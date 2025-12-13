@@ -14,21 +14,24 @@
           pkgs = import nixpkgs { inherit system; };
           wlrootsPc = "wlroots-${lib.versions.majorMinor pkgs.wlroots.version}";
 
-          buildTools = with pkgs; [
-            gnumake
-            stdenv.cc
-            pkg-config
-            wayland
-            wayland-scanner
-            wayland-protocols
-            wlroots
-            libinput
-            libxkbcommon
-            pixman
-            libdrm
-            seatd
-            swaybg
-          ];
+            buildTools = with pkgs; [
+              gnumake
+              stdenv.cc
+              pkg-config
+              wayland
+              wayland-scanner
+              wayland-protocols
+              wlroots
+              libinput
+              libxkbcommon
+              pixman
+              libdrm
+              xorg.libxcb
+              xorg.xcbutilwm
+              xwayland
+              seatd
+              swaybg
+            ];
 
           buildScript = pkgs.writeShellApplication {
             name = "dwl-build";
@@ -57,20 +60,24 @@
             version = "git";
             src = ./.;
 
-            nativeBuildInputs = with pkgs; [
-              pkg-config
-              wayland
-              wayland-scanner
-              wayland-protocols
+            nativeBuildInputs = [
+              pkgs.pkg-config
+              pkgs.wayland
+              pkgs.wayland-scanner
+              pkgs.wayland-protocols
+              pkgs.makeWrapper
             ];
 
-            buildInputs = with pkgs; [
-              wayland
-              wlroots
-              libinput
-              libxkbcommon
-              pixman
-              libdrm
+            buildInputs = [
+              pkgs.wayland
+              pkgs.wlroots
+              pkgs.libinput
+              pkgs.libxkbcommon
+              pkgs.pixman
+              pkgs.libdrm
+              pkgs.xorg.libxcb
+              pkgs.xorg.xcbutilwm
+              pkgs.xwayland
             ];
 
             makeFlags = [ "PKG_CONFIG=${pkgs.pkg-config}/bin/pkg-config" ];
@@ -86,6 +93,9 @@
             installPhase = ''
               runHook preInstall
               make PREFIX=$out MANDIR=$out/share/man DATADIR=$out/share install
+              mkdir -p $out/share/dwl/wallpapers
+              cp -r wallpapers/* $out/share/dwl/wallpapers/
+              wrapProgram $out/bin/dwl --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.swaybg ]}
               runHook postInstall
             '';
 
