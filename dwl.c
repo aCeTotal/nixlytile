@@ -366,6 +366,8 @@ static void xytonode(double x, double y, struct wlr_surface **psurface,
 		Client **pc, LayerSurface **pl, double *nx, double *ny);
 static void zoom(const Arg *arg);
 static void rotate_clients(const Arg *arg);
+static int node_contains_client(LayoutNode *node, Client *c);
+static int subtree_bounds(LayoutNode *node, Monitor *m, struct wlr_box *out);
 static struct wlr_output_mode *bestmode(struct wlr_output *output);
 static void btrtile(Monitor *m);
 static void setratio_h(const Arg *arg);
@@ -427,6 +429,12 @@ static struct wlr_box sgeom;
 static struct wl_list mons;
 static Monitor *selmon;
 
+static struct wlr_box resize_start_box;
+static double resize_start_x, resize_start_y;
+static LayoutNode *resize_split_node;
+static int resize_split_is_vert;
+static double resize_split_start_ratio;
+static double resize_split_size;
 static int fullscreen_adaptive_sync_enabled = 1;
 
 /* global event handlers */
@@ -1968,6 +1976,54 @@ motionabsolute(struct wl_listener *listener, void *data)
 	motionnotify(event->time_msec, &event->pointer->base, dx, dy, dx, dy);
 }
 
+static int
+node_contains_client(LayoutNode *node, Client *c)
+{
+	if (!node)
+		return 0;
+	if (node->is_client_node)
+		return node->client == c;
+	return node_contains_client(node->left, c) || node_contains_client(node->right, c);
+}
+
+static int
+subtree_bounds(LayoutNode *node, Monitor *m, struct wlr_box *out)
+{
+	struct wlr_box lbox, rbox;
+	int hasl, hasr, right, bottom;
+
+	if (!node)
+		return 0;
+	if (node->is_client_node) {
+		Client *c = node->client;
+		if (!c || !VISIBLEON(c, m) || c->isfloating || c->isfullscreen)
+			return 0;
+		*out = c->geom;
+		return 1;
+	}
+
+	hasl = subtree_bounds(node->left, m, &lbox);
+	hasr = subtree_bounds(node->right, m, &rbox);
+	if (!hasl && !hasr)
+		return 0;
+	if (hasl && !hasr) {
+		*out = lbox;
+		return 1;
+	}
+	if (!hasl && hasr) {
+		*out = rbox;
+		return 1;
+	}
+
+	out->x = MIN(lbox.x, rbox.x);
+	out->y = MIN(lbox.y, rbox.y);
+	right = MAX(lbox.x + lbox.width, rbox.x + rbox.width);
+	bottom = MAX(lbox.y + lbox.height, rbox.y + rbox.height);
+	out->width = right - out->x;
+	out->height = bottom - out->y;
+	return 1;
+}
+
 void
 motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double dy,
 		double dx_unaccel, double dy_unaccel)
@@ -2045,46 +2101,73 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		}
 	} else if (cursor_mode == CurResize) {
 		if (tiled && resizing_from_mouse) {
-			dx_total = cursor->x - resize_last_update_x;
-			dy_total = cursor->y - resize_last_update_y;
+			dx_total = cursor->x - resize_start_x;
+			dy_total = cursor->y - resize_start_y;
+			LayoutNode *split = resize_split_node, *client_node;
+			int is_vert;
 
-			if (time - last_resize_time >= resize_interval_ms) {
-				Arg a = {0};
-				if (fabs(dx_total) > fabs(dy_total)) {
-					a.f = (float)(dx_total * resize_factor);
-					setratio_h(&a);
-				} else {
-					a.f = (float)(dy_total * resize_factor);
-					setratio_v(&a);
-				}
+			if (!split) {
+				client_node = find_client_node(selmon->root, grabc);
+				if (!client_node || !client_node->split_node)
+					goto focus;
+				split = client_node->split_node;
+				if (!subtree_bounds(split, selmon, &resize_start_box))
+					goto focus;
+				resize_split_node = split;
+				resize_split_is_vert = split->is_split_vertically;
+				resize_split_start_ratio = split->split_ratio;
+				resize_split_size = resize_split_is_vert ? resize_start_box.width : resize_start_box.height;
+			}
+
+			is_vert = resize_split_is_vert;
+
+			if (resize_split_size > 0) {
+				double delta = is_vert ? dx_total : dy_total;
+				double ratio = resize_split_start_ratio + (delta / resize_split_size);
+
+				if (ratio < 0.05f)
+					ratio = 0.05f;
+				if (ratio > 0.95f)
+					ratio = 0.95f;
+
+				resize_split_node->split_ratio = ratio;
 				arrange(selmon);
-
-				last_resize_time = time;
-				resize_last_update_x = cursor->x;
-				resize_last_update_y = cursor->y;
 			}
 
 		} else if (grabc && grabc->isfloating) {
-			int cdx = (int)round(cursor->x) - grabcx;
-			int cdy = (int)round(cursor->y) - grabcy;
+			double dx_total = cursor->x - resize_start_x;
+			double dy_total = cursor->y - resize_start_y;
+			int minw = 1 + 2 * (int)grabc->bw;
+			int minh = 1 + 2 * (int)grabc->bw;
+			int dw = (int)lround(dx_total);
+			int dh = (int)lround(dy_total);
+			struct wlr_box box = resize_start_box;
 
-			cdx = !(rzcorner & 1) && grabc->geom.width - 2 * (int)grabc->bw - cdx < 1 ? 0 : cdx;
-			cdy = !(rzcorner & 2) && grabc->geom.height - 2 * (int)grabc->bw - cdy < 1 ? 0 : cdy;
-
-			const struct wlr_box box = {
-				.x      = grabc->geom.x      + (rzcorner & 1 ? 0   :  cdx),
-				.y      = grabc->geom.y      + (rzcorner & 2 ? 0   :  cdy),
-				.width  = grabc->geom.width  + (rzcorner & 1 ? cdx : -cdx),
-				.height = grabc->geom.height + (rzcorner & 2 ? cdy : -cdy)
-			};
-			resize(grabc, box, 1);
-
-			if (!lock_cursor) {
-				grabcx += cdx;
-				grabcy += cdy;
+			if (rzcorner & 1) {
+				if (box.width + dw < minw)
+					dw = minw - box.width;
+				box.width += dw;
 			} else {
-				wlr_cursor_warp_closest(cursor, NULL, grabcx, grabcy);
+				if (box.width - dw < minw)
+					dw = box.width - minw;
+				box.x += dw;
+				box.width -= dw;
 			}
+
+			if (rzcorner & 2) {
+				if (box.height + dh < minh)
+					dh = minh - box.height;
+				box.height += dh;
+			} else {
+				if (box.height - dh < minh)
+					dh = box.height - minh;
+				box.y += dh;
+				box.height -= dh;
+			}
+
+			resize(grabc, box, 1);
+			if (lock_cursor)
+				wlr_cursor_warp_closest(cursor, NULL, resize_start_x, resize_start_y);
 			return;
 		}
 	}
@@ -2137,6 +2220,8 @@ moveresize(const Arg *arg)
 		case CurResize:
 			{
 				const char *cursors[] = { "nw-resize", "ne-resize", "sw-resize", "se-resize" };
+				double start_x = cursor->x, start_y = cursor->y;
+				double warp_x, warp_y;
 
 				rzcorner = resize_corner;
 				grabcx = (int)round(cursor->x);
@@ -2148,16 +2233,23 @@ moveresize(const Arg *arg)
 					         + (grabcy - grabc->geom.y < grabc->geom.y + grabc->geom.height - grabcy ? 0 : 2);
 
 				if (warp_cursor) {
-					grabcx = rzcorner & 1 ? grabc->geom.x + grabc->geom.width  : grabc->geom.x;
-					grabcy = rzcorner & 2 ? grabc->geom.y + grabc->geom.height : grabc->geom.y;
-					wlr_cursor_warp_closest(cursor, NULL, grabcx, grabcy);
+					warp_x = rzcorner & 1 ? grabc->geom.x + grabc->geom.width  : grabc->geom.x;
+					warp_y = rzcorner & 2 ? grabc->geom.y + grabc->geom.height : grabc->geom.y;
+					wlr_cursor_warp_closest(cursor, NULL, warp_x, warp_y);
+					start_x = warp_x;
+					start_y = warp_y;
 				}
 
+				resize_start_box = grabc->geom;
+				resize_start_x = start_x;
+				resize_start_y = start_y;
+				resize_last_update_x = start_x;
+				resize_last_update_y = start_y;
+				resize_split_node = NULL;
+				resize_split_size = 0;
+				resizing_from_mouse = 1;
 				wlr_cursor_set_xcursor(cursor, cursor_mgr, cursors[rzcorner]);
 			}
-			resize_last_update_x = cursor->x;
-			resize_last_update_y = cursor->y;
-			resizing_from_mouse = 1;
 			break;
 		}
 	} else {
@@ -2173,6 +2265,8 @@ moveresize(const Arg *arg)
 		case CurResize:
 			{
 				const char *cursors[] = { "nw-resize", "ne-resize", "sw-resize", "se-resize" };
+				double start_x = cursor->x, start_y = cursor->y;
+				double warp_x, warp_y;
 
 				rzcorner = resize_corner;
 				grabcx = (int)round(cursor->x);
@@ -2184,11 +2278,21 @@ moveresize(const Arg *arg)
 					         + (grabcy - grabc->geom.y < grabc->geom.y + grabc->geom.height - grabcy ? 0 : 2);
 
 				if (warp_cursor) {
-					grabcx = rzcorner & 1 ? grabc->geom.x + grabc->geom.width  : grabc->geom.x;
-					grabcy = rzcorner & 2 ? grabc->geom.y + grabc->geom.height : grabc->geom.y;
-					wlr_cursor_warp_closest(cursor, NULL, grabcx, grabcy);
+					warp_x = rzcorner & 1 ? grabc->geom.x + grabc->geom.width  : grabc->geom.x;
+					warp_y = rzcorner & 2 ? grabc->geom.y + grabc->geom.height : grabc->geom.y;
+					wlr_cursor_warp_closest(cursor, NULL, warp_x, warp_y);
+					start_x = warp_x;
+					start_y = warp_y;
 				}
 
+				resize_start_box = grabc->geom;
+				resize_start_x = start_x;
+				resize_start_y = start_y;
+				resize_last_update_x = start_x;
+				resize_last_update_y = start_y;
+				resize_split_node = NULL;
+				resize_split_size = 0;
+				resizing_from_mouse = 1;
 				wlr_cursor_set_xcursor(cursor, cursor_mgr, cursors[rzcorner]);
 			}
 			break;
