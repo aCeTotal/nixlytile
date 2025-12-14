@@ -361,6 +361,12 @@ static void view(const Arg *arg);
 static void virtualkeyboard(struct wl_listener *listener, void *data);
 static void virtualpointer(struct wl_listener *listener, void *data);
 static void warpcursor(const Client *c);
+static const char *pick_resize_handle(const Client *c, double cx, double cy);
+static const char *resize_cursor_from_dirs(int dx, int dy);
+static LayoutNode *closest_split_node(LayoutNode *client_node, int want_vert,
+		double pointer, double *out_ratio, struct wlr_box *out_box,
+		double *out_dist);
+static void apply_resize_axis_choice(double dist_v, double dist_h);
 static Monitor *xytomon(double x, double y);
 static void xytonode(double x, double y, struct wlr_surface **psurface,
 		Client **pc, LayerSurface **pl, double *nx, double *ny);
@@ -423,7 +429,9 @@ static KeyboardGroup *kb_group;
 static unsigned int cursor_mode;
 static Client *grabc;
 static int grabcx, grabcy; /* client-relative */
-static int rzcorner;
+static int resize_dir_x, resize_dir_y;
+static double resize_start_ratio_v, resize_start_ratio_h;
+static int resize_use_v, resize_use_h;
 
 static struct wlr_output_layout *output_layout;
 static struct wlr_box sgeom;
@@ -2042,6 +2050,123 @@ ancestor_split(LayoutNode *node, int want_vert)
 	return NULL;
 }
 
+static LayoutNode *
+closest_split_node(LayoutNode *client_node, int want_vert, double pointer,
+		double *out_ratio, struct wlr_box *out_box, double *out_dist)
+{
+	LayoutNode *n = client_node ? client_node->split_node : NULL;
+	LayoutNode *best = NULL;
+	double best_dist = HUGE_VAL;
+	struct wlr_box box;
+
+	while (n) {
+		if (!n->is_client_node && n->is_split_vertically == want_vert) {
+			if (subtree_bounds(n, selmon, &box)) {
+				double ratio = n->split_ratio;
+				double div = want_vert ? box.x + box.width * ratio
+						: box.y + box.height * ratio;
+				double dist = fabs(pointer - div);
+
+				if (dist < best_dist) {
+					best_dist = dist;
+					best = n;
+					if (out_ratio)
+						*out_ratio = ratio;
+					if (out_box)
+						*out_box = box;
+				}
+			}
+		}
+		n = n->split_node;
+	}
+
+	if (out_dist)
+		*out_dist = best ? best_dist : HUGE_VAL;
+	return best;
+}
+
+static void
+apply_resize_axis_choice(double dist_v, double dist_h)
+{
+	double tol = 16.0;
+
+	if (resize_split_node && resize_split_node_h) {
+		if (fabs(dist_v - dist_h) <= tol) {
+			resize_use_v = resize_use_h = 1;
+		} else if (dist_v < dist_h) {
+			resize_use_v = 1;
+			resize_use_h = 0;
+		} else {
+			resize_use_v = 0;
+			resize_use_h = 1;
+		}
+	} else if (resize_split_node) {
+		resize_use_v = 1;
+		resize_use_h = 0;
+	} else if (resize_split_node_h) {
+		resize_use_v = 0;
+		resize_use_h = 1;
+	}
+}
+
+static const char *
+resize_cursor_from_dirs(int dx, int dy)
+{
+	if (dx == 0 && dy == -1)
+		return "n-resize";
+	if (dx == 0 && dy == 1)
+		return "s-resize";
+	if (dx == -1 && dy == 0)
+		return "w-resize";
+	if (dx == 1 && dy == 0)
+		return "e-resize";
+	if (dx == -1 && dy == -1)
+		return "nw-resize";
+	if (dx == 1 && dy == -1)
+		return "ne-resize";
+	if (dx == -1 && dy == 1)
+		return "sw-resize";
+	if (dx == 1 && dy == 1)
+		return "se-resize";
+	return "default";
+}
+
+static const char *
+pick_resize_handle(const Client *c, double cx, double cy)
+{
+	double left = cx - c->geom.x;
+	double right = c->geom.x + c->geom.width - cx;
+	double top = cy - c->geom.y;
+	double bottom = c->geom.y + c->geom.height - cy;
+	double corner_thresh = MIN(24.0, MIN(c->geom.width, c->geom.height) / 3.0);
+	int hx = (left <= right) ? -1 : 1;
+	int hy = (top <= bottom) ? -1 : 1;
+
+	resize_dir_x = 0;
+	resize_dir_y = 0;
+	resize_use_v = resize_use_h = 0;
+
+	if (MIN(left, right) <= corner_thresh && MIN(top, bottom) <= corner_thresh) {
+		/* Close to a corner: resize both axes. */
+		resize_dir_x = hx;
+		resize_dir_y = hy;
+	} else {
+		if (MIN(left, right) <= corner_thresh)
+			resize_dir_x = hx;
+		if (MIN(top, bottom) <= corner_thresh)
+			resize_dir_y = hy;
+		if (!resize_dir_x && !resize_dir_y) {
+			/* Otherwise pick the nearest axis so resize still happens. */
+			if (MIN(left, right) <= MIN(top, bottom))
+				resize_dir_x = hx;
+			else
+				resize_dir_y = hy;
+		}
+	}
+
+	return resize_cursor_from_dirs(resize_dir_x, resize_dir_y);
+}
+
 void
 motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double dy,
 		double dx_unaccel, double dy_unaccel)
@@ -2118,44 +2243,49 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 			return;
 		}
 	} else if (cursor_mode == CurResize) {
-		if (tiled && resizing_from_mouse) {
-			double ratio, ratio_h;
-			LayoutNode *client_node;
+			if (tiled && resizing_from_mouse) {
+				double ratio, ratio_h;
+				double dx_total = cursor->x - resize_start_x;
+				double dy_total = cursor->y - resize_start_y;
+				LayoutNode *client_node;
+				double dist_v = HUGE_VAL, dist_h = HUGE_VAL;
 
-			if (!resize_split_node && !resize_split_node_h) {
-				client_node = find_client_node(selmon->root, grabc);
-				if (!client_node)
-					goto focus;
+				if (!resize_split_node && !resize_split_node_h) {
+					client_node = find_client_node(selmon->root, grabc);
+					if (!client_node)
+						goto focus;
 
-				/* vertical ancestor */
-				resize_split_node = ancestor_split(client_node, 1);
-				if (!resize_split_node || !subtree_bounds(resize_split_node, selmon, &resize_start_box_v))
-					resize_split_node = NULL;
+					resize_use_v = resize_use_h = 0;
 
-				/* horizontal ancestor */
-				resize_split_node_h = ancestor_split(client_node, 0);
-				if (!resize_split_node_h || !subtree_bounds(resize_split_node_h, selmon, &resize_start_box_h))
-					resize_split_node_h = NULL;
-			}
+					resize_split_node = closest_split_node(client_node, 1, cursor->x,
+							&resize_start_ratio_v, &resize_start_box_v, &dist_v);
+					if (!resize_split_node)
+						resize_start_ratio_v = 0.5;
 
-			if (resize_split_node && subtree_bounds(resize_split_node, selmon, &resize_start_box_v)
-					&& resize_start_box_v.width > 0) {
-				ratio = (cursor->x - resize_start_box_v.x) / resize_start_box_v.width;
-				if (ratio < 0.05f)
-					ratio = 0.05f;
-				if (ratio > 0.95f)
-					ratio = 0.95f;
-				resize_split_node->split_ratio = ratio;
-			}
+					resize_split_node_h = closest_split_node(client_node, 0, cursor->y,
+							&resize_start_ratio_h, &resize_start_box_h, &dist_h);
+					if (!resize_split_node_h)
+						resize_start_ratio_h = 0.5;
 
-			if (resize_split_node_h && subtree_bounds(resize_split_node_h, selmon, &resize_start_box_h)
-					&& resize_start_box_h.height > 0) {
-				ratio_h = (cursor->y - resize_start_box_h.y) / resize_start_box_h.height;
-				if (ratio_h < 0.05f)
-					ratio_h = 0.05f;
-				if (ratio_h > 0.95f)
-					ratio_h = 0.95f;
-				resize_split_node_h->split_ratio = ratio_h;
+					apply_resize_axis_choice(dist_v, dist_h);
+				}
+
+				if (resize_use_v && resize_split_node && resize_start_box_v.width > 0) {
+					ratio = resize_start_ratio_v + dx_total / resize_start_box_v.width;
+					if (ratio < 0.05f)
+						ratio = 0.05f;
+					if (ratio > 0.95f)
+						ratio = 0.95f;
+					resize_split_node->split_ratio = ratio;
+				}
+
+				if (resize_use_h && resize_split_node_h && resize_start_box_h.height > 0) {
+					ratio_h = resize_start_ratio_h + dy_total / resize_start_box_h.height;
+					if (ratio_h < 0.05f)
+						ratio_h = 0.05f;
+					if (ratio_h > 0.95f)
+						ratio_h = 0.95f;
+					resize_split_node_h->split_ratio = ratio_h;
 			}
 
 			if (resize_split_node || resize_split_node_h)
@@ -2170,31 +2300,33 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 			int dh = (int)lround(dy_total);
 			struct wlr_box box = resize_start_box_f;
 
-			if (rzcorner & 1) {
-				if (box.width + dw < minw)
-					dw = minw - box.width;
-				box.width += dw;
-			} else {
-				if (box.width - dw < minw)
-					dw = box.width - minw;
-				box.x += dw;
-				box.width -= dw;
+			if (resize_dir_x) {
+				if (resize_dir_x > 0) {
+					if (box.width + dw < minw)
+						dw = minw - box.width;
+					box.width += dw;
+				} else {
+					if (box.width - dw < minw)
+						dw = box.width - minw;
+					box.x += dw;
+					box.width -= dw;
+				}
 			}
 
-			if (rzcorner & 2) {
-				if (box.height + dh < minh)
-					dh = minh - box.height;
-				box.height += dh;
-			} else {
-				if (box.height - dh < minh)
-					dh = box.height - minh;
-				box.y += dh;
-				box.height -= dh;
+			if (resize_dir_y) {
+				if (resize_dir_y > 0) {
+					if (box.height + dh < minh)
+						dh = minh - box.height;
+					box.height += dh;
+				} else {
+					if (box.height - dh < minh)
+						dh = box.height - minh;
+					box.y += dh;
+					box.height -= dh;
+				}
 			}
 
 			resize(grabc, box, 1);
-			if (lock_cursor)
-				wlr_cursor_warp_closest(cursor, NULL, resize_start_x, resize_start_y);
 			return;
 		}
 	}
@@ -2246,26 +2378,10 @@ moveresize(const Arg *arg)
 			break;
 		case CurResize:
 			{
-				const char *cursors[] = { "nw-resize", "ne-resize", "sw-resize", "se-resize" };
+				const char *cursor_name = pick_resize_handle(grabc, cursor->x, cursor->y);
 				double start_x = cursor->x, start_y = cursor->y;
-				double warp_x, warp_y;
-
-				rzcorner = resize_corner;
 				grabcx = (int)round(cursor->x);
 				grabcy = (int)round(cursor->y);
-
-				if (rzcorner == 4)
-					/* identify the closest corner index */
-					rzcorner = (grabcx - grabc->geom.x < grabc->geom.x + grabc->geom.width  - grabcx ? 0 : 1)
-					         + (grabcy - grabc->geom.y < grabc->geom.y + grabc->geom.height - grabcy ? 0 : 2);
-
-				if (warp_cursor) {
-					warp_x = rzcorner & 1 ? grabc->geom.x + grabc->geom.width  : grabc->geom.x;
-					warp_y = rzcorner & 2 ? grabc->geom.y + grabc->geom.height : grabc->geom.y;
-					wlr_cursor_warp_closest(cursor, NULL, warp_x, warp_y);
-					start_x = warp_x;
-					start_y = warp_y;
-				}
 
 				resize_start_box_v = (struct wlr_box){0};
 				resize_start_box_h = (struct wlr_box){0};
@@ -2274,11 +2390,12 @@ moveresize(const Arg *arg)
 				resize_start_y = start_y;
 				resize_last_update_x = start_x;
 				resize_last_update_y = start_y;
-					resize_split_node = NULL;
-					resize_split_node_h = NULL;
-					resizing_from_mouse = 1;
-					wlr_cursor_set_xcursor(cursor, cursor_mgr, cursors[rzcorner]);
-				}
+				resize_start_ratio_v = resize_start_ratio_h = 0.0;
+				resize_split_node = NULL;
+				resize_split_node_h = NULL;
+				resizing_from_mouse = 1;
+				wlr_cursor_set_xcursor(cursor, cursor_mgr, cursor_name);
+			}
 			break;
 		}
 	} else {
@@ -2293,26 +2410,10 @@ moveresize(const Arg *arg)
 			break;
 		case CurResize:
 			{
-				const char *cursors[] = { "nw-resize", "ne-resize", "sw-resize", "se-resize" };
+				const char *cursor_name = pick_resize_handle(grabc, cursor->x, cursor->y);
 				double start_x = cursor->x, start_y = cursor->y;
-				double warp_x, warp_y;
-
-				rzcorner = resize_corner;
 				grabcx = (int)round(cursor->x);
 				grabcy = (int)round(cursor->y);
-
-				if (rzcorner == 4)
-					/* identify the closest corner index */
-					rzcorner = (grabcx - grabc->geom.x < grabc->geom.x + grabc->geom.width  - grabcx ? 0 : 1)
-					         + (grabcy - grabc->geom.y < grabc->geom.y + grabc->geom.height - grabcy ? 0 : 2);
-
-				if (warp_cursor) {
-					warp_x = rzcorner & 1 ? grabc->geom.x + grabc->geom.width  : grabc->geom.x;
-					warp_y = rzcorner & 2 ? grabc->geom.y + grabc->geom.height : grabc->geom.y;
-					wlr_cursor_warp_closest(cursor, NULL, warp_x, warp_y);
-					start_x = warp_x;
-					start_y = warp_y;
-				}
 
 				resize_start_box_v = (struct wlr_box){0};
 				resize_start_box_h = (struct wlr_box){0};
@@ -2321,10 +2422,11 @@ moveresize(const Arg *arg)
 				resize_start_y = start_y;
 				resize_last_update_x = start_x;
 				resize_last_update_y = start_y;
-					resize_split_node = NULL;
-					resize_split_node_h = NULL;
-					resizing_from_mouse = 1;
-					wlr_cursor_set_xcursor(cursor, cursor_mgr, cursors[rzcorner]);
+				resize_start_ratio_v = resize_start_ratio_h = 0.0;
+				resize_split_node = NULL;
+				resize_split_node_h = NULL;
+				resizing_from_mouse = 1;
+				wlr_cursor_set_xcursor(cursor, cursor_mgr, cursor_name);
 			}
 			break;
 		}
@@ -3459,21 +3561,8 @@ virtualpointer(struct wl_listener *listener, void *data)
 void
 warpcursor(const Client *c)
 {
-	if (cursor_mode != CurNormal)
-		return;
-
-	if (!c && selmon) {
-		wlr_cursor_warp_closest(cursor, NULL,
-				selmon->w.x + selmon->w.width / 2.0,
-				selmon->w.y + selmon->w.height / 2.0);
-	} else if (c && (cursor->x < c->geom.x
-			|| cursor->x > c->geom.x + c->geom.width
-			|| cursor->y < c->geom.y
-			|| cursor->y > c->geom.y + c->geom.height)) {
-		wlr_cursor_warp_closest(cursor, NULL,
-				c->geom.x + c->geom.width / 2.0,
-				c->geom.y + c->geom.height / 2.0);
-	}
+	(void)c;
+	/* Intentionally do not warp the cursor; keep it exactly where the user left it. */
 }
 
 Monitor *
