@@ -368,6 +368,7 @@ static void zoom(const Arg *arg);
 static void rotate_clients(const Arg *arg);
 static int node_contains_client(LayoutNode *node, Client *c);
 static int subtree_bounds(LayoutNode *node, Monitor *m, struct wlr_box *out);
+static LayoutNode *ancestor_split(LayoutNode *node, int want_vert);
 static struct wlr_output_mode *bestmode(struct wlr_output *output);
 static void btrtile(Monitor *m);
 static void setratio_h(const Arg *arg);
@@ -429,12 +430,12 @@ static struct wlr_box sgeom;
 static struct wl_list mons;
 static Monitor *selmon;
 
-static struct wlr_box resize_start_box;
+static struct wlr_box resize_start_box_v;
+static struct wlr_box resize_start_box_h;
+static struct wlr_box resize_start_box_f;
 static double resize_start_x, resize_start_y;
 static LayoutNode *resize_split_node;
-static int resize_split_is_vert;
-static double resize_split_start_ratio;
-static double resize_split_size;
+static LayoutNode *resize_split_node_h;
 static int fullscreen_adaptive_sync_enabled = 1;
 
 /* global event handlers */
@@ -1991,7 +1992,10 @@ subtree_bounds(LayoutNode *node, Monitor *m, struct wlr_box *out)
 {
 	struct wlr_box lbox, rbox;
 	int hasl, hasr, right, bottom;
+	struct wlr_box tmp;
 
+	if (!out)
+		out = &tmp;
 	if (!node)
 		return 0;
 	if (node->is_client_node) {
@@ -2024,12 +2028,26 @@ subtree_bounds(LayoutNode *node, Monitor *m, struct wlr_box *out)
 	return 1;
 }
 
+static LayoutNode *
+ancestor_split(LayoutNode *node, int want_vert)
+{
+	if (!node)
+		return NULL;
+	node = node->split_node;
+	while (node) {
+		if (!node->is_client_node && node->is_split_vertically == want_vert)
+			return node;
+		node = node->split_node;
+	}
+	return NULL;
+}
+
 void
 motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double dy,
 		double dx_unaccel, double dy_unaccel)
 {
 	int tiled = 0;
-	double sx = 0, sy = 0, sx_confined, sy_confined, dx_total, dy_total;
+	double sx = 0, sy = 0, sx_confined, sy_confined;
 	Client *c = NULL, *w = NULL;
 	LayerSurface *l = NULL;
 	struct wlr_surface *surface = NULL;
@@ -2101,38 +2119,47 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		}
 	} else if (cursor_mode == CurResize) {
 		if (tiled && resizing_from_mouse) {
-			dx_total = cursor->x - resize_start_x;
-			dy_total = cursor->y - resize_start_y;
-			LayoutNode *split = resize_split_node, *client_node;
-			int is_vert;
+			double ratio, ratio_h;
+			LayoutNode *client_node;
 
-			if (!split) {
+			if (!resize_split_node && !resize_split_node_h) {
 				client_node = find_client_node(selmon->root, grabc);
-				if (!client_node || !client_node->split_node)
+				if (!client_node)
 					goto focus;
-				split = client_node->split_node;
-				if (!subtree_bounds(split, selmon, &resize_start_box))
-					goto focus;
-				resize_split_node = split;
-				resize_split_is_vert = split->is_split_vertically;
-				resize_split_start_ratio = split->split_ratio;
-				resize_split_size = resize_split_is_vert ? resize_start_box.width : resize_start_box.height;
+
+				/* vertical ancestor */
+				resize_split_node = ancestor_split(client_node, 1);
+				if (!resize_split_node || !subtree_bounds(resize_split_node, selmon, &resize_start_box_v))
+					resize_split_node = NULL;
+
+				/* horizontal ancestor */
+				resize_split_node_h = ancestor_split(client_node, 0);
+				if (!resize_split_node_h || !subtree_bounds(resize_split_node_h, selmon, &resize_start_box_h))
+					resize_split_node_h = NULL;
 			}
 
-			is_vert = resize_split_is_vert;
-
-			if (resize_split_size > 0) {
-				double delta = is_vert ? dx_total : dy_total;
-				double ratio = resize_split_start_ratio + (delta / resize_split_size);
-
+			if (resize_split_node && subtree_bounds(resize_split_node, selmon, &resize_start_box_v)
+					&& resize_start_box_v.width > 0) {
+				ratio = (cursor->x - resize_start_box_v.x) / resize_start_box_v.width;
 				if (ratio < 0.05f)
 					ratio = 0.05f;
 				if (ratio > 0.95f)
 					ratio = 0.95f;
-
 				resize_split_node->split_ratio = ratio;
-				arrange(selmon);
 			}
+
+			if (resize_split_node_h && subtree_bounds(resize_split_node_h, selmon, &resize_start_box_h)
+					&& resize_start_box_h.height > 0) {
+				ratio_h = (cursor->y - resize_start_box_h.y) / resize_start_box_h.height;
+				if (ratio_h < 0.05f)
+					ratio_h = 0.05f;
+				if (ratio_h > 0.95f)
+					ratio_h = 0.95f;
+				resize_split_node_h->split_ratio = ratio_h;
+			}
+
+			if (resize_split_node || resize_split_node_h)
+				arrange(selmon);
 
 		} else if (grabc && grabc->isfloating) {
 			double dx_total = cursor->x - resize_start_x;
@@ -2141,7 +2168,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 			int minh = 1 + 2 * (int)grabc->bw;
 			int dw = (int)lround(dx_total);
 			int dh = (int)lround(dy_total);
-			struct wlr_box box = resize_start_box;
+			struct wlr_box box = resize_start_box_f;
 
 			if (rzcorner & 1) {
 				if (box.width + dw < minw)
@@ -2240,16 +2267,18 @@ moveresize(const Arg *arg)
 					start_y = warp_y;
 				}
 
-				resize_start_box = grabc->geom;
+				resize_start_box_v = (struct wlr_box){0};
+				resize_start_box_h = (struct wlr_box){0};
+				resize_start_box_f = grabc->geom;
 				resize_start_x = start_x;
 				resize_start_y = start_y;
 				resize_last_update_x = start_x;
 				resize_last_update_y = start_y;
-				resize_split_node = NULL;
-				resize_split_size = 0;
-				resizing_from_mouse = 1;
-				wlr_cursor_set_xcursor(cursor, cursor_mgr, cursors[rzcorner]);
-			}
+					resize_split_node = NULL;
+					resize_split_node_h = NULL;
+					resizing_from_mouse = 1;
+					wlr_cursor_set_xcursor(cursor, cursor_mgr, cursors[rzcorner]);
+				}
 			break;
 		}
 	} else {
@@ -2285,15 +2314,17 @@ moveresize(const Arg *arg)
 					start_y = warp_y;
 				}
 
-				resize_start_box = grabc->geom;
+				resize_start_box_v = (struct wlr_box){0};
+				resize_start_box_h = (struct wlr_box){0};
+				resize_start_box_f = grabc->geom;
 				resize_start_x = start_x;
 				resize_start_y = start_y;
 				resize_last_update_x = start_x;
 				resize_last_update_y = start_y;
-				resize_split_node = NULL;
-				resize_split_size = 0;
-				resizing_from_mouse = 1;
-				wlr_cursor_set_xcursor(cursor, cursor_mgr, cursors[rzcorner]);
+					resize_split_node = NULL;
+					resize_split_node_h = NULL;
+					resizing_from_mouse = 1;
+					wlr_cursor_set_xcursor(cursor, cursor_mgr, cursors[rzcorner]);
 			}
 			break;
 		}
