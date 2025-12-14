@@ -366,7 +366,7 @@ static const char *resize_cursor_from_dirs(int dx, int dy);
 static LayoutNode *closest_split_node(LayoutNode *client_node, int want_vert,
 		double pointer, double *out_ratio, struct wlr_box *out_box,
 		double *out_dist);
-static void apply_resize_axis_choice(double dist_v, double dist_h);
+static void apply_resize_axis_choice(void);
 static Monitor *xytomon(double x, double y);
 static void xytonode(double x, double y, struct wlr_surface **psurface,
 		Client **pc, LayerSurface **pl, double *nx, double *ny);
@@ -2086,27 +2086,10 @@ closest_split_node(LayoutNode *client_node, int want_vert, double pointer,
 }
 
 static void
-apply_resize_axis_choice(double dist_v, double dist_h)
+apply_resize_axis_choice(void)
 {
-	double tol = 16.0;
-
-	if (resize_split_node && resize_split_node_h) {
-		if (fabs(dist_v - dist_h) <= tol) {
-			resize_use_v = resize_use_h = 1;
-		} else if (dist_v < dist_h) {
-			resize_use_v = 1;
-			resize_use_h = 0;
-		} else {
-			resize_use_v = 0;
-			resize_use_h = 1;
-		}
-	} else if (resize_split_node) {
-		resize_use_v = 1;
-		resize_use_h = 0;
-	} else if (resize_split_node_h) {
-		resize_use_v = 0;
-		resize_use_h = 1;
-	}
+	resize_use_v = resize_split_node != NULL;
+	resize_use_h = resize_split_node_h != NULL;
 }
 
 static const char *
@@ -2248,7 +2231,6 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 				double dx_total = cursor->x - resize_start_x;
 				double dy_total = cursor->y - resize_start_y;
 				LayoutNode *client_node;
-				double dist_v = HUGE_VAL, dist_h = HUGE_VAL;
 
 				if (!resize_split_node && !resize_split_node_h) {
 					client_node = find_client_node(selmon->root, grabc);
@@ -2258,16 +2240,16 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 					resize_use_v = resize_use_h = 0;
 
 					resize_split_node = closest_split_node(client_node, 1, cursor->x,
-							&resize_start_ratio_v, &resize_start_box_v, &dist_v);
+							&resize_start_ratio_v, &resize_start_box_v, NULL);
 					if (!resize_split_node)
 						resize_start_ratio_v = 0.5;
 
 					resize_split_node_h = closest_split_node(client_node, 0, cursor->y,
-							&resize_start_ratio_h, &resize_start_box_h, &dist_h);
+							&resize_start_ratio_h, &resize_start_box_h, NULL);
 					if (!resize_split_node_h)
 						resize_start_ratio_h = 0.5;
 
-					apply_resize_axis_choice(dist_v, dist_h);
+					apply_resize_axis_choice();
 				}
 
 				if (resize_use_v && resize_split_node && resize_start_box_v.width > 0) {
