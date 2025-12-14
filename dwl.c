@@ -2397,13 +2397,20 @@ moveresize(const Arg *arg)
 	if (grabc->was_tiled) {
 		switch (cursor_mode) {
 		case CurMove:
-			setfloating(grabc, 1);
-			grabcx = (int)round(cursor->x) - grabc->geom.x;
-			grabcy = (int)round(cursor->y) - grabc->geom.y;
-			wlr_cursor_set_xcursor(cursor, cursor_mgr, "fleur");
-			break;
+			{
+				struct wlr_box start_geom = grabc->geom;
+				setfloating(grabc, 1);
+				/* Anchor to the original cursor offset within the window */
+				grabcx = (int)round(cursor->x) - start_geom.x;
+				grabcy = (int)round(cursor->y) - start_geom.y;
+				/* Keep the window anchored under the cursor when leaving tiling. */
+				resize(grabc, start_geom, 1);
+				wlr_cursor_set_xcursor(cursor, cursor_mgr, "fleur");
+				break;
+			}
 		case CurResize:
 			{
+				struct wlr_box start_geom = grabc->geom;
 				const char *cursor_name = pick_resize_handle(grabc, cursor->x, cursor->y);
 				double start_x = cursor->x, start_y = cursor->y;
 				grabcx = (int)round(cursor->x);
@@ -2411,7 +2418,7 @@ moveresize(const Arg *arg)
 
 				resize_start_box_v = (struct wlr_box){0};
 				resize_start_box_h = (struct wlr_box){0};
-				resize_start_box_f = grabc->geom;
+				resize_start_box_f = start_geom;
 				resize_start_x = start_x;
 				resize_start_y = start_y;
 				resize_start_ratio_v = resize_start_ratio_h = 0.0;
@@ -2421,6 +2428,8 @@ moveresize(const Arg *arg)
 				resize_last_x = start_x;
 				resize_last_y = start_y;
 				resizing_from_mouse = 1;
+				/* Keep geometry unchanged as we switch to floating resize. */
+				resize(grabc, start_geom, 1);
 				wlr_cursor_set_xcursor(cursor, cursor_mgr, cursor_name);
 			}
 			break;
