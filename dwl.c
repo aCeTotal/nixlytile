@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <stdint.h>
 #include <time.h>
 #include <unistd.h>
 #include <wayland-server-core.h>
@@ -83,6 +84,20 @@
 #define LISTEN(E, L, H)         wl_signal_add((E), ((L)->notify = (H), (L)))
 #define LISTEN_STATIC(E, H)     do { struct wl_listener *_l = ecalloc(1, sizeof(*_l)); _l->notify = (H); wl_signal_add((E), _l); } while (0)
 
+static const uint8_t digit_bitmap[10][7] = {
+	/* 5x7 bitmap, MSB unused (only 5 bits used per row) */
+	{0x0e, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0e}, /* 0 (rounded) */
+	{0x08, 0x18, 0x08, 0x08, 0x08, 0x08, 0x1c}, /* 1 */
+	{0x1e, 0x01, 0x01, 0x0e, 0x10, 0x10, 0x1f}, /* 2 */
+	{0x1e, 0x01, 0x01, 0x0e, 0x01, 0x01, 0x1e}, /* 3 */
+	{0x02, 0x06, 0x0a, 0x12, 0x1f, 0x02, 0x02}, /* 4 */
+	{0x1f, 0x10, 0x10, 0x1e, 0x01, 0x01, 0x1e}, /* 5 */
+	{0x0e, 0x10, 0x10, 0x1e, 0x11, 0x11, 0x0e}, /* 6 */
+	{0x1f, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}, /* 7 */
+	{0x0e, 0x11, 0x11, 0x0e, 0x11, 0x11, 0x0e}, /* 8 */
+	{0x0e, 0x11, 0x11, 0x0f, 0x01, 0x01, 0x0e}  /* 9 */
+};
+
 /* enums */
 enum { CurNormal, CurPressed, CurMove, CurResize }; /* cursor */
 enum { XDGShell, LayerShell, X11 }; /* client types */
@@ -104,6 +119,19 @@ typedef struct {
 
 typedef struct LayoutNode LayoutNode;
 typedef struct Monitor Monitor;
+typedef struct StatusBar StatusBar;
+typedef struct StatusModule StatusModule;
+struct StatusModule {
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_tree *bg;
+	int width;
+};
+
+struct StatusBar {
+	struct wlr_scene_tree *tree;
+	struct wlr_box area;
+	StatusModule clock;
+};
 typedef struct {
 	/* Must keep this field first */
 	unsigned int type; /* XDGShell or X11* */
@@ -203,8 +231,10 @@ struct Monitor {
 	struct wlr_box m; /* monitor area, layout-relative */
 	struct wlr_box w; /* window area, layout-relative */
 	struct wl_list layers[4]; /* LayerSurface.link */
+	StatusBar statusbar;
 	const Layout *lt[2];
 	int gaps;
+	int showbar;
 	unsigned int seltags;
 	unsigned int sellt;
 	uint32_t tagset[2];
@@ -298,6 +328,7 @@ static Client *focustop(Monitor *m);
 static void fullscreennotify(struct wl_listener *listener, void *data);
 static void gpureset(struct wl_listener *listener, void *data);
 static void handlesig(int signo);
+static void initstatusbar(Monitor *m);
 static void incnmaster(const Arg *arg);
 static void inputdevice(struct wl_listener *listener, void *data);
 static int keybinding(uint32_t mods, xkb_keysym_t sym);
@@ -305,6 +336,8 @@ static void keypress(struct wl_listener *listener, void *data);
 static void keypressmod(struct wl_listener *listener, void *data);
 static int keyrepeat(void *data);
 static void killclient(const Arg *arg);
+static void layoutstatusbar(Monitor *m, const struct wlr_box *area,
+		struct wlr_box *client_area);
 static void locksession(struct wl_listener *listener, void *data);
 static void mapnotify(struct wl_listener *listener, void *data);
 static void maximizenotify(struct wl_listener *listener, void *data);
@@ -322,7 +355,10 @@ static void pointerfocus(Client *c, struct wlr_surface *surface,
 static void printstatus(void);
 static void powermgrsetmode(struct wl_listener *listener, void *data);
 static void quit(const Arg *arg);
+static void renderclock(StatusModule *module, int bar_height, const char *text);
 static void rendermon(struct wl_listener *listener, void *data);
+static void positionstatusmodules(Monitor *m);
+static void refreshstatusclock(void);
 static void requestdecorationmode(struct wl_listener *listener, void *data);
 static void requeststartdrag(struct wl_listener *listener, void *data);
 static void requestmonstate(struct wl_listener *listener, void *data);
@@ -350,8 +386,11 @@ static void togglefullscreen(const Arg *arg);
 static void togglefullscreenadaptivesync(const Arg *arg);
 static void togglesticky(const Arg *arg);
 static void togglegaps(const Arg *arg);
+static void togglestatusbar(const Arg *arg);
 static void toggletag(const Arg *arg);
 static void toggleview(const Arg *arg);
+static int updatestatusclock(void *data);
+static void schedule_status_timer(void);
 static void unlocksession(struct wl_listener *listener, void *data);
 static void unmaplayersurfacenotify(struct wl_listener *listener, void *data);
 static void unmapnotify(struct wl_listener *listener, void *data);
@@ -449,6 +488,7 @@ static double resize_start_x, resize_start_y;
 static LayoutNode *resize_split_node;
 static LayoutNode *resize_split_node_h;
 static int fullscreen_adaptive_sync_enabled = 1;
+static struct wl_event_source *status_timer;
 
 /* global event handlers */
 static struct wl_listener cursor_axis = {.notify = axisnotify};
@@ -554,6 +594,302 @@ applyrules(Client *c)
 	setmon(c, mon, newtags);
 }
 
+static void
+clearstatusmodule(StatusModule *module)
+{
+	struct wlr_scene_node *node, *tmp;
+
+	if (!module || !module->tree)
+		return;
+
+	wl_list_for_each_safe(node, tmp, &module->tree->children, link) {
+		if (module->bg && node == &module->bg->node)
+			continue;
+		wlr_scene_node_destroy(node);
+	}
+}
+
+static void
+updatemodulebg(StatusModule *module, int width, int height)
+{
+	struct wlr_scene_node *node, *tmp;
+	int radius, y, inset_top, inset_bottom, inset, start, h, w;
+	struct wlr_scene_rect *r;
+
+	if (!module || !module->tree || width <= 0 || height <= 0)
+		return;
+
+	if (!module->bg && !(module->bg = wlr_scene_tree_create(module->tree)))
+		return;
+
+	wl_list_for_each_safe(node, tmp, &module->bg->children, link)
+		wlr_scene_node_destroy(node);
+
+	radius = MIN(4, MIN(width, height) / 4);
+
+	y = 0;
+	while (y < height) {
+		inset_top = radius ? MAX(0, radius - y) : 0;
+		inset_bottom = radius ? MAX(0, radius - ((height - 1) - y)) : 0;
+		inset = MAX(inset_top, inset_bottom);
+		start = y;
+
+		while (y < height) {
+			inset_top = radius ? MAX(0, radius - y) : 0;
+			inset_bottom = radius ? MAX(0, radius - ((height - 1) - y)) : 0;
+			if (MAX(inset_top, inset_bottom) != inset)
+				break;
+			y++;
+		}
+
+		h = y - start;
+		w = width - 2 * inset;
+		if (w < 0)
+			w = 0;
+
+		if (h > 0 && w > 0) {
+			r = wlr_scene_rect_create(module->bg, w, h, statusbar_bg);
+			if (r)
+				wlr_scene_node_set_position(&r->node, inset, start);
+		}
+	}
+
+	wlr_scene_node_lower_to_bottom(&module->bg->node);
+}
+
+static void
+renderclock(StatusModule *module, int bar_height, const char *text)
+{
+	/* Render a higher-res bitmap digit (5x7 grid, scaled up) */
+	int digit_height, spacing, padding;
+	int dot, colon_gap, colon_width;
+	int cell_w, cell_h, glyph_w, glyph_h, glyph_yoff;
+	int advance = 0;
+	int has_prev = 0;
+	int total_width = 0;
+	int x, y;
+	size_t i, row, col;
+	struct wlr_scene_rect *r;
+
+	if (!module || !module->tree)
+		return;
+
+	digit_height = MIN((int)statusbar_digit_height, bar_height);
+	spacing = statusbar_digit_spacing;
+	padding = statusbar_module_padding;
+	dot = MAX(1, digit_height / 6);
+	colon_gap = MAX(1, digit_height / 3);
+	colon_width = MAX(dot, statusbar_digit_width / 3);
+
+	cell_w = MAX(1, statusbar_digit_width / 5);
+	cell_h = MAX(1, digit_height / 7);
+	glyph_w = cell_w * 5;
+	glyph_h = cell_h * 7;
+	glyph_yoff = (digit_height - glyph_h) / 2;
+
+	clearstatusmodule(module);
+
+	if (digit_height <= 0 || bar_height <= 0) {
+		module->width = 0;
+		return;
+	}
+
+	/* Pass 1: measure total advance width */
+	for (i = 0; text[i]; i++) {
+		int charw = 0;
+		if (text[i] == ':')
+			charw = colon_width;
+		else if (text[i] >= '0' && text[i] <= '9')
+			charw = statusbar_digit_width;
+		else
+			continue;
+
+		if (has_prev)
+			total_width += spacing;
+		total_width += charw;
+		has_prev = 1;
+	}
+
+	if (!has_prev) {
+		module->width = 2 * padding;
+		updatemodulebg(module, module->width, bar_height);
+		return;
+	}
+
+	module->width = total_width + 2 * padding;
+	x = padding;
+	y = (bar_height - digit_height) / 2;
+	advance = 0;
+	has_prev = 0;
+
+	for (i = 0; text[i]; i++) {
+		int is_digit = (text[i] >= '0' && text[i] <= '9');
+		int is_colon = text[i] == ':';
+		int left;
+
+		if (!is_digit && !is_colon)
+			continue;
+
+		if (has_prev)
+			advance += spacing;
+		has_prev = 1;
+
+		if (text[i] == ':') {
+			int cx = x + advance + (colon_width - dot) / 2;
+			r = wlr_scene_rect_create(module->tree, dot, dot, statusbar_fg);
+			wlr_scene_node_set_position(&r->node, cx, y + colon_gap - dot / 2);
+			r = wlr_scene_rect_create(module->tree, dot, dot, statusbar_fg);
+			wlr_scene_node_set_position(&r->node, cx, y + digit_height - colon_gap - dot / 2);
+
+			advance += colon_width;
+			continue;
+		}
+
+		left = x + advance + (statusbar_digit_width - glyph_w) / 2;
+		for (row = 0; row < 7; row++) {
+			uint8_t mask = digit_bitmap[text[i] - '0'][row];
+			for (col = 0; col < 5; col++) {
+				if (!(mask & (1 << (4 - col))))
+					continue;
+				r = wlr_scene_rect_create(module->tree, cell_w, cell_h, statusbar_fg);
+				wlr_scene_node_set_position(&r->node,
+						left + col * cell_w,
+						y + glyph_yoff + row * cell_h);
+			}
+		}
+
+		advance += statusbar_digit_width;
+	}
+
+	updatemodulebg(module, module->width, bar_height);
+}
+
+static void
+positionstatusmodules(Monitor *m)
+{
+	int x, spacing;
+
+	if (!m || !m->statusbar.tree)
+		return;
+
+	if (!m->showbar || !m->statusbar.area.width || !m->statusbar.area.height) {
+		wlr_scene_node_set_enabled(&m->statusbar.tree->node, 0);
+		if (m->statusbar.clock.tree)
+			wlr_scene_node_set_enabled(&m->statusbar.clock.tree->node, 0);
+		return;
+	}
+
+	wlr_scene_node_set_enabled(&m->statusbar.tree->node, 1);
+	if (m->statusbar.clock.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.clock.tree->node,
+				m->statusbar.clock.width > 0);
+	x = m->statusbar.area.width;
+	spacing = statusbar_module_spacing;
+
+	if (m->statusbar.clock.width > 0) {
+		x -= m->statusbar.clock.width;
+		wlr_scene_node_set_position(&m->statusbar.clock.tree->node, x, 0);
+		x -= spacing;
+	}
+}
+
+static void
+layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_area)
+{
+	int gap, bar_height;
+	struct wlr_box bar_area = {0};
+
+	if (!m || !m->statusbar.tree || !area || !client_area)
+		return;
+
+	if (!m->showbar) {
+		wlr_scene_node_set_enabled(&m->statusbar.tree->node, 0);
+		*client_area = *area;
+		m->statusbar.area = (struct wlr_box){0};
+		return;
+	}
+
+	gap = m->gaps ? gappx : 0;
+	bar_height = MIN((int)statusbar_height, area->height);
+
+	bar_area.x = area->x + gap;
+	bar_area.y = area->y + statusbar_top_gap;
+	bar_area.width = area->width - 2 * gap;
+	bar_area.height = bar_height;
+
+	if (bar_area.width < 0)
+		bar_area.width = 0;
+	if (bar_area.height < 0)
+		bar_area.height = 0;
+
+	wlr_scene_node_set_enabled(&m->statusbar.tree->node, 1);
+	wlr_scene_node_set_position(&m->statusbar.tree->node, bar_area.x, bar_area.y);
+	m->statusbar.area = bar_area;
+
+	positionstatusmodules(m);
+
+	*client_area = *area;
+	client_area->y = area->y + statusbar_top_gap + bar_area.height;
+	client_area->height = area->height - bar_area.height - statusbar_top_gap;
+	if (client_area->height < 0)
+		client_area->height = 0;
+}
+
+static void
+refreshstatusclock(void)
+{
+	time_t now;
+	struct tm tm;
+	char timestr[6] = {0};
+	Monitor *m;
+
+	now = time(NULL);
+	if (now == (time_t)-1)
+		return;
+	if (!localtime_r(&now, &tm))
+		return;
+	if (!strftime(timestr, sizeof(timestr), "%H:%M", &tm))
+		return;
+
+	wl_list_for_each(m, &mons, link) {
+		if (!m->statusbar.clock.tree || !m->showbar)
+			continue;
+		renderclock(&m->statusbar.clock,
+				m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height,
+				timestr);
+		positionstatusmodules(m);
+	}
+}
+
+static void
+schedule_status_timer(void)
+{
+	struct timespec ts;
+	double now, next;
+	int ms;
+
+	if (!status_timer)
+		return;
+
+	clock_gettime(CLOCK_REALTIME, &ts);
+	now = ts.tv_sec + ts.tv_nsec / 1e9;
+	next = ceil(now / 60.0) * 60.0;
+	ms = (int)((next - now) * 1000.0);
+	if (ms < 1)
+		ms = 1;
+
+	wl_event_source_timer_update(status_timer, ms);
+}
+
+static int
+updatestatusclock(void *data)
+{
+	(void)data;
+	refreshstatusclock();
+	schedule_status_timer();
+	return 0;
+}
+
 void
 arrange(Monitor *m)
 {
@@ -620,6 +956,8 @@ arrangelayers(Monitor *m)
 {
 	int i;
 	struct wlr_box usable_area = m->m;
+	struct wlr_box client_area;
+	struct wlr_box old_w = m->w;
 	LayerSurface *l;
 	uint32_t layers_above_shell[] = {
 		ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY,
@@ -632,14 +970,21 @@ arrangelayers(Monitor *m)
 	for (i = 3; i >= 0; i--)
 		arrangelayer(m, &m->layers[i], &usable_area, 1);
 
-	if (!wlr_box_equal(&usable_area, &m->w)) {
-		m->w = usable_area;
+	client_area = usable_area;
+	layoutstatusbar(m, &usable_area, &client_area);
+
+	if (!wlr_box_equal(&client_area, &old_w)) {
+		m->w = client_area;
 		arrange(m);
+	} else {
+		positionstatusmodules(m);
 	}
 
 	/* Arrange non-exlusive surfaces from top->bottom */
 	for (i = 3; i >= 0; i--)
 		arrangelayer(m, &m->layers[i], &usable_area, 0);
+
+	refreshstatusclock();
 
 	/* Find topmost keyboard interactive layer, if such a layer exists */
 	for (i = 0; i < (int)LENGTH(layers_above_shell); i++) {
@@ -774,6 +1119,10 @@ void
 cleanup(void)
 {
 	cleanuplisteners();
+	if (status_timer) {
+		wl_event_source_remove(status_timer);
+		status_timer = NULL;
+	}
 #ifdef XWAYLAND
 	wlr_xwayland_destroy(xwayland);
 	xwayland = NULL;
@@ -829,6 +1178,8 @@ cleanupmon(struct wl_listener *listener, void *data)
 	wlr_output_layout_remove(output_layout, m->wlr_output);
 	wlr_scene_output_destroy(m->scene_output);
 
+	if (m->statusbar.tree)
+		wlr_scene_node_destroy(&m->statusbar.tree->node);
 	destroy_tree(m);
 	closemon(m);
 	wlr_scene_node_destroy(&m->fullscreen_bg->node);
@@ -1142,6 +1493,22 @@ bestmode(struct wlr_output *output)
 	return best;
 }
 
+static void
+initstatusbar(Monitor *m)
+{
+	if (!m)
+		return;
+
+	m->showbar = 1;
+	m->statusbar.area = (struct wlr_box){0};
+	m->statusbar.tree = wlr_scene_tree_create(layers[LyrTop]);
+	if (m->statusbar.tree) {
+		m->statusbar.clock.tree = wlr_scene_tree_create(m->statusbar.tree);
+		if (m->statusbar.clock.tree)
+			m->statusbar.clock.bg = wlr_scene_tree_create(m->statusbar.clock.tree);
+	}
+}
+
 void
 createmon(struct wl_listener *listener, void *data)
 {
@@ -1163,6 +1530,7 @@ createmon(struct wl_listener *listener, void *data)
 
 	for (i = 0; i < LENGTH(m->layers); i++)
 		wl_list_init(&m->layers[i]);
+	initstatusbar(m);
 
 	wlr_output_state_init(&state);
 	/* Initialize monitor state using configured rules */
@@ -2699,6 +3067,7 @@ resize(Client *c, struct wlr_box geo, int interact)
 {
 	struct wlr_box *bbox;
 	struct wlr_box clip;
+	int reqw, reqh;
 
 	if (!c->mon || !client_surface(c)->mapped)
 		return;
@@ -2720,8 +3089,8 @@ resize(Client *c, struct wlr_box geo, int interact)
 	wlr_scene_node_set_position(&c->border[2]->node, 0, c->bw);
 	wlr_scene_node_set_position(&c->border[3]->node, c->geom.width - c->bw, c->bw);
 
-	int reqw = c->geom.width - 2 * c->bw;
-	int reqh = c->geom.height - 2 * c->bw;
+	reqw = c->geom.width - 2 * c->bw;
+	reqh = c->geom.height - 2 * c->bw;
 
 	/*
 	 * Avoid flooding heavy clients: only send a new configure when there isn't
@@ -2773,10 +3142,11 @@ run(const char *startup_cmd)
 
 	/* Import environment variables then start systemd target */
 	if (fork() == 0) {
+		pid_t import_pid;
 		setsid();
 
 		/* First: import environment variables */
-		pid_t import_pid = fork();
+		import_pid = fork();
 		if (import_pid == 0) {
 			execvp("systemctl", (char *const[]) {
 				"systemctl", "--user", "import-environment",
@@ -3012,6 +3382,7 @@ setup(void)
 	 * clients from the Unix socket, manging Wayland globals, and so on. */
 	dpy = wl_display_create();
 	event_loop = wl_display_get_event_loop(dpy);
+	status_timer = wl_event_loop_add_timer(event_loop, updatestatusclock, NULL);
 
 	/* The backend is a wlroots feature which abstracts the underlying input and
 	 * output hardware. The autocreate option will choose the most suitable
@@ -3218,6 +3589,11 @@ setup(void)
 		fprintf(stderr, "failed to setup XWayland X server, continuing without it\n");
 	}
 #endif
+
+	if (status_timer) {
+		refreshstatusclock();
+		schedule_status_timer();
+	}
 }
 
 void
@@ -3345,8 +3721,21 @@ togglesticky(const Arg *arg)
 void
 togglegaps(const Arg *arg)
 {
+	if (!selmon)
+		return;
 	selmon->gaps = !selmon->gaps;
+	arrangelayers(selmon);
 	arrange(selmon);
+}
+
+void
+togglestatusbar(const Arg *arg)
+{
+	(void)arg;
+	if (!selmon)
+		return;
+	selmon->showbar = !selmon->showbar;
+	arrangelayers(selmon);
 }
 
 void
