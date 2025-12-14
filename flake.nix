@@ -18,12 +18,14 @@
               gnumake
               stdenv.cc
               pkg-config
+              fcft
               wayland
               wayland-scanner
               wayland-protocols
               wlroots
               libinput
               libxkbcommon
+              tllist
               pixman
               libdrm
               xorg.libxcb
@@ -73,6 +75,8 @@
               pkgs.wlroots
               pkgs.libinput
               pkgs.libxkbcommon
+              pkgs.fcft
+              pkgs.tllist
               pkgs.pixman
               pkgs.libdrm
               pkgs.xorg.libxcb

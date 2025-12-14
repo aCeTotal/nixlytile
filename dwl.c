@@ -6,6 +6,9 @@
 #include <libinput.h>
 #include <linux/input-event-codes.h>
 #include <math.h>
+#include <drm_fourcc.h>
+#include <fcft/fcft.h>
+#include <pixman.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +22,7 @@
 #include <wlr/backend/libinput.h>
 #include <wlr/render/allocator.h>
 #include <wlr/render/wlr_renderer.h>
+#include <wlr/interfaces/wlr_buffer.h>
 #include <wlr/types/wlr_alpha_modifier_v1.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_cursor.h>
@@ -70,6 +74,7 @@
 #include <xcb/xcb.h>
 #include <xcb/xcb_icccm.h>
 #endif
+#include <tllist.h>
 
 #include "util.h"
 
@@ -81,21 +86,21 @@
 #define LENGTH(X)               (sizeof X / sizeof X[0])
 #define END(A)                  ((A) + LENGTH(A))
 #define TAGMASK                 ((1u << TAGCOUNT) - 1)
+#define MAX_TAGS                32
 #define LISTEN(E, L, H)         wl_signal_add((E), ((L)->notify = (H), (L)))
 #define LISTEN_STATIC(E, H)     do { struct wl_listener *_l = ecalloc(1, sizeof(*_l)); _l->notify = (H); wl_signal_add((E), _l); } while (0)
 
-static const uint8_t digit_bitmap[10][7] = {
-	/* 5x7 bitmap, MSB unused (only 5 bits used per row) */
-	{0x0e, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0e}, /* 0 (rounded) */
-	{0x08, 0x18, 0x08, 0x08, 0x08, 0x08, 0x1c}, /* 1 */
-	{0x1e, 0x01, 0x01, 0x0e, 0x10, 0x10, 0x1f}, /* 2 */
-	{0x1e, 0x01, 0x01, 0x0e, 0x01, 0x01, 0x1e}, /* 3 */
-	{0x02, 0x06, 0x0a, 0x12, 0x1f, 0x02, 0x02}, /* 4 */
-	{0x1f, 0x10, 0x10, 0x1e, 0x01, 0x01, 0x1e}, /* 5 */
-	{0x0e, 0x10, 0x10, 0x1e, 0x11, 0x11, 0x0e}, /* 6 */
-	{0x1f, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}, /* 7 */
-	{0x0e, 0x11, 0x11, 0x0e, 0x11, 0x11, 0x0e}, /* 8 */
-	{0x0e, 0x11, 0x11, 0x0f, 0x01, 0x01, 0x0e}  /* 9 */
+struct GlyphRun {
+	const struct fcft_glyph *glyph;
+	int pen_x;
+	uint32_t codepoint;
+};
+
+struct StatusFont {
+	struct fcft_font *font;
+	int ascent;
+	int descent;
+	int height;
 };
 
 /* enums */
@@ -125,13 +130,65 @@ struct StatusModule {
 	struct wlr_scene_tree *tree;
 	struct wlr_scene_tree *bg;
 	int width;
+	int box_x[MAX_TAGS];
+	int box_w[MAX_TAGS];
+	int box_tag[MAX_TAGS];
+	int box_count;
+	uint32_t tagmask;
 };
 
 struct StatusBar {
 	struct wlr_scene_tree *tree;
 	struct wlr_box area;
 	StatusModule clock;
+	StatusModule tags;
 };
+
+struct PixmanBuffer {
+	struct wlr_buffer base;
+	pixman_image_t *image;
+	void *data;
+	uint32_t drm_format;
+	int stride;
+	int owns_data;
+};
+
+static void
+drawroundedrect(struct wlr_scene_tree *parent, int x, int y,
+		int width, int height, const float color[static 4])
+{
+	int radius, yy, inset_top, inset_bottom, inset, start, h, w;
+	struct wlr_scene_rect *r;
+
+	if (!parent || width <= 0 || height <= 0)
+		return;
+
+	radius = MIN(4, MIN(width, height) / 4);
+
+	yy = 0;
+	while (yy < height) {
+		inset_top = radius ? MAX(0, radius - yy) : 0;
+		inset_bottom = radius ? MAX(0, radius - ((height - 1) - yy)) : 0;
+		inset = MAX(inset_top, inset_bottom);
+		start = yy;
+
+		while (yy < height) {
+			inset_top = radius ? MAX(0, radius - yy) : 0;
+			inset_bottom = radius ? MAX(0, radius - ((height - 1) - yy)) : 0;
+			if (MAX(inset_top, inset_bottom) != inset)
+				break;
+			yy++;
+		}
+
+		h = yy - start;
+		w = width - 2 * inset;
+		if (h > 0 && w > 0) {
+			r = wlr_scene_rect_create(parent, w, h, color);
+			if (r)
+				wlr_scene_node_set_position(&r->node, x + inset, y + start);
+		}
+	}
+}
 typedef struct {
 	/* Must keep this field first */
 	unsigned int type; /* XDGShell or X11* */
@@ -357,8 +414,12 @@ static void powermgrsetmode(struct wl_listener *listener, void *data);
 static void quit(const Arg *arg);
 static void renderclock(StatusModule *module, int bar_height, const char *text);
 static void rendermon(struct wl_listener *listener, void *data);
+static void renderworkspaces(Monitor *m, StatusModule *module, int bar_height);
+static void freestatusfont(void);
+static int loadstatusfont(void);
 static void positionstatusmodules(Monitor *m);
 static void refreshstatusclock(void);
+static void refreshstatustags(void);
 static void requestdecorationmode(struct wl_listener *listener, void *data);
 static void requeststartdrag(struct wl_listener *listener, void *data);
 static void requestmonstate(struct wl_listener *listener, void *data);
@@ -391,6 +452,7 @@ static void toggletag(const Arg *arg);
 static void toggleview(const Arg *arg);
 static int updatestatusclock(void *data);
 static void schedule_status_timer(void);
+static struct wlr_buffer *statusbar_buffer_from_glyph(const struct fcft_glyph *glyph);
 static void unlocksession(struct wl_listener *listener, void *data);
 static void unmaplayersurfacenotify(struct wl_listener *listener, void *data);
 static void unmapnotify(struct wl_listener *listener, void *data);
@@ -438,6 +500,10 @@ static struct wlr_renderer *drw;
 static struct wlr_allocator *alloc;
 static struct wlr_compositor *compositor;
 static struct wlr_session *session;
+static struct StatusFont statusfont;
+static int fcft_initialized;
+static int has_dwl_session_target_cached = -1;
+static void hidetagthumbnail(Monitor *m);
 
 static struct wlr_xdg_shell *xdg_shell;
 static struct wlr_xdg_activation_v1 *activation;
@@ -541,6 +607,35 @@ static struct wlr_xwayland *xwayland;
 #include "client.h"
 #include "btrtile.c"
 
+static int
+has_dwl_session_target(void)
+{
+	const char *paths[] = {
+		"/etc/systemd/user/dwl-session.target",
+		"/usr/lib/systemd/user/dwl-session.target",
+		"/lib/systemd/user/dwl-session.target",
+		NULL
+	};
+
+	if (has_dwl_session_target_cached >= 0)
+		return has_dwl_session_target_cached;
+
+	for (int i = 0; paths[i]; i++) {
+		if (access(paths[i], F_OK) == 0) {
+			has_dwl_session_target_cached = 1;
+			return 1;
+		}
+	}
+	has_dwl_session_target_cached = 0;
+	return 0;
+}
+
+static void
+hidetagthumbnail(Monitor *m)
+{
+	(void)m;
+}
+
 /* function implementations */
 void
 applybounds(Client *c, struct wlr_box *bbox)
@@ -595,6 +690,131 @@ applyrules(Client *c)
 }
 
 static void
+pixman_buffer_destroy(struct wlr_buffer *wlr_buffer)
+{
+	struct PixmanBuffer *buf = wl_container_of(wlr_buffer, buf, base);
+
+	if (!buf)
+		return;
+	if (buf->image)
+		pixman_image_unref(buf->image);
+	if (buf->owns_data && buf->data)
+		free(buf->data);
+	free(buf);
+}
+
+static bool
+pixman_buffer_begin_data_ptr_access(struct wlr_buffer *wlr_buffer, uint32_t flags,
+		void **data, uint32_t *format, size_t *stride)
+{
+	struct PixmanBuffer *buf = wl_container_of(wlr_buffer, buf, base);
+
+	(void)flags;
+	if (!buf || !data || !format || !stride)
+		return false;
+
+	*data = buf->data;
+	*format = buf->drm_format;
+	*stride = buf->stride;
+	return true;
+}
+
+static void
+pixman_buffer_end_data_ptr_access(struct wlr_buffer *wlr_buffer)
+{
+	(void)wlr_buffer;
+}
+
+static bool
+pixman_buffer_get_dmabuf(struct wlr_buffer *wlr_buffer,
+		struct wlr_dmabuf_attributes *attribs)
+{
+	(void)wlr_buffer;
+	(void)attribs;
+	return false;
+}
+
+static bool
+pixman_buffer_get_shm(struct wlr_buffer *wlr_buffer,
+		struct wlr_shm_attributes *attribs)
+{
+	(void)wlr_buffer;
+	(void)attribs;
+	return false;
+}
+
+static const struct wlr_buffer_impl pixman_buffer_impl = {
+	.destroy = pixman_buffer_destroy,
+	.get_dmabuf = pixman_buffer_get_dmabuf,
+	.get_shm = pixman_buffer_get_shm,
+	.begin_data_ptr_access = pixman_buffer_begin_data_ptr_access,
+	.end_data_ptr_access = pixman_buffer_end_data_ptr_access,
+};
+
+static struct wlr_buffer *
+statusbar_buffer_from_glyph(const struct fcft_glyph *glyph)
+{
+	pixman_image_t *dst, *solid = NULL;
+	struct PixmanBuffer *buf;
+	pixman_color_t col;
+	uint32_t *data;
+	int width, height, stride, force_color;
+
+	if (!glyph || !glyph->pix)
+		return NULL;
+
+	width = glyph->width;
+	height = glyph->height;
+	if (width <= 0 || height <= 0)
+		return NULL;
+
+	stride = width * 4;
+	data = ecalloc(height, stride);
+	if (!data)
+		return NULL;
+
+	dst = pixman_image_create_bits_no_clear(PIXMAN_a8r8g8b8, width, height,
+			data, stride);
+	if (!dst) {
+		free(data);
+		return NULL;
+	}
+
+	force_color = statusbar_font_force_color || pixman_image_get_format(glyph->pix) == PIXMAN_a8;
+	if (force_color) {
+		col.alpha = (uint16_t)lroundf(statusbar_fg[3] * 65535.0f);
+		col.red = (uint16_t)lroundf(statusbar_fg[0] * 65535.0f);
+		col.green = (uint16_t)lroundf(statusbar_fg[1] * 65535.0f);
+		col.blue = (uint16_t)lroundf(statusbar_fg[2] * 65535.0f);
+		solid = pixman_image_create_solid_fill(&col);
+		pixman_image_composite32(PIXMAN_OP_SRC, solid, glyph->pix, dst,
+				0, 0, 0, 0, 0, 0, width, height);
+	} else {
+		pixman_image_composite32(PIXMAN_OP_SRC, glyph->pix, NULL, dst,
+				0, 0, 0, 0, 0, 0, width, height);
+	}
+
+	if (solid)
+		pixman_image_unref(solid);
+
+	buf = ecalloc(1, sizeof(*buf));
+	if (!buf) {
+		pixman_image_unref(dst);
+		free(data);
+		return NULL;
+	}
+
+	buf->image = dst;
+	buf->data = data;
+	buf->drm_format = DRM_FORMAT_ARGB8888;
+	buf->stride = stride;
+	buf->owns_data = 1;
+	wlr_buffer_init(&buf->base, &pixman_buffer_impl, width, height);
+
+	return &buf->base;
+}
+
+static void
 clearstatusmodule(StatusModule *module)
 {
 	struct wlr_scene_node *node, *tmp;
@@ -621,6 +841,8 @@ updatemodulebg(StatusModule *module, int width, int height)
 
 	if (!module->bg && !(module->bg = wlr_scene_tree_create(module->tree)))
 		return;
+	wlr_scene_node_set_enabled(&module->bg->node, 1);
+	wlr_scene_node_set_position(&module->bg->node, 0, 0);
 
 	wl_list_for_each_safe(node, tmp, &module->bg->children, link)
 		wlr_scene_node_destroy(node);
@@ -660,108 +882,229 @@ updatemodulebg(StatusModule *module, int width, int height)
 static void
 renderclock(StatusModule *module, int bar_height, const char *text)
 {
-	/* Render a higher-res bitmap digit (5x7 grid, scaled up) */
-	int digit_height, spacing, padding;
-	int dot, colon_gap, colon_width;
-	int cell_w, cell_h, glyph_w, glyph_h, glyph_yoff;
-	int advance = 0;
-	int has_prev = 0;
-	int total_width = 0;
-	int x, y;
-	size_t i, row, col;
-	struct wlr_scene_rect *r;
+	/* Render using fcft for proper font glyphs */
+	tll(struct GlyphRun) glyphs = tll_init();
+	const struct fcft_glyph *glyph;
+	struct wlr_scene_buffer *scene_buf;
+	struct wlr_buffer *buffer;
+	uint32_t prev_cp;
+	int padding, pen_x, min_x, min_y, max_x, max_y;
+	int text_width, text_height, origin_x, origin_y;
+	size_t i;
 
 	if (!module || !module->tree)
 		return;
 
-	digit_height = MIN((int)statusbar_digit_height, bar_height);
-	spacing = statusbar_digit_spacing;
-	padding = statusbar_module_padding;
-	dot = MAX(1, digit_height / 6);
-	colon_gap = MAX(1, digit_height / 3);
-	colon_width = MAX(dot, statusbar_digit_width / 3);
-
-	cell_w = MAX(1, statusbar_digit_width / 5);
-	cell_h = MAX(1, digit_height / 7);
-	glyph_w = cell_w * 5;
-	glyph_h = cell_h * 7;
-	glyph_yoff = (digit_height - glyph_h) / 2;
-
 	clearstatusmodule(module);
-
-	if (digit_height <= 0 || bar_height <= 0) {
-		module->width = 0;
-		return;
-	}
-
-	/* Pass 1: measure total advance width */
-	for (i = 0; text[i]; i++) {
-		int charw = 0;
-		if (text[i] == ':')
-			charw = colon_width;
-		else if (text[i] >= '0' && text[i] <= '9')
-			charw = statusbar_digit_width;
-		else
-			continue;
-
-		if (has_prev)
-			total_width += spacing;
-		total_width += charw;
-		has_prev = 1;
-	}
-
-	if (!has_prev) {
+	padding = statusbar_module_padding;
+	if (!statusfont.font || !text || !*text || bar_height <= 0) {
 		module->width = 2 * padding;
 		updatemodulebg(module, module->width, bar_height);
 		return;
 	}
 
-	module->width = total_width + 2 * padding;
-	x = padding;
-	y = (bar_height - digit_height) / 2;
-	advance = 0;
-	has_prev = 0;
+	pen_x = 0;
+	min_x = INT_MAX;
+	min_y = INT_MAX;
+	max_x = INT_MIN;
+	max_y = INT_MIN;
+	prev_cp = 0;
 
 	for (i = 0; text[i]; i++) {
-		int is_digit = (text[i] >= '0' && text[i] <= '9');
-		int is_colon = text[i] == ':';
-		int left;
+		long kern_x = 0, kern_y = 0;
+		uint32_t cp = (unsigned char)text[i];
+		struct GlyphRun run;
 
-		if (!is_digit && !is_colon)
-			continue;
+		if (prev_cp)
+			fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
+		pen_x += (int)kern_x;
 
-		if (has_prev)
-			advance += spacing;
-		has_prev = 1;
-
-		if (text[i] == ':') {
-			int cx = x + advance + (colon_width - dot) / 2;
-			r = wlr_scene_rect_create(module->tree, dot, dot, statusbar_fg);
-			wlr_scene_node_set_position(&r->node, cx, y + colon_gap - dot / 2);
-			r = wlr_scene_rect_create(module->tree, dot, dot, statusbar_fg);
-			wlr_scene_node_set_position(&r->node, cx, y + digit_height - colon_gap - dot / 2);
-
-			advance += colon_width;
+		glyph = fcft_rasterize_char_utf32(statusfont.font, cp, statusbar_font_subpixel);
+		if (!glyph || !glyph->pix) {
+			prev_cp = cp;
 			continue;
 		}
 
-		left = x + advance + (statusbar_digit_width - glyph_w) / 2;
-		for (row = 0; row < 7; row++) {
-			uint8_t mask = digit_bitmap[text[i] - '0'][row];
-			for (col = 0; col < 5; col++) {
-				if (!(mask & (1 << (4 - col))))
-					continue;
-				r = wlr_scene_rect_create(module->tree, cell_w, cell_h, statusbar_fg);
-				wlr_scene_node_set_position(&r->node,
-						left + col * cell_w,
-						y + glyph_yoff + row * cell_h);
-			}
-		}
+		run.glyph = glyph;
+		run.pen_x = pen_x;
+		run.codepoint = cp;
+		tll_push_back(glyphs, run);
 
-		advance += statusbar_digit_width;
+		min_x = MIN(min_x, pen_x + glyph->x);
+		min_y = MIN(min_y, -glyph->y);
+		max_x = MAX(max_x, pen_x + glyph->x + glyph->width);
+		max_y = MAX(max_y, -glyph->y + glyph->height);
+
+		pen_x += glyph->advance.x;
+		if (text[i + 1])
+			pen_x += statusbar_font_spacing;
+		prev_cp = cp;
+	}
+
+	if (tll_length(glyphs) == 0) {
+		module->width = 2 * padding;
+		updatemodulebg(module, module->width, bar_height);
+		tll_free(glyphs);
+		return;
+	}
+
+	text_width = max_x - min_x;
+	text_height = max_y - min_y;
+	module->width = text_width + 2 * padding;
+	origin_x = padding - min_x;
+	origin_y = (bar_height - text_height) / 2 - min_y;
+
+	tll_foreach(glyphs, it) {
+		glyph = it->item.glyph;
+		buffer = statusbar_buffer_from_glyph(glyph);
+		if (!buffer)
+			continue;
+
+		scene_buf = wlr_scene_buffer_create(module->tree, NULL);
+		if (scene_buf) {
+			wlr_scene_buffer_set_buffer(scene_buf, buffer);
+			wlr_scene_node_set_position(&scene_buf->node,
+					origin_x + it->item.pen_x + glyph->x,
+					origin_y - glyph->y);
+		}
+		wlr_buffer_drop(buffer);
 	}
 
 	updatemodulebg(module, module->width, bar_height);
+	tll_free(glyphs);
+}
+
+static void
+renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
+{
+	uint32_t mask = 0;
+	Client *c;
+	int padding, inner, spacing;
+	int box_h, box_y, total_w = 0;
+	int x, count = 0;
+	struct wlr_scene_buffer *scene_buf;
+	struct wlr_buffer *buffer;
+
+	if (!m || !module || !module->tree)
+		return;
+	if (!statusfont.font || bar_height <= 0) {
+		module->width = 0;
+		return;
+	}
+
+	padding = statusbar_module_padding;
+	inner = statusbar_workspace_padding;
+	spacing = statusbar_workspace_spacing;
+	module->box_count = 0;
+	module->tagmask = 0;
+
+	wl_list_for_each(c, &clients, link) {
+		if (c->mon != m)
+			continue;
+		mask |= c->tags;
+	}
+	mask |= m->tagset[m->seltags];
+	mask |= 1u; /* Always show workspace 1 */
+	mask &= TAGMASK;
+
+	clearstatusmodule(module);
+
+	box_h = MAX(1, MIN(bar_height - 4, statusfont.height + inner * 2));
+	box_y = (bar_height - box_h) / 2;
+	x = padding;
+
+	for (int i = 0; i < TAGCOUNT; i++) {
+		const struct fcft_glyph *glyph;
+		int min_x, max_x, min_y, max_y;
+		int text_w, text_h, box_w;
+		int origin_x, origin_y;
+		const float *bgcol;
+		int active;
+
+		if (!(mask & (1u << i)))
+			continue;
+
+		if (count > 0) {
+			x += spacing;
+			total_w += spacing;
+		}
+
+		glyph = fcft_rasterize_char_utf32(statusfont.font,
+				(uint32_t)('1' + i), statusbar_font_subpixel);
+		if (!glyph || !glyph->pix) {
+			continue;
+		}
+
+		min_x = glyph->x;
+		max_x = glyph->x + glyph->width;
+		min_y = -glyph->y;
+		max_y = -glyph->y + glyph->height;
+		text_w = max_x - min_x;
+		text_h = max_y - min_y;
+		box_w = text_w + inner * 2;
+		origin_x = x + (box_w - text_w) / 2 - min_x;
+		origin_y = box_y + (box_h - text_h) / 2 - min_y;
+
+		active = (m->tagset[m->seltags] & (1u << i)) != 0;
+		bgcol = active ? statusbar_tag_active_bg : statusbar_bg;
+		drawroundedrect(module->tree, x, box_y, box_w, box_h, bgcol);
+
+		buffer = statusbar_buffer_from_glyph(glyph);
+		if (buffer) {
+			scene_buf = wlr_scene_buffer_create(module->tree, NULL);
+			if (scene_buf) {
+				wlr_scene_buffer_set_buffer(scene_buf, buffer);
+				wlr_scene_node_set_position(&scene_buf->node,
+						origin_x + glyph->x,
+						origin_y - glyph->y);
+			}
+			wlr_buffer_drop(buffer);
+		}
+
+		x += box_w;
+		total_w += box_w;
+		if (module->box_count < TAGCOUNT) {
+			module->box_x[module->box_count] = padding + total_w - box_w;
+			module->box_w[module->box_count] = box_w;
+			module->box_tag[module->box_count] = i;
+			module->tagmask |= (1u << i);
+		}
+		count++;
+	}
+
+	module->width = total_w + padding * 2;
+	module->box_count = count;
+	updatemodulebg(module, module->width, bar_height);
+}
+
+static int
+loadstatusfont(void)
+{
+	size_t count;
+
+	if (statusfont.font)
+		return 1;
+
+	count = LENGTH(statusbar_fonts);
+	if (count == 0)
+		return 0;
+
+	statusfont.font = fcft_from_name(count, statusbar_fonts, statusbar_font_attributes);
+	if (!statusfont.font)
+		return 0;
+
+	statusfont.ascent = statusfont.font->ascent;
+	statusfont.descent = statusfont.font->descent;
+	statusfont.height = statusfont.font->height;
+	return 1;
+}
+
+static void
+freestatusfont(void)
+{
+	if (statusfont.font)
+		fcft_destroy(statusfont.font);
+	statusfont.font = NULL;
 }
 
 static void
@@ -774,15 +1117,28 @@ positionstatusmodules(Monitor *m)
 
 	if (!m->showbar || !m->statusbar.area.width || !m->statusbar.area.height) {
 		wlr_scene_node_set_enabled(&m->statusbar.tree->node, 0);
+		if (m->statusbar.tags.tree)
+			wlr_scene_node_set_enabled(&m->statusbar.tags.tree->node, 0);
 		if (m->statusbar.clock.tree)
 			wlr_scene_node_set_enabled(&m->statusbar.clock.tree->node, 0);
 		return;
 	}
 
 	wlr_scene_node_set_enabled(&m->statusbar.tree->node, 1);
+	if (m->statusbar.tags.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.tags.tree->node,
+				m->statusbar.tags.width > 0);
 	if (m->statusbar.clock.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.clock.tree->node,
 				m->statusbar.clock.width > 0);
+	x = 0;
+	spacing = statusbar_module_spacing;
+
+	if (m->statusbar.tags.width > 0) {
+		wlr_scene_node_set_position(&m->statusbar.tags.tree->node, x, 0);
+		x += m->statusbar.tags.width + spacing;
+	}
+
 	x = m->statusbar.area.width;
 	spacing = statusbar_module_spacing;
 
@@ -804,6 +1160,7 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 
 	if (!m->showbar) {
 		wlr_scene_node_set_enabled(&m->statusbar.tree->node, 0);
+		hidetagthumbnail(m);
 		*client_area = *area;
 		m->statusbar.area = (struct wlr_box){0};
 		return;
@@ -826,6 +1183,7 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 	wlr_scene_node_set_position(&m->statusbar.tree->node, bar_area.x, bar_area.y);
 	m->statusbar.area = bar_area;
 
+	renderworkspaces(m, &m->statusbar.tags, bar_area.height);
 	positionstatusmodules(m);
 
 	*client_area = *area;
@@ -857,6 +1215,20 @@ refreshstatusclock(void)
 		renderclock(&m->statusbar.clock,
 				m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height,
 				timestr);
+		positionstatusmodules(m);
+	}
+}
+
+static void
+refreshstatustags(void)
+{
+	Monitor *m;
+
+	wl_list_for_each(m, &mons, link) {
+		if (!m->statusbar.tags.tree || !m->showbar)
+			continue;
+		renderworkspaces(m, &m->statusbar.tags,
+				m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height);
 		positionstatusmodules(m);
 	}
 }
@@ -928,6 +1300,7 @@ arrange(Monitor *m)
 		m->lt[m->sellt]->arrange(m);
 	motionnotify(0, NULL, 0, 0, 0, 0);
 	checkidleinhibitor(NULL);
+	refreshstatustags();
 	warpcursor(focustop(selmon));
 }
 
@@ -1027,11 +1400,32 @@ buttonpress(struct wl_listener *listener, void *data)
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
 	switch (event->state) {
-	case WL_POINTER_BUTTON_STATE_PRESSED:
+		case WL_POINTER_BUTTON_STATE_PRESSED:
 		cursor_mode = CurPressed;
 		selmon = xytomon(cursor->x, cursor->y);
 		if (locked)
 			break;
+
+		if (event->button == BTN_LEFT && selmon && selmon->showbar) {
+			int lx = cursor->x - selmon->statusbar.area.x;
+			int ly = cursor->y - selmon->statusbar.area.y;
+			StatusModule *tags = &selmon->statusbar.tags;
+
+			if (lx >= 0 && ly >= 0 &&
+					lx < selmon->statusbar.area.width &&
+					ly < selmon->statusbar.area.height &&
+					lx < tags->width) {
+				for (int i = 0; i < tags->box_count; i++) {
+					int bx = tags->box_x[i];
+					int bw = tags->box_w[i];
+					if (lx >= bx && lx < bx + bw) {
+						Arg arg = { .ui = 1u << tags->box_tag[i] };
+						view(&arg);
+						return;
+					}
+				}
+			}
+		}
 
 		/* Change focus if the button was _pressed_ over a client */
 		xytonode(cursor->x, cursor->y, NULL, &c, NULL, NULL, NULL);
@@ -1130,9 +1524,11 @@ cleanup(void)
 	/* Stop systemd target */
 	if (fork() == 0) {
 		setsid();
-		execvp("systemctl", (char *const[]) {
-			"systemctl", "--user", "stop", "dwl-session.target", NULL
-		});
+		if (has_dwl_session_target()) {
+			execvp("systemctl", (char *const[]) {
+				"systemctl", "--user", "stop", "dwl-session.target", NULL
+			});
+		}
 		exit(1);
 	}
 
@@ -1140,6 +1536,11 @@ cleanup(void)
 	if (child_pid > 0) {
 		kill(-child_pid, SIGTERM);
 		waitpid(child_pid, NULL, 0);
+	}
+	freestatusfont();
+	if (fcft_initialized) {
+		fcft_fini();
+		fcft_initialized = 0;
 	}
 	wlr_xcursor_manager_destroy(cursor_mgr);
 
@@ -1503,6 +1904,9 @@ initstatusbar(Monitor *m)
 	m->statusbar.area = (struct wlr_box){0};
 	m->statusbar.tree = wlr_scene_tree_create(layers[LyrTop]);
 	if (m->statusbar.tree) {
+		m->statusbar.tags.tree = wlr_scene_tree_create(m->statusbar.tree);
+		if (m->statusbar.tags.tree)
+			m->statusbar.tags.bg = wlr_scene_tree_create(m->statusbar.tags.tree);
 		m->statusbar.clock.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.clock.tree)
 			m->statusbar.clock.bg = wlr_scene_tree_create(m->statusbar.clock.tree);
@@ -3159,9 +3563,11 @@ run(const char *startup_cmd)
 		waitpid(import_pid, NULL, 0);
 
 		/* Second: start target */
-		execvp("systemctl", (char *const[]) {
-			"systemctl", "--user", "start", "dwl-session.target", NULL
-		});
+		if (has_dwl_session_target()) {
+			execvp("systemctl", (char *const[]) {
+				"systemctl", "--user", "start", "dwl-session.target", NULL
+			});
+		}
 
 		exit(1);
 	}
@@ -3383,6 +3789,11 @@ setup(void)
 	dpy = wl_display_create();
 	event_loop = wl_display_get_event_loop(dpy);
 	status_timer = wl_event_loop_add_timer(event_loop, updatestatusclock, NULL);
+	fcft_initialized = fcft_init(FCFT_LOG_COLORIZE_NEVER, 0, FCFT_LOG_CLASS_ERROR);
+	if (!fcft_initialized)
+		die("couldn't initialize fcft");
+	if (!loadstatusfont())
+		die("couldn't load statusbar font");
 
 	/* The backend is a wlroots feature which abstracts the underlying input and
 	 * output hardware. The autocreate option will choose the most suitable
@@ -4013,9 +4424,13 @@ xytonode(double x, double y, struct wlr_surface **psurface,
 		if (!(node = wlr_scene_node_at(&layers[layer]->node, x, y, nx, ny)))
 			continue;
 
-		if (node->type == WLR_SCENE_NODE_BUFFER)
-			surface = wlr_scene_surface_try_from_buffer(
-					wlr_scene_buffer_from_node(node))->surface;
+		if (node->type == WLR_SCENE_NODE_BUFFER) {
+			struct wlr_scene_surface *scene_surface =
+				wlr_scene_surface_try_from_buffer(
+						wlr_scene_buffer_from_node(node));
+			if (scene_surface)
+				surface = scene_surface->surface;
+		}
 		/* Walk the tree to find a node that knows the client */
 		for (pnode = node; pnode && !c; pnode = &pnode->parent->node)
 			c = pnode->data;

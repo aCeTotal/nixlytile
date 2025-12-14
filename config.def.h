@@ -14,16 +14,26 @@ static const float rootcolor[]             = COLOR(0x222222ff);
 static const float bordercolor[]           = COLOR(0x444444ff);
 static const float focuscolor[]            = COLOR(0x005577ff);
 static const float urgentcolor[]           = COLOR(0xff0000ff);
-static const unsigned int statusbar_height = 30;
-static const unsigned int statusbar_digit_width = 14;
-static const unsigned int statusbar_digit_height = 22;
-static const unsigned int statusbar_digit_thickness = 2;
-static const unsigned int statusbar_digit_spacing = 6;
-static const unsigned int statusbar_module_spacing = 12;
-static const unsigned int statusbar_module_padding = 6;
+static const unsigned int statusbar_height = 26;
+static const unsigned int statusbar_module_spacing = 10;
+static const unsigned int statusbar_module_padding = 8;
 static const unsigned int statusbar_top_gap = 3;
 static const float statusbar_fg[]          = COLOR(0xffffffff);
-static const float statusbar_bg[]          = COLOR(0x00000022);
+static const float statusbar_bg[]          = COLOR(0x00000016);
+static const float statusbar_tag_active_bg[] = COLOR(0x3399ff44);
+static const char *statusbar_fonts[] = {
+	"monospace:size=16:weight=Bold",
+	"monospace:size=16"
+};
+static const char *statusbar_font_attributes = NULL;
+static const int statusbar_font_spacing = 0;
+static const int statusbar_font_force_color = 1;
+static const enum fcft_subpixel statusbar_font_subpixel = FCFT_SUBPIXEL_DEFAULT;
+static const int statusbar_workspace_padding = 6;
+static const int statusbar_workspace_spacing = 4;
+static const int statusbar_thumb_height = 40;
+static const int statusbar_thumb_gap = 2;
+static const float statusbar_thumb_window[] = COLOR(0xffffff55);
 /* This conforms to the xdg-protocol. Set the alpha to zero to restore the old behavior */
 static const float fullscreen_bg[]         = {0.1f, 0.1f, 0.1f, 1.0f}; /* You can also use glsl colors */
 static const float resize_factor           = 0.0002f; /* Resize multiplier for mouse resizing, depends on mouse sensivity. */
