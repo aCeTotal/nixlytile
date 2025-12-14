@@ -17,7 +17,9 @@ static const float urgentcolor[]           = COLOR(0xff0000ff);
 /* This conforms to the xdg-protocol. Set the alpha to zero to restore the old behavior */
 static const float fullscreen_bg[]         = {0.1f, 0.1f, 0.1f, 1.0f}; /* You can also use glsl colors */
 static const float resize_factor           = 0.0002f; /* Resize multiplier for mouse resizing, depends on mouse sensivity. */
-static const uint32_t resize_interval_ms   = 16; /* Resize interval depends on framerate and screen refresh rate. */
+static const uint32_t resize_interval_ms   = 24; /* Min interval between mouse-driven resize updates (higher smooths heavy apps). */
+static const double   resize_min_pixels    = 3.0; /* Min pointer movement before a new resize if within interval. */
+static const float    resize_ratio_epsilon = 0.002f; /* Smallest ratio change that should trigger an arrange. */
 
 /* window resizing */
 static const int lock_cursor = 0;	/* 1: lock cursor, 0: don't lock */

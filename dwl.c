@@ -143,6 +143,7 @@ typedef struct {
 	uint32_t tags;
 	int isfloating, isurgent, isfullscreen, issticky, was_tiled;
 	uint32_t resize; /* configure serial of a pending resize */
+	int pending_resize_w, pending_resize_h; /* last requested size while pending */
 	struct wlr_box old_geom;
 	char *output;
 } Client;
@@ -367,6 +368,7 @@ static LayoutNode *closest_split_node(LayoutNode *client_node, int want_vert,
 		double pointer, double *out_ratio, struct wlr_box *out_box,
 		double *out_dist);
 static void apply_resize_axis_choice(void);
+static int resize_should_update(uint32_t time);
 static Monitor *xytomon(double x, double y);
 static void xytonode(double x, double y, struct wlr_surface **psurface,
 		Client **pc, LayerSurface **pl, double *nx, double *ny);
@@ -432,6 +434,8 @@ static int grabcx, grabcy; /* client-relative */
 static int resize_dir_x, resize_dir_y;
 static double resize_start_ratio_v, resize_start_ratio_h;
 static int resize_use_v, resize_use_h;
+static uint32_t resize_last_time;
+static double resize_last_x, resize_last_y;
 
 static struct wlr_output_layout *output_layout;
 static struct wlr_box sgeom;
@@ -722,6 +726,7 @@ buttonpress(struct wl_listener *listener, void *data)
 			} else {
 				if (cursor_mode == CurResize && resizing_from_mouse)
 					resizing_from_mouse = 0;
+				resize_last_time = 0;
 			}
 			/* Default behaviour */
 			wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
@@ -957,11 +962,13 @@ commitnotify(struct wl_listener *listener, void *data)
 		return;
 	}
 
-	resize(c, c->geom, (c->isfloating && !c->isfullscreen));
-
 	/* mark a pending resize as completed */
-	if (c->resize && c->resize <= c->surface.xdg->current.configure_serial)
+	if (c->resize && c->resize <= c->surface.xdg->current.configure_serial) {
 		c->resize = 0;
+		c->pending_resize_w = c->pending_resize_h = -1;
+	}
+
+	resize(c, c->geom, (c->isfloating && !c->isfullscreen));
 }
 
 void
@@ -2092,6 +2099,31 @@ apply_resize_axis_choice(void)
 	resize_use_h = resize_split_node_h != NULL;
 }
 
+static int
+resize_should_update(uint32_t time)
+{
+	if (!resizing_from_mouse || time == 0 || resize_interval_ms == 0)
+		return 1;
+
+	if (resize_last_time == 0) {
+		resize_last_time = time;
+		resize_last_x = cursor->x;
+		resize_last_y = cursor->y;
+		return 1;
+	}
+
+	uint32_t elapsed = time - resize_last_time;
+	double dist = fabs(cursor->x - resize_last_x) + fabs(cursor->y - resize_last_y);
+
+	if (elapsed < resize_interval_ms && dist < resize_min_pixels)
+		return 0;
+
+	resize_last_time = time;
+	resize_last_x = cursor->x;
+	resize_last_y = cursor->y;
+	return 1;
+}
+
 static const char *
 resize_cursor_from_dirs(int dx, int dy)
 {
@@ -2226,8 +2258,12 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 			return;
 		}
 	} else if (cursor_mode == CurResize) {
+			if (!resize_should_update(time))
+				goto focus;
+
 			if (tiled && resizing_from_mouse) {
 				double ratio, ratio_h;
+				int changed = 0;
 				double dx_total = cursor->x - resize_start_x;
 				double dy_total = cursor->y - resize_start_y;
 				LayoutNode *client_node;
@@ -2253,24 +2289,32 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 				}
 
 				if (resize_use_v && resize_split_node && resize_start_box_v.width > 0) {
+					double current = resize_split_node->split_ratio;
 					ratio = resize_start_ratio_v + dx_total / resize_start_box_v.width;
 					if (ratio < 0.05f)
 						ratio = 0.05f;
 					if (ratio > 0.95f)
 						ratio = 0.95f;
-					resize_split_node->split_ratio = ratio;
+					if (fabs(ratio - current) >= resize_ratio_epsilon) {
+						resize_split_node->split_ratio = ratio;
+						changed = 1;
+					}
 				}
 
 				if (resize_use_h && resize_split_node_h && resize_start_box_h.height > 0) {
+					double current_h = resize_split_node_h->split_ratio;
 					ratio_h = resize_start_ratio_h + dy_total / resize_start_box_h.height;
 					if (ratio_h < 0.05f)
 						ratio_h = 0.05f;
 					if (ratio_h > 0.95f)
 						ratio_h = 0.95f;
-					resize_split_node_h->split_ratio = ratio_h;
-			}
+					if (fabs(ratio_h - current_h) >= resize_ratio_epsilon) {
+						resize_split_node_h->split_ratio = ratio_h;
+						changed = 1;
+					}
+				}
 
-			if (resize_split_node || resize_split_node_h)
+			if (changed)
 				arrange(selmon);
 
 		} else if (grabc && grabc->isfloating) {
@@ -2370,11 +2414,12 @@ moveresize(const Arg *arg)
 				resize_start_box_f = grabc->geom;
 				resize_start_x = start_x;
 				resize_start_y = start_y;
-				resize_last_update_x = start_x;
-				resize_last_update_y = start_y;
 				resize_start_ratio_v = resize_start_ratio_h = 0.0;
 				resize_split_node = NULL;
 				resize_split_node_h = NULL;
+				resize_last_time = 0;
+				resize_last_x = start_x;
+				resize_last_y = start_y;
 				resizing_from_mouse = 1;
 				wlr_cursor_set_xcursor(cursor, cursor_mgr, cursor_name);
 			}
@@ -2402,11 +2447,12 @@ moveresize(const Arg *arg)
 				resize_start_box_f = grabc->geom;
 				resize_start_x = start_x;
 				resize_start_y = start_y;
-				resize_last_update_x = start_x;
-				resize_last_update_y = start_y;
 				resize_start_ratio_v = resize_start_ratio_h = 0.0;
 				resize_split_node = NULL;
 				resize_split_node_h = NULL;
+				resize_last_time = 0;
+				resize_last_x = start_x;
+				resize_last_y = start_y;
 				resizing_from_mouse = 1;
 				wlr_cursor_set_xcursor(cursor, cursor_mgr, cursor_name);
 			}
@@ -2599,20 +2645,11 @@ rendermon(struct wl_listener *listener, void *data)
 	/* This function is called every time an output is ready to display a frame,
 	 * generally at the output's refresh rate (e.g. 60Hz). */
 	Monitor *m = wl_container_of(listener, m, frame);
-	Client *c;
 	struct wlr_output_state pending = {0};
 	struct timespec now;
 
-	/* Render if no XDG clients have an outstanding resize and are visible on
-	 * this monitor. */
-	wl_list_for_each(c, &clients, link) {
-		if (c->resize && !c->isfloating && client_is_rendered_on_mon(c, m) && !client_is_stopped(c))
-			goto skip;
-	}
-
 	wlr_scene_output_commit(m->scene_output, NULL);
 
-skip:
 	/* Let clients know a frame has been rendered */
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	wlr_scene_output_send_frame_done(m->scene_output, &now);
@@ -2674,9 +2711,19 @@ resize(Client *c, struct wlr_box geo, int interact)
 	wlr_scene_node_set_position(&c->border[2]->node, 0, c->bw);
 	wlr_scene_node_set_position(&c->border[3]->node, c->geom.width - c->bw, c->bw);
 
-	/* this is a no-op if size hasn't changed */
-	c->resize = client_set_size(c, c->geom.width - 2 * c->bw,
-			c->geom.height - 2 * c->bw);
+	int reqw = c->geom.width - 2 * c->bw;
+	int reqh = c->geom.height - 2 * c->bw;
+
+	/*
+	 * Avoid flooding heavy clients: only send a new configure when there isn't
+	 * already one pending. While waiting for an ack we just remember the
+	 * latest requested size.
+	 */
+	if (!c->resize)
+		c->resize = client_set_size(c, reqw, reqh);
+	c->pending_resize_w = reqw;
+	c->pending_resize_h = reqh;
+
 	client_get_clip(c, &clip);
 	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
 }
