@@ -20,7 +20,10 @@ static const unsigned int statusbar_module_padding = 8;
 static const unsigned int statusbar_top_gap = 3;
 static const float statusbar_fg[]          = COLOR(0xffffffff);
 static const float statusbar_bg[]          = COLOR(0x00000016);
+static const float statusbar_tag_bg[]      = COLOR(0x00000033);
 static const float statusbar_tag_active_bg[] = COLOR(0x3399ff44);
+static const float statusbar_tag_hover_bg[] = COLOR(0x66b3ffaa);
+static const int statusbar_hover_fade_ms   = 0;
 static const char *statusbar_fonts[] = {
 	"monospace:size=16:weight=Bold",
 	"monospace:size=16"
@@ -29,7 +32,7 @@ static const char *statusbar_font_attributes = NULL;
 static const int statusbar_font_spacing = 0;
 static const int statusbar_font_force_color = 1;
 static const enum fcft_subpixel statusbar_font_subpixel = FCFT_SUBPIXEL_DEFAULT;
-static const int statusbar_workspace_padding = 6;
+static const int statusbar_workspace_padding = 8;
 static const int statusbar_workspace_spacing = 4;
 static const int statusbar_thumb_height = 40;
 static const int statusbar_thumb_gap = 2;
@@ -154,6 +157,7 @@ static const enum libinput_config_tap_button_map button_map = LIBINPUT_CONFIG_TA
 /* commands */
 static const char *termcmd[] = { "foot", NULL };
 static const char *alacrittycmd[] = { "alacritty", NULL };
+static const char *btopcmd[] = { "alacritty", "-e", "btop", NULL };
 static const char *chromecmd[] = { "google-chrome-stable", NULL };
 static const char *menucmd[] = { "wmenu-run", NULL };
 /* Startup command run when no -s is provided; closes stdin to avoid status pipe */

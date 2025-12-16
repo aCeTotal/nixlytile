@@ -1,6 +1,10 @@
 /*
  * See LICENSE file for copyright and license details.
  */
+#include <arpa/inet.h>
+#include <dirent.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <limits.h>
 #include <getopt.h>
 #include <libinput.h>
@@ -13,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <stdint.h>
 #include <time.h>
@@ -130,18 +135,46 @@ struct StatusModule {
 	struct wlr_scene_tree *tree;
 	struct wlr_scene_tree *bg;
 	int width;
+	int x;
 	int box_x[MAX_TAGS];
 	int box_w[MAX_TAGS];
 	int box_tag[MAX_TAGS];
 	int box_count;
 	uint32_t tagmask;
+	int hover_tag;
+	float hover_alpha[MAX_TAGS];
 };
+
+typedef struct {
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_tree *bg;
+	int width;
+	int height;
+	int visible;
+} CpuPopup;
+
+typedef struct {
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_tree *bg;
+	int width;
+	int height;
+	int visible;
+} NetPopup;
 
 struct StatusBar {
 	struct wlr_scene_tree *tree;
 	struct wlr_box area;
 	StatusModule clock;
+	StatusModule cpu;
+	StatusModule battery;
+	StatusModule net;
+	StatusModule light;
+	StatusModule volume;
+	StatusModule ram;
 	StatusModule tags;
+	CpuPopup cpu_popup;
+	NetPopup net_popup;
+	StatusModule sysicons;
 };
 
 struct PixmanBuffer {
@@ -152,6 +185,50 @@ struct PixmanBuffer {
 	int stride;
 	int owns_data;
 };
+
+struct CpuSample {
+	unsigned long long idle;
+	unsigned long long total;
+};
+
+static void
+drawrect(struct wlr_scene_tree *parent, int x, int y,
+		int width, int height, const float color[static 4])
+{
+	struct wlr_scene_rect *r;
+
+	if (!parent || width <= 0 || height <= 0)
+		return;
+
+	r = wlr_scene_rect_create(parent, width, height, color);
+	if (r)
+		wlr_scene_node_set_position(&r->node, x, y);
+}
+
+static void
+drawhoverrect(struct wlr_scene_tree *parent, int x, int y,
+		int width, int height, const float color[static 4], float fade)
+{
+	struct wlr_scene_rect *r;
+	float col[4];
+
+	if (!parent || width <= 0 || height <= 0)
+		return;
+
+	if (fade < 0.0f)
+		fade = 0.0f;
+	if (fade > 1.0f)
+		fade = 1.0f;
+
+	col[0] = color[0];
+	col[1] = color[1];
+	col[2] = color[2];
+	col[3] = color[3] * fade;
+
+	r = wlr_scene_rect_create(parent, width, height, col);
+	if (r)
+		wlr_scene_node_set_position(&r->node, x, y);
+}
 
 static void
 drawroundedrect(struct wlr_scene_tree *parent, int x, int y,
@@ -413,13 +490,25 @@ static void printstatus(void);
 static void powermgrsetmode(struct wl_listener *listener, void *data);
 static void quit(const Arg *arg);
 static void renderclock(StatusModule *module, int bar_height, const char *text);
+static void rendericons(StatusModule *module, int bar_height, const char *text);
+static void renderlight(StatusModule *module, int bar_height, const char *text);
+static void rendernet(StatusModule *module, int bar_height, const char *text);
+static void renderbattery(StatusModule *module, int bar_height, const char *text);
 static void rendermon(struct wl_listener *listener, void *data);
+static void rendervolume(StatusModule *module, int bar_height, const char *text);
 static void renderworkspaces(Monitor *m, StatusModule *module, int bar_height);
 static void freestatusfont(void);
 static int loadstatusfont(void);
 static void positionstatusmodules(Monitor *m);
 static void refreshstatusclock(void);
+static void refreshstatuslight(void);
+static void refreshstatusvolume(void);
+static void refreshstatusbattery(void);
+static void refreshstatusnet(void);
+static void refreshstatusicons(void);
 static void refreshstatustags(void);
+static void updatetaghover(Monitor *m, double cx, double cy);
+static void updatenethover(Monitor *m, double cx, double cy);
 static void requestdecorationmode(struct wl_listener *listener, void *data);
 static void requeststartdrag(struct wl_listener *listener, void *data);
 static void requestmonstate(struct wl_listener *listener, void *data);
@@ -450,7 +539,35 @@ static void togglegaps(const Arg *arg);
 static void togglestatusbar(const Arg *arg);
 static void toggletag(const Arg *arg);
 static void toggleview(const Arg *arg);
+static void rendercpu(StatusModule *module, int bar_height, const char *text);
+static void rendercpupopup(Monitor *m);
+static void renderram(StatusModule *module, int bar_height, const char *text);
+static void refreshstatuscpu(void);
+static void refreshstatusram(void);
+static int handlestatusscroll(struct wlr_pointer_axis_event *event);
+static int scrollsteps(const struct wlr_pointer_axis_event *event);
+static int updatestatuscpu(void *data);
 static int updatestatusclock(void *data);
+static int updatehoverfade(void *data);
+static void schedule_hover_timer(void);
+static int readcpustats(struct CpuSample *out, int maxcount);
+static int readmeminfo(unsigned long long *total_kb, unsigned long long *avail_kb);
+static int set_backlight_percent(double percent);
+static int set_pipewire_volume(double percent);
+static int set_pipewire_mute(int mute);
+static int toggle_pipewire_mute(void);
+static void updatecpuhover(Monitor *m, double cx, double cy);
+static double net_bytes_to_rate(unsigned long long cur, unsigned long long prev,
+		double elapsed);
+static double ramused_mb(void);
+static double cpuaverage(void);
+static double battery_percent(void);
+static struct xkb_rule_names getxkbrules(void);
+static double backlight_percent(void);
+static double pipewire_volume_percent(void);
+static int findbacklightdevice(char *brightness_path, size_t brightness_len,
+		char *max_path, size_t max_len);
+static int findbatterydevice(char *capacity_path, size_t capacity_len);
 static void schedule_status_timer(void);
 static struct wlr_buffer *statusbar_buffer_from_glyph(const struct fcft_glyph *glyph);
 static void unlocksession(struct wl_listener *listener, void *data);
@@ -555,6 +672,50 @@ static LayoutNode *resize_split_node;
 static LayoutNode *resize_split_node_h;
 static int fullscreen_adaptive_sync_enabled = 1;
 static struct wl_event_source *status_timer;
+static struct wl_event_source *status_cpu_timer;
+static struct wl_event_source *status_hover_timer;
+#define MAX_CPU_CORES 256
+static struct CpuSample cpu_prev[MAX_CPU_CORES];
+static int cpu_prev_count;
+static double cpu_last_percent = -1.0;
+static char cpu_text[32] = "CPU: --%";
+static double ram_last_mb = -1.0;
+static char ram_text[32] = "RAM: --";
+static double battery_last_percent = -1.0;
+static char battery_text[32] = "Battery: --%";
+static double net_last_down_bps = -1.0;
+static double net_last_up_bps = -1.0;
+static char net_text[64] = "Net: --";
+static char net_local_ip[64] = "--";
+static char net_public_ip[64] = "--";
+static char net_down_text[32] = "--";
+static char net_up_text[32] = "--";
+static char net_iface[64] = {0};
+static char net_prev_iface[64] = {0};
+static int net_is_wireless;
+static int net_available;
+static unsigned long long net_prev_rx;
+static unsigned long long net_prev_tx;
+static struct timespec net_prev_ts;
+static int net_prev_valid;
+static time_t net_public_ip_last;
+static double light_last_percent = -1.0;
+static char light_text[32] = "Light: --%";
+static double volume_last_percent = -1.0;
+static char volume_text[32] = "Vol: --%";
+static int volume_muted = -1;
+static char backlight_brightness_path[PATH_MAX];
+static char backlight_max_path[PATH_MAX];
+static int backlight_available;
+static int backlight_writable;
+static char battery_capacity_path[PATH_MAX];
+static int battery_available;
+static const double light_step = 5.0;
+static const double volume_step = 3.0;
+static const double volume_max_percent = 150.0;
+static double cpu_last_core_percent[MAX_CPU_CORES];
+static int cpu_core_count;
+static char sysicons_text[64] = "󰤨 󰂯";
 
 /* global event handlers */
 static struct wl_listener cursor_axis = {.notify = axisnotify};
@@ -830,7 +991,8 @@ clearstatusmodule(StatusModule *module)
 }
 
 static void
-updatemodulebg(StatusModule *module, int width, int height)
+updatemodulebg(StatusModule *module, int width, int height,
+		const float color[static 4])
 {
 	struct wlr_scene_node *node, *tmp;
 	int radius, y, inset_top, inset_bottom, inset, start, h, w;
@@ -870,7 +1032,7 @@ updatemodulebg(StatusModule *module, int width, int height)
 			w = 0;
 
 		if (h > 0 && w > 0) {
-			r = wlr_scene_rect_create(module->bg, w, h, statusbar_bg);
+			r = wlr_scene_rect_create(module->bg, w, h, color);
 			if (r)
 				wlr_scene_node_set_position(&r->node, inset, start);
 		}
@@ -899,7 +1061,7 @@ renderclock(StatusModule *module, int bar_height, const char *text)
 	padding = statusbar_module_padding;
 	if (!statusfont.font || !text || !*text || bar_height <= 0) {
 		module->width = 2 * padding;
-		updatemodulebg(module, module->width, bar_height);
+		updatemodulebg(module, module->width, bar_height, statusbar_bg);
 		return;
 	}
 
@@ -943,7 +1105,7 @@ renderclock(StatusModule *module, int bar_height, const char *text)
 
 	if (tll_length(glyphs) == 0) {
 		module->width = 2 * padding;
-		updatemodulebg(module, module->width, bar_height);
+		updatemodulebg(module, module->width, bar_height, statusbar_bg);
 		tll_free(glyphs);
 		return;
 	}
@@ -970,8 +1132,419 @@ renderclock(StatusModule *module, int bar_height, const char *text)
 		wlr_buffer_drop(buffer);
 	}
 
-	updatemodulebg(module, module->width, bar_height);
+	updatemodulebg(module, module->width, bar_height, statusbar_bg);
 	tll_free(glyphs);
+}
+
+static void
+rendercpu(StatusModule *module, int bar_height, const char *text)
+{
+	renderclock(module, bar_height, text);
+}
+
+static void
+renderlight(StatusModule *module, int bar_height, const char *text)
+{
+	if (!backlight_available) {
+		if (module && module->tree) {
+			clearstatusmodule(module);
+			module->width = 0;
+			wlr_scene_node_set_enabled(&module->tree->node, 0);
+		}
+		return;
+	}
+
+	renderclock(module, bar_height, text);
+}
+
+static void
+rendernet(StatusModule *module, int bar_height, const char *text)
+{
+	if (!net_available) {
+		if (module && module->tree) {
+			clearstatusmodule(module);
+			module->width = 0;
+			wlr_scene_node_set_enabled(&module->tree->node, 0);
+		}
+		return;
+	}
+
+	renderclock(module, bar_height, text);
+}
+
+static void
+renderbattery(StatusModule *module, int bar_height, const char *text)
+{
+	if (!battery_available) {
+		if (module && module->tree) {
+			clearstatusmodule(module);
+			module->width = 0;
+			wlr_scene_node_set_enabled(&module->tree->node, 0);
+		}
+		return;
+	}
+
+	renderclock(module, bar_height, text);
+}
+
+static void
+renderram(StatusModule *module, int bar_height, const char *text)
+{
+	renderclock(module, bar_height, text);
+}
+
+static void
+rendervolume(StatusModule *module, int bar_height, const char *text)
+{
+	renderclock(module, bar_height, text);
+}
+
+static void
+rendericons(StatusModule *module, int bar_height, const char *text)
+{
+	renderclock(module, bar_height, text);
+}
+
+static void
+rendercpupopup(Monitor *m)
+{
+	CpuPopup *p;
+	int padding, line_spacing;
+	int line_count, max_width = 0;
+	int total_height;
+	char line[64];
+
+	if (!m || !m->statusbar.cpu_popup.tree)
+		return;
+
+	p = &m->statusbar.cpu_popup;
+	padding = statusbar_module_padding;
+	line_spacing = 2;
+
+	/* Clear previous buffers but keep bg */
+	struct wlr_scene_node *node, *tmp;
+	wl_list_for_each_safe(node, tmp, &p->tree->children, link) {
+		if (p->bg && node == &p->bg->node)
+			continue;
+		wlr_scene_node_destroy(node);
+	}
+
+	if (!statusfont.font || cpu_core_count <= 0) {
+		p->width = p->height = 0;
+		if (p->tree)
+			wlr_scene_node_set_enabled(&p->tree->node, 0);
+		p->visible = 0;
+		return;
+	}
+
+	line_count = cpu_core_count + 1; /* +1 for avg line */
+
+	/* First pass: compute max width */
+	for (int i = 0; i < line_count; i++) {
+		const struct fcft_glyph *glyph;
+		uint32_t prev_cp = 0;
+		int pen_x = 0;
+		int min_x = INT_MAX, max_x_local = INT_MIN;
+		const char *text;
+
+		double perc = (i < cpu_core_count) ? cpu_last_core_percent[i] : cpu_last_percent;
+		if (perc < 0.0) {
+			if (i < cpu_core_count)
+				snprintf(line, sizeof(line), "C%d: --%%", i);
+			else
+				snprintf(line, sizeof(line), "Avg: --%%");
+		} else if (i < cpu_core_count) {
+			snprintf(line, sizeof(line), "C%d: %d%%", i, (int)lround(perc));
+		} else {
+			int avg_disp = (perc < 1.0) ? 0 : (int)lround(perc);
+			snprintf(line, sizeof(line), "Avg: %d%%", avg_disp);
+		}
+		text = line;
+
+		for (size_t j = 0; text[j]; j++) {
+			long kern_x = 0, kern_y = 0;
+			uint32_t cp = (unsigned char)text[j];
+			if (prev_cp)
+				fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
+			pen_x += (int)kern_x;
+
+			glyph = fcft_rasterize_char_utf32(statusfont.font, cp, statusbar_font_subpixel);
+			if (!glyph || !glyph->pix) {
+				prev_cp = cp;
+				continue;
+			}
+
+			min_x = MIN(min_x, pen_x + glyph->x);
+			max_x_local = MAX(max_x_local, pen_x + glyph->x + glyph->width);
+			pen_x += glyph->advance.x;
+			if (text[j + 1])
+				pen_x += statusbar_font_spacing;
+			prev_cp = cp;
+		}
+
+		if (min_x == INT_MAX || max_x_local == INT_MIN)
+			continue;
+		max_width = MAX(max_width, max_x_local - min_x);
+	}
+
+	p->width = max_width + 2 * padding;
+	p->height = line_count * statusfont.height + (line_count - 1) * line_spacing + 2 * padding;
+	total_height = p->height;
+
+	if (!p->bg && !(p->bg = wlr_scene_tree_create(p->tree)))
+		return;
+	wlr_scene_node_set_enabled(&p->bg->node, 1);
+	wlr_scene_node_set_position(&p->bg->node, 0, 0);
+	wl_list_for_each_safe(node, tmp, &p->bg->children, link)
+		wlr_scene_node_destroy(node);
+	drawrect(p->bg, 0, 0, p->width, total_height, statusbar_bg);
+
+	for (int i = 0; i < line_count; i++) {
+		const char *text;
+		int min_x = INT_MAX, max_x_local = INT_MIN;
+		int min_y = INT_MAX, max_y = INT_MIN;
+		int pen_x = 0;
+		uint32_t prev_cp = 0;
+
+		double perc = (i < cpu_core_count) ? cpu_last_core_percent[i] : cpu_last_percent;
+		if (perc < 0.0) {
+			if (i < cpu_core_count)
+				snprintf(line, sizeof(line), "C%d: --%%", i);
+			else
+				snprintf(line, sizeof(line), "Avg: --%%");
+		} else if (i < cpu_core_count) {
+			snprintf(line, sizeof(line), "C%d: %d%%", i, (int)lround(perc));
+		} else {
+			int avg_disp = (perc < 1.0) ? 0 : (int)lround(perc);
+			snprintf(line, sizeof(line), "Avg: %d%%", avg_disp);
+		}
+		text = line;
+
+		tll(struct GlyphRun) glyphs = tll_init();
+		for (size_t j = 0; text[j]; j++) {
+			long kern_x = 0, kern_y = 0;
+			uint32_t cp = (unsigned char)text[j];
+			struct GlyphRun run;
+
+			if (prev_cp)
+				fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
+			pen_x += (int)kern_x;
+
+			const struct fcft_glyph *glyph = fcft_rasterize_char_utf32(statusfont.font,
+					cp, statusbar_font_subpixel);
+			if (!glyph || !glyph->pix) {
+				prev_cp = cp;
+				continue;
+			}
+
+			run.glyph = glyph;
+			run.pen_x = pen_x;
+			run.codepoint = cp;
+			tll_push_back(glyphs, run);
+
+			min_x = MIN(min_x, pen_x + glyph->x);
+			min_y = MIN(min_y, -glyph->y);
+			max_x_local = MAX(max_x_local, pen_x + glyph->x + glyph->width);
+			max_y = MAX(max_y, -glyph->y + glyph->height);
+
+			pen_x += glyph->advance.x;
+			if (text[j + 1])
+				pen_x += statusbar_font_spacing;
+			prev_cp = cp;
+		}
+
+		if (tll_length(glyphs) == 0) {
+			tll_free(glyphs);
+			continue;
+		}
+
+		int text_width = max_x_local - min_x;
+		int text_height = max_y - min_y;
+		int origin_x = padding - min_x;
+		int origin_y = padding + i * (statusfont.height + line_spacing)
+			+ (statusfont.height - text_height) / 2 - min_y;
+
+		tll_foreach(glyphs, it) {
+			const struct fcft_glyph *glyph = it->item.glyph;
+			struct wlr_buffer *buffer = statusbar_buffer_from_glyph(glyph);
+			if (!buffer)
+				continue;
+
+			struct wlr_scene_buffer *scene_buf = wlr_scene_buffer_create(p->tree, NULL);
+			if (scene_buf) {
+				wlr_scene_buffer_set_buffer(scene_buf, buffer);
+				wlr_scene_node_set_position(&scene_buf->node,
+						origin_x + it->item.pen_x + glyph->x,
+						origin_y - glyph->y);
+			}
+			wlr_buffer_drop(buffer);
+		}
+
+		tll_free(glyphs);
+	}
+
+	if (p->width <= 0 || p->height <= 0)
+		wlr_scene_node_set_enabled(&p->tree->node, 0);
+}
+
+static void
+rendernetpopup(Monitor *m)
+{
+	NetPopup *p;
+	int padding, line_spacing;
+	int line_count = 4;
+	int max_width = 0;
+	int total_height;
+	char lines[4][64];
+
+	if (!m || !m->statusbar.net_popup.tree)
+		return;
+
+	p = &m->statusbar.net_popup;
+	padding = statusbar_module_padding;
+	line_spacing = 2;
+
+	snprintf(lines[0], sizeof(lines[0]), "Local: %s", net_local_ip);
+	snprintf(lines[1], sizeof(lines[1]), "Public: %s", net_public_ip);
+	snprintf(lines[2], sizeof(lines[2]), "Down: %s", net_down_text);
+	snprintf(lines[3], sizeof(lines[3]), "Up: %s", net_up_text);
+
+	/* Clear previous buffers but keep bg */
+	struct wlr_scene_node *node, *tmp;
+	wl_list_for_each_safe(node, tmp, &p->tree->children, link) {
+		if (p->bg && node == &p->bg->node)
+			continue;
+		wlr_scene_node_destroy(node);
+	}
+
+	if (!statusfont.font || !net_available) {
+		p->width = p->height = 0;
+		if (p->tree)
+			wlr_scene_node_set_enabled(&p->tree->node, 0);
+		p->visible = 0;
+		return;
+	}
+
+	/* First pass: compute max width */
+	for (int i = 0; i < line_count; i++) {
+		const struct fcft_glyph *glyph;
+		uint32_t prev_cp = 0;
+		int pen_x = 0;
+		int min_x = INT_MAX, max_x_local = INT_MIN;
+		const char *text = lines[i];
+
+		for (size_t j = 0; text[j]; j++) {
+			long kern_x = 0, kern_y = 0;
+			uint32_t cp = (unsigned char)text[j];
+			if (prev_cp)
+				fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
+			pen_x += (int)kern_x;
+
+			glyph = fcft_rasterize_char_utf32(statusfont.font, cp, statusbar_font_subpixel);
+			if (!glyph || !glyph->pix) {
+				prev_cp = cp;
+				continue;
+			}
+
+			min_x = MIN(min_x, pen_x + glyph->x);
+			max_x_local = MAX(max_x_local, pen_x + glyph->x + glyph->width);
+			pen_x += glyph->advance.x;
+			if (text[j + 1])
+				pen_x += statusbar_font_spacing;
+			prev_cp = cp;
+		}
+
+		if (min_x == INT_MAX || max_x_local == INT_MIN)
+			continue;
+		max_width = MAX(max_width, max_x_local - min_x);
+	}
+
+	p->width = max_width + 2 * padding;
+	p->height = line_count * statusfont.height + (line_count - 1) * line_spacing + 2 * padding;
+	total_height = p->height;
+
+	if (!p->bg && !(p->bg = wlr_scene_tree_create(p->tree)))
+		return;
+	wlr_scene_node_set_enabled(&p->bg->node, 1);
+	wlr_scene_node_set_position(&p->bg->node, 0, 0);
+	wl_list_for_each_safe(node, tmp, &p->bg->children, link)
+		wlr_scene_node_destroy(node);
+	drawrect(p->bg, 0, 0, p->width, total_height, statusbar_bg);
+
+	for (int i = 0; i < line_count; i++) {
+		const char *text = lines[i];
+		int min_x = INT_MAX, max_x_local = INT_MIN;
+		int min_y = INT_MAX, max_y = INT_MIN;
+		int pen_x = 0;
+		uint32_t prev_cp = 0;
+
+		tll(struct GlyphRun) glyphs = tll_init();
+		for (size_t j = 0; text[j]; j++) {
+			long kern_x = 0, kern_y = 0;
+			uint32_t cp = (unsigned char)text[j];
+			struct GlyphRun run;
+
+			if (prev_cp)
+				fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
+			pen_x += (int)kern_x;
+
+			const struct fcft_glyph *glyph = fcft_rasterize_char_utf32(statusfont.font,
+					cp, statusbar_font_subpixel);
+			if (!glyph || !glyph->pix) {
+				prev_cp = cp;
+				continue;
+			}
+
+			run.glyph = glyph;
+			run.pen_x = pen_x;
+			run.codepoint = cp;
+			tll_push_back(glyphs, run);
+
+			min_x = MIN(min_x, pen_x + glyph->x);
+			min_y = MIN(min_y, -glyph->y);
+			max_x_local = MAX(max_x_local, pen_x + glyph->x + glyph->width);
+			max_y = MAX(max_y, -glyph->y + glyph->height);
+
+			pen_x += glyph->advance.x;
+			if (text[j + 1])
+				pen_x += statusbar_font_spacing;
+			prev_cp = cp;
+		}
+
+		if (tll_length(glyphs) == 0) {
+			tll_free(glyphs);
+			continue;
+		}
+
+		int width = max_x_local - min_x;
+		int height = max_y - min_y;
+		int origin_x = padding + (max_width - width) / 2;
+		int origin_y = padding + i * (statusfont.height + line_spacing) + statusfont.ascent;
+
+		tll_foreach(glyphs, it) {
+			struct wlr_buffer *buffer;
+			struct wlr_scene_buffer *scene_buf;
+			const struct fcft_glyph *glyph = it->item.glyph;
+
+			buffer = statusbar_buffer_from_glyph(glyph);
+			if (!buffer)
+				continue;
+
+			scene_buf = wlr_scene_buffer_create(p->tree, NULL);
+			if (scene_buf) {
+				wlr_scene_buffer_set_buffer(scene_buf, buffer);
+				wlr_scene_node_set_position(&scene_buf->node,
+						origin_x + it->item.pen_x + glyph->x,
+						origin_y - glyph->y);
+			}
+			wlr_buffer_drop(buffer);
+		}
+
+		tll_free(glyphs);
+	}
+
+	if (p->width <= 0 || p->height <= 0)
+		wlr_scene_node_set_enabled(&p->tree->node, 0);
 }
 
 static void
@@ -979,9 +1552,10 @@ renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 {
 	uint32_t mask = 0;
 	Client *c;
-	int padding, inner, spacing;
+	int padding, inner, spacing, outer_pad;
 	int box_h, box_y, total_w = 0;
 	int x, count = 0;
+	double now_ms = 0.0;
 	struct wlr_scene_buffer *scene_buf;
 	struct wlr_buffer *buffer;
 
@@ -995,8 +1569,12 @@ renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 	padding = statusbar_module_padding;
 	inner = statusbar_workspace_padding;
 	spacing = statusbar_workspace_spacing;
+	/* give the module a little extra padding so bg extends past boxes */
+	outer_pad = padding + spacing + 6;
 	module->box_count = 0;
 	module->tagmask = 0;
+	if (module->hover_tag < -1 || module->hover_tag >= TAGCOUNT)
+		module->hover_tag = -1;
 
 	wl_list_for_each(c, &clients, link) {
 		if (c->mon != m)
@@ -1009,9 +1587,9 @@ renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 
 	clearstatusmodule(module);
 
-	box_h = MAX(1, MIN(bar_height - 4, statusfont.height + inner * 2));
+	box_h = MAX(1, MIN(bar_height - 2, statusfont.height + inner * 2 + 2));
 	box_y = (bar_height - box_h) / 2;
-	x = padding;
+	x = outer_pad;
 
 	for (int i = 0; i < TAGCOUNT; i++) {
 		const struct fcft_glyph *glyph;
@@ -1046,8 +1624,16 @@ renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 		origin_y = box_y + (box_h - text_h) / 2 - min_y;
 
 		active = (m->tagset[m->seltags] & (1u << i)) != 0;
-		bgcol = active ? statusbar_tag_active_bg : statusbar_bg;
-		drawroundedrect(module->tree, x, box_y, box_w, box_h, bgcol);
+		bgcol = statusbar_tag_bg;
+		if (active)
+			bgcol = statusbar_tag_active_bg;
+
+		drawrect(module->tree, x, box_y, box_w, box_h, bgcol);
+
+		if (!active && module->hover_alpha[i] > 0.0f) {
+			drawhoverrect(module->tree, x, box_y, box_w, box_h,
+					statusbar_tag_hover_bg, module->hover_alpha[i]);
+		}
 
 		buffer = statusbar_buffer_from_glyph(glyph);
 		if (buffer) {
@@ -1064,17 +1650,736 @@ renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 		x += box_w;
 		total_w += box_w;
 		if (module->box_count < TAGCOUNT) {
-			module->box_x[module->box_count] = padding + total_w - box_w;
-			module->box_w[module->box_count] = box_w;
-			module->box_tag[module->box_count] = i;
+			int idx = module->box_count;
+			module->box_x[idx] = outer_pad + total_w - box_w;
+			module->box_w[idx] = box_w;
+			module->box_tag[idx] = i;
 			module->tagmask |= (1u << i);
+			module->box_count++;
 		}
 		count++;
 	}
 
-	module->width = total_w + padding * 2;
-	module->box_count = count;
-	updatemodulebg(module, module->width, bar_height);
+	module->width = total_w + outer_pad * 2;
+	updatemodulebg(module, module->width, bar_height, statusbar_tag_bg);
+}
+
+static int
+readcpustats(struct CpuSample *out, int maxcount)
+{
+	FILE *fp;
+	char line[256];
+	int max_idx = -1;
+
+	if (!out || maxcount <= 0)
+		return 0;
+
+	for (int i = 0; i < maxcount; i++) {
+		out[i].idle = 0;
+		out[i].total = 0;
+	}
+
+	fp = fopen("/proc/stat", "r");
+	if (!fp)
+		return -1;
+
+	while (fgets(line, sizeof(line), fp)) {
+		int idx = -1;
+		unsigned long long user, nice, system, idle, iowait, irq, softirq, steal;
+
+		if (sscanf(line, "cpu%d %llu %llu %llu %llu %llu %llu %llu %llu",
+				&idx, &user, &nice, &system, &idle, &iowait, &irq, &softirq,
+				&steal) == 9) {
+			if (idx < 0 || idx >= maxcount)
+				continue;
+			unsigned long long idle_all = idle + iowait;
+			unsigned long long non_idle = user + nice + system + irq + softirq + steal;
+			out[idx].idle = idle_all;
+			out[idx].total = idle_all + non_idle;
+			if (idx > max_idx)
+				max_idx = idx;
+		}
+	}
+
+	fclose(fp);
+	return max_idx + 1;
+}
+
+static double
+cpuaverage(void)
+{
+	struct CpuSample curr[MAX_CPU_CORES];
+	int count, used, i;
+	double sum_busy = 0.0, sum_total = 0.0;
+
+	count = readcpustats(curr, MAX_CPU_CORES);
+	if (count <= 0)
+		return -1.0;
+	if (count > MAX_CPU_CORES)
+		count = MAX_CPU_CORES;
+
+	for (i = 0; i < MAX_CPU_CORES; i++)
+		cpu_last_core_percent[i] = -1.0;
+
+	if (cpu_prev_count <= 0) {
+		memcpy(cpu_prev, curr, count * sizeof(struct CpuSample));
+		cpu_prev_count = count;
+		cpu_core_count = count;
+		return -1.0;
+	}
+
+	used = MIN(count, cpu_prev_count);
+	cpu_core_count = count;
+	for (i = 0; i < used; i++) {
+		unsigned long long diff_total = curr[i].total - cpu_prev[i].total;
+		unsigned long long diff_idle = curr[i].idle - cpu_prev[i].idle;
+		if (curr[i].total == 0 || curr[i].idle == 0 ||
+				curr[i].total <= cpu_prev[i].total ||
+				curr[i].idle < cpu_prev[i].idle ||
+				diff_total == 0) {
+			cpu_last_core_percent[i] = -1.0;
+			continue;
+		}
+		double busy = (double)(diff_total - diff_idle);
+		double perc = (busy / (double)diff_total) * 100.0;
+		cpu_last_core_percent[i] = perc;
+		sum_busy += busy;
+		sum_total += (double)diff_total;
+	}
+
+	memcpy(cpu_prev, curr, count * sizeof(struct CpuSample));
+	cpu_prev_count = count;
+
+	if (sum_total <= 0.0)
+		return -1.0;
+
+	return (sum_busy / sum_total) * 100.0;
+}
+
+static int
+readmeminfo(unsigned long long *total_kb, unsigned long long *avail_kb)
+{
+	FILE *fp;
+	char line[256];
+	unsigned long long total = 0, avail = 0;
+
+	fp = fopen("/proc/meminfo", "r");
+	if (!fp)
+		return -1;
+
+	while (fgets(line, sizeof(line), fp)) {
+		if (sscanf(line, "MemTotal: %llu kB", &total) == 1)
+			continue;
+		if (sscanf(line, "MemAvailable: %llu kB", &avail) == 1)
+			continue;
+	}
+
+	fclose(fp);
+
+	if (total == 0 || avail == 0)
+		return -1;
+
+	if (total_kb)
+		*total_kb = total;
+	if (avail_kb)
+		*avail_kb = avail;
+	return 0;
+}
+
+static double
+ramused_mb(void)
+{
+	unsigned long long total, avail;
+
+	if (readmeminfo(&total, &avail) != 0)
+		return -1.0;
+
+	if (total <= avail)
+		return 0.0;
+
+	return (double)(total - avail) / 1024.0;
+}
+
+static int
+readulong(const char *path, unsigned long long *out)
+{
+	FILE *fp;
+	unsigned long long val = 0;
+
+	if (!path || !out)
+		return -1;
+
+	fp = fopen(path, "r");
+	if (!fp)
+		return -1;
+	if (fscanf(fp, "%llu", &val) != 1) {
+		fclose(fp);
+		return -1;
+	}
+
+	fclose(fp);
+	*out = val;
+	return 0;
+}
+
+static int
+findbatterydevice(char *capacity_path, size_t capacity_len)
+{
+	DIR *dir;
+	struct dirent *ent;
+	int have_battery = 0;
+	char found[PATH_MAX] = {0};
+
+	if (!capacity_path || capacity_len == 0)
+		return 0;
+
+	dir = opendir("/sys/class/power_supply");
+	if (!dir)
+		return 0;
+
+	while ((ent = readdir(dir))) {
+		char type_path[PATH_MAX];
+		char cap_path[PATH_MAX];
+		struct stat st;
+		FILE *fp;
+		char type[32] = {0};
+		char *nl;
+
+		if (ent->d_name[0] == '.')
+			continue;
+
+		if (snprintf(type_path, sizeof(type_path), "/sys/class/power_supply/%s/type",
+					ent->d_name) >= (int)sizeof(type_path))
+			continue;
+		if (snprintf(cap_path, sizeof(cap_path), "/sys/class/power_supply/%s/capacity",
+					ent->d_name) >= (int)sizeof(cap_path))
+			continue;
+
+		if (stat(type_path, &st) != 0 || !S_ISREG(st.st_mode))
+			continue;
+		if (stat(cap_path, &st) != 0 || !S_ISREG(st.st_mode))
+			continue;
+		if (access(cap_path, R_OK) != 0)
+			continue;
+
+		fp = fopen(type_path, "r");
+		if (!fp)
+			continue;
+		if (!fgets(type, sizeof(type), fp)) {
+			fclose(fp);
+			continue;
+		}
+		fclose(fp);
+
+		nl = strchr(type, '\n');
+		if (nl)
+			*nl = '\0';
+		if (strcmp(type, "Battery") != 0)
+			continue;
+
+		if (snprintf(found, sizeof(found), "%s", cap_path) >= (int)sizeof(found))
+			continue;
+		have_battery = 1;
+		break;
+	}
+
+	closedir(dir);
+
+	if (!have_battery)
+		return 0;
+	if (snprintf(capacity_path, capacity_len, "%s", found) >= (int)capacity_len)
+		return 0;
+	return 1;
+}
+
+static int
+readfirstline(const char *path, char *buf, size_t len)
+{
+	FILE *fp;
+
+	if (!path || !buf || len == 0)
+		return -1;
+	fp = fopen(path, "r");
+	if (!fp)
+		return -1;
+	if (!fgets(buf, (int)len, fp)) {
+		fclose(fp);
+		return -1;
+	}
+	fclose(fp);
+	for (size_t i = 0; i < len; i++) {
+		if (buf[i] == '\n') {
+			buf[i] = '\0';
+			break;
+		}
+	}
+	return 0;
+}
+
+static int
+iface_is_wireless(const char *iface)
+{
+	char path[PATH_MAX];
+	struct stat st;
+
+	if (!iface)
+		return 0;
+	if (snprintf(path, sizeof(path), "/sys/class/net/%s/wireless", iface)
+			>= (int)sizeof(path))
+		return 0;
+	return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static int
+findactiveinterface(char *iface, size_t len, int *is_wireless)
+{
+	DIR *dir;
+	struct dirent *ent;
+	char best_wifi[IF_NAMESIZE] = {0};
+	char best_wired[IF_NAMESIZE] = {0};
+	char state[32];
+
+	if (!iface || len == 0)
+		return 0;
+
+	dir = opendir("/sys/class/net");
+	if (!dir)
+		return 0;
+
+	while ((ent = readdir(dir))) {
+		char oper[PATH_MAX];
+
+		if (ent->d_name[0] == '.')
+			continue;
+		if (strcmp(ent->d_name, "lo") == 0)
+			continue;
+
+		if (snprintf(oper, sizeof(oper), "/sys/class/net/%s/operstate",
+					ent->d_name) >= (int)sizeof(oper))
+			continue;
+		if (readfirstline(oper, state, sizeof(state)) != 0)
+			continue;
+		if (strcmp(state, "up") != 0)
+			continue;
+
+		if (iface_is_wireless(ent->d_name)) {
+			snprintf(best_wifi, sizeof(best_wifi), "%s", ent->d_name);
+		} else if (!best_wired[0]) {
+			snprintf(best_wired, sizeof(best_wired), "%s", ent->d_name);
+		}
+
+		if (best_wifi[0])
+			break;
+	}
+
+	closedir(dir);
+
+	if (best_wifi[0]) {
+		if (snprintf(iface, len, "%s", best_wifi) >= (int)len)
+			return 0;
+		if (is_wireless)
+			*is_wireless = 1;
+		return 1;
+	}
+	if (best_wired[0]) {
+		if (snprintf(iface, len, "%s", best_wired) >= (int)len)
+			return 0;
+		if (is_wireless)
+			*is_wireless = 0;
+		return 1;
+	}
+	return 0;
+}
+
+static int
+readssid(const char *iface, char *out, size_t len)
+{
+	char cmd[128];
+	FILE *fp;
+
+	if (!iface || !out || len == 0)
+		return 0;
+
+	if (snprintf(cmd, sizeof(cmd), "iwgetid -r %s 2>/dev/null", iface)
+			>= (int)sizeof(cmd))
+		return 0;
+
+	fp = popen(cmd, "r");
+	if (!fp)
+		return 0;
+	if (!fgets(out, (int)len, fp)) {
+		pclose(fp);
+		return 0;
+	}
+	pclose(fp);
+	for (size_t i = 0; i < len; i++) {
+		if (out[i] == '\n') {
+			out[i] = '\0';
+			break;
+		}
+	}
+	return out[0] != '\0';
+}
+
+static int
+localip(const char *iface, char *out, size_t len)
+{
+	struct ifaddrs *ifaddr, *ifa;
+	int ret = 0;
+
+	if (!iface || !out || len == 0)
+		return 0;
+
+	if (getifaddrs(&ifaddr) == -1)
+		return 0;
+
+	for (ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
+		void *addr;
+		if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET)
+			continue;
+		if (!(ifa->ifa_flags & IFF_UP) || !(ifa->ifa_flags & IFF_RUNNING))
+			continue;
+		if (strcmp(ifa->ifa_name, iface) != 0)
+			continue;
+
+		addr = &((struct sockaddr_in *)ifa->ifa_addr)->sin_addr;
+		if (inet_ntop(AF_INET, addr, out, (socklen_t)len)) {
+			ret = 1;
+			break;
+		}
+	}
+
+	freeifaddrs(ifaddr);
+	return ret;
+}
+
+static void
+format_speed(double bps, char *out, size_t len)
+{
+	const char *unit = "B/s";
+	double val = bps;
+
+	if (!out || len == 0)
+		return;
+
+	if (bps < 0.0) {
+		snprintf(out, len, "--");
+		return;
+	}
+
+	if (val >= 1024.0) {
+		val /= 1024.0;
+		unit = "KB/s";
+	}
+	if (val >= 1024.0) {
+		val /= 1024.0;
+		unit = "MB/s";
+	}
+	if (val >= 1024.0) {
+		val /= 1024.0;
+		unit = "GB/s";
+	}
+
+	if (val >= 100.0)
+		snprintf(out, len, "%.0f %s", val, unit);
+	else
+		snprintf(out, len, "%.1f %s", val, unit);
+}
+
+static void
+update_public_ip(void)
+{
+	time_t now = time(NULL);
+	const char *cmd;
+	FILE *fp;
+	char buf[128] = {0};
+
+	if (now == (time_t)-1)
+		return;
+
+	if (net_public_ip_last != 0 && (now - net_public_ip_last) < 300)
+		return;
+
+	cmd = getenv("DWL_PUBLIC_IP_CMD");
+	if (!cmd || !cmd[0])
+		cmd = "curl -s https://ifconfig.me";
+
+	fp = popen(cmd, "r");
+	if (fp) {
+		if (fgets(buf, sizeof(buf), fp)) {
+			for (size_t i = 0; i < sizeof(buf); i++) {
+				if (buf[i] == '\n') {
+					buf[i] = '\0';
+					break;
+				}
+			}
+			if (buf[0])
+				snprintf(net_public_ip, sizeof(net_public_ip), "%s", buf);
+		}
+		pclose(fp);
+	}
+
+	if (!net_public_ip[0])
+		snprintf(net_public_ip, sizeof(net_public_ip), "--");
+
+	net_public_ip_last = now;
+}
+
+static double
+net_bytes_to_rate(unsigned long long cur, unsigned long long prev, double elapsed)
+{
+	if (elapsed <= 0.0 || cur < prev)
+		return -1.0;
+	return (double)(cur - prev) / elapsed;
+}
+
+static int
+findbacklightdevice(char *brightness_path, size_t brightness_len,
+		char *max_path, size_t max_len)
+{
+	DIR *dir;
+	struct dirent *ent;
+	char w_bpath[PATH_MAX] = {0};
+	char w_mpath[PATH_MAX] = {0};
+	char r_bpath[PATH_MAX] = {0};
+	char r_mpath[PATH_MAX] = {0};
+	int have_writable = 0;
+	int have_readable = 0;
+
+	if (!brightness_path || !max_path || brightness_len == 0 || max_len == 0)
+		return 0;
+
+	dir = opendir("/sys/class/backlight");
+	if (!dir)
+		return 0;
+
+	backlight_writable = 0;
+
+	while ((ent = readdir(dir))) {
+		char bpath[PATH_MAX];
+		char mpath[PATH_MAX];
+		struct stat st;
+
+		if (ent->d_name[0] == '.')
+			continue;
+
+		snprintf(bpath, sizeof(bpath), "/sys/class/backlight/%s/brightness",
+				ent->d_name);
+		snprintf(mpath, sizeof(mpath), "/sys/class/backlight/%s/max_brightness",
+				ent->d_name);
+
+		if (stat(bpath, &st) != 0 || !S_ISREG(st.st_mode))
+			continue;
+		if (stat(mpath, &st) != 0 || !S_ISREG(st.st_mode))
+			continue;
+
+		if (access(bpath, R_OK) != 0 || access(mpath, R_OK) != 0)
+			continue;
+
+		if (access(bpath, W_OK) == 0 && !have_writable) {
+			if (snprintf(w_bpath, sizeof(w_bpath), "%s", bpath) < (int)sizeof(w_bpath)
+					&& snprintf(w_mpath, sizeof(w_mpath), "%s", mpath) < (int)sizeof(w_mpath))
+				have_writable = 1;
+		}
+
+		if (!have_readable) {
+			if (snprintf(r_bpath, sizeof(r_bpath), "%s", bpath) < (int)sizeof(r_bpath)
+					&& snprintf(r_mpath, sizeof(r_mpath), "%s", mpath) < (int)sizeof(r_mpath))
+				have_readable = 1;
+		}
+	}
+
+	closedir(dir);
+
+	if (have_writable) {
+		if (snprintf(brightness_path, brightness_len, "%s", w_bpath) >= (int)brightness_len)
+			return 0;
+		if (snprintf(max_path, max_len, "%s", w_mpath) >= (int)max_len)
+			return 0;
+		backlight_writable = 1;
+		return 1;
+	}
+
+	if (have_readable) {
+		if (snprintf(brightness_path, brightness_len, "%s", r_bpath) >= (int)brightness_len)
+			return 0;
+		if (snprintf(max_path, max_len, "%s", r_mpath) >= (int)max_len)
+			return 0;
+		backlight_writable = 0;
+		return 1;
+	}
+
+	return 0;
+}
+
+static double
+backlight_percent(void)
+{
+	unsigned long long cur, max;
+
+	if (!backlight_available)
+		return -1.0;
+	if (readulong(backlight_brightness_path, &cur) != 0)
+		return -1.0;
+	if (readulong(backlight_max_path, &max) != 0 || max == 0)
+		return -1.0;
+
+	if (cur > max)
+		cur = max;
+
+	return ((double)cur * 100.0) / (double)max;
+}
+
+static int
+set_backlight_percent(double percent)
+{
+	unsigned long long max, target;
+	FILE *fp;
+
+	if (!backlight_available)
+		return -1;
+
+	if (percent < 0.0)
+		percent = 0.0;
+	if (percent > 100.0)
+		percent = 100.0;
+
+	if (readulong(backlight_max_path, &max) != 0 || max == 0)
+		return -1;
+
+	target = (unsigned long long)lround((percent / 100.0) * (double)max);
+	if (target > max)
+		target = max;
+
+	fp = fopen(backlight_brightness_path, "w");
+	if (!fp)
+		return -1;
+
+	if (fprintf(fp, "%llu", target) < 0) {
+		fclose(fp);
+		return -1;
+	}
+
+	fclose(fp);
+	return 0;
+}
+
+static double
+battery_percent(void)
+{
+	unsigned long long cur;
+
+	if (!battery_available)
+		return -1.0;
+	if (readulong(battery_capacity_path, &cur) != 0)
+		return -1.0;
+	if (cur > 100)
+		cur = 100;
+
+	return (double)cur;
+}
+
+static struct xkb_rule_names
+getxkbrules(void)
+{
+	struct xkb_rule_names names = xkb_rules;
+	const char *env;
+
+	if (!names.rules && (env = getenv("XKB_DEFAULT_RULES")))
+		names.rules = env;
+	if (!names.model && (env = getenv("XKB_DEFAULT_MODEL")))
+		names.model = env;
+	if (!names.layout && (env = getenv("XKB_DEFAULT_LAYOUT")))
+		names.layout = env;
+	if (!names.variant && (env = getenv("XKB_DEFAULT_VARIANT")))
+		names.variant = env;
+	if (!names.options && (env = getenv("XKB_DEFAULT_OPTIONS")))
+		names.options = env;
+
+	return names;
+}
+
+static double
+pipewire_volume_percent(void)
+{
+	FILE *fp;
+	char line[128];
+	double level = -1.0;
+	int muted = 0;
+
+	fp = popen("wpctl get-volume @DEFAULT_AUDIO_SINK@", "r");
+	if (!fp)
+		return -1.0;
+
+	if (fgets(line, sizeof(line), fp)) {
+		double raw = 0.0;
+		if (strstr(line, "[MUTED]"))
+			muted = 1;
+		if (sscanf(line, "Volume: %lf", &raw) == 1)
+			level = raw * 100.0;
+	}
+
+	pclose(fp);
+	volume_muted = muted;
+	return level;
+}
+
+static int
+set_pipewire_mute(int mute)
+{
+	char cmd[128];
+	int ret;
+
+	ret = snprintf(cmd, sizeof(cmd), "wpctl set-mute @DEFAULT_AUDIO_SINK@ %d", mute ? 1 : 0);
+	if (ret < 0 || ret >= (int)sizeof(cmd))
+		return -1;
+
+	ret = system(cmd);
+	if (ret != 0)
+		return -1;
+
+	/* Re-read to confirm state */
+	pipewire_volume_percent();
+	return 0;
+}
+
+static int
+set_pipewire_volume(double percent)
+{
+	char cmd[128];
+	int ret;
+
+	if (percent < 0.0)
+		percent = 0.0;
+	if (percent > volume_max_percent)
+		percent = volume_max_percent;
+
+	ret = snprintf(cmd, sizeof(cmd),
+			"wpctl set-volume @DEFAULT_AUDIO_SINK@ %.2f%%", percent);
+	if (ret < 0 || ret >= (int)sizeof(cmd))
+		return -1;
+
+	ret = system(cmd);
+	if (ret == 0)
+		volume_last_percent = percent;
+	return ret == 0 ? 0 : -1;
+}
+
+static int
+toggle_pipewire_mute(void)
+{
+	int ret;
+	int current;
+
+	current = pipewire_volume_percent() >= 0.0 ? volume_muted : 0;
+	ret = set_pipewire_mute(!current);
+	if (ret != 0)
+		return -1;
+
+	/* Re-read to update mute flag and percent text */
+	pipewire_volume_percent();
+	refreshstatusvolume();
+	return 0;
 }
 
 static int
@@ -1117,10 +2422,50 @@ positionstatusmodules(Monitor *m)
 
 	if (!m->showbar || !m->statusbar.area.width || !m->statusbar.area.height) {
 		wlr_scene_node_set_enabled(&m->statusbar.tree->node, 0);
-		if (m->statusbar.tags.tree)
+		if (m->statusbar.tags.tree) {
 			wlr_scene_node_set_enabled(&m->statusbar.tags.tree->node, 0);
-		if (m->statusbar.clock.tree)
+			m->statusbar.tags.x = 0;
+		}
+		if (m->statusbar.sysicons.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.sysicons.tree->node, 0);
+			m->statusbar.sysicons.x = 0;
+		}
+		if (m->statusbar.cpu.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.cpu.tree->node, 0);
+			m->statusbar.cpu.x = 0;
+		}
+		if (m->statusbar.net.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.net.tree->node, 0);
+			m->statusbar.net.x = 0;
+		}
+		if (m->statusbar.battery.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.battery.tree->node, 0);
+			m->statusbar.battery.x = 0;
+		}
+		if (m->statusbar.light.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.light.tree->node, 0);
+			m->statusbar.light.x = 0;
+		}
+		if (m->statusbar.volume.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.volume.tree->node, 0);
+			m->statusbar.volume.x = 0;
+		}
+		if (m->statusbar.ram.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.ram.tree->node, 0);
+			m->statusbar.ram.x = 0;
+		}
+		if (m->statusbar.clock.tree) {
 			wlr_scene_node_set_enabled(&m->statusbar.clock.tree->node, 0);
+			m->statusbar.clock.x = 0;
+		}
+		if (m->statusbar.cpu_popup.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
+			m->statusbar.cpu_popup.visible = 0;
+		}
+		if (m->statusbar.net_popup.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
+			m->statusbar.net_popup.visible = 0;
+		}
 		return;
 	}
 
@@ -1128,15 +2473,46 @@ positionstatusmodules(Monitor *m)
 	if (m->statusbar.tags.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.tags.tree->node,
 				m->statusbar.tags.width > 0);
+	if (m->statusbar.sysicons.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.sysicons.tree->node,
+				m->statusbar.sysicons.width > 0);
+	if (m->statusbar.cpu.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.cpu.tree->node,
+				m->statusbar.cpu.width > 0);
+	if (m->statusbar.net.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.net.tree->node,
+				m->statusbar.net.width > 0);
+	if (m->statusbar.battery.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.battery.tree->node,
+				m->statusbar.battery.width > 0);
+	if (m->statusbar.light.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.light.tree->node,
+				m->statusbar.light.width > 0);
+	if (m->statusbar.volume.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.volume.tree->node,
+				m->statusbar.volume.width > 0);
+	if (m->statusbar.ram.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.ram.tree->node,
+				m->statusbar.ram.width > 0);
 	if (m->statusbar.clock.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.clock.tree->node,
 				m->statusbar.clock.width > 0);
+	if (m->statusbar.cpu_popup.tree && m->statusbar.cpu.width > 0) {
+		if (!m->statusbar.cpu_popup.visible)
+			wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
+	}
 	x = 0;
 	spacing = statusbar_module_spacing;
 
 	if (m->statusbar.tags.width > 0) {
 		wlr_scene_node_set_position(&m->statusbar.tags.tree->node, x, 0);
+		m->statusbar.tags.x = x;
 		x += m->statusbar.tags.width + spacing;
+	}
+	if (m->statusbar.sysicons.width > 0) {
+		wlr_scene_node_set_position(&m->statusbar.sysicons.tree->node, x, 0);
+		m->statusbar.sysicons.x = x;
+		x += m->statusbar.sysicons.width + spacing;
 	}
 
 	x = m->statusbar.area.width;
@@ -1145,7 +2521,62 @@ positionstatusmodules(Monitor *m)
 	if (m->statusbar.clock.width > 0) {
 		x -= m->statusbar.clock.width;
 		wlr_scene_node_set_position(&m->statusbar.clock.tree->node, x, 0);
+		m->statusbar.clock.x = x;
 		x -= spacing;
+	}
+	if (m->statusbar.cpu.width > 0) {
+		x -= m->statusbar.cpu.width;
+		wlr_scene_node_set_position(&m->statusbar.cpu.tree->node, x, 0);
+		m->statusbar.cpu.x = x;
+		x -= spacing;
+	}
+	if (m->statusbar.net.width > 0) {
+		x -= m->statusbar.net.width;
+		wlr_scene_node_set_position(&m->statusbar.net.tree->node, x, 0);
+		m->statusbar.net.x = x;
+		x -= spacing;
+	}
+	if (m->statusbar.volume.width > 0) {
+		x -= m->statusbar.volume.width;
+		wlr_scene_node_set_position(&m->statusbar.volume.tree->node, x, 0);
+		m->statusbar.volume.x = x;
+		x -= spacing;
+	}
+	if (m->statusbar.light.width > 0) {
+		x -= m->statusbar.light.width;
+		wlr_scene_node_set_position(&m->statusbar.light.tree->node, x, 0);
+		m->statusbar.light.x = x;
+		x -= spacing;
+	}
+	if (m->statusbar.battery.width > 0) {
+		x -= m->statusbar.battery.width;
+		wlr_scene_node_set_position(&m->statusbar.battery.tree->node, x, 0);
+		m->statusbar.battery.x = x;
+		x -= spacing;
+	}
+	if (m->statusbar.ram.width > 0) {
+		x -= m->statusbar.ram.width;
+		wlr_scene_node_set_position(&m->statusbar.ram.tree->node, x, 0);
+		m->statusbar.ram.x = x;
+		x -= spacing;
+	}
+	if (m->statusbar.cpu_popup.tree) {
+		if (m->statusbar.cpu.width > 0 && m->statusbar.area.height > 0) {
+			wlr_scene_node_set_position(&m->statusbar.cpu_popup.tree->node,
+					m->statusbar.cpu.x, m->statusbar.area.height);
+		} else {
+			wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
+			m->statusbar.cpu_popup.visible = 0;
+		}
+	}
+	if (m->statusbar.net_popup.tree) {
+		if (m->statusbar.net.width > 0 && m->statusbar.area.height > 0) {
+			wlr_scene_node_set_position(&m->statusbar.net_popup.tree->node,
+					m->statusbar.net.x, m->statusbar.area.height);
+		} else {
+			wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
+			m->statusbar.net_popup.visible = 0;
+		}
 	}
 }
 
@@ -1184,6 +2615,26 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 	m->statusbar.area = bar_area;
 
 	renderworkspaces(m, &m->statusbar.tags, bar_area.height);
+	if (m->statusbar.sysicons.tree)
+		rendericons(&m->statusbar.sysicons, bar_area.height, sysicons_text);
+	if (m->statusbar.cpu.tree)
+		rendercpu(&m->statusbar.cpu, bar_area.height, cpu_text);
+	if (m->statusbar.net.tree)
+		rendernet(&m->statusbar.net, bar_area.height, net_text);
+	if (m->statusbar.light.tree)
+		renderlight(&m->statusbar.light, bar_area.height, light_text);
+	if (m->statusbar.battery.tree)
+		renderbattery(&m->statusbar.battery, bar_area.height, battery_text);
+	if (m->statusbar.volume.tree)
+		rendervolume(&m->statusbar.volume, bar_area.height, volume_text);
+	if (m->statusbar.sysicons.tree)
+		rendericons(&m->statusbar.sysicons, bar_area.height, sysicons_text);
+	if (m->statusbar.ram.tree)
+		renderram(&m->statusbar.ram, bar_area.height, ram_text);
+	if (m->statusbar.cpu_popup.tree && m->statusbar.cpu_popup.visible)
+		rendercpupopup(m);
+	if (m->statusbar.net_popup.tree && m->statusbar.net_popup.visible)
+		rendernetpopup(m);
 	positionstatusmodules(m);
 
 	*client_area = *area;
@@ -1220,6 +2671,271 @@ refreshstatusclock(void)
 }
 
 static void
+refreshstatuslight(void)
+{
+	Monitor *m;
+	int barh;
+	double percent, display;
+
+	backlight_available = findbacklightdevice(backlight_brightness_path,
+			sizeof(backlight_brightness_path),
+			backlight_max_path, sizeof(backlight_max_path));
+	if (!backlight_available)
+		backlight_writable = 0;
+
+	percent = backlight_percent();
+	display = percent;
+
+	if (percent >= 0.0) {
+		light_last_percent = percent;
+		display = percent;
+	} else if (light_last_percent >= 0.0) {
+		display = light_last_percent;
+	}
+
+	if (display < 0.0) {
+		snprintf(light_text, sizeof(light_text), "Light: --%%");
+	} else {
+		if (display > 100.0)
+			display = 100.0;
+		if (display < 0.0)
+			display = 0.0;
+		snprintf(light_text, sizeof(light_text), "Light: %d%%", (int)lround(display));
+	}
+
+	wl_list_for_each(m, &mons, link) {
+		if (!m->statusbar.light.tree || !m->showbar)
+			continue;
+		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+		renderlight(&m->statusbar.light, barh, light_text);
+		positionstatusmodules(m);
+	}
+}
+
+static void
+refreshstatusnet(void)
+{
+	Monitor *m;
+	int barh;
+	char iface[IF_NAMESIZE] = {0};
+	char label[64] = {0};
+	unsigned long long rx = 0, tx = 0;
+	struct timespec now_ts = {0};
+	double elapsed = 0.0;
+	int rx_ok = 0, tx_ok = 0;
+
+	net_available = findactiveinterface(iface, sizeof(iface), &net_is_wireless);
+	if (!net_available) {
+		snprintf(net_text, sizeof(net_text), "Net: --");
+		snprintf(net_local_ip, sizeof(net_local_ip), "--");
+		snprintf(net_down_text, sizeof(net_down_text), "--");
+		snprintf(net_up_text, sizeof(net_up_text), "--");
+		net_last_down_bps = net_last_up_bps = -1.0;
+		net_prev_valid = 0;
+		net_prev_iface[0] = '\0';
+	} else {
+		snprintf(net_iface, sizeof(net_iface), "%s", iface);
+		if (strncmp(net_prev_iface, net_iface, sizeof(net_prev_iface)) != 0) {
+			net_prev_valid = 0;
+			net_prev_rx = net_prev_tx = 0;
+			snprintf(net_prev_iface, sizeof(net_prev_iface), "%s", net_iface);
+		}
+		if (net_is_wireless && readssid(net_iface, label, sizeof(label))) {
+			snprintf(net_text, sizeof(net_text), "Net: %s", label);
+		} else {
+			snprintf(net_text, sizeof(net_text), "Net: %s", net_is_wireless ? "WiFi" : "Wired");
+		}
+
+		if (!localip(net_iface, net_local_ip, sizeof(net_local_ip)))
+			snprintf(net_local_ip, sizeof(net_local_ip), "--");
+
+		update_public_ip();
+
+		clock_gettime(CLOCK_MONOTONIC, &now_ts);
+
+		char path[PATH_MAX];
+		if (snprintf(path, sizeof(path), "/sys/class/net/%s/statistics/rx_bytes", net_iface)
+				< (int)sizeof(path))
+			rx_ok = (readulong(path, &rx) == 0);
+		if (snprintf(path, sizeof(path), "/sys/class/net/%s/statistics/tx_bytes", net_iface)
+				< (int)sizeof(path))
+			tx_ok = (readulong(path, &tx) == 0);
+
+		if (net_prev_valid) {
+			elapsed = (now_ts.tv_sec - net_prev_ts.tv_sec)
+				+ (now_ts.tv_nsec - net_prev_ts.tv_nsec) / 1e9;
+		}
+		net_last_down_bps = (net_prev_valid && rx_ok) ? net_bytes_to_rate(rx, net_prev_rx, elapsed) : -1.0;
+		net_last_up_bps = (net_prev_valid && tx_ok) ? net_bytes_to_rate(tx, net_prev_tx, elapsed) : -1.0;
+		format_speed(net_last_down_bps, net_down_text, sizeof(net_down_text));
+		format_speed(net_last_up_bps, net_up_text, sizeof(net_up_text));
+
+		if (rx_ok && tx_ok) {
+			net_prev_rx = rx;
+			net_prev_tx = tx;
+			net_prev_ts = now_ts;
+			net_prev_valid = 1;
+		}
+	}
+
+	wl_list_for_each(m, &mons, link) {
+		if (!m->statusbar.net.tree || !m->showbar)
+			continue;
+		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+		rendernet(&m->statusbar.net, barh, net_text);
+		if (m->statusbar.net_popup.visible)
+			rendernetpopup(m);
+		positionstatusmodules(m);
+	}
+}
+
+static void
+refreshstatusbattery(void)
+{
+	Monitor *m;
+	int barh;
+	double percent, display;
+
+	battery_available = findbatterydevice(battery_capacity_path,
+			sizeof(battery_capacity_path));
+
+	percent = battery_percent();
+	display = percent;
+
+	if (percent >= 0.0) {
+		battery_last_percent = percent;
+		display = percent;
+	} else if (battery_last_percent >= 0.0) {
+		display = battery_last_percent;
+	}
+
+	if (display < 0.0) {
+		snprintf(battery_text, sizeof(battery_text), "Battery: --%%");
+	} else {
+		if (display > 100.0)
+			display = 100.0;
+		if (display < 0.0)
+			display = 0.0;
+		snprintf(battery_text, sizeof(battery_text), "Battery: %d%%", (int)lround(display));
+	}
+
+	wl_list_for_each(m, &mons, link) {
+		if (!m->statusbar.battery.tree || !m->showbar)
+			continue;
+		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+		renderbattery(&m->statusbar.battery, barh, battery_text);
+		positionstatusmodules(m);
+	}
+}
+
+static void
+refreshstatuscpu(void)
+{
+	double usage = cpuaverage();
+	Monitor *m;
+	int barh;
+
+	if (usage >= 0.0)
+		cpu_last_percent = usage;
+
+	if (cpu_last_percent < 0.0)
+		snprintf(cpu_text, sizeof(cpu_text), "CPU: --%%");
+	else {
+		int avg_disp = (cpu_last_percent < 1.0) ? 0 : (int)lround(cpu_last_percent);
+		snprintf(cpu_text, sizeof(cpu_text), "CPU: %d%%", avg_disp);
+	}
+
+	wl_list_for_each(m, &mons, link) {
+		if (!m->statusbar.cpu.tree || !m->showbar)
+			continue;
+		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+		rendercpu(&m->statusbar.cpu, barh, cpu_text);
+		if (m->statusbar.cpu_popup.visible)
+			rendercpupopup(m);
+		positionstatusmodules(m);
+	}
+}
+
+static void
+refreshstatusram(void)
+{
+	double used_mb = ramused_mb();
+	Monitor *m;
+	int barh;
+
+	if (used_mb >= 0.0)
+		ram_last_mb = used_mb;
+
+	if (ram_last_mb < 0.0) {
+		snprintf(ram_text, sizeof(ram_text), "RAM: --");
+	} else if (ram_last_mb >= 1024.0) {
+		double gb = ram_last_mb / 1024.0;
+		snprintf(ram_text, sizeof(ram_text), "RAM: %.1fGB", gb);
+	} else {
+		snprintf(ram_text, sizeof(ram_text), "RAM: %dMB", (int)lround(ram_last_mb));
+	}
+
+	wl_list_for_each(m, &mons, link) {
+		if (!m->statusbar.ram.tree || !m->showbar)
+			continue;
+		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+		renderram(&m->statusbar.ram, barh, ram_text);
+		positionstatusmodules(m);
+	}
+}
+
+static void
+refreshstatusvolume(void)
+{
+	double vol = pipewire_volume_percent();
+	Monitor *m;
+	int barh;
+	double display = vol;
+
+	if (vol >= 0.0) {
+		volume_last_percent = vol;
+		display = vol;
+	} else if (volume_last_percent >= 0.0) {
+		display = volume_last_percent;
+	}
+
+	if (display < 0.0) {
+		snprintf(volume_text, sizeof(volume_text), "Vol: --%%");
+	} else if (volume_muted == 1) {
+		snprintf(volume_text, sizeof(volume_text), "Vol: muted");
+	} else {
+		if (display > volume_max_percent)
+			display = volume_max_percent;
+		if (display < 0.0)
+			display = 0.0;
+		snprintf(volume_text, sizeof(volume_text), "Vol: %d%%", (int)lround(display));
+	}
+
+	wl_list_for_each(m, &mons, link) {
+		if (!m->statusbar.volume.tree || !m->showbar)
+			continue;
+		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+		rendervolume(&m->statusbar.volume, barh, volume_text);
+		positionstatusmodules(m);
+	}
+}
+
+static void
+refreshstatusicons(void)
+{
+	Monitor *m;
+	int barh;
+
+	wl_list_for_each(m, &mons, link) {
+		if (!m->statusbar.sysicons.tree || !m->showbar)
+			continue;
+		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+		rendericons(&m->statusbar.sysicons, barh, sysicons_text);
+		positionstatusmodules(m);
+	}
+}
+
+static void
 refreshstatustags(void)
 {
 	Monitor *m;
@@ -1229,6 +2945,9 @@ refreshstatustags(void)
 			continue;
 		renderworkspaces(m, &m->statusbar.tags,
 				m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height);
+		m->statusbar.tags.hover_tag = -1;
+		for (int i = 0; i < TAGCOUNT; i++)
+			m->statusbar.tags.hover_alpha[i] = 0.0f;
 		positionstatusmodules(m);
 	}
 }
@@ -1251,6 +2970,157 @@ schedule_status_timer(void)
 		ms = 1;
 
 	wl_event_source_timer_update(status_timer, ms);
+}
+
+static int
+updatestatuscpu(void *data)
+{
+	(void)data;
+	refreshstatuscpu();
+	refreshstatusram();
+	refreshstatuslight();
+	refreshstatusvolume();
+	refreshstatusbattery();
+	refreshstatusnet();
+	refreshstatusicons();
+	if (status_cpu_timer)
+		wl_event_source_timer_update(status_cpu_timer, 2000);
+	return 0;
+}
+
+static int
+updatehoverfade(void *data)
+{
+	(void)data;
+	int need_more = 0;
+	Monitor *mon;
+	float step;
+
+	if (statusbar_hover_fade_ms <= 0)
+		return 0;
+
+	step = 16.0f / (float)statusbar_hover_fade_ms;
+
+	wl_list_for_each(mon, &mons, link) {
+		Monitor *m = mon;
+		int barh;
+		if (!m->showbar || !m->statusbar.tags.tree)
+			continue;
+		if (m->statusbar.tags.hover_tag < 0 && m->statusbar.tags.tagmask == 0)
+			continue;
+
+		for (int i = 0; i < TAGCOUNT; i++) {
+			float target = (m->statusbar.tags.hover_tag == i) ? 1.0f : 0.0f;
+			float alpha = m->statusbar.tags.hover_alpha[i];
+			if (target > alpha) {
+				alpha += step;
+				if (alpha > target)
+					alpha = target;
+			} else if (target < alpha) {
+				alpha -= step;
+				if (alpha < target)
+					alpha = target;
+			}
+			if (alpha != m->statusbar.tags.hover_alpha[i])
+				need_more = 1;
+			m->statusbar.tags.hover_alpha[i] = alpha;
+		}
+
+		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+		renderworkspaces(m, &m->statusbar.tags, barh);
+		positionstatusmodules(m);
+	}
+
+	if (need_more && status_hover_timer)
+		wl_event_source_timer_update(status_hover_timer, 16);
+
+	return 0;
+}
+
+static void
+updatecpuhover(Monitor *m, double cx, double cy)
+{
+	int lx, ly;
+	int inside = 0;
+	int was_visible;
+	CpuPopup *p;
+
+	if (!m || !m->showbar || !m->statusbar.cpu.tree || !m->statusbar.cpu_popup.tree) {
+		if (m && m->statusbar.cpu_popup.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
+			m->statusbar.cpu_popup.visible = 0;
+		}
+		return;
+	}
+
+	p = &m->statusbar.cpu_popup;
+	lx = (int)floor(cx) - m->statusbar.area.x;
+	ly = (int)floor(cy) - m->statusbar.area.y;
+
+	if (lx >= m->statusbar.cpu.x &&
+			lx < m->statusbar.cpu.x + m->statusbar.cpu.width &&
+			ly >= 0 && ly < m->statusbar.area.height &&
+			m->statusbar.cpu.width > 0) {
+		inside = 1;
+	}
+
+	was_visible = p->visible;
+
+	if (inside) {
+		p->visible = 1;
+		wlr_scene_node_set_enabled(&p->tree->node, 1);
+		wlr_scene_node_set_position(&p->tree->node,
+				m->statusbar.cpu.x, m->statusbar.area.height);
+		if (!was_visible)
+			rendercpupopup(m);
+	} else if (p->visible) {
+		p->visible = 0;
+		wlr_scene_node_set_enabled(&p->tree->node, 0);
+	}
+}
+
+static void
+updatenethover(Monitor *m, double cx, double cy)
+{
+	int lx, ly;
+	int inside = 0;
+	int was_visible;
+	NetPopup *p;
+
+	if (!m || !m->showbar || !m->statusbar.net.tree || !m->statusbar.net_popup.tree) {
+		if (m && m->statusbar.net_popup.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
+			m->statusbar.net_popup.visible = 0;
+		}
+		return;
+	}
+
+	p = &m->statusbar.net_popup;
+	lx = (int)floor(cx) - m->statusbar.area.x;
+	ly = (int)floor(cy) - m->statusbar.area.y;
+
+	if (lx >= m->statusbar.net.x &&
+			lx < m->statusbar.net.x + m->statusbar.net.width &&
+			ly >= 0 && ly < m->statusbar.area.height &&
+			m->statusbar.net.width > 0) {
+		inside = 1;
+	}
+
+	was_visible = p->visible;
+
+	if (inside) {
+		p->visible = 1;
+		wlr_scene_node_set_enabled(&p->tree->node, 1);
+		wlr_scene_node_set_position(&p->tree->node,
+				m->statusbar.net.x, m->statusbar.area.height);
+		if (!was_visible) {
+			refreshstatusnet();
+			rendernetpopup(m);
+		}
+	} else if (p->visible) {
+		p->visible = 0;
+		wlr_scene_node_set_enabled(&p->tree->node, 0);
+	}
 }
 
 static int
@@ -1373,6 +3243,138 @@ arrangelayers(Monitor *m)
 	}
 }
 
+static int
+scrollsteps(const struct wlr_pointer_axis_event *event)
+{
+	int steps;
+
+	if (!event)
+		return 0;
+
+	if (event->delta_discrete > 0)
+		steps = 1;
+	else if (event->delta_discrete < 0)
+		steps = -1;
+	else if (event->delta > 0.0)
+		steps = 1;
+	else if (event->delta < 0.0)
+		steps = -1;
+	else
+		steps = 0;
+
+	if (event->relative_direction == WL_POINTER_AXIS_RELATIVE_DIRECTION_INVERTED)
+		steps = -steps;
+
+	return steps;
+}
+
+static int
+adjust_backlight_by_steps(int steps)
+{
+	double percent;
+
+	if (steps == 0)
+		return 0;
+
+	backlight_available = findbacklightdevice(backlight_brightness_path,
+			sizeof(backlight_brightness_path),
+			backlight_max_path, sizeof(backlight_max_path));
+	if (!backlight_available)
+		return 0;
+
+	percent = backlight_percent();
+	if (percent < 0.0)
+		percent = light_last_percent;
+	if (percent < 0.0)
+		return 0;
+
+	percent += (double)steps * light_step;
+	if (percent < 0.0)
+		percent = 0.0;
+	if (percent > 100.0)
+		percent = 100.0;
+
+	if (set_backlight_percent(percent) != 0)
+		return 0;
+
+	light_last_percent = percent;
+	refreshstatuslight();
+	return 1;
+}
+
+static int
+adjust_volume_by_steps(int steps)
+{
+	double vol;
+
+	if (steps == 0)
+		return 0;
+
+	vol = volume_last_percent >= 0.0 ? volume_last_percent : pipewire_volume_percent();
+	if (vol < 0.0)
+		return 0;
+
+	if (volume_muted == 1)
+		system("wpctl set-mute @DEFAULT_AUDIO_SINK@ 0");
+
+	vol += (double)steps * volume_step;
+	if (vol < 0.0)
+		vol = 0.0;
+	if (vol > volume_max_percent)
+		vol = volume_max_percent;
+
+	if (set_pipewire_volume(vol) != 0)
+		return 0;
+
+	volume_last_percent = vol;
+	refreshstatusvolume();
+	return 1;
+}
+
+static int
+handlestatusscroll(struct wlr_pointer_axis_event *event)
+{
+	Monitor *m;
+	int lx, ly, steps;
+
+	if (!event || locked)
+		return 0;
+
+	if (event->orientation != WL_POINTER_AXIS_VERTICAL_SCROLL)
+		return 0;
+
+	m = xytomon(cursor->x, cursor->y);
+	if (!m)
+		return 0;
+	selmon = m;
+
+	if (!m->showbar || !m->statusbar.area.width || !m->statusbar.area.height)
+		return 0;
+
+	lx = (int)floor(cursor->x) - m->statusbar.area.x;
+	ly = (int)floor(cursor->y) - m->statusbar.area.y;
+	if (lx < 0 || ly < 0 || lx >= m->statusbar.area.width || ly >= m->statusbar.area.height)
+		return 0;
+
+	steps = scrollsteps(event);
+	if (steps == 0)
+		return 0;
+
+	if (m->statusbar.light.width > 0 &&
+			lx >= m->statusbar.light.x &&
+			lx < m->statusbar.light.x + m->statusbar.light.width) {
+		return adjust_backlight_by_steps(steps);
+	}
+
+	if (m->statusbar.volume.width > 0 &&
+			lx >= m->statusbar.volume.x &&
+			lx < m->statusbar.volume.x + m->statusbar.volume.width) {
+		return adjust_volume_by_steps(steps);
+	}
+
+	return 0;
+}
+
 void
 axisnotify(struct wl_listener *listener, void *data)
 {
@@ -1380,12 +3382,12 @@ axisnotify(struct wl_listener *listener, void *data)
 	 * for example when you move the scroll wheel. */
 	struct wlr_pointer_axis_event *event = data;
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
-	/* TODO: allow usage of scroll wheel for mousebindings, it can be implemented
-	 * by checking the event's orientation and the delta of the event */
-	/* Notify the client with pointer focus of the axis event. */
-	wlr_seat_pointer_notify_axis(seat,
-			event->time_msec, event->orientation, event->delta,
-			event->delta_discrete, event->source, event->relative_direction);
+	if (!handlestatusscroll(event)) {
+		/* Notify the client with pointer focus of the axis event. */
+		wlr_seat_pointer_notify_axis(seat,
+				event->time_msec, event->orientation, event->delta,
+				event->delta_discrete, event->source, event->relative_direction);
+	}
 }
 
 void
@@ -1410,18 +3412,32 @@ buttonpress(struct wl_listener *listener, void *data)
 			int lx = cursor->x - selmon->statusbar.area.x;
 			int ly = cursor->y - selmon->statusbar.area.y;
 			StatusModule *tags = &selmon->statusbar.tags;
+			StatusModule *vol = &selmon->statusbar.volume;
+			StatusModule *cpu = &selmon->statusbar.cpu;
 
 			if (lx >= 0 && ly >= 0 &&
 					lx < selmon->statusbar.area.width &&
-					ly < selmon->statusbar.area.height &&
-					lx < tags->width) {
-				for (int i = 0; i < tags->box_count; i++) {
-					int bx = tags->box_x[i];
-					int bw = tags->box_w[i];
-					if (lx >= bx && lx < bx + bw) {
-						Arg arg = { .ui = 1u << tags->box_tag[i] };
-						view(&arg);
-						return;
+					ly < selmon->statusbar.area.height) {
+				if (cpu->width > 0 && lx >= cpu->x && lx < cpu->x + cpu->width) {
+					Arg arg = { .v = btopcmd };
+					spawn(&arg);
+					return;
+				}
+
+				if (vol->width > 0 && lx >= vol->x && lx < vol->x + vol->width) {
+					toggle_pipewire_mute();
+					return;
+				}
+
+				if (lx < tags->width) {
+					for (int i = 0; i < tags->box_count; i++) {
+						int bx = tags->box_x[i];
+						int bw = tags->box_w[i];
+						if (lx >= bx && lx < bx + bw) {
+							Arg arg = { .ui = 1u << tags->box_tag[i] };
+							view(&arg);
+							return;
+						}
 					}
 				}
 			}
@@ -1516,6 +3532,14 @@ cleanup(void)
 	if (status_timer) {
 		wl_event_source_remove(status_timer);
 		status_timer = NULL;
+	}
+	if (status_cpu_timer) {
+		wl_event_source_remove(status_cpu_timer);
+		status_cpu_timer = NULL;
+	}
+	if (status_hover_timer) {
+		wl_event_source_remove(status_hover_timer);
+		status_hover_timer = NULL;
 	}
 #ifdef XWAYLAND
 	wlr_xwayland_destroy(xwayland);
@@ -1791,13 +3815,15 @@ createkeyboardgroup(void)
 	KeyboardGroup *group = ecalloc(1, sizeof(*group));
 	struct xkb_context *context;
 	struct xkb_keymap *keymap;
+	struct xkb_rule_names names;
 
 	group->wlr_group = wlr_keyboard_group_create();
 	group->wlr_group->data = group;
 
 	/* Prepare an XKB keymap and assign it to the keyboard group. */
 	context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-	if (!(keymap = xkb_keymap_new_from_names(context, &xkb_rules,
+	names = getxkbrules();
+	if (!(keymap = xkb_keymap_new_from_names(context, &names,
 				XKB_KEYMAP_COMPILE_NO_FLAGS)))
 		die("failed to compile keymap");
 
@@ -1905,11 +3931,48 @@ initstatusbar(Monitor *m)
 	m->statusbar.tree = wlr_scene_tree_create(layers[LyrTop]);
 	if (m->statusbar.tree) {
 		m->statusbar.tags.tree = wlr_scene_tree_create(m->statusbar.tree);
-		if (m->statusbar.tags.tree)
+		if (m->statusbar.tags.tree) {
 			m->statusbar.tags.bg = wlr_scene_tree_create(m->statusbar.tags.tree);
+			m->statusbar.tags.hover_tag = -1;
+			for (int i = 0; i < TAGCOUNT; i++)
+				m->statusbar.tags.hover_alpha[i] = 0.0f;
+		}
+		m->statusbar.sysicons.tree = wlr_scene_tree_create(m->statusbar.tree);
+		if (m->statusbar.sysicons.tree)
+			m->statusbar.sysicons.bg = wlr_scene_tree_create(m->statusbar.sysicons.tree);
+		m->statusbar.cpu.tree = wlr_scene_tree_create(m->statusbar.tree);
+		if (m->statusbar.cpu.tree)
+			m->statusbar.cpu.bg = wlr_scene_tree_create(m->statusbar.cpu.tree);
+		m->statusbar.net.tree = wlr_scene_tree_create(m->statusbar.tree);
+		if (m->statusbar.net.tree)
+			m->statusbar.net.bg = wlr_scene_tree_create(m->statusbar.net.tree);
+		m->statusbar.battery.tree = wlr_scene_tree_create(m->statusbar.tree);
+		if (m->statusbar.battery.tree)
+			m->statusbar.battery.bg = wlr_scene_tree_create(m->statusbar.battery.tree);
+		m->statusbar.light.tree = wlr_scene_tree_create(m->statusbar.tree);
+		if (m->statusbar.light.tree)
+			m->statusbar.light.bg = wlr_scene_tree_create(m->statusbar.light.tree);
+		m->statusbar.volume.tree = wlr_scene_tree_create(m->statusbar.tree);
+		if (m->statusbar.volume.tree)
+			m->statusbar.volume.bg = wlr_scene_tree_create(m->statusbar.volume.tree);
+		m->statusbar.ram.tree = wlr_scene_tree_create(m->statusbar.tree);
+		if (m->statusbar.ram.tree)
+			m->statusbar.ram.bg = wlr_scene_tree_create(m->statusbar.ram.tree);
 		m->statusbar.clock.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.clock.tree)
 			m->statusbar.clock.bg = wlr_scene_tree_create(m->statusbar.clock.tree);
+		m->statusbar.cpu_popup.tree = wlr_scene_tree_create(m->statusbar.tree);
+		if (m->statusbar.cpu_popup.tree) {
+			m->statusbar.cpu_popup.bg = wlr_scene_tree_create(m->statusbar.cpu_popup.tree);
+			m->statusbar.cpu_popup.visible = 0;
+			wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
+		}
+		m->statusbar.net_popup.tree = wlr_scene_tree_create(m->statusbar.tree);
+		if (m->statusbar.net_popup.tree) {
+			m->statusbar.net_popup.bg = wlr_scene_tree_create(m->statusbar.net_popup.tree);
+			m->statusbar.net_popup.visible = 0;
+			wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
+		}
 	}
 }
 
@@ -1933,7 +3996,7 @@ createmon(struct wl_listener *listener, void *data)
 	m->wlr_output = wlr_output;
 
 	for (i = 0; i < LENGTH(m->layers); i++)
-		wl_list_init(&m->layers[i]);
+	wl_list_init(&m->layers[i]);
 	initstatusbar(m);
 
 	wlr_output_state_init(&state);
@@ -3013,6 +5076,13 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	/* Update drag icon's position */
 	wlr_scene_node_set_position(&drag_icon->node, (int)round(cursor->x), (int)round(cursor->y));
 
+	/* Hover feedback for tag boxes */
+	if (selmon && selmon->showbar) {
+		updatetaghover(selmon, cursor->x, cursor->y);
+		updatecpuhover(selmon, cursor->x, cursor->y);
+		updatenethover(selmon, cursor->x, cursor->y);
+	}
+
 	/* Skip if internal call or already resizing */
 	if (time == 0 && resizing_from_mouse)
 		goto focus;
@@ -3345,6 +5415,78 @@ pointerfocus(Client *c, struct wlr_surface *surface, double sx, double sy,
 	 * wlroots makes this a no-op if surface is already focused */
 	wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
 	wlr_seat_pointer_notify_motion(seat, time, sx, sy);
+}
+
+static void
+updatetaghover(Monitor *m, double cx, double cy)
+{
+	StatusModule *tags;
+	int lx, ly, hover = -1;
+	int bar_h;
+	int prev;
+
+	if (!m || !m->showbar)
+		return;
+
+	tags = &m->statusbar.tags;
+	if (!tags->tree || m->statusbar.area.width <= 0 || m->statusbar.area.height <= 0)
+		return;
+
+	lx = (int)floor(cx) - m->statusbar.area.x;
+	ly = (int)floor(cy) - m->statusbar.area.y;
+	if (lx >= 0 && ly >= 0 && lx < m->statusbar.area.width && ly < m->statusbar.area.height
+			&& lx < tags->width) {
+		for (int i = 0; i < tags->box_count; i++) {
+			if (lx >= tags->box_x[i] && lx < tags->box_x[i] + tags->box_w[i]) {
+				hover = tags->box_tag[i];
+				break;
+			}
+		}
+	}
+
+	if (hover == tags->hover_tag)
+		return;
+
+	prev = tags->hover_tag;
+	tags->hover_tag = hover;
+	bar_h = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+	if (statusbar_hover_fade_ms <= 0) {
+		for (int i = 0; i < TAGCOUNT; i++)
+			tags->hover_alpha[i] = (tags->hover_tag == i) ? 1.0f : 0.0f;
+		renderworkspaces(m, tags, bar_h);
+		positionstatusmodules(m);
+		return;
+	}
+
+	renderworkspaces(m, tags, bar_h);
+	positionstatusmodules(m);
+	if (status_hover_timer)
+		wl_event_source_timer_update(status_hover_timer, 0);
+	else
+		schedule_hover_timer();
+}
+
+static void
+schedule_hover_timer(void)
+{
+	if (!status_hover_timer)
+		return;
+
+	Monitor *mon;
+	wl_list_for_each(mon, &mons, link) {
+		Monitor *m = mon;
+		int active = (m->statusbar.tags.hover_tag >= 0);
+		for (int i = 0; i < TAGCOUNT && !active; i++) {
+			if (m->statusbar.tags.hover_alpha[i] > 0.0f) {
+				active = 1;
+				break;
+			}
+		}
+		if (active) {
+			wl_event_source_timer_update(status_hover_timer, 16);
+			return;
+		}
+	}
 }
 
 void
@@ -3789,11 +5931,16 @@ setup(void)
 	dpy = wl_display_create();
 	event_loop = wl_display_get_event_loop(dpy);
 	status_timer = wl_event_loop_add_timer(event_loop, updatestatusclock, NULL);
+	status_cpu_timer = wl_event_loop_add_timer(event_loop, updatestatuscpu, NULL);
+	status_hover_timer = wl_event_loop_add_timer(event_loop, updatehoverfade, NULL);
 	fcft_initialized = fcft_init(FCFT_LOG_COLORIZE_NEVER, 0, FCFT_LOG_CLASS_ERROR);
 	if (!fcft_initialized)
 		die("couldn't initialize fcft");
 	if (!loadstatusfont())
 		die("couldn't load statusbar font");
+	backlight_available = findbacklightdevice(backlight_brightness_path,
+			sizeof(backlight_brightness_path),
+			backlight_max_path, sizeof(backlight_max_path));
 
 	/* The backend is a wlroots feature which abstracts the underlying input and
 	 * output hardware. The autocreate option will choose the most suitable
@@ -4005,6 +6152,17 @@ setup(void)
 		refreshstatusclock();
 		schedule_status_timer();
 	}
+	if (status_cpu_timer) {
+		refreshstatuscpu();
+		refreshstatusram();
+		refreshstatuslight();
+		refreshstatusvolume();
+		refreshstatusbattery();
+		refreshstatusnet();
+		wl_event_source_timer_update(status_cpu_timer, 2000);
+	}
+	if (status_hover_timer)
+		wl_event_source_timer_update(status_hover_timer, 0);
 }
 
 void

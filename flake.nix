@@ -17,10 +17,8 @@
             buildTools = with pkgs; [
               gnumake
               stdenv.cc
-              pkg-config
               fcft
               wayland
-              wayland-scanner
               wayland-protocols
               wlroots
               libinput
