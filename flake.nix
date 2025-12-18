@@ -14,7 +14,17 @@
           pkgs = import nixpkgs { inherit system; };
           wlrootsPc = "wlroots-${lib.versions.majorMinor pkgs.wlroots.version}";
 
-            buildTools = with pkgs; [
+          iconDeps = with pkgs; [
+            librsvg
+            gdk-pixbuf
+            hicolor-icon-theme
+            adwaita-icon-theme
+            libpng
+            libjpeg
+          ];
+
+          buildTools = with pkgs;
+            [
               gnumake
               stdenv.cc
               fcft
@@ -26,12 +36,14 @@
               tllist
               pixman
               libdrm
+              systemd
               xorg.libxcb
               xorg.xcbutilwm
               xwayland
               seatd
               swaybg
-            ];
+            ]
+            ++ iconDeps;
 
           buildScript = pkgs.writeShellApplication {
             name = "dwl-build";
@@ -48,7 +60,7 @@
             '';
           };
         in {
-          inherit pkgs wlrootsPc buildTools buildScript;
+          inherit pkgs wlrootsPc buildTools buildScript iconDeps;
         };
     in {
       packages = forAllSystems (system:
@@ -80,7 +92,8 @@
               pkgs.xorg.libxcb
               pkgs.xorg.xcbutilwm
               pkgs.xwayland
-            ];
+              pkgs.systemd
+            ] ++ ps.iconDeps;
 
             makeFlags = [ "PKG_CONFIG=${pkgs.pkg-config}/bin/pkg-config" ];
 

@@ -41,8 +41,9 @@ static unsigned int visible_count(LayoutNode *node, Monitor *m);
 static Client *xytoclient(double x, double y);
 
 static int resizing_from_mouse = 0;
-static double resize_last_update_x, resize_last_update_y;
-static uint32_t last_resize_time = 0;
+static double resize_last_update_x __attribute__((unused)),
+             resize_last_update_y __attribute__((unused));
+static uint32_t last_resize_time __attribute__((unused)) = 0;
 
 static void
 apply_layout(Monitor *m, LayoutNode *node,

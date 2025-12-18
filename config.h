@@ -24,6 +24,7 @@ static const float statusbar_tag_bg[]      = COLOR(0x00000033);
 static const float statusbar_tag_active_bg[] = COLOR(0x3399ff44);
 static const float statusbar_tag_hover_bg[] = COLOR(0x66b3ffaa);
 static const int statusbar_hover_fade_ms   = 0;
+static const int statusbar_tray_force_rgba = 0; /* 1: force RGBA decode for all tray icons (last-resort for apps that send RGBA) */
 static const char *statusbar_fonts[] = {
 	"monospace:size=16:weight=Bold",
 	"monospace:size=16"
@@ -166,6 +167,8 @@ static const char *const autostart_cmd =
 	"wp=\"${DWL_WALLPAPER:-$bin_dir/../share/dwl/wallpapers/beach.jpg}\"; "
 	"[ -r \"$wp\" ] || wp=\"$PWD/wallpapers/beach.jpg\"; "
 	"[ -r \"$wp\" ] || wp=\"wallpapers/beach.jpg\"; "
+	"nm-applet --indicator >/dev/null 2>&1 & "
+	"blueman-applet >/dev/null 2>&1 & "
 	"swaybg -i \"$wp\" -m fill <&-";
 
 static const Key keys[] = {

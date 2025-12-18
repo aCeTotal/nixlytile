@@ -1,10 +1,13 @@
 /*
  * See LICENSE file for copyright and license details.
  */
+#define _DEFAULT_SOURCE
+
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <ifaddrs.h>
 #include <net/if.h>
+#include <systemd/sd-bus.h>
 #include <limits.h>
 #include <getopt.h>
 #include <libinput.h>
@@ -81,11 +84,19 @@
 #endif
 #include <tllist.h>
 
+#ifndef SD_BUS_EVENT_READABLE
+#define SD_BUS_EVENT_READABLE 1
+#endif
+#ifndef SD_BUS_EVENT_WRITABLE
+#define SD_BUS_EVENT_WRITABLE 2
+#endif
+
 #include "util.h"
 
 /* macros */
 #define MAX(A, B)               ((A) > (B) ? (A) : (B))
 #define MIN(A, B)               ((A) < (B) ? (A) : (B))
+#define UNUSED __attribute__((unused))
 #define CLEANMASK(mask)         (mask & ~WLR_MODIFIER_CAPS)
 #define VISIBLEON(C, M)         ((M) && (C)->mon == (M) && (((C)->tags & (M)->tagset[(M)->seltags]) || (C)->issticky))
 #define LENGTH(X)               (sizeof X / sizeof X[0])
@@ -177,6 +188,18 @@ struct StatusBar {
 	StatusModule sysicons;
 };
 
+typedef struct TrayItem {
+	char service[128];
+	char path[128];
+	char label[64];
+	int x;
+	int w;
+	int icon_w;
+	int icon_h;
+	struct wlr_buffer *icon_buf;
+	struct wl_list link;
+} TrayItem;
+
 struct PixmanBuffer {
 	struct wlr_buffer base;
 	pixman_image_t *image;
@@ -230,9 +253,9 @@ drawhoverrect(struct wlr_scene_tree *parent, int x, int y,
 		wlr_scene_node_set_position(&r->node, x, y);
 }
 
-static void
+static void UNUSED
 drawroundedrect(struct wlr_scene_tree *parent, int x, int y,
-		int width, int height, const float color[static 4])
+        int width, int height, const float color[static 4])
 {
 	int radius, yy, inset_top, inset_bottom, inset, start, h, w;
 	struct wlr_scene_rect *r;
@@ -489,8 +512,8 @@ static void pointerfocus(Client *c, struct wlr_surface *surface,
 static void printstatus(void);
 static void powermgrsetmode(struct wl_listener *listener, void *data);
 static void quit(const Arg *arg);
+static struct wlr_buffer *statusbar_buffer_from_argb32(const uint32_t *data, int width, int height);
 static void renderclock(StatusModule *module, int bar_height, const char *text);
-static void rendericons(StatusModule *module, int bar_height, const char *text);
 static void renderlight(StatusModule *module, int bar_height, const char *text);
 static void rendernet(StatusModule *module, int bar_height, const char *text);
 static void renderbattery(StatusModule *module, int bar_height, const char *text);
@@ -499,6 +522,8 @@ static void rendervolume(StatusModule *module, int bar_height, const char *text)
 static void renderworkspaces(Monitor *m, StatusModule *module, int bar_height);
 static void freestatusfont(void);
 static int loadstatusfont(void);
+static int status_text_width(const char *text);
+static int tray_render_label(StatusModule *module, const char *text, int x, int bar_height);
 static void positionstatusmodules(Monitor *m);
 static void refreshstatusclock(void);
 static void refreshstatuslight(void);
@@ -509,6 +534,30 @@ static void refreshstatusicons(void);
 static void refreshstatustags(void);
 static void updatetaghover(Monitor *m, double cx, double cy);
 static void updatenethover(Monitor *m, double cx, double cy);
+static int tray_bus_event(int fd, uint32_t mask, void *data);
+static int tray_method_register_item(sd_bus_message *m, void *userdata, sd_bus_error *ret_error);
+static int tray_method_register_host(sd_bus_message *m, void *userdata, sd_bus_error *ret_error);
+static int tray_property_get_registered(sd_bus *bus, const char *path, const char *interface,
+        const char *property, sd_bus_message *reply, void *userdata, sd_bus_error *ret_error);
+static int tray_property_get_host_registered(sd_bus *bus, const char *path, const char *interface,
+        const char *property, sd_bus_message *reply, void *userdata, sd_bus_error *ret_error);
+static int tray_property_get_protocol_version(sd_bus *bus, const char *path, const char *interface,
+        const char *property, sd_bus_message *reply, void *userdata, sd_bus_error *ret_error);
+static int tray_item_load_icon(TrayItem *it);
+static int tray_render_label(StatusModule *module, const char *text, int x, int bar_height);
+static void tray_emit_host_registered(void);
+static int tray_search_item_path(const char *service, const char *start_path,
+		char *out, size_t outlen, int depth);
+static int tray_find_item_path(const char *service, char *path, size_t pathlen);
+static void tray_add_item(const char *service, const char *path, int emit_signals);
+static void tray_scan_existing_items(void);
+static void tray_update_icons_text(void);
+static void tray_remove_item(const char *service);
+static void rendertrayicons(Monitor *m, int bar_height);
+static int tray_name_owner_changed(sd_bus_message *m, void *userdata, sd_bus_error *ret_error);
+static void tray_init(void);
+static TrayItem *tray_first_item(void);
+static void tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y);
 static void requestdecorationmode(struct wl_listener *listener, void *data);
 static void requeststartdrag(struct wl_listener *listener, void *data);
 static void requestmonstate(struct wl_listener *listener, void *data);
@@ -559,6 +608,7 @@ static int toggle_pipewire_mute(void);
 static void updatecpuhover(Monitor *m, double cx, double cy);
 static double net_bytes_to_rate(unsigned long long cur, unsigned long long prev,
 		double elapsed);
+static void fix_tray_argb32(uint32_t *pixels, size_t count, int use_rgba_order);
 static double ramused_mb(void);
 static double cpuaverage(void);
 static double battery_percent(void);
@@ -570,6 +620,8 @@ static int findbacklightdevice(char *brightness_path, size_t brightness_len,
 static int findbatterydevice(char *capacity_path, size_t capacity_len);
 static void schedule_status_timer(void);
 static struct wlr_buffer *statusbar_buffer_from_glyph(const struct fcft_glyph *glyph);
+static struct wlr_buffer *statusbar_scaled_buffer_from_argb32(const uint32_t *data,
+		int width, int height, int target_h);
 static void unlocksession(struct wl_listener *listener, void *data);
 static void unmaplayersurfacenotify(struct wl_listener *listener, void *data);
 static void unmapnotify(struct wl_listener *listener, void *data);
@@ -583,8 +635,8 @@ static void warpcursor(const Client *c);
 static const char *pick_resize_handle(const Client *c, double cx, double cy);
 static const char *resize_cursor_from_dirs(int dx, int dy);
 static LayoutNode *closest_split_node(LayoutNode *client_node, int want_vert,
-		double pointer, double *out_ratio, struct wlr_box *out_box,
-		double *out_dist);
+        double pointer, double *out_ratio, struct wlr_box *out_box,
+        double *out_dist);
 static void apply_resize_axis_choice(void);
 static int resize_should_update(uint32_t time);
 static Monitor *xytomon(double x, double y);
@@ -592,9 +644,9 @@ static void xytonode(double x, double y, struct wlr_surface **psurface,
 		Client **pc, LayerSurface **pl, double *nx, double *ny);
 static void zoom(const Arg *arg);
 static void rotate_clients(const Arg *arg);
-static int node_contains_client(LayoutNode *node, Client *c);
+static int __attribute__((unused)) node_contains_client(LayoutNode *node, Client *c);
 static int subtree_bounds(LayoutNode *node, Monitor *m, struct wlr_box *out);
-static LayoutNode *ancestor_split(LayoutNode *node, int want_vert);
+static __attribute__((unused)) LayoutNode *ancestor_split(LayoutNode *node, int want_vert);
 static struct wlr_output_mode *bestmode(struct wlr_output *output);
 static void btrtile(Monitor *m);
 static void setratio_h(const Arg *arg);
@@ -674,6 +726,9 @@ static int fullscreen_adaptive_sync_enabled = 1;
 static struct wl_event_source *status_timer;
 static struct wl_event_source *status_cpu_timer;
 static struct wl_event_source *status_hover_timer;
+static int tray_anchor_x = -1;
+static int tray_anchor_y = -1;
+static uint64_t tray_anchor_time_ms;
 #define MAX_CPU_CORES 256
 static struct CpuSample cpu_prev[MAX_CPU_CORES];
 static int cpu_prev_count;
@@ -699,6 +754,13 @@ static unsigned long long net_prev_tx;
 static struct timespec net_prev_ts;
 static int net_prev_valid;
 static time_t net_public_ip_last;
+static sd_bus *tray_bus;
+static struct wl_event_source *tray_event;
+static sd_bus_slot *tray_vtable_slot;
+static sd_bus_slot *tray_fdo_vtable_slot;
+static sd_bus_slot *tray_name_slot;
+static int tray_host_registered;
+static struct wl_list tray_items;
 static double light_last_percent = -1.0;
 static char light_text[32] = "Light: --%";
 static double volume_last_percent = -1.0;
@@ -715,7 +777,7 @@ static const double volume_step = 3.0;
 static const double volume_max_percent = 150.0;
 static double cpu_last_core_percent[MAX_CPU_CORES];
 static int cpu_core_count;
-static char sysicons_text[64] = "󰤨 󰂯";
+static char sysicons_text[64] = "Tray";
 
 /* global event handlers */
 static struct wl_listener cursor_axis = {.notify = axisnotify};
@@ -1136,6 +1198,119 @@ renderclock(StatusModule *module, int bar_height, const char *text)
 	tll_free(glyphs);
 }
 
+static int
+status_text_width(const char *text)
+{
+	int pen_x = 0;
+	uint32_t prev_cp = 0;
+
+	if (!text || !*text)
+		return 0;
+
+	if (!statusfont.font)
+		return (int)strlen(text) * 8;
+
+	for (int i = 0; text[i]; i++) {
+		long kern_x = 0, kern_y = 0;
+		uint32_t cp = (unsigned char)text[i];
+		const struct fcft_glyph *glyph;
+
+		if (prev_cp)
+			fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
+		pen_x += (int)kern_x;
+
+		glyph = fcft_rasterize_char_utf32(statusfont.font, cp,
+				statusbar_font_subpixel);
+		if (glyph && glyph->pix) {
+			pen_x += glyph->advance.x;
+			if (text[i + 1])
+				pen_x += statusbar_font_spacing;
+		}
+		prev_cp = cp;
+	}
+
+	return pen_x;
+}
+
+static int
+tray_render_label(StatusModule *module, const char *text, int x, int bar_height)
+{
+	tll(struct GlyphRun) glyphs = tll_init();
+	const struct fcft_glyph *glyph;
+	struct wlr_scene_buffer *scene_buf;
+	struct wlr_buffer *buffer;
+	uint32_t prev_cp = 0;
+	int pen_x = 0;
+	int min_y = INT_MAX, max_y = INT_MIN;
+	int text_width, text_height, origin_y;
+	size_t i;
+
+	if (!module || !module->tree || !text || !*text || bar_height <= 0)
+		return 0;
+
+	if (!statusfont.font) {
+		int w = status_text_width(text);
+		if (w <= 0)
+			w = statusbar_font_spacing;
+		return w;
+	}
+
+	for (i = 0; text[i]; i++) {
+		long kern_x = 0, kern_y = 0;
+		uint32_t cp = (unsigned char)text[i];
+
+		if (prev_cp)
+			fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
+		pen_x += (int)kern_x;
+
+		glyph = fcft_rasterize_char_utf32(statusfont.font, cp,
+				statusbar_font_subpixel);
+		if (glyph && glyph->pix) {
+			tll_push_back(glyphs, ((struct GlyphRun){
+				.glyph = glyph,
+				.pen_x = pen_x,
+				.codepoint = cp,
+			}));
+			if (-glyph->y < min_y)
+				min_y = -glyph->y;
+			if (-glyph->y + glyph->height > max_y)
+				max_y = -glyph->y + glyph->height;
+			pen_x += glyph->advance.x;
+			if (text[i + 1])
+				pen_x += statusbar_font_spacing;
+		}
+		prev_cp = cp;
+	}
+
+	if (tll_length(glyphs) == 0) {
+		tll_free(glyphs);
+		return 0;
+	}
+
+	text_width = status_text_width(text);
+	text_height = max_y - min_y;
+	origin_y = (bar_height - text_height) / 2 - min_y;
+
+	tll_foreach(glyphs, it) {
+		glyph = it->item.glyph;
+		buffer = statusbar_buffer_from_glyph(glyph);
+		if (!buffer)
+			continue;
+
+		scene_buf = wlr_scene_buffer_create(module->tree, NULL);
+		if (scene_buf) {
+			wlr_scene_buffer_set_buffer(scene_buf, buffer);
+			wlr_scene_node_set_position(&scene_buf->node,
+					x + it->item.pen_x + glyph->x,
+					origin_y - glyph->y);
+		}
+		wlr_buffer_drop(buffer);
+	}
+
+	tll_free(glyphs);
+	return text_width;
+}
+
 static void
 rendercpu(StatusModule *module, int bar_height, const char *text)
 {
@@ -1199,10 +1374,360 @@ rendervolume(StatusModule *module, int bar_height, const char *text)
 	renderclock(module, bar_height, text);
 }
 
-static void
-rendericons(StatusModule *module, int bar_height, const char *text)
+static int
+tray_item_load_icon(TrayItem *it)
 {
-	renderclock(module, bar_height, text);
+	sd_bus_message *reply = NULL;
+	sd_bus_error err = SD_BUS_ERROR_NULL;
+	const void *best_data = NULL;
+	size_t best_len = 0;
+	int desired_h = statusbar_height > 0 ? (int)statusbar_height : 24;
+	int best_score = INT_MAX;
+	int best_w = 0, best_h = 0;
+	int r;
+	const char *ifaces[] = {
+		"org.kde.StatusNotifierItem",
+		"org.freedesktop.StatusNotifierItem",
+	};
+	const char *props[] = { "IconPixmap", "AttentionIconPixmap" };
+	int prop_idx;
+
+	if (!tray_bus || !it)
+		return -1;
+
+	for (prop_idx = 0; prop_idx < (int)LENGTH(props); prop_idx++) {
+		best_data = NULL;
+		best_len = 0;
+		best_score = INT_MAX;
+		best_w = best_h = 0;
+
+		for (size_t iface_idx = 0; iface_idx < LENGTH(ifaces); iface_idx++) {
+			sd_bus_error_free(&err);
+			sd_bus_message_unref(reply);
+			reply = NULL;
+
+			r = sd_bus_call_method(tray_bus, it->service, it->path,
+					"org.freedesktop.DBus.Properties", "Get",
+					&err, &reply, "ss", ifaces[iface_idx], props[prop_idx]);
+			if (r >= 0)
+				break;
+		}
+		if (r < 0)
+			continue;
+
+		if (sd_bus_message_enter_container(reply, 'v', "a(iiay)") < 0)
+			continue;
+		if (sd_bus_message_enter_container(reply, 'a', "(iiay)") < 0)
+			continue;
+
+		while (sd_bus_message_enter_container(reply, 'r', "iiay") > 0) {
+			int w = 0, h = 0;
+			const void *pix = NULL;
+			size_t len = 0;
+			if (sd_bus_message_read(reply, "ii", &w, &h) < 0) {
+				sd_bus_message_exit_container(reply); /* struct */
+				break;
+			}
+			if (sd_bus_message_read_array(reply, 'y', &pix, &len) < 0) {
+				sd_bus_message_exit_container(reply); /* struct */
+				break;
+			}
+			if (w > 0 && h > 0 && len >= (size_t)w * (size_t)h * 4) {
+				int diff = desired_h > 0 ? abs(h - desired_h) : INT_MAX;
+				size_t area = (size_t)w * (size_t)h;
+				if ((desired_h > 0 && (diff < best_score ||
+						(diff == best_score && h < best_h))) ||
+						(desired_h <= 0 && area > best_len)) {
+					best_score = diff;
+					best_len = area;
+					best_w = w;
+					best_h = h;
+					best_data = pix;
+				}
+			}
+			sd_bus_message_exit_container(reply); /* struct */
+		}
+
+		sd_bus_message_exit_container(reply);
+		sd_bus_message_exit_container(reply);
+
+		if (best_data && best_w > 0 && best_h > 0)
+			break;
+	}
+
+	if (best_data && best_w > 0 && best_h > 0) {
+		int target_h = (desired_h > 0) ? desired_h : best_h;
+		struct wlr_buffer *buf = NULL;
+
+		if (best_h > target_h && target_h > 0)
+			buf = statusbar_scaled_buffer_from_argb32(best_data, best_w, best_h, target_h);
+		else
+			buf = statusbar_buffer_from_argb32(best_data, best_w, best_h);
+		if (buf) {
+			if (it->icon_buf)
+				wlr_buffer_drop(it->icon_buf);
+			it->icon_buf = buf;
+			if (target_h > 0 && best_h > target_h) {
+				it->icon_w = (int)lround(((double)best_w * (double)target_h) / (double)best_h);
+				it->icon_h = target_h;
+			} else {
+				it->icon_w = best_w;
+				it->icon_h = best_h;
+			}
+			sd_bus_message_unref(reply);
+			sd_bus_error_free(&err);
+			return 0;
+		}
+	}
+
+	sd_bus_message_unref(reply);
+	sd_bus_error_free(&err);
+	return -1;
+}
+
+static void
+rendertrayicons(Monitor *m, int bar_height)
+{
+	StatusModule *module;
+	int padding;
+	int x;
+	int any = 0;
+	TrayItem *it;
+
+	if (!m || !m->statusbar.sysicons.tree)
+		return;
+
+	module = &m->statusbar.sysicons;
+	clearstatusmodule(module);
+
+	padding = statusbar_module_padding;
+	x = padding;
+
+	wl_list_for_each(it, &tray_items, link) {
+		int iw = 0, ih = 0;
+		struct wlr_scene_buffer *scene_buf;
+		struct wlr_buffer *buf = it->icon_buf;
+		int x_before = x;
+
+		if (!buf)
+			tray_item_load_icon(it);
+		buf = it->icon_buf;
+		iw = it->icon_w;
+		ih = it->icon_h;
+
+		if (buf && iw > 0 && ih > 0) {
+			scene_buf = wlr_scene_buffer_create(module->tree, NULL);
+			if (scene_buf) {
+				wlr_scene_buffer_set_buffer(scene_buf, buf);
+				wlr_scene_node_set_position(&scene_buf->node, x,
+						MAX(0, (bar_height - ih) / 2));
+				it->x = x;
+				it->w = iw;
+				x += iw + statusbar_module_spacing;
+				any = 1;
+				continue;
+			}
+		}
+
+		/* Fallback: render label text if icon missing */
+		int label_w = tray_render_label(module, it->label, x, bar_height);
+		if (label_w > 0) {
+			it->x = x;
+			it->w = label_w;
+			x += label_w + statusbar_module_spacing;
+			any = 1;
+		} else {
+			it->x = x_before;
+			it->w = 0;
+		}
+	}
+
+	if (any) {
+		module->width = x + padding;
+		updatemodulebg(module, module->width, bar_height, statusbar_bg);
+		return;
+	}
+
+	/* fallback text if no icons */
+	renderclock(module, bar_height, sysicons_text);
+}
+
+static void
+fix_tray_argb32(uint32_t *pixels, size_t count, int use_rgba_order)
+{
+	size_t i;
+
+	if (!pixels || count == 0)
+		return;
+
+	for (i = 0; i < count; i++) {
+		/* IconPixmap spec: ARGB32, bytes in big-endian order A,R,G,B */
+		const uint8_t *p8 = (const uint8_t *)&pixels[i];
+		uint8_t a, r, g, b;
+
+		if (use_rgba_order || statusbar_tray_force_rgba) {
+			/* Fallback for apps that provide RGBA bytes */
+			r = p8[0];
+			g = p8[1];
+			b = p8[2];
+			a = p8[3];
+		} else {
+			a = p8[0];
+			r = p8[1];
+			g = p8[2];
+			b = p8[3];
+		}
+
+		/* Premultiply for pixman/wlroots */
+		if (a != 0 && a != 255) {
+			r = (uint8_t)((r * a + 127) / 255);
+			g = (uint8_t)((g * a + 127) / 255);
+			b = (uint8_t)((b * a + 127) / 255);
+		}
+
+		pixels[i] = ((uint32_t)a << 24) | ((uint32_t)r << 16) |
+			((uint32_t)g << 8) | (uint32_t)b;
+	}
+}
+
+static struct wlr_buffer *
+statusbar_scaled_buffer_from_argb32(const uint32_t *data, int width, int height, int target_h)
+{
+	pixman_image_t *src = NULL, *dst = NULL;
+	struct PixmanBuffer *buf;
+	uint8_t *src_copy = NULL;
+	uint8_t *dst_copy = NULL;
+	size_t src_stride, dst_stride, src_size, dst_size;
+	int target_w;
+
+	if (!data || width <= 0 || height <= 0 || target_h <= 0)
+		return NULL;
+
+	target_w = (int)lround(((double)width * (double)target_h) / (double)height);
+	if (target_w <= 0)
+		target_w = 1;
+
+	src_stride = (size_t)width * 4;
+	dst_stride = (size_t)target_w * 4;
+	src_size = src_stride * (size_t)height;
+	dst_size = dst_stride * (size_t)target_h;
+
+	src_copy = calloc(1, src_size);
+	dst_copy = calloc(1, dst_size);
+	if (!src_copy || !dst_copy)
+		goto fail;
+	memcpy(src_copy, data, src_size);
+	fix_tray_argb32((uint32_t *)src_copy, (size_t)width * (size_t)height, 0);
+
+	/* If the first pass produced fully transparent data, retry assuming RGBA order */
+	{
+		size_t alpha_sum = 0;
+		for (size_t n = 0; n < (size_t)width * (size_t)height; n++)
+			alpha_sum += src_copy[n * 4];
+		if (alpha_sum == 0) {
+			memcpy(src_copy, data, src_size);
+			fix_tray_argb32((uint32_t *)src_copy, (size_t)width * (size_t)height, 1);
+		}
+	}
+
+	src = pixman_image_create_bits_no_clear(PIXMAN_a8r8g8b8, width, height,
+			(uint32_t *)src_copy, (int)src_stride);
+	dst = pixman_image_create_bits_no_clear(PIXMAN_a8r8g8b8, target_w, target_h,
+			(uint32_t *)dst_copy, (int)dst_stride);
+	if (!src || !dst)
+		goto fail;
+
+	/* Scale with a simple bilinear filter to fit the bar height */
+	pixman_transform_t transform;
+	pixman_transform_init_identity(&transform);
+	pixman_transform_scale(&transform, NULL,
+			pixman_double_to_fixed((double)width / (double)target_w),
+			pixman_double_to_fixed((double)height / (double)target_h));
+	pixman_image_set_transform(src, &transform);
+	pixman_image_set_filter(src, PIXMAN_FILTER_BILINEAR, NULL, 0);
+
+	pixman_image_composite32(PIXMAN_OP_SRC, src, NULL, dst,
+			0, 0, 0, 0, 0, 0, target_w, target_h);
+
+	pixman_image_unref(src);
+	free(src_copy);
+	src = NULL;
+	src_copy = NULL;
+
+	buf = ecalloc(1, sizeof(*buf));
+	if (!buf)
+		goto fail;
+
+	buf->image = dst;
+	buf->data = dst_copy;
+	buf->drm_format = DRM_FORMAT_ARGB8888;
+	buf->stride = (int)dst_stride;
+	buf->owns_data = 1;
+	wlr_buffer_init(&buf->base, &pixman_buffer_impl, target_w, target_h);
+	return &buf->base;
+
+fail:
+	if (src)
+		pixman_image_unref(src);
+	if (dst)
+		pixman_image_unref(dst);
+	free(src_copy);
+	free(dst_copy);
+	return NULL;
+}
+
+static struct wlr_buffer *
+statusbar_buffer_from_argb32(const uint32_t *data, int width, int height)
+{
+	pixman_image_t *dst;
+	struct PixmanBuffer *buf;
+	uint8_t *copy;
+	size_t stride, size;
+
+	if (!data || width <= 0 || height <= 0)
+		return NULL;
+
+	stride = (size_t)width * 4;
+	size = stride * (size_t)height;
+	copy = calloc(1, size);
+	if (!copy)
+		return NULL;
+	memcpy(copy, data, size);
+	fix_tray_argb32((uint32_t *)copy, (size_t)width * (size_t)height, 0);
+
+	/* If the first pass produced fully transparent data, retry assuming RGBA order */
+	{
+		size_t alpha_sum = 0;
+		for (size_t n = 0; n < (size_t)width * (size_t)height; n++)
+			alpha_sum += copy[n * 4];
+		if (alpha_sum == 0) {
+			memcpy(copy, data, size);
+			fix_tray_argb32((uint32_t *)copy, (size_t)width * (size_t)height, 1);
+		}
+	}
+
+	dst = pixman_image_create_bits_no_clear(PIXMAN_a8r8g8b8, width, height,
+			(uint32_t *)copy, (int)stride);
+	if (!dst) {
+		free(copy);
+		return NULL;
+	}
+
+	buf = ecalloc(1, sizeof(*buf));
+	if (!buf) {
+		pixman_image_unref(dst);
+		free(copy);
+		return NULL;
+	}
+
+	buf->image = dst;
+	buf->data = copy;
+	buf->drm_format = DRM_FORMAT_ARGB8888;
+	buf->stride = (int)stride;
+	buf->owns_data = 1;
+	wlr_buffer_init(&buf->base, &pixman_buffer_impl, width, height);
+
+	return &buf->base;
 }
 
 static void
@@ -1213,6 +1738,7 @@ rendercpupopup(Monitor *m)
 	int line_count, max_width = 0;
 	int total_height;
 	char line[64];
+	struct wlr_scene_node *node, *tmp;
 
 	if (!m || !m->statusbar.cpu_popup.tree)
 		return;
@@ -1222,7 +1748,6 @@ rendercpupopup(Monitor *m)
 	line_spacing = 2;
 
 	/* Clear previous buffers but keep bg */
-	struct wlr_scene_node *node, *tmp;
 	wl_list_for_each_safe(node, tmp, &p->tree->children, link) {
 		if (p->bg && node == &p->bg->node)
 			continue;
@@ -1305,6 +1830,11 @@ rendercpupopup(Monitor *m)
 		int min_y = INT_MAX, max_y = INT_MIN;
 		int pen_x = 0;
 		uint32_t prev_cp = 0;
+		const struct fcft_glyph *glyph;
+		int text_height = 0;
+		int origin_x = 0;
+		int origin_y = 0;
+		tll(struct GlyphRun) glyphs = tll_init();
 
 		double perc = (i < cpu_core_count) ? cpu_last_core_percent[i] : cpu_last_percent;
 		if (perc < 0.0) {
@@ -1320,7 +1850,6 @@ rendercpupopup(Monitor *m)
 		}
 		text = line;
 
-		tll(struct GlyphRun) glyphs = tll_init();
 		for (size_t j = 0; text[j]; j++) {
 			long kern_x = 0, kern_y = 0;
 			uint32_t cp = (unsigned char)text[j];
@@ -1330,7 +1859,7 @@ rendercpupopup(Monitor *m)
 				fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
 			pen_x += (int)kern_x;
 
-			const struct fcft_glyph *glyph = fcft_rasterize_char_utf32(statusfont.font,
+			glyph = fcft_rasterize_char_utf32(statusfont.font,
 					cp, statusbar_font_subpixel);
 			if (!glyph || !glyph->pix) {
 				prev_cp = cp;
@@ -1358,19 +1887,21 @@ rendercpupopup(Monitor *m)
 			continue;
 		}
 
-		int text_width = max_x_local - min_x;
-		int text_height = max_y - min_y;
-		int origin_x = padding - min_x;
-		int origin_y = padding + i * (statusfont.height + line_spacing)
+		text_height = max_y - min_y;
+		origin_x = padding - min_x;
+		origin_y = padding + i * (statusfont.height + line_spacing)
 			+ (statusfont.height - text_height) / 2 - min_y;
 
 		tll_foreach(glyphs, it) {
-			const struct fcft_glyph *glyph = it->item.glyph;
-			struct wlr_buffer *buffer = statusbar_buffer_from_glyph(glyph);
+			struct wlr_buffer *buffer;
+			struct wlr_scene_buffer *scene_buf;
+
+			glyph = it->item.glyph;
+			buffer = statusbar_buffer_from_glyph(glyph);
 			if (!buffer)
 				continue;
 
-			struct wlr_scene_buffer *scene_buf = wlr_scene_buffer_create(p->tree, NULL);
+			scene_buf = wlr_scene_buffer_create(p->tree, NULL);
 			if (scene_buf) {
 				wlr_scene_buffer_set_buffer(scene_buf, buffer);
 				wlr_scene_node_set_position(&scene_buf->node,
@@ -1396,6 +1927,7 @@ rendernetpopup(Monitor *m)
 	int max_width = 0;
 	int total_height;
 	char lines[4][64];
+	struct wlr_scene_node *node, *tmp;
 
 	if (!m || !m->statusbar.net_popup.tree)
 		return;
@@ -1410,7 +1942,6 @@ rendernetpopup(Monitor *m)
 	snprintf(lines[3], sizeof(lines[3]), "Up: %s", net_up_text);
 
 	/* Clear previous buffers but keep bg */
-	struct wlr_scene_node *node, *tmp;
 	wl_list_for_each_safe(node, tmp, &p->tree->children, link) {
 		if (p->bg && node == &p->bg->node)
 			continue;
@@ -1476,6 +2007,9 @@ rendernetpopup(Monitor *m)
 		int min_x = INT_MAX, max_x_local = INT_MIN;
 		int min_y = INT_MAX, max_y = INT_MIN;
 		int pen_x = 0;
+		int width = 0;
+		int origin_x = 0;
+		int origin_y = 0;
 		uint32_t prev_cp = 0;
 
 		tll(struct GlyphRun) glyphs = tll_init();
@@ -1483,12 +2017,13 @@ rendernetpopup(Monitor *m)
 			long kern_x = 0, kern_y = 0;
 			uint32_t cp = (unsigned char)text[j];
 			struct GlyphRun run;
+			const struct fcft_glyph *glyph;
 
 			if (prev_cp)
 				fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
 			pen_x += (int)kern_x;
 
-			const struct fcft_glyph *glyph = fcft_rasterize_char_utf32(statusfont.font,
+			glyph = fcft_rasterize_char_utf32(statusfont.font,
 					cp, statusbar_font_subpixel);
 			if (!glyph || !glyph->pix) {
 				prev_cp = cp;
@@ -1516,10 +2051,9 @@ rendernetpopup(Monitor *m)
 			continue;
 		}
 
-		int width = max_x_local - min_x;
-		int height = max_y - min_y;
-		int origin_x = padding + (max_width - width) / 2;
-		int origin_y = padding + i * (statusfont.height + line_spacing) + statusfont.ascent;
+		width = max_x_local - min_x;
+		origin_x = padding + (max_width - width) / 2;
+		origin_y = padding + i * (statusfont.height + line_spacing) + statusfont.ascent;
 
 		tll_foreach(glyphs, it) {
 			struct wlr_buffer *buffer;
@@ -1555,7 +2089,6 @@ renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 	int padding, inner, spacing, outer_pad;
 	int box_h, box_y, total_w = 0;
 	int x, count = 0;
-	double now_ms = 0.0;
 	struct wlr_scene_buffer *scene_buf;
 	struct wlr_buffer *buffer;
 
@@ -1686,14 +2219,15 @@ readcpustats(struct CpuSample *out, int maxcount)
 	while (fgets(line, sizeof(line), fp)) {
 		int idx = -1;
 		unsigned long long user, nice, system, idle, iowait, irq, softirq, steal;
+		unsigned long long idle_all, non_idle;
 
 		if (sscanf(line, "cpu%d %llu %llu %llu %llu %llu %llu %llu %llu",
 				&idx, &user, &nice, &system, &idle, &iowait, &irq, &softirq,
 				&steal) == 9) {
 			if (idx < 0 || idx >= maxcount)
 				continue;
-			unsigned long long idle_all = idle + iowait;
-			unsigned long long non_idle = user + nice + system + irq + softirq + steal;
+			idle_all = idle + iowait;
+			non_idle = user + nice + system + irq + softirq + steal;
 			out[idx].idle = idle_all;
 			out[idx].total = idle_all + non_idle;
 			if (idx > max_idx)
@@ -1711,6 +2245,7 @@ cpuaverage(void)
 	struct CpuSample curr[MAX_CPU_CORES];
 	int count, used, i;
 	double sum_busy = 0.0, sum_total = 0.0;
+	double busy, perc;
 
 	count = readcpustats(curr, MAX_CPU_CORES);
 	if (count <= 0)
@@ -1734,14 +2269,14 @@ cpuaverage(void)
 		unsigned long long diff_total = curr[i].total - cpu_prev[i].total;
 		unsigned long long diff_idle = curr[i].idle - cpu_prev[i].idle;
 		if (curr[i].total == 0 || curr[i].idle == 0 ||
-				curr[i].total <= cpu_prev[i].total ||
-				curr[i].idle < cpu_prev[i].idle ||
-				diff_total == 0) {
+					curr[i].total <= cpu_prev[i].total ||
+					curr[i].idle < cpu_prev[i].idle ||
+					diff_total == 0) {
 			cpu_last_core_percent[i] = -1.0;
 			continue;
 		}
-		double busy = (double)(diff_total - diff_idle);
-		double perc = (busy / (double)diff_total) * 100.0;
+		busy = (double)(diff_total - diff_idle);
+		perc = (busy / (double)diff_total) * 100.0;
 		cpu_last_core_percent[i] = perc;
 		sum_busy += busy;
 		sum_total += (double)diff_total;
@@ -2131,6 +2666,406 @@ net_bytes_to_rate(unsigned long long cur, unsigned long long prev, double elapse
 	if (elapsed <= 0.0 || cur < prev)
 		return -1.0;
 	return (double)(cur - prev) / elapsed;
+}
+
+static uint64_t
+monotonic_msec(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)(ts.tv_nsec / 1000000);
+}
+
+static void
+tray_emit_host_registered(void)
+{
+	if (!tray_bus)
+		return;
+	sd_bus_emit_signal(tray_bus, NULL, "/StatusNotifierWatcher",
+			"org.kde.StatusNotifierWatcher",
+			"StatusNotifierHostRegistered", "");
+	sd_bus_emit_signal(tray_bus, NULL, "/StatusNotifierWatcher",
+			"org.freedesktop.StatusNotifierWatcher",
+			"StatusNotifierHostRegistered", "");
+}
+
+static int
+tray_search_item_path(const char *service, const char *start_path,
+		char *out, size_t outlen, int depth)
+{
+	sd_bus_message *reply = NULL;
+	sd_bus_error err = SD_BUS_ERROR_NULL;
+	const char *xml;
+	const char *p;
+	int r = -1;
+
+	if (!tray_bus || !service || !start_path || !out || outlen == 0 || depth <= 0)
+		return -EINVAL;
+
+	r = sd_bus_call_method(tray_bus, service, start_path,
+			"org.freedesktop.DBus.Introspectable", "Introspect",
+			&err, &reply, "");
+	if (r < 0)
+		goto out;
+
+	if (sd_bus_message_read(reply, "s", &xml) < 0 || !xml) {
+		r = -EINVAL;
+		goto out;
+	}
+
+	if (strstr(xml, "org.kde.StatusNotifierItem")
+			|| strstr(xml, "org.freedesktop.StatusNotifierItem")) {
+		snprintf(out, outlen, "%s", start_path);
+		r = 0;
+		goto out;
+	}
+
+	if (depth <= 1) {
+		r = 1;
+		goto out;
+	}
+
+	p = xml;
+	while ((p = strstr(p, "<node name=\""))) {
+		char name[128];
+		char child[256];
+		const char *end;
+		size_t nlen;
+
+		p += strlen("<node name=\"");
+		end = strchr(p, '"');
+		if (!end)
+			break;
+		nlen = (size_t)(end - p);
+		if (nlen == 0 || nlen >= sizeof(name)) {
+			p = end ? end + 1 : p + 1;
+			continue;
+		}
+		memcpy(name, p, nlen);
+		name[nlen] = '\0';
+
+		if (strcmp(start_path, "/") == 0)
+			snprintf(child, sizeof(child), "/%s", name);
+		else
+			snprintf(child, sizeof(child), "%s/%s", start_path, name);
+
+		if (tray_search_item_path(service, child, out, outlen, depth - 1) == 0) {
+			r = 0;
+			goto out;
+		}
+		p = end + 1;
+	}
+
+out:
+	sd_bus_error_free(&err);
+	sd_bus_message_unref(reply);
+	return r;
+}
+
+static int
+tray_find_item_path(const char *service, char *path, size_t pathlen)
+{
+	static const char *candidates[] = {
+		"/StatusNotifierItem",
+		"/org/ayatana/NotificationItem",
+	};
+
+	if (!service || !path || pathlen == 0)
+		return -EINVAL;
+
+	for (size_t i = 0; i < LENGTH(candidates); i++) {
+		if (tray_search_item_path(service, candidates[i], path, pathlen, 1) == 0)
+			return 0;
+	}
+
+	if (tray_search_item_path(service, "/", path, pathlen, 6) == 0)
+		return 0;
+
+	snprintf(path, pathlen, "%s", "/StatusNotifierItem");
+	return -1;
+}
+
+static void
+tray_add_item(const char *service, const char *path, int emit_signals)
+{
+	const char *base;
+	TrayItem *it;
+
+	if (!service || !service[0] || !path || !path[0])
+		return;
+
+	tray_remove_item(service);
+	it = ecalloc(1, sizeof(*it));
+	snprintf(it->service, sizeof(it->service), "%s", service);
+	snprintf(it->path, sizeof(it->path), "%s", path);
+	base = strrchr(service, '.');
+	base = base ? base + 1 : service;
+	snprintf(it->label, sizeof(it->label), "%s", base);
+	wl_list_insert(&tray_items, &it->link);
+	fprintf(stderr, "tray: registered %s%s\n", service, path);
+
+	tray_update_icons_text();
+
+	if (!emit_signals || !tray_bus)
+		return;
+
+	sd_bus_emit_signal(tray_bus, NULL, "/StatusNotifierWatcher",
+			"org.kde.StatusNotifierWatcher",
+			"StatusNotifierItemRegistered", "s", service);
+	sd_bus_emit_signal(tray_bus, NULL, "/StatusNotifierWatcher",
+			"org.freedesktop.StatusNotifierWatcher",
+			"StatusNotifierItemRegistered", "s", service);
+}
+
+static int
+tray_method_register_item(sd_bus_message *m, void *userdata, sd_bus_error *ret_error)
+{
+	const char *arg = NULL;
+	const char *sender = sd_bus_message_get_sender(m);
+	char service[128] = {0};
+	char path[128] = {0};
+	sd_bus_error err = SD_BUS_ERROR_NULL;
+
+	(void)userdata;
+	(void)ret_error;
+
+	if (sd_bus_message_read(m, "s", &arg) < 0) {
+		sd_bus_error_set_const(&err, SD_BUS_ERROR_INVALID_ARGS, "invalid arg");
+		return sd_bus_reply_method_error(m, &err);
+	}
+	if (!sender || !sender[0]) {
+		sd_bus_error_set_const(&err, SD_BUS_ERROR_FAILED, "no sender");
+		return sd_bus_reply_method_error(m, &err);
+	}
+
+	if (arg && strchr(arg, '/')) {
+		snprintf(service, sizeof(service), "%s", sender);
+		snprintf(path, sizeof(path), "%s", arg);
+	} else {
+		snprintf(service, sizeof(service), "%s", arg && arg[0] ? arg : sender);
+		snprintf(path, sizeof(path), "/StatusNotifierItem");
+	}
+
+	if (tray_find_item_path(service, path, sizeof(path)) == 0) {
+		/* path updated by helper */
+	}
+
+	tray_add_item(service, path, 1);
+	tray_emit_host_registered();
+	return sd_bus_reply_method_return(m, "");
+}
+
+static int
+tray_method_register_host(sd_bus_message *m, void *userdata, sd_bus_error *ret_error)
+{
+	(void)userdata;
+	(void)ret_error;
+	tray_host_registered = 1;
+	tray_emit_host_registered();
+	return sd_bus_reply_method_return(m, "");
+}
+
+static void
+tray_scan_existing_items(void)
+{
+	sd_bus_message *reply = NULL;
+	sd_bus_error err = SD_BUS_ERROR_NULL;
+	const char *name;
+
+	if (!tray_bus)
+		return;
+
+	if (sd_bus_call_method(tray_bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+				"org.freedesktop.DBus", "ListNames", &err, &reply, "") < 0)
+		goto out;
+	if (sd_bus_message_enter_container(reply, 'a', "s") < 0)
+		goto out;
+
+	while (sd_bus_message_read_basic(reply, 's', &name) > 0) {
+		if (!name)
+			continue;
+		if (strstr(name, "StatusNotifierItem") || strstr(name, "NotificationItem")) {
+			char path[128];
+			if (tray_find_item_path(name, path, sizeof(path)) != 0)
+				snprintf(path, sizeof(path), "%s", "/StatusNotifierItem");
+			tray_add_item(name, path, 1);
+		}
+	}
+
+	sd_bus_message_exit_container(reply);
+out:
+	sd_bus_error_free(&err);
+	sd_bus_message_unref(reply);
+}
+
+static int
+tray_property_get_registered(sd_bus *bus, const char *path, const char *interface,
+		const char *property, sd_bus_message *reply, void *userdata, sd_bus_error *ret_error)
+{
+	TrayItem *it;
+
+	(void)bus; (void)path; (void)interface; (void)property; (void)userdata; (void)ret_error;
+
+	if (sd_bus_message_open_container(reply, 'a', "s") < 0)
+		return -EINVAL;
+
+	wl_list_for_each(it, &tray_items, link) {
+		char full[256];
+		snprintf(full, sizeof(full), "%s%s", it->service, it->path);
+		sd_bus_message_append_basic(reply, 's', full);
+	}
+
+	return sd_bus_message_close_container(reply);
+}
+
+static int
+tray_property_get_host_registered(sd_bus *bus, const char *path, const char *interface,
+		const char *property, sd_bus_message *reply, void *userdata, sd_bus_error *ret_error)
+{
+	(void)bus; (void)path; (void)interface; (void)property; (void)userdata; (void)ret_error;
+	return sd_bus_message_append_basic(reply, 'b', &tray_host_registered);
+}
+
+static int
+tray_property_get_protocol_version(sd_bus *bus, const char *path, const char *interface,
+		const char *property, sd_bus_message *reply, void *userdata, sd_bus_error *ret_error)
+{
+	int version = 1;
+
+	(void)bus; (void)path; (void)interface; (void)property; (void)userdata; (void)ret_error;
+	return sd_bus_message_append_basic(reply, 'i', &version);
+}
+
+static int
+tray_name_owner_changed(sd_bus_message *m, void *userdata, sd_bus_error *ret_error)
+{
+	const char *name, *old_owner, *new_owner;
+
+	(void)userdata;
+	(void)ret_error;
+	if (sd_bus_message_read(m, "sss", &name, &old_owner, &new_owner) < 0)
+		return 0;
+	if (name && new_owner && *new_owner &&
+			(strstr(name, "StatusNotifierItem") || strstr(name, "NotificationItem"))) {
+		char path[128];
+		if (tray_find_item_path(name, path, sizeof(path)) != 0)
+			snprintf(path, sizeof(path), "%s", "/StatusNotifierItem");
+		tray_add_item(name, path, 1);
+		return 0;
+	}
+	if (name && old_owner && *old_owner && (!new_owner || !*new_owner))
+		tray_remove_item(name);
+	return 0;
+}
+
+static int
+tray_bus_event(int fd, uint32_t mask, void *data)
+{
+	sd_bus *bus = data;
+	int r;
+	int events;
+	uint32_t newmask;
+
+	(void)fd;
+	if (!bus)
+		return 0;
+
+	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR))
+		return 0;
+
+	while ((r = sd_bus_process(bus, NULL)) > 0)
+		;
+
+	events = sd_bus_get_events(bus);
+	newmask = 0;
+	if (events & SD_BUS_EVENT_READABLE)
+		newmask |= WL_EVENT_READABLE;
+	if (events & SD_BUS_EVENT_WRITABLE)
+		newmask |= WL_EVENT_WRITABLE;
+	if (tray_event)
+		wl_event_source_fd_update(tray_event, newmask ? newmask : WL_EVENT_READABLE);
+
+	return 0;
+}
+
+static void
+tray_init(void)
+{
+	static const sd_bus_vtable tray_vtable[] = {
+		SD_BUS_VTABLE_START(0),
+		SD_BUS_METHOD("RegisterStatusNotifierItem", "s", "", tray_method_register_item, SD_BUS_VTABLE_UNPRIVILEGED),
+		SD_BUS_METHOD("RegisterStatusNotifierHost", "s", "", tray_method_register_host, SD_BUS_VTABLE_UNPRIVILEGED),
+		SD_BUS_PROPERTY("RegisteredStatusNotifierItems", "as", tray_property_get_registered, 0, SD_BUS_VTABLE_PROPERTY_EMITS_INVALIDATION),
+		SD_BUS_PROPERTY("IsStatusNotifierHostRegistered", "b", tray_property_get_host_registered, 0, SD_BUS_VTABLE_PROPERTY_EMITS_INVALIDATION),
+		SD_BUS_PROPERTY("ProtocolVersion", "i", tray_property_get_protocol_version, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+		SD_BUS_VTABLE_END
+	};
+	int r;
+	int fd;
+	int events;
+	uint32_t mask = WL_EVENT_READABLE;
+	uint64_t name_flags = SD_BUS_NAME_ALLOW_REPLACEMENT | SD_BUS_NAME_REPLACE_EXISTING;
+
+	if (tray_bus)
+		return;
+
+	r = sd_bus_open_user(&tray_bus);
+	if (r < 0) {
+		fprintf(stderr, "tray: failed to connect to session bus: %s\n", strerror(-r));
+		tray_bus = NULL;
+		return;
+	}
+
+	r = sd_bus_request_name(tray_bus, "org.kde.StatusNotifierWatcher", name_flags);
+	if (r < 0) {
+		fprintf(stderr, "tray: failed to acquire watcher name: %s\n", strerror(-r));
+		goto fail;
+	}
+	/* Some implementations also look for the freedesktop alias */
+	sd_bus_request_name(tray_bus, "org.freedesktop.StatusNotifierWatcher", name_flags);
+	sd_bus_add_object_vtable(tray_bus, &tray_vtable_slot, "/StatusNotifierWatcher",
+			"org.kde.StatusNotifierWatcher", tray_vtable, NULL);
+	sd_bus_add_object_vtable(tray_bus, &tray_fdo_vtable_slot, "/StatusNotifierWatcher",
+			"org.freedesktop.StatusNotifierWatcher", tray_vtable, NULL);
+	sd_bus_add_match(tray_bus, &tray_name_slot,
+		"type='signal',sender='org.freedesktop.DBus',path='/org/freedesktop/DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged'",
+		tray_name_owner_changed, NULL);
+
+	fd = sd_bus_get_fd(tray_bus);
+	events = sd_bus_get_events(tray_bus);
+	mask = 0;
+	if (events & SD_BUS_EVENT_READABLE)
+		mask |= WL_EVENT_READABLE;
+	if (events & SD_BUS_EVENT_WRITABLE)
+		mask |= WL_EVENT_WRITABLE;
+	if (mask == 0)
+		mask = WL_EVENT_READABLE;
+
+	tray_event = wl_event_loop_add_fd(event_loop, fd, mask, tray_bus_event, tray_bus);
+	tray_scan_existing_items();
+	tray_host_registered = 1;
+	tray_emit_host_registered();
+	tray_update_icons_text();
+	return;
+fail:
+	if (tray_vtable_slot)
+		sd_bus_slot_unref(tray_vtable_slot);
+	tray_vtable_slot = NULL;
+	if (tray_fdo_vtable_slot)
+		sd_bus_slot_unref(tray_fdo_vtable_slot);
+	tray_fdo_vtable_slot = NULL;
+	if (tray_name_slot)
+		sd_bus_slot_unref(tray_name_slot);
+	tray_name_slot = NULL;
+	if (tray_event) {
+		wl_event_source_remove(tray_event);
+		tray_event = NULL;
+	}
+	if (tray_bus) {
+		sd_bus_unref(tray_bus);
+		tray_bus = NULL;
+	}
 }
 
 static int
@@ -2616,7 +3551,7 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 
 	renderworkspaces(m, &m->statusbar.tags, bar_area.height);
 	if (m->statusbar.sysicons.tree)
-		rendericons(&m->statusbar.sysicons, bar_area.height, sysicons_text);
+		rendertrayicons(m, bar_area.height);
 	if (m->statusbar.cpu.tree)
 		rendercpu(&m->statusbar.cpu, bar_area.height, cpu_text);
 	if (m->statusbar.net.tree)
@@ -2627,8 +3562,6 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 		renderbattery(&m->statusbar.battery, bar_area.height, battery_text);
 	if (m->statusbar.volume.tree)
 		rendervolume(&m->statusbar.volume, bar_area.height, volume_text);
-	if (m->statusbar.sysicons.tree)
-		rendericons(&m->statusbar.sysicons, bar_area.height, sysicons_text);
 	if (m->statusbar.ram.tree)
 		renderram(&m->statusbar.ram, bar_area.height, ram_text);
 	if (m->statusbar.cpu_popup.tree && m->statusbar.cpu_popup.visible)
@@ -2719,6 +3652,7 @@ refreshstatusnet(void)
 	int barh;
 	char iface[IF_NAMESIZE] = {0};
 	char label[64] = {0};
+	char path[PATH_MAX];
 	unsigned long long rx = 0, tx = 0;
 	struct timespec now_ts = {0};
 	double elapsed = 0.0;
@@ -2733,30 +3667,29 @@ refreshstatusnet(void)
 		net_last_down_bps = net_last_up_bps = -1.0;
 		net_prev_valid = 0;
 		net_prev_iface[0] = '\0';
-	} else {
-		snprintf(net_iface, sizeof(net_iface), "%s", iface);
-		if (strncmp(net_prev_iface, net_iface, sizeof(net_prev_iface)) != 0) {
-			net_prev_valid = 0;
-			net_prev_rx = net_prev_tx = 0;
-			snprintf(net_prev_iface, sizeof(net_prev_iface), "%s", net_iface);
-		}
-		if (net_is_wireless && readssid(net_iface, label, sizeof(label))) {
-			snprintf(net_text, sizeof(net_text), "Net: %s", label);
 		} else {
-			snprintf(net_text, sizeof(net_text), "Net: %s", net_is_wireless ? "WiFi" : "Wired");
-		}
+			snprintf(net_iface, sizeof(net_iface), "%s", iface);
+			if (strncmp(net_prev_iface, net_iface, sizeof(net_prev_iface)) != 0) {
+				net_prev_valid = 0;
+				net_prev_rx = net_prev_tx = 0;
+				snprintf(net_prev_iface, sizeof(net_prev_iface), "%s", net_iface);
+			}
+			if (net_is_wireless && readssid(net_iface, label, sizeof(label))) {
+				snprintf(net_text, sizeof(net_text), "Net: %s", label);
+			} else {
+				snprintf(net_text, sizeof(net_text), "Net: %s", net_is_wireless ? "WiFi" : "Wired");
+			}
 
-		if (!localip(net_iface, net_local_ip, sizeof(net_local_ip)))
-			snprintf(net_local_ip, sizeof(net_local_ip), "--");
+			if (!localip(net_iface, net_local_ip, sizeof(net_local_ip)))
+				snprintf(net_local_ip, sizeof(net_local_ip), "--");
 
-		update_public_ip();
+			update_public_ip();
 
-		clock_gettime(CLOCK_MONOTONIC, &now_ts);
+			clock_gettime(CLOCK_MONOTONIC, &now_ts);
 
-		char path[PATH_MAX];
-		if (snprintf(path, sizeof(path), "/sys/class/net/%s/statistics/rx_bytes", net_iface)
-				< (int)sizeof(path))
-			rx_ok = (readulong(path, &rx) == 0);
+			if (snprintf(path, sizeof(path), "/sys/class/net/%s/statistics/rx_bytes", net_iface)
+					< (int)sizeof(path))
+				rx_ok = (readulong(path, &rx) == 0);
 		if (snprintf(path, sizeof(path), "/sys/class/net/%s/statistics/tx_bytes", net_iface)
 				< (int)sizeof(path))
 			tx_ok = (readulong(path, &tx) == 0);
@@ -2787,6 +3720,63 @@ refreshstatusnet(void)
 			rendernetpopup(m);
 		positionstatusmodules(m);
 	}
+}
+
+static void
+tray_remove_item(const char *service)
+{
+	TrayItem *it, *tmp;
+
+	if (!service)
+		return;
+
+	wl_list_for_each_safe(it, tmp, &tray_items, link) {
+		if (strcmp(it->service, service) == 0) {
+			wl_list_remove(&it->link);
+			if (it->icon_buf)
+				wlr_buffer_drop(it->icon_buf);
+			free(it);
+			tray_update_icons_text();
+			sd_bus_emit_signal(tray_bus, NULL, "/StatusNotifierWatcher",
+					"org.kde.StatusNotifierWatcher",
+					"StatusNotifierItemUnregistered", "s", service);
+			sd_bus_emit_signal(tray_bus, NULL, "/StatusNotifierWatcher",
+					"org.freedesktop.StatusNotifierWatcher",
+					"StatusNotifierItemUnregistered", "s", service);
+			return;
+		}
+	}
+}
+
+static TrayItem *
+tray_first_item(void)
+{
+	TrayItem *sample = NULL;
+
+	if (wl_list_empty(&tray_items))
+		return NULL;
+	return wl_container_of(tray_items.next, sample, link);
+}
+
+static void
+tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y)
+{
+	const char *method;
+
+	if (!tray_bus || !it)
+		return;
+	if (context_menu)
+		method = "ContextMenu";
+	else if (button == BTN_MIDDLE)
+		method = "SecondaryActivate";
+	else
+		method = "Activate";
+	tray_anchor_x = x;
+	tray_anchor_y = y;
+	tray_anchor_time_ms = monotonic_msec();
+	sd_bus_call_method(tray_bus, it->service, it->path,
+			"org.kde.StatusNotifierItem", method,
+			NULL, NULL, "ii", x, y);
 }
 
 static void
@@ -2930,9 +3920,49 @@ refreshstatusicons(void)
 		if (!m->statusbar.sysicons.tree || !m->showbar)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		rendericons(&m->statusbar.sysicons, barh, sysicons_text);
+		rendertrayicons(m, barh);
 		positionstatusmodules(m);
 	}
+}
+
+static void
+tray_update_icons_text(void)
+{
+	TrayItem *it;
+	size_t off = 0;
+	int running_width;
+	char segment[256];
+
+	snprintf(sysicons_text, sizeof(sysicons_text), "Tray");
+	off = strlen(sysicons_text);
+	if (off >= sizeof(sysicons_text))
+		off = sizeof(sysicons_text) - 1;
+	running_width = status_text_width(sysicons_text);
+
+	wl_list_for_each(it, &tray_items, link) {
+		const char *label = it->label[0] ? it->label : it->service;
+		int n;
+		it->x = running_width;
+		if (off ? snprintf(segment, sizeof(segment), " %s", label)
+				: snprintf(segment, sizeof(segment), "%s", label))
+			it->w = status_text_width(segment);
+		else
+			it->w = status_text_width(label);
+		if (it->w <= 0)
+			it->w = statusbar_font_spacing;
+		n = snprintf(sysicons_text + off, sizeof(sysicons_text) - off,
+				off ? " %s" : "%s", label);
+		if (n < 0)
+			break;
+		if ((size_t)n >= sizeof(sysicons_text) - off) {
+			sysicons_text[sizeof(sysicons_text) - 1] = '\0';
+			break;
+		}
+		off += (size_t)n;
+		running_width += it->w;
+	}
+
+	refreshstatusicons();
 }
 
 static void
@@ -2991,10 +4021,11 @@ updatestatuscpu(void *data)
 static int
 updatehoverfade(void *data)
 {
-	(void)data;
 	int need_more = 0;
 	Monitor *mon;
 	float step;
+
+	(void)data;
 
 	if (statusbar_hover_fade_ms <= 0)
 		return 0;
@@ -3314,8 +4345,10 @@ adjust_volume_by_steps(int steps)
 	if (vol < 0.0)
 		return 0;
 
-	if (volume_muted == 1)
-		system("wpctl set-mute @DEFAULT_AUDIO_SINK@ 0");
+	if (volume_muted == 1) {
+		int mute_res = system("wpctl set-mute @DEFAULT_AUDIO_SINK@ 0");
+		(void)mute_res;
+	}
 
 	vol += (double)steps * volume_step;
 	if (vol < 0.0)
@@ -3402,22 +4435,47 @@ buttonpress(struct wl_listener *listener, void *data)
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
 	switch (event->state) {
-		case WL_POINTER_BUTTON_STATE_PRESSED:
+	case WL_POINTER_BUTTON_STATE_PRESSED:
 		cursor_mode = CurPressed;
 		selmon = xytomon(cursor->x, cursor->y);
 		if (locked)
 			break;
 
-		if (event->button == BTN_LEFT && selmon && selmon->showbar) {
-			int lx = cursor->x - selmon->statusbar.area.x;
-			int ly = cursor->y - selmon->statusbar.area.y;
+		if (selmon && selmon->showbar) {
+			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
+			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
 			StatusModule *tags = &selmon->statusbar.tags;
 			StatusModule *vol = &selmon->statusbar.volume;
 			StatusModule *cpu = &selmon->statusbar.cpu;
+			StatusModule *icons = &selmon->statusbar.sysicons;
+			TrayItem *titem;
 
 			if (lx >= 0 && ly >= 0 &&
 					lx < selmon->statusbar.area.width &&
 					ly < selmon->statusbar.area.height) {
+				if (icons->width > 0 && lx >= icons->x && lx < icons->x + icons->width) {
+					int rel = lx - icons->x;
+					int barh = selmon->statusbar.area.height
+						? selmon->statusbar.area.height
+						: (int)statusbar_height;
+					TrayItem *it;
+					titem = NULL;
+					wl_list_for_each(it, &tray_items, link) {
+						if (rel >= it->x && rel < it->x + it->w) {
+							titem = it;
+							break;
+						}
+					}
+					if (!titem)
+						titem = tray_first_item();
+					if (titem) {
+						int gx = selmon->statusbar.area.x + icons->x + titem->x + titem->w / 2;
+						int gy = selmon->statusbar.area.y + barh;
+						tray_item_activate(titem, event->button,
+								event->button == BTN_RIGHT, gx, gy);
+					}
+					return;
+				}
 				if (cpu->width > 0 && lx >= cpu->x && lx < cpu->x + cpu->width) {
 					Arg arg = { .v = btopcmd };
 					spawn(&arg);
@@ -3429,7 +4487,7 @@ buttonpress(struct wl_listener *listener, void *data)
 					return;
 				}
 
-				if (lx < tags->width) {
+				if (event->button == BTN_LEFT && lx < tags->width) {
 					for (int i = 0; i < tags->box_count; i++) {
 						int bx = tags->box_x[i];
 						int bw = tags->box_w[i];
@@ -3528,6 +4586,8 @@ checkidleinhibitor(struct wlr_surface *exclude)
 void
 cleanup(void)
 {
+	TrayItem *it, *tmp;
+
 	cleanuplisteners();
 	if (status_timer) {
 		wl_event_source_remove(status_timer);
@@ -3540,6 +4600,24 @@ cleanup(void)
 	if (status_hover_timer) {
 		wl_event_source_remove(status_hover_timer);
 		status_hover_timer = NULL;
+	}
+	if (tray_event) {
+		wl_event_source_remove(tray_event);
+		tray_event = NULL;
+	}
+	if (tray_vtable_slot)
+		sd_bus_slot_unref(tray_vtable_slot);
+	if (tray_fdo_vtable_slot)
+		sd_bus_slot_unref(tray_fdo_vtable_slot);
+	if (tray_name_slot)
+		sd_bus_slot_unref(tray_name_slot);
+	if (tray_bus)
+		sd_bus_unref(tray_bus);
+	wl_list_for_each_safe(it, tmp, &tray_items, link) {
+		if (it->icon_buf)
+			wlr_buffer_drop(it->icon_buf);
+		wl_list_remove(&it->link);
+		free(it);
 	}
 #ifdef XWAYLAND
 	wlr_xwayland_destroy(xwayland);
@@ -4749,7 +5827,10 @@ mapnotify(struct wl_listener *listener, void *data)
 	 * If there is no parent, apply rules */
 	if ((p = client_get_parent(c))) {
 		c->isfloating = 1;
-		if (p->mon) {
+		if (tray_anchor_time_ms && monotonic_msec() - tray_anchor_time_ms <= 1000) {
+			c->geom.x = tray_anchor_x - c->geom.width / 2;
+			c->geom.y = tray_anchor_y;
+		} else if (p->mon) {
 			c->geom.x = (p->mon->w.width - c->geom.width) / 2 + p->mon->m.x;
 			c->geom.y = (p->mon->w.height - c->geom.height) / 2 + p->mon->m.y;
 		}
@@ -4827,7 +5908,7 @@ motionabsolute(struct wl_listener *listener, void *data)
 	motionnotify(event->time_msec, &event->pointer->base, dx, dy, dx, dy);
 }
 
-static int
+static int __attribute__((unused))
 node_contains_client(LayoutNode *node, Client *c)
 {
 	if (!node)
@@ -4878,14 +5959,14 @@ subtree_bounds(LayoutNode *node, Monitor *m, struct wlr_box *out)
 	return 1;
 }
 
-static LayoutNode *
+static __attribute__((unused)) LayoutNode *
 ancestor_split(LayoutNode *node, int want_vert)
 {
 	if (!node)
 		return NULL;
 	node = node->split_node;
 	while (node) {
-		if (!node->is_client_node && node->is_split_vertically == want_vert)
+		if (!node->is_client_node && node->is_split_vertically == (unsigned int)want_vert)
 			return node;
 		node = node->split_node;
 	}
@@ -4902,7 +5983,7 @@ closest_split_node(LayoutNode *client_node, int want_vert, double pointer,
 	struct wlr_box box;
 
 	while (n) {
-		if (!n->is_client_node && n->is_split_vertically == want_vert) {
+		if (!n->is_client_node && n->is_split_vertically == (unsigned int)want_vert) {
 			if (subtree_bounds(n, selmon, &box)) {
 				double ratio = n->split_ratio;
 				double div = want_vert ? box.x + box.width * ratio
@@ -4937,6 +6018,9 @@ apply_resize_axis_choice(void)
 static int
 resize_should_update(uint32_t time)
 {
+	uint32_t elapsed;
+	double dist;
+
 	if (!resizing_from_mouse || time == 0 || resize_interval_ms == 0)
 		return 1;
 
@@ -4947,8 +6031,8 @@ resize_should_update(uint32_t time)
 		return 1;
 	}
 
-	uint32_t elapsed = time - resize_last_time;
-	double dist = fabs(cursor->x - resize_last_x) + fabs(cursor->y - resize_last_y);
+	elapsed = time - resize_last_time;
+	dist = fabs(cursor->x - resize_last_x) + fabs(cursor->y - resize_last_y);
 
 	if (elapsed < resize_interval_ms && dist < resize_min_pixels)
 		return 0;
@@ -5133,28 +6217,28 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 				if (resize_use_v && resize_split_node && resize_start_box_v.width > 0) {
 					double current = resize_split_node->split_ratio;
 					ratio = resize_start_ratio_v + dx_total / resize_start_box_v.width;
-					if (ratio < 0.05f)
-						ratio = 0.05f;
-					if (ratio > 0.95f)
-						ratio = 0.95f;
-					if (fabs(ratio - current) >= resize_ratio_epsilon) {
-						resize_split_node->split_ratio = ratio;
-						changed = 1;
+						if (ratio < 0.05f)
+							ratio = 0.05f;
+						if (ratio > 0.95f)
+							ratio = 0.95f;
+						if (fabs(ratio - current) >= resize_ratio_epsilon) {
+							resize_split_node->split_ratio = (float)ratio;
+							changed = 1;
+						}
 					}
-				}
 
 				if (resize_use_h && resize_split_node_h && resize_start_box_h.height > 0) {
 					double current_h = resize_split_node_h->split_ratio;
 					ratio_h = resize_start_ratio_h + dy_total / resize_start_box_h.height;
-					if (ratio_h < 0.05f)
-						ratio_h = 0.05f;
-					if (ratio_h > 0.95f)
-						ratio_h = 0.95f;
-					if (fabs(ratio_h - current_h) >= resize_ratio_epsilon) {
-						resize_split_node_h->split_ratio = ratio_h;
-						changed = 1;
+						if (ratio_h < 0.05f)
+							ratio_h = 0.05f;
+						if (ratio_h > 0.95f)
+							ratio_h = 0.95f;
+						if (fabs(ratio_h - current_h) >= resize_ratio_epsilon) {
+							resize_split_node_h->split_ratio = (float)ratio_h;
+							changed = 1;
+						}
 					}
-				}
 
 			if (changed)
 				arrange(selmon);
@@ -5423,7 +6507,6 @@ updatetaghover(Monitor *m, double cx, double cy)
 	StatusModule *tags;
 	int lx, ly, hover = -1;
 	int bar_h;
-	int prev;
 
 	if (!m || !m->showbar)
 		return;
@@ -5447,7 +6530,6 @@ updatetaghover(Monitor *m, double cx, double cy)
 	if (hover == tags->hover_tag)
 		return;
 
-	prev = tags->hover_tag;
 	tags->hover_tag = hover;
 	bar_h = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
 	if (statusbar_hover_fade_ms <= 0) {
@@ -5469,10 +6551,11 @@ updatetaghover(Monitor *m, double cx, double cy)
 static void
 schedule_hover_timer(void)
 {
+	Monitor *mon;
+
 	if (!status_hover_timer)
 		return;
 
-	Monitor *mon;
 	wl_list_for_each(mon, &mons, link) {
 		Monitor *m = mon;
 		int active = (m->statusbar.tags.hover_tag >= 0);
@@ -5930,14 +7013,18 @@ setup(void)
 	 * clients from the Unix socket, manging Wayland globals, and so on. */
 	dpy = wl_display_create();
 	event_loop = wl_display_get_event_loop(dpy);
+	wl_list_init(&mons);
+	wl_list_init(&tray_items);
 	status_timer = wl_event_loop_add_timer(event_loop, updatestatusclock, NULL);
 	status_cpu_timer = wl_event_loop_add_timer(event_loop, updatestatuscpu, NULL);
 	status_hover_timer = wl_event_loop_add_timer(event_loop, updatehoverfade, NULL);
+	tray_init();
 	fcft_initialized = fcft_init(FCFT_LOG_COLORIZE_NEVER, 0, FCFT_LOG_CLASS_ERROR);
 	if (!fcft_initialized)
 		die("couldn't initialize fcft");
 	if (!loadstatusfont())
 		die("couldn't load statusbar font");
+	tray_update_icons_text();
 	backlight_available = findbacklightdevice(backlight_brightness_path,
 			sizeof(backlight_brightness_path),
 			backlight_max_path, sizeof(backlight_max_path));
@@ -6026,7 +7113,6 @@ setup(void)
 
 	/* Configure a listener to be notified when new outputs are available on the
 	 * backend. */
-	wl_list_init(&mons);
 	wl_signal_add(&backend->events.new_output, &new_output);
 
 	/* Set up our client lists, the xdg-shell and the layer-shell. The xdg-shell is a
@@ -6277,7 +7363,7 @@ togglefullscreenadaptivesync(const Arg *arg)
 }
 
 void
-togglesticky(const Arg *arg)
+__attribute__((unused)) togglesticky(const Arg *arg)
 {
 	Client *c = focustop(selmon);
 
