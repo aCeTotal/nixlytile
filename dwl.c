@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <strings.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -4475,6 +4476,11 @@ static void
 tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y)
 {
 	const char *method;
+	const char *ifaces[] = {
+		"org.kde.StatusNotifierItem",
+		"org.freedesktop.StatusNotifierItem",
+	};
+	int r = -1;
 
 	if (!tray_bus || !it)
 		return;
@@ -4487,9 +4493,27 @@ tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y)
 	tray_anchor_x = x;
 	tray_anchor_y = y;
 	tray_anchor_time_ms = monotonic_msec();
-	sd_bus_call_method(tray_bus, it->service, it->path,
-			"org.kde.StatusNotifierItem", method,
-			NULL, NULL, "ii", x, y);
+	for (int attempt = 0; attempt < 2; attempt++) {
+		for (size_t i = 0; i < LENGTH(ifaces); i++) {
+			r = sd_bus_call_method(tray_bus, it->service,
+					it->path ? it->path : "/StatusNotifierItem",
+					ifaces[i], method,
+					NULL, NULL, "ii", x, y);
+			if (r >= 0)
+				return;
+		}
+		/* If bus is broken, try to re-init once */
+		if (r == -EBADFD || r == -EPIPE || r == -ENOTCONN) {
+			tray_init();
+			if (!tray_bus)
+				break;
+		} else {
+			break;
+		}
+	}
+	fprintf(stderr, "tray: %s %s failed on %s%s: %s\n",
+			method, it->service, it->path ? it->path : "",
+			it->path ? "" : "(null)", strerror(-r));
 }
 
 static void
@@ -5171,6 +5195,7 @@ buttonpress(struct wl_listener *listener, void *data)
 					int barh = selmon->statusbar.area.height
 						? selmon->statusbar.area.height
 						: (int)statusbar_height;
+					int icon_x = selmon->statusbar.area.x + icons->x;
 					TrayItem *it;
 					titem = NULL;
 					wl_list_for_each(it, &tray_items, link) {
@@ -5182,8 +5207,10 @@ buttonpress(struct wl_listener *listener, void *data)
 					if (!titem)
 						titem = tray_first_item();
 					if (titem) {
-						int gx = selmon->statusbar.area.x + icons->x + titem->x + titem->w / 2;
-						int gy = selmon->statusbar.area.y + barh;
+						int icon_h = (titem->icon_h > 0) ? titem->icon_h : barh;
+						int icon_y = selmon->statusbar.area.y + MAX(0, (barh - icon_h) / 2);
+						int gx = icon_x + titem->x + titem->w / 2;
+						int gy = icon_y + icon_h + 2; /* drop menu just under icon */
 						tray_item_activate(titem, event->button,
 								event->button == BTN_RIGHT, gx, gy);
 					}
