@@ -1,0 +1,27 @@
+<!--?xml version="1.0" encoding="UTF-8"?-->
+<svg xmlns="http://www.w3.org/2000/svg" height="800px" width="800px" version="1.1" viewBox="0 0 496 496" xml:space="preserve">
+
+  <!-- Speaker body -->
+  <path style="fill:#61479E;" d="M235.2,40.8c-7.2,0-14.4,4-17.6,10.4L80.8,128.8
+           C64,123.2,44.8,120,36,120h-3.2
+           C15.2,120,0,134.4,0,152.8v190.4
+           C0,361.6,15.2,376,32.8,376h2.4
+           c8.8,0,28-3.2,44.8-8.8l136.8,77.6
+           c3.2,6.4,10.4,10.4,18.4,10.4
+           c11.2,0,20.8-8.8,20.8-20V60.8
+           C256,49.6,246.4,40.8,235.2,40.8z"></path>
+
+  <path style="fill:#7A61C9;" d="M216,52.8l-136,76
+           c-17.6-5.6-35.2-8.8-44-8.8h-3.2
+           C15.2,120,0,134.4,0,152.8V256
+           h185.6c18.4,0,30.4-17.6,30.4-35.2
+           V52.8z"></path>
+
+  <!-- Red X -->
+  <g>
+    <line x1="312" y1="188" x2="432" y2="308" stroke="#E53935" stroke-width="28" stroke-linecap="round"></line>
+
+    <line x1="312" y1="308" x2="432" y2="188" stroke="#E53935" stroke-width="28" stroke-linecap="round"></line>
+  </g>
+
+</svg>
