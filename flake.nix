@@ -15,10 +15,12 @@
           wlrootsPc = "wlroots-${lib.versions.majorMinor pkgs.wlroots.version}";
 
           iconDeps = with pkgs; [
+            cairo
             librsvg
             gdk-pixbuf
             hicolor-icon-theme
             adwaita-icon-theme
+            papirus-icon-theme
             libpng
             libjpeg
           ];
@@ -96,6 +98,7 @@
             ] ++ ps.iconDeps;
 
             makeFlags = [ "PKG_CONFIG=${pkgs.pkg-config}/bin/pkg-config" ];
+            dontWrapQtApps = true;
 
             buildPhase = ''
               runHook preBuild
@@ -110,7 +113,9 @@
               make PREFIX=$out MANDIR=$out/share/man DATADIR=$out/share install
               mkdir -p $out/share/dwl/wallpapers
               cp -r wallpapers/* $out/share/dwl/wallpapers/
-              wrapProgram $out/bin/dwl --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.swaybg ]}
+              wrapProgram $out/bin/dwl \
+                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.swaybg ]} \
+                --prefix XDG_DATA_DIRS : "${pkgs.papirus-icon-theme}/share:${pkgs.adwaita-icon-theme}/share:${pkgs.hicolor-icon-theme}/share:${pkgs.shared-mime-info}/share"
               runHook postInstall
             '';
 

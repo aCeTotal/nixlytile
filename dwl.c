@@ -11,15 +11,19 @@
 #include <limits.h>
 #include <getopt.h>
 #include <libinput.h>
+#include <cairo/cairo.h>
+#include <librsvg/rsvg.h>
 #include <linux/input-event-codes.h>
 #include <math.h>
 #include <drm_fourcc.h>
 #include <fcft/fcft.h>
 #include <pixman.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <stdint.h>
@@ -1375,13 +1379,695 @@ rendervolume(StatusModule *module, int bar_height, const char *text)
 }
 
 static int
+pathisdir(const char *path)
+{
+	struct stat st;
+
+	return path && *path && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static int
+pathisfile(const char *path)
+{
+	struct stat st;
+
+	return path && *path && stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static int
+has_svg_extension(const char *path)
+{
+	size_t len;
+
+	if (!path || !*path)
+		return 0;
+
+	len = strlen(path);
+	if (len >= 4 && strcasecmp(path + len - 4, ".svg") == 0)
+		return 1;
+	if (len >= 5 && strcasecmp(path + len - 5, ".svgz") == 0)
+		return 1;
+	return 0;
+}
+
+static int
+strip_symbolic_suffix(const char *name, char *out, size_t outlen)
+{
+	size_t len, suffix = strlen("-symbolic");
+
+	if (!name || !out || outlen == 0)
+		return 0;
+
+	len = strlen(name);
+	if (len > suffix && strcmp(name + len - suffix, "-symbolic") == 0) {
+		size_t copylen = len - suffix;
+		if (copylen >= outlen)
+			copylen = outlen - 1;
+		memcpy(out, name, copylen);
+		out[copylen] = '\0';
+		return 1;
+	}
+	return 0;
+}
+
+static void
+add_icon_root_paths(const char *base, const char *themes[], size_t theme_count,
+		char pathbufs[][PATH_MAX], size_t *pathcount, size_t max_paths)
+{
+	if (!base || !*base || !themes || !pathbufs || !pathcount)
+		return;
+
+	for (size_t i = 0; i < theme_count && *pathcount < max_paths; i++) {
+		char themed[PATH_MAX];
+		snprintf(themed, sizeof(themed), "%s/%s", base, themes[i]);
+		snprintf(pathbufs[*pathcount], PATH_MAX, "%s", themed);
+		(*pathcount)++;
+	}
+
+	if (*pathcount < max_paths) {
+		snprintf(pathbufs[*pathcount], PATH_MAX, "%s", base);
+		(*pathcount)++;
+	}
+}
+
+static GdkPixbuf *
+pixbuf_from_cairo_surface(cairo_surface_t *surface, int width, int height)
+{
+	GdkPixbuf *pixbuf;
+	guchar *dst;
+	const uint8_t *src;
+	int dst_stride, src_stride;
+
+	if (!surface || width <= 0 || height <= 0)
+		return NULL;
+	if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS)
+		return NULL;
+
+	cairo_surface_flush(surface);
+	src = cairo_image_surface_get_data(surface);
+	src_stride = cairo_image_surface_get_stride(surface);
+	if (!src)
+		return NULL;
+
+	pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, 1, 8, width, height);
+	if (!pixbuf)
+		return NULL;
+	dst = gdk_pixbuf_get_pixels(pixbuf);
+	dst_stride = gdk_pixbuf_get_rowstride(pixbuf);
+
+	for (int y = 0; y < height; y++) {
+		const uint32_t *srow = (const uint32_t *)(src + (size_t)y * (size_t)src_stride);
+		guchar *drow = dst + (size_t)y * (size_t)dst_stride;
+		for (int x = 0; x < width; x++) {
+			uint32_t s = srow[x];
+			uint8_t a = (uint8_t)(s >> 24);
+			uint8_t r = (uint8_t)(s >> 16);
+			uint8_t g = (uint8_t)(s >> 8);
+			uint8_t b = (uint8_t)s;
+
+			if (a > 0) {
+				/* Un-premultiply */
+				r = (uint8_t)((((uint32_t)r) * 255u + a / 2u) / a);
+				g = (uint8_t)((((uint32_t)g) * 255u + a / 2u) / a);
+				b = (uint8_t)((((uint32_t)b) * 255u + a / 2u) / a);
+			} else {
+				r = g = b = 0;
+			}
+
+			drow[(size_t)x * 4] = r;
+			drow[(size_t)x * 4 + 1] = g;
+			drow[(size_t)x * 4 + 2] = b;
+			drow[(size_t)x * 4 + 3] = a;
+		}
+	}
+
+	return pixbuf;
+}
+
+static void
+tray_consider_icon(const char *path, int size_hint, int desired_h,
+		char *best_path, int *best_diff, int *found)
+{
+	int diff;
+
+	if (!path || !*path || !best_path || !best_diff || !found)
+		return;
+	if (!pathisfile(path) || access(path, R_OK) != 0)
+		return;
+
+	if (size_hint > 0 && desired_h > 0)
+		diff = abs(size_hint - desired_h);
+	else if (desired_h > 0 && size_hint <= 0)
+		diff = desired_h;
+	else
+		diff = 0;
+
+	if (!*found || diff < *best_diff) {
+		*best_diff = diff;
+		snprintf(best_path, PATH_MAX, "%s", path);
+		*found = 1;
+	}
+}
+
+static struct wlr_buffer *
+statusbar_buffer_from_pixbuf(GdkPixbuf *pixbuf, int target_h, int *out_w, int *out_h)
+{
+	GdkPixbuf *scaled = NULL;
+	guchar *pixels;
+	int w, h, nchan, stride;
+	uint8_t *argb = NULL;
+	size_t bufsize;
+	struct wlr_buffer *buf = NULL;
+
+	if (!pixbuf)
+		return NULL;
+
+	w = gdk_pixbuf_get_width(pixbuf);
+	h = gdk_pixbuf_get_height(pixbuf);
+	if (w <= 0 || h <= 0)
+		goto out;
+
+	if (target_h > 0 && h > target_h) {
+		int target_w = (int)lround(((double)w * (double)target_h) / (double)h);
+		if (target_w <= 0)
+			target_w = 1;
+		scaled = gdk_pixbuf_scale_simple(pixbuf, target_w, target_h, GDK_INTERP_BILINEAR);
+		if (scaled) {
+			g_object_unref(pixbuf);
+			pixbuf = scaled;
+			w = target_w;
+			h = target_h;
+		}
+	}
+
+	nchan = gdk_pixbuf_get_n_channels(pixbuf);
+	if (nchan < 3)
+		goto out;
+	stride = gdk_pixbuf_get_rowstride(pixbuf);
+	pixels = gdk_pixbuf_get_pixels(pixbuf);
+	if (!pixels)
+		goto out;
+
+	bufsize = (size_t)w * (size_t)h * 4;
+	argb = calloc(1, bufsize);
+	if (!argb)
+		goto out;
+
+	for (int y = 0; y < h; y++) {
+		const guchar *row = pixels + (size_t)y * (size_t)stride;
+		for (int x = 0; x < w; x++) {
+			const guchar *p = row + (size_t)x * (size_t)nchan;
+			uint8_t r = p[0];
+			uint8_t g = p[1];
+			uint8_t b = p[2];
+			uint8_t a = (nchan >= 4 && gdk_pixbuf_get_has_alpha(pixbuf)) ? p[3] : 255;
+			size_t idx = ((size_t)y * (size_t)w + (size_t)x) * 4;
+			argb[idx] = a;
+			argb[idx + 1] = r;
+			argb[idx + 2] = g;
+			argb[idx + 3] = b;
+		}
+	}
+
+	buf = statusbar_buffer_from_argb32((const uint32_t *)argb, w, h);
+	if (buf) {
+		if (out_w)
+			*out_w = w;
+		if (out_h)
+			*out_h = h;
+	}
+
+out:
+	free(argb);
+	g_object_unref(pixbuf);
+	return buf;
+}
+
+static int
+tray_load_svg_pixbuf(const char *path, int desired_h, GdkPixbuf **out_pixbuf)
+{
+	RsvgHandle *handle = NULL;
+	GError *gerr = NULL;
+	double svg_w = 0.0, svg_h = 0.0;
+	int target_w, target_h;
+	cairo_surface_t *surface = NULL;
+	cairo_t *cr = NULL;
+	GdkPixbuf *pixbuf = NULL;
+
+	if (!path || !*path || !out_pixbuf)
+		return -1;
+
+	handle = rsvg_handle_new_from_file(path, &gerr);
+	if (!handle) {
+		if (gerr) {
+			fprintf(stderr, "tray: failed to parse SVG '%s': %s\n",
+					path, gerr->message);
+			g_error_free(gerr);
+		}
+		return -1;
+	}
+
+	if (!rsvg_handle_get_intrinsic_size_in_pixels(handle, &svg_w, &svg_h) ||
+			svg_w <= 0.0 || svg_h <= 0.0) {
+		RsvgDimensionData dim = {0};
+		rsvg_handle_get_dimensions(handle, &dim);
+		svg_w = dim.width;
+		svg_h = dim.height;
+	}
+
+	target_h = (desired_h > 0) ? desired_h :
+		((svg_h > 0.0) ? (int)lround(svg_h) : 24);
+	if (target_h <= 0)
+		target_h = 24;
+	if (svg_w > 0.0 && svg_h > 0.0)
+		target_w = MAX(1, (int)lround((svg_w * (double)target_h) / svg_h));
+	else
+		target_w = target_h;
+
+	surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, target_w, target_h);
+	if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS)
+		goto out;
+
+	cr = cairo_create(surface);
+	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.0);
+	cairo_paint(cr);
+
+	{
+		RsvgRectangle viewport = {
+			.x = 0,
+			.y = 0,
+			.width = (double)target_w,
+			.height = (double)target_h,
+		};
+		if (!rsvg_handle_render_document(handle, cr, &viewport, &gerr)) {
+			if (gerr) {
+				fprintf(stderr, "tray: failed to render SVG '%s': %s\n",
+						path, gerr->message);
+				g_error_free(gerr);
+				gerr = NULL;
+			}
+			goto out;
+		}
+	}
+
+	cairo_destroy(cr);
+	cr = NULL;
+	pixbuf = pixbuf_from_cairo_surface(surface, target_w, target_h);
+
+out:
+	if (cr)
+		cairo_destroy(cr);
+	if (surface)
+		cairo_surface_destroy(surface);
+	if (handle)
+		g_object_unref(handle);
+	if (!pixbuf && gerr) {
+		fprintf(stderr, "tray: failed to load SVG '%s': %s\n",
+				path, gerr->message);
+	}
+	if (gerr)
+		g_error_free(gerr);
+
+	if (!pixbuf)
+		return -1;
+
+	*out_pixbuf = pixbuf;
+	return 0;
+}
+
+static int
+tray_load_icon_file(TrayItem *it, const char *path, int desired_h)
+{
+	GError *gerr = NULL;
+	struct wlr_buffer *buf;
+	int w = 0, h = 0;
+	GdkPixbuf *pixbuf = NULL;
+
+	if (!it || !path || !*path)
+		return -1;
+
+	pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
+	if (!pixbuf) {
+		if (gerr) {
+			fprintf(stderr, "tray: failed to load icon '%s': %s\n", path, gerr->message);
+			g_error_free(gerr);
+			gerr = NULL;
+		}
+		if (!has_svg_extension(path) ||
+				tray_load_svg_pixbuf(path, desired_h, &pixbuf) != 0)
+			return -1;
+	}
+
+	buf = statusbar_buffer_from_pixbuf(pixbuf, desired_h, &w, &h);
+	if (!buf)
+		return -1;
+
+	if (it->icon_buf)
+		wlr_buffer_drop(it->icon_buf);
+	it->icon_buf = buf;
+	it->icon_w = w;
+	it->icon_h = h;
+	return 0;
+}
+
+static int
+tray_lookup_icon_in_theme(const char *theme_root, const char *name, int desired_h,
+		char *best_path, int *best_diff, int *found)
+{
+	static const char *subdirs[] = {
+		"", "status", "apps", "panel", "actions",
+		"devices", "emblems", "places", "categories", "mimetypes"
+	};
+	static const char *exts[] = { "png", "svg", "xpm", "jpg", "jpeg" };
+	const int base_sizes[] = { 16, 22, 24, 32, 48, 64, 96, 128, 256 };
+	int sizes[LENGTH(base_sizes) + 1] = {0};
+	size_t size_count = 0;
+	char symbolic[128] = {0};
+	char nosymbolic[128] = {0};
+	const char *candidates[3] = { name, NULL, NULL };
+	size_t cand_count = 1;
+
+	if (!theme_root || !name || !*name || !pathisdir(theme_root))
+		return -1;
+
+	if (desired_h > 0)
+		sizes[size_count++] = desired_h;
+	for (size_t i = 0; i < LENGTH(base_sizes) && size_count < LENGTH(sizes); i++) {
+		if (desired_h > 0 && base_sizes[i] == desired_h)
+			continue;
+		sizes[size_count++] = base_sizes[i];
+	}
+
+	if (strip_symbolic_suffix(name, nosymbolic, sizeof(nosymbolic))) {
+		candidates[0] = nosymbolic; /* Prefer colored variant over symbolic */
+		candidates[cand_count++] = name;
+	} else {
+		candidates[0] = name;
+	}
+	if (!strstr(name, "-symbolic") && cand_count < LENGTH(candidates)) {
+		snprintf(symbolic, sizeof(symbolic), "%s-symbolic", name);
+		candidates[cand_count++] = symbolic;
+	}
+
+	for (size_t s = 0; s < size_count; s++) {
+		char sizedir[32];
+		snprintf(sizedir, sizeof(sizedir), "%dx%d", sizes[s], sizes[s]);
+		for (size_t d = 0; d < LENGTH(subdirs); d++) {
+			for (size_t c = 0; c < cand_count; c++) {
+				if (!candidates[c])
+					continue;
+				for (size_t e = 0; e < LENGTH(exts); e++) {
+					char path[PATH_MAX];
+					if (*subdirs[d])
+						snprintf(path, sizeof(path), "%s/%s/%s/%s.%s",
+								theme_root, sizedir, subdirs[d], candidates[c], exts[e]);
+					else
+						snprintf(path, sizeof(path), "%s/%s/%s.%s",
+								theme_root, sizedir, candidates[c], exts[e]);
+					tray_consider_icon(path, sizes[s], desired_h, best_path, best_diff, found);
+					if (*found && *best_diff == 0)
+						return 0;
+				}
+			}
+		}
+	}
+
+	for (size_t d = 0; d < LENGTH(subdirs); d++) {
+		for (size_t c = 0; c < cand_count; c++) {
+			if (!candidates[c])
+				continue;
+			for (size_t e = 0; e < LENGTH(exts); e++) {
+				char path[PATH_MAX];
+				if (*subdirs[d])
+					snprintf(path, sizeof(path), "%s/scalable/%s/%s.%s",
+							theme_root, subdirs[d], candidates[c], exts[e]);
+				else
+					snprintf(path, sizeof(path), "%s/scalable/%s.%s",
+							theme_root, candidates[c], exts[e]);
+				tray_consider_icon(path, desired_h, desired_h, best_path, best_diff, found);
+				if (*found && *best_diff == 0)
+					return 0;
+			}
+		}
+	}
+
+	for (size_t d = 0; d < LENGTH(subdirs); d++) {
+		for (size_t c = 0; c < cand_count; c++) {
+			if (!candidates[c])
+				continue;
+			for (size_t e = 0; e < LENGTH(exts); e++) {
+				char path[PATH_MAX];
+				if (*subdirs[d])
+					snprintf(path, sizeof(path), "%s/%s/%s.%s",
+							theme_root, subdirs[d], candidates[c], exts[e]);
+				else
+					snprintf(path, sizeof(path), "%s/%s.%s",
+							theme_root, candidates[c], exts[e]);
+				tray_consider_icon(path, desired_h, desired_h, best_path, best_diff, found);
+				if (*found && *best_diff == 0)
+					return 0;
+			}
+		}
+	}
+
+	return *found ? 0 : -1;
+}
+
+static int
+tray_lookup_icon_in_root(const char *base, const char *name, int desired_h,
+		char *best_path, int *best_diff, int *found)
+{
+	DIR *dir;
+	struct dirent *ent;
+	static const char *exts[] = { "png", "svg", "xpm", "jpg", "jpeg" };
+
+	if (!base || !*base || !name || !*name)
+		return -1;
+
+	tray_lookup_icon_in_theme(base, name, desired_h, best_path, best_diff, found);
+	if (*found && *best_diff == 0)
+		return 0;
+
+	if (pathisdir(base)) {
+		dir = opendir(base);
+		if (dir) {
+			while ((ent = readdir(dir))) {
+				char sub[PATH_MAX];
+				if (ent->d_name[0] == '.')
+					continue;
+				snprintf(sub, sizeof(sub), "%s/%s", base, ent->d_name);
+				if (!pathisdir(sub))
+					continue;
+				tray_lookup_icon_in_theme(sub, name, desired_h, best_path, best_diff, found);
+				if (*found && *best_diff == 0) {
+					closedir(dir);
+					return 0;
+				}
+			}
+			closedir(dir);
+		}
+	}
+
+	for (size_t e = 0; e < LENGTH(exts); e++) {
+		char path[PATH_MAX];
+		snprintf(path, sizeof(path), "%s/%s.%s", base, name, exts[e]);
+		tray_consider_icon(path, desired_h, desired_h, best_path, best_diff, found);
+		if (*found && *best_diff == 0)
+			return 0;
+	}
+
+	return *found ? 0 : -1;
+}
+
+static int
+tray_find_icon_path(const char *name, const char *theme_path, int desired_h,
+		char *out, size_t outlen)
+{
+	const char *xdg_data_dirs;
+	char best_path[PATH_MAX] = {0};
+	char pathbufs[64][PATH_MAX];
+	size_t pathcount = 0;
+	int found = 0;
+	int best_diff = INT_MAX;
+	const char *themes[16] = {0};
+	size_t theme_count = 0;
+	char theme_env[256] = {0};
+	const char *default_themes[] = {
+		"Papirus", "Papirus-Dark", "Papirus-Light", "Adwaita", "hicolor"
+	};
+
+#define ADD_PATH(P) do { \
+	if ((P) && *(P) && pathcount < LENGTH(pathbufs)) { \
+		snprintf(pathbufs[pathcount], sizeof(pathbufs[pathcount]), "%s", (P)); \
+		pathcount++; \
+	} \
+} while (0)
+
+	if (getenv("STATUSBAR_ICON_THEMES")) {
+		snprintf(theme_env, sizeof(theme_env), "%s", getenv("STATUSBAR_ICON_THEMES"));
+		for (char *tok = theme_env; tok && *tok && theme_count < LENGTH(themes); ) {
+			char *sep = strchr(tok, ':');
+			if (sep)
+				*sep = '\0';
+			if (*tok)
+				themes[theme_count++] = tok;
+			if (!sep)
+				break;
+			tok = sep + 1;
+		}
+	}
+	if (theme_count == 0) {
+		for (size_t i = 0; i < LENGTH(default_themes) && theme_count < LENGTH(themes); i++)
+			themes[theme_count++] = default_themes[i];
+	}
+
+	if (!name || !*name || !out || outlen == 0)
+		return -1;
+
+	if (name[0] == '/' && access(name, R_OK) == 0) {
+		snprintf(out, outlen, "%s", name);
+		return 0;
+	}
+
+	if (theme_path && *theme_path && pathcount < LENGTH(pathbufs)) {
+		ADD_PATH(theme_path);
+	}
+
+	{
+		const char *xdg_home = getenv("XDG_DATA_HOME");
+		const char *home = getenv("HOME");
+		if (xdg_home && *xdg_home && pathcount < LENGTH(pathbufs)) {
+			char path[PATH_MAX];
+			snprintf(path, sizeof(path), "%s/icons", xdg_home);
+			add_icon_root_paths(path, themes, theme_count, pathbufs, &pathcount, LENGTH(pathbufs));
+		} else if (home && *home && pathcount < LENGTH(pathbufs)) {
+			char path[PATH_MAX];
+			snprintf(path, sizeof(path), "%s/.local/share/icons", home);
+			add_icon_root_paths(path, themes, theme_count, pathbufs, &pathcount, LENGTH(pathbufs));
+		}
+		if (home && *home && pathcount < LENGTH(pathbufs)) {
+			char path[PATH_MAX];
+			snprintf(path, sizeof(path), "%s/.icons", home);
+			add_icon_root_paths(path, themes, theme_count, pathbufs, &pathcount, LENGTH(pathbufs));
+		}
+	}
+
+	xdg_data_dirs = getenv("XDG_DATA_DIRS");
+	if (!xdg_data_dirs || !*xdg_data_dirs)
+		xdg_data_dirs = "/usr/local/share:/usr/share";
+	while (*xdg_data_dirs && pathcount < LENGTH(pathbufs)) {
+		const char *end = strchrnul(xdg_data_dirs, ':');
+		size_t len = (size_t)(end - xdg_data_dirs);
+		if (len > 0 && len < sizeof(pathbufs[0]) - 7) {
+			char path[PATH_MAX];
+			snprintf(path, sizeof(path), "%.*s/icons",
+					(int)len, xdg_data_dirs);
+			add_icon_root_paths(path, themes, theme_count, pathbufs, &pathcount, LENGTH(pathbufs));
+		}
+		if (*end == '\0')
+			break;
+		xdg_data_dirs = end + 1;
+	}
+
+	{
+		const char *nix_profiles = getenv("NIX_PROFILES");
+		while (nix_profiles && *nix_profiles && pathcount < LENGTH(pathbufs)) {
+			const char *end = strchrnul(nix_profiles, ' ');
+			size_t len = (size_t)(end - nix_profiles);
+			if (len > 0 && len < sizeof(pathbufs[0]) - 14 && pathcount < LENGTH(pathbufs)) {
+				char path[PATH_MAX];
+				snprintf(path, sizeof(path),
+						"%.*s/share/icons", (int)len, nix_profiles);
+				add_icon_root_paths(path, themes, theme_count, pathbufs, &pathcount, LENGTH(pathbufs));
+			}
+			if (len > 0 && len < sizeof(pathbufs[0]) - 16 && pathcount < LENGTH(pathbufs)) {
+				char path[PATH_MAX];
+				snprintf(path, sizeof(path),
+						"%.*s/share/pixmaps", (int)len, nix_profiles);
+				ADD_PATH(path);
+			}
+			if (*end == '\0')
+				break;
+			nix_profiles = end + 1;
+		}
+	}
+
+	if (pathcount < LENGTH(pathbufs)) {
+		add_icon_root_paths("/run/current-system/sw/share/icons", themes, theme_count, pathbufs, &pathcount, LENGTH(pathbufs));
+	}
+	if (pathcount < LENGTH(pathbufs)) {
+		ADD_PATH("/run/current-system/sw/share/pixmaps");
+	}
+
+	if (pathcount < LENGTH(pathbufs)) {
+		ADD_PATH("/usr/share/pixmaps");
+	}
+
+#undef ADD_PATH
+
+	for (size_t i = 0; i < pathcount; i++) {
+		tray_lookup_icon_in_root(pathbufs[i], name, desired_h, best_path, &best_diff, &found);
+		if (found && best_diff == 0)
+			break;
+	}
+
+	if (!found)
+		return -1;
+
+	snprintf(out, outlen, "%s", best_path);
+	return 0;
+}
+
+static int
+tray_get_string_property(TrayItem *it, const char *prop, char *out, size_t outlen)
+{
+	const char *ifaces[] = {
+		"org.kde.StatusNotifierItem",
+		"org.freedesktop.StatusNotifierItem",
+	};
+	sd_bus_message *reply = NULL;
+	sd_bus_error err = SD_BUS_ERROR_NULL;
+	const char *val = NULL;
+	int r = -1;
+
+	if (!tray_bus || !it || !prop)
+		return -1;
+
+	for (size_t iface_idx = 0; iface_idx < LENGTH(ifaces); iface_idx++) {
+		sd_bus_error_free(&err);
+		sd_bus_message_unref(reply);
+		reply = NULL;
+
+		r = sd_bus_call_method(tray_bus, it->service, it->path,
+				"org.freedesktop.DBus.Properties", "Get",
+				&err, &reply, "ss", ifaces[iface_idx], prop);
+		if (r >= 0)
+			break;
+	}
+	if (r < 0 || !reply)
+		goto out;
+	if (sd_bus_message_enter_container(reply, 'v', "s") < 0)
+		goto out;
+	if (sd_bus_message_read(reply, "s", &val) < 0)
+		goto out;
+	if (val && *val && out && outlen > 0)
+		snprintf(out, outlen, "%s", val);
+
+out:
+	sd_bus_error_free(&err);
+	sd_bus_message_unref(reply);
+	return (val && *val) ? 0 : -1;
+}
+
+static int
 tray_item_load_icon(TrayItem *it)
 {
 	sd_bus_message *reply = NULL;
 	sd_bus_error err = SD_BUS_ERROR_NULL;
 	const void *best_data = NULL;
 	size_t best_len = 0;
-	int desired_h = statusbar_height > 0 ? (int)statusbar_height : 24;
+	int desired_h = statusbar_height > 0 ? MAX(12, (int)statusbar_height - 4) : 24;
 	int best_score = INT_MAX;
 	int best_w = 0, best_h = 0;
 	int r;
@@ -1394,6 +2080,30 @@ tray_item_load_icon(TrayItem *it)
 
 	if (!tray_bus || !it)
 		return -1;
+
+	/* Prefer themed icons first so the user's icon theme takes effect */
+	{
+		char icon_theme_path[PATH_MAX] = {0};
+		char icon_path[PATH_MAX] = {0};
+		char icon_name[128] = {0};
+
+		tray_get_string_property(it, "IconThemePath", icon_theme_path,
+				sizeof(icon_theme_path));
+
+		if (tray_get_string_property(it, "AttentionIconName", icon_name, sizeof(icon_name)) == 0 &&
+				tray_find_icon_path(icon_name, icon_theme_path, desired_h,
+					icon_path, sizeof(icon_path)) == 0 &&
+				tray_load_icon_file(it, icon_path, desired_h) == 0)
+			return 0;
+
+		memset(icon_name, 0, sizeof(icon_name));
+		memset(icon_path, 0, sizeof(icon_path));
+		if (tray_get_string_property(it, "IconName", icon_name, sizeof(icon_name)) == 0 &&
+				tray_find_icon_path(icon_name, icon_theme_path, desired_h,
+					icon_path, sizeof(icon_path)) == 0 &&
+				tray_load_icon_file(it, icon_path, desired_h) == 0)
+			return 0;
+	}
 
 	for (prop_idx = 0; prop_idx < (int)LENGTH(props); prop_idx++) {
 		best_data = NULL;
@@ -3016,6 +3726,9 @@ tray_init(void)
 		tray_bus = NULL;
 		return;
 	}
+
+	/* Keep icon/property queries from stalling the compositor for too long */
+	sd_bus_set_method_call_timeout(tray_bus, 2 * 1000 * 1000); /* 2s */
 
 	r = sd_bus_request_name(tray_bus, "org.kde.StatusNotifierWatcher", name_flags);
 	if (r < 0) {
