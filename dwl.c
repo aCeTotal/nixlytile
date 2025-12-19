@@ -177,6 +177,33 @@ typedef struct {
 	int visible;
 } NetPopup;
 
+typedef struct TrayMenuEntry {
+	int id;
+	int enabled;
+	int is_separator;
+	int depth;
+	int has_submenu;
+	int toggle_type;
+	int toggle_state;
+	int y;
+	int height;
+	char label[256];
+	struct wl_list link;
+} TrayMenuEntry;
+
+typedef struct {
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_tree *bg;
+	int width;
+	int height;
+	int visible;
+	int x;
+	int y;
+	char service[128];
+	char menu_path[128];
+	struct wl_list entries;
+} TrayMenu;
+
 struct StatusBar {
 	struct wlr_scene_tree *tree;
 	struct wlr_box area;
@@ -188,8 +215,10 @@ struct StatusBar {
 	StatusModule volume;
 	StatusModule ram;
 	StatusModule tags;
+	StatusModule traylabel;
 	CpuPopup cpu_popup;
 	NetPopup net_popup;
+	TrayMenu tray_menu;
 	StatusModule sysicons;
 };
 
@@ -197,6 +226,10 @@ typedef struct TrayItem {
 	char service[128];
 	char path[128];
 	char label[64];
+	char menu[128];
+	int has_menu;
+	int icon_tried;
+	int icon_failed;
 	int x;
 	int w;
 	int icon_w;
@@ -551,6 +584,17 @@ static int tray_property_get_protocol_version(sd_bus *bus, const char *path, con
 static int tray_item_load_icon(TrayItem *it);
 static int tray_render_label(StatusModule *module, const char *text, int x, int bar_height);
 static void tray_emit_host_registered(void);
+static void tray_menu_clear(TrayMenu *menu);
+static void tray_menu_hide(Monitor *m);
+static void tray_menu_hide_all(void);
+static int tray_item_get_menu_path(TrayItem *it);
+static int tray_menu_open_at(Monitor *m, TrayItem *it, int icon_x);
+static void tray_menu_render(Monitor *m);
+static TrayMenuEntry *tray_menu_entry_at(Monitor *m, int lx, int ly);
+static int tray_menu_send_event(TrayMenu *menu, TrayMenuEntry *entry, uint32_t time_msec);
+static int tray_menu_parse_node(sd_bus_message *msg, TrayMenu *menu, int depth, int max_depth);
+static int tray_menu_parse_node_body(sd_bus_message *msg, TrayMenu *menu, int depth, int max_depth);
+static void tray_sanitize_label(const char *src, char *dst, size_t len);
 static int tray_search_item_path(const char *service, const char *start_path,
 		char *out, size_t outlen, int depth);
 static int tray_find_item_path(const char *service, char *path, size_t pathlen);
@@ -783,6 +827,7 @@ static const double volume_max_percent = 150.0;
 static double cpu_last_core_percent[MAX_CPU_CORES];
 static int cpu_core_count;
 static char sysicons_text[64] = "Tray";
+static const char tray_label_text[] = "Tray";
 
 /* global event handlers */
 static struct wl_listener cursor_axis = {.notify = axisnotify};
@@ -1708,16 +1753,31 @@ tray_load_icon_file(TrayItem *it, const char *path, int desired_h)
 	if (!it || !path || !*path)
 		return -1;
 
-	pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
-	if (!pixbuf) {
-		if (gerr) {
-			fprintf(stderr, "tray: failed to load icon '%s': %s\n", path, gerr->message);
-			g_error_free(gerr);
-			gerr = NULL;
+	if (has_svg_extension(path)) {
+		if (tray_load_svg_pixbuf(path, desired_h, &pixbuf) != 0) {
+			pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
+			if (!pixbuf && gerr) {
+				fprintf(stderr, "tray: failed to load icon '%s': %s\n", path, gerr->message);
+				g_error_free(gerr);
+				gerr = NULL;
+			}
+			if (!pixbuf)
+				return -1;
 		}
-		if (!has_svg_extension(path) ||
-				tray_load_svg_pixbuf(path, desired_h, &pixbuf) != 0)
-			return -1;
+	} else {
+		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
+		if (!pixbuf) {
+			if (gerr) {
+				fprintf(stderr, "tray: failed to load icon '%s': %s\n", path, gerr->message);
+				g_error_free(gerr);
+				gerr = NULL;
+			}
+			if (has_svg_extension(path) &&
+					tray_load_svg_pixbuf(path, desired_h, &pixbuf) != 0)
+				return -1;
+			if (!pixbuf)
+				return -1;
+		}
 	}
 
 	buf = statusbar_buffer_from_pixbuf(pixbuf, desired_h, &w, &h);
@@ -2081,6 +2141,9 @@ tray_item_load_icon(TrayItem *it)
 
 	if (!tray_bus || !it)
 		return -1;
+	if (it->icon_tried && it->icon_failed)
+		return -1;
+	it->icon_tried = 1;
 
 	/* Prefer themed icons first so the user's icon theme takes effect */
 	{
@@ -2094,16 +2157,20 @@ tray_item_load_icon(TrayItem *it)
 		if (tray_get_string_property(it, "AttentionIconName", icon_name, sizeof(icon_name)) == 0 &&
 				tray_find_icon_path(icon_name, icon_theme_path, desired_h,
 					icon_path, sizeof(icon_path)) == 0 &&
-				tray_load_icon_file(it, icon_path, desired_h) == 0)
+				tray_load_icon_file(it, icon_path, desired_h) == 0) {
+			it->icon_failed = 0;
 			return 0;
+		}
 
 		memset(icon_name, 0, sizeof(icon_name));
 		memset(icon_path, 0, sizeof(icon_path));
 		if (tray_get_string_property(it, "IconName", icon_name, sizeof(icon_name)) == 0 &&
 				tray_find_icon_path(icon_name, icon_theme_path, desired_h,
 					icon_path, sizeof(icon_path)) == 0 &&
-				tray_load_icon_file(it, icon_path, desired_h) == 0)
+				tray_load_icon_file(it, icon_path, desired_h) == 0) {
+			it->icon_failed = 0;
 			return 0;
+		}
 	}
 
 	for (prop_idx = 0; prop_idx < (int)LENGTH(props); prop_idx++) {
@@ -2187,12 +2254,14 @@ tray_item_load_icon(TrayItem *it)
 			}
 			sd_bus_message_unref(reply);
 			sd_bus_error_free(&err);
+			it->icon_failed = 0;
 			return 0;
 		}
 	}
 
 	sd_bus_message_unref(reply);
 	sd_bus_error_free(&err);
+	it->icon_failed = 1;
 	return -1;
 }
 
@@ -2200,67 +2269,17 @@ static void
 rendertrayicons(Monitor *m, int bar_height)
 {
 	StatusModule *module;
-	int padding;
-	int x;
-	int any = 0;
-	TrayItem *it;
+
+	(void)bar_height;
 
 	if (!m || !m->statusbar.sysicons.tree)
 		return;
 
 	module = &m->statusbar.sysicons;
 	clearstatusmodule(module);
-
-	padding = statusbar_module_padding;
-	x = padding;
-
-	wl_list_for_each(it, &tray_items, link) {
-		int iw = 0, ih = 0;
-		struct wlr_scene_buffer *scene_buf;
-		struct wlr_buffer *buf = it->icon_buf;
-		int x_before = x;
-
-		if (!buf)
-			tray_item_load_icon(it);
-		buf = it->icon_buf;
-		iw = it->icon_w;
-		ih = it->icon_h;
-
-		if (buf && iw > 0 && ih > 0) {
-			scene_buf = wlr_scene_buffer_create(module->tree, NULL);
-			if (scene_buf) {
-				wlr_scene_buffer_set_buffer(scene_buf, buf);
-				wlr_scene_node_set_position(&scene_buf->node, x,
-						MAX(0, (bar_height - ih) / 2));
-				it->x = x;
-				it->w = iw;
-				x += iw + statusbar_module_spacing;
-				any = 1;
-				continue;
-			}
-		}
-
-		/* Fallback: render label text if icon missing */
-		int label_w = tray_render_label(module, it->label, x, bar_height);
-		if (label_w > 0) {
-			it->x = x;
-			it->w = label_w;
-			x += label_w + statusbar_module_spacing;
-			any = 1;
-		} else {
-			it->x = x_before;
-			it->w = 0;
-		}
-	}
-
-	if (any) {
-		module->width = x + padding;
-		updatemodulebg(module, module->width, bar_height, statusbar_bg);
-		return;
-	}
-
-	/* fallback text if no icons */
-	renderclock(module, bar_height, sysicons_text);
+	module->width = 0;
+	module->x = 0;
+	wlr_scene_node_set_enabled(&module->tree->node, 0);
 }
 
 static void
@@ -2310,6 +2329,7 @@ statusbar_scaled_buffer_from_argb32(const uint32_t *data, int width, int height,
 	uint8_t *dst_copy = NULL;
 	size_t src_stride, dst_stride, src_size, dst_size;
 	int target_w;
+	pixman_transform_t transform;
 
 	if (!data || width <= 0 || height <= 0 || target_h <= 0)
 		return NULL;
@@ -2349,7 +2369,6 @@ statusbar_scaled_buffer_from_argb32(const uint32_t *data, int width, int height,
 		goto fail;
 
 	/* Scale with a simple bilinear filter to fit the bar height */
-	pixman_transform_t transform;
 	pixman_transform_init_identity(&transform);
 	pixman_transform_scale(&transform, NULL,
 			pixman_double_to_fixed((double)width / (double)target_w),
@@ -3498,6 +3517,654 @@ tray_find_item_path(const char *service, char *path, size_t pathlen)
 }
 
 static void
+tray_sanitize_label(const char *src, char *dst, size_t len)
+{
+	size_t di = 0;
+	int in_tag = 0;
+
+	if (!dst || len == 0) {
+		return;
+	}
+
+	dst[0] = '\0';
+	if (!src)
+		return;
+
+	for (size_t i = 0; src[i] && di + 1 < len; i++) {
+		char c = src[i];
+		if (c == '<') {
+			in_tag = 1;
+			continue;
+		}
+		if (in_tag) {
+			if (c == '>')
+				in_tag = 0;
+			continue;
+		}
+		if (c == '_' || c == '&')
+			continue;
+		dst[di++] = c;
+	}
+
+	while (di > 0 && (dst[di - 1] == ' ' || dst[di - 1] == '\t'))
+		di--;
+	dst[di] = '\0';
+}
+
+static void
+tray_menu_clear(TrayMenu *menu)
+{
+	TrayMenuEntry *e, *tmp;
+
+	if (!menu)
+		return;
+
+	wl_list_for_each_safe(e, tmp, &menu->entries, link) {
+		wl_list_remove(&e->link);
+		free(e);
+	}
+	wl_list_init(&menu->entries);
+
+	menu->width = menu->height = 0;
+	menu->x = menu->y = 0;
+	menu->visible = 0;
+	menu->service[0] = '\0';
+	menu->menu_path[0] = '\0';
+
+	if (menu->tree)
+		wlr_scene_node_set_enabled(&menu->tree->node, 0);
+}
+
+static void
+tray_menu_hide(Monitor *m)
+{
+	if (!m)
+		return;
+	tray_menu_clear(&m->statusbar.tray_menu);
+}
+
+static void
+tray_menu_hide_all(void)
+{
+	Monitor *m;
+
+	wl_list_for_each(m, &mons, link)
+		tray_menu_hide(m);
+}
+
+static int
+tray_item_get_menu_path(TrayItem *it)
+{
+	static const char *ifaces[] = {
+		"org.kde.StatusNotifierItem",
+		"org.freedesktop.StatusNotifierItem",
+	};
+	const char *item_path;
+	sd_bus_message *reply = NULL;
+	sd_bus_error err = SD_BUS_ERROR_NULL;
+	const char *path = NULL;
+	int r = -1;
+
+	if (!tray_bus || !it)
+		return -EINVAL;
+
+	it->has_menu = 0;
+	it->menu[0] = '\0';
+	item_path = it->path[0] ? it->path : "/StatusNotifierItem";
+
+	for (size_t i = 0; i < LENGTH(ifaces); i++) {
+		sd_bus_error_free(&err);
+		reply = NULL;
+		r = sd_bus_call_method(tray_bus, it->service,
+				item_path,
+				"org.freedesktop.DBus.Properties", "Get",
+				&err, &reply, "ss", ifaces[i], "Menu");
+		if (r < 0)
+			continue;
+		if (sd_bus_message_enter_container(reply, 'v', "o") < 0) {
+			sd_bus_message_unref(reply);
+			continue;
+		}
+		if (sd_bus_message_read(reply, "o", &path) < 0) {
+			sd_bus_message_exit_container(reply);
+			sd_bus_message_unref(reply);
+			continue;
+		}
+		sd_bus_message_exit_container(reply);
+		if (path && path[0] && strcmp(path, "/") != 0) {
+			snprintf(it->menu, sizeof(it->menu), "%s", path);
+			it->has_menu = 1;
+			sd_bus_message_unref(reply);
+			sd_bus_error_free(&err);
+			return 0;
+		}
+		fprintf(stderr, "tray: service %s Menu property empty/invalid\n", it->service);
+		sd_bus_message_unref(reply);
+	}
+
+	sd_bus_error_free(&err);
+	fprintf(stderr, "tray: failed to get Menu property for %s: %s\n",
+			it->service, strerror(-r));
+	return -1;
+}
+
+static int
+tray_menu_parse_node(sd_bus_message *msg, TrayMenu *menu, int depth, int max_depth)
+{
+	int r;
+
+	if (!msg || !menu)
+		return -EINVAL;
+
+	r = sd_bus_message_enter_container(msg, 'r', "ia{sv}av");
+	if (r < 0)
+		return r;
+	if (r == 0)
+		return 0;
+	if (depth < 0 || depth > max_depth + 4) /* sanity */
+		return -EINVAL;
+
+	r = tray_menu_parse_node_body(msg, menu, depth, max_depth);
+	sd_bus_message_exit_container(msg);
+	return r;
+}
+
+static int
+tray_menu_parse_node_body(sd_bus_message *msg, TrayMenu *menu, int depth, int max_depth)
+{
+	TrayMenuEntry *entry;
+	int id = 0, r = 0;
+	int enabled = 1, visible = 1;
+	int is_separator = 0, has_submenu = 0;
+	int toggle_type = 0, toggle_state = 0;
+	int child_count = 0;
+	char label[256] = {0};
+
+	if (!msg || !menu)
+		return -EINVAL;
+	if (depth > max_depth + 4)
+		return -EINVAL;
+
+	if (sd_bus_message_read(msg, "i", &id) < 0)
+		return -EINVAL;
+
+	r = sd_bus_message_enter_container(msg, 'a', "{sv}");
+	if (r < 0)
+		return r;
+	while ((r = sd_bus_message_enter_container(msg, 'e', "sv")) > 0) {
+		const char *key = NULL;
+		if (sd_bus_message_read(msg, "s", &key) < 0) {
+			sd_bus_message_exit_container(msg);
+			r = -EINVAL;
+			break;
+		}
+		if (key && strcmp(key, "label") == 0) {
+			const char *val = NULL;
+			if (sd_bus_message_enter_container(msg, 'v', "s") >= 0) {
+				if (sd_bus_message_read(msg, "s", &val) >= 0 && val)
+					tray_sanitize_label(val, label, sizeof(label));
+				sd_bus_message_exit_container(msg);
+			} else {
+				sd_bus_message_skip(msg, "v");
+			}
+		} else if (key && strcmp(key, "enabled") == 0) {
+			int v = 1;
+			if (sd_bus_message_enter_container(msg, 'v', "b") >= 0) {
+				sd_bus_message_read(msg, "b", &v);
+				enabled = v;
+				sd_bus_message_exit_container(msg);
+			} else {
+				sd_bus_message_skip(msg, "v");
+			}
+		} else if (key && strcmp(key, "visible") == 0) {
+			int v = 1;
+			if (sd_bus_message_enter_container(msg, 'v', "b") >= 0) {
+				sd_bus_message_read(msg, "b", &v);
+				visible = v;
+				sd_bus_message_exit_container(msg);
+			} else {
+				sd_bus_message_skip(msg, "v");
+			}
+		} else if (key && strcmp(key, "type") == 0) {
+			const char *val = NULL;
+			if (sd_bus_message_enter_container(msg, 'v', "s") >= 0) {
+				if (sd_bus_message_read(msg, "s", &val) >= 0 && val
+						&& strcmp(val, "separator") == 0)
+					is_separator = 1;
+				sd_bus_message_exit_container(msg);
+			} else {
+				sd_bus_message_skip(msg, "v");
+			}
+		} else if (key && strcmp(key, "toggle-type") == 0) {
+			const char *val = NULL;
+			if (sd_bus_message_enter_container(msg, 'v', "s") >= 0) {
+				if (sd_bus_message_read(msg, "s", &val) >= 0 && val) {
+					if (strcmp(val, "checkmark") == 0)
+						toggle_type = 1;
+					else if (strcmp(val, "radio") == 0)
+						toggle_type = 2;
+				}
+				sd_bus_message_exit_container(msg);
+			} else {
+				sd_bus_message_skip(msg, "v");
+			}
+		} else if (key && strcmp(key, "toggle-state") == 0) {
+			int32_t state = 0;
+			if (sd_bus_message_enter_container(msg, 'v', "i") >= 0) {
+				sd_bus_message_read(msg, "i", &state);
+				if (state < 0)
+					state = 0;
+				toggle_state = state;
+				sd_bus_message_exit_container(msg);
+			} else {
+				sd_bus_message_skip(msg, "v");
+			}
+		} else if (key && strcmp(key, "children-display") == 0) {
+			const char *val = NULL;
+			if (sd_bus_message_enter_container(msg, 'v', "s") >= 0) {
+				if (sd_bus_message_read(msg, "s", &val) >= 0 && val
+						&& strcmp(val, "submenu") == 0)
+					has_submenu = 1;
+				sd_bus_message_exit_container(msg);
+			} else {
+				sd_bus_message_skip(msg, "v");
+			}
+		} else {
+			sd_bus_message_skip(msg, "v");
+		}
+		sd_bus_message_exit_container(msg);
+	}
+	sd_bus_message_exit_container(msg);
+	if (r < 0)
+		return r;
+
+	{
+		r = sd_bus_message_enter_container(msg, 'a', "(ia{sv}av)");
+		if (r < 0)
+			return r;
+		while ((r = sd_bus_message_enter_container(msg, 'r', "ia{sv}av")) > 0) {
+			child_count++;
+			if (depth < max_depth) {
+				int cr = tray_menu_parse_node_body(msg, menu, depth + 1, max_depth);
+				if (cr < 0) {
+					sd_bus_message_exit_container(msg);
+					r = cr;
+					break;
+				}
+			} else {
+				if (sd_bus_message_skip(msg, "ia{sv}av") < 0) {
+					sd_bus_message_exit_container(msg);
+					r = -EINVAL;
+					break;
+				}
+			}
+			sd_bus_message_exit_container(msg);
+		}
+		sd_bus_message_exit_container(msg);
+		if (r < 0)
+			return r;
+	}
+
+	if (!visible || depth == 0 || depth > max_depth)
+		return 0;
+
+	entry = ecalloc(1, sizeof(*entry));
+	entry->id = id;
+	entry->enabled = enabled;
+	entry->is_separator = is_separator;
+	entry->depth = depth - 1;
+	entry->has_submenu = has_submenu || child_count > 0;
+	entry->toggle_type = toggle_type;
+	entry->toggle_state = toggle_state;
+	if (label[0])
+		snprintf(entry->label, sizeof(entry->label), "%s", label);
+
+	wl_list_insert(menu->entries.prev, &entry->link);
+	return 0;
+}
+
+static void
+tray_menu_draw_text(struct wlr_scene_tree *tree, const char *text, int x, int y, int row_h)
+{
+	tll(struct GlyphRun) glyphs = tll_init();
+	const struct fcft_glyph *glyph;
+	struct wlr_scene_buffer *scene_buf;
+	struct wlr_buffer *buffer;
+	uint32_t prev_cp = 0;
+	int pen_x = 0;
+	int min_y = INT_MAX, max_y = INT_MIN;
+
+	if (!tree || !text || !*text || row_h <= 0)
+		return;
+	if (!statusfont.font)
+		return;
+
+	for (size_t i = 0; text[i]; i++) {
+		long kern_x = 0, kern_y = 0;
+		uint32_t cp = (unsigned char)text[i];
+
+		if (prev_cp)
+			fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
+		pen_x += (int)kern_x;
+
+		glyph = fcft_rasterize_char_utf32(statusfont.font, cp, statusbar_font_subpixel);
+		if (glyph && glyph->pix) {
+			tll_push_back(glyphs, ((struct GlyphRun){
+				.glyph = glyph,
+				.pen_x = pen_x,
+				.codepoint = cp,
+			}));
+			if (-glyph->y < min_y)
+				min_y = -glyph->y;
+			if (-glyph->y + glyph->height > max_y)
+				max_y = -glyph->y + glyph->height;
+			pen_x += glyph->advance.x;
+			if (text[i + 1])
+				pen_x += statusbar_font_spacing;
+		}
+		prev_cp = cp;
+	}
+
+	if (tll_length(glyphs) == 0) {
+		tll_free(glyphs);
+		return;
+	}
+
+	{
+		int text_height = max_y - min_y;
+		int origin_y = y + (row_h - text_height) / 2 - min_y;
+
+		tll_foreach(glyphs, it) {
+			glyph = it->item.glyph;
+			buffer = statusbar_buffer_from_glyph(glyph);
+			if (!buffer)
+				continue;
+
+			scene_buf = wlr_scene_buffer_create(tree, NULL);
+			if (scene_buf) {
+				wlr_scene_buffer_set_buffer(scene_buf, buffer);
+				wlr_scene_node_set_position(&scene_buf->node,
+						x + it->item.pen_x + glyph->x,
+						origin_y - glyph->y);
+			}
+			wlr_buffer_drop(buffer);
+		}
+	}
+
+	tll_free(glyphs);
+}
+
+static void
+tray_menu_render(Monitor *m)
+{
+	TrayMenu *menu;
+	struct wlr_scene_node *node, *tmp;
+	TrayMenuEntry *entry;
+	int padding, line_spacing, indent_w;
+	int max_width = 0;
+	int total_height;
+	int row_h;
+
+	if (!m || !m->statusbar.tray_menu.tree)
+		return;
+	menu = &m->statusbar.tray_menu;
+
+	padding = statusbar_module_padding;
+	line_spacing = 4;
+	indent_w = statusbar_font_spacing > 0 ? statusbar_font_spacing * 2 : 10;
+
+	wl_list_for_each_safe(node, tmp, &menu->tree->children, link) {
+		if (menu->bg && node == &menu->bg->node)
+			continue;
+		wlr_scene_node_destroy(node);
+	}
+
+	if (!statusfont.font || wl_list_empty(&menu->entries)) {
+		menu->width = menu->height = 0;
+		wlr_scene_node_set_enabled(&menu->tree->node, 0);
+		menu->visible = 0;
+		return;
+	}
+
+	row_h = statusfont.height + line_spacing;
+	if (row_h < statusfont.height)
+		row_h = statusfont.height;
+	total_height = padding * 2;
+
+	wl_list_for_each(entry, &menu->entries, link) {
+		int text_w = entry->is_separator ? 0 : status_text_width(
+				entry->label[0] ? entry->label : " ");
+		int row_width = text_w + 2 * padding + indent_w * entry->depth;
+		if (entry->toggle_type)
+			row_width += row_h;
+		if (entry->has_submenu)
+			row_width += row_h / 2;
+		max_width = MAX(max_width, row_width);
+		total_height += entry->is_separator ? line_spacing : row_h;
+	}
+
+	if (max_width <= 0)
+		max_width = 80;
+
+	menu->width = max_width;
+	menu->height = total_height;
+
+	if (!menu->bg && !(menu->bg = wlr_scene_tree_create(menu->tree)))
+		return;
+	wlr_scene_node_set_enabled(&menu->bg->node, 1);
+	wlr_scene_node_set_position(&menu->bg->node, 0, 0);
+	wl_list_for_each_safe(node, tmp, &menu->bg->children, link)
+		wlr_scene_node_destroy(node);
+	drawrect(menu->bg, 0, 0, menu->width, menu->height, statusbar_bg);
+
+	{
+		int y = padding;
+		wl_list_for_each(entry, &menu->entries, link) {
+			char text[512];
+			int row = entry->is_separator ? line_spacing : row_h;
+			int x = padding + indent_w * entry->depth;
+
+			entry->y = y;
+			entry->height = row;
+
+			if (entry->is_separator) {
+				int sep_y = y + row / 2;
+				drawrect(menu->tree, padding, sep_y, menu->width - 2 * padding, 1, statusbar_fg);
+				y += row;
+				continue;
+			}
+
+			text[0] = '\0';
+			if (entry->toggle_type == 1) {
+				snprintf(text, sizeof(text), "%s%s%s",
+						entry->toggle_state ? "[x] " : "[ ] ",
+						entry->label[0] ? entry->label : "",
+						entry->has_submenu ? "  >" : "");
+			} else if (entry->toggle_type == 2) {
+				snprintf(text, sizeof(text), "%s%s%s",
+						entry->toggle_state ? "(o) " : "( ) ",
+						entry->label[0] ? entry->label : "",
+						entry->has_submenu ? "  >" : "");
+			} else {
+				snprintf(text, sizeof(text), "%s%s",
+						entry->label[0] ? entry->label : " ",
+						entry->has_submenu ? "  >" : "");
+			}
+
+			tray_menu_draw_text(menu->tree, text, x, y, row);
+			y += row;
+		}
+	}
+}
+
+static int
+tray_menu_open_at(Monitor *m, TrayItem *it, int icon_x)
+{
+	sd_bus_message *req = NULL, *reply = NULL;
+	sd_bus_error err = SD_BUS_ERROR_NULL;
+	char *props[] = {"label", "enabled", "type", "children-display",
+		"toggle-type", "toggle-state", "visible", NULL};
+	int r;
+	int max_depth = 3; /* limited depth for safety; can be raised if needed */
+	TrayMenu *menu;
+	int desired_x, max_x;
+	const char *sig;
+
+	if (!m || !m->showbar || !m->statusbar.tray_menu.tree || !it || !tray_bus)
+		return 0;
+	if (!m->statusbar.area.width || !m->statusbar.area.height)
+		return 0;
+
+	if (tray_item_get_menu_path(it) != 0 || !it->has_menu)
+		return 0;
+
+	menu = &m->statusbar.tray_menu;
+	tray_menu_hide_all();
+	tray_menu_clear(menu);
+	wl_list_init(&menu->entries);
+	if (!menu->tree) {
+		return 0;
+	}
+	if (max_depth < 1)
+		max_depth = 1;
+
+	/* Temporarily disable custom menu parsing to avoid crashes; fall back to client ContextMenu */
+	return 0;
+
+	r = sd_bus_message_new_method_call(tray_bus, &req, it->service, it->menu,
+			"com.canonical.dbusmenu", "GetLayout");
+	if (r < 0)
+		goto fail;
+
+	r = sd_bus_message_append(req, "iias", 0, max_depth, props);
+	if (r < 0)
+		goto fail;
+
+	r = sd_bus_call(tray_bus, req, 2 * 1000 * 1000, &err, &reply);
+	if (r < 0)
+		goto fail;
+
+	sig = sd_bus_message_get_signature(reply, 0);
+	if (!sig || !strstr(sig, "(ia{sv}av)")) {
+		r = -EINVAL;
+		goto fail;
+	}
+
+	{
+		int revision = 0;
+		if (sd_bus_message_read(reply, "i", &revision) < 0)
+			goto fail;
+		(void)revision;
+		if ((r = tray_menu_parse_node(reply, menu, 0, max_depth)) < 0)
+			goto fail;
+	}
+
+	sd_bus_message_unref(req);
+	sd_bus_message_unref(reply);
+	sd_bus_error_free(&err);
+
+	if (wl_list_empty(&menu->entries))
+		goto fail;
+
+	snprintf(menu->service, sizeof(menu->service), "%s", it->service);
+	snprintf(menu->menu_path, sizeof(menu->menu_path), "%s", it->menu);
+
+	tray_menu_render(m);
+	if (menu->width <= 0 || menu->height <= 0)
+		goto fail;
+
+	desired_x = icon_x - menu->width / 2;
+	if (desired_x < 0)
+		desired_x = 0;
+	max_x = m->statusbar.area.width - menu->width;
+	if (max_x < 0)
+		max_x = 0;
+	if (desired_x > max_x)
+		desired_x = max_x;
+
+	menu->x = desired_x;
+	menu->y = m->statusbar.area.height;
+	wlr_scene_node_set_position(&menu->tree->node, menu->x, menu->y);
+	wlr_scene_node_set_enabled(&menu->tree->node, 1);
+	menu->visible = 1;
+	return 1;
+
+fail:
+	fprintf(stderr, "tray: GetLayout failed for %s%s: %s\n",
+			it->service, it->menu, err.message ? err.message : strerror(-r));
+	if (req)
+		sd_bus_message_unref(req);
+	if (reply)
+		sd_bus_message_unref(reply);
+	sd_bus_error_free(&err);
+	tray_menu_hide_all();
+	return 0;
+}
+
+static TrayMenuEntry *
+tray_menu_entry_at(Monitor *m, int lx, int ly)
+{
+	TrayMenuEntry *entry;
+	TrayMenu *menu;
+
+	if (!m)
+		return NULL;
+	menu = &m->statusbar.tray_menu;
+	wl_list_for_each(entry, &menu->entries, link) {
+		if (ly >= entry->y && ly < entry->y + entry->height) {
+			if (entry->is_separator || !entry->enabled)
+				return NULL;
+			return entry;
+		}
+	}
+	return NULL;
+}
+
+static int
+tray_menu_send_event(TrayMenu *menu, TrayMenuEntry *entry, uint32_t time_msec)
+{
+	sd_bus_message *msg = NULL, *reply = NULL;
+	sd_bus_error err = SD_BUS_ERROR_NULL;
+	int r;
+
+	if (!tray_bus || !menu || !entry || !menu->service[0] || !menu->menu_path[0])
+		return -EINVAL;
+
+	r = sd_bus_message_new_method_call(tray_bus, &msg, menu->service, menu->menu_path,
+			"com.canonical.dbusmenu", "Event");
+	if (r < 0)
+		goto out;
+
+	r = sd_bus_message_append(msg, "is", entry->id, "clicked");
+	if (r < 0)
+		goto out;
+
+	r = sd_bus_message_open_container(msg, 'v', "s");
+	if (r < 0)
+		goto out;
+	r = sd_bus_message_append_basic(msg, 's', "");
+	if (r < 0)
+		goto out;
+	r = sd_bus_message_close_container(msg);
+	if (r < 0)
+		goto out;
+
+	r = sd_bus_message_append(msg, "u", time_msec);
+	if (r < 0)
+		goto out;
+
+	r = sd_bus_call(tray_bus, msg, 2 * 1000 * 1000, &err, &reply);
+
+out:
+	if (msg)
+		sd_bus_message_unref(msg);
+	if (reply)
+		sd_bus_message_unref(reply);
+	sd_bus_error_free(&err);
+	return r < 0 ? r : 0;
+}
+
+static void
 tray_add_item(const char *service, const char *path, int emit_signals)
 {
 	const char *base;
@@ -3513,6 +4180,8 @@ tray_add_item(const char *service, const char *path, int emit_signals)
 	base = strrchr(service, '.');
 	base = base ? base + 1 : service;
 	snprintf(it->label, sizeof(it->label), "%s", base);
+	it->icon_tried = 0;
+	it->icon_failed = 0;
 	wl_list_insert(&tray_items, &it->link);
 	fprintf(stderr, "tray: registered %s%s\n", service, path);
 
@@ -4075,9 +4744,17 @@ positionstatusmodules(Monitor *m)
 			wlr_scene_node_set_enabled(&m->statusbar.tags.tree->node, 0);
 			m->statusbar.tags.x = 0;
 		}
+		if (m->statusbar.traylabel.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.traylabel.tree->node, 0);
+			m->statusbar.traylabel.x = 0;
+		}
 		if (m->statusbar.sysicons.tree) {
 			wlr_scene_node_set_enabled(&m->statusbar.sysicons.tree->node, 0);
 			m->statusbar.sysicons.x = 0;
+		}
+		if (m->statusbar.tray_menu.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 0);
+			m->statusbar.tray_menu.visible = 0;
 		}
 		if (m->statusbar.cpu.tree) {
 			wlr_scene_node_set_enabled(&m->statusbar.cpu.tree->node, 0);
@@ -4122,6 +4799,9 @@ positionstatusmodules(Monitor *m)
 	if (m->statusbar.tags.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.tags.tree->node,
 				m->statusbar.tags.width > 0);
+	if (m->statusbar.traylabel.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.traylabel.tree->node,
+				m->statusbar.traylabel.width > 0);
 	if (m->statusbar.sysicons.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.sysicons.tree->node,
 				m->statusbar.sysicons.width > 0);
@@ -4157,6 +4837,11 @@ positionstatusmodules(Monitor *m)
 		wlr_scene_node_set_position(&m->statusbar.tags.tree->node, x, 0);
 		m->statusbar.tags.x = x;
 		x += m->statusbar.tags.width + spacing;
+	}
+	if (m->statusbar.traylabel.width > 0) {
+		wlr_scene_node_set_position(&m->statusbar.traylabel.tree->node, x, 0);
+		m->statusbar.traylabel.x = x;
+		x += m->statusbar.traylabel.width + spacing;
 	}
 	if (m->statusbar.sysicons.width > 0) {
 		wlr_scene_node_set_position(&m->statusbar.sysicons.tree->node, x, 0);
@@ -4227,6 +4912,26 @@ positionstatusmodules(Monitor *m)
 			m->statusbar.net_popup.visible = 0;
 		}
 	}
+	if (m->statusbar.tray_menu.tree) {
+		if (m->statusbar.tray_menu.visible && m->statusbar.area.height > 0) {
+			int max_x = m->statusbar.area.width - m->statusbar.tray_menu.width;
+			int menu_x = m->statusbar.tray_menu.x;
+			if (max_x < 0)
+				max_x = 0;
+			if (menu_x > max_x)
+				menu_x = max_x;
+			if (menu_x < 0)
+				menu_x = 0;
+			m->statusbar.tray_menu.x = menu_x;
+			m->statusbar.tray_menu.y = m->statusbar.area.height;
+			wlr_scene_node_set_position(&m->statusbar.tray_menu.tree->node,
+					m->statusbar.tray_menu.x, m->statusbar.tray_menu.y);
+			wlr_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 1);
+		} else {
+			wlr_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 0);
+			m->statusbar.tray_menu.visible = 0;
+		}
+	}
 }
 
 static void
@@ -4264,6 +4969,8 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 	m->statusbar.area = bar_area;
 
 	renderworkspaces(m, &m->statusbar.tags, bar_area.height);
+	if (m->statusbar.traylabel.tree)
+		rendercpu(&m->statusbar.traylabel, bar_area.height, tray_label_text);
 	if (m->statusbar.sysicons.tree)
 		rendertrayicons(m, bar_area.height);
 	if (m->statusbar.cpu.tree)
@@ -4440,9 +5147,15 @@ static void
 tray_remove_item(const char *service)
 {
 	TrayItem *it, *tmp;
+	Monitor *m;
 
 	if (!service)
 		return;
+
+	wl_list_for_each(m, &mons, link) {
+		if (strcmp(m->statusbar.tray_menu.service, service) == 0)
+			tray_menu_hide(m);
+	}
 
 	wl_list_for_each_safe(it, tmp, &tray_items, link) {
 		if (strcmp(it->service, service) == 0) {
@@ -4480,6 +5193,7 @@ tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y)
 		"org.kde.StatusNotifierItem",
 		"org.freedesktop.StatusNotifierItem",
 	};
+	const char *item_path;
 	int r = -1;
 
 	if (!tray_bus || !it)
@@ -4493,12 +5207,16 @@ tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y)
 	tray_anchor_x = x;
 	tray_anchor_y = y;
 	tray_anchor_time_ms = monotonic_msec();
+	if (context_menu) {
+		/* ensure transient menus are placed near the icon even if GetLayout fails */
+		tray_anchor_x = x;
+		tray_anchor_y = y;
+	}
+	item_path = it->path[0] ? it->path : "/StatusNotifierItem";
 	for (int attempt = 0; attempt < 2; attempt++) {
 		for (size_t i = 0; i < LENGTH(ifaces); i++) {
-			r = sd_bus_call_method(tray_bus, it->service,
-					it->path ? it->path : "/StatusNotifierItem",
-					ifaces[i], method,
-					NULL, NULL, "ii", x, y);
+			r = sd_bus_call_method(tray_bus, it->service, item_path,
+					ifaces[i], method, NULL, NULL, "ii", x, y);
 			if (r >= 0)
 				return;
 		}
@@ -4512,8 +5230,7 @@ tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y)
 		}
 	}
 	fprintf(stderr, "tray: %s %s failed on %s%s: %s\n",
-			method, it->service, it->path ? it->path : "",
-			it->path ? "" : "(null)", strerror(-r));
+			method, it->service, item_path, it->path[0] ? "" : "(null)", strerror(-r));
 }
 
 static void
@@ -4710,8 +5427,10 @@ refreshstatustags(void)
 	wl_list_for_each(m, &mons, link) {
 		if (!m->statusbar.tags.tree || !m->showbar)
 			continue;
-		renderworkspaces(m, &m->statusbar.tags,
-				m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height);
+		int barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+		renderworkspaces(m, &m->statusbar.tags, barh);
+		if (m->statusbar.traylabel.tree)
+			rendercpu(&m->statusbar.traylabel, barh, tray_label_text);
 		m->statusbar.tags.hover_tag = -1;
 		for (int i = 0; i < TAGCOUNT; i++)
 			m->statusbar.tags.hover_alpha[i] = 0.0f;
@@ -5178,18 +5897,43 @@ buttonpress(struct wl_listener *listener, void *data)
 		if (locked)
 			break;
 
+		if (selmon && selmon->statusbar.tray_menu.visible) {
+			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
+			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
+			TrayMenu *menu = &selmon->statusbar.tray_menu;
+			int relx = lx - menu->x;
+			int rely = ly - menu->y;
+			if (relx >= 0 && rely >= 0 &&
+					relx < menu->width && rely < menu->height) {
+				TrayMenuEntry *entry = tray_menu_entry_at(selmon, relx, rely);
+				if (entry)
+					tray_menu_send_event(menu, entry, event->time_msec);
+				tray_menu_hide_all();
+				return;
+			} else {
+				tray_menu_hide_all();
+			}
+		}
+
 		if (selmon && selmon->showbar) {
 			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
 			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
 			StatusModule *tags = &selmon->statusbar.tags;
 			StatusModule *vol = &selmon->statusbar.volume;
 			StatusModule *cpu = &selmon->statusbar.cpu;
+			StatusModule *traylabel = &selmon->statusbar.traylabel;
 			StatusModule *icons = &selmon->statusbar.sysicons;
 			TrayItem *titem;
 
 			if (lx >= 0 && ly >= 0 &&
 					lx < selmon->statusbar.area.width &&
 					ly < selmon->statusbar.area.height) {
+				if (traylabel->width > 0 && lx >= traylabel->x
+						&& lx < traylabel->x + traylabel->width) {
+					Arg arg = { .v = btopcmd };
+					spawn(&arg);
+					return;
+				}
 				if (icons->width > 0 && lx >= icons->x && lx < icons->x + icons->width) {
 					int rel = lx - icons->x;
 					int barh = selmon->statusbar.area.height
@@ -5204,14 +5948,20 @@ buttonpress(struct wl_listener *listener, void *data)
 							break;
 						}
 					}
-					if (!titem)
-						titem = tray_first_item();
-					if (titem) {
-						int icon_h = (titem->icon_h > 0) ? titem->icon_h : barh;
-						int icon_y = selmon->statusbar.area.y + MAX(0, (barh - icon_h) / 2);
-						int gx = icon_x + titem->x + titem->w / 2;
-						int gy = icon_y + icon_h + 2; /* drop menu just under icon */
-						tray_item_activate(titem, event->button,
+	if (!titem)
+		titem = tray_first_item();
+	if (titem) {
+		int icon_h, icon_y, gx, gy;
+		if (event->button == BTN_RIGHT) {
+			int menu_x = icons->x + titem->x + titem->w / 2;
+			if (tray_menu_open_at(selmon, titem, menu_x))
+				return;
+		}
+		icon_h = (titem->icon_h > 0) ? titem->icon_h : barh;
+		icon_y = selmon->statusbar.area.y + MAX(0, (barh - icon_h) / 2);
+		gx = icon_x + titem->x + titem->w / 2;
+		gy = icon_y + icon_h + 2; /* drop menu just under icon */
+		tray_item_activate(titem, event->button,
 								event->button == BTN_RIGHT, gx, gy);
 					}
 					return;
@@ -5341,6 +6091,7 @@ cleanup(void)
 		wl_event_source_remove(status_hover_timer);
 		status_hover_timer = NULL;
 	}
+	tray_menu_hide_all();
 	if (tray_event) {
 		wl_event_source_remove(tray_event);
 		tray_event = NULL;
@@ -5744,6 +6495,7 @@ initstatusbar(Monitor *m)
 	if (!m)
 		return;
 
+	wl_list_init(&m->statusbar.tray_menu.entries);
 	m->showbar = 1;
 	m->statusbar.area = (struct wlr_box){0};
 	m->statusbar.tree = wlr_scene_tree_create(layers[LyrTop]);
@@ -5755,9 +6507,18 @@ initstatusbar(Monitor *m)
 			for (int i = 0; i < TAGCOUNT; i++)
 				m->statusbar.tags.hover_alpha[i] = 0.0f;
 		}
+		m->statusbar.traylabel.tree = wlr_scene_tree_create(m->statusbar.tree);
+		if (m->statusbar.traylabel.tree)
+			m->statusbar.traylabel.bg = wlr_scene_tree_create(m->statusbar.traylabel.tree);
 		m->statusbar.sysicons.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.sysicons.tree)
 			m->statusbar.sysicons.bg = wlr_scene_tree_create(m->statusbar.sysicons.tree);
+		m->statusbar.tray_menu.tree = wlr_scene_tree_create(m->statusbar.tree);
+		if (m->statusbar.tray_menu.tree) {
+			m->statusbar.tray_menu.bg = wlr_scene_tree_create(m->statusbar.tray_menu.tree);
+			m->statusbar.tray_menu.visible = 0;
+			wlr_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 0);
+		}
 		m->statusbar.cpu.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.cpu.tree)
 			m->statusbar.cpu.bg = wlr_scene_tree_create(m->statusbar.cpu.tree);
@@ -6577,6 +7338,17 @@ mapnotify(struct wl_listener *listener, void *data)
 		setmon(c, p->mon, p->tags);
 	} else {
 		applyrules(c);
+		if (tray_anchor_time_ms && monotonic_msec() - tray_anchor_time_ms <= 1000) {
+			Monitor *am = xytomon(tray_anchor_x, tray_anchor_y);
+			if (!am)
+				am = selmon;
+			if (am) {
+				c->isfloating = 1;
+				c->geom.x = tray_anchor_x - c->geom.width / 2;
+				c->geom.y = tray_anchor_y;
+				setmon(c, am, c->tags);
+			}
+		}
 	}
 	free(c->output);
 	c->output = strdup(c->mon->wlr_output->name);
