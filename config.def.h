@@ -162,8 +162,12 @@ static const char *chromecmd[] = { "google-chrome-stable", NULL };
 static const char *menucmd[] = { "wmenu-run", NULL };
 /* Startup command run when no -s is provided; closes stdin to avoid status pipe */
 static const char *const autostart_cmd =
-	"bin_dir=$(CDPATH= cd -- \"$(dirname \"$0\")\" && pwd); "
+	"exe=\"$0\"; "
+	"real_exe=$(readlink -f \"$exe\" 2>/dev/null || printf '%s' \"$exe\"); "
+	"bin_dir=$(CDPATH= cd -- \"$(dirname \"$real_exe\")\" && pwd); "
 	"wp=\"${DWL_WALLPAPER:-$bin_dir/../share/dwl/wallpapers/beach.jpg}\"; "
+	"[ -r \"$wp\" ] || wp=\"$bin_dir/../wallpapers/beach.jpg\"; "
+	"[ -r \"$wp\" ] || wp=\"$(CDPATH= cd -- \"$bin_dir/..\" && pwd)/wallpapers/beach.jpg\"; "
 	"[ -r \"$wp\" ] || wp=\"$PWD/wallpapers/beach.jpg\"; "
 	"[ -r \"$wp\" ] || wp=\"wallpapers/beach.jpg\"; "
 	"swaybg -i \"$wp\" -m fill <&-";

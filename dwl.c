@@ -28,6 +28,7 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <time.h>
 #include <unistd.h>
@@ -109,6 +110,7 @@
 #define END(A)                  ((A) + LENGTH(A))
 #define TAGMASK                 ((1u << TAGCOUNT) - 1)
 #define MAX_TAGS                32
+#define STATUS_FAST_MS          3000
 #define LISTEN(E, L, H)         wl_signal_add((E), ((L)->notify = (H), (L)))
 #define LISTEN_STATIC(E, H)     do { struct wl_listener *_l = ecalloc(1, sizeof(*_l)); _l->notify = (H); wl_signal_add((E), _l); } while (0)
 
@@ -176,7 +178,15 @@ typedef struct {
 	int width;
 	int height;
 	int visible;
+	int anchor_x;
+	int anchor_y;
+	int anchor_w;
 } NetPopup;
+
+typedef struct {
+	void (*fn)(void);
+	uint64_t next_due_ms;
+} StatusRefreshTask;
 
 typedef struct TrayMenuEntry {
 	int id;
@@ -569,8 +579,20 @@ static void refreshstatuslight(void);
 static void refreshstatusvolume(void);
 static void refreshstatusbattery(void);
 static void refreshstatusnet(void);
+static void request_public_ip_async(void);
+static void stop_public_ip_fetch(void);
+static void request_ssid_async(const char *iface);
+static void stop_ssid_fetch(void);
 static void refreshstatusicons(void);
 static void refreshstatustags(void);
+static void init_status_refresh_tasks(void);
+static int status_should_render(StatusModule *module, int barh, const char *text,
+		char *last_text, size_t last_len, int *last_h);
+static void initial_status_refresh(void);
+static int status_task_hover_active(void (*fn)(void));
+static void trigger_status_task_now(void (*fn)(void));
+static int public_ip_event_cb(int fd, uint32_t mask, void *data);
+static int ssid_event_cb(int fd, uint32_t mask, void *data);
 static void updatetaghover(Monitor *m, double cx, double cy);
 static void updatenethover(Monitor *m, double cx, double cy);
 static int tray_bus_event(int fd, uint32_t mask, void *data);
@@ -670,6 +692,7 @@ static int findbacklightdevice(char *brightness_path, size_t brightness_len,
 		char *max_path, size_t max_len);
 static int findbatterydevice(char *capacity_path, size_t capacity_len);
 static void schedule_status_timer(void);
+static void schedule_next_status_refresh(void);
 static struct wlr_buffer *statusbar_scaled_buffer_from_argb32_raw(const uint32_t *data,
 		int width, int height, int target_h);
 static struct wlr_buffer *statusbar_buffer_from_argb32_raw(const uint32_t *data, int width, int height);
@@ -780,6 +803,27 @@ static int fullscreen_adaptive_sync_enabled = 1;
 static struct wl_event_source *status_timer;
 static struct wl_event_source *status_cpu_timer;
 static struct wl_event_source *status_hover_timer;
+static StatusRefreshTask status_tasks[] = {
+	{ refreshstatuscpu, 0 },
+	{ refreshstatusram, 0 },
+	{ refreshstatuslight, 0 },
+	{ refreshstatusvolume, 0 },
+	{ refreshstatusbattery, 0 },
+	{ refreshstatusnet, 0 },
+	{ refreshstatusicons, 0 },
+};
+static int status_rng_seeded;
+static pid_t public_ip_pid = -1;
+static int public_ip_fd = -1;
+static struct wl_event_source *public_ip_event = NULL;
+static char public_ip_buf[128];
+static size_t public_ip_len = 0;
+static pid_t ssid_pid = -1;
+static int ssid_fd = -1;
+static struct wl_event_source *ssid_event = NULL;
+static char ssid_buf[256];
+static size_t ssid_len = 0;
+static time_t ssid_last_time = 0;
 static int tray_anchor_x = -1;
 static int tray_anchor_y = -1;
 static uint64_t tray_anchor_time_ms;
@@ -794,11 +838,34 @@ static double battery_last_percent = -1.0;
 static char battery_text[32] = "Battery: --%";
 static double net_last_down_bps = -1.0;
 static double net_last_up_bps = -1.0;
+static char last_clock_render[32];
+static char last_cpu_render[32];
+static char last_ram_render[32];
+static char last_light_render[32];
+static char last_volume_render[32];
+static char last_battery_render[32];
+static char last_net_render[64];
+static int last_clock_h;
+static int last_cpu_h;
+static int last_ram_h;
+static int last_light_h;
+static int last_volume_h;
+static int last_battery_h;
+static int last_net_h;
+static int battery_path_initialized;
+static int backlight_paths_initialized;
+static uint64_t volume_last_read_ms;
+static double volume_cached = -1.0;
+static int volume_cached_muted = -1;
+static uint64_t last_pointer_motion_ms;
 static char net_text[64] = "Net: --";
 static char net_local_ip[64] = "--";
 static char net_public_ip[64] = "--";
 static char net_down_text[32] = "--";
 static char net_up_text[32] = "--";
+static char net_ssid[64] = "--";
+static double net_last_wifi_quality = -1.0;
+static int net_link_speed_mbps = -1;
 static char net_iface[64] = {0};
 static char net_prev_iface[64] = {0};
 static int net_is_wireless;
@@ -1407,16 +1474,12 @@ renderlight(StatusModule *module, int bar_height, const char *text)
 static void
 rendernet(StatusModule *module, int bar_height, const char *text)
 {
-	if (!net_available) {
-		if (module && module->tree) {
-			clearstatusmodule(module);
-			module->width = 0;
-			wlr_scene_node_set_enabled(&module->tree->node, 0);
-		}
-		return;
+	/* Net text module is disabled; keep node hidden */
+	if (module && module->tree) {
+		clearstatusmodule(module);
+		module->width = 0;
+		wlr_scene_node_set_enabled(&module->tree->node, 0);
 	}
-
-	renderclock(module, bar_height, text);
 }
 
 static void
@@ -3152,7 +3215,7 @@ rendernetpopup(Monitor *m)
 	int line_count = 4;
 	int max_width = 0;
 	int total_height;
-	char lines[4][64];
+	char lines[4][128];
 	struct wlr_scene_node *node, *tmp;
 
 	if (!m || !m->statusbar.net_popup.tree)
@@ -3162,10 +3225,23 @@ rendernetpopup(Monitor *m)
 	padding = statusbar_module_padding;
 	line_spacing = 2;
 
-	snprintf(lines[0], sizeof(lines[0]), "Local: %s", net_local_ip);
-	snprintf(lines[1], sizeof(lines[1]), "Public: %s", net_public_ip);
-	snprintf(lines[2], sizeof(lines[2]), "Down: %s", net_down_text);
-	snprintf(lines[3], sizeof(lines[3]), "Up: %s", net_up_text);
+	if (net_is_wireless) {
+		int sig = (net_last_wifi_quality >= 0.0) ? (int)lround(net_last_wifi_quality) : -1;
+		if (sig >= 0)
+			snprintf(lines[0], sizeof(lines[0]), "Wifi: %s | %d%%", net_ssid, sig);
+		else
+			snprintf(lines[0], sizeof(lines[0]), "Wifi: %s | --", net_ssid);
+	} else {
+		if (net_link_speed_mbps >= 1000)
+			snprintf(lines[0], sizeof(lines[0]), "Ethernet | %.1f Gbps", net_link_speed_mbps / 1000.0);
+		else if (net_link_speed_mbps > 0)
+			snprintf(lines[0], sizeof(lines[0]), "Ethernet | %d Mbps", net_link_speed_mbps);
+		else
+			snprintf(lines[0], sizeof(lines[0]), "Ethernet | --");
+	}
+	snprintf(lines[1], sizeof(lines[1]), "Local: %s", net_local_ip);
+	snprintf(lines[2], sizeof(lines[2]), "Public: %s", net_public_ip);
+	snprintf(lines[3], sizeof(lines[3]), "Up: %s  Down: %s", net_up_text, net_down_text);
 
 	/* Clear previous buffers but keep bg */
 	wl_list_for_each_safe(node, tmp, &p->tree->children, link) {
@@ -3305,6 +3381,12 @@ rendernetpopup(Monitor *m)
 
 	if (p->width <= 0 || p->height <= 0)
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
+	else {
+		/* keep anchor so hover detection survives brief relayouts */
+		p->anchor_x = m->statusbar.sysicons.x;
+		p->anchor_y = m->statusbar.area.height;
+		p->anchor_w = m->statusbar.sysicons.width;
+	}
 }
 
 static void
@@ -3678,6 +3760,31 @@ readfirstline(const char *path, char *buf, size_t len)
 }
 
 static int
+readlinkspeedmbps(const char *iface, int *out)
+{
+	char path[PATH_MAX];
+	char buf[32];
+	long val;
+	char *end;
+
+	if (!iface || !out)
+		return -1;
+	if (snprintf(path, sizeof(path), "/sys/class/net/%s/speed", iface)
+			>= (int)sizeof(path))
+		return -1;
+	if (readfirstline(path, buf, sizeof(buf)) != 0)
+		return -1;
+	errno = 0;
+	val = strtol(buf, &end, 10);
+	if (errno != 0 || end == buf)
+		return -1;
+	if (val <= 0)
+		return -1;
+	*out = (int)val;
+	return 0;
+}
+
+static int
 iface_is_wireless(const char *iface)
 {
 	char path[PATH_MAX];
@@ -3755,31 +3862,12 @@ findactiveinterface(char *iface, size_t len, int *is_wireless)
 static int
 readssid(const char *iface, char *out, size_t len)
 {
-	char cmd[128];
-	FILE *fp;
-
-	if (!iface || !out || len == 0)
+	/* Deprecated: synchronous SSID lookup removed to avoid blocking */
+	(void)iface;
+	if (!out || len == 0)
 		return 0;
-
-	if (snprintf(cmd, sizeof(cmd), "iwgetid -r %s 2>/dev/null", iface)
-			>= (int)sizeof(cmd))
-		return 0;
-
-	fp = popen(cmd, "r");
-	if (!fp)
-		return 0;
-	if (!fgets(out, (int)len, fp)) {
-		pclose(fp);
-		return 0;
-	}
-	pclose(fp);
-	for (size_t i = 0; i < len; i++) {
-		if (out[i] == '\n') {
-			out[i] = '\0';
-			break;
-		}
-	}
-	return out[0] != '\0';
+	out[0] = '\0';
+	return 0;
 }
 
 static int
@@ -3861,8 +3949,8 @@ wireless_signal_percent(const char *iface)
 static void
 format_speed(double bps, char *out, size_t len)
 {
-	const char *unit = "B/s";
-	double val = bps;
+	const char *unit = "kbps";
+	double val = bps / 1000.0;
 
 	if (!out || len == 0)
 		return;
@@ -3872,17 +3960,13 @@ format_speed(double bps, char *out, size_t len)
 		return;
 	}
 
-	if (val >= 1024.0) {
-		val /= 1024.0;
-		unit = "KB/s";
+	if (val >= 1000.0) {
+		val /= 1000.0;
+		unit = "Mbps";
 	}
-	if (val >= 1024.0) {
-		val /= 1024.0;
-		unit = "MB/s";
-	}
-	if (val >= 1024.0) {
-		val /= 1024.0;
-		unit = "GB/s";
+	if (val >= 1000.0) {
+		val /= 1000.0;
+		unit = "Gbps";
 	}
 
 	if (val >= 100.0)
@@ -3915,12 +3999,11 @@ set_net_icon_path(const char *path)
 }
 
 static void
-update_public_ip(void)
+request_public_ip_async(void)
 {
-	time_t now = time(NULL);
 	const char *cmd;
-	FILE *fp;
-	char buf[128] = {0};
+	int pipefd[2] = {-1, -1};
+	time_t now = time(NULL);
 
 	if (now == (time_t)-1)
 		return;
@@ -3928,29 +4011,221 @@ update_public_ip(void)
 	if (net_public_ip_last != 0 && (now - net_public_ip_last) < 300)
 		return;
 
+	if (public_ip_pid > 0 || public_ip_event)
+		return;
+
 	cmd = getenv("DWL_PUBLIC_IP_CMD");
 	if (!cmd || !cmd[0])
-		cmd = "curl -s https://ifconfig.me";
+		cmd = "curl -4 -s https://ifconfig.me";
 
-	fp = popen(cmd, "r");
-	if (fp) {
-		if (fgets(buf, sizeof(buf), fp)) {
-			for (size_t i = 0; i < sizeof(buf); i++) {
-				if (buf[i] == '\n') {
-					buf[i] = '\0';
-					break;
-				}
-			}
-			if (buf[0])
-				snprintf(net_public_ip, sizeof(net_public_ip), "%s", buf);
-		}
-		pclose(fp);
+	if (pipe(pipefd) != 0)
+		return;
+
+	public_ip_pid = fork();
+	if (public_ip_pid == 0) {
+		/* child */
+		close(pipefd[0]);
+		dup2(pipefd[1], STDOUT_FILENO);
+		dup2(pipefd[1], STDERR_FILENO);
+		close(pipefd[1]);
+		execl("/bin/sh", "/bin/sh", "-c", cmd, NULL);
+		_exit(127);
+	} else if (public_ip_pid < 0) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		public_ip_pid = -1;
+		return;
 	}
 
-	if (!net_public_ip[0])
-		snprintf(net_public_ip, sizeof(net_public_ip), "--");
+	/* parent */
+	close(pipefd[1]);
+	public_ip_fd = pipefd[0];
+	fcntl(public_ip_fd, F_SETFL, fcntl(public_ip_fd, F_GETFL) | O_NONBLOCK);
+	public_ip_len = 0;
+	public_ip_buf[0] = '\0';
+	net_public_ip_last = now; /* rate-limit even if fetch fails */
+	public_ip_event = wl_event_loop_add_fd(event_loop, public_ip_fd,
+			WL_EVENT_READABLE | WL_EVENT_HANGUP,
+			public_ip_event_cb, NULL);
+	if (!public_ip_event)
+		stop_public_ip_fetch();
+}
 
-	net_public_ip_last = now;
+static void
+stop_public_ip_fetch(void)
+{
+	if (public_ip_event) {
+		wl_event_source_remove(public_ip_event);
+		public_ip_event = NULL;
+	}
+	if (public_ip_fd >= 0) {
+		close(public_ip_fd);
+		public_ip_fd = -1;
+	}
+	if (public_ip_pid > 0) {
+		waitpid(public_ip_pid, NULL, WNOHANG);
+		public_ip_pid = -1;
+	}
+	public_ip_len = 0;
+	public_ip_buf[0] = '\0';
+}
+
+static int
+public_ip_event_cb(int fd, uint32_t mask, void *data)
+{
+	ssize_t n;
+	(void)data;
+
+	(void)mask;
+
+	for (;;) {
+		if (public_ip_len >= sizeof(public_ip_buf) - 1)
+			break;
+		n = read(fd, public_ip_buf + public_ip_len,
+				sizeof(public_ip_buf) - 1 - public_ip_len);
+		if (n > 0) {
+			public_ip_len += (size_t)n;
+			continue;
+		} else if (n == 0) {
+			break;
+		} else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+			return 0;
+		} else {
+			break;
+		}
+	}
+
+	public_ip_buf[public_ip_len] = '\0';
+	for (size_t i = 0; i < public_ip_len; i++) {
+		if (public_ip_buf[i] == '\n' || public_ip_buf[i] == '\r') {
+			public_ip_buf[i] = '\0';
+			break;
+		}
+	}
+	if (public_ip_buf[0])
+		snprintf(net_public_ip, sizeof(net_public_ip), "%s", public_ip_buf);
+	else if (!net_public_ip[0])
+		snprintf(net_public_ip, sizeof(net_public_ip), "--");
+	net_public_ip_last = time(NULL);
+	stop_public_ip_fetch();
+	return 0;
+}
+
+static void
+request_ssid_async(const char *iface)
+{
+	int pipefd[2] = {-1, -1};
+	char cmd[256];
+	const char *iw = "/run/current-system/sw/bin/iw";
+
+	if (!iface || !*iface)
+		return;
+	if (ssid_pid > 0 || ssid_event)
+		return;
+	if (access(iw, X_OK) != 0) {
+		iw = "/run/wrappers/bin/iw";
+		if (access(iw, X_OK) != 0)
+			iw = "iw";
+	}
+	if (snprintf(cmd, sizeof(cmd), "%s dev %s link 2>/dev/null", iw, iface)
+			>= (int)sizeof(cmd))
+		return;
+
+	if (pipe(pipefd) != 0)
+		return;
+
+	ssid_pid = fork();
+	if (ssid_pid == 0) {
+		close(pipefd[0]);
+		dup2(pipefd[1], STDOUT_FILENO);
+		dup2(pipefd[1], STDERR_FILENO);
+		close(pipefd[1]);
+		execl("/bin/sh", "/bin/sh", "-c", cmd, NULL);
+		_exit(127);
+	} else if (ssid_pid < 0) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		ssid_pid = -1;
+		return;
+	}
+
+	close(pipefd[1]);
+	ssid_fd = pipefd[0];
+	fcntl(ssid_fd, F_SETFL, fcntl(ssid_fd, F_GETFL) | O_NONBLOCK);
+	ssid_len = 0;
+	ssid_buf[0] = '\0';
+	ssid_event = wl_event_loop_add_fd(event_loop, ssid_fd,
+			WL_EVENT_READABLE | WL_EVENT_HANGUP,
+			ssid_event_cb, NULL);
+	if (!ssid_event)
+		stop_ssid_fetch();
+}
+
+static void
+stop_ssid_fetch(void)
+{
+	if (ssid_event) {
+		wl_event_source_remove(ssid_event);
+		ssid_event = NULL;
+	}
+	if (ssid_fd >= 0) {
+		close(ssid_fd);
+		ssid_fd = -1;
+	}
+	if (ssid_pid > 0) {
+		waitpid(ssid_pid, NULL, WNOHANG);
+		ssid_pid = -1;
+	}
+	ssid_len = 0;
+	ssid_buf[0] = '\0';
+}
+
+static int
+ssid_event_cb(int fd, uint32_t mask, void *data)
+{
+	ssize_t n;
+	(void)data;
+	(void)mask;
+
+	for (;;) {
+		if (ssid_len >= sizeof(ssid_buf) - 1)
+			break;
+		n = read(fd, ssid_buf + ssid_len, sizeof(ssid_buf) - 1 - ssid_len);
+		if (n > 0) {
+			ssid_len += (size_t)n;
+			continue;
+		} else if (n == 0) {
+			break;
+		} else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+			return 0;
+		} else {
+			break;
+		}
+	}
+
+	ssid_buf[ssid_len] = '\0';
+	if (ssid_buf[0]) {
+		char *line = ssid_buf;
+		while ((line = strstr(line, "SSID"))) {
+			while (*line && *line != ':' && *line != ' ')
+				line++;
+			while (*line == ':' || *line == ' ' || *line == '\t')
+				line++;
+			if (*line) {
+				char *end = line;
+				while (*end && *end != '\n' && *end != '\r')
+					end++;
+				*end = '\0';
+				snprintf(net_ssid, sizeof(net_ssid), "%s", line);
+				break;
+			}
+		}
+	}
+	if (!net_ssid[0])
+		snprintf(net_ssid, sizeof(net_ssid), "WiFi");
+	ssid_last_time = time(NULL);
+	stop_ssid_fetch();
+	return 0;
 }
 
 static double
@@ -5187,6 +5462,14 @@ pipewire_volume_percent(void)
 	char line[128];
 	double level = -1.0;
 	int muted = 0;
+	uint64_t now = monotonic_msec();
+
+	if (volume_last_read_ms != 0 && now - volume_last_read_ms < 8000) {
+		if (volume_cached >= 0.0) {
+			volume_muted = volume_cached_muted;
+			return volume_cached;
+		}
+	}
 
 	fp = popen("wpctl get-volume @DEFAULT_AUDIO_SINK@", "r");
 	if (!fp)
@@ -5202,6 +5485,11 @@ pipewire_volume_percent(void)
 
 	pclose(fp);
 	volume_muted = muted;
+	if (level >= 0.0) {
+		volume_cached = level;
+		volume_cached_muted = muted;
+		volume_last_read_ms = now;
+	}
 	return level;
 }
 
@@ -5252,13 +5540,18 @@ toggle_pipewire_mute(void)
 	int ret;
 	int current;
 
+	volume_last_read_ms = 0; /* force fresh read */
 	current = pipewire_volume_percent() >= 0.0 ? volume_muted : 0;
 	ret = set_pipewire_mute(!current);
 	if (ret != 0)
 		return -1;
 
-	/* Re-read to update mute flag and percent text */
-	pipewire_volume_percent();
+	/* Update cached state immediately to reflect the toggle */
+	volume_muted = !current;
+	volume_cached_muted = volume_muted;
+	volume_last_read_ms = monotonic_msec();
+	if (volume_last_percent < 0.0)
+		volume_last_percent = volume_cached >= 0.0 ? volume_cached : volume_last_percent;
 	refreshstatusvolume();
 	return 0;
 }
@@ -5467,9 +5760,19 @@ positionstatusmodules(Monitor *m)
 		}
 	}
 	if (m->statusbar.net_popup.tree) {
-		if (m->statusbar.net.width > 0 && m->statusbar.area.height > 0) {
+		int icon_w = m->statusbar.sysicons.width;
+		int pos_x = icon_w > 0 ? m->statusbar.sysicons.x : m->statusbar.net_popup.anchor_x;
+
+		if (m->statusbar.area.height > 0) {
 			wlr_scene_node_set_position(&m->statusbar.net_popup.tree->node,
-					m->statusbar.net.x, m->statusbar.area.height);
+					pos_x, m->statusbar.area.height);
+			if (icon_w > 0) {
+				m->statusbar.net_popup.anchor_x = pos_x;
+				m->statusbar.net_popup.anchor_y = m->statusbar.area.height;
+				m->statusbar.net_popup.anchor_w = icon_w;
+			}
+			if (!m->statusbar.net_popup.visible)
+				wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
 		} else {
 			wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
 			m->statusbar.net_popup.visible = 0;
@@ -5583,9 +5886,8 @@ refreshstatusclock(void)
 	wl_list_for_each(m, &mons, link) {
 		if (!m->statusbar.clock.tree || !m->showbar)
 			continue;
-		renderclock(&m->statusbar.clock,
-				m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height,
-				timestr);
+		int barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+		renderclock(&m->statusbar.clock, barh, timestr);
 		positionstatusmodules(m);
 	}
 }
@@ -5597,11 +5899,14 @@ refreshstatuslight(void)
 	int barh;
 	double percent, display;
 
-	backlight_available = findbacklightdevice(backlight_brightness_path,
-			sizeof(backlight_brightness_path),
-			backlight_max_path, sizeof(backlight_max_path));
-	if (!backlight_available)
-		backlight_writable = 0;
+	if (!backlight_paths_initialized) {
+		backlight_available = findbacklightdevice(backlight_brightness_path,
+				sizeof(backlight_brightness_path),
+				backlight_max_path, sizeof(backlight_max_path));
+		if (!backlight_available)
+			backlight_writable = 0;
+		backlight_paths_initialized = 1;
+	}
 
 	percent = backlight_percent();
 	display = percent;
@@ -5627,8 +5932,11 @@ refreshstatuslight(void)
 		if (!m->statusbar.light.tree || !m->showbar)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		renderlight(&m->statusbar.light, barh, light_text);
-		positionstatusmodules(m);
+		if (status_should_render(&m->statusbar.light, barh, light_text,
+					last_light_render, sizeof(last_light_render), &last_light_h)) {
+			renderlight(&m->statusbar.light, barh, light_text);
+			positionstatusmodules(m);
+		}
 	}
 }
 
@@ -5640,73 +5948,114 @@ refreshstatusnet(void)
 	char iface[IF_NAMESIZE] = {0};
 	char label[64] = {0};
 	char path[PATH_MAX];
+	time_t now_sec = time(NULL);
 	unsigned long long rx = 0, tx = 0;
 	struct timespec now_ts = {0};
 	double elapsed = 0.0;
 	int rx_ok = 0, tx_ok = 0;
 	double wifi_quality = -1.0;
 	const char *icon_path = net_icon_no_conn_resolved[0] ? net_icon_no_conn_resolved : net_icon_no_conn;
+	int link_speed = -1;
+	int popup_active = 0;
 
-	drop_net_icon_buffer(); /* force reload to avoid stale/low-res buffers */
+	wl_list_for_each(m, &mons, link) {
+		if (m->statusbar.net_popup.visible) {
+			popup_active = 1;
+			break;
+		}
+	}
 	net_available = findactiveinterface(iface, sizeof(iface), &net_is_wireless);
 	if (!net_available) {
 		snprintf(net_text, sizeof(net_text), "Net: --");
 		snprintf(net_local_ip, sizeof(net_local_ip), "--");
 		snprintf(net_down_text, sizeof(net_down_text), "--");
 		snprintf(net_up_text, sizeof(net_up_text), "--");
+		snprintf(net_ssid, sizeof(net_ssid), "--");
+		net_last_wifi_quality = -1.0;
+		net_link_speed_mbps = -1;
 		net_last_down_bps = net_last_up_bps = -1.0;
 		net_prev_valid = 0;
 		net_prev_iface[0] = '\0';
+		stop_ssid_fetch();
+		ssid_last_time = 0;
 	} else {
 		snprintf(net_iface, sizeof(net_iface), "%s", iface);
 		if (strncmp(net_prev_iface, net_iface, sizeof(net_prev_iface)) != 0) {
 			net_prev_valid = 0;
 			net_prev_rx = net_prev_tx = 0;
 			snprintf(net_prev_iface, sizeof(net_prev_iface), "%s", net_iface);
+			if (net_is_wireless) {
+				stop_ssid_fetch();
+				ssid_last_time = 0;
+			}
 		}
-		if (net_is_wireless && readssid(net_iface, label, sizeof(label))) {
-			snprintf(net_text, sizeof(net_text), "Net: %s", label);
+
+		if (net_is_wireless) {
+			if (popup_active && now_sec != (time_t)-1 &&
+					(now_sec - ssid_last_time > 60 || ssid_last_time == 0) &&
+					!ssid_event && ssid_pid <= 0) {
+				request_ssid_async(net_iface);
+			}
+			if (!net_ssid[0])
+				snprintf(net_ssid, sizeof(net_ssid), "WiFi");
+			snprintf(net_text, sizeof(net_text), "Net: %s", net_ssid);
 		} else {
-			snprintf(net_text, sizeof(net_text), "Net: %s", net_is_wireless ? "WiFi" : "Wired");
+			stop_ssid_fetch();
+			ssid_last_time = 0;
+			snprintf(net_text, sizeof(net_text), "Net: Wired");
+			snprintf(net_ssid, sizeof(net_ssid), "Ethernet");
 		}
 
 		if (!net_is_wireless) {
 			icon_path = net_icon_eth_resolved[0] ? net_icon_eth_resolved : net_icon_eth;
+			if (readlinkspeedmbps(net_iface, &link_speed) == 0)
+				net_link_speed_mbps = link_speed;
+			else
+				net_link_speed_mbps = -1;
+			net_last_wifi_quality = -1.0;
 		} else {
 			wifi_quality = wireless_signal_percent(net_iface);
 			if (wifi_quality < 0.0)
 				wifi_quality = 50.0;
 			icon_path = wifi_icon_for_quality(wifi_quality);
+			net_last_wifi_quality = wifi_quality;
+			if (readlinkspeedmbps(net_iface, &link_speed) == 0)
+				net_link_speed_mbps = link_speed;
+			else
+				net_link_speed_mbps = -1;
 		}
 
 		if (!localip(net_iface, net_local_ip, sizeof(net_local_ip)))
 			snprintf(net_local_ip, sizeof(net_local_ip), "--");
 
-		update_public_ip();
+		if (popup_active)
+			request_public_ip_async();
 
 		clock_gettime(CLOCK_MONOTONIC, &now_ts);
 
-		if (snprintf(path, sizeof(path), "/sys/class/net/%s/statistics/rx_bytes", net_iface)
-				< (int)sizeof(path))
-			rx_ok = (readulong(path, &rx) == 0);
-		if (snprintf(path, sizeof(path), "/sys/class/net/%s/statistics/tx_bytes", net_iface)
-				< (int)sizeof(path))
-			tx_ok = (readulong(path, &tx) == 0);
+		if (popup_active) {
+			if (snprintf(path, sizeof(path), "/sys/class/net/%s/statistics/rx_bytes", net_iface)
+					< (int)sizeof(path))
+				rx_ok = (readulong(path, &rx) == 0);
+			if (snprintf(path, sizeof(path), "/sys/class/net/%s/statistics/tx_bytes", net_iface)
+					< (int)sizeof(path))
+				tx_ok = (readulong(path, &tx) == 0);
 
-		if (net_prev_valid) {
-			elapsed = (now_ts.tv_sec - net_prev_ts.tv_sec)
-				+ (now_ts.tv_nsec - net_prev_ts.tv_nsec) / 1e9;
-		}
-		net_last_down_bps = (net_prev_valid && rx_ok) ? net_bytes_to_rate(rx, net_prev_rx, elapsed) : -1.0;
-		net_last_up_bps = (net_prev_valid && tx_ok) ? net_bytes_to_rate(tx, net_prev_tx, elapsed) : -1.0;
-		format_speed(net_last_down_bps, net_down_text, sizeof(net_down_text));
-		format_speed(net_last_up_bps, net_up_text, sizeof(net_up_text));
+			if (net_prev_valid) {
+				elapsed = (now_ts.tv_sec - net_prev_ts.tv_sec)
+					+ (now_ts.tv_nsec - net_prev_ts.tv_nsec) / 1e9;
+			}
+			net_last_down_bps = (net_prev_valid && rx_ok) ? net_bytes_to_rate(rx, net_prev_rx, elapsed) : -1.0;
+			net_last_up_bps = (net_prev_valid && tx_ok) ? net_bytes_to_rate(tx, net_prev_tx, elapsed) : -1.0;
+			format_speed(net_last_down_bps, net_down_text, sizeof(net_down_text));
+			format_speed(net_last_up_bps, net_up_text, sizeof(net_up_text));
 
-		if (rx_ok && tx_ok) {
-			net_prev_rx = rx;
-			net_prev_tx = tx;
-			net_prev_ts = now_ts;
-			net_prev_valid = 1;
+			if (rx_ok && tx_ok) {
+				net_prev_rx = rx;
+				net_prev_tx = tx;
+				net_prev_ts = now_ts;
+				net_prev_valid = 1;
+			}
 		}
 	}
 	set_net_icon_path(icon_path);
@@ -5715,10 +6064,16 @@ refreshstatusnet(void)
 		if (!m->statusbar.net.tree || !m->showbar)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		rendernet(&m->statusbar.net, barh, net_text);
-		if (m->statusbar.net_popup.visible)
+		if (status_should_render(&m->statusbar.net, barh, net_text,
+					last_net_render, sizeof(last_net_render), &last_net_h)
+				|| m->statusbar.net_popup.visible) {
+			rendernet(&m->statusbar.net, barh, net_text);
+			if (m->statusbar.net_popup.visible)
+				rendernetpopup(m);
+			positionstatusmodules(m);
+		} else if (m->statusbar.net_popup.visible) {
 			rendernetpopup(m);
-		positionstatusmodules(m);
+		}
 	}
 }
 
@@ -5819,8 +6174,11 @@ refreshstatusbattery(void)
 	int barh;
 	double percent, display;
 
-	battery_available = findbatterydevice(battery_capacity_path,
-			sizeof(battery_capacity_path));
+	if (!battery_path_initialized) {
+		battery_available = findbatterydevice(battery_capacity_path,
+				sizeof(battery_capacity_path));
+		battery_path_initialized = 1;
+	}
 
 	percent = battery_percent();
 	display = percent;
@@ -5846,8 +6204,11 @@ refreshstatusbattery(void)
 		if (!m->statusbar.battery.tree || !m->showbar)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		renderbattery(&m->statusbar.battery, barh, battery_text);
-		positionstatusmodules(m);
+		if (status_should_render(&m->statusbar.battery, barh, battery_text,
+					last_battery_render, sizeof(last_battery_render), &last_battery_h)) {
+			renderbattery(&m->statusbar.battery, barh, battery_text);
+			positionstatusmodules(m);
+		}
 	}
 }
 
@@ -5872,10 +6233,14 @@ refreshstatuscpu(void)
 		if (!m->statusbar.cpu.tree || !m->showbar)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		rendercpu(&m->statusbar.cpu, barh, cpu_text);
-		if (m->statusbar.cpu_popup.visible)
-			rendercpupopup(m);
-		positionstatusmodules(m);
+		if (status_should_render(&m->statusbar.cpu, barh, cpu_text,
+					last_cpu_render, sizeof(last_cpu_render), &last_cpu_h)
+				|| m->statusbar.cpu_popup.visible) {
+			rendercpu(&m->statusbar.cpu, barh, cpu_text);
+			if (m->statusbar.cpu_popup.visible)
+				rendercpupopup(m);
+			positionstatusmodules(m);
+		}
 	}
 }
 
@@ -5902,8 +6267,11 @@ refreshstatusram(void)
 		if (!m->statusbar.ram.tree || !m->showbar)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		renderram(&m->statusbar.ram, barh, ram_text);
-		positionstatusmodules(m);
+		if (status_should_render(&m->statusbar.ram, barh, ram_text,
+					last_ram_render, sizeof(last_ram_render), &last_ram_h)) {
+			renderram(&m->statusbar.ram, barh, ram_text);
+			positionstatusmodules(m);
+		}
 	}
 }
 
@@ -5938,8 +6306,11 @@ refreshstatusvolume(void)
 		if (!m->statusbar.volume.tree || !m->showbar)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		rendervolume(&m->statusbar.volume, barh, volume_text);
-		positionstatusmodules(m);
+		if (status_should_render(&m->statusbar.volume, barh, volume_text,
+					last_volume_render, sizeof(last_volume_render), &last_volume_h)) {
+			rendervolume(&m->statusbar.volume, barh, volume_text);
+			positionstatusmodules(m);
+		}
 	}
 }
 
@@ -6021,6 +6392,127 @@ refreshstatustags(void)
 }
 
 static void
+seed_status_rng(void)
+{
+	struct timespec ts;
+
+	if (status_rng_seeded)
+		return;
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+		srand((unsigned)(ts.tv_sec ^ ts.tv_nsec));
+	else
+		srand((unsigned)time(NULL));
+	status_rng_seeded = 1;
+}
+
+static int
+status_should_render(StatusModule *module, int barh, const char *text,
+		char *last_text, size_t last_len, int *last_h)
+{
+	if (!module || !text || !last_text || last_len == 0)
+		return 1;
+
+	if ((last_h && *last_h != barh) || last_text[0] == '\0'
+			|| strncmp(last_text, text, last_len) != 0) {
+		snprintf(last_text, last_len, "%s", text);
+		if (last_h)
+			*last_h = barh;
+		return 1;
+	}
+	return 0;
+}
+
+static void
+initial_status_refresh(void)
+{
+	refreshstatusclock();
+	refreshstatuscpu();
+	refreshstatusram();
+	refreshstatuslight();
+	refreshstatusvolume();
+	refreshstatusbattery();
+	refreshstatusnet();
+	refreshstatusicons();
+	refreshstatustags();
+}
+
+static uint32_t
+random_status_delay_ms(void)
+{
+	seed_status_rng();
+	return 5000u + (uint32_t)(rand() % 5001);
+}
+
+static void
+init_status_refresh_tasks(void)
+{
+	uint64_t now = monotonic_msec();
+	uint32_t offset = 100;
+
+	for (size_t i = 0; i < LENGTH(status_tasks); i++) {
+		status_tasks[i].next_due_ms = now + offset;
+		offset += 200; /* stagger initial fills to avoid clumping */
+	}
+}
+
+static void
+trigger_status_task_now(void (*fn)(void))
+{
+	uint64_t now = monotonic_msec();
+
+	for (size_t i = 0; i < LENGTH(status_tasks); i++) {
+		if (status_tasks[i].fn == fn) {
+			status_tasks[i].next_due_ms = now;
+			schedule_next_status_refresh();
+			return;
+		}
+	}
+}
+
+static int
+status_task_hover_active(void (*fn)(void))
+{
+	Monitor *m;
+
+	if (fn == refreshstatuscpu) {
+		wl_list_for_each(m, &mons, link) {
+			if (m->showbar && m->statusbar.cpu_popup.visible)
+				return 1;
+		}
+	}
+	if (fn == refreshstatusnet) {
+		wl_list_for_each(m, &mons, link) {
+			if (m->showbar && m->statusbar.net_popup.visible)
+				return 1;
+		}
+	}
+	return 0;
+}
+
+static void
+schedule_next_status_refresh(void)
+{
+	uint64_t now = monotonic_msec();
+	uint64_t next = UINT64_MAX;
+
+	if (!status_cpu_timer)
+		return;
+
+	for (size_t i = 0; i < LENGTH(status_tasks); i++) {
+		if (status_tasks[i].next_due_ms < next)
+			next = status_tasks[i].next_due_ms;
+	}
+
+	if (next == UINT64_MAX)
+		return;
+
+	if (next <= now)
+		wl_event_source_timer_update(status_cpu_timer, 1);
+	else
+		wl_event_source_timer_update(status_cpu_timer, (int)(next - now));
+}
+
+static void
 schedule_status_timer(void)
 {
 	struct timespec ts;
@@ -6043,16 +6535,43 @@ schedule_status_timer(void)
 static int
 updatestatuscpu(void *data)
 {
+	size_t chosen = 0;
+	uint64_t best = 0;
+	uint64_t now = monotonic_msec();
+	int found = 0;
+	uint64_t since_motion = last_pointer_motion_ms ? now - last_pointer_motion_ms : UINT64_MAX;
+
 	(void)data;
-	refreshstatuscpu();
-	refreshstatusram();
-	refreshstatuslight();
-	refreshstatusvolume();
-	refreshstatusbattery();
-	refreshstatusnet();
-	refreshstatusicons();
-	if (status_cpu_timer)
-		wl_event_source_timer_update(status_cpu_timer, 2000);
+
+	if (since_motion < 8) {
+		wl_event_source_timer_update(status_cpu_timer, 8 - (int)since_motion);
+		return 0;
+	}
+
+	for (size_t i = 0; i < LENGTH(status_tasks); i++) {
+		if (!found || status_tasks[i].next_due_ms < best) {
+			best = status_tasks[i].next_due_ms;
+			chosen = i;
+			found = 1;
+		}
+	}
+
+	if (!found) {
+		schedule_next_status_refresh();
+		return 0;
+	}
+
+	if (best > now) {
+		schedule_next_status_refresh();
+		return 0;
+	}
+
+	status_tasks[chosen].fn();
+	if (status_task_hover_active(status_tasks[chosen].fn))
+		status_tasks[chosen].next_due_ms = now + STATUS_FAST_MS;
+	else
+		status_tasks[chosen].next_due_ms = now + random_status_delay_ms();
+	schedule_next_status_refresh();
 	return 0;
 }
 
@@ -6140,8 +6659,10 @@ updatecpuhover(Monitor *m, double cx, double cy)
 		wlr_scene_node_set_enabled(&p->tree->node, 1);
 		wlr_scene_node_set_position(&p->tree->node,
 				m->statusbar.cpu.x, m->statusbar.area.height);
-		if (!was_visible)
+		if (!was_visible) {
 			rendercpupopup(m);
+			trigger_status_task_now(refreshstatuscpu);
+		}
 	} else if (p->visible) {
 		p->visible = 0;
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
@@ -6154,9 +6675,10 @@ updatenethover(Monitor *m, double cx, double cy)
 	int lx, ly;
 	int inside = 0;
 	int was_visible;
+	StatusModule *icon_mod;
 	NetPopup *p;
 
-	if (!m || !m->showbar || !m->statusbar.net.tree || !m->statusbar.net_popup.tree) {
+	if (!m || !m->showbar || !m->statusbar.net_popup.tree) {
 		if (m && m->statusbar.net_popup.tree) {
 			wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
 			m->statusbar.net_popup.visible = 0;
@@ -6165,14 +6687,37 @@ updatenethover(Monitor *m, double cx, double cy)
 	}
 
 	p = &m->statusbar.net_popup;
+	icon_mod = &m->statusbar.sysicons;
 	lx = (int)floor(cx) - m->statusbar.area.x;
 	ly = (int)floor(cy) - m->statusbar.area.y;
 
-	if (lx >= m->statusbar.net.x &&
-			lx < m->statusbar.net.x + m->statusbar.net.width &&
-			ly >= 0 && ly < m->statusbar.area.height &&
-			m->statusbar.net.width > 0) {
+	if (icon_mod->width > 0 &&
+		lx >= icon_mod->x &&
+		lx < icon_mod->x + icon_mod->width &&
+		ly >= 0 && ly < m->statusbar.area.height) {
 		inside = 1;
+	}
+	/* Allow anchor data when icon is temporarily zero-sized */
+	if (!inside && p->anchor_w > 0) {
+		int lx_abs = (int)floor(cx);
+		int ly_abs = (int)floor(cy);
+		int ax0 = m->statusbar.area.x + p->anchor_x;
+		int ay0 = m->statusbar.area.y;
+		if (lx_abs >= ax0 && lx_abs < ax0 + p->anchor_w &&
+				ly_abs >= ay0 && ly_abs < ay0 + m->statusbar.area.height)
+			inside = 1;
+	}
+
+	/* Keep visible while hovering popup itself */
+	if (!inside && p->visible && p->width > 0 && p->height > 0) {
+		int px0 = m->statusbar.area.x + (icon_mod->width > 0 ? icon_mod->x : p->anchor_x);
+		int py0 = m->statusbar.area.y + m->statusbar.area.height;
+		int px1 = px0 + p->width;
+		int py1 = py0 + p->height;
+		int cx_i = (int)floor(cx);
+		int cy_i = (int)floor(cy);
+		if (cx_i >= px0 && cx_i < px1 && cy_i >= py0 && cy_i < py1)
+			inside = 1;
 	}
 
 	was_visible = p->visible;
@@ -6181,10 +6726,14 @@ updatenethover(Monitor *m, double cx, double cy)
 		p->visible = 1;
 		wlr_scene_node_set_enabled(&p->tree->node, 1);
 		wlr_scene_node_set_position(&p->tree->node,
-				m->statusbar.net.x, m->statusbar.area.height);
+				icon_mod->width > 0 ? icon_mod->x : p->anchor_x,
+				m->statusbar.area.height);
 		if (!was_visible) {
-			refreshstatusnet();
+			p->anchor_x = icon_mod->width > 0 ? icon_mod->x : p->anchor_x;
+			p->anchor_y = m->statusbar.area.height;
+			p->anchor_w = icon_mod->width > 0 ? icon_mod->width : p->anchor_w;
 			rendernetpopup(m);
+			trigger_status_task_now(refreshstatusnet);
 		}
 	} else if (p->visible) {
 		p->visible = 0;
@@ -6379,6 +6928,7 @@ adjust_volume_by_steps(int steps)
 	if (steps == 0)
 		return 0;
 
+	volume_last_read_ms = 0; /* force fresh read if needed */
 	vol = volume_last_percent >= 0.0 ? volume_last_percent : pipewire_volume_percent();
 	if (vol < 0.0)
 		return 0;
@@ -6398,6 +6948,9 @@ adjust_volume_by_steps(int steps)
 		return 0;
 
 	volume_last_percent = vol;
+	volume_cached = vol;
+	volume_cached_muted = 0;
+	volume_last_read_ms = monotonic_msec();
 	refreshstatusvolume();
 	return 1;
 }
@@ -6621,6 +7174,12 @@ cleanup(void)
 
 	cleanuplisteners();
 	drop_net_icon_buffer();
+	stop_public_ip_fetch();
+	stop_ssid_fetch();
+	last_clock_render[0] = last_cpu_render[0] = last_ram_render[0] = '\0';
+	last_light_render[0] = last_volume_render[0] = last_battery_render[0] = '\0';
+	last_net_render[0] = '\0';
+	last_clock_h = last_cpu_h = last_ram_h = last_light_h = last_volume_h = last_battery_h = last_net_h = 0;
 	if (status_timer) {
 		wl_event_source_remove(status_timer);
 		status_timer = NULL;
@@ -7959,6 +8518,7 @@ motionabsolute(struct wl_listener *listener, void *data)
 	wlr_cursor_absolute_to_layout_coords(cursor, &event->pointer->base, event->x, event->y, &lx, &ly);
 	dx = lx - cursor->x;
 	dy = ly - cursor->y;
+	last_pointer_motion_ms = monotonic_msec();
 	motionnotify(event->time_msec, &event->pointer->base, dx, dy, dx, dy);
 }
 
@@ -8225,8 +8785,9 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	if (time == 0 && resizing_from_mouse)
 		goto focus;
 
-	tiled = grabc && !grabc->isfloating && !grabc->isfullscreen;
-	if (cursor_mode == CurMove) {
+		tiled = grabc && !grabc->isfloating && !grabc->isfullscreen;
+		last_pointer_motion_ms = monotonic_msec();
+		if (cursor_mode == CurMove) {
 		/* Move the grabbed client to the new position. */
 		if (grabc && grabc->isfloating) {
 			resize(grabc, (struct wlr_box){
@@ -8358,6 +8919,7 @@ motionrelative(struct wl_listener *listener, void *data)
 	 * special configuration applied for the specific input device which
 	 * generated the event. You can pass NULL for the device if you want to move
 	 * the cursor around without any input. */
+	last_pointer_motion_ms = monotonic_msec();
 	motionnotify(event->time_msec, &event->pointer->base, event->delta_x, event->delta_y,
 			event->unaccel_dx, event->unaccel_dy);
 }
@@ -9289,18 +9851,12 @@ setup(void)
 	}
 #endif
 
-	if (status_timer) {
-		refreshstatusclock();
+	initial_status_refresh();
+	if (status_timer)
 		schedule_status_timer();
-	}
 	if (status_cpu_timer) {
-		refreshstatuscpu();
-		refreshstatusram();
-		refreshstatuslight();
-		refreshstatusvolume();
-		refreshstatusbattery();
-		refreshstatusnet();
-		wl_event_source_timer_update(status_cpu_timer, 2000);
+		init_status_refresh_tasks();
+		schedule_next_status_refresh();
 	}
 	if (status_hover_timer)
 		wl_event_source_timer_update(status_hover_timer, 0);
