@@ -1,0 +1,86 @@
+net icon paths: wifi100=images/svg/wifi_100.svg wifi75=images/svg/wifi_75.svg wifi50=images/svg/wifi_50.svg wifi25=images/svg/wifi_25.svg eth=images/svg/ethernet.svg noconn=images/svg/no_connection.svg
+eDP-1 title 
+eDP-1 appid 
+eDP-1 fullscreen 
+eDP-1 floating 
+eDP-1 selmon 0
+eDP-1 tags 0 1 0 0
+eDP-1 layout |w|
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+eDP-1 title 
+eDP-1 appid 
+eDP-1 fullscreen 
+eDP-1 floating 
+eDP-1 selmon 1
+eDP-1 tags 0 1 0 0
+eDP-1 layout |w|
+eDP-1 title 
+eDP-1 appid 
+eDP-1 fullscreen 
+eDP-1 floating 
+eDP-1 selmon 1
+eDP-1 tags 0 1 0 0
+eDP-1 layout |w|
+tray: registered :1.3/org/ayatana/NotificationItem/nm_applet
+tray: registered :1.8257/org/blueman/sni
+2025-12-20 12:44:37 - [main.c:282] Found config * for output eDP-1 (AU Optronics 0x328E)
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+tray: registered :1.8265/org/blueman/sni
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_100.svg (resolved=images/svg/wifi_100.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_100.svg (resolved=images/svg/wifi_100.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_100.svg (resolved=images/svg/wifi_100.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_100.svg (resolved=images/svg/wifi_100.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_100.svg (resolved=images/svg/wifi_100.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_100.svg (resolved=images/svg/wifi_100.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_100.svg (resolved=images/svg/wifi_100.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_100.svg (resolved=images/svg/wifi_100.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_100.svg (resolved=images/svg/wifi_100.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_100.svg (resolved=images/svg/wifi_100.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_100.svg (resolved=images/svg/wifi_100.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_100.svg (resolved=images/svg/wifi_100.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_100.svg (resolved=images/svg/wifi_100.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_100.svg (resolved=images/svg/wifi_100.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_100.svg (resolved=images/svg/wifi_100.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_100.svg (resolved=images/svg/wifi_100.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_75.svg (resolved=images/svg/wifi_75.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_100.svg (resolved=images/svg/wifi_100.svg) w=26 h=26 target_h=26
+net icon: loaded images/svg/wifi_100.svg (resolved=images/svg/wifi_100.svg) w=26 h=26 target_h=26
+Io error: Broken pipe (os error 32)
+Io error: Broken pipe (os error 32)
+Io error: Broken pipe (os error 32)
+Error: ExitFailure(1)
