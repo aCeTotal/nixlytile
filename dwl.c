@@ -255,6 +255,7 @@ struct StatusBar {
 	StatusModule battery;
 	StatusModule net;
 	StatusModule light;
+	StatusModule mic;
 	StatusModule volume;
 	StatusModule ram;
 	StatusModule tags;
@@ -610,6 +611,8 @@ static int ensure_ram_icon_buffer(int target_h);
 static void drop_ram_icon_buffer(void);
 static int ensure_battery_icon_buffer(int target_h);
 static void drop_battery_icon_buffer(void);
+static int ensure_mic_icon_buffer(int target_h);
+static void drop_mic_icon_buffer(void);
 static int ensure_volume_icon_buffer(int target_h);
 static void drop_volume_icon_buffer(void);
 static void renderclock(StatusModule *module, int bar_height, const char *text);
@@ -618,6 +621,7 @@ static void rendernet(StatusModule *module, int bar_height, const char *text);
 static void renderbattery(StatusModule *module, int bar_height, const char *text);
 static void rendermon(struct wl_listener *listener, void *data);
 static void rendervolume(StatusModule *module, int bar_height, const char *text);
+static void rendermic(StatusModule *module, int bar_height, const char *text);
 static void render_icon_label(StatusModule *module, int bar_height, const char *text,
 		int (*ensure_icon)(int target_h), struct wlr_buffer **icon_buf,
 		int *icon_w, int *icon_h, int min_text_w, int icon_gap,
@@ -632,6 +636,7 @@ static void positionstatusmodules(Monitor *m);
 static void refreshstatusclock(void);
 static void refreshstatuslight(void);
 static void refreshstatusvolume(void);
+static void refreshstatusmic(void);
 static void refreshstatusbattery(void);
 static void refreshstatusnet(void);
 static void request_public_ip_async(void);
@@ -746,6 +751,10 @@ static int set_pipewire_volume(double percent);
 static int set_pipewire_mute(int mute);
 static int toggle_pipewire_mute(void);
 static int pipewire_sink_is_headset(void);
+static int set_pipewire_mic_volume(double percent);
+static int set_pipewire_mic_mute(int mute);
+static int toggle_pipewire_mic_mute(void);
+static double pipewire_mic_volume_percent(void);
 static void updatecpuhover(Monitor *m, double cx, double cy);
 static double net_bytes_to_rate(unsigned long long cur, unsigned long long prev,
 		double elapsed);
@@ -875,6 +884,7 @@ static StatusRefreshTask status_tasks[] = {
 	{ refreshstatuscpu, 0 },
 	{ refreshstatusram, 0 },
 	{ refreshstatuslight, 0 },
+	{ refreshstatusmic, 0 },
 	{ refreshstatusvolume, 0 },
 	{ refreshstatusbattery, 0 },
 	{ refreshstatusnet, 0 },
@@ -911,6 +921,7 @@ static char last_cpu_render[32];
 static char last_ram_render[32];
 static char last_light_render[32];
 static char last_volume_render[32];
+static char last_mic_render[32];
 static char last_battery_render[32];
 static char last_net_render[64];
 static int last_clock_h;
@@ -918,6 +929,7 @@ static int last_cpu_h;
 static int last_ram_h;
 static int last_light_h;
 static int last_volume_h;
+static int last_mic_h;
 static int last_battery_h;
 static int last_net_h;
 static int battery_path_initialized;
@@ -925,8 +937,12 @@ static int backlight_paths_initialized;
 static uint64_t volume_last_read_ms;
 static double volume_cached = -1.0;
 static int volume_cached_muted = -1;
+static uint64_t mic_last_read_ms;
+static double mic_cached = -1.0;
+static int mic_cached_muted = -1;
 static uint64_t last_pointer_motion_ms;
 static const float *volume_text_color = NULL; /* set at runtime; defaults to statusbar_fg */
+static const float *mic_text_color = NULL;
 static const float *statusbar_fg_override = NULL;
 static pid_t wifi_scan_pid = -1;
 static int wifi_scan_fd = -1;
@@ -959,6 +975,8 @@ static char ram_icon_path[PATH_MAX] = "images/svg/ram.svg";
 static char ram_icon_loaded_path[PATH_MAX];
 static char battery_icon_path[PATH_MAX] = "images/svg/battery-100.svg";
 static char battery_icon_loaded_path[PATH_MAX];
+static char mic_icon_path[PATH_MAX] = "images/svg/microphone.svg";
+static char mic_icon_loaded_path[PATH_MAX];
 static char volume_icon_path[PATH_MAX] = "images/svg/speaker_100.svg";
 static char volume_icon_loaded_path[PATH_MAX];
 static const char net_icon_no_conn[] = "images/svg/no_connection.svg";
@@ -977,6 +995,8 @@ static const char volume_icon_speaker_100[] = "images/svg/speaker_100.svg";
 static const char volume_icon_speaker_muted[] = "images/svg/speaker_muted.svg";
 static const char volume_icon_headset[] = "images/svg/headset.svg";
 static const char volume_icon_headset_muted[] = "images/svg/headset_muted.svg";
+static const char mic_icon_unmuted[] = "images/svg/microphone.svg";
+static const char mic_icon_muted[] = "images/svg/microphone_muted.svg";
 static char net_icon_wifi_100_resolved[PATH_MAX];
 static char net_icon_wifi_75_resolved[PATH_MAX];
 static char net_icon_wifi_50_resolved[PATH_MAX];
@@ -1003,6 +1023,10 @@ static int battery_icon_loaded_h;
 static int battery_icon_w;
 static int battery_icon_h;
 static struct wlr_buffer *battery_icon_buf;
+static int mic_icon_loaded_h;
+static int mic_icon_w;
+static int mic_icon_h;
+static struct wlr_buffer *mic_icon_buf;
 static int volume_icon_loaded_h;
 static int volume_icon_w;
 static int volume_icon_h;
@@ -1021,9 +1045,13 @@ static int tray_host_registered;
 static struct wl_list tray_items;
 static double light_last_percent = -1.0;
 static char light_text[32] = "--%";
+static double mic_last_percent = -1.0;
+static char mic_text[32] = "--%";
 static double volume_last_percent = -1.0;
 static char volume_text[32] = "--%";
 static int volume_muted = -1;
+static int mic_muted = -1;
+static int mic_last_color_is_muted = -1;
 static int volume_last_color_is_muted = -1;
 static char backlight_brightness_path[PATH_MAX];
 static char backlight_max_path[PATH_MAX];
@@ -1034,6 +1062,8 @@ static int battery_available;
 static const double light_step = 5.0;
 static const double volume_step = 3.0;
 static const double volume_max_percent = 150.0;
+static const double mic_step = 3.0;
+static const double mic_max_percent = 150.0;
 static double cpu_last_core_percent[MAX_CPU_CORES];
 static int cpu_core_count;
 static char sysicons_text[64] = "Tray";
@@ -1721,6 +1751,14 @@ rendervolume(StatusModule *module, int bar_height, const char *text)
 	render_icon_label(module, bar_height, text,
 			ensure_volume_icon_buffer, &volume_icon_buf, &volume_icon_w, &volume_icon_h,
 			status_text_width("100%"), statusbar_icon_text_gap_volume, volume_text_color);
+}
+
+static void
+rendermic(StatusModule *module, int bar_height, const char *text)
+{
+	render_icon_label(module, bar_height, text,
+			ensure_mic_icon_buffer, &mic_icon_buf, &mic_icon_w, &mic_icon_h,
+			status_text_width("100%"), statusbar_icon_text_gap_microphone, mic_text_color);
 }
 
 static int
@@ -2535,6 +2573,63 @@ ensure_battery_icon_buffer(int target_h)
 	battery_icon_h = h;
 	battery_icon_loaded_h = target_h;
 	snprintf(battery_icon_loaded_path, sizeof(battery_icon_loaded_path), "%s", path);
+	return 0;
+}
+
+static void
+drop_mic_icon_buffer(void)
+{
+	if (mic_icon_buf) {
+		wlr_buffer_drop(mic_icon_buf);
+		mic_icon_buf = NULL;
+	}
+	mic_icon_loaded_h = 0;
+	mic_icon_w = mic_icon_h = 0;
+	mic_icon_loaded_path[0] = '\0';
+}
+
+static int
+ensure_mic_icon_buffer(int target_h)
+{
+	GdkPixbuf *pixbuf = NULL;
+	GError *gerr = NULL;
+	struct wlr_buffer *buf;
+	int w = 0, h = 0;
+	char resolved[PATH_MAX];
+	const char *path = mic_icon_path;
+
+	if (target_h <= 0)
+		return -1;
+
+	if (resolve_asset_path(mic_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
+		path = resolved;
+
+	if (mic_icon_buf && mic_icon_loaded_h == target_h &&
+			strncmp(mic_icon_loaded_path, path, sizeof(mic_icon_loaded_path)) == 0)
+		return 0;
+
+	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
+		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
+		if (!pixbuf) {
+			if (gerr) {
+				fprintf(stderr, "mic icon: failed to load '%s': %s\n",
+						path, gerr->message);
+				g_error_free(gerr);
+			}
+			return -1;
+		}
+	}
+
+	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
+	if (!buf)
+		return -1;
+
+	drop_mic_icon_buffer();
+	mic_icon_buf = buf;
+	mic_icon_w = w;
+	mic_icon_h = h;
+	mic_icon_loaded_h = target_h;
+	snprintf(mic_icon_loaded_path, sizeof(mic_icon_loaded_path), "%s", path);
 	return 0;
 }
 
@@ -6276,6 +6371,44 @@ pipewire_volume_percent(void)
 	return level;
 }
 
+static double
+pipewire_mic_volume_percent(void)
+{
+	FILE *fp;
+	char line[128];
+	double level = -1.0;
+	int muted = 0;
+	uint64_t now = monotonic_msec();
+
+	if (mic_last_read_ms != 0 && now - mic_last_read_ms < 8000) {
+		if (mic_cached >= 0.0) {
+			mic_muted = mic_cached_muted;
+			return mic_cached;
+		}
+	}
+
+	fp = popen("wpctl get-volume @DEFAULT_AUDIO_SOURCE@", "r");
+	if (!fp)
+		return -1.0;
+
+	if (fgets(line, sizeof(line), fp)) {
+		double raw = 0.0;
+		if (strstr(line, "[MUTED]"))
+			muted = 1;
+		if (sscanf(line, "Volume: %lf", &raw) == 1)
+			level = raw * 100.0;
+	}
+
+	pclose(fp);
+	mic_muted = muted;
+	if (level >= 0.0) {
+		mic_cached = level;
+		mic_cached_muted = muted;
+		mic_last_read_ms = now;
+	}
+	return level;
+}
+
 static int
 pipewire_sink_is_headset(void)
 {
@@ -6327,6 +6460,24 @@ set_pipewire_mute(int mute)
 }
 
 static int
+set_pipewire_mic_mute(int mute)
+{
+	char cmd[128];
+	int ret;
+
+	ret = snprintf(cmd, sizeof(cmd), "wpctl set-mute @DEFAULT_AUDIO_SOURCE@ %d", mute ? 1 : 0);
+	if (ret < 0 || ret >= (int)sizeof(cmd))
+		return -1;
+
+	ret = system(cmd);
+	if (ret != 0)
+		return -1;
+
+	pipewire_mic_volume_percent();
+	return 0;
+}
+
+static int
 set_pipewire_volume(double percent)
 {
 	char cmd[128];
@@ -6349,6 +6500,28 @@ set_pipewire_volume(double percent)
 }
 
 static int
+set_pipewire_mic_volume(double percent)
+{
+	char cmd[128];
+	int ret;
+
+	if (percent < 0.0)
+		percent = 0.0;
+	if (percent > mic_max_percent)
+		percent = mic_max_percent;
+
+	ret = snprintf(cmd, sizeof(cmd),
+			"wpctl set-volume @DEFAULT_AUDIO_SOURCE@ %.2f%%", percent);
+	if (ret < 0 || ret >= (int)sizeof(cmd))
+		return -1;
+
+	ret = system(cmd);
+	if (ret == 0)
+		mic_last_percent = percent;
+	return ret == 0 ? 0 : -1;
+}
+
+static int
 toggle_pipewire_mute(void)
 {
 	int ret;
@@ -6367,6 +6540,27 @@ toggle_pipewire_mute(void)
 	if (volume_last_percent < 0.0)
 		volume_last_percent = volume_cached >= 0.0 ? volume_cached : volume_last_percent;
 	refreshstatusvolume();
+	return 0;
+}
+
+static int
+toggle_pipewire_mic_mute(void)
+{
+	int ret;
+	int current;
+
+	mic_last_read_ms = 0;
+	current = pipewire_mic_volume_percent() >= 0.0 ? mic_muted : 0;
+	ret = set_pipewire_mic_mute(!current);
+	if (ret != 0)
+		return -1;
+
+	mic_muted = !current;
+	mic_cached_muted = mic_muted;
+	mic_last_read_ms = monotonic_msec();
+	if (mic_last_percent < 0.0)
+		mic_last_percent = mic_cached >= 0.0 ? mic_cached : mic_last_percent;
+	refreshstatusmic();
 	return 0;
 }
 
@@ -6438,14 +6632,18 @@ positionstatusmodules(Monitor *m)
 			wlr_scene_node_set_enabled(&m->statusbar.battery.tree->node, 0);
 			m->statusbar.battery.x = 0;
 		}
-		if (m->statusbar.light.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.light.tree->node, 0);
-			m->statusbar.light.x = 0;
-		}
-		if (m->statusbar.volume.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.volume.tree->node, 0);
-			m->statusbar.volume.x = 0;
-		}
+			if (m->statusbar.light.tree) {
+				wlr_scene_node_set_enabled(&m->statusbar.light.tree->node, 0);
+				m->statusbar.light.x = 0;
+			}
+			if (m->statusbar.mic.tree) {
+				wlr_scene_node_set_enabled(&m->statusbar.mic.tree->node, 0);
+				m->statusbar.mic.x = 0;
+			}
+			if (m->statusbar.volume.tree) {
+				wlr_scene_node_set_enabled(&m->statusbar.volume.tree->node, 0);
+				m->statusbar.volume.x = 0;
+			}
 		if (m->statusbar.ram.tree) {
 			wlr_scene_node_set_enabled(&m->statusbar.ram.tree->node, 0);
 			m->statusbar.ram.x = 0;
@@ -6484,12 +6682,15 @@ positionstatusmodules(Monitor *m)
 	if (m->statusbar.battery.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.battery.tree->node,
 				m->statusbar.battery.width > 0);
-	if (m->statusbar.light.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.light.tree->node,
-				m->statusbar.light.width > 0);
-	if (m->statusbar.volume.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.volume.tree->node,
-				m->statusbar.volume.width > 0);
+		if (m->statusbar.light.tree)
+			wlr_scene_node_set_enabled(&m->statusbar.light.tree->node,
+					m->statusbar.light.width > 0);
+		if (m->statusbar.mic.tree)
+			wlr_scene_node_set_enabled(&m->statusbar.mic.tree->node,
+					m->statusbar.mic.width > 0);
+		if (m->statusbar.volume.tree)
+			wlr_scene_node_set_enabled(&m->statusbar.volume.tree->node,
+					m->statusbar.volume.width > 0);
 	if (m->statusbar.ram.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.ram.tree->node,
 				m->statusbar.ram.width > 0);
@@ -6544,6 +6745,12 @@ positionstatusmodules(Monitor *m)
 		x -= m->statusbar.net.width;
 		wlr_scene_node_set_position(&m->statusbar.net.tree->node, x, 0);
 		m->statusbar.net.x = x;
+		x -= spacing;
+	}
+	if (m->statusbar.mic.width > 0) {
+		x -= m->statusbar.mic.width;
+		wlr_scene_node_set_position(&m->statusbar.mic.tree->node, x, 0);
+		m->statusbar.mic.x = x;
 		x -= spacing;
 	}
 	if (m->statusbar.volume.width > 0) {
@@ -7499,6 +7706,75 @@ refreshstatusvolume(void)
 }
 
 static void
+refreshstatusmic(void)
+{
+	double vol = pipewire_mic_volume_percent();
+	Monitor *m;
+	int barh;
+	double display = vol;
+	int force_render = 0;
+	int use_muted_color = 0;
+	const char *icon = mic_icon_unmuted;
+
+	if (vol >= 0.0) {
+		mic_last_percent = vol;
+		display = vol;
+	} else if (mic_last_percent >= 0.0) {
+		display = mic_last_percent;
+	}
+
+	if (display > mic_max_percent)
+		display = mic_max_percent;
+	if (display < 0.0 && mic_muted == 1)
+		display = 0.0;
+
+	if (mic_muted == 1) {
+		use_muted_color = 1;
+		display = display < 0.0 ? 0.0 : display;
+	}
+
+	if (display < 0.0) {
+		snprintf(mic_text, sizeof(mic_text), "--%%");
+	} else {
+		if (display < 0.0)
+			display = 0.0;
+		if (display > mic_max_percent)
+			display = mic_max_percent;
+		if (mic_muted == 1)
+			display = 0.0;
+		snprintf(mic_text, sizeof(mic_text), "%d%%", (int)lround(display));
+	}
+
+	if (mic_muted == 1)
+		icon = mic_icon_muted;
+	else
+		icon = mic_icon_unmuted;
+
+	if (strncmp(mic_icon_path, icon, sizeof(mic_icon_path)) != 0) {
+		snprintf(mic_icon_path, sizeof(mic_icon_path), "%s", icon);
+		force_render = 1;
+	}
+
+	mic_text_color = use_muted_color ? statusbar_mic_muted_fg : statusbar_fg;
+	if (use_muted_color != mic_last_color_is_muted) {
+		force_render = 1;
+		mic_last_color_is_muted = use_muted_color;
+	}
+
+	wl_list_for_each(m, &mons, link) {
+		if (!m->statusbar.mic.tree || !m->showbar)
+			continue;
+		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+		if (status_should_render(&m->statusbar.mic, barh, mic_text,
+					last_mic_render, sizeof(last_mic_render), &last_mic_h)
+				|| force_render) {
+			rendermic(&m->statusbar.mic, barh, mic_text);
+			positionstatusmodules(m);
+		}
+	}
+}
+
+static void
 refreshstatusicons(void)
 {
 	Monitor *m;
@@ -7614,6 +7890,7 @@ initial_status_refresh(void)
 	refreshstatuscpu();
 	refreshstatusram();
 	refreshstatuslight();
+	refreshstatusmic();
 	refreshstatusvolume();
 	refreshstatusbattery();
 	refreshstatusnet();
@@ -8142,6 +8419,42 @@ adjust_volume_by_steps(int steps)
 }
 
 static int
+adjust_mic_by_steps(int steps)
+{
+	double vol;
+
+	if (steps == 0)
+		return 0;
+
+	mic_last_read_ms = 0;
+	vol = mic_last_percent >= 0.0 ? mic_last_percent : pipewire_mic_volume_percent();
+	if (vol < 0.0)
+		return 0;
+
+	if (mic_muted == 1) {
+		int mute_res = system("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0");
+		(void)mute_res;
+	}
+
+	vol += (double)steps * mic_step;
+	if (vol < 0.0)
+		vol = 0.0;
+	if (vol > mic_max_percent)
+		vol = mic_max_percent;
+
+	if (set_pipewire_mic_volume(vol) != 0)
+		return 0;
+
+	mic_last_percent = vol;
+	mic_cached = vol;
+	mic_cached_muted = 0;
+	mic_muted = 0;
+	mic_last_read_ms = monotonic_msec();
+	refreshstatusmic();
+	return 1;
+}
+
+static int
 handlestatusscroll(struct wlr_pointer_axis_event *event)
 {
 	Monitor *m;
@@ -8174,6 +8487,12 @@ handlestatusscroll(struct wlr_pointer_axis_event *event)
 			lx >= m->statusbar.light.x &&
 			lx < m->statusbar.light.x + m->statusbar.light.width) {
 		return adjust_backlight_by_steps(steps);
+	}
+
+	if (m->statusbar.mic.width > 0 &&
+			lx >= m->statusbar.mic.x &&
+			lx < m->statusbar.mic.x + m->statusbar.mic.width) {
+		return adjust_mic_by_steps(steps);
 	}
 
 	if (m->statusbar.volume.width > 0 &&
@@ -8244,12 +8563,13 @@ buttonpress(struct wl_listener *listener, void *data)
 		}
 
 	if (selmon && selmon->showbar) {
-		int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
-		int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
-		StatusModule *tags = &selmon->statusbar.tags;
-		StatusModule *vol = &selmon->statusbar.volume;
-			StatusModule *cpu = &selmon->statusbar.cpu;
-			StatusModule *sys = &selmon->statusbar.sysicons;
+			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
+			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
+			StatusModule *tags = &selmon->statusbar.tags;
+			StatusModule *mic = &selmon->statusbar.mic;
+			StatusModule *vol = &selmon->statusbar.volume;
+				StatusModule *cpu = &selmon->statusbar.cpu;
+				StatusModule *sys = &selmon->statusbar.sysicons;
 
 			if (lx >= 0 && ly >= 0 &&
 					lx < selmon->statusbar.area.width &&
@@ -8262,16 +8582,21 @@ buttonpress(struct wl_listener *listener, void *data)
 					return;
 				}
 
-				if (cpu->width > 0 && lx >= cpu->x && lx < cpu->x + cpu->width) {
-					Arg arg = { .v = btopcmd };
-					spawn(&arg);
-					return;
-				}
+					if (cpu->width > 0 && lx >= cpu->x && lx < cpu->x + cpu->width) {
+						Arg arg = { .v = btopcmd };
+						spawn(&arg);
+						return;
+					}
 
-				if (vol->width > 0 && lx >= vol->x && lx < vol->x + vol->width) {
-					toggle_pipewire_mute();
-					return;
-				}
+					if (mic->width > 0 && lx >= mic->x && lx < mic->x + mic->width) {
+						toggle_pipewire_mic_mute();
+						return;
+					}
+
+					if (vol->width > 0 && lx >= vol->x && lx < vol->x + vol->width) {
+						toggle_pipewire_mute();
+						return;
+					}
 
 				if (event->button == BTN_LEFT && lx < tags->width) {
 					for (int i = 0; i < tags->box_count; i++) {
@@ -8380,6 +8705,7 @@ cleanup(void)
 	drop_light_icon_buffer();
 	drop_ram_icon_buffer();
 	drop_battery_icon_buffer();
+	drop_mic_icon_buffer();
 	drop_volume_icon_buffer();
 	stop_public_ip_fetch();
 	stop_ssid_fetch();
@@ -8387,9 +8713,9 @@ cleanup(void)
 	net_menu_hide_all();
 	wifi_networks_clear();
 	last_clock_render[0] = last_cpu_render[0] = last_ram_render[0] = '\0';
-	last_light_render[0] = last_volume_render[0] = last_battery_render[0] = '\0';
+	last_light_render[0] = last_volume_render[0] = last_mic_render[0] = last_battery_render[0] = '\0';
 	last_net_render[0] = '\0';
-	last_clock_h = last_cpu_h = last_ram_h = last_light_h = last_volume_h = last_battery_h = last_net_h = 0;
+	last_clock_h = last_cpu_h = last_ram_h = last_light_h = last_volume_h = last_mic_h = last_battery_h = last_net_h = 0;
 	if (wifi_scan_timer) {
 		wl_event_source_remove(wifi_scan_timer);
 		wifi_scan_timer = NULL;
@@ -8858,15 +9184,18 @@ initstatusbar(Monitor *m)
 		m->statusbar.net.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.net.tree)
 			m->statusbar.net.bg = wlr_scene_tree_create(m->statusbar.net.tree);
-		m->statusbar.battery.tree = wlr_scene_tree_create(m->statusbar.tree);
-		if (m->statusbar.battery.tree)
-			m->statusbar.battery.bg = wlr_scene_tree_create(m->statusbar.battery.tree);
-		m->statusbar.light.tree = wlr_scene_tree_create(m->statusbar.tree);
-		if (m->statusbar.light.tree)
-			m->statusbar.light.bg = wlr_scene_tree_create(m->statusbar.light.tree);
-		m->statusbar.volume.tree = wlr_scene_tree_create(m->statusbar.tree);
-		if (m->statusbar.volume.tree)
-			m->statusbar.volume.bg = wlr_scene_tree_create(m->statusbar.volume.tree);
+			m->statusbar.battery.tree = wlr_scene_tree_create(m->statusbar.tree);
+			if (m->statusbar.battery.tree)
+				m->statusbar.battery.bg = wlr_scene_tree_create(m->statusbar.battery.tree);
+			m->statusbar.light.tree = wlr_scene_tree_create(m->statusbar.tree);
+			if (m->statusbar.light.tree)
+				m->statusbar.light.bg = wlr_scene_tree_create(m->statusbar.light.tree);
+			m->statusbar.mic.tree = wlr_scene_tree_create(m->statusbar.tree);
+			if (m->statusbar.mic.tree)
+				m->statusbar.mic.bg = wlr_scene_tree_create(m->statusbar.mic.tree);
+			m->statusbar.volume.tree = wlr_scene_tree_create(m->statusbar.tree);
+			if (m->statusbar.volume.tree)
+				m->statusbar.volume.bg = wlr_scene_tree_create(m->statusbar.volume.tree);
 		m->statusbar.ram.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.ram.tree)
 			m->statusbar.ram.bg = wlr_scene_tree_create(m->statusbar.ram.tree);
