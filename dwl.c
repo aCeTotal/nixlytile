@@ -101,8 +101,12 @@
 #include "util.h"
 
 /* macros */
+#ifndef MAX
 #define MAX(A, B)               ((A) > (B) ? (A) : (B))
+#endif
+#ifndef MIN
 #define MIN(A, B)               ((A) < (B) ? (A) : (B))
+#endif
 #define UNUSED __attribute__((unused))
 #define CLEANMASK(mask)         (mask & ~WLR_MODIFIER_CAPS)
 #define VISIBLEON(C, M)         ((M) && (C)->mon == (M) && (((C)->tags & (M)->tagset[(M)->seltags]) || (C)->issticky))
@@ -188,6 +192,34 @@ typedef struct {
 	uint64_t next_due_ms;
 } StatusRefreshTask;
 
+static const float net_menu_row_bg[4] = {0.15f, 0.15f, 0.15f, 1.0f};
+static const float net_menu_row_bg_hover[4] = {0.25f, 0.25f, 0.25f, 1.0f};
+static const double status_icon_scale = 2.0;
+
+typedef struct WifiNetwork {
+	char ssid[128];
+	int strength;
+	int secure;
+	struct wl_list link;
+} WifiNetwork;
+
+typedef struct {
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_tree *bg;
+	struct wlr_scene_tree *submenu_tree;
+	struct wlr_scene_tree *submenu_bg;
+	int width, height;
+	int submenu_width, submenu_height;
+	int x, y;
+	int submenu_x, submenu_y;
+	int visible;
+	int submenu_visible;
+	int hover;
+	int submenu_hover;
+	struct wl_list entries;   /* main menu entries */
+	struct wl_list networks;  /* WifiNetwork list */
+} NetMenu;
+
 typedef struct TrayMenuEntry {
 	int id;
 	int enabled;
@@ -230,6 +262,7 @@ struct StatusBar {
 	CpuPopup cpu_popup;
 	NetPopup net_popup;
 	TrayMenu tray_menu;
+	NetMenu net_menu;
 	StatusModule sysicons;
 };
 
@@ -268,11 +301,18 @@ drawrect(struct wlr_scene_tree *parent, int x, int y,
 		int width, int height, const float color[static 4])
 {
 	struct wlr_scene_rect *r;
+	float col[4];
 
 	if (!parent || width <= 0 || height <= 0)
 		return;
 
-	r = wlr_scene_rect_create(parent, width, height, color);
+	/* Disable alpha for solid buttons/dropdowns */
+	col[0] = color[0];
+	col[1] = color[1];
+	col[2] = color[2];
+	col[3] = 1.0f;
+
+	r = wlr_scene_rect_create(parent, width, height, col);
 	if (r)
 		wlr_scene_node_set_position(&r->node, x, y);
 }
@@ -562,17 +602,32 @@ static void printstatus(void);
 static void powermgrsetmode(struct wl_listener *listener, void *data);
 static void quit(const Arg *arg);
 static struct wlr_buffer *statusbar_buffer_from_argb32(const uint32_t *data, int width, int height);
+static int ensure_cpu_icon_buffer(int target_h);
+static void drop_cpu_icon_buffer(void);
+static int ensure_light_icon_buffer(int target_h);
+static void drop_light_icon_buffer(void);
+static int ensure_ram_icon_buffer(int target_h);
+static void drop_ram_icon_buffer(void);
+static int ensure_battery_icon_buffer(int target_h);
+static void drop_battery_icon_buffer(void);
+static int ensure_volume_icon_buffer(int target_h);
+static void drop_volume_icon_buffer(void);
 static void renderclock(StatusModule *module, int bar_height, const char *text);
 static void renderlight(StatusModule *module, int bar_height, const char *text);
 static void rendernet(StatusModule *module, int bar_height, const char *text);
 static void renderbattery(StatusModule *module, int bar_height, const char *text);
 static void rendermon(struct wl_listener *listener, void *data);
 static void rendervolume(StatusModule *module, int bar_height, const char *text);
+static void render_icon_label(StatusModule *module, int bar_height, const char *text,
+		int (*ensure_icon)(int target_h), struct wlr_buffer **icon_buf,
+		int *icon_w, int *icon_h, int min_text_w, int icon_gap,
+		const float text_color[static 4]);
 static void renderworkspaces(Monitor *m, StatusModule *module, int bar_height);
 static void freestatusfont(void);
 static int loadstatusfont(void);
 static int status_text_width(const char *text);
-static int tray_render_label(StatusModule *module, const char *text, int x, int bar_height);
+static int tray_render_label(StatusModule *module, const char *text, int x, int bar_height,
+		const float color[static 4]);
 static void positionstatusmodules(Monitor *m);
 static void refreshstatusclock(void);
 static void refreshstatuslight(void);
@@ -589,6 +644,17 @@ static void init_status_refresh_tasks(void);
 static int status_should_render(StatusModule *module, int barh, const char *text,
 		char *last_text, size_t last_len, int *last_h);
 static void initial_status_refresh(void);
+static void net_menu_hide_all(void);
+static void net_menu_open(Monitor *m);
+static void net_menu_render(Monitor *m);
+static void net_menu_submenu_render(Monitor *m);
+static void net_menu_update_hover(Monitor *m, double cx, double cy);
+static void wifi_networks_clear(void);
+static void request_wifi_scan(void);
+static void wifi_scan_plan_rescan(void);
+static int wifi_scan_event_cb(int fd, uint32_t mask, void *data);
+static void connect_wifi_ssid(const char *ssid);
+static void connect_wifi_with_prompt(const char *ssid, int secure);
 static int status_task_hover_active(void (*fn)(void));
 static void trigger_status_task_now(void (*fn)(void));
 static int public_ip_event_cb(int fd, uint32_t mask, void *data);
@@ -605,7 +671,8 @@ static int tray_property_get_host_registered(sd_bus *bus, const char *path, cons
 static int tray_property_get_protocol_version(sd_bus *bus, const char *path, const char *interface,
         const char *property, sd_bus_message *reply, void *userdata, sd_bus_error *ret_error);
 static int tray_item_load_icon(TrayItem *it);
-static int tray_render_label(StatusModule *module, const char *text, int x, int bar_height);
+static int tray_render_label(StatusModule *module, const char *text, int x, int bar_height,
+		const float color[static 4]);
 static void tray_emit_host_registered(void);
 static void tray_menu_clear(TrayMenu *menu);
 static void tray_menu_hide(Monitor *m);
@@ -678,6 +745,7 @@ static int set_backlight_percent(double percent);
 static int set_pipewire_volume(double percent);
 static int set_pipewire_mute(int mute);
 static int toggle_pipewire_mute(void);
+static int pipewire_sink_is_headset(void);
 static void updatecpuhover(Monitor *m, double cx, double cy);
 static double net_bytes_to_rate(unsigned long long cur, unsigned long long prev,
 		double elapsed);
@@ -831,11 +899,11 @@ static uint64_t tray_anchor_time_ms;
 static struct CpuSample cpu_prev[MAX_CPU_CORES];
 static int cpu_prev_count;
 static double cpu_last_percent = -1.0;
-static char cpu_text[32] = "CPU: --%";
+static char cpu_text[32] = "--%";
 static double ram_last_mb = -1.0;
-static char ram_text[32] = "RAM: --";
+static char ram_text[32] = "--";
 static double battery_last_percent = -1.0;
-static char battery_text[32] = "Battery: --%";
+static char battery_text[32] = "--%";
 static double net_last_down_bps = -1.0;
 static double net_last_up_bps = -1.0;
 static char last_clock_render[32];
@@ -858,6 +926,17 @@ static uint64_t volume_last_read_ms;
 static double volume_cached = -1.0;
 static int volume_cached_muted = -1;
 static uint64_t last_pointer_motion_ms;
+static const float *volume_text_color = NULL; /* set at runtime; defaults to statusbar_fg */
+static const float *statusbar_fg_override = NULL;
+static pid_t wifi_scan_pid = -1;
+static int wifi_scan_fd = -1;
+static struct wl_event_source *wifi_scan_event = NULL;
+static struct wl_event_source *wifi_scan_timer = NULL;
+static char wifi_scan_buf[8192];
+static size_t wifi_scan_len = 0;
+static int wifi_scan_inflight;
+static struct wl_list wifi_networks; /* WifiNetwork */
+static int wifi_networks_initialized;
 static char net_text[64] = "Net: --";
 static char net_local_ip[64] = "--";
 static char net_public_ip[64] = "--";
@@ -872,12 +951,32 @@ static int net_is_wireless;
 static int net_available;
 static char net_icon_path[PATH_MAX] = "images/svg/no_connection.svg";
 static char net_icon_loaded_path[PATH_MAX];
+static char cpu_icon_path[PATH_MAX] = "images/svg/cpu.svg";
+static char cpu_icon_loaded_path[PATH_MAX];
+static char light_icon_path[PATH_MAX] = "images/svg/light.svg";
+static char light_icon_loaded_path[PATH_MAX];
+static char ram_icon_path[PATH_MAX] = "images/svg/ram.svg";
+static char ram_icon_loaded_path[PATH_MAX];
+static char battery_icon_path[PATH_MAX] = "images/svg/battery-100.svg";
+static char battery_icon_loaded_path[PATH_MAX];
+static char volume_icon_path[PATH_MAX] = "images/svg/speaker_100.svg";
+static char volume_icon_loaded_path[PATH_MAX];
 static const char net_icon_no_conn[] = "images/svg/no_connection.svg";
 static const char net_icon_eth[] = "images/svg/ethernet.svg";
 static const char net_icon_wifi_100[] = "images/svg/wifi_100.svg";
 static const char net_icon_wifi_75[] = "images/svg/wifi_75.svg";
 static const char net_icon_wifi_50[] = "images/svg/wifi_50.svg";
 static const char net_icon_wifi_25[] = "images/svg/wifi_25.svg";
+static const char battery_icon_25[] = "images/svg/battery-25.svg";
+static const char battery_icon_50[] = "images/svg/battery-50.svg";
+static const char battery_icon_75[] = "images/svg/battery-75.svg";
+static const char battery_icon_100[] = "images/svg/battery-100.svg";
+static const char volume_icon_speaker_25[] = "images/svg/speaker_25.svg";
+static const char volume_icon_speaker_50[] = "images/svg/speaker_50.svg";
+static const char volume_icon_speaker_100[] = "images/svg/speaker_100.svg";
+static const char volume_icon_speaker_muted[] = "images/svg/speaker_muted.svg";
+static const char volume_icon_headset[] = "images/svg/headset.svg";
+static const char volume_icon_headset_muted[] = "images/svg/headset_muted.svg";
 static char net_icon_wifi_100_resolved[PATH_MAX];
 static char net_icon_wifi_75_resolved[PATH_MAX];
 static char net_icon_wifi_50_resolved[PATH_MAX];
@@ -888,6 +987,26 @@ static int net_icon_loaded_h;
 static int net_icon_w;
 static int net_icon_h;
 static struct wlr_buffer *net_icon_buf;
+static int cpu_icon_loaded_h;
+static int cpu_icon_w;
+static int cpu_icon_h;
+static struct wlr_buffer *cpu_icon_buf;
+static int light_icon_loaded_h;
+static int light_icon_w;
+static int light_icon_h;
+static struct wlr_buffer *light_icon_buf;
+static int ram_icon_loaded_h;
+static int ram_icon_w;
+static int ram_icon_h;
+static struct wlr_buffer *ram_icon_buf;
+static int battery_icon_loaded_h;
+static int battery_icon_w;
+static int battery_icon_h;
+static struct wlr_buffer *battery_icon_buf;
+static int volume_icon_loaded_h;
+static int volume_icon_w;
+static int volume_icon_h;
+static struct wlr_buffer *volume_icon_buf;
 static unsigned long long net_prev_rx;
 static unsigned long long net_prev_tx;
 static struct timespec net_prev_ts;
@@ -901,10 +1020,11 @@ static sd_bus_slot *tray_name_slot;
 static int tray_host_registered;
 static struct wl_list tray_items;
 static double light_last_percent = -1.0;
-static char light_text[32] = "Light: --%";
+static char light_text[32] = "--%";
 static double volume_last_percent = -1.0;
-static char volume_text[32] = "Vol: --%";
+static char volume_text[32] = "--%";
 static int volume_muted = -1;
+static int volume_last_color_is_muted = -1;
 static char backlight_brightness_path[PATH_MAX];
 static char backlight_max_path[PATH_MAX];
 static int backlight_available;
@@ -1144,10 +1264,11 @@ statusbar_buffer_from_glyph(const struct fcft_glyph *glyph)
 
 	force_color = statusbar_font_force_color || pixman_image_get_format(glyph->pix) == PIXMAN_a8;
 	if (force_color) {
-		col.alpha = (uint16_t)lroundf(statusbar_fg[3] * 65535.0f);
-		col.red = (uint16_t)lroundf(statusbar_fg[0] * 65535.0f);
-		col.green = (uint16_t)lroundf(statusbar_fg[1] * 65535.0f);
-		col.blue = (uint16_t)lroundf(statusbar_fg[2] * 65535.0f);
+		const float *fg = statusbar_fg_override ? statusbar_fg_override : statusbar_fg;
+		col.alpha = (uint16_t)lroundf(fg[3] * 65535.0f);
+		col.red = (uint16_t)lroundf(fg[0] * 65535.0f);
+		col.green = (uint16_t)lroundf(fg[1] * 65535.0f);
+		col.blue = (uint16_t)lroundf(fg[2] * 65535.0f);
 		solid = pixman_image_create_solid_fill(&col);
 		pixman_image_composite32(PIXMAN_OP_SRC, solid, glyph->pix, dst,
 				0, 0, 0, 0, 0, 0, width, height);
@@ -1337,6 +1458,81 @@ renderclock(StatusModule *module, int bar_height, const char *text)
 	tll_free(glyphs);
 }
 
+static void
+render_icon_label(StatusModule *module, int bar_height, const char *text,
+		int (*ensure_icon)(int target_h), struct wlr_buffer **icon_buf,
+		int *icon_w, int *icon_h, int min_text_w, int icon_gap,
+		const float text_color[static 4])
+{
+	int padding = statusbar_module_padding;
+	int text_w = 0;
+	int x;
+	int iw = 0, ih = 0;
+	int target_h;
+	int scaled_target_h;
+	struct wlr_scene_buffer *scene_buf;
+	const float *fg = text_color ? text_color : statusbar_fg;
+
+	if (!module || !module->tree)
+		return;
+
+	clearstatusmodule(module);
+
+	if (bar_height <= 0) {
+		module->width = 0;
+		return;
+	}
+
+	target_h = bar_height - 2 * padding;
+	if (target_h <= 0)
+		target_h = bar_height;
+	scaled_target_h = target_h;
+	if (status_icon_scale > 0.0) {
+		double scaled = (double)target_h * status_icon_scale;
+		if (scaled > (double)INT_MAX)
+			scaled = (double)INT_MAX;
+		scaled_target_h = (int)lround(scaled);
+		if (scaled_target_h <= 0)
+			scaled_target_h = target_h;
+	}
+
+	if (ensure_icon && icon_buf && icon_w && icon_h
+			&& ensure_icon(scaled_target_h) == 0
+			&& *icon_buf && *icon_w > 0 && *icon_h > 0) {
+		iw = *icon_w;
+		ih = *icon_h;
+	}
+
+	if (text && *text)
+		text_w = status_text_width(text);
+	if (min_text_w > text_w)
+		text_w = min_text_w;
+	if (icon_gap <= 0)
+		icon_gap = statusbar_icon_text_gap;
+
+	module->width = 2 * padding + text_w;
+	if (iw > 0)
+		module->width += iw + (text_w > 0 ? icon_gap : padding);
+	if (module->width < 2 * padding)
+		module->width = 2 * padding;
+
+	updatemodulebg(module, module->width, bar_height, statusbar_bg);
+	x = padding;
+
+	if (iw > 0 && icon_buf && *icon_buf) {
+		scene_buf = wlr_scene_buffer_create(module->tree, NULL);
+		if (scene_buf) {
+			int icon_y = (bar_height - ih) / 2;
+			wlr_scene_buffer_set_buffer(scene_buf, *icon_buf);
+			wlr_scene_node_set_position(&scene_buf->node, x, icon_y);
+		}
+		x += iw + (text_w > 0 ? icon_gap : padding);
+	}
+
+	if (text_w > 0)
+		tray_render_label(module, text, x, bar_height, fg);
+}
+
 static int
 status_text_width(const char *text)
 {
@@ -1372,7 +1568,8 @@ status_text_width(const char *text)
 }
 
 static int
-tray_render_label(StatusModule *module, const char *text, int x, int bar_height)
+tray_render_label(StatusModule *module, const char *text, int x, int bar_height,
+		const float color[static 4])
 {
 	tll(struct GlyphRun) glyphs = tll_init();
 	const struct fcft_glyph *glyph;
@@ -1383,14 +1580,17 @@ tray_render_label(StatusModule *module, const char *text, int x, int bar_height)
 	int min_y = INT_MAX, max_y = INT_MIN;
 	int text_width, text_height, origin_y;
 	size_t i;
+	const float *prev_fg = statusbar_fg_override;
 
 	if (!module || !module->tree || !text || !*text || bar_height <= 0)
 		return 0;
 
+	statusbar_fg_override = color;
 	if (!statusfont.font) {
 		int w = status_text_width(text);
 		if (w <= 0)
 			w = statusbar_font_spacing;
+		statusbar_fg_override = prev_fg;
 		return w;
 	}
 
@@ -1423,6 +1623,7 @@ tray_render_label(StatusModule *module, const char *text, int x, int bar_height)
 
 	if (tll_length(glyphs) == 0) {
 		tll_free(glyphs);
+		statusbar_fg_override = prev_fg;
 		return 0;
 	}
 
@@ -1447,28 +1648,35 @@ tray_render_label(StatusModule *module, const char *text, int x, int bar_height)
 	}
 
 	tll_free(glyphs);
+	statusbar_fg_override = prev_fg;
 	return text_width;
 }
 
 static void
 rendercpu(StatusModule *module, int bar_height, const char *text)
 {
-	renderclock(module, bar_height, text);
+	render_icon_label(module, bar_height, text,
+			ensure_cpu_icon_buffer, &cpu_icon_buf, &cpu_icon_w, &cpu_icon_h,
+			0, statusbar_icon_text_gap_cpu, statusbar_fg);
 }
 
 static void
 renderlight(StatusModule *module, int bar_height, const char *text)
 {
-	if (!backlight_available) {
-		if (module && module->tree) {
-			clearstatusmodule(module);
-			module->width = 0;
-			wlr_scene_node_set_enabled(&module->tree->node, 0);
-		}
+	if (!module || !module->tree) {
 		return;
 	}
 
-	renderclock(module, bar_height, text);
+	if (!backlight_available) {
+		clearstatusmodule(module);
+		module->width = 0;
+		wlr_scene_node_set_enabled(&module->tree->node, 0);
+		return;
+	}
+
+	render_icon_label(module, bar_height, text,
+			ensure_light_icon_buffer, &light_icon_buf, &light_icon_w, &light_icon_h,
+			0, statusbar_icon_text_gap_light, statusbar_fg);
 }
 
 static void
@@ -1494,19 +1702,25 @@ renderbattery(StatusModule *module, int bar_height, const char *text)
 		return;
 	}
 
-	renderclock(module, bar_height, text);
+	render_icon_label(module, bar_height, text,
+			ensure_battery_icon_buffer, &battery_icon_buf, &battery_icon_w, &battery_icon_h,
+			status_text_width("100%"), statusbar_icon_text_gap_battery, statusbar_fg);
 }
 
 static void
 renderram(StatusModule *module, int bar_height, const char *text)
 {
-	renderclock(module, bar_height, text);
+	render_icon_label(module, bar_height, text,
+			ensure_ram_icon_buffer, &ram_icon_buf, &ram_icon_w, &ram_icon_h,
+			0, statusbar_icon_text_gap_ram, statusbar_fg);
 }
 
 static void
 rendervolume(StatusModule *module, int bar_height, const char *text)
 {
-	renderclock(module, bar_height, text);
+	render_icon_label(module, bar_height, text,
+			ensure_volume_icon_buffer, &volume_icon_buf, &volume_icon_w, &volume_icon_h,
+			status_text_width("100%"), statusbar_icon_text_gap_volume, volume_text_color);
 }
 
 static int
@@ -1559,10 +1773,11 @@ resolve_asset_path(const char *path, char *out, size_t len)
 	}
 
 	if (!exe_dir_cached) {
+		char *slash;
 		ssize_t n = readlink("/proc/self/exe", exe_dir, sizeof(exe_dir) - 1);
 		if (n > 0 && (size_t)n < sizeof(exe_dir)) {
 			exe_dir[n] = '\0';
-			char *slash = strrchr(exe_dir, '/');
+			slash = strrchr(exe_dir, '/');
 			if (slash)
 				*slash = '\0';
 			else
@@ -2038,6 +2253,291 @@ out:
 	return 0;
 }
 
+static void
+drop_cpu_icon_buffer(void)
+{
+	if (cpu_icon_buf) {
+		wlr_buffer_drop(cpu_icon_buf);
+		cpu_icon_buf = NULL;
+	}
+	cpu_icon_loaded_h = 0;
+	cpu_icon_w = cpu_icon_h = 0;
+	cpu_icon_loaded_path[0] = '\0';
+}
+
+static int
+ensure_cpu_icon_buffer(int target_h)
+{
+	GdkPixbuf *pixbuf = NULL;
+	GError *gerr = NULL;
+	struct wlr_buffer *buf;
+	int w = 0, h = 0;
+	char resolved[PATH_MAX];
+	const char *path = cpu_icon_path;
+
+	if (target_h <= 0)
+		return -1;
+
+	if (resolve_asset_path(cpu_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
+		path = resolved;
+
+	if (cpu_icon_buf && cpu_icon_loaded_h == target_h &&
+			strncmp(cpu_icon_loaded_path, path, sizeof(cpu_icon_loaded_path)) == 0)
+		return 0;
+
+	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
+		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
+		if (!pixbuf) {
+			if (gerr) {
+				fprintf(stderr, "cpu icon: failed to load '%s': %s\n",
+						path, gerr->message);
+				g_error_free(gerr);
+			}
+			return -1;
+		}
+	}
+
+	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
+	if (!buf)
+		return -1;
+
+	drop_cpu_icon_buffer();
+	cpu_icon_buf = buf;
+	cpu_icon_w = w;
+	cpu_icon_h = h;
+	cpu_icon_loaded_h = target_h;
+	snprintf(cpu_icon_loaded_path, sizeof(cpu_icon_loaded_path), "%s", path);
+	return 0;
+}
+
+static void
+drop_light_icon_buffer(void)
+{
+	if (light_icon_buf) {
+		wlr_buffer_drop(light_icon_buf);
+		light_icon_buf = NULL;
+	}
+	light_icon_loaded_h = 0;
+	light_icon_w = light_icon_h = 0;
+	light_icon_loaded_path[0] = '\0';
+}
+
+static int
+ensure_light_icon_buffer(int target_h)
+{
+	GdkPixbuf *pixbuf = NULL;
+	GError *gerr = NULL;
+	struct wlr_buffer *buf;
+	int w = 0, h = 0;
+	char resolved[PATH_MAX];
+	const char *path = light_icon_path;
+
+	if (target_h <= 0)
+		return -1;
+
+	if (resolve_asset_path(light_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
+		path = resolved;
+
+	if (light_icon_buf && light_icon_loaded_h == target_h &&
+			strncmp(light_icon_loaded_path, path, sizeof(light_icon_loaded_path)) == 0)
+		return 0;
+
+	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
+		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
+		if (!pixbuf) {
+			if (gerr) {
+				fprintf(stderr, "light icon: failed to load '%s': %s\n",
+						path, gerr->message);
+				g_error_free(gerr);
+			}
+			return -1;
+		}
+	}
+
+	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
+	if (!buf)
+		return -1;
+
+	drop_light_icon_buffer();
+	light_icon_buf = buf;
+	light_icon_w = w;
+	light_icon_h = h;
+	light_icon_loaded_h = target_h;
+	snprintf(light_icon_loaded_path, sizeof(light_icon_loaded_path), "%s", path);
+	return 0;
+}
+
+static void
+drop_ram_icon_buffer(void)
+{
+	if (ram_icon_buf) {
+		wlr_buffer_drop(ram_icon_buf);
+		ram_icon_buf = NULL;
+	}
+	ram_icon_loaded_h = 0;
+	ram_icon_w = ram_icon_h = 0;
+	ram_icon_loaded_path[0] = '\0';
+}
+
+static int
+ensure_ram_icon_buffer(int target_h)
+{
+	GdkPixbuf *pixbuf = NULL;
+	GError *gerr = NULL;
+	struct wlr_buffer *buf;
+	int w = 0, h = 0;
+	char resolved[PATH_MAX];
+	const char *path = ram_icon_path;
+
+	if (target_h <= 0)
+		return -1;
+
+	if (resolve_asset_path(ram_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
+		path = resolved;
+
+	if (ram_icon_buf && ram_icon_loaded_h == target_h &&
+			strncmp(ram_icon_loaded_path, path, sizeof(ram_icon_loaded_path)) == 0)
+		return 0;
+
+	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
+		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
+		if (!pixbuf) {
+			if (gerr) {
+				fprintf(stderr, "ram icon: failed to load '%s': %s\n",
+						path, gerr->message);
+				g_error_free(gerr);
+			}
+			return -1;
+		}
+	}
+
+	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
+	if (!buf)
+		return -1;
+
+	drop_ram_icon_buffer();
+	ram_icon_buf = buf;
+	ram_icon_w = w;
+	ram_icon_h = h;
+	ram_icon_loaded_h = target_h;
+	snprintf(ram_icon_loaded_path, sizeof(ram_icon_loaded_path), "%s", path);
+	return 0;
+}
+
+static void
+drop_volume_icon_buffer(void)
+{
+	if (volume_icon_buf) {
+		wlr_buffer_drop(volume_icon_buf);
+		volume_icon_buf = NULL;
+	}
+	volume_icon_loaded_h = 0;
+	volume_icon_w = volume_icon_h = 0;
+	volume_icon_loaded_path[0] = '\0';
+}
+
+static int
+ensure_volume_icon_buffer(int target_h)
+{
+	GdkPixbuf *pixbuf = NULL;
+	GError *gerr = NULL;
+	struct wlr_buffer *buf;
+	int w = 0, h = 0;
+	char resolved[PATH_MAX];
+	const char *path = volume_icon_path;
+
+	if (target_h <= 0)
+		return -1;
+
+	if (resolve_asset_path(volume_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
+		path = resolved;
+
+	if (volume_icon_buf && volume_icon_loaded_h == target_h &&
+			strncmp(volume_icon_loaded_path, path, sizeof(volume_icon_loaded_path)) == 0)
+		return 0;
+
+	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
+		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
+		if (!pixbuf) {
+			if (gerr) {
+				fprintf(stderr, "volume icon: failed to load '%s': %s\n",
+						path, gerr->message);
+				g_error_free(gerr);
+			}
+			return -1;
+		}
+	}
+
+	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
+	if (!buf)
+		return -1;
+
+	drop_volume_icon_buffer();
+	volume_icon_buf = buf;
+	volume_icon_w = w;
+	volume_icon_h = h;
+	volume_icon_loaded_h = target_h;
+	snprintf(volume_icon_loaded_path, sizeof(volume_icon_loaded_path), "%s", path);
+	return 0;
+}
+
+static void
+drop_battery_icon_buffer(void)
+{
+	if (battery_icon_buf) {
+		wlr_buffer_drop(battery_icon_buf);
+		battery_icon_buf = NULL;
+	}
+	battery_icon_loaded_h = 0;
+	battery_icon_w = battery_icon_h = 0;
+	battery_icon_loaded_path[0] = '\0';
+}
+
+static int
+ensure_battery_icon_buffer(int target_h)
+{
+	GdkPixbuf *pixbuf = NULL;
+	GError *gerr = NULL;
+	struct wlr_buffer *buf;
+	int w = 0, h = 0;
+	char resolved[PATH_MAX];
+	const char *path = battery_icon_path;
+
+	if (target_h <= 0)
+		return -1;
+
+	if (resolve_asset_path(battery_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
+		path = resolved;
+
+	if (battery_icon_buf && battery_icon_loaded_h == target_h &&
+			strncmp(battery_icon_loaded_path, path, sizeof(battery_icon_loaded_path)) == 0)
+		return 0;
+
+	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
+		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
+		if (!pixbuf) {
+			if (gerr) {
+				fprintf(stderr, "battery icon: failed to load '%s': %s\n",
+						path, gerr->message);
+				g_error_free(gerr);
+			}
+			return -1;
+		}
+	}
+
+	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
+	if (!buf)
+		return -1;
+
+	drop_battery_icon_buffer();
+	battery_icon_buf = buf;
+	battery_icon_w = w;
+	battery_icon_h = h;
+	battery_icon_loaded_h = target_h;
+	snprintf(battery_icon_loaded_path, sizeof(battery_icon_loaded_path), "%s", path);
+	return 0;
+}
+
 static int
 tray_load_icon_file(TrayItem *it, const char *path, int desired_h)
 {
@@ -2255,8 +2755,9 @@ tray_find_icon_path(const char *name, const char *theme_path, int desired_h,
 	};
 
 #define ADD_PATH(P) do { \
-	if ((P) && *(P) && pathcount < LENGTH(pathbufs)) { \
-		snprintf(pathbufs[pathcount], sizeof(pathbufs[pathcount]), "%s", (P)); \
+	const char *p_ = (P); \
+	if (p_ && *p_ && pathcount < LENGTH(pathbufs)) { \
+		snprintf(pathbufs[pathcount], sizeof(pathbufs[pathcount]), "%s", p_); \
 		pathcount++; \
 	} \
 } while (0)
@@ -2417,7 +2918,7 @@ out:
 	return (val && *val) ? 0 : -1;
 }
 
-static int
+__attribute__((unused)) static int
 tray_item_load_icon(TrayItem *it)
 {
 	sd_bus_message *reply = NULL;
@@ -2924,7 +3425,7 @@ fail:
 	return NULL;
 }
 
-static struct wlr_buffer *
+__attribute__((unused)) static struct wlr_buffer *
 statusbar_buffer_from_argb32_raw(const uint32_t *data, int width, int height)
 {
 	pixman_image_t *dst;
@@ -3859,7 +4360,7 @@ findactiveinterface(char *iface, size_t len, int *is_wireless)
 	return 0;
 }
 
-static int
+__attribute__((unused)) static int
 readssid(const char *iface, char *out, size_t len)
 {
 	/* Deprecated: synchronous SSID lookup removed to avoid blocking */
@@ -4835,7 +5336,7 @@ tray_menu_render(Monitor *m)
 	}
 }
 
-static int
+static __attribute__((unused)) int
 tray_menu_open_at(Monitor *m, TrayItem *it, int icon_x)
 {
 	sd_bus_message *req = NULL, *reply = NULL;
@@ -5000,6 +5501,288 @@ out:
 		sd_bus_message_unref(reply);
 	sd_bus_error_free(&err);
 	return r < 0 ? r : 0;
+}
+
+static void
+connect_wifi_ssid(const char *ssid)
+{
+	if (!ssid || !*ssid)
+		return;
+	if (fork() == 0) {
+		setsid();
+		execl("/bin/sh", "/bin/sh", "-c",
+				"nmcli device wifi connect \"$1\" >/dev/null 2>&1",
+				"nmcli-connect", ssid, (char *)NULL);
+		_exit(0);
+	}
+}
+
+static void
+connect_wifi_with_prompt(const char *ssid, int secure)
+{
+	if (!ssid || !*ssid)
+		return;
+	/* Prefer zenity if present, else fallback to a terminal prompt */
+	if (secure) {
+		const char *cmd =
+			"if command -v zenity >/dev/null 2>&1; then "
+				"pw=$(zenity --entry --hide-text --text=\"Passphrase for $1\" --title=\"Wi-Fi\" 2>/dev/null) || exit 1; "
+			"elif command -v wofi >/dev/null 2>&1; then "
+				"pw=$(printf '' | wofi --dmenu --password --prompt \"Passphrase for $1\" 2>/dev/null) || exit 1; "
+			"elif command -v bemenu >/dev/null 2>&1; then "
+				"pw=$(printf '' | bemenu -p \"Passphrase for $1\" -P 2>/dev/null) || exit 1; "
+			"elif command -v dmenu >/dev/null 2>&1; then "
+				"pw=$(printf '' | dmenu -p \"Passphrase for $1\" 2>/dev/null) || exit 1; "
+			"else exit 1; fi; "
+			"nmcli device wifi connect \"$1\" password \"$pw\" >/dev/null 2>&1";
+		if (fork() == 0) {
+			setsid();
+			execl("/bin/sh", "/bin/sh", "-c", cmd, "nmcli-connect", ssid, (char *)NULL);
+			_exit(0);
+		}
+		return;
+	}
+	/* Fallback: attempt plain connect (will fail if not saved) */
+	connect_wifi_ssid(ssid);
+}
+
+static void
+wifi_networks_clear(void)
+{
+	WifiNetwork *n, *tmp;
+	wl_list_for_each_safe(n, tmp, &wifi_networks, link) {
+		wl_list_remove(&n->link);
+		free(n);
+	}
+	wl_list_init(&wifi_networks);
+}
+
+static void
+net_menu_hide_all(void)
+{
+	Monitor *m;
+
+	wl_list_for_each(m, &mons, link) {
+		if (m->statusbar.net_menu.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.net_menu.tree->node, 0);
+			m->statusbar.net_menu.visible = 0;
+		}
+		if (m->statusbar.net_menu.submenu_tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.net_menu.submenu_tree->node, 0);
+			m->statusbar.net_menu.submenu_visible = 0;
+		}
+		m->statusbar.net_menu.hover = -1;
+		m->statusbar.net_menu.submenu_hover = -1;
+	}
+}
+
+static void
+net_menu_render(Monitor *m)
+{
+	const char *label = "Available networks";
+	int padding = statusbar_module_padding;
+	int line_spacing = 4;
+	int row_h;
+	int text_w;
+	int max_w;
+	NetMenu *menu;
+	struct wlr_scene_node *node, *tmp;
+	float border_col[4] = {0, 0, 0, 1};
+	int border_px = 1;
+
+	if (!m || !m->statusbar.net_menu.tree)
+		return;
+	menu = &m->statusbar.net_menu;
+
+	wl_list_for_each_safe(node, tmp, &menu->tree->children, link) {
+		if (menu->bg && node == &menu->bg->node)
+			continue;
+		wlr_scene_node_destroy(node);
+	}
+
+	if (!statusfont.font) {
+		menu->width = menu->height = 0;
+		wlr_scene_node_set_enabled(&menu->tree->node, 0);
+		menu->visible = 0;
+		return;
+	}
+
+	row_h = statusfont.height + line_spacing;
+	if (row_h < statusfont.height)
+		row_h = statusfont.height;
+	text_w = status_text_width(label);
+	max_w = text_w + 2 * padding + row_h; /* space for arrow */
+	menu->width = max_w;
+	menu->height = row_h + 2 * padding;
+
+	if (!menu->bg && !(menu->bg = wlr_scene_tree_create(menu->tree)))
+		return;
+	wlr_scene_node_set_enabled(&menu->bg->node, 1);
+	wlr_scene_node_set_position(&menu->bg->node, 0, 0);
+	wl_list_for_each_safe(node, tmp, &menu->bg->children, link)
+		wlr_scene_node_destroy(node);
+	drawrect(menu->bg, 0, 0, menu->width, menu->height, net_menu_row_bg);
+	drawrect(menu->bg, 0, 0, menu->width, border_px, border_col);
+	drawrect(menu->bg, 0, menu->height - border_px, menu->width, border_px, border_col);
+	drawrect(menu->bg, 0, 0, border_px, menu->height, border_col);
+	drawrect(menu->bg, menu->width - border_px, 0, border_px, menu->height, border_col);
+
+	{
+		char text[256];
+		snprintf(text, sizeof(text), "%s  >", label);
+		drawrect(menu->tree, padding, padding, menu->width - 2 * padding, row_h,
+				menu->hover == 0 ? net_menu_row_bg_hover : net_menu_row_bg);
+		tray_menu_draw_text(menu->tree, text, padding + 4, padding, row_h);
+	}
+
+	menu->visible = 1;
+	wlr_scene_node_set_enabled(&menu->tree->node, 1);
+}
+
+static void
+net_menu_submenu_render(Monitor *m)
+{
+	NetMenu *menu;
+	struct wlr_scene_node *node, *tmp;
+	int padding = statusbar_module_padding;
+	int line_spacing = 4;
+	int row_h;
+	int max_w = 0;
+	int total_h = 0;
+	int y;
+	int count = 0;
+	WifiNetwork *n;
+	char line[256];
+	float border_col[4] = {0, 0, 0, 1};
+	int border_px = 1;
+
+	if (!m || !m->statusbar.net_menu.submenu_tree)
+		return;
+	menu = &m->statusbar.net_menu;
+
+	wl_list_for_each_safe(node, tmp, &menu->submenu_tree->children, link) {
+		if (menu->submenu_bg && node == &menu->submenu_bg->node)
+			continue;
+		wlr_scene_node_destroy(node);
+	}
+
+	if (!statusfont.font) {
+		wlr_scene_node_set_enabled(&menu->submenu_tree->node, 0);
+		menu->submenu_visible = 0;
+		return;
+	}
+
+	row_h = statusfont.height + line_spacing;
+	if (row_h < statusfont.height)
+		row_h = statusfont.height;
+
+	if (wifi_scan_inflight && wl_list_empty(&wifi_networks)) {
+		snprintf(line, sizeof(line), "Scanning...");
+		max_w = status_text_width(line);
+		total_h = row_h + 2 * padding;
+	} else if (wl_list_empty(&wifi_networks)) {
+		snprintf(line, sizeof(line), "No networks");
+		max_w = status_text_width(line);
+		total_h = row_h + 2 * padding;
+	} else {
+		wl_list_for_each(n, &wifi_networks, link) {
+			int w;
+			count++;
+			snprintf(line, sizeof(line), "%s (%d%%%s)", n->ssid, n->strength,
+					n->secure ? ", secured" : "");
+			w = status_text_width(line);
+			if (w > max_w)
+				max_w = w;
+		}
+		total_h = padding * 2 + count * row_h;
+	}
+
+	if (max_w <= 0)
+		max_w = 100;
+
+	menu->submenu_width = max_w + 2 * padding;
+	menu->submenu_height = total_h;
+
+	if (!menu->submenu_bg && !(menu->submenu_bg = wlr_scene_tree_create(menu->submenu_tree)))
+		return;
+	wlr_scene_node_set_enabled(&menu->submenu_bg->node, 1);
+	wlr_scene_node_set_position(&menu->submenu_bg->node, 0, 0);
+	wl_list_for_each_safe(node, tmp, &menu->submenu_bg->children, link)
+		wlr_scene_node_destroy(node);
+	drawrect(menu->submenu_bg, 0, 0, menu->submenu_width, menu->submenu_height, net_menu_row_bg);
+	drawrect(menu->submenu_bg, 0, 0, menu->submenu_width, border_px, border_col);
+	drawrect(menu->submenu_bg, 0, menu->submenu_height - border_px, menu->submenu_width, border_px, border_col);
+	drawrect(menu->submenu_bg, 0, 0, border_px, menu->submenu_height, border_col);
+	drawrect(menu->submenu_bg, menu->submenu_width - border_px, 0, border_px, menu->submenu_height, border_col);
+
+	y = padding;
+	if (wl_list_empty(&wifi_networks)) {
+		drawrect(menu->submenu_tree, padding, y, menu->submenu_width - 2 * padding, row_h,
+				net_menu_row_bg);
+		tray_menu_draw_text(menu->submenu_tree, line, padding + 4, y, row_h);
+	} else {
+		int idx = 0;
+		wl_list_for_each(n, &wifi_networks, link) {
+			int x = padding;
+			int hover = (menu->submenu_hover == idx);
+			snprintf(line, sizeof(line), "%s (%d%%%s)", n->ssid, n->strength,
+					n->secure ? ", secured" : "");
+			drawrect(menu->submenu_tree, x, y, menu->submenu_width - 2 * padding, row_h,
+					hover ? net_menu_row_bg_hover : net_menu_row_bg);
+			tray_menu_draw_text(menu->submenu_tree, line, x + 4, y, row_h);
+			n->secure = n->secure ? 1 : 0;
+			idx++;
+			y += row_h;
+		}
+	}
+
+	menu->submenu_visible = 1;
+	wlr_scene_node_set_enabled(&menu->submenu_tree->node, 1);
+}
+
+static void
+request_wifi_scan(void)
+{
+	const char *cmd = "nmcli -t -f SSID,SIGNAL,SECURITY device wifi list --rescan no";
+	int pipefd[2] = {-1, -1};
+
+	if (wifi_scan_inflight)
+		return;
+
+	if (pipe(pipefd) != 0)
+		return;
+
+	wifi_scan_pid = fork();
+	if (wifi_scan_pid == 0) {
+		close(pipefd[0]);
+		dup2(pipefd[1], STDOUT_FILENO);
+		dup2(pipefd[1], STDERR_FILENO);
+		close(pipefd[1]);
+		execl("/bin/sh", "/bin/sh", "-c", cmd, NULL);
+		_exit(127);
+	} else if (wifi_scan_pid < 0) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		wifi_scan_pid = -1;
+		return;
+	}
+
+	close(pipefd[1]);
+	wifi_scan_fd = pipefd[0];
+	fcntl(wifi_scan_fd, F_SETFL, fcntl(wifi_scan_fd, F_GETFL) | O_NONBLOCK);
+	wifi_scan_len = 0;
+	wifi_scan_buf[0] = '\0';
+	wifi_scan_inflight = 1;
+	wifi_scan_event = wl_event_loop_add_fd(event_loop, wifi_scan_fd,
+			WL_EVENT_READABLE | WL_EVENT_HANGUP, wifi_scan_event_cb, NULL);
+	if (!wifi_scan_event) {
+		wifi_scan_inflight = 0;
+		close(wifi_scan_fd);
+		wifi_scan_fd = -1;
+		if (wifi_scan_pid > 0)
+			waitpid(wifi_scan_pid, NULL, WNOHANG);
+		wifi_scan_pid = -1;
+	}
 }
 
 static void
@@ -5494,6 +6277,37 @@ pipewire_volume_percent(void)
 }
 
 static int
+pipewire_sink_is_headset(void)
+{
+	FILE *fp;
+	char line[512];
+	int headset = 0;
+	const char *kw[] = {
+		"headset", "headphone", "earbud", "earphone",
+		"bluez", "bluetooth", "a2dp", "hfp", "hsp"
+	};
+	size_t i;
+
+	fp = popen("wpctl inspect @DEFAULT_AUDIO_SINK@", "r");
+	if (!fp)
+		return 0;
+
+	while (fgets(line, sizeof(line), fp)) {
+		for (i = 0; i < LENGTH(kw); i++) {
+			if (strcasestr(line, kw[i])) {
+				headset = 1;
+				break;
+			}
+		}
+		if (headset)
+			break;
+	}
+
+	pclose(fp);
+	return headset;
+}
+
+static int
 set_pipewire_mute(int mute)
 {
 	char cmd[128];
@@ -5714,6 +6528,12 @@ positionstatusmodules(Monitor *m)
 		m->statusbar.clock.x = x;
 		x -= spacing;
 	}
+	if (m->statusbar.ram.width > 0) {
+		x -= m->statusbar.ram.width;
+		wlr_scene_node_set_position(&m->statusbar.ram.tree->node, x, 0);
+		m->statusbar.ram.x = x;
+		x -= spacing;
+	}
 	if (m->statusbar.cpu.width > 0) {
 		x -= m->statusbar.cpu.width;
 		wlr_scene_node_set_position(&m->statusbar.cpu.tree->node, x, 0);
@@ -5742,12 +6562,6 @@ positionstatusmodules(Monitor *m)
 		x -= m->statusbar.battery.width;
 		wlr_scene_node_set_position(&m->statusbar.battery.tree->node, x, 0);
 		m->statusbar.battery.x = x;
-		x -= spacing;
-	}
-	if (m->statusbar.ram.width > 0) {
-		x -= m->statusbar.ram.width;
-		wlr_scene_node_set_position(&m->statusbar.ram.tree->node, x, 0);
-		m->statusbar.ram.x = x;
 		x -= spacing;
 	}
 	if (m->statusbar.cpu_popup.tree) {
@@ -5798,6 +6612,320 @@ positionstatusmodules(Monitor *m)
 			m->statusbar.tray_menu.visible = 0;
 		}
 	}
+}
+
+static void
+wifi_networks_insert_sorted(WifiNetwork *n)
+{
+	WifiNetwork *it;
+
+	/* de-duplicate by SSID, keep strongest and mark secure if any entry is secure */
+	wl_list_for_each(it, &wifi_networks, link) {
+		if (strncmp(it->ssid, n->ssid, sizeof(it->ssid)) == 0) {
+			if (n->strength > it->strength)
+				it->strength = n->strength;
+			if (n->secure)
+				it->secure = 1;
+			free(n);
+			return;
+		}
+	}
+
+	wl_list_for_each(it, &wifi_networks, link) {
+		if (n->strength > it->strength) {
+			wl_list_insert(it->link.prev, &n->link);
+			return;
+		}
+	}
+	wl_list_insert(wifi_networks.prev, &n->link);
+}
+
+static void
+wifi_scan_finish(void)
+{
+	if (wifi_scan_event) {
+		wl_event_source_remove(wifi_scan_event);
+		wifi_scan_event = NULL;
+	}
+	if (wifi_scan_fd >= 0) {
+		close(wifi_scan_fd);
+		wifi_scan_fd = -1;
+	}
+	if (wifi_scan_pid > 0) {
+		waitpid(wifi_scan_pid, NULL, WNOHANG);
+		wifi_scan_pid = -1;
+	}
+	wifi_scan_inflight = 0;
+}
+
+static int
+wifi_scan_event_cb(int fd, uint32_t mask, void *data)
+{
+	ssize_t n;
+	char *saveptr = NULL;
+	char *line;
+	(void)data;
+
+	for (;;) {
+		if (wifi_scan_len >= sizeof(wifi_scan_buf) - 1)
+			break;
+		n = read(fd, wifi_scan_buf + wifi_scan_len,
+				sizeof(wifi_scan_buf) - 1 - wifi_scan_len);
+		if (n > 0) {
+			wifi_scan_len += (size_t)n;
+			continue;
+		} else if (n == 0) {
+			break;
+		} else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+			return 0;
+		} else {
+			break;
+		}
+	}
+
+	wifi_scan_buf[wifi_scan_len] = '\0';
+	wifi_networks_clear();
+
+	line = strtok_r(wifi_scan_buf, "\n", &saveptr);
+	while (line) {
+		char *sig_s, *sec_s;
+		WifiNetwork *nentry;
+		int strength = 0;
+		int secure = 0;
+		char ssid[128] = {0};
+
+		sig_s = strchr(line, ':');
+		if (sig_s) {
+			*sig_s = '\0';
+			sig_s++;
+			sec_s = strchr(sig_s, ':');
+			if (sec_s) {
+				*sec_s = '\0';
+				sec_s++;
+			}
+		} else {
+			sec_s = NULL;
+		}
+
+		if (line[0])
+			snprintf(ssid, sizeof(ssid), "%s", line);
+		if (!ssid[0]) {
+			line = strtok_r(NULL, "\n", &saveptr);
+			continue;
+		}
+		if (sig_s)
+			strength = atoi(sig_s);
+		if (sec_s && *sec_s && strcmp(sec_s, "--") != 0)
+			secure = 1;
+
+		nentry = ecalloc(1, sizeof(*nentry));
+		snprintf(nentry->ssid, sizeof(nentry->ssid), "%s", ssid);
+		nentry->strength = strength;
+		nentry->secure = secure;
+		wifi_networks_insert_sorted(nentry);
+
+		line = strtok_r(NULL, "\n", &saveptr);
+	}
+
+	wifi_scan_finish();
+
+	{
+		Monitor *m;
+		wl_list_for_each(m, &mons, link) {
+			if (m->statusbar.net_menu.visible) {
+				net_menu_submenu_render(m);
+				if (m->statusbar.net_menu.submenu_tree)
+					wlr_scene_node_set_position(&m->statusbar.net_menu.submenu_tree->node,
+							m->statusbar.net_menu.submenu_x, m->statusbar.net_menu.submenu_y);
+			}
+		}
+	}
+	wifi_scan_plan_rescan();
+	return 0;
+}
+
+static void
+wifi_scan_plan_rescan(void)
+{
+	if (wifi_scan_timer)
+		wl_event_source_timer_update(wifi_scan_timer, 2000);
+}
+
+static int
+wifi_scan_timer_cb(void *data)
+{
+	Monitor *m;
+	int visible = 0;
+	(void)data;
+
+	if (wifi_scan_inflight)
+		return 0;
+
+	wl_list_for_each(m, &mons, link) {
+		if (m->statusbar.net_menu.visible) {
+			visible = 1;
+			break;
+		}
+	}
+
+	if (visible)
+		request_wifi_scan();
+
+	return 0;
+}
+
+static void
+net_menu_open(Monitor *m)
+{
+	const int offset = statusbar_module_padding;
+	int desired_x, max_x;
+	NetMenu *menu;
+
+	if (!m || !m->showbar || !m->statusbar.net_menu.tree || !m->statusbar.sysicons.tree)
+		return;
+	if (!m->statusbar.area.width || !m->statusbar.area.height)
+		return;
+
+	menu = &m->statusbar.net_menu;
+	net_menu_hide_all();
+	if (m->statusbar.net_popup.tree) {
+		wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
+		m->statusbar.net_popup.visible = 0;
+	}
+	request_wifi_scan();
+	net_menu_render(m);
+	if (menu->width <= 0 || menu->height <= 0)
+		return;
+
+	desired_x = m->statusbar.sysicons.x - menu->width / 2 + m->statusbar.sysicons.width / 2;
+	if (desired_x < 0)
+		desired_x = 0;
+	max_x = m->statusbar.area.width - menu->width;
+	if (max_x < 0)
+		max_x = 0;
+	if (desired_x > max_x)
+		desired_x = max_x;
+
+	menu->x = desired_x;
+	menu->y = m->statusbar.area.height + statusbar_module_padding;
+	wlr_scene_node_set_position(&menu->tree->node, menu->x, menu->y);
+	wlr_scene_node_set_enabled(&menu->tree->node, 1);
+	menu->visible = 1;
+	menu->hover = 0;
+
+	menu->submenu_x = menu->x + menu->width + offset;
+	menu->submenu_y = menu->y + offset;
+	if (menu->submenu_tree) {
+		net_menu_submenu_render(m);
+		wlr_scene_node_set_position(&menu->submenu_tree->node, menu->submenu_x, menu->submenu_y);
+	}
+	wifi_scan_plan_rescan();
+}
+
+static void
+net_menu_update_hover(Monitor *m, double cx, double cy)
+{
+	NetMenu *menu;
+	int lx, ly;
+	int row_h, padding;
+	int prev_hover, prev_sub;
+	int new_hover = -1, new_sub = -1;
+
+	if (!m || !m->statusbar.net_menu.visible || !m->statusbar.net_menu.submenu_tree)
+		return;
+	menu = &m->statusbar.net_menu;
+	lx = (int)floor(cx) - m->statusbar.area.x;
+	ly = (int)floor(cy) - m->statusbar.area.y;
+	padding = statusbar_module_padding;
+	row_h = statusfont.height + 4;
+	if (row_h < statusfont.height)
+		row_h = statusfont.height;
+
+	if (lx >= menu->x && lx < menu->x + menu->width &&
+			ly >= menu->y && ly < menu->y + menu->height) {
+		new_hover = 0;
+	}
+
+	if (menu->submenu_visible &&
+			lx >= menu->submenu_x && lx < menu->submenu_x + menu->submenu_width &&
+			ly >= menu->submenu_y && ly < menu->submenu_y + menu->submenu_height) {
+		if (wl_list_empty(&wifi_networks)) {
+			new_sub = -1;
+		} else {
+			int rel_y = ly - menu->submenu_y - padding;
+			if (rel_y >= 0) {
+				new_sub = rel_y / row_h;
+			}
+		}
+	}
+
+	prev_hover = menu->hover;
+	prev_sub = menu->submenu_hover;
+	menu->hover = new_hover;
+	menu->submenu_hover = new_sub;
+	if (menu->hover != prev_hover)
+		net_menu_render(m);
+	if (menu->submenu_hover != prev_sub) {
+		net_menu_submenu_render(m);
+		wlr_scene_node_set_position(&menu->submenu_tree->node, menu->submenu_x, menu->submenu_y);
+	}
+}
+
+static WifiNetwork *
+wifi_network_at_index(int idx)
+{
+	WifiNetwork *n;
+	int i = 0;
+	wl_list_for_each(n, &wifi_networks, link) {
+		if (i == idx)
+			return n;
+		i++;
+	}
+	return NULL;
+}
+
+static int
+net_menu_handle_click(Monitor *m, int lx, int ly, uint32_t button)
+{
+	NetMenu *menu;
+	int padding = statusbar_module_padding;
+	int row_h;
+
+	if (!m || !m->statusbar.net_menu.visible)
+		return 0;
+	menu = &m->statusbar.net_menu;
+	row_h = statusfont.height + 4;
+	if (row_h < statusfont.height)
+		row_h = statusfont.height;
+
+	if (lx >= menu->x && lx < menu->x + menu->width &&
+			ly >= menu->y && ly < menu->y + menu->height) {
+		/* main menu, only one entry */
+		return 1;
+	}
+
+	if (menu->submenu_visible &&
+			lx >= menu->submenu_x && lx < menu->submenu_x + menu->submenu_width &&
+			ly >= menu->submenu_y && ly < menu->submenu_y + menu->submenu_height) {
+		if (button != BTN_LEFT)
+			return 1;
+		if (!wl_list_empty(&wifi_networks)) {
+			int rel_y = ly - menu->submenu_y - padding;
+			int idx = rel_y / row_h;
+			if (rel_y >= 0) {
+				WifiNetwork *n = wifi_network_at_index(idx);
+				if (n) {
+					connect_wifi_with_prompt(n->ssid, n->secure);
+					net_menu_hide_all();
+					return 1;
+				}
+			}
+		}
+		return 1;
+	}
+
+	net_menu_hide_all();
+	return 1;
 }
 
 static void
@@ -5874,6 +7002,7 @@ refreshstatusclock(void)
 	struct tm tm;
 	char timestr[6] = {0};
 	Monitor *m;
+	int barh;
 
 	now = time(NULL);
 	if (now == (time_t)-1)
@@ -5886,7 +7015,7 @@ refreshstatusclock(void)
 	wl_list_for_each(m, &mons, link) {
 		if (!m->statusbar.clock.tree || !m->showbar)
 			continue;
-		int barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
 		renderclock(&m->statusbar.clock, barh, timestr);
 		positionstatusmodules(m);
 	}
@@ -5919,13 +7048,13 @@ refreshstatuslight(void)
 	}
 
 	if (display < 0.0) {
-		snprintf(light_text, sizeof(light_text), "Light: --%%");
+		snprintf(light_text, sizeof(light_text), "--%%");
 	} else {
 		if (display > 100.0)
 			display = 100.0;
 		if (display < 0.0)
 			display = 0.0;
-		snprintf(light_text, sizeof(light_text), "Light: %d%%", (int)lround(display));
+		snprintf(light_text, sizeof(light_text), "%d%%", (int)lround(display));
 	}
 
 	wl_list_for_each(m, &mons, link) {
@@ -5942,14 +7071,13 @@ refreshstatuslight(void)
 
 static void
 refreshstatusnet(void)
-{
-	Monitor *m;
-	int barh;
-	char iface[IF_NAMESIZE] = {0};
-	char label[64] = {0};
-	char path[PATH_MAX];
-	time_t now_sec = time(NULL);
-	unsigned long long rx = 0, tx = 0;
+	{
+		Monitor *m;
+		int barh;
+		char iface[IF_NAMESIZE] = {0};
+		char path[PATH_MAX];
+		time_t now_sec = time(NULL);
+		unsigned long long rx = 0, tx = 0;
 	struct timespec now_ts = {0};
 	double elapsed = 0.0;
 	int rx_ok = 0, tx_ok = 0;
@@ -6109,7 +7237,7 @@ tray_remove_item(const char *service)
 	}
 }
 
-static TrayItem *
+static __attribute__((unused)) TrayItem *
 tray_first_item(void)
 {
 	TrayItem *sample = NULL;
@@ -6119,7 +7247,7 @@ tray_first_item(void)
 	return wl_container_of(tray_items.next, sample, link);
 }
 
-static void
+static __attribute__((unused)) void
 tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y)
 {
 	const char *method;
@@ -6173,6 +7301,7 @@ refreshstatusbattery(void)
 	Monitor *m;
 	int barh;
 	double percent, display;
+	const char *icon = battery_icon_100;
 
 	if (!battery_path_initialized) {
 		battery_available = findbatterydevice(battery_capacity_path,
@@ -6191,13 +7320,27 @@ refreshstatusbattery(void)
 	}
 
 	if (display < 0.0) {
-		snprintf(battery_text, sizeof(battery_text), "Battery: --%%");
+		snprintf(battery_text, sizeof(battery_text), "--%%");
 	} else {
 		if (display > 100.0)
 			display = 100.0;
 		if (display < 0.0)
 			display = 0.0;
-		snprintf(battery_text, sizeof(battery_text), "Battery: %d%%", (int)lround(display));
+		snprintf(battery_text, sizeof(battery_text), "%d%%", (int)lround(display));
+	}
+
+	if (display >= 0.0) {
+		if (display <= 25.0)
+			icon = battery_icon_25;
+		else if (display <= 50.0)
+			icon = battery_icon_50;
+		else if (display <= 75.0)
+			icon = battery_icon_75;
+		else
+			icon = battery_icon_100;
+	}
+	if (strncmp(battery_icon_path, icon, sizeof(battery_icon_path)) != 0) {
+		snprintf(battery_icon_path, sizeof(battery_icon_path), "%s", icon);
 	}
 
 	wl_list_for_each(m, &mons, link) {
@@ -6223,10 +7366,10 @@ refreshstatuscpu(void)
 		cpu_last_percent = usage;
 
 	if (cpu_last_percent < 0.0)
-		snprintf(cpu_text, sizeof(cpu_text), "CPU: --%%");
+		snprintf(cpu_text, sizeof(cpu_text), "--%%");
 	else {
 		int avg_disp = (cpu_last_percent < 1.0) ? 0 : (int)lround(cpu_last_percent);
-		snprintf(cpu_text, sizeof(cpu_text), "CPU: %d%%", avg_disp);
+		snprintf(cpu_text, sizeof(cpu_text), "%d%%", avg_disp);
 	}
 
 	wl_list_for_each(m, &mons, link) {
@@ -6255,12 +7398,12 @@ refreshstatusram(void)
 		ram_last_mb = used_mb;
 
 	if (ram_last_mb < 0.0) {
-		snprintf(ram_text, sizeof(ram_text), "RAM: --");
+		snprintf(ram_text, sizeof(ram_text), "--");
 	} else if (ram_last_mb >= 1024.0) {
 		double gb = ram_last_mb / 1024.0;
-		snprintf(ram_text, sizeof(ram_text), "RAM: %.1fGB", gb);
+		snprintf(ram_text, sizeof(ram_text), "%.1fGB", gb);
 	} else {
-		snprintf(ram_text, sizeof(ram_text), "RAM: %dMB", (int)lround(ram_last_mb));
+		snprintf(ram_text, sizeof(ram_text), "%dMB", (int)lround(ram_last_mb));
 	}
 
 	wl_list_for_each(m, &mons, link) {
@@ -6282,6 +7425,10 @@ refreshstatusvolume(void)
 	Monitor *m;
 	int barh;
 	double display = vol;
+	int force_render = 0;
+	int use_muted_color = 0;
+	int is_headset = pipewire_sink_is_headset();
+	const char *icon = volume_icon_speaker_100;
 
 	if (vol >= 0.0) {
 		volume_last_percent = vol;
@@ -6290,24 +7437,61 @@ refreshstatusvolume(void)
 		display = volume_last_percent;
 	}
 
+	if (display > volume_max_percent)
+		display = volume_max_percent;
+	if (display < 0.0 && volume_muted == 1)
+		display = 0.0;
+
+	if (volume_muted == 1) {
+		use_muted_color = 1;
+		display = display < 0.0 ? 0.0 : display;
+	}
+
 	if (display < 0.0) {
-		snprintf(volume_text, sizeof(volume_text), "Vol: --%%");
-	} else if (volume_muted == 1) {
-		snprintf(volume_text, sizeof(volume_text), "Vol: muted");
+		snprintf(volume_text, sizeof(volume_text), "--%%");
 	} else {
-		if (display > volume_max_percent)
-			display = volume_max_percent;
 		if (display < 0.0)
 			display = 0.0;
-		snprintf(volume_text, sizeof(volume_text), "Vol: %d%%", (int)lround(display));
+		if (display > volume_max_percent)
+			display = volume_max_percent;
+		if (volume_muted == 1)
+			display = 0.0;
+		snprintf(volume_text, sizeof(volume_text), "%d%%", (int)lround(display));
 	}
+
+	if (is_headset) {
+		if (volume_muted == 1)
+			icon = volume_icon_headset_muted;
+		else
+			icon = volume_icon_headset;
+	} else if (volume_muted == 1) {
+		icon = volume_icon_speaker_muted;
+	} else if (display <= 25.0) {
+		icon = volume_icon_speaker_25;
+	} else if (display <= 75.0) {
+		icon = volume_icon_speaker_50;
+	} else {
+		icon = volume_icon_speaker_100;
+	}
+
+	if (strncmp(volume_icon_path, icon, sizeof(volume_icon_path)) != 0) {
+		snprintf(volume_icon_path, sizeof(volume_icon_path), "%s", icon);
+		force_render = 1;
+	}
+
+	volume_text_color = use_muted_color ? statusbar_volume_muted_fg : statusbar_fg;
+	if (use_muted_color != volume_last_color_is_muted) {
+		force_render = 1;
+	}
+	volume_last_color_is_muted = use_muted_color;
 
 	wl_list_for_each(m, &mons, link) {
 		if (!m->statusbar.volume.tree || !m->showbar)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
 		if (status_should_render(&m->statusbar.volume, barh, volume_text,
-					last_volume_render, sizeof(last_volume_render), &last_volume_h)) {
+					last_volume_render, sizeof(last_volume_render), &last_volume_h)
+				|| force_render) {
 			rendervolume(&m->statusbar.volume, barh, volume_text);
 			positionstatusmodules(m);
 		}
@@ -6373,11 +7557,12 @@ static void
 refreshstatustags(void)
 {
 	Monitor *m;
+	int barh;
 
 	wl_list_for_each(m, &mons, link) {
 		if (!m->statusbar.tags.tree || !m->showbar)
 			continue;
-		int barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
 		renderworkspaces(m, &m->statusbar.tags, barh);
 		if (m->statusbar.traylabel.tree) {
 			clearstatusmodule(&m->statusbar.traylabel);
@@ -6678,7 +7863,8 @@ updatenethover(Monitor *m, double cx, double cy)
 	StatusModule *icon_mod;
 	NetPopup *p;
 
-	if (!m || !m->showbar || !m->statusbar.net_popup.tree) {
+	if (!m || !m->showbar || !m->statusbar.net_popup.tree
+			|| (m->statusbar.net_menu.visible)) {
 		if (m && m->statusbar.net_popup.tree) {
 			wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
 			m->statusbar.net_popup.visible = 0;
@@ -7050,16 +8236,32 @@ buttonpress(struct wl_listener *listener, void *data)
 			}
 		}
 
-		if (selmon && selmon->showbar) {
+		if (selmon && selmon->statusbar.net_menu.visible) {
 			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
 			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
-			StatusModule *tags = &selmon->statusbar.tags;
-			StatusModule *vol = &selmon->statusbar.volume;
+			if (net_menu_handle_click(selmon, lx, ly, event->button))
+				return;
+		}
+
+	if (selmon && selmon->showbar) {
+		int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
+		int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
+		StatusModule *tags = &selmon->statusbar.tags;
+		StatusModule *vol = &selmon->statusbar.volume;
 			StatusModule *cpu = &selmon->statusbar.cpu;
+			StatusModule *sys = &selmon->statusbar.sysicons;
 
 			if (lx >= 0 && ly >= 0 &&
 					lx < selmon->statusbar.area.width &&
 					ly < selmon->statusbar.area.height) {
+				if (event->button == BTN_RIGHT &&
+						sys->width > 0 &&
+						lx >= sys->x && lx < sys->x + sys->width) {
+					net_menu_hide_all();
+					net_menu_open(selmon);
+					return;
+				}
+
 				if (cpu->width > 0 && lx >= cpu->x && lx < cpu->x + cpu->width) {
 					Arg arg = { .v = btopcmd };
 					spawn(&arg);
@@ -7174,12 +8376,24 @@ cleanup(void)
 
 	cleanuplisteners();
 	drop_net_icon_buffer();
+	drop_cpu_icon_buffer();
+	drop_light_icon_buffer();
+	drop_ram_icon_buffer();
+	drop_battery_icon_buffer();
+	drop_volume_icon_buffer();
 	stop_public_ip_fetch();
 	stop_ssid_fetch();
+	wifi_scan_finish();
+	net_menu_hide_all();
+	wifi_networks_clear();
 	last_clock_render[0] = last_cpu_render[0] = last_ram_render[0] = '\0';
 	last_light_render[0] = last_volume_render[0] = last_battery_render[0] = '\0';
 	last_net_render[0] = '\0';
 	last_clock_h = last_cpu_h = last_ram_h = last_light_h = last_volume_h = last_battery_h = last_net_h = 0;
+	if (wifi_scan_timer) {
+		wl_event_source_remove(wifi_scan_timer);
+		wifi_scan_timer = NULL;
+	}
 	if (status_timer) {
 		wl_event_source_remove(status_timer);
 		status_timer = NULL;
@@ -7597,6 +8811,12 @@ initstatusbar(Monitor *m)
 		return;
 
 	wl_list_init(&m->statusbar.tray_menu.entries);
+	if (!wifi_networks_initialized) {
+		wl_list_init(&wifi_networks);
+		wifi_networks_initialized = 1;
+	}
+	wl_list_init(&m->statusbar.net_menu.entries);
+	wl_list_init(&m->statusbar.net_menu.networks);
 	m->showbar = 1;
 	m->statusbar.area = (struct wlr_box){0};
 	m->statusbar.tree = wlr_scene_tree_create(layers[LyrTop]);
@@ -7619,6 +8839,18 @@ initstatusbar(Monitor *m)
 			m->statusbar.tray_menu.bg = wlr_scene_tree_create(m->statusbar.tray_menu.tree);
 			m->statusbar.tray_menu.visible = 0;
 			wlr_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 0);
+		}
+		m->statusbar.net_menu.tree = wlr_scene_tree_create(m->statusbar.tree);
+		if (m->statusbar.net_menu.tree) {
+			m->statusbar.net_menu.bg = wlr_scene_tree_create(m->statusbar.net_menu.tree);
+			m->statusbar.net_menu.submenu_tree = wlr_scene_tree_create(m->statusbar.tree);
+			if (m->statusbar.net_menu.submenu_tree)
+				m->statusbar.net_menu.submenu_bg = wlr_scene_tree_create(m->statusbar.net_menu.submenu_tree);
+			m->statusbar.net_menu.visible = 0;
+			m->statusbar.net_menu.submenu_visible = 0;
+			wlr_scene_node_set_enabled(&m->statusbar.net_menu.tree->node, 0);
+			if (m->statusbar.net_menu.submenu_tree)
+				wlr_scene_node_set_enabled(&m->statusbar.net_menu.submenu_tree->node, 0);
 		}
 		m->statusbar.cpu.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.cpu.tree)
@@ -8775,19 +10007,22 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	wlr_scene_node_set_position(&drag_icon->node, (int)round(cursor->x), (int)round(cursor->y));
 
 	/* Hover feedback for tag boxes */
-	if (selmon && selmon->showbar) {
-		updatetaghover(selmon, cursor->x, cursor->y);
-		updatecpuhover(selmon, cursor->x, cursor->y);
-		updatenethover(selmon, cursor->x, cursor->y);
-	}
+		if (selmon && selmon->showbar) {
+			updatetaghover(selmon, cursor->x, cursor->y);
+			updatecpuhover(selmon, cursor->x, cursor->y);
+			updatenethover(selmon, cursor->x, cursor->y);
+			net_menu_update_hover(selmon, cursor->x, cursor->y);
+			if (!selmon->statusbar.net_menu.visible)
+				net_menu_hide_all();
+		}
 
-	/* Skip if internal call or already resizing */
-	if (time == 0 && resizing_from_mouse)
-		goto focus;
+		/* Skip if internal call or already resizing */
+		if (time == 0 && resizing_from_mouse)
+			goto focus;
 
-		tiled = grabc && !grabc->isfloating && !grabc->isfullscreen;
-		last_pointer_motion_ms = monotonic_msec();
-		if (cursor_mode == CurMove) {
+	tiled = grabc && !grabc->isfloating && !grabc->isfullscreen;
+	last_pointer_motion_ms = monotonic_msec();
+	if (cursor_mode == CurMove) {
 		/* Move the grabbed client to the new position. */
 		if (grabc && grabc->isfloating) {
 			resize(grabc, (struct wlr_box){
@@ -9858,6 +11093,8 @@ setup(void)
 		init_status_refresh_tasks();
 		schedule_next_status_refresh();
 	}
+	if (!wifi_scan_timer)
+		wifi_scan_timer = wl_event_loop_add_timer(event_loop, wifi_scan_timer_cb, NULL);
 	if (status_hover_timer)
 		wl_event_source_timer_update(status_hover_timer, 0);
 }
