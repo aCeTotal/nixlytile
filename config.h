@@ -24,6 +24,7 @@ static const unsigned int statusbar_icon_text_gap_cpu = statusbar_icon_text_gap;
 static const unsigned int statusbar_icon_text_gap_ram = statusbar_icon_text_gap;
 static const unsigned int statusbar_icon_text_gap_light = statusbar_icon_text_gap;
 static const unsigned int statusbar_icon_text_gap_battery = 2; /* slightly tighter */
+static const unsigned int statusbar_icon_text_gap_clock = statusbar_icon_text_gap;
 static const unsigned int statusbar_top_gap = 3;
 static const float statusbar_fg[]          = COLOR(0xffffffff);
 static const float statusbar_bg[]          = COLOR(0x00000016);

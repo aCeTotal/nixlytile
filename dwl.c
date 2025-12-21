@@ -26,6 +26,7 @@
 #include <string.h>
 #include <errno.h>
 #include <strings.h>
+#include <ctype.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <fcntl.h>
@@ -169,11 +170,26 @@ struct StatusModule {
 };
 
 typedef struct {
+	pid_t pid;
+	char name[64];
+	double cpu;
+	double max_single_cpu;
+	int y;
+	int height;
+	int kill_x, kill_y, kill_w, kill_h;
+	int has_kill;
+} CpuProcEntry;
+
+typedef struct {
 	struct wlr_scene_tree *tree;
 	struct wlr_scene_tree *bg;
 	int width;
 	int height;
 	int visible;
+	int hover_idx;
+	int refresh_data;
+	int proc_count;
+	CpuProcEntry procs[10];
 } CpuPopup;
 
 typedef struct {
@@ -611,6 +627,8 @@ static int ensure_ram_icon_buffer(int target_h);
 static void drop_ram_icon_buffer(void);
 static int ensure_battery_icon_buffer(int target_h);
 static void drop_battery_icon_buffer(void);
+static int ensure_clock_icon_buffer(int target_h);
+static void drop_clock_icon_buffer(void);
 static int ensure_mic_icon_buffer(int target_h);
 static void drop_mic_icon_buffer(void);
 static int ensure_volume_icon_buffer(int target_h);
@@ -735,6 +753,13 @@ static void toggletag(const Arg *arg);
 static void toggleview(const Arg *arg);
 static void rendercpu(StatusModule *module, int bar_height, const char *text);
 static void rendercpupopup(Monitor *m);
+static int cpu_popup_clamped_x(Monitor *m, CpuPopup *p);
+static int cpu_popup_hover_index(Monitor *m, CpuPopup *p);
+static int cpu_proc_cmp(const void *a, const void *b);
+static int kill_processes_with_name(const char *name);
+static int cpu_proc_is_critical(pid_t pid, const char *name);
+static int read_top_cpu_processes(CpuPopup *p);
+static int cpu_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 static void renderram(StatusModule *module, int bar_height, const char *text);
 static void refreshstatuscpu(void);
 static void refreshstatusram(void);
@@ -1003,10 +1028,16 @@ static char net_icon_wifi_50_resolved[PATH_MAX];
 static char net_icon_wifi_25_resolved[PATH_MAX];
 static char net_icon_eth_resolved[PATH_MAX];
 static char net_icon_no_conn_resolved[PATH_MAX];
+static char clock_icon_path[PATH_MAX] = "images/svg/clock.svg";
+static char clock_icon_loaded_path[PATH_MAX];
 static int net_icon_loaded_h;
 static int net_icon_w;
 static int net_icon_h;
 static struct wlr_buffer *net_icon_buf;
+static int clock_icon_loaded_h;
+static int clock_icon_w;
+static int clock_icon_h;
+static struct wlr_buffer *clock_icon_buf;
 static int cpu_icon_loaded_h;
 static int cpu_icon_w;
 static int cpu_icon_h;
@@ -1396,96 +1427,9 @@ updatemodulebg(StatusModule *module, int width, int height,
 static void
 renderclock(StatusModule *module, int bar_height, const char *text)
 {
-	/* Render using fcft for proper font glyphs */
-	tll(struct GlyphRun) glyphs = tll_init();
-	const struct fcft_glyph *glyph;
-	struct wlr_scene_buffer *scene_buf;
-	struct wlr_buffer *buffer;
-	uint32_t prev_cp;
-	int padding, pen_x, min_x, min_y, max_x, max_y;
-	int text_width, text_height, origin_x, origin_y;
-	size_t i;
-
-	if (!module || !module->tree)
-		return;
-
-	clearstatusmodule(module);
-	padding = statusbar_module_padding;
-	if (!statusfont.font || !text || !*text || bar_height <= 0) {
-		module->width = 2 * padding;
-		updatemodulebg(module, module->width, bar_height, statusbar_bg);
-		return;
-	}
-
-	pen_x = 0;
-	min_x = INT_MAX;
-	min_y = INT_MAX;
-	max_x = INT_MIN;
-	max_y = INT_MIN;
-	prev_cp = 0;
-
-	for (i = 0; text[i]; i++) {
-		long kern_x = 0, kern_y = 0;
-		uint32_t cp = (unsigned char)text[i];
-		struct GlyphRun run;
-
-		if (prev_cp)
-			fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
-		pen_x += (int)kern_x;
-
-		glyph = fcft_rasterize_char_utf32(statusfont.font, cp, statusbar_font_subpixel);
-		if (!glyph || !glyph->pix) {
-			prev_cp = cp;
-			continue;
-		}
-
-		run.glyph = glyph;
-		run.pen_x = pen_x;
-		run.codepoint = cp;
-		tll_push_back(glyphs, run);
-
-		min_x = MIN(min_x, pen_x + glyph->x);
-		min_y = MIN(min_y, -glyph->y);
-		max_x = MAX(max_x, pen_x + glyph->x + glyph->width);
-		max_y = MAX(max_y, -glyph->y + glyph->height);
-
-		pen_x += glyph->advance.x;
-		if (text[i + 1])
-			pen_x += statusbar_font_spacing;
-		prev_cp = cp;
-	}
-
-	if (tll_length(glyphs) == 0) {
-		module->width = 2 * padding;
-		updatemodulebg(module, module->width, bar_height, statusbar_bg);
-		tll_free(glyphs);
-		return;
-	}
-
-	text_width = max_x - min_x;
-	text_height = max_y - min_y;
-	module->width = text_width + 2 * padding;
-	origin_x = padding - min_x;
-	origin_y = (bar_height - text_height) / 2 - min_y;
-
-	tll_foreach(glyphs, it) {
-		glyph = it->item.glyph;
-		buffer = statusbar_buffer_from_glyph(glyph);
-		if (!buffer)
-			continue;
-
-		scene_buf = wlr_scene_buffer_create(module->tree, NULL);
-		if (scene_buf) {
-			wlr_scene_buffer_set_buffer(scene_buf, buffer);
-			wlr_scene_node_set_position(&scene_buf->node,
-					origin_x + it->item.pen_x + glyph->x,
-					origin_y - glyph->y);
-		}
-		wlr_buffer_drop(buffer);
-	}
-
-	updatemodulebg(module, module->width, bar_height, statusbar_bg);
-	tll_free(glyphs);
+	render_icon_label(module, bar_height, text,
+			ensure_clock_icon_buffer, &clock_icon_buf, &clock_icon_w, &clock_icon_h,
+			0, statusbar_icon_text_gap_clock, statusbar_fg);
 }
 
 static void
@@ -2345,6 +2289,63 @@ ensure_cpu_icon_buffer(int target_h)
 	cpu_icon_h = h;
 	cpu_icon_loaded_h = target_h;
 	snprintf(cpu_icon_loaded_path, sizeof(cpu_icon_loaded_path), "%s", path);
+	return 0;
+}
+
+static void
+drop_clock_icon_buffer(void)
+{
+	if (clock_icon_buf) {
+		wlr_buffer_drop(clock_icon_buf);
+		clock_icon_buf = NULL;
+	}
+	clock_icon_loaded_h = 0;
+	clock_icon_w = clock_icon_h = 0;
+	clock_icon_loaded_path[0] = '\0';
+}
+
+static int
+ensure_clock_icon_buffer(int target_h)
+{
+	GdkPixbuf *pixbuf = NULL;
+	GError *gerr = NULL;
+	struct wlr_buffer *buf;
+	int w = 0, h = 0;
+	char resolved[PATH_MAX];
+	const char *path = clock_icon_path;
+
+	if (target_h <= 0)
+		return -1;
+
+	if (resolve_asset_path(clock_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
+		path = resolved;
+
+	if (clock_icon_buf && clock_icon_loaded_h == target_h &&
+			strncmp(clock_icon_loaded_path, path, sizeof(clock_icon_loaded_path)) == 0)
+		return 0;
+
+	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
+		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
+		if (!pixbuf) {
+			if (gerr) {
+				fprintf(stderr, "clock icon: failed to load '%s': %s\n",
+						path, gerr->message);
+				g_error_free(gerr);
+			}
+			return -1;
+		}
+	}
+
+	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
+	if (!buf)
+		return -1;
+
+	drop_clock_icon_buffer();
+	clock_icon_buf = buf;
+	clock_icon_w = w;
+	clock_icon_h = h;
+	clock_icon_loaded_h = target_h;
+	snprintf(clock_icon_loaded_path, sizeof(clock_icon_loaded_path), "%s", path);
 	return 0;
 }
 
@@ -3615,13 +3616,259 @@ statusbar_buffer_from_argb32(const uint32_t *data, int width, int height)
 	return &buf->base;
 }
 
+static int
+cpu_proc_is_critical(pid_t pid, const char *name)
+{
+	const char *blocked[] = {
+		"dwl", "systemd", "init", "dbus-daemon", "login", "seatd",
+		"wpa_supplicant", "NetworkManager", "pipewire", "wireplumber",
+		"pulseaudio", "udevd", "Xwayland", "kswapd"
+	};
+
+	if (pid <= 1 || pid == getpid())
+		return 1;
+	if (!name || !*name)
+		return 1;
+	if (name[0] == '[')
+		return 1;
+	if (!strncmp(name, "kworker", 7) || !strncmp(name, "ksoftirq", 8)
+			|| !strncmp(name, "rcu_", 4) || !strncmp(name, "migration", 9)
+			|| !strncmp(name, "kswapd", 6))
+		return 1;
+
+	for (size_t i = 0; i < LENGTH(blocked); i++) {
+		if (strcasestr(name, blocked[i]))
+			return 1;
+	}
+	return 0;
+}
+
+static int
+cpu_proc_cmp(const void *a, const void *b)
+{
+	const CpuProcEntry *pa = a;
+	const CpuProcEntry *pb = b;
+
+	if (pa->cpu < pb->cpu)
+		return 1;
+	if (pa->cpu > pb->cpu)
+		return -1;
+	if (pa->pid < pb->pid)
+		return -1;
+	if (pa->pid > pb->pid)
+		return 1;
+	return 0;
+}
+
+static int
+cpu_popup_clamped_x(Monitor *m, CpuPopup *p)
+{
+	int popup_x;
+
+	if (!m || !p)
+		return 0;
+
+	popup_x = m->statusbar.cpu.x;
+	if (p->width > 0 && m->statusbar.area.width > 0) {
+		int max_x = m->statusbar.area.width - p->width;
+		if (max_x < 0)
+			max_x = 0;
+		if (popup_x > max_x)
+			popup_x = max_x;
+		if (popup_x < 0)
+			popup_x = 0;
+	}
+	return popup_x;
+}
+
+static int
+cpu_popup_hover_index(Monitor *m, CpuPopup *p)
+{
+	int rel_x, rel_y;
+	int popup_x;
+
+	if (!m || !p || p->proc_count <= 0 || p->width <= 0 || p->height <= 0)
+		return -1;
+
+	popup_x = cpu_popup_clamped_x(m, p);
+	rel_x = (int)floor(cursor->x) - m->statusbar.area.x - popup_x;
+	rel_y = (int)floor(cursor->y) - m->statusbar.area.y - m->statusbar.area.height;
+	if (rel_x < 0 || rel_y < 0 || rel_x >= p->width || rel_y >= p->height)
+		return -1;
+
+	for (int i = 0; i < p->proc_count; i++) {
+		CpuProcEntry *e = &p->procs[i];
+		if (!e->has_kill || e->kill_w <= 0 || e->kill_h <= 0)
+			continue;
+		if (rel_x >= e->kill_x && rel_x < e->kill_x + e->kill_w &&
+				rel_y >= e->kill_y && rel_y < e->kill_y + e->kill_h)
+			return i;
+	}
+	return -1;
+}
+
+static int
+kill_processes_with_name(const char *name)
+{
+	DIR *dir;
+	struct dirent *ent;
+	int killed = 0;
+	int found = 0;
+
+	if (!name || !*name)
+		return 0;
+
+	dir = opendir("/proc");
+	if (!dir)
+		return 0;
+
+	while ((ent = readdir(dir))) {
+		pid_t pid = 0;
+		char comm_path[PATH_MAX];
+		char comm[256];
+		FILE *fp;
+		size_t len;
+		int is_num = 1;
+
+		if (!ent->d_name || !*ent->d_name)
+			continue;
+		for (size_t i = 0; ent->d_name[i]; i++) {
+			if (!isdigit((unsigned char)ent->d_name[i])) {
+				is_num = 0;
+				break;
+			}
+		}
+		if (!is_num)
+			continue;
+
+		pid = (pid_t)atoi(ent->d_name);
+		if (pid <= 1 || pid == getpid())
+			continue;
+
+		found = 1;
+
+		snprintf(comm_path, sizeof(comm_path), "/proc/%s/comm", ent->d_name);
+		fp = fopen(comm_path, "r");
+		if (!fp)
+			continue;
+		if (!fgets(comm, sizeof(comm), fp)) {
+			fclose(fp);
+			continue;
+		}
+		fclose(fp);
+		len = strlen(comm);
+		if (len > 0 && comm[len - 1] == '\n')
+			comm[len - 1] = '\0';
+
+		if (strcmp(comm, name) == 0) {
+			if (kill(pid, SIGKILL) == 0) {
+				killed++;
+			} else {
+				fprintf(stderr, "cpu popup: kill %d (%s) failed: %s\n",
+						pid, name, strerror(errno));
+			}
+		}
+	}
+
+	closedir(dir);
+	if (killed == 0 && found > 0) {
+		char cmd[256];
+		int ret = snprintf(cmd, sizeof(cmd), "pkill -9 -x %s", name);
+		if (ret > 0 && ret < (int)sizeof(cmd)) {
+			int res = system(cmd);
+			(void)res;
+		}
+	}
+	return killed;
+}
+
+static int
+read_top_cpu_processes(CpuPopup *p)
+{
+	FILE *fp;
+	char line[256];
+	int count = 0;
+	int lines = 0;
+
+	if (!p)
+		return 0;
+
+	fp = popen("ps -eo pid,comm,pcpu --no-headers --sort=-pcpu", "r");
+	if (!fp) {
+		p->proc_count = 0;
+		return 0;
+	}
+
+	while (fgets(line, sizeof(line), fp) && lines < 128) {
+		CpuProcEntry *e;
+		pid_t pid = 0;
+		char name[64] = {0};
+		double cpu = 0.0;
+		int existing = -1;
+		int critical = 0;
+
+		lines++;
+		if (sscanf(line, "%d %63s %lf", &pid, name, &cpu) != 3)
+			continue;
+		if (name[0] == '[')
+			continue;
+
+		for (int i = 0; i < count; i++) {
+			if (strcmp(p->procs[i].name, name) == 0) {
+				existing = i;
+				break;
+			}
+		}
+
+		critical = cpu_proc_is_critical(pid, name);
+
+		if (existing >= 0) {
+			e = &p->procs[existing];
+			e->cpu += cpu;
+			if (cpu > e->max_single_cpu) {
+				e->max_single_cpu = cpu;
+				e->pid = pid;
+			}
+			if (critical)
+				e->has_kill = 0;
+		} else if (count < (int)LENGTH(p->procs)) {
+			e = &p->procs[count];
+			e->pid = pid;
+			snprintf(e->name, sizeof(e->name), "%s", name);
+			e->cpu = cpu;
+			e->max_single_cpu = cpu;
+			e->y = e->height = 0;
+			e->kill_x = e->kill_y = e->kill_w = e->kill_h = 0;
+			e->has_kill = critical ? 0 : 1;
+			count++;
+		}
+	}
+
+	pclose(fp);
+	if (count > 1)
+		qsort(p->procs, (size_t)count, sizeof(p->procs[0]), cpu_proc_cmp);
+	p->proc_count = count;
+	return count;
+}
+
 static void
 rendercpupopup(Monitor *m)
 {
 	CpuPopup *p;
 	int padding, line_spacing;
-	int line_count, max_width = 0;
-	int total_height;
+	int line_count;
+	int left_w = 0, right_w = 0;
+	int left_h = 0, right_h = 0;
+	int content_h;
+	int column_gap;
+	int row_height;
+	int button_gap;
+	int kill_text_w;
+	int kill_w;
+	int kill_h;
+	int use_right_gap;
+	int hover_idx;
+	int popup_x = m->statusbar.cpu.x;
 	char line[64];
 	struct wlr_scene_node *node, *tmp;
 
@@ -3629,8 +3876,17 @@ rendercpupopup(Monitor *m)
 		return;
 
 	p = &m->statusbar.cpu_popup;
+	hover_idx = p->hover_idx;
+	if (hover_idx < -1 || hover_idx >= (int)LENGTH(p->procs))
+		hover_idx = -1;
 	padding = statusbar_module_padding;
 	line_spacing = 2;
+	column_gap = statusbar_module_spacing + 8;
+	row_height = statusfont.height > 0 ? statusfont.height : 16;
+	button_gap = statusbar_module_spacing > 0 ? statusbar_module_spacing / 2 : 6;
+	kill_text_w = status_text_width("Kill");
+	kill_w = kill_text_w + 12;
+	kill_h = row_height;
 
 	/* Clear previous buffers but keep bg */
 	wl_list_for_each_safe(node, tmp, &p->tree->children, link) {
@@ -3647,17 +3903,15 @@ rendercpupopup(Monitor *m)
 		return;
 	}
 
+	if (p->refresh_data) {
+		read_top_cpu_processes(p);
+		p->refresh_data = 0;
+	}
 	line_count = cpu_core_count + 1; /* +1 for avg line */
 
-	/* First pass: compute max width */
 	for (int i = 0; i < line_count; i++) {
-		const struct fcft_glyph *glyph;
-		uint32_t prev_cp = 0;
-		int pen_x = 0;
-		int min_x = INT_MAX, max_x_local = INT_MIN;
-		const char *text;
-
 		double perc = (i < cpu_core_count) ? cpu_last_core_percent[i] : cpu_last_percent;
+
 		if (perc < 0.0) {
 			if (i < cpu_core_count)
 				snprintf(line, sizeof(line), "C%d: --%%", i);
@@ -3669,37 +3923,39 @@ rendercpupopup(Monitor *m)
 			int avg_disp = (perc < 1.0) ? 0 : (int)lround(perc);
 			snprintf(line, sizeof(line), "Avg: %d%%", avg_disp);
 		}
-		text = line;
-
-		for (size_t j = 0; text[j]; j++) {
-			long kern_x = 0, kern_y = 0;
-			uint32_t cp = (unsigned char)text[j];
-			if (prev_cp)
-				fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
-			pen_x += (int)kern_x;
-
-			glyph = fcft_rasterize_char_utf32(statusfont.font, cp, statusbar_font_subpixel);
-			if (!glyph || !glyph->pix) {
-				prev_cp = cp;
-				continue;
-			}
-
-			min_x = MIN(min_x, pen_x + glyph->x);
-			max_x_local = MAX(max_x_local, pen_x + glyph->x + glyph->width);
-			pen_x += glyph->advance.x;
-			if (text[j + 1])
-				pen_x += statusbar_font_spacing;
-			prev_cp = cp;
-		}
-
-		if (min_x == INT_MAX || max_x_local == INT_MIN)
-			continue;
-		max_width = MAX(max_width, max_x_local - min_x);
+		left_w = MAX(left_w, status_text_width(line));
 	}
+	left_h = line_count * row_height + (line_count - 1) * line_spacing;
 
-	p->width = max_width + 2 * padding;
-	p->height = line_count * statusfont.height + (line_count - 1) * line_spacing + 2 * padding;
-	total_height = p->height;
+	for (int i = 0; i < p->proc_count; i++) {
+		CpuProcEntry *e = &p->procs[i];
+		int cpu_disp = (int)lround(e->cpu < 0.0 ? 0.0 : e->cpu);
+		int row_w;
+		char proc_line[128];
+
+		snprintf(proc_line, sizeof(proc_line), "%s %d%%", e->name, cpu_disp);
+		row_w = status_text_width(proc_line);
+		if (e->has_kill)
+			row_w += button_gap + kill_w;
+		right_w = MAX(right_w, row_w);
+	}
+	if (p->proc_count > 0)
+		right_h = p->proc_count * row_height + (p->proc_count - 1) * line_spacing;
+
+	content_h = MAX(left_h, right_h);
+	use_right_gap = right_w > 0 ? column_gap : 0;
+	p->width = 2 * padding + left_w + use_right_gap + right_w;
+	p->height = content_h + 2 * padding;
+
+	if (p->width > 0 && m->statusbar.area.width > 0) {
+		int max_x = m->statusbar.area.width - p->width;
+		if (max_x < 0)
+			max_x = 0;
+		if (popup_x > max_x)
+			popup_x = max_x;
+		if (popup_x < 0)
+			popup_x = 0;
+	}
 
 	if (!p->bg && !(p->bg = wlr_scene_tree_create(p->tree)))
 		return;
@@ -3707,21 +3963,14 @@ rendercpupopup(Monitor *m)
 	wlr_scene_node_set_position(&p->bg->node, 0, 0);
 	wl_list_for_each_safe(node, tmp, &p->bg->children, link)
 		wlr_scene_node_destroy(node);
-	drawrect(p->bg, 0, 0, p->width, total_height, statusbar_bg);
+	drawrect(p->bg, 0, 0, p->width, p->height, statusbar_bg);
 
 	for (int i = 0; i < line_count; i++) {
-		const char *text;
-		int min_x = INT_MAX, max_x_local = INT_MIN;
-		int min_y = INT_MAX, max_y = INT_MIN;
-		int pen_x = 0;
-		uint32_t prev_cp = 0;
-		const struct fcft_glyph *glyph;
-		int text_height = 0;
-		int origin_x = 0;
-		int origin_y = 0;
-		tll(struct GlyphRun) glyphs = tll_init();
-
 		double perc = (i < cpu_core_count) ? cpu_last_core_percent[i] : cpu_last_percent;
+		int row_y = padding + i * (row_height + line_spacing);
+		struct wlr_scene_tree *row;
+		StatusModule mod = {0};
+
 		if (perc < 0.0) {
 			if (i < cpu_core_count)
 				snprintf(line, sizeof(line), "C%d: --%%", i);
@@ -3733,74 +3982,126 @@ rendercpupopup(Monitor *m)
 			int avg_disp = (perc < 1.0) ? 0 : (int)lround(perc);
 			snprintf(line, sizeof(line), "Avg: %d%%", avg_disp);
 		}
-		text = line;
 
-		for (size_t j = 0; text[j]; j++) {
-			long kern_x = 0, kern_y = 0;
-			uint32_t cp = (unsigned char)text[j];
-			struct GlyphRun run;
-
-			if (prev_cp)
-				fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
-			pen_x += (int)kern_x;
-
-			glyph = fcft_rasterize_char_utf32(statusfont.font,
-					cp, statusbar_font_subpixel);
-			if (!glyph || !glyph->pix) {
-				prev_cp = cp;
-				continue;
-			}
-
-			run.glyph = glyph;
-			run.pen_x = pen_x;
-			run.codepoint = cp;
-			tll_push_back(glyphs, run);
-
-			min_x = MIN(min_x, pen_x + glyph->x);
-			min_y = MIN(min_y, -glyph->y);
-			max_x_local = MAX(max_x_local, pen_x + glyph->x + glyph->width);
-			max_y = MAX(max_y, -glyph->y + glyph->height);
-
-			pen_x += glyph->advance.x;
-			if (text[j + 1])
-				pen_x += statusbar_font_spacing;
-			prev_cp = cp;
-		}
-
-		if (tll_length(glyphs) == 0) {
-			tll_free(glyphs);
+		row = wlr_scene_tree_create(p->tree);
+		if (!row)
 			continue;
-		}
+		wlr_scene_node_set_position(&row->node, padding, row_y);
+		mod.tree = row;
+		tray_render_label(&mod, line, 0, row_height, statusbar_fg);
+	}
 
-		text_height = max_y - min_y;
-		origin_x = padding - min_x;
-		origin_y = padding + i * (statusfont.height + line_spacing)
-			+ (statusfont.height - text_height) / 2 - min_y;
+	if (right_w > 0) {
+		int right_x = padding + left_w + use_right_gap;
+		for (int i = 0; i < p->proc_count; i++) {
+			CpuProcEntry *e = &p->procs[i];
+			int cpu_disp = (int)lround(e->cpu < 0.0 ? 0.0 : e->cpu);
+			int row_y = padding + i * (row_height + line_spacing);
+			int text_w;
+			char proc_line[128];
+			struct wlr_scene_tree *row;
+			StatusModule mod = {0};
 
-		tll_foreach(glyphs, it) {
-			struct wlr_buffer *buffer;
-			struct wlr_scene_buffer *scene_buf;
-
-			glyph = it->item.glyph;
-			buffer = statusbar_buffer_from_glyph(glyph);
-			if (!buffer)
-				continue;
-
-			scene_buf = wlr_scene_buffer_create(p->tree, NULL);
-			if (scene_buf) {
-				wlr_scene_buffer_set_buffer(scene_buf, buffer);
-				wlr_scene_node_set_position(&scene_buf->node,
-						origin_x + it->item.pen_x + glyph->x,
-						origin_y - glyph->y);
+			snprintf(proc_line, sizeof(proc_line), "%s %d%%", e->name, cpu_disp);
+			row = wlr_scene_tree_create(p->tree);
+			if (row) {
+				wlr_scene_node_set_position(&row->node, right_x, row_y);
+				mod.tree = row;
+				text_w = tray_render_label(&mod, proc_line, 0, row_height, statusbar_fg);
+				if (text_w <= 0)
+					text_w = status_text_width(proc_line);
+			} else {
+				text_w = status_text_width(proc_line);
 			}
-			wlr_buffer_drop(buffer);
-		}
 
-		tll_free(glyphs);
+			e->y = row_y;
+			e->height = row_height;
+		if (e->has_kill && kill_w > 0 && kill_h > 0) {
+			int btn_x = right_x + text_w + button_gap;
+			int btn_y = row_y + (row_height - kill_h) / 2;
+			struct wlr_scene_tree *btn;
+			StatusModule btn_mod = {0};
+			const float *btn_color = statusbar_volume_muted_fg;
+			int is_hover = (hover_idx == i);
+
+			if (is_hover)
+				btn_color = statusbar_tag_active_bg;
+
+			e->kill_x = btn_x;
+				e->kill_y = btn_y;
+				e->kill_w = kill_w;
+				e->kill_h = kill_h;
+				drawrect(p->tree, btn_x, btn_y, kill_w, kill_h, btn_color);
+
+				btn = wlr_scene_tree_create(p->tree);
+				if (btn) {
+					int text_x = (kill_w - kill_text_w) / 2;
+					if (text_x < 2)
+						text_x = 2;
+					wlr_scene_node_set_position(&btn->node, btn_x, btn_y);
+					btn_mod.tree = btn;
+					tray_render_label(&btn_mod, "Kill", text_x, kill_h, statusbar_fg);
+				}
+			} else {
+				e->kill_x = e->kill_y = e->kill_w = e->kill_h = 0;
+				e->has_kill = 0;
+			}
+		}
 	}
 
 	if (p->width <= 0 || p->height <= 0)
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
+}
+
+static int
+cpu_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
+{
+	CpuPopup *p;
+	int rel_x, rel_y;
+	int popup_x;
+
+	if (!m || !m->statusbar.cpu_popup.visible || button != BTN_LEFT)
+		return 0;
+
+	p = &m->statusbar.cpu_popup;
+	if (!p->tree || p->width <= 0 || p->height <= 0)
+		return 0;
+
+	popup_x = m->statusbar.cpu.x;
+	if (p->width > 0 && m->statusbar.area.width > 0) {
+		int max_x = m->statusbar.area.width - p->width;
+		if (max_x < 0)
+			max_x = 0;
+		if (popup_x > max_x)
+			popup_x = max_x;
+		if (popup_x < 0)
+			popup_x = 0;
+	}
+
+	rel_x = lx - popup_x;
+	rel_y = ly - m->statusbar.area.height;
+	if (rel_x < 0 || rel_y < 0 || rel_x >= p->width || rel_y >= p->height)
+		return 0;
+
+	for (int i = 0; i < p->proc_count; i++) {
+		CpuProcEntry *e = &p->procs[i];
+		if (!e->has_kill || e->kill_w <= 0 || e->kill_h <= 0)
+			continue;
+		if (rel_x >= e->kill_x && rel_x < e->kill_x + e->kill_w &&
+				rel_y >= e->kill_y && rel_y < e->kill_y + e->kill_h) {
+			if (cpu_proc_is_critical(e->pid, e->name))
+				return 1;
+			if (kill_processes_with_name(e->name) == 0) {
+				if (kill(e->pid, SIGKILL) != 0)
+					fprintf(stderr, "cpu popup: kill %d failed: %s\n",
+							e->pid, strerror(errno));
+			}
+			refreshstatuscpu();
+			return 1;
+		}
+	}
+
+	return 0;
 }
 
 static void
@@ -6416,8 +6717,9 @@ pipewire_sink_is_headset(void)
 	char line[512];
 	int headset = 0;
 	const char *kw[] = {
-		"headset", "headphone", "earbud", "earphone",
-		"bluez", "bluetooth", "a2dp", "hfp", "hsp"
+		"headset", "headphone", "headphones", "earbud", "earbuds",
+		"earphone", "handsfree", "bluez", "bluetooth", "a2dp",
+		"hfp", "hsp", "head-unit"
 	};
 	size_t i;
 
@@ -6426,6 +6728,29 @@ pipewire_sink_is_headset(void)
 		return 0;
 
 	while (fgets(line, sizeof(line), fp)) {
+		for (i = 0; i < LENGTH(kw); i++) {
+			if (strcasestr(line, kw[i])) {
+				headset = 1;
+				break;
+			}
+		}
+		if (headset)
+			break;
+	}
+
+	pclose(fp);
+	if (headset)
+		return 1;
+
+	fp = popen("wpctl status --no-colors", "r");
+	if (!fp)
+		fp = popen("wpctl status", "r");
+	if (!fp)
+		return 0;
+
+	while (fgets(line, sizeof(line), fp)) {
+		if (!strchr(line, '*'))
+			continue;
 		for (i = 0; i < LENGTH(kw); i++) {
 			if (strcasestr(line, kw[i])) {
 				headset = 1;
@@ -6773,11 +7098,21 @@ positionstatusmodules(Monitor *m)
 	}
 	if (m->statusbar.cpu_popup.tree) {
 		if (m->statusbar.cpu.width > 0 && m->statusbar.area.height > 0) {
+			int popup_x = m->statusbar.cpu.x;
+			int max_x = m->statusbar.area.width - m->statusbar.cpu_popup.width;
+			if (max_x < 0)
+				max_x = 0;
+			if (popup_x > max_x)
+				popup_x = max_x;
+			if (popup_x < 0)
+				popup_x = 0;
 			wlr_scene_node_set_position(&m->statusbar.cpu_popup.tree->node,
-					m->statusbar.cpu.x, m->statusbar.area.height);
+					popup_x, m->statusbar.area.height);
+			m->statusbar.cpu_popup.refresh_data = 1;
 		} else {
 			wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
 			m->statusbar.cpu_popup.visible = 0;
+			m->statusbar.cpu_popup.refresh_data = 0;
 		}
 	}
 	if (m->statusbar.net_popup.tree) {
@@ -7937,10 +8272,7 @@ status_task_hover_active(void (*fn)(void))
 	Monitor *m;
 
 	if (fn == refreshstatuscpu) {
-		wl_list_for_each(m, &mons, link) {
-			if (m->showbar && m->statusbar.cpu_popup.visible)
-				return 1;
-		}
+		return 0;
 	}
 	if (fn == refreshstatusnet) {
 		wl_list_for_each(m, &mons, link) {
@@ -8092,13 +8424,17 @@ updatecpuhover(Monitor *m, double cx, double cy)
 {
 	int lx, ly;
 	int inside = 0;
+	int popup_hover = 0;
 	int was_visible;
 	CpuPopup *p;
+	int popup_x;
+	int new_hover = -1;
 
 	if (!m || !m->showbar || !m->statusbar.cpu.tree || !m->statusbar.cpu_popup.tree) {
 		if (m && m->statusbar.cpu_popup.tree) {
 			wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
 			m->statusbar.cpu_popup.visible = 0;
+			m->statusbar.cpu_popup.hover_idx = -1;
 		}
 		return;
 	}
@@ -8107,10 +8443,31 @@ updatecpuhover(Monitor *m, double cx, double cy)
 	lx = (int)floor(cx) - m->statusbar.area.x;
 	ly = (int)floor(cy) - m->statusbar.area.y;
 
+	popup_x = m->statusbar.cpu.x;
+	if (p->width > 0 && m->statusbar.area.width > 0) {
+		int max_x = m->statusbar.area.width - p->width;
+		if (max_x < 0)
+			max_x = 0;
+		if (popup_x > max_x)
+			popup_x = max_x;
+		if (popup_x < 0)
+			popup_x = 0;
+	}
+
+	if (p->visible && p->width > 0 && p->height > 0 &&
+			lx >= popup_x &&
+			lx < popup_x + p->width &&
+			ly >= m->statusbar.area.height &&
+			ly < m->statusbar.area.height + p->height) {
+		popup_hover = 1;
+	}
+
 	if (lx >= m->statusbar.cpu.x &&
 			lx < m->statusbar.cpu.x + m->statusbar.cpu.width &&
 			ly >= 0 && ly < m->statusbar.area.height &&
 			m->statusbar.cpu.width > 0) {
+		inside = 1;
+	} else if (popup_hover) {
 		inside = 1;
 	}
 
@@ -8120,14 +8477,18 @@ updatecpuhover(Monitor *m, double cx, double cy)
 		p->visible = 1;
 		wlr_scene_node_set_enabled(&p->tree->node, 1);
 		wlr_scene_node_set_position(&p->tree->node,
-				m->statusbar.cpu.x, m->statusbar.area.height);
-		if (!was_visible) {
+				popup_x, m->statusbar.area.height);
+		new_hover = cpu_popup_hover_index(m, p);
+		if (new_hover != p->hover_idx || !was_visible) {
+			p->hover_idx = new_hover;
+			p->refresh_data = was_visible ? 0 : 1;
 			rendercpupopup(m);
-			trigger_status_task_now(refreshstatuscpu);
 		}
 	} else if (p->visible) {
 		p->visible = 0;
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
+		p->hover_idx = -1;
+		p->refresh_data = 1;
 	}
 }
 
@@ -8562,14 +8923,19 @@ buttonpress(struct wl_listener *listener, void *data)
 				return;
 		}
 
-	if (selmon && selmon->showbar) {
+		if (selmon && selmon->showbar) {
 			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
 			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
 			StatusModule *tags = &selmon->statusbar.tags;
 			StatusModule *mic = &selmon->statusbar.mic;
 			StatusModule *vol = &selmon->statusbar.volume;
-				StatusModule *cpu = &selmon->statusbar.cpu;
-				StatusModule *sys = &selmon->statusbar.sysicons;
+			StatusModule *cpu = &selmon->statusbar.cpu;
+			StatusModule *sys = &selmon->statusbar.sysicons;
+
+			if (selmon->statusbar.cpu_popup.visible) {
+				if (cpu_popup_handle_click(selmon, lx, ly, event->button))
+					return;
+			}
 
 			if (lx >= 0 && ly >= 0 &&
 					lx < selmon->statusbar.area.width &&
@@ -8582,21 +8948,21 @@ buttonpress(struct wl_listener *listener, void *data)
 					return;
 				}
 
-					if (cpu->width > 0 && lx >= cpu->x && lx < cpu->x + cpu->width) {
-						Arg arg = { .v = btopcmd };
-						spawn(&arg);
-						return;
-					}
+				if (cpu->width > 0 && lx >= cpu->x && lx < cpu->x + cpu->width) {
+					Arg arg = { .v = btopcmd };
+					spawn(&arg);
+					return;
+				}
 
-					if (mic->width > 0 && lx >= mic->x && lx < mic->x + mic->width) {
-						toggle_pipewire_mic_mute();
-						return;
-					}
+				if (mic->width > 0 && lx >= mic->x && lx < mic->x + mic->width) {
+					toggle_pipewire_mic_mute();
+					return;
+				}
 
-					if (vol->width > 0 && lx >= vol->x && lx < vol->x + vol->width) {
-						toggle_pipewire_mute();
-						return;
-					}
+				if (vol->width > 0 && lx >= vol->x && lx < vol->x + vol->width) {
+					toggle_pipewire_mute();
+					return;
+				}
 
 				if (event->button == BTN_LEFT && lx < tags->width) {
 					for (int i = 0; i < tags->box_count; i++) {
@@ -8702,6 +9068,7 @@ cleanup(void)
 	cleanuplisteners();
 	drop_net_icon_buffer();
 	drop_cpu_icon_buffer();
+	drop_clock_icon_buffer();
 	drop_light_icon_buffer();
 	drop_ram_icon_buffer();
 	drop_battery_icon_buffer();
@@ -9202,12 +9569,14 @@ initstatusbar(Monitor *m)
 		m->statusbar.clock.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.clock.tree)
 			m->statusbar.clock.bg = wlr_scene_tree_create(m->statusbar.clock.tree);
-		m->statusbar.cpu_popup.tree = wlr_scene_tree_create(m->statusbar.tree);
-		if (m->statusbar.cpu_popup.tree) {
-			m->statusbar.cpu_popup.bg = wlr_scene_tree_create(m->statusbar.cpu_popup.tree);
-			m->statusbar.cpu_popup.visible = 0;
-			wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
-		}
+	m->statusbar.cpu_popup.tree = wlr_scene_tree_create(m->statusbar.tree);
+	if (m->statusbar.cpu_popup.tree) {
+		m->statusbar.cpu_popup.bg = wlr_scene_tree_create(m->statusbar.cpu_popup.tree);
+		m->statusbar.cpu_popup.visible = 0;
+		m->statusbar.cpu_popup.hover_idx = -1;
+		m->statusbar.cpu_popup.refresh_data = 1;
+		wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
+	}
 		m->statusbar.net_popup.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.net_popup.tree) {
 			m->statusbar.net_popup.bg = wlr_scene_tree_create(m->statusbar.net_popup.tree);
