@@ -28,6 +28,7 @@ static const unsigned int statusbar_icon_text_gap_clock = statusbar_icon_text_ga
 static const unsigned int statusbar_top_gap = 3;
 static const float statusbar_fg[]          = COLOR(0xffffffff);
 static const float statusbar_bg[]          = COLOR(0x00000016);
+static const float statusbar_popup_bg[]    = COLOR(0x00000080); /* ~50% */
 static const float statusbar_volume_muted_fg[] = COLOR(0xff4c4cff);
 static const float statusbar_mic_muted_fg[] = COLOR(0xff4c4cff);
 static const float statusbar_tag_bg[]      = COLOR(0x00000033);
@@ -186,9 +187,9 @@ static const char *const autostart_cmd =
 	"swaybg -i \"$wp\" -m fill <&-";
 
 static const Key keys[] = {
-	/* Note that Shift changes certain key codes: c -> C, 2 -> at, etc. */
-	/* modifier                  key                 function        argument */
-	{ MODKEY,                    XKB_KEY_p,          spawn,          {.v = menucmd} },
+/* Note that Shift changes certain key codes: c -> C, 2 -> at, etc. */
+/* modifier                  key                 function        argument */
+{ MODKEY,                    XKB_KEY_p,          modal_show,     {0} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Return,     spawn,          {.v = termcmd} },
 	{ MODKEY,                    XKB_KEY_j,          focusstack,     {.i = +1} },
 	{ MODKEY,                    XKB_KEY_k,          focusstack,     {.i = -1} },
