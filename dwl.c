@@ -27,6 +27,7 @@
 #include <errno.h>
 #include <strings.h>
 #include <ctype.h>
+#include <pwd.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <fcntl.h>
@@ -137,6 +138,7 @@ enum { CurNormal, CurPressed, CurMove, CurResize }; /* cursor */
 enum { XDGShell, LayerShell, X11 }; /* client types */
 enum { LyrBg, LyrBottom, LyrTile, LyrFloat, LyrTop, LyrFS, LyrOverlay, LyrBlock, NUM_LAYERS }; /* scene layers */
 #define MODAL_MAX_RESULTS 1024
+#define MODAL_RESULT_LEN 256
 
 typedef union {
 	int i;
@@ -202,10 +204,19 @@ typedef struct {
 	char search[3][256];
 	int search_len[3];
 	int result_count[3];
-	char results[3][MODAL_MAX_RESULTS][128];
+	char results[3][MODAL_MAX_RESULTS][MODAL_RESULT_LEN];
 	int result_entry_idx[3][MODAL_MAX_RESULTS];
 	int selected[3];
 	int scroll[3];
+	char file_results_name[MODAL_MAX_RESULTS][128];
+	char file_results_path[MODAL_MAX_RESULTS][PATH_MAX];
+	time_t file_results_mtime[MODAL_MAX_RESULTS];
+	pid_t file_search_pid;
+	int file_search_fd;
+	struct wl_event_source *file_search_event;
+	size_t file_search_len;
+	char file_search_buf[4096];
+	char file_search_last[256];
 } ModalOverlay;
 
 typedef struct {
@@ -782,8 +793,15 @@ static Monitor *modal_visible_monitor(void);
 static void modal_layout_metrics(int *btn_h, int *field_h, int *line_h, int *pad);
 static int modal_max_visible_lines(Monitor *m);
 static void modal_ensure_selection_visible(Monitor *m);
+static int modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym);
+static void modal_file_search_clear_results(Monitor *m);
+static void modal_file_search_stop(Monitor *m);
+static void modal_file_search_start(Monitor *m);
+static int modal_file_search_event(int fd, uint32_t mask, void *data);
+static void modal_truncate_to_width(const char *src, char *dst, size_t len, int max_px);
+static void shorten_path_display(const char *full, char *out, size_t len);
 static int desktop_entry_cmp_used(const void *a, const void *b);
-static int modal_match_name(const char *haystack, const char *needle);
+static int __attribute__((unused)) modal_match_name(const char *haystack, const char *needle);
 static void modal_update_results(Monitor *m);
 static void ensure_desktop_entries_loaded(void);
 static void rendercpu(StatusModule *module, int bar_height, const char *text);
@@ -4329,6 +4347,7 @@ modal_hide(Monitor *m)
 {
 	if (!m || !m->modal.tree)
 		return;
+	modal_file_search_stop(m);
 	m->modal.visible = 0;
 	wlr_scene_node_set_enabled(&m->modal.tree->node, 0);
 }
@@ -4350,7 +4369,7 @@ modal_show(const Arg *arg)
 	ModalOverlay *mo;
 	int mw, mh, w, h, x, y;
 	int min_w = 300, min_h = 200;
-	int max_w = 900, max_h = 700;
+	int max_w = 1400, max_h = 800;
 	int cycling = 0;
 
 	(void)arg;
@@ -4365,7 +4384,7 @@ modal_show(const Arg *arg)
 
 	mw = m->w.width > 0 ? m->w.width : m->m.width;
 	mh = m->w.height > 0 ? m->w.height : m->m.height;
-	w = mw > 0 ? (int)(mw * 0.6) : 800;
+	w = mw > 0 ? (int)(mw * 0.8) : 1100;
 	h = mh > 0 ? (int)(mh * 0.6) : 500;
 	if (w < min_w)
 		w = min_w;
@@ -4406,6 +4425,9 @@ modal_show(const Arg *arg)
 		mo->active_idx = 0;
 	else
 		mo->active_idx = 0;
+	modal_file_search_stop(m);
+	modal_file_search_clear_results(m);
+	mo->file_search_last[0] = '\0';
 	mo->search[mo->active_idx][0] = '\0';
 	mo->search_len[mo->active_idx] = 0;
 	mo->selected[mo->active_idx] = -1;
@@ -8511,6 +8533,560 @@ modal_ensure_selection_visible(Monitor *m)
 		mo->scroll[active] = 0;
 }
 
+static void
+modal_file_search_clear_results(Monitor *m)
+{
+	ModalOverlay *mo;
+
+	if (!m)
+		return;
+	mo = &m->modal;
+		mo->result_count[1] = 0;
+		for (int i = 0; i < (int)LENGTH(mo->results[1]); i++) {
+			mo->results[1][i][0] = '\0';
+			mo->result_entry_idx[1][i] = -1;
+			mo->file_results_name[i][0] = '\0';
+			mo->file_results_path[i][0] = '\0';
+			mo->file_results_mtime[i] = 0;
+	}
+	mo->selected[1] = -1;
+	mo->scroll[1] = 0;
+}
+
+static int
+modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
+{
+	ModalOverlay *mo;
+
+	if (!m)
+		return 0;
+	mo = &m->modal;
+
+	if (sym == XKB_KEY_Escape) {
+		modal_hide_all();
+		return 1;
+	}
+
+	if (sym == XKB_KEY_BackSpace && mo->search_len[mo->active_idx] > 0 && mods == 0) {
+		mo->search_len[mo->active_idx]--;
+		mo->search[mo->active_idx][mo->search_len[mo->active_idx]] = '\0';
+		return 1;
+	}
+	if (sym == XKB_KEY_Down && mo->result_count[mo->active_idx] > 0) {
+		int sel = mo->selected[mo->active_idx];
+		if (sel < 0)
+			sel = 0;
+		else if (sel + 1 < mo->result_count[mo->active_idx])
+			sel++;
+		else
+			sel = 0; /* wrap to top */
+		mo->selected[mo->active_idx] = sel;
+		modal_ensure_selection_visible(m);
+		return 1;
+	}
+	if (sym == XKB_KEY_Up && mo->result_count[mo->active_idx] > 0) {
+		int sel = mo->selected[mo->active_idx];
+		if (sel < 0)
+			sel = mo->result_count[mo->active_idx] - 1;
+		else if (sel > 0)
+			sel--;
+		else
+			sel = mo->result_count[mo->active_idx] - 1; /* wrap to bottom */
+		mo->selected[mo->active_idx] = sel;
+		modal_ensure_selection_visible(m);
+		return 1;
+	}
+	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+		int sel = mo->selected[mo->active_idx];
+		if (mo->active_idx == 0 && sel >= 0 && sel < mo->result_count[0]) {
+			int idx = mo->result_entry_idx[0][sel];
+			if (idx >= 0 && idx < desktop_entry_count) {
+				char cmd_str[512];
+				char *cmd[4] = { "sh", "-c", cmd_str, NULL };
+				desktop_entries[idx].used++;
+				snprintf(cmd_str, sizeof(cmd_str), "%s", desktop_entries[idx].exec[0]
+						? desktop_entries[idx].exec : desktop_entries[idx].name);
+				Arg arg = { .v = cmd };
+				spawn(&arg);
+				modal_hide_all();
+			}
+		} else if (mo->active_idx == 1 && sel >= 0 && sel < mo->result_count[1]) {
+			const char *path = mo->file_results_path[sel];
+			if (path && *path) {
+				char *cmd[] = { "xdg-open", (char *)path, NULL };
+				Arg arg = { .v = cmd };
+				spawn(&arg);
+				modal_hide_all();
+			}
+		}
+		return 1;
+	}
+	if (sym >= 0x20 && sym <= 0x7e && mods == 0) {
+		int len = mo->search_len[mo->active_idx];
+		if (len + 1 < (int)sizeof(mo->search[0])) {
+			mo->search[mo->active_idx][len] = (char)sym;
+			mo->search[mo->active_idx][len + 1] = '\0';
+			mo->search_len[mo->active_idx] = len + 1;
+		}
+		return 1;
+	}
+
+	return 0;
+}
+
+static void
+modal_file_search_stop(Monitor *m)
+{
+	ModalOverlay *mo;
+
+	if (!m)
+		return;
+	mo = &m->modal;
+
+	if (mo->file_search_event) {
+		wl_event_source_remove(mo->file_search_event);
+		mo->file_search_event = NULL;
+	}
+	if (mo->file_search_fd >= 0) {
+		close(mo->file_search_fd);
+		mo->file_search_fd = -1;
+	}
+	if (mo->file_search_pid > 0) {
+		kill(mo->file_search_pid, SIGTERM);
+		waitpid(mo->file_search_pid, NULL, WNOHANG);
+		mo->file_search_pid = -1;
+	}
+	mo->file_search_len = 0;
+	mo->file_search_buf[0] = '\0';
+}
+
+static void
+shorten_path_display(const char *full, char *out, size_t len)
+{
+	const char *home = getenv("HOME");
+	const char *p = full;
+	size_t flen;
+
+	if (!out || len == 0)
+		return;
+	out[0] = '\0';
+	if (!p)
+		return;
+
+	if (home && *home && strncmp(full, home, strlen(home)) == 0 && strlen(home) < strlen(full)) {
+		static char tmp[PATH_MAX];
+		size_t hlen = strlen(home);
+		size_t rem = strlen(full) - hlen;
+		if (hlen + 1 + rem < sizeof(tmp)) {
+			tmp[0] = '~';
+			memcpy(tmp + 1, full + hlen, rem + 1);
+			p = tmp;
+		}
+	}
+
+	flen = strlen(p);
+	if (flen < len) {
+		snprintf(out, len, "%s", p);
+		return;
+	}
+	if (len < 5) {
+		snprintf(out, len, "%s", p + (flen - (len - 1)));
+		return;
+	}
+
+	size_t keep = (len - 4) / 2;
+	const char *tail = p + flen - (len - keep - 4);
+	if (tail < p)
+		tail = p;
+	snprintf(out, len, "%.*s...%s", (int)keep, p, tail);
+}
+
+static void
+modal_file_search_add_line(Monitor *m, const char *line)
+{
+	ModalOverlay *mo;
+	int idx;
+	const char *tab1;
+	const char *tab2;
+	size_t name_len, path_len;
+	char name[128];
+	char path[PATH_MAX];
+	char dir[PATH_MAX];
+	char when[32] = {0};
+	char path_disp[128] = {0};
+	double epoch = 0.0;
+	time_t t;
+	struct tm tm;
+
+	if (!m || !line || !*line)
+		return;
+	mo = &m->modal;
+	if (mo->result_count[1] >= (int)LENGTH(mo->results[1]))
+		return;
+
+	tab1 = strchr(line, '\t');
+	if (!tab1)
+		return;
+	tab2 = strchr(tab1 + 1, '\t');
+	if (!tab2)
+		return;
+
+	name_len = (size_t)(tab1 - line);
+	path_len = (size_t)(tab2 - (tab1 + 1));
+	if (name_len == 0 || path_len == 0)
+		return;
+	if (name_len >= sizeof(name))
+		name_len = sizeof(name) - 1;
+	if (path_len >= sizeof(path))
+		path_len = sizeof(path) - 1;
+
+	snprintf(name, sizeof(name), "%.*s", (int)name_len, line);
+	snprintf(path, sizeof(path), "%.*s", (int)path_len, tab1 + 1);
+	snprintf(dir, sizeof(dir), "%s", path);
+	{
+		char *slash = strrchr(dir, '/');
+		if (slash && slash != dir) {
+			*slash = '\0';
+		} else if (slash) {
+			*(slash + 1) = '\0';
+		} else {
+			snprintf(dir, sizeof(dir), ".");
+		}
+	}
+	epoch = strtod(tab2 + 1, NULL);
+	t = (time_t)epoch;
+	if (localtime_r(&t, &tm))
+		strftime(when, sizeof(when), "%Y-%m-%d %H:%M", &tm);
+	shorten_path_display(dir, path_disp, sizeof(path_disp));
+
+	idx = mo->result_count[1];
+	snprintf(mo->results[1][idx], sizeof(mo->results[1][idx]),
+			"%s  %s", name, path_disp[0] ? path_disp : dir);
+	snprintf(mo->file_results_name[idx], sizeof(mo->file_results_name[idx]), "%s", name);
+	snprintf(mo->file_results_path[idx], sizeof(mo->file_results_path[idx]), "%s", path);
+	mo->file_results_mtime[idx] = t;
+	mo->result_entry_idx[1][idx] = -1;
+	mo->result_count[1]++;
+	if (mo->selected[1] < 0)
+		mo->selected[1] = idx;
+	if (mo->result_count[1] >= (int)LENGTH(mo->results[1]))
+		modal_file_search_stop(m);
+}
+
+static void
+modal_file_search_flush_buffer(Monitor *m)
+{
+	ModalOverlay *mo;
+	size_t start = 0;
+
+	if (!m)
+		return;
+	mo = &m->modal;
+	for (size_t i = 0; i < mo->file_search_len; i++) {
+		if (mo->file_search_buf[i] == '\n') {
+			mo->file_search_buf[i] = '\0';
+			modal_file_search_add_line(m, mo->file_search_buf + start);
+			if (mo->result_count[1] >= (int)LENGTH(mo->results[1])) {
+				modal_file_search_stop(m);
+				start = mo->file_search_len;
+				break;
+			}
+			start = i + 1;
+		}
+	}
+
+	if (start > 0) {
+		size_t remaining = mo->file_search_len - start;
+		memmove(mo->file_search_buf, mo->file_search_buf + start, remaining);
+		mo->file_search_len = remaining;
+		mo->file_search_buf[mo->file_search_len] = '\0';
+	} else if (mo->file_search_len >= sizeof(mo->file_search_buf) - 1) {
+		/* avoid getting stuck with an overfull buffer if no newline arrives */
+		mo->file_search_len = 0;
+		mo->file_search_buf[0] = '\0';
+	}
+}
+
+static void
+modal_file_search_start(Monitor *m)
+{
+	ModalOverlay *mo;
+	const char *home_env;
+	char home[PATH_MAX];
+	const char *roots[128]; /* search roots; deduped */
+	char root_bufs[128][PATH_MAX];
+	int root_count = 0;
+	char pattern[MODAL_RESULT_LEN];
+	int pipefd[2] = {-1, -1};
+	struct stat st = {0};
+	pid_t pid;
+	int nlen;
+
+	if (!m)
+		return;
+	mo = &m->modal;
+
+	modal_file_search_stop(m);
+	modal_file_search_clear_results(m);
+	snprintf(mo->file_search_last, sizeof(mo->file_search_last), "%s", mo->search[1]);
+
+	if (mo->search_len[1] <= 0)
+		return;
+
+	/* helper to add unique, existing directories */
+#define ADD_ROOT(PATHSTR) \
+	do { \
+		if ((int)LENGTH(roots) > root_count && (PATHSTR) && *(PATHSTR) && stat((PATHSTR), &st) == 0 && S_ISDIR(st.st_mode)) { \
+			int exists = 0; \
+			for (int _i = 0; _i < root_count; _i++) { \
+				if (strcmp(roots[_i], (PATHSTR)) == 0) { exists = 1; break; } \
+			} \
+			if (!exists) { \
+				snprintf(root_bufs[root_count], sizeof(root_bufs[0]), "%s", (PATHSTR)); \
+				roots[root_count++] = root_bufs[root_count - 1]; \
+			} \
+		} \
+	} while (0)
+
+	home_env = getenv("HOME");
+	if (home_env && *home_env &&
+			snprintf(home, sizeof(home), "%s", home_env) < (int)sizeof(home))
+		ADD_ROOT(home);
+	else {
+		struct passwd *pw = getpwuid(getuid());
+		if (pw && pw->pw_dir && *pw->pw_dir &&
+				snprintf(home, sizeof(home), "%s", pw->pw_dir) < (int)sizeof(home))
+			ADD_ROOT(home);
+	}
+	/* add mounted nfs/smb exports from mountinfo */
+	{
+		FILE *fp = fopen("/proc/self/mountinfo", "r");
+		char line[1024];
+		if (fp) {
+			while (fgets(line, sizeof(line), fp)) {
+				char mnt[PATH_MAX] = {0};
+				char fstype[64] = {0};
+				char *p = strchr(line, ' ');
+				for (int i = 0; p && i < 3; i++)
+					p = strchr(p + 1, ' ');
+				if (p) {
+					p++;
+					char *sep = strchr(p, ' ');
+					if (sep && (size_t)(sep - p) < sizeof(mnt)) {
+						memcpy(mnt, p, (size_t)(sep - p));
+						mnt[sep - p] = '\0';
+						p = strchr(sep + 1, ' ');
+						if (p) {
+							p++;
+							char *fs = strchr(p, ' ');
+							if (fs && (size_t)(fs - p) < sizeof(fstype)) {
+								memcpy(fstype, p, (size_t)(fs - p));
+								fstype[fs - p] = '\0';
+							}
+						}
+					}
+				}
+				if (fstype[0]) {
+					if ((strncmp(fstype, "nfs", 3) == 0 ||
+							strncmp(fstype, "cifs", 4) == 0 ||
+							strncmp(fstype, "smb", 3) == 0) && mnt[0])
+						ADD_ROOT(mnt);
+				}
+			}
+			fclose(fp);
+		}
+	}
+#ifdef __linux__
+	/* fallback to /proc/mounts if mountinfo unavailable */
+	if (root_count == 0) {
+		FILE *fp = fopen("/proc/mounts", "r");
+		char line[1024];
+		if (fp) {
+			while (fgets(line, sizeof(line), fp)) {
+				char src[256], mnt[PATH_MAX], fstype[64];
+				src[0] = mnt[0] = fstype[0] = '\0';
+				if (sscanf(line, "%255s %1023s %63s", src, mnt, fstype) == 3) {
+					if ((strncmp(fstype, "nfs", 3) == 0 ||
+							strncmp(fstype, "cifs", 4) == 0 ||
+							strncmp(fstype, "smb", 3) == 0) && mnt[0])
+						ADD_ROOT(mnt);
+				}
+			}
+			fclose(fp);
+		}
+	}
+#endif
+
+		/* common extra roots on NixOS/desktops if they exist */
+		ADD_ROOT("/run/media");
+		ADD_ROOT("/run/mounts");
+		ADD_ROOT("/mnt");
+		ADD_ROOT("/media");
+
+		if (root_count == 0)
+			ADD_ROOT("/");
+	#undef ADD_ROOT
+
+	nlen = mo->search_len[1];
+	if (nlen >= (int)sizeof(pattern) - 3)
+		nlen = (int)sizeof(pattern) - 4;
+	pattern[0] = '*';
+	memcpy(pattern + 1, mo->search[1], (size_t)nlen);
+	pattern[nlen + 1] = '*';
+	pattern[nlen + 2] = '\0';
+
+	if (pipe(pipefd) != 0)
+		return;
+	/* keep read FD out of launched apps and avoid blocking reads */
+	fcntl(pipefd[0], F_SETFD, fcntl(pipefd[0], F_GETFD) | FD_CLOEXEC);
+	fcntl(pipefd[0], F_SETFL, fcntl(pipefd[0], F_GETFL) | O_NONBLOCK);
+
+	pid = fork();
+	if (pid == 0) {
+		char *argv[256];
+		int argc = 0;
+
+		close(pipefd[0]);
+		dup2(pipefd[1], STDOUT_FILENO);
+		dup2(pipefd[1], STDERR_FILENO);
+		close(pipefd[1]);
+		setsid();
+
+		argv[argc++] = "find";
+		for (int i = 0; i < root_count && argc < (int)LENGTH(argv) - 20; i++) {
+			argv[argc++] = (char *)roots[i];
+		}
+		argv[argc++] = "(";
+		argv[argc++] = "-path";
+		argv[argc++] = "*/.local/*";
+		argv[argc++] = "-o";
+		argv[argc++] = "-path";
+		argv[argc++] = "*/.cache/*";
+		argv[argc++] = ")";
+		argv[argc++] = "-prune";
+		argv[argc++] = "-o";
+		argv[argc++] = "-type";
+		argv[argc++] = "f";
+		argv[argc++] = "-iname";
+		argv[argc++] = pattern;
+		argv[argc++] = "-printf";
+		argv[argc++] = "%f\t%p\t%T@\\n";
+		argv[argc] = NULL;
+		execvp("find", argv);
+		_exit(127);
+	} else if (pid < 0) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return;
+	}
+
+	close(pipefd[1]);
+	mo->file_search_pid = pid;
+	mo->file_search_fd = pipefd[0];
+	fcntl(mo->file_search_fd, F_SETFL, fcntl(mo->file_search_fd, F_GETFL) | O_NONBLOCK);
+	mo->file_search_len = 0;
+	mo->file_search_buf[0] = '\0';
+	mo->file_search_event = wl_event_loop_add_fd(event_loop, mo->file_search_fd,
+			WL_EVENT_READABLE | WL_EVENT_HANGUP, modal_file_search_event, m);
+	if (!mo->file_search_event)
+		modal_file_search_stop(m);
+}
+
+static int
+modal_file_search_event(int fd, uint32_t mask, void *data)
+{
+	Monitor *m = data;
+	ModalOverlay *mo;
+	char buf[512];
+	ssize_t n;
+
+	if (!m)
+		return 0;
+	(void)mask;
+	mo = &m->modal;
+	if (fd != mo->file_search_fd)
+		return 0;
+
+	for (;;) {
+		n = read(fd, buf, sizeof(buf));
+		if (n > 0) {
+			if (mo->file_search_len >= sizeof(mo->file_search_buf) - 1)
+				modal_file_search_flush_buffer(m);
+			if (mo->file_search_len < sizeof(mo->file_search_buf) - 1) {
+				size_t avail = sizeof(mo->file_search_buf) - 1 - mo->file_search_len;
+				if ((size_t)n > avail)
+					n = (ssize_t)avail;
+				memcpy(mo->file_search_buf + mo->file_search_len, buf, (size_t)n);
+				mo->file_search_len += (size_t)n;
+				mo->file_search_buf[mo->file_search_len] = '\0';
+			}
+			modal_file_search_flush_buffer(m);
+			if (mo->file_search_fd < 0 || mo->file_search_pid <= 0)
+				break;
+		} else if (n == 0) {
+			modal_file_search_flush_buffer(m);
+			if (mo->file_search_len > 0 && mo->file_search_len < sizeof(mo->file_search_buf)) {
+				mo->file_search_buf[mo->file_search_len] = '\0';
+				modal_file_search_add_line(m, mo->file_search_buf);
+				mo->file_search_len = 0;
+				mo->file_search_buf[0] = '\0';
+			}
+			modal_file_search_stop(m);
+			break;
+		} else {
+			if (errno == EAGAIN || errno == EWOULDBLOCK)
+				break;
+			modal_file_search_stop(m);
+			break;
+		}
+	}
+
+	if (mo->result_count[1] > 0 && mo->selected[1] < 0)
+		mo->selected[1] = 0;
+	if (mo->active_idx == 1 && mo->result_count[1] > 0)
+		modal_ensure_selection_visible(m);
+	if (m->modal.visible)
+		modal_render(m);
+	return 0;
+}
+
+static void
+modal_truncate_to_width(const char *src, char *dst, size_t len, int max_px)
+{
+	size_t n;
+
+	if (!dst || len == 0) {
+		return;
+	}
+	dst[0] = '\0';
+	if (!src || !*src || max_px <= 0) {
+		return;
+	}
+
+	snprintf(dst, len, "%s", src);
+	if (status_text_width(dst) <= max_px)
+		return;
+
+	n = strlen(dst);
+	if (len < 4) {
+		dst[0] = '\0';
+		return;
+	}
+
+	while (n > 0 && status_text_width(dst) > max_px) {
+		n--;
+		if (n < 3) {
+			dst[0] = '\0';
+			return;
+		}
+		dst[n] = '\0';
+	}
+
+	if (strlen(dst) + 3 < len) {
+		strncat(dst, "...", len - strlen(dst) - 1);
+	}
+}
+
 static int
 desktop_entry_cmp_used(const void *a, const void *b)
 {
@@ -8604,8 +9180,6 @@ load_desktop_dir_rec(const char *dir, int depth)
 
 		if (desktop_entry_count >= (int)LENGTH(desktop_entries))
 			break;
-		if (!ent->d_name)
-			continue;
 
 		if (ent->d_type == DT_DIR) {
 			isdir = 1;
@@ -8714,145 +9288,140 @@ ensure_desktop_entries_loaded(void)
 	if (desktop_entries_loaded)
 		return;
 
-		{
-			char appdirs[128][PATH_MAX];
-			int appdir_count = 0;
-			const char *home = getenv("HOME");
-			const char *user = getenv("USER");
-			const char *xdg_data_home = getenv("XDG_DATA_HOME");
-			const char *defaults[] = {
-				"/usr/share/applications",
-				"/usr/local/share/applications",
-				"/var/lib/flatpak/exports/share/applications",
-				"/opt/share/applications",
-				"/run/current-system/sw/share/applications",
-				"/nix/var/nix/profiles/system/sw/share/applications",
-				"/nix/profile/share/applications",
-				"/nix/var/nix/profiles/default/share/applications",
-				NULL
-			};
-			char buf[PATH_MAX];
-			char xdg_buf[4096] = {0};
-			char *saveptr = NULL;
-		const char *xdg_data_dirs;
+	char appdirs[128][PATH_MAX];
+	int appdir_count = 0;
+	const char *home = getenv("HOME");
+	const char *user = getenv("USER");
+	const char *xdg_data_home = getenv("XDG_DATA_HOME");
+	const char *defaults[] = {
+		"/usr/share/applications",
+		"/usr/local/share/applications",
+		"/var/lib/flatpak/exports/share/applications",
+		"/opt/share/applications",
+		"/run/current-system/sw/share/applications",
+		"/nix/var/nix/profiles/system/sw/share/applications",
+		"/nix/profile/share/applications",
+		"/nix/var/nix/profiles/default/share/applications",
+		NULL
+	};
+	char buf[PATH_MAX];
+	char xdg_buf[4096] = {0};
+	char *saveptr = NULL;
+	const char *xdg_data_dirs;
 
-		memset(appdirs, 0, sizeof(appdirs));
+	memset(appdirs, 0, sizeof(appdirs));
 
-			for (size_t i = 0; defaults[i]; i++) {
-				if (appdir_count >= (int)LENGTH(appdirs))
-					break;
-				if (appdir_exists(appdirs, appdir_count, defaults[i]))
-					continue;
-				snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", defaults[i]);
-			}
-
-			if (xdg_data_home && *xdg_data_home) {
-				if (appdir_count < (int)LENGTH(appdirs) &&
-						snprintf(buf, sizeof(buf), "%s/applications", xdg_data_home) < (int)sizeof(buf) &&
-						!appdir_exists(appdirs, appdir_count, buf))
-					snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
-			}
-
-			if (home) {
-				if (appdir_count < (int)LENGTH(appdirs) &&
-						snprintf(buf, sizeof(buf), "%s/.local/share/applications", home) < (int)sizeof(buf) &&
-						!appdir_exists(appdirs, appdir_count, buf))
-					snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
-				if (appdir_count < (int)LENGTH(appdirs) &&
-						snprintf(buf, sizeof(buf), "%s/.local/share/flatpak/exports/share/applications", home) < (int)sizeof(buf) &&
-						!appdir_exists(appdirs, appdir_count, buf))
-					snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
-				if (appdir_count < (int)LENGTH(appdirs) &&
-						snprintf(buf, sizeof(buf), "%s/.nix-profile/share/applications", home) < (int)sizeof(buf) &&
-						!appdir_exists(appdirs, appdir_count, buf))
-					snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
-				if (appdir_count < (int)LENGTH(appdirs) &&
-						snprintf(buf, sizeof(buf), "%s/.local/state/nix/profiles/profile/share/applications", home) < (int)sizeof(buf) &&
-						!appdir_exists(appdirs, appdir_count, buf))
-					snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
-				if (appdir_count < (int)LENGTH(appdirs) &&
-						snprintf(buf, sizeof(buf), "%s/.local/state/nix/profiles/default/share/applications", home) < (int)sizeof(buf) &&
-						!appdir_exists(appdirs, appdir_count, buf))
-					snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
-				if (appdir_count < (int)LENGTH(appdirs) &&
-						snprintf(buf, sizeof(buf), "%s/.local/state/nix/profiles/home-manager/share/applications", home) < (int)sizeof(buf) &&
-						!appdir_exists(appdirs, appdir_count, buf))
-					snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
-			}
-
-			if (user && appdir_count < (int)LENGTH(appdirs)) {
-				if (snprintf(buf, sizeof(buf), "/etc/profiles/per-user/%s/share/applications", user) < (int)sizeof(buf) &&
-						!appdir_exists(appdirs, appdir_count, buf))
-					snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
-				if (appdir_count < (int)LENGTH(appdirs) &&
-						snprintf(buf, sizeof(buf), "/nix/var/nix/profiles/per-user/%s/profile/share/applications", user) < (int)sizeof(buf) &&
-						!appdir_exists(appdirs, appdir_count, buf))
-					snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
-				if (appdir_count < (int)LENGTH(appdirs) &&
-						snprintf(buf, sizeof(buf), "/nix/var/nix/profiles/per-user/%s/home-manager/share/applications", user) < (int)sizeof(buf) &&
-						!appdir_exists(appdirs, appdir_count, buf))
-					snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
-				if (appdir_count < (int)LENGTH(appdirs) &&
-						snprintf(buf, sizeof(buf), "/nix/var/nix/profiles/per-user/%s/sw/share/applications", user) < (int)sizeof(buf) &&
-						!appdir_exists(appdirs, appdir_count, buf))
-					snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
-			}
-
-		xdg_data_dirs = getenv("XDG_DATA_DIRS");
-		if (!xdg_data_dirs || !*xdg_data_dirs)
-			xdg_data_dirs = "/usr/local/share:/usr/share";
-		snprintf(xdg_buf, sizeof(xdg_buf), "%s", xdg_data_dirs);
-		for (char *tok = strtok_r(xdg_buf, ":", &saveptr); tok; tok = strtok_r(NULL, ":", &saveptr)) {
-			if (!*tok || appdir_count >= (int)LENGTH(appdirs))
-				continue;
-			if (snprintf(buf, sizeof(buf), "%s/applications", tok) >= (int)sizeof(buf))
-				continue;
-			if (appdir_exists(appdirs, appdir_count, buf))
-				continue;
-			snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
-			if (appdir_count >= (int)LENGTH(appdirs))
-				break;
-		}
-
-			for (int i = 0; i < appdir_count && desktop_entry_count < (int)LENGTH(desktop_entries); i++)
-				load_desktop_dir(appdirs[i]);
-
-			/* also scan nix store directly for stray .desktop files */
-			if (desktop_entry_count < (int)LENGTH(desktop_entries)) {
-				const char *store_root = "/nix/store";
-				DIR *sd = opendir(store_root);
-				struct dirent *ent;
-				if (sd) {
-					while ((ent = readdir(sd))) {
-						char path[PATH_MAX];
-						struct stat st = {0};
-
-						if (desktop_entry_count >= (int)LENGTH(desktop_entries))
-							break;
-						if (!ent->d_name || ent->d_name[0] == '.')
-							continue;
-						if (snprintf(path, sizeof(path), "%s/%s/share/applications", store_root, ent->d_name) >= (int)sizeof(path))
-							continue;
-						if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode))
-							continue;
-						load_desktop_dir(path);
-					}
-					closedir(sd);
-				}
-			}
-		}
-
-		desktop_entries_loaded = 1;
+	for (size_t i = 0; defaults[i]; i++) {
+		if (appdir_count >= (int)LENGTH(appdirs))
+			break;
+		if (appdir_exists(appdirs, appdir_count, defaults[i]))
+			continue;
+		snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", defaults[i]);
 	}
+
+	if (xdg_data_home && *xdg_data_home) {
+		if (appdir_count < (int)LENGTH(appdirs) &&
+				snprintf(buf, sizeof(buf), "%s/applications", xdg_data_home) < (int)sizeof(buf) &&
+				!appdir_exists(appdirs, appdir_count, buf))
+			snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
+	}
+
+	if (home) {
+		if (appdir_count < (int)LENGTH(appdirs) &&
+				snprintf(buf, sizeof(buf), "%s/.local/share/applications", home) < (int)sizeof(buf) &&
+				!appdir_exists(appdirs, appdir_count, buf))
+			snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
+		if (appdir_count < (int)LENGTH(appdirs) &&
+				snprintf(buf, sizeof(buf), "%s/.local/share/flatpak/exports/share/applications", home) < (int)sizeof(buf) &&
+				!appdir_exists(appdirs, appdir_count, buf))
+			snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
+		if (appdir_count < (int)LENGTH(appdirs) &&
+				snprintf(buf, sizeof(buf), "%s/.nix-profile/share/applications", home) < (int)sizeof(buf) &&
+				!appdir_exists(appdirs, appdir_count, buf))
+			snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
+		if (appdir_count < (int)LENGTH(appdirs) &&
+				snprintf(buf, sizeof(buf), "%s/.local/state/nix/profiles/profile/share/applications", home) < (int)sizeof(buf) &&
+				!appdir_exists(appdirs, appdir_count, buf))
+			snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
+		if (appdir_count < (int)LENGTH(appdirs) &&
+				snprintf(buf, sizeof(buf), "%s/.local/state/nix/profiles/default/share/applications", home) < (int)sizeof(buf) &&
+				!appdir_exists(appdirs, appdir_count, buf))
+			snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
+		if (appdir_count < (int)LENGTH(appdirs) &&
+				snprintf(buf, sizeof(buf), "%s/.local/state/nix/profiles/home-manager/share/applications", home) < (int)sizeof(buf) &&
+				!appdir_exists(appdirs, appdir_count, buf))
+			snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
+	}
+
+	if (user && appdir_count < (int)LENGTH(appdirs)) {
+		if (snprintf(buf, sizeof(buf), "/etc/profiles/per-user/%s/share/applications", user) < (int)sizeof(buf) &&
+				!appdir_exists(appdirs, appdir_count, buf))
+			snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
+		if (appdir_count < (int)LENGTH(appdirs) &&
+				snprintf(buf, sizeof(buf), "/nix/var/nix/profiles/per-user/%s/profile/share/applications", user) < (int)sizeof(buf) &&
+				!appdir_exists(appdirs, appdir_count, buf))
+			snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
+		if (appdir_count < (int)LENGTH(appdirs) &&
+				snprintf(buf, sizeof(buf), "/nix/var/nix/profiles/per-user/%s/home-manager/share/applications", user) < (int)sizeof(buf) &&
+				!appdir_exists(appdirs, appdir_count, buf))
+			snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
+		if (appdir_count < (int)LENGTH(appdirs) &&
+				snprintf(buf, sizeof(buf), "/nix/var/nix/profiles/per-user/%s/sw/share/applications", user) < (int)sizeof(buf) &&
+				!appdir_exists(appdirs, appdir_count, buf))
+			snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
+	}
+
+	xdg_data_dirs = getenv("XDG_DATA_DIRS");
+	if (!xdg_data_dirs || !*xdg_data_dirs)
+		xdg_data_dirs = "/usr/local/share:/usr/share";
+	snprintf(xdg_buf, sizeof(xdg_buf), "%s", xdg_data_dirs);
+	for (char *tok = strtok_r(xdg_buf, ":", &saveptr); tok; tok = strtok_r(NULL, ":", &saveptr)) {
+		if (!*tok || appdir_count >= (int)LENGTH(appdirs))
+			continue;
+		if (snprintf(buf, sizeof(buf), "%s/applications", tok) >= (int)sizeof(buf))
+			continue;
+		if (appdir_exists(appdirs, appdir_count, buf))
+			continue;
+		snprintf(appdirs[appdir_count++], sizeof(appdirs[0]), "%s", buf);
+		if (appdir_count >= (int)LENGTH(appdirs))
+			break;
+	}
+
+	for (int i = 0; i < appdir_count && desktop_entry_count < (int)LENGTH(desktop_entries); i++)
+		load_desktop_dir(appdirs[i]);
+
+	/* also scan nix store directly for stray .desktop files */
+	if (desktop_entry_count < (int)LENGTH(desktop_entries)) {
+		const char *store_root = "/nix/store";
+		DIR *sd = opendir(store_root);
+		struct dirent *ent;
+		if (sd) {
+			while ((ent = readdir(sd))) {
+				char path[PATH_MAX];
+				struct stat st = {0};
+
+				if (desktop_entry_count >= (int)LENGTH(desktop_entries))
+					break;
+				if (ent->d_name[0] == '.')
+					continue;
+				if (snprintf(path, sizeof(path), "%s/%s/share/applications", store_root, ent->d_name) >= (int)sizeof(path))
+					continue;
+				if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode))
+					continue;
+				load_desktop_dir(path);
+			}
+			closedir(sd);
+		}
+	}
+
+	desktop_entries_loaded = 1;
+}
 
 static void
 modal_update_results(Monitor *m)
 {
 	ModalOverlay *mo;
 	int active;
-	int prev_entry = -1;
-	int order[LENGTH(desktop_entries)];
-	int order_count;
 
 	if (!m)
 		return;
@@ -8861,33 +9430,53 @@ modal_update_results(Monitor *m)
 		mo->active_idx = 0;
 	active = mo->active_idx;
 
-	if (mo->selected[active] >= 0 && mo->selected[active] < mo->result_count[active])
-		prev_entry = mo->result_entry_idx[active][mo->selected[active]];
+	if (active != 1 && mo->file_search_pid > 0)
+		modal_file_search_stop(m);
 
-	mo->result_count[active] = 0;
-	for (int i = 0; i < (int)LENGTH(mo->results[active]); i++)
-		mo->results[active][i][0] = '\0';
-	for (int i = 0; i < (int)LENGTH(mo->result_entry_idx[active]); i++)
-		mo->result_entry_idx[active][i] = -1;
-
-	if (mo->active_idx != 0) {
-		mo->selected[mo->active_idx] = -1;
-		mo->scroll[mo->active_idx] = 0;
+	if (active == 1) {
+		if (strncmp(mo->search[1], mo->file_search_last, sizeof(mo->file_search_last)) != 0)
+			modal_file_search_start(m);
+		if (mo->result_count[1] > 0) {
+			if (mo->selected[1] < 0)
+				mo->selected[1] = 0;
+			modal_ensure_selection_visible(m);
+		} else {
+			mo->selected[1] = -1;
+			mo->scroll[1] = 0;
+		}
 		return;
 	}
 
-	ensure_desktop_entries_loaded();
+	if (active != 0) {
+		mo->selected[active] = -1;
+		mo->scroll[active] = 0;
+		return;
+	}
+
 	{
-		int i;
+		int prev_entry = -1;
+		int order[LENGTH(desktop_entries)];
+		int order_count;
+
+		if (mo->selected[0] >= 0 && mo->selected[0] < mo->result_count[0])
+			prev_entry = mo->result_entry_idx[0][mo->selected[0]];
+
+		mo->result_count[0] = 0;
+		for (int i = 0; i < (int)LENGTH(mo->results[0]); i++)
+			mo->results[0][i][0] = '\0';
+		for (int i = 0; i < (int)LENGTH(mo->result_entry_idx[0]); i++)
+			mo->result_entry_idx[0][i] = -1;
+
+		ensure_desktop_entries_loaded();
 		order_count = desktop_entry_count;
 		if (order_count > (int)LENGTH(order))
 			order_count = (int)LENGTH(order);
-		for (i = 0; i < order_count; i++)
+		for (int i = 0; i < order_count; i++)
 			order[i] = i;
 		qsort(order, order_count, sizeof(order[0]), desktop_entry_cmp_used);
 
 		if (mo->search_len[0] <= 0) {
-			for (i = 0; i < order_count && mo->result_count[0] < (int)LENGTH(mo->results[0]); i++) {
+			for (int i = 0; i < order_count && mo->result_count[0] < (int)LENGTH(mo->results[0]); i++) {
 				int idx = order[i];
 				snprintf(mo->results[0][mo->result_count[0]],
 						sizeof(mo->results[0][mo->result_count[0]]),
@@ -8905,7 +9494,7 @@ modal_update_results(Monitor *m)
 			needle[nlen] = '\0';
 
 			/* exact matches first */
-			for (i = 0; i < order_count && mo->result_count[0] < (int)LENGTH(mo->results[0]); i++) {
+			for (int i = 0; i < order_count && mo->result_count[0] < (int)LENGTH(mo->results[0]); i++) {
 				int idx = order[i];
 				if (strcmp(desktop_entries[idx].name_lower, needle) == 0) {
 					snprintf(mo->results[0][mo->result_count[0]],
@@ -8916,7 +9505,7 @@ modal_update_results(Monitor *m)
 				}
 			}
 			/* then prefix matches */
-			for (i = 0; i < order_count && mo->result_count[0] < (int)LENGTH(mo->results[0]); i++) {
+			for (int i = 0; i < order_count && mo->result_count[0] < (int)LENGTH(mo->results[0]); i++) {
 				int idx = order[i];
 				if (strncmp(desktop_entries[idx].name_lower, needle, (size_t)nlen) == 0 &&
 						strcmp(desktop_entries[idx].name_lower, needle) != 0) {
@@ -8928,7 +9517,7 @@ modal_update_results(Monitor *m)
 				}
 			}
 			/* finally substring matches */
-			for (i = 0; i < order_count && mo->result_count[0] < (int)LENGTH(mo->results[0]); i++) {
+			for (int i = 0; i < order_count && mo->result_count[0] < (int)LENGTH(mo->results[0]); i++) {
 				int idx = order[i];
 				if (strstr(desktop_entries[idx].name_lower, needle) &&
 						strncmp(desktop_entries[idx].name_lower, needle, (size_t)nlen) != 0) {
@@ -8960,11 +9549,11 @@ modal_update_results(Monitor *m)
 		}
 	}
 
-	if (mo->result_count[mo->active_idx] > 0)
+	if (mo->result_count[0] > 0)
 		modal_ensure_selection_visible(m);
 	else {
-		mo->selected[mo->active_idx] = -1;
-		mo->scroll[mo->active_idx] = 0;
+		mo->selected[0] = -1;
+		mo->scroll[0] = 0;
 	}
 }
 
@@ -9079,35 +9668,93 @@ modal_render(Monitor *m)
 		}
 	}
 
-	/* results list for App Launcher */
-	if (mo->active_idx == 0 && mo->result_count[0] > 0) {
+	/* results list */
+	if (mo->active_idx >= 0 && mo->active_idx < 3 && mo->result_count[mo->active_idx] > 0) {
 		int line_y = btn_h + pad + field_h + pad;
 		int max_lines = modal_max_visible_lines(m);
-		int start = mo->scroll[0];
+		int start = mo->scroll[mo->active_idx];
 		int max_start;
+		int col_name_w = 0, col_path_w = 0, col_gap = 12;
 
 		if (max_lines <= 0)
 			return;
-		max_start = mo->result_count[0] - max_lines;
+		max_start = mo->result_count[mo->active_idx] - max_lines;
 		if (max_start < 0)
 			max_start = 0;
 		if (start < 0)
 			start = 0;
 		if (start > max_start)
 			start = max_start;
-		mo->scroll[0] = start;
+		mo->scroll[mo->active_idx] = start;
 
-		for (int i = 0; i < max_lines && (start + i) < mo->result_count[0]; i++) {
+		if (mo->active_idx == 1) {
+			int total_w = mo->width - pad * 2 - 4;
+			int name_min = 80;
+			int path_min = 120;
+			col_name_w = total_w / 2;
+			if (col_name_w < name_min)
+				col_name_w = name_min;
+			col_path_w = total_w - col_name_w - col_gap;
+			if (col_path_w < path_min) {
+				col_path_w = path_min;
+				col_name_w = total_w - col_gap - col_path_w;
+			}
+			if (col_name_w < name_min)
+				col_name_w = name_min;
+		}
+
+		for (int i = 0; i < max_lines && (start + i) < mo->result_count[mo->active_idx]; i++) {
 			int idx = start + i;
 			struct wlr_scene_tree *row = wlr_scene_tree_create(mo->tree);
 			StatusModule mod = {0};
+			char text_buf[MODAL_RESULT_LEN];
+			int max_px = mo->width - pad * 2 - 8;
+			char name_buf[128];
+			char path_buf[128];
+			char short_path[128];
+			const char *name = mo->file_results_name[idx];
+			const char *path = mo->file_results_path[idx];
+			char path_dir[PATH_MAX];
+			int path_w = 0;
+			int path_x = 0;
+			char *slash = NULL;
+
 			if (!row)
 				continue;
 			wlr_scene_node_set_position(&row->node, 0, line_y + i * line_h);
 			mod.tree = row;
-			if (mo->selected[0] == idx)
+			if (mo->selected[mo->active_idx] == idx)
 				drawrect(row, pad - 2, 0, mo->width - pad * 2 + 4, line_h, statusbar_tag_active_bg);
-			tray_render_label(&mod, mo->results[0][idx], pad, line_h, statusbar_fg);
+
+			if (mo->active_idx == 1) {
+				if (path) {
+					snprintf(path_dir, sizeof(path_dir), "%s", path);
+					slash = strrchr(path_dir, '/');
+					if (slash && slash != path_dir)
+						*slash = '\0';
+					else if (slash)
+						*(slash + 1) = '\0';
+				} else {
+					snprintf(path_dir, sizeof(path_dir), ".");
+				}
+				shorten_path_display(path_dir, short_path, sizeof(short_path));
+				modal_truncate_to_width(name ? name : "", name_buf, sizeof(name_buf), col_name_w);
+				modal_truncate_to_width(short_path, path_buf, sizeof(path_buf), col_path_w);
+				path_w = status_text_width(path_buf);
+				path_x = mo->width - pad - path_w;
+				if (path_x < pad + 10)
+					path_x = pad + 10;
+				tray_render_label(&mod, name_buf[0] ? name_buf : "--", pad, line_h, statusbar_fg);
+				tray_render_label(&mod, path_buf[0] ? path_buf : "--", path_x, line_h, statusbar_fg);
+			} else {
+				if (max_px < 40)
+					max_px = 40;
+				modal_truncate_to_width(mo->results[mo->active_idx][idx],
+						text_buf, sizeof(text_buf), max_px);
+				if (!text_buf[0])
+					snprintf(text_buf, sizeof(text_buf), "%s", mo->results[mo->active_idx][idx]);
+				tray_render_label(&mod, text_buf, pad, line_h, statusbar_fg);
+			}
 		}
 	}
 }
@@ -10006,6 +10653,8 @@ cleanupmon(struct wl_listener *listener, void *data)
 	LayerSurface *l, *tmp;
 	size_t i;
 
+	modal_file_search_stop(m);
+
 	/* m->layers[i] are intentionally not unlinked */
 	for (i = 0; i < LENGTH(m->layers); i++) {
 		wl_list_for_each_safe(l, tmp, &m->layers[i], link)
@@ -10392,35 +11041,36 @@ initstatusbar(Monitor *m)
 		m->statusbar.cpu.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.cpu.tree)
 			m->statusbar.cpu.bg = wlr_scene_tree_create(m->statusbar.cpu.tree);
-		m->statusbar.net.tree = wlr_scene_tree_create(m->statusbar.tree);
-		if (m->statusbar.net.tree)
-			m->statusbar.net.bg = wlr_scene_tree_create(m->statusbar.net.tree);
-			m->statusbar.battery.tree = wlr_scene_tree_create(m->statusbar.tree);
-			if (m->statusbar.battery.tree)
-				m->statusbar.battery.bg = wlr_scene_tree_create(m->statusbar.battery.tree);
-			m->statusbar.light.tree = wlr_scene_tree_create(m->statusbar.tree);
-			if (m->statusbar.light.tree)
-				m->statusbar.light.bg = wlr_scene_tree_create(m->statusbar.light.tree);
-			m->statusbar.mic.tree = wlr_scene_tree_create(m->statusbar.tree);
-			if (m->statusbar.mic.tree)
-				m->statusbar.mic.bg = wlr_scene_tree_create(m->statusbar.mic.tree);
-			m->statusbar.volume.tree = wlr_scene_tree_create(m->statusbar.tree);
-			if (m->statusbar.volume.tree)
-				m->statusbar.volume.bg = wlr_scene_tree_create(m->statusbar.volume.tree);
-		m->statusbar.ram.tree = wlr_scene_tree_create(m->statusbar.tree);
-		if (m->statusbar.ram.tree)
-			m->statusbar.ram.bg = wlr_scene_tree_create(m->statusbar.ram.tree);
-		m->statusbar.clock.tree = wlr_scene_tree_create(m->statusbar.tree);
-		if (m->statusbar.clock.tree)
-			m->statusbar.clock.bg = wlr_scene_tree_create(m->statusbar.clock.tree);
-		m->statusbar.cpu_popup.tree = wlr_scene_tree_create(m->statusbar.tree);
-		if (m->statusbar.cpu_popup.tree) {
-			m->statusbar.cpu_popup.bg = wlr_scene_tree_create(m->statusbar.cpu_popup.tree);
-			m->statusbar.cpu_popup.visible = 0;
-			m->statusbar.cpu_popup.hover_idx = -1;
-			m->statusbar.cpu_popup.refresh_data = 1;
-			wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
-		}
+	m->statusbar.net.tree = wlr_scene_tree_create(m->statusbar.tree);
+	if (m->statusbar.net.tree) {
+		m->statusbar.net.bg = wlr_scene_tree_create(m->statusbar.net.tree);
+	}
+	m->statusbar.battery.tree = wlr_scene_tree_create(m->statusbar.tree);
+	if (m->statusbar.battery.tree)
+		m->statusbar.battery.bg = wlr_scene_tree_create(m->statusbar.battery.tree);
+	m->statusbar.light.tree = wlr_scene_tree_create(m->statusbar.tree);
+	if (m->statusbar.light.tree)
+		m->statusbar.light.bg = wlr_scene_tree_create(m->statusbar.light.tree);
+	m->statusbar.mic.tree = wlr_scene_tree_create(m->statusbar.tree);
+	if (m->statusbar.mic.tree)
+		m->statusbar.mic.bg = wlr_scene_tree_create(m->statusbar.mic.tree);
+	m->statusbar.volume.tree = wlr_scene_tree_create(m->statusbar.tree);
+	if (m->statusbar.volume.tree)
+		m->statusbar.volume.bg = wlr_scene_tree_create(m->statusbar.volume.tree);
+	m->statusbar.ram.tree = wlr_scene_tree_create(m->statusbar.tree);
+	if (m->statusbar.ram.tree)
+		m->statusbar.ram.bg = wlr_scene_tree_create(m->statusbar.ram.tree);
+	m->statusbar.clock.tree = wlr_scene_tree_create(m->statusbar.tree);
+	if (m->statusbar.clock.tree)
+		m->statusbar.clock.bg = wlr_scene_tree_create(m->statusbar.clock.tree);
+	m->statusbar.cpu_popup.tree = wlr_scene_tree_create(m->statusbar.tree);
+	if (m->statusbar.cpu_popup.tree) {
+		m->statusbar.cpu_popup.bg = wlr_scene_tree_create(m->statusbar.cpu_popup.tree);
+		m->statusbar.cpu_popup.visible = 0;
+		m->statusbar.cpu_popup.hover_idx = -1;
+		m->statusbar.cpu_popup.refresh_data = 1;
+		wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
+	}
 		m->statusbar.net_popup.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.net_popup.tree) {
 			m->statusbar.net_popup.bg = wlr_scene_tree_create(m->statusbar.net_popup.tree);
@@ -10443,6 +11093,17 @@ initstatusbar(Monitor *m)
 				m->modal.selected[i] = -1;
 				m->modal.scroll[i] = 0;
 			}
+				for (int i = 0; i < (int)LENGTH(m->modal.file_results_path); i++) {
+					m->modal.file_results_name[i][0] = '\0';
+					m->modal.file_results_path[i][0] = '\0';
+					m->modal.file_results_mtime[i] = 0;
+				}
+			m->modal.file_search_pid = -1;
+			m->modal.file_search_fd = -1;
+			m->modal.file_search_event = NULL;
+			m->modal.file_search_len = 0;
+			m->modal.file_search_buf[0] = '\0';
+			m->modal.file_search_last[0] = '\0';
 			wlr_scene_node_set_enabled(&m->modal.tree->node, 0);
 		}
 	}
@@ -11083,93 +11744,16 @@ keypress(struct wl_listener *listener, void *data)
 	 * attempt to process a compositor keybinding. */
 	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 		if (modal_mon) {
-			ModalOverlay *mo = &modal_mon->modal;
 			int consumed = 0;
 			for (i = 0; i < nsyms; i++) {
-				xkb_keysym_t sym = syms[i];
-				if (sym == XKB_KEY_Escape) {
-					modal_hide_all();
+				if (modal_handle_key(modal_mon, mods, syms[i])) {
 					handled = 1;
 					consumed = 1;
-					break;
-				}
-				if (sym == XKB_KEY_BackSpace && mo->search_len[mo->active_idx] > 0
-						&& mods == 0) {
-					mo->search_len[mo->active_idx]--;
-					mo->search[mo->active_idx][mo->search_len[mo->active_idx]] = '\0';
-					handled = 1;
-					consumed = 1;
-					continue;
-				}
-				if (sym == XKB_KEY_Down && mo->result_count[mo->active_idx] > 0) {
-					int sel = mo->selected[mo->active_idx];
-					if (sel < 0)
-						sel = 0;
-					else if (sel + 1 < mo->result_count[mo->active_idx])
-						sel++;
-					else
-						sel = 0; /* wrap to top */
-					mo->selected[mo->active_idx] = sel;
-					modal_ensure_selection_visible(modal_mon);
-					handled = 1;
-					consumed = 1;
-					continue;
-				}
-				if (sym == XKB_KEY_Up && mo->result_count[mo->active_idx] > 0) {
-					int sel = mo->selected[mo->active_idx];
-					if (sel < 0)
-						sel = mo->result_count[mo->active_idx] - 1;
-					else if (sel > 0)
-						sel--;
-					else
-						sel = mo->result_count[mo->active_idx] - 1; /* wrap to bottom */
-					mo->selected[mo->active_idx] = sel;
-					modal_ensure_selection_visible(modal_mon);
-					handled = 1;
-					consumed = 1;
-					continue;
-				}
-				if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
-					int sel = mo->selected[mo->active_idx];
-					if (mo->active_idx == 0 && sel >= 0 && sel < mo->result_count[0]) {
-						int idx = mo->result_entry_idx[0][sel];
-						if (idx >= 0 && idx < desktop_entry_count) {
-							char cmd_str[512];
-							char *cmd[4] = { "sh", "-c", cmd_str, NULL };
-							desktop_entries[idx].used++;
-							snprintf(cmd_str, sizeof(cmd_str), "%s", desktop_entries[idx].exec[0]
-									? desktop_entries[idx].exec : desktop_entries[idx].name);
-							Arg arg = { .v = cmd };
-							spawn(&arg);
-							modal_hide_all();
-						}
-					}
-					handled = 1;
-					consumed = 1;
-					continue;
-				}
-				if (sym >= 0x20 && sym <= 0x7e && mods == 0) {
-					int len = mo->search_len[mo->active_idx];
-					if (len + 1 < (int)sizeof(mo->search[0])) {
-						mo->search[mo->active_idx][len] = (char)sym;
-						mo->search[mo->active_idx][len + 1] = '\0';
-						mo->search_len[mo->active_idx] = len + 1;
-					}
-					handled = 1;
-					consumed = 1;
-					continue;
 				}
 			}
 			if (consumed) {
 				modal_update_results(modal_mon);
 				modal_render(modal_mon);
-			}
-		}
-		for (i = 0; i < nsyms; i++) {
-			if (syms[i] == XKB_KEY_Escape && modal_visible_monitor()) {
-				modal_hide_all();
-				handled = 1;
-				break;
 			}
 		}
 		for (i = 0; i < nsyms; i++)
@@ -11213,6 +11797,8 @@ int
 keyrepeat(void *data)
 {
 	KeyboardGroup *group = data;
+	Monitor *modal_mon = modal_visible_monitor();
+	int modal_consumed = 0;
 	int i;
 	if (!group->nsyms || group->wlr_group->keyboard.repeat_info.rate <= 0)
 		return 0;
@@ -11220,8 +11806,17 @@ keyrepeat(void *data)
 	wl_event_source_timer_update(group->key_repeat_source,
 			1000 / group->wlr_group->keyboard.repeat_info.rate);
 
-	for (i = 0; i < group->nsyms; i++)
-		keybinding(group->mods, group->keysyms[i]);
+	for (i = 0; i < group->nsyms; i++) {
+		if (modal_mon && modal_handle_key(modal_mon, group->mods, group->keysyms[i]))
+			modal_consumed = 1;
+		else
+			keybinding(group->mods, group->keysyms[i]);
+	}
+
+	if (modal_consumed) {
+		modal_update_results(modal_mon);
+		modal_render(modal_mon);
+	}
 
 	return 0;
 }
