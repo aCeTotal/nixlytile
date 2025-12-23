@@ -137,7 +137,7 @@ struct StatusFont {
 enum { CurNormal, CurPressed, CurMove, CurResize }; /* cursor */
 enum { XDGShell, LayerShell, X11 }; /* client types */
 enum { LyrBg, LyrBottom, LyrTile, LyrFloat, LyrTop, LyrFS, LyrOverlay, LyrBlock, NUM_LAYERS }; /* scene layers */
-#define MODAL_MAX_RESULTS 1024
+#define MODAL_MAX_RESULTS 512
 #define MODAL_RESULT_LEN 256
 
 typedef union {
@@ -217,6 +217,7 @@ typedef struct {
 	size_t file_search_len;
 	char file_search_buf[4096];
 	char file_search_last[256];
+	struct wl_event_source *file_search_timer;
 } ModalOverlay;
 
 typedef struct {
@@ -796,6 +797,7 @@ static void modal_ensure_selection_visible(Monitor *m);
 static int modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym);
 static void modal_file_search_clear_results(Monitor *m);
 static void modal_file_search_stop(Monitor *m);
+static int modal_file_search_timeout(void *data);
 static void modal_file_search_start(Monitor *m);
 static int modal_file_search_event(int fd, uint32_t mask, void *data);
 static void modal_truncate_to_width(const char *src, char *dst, size_t len, int max_px);
@@ -842,7 +844,7 @@ static double cpuaverage(void);
 static double battery_percent(void);
 static struct xkb_rule_names getxkbrules(void);
 static double backlight_percent(void);
-static double pipewire_volume_percent(void);
+static double pipewire_volume_percent(int *is_headset_out);
 static int findbacklightdevice(char *brightness_path, size_t brightness_len,
 		char *max_path, size_t max_len);
 static int findbatterydevice(char *capacity_path, size_t capacity_len);
@@ -1012,9 +1014,12 @@ static int last_battery_h;
 static int last_net_h;
 static int battery_path_initialized;
 static int backlight_paths_initialized;
-static uint64_t volume_last_read_ms;
-static double volume_cached = -1.0;
-static int volume_cached_muted = -1;
+static uint64_t volume_last_read_speaker_ms;
+static uint64_t volume_last_read_headset_ms;
+static double volume_cached_speaker = -1.0;
+static double volume_cached_headset = -1.0;
+static int volume_cached_speaker_muted = -1;
+static int volume_cached_headset_muted = -1;
 static uint64_t mic_last_read_ms;
 static double mic_cached = -1.0;
 static int mic_cached_muted = -1;
@@ -1131,7 +1136,12 @@ static double light_last_percent = -1.0;
 static char light_text[32] = "--%";
 static double mic_last_percent = -1.0;
 static char mic_text[32] = "--%";
-static double volume_last_percent = -1.0;
+static double volume_last_speaker_percent = -1.0;
+static double volume_last_headset_percent = -1.0;
+static double speaker_active = -1.0;
+static double speaker_stored = -1.0;
+static double microphone_active = -1.0;
+static double microphone_stored = -1.0;
 static char volume_text[32] = "--%";
 static int volume_muted = -1;
 static int mic_muted = -1;
@@ -3861,12 +3871,13 @@ read_top_cpu_processes(CpuPopup *p)
 		char name[64] = {0};
 		double cpu = 0.0;
 		int existing = -1;
-		int critical = 0;
 
 		lines++;
 		if (sscanf(line, "%d %63s %lf", &pid, name, &cpu) != 3)
 			continue;
 		if (name[0] == '[')
+			continue;
+		if (cpu_proc_is_critical(pid, name))
 			continue;
 
 		for (int i = 0; i < count; i++) {
@@ -3876,8 +3887,6 @@ read_top_cpu_processes(CpuPopup *p)
 			}
 		}
 
-		critical = cpu_proc_is_critical(pid, name);
-
 		if (existing >= 0) {
 			e = &p->procs[existing];
 			e->cpu += cpu;
@@ -3885,8 +3894,6 @@ read_top_cpu_processes(CpuPopup *p)
 				e->max_single_cpu = cpu;
 				e->pid = pid;
 			}
-			if (critical)
-				e->has_kill = 0;
 		} else if (count < (int)LENGTH(p->procs)) {
 			e = &p->procs[count];
 			e->pid = pid;
@@ -3895,7 +3902,7 @@ read_top_cpu_processes(CpuPopup *p)
 			e->max_single_cpu = cpu;
 			e->y = e->height = 0;
 			e->kill_x = e->kill_y = e->kill_w = e->kill_h = 0;
-			e->has_kill = critical ? 0 : 1;
+			e->has_kill = 1;
 			count++;
 		}
 	}
@@ -6786,19 +6793,65 @@ getxkbrules(void)
 }
 
 static double
-pipewire_volume_percent(void)
+volume_last_for_type(int is_headset)
+{
+	return is_headset ? volume_last_headset_percent : volume_last_speaker_percent;
+}
+
+static void
+volume_cache_store(int is_headset, double level, int muted, uint64_t now)
+{
+	if (level < 0.0)
+		return;
+
+	if (is_headset) {
+		volume_cached_headset = level;
+		volume_cached_headset_muted = muted;
+		volume_last_read_headset_ms = now;
+		volume_last_headset_percent = level;
+	} else {
+		volume_cached_speaker = level;
+		volume_cached_speaker_muted = muted;
+		volume_last_read_speaker_ms = now;
+		volume_last_speaker_percent = level;
+	}
+	speaker_active = level;
+}
+
+static void
+volume_invalidate_cache(int is_headset)
+{
+	if (is_headset)
+		volume_last_read_headset_ms = 0;
+	else
+		volume_last_read_speaker_ms = 0;
+}
+
+static double
+pipewire_volume_percent(int *is_headset_out)
 {
 	FILE *fp;
 	char line[128];
 	double level = -1.0;
 	int muted = 0;
 	uint64_t now = monotonic_msec();
+	int is_headset = (is_headset_out && (*is_headset_out == 0 || *is_headset_out == 1))
+			? *is_headset_out
+			: pipewire_sink_is_headset();
+	uint64_t last_read = is_headset ? volume_last_read_headset_ms : volume_last_read_speaker_ms;
+	double cached = is_headset ? volume_cached_headset : volume_cached_speaker;
+	int cached_muted = is_headset ? volume_cached_headset_muted : volume_cached_speaker_muted;
 
-	if (volume_last_read_ms != 0 && now - volume_last_read_ms < 8000) {
-		if (volume_cached >= 0.0) {
-			volume_muted = volume_cached_muted;
-			return volume_cached;
-		}
+	if (is_headset_out)
+		*is_headset_out = is_headset;
+
+	if (last_read != 0 && now - last_read < 8000 && cached >= 0.0) {
+		volume_muted = cached_muted;
+		if (is_headset)
+			volume_last_headset_percent = cached;
+		else
+			volume_last_speaker_percent = cached;
+		return cached;
 	}
 
 	fp = popen("wpctl get-volume @DEFAULT_AUDIO_SINK@", "r");
@@ -6815,11 +6868,9 @@ pipewire_volume_percent(void)
 
 	pclose(fp);
 	volume_muted = muted;
-	if (level >= 0.0) {
-		volume_cached = level;
-		volume_cached_muted = muted;
-		volume_last_read_ms = now;
-	}
+	volume_cache_store(is_headset, level, muted, now);
+	if (level >= 0.0)
+		speaker_active = level;
 	return level;
 }
 
@@ -6857,6 +6908,7 @@ pipewire_mic_volume_percent(void)
 		mic_cached = level;
 		mic_cached_muted = muted;
 		mic_last_read_ms = now;
+		microphone_active = level;
 	}
 	return level;
 }
@@ -6929,7 +6981,7 @@ set_pipewire_mute(int mute)
 		return -1;
 
 	/* Re-read to confirm state */
-	pipewire_volume_percent();
+	pipewire_volume_percent(NULL);
 	return 0;
 }
 
@@ -6968,8 +7020,6 @@ set_pipewire_volume(double percent)
 		return -1;
 
 	ret = system(cmd);
-	if (ret == 0)
-		volume_last_percent = percent;
 	return ret == 0 ? 0 : -1;
 }
 
@@ -7000,19 +7050,46 @@ toggle_pipewire_mute(void)
 {
 	int ret;
 	int current;
+	int is_headset = pipewire_sink_is_headset();
+	double vol;
+	uint64_t now;
+	double base;
+	double target;
 
-	volume_last_read_ms = 0; /* force fresh read */
-	current = pipewire_volume_percent() >= 0.0 ? volume_muted : 0;
-	ret = set_pipewire_mute(!current);
-	if (ret != 0)
-		return -1;
+	volume_invalidate_cache(is_headset); /* force fresh read for active sink */
+	vol = speaker_active;
+	if (vol < 0.0)
+		vol = pipewire_volume_percent(&is_headset);
+	current = vol >= 0.0 ? volume_muted : 0;
+	base = vol >= 0.0 ? vol : volume_last_for_type(is_headset);
 
-	/* Update cached state immediately to reflect the toggle */
-	volume_muted = !current;
-	volume_cached_muted = volume_muted;
-	volume_last_read_ms = monotonic_msec();
-	if (volume_last_percent < 0.0)
-		volume_last_percent = volume_cached >= 0.0 ? volume_cached : volume_last_percent;
+	if (current == 0) { /* muting */
+		ret = set_pipewire_mute(1);
+		if (ret != 0)
+			return -1;
+		volume_muted = 1;
+		now = monotonic_msec();
+		if (base >= 0.0) {
+			volume_cache_store(is_headset, base, volume_muted, now);
+			speaker_stored = base;
+		} else {
+			volume_invalidate_cache(is_headset);
+		}
+	} else { /* unmuting */
+		target = speaker_stored >= 0.0 ? speaker_stored : base;
+		ret = set_pipewire_mute(0);
+		if (ret != 0)
+			return -1;
+		volume_muted = 0;
+		if (target >= 0.0)
+			set_pipewire_volume(target);
+		if (target >= 0.0) {
+			speaker_active = target;
+		}
+		volume_invalidate_cache(is_headset);
+		pipewire_volume_percent(&is_headset); /* refresh cache from PipeWire */
+	}
+
 	refreshstatusvolume();
 	return 0;
 }
@@ -7022,16 +7099,50 @@ toggle_pipewire_mic_mute(void)
 {
 	int ret;
 	int current;
+	double vol;
+	double base;
+	double target;
 
 	mic_last_read_ms = 0;
-	current = pipewire_mic_volume_percent() >= 0.0 ? mic_muted : 0;
-	ret = set_pipewire_mic_mute(!current);
-	if (ret != 0)
-		return -1;
+	vol = microphone_active;
+	if (vol < 0.0)
+		vol = pipewire_mic_volume_percent();
+	current = vol >= 0.0 ? mic_muted : 0;
+	base = vol >= 0.0 ? vol : mic_last_percent;
 
-	mic_muted = !current;
-	mic_cached_muted = mic_muted;
-	mic_last_read_ms = monotonic_msec();
+	if (current == 0) { /* muting */
+		ret = set_pipewire_mic_mute(1);
+		if (ret != 0)
+			return -1;
+		mic_muted = 1;
+		mic_cached_muted = mic_muted;
+		if (base >= 0.0) {
+			mic_cached = base;
+			mic_last_percent = base;
+			microphone_active = base;
+			mic_last_read_ms = monotonic_msec();
+			microphone_stored = base;
+		}
+	} else { /* unmuting */
+		target = microphone_stored >= 0.0 ? microphone_stored : base;
+		ret = set_pipewire_mic_mute(0);
+		if (ret != 0)
+			return -1;
+		mic_muted = 0;
+		mic_cached_muted = mic_muted;
+		mic_last_read_ms = 0;
+		mic_cached = -1.0;
+		if (target >= 0.0) {
+			set_pipewire_mic_volume(target);
+			mic_cached = target;
+			mic_last_percent = target;
+			microphone_active = target;
+			mic_last_read_ms = monotonic_msec();
+		} else {
+			pipewire_mic_volume_percent(); /* refresh cache from PipeWire */
+		}
+	}
+
 	if (mic_last_percent < 0.0)
 		mic_last_percent = mic_cached >= 0.0 ? mic_cached : mic_last_percent;
 	refreshstatusmic();
@@ -8111,21 +8222,23 @@ refreshstatusram(void)
 static void
 refreshstatusvolume(void)
 {
-	double vol = pipewire_volume_percent();
+	int is_headset = pipewire_sink_is_headset();
+	double vol = speaker_active;
 	Monitor *m;
 	int barh;
 	double display = vol;
 	int force_render = 0;
 	int use_muted_color = 0;
-	int is_headset = pipewire_sink_is_headset();
 	const char *icon = volume_icon_speaker_100;
 
-	if (vol >= 0.0) {
-		volume_last_percent = vol;
-		display = vol;
-	} else if (volume_last_percent >= 0.0) {
-		display = volume_last_percent;
+	if (vol < 0.0) {
+		double read = pipewire_volume_percent(&is_headset);
+		if (read >= 0.0) {
+			vol = read;
+			speaker_active = read;
+		}
 	}
+	display = vol;
 
 	if (display > volume_max_percent)
 		display = volume_max_percent;
@@ -8191,7 +8304,7 @@ refreshstatusvolume(void)
 static void
 refreshstatusmic(void)
 {
-	double vol = pipewire_mic_volume_percent();
+	double vol = microphone_active;
 	Monitor *m;
 	int barh;
 	double display = vol;
@@ -8199,12 +8312,17 @@ refreshstatusmic(void)
 	int use_muted_color = 0;
 	const char *icon = mic_icon_unmuted;
 
-	if (vol >= 0.0) {
-		mic_last_percent = vol;
-		display = vol;
-	} else if (mic_last_percent >= 0.0) {
-		display = mic_last_percent;
+	if (vol < 0.0) {
+		double read = pipewire_mic_volume_percent();
+		if (read >= 0.0) {
+			vol = read;
+			microphone_active = read;
+			mic_last_percent = read;
+		}
 	}
+	if (vol >= 0.0)
+		mic_last_percent = vol;
+	display = vol >= 0.0 ? vol : mic_last_percent;
 
 	if (display > mic_max_percent)
 		display = mic_max_percent;
@@ -8643,6 +8761,8 @@ modal_file_search_stop(Monitor *m)
 		return;
 	mo = &m->modal;
 
+	if (mo->file_search_timer)
+		wl_event_source_timer_update(mo->file_search_timer, 0);
 	if (mo->file_search_event) {
 		wl_event_source_remove(mo->file_search_event);
 		mo->file_search_event = NULL;
@@ -8658,6 +8778,10 @@ modal_file_search_stop(Monitor *m)
 	}
 	mo->file_search_len = 0;
 	mo->file_search_buf[0] = '\0';
+	if (mo->file_search_timer) {
+		wl_event_source_remove(mo->file_search_timer);
+		mo->file_search_timer = NULL;
+	}
 }
 
 static void
@@ -8821,6 +8945,7 @@ modal_file_search_start(Monitor *m)
 	struct stat st = {0};
 	pid_t pid;
 	int nlen;
+	const int debounce_ms = 100;
 
 	if (!m)
 		return;
@@ -8832,6 +8957,10 @@ modal_file_search_start(Monitor *m)
 
 	if (mo->search_len[1] <= 0)
 		return;
+	if (mo->search_len[1] < modal_file_search_minlen) {
+		modal_file_search_clear_results(m);
+		return;
+	}
 
 	/* helper to add unique, existing directories */
 #define ADD_ROOT(PATHSTR) \
@@ -9434,8 +9563,21 @@ modal_update_results(Monitor *m)
 		modal_file_search_stop(m);
 
 	if (active == 1) {
-		if (strncmp(mo->search[1], mo->file_search_last, sizeof(mo->file_search_last)) != 0)
-			modal_file_search_start(m);
+		if (strncmp(mo->search[1], mo->file_search_last, sizeof(mo->file_search_last)) != 0) {
+			modal_file_search_stop(m);
+			if (mo->search_len[1] >= modal_file_search_minlen) {
+				if (mo->file_search_timer)
+					wl_event_source_timer_update(mo->file_search_timer, 0);
+				if (!mo->file_search_timer)
+					mo->file_search_timer = wl_event_loop_add_timer(event_loop,
+							modal_file_search_timeout, m);
+				wl_event_source_timer_update(mo->file_search_timer, 150);
+			}
+		}
+		if (mo->search_len[1] < modal_file_search_minlen) {
+			modal_file_search_clear_results(m);
+			return;
+		}
 		if (mo->result_count[1] > 0) {
 			if (mo->selected[1] < 0)
 				mo->selected[1] = 0;
@@ -10224,18 +10366,25 @@ static int
 adjust_volume_by_steps(int steps)
 {
 	double vol;
+	int is_headset;
+	uint64_t now;
 
 	if (steps == 0)
 		return 0;
 
-	volume_last_read_ms = 0; /* force fresh read if needed */
-	vol = volume_last_percent >= 0.0 ? volume_last_percent : pipewire_volume_percent();
+	is_headset = pipewire_sink_is_headset();
+	volume_invalidate_cache(is_headset); /* force fresh read if needed */
+
+	vol = speaker_active >= 0.0 ? speaker_active : volume_last_for_type(is_headset);
+	if (vol < 0.0)
+		vol = pipewire_volume_percent(&is_headset);
 	if (vol < 0.0)
 		return 0;
 
 	if (volume_muted == 1) {
 		int mute_res = system("wpctl set-mute @DEFAULT_AUDIO_SINK@ 0");
 		(void)mute_res;
+		volume_muted = 0;
 	}
 
 	vol += (double)steps * volume_step;
@@ -10247,10 +10396,14 @@ adjust_volume_by_steps(int steps)
 	if (set_pipewire_volume(vol) != 0)
 		return 0;
 
-	volume_last_percent = vol;
-	volume_cached = vol;
-	volume_cached_muted = 0;
-	volume_last_read_ms = monotonic_msec();
+	now = monotonic_msec();
+	volume_cache_store(is_headset, vol, 0, now);
+	speaker_active = vol;
+	if (is_headset) {
+		volume_cached_headset_muted = 0;
+	} else {
+		volume_cached_speaker_muted = 0;
+	}
 	refreshstatusvolume();
 	return 1;
 }
@@ -10259,34 +10412,39 @@ static int
 adjust_mic_by_steps(int steps)
 {
 	double vol;
+	double target;
 
 	if (steps == 0)
 		return 0;
 
 	mic_last_read_ms = 0;
-	vol = mic_last_percent >= 0.0 ? mic_last_percent : pipewire_mic_volume_percent();
+	vol = microphone_active >= 0.0 ? microphone_active : mic_last_percent;
+	if (vol < 0.0)
+		vol = pipewire_mic_volume_percent();
 	if (vol < 0.0)
 		return 0;
 
 	if (mic_muted == 1) {
 		int mute_res = system("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0");
 		(void)mute_res;
+		mic_muted = 0;
 	}
 
-	vol += (double)steps * mic_step;
-	if (vol < 0.0)
-		vol = 0.0;
-	if (vol > mic_max_percent)
-		vol = mic_max_percent;
+	target = vol + (double)steps * mic_step;
+	if (target < 0.0)
+		target = 0.0;
+	if (target > mic_max_percent)
+		target = mic_max_percent;
 
-	if (set_pipewire_mic_volume(vol) != 0)
+	if (set_pipewire_mic_volume(target) != 0)
 		return 0;
 
-	mic_last_percent = vol;
-	mic_cached = vol;
+	mic_last_percent = target;
+	mic_cached = target;
 	mic_cached_muted = 0;
 	mic_muted = 0;
 	mic_last_read_ms = monotonic_msec();
+	microphone_active = target;
 	refreshstatusmic();
 	return 1;
 }
@@ -11099,11 +11257,12 @@ initstatusbar(Monitor *m)
 					m->modal.file_results_mtime[i] = 0;
 				}
 			m->modal.file_search_pid = -1;
-			m->modal.file_search_fd = -1;
-			m->modal.file_search_event = NULL;
-			m->modal.file_search_len = 0;
-			m->modal.file_search_buf[0] = '\0';
-			m->modal.file_search_last[0] = '\0';
+	m->modal.file_search_fd = -1;
+	m->modal.file_search_event = NULL;
+	m->modal.file_search_timer = NULL;
+	m->modal.file_search_len = 0;
+	m->modal.file_search_buf[0] = '\0';
+	m->modal.file_search_last[0] = '\0';
 			wlr_scene_node_set_enabled(&m->modal.tree->node, 0);
 		}
 	}
@@ -13996,4 +14155,14 @@ main(int argc, char *argv[])
 
 usage:
 	die("Usage: %s [-v] [-d] [-s startup command]", argv[0]);
+}
+static int
+modal_file_search_timeout(void *data)
+{
+	Monitor *m = data;
+
+	if (!m)
+		return 0;
+	modal_file_search_start(m);
+	return 0;
 }

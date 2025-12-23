@@ -1,5 +1,5 @@
 {
-  description = "Nix dev flake for hacking on dwl with a build helper";
+      description = "Nix dev flake for hacking on dwl with a build helper";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
