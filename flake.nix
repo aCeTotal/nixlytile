@@ -82,20 +82,21 @@
               pkgs.makeWrapper
             ];
 
-            buildInputs = [
-              pkgs.wayland
-              pkgs.wlroots
-              pkgs.libinput
-              pkgs.libxkbcommon
-              pkgs.fcft
+          buildInputs = [
+            pkgs.wayland
+            pkgs.wlroots
+            pkgs.libinput
+            pkgs.libxkbcommon
+            pkgs.fcft
               pkgs.tllist
               pkgs.pixman
               pkgs.libdrm
-              pkgs.xorg.libxcb
-              pkgs.xorg.xcbutilwm
-              pkgs.xwayland
-              pkgs.systemd
-            ] ++ ps.iconDeps;
+            pkgs.xorg.libxcb
+            pkgs.xorg.xcbutilwm
+            pkgs.xwayland
+            pkgs.systemd
+            pkgs.brightnessctl
+          ] ++ ps.iconDeps;
 
             makeFlags = [ "PKG_CONFIG=${pkgs.pkg-config}/bin/pkg-config" ];
             dontWrapQtApps = true;
@@ -114,7 +115,7 @@
               mkdir -p $out/share/dwl/wallpapers
               cp -r wallpapers/* $out/share/dwl/wallpapers/
               wrapProgram $out/bin/dwl \
-                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.swaybg ]} \
+                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.swaybg pkgs.brightnessctl ]} \
                 --prefix XDG_DATA_DIRS : "${pkgs.papirus-icon-theme}/share:${pkgs.adwaita-icon-theme}/share:${pkgs.hicolor-icon-theme}/share:${pkgs.shared-mime-info}/share"
               runHook postInstall
             '';

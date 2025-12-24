@@ -191,6 +191,9 @@ typedef struct {
 	int visible;
 	int hover_idx;
 	int refresh_data;
+	uint64_t last_fetch_ms;
+	uint64_t last_render_ms;
+	uint64_t suppress_refresh_until_ms;
 	int proc_count;
 	CpuProcEntry procs[10];
 } CpuPopup;
@@ -805,7 +808,12 @@ static void shorten_path_display(const char *full, char *out, size_t len);
 static int desktop_entry_cmp_used(const void *a, const void *b);
 static int __attribute__((unused)) modal_match_name(const char *haystack, const char *needle);
 static void modal_update_results(Monitor *m);
+static void modal_prewarm(Monitor *m);
 static void ensure_desktop_entries_loaded(void);
+static void ensure_shell_env(void);
+static int cpu_popup_refresh_timeout(void *data);
+static void schedule_cpu_popup_refresh(uint32_t ms);
+static uint64_t monotonic_msec(void);
 static void rendercpu(StatusModule *module, int bar_height, const char *text);
 static void rendercpupopup(Monitor *m);
 static int cpu_popup_clamped_x(Monitor *m, CpuPopup *p);
@@ -827,6 +835,7 @@ static void schedule_hover_timer(void);
 static int readcpustats(struct CpuSample *out, int maxcount);
 static int readmeminfo(unsigned long long *total_kb, unsigned long long *avail_kb);
 static int set_backlight_percent(double percent);
+static int set_backlight_relative(double delta_percent);
 static int set_pipewire_volume(double percent);
 static int set_pipewire_mute(int mute);
 static int toggle_pipewire_mute(void);
@@ -847,6 +856,8 @@ static double backlight_percent(void);
 static double pipewire_volume_percent(int *is_headset_out);
 static int findbacklightdevice(char *brightness_path, size_t brightness_len,
 		char *max_path, size_t max_len);
+static int set_backlight_relative(double delta_percent);
+static void apply_startup_defaults(void);
 static int findbatterydevice(char *capacity_path, size_t capacity_len);
 static void schedule_status_timer(void);
 static void schedule_next_status_refresh(void);
@@ -1031,6 +1042,7 @@ static pid_t wifi_scan_pid = -1;
 static int wifi_scan_fd = -1;
 static struct wl_event_source *wifi_scan_event = NULL;
 static struct wl_event_source *wifi_scan_timer = NULL;
+static struct wl_event_source *cpu_popup_refresh_timer = NULL;
 static char wifi_scan_buf[8192];
 static size_t wifi_scan_len = 0;
 static int wifi_scan_inflight;
@@ -1052,6 +1064,7 @@ static char net_icon_path[PATH_MAX] = "images/svg/no_connection.svg";
 static char net_icon_loaded_path[PATH_MAX];
 static char cpu_icon_path[PATH_MAX] = "images/svg/cpu.svg";
 static char cpu_icon_loaded_path[PATH_MAX];
+static const uint32_t cpu_popup_refresh_interval_ms = 10000;
 static char light_icon_path[PATH_MAX] = "images/svg/light.svg";
 static char light_icon_loaded_path[PATH_MAX];
 static char ram_icon_path[PATH_MAX] = "images/svg/ram.svg";
@@ -1133,15 +1146,16 @@ static sd_bus_slot *tray_name_slot;
 static int tray_host_registered;
 static struct wl_list tray_items;
 static double light_last_percent = -1.0;
+static double light_cached_percent = -1.0;
 static char light_text[32] = "--%";
-static double mic_last_percent = 70.0;
+static double mic_last_percent = 80.0;
 static char mic_text[32] = "--%";
-static double volume_last_speaker_percent = 60.0;
-static double volume_last_headset_percent = 60.0;
-static double speaker_active = 60.0;
-static double speaker_stored = 60.0;
-static double microphone_active = 70.0;
-static double microphone_stored = 70.0;
+static double volume_last_speaker_percent = 70.0;
+static double volume_last_headset_percent = 70.0;
+static double speaker_active = 70.0;
+static double speaker_stored = 70.0;
+static double microphone_active = 80.0;
+static double microphone_stored = 80.0;
 static char volume_text[32] = "--%";
 static int volume_muted = -1;
 static int mic_muted = -1;
@@ -3929,9 +3943,11 @@ rendercpupopup(Monitor *m)
 	int kill_text_w;
 	int kill_w;
 	int kill_h;
+	uint64_t now;
 	int use_right_gap;
 	int hover_idx;
 	int popup_x = m->statusbar.cpu.x;
+	int need_fetch_now;
 	char line[64];
 	struct wlr_scene_node *node, *tmp;
 
@@ -3950,6 +3966,9 @@ rendercpupopup(Monitor *m)
 	kill_text_w = status_text_width("Kill");
 	kill_w = kill_text_w + 12;
 	kill_h = row_height;
+	now = monotonic_msec();
+	need_fetch_now = 0;
+	now = monotonic_msec();
 
 	/* Clear previous buffers but keep bg */
 	wl_list_for_each_safe(node, tmp, &p->tree->children, link) {
@@ -3966,8 +3985,22 @@ rendercpupopup(Monitor *m)
 		return;
 	}
 
+	if (p->suppress_refresh_until_ms == 0 || now >= p->suppress_refresh_until_ms) {
+		if (p->last_fetch_ms == 0 ||
+				now < p->last_fetch_ms ||
+				now - p->last_fetch_ms >= cpu_popup_refresh_interval_ms)
+			p->refresh_data = 1;
+	}
+
 	if (p->refresh_data) {
-		read_top_cpu_processes(p);
+		if (p->last_fetch_ms == 0 || now - p->last_fetch_ms >= 200)
+			need_fetch_now = 1;
+		if (need_fetch_now) {
+			read_top_cpu_processes(p);
+			p->last_fetch_ms = now;
+		}
+		if (p->suppress_refresh_until_ms > 0 && now >= p->suppress_refresh_until_ms)
+			p->suppress_refresh_until_ms = 0;
 		p->refresh_data = 0;
 	}
 	line_count = cpu_core_count + 1; /* +1 for avg line */
@@ -4114,6 +4147,7 @@ rendercpupopup(Monitor *m)
 
 	if (p->width <= 0 || p->height <= 0)
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
+	p->last_render_ms = now;
 }
 
 static int
@@ -4159,6 +4193,10 @@ cpu_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 					fprintf(stderr, "cpu popup: kill %d failed: %s\n",
 							e->pid, strerror(errno));
 			}
+			p->last_fetch_ms = monotonic_msec();
+			p->suppress_refresh_until_ms = p->last_fetch_ms + 2000;
+			p->refresh_data = 0;
+			schedule_cpu_popup_refresh(2000);
 			refreshstatuscpu();
 			return 1;
 		}
@@ -6705,22 +6743,108 @@ findbacklightdevice(char *brightness_path, size_t brightness_len,
 	return 0;
 }
 
+static int
+readulong_cmd(const char *cmd, unsigned long long *out)
+{
+	FILE *fp;
+	char buf[64];
+	unsigned long long val;
+	char *end = NULL;
+
+	if (!cmd || !out)
+		return -1;
+
+	fp = popen(cmd, "r");
+	if (!fp)
+		return -1;
+	if (!fgets(buf, sizeof(buf), fp)) {
+		pclose(fp);
+		return -1;
+	}
+	pclose(fp);
+
+	errno = 0;
+	val = strtoull(buf, &end, 10);
+	if (errno != 0)
+		return -1;
+	if (end == buf)
+		return -1;
+	*out = val;
+	return 0;
+}
+
 static double
 backlight_percent(void)
 {
 	unsigned long long cur, max;
+	double percent;
 
-	if (!backlight_available)
-		return -1.0;
-	if (readulong(backlight_brightness_path, &cur) != 0)
-		return -1.0;
-	if (readulong(backlight_max_path, &max) != 0 || max == 0)
-		return -1.0;
+	/* Prefer brightnessctl */
+	if (readulong_cmd("brightnessctl g", &cur) == 0 &&
+			readulong_cmd("brightnessctl m", &max) == 0 && max > 0) {
+		if (cur > max)
+			cur = max;
+		light_cached_percent = ((double)cur * 100.0) / (double)max;
+		return light_cached_percent;
+	}
 
-	if (cur > max)
-		cur = max;
+	/* Fallback to light -G */
+	{
+		FILE *fp = popen("light -G", "r");
+		if (fp) {
+			if (fscanf(fp, "%lf", &percent) == 1) {
+				pclose(fp);
+				if (percent < 0.0)
+					percent = -1.0;
+				if (percent > 100.0)
+					percent = 100.0;
+				if (percent >= 0.0)
+					light_cached_percent = percent;
+				return percent;
+			}
+			pclose(fp);
+		}
+	}
 
-	return ((double)cur * 100.0) / (double)max;
+	/* Fallback to sysfs if available */
+	if (backlight_available) {
+		if (readulong(backlight_brightness_path, &cur) == 0 &&
+				readulong(backlight_max_path, &max) == 0 && max > 0) {
+			if (cur > max)
+				cur = max;
+			light_cached_percent = ((double)cur * 100.0) / (double)max;
+			return light_cached_percent;
+		}
+	}
+
+	/* Fallback to brightnessctl */
+	if (readulong_cmd("brightnessctl g", &cur) == 0 &&
+			readulong_cmd("brightnessctl m", &max) == 0 && max > 0) {
+		if (cur > max)
+			cur = max;
+		light_cached_percent = ((double)cur * 100.0) / (double)max;
+		return light_cached_percent;
+	}
+
+	/* Fallback to light -G */
+	{
+		FILE *fp = popen("light -G", "r");
+		if (fp) {
+			if (fscanf(fp, "%lf", &percent) == 1) {
+				pclose(fp);
+				if (percent < 0.0)
+					percent = -1.0;
+				if (percent > 100.0)
+					percent = 100.0;
+				if (percent >= 0.0)
+					light_cached_percent = percent;
+				return percent;
+			}
+			pclose(fp);
+		}
+	}
+
+	return light_cached_percent;
 }
 
 static int
@@ -6728,33 +6852,159 @@ set_backlight_percent(double percent)
 {
 	unsigned long long max, target;
 	FILE *fp;
-
-	if (!backlight_available)
-		return -1;
+	int attempted = 0;
 
 	if (percent < 0.0)
 		percent = 0.0;
 	if (percent > 100.0)
 		percent = 100.0;
 
-	if (readulong(backlight_max_path, &max) != 0 || max == 0)
-		return -1;
+	if (backlight_available && readulong(backlight_max_path, &max) == 0 && max > 0) {
+		target = (unsigned long long)lround((percent / 100.0) * (double)max);
+		if (target > max)
+			target = max;
 
-	target = (unsigned long long)lround((percent / 100.0) * (double)max);
-	if (target > max)
-		target = max;
-
-	fp = fopen(backlight_brightness_path, "w");
-	if (!fp)
-		return -1;
-
-	if (fprintf(fp, "%llu", target) < 0) {
-		fclose(fp);
-		return -1;
+		if (backlight_writable && (fp = fopen(backlight_brightness_path, "w"))) {
+			attempted = 1;
+			if (fprintf(fp, "%llu", target) >= 0) {
+				fclose(fp);
+				light_cached_percent = percent;
+				return 0;
+			}
+			fclose(fp);
+		}
 	}
 
-	fclose(fp);
-	return 0;
+	/* Prefer external tools first */
+	{
+		char cmd[128];
+		int ret;
+
+		ret = snprintf(cmd, sizeof(cmd), "brightnessctl set %.2f%%", percent);
+		if (ret > 0 && ret < (int)sizeof(cmd)) {
+			attempted = 1;
+			if (system(cmd) == 0) {
+				light_cached_percent = percent;
+				return 0;
+			}
+		}
+
+		ret = snprintf(cmd, sizeof(cmd), "light -S %.2f", percent);
+		if (ret > 0 && ret < (int)sizeof(cmd)) {
+			attempted = 1;
+			if (system(cmd) == 0) {
+				light_cached_percent = percent;
+				return 0;
+			}
+		}
+	}
+
+	/* Fallback to sysfs if available */
+	if (backlight_available && readulong(backlight_max_path, &max) == 0 && max > 0) {
+		target = (unsigned long long)lround((percent / 100.0) * (double)max);
+		if (target > max)
+			target = max;
+
+		if (backlight_writable && (fp = fopen(backlight_brightness_path, "w"))) {
+			attempted = 1;
+			if (fprintf(fp, "%llu", target) >= 0) {
+				fclose(fp);
+				light_cached_percent = percent;
+				return 0;
+			}
+			fclose(fp);
+		}
+	}
+
+	return attempted ? -1 : 0;
+}
+
+static int
+set_backlight_relative(double delta_percent)
+{
+	char cmd[128];
+	int ret;
+
+	if (delta_percent == 0.0)
+		return 0;
+
+	/* brightnessctl relative */
+	if (delta_percent > 0) {
+		ret = snprintf(cmd, sizeof(cmd), "brightnessctl set +%.2f%%", delta_percent);
+	} else {
+		ret = snprintf(cmd, sizeof(cmd), "brightnessctl set %.2f%%-", -delta_percent);
+	}
+	if (ret > 0 && ret < (int)sizeof(cmd)) {
+		if (system(cmd) == 0)
+			return 0;
+	}
+
+	/* light relative */
+	if (delta_percent > 0) {
+		ret = snprintf(cmd, sizeof(cmd), "light -A %.2f", delta_percent);
+	} else {
+		ret = snprintf(cmd, sizeof(cmd), "light -U %.2f", -delta_percent);
+	}
+	if (ret > 0 && ret < (int)sizeof(cmd)) {
+		if (system(cmd) == 0)
+			return 0;
+	}
+
+	/* Prefer sysfs if available and writable */
+	if (backlight_available && backlight_writable) {
+		double cur = backlight_percent();
+		if (cur < 0.0)
+			cur = light_cached_percent;
+		if (cur >= 0.0) {
+			double target = cur + delta_percent;
+			if (target < 0.0)
+				target = 0.0;
+			if (target > 100.0)
+				target = 100.0;
+			return set_backlight_percent(target);
+		}
+	}
+
+	return -1;
+}
+
+static void
+apply_startup_defaults(void)
+{
+	static int applied = 0;
+	const double light_default = 40.0;
+	const double speaker_default = 70.0;
+	const double mic_default = 80.0;
+
+	if (applied)
+		return;
+
+	/* Backlight */
+	if (set_backlight_percent(light_default) == 0) {
+		light_last_percent = light_default;
+		light_cached_percent = light_default;
+	} else if (light_cached_percent < 0.0) {
+		light_cached_percent = light_default;
+	}
+
+	/* Speaker/headset volume */
+	if (set_pipewire_volume(speaker_default) == 0) {
+		speaker_active = speaker_default;
+		speaker_stored = speaker_default;
+		volume_last_speaker_percent = speaker_default;
+		volume_last_headset_percent = speaker_default;
+		volume_muted = 0;
+	}
+
+	/* Microphone volume */
+	if (set_pipewire_mic_volume(mic_default) == 0) {
+		microphone_active = mic_default;
+		microphone_stored = mic_default;
+		mic_last_percent = mic_default;
+		mic_muted = 0;
+	}
+
+	applied = 1;
 }
 
 static double
@@ -7267,15 +7517,15 @@ positionstatusmodules(Monitor *m)
 	if (m->statusbar.battery.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.battery.tree->node,
 				m->statusbar.battery.width > 0);
-		if (m->statusbar.light.tree)
-			wlr_scene_node_set_enabled(&m->statusbar.light.tree->node,
-					m->statusbar.light.width > 0);
-		if (m->statusbar.mic.tree)
-			wlr_scene_node_set_enabled(&m->statusbar.mic.tree->node,
-					m->statusbar.mic.width > 0);
-		if (m->statusbar.volume.tree)
-			wlr_scene_node_set_enabled(&m->statusbar.volume.tree->node,
-					m->statusbar.volume.width > 0);
+	if (m->statusbar.light.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.light.tree->node,
+				m->statusbar.light.width > 0);
+	if (m->statusbar.mic.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.mic.tree->node,
+				m->statusbar.mic.width > 0);
+	if (m->statusbar.volume.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.volume.tree->node,
+				m->statusbar.volume.width > 0);
 	if (m->statusbar.ram.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.ram.tree->node,
 				m->statusbar.ram.width > 0);
@@ -7573,6 +7823,42 @@ wifi_scan_timer_cb(void *data)
 		request_wifi_scan();
 
 	return 0;
+}
+
+static int
+cpu_popup_refresh_timeout(void *data)
+{
+	Monitor *m;
+	int any_visible = 0;
+
+	(void)data;
+
+	wl_list_for_each(m, &mons, link) {
+		CpuPopup *p = &m->statusbar.cpu_popup;
+		if (!p || !p->tree || !p->visible)
+			continue;
+		p->suppress_refresh_until_ms = 0;
+		p->refresh_data = 1;
+		rendercpupopup(m);
+		any_visible = 1;
+	}
+
+	if (any_visible)
+		wl_event_source_timer_update(cpu_popup_refresh_timer, cpu_popup_refresh_interval_ms);
+
+	return 0;
+}
+
+static void
+schedule_cpu_popup_refresh(uint32_t ms)
+{
+	if (!event_loop)
+		return;
+	if (!cpu_popup_refresh_timer)
+		cpu_popup_refresh_timer = wl_event_loop_add_timer(event_loop,
+				cpu_popup_refresh_timeout, NULL);
+	if (cpu_popup_refresh_timer)
+		wl_event_source_timer_update(cpu_popup_refresh_timer, ms);
 }
 
 static void
@@ -7908,6 +8194,8 @@ refreshstatusnet(void)
 		stop_ssid_fetch();
 		ssid_last_time = 0;
 	} else {
+		int need_ssid;
+
 		snprintf(net_iface, sizeof(net_iface), "%s", iface);
 		if (strncmp(net_prev_iface, net_iface, sizeof(net_prev_iface)) != 0) {
 			net_prev_valid = 0;
@@ -7920,8 +8208,10 @@ refreshstatusnet(void)
 		}
 
 		if (net_is_wireless) {
-			if (popup_active && now_sec != (time_t)-1 &&
-					(now_sec - ssid_last_time > 60 || ssid_last_time == 0) &&
+			need_ssid = (!net_ssid[0] || strcmp(net_ssid, "--") == 0 ||
+					(now_sec != (time_t)-1 &&
+					 (now_sec - ssid_last_time > 60 || ssid_last_time == 0)));
+			if ((popup_active || need_ssid) && now_sec != (time_t)-1 &&
 					!ssid_event && ssid_pid <= 0) {
 				request_ssid_async(net_iface);
 			}
@@ -8487,6 +8777,7 @@ status_should_render(StatusModule *module, int barh, const char *text,
 static void
 initial_status_refresh(void)
 {
+	apply_startup_defaults();
 	refreshstatusclock();
 	refreshstatuscpu();
 	refreshstatusram();
@@ -8721,10 +9012,11 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 			if (idx >= 0 && idx < desktop_entry_count) {
 				char cmd_str[512];
 				char *cmd[4] = { "sh", "-c", cmd_str, NULL };
+				Arg arg;
 				desktop_entries[idx].used++;
 				snprintf(cmd_str, sizeof(cmd_str), "%s", desktop_entries[idx].exec[0]
 						? desktop_entries[idx].exec : desktop_entries[idx].name);
-				Arg arg = { .v = cmd };
+				arg.v = cmd;
 				spawn(&arg);
 				modal_hide_all();
 			}
@@ -8790,6 +9082,8 @@ shorten_path_display(const char *full, char *out, size_t len)
 	const char *home = getenv("HOME");
 	const char *p = full;
 	size_t flen;
+	size_t keep;
+	const char *tail;
 
 	if (!out || len == 0)
 		return;
@@ -8818,8 +9112,8 @@ shorten_path_display(const char *full, char *out, size_t len)
 		return;
 	}
 
-	size_t keep = (len - 4) / 2;
-	const char *tail = p + flen - (len - keep - 4);
+	keep = (len - 4) / 2;
+	tail = p + flen - (len - keep - 4);
 	if (tail < p)
 		tail = p;
 	snprintf(out, len, "%.*s...%s", (int)keep, p, tail);
@@ -8945,7 +9239,6 @@ modal_file_search_start(Monitor *m)
 	struct stat st = {0};
 	pid_t pid;
 	int nlen;
-	const int debounce_ms = 100;
 
 	if (!m)
 		return;
@@ -8965,14 +9258,19 @@ modal_file_search_start(Monitor *m)
 	/* helper to add unique, existing directories */
 #define ADD_ROOT(PATHSTR) \
 	do { \
-		if ((int)LENGTH(roots) > root_count && (PATHSTR) && *(PATHSTR) && stat((PATHSTR), &st) == 0 && S_ISDIR(st.st_mode)) { \
+		const char *_path = (PATHSTR); \
+		int _i; \
+		int idx; \
+		if ((int)LENGTH(roots) > root_count && _path && *_path && stat(_path, &st) == 0 && S_ISDIR(st.st_mode)) { \
 			int exists = 0; \
-			for (int _i = 0; _i < root_count; _i++) { \
-				if (strcmp(roots[_i], (PATHSTR)) == 0) { exists = 1; break; } \
+			for (_i = 0; _i < root_count; _i++) { \
+				if (strcmp(roots[_i], _path) == 0) { exists = 1; break; } \
 			} \
 			if (!exists) { \
-				snprintf(root_bufs[root_count], sizeof(root_bufs[0]), "%s", (PATHSTR)); \
-				roots[root_count++] = root_bufs[root_count - 1]; \
+				idx = root_count; \
+				snprintf(root_bufs[idx], sizeof(root_bufs[0]), "%s", _path); \
+				roots[idx] = root_bufs[idx]; \
+				root_count++; \
 			} \
 		} \
 	} while (0)
@@ -8991,23 +9289,27 @@ modal_file_search_start(Monitor *m)
 	{
 		FILE *fp = fopen("/proc/self/mountinfo", "r");
 		char line[1024];
+		int i;
+		char *p;
+		char *sep;
+		char *fs;
 		if (fp) {
 			while (fgets(line, sizeof(line), fp)) {
 				char mnt[PATH_MAX] = {0};
 				char fstype[64] = {0};
-				char *p = strchr(line, ' ');
-				for (int i = 0; p && i < 3; i++)
+				p = strchr(line, ' ');
+				for (i = 0; p && i < 3; i++)
 					p = strchr(p + 1, ' ');
 				if (p) {
 					p++;
-					char *sep = strchr(p, ' ');
+					sep = strchr(p, ' ');
 					if (sep && (size_t)(sep - p) < sizeof(mnt)) {
 						memcpy(mnt, p, (size_t)(sep - p));
 						mnt[sep - p] = '\0';
 						p = strchr(sep + 1, ' ');
 						if (p) {
 							p++;
-							char *fs = strchr(p, ' ');
+							fs = strchr(p, ' ');
 							if (fs && (size_t)(fs - p) < sizeof(fstype)) {
 								memcpy(fstype, p, (size_t)(fs - p));
 								fstype[fs - p] = '\0';
@@ -9414,9 +9716,6 @@ load_desktop_dir(const char *dir)
 static void
 ensure_desktop_entries_loaded(void)
 {
-	if (desktop_entries_loaded)
-		return;
-
 	char appdirs[128][PATH_MAX];
 	int appdir_count = 0;
 	const char *home = getenv("HOME");
@@ -9437,6 +9736,9 @@ ensure_desktop_entries_loaded(void)
 	char xdg_buf[4096] = {0};
 	char *saveptr = NULL;
 	const char *xdg_data_dirs;
+
+	if (desktop_entries_loaded)
+		return;
 
 	memset(appdirs, 0, sizeof(appdirs));
 
@@ -9697,6 +9999,26 @@ modal_update_results(Monitor *m)
 		mo->selected[0] = -1;
 		mo->scroll[0] = 0;
 	}
+}
+
+static void
+modal_prewarm(Monitor *m)
+{
+	int prev_idx;
+
+	if (!m || !m->modal.tree || m->modal.visible)
+		return;
+
+	ensure_desktop_entries_loaded();
+
+	prev_idx = m->modal.active_idx;
+	m->modal.active_idx = 0;
+	m->modal.search[0][0] = '\0';
+	m->modal.search_len[0] = 0;
+	modal_update_results(m);
+	m->modal.active_idx = prev_idx;
+	m->modal.selected[0] = -1;
+	m->modal.scroll[0] = 0;
 }
 
 static void
@@ -10047,6 +10369,9 @@ updatecpuhover(Monitor *m, double cx, double cy)
 	CpuPopup *p;
 	int popup_x;
 	int new_hover = -1;
+	uint64_t now = monotonic_msec();
+	int need_refresh = 0;
+	int stale_refresh = 0;
 
 	if (!m || !m->showbar || !m->statusbar.cpu.tree || !m->statusbar.cpu_popup.tree) {
 		if (m && m->statusbar.cpu_popup.tree) {
@@ -10097,16 +10422,34 @@ updatecpuhover(Monitor *m, double cx, double cy)
 		wlr_scene_node_set_position(&p->tree->node,
 				popup_x, m->statusbar.area.height);
 		new_hover = cpu_popup_hover_index(m, p);
-		if (new_hover != p->hover_idx || !was_visible) {
-			p->hover_idx = new_hover;
-			p->refresh_data = was_visible ? 0 : 1;
-			rendercpupopup(m);
+		stale_refresh = (p->last_fetch_ms == 0 ||
+				now < p->last_fetch_ms ||
+				(now - p->last_fetch_ms) >= cpu_popup_refresh_interval_ms);
+		need_refresh = (!was_visible || stale_refresh) &&
+				(p->suppress_refresh_until_ms == 0 ||
+				 now >= p->suppress_refresh_until_ms);
+		if (need_refresh)
+			p->refresh_data = 1;
+		if (new_hover != p->hover_idx || !was_visible || need_refresh) {
+			int allow_render = 1;
+			if (!need_refresh && was_visible && new_hover != p->hover_idx &&
+					p->last_render_ms > 0 && now >= p->last_render_ms &&
+					now - p->last_render_ms < 16)
+				allow_render = 0;
+			if (allow_render) {
+				p->hover_idx = new_hover;
+				rendercpupopup(m);
+			}
 		}
+		if (!was_visible)
+			schedule_cpu_popup_refresh(cpu_popup_refresh_interval_ms);
 	} else if (p->visible) {
 		p->visible = 0;
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
 		p->hover_idx = -1;
-		p->refresh_data = 1;
+		p->refresh_data = 0;
+		p->last_render_ms = 0;
+		p->suppress_refresh_until_ms = 0;
 	}
 }
 
@@ -10332,6 +10675,7 @@ static int
 adjust_backlight_by_steps(int steps)
 {
 	double percent;
+	double delta;
 
 	if (steps == 0)
 		return 0;
@@ -10339,25 +10683,50 @@ adjust_backlight_by_steps(int steps)
 	backlight_available = findbacklightdevice(backlight_brightness_path,
 			sizeof(backlight_brightness_path),
 			backlight_max_path, sizeof(backlight_max_path));
-	if (!backlight_available)
-		return 0;
 
 	percent = backlight_percent();
 	if (percent < 0.0)
 		percent = light_last_percent;
 	if (percent < 0.0)
-		return 0;
+		percent = light_cached_percent >= 0.0 ? light_cached_percent : 50.0; /* fallback default */
 
-	percent += (double)steps * light_step;
-	if (percent < 0.0)
-		percent = 0.0;
-	if (percent > 100.0)
-		percent = 100.0;
+	delta = (double)steps * light_step;
 
-	if (set_backlight_percent(percent) != 0)
-		return 0;
+	/* First try relative adjustment via helper and return on success */
+	if (set_backlight_relative(delta) == 0) {
+		double newp = backlight_percent();
+		if (newp >= 0.0)
+			percent = newp;
+		else
+			percent = percent + delta;
+		if (percent < 0.0)
+			percent = 0.0;
+		if (percent > 100.0)
+			percent = 100.0;
+		light_last_percent = percent;
+		light_cached_percent = percent;
+		refreshstatuslight();
+		return 1;
+	}
 
-	light_last_percent = percent;
+	/* Fall back to absolute write */
+	{
+		double target = percent + delta;
+		if (target < 0.0)
+			target = 0.0;
+		if (target > 100.0)
+			target = 100.0;
+
+		if (set_backlight_percent(target) != 0) {
+			light_last_percent = target;
+			light_cached_percent = target;
+			refreshstatuslight();
+			return 1;
+		}
+		light_last_percent = target;
+		light_cached_percent = target;
+	}
+
 	refreshstatuslight();
 	return 1;
 }
@@ -10745,6 +11114,10 @@ cleanup(void)
 	if (status_hover_timer) {
 		wl_event_source_remove(status_hover_timer);
 		status_hover_timer = NULL;
+	}
+	if (cpu_popup_refresh_timer) {
+		wl_event_source_remove(cpu_popup_refresh_timer);
+		cpu_popup_refresh_timer = NULL;
 	}
 	tray_menu_hide_all();
 	if (tray_event) {
@@ -11329,6 +11702,7 @@ createmon(struct wl_listener *listener, void *data)
 	wl_list_insert(&mons, &m->link);
 	printstatus();
 	init_tree(m);
+	modal_prewarm(m);
 
 	/* The xdg-protocol specifies:
 	 *
@@ -13253,6 +13627,26 @@ setsel(struct wl_listener *listener, void *data)
 	wlr_seat_set_selection(seat, event->source, event->serial);
 }
 
+static void
+ensure_shell_env(void)
+{
+	const char *shell = getenv("SHELL");
+	struct passwd *pw;
+	int looks_like_minimal_nix_bash = 0;
+
+	if (shell && *shell) {
+		looks_like_minimal_nix_bash = strstr(shell, "/nix/store/") &&
+				strstr(shell, "bash-") &&
+				!strstr(shell, "bash-interactive");
+		if (!looks_like_minimal_nix_bash)
+			return;
+	}
+
+	pw = getpwuid(getuid());
+	if (pw && pw->pw_shell && *pw->pw_shell)
+		setenv("SHELL", pw->pw_shell, 1);
+}
+
 void
 setup(void)
 {
@@ -13264,6 +13658,9 @@ setup(void)
 		sigaction(sig[i], &sa, NULL);
 
 	wlr_log_init(log_level, NULL);
+
+	/* Make sure spawned terminals get the real login shell, not the minimal wrapper shell */
+	ensure_shell_env();
 
 	/* The Wayland display is managed by libwayland. It handles accepting
 	 * clients from the Unix socket, manging Wayland globals, and so on. */
@@ -13282,6 +13679,7 @@ setup(void)
 	if (!loadstatusfont())
 		die("couldn't load statusbar font");
 	tray_update_icons_text();
+	ensure_desktop_entries_loaded();
 	backlight_available = findbacklightdevice(backlight_brightness_path,
 			sizeof(backlight_brightness_path),
 			backlight_max_path, sizeof(backlight_max_path));
