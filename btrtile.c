@@ -37,7 +37,9 @@ static void remove_client(Monitor *m, Client *c);
 static void setratio_h(const Arg *arg);
 static void setratio_v(const Arg *arg);
 static void swapclients(const Arg *arg);
+static unsigned int count_columns(LayoutNode *node, Monitor *m);
 static unsigned int visible_count(LayoutNode *node, Monitor *m);
+static unsigned int target_columns(Monitor *m);
 static Client *xytoclient(double x, double y);
 
 static int resizing_from_mouse = 0;
@@ -282,6 +284,10 @@ insert_client(Monitor *m, Client *focused_client, Client *new_client)
 	LayoutNode **root = &m->root, *old_root,
 	*focused_node, *new_client_node, *old_client_node;
 	unsigned int wider, mid_x, mid_y;
+	unsigned int desired_cols, current_cols;
+
+	desired_cols = target_columns(m);
+	current_cols = count_columns(*root, m);
 
 	/* If no root , new client becomes the root. */
 	if (!*root) {
@@ -308,6 +314,8 @@ insert_client(Monitor *m, Client *focused_client, Client *new_client)
 
 	/* Decide split direction. */
 	wider = (focused_client->geom.width >= focused_client->geom.height);
+	if (current_cols < desired_cols)
+		wider = 1;
 	focused_node->is_client_node = 0;
 	focused_node->client         = NULL;
 	focused_node->is_split_vertically = (wider ? 1 : 0);
@@ -513,17 +521,38 @@ static void swapclients(const Arg *arg) {
         }
     }
 
-    /* If target is found, swap the two clients’ positions in the layout tree */
-    if (target) {
-        sel_node = find_client_node(selmon->root, sel);
-        target_node = find_client_node(selmon->root, target);
-        if (sel_node && target_node) {
-            tmp = sel_node->client;
-            sel_node->client = target_node->client;
-            target_node->client = tmp;
-            arrange(selmon);
-        }
-    }
+	/* If target is found, swap the two clients’ positions in the layout tree */
+	if (target) {
+		sel_node = find_client_node(selmon->root, sel);
+		target_node = find_client_node(selmon->root, target);
+		if (sel_node && target_node) {
+			tmp = sel_node->client;
+			sel_node->client = target_node->client;
+			target_node->client = tmp;
+			arrange(selmon);
+		}
+	}
+}
+
+static unsigned int
+count_columns(LayoutNode *node, Monitor *m)
+{
+	unsigned int left_cols, right_cols;
+	Client *c;
+
+	if (!node)
+		return 0;
+	if (node->is_client_node) {
+		c = node->client;
+		return (c && VISIBLEON(c, m) && !c->isfloating && !c->isfullscreen) ? 1 : 0;
+	}
+
+	left_cols = count_columns(node->left, m);
+	right_cols = count_columns(node->right, m);
+
+	if (node->is_split_vertically)
+		return left_cols + right_cols;
+	return MAX(left_cols, right_cols);
 }
 
 static unsigned int
@@ -542,6 +571,23 @@ visible_count(LayoutNode *node, Monitor *m)
 	}
 	/* Else it’s a split node. */
 	return visible_count(node->left, m) + visible_count(node->right, m);
+}
+
+static unsigned int
+target_columns(Monitor *m)
+{
+	float ratio;
+
+	/* 16:9-ish -> 2 cols, ~21:9 -> 3 cols, ~32:9 -> 4 cols */
+	if (!m || m->w.height == 0)
+		return 2;
+
+	ratio = (float)m->w.width / (float)m->w.height;
+	if (ratio >= 3.2f)
+		return 4;
+	if (ratio >= 2.2f)
+		return 3;
+	return 2;
 }
 
 static Client *
