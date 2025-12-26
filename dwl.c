@@ -9996,30 +9996,6 @@ ensure_desktop_entries_loaded(void)
 	for (int i = 0; i < appdir_count && desktop_entry_count < (int)LENGTH(desktop_entries); i++)
 		load_desktop_dir(appdirs[i]);
 
-	/* also scan nix store directly for stray .desktop files */
-	if (desktop_entry_count < (int)LENGTH(desktop_entries)) {
-		const char *store_root = "/nix/store";
-		DIR *sd = opendir(store_root);
-		struct dirent *ent;
-		if (sd) {
-			while ((ent = readdir(sd))) {
-				char path[PATH_MAX];
-				struct stat st = {0};
-
-				if (desktop_entry_count >= (int)LENGTH(desktop_entries))
-					break;
-				if (ent->d_name[0] == '.')
-					continue;
-				if (snprintf(path, sizeof(path), "%s/%s/share/applications", store_root, ent->d_name) >= (int)sizeof(path))
-					continue;
-				if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode))
-					continue;
-				load_desktop_dir(path);
-			}
-			closedir(sd);
-		}
-	}
-
 	desktop_entries_loaded = 1;
 }
 
