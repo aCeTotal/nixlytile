@@ -216,6 +216,7 @@ typedef struct {
 	time_t file_results_mtime[MODAL_MAX_RESULTS];
 	pid_t file_search_pid;
 	int file_search_fd;
+	int file_search_fallback;
 	struct wl_event_source *file_search_event;
 	size_t file_search_len;
 	char file_search_buf[4096];
@@ -239,6 +240,7 @@ typedef struct {
 	int anchor_x;
 	int anchor_y;
 	int anchor_w;
+	uint64_t suppress_refresh_until_ms;
 } NetPopup;
 
 typedef struct {
@@ -800,7 +802,7 @@ static void modal_ensure_selection_visible(Monitor *m);
 static int modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym);
 static void modal_file_search_clear_results(Monitor *m);
 static void modal_file_search_stop(Monitor *m);
-static int modal_file_search_timeout(void *data);
+static void modal_file_search_start_mode(Monitor *m, int fallback);
 static void modal_file_search_start(Monitor *m);
 static int modal_file_search_event(int fd, uint32_t mask, void *data);
 static void modal_truncate_to_width(const char *src, char *dst, size_t len, int max_px);
@@ -845,6 +847,7 @@ static int set_pipewire_mic_mute(int mute);
 static int toggle_pipewire_mic_mute(void);
 static double pipewire_mic_volume_percent(void);
 static void updatecpuhover(Monitor *m, double cx, double cy);
+static void set_status_task_due(void (*fn)(void), uint64_t due_ms);
 static double net_bytes_to_rate(unsigned long long cur, unsigned long long prev,
 		double elapsed);
 static void fix_tray_argb32(uint32_t *pixels, size_t count, int use_rgba_order);
@@ -1046,6 +1049,10 @@ static struct wl_event_source *cpu_popup_refresh_timer = NULL;
 static char wifi_scan_buf[8192];
 static size_t wifi_scan_len = 0;
 static int wifi_scan_inflight;
+static unsigned int wifi_networks_generation;
+static unsigned int wifi_scan_generation;
+static int wifi_networks_accept_updates;
+static int wifi_networks_freeze_existing;
 static struct wl_list wifi_networks; /* WifiNetwork */
 static int wifi_networks_initialized;
 static char net_text[64] = "Net: --";
@@ -4473,10 +4480,13 @@ modal_show(const Arg *arg)
 	modal_file_search_stop(m);
 	modal_file_search_clear_results(m);
 	mo->file_search_last[0] = '\0';
-	mo->search[mo->active_idx][0] = '\0';
-	mo->search_len[mo->active_idx] = 0;
-	mo->selected[mo->active_idx] = -1;
-	mo->scroll[mo->active_idx] = 0;
+	for (int i = 0; i < 3; i++) {
+		mo->search[i][0] = '\0';
+		mo->search_len[i] = 0;
+		mo->selected[i] = -1;
+		mo->scroll[i] = 0;
+	}
+	mo->file_search_fallback = 0;
 	mo->visible = 1;
 	modal_update_results(m);
 	modal_render(m);
@@ -5210,18 +5220,26 @@ request_ssid_async(const char *iface)
 	int pipefd[2] = {-1, -1};
 	char cmd[256];
 	const char *iw = "/run/current-system/sw/bin/iw";
+	const char *nmcli = "/run/current-system/sw/bin/nmcli";
 
 	if (!iface || !*iface)
 		return;
 	if (ssid_pid > 0 || ssid_event)
 		return;
+	if (access(nmcli, X_OK) != 0) {
+		nmcli = "/run/wrappers/bin/nmcli";
+		if (access(nmcli, X_OK) != 0)
+			nmcli = "nmcli";
+	}
 	if (access(iw, X_OK) != 0) {
 		iw = "/run/wrappers/bin/iw";
 		if (access(iw, X_OK) != 0)
 			iw = "iw";
 	}
-	if (snprintf(cmd, sizeof(cmd), "%s dev %s link 2>/dev/null", iw, iface)
-			>= (int)sizeof(cmd))
+	if (snprintf(cmd, sizeof(cmd),
+				"%s -t -f active,ssid dev wifi | grep '^yes' | cut -d: -f2 || "
+				"%s dev %s link 2>/dev/null",
+				nmcli, iw, iface) >= (int)sizeof(cmd))
 		return;
 
 	if (pipe(pipefd) != 0)
@@ -5299,19 +5317,30 @@ ssid_event_cb(int fd, uint32_t mask, void *data)
 	ssid_buf[ssid_len] = '\0';
 	if (ssid_buf[0]) {
 		char *line = ssid_buf;
-		while ((line = strstr(line, "SSID"))) {
-			while (*line && *line != ':' && *line != ' ')
-				line++;
-			while (*line == ':' || *line == ' ' || *line == '\t')
-				line++;
-			if (*line) {
-				char *end = line;
-				while (*end && *end != '\n' && *end != '\r')
-					end++;
-				*end = '\0';
-				snprintf(net_ssid, sizeof(net_ssid), "%s", line);
+		while (line && *line) {
+			char *next = strpbrk(line, "\r\n");
+			if (next)
+				*next = '\0';
+
+			/* Try iw-style output first */
+			char *ssid = strstr(line, "SSID");
+			if (ssid) {
+				while (*ssid && *ssid != ':' && *ssid != ' ')
+					ssid++;
+				while (*ssid == ':' || *ssid == ' ' || *ssid == '\t')
+					ssid++;
+			} else {
+				ssid = line;
+				while (*ssid == ' ' || *ssid == '\t')
+					ssid++;
+			}
+
+			if (ssid && *ssid) {
+				snprintf(net_ssid, sizeof(net_ssid), "%s", ssid);
 				break;
 			}
+
+			line = next ? next + 1 : NULL;
 		}
 	}
 	if (!net_ssid[0])
@@ -6153,9 +6182,12 @@ static void
 net_menu_hide_all(void)
 {
 	Monitor *m;
+	int any_visible = 0;
 
 	wl_list_for_each(m, &mons, link) {
 		if (m->statusbar.net_menu.tree) {
+			if (m->statusbar.net_menu.visible)
+				any_visible = 1;
 			wlr_scene_node_set_enabled(&m->statusbar.net_menu.tree->node, 0);
 			m->statusbar.net_menu.visible = 0;
 		}
@@ -6165,6 +6197,12 @@ net_menu_hide_all(void)
 		}
 		m->statusbar.net_menu.hover = -1;
 		m->statusbar.net_menu.submenu_hover = -1;
+	}
+	if (any_visible) {
+		wifi_networks_accept_updates = 0;
+		wifi_networks_freeze_existing = 0;
+		wifi_networks_generation++;
+		wifi_networks_clear();
 	}
 }
 
@@ -6344,6 +6382,7 @@ request_wifi_scan(void)
 	if (pipe(pipefd) != 0)
 		return;
 
+	wifi_scan_generation = wifi_networks_generation;
 	wifi_scan_pid = fork();
 	if (wifi_scan_pid == 0) {
 		close(pipefd[0]);
@@ -7665,6 +7704,20 @@ positionstatusmodules(Monitor *m)
 	}
 }
 
+static int
+wifi_network_exists(const char *ssid)
+{
+	WifiNetwork *it;
+
+	if (!ssid || !*ssid)
+		return 0;
+	wl_list_for_each(it, &wifi_networks, link) {
+		if (strncmp(it->ssid, ssid, sizeof(it->ssid)) == 0)
+			return 1;
+	}
+	return 0;
+}
+
 static void
 wifi_networks_insert_sorted(WifiNetwork *n)
 {
@@ -7715,7 +7768,11 @@ wifi_scan_event_cb(int fd, uint32_t mask, void *data)
 	ssize_t n;
 	char *saveptr = NULL;
 	char *line;
+	int discard_results;
 	(void)data;
+
+	discard_results = (!wifi_networks_accept_updates)
+			|| (wifi_scan_generation != wifi_networks_generation);
 
 	for (;;) {
 		if (wifi_scan_len >= sizeof(wifi_scan_buf) - 1)
@@ -7735,7 +7792,17 @@ wifi_scan_event_cb(int fd, uint32_t mask, void *data)
 	}
 
 	wifi_scan_buf[wifi_scan_len] = '\0';
-	wifi_networks_clear();
+
+	if (discard_results) {
+		wifi_scan_finish();
+		if (wifi_networks_accept_updates && !wifi_scan_inflight)
+			request_wifi_scan();
+		wifi_scan_plan_rescan();
+		return 0;
+	}
+
+	if (!wifi_networks_freeze_existing)
+		wifi_networks_clear();
 
 	line = strtok_r(wifi_scan_buf, "\n", &saveptr);
 	while (line) {
@@ -7761,6 +7828,10 @@ wifi_scan_event_cb(int fd, uint32_t mask, void *data)
 		if (line[0])
 			snprintf(ssid, sizeof(ssid), "%s", line);
 		if (!ssid[0]) {
+			line = strtok_r(NULL, "\n", &saveptr);
+			continue;
+		}
+		if (wifi_networks_freeze_existing && wifi_network_exists(ssid)) {
 			line = strtok_r(NULL, "\n", &saveptr);
 			continue;
 		}
@@ -7875,6 +7946,10 @@ net_menu_open(Monitor *m)
 
 	menu = &m->statusbar.net_menu;
 	net_menu_hide_all();
+	wifi_networks_generation++;
+	wifi_networks_accept_updates = 1;
+	wifi_networks_freeze_existing = 1;
+	wifi_networks_clear();
 	if (m->statusbar.net_popup.tree) {
 		wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
 		m->statusbar.net_popup.visible = 0;
@@ -8217,11 +8292,11 @@ refreshstatusnet(void)
 			}
 			if (!net_ssid[0])
 				snprintf(net_ssid, sizeof(net_ssid), "WiFi");
-			snprintf(net_text, sizeof(net_text), "Net: %s", net_ssid);
+			snprintf(net_text, sizeof(net_text), "WiFi: %s", net_ssid);
 		} else {
 			stop_ssid_fetch();
 			ssid_last_time = 0;
-			snprintf(net_text, sizeof(net_text), "Net: Wired");
+			snprintf(net_text, sizeof(net_text), "Wired");
 			snprintf(net_ssid, sizeof(net_ssid), "Ethernet");
 		}
 
@@ -8823,6 +8898,18 @@ trigger_status_task_now(void (*fn)(void))
 	}
 }
 
+static void
+set_status_task_due(void (*fn)(void), uint64_t due_ms)
+{
+	for (size_t i = 0; i < LENGTH(status_tasks); i++) {
+		if (status_tasks[i].fn == fn) {
+			status_tasks[i].next_due_ms = due_ms;
+			schedule_next_status_refresh();
+			return;
+		}
+	}
+}
+
 static int
 status_task_hover_active(void (*fn)(void))
 {
@@ -8960,6 +9047,34 @@ modal_file_search_clear_results(Monitor *m)
 	}
 	mo->selected[1] = -1;
 	mo->scroll[1] = 0;
+	mo->file_search_fallback = 0;
+}
+
+static int
+ci_contains(const char *hay, const char *needle)
+{
+	size_t hlen, nlen;
+
+	if (!needle || !*needle)
+		return 1;
+	if (!hay || !*hay)
+		return 0;
+	hlen = strlen(hay);
+	nlen = strlen(needle);
+	if (nlen > hlen)
+		return 0;
+	for (size_t i = 0; i + nlen <= hlen; i++) {
+		size_t j = 0;
+		for (; j < nlen; j++) {
+			char a = (char)tolower((unsigned char)hay[i + j]);
+			char b = (char)tolower((unsigned char)needle[j]);
+			if (a != b)
+				break;
+		}
+		if (j == nlen)
+			return 1;
+	}
+	return 0;
 }
 
 static int
@@ -9031,7 +9146,8 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 		}
 		return 1;
 	}
-	if (sym >= 0x20 && sym <= 0x7e && mods == 0) {
+	if (sym >= 0x20 && sym <= 0x7e &&
+			!(mods & (WLR_MODIFIER_CTRL | WLR_MODIFIER_LOGO))) {
 		int len = mo->search_len[mo->active_idx];
 		if (len + 1 < (int)sizeof(mo->search[0])) {
 			mo->search[mo->active_idx][len] = (char)sym;
@@ -9064,6 +9180,7 @@ modal_file_search_stop(Monitor *m)
 		mo->file_search_fd = -1;
 	}
 	if (mo->file_search_pid > 0) {
+		wlr_log(WLR_INFO, "modal file search stop: killing pid=%d", mo->file_search_pid);
 		kill(mo->file_search_pid, SIGTERM);
 		waitpid(mo->file_search_pid, NULL, WNOHANG);
 		mo->file_search_pid = -1;
@@ -9135,6 +9252,7 @@ modal_file_search_add_line(Monitor *m, const char *line)
 	double epoch = 0.0;
 	time_t t;
 	struct tm tm;
+	char needle[256];
 
 	if (!m || !line || !*line)
 		return;
@@ -9171,11 +9289,33 @@ modal_file_search_add_line(Monitor *m, const char *line)
 			snprintf(dir, sizeof(dir), ".");
 		}
 	}
+
 	epoch = strtod(tab2 + 1, NULL);
 	t = (time_t)epoch;
 	if (localtime_r(&t, &tm))
 		strftime(when, sizeof(when), "%Y-%m-%d %H:%M", &tm);
 	shorten_path_display(dir, path_disp, sizeof(path_disp));
+
+	/* Always filter locally to allow any substring/character combination to match */
+	const char *q = mo->file_search_last;
+	int qlen = q ? (int)strlen(q) : 0;
+	int qstart = 0, qend = qlen;
+	if (qlen >= (int)sizeof(needle))
+		qlen = (int)sizeof(needle) - 1;
+	while (qstart < qlen && isspace((unsigned char)q[qstart]))
+		qstart++;
+	while (qend > qstart && isspace((unsigned char)q[qend - 1]))
+		qend--;
+	qlen = qend - qstart;
+	if (qlen <= 0)
+		return;
+	for (int i = 0; i < qlen; i++)
+		needle[i] = (char)q[qstart + i];
+	needle[qlen] = '\0';
+	if (!ci_contains(name, needle) && !ci_contains(path, needle))
+		return;
+
+	wlr_log(WLR_INFO, "modal file search result: name='%s' dir='%s'", name, path_disp[0] ? path_disp : dir);
 
 	idx = mo->result_count[1];
 	snprintf(mo->results[1][idx], sizeof(mo->results[1][idx]),
@@ -9226,7 +9366,7 @@ modal_file_search_flush_buffer(Monitor *m)
 }
 
 static void
-modal_file_search_start(Monitor *m)
+modal_file_search_start_mode(Monitor *m, int fallback)
 {
 	ModalOverlay *mo;
 	const char *home_env;
@@ -9246,14 +9386,12 @@ modal_file_search_start(Monitor *m)
 
 	modal_file_search_stop(m);
 	modal_file_search_clear_results(m);
-	snprintf(mo->file_search_last, sizeof(mo->file_search_last), "%s", mo->search[1]);
 
-	if (mo->search_len[1] <= 0)
-		return;
 	if (mo->search_len[1] < modal_file_search_minlen) {
-		modal_file_search_clear_results(m);
+		mo->file_search_last[0] = '\0';
 		return;
 	}
+	mo->file_search_fallback = 1; /* always filter locally */
 
 	/* helper to add unique, existing directories */
 #define ADD_ROOT(PATHSTR) \
@@ -9354,20 +9492,41 @@ modal_file_search_start(Monitor *m)
 		ADD_ROOT("/mnt");
 		ADD_ROOT("/media");
 
-		if (root_count == 0)
-			ADD_ROOT("/");
-	#undef ADD_ROOT
+	if (root_count == 0)
+		ADD_ROOT("/");
+#undef ADD_ROOT
 
 	nlen = mo->search_len[1];
-	if (nlen >= (int)sizeof(pattern) - 3)
-		nlen = (int)sizeof(pattern) - 4;
-	pattern[0] = '*';
-	memcpy(pattern + 1, mo->search[1], (size_t)nlen);
-	pattern[nlen + 1] = '*';
-	pattern[nlen + 2] = '\0';
-
-	if (pipe(pipefd) != 0)
+	/* Trim whitespace, then build find pattern ("*<escaped query>*" or "*" in fallback) */
+	if (nlen > (int)sizeof(pattern) - 1)
+		nlen = (int)sizeof(pattern) - 1;
+	char query[256];
+	if (nlen > (int)sizeof(query) - 1)
+		nlen = (int)sizeof(query) - 1;
+	memcpy(query, mo->search[1], (size_t)nlen);
+	query[nlen] = '\0';
+	int start = 0, end = nlen;
+	while (start < nlen && isspace((unsigned char)query[start]))
+		start++;
+	while (end > start && isspace((unsigned char)query[end - 1]))
+		end--;
+	nlen = end - start;
+	if (nlen <= 0) {
+		mo->file_search_last[0] = '\0';
 		return;
+	}
+	{
+		const char *q = query + start;
+		(void)fallback;
+		(void)q;
+		snprintf(pattern, sizeof(pattern), "*");
+	}
+
+	if (pipe(pipefd) != 0) {
+		wlr_log(WLR_ERROR, "modal file search: pipe failed: %s", strerror(errno));
+		mo->file_search_last[0] = '\0';
+		return;
+	}
 	/* keep read FD out of launched apps and avoid blocking reads */
 	fcntl(pipefd[0], F_SETFD, fcntl(pipefd[0], F_GETFD) | FD_CLOEXEC);
 	fcntl(pipefd[0], F_SETFL, fcntl(pipefd[0], F_GETFL) | O_NONBLOCK);
@@ -9387,13 +9546,8 @@ modal_file_search_start(Monitor *m)
 		for (int i = 0; i < root_count && argc < (int)LENGTH(argv) - 20; i++) {
 			argv[argc++] = (char *)roots[i];
 		}
-		argv[argc++] = "(";
 		argv[argc++] = "-path";
-		argv[argc++] = "*/.local/*";
-		argv[argc++] = "-o";
-		argv[argc++] = "-path";
-		argv[argc++] = "*/.cache/*";
-		argv[argc++] = ")";
+		argv[argc++] = "*/.*";
 		argv[argc++] = "-prune";
 		argv[argc++] = "-o";
 		argv[argc++] = "-type";
@@ -9408,6 +9562,8 @@ modal_file_search_start(Monitor *m)
 	} else if (pid < 0) {
 		close(pipefd[0]);
 		close(pipefd[1]);
+		wlr_log(WLR_ERROR, "modal file search: fork failed: %s", strerror(errno));
+		mo->file_search_last[0] = '\0';
 		return;
 	}
 
@@ -9419,8 +9575,22 @@ modal_file_search_start(Monitor *m)
 	mo->file_search_buf[0] = '\0';
 	mo->file_search_event = wl_event_loop_add_fd(event_loop, mo->file_search_fd,
 			WL_EVENT_READABLE | WL_EVENT_HANGUP, modal_file_search_event, m);
-	if (!mo->file_search_event)
+	if (!mo->file_search_event) {
+		wlr_log(WLR_ERROR, "modal file search: failed to watch results fd");
 		modal_file_search_stop(m);
+		mo->file_search_last[0] = '\0';
+		return;
+	}
+
+	snprintf(mo->file_search_last, sizeof(mo->file_search_last), "%s", mo->search[1]);
+	wlr_log(WLR_INFO, "modal file search start: '%s' (len=%d, roots=%d, fd=%d pid=%d event=%p fallback=%d)",
+			mo->file_search_last, mo->search_len[1], root_count, mo->file_search_fd, mo->file_search_pid, (void *)mo->file_search_event, mo->file_search_fallback);
+}
+
+static void
+modal_file_search_start(Monitor *m)
+{
+	modal_file_search_start_mode(m, 1);
 }
 
 static int
@@ -9438,9 +9608,12 @@ modal_file_search_event(int fd, uint32_t mask, void *data)
 	if (fd != mo->file_search_fd)
 		return 0;
 
+	wlr_log(WLR_INFO, "modal file search event: mask=0x%x pid=%d fd=%d", mask, mo->file_search_pid, fd);
+
 	for (;;) {
 		n = read(fd, buf, sizeof(buf));
 		if (n > 0) {
+			wlr_log(WLR_INFO, "modal file search read %zd bytes (buf_len=%zu)", n, mo->file_search_len);
 			if (mo->file_search_len >= sizeof(mo->file_search_buf) - 1)
 				modal_file_search_flush_buffer(m);
 			if (mo->file_search_len < sizeof(mo->file_search_buf) - 1) {
@@ -9462,12 +9635,14 @@ modal_file_search_event(int fd, uint32_t mask, void *data)
 				mo->file_search_len = 0;
 				mo->file_search_buf[0] = '\0';
 			}
+			wlr_log(WLR_INFO, "modal file search done: '%s' (%d results)", mo->file_search_last, mo->result_count[1]);
 			modal_file_search_stop(m);
 			break;
 		} else {
 			if (errno == EAGAIN || errno == EWOULDBLOCK)
 				break;
 			modal_file_search_stop(m);
+			wlr_log(WLR_ERROR, "modal file search read error: %s", strerror(errno));
 			break;
 		}
 	}
@@ -9865,20 +10040,19 @@ modal_update_results(Monitor *m)
 		modal_file_search_stop(m);
 
 	if (active == 1) {
+		if (mo->search_len[1] < modal_file_search_minlen) {
+			modal_file_search_stop(m);
+			modal_file_search_clear_results(m);
+			mo->file_search_last[0] = '\0';
+			return;
+		}
 		if (strncmp(mo->search[1], mo->file_search_last, sizeof(mo->file_search_last)) != 0) {
 			modal_file_search_stop(m);
-			if (mo->search_len[1] >= modal_file_search_minlen) {
-				if (mo->file_search_timer)
-					wl_event_source_timer_update(mo->file_search_timer, 0);
-				if (!mo->file_search_timer)
-					mo->file_search_timer = wl_event_loop_add_timer(event_loop,
-							modal_file_search_timeout, m);
-				wl_event_source_timer_update(mo->file_search_timer, 150);
-			}
-		}
-		if (mo->search_len[1] < modal_file_search_minlen) {
-			modal_file_search_clear_results(m);
-			return;
+			modal_file_search_start(m);
+		} else if (mo->file_search_pid <= 0 && mo->result_count[1] == 0 && !mo->file_search_fallback) {
+			/* No search running and no results; retry current query once */
+			modal_file_search_stop(m);
+			modal_file_search_start(m);
 		}
 		if (mo->result_count[1] > 0) {
 			if (mo->selected[1] < 0)
@@ -10301,10 +10475,32 @@ updatestatuscpu(void *data)
 	}
 
 	status_tasks[chosen].fn();
-	if (status_task_hover_active(status_tasks[chosen].fn))
+	if (status_tasks[chosen].fn == refreshstatusnet) {
+		uint64_t delay_ms = 60000;
+		uint64_t allow_fast_after = now;
+		int popup_active = 0;
+		Monitor *m;
+
+		wl_list_for_each(m, &mons, link) {
+			if (m->showbar && m->statusbar.net_popup.visible) {
+				popup_active = 1;
+				if (m->statusbar.net_popup.suppress_refresh_until_ms > allow_fast_after)
+					allow_fast_after = m->statusbar.net_popup.suppress_refresh_until_ms;
+			}
+		}
+
+		if (popup_active) {
+			if (allow_fast_after > now)
+				delay_ms = allow_fast_after - now;
+			else
+				delay_ms = 1000;
+		}
+		status_tasks[chosen].next_due_ms = now + delay_ms;
+	} else if (status_task_hover_active(status_tasks[chosen].fn)) {
 		status_tasks[chosen].next_due_ms = now + STATUS_FAST_MS;
-	else
+	} else {
 		status_tasks[chosen].next_due_ms = now + random_status_delay_ms();
+	}
 	schedule_next_status_refresh();
 	return 0;
 }
@@ -10417,6 +10613,10 @@ updatecpuhover(Monitor *m, double cx, double cy)
 	was_visible = p->visible;
 
 	if (inside) {
+		if (!was_visible) {
+			/* Delay heavy popup refresh until pointer lingers for 2s */
+			p->suppress_refresh_until_ms = now + 2000;
+		}
 		p->visible = 1;
 		wlr_scene_node_set_enabled(&p->tree->node, 1);
 		wlr_scene_node_set_position(&p->tree->node,
@@ -10442,7 +10642,7 @@ updatecpuhover(Monitor *m, double cx, double cy)
 			}
 		}
 		if (!was_visible)
-			schedule_cpu_popup_refresh(cpu_popup_refresh_interval_ms);
+			schedule_cpu_popup_refresh(2000);
 	} else if (p->visible) {
 		p->visible = 0;
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
@@ -10461,6 +10661,7 @@ updatenethover(Monitor *m, double cx, double cy)
 	int was_visible;
 	StatusModule *icon_mod;
 	NetPopup *p;
+	uint64_t now = monotonic_msec();
 
 	if (!m || !m->showbar || !m->statusbar.net_popup.tree
 			|| (m->statusbar.net_menu.visible)) {
@@ -10508,6 +10709,10 @@ updatenethover(Monitor *m, double cx, double cy)
 	was_visible = p->visible;
 
 	if (inside) {
+		if (!was_visible) {
+			p->suppress_refresh_until_ms = now + 2000;
+			set_status_task_due(refreshstatusnet, p->suppress_refresh_until_ms);
+		}
 		p->visible = 1;
 		wlr_scene_node_set_enabled(&p->tree->node, 1);
 		wlr_scene_node_set_position(&p->tree->node,
@@ -10518,11 +10723,12 @@ updatenethover(Monitor *m, double cx, double cy)
 			p->anchor_y = m->statusbar.area.height;
 			p->anchor_w = icon_mod->width > 0 ? icon_mod->width : p->anchor_w;
 			rendernetpopup(m);
-			trigger_status_task_now(refreshstatusnet);
 		}
 	} else if (p->visible) {
 		p->visible = 0;
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
+		p->suppress_refresh_until_ms = 0;
+		set_status_task_due(refreshstatusnet, now + 60000);
 	}
 }
 
@@ -14553,14 +14759,4 @@ main(int argc, char *argv[])
 
 usage:
 	die("Usage: %s [-v] [-d] [-s startup command]", argv[0]);
-}
-static int
-modal_file_search_timeout(void *data)
-{
-	Monitor *m = data;
-
-	if (!m)
-		return 0;
-	modal_file_search_start(m);
-	return 0;
 }

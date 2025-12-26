@@ -55,7 +55,7 @@ static const float resize_factor           = 0.0002f; /* Resize multiplier for m
 static const uint32_t resize_interval_ms   = 24; /* Min interval between mouse-driven resize updates (higher smooths heavy apps). */
 static const double   resize_min_pixels    = 3.0; /* Min pointer movement before a new resize if within interval. */
 static const float    resize_ratio_epsilon = 0.002f; /* Smallest ratio change that should trigger an arrange. */
-static const int      modal_file_search_minlen = 2; /* Min chars before starting a file search */
+static const int      modal_file_search_minlen = 1; /* Min chars before starting a file search */
 
 /* window resizing */
 static const int lock_cursor = 0;	/* 1: lock cursor, 0: don't lock */
@@ -66,7 +66,7 @@ enum Direction { DIR_LEFT, DIR_RIGHT, DIR_UP, DIR_DOWN };
 #define TAGCOUNT (9)
 
 /* logging */
-static int log_level = WLR_ERROR;
+static int log_level = WLR_INFO;
 
 /* NOTE: ALWAYS keep a rule declared even if you don't use rules (e.g leave at least one example) */
 static const Rule rules[] = {
@@ -109,8 +109,8 @@ static const struct xkb_rule_names xkb_rules = {
 	.options = NULL,
 };
 
-static const int repeat_rate = 25;
-static const int repeat_delay = 600;
+static const int repeat_delay = 250;
+static const int repeat_rate = 60;
 
 /* Trackpad */
 static const int tap_to_click = 1;
@@ -209,7 +209,6 @@ static const Key keys[] = {
 	{ MODKEY,                    XKB_KEY_q,          killclient,     {0} },
 	{ MODKEY,                    XKB_KEY_t,          setlayout,      {.v = &layouts[0]} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_f,          setlayout,      {.v = &layouts[1]} },
-	{ MODKEY,                    XKB_KEY_m,          setlayout,      {.v = &layouts[2]} },
 	{ MODKEY,                    XKB_KEY_space,      setlayout,      {0} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_space,      togglefloating, {0} },
 	{ MODKEY,                    XKB_KEY_f,          togglefullscreen, {0} },
