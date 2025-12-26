@@ -11204,10 +11204,11 @@ buttonpress(struct wl_listener *listener, void *data)
 				if (cursor_mode == CurMove && c->isfloating) {
 					target = xytoclient(cursor->x, cursor->y);
 
+					remove_client(selmon, c);
 					if (target && !target->isfloating && !target->isfullscreen)
 						insert_client(selmon, target, c);
 					else
-						selmon->root = create_client_node(c);
+						insert_client(selmon, NULL, c);
 
 					setfloating(c, 0);
 					arrange(selmon);

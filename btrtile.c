@@ -37,12 +37,20 @@ static void remove_client(Monitor *m, Client *c);
 static void setratio_h(const Arg *arg);
 static void setratio_v(const Arg *arg);
 static void swapclients(const Arg *arg);
+static int collect_columns(LayoutNode *node, Monitor *m, LayoutNode **out_nodes,
+		unsigned int *out_counts, Client **out_clients, int max_out);
+static Client *first_visible_client(LayoutNode *node, Monitor *m);
+static Client *first_active_client(LayoutNode *node, Monitor *m);
+static Client *pick_target_client(Monitor *m, Client *focused_client);
 static unsigned int count_columns(LayoutNode *node, Monitor *m);
 static unsigned int visible_count(LayoutNode *node, Monitor *m);
+static unsigned int placement_count(LayoutNode *node, Monitor *m);
 static unsigned int target_columns(Monitor *m);
 static Client *xytoclient(double x, double y);
 
 static int resizing_from_mouse = 0;
+static int split_side_toggle = 0;
+static int col_pick_toggle = 0;
 static double resize_last_update_x __attribute__((unused)),
              resize_last_update_y __attribute__((unused));
 static uint32_t last_resize_time __attribute__((unused)) = 0;
@@ -144,7 +152,7 @@ apply_layout(Monitor *m, LayoutNode *node,
 static void
 btrtile(Monitor *m)
 {
-	Client *c, *focused = NULL;
+	Client *c;
 	int n = 0;
 	LayoutNode *found;
 	struct wlr_box full_area;
@@ -160,16 +168,12 @@ btrtile(Monitor *m)
 		}
 	}
 
-	/* If no client is found under cursor, fallback to focustop(m) */
-	if (!(focused = xytoclient(cursor->x, cursor->y)))
-		focused = focustop(m);
-
 	/* Insert visible clients that are not part of the tree. */
 	wl_list_for_each(c, &clients, link) {
 		if (VISIBLEON(c, m) && !c->isfloating && !c->isfullscreen && c->mon == m) {
 			found = find_client_node(m->root, c);
 			if (!found) {
-				insert_client(m, focused, c);
+				insert_client(m, NULL, c);
 			}
 			n++;
 		}
@@ -283,11 +287,19 @@ insert_client(Monitor *m, Client *focused_client, Client *new_client)
 	Client *old_client;
 	LayoutNode **root = &m->root, *old_root,
 	*focused_node, *new_client_node, *old_client_node;
-	unsigned int wider, mid_x, mid_y;
+	unsigned int wider;
+	int place_new_first;
 	unsigned int desired_cols, current_cols;
+	Client *target_client;
 
 	desired_cols = target_columns(m);
 	current_cols = count_columns(*root, m);
+	target_client = focused_client;
+	if (!target_client)
+		target_client = pick_target_client(m, NULL);
+	if (!target_client)
+		target_client = focused_client;
+	focused_client = target_client;
 
 	/* If no root , new client becomes the root. */
 	if (!*root) {
@@ -320,28 +332,31 @@ insert_client(Monitor *m, Client *focused_client, Client *new_client)
 	focused_node->client         = NULL;
 	focused_node->is_split_vertically = (wider ? 1 : 0);
 
-	/* Pick new_client side depending on the cursor position. */
-	mid_x = focused_client->geom.x + focused_client->geom.width / 2;
-	mid_y = focused_client->geom.y + focused_client->geom.height / 2;
-
-	if (wider) {
-		/* vertical split => left vs right */
-		if (cursor->x <= mid_x) {
-			focused_node->left  = new_client_node;
-			focused_node->right = old_client_node;
-		} else {
-			focused_node->left  = old_client_node;
-			focused_node->right = new_client_node;
-		}
+	/* Pick side deterministically to balance columns, not cursor position. */
+	place_new_first = 0;
+	if (focused_node->is_split_vertically) {
+		unsigned int old_count = visible_count(old_client_node, m);
+		unsigned int new_count = visible_count(new_client_node, m);
+		if (old_count > new_count)
+			place_new_first = 1;
+		else if (old_count == new_count)
+			place_new_first = split_side_toggle;
 	} else {
-		/* horizontal split => top vs bottom */
-		if (cursor->y <= mid_y) {
-			focused_node->left  = new_client_node;
-			focused_node->right = old_client_node;
-		} else {
-			focused_node->left  = old_client_node;
-			focused_node->right = new_client_node;
-		}
+		unsigned int old_count = visible_count(old_client_node, m);
+		unsigned int new_count = visible_count(new_client_node, m);
+		if (old_count > new_count)
+			place_new_first = 1;
+		else if (old_count == new_count)
+			place_new_first = split_side_toggle;
+	}
+	split_side_toggle = !split_side_toggle;
+
+	if (place_new_first) {
+		focused_node->left  = new_client_node;
+		focused_node->right = old_client_node;
+	} else {
+		focused_node->left  = old_client_node;
+		focused_node->right = new_client_node;
 	}
 	old_client_node->split_node = focused_node;
 	new_client_node->split_node = focused_node;
@@ -538,14 +553,11 @@ static unsigned int
 count_columns(LayoutNode *node, Monitor *m)
 {
 	unsigned int left_cols, right_cols;
-	Client *c;
 
 	if (!node)
 		return 0;
-	if (node->is_client_node) {
-		c = node->client;
-		return (c && VISIBLEON(c, m) && !c->isfloating && !c->isfullscreen) ? 1 : 0;
-	}
+	if (node->is_client_node)
+		return 1;
 
 	left_cols = count_columns(node->left, m);
 	right_cols = count_columns(node->right, m);
@@ -553,6 +565,41 @@ count_columns(LayoutNode *node, Monitor *m)
 	if (node->is_split_vertically)
 		return left_cols + right_cols;
 	return MAX(left_cols, right_cols);
+}
+
+static int
+collect_columns(LayoutNode *node, Monitor *m, LayoutNode **out_nodes,
+		unsigned int *out_counts, Client **out_clients, int max_out)
+{
+	int used = 0;
+	unsigned int pc;
+
+	if (!node || max_out <= 0)
+		return 0;
+
+	/* Any non-vertical subtree represents a single column. */
+	if (node->is_client_node || !node->is_split_vertically) {
+		pc = placement_count(node, m);
+		if (pc == 0)
+			return 0;
+		if (out_nodes)
+			out_nodes[used] = node;
+		if (out_counts)
+			out_counts[used] = pc;
+		if (out_clients)
+			out_clients[used] = first_active_client(node, m);
+		return 1;
+	}
+
+	used = collect_columns(node->left, m, out_nodes, out_counts, out_clients, max_out);
+	if (used < max_out) {
+		used += collect_columns(node->right, m,
+				out_nodes ? out_nodes + used : NULL,
+				out_counts ? out_counts + used : NULL,
+				out_clients ? out_clients + used : NULL,
+				max_out - used);
+	}
+	return used;
 }
 
 static unsigned int
@@ -574,6 +621,22 @@ visible_count(LayoutNode *node, Monitor *m)
 }
 
 static unsigned int
+placement_count(LayoutNode *node, Monitor *m)
+{
+	Client *c;
+
+	if (!node)
+		return 0;
+	if (node->is_client_node) {
+		c = node->client;
+		if (!c || c->isfullscreen || c->isfloating)
+			return 0;
+		return VISIBLEON(c, m) ? 1 : 0;
+	}
+	return placement_count(node->left, m) + placement_count(node->right, m);
+}
+
+static unsigned int
 target_columns(Monitor *m)
 {
 	float ratio;
@@ -588,6 +651,81 @@ target_columns(Monitor *m)
 	if (ratio >= 2.2f)
 		return 3;
 	return 2;
+}
+
+static Client *
+first_visible_client(LayoutNode *node, Monitor *m)
+{
+	Client *c;
+
+	if (!node)
+		return NULL;
+	if (node->is_client_node) {
+		c = node->client;
+		return (c && VISIBLEON(c, m) && !c->isfloating && !c->isfullscreen) ? c : NULL;
+	}
+
+	c = first_visible_client(node->left, m);
+	return c ? c : first_visible_client(node->right, m);
+}
+
+static Client *
+first_active_client(LayoutNode *node, Monitor *m)
+{
+	Client *c;
+
+	if (!node)
+		return NULL;
+	if (node->is_client_node) {
+		c = node->client;
+		if (c && !c->isfullscreen && !c->isfloating && VISIBLEON(c, m))
+			return c;
+		return NULL;
+	}
+
+	c = first_active_client(node->left, m);
+	return c ? c : first_active_client(node->right, m);
+}
+
+static Client *
+pick_target_client(Monitor *m, Client *focused_client)
+{
+	LayoutNode *col_nodes[64];
+	unsigned int col_counts[64];
+	Client *col_clients[64];
+	int min_cols[64];
+	unsigned int min_count = UINT_MAX;
+	int ncols, i, min_len = 0;
+
+	if (!m || !m->root)
+		return focused_client;
+
+	ncols = collect_columns(m->root, m, col_nodes, col_counts, col_clients, (int)LENGTH(col_nodes));
+	for (i = 0; i < ncols; i++) {
+		if (col_counts[i] < min_count) {
+			min_count = col_counts[i];
+			min_len = 0;
+			min_cols[min_len++] = i;
+		} else if (col_counts[i] == min_count && min_len < (int)LENGTH(min_cols)) {
+			min_cols[min_len++] = i;
+		}
+	}
+
+	if (min_len > 0) {
+		int start = col_pick_toggle % min_len;
+		int offset;
+
+	for (offset = 0; offset < min_len; offset++) {
+			int pick = min_cols[(start + offset) % min_len];
+			if (col_clients[pick]) {
+				col_pick_toggle++;
+				return col_clients[pick];
+			}
+		}
+	}
+
+	/* Fall back to any active client (avoids mouse-driven target). */
+	return first_active_client(m->root, m);
 }
 
 static Client *
