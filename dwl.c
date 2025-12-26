@@ -1230,6 +1230,10 @@ static struct wl_listener xwayland_ready = {.notify = xwaylandready};
 static struct wlr_xwayland *xwayland;
 #endif
 
+#ifndef WLR_SILENCE
+#define WLR_SILENCE (WLR_ERROR - 1)
+#endif
+
 /* configuration, allows nested code to access above variables */
 #include "config.h"
 
@@ -2233,7 +2237,7 @@ tray_load_svg_pixbuf(const char *path, int desired_h, GdkPixbuf **out_pixbuf)
 
 		if (!g_file_get_contents(path, &data, &len, &gerr) || !data || len == 0) {
 			if (gerr) {
-				fprintf(stderr, "tray: failed to read SVG '%s': %s\n",
+				wlr_log(WLR_ERROR, "tray: failed to read SVG '%s': %s",
 						path, gerr->message);
 				g_error_free(gerr);
 			}
@@ -2246,7 +2250,7 @@ tray_load_svg_pixbuf(const char *path, int desired_h, GdkPixbuf **out_pixbuf)
 	}
 	if (!handle) {
 		if (gerr) {
-			fprintf(stderr, "tray: failed to parse SVG '%s': %s\n",
+			wlr_log(WLR_ERROR, "tray: failed to parse SVG '%s': %s",
 					path, gerr->message);
 			g_error_free(gerr);
 		}
@@ -2288,7 +2292,7 @@ tray_load_svg_pixbuf(const char *path, int desired_h, GdkPixbuf **out_pixbuf)
 		};
 		if (!rsvg_handle_render_document(handle, cr, &viewport, &gerr)) {
 			if (gerr) {
-				fprintf(stderr, "tray: failed to render SVG '%s': %s\n",
+				wlr_log(WLR_ERROR, "tray: failed to render SVG '%s': %s",
 						path, gerr->message);
 				g_error_free(gerr);
 				gerr = NULL;
@@ -2309,7 +2313,7 @@ out:
 	if (handle)
 		g_object_unref(handle);
 	if (!pixbuf && gerr) {
-		fprintf(stderr, "tray: failed to load SVG '%s': %s\n",
+		wlr_log(WLR_ERROR, "tray: failed to load SVG '%s': %s",
 				path, gerr->message);
 	}
 	if (gerr)
@@ -2358,7 +2362,7 @@ ensure_cpu_icon_buffer(int target_h)
 		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
 		if (!pixbuf) {
 			if (gerr) {
-				fprintf(stderr, "cpu icon: failed to load '%s': %s\n",
+				wlr_log(WLR_ERROR, "cpu icon: failed to load '%s': %s",
 						path, gerr->message);
 				g_error_free(gerr);
 			}
@@ -2415,7 +2419,7 @@ ensure_clock_icon_buffer(int target_h)
 		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
 		if (!pixbuf) {
 			if (gerr) {
-				fprintf(stderr, "clock icon: failed to load '%s': %s\n",
+				wlr_log(WLR_ERROR, "clock icon: failed to load '%s': %s",
 						path, gerr->message);
 				g_error_free(gerr);
 			}
@@ -2472,7 +2476,7 @@ ensure_light_icon_buffer(int target_h)
 		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
 		if (!pixbuf) {
 			if (gerr) {
-				fprintf(stderr, "light icon: failed to load '%s': %s\n",
+				wlr_log(WLR_ERROR, "light icon: failed to load '%s': %s",
 						path, gerr->message);
 				g_error_free(gerr);
 			}
@@ -2529,7 +2533,7 @@ ensure_ram_icon_buffer(int target_h)
 		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
 		if (!pixbuf) {
 			if (gerr) {
-				fprintf(stderr, "ram icon: failed to load '%s': %s\n",
+				wlr_log(WLR_ERROR, "ram icon: failed to load '%s': %s",
 						path, gerr->message);
 				g_error_free(gerr);
 			}
@@ -2586,7 +2590,7 @@ ensure_volume_icon_buffer(int target_h)
 		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
 		if (!pixbuf) {
 			if (gerr) {
-				fprintf(stderr, "volume icon: failed to load '%s': %s\n",
+				wlr_log(WLR_ERROR, "volume icon: failed to load '%s': %s",
 						path, gerr->message);
 				g_error_free(gerr);
 			}
@@ -2643,7 +2647,7 @@ ensure_battery_icon_buffer(int target_h)
 		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
 		if (!pixbuf) {
 			if (gerr) {
-				fprintf(stderr, "battery icon: failed to load '%s': %s\n",
+				wlr_log(WLR_ERROR, "battery icon: failed to load '%s': %s",
 						path, gerr->message);
 				g_error_free(gerr);
 			}
@@ -2700,7 +2704,7 @@ ensure_mic_icon_buffer(int target_h)
 		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
 		if (!pixbuf) {
 			if (gerr) {
-				fprintf(stderr, "mic icon: failed to load '%s': %s\n",
+				wlr_log(WLR_ERROR, "mic icon: failed to load '%s': %s",
 						path, gerr->message);
 				g_error_free(gerr);
 			}
@@ -2736,7 +2740,7 @@ tray_load_icon_file(TrayItem *it, const char *path, int desired_h)
 		if (tray_load_svg_pixbuf(path, desired_h, &pixbuf) != 0) {
 			pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
 			if (!pixbuf && gerr) {
-				fprintf(stderr, "tray: failed to load icon '%s': %s\n", path, gerr->message);
+				wlr_log(WLR_ERROR, "tray: failed to load icon '%s': %s", path, gerr->message);
 				g_error_free(gerr);
 				gerr = NULL;
 			}
@@ -2747,7 +2751,7 @@ tray_load_icon_file(TrayItem *it, const char *path, int desired_h)
 		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
 		if (!pixbuf) {
 			if (gerr) {
-				fprintf(stderr, "tray: failed to load icon '%s': %s\n", path, gerr->message);
+				wlr_log(WLR_ERROR, "tray: failed to load icon '%s': %s", path, gerr->message);
 				g_error_free(gerr);
 				gerr = NULL;
 			}
@@ -3280,7 +3284,7 @@ load_net_icon_buffer(const char *path, int target_h)
 				&& strcmp(load_path, net_icon_wifi_100_resolved) == 0)) {
 		buf = statusbar_buffer_from_wifi100(target_h, &w, &h);
 		if (!buf) {
-			fprintf(stderr, "net icon: synth wifi_100 failed (path=%s resolved=%s)\n",
+			wlr_log(WLR_ERROR, "net icon: synth wifi_100 failed (path=%s resolved=%s)",
 					path, load_path);
 			return -1;
 		}
@@ -3292,7 +3296,7 @@ load_net_icon_buffer(const char *path, int target_h)
 		pixbuf = gdk_pixbuf_new_from_file(load_path, &gerr);
 		if (!pixbuf) {
 			if (gerr) {
-				fprintf(stderr, "net icon: failed to load '%s': %s\n", load_path, gerr->message);
+				wlr_log(WLR_ERROR, "net icon: failed to load '%s': %s", load_path, gerr->message);
 				g_error_free(gerr);
 			}
 			return -1;
@@ -3315,7 +3319,7 @@ done:
 	net_icon_h = h;
 	net_icon_loaded_h = target_h;
 	snprintf(net_icon_loaded_path, sizeof(net_icon_loaded_path), "%s", load_path);
-	fprintf(stderr, "net icon: loaded %s (resolved=%s) w=%d h=%d target_h=%d\n",
+	wlr_log(WLR_INFO, "net icon: loaded %s (resolved=%s) w=%d h=%d target_h=%d",
 			path, load_path, net_icon_w, net_icon_h, target_h);
 	return 0;
 }
@@ -3440,7 +3444,7 @@ init_net_icon_paths(void)
 	resolve_asset_path(net_icon_no_conn, net_icon_no_conn_resolved, sizeof(net_icon_no_conn_resolved));
 	if (net_icon_no_conn_resolved[0])
 		snprintf(net_icon_path, sizeof(net_icon_path), "%s", net_icon_no_conn_resolved);
-	fprintf(stderr, "net icon paths: wifi100=%s wifi75=%s wifi50=%s wifi25=%s eth=%s noconn=%s\n",
+	wlr_log(WLR_INFO, "net icon paths: wifi100=%s wifi75=%s wifi50=%s wifi25=%s eth=%s noconn=%s",
 			net_icon_wifi_100_resolved[0] ? net_icon_wifi_100_resolved : net_icon_wifi_100,
 			net_icon_wifi_75_resolved[0] ? net_icon_wifi_75_resolved : net_icon_wifi_75,
 			net_icon_wifi_50_resolved[0] ? net_icon_wifi_50_resolved : net_icon_wifi_50,
@@ -3851,7 +3855,7 @@ kill_processes_with_name(const char *name)
 			if (kill(pid, SIGKILL) == 0) {
 				killed++;
 			} else {
-				fprintf(stderr, "cpu popup: kill %d (%s) failed: %s\n",
+				wlr_log(WLR_ERROR, "cpu popup: kill %d (%s) failed: %s",
 						pid, name, strerror(errno));
 			}
 		}
@@ -4197,7 +4201,7 @@ cpu_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 				return 1;
 			if (kill_processes_with_name(e->name) == 0) {
 				if (kill(e->pid, SIGKILL) != 0)
-					fprintf(stderr, "cpu popup: kill %d failed: %s\n",
+					wlr_log(WLR_ERROR, "cpu popup: kill %d failed: %s",
 							e->pid, strerror(errno));
 			}
 			p->last_fetch_ms = monotonic_msec();
@@ -5598,12 +5602,12 @@ tray_item_get_menu_path(TrayItem *it)
 			sd_bus_error_free(&err);
 			return 0;
 		}
-		fprintf(stderr, "tray: service %s Menu property empty/invalid\n", it->service);
+		wlr_log(WLR_ERROR, "tray: service %s Menu property empty/invalid", it->service);
 		sd_bus_message_unref(reply);
 	}
 
 	sd_bus_error_free(&err);
-	fprintf(stderr, "tray: failed to get Menu property for %s: %s\n",
+	wlr_log(WLR_ERROR, "tray: failed to get Menu property for %s: %s",
 			it->service, strerror(-r));
 	return -1;
 }
@@ -6050,7 +6054,7 @@ tray_menu_open_at(Monitor *m, TrayItem *it, int icon_x)
 	return 1;
 
 fail:
-	fprintf(stderr, "tray: GetLayout failed for %s%s: %s\n",
+	wlr_log(WLR_ERROR, "tray: GetLayout failed for %s%s: %s",
 			it->service, it->menu, err.message ? err.message : strerror(-r));
 	if (req)
 		sd_bus_message_unref(req);
@@ -6435,7 +6439,7 @@ tray_add_item(const char *service, const char *path, int emit_signals)
 	it->icon_tried = 0;
 	it->icon_failed = 0;
 	wl_list_insert(&tray_items, &it->link);
-	fprintf(stderr, "tray: registered %s%s\n", service, path);
+	wlr_log(WLR_INFO, "tray: registered %s%s", service, path);
 
 	tray_update_icons_text();
 
@@ -6644,7 +6648,7 @@ tray_init(void)
 
 	r = sd_bus_open_user(&tray_bus);
 	if (r < 0) {
-		fprintf(stderr, "tray: failed to connect to session bus: %s\n", strerror(-r));
+		wlr_log(WLR_ERROR, "tray: failed to connect to session bus: %s", strerror(-r));
 		tray_bus = NULL;
 		return;
 	}
@@ -6654,7 +6658,7 @@ tray_init(void)
 
 	r = sd_bus_request_name(tray_bus, "org.kde.StatusNotifierWatcher", name_flags);
 	if (r < 0) {
-		fprintf(stderr, "tray: failed to acquire watcher name: %s\n", strerror(-r));
+		wlr_log(WLR_ERROR, "tray: failed to acquire watcher name: %s", strerror(-r));
 		goto fail;
 	}
 	/* Some implementations also look for the freedesktop alias */
@@ -8457,7 +8461,7 @@ tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y)
 			break;
 		}
 	}
-	fprintf(stderr, "tray: %s %s failed on %s%s: %s\n",
+	wlr_log(WLR_ERROR, "tray: %s %s failed on %s%s: %s",
 			method, it->service, item_path, it->path[0] ? "" : "(null)", strerror(-r));
 }
 
@@ -14067,7 +14071,7 @@ setup(void)
 
 		setenv("DISPLAY", xwayland->display_name, 1);
 	} else {
-		fprintf(stderr, "failed to setup XWayland X server, continuing without it\n");
+		wlr_log(WLR_ERROR, "failed to setup XWayland X server, continuing without it");
 	}
 #endif
 
