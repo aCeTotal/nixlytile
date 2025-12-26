@@ -854,6 +854,7 @@ static void fix_tray_argb32(uint32_t *pixels, size_t count, int use_rgba_order);
 static double ramused_mb(void);
 static double cpuaverage(void);
 static double battery_percent(void);
+static void applyxkbdefaultsfromsystem(struct xkb_rule_names *names);
 static struct xkb_rule_names getxkbrules(void);
 static double backlight_percent(void);
 static double pipewire_volume_percent(int *is_headset_out);
@@ -7065,6 +7066,75 @@ battery_percent(void)
 	return (double)cur;
 }
 
+static void
+applyxkbdefaultsfromsystem(struct xkb_rule_names *names)
+{
+	static int loaded;
+	static char layout[128];
+	static char model[128];
+	static char variant[128];
+	static char options[256];
+	FILE *fp;
+	char line[256];
+	char *newline;
+
+	/* If config already provided everything, avoid extra work */
+	if (names->model && names->layout && names->variant && names->options)
+		return;
+
+	if (!loaded) {
+		int need_localectl;
+		fp = fopen("/etc/X11/xorg.conf.d/00-keyboard.conf", "r");
+		if (fp) {
+			while (fgets(line, sizeof(line), fp)) {
+				newline = strpbrk(line, "\r\n");
+				if (newline)
+					*newline = '\0';
+				if (!layout[0] && sscanf(line, " Option \"XkbLayout\" \"%127[^\"]\"", layout) == 1)
+					continue;
+				if (!model[0] && sscanf(line, " Option \"XkbModel\" \"%127[^\"]\"", model) == 1)
+					continue;
+				if (!variant[0] && sscanf(line, " Option \"XkbVariant\" \"%127[^\"]\"", variant) == 1)
+					continue;
+				if (!options[0] && sscanf(line, " Option \"XkbOptions\" \"%255[^\"]\"", options) == 1)
+					continue;
+			}
+			fclose(fp);
+		}
+		need_localectl = !layout[0] || !model[0] || !variant[0] || !options[0];
+		/* If the X11 config isn't present (Wayland-only setups) or lacks data, try localectl */
+		if (need_localectl) {
+			fp = popen("localectl status", "r");
+			if (fp) {
+				while (fgets(line, sizeof(line), fp)) {
+					newline = strpbrk(line, "\r\n");
+					if (newline)
+						*newline = '\0';
+					if (!layout[0] && sscanf(line, " X11 Layout: %127[^\n]", layout) == 1)
+						continue;
+					if (!model[0] && sscanf(line, " X11 Model: %127[^\n]", model) == 1)
+						continue;
+					if (!variant[0] && sscanf(line, " X11 Variant: %127[^\n]", variant) == 1)
+						continue;
+					if (!options[0] && sscanf(line, " X11 Options: %255[^\n]", options) == 1)
+						continue;
+				}
+				pclose(fp);
+			}
+		}
+		loaded = 1;
+	}
+
+	if (!names->layout && layout[0])
+		names->layout = layout;
+	if (!names->model && model[0])
+		names->model = model;
+	if (!names->variant && variant[0])
+		names->variant = variant;
+	if (!names->options && options[0])
+		names->options = options;
+}
+
 static struct xkb_rule_names
 getxkbrules(void)
 {
@@ -7081,6 +7151,10 @@ getxkbrules(void)
 		names.variant = env;
 	if (!names.options && (env = getenv("XKB_DEFAULT_OPTIONS")))
 		names.options = env;
+
+	/* NixOS/localectl store XKB defaults system-wide; use them as a fallback so
+	 * Wayland sessions pick up the same keyboard layout. */
+	applyxkbdefaultsfromsystem(&names);
 
 	return names;
 }
