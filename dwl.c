@@ -546,7 +546,7 @@ struct Monitor {
 	int nmaster;
 	char ltsymbol[16];
 	int asleep;
-	LayoutNode *root;
+	LayoutNode *root[MAX_TAGS];
 };
 
 typedef struct {
@@ -11277,15 +11277,43 @@ buttonpress(struct wl_listener *listener, void *data)
 			if (c && c->was_tiled && !strcmp(selmon->ltsymbol, "|w|")) {
 				if (cursor_mode == CurMove && c->isfloating) {
 					target = xytoclient(cursor->x, cursor->y);
+					int was_alone = drag_was_alone_in_column;
+					int move_allowed;
 
-					remove_client(selmon, c);
-					if (target && !target->isfloating && !target->isfullscreen)
-						insert_client(selmon, target, c);
+					/* Check if movement is allowed before modifying anything */
+					if (target && target != c && !target->isfloating && !target->isfullscreen)
+						move_allowed = can_move_tile(selmon, c, target);
 					else
-						insert_client(selmon, NULL, c);
+						move_allowed = can_move_tile(selmon, c, NULL);
 
-					setfloating(c, 0);
-					arrange(selmon);
+					/* Clear drag state before modifying tree */
+					end_tile_drag();
+
+					/* Restore tiled state */
+					c->isfloating = 0;
+
+					if (move_allowed == 0) {
+						/* Movement blocked (4 tiles in source or target column) */
+						/* Just restore to original position, no change */
+						arrange(selmon);
+					} else if (move_allowed == 2 && target && target != c) {
+						/* Same column swap */
+						swap_tiles_in_tree(selmon, c, target);
+						arrange(selmon);
+					} else if (was_alone && target && target != c &&
+					    !target->isfloating && !target->isfullscreen) {
+						/* Swap columns if dragged tile was alone in its column */
+						swap_columns(selmon, c, target);
+						arrange(selmon);
+					} else {
+						/* Remove from old position and insert at new */
+						remove_client(selmon, c);
+						if (target && target != c && !target->isfloating && !target->isfullscreen)
+							insert_client_at(selmon, target, c, cursor->x, cursor->y);
+						else
+							insert_client(selmon, NULL, c);
+						arrange(selmon);
+					}
 
 				} else if (cursor_mode == CurResize && !c->isfloating) {
 					resizing_from_mouse = 0;
@@ -11294,6 +11322,12 @@ buttonpress(struct wl_listener *listener, void *data)
 				if (cursor_mode == CurResize && resizing_from_mouse)
 					resizing_from_mouse = 0;
 				resize_last_time = 0;
+				/* Restore tiled state if was_tiled but not btrtile layout */
+				if (c && c->was_tiled && c->isfloating) {
+					setfloating(c, 0);
+					arrange(selmon);
+				}
+				end_tile_drag();
 			}
 			/* Default behaviour */
 			wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
@@ -12214,7 +12248,7 @@ destroynotify(struct wl_listener *listener, void *data)
 	wl_list_remove(&c->fullscreen.link);
 	/* We check if the destroyed client was part of any tiled_list, to catch
 	 * client removals even if they would not be currently managed by btrtile */
-	if (selmon && selmon->root)
+	if (selmon)
 		remove_client(selmon, c);
 #ifdef XWAYLAND
 	if (c->type != XDGShell) {
@@ -13085,7 +13119,8 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 				LayoutNode *client_node;
 
 				if (!resize_split_node && !resize_split_node_h) {
-					client_node = find_client_node(selmon->root, grabc);
+					LayoutNode **curr_root = get_current_root(selmon);
+					client_node = curr_root ? find_client_node(*curr_root, grabc) : NULL;
 					if (!client_node)
 						goto focus;
 
@@ -13216,6 +13251,8 @@ moveresize(const Arg *arg)
 		case CurMove:
 			{
 				struct wlr_box start_geom = grabc->geom;
+				/* Start drag tracking before making floating */
+				start_tile_drag(selmon, grabc);
 				setfloating(grabc, 1);
 				/* Anchor to the original cursor offset within the window */
 				grabcx = (int)round(cursor->x) - start_geom.x;
