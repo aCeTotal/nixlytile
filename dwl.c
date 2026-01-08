@@ -898,6 +898,7 @@ static int subtree_bounds(LayoutNode *node, Monitor *m, struct wlr_box *out);
 static __attribute__((unused)) LayoutNode *ancestor_split(LayoutNode *node, int want_vert);
 static struct wlr_output_mode *bestmode(struct wlr_output *output);
 static void btrtile(Monitor *m);
+static void focusdir(const Arg *arg);
 static void setratio_h(const Arg *arg);
 static void setratio_v(const Arg *arg);
 static void swapclients(const Arg *arg);

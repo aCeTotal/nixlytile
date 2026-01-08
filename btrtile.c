@@ -35,6 +35,7 @@ static int insert_client(Monitor *m, Client *focused_client, Client *new_client)
 static void insert_client_at(Monitor *m, Client *target, Client *new_client, double cx, double cy);
 static LayoutNode *remove_client_node(LayoutNode *node, Client *c);
 static void remove_client(Monitor *m, Client *c);
+static void focusdir(const Arg *arg);
 static void setratio_h(const Arg *arg);
 static void setratio_v(const Arg *arg);
 static void swapclients(const Arg *arg);
@@ -829,6 +830,85 @@ static void swapclients(const Arg *arg) {
 			/* Keep focus on the original client in its new position */
 			focusclient(sel, 1);
 		}
+	}
+}
+
+static void focusdir(const Arg *arg) {
+	Client *c, *target = NULL, *sel = focustop(selmon);
+	int closest_dist = INT_MAX, dist, sel_center_x, sel_center_y,
+		cand_center_x, cand_center_y;
+	int is_vertical, overlaps, best_overlaps = 0;
+
+	if (!sel || sel->isfullscreen)
+		return;
+
+	/* Get the center coordinates of the selected client */
+	sel_center_x = sel->geom.x + sel->geom.width / 2;
+	sel_center_y = sel->geom.y + sel->geom.height / 2;
+
+	/* Determine if movement is vertical (up/down) or horizontal (left/right) */
+	is_vertical = (arg->ui == DIR_UP || arg->ui == DIR_DOWN);
+
+	wl_list_for_each(c, &clients, link) {
+		if (!VISIBLEON(c, selmon) || c->isfloating || c->isfullscreen || c == sel)
+			continue;
+
+		/* Get the center of candidate client */
+		cand_center_x = c->geom.x + c->geom.width / 2;
+		cand_center_y = c->geom.y + c->geom.height / 2;
+
+		/* Check that the candidate lies in the requested direction. */
+		switch (arg->ui) {
+			case DIR_LEFT:
+				if (cand_center_x >= sel_center_x)
+					continue;
+				break;
+			case DIR_RIGHT:
+				if (cand_center_x <= sel_center_x)
+					continue;
+				break;
+			case DIR_UP:
+				if (cand_center_y >= sel_center_y)
+					continue;
+				break;
+			case DIR_DOWN:
+				if (cand_center_y <= sel_center_y)
+					continue;
+				break;
+			default:
+				continue;
+		}
+
+		/* Check if candidate overlaps with selected tile in the perpendicular axis */
+		if (is_vertical) {
+			overlaps = !(c->geom.x + c->geom.width <= sel->geom.x ||
+			             c->geom.x >= sel->geom.x + sel->geom.width);
+		} else {
+			overlaps = !(c->geom.y + c->geom.height <= sel->geom.y ||
+			             c->geom.y >= sel->geom.y + sel->geom.height);
+		}
+
+		/* Calculate distance in the primary direction only */
+		if (is_vertical)
+			dist = abs(sel_center_y - cand_center_y);
+		else
+			dist = abs(sel_center_x - cand_center_x);
+
+		/* Prioritize overlapping tiles, then by distance */
+		if (overlaps > best_overlaps ||
+		    (overlaps == best_overlaps && dist < closest_dist)) {
+			best_overlaps = overlaps;
+			closest_dist = dist;
+			target = c;
+		}
+	}
+
+	/* If target is found, focus it and warp cursor to its center */
+	if (target) {
+		focusclient(target, 1);
+		wlr_cursor_warp(cursor, NULL,
+			target->geom.x + target->geom.width / 2,
+			target->geom.y + target->geom.height / 2);
 	}
 }
 
