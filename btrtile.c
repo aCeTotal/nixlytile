@@ -54,6 +54,7 @@ static void end_tile_drag(void);
 static void swap_columns(Monitor *m, Client *c1, Client *c2);
 static LayoutNode *find_column_root(LayoutNode *node, Monitor *m);
 static unsigned int count_in_column(LayoutNode *col_node, Monitor *m);
+static LayoutNode *find_column_half(LayoutNode *node, Monitor *m);
 static int same_column(Monitor *m, Client *c1, Client *c2);
 static int can_move_tile(Monitor *m, Client *source, Client *target);
 static void swap_tiles_in_tree(Monitor *m, Client *c1, Client *c2);
@@ -462,6 +463,14 @@ insert_client(Monitor *m, Client *focused_client, Client *new_client)
 		} else if (col_tiles == 1) {
 			wider = 0; /* First split in column: horizontal (top/bottom) */
 		} else {
+			/* Check if target half (top/bottom) is full (max 2 tiles per half) */
+			LayoutNode *half = find_column_half(focused_node, m);
+			if (half && visible_count(half, m) >= 2) {
+				/* This half already has 2 tiles - block */
+				free(old_client_node);
+				free(new_client_node);
+				return 0;
+			}
 			wider = 1; /* After horizontal split: vertical (left/right) */
 		}
 	}
@@ -569,6 +578,16 @@ insert_client_at(Monitor *m, Client *target, Client *new_client, double cx, doub
 		} else if (col_tiles == 1) {
 			wider = 0; /* First split in column: horizontal (top/bottom) */
 		} else {
+			/* Check if target half (top/bottom) is full (max 2 tiles per half) */
+			LayoutNode *half = find_column_half(target_node, m);
+			if (half && visible_count(half, m) >= 2) {
+				/* This half already has 2 tiles - block */
+				free(old_client_node);
+				free(new_client_node);
+				/* Re-insert at original position */
+				insert_client(m, NULL, new_client);
+				return;
+			}
 			wider = 1; /* After horizontal split: vertical (left/right) */
 		}
 	}
@@ -1217,6 +1236,33 @@ count_in_column(LayoutNode *col_node, Monitor *m)
 	return visible_count(col_node, m);
 }
 
+/* Find which half (top/bottom) of a column a node is in.
+ * Returns the half subtree node, or NULL if not in a split column. */
+static LayoutNode *
+find_column_half(LayoutNode *node, Monitor *m)
+{
+	LayoutNode *col_root;
+	LayoutNode *n;
+
+	if (!node || !m)
+		return NULL;
+
+	col_root = find_column_root(node, m);
+	if (!col_root || col_root->is_client_node)
+		return NULL;
+
+	/* Column root should be a horizontal split (top/bottom) */
+	if (col_root->is_split_vertically)
+		return NULL;
+
+	/* Walk up from node until we hit a direct child of col_root */
+	n = node;
+	while (n && n->split_node != col_root)
+		n = n->split_node;
+
+	return n; /* This is the half (top or bottom) */
+}
+
 /* Check if two clients are in the same column */
 static int
 same_column(Monitor *m, Client *c1, Client *c2)
@@ -1301,6 +1347,13 @@ can_move_tile(Monitor *m, Client *source, Client *target)
 	/* Different column: check if target column is full */
 	if (target_col_tiles >= 4)
 		return 0;
+
+	/* Check if target half (top/bottom) is full (max 2 tiles per half) */
+	if (target_col_tiles >= 2) {
+		LayoutNode *target_half = find_column_half(target_node, m);
+		if (target_half && visible_count(target_half, m) >= 2)
+			return 0;
+	}
 
 	/* Moving to different column is allowed (even from a 4-tile column) */
 	return 1;
