@@ -439,19 +439,26 @@ insert_client(Monitor *m, Client *focused_client, Client *new_client)
 		return 1;
 	}
 
+	/* Split direction:
+	 * - Need more columns? -> vertical split at ROOT (create column)
+	 * - Tiles within column -> always horizontal split (top/bottom)
+	 * - 4 tiles in column -> FULL, don't allow more */
+	if (current_cols < desired_cols) {
+		/* Need a new column - wrap existing tree in a vertical split at root */
+		new_client_node = create_client_node(new_client);
+		old_root = *root;
+		*root = create_split_node(1, old_root, new_client_node);
+		return 1;
+	}
+
 	/* Turn focused node from a client node into a split node,
 	 * and attach old_client + new_client. */
 	old_client = focused_node->client;
 	old_client_node = create_client_node(old_client);
 	new_client_node = create_client_node(new_client);
 
-	/* Split direction:
-	 * - Need more columns? -> vertical split (create column)
-	 * - Tiles within column -> always horizontal split (top/bottom)
-	 * - 4 tiles in column -> FULL, don't allow more */
-	if (current_cols < desired_cols) {
-		wider = 1; /* Need more columns - vertical split */
-	} else {
+	/* Check column constraints */
+	{
 		LayoutNode *col_root = find_column_root(focused_node, m);
 		unsigned int col_tiles = count_in_column(col_root, m);
 
