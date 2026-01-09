@@ -13915,6 +13915,14 @@ keypress(struct wl_listener *listener, void *data)
 	const xkb_keysym_t *syms;
 	int nsyms = xkb_state_key_get_syms(
 			group->wlr_group->keyboard.xkb_state, keycode, &syms);
+	/* Also get the base keysym (level 0, no modifiers applied) for shifted bindings */
+	xkb_keysym_t base_sym = xkb_state_key_get_one_sym(
+			group->wlr_group->keyboard.xkb_state, keycode);
+	struct xkb_keymap *keymap = group->wlr_group->keyboard.keymap;
+	xkb_layout_index_t layout = xkb_state_key_get_layout(
+			group->wlr_group->keyboard.xkb_state, keycode);
+	const xkb_keysym_t *level0_syms;
+	int nlevel0 = xkb_keymap_key_get_syms_by_level(keymap, keycode, layout, 0, &level0_syms);
 
 	int handled = 0;
 	uint32_t mods = wlr_keyboard_get_modifiers(&group->wlr_group->keyboard);
@@ -13948,6 +13956,11 @@ keypress(struct wl_listener *listener, void *data)
 		}
 		for (i = 0; i < nsyms; i++)
 			handled = keybinding(mods, syms[i]) || handled;
+		/* If no binding matched, try with base keysyms (level 0) for shifted bindings */
+		if (!handled && nlevel0 > 0) {
+			for (i = 0; i < nlevel0; i++)
+				handled = keybinding(mods, level0_syms[i]) || handled;
+		}
 	}
 
 	if (handled && group->wlr_group->keyboard.repeat_info.delay > 0) {
@@ -15605,7 +15618,9 @@ tag(const Arg *arg)
 		return;
 
 	sel->tags = arg->ui & TAGMASK;
-	focusclient(focustop(selmon), 1);
+	/* Switch to the new tag so we follow the window */
+	selmon->tagset[selmon->seltags] = arg->ui & TAGMASK;
+	focusclient(sel, 1);
 	arrange(selmon);
 	printstatus();
 }
