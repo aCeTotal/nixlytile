@@ -276,6 +276,24 @@ typedef struct {
 	struct wl_list networks;  /* WifiNetwork list */
 } NetMenu;
 
+typedef struct {
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_tree *bg;
+	int visible;
+	int width, height;
+	char ssid[128];
+	char password[256];
+	int password_len;
+	int cursor_pos;
+	int button_hover;  /* 0 = none, 1 = connect button */
+	int connecting;    /* 1 = connection in progress */
+	int error;         /* 1 = last connection failed */
+	int try_saved;     /* 1 = trying saved credentials first */
+	pid_t connect_pid;
+	int connect_fd;
+	struct wl_event_source *connect_event;
+} WifiPasswordPopup;
+
 typedef struct TrayMenuEntry {
 	int id;
 	int enabled;
@@ -316,6 +334,9 @@ struct StatusBar {
 	StatusModule ram;
 	StatusModule tags;
 	StatusModule traylabel;
+	StatusModule bluetooth;
+	StatusModule steam;
+	StatusModule discord;
 	CpuPopup cpu_popup;
 	NetPopup net_popup;
 	TrayMenu tray_menu;
@@ -535,6 +556,7 @@ struct Monitor {
 	struct wl_list layers[4]; /* LayerSurface.link */
 	StatusBar statusbar;
 	ModalOverlay modal;
+	WifiPasswordPopup wifi_popup;
 	const Layout *lt[2];
 	int gaps;
 	int showbar;
@@ -718,6 +740,16 @@ static void wifi_scan_plan_rescan(void);
 static int wifi_scan_event_cb(int fd, uint32_t mask, void *data);
 static void connect_wifi_ssid(const char *ssid);
 static void connect_wifi_with_prompt(const char *ssid, int secure);
+static void wifi_popup_show(Monitor *m, const char *ssid);
+static void wifi_popup_hide(Monitor *m);
+static void wifi_popup_hide_all(void);
+static void wifi_popup_render(Monitor *m);
+static int wifi_popup_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym);
+static int wifi_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
+static Monitor *wifi_popup_visible_monitor(void);
+static void wifi_popup_connect(Monitor *m);
+static void wifi_try_saved_connect(Monitor *m, const char *ssid);
+static int wifi_popup_connect_cb(int fd, uint32_t mask, void *data);
 static int status_task_hover_active(void (*fn)(void));
 static void trigger_status_task_now(void (*fn)(void));
 static int public_ip_event_cb(int fd, uint32_t mask, void *data);
@@ -863,6 +895,10 @@ static int findbacklightdevice(char *brightness_path, size_t brightness_len,
 static int set_backlight_relative(double delta_percent);
 static void apply_startup_defaults(void);
 static int findbatterydevice(char *capacity_path, size_t capacity_len);
+static int findbluetoothdevice(void);
+static int is_process_running(const char *name);
+static Client *find_client_by_app_id(const char *app_id);
+static void focus_or_launch_app(const char *app_id, const char *launch_cmd);
 static void schedule_status_timer(void);
 static void schedule_next_status_refresh(void);
 static struct wlr_buffer *statusbar_scaled_buffer_from_argb32_raw(const uint32_t *data,
@@ -1142,6 +1178,27 @@ static int volume_icon_loaded_h;
 static int volume_icon_w;
 static int volume_icon_h;
 static struct wlr_buffer *volume_icon_buf;
+static char bluetooth_icon_path[PATH_MAX] = "images/svg/bluetooth.svg";
+static char bluetooth_icon_loaded_path[PATH_MAX];
+static int bluetooth_icon_loaded_h;
+static int bluetooth_icon_w;
+static int bluetooth_icon_h;
+static struct wlr_buffer *bluetooth_icon_buf;
+static int bluetooth_available;
+static char steam_icon_path[PATH_MAX] = "images/svg/steam.svg";
+static char steam_icon_loaded_path[PATH_MAX];
+static int steam_icon_loaded_h;
+static int steam_icon_w;
+static int steam_icon_h;
+static struct wlr_buffer *steam_icon_buf;
+static int steam_running;
+static char discord_icon_path[PATH_MAX] = "images/svg/discord.svg";
+static char discord_icon_loaded_path[PATH_MAX];
+static int discord_icon_loaded_h;
+static int discord_icon_w;
+static int discord_icon_h;
+static struct wlr_buffer *discord_icon_buf;
+static int discord_running;
 static unsigned long long net_prev_rx;
 static unsigned long long net_prev_tx;
 static struct timespec net_prev_ts;
@@ -3347,6 +3404,377 @@ ensure_net_icon_buffer(int target_h)
 }
 
 static void
+drop_bluetooth_icon_buffer(void)
+{
+	if (bluetooth_icon_buf) {
+		wlr_buffer_drop(bluetooth_icon_buf);
+		bluetooth_icon_buf = NULL;
+	}
+	bluetooth_icon_loaded_h = 0;
+	bluetooth_icon_loaded_path[0] = '\0';
+	bluetooth_icon_w = 0;
+	bluetooth_icon_h = 0;
+}
+
+static int
+load_bluetooth_icon_buffer(const char *path, int target_h)
+{
+	GError *gerr = NULL;
+	struct wlr_buffer *buf;
+	int w = 0, h = 0;
+	GdkPixbuf *pixbuf = NULL;
+	char resolved[PATH_MAX];
+	const char *load_path = path;
+
+	if (!path || !*path || target_h <= 0)
+		return -1;
+
+	if (resolve_asset_path(path, resolved, sizeof(resolved)) == 0)
+		load_path = resolved;
+
+	if (tray_load_svg_pixbuf(load_path, target_h, &pixbuf) != 0) {
+		pixbuf = gdk_pixbuf_new_from_file(load_path, &gerr);
+		if (!pixbuf) {
+			if (gerr) {
+				wlr_log(WLR_ERROR, "bluetooth icon: failed to load '%s': %s", load_path, gerr->message);
+				g_error_free(gerr);
+			}
+			return -1;
+		}
+	}
+
+	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
+	if (!buf)
+		return -1;
+
+	drop_bluetooth_icon_buffer();
+	bluetooth_icon_buf = buf;
+	bluetooth_icon_w = w;
+	bluetooth_icon_h = h;
+	bluetooth_icon_loaded_h = target_h;
+	snprintf(bluetooth_icon_loaded_path, sizeof(bluetooth_icon_loaded_path), "%s", load_path);
+	return 0;
+}
+
+static int
+ensure_bluetooth_icon_buffer(int target_h)
+{
+	if (target_h <= 0)
+		return -1;
+
+	if (bluetooth_icon_buf && bluetooth_icon_loaded_h == target_h &&
+			strncmp(bluetooth_icon_loaded_path, bluetooth_icon_path, sizeof(bluetooth_icon_loaded_path)) == 0)
+		return 0;
+
+	return load_bluetooth_icon_buffer(bluetooth_icon_path, target_h);
+}
+
+static void
+drop_steam_icon_buffer(void)
+{
+	if (steam_icon_buf) {
+		wlr_buffer_drop(steam_icon_buf);
+		steam_icon_buf = NULL;
+	}
+	steam_icon_loaded_h = 0;
+	steam_icon_loaded_path[0] = '\0';
+	steam_icon_w = 0;
+	steam_icon_h = 0;
+}
+
+static int
+load_steam_icon_buffer(const char *path, int target_h)
+{
+	GError *gerr = NULL;
+	struct wlr_buffer *buf;
+	int w = 0, h = 0;
+	GdkPixbuf *pixbuf = NULL;
+	char resolved[PATH_MAX];
+	const char *load_path = path;
+
+	if (!path || !*path || target_h <= 0)
+		return -1;
+
+	if (resolve_asset_path(path, resolved, sizeof(resolved)) == 0)
+		load_path = resolved;
+
+	if (tray_load_svg_pixbuf(load_path, target_h, &pixbuf) != 0) {
+		pixbuf = gdk_pixbuf_new_from_file(load_path, &gerr);
+		if (!pixbuf) {
+			if (gerr) {
+				wlr_log(WLR_ERROR, "steam icon: failed to load '%s': %s", load_path, gerr->message);
+				g_error_free(gerr);
+			}
+			return -1;
+		}
+	}
+
+	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
+	if (!buf)
+		return -1;
+
+	drop_steam_icon_buffer();
+	steam_icon_buf = buf;
+	steam_icon_w = w;
+	steam_icon_h = h;
+	steam_icon_loaded_h = target_h;
+	snprintf(steam_icon_loaded_path, sizeof(steam_icon_loaded_path), "%s", load_path);
+	return 0;
+}
+
+static int
+ensure_steam_icon_buffer(int target_h)
+{
+	if (target_h <= 0)
+		return -1;
+
+	if (steam_icon_buf && steam_icon_loaded_h == target_h &&
+			strncmp(steam_icon_loaded_path, steam_icon_path, sizeof(steam_icon_loaded_path)) == 0)
+		return 0;
+
+	return load_steam_icon_buffer(steam_icon_path, target_h);
+}
+
+static void
+drop_discord_icon_buffer(void)
+{
+	if (discord_icon_buf) {
+		wlr_buffer_drop(discord_icon_buf);
+		discord_icon_buf = NULL;
+	}
+	discord_icon_loaded_h = 0;
+	discord_icon_loaded_path[0] = '\0';
+	discord_icon_w = 0;
+	discord_icon_h = 0;
+}
+
+static int
+load_discord_icon_buffer(const char *path, int target_h)
+{
+	GError *gerr = NULL;
+	struct wlr_buffer *buf;
+	int w = 0, h = 0;
+	GdkPixbuf *pixbuf = NULL;
+	char resolved[PATH_MAX];
+	const char *load_path = path;
+
+	if (!path || !*path || target_h <= 0)
+		return -1;
+
+	if (resolve_asset_path(path, resolved, sizeof(resolved)) == 0)
+		load_path = resolved;
+
+	if (tray_load_svg_pixbuf(load_path, target_h, &pixbuf) != 0) {
+		pixbuf = gdk_pixbuf_new_from_file(load_path, &gerr);
+		if (!pixbuf) {
+			if (gerr) {
+				wlr_log(WLR_ERROR, "discord icon: failed to load '%s': %s", load_path, gerr->message);
+				g_error_free(gerr);
+			}
+			return -1;
+		}
+	}
+
+	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
+	if (!buf)
+		return -1;
+
+	drop_discord_icon_buffer();
+	discord_icon_buf = buf;
+	discord_icon_w = w;
+	discord_icon_h = h;
+	discord_icon_loaded_h = target_h;
+	snprintf(discord_icon_loaded_path, sizeof(discord_icon_loaded_path), "%s", load_path);
+	return 0;
+}
+
+static int
+ensure_discord_icon_buffer(int target_h)
+{
+	if (target_h <= 0)
+		return -1;
+
+	if (discord_icon_buf && discord_icon_loaded_h == target_h &&
+			strncmp(discord_icon_loaded_path, discord_icon_path, sizeof(discord_icon_loaded_path)) == 0)
+		return 0;
+
+	return load_discord_icon_buffer(discord_icon_path, target_h);
+}
+
+static void
+renderbluetooth(Monitor *m, int bar_height)
+{
+	StatusModule *module;
+	int padding, target_h, icon_x, icon_y, base_h;
+	struct wlr_scene_buffer *scene_buf;
+
+	if (!m || !m->statusbar.bluetooth.tree)
+		return;
+
+	module = &m->statusbar.bluetooth;
+	clearstatusmodule(module);
+	module->width = 0;
+	module->x = 0;
+
+	/* Only show if bluetooth is available */
+	if (!bluetooth_available) {
+		wlr_scene_node_set_enabled(&module->tree->node, 0);
+		return;
+	}
+
+	padding = statusbar_module_padding / 2;
+	if (padding < 1)
+		padding = 1;
+	base_h = bar_height - 2 * padding;
+	target_h = (int)lround(base_h * 1.5);
+	if (target_h > bar_height)
+		target_h = bar_height;
+	if (target_h <= 0)
+		target_h = bar_height - padding;
+	if (target_h <= 0)
+		target_h = 1;
+
+	if (ensure_bluetooth_icon_buffer(target_h) != 0 || !bluetooth_icon_buf ||
+			bluetooth_icon_w <= 0 || bluetooth_icon_h <= 0) {
+		wlr_scene_node_set_enabled(&module->tree->node, 0);
+		return;
+	}
+
+	module->width = bluetooth_icon_w + 2 * padding;
+	if (module->width < bluetooth_icon_w)
+		module->width = bluetooth_icon_w;
+
+	updatemodulebg(module, module->width, bar_height, statusbar_bg);
+
+	scene_buf = wlr_scene_buffer_create(module->tree, NULL);
+	if (scene_buf) {
+		int usable_w = module->width - 2 * padding;
+		icon_x = padding + MAX(0, (usable_w - bluetooth_icon_w) / 2);
+		icon_y = MAX(0, (bar_height - bluetooth_icon_h) / 2);
+		wlr_scene_buffer_set_buffer(scene_buf, bluetooth_icon_buf);
+		wlr_scene_node_set_position(&scene_buf->node, icon_x, icon_y);
+	}
+
+	wlr_scene_node_set_enabled(&module->tree->node, module->width > 0);
+}
+
+static void
+rendersteam(Monitor *m, int bar_height)
+{
+	StatusModule *module;
+	int padding, target_h, icon_x, icon_y, base_h;
+	struct wlr_scene_buffer *scene_buf;
+
+	if (!m || !m->statusbar.steam.tree)
+		return;
+
+	module = &m->statusbar.steam;
+	clearstatusmodule(module);
+	module->width = 0;
+	module->x = 0;
+
+	/* Only show if Steam process is running */
+	steam_running = is_process_running("steam");
+	if (!steam_running) {
+		wlr_scene_node_set_enabled(&module->tree->node, 0);
+		return;
+	}
+
+	padding = statusbar_module_padding / 2;
+	if (padding < 1)
+		padding = 1;
+	base_h = bar_height - 2 * padding;
+	target_h = (int)lround(base_h * 1.5);
+	if (target_h > bar_height)
+		target_h = bar_height;
+	if (target_h <= 0)
+		target_h = bar_height - padding;
+	if (target_h <= 0)
+		target_h = 1;
+
+	if (ensure_steam_icon_buffer(target_h) != 0 || !steam_icon_buf ||
+			steam_icon_w <= 0 || steam_icon_h <= 0) {
+		wlr_scene_node_set_enabled(&module->tree->node, 0);
+		return;
+	}
+
+	module->width = steam_icon_w + 2 * padding;
+	if (module->width < steam_icon_w)
+		module->width = steam_icon_w;
+
+	updatemodulebg(module, module->width, bar_height, statusbar_bg);
+
+	scene_buf = wlr_scene_buffer_create(module->tree, NULL);
+	if (scene_buf) {
+		int usable_w = module->width - 2 * padding;
+		icon_x = padding + MAX(0, (usable_w - steam_icon_w) / 2);
+		icon_y = MAX(0, (bar_height - steam_icon_h) / 2);
+		wlr_scene_buffer_set_buffer(scene_buf, steam_icon_buf);
+		wlr_scene_node_set_position(&scene_buf->node, icon_x, icon_y);
+	}
+
+	wlr_scene_node_set_enabled(&module->tree->node, module->width > 0);
+}
+
+static void
+renderdiscord(Monitor *m, int bar_height)
+{
+	StatusModule *module;
+	int padding, target_h, icon_x, icon_y, base_h;
+	struct wlr_scene_buffer *scene_buf;
+
+	if (!m || !m->statusbar.discord.tree)
+		return;
+
+	module = &m->statusbar.discord;
+	clearstatusmodule(module);
+	module->width = 0;
+	module->x = 0;
+
+	/* Only show if Discord process is running */
+	discord_running = is_process_running("Discord");
+	if (!discord_running) {
+		wlr_scene_node_set_enabled(&module->tree->node, 0);
+		return;
+	}
+
+	padding = statusbar_module_padding / 2;
+	if (padding < 1)
+		padding = 1;
+	base_h = bar_height - 2 * padding;
+	target_h = (int)lround(base_h * 1.5);
+	if (target_h > bar_height)
+		target_h = bar_height;
+	if (target_h <= 0)
+		target_h = bar_height - padding;
+	if (target_h <= 0)
+		target_h = 1;
+
+	if (ensure_discord_icon_buffer(target_h) != 0 || !discord_icon_buf ||
+			discord_icon_w <= 0 || discord_icon_h <= 0) {
+		wlr_scene_node_set_enabled(&module->tree->node, 0);
+		return;
+	}
+
+	module->width = discord_icon_w + 2 * padding;
+	if (module->width < discord_icon_w)
+		module->width = discord_icon_w;
+
+	updatemodulebg(module, module->width, bar_height, statusbar_bg);
+
+	scene_buf = wlr_scene_buffer_create(module->tree, NULL);
+	if (scene_buf) {
+		int usable_w = module->width - 2 * padding;
+		icon_x = padding + MAX(0, (usable_w - discord_icon_w) / 2);
+		icon_y = MAX(0, (bar_height - discord_icon_h) / 2);
+		wlr_scene_buffer_set_buffer(scene_buf, discord_icon_buf);
+		wlr_scene_node_set_position(&scene_buf->node, icon_x, icon_y);
+	}
+
+	wlr_scene_node_set_enabled(&module->tree->node, module->width > 0);
+}
+
+static void
 rendertrayicons(Monitor *m, int bar_height)
 {
 	StatusModule *module;
@@ -4845,6 +5273,135 @@ findbatterydevice(char *capacity_path, size_t capacity_len)
 }
 
 static int
+findbluetoothdevice(void)
+{
+	DIR *dir;
+	struct dirent *ent;
+	int found = 0;
+
+	dir = opendir("/sys/class/bluetooth");
+	if (!dir)
+		return 0;
+
+	while ((ent = readdir(dir))) {
+		if (ent->d_name[0] == '.')
+			continue;
+		/* Found at least one bluetooth adapter */
+		found = 1;
+		break;
+	}
+
+	closedir(dir);
+	return found;
+}
+
+static int
+is_process_running(const char *name)
+{
+	DIR *dir;
+	struct dirent *ent;
+	char path[PATH_MAX];
+	char comm[256];
+	FILE *fp;
+	int found = 0;
+
+	if (!name || !name[0])
+		return 0;
+
+	dir = opendir("/proc");
+	if (!dir)
+		return 0;
+
+	while ((ent = readdir(dir))) {
+		/* Skip non-numeric entries */
+		if (ent->d_name[0] < '0' || ent->d_name[0] > '9')
+			continue;
+
+		snprintf(path, sizeof(path), "/proc/%s/comm", ent->d_name);
+		fp = fopen(path, "r");
+		if (!fp)
+			continue;
+
+		if (fgets(comm, sizeof(comm), fp)) {
+			/* Remove trailing newline */
+			char *nl = strchr(comm, '\n');
+			if (nl)
+				*nl = '\0';
+			if (strcasecmp(comm, name) == 0 || strcasestr(comm, name)) {
+				found = 1;
+				fclose(fp);
+				break;
+			}
+		}
+		fclose(fp);
+	}
+
+	closedir(dir);
+	return found;
+}
+
+static Client *
+find_client_by_app_id(const char *app_id)
+{
+	Client *c;
+
+	if (!app_id || !app_id[0])
+		return NULL;
+
+	wl_list_for_each(c, &clients, link) {
+		if (c->type == XDGShell && c->surface.xdg && c->surface.xdg->toplevel) {
+			const char *cid = c->surface.xdg->toplevel->app_id;
+			if (cid && (strcasecmp(cid, app_id) == 0 || strcasestr(cid, app_id)))
+				return c;
+		}
+#ifdef XWAYLAND
+		if (c->type == X11 && c->surface.xwayland) {
+			const char *cls = c->surface.xwayland->class;
+			if (cls && (strcasecmp(cls, app_id) == 0 || strcasestr(cls, app_id)))
+				return c;
+		}
+#endif
+	}
+	return NULL;
+}
+
+static void
+focus_or_launch_app(const char *app_id, const char *launch_cmd)
+{
+	Client *found;
+
+	if (!app_id || !app_id[0])
+		return;
+
+	/* Find the client with matching app_id */
+	found = find_client_by_app_id(app_id);
+
+	if (found) {
+		/* Focus the client and switch to its tag/workspace */
+		Monitor *m = found->mon;
+		if (m && found->tags) {
+			/* Switch to the tag where this client is */
+			unsigned int newtags = found->tags & TAGMASK;
+			if (newtags && newtags != m->tagset[m->seltags]) {
+				m->tagset[m->seltags] = newtags;
+				focusclient(found, 1);
+				arrange(m);
+			} else {
+				focusclient(found, 1);
+			}
+		}
+	} else if (launch_cmd && launch_cmd[0]) {
+		/* No window found - launch/activate the app */
+		pid_t pid = fork();
+		if (pid == 0) {
+			setsid();
+			execlp("sh", "sh", "-c", launch_cmd, NULL);
+			_exit(1);
+		}
+	}
+}
+
+static int
 readfirstline(const char *path, char *buf, size_t len)
 {
 	FILE *fp;
@@ -6137,9 +6694,13 @@ connect_wifi_ssid(const char *ssid)
 		return;
 	if (fork() == 0) {
 		setsid();
-		execl("/bin/sh", "/bin/sh", "-c",
-				"nmcli device wifi connect \"$1\" >/dev/null 2>&1",
-				"nmcli-connect", ssid, (char *)NULL);
+		int fd = open("/dev/null", O_RDWR);
+		if (fd >= 0) {
+			dup2(fd, STDOUT_FILENO);
+			dup2(fd, STDERR_FILENO);
+			close(fd);
+		}
+		execlp("nmcli", "nmcli", "device", "wifi", "connect", ssid, (char *)NULL);
 		_exit(0);
 	}
 }
@@ -6171,6 +6732,664 @@ connect_wifi_with_prompt(const char *ssid, int secure)
 	}
 	/* Fallback: attempt plain connect (will fail if not saved) */
 	connect_wifi_ssid(ssid);
+}
+
+static void
+connect_wifi_with_password(const char *ssid, const char *password)
+{
+	if (!ssid || !*ssid || !password)
+		return;
+	if (fork() == 0) {
+		char cmd[512];
+		setsid();
+		snprintf(cmd, sizeof(cmd),
+			"nmcli device wifi connect \"%s\" password \"%s\" >/dev/null 2>&1",
+			ssid, password);
+		execl("/bin/sh", "/bin/sh", "-c", cmd, (char *)NULL);
+		_exit(0);
+	}
+}
+
+static int
+wifi_popup_connect_cb(int fd, uint32_t mask, void *data)
+{
+	Monitor *m = data;
+	WifiPasswordPopup *p;
+	char buf[256];
+	ssize_t n;
+	int status = 0;
+	int finished = 0;
+
+	(void)mask;
+
+	if (!m)
+		return 0;
+
+	p = &m->wifi_popup;
+
+	/* Read until EOF or would block */
+	for (;;) {
+		n = read(fd, buf, sizeof(buf));
+		if (n > 0) {
+			continue;  /* More data, keep reading */
+		} else if (n == 0) {
+			finished = 1;  /* EOF - process finished */
+			break;
+		} else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+			return 0;  /* No more data available yet */
+		} else {
+			finished = 1;  /* Error - treat as finished */
+			break;
+		}
+	}
+
+	if (!finished)
+		return 0;
+
+	/* Process finished - get exit status */
+	if (p->connect_pid > 0) {
+		waitpid(p->connect_pid, &status, 0);
+		p->connect_pid = -1;
+	}
+	if (p->connect_event) {
+		wl_event_source_remove(p->connect_event);
+		p->connect_event = NULL;
+	}
+	if (p->connect_fd >= 0) {
+		close(p->connect_fd);
+		p->connect_fd = -1;
+	}
+
+	p->connecting = 0;
+	if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+		/* Success - hide popup and menu */
+		wifi_popup_hide_all();
+		net_menu_hide_all();
+	} else if (p->try_saved) {
+		/* Saved credentials failed - show password popup */
+		p->try_saved = 0;
+		p->visible = 1;
+		p->error = 0;
+		wifi_popup_render(m);
+	} else {
+		/* Password entry failed - show error */
+		p->error = 1;
+		wifi_popup_render(m);
+	}
+	return 0;
+}
+
+static void
+wifi_popup_connect(Monitor *m)
+{
+	WifiPasswordPopup *p;
+	int pipefd[2];
+	pid_t pid;
+
+	if (!m)
+		return;
+
+	p = &m->wifi_popup;
+
+	if (p->connecting || p->password_len == 0)
+		return;
+
+	/* Clean up any previous connection attempt */
+	if (p->connect_event) {
+		wl_event_source_remove(p->connect_event);
+		p->connect_event = NULL;
+	}
+	if (p->connect_fd >= 0) {
+		close(p->connect_fd);
+		p->connect_fd = -1;
+	}
+	if (p->connect_pid > 0) {
+		kill(p->connect_pid, SIGTERM);
+		waitpid(p->connect_pid, NULL, WNOHANG);
+		p->connect_pid = -1;
+	}
+
+	if (pipe(pipefd) < 0)
+		return;
+
+	pid = fork();
+	if (pid < 0) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return;
+	}
+
+	if (pid == 0) {
+		/* Child */
+		close(pipefd[0]);
+		dup2(pipefd[1], STDOUT_FILENO);
+		dup2(pipefd[1], STDERR_FILENO);
+		close(pipefd[1]);
+		setsid();
+
+		/* Use execlp directly to avoid shell escaping issues */
+		execlp("nmcli", "nmcli", "device", "wifi", "connect",
+			p->ssid, "password", p->password, (char *)NULL);
+		_exit(1);
+	}
+
+	/* Parent */
+	close(pipefd[1]);
+
+	int flags = fcntl(pipefd[0], F_GETFL, 0);
+	fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
+
+	p->connect_pid = pid;
+	p->connect_fd = pipefd[0];
+	p->connecting = 1;
+	p->error = 0;
+	p->connect_event = wl_event_loop_add_fd(wl_display_get_event_loop(dpy),
+		pipefd[0], WL_EVENT_READABLE | WL_EVENT_HANGUP,
+		wifi_popup_connect_cb, m);
+
+	wifi_popup_render(m);
+}
+
+static void
+wifi_try_saved_connect(Monitor *m, const char *ssid)
+{
+	WifiPasswordPopup *p;
+	int pipefd[2];
+	pid_t pid;
+
+	if (!m || !ssid || !*ssid)
+		return;
+
+	p = &m->wifi_popup;
+
+	/* Store SSID for potential password popup later */
+	snprintf(p->ssid, sizeof(p->ssid), "%s", ssid);
+	p->password[0] = '\0';
+	p->password_len = 0;
+	p->visible = 0;  /* Don't show popup yet */
+	p->error = 0;
+	p->try_saved = 1;  /* Mark that we're trying saved credentials */
+
+	/* Clean up any previous connection attempt */
+	if (p->connect_event) {
+		wl_event_source_remove(p->connect_event);
+		p->connect_event = NULL;
+	}
+	if (p->connect_fd >= 0) {
+		close(p->connect_fd);
+		p->connect_fd = -1;
+	}
+	if (p->connect_pid > 0) {
+		kill(p->connect_pid, SIGTERM);
+		waitpid(p->connect_pid, NULL, WNOHANG);
+		p->connect_pid = -1;
+	}
+
+	if (pipe(pipefd) < 0)
+		return;
+
+	pid = fork();
+	if (pid < 0) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return;
+	}
+
+	if (pid == 0) {
+		/* Child */
+		close(pipefd[0]);
+		dup2(pipefd[1], STDOUT_FILENO);
+		dup2(pipefd[1], STDERR_FILENO);
+		close(pipefd[1]);
+		setsid();
+
+		/* Try connecting without password - nmcli will use saved credentials */
+		execlp("nmcli", "nmcli", "device", "wifi", "connect", ssid, (char *)NULL);
+		_exit(1);
+	}
+
+	/* Parent */
+	close(pipefd[1]);
+
+	int flags = fcntl(pipefd[0], F_GETFL, 0);
+	fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
+
+	p->connect_pid = pid;
+	p->connect_fd = pipefd[0];
+	p->connecting = 1;
+	p->connect_event = wl_event_loop_add_fd(wl_display_get_event_loop(dpy),
+		pipefd[0], WL_EVENT_READABLE | WL_EVENT_HANGUP,
+		wifi_popup_connect_cb, m);
+}
+
+static Monitor *
+wifi_popup_visible_monitor(void)
+{
+	Monitor *m;
+	wl_list_for_each(m, &mons, link) {
+		if (m->wifi_popup.visible)
+			return m;
+	}
+	return NULL;
+}
+
+static void
+wifi_popup_hide(Monitor *m)
+{
+	if (!m || !m->wifi_popup.tree)
+		return;
+	/* Clean up any ongoing connection */
+	if (m->wifi_popup.connect_event) {
+		wl_event_source_remove(m->wifi_popup.connect_event);
+		m->wifi_popup.connect_event = NULL;
+	}
+	if (m->wifi_popup.connect_fd >= 0) {
+		close(m->wifi_popup.connect_fd);
+		m->wifi_popup.connect_fd = -1;
+	}
+	if (m->wifi_popup.connect_pid > 0) {
+		kill(m->wifi_popup.connect_pid, SIGTERM);
+		waitpid(m->wifi_popup.connect_pid, NULL, WNOHANG);
+		m->wifi_popup.connect_pid = -1;
+	}
+	m->wifi_popup.visible = 0;
+	m->wifi_popup.password[0] = '\0';
+	m->wifi_popup.password_len = 0;
+	m->wifi_popup.ssid[0] = '\0';
+	m->wifi_popup.button_hover = 0;
+	m->wifi_popup.connecting = 0;
+	m->wifi_popup.error = 0;
+	m->wifi_popup.try_saved = 0;
+	wlr_scene_node_set_enabled(&m->wifi_popup.tree->node, 0);
+}
+
+static void
+wifi_popup_hide_all(void)
+{
+	Monitor *m;
+	wl_list_for_each(m, &mons, link)
+		wifi_popup_hide(m);
+}
+
+static void
+wifi_popup_show(Monitor *m, const char *ssid)
+{
+	if (!m || !ssid || !*ssid)
+		return;
+
+	/* Copy SSID first - net_menu_hide_all() frees the WifiNetwork structs */
+	snprintf(m->wifi_popup.ssid, sizeof(m->wifi_popup.ssid), "%s", ssid);
+
+	wifi_popup_hide_all();
+	net_menu_hide_all();
+
+	m->wifi_popup.password[0] = '\0';
+	m->wifi_popup.password_len = 0;
+	m->wifi_popup.cursor_pos = 0;
+	m->wifi_popup.button_hover = 0;
+	m->wifi_popup.visible = 1;
+
+	wifi_popup_render(m);
+}
+
+static void
+wifi_popup_render(Monitor *m)
+{
+	WifiPasswordPopup *p;
+	struct wlr_scene_node *node, *tmp;
+	int padding = 20;
+	int input_width = 300;
+	int input_height;
+	int button_width = 120;
+	int button_height;
+	int title_width = 0;
+	int total_width, total_height;
+	int center_x, center_y;
+	char title[256];
+	const char *btn_text;
+	int line_spacing = 10;
+
+	if (!m || !m->wifi_popup.tree)
+		return;
+
+	p = &m->wifi_popup;
+
+	/* Set button text based on state */
+	if (p->connecting)
+		btn_text = "Connecting...";
+	else if (p->error)
+		btn_text = "Retry";
+	else
+		btn_text = "Connect";
+
+	/* Clear previous content */
+	wl_list_for_each_safe(node, tmp, &p->tree->children, link) {
+		if (p->bg && node == &p->bg->node)
+			continue;
+		wlr_scene_node_destroy(node);
+	}
+
+	if (!p->visible || !statusfont.font) {
+		wlr_scene_node_set_enabled(&p->tree->node, 0);
+		return;
+	}
+
+	input_height = statusfont.height + 12;
+	button_height = statusfont.height + 10;
+
+	snprintf(title, sizeof(title), "Wifi Passphrase:");
+
+	/* Compute title width */
+	{
+		int pen_x = 0;
+		uint32_t prev_cp = 0;
+		for (size_t i = 0; title[i]; i++) {
+			long kern_x = 0, kern_y = 0;
+			uint32_t cp = (unsigned char)title[i];
+			const struct fcft_glyph *glyph;
+			if (prev_cp)
+				fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
+			pen_x += (int)kern_x;
+			glyph = fcft_rasterize_char_utf32(statusfont.font, cp, statusbar_font_subpixel);
+			if (glyph)
+				pen_x += glyph->advance.x;
+			if (title[i + 1])
+				pen_x += statusbar_font_spacing;
+			prev_cp = cp;
+		}
+		title_width = pen_x;
+	}
+
+	total_width = MAX(input_width, title_width) + 2 * padding;
+	total_height = statusfont.height + line_spacing + input_height + line_spacing + button_height + 2 * padding;
+
+	p->width = total_width;
+	p->height = total_height;
+
+	/* Center on monitor */
+	center_x = m->m.x + (m->m.width - total_width) / 2;
+	center_y = m->m.y + (m->m.height - total_height) / 2;
+
+	wlr_scene_node_set_position(&p->tree->node, center_x, center_y);
+
+	/* Background */
+	if (!p->bg)
+		p->bg = wlr_scene_tree_create(p->tree);
+	if (p->bg) {
+		wl_list_for_each_safe(node, tmp, &p->bg->children, link)
+			wlr_scene_node_destroy(node);
+		wlr_scene_node_set_position(&p->bg->node, 0, 0);
+		drawrect(p->bg, 0, 0, total_width, total_height, statusbar_popup_bg);
+		/* Border */
+		float border_col[4] = {0.3f, 0.3f, 0.3f, 1.0f};
+		drawrect(p->bg, 0, 0, total_width, 1, border_col);
+		drawrect(p->bg, 0, total_height - 1, total_width, 1, border_col);
+		drawrect(p->bg, 0, 0, 1, total_height, border_col);
+		drawrect(p->bg, total_width - 1, 0, 1, total_height, border_col);
+	}
+
+	/* Draw title */
+	{
+		int origin_x = padding + (total_width - 2 * padding - title_width) / 2;
+		int origin_y = padding + statusfont.ascent;
+		int pen_x = 0;
+		uint32_t prev_cp = 0;
+
+		for (size_t i = 0; title[i]; i++) {
+			long kern_x = 0, kern_y = 0;
+			uint32_t cp = (unsigned char)title[i];
+			const struct fcft_glyph *glyph;
+			struct wlr_buffer *buffer;
+			struct wlr_scene_buffer *scene_buf;
+
+			if (prev_cp)
+				fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
+			pen_x += (int)kern_x;
+
+			glyph = fcft_rasterize_char_utf32(statusfont.font, cp, statusbar_font_subpixel);
+			if (!glyph || !glyph->pix) {
+				prev_cp = cp;
+				continue;
+			}
+
+			buffer = statusbar_buffer_from_glyph(glyph);
+			if (buffer) {
+				scene_buf = wlr_scene_buffer_create(p->tree, NULL);
+				if (scene_buf) {
+					wlr_scene_buffer_set_buffer(scene_buf, buffer);
+					wlr_scene_node_set_position(&scene_buf->node,
+						origin_x + pen_x + glyph->x,
+						origin_y - glyph->y);
+				}
+				wlr_buffer_drop(buffer);
+			}
+			pen_x += glyph->advance.x;
+			if (title[i + 1])
+				pen_x += statusbar_font_spacing;
+			prev_cp = cp;
+		}
+	}
+
+	/* Draw input box */
+	{
+		int input_x = padding;
+		int input_y = padding + statusfont.height + line_spacing;
+		float input_bg[4] = {0.1f, 0.1f, 0.1f, 1.0f};
+		float input_border[4] = {0.4f, 0.4f, 0.4f, 1.0f};
+		float error_border[4] = {0.8f, 0.2f, 0.2f, 1.0f};
+		float *border = p->error ? error_border : input_border;
+
+		drawrect(p->tree, input_x, input_y, input_width, input_height, input_bg);
+		drawrect(p->tree, input_x, input_y, input_width, 1, border);
+		drawrect(p->tree, input_x, input_y + input_height - 1, input_width, 1, border);
+		drawrect(p->tree, input_x, input_y, 1, input_height, border);
+		drawrect(p->tree, input_x + input_width - 1, input_y, 1, input_height, border);
+
+		/* Draw password as dots */
+		{
+			int text_x = input_x + 6;
+			int text_y = input_y + (input_height - statusfont.height) / 2 + statusfont.ascent;
+			int pen_x = 0;
+
+			for (int i = 0; i < p->password_len && i < (int)sizeof(p->password) - 1; i++) {
+				const struct fcft_glyph *glyph = fcft_rasterize_char_utf32(
+					statusfont.font, 0x2022 /* bullet */, statusbar_font_subpixel);
+				if (!glyph)
+					glyph = fcft_rasterize_char_utf32(statusfont.font, '*', statusbar_font_subpixel);
+				if (glyph && glyph->pix) {
+					struct wlr_buffer *buffer = statusbar_buffer_from_glyph(glyph);
+					if (buffer) {
+						struct wlr_scene_buffer *scene_buf = wlr_scene_buffer_create(p->tree, NULL);
+						if (scene_buf) {
+							wlr_scene_buffer_set_buffer(scene_buf, buffer);
+							wlr_scene_node_set_position(&scene_buf->node,
+								text_x + pen_x + glyph->x,
+								text_y - glyph->y);
+						}
+						wlr_buffer_drop(buffer);
+					}
+					pen_x += glyph->advance.x + statusbar_font_spacing;
+				}
+			}
+
+			/* Draw cursor */
+			float cursor_col[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+			drawrect(p->tree, text_x + pen_x, input_y + 4, 2, input_height - 8, cursor_col);
+		}
+	}
+
+	/* Draw connect button */
+	{
+		int btn_x = padding + (input_width - button_width) / 2;
+		int btn_y = padding + statusfont.height + line_spacing + input_height + line_spacing;
+		float btn_bg[4] = {0.2f, 0.4f, 0.6f, 1.0f};
+		float btn_hover_bg[4] = {0.3f, 0.5f, 0.7f, 1.0f};
+
+		if (p->button_hover)
+			drawrect(p->tree, btn_x, btn_y, button_width, button_height, btn_hover_bg);
+		else
+			drawrect(p->tree, btn_x, btn_y, button_width, button_height, btn_bg);
+
+		/* Center button text */
+		int btn_text_width = 0;
+		{
+			int pen_x = 0;
+			uint32_t prev_cp = 0;
+			for (size_t i = 0; btn_text[i]; i++) {
+				long kern_x = 0, kern_y = 0;
+				uint32_t cp = (unsigned char)btn_text[i];
+				const struct fcft_glyph *glyph;
+				if (prev_cp)
+					fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
+				pen_x += (int)kern_x;
+				glyph = fcft_rasterize_char_utf32(statusfont.font, cp, statusbar_font_subpixel);
+				if (glyph)
+					pen_x += glyph->advance.x;
+				if (btn_text[i + 1])
+					pen_x += statusbar_font_spacing;
+				prev_cp = cp;
+			}
+			btn_text_width = pen_x;
+		}
+
+		int text_x = btn_x + (button_width - btn_text_width) / 2;
+		int text_y = btn_y + (button_height - statusfont.height) / 2 + statusfont.ascent;
+		int pen_x = 0;
+		uint32_t prev_cp = 0;
+
+		for (size_t i = 0; btn_text[i]; i++) {
+			long kern_x = 0, kern_y = 0;
+			uint32_t cp = (unsigned char)btn_text[i];
+			const struct fcft_glyph *glyph;
+			struct wlr_buffer *buffer;
+			struct wlr_scene_buffer *scene_buf;
+
+			if (prev_cp)
+				fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
+			pen_x += (int)kern_x;
+
+			glyph = fcft_rasterize_char_utf32(statusfont.font, cp, statusbar_font_subpixel);
+			if (!glyph || !glyph->pix) {
+				prev_cp = cp;
+				continue;
+			}
+
+			buffer = statusbar_buffer_from_glyph(glyph);
+			if (buffer) {
+				scene_buf = wlr_scene_buffer_create(p->tree, NULL);
+				if (scene_buf) {
+					wlr_scene_buffer_set_buffer(scene_buf, buffer);
+					wlr_scene_node_set_position(&scene_buf->node,
+						text_x + pen_x + glyph->x,
+						text_y - glyph->y);
+				}
+				wlr_buffer_drop(buffer);
+			}
+			pen_x += glyph->advance.x;
+			if (btn_text[i + 1])
+				pen_x += statusbar_font_spacing;
+			prev_cp = cp;
+		}
+	}
+
+	wlr_scene_node_set_enabled(&p->tree->node, 1);
+}
+
+static int
+wifi_popup_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
+{
+	WifiPasswordPopup *p;
+
+	if (!m || !m->wifi_popup.visible)
+		return 0;
+
+	p = &m->wifi_popup;
+
+	if (sym == XKB_KEY_Escape) {
+		wifi_popup_hide_all();
+		return 1;
+	}
+
+	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+		if (!p->connecting && p->password_len > 0) {
+			wifi_popup_connect(m);
+		}
+		return 1;
+	}
+
+	/* Don't allow editing while connecting */
+	if (p->connecting)
+		return 1;
+
+	if (sym == XKB_KEY_BackSpace && p->password_len > 0) {
+		p->password_len--;
+		p->password[p->password_len] = '\0';
+		p->error = 0;  /* Clear error on edit */
+		wifi_popup_render(m);
+		return 1;
+	}
+
+	/* Handle printable characters */
+	if (sym >= 0x20 && sym <= 0x7e && !(mods & (WLR_MODIFIER_CTRL | WLR_MODIFIER_LOGO))) {
+		if (p->password_len + 1 < (int)sizeof(p->password)) {
+			p->password[p->password_len] = (char)sym;
+			p->password_len++;
+			p->password[p->password_len] = '\0';
+			p->error = 0;  /* Clear error on edit */
+			wifi_popup_render(m);
+		}
+		return 1;
+	}
+
+	return 1; /* Consume all keys while popup is open */
+}
+
+static int
+wifi_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
+{
+	WifiPasswordPopup *p;
+	int popup_x, popup_y;
+	int padding = 20;
+	int input_width = 300;
+	int button_width = 120;
+	int button_height;
+	int input_height;
+	int line_spacing = 10;
+
+	if (!m || !m->wifi_popup.visible)
+		return 0;
+
+	p = &m->wifi_popup;
+
+	input_height = statusfont.height + 12;
+	button_height = statusfont.height + 10;
+
+	popup_x = m->m.x + (m->m.width - p->width) / 2;
+	popup_y = m->m.y + (m->m.height - p->height) / 2;
+
+	/* Check if click is inside popup */
+	if (lx < popup_x || lx >= popup_x + p->width ||
+	    ly < popup_y || ly >= popup_y + p->height) {
+		if (!p->connecting)
+			wifi_popup_hide_all();
+		return 1;
+	}
+
+	/* Check button click */
+	if (button == BTN_LEFT && !p->connecting) {
+		int btn_x = popup_x + padding + (input_width - button_width) / 2;
+		int btn_y = popup_y + padding + statusfont.height + line_spacing + input_height + line_spacing;
+
+		if (lx >= btn_x && lx < btn_x + button_width &&
+		    ly >= btn_y && ly < btn_y + button_height) {
+			if (p->password_len > 0) {
+				wifi_popup_connect(m);
+			}
+			return 1;
+		}
+	}
+
+	return 1;
 }
 
 static void
@@ -6379,7 +7598,7 @@ net_menu_submenu_render(Monitor *m)
 static void
 request_wifi_scan(void)
 {
-	const char *cmd = "nmcli -t -f SSID,SIGNAL,SECURITY device wifi list --rescan no";
+	const char *cmd = "nmcli -t -f SSID,SIGNAL,SECURITY device wifi list --rescan auto";
 	int pipefd[2] = {-1, -1};
 
 	if (wifi_scan_inflight)
@@ -7569,6 +8788,18 @@ positionstatusmodules(Monitor *m)
 			wlr_scene_node_set_enabled(&m->statusbar.sysicons.tree->node, 0);
 			m->statusbar.sysicons.x = 0;
 		}
+		if (m->statusbar.bluetooth.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.bluetooth.tree->node, 0);
+			m->statusbar.bluetooth.x = 0;
+		}
+		if (m->statusbar.steam.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.steam.tree->node, 0);
+			m->statusbar.steam.x = 0;
+		}
+		if (m->statusbar.discord.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.discord.tree->node, 0);
+			m->statusbar.discord.x = 0;
+		}
 		if (m->statusbar.tray_menu.tree) {
 			wlr_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 0);
 			m->statusbar.tray_menu.visible = 0;
@@ -7626,6 +8857,15 @@ positionstatusmodules(Monitor *m)
 	if (m->statusbar.sysicons.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.sysicons.tree->node,
 				m->statusbar.sysicons.width > 0);
+	if (m->statusbar.bluetooth.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.bluetooth.tree->node,
+				m->statusbar.bluetooth.width > 0);
+	if (m->statusbar.steam.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.steam.tree->node,
+				m->statusbar.steam.width > 0);
+	if (m->statusbar.discord.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.discord.tree->node,
+				m->statusbar.discord.width > 0);
 	if (m->statusbar.cpu.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.cpu.tree->node,
 				m->statusbar.cpu.width > 0);
@@ -7662,6 +8902,27 @@ positionstatusmodules(Monitor *m)
 		m->statusbar.tags.x = x;
 		x += m->statusbar.tags.width + spacing;
 	}
+	/* Group connection-related icons together with minimal spacing */
+	if (m->statusbar.sysicons.width > 0) {
+		wlr_scene_node_set_position(&m->statusbar.sysicons.tree->node, x, 0);
+		m->statusbar.sysicons.x = x;
+		x += m->statusbar.sysicons.width + 2;
+	}
+	if (m->statusbar.bluetooth.width > 0) {
+		wlr_scene_node_set_position(&m->statusbar.bluetooth.tree->node, x, 0);
+		m->statusbar.bluetooth.x = x;
+		x += m->statusbar.bluetooth.width + 2;
+	}
+	if (m->statusbar.steam.width > 0) {
+		wlr_scene_node_set_position(&m->statusbar.steam.tree->node, x, 0);
+		m->statusbar.steam.x = x;
+		x += m->statusbar.steam.width + 2;
+	}
+	if (m->statusbar.discord.width > 0) {
+		wlr_scene_node_set_position(&m->statusbar.discord.tree->node, x, 0);
+		m->statusbar.discord.x = x;
+		x += m->statusbar.discord.width + spacing;
+	}
 	if (m->statusbar.net.width > 0) {
 		wlr_scene_node_set_position(&m->statusbar.net.tree->node, x, 0);
 		m->statusbar.net.x = x;
@@ -7671,11 +8932,6 @@ positionstatusmodules(Monitor *m)
 		wlr_scene_node_set_position(&m->statusbar.traylabel.tree->node, x, 0);
 		m->statusbar.traylabel.x = x;
 		x += m->statusbar.traylabel.width + spacing;
-	}
-	if (m->statusbar.sysicons.width > 0) {
-		wlr_scene_node_set_position(&m->statusbar.sysicons.tree->node, x, 0);
-		m->statusbar.sysicons.x = x;
-		x += m->statusbar.sysicons.width + spacing;
 	}
 
 	x = m->statusbar.area.width;
@@ -7949,7 +9205,7 @@ static void
 wifi_scan_plan_rescan(void)
 {
 	if (wifi_scan_timer)
-		wl_event_source_timer_update(wifi_scan_timer, 2000);
+		wl_event_source_timer_update(wifi_scan_timer, 500);
 }
 
 static int
@@ -7959,9 +9215,6 @@ wifi_scan_timer_cb(void *data)
 	int visible = 0;
 	(void)data;
 
-	if (wifi_scan_inflight)
-		return 0;
-
 	wl_list_for_each(m, &mons, link) {
 		if (m->statusbar.net_menu.visible) {
 			visible = 1;
@@ -7969,8 +9222,14 @@ wifi_scan_timer_cb(void *data)
 		}
 	}
 
-	if (visible)
+	if (!visible)
+		return 0;
+
+	if (!wifi_scan_inflight)
 		request_wifi_scan();
+
+	/* Always reschedule while menu is visible */
+	wifi_scan_plan_rescan();
 
 	return 0;
 }
@@ -8027,7 +9286,7 @@ net_menu_open(Monitor *m)
 	net_menu_hide_all();
 	wifi_networks_generation++;
 	wifi_networks_accept_updates = 1;
-	wifi_networks_freeze_existing = 1;
+	wifi_networks_freeze_existing = 0;
 	wifi_networks_clear();
 	if (m->statusbar.net_popup.tree) {
 		wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
@@ -8156,8 +9415,9 @@ net_menu_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 			if (rel_y >= 0) {
 				WifiNetwork *n = wifi_network_at_index(idx);
 				if (n) {
-					connect_wifi_with_prompt(n->ssid, n->secure);
-					net_menu_hide_all();
+					/* Always try connecting first - nmcli will use saved credentials */
+					/* For secure networks without saved creds, password popup will appear */
+					wifi_try_saved_connect(m, n->ssid);
 					return 1;
 				}
 			}
@@ -8211,6 +9471,12 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 	}
 	if (m->statusbar.sysicons.tree)
 		rendertrayicons(m, bar_area.height);
+	if (m->statusbar.bluetooth.tree)
+		renderbluetooth(m, bar_area.height);
+	if (m->statusbar.steam.tree)
+		rendersteam(m, bar_area.height);
+	if (m->statusbar.discord.tree)
+		renderdiscord(m, bar_area.height);
 	if (m->statusbar.cpu.tree)
 		rendercpu(&m->statusbar.cpu, bar_area.height, cpu_text);
 	if (m->statusbar.net.tree)
@@ -8826,10 +10092,17 @@ refreshstatusicons(void)
 	int barh;
 
 	wl_list_for_each(m, &mons, link) {
-		if (!m->statusbar.sysicons.tree || !m->showbar)
+		if (!m->showbar)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		rendertrayicons(m, barh);
+		if (m->statusbar.sysicons.tree)
+			rendertrayicons(m, barh);
+		if (m->statusbar.bluetooth.tree)
+			renderbluetooth(m, barh);
+		if (m->statusbar.steam.tree)
+			rendersteam(m, barh);
+		if (m->statusbar.discord.tree)
+			renderdiscord(m, barh);
 		positionstatusmodules(m);
 	}
 }
@@ -11193,6 +12466,13 @@ buttonpress(struct wl_listener *listener, void *data)
 			}
 		}
 
+		if (selmon && selmon->wifi_popup.visible) {
+			int lx = (int)lround(cursor->x);
+			int ly = (int)lround(cursor->y);
+			if (wifi_popup_handle_click(selmon, lx, ly, event->button))
+				return;
+		}
+
 		if (selmon && selmon->statusbar.net_menu.visible) {
 			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
 			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
@@ -11208,6 +12488,9 @@ buttonpress(struct wl_listener *listener, void *data)
 			StatusModule *vol = &selmon->statusbar.volume;
 			StatusModule *cpu = &selmon->statusbar.cpu;
 			StatusModule *sys = &selmon->statusbar.sysicons;
+			StatusModule *bt = &selmon->statusbar.bluetooth;
+			StatusModule *stm = &selmon->statusbar.steam;
+			StatusModule *dsc = &selmon->statusbar.discord;
 
 			if (selmon->statusbar.cpu_popup.visible) {
 				if (cpu_popup_handle_click(selmon, lx, ly, event->button))
@@ -11225,6 +12508,14 @@ buttonpress(struct wl_listener *listener, void *data)
 					return;
 				}
 
+				if (event->button == BTN_LEFT &&
+						sys->width > 0 &&
+						lx >= sys->x && lx < sys->x + sys->width) {
+					Arg arg = { .v = netcmd };
+					spawn(&arg);
+					return;
+				}
+
 				if (cpu->width > 0 && lx >= cpu->x && lx < cpu->x + cpu->width) {
 					Arg arg = { .v = btopcmd };
 					spawn(&arg);
@@ -11238,6 +12529,35 @@ buttonpress(struct wl_listener *listener, void *data)
 
 				if (vol->width > 0 && lx >= vol->x && lx < vol->x + vol->width) {
 					toggle_pipewire_mute();
+					return;
+				}
+
+				/* Bluetooth module click - open bluetooth manager */
+				if (event->button == BTN_LEFT &&
+						bt->width > 0 &&
+						lx >= bt->x && lx < bt->x + bt->width) {
+					pid_t pid = fork();
+					if (pid == 0) {
+						setsid();
+						execlp("blueman-manager", "blueman-manager", NULL);
+						_exit(1);
+					}
+					return;
+				}
+
+				/* Steam module click - focus or launch Steam */
+				if (event->button == BTN_LEFT &&
+						stm->width > 0 &&
+						lx >= stm->x && lx < stm->x + stm->width) {
+					focus_or_launch_app("steam", "steam");
+					return;
+				}
+
+				/* Discord module click - focus or launch Discord */
+				if (event->button == BTN_LEFT &&
+						dsc->width > 0 &&
+						lx >= dsc->x && lx < dsc->x + dsc->width) {
+					focus_or_launch_app("discord", "discord");
 					return;
 				}
 
@@ -11386,6 +12706,9 @@ cleanup(void)
 	drop_battery_icon_buffer();
 	drop_mic_icon_buffer();
 	drop_volume_icon_buffer();
+	drop_bluetooth_icon_buffer();
+	drop_steam_icon_buffer();
+	drop_discord_icon_buffer();
 	stop_public_ip_fetch();
 	stop_ssid_fetch();
 	wifi_scan_finish();
@@ -11502,6 +12825,8 @@ cleanupmon(struct wl_listener *listener, void *data)
 		wlr_scene_node_destroy(&m->statusbar.tree->node);
 	if (m->modal.tree)
 		wlr_scene_node_destroy(&m->modal.tree->node);
+	if (m->wifi_popup.tree)
+		wlr_scene_node_destroy(&m->wifi_popup.tree->node);
 	destroy_tree(m);
 	closemon(m);
 	wlr_scene_node_destroy(&m->fullscreen_bg->node);
@@ -11847,6 +13172,15 @@ initstatusbar(Monitor *m)
 		m->statusbar.sysicons.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.sysicons.tree)
 			m->statusbar.sysicons.bg = wlr_scene_tree_create(m->statusbar.sysicons.tree);
+		m->statusbar.bluetooth.tree = wlr_scene_tree_create(m->statusbar.tree);
+		if (m->statusbar.bluetooth.tree)
+			m->statusbar.bluetooth.bg = wlr_scene_tree_create(m->statusbar.bluetooth.tree);
+		m->statusbar.steam.tree = wlr_scene_tree_create(m->statusbar.tree);
+		if (m->statusbar.steam.tree)
+			m->statusbar.steam.bg = wlr_scene_tree_create(m->statusbar.steam.tree);
+		m->statusbar.discord.tree = wlr_scene_tree_create(m->statusbar.tree);
+		if (m->statusbar.discord.tree)
+			m->statusbar.discord.bg = wlr_scene_tree_create(m->statusbar.discord.tree);
 		m->statusbar.tray_menu.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.tray_menu.tree) {
 			m->statusbar.tray_menu.bg = wlr_scene_tree_create(m->statusbar.tray_menu.tree);
@@ -11933,6 +13267,25 @@ initstatusbar(Monitor *m)
 	m->modal.file_search_buf[0] = '\0';
 	m->modal.file_search_last[0] = '\0';
 			wlr_scene_node_set_enabled(&m->modal.tree->node, 0);
+		}
+	}
+	if (!m->wifi_popup.tree) {
+		m->wifi_popup.tree = wlr_scene_tree_create(layers[LyrTop]);
+		if (m->wifi_popup.tree) {
+			m->wifi_popup.bg = NULL;
+			m->wifi_popup.visible = 0;
+			m->wifi_popup.ssid[0] = '\0';
+			m->wifi_popup.password[0] = '\0';
+			m->wifi_popup.password_len = 0;
+			m->wifi_popup.cursor_pos = 0;
+			m->wifi_popup.button_hover = 0;
+			m->wifi_popup.connecting = 0;
+			m->wifi_popup.error = 0;
+			m->wifi_popup.try_saved = 0;
+			m->wifi_popup.connect_pid = -1;
+			m->wifi_popup.connect_fd = -1;
+			m->wifi_popup.connect_event = NULL;
+			wlr_scene_node_set_enabled(&m->wifi_popup.tree->node, 0);
 		}
 	}
 }
@@ -12566,12 +13919,20 @@ keypress(struct wl_listener *listener, void *data)
 	int handled = 0;
 	uint32_t mods = wlr_keyboard_get_modifiers(&group->wlr_group->keyboard);
 	Monitor *modal_mon = modal_visible_monitor();
+	Monitor *wifi_mon = wifi_popup_visible_monitor();
 
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
 	/* On _press_ if there is no active screen locker,
 	 * attempt to process a compositor keybinding. */
 	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+		/* WiFi password popup takes priority */
+		if (wifi_mon) {
+			for (i = 0; i < nsyms; i++) {
+				if (wifi_popup_handle_key(wifi_mon, mods, syms[i]))
+					handled = 1;
+			}
+		}
 		if (modal_mon) {
 			int consumed = 0;
 			for (i = 0; i < nsyms; i++) {
@@ -12729,6 +14090,18 @@ mapnotify(struct wl_listener *listener, void *data)
 	/* Insert this client into client lists. */
 	wl_list_insert(&clients, &c->link);
 	wl_list_insert(&fstack, &c->flink);
+
+	/* Debug: log client app_id */
+	if (c->type == XDGShell && c->surface.xdg && c->surface.xdg->toplevel) {
+		const char *aid = c->surface.xdg->toplevel->app_id;
+		wlr_log(WLR_INFO, "mapnotify: XDG client mapped, app_id='%s'", aid ? aid : "(null)");
+	}
+#ifdef XWAYLAND
+	if (c->type == X11 && c->surface.xwayland) {
+		const char *cls = c->surface.xwayland->class;
+		wlr_log(WLR_INFO, "mapnotify: X11 client mapped, class='%s'", cls ? cls : "(null)");
+	}
+#endif
 
 	/* Set initial monitor, tags, floating status, and focus:
 	 * we always consider floating, clients that have parent and thus
@@ -13982,6 +15355,7 @@ setup(void)
 	backlight_available = findbacklightdevice(backlight_brightness_path,
 			sizeof(backlight_brightness_path),
 			backlight_max_path, sizeof(backlight_max_path));
+	bluetooth_available = findbluetoothdevice();
 
 	/* The backend is a wlroots feature which abstracts the underlying input and
 	 * output hardware. The autocreate option will choose the most suitable
