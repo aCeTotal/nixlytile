@@ -184,8 +184,6 @@ static const char *const autostart_cmd =
 	"[ -r \"$wp\" ] || wp=\"$(CDPATH= cd -- \"$bin_dir/..\" && pwd)/wallpapers/beach.jpg\"; "
 	"[ -r \"$wp\" ] || wp=\"$PWD/wallpapers/beach.jpg\"; "
 	"[ -r \"$wp\" ] || wp=\"wallpapers/beach.jpg\"; "
-	"nm-applet --indicator >/dev/null 2>&1 & "
-	"blueman-applet >/dev/null 2>&1 & "
 	"swaybg -i \"$wp\" -m fill <&-";
 
 static const Key keys[] = {

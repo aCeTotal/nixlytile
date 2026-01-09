@@ -430,7 +430,7 @@ insert_client(Monitor *m, Client *focused_client, Client *new_client)
 	if (!focused_node) {
 		old_root = *root;
 		new_client_node = create_client_node(new_client);
-		/* Only create vertical split if we need more columns */
+		/* Vertical split for new column, horizontal for tiles within column */
 		if (current_cols < desired_cols)
 			*root = create_split_node(1, old_root, new_client_node);
 		else
@@ -446,8 +446,7 @@ insert_client(Monitor *m, Client *focused_client, Client *new_client)
 
 	/* Split direction:
 	 * - Need more columns? -> vertical split (create column)
-	 * - 1 tile in column -> horizontal split (top/bottom)
-	 * - 2-3 tiles in column -> vertical split (left/right)
+	 * - Tiles within column -> always horizontal split (top/bottom)
 	 * - 4 tiles in column -> FULL, don't allow more */
 	if (current_cols < desired_cols) {
 		wider = 1; /* Need more columns - vertical split */
@@ -461,9 +460,9 @@ insert_client(Monitor *m, Client *focused_client, Client *new_client)
 			free(new_client_node);
 			return 0;
 		} else if (col_tiles == 1) {
-			wider = 0; /* Horizontal split (top/bottom) */
+			wider = 0; /* First split in column: horizontal (top/bottom) */
 		} else {
-			wider = 1; /* Vertical split (left/right) */
+			wider = 1; /* After horizontal split: vertical (left/right) */
 		}
 	}
 	focused_node->is_client_node = 0;
@@ -533,6 +532,7 @@ insert_client_at(Monitor *m, Client *target, Client *new_client, double cx, doub
 	if (!target_node) {
 		old_root = *root;
 		new_client_node = create_client_node(new_client);
+		/* Vertical split for new column, horizontal for tiles within column */
 		if (current_cols < desired_cols)
 			*root = create_split_node(1, old_root, new_client_node);
 		else
@@ -551,8 +551,7 @@ insert_client_at(Monitor *m, Client *target, Client *new_client, double cx, doub
 
 	/* Split direction:
 	 * - Need more columns? -> vertical split (create column)
-	 * - 1 tile in column -> horizontal split (top/bottom)
-	 * - 2-3 tiles in column -> vertical split (left/right)
+	 * - Tiles within column -> always horizontal split (top/bottom)
 	 * - 4 tiles in column -> FULL, don't allow more */
 	if (current_cols < desired_cols) {
 		wider = 1; /* Need more columns - vertical split */
@@ -568,9 +567,9 @@ insert_client_at(Monitor *m, Client *target, Client *new_client, double cx, doub
 			insert_client(m, NULL, new_client);
 			return;
 		} else if (col_tiles == 1) {
-			wider = 0; /* Horizontal split (top/bottom) */
+			wider = 0; /* First split in column: horizontal (top/bottom) */
 		} else {
-			wider = 1; /* Vertical split (left/right) */
+			wider = 1; /* After horizontal split: vertical (left/right) */
 		}
 	}
 

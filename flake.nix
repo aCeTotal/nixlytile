@@ -116,7 +116,7 @@
               cp -r wallpapers/* $out/share/dwl/wallpapers/
               wrapProgram $out/bin/dwl \
                 --set DWL_WALLPAPER "$out/share/dwl/wallpapers/beach.jpg" \
-                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.swaybg pkgs.brightnessctl pkgs.networkmanagerapplet ]} \
+                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.swaybg pkgs.brightnessctl ]} \
                 --prefix XDG_DATA_DIRS : "${pkgs.papirus-icon-theme}/share:${pkgs.adwaita-icon-theme}/share:${pkgs.hicolor-icon-theme}/share:${pkgs.shared-mime-info}/share"
               runHook postInstall
             '';
