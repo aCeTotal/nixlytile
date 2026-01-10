@@ -199,6 +199,49 @@ typedef struct {
 } CpuPopup;
 
 typedef struct {
+	pid_t pid;
+	char name[64];
+	unsigned long mem_kb;  /* memory in KB */
+	int y;
+	int height;
+	int kill_x, kill_y, kill_w, kill_h;
+	int has_kill;
+} RamProcEntry;
+
+typedef struct {
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_tree *bg;
+	int width;
+	int height;
+	int visible;
+	int hover_idx;
+	int refresh_data;
+	uint64_t last_fetch_ms;
+	uint64_t last_render_ms;
+	uint64_t suppress_refresh_until_ms;
+	int proc_count;
+	RamProcEntry procs[15];
+} RamPopup;
+
+typedef struct {
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_tree *bg;
+	int width;
+	int height;
+	int visible;
+	int refresh_data;
+	uint64_t last_fetch_ms;
+	uint64_t last_render_ms;
+	uint64_t suppress_refresh_until_ms;
+	/* Cached battery info */
+	int charging;           /* 1=charging, 0=discharging */
+	double percent;         /* Battery percentage */
+	double voltage_v;       /* Voltage in V */
+	double power_w;         /* Power draw in W */
+	double time_remaining_h; /* Time remaining in hours */
+} BatteryPopup;
+
+typedef struct {
 	struct wlr_scene_tree *tree;
 	struct wlr_scene_tree *bg;
 	int visible;
@@ -338,6 +381,8 @@ struct StatusBar {
 	StatusModule steam;
 	StatusModule discord;
 	CpuPopup cpu_popup;
+	RamPopup ram_popup;
+	BatteryPopup battery_popup;
 	NetPopup net_popup;
 	TrayMenu tray_menu;
 	NetMenu net_menu;
@@ -860,6 +905,18 @@ static int kill_processes_with_name(const char *name);
 static int cpu_proc_is_critical(pid_t pid, const char *name);
 static int read_top_cpu_processes(CpuPopup *p);
 static int cpu_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
+static void renderrampopup(Monitor *m);
+static int ram_popup_clamped_x(Monitor *m, RamPopup *p);
+static int ram_popup_hover_index(Monitor *m, RamPopup *p);
+static int ram_proc_cmp(const void *a, const void *b);
+static int read_top_ram_processes(RamPopup *p);
+static int ram_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
+static int ram_popup_refresh_timeout(void *data);
+static void schedule_ram_popup_refresh(uint32_t ms);
+static void renderbatterypopup(Monitor *m);
+static int battery_popup_clamped_x(Monitor *m, BatteryPopup *p);
+static void read_battery_info(BatteryPopup *p);
+static void updatebatteryhover(Monitor *m, double cx, double cy);
 static void renderram(StatusModule *module, int bar_height, const char *text);
 static void refreshstatuscpu(void);
 static void refreshstatusram(void);
@@ -882,6 +939,7 @@ static int set_pipewire_mic_mute(int mute);
 static int toggle_pipewire_mic_mute(void);
 static double pipewire_mic_volume_percent(void);
 static void updatecpuhover(Monitor *m, double cx, double cy);
+static void updateramhover(Monitor *m, double cx, double cy);
 static void set_status_task_due(void (*fn)(void), uint64_t due_ms);
 static double net_bytes_to_rate(unsigned long long cur, unsigned long long prev,
 		double elapsed);
@@ -1087,6 +1145,7 @@ static int wifi_scan_fd = -1;
 static struct wl_event_source *wifi_scan_event = NULL;
 static struct wl_event_source *wifi_scan_timer = NULL;
 static struct wl_event_source *cpu_popup_refresh_timer = NULL;
+static struct wl_event_source *ram_popup_refresh_timer = NULL;
 static char wifi_scan_buf[8192];
 static size_t wifi_scan_len = 0;
 static int wifi_scan_inflight;
@@ -1113,6 +1172,7 @@ static char net_icon_loaded_path[PATH_MAX];
 static char cpu_icon_path[PATH_MAX] = "images/svg/cpu.svg";
 static char cpu_icon_loaded_path[PATH_MAX];
 static const uint32_t cpu_popup_refresh_interval_ms = 1000;
+static const uint32_t ram_popup_refresh_interval_ms = 1000;
 static char light_icon_path[PATH_MAX] = "images/svg/light.svg";
 static char light_icon_loaded_path[PATH_MAX];
 static char ram_icon_path[PATH_MAX] = "images/svg/ram.svg";
@@ -1235,6 +1295,7 @@ static char backlight_max_path[PATH_MAX];
 static int backlight_available;
 static int backlight_writable;
 static char battery_capacity_path[PATH_MAX];
+static char battery_device_dir[PATH_MAX];  /* e.g. /sys/class/power_supply/BAT0 */
 static int battery_available;
 static const double light_step = 5.0;
 static const double volume_step = 3.0;
@@ -4510,23 +4571,24 @@ rendercpupopup(Monitor *m)
 		return;
 	}
 
+	/* Only fetch data after suppress delay has passed */
 	if (p->suppress_refresh_until_ms == 0 || now >= p->suppress_refresh_until_ms) {
 		if (p->last_fetch_ms == 0 ||
 				now < p->last_fetch_ms ||
 				now - p->last_fetch_ms >= cpu_popup_refresh_interval_ms)
 			p->refresh_data = 1;
-	}
 
-	if (p->refresh_data) {
-		if (p->last_fetch_ms == 0 || now - p->last_fetch_ms >= 200)
-			need_fetch_now = 1;
-		if (need_fetch_now) {
-			read_top_cpu_processes(p);
-			p->last_fetch_ms = now;
+		if (p->refresh_data) {
+			if (p->last_fetch_ms == 0 || now - p->last_fetch_ms >= 200)
+				need_fetch_now = 1;
+			if (need_fetch_now) {
+				read_top_cpu_processes(p);
+				p->last_fetch_ms = now;
+			}
+			if (p->suppress_refresh_until_ms > 0)
+				p->suppress_refresh_until_ms = 0;
+			p->refresh_data = 0;
 		}
-		if (p->suppress_refresh_until_ms > 0 && now >= p->suppress_refresh_until_ms)
-			p->suppress_refresh_until_ms = 0;
-		p->refresh_data = 0;
 	}
 	line_count = cpu_core_count + 1; /* +1 for avg line */
 
@@ -4735,6 +4797,752 @@ cpu_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 	}
 
 	return 0;
+}
+
+/* RAM Popup Functions */
+static int
+ram_proc_cmp(const void *a, const void *b)
+{
+	const RamProcEntry *pa = a;
+	const RamProcEntry *pb = b;
+
+	if (pa->mem_kb < pb->mem_kb)
+		return 1;
+	if (pa->mem_kb > pb->mem_kb)
+		return -1;
+	if (pa->pid < pb->pid)
+		return -1;
+	if (pa->pid > pb->pid)
+		return 1;
+	return 0;
+}
+
+static int
+read_top_ram_processes(RamPopup *p)
+{
+	FILE *fp;
+	char line[256];
+	int count = 0;
+	int lines = 0;
+	const unsigned long min_kb = 50 * 1024; /* 50 MB minimum */
+
+	if (!p)
+		return 0;
+
+	/* ps with RSS (resident set size) in KB, sorted by memory */
+	fp = popen("ps -eo pid,rss,comm --no-headers --sort=-rss", "r");
+	if (!fp) {
+		p->proc_count = 0;
+		return 0;
+	}
+
+	while (fgets(line, sizeof(line), fp) && lines < 200 && count < 15) {
+		RamProcEntry *e;
+		pid_t pid = 0;
+		unsigned long rss = 0;
+		char name[64] = {0};
+		int existing = -1;
+
+		lines++;
+		if (sscanf(line, "%d %lu %63s", &pid, &rss, name) != 3)
+			continue;
+		if (name[0] == '[')
+			continue;
+		if (rss < min_kb)
+			continue;
+		/* Hide system processes from RAM popup */
+		if (strcmp(name, "dwl") == 0 ||
+				strcmp(name, "Xwayland") == 0 ||
+				strncmp(name, "blueman", 7) == 0)
+			continue;
+
+		/* Check for existing entry with same name */
+		for (int i = 0; i < count; i++) {
+			if (strcmp(p->procs[i].name, name) == 0) {
+				existing = i;
+				break;
+			}
+		}
+
+		if (existing >= 0) {
+			e = &p->procs[existing];
+			e->mem_kb += rss;
+			if (rss > e->mem_kb / 2)
+				e->pid = pid;
+		} else {
+			e = &p->procs[count];
+			e->pid = pid;
+			snprintf(e->name, sizeof(e->name), "%s", name);
+			e->mem_kb = rss;
+			e->y = e->height = 0;
+			e->kill_x = e->kill_y = e->kill_w = e->kill_h = 0;
+			e->has_kill = 1;
+			count++;
+		}
+	}
+
+	pclose(fp);
+	if (count > 1)
+		qsort(p->procs, (size_t)count, sizeof(p->procs[0]), ram_proc_cmp);
+	p->proc_count = count;
+	return count;
+}
+
+static int
+ram_popup_clamped_x(Monitor *m, RamPopup *p)
+{
+	int popup_x;
+
+	if (!m || !p)
+		return 0;
+
+	popup_x = m->statusbar.ram.x;
+	if (p->width > 0 && m->statusbar.area.width > 0) {
+		int max_x = m->statusbar.area.width - p->width;
+		if (max_x < 0)
+			max_x = 0;
+		if (popup_x > max_x)
+			popup_x = max_x;
+		if (popup_x < 0)
+			popup_x = 0;
+	}
+	return popup_x;
+}
+
+static int
+ram_popup_hover_index(Monitor *m, RamPopup *p)
+{
+	double cx, cy;
+	int lx, ly;
+	int popup_x, rel_x, rel_y;
+
+	if (!m || !p || !p->visible || !cursor)
+		return -1;
+
+	popup_x = ram_popup_clamped_x(m, p);
+	cx = cursor->x;
+	cy = cursor->y;
+	lx = (int)round(cx) - m->m.x;
+	ly = (int)round(cy) - m->m.y;
+	rel_x = lx - popup_x;
+	rel_y = ly - m->statusbar.area.height;
+
+	for (int i = 0; i < p->proc_count; i++) {
+		RamProcEntry *e = &p->procs[i];
+		if (!e->has_kill || e->kill_w <= 0 || e->kill_h <= 0)
+			continue;
+		if (rel_x >= e->kill_x && rel_x < e->kill_x + e->kill_w &&
+				rel_y >= e->kill_y && rel_y < e->kill_y + e->kill_h)
+			return i;
+	}
+	return -1;
+}
+
+static void
+format_mem_size(unsigned long kb, char *buf, size_t bufsz)
+{
+	if (kb >= 1024 * 1024)
+		snprintf(buf, bufsz, "%.1fG", kb / (1024.0 * 1024.0));
+	else if (kb >= 1024)
+		snprintf(buf, bufsz, "%.0fM", kb / 1024.0);
+	else
+		snprintf(buf, bufsz, "%luK", kb);
+}
+
+static void
+renderrampopup(Monitor *m)
+{
+	RamPopup *p;
+	int padding, line_spacing;
+	int row_height;
+	int button_gap;
+	int kill_text_w;
+	int kill_w;
+	int kill_h;
+	uint64_t now;
+	int hover_idx;
+	int popup_x;
+	int need_fetch_now;
+	int max_proc_text_w = 0;
+	int any_has_kill = 0;
+	int content_w = 0, content_h = 0;
+	struct wlr_scene_node *node, *tmp;
+
+	if (!m || !m->statusbar.ram_popup.tree)
+		return;
+
+	p = &m->statusbar.ram_popup;
+	hover_idx = p->hover_idx;
+	if (hover_idx < -1 || hover_idx >= (int)LENGTH(p->procs))
+		hover_idx = -1;
+	padding = statusbar_module_padding;
+	line_spacing = 2;
+	row_height = statusfont.height > 0 ? statusfont.height : 16;
+	button_gap = statusbar_module_spacing > 0 ? statusbar_module_spacing / 2 : 6;
+	kill_text_w = status_text_width("Kill");
+	kill_w = kill_text_w + 12;
+	kill_h = row_height;
+	now = monotonic_msec();
+	need_fetch_now = 0;
+	popup_x = m->statusbar.ram.x;
+
+	/* Clear previous buffers but keep bg */
+	wl_list_for_each_safe(node, tmp, &p->tree->children, link) {
+		if (p->bg && node == &p->bg->node)
+			continue;
+		wlr_scene_node_destroy(node);
+	}
+
+	if (!statusfont.font) {
+		p->width = p->height = 0;
+		if (p->tree)
+			wlr_scene_node_set_enabled(&p->tree->node, 0);
+		p->visible = 0;
+		return;
+	}
+
+	/* Only fetch data after suppress delay has passed */
+	if (p->suppress_refresh_until_ms == 0 || now >= p->suppress_refresh_until_ms) {
+		if (p->last_fetch_ms == 0 ||
+				now < p->last_fetch_ms ||
+				now - p->last_fetch_ms >= ram_popup_refresh_interval_ms)
+			p->refresh_data = 1;
+
+		if (p->refresh_data) {
+			if (p->last_fetch_ms == 0 || now - p->last_fetch_ms >= 200)
+				need_fetch_now = 1;
+			if (need_fetch_now) {
+				read_top_ram_processes(p);
+				p->last_fetch_ms = now;
+			}
+			if (p->suppress_refresh_until_ms > 0)
+				p->suppress_refresh_until_ms = 0;
+			p->refresh_data = 0;
+		}
+	}
+
+	if (p->proc_count == 0) {
+		/* Don't hide if we're waiting for data to load (suppress period) */
+		if (p->suppress_refresh_until_ms > 0 && now < p->suppress_refresh_until_ms) {
+			/* Show loading placeholder */
+			const char *loading = "Loading...";
+			int text_w = status_text_width(loading);
+			struct wlr_scene_tree *row;
+			StatusModule mod = {0};
+
+			p->width = 2 * padding + text_w;
+			p->height = 2 * padding + row_height;
+
+			if (!p->bg && !(p->bg = wlr_scene_tree_create(p->tree)))
+				return;
+			wlr_scene_node_set_enabled(&p->bg->node, 1);
+			wlr_scene_node_set_position(&p->bg->node, 0, 0);
+			wl_list_for_each_safe(node, tmp, &p->bg->children, link)
+				wlr_scene_node_destroy(node);
+			drawrect(p->bg, 0, 0, p->width, p->height, statusbar_popup_bg);
+
+			row = wlr_scene_tree_create(p->tree);
+			if (row) {
+				wlr_scene_node_set_position(&row->node, padding, padding);
+				mod.tree = row;
+				tray_render_label(&mod, loading, 0, row_height, statusbar_fg);
+			}
+			p->last_render_ms = now;
+			return;
+		}
+		p->width = p->height = 0;
+		if (p->tree)
+			wlr_scene_node_set_enabled(&p->tree->node, 0);
+		p->visible = 0;
+		return;
+	}
+
+	/* First pass: find max text width for vertical kill button alignment */
+	for (int i = 0; i < p->proc_count; i++) {
+		RamProcEntry *e = &p->procs[i];
+		int text_w;
+		char proc_line[128];
+		char mem_str[16];
+
+		format_mem_size(e->mem_kb, mem_str, sizeof(mem_str));
+		snprintf(proc_line, sizeof(proc_line), "%s %s", e->name, mem_str);
+		text_w = status_text_width(proc_line);
+		max_proc_text_w = MAX(max_proc_text_w, text_w);
+		if (e->has_kill)
+			any_has_kill = 1;
+	}
+
+	/* Calculate dimensions */
+	content_w = max_proc_text_w;
+	if (any_has_kill)
+		content_w += button_gap + kill_w;
+	content_h = p->proc_count * row_height + (p->proc_count - 1) * line_spacing;
+
+	p->width = 2 * padding + content_w;
+	p->height = content_h + 2 * padding;
+
+	if (p->width > 0 && m->statusbar.area.width > 0) {
+		int max_x = m->statusbar.area.width - p->width;
+		if (max_x < 0)
+			max_x = 0;
+		if (popup_x > max_x)
+			popup_x = max_x;
+		if (popup_x < 0)
+			popup_x = 0;
+	}
+
+	if (!p->bg && !(p->bg = wlr_scene_tree_create(p->tree)))
+		return;
+	wlr_scene_node_set_enabled(&p->bg->node, 1);
+	wlr_scene_node_set_position(&p->bg->node, 0, 0);
+	wl_list_for_each_safe(node, tmp, &p->bg->children, link)
+		wlr_scene_node_destroy(node);
+	drawrect(p->bg, 0, 0, p->width, p->height, statusbar_popup_bg);
+
+	/* Render process rows */
+	for (int i = 0; i < p->proc_count; i++) {
+		RamProcEntry *e = &p->procs[i];
+		int row_y = padding + i * (row_height + line_spacing);
+		char proc_line[128];
+		char mem_str[16];
+		struct wlr_scene_tree *row;
+		StatusModule mod = {0};
+
+		format_mem_size(e->mem_kb, mem_str, sizeof(mem_str));
+		snprintf(proc_line, sizeof(proc_line), "%s %s", e->name, mem_str);
+		row = wlr_scene_tree_create(p->tree);
+		if (row) {
+			wlr_scene_node_set_position(&row->node, padding, row_y);
+			mod.tree = row;
+			tray_render_label(&mod, proc_line, 0, row_height, statusbar_fg);
+		}
+
+		e->y = row_y;
+		e->height = row_height;
+
+		if (e->has_kill && kill_w > 0 && kill_h > 0) {
+			int btn_x = padding + max_proc_text_w + button_gap;
+			int btn_y = row_y + (row_height - kill_h) / 2;
+			struct wlr_scene_tree *btn;
+			StatusModule btn_mod = {0};
+			const float *btn_color = statusbar_volume_muted_fg;
+			int is_hover = (hover_idx == i);
+
+			if (is_hover)
+				btn_color = statusbar_tag_active_bg;
+
+			e->kill_x = btn_x;
+			e->kill_y = btn_y;
+			e->kill_w = kill_w;
+			e->kill_h = kill_h;
+			drawrect(p->tree, btn_x, btn_y, kill_w, kill_h, btn_color);
+
+			btn = wlr_scene_tree_create(p->tree);
+			if (btn) {
+				int text_x = (kill_w - kill_text_w) / 2;
+				if (text_x < 2)
+					text_x = 2;
+				wlr_scene_node_set_position(&btn->node, btn_x, btn_y);
+				btn_mod.tree = btn;
+				tray_render_label(&btn_mod, "Kill", text_x, kill_h, statusbar_fg);
+			}
+		} else {
+			e->kill_x = e->kill_y = e->kill_w = e->kill_h = 0;
+			e->has_kill = 0;
+		}
+	}
+
+	if (p->width <= 0 || p->height <= 0)
+		wlr_scene_node_set_enabled(&p->tree->node, 0);
+	p->last_render_ms = now;
+}
+
+static int
+ram_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
+{
+	RamPopup *p;
+	int popup_x, rel_x, rel_y;
+
+	if (!m || !m->statusbar.ram_popup.visible || button != BTN_LEFT)
+		return 0;
+
+	p = &m->statusbar.ram_popup;
+	popup_x = ram_popup_clamped_x(m, p);
+
+	if (p->width > 0 && m->statusbar.area.width > 0) {
+		int max_x = m->statusbar.area.width - p->width;
+		if (max_x < 0)
+			max_x = 0;
+		if (popup_x > max_x)
+			popup_x = max_x;
+		if (popup_x < 0)
+			popup_x = 0;
+	}
+
+	rel_x = lx - popup_x;
+	rel_y = ly - m->statusbar.area.height;
+	if (rel_x < 0 || rel_y < 0 || rel_x >= p->width || rel_y >= p->height)
+		return 0;
+
+	for (int i = 0; i < p->proc_count; i++) {
+		RamProcEntry *e = &p->procs[i];
+		if (!e->has_kill || e->kill_w <= 0 || e->kill_h <= 0)
+			continue;
+		if (rel_x >= e->kill_x && rel_x < e->kill_x + e->kill_w &&
+				rel_y >= e->kill_y && rel_y < e->kill_y + e->kill_h) {
+			if (cpu_proc_is_critical(e->pid, e->name))
+				return 1;
+			if (kill_processes_with_name(e->name) == 0) {
+				if (kill(e->pid, SIGKILL) != 0)
+					wlr_log(WLR_ERROR, "ram popup: kill %d failed: %s",
+							e->pid, strerror(errno));
+			}
+			p->last_fetch_ms = monotonic_msec();
+			p->suppress_refresh_until_ms = p->last_fetch_ms + 2000;
+			p->refresh_data = 0;
+			schedule_ram_popup_refresh(2000);
+			refreshstatusram();
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+static int
+ram_popup_refresh_timeout(void *data)
+{
+	Monitor *m;
+	int any_visible = 0;
+
+	(void)data;
+
+	wl_list_for_each(m, &mons, link) {
+		RamPopup *p = &m->statusbar.ram_popup;
+		if (!p || !p->tree || !p->visible)
+			continue;
+		p->suppress_refresh_until_ms = 0;
+		p->refresh_data = 1;
+		renderrampopup(m);
+		any_visible = 1;
+	}
+
+	if (any_visible)
+		wl_event_source_timer_update(ram_popup_refresh_timer, ram_popup_refresh_interval_ms);
+
+	return 0;
+}
+
+static void
+schedule_ram_popup_refresh(uint32_t ms)
+{
+	if (!event_loop)
+		return;
+	if (!ram_popup_refresh_timer)
+		ram_popup_refresh_timer = wl_event_loop_add_timer(event_loop,
+				ram_popup_refresh_timeout, NULL);
+	if (ram_popup_refresh_timer)
+		wl_event_source_timer_update(ram_popup_refresh_timer, ms);
+}
+
+/* Forward declaration for readulong (defined later) */
+static int readulong(const char *path, unsigned long long *out);
+
+/* Battery Popup Functions */
+static void
+read_battery_info(BatteryPopup *p)
+{
+	char path[PATH_MAX];
+	char buf[64];
+	FILE *fp;
+	unsigned long long val;
+
+	if (!p || !battery_available || !battery_device_dir[0])
+		return;
+
+	/* Read charging status */
+	snprintf(path, sizeof(path), "%s/status", battery_device_dir);
+	fp = fopen(path, "r");
+	if (fp) {
+		if (fgets(buf, sizeof(buf), fp)) {
+			char *nl = strchr(buf, '\n');
+			if (nl) *nl = '\0';
+			p->charging = (strcmp(buf, "Charging") == 0 || strcmp(buf, "Full") == 0);
+		}
+		fclose(fp);
+	}
+
+	/* Read capacity percentage */
+	p->percent = battery_percent();
+
+	/* Read voltage (microvolts -> volts) */
+	snprintf(path, sizeof(path), "%s/voltage_now", battery_device_dir);
+	if (readulong(path, &val) == 0) {
+		p->voltage_v = val / 1000000.0;
+	} else {
+		p->voltage_v = -1.0;
+	}
+
+	/* Read power draw (microwatts -> watts) */
+	snprintf(path, sizeof(path), "%s/power_now", battery_device_dir);
+	if (readulong(path, &val) == 0) {
+		p->power_w = val / 1000000.0;
+	} else {
+		/* Try current_now * voltage_now if power_now not available */
+		snprintf(path, sizeof(path), "%s/current_now", battery_device_dir);
+		if (readulong(path, &val) == 0 && p->voltage_v > 0) {
+			double current_a = val / 1000000.0;
+			p->power_w = current_a * p->voltage_v;
+		} else {
+			p->power_w = -1.0;
+		}
+	}
+
+	/* Calculate time remaining */
+	p->time_remaining_h = -1.0;
+	if (!p->charging && p->power_w > 0.1 && p->percent >= 0) {
+		/* Read energy_now (microwatt-hours) */
+		snprintf(path, sizeof(path), "%s/energy_now", battery_device_dir);
+		if (readulong(path, &val) == 0) {
+			double energy_wh = val / 1000000.0;
+			p->time_remaining_h = energy_wh / p->power_w;
+		} else {
+			/* Try charge_now * voltage */
+			snprintf(path, sizeof(path), "%s/charge_now", battery_device_dir);
+			if (readulong(path, &val) == 0 && p->voltage_v > 0) {
+				double charge_ah = val / 1000000.0;
+				double energy_wh = charge_ah * p->voltage_v;
+				p->time_remaining_h = energy_wh / p->power_w;
+			}
+		}
+	}
+}
+
+static int
+battery_popup_clamped_x(Monitor *m, BatteryPopup *p)
+{
+	int popup_x;
+
+	if (!m || !p)
+		return 0;
+
+	popup_x = m->statusbar.battery.x;
+	if (p->width > 0 && m->statusbar.area.width > 0) {
+		int max_x = m->statusbar.area.width - p->width;
+		if (max_x < 0)
+			max_x = 0;
+		if (popup_x > max_x)
+			popup_x = max_x;
+		if (popup_x < 0)
+			popup_x = 0;
+	}
+	return popup_x;
+}
+
+static void
+renderbatterypopup(Monitor *m)
+{
+	BatteryPopup *p;
+	int padding, line_spacing;
+	int row_height;
+	int max_width = 0;
+	int line_count = 0;
+	char lines[5][128];
+	int popup_x;
+	uint64_t now;
+	struct wlr_scene_node *node, *tmp;
+
+	if (!m || !m->statusbar.battery_popup.tree)
+		return;
+
+	p = &m->statusbar.battery_popup;
+	padding = statusbar_module_padding;
+	line_spacing = 2;
+	row_height = statusfont.height > 0 ? statusfont.height : 16;
+	now = monotonic_msec();
+	popup_x = m->statusbar.battery.x;
+
+	/* Clear previous content */
+	wl_list_for_each_safe(node, tmp, &p->tree->children, link) {
+		if (p->bg && node == &p->bg->node)
+			continue;
+		wlr_scene_node_destroy(node);
+	}
+
+	if (!statusfont.font || !battery_available) {
+		p->width = p->height = 0;
+		if (p->tree)
+			wlr_scene_node_set_enabled(&p->tree->node, 0);
+		p->visible = 0;
+		return;
+	}
+
+	/* Fetch data only when refresh_data flag is set */
+	if (p->refresh_data) {
+		read_battery_info(p);
+		p->last_fetch_ms = now;
+		p->refresh_data = 0;
+	}
+
+	/* Build display lines */
+	if (p->charging) {
+		snprintf(lines[line_count++], sizeof(lines[0]), "Charging:");
+	} else {
+		snprintf(lines[line_count++], sizeof(lines[0]), "On Battery:");
+	}
+
+	if (p->percent >= 0) {
+		snprintf(lines[line_count++], sizeof(lines[0]), "Level: %.0f%%", p->percent);
+	}
+
+	if (p->voltage_v > 0) {
+		snprintf(lines[line_count++], sizeof(lines[0]), "Voltage: %.2f V", p->voltage_v);
+	}
+
+	if (p->power_w > 0) {
+		snprintf(lines[line_count++], sizeof(lines[0]), "Power: %.1f W", p->power_w);
+	}
+
+	if (!p->charging && p->time_remaining_h > 0) {
+		int hours = (int)p->time_remaining_h;
+		int mins = (int)((p->time_remaining_h - hours) * 60);
+		snprintf(lines[line_count++], sizeof(lines[0]), "Remaining: %dh %dm", hours, mins);
+	}
+
+	if (line_count == 0) {
+		p->width = p->height = 0;
+		if (p->tree)
+			wlr_scene_node_set_enabled(&p->tree->node, 0);
+		p->visible = 0;
+		return;
+	}
+
+	/* Calculate dimensions */
+	for (int i = 0; i < line_count; i++) {
+		int w = status_text_width(lines[i]);
+		max_width = MAX(max_width, w);
+	}
+
+	p->width = 2 * padding + max_width;
+	p->height = 2 * padding + line_count * row_height + (line_count - 1) * line_spacing;
+
+	/* Clamp position */
+	if (p->width > 0 && m->statusbar.area.width > 0) {
+		int max_x = m->statusbar.area.width - p->width;
+		if (max_x < 0)
+			max_x = 0;
+		if (popup_x > max_x)
+			popup_x = max_x;
+		if (popup_x < 0)
+			popup_x = 0;
+	}
+
+	/* Draw background */
+	if (!p->bg && !(p->bg = wlr_scene_tree_create(p->tree)))
+		return;
+	wlr_scene_node_set_enabled(&p->bg->node, 1);
+	wlr_scene_node_set_position(&p->bg->node, 0, 0);
+	wl_list_for_each_safe(node, tmp, &p->bg->children, link)
+		wlr_scene_node_destroy(node);
+	drawrect(p->bg, 0, 0, p->width, p->height, statusbar_popup_bg);
+
+	/* Render text lines */
+	for (int i = 0; i < line_count; i++) {
+		int row_y = padding + i * (row_height + line_spacing);
+		struct wlr_scene_tree *row;
+		StatusModule mod = {0};
+
+		row = wlr_scene_tree_create(p->tree);
+		if (row) {
+			wlr_scene_node_set_position(&row->node, padding, row_y);
+			mod.tree = row;
+			tray_render_label(&mod, lines[i], 0, row_height, statusbar_fg);
+		}
+	}
+
+	p->last_render_ms = now;
+}
+
+static void
+updatebatteryhover(Monitor *m, double cx, double cy)
+{
+	int lx, ly;
+	int inside = 0;
+	int popup_hover = 0;
+	int was_visible;
+	BatteryPopup *p;
+	int popup_x;
+	uint64_t now = monotonic_msec();
+	int need_refresh = 0;
+	int stale_refresh = 0;
+
+	if (!m || !m->showbar || !m->statusbar.battery.tree || !m->statusbar.battery_popup.tree || !battery_available) {
+		if (m && m->statusbar.battery_popup.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.battery_popup.tree->node, 0);
+			m->statusbar.battery_popup.visible = 0;
+		}
+		return;
+	}
+
+	p = &m->statusbar.battery_popup;
+	lx = (int)floor(cx) - m->statusbar.area.x;
+	ly = (int)floor(cy) - m->statusbar.area.y;
+
+	popup_x = battery_popup_clamped_x(m, p);
+
+	/* Check if hovering over popup */
+	if (p->visible && p->width > 0 && p->height > 0 &&
+			lx >= popup_x &&
+			lx < popup_x + p->width &&
+			ly >= m->statusbar.area.height &&
+			ly < m->statusbar.area.height + p->height) {
+		popup_hover = 1;
+	}
+
+	/* Check if hovering over battery module */
+	if (lx >= m->statusbar.battery.x &&
+			lx < m->statusbar.battery.x + m->statusbar.battery.width &&
+			ly >= 0 && ly < m->statusbar.area.height &&
+			m->statusbar.battery.width > 0) {
+		inside = 1;
+	} else if (popup_hover) {
+		inside = 1;
+	}
+
+	was_visible = p->visible;
+
+	if (inside) {
+		if (!was_visible) {
+			/* Delay heavy popup refresh until pointer lingers for 1s */
+			p->suppress_refresh_until_ms = now + 1000;
+			p->refresh_data = 0;
+		}
+		p->visible = 1;
+		wlr_scene_node_set_enabled(&p->tree->node, 1);
+		wlr_scene_node_set_position(&p->tree->node,
+				popup_x, m->statusbar.area.height);
+
+		/* Check if refresh is needed (every 500ms after delay) */
+		stale_refresh = (p->last_fetch_ms == 0 ||
+				now < p->last_fetch_ms ||
+				(now - p->last_fetch_ms) >= 500);
+		need_refresh = stale_refresh &&
+				(p->suppress_refresh_until_ms == 0 ||
+				 now >= p->suppress_refresh_until_ms);
+
+		if (need_refresh)
+			p->refresh_data = 1;
+
+		if (!was_visible || need_refresh ||
+				(p->last_render_ms == 0 || (now - p->last_render_ms) >= 100)) {
+			renderbatterypopup(m);
+			p->last_render_ms = now;
+		}
+	} else if (p->visible) {
+		p->visible = 0;
+		p->suppress_refresh_until_ms = 0;
+		wlr_scene_node_set_enabled(&p->tree->node, 0);
+	}
 }
 
 static void
@@ -5350,6 +6158,9 @@ findbatterydevice(char *capacity_path, size_t capacity_len)
 
 		if (snprintf(found, sizeof(found), "%s", cap_path) >= (int)sizeof(found))
 			continue;
+		/* Also store the device directory */
+		snprintf(battery_device_dir, sizeof(battery_device_dir),
+				"/sys/class/power_supply/%s", ent->d_name);
 		have_battery = 1;
 		break;
 	}
@@ -12089,8 +12900,8 @@ updatecpuhover(Monitor *m, double cx, double cy)
 
 	if (inside) {
 		if (!was_visible) {
-			/* Delay heavy popup refresh until pointer lingers for 2s */
-			p->suppress_refresh_until_ms = now + 2000;
+			/* Delay heavy popup refresh until pointer lingers for 1s */
+			p->suppress_refresh_until_ms = now + 1000;
 		}
 		p->visible = 1;
 		wlr_scene_node_set_enabled(&p->tree->node, 1);
@@ -12118,6 +12929,104 @@ updatecpuhover(Monitor *m, double cx, double cy)
 		}
 		if (!was_visible)
 			schedule_cpu_popup_refresh(1000);
+	} else if (p->visible) {
+		p->visible = 0;
+		wlr_scene_node_set_enabled(&p->tree->node, 0);
+		p->hover_idx = -1;
+		p->refresh_data = 0;
+		p->last_render_ms = 0;
+		p->suppress_refresh_until_ms = 0;
+	}
+}
+
+static void
+updateramhover(Monitor *m, double cx, double cy)
+{
+	int lx, ly;
+	int inside = 0;
+	int popup_hover = 0;
+	int was_visible;
+	RamPopup *p;
+	int popup_x;
+	int new_hover = -1;
+	uint64_t now = monotonic_msec();
+	int need_refresh = 0;
+	int stale_refresh = 0;
+
+	if (!m || !m->showbar || !m->statusbar.ram.tree || !m->statusbar.ram_popup.tree) {
+		if (m && m->statusbar.ram_popup.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.ram_popup.tree->node, 0);
+			m->statusbar.ram_popup.visible = 0;
+			m->statusbar.ram_popup.hover_idx = -1;
+		}
+		return;
+	}
+
+	p = &m->statusbar.ram_popup;
+	lx = (int)floor(cx) - m->statusbar.area.x;
+	ly = (int)floor(cy) - m->statusbar.area.y;
+
+	popup_x = m->statusbar.ram.x;
+	if (p->width > 0 && m->statusbar.area.width > 0) {
+		int max_x = m->statusbar.area.width - p->width;
+		if (max_x < 0)
+			max_x = 0;
+		if (popup_x > max_x)
+			popup_x = max_x;
+		if (popup_x < 0)
+			popup_x = 0;
+	}
+
+	if (p->visible && p->width > 0 && p->height > 0 &&
+			lx >= popup_x &&
+			lx < popup_x + p->width &&
+			ly >= m->statusbar.area.height &&
+			ly < m->statusbar.area.height + p->height) {
+		popup_hover = 1;
+	}
+
+	if (lx >= m->statusbar.ram.x &&
+			lx < m->statusbar.ram.x + m->statusbar.ram.width &&
+			ly >= 0 && ly < m->statusbar.area.height &&
+			m->statusbar.ram.width > 0) {
+		inside = 1;
+	} else if (popup_hover) {
+		inside = 1;
+	}
+
+	was_visible = p->visible;
+
+	if (inside) {
+		if (!was_visible) {
+			/* Delay heavy popup refresh until pointer lingers for 1s */
+			p->suppress_refresh_until_ms = now + 1000;
+		}
+		p->visible = 1;
+		wlr_scene_node_set_enabled(&p->tree->node, 1);
+		wlr_scene_node_set_position(&p->tree->node,
+				popup_x, m->statusbar.area.height);
+		new_hover = ram_popup_hover_index(m, p);
+		stale_refresh = (p->last_fetch_ms == 0 ||
+				now < p->last_fetch_ms ||
+				(now - p->last_fetch_ms) >= ram_popup_refresh_interval_ms);
+		need_refresh = (!was_visible || stale_refresh) &&
+				(p->suppress_refresh_until_ms == 0 ||
+				 now >= p->suppress_refresh_until_ms);
+		if (need_refresh)
+			p->refresh_data = 1;
+		if (new_hover != p->hover_idx || !was_visible || need_refresh) {
+			int allow_render = 1;
+			if (!need_refresh && was_visible && new_hover != p->hover_idx &&
+					p->last_render_ms > 0 && now >= p->last_render_ms &&
+					now - p->last_render_ms < 16)
+				allow_render = 0;
+			if (allow_render) {
+				p->hover_idx = new_hover;
+				renderrampopup(m);
+			}
+		}
+		if (!was_visible)
+			schedule_ram_popup_refresh(1000);
 	} else if (p->visible) {
 		p->visible = 0;
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
@@ -12644,6 +13553,11 @@ buttonpress(struct wl_listener *listener, void *data)
 					return;
 			}
 
+			if (selmon->statusbar.ram_popup.visible) {
+				if (ram_popup_handle_click(selmon, lx, ly, event->button))
+					return;
+			}
+
 			if (lx >= 0 && ly >= 0 &&
 					lx < selmon->statusbar.area.width &&
 					ly < selmon->statusbar.area.height) {
@@ -12884,6 +13798,10 @@ cleanup(void)
 	if (cpu_popup_refresh_timer) {
 		wl_event_source_remove(cpu_popup_refresh_timer);
 		cpu_popup_refresh_timer = NULL;
+	}
+	if (ram_popup_refresh_timer) {
+		wl_event_source_remove(ram_popup_refresh_timer);
+		ram_popup_refresh_timer = NULL;
 	}
 	tray_menu_hide_all();
 	if (tray_event) {
@@ -13376,8 +14294,30 @@ initstatusbar(Monitor *m)
 		m->statusbar.cpu_popup.bg = wlr_scene_tree_create(m->statusbar.cpu_popup.tree);
 		m->statusbar.cpu_popup.visible = 0;
 		m->statusbar.cpu_popup.hover_idx = -1;
-		m->statusbar.cpu_popup.refresh_data = 1;
+		m->statusbar.cpu_popup.refresh_data = 0;
+		m->statusbar.cpu_popup.last_fetch_ms = 0;
+		m->statusbar.cpu_popup.suppress_refresh_until_ms = 0;
 		wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
+	}
+	m->statusbar.ram_popup.tree = wlr_scene_tree_create(m->statusbar.tree);
+	if (m->statusbar.ram_popup.tree) {
+		m->statusbar.ram_popup.bg = wlr_scene_tree_create(m->statusbar.ram_popup.tree);
+		m->statusbar.ram_popup.visible = 0;
+		m->statusbar.ram_popup.hover_idx = -1;
+		m->statusbar.ram_popup.refresh_data = 0;
+		m->statusbar.ram_popup.last_fetch_ms = 0;
+		m->statusbar.ram_popup.suppress_refresh_until_ms = 0;
+		wlr_scene_node_set_enabled(&m->statusbar.ram_popup.tree->node, 0);
+	}
+	m->statusbar.battery_popup.tree = wlr_scene_tree_create(m->statusbar.tree);
+	if (m->statusbar.battery_popup.tree) {
+		m->statusbar.battery_popup.bg = wlr_scene_tree_create(m->statusbar.battery_popup.tree);
+		m->statusbar.battery_popup.visible = 0;
+		m->statusbar.battery_popup.refresh_data = 0;
+		m->statusbar.battery_popup.last_fetch_ms = 0;
+		m->statusbar.battery_popup.last_render_ms = 0;
+		m->statusbar.battery_popup.suppress_refresh_until_ms = 0;
+		wlr_scene_node_set_enabled(&m->statusbar.battery_popup.tree->node, 0);
 	}
 		m->statusbar.net_popup.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.net_popup.tree) {
@@ -14686,6 +15626,8 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		if (selmon && selmon->showbar) {
 			updatetaghover(selmon, cursor->x, cursor->y);
 			updatecpuhover(selmon, cursor->x, cursor->y);
+			updateramhover(selmon, cursor->x, cursor->y);
+			updatebatteryhover(selmon, cursor->x, cursor->y);
 			updatenethover(selmon, cursor->x, cursor->y);
 			net_menu_update_hover(selmon, cursor->x, cursor->y);
 			if (!selmon->statusbar.net_menu.visible)
