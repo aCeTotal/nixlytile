@@ -721,6 +721,7 @@ static void refreshstatusvolume(void);
 static void refreshstatusmic(void);
 static void refreshstatusbattery(void);
 static void refreshstatusnet(void);
+static void request_public_ip_async_ex(int force);
 static void request_public_ip_async(void);
 static void stop_public_ip_fetch(void);
 static void request_ssid_async(const char *iface);
@@ -5667,7 +5668,7 @@ set_net_icon_path(const char *path)
 }
 
 static void
-request_public_ip_async(void)
+request_public_ip_async_ex(int force)
 {
 	const char *cmd;
 	int pipefd[2] = {-1, -1};
@@ -5676,7 +5677,8 @@ request_public_ip_async(void)
 	if (now == (time_t)-1)
 		return;
 
-	if (net_public_ip_last != 0 && (now - net_public_ip_last) < 300)
+	/* Skip rate limit if force is set (real-time update when hovering) */
+	if (!force && net_public_ip_last != 0 && (now - net_public_ip_last) < 300)
 		return;
 
 	if (public_ip_pid > 0 || public_ip_event)
@@ -5717,6 +5719,12 @@ request_public_ip_async(void)
 			public_ip_event_cb, NULL);
 	if (!public_ip_event)
 		stop_public_ip_fetch();
+}
+
+static void
+request_public_ip_async(void)
+{
+	request_public_ip_async_ex(0);
 }
 
 static void
@@ -9718,7 +9726,7 @@ refreshstatusnet(void)
 			snprintf(net_local_ip, sizeof(net_local_ip), "--");
 
 		if (popup_active)
-			request_public_ip_async();
+			request_public_ip_async_ex(1); /* force update when hovering */
 
 		clock_gettime(CLOCK_MONOTONIC, &now_ts);
 
@@ -10263,6 +10271,7 @@ initial_status_refresh(void)
 	refreshstatusvolume();
 	refreshstatusbattery();
 	refreshstatusnet();
+	request_public_ip_async(); /* prefetch public IP in background */
 	refreshstatusicons();
 	refreshstatustags();
 }
