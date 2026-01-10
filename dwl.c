@@ -1112,7 +1112,7 @@ static char net_icon_path[PATH_MAX] = "images/svg/no_connection.svg";
 static char net_icon_loaded_path[PATH_MAX];
 static char cpu_icon_path[PATH_MAX] = "images/svg/cpu.svg";
 static char cpu_icon_loaded_path[PATH_MAX];
-static const uint32_t cpu_popup_refresh_interval_ms = 10000;
+static const uint32_t cpu_popup_refresh_interval_ms = 1000;
 static char light_icon_path[PATH_MAX] = "images/svg/light.svg";
 static char light_icon_loaded_path[PATH_MAX];
 static char ram_icon_path[PATH_MAX] = "images/svg/ram.svg";
@@ -4143,28 +4143,103 @@ statusbar_buffer_from_argb32(const uint32_t *data, int width, int height)
 static int
 cpu_proc_is_critical(pid_t pid, const char *name)
 {
-	const char *blocked[] = {
-		"dwl", "systemd", "init", "dbus-daemon", "login", "seatd",
-		"wpa_supplicant", "NetworkManager", "pipewire", "wireplumber",
-		"pulseaudio", "udevd", "Xwayland", "kswapd"
+	/* Only show real user applications - hide all system/background processes */
+	const char *user_apps[] = {
+		/* Browsers */
+		"firefox", "chromium", "chrome", "brave", "vivaldi", "opera",
+		"epiphany", "midori", "qutebrowser", "nyxt", "librewolf", "waterfox",
+		"zen", "floorp", "thorium",
+		/* File managers */
+		"thunar", "nautilus", "dolphin", "nemo", "pcmanfm", "caja",
+		"spacefm", "ranger", "lf", "nnn", "vifm",
+		/* Terminals */
+		"alacritty", "kitty", "foot", "wezterm", "konsole", "gnome-terminal",
+		"xfce4-terminal", "terminator", "tilix", "st", "urxvt", "xterm",
+		/* Editors/IDEs */
+		"code", "codium", "vscodium", "nvim", "vim", "emacs", "gedit", "kate",
+		"sublime", "atom", "jetbrains", "idea", "pycharm", "webstorm",
+		"clion", "goland", "rider", "android-studio", "zed", "helix",
+		/* Creative */
+		"blender", "gimp", "inkscape", "krita", "darktable", "rawtherapee",
+		"kdenlive", "shotcut", "openshot", "obs", "audacity", "ardour",
+		"lmms", "bitwig", "reaper", "godot", "unity",
+		/* Office */
+		"libreoffice", "soffice", "writer", "calc", "impress", "draw",
+		"onlyoffice", "wps", "evince", "okular", "zathura", "mupdf",
+		/* Communication */
+		"discord", "slack", "teams", "zoom", "skype", "telegram", "signal",
+		"element", "fractal", "nheko", "thunderbird", "geary", "evolution",
+		/* Media players */
+		"vlc", "mpv", "celluloid", "totem", "parole", "smplayer",
+		"spotify", "rhythmbox", "clementine", "strawberry", "elisa",
+		/* Games */
+		"steam", "lutris", "heroic", "bottles", "wine", "proton",
+		"minecraft", "retroarch",
+		/* Utilities */
+		"keepassxc", "bitwarden", "1password", "syncthing", "transmission",
+		"qbittorrent", "deluge", "fragments", "virt-manager", "virtualbox",
+		"vmware", "docker", "podman",
+		/* Misc apps */
+		"calibre", "anki", "logseq", "obsidian", "notion", "joplin",
+		"drawio", "figma", "postman", "insomnia", "dbeaver", "pgadmin",
+		"ghidra", "wireshark", "burp"
 	};
 
 	if (pid <= 1 || pid == getpid())
 		return 1;
 	if (!name || !*name)
 		return 1;
+
+	/* Block kernel threads */
 	if (name[0] == '[')
 		return 1;
-	if (!strncmp(name, "kworker", 7) || !strncmp(name, "ksoftirq", 8)
-			|| !strncmp(name, "rcu_", 4) || !strncmp(name, "migration", 9)
-			|| !strncmp(name, "kswapd", 6))
+
+	/* Block common kernel/system process prefixes */
+	if (!strncmp(name, "kworker", 7) || !strncmp(name, "ksoftirq", 8) ||
+	    !strncmp(name, "kthread", 7) || !strncmp(name, "kswapd", 6) ||
+	    !strncmp(name, "rcu_", 4) || !strncmp(name, "migration", 9) ||
+	    !strncmp(name, "irq/", 4) || !strncmp(name, "watchdog", 8) ||
+	    !strncmp(name, "khugepaged", 10) || !strncmp(name, "kcompact", 8) ||
+	    !strncmp(name, "writeback", 9) || !strncmp(name, "kblockd", 7) ||
+	    !strncmp(name, "oom_", 4) || !strncmp(name, "kaudit", 6) ||
+	    !strncmp(name, "ksmd", 4) || !strncmp(name, "khungtask", 9) ||
+	    !strncmp(name, "kdevtmpfs", 9) || !strncmp(name, "netns", 5) ||
+	    !strncmp(name, "kintegrity", 10) || !strncmp(name, "bioset", 6) ||
+	    !strncmp(name, "crypto", 6) || !strncmp(name, "kstrp", 5) ||
+	    !strncmp(name, "charger", 7) || !strncmp(name, "scsi_", 5) ||
+	    !strncmp(name, "nvme", 4) || !strncmp(name, "usb-storage", 11) ||
+	    !strncmp(name, "jbd2", 4) || !strncmp(name, "ext4", 4) ||
+	    !strncmp(name, "btrfs", 5) || !strncmp(name, "xfs", 3) ||
+	    !strncmp(name, "dm-", 3) || !strncmp(name, "md", 2) ||
+	    !strncmp(name, "loop", 4) || !strncmp(name, "zram", 4) ||
+	    !strncmp(name, "cfg80211", 8) || !strncmp(name, "card", 4) ||
+	    !strncmp(name, "i915", 4) || !strncmp(name, "amdgpu", 6) ||
+	    !strncmp(name, "nvidia", 6) ||
+	    /* systemd and related */
+	    !strncmp(name, "systemd", 7) || !strncmp(name, "(sd-", 4) ||
+	    !strncmp(name, "sd-", 3))
 		return 1;
 
-	for (size_t i = 0; i < LENGTH(blocked); i++) {
-		if (strcasestr(name, blocked[i]))
+	/* Block by suffix patterns */
+	{
+		size_t len = strlen(name);
+		if (len > 2 && name[len-1] == 'd' && name[len-2] == '-')
+			return 1; /* ends with -d (daemon) */
+		if (strcasestr(name, "daemon") || strcasestr(name, "helper") ||
+		    strcasestr(name, "agent") || strcasestr(name, "server") ||
+		    strcasestr(name, "service") || strcasestr(name, "worker") ||
+		    strcasestr(name, "watcher") || strcasestr(name, "monitor"))
 			return 1;
 	}
-	return 0;
+
+	/* Whitelist approach: only show known user applications */
+	for (size_t i = 0; i < LENGTH(user_apps); i++) {
+		if (strcasestr(name, user_apps[i]))
+			return 0; /* NOT critical - show it */
+	}
+
+	/* Everything else is considered system/background - hide it */
+	return 1;
 }
 
 static int
@@ -4317,7 +4392,8 @@ read_top_cpu_processes(CpuPopup *p)
 	if (!p)
 		return 0;
 
-	fp = popen("ps -eo pid,comm,pcpu --no-headers --sort=-pcpu", "r");
+	/* Use top for real-time CPU usage (not cumulative like ps pcpu) */
+	fp = popen("top -bn1 -o %CPU 2>/dev/null | tail -n +8 | head -50", "r");
 	if (!fp) {
 		p->proc_count = 0;
 		return 0;
@@ -4329,9 +4405,12 @@ read_top_cpu_processes(CpuPopup *p)
 		char name[64] = {0};
 		double cpu = 0.0;
 		int existing = -1;
+		char user[32], pr[8], ni[8], virt[16], res[16], shr[16], s[4];
 
 		lines++;
-		if (sscanf(line, "%d %63s %lf", &pid, name, &cpu) != 3)
+		/* top format: PID USER PR NI VIRT RES SHR S %CPU %MEM TIME+ COMMAND */
+		if (sscanf(line, "%d %31s %7s %7s %15s %15s %15s %3s %lf %*f %*s %63s",
+		           &pid, user, pr, ni, virt, res, shr, s, &cpu, name) < 10)
 			continue;
 		if (name[0] == '[')
 			continue;
@@ -4392,6 +4471,8 @@ rendercpupopup(Monitor *m)
 	int hover_idx;
 	int popup_x = m->statusbar.cpu.x;
 	int need_fetch_now;
+	int max_proc_text_w = 0;
+	int any_has_kill = 0;
 	char line[64];
 	struct wlr_scene_node *node, *tmp;
 
@@ -4467,17 +4548,24 @@ rendercpupopup(Monitor *m)
 	}
 	left_h = line_count * row_height + (line_count - 1) * line_spacing;
 
+	/* First pass: find max text width for vertical kill button alignment */
 	for (int i = 0; i < p->proc_count; i++) {
 		CpuProcEntry *e = &p->procs[i];
 		int cpu_disp = (int)lround(e->cpu < 0.0 ? 0.0 : e->cpu);
-		int row_w;
+		int text_w;
 		char proc_line[128];
 
 		snprintf(proc_line, sizeof(proc_line), "%s %d%%", e->name, cpu_disp);
-		row_w = status_text_width(proc_line);
+		text_w = status_text_width(proc_line);
+		max_proc_text_w = MAX(max_proc_text_w, text_w);
 		if (e->has_kill)
-			row_w += button_gap + kill_w;
-		right_w = MAX(right_w, row_w);
+			any_has_kill = 1;
+	}
+	/* Calculate right_w with aligned kill buttons */
+	if (p->proc_count > 0) {
+		right_w = max_proc_text_w;
+		if (any_has_kill)
+			right_w += button_gap + kill_w;
 	}
 	if (p->proc_count > 0)
 		right_h = p->proc_count * row_height + (p->proc_count - 1) * line_spacing;
@@ -4557,7 +4645,7 @@ rendercpupopup(Monitor *m)
 			e->y = row_y;
 			e->height = row_height;
 		if (e->has_kill && kill_w > 0 && kill_h > 0) {
-			int btn_x = right_x + text_w + button_gap;
+			int btn_x = right_x + max_proc_text_w + button_gap;
 			int btn_y = row_y + (row_height - kill_h) / 2;
 			struct wlr_scene_tree *btn;
 			StatusModule btn_mod = {0};
@@ -12029,7 +12117,7 @@ updatecpuhover(Monitor *m, double cx, double cy)
 			}
 		}
 		if (!was_visible)
-			schedule_cpu_popup_refresh(2000);
+			schedule_cpu_popup_refresh(1000);
 	} else if (p->visible) {
 		p->visible = 0;
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
