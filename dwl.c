@@ -648,6 +648,8 @@ static void destroykeyboardgroup(struct wl_listener *listener, void *data);
 static Monitor *dirtomon(enum wlr_direction dir);
 static void focusclient(Client *c, int lift);
 static void focusmon(const Arg *arg);
+static void warptomonitor(const Arg *arg);
+static void tagtomonitornum(const Arg *arg);
 static void focusstack(const Arg *arg);
 static Client *focustop(Monitor *m);
 static void fullscreennotify(struct wl_listener *listener, void *data);
@@ -7431,6 +7433,54 @@ net_menu_hide_all(void)
 	}
 }
 
+/* Transfer visible status menus to target monitor when mouse moves */
+static void
+transfer_status_menus(Monitor *from, Monitor *to)
+{
+	if (!from || !to || from == to)
+		return;
+
+	/* Transfer net_menu */
+	if (from->statusbar.net_menu.visible && to->statusbar.net_menu.tree) {
+		/* Hide on old monitor */
+		wlr_scene_node_set_enabled(&from->statusbar.net_menu.tree->node, 0);
+		from->statusbar.net_menu.visible = 0;
+		if (from->statusbar.net_menu.submenu_tree) {
+			wlr_scene_node_set_enabled(&from->statusbar.net_menu.submenu_tree->node, 0);
+			from->statusbar.net_menu.submenu_visible = 0;
+		}
+		/* Show on new monitor */
+		net_menu_render(to);
+		if (from->statusbar.net_menu.submenu_visible)
+			net_menu_submenu_render(to);
+	}
+
+	/* Transfer cpu_popup */
+	if (from->statusbar.cpu_popup.visible && to->statusbar.cpu_popup.tree) {
+		wlr_scene_node_set_enabled(&from->statusbar.cpu_popup.tree->node, 0);
+		from->statusbar.cpu_popup.visible = 0;
+		to->statusbar.cpu_popup.visible = 1;
+		to->statusbar.cpu_popup.refresh_data = 1;
+		rendercpupopup(to);
+		wlr_scene_node_set_enabled(&to->statusbar.cpu_popup.tree->node, 1);
+	}
+
+	/* Transfer wifi_popup */
+	if (from->wifi_popup.visible && to->wifi_popup.tree) {
+		/* Copy popup state */
+		memcpy(to->wifi_popup.ssid, from->wifi_popup.ssid, sizeof(to->wifi_popup.ssid));
+		memcpy(to->wifi_popup.password, from->wifi_popup.password, sizeof(to->wifi_popup.password));
+		to->wifi_popup.password_len = from->wifi_popup.password_len;
+		to->wifi_popup.cursor_pos = from->wifi_popup.cursor_pos;
+		to->wifi_popup.error = from->wifi_popup.error;
+		/* Hide on old, show on new */
+		wlr_scene_node_set_enabled(&from->wifi_popup.tree->node, 0);
+		from->wifi_popup.visible = 0;
+		to->wifi_popup.visible = 1;
+		wifi_popup_render(to);
+	}
+}
+
 static void
 net_menu_render(Monitor *m)
 {
@@ -13762,6 +13812,68 @@ focusmon(const Arg *arg)
 	focusclient(focustop(selmon), 1);
 }
 
+/* Warp cursor to center of monitor in specified direction */
+void
+warptomonitor(const Arg *arg)
+{
+	Monitor *m;
+	int i = 0, nmons = wl_list_length(&mons);
+
+	if (!nmons)
+		return;
+
+	m = selmon;
+	do
+		m = dirtomon(arg->i);
+	while (!m->wlr_output->enabled && i++ < nmons);
+
+	if (m && m->wlr_output->enabled) {
+		/* Transfer any open status menus to new monitor */
+		transfer_status_menus(selmon, m);
+		selmon = m;
+		/* Warp cursor to center of monitor */
+		wlr_cursor_warp(cursor, NULL,
+			m->m.x + m->m.width / 2,
+			m->m.y + m->m.height / 2);
+		focusclient(focustop(selmon), 1);
+	}
+}
+
+/* Get monitor by index (0-based) */
+static Monitor *
+monitorbyindex(unsigned int idx)
+{
+	Monitor *m;
+	unsigned int i = 0;
+
+	wl_list_for_each(m, &mons, link) {
+		if (i == idx)
+			return m;
+		i++;
+	}
+	return NULL;
+}
+
+/* Move focused client to monitor by index */
+void
+tagtomonitornum(const Arg *arg)
+{
+	Client *sel = focustop(selmon);
+	Monitor *target;
+
+	if (!sel)
+		return;
+
+	target = monitorbyindex(arg->ui);
+	if (!target || target == sel->mon)
+		return;
+
+	setmon(sel, target, 0);
+	free(sel->output);
+	if (!(sel->output = strdup(sel->mon->wlr_output->name)))
+		die("oom");
+}
+
 void
 focusstack(const Arg *arg)
 {
@@ -14460,8 +14572,14 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
 		/* Update selmon (even while dragging a window) */
-		if (sloppyfocus)
-			selmon = xytomon(cursor->x, cursor->y);
+		if (sloppyfocus) {
+			Monitor *newmon = xytomon(cursor->x, cursor->y);
+			if (newmon && newmon != selmon) {
+				/* Transfer any open status menus to new monitor */
+				transfer_status_menus(selmon, newmon);
+				selmon = newmon;
+			}
+		}
 	}
 
 	/* Update drag icon's position */

@@ -157,12 +157,17 @@ static const enum libinput_config_tap_button_map button_map = LIBINPUT_CONFIG_TA
 
 /* If you want to use the windows key for MODKEY, use WLR_MODIFIER_LOGO */
 #define MODKEY WLR_MODIFIER_LOGO
+#define MONITORKEY WLR_MODIFIER_CTRL
 
 #define TAGKEYS(KEY,SKEY,TAG) \
 	{ MODKEY,                    KEY,            view,            {.ui = 1 << TAG} }, \
 	{ MODKEY|WLR_MODIFIER_CTRL,  KEY,            toggleview,      {.ui = 1 << TAG} }, \
 	{ MODKEY|WLR_MODIFIER_SHIFT, KEY,            tag,             {.ui = 1 << TAG} }, \
 	{ MODKEY|WLR_MODIFIER_CTRL|WLR_MODIFIER_SHIFT,KEY,toggletag,  {.ui = 1 << TAG} }
+
+/* Move focused tile to monitor by number (0-indexed) */
+#define MONITORKEYS(KEY,MONNUM) \
+	{ MONITORKEY|WLR_MODIFIER_SHIFT, KEY, tagtomonitornum, {.ui = MONNUM} }
 
 /* helper for spawning shell commands in the pre dwm-5.0 fashion */
 #define SHCMD(cmd) { .v = (const char*[]){ "/bin/sh", "-c", cmd, NULL } }
@@ -241,6 +246,18 @@ static const Key keys[] = {
 	TAGKEYS(          XKB_KEY_8, XKB_KEY_asterisk,                   7),
 	TAGKEYS(          XKB_KEY_9, XKB_KEY_parenleft,                  8),
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Q,          quit,           {0} },
+
+	/* Monitor navigation: CTRL + arrow keys to warp cursor to monitor */
+	{ MONITORKEY,                XKB_KEY_Up,         warptomonitor,  {.i = WLR_DIRECTION_UP} },
+	{ MONITORKEY,                XKB_KEY_Down,       warptomonitor,  {.i = WLR_DIRECTION_DOWN} },
+	{ MONITORKEY,                XKB_KEY_Left,       warptomonitor,  {.i = WLR_DIRECTION_LEFT} },
+	{ MONITORKEY,                XKB_KEY_Right,      warptomonitor,  {.i = WLR_DIRECTION_RIGHT} },
+
+	/* Move tile to monitor: CTRL + Shift + monitor number */
+	MONITORKEYS(XKB_KEY_exclam,     0),  /* Ctrl+Shift+1 -> monitor 0 */
+	MONITORKEYS(XKB_KEY_at,         1),  /* Ctrl+Shift+2 -> monitor 1 */
+	MONITORKEYS(XKB_KEY_numbersign, 2),  /* Ctrl+Shift+3 -> monitor 2 */
+	MONITORKEYS(XKB_KEY_dollar,     3),  /* Ctrl+Shift+4 -> monitor 3 */
 
 	/* Ctrl-Alt-Backspace and Ctrl-Alt-Fx used to be handled by X server */
 	{ WLR_MODIFIER_CTRL|WLR_MODIFIER_ALT,XKB_KEY_Terminate_Server, quit, {0} },
