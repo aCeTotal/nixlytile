@@ -42,6 +42,7 @@
 #include <wlr/interfaces/wlr_buffer.h>
 #include <wlr/types/wlr_alpha_modifier_v1.h>
 #include <wlr/types/wlr_compositor.h>
+#include <wlr/types/wlr_content_type_v1.h>
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_cursor_shape_v1.h>
 #include <wlr/types/wlr_data_control_v1.h>
@@ -92,6 +93,7 @@
 #include <xcb/xcb_icccm.h>
 #endif
 #include <tllist.h>
+#include "content-type-v1-protocol.h"
 
 #ifndef SD_BUS_EVENT_READABLE
 #define SD_BUS_EVENT_READABLE 1
@@ -542,6 +544,11 @@ typedef struct {
 	int pending_resize_w, pending_resize_h; /* last requested size while pending */
 	struct wlr_box old_geom;
 	char *output;
+	/* Frame rate tracking for video detection */
+	uint64_t frame_times[32];    /* circular buffer of commit timestamps (ms) */
+	int frame_time_idx;          /* next write index */
+	int frame_time_count;        /* number of samples collected */
+	int detected_video_fps;      /* detected video fps (0 = not video) */
 } Client;
 
 typedef struct {
@@ -614,6 +621,13 @@ struct Monitor {
 	char ltsymbol[16];
 	int asleep;
 	LayoutNode *root[MAX_TAGS];
+	/* Video refresh rate matching */
+	struct wlr_output_mode *original_mode; /* saved mode before video switch */
+	int video_mode_active;                 /* 1 if currently in video-optimized mode */
+	/* Hz OSD for refresh rate changes */
+	struct wlr_scene_tree *hz_osd_tree;
+	struct wlr_scene_tree *hz_osd_bg;
+	int hz_osd_visible;
 };
 
 typedef struct {
@@ -847,6 +861,17 @@ static void requestmonstate(struct wl_listener *listener, void *data);
 static void resize(Client *c, struct wlr_box geo, int interact);
 static void run(const char *startup_cmd);
 static void set_adaptive_sync(Monitor *m, int enabled);
+static void set_video_refresh_rate(Monitor *m, Client *c);
+static void restore_max_refresh_rate(Monitor *m);
+static int is_video_content(Client *c);
+static void track_client_frame(Client *c);
+static int detect_video_framerate(Client *c);
+static void check_fullscreen_video(void);
+static void schedule_video_check(uint32_t ms);
+static int set_custom_video_mode(Monitor *m, int fps);
+static void show_hz_osd(Monitor *m, const char *msg);
+static void hide_hz_osd(Monitor *m);
+static int hz_osd_timeout(void *data);
 static void setcursor(struct wl_listener *listener, void *data);
 static void setcursorshape(struct wl_listener *listener, void *data);
 static void setfloating(Client *c, int floating);
@@ -1030,6 +1055,7 @@ static struct wlr_idle_notifier_v1 *idle_notifier;
 static struct wlr_idle_inhibit_manager_v1 *idle_inhibit_mgr;
 static struct wlr_layer_shell_v1 *layer_shell;
 static struct wlr_output_manager_v1 *output_mgr;
+static struct wlr_content_type_manager_v1 *content_type_mgr;
 static struct wlr_virtual_keyboard_manager_v1 *virtual_keyboard_mgr;
 static struct wlr_virtual_pointer_manager_v1 *virtual_pointer_mgr;
 static struct wlr_cursor_shape_manager_v1 *cursor_shape_mgr;
@@ -1146,6 +1172,8 @@ static struct wl_event_source *wifi_scan_event = NULL;
 static struct wl_event_source *wifi_scan_timer = NULL;
 static struct wl_event_source *cpu_popup_refresh_timer = NULL;
 static struct wl_event_source *ram_popup_refresh_timer = NULL;
+static struct wl_event_source *video_check_timer = NULL;
+static struct wl_event_source *hz_osd_timer = NULL;
 static char wifi_scan_buf[8192];
 static size_t wifi_scan_len = 0;
 static int wifi_scan_inflight;
@@ -5513,9 +5541,9 @@ updatebatteryhover(Monitor *m, double cx, double cy)
 
 	if (inside) {
 		if (!was_visible) {
-			/* Delay heavy popup refresh until pointer lingers for 1s */
-			p->suppress_refresh_until_ms = now + 1000;
-			p->refresh_data = 0;
+			/* Short delay to avoid flicker on quick mouse movements */
+			p->suppress_refresh_until_ms = now + 100;
+			p->refresh_data = 1; /* Trigger immediate fetch when delay passes */
 		}
 		p->visible = 1;
 		wlr_scene_node_set_enabled(&p->tree->node, 1);
@@ -12998,8 +13026,9 @@ updateramhover(Monitor *m, double cx, double cy)
 
 	if (inside) {
 		if (!was_visible) {
-			/* Delay heavy popup refresh until pointer lingers for 1s */
-			p->suppress_refresh_until_ms = now + 1000;
+			/* Short delay to avoid flicker on quick mouse movements */
+			p->suppress_refresh_until_ms = now + 100;
+			p->refresh_data = 1; /* Trigger immediate fetch when delay passes */
 		}
 		p->visible = 1;
 		wlr_scene_node_set_enabled(&p->tree->node, 1);
@@ -13026,7 +13055,7 @@ updateramhover(Monitor *m, double cx, double cy)
 			}
 		}
 		if (!was_visible)
-			schedule_ram_popup_refresh(1000);
+			schedule_ram_popup_refresh(100);
 	} else if (p->visible) {
 		p->visible = 0;
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
@@ -14030,6 +14059,10 @@ commitnotify(struct wl_listener *listener, void *data)
 		c->resize = 0;
 		c->pending_resize_w = c->pending_resize_h = -1;
 	}
+
+	/* Track frame times for fullscreen clients (video detection) */
+	if (c->isfullscreen)
+		track_client_frame(c);
 
 	resize(c, c->geom, (c->isfloating && !c->isfullscreen));
 }
@@ -16321,6 +16354,486 @@ set_adaptive_sync(Monitor *m, int enable)
 	wlr_output_manager_v1_set_configuration(output_mgr, config);
 }
 
+/* Check if a client's surface has video content type */
+static int
+is_video_content(Client *c)
+{
+	struct wlr_surface *surface;
+	enum wp_content_type_v1_type content_type;
+
+	if (!c || !content_type_mgr)
+		return 0;
+
+	surface = client_surface(c);
+	if (!surface)
+		return 0;
+
+	content_type = wlr_surface_get_content_type_v1(content_type_mgr, surface);
+	return content_type == WP_CONTENT_TYPE_V1_TYPE_VIDEO;
+}
+
+/*
+ * Set output to a refresh rate optimized for video playback.
+ * For content-type based detection, we start frame tracking to determine
+ * the actual fps, then set custom mode.
+ */
+static void
+set_video_refresh_rate(Monitor *m, Client *c)
+{
+	if (!m || !m->wlr_output || !m->wlr_output->enabled || !c)
+		return;
+
+	/* Don't switch if already in video mode */
+	if (m->video_mode_active)
+		return;
+
+	/* Check if content type is video */
+	if (!is_video_content(c))
+		return;
+
+	/* Reset frame tracking to detect actual video fps */
+	c->frame_time_idx = 0;
+	c->frame_time_count = 0;
+	c->detected_video_fps = 0;
+
+	wlr_log(WLR_INFO, "Video content detected on %s, starting frame rate detection",
+			m->wlr_output->name);
+
+	/* Schedule video check to detect fps and set appropriate mode */
+	schedule_video_check(500);
+}
+
+/* Restore output to maximum refresh rate */
+static void
+restore_max_refresh_rate(Monitor *m)
+{
+	struct wlr_output_mode *max_mode;
+	struct wlr_output_state state;
+	struct wlr_output_configuration_v1 *config;
+	struct wlr_output_configuration_head_v1 *config_head;
+
+	if (!m || !m->wlr_output || !m->wlr_output->enabled)
+		return;
+
+	/* Only restore if we're in video mode */
+	if (!m->video_mode_active)
+		return;
+
+	/* Find best (highest refresh) mode */
+	max_mode = bestmode(m->wlr_output);
+	if (!max_mode)
+		return;
+
+	wlr_log(WLR_INFO, "Restoring %s to max mode: %dx%d@%dmHz",
+			m->wlr_output->name, max_mode->width, max_mode->height,
+			max_mode->refresh);
+
+	/* Apply the mode */
+	wlr_output_state_init(&state);
+	wlr_output_state_set_mode(&state, max_mode);
+	if (wlr_output_commit_state(m->wlr_output, &state)) {
+		m->video_mode_active = 0;
+		m->original_mode = NULL;
+
+		/* Broadcast change to output manager */
+		config = wlr_output_configuration_v1_create();
+		config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+		config_head->state.mode = max_mode;
+		wlr_output_manager_v1_set_configuration(output_mgr, config);
+
+		/* Show OSD notification */
+		{
+			char osd_msg[64];
+			snprintf(osd_msg, sizeof(osd_msg), "%d.%03d Hz",
+					max_mode->refresh / 1000, max_mode->refresh % 1000);
+			show_hz_osd(m, osd_msg);
+		}
+	}
+	wlr_output_state_finish(&state);
+}
+
+/* Track frame commit timestamp for a client */
+static void
+track_client_frame(Client *c)
+{
+	uint64_t now;
+
+	if (!c)
+		return;
+
+	now = monotonic_msec();
+	c->frame_times[c->frame_time_idx] = now;
+	c->frame_time_idx = (c->frame_time_idx + 1) % 32;
+	if (c->frame_time_count < 32)
+		c->frame_time_count++;
+}
+
+/*
+ * Analyze frame times to detect video framerate.
+ * Returns detected FPS (24, 25, 30, 50, 60) or 0 if not video.
+ */
+static int
+detect_video_framerate(Client *c)
+{
+	int i, count, valid_intervals;
+	uint64_t intervals[31];
+	uint64_t avg_interval;
+	uint64_t sum = 0;
+	uint64_t variance_sum = 0;
+	double variance, stddev;
+	int fps;
+
+	if (!c || c->frame_time_count < 16)
+		return 0;
+
+	count = c->frame_time_count;
+	valid_intervals = 0;
+
+	/* Calculate intervals between frames */
+	for (i = 1; i < count; i++) {
+		int prev_idx = (c->frame_time_idx - count + i - 1 + 32) % 32;
+		int curr_idx = (c->frame_time_idx - count + i + 32) % 32;
+		uint64_t interval = c->frame_times[curr_idx] - c->frame_times[prev_idx];
+
+		/* Filter out unreasonable intervals (< 5ms or > 200ms) */
+		if (interval >= 5 && interval <= 200) {
+			intervals[valid_intervals++] = interval;
+			sum += interval;
+		}
+	}
+
+	if (valid_intervals < 10)
+		return 0;
+
+	avg_interval = sum / valid_intervals;
+
+	/* Calculate variance to check for stable frame rate */
+	for (i = 0; i < valid_intervals; i++) {
+		int64_t diff = (int64_t)intervals[i] - (int64_t)avg_interval;
+		variance_sum += (uint64_t)(diff * diff);
+	}
+	variance = (double)variance_sum / valid_intervals;
+	stddev = sqrt(variance);
+
+	/* If standard deviation is more than 20% of mean, not stable enough */
+	if (stddev > avg_interval * 0.20)
+		return 0;
+
+	/* Convert average interval (ms) to FPS and match to common rates */
+	fps = (int)(1000.0 / avg_interval + 0.5);
+
+	/* Match to common video framerates with some tolerance */
+	if (fps >= 22 && fps <= 26)
+		return 24;  /* Film (23.976, 24) */
+	if (fps >= 27 && fps <= 32)
+		return 30;  /* NTSC (29.97, 30) */
+	if (fps >= 48 && fps <= 52)
+		return 50;  /* PAL high frame rate */
+	if (fps >= 58 && fps <= 62)
+		return 60;  /* High frame rate */
+	if (fps >= 118 && fps <= 122)
+		return 120; /* Very high frame rate */
+
+	return 0;
+}
+
+/*
+ * Set a custom refresh rate that exactly matches the video FPS.
+ * Uses wlr_output_state_set_custom_mode to create an exact match.
+ * Returns 1 on success, 0 on failure.
+ */
+static int
+set_custom_video_mode(Monitor *m, int fps)
+{
+	struct wlr_output_state state;
+	struct wlr_output_configuration_v1 *config;
+	struct wlr_output_configuration_head_v1 *config_head;
+	int width, height;
+	int32_t refresh_mhz;
+	int success = 0;
+
+	if (!m || !m->wlr_output || !m->wlr_output->enabled || !m->wlr_output->current_mode)
+		return 0;
+
+	/* Don't switch if already at this fps */
+	if (m->video_mode_active && m->wlr_output->refresh == fps * 1000)
+		return 1;
+
+	/* Save original mode before first switch */
+	if (!m->video_mode_active)
+		m->original_mode = m->wlr_output->current_mode;
+
+	width = m->wlr_output->current_mode->width;
+	height = m->wlr_output->current_mode->height;
+
+	/* Calculate exact refresh rate in mHz */
+	switch (fps) {
+	case 24:
+		refresh_mhz = 23976; /* 23.976 Hz for film */
+		break;
+	case 25:
+		refresh_mhz = 25000; /* 25 Hz PAL */
+		break;
+	case 30:
+		refresh_mhz = 29970; /* 29.97 Hz NTSC */
+		break;
+	case 50:
+		refresh_mhz = 50000; /* 50 Hz */
+		break;
+	case 60:
+		refresh_mhz = 59940; /* 59.94 Hz */
+		break;
+	case 120:
+		refresh_mhz = 119880; /* 119.88 Hz */
+		break;
+	default:
+		refresh_mhz = fps * 1000;
+		break;
+	}
+
+	wlr_log(WLR_INFO, "Setting custom video mode: %dx%d@%d.%03dHz for %dfps video",
+			width, height, refresh_mhz / 1000, refresh_mhz % 1000, fps);
+
+	wlr_output_state_init(&state);
+	wlr_output_state_set_custom_mode(&state, width, height, refresh_mhz);
+
+	if (wlr_output_test_state(m->wlr_output, &state)) {
+		if (wlr_output_commit_state(m->wlr_output, &state)) {
+			m->video_mode_active = 1;
+			success = 1;
+
+			/* Broadcast change to output manager */
+			config = wlr_output_configuration_v1_create();
+			config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+			config_head->state.custom_mode.width = width;
+			config_head->state.custom_mode.height = height;
+			config_head->state.custom_mode.refresh = refresh_mhz;
+			wlr_output_manager_v1_set_configuration(output_mgr, config);
+
+			wlr_log(WLR_INFO, "Custom video mode applied successfully");
+
+			/* Show OSD notification */
+			{
+				char osd_msg[64];
+				snprintf(osd_msg, sizeof(osd_msg), "%d.%03d Hz (video %d fps)",
+						refresh_mhz / 1000, refresh_mhz % 1000, fps);
+				show_hz_osd(m, osd_msg);
+			}
+		} else {
+			wlr_log(WLR_ERROR, "Failed to commit custom video mode");
+		}
+	} else {
+		wlr_log(WLR_INFO, "Custom mode %dx%d@%dmHz not supported, trying standard modes",
+				width, height, refresh_mhz);
+	}
+
+	wlr_output_state_finish(&state);
+	return success;
+}
+
+/* Timer callback to check fullscreen clients for video content */
+static int
+video_check_timeout(void *data)
+{
+	(void)data;
+	check_fullscreen_video();
+	return 0;
+}
+
+/* Schedule video check timer */
+static void
+schedule_video_check(uint32_t ms)
+{
+	if (!event_loop)
+		return;
+	if (!video_check_timer)
+		video_check_timer = wl_event_loop_add_timer(event_loop,
+				video_check_timeout, NULL);
+	if (video_check_timer)
+		wl_event_source_timer_update(video_check_timer, ms);
+}
+
+/* Hz OSD - show refresh rate change notification */
+static int
+hz_osd_timeout(void *data)
+{
+	Monitor *m;
+	(void)data;
+
+	wl_list_for_each(m, &mons, link) {
+		if (m->hz_osd_visible)
+			hide_hz_osd(m);
+	}
+	return 0;
+}
+
+static void
+hide_hz_osd(Monitor *m)
+{
+	if (!m || !m->hz_osd_tree)
+		return;
+
+	m->hz_osd_visible = 0;
+	wlr_scene_node_set_enabled(&m->hz_osd_tree->node, 0);
+}
+
+static void
+show_hz_osd(Monitor *m, const char *msg)
+{
+	tll(struct GlyphRun) glyphs = tll_init();
+	const struct fcft_glyph *glyph;
+	struct wlr_scene_buffer *scene_buf;
+	struct wlr_buffer *buffer;
+	uint32_t prev_cp = 0;
+	int pen_x = 0;
+	int min_y = INT_MAX, max_y = INT_MIN;
+	int padding = 20;
+	int box_width, box_height;
+	int osd_x, osd_y;
+	static const float osd_bg[4] = {0.1f, 0.1f, 0.1f, 0.85f};
+
+	if (!m || !statusfont.font || !msg || !*msg)
+		return;
+
+	/* Create tree if needed */
+	if (!m->hz_osd_tree) {
+		m->hz_osd_tree = wlr_scene_tree_create(layers[LyrOverlay]);
+		if (!m->hz_osd_tree)
+			return;
+		m->hz_osd_bg = NULL;
+		m->hz_osd_visible = 0;
+	}
+
+	/* Build glyph list and measure text */
+	for (size_t i = 0; msg[i]; i++) {
+		long kern_x = 0, kern_y = 0;
+		uint32_t cp = (unsigned char)msg[i];
+
+		if (prev_cp)
+			fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
+		pen_x += (int)kern_x;
+
+		glyph = fcft_rasterize_char_utf32(statusfont.font, cp, statusbar_font_subpixel);
+		if (glyph && glyph->pix) {
+			tll_push_back(glyphs, ((struct GlyphRun){
+				.glyph = glyph,
+				.pen_x = pen_x,
+				.codepoint = cp,
+			}));
+			if (-glyph->y < min_y)
+				min_y = -glyph->y;
+			if (-glyph->y + (int)glyph->height > max_y)
+				max_y = -glyph->y + (int)glyph->height;
+			pen_x += glyph->advance.x;
+		}
+		prev_cp = cp;
+	}
+
+	if (tll_length(glyphs) == 0) {
+		tll_free(glyphs);
+		return;
+	}
+
+	box_width = pen_x + padding * 2;
+	box_height = (max_y - min_y) + padding * 2;
+
+	/* Center on monitor */
+	osd_x = m->m.x + (m->m.width - box_width) / 2;
+	osd_y = m->m.y + (m->m.height - box_height) / 2;
+
+	/* Clear old children */
+	struct wlr_scene_node *node, *tmp;
+	wl_list_for_each_safe(node, tmp, &m->hz_osd_tree->children, link)
+		wlr_scene_node_destroy(node);
+	m->hz_osd_bg = NULL;
+
+	/* Create background */
+	m->hz_osd_bg = wlr_scene_tree_create(m->hz_osd_tree);
+	if (m->hz_osd_bg)
+		drawrect(m->hz_osd_bg, 0, 0, box_width, box_height, osd_bg);
+
+	/* Draw glyphs */
+	{
+		int origin_y = padding - min_y;
+
+		tll_foreach(glyphs, it) {
+			glyph = it->item.glyph;
+			buffer = statusbar_buffer_from_glyph(glyph);
+			if (!buffer)
+				continue;
+
+			scene_buf = wlr_scene_buffer_create(m->hz_osd_tree, NULL);
+			if (scene_buf) {
+				wlr_scene_buffer_set_buffer(scene_buf, buffer);
+				wlr_scene_node_set_position(&scene_buf->node,
+						padding + it->item.pen_x + glyph->x,
+						origin_y - glyph->y);
+			}
+			wlr_buffer_drop(buffer);
+		}
+	}
+
+	tll_free(glyphs);
+
+	/* Position and show */
+	wlr_scene_node_set_position(&m->hz_osd_tree->node, osd_x, osd_y);
+	wlr_scene_node_set_enabled(&m->hz_osd_tree->node, 1);
+	m->hz_osd_visible = 1;
+
+	/* Schedule auto-hide after 3 seconds */
+	if (!hz_osd_timer)
+		hz_osd_timer = wl_event_loop_add_timer(event_loop, hz_osd_timeout, NULL);
+	if (hz_osd_timer)
+		wl_event_source_timer_update(hz_osd_timer, 3000);
+}
+
+/* Check if any fullscreen client is playing video and adjust refresh rate */
+static void
+check_fullscreen_video(void)
+{
+	Client *c;
+	Monitor *m;
+	int any_fullscreen_video = 0;
+
+	wl_list_for_each(m, &mons, link) {
+		c = focustop(m);
+		if (!c || !c->isfullscreen)
+			continue;
+
+		/* Detect video fps from frame timing */
+		if (c->frame_time_count >= 16) {
+			int fps = detect_video_framerate(c);
+
+			/* Also check content-type as hint */
+			int is_video = is_video_content(c);
+
+			if (fps > 0 && fps != c->detected_video_fps) {
+				c->detected_video_fps = fps;
+
+				wlr_log(WLR_INFO, "Detected %s at %d fps on %s",
+						is_video ? "video content" : "stable framerate",
+						fps, m->wlr_output->name);
+
+				/* Set custom mode matching exact fps */
+				set_custom_video_mode(m, fps);
+				any_fullscreen_video = 1;
+			} else if (fps > 0) {
+				any_fullscreen_video = 1;
+			} else if (is_video && !m->video_mode_active) {
+				/* Video content but can't detect fps yet, keep checking */
+				any_fullscreen_video = 1;
+			}
+		} else {
+			/* Still collecting samples */
+			any_fullscreen_video = 1;
+		}
+	}
+
+	/* Continue checking if we have fullscreen clients */
+	if (any_fullscreen_video)
+		schedule_video_check(1000);
+}
+
 void
 setcursor(struct wl_listener *listener, void *data)
 {
@@ -16385,11 +16898,22 @@ setfullscreen(Client *c, int fullscreen)
 		c->prev = c->geom;
 		resize(c, c->mon->m, 0);
 		set_adaptive_sync(c->mon, 1);
+		/* Reset frame tracking for video detection */
+		c->frame_time_idx = 0;
+		c->frame_time_count = 0;
+		c->detected_video_fps = 0;
+		/* Try to match video refresh rate if content is video */
+		set_video_refresh_rate(c->mon, c);
+		/* Start periodic video detection check */
+		schedule_video_check(500);
 	} else {
 		/* restore previous size instead of arrange for floating windows since
 		 * client positions are set by the user and cannot be recalculated */
 		resize(c, c->prev, 0);
 		set_adaptive_sync(c->mon, 0);
+		/* Restore max refresh rate when exiting fullscreen */
+		restore_max_refresh_rate(c->mon);
+		c->detected_video_fps = 0;
 	}
 	arrange(c->mon);
 	printstatus();
@@ -16592,6 +17116,7 @@ setup(void)
 	wlr_fractional_scale_manager_v1_create(dpy, 1);
 	wlr_presentation_create(dpy, backend, 2);
 	wlr_alpha_modifier_v1_create(dpy);
+	content_type_mgr = wlr_content_type_manager_v1_create(dpy, 1);
 
 	/* Initializes the interface used to implement urgency hints */
 	activation = wlr_xdg_activation_v1_create(dpy);
@@ -16959,9 +17484,12 @@ unmapnotify(struct wl_listener *listener, void *data)
 		setmon(c, NULL, 0);
 		wl_list_remove(&c->flink);
 	}
-	/* Toggle adaptive sync off when fullscreen client is unmapped */
-	if (c->isfullscreen)
-		set_adaptive_sync(c->mon ? c->mon : selmon, 0);
+	/* Toggle adaptive sync off and restore refresh rate when fullscreen client is unmapped */
+	if (c->isfullscreen) {
+		Monitor *m = c->mon ? c->mon : selmon;
+		set_adaptive_sync(m, 0);
+		restore_max_refresh_rate(m);
+	}
 
 	wlr_scene_node_destroy(&c->scene->node);
 	printstatus();
