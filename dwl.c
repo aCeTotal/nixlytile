@@ -14267,7 +14267,17 @@ commitnotify(struct wl_listener *listener, void *data)
 	if (c->isfullscreen)
 		track_client_frame(c);
 
-	resize(c, c->geom, (c->isfloating && !c->isfullscreen));
+	/* For tiled clients in a tiling layout, use the geometry from btrtile
+	 * (stored in old_geom) to ensure proper tiling. This prevents clients
+	 * from appearing at their initial centered position before the layout
+	 * has positioned them. */
+	if (!c->isfloating && !c->isfullscreen && c->mon &&
+	    c->mon->lt[c->mon->sellt]->arrange &&
+	    c->old_geom.width > 0 && c->old_geom.height > 0) {
+		resize(c, c->old_geom, 0);
+	} else {
+		resize(c, c->geom, (c->isfloating && !c->isfullscreen));
+	}
 }
 
 void
@@ -18474,9 +18484,11 @@ setfullscreen(Client *c, int fullscreen)
 		/* Start periodic video detection check */
 		schedule_video_check(500);
 	} else {
-		/* restore previous size instead of arrange for floating windows since
-		 * client positions are set by the user and cannot be recalculated */
-		resize(c, c->prev, 0);
+		/* restore previous size only for floating windows since their
+		 * positions are set by the user. Tiled windows will be positioned
+		 * by the layout system in arrange(). */
+		if (c->isfloating)
+			resize(c, c->prev, 0);
 		set_adaptive_sync(c->mon, 0);
 		/* Restore max refresh rate when exiting fullscreen */
 		restore_max_refresh_rate(c->mon);
@@ -18529,8 +18541,10 @@ setmon(Client *c, Monitor *m, uint32_t newtags)
 	if (oldmon)
 		arrange(oldmon);
 	if (m) {
-		/* Make sure window actually overlaps with the monitor */
-		resize(c, c->geom, 0);
+		/* For floating windows, ensure they overlap with the new monitor.
+		 * Tiled windows will be positioned by the layout system in arrange(). */
+		if (c->isfloating)
+			resize(c, c->geom, 0);
 		c->tags = newtags ? newtags : m->tagset[m->seltags]; /* assign tags of target monitor */
 		setfullscreen(c, c->isfullscreen); /* This will call arrange(c->mon) */
 		setfloating(c, c->isfloating);

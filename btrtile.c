@@ -411,6 +411,15 @@ insert_client(Monitor *m, Client *focused_client, Client *new_client)
 		return 0;
 	}
 
+	/* If we have exactly one visible client and need more columns,
+	 * always create a vertical split at the root (side by side) */
+	if (*root && total_tiles == 1 && current_cols < desired_cols) {
+		LayoutNode *new_client_node = create_client_node(new_client);
+		LayoutNode *old_root = *root;
+		*root = create_split_node(1, old_root, new_client_node);
+		return 1;
+	}
+
 	target_client = focused_client;
 	if (!target_client)
 		target_client = pick_target_client(m, NULL);
@@ -652,16 +661,8 @@ remove_client_node(LayoutNode *node, Client *c)
 		if (tmp)
 			tmp->split_node = node->split_node;
 
-		/* If lifted node is a horizontal split becoming a column root,
-		 * convert to vertical so tiles become separate columns (side by side) */
-		if (tmp && !tmp->is_client_node && !tmp->is_split_vertically) {
-			/* It's a column root if: no parent (becomes tree root) OR
-			 * parent is a vertical split (column separator) */
-			if (!tmp->split_node ||
-			    (tmp->split_node && tmp->split_node->is_split_vertically)) {
-				tmp->is_split_vertically = 1;
-			}
-		}
+		/* Preserve split orientation - tiles that were stacked in the same
+		 * column should remain stacked (horizontal split = top/bottom) */
 
 		free(node);
 		return tmp;
@@ -674,14 +675,8 @@ remove_client_node(LayoutNode *node, Client *c)
 		if (tmp)
 			tmp->split_node = node->split_node;
 
-		/* If lifted node is a horizontal split becoming a column root,
-		 * convert to vertical so tiles become separate columns (side by side) */
-		if (tmp && !tmp->is_client_node && !tmp->is_split_vertically) {
-			if (!tmp->split_node ||
-			    (tmp->split_node && tmp->split_node->is_split_vertically)) {
-				tmp->is_split_vertically = 1;
-			}
-		}
+		/* Preserve split orientation - tiles that were stacked in the same
+		 * column should remain stacked (horizontal split = top/bottom) */
 
 		free(node);
 		return tmp;

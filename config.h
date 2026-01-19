@@ -176,13 +176,23 @@ static const enum libinput_config_tap_button_map button_map = LIBINPUT_CONFIG_TA
 static const char *termcmd[] = { "foot", NULL };
 static const char *alacrittycmd[] = { "alacritty", NULL };
 static const char *btopcmd[] = { "alacritty", "-e", "btop", NULL };
-static const char *chromecmd[] = { "google-chrome-stable", NULL };
+static const char *bravecmd[] = { "brave",
+	"--no-first-run",
+	"--no-default-browser-check",
+	"--disable-session-crashed-bubble",
+	"--disable-breakpad",
+	"--disable-background-networking",
+	"--disable-component-update",
+	"--disable-sync",
+	"--disable-features=TranslateUI",
+	NULL };
 static const char *menucmd[] __attribute__((unused)) = { "wmenu-run", NULL };
 static const char *netcmd[] = { "nm-connection-editor", NULL };
 static const char *thunarcmd[] = { "thunar", NULL };
 /* Startup command run when no -s is provided; closes stdin to avoid status pipe */
 static const char *const autostart_cmd =
-	"swaybg -i \"$HOME/.nixlyos/wallpapers/beach.jpg\" -m fill <&-";
+	"eval $(gnome-keyring-daemon --start --components=secrets,ssh,pkcs11) & "
+	"thunar --daemon & swaybg -i \"$HOME/.nixlyos/wallpapers/beach.jpg\" -m fill <&-";
 
 static const Key keys[] = {
 /* Note that Shift changes certain key codes: c -> C, 2 -> at, etc. */
@@ -219,7 +229,7 @@ static const Key keys[] = {
 	{ MODKEY,                    XKB_KEY_period,     focusmon,       {.i = WLR_DIRECTION_RIGHT} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_less,       tagmon,         {.i = WLR_DIRECTION_LEFT} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_greater,    tagmon,         {.i = WLR_DIRECTION_RIGHT} },
-	{ MODKEY,                    XKB_KEY_BackSpace,  spawn,          {.v = chromecmd} },
+	{ MODKEY,                    XKB_KEY_BackSpace,  spawn,          {.v = bravecmd} },
 	{ MODKEY,                    XKB_KEY_Up,         focusdir,       {.ui = DIR_UP} },
 	{ MODKEY,                    XKB_KEY_Down,       focusdir,       {.ui = DIR_DOWN} },
 	{ MODKEY,                    XKB_KEY_Right,      focusdir,       {.ui = DIR_RIGHT} },
