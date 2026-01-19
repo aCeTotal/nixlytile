@@ -66,7 +66,7 @@ enum Direction { DIR_LEFT, DIR_RIGHT, DIR_UP, DIR_DOWN };
 #define TAGCOUNT (9)
 
 /* logging */
-static int log_level = WLR_SILENCE;
+static int log_level = WLR_DEBUG;
 
 /* NOTE: ALWAYS keep a rule declared even if you don't use rules (e.g leave at least one example) */
 static const Rule rules[] = {
@@ -181,15 +181,7 @@ static const char *menucmd[] __attribute__((unused)) = { "wmenu-run", NULL };
 static const char *netcmd[] = { "nm-connection-editor", NULL };
 /* Startup command run when no -s is provided; closes stdin to avoid status pipe */
 static const char *const autostart_cmd =
-	"exe=\"$0\"; "
-	"real_exe=$(readlink -f \"$exe\" 2>/dev/null || printf '%s' \"$exe\"); "
-	"bin_dir=$(CDPATH= cd -- \"$(dirname \"$real_exe\")\" && pwd); "
-	"wp=\"${DWL_WALLPAPER:-$bin_dir/../share/dwl/wallpapers/beach.jpg}\"; "
-	"[ -r \"$wp\" ] || wp=\"$bin_dir/../wallpapers/beach.jpg\"; "
-	"[ -r \"$wp\" ] || wp=\"$(CDPATH= cd -- \"$bin_dir/..\" && pwd)/wallpapers/beach.jpg\"; "
-	"[ -r \"$wp\" ] || wp=\"$PWD/wallpapers/beach.jpg\"; "
-	"[ -r \"$wp\" ] || wp=\"wallpapers/beach.jpg\"; "
-	"swaybg -i \"$wp\" -m fill <&-";
+	"swaybg -i \"$HOME/.nixlyos/wallpapers/beach.jpg\" -m fill <&-";
 
 static const Key keys[] = {
 /* Note that Shift changes certain key codes: c -> C, 2 -> at, etc. */
@@ -217,6 +209,8 @@ static const Key keys[] = {
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_space,      togglefloating, {0} },
 	{ MODKEY,                    XKB_KEY_f,          togglefullscreen, {0} },
 	{ MODKEY,                    XKB_KEY_F5,         togglefullscreenadaptivesync, {0} },
+	{ MODKEY,                    XKB_KEY_u,          testhzosd,      {0} },
+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_i,          setcustomhz,    {.f = 25.55f} },
 	{ MODKEY,                    XKB_KEY_0,          view,           {.ui = ~0} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_parenright, tag,            {.ui = ~0} },
 	{ MODKEY,                    XKB_KEY_comma,      focusmon,       {.i = WLR_DIRECTION_LEFT} },

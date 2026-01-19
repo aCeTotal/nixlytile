@@ -17,6 +17,8 @@
 #include <math.h>
 #include <glib.h>
 #include <drm_fourcc.h>
+#include <xf86drm.h>
+#include <xf86drmMode.h>
 #include <fcft/fcft.h>
 #include <pixman.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
@@ -40,6 +42,7 @@
 #include <wlr/render/allocator.h>
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/interfaces/wlr_buffer.h>
+#include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_alpha_modifier_v1.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_content_type_v1.h>
@@ -48,6 +51,7 @@
 #include <wlr/types/wlr_data_control_v1.h>
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_drm.h>
+#include <wlr/backend/drm.h>
 #include <wlr/types/wlr_export_dmabuf_v1.h>
 #include <wlr/types/wlr_fractional_scale_v1.h>
 #include <wlr/types/wlr_gamma_control_v1.h>
@@ -76,6 +80,7 @@
 #include <wlr/types/wlr_session_lock_v1.h>
 #include <wlr/types/wlr_single_pixel_buffer_v1.h>
 #include <wlr/types/wlr_subcompositor.h>
+#include <wlr/types/wlr_tearing_control_v1.h>
 #include <wlr/types/wlr_viewporter.h>
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
 #include <wlr/types/wlr_virtual_pointer_v1.h>
@@ -196,6 +201,7 @@ typedef struct {
 	uint64_t last_fetch_ms;
 	uint64_t last_render_ms;
 	uint64_t suppress_refresh_until_ms;
+	uint64_t hover_start_ms;
 	int proc_count;
 	CpuProcEntry procs[10];
 } CpuPopup;
@@ -221,6 +227,7 @@ typedef struct {
 	uint64_t last_fetch_ms;
 	uint64_t last_render_ms;
 	uint64_t suppress_refresh_until_ms;
+	uint64_t hover_start_ms;
 	int proc_count;
 	RamProcEntry procs[15];
 } RamPopup;
@@ -235,6 +242,7 @@ typedef struct {
 	uint64_t last_fetch_ms;
 	uint64_t last_render_ms;
 	uint64_t suppress_refresh_until_ms;
+	uint64_t hover_start_ms;
 	/* Cached battery info */
 	int charging;           /* 1=charging, 0=discharging */
 	double percent;         /* Battery percentage */
@@ -286,6 +294,7 @@ typedef struct {
 	int anchor_y;
 	int anchor_w;
 	uint64_t suppress_refresh_until_ms;
+	uint64_t hover_start_ms;
 } NetPopup;
 
 typedef struct {
@@ -548,7 +557,10 @@ typedef struct {
 	uint64_t frame_times[32];    /* circular buffer of commit timestamps (ms) */
 	int frame_time_idx;          /* next write index */
 	int frame_time_count;        /* number of samples collected */
-	int detected_video_fps;      /* detected video fps (0 = not video) */
+	float detected_video_hz;     /* detected video Hz (0 = not video), exact value */
+	struct wlr_buffer *last_buffer; /* track buffer changes for frame detection */
+	int video_detect_retries;    /* retry counter for video detection (max 3) */
+	int video_detect_phase;      /* 0=scanning, 1=analyzing, 2=done */
 } Client;
 
 typedef struct {
@@ -624,10 +636,21 @@ struct Monitor {
 	/* Video refresh rate matching */
 	struct wlr_output_mode *original_mode; /* saved mode before video switch */
 	int video_mode_active;                 /* 1 if currently in video-optimized mode */
+	int vrr_capable;                       /* 1 if monitor supports VRR/FreeSync/G-Sync */
+	int vrr_active;                        /* 1 if VRR is currently active for video */
+	float vrr_target_hz;                   /* target Hz when using VRR for video */
 	/* Hz OSD for refresh rate changes */
 	struct wlr_scene_tree *hz_osd_tree;
 	struct wlr_scene_tree *hz_osd_bg;
 	int hz_osd_visible;
+	/* Frame timing tracking for optimal frame pacing (inspired by Gamescope) */
+	uint64_t last_frame_ns;           /* timestamp of last frame commit */
+	uint64_t last_commit_duration_ns; /* how long the last commit took */
+	uint64_t rolling_commit_time_ns;  /* rolling average of commit times */
+	int frames_since_content_change;  /* frames since last buffer change */
+	/* Direct scanout tracking */
+	int direct_scanout_active;        /* 1 if direct scanout is currently happening */
+	int direct_scanout_notified;      /* 1 if we already showed the notification */
 };
 
 typedef struct {
@@ -864,14 +887,21 @@ static void set_adaptive_sync(Monitor *m, int enabled);
 static void set_video_refresh_rate(Monitor *m, Client *c);
 static void restore_max_refresh_rate(Monitor *m);
 static int is_video_content(Client *c);
+static int is_game_content(Client *c);
+static int client_wants_tearing(Client *c);
 static void track_client_frame(Client *c);
-static int detect_video_framerate(Client *c);
+static float detect_video_framerate(Client *c);
 static void check_fullscreen_video(void);
 static void schedule_video_check(uint32_t ms);
-static int set_custom_video_mode(Monitor *m, int fps);
+static int enable_vrr_video_mode(Monitor *m, float video_hz);
+static void disable_vrr_video_mode(Monitor *m);
+static int set_custom_video_mode(Monitor *m, float exact_hz);
+static void generate_cvt_mode(drmModeModeInfo *mode, int hdisplay, int vdisplay, float vrefresh);
 static void show_hz_osd(Monitor *m, const char *msg);
 static void hide_hz_osd(Monitor *m);
 static int hz_osd_timeout(void *data);
+static void testhzosd(const Arg *arg);
+static void setcustomhz(const Arg *arg);
 static void setcursor(struct wl_listener *listener, void *data);
 static void setcursorshape(struct wl_listener *listener, void *data);
 static void setfloating(Client *c, int floating);
@@ -1056,6 +1086,7 @@ static struct wlr_idle_inhibit_manager_v1 *idle_inhibit_mgr;
 static struct wlr_layer_shell_v1 *layer_shell;
 static struct wlr_output_manager_v1 *output_mgr;
 static struct wlr_content_type_manager_v1 *content_type_mgr;
+static struct wlr_tearing_control_manager_v1 *tearing_control_mgr;
 static struct wlr_virtual_keyboard_manager_v1 *virtual_keyboard_mgr;
 static struct wlr_virtual_pointer_manager_v1 *virtual_pointer_mgr;
 static struct wlr_cursor_shape_manager_v1 *cursor_shape_mgr;
@@ -5540,6 +5571,14 @@ updatebatteryhover(Monitor *m, double cx, double cy)
 	was_visible = p->visible;
 
 	if (inside) {
+		/* Track when hover started for delay */
+		if (p->hover_start_ms == 0)
+			p->hover_start_ms = now;
+
+		/* Wait 500ms before showing popup */
+		if (!was_visible && (now - p->hover_start_ms) < 500)
+			return;
+
 		if (!was_visible) {
 			/* Short delay to avoid flicker on quick mouse movements */
 			p->suppress_refresh_until_ms = now + 100;
@@ -5566,9 +5605,10 @@ updatebatteryhover(Monitor *m, double cx, double cy)
 			renderbatterypopup(m);
 			p->last_render_ms = now;
 		}
-	} else if (p->visible) {
+	} else if (p->visible || p->hover_start_ms != 0) {
 		p->visible = 0;
 		p->suppress_refresh_until_ms = 0;
+		p->hover_start_ms = 0;
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
 	}
 }
@@ -12927,6 +12967,14 @@ updatecpuhover(Monitor *m, double cx, double cy)
 	was_visible = p->visible;
 
 	if (inside) {
+		/* Track when hover started for delay */
+		if (p->hover_start_ms == 0)
+			p->hover_start_ms = now;
+
+		/* Wait 500ms before showing popup */
+		if (!was_visible && (now - p->hover_start_ms) < 500)
+			return;
+
 		if (!was_visible) {
 			/* Delay heavy popup refresh until pointer lingers for 1s */
 			p->suppress_refresh_until_ms = now + 1000;
@@ -12957,13 +13005,14 @@ updatecpuhover(Monitor *m, double cx, double cy)
 		}
 		if (!was_visible)
 			schedule_cpu_popup_refresh(1000);
-	} else if (p->visible) {
+	} else if (p->visible || p->hover_start_ms != 0) {
 		p->visible = 0;
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
 		p->hover_idx = -1;
 		p->refresh_data = 0;
 		p->last_render_ms = 0;
 		p->suppress_refresh_until_ms = 0;
+		p->hover_start_ms = 0;
 	}
 }
 
@@ -13025,6 +13074,14 @@ updateramhover(Monitor *m, double cx, double cy)
 	was_visible = p->visible;
 
 	if (inside) {
+		/* Track when hover started for delay */
+		if (p->hover_start_ms == 0)
+			p->hover_start_ms = now;
+
+		/* Wait 500ms before showing popup */
+		if (!was_visible && (now - p->hover_start_ms) < 500)
+			return;
+
 		if (!was_visible) {
 			/* Short delay to avoid flicker on quick mouse movements */
 			p->suppress_refresh_until_ms = now + 100;
@@ -13056,13 +13113,14 @@ updateramhover(Monitor *m, double cx, double cy)
 		}
 		if (!was_visible)
 			schedule_ram_popup_refresh(100);
-	} else if (p->visible) {
+	} else if (p->visible || p->hover_start_ms != 0) {
 		p->visible = 0;
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
 		p->hover_idx = -1;
 		p->refresh_data = 0;
 		p->last_render_ms = 0;
 		p->suppress_refresh_until_ms = 0;
+		p->hover_start_ms = 0;
 	}
 }
 
@@ -13122,6 +13180,14 @@ updatenethover(Monitor *m, double cx, double cy)
 	was_visible = p->visible;
 
 	if (inside) {
+		/* Track when hover started for delay */
+		if (p->hover_start_ms == 0)
+			p->hover_start_ms = now;
+
+		/* Wait 500ms before showing popup */
+		if (!was_visible && (now - p->hover_start_ms) < 500)
+			return;
+
 		if (!was_visible) {
 			p->suppress_refresh_until_ms = now + 2000;
 			set_status_task_due(refreshstatusnet, p->suppress_refresh_until_ms);
@@ -13137,10 +13203,11 @@ updatenethover(Monitor *m, double cx, double cy)
 			p->anchor_w = icon_mod->width > 0 ? icon_mod->width : p->anchor_w;
 			rendernetpopup(m);
 		}
-	} else if (p->visible) {
+	} else if (p->visible || p->hover_start_ms != 0) {
 		p->visible = 0;
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
 		p->suppress_refresh_until_ms = 0;
+		p->hover_start_ms = 0;
 		set_status_task_due(refreshstatusnet, now + 60000);
 	}
 }
@@ -13169,8 +13236,41 @@ arrange(Monitor *m)
 		}
 	}
 
-	wlr_scene_node_set_enabled(&m->fullscreen_bg->node,
-			(c = focustop(m)) && c->isfullscreen);
+	/*
+	 * fullscreen_bg is used to hide content behind fullscreen windows that
+	 * don't fill the entire screen. However, for direct scanout to work
+	 * (bypassing composition entirely), the fullscreen window must be the
+	 * ONLY visible element. So we only show fullscreen_bg when the fullscreen
+	 * window doesn't cover the full monitor area.
+	 *
+	 * This allows games and videos to achieve direct scanout for best
+	 * frame pacing and lowest latency when they fill the screen.
+	 */
+	c = focustop(m);
+	if (c && c->isfullscreen) {
+		/* Check if window covers the full monitor */
+		int covers_full_screen =
+			c->geom.x <= m->m.x &&
+			c->geom.y <= m->m.y &&
+			c->geom.x + c->geom.width >= m->m.x + m->m.width &&
+			c->geom.y + c->geom.height >= m->m.y + m->m.height;
+
+		/* Only show bg if fullscreen window doesn't cover everything */
+		wlr_scene_node_set_enabled(&m->fullscreen_bg->node, !covers_full_screen);
+
+		/*
+		 * Hide ALL background elements when fullscreen covers the whole screen.
+		 * This is CRITICAL for direct scanout - wlroots can only do direct
+		 * scanout when there's exactly one visible surface covering the output.
+		 * Any other visible scene nodes (root_bg, swaybg, etc.) prevent this.
+		 */
+		wlr_scene_node_set_enabled(&layers[LyrBg]->node, !covers_full_screen);
+		wlr_scene_node_set_enabled(&root_bg->node, !covers_full_screen);
+	} else {
+		wlr_scene_node_set_enabled(&m->fullscreen_bg->node, 0);
+		wlr_scene_node_set_enabled(&layers[LyrBg]->node, 1);
+		wlr_scene_node_set_enabled(&root_bg->node, 1);
+	}
 
 	strncpy(m->ltsymbol, m->lt[m->sellt]->symbol, LENGTH(m->ltsymbol));
 
@@ -14467,6 +14567,21 @@ createmon(struct wl_listener *listener, void *data)
 	wlr_output_state_set_enabled(&state, 1);
 	wlr_output_commit_state(wlr_output, &state);
 	wlr_output_state_finish(&state);
+
+	/* Check VRR capability - try to enable adaptive sync to test support */
+	m->vrr_capable = 0;
+	m->vrr_active = 0;
+	m->vrr_target_hz = 0.0f;
+	if (wlr_output_is_drm(wlr_output)) {
+		struct wlr_output_state vrr_test;
+		wlr_output_state_init(&vrr_test);
+		wlr_output_state_set_adaptive_sync_enabled(&vrr_test, 1);
+		if (wlr_output_test_state(wlr_output, &vrr_test)) {
+			m->vrr_capable = 1;
+			wlr_log(WLR_INFO, "Monitor %s supports VRR/Adaptive Sync", wlr_output->name);
+		}
+		wlr_output_state_finish(&vrr_test);
+	}
 
 	wl_list_insert(&mons, &m->link);
 	printstatus();
@@ -16150,21 +16265,168 @@ quit(const Arg *arg)
 	wl_display_terminate(dpy);
 }
 
+/*
+ * Get current time in nanoseconds (monotonic clock).
+ * Used for precise frame timing measurements.
+ */
+static uint64_t
+get_time_ns(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/*
+ * Render a monitor frame with optimal frame pacing.
+ *
+ * Frame pacing strategy (inspired by Gamescope):
+ *
+ * For GAMES (content-type=game or tearing hint):
+ *   - Use async page flips (tearing) for minimum input latency
+ *   - Frame is displayed immediately when GPU finishes
+ *   - Best for competitive/fast-paced games
+ *
+ * For VIDEO (content-type=video or detected video framerate):
+ *   - Use VRR if available for judder-free playback
+ *   - Otherwise use vsync with matched refresh rate
+ *   - Critical: consistent frame timing is more important than latency
+ *
+ * For NORMAL content:
+ *   - Standard vsync'd commits
+ *   - Balance between latency and smoothness
+ *
+ * Frame timing tracking:
+ *   - Track commit duration for predicting future commits
+ *   - Use rolling average to handle spikes gracefully
+ *   - Skip unnecessary commits when nothing has changed
+ */
 void
 rendermon(struct wl_listener *listener, void *data)
 {
-	/* This function is called every time an output is ready to display a frame,
-	 * generally at the output's refresh rate (e.g. 60Hz). */
 	Monitor *m = wl_container_of(listener, m, frame);
-	struct wlr_output_state pending = {0};
+	struct wlr_scene_output_state_options opts = {0};
+	struct wlr_output_state state;
 	struct timespec now;
+	uint64_t frame_start_ns, commit_end_ns;
+	int needs_frame = 0;
+	Client *fullscreen_client = NULL;
+	int allow_tearing = 0;
+	int is_video = 0;
+	int is_game = 0;
+	int is_direct_scanout = 0;
 
-	wlr_scene_output_commit(m->scene_output, NULL);
+	frame_start_ns = get_time_ns();
 
-	/* Let clients know a frame has been rendered */
+	/*
+	 * Check for fullscreen client and determine content type for optimal handling.
+	 */
+	fullscreen_client = focustop(m);
+	if (fullscreen_client && fullscreen_client->isfullscreen) {
+		is_game = client_wants_tearing(fullscreen_client) || is_game_content(fullscreen_client);
+		is_video = is_video_content(fullscreen_client) || fullscreen_client->detected_video_hz > 0.0f;
+
+		/* Games get tearing for lowest latency, unless it's video content */
+		if (is_game && !is_video) {
+			allow_tearing = 1;
+		}
+	}
+
+	/*
+	 * Build output state. This determines if we actually need to render.
+	 * wlr_scene handles damage tracking and direct scanout optimization.
+	 *
+	 * When a fullscreen window covers the entire output and its buffer
+	 * is compatible (DMA-BUF, correct size/format), wlroots will
+	 * automatically use direct scanout - bypassing GPU composition entirely.
+	 * This gives optimal frame pacing for games and video.
+	 */
+	wlr_output_state_init(&state);
+	needs_frame = wlr_scene_output_build_state(m->scene_output, &state, &opts);
+
+	/*
+	 * Detect direct scanout: if the output buffer is a client buffer
+	 * (not from the compositor's swapchain), direct scanout is active.
+	 * wlr_client_buffer_get() returns non-NULL only for client buffers.
+	 */
+	if (needs_frame && state.buffer && wlr_client_buffer_get(state.buffer)) {
+		is_direct_scanout = 1;
+	}
+
+	/* Track scanout state transitions and show notification */
+	if (is_direct_scanout && !m->direct_scanout_active) {
+		m->direct_scanout_active = 1;
+		if (!m->direct_scanout_notified) {
+			show_hz_osd(m, "Direct Scanout");
+			m->direct_scanout_notified = 1;
+		}
+	} else if (!is_direct_scanout && m->direct_scanout_active) {
+		m->direct_scanout_active = 0;
+		m->direct_scanout_notified = 0; /* Reset so next scanout shows OSD again */
+	}
+
+	if (needs_frame) {
+		m->frames_since_content_change = 0;
+
+		/*
+		 * Apply tearing for games - async page flips bypass vsync.
+		 * This gives the lowest possible input latency at the cost of
+		 * potential screen tearing (which gamers often prefer).
+		 */
+		if (allow_tearing && wlr_output_is_drm(m->wlr_output)) {
+			state.tearing_page_flip = true;
+		}
+
+		/* Commit the frame */
+		if (!wlr_output_commit_state(m->wlr_output, &state)) {
+			/* Fallback: retry without tearing if it failed */
+			if (allow_tearing) {
+				state.tearing_page_flip = false;
+				wlr_output_commit_state(m->wlr_output, &state);
+			}
+		}
+
+		/* Track commit timing for frame pacing analysis */
+		commit_end_ns = get_time_ns();
+		m->last_commit_duration_ns = commit_end_ns - frame_start_ns;
+
+		/*
+		 * Update rolling average of commit time (Gamescope-style).
+		 * Use 98% decay rate - this means spikes are remembered but
+		 * gradually fade, while sustained high times are tracked accurately.
+		 */
+		if (m->rolling_commit_time_ns == 0) {
+			m->rolling_commit_time_ns = m->last_commit_duration_ns;
+		} else {
+			/* Rolling average: 98% old + 2% new */
+			m->rolling_commit_time_ns =
+				(m->rolling_commit_time_ns * 98 + m->last_commit_duration_ns * 2) / 100;
+
+			/* But always track upward spikes immediately */
+			if (m->last_commit_duration_ns > m->rolling_commit_time_ns) {
+				m->rolling_commit_time_ns = m->last_commit_duration_ns;
+			}
+		}
+	} else {
+		m->frames_since_content_change++;
+	}
+
+	wlr_output_state_finish(&state);
+	m->last_frame_ns = frame_start_ns;
+
+	/*
+	 * Send frame_done to clients.
+	 *
+	 * This is critical for proper frame pacing:
+	 * - Video players use this to time their next frame submission
+	 * - Games use this to know when to start rendering the next frame
+	 * - The timestamp should reflect when the frame opportunity occurred
+	 *
+	 * We always send this, even if we didn't commit, because clients
+	 * need to know a vblank occurred for proper timing.
+	 */
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	wlr_scene_output_send_frame_done(m->scene_output, &now);
-	wlr_output_state_finish(&pending);
 }
 
 void
@@ -16369,7 +16631,63 @@ is_video_content(Client *c)
 		return 0;
 
 	content_type = wlr_surface_get_content_type_v1(content_type_mgr, surface);
+
+	/* Debug: log content type for fullscreen clients */
+	static int last_logged_type = -1;
+	if (c->isfullscreen && (int)content_type != last_logged_type) {
+		const char *type_str = "unknown";
+		switch (content_type) {
+		case WP_CONTENT_TYPE_V1_TYPE_NONE: type_str = "none"; break;
+		case WP_CONTENT_TYPE_V1_TYPE_PHOTO: type_str = "photo"; break;
+		case WP_CONTENT_TYPE_V1_TYPE_VIDEO: type_str = "video"; break;
+		case WP_CONTENT_TYPE_V1_TYPE_GAME: type_str = "game"; break;
+		}
+		wlr_log(WLR_DEBUG, "Fullscreen client content-type: %s", type_str);
+		last_logged_type = (int)content_type;
+	}
+
 	return content_type == WP_CONTENT_TYPE_V1_TYPE_VIDEO;
+}
+
+/* Check if a client's surface has game content type */
+static int
+is_game_content(Client *c)
+{
+	struct wlr_surface *surface;
+	enum wp_content_type_v1_type content_type;
+
+	if (!c || !content_type_mgr)
+		return 0;
+
+	surface = client_surface(c);
+	if (!surface)
+		return 0;
+
+	content_type = wlr_surface_get_content_type_v1(content_type_mgr, surface);
+	return content_type == WP_CONTENT_TYPE_V1_TYPE_GAME;
+}
+
+/*
+ * Check if a client wants tearing (async page flips).
+ * Games may request this for lowest latency.
+ */
+static int
+client_wants_tearing(Client *c)
+{
+	struct wlr_surface *surface;
+	enum wp_tearing_control_v1_presentation_hint hint;
+
+	if (!c || !tearing_control_mgr)
+		return 0;
+
+	surface = client_surface(c);
+	if (!surface)
+		return 0;
+
+	hint = wlr_tearing_control_manager_v1_surface_hint_from_surface(
+			tearing_control_mgr, surface);
+
+	return hint == WP_TEARING_CONTROL_V1_PRESENTATION_HINT_ASYNC;
 }
 
 /*
@@ -16391,10 +16709,10 @@ set_video_refresh_rate(Monitor *m, Client *c)
 	if (!is_video_content(c))
 		return;
 
-	/* Reset frame tracking to detect actual video fps */
+	/* Reset frame tracking to detect actual video Hz */
 	c->frame_time_idx = 0;
 	c->frame_time_count = 0;
-	c->detected_video_fps = 0;
+	c->detected_video_hz = 0.0f;
 
 	wlr_log(WLR_INFO, "Video content detected on %s, starting frame rate detection",
 			m->wlr_output->name);
@@ -16403,7 +16721,7 @@ set_video_refresh_rate(Monitor *m, Client *c)
 	schedule_video_check(500);
 }
 
-/* Restore output to maximum refresh rate */
+/* Restore output to maximum refresh rate and disable VRR */
 static void
 restore_max_refresh_rate(Monitor *m)
 {
@@ -16415,7 +16733,11 @@ restore_max_refresh_rate(Monitor *m)
 	if (!m || !m->wlr_output || !m->wlr_output->enabled)
 		return;
 
-	/* Only restore if we're in video mode */
+	/* Disable VRR if active */
+	if (m->vrr_active)
+		disable_vrr_video_mode(m);
+
+	/* Only restore mode if we're in video mode */
 	if (!m->video_mode_active)
 		return;
 
@@ -16452,16 +16774,47 @@ restore_max_refresh_rate(Monitor *m)
 	wlr_output_state_finish(&state);
 }
 
-/* Track frame commit timestamp for a client */
+/* Track frame commit timestamp for a client (only when buffer changes) */
 static void
 track_client_frame(Client *c)
 {
+	struct wlr_surface *surface;
+	struct wlr_buffer *current_buffer;
 	uint64_t now;
+	static int log_count = 0;
 
 	if (!c)
 		return;
 
+	surface = client_surface(c);
+	if (!surface)
+		return;
+
+	/*
+	 * Only track when the buffer actually changes. On high refresh rate
+	 * monitors, compositors may re-commit the same buffer multiple times
+	 * per video frame. By tracking buffer changes, we measure actual
+	 * content updates rather than compositor refresh rate.
+	 *
+	 * We use the wlr_client_buffer pointer as an opaque identifier - when
+	 * a new buffer is attached, the pointer changes.
+	 */
+	current_buffer = (struct wlr_buffer *)surface->buffer;
+	if (current_buffer == c->last_buffer)
+		return;
+
+	c->last_buffer = current_buffer;
 	now = monotonic_msec();
+
+	/* Log interval for debugging */
+	if (c->frame_time_count > 0 && log_count < 20) {
+		int prev_idx = (c->frame_time_idx - 1 + 32) % 32;
+		uint64_t interval = now - c->frame_times[prev_idx];
+		wlr_log(WLR_INFO, "Frame buffer change: interval=%lums (%.1f fps)",
+				(unsigned long)interval, 1000.0 / interval);
+		log_count++;
+	}
+
 	c->frame_times[c->frame_time_idx] = now;
 	c->frame_time_idx = (c->frame_time_idx + 1) % 32;
 	if (c->frame_time_count < 32)
@@ -16469,22 +16822,23 @@ track_client_frame(Client *c)
 }
 
 /*
- * Analyze frame times to detect video framerate.
- * Returns detected FPS (24, 25, 30, 50, 60) or 0 if not video.
+ * Analyze frame times to detect exact video framerate.
+ * Returns exact Hz value (e.g., 23.976, 29.97, 59.94) or 0.0 if not video.
+ * Inspired by Gamescope's approach of calculating precise frame timing.
  */
-static int
+static float
 detect_video_framerate(Client *c)
 {
 	int i, count, valid_intervals;
 	uint64_t intervals[31];
-	uint64_t avg_interval;
+	double avg_interval;
 	uint64_t sum = 0;
 	uint64_t variance_sum = 0;
 	double variance, stddev;
-	int fps;
+	double exact_hz;
 
-	if (!c || c->frame_time_count < 16)
-		return 0;
+	if (!c || c->frame_time_count < 12)
+		return 0.0f;
 
 	count = c->frame_time_count;
 	valid_intervals = 0;
@@ -16502,62 +16856,616 @@ detect_video_framerate(Client *c)
 		}
 	}
 
-	if (valid_intervals < 10)
-		return 0;
+	if (valid_intervals < 8)
+		return 0.0f;
 
-	avg_interval = sum / valid_intervals;
+	avg_interval = (double)sum / valid_intervals;
 
 	/* Calculate variance to check for stable frame rate */
 	for (i = 0; i < valid_intervals; i++) {
-		int64_t diff = (int64_t)intervals[i] - (int64_t)avg_interval;
+		int64_t diff = (int64_t)intervals[i] - (int64_t)(avg_interval + 0.5);
 		variance_sum += (uint64_t)(diff * diff);
 	}
 	variance = (double)variance_sum / valid_intervals;
 	stddev = sqrt(variance);
 
-	/* If standard deviation is more than 20% of mean, not stable enough */
-	if (stddev > avg_interval * 0.20)
-		return 0;
+	/* If standard deviation is more than 30% of mean, not stable enough */
+	if (stddev > avg_interval * 0.30) {
+		wlr_log(WLR_DEBUG, "Frame rate detection: stddev=%.2f (%.1f%%) too high for avg_interval=%.2fms",
+				stddev, (stddev / avg_interval) * 100.0, avg_interval);
+		return 0.0f;
+	}
 
-	/* Convert average interval (ms) to FPS and match to common rates */
-	fps = (int)(1000.0 / avg_interval + 0.5);
+	/* Calculate exact Hz from average interval */
+	exact_hz = 1000.0 / avg_interval;
 
-	/* Match to common video framerates with some tolerance */
-	if (fps >= 22 && fps <= 26)
-		return 24;  /* Film (23.976, 24) */
-	if (fps >= 27 && fps <= 32)
-		return 30;  /* NTSC (29.97, 30) */
-	if (fps >= 48 && fps <= 52)
-		return 50;  /* PAL high frame rate */
-	if (fps >= 58 && fps <= 62)
-		return 60;  /* High frame rate */
-	if (fps >= 118 && fps <= 122)
-		return 120; /* Very high frame rate */
+	wlr_log(WLR_DEBUG, "Frame rate detection: avg_interval=%.3fms -> %.3f Hz (stddev=%.2f)",
+			avg_interval, exact_hz, stddev);
 
-	return 0;
+	/*
+	 * Map to exact standard framerates if within tolerance.
+	 * This accounts for the 1000/1001 pulldown used in NTSC standards.
+	 */
+	/* 23.976 Hz (24000/1001) - Film NTSC pulldown */
+	if (exact_hz >= 23.5 && exact_hz <= 24.5) {
+		if (exact_hz < 24.0)
+			return 23.976f;
+		return 24.0f;
+	}
+	/* 25 Hz - PAL */
+	if (exact_hz >= 24.5 && exact_hz <= 25.5)
+		return 25.0f;
+	/* 29.97 Hz (30000/1001) - NTSC */
+	if (exact_hz >= 29.5 && exact_hz <= 30.5) {
+		if (exact_hz < 30.0)
+			return 29.97f;
+		return 30.0f;
+	}
+	/* 47.952 Hz (48000/1001) - 2x Film NTSC */
+	if (exact_hz >= 47.5 && exact_hz <= 48.5) {
+		if (exact_hz < 48.0)
+			return 47.952f;
+		return 48.0f;
+	}
+	/* 50 Hz - PAL high frame rate */
+	if (exact_hz >= 49.5 && exact_hz <= 50.5)
+		return 50.0f;
+	/* 59.94 Hz (60000/1001) - NTSC high frame rate */
+	if (exact_hz >= 59.0 && exact_hz <= 60.5) {
+		if (exact_hz < 60.0)
+			return 59.94f;
+		return 60.0f;
+	}
+	/* 119.88 Hz (120000/1001) */
+	if (exact_hz >= 119.0 && exact_hz <= 120.5) {
+		if (exact_hz < 120.0)
+			return 119.88f;
+		return 120.0f;
+	}
+
+	/* If not a standard rate but stable, return the exact measured value */
+	if (exact_hz >= 10.0 && exact_hz <= 240.0) {
+		wlr_log(WLR_INFO, "Non-standard framerate detected: %.3f Hz", exact_hz);
+		return (float)exact_hz;
+	}
+
+	return 0.0f;
 }
 
 /*
- * Set a custom refresh rate that exactly matches the video FPS.
- * Uses wlr_output_state_set_custom_mode to create an exact match.
+ * Video playback quality scoring system.
+ * Higher score = better quality (smoother playback, less judder).
+ *
+ * Score components:
+ * - Perfect sync (integer multiple): 100 points base
+ * - VRR: 150 points (best possible - true frame-by-frame sync)
+ * - Lower multiplier: bonus (2x > 3x > 4x)
+ * - Precision penalty: deduct for non-exact matches
+ */
+typedef struct {
+	int method;              /* 0=none, 1=existing_mode, 2=custom_cvt, 3=vrr */
+	struct wlr_output_mode *mode;
+	int multiplier;
+	float target_hz;
+	float actual_hz;
+	float score;
+	float judder_ms;         /* estimated judder per frame in ms */
+} VideoModeCandidate;
+
+/*
+ * Calculate judder (frame timing error) for a given mode/video Hz combination.
+ * Returns estimated judder in milliseconds per frame.
+ * 0 = perfect sync (integer multiple or VRR)
+ */
+static float
+calculate_judder_ms(float video_hz, float display_hz)
+{
+	if (video_hz <= 0.0f || display_hz <= 0.0f)
+		return 999.0f;
+
+	float ratio = display_hz / video_hz;
+	int nearest_multiple = (int)(ratio + 0.5f);
+
+	if (nearest_multiple < 1)
+		nearest_multiple = 1;
+
+	float perfect_hz = video_hz * nearest_multiple;
+	float hz_error = fabsf(display_hz - perfect_hz);
+
+	/* Convert Hz error to timing error per frame */
+	float frame_period_ms = 1000.0f / video_hz;
+	float timing_error_ratio = hz_error / display_hz;
+
+	return frame_period_ms * timing_error_ratio;
+}
+
+/*
+ * Score a video mode candidate. Higher score = better.
+ */
+static float
+score_video_mode(int method, float video_hz, float display_hz, int multiplier)
+{
+	float score = 0.0f;
+	float judder = calculate_judder_ms(video_hz, display_hz);
+
+	switch (method) {
+	case 3: /* VRR - best possible */
+		score = 150.0f;
+		break;
+	case 1: /* Existing mode - good if it's a perfect multiple */
+	case 2: /* Custom CVT mode */
+		if (judder < 0.1f) {
+			/* Near-perfect sync */
+			score = 100.0f;
+			/* Bonus for lower multiplier (less frame repeats) */
+			score += (10 - multiplier) * 2.0f;
+		} else {
+			/* Imperfect sync - penalize heavily */
+			score = 50.0f - judder * 10.0f;
+		}
+		break;
+	default:
+		score = 0.0f;
+	}
+
+	return score;
+}
+
+/*
+ * Find the absolute best video mode for the given framerate.
+ * Evaluates ALL options and returns the one with highest quality score.
+ *
+ * Priority (by quality):
+ * 1. VRR if available - true judder-free
+ * 2. Exact integer multiple mode (120Hz for 24fps, etc)
+ * 3. Custom CVT mode at exact multiple
+ * 4. Closest available mode
+ */
+static VideoModeCandidate
+find_best_video_mode(Monitor *m, float video_hz)
+{
+	VideoModeCandidate best = {0};
+	VideoModeCandidate candidate;
+	struct wlr_output_mode *mode;
+	int width, height;
+
+	best.score = -1.0f;
+	best.judder_ms = 999.0f;
+	best.target_hz = video_hz;
+
+	if (!m || !m->wlr_output || !m->wlr_output->current_mode || video_hz <= 0.0f)
+		return best;
+
+	width = m->wlr_output->current_mode->width;
+	height = m->wlr_output->current_mode->height;
+
+	wlr_log(WLR_INFO, "Evaluating video modes for %.3f Hz on %s:", video_hz, m->wlr_output->name);
+
+	/* Option 1: VRR (best quality if available) */
+	if (m->vrr_capable && fullscreen_adaptive_sync_enabled) {
+		candidate.method = 3;
+		candidate.mode = NULL;
+		candidate.multiplier = 1;
+		candidate.target_hz = video_hz;
+		candidate.actual_hz = video_hz;
+		candidate.judder_ms = 0.0f;
+		candidate.score = score_video_mode(3, video_hz, video_hz, 1);
+
+		wlr_log(WLR_INFO, "  VRR: score=%.1f (judder=0ms)", candidate.score);
+
+		if (candidate.score > best.score) {
+			best = candidate;
+		}
+	}
+
+	/* Option 2: Scan existing modes for integer multiples */
+	wl_list_for_each(mode, &m->wlr_output->modes, link) {
+		if (mode->width != width || mode->height != height)
+			continue;
+
+		float mode_hz = mode->refresh / 1000.0f;
+		float ratio = mode_hz / video_hz;
+		int multiple = (int)(ratio + 0.5f);
+
+		if (multiple < 1 || multiple > 8)
+			continue;
+
+		float expected_hz = video_hz * multiple;
+		float diff = fabsf(mode_hz - expected_hz);
+
+		/* Only consider if within 0.5% tolerance */
+		if (diff > expected_hz * 0.005f)
+			continue;
+
+		candidate.method = 1;
+		candidate.mode = mode;
+		candidate.multiplier = multiple;
+		candidate.target_hz = video_hz;
+		candidate.actual_hz = mode_hz;
+		candidate.judder_ms = calculate_judder_ms(video_hz, mode_hz);
+		candidate.score = score_video_mode(1, video_hz, mode_hz, multiple);
+
+		wlr_log(WLR_INFO, "  Mode %d.%03dHz: %dx mult, score=%.1f, judder=%.2fms",
+				mode->refresh / 1000, mode->refresh % 1000,
+				multiple, candidate.score, candidate.judder_ms);
+
+		if (candidate.score > best.score) {
+			best = candidate;
+		}
+	}
+
+	/* Option 3: Check if CVT custom modes could work (score them theoretically) */
+	for (int mult = 1; mult <= 5; mult++) {
+		float target_display_hz = video_hz * mult;
+
+		/* Skip if below typical panel minimum or above maximum */
+		if (target_display_hz < 48.0f || target_display_hz > 240.0f)
+			continue;
+
+		/* Check if we already found this rate in existing modes */
+		int found = 0;
+		wl_list_for_each(mode, &m->wlr_output->modes, link) {
+			if (mode->width != width || mode->height != height)
+				continue;
+			float mode_hz = mode->refresh / 1000.0f;
+			if (fabsf(mode_hz - target_display_hz) < 0.5f) {
+				found = 1;
+				break;
+			}
+		}
+
+		if (!found && wlr_output_is_drm(m->wlr_output)) {
+			candidate.method = 2;
+			candidate.mode = NULL;
+			candidate.multiplier = mult;
+			candidate.target_hz = video_hz;
+			candidate.actual_hz = target_display_hz;
+			candidate.judder_ms = 0.0f; /* Custom CVT will be exact */
+			candidate.score = score_video_mode(2, video_hz, target_display_hz, mult);
+
+			/* Slightly penalize CVT modes as they're less reliable */
+			candidate.score -= 5.0f;
+
+			wlr_log(WLR_INFO, "  CVT %.3fHz: %dx mult, score=%.1f (theoretical)",
+					target_display_hz, mult, candidate.score);
+
+			if (candidate.score > best.score) {
+				best = candidate;
+			}
+		}
+	}
+
+	if (best.score > 0) {
+		const char *method_str = "none";
+		switch (best.method) {
+		case 1: method_str = "existing mode"; break;
+		case 2: method_str = "custom CVT"; break;
+		case 3: method_str = "VRR"; break;
+		}
+		wlr_log(WLR_INFO, "Best option: %s at %.3f Hz (%dx), score=%.1f, judder=%.2fms",
+				method_str, best.actual_hz, best.multiplier, best.score, best.judder_ms);
+	}
+
+	return best;
+}
+
+/*
+ * Find a mode that is an integer multiple of the target Hz.
+ * For example, 23.976 Hz video looks smooth at 47.952 Hz, 71.928 Hz, 119.88 Hz, etc.
+ * Returns NULL if no suitable mode found.
+ */
+static struct wlr_output_mode *
+find_video_friendly_mode(Monitor *m, float target_hz)
+{
+	struct wlr_output_mode *mode, *best = NULL;
+	int width, height;
+	float best_diff = 999.0f;
+
+	if (!m || !m->wlr_output || !m->wlr_output->current_mode || target_hz <= 0.0f)
+		return NULL;
+
+	width = m->wlr_output->current_mode->width;
+	height = m->wlr_output->current_mode->height;
+
+	wl_list_for_each(mode, &m->wlr_output->modes, link) {
+		/* Must match current resolution */
+		if (mode->width != width || mode->height != height)
+			continue;
+
+		float mode_hz = mode->refresh / 1000.0f;
+
+		/* Check if this refresh rate is an integer multiple of target Hz */
+		float ratio = mode_hz / target_hz;
+		int multiple = (int)(ratio + 0.5f);
+
+		if (multiple >= 1 && multiple <= 8) {
+			float expected_hz = target_hz * multiple;
+			float diff = fabsf(mode_hz - expected_hz);
+
+			/* Allow 0.5% tolerance for fractional rates */
+			if (diff < expected_hz * 0.005f && diff < best_diff) {
+				best = mode;
+				best_diff = diff;
+			}
+		}
+	}
+
+	return best;
+}
+
+/*
+ * Enable VRR mode for judder-free video playback.
+ * With VRR, frames are displayed exactly when ready - no need to match refresh rate.
  * Returns 1 on success, 0 on failure.
  */
 static int
-set_custom_video_mode(Monitor *m, int fps)
+enable_vrr_video_mode(Monitor *m, float video_hz)
 {
 	struct wlr_output_state state;
 	struct wlr_output_configuration_v1 *config;
 	struct wlr_output_configuration_head_v1 *config_head;
-	int width, height;
-	int32_t refresh_mhz;
+	char osd_msg[64];
+
+	if (!m || !m->wlr_output || !m->wlr_output->enabled)
+		return 0;
+
+	if (!m->vrr_capable) {
+		wlr_log(WLR_DEBUG, "Monitor %s does not support VRR", m->wlr_output->name);
+		return 0;
+	}
+
+	if (!fullscreen_adaptive_sync_enabled) {
+		wlr_log(WLR_DEBUG, "Adaptive sync disabled by user");
+		return 0;
+	}
+
+	/* Save original mode before first switch */
+	if (!m->video_mode_active && !m->vrr_active)
+		m->original_mode = m->wlr_output->current_mode;
+
+	wlr_log(WLR_INFO, "Enabling VRR for %.3f Hz video on %s",
+			video_hz, m->wlr_output->name);
+
+	/* Enable adaptive sync */
+	wlr_output_state_init(&state);
+	wlr_output_state_set_adaptive_sync_enabled(&state, 1);
+
+	if (wlr_output_test_state(m->wlr_output, &state)) {
+		if (wlr_output_commit_state(m->wlr_output, &state)) {
+			m->vrr_active = 1;
+			m->vrr_target_hz = video_hz;
+
+			/* Broadcast state change */
+			config = wlr_output_configuration_v1_create();
+			config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+			config_head->state.adaptive_sync_enabled = 1;
+			wlr_output_manager_v1_set_configuration(output_mgr, config);
+
+			wlr_log(WLR_INFO, "VRR enabled for %.3f Hz video - judder-free playback",
+					video_hz);
+
+			/* Show OSD */
+			snprintf(osd_msg, sizeof(osd_msg), "VRR %.3f Hz", video_hz);
+			show_hz_osd(m, osd_msg);
+
+			wlr_output_state_finish(&state);
+			return 1;
+		}
+	}
+
+	wlr_output_state_finish(&state);
+	wlr_log(WLR_DEBUG, "Failed to enable VRR on %s", m->wlr_output->name);
+	return 0;
+}
+
+/*
+ * Disable VRR mode and restore normal operation.
+ */
+static void
+disable_vrr_video_mode(Monitor *m)
+{
+	struct wlr_output_state state;
+	struct wlr_output_configuration_v1 *config;
+	struct wlr_output_configuration_head_v1 *config_head;
+
+	if (!m || !m->wlr_output || !m->wlr_output->enabled || !m->vrr_active)
+		return;
+
+	wlr_log(WLR_INFO, "Disabling VRR on %s", m->wlr_output->name);
+
+	wlr_output_state_init(&state);
+	wlr_output_state_set_adaptive_sync_enabled(&state, 0);
+
+	if (wlr_output_commit_state(m->wlr_output, &state)) {
+		m->vrr_active = 0;
+		m->vrr_target_hz = 0.0f;
+
+		config = wlr_output_configuration_v1_create();
+		config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+		config_head->state.adaptive_sync_enabled = 0;
+		wlr_output_manager_v1_set_configuration(output_mgr, config);
+	}
+
+	wlr_output_state_finish(&state);
+}
+
+/*
+ * Apply the best video mode based on scoring evaluation.
+ * This is the main entry point for automatic video mode selection.
+ * Returns 1 on success, 0 on failure.
+ */
+static int
+apply_best_video_mode(Monitor *m, float video_hz)
+{
+	VideoModeCandidate best;
+	struct wlr_output_state state;
+	struct wlr_output_configuration_v1 *config;
+	struct wlr_output_configuration_head_v1 *config_head;
+	drmModeModeInfo drm_mode;
+	struct wlr_output_mode *new_mode;
+	char osd_msg[64];
 	int success = 0;
+
+	if (!m || !m->wlr_output || !m->wlr_output->enabled || video_hz <= 0.0f)
+		return 0;
+
+	/* Find the best option using scoring system */
+	best = find_best_video_mode(m, video_hz);
+
+	if (best.score <= 0) {
+		wlr_log(WLR_ERROR, "No suitable video mode found for %.3f Hz", video_hz);
+		show_hz_osd(m, "No compatible mode");
+		return 0;
+	}
+
+	/* Save original mode before first switch */
+	if (!m->video_mode_active && !m->vrr_active)
+		m->original_mode = m->wlr_output->current_mode;
+
+	switch (best.method) {
+	case 3: /* VRR - best option */
+		success = enable_vrr_video_mode(m, video_hz);
+		break;
+
+	case 1: /* Existing mode */
+		if (!best.mode) {
+			wlr_log(WLR_ERROR, "Best method is existing mode but no mode set");
+			break;
+		}
+
+		wlr_output_state_init(&state);
+		wlr_output_state_set_mode(&state, best.mode);
+
+		if (wlr_output_test_state(m->wlr_output, &state) &&
+		    wlr_output_commit_state(m->wlr_output, &state)) {
+			m->video_mode_active = 1;
+			success = 1;
+
+			config = wlr_output_configuration_v1_create();
+			config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+			config_head->state.mode = best.mode;
+			wlr_output_manager_v1_set_configuration(output_mgr, config);
+
+			/* Show OSD */
+			if (best.multiplier > 1) {
+				snprintf(osd_msg, sizeof(osd_msg), "%d.%03d Hz (%dx%.0f)",
+						best.mode->refresh / 1000, best.mode->refresh % 1000,
+						best.multiplier, video_hz);
+			} else {
+				snprintf(osd_msg, sizeof(osd_msg), "%d.%03d Hz",
+						best.mode->refresh / 1000, best.mode->refresh % 1000);
+			}
+			show_hz_osd(m, osd_msg);
+
+			wlr_log(WLR_INFO, "Applied existing mode %d.%03d Hz for %.3f Hz video",
+					best.mode->refresh / 1000, best.mode->refresh % 1000, video_hz);
+		}
+		wlr_output_state_finish(&state);
+		break;
+
+	case 2: /* Custom CVT mode */
+		if (!wlr_output_is_drm(m->wlr_output)) {
+			wlr_log(WLR_ERROR, "CVT mode requires DRM output");
+			break;
+		}
+
+		/* Generate CVT mode */
+		generate_cvt_mode(&drm_mode,
+				m->wlr_output->current_mode->width,
+				m->wlr_output->current_mode->height,
+				best.actual_hz);
+
+		new_mode = wlr_drm_connector_add_mode(m->wlr_output, &drm_mode);
+		if (!new_mode) {
+			wlr_log(WLR_ERROR, "Failed to add CVT mode for %.3f Hz", best.actual_hz);
+			break;
+		}
+
+		wlr_output_state_init(&state);
+		wlr_output_state_set_mode(&state, new_mode);
+
+		if (wlr_output_test_state(m->wlr_output, &state) &&
+		    wlr_output_commit_state(m->wlr_output, &state)) {
+			m->video_mode_active = 1;
+			success = 1;
+
+			config = wlr_output_configuration_v1_create();
+			config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+			config_head->state.mode = new_mode;
+			wlr_output_manager_v1_set_configuration(output_mgr, config);
+
+			/* Show OSD */
+			int actual_mhz = (int)(best.actual_hz * 1000.0f + 0.5f);
+			int source_mhz = (int)(video_hz * 1000.0f + 0.5f);
+			if (best.multiplier > 1) {
+				snprintf(osd_msg, sizeof(osd_msg), "%d.%03d Hz (%dx %d.%03d)",
+						actual_mhz / 1000, actual_mhz % 1000,
+						best.multiplier,
+						source_mhz / 1000, source_mhz % 1000);
+			} else {
+				snprintf(osd_msg, sizeof(osd_msg), "%d.%03d Hz",
+						actual_mhz / 1000, actual_mhz % 1000);
+			}
+			show_hz_osd(m, osd_msg);
+
+			wlr_log(WLR_INFO, "Applied CVT mode %.3f Hz for %.3f Hz video",
+					best.actual_hz, video_hz);
+		}
+		wlr_output_state_finish(&state);
+		break;
+	}
+
+	if (!success) {
+		wlr_log(WLR_ERROR, "Failed to apply best video mode (method=%d, hz=%.3f)",
+				best.method, best.actual_hz);
+	}
+
+	return success;
+}
+
+/*
+ * Set optimal video mode using intelligent prioritization:
+ * 1. VRR (Variable Refresh Rate) - best option, true judder-free
+ * 2. Exact mode match (integer multiple of video Hz)
+ * 3. Custom CVT mode generation
+ *
+ * Returns 1 on success, 0 on failure.
+ */
+static int
+set_custom_video_mode(Monitor *m, float exact_hz)
+{
+	struct wlr_output_state state;
+	struct wlr_output_configuration_v1 *config;
+	struct wlr_output_configuration_head_v1 *config_head;
+	struct wlr_output_mode *new_mode, *friendly_mode;
+	drmModeModeInfo drm_mode;
+	int width, height;
+	float actual_hz;
+	int multiplier;
+	int success = 0;
+	char osd_msg[64];
 
 	if (!m || !m->wlr_output || !m->wlr_output->enabled || !m->wlr_output->current_mode)
 		return 0;
 
-	/* Don't switch if already at this fps */
-	if (m->video_mode_active && m->wlr_output->refresh == fps * 1000)
+	if (exact_hz <= 0.0f)
+		return 0;
+
+	/*
+	 * PRIORITY 1: Try VRR first - the best solution for judder-free video.
+	 * With VRR, the display adapts to each frame, so we don't need to match
+	 * refresh rates at all. This is how high-end displays handle video.
+	 */
+	if (m->vrr_capable && enable_vrr_video_mode(m, exact_hz)) {
+		wlr_log(WLR_INFO, "Using VRR for %.3f Hz video - optimal solution", exact_hz);
 		return 1;
+	}
+
+	/* Check if this is a DRM output - needed for mode switching */
+	if (!wlr_output_is_drm(m->wlr_output)) {
+		wlr_log(WLR_INFO, "Output is not DRM, cannot change mode");
+		return 0;
+	}
 
 	/* Save original mode before first switch */
 	if (!m->video_mode_active)
@@ -16566,68 +17474,123 @@ set_custom_video_mode(Monitor *m, int fps)
 	width = m->wlr_output->current_mode->width;
 	height = m->wlr_output->current_mode->height;
 
-	/* Calculate exact refresh rate in mHz */
-	switch (fps) {
-	case 24:
-		refresh_mhz = 23976; /* 23.976 Hz for film */
-		break;
-	case 25:
-		refresh_mhz = 25000; /* 25 Hz PAL */
-		break;
-	case 30:
-		refresh_mhz = 29970; /* 29.97 Hz NTSC */
-		break;
-	case 50:
-		refresh_mhz = 50000; /* 50 Hz */
-		break;
-	case 60:
-		refresh_mhz = 59940; /* 59.94 Hz */
-		break;
-	case 120:
-		refresh_mhz = 119880; /* 119.88 Hz */
-		break;
-	default:
-		refresh_mhz = fps * 1000;
-		break;
+	/*
+	 * PRIORITY 2: Check if there's an existing mode that's a multiple of video Hz.
+	 * Many displays have modes like 120Hz which work perfectly for 24Hz content.
+	 */
+	friendly_mode = find_video_friendly_mode(m, exact_hz);
+	if (friendly_mode) {
+		wlr_output_state_init(&state);
+		wlr_output_state_set_mode(&state, friendly_mode);
+
+		if (wlr_output_test_state(m->wlr_output, &state)) {
+			if (wlr_output_commit_state(m->wlr_output, &state)) {
+				success = 1;
+				m->video_mode_active = 1;
+				actual_hz = friendly_mode->refresh / 1000.0f;
+				multiplier = (int)(actual_hz / exact_hz + 0.5f);
+
+				config = wlr_output_configuration_v1_create();
+				config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+				config_head->state.mode = friendly_mode;
+				wlr_output_manager_v1_set_configuration(output_mgr, config);
+
+				wlr_log(WLR_INFO, "Using existing mode %d.%03d Hz for %.3f Hz video (%dx)",
+						friendly_mode->refresh / 1000, friendly_mode->refresh % 1000,
+						exact_hz, multiplier);
+
+				/* Show OSD */
+				snprintf(osd_msg, sizeof(osd_msg), "%d.%03d Hz (%dx%.0f)",
+						friendly_mode->refresh / 1000, friendly_mode->refresh % 1000,
+						multiplier, exact_hz);
+				show_hz_osd(m, osd_msg);
+
+				wlr_output_state_finish(&state);
+				return 1;
+			}
+		}
+		wlr_output_state_finish(&state);
 	}
 
-	wlr_log(WLR_INFO, "Setting custom video mode: %dx%d@%d.%03dHz for %dfps video",
-			width, height, refresh_mhz / 1000, refresh_mhz % 1000, fps);
+	/*
+	 * PRIORITY 3: Generate custom CVT mode.
+	 * Multiply Hz to stay above panel minimum (typically 48 Hz).
+	 */
+	multiplier = 1;
+	if (exact_hz < 48.0f) {
+		multiplier = (int)ceilf(48.0f / exact_hz);
+	}
 
-	wlr_output_state_init(&state);
-	wlr_output_state_set_custom_mode(&state, width, height, refresh_mhz);
+	wlr_log(WLR_INFO, "Video mode: no VRR, no friendly mode, trying CVT at %dx multiplier",
+			multiplier);
 
-	if (wlr_output_test_state(m->wlr_output, &state)) {
-		if (wlr_output_commit_state(m->wlr_output, &state)) {
-			m->video_mode_active = 1;
-			success = 1;
+	for (; multiplier <= 8 && !success; multiplier++) {
+		actual_hz = exact_hz * multiplier;
 
-			/* Broadcast change to output manager */
-			config = wlr_output_configuration_v1_create();
-			config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
-			config_head->state.custom_mode.width = width;
-			config_head->state.custom_mode.height = height;
-			config_head->state.custom_mode.refresh = refresh_mhz;
-			wlr_output_manager_v1_set_configuration(output_mgr, config);
+		/* Skip if above typical maximum */
+		if (actual_hz > 300.0f)
+			break;
 
-			wlr_log(WLR_INFO, "Custom video mode applied successfully");
+		wlr_log(WLR_INFO, "Video mode: trying %.3f Hz -> %.3f Hz (%dx multiplier)",
+				exact_hz, actual_hz, multiplier);
 
-			/* Show OSD notification */
-			{
-				char osd_msg[64];
-				snprintf(osd_msg, sizeof(osd_msg), "%d.%03d Hz (video %d fps)",
-						refresh_mhz / 1000, refresh_mhz % 1000, fps);
-				show_hz_osd(m, osd_msg);
+		/* Generate CVT mode with exact timing parameters */
+		generate_cvt_mode(&drm_mode, width, height, actual_hz);
+
+		/* Add custom mode to DRM connector */
+		new_mode = wlr_drm_connector_add_mode(m->wlr_output, &drm_mode);
+		if (!new_mode) {
+			wlr_log(WLR_DEBUG, "wlr_drm_connector_add_mode failed for %.3f Hz", actual_hz);
+			continue;
+		}
+
+		wlr_log(WLR_INFO, "Added custom mode: %dx%d@%d mHz",
+				new_mode->width, new_mode->height, new_mode->refresh);
+
+		/* Try to apply the new mode */
+		wlr_output_state_init(&state);
+		wlr_output_state_set_mode(&state, new_mode);
+
+		if (wlr_output_test_state(m->wlr_output, &state)) {
+			if (wlr_output_commit_state(m->wlr_output, &state)) {
+				success = 1;
+				m->video_mode_active = 1;
+
+				config = wlr_output_configuration_v1_create();
+				config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+				config_head->state.mode = new_mode;
+				wlr_output_manager_v1_set_configuration(output_mgr, config);
+
+				wlr_log(WLR_INFO, "Custom mode %.3f Hz applied for %.3f Hz video (%dx)",
+						actual_hz, exact_hz, multiplier);
+			} else {
+				wlr_log(WLR_DEBUG, "wlr_output_commit_state failed for %.3f Hz", actual_hz);
 			}
 		} else {
-			wlr_log(WLR_ERROR, "Failed to commit custom video mode");
+			wlr_log(WLR_DEBUG, "wlr_output_test_state failed for %.3f Hz", actual_hz);
 		}
-	} else {
-		wlr_log(WLR_INFO, "Custom mode %dx%d@%dmHz not supported, trying standard modes",
-				width, height, refresh_mhz);
+		wlr_output_state_finish(&state);
 	}
 
-	wlr_output_state_finish(&state);
+	/* Show OSD notification */
+	if (success) {
+		int actual_mhz = (int)(actual_hz * 1000.0f + 0.5f);
+		int source_mhz = (int)(exact_hz * 1000.0f + 0.5f);
+		if (multiplier > 1) {
+			snprintf(osd_msg, sizeof(osd_msg), "%d.%03d Hz (%dx %d.%03d)",
+					actual_mhz / 1000, actual_mhz % 1000,
+					multiplier,
+					source_mhz / 1000, source_mhz % 1000);
+		} else {
+			snprintf(osd_msg, sizeof(osd_msg), "%d.%03d Hz",
+					actual_mhz / 1000, actual_mhz % 1000);
+		}
+		show_hz_osd(m, osd_msg);
+	} else {
+		wlr_log(WLR_ERROR, "Failed to set video mode for %.3f Hz (VRR: %s, no friendly modes)",
+				exact_hz, m->vrr_capable ? "unavailable" : "not supported");
+	}
+
 	return success;
 }
 
@@ -16787,51 +17750,547 @@ show_hz_osd(Monitor *m, const char *msg)
 		wl_event_source_timer_update(hz_osd_timer, 3000);
 }
 
-/* Check if any fullscreen client is playing video and adjust refresh rate */
+/* Test Hz OSD - show current monitor refresh rate */
+static void
+testhzosd(const Arg *arg)
+{
+	Monitor *m = selmon;
+	char osd_msg[64];
+	int refresh_mhz;
+
+	if (!m || !m->wlr_output)
+		return;
+
+	/* Use current_mode->refresh for accurate active refresh rate */
+	if (m->wlr_output->current_mode)
+		refresh_mhz = m->wlr_output->current_mode->refresh;
+	else
+		refresh_mhz = m->wlr_output->refresh;
+
+	snprintf(osd_msg, sizeof(osd_msg), "%d.%03d Hz",
+			refresh_mhz / 1000, refresh_mhz % 1000);
+	show_hz_osd(m, osd_msg);
+}
+
+/*
+ * Generate CVT (Coordinated Video Timings) modeline for a given resolution and refresh rate.
+ * This creates a full drmModeModeInfo structure with proper timing parameters.
+ * Based on VESA CVT 1.2 standard formula (reduced blanking variant).
+ */
+static void
+generate_cvt_mode(drmModeModeInfo *mode, int hdisplay, int vdisplay, float vrefresh)
+{
+	/* CVT-RB (Reduced Blanking) constants - better for modern displays */
+	const int RB_H_BLANK = 160;       /* Horizontal blanking pixels */
+	const int RB_H_SYNC = 32;         /* Horizontal sync width */
+	const int RB_V_FPORCH = 3;        /* Vertical front porch lines */
+	const int RB_MIN_V_BLANK = 460;   /* Minimum vertical blank time (us) */
+
+	int h_sync_start, h_sync_end, h_total;
+	int v_sync_start, v_sync_end, v_total;
+	int v_sync, v_back_porch, v_blank;
+	float h_period, pixel_clock;
+
+	memset(mode, 0, sizeof(*mode));
+
+	/* Round hdisplay to multiple of 8 (CVT granularity) */
+	hdisplay = (hdisplay / 8) * 8;
+
+	/* Determine vsync lines based on aspect ratio */
+	float aspect = (float)hdisplay / vdisplay;
+	if (fabsf(aspect - 4.0f/3.0f) < 0.01f)
+		v_sync = 4;
+	else if (fabsf(aspect - 16.0f/9.0f) < 0.01f)
+		v_sync = 5;
+	else if (fabsf(aspect - 16.0f/10.0f) < 0.01f)
+		v_sync = 6;
+	else if (fabsf(aspect - 5.0f/4.0f) < 0.01f)
+		v_sync = 7;
+	else if (fabsf(aspect - 15.0f/9.0f) < 0.01f)
+		v_sync = 7;
+	else
+		v_sync = 10; /* Default for other ratios */
+
+	/* CVT-RB horizontal timings */
+	h_total = hdisplay + RB_H_BLANK;
+	h_sync_start = hdisplay + 48; /* Front porch = 48 pixels */
+	h_sync_end = h_sync_start + RB_H_SYNC;
+
+	/* Calculate horizontal period and vertical blanking */
+	h_period = (1000000.0f / vrefresh - RB_MIN_V_BLANK) / vdisplay;
+	v_blank = (int)(RB_MIN_V_BLANK / h_period + 0.5f);
+	if (v_blank < RB_V_FPORCH + v_sync + 1)
+		v_blank = RB_V_FPORCH + v_sync + 1;
+
+	v_back_porch = v_blank - RB_V_FPORCH - v_sync;
+	v_total = vdisplay + v_blank;
+
+	/* CVT-RB vertical timings */
+	v_sync_start = vdisplay + RB_V_FPORCH;
+	v_sync_end = v_sync_start + v_sync;
+
+	/* Calculate pixel clock in kHz */
+	pixel_clock = vrefresh * h_total * v_total / 1000.0f;
+
+	/* Fill in drmModeModeInfo */
+	mode->clock = (uint32_t)(pixel_clock + 0.5f);
+	mode->hdisplay = hdisplay;
+	mode->hsync_start = h_sync_start;
+	mode->hsync_end = h_sync_end;
+	mode->htotal = h_total;
+	mode->vdisplay = vdisplay;
+	mode->vsync_start = v_sync_start;
+	mode->vsync_end = v_sync_end;
+	mode->vtotal = v_total;
+	mode->vrefresh = (uint32_t)(vrefresh + 0.5f);
+	mode->flags = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_PVSYNC;
+	mode->type = DRM_MODE_TYPE_USERDEF;
+
+	snprintf(mode->name, sizeof(mode->name), "%dx%d@%.2f",
+			hdisplay, vdisplay, vrefresh);
+
+	wlr_log(WLR_INFO, "CVT-RB mode: %s clock=%d htotal=%d vtotal=%d",
+			mode->name, mode->clock, h_total, v_total);
+	(void)v_back_porch;
+}
+
+/*
+ * Generate a fixed mode by copying timings from base mode and adjusting only the clock.
+ * This is the method Gamescope uses for dynamic refresh rate changes - it preserves
+ * all timing parameters and just changes the pixel clock to achieve the target refresh.
+ * Much more likely to be accepted by the display than CVT-generated timings.
+ */
+static void
+generate_fixed_mode(drmModeModeInfo *mode, const drmModeModeInfo *base, int vrefresh)
+{
+	*mode = *base;
+	if (!vrefresh)
+		vrefresh = 60;
+
+	/* Calculate new clock to achieve target refresh rate:
+	 * clock (kHz) = htotal * vtotal * vrefresh / 1000
+	 * Round up to avoid going below target refresh */
+	mode->clock = ((mode->htotal * mode->vtotal * vrefresh) + 999) / 1000;
+
+	/* Recalculate actual refresh rate from the clock we set */
+	mode->vrefresh = (1000 * mode->clock) / (mode->htotal * mode->vtotal);
+
+	snprintf(mode->name, sizeof(mode->name), "%dx%d@%d.00",
+			mode->hdisplay, mode->vdisplay, vrefresh);
+}
+
+/* Set a custom refresh rate from keybind - uses arg.f as Hz (e.g., 25.55) */
+static void
+setcustomhz(const Arg *arg)
+{
+	Monitor *m = selmon;
+	struct wlr_output_state state;
+	struct wlr_output_configuration_v1 *config;
+	struct wlr_output_configuration_head_v1 *config_head;
+	struct wlr_output_mode *new_mode, *current;
+	drmModeModeInfo drm_mode, base_drm_mode;
+	int width, height;
+	float actual_hz, target_hz;
+	int multiplier;
+	char osd_msg[64];
+	int success = 0;
+
+	if (!m || !m->wlr_output || !m->wlr_output->enabled || !m->wlr_output->current_mode)
+		return;
+
+	if (arg->f <= 0)
+		return;
+
+	/* Check if this is a DRM output - only DRM supports custom modes */
+	if (!wlr_output_is_drm(m->wlr_output)) {
+		wlr_log(WLR_INFO, "Output is not DRM, cannot add custom mode");
+		snprintf(osd_msg, sizeof(osd_msg), "Not DRM output");
+		show_hz_osd(m, osd_msg);
+		return;
+	}
+
+	/* Save original mode before first switch */
+	if (!m->video_mode_active)
+		m->original_mode = m->wlr_output->current_mode;
+
+	current = m->wlr_output->current_mode;
+	width = current->width;
+	height = current->height;
+	target_hz = arg->f;
+
+	/*
+	 * Build base DRM mode from current wlr_output_mode.
+	 * This preserves the timing parameters that the display already accepts.
+	 */
+	memset(&base_drm_mode, 0, sizeof(base_drm_mode));
+	base_drm_mode.hdisplay = width;
+	base_drm_mode.vdisplay = height;
+	base_drm_mode.vrefresh = (current->refresh + 500) / 1000;
+	base_drm_mode.clock = current->refresh * width * height / 1000000;
+
+	/* Try to get actual DRM timings from preferred mode */
+	struct wlr_output_mode *pref;
+	wl_list_for_each(pref, &m->wlr_output->modes, link) {
+		if (pref->width == width && pref->height == height && pref->preferred) {
+			/* Use preferred mode timings as base - these are EDID-verified */
+			base_drm_mode.clock = pref->refresh * width * height / 1000000;
+			/* Estimate htotal/vtotal from clock and refresh */
+			int total_pixels = (pref->refresh > 0) ? (base_drm_mode.clock * 1000000 / pref->refresh) : (width * height);
+			/* Assume typical blanking ratio for htotal/vtotal estimation */
+			base_drm_mode.htotal = width + 160; /* CVT-RB typical H blank */
+			base_drm_mode.vtotal = total_pixels / base_drm_mode.htotal;
+			if (base_drm_mode.vtotal < height)
+				base_drm_mode.vtotal = height + 50; /* minimum V blank */
+			/* Recalculate clock based on actual totals */
+			base_drm_mode.clock = (base_drm_mode.htotal * base_drm_mode.vtotal * base_drm_mode.vrefresh + 999) / 1000;
+			/* Standard sync positions */
+			base_drm_mode.hsync_start = width + 48;
+			base_drm_mode.hsync_end = base_drm_mode.hsync_start + 32;
+			base_drm_mode.vsync_start = height + 3;
+			base_drm_mode.vsync_end = base_drm_mode.vsync_start + 5;
+			base_drm_mode.flags = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_PVSYNC;
+			wlr_log(WLR_INFO, "Using preferred mode as base: %dx%d htotal=%d vtotal=%d",
+					width, height, base_drm_mode.htotal, base_drm_mode.vtotal);
+			break;
+		}
+	}
+
+	/* If no preferred mode found, generate CVT timings as base */
+	if (base_drm_mode.htotal == 0) {
+		generate_cvt_mode(&base_drm_mode, width, height, (float)base_drm_mode.vrefresh);
+		wlr_log(WLR_INFO, "Generated CVT base mode: %dx%d htotal=%d vtotal=%d",
+				width, height, base_drm_mode.htotal, base_drm_mode.vtotal);
+	}
+
+	/*
+	 * Calculate starting multiplier to stay above panel minimum (48 Hz).
+	 */
+	multiplier = 1;
+	if (target_hz < 48.0f) {
+		multiplier = (int)ceilf(48.0f / target_hz);
+	}
+
+	/*
+	 * Try FIXED mode generation first (Gamescope method).
+	 * This preserves timings and only changes clock - much more likely to work.
+	 */
+	for (; multiplier <= 8 && !success; multiplier++) {
+		int target_vrefresh = (int)(target_hz * multiplier + 0.5f);
+		actual_hz = target_hz * multiplier;
+
+		/* Skip if above typical max refresh */
+		if (actual_hz > 300.0f)
+			break;
+
+		wlr_log(WLR_INFO, "Fixed mode: trying %.3f Hz -> %d Hz (%dx multiplier)",
+				target_hz, target_vrefresh, multiplier);
+
+		/* Generate fixed mode - only changes clock, preserves all timings */
+		generate_fixed_mode(&drm_mode, &base_drm_mode, target_vrefresh);
+
+		wlr_log(WLR_INFO, "Fixed mode params: clock=%d htotal=%d vtotal=%d vrefresh=%d",
+				drm_mode.clock, drm_mode.htotal, drm_mode.vtotal, drm_mode.vrefresh);
+
+		/* Add custom mode to DRM connector */
+		new_mode = wlr_drm_connector_add_mode(m->wlr_output, &drm_mode);
+		if (!new_mode) {
+			wlr_log(WLR_DEBUG, "wlr_drm_connector_add_mode failed for fixed %d Hz", target_vrefresh);
+			continue;
+		}
+
+		wlr_log(WLR_INFO, "Added fixed mode: %dx%d@%d mHz",
+				new_mode->width, new_mode->height, new_mode->refresh);
+
+		/* Try to apply the new mode */
+		wlr_output_state_init(&state);
+		wlr_output_state_set_mode(&state, new_mode);
+
+		if (wlr_output_test_state(m->wlr_output, &state)) {
+			if (wlr_output_commit_state(m->wlr_output, &state)) {
+				success = 1;
+				m->video_mode_active = 1;
+
+				config = wlr_output_configuration_v1_create();
+				config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+				config_head->state.mode = new_mode;
+				wlr_output_manager_v1_set_configuration(output_mgr, config);
+
+				wlr_log(WLR_INFO, "Fixed mode %d Hz applied (%dx %.3f fps)",
+						target_vrefresh, multiplier, target_hz);
+			} else {
+				wlr_log(WLR_DEBUG, "wlr_output_commit_state failed for fixed %d Hz", target_vrefresh);
+			}
+		} else {
+			wlr_log(WLR_DEBUG, "wlr_output_test_state failed for fixed %d Hz", target_vrefresh);
+		}
+		wlr_output_state_finish(&state);
+	}
+
+	/*
+	 * Fallback: Try CVT mode generation if fixed mode didn't work.
+	 */
+	if (!success) {
+		multiplier = 1;
+		if (target_hz < 48.0f) {
+			multiplier = (int)ceilf(48.0f / target_hz);
+		}
+
+		for (; multiplier <= 8 && !success; multiplier++) {
+			actual_hz = target_hz * multiplier;
+
+			if (actual_hz > 300.0f)
+				break;
+
+			wlr_log(WLR_INFO, "CVT fallback: trying %.3f Hz -> %.3f Hz (%dx multiplier)",
+					target_hz, actual_hz, multiplier);
+
+			generate_cvt_mode(&drm_mode, width, height, actual_hz);
+
+			new_mode = wlr_drm_connector_add_mode(m->wlr_output, &drm_mode);
+			if (!new_mode) {
+				wlr_log(WLR_DEBUG, "wlr_drm_connector_add_mode failed for CVT %.3f Hz", actual_hz);
+				continue;
+			}
+
+			wlr_output_state_init(&state);
+			wlr_output_state_set_mode(&state, new_mode);
+
+			if (wlr_output_test_state(m->wlr_output, &state)) {
+				if (wlr_output_commit_state(m->wlr_output, &state)) {
+					success = 1;
+					m->video_mode_active = 1;
+
+					config = wlr_output_configuration_v1_create();
+					config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+					config_head->state.mode = new_mode;
+					wlr_output_manager_v1_set_configuration(output_mgr, config);
+
+					wlr_log(WLR_INFO, "CVT mode %.3f Hz applied (%dx %.3f fps)",
+							actual_hz, multiplier, target_hz);
+				}
+			}
+			wlr_output_state_finish(&state);
+		}
+	}
+
+	/* Fallback: Find existing mode that's a multiple of target Hz */
+	if (!success) {
+		struct wlr_output_mode *video_mode = find_video_friendly_mode(m, target_hz);
+
+		if (video_mode && video_mode != m->wlr_output->current_mode) {
+			wlr_output_state_init(&state);
+			wlr_output_state_set_mode(&state, video_mode);
+
+			if (wlr_output_commit_state(m->wlr_output, &state)) {
+				success = 1;
+				m->video_mode_active = 1;
+				actual_hz = video_mode->refresh / 1000.0f;
+				multiplier = (int)(actual_hz / target_hz + 0.5f);
+
+				config = wlr_output_configuration_v1_create();
+				config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+				config_head->state.mode = video_mode;
+				wlr_output_manager_v1_set_configuration(output_mgr, config);
+
+				wlr_log(WLR_INFO, "Fallback mode %d.%03d Hz applied (%dx %.3f Hz)",
+						video_mode->refresh / 1000, video_mode->refresh % 1000,
+						multiplier, target_hz);
+			}
+			wlr_output_state_finish(&state);
+		}
+	}
+
+	/* Show result */
+	if (success) {
+		int actual_mhz = (int)(actual_hz * 1000.0f + 0.5f);
+		if (multiplier > 1) {
+			snprintf(osd_msg, sizeof(osd_msg), "%d.%03d Hz (%dx%.0f)",
+					actual_mhz / 1000, actual_mhz % 1000, multiplier, target_hz);
+		} else {
+			snprintf(osd_msg, sizeof(osd_msg), "%d.%03d Hz",
+					actual_mhz / 1000, actual_mhz % 1000);
+		}
+	} else {
+		wlr_log(WLR_ERROR, "Failed to set video Hz for %.3f fps (all methods failed)", target_hz);
+
+		/* Restore original mode */
+		if (m->original_mode) {
+			wlr_output_state_init(&state);
+			wlr_output_state_set_mode(&state, m->original_mode);
+			wlr_output_commit_state(m->wlr_output, &state);
+			wlr_output_state_finish(&state);
+		}
+
+		snprintf(osd_msg, sizeof(osd_msg), "FAILED: %.0f fps", target_hz);
+	}
+
+	show_hz_osd(m, osd_msg);
+}
+
+/*
+ * Check if any fullscreen client is playing video and adjust refresh rate.
+ * Uses intelligent scoring system to find optimal mode for silky smooth playback.
+ * Implements 3-retry logic when no video is detected initially.
+ */
 static void
 check_fullscreen_video(void)
 {
 	Client *c;
 	Monitor *m;
-	int any_fullscreen_video = 0;
+	int any_fullscreen_active = 0;
+	char osd_msg[64];
 
 	wl_list_for_each(m, &mons, link) {
 		c = focustop(m);
 		if (!c || !c->isfullscreen)
 			continue;
 
-		/* Detect video fps from frame timing */
-		if (c->frame_time_count >= 16) {
-			int fps = detect_video_framerate(c);
+		any_fullscreen_active = 1;
 
-			/* Also check content-type as hint */
-			int is_video = is_video_content(c);
+		/* Check content-type hint from client */
+		int is_video = is_video_content(c);
 
-			if (fps > 0 && fps != c->detected_video_fps) {
-				c->detected_video_fps = fps;
+		/* Detect exact video Hz from frame timing */
+		float hz = 0.0f;
+		if (c->frame_time_count >= 16)
+			hz = detect_video_framerate(c);
 
-				wlr_log(WLR_INFO, "Detected %s at %d fps on %s",
-						is_video ? "video content" : "stable framerate",
-						fps, m->wlr_output->name);
+		wlr_log(WLR_DEBUG, "check_fullscreen_video: monitor=%s is_video=%d "
+				"frame_count=%d hz=%.3f detected_hz=%.3f phase=%d retries=%d "
+				"video_mode_active=%d vrr_active=%d",
+				m->wlr_output->name, is_video, c->frame_time_count, hz,
+				c->detected_video_hz, c->video_detect_phase, c->video_detect_retries,
+				m->video_mode_active, m->vrr_active);
 
-				/* Set custom mode matching exact fps */
-				set_custom_video_mode(m, fps);
-				any_fullscreen_video = 1;
-			} else if (fps > 0) {
-				any_fullscreen_video = 1;
-			} else if (is_video && !m->video_mode_active) {
-				/* Video content but can't detect fps yet, keep checking */
-				any_fullscreen_video = 1;
+		/* Already successfully detected and mode set */
+		if (c->video_detect_phase == 2 && (m->video_mode_active || m->vrr_active)) {
+			/* Check if Hz changed significantly - video may have switched */
+			if (hz > 0.0f && fabsf(hz - c->detected_video_hz) > 0.5f) {
+				wlr_log(WLR_INFO, "Video Hz changed from %.3f to %.3f, re-evaluating",
+						c->detected_video_hz, hz);
+				c->detected_video_hz = hz;
+				apply_best_video_mode(m, hz);
 			}
-		} else {
-			/* Still collecting samples */
-			any_fullscreen_video = 1;
+			continue;
+		}
+
+		/* Phase 0: Scanning - collecting frame samples */
+		if (c->video_detect_phase == 0) {
+			if (c->frame_time_count < 16) {
+				/* Still collecting samples */
+				snprintf(osd_msg, sizeof(osd_msg), "Scanning... %d/16", c->frame_time_count);
+				show_hz_osd(m, osd_msg);
+				continue;
+			}
+			/* Enough samples collected, move to analysis */
+			c->video_detect_phase = 1;
+		}
+
+		/* Phase 1: Analysis - try to detect video framerate */
+		if (c->video_detect_phase == 1) {
+			if (hz > 0.0f) {
+				/* Successfully detected! Apply best mode */
+				c->detected_video_hz = hz;
+				c->video_detect_phase = 2;
+				c->video_detect_retries = 0;
+
+				wlr_log(WLR_INFO, "Video detected at %.3f Hz on %s, applying best mode",
+						hz, m->wlr_output->name);
+
+				if (apply_best_video_mode(m, hz)) {
+					wlr_log(WLR_INFO, "Successfully applied optimal video mode");
+				} else {
+					wlr_log(WLR_ERROR, "Failed to apply video mode");
+				}
+				continue;
+			}
+
+			/* No stable framerate detected yet */
+			if (is_video) {
+				/* Content-type says video but can't detect fps.
+				 * Use default 59.94 Hz as fallback. */
+				wlr_log(WLR_INFO, "Video content-type detected but fps unclear, using 59.94 Hz");
+				c->detected_video_hz = 59.94f;
+				c->video_detect_phase = 2;
+				apply_best_video_mode(m, 59.94f);
+				continue;
+			}
+
+			/* Try to estimate from raw measurements */
+			double avg_interval = 0;
+			int valid = 0;
+			for (int i = 1; i < c->frame_time_count; i++) {
+				int prev_idx = (c->frame_time_idx - c->frame_time_count + i - 1 + 32) % 32;
+				int curr_idx = (c->frame_time_idx - c->frame_time_count + i + 32) % 32;
+				uint64_t interval = c->frame_times[curr_idx] - c->frame_times[prev_idx];
+				if (interval >= 5 && interval <= 200) {
+					avg_interval += interval;
+					valid++;
+				}
+			}
+
+			if (valid > 0) {
+				avg_interval /= valid;
+				double raw_hz = 1000.0 / avg_interval;
+
+				/* If in video range (20-120 Hz), use rounded standard framerate */
+				if (raw_hz >= 20.0 && raw_hz <= 120.0) {
+					float use_hz;
+					if (raw_hz < 24.5)
+						use_hz = (raw_hz < 24.0) ? 23.976f : 24.0f;
+					else if (raw_hz < 27.5)
+						use_hz = 25.0f;
+					else if (raw_hz < 35.0)
+						use_hz = (raw_hz < 30.0) ? 29.97f : 30.0f;
+					else if (raw_hz < 55.0)
+						use_hz = 50.0f;
+					else if (raw_hz < 65.0)
+						use_hz = (raw_hz < 60.0) ? 59.94f : 60.0f;
+					else
+						use_hz = (float)raw_hz;
+
+					c->detected_video_hz = use_hz;
+					c->video_detect_phase = 2;
+
+					wlr_log(WLR_INFO, "Estimated framerate %.3f Hz (raw ~%.1f Hz) on %s",
+							use_hz, raw_hz, m->wlr_output->name);
+
+					apply_best_video_mode(m, use_hz);
+					continue;
+				}
+
+				/* Hz outside video range - likely not video content */
+				wlr_log(WLR_DEBUG, "Measured Hz (~%.1f) outside video range", raw_hz);
+			}
+
+			/* No video detected - implement 3-retry logic */
+			c->video_detect_retries++;
+
+			if (c->video_detect_retries < 3) {
+				/* Reset frame collection and try again */
+				snprintf(osd_msg, sizeof(osd_msg), "Retry %d/3...", c->video_detect_retries);
+				show_hz_osd(m, osd_msg);
+
+				wlr_log(WLR_INFO, "No video detected, retry %d/3", c->video_detect_retries);
+
+				/* Clear frame data for fresh scan */
+				c->frame_time_idx = 0;
+				c->frame_time_count = 0;
+				c->last_buffer = NULL;
+				c->video_detect_phase = 0;
+			} else {
+				/* 3 retries exhausted - give up */
+				c->video_detect_phase = 2; /* Mark as done */
+				show_hz_osd(m, "No video detected");
+				wlr_log(WLR_INFO, "No video detected after 3 attempts on %s",
+						m->wlr_output->name);
+			}
 		}
 	}
 
-	/* Continue checking if we have fullscreen clients */
-	if (any_fullscreen_video)
-		schedule_video_check(1000);
+	/* Continue checking while fullscreen clients exist */
+	if (any_fullscreen_active)
+		schedule_video_check(500);
 }
 
 void
@@ -16898,10 +18357,13 @@ setfullscreen(Client *c, int fullscreen)
 		c->prev = c->geom;
 		resize(c, c->mon->m, 0);
 		set_adaptive_sync(c->mon, 1);
-		/* Reset frame tracking for video detection */
+		/* Reset frame tracking and video detection state */
 		c->frame_time_idx = 0;
 		c->frame_time_count = 0;
-		c->detected_video_fps = 0;
+		c->detected_video_hz = 0.0f;
+		c->last_buffer = NULL;
+		c->video_detect_retries = 0;
+		c->video_detect_phase = 0;
 		/* Try to match video refresh rate if content is video */
 		set_video_refresh_rate(c->mon, c);
 		/* Start periodic video detection check */
@@ -16913,7 +18375,7 @@ setfullscreen(Client *c, int fullscreen)
 		set_adaptive_sync(c->mon, 0);
 		/* Restore max refresh rate when exiting fullscreen */
 		restore_max_refresh_rate(c->mon);
-		c->detected_video_fps = 0;
+		c->detected_video_hz = 0.0f;
 	}
 	arrange(c->mon);
 	printstatus();
@@ -17117,6 +18579,7 @@ setup(void)
 	wlr_presentation_create(dpy, backend, 2);
 	wlr_alpha_modifier_v1_create(dpy);
 	content_type_mgr = wlr_content_type_manager_v1_create(dpy, 1);
+	tearing_control_mgr = wlr_tearing_control_manager_v1_create(dpy, 1);
 
 	/* Initializes the interface used to implement urgency hints */
 	activation = wlr_xdg_activation_v1_create(dpy);

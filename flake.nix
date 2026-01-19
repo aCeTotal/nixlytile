@@ -112,10 +112,7 @@
             installPhase = ''
               runHook preInstall
               make PREFIX=$out MANDIR=$out/share/man DATADIR=$out/share install
-              mkdir -p $out/share/dwl/wallpapers
-              cp -r wallpapers/* $out/share/dwl/wallpapers/
               wrapProgram $out/bin/dwl \
-                --set DWL_WALLPAPER "$out/share/dwl/wallpapers/beach.jpg" \
                 --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.swaybg pkgs.brightnessctl ]} \
                 --prefix XDG_DATA_DIRS : "${pkgs.papirus-icon-theme}/share:${pkgs.adwaita-icon-theme}/share:${pkgs.hicolor-icon-theme}/share:${pkgs.shared-mime-info}/share"
               runHook postInstall
