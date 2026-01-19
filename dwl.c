@@ -948,8 +948,12 @@ static void modal_update_results(Monitor *m);
 static void modal_prewarm(Monitor *m);
 static void ensure_desktop_entries_loaded(void);
 static void ensure_shell_env(void);
+static int should_use_dgpu(const char *cmd);
+static void set_dgpu_env(void);
 static int cpu_popup_refresh_timeout(void *data);
 static void schedule_cpu_popup_refresh(uint32_t ms);
+static int popup_delay_timeout(void *data);
+static void schedule_popup_delay(uint32_t ms);
 static uint64_t monotonic_msec(void);
 static void rendercpu(StatusModule *module, int bar_height, const char *text);
 static void rendercpupopup(Monitor *m);
@@ -1203,6 +1207,7 @@ static struct wl_event_source *wifi_scan_event = NULL;
 static struct wl_event_source *wifi_scan_timer = NULL;
 static struct wl_event_source *cpu_popup_refresh_timer = NULL;
 static struct wl_event_source *ram_popup_refresh_timer = NULL;
+static struct wl_event_source *popup_delay_timer = NULL;
 static struct wl_event_source *video_check_timer = NULL;
 static struct wl_event_source *hz_osd_timer = NULL;
 static char wifi_scan_buf[8192];
@@ -5575,9 +5580,13 @@ updatebatteryhover(Monitor *m, double cx, double cy)
 		if (p->hover_start_ms == 0)
 			p->hover_start_ms = now;
 
-		/* Wait 500ms before showing popup */
-		if (!was_visible && (now - p->hover_start_ms) < 500)
+		/* Wait 300ms before showing popup */
+		if (!was_visible && (now - p->hover_start_ms) < 300) {
+			/* Schedule timer to check again after remaining delay */
+			uint64_t remaining = 300 - (now - p->hover_start_ms);
+			schedule_popup_delay(remaining + 1);
 			return;
+		}
 
 		if (!was_visible) {
 			/* Short delay to avoid flicker on quick mouse movements */
@@ -6365,6 +6374,8 @@ focus_or_launch_app(const char *app_id, const char *launch_cmd)
 		pid_t pid = fork();
 		if (pid == 0) {
 			setsid();
+			if (should_use_dgpu(launch_cmd))
+				set_dgpu_env();
 			execlp("sh", "sh", "-c", launch_cmd, NULL);
 			_exit(1);
 		}
@@ -10293,6 +10304,40 @@ schedule_cpu_popup_refresh(uint32_t ms)
 		wl_event_source_timer_update(cpu_popup_refresh_timer, ms);
 }
 
+static int
+popup_delay_timeout(void *data)
+{
+	Monitor *m;
+	(void)data;
+
+	wl_list_for_each(m, &mons, link) {
+		if (!m->showbar)
+			continue;
+		/* Re-run hover checks to show popup after delay */
+		if (m->statusbar.cpu_popup.hover_start_ms != 0 && !m->statusbar.cpu_popup.visible)
+			updatecpuhover(m, cursor->x, cursor->y);
+		if (m->statusbar.ram_popup.hover_start_ms != 0 && !m->statusbar.ram_popup.visible)
+			updateramhover(m, cursor->x, cursor->y);
+		if (m->statusbar.battery_popup.hover_start_ms != 0 && !m->statusbar.battery_popup.visible)
+			updatebatteryhover(m, cursor->x, cursor->y);
+		if (m->statusbar.net_popup.hover_start_ms != 0 && !m->statusbar.net_popup.visible)
+			updatenethover(m, cursor->x, cursor->y);
+	}
+	return 0;
+}
+
+static void
+schedule_popup_delay(uint32_t ms)
+{
+	if (!event_loop)
+		return;
+	if (!popup_delay_timer)
+		popup_delay_timer = wl_event_loop_add_timer(event_loop,
+				popup_delay_timeout, NULL);
+	if (popup_delay_timer)
+		wl_event_source_timer_update(popup_delay_timer, ms);
+}
+
 static void
 net_menu_open(Monitor *m)
 {
@@ -11464,6 +11509,50 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 
 	if (sym == XKB_KEY_Escape) {
 		modal_hide_all();
+		return 1;
+	}
+
+	/* Mod+E: Open all file search results in Thunar via symlinks */
+	if ((sym == XKB_KEY_e || sym == XKB_KEY_E) && (mods & WLR_MODIFIER_LOGO) &&
+			mo->active_idx == 1 && mo->result_count[1] > 0) {
+		char tmpdir[PATH_MAX];
+		const char *base = "/tmp/dwl-search-results";
+		int i;
+
+		/* Remove old temp dir if exists, then create fresh */
+		snprintf(tmpdir, sizeof(tmpdir), "rm -rf '%s' && mkdir -p '%s'", base, base);
+		if (system(tmpdir) == 0) {
+			/* Create symlinks for all results */
+			for (i = 0; i < mo->result_count[1]; i++) {
+				const char *path = mo->file_results_path[i];
+				const char *name = mo->file_results_name[i];
+				char linkpath[PATH_MAX];
+				char safename[256];
+				int j, k;
+
+				if (!path || !*path || !name || !*name)
+					continue;
+
+				/* Sanitize filename: replace / with _ */
+				for (j = 0, k = 0; name[j] && k < (int)sizeof(safename) - 1; j++) {
+					if (name[j] == '/')
+						safename[k++] = '_';
+					else
+						safename[k++] = name[j];
+				}
+				safename[k] = '\0';
+
+				/* Add index prefix to preserve order and handle duplicates */
+				snprintf(linkpath, sizeof(linkpath), "%s/%03d_%s", base, i + 1, safename);
+				symlink(path, linkpath);
+			}
+
+			/* Open in Thunar */
+			char *cmd[] = { "thunar", (char *)base, NULL };
+			Arg arg = { .v = cmd };
+			spawn(&arg);
+			modal_hide_all();
+		}
 		return 1;
 	}
 
@@ -12969,9 +13058,13 @@ updatecpuhover(Monitor *m, double cx, double cy)
 		if (p->hover_start_ms == 0)
 			p->hover_start_ms = now;
 
-		/* Wait 500ms before showing popup */
-		if (!was_visible && (now - p->hover_start_ms) < 500)
+		/* Wait 300ms before showing popup */
+		if (!was_visible && (now - p->hover_start_ms) < 300) {
+			/* Schedule timer to check again after remaining delay */
+			uint64_t remaining = 300 - (now - p->hover_start_ms);
+			schedule_popup_delay(remaining + 1);
 			return;
+		}
 
 		if (!was_visible) {
 			/* Delay heavy popup refresh until pointer lingers for 1s */
@@ -13076,9 +13169,13 @@ updateramhover(Monitor *m, double cx, double cy)
 		if (p->hover_start_ms == 0)
 			p->hover_start_ms = now;
 
-		/* Wait 500ms before showing popup */
-		if (!was_visible && (now - p->hover_start_ms) < 500)
+		/* Wait 300ms before showing popup */
+		if (!was_visible && (now - p->hover_start_ms) < 300) {
+			/* Schedule timer to check again after remaining delay */
+			uint64_t remaining = 300 - (now - p->hover_start_ms);
+			schedule_popup_delay(remaining + 1);
 			return;
+		}
 
 		if (!was_visible) {
 			/* Short delay to avoid flicker on quick mouse movements */
@@ -13182,9 +13279,13 @@ updatenethover(Monitor *m, double cx, double cy)
 		if (p->hover_start_ms == 0)
 			p->hover_start_ms = now;
 
-		/* Wait 500ms before showing popup */
-		if (!was_visible && (now - p->hover_start_ms) < 500)
+		/* Wait 300ms before showing popup */
+		if (!was_visible && (now - p->hover_start_ms) < 300) {
+			/* Schedule timer to check again after remaining delay */
+			uint64_t remaining = 300 - (now - p->hover_start_ms);
+			schedule_popup_delay(remaining + 1);
 			return;
+		}
 
 		if (!was_visible) {
 			p->suppress_refresh_until_ms = now + 2000;
@@ -13929,6 +14030,10 @@ cleanup(void)
 	if (ram_popup_refresh_timer) {
 		wl_event_source_remove(ram_popup_refresh_timer);
 		ram_popup_refresh_timer = NULL;
+	}
+	if (popup_delay_timer) {
+		wl_event_source_remove(popup_delay_timer);
+		popup_delay_timer = NULL;
 	}
 	tray_menu_hide_all();
 	if (tray_event) {
@@ -15249,8 +15354,10 @@ keypress(struct wl_listener *listener, void *data)
 				modal_render(modal_mon);
 			}
 		}
-		for (i = 0; i < nsyms; i++)
-			handled = keybinding(mods, syms[i]) || handled;
+		if (!handled) {
+			for (i = 0; i < nsyms; i++)
+				handled = keybinding(mods, syms[i]) || handled;
+		}
 		/* If no binding matched, try with base keysyms (level 0) for shifted bindings */
 		if (!handled && nlevel0 > 0) {
 			for (i = 0; i < nlevel0; i++)
@@ -18731,12 +18838,69 @@ setup(void)
 		wl_event_source_timer_update(status_hover_timer, 0);
 }
 
+/* Programs that should use dedicated GPU */
+static const char *dgpu_programs[] = {
+	"steam", "gamescope", "mangohud",
+	"blender", "freecad", "openscad", "kicad",
+	"obs", "obs-studio", "kdenlive", "davinci-resolve",
+	"godot", "unity", "unreal",
+	"wine", "wine64", "proton",
+	"vkcube", "vulkaninfo", "glxgears", "glxinfo",
+	"darktable", "rawtherapee", "gimp",
+	"prusa-slicer", "cura", "superslicer",
+	NULL
+};
+
+static int
+should_use_dgpu(const char *cmd)
+{
+	const char *base;
+	int i;
+
+	if (!cmd)
+		return 0;
+
+	/* Get basename of command */
+	base = strrchr(cmd, '/');
+	base = base ? base + 1 : cmd;
+
+	for (i = 0; dgpu_programs[i]; i++) {
+		if (strcasecmp(base, dgpu_programs[i]) == 0)
+			return 1;
+		/* Also check if command contains the program name (for wrappers) */
+		if (strcasestr(cmd, dgpu_programs[i]))
+			return 1;
+	}
+	return 0;
+}
+
+static void
+set_dgpu_env(void)
+{
+	/* PRIME render offload for NVIDIA */
+	setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 1);
+	setenv("__NV_PRIME_RENDER_OFFLOAD_PROVIDER", "NVIDIA-G0", 1);
+	setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 1);
+	setenv("__VK_LAYER_NV_optimus", "NVIDIA_only", 1);
+
+	/* DRI_PRIME for AMD/Intel hybrid */
+	setenv("DRI_PRIME", "1", 1);
+
+	/* Vulkan device selection (prefer discrete) */
+	setenv("VK_LOADER_DRIVERS_SELECT", "nvidia*,radeon*,amd*", 1);
+}
+
 void
 spawn(const Arg *arg)
 {
 	if (fork() == 0) {
 		dup2(STDERR_FILENO, STDOUT_FILENO);
 		setsid();
+
+		/* Set dedicated GPU environment for GPU-intensive programs */
+		if (should_use_dgpu(((char **)arg->v)[0]))
+			set_dgpu_env();
+
 		execvp(((char **)arg->v)[0], (char **)arg->v);
 		die("dwl: execvp %s failed:", ((char **)arg->v)[0]);
 	}
@@ -18795,10 +18959,24 @@ tile(Monitor *m)
 	if (smartgaps == n)
 		e = 0;
 
-	if (n > m->nmaster)
-		mw = m->nmaster ? (int)roundf((m->w.width + gappx * e) * m->mfact) : 0;
-	else
-		mw = m->w.width;
+	/* When all windows fit in master area, arrange them horizontally as columns */
+	if (n <= m->nmaster) {
+		unsigned int w, mx = gappx * e;
+		i = 0;
+		wl_list_for_each(c, &clients, link) {
+			if (!VISIBLEON(c, m) || c->isfloating || c->isfullscreen)
+				continue;
+			r = n - i;
+			w = (m->w.width - mx - gappx * e - gappx * e * (r - 1)) / r;
+			resize(c, (struct wlr_box){.x = m->w.x + mx, .y = m->w.y + gappx * e,
+				.width = w, .height = m->w.height - 2 * gappx * e}, 0);
+			mx += c->geom.width + gappx * e;
+			i++;
+		}
+		return;
+	}
+
+	mw = m->nmaster ? (int)roundf((m->w.width + gappx * e) * m->mfact) : 0;
 	i = 0;
 	my = ty = gappx * e;
 	wl_list_for_each(c, &clients, link) {

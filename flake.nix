@@ -69,6 +69,42 @@
         let
           ps = perSystem system;
           pkgs = ps.pkgs;
+          runtimeDeps = with pkgs; [
+            # Core utilities
+            swaybg
+            brightnessctl
+            xdg-utils          # xdg-open
+
+            # File manager
+            xfce.thunar
+            xfce.thunar-volman
+            xfce.thunar-archive-plugin
+
+            # Network management
+            networkmanager     # nmcli
+            networkmanagerapplet
+
+            # Audio
+            pipewire
+            wireplumber
+            pavucontrol
+
+            # Bluetooth
+            blueman
+
+            # System utilities
+            findutils          # find (for file search)
+            coreutils          # rm, mkdir, etc.
+            gnused
+            gnugrep
+
+            # Terminal
+            alacritty
+            foot
+
+            # Notifications
+            libnotify          # notify-send
+          ];
           defaultPackage = pkgs.stdenv.mkDerivation {
             pname = "dwl";
             version = "git";
@@ -113,7 +149,7 @@
               runHook preInstall
               make PREFIX=$out MANDIR=$out/share/man DATADIR=$out/share install
               wrapProgram $out/bin/dwl \
-                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.swaybg pkgs.brightnessctl ]} \
+                --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps} \
                 --prefix XDG_DATA_DIRS : "${pkgs.papirus-icon-theme}/share:${pkgs.adwaita-icon-theme}/share:${pkgs.hicolor-icon-theme}/share:${pkgs.shared-mime-info}/share"
               runHook postInstall
             '';
