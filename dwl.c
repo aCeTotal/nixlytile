@@ -9668,10 +9668,9 @@ toggle_pipewire_mute(void)
 	double base;
 	double target;
 
-	volume_invalidate_cache(is_headset); /* force fresh read for active sink */
-	vol = speaker_active;
-	if (vol < 0.0)
-		vol = pipewire_volume_percent(&is_headset);
+	/* Always force a fresh read from PipeWire to get accurate mute state */
+	volume_invalidate_cache(is_headset);
+	vol = pipewire_volume_percent(&is_headset);
 	current = vol >= 0.0 ? volume_muted : 0;
 	base = vol >= 0.0 ? vol : volume_last_for_type(is_headset);
 
@@ -9715,10 +9714,9 @@ toggle_pipewire_mic_mute(void)
 	double base;
 	double target;
 
+	/* Always force a fresh read from PipeWire to get accurate mute state */
 	mic_last_read_ms = 0;
-	vol = microphone_active;
-	if (vol < 0.0)
-		vol = pipewire_mic_volume_percent();
+	vol = pipewire_mic_volume_percent();
 	current = vol >= 0.0 ? mic_muted : 0;
 	base = vol >= 0.0 ? vol : mic_last_percent;
 

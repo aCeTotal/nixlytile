@@ -652,14 +652,14 @@ remove_client_node(LayoutNode *node, Client *c)
 		if (tmp)
 			tmp->split_node = node->split_node;
 
-		/* If lifted node is a vertical split becoming a column root,
-		 * convert to horizontal so tiles stack vertically */
-		if (tmp && !tmp->is_client_node && tmp->is_split_vertically) {
+		/* If lifted node is a horizontal split becoming a column root,
+		 * convert to vertical so tiles become separate columns (side by side) */
+		if (tmp && !tmp->is_client_node && !tmp->is_split_vertically) {
 			/* It's a column root if: no parent (becomes tree root) OR
 			 * parent is a vertical split (column separator) */
 			if (!tmp->split_node ||
 			    (tmp->split_node && tmp->split_node->is_split_vertically)) {
-				tmp->is_split_vertically = 0;
+				tmp->is_split_vertically = 1;
 			}
 		}
 
@@ -674,12 +674,12 @@ remove_client_node(LayoutNode *node, Client *c)
 		if (tmp)
 			tmp->split_node = node->split_node;
 
-		/* If lifted node is a vertical split becoming a column root,
-		 * convert to horizontal so tiles stack vertically */
-		if (tmp && !tmp->is_client_node && tmp->is_split_vertically) {
+		/* If lifted node is a horizontal split becoming a column root,
+		 * convert to vertical so tiles become separate columns (side by side) */
+		if (tmp && !tmp->is_client_node && !tmp->is_split_vertically) {
 			if (!tmp->split_node ||
 			    (tmp->split_node && tmp->split_node->is_split_vertically)) {
-				tmp->is_split_vertically = 0;
+				tmp->is_split_vertically = 1;
 			}
 		}
 
