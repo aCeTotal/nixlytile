@@ -13932,11 +13932,6 @@ buttonpress(struct wl_listener *listener, void *data)
 				if (cursor_mode == CurResize && resizing_from_mouse)
 					resizing_from_mouse = 0;
 				resize_last_time = 0;
-				/* Restore tiled state if was_tiled but not btrtile layout */
-				if (c && c->was_tiled && c->isfloating) {
-					setfloating(c, 0);
-					arrange(selmon);
-				}
 				end_tile_drag();
 			}
 			/* Default behaviour */
@@ -14067,6 +14062,21 @@ cleanup(void)
 			});
 		}
 		exit(1);
+	}
+
+	/* Send close to all clients and give them time to save state */
+	{
+		Client *c;
+		int has_clients = 0;
+		wl_list_for_each(c, &clients, link) {
+			client_send_close(c);
+			has_clients = 1;
+		}
+		/* Wait for clients to close gracefully */
+		if (has_clients) {
+			struct timespec ts = {0, 500000000}; /* 500ms */
+			nanosleep(&ts, NULL);
+		}
 	}
 
 	wl_display_destroy_clients(dpy);
