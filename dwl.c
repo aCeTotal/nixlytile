@@ -259,6 +259,10 @@ typedef struct {
 	int active_idx;
 	char search[3][256];
 	int search_len[3];
+	char search_rendered[3][256]; /* last rendered search text */
+	struct wlr_scene_tree *search_field_tree; /* cached search field for fast updates */
+	struct wl_event_source *render_timer; /* timer for async rendering */
+	int render_pending; /* flag to indicate render is needed */
 	int result_count[3];
 	char results[3][MODAL_MAX_RESULTS][MODAL_RESULT_LEN];
 	int result_entry_idx[3][MODAL_MAX_RESULTS];
@@ -286,6 +290,7 @@ typedef struct {
 	size_t git_search_len;
 	char git_search_buf[4096];
 	int git_search_done;
+	char git_search_last[256];
 } ModalOverlay;
 
 typedef struct {
@@ -951,16 +956,24 @@ static void modal_file_search_stop(Monitor *m);
 static void modal_file_search_start_mode(Monitor *m, int fallback);
 static void modal_file_search_start(Monitor *m);
 static int modal_file_search_event(int fd, uint32_t mask, void *data);
+static int modal_file_search_debounce_cb(void *data);
+static void modal_file_search_schedule(Monitor *m);
 static void modal_git_search_clear_results(Monitor *m);
 static void modal_git_search_stop(Monitor *m);
 static void modal_git_search_start(Monitor *m);
 static int modal_git_search_event(int fd, uint32_t mask, void *data);
 static void git_cache_update_start(void);
+static void file_cache_update_start(void);
+static int cache_update_timer_cb(void *data);
+static void schedule_cache_update_timer(void);
 static void modal_truncate_to_width(const char *src, char *dst, size_t len, int max_px);
 static void shorten_path_display(const char *full, char *out, size_t len);
 static int desktop_entry_cmp_used(const void *a, const void *b);
 static int __attribute__((unused)) modal_match_name(const char *haystack, const char *needle);
 static void modal_update_results(Monitor *m);
+static void modal_render_search_field(Monitor *m);
+static int modal_render_timer_cb(void *data);
+static void modal_schedule_render(Monitor *m);
 static void modal_prewarm(Monitor *m);
 static void ensure_desktop_entries_loaded(void);
 static void ensure_shell_env(void);
@@ -1150,6 +1163,7 @@ static int fullscreen_adaptive_sync_enabled = 1;
 static struct wl_event_source *status_timer;
 static struct wl_event_source *status_cpu_timer;
 static struct wl_event_source *status_hover_timer;
+static struct wl_event_source *cache_update_timer;
 static StatusRefreshTask status_tasks[] = {
 	{ refreshstatuscpu, 0 },
 	{ refreshstatusram, 0 },
@@ -5909,13 +5923,19 @@ modal_show(const Arg *arg)
 	modal_git_search_stop(m);
 	modal_git_search_clear_results(m);
 	mo->file_search_last[0] = '\0';
+	mo->git_search_last[0] = '\0';
 	mo->git_search_done = 0;
 	for (int i = 0; i < 3; i++) {
 		mo->search[i][0] = '\0';
 		mo->search_len[i] = 0;
+		mo->search_rendered[i][0] = '\0';
 		mo->selected[i] = -1;
 		mo->scroll[i] = 0;
 	}
+	mo->search_field_tree = NULL; /* will be recreated on render */
+	mo->render_pending = 0;
+	if (mo->render_timer)
+		wl_event_source_timer_update(mo->render_timer, 0);
 	mo->file_search_fallback = 0;
 	mo->visible = 1;
 	modal_update_results(m);
@@ -11953,16 +11973,10 @@ static void
 modal_file_search_start_mode(Monitor *m, int fallback)
 {
 	ModalOverlay *mo;
-	const char *home_env;
-	char home[PATH_MAX];
-	const char *roots[128]; /* search roots; deduped */
-	char root_bufs[128][PATH_MAX];
-	int root_count = 0;
-	char pattern[MODAL_RESULT_LEN];
 	int pipefd[2] = {-1, -1};
-	struct stat st = {0};
 	pid_t pid;
-	int nlen;
+
+	(void)fallback;
 
 	if (!m)
 		return;
@@ -11977,171 +11991,26 @@ modal_file_search_start_mode(Monitor *m, int fallback)
 	}
 	mo->file_search_fallback = 1; /* always filter locally */
 
-	/* helper to add unique, existing directories */
-#define ADD_ROOT(PATHSTR) \
-	do { \
-		const char *_path = (PATHSTR); \
-		int _i; \
-		int idx; \
-		if ((int)LENGTH(roots) > root_count && _path && *_path && stat(_path, &st) == 0 && S_ISDIR(st.st_mode)) { \
-			int exists = 0; \
-			for (_i = 0; _i < root_count; _i++) { \
-				if (strcmp(roots[_i], _path) == 0) { exists = 1; break; } \
-			} \
-			if (!exists) { \
-				idx = root_count; \
-				snprintf(root_bufs[idx], sizeof(root_bufs[0]), "%s", _path); \
-				roots[idx] = root_bufs[idx]; \
-				root_count++; \
-			} \
-		} \
-	} while (0)
-
-	home_env = getenv("HOME");
-	if (home_env && *home_env &&
-			snprintf(home, sizeof(home), "%s", home_env) < (int)sizeof(home))
-		ADD_ROOT(home);
-	else {
-		struct passwd *pw = getpwuid(getuid());
-		if (pw && pw->pw_dir && *pw->pw_dir &&
-				snprintf(home, sizeof(home), "%s", pw->pw_dir) < (int)sizeof(home))
-			ADD_ROOT(home);
-	}
-	/* add mounted nfs/smb exports from mountinfo */
-	{
-		FILE *fp = fopen("/proc/self/mountinfo", "r");
-		char line[1024];
-		int i;
-		char *p;
-		char *sep;
-		char *fs;
-		if (fp) {
-			while (fgets(line, sizeof(line), fp)) {
-				char mnt[PATH_MAX] = {0};
-				char fstype[64] = {0};
-				p = strchr(line, ' ');
-				for (i = 0; p && i < 3; i++)
-					p = strchr(p + 1, ' ');
-				if (p) {
-					p++;
-					sep = strchr(p, ' ');
-					if (sep && (size_t)(sep - p) < sizeof(mnt)) {
-						memcpy(mnt, p, (size_t)(sep - p));
-						mnt[sep - p] = '\0';
-						p = strchr(sep + 1, ' ');
-						if (p) {
-							p++;
-							fs = strchr(p, ' ');
-							if (fs && (size_t)(fs - p) < sizeof(fstype)) {
-								memcpy(fstype, p, (size_t)(fs - p));
-								fstype[fs - p] = '\0';
-							}
-						}
-					}
-				}
-				if (fstype[0]) {
-					if ((strncmp(fstype, "nfs", 3) == 0 ||
-							strncmp(fstype, "cifs", 4) == 0 ||
-							strncmp(fstype, "smb", 3) == 0) && mnt[0])
-						ADD_ROOT(mnt);
-				}
-			}
-			fclose(fp);
-		}
-	}
-#ifdef __linux__
-	/* fallback to /proc/mounts if mountinfo unavailable */
-	if (root_count == 0) {
-		FILE *fp = fopen("/proc/mounts", "r");
-		char line[1024];
-		if (fp) {
-			while (fgets(line, sizeof(line), fp)) {
-				char src[256], mnt[PATH_MAX], fstype[64];
-				src[0] = mnt[0] = fstype[0] = '\0';
-				if (sscanf(line, "%255s %1023s %63s", src, mnt, fstype) == 3) {
-					if ((strncmp(fstype, "nfs", 3) == 0 ||
-							strncmp(fstype, "cifs", 4) == 0 ||
-							strncmp(fstype, "smb", 3) == 0) && mnt[0])
-						ADD_ROOT(mnt);
-				}
-			}
-			fclose(fp);
-		}
-	}
-#endif
-
-		/* common extra roots on NixOS/desktops if they exist */
-		ADD_ROOT("/run/media");
-		ADD_ROOT("/run/mounts");
-		ADD_ROOT("/mnt");
-		ADD_ROOT("/media");
-
-	if (root_count == 0)
-		ADD_ROOT("/");
-#undef ADD_ROOT
-
-	nlen = mo->search_len[1];
-	/* Trim whitespace, then build find pattern ("*<escaped query>*" or "*" in fallback) */
-	if (nlen > (int)sizeof(pattern) - 1)
-		nlen = (int)sizeof(pattern) - 1;
-	char query[256];
-	if (nlen > (int)sizeof(query) - 1)
-		nlen = (int)sizeof(query) - 1;
-	memcpy(query, mo->search[1], (size_t)nlen);
-	query[nlen] = '\0';
-	int start = 0, end = nlen;
-	while (start < nlen && isspace((unsigned char)query[start]))
-		start++;
-	while (end > start && isspace((unsigned char)query[end - 1]))
-		end--;
-	nlen = end - start;
-	if (nlen <= 0) {
-		mo->file_search_last[0] = '\0';
-		return;
-	}
-	{
-		const char *q = query + start;
-		(void)fallback;
-		(void)q;
-		snprintf(pattern, sizeof(pattern), "*");
-	}
-
 	if (pipe(pipefd) != 0) {
 		wlr_log(WLR_ERROR, "modal file search: pipe failed: %s", strerror(errno));
 		mo->file_search_last[0] = '\0';
 		return;
 	}
-	/* keep read FD out of launched apps and avoid blocking reads */
 	fcntl(pipefd[0], F_SETFD, fcntl(pipefd[0], F_GETFD) | FD_CLOEXEC);
 	fcntl(pipefd[0], F_SETFL, fcntl(pipefd[0], F_GETFL) | O_NONBLOCK);
 
 	pid = fork();
 	if (pid == 0) {
-		char *argv[256];
-		int argc = 0;
-
 		close(pipefd[0]);
 		dup2(pipefd[1], STDOUT_FILENO);
 		dup2(pipefd[1], STDERR_FILENO);
 		close(pipefd[1]);
 		setsid();
 
-		argv[argc++] = "find";
-		for (int i = 0; i < root_count && argc < (int)LENGTH(argv) - 20; i++) {
-			argv[argc++] = (char *)roots[i];
-		}
-		argv[argc++] = "-path";
-		argv[argc++] = "*/.*";
-		argv[argc++] = "-prune";
-		argv[argc++] = "-o";
-		argv[argc++] = "-type";
-		argv[argc++] = "f";
-		argv[argc++] = "-iname";
-		argv[argc++] = pattern;
-		argv[argc++] = "-printf";
-		argv[argc++] = "%f\t%p\t%T@\\n";
-		argv[argc] = NULL;
-		execvp("find", argv);
+		/* Read file search from cache (cache updated at dwl startup) */
+		execlp("sh", "sh", "-c",
+			"cat \"${XDG_CACHE_HOME:-$HOME/.cache}/dwl-file-search\" 2>/dev/null",
+			(char *)NULL);
 		_exit(127);
 	} else if (pid < 0) {
 		close(pipefd[0]);
@@ -12167,14 +12036,55 @@ modal_file_search_start_mode(Monitor *m, int fallback)
 	}
 
 	snprintf(mo->file_search_last, sizeof(mo->file_search_last), "%s", mo->search[1]);
-	wlr_log(WLR_INFO, "modal file search start: '%s' (len=%d, roots=%d, fd=%d pid=%d event=%p fallback=%d)",
-			mo->file_search_last, mo->search_len[1], root_count, mo->file_search_fd, mo->file_search_pid, (void *)mo->file_search_event, mo->file_search_fallback);
+	wlr_log(WLR_INFO, "modal file search start: '%s' (len=%d, fd=%d pid=%d event=%p)",
+			mo->file_search_last, mo->search_len[1], mo->file_search_fd, mo->file_search_pid, (void *)mo->file_search_event);
 }
 
 static void
 modal_file_search_start(Monitor *m)
 {
 	modal_file_search_start_mode(m, 1);
+}
+
+/* Debounce timer callback - starts search after typing pause */
+static int
+modal_file_search_debounce_cb(void *data)
+{
+	Monitor *m = data;
+	ModalOverlay *mo;
+
+	if (!m)
+		return 0;
+	mo = &m->modal;
+
+	/* Only start if search string still differs from last search */
+	if (mo->search_len[1] >= modal_file_search_minlen &&
+	    strncmp(mo->search[1], mo->file_search_last, sizeof(mo->file_search_last)) != 0) {
+		modal_file_search_start(m);
+	}
+
+	return 0;
+}
+
+/* Schedule a debounced file search (150ms delay) */
+static void
+modal_file_search_schedule(Monitor *m)
+{
+	ModalOverlay *mo;
+
+	if (!m)
+		return;
+	mo = &m->modal;
+
+	/* Create timer if it doesn't exist */
+	if (!mo->file_search_timer) {
+		mo->file_search_timer = wl_event_loop_add_timer(event_loop,
+				modal_file_search_debounce_cb, m);
+	}
+
+	/* Reset timer to 150ms */
+	if (mo->file_search_timer)
+		wl_event_source_timer_update(mo->file_search_timer, 150);
 }
 
 static int
@@ -12235,7 +12145,8 @@ modal_file_search_event(int fd, uint32_t mask, void *data)
 		mo->selected[1] = 0;
 	if (mo->active_idx == 1 && mo->result_count[1] > 0)
 		modal_ensure_selection_visible(m);
-	if (m->modal.visible)
+	/* Only render if user is not actively typing */
+	if (m->modal.visible && !mo->render_pending)
 		modal_render(m);
 	return 0;
 }
@@ -12420,8 +12331,7 @@ modal_git_search_event(int fd, uint32_t mask, void *data)
 		mo->selected[2] = 0;
 	if (mo->active_idx == 2 && mo->result_count[2] > 0)
 		modal_ensure_selection_visible(m);
-	if (m->modal.visible)
-		modal_render(m);
+	/* Don't render here - let the render timer handle it */
 	return 0;
 }
 
@@ -12486,7 +12396,16 @@ modal_git_search_start(Monitor *m)
 		return;
 	}
 
-	wlr_log(WLR_INFO, "modal git search start: fd=%d pid=%d", mo->git_search_fd, mo->git_search_pid);
+	/* Save current search query */
+	{
+		int qlen = mo->search_len[2];
+		if (qlen > (int)sizeof(mo->git_search_last) - 1)
+			qlen = (int)sizeof(mo->git_search_last) - 1;
+		if (qlen > 0)
+			memcpy(mo->git_search_last, mo->search[2], (size_t)qlen);
+		mo->git_search_last[qlen] = '\0';
+	}
+	wlr_log(WLR_INFO, "modal git search start: fd=%d pid=%d query='%s'", mo->git_search_fd, mo->git_search_pid, mo->git_search_last);
 }
 
 static void
@@ -12502,14 +12421,53 @@ git_cache_update_start(void)
 			"cache=\"${XDG_CACHE_HOME:-$HOME/.cache}/dwl-git-projects\"; "
 			"fd -H -t d '^\\.git$' -E '.local' -E '.config' -E '.cache' -E '.npm' -E '.cargo' -E 'node_modules' -E '.Trash*' \"$HOME\" /mnt /media /run/media 2>/dev/null | "
 			"sed 's|/\\.git/$||' | while IFS= read -r d; do "
-			"  mtime=$(stat -c %%Y \"$d\" 2>/dev/null || echo 0); "
-			"  printf '%%s\\t%%s\\n' \"$mtime\" \"$d\"; "
+			"  mtime=$(stat -c %Y \"$d\" 2>/dev/null || echo 0); "
+			"  printf '%s\\t%s\\n' \"$mtime\" \"$d\"; "
 			"done | sort -rn | head -500 > \"$cache.tmp\" && mv \"$cache.tmp\" \"$cache\"",
 			(char *)NULL);
 		_exit(127);
 	} else if (pid > 0) {
 		wlr_log(WLR_INFO, "git cache update started: pid=%d", pid);
 	}
+}
+
+static void
+file_cache_update_start(void)
+{
+	pid_t pid;
+
+	pid = fork();
+	if (pid == 0) {
+		setsid();
+		/* Update file search cache in background using fd + awk for speed */
+		execlp("sh", "sh", "-c",
+			"cache=\"${XDG_CACHE_HOME:-$HOME/.cache}/dwl-file-search\"; "
+			"fd -H -t f . -E '.local/share/Trash' -E '.cache' -E '.npm' -E '.cargo' -E 'node_modules' -E '.git' -E '__pycache__' -E '.Trash*' -E '.local' \"$HOME\" /mnt /media /run/media 2>/dev/null | "
+			"awk -F/ '{print $NF\"\\t\"$0\"\\t0\"}' > \"$cache.tmp\" && mv \"$cache.tmp\" \"$cache\"",
+			(char *)NULL);
+		_exit(127);
+	} else if (pid > 0) {
+		wlr_log(WLR_INFO, "file cache update started: pid=%d", pid);
+	}
+}
+
+static int
+cache_update_timer_cb(void *data)
+{
+	(void)data;
+	git_cache_update_start();
+	file_cache_update_start();
+	schedule_cache_update_timer();
+	return 0;
+}
+
+static void
+schedule_cache_update_timer(void)
+{
+	if (!cache_update_timer)
+		return;
+	/* 30 minutes = 30 * 60 * 1000 ms = 1800000 ms */
+	wl_event_source_timer_update(cache_update_timer, 1800000);
 }
 
 static void
@@ -12878,13 +12836,16 @@ modal_update_results(Monitor *m)
 			modal_file_search_stop(m);
 			modal_file_search_clear_results(m);
 			mo->file_search_last[0] = '\0';
+			/* Cancel any pending debounce timer */
+			if (mo->file_search_timer)
+				wl_event_source_timer_update(mo->file_search_timer, 0);
 			return;
 		}
-		if (strncmp(mo->search[1], mo->file_search_last, sizeof(mo->file_search_last)) != 0) {
-			modal_file_search_stop(m);
-			modal_file_search_start(m);
-		} else if (mo->file_search_pid <= 0 && mo->result_count[1] == 0 && !mo->file_search_fallback) {
-			/* No search running and no results; retry current query once */
+		/* Search is started by render_timer_cb, not here */
+		if (mo->file_search_pid <= 0 && mo->result_count[1] == 0 &&
+		    mo->search_len[1] >= modal_file_search_minlen &&
+		    strncmp(mo->search[1], mo->file_search_last, sizeof(mo->file_search_last)) != 0) {
+			/* Start search if not running and query changed */
 			modal_file_search_stop(m);
 			modal_file_search_start(m);
 		}
@@ -12900,13 +12861,18 @@ modal_update_results(Monitor *m)
 	}
 
 	if (active == 2) {
-		/* Git-projects: Start search automatically when tab is selected */
-		if (mo->git_search_pid <= 0 && !mo->git_search_done) {
-			modal_git_search_start(m);
-		}
-		/* Re-filter results if search query changed and search is done */
-		if (mo->git_search_done && mo->search_len[2] > 0) {
-			/* Restart search with new filter */
+		/* Git-projects: Check if search query changed */
+		char current_query[256] = {0};
+		int qlen = mo->search_len[2];
+		if (qlen > (int)sizeof(current_query) - 1)
+			qlen = (int)sizeof(current_query) - 1;
+		if (qlen > 0)
+			memcpy(current_query, mo->search[2], (size_t)qlen);
+		current_query[qlen] = '\0';
+
+		/* Restart search if query changed or not started yet */
+		if (mo->git_search_pid <= 0 &&
+		    (!mo->git_search_done || strcmp(current_query, mo->git_search_last) != 0)) {
 			mo->git_search_done = 0;
 			modal_git_search_start(m);
 		}
@@ -13051,6 +13017,112 @@ modal_prewarm(Monitor *m)
 	m->modal.scroll[0] = 0;
 }
 
+/* Fast update of just the search field text (avoids full re-render) */
+static void
+modal_render_search_field(Monitor *m)
+{
+	ModalOverlay *mo;
+	int btn_h, field_h, line_h, pad;
+	struct wlr_scene_node *node, *tmp;
+	const char *text;
+	const char *to_draw;
+
+	if (!m || !m->modal.tree)
+		return;
+	mo = &m->modal;
+	if (!mo->visible || mo->width <= 0 || mo->height <= 0)
+		return;
+
+	/* Check if search text actually changed */
+	if (strcmp(mo->search[mo->active_idx], mo->search_rendered[mo->active_idx]) == 0)
+		return;
+
+	/* Destroy and recreate only the search field tree */
+	if (mo->search_field_tree) {
+		wl_list_for_each_safe(node, tmp, &mo->search_field_tree->children, link)
+			wlr_scene_node_destroy(node);
+	} else {
+		mo->search_field_tree = wlr_scene_tree_create(mo->tree);
+		if (!mo->search_field_tree)
+			return;
+	}
+
+	modal_layout_metrics(&btn_h, &field_h, &line_h, &pad);
+
+	text = mo->search[mo->active_idx];
+	to_draw = (text && *text) ? text : "Type to search...";
+
+	{
+		int field_x = pad;
+		int field_y = btn_h + pad;
+		int field_w = mo->width - pad * 2;
+		int field_h_use = field_h > 20 ? field_h : 20;
+		StatusModule mod = {0};
+		int text_w, text_x;
+
+		if (field_w < 20) field_w = 20;
+		wlr_scene_node_set_position(&mo->search_field_tree->node, 0, field_y);
+		mod.tree = mo->search_field_tree;
+		/* Center text */
+		text_w = status_text_width(to_draw);
+		text_x = field_x + (field_w - text_w) / 2;
+		if (text_x < field_x + 6)
+			text_x = field_x + 6;
+		tray_render_label(&mod, to_draw, text_x, field_h_use, statusbar_fg);
+	}
+
+	snprintf(mo->search_rendered[mo->active_idx], sizeof(mo->search_rendered[0]),
+			"%s", mo->search[mo->active_idx]);
+}
+
+/* Timer callback - updates and renders after typing stops (300ms) */
+static int
+modal_render_timer_cb(void *data)
+{
+	Monitor *m = data;
+	ModalOverlay *mo;
+	if (!m || !m->modal.visible)
+		return 0;
+	mo = &m->modal;
+
+	if (mo->render_pending) {
+		mo->render_pending = 0;
+		/* For file search: start search directly with current text */
+		if (mo->active_idx == 1 && mo->search_len[1] >= modal_file_search_minlen) {
+			modal_file_search_stop(m);
+			modal_file_search_start(m);
+			/* Results will trigger render via modal_file_search_event */
+		} else {
+			/* Non-file-search: render immediately */
+			modal_update_results(m);
+			modal_render(m);
+		}
+	}
+	return 0;
+}
+
+/* Schedule delayed full render (resets on each keystroke) */
+static void
+modal_schedule_render(Monitor *m)
+{
+	ModalOverlay *mo;
+
+	if (!m)
+		return;
+	mo = &m->modal;
+
+	mo->render_pending = 1;
+
+	/* Create timer if needed */
+	if (!mo->render_timer) {
+		mo->render_timer = wl_event_loop_add_timer(event_loop, modal_render_timer_cb, m);
+	}
+
+	/* Reset timer to 300ms - only fires after typing stops */
+	if (mo->render_timer)
+		wl_event_source_timer_update(mo->render_timer, 300);
+}
+
 static void
 modal_render(Monitor *m)
 {
@@ -13077,7 +13149,7 @@ modal_render(Monitor *m)
 		last_w = btn_w;
 	if (mo->active_idx < 0 || mo->active_idx > 2)
 		mo->active_idx = 0;
-	modal_update_results(m);
+	/* NOTE: modal_update_results is called by keypress, not here */
 
 	/* clear existing non-bg nodes */
 	wl_list_for_each_safe(node, tmp, &mo->tree->children, link) {
@@ -13085,6 +13157,10 @@ modal_render(Monitor *m)
 			continue;
 		wlr_scene_node_destroy(node);
 	}
+	/* Reset cached search field since it was destroyed above */
+	mo->search_field_tree = NULL;
+	for (int i = 0; i < 3; i++)
+		mo->search_rendered[i][0] = '\0';
 
 	/* redraw background */
 	if (mo->bg) {
@@ -13135,7 +13211,6 @@ modal_render(Monitor *m)
 		struct wlr_scene_tree *row;
 		StatusModule mod = {0};
 		int text_x;
-		int text_w;
 
 		if (field_w < 20)
 			field_w = 20;
@@ -13150,15 +13225,21 @@ modal_render(Monitor *m)
 			drawrect(mo->bg, field_x + field_w - 1, field_y, 1, field_h, border);
 		}
 
-		row = wlr_scene_tree_create(mo->tree);
-		if (row) {
-			wlr_scene_node_set_position(&row->node, 0, field_y);
-			mod.tree = row;
-			text_w = status_text_width(to_draw);
+		/* Use search_field_tree so it's consistent with modal_render_search_field */
+		if (!mo->search_field_tree)
+			mo->search_field_tree = wlr_scene_tree_create(mo->tree);
+		if (mo->search_field_tree) {
+			int text_w = status_text_width(to_draw);
+			wlr_scene_node_set_position(&mo->search_field_tree->node, 0, field_y);
+			mod.tree = mo->search_field_tree;
+			/* Center text */
 			text_x = field_x + (field_w - text_w) / 2;
 			if (text_x < field_x + 6)
 				text_x = field_x + 6;
 			tray_render_label(&mod, to_draw, text_x, field_h, statusbar_fg);
+			/* Mark as rendered */
+			snprintf(mo->search_rendered[mo->active_idx], sizeof(mo->search_rendered[0]),
+					"%s", mo->search[mo->active_idx]);
 		}
 	}
 
@@ -15006,12 +15087,16 @@ initstatusbar(Monitor *m)
 			for (int i = 0; i < 3; i++) {
 				m->modal.search[i][0] = '\0';
 				m->modal.search_len[i] = 0;
+				m->modal.search_rendered[i][0] = '\0';
 				m->modal.result_count[i] = 0;
 				for (int j = 0; j < (int)LENGTH(m->modal.results[i]); j++)
 					m->modal.results[i][j][0] = '\0';
 				m->modal.selected[i] = -1;
 				m->modal.scroll[i] = 0;
 			}
+			m->modal.search_field_tree = NULL;
+			m->modal.render_timer = NULL;
+			m->modal.render_pending = 0;
 				for (int i = 0; i < (int)LENGTH(m->modal.file_results_path); i++) {
 					m->modal.file_results_name[i][0] = '\0';
 					m->modal.file_results_path[i][0] = '\0';
@@ -15790,15 +15875,33 @@ keypress(struct wl_listener *listener, void *data)
 		}
 		if (modal_mon) {
 			int consumed = 0;
+			int is_text_input = 0;
 			for (i = 0; i < nsyms; i++) {
-				if (modal_handle_key(modal_mon, mods, syms[i])) {
+				xkb_keysym_t s = syms[i];
+				/* Check if this is a text input key (printable or backspace) */
+				if ((s >= 0x20 && s <= 0x7e) || s == XKB_KEY_BackSpace)
+					is_text_input = 1;
+				if (modal_handle_key(modal_mon, mods, s)) {
 					handled = 1;
 					consumed = 1;
 				}
 			}
 			if (consumed) {
-				modal_update_results(modal_mon);
-				modal_render(modal_mon);
+				int is_file_search = (modal_mon->modal.active_idx == 1);
+				if (is_text_input && is_file_search) {
+					/* File search: show text immediately, delay search 300ms */
+					modal_render_search_field(modal_mon);
+					/* Schedule search + full render after 300ms */
+					if (!modal_mon->modal.render_timer)
+						modal_mon->modal.render_timer = wl_event_loop_add_timer(
+							event_loop, modal_render_timer_cb, modal_mon);
+					modal_mon->modal.render_pending = 1;
+					wl_event_source_timer_update(modal_mon->modal.render_timer, 300);
+				} else {
+					/* App launcher, git-projects, navigation: instant */
+					modal_update_results(modal_mon);
+					modal_render(modal_mon);
+				}
 			}
 		}
 		if (!handled) {
@@ -15812,7 +15915,9 @@ keypress(struct wl_listener *listener, void *data)
 		}
 	}
 
-	if (handled && group->wlr_group->keyboard.repeat_info.delay > 0) {
+	/* Don't enable key repeat for modal text input to avoid double characters.
+	 * Only allow repeat for navigation keys (arrows, backspace) in modal. */
+	if (handled && group->wlr_group->keyboard.repeat_info.delay > 0 && !modal_mon) {
 		group->mods = mods;
 		group->keysyms = syms;
 		group->nsyms = nsyms;
@@ -19064,6 +19169,7 @@ setup(void)
 	status_timer = wl_event_loop_add_timer(event_loop, updatestatusclock, NULL);
 	status_cpu_timer = wl_event_loop_add_timer(event_loop, updatestatuscpu, NULL);
 	status_hover_timer = wl_event_loop_add_timer(event_loop, updatehoverfade, NULL);
+	cache_update_timer = wl_event_loop_add_timer(event_loop, cache_update_timer_cb, NULL);
 	tray_init();
 	fcft_initialized = fcft_init(FCFT_LOG_COLORIZE_NEVER, 0, FCFT_LOG_CLASS_ERROR);
 	if (!fcft_initialized)
@@ -20023,6 +20129,8 @@ main(int argc, char *argv[])
 		die("XDG_RUNTIME_DIR must be set");
 	setup();
 	git_cache_update_start();
+	file_cache_update_start();
+	schedule_cache_update_timer();
 	run(startup_cmd);
 	cleanup();
 	return EXIT_SUCCESS;
