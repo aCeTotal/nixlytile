@@ -291,6 +291,13 @@ typedef struct {
 	char git_search_buf[4096];
 	int git_search_done;
 	char git_search_last[256];
+	/* Cached results scene for fast navigation */
+	struct wlr_scene_tree *results_tree;
+	int last_scroll;
+	int last_selected;
+	/* Cached highlight rects for instant navigation */
+	struct wlr_scene_rect *row_highlights[MODAL_MAX_RESULTS];
+	int row_highlight_count;
 } ModalOverlay;
 
 typedef struct {
@@ -944,6 +951,8 @@ static void toggletag(const Arg *arg);
 static void toggleview(const Arg *arg);
 static void modal_show(const Arg *arg);
 static void modal_render(Monitor *m);
+static void modal_render_results(Monitor *m);
+static void modal_update_selection(Monitor *m);
 static void modal_hide(Monitor *m);
 static void modal_hide_all(void);
 static Monitor *modal_visible_monitor(void);
@@ -12331,7 +12340,9 @@ modal_git_search_event(int fd, uint32_t mask, void *data)
 		mo->selected[2] = 0;
 	if (mo->active_idx == 2 && mo->result_count[2] > 0)
 		modal_ensure_selection_visible(m);
-	/* Don't render here - let the render timer handle it */
+	/* Render after receiving git search results */
+	if (mo->active_idx == 2)
+		modal_render(m);
 	return 0;
 }
 
@@ -12439,10 +12450,11 @@ file_cache_update_start(void)
 	pid = fork();
 	if (pid == 0) {
 		setsid();
-		/* Update file search cache in background using fd + awk for speed */
+		/* Update file search cache in background using fd + awk for speed
+		 * No -H flag = ignores hidden files/directories by default */
 		execlp("sh", "sh", "-c",
 			"cache=\"${XDG_CACHE_HOME:-$HOME/.cache}/dwl-file-search\"; "
-			"fd -H -t f . -E '.local/share/Trash' -E '.cache' -E '.npm' -E '.cargo' -E 'node_modules' -E '.git' -E '__pycache__' -E '.Trash*' -E '.local' \"$HOME\" /mnt /media /run/media 2>/dev/null | "
+			"fd -t f . -E 'node_modules' -E '__pycache__' \"$HOME\" /mnt /media /run/media 2>/dev/null | "
 			"awk -F/ '{print $NF\"\\t\"$0\"\\t0\"}' > \"$cache.tmp\" && mv \"$cache.tmp\" \"$cache\"",
 			(char *)NULL);
 		_exit(127);
@@ -12466,8 +12478,8 @@ schedule_cache_update_timer(void)
 {
 	if (!cache_update_timer)
 		return;
-	/* 30 minutes = 30 * 60 * 1000 ms = 1800000 ms */
-	wl_event_source_timer_update(cache_update_timer, 1800000);
+	/* 10 minutes = 10 * 60 * 1000 ms = 600000 ms */
+	wl_event_source_timer_update(cache_update_timer, 600000);
 }
 
 static void
@@ -13157,8 +13169,10 @@ modal_render(Monitor *m)
 			continue;
 		wlr_scene_node_destroy(node);
 	}
-	/* Reset cached search field since it was destroyed above */
+	/* Reset cached trees since they were destroyed above */
 	mo->search_field_tree = NULL;
+	mo->results_tree = NULL;
+	mo->row_highlight_count = 0;
 	for (int i = 0; i < 3; i++)
 		mo->search_rendered[i][0] = '\0';
 
@@ -13243,95 +13257,207 @@ modal_render(Monitor *m)
 		}
 	}
 
-	/* results list */
-	if (mo->active_idx >= 0 && mo->active_idx < 3 && mo->result_count[mo->active_idx] > 0) {
-		int line_y = btn_h + pad + field_h + pad;
-		int max_lines = modal_max_visible_lines(m);
-		int start = mo->scroll[mo->active_idx];
-		int max_start;
-		int col_name_w = 0, col_path_w = 0, col_gap = 12;
+	/* results list - use the dedicated function */
+	modal_render_results(m);
 
-		if (max_lines <= 0)
-			return;
-		max_start = mo->result_count[mo->active_idx] - max_lines;
-		if (max_start < 0)
-			max_start = 0;
-		if (start < 0)
-			start = 0;
-		if (start > max_start)
-			start = max_start;
-		mo->scroll[mo->active_idx] = start;
-
-		if (mo->active_idx == 1) {
-			int total_w = mo->width - pad * 2 - 4;
-			int name_min = 80;
-			int path_min = 120;
-			col_name_w = total_w / 2;
-			if (col_name_w < name_min)
-				col_name_w = name_min;
-			col_path_w = total_w - col_name_w - col_gap;
-			if (col_path_w < path_min) {
-				col_path_w = path_min;
-				col_name_w = total_w - col_gap - col_path_w;
-			}
-			if (col_name_w < name_min)
-				col_name_w = name_min;
-		}
-
-		for (int i = 0; i < max_lines && (start + i) < mo->result_count[mo->active_idx]; i++) {
-			int idx = start + i;
-			struct wlr_scene_tree *row = wlr_scene_tree_create(mo->tree);
+	/* Hint text at bottom for file search */
+	if (mo->active_idx == 1) {
+		struct wlr_scene_tree *hint = wlr_scene_tree_create(mo->tree);
+		if (hint) {
 			StatusModule mod = {0};
-			char text_buf[MODAL_RESULT_LEN];
-			int max_px = mo->width - pad * 2 - 8;
-			char name_buf[128];
-			char path_buf[128];
-			char short_path[128];
-			const char *name = mo->file_results_name[idx];
-			const char *path = mo->file_results_path[idx];
-			char path_dir[PATH_MAX];
-			int path_w = 0;
-			int path_x = 0;
-			char *slash = NULL;
+			const char *hint_text = "Super + E to open all in Thunar";
+			int hint_h = 20;
+			int hint_y = mo->height - hint_h - 4;
+			int text_w = status_text_width(hint_text);
+			int text_x = (mo->width - text_w) / 2;
+			const float hint_fg[4] = {0.6f, 0.6f, 0.6f, 1.0f};
 
-			if (!row)
-				continue;
-			wlr_scene_node_set_position(&row->node, 0, line_y + i * line_h);
-			mod.tree = row;
-			if (mo->selected[mo->active_idx] == idx)
-				drawrect(row, pad - 2, 0, mo->width - pad * 2 + 4, line_h, statusbar_tag_active_bg);
-
-			if (mo->active_idx == 1) {
-				if (path) {
-					snprintf(path_dir, sizeof(path_dir), "%s", path);
-					slash = strrchr(path_dir, '/');
-					if (slash && slash != path_dir)
-						*slash = '\0';
-					else if (slash)
-						*(slash + 1) = '\0';
-				} else {
-					snprintf(path_dir, sizeof(path_dir), ".");
-				}
-				shorten_path_display(path_dir, short_path, sizeof(short_path));
-				modal_truncate_to_width(name ? name : "", name_buf, sizeof(name_buf), col_name_w);
-				modal_truncate_to_width(short_path, path_buf, sizeof(path_buf), col_path_w);
-				path_w = status_text_width(path_buf);
-				path_x = mo->width - pad - path_w;
-				if (path_x < pad + 10)
-					path_x = pad + 10;
-				tray_render_label(&mod, name_buf[0] ? name_buf : "--", pad, line_h, statusbar_fg);
-				tray_render_label(&mod, path_buf[0] ? path_buf : "--", path_x, line_h, statusbar_fg);
-			} else {
-				if (max_px < 40)
-					max_px = 40;
-				modal_truncate_to_width(mo->results[mo->active_idx][idx],
-						text_buf, sizeof(text_buf), max_px);
-				if (!text_buf[0])
-					snprintf(text_buf, sizeof(text_buf), "%s", mo->results[mo->active_idx][idx]);
-				tray_render_label(&mod, text_buf, pad, line_h, statusbar_fg);
-			}
+			wlr_scene_node_set_position(&hint->node, 0, hint_y);
+			mod.tree = hint;
+			/* Small background bar */
+			drawrect(hint, 0, 0, mo->width, hint_h, statusbar_popup_bg);
+			tray_render_label(&mod, hint_text, text_x, hint_h, hint_fg);
 		}
 	}
+}
+
+/* Fast results-only render for navigation - just updates the results area */
+static void
+modal_render_results(Monitor *m)
+{
+	ModalOverlay *mo;
+	int btn_h, field_h, line_h, pad;
+	int max_lines, start, max_start;
+	int col_name_w = 0, col_path_w = 0, col_gap = 12;
+	int line_y;
+	int rendered_count = 0;
+
+	if (!m || !m->modal.tree)
+		return;
+	mo = &m->modal;
+	if (!mo->visible || mo->width <= 0 || mo->height <= 0)
+		return;
+	if (mo->active_idx < 0 || mo->active_idx > 2)
+		return;
+	if (mo->result_count[mo->active_idx] <= 0)
+		return;
+
+	modal_layout_metrics(&btn_h, &field_h, &line_h, &pad);
+	line_y = btn_h + pad + field_h + pad;
+
+	/* Destroy old results tree if it exists */
+	if (mo->results_tree) {
+		wlr_scene_node_destroy(&mo->results_tree->node);
+		mo->results_tree = NULL;
+	}
+	/* Clear cached highlights */
+	mo->row_highlight_count = 0;
+	for (int i = 0; i < MODAL_MAX_RESULTS; i++)
+		mo->row_highlights[i] = NULL;
+
+	/* Create new results tree */
+	mo->results_tree = wlr_scene_tree_create(mo->tree);
+	if (!mo->results_tree)
+		return;
+	wlr_scene_node_set_position(&mo->results_tree->node, 0, line_y);
+
+	max_lines = modal_max_visible_lines(m);
+	if (max_lines <= 0)
+		return;
+
+	start = mo->scroll[mo->active_idx];
+	max_start = mo->result_count[mo->active_idx] - max_lines;
+	if (max_start < 0)
+		max_start = 0;
+	if (start < 0)
+		start = 0;
+	if (start > max_start)
+		start = max_start;
+	mo->scroll[mo->active_idx] = start;
+	mo->last_scroll = start;
+	mo->last_selected = mo->selected[mo->active_idx];
+
+	if (mo->active_idx == 1) {
+		int total_w = mo->width - pad * 2 - 4;
+		int name_min = 80;
+		int path_min = 120;
+		col_name_w = total_w / 2;
+		if (col_name_w < name_min)
+			col_name_w = name_min;
+		col_path_w = total_w - col_name_w - col_gap;
+		if (col_path_w < path_min) {
+			col_path_w = path_min;
+			col_name_w = total_w - col_gap - col_path_w;
+		}
+		if (col_name_w < name_min)
+			col_name_w = name_min;
+	}
+
+	for (int i = 0; i < max_lines && (start + i) < mo->result_count[mo->active_idx]; i++) {
+		int idx = start + i;
+		struct wlr_scene_tree *row = wlr_scene_tree_create(mo->results_tree);
+		struct wlr_scene_rect *highlight;
+		StatusModule mod = {0};
+		char text_buf[MODAL_RESULT_LEN];
+		int max_px = mo->width - pad * 2 - 8;
+		char name_buf[128];
+		char path_buf[128];
+		char short_path[128];
+		const char *name = mo->file_results_name[idx];
+		const char *path = mo->file_results_path[idx];
+		char path_dir[PATH_MAX];
+		int path_w = 0;
+		int path_x = 0;
+		char *slash = NULL;
+		int is_selected = (mo->selected[mo->active_idx] == idx);
+
+		if (!row)
+			continue;
+		wlr_scene_node_set_position(&row->node, 0, i * line_h);
+		mod.tree = row;
+
+		/* Create highlight rect for this row - always create, toggle visibility */
+		highlight = wlr_scene_rect_create(row, mo->width - pad * 2 + 4, line_h, statusbar_tag_active_bg);
+		if (highlight) {
+			wlr_scene_node_set_position(&highlight->node, pad - 2, 0);
+			wlr_scene_node_set_enabled(&highlight->node, is_selected);
+			if (rendered_count < MODAL_MAX_RESULTS)
+				mo->row_highlights[rendered_count] = highlight;
+		}
+
+		if (mo->active_idx == 1) {
+			if (path) {
+				snprintf(path_dir, sizeof(path_dir), "%s", path);
+				slash = strrchr(path_dir, '/');
+				if (slash && slash != path_dir)
+					*slash = '\0';
+				else if (slash)
+					*(slash + 1) = '\0';
+			} else {
+				snprintf(path_dir, sizeof(path_dir), ".");
+			}
+			shorten_path_display(path_dir, short_path, sizeof(short_path));
+			modal_truncate_to_width(name ? name : "", name_buf, sizeof(name_buf), col_name_w);
+			modal_truncate_to_width(short_path, path_buf, sizeof(path_buf), col_path_w);
+			path_w = status_text_width(path_buf);
+			path_x = mo->width - pad - path_w;
+			if (path_x < pad + 10)
+				path_x = pad + 10;
+			tray_render_label(&mod, name_buf[0] ? name_buf : "--", pad, line_h, statusbar_fg);
+			tray_render_label(&mod, path_buf[0] ? path_buf : "--", path_x, line_h, statusbar_fg);
+		} else {
+			if (max_px < 40)
+				max_px = 40;
+			modal_truncate_to_width(mo->results[mo->active_idx][idx],
+					text_buf, sizeof(text_buf), max_px);
+			if (!text_buf[0])
+				snprintf(text_buf, sizeof(text_buf), "%s", mo->results[mo->active_idx][idx]);
+			tray_render_label(&mod, text_buf, pad, line_h, statusbar_fg);
+		}
+		rendered_count++;
+	}
+	mo->row_highlight_count = rendered_count;
+}
+
+/* Ultra-fast selection update - just toggles highlight visibility */
+static void
+modal_update_selection(Monitor *m)
+{
+	ModalOverlay *mo;
+	int start, sel, old_row, new_row;
+
+	if (!m)
+		return;
+	mo = &m->modal;
+	if (!mo->visible || !mo->results_tree)
+		return;
+	if (mo->active_idx < 0 || mo->active_idx > 2)
+		return;
+	if (mo->row_highlight_count <= 0)
+		return;
+
+	start = mo->scroll[mo->active_idx];
+	sel = mo->selected[mo->active_idx];
+
+	/* If scroll changed, we need full re-render */
+	if (start != mo->last_scroll) {
+		modal_render_results(m);
+		return;
+	}
+
+	/* Calculate old and new row indices within visible area */
+	old_row = mo->last_selected - start;
+	new_row = sel - start;
+
+	/* Hide old highlight */
+	if (old_row >= 0 && old_row < mo->row_highlight_count && mo->row_highlights[old_row])
+		wlr_scene_node_set_enabled(&mo->row_highlights[old_row]->node, 0);
+
+	/* Show new highlight */
+	if (new_row >= 0 && new_row < mo->row_highlight_count && mo->row_highlights[new_row])
+		wlr_scene_node_set_enabled(&mo->row_highlights[new_row]->node, 1);
+
+	mo->last_selected = sel;
 }
 
 static void
@@ -15116,6 +15242,12 @@ initstatusbar(Monitor *m)
 	m->modal.git_search_buf[0] = '\0';
 	m->modal.git_search_done = 0;
 	m->modal.git_result_count = 0;
+	m->modal.results_tree = NULL;
+	m->modal.last_scroll = 0;
+	m->modal.last_selected = -1;
+	m->modal.row_highlight_count = 0;
+	for (int i = 0; i < MODAL_MAX_RESULTS; i++)
+		m->modal.row_highlights[i] = NULL;
 	for (int i = 0; i < (int)LENGTH(m->modal.git_results_path); i++) {
 		m->modal.git_results_name[i][0] = '\0';
 		m->modal.git_results_path[i][0] = '\0';
@@ -15888,7 +16020,17 @@ keypress(struct wl_listener *listener, void *data)
 			}
 			if (consumed) {
 				int is_file_search = (modal_mon->modal.active_idx == 1);
-				if (is_text_input && is_file_search) {
+				int is_navigation = 0;
+				for (i = 0; i < nsyms; i++) {
+					if (syms[i] == XKB_KEY_Up || syms[i] == XKB_KEY_Down) {
+						is_navigation = 1;
+						break;
+					}
+				}
+				if (is_navigation) {
+					/* Navigation keys: ultra-fast highlight toggle only */
+					modal_update_selection(modal_mon);
+				} else if (is_text_input && is_file_search) {
 					/* File search: show text immediately, delay search 300ms */
 					modal_render_search_field(modal_mon);
 					/* Schedule search + full render after 300ms */
@@ -15898,7 +16040,7 @@ keypress(struct wl_listener *listener, void *data)
 					modal_mon->modal.render_pending = 1;
 					wl_event_source_timer_update(modal_mon->modal.render_timer, 300);
 				} else {
-					/* App launcher, git-projects, navigation: instant */
+					/* App launcher, git-projects, text input: full update */
 					modal_update_results(modal_mon);
 					modal_render(modal_mon);
 				}
@@ -15917,15 +16059,33 @@ keypress(struct wl_listener *listener, void *data)
 
 	/* Don't enable key repeat for modal text input to avoid double characters.
 	 * Only allow repeat for navigation keys (arrows, backspace) in modal. */
-	if (handled && group->wlr_group->keyboard.repeat_info.delay > 0 && !modal_mon) {
-		group->mods = mods;
-		group->keysyms = syms;
-		group->nsyms = nsyms;
-		wl_event_source_timer_update(group->key_repeat_source,
-				group->wlr_group->keyboard.repeat_info.delay);
-	} else {
-		group->nsyms = 0;
-		wl_event_source_timer_update(group->key_repeat_source, 0);
+	{
+		int allow_repeat = 0;
+		if (handled && group->wlr_group->keyboard.repeat_info.delay > 0) {
+			if (!modal_mon) {
+				allow_repeat = 1;
+			} else {
+				/* In modal: only allow repeat for navigation keys */
+				for (i = 0; i < nsyms; i++) {
+					xkb_keysym_t s = syms[i];
+					if (s == XKB_KEY_Up || s == XKB_KEY_Down ||
+					    s == XKB_KEY_BackSpace) {
+						allow_repeat = 1;
+						break;
+					}
+				}
+			}
+		}
+		if (allow_repeat) {
+			group->mods = mods;
+			group->keysyms = syms;
+			group->nsyms = nsyms;
+			wl_event_source_timer_update(group->key_repeat_source,
+					group->wlr_group->keyboard.repeat_info.delay);
+		} else {
+			group->nsyms = 0;
+			wl_event_source_timer_update(group->key_repeat_source, 0);
+		}
 	}
 
 	if (handled)
@@ -15970,9 +16130,23 @@ keyrepeat(void *data)
 			keybinding(group->mods, group->keysyms[i]);
 	}
 
-	if (modal_consumed) {
-		modal_update_results(modal_mon);
-		modal_render(modal_mon);
+	if (modal_consumed && modal_mon) {
+		/* Check if this is navigation - use fast path */
+		int is_nav = 0;
+		for (i = 0; i < group->nsyms; i++) {
+			if (group->keysyms[i] == XKB_KEY_Up || group->keysyms[i] == XKB_KEY_Down) {
+				is_nav = 1;
+				break;
+			}
+		}
+		if (is_nav) {
+			/* Ultra-fast: just toggle highlights */
+			modal_update_selection(modal_mon);
+		} else {
+			/* Other keys (backspace): full update */
+			modal_update_results(modal_mon);
+			modal_render(modal_mon);
+		}
 	}
 
 	return 0;
