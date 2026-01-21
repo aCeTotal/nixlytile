@@ -1,0 +1,1 @@
+- Add to memory. Vertical resizing

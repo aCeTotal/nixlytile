@@ -275,6 +275,17 @@ typedef struct {
 	char file_search_buf[4096];
 	char file_search_last[256];
 	struct wl_event_source *file_search_timer;
+	/* Git project search state */
+	char git_results_name[MODAL_MAX_RESULTS][128];
+	char git_results_path[MODAL_MAX_RESULTS][PATH_MAX];
+	time_t git_results_mtime[MODAL_MAX_RESULTS];
+	int git_result_count;
+	pid_t git_search_pid;
+	int git_search_fd;
+	struct wl_event_source *git_search_event;
+	size_t git_search_len;
+	char git_search_buf[4096];
+	int git_search_done;
 } ModalOverlay;
 
 typedef struct {
@@ -940,6 +951,11 @@ static void modal_file_search_stop(Monitor *m);
 static void modal_file_search_start_mode(Monitor *m, int fallback);
 static void modal_file_search_start(Monitor *m);
 static int modal_file_search_event(int fd, uint32_t mask, void *data);
+static void modal_git_search_clear_results(Monitor *m);
+static void modal_git_search_stop(Monitor *m);
+static void modal_git_search_start(Monitor *m);
+static int modal_git_search_event(int fd, uint32_t mask, void *data);
+static void git_cache_update_start(void);
 static void modal_truncate_to_width(const char *src, char *dst, size_t len, int max_px);
 static void shorten_path_display(const char *full, char *out, size_t len);
 static int desktop_entry_cmp_used(const void *a, const void *b);
@@ -5810,6 +5826,7 @@ modal_hide(Monitor *m)
 	if (!m || !m->modal.tree)
 		return;
 	modal_file_search_stop(m);
+	modal_git_search_stop(m);
 	m->modal.visible = 0;
 	wlr_scene_node_set_enabled(&m->modal.tree->node, 0);
 }
@@ -5889,7 +5906,10 @@ modal_show(const Arg *arg)
 		mo->active_idx = 0;
 	modal_file_search_stop(m);
 	modal_file_search_clear_results(m);
+	modal_git_search_stop(m);
+	modal_git_search_clear_results(m);
 	mo->file_search_last[0] = '\0';
+	mo->git_search_done = 0;
 	for (int i = 0; i < 3; i++) {
 		mo->search[i][0] = '\0';
 		mo->search_len[i] = 0;
@@ -7688,7 +7708,11 @@ connect_wifi_ssid(const char *ssid)
 			dup2(fd, STDERR_FILENO);
 			close(fd);
 		}
-		execlp("nmcli", "nmcli", "device", "wifi", "connect", ssid, (char *)NULL);
+		/* Include ifname to ensure proper network switching */
+		if (net_iface[0])
+			execlp("nmcli", "nmcli", "device", "wifi", "connect", ssid, "ifname", net_iface, (char *)NULL);
+		else
+			execlp("nmcli", "nmcli", "device", "wifi", "connect", ssid, (char *)NULL);
 		_exit(0);
 	}
 }
@@ -7700,7 +7724,9 @@ connect_wifi_with_prompt(const char *ssid, int secure)
 		return;
 	/* Prefer zenity if present, else fallback to a terminal prompt */
 	if (secure) {
-		const char *cmd =
+		char cmd[1024];
+		/* Include ifname ($2) to ensure proper network switching */
+		snprintf(cmd, sizeof(cmd),
 			"if command -v zenity >/dev/null 2>&1; then "
 				"pw=$(zenity --entry --hide-text --text=\"Passphrase for $1\" --title=\"Wi-Fi\" 2>/dev/null) || exit 1; "
 			"elif command -v wofi >/dev/null 2>&1; then "
@@ -7710,10 +7736,14 @@ connect_wifi_with_prompt(const char *ssid, int secure)
 			"elif command -v dmenu >/dev/null 2>&1; then "
 				"pw=$(printf '' | dmenu -p \"Passphrase for $1\" 2>/dev/null) || exit 1; "
 			"else exit 1; fi; "
-			"nmcli device wifi connect \"$1\" password \"$pw\" >/dev/null 2>&1";
+			"nmcli device wifi connect \"$1\" password \"$pw\"%s >/dev/null 2>&1",
+			net_iface[0] ? " ifname \"$2\"" : "");
 		if (fork() == 0) {
 			setsid();
-			execl("/bin/sh", "/bin/sh", "-c", cmd, "nmcli-connect", ssid, (char *)NULL);
+			if (net_iface[0])
+				execl("/bin/sh", "/bin/sh", "-c", cmd, "nmcli-connect", ssid, net_iface, (char *)NULL);
+			else
+				execl("/bin/sh", "/bin/sh", "-c", cmd, "nmcli-connect", ssid, (char *)NULL);
 			_exit(0);
 		}
 		return;
@@ -7730,9 +7760,15 @@ connect_wifi_with_password(const char *ssid, const char *password)
 	if (fork() == 0) {
 		char cmd[512];
 		setsid();
-		snprintf(cmd, sizeof(cmd),
-			"nmcli device wifi connect \"%s\" password \"%s\" >/dev/null 2>&1",
-			ssid, password);
+		/* Include ifname to ensure proper network switching */
+		if (net_iface[0])
+			snprintf(cmd, sizeof(cmd),
+				"nmcli device wifi connect \"%s\" password \"%s\" ifname \"%s\" >/dev/null 2>&1",
+				ssid, password, net_iface);
+		else
+			snprintf(cmd, sizeof(cmd),
+				"nmcli device wifi connect \"%s\" password \"%s\" >/dev/null 2>&1",
+				ssid, password);
 		execl("/bin/sh", "/bin/sh", "-c", cmd, (char *)NULL);
 		_exit(0);
 	}
@@ -7796,6 +7832,7 @@ wifi_popup_connect_cb(int fd, uint32_t mask, void *data)
 	} else if (p->try_saved) {
 		/* Saved credentials failed - show password popup */
 		p->try_saved = 0;
+		net_menu_hide_all();  /* Hide menu before showing popup */
 		p->visible = 1;
 		p->error = 0;
 		wifi_popup_render(m);
@@ -7855,9 +7892,33 @@ wifi_popup_connect(Monitor *m)
 		close(pipefd[1]);
 		setsid();
 
-		/* Use execlp directly to avoid shell escaping issues */
-		execlp("nmcli", "nmcli", "device", "wifi", "connect",
-			p->ssid, "password", p->password, (char *)NULL);
+		/* Delete any existing corrupted connection profile first (ignore errors),
+		 * then connect with the new password.
+		 * Use execlp with separate args to avoid shell escaping issues. */
+		{
+			pid_t del_pid = fork();
+			if (del_pid == 0) {
+				/* Delete child - silence output */
+				int null_fd = open("/dev/null", O_RDWR);
+				if (null_fd >= 0) {
+					dup2(null_fd, STDOUT_FILENO);
+					dup2(null_fd, STDERR_FILENO);
+					close(null_fd);
+				}
+				execlp("nmcli", "nmcli", "connection", "delete", p->ssid, (char *)NULL);
+				_exit(0);
+			}
+			if (del_pid > 0)
+				waitpid(del_pid, NULL, 0);
+		}
+
+		/* Now connect with password */
+		if (net_iface[0])
+			execlp("nmcli", "nmcli", "device", "wifi", "connect",
+				p->ssid, "password", p->password, "ifname", net_iface, (char *)NULL);
+		else
+			execlp("nmcli", "nmcli", "device", "wifi", "connect",
+				p->ssid, "password", p->password, (char *)NULL);
 		_exit(1);
 	}
 
@@ -7871,7 +7932,7 @@ wifi_popup_connect(Monitor *m)
 	p->connect_fd = pipefd[0];
 	p->connecting = 1;
 	p->error = 0;
-	p->connect_event = wl_event_loop_add_fd(wl_display_get_event_loop(dpy),
+	p->connect_event = wl_event_loop_add_fd(event_loop,
 		pipefd[0], WL_EVENT_READABLE | WL_EVENT_HANGUP,
 		wifi_popup_connect_cb, m);
 
@@ -7931,8 +7992,12 @@ wifi_try_saved_connect(Monitor *m, const char *ssid)
 		close(pipefd[1]);
 		setsid();
 
-		/* Try connecting without password - nmcli will use saved credentials */
-		execlp("nmcli", "nmcli", "device", "wifi", "connect", ssid, (char *)NULL);
+		/* Try connecting without password - nmcli will use saved credentials
+		 * Include ifname to ensure proper network switching */
+		if (net_iface[0])
+			execlp("nmcli", "nmcli", "device", "wifi", "connect", ssid, "ifname", net_iface, (char *)NULL);
+		else
+			execlp("nmcli", "nmcli", "device", "wifi", "connect", ssid, (char *)NULL);
 		_exit(1);
 	}
 
@@ -7945,7 +8010,7 @@ wifi_try_saved_connect(Monitor *m, const char *ssid)
 	p->connect_pid = pid;
 	p->connect_fd = pipefd[0];
 	p->connecting = 1;
-	p->connect_event = wl_event_loop_add_fd(wl_display_get_event_loop(dpy),
+	p->connect_event = wl_event_loop_add_fd(event_loop,
 		pipefd[0], WL_EVENT_READABLE | WL_EVENT_HANGUP,
 		wifi_popup_connect_cb, m);
 }
@@ -8317,16 +8382,39 @@ wifi_popup_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 		return 1;
 	}
 
-	/* Handle printable characters */
-	if (sym >= 0x20 && sym <= 0x7e && !(mods & (WLR_MODIFIER_CTRL | WLR_MODIFIER_LOGO))) {
-		if (p->password_len + 1 < (int)sizeof(p->password)) {
-			p->password[p->password_len] = (char)sym;
+	/* Handle printable characters
+	 * Allow Ctrl+Alt (AltGr) combinations - on many systems AltGr is Ctrl+Alt
+	 * Only block Ctrl without Alt (real Ctrl shortcuts) and Logo key */
+	{
+		int is_altgr = (mods & WLR_MODIFIER_CTRL) && (mods & WLR_MODIFIER_ALT);
+		int is_ctrl_only = (mods & WLR_MODIFIER_CTRL) && !is_altgr;
+		char ch = 0;
+
+		/* Handle numpad digits (XKB_KEY_KP_0 to XKB_KEY_KP_9) */
+		if (sym >= XKB_KEY_KP_0 && sym <= XKB_KEY_KP_9) {
+			ch = '0' + (sym - XKB_KEY_KP_0);
+		}
+		/* Handle other numpad keys */
+		else if (sym == XKB_KEY_KP_Space) ch = ' ';
+		else if (sym == XKB_KEY_KP_Multiply) ch = '*';
+		else if (sym == XKB_KEY_KP_Add) ch = '+';
+		else if (sym == XKB_KEY_KP_Subtract) ch = '-';
+		else if (sym == XKB_KEY_KP_Decimal) ch = '.';
+		else if (sym == XKB_KEY_KP_Divide) ch = '/';
+		else if (sym == XKB_KEY_KP_Equal) ch = '=';
+		/* Handle regular printable ASCII */
+		else if (sym >= 0x20 && sym <= 0x7e && !is_ctrl_only && !(mods & WLR_MODIFIER_LOGO)) {
+			ch = (char)sym;
+		}
+
+		if (ch && p->password_len + 1 < (int)sizeof(p->password)) {
+			p->password[p->password_len] = ch;
 			p->password_len++;
 			p->password[p->password_len] = '\0';
 			p->error = 0;  /* Clear error on edit */
 			wifi_popup_render(m);
+			return 1;
 		}
-		return 1;
 	}
 
 	return 1; /* Consume all keys while popup is open */
@@ -8578,9 +8666,11 @@ net_menu_submenu_render(Monitor *m)
 	} else {
 		wl_list_for_each(n, &wifi_networks, link) {
 			int w;
+			int is_connected = (net_ssid[0] && strcmp(n->ssid, net_ssid) == 0);
 			count++;
-			snprintf(line, sizeof(line), "%s (%d%%%s)", n->ssid, n->strength,
-					n->secure ? ", secured" : "");
+			snprintf(line, sizeof(line), "%s (%d%%%s%s)", n->ssid, n->strength,
+					n->secure ? ", secured" : "",
+					is_connected ? ", Connected" : "");
 			w = status_text_width(line);
 			if (w > max_w)
 				max_w = w;
@@ -8616,8 +8706,10 @@ net_menu_submenu_render(Monitor *m)
 		wl_list_for_each(n, &wifi_networks, link) {
 			int x = padding;
 			int hover = (menu->submenu_hover == idx);
-			snprintf(line, sizeof(line), "%s (%d%%%s)", n->ssid, n->strength,
-					n->secure ? ", secured" : "");
+			int is_connected = (net_ssid[0] && strcmp(n->ssid, net_ssid) == 0);
+			snprintf(line, sizeof(line), "%s (%d%%%s%s)", n->ssid, n->strength,
+					n->secure ? ", secured" : "",
+					is_connected ? ", Connected" : "");
 			drawrect(menu->submenu_tree, x, y, menu->submenu_width - 2 * padding, row_h,
 					hover ? net_menu_row_bg_hover : net_menu_row_bg);
 			tray_menu_draw_text(menu->submenu_tree, line, x + 4, y, row_h);
@@ -10483,9 +10575,19 @@ net_menu_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 			if (rel_y >= 0) {
 				WifiNetwork *n = wifi_network_at_index(idx);
 				if (n) {
-					/* Always try connecting first - nmcli will use saved credentials */
-					/* For secure networks without saved creds, password popup will appear */
-					wifi_try_saved_connect(m, n->ssid);
+					/* Copy SSID before hiding menu - net_menu_hide_all() frees WifiNetwork structs */
+					char ssid_copy[128];
+					int secure = n->secure;
+					snprintf(ssid_copy, sizeof(ssid_copy), "%s", n->ssid);
+					net_menu_hide_all();
+					if (secure) {
+						/* Secure network: try saved credentials first,
+						 * password popup will appear if not saved */
+						wifi_try_saved_connect(m, ssid_copy);
+					} else {
+						/* Open network: connect directly without password */
+						connect_wifi_ssid(ssid_copy);
+					}
 					return 1;
 				}
 			}
@@ -11608,18 +11710,35 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 				spawn(&arg);
 				modal_hide_all();
 			}
+		} else if (mo->active_idx == 2 && sel >= 0 && sel < mo->result_count[2]) {
+			const char *path = mo->git_results_path[sel];
+			if (path && *path) {
+				char cmd_str[PATH_MAX + 64];
+				char *cmd[4] = { "sh", "-c", cmd_str, NULL };
+				Arg arg;
+				/* Open terminal in the git project directory */
+				snprintf(cmd_str, sizeof(cmd_str), "cd '%s' && alacritty", path);
+				arg.v = cmd;
+				spawn(&arg);
+				modal_hide_all();
+			}
 		}
 		return 1;
 	}
-	if (sym >= 0x20 && sym <= 0x7e &&
-			!(mods & (WLR_MODIFIER_CTRL | WLR_MODIFIER_LOGO))) {
-		int len = mo->search_len[mo->active_idx];
-		if (len + 1 < (int)sizeof(mo->search[0])) {
-			mo->search[mo->active_idx][len] = (char)sym;
-			mo->search[mo->active_idx][len + 1] = '\0';
-			mo->search_len[mo->active_idx] = len + 1;
+	/* Allow Ctrl+Alt (AltGr) combinations - on many systems AltGr is Ctrl+Alt
+	 * Only block Ctrl without Alt (real Ctrl shortcuts) and Logo key */
+	{
+		int is_altgr = (mods & WLR_MODIFIER_CTRL) && (mods & WLR_MODIFIER_ALT);
+		int is_ctrl_only = (mods & WLR_MODIFIER_CTRL) && !is_altgr;
+		if (sym >= 0x20 && sym <= 0x7e && !is_ctrl_only && !(mods & WLR_MODIFIER_LOGO)) {
+			int len = mo->search_len[mo->active_idx];
+			if (len + 1 < (int)sizeof(mo->search[0])) {
+				mo->search[mo->active_idx][len] = (char)sym;
+				mo->search[mo->active_idx][len + 1] = '\0';
+				mo->search_len[mo->active_idx] = len + 1;
+			}
+			return 1;
 		}
-		return 1;
 	}
 
 	return 0;
@@ -12121,6 +12240,278 @@ modal_file_search_event(int fd, uint32_t mask, void *data)
 	return 0;
 }
 
+/* Git project search functions */
+static void
+modal_git_search_clear_results(Monitor *m)
+{
+	ModalOverlay *mo;
+
+	if (!m)
+		return;
+	mo = &m->modal;
+	mo->git_result_count = 0;
+	mo->result_count[2] = 0;
+	for (int i = 0; i < MODAL_MAX_RESULTS; i++) {
+		mo->git_results_name[i][0] = '\0';
+		mo->git_results_path[i][0] = '\0';
+		mo->git_results_mtime[i] = 0;
+		mo->results[2][i][0] = '\0';
+	}
+	mo->selected[2] = -1;
+	mo->scroll[2] = 0;
+}
+
+static void
+modal_git_search_stop(Monitor *m)
+{
+	ModalOverlay *mo;
+
+	if (!m)
+		return;
+	mo = &m->modal;
+
+	if (mo->git_search_event) {
+		wl_event_source_remove(mo->git_search_event);
+		mo->git_search_event = NULL;
+	}
+	if (mo->git_search_fd >= 0) {
+		close(mo->git_search_fd);
+		mo->git_search_fd = -1;
+	}
+	if (mo->git_search_pid > 0) {
+		wlr_log(WLR_INFO, "modal git search stop: killing pid=%d", mo->git_search_pid);
+		kill(mo->git_search_pid, SIGTERM);
+		waitpid(mo->git_search_pid, NULL, WNOHANG);
+		mo->git_search_pid = -1;
+	}
+	mo->git_search_len = 0;
+	mo->git_search_buf[0] = '\0';
+}
+
+static void
+modal_git_search_add_line(Monitor *m, const char *line)
+{
+	ModalOverlay *mo;
+	int idx;
+	const char *tab;
+	double epoch;
+	time_t t;
+	char *name;
+	char path[PATH_MAX];
+	char short_path[128];
+
+	if (!m || !line || !*line)
+		return;
+	mo = &m->modal;
+	if (mo->git_result_count >= MODAL_MAX_RESULTS)
+		return;
+
+	/* Format: "mtime_epoch\tpath" */
+	tab = strchr(line, '\t');
+	if (!tab)
+		return;
+
+	epoch = strtod(line, NULL);
+	t = (time_t)epoch;
+	snprintf(path, sizeof(path), "%s", tab + 1);
+
+	/* Extract project name from path */
+	name = strrchr(path, '/');
+	if (name)
+		name++;
+	else
+		name = path;
+
+	/* Filter by search query if any */
+	if (mo->search_len[2] > 0) {
+		char needle[256];
+		int nlen = mo->search_len[2];
+		if (nlen >= (int)sizeof(needle))
+			nlen = (int)sizeof(needle) - 1;
+		for (int i = 0; i < nlen; i++)
+			needle[i] = (char)tolower((unsigned char)mo->search[2][i]);
+		needle[nlen] = '\0';
+		if (!ci_contains(name, needle) && !ci_contains(path, needle))
+			return;
+	}
+
+	idx = mo->git_result_count;
+	snprintf(mo->git_results_name[idx], sizeof(mo->git_results_name[idx]), "%s", name);
+	snprintf(mo->git_results_path[idx], sizeof(mo->git_results_path[idx]), "%s", path);
+	mo->git_results_mtime[idx] = t;
+
+	shorten_path_display(path, short_path, sizeof(short_path));
+	snprintf(mo->results[2][idx], sizeof(mo->results[2][idx]), "%s", short_path);
+	mo->result_count[2]++;
+	mo->git_result_count++;
+
+	if (mo->selected[2] < 0)
+		mo->selected[2] = 0;
+}
+
+static void
+modal_git_search_flush_buffer(Monitor *m)
+{
+	ModalOverlay *mo;
+	size_t start = 0;
+
+	if (!m)
+		return;
+	mo = &m->modal;
+	for (size_t i = 0; i < mo->git_search_len; i++) {
+		if (mo->git_search_buf[i] == '\n') {
+			mo->git_search_buf[i] = '\0';
+			modal_git_search_add_line(m, mo->git_search_buf + start);
+			if (mo->git_result_count >= MODAL_MAX_RESULTS) {
+				modal_git_search_stop(m);
+				start = mo->git_search_len;
+				break;
+			}
+			start = i + 1;
+		}
+	}
+	if (start > 0 && start < mo->git_search_len) {
+		memmove(mo->git_search_buf, mo->git_search_buf + start, mo->git_search_len - start);
+		mo->git_search_len -= start;
+	} else if (start == mo->git_search_len) {
+		mo->git_search_len = 0;
+	}
+	mo->git_search_buf[mo->git_search_len] = '\0';
+}
+
+static int
+modal_git_search_event(int fd, uint32_t mask, void *data)
+{
+	Monitor *m = data;
+	ModalOverlay *mo;
+	char buf[512];
+	ssize_t n;
+
+	if (!m)
+		return 0;
+	(void)mask;
+	mo = &m->modal;
+	if (fd != mo->git_search_fd)
+		return 0;
+
+	while ((n = read(fd, buf, sizeof(buf) - 1)) > 0) {
+		buf[n] = '\0';
+		size_t space = sizeof(mo->git_search_buf) - mo->git_search_len - 1;
+		if ((size_t)n > space)
+			n = (ssize_t)space;
+		if (n > 0) {
+			memcpy(mo->git_search_buf + mo->git_search_len, buf, (size_t)n);
+			mo->git_search_len += (size_t)n;
+			mo->git_search_buf[mo->git_search_len] = '\0';
+		}
+		modal_git_search_flush_buffer(m);
+		if (mo->git_result_count >= MODAL_MAX_RESULTS)
+			break;
+	}
+
+	if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+		mo->git_search_done = 1;
+		modal_git_search_stop(m);
+		if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
+			wlr_log(WLR_ERROR, "modal git search read error: %s", strerror(errno));
+	}
+
+	if (mo->result_count[2] > 0 && mo->selected[2] < 0)
+		mo->selected[2] = 0;
+	if (mo->active_idx == 2 && mo->result_count[2] > 0)
+		modal_ensure_selection_visible(m);
+	if (m->modal.visible)
+		modal_render(m);
+	return 0;
+}
+
+static void
+modal_git_search_start(Monitor *m)
+{
+	ModalOverlay *mo;
+	pid_t pid;
+	int pipefd[2];
+	const char *home;
+
+	if (!m)
+		return;
+	mo = &m->modal;
+
+	modal_git_search_stop(m);
+	modal_git_search_clear_results(m);
+	mo->git_search_done = 0;
+
+	home = getenv("HOME");
+	if (!home || !*home)
+		home = "/";
+
+	if (pipe(pipefd) != 0) {
+		wlr_log(WLR_ERROR, "modal git search: pipe failed: %s", strerror(errno));
+		return;
+	}
+	fcntl(pipefd[0], F_SETFD, fcntl(pipefd[0], F_GETFD) | FD_CLOEXEC);
+	fcntl(pipefd[0], F_SETFL, fcntl(pipefd[0], F_GETFL) | O_NONBLOCK);
+
+	pid = fork();
+	if (pid == 0) {
+		close(pipefd[0]);
+		dup2(pipefd[1], STDOUT_FILENO);
+		dup2(pipefd[1], STDERR_FILENO);
+		close(pipefd[1]);
+		setsid();
+
+		/* Read git projects from cache only (cache updated at dwl startup) */
+		execlp("sh", "sh", "-c",
+			"cat \"${XDG_CACHE_HOME:-$HOME/.cache}/dwl-git-projects\" 2>/dev/null",
+			(char *)NULL);
+		_exit(127);
+	} else if (pid < 0) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		wlr_log(WLR_ERROR, "modal git search: fork failed: %s", strerror(errno));
+		return;
+	}
+
+	close(pipefd[1]);
+	mo->git_search_pid = pid;
+	mo->git_search_fd = pipefd[0];
+	fcntl(mo->git_search_fd, F_SETFL, fcntl(mo->git_search_fd, F_GETFL) | O_NONBLOCK);
+	mo->git_search_len = 0;
+	mo->git_search_buf[0] = '\0';
+	mo->git_search_event = wl_event_loop_add_fd(event_loop, mo->git_search_fd,
+			WL_EVENT_READABLE | WL_EVENT_HANGUP, modal_git_search_event, m);
+	if (!mo->git_search_event) {
+		wlr_log(WLR_ERROR, "modal git search: failed to watch results fd");
+		modal_git_search_stop(m);
+		return;
+	}
+
+	wlr_log(WLR_INFO, "modal git search start: fd=%d pid=%d", mo->git_search_fd, mo->git_search_pid);
+}
+
+static void
+git_cache_update_start(void)
+{
+	pid_t pid;
+
+	pid = fork();
+	if (pid == 0) {
+		setsid();
+		/* Update git projects cache in background */
+		execlp("sh", "sh", "-c",
+			"cache=\"${XDG_CACHE_HOME:-$HOME/.cache}/dwl-git-projects\"; "
+			"fd -H -t d '^\\.git$' -E '.local' -E '.config' -E '.cache' -E '.npm' -E '.cargo' -E 'node_modules' -E '.Trash*' \"$HOME\" /mnt /media /run/media 2>/dev/null | "
+			"sed 's|/\\.git/$||' | while IFS= read -r d; do "
+			"  mtime=$(stat -c %%Y \"$d\" 2>/dev/null || echo 0); "
+			"  printf '%%s\\t%%s\\n' \"$mtime\" \"$d\"; "
+			"done | sort -rn | head -500 > \"$cache.tmp\" && mv \"$cache.tmp\" \"$cache\"",
+			(char *)NULL);
+		_exit(127);
+	} else if (pid > 0) {
+		wlr_log(WLR_INFO, "git cache update started: pid=%d", pid);
+	}
+}
+
 static void
 modal_truncate_to_width(const char *src, char *dst, size_t len, int max_px)
 {
@@ -12479,6 +12870,8 @@ modal_update_results(Monitor *m)
 
 	if (active != 1 && mo->file_search_pid > 0)
 		modal_file_search_stop(m);
+	if (active != 2 && mo->git_search_pid > 0)
+		modal_git_search_stop(m);
 
 	if (active == 1) {
 		if (mo->search_len[1] < modal_file_search_minlen) {
@@ -12502,6 +12895,28 @@ modal_update_results(Monitor *m)
 		} else {
 			mo->selected[1] = -1;
 			mo->scroll[1] = 0;
+		}
+		return;
+	}
+
+	if (active == 2) {
+		/* Git-projects: Start search automatically when tab is selected */
+		if (mo->git_search_pid <= 0 && !mo->git_search_done) {
+			modal_git_search_start(m);
+		}
+		/* Re-filter results if search query changed and search is done */
+		if (mo->git_search_done && mo->search_len[2] > 0) {
+			/* Restart search with new filter */
+			mo->git_search_done = 0;
+			modal_git_search_start(m);
+		}
+		if (mo->result_count[2] > 0) {
+			if (mo->selected[2] < 0)
+				mo->selected[2] = 0;
+			modal_ensure_selection_visible(m);
+		} else {
+			mo->selected[2] = -1;
+			mo->scroll[2] = 0;
 		}
 		return;
 	}
@@ -12640,7 +13055,7 @@ static void
 modal_render(Monitor *m)
 {
 	static const char *labels[] = {
-		"App Launcher", "File Search", "Grep Search"
+		"App Launcher", "File Search", "Git-projects"
 	};
 	ModalOverlay *mo;
 	int btn_h, btn_w, last_w, field_h, line_h, pad;
@@ -14609,6 +15024,18 @@ initstatusbar(Monitor *m)
 	m->modal.file_search_len = 0;
 	m->modal.file_search_buf[0] = '\0';
 	m->modal.file_search_last[0] = '\0';
+	m->modal.git_search_pid = -1;
+	m->modal.git_search_fd = -1;
+	m->modal.git_search_event = NULL;
+	m->modal.git_search_len = 0;
+	m->modal.git_search_buf[0] = '\0';
+	m->modal.git_search_done = 0;
+	m->modal.git_result_count = 0;
+	for (int i = 0; i < (int)LENGTH(m->modal.git_results_path); i++) {
+		m->modal.git_results_name[i][0] = '\0';
+		m->modal.git_results_path[i][0] = '\0';
+		m->modal.git_results_mtime[i] = 0;
+	}
 			wlr_scene_node_set_enabled(&m->modal.tree->node, 0);
 		}
 	}
@@ -14955,13 +15382,13 @@ destroynotify(struct wl_listener *listener, void *data)
 {
 	/* Called when the xdg_toplevel is destroyed. */
 	Client *c = wl_container_of(listener, c, destroy);
+	Monitor *m;
 	wl_list_remove(&c->destroy.link);
 	wl_list_remove(&c->set_title.link);
 	wl_list_remove(&c->fullscreen.link);
-	/* We check if the destroyed client was part of any tiled_list, to catch
-	 * client removals even if they would not be currently managed by btrtile */
-	if (selmon)
-		remove_client(selmon, c);
+	/* Remove client from all monitors' layout trees and rebalance */
+	wl_list_for_each(m, &mons, link)
+		remove_client(m, c);
 #ifdef XWAYLAND
 	if (c->type != XDGShell) {
 		wl_list_remove(&c->activate.link);
@@ -16223,10 +16650,19 @@ pointerfocus(Client *c, struct wlr_surface *surface, double sx, double sy,
 		uint32_t time)
 {
 	struct timespec now;
+	static int in_pointerfocus = 0;
 
-	if (surface != seat->pointer_state.focused_surface &&
-			sloppyfocus && time && c && !client_is_unmanaged(c))
+	/* Focus follows mouse: focus client under cursor.
+	 * Also update focus on internal calls (time==0) after layout changes
+	 * so the tile under the cursor gets focus after rebalancing.
+	 * Use re-entry guard to prevent infinite recursion since focusclient
+	 * can trigger motionnotify which calls pointerfocus again. */
+	if (!in_pointerfocus && surface != seat->pointer_state.focused_surface &&
+			sloppyfocus && c && !client_is_unmanaged(c)) {
+		in_pointerfocus = 1;
 		focusclient(c, 0);
+		in_pointerfocus = 0;
+	}
 
 	/* If surface is NULL, clear pointer focus */
 	if (!surface) {
@@ -19144,6 +19580,9 @@ unmapnotify(struct wl_listener *listener, void *data)
 		}
 	} else {
 		wl_list_remove(&c->link);
+		/* Remove from layout tree and rebalance BEFORE setmon calls arrange() */
+		if (c->mon)
+			remove_client(c->mon, c);
 		setmon(c, NULL, 0);
 		wl_list_remove(&c->flink);
 	}
@@ -19583,6 +20022,7 @@ main(int argc, char *argv[])
 	if (!getenv("XDG_RUNTIME_DIR"))
 		die("XDG_RUNTIME_DIR must be set");
 	setup();
+	git_cache_update_start();
 	run(startup_cmd);
 	cleanup();
 	return EXIT_SUCCESS;

@@ -54,7 +54,6 @@ static void end_tile_drag(void);
 static void swap_columns(Monitor *m, Client *c1, Client *c2);
 static LayoutNode *find_column_root(LayoutNode *node, Monitor *m);
 static unsigned int count_in_column(LayoutNode *col_node, Monitor *m);
-static LayoutNode *find_column_half(LayoutNode *node, Monitor *m);
 static int same_column(Monitor *m, Client *c1, Client *c2);
 static int can_move_tile(Monitor *m, Client *source, Client *target);
 static void swap_tiles_in_tree(Monitor *m, Client *c1, Client *c2);
@@ -176,17 +175,17 @@ apply_layout(Monitor *m, LayoutNode *node,
 		return;
 	}
 
-	/* If we’re here, we have visible clients in both subtrees. */
-	ratio = node->split_ratio;
-	if (ratio < 0.05f)
-		ratio = 0.05f;
-	if (ratio > 0.95f)
-		ratio = 0.95f;
-
 	memset(&left_area, 0, sizeof(left_area));
 	memset(&right_area, 0, sizeof(right_area));
 
 	if (node->is_split_vertically) {
+		/* Vertical split (columns): use stored split_ratio for manual resizing */
+		ratio = node->split_ratio;
+		if (ratio < 0.05f)
+			ratio = 0.05f;
+		if (ratio > 0.95f)
+			ratio = 0.95f;
+
 		mid = (unsigned int)(area.width * ratio);
 		left_area.x      = area.x;
 		left_area.y      = area.y;
@@ -204,7 +203,13 @@ apply_layout(Monitor *m, LayoutNode *node,
 			right_area.width -= gappx / 2;
 		}
 	} else {
-		/* horizontal split */
+		/* Horizontal split (tiles within column): use stored split_ratio for manual resizing */
+		ratio = node->split_ratio;
+		if (ratio < 0.05f)
+			ratio = 0.05f;
+		if (ratio > 0.95f)
+			ratio = 0.95f;
+
 		mid = (unsigned int)(area.height * ratio);
 		left_area.x     = area.x;
 		left_area.y     = area.y;
@@ -241,12 +246,15 @@ btrtile(Monitor *m)
 
 	root = get_current_root(m);
 
-	/* Remove non tiled clients from tree (but keep dragging_client). */
+	/* Remove non-visible clients from tree (but keep dragging_client).
+	 * This includes clients that moved to another tag, became floating,
+	 * fullscreen, or moved to another monitor. */
 	if (*root) {
 		wl_list_for_each(c, &clients, link) {
 			if (c == dragging_client && c->mon == m)
 				continue; /* Keep dragging client in tree to preserve space */
-			if (c->mon == m && !c->isfloating && !c->isfullscreen) {
+			if (VISIBLEON(c, m) && c->mon == m && !c->isfloating && !c->isfullscreen) {
+				/* Client is visible and tiled - keep in tree */
 			} else {
 				remove_client(m, c);
 			}
@@ -388,13 +396,36 @@ init_tree(Monitor *m)
 		m->root[i] = NULL;
 }
 
+/* Reset horizontal split ratios in a column to equal distribution.
+ * For N tiles, each should get 1/N of the height.
+ * In a binary tree, this means ratio = left_count / (left_count + right_count) */
+static void
+reset_column_ratios(LayoutNode *node, Monitor *m)
+{
+	unsigned int left_count, right_count;
+
+	if (!node || node->is_client_node)
+		return;
+
+	/* Only reset horizontal splits (tiles within columns) */
+	if (!node->is_split_vertically) {
+		left_count = visible_count(node->left, m);
+		right_count = visible_count(node->right, m);
+		if (left_count + right_count > 0) {
+			node->split_ratio = (float)left_count / (float)(left_count + right_count);
+		}
+	}
+
+	reset_column_ratios(node->left, m);
+	reset_column_ratios(node->right, m);
+}
+
 static int
 insert_client(Monitor *m, Client *focused_client, Client *new_client)
 {
 	Client *old_client;
 	LayoutNode **root, *old_root,
 	*focused_node, *new_client_node, *old_client_node;
-	unsigned int wider;
 	int place_new_first;
 	unsigned int desired_cols, current_cols, total_tiles, max_tiles;
 	Client *target_client;
@@ -411,15 +442,21 @@ insert_client(Monitor *m, Client *focused_client, Client *new_client)
 		return 0;
 	}
 
-	/* If we have exactly one visible client and need more columns,
-	 * always create a vertical split at the root (side by side) */
-	if (*root && total_tiles == 1 && current_cols < desired_cols) {
-		LayoutNode *new_client_node = create_client_node(new_client);
-		LayoutNode *old_root = *root;
+	/* If no root, new client becomes the root. */
+	if (!*root) {
+		*root = create_client_node(new_client);
+		return 1;
+	}
+
+	/* If we need more columns, create a new column (vertical split at root) */
+	if (current_cols < desired_cols) {
+		new_client_node = create_client_node(new_client);
+		old_root = *root;
 		*root = create_split_node(1, old_root, new_client_node);
 		return 1;
 	}
 
+	/* All columns exist - find the column with fewest tiles and add there */
 	target_client = focused_client;
 	if (!target_client)
 		target_client = pick_target_client(m, NULL);
@@ -427,108 +464,58 @@ insert_client(Monitor *m, Client *focused_client, Client *new_client)
 		target_client = focused_client;
 	focused_client = target_client;
 
-	/* If no root , new client becomes the root. */
-	if (!*root) {
-		*root = create_client_node(new_client);
-		return 1;
-	}
-
-	/* Find the focused_client node,
-	 * if not found split the root. */
+	/* Find the focused_client node */
 	focused_node = focused_client ?
 		find_client_node(*root, focused_client) : NULL;
 	if (!focused_node) {
+		/* No focused node found - add to root with horizontal split */
 		old_root = *root;
 		new_client_node = create_client_node(new_client);
-		/* Vertical split for new column, horizontal for tiles within column */
-		if (current_cols < desired_cols)
-			*root = create_split_node(1, old_root, new_client_node);
-		else
-			*root = create_split_node(0, old_root, new_client_node);
+		*root = create_split_node(0, old_root, new_client_node);
 		return 1;
 	}
 
-	/* Split direction:
-	 * - Need more columns? -> vertical split at ROOT (create column)
-	 * - Tiles within column -> always horizontal split (top/bottom)
-	 * - 4 tiles in column -> FULL, don't allow more */
-	if (current_cols < desired_cols) {
-		/* Need a new column - wrap existing tree in a vertical split at root */
-		new_client_node = create_client_node(new_client);
-		old_root = *root;
-		*root = create_split_node(1, old_root, new_client_node);
-		return 1;
-	}
-
-	/* Turn focused node from a client node into a split node,
-	 * and attach old_client + new_client. */
-	old_client = focused_node->client;
-	old_client_node = create_client_node(old_client);
-	new_client_node = create_client_node(new_client);
-
-	/* Check column constraints */
+	/* Check column constraint (max 4 tiles per column) */
 	{
 		LayoutNode *col_root = find_column_root(focused_node, m);
 		unsigned int col_tiles = count_in_column(col_root, m);
 
 		if (col_tiles >= 4) {
 			/* Column is full - don't allow more tiles */
-			free(old_client_node);
-			free(new_client_node);
 			return 0;
-		} else if (col_tiles == 1) {
-			/* If we don't have enough columns filled yet, create new column (vertical split)
-			 * This ensures 2 tiles are always side-by-side, not stacked */
-			if (total_tiles < desired_cols) {
-				wider = 1; /* Create new column (side by side) */
-			} else {
-				wider = 0; /* Columns filled, stack within column (top/bottom) */
-			}
-		} else {
-			/* Check if target half (top/bottom) is full (max 2 tiles per half) */
-			LayoutNode *half = find_column_half(focused_node, m);
-			if (half && visible_count(half, m) >= 2) {
-				/* This half already has 2 tiles - block */
-				free(old_client_node);
-				free(new_client_node);
-				return 0;
-			}
-			wider = 1; /* After horizontal split: vertical (left/right) */
 		}
 	}
-	focused_node->is_client_node = 0;
-	focused_node->client         = NULL;
-	focused_node->is_split_vertically = (wider ? 1 : 0);
 
-	/* Pick side deterministically to balance columns, not cursor position. */
-	place_new_first = 0;
-	if (focused_node->is_split_vertically) {
-		unsigned int old_count = visible_count(old_client_node, m);
-		unsigned int new_count = visible_count(new_client_node, m);
-		if (old_count > new_count)
-			place_new_first = 1;
-		else if (old_count == new_count)
-			place_new_first = split_side_toggle;
-	} else {
-		unsigned int old_count = visible_count(old_client_node, m);
-		unsigned int new_count = visible_count(new_client_node, m);
-		if (old_count > new_count)
-			place_new_first = 1;
-		else if (old_count == new_count)
-			place_new_first = split_side_toggle;
-	}
+	/* Turn focused node from a client node into a horizontal split node,
+	 * and attach old_client + new_client (stacked vertically). */
+	old_client = focused_node->client;
+	old_client_node = create_client_node(old_client);
+	new_client_node = create_client_node(new_client);
+
+	focused_node->is_client_node = 0;
+	focused_node->client = NULL;
+	focused_node->is_split_vertically = 0; /* Always horizontal (vertical stacking) */
+
+	/* New tile goes below the old tile */
+	place_new_first = split_side_toggle;
 	split_side_toggle = !split_side_toggle;
 
 	if (place_new_first) {
-		focused_node->left  = new_client_node;
+		focused_node->left = new_client_node;
 		focused_node->right = old_client_node;
 	} else {
-		focused_node->left  = old_client_node;
+		focused_node->left = old_client_node;
 		focused_node->right = new_client_node;
 	}
 	old_client_node->split_node = focused_node;
 	new_client_node->split_node = focused_node;
 	focused_node->split_ratio = 0.5f;
+
+	/* Reset height distribution in the affected column to equal */
+	{
+		LayoutNode *col_root = find_column_root(focused_node, m);
+		reset_column_ratios(col_root, m);
+	}
 	return 1;
 }
 
@@ -538,10 +525,9 @@ insert_client_at(Monitor *m, Client *target, Client *new_client, double cx, doub
 	Client *old_client;
 	LayoutNode **root, *old_root,
 		*target_node, *new_client_node, *old_client_node;
-	unsigned int wider;
 	int place_new_first;
 	unsigned int desired_cols, current_cols;
-	int target_center_x, target_center_y;
+	int target_center_y;
 
 	if (!target || !new_client) {
 		insert_client(m, target, new_client);
@@ -571,61 +557,30 @@ insert_client_at(Monitor *m, Client *target, Client *new_client, double cx, doub
 		return;
 	}
 
-	/* Turn target node from a client node into a split node */
-	old_client = target_node->client;
-	old_client_node = create_client_node(old_client);
-	new_client_node = create_client_node(new_client);
-
-	/* Determine placement based on cursor position relative to target center */
-	target_center_x = target->geom.x + target->geom.width / 2;
-	target_center_y = target->geom.y + target->geom.height / 2;
-
-	/* Split direction:
-	 * - Need more columns? -> vertical split (create column)
-	 * - Tiles within column -> always horizontal split (top/bottom)
-	 * - 4 tiles in column -> FULL, don't allow more */
-	if (current_cols < desired_cols) {
-		wider = 1; /* Need more columns - vertical split */
-	} else {
+	/* Check column constraint (max 4 tiles per column) */
+	{
 		LayoutNode *col_root = find_column_root(target_node, m);
 		unsigned int col_tiles = count_in_column(col_root, m);
 
 		if (col_tiles >= 4) {
-			/* Column is full - don't allow more tiles */
-			free(old_client_node);
-			free(new_client_node);
-			/* Re-insert at original position */
+			/* Column is full - re-insert at original position */
 			insert_client(m, NULL, new_client);
 			return;
-		} else if (col_tiles == 1) {
-			wider = 0; /* First split in column: horizontal (top/bottom) */
-		} else {
-			/* Check if target half (top/bottom) is full (max 2 tiles per half) */
-			LayoutNode *half = find_column_half(target_node, m);
-			if (half && visible_count(half, m) >= 2) {
-				/* This half already has 2 tiles - block */
-				free(old_client_node);
-				free(new_client_node);
-				/* Re-insert at original position */
-				insert_client(m, NULL, new_client);
-				return;
-			}
-			wider = 1; /* After horizontal split: vertical (left/right) */
 		}
 	}
 
+	/* Turn target node from a client node into a horizontal split node */
+	old_client = target_node->client;
+	old_client_node = create_client_node(old_client);
+	new_client_node = create_client_node(new_client);
+
 	target_node->is_client_node = 0;
 	target_node->client = NULL;
-	target_node->is_split_vertically = (wider ? 1 : 0);
+	target_node->is_split_vertically = 0; /* Always horizontal (vertical stacking) */
 
-	/* Placement based on cursor position */
-	if (target_node->is_split_vertically) {
-		/* Vertical split: left/right based on cursor x */
-		place_new_first = (cx < target_center_x);
-	} else {
-		/* Horizontal split: top/bottom based on cursor y */
-		place_new_first = (cy < target_center_y);
-	}
+	/* Placement based on cursor Y position (top/bottom) */
+	target_center_y = target->geom.y + target->geom.height / 2;
+	place_new_first = (cy < target_center_y);
 
 	if (place_new_first) {
 		target_node->left = new_client_node;
@@ -637,6 +592,12 @@ insert_client_at(Monitor *m, Client *target, Client *new_client, double cx, doub
 	old_client_node->split_node = target_node;
 	new_client_node->split_node = target_node;
 	target_node->split_ratio = 0.5f;
+
+	/* Reset height distribution in the affected column to equal */
+	{
+		LayoutNode *col_root = find_column_root(target_node, m);
+		reset_column_ratios(col_root, m);
+	}
 }
 
 static LayoutNode *
@@ -658,48 +619,23 @@ remove_client_node(LayoutNode *node, Client *c)
 	node->left = remove_client_node(node->left, c);
 	node->right = remove_client_node(node->right, c);
 
-	/* If one of the client node is NULL after removal and the other is not,
-	 * we "lift" the other client node up to replace this split node. */
+	/* If one child is NULL after removal and the other is not,
+	 * "lift" the remaining child up to replace this split node.
+	 * This maintains the column structure - remaining tiles
+	 * in the column will automatically share the height equally
+	 * via apply_layout(). */
 	if (!node->left && node->right) {
 		tmp = node->right;
-
-		/* Save pointer to split node */
 		if (tmp)
 			tmp->split_node = node->split_node;
-
-		/* If lifted node is a horizontal split becoming a column root,
-		 * convert to vertical so tiles become separate columns (side by side) */
-		if (tmp && !tmp->is_client_node && !tmp->is_split_vertically) {
-			/* It's a column root if: no parent (becomes tree root) OR
-			 * parent is a vertical split (column separator) */
-			if (!tmp->split_node ||
-			    (tmp->split_node && tmp->split_node->is_split_vertically)) {
-				tmp->is_split_vertically = 1;
-			}
-		}
-
 		free(node);
 		return tmp;
 	}
 
 	if (!node->right && node->left) {
 		tmp = node->left;
-
-		/* Save pointer to split node */
 		if (tmp)
 			tmp->split_node = node->split_node;
-
-		/* If lifted node is a horizontal split becoming a column root,
-		 * convert to vertical so tiles become separate columns (side by side) */
-		if (tmp && !tmp->is_client_node && !tmp->is_split_vertically) {
-			/* It's a column root if: no parent (becomes tree root) OR
-			 * parent is a vertical split (column separator) */
-			if (!tmp->split_node ||
-			    (tmp->split_node && tmp->split_node->is_split_vertically)) {
-				tmp->is_split_vertically = 1;
-			}
-		}
-
 		free(node);
 		return tmp;
 	}
@@ -709,16 +645,83 @@ remove_client_node(LayoutNode *node, Client *c)
 	return node;
 }
 
+/* Find and convert a horizontal split to vertical to create a new column.
+ * Returns 1 if a promotion was made, 0 otherwise. */
+static int
+promote_to_column(LayoutNode *node, Monitor *m)
+{
+	if (!node || node->is_client_node)
+		return 0;
+
+	/* If this is a horizontal split with visible tiles on both sides,
+	 * convert to vertical (creates a new column) */
+	if (!node->is_split_vertically) {
+		unsigned int left_count = visible_count(node->left, m);
+		unsigned int right_count = visible_count(node->right, m);
+		if (left_count > 0 && right_count > 0) {
+			node->is_split_vertically = 1;
+			node->split_ratio = 0.5f;
+			return 1;
+		}
+	}
+
+	/* Recursively check children */
+	if (promote_to_column(node->left, m))
+		return 1;
+	return promote_to_column(node->right, m);
+}
+
+/* Ensure we always have max columns before stacking.
+ * When a column disappears, un-stack tiles to fill up to max columns. */
+static void
+ensure_proper_columns(Monitor *m, LayoutNode **root)
+{
+	LayoutNode *r;
+	unsigned int tile_count, desired_cols, current_cols;
+
+	if (!m || !root || !*root)
+		return;
+
+	r = *root;
+	tile_count = visible_count(r, m);
+	desired_cols = target_columns(m);
+	current_cols = count_columns(r, m);
+
+	/* Keep promoting horizontal splits to columns until we have enough,
+	 * or until we run out of tiles to promote */
+	while (current_cols < desired_cols && tile_count > current_cols) {
+		if (!promote_to_column(*root, m))
+			break;  /* No more horizontal splits to promote */
+		current_cols = count_columns(*root, m);
+	}
+}
+
 static void
 remove_client(Monitor *m, Client *c)
 {
-	unsigned int i;
+	unsigned int current_tag;
+	LayoutNode **current_root;
+
 	if (!m || !c)
 		return;
-	/* Remove client from all tag trees it might be in */
-	for (i = 0; i < TAGCOUNT; i++) {
-		if (m->root[i])
-			m->root[i] = remove_client_node(m->root[i], c);
+
+	current_tag = get_tag_index(m->tagset[m->seltags]);
+	current_root = &m->root[current_tag];
+
+	/* Only remove client from the current tag's tree.
+	 * Check if client is actually in the tree before attempting removal -
+	 * this prevents reset_column_ratios from being called unnecessarily
+	 * which would destroy manual vertical resize adjustments. */
+	if (!*current_root || !find_client_node(*current_root, c))
+		return;
+
+	*current_root = remove_client_node(*current_root, c);
+
+	/* Rebalance the current tag structure if needed */
+	if (*current_root) {
+		ensure_proper_columns(m, current_root);
+		/* Reset height distribution in all columns to equal after removal */
+		reset_column_ratios(*current_root, m);
 	}
 }
 
@@ -1241,14 +1244,19 @@ find_column_root(LayoutNode *node, Monitor *m)
 	if ((*root)->is_client_node || !(*root)->is_split_vertically)
 		return *root;
 
-	/* Walk up to find the node that is a direct child of the root vertical split */
+	/* Walk up from the node until we find a vertical split parent.
+	 * The column is the subtree that's a child of a vertical split.
+	 * This correctly handles nested vertical splits (3+ columns). */
 	n = node;
 	col_candidate = node;
 	while (n->split_node) {
+		/* If parent is a vertical split, current node is a column root */
+		if (n->split_node->is_split_vertically)
+			return n;
 		col_candidate = n;
 		n = n->split_node;
 	}
-	/* col_candidate is now a direct child of root */
+	/* Reached root without finding vertical split parent - return the candidate */
 	return col_candidate;
 }
 
@@ -1258,33 +1266,6 @@ count_in_column(LayoutNode *col_node, Monitor *m)
 	if (!col_node)
 		return 0;
 	return visible_count(col_node, m);
-}
-
-/* Find which half (top/bottom) of a column a node is in.
- * Returns the half subtree node, or NULL if not in a split column. */
-static LayoutNode *
-find_column_half(LayoutNode *node, Monitor *m)
-{
-	LayoutNode *col_root;
-	LayoutNode *n;
-
-	if (!node || !m)
-		return NULL;
-
-	col_root = find_column_root(node, m);
-	if (!col_root || col_root->is_client_node)
-		return NULL;
-
-	/* Column root should be a horizontal split (top/bottom) */
-	if (col_root->is_split_vertically)
-		return NULL;
-
-	/* Walk up from node until we hit a direct child of col_root */
-	n = node;
-	while (n && n->split_node != col_root)
-		n = n->split_node;
-
-	return n; /* This is the half (top or bottom) */
 }
 
 /* Check if two clients are in the same column */
@@ -1347,39 +1328,20 @@ can_move_tile(Monitor *m, Client *source, Client *target)
 
 	/* Check if same column */
 	if (source_col && target_col && source_col == target_col) {
-		/* Same column with 4 tiles: block all LOCAL movement */
-		if (source_col_tiles >= 4)
-			return 0;
-
-		/* Swap only if:
-		 * 1. Both tiles are siblings (same parent split), OR
-		 * 2. Source is a direct child of column root (big tile) */
+		/* Same column: allow swapping tiles within the column */
 		if (source_node->split_node && source_node->split_node == target_node->split_node) {
 			/* Siblings - swap them */
 			return 2;
 		}
-		if (source_col && !source_col->is_client_node &&
-		    source_node->split_node == source_col) {
-			/* Source is direct child of column root - swap halves */
-			return 2;
-		}
-
-		/* Other same-column cases: allow normal move (e.g., small over big) */
+		/* Allow normal move within column */
 		return 1;
 	}
 
-	/* Different column: check if target column is full */
+	/* Different column: check if target column is full (max 4 tiles) */
 	if (target_col_tiles >= 4)
 		return 0;
 
-	/* Check if target half (top/bottom) is full (max 2 tiles per half) */
-	if (target_col_tiles >= 2) {
-		LayoutNode *target_half = find_column_half(target_node, m);
-		if (target_half && visible_count(target_half, m) >= 2)
-			return 0;
-	}
-
-	/* Moving to different column is allowed (even from a 4-tile column) */
+	/* Moving to different column is allowed */
 	return 1;
 }
 
@@ -1482,8 +1444,9 @@ static void
 swap_columns(Monitor *m, Client *c1, Client *c2)
 {
 	LayoutNode *node1, *node2, *col1, *col2;
-	LayoutNode *tmp_left, *tmp_right;
+	LayoutNode *parent1, *parent2;
 	LayoutNode **root;
+	int col1_is_left, col2_is_left;
 
 	if (!m || !c1 || !c2)
 		return;
@@ -1502,12 +1465,27 @@ swap_columns(Monitor *m, Client *c1, Client *c2)
 	if (!col1 || !col2 || col1 == col2)
 		return;
 
-	/* If both columns share the same parent split node, swap them */
-	if (col1->split_node && col1->split_node == col2->split_node) {
-		LayoutNode *parent = col1->split_node;
-		tmp_left = parent->left;
-		tmp_right = parent->right;
-		parent->left = tmp_right;
-		parent->right = tmp_left;
-	}
+	parent1 = col1->split_node;
+	parent2 = col2->split_node;
+	if (!parent1 || !parent2)
+		return;
+
+	/* Determine which side each column is on in its parent */
+	col1_is_left = (parent1->left == col1);
+	col2_is_left = (parent2->left == col2);
+
+	/* Swap the columns in their respective parents */
+	if (col1_is_left)
+		parent1->left = col2;
+	else
+		parent1->right = col2;
+
+	if (col2_is_left)
+		parent2->left = col1;
+	else
+		parent2->right = col1;
+
+	/* Update the split_node pointers */
+	col1->split_node = parent2;
+	col2->split_node = parent1;
 }
