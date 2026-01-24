@@ -14,6 +14,7 @@
 #include <cairo/cairo.h>
 #include <librsvg/rsvg.h>
 #include <linux/input-event-codes.h>
+#include <linux/input.h>
 #include <math.h>
 #include <glib.h>
 #include <drm_fourcc.h>
@@ -32,6 +33,7 @@
 #include <pwd.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/inotify.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <time.h>
@@ -300,6 +302,37 @@ typedef struct {
 	int row_highlight_count;
 } ModalOverlay;
 
+/* Nixpkgs package entry for install popup */
+typedef struct {
+	char name[128];
+	char name_lower[128]; /* lowercase for case-insensitive search */
+	char version[64];     /* package version */
+	int installed;        /* 1 if package is in packages.nix */
+} NixpkgEntry;
+
+/* Nixpkgs install popup */
+typedef struct {
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_tree *bg;
+	int visible;
+	int x, y, width, height;
+	char search[256];
+	int search_len;
+	char search_rendered[256]; /* last rendered search text */
+	struct wlr_scene_tree *search_field_tree; /* cached search field for fast updates */
+	int result_count;
+	int result_indices[MODAL_MAX_RESULTS]; /* indices into nixpkg_entries */
+	int selected;
+	int scroll;
+	/* Cached results scene for fast navigation */
+	struct wlr_scene_tree *results_tree;
+	int last_scroll;
+	int last_selected;
+	/* Cached highlight rects for instant navigation */
+	struct wlr_scene_rect *row_highlights[MODAL_MAX_RESULTS];
+	int row_highlight_count;
+} NixpkgsOverlay;
+
 typedef struct {
 	char name[128];
 	char exec[256];
@@ -370,6 +403,67 @@ typedef struct {
 	int connect_fd;
 	struct wl_event_source *connect_event;
 } WifiPasswordPopup;
+
+typedef struct {
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_tree *bg;
+	int visible;
+	int width, height;
+	char title[128];
+	char password[256];
+	int password_len;
+	int cursor_pos;
+	int button_hover;  /* 0 = none, 1 = OK button */
+	int running;       /* 1 = command in progress */
+	int error;         /* 1 = auth failed */
+	char pending_cmd[1024];  /* command to run after auth */
+	char pending_pkg[140];   /* package name for toast */
+	pid_t sudo_pid;
+	int sudo_fd;
+	struct wl_event_source *sudo_event;
+	struct wl_event_source *wait_timer; /* timer to poll child exit */
+} SudoPopup;
+
+/* Gamepad menu item */
+typedef struct {
+	const char *label;
+	const char *command;
+} GamepadMenuItem;
+
+/* Gamepad controller menu popup */
+typedef struct {
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_tree *bg;
+	int visible;
+	int width, height;
+	int selected;  /* currently selected menu item (0-2) */
+	int item_count;
+} GamepadMenu;
+
+/* Axis calibration info */
+typedef struct AxisCalibration {
+	int min, max, center;  /* Range and center value */
+	int flat;              /* Deadzone (from device) */
+} AxisCalibration;
+
+/* Tracked gamepad device */
+typedef struct GamepadDevice {
+	int fd;
+	char path[64];
+	char name[128];
+	char bluez_path[256];  /* Cached BlueZ D-Bus path for async disconnect */
+	struct wl_event_source *event_source;
+	struct wl_list link;
+	/* Joystick axis values (raw from device) */
+	int left_x, left_y;    /* Left stick */
+	int right_x, right_y;  /* Right stick */
+	/* Axis calibration (read from device) */
+	AxisCalibration cal_lx, cal_ly;  /* Left stick */
+	AxisCalibration cal_rx, cal_ry;  /* Right stick */
+	/* Inactivity tracking */
+	int64_t last_activity_ms;  /* Last input timestamp (monotonic ms) */
+	int suspended;             /* 1 if gamepad is suspended/powered off */
+} GamepadDevice;
 
 typedef struct TrayMenuEntry {
 	int id;
@@ -643,7 +737,10 @@ struct Monitor {
 	struct wl_list layers[4]; /* LayerSurface.link */
 	StatusBar statusbar;
 	ModalOverlay modal;
+	NixpkgsOverlay nixpkgs;
 	WifiPasswordPopup wifi_popup;
+	SudoPopup sudo_popup;
+	GamepadMenu gamepad_menu;
 	const Layout *lt[2];
 	int gaps;
 	int showbar;
@@ -674,6 +771,10 @@ struct Monitor {
 	/* Direct scanout tracking */
 	int direct_scanout_active;        /* 1 if direct scanout is currently happening */
 	int direct_scanout_notified;      /* 1 if we already showed the notification */
+	/* Toast notification */
+	struct wlr_scene_tree *toast_tree;
+	struct wl_event_source *toast_timer;
+	int toast_visible;
 };
 
 typedef struct {
@@ -685,6 +786,33 @@ typedef struct {
 	enum wl_output_transform rr;
 	int x, y;
 } MonitorRule;
+
+/* Monitor position slots for runtime configuration */
+typedef enum {
+	MON_POS_MASTER = 0,      /* Primary/master monitor */
+	MON_POS_LEFT,            /* Left of master */
+	MON_POS_RIGHT,           /* Right of master */
+	MON_POS_TOP_LEFT,        /* Top-left (above left) */
+	MON_POS_TOP_RIGHT,       /* Top-right (above right) */
+	MON_POS_BOTTOM_LEFT,     /* Bottom-left */
+	MON_POS_BOTTOM_RIGHT,    /* Bottom-right */
+	MON_POS_AUTO,            /* Auto-placement */
+	MON_POS_COUNT
+} MonitorPosition;
+
+/* Runtime monitor configuration */
+typedef struct {
+	char name[64];           /* Output name pattern (e.g., "HDMI-A-1", "DP-*") */
+	MonitorPosition position;/* Position slot */
+	int width;               /* 0 = auto (use preferred mode) */
+	int height;              /* 0 = auto */
+	float refresh;           /* 0 = auto (highest available) */
+	float scale;             /* Display scale (default 1.0) */
+	float mfact;             /* Master factor (default 0.55) */
+	int nmaster;             /* Number of masters (default 1) */
+	int enabled;             /* 1 = enabled, 0 = disabled */
+	int transform;           /* WL_OUTPUT_TRANSFORM_* value */
+} RuntimeMonitorConfig;
 
 typedef struct {
 	struct wlr_pointer_constraint_v1 *constraint;
@@ -717,6 +845,7 @@ static void arrangelayer(Monitor *m, struct wl_list *list,
 static void arrangelayers(Monitor *m);
 static void axisnotify(struct wl_listener *listener, void *data);
 static void buttonpress(struct wl_listener *listener, void *data);
+static void handle_pointer_button_internal(uint32_t button, uint32_t state, uint32_t time_msec);
 static void chvt(const Arg *arg);
 static void checkidleinhibitor(struct wlr_surface *exclude);
 static void cleanup(void);
@@ -858,6 +987,15 @@ static Monitor *wifi_popup_visible_monitor(void);
 static void wifi_popup_connect(Monitor *m);
 static void wifi_try_saved_connect(Monitor *m, const char *ssid);
 static int wifi_popup_connect_cb(int fd, uint32_t mask, void *data);
+static void sudo_popup_show(Monitor *m, const char *title, const char *cmd, const char *pkg_name);
+static void sudo_popup_hide(Monitor *m);
+static void sudo_popup_hide_all(void);
+static void sudo_popup_render(Monitor *m);
+static int sudo_popup_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym);
+static Monitor *sudo_popup_visible_monitor(void);
+static void sudo_popup_execute(Monitor *m);
+static int sudo_popup_cb(int fd, uint32_t mask, void *data);
+static int sudo_popup_wait_timer(void *data);
 static int status_task_hover_active(void (*fn)(void));
 static void trigger_status_task_now(void (*fn)(void));
 static int public_ip_event_cb(int fd, uint32_t mask, void *data);
@@ -936,6 +1074,13 @@ static void setmon(Client *c, Monitor *m, uint32_t newtags);
 static void setpsel(struct wl_listener *listener, void *data);
 static void setsel(struct wl_listener *listener, void *data);
 static void setup(void);
+static void load_config(void);
+static void reload_config(void);
+static int config_watch_handler(int fd, uint32_t mask, void *data);
+static void setup_config_watch(void);
+static void init_keybindings(void);
+static RuntimeMonitorConfig *find_monitor_config(const char *name);
+static void calculate_monitor_position(Monitor *m, RuntimeMonitorConfig *cfg, int *out_x, int *out_y);
 static void spawn(const Arg *arg);
 static void startdrag(struct wl_listener *listener, void *data);
 static void tag(const Arg *arg);
@@ -950,6 +1095,8 @@ static void togglestatusbar(const Arg *arg);
 static void toggletag(const Arg *arg);
 static void toggleview(const Arg *arg);
 static void modal_show(const Arg *arg);
+static void modal_show_files(const Arg *arg);
+static void modal_show_git(const Arg *arg);
 static void modal_render(Monitor *m);
 static void modal_render_results(Monitor *m);
 static void modal_update_selection(Monitor *m);
@@ -973,8 +1120,17 @@ static void modal_git_search_start(Monitor *m);
 static int modal_git_search_event(int fd, uint32_t mask, void *data);
 static void git_cache_update_start(void);
 static void file_cache_update_start(void);
+static void nixpkgs_cache_update_start(void);
 static int cache_update_timer_cb(void *data);
+static int nixpkgs_cache_timer_cb(void *data);
 static void schedule_cache_update_timer(void);
+static void schedule_nixpkgs_cache_timer(void);
+static void update_game_mode(void);
+static void htpc_mode_enter(void);
+static void htpc_mode_exit(void);
+static void htpc_mode_toggle(const Arg *arg);
+static void config_expand_path(const char *src, char *dst, size_t dstlen);
+static int any_client_fullscreen(void);
 static void modal_truncate_to_width(const char *src, char *dst, size_t len, int max_px);
 static void shorten_path_display(const char *full, char *out, size_t len);
 static int desktop_entry_cmp_used(const void *a, const void *b);
@@ -984,7 +1140,23 @@ static void modal_render_search_field(Monitor *m);
 static int modal_render_timer_cb(void *data);
 static void modal_schedule_render(Monitor *m);
 static void modal_prewarm(Monitor *m);
+static void nixpkgs_show(const Arg *arg);
+static void nixpkgs_hide(Monitor *m);
+static void nixpkgs_hide_all(void);
+static Monitor *nixpkgs_visible_monitor(void);
+static void nixpkgs_render(Monitor *m);
+static void nixpkgs_render_results(Monitor *m);
+static void nixpkgs_update_selection(Monitor *m);
+static void nixpkgs_update_results(Monitor *m);
+static int nixpkgs_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym);
+static void nixpkgs_install_selected(Monitor *m);
+static int toast_hide_timer(void *data);
+static void toast_show(Monitor *m, const char *message, int duration_ms);
+static void load_nixpkgs_cache(void);
+static void load_installed_packages(void);
+static void ensure_nixpkgs_cache_loaded(void);
 static void ensure_desktop_entries_loaded(void);
+static int ensure_nixpkg_ok_icon(int height);
 static void ensure_shell_env(void);
 static int should_use_dgpu(const char *cmd);
 static void set_dgpu_env(void);
@@ -993,6 +1165,45 @@ static void schedule_cpu_popup_refresh(uint32_t ms);
 static int popup_delay_timeout(void *data);
 static void schedule_popup_delay(uint32_t ms);
 static uint64_t monotonic_msec(void);
+
+/* Gamepad controller menu functions */
+static void gamepad_menu_show(Monitor *m);
+static void gamepad_menu_hide(Monitor *m);
+static void gamepad_menu_hide_all(void);
+static Monitor *gamepad_menu_visible_monitor(void);
+static void gamepad_menu_render(Monitor *m);
+static int gamepad_menu_handle_button(Monitor *m, int button, int value);
+static void gamepad_menu_select(Monitor *m);
+static void gamepad_device_add(const char *path);
+static void gamepad_device_remove(const char *path);
+static int gamepad_event_cb(int fd, uint32_t mask, void *data);
+static int gamepad_inotify_cb(int fd, uint32_t mask, void *data);
+static void gamepad_scan_devices(void);
+static void gamepad_setup(void);
+static void gamepad_cleanup(void);
+static int gamepad_cursor_timer_cb(void *data);
+static int gamepad_pending_timer_cb(void *data);
+static void gamepad_update_cursor(void);
+static int gamepad_inactivity_timer_cb(void *data);
+static void gamepad_turn_off_led_sysfs(GamepadDevice *gp);
+static void gamepad_suspend(GamepadDevice *gp);
+static void gamepad_resume(GamepadDevice *gp);
+static int gamepad_any_monitor_active(void);
+static void cec_switch_to_active_source(void);
+
+/* Bluetooth controller auto-pairing */
+static int bt_bus_event_cb(int fd, uint32_t mask, void *data);
+static void bt_controller_setup(void);
+static void bt_controller_cleanup(void);
+static int bt_scan_timer_cb(void *data);
+static void bt_start_discovery(void);
+static void bt_stop_discovery(void);
+static int bt_is_gamepad_name(const char *name);
+static void bt_pair_device(const char *path);
+static void bt_connect_device(const char *path);
+static void bt_trust_device(const char *path);
+static int bt_device_signal_cb(sd_bus_message *m, void *userdata, sd_bus_error *error);
+
 static void rendercpu(StatusModule *module, int bar_height, const char *text);
 static void rendercpupopup(Monitor *m);
 static int cpu_popup_clamped_x(Monitor *m, CpuPopup *p);
@@ -1101,6 +1312,14 @@ static void swapclients(const Arg *arg);
 static pid_t child_pid = -1;
 static int locked;
 static void *exclusive_focus;
+
+/* Config hot-reload */
+static int config_inotify_fd = -1;
+static int config_watch_wd = -1;
+static char config_path_cached[PATH_MAX] = {0};
+static struct wl_event_source *config_watch_source = NULL;
+static struct wl_event_source *config_rewatch_timer = NULL;
+static int config_needs_rewatch = 0;
 static struct wl_display *dpy;
 static struct wl_event_loop *event_loop;
 static struct wlr_backend *backend;
@@ -1169,10 +1388,13 @@ static double resize_start_x, resize_start_y;
 static LayoutNode *resize_split_node;
 static LayoutNode *resize_split_node_h;
 static int fullscreen_adaptive_sync_enabled = 1;
+static int game_mode_active = 0; /* Set when any client is fullscreen - pauses background tasks */
+static int htpc_mode_active = 0; /* HTPC mode - hides statusbar, stops background tasks */
 static struct wl_event_source *status_timer;
 static struct wl_event_source *status_cpu_timer;
 static struct wl_event_source *status_hover_timer;
 static struct wl_event_source *cache_update_timer;
+static struct wl_event_source *nixpkgs_cache_timer;
 static StatusRefreshTask status_tasks[] = {
 	{ refreshstatuscpu, 0 },
 	{ refreshstatusram, 0 },
@@ -1184,6 +1406,62 @@ static StatusRefreshTask status_tasks[] = {
 	{ refreshstatusicons, 0 },
 };
 static int status_rng_seeded;
+
+/* Gamepad controller support */
+static struct wl_list gamepads;  /* GamepadDevice.link */
+static int gamepad_inotify_fd = -1;
+static int gamepad_inotify_wd = -1;
+static struct wl_event_source *gamepad_inotify_event = NULL;
+static struct wl_event_source *gamepad_inactivity_timer = NULL;
+#define GAMEPAD_INACTIVITY_TIMEOUT_MS 10000  /* 10 seconds */
+#define GAMEPAD_INACTIVITY_CHECK_MS 1000     /* Check every 1 second */
+
+/* Pending gamepad devices (for delayed add after inotify) */
+#define GAMEPAD_PENDING_MAX 8
+static char gamepad_pending_paths[GAMEPAD_PENDING_MAX][128];
+static int gamepad_pending_count = 0;
+static struct wl_event_source *gamepad_pending_timer = NULL;
+
+/* Gamepad menu items */
+static const GamepadMenuItem gamepad_menu_items[] = {
+	{ "Movies",    NULL },
+	{ "TV-shows",  NULL },
+	{ "Gaming",    NULL },
+};
+#define GAMEPAD_MENU_ITEM_COUNT 3
+
+/* Gamepad joystick cursor control */
+static struct wl_event_source *gamepad_cursor_timer = NULL;
+#define GAMEPAD_CURSOR_INTERVAL_MS 16   /* ~60 Hz update rate */
+#define GAMEPAD_DEADZONE 4000           /* Deadzone threshold (out of 32767) */
+#define GAMEPAD_CURSOR_SPEED 15.0       /* Base cursor speed in pixels per update */
+#define GAMEPAD_CURSOR_ACCEL 2.5        /* Acceleration factor at full tilt */
+
+/* Bluetooth controller auto-pairing */
+static struct wl_event_source *bt_scan_timer = NULL;
+static struct wl_event_source *bt_bus_event = NULL;
+static sd_bus *bt_bus = NULL;
+static int bt_scanning = 0;
+#define BT_SCAN_INTERVAL_MS 30000       /* Scan every 30 seconds */
+#define BT_SCAN_DURATION_MS 10000       /* Scan for 10 seconds */
+
+/* Known gamepad name patterns for auto-pairing */
+static const char *bt_gamepad_patterns[] = {
+	"Xbox",
+	"DualSense",
+	"DualShock",
+	"PS5",
+	"PS4",
+	"PlayStation",
+	"8BitDo",
+	"Pro Controller",   /* Nintendo Switch Pro */
+	"Joy-Con",
+	"Wireless Controller",
+	"Game Controller",
+	"Gamepad",
+	NULL
+};
+
 static pid_t public_ip_pid = -1;
 static int public_ip_fd = -1;
 static struct wl_event_source *public_ip_event = NULL;
@@ -1412,6 +1690,17 @@ static DesktopEntry desktop_entries[4096];
 static int desktop_entry_count = 0;
 static int desktop_entries_loaded = 0;
 
+/* Nixpkgs package cache */
+#define NIXPKGS_MAX_ENTRIES 32768
+static NixpkgEntry nixpkg_entries[NIXPKGS_MAX_ENTRIES];
+static int nixpkg_entry_count = 0;
+static int nixpkg_entries_loaded = 0;
+static char nixpkgs_cache_path[PATH_MAX] = "";
+
+/* Installed package check icon */
+static struct wlr_buffer *nixpkg_ok_icon_buf = NULL;
+static int nixpkg_ok_icon_height = 0;
+
 /* global event handlers */
 static struct wl_listener cursor_axis = {.notify = axisnotify};
 static struct wl_listener cursor_button = {.notify = buttonpress};
@@ -1462,6 +1751,10 @@ static struct wlr_xwayland *xwayland;
 
 /* configuration, allows nested code to access above variables */
 #include "config.h"
+
+/* Runtime font storage - config values are copied here so we can modify them */
+static char *runtime_fonts[8];
+static int runtime_fonts_set = 0;
 
 /* attempt to encapsulate suck into one file */
 #include "client.h"
@@ -5952,6 +6245,150 @@ modal_show(const Arg *arg)
 }
 
 static void
+modal_show_files(const Arg *arg)
+{
+	Monitor *m = selmon ? selmon : xytomon(cursor->x, cursor->y);
+	ModalOverlay *mo;
+	int mw, mh, w, h, x, y;
+	int min_w = 300, min_h = 200;
+	int max_w = 1400, max_h = 800;
+
+	(void)arg;
+
+	if (!m || !m->modal.tree)
+		return;
+
+	modal_hide_all();
+
+	mw = m->w.width > 0 ? m->w.width : m->m.width;
+	mh = m->w.height > 0 ? m->w.height : m->m.height;
+	w = mw > 0 ? (int)(mw * 0.8) : 1100;
+	h = mh > 0 ? (int)(mh * 0.6) : 500;
+	if (w < min_w) w = min_w;
+	if (h < min_h) h = min_h;
+	if (w > max_w) w = max_w;
+	if (h > max_h) h = max_h;
+
+	x = m->m.x + (m->m.width - w) / 2;
+	y = m->m.y + (m->m.height - h) / 2;
+	if (x < m->m.x) x = m->m.x;
+	if (y < m->m.y) y = m->m.y;
+
+	mo = &m->modal;
+	mo->width = w;
+	mo->height = h;
+	mo->x = x;
+	mo->y = y;
+
+	if (!mo->bg)
+		mo->bg = wlr_scene_tree_create(mo->tree);
+	if (mo->bg) {
+		struct wlr_scene_node *node, *tmp;
+		wl_list_for_each_safe(node, tmp, &mo->bg->children, link)
+			wlr_scene_node_destroy(node);
+		drawrect(mo->bg, 0, 0, w, h, statusbar_popup_bg);
+	}
+
+	wlr_scene_node_set_position(&mo->tree->node, x, y);
+	wlr_scene_node_set_enabled(&mo->tree->node, 1);
+	mo->active_idx = 1; /* File search tab */
+	modal_file_search_stop(m);
+	modal_file_search_clear_results(m);
+	modal_git_search_stop(m);
+	modal_git_search_clear_results(m);
+	mo->file_search_last[0] = '\0';
+	mo->git_search_last[0] = '\0';
+	mo->git_search_done = 0;
+	for (int i = 0; i < 3; i++) {
+		mo->search[i][0] = '\0';
+		mo->search_len[i] = 0;
+		mo->search_rendered[i][0] = '\0';
+		mo->selected[i] = -1;
+		mo->scroll[i] = 0;
+	}
+	mo->search_field_tree = NULL;
+	mo->render_pending = 0;
+	if (mo->render_timer)
+		wl_event_source_timer_update(mo->render_timer, 0);
+	mo->file_search_fallback = 0;
+	mo->visible = 1;
+	modal_update_results(m);
+	modal_render(m);
+}
+
+static void
+modal_show_git(const Arg *arg)
+{
+	Monitor *m = selmon ? selmon : xytomon(cursor->x, cursor->y);
+	ModalOverlay *mo;
+	int mw, mh, w, h, x, y;
+	int min_w = 300, min_h = 200;
+	int max_w = 1400, max_h = 800;
+
+	(void)arg;
+
+	if (!m || !m->modal.tree)
+		return;
+
+	modal_hide_all();
+
+	mw = m->w.width > 0 ? m->w.width : m->m.width;
+	mh = m->w.height > 0 ? m->w.height : m->m.height;
+	w = mw > 0 ? (int)(mw * 0.8) : 1100;
+	h = mh > 0 ? (int)(mh * 0.6) : 500;
+	if (w < min_w) w = min_w;
+	if (h < min_h) h = min_h;
+	if (w > max_w) w = max_w;
+	if (h > max_h) h = max_h;
+
+	x = m->m.x + (m->m.width - w) / 2;
+	y = m->m.y + (m->m.height - h) / 2;
+	if (x < m->m.x) x = m->m.x;
+	if (y < m->m.y) y = m->m.y;
+
+	mo = &m->modal;
+	mo->width = w;
+	mo->height = h;
+	mo->x = x;
+	mo->y = y;
+
+	if (!mo->bg)
+		mo->bg = wlr_scene_tree_create(mo->tree);
+	if (mo->bg) {
+		struct wlr_scene_node *node, *tmp;
+		wl_list_for_each_safe(node, tmp, &mo->bg->children, link)
+			wlr_scene_node_destroy(node);
+		drawrect(mo->bg, 0, 0, w, h, statusbar_popup_bg);
+	}
+
+	wlr_scene_node_set_position(&mo->tree->node, x, y);
+	wlr_scene_node_set_enabled(&mo->tree->node, 1);
+	mo->active_idx = 2; /* Git projects tab */
+	modal_file_search_stop(m);
+	modal_file_search_clear_results(m);
+	modal_git_search_stop(m);
+	modal_git_search_clear_results(m);
+	mo->file_search_last[0] = '\0';
+	mo->git_search_last[0] = '\0';
+	mo->git_search_done = 0;
+	for (int i = 0; i < 3; i++) {
+		mo->search[i][0] = '\0';
+		mo->search_len[i] = 0;
+		mo->search_rendered[i][0] = '\0';
+		mo->selected[i] = -1;
+		mo->scroll[i] = 0;
+	}
+	mo->search_field_tree = NULL;
+	mo->render_pending = 0;
+	if (mo->render_timer)
+		wl_event_source_timer_update(mo->render_timer, 0);
+	mo->file_search_fallback = 0;
+	mo->visible = 1;
+	modal_git_search_start(m); /* Start git search immediately */
+	modal_render(m);
+}
+
+static void
 renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 {
 	uint32_t mask = 0;
@@ -8497,6 +8934,469 @@ wifi_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 	return 1;
 }
 
+/* Sudo password popup functions */
+static Monitor *
+sudo_popup_visible_monitor(void)
+{
+	Monitor *m;
+	wl_list_for_each(m, &mons, link) {
+		if (m->sudo_popup.visible)
+			return m;
+	}
+	return NULL;
+}
+
+static void
+sudo_popup_hide(Monitor *m)
+{
+	if (!m)
+		return;
+	m->sudo_popup.visible = 0;
+	m->sudo_popup.password[0] = '\0';
+	m->sudo_popup.password_len = 0;
+	m->sudo_popup.cursor_pos = 0;
+	m->sudo_popup.error = 0;
+	m->sudo_popup.running = 0;
+	if (m->sudo_popup.wait_timer) {
+		wl_event_source_remove(m->sudo_popup.wait_timer);
+		m->sudo_popup.wait_timer = NULL;
+	}
+	if (m->sudo_popup.tree)
+		wlr_scene_node_set_enabled(&m->sudo_popup.tree->node, 0);
+}
+
+static void
+sudo_popup_hide_all(void)
+{
+	Monitor *m;
+	wl_list_for_each(m, &mons, link)
+		sudo_popup_hide(m);
+}
+
+static void
+sudo_popup_render(Monitor *m)
+{
+	SudoPopup *p;
+	struct wlr_scene_node *node, *tmp;
+	int padding = 20;
+	int input_width = 300;
+	int input_height;
+	int button_width = 100;
+	int button_height;
+	int title_width = 0;
+	int total_width, total_height;
+	int center_x, center_y;
+	const char *btn_text;
+	int line_spacing = 10;
+
+	if (!m || !m->sudo_popup.tree)
+		return;
+
+	p = &m->sudo_popup;
+
+	/* Set button text based on state */
+	if (p->running)
+		btn_text = "Running...";
+	else if (p->error)
+		btn_text = "Retry";
+	else
+		btn_text = "OK";
+
+	/* Clear previous content */
+	wl_list_for_each_safe(node, tmp, &p->tree->children, link) {
+		if (p->bg && node == &p->bg->node)
+			continue;
+		wlr_scene_node_destroy(node);
+	}
+
+	if (!p->visible || !statusfont.font) {
+		wlr_scene_node_set_enabled(&p->tree->node, 0);
+		return;
+	}
+
+	/* Calculate sizes */
+	title_width = status_text_width(p->title);
+	input_height = statusfont.height + 12;
+	button_height = statusfont.height + 10;
+
+	total_width = input_width + padding * 2;
+	if (title_width + padding * 2 > total_width)
+		total_width = title_width + padding * 2;
+
+	total_height = padding + statusfont.height + line_spacing +
+	               input_height + line_spacing + button_height + padding;
+
+	p->width = total_width;
+	p->height = total_height;
+
+	center_x = m->m.x + (m->m.width - total_width) / 2;
+	center_y = m->m.y + (m->m.height - total_height) / 2;
+
+	wlr_scene_node_set_position(&p->tree->node, center_x, center_y);
+
+	/* Draw background */
+	if (p->bg) {
+		wl_list_for_each_safe(node, tmp, &p->bg->children, link)
+			wlr_scene_node_destroy(node);
+		drawrect(p->bg, 0, 0, total_width, total_height, statusbar_popup_bg);
+		/* Border */
+		const float border[4] = {0.3f, 0.3f, 0.3f, 1.0f};
+		drawrect(p->bg, 0, 0, total_width, 1, border);
+		drawrect(p->bg, 0, total_height - 1, total_width, 1, border);
+		drawrect(p->bg, 0, 0, 1, total_height, border);
+		drawrect(p->bg, total_width - 1, 0, 1, total_height, border);
+	}
+
+	/* Draw title */
+	{
+		struct wlr_scene_tree *title_tree = wlr_scene_tree_create(p->tree);
+		if (title_tree) {
+			StatusModule mod = {0};
+			int title_x = (total_width - title_width) / 2;
+			wlr_scene_node_set_position(&title_tree->node, title_x, padding);
+			mod.tree = title_tree;
+			tray_render_label(&mod, p->title, 0, statusfont.height, statusbar_fg);
+		}
+	}
+
+	/* Draw password input field */
+	{
+		struct wlr_scene_tree *input_tree = wlr_scene_tree_create(p->tree);
+		if (input_tree) {
+			const float input_bg[4] = {0.1f, 0.1f, 0.1f, 0.8f};
+			const float input_border[4] = {0.4f, 0.4f, 0.4f, 1.0f};
+			int input_x = padding;
+			int input_y = padding + statusfont.height + line_spacing;
+			StatusModule mod = {0};
+			char masked[257];
+			int i;
+
+			wlr_scene_node_set_position(&input_tree->node, input_x, input_y);
+
+			/* Input background */
+			drawrect(input_tree, 0, 0, input_width, input_height, input_bg);
+			drawrect(input_tree, 0, 0, input_width, 1, input_border);
+			drawrect(input_tree, 0, input_height - 1, input_width, 1, input_border);
+			drawrect(input_tree, 0, 0, 1, input_height, input_border);
+			drawrect(input_tree, input_width - 1, 0, 1, input_height, input_border);
+
+			/* Masked password (show dots) */
+			for (i = 0; i < p->password_len && i < 256; i++)
+				masked[i] = '*';
+			masked[i] = '\0';
+
+			mod.tree = input_tree;
+			tray_render_label(&mod, masked, 6, input_height, statusbar_fg);
+
+			/* Draw cursor */
+			if (!p->running) {
+				int cursor_x = 6 + status_text_width(masked);
+				const float cursor_color[4] = {1.0f, 1.0f, 1.0f, 0.8f};
+				drawrect(input_tree, cursor_x, 4, 2, input_height - 8, cursor_color);
+			}
+		}
+	}
+
+	/* Draw OK button */
+	{
+		struct wlr_scene_tree *btn_tree = wlr_scene_tree_create(p->tree);
+		if (btn_tree) {
+			const float btn_bg[4] = {0.2f, 0.4f, 0.6f, 1.0f};
+			const float btn_hover_bg[4] = {0.3f, 0.5f, 0.7f, 1.0f};
+			int btn_x = padding + (input_width - button_width) / 2;
+			int btn_y = padding + statusfont.height + line_spacing + input_height + line_spacing;
+			int btn_text_w = status_text_width(btn_text);
+			StatusModule mod = {0};
+
+			wlr_scene_node_set_position(&btn_tree->node, btn_x, btn_y);
+
+			drawrect(btn_tree, 0, 0, button_width, button_height,
+			         p->button_hover ? btn_hover_bg : btn_bg);
+
+			mod.tree = btn_tree;
+			tray_render_label(&mod, btn_text, (button_width - btn_text_w) / 2,
+			                  button_height, statusbar_fg);
+		}
+	}
+
+	/* Show error message if auth failed */
+	if (p->error) {
+		struct wlr_scene_tree *err_tree = wlr_scene_tree_create(p->tree);
+		if (err_tree) {
+			const char *err_msg = "Authentication failed";
+			const float err_color[4] = {1.0f, 0.3f, 0.3f, 1.0f};
+			int err_w = status_text_width(err_msg);
+			StatusModule mod = {0};
+
+			wlr_scene_node_set_position(&err_tree->node,
+			                            (total_width - err_w) / 2,
+			                            total_height - padding + 2);
+			mod.tree = err_tree;
+			tray_render_label(&mod, err_msg, 0, statusfont.height, err_color);
+		}
+	}
+
+	wlr_scene_node_set_enabled(&p->tree->node, 1);
+}
+
+static int
+sudo_popup_wait_timer(void *data)
+{
+	Monitor *m = data;
+	SudoPopup *p;
+	int status = 0;
+	pid_t result;
+
+	if (!m)
+		return 0;
+
+	p = &m->sudo_popup;
+
+	if (p->sudo_pid <= 0) {
+		/* No child to wait for */
+		if (p->wait_timer) {
+			wl_event_source_remove(p->wait_timer);
+			p->wait_timer = NULL;
+		}
+		return 0;
+	}
+
+	/* Non-blocking check if child has exited */
+	result = waitpid(p->sudo_pid, &status, WNOHANG);
+	if (result == 0) {
+		/* Child still running, re-arm timer to check again in 100ms */
+		if (p->wait_timer)
+			wl_event_source_timer_update(p->wait_timer, 100);
+		return 0;
+	}
+
+	/* Child has exited (result > 0) or error (result < 0) */
+	p->sudo_pid = -1;
+
+	/* Remove timer */
+	if (p->wait_timer) {
+		wl_event_source_remove(p->wait_timer);
+		p->wait_timer = NULL;
+	}
+
+	p->running = 0;
+	if (result > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+		/* Success */
+		char toast_msg[256];
+		snprintf(toast_msg, sizeof(toast_msg), "%s installed", p->pending_pkg);
+		toast_show(m, toast_msg, 4000);
+		sudo_popup_hide_all();
+		/* Reload desktop entries to pick up new applications */
+		desktop_entries_loaded = 0;
+		desktop_entry_count = 0;
+	} else {
+		/* Auth failed or error - show popup again with error message */
+		p->error = 1;
+		p->password[0] = '\0';
+		p->password_len = 0;
+		p->cursor_pos = 0;
+		p->visible = 1;
+		toast_show(m, "Authentication failed", 3000);
+		sudo_popup_render(m);
+	}
+	return 0;
+}
+
+static int
+sudo_popup_cb(int fd, uint32_t mask, void *data)
+{
+	Monitor *m = data;
+	SudoPopup *p;
+	char buf[256];
+	ssize_t n;
+
+	if (!m)
+		return 0;
+
+	p = &m->sudo_popup;
+
+	/* Read any available output (non-blocking since fd triggers the callback) */
+	for (;;) {
+		n = read(fd, buf, sizeof(buf) - 1);
+		if (n <= 0)
+			break;
+		buf[n] = '\0';
+		wlr_log(WLR_DEBUG, "sudo output: %s", buf);
+	}
+
+	/* Clean up event source for fd */
+	if (p->sudo_event) {
+		wl_event_source_remove(p->sudo_event);
+		p->sudo_event = NULL;
+	}
+	if (p->sudo_fd >= 0) {
+		close(p->sudo_fd);
+		p->sudo_fd = -1;
+	}
+
+	/* Start a timer to poll for child exit instead of blocking */
+	if (p->sudo_pid > 0 && !p->wait_timer) {
+		p->wait_timer = wl_event_loop_add_timer(event_loop,
+			sudo_popup_wait_timer, m);
+		if (p->wait_timer)
+			wl_event_source_timer_update(p->wait_timer, 100); /* Check every 100ms */
+	}
+
+	return 0;
+}
+
+static void
+sudo_popup_execute(Monitor *m)
+{
+	SudoPopup *p;
+	int pipefd[2];
+	pid_t pid;
+
+	if (!m)
+		return;
+
+	p = &m->sudo_popup;
+
+	if (p->password_len == 0 || p->running)
+		return;
+
+	if (pipe(pipefd) < 0) {
+		wlr_log(WLR_ERROR, "Failed to create pipe for sudo");
+		return;
+	}
+
+	pid = fork();
+	if (pid < 0) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return;
+	}
+
+	if (pid == 0) {
+		/* Child process */
+		close(pipefd[0]);
+		dup2(pipefd[1], STDOUT_FILENO);
+		dup2(pipefd[1], STDERR_FILENO);
+		close(pipefd[1]);
+		setsid();
+
+		/* Run command with sudo -S (read password from stdin)
+		 * Use printf %s to safely pass password without shell interpretation */
+		char cmd[2048];
+		snprintf(cmd, sizeof(cmd), "printf '%%s\\n' \"$SUDO_PASS\" | sudo -S sh -c '%s' 2>&1",
+		         p->pending_cmd);
+		setenv("SUDO_PASS", p->password, 1);
+		execl("/bin/sh", "sh", "-c", cmd, NULL);
+		_exit(127);
+	}
+
+	/* Parent */
+	close(pipefd[1]);
+
+	/* Set pipe to non-blocking to prevent freezing the compositor */
+	fcntl(pipefd[0], F_SETFL, fcntl(pipefd[0], F_GETFL) | O_NONBLOCK);
+
+	p->sudo_pid = pid;
+	p->sudo_fd = pipefd[0];
+	p->running = 1;
+	p->error = 0;
+
+	/* Set up event handler for reading output */
+	p->sudo_event = wl_event_loop_add_fd(event_loop, pipefd[0],
+	                                      WL_EVENT_READABLE,
+	                                      sudo_popup_cb, m);
+
+	/* Show "Installing..." toast */
+	{
+		char toast_msg[256];
+		snprintf(toast_msg, sizeof(toast_msg), "Installing %s...", p->pending_pkg);
+		toast_show(m, toast_msg, 60000); /* Long timeout, will be replaced on completion */
+	}
+
+	/* Hide popup immediately - installation runs in background */
+	p->visible = 0;
+	if (p->tree)
+		wlr_scene_node_set_enabled(&p->tree->node, 0);
+}
+
+static int
+sudo_popup_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
+{
+	SudoPopup *p;
+	char buf[8];
+	int len;
+
+	if (!m || !m->sudo_popup.visible)
+		return 0;
+
+	p = &m->sudo_popup;
+
+	/* Don't accept input while running */
+	if (p->running)
+		return 1;
+
+	/* Escape to close */
+	if (sym == XKB_KEY_Escape) {
+		sudo_popup_hide_all();
+		return 1;
+	}
+
+	/* Enter to submit */
+	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+		if (p->password_len > 0)
+			sudo_popup_execute(m);
+		return 1;
+	}
+
+	/* Backspace */
+	if (sym == XKB_KEY_BackSpace) {
+		if (p->password_len > 0) {
+			p->password_len--;
+			p->password[p->password_len] = '\0';
+			sudo_popup_render(m);
+		}
+		return 1;
+	}
+
+	/* Regular character input */
+	len = xkb_keysym_to_utf8(sym, buf, sizeof(buf));
+	if (len > 0 && len < (int)sizeof(buf) && buf[0] >= 32 && buf[0] < 127) {
+		if (p->password_len < (int)sizeof(p->password) - 1) {
+			p->password[p->password_len++] = buf[0];
+			p->password[p->password_len] = '\0';
+			sudo_popup_render(m);
+		}
+		return 1;
+	}
+
+	return 1;
+}
+
+static void
+sudo_popup_show(Monitor *m, const char *title, const char *cmd, const char *pkg_name)
+{
+	if (!m || !cmd)
+		return;
+
+	sudo_popup_hide_all();
+
+	snprintf(m->sudo_popup.title, sizeof(m->sudo_popup.title), "%s",
+	         title ? title : "sudo:");
+	snprintf(m->sudo_popup.pending_cmd, sizeof(m->sudo_popup.pending_cmd), "%s", cmd);
+	snprintf(m->sudo_popup.pending_pkg, sizeof(m->sudo_popup.pending_pkg), "%s",
+	         pkg_name ? pkg_name : "package");
+
+	m->sudo_popup.password[0] = '\0';
+	m->sudo_popup.password_len = 0;
+	m->sudo_popup.cursor_pos = 0;
+	m->sudo_popup.button_hover = 0;
+	m->sudo_popup.error = 0;
+	m->sudo_popup.running = 0;
+	m->sudo_popup.visible = 1;
+
+	sudo_popup_render(m);
+}
+
 static void
 wifi_networks_clear(void)
 {
@@ -9895,15 +10795,27 @@ static int
 loadstatusfont(void)
 {
 	size_t count;
+	const char **fonts;
 
 	if (statusfont.font)
 		return 1;
 
-	count = LENGTH(statusbar_fonts);
+	/* Use runtime fonts if configured, otherwise use default */
+	if (runtime_fonts_set && runtime_fonts[0]) {
+		fonts = (const char **)runtime_fonts;
+		for (count = 0; count < 8 && fonts[count]; count++)
+			;
+	} else {
+		fonts = statusbar_fonts;
+		/* Count actual non-NULL fonts, not array size */
+		for (count = 0; count < LENGTH(statusbar_fonts) && fonts[count]; count++)
+			;
+	}
+
 	if (count == 0)
 		return 0;
 
-	statusfont.font = fcft_from_name(count, statusbar_fonts, statusbar_font_attributes);
+	statusfont.font = fcft_from_name(count, fonts, statusbar_font_attributes);
 	if (!statusfont.font)
 		return 0;
 
@@ -12424,6 +13336,9 @@ git_cache_update_start(void)
 {
 	pid_t pid;
 
+	if (game_mode_active || htpc_mode_active)
+		return;
+
 	pid = fork();
 	if (pid == 0) {
 		setsid();
@@ -12447,6 +13362,9 @@ file_cache_update_start(void)
 {
 	pid_t pid;
 
+	if (game_mode_active || htpc_mode_active)
+		return;
+
 	pid = fork();
 	if (pid == 0) {
 		setsid();
@@ -12467,8 +13385,10 @@ static int
 cache_update_timer_cb(void *data)
 {
 	(void)data;
-	git_cache_update_start();
-	file_cache_update_start();
+	if (!game_mode_active && !htpc_mode_active) {
+		git_cache_update_start();
+		file_cache_update_start();
+	}
 	schedule_cache_update_timer();
 	return 0;
 }
@@ -12476,10 +13396,266 @@ cache_update_timer_cb(void *data)
 static void
 schedule_cache_update_timer(void)
 {
-	if (!cache_update_timer)
+	if (!cache_update_timer || game_mode_active || htpc_mode_active)
 		return;
 	/* 10 minutes = 10 * 60 * 1000 ms = 600000 ms */
 	wl_event_source_timer_update(cache_update_timer, 600000);
+}
+
+static void
+nixpkgs_cache_update_start(void)
+{
+	pid_t pid;
+	char *home;
+	char cache_path[PATH_MAX];
+
+	if (game_mode_active || htpc_mode_active)
+		return;
+
+	home = getenv("HOME");
+	if (!home)
+		home = "/tmp";
+	snprintf(cache_path, sizeof(cache_path), "%s/.cache/dwl-nixpkgs-stable.txt", home);
+
+	pid = fork();
+	if (pid == 0) {
+		setsid();
+		/* Update nixpkgs cache from nixpkgs-stable flake input */
+		char cmd[2048];
+		snprintf(cmd, sizeof(cmd),
+			"nix eval --raw ~/.nixlyos#nixpkgs-stable.outPath 2>/dev/null | "
+			"xargs -I{} nix-env -qaP -f {} 2>/dev/null | "
+			"awk 'index($1, \".\") == 0 {print $1\"\\t\"$2}' | "
+			"sed 's/\\t.*-\\([0-9]\\)/\\t\\1/' > '%s'",
+			cache_path);
+		execl("/bin/sh", "sh", "-c", cmd, NULL);
+		_exit(127);
+	} else if (pid > 0) {
+		wlr_log(WLR_INFO, "nixpkgs cache update started: pid=%d", pid);
+	}
+}
+
+static int
+nixpkgs_cache_timer_cb(void *data)
+{
+	(void)data;
+	if (!game_mode_active && !htpc_mode_active) {
+		nixpkgs_cache_update_start();
+	}
+	schedule_nixpkgs_cache_timer();
+	return 0;
+}
+
+static void
+schedule_nixpkgs_cache_timer(void)
+{
+	if (!nixpkgs_cache_timer)
+		return;
+	/* 1 week = 7 * 24 * 60 * 60 * 1000 ms = 604800000 ms */
+	wl_event_source_timer_update(nixpkgs_cache_timer, 604800000);
+}
+
+/* Check if any client is currently fullscreen */
+static int
+any_client_fullscreen(void)
+{
+	Client *c;
+	wl_list_for_each(c, &clients, link) {
+		if (c->isfullscreen && client_surface(c)->mapped)
+			return 1;
+	}
+	return 0;
+}
+
+/* Update game mode state - called when fullscreen state changes */
+static void
+update_game_mode(void)
+{
+	int was_active = game_mode_active;
+	game_mode_active = any_client_fullscreen();
+
+	if (game_mode_active && !was_active) {
+		wlr_log(WLR_INFO, "Game mode activated - pausing background tasks");
+		/* Cancel pending timers to reduce CPU/IO during gaming */
+		if (cache_update_timer)
+			wl_event_source_timer_update(cache_update_timer, 0);
+		if (nixpkgs_cache_timer)
+			wl_event_source_timer_update(nixpkgs_cache_timer, 0);
+		if (status_cpu_timer)
+			wl_event_source_timer_update(status_cpu_timer, 0);
+		if (status_timer)
+			wl_event_source_timer_update(status_timer, 0);
+	} else if (!game_mode_active && was_active) {
+		wlr_log(WLR_INFO, "Game mode deactivated - resuming background tasks");
+		/* Resume all background timers */
+		schedule_cache_update_timer();
+		schedule_nixpkgs_cache_timer();
+		schedule_status_timer();
+		schedule_next_status_refresh();
+	}
+}
+
+/* HTPC mode - optimized for controller/TV usage */
+static void
+htpc_mode_enter(void)
+{
+	Monitor *m;
+	Client *c, *tmp;
+
+	if (!htpc_mode_enabled || htpc_mode_active)
+		return;
+
+	htpc_mode_active = 1;
+	wlr_log(WLR_INFO, "HTPC mode activated - killing all clients, minimizing system load");
+
+	/* Close all client windows gracefully */
+	wl_list_for_each_safe(c, tmp, &clients, link) {
+		client_send_close(c);
+	}
+
+	/* Hide statusbar on all monitors */
+	wl_list_for_each(m, &mons, link) {
+		m->showbar = 0;
+		if (m->statusbar.tree)
+			wlr_scene_node_set_enabled(&m->statusbar.tree->node, 0);
+	}
+
+	/* Hide all status menus and popups */
+	net_menu_hide_all();
+	wifi_popup_hide_all();
+	sudo_popup_hide_all();
+	tray_menu_hide_all();
+	modal_hide_all();
+	nixpkgs_hide_all();
+	gamepad_menu_hide_all();
+
+	/* Stop ALL background timers to minimize CPU/IO/RAM */
+	if (cache_update_timer)
+		wl_event_source_timer_update(cache_update_timer, 0);
+	if (nixpkgs_cache_timer)
+		wl_event_source_timer_update(nixpkgs_cache_timer, 0);
+	if (status_cpu_timer)
+		wl_event_source_timer_update(status_cpu_timer, 0);
+	if (status_timer)
+		wl_event_source_timer_update(status_timer, 0);
+	if (status_hover_timer)
+		wl_event_source_timer_update(status_hover_timer, 0);
+	if (cpu_popup_refresh_timer)
+		wl_event_source_timer_update(cpu_popup_refresh_timer, 0);
+	if (ram_popup_refresh_timer)
+		wl_event_source_timer_update(ram_popup_refresh_timer, 0);
+	if (wifi_scan_timer)
+		wl_event_source_timer_update(wifi_scan_timer, 0);
+	/* NOTE: Keep bt_scan_timer running - needed for controller reconnection */
+	if (video_check_timer)
+		wl_event_source_timer_update(video_check_timer, 0);
+	if (popup_delay_timer)
+		wl_event_source_timer_update(popup_delay_timer, 0);
+	if (config_rewatch_timer)
+		wl_event_source_timer_update(config_rewatch_timer, 0);
+
+	/* Kill non-essential processes */
+	if (fork() == 0) {
+		setsid();
+		execl("/bin/sh", "sh", "-c",
+			"pkill -9 -f 'thunar|nautilus|dolphin' 2>/dev/null; "
+			"pkill -9 -f 'code|codium|sublime' 2>/dev/null; "
+			"pkill -9 -f 'firefox|chromium|brave|chrome' 2>/dev/null; "
+			"pkill -9 -f 'discord|slack|telegram|signal' 2>/dev/null; "
+			"pkill -9 -f 'spotify|rhythmbox|vlc|mpv' 2>/dev/null; "
+			"pkill -9 -f 'gimp|inkscape|blender|kdenlive' 2>/dev/null; "
+			"pkill -9 -f 'libreoffice|evince|zathura' 2>/dev/null; "
+			"pkill -9 -f 'alacritty|foot|kitty|wezterm|konsole|gnome-terminal' 2>/dev/null; "
+			"sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; "
+			"echo 10 > /proc/sys/vm/swappiness 2>/dev/null",
+			(char *)NULL);
+		_exit(0);
+	}
+
+	/* Set HTPC wallpaper */
+	{
+		char expanded_htpc_wp[PATH_MAX];
+		config_expand_path(htpc_wallpaper_path, expanded_htpc_wp, sizeof(expanded_htpc_wp));
+		wlr_log(WLR_INFO, "HTPC mode: setting wallpaper to %s", expanded_htpc_wp);
+
+		pid_t pid = fork();
+		if (pid == 0) {
+			setsid();
+			/* Kill swaybg, wait, then exec new swaybg directly */
+			system("pkill -9 swaybg 2>/dev/null; sleep 0.5");
+			execlp("swaybg", "swaybg", "-i", expanded_htpc_wp, "-m", "fill", (char *)NULL);
+			_exit(127);
+		}
+	}
+
+	/* Re-arrange all monitors */
+	wl_list_for_each(m, &mons, link) {
+		arrange(m);
+	}
+
+	/* Clear focus since all clients are being closed */
+	focusclient(NULL, 0);
+}
+
+static void
+htpc_mode_exit(void)
+{
+	Monitor *m;
+
+	if (!htpc_mode_active)
+		return;
+
+	htpc_mode_active = 0;
+	wlr_log(WLR_INFO, "HTPC mode deactivated - showing statusbar, resuming background tasks");
+
+	/* Restore normal wallpaper */
+	{
+		char expanded_wp[PATH_MAX];
+		config_expand_path(wallpaper_path, expanded_wp, sizeof(expanded_wp));
+		wlr_log(WLR_INFO, "Restoring wallpaper: %s", expanded_wp);
+
+		pid_t pid = fork();
+		if (pid == 0) {
+			setsid();
+			system("pkill -9 swaybg 2>/dev/null; sleep 0.5");
+			execlp("swaybg", "swaybg", "-i", expanded_wp, "-m", "fill", (char *)NULL);
+			_exit(127);
+		}
+	}
+
+	/* Show statusbar on all monitors */
+	wl_list_for_each(m, &mons, link) {
+		m->showbar = 1;
+		if (m->statusbar.tree)
+			wlr_scene_node_set_enabled(&m->statusbar.tree->node, 1);
+	}
+
+	/* Resume background timers (unless game mode is active) */
+	if (!game_mode_active) {
+		schedule_cache_update_timer();
+		schedule_nixpkgs_cache_timer();
+		schedule_status_timer();
+		schedule_next_status_refresh();
+	}
+
+	/* Re-arrange all monitors to allocate statusbar space */
+	wl_list_for_each(m, &mons, link) {
+		arrange(m);
+	}
+}
+
+static void
+htpc_mode_toggle(const Arg *arg)
+{
+	(void)arg;
+
+	if (!htpc_mode_enabled)
+		return;
+
+	if (htpc_mode_active)
+		htpc_mode_exit();
+	else
+		htpc_mode_enter();
 }
 
 static void
@@ -13460,13 +14636,2846 @@ modal_update_selection(Monitor *m)
 	mo->last_selected = sel;
 }
 
+/* ===== Nixpkgs Install Popup ===== */
+
+static void
+add_nixpkg_entry(const char *name, const char *version)
+{
+	int i;
+	if (nixpkg_entry_count >= NIXPKGS_MAX_ENTRIES)
+		return;
+
+	snprintf(nixpkg_entries[nixpkg_entry_count].name, sizeof(nixpkg_entries[0].name),
+		"%s", name);
+	snprintf(nixpkg_entries[nixpkg_entry_count].version, sizeof(nixpkg_entries[0].version),
+		"%s", version ? version : "");
+	nixpkg_entries[nixpkg_entry_count].installed = 0; /* Will be set by load_installed_packages */
+
+	/* Create lowercase version for case-insensitive search */
+	for (i = 0; nixpkg_entries[nixpkg_entry_count].name[i] && i < (int)sizeof(nixpkg_entries[0].name_lower) - 1; i++)
+		nixpkg_entries[nixpkg_entry_count].name_lower[i] = tolower((unsigned char)nixpkg_entries[nixpkg_entry_count].name[i]);
+	nixpkg_entries[nixpkg_entry_count].name_lower[i] = '\0';
+	nixpkg_entry_count++;
+}
+
+static void
+load_nixlypkgs_cache(void)
+{
+	/* Load nixlypkgs packages from ~/dev_nixly/nixlypkgs/pkgs/ */
+	char pkgs_dir[PATH_MAX];
+	char *home;
+	DIR *dir;
+	struct dirent *entry;
+
+	home = getenv("HOME");
+	if (!home)
+		return;
+
+	snprintf(pkgs_dir, sizeof(pkgs_dir), "%s/dev_nixly/nixlypkgs/pkgs", home);
+	dir = opendir(pkgs_dir);
+	if (!dir)
+		return;
+
+	while ((entry = readdir(dir)) != NULL) {
+		if (entry->d_name[0] == '.')
+			continue;
+		if (entry->d_type == DT_DIR) {
+			char name[140];
+			snprintf(name, sizeof(name), "nixlypkgs.%s", entry->d_name);
+			add_nixpkg_entry(name, "local");
+		}
+	}
+	closedir(dir);
+	wlr_log(WLR_INFO, "Added nixlypkgs entries, total now %d", nixpkg_entry_count);
+}
+
+static void
+load_nixpkgs_cache(void)
+{
+	FILE *f;
+	char line[512];
+	char *home;
+	char *tab;
+
+	if (nixpkg_entries_loaded)
+		return;
+
+	/* Build cache path from flake.nix nixpkgs-stable input */
+	home = getenv("HOME");
+	if (!home)
+		home = "/tmp";
+	snprintf(nixpkgs_cache_path, sizeof(nixpkgs_cache_path),
+		"%s/.cache/dwl-nixpkgs-stable.txt", home);
+
+	f = fopen(nixpkgs_cache_path, "r");
+	if (!f) {
+		wlr_log(WLR_INFO, "Nixpkgs cache not found at %s, generating...", nixpkgs_cache_path);
+		/* Generate cache in background using nix-env -qa with version */
+		pid_t pid = fork();
+		if (pid == 0) {
+			/* Child: generate cache with versions (format: name<TAB>version)
+			 * Use nixpkgs-stable from ~/.nixlyos flake
+			 * Filter to only show top-level packages (first column has no dots)
+			 * This filters out internal packages like pythonPackages.*, haskellPackages.*, etc. */
+			char cmd[2048];
+			snprintf(cmd, sizeof(cmd),
+				"nix eval --raw ~/.nixlyos#nixpkgs-stable.outPath 2>/dev/null | "
+				"xargs -I{} nix-env -qaP -f {} 2>/dev/null | "
+				"awk 'index($1, \".\") == 0 {print $1\"\\t\"$2}' | "
+				"sed 's/\\t.*-\\([0-9]\\)/\\t\\1/' > '%s'",
+				nixpkgs_cache_path);
+			execl("/bin/sh", "sh", "-c", cmd, NULL);
+			_exit(1);
+		}
+		nixpkg_entries_loaded = 1; /* Mark as loaded (empty) to avoid re-triggering */
+		/* Still load nixlypkgs even if nixpkgs cache doesn't exist */
+		load_nixlypkgs_cache();
+		return;
+	}
+
+	nixpkg_entry_count = 0;
+	while (fgets(line, sizeof(line), f) && nixpkg_entry_count < NIXPKGS_MAX_ENTRIES) {
+		/* Remove newline */
+		size_t len = strlen(line);
+		if (len > 0 && line[len - 1] == '\n')
+			line[len - 1] = '\0';
+		if (line[0] == '\0')
+			continue;
+
+		/* Parse tab-separated format: name<TAB>version */
+		tab = strchr(line, '\t');
+		if (tab) {
+			*tab = '\0';
+			add_nixpkg_entry(line, tab + 1);
+		} else {
+			/* Old format without version */
+			add_nixpkg_entry(line, NULL);
+		}
+	}
+	fclose(f);
+
+	/* Also load nixlypkgs packages */
+	load_nixlypkgs_cache();
+
+	nixpkg_entries_loaded = 1;
+	wlr_log(WLR_INFO, "Loaded %d nixpkgs entries from cache", nixpkg_entry_count);
+
+	/* Load installed packages status */
+	load_installed_packages();
+}
+
+static void
+load_installed_packages(void)
+{
+	char packages_path[PATH_MAX];
+	char *home;
+	FILE *f;
+	char *content = NULL;
+	long file_size;
+	int i, count = 0;
+
+	home = getenv("HOME");
+	if (!home)
+		return;
+
+	snprintf(packages_path, sizeof(packages_path),
+		"%s/.nixlyos/modules/core/packages.nix", home);
+
+	f = fopen(packages_path, "r");
+	if (!f)
+		return;
+
+	fseek(f, 0, SEEK_END);
+	file_size = ftell(f);
+	fseek(f, 0, SEEK_SET);
+
+	content = malloc(file_size + 1);
+	if (!content) {
+		fclose(f);
+		return;
+	}
+
+	if (fread(content, 1, file_size, f) != (size_t)file_size) {
+		fclose(f);
+		free(content);
+		return;
+	}
+	content[file_size] = '\0';
+	fclose(f);
+
+	/* Mark packages as installed if they appear in packages.nix */
+	for (i = 0; i < nixpkg_entry_count; i++) {
+		const char *name = nixpkg_entries[i].name;
+		/* For nixlypkgs.foo entries, check for "foo" */
+		if (strncmp(name, "nixlypkgs.", 10) == 0)
+			name = name + 10;
+
+		/* Simple check: look for the package name in the file */
+		if (strstr(content, name)) {
+			nixpkg_entries[i].installed = 1;
+			count++;
+		} else {
+			nixpkg_entries[i].installed = 0;
+		}
+	}
+
+	free(content);
+	wlr_log(WLR_INFO, "Marked %d packages as installed", count);
+}
+
+static int
+ensure_nixpkg_ok_icon(int height)
+{
+	GdkPixbuf *pixbuf = NULL;
+	char icon_path[PATH_MAX];
+
+	if (nixpkg_ok_icon_buf && nixpkg_ok_icon_height == height)
+		return 0;
+
+	/* Drop old buffer */
+	if (nixpkg_ok_icon_buf) {
+		wlr_buffer_drop(nixpkg_ok_icon_buf);
+		nixpkg_ok_icon_buf = NULL;
+		nixpkg_ok_icon_height = 0;
+	}
+
+	if (resolve_asset_path("images/svg/ok.svg", icon_path, sizeof(icon_path)) != 0)
+		return -1;
+
+	if (tray_load_svg_pixbuf(icon_path, height, &pixbuf) != 0)
+		return -1;
+
+	{
+		int w = gdk_pixbuf_get_width(pixbuf);
+		int h = gdk_pixbuf_get_height(pixbuf);
+		int stride = gdk_pixbuf_get_rowstride(pixbuf);
+		int n_chan = gdk_pixbuf_get_n_channels(pixbuf);
+		guchar *pix = gdk_pixbuf_get_pixels(pixbuf);
+		uint32_t *argb = malloc(w * h * 4);
+
+		if (!argb) {
+			g_object_unref(pixbuf);
+			return -1;
+		}
+
+		for (int y = 0; y < h; y++) {
+			guchar *row = pix + y * stride;
+			for (int x = 0; x < w; x++) {
+				guchar r = row[x * n_chan + 0];
+				guchar g = row[x * n_chan + 1];
+				guchar b = row[x * n_chan + 2];
+				guchar a = (n_chan == 4) ? row[x * n_chan + 3] : 255;
+				argb[y * w + x] = ((uint32_t)a << 24) | ((uint32_t)r << 16) |
+				                  ((uint32_t)g << 8) | (uint32_t)b;
+			}
+		}
+
+		nixpkg_ok_icon_buf = statusbar_buffer_from_argb32_raw(argb, w, h);
+		free(argb);
+		g_object_unref(pixbuf);
+
+		if (!nixpkg_ok_icon_buf)
+			return -1;
+
+		nixpkg_ok_icon_height = height;
+	}
+
+	return 0;
+}
+
+static void
+ensure_nixpkgs_cache_loaded(void)
+{
+	if (!nixpkg_entries_loaded)
+		load_nixpkgs_cache();
+}
+
+static Monitor *
+nixpkgs_visible_monitor(void)
+{
+	Monitor *m;
+	wl_list_for_each(m, &mons, link) {
+		if (m->nixpkgs.visible)
+			return m;
+	}
+	return NULL;
+}
+
+static void
+nixpkgs_hide(Monitor *m)
+{
+	if (!m || !m->nixpkgs.tree)
+		return;
+	m->nixpkgs.visible = 0;
+	wlr_scene_node_set_enabled(&m->nixpkgs.tree->node, 0);
+}
+
+static void
+nixpkgs_hide_all(void)
+{
+	Monitor *m;
+	wl_list_for_each(m, &mons, link)
+		nixpkgs_hide(m);
+}
+
+static void
+nixpkgs_update_results(Monitor *m)
+{
+	NixpkgsOverlay *no;
+	char needle[256];
+	int i, k, count;
+
+	if (!m)
+		return;
+	no = &m->nixpkgs;
+
+	ensure_nixpkgs_cache_loaded();
+
+	/* Convert search to lowercase */
+	for (i = 0; i < no->search_len && i < (int)sizeof(needle) - 1; i++)
+		needle[i] = tolower((unsigned char)no->search[i]);
+	needle[i] = '\0';
+
+	count = 0;
+	if (needle[0] == '\0') {
+		/* Empty search: show first N packages */
+		for (i = 0; i < nixpkg_entry_count && count < MODAL_MAX_RESULTS; i++)
+			no->result_indices[count++] = i;
+	} else {
+		/* Search: prefix match first, then substring */
+		/* Pass 1: prefix matches */
+		for (i = 0; i < nixpkg_entry_count && count < MODAL_MAX_RESULTS; i++) {
+			if (strncmp(nixpkg_entries[i].name_lower, needle, strlen(needle)) == 0)
+				no->result_indices[count++] = i;
+		}
+		/* Pass 2: substring matches (not prefix) */
+		for (i = 0; i < nixpkg_entry_count && count < MODAL_MAX_RESULTS; i++) {
+			if (strncmp(nixpkg_entries[i].name_lower, needle, strlen(needle)) != 0 &&
+			    strstr(nixpkg_entries[i].name_lower, needle))
+				no->result_indices[count++] = i;
+		}
+	}
+	no->result_count = count;
+
+	/* Reset selection if out of range */
+	if (no->selected >= count)
+		no->selected = count > 0 ? count - 1 : -1;
+	if (no->selected < 0 && count > 0)
+		no->selected = 0;
+}
+
+/* Get layout metrics for nixpkgs popup (simplified - no tabs) */
+static void
+nixpkgs_layout_metrics(int *field_h, int *line_h, int *pad)
+{
+	*field_h = 36;
+	*line_h = 24;
+	*pad = 10;
+}
+
+static int
+nixpkgs_max_visible_lines(Monitor *m)
+{
+	NixpkgsOverlay *no;
+	int field_h, line_h, pad;
+	int usable;
+	int hint_h = 20 + 4; /* hint height + margin */
+	int title_h = 32;
+
+	if (!m)
+		return 0;
+	no = &m->nixpkgs;
+
+	nixpkgs_layout_metrics(&field_h, &line_h, &pad);
+	/* title + pad + field + pad + results + hint area */
+	usable = no->height - title_h - pad - field_h - pad - hint_h - pad;
+	if (usable <= 0)
+		return 0;
+	return usable / line_h;
+}
+
+static void
+nixpkgs_ensure_selection_visible(Monitor *m)
+{
+	NixpkgsOverlay *no;
+	int max_lines, sel;
+
+	if (!m)
+		return;
+	no = &m->nixpkgs;
+	sel = no->selected;
+	if (sel < 0)
+		return;
+
+	max_lines = nixpkgs_max_visible_lines(m);
+	if (max_lines <= 0)
+		return;
+
+	if (sel < no->scroll)
+		no->scroll = sel;
+	else if (sel >= no->scroll + max_lines)
+		no->scroll = sel - max_lines + 1;
+}
+
+static void
+nixpkgs_render(Monitor *m)
+{
+	NixpkgsOverlay *no;
+	int field_h, line_h, pad;
+	struct wlr_scene_node *node, *tmp;
+
+	if (!m || !m->nixpkgs.tree)
+		return;
+
+	no = &m->nixpkgs;
+	if (!no->visible || no->width <= 0 || no->height <= 0)
+		return;
+
+	nixpkgs_layout_metrics(&field_h, &line_h, &pad);
+
+	/* Clear existing non-bg nodes */
+	wl_list_for_each_safe(node, tmp, &no->tree->children, link) {
+		if (no->bg && node == &no->bg->node)
+			continue;
+		wlr_scene_node_destroy(node);
+	}
+	/* Reset cached trees */
+	no->search_field_tree = NULL;
+	no->results_tree = NULL;
+	no->row_highlight_count = 0;
+	no->search_rendered[0] = '\0';
+
+	/* Redraw background */
+	if (no->bg) {
+		wl_list_for_each_safe(node, tmp, &no->bg->children, link)
+			wlr_scene_node_destroy(node);
+		drawrect(no->bg, 0, 0, no->width, no->height, statusbar_popup_bg);
+		/* 1px black border */
+		if (no->width > 0 && no->height > 0) {
+			const float border[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+			drawrect(no->bg, 0, 0, no->width, 1, border); /* top */
+			drawrect(no->bg, 0, no->height - 1, no->width, 1, border); /* bottom */
+			drawrect(no->bg, 0, 0, 1, no->height, border); /* left */
+			if (no->width > 1)
+				drawrect(no->bg, no->width - 1, 0, 1, no->height, border); /* right */
+		}
+	}
+
+	/* Title */
+	{
+		struct wlr_scene_tree *title = wlr_scene_tree_create(no->tree);
+		if (title) {
+			StatusModule mod = {0};
+			const char *title_text = "Nixpkgs Install";
+			int title_h = 32;
+			int text_w = status_text_width(title_text);
+			int text_x = (no->width - text_w) / 2;
+
+			wlr_scene_node_set_position(&title->node, 0, 4);
+			mod.tree = title;
+			drawrect(title, 0, 0, no->width, title_h, statusbar_tag_active_bg);
+			tray_render_label(&mod, title_text, text_x, title_h, statusbar_fg);
+		}
+	}
+
+	/* Search field */
+	{
+		int field_x = pad;
+		int field_y = 32 + pad;
+		int field_w = no->width - pad * 2;
+		const float field_bg[4] = {0.1f, 0.1f, 0.1f, 0.5f};
+		const float border[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+		const char *text = no->search;
+		const char *to_draw = (text && *text) ? text : "Type to search packages...";
+		StatusModule mod = {0};
+		int text_w, text_x;
+
+		if (field_w < 20)
+			field_w = 20;
+		if (field_h < 20)
+			field_h = 20;
+
+		if (no->bg) {
+			drawrect(no->bg, field_x, field_y, field_w, field_h, field_bg);
+			drawrect(no->bg, field_x, field_y, field_w, 1, border);
+			drawrect(no->bg, field_x, field_y + field_h - 1, field_w, 1, border);
+			drawrect(no->bg, field_x, field_y, 1, field_h, border);
+			drawrect(no->bg, field_x + field_w - 1, field_y, 1, field_h, border);
+		}
+
+		if (!no->search_field_tree)
+			no->search_field_tree = wlr_scene_tree_create(no->tree);
+		if (no->search_field_tree) {
+			wlr_scene_node_set_position(&no->search_field_tree->node, 0, field_y);
+			mod.tree = no->search_field_tree;
+			text_w = status_text_width(to_draw);
+			text_x = field_x + (field_w - text_w) / 2;
+			if (text_x < field_x + 6)
+				text_x = field_x + 6;
+			tray_render_label(&mod, to_draw, text_x, field_h, statusbar_fg);
+			snprintf(no->search_rendered, sizeof(no->search_rendered), "%s", no->search);
+		}
+	}
+
+	/* Results list */
+	nixpkgs_render_results(m);
+
+	/* Hint at bottom */
+	{
+		struct wlr_scene_tree *hint = wlr_scene_tree_create(no->tree);
+		if (hint) {
+			StatusModule mod = {0};
+			const char *hint_text = "Hit enter to install package";
+			int hint_h = 20;
+			int hint_y = no->height - hint_h - 4;
+			int text_w = status_text_width(hint_text);
+			int text_x = (no->width - text_w) / 2;
+			const float hint_fg[4] = {0.6f, 0.6f, 0.6f, 1.0f};
+
+			wlr_scene_node_set_position(&hint->node, 0, hint_y);
+			mod.tree = hint;
+			drawrect(hint, 0, 0, no->width, hint_h, statusbar_popup_bg);
+			tray_render_label(&mod, hint_text, text_x, hint_h, hint_fg);
+		}
+	}
+}
+
+static void
+nixpkgs_render_results(Monitor *m)
+{
+	NixpkgsOverlay *no;
+	int field_h, line_h, pad;
+	int max_lines, start, max_start;
+	int line_y;
+	int rendered_count = 0;
+	int i;
+
+	if (!m || !m->nixpkgs.tree)
+		return;
+	no = &m->nixpkgs;
+	if (!no->visible || no->width <= 0 || no->height <= 0)
+		return;
+	if (no->result_count <= 0)
+		return;
+
+	nixpkgs_layout_metrics(&field_h, &line_h, &pad);
+	line_y = 32 + pad + field_h + pad; /* title + pad + field + pad */
+
+	/* Destroy old results tree */
+	if (no->results_tree) {
+		wlr_scene_node_destroy(&no->results_tree->node);
+		no->results_tree = NULL;
+	}
+	/* Clear cached highlights */
+	no->row_highlight_count = 0;
+	for (i = 0; i < MODAL_MAX_RESULTS; i++)
+		no->row_highlights[i] = NULL;
+
+	/* Create new results tree */
+	no->results_tree = wlr_scene_tree_create(no->tree);
+	if (!no->results_tree)
+		return;
+	wlr_scene_node_set_position(&no->results_tree->node, 0, line_y);
+
+	max_lines = nixpkgs_max_visible_lines(m);
+	if (max_lines <= 0)
+		return;
+
+	start = no->scroll;
+	max_start = no->result_count - max_lines;
+	if (max_start < 0)
+		max_start = 0;
+	if (start < 0)
+		start = 0;
+	if (start > max_start)
+		start = max_start;
+	no->scroll = start;
+
+	for (i = start; i < no->result_count && rendered_count < max_lines; i++) {
+		int idx = no->result_indices[i];
+		const char *name = nixpkg_entries[idx].name;
+		const char *version = nixpkg_entries[idx].version;
+		int y = rendered_count * line_h;
+		struct wlr_scene_tree *row;
+		struct wlr_scene_rect *highlight;
+		StatusModule mod = {0};
+		int sel = (i == no->selected);
+		const float sel_bg[4] = {0.2f, 0.4f, 0.6f, 0.8f};
+		const float version_fg[4] = {0.5f, 0.5f, 0.5f, 1.0f}; /* grey for version */
+		int name_w;
+
+		row = wlr_scene_tree_create(no->results_tree);
+		if (!row)
+			continue;
+		wlr_scene_node_set_position(&row->node, pad, y);
+
+		/* Create highlight rect (hidden by default unless selected) */
+		highlight = wlr_scene_rect_create(row, no->width - pad * 2, line_h, sel_bg);
+		if (highlight) {
+			wlr_scene_node_set_position(&highlight->node, 0, 0);
+			wlr_scene_node_set_enabled(&highlight->node, sel);
+			no->row_highlights[rendered_count] = highlight;
+		}
+
+		/* Render package name */
+		mod.tree = row;
+		tray_render_label(&mod, name, 4, line_h, statusbar_fg);
+
+		/* Render version in grey parentheses if available */
+		name_w = status_text_width(name);
+		if (version && version[0]) {
+			char ver_str[80];
+			snprintf(ver_str, sizeof(ver_str), "(%s)", version);
+			tray_render_label(&mod, ver_str, 4 + name_w + 8, line_h, version_fg);
+
+			/* Show ok.svg icon if package is installed */
+			if (nixpkg_entries[idx].installed) {
+				int icon_h = line_h - 4;
+				if (ensure_nixpkg_ok_icon(icon_h) == 0 && nixpkg_ok_icon_buf) {
+					int ver_w = status_text_width(ver_str);
+					int icon_x = 4 + name_w + 8 + ver_w + 6;
+					int icon_y = (line_h - icon_h) / 2;
+					struct wlr_scene_buffer *icon_node =
+						wlr_scene_buffer_create(row, nixpkg_ok_icon_buf);
+					if (icon_node)
+						wlr_scene_node_set_position(&icon_node->node, icon_x, icon_y);
+				}
+			}
+		} else if (nixpkg_entries[idx].installed) {
+			/* No version but installed - show icon after name */
+			int icon_h = line_h - 4;
+			if (ensure_nixpkg_ok_icon(icon_h) == 0 && nixpkg_ok_icon_buf) {
+				int icon_x = 4 + name_w + 8;
+				int icon_y = (line_h - icon_h) / 2;
+				struct wlr_scene_buffer *icon_node =
+					wlr_scene_buffer_create(row, nixpkg_ok_icon_buf);
+				if (icon_node)
+					wlr_scene_node_set_position(&icon_node->node, icon_x, icon_y);
+			}
+		}
+
+		/* Render "Source (Mod+w)" on the right side */
+		{
+			const char *source_text = "Source (Mod+w)";
+			int source_w = status_text_width(source_text);
+			int source_x = no->width - pad * 2 - source_w - 8;
+			tray_render_label(&mod, source_text, source_x, line_h, version_fg);
+		}
+
+		rendered_count++;
+	}
+	no->row_highlight_count = rendered_count;
+	no->last_scroll = start;
+	no->last_selected = no->selected;
+}
+
+static void
+nixpkgs_update_selection(Monitor *m)
+{
+	NixpkgsOverlay *no;
+	int start, sel, old_row, new_row;
+
+	if (!m)
+		return;
+	no = &m->nixpkgs;
+	if (!no->visible || !no->results_tree)
+		return;
+	if (no->row_highlight_count <= 0)
+		return;
+
+	start = no->scroll;
+	sel = no->selected;
+
+	/* If scroll changed, need full re-render */
+	if (start != no->last_scroll) {
+		nixpkgs_render_results(m);
+		return;
+	}
+
+	/* Calculate old and new row indices */
+	old_row = no->last_selected - start;
+	new_row = sel - start;
+
+	/* Hide old highlight */
+	if (old_row >= 0 && old_row < no->row_highlight_count && no->row_highlights[old_row])
+		wlr_scene_node_set_enabled(&no->row_highlights[old_row]->node, 0);
+
+	/* Show new highlight */
+	if (new_row >= 0 && new_row < no->row_highlight_count && no->row_highlights[new_row])
+		wlr_scene_node_set_enabled(&no->row_highlights[new_row]->node, 1);
+
+	no->last_selected = sel;
+}
+
+/* Toast notification functions */
+static int
+toast_hide_timer(void *data)
+{
+	Monitor *m = data;
+	if (m && m->toast_tree) {
+		wlr_scene_node_set_enabled(&m->toast_tree->node, 0);
+		m->toast_visible = 0;
+	}
+	return 0;
+}
+
+static void
+toast_show(Monitor *m, const char *message, int duration_ms)
+{
+	struct wlr_scene_node *node, *tmp;
+	int text_w, pad = 12, h = 28;
+	int x, y, w;
+	const float bg[4] = {0.15f, 0.15f, 0.15f, 0.95f};
+	const float border[4] = {0.3f, 0.3f, 0.3f, 1.0f};
+	StatusModule mod = {0};
+
+	if (!m)
+		m = selmon;
+	if (!m)
+		return;
+
+	/* Create toast tree if needed */
+	if (!m->toast_tree) {
+		m->toast_tree = wlr_scene_tree_create(layers[LyrTop]);
+		if (!m->toast_tree)
+			return;
+	}
+
+	/* Clear existing content */
+	wl_list_for_each_safe(node, tmp, &m->toast_tree->children, link)
+		wlr_scene_node_destroy(node);
+
+	/* Calculate size and position (top right corner) */
+	text_w = status_text_width(message);
+	w = text_w + pad * 2;
+	x = m->m.x + m->m.width - w - 20;
+	y = m->m.y + 50; /* Below status bar */
+
+	wlr_scene_node_set_position(&m->toast_tree->node, x, y);
+
+	/* Draw background */
+	drawrect(m->toast_tree, 0, 0, w, h, bg);
+	/* Draw border */
+	drawrect(m->toast_tree, 0, 0, w, 1, border);
+	drawrect(m->toast_tree, 0, h - 1, w, 1, border);
+	drawrect(m->toast_tree, 0, 0, 1, h, border);
+	drawrect(m->toast_tree, w - 1, 0, 1, h, border);
+
+	/* Draw text */
+	mod.tree = m->toast_tree;
+	tray_render_label(&mod, message, pad, h, statusbar_fg);
+
+	/* Show toast */
+	wlr_scene_node_set_enabled(&m->toast_tree->node, 1);
+	m->toast_visible = 1;
+
+	/* Set up timer to hide */
+	if (!m->toast_timer)
+		m->toast_timer = wl_event_loop_add_timer(event_loop, toast_hide_timer, m);
+	wl_event_source_timer_update(m->toast_timer, duration_ms);
+}
+
+static void
+nixpkgs_open_source(Monitor *m)
+{
+	NixpkgsOverlay *no;
+	int idx;
+	const char *name;
+	char url[512];
+	char cmd_str[600];
+	char *cmd[4] = { "sh", "-c", cmd_str, NULL };
+	Arg arg;
+
+	if (!m)
+		return;
+	no = &m->nixpkgs;
+	if (no->selected < 0 || no->selected >= no->result_count)
+		return;
+
+	idx = no->result_indices[no->selected];
+	name = nixpkg_entries[idx].name;
+
+	/* Check if it's a nixlypkgs package */
+	if (strncmp(name, "nixlypkgs.", 10) == 0) {
+		/* Open local nixlypkgs package in file manager or editor */
+		const char *pkg = name + 10; /* skip "nixlypkgs." prefix */
+		snprintf(url, sizeof(url),
+			"https://github.com/totalygeek/nixlypkgs/tree/main/pkgs/%s", pkg);
+	} else {
+		/* Open on GitHub nixpkgs (nixos-25.11 stable branch) */
+		snprintf(url, sizeof(url),
+			"https://github.com/NixOS/nixpkgs/blob/nixos-25.11/pkgs/by-name/%c%c/%s/package.nix",
+			name[0], name[1] && name[1] != '\0' ? name[1] : name[0], name);
+	}
+
+	snprintf(cmd_str, sizeof(cmd_str), "xdg-open '%s'", url);
+	arg.v = cmd;
+	spawn(&arg);
+}
+
+static void
+nixpkgs_install_selected(Monitor *m)
+{
+	NixpkgsOverlay *no;
+	int idx;
+	const char *name;
+	char packages_path[PATH_MAX];
+	char *home;
+	FILE *f;
+	char *content = NULL;
+	long file_size;
+	char *insert_pos;
+	char *new_content;
+	size_t new_size;
+	const char *marker = "];"; /* End of hmPackages list */
+	char pkg_name[140];
+
+	if (!m)
+		return;
+	no = &m->nixpkgs;
+	if (no->selected < 0 || no->selected >= no->result_count)
+		return;
+
+	idx = no->result_indices[no->selected];
+	name = nixpkg_entries[idx].name;
+
+	/* Get package name without nixlypkgs. prefix for insertion */
+	if (strncmp(name, "nixlypkgs.", 10) == 0) {
+		snprintf(pkg_name, sizeof(pkg_name), "%s", name + 10);
+	} else {
+		snprintf(pkg_name, sizeof(pkg_name), "%s", name);
+	}
+
+	/* Build path to packages.nix */
+	home = getenv("HOME");
+	if (!home)
+		return;
+	snprintf(packages_path, sizeof(packages_path),
+		"%s/.nixlyos/modules/core/packages.nix", home);
+
+	/* Read the file */
+	f = fopen(packages_path, "r");
+	if (!f) {
+		wlr_log(WLR_ERROR, "Failed to open %s for reading", packages_path);
+		return;
+	}
+
+	fseek(f, 0, SEEK_END);
+	file_size = ftell(f);
+	fseek(f, 0, SEEK_SET);
+
+	content = malloc(file_size + 1);
+	if (!content) {
+		fclose(f);
+		return;
+	}
+
+	if (fread(content, 1, file_size, f) != (size_t)file_size) {
+		fclose(f);
+		free(content);
+		return;
+	}
+	content[file_size] = '\0';
+	fclose(f);
+
+	/* Check if package already exists */
+	if (strstr(content, pkg_name)) {
+		wlr_log(WLR_INFO, "Package %s already in packages.nix", pkg_name);
+		free(content);
+		nixpkgs_hide_all();
+		return;
+	}
+
+	/* Find the first "];" which marks the end of hmPackages */
+	insert_pos = strstr(content, marker);
+	if (!insert_pos) {
+		wlr_log(WLR_ERROR, "Could not find hmPackages end marker in packages.nix");
+		free(content);
+		return;
+	}
+
+	/* Create new content with package inserted before "];" */
+	/* "    pkg_name\n  " = 4 spaces + name + newline + 2 spaces = 7 + strlen */
+	new_size = file_size + strlen(pkg_name) + 10;
+	new_content = malloc(new_size + 1);
+	if (!new_content) {
+		free(content);
+		return;
+	}
+
+	/* Copy content before marker, add new package, add marker and rest */
+	{
+		size_t prefix_len = insert_pos - content;
+		char *p = new_content;
+
+		memcpy(p, content, prefix_len);
+		p += prefix_len;
+
+		p += sprintf(p, "    %s\n  ", pkg_name);
+
+		strcpy(p, insert_pos);
+	}
+
+	/* Write the file back */
+	f = fopen(packages_path, "w");
+	if (!f) {
+		wlr_log(WLR_ERROR, "Failed to open %s for writing", packages_path);
+		free(content);
+		free(new_content);
+		return;
+	}
+
+	fputs(new_content, f);
+	fclose(f);
+
+	wlr_log(WLR_INFO, "Added %s to packages.nix", pkg_name);
+
+	/* Mark package as installed in our cache */
+	nixpkg_entries[idx].installed = 1;
+
+	free(content);
+	free(new_content);
+	nixpkgs_hide_all();
+
+	/* Show sudo popup to run nixos-rebuild boot */
+	{
+		char rebuild_cmd[512];
+		snprintf(rebuild_cmd, sizeof(rebuild_cmd),
+			"cd %s/.nixlyos && nixos-rebuild boot --flake .#nixlyos", home);
+		sudo_popup_show(m, "sudo:", rebuild_cmd, pkg_name);
+	}
+}
+
+static int
+nixpkgs_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
+{
+	NixpkgsOverlay *no;
+
+	if (!m)
+		return 0;
+	no = &m->nixpkgs;
+
+	if (sym == XKB_KEY_Escape) {
+		nixpkgs_hide_all();
+		return 1;
+	}
+
+	if (sym == XKB_KEY_BackSpace && no->search_len > 0 && mods == 0) {
+		no->search_len--;
+		no->search[no->search_len] = '\0';
+		return 1;
+	}
+
+	if (sym == XKB_KEY_Down && no->result_count > 0) {
+		int sel = no->selected;
+		if (sel < 0)
+			sel = 0;
+		else if (sel + 1 < no->result_count)
+			sel++;
+		else
+			sel = 0; /* wrap */
+		no->selected = sel;
+		nixpkgs_ensure_selection_visible(m);
+		return 1;
+	}
+
+	if (sym == XKB_KEY_Up && no->result_count > 0) {
+		int sel = no->selected;
+		if (sel < 0)
+			sel = no->result_count - 1;
+		else if (sel > 0)
+			sel--;
+		else
+			sel = no->result_count - 1; /* wrap */
+		no->selected = sel;
+		nixpkgs_ensure_selection_visible(m);
+		return 1;
+	}
+
+	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+		nixpkgs_install_selected(m);
+		return 1;
+	}
+
+	/* Mod+w: Open source in browser */
+	if ((sym == XKB_KEY_w || sym == XKB_KEY_W) && (mods & WLR_MODIFIER_LOGO)) {
+		nixpkgs_open_source(m);
+		return 1;
+	}
+
+	/* Text input */
+	{
+		int is_altgr = (mods & WLR_MODIFIER_CTRL) && (mods & WLR_MODIFIER_ALT);
+		int is_ctrl_only = (mods & WLR_MODIFIER_CTRL) && !is_altgr;
+		if (sym >= 0x20 && sym <= 0x7e && !is_ctrl_only && !(mods & WLR_MODIFIER_LOGO)) {
+			int len = no->search_len;
+			if (len + 1 < (int)sizeof(no->search)) {
+				no->search[len] = (char)sym;
+				no->search[len + 1] = '\0';
+				no->search_len = len + 1;
+			}
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+static void
+nixpkgs_show(const Arg *arg)
+{
+	Monitor *m = selmon ? selmon : xytomon(cursor->x, cursor->y);
+	Monitor *vm = nixpkgs_visible_monitor();
+	NixpkgsOverlay *no;
+	int mw, mh, w, h, x, y;
+	int min_w = 300, min_h = 200;
+	int max_w = 800, max_h = 600;
+
+	(void)arg;
+
+	if (!m || !m->nixpkgs.tree)
+		return;
+
+	/* Hide modal if visible */
+	modal_hide_all();
+
+	if (vm && vm != m)
+		nixpkgs_hide_all();
+
+	/* Load cache on first show */
+	ensure_nixpkgs_cache_loaded();
+
+	mw = m->w.width > 0 ? m->w.width : m->m.width;
+	mh = m->w.height > 0 ? m->w.height : m->m.height;
+	w = mw > 0 ? (int)(mw * 0.5) : 600;
+	h = mh > 0 ? (int)(mh * 0.6) : 500;
+	if (w < min_w) w = min_w;
+	if (h < min_h) h = min_h;
+	if (w > max_w) w = max_w;
+	if (h > max_h) h = max_h;
+
+	x = m->m.x + (m->m.width - w) / 2;
+	y = m->m.y + (m->m.height - h) / 2;
+	if (x < m->m.x) x = m->m.x;
+	if (y < m->m.y) y = m->m.y;
+
+	no = &m->nixpkgs;
+	no->width = w;
+	no->height = h;
+	no->x = x;
+	no->y = y;
+
+	if (!no->bg)
+		no->bg = wlr_scene_tree_create(no->tree);
+	if (no->bg) {
+		struct wlr_scene_node *node, *tmp;
+		wl_list_for_each_safe(node, tmp, &no->bg->children, link)
+			wlr_scene_node_destroy(node);
+		drawrect(no->bg, 0, 0, w, h, statusbar_popup_bg);
+	}
+
+	wlr_scene_node_set_position(&no->tree->node, x, y);
+	wlr_scene_node_set_enabled(&no->tree->node, 1);
+
+	/* Reset state */
+	no->search[0] = '\0';
+	no->search_len = 0;
+	no->search_rendered[0] = '\0';
+	no->selected = 0;
+	no->scroll = 0;
+	no->search_field_tree = NULL;
+	no->results_tree = NULL;
+	no->row_highlight_count = 0;
+
+	no->visible = 1;
+	nixpkgs_update_results(m);
+	nixpkgs_render(m);
+}
+
+/* ============================================================================
+ * Gamepad Controller Menu Implementation
+ * ============================================================================ */
+
+static void
+gamepad_menu_show(Monitor *m)
+{
+	GamepadMenu *gm;
+	int w, h, x, y;
+
+	if (!m)
+		return;
+
+	gamepad_menu_hide_all();
+
+	gm = &m->gamepad_menu;
+	gm->selected = 0;
+	gm->item_count = GAMEPAD_MENU_ITEM_COUNT;
+
+	/* Calculate popup size - just buttons, no title/hints */
+	w = 300;
+	h = 20 + GAMEPAD_MENU_ITEM_COUNT * 55 + 20;
+
+	/* Center on monitor */
+	x = m->m.x + (m->m.width - w) / 2;
+	y = m->m.y + (m->m.height - h) / 2;
+
+	gm->width = w;
+	gm->height = h;
+	gm->visible = 1;
+
+	if (!gm->tree)
+		gm->tree = wlr_scene_tree_create(layers[LyrBlock]);
+	if (!gm->tree)
+		return;
+
+	wlr_scene_node_set_position(&gm->tree->node, x, y);
+	wlr_scene_node_set_enabled(&gm->tree->node, 1);
+
+	gamepad_menu_render(m);
+}
+
+static void
+gamepad_menu_hide(Monitor *m)
+{
+	GamepadMenu *gm;
+
+	if (!m)
+		return;
+
+	gm = &m->gamepad_menu;
+	if (!gm->visible)
+		return;
+
+	gm->visible = 0;
+	if (gm->tree)
+		wlr_scene_node_set_enabled(&gm->tree->node, 0);
+}
+
+static void
+gamepad_menu_hide_all(void)
+{
+	Monitor *m;
+
+	wl_list_for_each(m, &mons, link) {
+		gamepad_menu_hide(m);
+	}
+}
+
+static Monitor *
+gamepad_menu_visible_monitor(void)
+{
+	Monitor *m;
+
+	wl_list_for_each(m, &mons, link) {
+		if (m->gamepad_menu.visible)
+			return m;
+	}
+	return NULL;
+}
+
+static void
+gamepad_menu_render(Monitor *m)
+{
+	GamepadMenu *gm;
+	struct wlr_scene_node *node, *tmp;
+	int padding = 15;
+	int item_height = 55;
+	int button_margin = 10;
+	int y_offset;
+	float bg_color[4] = {0.12f, 0.12f, 0.14f, 0.95f};
+	float button_color[4] = {0.18f, 0.18f, 0.22f, 1.0f};
+	float selected_color[4] = {0.25f, 0.5f, 0.9f, 1.0f};
+	float border_color[4] = {0.35f, 0.35f, 0.4f, 1.0f};
+
+	if (!m || !statusfont.font)
+		return;
+
+	gm = &m->gamepad_menu;
+	if (!gm->visible || !gm->tree)
+		return;
+
+	/* Clear previous content */
+	wl_list_for_each_safe(node, tmp, &gm->tree->children, link) {
+		if (gm->bg && node == &gm->bg->node)
+			continue;
+		wlr_scene_node_destroy(node);
+	}
+
+	/* Create/update background */
+	if (!gm->bg)
+		gm->bg = wlr_scene_tree_create(gm->tree);
+	if (gm->bg) {
+		wl_list_for_each_safe(node, tmp, &gm->bg->children, link)
+			wlr_scene_node_destroy(node);
+		wlr_scene_node_set_position(&gm->bg->node, 0, 0);
+		drawrect(gm->bg, 0, 0, gm->width, gm->height, bg_color);
+		/* Outer border */
+		drawrect(gm->bg, 0, 0, gm->width, 2, border_color);
+		drawrect(gm->bg, 0, gm->height - 2, gm->width, 2, border_color);
+		drawrect(gm->bg, 0, 0, 2, gm->height, border_color);
+		drawrect(gm->bg, gm->width - 2, 0, 2, gm->height, border_color);
+	}
+
+	/* Draw menu items as buttons */
+	y_offset = padding;
+	for (int i = 0; i < gm->item_count; i++) {
+		const char *label = gamepad_menu_items[i].label;
+		int button_x = padding;
+		int button_y = y_offset + i * item_height;
+		int button_w = gm->width - 2 * padding;
+		int button_h = item_height - button_margin;
+		int label_w = status_text_width(label);
+		/* Center label horizontally within button */
+		int label_x = (button_w - label_w) / 2;
+
+		/* Draw button background */
+		if (i == gm->selected) {
+			drawrect(gm->tree, button_x, button_y, button_w, button_h, selected_color);
+		} else {
+			drawrect(gm->tree, button_x, button_y, button_w, button_h, button_color);
+		}
+
+		/* Button border */
+		float btn_border[4] = {0.4f, 0.4f, 0.45f, 1.0f};
+		drawrect(gm->tree, button_x, button_y, button_w, 1, btn_border);
+		drawrect(gm->tree, button_x, button_y + button_h - 1, button_w, 1, btn_border);
+		drawrect(gm->tree, button_x, button_y, 1, button_h, btn_border);
+		drawrect(gm->tree, button_x + button_w - 1, button_y, 1, button_h, btn_border);
+
+		/* Button label - create subtree positioned at button location */
+		struct wlr_scene_tree *label_tree = wlr_scene_tree_create(gm->tree);
+		if (label_tree) {
+			wlr_scene_node_set_position(&label_tree->node, button_x, button_y);
+			StatusModule mod = {0};
+			mod.tree = label_tree;
+			/* tray_render_label centers text vertically within bar_height */
+			tray_render_label(&mod, label, label_x, button_h, statusbar_fg);
+		}
+	}
+}
+
+static void
+gamepad_menu_select(Monitor *m)
+{
+	GamepadMenu *gm;
+	const char *cmd;
+
+	if (!m)
+		return;
+
+	gm = &m->gamepad_menu;
+	if (!gm->visible || gm->selected < 0 || gm->selected >= gm->item_count)
+		return;
+
+	cmd = gamepad_menu_items[gm->selected].command;
+
+	/* Execute command if set, otherwise just log the selection */
+	if (cmd && cmd[0]) {
+		Arg arg = {.v = cmd};
+		spawn(&arg);
+	} else {
+		wlr_log(WLR_INFO, "Gamepad menu selected: %s", gamepad_menu_items[gm->selected].label);
+	}
+
+	gamepad_menu_hide(m);
+}
+
+/* Handle gamepad button press - returns 1 if handled */
+static int
+gamepad_menu_handle_button(Monitor *m, int button, int value)
+{
+	GamepadMenu *gm;
+
+	if (!m)
+		return 0;
+
+	gm = &m->gamepad_menu;
+
+	/* BTN_MODE (guide button) - toggle menu (on press only) */
+	if (button == BTN_MODE && value == 1) {
+		if (gm->visible)
+			gamepad_menu_hide(m);
+		else
+			gamepad_menu_show(m);
+		return 1;
+	}
+
+	/* Mouse click emulation with shoulder buttons (when menu is not visible) */
+	if (!gm->visible) {
+		/* Skip click emulation if a fullscreen client has focus (let game handle it) */
+		Client *focused = focustop(selmon);
+		if (focused && focused->isfullscreen)
+			return 0;
+
+		uint32_t time_msec = (uint32_t)(monotonic_msec() & 0xFFFFFFFF);
+		uint32_t mapped_button = 0;
+		uint32_t state = value ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED;
+
+		switch (button) {
+		case BTN_TR:  /* Right bumper = left click */
+		case BTN_SOUTH:  /* A button = left click */
+			mapped_button = BTN_LEFT;
+			break;
+		case BTN_TL:  /* Left bumper = right click */
+		case BTN_EAST:  /* B button = right click */
+			mapped_button = BTN_RIGHT;
+			break;
+		case BTN_THUMBL:  /* Left stick click = middle click */
+			mapped_button = BTN_MIDDLE;
+			break;
+		}
+
+		if (mapped_button) {
+			/* Use internal handler for full statusbar/tile support */
+			handle_pointer_button_internal(mapped_button, state, time_msec);
+			return 1;
+		}
+		return 0;
+	}
+
+	/* Menu navigation (only on button press) */
+	if (value != 1)
+		return 0;
+
+	switch (button) {
+	case BTN_SOUTH:  /* A button - select */
+		gamepad_menu_select(m);
+		return 1;
+	case BTN_EAST:   /* B button - close */
+		gamepad_menu_hide(m);
+		return 1;
+	case BTN_DPAD_UP:
+		if (gm->selected > 0) {
+			gm->selected--;
+			gamepad_menu_render(m);
+		}
+		return 1;
+	case BTN_DPAD_DOWN:
+		if (gm->selected < gm->item_count - 1) {
+			gm->selected++;
+			gamepad_menu_render(m);
+		}
+		return 1;
+	}
+
+	return 0;
+}
+
+/* Check if device is a gamepad (not keyboard/mouse) */
+static int
+gamepad_is_gamepad_device(int fd)
+{
+	unsigned long evbit[((EV_MAX) / (8 * sizeof(unsigned long))) + 1] = {0};
+	unsigned long keybit[((KEY_MAX) / (8 * sizeof(unsigned long))) + 1] = {0};
+
+	/* Get event types */
+	if (ioctl(fd, EVIOCGBIT(0, sizeof(evbit)), evbit) < 0)
+		return 0;
+
+	/* Must have EV_KEY */
+	if (!(evbit[0] & (1 << EV_KEY)))
+		return 0;
+
+	/* Get key capabilities */
+	if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybit)), keybit) < 0)
+		return 0;
+
+	/* Check for gamepad-specific buttons */
+	/* BTN_GAMEPAD is 0x130, BTN_SOUTH is 0x130, BTN_MODE is 0x13c */
+	int has_gamepad_btn = 0;
+
+	/* Check for BTN_SOUTH (A button) - 0x130 = 304 */
+	if (keybit[BTN_SOUTH / (8 * sizeof(unsigned long))] & (1UL << (BTN_SOUTH % (8 * sizeof(unsigned long)))))
+		has_gamepad_btn = 1;
+
+	/* Check for BTN_MODE (guide button) - 0x13c = 316 */
+	if (keybit[BTN_MODE / (8 * sizeof(unsigned long))] & (1UL << (BTN_MODE % (8 * sizeof(unsigned long)))))
+		has_gamepad_btn = 1;
+
+	/* Reject if it has typical keyboard keys (KEY_A through KEY_Z) */
+	/* KEY_A = 30 */
+	if (keybit[KEY_A / (8 * sizeof(unsigned long))] & (1UL << (KEY_A % (8 * sizeof(unsigned long)))))
+		return 0;
+
+	/* Reject if it has BTN_LEFT (mouse) - 0x110 = 272 */
+	if (keybit[BTN_LEFT / (8 * sizeof(unsigned long))] & (1UL << (BTN_LEFT % (8 * sizeof(unsigned long)))))
+		return 0;
+
+	return has_gamepad_btn;
+}
+
+static int
+gamepad_event_cb(int fd, uint32_t mask, void *data)
+{
+	GamepadDevice *gp = data;
+	GamepadDevice *iter;
+	struct input_event ev;
+	Monitor *m;
+	ssize_t n;
+	int found = 0;
+
+	if (!gp)
+		return 0;
+
+	/* Verify gp is still in the list (not already freed by inotify handler) */
+	wl_list_for_each(iter, &gamepads, link) {
+		if (iter == gp) {
+			found = 1;
+			break;
+		}
+	}
+	if (!found)
+		return 0;
+
+	/* Handle device disconnection/error */
+	if (mask & (WL_EVENT_ERROR | WL_EVENT_HANGUP)) {
+		wlr_log(WLR_INFO, "Gamepad disconnected (fd event): %s (%s)", gp->name, gp->path);
+		if (gp->event_source) {
+			wl_event_source_remove(gp->event_source);
+			gp->event_source = NULL;
+		}
+		if (gp->fd >= 0) {
+			close(gp->fd);
+			gp->fd = -1;
+		}
+		wl_list_remove(&gp->link);
+		free(gp);
+		return 0;
+	}
+
+	while ((n = read(fd, &ev, sizeof(ev))) == sizeof(ev)) {
+		/* Skip sync events for activity tracking */
+		if (ev.type == EV_SYN)
+			continue;
+
+		/* Update activity timestamp */
+		gp->last_activity_ms = monotonic_msec();
+
+		/* Handle wake from suspended state - guide button wakes the controller */
+		if (gp->suspended) {
+			if (ev.type == EV_KEY && ev.code == BTN_MODE && ev.value == 1) {
+				gamepad_resume(gp);
+			}
+			continue;  /* Ignore other input while suspended */
+		}
+
+		/* Find the currently selected monitor */
+		m = selmon ? selmon : (wl_list_empty(&mons) ? NULL :
+			wl_container_of(mons.next, m, link));
+
+		/* Handle key/button events */
+		if (ev.type == EV_KEY) {
+			if (m)
+				gamepad_menu_handle_button(m, ev.code, ev.value);
+			continue;
+		}
+
+		/* Handle axis events */
+		if (ev.type == EV_ABS) {
+			/* Joystick axes for cursor movement */
+			switch (ev.code) {
+			case ABS_X:
+				gp->left_x = ev.value;
+				break;
+			case ABS_Y:
+				gp->left_y = ev.value;
+				break;
+			case ABS_RX:
+				gp->right_x = ev.value;
+				break;
+			case ABS_RY:
+				gp->right_y = ev.value;
+				break;
+			case ABS_HAT0X:
+				/* D-pad left/right - could be used for menu navigation */
+				break;
+			case ABS_HAT0Y:
+				/* D-pad up/down for menu navigation */
+				if (m && m->gamepad_menu.visible) {
+					GamepadMenu *gm = &m->gamepad_menu;
+					if (ev.value == -1 && gm->selected > 0) {
+						gm->selected--;
+						gamepad_menu_render(m);
+					} else if (ev.value == 1 && gm->selected < gm->item_count - 1) {
+						gm->selected++;
+						gamepad_menu_render(m);
+					}
+				}
+				break;
+			}
+		}
+	}
+
+	/* Check for read errors indicating device disconnection */
+	if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+		wlr_log(WLR_INFO, "Gamepad read error (errno=%d): %s (%s)", errno, gp->name, gp->path);
+		if (gp->event_source) {
+			wl_event_source_remove(gp->event_source);
+			gp->event_source = NULL;
+		}
+		if (gp->fd >= 0) {
+			close(gp->fd);
+			gp->fd = -1;
+		}
+		wl_list_remove(&gp->link);
+		free(gp);
+		return 0;
+	}
+
+	return 0;
+}
+
+static void
+gamepad_device_add(const char *path)
+{
+	GamepadDevice *gp, *existing;
+	int fd;
+	char name[128] = "Unknown";
+
+	if (!path)
+		return;
+
+	/* Check if already added */
+	wl_list_for_each(existing, &gamepads, link) {
+		if (strcmp(existing->path, path) == 0)
+			return;
+	}
+
+	fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+	if (fd < 0)
+		return;
+
+	/* Check if it's a gamepad */
+	if (!gamepad_is_gamepad_device(fd)) {
+		close(fd);
+		return;
+	}
+
+	/* Get device name */
+	ioctl(fd, EVIOCGNAME(sizeof(name)), name);
+
+	gp = ecalloc(1, sizeof(*gp));
+	gp->fd = fd;
+	snprintf(gp->path, sizeof(gp->path), "%s", path);
+	snprintf(gp->name, sizeof(gp->name), "%s", name);
+
+	/* Read axis calibration from device */
+	struct input_absinfo absinfo;
+	/* Left stick X */
+	if (ioctl(fd, EVIOCGABS(ABS_X), &absinfo) == 0) {
+		gp->cal_lx.min = absinfo.minimum;
+		gp->cal_lx.max = absinfo.maximum;
+		gp->cal_lx.center = (absinfo.minimum + absinfo.maximum) / 2;
+		gp->cal_lx.flat = absinfo.flat;
+		gp->left_x = gp->cal_lx.center;
+	} else {
+		gp->cal_lx.min = -32768; gp->cal_lx.max = 32767; gp->cal_lx.center = 0; gp->cal_lx.flat = 0;
+		gp->left_x = 0;
+	}
+	/* Left stick Y */
+	if (ioctl(fd, EVIOCGABS(ABS_Y), &absinfo) == 0) {
+		gp->cal_ly.min = absinfo.minimum;
+		gp->cal_ly.max = absinfo.maximum;
+		gp->cal_ly.center = (absinfo.minimum + absinfo.maximum) / 2;
+		gp->cal_ly.flat = absinfo.flat;
+		gp->left_y = gp->cal_ly.center;
+	} else {
+		gp->cal_ly.min = -32768; gp->cal_ly.max = 32767; gp->cal_ly.center = 0; gp->cal_ly.flat = 0;
+		gp->left_y = 0;
+	}
+	/* Right stick X */
+	if (ioctl(fd, EVIOCGABS(ABS_RX), &absinfo) == 0) {
+		gp->cal_rx.min = absinfo.minimum;
+		gp->cal_rx.max = absinfo.maximum;
+		gp->cal_rx.center = (absinfo.minimum + absinfo.maximum) / 2;
+		gp->cal_rx.flat = absinfo.flat;
+		gp->right_x = gp->cal_rx.center;
+	} else {
+		gp->cal_rx.min = -32768; gp->cal_rx.max = 32767; gp->cal_rx.center = 0; gp->cal_rx.flat = 0;
+		gp->right_x = 0;
+	}
+	/* Right stick Y */
+	if (ioctl(fd, EVIOCGABS(ABS_RY), &absinfo) == 0) {
+		gp->cal_ry.min = absinfo.minimum;
+		gp->cal_ry.max = absinfo.maximum;
+		gp->cal_ry.center = (absinfo.minimum + absinfo.maximum) / 2;
+		gp->cal_ry.flat = absinfo.flat;
+		gp->right_y = gp->cal_ry.center;
+	} else {
+		gp->cal_ry.min = -32768; gp->cal_ry.max = 32767; gp->cal_ry.center = 0; gp->cal_ry.flat = 0;
+		gp->right_y = 0;
+	}
+
+	wlr_log(WLR_INFO, "Gamepad calibration: LX[%d-%d c=%d], LY[%d-%d c=%d]",
+		gp->cal_lx.min, gp->cal_lx.max, gp->cal_lx.center,
+		gp->cal_ly.min, gp->cal_ly.max, gp->cal_ly.center);
+
+	/* Initialize activity tracking */
+	gp->last_activity_ms = monotonic_msec();
+	gp->suspended = 0;
+
+	/* Add to event loop */
+	gp->event_source = wl_event_loop_add_fd(event_loop, fd,
+		WL_EVENT_READABLE, gamepad_event_cb, gp);
+
+	/* Start timers if this is the first gamepad */
+	if (wl_list_empty(&gamepads)) {
+		if (gamepad_cursor_timer)
+			wl_event_source_timer_update(gamepad_cursor_timer, GAMEPAD_CURSOR_INTERVAL_MS);
+		if (gamepad_inactivity_timer)
+			wl_event_source_timer_update(gamepad_inactivity_timer, GAMEPAD_INACTIVITY_CHECK_MS);
+	}
+
+	wl_list_insert(&gamepads, &gp->link);
+
+	wlr_log(WLR_INFO, "Gamepad connected: %s (%s)", name, path);
+
+	/* Enter HTPC mode when controller connects (if enabled) */
+	if (htpc_mode_auto_on_controller)
+		htpc_mode_enter();
+
+	/* Switch TV/Monitor to this HDMI input via CEC */
+	cec_switch_to_active_source();
+}
+
+static void
+gamepad_device_remove(const char *path)
+{
+	GamepadDevice *gp, *tmp;
+
+	if (!path)
+		return;
+
+	wl_list_for_each_safe(gp, tmp, &gamepads, link) {
+		if (strcmp(gp->path, path) == 0) {
+			wlr_log(WLR_INFO, "Gamepad disconnected: %s (%s)", gp->name, gp->path);
+			if (gp->event_source)
+				wl_event_source_remove(gp->event_source);
+			if (gp->fd >= 0)
+				close(gp->fd);
+			wl_list_remove(&gp->link);
+			free(gp);
+			return;
+		}
+	}
+}
+
+/* Timer callback to process pending gamepad devices */
+static int
+gamepad_pending_timer_cb(void *data)
+{
+	int i;
+
+	(void)data;
+
+	for (i = 0; i < gamepad_pending_count; i++) {
+		gamepad_device_add(gamepad_pending_paths[i]);
+	}
+	gamepad_pending_count = 0;
+
+	return 0;
+}
+
+static int
+gamepad_inotify_cb(int fd, uint32_t mask, void *data)
+{
+	char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+	const struct inotify_event *event;
+	ssize_t len;
+	char *ptr;
+	char path[128];
+	int schedule_pending = 0;
+
+	(void)mask;
+	(void)data;
+
+	while ((len = read(fd, buf, sizeof(buf))) > 0) {
+		for (ptr = buf; ptr < buf + len;
+		     ptr += sizeof(struct inotify_event) + event->len) {
+			event = (const struct inotify_event *)ptr;
+
+			/* Only interested in event* files */
+			if (!event->name || strncmp(event->name, "event", 5) != 0)
+				continue;
+
+			snprintf(path, sizeof(path), "/dev/input/%s", event->name);
+
+			if (event->mask & IN_CREATE) {
+				/* Queue device for delayed add (non-blocking) */
+				if (gamepad_pending_count < GAMEPAD_PENDING_MAX) {
+					snprintf(gamepad_pending_paths[gamepad_pending_count],
+						sizeof(gamepad_pending_paths[0]), "%s", path);
+					gamepad_pending_count++;
+					schedule_pending = 1;
+				}
+			} else if (event->mask & IN_DELETE) {
+				gamepad_device_remove(path);
+			}
+		}
+	}
+
+	/* Schedule timer to add pending devices after delay */
+	if (schedule_pending && gamepad_pending_timer) {
+		wl_event_source_timer_update(gamepad_pending_timer, 100); /* 100ms */
+	}
+
+	return 0;
+}
+
+static void
+gamepad_scan_devices(void)
+{
+	DIR *dir;
+	struct dirent *entry;
+	char path[128];
+
+	dir = opendir("/dev/input");
+	if (!dir)
+		return;
+
+	while ((entry = readdir(dir)) != NULL) {
+		if (strncmp(entry->d_name, "event", 5) != 0)
+			continue;
+
+		snprintf(path, sizeof(path), "/dev/input/%s", entry->d_name);
+		gamepad_device_add(path);
+	}
+
+	closedir(dir);
+}
+
+/* Update cursor position based on joystick input from all gamepads */
+static void
+gamepad_update_cursor(void)
+{
+	GamepadDevice *gp;
+	double total_dx = 0, total_dy = 0;
+	int any_input = 0;
+	uint64_t now = monotonic_msec();
+
+	if (wl_list_empty(&gamepads))
+		return;
+
+	/* Skip gamepad cursor control if a fullscreen client has focus (let game handle it) */
+	Client *focused = focustop(selmon);
+	if (focused && focused->isfullscreen)
+		return;
+
+	/* Skip gamepad cursor movement if physical mouse was used recently */
+	if (last_pointer_motion_ms && (now - last_pointer_motion_ms) < 100)
+		return;
+
+	wl_list_for_each(gp, &gamepads, link) {
+		double dx = 0, dy = 0;
+		double magnitude, normalized;
+
+		/* Skip suspended gamepads */
+		if (gp->suspended)
+			continue;
+
+		/* Normalize axis values relative to calibrated center */
+		int lx_offset = gp->left_x - gp->cal_lx.center;
+		int ly_offset = gp->left_y - gp->cal_ly.center;
+
+		/* Calculate range for normalization (half the total range) */
+		int lx_range = (gp->cal_lx.max - gp->cal_lx.min) / 2;
+		int ly_range = (gp->cal_ly.max - gp->cal_ly.min) / 2;
+		if (lx_range == 0) lx_range = 32767;
+		if (ly_range == 0) ly_range = 32767;
+
+		/* Calculate deadzone threshold based on device flat value or default */
+		int lx_deadzone = gp->cal_lx.flat > 0 ? gp->cal_lx.flat : (lx_range * GAMEPAD_DEADZONE / 32767);
+		int ly_deadzone = gp->cal_ly.flat > 0 ? gp->cal_ly.flat : (ly_range * GAMEPAD_DEADZONE / 32767);
+
+		/* Apply deadzone to left stick */
+		if (abs(lx_offset) > lx_deadzone || abs(ly_offset) > ly_deadzone) {
+			/* Normalize to -1.0 to 1.0 range based on calibration */
+			double nx = (double)lx_offset / (double)lx_range;
+			double ny = (double)ly_offset / (double)ly_range;
+
+			/* Clamp values */
+			if (nx > 1.0) nx = 1.0;
+			if (nx < -1.0) nx = -1.0;
+			if (ny > 1.0) ny = 1.0;
+			if (ny < -1.0) ny = -1.0;
+
+			/* Calculate magnitude for acceleration */
+			magnitude = sqrt(nx * nx + ny * ny);
+			if (magnitude > 1.0)
+				magnitude = 1.0;
+
+			/* Apply acceleration curve (higher values accelerate more) */
+			normalized = magnitude * magnitude * GAMEPAD_CURSOR_ACCEL;
+			if (normalized < 1.0)
+				normalized = 1.0;
+
+			/* Calculate delta movement */
+			dx = nx * GAMEPAD_CURSOR_SPEED * normalized;
+			dy = ny * GAMEPAD_CURSOR_SPEED * normalized;
+
+			any_input = 1;
+		}
+
+		/* Right stick - normalize relative to calibrated center */
+		int rx_offset = gp->right_x - gp->cal_rx.center;
+		int ry_offset = gp->right_y - gp->cal_ry.center;
+		int rx_range = (gp->cal_rx.max - gp->cal_rx.min) / 2;
+		int ry_range = (gp->cal_ry.max - gp->cal_ry.min) / 2;
+		if (rx_range == 0) rx_range = 32767;
+		if (ry_range == 0) ry_range = 32767;
+		int rx_deadzone = gp->cal_rx.flat > 0 ? gp->cal_rx.flat : (rx_range * GAMEPAD_DEADZONE / 32767);
+		int ry_deadzone = gp->cal_ry.flat > 0 ? gp->cal_ry.flat : (ry_range * GAMEPAD_DEADZONE / 32767);
+
+		/* Right stick controls scrolling */
+		if (abs(ry_offset) > ry_deadzone) {
+			double ny = (double)ry_offset / (double)ry_range;
+			if (ny > 1.0) ny = 1.0;
+			if (ny < -1.0) ny = -1.0;
+
+			/* Send scroll event - negative Y = scroll up, positive Y = scroll down */
+			double scroll_amount = ny * 3.0;  /* Adjust scroll speed */
+			uint32_t time_msec = (uint32_t)(monotonic_msec() & 0xFFFFFFFF);
+
+			wlr_seat_pointer_notify_axis(seat, time_msec,
+				WL_POINTER_AXIS_VERTICAL_SCROLL,
+				scroll_amount, (int32_t)(scroll_amount * 120),
+				WL_POINTER_AXIS_SOURCE_CONTINUOUS,
+				WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+		}
+
+		/* Right stick X for horizontal scroll */
+		if (abs(rx_offset) > rx_deadzone) {
+			double nx = (double)rx_offset / (double)rx_range;
+			if (nx > 1.0) nx = 1.0;
+			if (nx < -1.0) nx = -1.0;
+
+			double scroll_amount = nx * 3.0;
+			uint32_t time_msec = (uint32_t)(monotonic_msec() & 0xFFFFFFFF);
+
+			wlr_seat_pointer_notify_axis(seat, time_msec,
+				WL_POINTER_AXIS_HORIZONTAL_SCROLL,
+				scroll_amount, (int32_t)(scroll_amount * 120),
+				WL_POINTER_AXIS_SOURCE_CONTINUOUS,
+				WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+		}
+
+		total_dx += dx;
+		total_dy += dy;
+	}
+
+	/* Move cursor if there's any input */
+	if (any_input && cursor && (fabs(total_dx) > 0.1 || fabs(total_dy) > 0.1)) {
+		/* Move cursor directly (fast) */
+		wlr_cursor_move(cursor, NULL, total_dx, total_dy);
+		wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
+
+		/* Update hover feedback for statusbar */
+		if (selmon && selmon->showbar) {
+			updatetaghover(selmon, cursor->x, cursor->y);
+			updatenethover(selmon, cursor->x, cursor->y);
+		}
+
+		/* Update pointer focus for clients */
+		double sx, sy;
+		struct wlr_surface *surface = NULL;
+		Client *c = NULL;
+		xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
+		if (surface) {
+			uint32_t time_msec = (uint32_t)(now & 0xFFFFFFFF);
+			wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
+			wlr_seat_pointer_notify_motion(seat, time_msec, sx, sy);
+		}
+	}
+}
+
+static int
+gamepad_cursor_timer_cb(void *data)
+{
+	(void)data;
+
+	/* Update cursor position */
+	gamepad_update_cursor();
+
+	/* Reschedule timer if we have gamepads */
+	if (!wl_list_empty(&gamepads) && gamepad_cursor_timer) {
+		wl_event_source_timer_update(gamepad_cursor_timer, GAMEPAD_CURSOR_INTERVAL_MS);
+	}
+
+	return 0;
+}
+
+/* Switch TV/Monitor to this device via HDMI-CEC */
+static void
+cec_switch_to_active_source(void)
+{
+	pid_t pid;
+
+	wlr_log(WLR_INFO, "Switching TV to active source via CEC");
+
+	pid = fork();
+	if (pid == 0) {
+		/* Child process */
+		int fd;
+
+		setsid();
+		fd = open("/dev/null", O_RDWR);
+		if (fd >= 0) {
+			dup2(fd, STDIN_FILENO);
+			dup2(fd, STDOUT_FILENO);
+			dup2(fd, STDERR_FILENO);
+			if (fd > 2)
+				close(fd);
+		}
+
+		/* Send "active source" command via cec-client
+		 * "as" = Active Source - tells TV to switch to this input
+		 * -s = single command mode
+		 * -d 1 = minimal output */
+		execlp("sh", "sh", "-c",
+			"echo 'as' | cec-client -s -d 1 2>/dev/null || "
+			"echo 'tx 4F:82:10:00' | cec-client -s -d 1 2>/dev/null",
+			(char *)NULL);
+		_exit(0);
+	}
+	/* Parent doesn't wait - fire and forget */
+}
+
+/* ============================================================================
+ * Bluetooth Controller Auto-Pairing
+ * ============================================================================ */
+
+/* Check if device name matches known gamepad patterns */
+static int
+bt_is_gamepad_name(const char *name)
+{
+	int i;
+
+	if (!name || !*name)
+		return 0;
+
+	for (i = 0; bt_gamepad_patterns[i]; i++) {
+		if (strcasestr(name, bt_gamepad_patterns[i]))
+			return 1;
+	}
+	return 0;
+}
+
+/* Trust a Bluetooth device (allows auto-reconnect) */
+static void
+bt_trust_device(const char *path)
+{
+	sd_bus_error error = SD_BUS_ERROR_NULL;
+	int r;
+
+	if (!bt_bus || !path)
+		return;
+
+	/* This is a quick local operation, keep synchronous */
+	r = sd_bus_set_property(bt_bus, "org.bluez", path,
+		"org.bluez.Device1", "Trusted",
+		&error, "b", 1);
+
+	if (r < 0)
+		wlr_log(WLR_DEBUG, "Failed to trust %s: %s", path, error.message);
+
+	sd_bus_error_free(&error);
+}
+
+/* Async callback for Pair method */
+static int
+bt_pair_cb(sd_bus_message *reply, void *userdata, sd_bus_error *error)
+{
+	char *path = userdata;
+
+	if (sd_bus_error_is_set(error)) {
+		/* AlreadyExists means already paired - that's fine */
+		if (!strstr(error->message, "AlreadyExists"))
+			wlr_log(WLR_DEBUG, "Pairing failed for %s: %s", path ? path : "unknown", error->message);
+	} else {
+		wlr_log(WLR_INFO, "Paired with: %s", path ? path : "unknown");
+	}
+
+	free(path);
+	return 0;
+}
+
+/* Pair with a Bluetooth device (async) */
+static void
+bt_pair_device(const char *path)
+{
+	int r;
+	char *path_copy;
+
+	if (!bt_bus || !path)
+		return;
+
+	wlr_log(WLR_INFO, "Pairing with Bluetooth device: %s", path);
+
+	/* First trust the device (quick operation) */
+	bt_trust_device(path);
+
+	/* Then pair asynchronously */
+	path_copy = strdup(path);
+	if (!path_copy)
+		return;
+
+	r = sd_bus_call_method_async(bt_bus, NULL,
+		"org.bluez", path,
+		"org.bluez.Device1", "Pair",
+		bt_pair_cb, path_copy, "");
+
+	if (r < 0) {
+		wlr_log(WLR_DEBUG, "Failed to start async Pair: %s", strerror(-r));
+		free(path_copy);
+	}
+}
+
+/* Async callback for Connect method */
+static int
+bt_connect_cb(sd_bus_message *reply, void *userdata, sd_bus_error *error)
+{
+	char *path = userdata;
+
+	if (sd_bus_error_is_set(error)) {
+		wlr_log(WLR_DEBUG, "Connect failed for %s: %s", path ? path : "unknown", error->message);
+	} else {
+		wlr_log(WLR_INFO, "Connected to: %s", path ? path : "unknown");
+	}
+
+	free(path);
+	return 0;
+}
+
+/* Connect to a paired Bluetooth device (async) */
+static void
+bt_connect_device(const char *path)
+{
+	int r;
+	char *path_copy;
+
+	if (!bt_bus || !path)
+		return;
+
+	wlr_log(WLR_INFO, "Connecting to Bluetooth device: %s", path);
+
+	path_copy = strdup(path);
+	if (!path_copy)
+		return;
+
+	r = sd_bus_call_method_async(bt_bus, NULL,
+		"org.bluez", path,
+		"org.bluez.Device1", "Connect",
+		bt_connect_cb, path_copy, "");
+
+	if (r < 0) {
+		wlr_log(WLR_DEBUG, "Failed to start async Connect: %s", strerror(-r));
+		free(path_copy);
+	}
+}
+
+/* Handle new device discovery signal from BlueZ */
+static int
+bt_device_signal_cb(sd_bus_message *m, void *userdata, sd_bus_error *error)
+{
+	const char *path;
+	const char *interface;
+	int r;
+
+	(void)userdata;
+	(void)error;
+
+	/* Get object path */
+	path = sd_bus_message_get_path(m);
+	if (!path || !strstr(path, "/org/bluez/"))
+		return 0;
+
+	/* Parse InterfacesAdded signal */
+	r = sd_bus_message_read(m, "s", &interface);
+	if (r < 0)
+		return 0;
+
+	/* Only interested in Device1 interface */
+	if (strcmp(interface, "org.bluez.Device1") != 0)
+		return 0;
+
+	/* Enter the properties array */
+	r = sd_bus_message_enter_container(m, 'a', "{sv}");
+	if (r < 0)
+		return 0;
+
+	/* Look for Name property */
+	while (sd_bus_message_enter_container(m, 'e', "sv") > 0) {
+		const char *prop_name;
+		r = sd_bus_message_read(m, "s", &prop_name);
+		if (r < 0)
+			break;
+
+		if (strcmp(prop_name, "Name") == 0) {
+			r = sd_bus_message_enter_container(m, 'v', "s");
+			if (r >= 0) {
+				const char *name;
+				r = sd_bus_message_read(m, "s", &name);
+				if (r >= 0 && bt_is_gamepad_name(name)) {
+					wlr_log(WLR_INFO, "Discovered gamepad: %s at %s", name, path);
+					bt_pair_device(path);
+					bt_connect_device(path);
+				}
+				sd_bus_message_exit_container(m);
+			}
+		}
+		sd_bus_message_exit_container(m);
+	}
+	sd_bus_message_exit_container(m);
+
+	return 0;
+}
+
+/* Async callback for GetManagedObjects - checks and connects gamepads */
+static int
+bt_check_existing_cb(sd_bus_message *reply, void *userdata, sd_bus_error *error)
+{
+	int r;
+
+	(void)userdata;
+
+	if (sd_bus_error_is_set(error)) {
+		wlr_log(WLR_DEBUG, "Failed to get BlueZ objects: %s", error->message);
+		return 0;
+	}
+
+	/* Parse response: a{oa{sa{sv}}} */
+	r = sd_bus_message_enter_container(reply, 'a', "{oa{sa{sv}}}");
+	if (r < 0)
+		return 0;
+
+	while (sd_bus_message_enter_container(reply, 'e', "oa{sa{sv}}") > 0) {
+		const char *obj_path;
+		r = sd_bus_message_read(reply, "o", &obj_path);
+		if (r < 0)
+			break;
+
+		/* Enter interfaces dict */
+		r = sd_bus_message_enter_container(reply, 'a', "{sa{sv}}");
+		if (r < 0)
+			break;
+
+		while (sd_bus_message_enter_container(reply, 'e', "sa{sv}") > 0) {
+			const char *iface;
+			r = sd_bus_message_read(reply, "s", &iface);
+			if (r < 0)
+				break;
+
+			if (strcmp(iface, "org.bluez.Device1") == 0) {
+				/* Enter properties dict */
+				r = sd_bus_message_enter_container(reply, 'a', "{sv}");
+				if (r < 0)
+					break;
+
+				const char *name = NULL;
+				int connected = 0;
+				int paired = 0;
+
+				while (sd_bus_message_enter_container(reply, 'e', "sv") > 0) {
+					const char *prop;
+					r = sd_bus_message_read(reply, "s", &prop);
+					if (r >= 0) {
+						if (strcmp(prop, "Name") == 0) {
+							sd_bus_message_enter_container(reply, 'v', "s");
+							sd_bus_message_read(reply, "s", &name);
+							sd_bus_message_exit_container(reply);
+						} else if (strcmp(prop, "Connected") == 0) {
+							sd_bus_message_enter_container(reply, 'v', "b");
+							sd_bus_message_read(reply, "b", &connected);
+							sd_bus_message_exit_container(reply);
+						} else if (strcmp(prop, "Paired") == 0) {
+							sd_bus_message_enter_container(reply, 'v', "b");
+							sd_bus_message_read(reply, "b", &paired);
+							sd_bus_message_exit_container(reply);
+						} else {
+							sd_bus_message_skip(reply, "v");
+						}
+					}
+					sd_bus_message_exit_container(reply);
+				}
+				sd_bus_message_exit_container(reply);
+
+				/* Auto-connect known gamepads that are paired but not connected */
+				if (name && bt_is_gamepad_name(name)) {
+					if (!paired) {
+						wlr_log(WLR_INFO, "Found unpaired gamepad: %s", name);
+						bt_pair_device(obj_path);
+						bt_connect_device(obj_path);
+					} else if (!connected) {
+						wlr_log(WLR_INFO, "Reconnecting paired gamepad: %s", name);
+						bt_connect_device(obj_path);
+					}
+				}
+			} else {
+				sd_bus_message_skip(reply, "a{sv}");
+			}
+			sd_bus_message_exit_container(reply);
+		}
+		sd_bus_message_exit_container(reply);
+		sd_bus_message_exit_container(reply);
+	}
+
+	return 0;
+}
+
+/* Check existing devices and pair any gamepads (async) */
+static void
+bt_check_existing_devices(void)
+{
+	int r;
+
+	if (!bt_bus)
+		return;
+
+	/* Async call to get managed objects */
+	r = sd_bus_call_method_async(bt_bus, NULL,
+		"org.bluez", "/",
+		"org.freedesktop.DBus.ObjectManager", "GetManagedObjects",
+		bt_check_existing_cb, NULL, "");
+
+	if (r < 0) {
+		wlr_log(WLR_DEBUG, "Failed to start async GetManagedObjects: %s", strerror(-r));
+	}
+}
+
+/* Async callback for StartDiscovery */
+static int
+bt_start_discovery_cb(sd_bus_message *reply, void *userdata, sd_bus_error *error)
+{
+	(void)reply;
+	(void)userdata;
+
+	if (sd_bus_error_is_set(error)) {
+		bt_scanning = 0;
+		wlr_log(WLR_DEBUG, "StartDiscovery failed: %s", error->message);
+		return 0;
+	}
+
+	wlr_log(WLR_INFO, "Started Bluetooth discovery for controllers");
+
+	/* Schedule stop after scan duration */
+	if (bt_scan_timer)
+		wl_event_source_timer_update(bt_scan_timer, BT_SCAN_DURATION_MS);
+
+	return 0;
+}
+
+/* Start Bluetooth discovery (async) */
+static void
+bt_start_discovery(void)
+{
+	int r;
+
+	if (!bt_bus || bt_scanning)
+		return;
+
+	/* Set scanning flag early to prevent duplicate calls */
+	bt_scanning = 1;
+
+	/* Async call to start discovery */
+	r = sd_bus_call_method_async(bt_bus, NULL,
+		"org.bluez", "/org/bluez/hci0",
+		"org.bluez.Adapter1", "StartDiscovery",
+		bt_start_discovery_cb, NULL, "");
+
+	if (r < 0) {
+		bt_scanning = 0;
+		wlr_log(WLR_DEBUG, "Failed to start async StartDiscovery: %s", strerror(-r));
+	}
+}
+
+/* Async callback for StopDiscovery */
+static int
+bt_stop_discovery_cb(sd_bus_message *reply, void *userdata, sd_bus_error *error)
+{
+	(void)reply;
+	(void)userdata;
+	(void)error;
+
+	wlr_log(WLR_DEBUG, "Stopped Bluetooth discovery");
+	return 0;
+}
+
+/* Stop Bluetooth discovery (async) */
+static void
+bt_stop_discovery(void)
+{
+	int r;
+
+	if (!bt_bus || !bt_scanning)
+		return;
+
+	bt_scanning = 0;
+
+	/* Async call to stop discovery - fire and forget */
+	r = sd_bus_call_method_async(bt_bus, NULL,
+		"org.bluez", "/org/bluez/hci0",
+		"org.bluez.Adapter1", "StopDiscovery",
+		bt_stop_discovery_cb, NULL, "");
+
+	if (r < 0) {
+		wlr_log(WLR_DEBUG, "Failed to start async StopDiscovery: %s", strerror(-r));
+	}
+}
+
+/* Timer callback for Bluetooth scanning */
+static int
+bt_scan_timer_cb(void *data)
+{
+	(void)data;
+
+	if (bt_scanning) {
+		/* Stop discovery and schedule next scan */
+		bt_stop_discovery();
+		if (bt_scan_timer)
+			wl_event_source_timer_update(bt_scan_timer, BT_SCAN_INTERVAL_MS);
+	} else {
+		/* Check existing devices and start new discovery */
+		bt_check_existing_devices();
+		bt_start_discovery();
+	}
+
+	return 0;
+}
+
+/* Bluetooth bus event callback - processes D-Bus messages without blocking */
+static int
+bt_bus_event_cb(int fd, uint32_t mask, void *data)
+{
+	sd_bus *bus = data;
+	int r;
+	int events;
+	uint32_t newmask;
+
+	(void)fd;
+	if (!bus)
+		return 0;
+
+	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR))
+		return 0;
+
+	/* Process all pending D-Bus messages (non-blocking) */
+	while ((r = sd_bus_process(bus, NULL)) > 0)
+		;
+
+	/* Update event mask for next iteration */
+	events = sd_bus_get_events(bus);
+	newmask = 0;
+	if (events & SD_BUS_EVENT_READABLE)
+		newmask |= WL_EVENT_READABLE;
+	if (events & SD_BUS_EVENT_WRITABLE)
+		newmask |= WL_EVENT_WRITABLE;
+	if (bt_bus_event)
+		wl_event_source_fd_update(bt_bus_event, newmask ? newmask : WL_EVENT_READABLE);
+
+	return 0;
+}
+
+/* Initialize Bluetooth controller auto-pairing */
+static void
+bt_controller_setup(void)
+{
+	int r;
+	int fd, events;
+	uint32_t mask;
+
+	/* Check if Bluetooth is available */
+	if (!bluetooth_available)
+		return;
+
+	/* Connect to system bus */
+	r = sd_bus_open_system(&bt_bus);
+	if (r < 0) {
+		wlr_log(WLR_DEBUG, "Failed to connect to system bus for Bluetooth: %s", strerror(-r));
+		return;
+	}
+
+	/* Set timeout - still useful for async calls that block internally */
+	sd_bus_set_method_call_timeout(bt_bus, 500 * 1000); /* 500ms - reduced from 2s */
+
+	/* Add bt_bus to event loop for async processing */
+	fd = sd_bus_get_fd(bt_bus);
+	events = sd_bus_get_events(bt_bus);
+	mask = 0;
+	if (events & SD_BUS_EVENT_READABLE)
+		mask |= WL_EVENT_READABLE;
+	if (events & SD_BUS_EVENT_WRITABLE)
+		mask |= WL_EVENT_WRITABLE;
+	if (mask == 0)
+		mask = WL_EVENT_READABLE;
+
+	bt_bus_event = wl_event_loop_add_fd(event_loop, fd, mask, bt_bus_event_cb, bt_bus);
+	if (!bt_bus_event) {
+		wlr_log(WLR_ERROR, "Failed to add Bluetooth bus to event loop");
+		sd_bus_unref(bt_bus);
+		bt_bus = NULL;
+		return;
+	}
+
+	/* Add match for new device signals */
+	r = sd_bus_match_signal(bt_bus, NULL, "org.bluez", NULL,
+		"org.freedesktop.DBus.ObjectManager", "InterfacesAdded",
+		bt_device_signal_cb, NULL);
+
+	if (r < 0)
+		wlr_log(WLR_DEBUG, "Failed to add BlueZ signal match: %s", strerror(-r));
+
+	/* Create scan timer */
+	bt_scan_timer = wl_event_loop_add_timer(event_loop, bt_scan_timer_cb, NULL);
+
+	/* Start initial scan after a short delay */
+	if (bt_scan_timer)
+		wl_event_source_timer_update(bt_scan_timer, 5000);
+
+	wlr_log(WLR_INFO, "Bluetooth controller auto-pairing initialized");
+}
+
+/* Cleanup Bluetooth controller auto-pairing */
+static void
+bt_controller_cleanup(void)
+{
+	if (bt_scanning)
+		bt_stop_discovery();
+
+	if (bt_scan_timer) {
+		wl_event_source_remove(bt_scan_timer);
+		bt_scan_timer = NULL;
+	}
+
+	if (bt_bus_event) {
+		wl_event_source_remove(bt_bus_event);
+		bt_bus_event = NULL;
+	}
+
+	if (bt_bus) {
+		sd_bus_unref(bt_bus);
+		bt_bus = NULL;
+	}
+}
+
+/* Check if any monitor is active (enabled and not asleep) */
+static int
+gamepad_any_monitor_active(void)
+{
+	Monitor *m;
+
+	wl_list_for_each(m, &mons, link) {
+		if (m->wlr_output && m->wlr_output->enabled && !m->asleep)
+			return 1;
+	}
+	return 0;
+}
+
+/* Turn off Xbox controller LED via sysfs */
+static void
+gamepad_turn_off_led_sysfs(GamepadDevice *gp)
+{
+	DIR *dir;
+	struct dirent *entry;
+	char event_name[32];
+	char led_path[256];
+	char sysfs_path[256];
+	const char *event_part;
+	int found = 0;
+
+	if (!gp || !gp->path[0])
+		return;
+
+	/* Extract event number from path (e.g., /dev/input/event5 -> event5) */
+	event_part = strrchr(gp->path, '/');
+	if (!event_part)
+		return;
+	event_part++;  /* Skip the '/' */
+	snprintf(event_name, sizeof(event_name), "%s", event_part);
+
+	/* Method 1: Check /sys/class/input/eventX/device/device/leds/ (for xpadneo/xone) */
+	snprintf(sysfs_path, sizeof(sysfs_path),
+		"/sys/class/input/%s/device/device/leds", event_name);
+	dir = opendir(sysfs_path);
+	if (dir) {
+		while ((entry = readdir(dir)) != NULL) {
+			if (entry->d_name[0] == '.')
+				continue;
+			/* Try to write 0 to brightness */
+			snprintf(led_path, sizeof(led_path), "%s/%s/brightness",
+				sysfs_path, entry->d_name);
+			int fd = open(led_path, O_WRONLY);
+			if (fd >= 0) {
+				write(fd, "0\n", 2);
+				close(fd);
+				wlr_log(WLR_INFO, "Turned off LED via %s", led_path);
+				found = 1;
+			}
+		}
+		closedir(dir);
+	}
+
+	/* Method 2: Check /sys/class/leds/ for xpad* entries */
+	if (!found) {
+		dir = opendir("/sys/class/leds");
+		if (dir) {
+			while ((entry = readdir(dir)) != NULL) {
+				/* Look for xpad LEDs (Xbox 360) or gip* LEDs (xone) */
+				if (strncmp(entry->d_name, "xpad", 4) == 0 ||
+				    strncmp(entry->d_name, "gip", 3) == 0) {
+					snprintf(led_path, sizeof(led_path),
+						"/sys/class/leds/%s/brightness", entry->d_name);
+					int fd = open(led_path, O_WRONLY);
+					if (fd >= 0) {
+						/* Pattern 0 = all LEDs off for xpad */
+						write(fd, "0\n", 2);
+						close(fd);
+						wlr_log(WLR_INFO, "Turned off LED via %s", led_path);
+						found = 1;
+					}
+				}
+			}
+			closedir(dir);
+		}
+	}
+
+	if (!found) {
+		wlr_log(WLR_DEBUG, "No sysfs LED found for gamepad %s", gp->name);
+	}
+}
+
+/* Async callback for Bluetooth Disconnect method */
+static int
+bt_disconnect_reply_cb(sd_bus_message *reply, void *userdata, sd_bus_error *error)
+{
+	char *name = userdata;
+
+	if (sd_bus_error_is_set(error)) {
+		wlr_log(WLR_DEBUG, "Async disconnect failed for %s: %s", name ? name : "unknown", error->message);
+	} else {
+		wlr_log(WLR_INFO, "Controller disconnected: %s", name ? name : "unknown");
+	}
+
+	free(name);
+	return 0;
+}
+
+/* Async callback for GetManagedObjects - finds and disconnects the device */
+static int
+bt_get_objects_disconnect_cb(sd_bus_message *reply, void *userdata, sd_bus_error *error)
+{
+	char *target_name = userdata;
+	const char *obj_path;
+	int r;
+
+	if (!target_name)
+		return 0;
+
+	if (sd_bus_error_is_set(error)) {
+		wlr_log(WLR_DEBUG, "Failed to get Bluetooth objects: %s", error->message);
+		free(target_name);
+		return 0;
+	}
+
+	/* Iterate through objects to find our device */
+	r = sd_bus_message_enter_container(reply, 'a', "{oa{sa{sv}}}");
+	if (r < 0)
+		goto done;
+
+	while ((r = sd_bus_message_enter_container(reply, 'e', "oa{sa{sv}}")) > 0) {
+		r = sd_bus_message_read(reply, "o", &obj_path);
+		if (r < 0)
+			break;
+
+		/* Enter interfaces dict */
+		r = sd_bus_message_enter_container(reply, 'a', "{sa{sv}}");
+		if (r < 0)
+			break;
+
+		while ((r = sd_bus_message_enter_container(reply, 'e', "sa{sv}")) > 0) {
+			const char *interface;
+			r = sd_bus_message_read(reply, "s", &interface);
+			if (r < 0)
+				break;
+
+			if (strcmp(interface, "org.bluez.Device1") == 0) {
+				/* Enter properties dict */
+				r = sd_bus_message_enter_container(reply, 'a', "{sv}");
+				if (r < 0)
+					break;
+
+				const char *device_name = NULL;
+				int connected = 0;
+
+				while ((r = sd_bus_message_enter_container(reply, 'e', "sv")) > 0) {
+					const char *prop;
+					r = sd_bus_message_read(reply, "s", &prop);
+					if (r < 0)
+						break;
+
+					if (strcmp(prop, "Name") == 0) {
+						r = sd_bus_message_enter_container(reply, 'v', "s");
+						if (r >= 0) {
+							sd_bus_message_read(reply, "s", &device_name);
+							sd_bus_message_exit_container(reply);
+						}
+					} else if (strcmp(prop, "Connected") == 0) {
+						r = sd_bus_message_enter_container(reply, 'v', "b");
+						if (r >= 0) {
+							sd_bus_message_read(reply, "b", &connected);
+							sd_bus_message_exit_container(reply);
+						}
+					} else {
+						sd_bus_message_skip(reply, "v");
+					}
+					sd_bus_message_exit_container(reply);
+				}
+				sd_bus_message_exit_container(reply);
+
+				/* Check if this is our device (match in either direction) */
+				if (device_name && connected &&
+				    (strcasestr(target_name, device_name) ||
+				     strcasestr(device_name, target_name))) {
+					wlr_log(WLR_INFO, "Disconnecting Bluetooth controller: %s", device_name);
+
+					/* Async disconnect - fire and forget */
+					char *name_copy = strdup(device_name);
+					r = sd_bus_call_method_async(bt_bus, NULL,
+						"org.bluez",
+						obj_path,
+						"org.bluez.Device1",
+						"Disconnect",
+						bt_disconnect_reply_cb,
+						name_copy,
+						"");
+
+					if (r < 0) {
+						wlr_log(WLR_DEBUG, "Failed to start async disconnect: %s", strerror(-r));
+						free(name_copy);
+					}
+					goto done;
+				}
+			} else {
+				sd_bus_message_skip(reply, "a{sv}");
+			}
+			sd_bus_message_exit_container(reply);
+		}
+		sd_bus_message_exit_container(reply);
+		sd_bus_message_exit_container(reply);
+	}
+
+done:
+	free(target_name);
+	return 0;
+}
+
+/* Disconnect Bluetooth device by name - completely powers off the controller (async) */
+static void
+gamepad_bt_disconnect(GamepadDevice *gp)
+{
+	int r;
+	char *name_copy;
+
+	if (!bt_bus || !gp)
+		return;
+
+	/* Copy name since gp may be freed before async callback */
+	name_copy = strdup(gp->name);
+	if (!name_copy)
+		return;
+
+	/* Async call to get managed objects */
+	r = sd_bus_call_method_async(bt_bus, NULL,
+		"org.bluez",
+		"/",
+		"org.freedesktop.DBus.ObjectManager",
+		"GetManagedObjects",
+		bt_get_objects_disconnect_cb,
+		name_copy,
+		"");
+
+	if (r < 0) {
+		wlr_log(WLR_DEBUG, "Failed to start async GetManagedObjects: %s", strerror(-r));
+		free(name_copy);
+	}
+}
+
+/* Suspend gamepad - power it off completely */
+static void
+gamepad_suspend(GamepadDevice *gp)
+{
+	char name_copy[128];
+
+	if (!gp || gp->suspended)
+		return;
+
+	/* Mark as suspended FIRST before any operations that might trigger removal */
+	gp->suspended = 1;
+
+	/* Copy name before potential free */
+	snprintf(name_copy, sizeof(name_copy), "%s", gp->name);
+
+	/* Turn off LED via sysfs (Xbox controllers) */
+	gamepad_turn_off_led_sysfs(gp);
+
+	/* Disconnect Bluetooth controller - this will power it off completely.
+	 * WARNING: This may trigger inotify which calls gamepad_device_remove()
+	 * and frees gp. Do NOT access gp after this call! */
+	gamepad_bt_disconnect(gp);
+
+	/* gp may be freed at this point - use copied name */
+	wlr_log(WLR_INFO, "Gamepad powered off due to inactivity: %s", name_copy);
+}
+
+/* Resume gamepad - wake it up */
+static void
+gamepad_resume(GamepadDevice *gp)
+{
+	if (!gp || !gp->suspended)
+		return;
+
+	gp->suspended = 0;
+	gp->last_activity_ms = monotonic_msec();
+	wlr_log(WLR_INFO, "Gamepad resumed: %s", gp->name);
+
+	/* Switch TV to active source when gamepad wakes */
+	cec_switch_to_active_source();
+}
+
+/* Gamepad inactivity timer callback */
+static int
+gamepad_inactivity_timer_cb(void *data)
+{
+	GamepadDevice *gp, *tmp;
+	int64_t now = monotonic_msec();
+	int any_active = 0;
+	int monitors_active = gamepad_any_monitor_active();
+
+	(void)data;
+
+	/* Use _safe iteration because gamepad_suspend may trigger device removal */
+	wl_list_for_each_safe(gp, tmp, &gamepads, link) {
+		if (gp->suspended)
+			continue;
+
+		any_active = 1;
+
+		/* Suspend if monitors are off or inactive for too long */
+		if (!monitors_active ||
+		    (now - gp->last_activity_ms) >= GAMEPAD_INACTIVITY_TIMEOUT_MS) {
+			gamepad_suspend(gp);
+		}
+	}
+
+	/* Reschedule timer if there are active gamepads */
+	if (any_active && gamepad_inactivity_timer) {
+		wl_event_source_timer_update(gamepad_inactivity_timer, GAMEPAD_INACTIVITY_CHECK_MS);
+	}
+
+	return 0;
+}
+
+static void
+gamepad_setup(void)
+{
+	wl_list_init(&gamepads);
+
+	/* Set up inotify to watch /dev/input for new devices */
+	gamepad_inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+	if (gamepad_inotify_fd < 0) {
+		wlr_log(WLR_ERROR, "Failed to create gamepad inotify: %s", strerror(errno));
+		return;
+	}
+
+	gamepad_inotify_wd = inotify_add_watch(gamepad_inotify_fd, "/dev/input",
+		IN_CREATE | IN_DELETE);
+	if (gamepad_inotify_wd < 0) {
+		wlr_log(WLR_ERROR, "Failed to watch /dev/input: %s", strerror(errno));
+		close(gamepad_inotify_fd);
+		gamepad_inotify_fd = -1;
+		return;
+	}
+
+	gamepad_inotify_event = wl_event_loop_add_fd(event_loop, gamepad_inotify_fd,
+		WL_EVENT_READABLE, gamepad_inotify_cb, NULL);
+
+	/* Create cursor movement timer */
+	gamepad_cursor_timer = wl_event_loop_add_timer(event_loop, gamepad_cursor_timer_cb, NULL);
+
+	/* Create pending device timer for delayed add */
+	gamepad_pending_timer = wl_event_loop_add_timer(event_loop, gamepad_pending_timer_cb, NULL);
+
+	/* Create inactivity timer for auto-suspend */
+	gamepad_inactivity_timer = wl_event_loop_add_timer(event_loop, gamepad_inactivity_timer_cb, NULL);
+
+	/* Scan existing devices */
+	gamepad_scan_devices();
+
+	/* Start timers if we found any gamepads */
+	if (!wl_list_empty(&gamepads)) {
+		if (gamepad_cursor_timer)
+			wl_event_source_timer_update(gamepad_cursor_timer, GAMEPAD_CURSOR_INTERVAL_MS);
+		if (gamepad_inactivity_timer)
+			wl_event_source_timer_update(gamepad_inactivity_timer, GAMEPAD_INACTIVITY_CHECK_MS);
+	}
+
+	wlr_log(WLR_INFO, "Gamepad support initialized");
+}
+
+static void
+gamepad_cleanup(void)
+{
+	GamepadDevice *gp, *tmp;
+
+	/* Remove all gamepads */
+	wl_list_for_each_safe(gp, tmp, &gamepads, link) {
+		if (gp->event_source)
+			wl_event_source_remove(gp->event_source);
+		if (gp->fd >= 0)
+			close(gp->fd);
+		wl_list_remove(&gp->link);
+		free(gp);
+	}
+
+	/* Clean up cursor timer */
+	if (gamepad_cursor_timer) {
+		wl_event_source_remove(gamepad_cursor_timer);
+		gamepad_cursor_timer = NULL;
+	}
+
+	/* Clean up pending device timer */
+	if (gamepad_pending_timer) {
+		wl_event_source_remove(gamepad_pending_timer);
+		gamepad_pending_timer = NULL;
+	}
+	gamepad_pending_count = 0;
+
+	/* Clean up inactivity timer */
+	if (gamepad_inactivity_timer) {
+		wl_event_source_remove(gamepad_inactivity_timer);
+		gamepad_inactivity_timer = NULL;
+	}
+
+	/* Clean up inotify */
+	if (gamepad_inotify_event) {
+		wl_event_source_remove(gamepad_inotify_event);
+		gamepad_inotify_event = NULL;
+	}
+	if (gamepad_inotify_fd >= 0) {
+		if (gamepad_inotify_wd >= 0)
+			inotify_rm_watch(gamepad_inotify_fd, gamepad_inotify_wd);
+		close(gamepad_inotify_fd);
+		gamepad_inotify_fd = -1;
+		gamepad_inotify_wd = -1;
+	}
+}
+
 static void
 schedule_next_status_refresh(void)
 {
 	uint64_t now = monotonic_msec();
 	uint64_t next = UINT64_MAX;
 
-	if (!status_cpu_timer)
+	if (!status_cpu_timer || game_mode_active || htpc_mode_active)
 		return;
 
 	for (size_t i = 0; i < LENGTH(status_tasks); i++) {
@@ -13490,7 +17499,7 @@ schedule_status_timer(void)
 	double now, next;
 	int ms;
 
-	if (!status_timer)
+	if (!status_timer || game_mode_active || htpc_mode_active)
 		return;
 
 	clock_gettime(CLOCK_REALTIME, &ts);
@@ -14323,6 +18332,193 @@ axisnotify(struct wl_listener *listener, void *data)
 	}
 }
 
+/* Internal handler for pointer button events - used by both real mouse and gamepad */
+void
+handle_pointer_button_internal(uint32_t button, uint32_t state, uint32_t time_msec)
+{
+	struct wlr_keyboard *keyboard;
+	uint32_t mods;
+	Client *c;
+	const Button *b;
+
+	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
+
+	if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+		cursor_mode = CurPressed;
+		selmon = xytomon(cursor->x, cursor->y);
+		if (locked)
+			goto notify_client;
+
+		/* Modal overlay eats clicks; outside closes it */
+		{
+			Monitor *modal_mon = modal_visible_monitor();
+			if (modal_mon) {
+				ModalOverlay *mo = &modal_mon->modal;
+				int inside = cursor->x >= mo->x && cursor->x < mo->x + mo->width &&
+						cursor->y >= mo->y && cursor->y < mo->y + mo->height;
+				if (!inside)
+					modal_hide(modal_mon);
+				return;
+			}
+		}
+
+		if (selmon && selmon->statusbar.tray_menu.visible) {
+			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
+			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
+			TrayMenu *menu = &selmon->statusbar.tray_menu;
+			int relx = lx - menu->x;
+			int rely = ly - menu->y;
+			if (relx >= 0 && rely >= 0 &&
+					relx < menu->width && rely < menu->height) {
+				TrayMenuEntry *entry = tray_menu_entry_at(selmon, relx, rely);
+				if (entry)
+					tray_menu_send_event(menu, entry, time_msec);
+				tray_menu_hide_all();
+				return;
+			} else {
+				tray_menu_hide_all();
+			}
+		}
+
+		if (selmon && selmon->wifi_popup.visible) {
+			int lx = (int)lround(cursor->x);
+			int ly = (int)lround(cursor->y);
+			if (wifi_popup_handle_click(selmon, lx, ly, button))
+				return;
+		}
+
+		if (selmon && selmon->statusbar.net_menu.visible) {
+			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
+			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
+			if (net_menu_handle_click(selmon, lx, ly, button))
+				return;
+		}
+
+		if (selmon && selmon->showbar) {
+			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
+			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
+			StatusModule *tags = &selmon->statusbar.tags;
+			StatusModule *mic = &selmon->statusbar.mic;
+			StatusModule *vol = &selmon->statusbar.volume;
+			StatusModule *cpu = &selmon->statusbar.cpu;
+			StatusModule *sys = &selmon->statusbar.sysicons;
+			StatusModule *bt = &selmon->statusbar.bluetooth;
+			StatusModule *stm = &selmon->statusbar.steam;
+			StatusModule *dsc = &selmon->statusbar.discord;
+
+			if (selmon->statusbar.cpu_popup.visible) {
+				if (cpu_popup_handle_click(selmon, lx, ly, button))
+					return;
+			}
+
+			if (selmon->statusbar.ram_popup.visible) {
+				if (ram_popup_handle_click(selmon, lx, ly, button))
+					return;
+			}
+
+			if (lx >= 0 && ly >= 0 &&
+					lx < selmon->statusbar.area.width &&
+					ly < selmon->statusbar.area.height) {
+				if (button == BTN_RIGHT &&
+						sys->width > 0 &&
+						lx >= sys->x && lx < sys->x + sys->width) {
+					net_menu_hide_all();
+					net_menu_open(selmon);
+					return;
+				}
+
+				if (button == BTN_LEFT &&
+						sys->width > 0 &&
+						lx >= sys->x && lx < sys->x + sys->width) {
+					Arg arg = { .v = netcmd };
+					spawn(&arg);
+					return;
+				}
+
+				if (cpu->width > 0 && lx >= cpu->x && lx < cpu->x + cpu->width) {
+					Arg arg = { .v = btopcmd };
+					spawn(&arg);
+					return;
+				}
+
+				if (mic->width > 0 && lx >= mic->x && lx < mic->x + mic->width) {
+					toggle_pipewire_mic_mute();
+					return;
+				}
+
+				if (vol->width > 0 && lx >= vol->x && lx < vol->x + vol->width) {
+					toggle_pipewire_mute();
+					return;
+				}
+
+				/* Bluetooth module click - open bluetooth manager */
+				if (button == BTN_LEFT &&
+						bt->width > 0 &&
+						lx >= bt->x && lx < bt->x + bt->width) {
+					pid_t pid = fork();
+					if (pid == 0) {
+						setsid();
+						execlp("blueman-manager", "blueman-manager", NULL);
+						_exit(1);
+					}
+					return;
+				}
+
+				/* Steam module click - focus or launch Steam */
+				if (button == BTN_LEFT &&
+						stm->width > 0 &&
+						lx >= stm->x && lx < stm->x + stm->width) {
+					focus_or_launch_app("steam", "steam");
+					return;
+				}
+
+				/* Discord module click - focus or launch Discord */
+				if (button == BTN_LEFT &&
+						dsc->width > 0 &&
+						lx >= dsc->x && lx < dsc->x + dsc->width) {
+					focus_or_launch_app("discord", "discord");
+					return;
+				}
+
+				if (button == BTN_LEFT && lx < tags->width) {
+					for (int i = 0; i < tags->box_count; i++) {
+						int bx = tags->box_x[i];
+						int bw = tags->box_w[i];
+						if (lx >= bx && lx < bx + bw) {
+							Arg arg = { .ui = 1u << tags->box_tag[i] };
+							view(&arg);
+							return;
+						}
+					}
+				}
+			}
+		}
+
+		/* Change focus if the button was _pressed_ over a client */
+		xytonode(cursor->x, cursor->y, NULL, &c, NULL, NULL, NULL);
+		if (c && (!client_is_unmanaged(c) || client_wants_focus(c)))
+			focusclient(c, 1);
+
+		keyboard = wlr_seat_get_keyboard(seat);
+		mods = keyboard ? wlr_keyboard_get_modifiers(keyboard) : 0;
+		for (b = buttons; b < END(buttons); b++) {
+			if (CLEANMASK(mods) == CLEANMASK(b->mod) &&
+					button == b->button && b->func) {
+				b->func(&b->arg);
+				return;
+			}
+		}
+	} else if (state == WL_POINTER_BUTTON_STATE_RELEASED) {
+		/* Reset cursor mode on release */
+		if (cursor_mode == CurPressed)
+			cursor_mode = CurNormal;
+	}
+
+notify_client:
+	/* Notify the client with pointer focus */
+	wlr_seat_pointer_notify_button(seat, time_msec, button, state);
+}
+
 void
 buttonpress(struct wl_listener *listener, void *data)
 {
@@ -14512,39 +18708,43 @@ buttonpress(struct wl_listener *listener, void *data)
 					int was_alone = drag_was_alone_in_column;
 					int move_allowed;
 
-					/* Check if movement is allowed before modifying anything */
-					if (target && target != c && !target->isfloating && !target->isfullscreen)
-						move_allowed = can_move_tile(selmon, c, target);
-					else
-						move_allowed = can_move_tile(selmon, c, NULL);
-
 					/* Clear drag state before modifying tree */
 					end_tile_drag();
 
 					/* Restore tiled state */
 					c->isfloating = 0;
 
-					if (move_allowed == 0) {
-						/* Movement blocked (4 tiles in source or target column) */
-						/* Just restore to original position, no change */
-						arrange(selmon);
-					} else if (move_allowed == 2 && target && target != c) {
-						/* Same column swap */
-						swap_tiles_in_tree(selmon, c, target);
-						arrange(selmon);
-					} else if (was_alone && target && target != c &&
-					    !target->isfloating && !target->isfullscreen) {
+					/* Column swap takes priority - check if source was alone and target is in different column */
+					if (was_alone && target && target != c &&
+					    !target->isfloating && !target->isfullscreen &&
+					    !same_column(selmon, c, target)) {
 						/* Swap columns if dragged tile was alone in its column */
 						swap_columns(selmon, c, target);
 						arrange(selmon);
 					} else {
-						/* Remove from old position and insert at new */
-						remove_client(selmon, c);
+						/* Check if movement is allowed before modifying anything */
 						if (target && target != c && !target->isfloating && !target->isfullscreen)
-							insert_client_at(selmon, target, c, cursor->x, cursor->y);
+							move_allowed = can_move_tile(selmon, c, target);
 						else
-							insert_client(selmon, NULL, c);
-						arrange(selmon);
+							move_allowed = can_move_tile(selmon, c, NULL);
+
+						if (move_allowed == 0) {
+							/* Movement blocked (4 tiles in source or target column) */
+							/* Just restore to original position, no change */
+							arrange(selmon);
+						} else if (move_allowed == 2 && target && target != c) {
+							/* Same column swap */
+							swap_tiles_in_tree(selmon, c, target);
+							arrange(selmon);
+						} else {
+							/* Remove from old position and insert at new */
+							remove_client(selmon, c);
+							if (target && target != c && !target->isfloating && !target->isfullscreen)
+								insert_client_at(selmon, target, c, cursor->x, cursor->y);
+							else
+								insert_client(selmon, NULL, c);
+							arrange(selmon);
+						}
 					}
 
 				} else if (cursor_mode == CurResize && !c->isfloating) {
@@ -14604,6 +18804,8 @@ cleanup(void)
 	TrayItem *it, *tmp;
 
 	cleanuplisteners();
+	gamepad_cleanup();
+	bt_controller_cleanup();
 	drop_net_icon_buffer();
 	drop_cpu_icon_buffer();
 	drop_clock_icon_buffer();
@@ -14652,6 +18854,12 @@ cleanup(void)
 		wl_event_source_remove(popup_delay_timer);
 		popup_delay_timer = NULL;
 	}
+	/* Clean up config rewatch timer */
+	if (config_rewatch_timer) {
+		wl_event_source_remove(config_rewatch_timer);
+		config_rewatch_timer = NULL;
+	}
+	config_needs_rewatch = 0;
 	tray_menu_hide_all();
 	if (tray_event) {
 		wl_event_source_remove(tray_event);
@@ -14754,6 +18962,8 @@ cleanupmon(struct wl_listener *listener, void *data)
 		wlr_scene_node_destroy(&m->statusbar.tree->node);
 	if (m->modal.tree)
 		wlr_scene_node_destroy(&m->modal.tree->node);
+	if (m->nixpkgs.tree)
+		wlr_scene_node_destroy(&m->nixpkgs.tree->node);
 	if (m->wifi_popup.tree)
 		wlr_scene_node_destroy(&m->wifi_popup.tree->node);
 	destroy_tree(m);
@@ -15256,6 +19466,27 @@ initstatusbar(Monitor *m)
 			wlr_scene_node_set_enabled(&m->modal.tree->node, 0);
 		}
 	}
+	if (!m->nixpkgs.tree) {
+		m->nixpkgs.tree = wlr_scene_tree_create(layers[LyrTop]);
+		if (m->nixpkgs.tree) {
+			m->nixpkgs.bg = wlr_scene_tree_create(m->nixpkgs.tree);
+			m->nixpkgs.visible = 0;
+			m->nixpkgs.search[0] = '\0';
+			m->nixpkgs.search_len = 0;
+			m->nixpkgs.search_rendered[0] = '\0';
+			m->nixpkgs.search_field_tree = NULL;
+			m->nixpkgs.result_count = 0;
+			m->nixpkgs.selected = -1;
+			m->nixpkgs.scroll = 0;
+			m->nixpkgs.results_tree = NULL;
+			m->nixpkgs.last_scroll = 0;
+			m->nixpkgs.last_selected = -1;
+			m->nixpkgs.row_highlight_count = 0;
+			for (int i = 0; i < MODAL_MAX_RESULTS; i++)
+				m->nixpkgs.row_highlights[i] = NULL;
+			wlr_scene_node_set_enabled(&m->nixpkgs.tree->node, 0);
+		}
+	}
 	if (!m->wifi_popup.tree) {
 		m->wifi_popup.tree = wlr_scene_tree_create(layers[LyrTop]);
 		if (m->wifi_popup.tree) {
@@ -15275,6 +19506,67 @@ initstatusbar(Monitor *m)
 			wlr_scene_node_set_enabled(&m->wifi_popup.tree->node, 0);
 		}
 	}
+	if (!m->sudo_popup.tree) {
+		m->sudo_popup.tree = wlr_scene_tree_create(layers[LyrTop]);
+		if (m->sudo_popup.tree) {
+			m->sudo_popup.bg = wlr_scene_tree_create(m->sudo_popup.tree);
+			m->sudo_popup.visible = 0;
+			m->sudo_popup.title[0] = '\0';
+			m->sudo_popup.password[0] = '\0';
+			m->sudo_popup.password_len = 0;
+			m->sudo_popup.cursor_pos = 0;
+			m->sudo_popup.button_hover = 0;
+			m->sudo_popup.running = 0;
+			m->sudo_popup.error = 0;
+			m->sudo_popup.pending_cmd[0] = '\0';
+			m->sudo_popup.pending_pkg[0] = '\0';
+			m->sudo_popup.sudo_pid = -1;
+			m->sudo_popup.sudo_fd = -1;
+			m->sudo_popup.sudo_event = NULL;
+			m->sudo_popup.wait_timer = NULL;
+			wlr_scene_node_set_enabled(&m->sudo_popup.tree->node, 0);
+		}
+	}
+	if (!m->gamepad_menu.tree) {
+		/* Use LyrBlock to ensure guide popup is always on top of fullscreen */
+		m->gamepad_menu.tree = wlr_scene_tree_create(layers[LyrBlock]);
+		if (m->gamepad_menu.tree) {
+			m->gamepad_menu.bg = NULL;
+			m->gamepad_menu.visible = 0;
+			m->gamepad_menu.selected = 0;
+			m->gamepad_menu.item_count = GAMEPAD_MENU_ITEM_COUNT;
+			wlr_scene_node_set_enabled(&m->gamepad_menu.tree->node, 0);
+		}
+	}
+}
+
+/* Find a mode matching resolution and optionally refresh rate */
+static struct wlr_output_mode *
+find_mode(struct wlr_output *output, int width, int height, float refresh)
+{
+	struct wlr_output_mode *mode, *best = NULL;
+	int best_refresh = 0;
+
+	wl_list_for_each(mode, &output->modes, link) {
+		if (mode->width == width && mode->height == height) {
+			if (refresh > 0) {
+				/* Find closest match to requested refresh rate */
+				int mode_hz = mode->refresh / 1000;
+				int target_hz = (int)refresh;
+				if (!best || abs(mode_hz - target_hz) < abs(best_refresh - target_hz)) {
+					best = mode;
+					best_refresh = mode_hz;
+				}
+			} else {
+				/* No refresh specified - pick highest */
+				if (!best || mode->refresh > best->refresh) {
+					best = mode;
+					best_refresh = mode->refresh / 1000;
+				}
+			}
+		}
+	}
+	return best;
 }
 
 void
@@ -15284,11 +19576,13 @@ createmon(struct wl_listener *listener, void *data)
 	 * monitor) becomes available. */
 	struct wlr_output *wlr_output = data;
 	const MonitorRule *r;
+	RuntimeMonitorConfig *rtcfg;
 	size_t i;
 	struct wlr_output_state state;
 	struct wlr_output_mode *mode;
 	Monitor *m;
 	Client *c;
+	int use_runtime_config = 0;
 
 	if (!wlr_output_init_render(wlr_output, alloc, drw))
 		return;
@@ -15305,26 +19599,80 @@ createmon(struct wl_listener *listener, void *data)
 	m->gaps = gaps;
 
 	m->tagset[0] = m->tagset[1] = 1;
-	for (r = monrules; r < END(monrules); r++) {
-		if (!r->name || strstr(wlr_output->name, r->name)) {
-			m->m.x = r->x;
-			m->m.y = r->y;
-			m->mfact = r->mfact;
-			m->nmaster = r->nmaster;
-			m->lt[0] = r->lt;
-			m->lt[1] = &layouts[LENGTH(layouts) > 1 && r->lt != &layouts[1]];
-			strncpy(m->ltsymbol, m->lt[m->sellt]->symbol, LENGTH(m->ltsymbol));
-			wlr_output_state_set_scale(&state, r->scale);
-			wlr_output_state_set_transform(&state, r->rr);
-			break;
+
+	/* First check runtime monitor configuration */
+	rtcfg = find_monitor_config(wlr_output->name);
+	if (rtcfg) {
+		use_runtime_config = 1;
+		wlr_log(WLR_INFO, "Using runtime config for monitor %s", wlr_output->name);
+
+		/* Check if monitor is disabled */
+		if (!rtcfg->enabled) {
+			wlr_log(WLR_INFO, "Monitor %s is disabled in config", wlr_output->name);
+			wlr_output_state_set_enabled(&state, 0);
+			wlr_output_commit_state(wlr_output, &state);
+			wlr_output_state_finish(&state);
+			free(m);
+			wlr_output->data = NULL;
+			return;
+		}
+
+		/* Apply runtime config */
+		m->mfact = rtcfg->mfact;
+		m->nmaster = rtcfg->nmaster;
+		m->lt[0] = &layouts[0];
+		m->lt[1] = &layouts[LENGTH(layouts) > 1 ? 1 : 0];
+		strncpy(m->ltsymbol, m->lt[m->sellt]->symbol, LENGTH(m->ltsymbol));
+		wlr_output_state_set_scale(&state, rtcfg->scale);
+		wlr_output_state_set_transform(&state, rtcfg->transform);
+
+		/* Position will be calculated after mode is set */
+		m->m.x = -1;
+		m->m.y = -1;
+
+		/* Find mode if resolution is specified */
+		if (rtcfg->width > 0 && rtcfg->height > 0) {
+			mode = find_mode(wlr_output, rtcfg->width, rtcfg->height, rtcfg->refresh);
+			if (mode) {
+				wlr_output_state_set_mode(&state, mode);
+				wlr_log(WLR_INFO, "Set mode %dx%d@%d for %s",
+					mode->width, mode->height, mode->refresh / 1000, wlr_output->name);
+			} else {
+				wlr_log(WLR_ERROR, "Mode %dx%d not found for %s, using auto",
+					rtcfg->width, rtcfg->height, wlr_output->name);
+				if ((mode = bestmode(wlr_output)))
+					wlr_output_state_set_mode(&state, mode);
+			}
+		} else {
+			/* Auto mode - pick best */
+			if ((mode = bestmode(wlr_output)))
+				wlr_output_state_set_mode(&state, mode);
 		}
 	}
 
-	/* The mode is a tuple of (width, height, refresh rate), and each
-	 * monitor supports only a specific set of modes. Pick the highest
-	 * resolution and refresh rate available. */
-	if ((mode = bestmode(wlr_output)))
-		wlr_output_state_set_mode(&state, mode);
+	/* Fall back to compile-time monrules if no runtime config */
+	if (!use_runtime_config) {
+		for (r = monrules; r < END(monrules); r++) {
+			if (!r->name || strstr(wlr_output->name, r->name)) {
+				m->m.x = r->x;
+				m->m.y = r->y;
+				m->mfact = r->mfact;
+				m->nmaster = r->nmaster;
+				m->lt[0] = r->lt;
+				m->lt[1] = &layouts[LENGTH(layouts) > 1 && r->lt != &layouts[1]];
+				strncpy(m->ltsymbol, m->lt[m->sellt]->symbol, LENGTH(m->ltsymbol));
+				wlr_output_state_set_scale(&state, r->scale);
+				wlr_output_state_set_transform(&state, r->rr);
+				break;
+			}
+		}
+
+		/* The mode is a tuple of (width, height, refresh rate), and each
+		 * monitor supports only a specific set of modes. Pick the highest
+		 * resolution and refresh rate available. */
+		if ((mode = bestmode(wlr_output)))
+			wlr_output_state_set_mode(&state, mode);
+	}
 
 	/* Set up event listeners */
 	LISTEN(&wlr_output->events.frame, &m->frame, rendermon);
@@ -15374,6 +19722,24 @@ createmon(struct wl_listener *listener, void *data)
 	 * output (such as DPI, scale factor, manufacturer, etc).
 	 */
 	m->scene_output = wlr_scene_output_create(scene, wlr_output);
+
+	/* Calculate position for runtime-configured monitors */
+	if (use_runtime_config && rtcfg && rtcfg->position != MON_POS_AUTO) {
+		int pos_x, pos_y;
+		/* Get monitor dimensions from the committed mode */
+		if (wlr_output->current_mode) {
+			m->m.width = wlr_output->current_mode->width;
+			m->m.height = wlr_output->current_mode->height;
+		}
+		calculate_monitor_position(m, rtcfg, &pos_x, &pos_y);
+		if (pos_x != -1 && pos_y != -1) {
+			m->m.x = pos_x;
+			m->m.y = pos_y;
+			wlr_log(WLR_INFO, "Positioning monitor %s at %d,%d (slot: %d)",
+				wlr_output->name, pos_x, pos_y, rtcfg->position);
+		}
+	}
+
 	if (m->m.x == -1 && m->m.y == -1)
 		wlr_output_layout_add_auto(output_layout, wlr_output);
 	else
@@ -15954,8 +20320,9 @@ keybinding(uint32_t mods, xkb_keysym_t sym)
 	 * processing keys, rather than passing them on to the client for its own
 	 * processing.
 	 */
-	const Key *k;
-	for (k = keys; k < END(keys); k++) {
+	size_t i;
+	for (i = 0; i < keys_count; i++) {
+		const Key *k = &keys[i];
 		if (CLEANMASK(mods) == CLEANMASK(k->mod)
 				&& sym == k->keysym && k->func) {
 			k->func(&k->arg);
@@ -15991,18 +20358,49 @@ keypress(struct wl_listener *listener, void *data)
 	int handled = 0;
 	uint32_t mods = wlr_keyboard_get_modifiers(&group->wlr_group->keyboard);
 	Monitor *modal_mon = modal_visible_monitor();
+	Monitor *nixpkgs_mon = nixpkgs_visible_monitor();
 	Monitor *wifi_mon = wifi_popup_visible_monitor();
+	Monitor *sudo_mon = sudo_popup_visible_monitor();
 
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
 	/* On _press_ if there is no active screen locker,
 	 * attempt to process a compositor keybinding. */
 	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-		/* WiFi password popup takes priority */
-		if (wifi_mon) {
+		/* Sudo password popup takes highest priority */
+		if (sudo_mon) {
+			for (i = 0; i < nsyms; i++) {
+				if (sudo_popup_handle_key(sudo_mon, mods, syms[i]))
+					handled = 1;
+			}
+		}
+		/* WiFi password popup */
+		if (wifi_mon && !handled) {
 			for (i = 0; i < nsyms; i++) {
 				if (wifi_popup_handle_key(wifi_mon, mods, syms[i]))
 					handled = 1;
+			}
+		}
+		/* Nixpkgs popup */
+		if (nixpkgs_mon && !handled) {
+			int consumed = 0;
+			int is_navigation = 0;
+			for (i = 0; i < nsyms; i++) {
+				xkb_keysym_t s = syms[i];
+				if (nixpkgs_handle_key(nixpkgs_mon, mods, s)) {
+					handled = 1;
+					consumed = 1;
+				}
+				if (s == XKB_KEY_Up || s == XKB_KEY_Down)
+					is_navigation = 1;
+			}
+			if (consumed) {
+				if (is_navigation) {
+					nixpkgs_update_selection(nixpkgs_mon);
+				} else {
+					nixpkgs_update_results(nixpkgs_mon);
+					nixpkgs_render(nixpkgs_mon);
+				}
 			}
 		}
 		if (modal_mon) {
@@ -16057,15 +20455,15 @@ keypress(struct wl_listener *listener, void *data)
 		}
 	}
 
-	/* Don't enable key repeat for modal text input to avoid double characters.
-	 * Only allow repeat for navigation keys (arrows, backspace) in modal. */
+	/* Don't enable key repeat for modal/nixpkgs text input to avoid double characters.
+	 * Only allow repeat for navigation keys (arrows, backspace) in modal/nixpkgs. */
 	{
 		int allow_repeat = 0;
 		if (handled && group->wlr_group->keyboard.repeat_info.delay > 0) {
-			if (!modal_mon) {
+			if (!modal_mon && !nixpkgs_mon) {
 				allow_repeat = 1;
 			} else {
-				/* In modal: only allow repeat for navigation keys */
+				/* In modal/nixpkgs: only allow repeat for navigation keys */
 				for (i = 0; i < nsyms; i++) {
 					xkb_keysym_t s = syms[i];
 					if (s == XKB_KEY_Up || s == XKB_KEY_Down ||
@@ -16115,7 +20513,9 @@ keyrepeat(void *data)
 {
 	KeyboardGroup *group = data;
 	Monitor *modal_mon = modal_visible_monitor();
+	Monitor *nixpkgs_mon = nixpkgs_visible_monitor();
 	int modal_consumed = 0;
+	int nixpkgs_consumed = 0;
 	int i;
 	if (!group->nsyms || group->wlr_group->keyboard.repeat_info.rate <= 0)
 		return 0;
@@ -16124,10 +20524,31 @@ keyrepeat(void *data)
 			1000 / group->wlr_group->keyboard.repeat_info.rate);
 
 	for (i = 0; i < group->nsyms; i++) {
-		if (modal_mon && modal_handle_key(modal_mon, group->mods, group->keysyms[i]))
+		if (nixpkgs_mon && nixpkgs_handle_key(nixpkgs_mon, group->mods, group->keysyms[i]))
+			nixpkgs_consumed = 1;
+		else if (modal_mon && modal_handle_key(modal_mon, group->mods, group->keysyms[i]))
 			modal_consumed = 1;
 		else
 			keybinding(group->mods, group->keysyms[i]);
+	}
+
+	if (nixpkgs_consumed && nixpkgs_mon) {
+		/* Check if this is navigation - use fast path */
+		int is_nav = 0;
+		for (i = 0; i < group->nsyms; i++) {
+			if (group->keysyms[i] == XKB_KEY_Up || group->keysyms[i] == XKB_KEY_Down) {
+				is_nav = 1;
+				break;
+			}
+		}
+		if (is_nav) {
+			/* Ultra-fast: just toggle highlights */
+			nixpkgs_update_selection(nixpkgs_mon);
+		} else {
+			/* Other keys (backspace): full update */
+			nixpkgs_update_results(nixpkgs_mon);
+			nixpkgs_render(nixpkgs_mon);
+		}
 	}
 
 	if (modal_consumed && modal_mon) {
@@ -19221,6 +23642,7 @@ setfullscreen(Client *c, int fullscreen)
 	}
 	arrange(c->mon);
 	printstatus();
+	update_game_mode();
 }
 
 void
@@ -19299,6 +23721,976 @@ setsel(struct wl_listener *listener, void *data)
 	wlr_seat_set_selection(seat, event->source, event->serial);
 }
 
+/* ========== Runtime Configuration Parser ========== */
+static char *config_strdup(const char *s)
+{
+	size_t len = strlen(s);
+	char *dup = malloc(len + 1);
+	if (dup) memcpy(dup, s, len + 1);
+	return dup;
+}
+
+static void config_trim(char *s)
+{
+	char *start = s, *end;
+	while (*start && isspace((unsigned char)*start)) start++;
+	if (start != s) memmove(s, start, strlen(start) + 1);
+	end = s + strlen(s);
+	while (end > s && isspace((unsigned char)*(end - 1))) end--;
+	*end = '\0';
+}
+
+static int config_parse_color(const char *value, float color[4])
+{
+	unsigned int hex;
+	if (value[0] == '#') value++;
+	else if (value[0] == '0' && (value[1] == 'x' || value[1] == 'X')) value += 2;
+	if (sscanf(value, "%x", &hex) != 1) return 0;
+	/* Handle both #RRGGBB and #RRGGBBAA formats */
+	if (strlen(value) <= 6) hex = (hex << 8) | 0xFF;
+	color[0] = ((hex >> 24) & 0xFF) / 255.0f;
+	color[1] = ((hex >> 16) & 0xFF) / 255.0f;
+	color[2] = ((hex >> 8) & 0xFF) / 255.0f;
+	color[3] = (hex & 0xFF) / 255.0f;
+	return 1;
+}
+
+static void config_expand_path(const char *src, char *dst, size_t dstlen)
+{
+	const char *home = getenv("HOME");
+	if (src[0] == '~' && src[1] == '/') {
+		snprintf(dst, dstlen, "%s%s", home ? home : "", src + 1);
+	} else if (strncmp(src, "$HOME", 5) == 0) {
+		snprintf(dst, dstlen, "%s%s", home ? home : "", src + 5);
+	} else {
+		snprintf(dst, dstlen, "%s", src);
+	}
+}
+
+static void config_set_value(const char *key, const char *value)
+{
+	/* General appearance */
+	if (strcmp(key, "sloppyfocus") == 0) sloppyfocus = atoi(value);
+	else if (strcmp(key, "bypass_surface_visibility") == 0) bypass_surface_visibility = atoi(value);
+	else if (strcmp(key, "smartgaps") == 0) smartgaps = atoi(value);
+	else if (strcmp(key, "gaps") == 0) gaps = atoi(value);
+	else if (strcmp(key, "gappx") == 0) gappx = (unsigned int)atoi(value);
+	else if (strcmp(key, "borderpx") == 0) borderpx = (unsigned int)atoi(value);
+	else if (strcmp(key, "lock_cursor") == 0) lock_cursor = atoi(value);
+
+	/* HTPC mode */
+	else if (strcmp(key, "htpc_mode_enabled") == 0) htpc_mode_enabled = atoi(value);
+	else if (strcmp(key, "htpc_mode_autostart") == 0) htpc_mode_autostart = atoi(value);
+	else if (strcmp(key, "htpc_mode_auto_on_controller") == 0) htpc_mode_auto_on_controller = atoi(value);
+	else if (strcmp(key, "htpc_wallpaper") == 0) {
+		config_expand_path(value, htpc_wallpaper_path, sizeof(htpc_wallpaper_path));
+	}
+
+	/* Colors */
+	else if (strcmp(key, "rootcolor") == 0) config_parse_color(value, rootcolor);
+	else if (strcmp(key, "bordercolor") == 0) config_parse_color(value, bordercolor);
+	else if (strcmp(key, "focuscolor") == 0) config_parse_color(value, focuscolor);
+	else if (strcmp(key, "urgentcolor") == 0) config_parse_color(value, urgentcolor);
+	else if (strcmp(key, "fullscreen_bg") == 0) config_parse_color(value, fullscreen_bg);
+
+	/* Statusbar */
+	else if (strcmp(key, "statusbar_height") == 0) statusbar_height = (unsigned int)atoi(value);
+	else if (strcmp(key, "statusbar_module_spacing") == 0) statusbar_module_spacing = (unsigned int)atoi(value);
+	else if (strcmp(key, "statusbar_module_padding") == 0) statusbar_module_padding = (unsigned int)atoi(value);
+	else if (strcmp(key, "statusbar_icon_text_gap") == 0) statusbar_icon_text_gap = (unsigned int)atoi(value);
+	else if (strcmp(key, "statusbar_top_gap") == 0) statusbar_top_gap = (unsigned int)atoi(value);
+	else if (strcmp(key, "statusbar_fg") == 0) config_parse_color(value, statusbar_fg);
+	else if (strcmp(key, "statusbar_bg") == 0) config_parse_color(value, statusbar_bg);
+	else if (strcmp(key, "statusbar_popup_bg") == 0) config_parse_color(value, statusbar_popup_bg);
+	else if (strcmp(key, "statusbar_volume_muted_fg") == 0) config_parse_color(value, statusbar_volume_muted_fg);
+	else if (strcmp(key, "statusbar_mic_muted_fg") == 0) config_parse_color(value, statusbar_mic_muted_fg);
+	else if (strcmp(key, "statusbar_tag_bg") == 0) config_parse_color(value, statusbar_tag_bg);
+	else if (strcmp(key, "statusbar_tag_active_bg") == 0) config_parse_color(value, statusbar_tag_active_bg);
+	else if (strcmp(key, "statusbar_tag_hover_bg") == 0) config_parse_color(value, statusbar_tag_hover_bg);
+	else if (strcmp(key, "statusbar_hover_fade_ms") == 0) statusbar_hover_fade_ms = atoi(value);
+	else if (strcmp(key, "statusbar_tray_force_rgba") == 0) statusbar_tray_force_rgba = atoi(value);
+	else if (strcmp(key, "statusbar_font_spacing") == 0) statusbar_font_spacing = atoi(value);
+	else if (strcmp(key, "statusbar_font_force_color") == 0) statusbar_font_force_color = atoi(value);
+	else if (strcmp(key, "statusbar_workspace_padding") == 0) statusbar_workspace_padding = atoi(value);
+	else if (strcmp(key, "statusbar_workspace_spacing") == 0) statusbar_workspace_spacing = atoi(value);
+	else if (strcmp(key, "statusbar_thumb_height") == 0) statusbar_thumb_height = atoi(value);
+	else if (strcmp(key, "statusbar_thumb_gap") == 0) statusbar_thumb_gap = atoi(value);
+	else if (strcmp(key, "statusbar_thumb_window") == 0) config_parse_color(value, statusbar_thumb_window);
+	else if (strcmp(key, "statusbar_font") == 0) {
+		/* Parse comma-separated fonts into runtime array */
+		char *copy = config_strdup(value);
+		char *saveptr, *tok;
+		int i = 0;
+		for (tok = strtok_r(copy, ",", &saveptr); tok && i < 7; tok = strtok_r(NULL, ",", &saveptr)) {
+			config_trim(tok);
+			if (*tok) runtime_fonts[i++] = config_strdup(tok);
+		}
+		runtime_fonts[i] = NULL;
+		runtime_fonts_set = 1;
+		free(copy);
+	}
+
+	/* Keyboard */
+	else if (strcmp(key, "repeat_delay") == 0) repeat_delay = atoi(value);
+	else if (strcmp(key, "repeat_rate") == 0) repeat_rate = atoi(value);
+
+	/* Trackpad */
+	else if (strcmp(key, "tap_to_click") == 0) tap_to_click = atoi(value);
+	else if (strcmp(key, "tap_and_drag") == 0) tap_and_drag = atoi(value);
+	else if (strcmp(key, "drag_lock") == 0) drag_lock = atoi(value);
+	else if (strcmp(key, "natural_scrolling") == 0) natural_scrolling = atoi(value);
+	else if (strcmp(key, "disable_while_typing") == 0) disable_while_typing = atoi(value);
+	else if (strcmp(key, "left_handed") == 0) left_handed = atoi(value);
+	else if (strcmp(key, "middle_button_emulation") == 0) middle_button_emulation = atoi(value);
+	else if (strcmp(key, "accel_speed") == 0) accel_speed = atof(value);
+	else if (strcmp(key, "accel_profile") == 0) {
+		if (strcmp(value, "flat") == 0) accel_profile = LIBINPUT_CONFIG_ACCEL_PROFILE_FLAT;
+		else if (strcmp(value, "adaptive") == 0) accel_profile = LIBINPUT_CONFIG_ACCEL_PROFILE_ADAPTIVE;
+	}
+	else if (strcmp(key, "scroll_method") == 0) {
+		if (strcmp(value, "none") == 0) scroll_method = LIBINPUT_CONFIG_SCROLL_NO_SCROLL;
+		else if (strcmp(value, "2fg") == 0) scroll_method = LIBINPUT_CONFIG_SCROLL_2FG;
+		else if (strcmp(value, "edge") == 0) scroll_method = LIBINPUT_CONFIG_SCROLL_EDGE;
+		else if (strcmp(value, "button") == 0) scroll_method = LIBINPUT_CONFIG_SCROLL_ON_BUTTON_DOWN;
+	}
+	else if (strcmp(key, "click_method") == 0) {
+		if (strcmp(value, "none") == 0) click_method = LIBINPUT_CONFIG_CLICK_METHOD_NONE;
+		else if (strcmp(value, "button_areas") == 0) click_method = LIBINPUT_CONFIG_CLICK_METHOD_BUTTON_AREAS;
+		else if (strcmp(value, "clickfinger") == 0) click_method = LIBINPUT_CONFIG_CLICK_METHOD_CLICKFINGER;
+	}
+	else if (strcmp(key, "button_map") == 0) {
+		if (strcmp(value, "lrm") == 0) button_map = LIBINPUT_CONFIG_TAP_MAP_LRM;
+		else if (strcmp(value, "lmr") == 0) button_map = LIBINPUT_CONFIG_TAP_MAP_LMR;
+	}
+
+	/* Resizing */
+	else if (strcmp(key, "resize_factor") == 0) resize_factor = (float)atof(value);
+	else if (strcmp(key, "resize_interval_ms") == 0) resize_interval_ms = (uint32_t)atoi(value);
+	else if (strcmp(key, "resize_min_pixels") == 0) resize_min_pixels = atof(value);
+	else if (strcmp(key, "resize_ratio_epsilon") == 0) resize_ratio_epsilon = (float)atof(value);
+	else if (strcmp(key, "modal_file_search_minlen") == 0) modal_file_search_minlen = atoi(value);
+
+	/* Wallpaper and autostart */
+	else if (strcmp(key, "wallpaper") == 0) {
+		/* Store wallpaper path - autostart_cmd is built in main() */
+		snprintf(wallpaper_path, sizeof(wallpaper_path), "%s", value);
+	}
+	else if (strcmp(key, "autostart") == 0) {
+		snprintf(autostart_cmd, sizeof(autostart_cmd), "%s", value);
+	}
+
+	/* Modifier keys */
+	else if (strcmp(key, "modkey") == 0) {
+		if (strcmp(value, "super") == 0 || strcmp(value, "logo") == 0 || strcmp(value, "mod4") == 0)
+			modkey = WLR_MODIFIER_LOGO;
+		else if (strcmp(value, "alt") == 0 || strcmp(value, "mod1") == 0)
+			modkey = WLR_MODIFIER_ALT;
+		else if (strcmp(value, "ctrl") == 0 || strcmp(value, "control") == 0)
+			modkey = WLR_MODIFIER_CTRL;
+		else if (strcmp(value, "shift") == 0)
+			modkey = WLR_MODIFIER_SHIFT;
+	}
+	else if (strcmp(key, "monitorkey") == 0) {
+		if (strcmp(value, "super") == 0 || strcmp(value, "logo") == 0 || strcmp(value, "mod4") == 0)
+			monitorkey = WLR_MODIFIER_LOGO;
+		else if (strcmp(value, "alt") == 0 || strcmp(value, "mod1") == 0)
+			monitorkey = WLR_MODIFIER_ALT;
+		else if (strcmp(value, "ctrl") == 0 || strcmp(value, "control") == 0)
+			monitorkey = WLR_MODIFIER_CTRL;
+		else if (strcmp(value, "shift") == 0)
+			monitorkey = WLR_MODIFIER_SHIFT;
+	}
+
+	/* Spawn commands */
+	else if (strcmp(key, "terminal") == 0) {
+		snprintf(spawn_cmd_terminal, sizeof(spawn_cmd_terminal), "%s", value);
+	}
+	else if (strcmp(key, "terminal_alt") == 0) {
+		snprintf(spawn_cmd_terminal_alt, sizeof(spawn_cmd_terminal_alt), "%s", value);
+	}
+	else if (strcmp(key, "browser") == 0) {
+		snprintf(spawn_cmd_browser, sizeof(spawn_cmd_browser), "%s", value);
+	}
+	else if (strcmp(key, "filemanager") == 0) {
+		snprintf(spawn_cmd_filemanager, sizeof(spawn_cmd_filemanager), "%s", value);
+	}
+	else if (strcmp(key, "launcher") == 0) {
+		snprintf(spawn_cmd_launcher, sizeof(spawn_cmd_launcher), "%s", value);
+	}
+}
+
+/* Keysym name to XKB keysym lookup */
+static xkb_keysym_t config_parse_keysym(const char *name)
+{
+	xkb_keysym_t sym;
+
+	/* Try XKB lookup first */
+	sym = xkb_keysym_from_name(name, XKB_KEYSYM_NO_FLAGS);
+	if (sym != XKB_KEY_NoSymbol) return sym;
+
+	/* Try case-insensitive */
+	sym = xkb_keysym_from_name(name, XKB_KEYSYM_CASE_INSENSITIVE);
+	if (sym != XKB_KEY_NoSymbol) return sym;
+
+	/* Common aliases */
+	if (strcasecmp(name, "enter") == 0) return XKB_KEY_Return;
+	if (strcasecmp(name, "esc") == 0) return XKB_KEY_Escape;
+	if (strcasecmp(name, "backspace") == 0) return XKB_KEY_BackSpace;
+	if (strcasecmp(name, "tab") == 0) return XKB_KEY_Tab;
+	if (strcasecmp(name, "space") == 0) return XKB_KEY_space;
+	if (strcasecmp(name, "up") == 0) return XKB_KEY_Up;
+	if (strcasecmp(name, "down") == 0) return XKB_KEY_Down;
+	if (strcasecmp(name, "left") == 0) return XKB_KEY_Left;
+	if (strcasecmp(name, "right") == 0) return XKB_KEY_Right;
+	if (strcasecmp(name, "delete") == 0) return XKB_KEY_Delete;
+	if (strcasecmp(name, "home") == 0) return XKB_KEY_Home;
+	if (strcasecmp(name, "end") == 0) return XKB_KEY_End;
+	if (strcasecmp(name, "pageup") == 0) return XKB_KEY_Page_Up;
+	if (strcasecmp(name, "pagedown") == 0) return XKB_KEY_Page_Down;
+	if (strcasecmp(name, "print") == 0) return XKB_KEY_Print;
+
+	return XKB_KEY_NoSymbol;
+}
+
+/* Parse modifier string like "super+shift" */
+static unsigned int config_parse_modifiers(const char *mods_str)
+{
+	unsigned int mods = 0;
+	char *copy = config_strdup(mods_str);
+	char *saveptr, *tok;
+
+	for (tok = strtok_r(copy, "+", &saveptr); tok; tok = strtok_r(NULL, "+", &saveptr)) {
+		config_trim(tok);
+		if (strcasecmp(tok, "super") == 0 || strcasecmp(tok, "logo") == 0 || strcasecmp(tok, "mod4") == 0)
+			mods |= WLR_MODIFIER_LOGO;
+		else if (strcasecmp(tok, "alt") == 0 || strcasecmp(tok, "mod1") == 0)
+			mods |= WLR_MODIFIER_ALT;
+		else if (strcasecmp(tok, "ctrl") == 0 || strcasecmp(tok, "control") == 0)
+			mods |= WLR_MODIFIER_CTRL;
+		else if (strcasecmp(tok, "shift") == 0)
+			mods |= WLR_MODIFIER_SHIFT;
+		else if (strcasecmp(tok, "mod") == 0)
+			mods |= modkey;
+	}
+	free(copy);
+	return mods;
+}
+
+/* Stored spawn commands for runtime bindings */
+static char *runtime_spawn_cmds[MAX_KEYS];
+static int runtime_spawn_cmd_count = 0;
+
+/* ========== Runtime Monitor Configuration ========== */
+#define MAX_MONITORS 16
+
+static RuntimeMonitorConfig runtime_monitors[MAX_MONITORS];
+static int runtime_monitor_count = 0;
+
+/* Default monitor assignments by connector type priority */
+static int monitor_master_set = 0;  /* Track if master was explicitly configured */
+
+/* Function lookup for keybindings */
+typedef struct {
+	const char *name;
+	void (*func)(const Arg *);
+	int arg_type; /* 0=none, 1=int, 2=uint, 3=float, 4=spawn */
+} FuncEntry;
+
+static const FuncEntry func_table[] = {
+	{ "quit",              quit,              0 },
+	{ "killclient",        killclient,        0 },
+	{ "focusstack",        focusstack,        1 },
+	{ "incnmaster",        incnmaster,        1 },
+	{ "setmfact",          setmfact,          3 },
+	{ "zoom",              zoom,              0 },
+	{ "view",              view,              2 },
+	{ "tag",               tag,               2 },
+	{ "toggleview",        toggleview,        2 },
+	{ "toggletag",         toggletag,         2 },
+	{ "togglefloating",    togglefloating,    0 },
+	{ "togglefullscreen",  togglefullscreen,  0 },
+	{ "togglegaps",        togglegaps,        0 },
+	{ "togglestatusbar",   togglestatusbar,   0 },
+	{ "htpc_mode_toggle",  htpc_mode_toggle,  0 },
+	{ "focusmon",          focusmon,          1 },
+	{ "tagmon",            tagmon,            1 },
+	{ "setlayout",         setlayout,         0 },
+	{ "spawn",             spawn,             4 },
+	{ "modal_show",        modal_show,        0 },
+	{ "modal_show_files",  modal_show_files,  0 },
+	{ "modal_show_git",    modal_show_git,    0 },
+	{ "nixpkgs_show",      nixpkgs_show,      0 },
+	{ "focusdir",          focusdir,          2 },
+	{ "swapclients",       swapclients,       1 },
+	{ "setratio_h",        setratio_h,        3 },
+	{ "setratio_v",        setratio_v,        3 },
+	{ "rotate_clients",    rotate_clients,    1 },
+	{ "warptomonitor",     warptomonitor,     1 },
+	{ "tagtomonitornum",   tagtomonitornum,   2 },
+	{ "chvt",              chvt,              2 },
+	{ NULL, NULL, 0 }
+};
+
+/* Parse a single keybinding line: bind = mod+key action [arg] */
+static int config_parse_binding(const char *line)
+{
+	char mods_key[128], action[128], arg_str[256];
+	char *plus, *mods_str, *key_str;
+	unsigned int mods;
+	xkb_keysym_t keysym;
+	const FuncEntry *fe;
+	Key *k;
+	int n;
+
+	if (runtime_keys_count >= MAX_KEYS) return 0;
+
+	/* Parse: mods+key action [arg] */
+	arg_str[0] = '\0';
+	n = sscanf(line, "%127s %127s %255[^\n]", mods_key, action, arg_str);
+	if (n < 2) return 0;
+
+	/* Split mods+key */
+	plus = strrchr(mods_key, '+');
+	if (plus) {
+		*plus = '\0';
+		mods_str = mods_key;
+		key_str = plus + 1;
+	} else {
+		mods_str = "";
+		key_str = mods_key;
+	}
+
+	/* Parse modifiers */
+	mods = config_parse_modifiers(mods_str);
+
+	/* Parse key */
+	keysym = config_parse_keysym(key_str);
+	if (keysym == XKB_KEY_NoSymbol) {
+		wlr_log(WLR_ERROR, "Unknown key: %s", key_str);
+		return 0;
+	}
+
+	/* Find function */
+	for (fe = func_table; fe->name; fe++) {
+		if (strcasecmp(action, fe->name) == 0) break;
+	}
+	if (!fe->name) {
+		wlr_log(WLR_ERROR, "Unknown action: %s", action);
+		return 0;
+	}
+
+	/* Add keybinding */
+	k = &runtime_keys[runtime_keys_count];
+	k->mod = mods;
+	k->keysym = keysym;
+	k->func = fe->func;
+
+	/* Parse argument - cast away const to set the value */
+	config_trim(arg_str);
+	{
+		Arg *argp = (Arg *)&k->arg;
+		switch (fe->arg_type) {
+		case 0: /* none */
+			argp->i = 0;
+			break;
+		case 1: /* int */
+			argp->i = atoi(arg_str);
+			break;
+		case 2: /* uint */
+			if (strcmp(arg_str, "all") == 0 || strcmp(arg_str, "~0") == 0)
+				argp->ui = ~0u;
+			else if (strcasecmp(arg_str, "up") == 0)
+				argp->ui = DIR_UP;
+			else if (strcasecmp(arg_str, "down") == 0)
+				argp->ui = DIR_DOWN;
+			else if (strcasecmp(arg_str, "left") == 0)
+				argp->ui = DIR_LEFT;
+			else if (strcasecmp(arg_str, "right") == 0)
+				argp->ui = DIR_RIGHT;
+			else
+				argp->ui = (unsigned int)atoi(arg_str);
+			break;
+		case 3: /* float */
+			argp->f = (float)atof(arg_str);
+			break;
+		case 4: /* spawn */
+			if (runtime_spawn_cmd_count < MAX_KEYS) {
+				runtime_spawn_cmds[runtime_spawn_cmd_count] = config_strdup(arg_str);
+				argp->v = runtime_spawn_cmds[runtime_spawn_cmd_count];
+				runtime_spawn_cmd_count++;
+			}
+			break;
+		}
+	}
+
+	runtime_keys_count++;
+	return 1;
+}
+
+/* Parse monitor position string */
+static MonitorPosition config_parse_monitor_position(const char *pos)
+{
+	if (!pos || !*pos) return MON_POS_AUTO;
+	if (strcasecmp(pos, "master") == 0 || strcasecmp(pos, "primary") == 0 || strcasecmp(pos, "1") == 0)
+		return MON_POS_MASTER;
+	if (strcasecmp(pos, "left") == 0 || strcasecmp(pos, "2") == 0)
+		return MON_POS_LEFT;
+	if (strcasecmp(pos, "right") == 0 || strcasecmp(pos, "3") == 0)
+		return MON_POS_RIGHT;
+	if (strcasecmp(pos, "top-left") == 0 || strcasecmp(pos, "topleft") == 0 || strcasecmp(pos, "4") == 0)
+		return MON_POS_TOP_LEFT;
+	if (strcasecmp(pos, "top-right") == 0 || strcasecmp(pos, "topright") == 0 || strcasecmp(pos, "5") == 0)
+		return MON_POS_TOP_RIGHT;
+	if (strcasecmp(pos, "bottom-left") == 0 || strcasecmp(pos, "bottomleft") == 0)
+		return MON_POS_BOTTOM_LEFT;
+	if (strcasecmp(pos, "bottom-right") == 0 || strcasecmp(pos, "bottomright") == 0)
+		return MON_POS_BOTTOM_RIGHT;
+	if (strcasecmp(pos, "auto") == 0)
+		return MON_POS_AUTO;
+	return MON_POS_AUTO;
+}
+
+/* Parse transform string */
+static int config_parse_transform(const char *str)
+{
+	if (!str || !*str || strcasecmp(str, "normal") == 0 || strcasecmp(str, "0") == 0)
+		return WL_OUTPUT_TRANSFORM_NORMAL;
+	if (strcasecmp(str, "90") == 0 || strcasecmp(str, "rotate-90") == 0)
+		return WL_OUTPUT_TRANSFORM_90;
+	if (strcasecmp(str, "180") == 0 || strcasecmp(str, "rotate-180") == 0)
+		return WL_OUTPUT_TRANSFORM_180;
+	if (strcasecmp(str, "270") == 0 || strcasecmp(str, "rotate-270") == 0)
+		return WL_OUTPUT_TRANSFORM_270;
+	if (strcasecmp(str, "flipped") == 0)
+		return WL_OUTPUT_TRANSFORM_FLIPPED;
+	if (strcasecmp(str, "flipped-90") == 0)
+		return WL_OUTPUT_TRANSFORM_FLIPPED_90;
+	if (strcasecmp(str, "flipped-180") == 0)
+		return WL_OUTPUT_TRANSFORM_FLIPPED_180;
+	if (strcasecmp(str, "flipped-270") == 0)
+		return WL_OUTPUT_TRANSFORM_FLIPPED_270;
+	return WL_OUTPUT_TRANSFORM_NORMAL;
+}
+
+/* Parse monitor configuration line:
+ * monitor = name position [WxH@Hz] [scale=X] [transform=X] [mfact=X] [nmaster=X] [disabled]
+ * Examples:
+ *   monitor = HDMI-A-1 master
+ *   monitor = DP-1 left 1920x1080@144 scale=1.0
+ *   monitor = eDP-1 master 2560x1440@60 scale=1.5
+ *   monitor = * auto
+ */
+static int config_parse_monitor(const char *line)
+{
+	RuntimeMonitorConfig *mon;
+	char name[64], pos_str[32], rest[256];
+	char *token, *saveptr, *rest_copy;
+	int n;
+
+	if (runtime_monitor_count >= MAX_MONITORS) {
+		wlr_log(WLR_ERROR, "Too many monitor configurations (max %d)", MAX_MONITORS);
+		return 0;
+	}
+
+	/* Parse: name position [rest...] */
+	rest[0] = '\0';
+	n = sscanf(line, "%63s %31s %255[^\n]", name, pos_str, rest);
+	if (n < 2) {
+		wlr_log(WLR_ERROR, "Invalid monitor config: %s", line);
+		return 0;
+	}
+
+	mon = &runtime_monitors[runtime_monitor_count];
+	memset(mon, 0, sizeof(*mon));
+	strncpy(mon->name, name, sizeof(mon->name) - 1);
+	mon->position = config_parse_monitor_position(pos_str);
+	mon->width = 0;      /* 0 = auto */
+	mon->height = 0;
+	mon->refresh = 0;    /* 0 = auto */
+	mon->scale = 1.0f;
+	mon->mfact = 0.55f;
+	mon->nmaster = 1;
+	mon->enabled = 1;
+	mon->transform = WL_OUTPUT_TRANSFORM_NORMAL;
+
+	if (mon->position == MON_POS_MASTER)
+		monitor_master_set = 1;
+
+	/* Parse optional parameters from rest */
+	if (rest[0]) {
+		rest_copy = config_strdup(rest);
+		if (rest_copy) {
+			for (token = strtok_r(rest_copy, " \t", &saveptr); token; token = strtok_r(NULL, " \t", &saveptr)) {
+				/* Check for WxH or WxH@Hz format */
+				int w, h;
+				float hz;
+				if (sscanf(token, "%dx%d@%f", &w, &h, &hz) == 3) {
+					mon->width = w;
+					mon->height = h;
+					mon->refresh = hz;
+				} else if (sscanf(token, "%dx%d", &w, &h) == 2) {
+					mon->width = w;
+					mon->height = h;
+				} else if (strncasecmp(token, "scale=", 6) == 0) {
+					mon->scale = (float)atof(token + 6);
+					if (mon->scale < 0.5f) mon->scale = 0.5f;
+					if (mon->scale > 4.0f) mon->scale = 4.0f;
+				} else if (strncasecmp(token, "transform=", 10) == 0) {
+					mon->transform = config_parse_transform(token + 10);
+				} else if (strncasecmp(token, "mfact=", 6) == 0) {
+					mon->mfact = (float)atof(token + 6);
+					if (mon->mfact < 0.1f) mon->mfact = 0.1f;
+					if (mon->mfact > 0.9f) mon->mfact = 0.9f;
+				} else if (strncasecmp(token, "nmaster=", 8) == 0) {
+					mon->nmaster = atoi(token + 8);
+					if (mon->nmaster < 1) mon->nmaster = 1;
+				} else if (strcasecmp(token, "disabled") == 0 || strcasecmp(token, "off") == 0) {
+					mon->enabled = 0;
+				}
+			}
+			free(rest_copy);
+		}
+	}
+
+	wlr_log(WLR_INFO, "Monitor config: %s at %s (%dx%d@%.2f scale=%.2f)",
+		mon->name,
+		pos_str,
+		mon->width, mon->height, mon->refresh, mon->scale);
+
+	runtime_monitor_count++;
+	return 1;
+}
+
+/* Find runtime config for a monitor by name */
+static RuntimeMonitorConfig *find_monitor_config(const char *name)
+{
+	int i;
+	for (i = 0; i < runtime_monitor_count; i++) {
+		/* Support wildcards: "*" matches all, "DP-*" matches DP-1, DP-2, etc. */
+		const char *pattern = runtime_monitors[i].name;
+		if (strcmp(pattern, "*") == 0)
+			return &runtime_monitors[i];
+		if (strchr(pattern, '*')) {
+			/* Simple prefix wildcard: "DP-*" */
+			size_t prefix_len = strchr(pattern, '*') - pattern;
+			if (strncmp(name, pattern, prefix_len) == 0)
+				return &runtime_monitors[i];
+		} else if (strcmp(name, pattern) == 0) {
+			return &runtime_monitors[i];
+		}
+	}
+	return NULL;
+}
+
+/* Get monitor connector type priority (lower = higher priority for master) */
+static int get_connector_priority(const char *name)
+{
+	/* Priority: HDMI > DP > eDP > others */
+	if (strncmp(name, "HDMI", 4) == 0) return 1;
+	if (strncmp(name, "DP-", 3) == 0) return 2;
+	if (strncmp(name, "eDP", 3) == 0) return 3;
+	if (strncmp(name, "VGA", 3) == 0) return 4;
+	if (strncmp(name, "DVI", 3) == 0) return 5;
+	return 10;
+}
+
+/* Calculate monitor position based on slot and other monitors */
+static void calculate_monitor_position(Monitor *m, RuntimeMonitorConfig *cfg, int *out_x, int *out_y)
+{
+	Monitor *other;
+	int master_x = 0, master_y = 0, master_w = 1920, master_h = 1080;
+	int left_x = 0, left_w = 1920;
+	int right_x = 0;
+
+	/* Find master monitor dimensions for positioning */
+	wl_list_for_each(other, &mons, link) {
+		RuntimeMonitorConfig *other_cfg = find_monitor_config(other->wlr_output->name);
+		if (other_cfg && other_cfg->position == MON_POS_MASTER) {
+			master_x = other->m.x;
+			master_y = other->m.y;
+			master_w = other->m.width > 0 ? other->m.width : 1920;
+			master_h = other->m.height > 0 ? other->m.height : 1080;
+			break;
+		}
+	}
+
+	/* Find left monitor for top-left positioning */
+	wl_list_for_each(other, &mons, link) {
+		RuntimeMonitorConfig *other_cfg = find_monitor_config(other->wlr_output->name);
+		if (other_cfg && other_cfg->position == MON_POS_LEFT) {
+			left_x = other->m.x;
+			left_w = other->m.width > 0 ? other->m.width : 1920;
+			break;
+		}
+	}
+
+	/* Find right monitor x position for top-right positioning */
+	wl_list_for_each(other, &mons, link) {
+		RuntimeMonitorConfig *other_cfg = find_monitor_config(other->wlr_output->name);
+		if (other_cfg && other_cfg->position == MON_POS_RIGHT) {
+			right_x = other->m.x;
+			break;
+		}
+	}
+
+	/* Get this monitor's dimensions */
+	int my_w = m->m.width > 0 ? m->m.width : (cfg->width > 0 ? cfg->width : 1920);
+	int my_h = m->m.height > 0 ? m->m.height : (cfg->height > 0 ? cfg->height : 1080);
+
+	switch (cfg->position) {
+	case MON_POS_MASTER:
+		*out_x = 0;
+		*out_y = 0;
+		break;
+	case MON_POS_LEFT:
+		*out_x = master_x - my_w;
+		*out_y = master_y;
+		break;
+	case MON_POS_RIGHT:
+		*out_x = master_x + master_w;
+		*out_y = master_y;
+		break;
+	case MON_POS_TOP_LEFT:
+		*out_x = left_x;
+		*out_y = master_y - my_h;
+		break;
+	case MON_POS_TOP_RIGHT:
+		*out_x = right_x > 0 ? right_x : (master_x + master_w);
+		*out_y = master_y - my_h;
+		break;
+	case MON_POS_BOTTOM_LEFT:
+		*out_x = left_x;
+		*out_y = master_y + master_h;
+		break;
+	case MON_POS_BOTTOM_RIGHT:
+		*out_x = right_x > 0 ? right_x : (master_x + master_w);
+		*out_y = master_y + master_h;
+		break;
+	case MON_POS_AUTO:
+	default:
+		*out_x = -1;  /* Auto-placement */
+		*out_y = -1;
+		break;
+	}
+}
+
+static void
+load_config(void)
+{
+	const char *home = getenv("HOME");
+	const char *config_home = getenv("XDG_CONFIG_HOME");
+	char config_path[PATH_MAX];
+	char fallback_path[PATH_MAX];
+	FILE *f;
+	char line[1024];
+	const char *xdg_data_dirs;
+	char *data_dirs_copy, *dir, *saveptr;
+	int found_fallback = 0;
+
+	/* Try XDG_CONFIG_HOME first, then ~/.config */
+	if (config_home && *config_home) {
+		snprintf(config_path, sizeof(config_path), "%s/nixlytile/config.conf", config_home);
+	} else if (home) {
+		snprintf(config_path, sizeof(config_path), "%s/.config/nixlytile/config.conf", home);
+	} else {
+		return; /* No home directory, use defaults */
+	}
+
+	/* Cache the config path for hot-reload watching */
+	strncpy(config_path_cached, config_path, sizeof(config_path_cached) - 1);
+
+	f = fopen(config_path, "r");
+	if (!f) {
+		/* Try to find config.conf.example in XDG_DATA_DIRS */
+		xdg_data_dirs = getenv("XDG_DATA_DIRS");
+		if (xdg_data_dirs && *xdg_data_dirs) {
+			data_dirs_copy = strdup(xdg_data_dirs);
+			if (data_dirs_copy) {
+				for (dir = strtok_r(data_dirs_copy, ":", &saveptr); dir; dir = strtok_r(NULL, ":", &saveptr)) {
+					snprintf(fallback_path, sizeof(fallback_path), "%s/dwl/config.conf.example", dir);
+					f = fopen(fallback_path, "r");
+					if (f) {
+						found_fallback = 1;
+						strncpy(config_path_cached, fallback_path, sizeof(config_path_cached) - 1);
+						wlr_log(WLR_INFO, "Using fallback config from %s", fallback_path);
+						break;
+					}
+				}
+				free(data_dirs_copy);
+			}
+		}
+		if (!found_fallback) {
+			wlr_log(WLR_INFO, "No config file found at %s, using defaults", config_path);
+			return;
+		}
+	} else {
+		wlr_log(WLR_INFO, "Loading config from %s", config_path);
+	}
+
+	while (fgets(line, sizeof(line), f)) {
+		char *p = line;
+		char *key, *value, *eq;
+
+		/* Skip leading whitespace */
+		while (*p && isspace((unsigned char)*p)) p++;
+
+		/* Skip empty lines and comments */
+		if (!*p || *p == '#' || *p == ';') continue;
+
+		/* Remove trailing newline/whitespace */
+		config_trim(p);
+
+		/* Find '=' separator */
+		eq = strchr(p, '=');
+		if (!eq) continue;
+
+		*eq = '\0';
+		key = p;
+		value = eq + 1;
+
+		config_trim(key);
+		config_trim(value);
+
+		/* Remove quotes from value if present */
+		if (*value == '"' || *value == '\'') {
+			char quote = *value++;
+			char *end = strrchr(value, quote);
+			if (end) *end = '\0';
+		}
+
+		/* Handle special config types */
+		if (strcmp(key, "bind") == 0) {
+			config_parse_binding(value);
+		} else if (strcmp(key, "monitor") == 0) {
+			config_parse_monitor(value);
+		} else if (*key && *value) {
+			config_set_value(key, value);
+		}
+	}
+
+	fclose(f);
+}
+
+/* Initialize keybindings - uses runtime keys if any were loaded, otherwise defaults */
+static void
+init_keybindings(void)
+{
+	if (runtime_keys_count > 0) {
+		keys = runtime_keys;
+		keys_count = runtime_keys_count;
+		wlr_log(WLR_INFO, "Using %zu custom keybindings from config", keys_count);
+	} else {
+		keys = default_keys;
+		keys_count = LENGTH(default_keys);
+		wlr_log(WLR_INFO, "Using %zu default keybindings", keys_count);
+	}
+}
+
+/* Reset runtime config state before reload */
+static void
+reset_runtime_config(void)
+{
+	int i;
+
+	/* Free allocated spawn commands */
+	for (i = 0; i < runtime_spawn_cmd_count; i++) {
+		if (runtime_spawn_cmds[i]) {
+			free(runtime_spawn_cmds[i]);
+			runtime_spawn_cmds[i] = NULL;
+		}
+	}
+	runtime_spawn_cmd_count = 0;
+
+	/* Reset keybindings */
+	runtime_keys_count = 0;
+	memset(runtime_keys, 0, sizeof(runtime_keys));
+
+	/* Reset monitor config */
+	runtime_monitor_count = 0;
+	monitor_master_set = 0;
+	memset(runtime_monitors, 0, sizeof(runtime_monitors));
+}
+
+/* Reload config file and apply changes */
+static void
+reload_config(void)
+{
+	Monitor *m;
+	int i;
+
+	wlr_log(WLR_INFO, "Hot-reloading config file...");
+
+	/* Reset runtime state */
+	reset_runtime_config();
+
+	/* Re-load config */
+	load_config();
+
+	/* Re-initialize keybindings */
+	init_keybindings();
+
+	/* Update visual settings on all monitors */
+	wl_list_for_each(m, &mons, link) {
+		/* Update gaps setting */
+		m->gaps = gaps;
+
+		/* Update border width on all clients */
+		Client *c;
+		wl_list_for_each(c, &clients, link) {
+			if (c->mon == m && !c->isfullscreen)
+				c->bw = borderpx;
+		}
+
+		/* Re-arrange with new settings (this also updates statusbar) */
+		arrange(m);
+	}
+
+	/* Update root background color */
+	if (root_bg)
+		wlr_scene_rect_set_color(root_bg, rootcolor);
+
+	/* Update locked background if exists */
+	if (locked_bg)
+		wlr_scene_rect_set_color(locked_bg, (float[]){0.1f, 0.1f, 0.1f, 1.0f});
+
+	/* Reload font if needed */
+	if (statusfont.font) {
+		struct StatusFont new_font = {0};
+		if (loadstatusfont()) {
+			/* Font loaded successfully, update tray icons */
+			tray_update_icons_text();
+		}
+		(void)new_font;
+	}
+
+	/* Force redraw of all monitors */
+	wl_list_for_each(m, &mons, link) {
+		if (m->wlr_output)
+			wlr_output_schedule_frame(m->wlr_output);
+	}
+
+	wlr_log(WLR_INFO, "Config reload complete: %zu keybindings, %d monitors configured",
+		keys_count, runtime_monitor_count);
+}
+
+/* Timer callback to re-add config watch */
+static int
+config_rewatch_timer_cb(void *data)
+{
+	(void)data;
+
+	if (config_needs_rewatch && config_path_cached[0]) {
+		config_watch_wd = inotify_add_watch(config_inotify_fd,
+			config_path_cached, IN_MODIFY | IN_CLOSE_WRITE | IN_MOVED_TO | IN_DELETE_SELF | IN_MOVE_SELF);
+		config_needs_rewatch = 0;
+		reload_config();
+	}
+
+	return 0;
+}
+
+/* Handle inotify events for config file changes */
+static int
+config_watch_handler(int fd, uint32_t mask, void *data)
+{
+	char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+	const struct inotify_event *event;
+	ssize_t len;
+	char *ptr;
+	int should_reload = 0;
+
+	(void)mask;
+	(void)data;
+
+	while ((len = read(fd, buf, sizeof(buf))) > 0) {
+		for (ptr = buf; ptr < buf + len; ptr += sizeof(struct inotify_event) + event->len) {
+			event = (const struct inotify_event *)ptr;
+
+			/* Check for modify, close_write, or move events */
+			if (event->mask & (IN_MODIFY | IN_CLOSE_WRITE | IN_MOVED_TO)) {
+				should_reload = 1;
+			}
+
+			/* If the file was deleted or moved away, re-add watch */
+			if (event->mask & (IN_DELETE_SELF | IN_MOVE_SELF)) {
+				if (config_watch_wd >= 0) {
+					inotify_rm_watch(config_inotify_fd, config_watch_wd);
+					config_watch_wd = -1;
+				}
+				/* Schedule timer to re-add watch (non-blocking) */
+				config_needs_rewatch = 1;
+				if (config_rewatch_timer)
+					wl_event_source_timer_update(config_rewatch_timer, 100); /* 100ms */
+				/* Don't reload now, timer will do it */
+				continue;
+			}
+		}
+	}
+
+	if (should_reload)
+		reload_config();
+
+	return 0;
+}
+
+/* Set up inotify watch for config file */
+static void
+setup_config_watch(void)
+{
+	char dir_path[PATH_MAX];
+	char *slash;
+
+	if (!config_path_cached[0]) {
+		wlr_log(WLR_INFO, "No config path to watch");
+		return;
+	}
+
+	/* Create inotify instance */
+	config_inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+	if (config_inotify_fd < 0) {
+		wlr_log(WLR_ERROR, "Failed to create inotify instance: %s", strerror(errno));
+		return;
+	}
+
+	/* Watch the config file for changes */
+	config_watch_wd = inotify_add_watch(config_inotify_fd, config_path_cached,
+		IN_MODIFY | IN_CLOSE_WRITE | IN_MOVED_TO | IN_DELETE_SELF | IN_MOVE_SELF);
+
+	if (config_watch_wd < 0) {
+		/* File doesn't exist yet, watch the directory instead */
+		strncpy(dir_path, config_path_cached, sizeof(dir_path) - 1);
+		slash = strrchr(dir_path, '/');
+		if (slash) {
+			*slash = '\0';
+			/* Create directory if it doesn't exist */
+			mkdir(dir_path, 0755);
+			config_watch_wd = inotify_add_watch(config_inotify_fd, dir_path,
+				IN_CREATE | IN_MOVED_TO);
+		}
+		if (config_watch_wd < 0) {
+			wlr_log(WLR_ERROR, "Failed to watch config: %s", strerror(errno));
+			close(config_inotify_fd);
+			config_inotify_fd = -1;
+			return;
+		}
+		wlr_log(WLR_INFO, "Watching config directory for file creation: %s", dir_path);
+	} else {
+		wlr_log(WLR_INFO, "Watching config file for changes: %s", config_path_cached);
+	}
+
+	/* Add to event loop */
+	config_watch_source = wl_event_loop_add_fd(event_loop, config_inotify_fd,
+		WL_EVENT_READABLE, config_watch_handler, NULL);
+
+	/* Create timer for delayed re-watch */
+	config_rewatch_timer = wl_event_loop_add_timer(event_loop, config_rewatch_timer_cb, NULL);
+	if (!config_watch_source) {
+		wlr_log(WLR_ERROR, "Failed to add config watcher to event loop");
+		close(config_inotify_fd);
+		config_inotify_fd = -1;
+	}
+}
+
 static void
 ensure_shell_env(void)
 {
@@ -19344,6 +24736,7 @@ setup(void)
 	status_cpu_timer = wl_event_loop_add_timer(event_loop, updatestatuscpu, NULL);
 	status_hover_timer = wl_event_loop_add_timer(event_loop, updatehoverfade, NULL);
 	cache_update_timer = wl_event_loop_add_timer(event_loop, cache_update_timer_cb, NULL);
+	nixpkgs_cache_timer = wl_event_loop_add_timer(event_loop, nixpkgs_cache_timer_cb, NULL);
 	tray_init();
 	fcft_initialized = fcft_init(FCFT_LOG_COLORIZE_NEVER, 0, FCFT_LOG_CLASS_ERROR);
 	if (!fcft_initialized)
@@ -19637,12 +25030,40 @@ spawn(const Arg *arg)
 		dup2(STDERR_FILENO, STDOUT_FILENO);
 		setsid();
 
-		/* Set dedicated GPU environment for GPU-intensive programs */
-		if (should_use_dgpu(((char **)arg->v)[0]))
-			set_dgpu_env();
+		const char *cmd = (const char *)arg->v;
+		if (!cmd || !cmd[0]) {
+			_exit(1);
+		}
 
-		execvp(((char **)arg->v)[0], (char **)arg->v);
-		die("dwl: execvp %s failed:", ((char **)arg->v)[0]);
+		/* Detect if arg->v is a char** array (default keys) or string (runtime config).
+		 * Runtime config strings are stored in runtime_spawn_cmds[] which are heap-allocated.
+		 * Default keys use static char* arrays.
+		 * We can check if the pointer is within runtime_spawn_cmds range. */
+		int is_runtime_string = 0;
+		for (int i = 0; i < runtime_spawn_cmd_count; i++) {
+			if (arg->v == runtime_spawn_cmds[i]) {
+				is_runtime_string = 1;
+				break;
+			}
+		}
+
+		if (!is_runtime_string) {
+			/* Default keybindings: arg->v is char** array */
+			char **argv = (char **)arg->v;
+			if (argv[0] && argv[0][0] != '\0') {
+				if (should_use_dgpu(argv[0]))
+					set_dgpu_env();
+				execvp(argv[0], argv);
+				/* If execvp fails, die */
+				die("dwl: execvp %s failed:", argv[0]);
+			}
+		}
+
+		/* Runtime config: arg->v is a string, execute via shell */
+		if (should_use_dgpu(cmd))
+			set_dgpu_env();
+		execl("/bin/sh", "sh", "-c", cmd, NULL);
+		die("dwl: execl %s failed:", cmd);
 	}
 }
 
@@ -19876,6 +25297,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 	wlr_scene_node_destroy(&c->scene->node);
 	printstatus();
 	motionnotify(0, NULL, 0, 0, 0, 0);
+	update_game_mode();
 }
 
 void
@@ -20295,6 +25717,22 @@ main(int argc, char *argv[])
 	if (optind < argc)
 		goto usage;
 
+	/* Load runtime config before applying defaults */
+	load_config();
+	init_keybindings();
+
+	/* Build autostart command with wallpaper path if not overridden */
+	{
+		char expanded_wp[PATH_MAX];
+		config_expand_path(wallpaper_path, expanded_wp, sizeof(expanded_wp));
+		/* Only rebuild if autostart_cmd still has the default wallpaper reference */
+		if (strstr(autostart_cmd, ".nixlyos/wallpapers/beach.jpg")) {
+			snprintf(autostart_cmd, sizeof(autostart_cmd),
+				"eval $(gnome-keyring-daemon --start --components=secrets,ssh,pkcs11) & "
+				"thunar --daemon & swaybg -i \"%s\" -m fill <&-", expanded_wp);
+		}
+	}
+
 	if (!startup_cmd)
 		startup_cmd = autostart_cmd;
 
@@ -20302,9 +25740,18 @@ main(int argc, char *argv[])
 	if (!getenv("XDG_RUNTIME_DIR"))
 		die("XDG_RUNTIME_DIR must be set");
 	setup();
+	setup_config_watch();
+	gamepad_setup();
+	bt_controller_setup();
+
+	/* Enter HTPC mode at startup if configured */
+	if (htpc_mode_autostart)
+		htpc_mode_enter();
+
 	git_cache_update_start();
 	file_cache_update_start();
 	schedule_cache_update_timer();
+	schedule_nixpkgs_cache_timer();
 	run(startup_cmd);
 	cleanup();
 	return EXIT_SUCCESS;

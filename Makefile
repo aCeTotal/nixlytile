@@ -73,6 +73,9 @@ install: dwl
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/dwl
 	mkdir -p $(DESTDIR)$(DATADIR)/dwl/images
 	cp -r images/svg $(DESTDIR)$(DATADIR)/dwl/images/
+	mkdir -p $(DESTDIR)$(DATADIR)/dwl
+	cp -f config.conf.example $(DESTDIR)$(DATADIR)/dwl/config.conf.example
+	chmod 644 $(DESTDIR)$(DATADIR)/dwl/config.conf.example
 	mkdir -p $(DESTDIR)$(MANDIR)/man1
 	cp -f dwl.1 $(DESTDIR)$(MANDIR)/man1
 	chmod 644 $(DESTDIR)$(MANDIR)/man1/dwl.1

@@ -1,0 +1,417 @@
+# Nixlytile Configuration File
+# Place this file at ~/.config/nixlytile/config.conf
+# Lines starting with # are comments
+# Format: key = value
+
+# ================= APPEARANCE =================
+
+# Focus follows mouse (1 = enabled, 0 = disabled)
+sloppyfocus = 1
+
+# Smart gaps - disable outer gap when only one window (1 = enabled)
+smartgaps = 0
+
+# Enable gaps between windows (1 = enabled)
+gaps = 1
+
+# Gap size in pixels between windows
+gappx = 5
+
+# Window border width in pixels
+borderpx = 1
+
+# Lock cursor during resize (1 = lock, 0 = free)
+lock_cursor = 0
+
+# ================= HTPC MODE =================
+# HTPC mode optimizes for controller/TV usage by hiding the statusbar,
+# killing all windows, and disabling background tasks to minimize
+# CPU, IO, and RAM load.
+
+# Enable HTPC mode features (1 = enabled, 0 = disabled)
+htpc_mode_enabled = 1
+
+# Start in HTPC mode when dwl launches (1 = enabled)
+htpc_mode_autostart = 0
+
+# Auto-enter HTPC mode when a game controller connects (1 = enabled)
+htpc_mode_auto_on_controller = 1
+
+# Wallpaper to display in HTPC mode (supports ~ and $HOME)
+htpc_wallpaper = ~/.nixlyos/wallpapers/htpc.jpg
+
+# ================= COLORS =================
+# Colors are in hex format: #RRGGBBAA or #RRGGBB
+# Examples: #FF0000FF (red, full opacity), #00FF00 (green)
+
+# Root/desktop background color
+rootcolor = #222222FF
+
+# Unfocused window border color
+bordercolor = #444444FF
+
+# Focused window border color
+focuscolor = #005577FF
+
+# Urgent window border color
+urgentcolor = #FF0000FF
+
+# Fullscreen background color
+fullscreen_bg = #1A1A1AFF
+
+# ================= STATUSBAR =================
+
+# Statusbar height in pixels
+statusbar_height = 26
+
+# Gap at top of statusbar
+statusbar_top_gap = 3
+
+# Spacing between status modules
+statusbar_module_spacing = 10
+
+# Padding inside status modules
+statusbar_module_padding = 8
+
+# Gap between icon and text in status modules
+statusbar_icon_text_gap = 6
+
+# Statusbar foreground (text) color
+statusbar_fg = #FFFFFFFF
+
+# Statusbar background color (semi-transparent)
+statusbar_bg = #00000016
+
+# Popup background color
+statusbar_popup_bg = #00000080
+
+# Muted volume indicator color
+statusbar_volume_muted_fg = #FF4C4CFF
+
+# Muted microphone indicator color
+statusbar_mic_muted_fg = #FF4C4CFF
+
+# Workspace tag background
+statusbar_tag_bg = #00000033
+
+# Active workspace tag background
+statusbar_tag_active_bg = #3399FF44
+
+# Hovered workspace tag background
+statusbar_tag_hover_bg = #66B3FFAA
+
+# Hover fade animation duration (0 = instant)
+statusbar_hover_fade_ms = 0
+
+# Workspace tag padding
+statusbar_workspace_padding = 8
+
+# Workspace tag spacing
+statusbar_workspace_spacing = 4
+
+# Thumbnail preview height
+statusbar_thumb_height = 40
+
+# Thumbnail preview gap
+statusbar_thumb_gap = 2
+
+# Thumbnail window color
+statusbar_thumb_window = #FFFFFF55
+
+# Force RGBA decode for tray icons (workaround for some apps)
+statusbar_tray_force_rgba = 0
+
+# Statusbar font (comma-separated for fallbacks)
+# Format: "family:size=N:weight=Bold"
+statusbar_font = "monospace:size=16:weight=Bold, monospace:size=16"
+
+# Font letter spacing adjustment
+statusbar_font_spacing = 0
+
+# Force font color rendering (1 = enabled)
+statusbar_font_force_color = 1
+
+# ================= KEYBOARD =================
+
+# Key repeat delay in milliseconds
+repeat_delay = 250
+
+# Key repeat rate (characters per second)
+repeat_rate = 60
+
+# ================= TRACKPAD/MOUSE =================
+
+# Enable tap to click (1 = enabled)
+tap_to_click = 1
+
+# Enable tap and drag (1 = enabled)
+tap_and_drag = 1
+
+# Enable drag lock (1 = enabled)
+drag_lock = 1
+
+# Enable natural scrolling (1 = enabled, reverses scroll direction)
+natural_scrolling = 0
+
+# Disable touchpad while typing (1 = enabled)
+disable_while_typing = 1
+
+# Left-handed mode (1 = enabled, swaps buttons)
+left_handed = 0
+
+# Middle button emulation (1 = enabled)
+middle_button_emulation = 0
+
+# Pointer acceleration speed (-1.0 to 1.0)
+accel_speed = 0.0
+
+# Acceleration profile: "flat" or "adaptive"
+accel_profile = adaptive
+
+# Scroll method: "none", "2fg" (two finger), "edge", "button"
+scroll_method = 2fg
+
+# Click method: "none", "button_areas", "clickfinger"
+click_method = button_areas
+
+# Tap button map: "lrm" (left/right/middle) or "lmr" (left/middle/right)
+button_map = lrm
+
+# ================= RESIZING =================
+
+# Resize factor for mouse resizing
+resize_factor = 0.0002
+
+# Minimum interval between resize updates (ms)
+resize_interval_ms = 24
+
+# Minimum pointer movement before resize (pixels)
+resize_min_pixels = 3.0
+
+# Smallest ratio change to trigger arrange
+resize_ratio_epsilon = 0.002
+
+# ================= SEARCH =================
+
+# Minimum characters before starting file search
+modal_file_search_minlen = 1
+
+# ================= WALLPAPER & STARTUP =================
+
+# Wallpaper image path (supports ~ and $HOME)
+wallpaper = ~/.nixlyos/wallpapers/beach.jpg
+
+# Custom autostart command (overrides default which includes wallpaper)
+# If you set this, wallpaper setting is ignored
+# autostart = "your-custom-startup-command &"
+
+# ================= MONITORS =================
+# Configure monitor positions, resolution, and refresh rate.
+# Format: monitor = <name> <position> [WxH@Hz] [options...]
+#
+# <name>: Output name (e.g., HDMI-A-1, DP-1, eDP-1) or pattern (DP-* matches DP-1, DP-2)
+#         Use * to match all monitors as a fallback
+#
+# <position>: Where to place the monitor:
+#   master (or 1) - Primary monitor at origin (0,0)
+#   left (or 2)   - Left of master
+#   right (or 3)  - Right of master
+#   top-left (4)  - Above left monitor
+#   top-right (5) - Above right monitor
+#   bottom-left   - Below left monitor
+#   bottom-right  - Below right monitor
+#   auto          - Let compositor auto-arrange
+#
+# [WxH@Hz]: Optional resolution and refresh rate (e.g., 1920x1080@144, 2560x1440@60)
+#           Omit for auto (highest resolution and refresh rate)
+#
+# [options]: Optional settings:
+#   scale=X      - Display scale factor (e.g., scale=1.5 for HiDPI)
+#   transform=X  - Rotation: normal, 90, 180, 270, flipped, flipped-90, etc.
+#   mfact=X      - Master area ratio (0.1-0.9, default 0.55)
+#   nmaster=X    - Number of master windows (default 1)
+#   disabled     - Disable this monitor
+#
+# Default behavior (when no monitors are configured):
+#   First HDMI or DP = master, second = left, third = right,
+#   fourth = top-left, fifth = top-right
+#
+# Examples:
+# monitor = HDMI-A-1 master
+# monitor = DP-1 left 2560x1440@144
+# monitor = DP-2 right 1920x1080@60 scale=1.0
+# monitor = eDP-1 master 2560x1600@120 scale=1.5
+# monitor = HDMI-A-2 top-right
+# monitor = VGA-1 auto disabled
+
+# Uncomment and adjust for your setup:
+# monitor = HDMI-A-1 master
+# monitor = DP-1 left
+# monitor = DP-2 right
+
+# ================= MODIFIER KEYS =================
+
+# Main modifier key: super (Windows key), alt, ctrl, shift
+modkey = super
+
+# Monitor navigation modifier key
+monitorkey = ctrl
+
+# ================= SPAWN COMMANDS =================
+# These define default programs. Note: these are NOT automatically bound
+# to keybindings - they are just convenience variables for the defaults.
+# The actual keybindings are defined in the KEYBINDINGS section below
+# using "bind = ... spawn <program>".
+
+# Default terminal
+terminal = foot
+
+# Alternative terminal (for Shift+Enter)
+terminal_alt = alacritty
+
+# Web browser
+browser = brave
+
+# File manager
+filemanager = thunar
+
+# Application launcher
+launcher = wmenu-run
+
+# ================= KEYBINDINGS =================
+# Format: bind = modifiers+key action [argument]
+#
+# Modifiers: super, alt, ctrl, shift, mod (uses modkey)
+# You can combine modifiers with +, e.g.: mod+shift+Return
+#
+# Common keys: Return, space, Tab, Escape, BackSpace, Delete
+#              Up, Down, Left, Right, Home, End, Page_Up, Page_Down
+#              F1-F12, Print, plus letter/number keys (a-z, 0-9)
+#
+# Actions and their arguments:
+#   quit                    - Exit compositor
+#   killclient              - Close focused window
+#   spawn <command>         - Run shell command
+#   focusstack <+1/-1>      - Focus next/previous window
+#   incnmaster <+1/-1>      - Increase/decrease master count
+#   setmfact <+/-0.05>      - Adjust master area size
+#   zoom                    - Swap focused with master
+#   view <tag>              - Switch to tag (1-9, or 'all')
+#   tag <tag>               - Move window to tag
+#   toggleview <tag>        - Toggle tag visibility
+#   toggletag <tag>         - Toggle window's tag
+#   togglefloating          - Toggle floating mode
+#   togglefullscreen        - Toggle fullscreen
+#   togglegaps              - Toggle gaps
+#   togglestatusbar         - Toggle statusbar
+#   htpc_mode_toggle        - Toggle HTPC mode (hides statusbar, pauses background tasks)
+#   focusmon <left/right>   - Focus monitor in direction
+#   tagmon <left/right>     - Move window to monitor
+#   modal_show              - Open modal (apps tab)
+#   modal_show_files        - Open modal directly in file search
+#   modal_show_git          - Open modal directly in git projects
+#   nixpkgs_show            - Open nixpkgs package installer
+#   focusdir <up/down/left/right>     - Focus window in direction
+#   swapclients <up/down/left/right>  - Swap window in direction
+#   setratio_h <+/-0.025>   - Adjust horizontal split ratio
+#   setratio_v <+/-0.025>   - Adjust vertical split ratio
+#   rotate_clients <+1/-1>  - Rotate windows in layout
+#   warptomonitor <direction> - Move cursor to monitor
+#   chvt <1-12>             - Switch to virtual terminal
+
+# === Window management ===
+bind = mod+q killclient
+bind = mod+shift+Q quit
+bind = mod+shift+space togglefloating
+bind = mod+shift+f togglefullscreen
+bind = mod+shift+g togglegaps
+bind = mod+b togglestatusbar
+bind = mod+shift+h htpc_mode_toggle
+
+# === Focus navigation ===
+bind = mod+j focusstack +1
+bind = mod+k focusstack -1
+bind = mod+Up focusdir up
+bind = mod+Down focusdir down
+bind = mod+Left focusdir left
+bind = mod+Right focusdir right
+
+# === Window movement ===
+bind = mod+shift+Up swapclients 0
+bind = mod+shift+Down swapclients 1
+bind = mod+shift+Left swapclients 2
+bind = mod+shift+Right swapclients 3
+bind = mod+shift+J rotate_clients +1
+bind = mod+shift+K rotate_clients -1
+
+# === Layout adjustment ===
+bind = mod+h setmfact -0.05
+bind = mod+l setmfact +0.05
+bind = mod+d incnmaster -1
+bind = mod+ctrl+Left setratio_h -0.025
+bind = mod+ctrl+Right setratio_h +0.025
+bind = mod+ctrl+Up setratio_v -0.025
+bind = mod+ctrl+Down setratio_v +0.025
+bind = mod+ctrl+Return zoom
+
+# === Applications ===
+# These keybindings launch programs. The 'spawn' action runs shell commands.
+# Format: bind = modifiers+key spawn <command>
+# Commands can be simple program names or full shell commands with arguments.
+
+# Terminal emulators
+bind = mod+Return spawn alacritty
+bind = mod+shift+Return spawn foot
+
+# Application launcher / search modal
+bind = mod+p modal_show
+bind = mod+f modal_show_files
+bind = mod+g modal_show_git
+bind = mod+i nixpkgs_show
+
+# File manager
+bind = mod+e spawn thunar
+
+# Web browser
+bind = mod+BackSpace spawn brave
+
+# Example additional applications (uncomment to enable):
+# bind = mod+n spawn nm-connection-editor
+# bind = mod+v spawn pavucontrol
+# bind = mod+c spawn code
+# bind = mod+s spawn spotify
+
+# === Workspaces (tags) ===
+bind = mod+1 view 1
+bind = mod+2 view 2
+bind = mod+3 view 4
+bind = mod+4 view 8
+bind = mod+5 view 16
+bind = mod+6 view 32
+bind = mod+7 view 64
+bind = mod+8 view 128
+bind = mod+9 view 256
+bind = mod+0 view all
+
+bind = mod+shift+1 tag 1
+bind = mod+shift+2 tag 2
+bind = mod+shift+3 tag 4
+bind = mod+shift+4 tag 8
+bind = mod+shift+5 tag 16
+bind = mod+shift+6 tag 32
+bind = mod+shift+7 tag 64
+bind = mod+shift+8 tag 128
+bind = mod+shift+9 tag 256
+bind = mod+shift+0 tag all
+
+bind = mod+Tab view 0
+
+# === Monitor navigation ===
+bind = mod+comma focusmon -1
+bind = mod+period focusmon 1
+bind = mod+shift+less tagmon -1
+bind = mod+shift+greater tagmon 1
+bind = ctrl+Up warptomonitor 0
+bind = ctrl+Down warptomonitor 1
+bind = ctrl+Left warptomonitor 2
+bind = ctrl+Right warptomonitor 3
