@@ -1,0 +1,5 @@
+[Desktop Entry]
+Name=Nixlytile
+Comment=Tiling Wayland compositor
+Exec=nixlytile
+Type=Application

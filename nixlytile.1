@@ -1,9 +1,9 @@
 .Dd January 8, 2021
-.Dt DWL 1
+.Dt NIXLYTILE 1
 .Os
 .Sh NAME
-.Nm dwl
-.Nd dwm for Wayland
+.Nm nixlytile
+.Nd tiling Wayland compositor
 .Sh SYNOPSIS
 .Nm
 .Op Fl v
@@ -11,10 +11,7 @@
 .Op Fl s Ar startup command
 .Sh DESCRIPTION
 .Nm
-is a Wayland compositor based on wlroots.
-It is intended to fill the same space in the Wayland world that
-.Nm dwm
-does for X11.
+is a tiling Wayland compositor based on wlroots.
 .Pp
 When given the
 .Fl v
@@ -189,7 +186,7 @@ Prints the symbol of the current layout.
 .Ss Examples
 When there is a selected window:
 .Bd -literal -offset indent
-HDMI\-A\-1 title \(ti/source/repos/dwl > man \-l dwl.1
+HDMI\-A\-1 title \(ti/source/repos/nixlytile > man \-l nixlytile.1
 HDMI\-A\-1 appid footclient
 HDMI\-A\-1 fullscreen 0
 HDMI\-A\-1 floating 0
@@ -248,9 +245,8 @@ server.
 Start
 .Nm
 with s6 in the background:
-.Dl dwl \-s \(aqs6\-svscan <&\-\(aq
+.Dl nixlytile \-s \(aqs6\-svscan <&\-\(aq
 .Sh SEE ALSO
-.Xr dwm 1 ,
 .Xr foot 1 ,
 .Xr wmenu 1 ,
 .Xr xkeyboard-config 7

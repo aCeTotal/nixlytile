@@ -1,5 +1,5 @@
 {
-      description = "Nix dev flake for hacking on dwl with a build helper";
+      description = "Nixlytile - a tiling Wayland compositor";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -48,7 +48,7 @@
             ++ iconDeps;
 
           buildScript = pkgs.writeShellApplication {
-            name = "dwl-build";
+            name = "nixlytile-build";
             runtimeInputs = buildTools;
             text = ''
               set -euo pipefail
@@ -106,7 +106,7 @@
             libnotify          # notify-send
           ];
           defaultPackage = pkgs.stdenv.mkDerivation {
-            pname = "dwl";
+            pname = "nixlytile";
             version = "git";
             src = ./.;
 
@@ -148,23 +148,23 @@
             installPhase = ''
               runHook preInstall
               make PREFIX=$out MANDIR=$out/share/man DATADIR=$out/share install
-              wrapProgram $out/bin/dwl \
+              wrapProgram $out/bin/nixlytile \
                 --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps} \
                 --prefix XDG_DATA_DIRS : "${pkgs.papirus-icon-theme}/share:${pkgs.adwaita-icon-theme}/share:${pkgs.hicolor-icon-theme}/share:${pkgs.shared-mime-info}/share"
               runHook postInstall
             '';
 
             meta = with pkgs.lib; {
-              description = "dwm-style Wayland compositor";
-              homepage = "https://codeberg.org/dwl/dwl";
+              description = "Nixlytile - a tiling Wayland compositor";
+              homepage = "https://github.com/total/nixlytile";
               license = licenses.gpl3Plus;
               platforms = platforms.linux;
-              mainProgram = "dwl";
+              mainProgram = "nixlytile";
             };
           };
         in {
           default = defaultPackage;
-          dwl = defaultPackage;
+          nixlytile = defaultPackage;
         });
 
       devShells = forAllSystems (system:
@@ -176,7 +176,7 @@
             packages = ps.buildTools ++ [ ps.buildScript ];
             shellHook = ''
               export WLR_PKG=${ps.wlrootsPc}
-              echo "Helper: dwl-build (uses ${ps.wlrootsPc}); swaybg and seatd are available in PATH."
+              echo "Helper: nixlytile-build (uses ${ps.wlrootsPc}); swaybg and seatd are available in PATH."
             '';
           };
         });
@@ -187,7 +187,7 @@
         in {
           build = {
             type = "app";
-            program = "${ps.buildScript}/bin/dwl-build";
+            program = "${ps.buildScript}/bin/nixlytile-build";
           };
         });
     };

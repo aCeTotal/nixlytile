@@ -4,22 +4,22 @@
 include config.mk
 
 # flags for compiling
-DWLCPPFLAGS = -I. -DWLR_USE_UNSTABLE -D_POSIX_C_SOURCE=200809L \
+CPPFLAGS_EXTRA = -I. -DWLR_USE_UNSTABLE -D_POSIX_C_SOURCE=200809L \
 	-DVERSION=\"$(VERSION)\" $(XWAYLAND)
-DWLDEVCFLAGS = -g -Wpedantic -Wall -Wextra -Wdeclaration-after-statement \
+DEVCFLAGS = -g -Wpedantic -Wall -Wextra -Wdeclaration-after-statement \
 	-Wno-unused-parameter -Wshadow -Wunused-macros -Werror=strict-prototypes \
 	-Werror=implicit -Werror=return-type -Werror=incompatible-pointer-types \
 	-Wfloat-conversion
 
 # CFLAGS / LDFLAGS
 PKGS      = wayland-server xkbcommon libinput libdrm $(XLIBS) fcft pixman-1 libsystemd gdk-pixbuf-2.0 cairo librsvg-2.0
-DWLCFLAGS = `$(PKG_CONFIG) --cflags $(PKGS)` $(WLR_INCS) $(DWLCPPFLAGS) $(DWLDEVCFLAGS) $(CFLAGS)
+NLCFLAGS = `$(PKG_CONFIG) --cflags $(PKGS)` $(WLR_INCS) $(CPPFLAGS_EXTRA) $(DEVCFLAGS) $(CFLAGS)
 LDLIBS    = `$(PKG_CONFIG) --libs $(PKGS)` $(WLR_LIBS) -lm $(LIBS)
 
-all: dwl
-dwl: dwl.o util.o
-	$(CC) dwl.o util.o $(DWLCFLAGS) $(LDFLAGS) $(LDLIBS) -o $@
-dwl.o: dwl.c client.h config.h config.mk cursor-shape-v1-protocol.h \
+all: nixlytile
+nixlytile: nixlytile.o util.o
+	$(CC) nixlytile.o util.o $(NLCFLAGS) $(LDFLAGS) $(LDLIBS) -o $@
+nixlytile.o: nixlytile.c client.h config.h config.mk cursor-shape-v1-protocol.h \
 	pointer-constraints-unstable-v1-protocol.h wlr-layer-shell-unstable-v1-protocol.h \
 	wlr-output-power-management-unstable-v1-protocol.h xdg-shell-protocol.h \
 	content-type-v1-protocol.h tearing-control-v1-protocol.h
@@ -56,36 +56,36 @@ tearing-control-v1-protocol.h:
 config.h:
 	cp config.def.h $@
 clean:
-	rm -f dwl *.o *-protocol.h
+	rm -f nixlytile *.o *-protocol.h
 
 dist: clean
-	mkdir -p dwl-$(VERSION)
+	mkdir -p nixlytile-$(VERSION)
 	cp -R LICENSE* Makefile CHANGELOG.md README.md client.h config.def.h \
-		config.mk protocols dwl.1 dwl.c util.c util.h dwl.desktop images \
-		dwl-$(VERSION)
-	tar -caf dwl-$(VERSION).tar.gz dwl-$(VERSION)
-	rm -rf dwl-$(VERSION)
+		config.mk protocols nixlytile.1 nixlytile.c util.c util.h nixlytile.desktop images \
+		nixlytile-$(VERSION)
+	tar -caf nixlytile-$(VERSION).tar.gz nixlytile-$(VERSION)
+	rm -rf nixlytile-$(VERSION)
 
-install: dwl
+install: nixlytile
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
-	rm -f $(DESTDIR)$(PREFIX)/bin/dwl
-	cp -f dwl $(DESTDIR)$(PREFIX)/bin
-	chmod 755 $(DESTDIR)$(PREFIX)/bin/dwl
-	mkdir -p $(DESTDIR)$(DATADIR)/dwl/images
-	cp -r images/svg $(DESTDIR)$(DATADIR)/dwl/images/
-	mkdir -p $(DESTDIR)$(DATADIR)/dwl
-	cp -f config.conf.example $(DESTDIR)$(DATADIR)/dwl/config.conf.example
-	chmod 644 $(DESTDIR)$(DATADIR)/dwl/config.conf.example
+	rm -f $(DESTDIR)$(PREFIX)/bin/nixlytile
+	cp -f nixlytile $(DESTDIR)$(PREFIX)/bin
+	chmod 755 $(DESTDIR)$(PREFIX)/bin/nixlytile
+	mkdir -p $(DESTDIR)$(DATADIR)/nixlytile/images
+	cp -r images/svg $(DESTDIR)$(DATADIR)/nixlytile/images/
+	mkdir -p $(DESTDIR)$(DATADIR)/nixlytile
+	cp -f config.conf.example $(DESTDIR)$(DATADIR)/nixlytile/config.conf.example
+	chmod 644 $(DESTDIR)$(DATADIR)/nixlytile/config.conf.example
 	mkdir -p $(DESTDIR)$(MANDIR)/man1
-	cp -f dwl.1 $(DESTDIR)$(MANDIR)/man1
-	chmod 644 $(DESTDIR)$(MANDIR)/man1/dwl.1
+	cp -f nixlytile.1 $(DESTDIR)$(MANDIR)/man1
+	chmod 644 $(DESTDIR)$(MANDIR)/man1/nixlytile.1
 	mkdir -p $(DESTDIR)$(DATADIR)/wayland-sessions
-	cp -f dwl.desktop $(DESTDIR)$(DATADIR)/wayland-sessions/dwl.desktop
-	chmod 644 $(DESTDIR)$(DATADIR)/wayland-sessions/dwl.desktop
+	cp -f nixlytile.desktop $(DESTDIR)$(DATADIR)/wayland-sessions/nixlytile.desktop
+	chmod 644 $(DESTDIR)$(DATADIR)/wayland-sessions/nixlytile.desktop
 uninstall:
-	rm -f $(DESTDIR)$(PREFIX)/bin/dwl $(DESTDIR)$(MANDIR)/man1/dwl.1 \
-		$(DESTDIR)$(DATADIR)/wayland-sessions/dwl.desktop
+	rm -f $(DESTDIR)$(PREFIX)/bin/nixlytile $(DESTDIR)$(MANDIR)/man1/nixlytile.1 \
+		$(DESTDIR)$(DATADIR)/wayland-sessions/nixlytile.desktop
 
 .SUFFIXES: .c .o
 .c.o:
-	$(CC) $(CPPFLAGS) $(DWLCFLAGS) -o $@ -c $<
+	$(CC) $(CPPFLAGS) $(NLCFLAGS) -o $@ -c $<
