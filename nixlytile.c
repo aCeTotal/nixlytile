@@ -27957,6 +27957,8 @@ spawn(const Arg *arg)
 			if (argv[0] && argv[0][0] != '\0') {
 				if (should_use_dgpu(argv[0]))
 					set_dgpu_env();
+				if (is_steam_cmd(argv[0]))
+					set_steam_env();
 				execvp(argv[0], argv);
 				/* If execvp fails, die */
 				die("nixlytile: execvp %s failed:", argv[0]);
@@ -27966,6 +27968,8 @@ spawn(const Arg *arg)
 		/* Runtime config: arg->v is a string, execute via shell */
 		if (should_use_dgpu(cmd))
 			set_dgpu_env();
+		if (is_steam_cmd(cmd))
+			set_steam_env();
 		execl("/bin/sh", "sh", "-c", cmd, NULL);
 		die("nixlytile: execl %s failed:", cmd);
 	}
