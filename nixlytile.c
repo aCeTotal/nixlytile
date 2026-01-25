@@ -6997,6 +6997,8 @@ focus_or_launch_app(const char *app_id, const char *launch_cmd)
 			setsid();
 			if (should_use_dgpu(launch_cmd))
 				set_dgpu_env();
+			if (is_steam_cmd(launch_cmd))
+				set_steam_env();
 			execlp("sh", "sh", "-c", launch_cmd, NULL);
 			_exit(1);
 		}
@@ -13837,6 +13839,7 @@ htpc_mode_enter(void)
 		if (pid == 0) {
 			setsid();
 			set_dgpu_env();
+			set_steam_env();
 			/* Kill Steam, wait for it to close, then start Big Picture in library */
 			execl("/bin/sh", "sh", "-c",
 				"pkill -9 steam 2>/dev/null; sleep 1; "
@@ -18018,6 +18021,9 @@ pc_gaming_launch_game(Monitor *m)
 		setsid();
 		/* Set discrete GPU environment for gaming */
 		set_dgpu_env();
+		/* Set Steam env vars if this is a Steam game (uses steam:// protocol) */
+		if (g->service == GAMING_SERVICE_STEAM || is_steam_cmd(g->launch_cmd))
+			set_steam_env();
 		execl("/bin/sh", "sh", "-c", g->launch_cmd, (char *)NULL);
 		_exit(127);
 	}
@@ -27914,8 +27920,32 @@ set_dgpu_env(void)
 static void
 set_steam_env(void)
 {
+	GpuInfo *dgpu;
+
 	/* UI scaling fix for better Big Picture performance on hybrid systems */
 	setenv("STEAM_FORCE_DESKTOPUI_SCALING", "1", 1);
+
+	/* Tell Steam to prefer host libraries over runtime for better driver compat */
+	setenv("STEAM_RUNTIME_PREFER_HOST_LIBRARIES", "1", 1);
+
+	/* If we have a discrete NVIDIA GPU, set PRIME offload vars for Steam itself */
+	if (discrete_gpu_idx >= 0 && discrete_gpu_idx < detected_gpu_count) {
+		dgpu = &detected_gpus[discrete_gpu_idx];
+		if (dgpu->vendor == GPU_VENDOR_NVIDIA) {
+			/* PRIME render offload for Steam process */
+			setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 1);
+			setenv("__NV_PRIME_RENDER_OFFLOAD_PROVIDER", "NVIDIA-G0", 1);
+			setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 1);
+			setenv("__VK_LAYER_NV_optimus", "NVIDIA_only", 1);
+			/* DRI_PRIME for Mesa fallback */
+			if (dgpu->pci_slot_underscore[0])
+				setenv("DRI_PRIME", dgpu->pci_slot_underscore, 1);
+			else
+				setenv("DRI_PRIME", "1", 1);
+			/* Vulkan ICD selection for NVIDIA */
+			setenv("VK_LOADER_DRIVERS_SELECT", "nvidia*", 1);
+		}
+	}
 }
 
 /* Check if command is Steam */
