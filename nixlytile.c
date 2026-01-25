@@ -6997,8 +6997,12 @@ focus_or_launch_app(const char *app_id, const char *launch_cmd)
 			setsid();
 			if (should_use_dgpu(launch_cmd))
 				set_dgpu_env();
-			if (is_steam_cmd(launch_cmd))
+			if (is_steam_cmd(launch_cmd)) {
 				set_steam_env();
+				/* Launch Steam with GPU acceleration flags */
+				execlp("steam", "steam", "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
+				_exit(1);
+			}
 			execlp("sh", "sh", "-c", launch_cmd, NULL);
 			_exit(1);
 		}
@@ -27935,6 +27939,10 @@ set_steam_env(void)
 	setenv("STEAM_DISABLE_GPU_BLOCKLIST", "1", 1);
 	setenv("STEAM_CEF_ARGS", "--ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy --enable-native-gpu-memory-buffers --disable-gpu-driver-bug-workarounds", 1);
 
+	/* Override CEF webhelper flags - Steam internally adds --disable-gpu which kills performance
+	 * STEAM_WEBHELPER_CEF_FLAGS can override/append to steamwebhelper arguments */
+	setenv("STEAM_WEBHELPER_CEF_FLAGS", "--enable-gpu --enable-gpu-compositing --enable-accelerated-video-decode --ignore-gpu-blocklist", 1);
+
 	/* If we have a discrete NVIDIA GPU, set PRIME offload vars for Steam itself */
 	if (discrete_gpu_idx >= 0 && discrete_gpu_idx < detected_gpu_count) {
 		dgpu = &detected_gpus[discrete_gpu_idx];
@@ -27997,8 +28005,11 @@ spawn(const Arg *arg)
 			if (argv[0] && argv[0][0] != '\0') {
 				if (should_use_dgpu(argv[0]))
 					set_dgpu_env();
-				if (is_steam_cmd(argv[0]))
+				if (is_steam_cmd(argv[0])) {
 					set_steam_env();
+					/* Launch Steam with GPU acceleration flags */
+					execlp("steam", "steam", "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
+				}
 				execvp(argv[0], argv);
 				/* If execvp fails, die */
 				die("nixlytile: execvp %s failed:", argv[0]);
@@ -28008,8 +28019,13 @@ spawn(const Arg *arg)
 		/* Runtime config: arg->v is a string, execute via shell */
 		if (should_use_dgpu(cmd))
 			set_dgpu_env();
-		if (is_steam_cmd(cmd))
+		if (is_steam_cmd(cmd)) {
 			set_steam_env();
+			/* If cmd is just "steam" or starts with "steam ", launch with GPU flags */
+			if (strcmp(cmd, "steam") == 0) {
+				execlp("steam", "steam", "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
+			}
+		}
 		execl("/bin/sh", "sh", "-c", cmd, NULL);
 		die("nixlytile: execl %s failed:", cmd);
 	}
