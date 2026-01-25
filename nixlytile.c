@@ -1220,6 +1220,7 @@ static int ensure_nixpkg_ok_icon(int height);
 static void ensure_shell_env(void);
 static int should_use_dgpu(const char *cmd);
 static void set_dgpu_env(void);
+static void detect_gpus(void);
 static int cpu_popup_refresh_timeout(void *data);
 static void schedule_cpu_popup_refresh(uint32_t ms);
 static int popup_delay_timeout(void *data);
@@ -1528,6 +1529,32 @@ static const char *gaming_service_names[] = {"Steam", "Heroic", "Lutris", "Bottl
 #define PC_GAMING_TILE_GAP 15
 #define PC_GAMING_PADDING 40
 #define PC_GAMING_CACHE_FILE "/.cache/nixlytile/games.cache"
+
+/* GPU detection and management */
+typedef enum {
+	GPU_VENDOR_UNKNOWN = 0,
+	GPU_VENDOR_INTEL,
+	GPU_VENDOR_AMD,
+	GPU_VENDOR_NVIDIA
+} GpuVendor;
+
+typedef struct {
+	char card_path[64];      /* /dev/dri/cardX */
+	char render_path[64];    /* /dev/dri/renderDX */
+	char driver[32];         /* Driver name: nvidia, amdgpu, i915, nouveau, radeon */
+	char pci_slot[16];       /* PCI slot like 0000:01:00.0 */
+	char pci_slot_underscore[20]; /* PCI slot with underscores: pci-0000_01_00_0 */
+	GpuVendor vendor;
+	int is_discrete;         /* 1 if discrete GPU, 0 if integrated */
+	int card_index;          /* Card number (0, 1, 2...) */
+	int render_index;        /* Render node index */
+} GpuInfo;
+
+#define MAX_GPUS 8
+static GpuInfo detected_gpus[MAX_GPUS];
+static int detected_gpu_count = 0;
+static int discrete_gpu_idx = -1;   /* Index of preferred discrete GPU, -1 if none */
+static int integrated_gpu_idx = -1; /* Index of integrated GPU, -1 if none */
 
 /* PC gaming cache file watcher for realtime updates */
 static int pc_gaming_cache_inotify_fd = -1;
@@ -16110,10 +16137,25 @@ gamepad_menu_select(Monitor *m)
 	label = gamepad_menu_items[gm->selected].label;
 	cmd = gamepad_menu_items[gm->selected].command;
 
-	/* Handle PC-gaming - show PC gaming view */
+	/* Handle PC-gaming - launch Steam Big Picture mode directly (fast) */
 	if (strcmp(label, "PC-gaming") == 0) {
 		gamepad_menu_hide(m);
-		wlr_log(WLR_INFO, "Opening PC Gaming view");
+		wlr_log(WLR_INFO, "Launching Steam Big Picture mode");
+		pid_t pid = fork();
+		if (pid == 0) {
+			setsid();
+			set_dgpu_env();
+			/* Launch Steam Big Picture directly - no killing, no waiting */
+			execlp("steam", "steam", "-bigpicture", "steam://open/games", (char *)NULL);
+			_exit(127);
+		}
+		return;
+	}
+
+	/* Handle Movies - show grid view */
+	if (strcmp(label, "Movies") == 0) {
+		gamepad_menu_hide(m);
+		wlr_log(WLR_INFO, "Opening Movies view");
 		pc_gaming_show(m);
 		return;
 	}
@@ -27572,6 +27614,183 @@ setup(void)
 		wl_event_source_timer_update(status_hover_timer, 0);
 }
 
+/* Detect all GPUs in the system */
+static void
+detect_gpus(void)
+{
+	DIR *dri_dir;
+	struct dirent *ent;
+	char path[256], link_target[256], driver_link[256];
+	ssize_t len;
+	int i;
+
+	detected_gpu_count = 0;
+	discrete_gpu_idx = -1;
+	integrated_gpu_idx = -1;
+
+	dri_dir = opendir("/sys/class/drm");
+	if (!dri_dir) {
+		wlr_log(WLR_ERROR, "Failed to open /sys/class/drm for GPU detection");
+		return;
+	}
+
+	while ((ent = readdir(dri_dir)) != NULL && detected_gpu_count < MAX_GPUS) {
+		int card_num;
+		GpuInfo *gpu;
+
+		/* Only process cardX entries (not renderDX or other entries) */
+		if (sscanf(ent->d_name, "card%d", &card_num) != 1)
+			continue;
+		/* Skip card0-HDMI-A-1 style entries */
+		if (strchr(ent->d_name, '-'))
+			continue;
+
+		gpu = &detected_gpus[detected_gpu_count];
+		memset(gpu, 0, sizeof(*gpu));
+		gpu->card_index = card_num;
+
+		snprintf(gpu->card_path, sizeof(gpu->card_path), "/dev/dri/card%d", card_num);
+
+		/* Find corresponding render node */
+		snprintf(path, sizeof(path), "/sys/class/drm/card%d/device", card_num);
+		DIR *dev_dir = opendir(path);
+		if (dev_dir) {
+			struct dirent *dev_ent;
+			while ((dev_ent = readdir(dev_dir)) != NULL) {
+				int render_num;
+				if (sscanf(dev_ent->d_name, "drm/renderD%d", &render_num) == 1 ||
+				    (strncmp(dev_ent->d_name, "drm", 3) == 0)) {
+					/* Check for renderDXXX in drm subdirectory */
+					char drm_path[300];
+					snprintf(drm_path, sizeof(drm_path), "%s/drm", path);
+					DIR *drm_dir = opendir(drm_path);
+					if (drm_dir) {
+						struct dirent *drm_ent;
+						while ((drm_ent = readdir(drm_dir)) != NULL) {
+							if (sscanf(drm_ent->d_name, "renderD%d", &render_num) == 1) {
+								gpu->render_index = render_num;
+								snprintf(gpu->render_path, sizeof(gpu->render_path),
+									"/dev/dri/renderD%d", render_num);
+								break;
+							}
+						}
+						closedir(drm_dir);
+					}
+					break;
+				}
+			}
+			closedir(dev_dir);
+		}
+
+		/* Get driver name from symlink */
+		snprintf(driver_link, sizeof(driver_link),
+			"/sys/class/drm/card%d/device/driver", card_num);
+		len = readlink(driver_link, link_target, sizeof(link_target) - 1);
+		if (len > 0) {
+			link_target[len] = '\0';
+			const char *driver_name = strrchr(link_target, '/');
+			driver_name = driver_name ? driver_name + 1 : link_target;
+			snprintf(gpu->driver, sizeof(gpu->driver), "%s", driver_name);
+		}
+
+		/* Get PCI slot from uevent */
+		snprintf(path, sizeof(path), "/sys/class/drm/card%d/device/uevent", card_num);
+		FILE *f = fopen(path, "r");
+		if (f) {
+			char line[256];
+			while (fgets(line, sizeof(line), f)) {
+				if (strncmp(line, "PCI_SLOT_NAME=", 14) == 0) {
+					char *nl = strchr(line + 14, '\n');
+					if (nl) *nl = '\0';
+					snprintf(gpu->pci_slot, sizeof(gpu->pci_slot), "%s", line + 14);
+					/* Create underscore version for DRI_PRIME */
+					snprintf(gpu->pci_slot_underscore, sizeof(gpu->pci_slot_underscore),
+						"pci-%s", gpu->pci_slot);
+					for (char *p = gpu->pci_slot_underscore; *p; p++) {
+						if (*p == ':' || *p == '.') *p = '_';
+					}
+					break;
+				}
+			}
+			fclose(f);
+		}
+
+		/* Determine vendor and if discrete */
+		if (strcmp(gpu->driver, "nvidia") == 0) {
+			gpu->vendor = GPU_VENDOR_NVIDIA;
+			gpu->is_discrete = 1;
+		} else if (strcmp(gpu->driver, "nouveau") == 0) {
+			gpu->vendor = GPU_VENDOR_NVIDIA;
+			gpu->is_discrete = 1;
+		} else if (strcmp(gpu->driver, "amdgpu") == 0 || strcmp(gpu->driver, "radeon") == 0) {
+			gpu->vendor = GPU_VENDOR_AMD;
+			/* Check if integrated (APU) or discrete - look at device class or boot_vga */
+			snprintf(path, sizeof(path), "/sys/class/drm/card%d/device/boot_vga", card_num);
+			f = fopen(path, "r");
+			if (f) {
+				int boot_vga = 0;
+				if (fscanf(f, "%d", &boot_vga) == 1) {
+					/* boot_vga=1 typically means primary/integrated on laptops */
+					/* But for AMD, we also check if another GPU exists */
+					gpu->is_discrete = !boot_vga;
+				}
+				fclose(f);
+			} else {
+				/* If no boot_vga, assume discrete */
+				gpu->is_discrete = 1;
+			}
+		} else if (strcmp(gpu->driver, "i915") == 0 || strcmp(gpu->driver, "xe") == 0) {
+			gpu->vendor = GPU_VENDOR_INTEL;
+			gpu->is_discrete = 0; /* Intel iGPU */
+		} else {
+			gpu->vendor = GPU_VENDOR_UNKNOWN;
+			gpu->is_discrete = 0;
+		}
+
+		wlr_log(WLR_INFO, "GPU %d: %s [%s] driver=%s discrete=%d pci=%s",
+			detected_gpu_count, gpu->card_path, gpu->render_path,
+			gpu->driver, gpu->is_discrete, gpu->pci_slot);
+
+		detected_gpu_count++;
+	}
+	closedir(dri_dir);
+
+	/* Find best discrete and integrated GPU */
+	for (i = 0; i < detected_gpu_count; i++) {
+		GpuInfo *gpu = &detected_gpus[i];
+		if (gpu->is_discrete) {
+			/* Prefer Nvidia > AMD for discrete */
+			if (discrete_gpu_idx < 0 ||
+			    (gpu->vendor == GPU_VENDOR_NVIDIA && detected_gpus[discrete_gpu_idx].vendor != GPU_VENDOR_NVIDIA)) {
+				discrete_gpu_idx = i;
+			}
+		} else {
+			if (integrated_gpu_idx < 0)
+				integrated_gpu_idx = i;
+		}
+	}
+
+	/* If AMD GPU was marked as not-discrete but no other integrated exists, it might be wrong */
+	if (discrete_gpu_idx < 0 && detected_gpu_count > 1) {
+		/* Multiple GPUs but none marked discrete - pick non-Intel as discrete */
+		for (i = 0; i < detected_gpu_count; i++) {
+			if (detected_gpus[i].vendor != GPU_VENDOR_INTEL) {
+				discrete_gpu_idx = i;
+				detected_gpus[i].is_discrete = 1;
+				break;
+			}
+		}
+	}
+
+	if (discrete_gpu_idx >= 0) {
+		GpuInfo *dgpu = &detected_gpus[discrete_gpu_idx];
+		wlr_log(WLR_INFO, "Selected discrete GPU: card%d (%s) driver=%s",
+			dgpu->card_index, dgpu->pci_slot, dgpu->driver);
+	} else {
+		wlr_log(WLR_INFO, "No discrete GPU detected");
+	}
+}
+
 /* Programs that should use dedicated GPU */
 static const char *dgpu_programs[] = {
 	"steam", "gamescope", "mangohud",
@@ -27611,17 +27830,61 @@ should_use_dgpu(const char *cmd)
 static void
 set_dgpu_env(void)
 {
-	/* PRIME render offload for NVIDIA */
-	setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 1);
-	setenv("__NV_PRIME_RENDER_OFFLOAD_PROVIDER", "NVIDIA-G0", 1);
-	setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 1);
-	setenv("__VK_LAYER_NV_optimus", "NVIDIA_only", 1);
+	GpuInfo *dgpu;
 
-	/* DRI_PRIME for AMD/Intel hybrid */
-	setenv("DRI_PRIME", "1", 1);
+	/* No discrete GPU detected - nothing to do */
+	if (discrete_gpu_idx < 0 || discrete_gpu_idx >= detected_gpu_count)
+		return;
 
-	/* Vulkan device selection (prefer discrete) */
-	setenv("VK_LOADER_DRIVERS_SELECT", "nvidia*,radeon*,amd*", 1);
+	dgpu = &detected_gpus[discrete_gpu_idx];
+
+	switch (dgpu->vendor) {
+	case GPU_VENDOR_NVIDIA:
+		/* PRIME render offload for NVIDIA proprietary driver */
+		setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 1);
+		setenv("__NV_PRIME_RENDER_OFFLOAD_PROVIDER", "NVIDIA-G0", 1);
+		setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 1);
+		setenv("__VK_LAYER_NV_optimus", "NVIDIA_only", 1);
+		/* Also set DRI_PRIME in case nouveau is used instead */
+		if (dgpu->pci_slot_underscore[0])
+			setenv("DRI_PRIME", dgpu->pci_slot_underscore, 1);
+		else
+			setenv("DRI_PRIME", "1", 1);
+		break;
+
+	case GPU_VENDOR_AMD:
+		/* DRI_PRIME with specific PCI device for AMD */
+		if (dgpu->pci_slot_underscore[0])
+			setenv("DRI_PRIME", dgpu->pci_slot_underscore, 1);
+		else
+			setenv("DRI_PRIME", "1", 1);
+		/* AMD Vulkan driver selection */
+		setenv("AMD_VULKAN_ICD", "RADV", 1);
+		break;
+
+	case GPU_VENDOR_INTEL:
+	case GPU_VENDOR_UNKNOWN:
+	default:
+		/* Generic DRI_PRIME for other cases */
+		if (dgpu->pci_slot_underscore[0])
+			setenv("DRI_PRIME", dgpu->pci_slot_underscore, 1);
+		else
+			setenv("DRI_PRIME", "1", 1);
+		break;
+	}
+
+	/* Vulkan device selection - prefer discrete GPU */
+	switch (dgpu->vendor) {
+	case GPU_VENDOR_NVIDIA:
+		setenv("VK_LOADER_DRIVERS_SELECT", "nvidia*", 1);
+		break;
+	case GPU_VENDOR_AMD:
+		setenv("VK_LOADER_DRIVERS_SELECT", "radeon*,amd*", 1);
+		break;
+	default:
+		setenv("VK_LOADER_DRIVERS_SELECT", "nvidia*,radeon*,amd*", 1);
+		break;
+	}
 }
 
 void
@@ -28321,6 +28584,9 @@ main(int argc, char *argv[])
 	/* Load runtime config before applying defaults */
 	load_config();
 	init_keybindings();
+
+	/* Detect available GPUs for PRIME offloading */
+	detect_gpus();
 
 	/* Build autostart command with wallpaper path if not overridden */
 	{
