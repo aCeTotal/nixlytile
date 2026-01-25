@@ -13840,10 +13840,11 @@ htpc_mode_enter(void)
 			setsid();
 			set_dgpu_env();
 			set_steam_env();
-			/* Kill Steam, wait for it to close, then start Big Picture in library */
+			/* Kill Steam, wait for it to close, then start Big Picture in library
+			 * Use -cef-force-gpu to force GPU acceleration in CEF/Chromium */
 			execl("/bin/sh", "sh", "-c",
 				"pkill -9 steam 2>/dev/null; sleep 1; "
-				"steam -bigpicture steam://open/games",
+				"steam -bigpicture -cef-force-gpu -cef-disable-sandbox steam://open/games",
 				(char *)NULL);
 			_exit(127);
 		}
@@ -16169,8 +16170,9 @@ gamepad_menu_select(Monitor *m)
 			setsid();
 			set_dgpu_env();
 			set_steam_env();
-			/* Launch Steam Big Picture directly - no killing, no waiting */
-			execlp("steam", "steam", "-bigpicture", "steam://open/games", (char *)NULL);
+			/* Launch Steam Big Picture directly - no killing, no waiting
+			 * Use -cef-force-gpu to force GPU acceleration in CEF/Chromium */
+			execlp("steam", "steam", "-bigpicture", "-cef-force-gpu", "-cef-disable-sandbox", "steam://open/games", (char *)NULL);
 			_exit(127);
 		}
 		return;
@@ -27928,6 +27930,11 @@ set_steam_env(void)
 	/* Tell Steam to prefer host libraries over runtime for better driver compat */
 	setenv("STEAM_RUNTIME_PREFER_HOST_LIBRARIES", "1", 1);
 
+	/* CEF/Chromium GPU override flags - force hardware acceleration
+	 * These help bypass Steam's internal GPU blocklist on hybrid systems */
+	setenv("STEAM_DISABLE_GPU_BLOCKLIST", "1", 1);
+	setenv("STEAM_CEF_ARGS", "--ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy --enable-native-gpu-memory-buffers --disable-gpu-driver-bug-workarounds", 1);
+
 	/* If we have a discrete NVIDIA GPU, set PRIME offload vars for Steam itself */
 	if (discrete_gpu_idx >= 0 && discrete_gpu_idx < detected_gpu_count) {
 		dgpu = &detected_gpus[discrete_gpu_idx];
@@ -27944,6 +27951,9 @@ set_steam_env(void)
 				setenv("DRI_PRIME", "1", 1);
 			/* Vulkan ICD selection for NVIDIA */
 			setenv("VK_LOADER_DRIVERS_SELECT", "nvidia*", 1);
+
+			/* NVIDIA-specific CEF args for better ANGLE/Vulkan support */
+			setenv("STEAM_CEF_GPU_ARGS", "--use-angle=vulkan --enable-features=Vulkan,UseSkiaRenderer", 1);
 		}
 	}
 }
