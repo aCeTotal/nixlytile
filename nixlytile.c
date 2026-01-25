@@ -338,6 +338,7 @@ typedef struct {
 	char exec[256];
 	char name_lower[128];
 	int used;
+	int prefers_dgpu;  /* 1 if PrefersNonDefaultGPU=true or X-KDE-RunOnDiscreteGpu=true */
 } DesktopEntry;
 
 typedef struct {
@@ -1220,6 +1221,8 @@ static int ensure_nixpkg_ok_icon(int height);
 static void ensure_shell_env(void);
 static int should_use_dgpu(const char *cmd);
 static void set_dgpu_env(void);
+static void set_steam_env(void);
+static int is_steam_cmd(const char *cmd);
 static void detect_gpus(void);
 static int cpu_popup_refresh_timeout(void *data);
 static void schedule_cpu_popup_refresh(uint32_t ms);
@@ -12746,13 +12749,20 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 			int idx = mo->result_entry_idx[0][sel];
 			if (idx >= 0 && idx < desktop_entry_count) {
 				char cmd_str[512];
-				char *cmd[4] = { "sh", "-c", cmd_str, NULL };
-				Arg arg;
 				desktop_entries[idx].used++;
 				snprintf(cmd_str, sizeof(cmd_str), "%s", desktop_entries[idx].exec[0]
 						? desktop_entries[idx].exec : desktop_entries[idx].name);
-				arg.v = cmd;
-				spawn(&arg);
+				/* Launch with dGPU if desktop entry prefers it or command matches dgpu_programs */
+				pid_t pid = fork();
+				if (pid == 0) {
+					setsid();
+					if (desktop_entries[idx].prefers_dgpu || should_use_dgpu(cmd_str))
+						set_dgpu_env();
+					if (is_steam_cmd(cmd_str))
+						set_steam_env();
+					execl("/bin/sh", "sh", "-c", cmd_str, NULL);
+					_exit(127);
+				}
 				modal_hide_all();
 			}
 		} else if (mo->active_idx == 1 && sel >= 0 && sel < mo->result_count[1]) {
@@ -14033,6 +14043,7 @@ load_desktop_dir_rec(const char *dir, int depth)
 		int hidden = 0;
 		int isdir = 0;
 		int in_main_section = 0;
+		int prefers_dgpu = 0;
 
 		if (desktop_entry_count >= (int)LENGTH(desktop_entries))
 			break;
@@ -14094,6 +14105,14 @@ load_desktop_dir_rec(const char *dir, int depth)
 				const char *val = line + 7;
 				if (!strncasecmp(val, "true", 4))
 					hidden = 1;
+			} else if (!strncmp(line, "PrefersNonDefaultGPU=", 21)) {
+				const char *val = line + 21;
+				if (!strncasecmp(val, "true", 4))
+					prefers_dgpu = 1;
+			} else if (!strncmp(line, "X-KDE-RunOnDiscreteGpu=", 23)) {
+				const char *val = line + 23;
+				if (!strncasecmp(val, "true", 4))
+					prefers_dgpu = 1;
 			}
 		}
 		fclose(fp);
@@ -14127,6 +14146,7 @@ load_desktop_dir_rec(const char *dir, int depth)
 			desktop_entries[desktop_entry_count].name_lower[j] =
 				(char)tolower((unsigned char)desktop_entries[desktop_entry_count].name[j]);
 		}
+		desktop_entries[desktop_entry_count].prefers_dgpu = prefers_dgpu;
 		desktop_entry_count++;
 	}
 	closedir(d);
@@ -16145,6 +16165,7 @@ gamepad_menu_select(Monitor *m)
 		if (pid == 0) {
 			setsid();
 			set_dgpu_env();
+			set_steam_env();
 			/* Launch Steam Big Picture directly - no killing, no waiting */
 			execlp("steam", "steam", "-bigpicture", "steam://open/games", (char *)NULL);
 			_exit(127);
@@ -17995,6 +18016,8 @@ pc_gaming_launch_game(Monitor *m)
 	pid_t pid = fork();
 	if (pid == 0) {
 		setsid();
+		/* Set discrete GPU environment for gaming */
+		set_dgpu_env();
 		execl("/bin/sh", "sh", "-c", g->launch_cmd, (char *)NULL);
 		_exit(127);
 	}
@@ -27885,6 +27908,23 @@ set_dgpu_env(void)
 		setenv("VK_LOADER_DRIVERS_SELECT", "nvidia*,radeon*,amd*", 1);
 		break;
 	}
+}
+
+/* Set Steam-specific environment variables */
+static void
+set_steam_env(void)
+{
+	/* UI scaling fix for better Big Picture performance on hybrid systems */
+	setenv("STEAM_FORCE_DESKTOPUI_SCALING", "1", 1);
+}
+
+/* Check if command is Steam */
+static int
+is_steam_cmd(const char *cmd)
+{
+	if (!cmd)
+		return 0;
+	return strcasestr(cmd, "steam") != NULL;
 }
 
 void
