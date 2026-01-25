@@ -463,6 +463,8 @@ typedef struct GameEntry {
 	time_t acquired_time;  /* When the game was acquired (epoch seconds) */
 	int controller_support; /* 0=none, 1=partial, 2=full */
 	int deck_verified;     /* 0=unknown, 1=unsupported, 2=playable, 3=verified */
+	int is_installing;     /* 1 if currently being installed */
+	int install_progress;  /* Installation progress 0-100 */
 	struct wlr_buffer *icon_buf;  /* Cached scaled icon buffer */
 	int icon_w, icon_h;    /* Loaded icon dimensions */
 	int icon_loaded;       /* 1 if icon was loaded (or attempted) */
@@ -493,6 +495,7 @@ typedef struct {
 	int install_popup_selected;  /* 0 = Install, 1 = Close */
 	char install_game_id[64];
 	char install_game_name[256];
+	GamingServiceType install_game_service;
 } PcGamingView;
 
 /* Axis calibration info */
@@ -1284,6 +1287,7 @@ static void pc_gaming_fetch_steam_names_batch(Monitor *m);
 static void pc_gaming_load_steam_playtime(Monitor *m);
 static void pc_gaming_sort_by_acquired(Monitor *m);
 static void pc_gaming_filter_non_games(Monitor *m);
+static void pc_gaming_update_install_status(Monitor *m);
 static int pc_gaming_cache_inotify_cb(int fd, uint32_t mask, void *data);
 static void pc_gaming_cache_watch_setup(void);
 
@@ -1478,6 +1482,7 @@ static struct wl_event_source *status_cpu_timer;
 static struct wl_event_source *status_hover_timer;
 static struct wl_event_source *cache_update_timer;
 static struct wl_event_source *nixpkgs_cache_timer;
+static int cache_update_phase = 0; /* 0=git, 1=file, 2=gaming, then restart */
 static StatusRefreshTask status_tasks[] = {
 	{ refreshstatuscpu, 0 },
 	{ refreshstatusram, 0 },
@@ -1626,6 +1631,7 @@ static struct wl_event_source *ram_popup_refresh_timer = NULL;
 static struct wl_event_source *popup_delay_timer = NULL;
 static struct wl_event_source *video_check_timer = NULL;
 static struct wl_event_source *hz_osd_timer = NULL;
+static struct wl_event_source *pc_gaming_install_timer = NULL;
 static char wifi_scan_buf[8192];
 static size_t wifi_scan_len = 0;
 static int wifi_scan_inflight;
@@ -4927,11 +4933,11 @@ kill_processes_with_name(const char *name)
 
 	closedir(dir);
 	if (killed == 0 && found > 0) {
-		char cmd[256];
-		int ret = snprintf(cmd, sizeof(cmd), "pkill -9 -x %s", name);
-		if (ret > 0 && ret < (int)sizeof(cmd)) {
-			int res = system(cmd);
-			(void)res;
+		/* Fallback: use pkill (non-blocking) */
+		if (fork() == 0) {
+			setsid();
+			execlp("pkill", "pkill", "-9", "-x", name, (char *)NULL);
+			_exit(127);
 		}
 	}
 	return killed;
@@ -10295,97 +10301,63 @@ set_backlight_percent(double percent)
 		}
 	}
 
-	/* Prefer external tools first */
+	/* Use external tools (non-blocking) */
 	{
-		char cmd[128];
-		int ret;
+		char arg[32];
+		snprintf(arg, sizeof(arg), "%.2f%%", percent);
 
-		ret = snprintf(cmd, sizeof(cmd), "brightnessctl set %.2f%%", percent);
-		if (ret > 0 && ret < (int)sizeof(cmd)) {
-			attempted = 1;
-			if (system(cmd) == 0) {
-				light_cached_percent = percent;
-				return 0;
-			}
+		if (fork() == 0) {
+			setsid();
+			execlp("brightnessctl", "brightnessctl", "set", arg, (char *)NULL);
+			/* If brightnessctl fails, try light */
+			snprintf(arg, sizeof(arg), "%.2f", percent);
+			execlp("light", "light", "-S", arg, (char *)NULL);
+			_exit(127);
 		}
-
-		ret = snprintf(cmd, sizeof(cmd), "light -S %.2f", percent);
-		if (ret > 0 && ret < (int)sizeof(cmd)) {
-			attempted = 1;
-			if (system(cmd) == 0) {
-				light_cached_percent = percent;
-				return 0;
-			}
-		}
+		light_cached_percent = percent;
+		return 0;
 	}
-
-	/* Fallback to sysfs if available */
-	if (backlight_available && readulong(backlight_max_path, &max) == 0 && max > 0) {
-		target = (unsigned long long)lround((percent / 100.0) * (double)max);
-		if (target > max)
-			target = max;
-
-		if (backlight_writable && (fp = fopen(backlight_brightness_path, "w"))) {
-			attempted = 1;
-			if (fprintf(fp, "%llu", target) >= 0) {
-				fclose(fp);
-				light_cached_percent = percent;
-				return 0;
-			}
-			fclose(fp);
-		}
-	}
-
-	return attempted ? -1 : 0;
 }
 
 static int
 set_backlight_relative(double delta_percent)
 {
-	char cmd[128];
-	int ret;
+	char arg[32];
+	char light_arg[32];
+	double cur;
 
 	if (delta_percent == 0.0)
 		return 0;
 
-	/* brightnessctl relative */
+	/* Update cached value */
+	cur = light_cached_percent >= 0.0 ? light_cached_percent : backlight_percent();
+	if (cur >= 0.0) {
+		double target = cur + delta_percent;
+		if (target < 0.0)
+			target = 0.0;
+		if (target > 100.0)
+			target = 100.0;
+		light_cached_percent = target;
+	}
+
+	/* Use external tools (non-blocking) */
 	if (delta_percent > 0) {
-		ret = snprintf(cmd, sizeof(cmd), "brightnessctl set +%.2f%%", delta_percent);
+		snprintf(arg, sizeof(arg), "+%.2f%%", delta_percent);
+		snprintf(light_arg, sizeof(light_arg), "%.2f", delta_percent);
 	} else {
-		ret = snprintf(cmd, sizeof(cmd), "brightnessctl set %.2f%%-", -delta_percent);
-	}
-	if (ret > 0 && ret < (int)sizeof(cmd)) {
-		if (system(cmd) == 0)
-			return 0;
+		snprintf(arg, sizeof(arg), "%.2f%%-", -delta_percent);
+		snprintf(light_arg, sizeof(light_arg), "%.2f", -delta_percent);
 	}
 
-	/* light relative */
-	if (delta_percent > 0) {
-		ret = snprintf(cmd, sizeof(cmd), "light -A %.2f", delta_percent);
-	} else {
-		ret = snprintf(cmd, sizeof(cmd), "light -U %.2f", -delta_percent);
-	}
-	if (ret > 0 && ret < (int)sizeof(cmd)) {
-		if (system(cmd) == 0)
-			return 0;
+	if (fork() == 0) {
+		setsid();
+		execlp("brightnessctl", "brightnessctl", "set", arg, (char *)NULL);
+		/* If brightnessctl fails, try light */
+		execlp("light", "light", delta_percent > 0 ? "-A" : "-U", light_arg, (char *)NULL);
+		_exit(127);
 	}
 
-	/* Prefer sysfs if available and writable */
-	if (backlight_available && backlight_writable) {
-		double cur = backlight_percent();
-		if (cur < 0.0)
-			cur = light_cached_percent;
-		if (cur >= 0.0) {
-			double target = cur + delta_percent;
-			if (target < 0.0)
-				target = 0.0;
-			if (target > 100.0)
-				target = 100.0;
-			return set_backlight_percent(target);
-		}
-	}
-
-	return -1;
+	return 0;
 }
 
 static void
@@ -10712,80 +10684,81 @@ pipewire_sink_is_headset(void)
 static int
 set_pipewire_mute(int mute)
 {
-	char cmd[128];
-	int ret;
+	char arg[8];
 
-	ret = snprintf(cmd, sizeof(cmd), "wpctl set-mute @DEFAULT_AUDIO_SINK@ %d", mute ? 1 : 0);
-	if (ret < 0 || ret >= (int)sizeof(cmd))
-		return -1;
+	snprintf(arg, sizeof(arg), "%d", mute ? 1 : 0);
 
-	ret = system(cmd);
-	if (ret != 0)
-		return -1;
+	if (fork() == 0) {
+		setsid();
+		execlp("wpctl", "wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", arg, (char *)NULL);
+		_exit(127);
+	}
 
-	/* Re-read to confirm state */
-	pipewire_volume_percent(NULL);
+	/* Update cached state optimistically */
+	volume_muted = mute;
 	return 0;
 }
 
 static int
 set_pipewire_mic_mute(int mute)
 {
-	char cmd[128];
-	int ret;
+	char arg[8];
 
-	ret = snprintf(cmd, sizeof(cmd), "wpctl set-mute @DEFAULT_AUDIO_SOURCE@ %d", mute ? 1 : 0);
-	if (ret < 0 || ret >= (int)sizeof(cmd))
-		return -1;
+	snprintf(arg, sizeof(arg), "%d", mute ? 1 : 0);
 
-	ret = system(cmd);
-	if (ret != 0)
-		return -1;
+	if (fork() == 0) {
+		setsid();
+		execlp("wpctl", "wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", arg, (char *)NULL);
+		_exit(127);
+	}
 
-	pipewire_mic_volume_percent();
+	/* Update cached state optimistically */
+	mic_muted = mute;
+	mic_cached_muted = mute;
 	return 0;
 }
 
 static int
 set_pipewire_volume(double percent)
 {
-	char cmd[128];
-	int ret;
+	char arg[32];
 
 	if (percent < 0.0)
 		percent = 0.0;
 	if (percent > volume_max_percent)
 		percent = volume_max_percent;
 
-	ret = snprintf(cmd, sizeof(cmd),
-			"wpctl set-volume @DEFAULT_AUDIO_SINK@ %.2f%%", percent);
-	if (ret < 0 || ret >= (int)sizeof(cmd))
-		return -1;
+	snprintf(arg, sizeof(arg), "%.2f%%", percent);
 
-	ret = system(cmd);
-	return ret == 0 ? 0 : -1;
+	if (fork() == 0) {
+		setsid();
+		execlp("wpctl", "wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", arg, (char *)NULL);
+		_exit(127);
+	}
+
+	return 0;
 }
 
 static int
 set_pipewire_mic_volume(double percent)
 {
-	char cmd[128];
-	int ret;
+	char arg[32];
 
 	if (percent < 0.0)
 		percent = 0.0;
 	if (percent > mic_max_percent)
 		percent = mic_max_percent;
 
-	ret = snprintf(cmd, sizeof(cmd),
-			"wpctl set-volume @DEFAULT_AUDIO_SOURCE@ %.2f%%", percent);
-	if (ret < 0 || ret >= (int)sizeof(cmd))
-		return -1;
+	snprintf(arg, sizeof(arg), "%.2f%%", percent);
 
-	ret = system(cmd);
-	if (ret == 0)
-		mic_last_percent = percent;
-	return ret == 0 ? 0 : -1;
+	if (fork() == 0) {
+		setsid();
+		execlp("wpctl", "wpctl", "set-volume", "@DEFAULT_AUDIO_SOURCE@", arg, (char *)NULL);
+		_exit(127);
+	}
+
+	mic_last_percent = percent;
+	return 0;
 }
 
 static int
@@ -12657,13 +12630,26 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 	/* Mod+E: Open all file search results in Thunar via symlinks */
 	if ((sym == XKB_KEY_e || sym == XKB_KEY_E) && (mods & WLR_MODIFIER_LOGO) &&
 			mo->active_idx == 1 && mo->result_count[1] > 0) {
-		char tmpdir[PATH_MAX];
 		const char *base = "/tmp/nixlytile-search-results";
+		DIR *d;
+		struct dirent *ent;
+		char entpath[PATH_MAX];
 		int i;
 
-		/* Remove old temp dir if exists, then create fresh */
-		snprintf(tmpdir, sizeof(tmpdir), "rm -rf '%s' && mkdir -p '%s'", base, base);
-		if (system(tmpdir) == 0) {
+		/* Remove old temp dir contents (symlinks only) */
+		d = opendir(base);
+		if (d) {
+			while ((ent = readdir(d)) != NULL) {
+				if (ent->d_name[0] == '.')
+					continue;
+				snprintf(entpath, sizeof(entpath), "%s/%s", base, ent->d_name);
+				unlink(entpath);
+			}
+			closedir(d);
+			rmdir(base);
+		}
+		mkdir(base, 0755);
+		{
 			/* Create symlinks for all results */
 			for (i = 0; i < mo->result_count[1]; i++) {
 				const char *path = mo->file_results_path[i];
@@ -13441,8 +13427,8 @@ git_cache_update_start(void)
 	pid = fork();
 	if (pid == 0) {
 		setsid();
-		/* Update git projects cache in background */
-		execlp("sh", "sh", "-c",
+		/* Update git projects cache in background with low priority */
+		execlp("nice", "nice", "-n", "19", "ionice", "-c", "3", "sh", "-c",
 			"cache=\"${XDG_CACHE_HOME:-$HOME/.cache}/nixlytile-git-projects\"; "
 			"fd -H -t d '^\\.git$' -E '.local' -E '.config' -E '.cache' -E '.npm' -E '.cargo' -E 'node_modules' -E '.Trash*' \"$HOME\" /mnt /media /run/media 2>/dev/null | "
 			"sed 's|/\\.git/$||' | while IFS= read -r d; do "
@@ -13467,9 +13453,9 @@ file_cache_update_start(void)
 	pid = fork();
 	if (pid == 0) {
 		setsid();
-		/* Update file search cache in background using fd + awk for speed
+		/* Update file search cache in background with low priority
 		 * No -H flag = ignores hidden files/directories by default */
-		execlp("sh", "sh", "-c",
+		execlp("nice", "nice", "-n", "19", "ionice", "-c", "3", "sh", "-c",
 			"cache=\"${XDG_CACHE_HOME:-$HOME/.cache}/nixlytile-file-search\"; "
 			"fd -t f . -E 'node_modules' -E '__pycache__' \"$HOME\" /mnt /media /run/media 2>/dev/null | "
 			"awk -F/ '{print $NF\"\\t\"$0\"\\t0\"}' > \"$cache.tmp\" && mv \"$cache.tmp\" \"$cache\"",
@@ -13493,8 +13479,8 @@ pc_gaming_cache_update_start(void)
 	pid = fork();
 	if (pid == 0) {
 		setsid();
-		/* Update PC gaming cache in background - scans Steam and fetches game info */
-		execlp("sh", "sh", "-c",
+		/* Update PC gaming cache in background with low priority - scans Steam and fetches game info */
+		execlp("nice", "nice", "-n", "19", "ionice", "-c", "3", "sh", "-c",
 			"home=\"$HOME\"\n"
 			"cache=\"${XDG_CACHE_HOME:-$home/.cache}/nixlytile/games.cache\"\n"
 			"mkdir -p \"$(dirname \"$cache\")\"\n"
@@ -13592,9 +13578,19 @@ cache_update_timer_cb(void *data)
 {
 	(void)data;
 	if (!game_mode_active && !htpc_mode_active) {
-		git_cache_update_start();
-		file_cache_update_start();
-		pc_gaming_cache_update_start();
+		/* Run only one cache update at a time, cycling through phases */
+		switch (cache_update_phase) {
+		case 0:
+			git_cache_update_start();
+			break;
+		case 1:
+			file_cache_update_start();
+			break;
+		case 2:
+			pc_gaming_cache_update_start();
+			break;
+		}
+		cache_update_phase = (cache_update_phase + 1) % 3;
 	}
 	schedule_cache_update_timer();
 	return 0;
@@ -13605,8 +13601,9 @@ schedule_cache_update_timer(void)
 {
 	if (!cache_update_timer || game_mode_active || htpc_mode_active)
 		return;
-	/* 10 minutes = 10 * 60 * 1000 ms = 600000 ms */
-	wl_event_source_timer_update(cache_update_timer, 600000);
+	/* 5 minutes between each cache type = 15 min full cycle
+	 * 5 minutes = 5 * 60 * 1000 ms = 300000 ms */
+	wl_event_source_timer_update(cache_update_timer, 300000);
 }
 
 static void
@@ -13627,13 +13624,14 @@ nixpkgs_cache_update_start(void)
 	pid = fork();
 	if (pid == 0) {
 		setsid();
-		/* Update nixpkgs cache from nixpkgs-stable flake input */
+		/* Update nixpkgs cache from nixpkgs-stable flake input with low priority */
 		char cmd[2048];
 		snprintf(cmd, sizeof(cmd),
+			"nice -n 19 ionice -c 3 sh -c \""
 			"nix eval --raw ~/.nixlyos#nixpkgs-stable.outPath 2>/dev/null | "
 			"xargs -I{} nix-env -qaP -f {} 2>/dev/null | "
-			"awk 'index($1, \".\") == 0 {print $1\"\\t\"$2}' | "
-			"sed 's/\\t.*-\\([0-9]\\)/\\t\\1/' > '%s'",
+			"awk 'index(\\$1, \\\".\\\") == 0 {print \\$1\\\"\\\\t\\\"\\$2}' | "
+			"sed 's/\\\\t.*-\\([0-9]\\)/\\\\t\\1/' > '%s'\"",
 			cache_path);
 		execl("/bin/sh", "sh", "-c", cmd, NULL);
 		_exit(127);
@@ -13796,13 +13794,17 @@ htpc_mode_enter(void)
 		}
 	}
 
-	/* Start Steam in background (silent mode) - ready for Big Picture when needed */
+	/* Kill existing Steam and start Big Picture mode with library view */
 	{
 		pid_t pid = fork();
 		if (pid == 0) {
 			setsid();
-			wlr_log(WLR_INFO, "HTPC mode: starting Steam in background");
-			execlp("steam", "steam", "-silent", (char *)NULL);
+			set_dgpu_env();
+			/* Kill Steam, wait for it to close, then start Big Picture in library */
+			execl("/bin/sh", "sh", "-c",
+				"pkill -9 steam 2>/dev/null; sleep 1; "
+				"steam -bigpicture steam://open/games",
+				(char *)NULL);
 			_exit(127);
 		}
 	}
@@ -16136,9 +16138,40 @@ gamepad_menu_handle_button(Monitor *m, int button, int value)
 	if (!m)
 		return 0;
 
+	/* Handle wifi popup with gamepad (A = connect, B = cancel) */
+	if (m->wifi_popup.visible && value == 1) {
+		switch (button) {
+		case BTN_SOUTH:  /* A button - connect */
+			if (!m->wifi_popup.connecting && m->wifi_popup.password_len > 0)
+				wifi_popup_connect(m);
+			return 1;
+		case BTN_EAST:   /* B button - cancel */
+			wifi_popup_hide_all();
+			return 1;
+		}
+		return 1;  /* Consume other buttons when popup is open */
+	}
+
+	/* Handle sudo popup with gamepad (A = submit, B = cancel) */
+	if (m->sudo_popup.visible && value == 1) {
+		switch (button) {
+		case BTN_SOUTH:  /* A button - submit */
+			if (!m->sudo_popup.running && m->sudo_popup.password_len > 0)
+				sudo_popup_execute(m);
+			return 1;
+		case BTN_EAST:   /* B button - cancel */
+			sudo_popup_hide_all();
+			return 1;
+		}
+		return 1;  /* Consume other buttons when popup is open */
+	}
+
 	/* Check if PC gaming view is visible - handle input there first */
 	if (m->pc_gaming.visible) {
 		if (pc_gaming_handle_button(m, button, value))
+			return 1;
+		/* Block guide button when install popup is visible */
+		if (m->pc_gaming.install_popup_visible)
 			return 1;
 		/* Guide button shows menu overlay instead of closing */
 		if (button == BTN_MODE && value == 1) {
@@ -16149,7 +16182,7 @@ gamepad_menu_handle_button(Monitor *m, int button, int value)
 				gamepad_menu_show(m);
 			return 1;
 		}
-		return 0;
+		/* Fall through to mouse click emulation if a popup client has focus */
 	}
 
 	gm = &m->gamepad_menu;
@@ -16339,12 +16372,12 @@ pc_gaming_load_cache(Monitor *m)
 
 	snprintf(path, sizeof(path), "%s" PC_GAMING_CACHE_FILE, home);
 
-	/* Check if cache exists and is recent (less than 1 hour old) */
+	/* Check if cache exists and is recent (less than 24 hours old) */
 	if (stat(path, &st) != 0)
 		return 0;
 
 	time_t now = time(NULL);
-	if (now - st.st_mtime > 3600) {
+	if (now - st.st_mtime > 86400) {
 		wlr_log(WLR_INFO, "Games cache is stale, will refresh");
 		return 0;
 	}
@@ -16818,9 +16851,8 @@ pc_gaming_filter_non_games(Monitor *m)
 		g = *pp;
 		int should_filter = !g->is_game;
 
-		/* Filter games without proper names (API failed) */
-		if (!should_filter && strncmp(g->name, "Steam Game ", 11) == 0)
-			should_filter = 1;
+		/* Don't filter games without proper names - show with app ID instead */
+		/* API may fail due to network issues, but game is still valid */
 
 		/* Filter known Proton/runtime/tool app IDs */
 		if (!should_filter && pc_gaming_is_known_tool(g->id))
@@ -16854,6 +16886,98 @@ pc_gaming_filter_non_games(Monitor *m)
 	}
 
 	wlr_log(WLR_INFO, "Filtered out %d non-game entries", removed);
+}
+
+/* Update installation status for games (check download progress) */
+static void
+pc_gaming_update_install_status(Monitor *m)
+{
+	GameEntry *g;
+	char *home;
+	const char *steam_paths[] = {
+		"%s/.local/share/Steam/steamapps",
+		"%s/.steam/steam/steamapps",
+		NULL
+	};
+
+	if (!m)
+		return;
+
+	home = getenv("HOME");
+	if (!home)
+		return;
+
+	g = m->pc_gaming.games;
+	while (g) {
+		if (g->service == GAMING_SERVICE_STEAM) {
+			/* Check appmanifest for download status */
+			for (int i = 0; steam_paths[i]; i++) {
+				char manifest_path[512];
+				FILE *fp;
+
+				snprintf(manifest_path, sizeof(manifest_path),
+					steam_paths[i], home);
+				snprintf(manifest_path + strlen(manifest_path),
+					sizeof(manifest_path) - strlen(manifest_path),
+					"/appmanifest_%s.acf", g->id);
+
+				fp = fopen(manifest_path, "r");
+				if (fp) {
+					char line[512];
+					int64_t bytes_to_download = 0;
+					int64_t bytes_downloaded = 0;
+					int state_flags = 0;
+
+					while (fgets(line, sizeof(line), fp)) {
+						char *key, *val;
+						key = strstr(line, "\"StateFlags\"");
+						if (key) {
+							val = strchr(key + 12, '\"');
+							if (val) {
+								val++;
+								state_flags = atoi(val);
+							}
+						}
+						key = strstr(line, "\"BytesToDownload\"");
+						if (key) {
+							val = strchr(key + 17, '\"');
+							if (val) {
+								val++;
+								bytes_to_download = atoll(val);
+							}
+						}
+						key = strstr(line, "\"BytesDownloaded\"");
+						if (key) {
+							val = strchr(key + 17, '\"');
+							if (val) {
+								val++;
+								bytes_downloaded = atoll(val);
+							}
+						}
+					}
+					fclose(fp);
+
+					/* StateFlags: 1026 = downloading, 1042 = updating, 4 = installed */
+					if ((state_flags & 1024) && bytes_to_download > 0) {
+						g->is_installing = 1;
+						g->install_progress = (int)((bytes_downloaded * 100) / bytes_to_download);
+						if (g->install_progress > 100)
+							g->install_progress = 100;
+					} else if (state_flags == 4) {
+						/* Fully installed */
+						g->is_installing = 0;
+						g->install_progress = 0;
+						g->installed = 1;
+					}
+					/* Don't reset is_installing for other states - Steam might be
+					 * preparing the download. Only clear when confirmed installed. */
+					break;
+				}
+			}
+		}
+		/* TODO: Add Heroic/Epic installation progress support */
+		g = g->next;
+	}
 }
 
 /* Load and scale game icon to tile dimensions */
@@ -17553,6 +17677,38 @@ pc_gaming_render(Monitor *m)
 					}
 				}
 
+				/* Installation progress bar */
+				if (g->is_installing) {
+					int bar_h = 6;
+					int bar_y = img_offset + tile_h - name_bar_h - bar_h;
+					int bar_w = tile_w;
+					int progress_w = (bar_w * g->install_progress) / 100;
+
+					/* Background bar (dark) */
+					float bar_bg[4] = {0.1f, 0.1f, 0.1f, 0.9f};
+					drawrect(tile_tree, img_offset, bar_y, bar_w, bar_h, bar_bg);
+
+					/* Progress bar (blue gradient) */
+					if (progress_w > 0) {
+						float bar_fg[4] = {0.2f, 0.6f, 1.0f, 1.0f};
+						drawrect(tile_tree, img_offset, bar_y, progress_w, bar_h, bar_fg);
+					}
+
+					/* Progress text */
+					char progress_text[16];
+					snprintf(progress_text, sizeof(progress_text), "%d%%", g->install_progress);
+					int text_w = status_text_width(progress_text);
+					struct wlr_scene_tree *progress_tree = wlr_scene_tree_create(tile_tree);
+					if (progress_tree) {
+						wlr_scene_node_set_position(&progress_tree->node,
+							img_offset + (bar_w - text_w) / 2, bar_y - 2);
+						StatusModule mod = {0};
+						mod.tree = progress_tree;
+						float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+						tray_render_label(&mod, progress_text, 0, 14, white);
+					}
+				}
+
 				/* Selection highlight border */
 				if (is_selected) {
 					int bw = 3;
@@ -17615,6 +17771,62 @@ pc_gaming_render(Monitor *m)
 	}
 }
 
+/* Timer callback for updating installation progress every 2 seconds */
+static int
+pc_gaming_install_timer_cb(void *data)
+{
+	Monitor *m;
+	int any_installing = 0;
+
+	(void)data;
+
+	/* Find monitor with visible PC gaming view */
+	m = pc_gaming_visible_monitor();
+	if (!m || !m->pc_gaming.visible)
+		return 0;
+
+	/* Update installation status */
+	pc_gaming_update_install_status(m);
+
+	/* Check if any games are still installing */
+	GameEntry *g = m->pc_gaming.games;
+	while (g) {
+		if (g->is_installing) {
+			any_installing = 1;
+			break;
+		}
+		g = g->next;
+	}
+
+	/* Re-render to show updated progress */
+	pc_gaming_render(m);
+
+	/* Reschedule timer if any games are installing */
+	if (any_installing && pc_gaming_install_timer)
+		wl_event_source_timer_update(pc_gaming_install_timer, 2000);
+
+	return 0;
+}
+
+static void
+pc_gaming_start_install_timer(void)
+{
+	if (!event_loop)
+		return;
+	if (!pc_gaming_install_timer)
+		pc_gaming_install_timer = wl_event_loop_add_timer(event_loop,
+			pc_gaming_install_timer_cb, NULL);
+	if (pc_gaming_install_timer)
+		wl_event_source_timer_update(pc_gaming_install_timer, 2000);
+}
+
+static void
+pc_gaming_stop_install_timer(void)
+{
+	if (pc_gaming_install_timer)
+		wl_event_source_timer_update(pc_gaming_install_timer, 0);
+}
+
 static void
 pc_gaming_show(Monitor *m)
 {
@@ -17652,6 +17864,10 @@ pc_gaming_show(Monitor *m)
 	/* Hide mouse cursor in PC gaming view */
 	wlr_cursor_set_surface(cursor, NULL, 0, 0);
 
+	/* Update install status and start timer */
+	pc_gaming_update_install_status(m);
+	pc_gaming_start_install_timer();
+
 	pc_gaming_render(m);
 }
 
@@ -17670,6 +17886,9 @@ pc_gaming_hide(Monitor *m)
 	pg->visible = 0;
 	if (pg->tree)
 		wlr_scene_node_set_enabled(&pg->tree->node, 0);
+
+	/* Stop install progress timer */
+	pc_gaming_stop_install_timer();
 }
 
 static void
@@ -17730,8 +17949,13 @@ pc_gaming_launch_game(Monitor *m)
 
 	/* Game is installed - launch it */
 	wlr_log(WLR_INFO, "Launching game: %s", g->name);
-	Arg arg = {.v = g->launch_cmd};
-	spawn(&arg);
+	/* Fork and exec directly - spawn() doesn't work with struct member strings */
+	pid_t pid = fork();
+	if (pid == 0) {
+		setsid();
+		execl("/bin/sh", "sh", "-c", g->launch_cmd, (char *)NULL);
+		_exit(127);
+	}
 	pc_gaming_hide(m);
 }
 
@@ -17749,6 +17973,7 @@ pc_gaming_install_popup_show(Monitor *m, GameEntry *g)
 	/* Store game info */
 	snprintf(pg->install_game_id, sizeof(pg->install_game_id), "%s", g->id);
 	snprintf(pg->install_game_name, sizeof(pg->install_game_name), "%s", g->name);
+	pg->install_game_service = g->service;
 	pg->install_popup_selected = 0;  /* Default to "Install" */
 	pg->install_popup_visible = 1;
 
@@ -17833,14 +18058,18 @@ pc_gaming_install_popup_render(Monitor *m)
 	/* Title - game name (truncated) */
 	{
 		char title[64];
-		snprintf(title, sizeof(title), "%.50s", pg->install_game_name);
-		if (strlen(pg->install_game_name) > 50)
+		snprintf(title, sizeof(title), "%.40s", pg->install_game_name);
+		if (strlen(pg->install_game_name) > 40)
 			strcat(title, "...");
 		int title_w = status_text_width(title);
 		int title_x = (popup_w - title_w) / 2;
-		StatusModule mod = {0};
-		mod.tree = pg->install_popup;
-		tray_render_label(&mod, title, title_x, 25, text_color);
+		struct wlr_scene_tree *title_tree = wlr_scene_tree_create(pg->install_popup);
+		if (title_tree) {
+			wlr_scene_node_set_position(&title_tree->node, title_x, 15);
+			StatusModule mod = {0};
+			mod.tree = title_tree;
+			tray_render_label(&mod, title, 0, 30, text_color);
+		}
 	}
 
 	/* "Not installed" text */
@@ -17849,9 +18078,13 @@ pc_gaming_install_popup_render(Monitor *m)
 		int msg_w = status_text_width(msg);
 		int msg_x = (popup_w - msg_w) / 2;
 		float gray[4] = {0.7f, 0.7f, 0.7f, 1.0f};
-		StatusModule mod = {0};
-		mod.tree = pg->install_popup;
-		tray_render_label(&mod, msg, msg_x, 55, gray);
+		struct wlr_scene_tree *msg_tree = wlr_scene_tree_create(pg->install_popup);
+		if (msg_tree) {
+			wlr_scene_node_set_position(&msg_tree->node, msg_x, 55);
+			StatusModule mod = {0};
+			mod.tree = msg_tree;
+			tray_render_label(&mod, msg, 0, 25, gray);
+		}
 	}
 
 	/* Buttons */
@@ -17864,22 +18097,30 @@ pc_gaming_install_popup_render(Monitor *m)
 	drawrect(pg->install_popup, install_x, btn_y, btn_w, btn_h,
 		pg->install_popup_selected == 0 ? selected_color : button_color);
 	{
-		const char *label = "Installer";
+		const char *label = "Install";
 		int label_w = status_text_width(label);
-		StatusModule mod = {0};
-		mod.tree = pg->install_popup;
-		tray_render_label(&mod, label, install_x + (btn_w - label_w) / 2, btn_y + 12, text_color);
+		struct wlr_scene_tree *btn_tree = wlr_scene_tree_create(pg->install_popup);
+		if (btn_tree) {
+			wlr_scene_node_set_position(&btn_tree->node, install_x + (btn_w - label_w) / 2, btn_y);
+			StatusModule mod = {0};
+			mod.tree = btn_tree;
+			tray_render_label(&mod, label, 0, btn_h, text_color);
+		}
 	}
 
 	/* Close button */
 	drawrect(pg->install_popup, close_x, btn_y, btn_w, btn_h,
 		pg->install_popup_selected == 1 ? selected_color : button_color);
 	{
-		const char *label = "Lukk";
+		const char *label = "Close";
 		int label_w = status_text_width(label);
-		StatusModule mod = {0};
-		mod.tree = pg->install_popup;
-		tray_render_label(&mod, label, close_x + (btn_w - label_w) / 2, btn_y + 12, text_color);
+		struct wlr_scene_tree *btn_tree = wlr_scene_tree_create(pg->install_popup);
+		if (btn_tree) {
+			wlr_scene_node_set_position(&btn_tree->node, close_x + (btn_w - label_w) / 2, btn_y);
+			StatusModule mod = {0};
+			mod.tree = btn_tree;
+			tray_render_label(&mod, label, 0, btn_h, text_color);
+		}
 	}
 }
 
@@ -17895,9 +18136,9 @@ pc_gaming_install_popup_handle_button(Monitor *m, int button, int value)
 	if (!pg->install_popup_visible)
 		return 0;
 
-	/* Only handle button press */
+	/* Consume all button releases when popup is open */
 	if (value != 1)
-		return 0;
+		return 1;
 
 	switch (button) {
 	case BTN_DPAD_LEFT:
@@ -17912,23 +18153,69 @@ pc_gaming_install_popup_handle_button(Monitor *m, int button, int value)
 			pc_gaming_install_popup_render(m);
 		}
 		return 1;
+	case BTN_DPAD_UP:
+	case BTN_DPAD_DOWN:
+		/* Consume but ignore - only left/right changes selection */
+		return 1;
 	case BTN_SOUTH:  /* A button - confirm */
 		if (pg->install_popup_selected == 0) {
-			/* Install - launch Steam install URL */
-			char cmd[256];
-			snprintf(cmd, sizeof(cmd), "steam steam://install/%s", pg->install_game_id);
-			wlr_log(WLR_INFO, "Installing game: %s", pg->install_game_name);
-			Arg arg = {.v = cmd};
-			spawn(&arg);
+			/* Install via the appropriate client */
+			char cmd[1024];
+			cmd[0] = '\0';
+			switch (pg->install_game_service) {
+			case GAMING_SERVICE_STEAM:
+				/* Use Steam client directly - steamcmd installs to wrong dir and doesn't update manifests */
+				snprintf(cmd, sizeof(cmd), "steam steam://install/%s", pg->install_game_id);
+				break;
+			case GAMING_SERVICE_HEROIC:
+				snprintf(cmd, sizeof(cmd), "heroic heroic://install/%s", pg->install_game_id);
+				break;
+			case GAMING_SERVICE_LUTRIS:
+				snprintf(cmd, sizeof(cmd), "lutris lutris:install/%s", pg->install_game_id);
+				break;
+			case GAMING_SERVICE_BOTTLES:
+				snprintf(cmd, sizeof(cmd), "bottles");
+				break;
+			default:
+				break;
+			}
+			if (cmd[0]) {
+				wlr_log(WLR_INFO, "Installing game via %s: %s",
+					gaming_service_names[pg->install_game_service], pg->install_game_name);
+				/* Mark game as installing immediately so progress bar shows */
+				GameEntry *g = pg->games;
+				while (g) {
+					if (strcmp(g->id, pg->install_game_id) == 0) {
+						g->is_installing = 1;
+						g->install_progress = 0;
+						break;
+					}
+					g = g->next;
+				}
+				/* Fork and exec directly - spawn() doesn't work with stack strings */
+				pid_t pid = fork();
+				if (pid == 0) {
+					setsid();
+					execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+					_exit(127);
+				}
+				/* Start/restart the install timer */
+				pc_gaming_start_install_timer();
+			}
 		}
 		pc_gaming_install_popup_hide(m);
+		/* Re-render to show progress bar immediately */
+		pc_gaming_render(m);
 		return 1;
 	case BTN_EAST:   /* B button - close */
 		pc_gaming_install_popup_hide(m);
 		return 1;
+	default:
+		/* Consume all other buttons when popup is open */
+		return 1;
 	}
 
-	return 0;
+	return 1;
 }
 
 static void
@@ -17963,6 +18250,7 @@ static int
 pc_gaming_handle_button(Monitor *m, int button, int value)
 {
 	PcGamingView *pg;
+	Client *popup_client;
 
 	if (!m)
 		return 0;
@@ -17970,6 +18258,40 @@ pc_gaming_handle_button(Monitor *m, int button, int value)
 	pg = &m->pc_gaming;
 	if (!pg->visible)
 		return 0;
+
+	/* If a window has focus (e.g. Steam dialog), click it and return to PC gaming */
+	popup_client = focustop(m);
+	if (popup_client && !popup_client->isfullscreen) {
+		/* On A button press, click center of popup and dismiss it */
+		if (value == 1 && button == BTN_SOUTH) {
+			double cx = popup_client->geom.x + popup_client->geom.width / 2.0;
+			double cy = popup_client->geom.y + popup_client->geom.height / 2.0;
+			uint32_t time_msec = (uint32_t)(monotonic_msec() & 0xFFFFFFFF);
+			wlr_cursor_warp(cursor, NULL, cx, cy);
+			/* Update pointer focus and send click */
+			struct wlr_surface *surface = client_surface(popup_client);
+			if (surface) {
+				double sx = popup_client->geom.width / 2.0;
+				double sy = popup_client->geom.height / 2.0;
+				wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
+				wlr_seat_pointer_notify_motion(seat, time_msec, sx, sy);
+				/* Send click (press + release) */
+				wlr_seat_pointer_notify_button(seat, time_msec, BTN_LEFT, WL_POINTER_BUTTON_STATE_PRESSED);
+				wlr_seat_pointer_notify_button(seat, time_msec + 1, BTN_LEFT, WL_POINTER_BUTTON_STATE_RELEASED);
+			}
+			/* Unfocus popup and return to PC gaming */
+			focusclient(NULL, 0);
+			wlr_seat_pointer_notify_clear_focus(seat);
+			return 1;
+		}
+		/* On B button, just dismiss popup without clicking */
+		if (value == 1 && button == BTN_EAST) {
+			focusclient(NULL, 0);
+			wlr_seat_pointer_notify_clear_focus(seat);
+			return 1;
+		}
+		return 0;
+	}
 
 	/* Handle install popup first if visible */
 	if (pg->install_popup_visible)
@@ -18225,12 +18547,23 @@ gamepad_event_cb(int fd, uint32_t mask, void *data)
 				/* D-pad left/right for navigation */
 				if (m && m->pc_gaming.visible && ev.value != 0) {
 					PcGamingView *pg = &m->pc_gaming;
-					if (ev.value == -1 && pg->selected_idx > 0) {
-						pg->selected_idx--;
-						pc_gaming_render(m);
-					} else if (ev.value == 1 && pg->selected_idx < pg->game_count - 1) {
-						pg->selected_idx++;
-						pc_gaming_render(m);
+					/* Handle install popup if visible */
+					if (pg->install_popup_visible) {
+						if (ev.value == -1 && pg->install_popup_selected > 0) {
+							pg->install_popup_selected--;
+							pc_gaming_install_popup_render(m);
+						} else if (ev.value == 1 && pg->install_popup_selected < 1) {
+							pg->install_popup_selected++;
+							pc_gaming_install_popup_render(m);
+						}
+					} else {
+						if (ev.value == -1 && pg->selected_idx > 0) {
+							pg->selected_idx--;
+							pc_gaming_render(m);
+						} else if (ev.value == 1 && pg->selected_idx < pg->game_count - 1) {
+							pg->selected_idx++;
+							pc_gaming_render(m);
+						}
 					}
 				}
 				break;
@@ -18238,6 +18571,9 @@ gamepad_event_cb(int fd, uint32_t mask, void *data)
 				/* D-pad up/down for menu/grid navigation */
 				if (m && m->pc_gaming.visible && ev.value != 0) {
 					PcGamingView *pg = &m->pc_gaming;
+					/* Skip if install popup is visible */
+					if (pg->install_popup_visible)
+						break;
 					if (ev.value == -1 && pg->selected_idx >= pg->cols) {
 						pg->selected_idx -= pg->cols;
 						pc_gaming_render(m);
@@ -18498,6 +18834,12 @@ gamepad_scan_devices(void)
 	closedir(dir);
 }
 
+/* Joystick navigation state for PC gaming view */
+static uint64_t joystick_nav_last_move = 0;
+static int joystick_nav_repeat_started = 0;
+#define JOYSTICK_NAV_INITIAL_DELAY 300  /* ms before repeat starts */
+#define JOYSTICK_NAV_REPEAT_RATE 150    /* ms between repeats */
+
 /* Update cursor position based on joystick input from all gamepads */
 static void
 gamepad_update_cursor(void)
@@ -18509,6 +18851,94 @@ gamepad_update_cursor(void)
 
 	if (wl_list_empty(&gamepads))
 		return;
+
+	/* Handle PC gaming view joystick navigation */
+	if (selmon && selmon->pc_gaming.visible) {
+		PcGamingView *pg = &selmon->pc_gaming;
+		Client *popup_client = focustop(selmon);
+
+		/* If a window has focus (e.g. Steam install dialog), allow mouse control */
+		if (popup_client && !popup_client->isfullscreen) {
+			/* Show cursor when controlling popup window */
+			wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
+			/* Fall through to normal mouse control code below */
+		} else {
+			/* No popup window - use grid navigation */
+			int nav_x = 0, nav_y = 0;
+
+			/* Read joystick values from all gamepads */
+			wl_list_for_each(gp, &gamepads, link) {
+				if (gp->suspended)
+					continue;
+
+				int lx_offset = gp->left_x - gp->cal_lx.center;
+				int ly_offset = gp->left_y - gp->cal_ly.center;
+				int lx_range = (gp->cal_lx.max - gp->cal_lx.min) / 2;
+				int ly_range = (gp->cal_ly.max - gp->cal_ly.min) / 2;
+				if (lx_range == 0) lx_range = 32767;
+				if (ly_range == 0) ly_range = 32767;
+				int lx_deadzone = gp->cal_lx.flat > 0 ? gp->cal_lx.flat : (lx_range * GAMEPAD_DEADZONE / 32767);
+				int ly_deadzone = gp->cal_ly.flat > 0 ? gp->cal_ly.flat : (ly_range * GAMEPAD_DEADZONE / 32767);
+
+				/* Threshold at 50% deflection for navigation */
+				int nav_threshold_x = lx_range / 2;
+				int nav_threshold_y = ly_range / 2;
+
+				if (lx_offset < -nav_threshold_x) nav_x = -1;
+				else if (lx_offset > nav_threshold_x) nav_x = 1;
+				if (ly_offset < -nav_threshold_y) nav_y = -1;
+				else if (ly_offset > nav_threshold_y) nav_y = 1;
+			}
+
+			/* Handle navigation with repeat */
+			if (nav_x != 0 || nav_y != 0) {
+				int should_move = 0;
+				uint64_t delay = joystick_nav_repeat_started ? JOYSTICK_NAV_REPEAT_RATE : JOYSTICK_NAV_INITIAL_DELAY;
+
+				if (joystick_nav_last_move == 0 || (now - joystick_nav_last_move) >= delay) {
+					should_move = 1;
+					joystick_nav_last_move = now;
+					joystick_nav_repeat_started = 1;
+				}
+
+				if (should_move) {
+					if (pg->install_popup_visible) {
+						/* Navigate install popup */
+						if (nav_x == -1 && pg->install_popup_selected > 0) {
+							pg->install_popup_selected--;
+							pc_gaming_install_popup_render(selmon);
+						} else if (nav_x == 1 && pg->install_popup_selected < 1) {
+							pg->install_popup_selected++;
+							pc_gaming_install_popup_render(selmon);
+						}
+					} else {
+						/* Navigate game grid */
+						int new_idx = pg->selected_idx;
+						if (nav_x == -1 && new_idx > 0)
+							new_idx--;
+						else if (nav_x == 1 && new_idx < pg->game_count - 1)
+							new_idx++;
+						if (nav_y == -1 && new_idx >= pg->cols)
+							new_idx -= pg->cols;
+						else if (nav_y == 1 && new_idx + pg->cols < pg->game_count)
+							new_idx += pg->cols;
+
+						if (new_idx != pg->selected_idx) {
+							pg->selected_idx = new_idx;
+							pc_gaming_render(selmon);
+						}
+					}
+				}
+			} else {
+				/* Reset repeat state when joystick returns to center */
+				joystick_nav_last_move = 0;
+				joystick_nav_repeat_started = 0;
+			}
+
+			/* Don't move mouse cursor while in PC gaming view without popup */
+			return;
+		}
+	}
 
 	/* Skip gamepad cursor control if a fullscreen client has focus (let game handle it) */
 	Client *focused = focustop(selmon);
@@ -20354,9 +20784,7 @@ adjust_volume_by_steps(int steps)
 		return 0;
 
 	if (volume_muted == 1) {
-		int mute_res = system("wpctl set-mute @DEFAULT_AUDIO_SINK@ 0");
-		(void)mute_res;
-		volume_muted = 0;
+		set_pipewire_mute(0);
 	}
 
 	vol += (double)steps * volume_step;
@@ -20397,9 +20825,7 @@ adjust_mic_by_steps(int steps)
 		return 0;
 
 	if (mic_muted == 1) {
-		int mute_res = system("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0");
-		(void)mute_res;
-		mic_muted = 0;
+		set_pipewire_mic_mute(0);
 	}
 
 	target = vol + (double)steps * mic_step;
@@ -21007,6 +21433,10 @@ cleanup(void)
 	if (popup_delay_timer) {
 		wl_event_source_remove(popup_delay_timer);
 		popup_delay_timer = NULL;
+	}
+	if (pc_gaming_install_timer) {
+		wl_event_source_remove(pc_gaming_install_timer);
+		pc_gaming_install_timer = NULL;
 	}
 	/* Clean up config rewatch timer */
 	if (config_rewatch_timer) {
@@ -22259,6 +22689,9 @@ focusclient(Client *c, int lift)
 	if (!c) {
 		/* With no client, all we have left is to clear focus */
 		wlr_seat_keyboard_notify_clear_focus(seat);
+		/* Hide cursor if PC gaming view is visible */
+		if (selmon && selmon->pc_gaming.visible)
+			wlr_cursor_set_surface(cursor, NULL, 0, 0);
 		return;
 	}
 
@@ -27917,10 +28350,12 @@ main(int argc, char *argv[])
 	if (htpc_mode_autostart || (htpc_mode_auto_on_controller && !wl_list_empty(&gamepads)))
 		htpc_mode_enter();
 
+	/* Start only git cache immediately, stagger others via timer
+	 * Phase 0=git (done), 1=file (in 30s), 2=gaming (in 60s) */
 	git_cache_update_start();
-	file_cache_update_start();
-	pc_gaming_cache_update_start();
-	schedule_cache_update_timer();
+	cache_update_phase = 1; /* Next: file cache */
+	if (cache_update_timer)
+		wl_event_source_timer_update(cache_update_timer, 30000); /* 30 seconds */
 	schedule_nixpkgs_cache_timer();
 	run(startup_cmd);
 	cleanup();

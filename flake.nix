@@ -184,10 +184,74 @@
       apps = forAllSystems (system:
         let
           ps = perSystem system;
+          pkgs = ps.pkgs;
+
+          gethashScript = pkgs.writeShellApplication {
+            name = "nixlytile-gethash";
+            runtimeInputs = with pkgs; [ git nix coreutils gnused ];
+            text = ''
+              set -euo pipefail
+
+              # Get repo root
+              REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo ".")
+              cd "$REPO_ROOT"
+
+              # Get latest commit hash
+              COMMIT=$(git rev-parse HEAD)
+              SHORT_COMMIT=$(git rev-parse --short HEAD)
+
+              # Get remote URL and extract owner/repo
+              REMOTE=$(git remote get-url origin 2>/dev/null || echo "local")
+              OWNER_REPO=$(echo "$REMOTE" | sed -E 's|.*[:/]([^/]+)/([^/]+)(\.git)?$|\1/\2|' | sed 's/\.git$//')
+
+              echo "=== nixlytile gethash ==="
+              echo "Commit: $COMMIT"
+              echo "Short:  $SHORT_COMMIT"
+              echo "Remote: $REMOTE"
+              echo "Repo:   $OWNER_REPO"
+              echo ""
+
+              # Check if tree is dirty
+              if ! git diff --quiet HEAD 2>/dev/null; then
+                echo "⚠️  Warning: Working tree has uncommitted changes!"
+                echo "   Hash will be for committed state only."
+                echo ""
+              fi
+
+              # Compute hash using nix-prefetch-url with GitHub archive
+              echo "Fetching hash from GitHub archive..."
+              if [[ "$REMOTE" == *"github.com"* ]]; then
+                ARCHIVE_URL="https://github.com/$OWNER_REPO/archive/$COMMIT.tar.gz"
+                HASH=$(nix-prefetch-url --unpack "$ARCHIVE_URL" 2>/dev/null)
+                SRI_HASH=$(nix hash convert --hash-algo sha256 --to sri "$HASH" 2>/dev/null || echo "$HASH")
+
+                echo ""
+                echo "=== For fetchFromGitHub ==="
+                echo "owner = \"$(echo "$OWNER_REPO" | cut -d/ -f1)\";"
+                echo "repo = \"$(echo "$OWNER_REPO" | cut -d/ -f2)\";"
+                echo "rev = \"$COMMIT\";"
+                echo "hash = \"$SRI_HASH\";"
+              else
+                echo "Not a GitHub remote, computing local hash..."
+                HASH=$(nix hash path . 2>/dev/null || echo "failed")
+                echo ""
+                echo "=== Local hash ==="
+                echo "hash = \"$HASH\";"
+              fi
+
+              echo ""
+              echo "=== Quick copy ==="
+              echo "$SHORT_COMMIT"
+            '';
+          };
         in {
           build = {
             type = "app";
             program = "${ps.buildScript}/bin/nixlytile-build";
+          };
+          gethash = {
+            type = "app";
+            program = "${gethashScript}/bin/nixlytile-gethash";
           };
         });
     };
