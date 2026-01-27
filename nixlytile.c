@@ -522,6 +522,7 @@ typedef struct GamepadDevice {
 	/* Inactivity tracking */
 	int64_t last_activity_ms;  /* Last input timestamp (monotonic ms) */
 	int suspended;             /* 1 if gamepad is suspended/powered off */
+	int grabbed;               /* 1 if EVIOCGRAB is active (exclusive access) */
 } GamepadDevice;
 
 typedef struct TrayMenuEntry {
@@ -1214,7 +1215,7 @@ static void tile(Monitor *m);
 static void togglefloating(const Arg *arg);
 static void togglefullscreen(const Arg *arg);
 static void togglefullscreenadaptivesync(const Arg *arg);
-static void showframepacingstats(const Arg *arg);
+static void gamepanel(const Arg *arg);
 static Monitor *stats_panel_visible_monitor(void);
 static int stats_panel_handle_key(Monitor *m, xkb_keysym_t sym);
 static void togglesticky(const Arg *arg);
@@ -1293,6 +1294,8 @@ static int should_use_dgpu(const char *cmd);
 static void set_dgpu_env(void);
 static void set_steam_env(void);
 static int is_steam_cmd(const char *cmd);
+static int is_steam_client(Client *c);
+static int is_steam_popup(Client *c);
 static void detect_gpus(void);
 static int cpu_popup_refresh_timeout(void *data);
 static void schedule_cpu_popup_refresh(uint32_t ms);
@@ -12841,8 +12844,11 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 					setsid();
 					if (desktop_entries[idx].prefers_dgpu || should_use_dgpu(cmd_str))
 						set_dgpu_env();
-					if (is_steam_cmd(cmd_str))
+					if (is_steam_cmd(cmd_str)) {
 						set_steam_env();
+						/* Launch Steam with GPU acceleration flags - same as HTPC mode */
+						execlp("steam", "steam", "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
+					}
 					execl("/bin/sh", "sh", "-c", cmd_str, NULL);
 					_exit(127);
 				}
@@ -16333,7 +16339,8 @@ gamepad_menu_show(Monitor *m)
 {
 	GamepadMenu *gm;
 	int w, h, x, y;
-	float dim_color[4] = {0.0f, 0.0f, 0.0f, 0.7f};
+	/* 80% opaque dark overlay for blur-like effect */
+	float dim_color[4] = {0.05f, 0.05f, 0.08f, 0.80f};
 
 	if (!m)
 		return;
@@ -16356,18 +16363,17 @@ gamepad_menu_show(Monitor *m)
 	gm->height = h;
 	gm->visible = 1;
 
-	/* Create dim overlay if PC gaming is visible */
-	if (m->pc_gaming.visible) {
-		if (!gm->dim)
-			gm->dim = wlr_scene_tree_create(layers[LyrBlock]);
-		if (gm->dim) {
-			struct wlr_scene_node *node, *tmp;
-			wl_list_for_each_safe(node, tmp, &gm->dim->children, link)
-				wlr_scene_node_destroy(node);
-			wlr_scene_node_set_position(&gm->dim->node, m->m.x, m->m.y);
-			drawrect(gm->dim, 0, 0, m->m.width, m->m.height, dim_color);
-			wlr_scene_node_set_enabled(&gm->dim->node, 1);
-		}
+	/* Always create dim overlay with 80% opacity for blur-like effect */
+	if (!gm->dim)
+		gm->dim = wlr_scene_tree_create(layers[LyrBlock]);
+	if (gm->dim) {
+		struct wlr_scene_node *node, *tmp;
+		wl_list_for_each_safe(node, tmp, &gm->dim->children, link)
+			wlr_scene_node_destroy(node);
+		wlr_scene_node_set_position(&gm->dim->node, m->m.x, m->m.y);
+		drawrect(gm->dim, 0, 0, m->m.width, m->m.height, dim_color);
+		wlr_scene_node_set_enabled(&gm->dim->node, 1);
+		wlr_scene_node_raise_to_top(&gm->dim->node);
 	}
 
 	if (!gm->tree)
@@ -19148,6 +19154,16 @@ gamepad_device_add(const char *path)
 	/* Initialize activity tracking */
 	gp->last_activity_ms = monotonic_msec();
 	gp->suspended = 0;
+	gp->grabbed = 0;
+
+	/* Grab exclusive access to gamepad - prevents Steam from receiving guide button
+	 * This is always enabled so nixlytile has full control over gamepad input */
+	if (ioctl(fd, EVIOCGRAB, 1) == 0) {
+		gp->grabbed = 1;
+		wlr_log(WLR_INFO, "Gamepad grabbed exclusively (Steam won't receive guide button)");
+	} else {
+		wlr_log(WLR_DEBUG, "Could not grab gamepad exclusively: %s", strerror(errno));
+	}
 
 	/* Add to event loop */
 	gp->event_source = wl_event_loop_add_fd(event_loop, fd,
@@ -19186,8 +19202,12 @@ gamepad_device_remove(const char *path)
 			wlr_log(WLR_INFO, "Gamepad disconnected: %s (%s)", gp->name, gp->path);
 			if (gp->event_source)
 				wl_event_source_remove(gp->event_source);
-			if (gp->fd >= 0)
+			if (gp->fd >= 0) {
+				/* Release exclusive grab before closing */
+				if (gp->grabbed)
+					ioctl(gp->fd, EVIOCGRAB, 0);
 				close(gp->fd);
+			}
 			wl_list_remove(&gp->link);
 			free(gp);
 			return;
@@ -19385,10 +19405,27 @@ gamepad_update_cursor(void)
 		}
 	}
 
-	/* Skip gamepad cursor control if a fullscreen client has focus (let game handle it) */
+	/* Skip gamepad cursor control if a fullscreen client has focus (let game handle it)
+	 * Exception: In HTPC mode, allow cursor control for Steam popups over fullscreen */
 	Client *focused = focustop(selmon);
-	if (focused && focused->isfullscreen)
-		return;
+	if (focused && focused->isfullscreen) {
+		/* In HTPC mode, check if there's a floating Steam popup that needs mouse control */
+		if (htpc_mode_active) {
+			Client *popup = NULL;
+			Client *c;
+			wl_list_for_each(c, &clients, link) {
+				if (c->isfloating && !c->isfullscreen && is_steam_popup(c)) {
+					popup = c;
+					break;
+				}
+			}
+			if (!popup)
+				return; /* No popup, let game handle input */
+			/* There's a Steam popup - allow mouse control below */
+		} else {
+			return;
+		}
+	}
 
 	/* Skip gamepad cursor movement if physical mouse was used recently */
 	if (last_pointer_motion_ms && (now - last_pointer_motion_ms) < 100)
@@ -23760,10 +23797,40 @@ mapnotify(struct wl_listener *listener, void *data)
 	c->output = strdup(c->mon->wlr_output->name);
 	if (c->output == NULL)
 		die("oom");
+
+	/*
+	 * HTPC mode Steam handling:
+	 * - Force Steam main window to fullscreen
+	 * - Steam popups/dialogs stay floating but get focus and raised to top
+	 */
+	if (htpc_mode_active) {
+		if (is_steam_client(c) && !c->isfloating) {
+			/* Steam main window - force fullscreen */
+			wlr_log(WLR_INFO, "HTPC: Forcing Steam to fullscreen");
+			setfullscreen(c, 1);
+		} else if (is_steam_popup(c) || (p && is_steam_popup(p))) {
+			/* Steam popup/dialog - ensure it's floating, centered, and focused */
+			c->isfloating = 1;
+			if (c->mon) {
+				c->geom.x = (c->mon->w.width - c->geom.width) / 2 + c->mon->m.x;
+				c->geom.y = (c->mon->w.height - c->geom.height) / 2 + c->mon->m.y;
+			}
+			/* Raise to top and focus */
+			wlr_scene_node_raise_to_top(&c->scene->node);
+			focusclient(c, 1);
+			wlr_log(WLR_INFO, "HTPC: Steam popup raised and focused");
+			/* Show cursor for popup interaction */
+			wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
+		}
+	}
+
 	printstatus();
 
 unset_fullscreen:
 	m = c->mon ? c->mon : xytomon(c->geom.x, c->geom.y);
+	/* In HTPC mode, don't unset fullscreen for Steam popups appearing */
+	if (htpc_mode_active && (is_steam_popup(c) || (p && is_steam_client(p))))
+		return;
 	wl_list_for_each(w, &clients, link) {
 		if (w != c && w != p && w->isfullscreen && m == w->mon && (w->tags & c->tags))
 			setfullscreen(w, 0);
@@ -27110,7 +27177,6 @@ check_fullscreen_video(void)
 	Client *c;
 	Monitor *m;
 	int any_fullscreen_active = 0;
-	char osd_msg[64];
 
 	wl_list_for_each(m, &mons, link) {
 		c = focustop(m);
@@ -27119,12 +27185,15 @@ check_fullscreen_video(void)
 
 		any_fullscreen_active = 1;
 
+		/* Check if this is a game - video detection runs silently for games */
+		int is_game = is_game_content(c) || client_wants_tearing(c);
+
 		/* Check content-type hint from client */
 		int is_video = is_video_content(c);
 
-		/* Detect exact video Hz from frame timing */
+		/* Detect exact video Hz from frame timing (use 8 samples for speed) */
 		float hz = 0.0f;
-		if (c->frame_time_count >= 16)
+		if (c->frame_time_count >= 8)
 			hz = detect_video_framerate(c);
 
 		wlr_log(WLR_DEBUG, "check_fullscreen_video: monitor=%s is_video=%d "
@@ -27146,14 +27215,11 @@ check_fullscreen_video(void)
 			continue;
 		}
 
-		/* Phase 0: Scanning - collecting frame samples */
+		/* Phase 0: Scanning - collecting frame samples (silent, no OSD) */
 		if (c->video_detect_phase == 0) {
-			if (c->frame_time_count < 16) {
-				/* Still collecting samples */
-				snprintf(osd_msg, sizeof(osd_msg), "Scanning... %d/16", c->frame_time_count);
-				show_hz_osd(m, osd_msg);
+			/* Use fewer samples for faster detection (8 instead of 16) */
+			if (c->frame_time_count < 8)
 				continue;
-			}
 			/* Enough samples collected, move to analysis */
 			c->video_detect_phase = 1;
 		}
@@ -27235,34 +27301,25 @@ check_fullscreen_video(void)
 				wlr_log(WLR_DEBUG, "Measured Hz (~%.1f) outside video range", raw_hz);
 			}
 
-			/* No video detected - implement 3-retry logic */
+			/* No video detected - silent retry (1 retry only for speed) */
 			c->video_detect_retries++;
 
-			if (c->video_detect_retries < 3) {
-				/* Reset frame collection and try again */
-				snprintf(osd_msg, sizeof(osd_msg), "Retry %d/3...", c->video_detect_retries);
-				show_hz_osd(m, osd_msg);
-
-				wlr_log(WLR_INFO, "No video detected, retry %d/3", c->video_detect_retries);
-
-				/* Clear frame data for fresh scan */
+			if (c->video_detect_retries < 1) {
+				/* Clear frame data for fresh scan - no OSD */
 				c->frame_time_idx = 0;
 				c->frame_time_count = 0;
 				c->last_buffer = NULL;
 				c->video_detect_phase = 0;
 			} else {
-				/* 3 retries exhausted - give up */
-				c->video_detect_phase = 2; /* Mark as done */
-				show_hz_osd(m, "No video detected");
-				wlr_log(WLR_INFO, "No video detected after 3 attempts on %s",
-						m->wlr_output->name);
+				/* Done - no video content, stay silent */
+				c->video_detect_phase = 2;
 			}
 		}
 	}
 
-	/* Continue checking while fullscreen clients exist */
+	/* Continue checking while fullscreen clients exist (fast interval) */
 	if (any_fullscreen_active)
-		schedule_video_check(500);
+		schedule_video_check(200);
 }
 
 void
@@ -27336,10 +27393,6 @@ setfullscreen(Client *c, int fullscreen)
 		c->last_buffer = NULL;
 		c->video_detect_retries = 0;
 		c->video_detect_phase = 0;
-		/* Try to match video refresh rate if content is video */
-		set_video_refresh_rate(c->mon, c);
-		/* Start periodic video detection check */
-		schedule_video_check(500);
 		/*
 		 * Enable dynamic game VRR if this is a game.
 		 * Game VRR will automatically adjust the display refresh rate
@@ -27347,7 +27400,12 @@ setfullscreen(Client *c, int fullscreen)
 		 */
 		if (is_game_content(c) || client_wants_tearing(c)) {
 			enable_game_vrr(c->mon);
+		} else {
+			/* Try to match video refresh rate if content is video */
+			set_video_refresh_rate(c->mon, c);
 		}
+		/* Always run silent video detection - catches cutscenes in games */
+		schedule_video_check(200);
 	} else {
 		/* restore previous size only for floating windows since their
 		 * positions are set by the user. Tiled windows will be positioned
@@ -27755,7 +27813,7 @@ static const FuncEntry func_table[] = {
 	{ "warptomonitor",     warptomonitor,     1 },
 	{ "tagtomonitornum",   tagtomonitornum,   2 },
 	{ "chvt",              chvt,              2 },
-	{ "showframepacingstats", showframepacingstats, 0 },
+	{ "gamepanel", gamepanel, 0 },
 	{ NULL, NULL, 0 }
 };
 
@@ -29025,6 +29083,39 @@ is_steam_cmd(const char *cmd)
 	return strcasestr(cmd, "steam") != NULL;
 }
 
+/* Check if client is Steam main window */
+static int
+is_steam_client(Client *c)
+{
+	const char *app_id;
+	if (!c)
+		return 0;
+	app_id = client_get_appid(c);
+	if (!app_id)
+		return 0;
+	/* Steam main window app_id is "steam" */
+	return strcasecmp(app_id, "steam") == 0;
+}
+
+/* Check if client is a Steam popup/dialog (not main window) */
+static int
+is_steam_popup(Client *c)
+{
+	const char *app_id;
+	if (!c)
+		return 0;
+	app_id = client_get_appid(c);
+	if (!app_id)
+		return 0;
+	/* Steam dialogs often have app_id starting with "steam" but may vary */
+	if (strcasestr(app_id, "steam"))
+		return 1;
+	/* Also check for common game launcher popups */
+	if (strcasestr(app_id, "steamwebhelper"))
+		return 1;
+	return 0;
+}
+
 void
 spawn(const Arg *arg)
 {
@@ -29845,7 +29936,7 @@ stats_panel_refresh_cb(void *data)
 
 /* Toggle stats panel visibility with slide animation */
 void
-showframepacingstats(const Arg *arg)
+gamepanel(const Arg *arg)
 {
 	Monitor *m = selmon;
 
@@ -29857,9 +29948,9 @@ showframepacingstats(const Arg *arg)
 	if (m->stats_panel_width < 200)
 		m->stats_panel_width = 200;
 
-	/* Create panel tree if needed */
+	/* Create panel tree if needed - use LyrBlock to show over fullscreen */
 	if (!m->stats_panel_tree) {
-		m->stats_panel_tree = wlr_scene_tree_create(layers[LyrOverlay]);
+		m->stats_panel_tree = wlr_scene_tree_create(layers[LyrBlock]);
 		if (!m->stats_panel_tree)
 			return;
 		m->stats_panel_visible = 0;
@@ -30031,9 +30122,8 @@ stats_panel_handle_key(Monitor *m, xkb_keysym_t sym)
 		return 1;
 
 	case XKB_KEY_Escape:
-	case XKB_KEY_F12:
 		/* Close panel */
-		showframepacingstats(NULL);
+		gamepanel(NULL);
 		return 1;
 	}
 

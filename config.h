@@ -243,7 +243,7 @@ static const Key default_keys[] = {
 	{ MODKEY,                    XKB_KEY_h,          setmfact,       {.f = -0.05f} },
 	{ MODKEY,                    XKB_KEY_l,          setmfact,       {.f = +0.05f} },
 	{ MODKEY,                    XKB_KEY_Return,     spawn,          {.v = alacrittycmd} },
-	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Return,     zoom,           {0} },
+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Return,     gamepanel,      {0} },
 	{ MODKEY,                    XKB_KEY_Tab,        view,           {0} },
 	{ MODKEY,                    XKB_KEY_g,          togglegaps,     {0} },
 	{ MODKEY,                    XKB_KEY_b,          togglestatusbar,{0} },

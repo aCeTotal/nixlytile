@@ -398,7 +398,7 @@ bind = mod+BackSpace spawn brave
 # bind = mod+s spawn spotify
 
 # Frame pacing statistics panel (slides in from right, shows FPS, latency, etc.)
-bind = mod+F12 showframepacingstats
+bind = mod+ctrl+Return gamepanel
 
 # === Workspaces (tags) ===
 bind = mod+1 view 1
