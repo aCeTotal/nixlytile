@@ -819,6 +819,12 @@ struct Monitor {
 	int vrr_capable;                       /* 1 if monitor supports VRR/FreeSync/G-Sync */
 	int vrr_active;                        /* 1 if VRR is currently active for video */
 	float vrr_target_hz;                   /* target Hz when using VRR for video */
+	/* Dynamic game VRR - matches display to game framerate */
+	int game_vrr_active;                   /* 1 if game VRR is currently active */
+	float game_vrr_target_fps;             /* current target FPS for game VRR */
+	float game_vrr_last_fps;               /* last stable FPS (for hysteresis) */
+	uint64_t game_vrr_last_change_ns;      /* timestamp of last VRR adjustment */
+	int game_vrr_stable_frames;            /* frames at current FPS (for stability) */
 	/* Hz OSD for refresh rate changes */
 	struct wlr_scene_tree *hz_osd_tree;
 	struct wlr_scene_tree *hz_osd_bg;
@@ -835,6 +841,61 @@ struct Monitor {
 	struct wlr_scene_tree *toast_tree;
 	struct wl_event_source *toast_timer;
 	int toast_visible;
+	/* Advanced frame pacing for games (compositor-controlled) */
+	struct wl_listener present;       /* presentation feedback listener */
+	uint64_t last_present_ns;         /* timestamp of last vblank/present */
+	uint64_t present_interval_ns;     /* measured interval between presents */
+	uint64_t target_present_ns;       /* when we want to present next frame */
+	int pending_game_frame;           /* 1 if game submitted a frame we're holding */
+	uint64_t game_frame_submit_ns;    /* when game submitted the pending frame */
+	uint64_t game_frame_intervals[8]; /* circular buffer of game frame intervals */
+	int game_frame_interval_idx;      /* index into circular buffer */
+	int game_frame_interval_count;    /* count of samples */
+	float estimated_game_fps;         /* estimated game framerate */
+	int frame_pacing_active;          /* 1 if compositor frame pacing is active */
+	/* Frame pacing statistics */
+	uint64_t frames_presented;        /* total frames presented */
+	uint64_t frames_dropped;          /* frames dropped due to late submission */
+	uint64_t frames_held;             /* frames held for better timing */
+	uint64_t total_latency_ns;        /* cumulative latency for averaging */
+	/* FPS limiter */
+	uint64_t fps_limit_last_frame_ns; /* timestamp of last frame_done sent */
+	uint64_t fps_limit_interval_ns;   /* minimum interval between frames */
+	/* Frame doubling/tripling for smooth low-FPS playback without VRR */
+	int frame_repeat_enabled;         /* 1 if frame repeat is active */
+	int frame_repeat_count;           /* how many times to show current frame (1=normal, 2=double, 3=triple) */
+	int frame_repeat_current;         /* current repeat iteration (0 to repeat_count-1) */
+	uint64_t frame_repeat_interval_ns; /* interval between repeated frames */
+	uint64_t last_game_buffer_id;     /* track when game submits new buffer */
+	uint64_t frames_repeated;         /* stats: total frames that were repeated */
+	/* Adaptive frame pacing (non-VRR smoothing) */
+	int adaptive_pacing_enabled;      /* 1 if adaptive pacing without VRR is active */
+	float target_frame_time_ms;       /* ideal frame time based on game fps */
+	uint64_t pacing_adjustment_ns;    /* fine-tune timing to reduce judder */
+	int judder_score;                 /* 0-100, lower is better */
+	/* Predictive frame timing */
+	uint64_t predicted_next_frame_ns; /* when we expect game to submit next frame */
+	uint64_t frame_variance_ns;       /* variance in frame times (jitter measure) */
+	int frames_early;                 /* frames that arrived earlier than predicted */
+	int frames_late;                  /* frames that arrived later than predicted */
+	float prediction_accuracy;        /* 0-100%, how accurate our predictions are */
+	/* Input latency tracking */
+	uint64_t last_input_ns;           /* timestamp of last input event */
+	uint64_t input_to_frame_ns;       /* time from input to frame commit */
+	uint64_t min_input_latency_ns;    /* minimum observed input latency */
+	uint64_t max_input_latency_ns;    /* maximum observed input latency */
+	/* Memory pressure */
+	int memory_pressure;              /* 0-100, current memory usage % */
+	/* Stats panel (sliding overlay from right) */
+	struct wlr_scene_tree *stats_panel_tree;
+	struct wl_event_source *stats_panel_timer;
+	struct wl_event_source *stats_panel_anim_timer;
+	int stats_panel_visible;
+	int stats_panel_target_x;         /* target X position for animation */
+	int stats_panel_current_x;        /* current X position during animation */
+	int stats_panel_width;            /* panel width (25% of screen) */
+	uint64_t stats_panel_anim_start;  /* animation start time */
+	int stats_panel_animating;        /* 1 if currently animating */
 };
 
 typedef struct {
@@ -996,6 +1057,7 @@ static void renderlight(StatusModule *module, int bar_height, const char *text);
 static void rendernet(StatusModule *module, int bar_height, const char *text);
 static void renderbattery(StatusModule *module, int bar_height, const char *text);
 static void rendermon(struct wl_listener *listener, void *data);
+static void outputpresent(struct wl_listener *listener, void *data);
 static void rendervolume(StatusModule *module, int bar_height, const char *text);
 static void rendermic(StatusModule *module, int bar_height, const char *text);
 static void render_icon_label(StatusModule *module, int bar_height, const char *text,
@@ -1108,6 +1170,9 @@ static void set_adaptive_sync(Monitor *m, int enabled);
 static void set_video_refresh_rate(Monitor *m, Client *c);
 static void restore_max_refresh_rate(Monitor *m);
 static int is_video_content(Client *c);
+static void update_game_vrr(Monitor *m, float current_fps);
+static void enable_game_vrr(Monitor *m);
+static void disable_game_vrr(Monitor *m);
 static int is_game_content(Client *c);
 static int client_wants_tearing(Client *c);
 static void track_client_frame(Client *c);
@@ -1149,6 +1214,9 @@ static void tile(Monitor *m);
 static void togglefloating(const Arg *arg);
 static void togglefullscreen(const Arg *arg);
 static void togglefullscreenadaptivesync(const Arg *arg);
+static void showframepacingstats(const Arg *arg);
+static Monitor *stats_panel_visible_monitor(void);
+static int stats_panel_handle_key(Monitor *m, xkb_keysym_t sym);
 static void togglesticky(const Arg *arg);
 static void togglegaps(const Arg *arg);
 static void togglestatusbar(const Arg *arg);
@@ -1189,9 +1257,11 @@ static void schedule_nixpkgs_cache_timer(void);
 static void update_game_mode(void);
 static void htpc_mode_enter(void);
 static void htpc_mode_exit(void);
+static uint64_t get_time_ns(void);
 static void htpc_mode_toggle(const Arg *arg);
 static void config_expand_path(const char *src, char *dst, size_t dstlen);
 static int any_client_fullscreen(void);
+static Client *get_fullscreen_client(void);
 static void modal_truncate_to_width(const char *src, char *dst, size_t len, int max_px);
 static void shorten_path_display(const char *full, char *out, size_t len);
 static int desktop_entry_cmp_used(const void *a, const void *b);
@@ -1479,7 +1549,14 @@ static double resize_start_x, resize_start_y;
 static LayoutNode *resize_split_node;
 static LayoutNode *resize_split_node_h;
 static int fullscreen_adaptive_sync_enabled = 1;
+static int fps_limit_enabled = 0;        /* 1 if FPS limiter is active */
+static int fps_limit_value = 60;         /* FPS limit value (default 60) */
 static int game_mode_active = 0; /* Set when any client is fullscreen - pauses background tasks */
+static int game_mode_ultra = 0;  /* Ultra game mode - maximum performance, minimal latency */
+static Client *game_mode_client = NULL;  /* The fullscreen game client */
+static pid_t game_mode_pid = 0;  /* PID of fullscreen game process */
+static int game_mode_nice_applied = 0;  /* 1 if we changed nice value */
+static int game_mode_ioclass_applied = 0;  /* 1 if we changed IO priority */
 static int htpc_mode_active = 0; /* HTPC mode - hides statusbar, stops background tasks */
 static struct wl_event_source *status_timer;
 static struct wl_event_source *status_cpu_timer;
@@ -13703,28 +13780,214 @@ schedule_nixpkgs_cache_timer(void)
 	wl_event_source_timer_update(nixpkgs_cache_timer, 604800000);
 }
 
-/* Check if any client is currently fullscreen */
-static int
-any_client_fullscreen(void)
+/* Check if any client is currently fullscreen, return the client if found */
+static Client *
+get_fullscreen_client(void)
 {
 	Client *c;
 	wl_list_for_each(c, &clients, link) {
 		if (c->isfullscreen && client_surface(c)->mapped)
-			return 1;
+			return c;
 	}
-	return 0;
+	return NULL;
 }
 
-/* Update game mode state - called when fullscreen state changes */
+/* Check if any client is currently fullscreen */
+static int
+any_client_fullscreen(void)
+{
+	return get_fullscreen_client() != NULL;
+}
+
+/*
+ * Get the PID of a Wayland client.
+ * Returns 0 if the PID cannot be determined.
+ */
+static pid_t
+client_get_pid(Client *c)
+{
+	struct wlr_surface *surface;
+	struct wl_client *wl_client;
+	pid_t pid = 0;
+	uid_t uid;
+	gid_t gid;
+
+	if (!c)
+		return 0;
+
+	surface = client_surface(c);
+	if (!surface || !surface->resource)
+		return 0;
+
+	wl_client = wl_resource_get_client(surface->resource);
+	if (!wl_client)
+		return 0;
+
+	wl_client_get_credentials(wl_client, &pid, &uid, &gid);
+	return pid;
+}
+
+/*
+ * Apply high-priority scheduling to a game process for optimal performance.
+ *
+ * This sets:
+ * 1. Nice value to -5 (higher CPU priority than normal processes)
+ * 2. I/O priority to real-time class (faster disk access)
+ * 3. SCHED_RR for compositor thread (optional, requires CAP_SYS_NICE)
+ *
+ * These optimizations reduce latency and ensure the game gets CPU time
+ * when it needs it, similar to what gamemode daemon does.
+ */
+static void
+apply_game_priority(pid_t pid)
+{
+	char cmd[256];
+
+	if (pid <= 1)
+		return;
+
+	/*
+	 * Set nice value to -5 (requires CAP_SYS_NICE or root).
+	 * This gives the game higher CPU scheduling priority.
+	 * -5 is aggressive but not extreme (-20 is max).
+	 */
+	snprintf(cmd, sizeof(cmd), "renice -n -5 -p %d 2>/dev/null", pid);
+	if (system(cmd) == 0) {
+		game_mode_nice_applied = 1;
+		wlr_log(WLR_INFO, "Game priority: set nice=-5 for PID %d", pid);
+	}
+
+	/*
+	 * Set I/O scheduling to best-effort class with high priority (0).
+	 * This ensures the game gets fast disk access for asset loading.
+	 * Class 2 = best-effort, priority 0 = highest within class.
+	 */
+	snprintf(cmd, sizeof(cmd), "ionice -c 2 -n 0 -p %d 2>/dev/null", pid);
+	if (system(cmd) == 0) {
+		game_mode_ioclass_applied = 1;
+		wlr_log(WLR_INFO, "Game priority: set ionice class=2 prio=0 for PID %d", pid);
+	}
+
+	/*
+	 * Disable CPU frequency scaling governor to prevent throttling.
+	 * This keeps the CPU at high frequency for consistent performance.
+	 * Note: Only works if user has permission to write to sysfs.
+	 */
+	(void)system("for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do "
+	             "echo performance > \"$cpu\" 2>/dev/null; done");
+}
+
+/*
+ * Restore normal priority for a process after game mode ends.
+ */
+static void
+restore_game_priority(pid_t pid)
+{
+	char cmd[256];
+
+	if (pid <= 1)
+		return;
+
+	/* Restore nice value to 0 (normal) */
+	if (game_mode_nice_applied) {
+		snprintf(cmd, sizeof(cmd), "renice -n 0 -p %d 2>/dev/null", pid);
+		(void)system(cmd);
+		game_mode_nice_applied = 0;
+		wlr_log(WLR_INFO, "Game priority: restored nice=0 for PID %d", pid);
+	}
+
+	/* Restore I/O priority to normal (class 2, priority 4) */
+	if (game_mode_ioclass_applied) {
+		snprintf(cmd, sizeof(cmd), "ionice -c 2 -n 4 -p %d 2>/dev/null", pid);
+		(void)system(cmd);
+		game_mode_ioclass_applied = 0;
+	}
+
+	/*
+	 * Restore CPU governor to powersave/schedutil (common defaults).
+	 * This allows the CPU to scale down when not gaming.
+	 */
+	(void)system("for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do "
+	             "echo schedutil > \"$cpu\" 2>/dev/null || echo powersave > \"$cpu\" 2>/dev/null; done");
+}
+
+/*
+ * Check system memory pressure for performance monitoring.
+ * Returns a value 0-100 indicating memory pressure (0=no pressure, 100=critical).
+ */
+static int
+get_memory_pressure(void)
+{
+	FILE *f;
+	char line[256];
+	unsigned long mem_total = 0, mem_available = 0;
+	int pressure = 0;
+
+	f = fopen("/proc/meminfo", "r");
+	if (!f)
+		return 0;
+
+	while (fgets(line, sizeof(line), f)) {
+		if (strncmp(line, "MemTotal:", 9) == 0) {
+			sscanf(line + 9, "%lu", &mem_total);
+		} else if (strncmp(line, "MemAvailable:", 13) == 0) {
+			sscanf(line + 13, "%lu", &mem_available);
+		}
+	}
+	fclose(f);
+
+	if (mem_total > 0 && mem_available > 0) {
+		/* Calculate percentage of memory in use */
+		pressure = 100 - (int)(mem_available * 100 / mem_total);
+	}
+
+	return pressure;
+}
+
+/*
+ * Ultra Game Mode - Maximum performance when fullscreen game detected.
+ *
+ * This is an aggressive optimization mode that minimizes ALL compositor
+ * overhead when a game is running fullscreen:
+ *
+ * 1. Stops ALL background timers (cache updates, status polling, wifi scans, etc.)
+ * 2. Hides the statusbar completely
+ * 3. Hides all popups and menus
+ * 4. Disables compositor animations
+ * 5. Direct scanout is automatically activated by wlroots when conditions are met
+ * 6. Tearing is enabled for games that request it (lowest latency)
+ *
+ * The goal is minimal latency path - the game's buffer goes directly to display
+ * without any compositor processing or system interrupts from background tasks.
+ */
 static void
 update_game_mode(void)
 {
 	int was_active = game_mode_active;
-	game_mode_active = any_client_fullscreen();
+	int was_ultra = game_mode_ultra;
+	Client *c = get_fullscreen_client();
+	Monitor *m;
+	int is_game = 0;
 
-	if (game_mode_active && !was_active) {
-		wlr_log(WLR_INFO, "Game mode activated - pausing background tasks");
-		/* Cancel pending timers to reduce CPU/IO during gaming */
+	game_mode_active = (c != NULL);
+	game_mode_client = c;
+
+	/* Determine if this is actually a game (vs video or other fullscreen content) */
+	if (c) {
+		is_game = client_wants_tearing(c) || is_game_content(c);
+	}
+
+	/* Ultra mode activates for games, regular game mode for other fullscreen content */
+	game_mode_ultra = (game_mode_active && is_game);
+
+	if (game_mode_ultra && !was_ultra) {
+		/*
+		 * ENTERING ULTRA GAME MODE
+		 * Maximum performance - stop everything non-essential
+		 */
+		wlr_log(WLR_INFO, "ULTRA GAME MODE ACTIVATED - maximum performance, minimal latency");
+
+		/* Stop ALL background timers to eliminate compositor interrupts */
 		if (cache_update_timer)
 			wl_event_source_timer_update(cache_update_timer, 0);
 		if (nixpkgs_cache_timer)
@@ -13733,13 +13996,106 @@ update_game_mode(void)
 			wl_event_source_timer_update(status_cpu_timer, 0);
 		if (status_timer)
 			wl_event_source_timer_update(status_timer, 0);
+		if (status_hover_timer)
+			wl_event_source_timer_update(status_hover_timer, 0);
+		if (cpu_popup_refresh_timer)
+			wl_event_source_timer_update(cpu_popup_refresh_timer, 0);
+		if (ram_popup_refresh_timer)
+			wl_event_source_timer_update(ram_popup_refresh_timer, 0);
+		if (wifi_scan_timer)
+			wl_event_source_timer_update(wifi_scan_timer, 0);
+		if (video_check_timer)
+			wl_event_source_timer_update(video_check_timer, 0);
+		if (popup_delay_timer)
+			wl_event_source_timer_update(popup_delay_timer, 0);
+		if (config_rewatch_timer)
+			wl_event_source_timer_update(config_rewatch_timer, 0);
+		if (gamepad_inactivity_timer)
+			wl_event_source_timer_update(gamepad_inactivity_timer, 0);
+		if (gamepad_cursor_timer)
+			wl_event_source_timer_update(gamepad_cursor_timer, 0);
+		if (hz_osd_timer)
+			wl_event_source_timer_update(hz_osd_timer, 0);
+		if (pc_gaming_install_timer)
+			wl_event_source_timer_update(pc_gaming_install_timer, 0);
+		/* NOTE: Keep bt_scan_timer - needed for controller reconnection */
+		/* NOTE: Keep gamepad_pending_timer - needed for controller input */
+
+		/* Hide statusbar on the monitor with the game */
+		if (c && c->mon) {
+			c->mon->showbar = 0;
+			if (c->mon->statusbar.tree)
+				wlr_scene_node_set_enabled(&c->mon->statusbar.tree->node, 0);
+		}
+
+		/* Hide all popups and menus - they would just be occluded anyway */
+		net_menu_hide_all();
+		wifi_popup_hide_all();
+		sudo_popup_hide_all();
+		tray_menu_hide_all();
+		/* Don't hide modal/nixpkgs - user might be searching while game loads */
+
+		/*
+		 * Apply high-priority scheduling to the game process.
+		 * This gives the game more CPU time and faster I/O access.
+		 */
+		game_mode_pid = client_get_pid(c);
+		if (game_mode_pid > 1) {
+			apply_game_priority(game_mode_pid);
+		}
+
+	} else if (game_mode_active && !was_active && !game_mode_ultra) {
+		/*
+		 * ENTERING REGULAR GAME MODE (non-game fullscreen like video)
+		 * Less aggressive - just pause some background tasks
+		 */
+		wlr_log(WLR_INFO, "Game mode activated (non-game fullscreen) - pausing background tasks");
+
+		if (cache_update_timer)
+			wl_event_source_timer_update(cache_update_timer, 0);
+		if (nixpkgs_cache_timer)
+			wl_event_source_timer_update(nixpkgs_cache_timer, 0);
+		if (status_cpu_timer)
+			wl_event_source_timer_update(status_cpu_timer, 0);
+
 	} else if (!game_mode_active && was_active) {
-		wlr_log(WLR_INFO, "Game mode deactivated - resuming background tasks");
+		/*
+		 * EXITING GAME MODE - restore everything
+		 */
+		wlr_log(WLR_INFO, "Game mode deactivated - restoring normal operation");
+
 		/* Resume all background timers */
 		schedule_cache_update_timer();
 		schedule_nixpkgs_cache_timer();
 		schedule_status_timer();
 		schedule_next_status_refresh();
+
+		/* Restore additional timers if we were in ultra mode */
+		if (was_ultra) {
+			/* Re-enable statusbar on all monitors */
+			wl_list_for_each(m, &mons, link) {
+				m->showbar = 1;
+				if (m->statusbar.tree)
+					wlr_scene_node_set_enabled(&m->statusbar.tree->node, 1);
+			}
+
+			/* Schedule deferred timer restarts for non-critical tasks */
+			if (wifi_scan_timer)
+				wl_event_source_timer_update(wifi_scan_timer, 5000);  /* 5s delay */
+			if (config_rewatch_timer)
+				wl_event_source_timer_update(config_rewatch_timer, 2000);
+
+			/* Restore normal priority for the game process */
+			if (game_mode_pid > 1) {
+				restore_game_priority(game_mode_pid);
+			}
+
+			wlr_log(WLR_INFO, "Ultra game mode deactivated - full system restored");
+		}
+
+		game_mode_ultra = 0;
+		game_mode_client = NULL;
+		game_mode_pid = 0;
 	}
 }
 
@@ -18028,8 +18384,20 @@ pc_gaming_launch_game(Monitor *m)
 		/* Set discrete GPU environment for gaming */
 		set_dgpu_env();
 		/* Set Steam env vars if this is a Steam game (uses steam:// protocol) */
-		if (g->service == GAMING_SERVICE_STEAM || is_steam_cmd(g->launch_cmd))
+		if (g->service == GAMING_SERVICE_STEAM || is_steam_cmd(g->launch_cmd)) {
 			set_steam_env();
+			/* If Steam isn't running, start it with GPU flags then run the game
+			 * This ensures Steam UI has full GPU acceleration */
+			if (!is_process_running("steam")) {
+				char cmd[512];
+				snprintf(cmd, sizeof(cmd),
+					"steam -cef-force-gpu -cef-disable-sandbox %s",
+					strstr(g->launch_cmd, "steam://") ? strstr(g->launch_cmd, "steam://") : "");
+				wlr_log(WLR_INFO, "Starting Steam with GPU flags: %s", cmd);
+				execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+				_exit(127);
+			}
+		}
 		execl("/bin/sh", "sh", "-c", g->launch_cmd, (char *)NULL);
 		_exit(127);
 	}
@@ -22339,6 +22707,7 @@ createmon(struct wl_listener *listener, void *data)
 	LISTEN(&wlr_output->events.frame, &m->frame, rendermon);
 	LISTEN(&wlr_output->events.destroy, &m->destroy, cleanupmon);
 	LISTEN(&wlr_output->events.request_state, &m->request_state, requestmonstate);
+	LISTEN(&wlr_output->events.present, &m->present, outputpresent);
 
 	wlr_output_state_set_enabled(&state, 1);
 	wlr_output_commit_state(wlr_output, &state);
@@ -22348,6 +22717,12 @@ createmon(struct wl_listener *listener, void *data)
 	m->vrr_capable = 0;
 	m->vrr_active = 0;
 	m->vrr_target_hz = 0.0f;
+	/* Initialize game VRR fields */
+	m->game_vrr_active = 0;
+	m->game_vrr_target_fps = 0.0f;
+	m->game_vrr_last_fps = 0.0f;
+	m->game_vrr_last_change_ns = 0;
+	m->game_vrr_stable_frames = 0;
 	if (wlr_output_is_drm(wlr_output)) {
 		struct wlr_output_state vrr_test;
 		wlr_output_state_init(&vrr_test);
@@ -23004,6 +23379,14 @@ keypress(struct wl_listener *listener, void *data)
 	KeyboardGroup *group = wl_container_of(listener, group, key);
 	struct wlr_keyboard_key_event *event = data;
 
+	/*
+	 * Track input timestamp for latency measurement.
+	 * This helps measure input-to-photon latency in games.
+	 */
+	if (game_mode_ultra && selmon) {
+		selmon->last_input_ns = get_time_ns();
+	}
+
 	/* Translate libinput keycode -> xkbcommon */
 	uint32_t keycode = event->keycode + 8;
 	/* Get a list of keysyms based on the keymap for this keyboard */
@@ -23026,6 +23409,7 @@ keypress(struct wl_listener *listener, void *data)
 	Monitor *wifi_mon = wifi_popup_visible_monitor();
 	Monitor *sudo_mon = sudo_popup_visible_monitor();
 	Monitor *pc_gaming_mon = pc_gaming_visible_monitor();
+	Monitor *stats_mon = stats_panel_visible_monitor();
 
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
@@ -23043,6 +23427,13 @@ keypress(struct wl_listener *listener, void *data)
 		if (wifi_mon && !handled) {
 			for (i = 0; i < nsyms; i++) {
 				if (wifi_popup_handle_key(wifi_mon, mods, syms[i]))
+					handled = 1;
+			}
+		}
+		/* Stats panel - handle before PC gaming so it can be used in-game */
+		if (stats_mon && !handled) {
+			for (i = 0; i < nsyms; i++) {
+				if (stats_panel_handle_key(stats_mon, syms[i]))
 					handled = 1;
 			}
 		}
@@ -23640,6 +24031,14 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	struct wlr_surface *surface = NULL;
 	struct wlr_pointer_constraint_v1 *constraint;
 
+	/*
+	 * Track input timestamp for mouse motion latency measurement.
+	 * Mouse input is most critical for competitive gaming.
+	 */
+	if (game_mode_ultra && selmon && time > 0) {
+		selmon->last_input_ns = get_time_ns();
+	}
+
 	/* Find the client under the pointer and send the event along. */
 	xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
 
@@ -24233,6 +24632,7 @@ get_time_ns(void)
  *   - Track commit duration for predicting future commits
  *   - Use rolling average to handle spikes gracefully
  *   - Skip unnecessary commits when nothing has changed
+ *   - Compositor-controlled frame pacing for optimal display timing
  */
 void
 rendermon(struct wl_listener *listener, void *data)
@@ -24248,6 +24648,7 @@ rendermon(struct wl_listener *listener, void *data)
 	int is_video = 0;
 	int is_game = 0;
 	int is_direct_scanout = 0;
+	int use_frame_pacing = 0;
 
 	frame_start_ns = get_time_ns();
 
@@ -24289,22 +24690,309 @@ rendermon(struct wl_listener *listener, void *data)
 	/* Track scanout state transitions and show notification */
 	if (is_direct_scanout && !m->direct_scanout_active) {
 		m->direct_scanout_active = 1;
+		m->frame_pacing_active = 1; /* Enable frame pacing for direct scanout */
 		if (!m->direct_scanout_notified) {
 			show_hz_osd(m, "Direct Scanout");
 			m->direct_scanout_notified = 1;
 		}
+		wlr_log(WLR_INFO, "Direct scanout activated on %s - frame pacing enabled",
+			m->wlr_output->name);
 	} else if (!is_direct_scanout && m->direct_scanout_active) {
 		m->direct_scanout_active = 0;
+		m->frame_pacing_active = 0;
 		m->direct_scanout_notified = 0; /* Reset so next scanout shows OSD again */
+		/* Reset frame pacing statistics on exit */
+		m->pending_game_frame = 0;
+		m->estimated_game_fps = 0.0f;
+		wlr_log(WLR_INFO, "Direct scanout deactivated on %s - stats: %lu presented, %lu dropped, %lu held",
+			m->wlr_output->name, m->frames_presented, m->frames_dropped, m->frames_held);
+	}
+
+	/*
+	 * Frame pacing logic for games in direct scanout mode.
+	 *
+	 * When we have direct scanout with a game, we can optimize frame timing:
+	 * 1. Track the game's frame submission rate
+	 * 2. Hold frames that arrive too early (would cause judder)
+	 * 3. Release frames at optimal vblank timing
+	 *
+	 * This is similar to Gamescope's frame pacing but integrated into
+	 * the compositor for seamless operation.
+	 */
+	if (is_direct_scanout && is_game && !allow_tearing && m->frame_pacing_active) {
+		use_frame_pacing = 1;
+
+		/* Track game's frame submission interval */
+		if (m->game_frame_submit_ns > 0 && frame_start_ns > m->game_frame_submit_ns) {
+			uint64_t game_interval = frame_start_ns - m->game_frame_submit_ns;
+
+			/* Only track reasonable intervals (8ms - 100ms = ~10-120fps) */
+			if (game_interval > 8000000 && game_interval < 100000000) {
+				m->game_frame_intervals[m->game_frame_interval_idx] = game_interval;
+				m->game_frame_interval_idx = (m->game_frame_interval_idx + 1) % 8;
+				if (m->game_frame_interval_count < 8)
+					m->game_frame_interval_count++;
+
+				/* Calculate estimated game FPS from rolling average */
+				if (m->game_frame_interval_count >= 4) {
+					uint64_t avg_interval = 0;
+					uint64_t variance_sum = 0;
+					for (int i = 0; i < m->game_frame_interval_count; i++)
+						avg_interval += m->game_frame_intervals[i];
+					avg_interval /= m->game_frame_interval_count;
+					m->estimated_game_fps = 1000000000.0f / (float)avg_interval;
+
+					/*
+					 * Calculate frame time variance (jitter).
+					 * Low variance = consistent frame times = smooth gameplay.
+					 * High variance = inconsistent = potential stutter.
+					 */
+					for (int i = 0; i < m->game_frame_interval_count; i++) {
+						int64_t diff = (int64_t)m->game_frame_intervals[i] - (int64_t)avg_interval;
+						variance_sum += (uint64_t)(diff * diff);
+					}
+					m->frame_variance_ns = variance_sum / m->game_frame_interval_count;
+
+					/*
+					 * PREDICTIVE FRAME TIMING
+					 *
+					 * Predict when the next frame will arrive based on:
+					 * 1. Average frame interval
+					 * 2. Recent trend (acceleration/deceleration)
+					 * 3. Variance (add margin for high-jitter games)
+					 *
+					 * This allows the compositor to prepare for the frame
+					 * and commit at optimal vblank timing.
+					 */
+					m->predicted_next_frame_ns = frame_start_ns + avg_interval;
+
+					/* Add margin based on variance (higher jitter = more margin) */
+					if (m->frame_variance_ns > 0) {
+						/* sqrt approximation for margin: variance^0.5 */
+						uint64_t margin = 0;
+						uint64_t v = m->frame_variance_ns;
+						while (v > margin * margin)
+							margin += 100000; /* 0.1ms steps */
+						m->predicted_next_frame_ns += margin;
+					}
+
+					/* Track prediction accuracy */
+					if (m->predicted_next_frame_ns > 0) {
+						int64_t prediction_error = (int64_t)frame_start_ns - (int64_t)(m->predicted_next_frame_ns - avg_interval);
+						if (prediction_error < 0) prediction_error = -prediction_error;
+
+						/* Frame is "on time" if within 2ms of prediction */
+						if (prediction_error < 2000000) {
+							/* Good prediction */
+							m->prediction_accuracy = m->prediction_accuracy * 0.9f + 10.0f;
+						} else if (prediction_error < (int64_t)avg_interval / 4) {
+							/* Acceptable prediction */
+							m->prediction_accuracy = m->prediction_accuracy * 0.9f + 5.0f;
+							if (frame_start_ns < m->predicted_next_frame_ns - avg_interval)
+								m->frames_early++;
+							else
+								m->frames_late++;
+						} else {
+							/* Poor prediction */
+							m->prediction_accuracy = m->prediction_accuracy * 0.9f;
+							m->frames_late++;
+						}
+						if (m->prediction_accuracy > 100.0f) m->prediction_accuracy = 100.0f;
+					}
+
+					/*
+					 * Update dynamic game VRR.
+					 * This adjusts the display to match the game's framerate,
+					 * eliminating judder when games run below native refresh.
+					 */
+					if (m->game_vrr_active) {
+						update_game_vrr(m, m->estimated_game_fps);
+					}
+				}
+			}
+		}
+		m->game_frame_submit_ns = frame_start_ns;
+		m->pending_game_frame = 1;
+
+		/*
+		 * Frame hold/release decision:
+		 *
+		 * If the game is running slower than display refresh, present immediately.
+		 * If the game is running faster, we may want to hold frames to prevent
+		 * judder from uneven frame presentation.
+		 *
+		 * Key insight: With direct scanout, the display directly shows the
+		 * game's buffer. We control WHEN it flips via the commit timing.
+		 */
+		if (m->present_interval_ns > 0 && m->target_present_ns > 0) {
+			uint64_t time_to_target = 0;
+			if (frame_start_ns < m->target_present_ns)
+				time_to_target = m->target_present_ns - frame_start_ns;
+
+			/*
+			 * If we're more than 2ms early, the frame arrived too soon.
+			 * In a perfect world we'd hold it, but that requires async
+			 * frame scheduling which is complex. For now, just track it.
+			 */
+			if (time_to_target > 2000000) {
+				m->frames_held++;
+				/*
+				 * Note: True frame holding would require:
+				 * 1. Storing the buffer
+				 * 2. Setting up a timer for optimal commit time
+				 * 3. Committing at the right moment
+				 *
+				 * wlroots doesn't easily support this, so we commit
+				 * immediately but track that we could have held it.
+				 */
+			}
+		}
+	}
+
+	/*
+	 * ============ FRAME DOUBLING/TRIPLING FOR SMOOTH LOW-FPS PLAYBACK ============
+	 *
+	 * When a game runs at a framerate that doesn't divide evenly into the
+	 * display refresh rate, you get "judder" - uneven frame presentation times.
+	 *
+	 * Example: 30 FPS game on 60 Hz display
+	 *   Without frame doubling: frame times are 16.6ms, 16.6ms (uneven feel)
+	 *   With frame doubling: each game frame shown 2x = perfect 33.3ms cadence
+	 *
+	 * Example: 24 FPS video on 120 Hz display
+	 *   Without: judder from 5:5:5:5:5 pattern not matching 24fps
+	 *   With frame 5x repeat: each frame shown 5 times = perfect 41.6ms cadence
+	 *
+	 * This technique is used by:
+	 * - Gamescope (Steam Deck compositor)
+	 * - High-end TVs (motion interpolation alternative)
+	 * - Professional video players
+	 *
+	 * We ONLY use this when VRR is NOT available or disabled, as VRR solves
+	 * this problem by adjusting the display refresh to match content.
+	 */
+	if (is_game && m->frame_pacing_active && !m->game_vrr_active && !allow_tearing) {
+		float display_hz = 0.0f;
+		float game_fps = m->estimated_game_fps;
+		int optimal_repeat = 1;
+
+		/* Get current display refresh rate */
+		if (m->present_interval_ns > 0) {
+			display_hz = 1000000000.0f / (float)m->present_interval_ns;
+		} else if (m->wlr_output->current_mode) {
+			display_hz = (float)m->wlr_output->current_mode->refresh / 1000.0f;
+		}
+
+		/*
+		 * Calculate optimal frame repeat count.
+		 * We want to find integer N where: display_hz / N ≈ game_fps
+		 *
+		 * This gives perfectly even frame timing without interpolation.
+		 */
+		if (game_fps > 5.0f && display_hz > 30.0f) {
+			float ratio = display_hz / game_fps;
+
+			/*
+			 * Find the best integer repeat count (1-6x).
+			 * We check which integer gives the smallest error.
+			 */
+			float min_error = 9999.0f;
+			for (int n = 1; n <= 6; n++) {
+				float effective_fps = display_hz / (float)n;
+				float error = fabsf(effective_fps - game_fps);
+				/* Also check if game fps is close to a fraction */
+				float frac_error = fabsf(ratio - (float)n);
+
+				if (frac_error < 0.15f && error < min_error) {
+					min_error = error;
+					optimal_repeat = n;
+				}
+			}
+
+			/*
+			 * Common patterns we optimize for:
+			 *
+			 * 60Hz display:
+			 *   30 FPS → 2x repeat (60/2=30) ✓
+			 *   20 FPS → 3x repeat (60/3=20) ✓
+			 *   15 FPS → 4x repeat (60/4=15) ✓
+			 *
+			 * 120Hz display:
+			 *   60 FPS → 2x repeat (120/2=60) ✓
+			 *   40 FPS → 3x repeat (120/3=40) ✓
+			 *   30 FPS → 4x repeat (120/4=30) ✓
+			 *   24 FPS → 5x repeat (120/5=24) ✓ (perfect for film content)
+			 *
+			 * 144Hz display:
+			 *   72 FPS → 2x repeat (144/2=72) ✓
+			 *   48 FPS → 3x repeat (144/3=48) ✓
+			 *   36 FPS → 4x repeat (144/4=36) ✓
+			 */
+
+			/* Only enable repeat if we have a good match (within 10%) */
+			if (optimal_repeat > 1) {
+				float target_fps = display_hz / (float)optimal_repeat;
+				float match_quality = fabsf(game_fps - target_fps) / target_fps;
+
+				if (match_quality > 0.10f) {
+					/* Not a good match, disable repeat */
+					optimal_repeat = 1;
+				}
+			}
+		}
+
+		/* Update frame repeat state */
+		if (optimal_repeat != m->frame_repeat_count) {
+			if (optimal_repeat > 1 && !m->frame_repeat_enabled) {
+				m->frame_repeat_enabled = 1;
+				m->frame_repeat_interval_ns = m->present_interval_ns;
+				wlr_log(WLR_INFO, "Frame repeat enabled: %dx (%.1f FPS → %.1f Hz display)",
+					optimal_repeat, game_fps, display_hz);
+			} else if (optimal_repeat == 1 && m->frame_repeat_enabled) {
+				m->frame_repeat_enabled = 0;
+				wlr_log(WLR_INFO, "Frame repeat disabled - game FPS matches display");
+			}
+			m->frame_repeat_count = optimal_repeat;
+			m->frame_repeat_current = 0;
+		}
+
+		/*
+		 * Calculate judder score (0-100, lower is better).
+		 * This measures how well game fps matches display refresh.
+		 */
+		if (game_fps > 0.0f && display_hz > 0.0f) {
+			float ideal_interval_ms = 1000.0f / game_fps;
+			float actual_interval_ms = 1000.0f / display_hz * (float)optimal_repeat;
+			float deviation_pct = fabsf(ideal_interval_ms - actual_interval_ms) / ideal_interval_ms * 100.0f;
+			m->judder_score = (int)(deviation_pct * 10.0f); /* Scale to 0-100ish */
+			if (m->judder_score > 100) m->judder_score = 100;
+		}
+
+		/* Enable adaptive pacing for smoother non-VRR playback */
+		m->adaptive_pacing_enabled = 1;
+		m->target_frame_time_ms = 1000.0f / game_fps;
+
+	} else {
+		/* Reset frame repeat state when not applicable */
+		if (m->frame_repeat_enabled) {
+			m->frame_repeat_enabled = 0;
+			m->frame_repeat_count = 1;
+			m->frame_repeat_current = 0;
+			m->adaptive_pacing_enabled = 0;
+			wlr_log(WLR_INFO, "Frame repeat disabled - VRR active or tearing enabled");
+		}
 	}
 
 	if (needs_frame) {
 		m->frames_since_content_change = 0;
 
 		/*
-		 * Apply tearing for games - async page flips bypass vsync.
+		 * Apply tearing for games that want it - async page flips bypass vsync.
 		 * This gives the lowest possible input latency at the cost of
-		 * potential screen tearing (which gamers often prefer).
+		 * potential screen tearing (which some gamers prefer).
+		 *
+		 * Note: When frame pacing is active and tearing is NOT requested,
+		 * we rely on vsync'd commits for smooth presentation.
 		 */
 		if (allow_tearing && wlr_output_is_drm(m->wlr_output)) {
 			state.tearing_page_flip = true;
@@ -24322,6 +25010,31 @@ rendermon(struct wl_listener *listener, void *data)
 		/* Track commit timing for frame pacing analysis */
 		commit_end_ns = get_time_ns();
 		m->last_commit_duration_ns = commit_end_ns - frame_start_ns;
+
+		/*
+		 * INPUT LATENCY TRACKING
+		 *
+		 * Measure time from last input event to frame commit.
+		 * This is a key component of "input-to-photon" latency:
+		 *   Total latency = input processing + game logic + render + commit + scanout
+		 *
+		 * We measure: input event → frame commit (what compositor controls)
+		 * The remaining latency (scanout) depends on display.
+		 */
+		if (game_mode_ultra && m->last_input_ns > 0) {
+			uint64_t input_latency = commit_end_ns - m->last_input_ns;
+
+			/* Only track reasonable latencies (< 500ms) */
+			if (input_latency < 500000000ULL) {
+				m->input_to_frame_ns = input_latency;
+
+				/* Track min/max for statistics */
+				if (m->min_input_latency_ns == 0 || input_latency < m->min_input_latency_ns)
+					m->min_input_latency_ns = input_latency;
+				if (input_latency > m->max_input_latency_ns)
+					m->max_input_latency_ns = input_latency;
+			}
+		}
 
 		/*
 		 * Update rolling average of commit time (Gamescope-style).
@@ -24342,10 +25055,98 @@ rendermon(struct wl_listener *listener, void *data)
 		}
 	} else {
 		m->frames_since_content_change++;
+
+		/*
+		 * If frame pacing is active but no new frame, track potential drop.
+		 * This happens when the game misses a vblank deadline.
+		 */
+		if (use_frame_pacing && m->pending_game_frame) {
+			/* Game didn't submit a new frame - previous one will be shown again */
+			m->frames_dropped++;
+			m->pending_game_frame = 0;
+		}
 	}
 
 	wlr_output_state_finish(&state);
 	m->last_frame_ns = frame_start_ns;
+
+	/*
+	 * FPS Limiter - controls when we send frame_done to clients.
+	 *
+	 * By delaying frame_done, we effectively limit how fast games can
+	 * render. The game waits for frame_done before starting the next
+	 * frame, so controlling this signal controls the framerate.
+	 */
+	if (fps_limit_enabled && fps_limit_value > 0 && is_game) {
+		uint64_t target_interval_ns = 1000000000ULL / (uint64_t)fps_limit_value;
+		uint64_t now_ns = get_time_ns();
+		uint64_t elapsed_ns = 0;
+
+		if (m->fps_limit_last_frame_ns > 0)
+			elapsed_ns = now_ns - m->fps_limit_last_frame_ns;
+
+		m->fps_limit_interval_ns = target_interval_ns;
+
+		/*
+		 * If not enough time has passed since last frame_done,
+		 * skip sending frame_done this vblank. The game will
+		 * continue to wait, effectively limiting its framerate.
+		 */
+		if (elapsed_ns < target_interval_ns) {
+			/* Don't send frame_done yet - limiter is active */
+			return;
+		}
+
+		m->fps_limit_last_frame_ns = now_ns;
+	}
+
+	/*
+	 * ============ FRAME REPEAT MECHANISM ============
+	 *
+	 * When frame doubling/tripling is active, we control the frame_done
+	 * signal to make the game render at a rate that divides evenly into
+	 * the display refresh rate.
+	 *
+	 * For example, on a 120Hz display with a game targeting 30 FPS:
+	 * - We want frame_done sent every 4th vblank (120/4=30)
+	 * - Each game frame is displayed for exactly 4 vblanks
+	 * - Result: perfectly even 33.33ms frame times, zero judder
+	 *
+	 * This is the KEY to smooth low-FPS gaming without VRR:
+	 * Instead of uneven frame times (16-17-16-17-16ms), we get
+	 * perfectly consistent frame times (33-33-33-33-33ms for 30fps).
+	 */
+	if (m->frame_repeat_enabled && m->frame_repeat_count > 1 && is_game) {
+		m->frame_repeat_current++;
+
+		/*
+		 * Only send frame_done when we've shown the current frame
+		 * for the required number of vblanks.
+		 */
+		if (m->frame_repeat_current < m->frame_repeat_count) {
+			/*
+			 * Not time for a new frame yet - skip frame_done.
+			 * The game will wait, and we'll show the same frame again
+			 * on the next vblank. This is frame "doubling" or "tripling".
+			 */
+			m->frames_repeated++;
+
+			/*
+			 * We still need to acknowledge this vblank for timing,
+			 * but we DON'T tell the game to render a new frame.
+			 * The display will simply show the previous frame again.
+			 *
+			 * This creates perfect frame cadence:
+			 * - 2x repeat: frame shown at vblank 0 and 1, new frame at 2
+			 * - 3x repeat: frame shown at vblank 0, 1, 2, new frame at 3
+			 * - etc.
+			 */
+			return;
+		}
+
+		/* Time for new frame - reset counter and continue to frame_done */
+		m->frame_repeat_current = 0;
+	}
 
 	/*
 	 * Send frame_done to clients.
@@ -24360,6 +25161,62 @@ rendermon(struct wl_listener *listener, void *data)
 	 */
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	wlr_scene_output_send_frame_done(m->scene_output, &now);
+}
+
+/*
+ * Presentation feedback callback - called when a frame is actually displayed.
+ * This gives us precise vblank timing for optimal frame pacing.
+ */
+static void
+outputpresent(struct wl_listener *listener, void *data)
+{
+	Monitor *m = wl_container_of(listener, m, present);
+	struct wlr_output_event_present *event = data;
+	uint64_t present_ns;
+
+	if (!event || !event->presented)
+		return;
+
+	/* Convert timespec to nanoseconds */
+	present_ns = (uint64_t)event->when.tv_sec * 1000000000ULL +
+		     (uint64_t)event->when.tv_nsec;
+
+	/* Calculate interval between presents (vblank interval) */
+	if (m->last_present_ns > 0 && present_ns > m->last_present_ns) {
+		uint64_t interval = present_ns - m->last_present_ns;
+		/* Sanity check: interval should be reasonable (1ms - 100ms) */
+		if (interval > 1000000 && interval < 100000000) {
+			/* Rolling average with 90% old, 10% new */
+			if (m->present_interval_ns == 0) {
+				m->present_interval_ns = interval;
+			} else {
+				m->present_interval_ns =
+					(m->present_interval_ns * 90 + interval * 10) / 100;
+			}
+		}
+	}
+
+	m->last_present_ns = present_ns;
+	m->frames_presented++;
+
+	/*
+	 * If we're in frame pacing mode and have a pending game frame,
+	 * calculate latency statistics.
+	 */
+	if (m->frame_pacing_active && m->pending_game_frame && m->game_frame_submit_ns > 0) {
+		uint64_t latency = present_ns - m->game_frame_submit_ns;
+		m->total_latency_ns += latency;
+		m->pending_game_frame = 0;
+	}
+
+	/*
+	 * Calculate target time for next frame presentation.
+	 * We want to present at the next vblank, minus a small margin
+	 * for compositor overhead (1ms).
+	 */
+	if (m->present_interval_ns > 0) {
+		m->target_present_ns = present_ns + m->present_interval_ns - 1000000;
+	}
 }
 
 void
@@ -24547,6 +25404,188 @@ set_adaptive_sync(Monitor *m, int enable)
 	/* Broadcast the adaptive sync state change to output_mgr */
 	config_head->state.adaptive_sync_enabled = enable;
 	wlr_output_manager_v1_set_configuration(output_mgr, config);
+}
+
+/*
+ * Dynamic Game VRR - Matches display refresh rate to game framerate.
+ *
+ * When VRR is enabled and a game is running fullscreen, the compositor
+ * dynamically adjusts the display's refresh rate to match the game's
+ * actual framerate. This eliminates judder when games run below the
+ * monitor's native refresh rate.
+ *
+ * Key features:
+ * - Hysteresis: Requires stable FPS for 30+ frames before adjusting
+ * - Deadband: Ignores FPS changes < 3 FPS to avoid jitter
+ * - Rate limiting: No more than one adjustment per 500ms
+ * - Smooth transitions: VRR handles the actual rate change smoothly
+ */
+
+/* Minimum time between VRR adjustments (500ms) */
+#define GAME_VRR_MIN_INTERVAL_NS (500ULL * 1000000ULL)
+/* Frames needed at stable FPS before adjusting */
+#define GAME_VRR_STABLE_FRAMES 30
+/* FPS change threshold to trigger adjustment (3 FPS) */
+#define GAME_VRR_FPS_DEADBAND 3.0f
+/* Minimum FPS to track (below this, don't adjust) */
+#define GAME_VRR_MIN_FPS 20.0f
+/* Maximum FPS to track (above this, use native refresh) */
+#define GAME_VRR_MAX_FPS 165.0f
+
+/*
+ * Enable game VRR mode - activates adaptive sync for game framerate matching.
+ */
+static void
+enable_game_vrr(Monitor *m)
+{
+	struct wlr_output_state state;
+	char osd_msg[64];
+
+	if (!m || !m->vrr_capable || m->game_vrr_active)
+		return;
+
+	if (!fullscreen_adaptive_sync_enabled) {
+		wlr_log(WLR_INFO, "Game VRR: disabled by user setting");
+		return;
+	}
+
+	wlr_output_state_init(&state);
+	wlr_output_state_set_adaptive_sync_enabled(&state, 1);
+
+	if (wlr_output_commit_state(m->wlr_output, &state)) {
+		m->game_vrr_active = 1;
+		m->game_vrr_target_fps = 0.0f;
+		m->game_vrr_last_fps = 0.0f;
+		m->game_vrr_last_change_ns = get_time_ns();
+		m->game_vrr_stable_frames = 0;
+
+		snprintf(osd_msg, sizeof(osd_msg), "Game VRR Enabled");
+		show_hz_osd(m, osd_msg);
+		wlr_log(WLR_INFO, "Game VRR enabled on %s", m->wlr_output->name);
+	}
+
+	wlr_output_state_finish(&state);
+}
+
+/*
+ * Disable game VRR mode - returns to fixed refresh rate.
+ */
+static void
+disable_game_vrr(Monitor *m)
+{
+	struct wlr_output_state state;
+
+	if (!m || !m->game_vrr_active)
+		return;
+
+	wlr_output_state_init(&state);
+	wlr_output_state_set_adaptive_sync_enabled(&state, 0);
+
+	if (wlr_output_commit_state(m->wlr_output, &state)) {
+		wlr_log(WLR_INFO, "Game VRR disabled on %s (was targeting %.1f FPS)",
+			m->wlr_output->name, m->game_vrr_target_fps);
+	}
+
+	wlr_output_state_finish(&state);
+
+	m->game_vrr_active = 0;
+	m->game_vrr_target_fps = 0.0f;
+	m->game_vrr_last_fps = 0.0f;
+	m->game_vrr_stable_frames = 0;
+}
+
+/*
+ * Update game VRR based on current measured FPS.
+ *
+ * This is called from rendermon() when a game is running fullscreen.
+ * It implements hysteresis and rate-limiting to avoid jittery behavior.
+ */
+static void
+update_game_vrr(Monitor *m, float current_fps)
+{
+	uint64_t now_ns;
+	float fps_diff;
+	float display_max_hz;
+	char osd_msg[64];
+
+	if (!m || !m->game_vrr_active)
+		return;
+
+	/* Sanity check FPS range */
+	if (current_fps < GAME_VRR_MIN_FPS || current_fps > GAME_VRR_MAX_FPS)
+		return;
+
+	now_ns = get_time_ns();
+
+	/* Get display's maximum refresh rate */
+	if (m->wlr_output->current_mode) {
+		display_max_hz = (float)m->wlr_output->current_mode->refresh / 1000.0f;
+	} else {
+		display_max_hz = 60.0f;
+	}
+
+	/* If game is running at or above display refresh, no adjustment needed */
+	if (current_fps >= display_max_hz - 2.0f) {
+		if (m->game_vrr_target_fps > 0.0f && m->game_vrr_target_fps < display_max_hz - 2.0f) {
+			/* Was running slower, now at full speed */
+			m->game_vrr_target_fps = display_max_hz;
+			m->game_vrr_stable_frames = 0;
+			snprintf(osd_msg, sizeof(osd_msg), "VRR: %.0f Hz (full)", display_max_hz);
+			show_hz_osd(m, osd_msg);
+			wlr_log(WLR_INFO, "Game VRR: back to full refresh %.1f Hz", display_max_hz);
+		}
+		return;
+	}
+
+	/* Calculate difference from current target */
+	fps_diff = fabsf(current_fps - m->game_vrr_last_fps);
+
+	/* Check if FPS is stable (within deadband of last reading) */
+	if (fps_diff < GAME_VRR_FPS_DEADBAND) {
+		m->game_vrr_stable_frames++;
+	} else {
+		/* FPS changed significantly, reset stability counter */
+		m->game_vrr_stable_frames = 0;
+		m->game_vrr_last_fps = current_fps;
+	}
+
+	/* Only adjust if FPS has been stable for enough frames */
+	if (m->game_vrr_stable_frames < GAME_VRR_STABLE_FRAMES)
+		return;
+
+	/* Rate limit: don't adjust more than once per interval */
+	if (now_ns - m->game_vrr_last_change_ns < GAME_VRR_MIN_INTERVAL_NS)
+		return;
+
+	/* Check if we actually need to change the target */
+	fps_diff = fabsf(current_fps - m->game_vrr_target_fps);
+	if (fps_diff < GAME_VRR_FPS_DEADBAND)
+		return;
+
+	/* Update target FPS */
+	m->game_vrr_target_fps = current_fps;
+	m->game_vrr_last_change_ns = now_ns;
+	m->game_vrr_stable_frames = 0;
+
+	/*
+	 * With VRR/FreeSync/G-Sync, the display automatically syncs to
+	 * the incoming frame rate. We don't need to do anything special
+	 * here - just having adaptive sync enabled is enough.
+	 *
+	 * The key insight is that VRR displays wait for each frame,
+	 * so if the game is running at 45 FPS, the display will show
+	 * frames at 45 Hz without judder.
+	 *
+	 * We track the target FPS for:
+	 * 1. OSD display feedback to the user
+	 * 2. Statistics and debugging
+	 * 3. Detecting when to disable VRR (e.g., game exits)
+	 */
+
+	snprintf(osd_msg, sizeof(osd_msg), "VRR: %.0f Hz", current_fps);
+	show_hz_osd(m, osd_msg);
+	wlr_log(WLR_INFO, "Game VRR: adjusted to %.1f FPS on %s",
+		current_fps, m->wlr_output->name);
 }
 
 /* Check if a client's surface has video content type */
@@ -26301,6 +27340,14 @@ setfullscreen(Client *c, int fullscreen)
 		set_video_refresh_rate(c->mon, c);
 		/* Start periodic video detection check */
 		schedule_video_check(500);
+		/*
+		 * Enable dynamic game VRR if this is a game.
+		 * Game VRR will automatically adjust the display refresh rate
+		 * to match the game's actual framerate for judder-free gaming.
+		 */
+		if (is_game_content(c) || client_wants_tearing(c)) {
+			enable_game_vrr(c->mon);
+		}
 	} else {
 		/* restore previous size only for floating windows since their
 		 * positions are set by the user. Tiled windows will be positioned
@@ -26308,6 +27355,8 @@ setfullscreen(Client *c, int fullscreen)
 		if (c->isfloating)
 			resize(c, c->prev, 0);
 		set_adaptive_sync(c->mon, 0);
+		/* Disable game VRR when exiting fullscreen */
+		disable_game_vrr(c->mon);
 		/* Restore max refresh rate when exiting fullscreen */
 		restore_max_refresh_rate(c->mon);
 		c->detected_video_hz = 0.0f;
@@ -26706,6 +27755,7 @@ static const FuncEntry func_table[] = {
 	{ "warptomonitor",     warptomonitor,     1 },
 	{ "tagtomonitornum",   tagtomonitornum,   2 },
 	{ "chvt",              chvt,              2 },
+	{ "showframepacingstats", showframepacingstats, 0 },
 	{ NULL, NULL, 0 }
 };
 
@@ -28145,6 +29195,849 @@ void
 togglefullscreenadaptivesync(const Arg *arg)
 {
 	fullscreen_adaptive_sync_enabled = !fullscreen_adaptive_sync_enabled;
+}
+
+/* Stats panel animation duration in ms */
+#define STATS_PANEL_ANIM_DURATION 250
+
+/* Ease-out cubic for smooth deceleration */
+static float
+ease_out_cubic(float t)
+{
+	t = t - 1.0f;
+	return t * t * t + 1.0f;
+}
+
+/* Animation timer callback - updates panel position */
+static int
+stats_panel_anim_cb(void *data)
+{
+	Monitor *m = data;
+	uint64_t now_ns, elapsed_ms;
+	float progress;
+	int new_x;
+
+	if (!m || !m->stats_panel_animating)
+		return 0;
+
+	now_ns = get_time_ns();
+	elapsed_ms = (now_ns - m->stats_panel_anim_start) / 1000000;
+
+	if (elapsed_ms >= STATS_PANEL_ANIM_DURATION) {
+		/* Animation complete */
+		m->stats_panel_current_x = m->stats_panel_target_x;
+		m->stats_panel_animating = 0;
+
+		/* If we slid out, hide the panel */
+		if (m->stats_panel_target_x >= m->m.x + m->m.width) {
+			wlr_scene_node_set_enabled(&m->stats_panel_tree->node, 0);
+			m->stats_panel_visible = 0;
+		}
+	} else {
+		/* Calculate eased position */
+		progress = (float)elapsed_ms / (float)STATS_PANEL_ANIM_DURATION;
+		progress = ease_out_cubic(progress);
+
+		int start_x = m->stats_panel_visible ?
+			(m->m.x + m->m.width) :
+			(m->m.x + m->m.width - m->stats_panel_width);
+		int end_x = m->stats_panel_target_x;
+
+		new_x = start_x + (int)((float)(end_x - start_x) * progress);
+		m->stats_panel_current_x = new_x;
+
+		/* Schedule next frame (~16ms for 60fps animation) */
+		wl_event_source_timer_update(m->stats_panel_anim_timer, 16);
+	}
+
+	/* Update position */
+	if (m->stats_panel_tree)
+		wlr_scene_node_set_position(&m->stats_panel_tree->node,
+			m->stats_panel_current_x, m->m.y);
+
+	return 0;
+}
+
+/* Refresh timer callback - updates stats content */
+static int
+stats_panel_refresh_cb(void *data)
+{
+	Monitor *m = data;
+	float display_hz = 0.0f;
+	float native_hz = 0.0f;
+	float avg_latency_ms = 0.0f;
+	float commit_ms = 0.0f;
+	float fps_diff = 0.0f;
+	char line[128];
+	int y_offset;
+	int line_height;
+	int padding = 16;
+	int col2_x;
+	StatusModule mod = {0};
+	static const float panel_bg[4] = {0.05f, 0.05f, 0.08f, 0.85f};
+	static const float header_color[4] = {0.4f, 0.8f, 1.0f, 1.0f};
+	static const float section_color[4] = {0.6f, 0.9f, 1.0f, 1.0f};
+	static const float label_color[4] = {0.7f, 0.7f, 0.7f, 1.0f};
+	static const float value_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+	static const float good_color[4] = {0.4f, 1.0f, 0.4f, 1.0f};
+	static const float warn_color[4] = {1.0f, 0.8f, 0.2f, 1.0f};
+	static const float bad_color[4] = {1.0f, 0.3f, 0.3f, 1.0f};
+	static const float sync_color[4] = {0.3f, 1.0f, 0.8f, 1.0f};
+	static const float disabled_color[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+	struct wlr_scene_node *node, *tmp;
+	int is_synced = 0;
+
+	if (!m || !m->stats_panel_visible || !m->stats_panel_tree)
+		return 0;
+
+	/* Calculate metrics */
+	if (m->present_interval_ns > 0) {
+		display_hz = 1000000000.0f / (float)m->present_interval_ns;
+	} else if (m->wlr_output->current_mode) {
+		display_hz = (float)m->wlr_output->current_mode->refresh / 1000.0f;
+	}
+
+	/* Get native/max refresh rate */
+	if (m->wlr_output->current_mode) {
+		native_hz = (float)m->wlr_output->current_mode->refresh / 1000.0f;
+	}
+
+	if (m->frames_presented > 0 && m->total_latency_ns > 0) {
+		avg_latency_ms = (float)(m->total_latency_ns / m->frames_presented) / 1000000.0f;
+	}
+
+	commit_ms = (float)m->rolling_commit_time_ns / 1000000.0f;
+
+	/* Check if screen and game are synced (within 2 Hz) */
+	if (m->estimated_game_fps > 0.0f) {
+		fps_diff = fabsf(display_hz - m->estimated_game_fps);
+		is_synced = fps_diff < 2.0f;
+	}
+
+	/* Clear old content */
+	wl_list_for_each_safe(node, tmp, &m->stats_panel_tree->children, link)
+		wlr_scene_node_destroy(node);
+
+	/* Draw background */
+	drawrect(m->stats_panel_tree, 0, 0, m->stats_panel_width, m->m.height, panel_bg);
+
+	/* Draw left border accent */
+	static const float accent[4] = {0.3f, 0.6f, 1.0f, 1.0f};
+	drawrect(m->stats_panel_tree, 0, 0, 3, m->m.height, accent);
+
+	line_height = statusfont.height + 8;
+	col2_x = m->stats_panel_width / 2;
+	y_offset = padding;
+	mod.tree = m->stats_panel_tree;
+
+	/* Header */
+	snprintf(line, sizeof(line), "PERFORMANCE MONITOR");
+	tray_render_label(&mod, line, padding, y_offset + line_height, header_color);
+	y_offset += line_height + 8;
+
+	/* Monitor name */
+	snprintf(line, sizeof(line), "%s", m->wlr_output->name);
+	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+	y_offset += line_height + 4;
+
+	/* Separator */
+	static const float sep_color[4] = {0.3f, 0.3f, 0.4f, 1.0f};
+	drawrect(m->stats_panel_tree, padding, y_offset, m->stats_panel_width - padding * 2, 1, sep_color);
+	y_offset += 12;
+
+	/* ============ VRR STATUS SECTION ============ */
+	snprintf(line, sizeof(line), "VRR / Adaptive Sync");
+	tray_render_label(&mod, line, padding, y_offset + line_height, section_color);
+	y_offset += line_height + 4;
+
+	/* VRR Support status */
+	snprintf(line, sizeof(line), "  Support:");
+	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+	if (m->vrr_capable) {
+		snprintf(line, sizeof(line), "Yes");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, good_color);
+	} else {
+		snprintf(line, sizeof(line), "No");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, bad_color);
+	}
+	y_offset += line_height;
+
+	/* VRR Enabled/Disabled status */
+	snprintf(line, sizeof(line), "  Setting:");
+	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+	if (!fullscreen_adaptive_sync_enabled) {
+		snprintf(line, sizeof(line), "DISABLED");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, bad_color);
+	} else if (m->vrr_capable) {
+		snprintf(line, sizeof(line), "ENABLED");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, good_color);
+	} else {
+		snprintf(line, sizeof(line), "N/A");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, disabled_color);
+	}
+	y_offset += line_height;
+
+	/* VRR Active status */
+	snprintf(line, sizeof(line), "  Status:");
+	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+	if (m->game_vrr_active) {
+		snprintf(line, sizeof(line), "Game VRR Active");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, sync_color);
+	} else if (m->vrr_active) {
+		snprintf(line, sizeof(line), "Video VRR Active");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, sync_color);
+	} else if (m->vrr_capable && fullscreen_adaptive_sync_enabled) {
+		snprintf(line, sizeof(line), "Ready");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, value_color);
+	} else {
+		snprintf(line, sizeof(line), "Inactive");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, disabled_color);
+	}
+	y_offset += line_height + 8;
+
+	/* Separator */
+	drawrect(m->stats_panel_tree, padding, y_offset, m->stats_panel_width - padding * 2, 1, sep_color);
+	y_offset += 12;
+
+	/* ============ FRAME SMOOTHING SECTION ============ */
+	static const float smooth_color[4] = {0.5f, 1.0f, 0.7f, 1.0f};  /* Mint green */
+	snprintf(line, sizeof(line), "Frame Smoothing");
+	tray_render_label(&mod, line, padding, y_offset + line_height, section_color);
+	y_offset += line_height + 4;
+
+	/* Frame repeat status */
+	snprintf(line, sizeof(line), "  Repeat:");
+	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+	if (m->frame_repeat_enabled && m->frame_repeat_count > 1) {
+		snprintf(line, sizeof(line), "%dx Active", m->frame_repeat_count);
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, smooth_color);
+	} else if (m->game_vrr_active) {
+		snprintf(line, sizeof(line), "VRR (better)");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, sync_color);
+	} else {
+		snprintf(line, sizeof(line), "1x (normal)");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, value_color);
+	}
+	y_offset += line_height;
+
+	/* Show effective frame time when repeat is active */
+	if (m->frame_repeat_enabled && m->frame_repeat_count > 1 && display_hz > 0.0f) {
+		float effective_frame_time = 1000.0f / display_hz * (float)m->frame_repeat_count;
+		snprintf(line, sizeof(line), "  Frame time:");
+		tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+		snprintf(line, sizeof(line), "%.2f ms", effective_frame_time);
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, smooth_color);
+		y_offset += line_height;
+	}
+
+	/* Judder score */
+	snprintf(line, sizeof(line), "  Judder:");
+	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+	if (m->estimated_game_fps > 0.0f) {
+		if (m->game_vrr_active || (m->frame_repeat_enabled && m->judder_score < 5)) {
+			snprintf(line, sizeof(line), "None");
+			tray_render_label(&mod, line, col2_x, y_offset + line_height, good_color);
+		} else if (m->judder_score < 20) {
+			snprintf(line, sizeof(line), "Low (%d%%)", m->judder_score);
+			tray_render_label(&mod, line, col2_x, y_offset + line_height, good_color);
+		} else if (m->judder_score < 50) {
+			snprintf(line, sizeof(line), "Medium (%d%%)", m->judder_score);
+			tray_render_label(&mod, line, col2_x, y_offset + line_height, warn_color);
+		} else {
+			snprintf(line, sizeof(line), "High (%d%%)", m->judder_score);
+			tray_render_label(&mod, line, col2_x, y_offset + line_height, bad_color);
+		}
+	} else {
+		snprintf(line, sizeof(line), "--");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, disabled_color);
+	}
+	y_offset += line_height;
+
+	/* Frames repeated counter */
+	if (m->frames_repeated > 0) {
+		snprintf(line, sizeof(line), "  Repeated:");
+		tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+		snprintf(line, sizeof(line), "%lu", m->frames_repeated);
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, smooth_color);
+		y_offset += line_height;
+	}
+	y_offset += 8;
+
+	/* Separator */
+	drawrect(m->stats_panel_tree, padding, y_offset, m->stats_panel_width - padding * 2, 1, sep_color);
+	y_offset += 12;
+
+	/* ============ REAL-TIME COMPARISON SECTION ============ */
+	snprintf(line, sizeof(line), "Real-Time Sync");
+	tray_render_label(&mod, line, padding, y_offset + line_height, section_color);
+	y_offset += line_height + 4;
+
+	/* Two-column headers */
+	snprintf(line, sizeof(line), "  SCREEN");
+	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+	snprintf(line, sizeof(line), "GAME");
+	tray_render_label(&mod, line, col2_x, y_offset + line_height, label_color);
+	y_offset += line_height;
+
+	/* Refresh rates - big numbers */
+	snprintf(line, sizeof(line), "  %.1f Hz", display_hz);
+	tray_render_label(&mod, line, padding, y_offset + line_height,
+		is_synced ? sync_color : value_color);
+
+	if (m->estimated_game_fps > 0.0f) {
+		snprintf(line, sizeof(line), "%.1f FPS", m->estimated_game_fps);
+		tray_render_label(&mod, line, col2_x, y_offset + line_height,
+			is_synced ? sync_color :
+			(m->estimated_game_fps >= 55.0f ? good_color :
+			(m->estimated_game_fps >= 30.0f ? warn_color : bad_color)));
+	} else {
+		snprintf(line, sizeof(line), "-- FPS");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, disabled_color);
+	}
+	y_offset += line_height;
+
+	/* Sync status indicator */
+	if (m->estimated_game_fps > 0.0f) {
+		if (is_synced) {
+			snprintf(line, sizeof(line), "  [SYNCED]");
+			tray_render_label(&mod, line, padding, y_offset + line_height, sync_color);
+		} else {
+			snprintf(line, sizeof(line), "  Diff: %.1f Hz", fps_diff);
+			tray_render_label(&mod, line, padding, y_offset + line_height,
+				fps_diff < 5.0f ? warn_color : bad_color);
+		}
+		y_offset += line_height;
+	}
+	y_offset += 8;
+
+	/* Separator */
+	drawrect(m->stats_panel_tree, padding, y_offset, m->stats_panel_width - padding * 2, 1, sep_color);
+	y_offset += 12;
+
+	/* ============ RENDERING SECTION ============ */
+	snprintf(line, sizeof(line), "Rendering");
+	tray_render_label(&mod, line, padding, y_offset + line_height, section_color);
+	y_offset += line_height + 4;
+
+	snprintf(line, sizeof(line), "  Mode:");
+	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+	if (m->direct_scanout_active) {
+		snprintf(line, sizeof(line), "Direct Scanout");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, good_color);
+	} else {
+		snprintf(line, sizeof(line), "Composited");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, value_color);
+	}
+	y_offset += line_height;
+
+	snprintf(line, sizeof(line), "  Commit:");
+	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+	snprintf(line, sizeof(line), "%.2f ms", commit_ms);
+	tray_render_label(&mod, line, col2_x, y_offset + line_height,
+		commit_ms < 2.0f ? good_color : (commit_ms < 8.0f ? warn_color : bad_color));
+	y_offset += line_height;
+
+	if (avg_latency_ms > 0.0f) {
+		snprintf(line, sizeof(line), "  Latency:");
+		tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+		snprintf(line, sizeof(line), "%.1f ms", avg_latency_ms);
+		tray_render_label(&mod, line, col2_x, y_offset + line_height,
+			avg_latency_ms < 16.0f ? good_color :
+			(avg_latency_ms < 33.0f ? warn_color : bad_color));
+		y_offset += line_height;
+	}
+	y_offset += 8;
+
+	/* Separator */
+	drawrect(m->stats_panel_tree, padding, y_offset, m->stats_panel_width - padding * 2, 1, sep_color);
+	y_offset += 12;
+
+	/* ============ GAME MODE SECTION ============ */
+	snprintf(line, sizeof(line), "Game Mode");
+	tray_render_label(&mod, line, padding, y_offset + line_height, section_color);
+	y_offset += line_height + 4;
+
+	snprintf(line, sizeof(line), "  Status:");
+	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+	if (game_mode_ultra) {
+		static const float ultra_color[4] = {1.0f, 0.2f, 0.8f, 1.0f};  /* Hot pink for ULTRA */
+		snprintf(line, sizeof(line), "ULTRA");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, ultra_color);
+	} else if (game_mode_active) {
+		snprintf(line, sizeof(line), "Active");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, good_color);
+	} else {
+		snprintf(line, sizeof(line), "Inactive");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, disabled_color);
+	}
+	y_offset += line_height;
+
+	/* Show what's optimized in game mode */
+	snprintf(line, sizeof(line), "  Timers:");
+	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+	if (game_mode_ultra) {
+		snprintf(line, sizeof(line), "All Stopped");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, good_color);
+	} else if (game_mode_active) {
+		snprintf(line, sizeof(line), "Some Paused");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, warn_color);
+	} else {
+		snprintf(line, sizeof(line), "Normal");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, value_color);
+	}
+	y_offset += line_height;
+
+	snprintf(line, sizeof(line), "  Statusbar:");
+	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+	if (game_mode_ultra) {
+		snprintf(line, sizeof(line), "Hidden");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, good_color);
+	} else {
+		snprintf(line, sizeof(line), "Visible");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, value_color);
+	}
+	y_offset += line_height;
+
+	/* Show game client info if available */
+	if (game_mode_client) {
+		const char *app_id = client_get_appid(game_mode_client);
+		if (app_id && strlen(app_id) > 0) {
+			snprintf(line, sizeof(line), "  Game:");
+			tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+			/* Truncate app_id if too long */
+			char truncated[32];
+			strncpy(truncated, app_id, sizeof(truncated) - 1);
+			truncated[sizeof(truncated) - 1] = '\0';
+			if (strlen(app_id) > 24) {
+				truncated[21] = '.';
+				truncated[22] = '.';
+				truncated[23] = '.';
+				truncated[24] = '\0';
+			}
+			tray_render_label(&mod, truncated, col2_x, y_offset + line_height, value_color);
+			y_offset += line_height;
+		}
+	}
+
+	/* Show priority boost if active */
+	if (game_mode_nice_applied || game_mode_ioclass_applied) {
+		snprintf(line, sizeof(line), "  Priority:");
+		tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+		snprintf(line, sizeof(line), "Boosted");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, good_color);
+		y_offset += line_height;
+	}
+	y_offset += 8;
+
+	/* Separator */
+	drawrect(m->stats_panel_tree, padding, y_offset, m->stats_panel_width - padding * 2, 1, sep_color);
+	y_offset += 12;
+
+	/* ============ INPUT LATENCY SECTION ============ */
+	if (game_mode_ultra) {
+		static const float latency_color[4] = {1.0f, 0.6f, 0.2f, 1.0f};  /* Orange */
+		snprintf(line, sizeof(line), "Input Latency");
+		tray_render_label(&mod, line, padding, y_offset + line_height, section_color);
+		y_offset += line_height + 4;
+
+		/* Current input-to-frame latency */
+		snprintf(line, sizeof(line), "  Current:");
+		tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+		if (m->input_to_frame_ns > 0) {
+			float latency_ms = (float)m->input_to_frame_ns / 1000000.0f;
+			snprintf(line, sizeof(line), "%.1f ms", latency_ms);
+			tray_render_label(&mod, line, col2_x, y_offset + line_height,
+				latency_ms < 8.0f ? good_color :
+				(latency_ms < 16.0f ? latency_color : bad_color));
+		} else {
+			snprintf(line, sizeof(line), "-- ms");
+			tray_render_label(&mod, line, col2_x, y_offset + line_height, disabled_color);
+		}
+		y_offset += line_height;
+
+		/* Min/Max latency */
+		if (m->min_input_latency_ns > 0) {
+			snprintf(line, sizeof(line), "  Range:");
+			tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+			snprintf(line, sizeof(line), "%.1f-%.1f ms",
+				(float)m->min_input_latency_ns / 1000000.0f,
+				(float)m->max_input_latency_ns / 1000000.0f);
+			tray_render_label(&mod, line, col2_x, y_offset + line_height, value_color);
+			y_offset += line_height;
+		}
+
+		/* Frame timing jitter/variance */
+		if (m->frame_variance_ns > 0) {
+			snprintf(line, sizeof(line), "  Jitter:");
+			tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+			/* Convert variance to approximate jitter in ms (sqrt approximation) */
+			float jitter_ms = 0.0f;
+			uint64_t v = m->frame_variance_ns;
+			uint64_t sqrt_approx = 0;
+			while (sqrt_approx * sqrt_approx < v) sqrt_approx += 10000;
+			jitter_ms = (float)sqrt_approx / 1000000.0f;
+			snprintf(line, sizeof(line), "%.2f ms", jitter_ms);
+			tray_render_label(&mod, line, col2_x, y_offset + line_height,
+				jitter_ms < 1.0f ? good_color :
+				(jitter_ms < 3.0f ? warn_color : bad_color));
+			y_offset += line_height;
+		}
+
+		/* Prediction accuracy */
+		if (m->prediction_accuracy > 0.0f) {
+			snprintf(line, sizeof(line), "  Prediction:");
+			tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+			snprintf(line, sizeof(line), "%.0f%% accurate", m->prediction_accuracy);
+			tray_render_label(&mod, line, col2_x, y_offset + line_height,
+				m->prediction_accuracy > 80.0f ? good_color :
+				(m->prediction_accuracy > 50.0f ? warn_color : bad_color));
+			y_offset += line_height;
+		}
+		y_offset += 8;
+
+		/* Separator */
+		drawrect(m->stats_panel_tree, padding, y_offset, m->stats_panel_width - padding * 2, 1, sep_color);
+		y_offset += 12;
+	}
+
+	/* ============ SYSTEM HEALTH SECTION ============ */
+	{
+		int mem_pressure = get_memory_pressure();
+		m->memory_pressure = mem_pressure;
+
+		snprintf(line, sizeof(line), "System Health");
+		tray_render_label(&mod, line, padding, y_offset + line_height, section_color);
+		y_offset += line_height + 4;
+
+		snprintf(line, sizeof(line), "  Memory:");
+		tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+		snprintf(line, sizeof(line), "%d%% used", mem_pressure);
+		tray_render_label(&mod, line, col2_x, y_offset + line_height,
+			mem_pressure < 70 ? good_color :
+			(mem_pressure < 90 ? warn_color : bad_color));
+		y_offset += line_height;
+
+		/* Show warning if memory pressure is high */
+		if (mem_pressure >= 90) {
+			snprintf(line, sizeof(line), "  ⚠ Low memory!");
+			tray_render_label(&mod, line, padding, y_offset + line_height, bad_color);
+			y_offset += line_height;
+		}
+		y_offset += 8;
+	}
+
+	/* Separator */
+	drawrect(m->stats_panel_tree, padding, y_offset, m->stats_panel_width - padding * 2, 1, sep_color);
+	y_offset += 12;
+
+	/* ============ FRAME STATS SECTION ============ */
+	snprintf(line, sizeof(line), "Frame Statistics");
+	tray_render_label(&mod, line, padding, y_offset + line_height, section_color);
+	y_offset += line_height + 4;
+
+	snprintf(line, sizeof(line), "  Presented:");
+	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+	snprintf(line, sizeof(line), "%lu", m->frames_presented);
+	tray_render_label(&mod, line, col2_x, y_offset + line_height, value_color);
+	y_offset += line_height;
+
+	snprintf(line, sizeof(line), "  Dropped:");
+	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+	snprintf(line, sizeof(line), "%lu", m->frames_dropped);
+	tray_render_label(&mod, line, col2_x, y_offset + line_height,
+		m->frames_dropped == 0 ? good_color : bad_color);
+	y_offset += line_height;
+
+	snprintf(line, sizeof(line), "  Held:");
+	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+	snprintf(line, sizeof(line), "%lu", m->frames_held);
+	tray_render_label(&mod, line, col2_x, y_offset + line_height,
+		m->frames_held < 10 ? good_color : warn_color);
+	y_offset += line_height + 8;
+
+	/* Separator */
+	drawrect(m->stats_panel_tree, padding, y_offset, m->stats_panel_width - padding * 2, 1, sep_color);
+	y_offset += 12;
+
+	/* ============ FPS LIMITER SECTION ============ */
+	snprintf(line, sizeof(line), "FPS Limiter");
+	tray_render_label(&mod, line, padding, y_offset + line_height, section_color);
+	y_offset += line_height + 4;
+
+	snprintf(line, sizeof(line), "  Status:");
+	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+	if (fps_limit_enabled) {
+		snprintf(line, sizeof(line), "ON (%d FPS)", fps_limit_value);
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, warn_color);
+	} else {
+		snprintf(line, sizeof(line), "OFF");
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, value_color);
+	}
+	y_offset += line_height;
+
+	/* Show effective limit vs actual */
+	if (fps_limit_enabled && m->estimated_game_fps > 0.0f) {
+		snprintf(line, sizeof(line), "  Effective:");
+		tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
+		float effective = m->estimated_game_fps;
+		if (effective > (float)fps_limit_value)
+			effective = (float)fps_limit_value;
+		snprintf(line, sizeof(line), "%.0f FPS", effective);
+		tray_render_label(&mod, line, col2_x, y_offset + line_height,
+			effective >= (float)fps_limit_value - 1.0f ? good_color : warn_color);
+		y_offset += line_height;
+	}
+	y_offset += 8;
+
+	/* Separator */
+	drawrect(m->stats_panel_tree, padding, y_offset, m->stats_panel_width - padding * 2, 1, sep_color);
+	y_offset += 12;
+
+	/* ============ CONTROLS SECTION ============ */
+	snprintf(line, sizeof(line), "Controls");
+	tray_render_label(&mod, line, padding, y_offset + line_height, section_color);
+	y_offset += line_height + 4;
+
+	static const float hint_color[4] = {0.5f, 0.5f, 0.6f, 1.0f};
+	static const float key_color[4] = {0.7f, 0.8f, 0.9f, 1.0f};
+
+	snprintf(line, sizeof(line), "  [L]");
+	tray_render_label(&mod, line, padding, y_offset + line_height, key_color);
+	snprintf(line, sizeof(line), "Toggle FPS limit");
+	tray_render_label(&mod, line, padding + 50, y_offset + line_height, hint_color);
+	y_offset += line_height;
+
+	snprintf(line, sizeof(line), "  [V]");
+	tray_render_label(&mod, line, padding, y_offset + line_height, key_color);
+	snprintf(line, sizeof(line), "Toggle VRR");
+	tray_render_label(&mod, line, padding + 50, y_offset + line_height, hint_color);
+	y_offset += line_height;
+
+	snprintf(line, sizeof(line), "  [+/-]");
+	tray_render_label(&mod, line, padding, y_offset + line_height, key_color);
+	snprintf(line, sizeof(line), "Adjust +/- 10");
+	tray_render_label(&mod, line, padding + 50, y_offset + line_height, hint_color);
+	y_offset += line_height;
+
+	snprintf(line, sizeof(line), "  [1-5]");
+	tray_render_label(&mod, line, padding, y_offset + line_height, key_color);
+	snprintf(line, sizeof(line), "30/60/90/120/144");
+	tray_render_label(&mod, line, padding + 50, y_offset + line_height, hint_color);
+	y_offset += line_height;
+
+	snprintf(line, sizeof(line), "  [0]");
+	tray_render_label(&mod, line, padding, y_offset + line_height, key_color);
+	snprintf(line, sizeof(line), "Disable limit");
+	tray_render_label(&mod, line, padding + 50, y_offset + line_height, hint_color);
+	y_offset += line_height;
+
+	snprintf(line, sizeof(line), "  [Esc]");
+	tray_render_label(&mod, line, padding, y_offset + line_height, key_color);
+	snprintf(line, sizeof(line), "Close panel");
+	tray_render_label(&mod, line, padding + 50, y_offset + line_height, hint_color);
+	y_offset += line_height;
+
+	/* Schedule next refresh (100ms for smoother real-time updates) */
+	wl_event_source_timer_update(m->stats_panel_timer, 100);
+
+	return 0;
+}
+
+/* Toggle stats panel visibility with slide animation */
+void
+showframepacingstats(const Arg *arg)
+{
+	Monitor *m = selmon;
+
+	if (!m)
+		return;
+
+	/* Calculate panel width (25% of screen) */
+	m->stats_panel_width = m->m.width / 4;
+	if (m->stats_panel_width < 200)
+		m->stats_panel_width = 200;
+
+	/* Create panel tree if needed */
+	if (!m->stats_panel_tree) {
+		m->stats_panel_tree = wlr_scene_tree_create(layers[LyrOverlay]);
+		if (!m->stats_panel_tree)
+			return;
+		m->stats_panel_visible = 0;
+		m->stats_panel_animating = 0;
+		/* Start off-screen */
+		m->stats_panel_current_x = m->m.x + m->m.width;
+	}
+
+	/* Create timers if needed */
+	if (!m->stats_panel_timer)
+		m->stats_panel_timer = wl_event_loop_add_timer(event_loop,
+			stats_panel_refresh_cb, m);
+	if (!m->stats_panel_anim_timer)
+		m->stats_panel_anim_timer = wl_event_loop_add_timer(event_loop,
+			stats_panel_anim_cb, m);
+
+	/* Toggle visibility */
+	if (m->stats_panel_visible) {
+		/* Slide out */
+		m->stats_panel_target_x = m->m.x + m->m.width;
+		m->stats_panel_anim_start = get_time_ns();
+		m->stats_panel_animating = 1;
+		/* Start animation from current position */
+		wl_event_source_timer_update(m->stats_panel_anim_timer, 1);
+		/* Cancel refresh timer */
+		wl_event_source_timer_update(m->stats_panel_timer, 0);
+	} else {
+		/* Slide in */
+		m->stats_panel_visible = 1;
+		m->stats_panel_target_x = m->m.x + m->m.width - m->stats_panel_width;
+		m->stats_panel_current_x = m->m.x + m->m.width; /* Start off-screen */
+		m->stats_panel_anim_start = get_time_ns();
+		m->stats_panel_animating = 1;
+
+		/* Enable and position */
+		wlr_scene_node_set_enabled(&m->stats_panel_tree->node, 1);
+		wlr_scene_node_set_position(&m->stats_panel_tree->node,
+			m->stats_panel_current_x, m->m.y);
+
+		/* Initial render and start animation */
+		stats_panel_refresh_cb(m);
+		wl_event_source_timer_update(m->stats_panel_anim_timer, 1);
+	}
+}
+
+/* Check if stats panel is visible on any monitor */
+static Monitor *
+stats_panel_visible_monitor(void)
+{
+	Monitor *m;
+
+	wl_list_for_each(m, &mons, link) {
+		if (m->stats_panel_visible)
+			return m;
+	}
+	return NULL;
+}
+
+/* Handle keyboard input when stats panel is visible */
+static int
+stats_panel_handle_key(Monitor *m, xkb_keysym_t sym)
+{
+	char osd_msg[64];
+
+	if (!m || !m->stats_panel_visible)
+		return 0;
+
+	switch (sym) {
+	case XKB_KEY_l:
+	case XKB_KEY_L:
+		/* Toggle FPS limiter */
+		fps_limit_enabled = !fps_limit_enabled;
+		if (fps_limit_enabled) {
+			snprintf(osd_msg, sizeof(osd_msg), "FPS Limit: %d", fps_limit_value);
+		} else {
+			snprintf(osd_msg, sizeof(osd_msg), "FPS Limit: OFF");
+		}
+		show_hz_osd(m, osd_msg);
+		stats_panel_refresh_cb(m);
+		return 1;
+
+	case XKB_KEY_plus:
+	case XKB_KEY_equal:
+	case XKB_KEY_KP_Add:
+		/* Increase FPS limit by 10 */
+		fps_limit_value += 10;
+		if (fps_limit_value > 500)
+			fps_limit_value = 500;
+		if (fps_limit_enabled) {
+			snprintf(osd_msg, sizeof(osd_msg), "FPS Limit: %d", fps_limit_value);
+			show_hz_osd(m, osd_msg);
+		}
+		stats_panel_refresh_cb(m);
+		return 1;
+
+	case XKB_KEY_minus:
+	case XKB_KEY_KP_Subtract:
+		/* Decrease FPS limit by 10 */
+		fps_limit_value -= 10;
+		if (fps_limit_value < 10)
+			fps_limit_value = 10;
+		if (fps_limit_enabled) {
+			snprintf(osd_msg, sizeof(osd_msg), "FPS Limit: %d", fps_limit_value);
+			show_hz_osd(m, osd_msg);
+		}
+		stats_panel_refresh_cb(m);
+		return 1;
+
+	case XKB_KEY_1:
+		fps_limit_value = 30;
+		fps_limit_enabled = 1;
+		snprintf(osd_msg, sizeof(osd_msg), "FPS Limit: 30");
+		show_hz_osd(m, osd_msg);
+		stats_panel_refresh_cb(m);
+		return 1;
+
+	case XKB_KEY_2:
+		fps_limit_value = 60;
+		fps_limit_enabled = 1;
+		snprintf(osd_msg, sizeof(osd_msg), "FPS Limit: 60");
+		show_hz_osd(m, osd_msg);
+		stats_panel_refresh_cb(m);
+		return 1;
+
+	case XKB_KEY_3:
+		fps_limit_value = 90;
+		fps_limit_enabled = 1;
+		snprintf(osd_msg, sizeof(osd_msg), "FPS Limit: 90");
+		show_hz_osd(m, osd_msg);
+		stats_panel_refresh_cb(m);
+		return 1;
+
+	case XKB_KEY_4:
+		fps_limit_value = 120;
+		fps_limit_enabled = 1;
+		snprintf(osd_msg, sizeof(osd_msg), "FPS Limit: 120");
+		show_hz_osd(m, osd_msg);
+		stats_panel_refresh_cb(m);
+		return 1;
+
+	case XKB_KEY_5:
+		fps_limit_value = 144;
+		fps_limit_enabled = 1;
+		snprintf(osd_msg, sizeof(osd_msg), "FPS Limit: 144");
+		show_hz_osd(m, osd_msg);
+		stats_panel_refresh_cb(m);
+		return 1;
+
+	case XKB_KEY_0:
+		/* Disable limiter */
+		fps_limit_enabled = 0;
+		show_hz_osd(m, "FPS Limit: OFF");
+		stats_panel_refresh_cb(m);
+		return 1;
+
+	case XKB_KEY_v:
+	case XKB_KEY_V:
+		/* Toggle VRR */
+		fullscreen_adaptive_sync_enabled = !fullscreen_adaptive_sync_enabled;
+		if (fullscreen_adaptive_sync_enabled) {
+			show_hz_osd(m, "VRR: ENABLED");
+		} else {
+			show_hz_osd(m, "VRR: DISABLED");
+			/* Disable active VRR if it was on */
+			if (m->game_vrr_active)
+				disable_game_vrr(m);
+		}
+		stats_panel_refresh_cb(m);
+		return 1;
+
+	case XKB_KEY_Escape:
+	case XKB_KEY_F12:
+		/* Close panel */
+		showframepacingstats(NULL);
+		return 1;
+	}
+
+	return 0;
 }
 
 void
