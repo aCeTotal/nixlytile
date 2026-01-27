@@ -368,7 +368,6 @@ bind = mod+ctrl+Left setratio_h -0.025
 bind = mod+ctrl+Right setratio_h +0.025
 bind = mod+ctrl+Up setratio_v -0.025
 bind = mod+ctrl+Down setratio_v +0.025
-bind = mod+ctrl+Return zoom
 
 # === Applications ===
 # These keybindings launch programs. The 'spawn' action runs shell commands.

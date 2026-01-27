@@ -13996,6 +13996,10 @@ update_game_mode(void)
 		 */
 		wlr_log(WLR_INFO, "ULTRA GAME MODE ACTIVATED - maximum performance, minimal latency");
 
+		/* Show "Game detected" notification for 1 second */
+		if (c && c->mon)
+			toast_show(c->mon, "Game detected", 1000);
+
 		/* Stop ALL background timers to eliminate compositor interrupts */
 		if (cache_update_timer)
 			wl_event_source_timer_update(cache_update_timer, 0);
@@ -14052,6 +14056,12 @@ update_game_mode(void)
 		if (game_mode_pid > 1) {
 			apply_game_priority(game_mode_pid);
 		}
+
+		/*
+		 * Ensure the game client has keyboard focus.
+		 * This is critical for games to receive keyboard input immediately.
+		 */
+		focusclient(c, 0);
 
 	} else if (game_mode_active && !was_active && !game_mode_ultra) {
 		/*
@@ -14202,19 +14212,24 @@ htpc_mode_enter(void)
 		}
 	}
 
-	/* Start Steam in background (silent mode) - ready for PC Gaming view
-	 * Steam will be shown when user selects "PC-gaming" from the menu */
+	/* Ensure we start on tag 1 */
+	if (selmon) {
+		selmon->seltags ^= 1;
+		selmon->tagset[selmon->seltags] = 1 << 0; /* Tag 1 = bit 0 */
+	}
+
+	/* Start Steam Big Picture on tag 2 (in background)
+	 * Steam will open on tag 2, user stays on tag 1 until they select PC-gaming */
 	{
 		pid_t pid = fork();
 		if (pid == 0) {
 			setsid();
 			set_dgpu_env();
 			set_steam_env();
-			/* Kill existing Steam, then start in silent mode (no window)
-			 * This preloads Steam so it's ready when user selects PC Gaming */
+			/* Kill existing Steam, then start Big Picture mode */
 			execl("/bin/sh", "sh", "-c",
 				"pkill -9 steam 2>/dev/null; sleep 1; "
-				"steam -silent -cef-force-gpu -cef-disable-sandbox",
+				"steam -bigpicture -cef-force-gpu -cef-disable-sandbox steam://open/games",
 				(char *)NULL);
 			_exit(127);
 		}
@@ -16531,19 +16546,33 @@ gamepad_menu_select(Monitor *m)
 	label = gamepad_menu_items[gm->selected].label;
 	cmd = gamepad_menu_items[gm->selected].command;
 
-	/* Handle PC-gaming - launch Steam Big Picture mode directly (fast) */
+	/* Handle PC-gaming - switch to tag 2 and launch Steam Big Picture if not running */
 	if (strcmp(label, "PC-gaming") == 0) {
 		gamepad_menu_hide(m);
-		wlr_log(WLR_INFO, "Launching Steam Big Picture mode");
-		pid_t pid = fork();
-		if (pid == 0) {
-			setsid();
-			set_dgpu_env();
-			set_steam_env();
-			/* Launch Steam Big Picture directly - no killing, no waiting
-			 * Use -cef-force-gpu to force GPU acceleration in CEF/Chromium */
-			execlp("steam", "steam", "-bigpicture", "-cef-force-gpu", "-cef-disable-sandbox", "steam://open/games", (char *)NULL);
-			_exit(127);
+		wlr_log(WLR_INFO, "Switching to PC Gaming (tag 2)");
+
+		/* Switch to tag 2 */
+		if (selmon) {
+			selmon->seltags ^= 1;
+			selmon->tagset[selmon->seltags] = 1 << 1; /* Tag 2 = bit 1 */
+			focusclient(focustop(selmon), 1);
+			arrange(selmon);
+			printstatus();
+		}
+
+		/* Only launch Steam if not already running */
+		if (!is_process_running("steam")) {
+			wlr_log(WLR_INFO, "Steam not running, launching Big Picture mode");
+			pid_t pid = fork();
+			if (pid == 0) {
+				setsid();
+				set_dgpu_env();
+				set_steam_env();
+				execlp("steam", "steam", "-bigpicture", "-cef-force-gpu", "-cef-disable-sandbox", "steam://open/games", (char *)NULL);
+				_exit(127);
+			}
+		} else {
+			wlr_log(WLR_INFO, "Steam already running, just switching to tag 2");
 		}
 		return;
 	}
@@ -23823,13 +23852,14 @@ mapnotify(struct wl_listener *listener, void *data)
 
 	/*
 	 * HTPC mode Steam handling:
-	 * - Force Steam main window to fullscreen
+	 * - Force Steam main window to fullscreen on tag 2
 	 * - Steam popups/dialogs stay floating but get focus and raised to top
 	 */
 	if (htpc_mode_active) {
 		if (is_steam_client(c) && !c->isfloating) {
-			/* Steam main window - force fullscreen */
-			wlr_log(WLR_INFO, "HTPC: Forcing Steam to fullscreen");
+			/* Steam main window - place on tag 2 and fullscreen */
+			wlr_log(WLR_INFO, "HTPC: Placing Steam on tag 2 and fullscreen");
+			c->tags = 1 << 1; /* Tag 2 = bit 1 */
 			setfullscreen(c, 1);
 		} else if (is_steam_popup(c) || (p && is_steam_popup(p))) {
 			/* Steam popup/dialog - ensure it's floating, centered, and focused */
@@ -27445,6 +27475,10 @@ setfullscreen(Client *c, int fullscreen)
 	arrange(c->mon);
 	printstatus();
 	update_game_mode();
+
+	/* Ensure fullscreen client gets keyboard focus immediately */
+	if (fullscreen)
+		focusclient(c, 0);
 }
 
 void
