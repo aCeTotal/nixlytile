@@ -523,6 +523,7 @@ typedef struct GamepadDevice {
 	int64_t last_activity_ms;  /* Last input timestamp (monotonic ms) */
 	int suspended;             /* 1 if gamepad is suspended/powered off */
 	int grabbed;               /* 1 if EVIOCGRAB is active (exclusive access) */
+	int64_t guide_press_ms;    /* Timestamp when guide button was pressed (0 if not held) */
 } GamepadDevice;
 
 typedef struct TrayMenuEntry {
@@ -1601,8 +1602,9 @@ static const GamepadMenuItem gamepad_menu_items[] = {
 	{ "PC-gaming",    NULL },
 	{ "Retro-gaming", NULL },
 	{ "Formula1TV",   NULL },
+	{ "Quit HTPC",    NULL },
 };
-#define GAMEPAD_MENU_ITEM_COUNT 5
+#define GAMEPAD_MENU_ITEM_COUNT 6
 
 /* PC Gaming service configuration */
 static int gaming_service_enabled[GAMING_SERVICE_COUNT] = {1, 1, 1, 1}; /* All enabled by default */
@@ -1650,6 +1652,7 @@ static struct wl_event_source *gamepad_cursor_timer = NULL;
 #define GAMEPAD_DEADZONE 4000           /* Deadzone threshold (out of 32767) */
 #define GAMEPAD_CURSOR_SPEED 15.0       /* Base cursor speed in pixels per update */
 #define GAMEPAD_CURSOR_ACCEL 2.5        /* Acceleration factor at full tilt */
+#define GUIDE_HOLD_MS 1000              /* Hold guide button 1 second for menu */
 
 /* Bluetooth controller auto-pairing */
 static struct wl_event_source *bt_scan_timer = NULL;
@@ -14199,18 +14202,19 @@ htpc_mode_enter(void)
 		}
 	}
 
-	/* Kill existing Steam and start Big Picture mode with library view */
+	/* Start Steam in background (silent mode) - ready for PC Gaming view
+	 * Steam will be shown when user selects "PC-gaming" from the menu */
 	{
 		pid_t pid = fork();
 		if (pid == 0) {
 			setsid();
 			set_dgpu_env();
 			set_steam_env();
-			/* Kill Steam, wait for it to close, then start Big Picture in library
-			 * Use -cef-force-gpu to force GPU acceleration in CEF/Chromium */
+			/* Kill existing Steam, then start in silent mode (no window)
+			 * This preloads Steam so it's ready when user selects PC Gaming */
 			execl("/bin/sh", "sh", "-c",
 				"pkill -9 steam 2>/dev/null; sleep 1; "
-				"steam -bigpicture -cef-force-gpu -cef-disable-sandbox steam://open/games",
+				"steam -silent -cef-force-gpu -cef-disable-sandbox",
 				(char *)NULL);
 			_exit(127);
 		}
@@ -16552,6 +16556,14 @@ gamepad_menu_select(Monitor *m)
 		return;
 	}
 
+	/* Handle Quit HTPC - exit HTPC mode and return to normal desktop */
+	if (strcmp(label, "Quit HTPC") == 0) {
+		gamepad_menu_hide(m);
+		wlr_log(WLR_INFO, "Exiting HTPC mode");
+		htpc_mode_exit();
+		return;
+	}
+
 	/* Execute command if set, otherwise just log the selection */
 	if (cmd && cmd[0]) {
 		Arg arg = {.v = cmd};
@@ -16605,29 +16617,27 @@ gamepad_menu_handle_button(Monitor *m, int button, int value)
 		if (pc_gaming_handle_button(m, button, value))
 			return 1;
 		/* Block guide button when install popup is visible */
-		if (m->pc_gaming.install_popup_visible)
-			return 1;
-		/* Guide button shows menu overlay instead of closing */
-		if (button == BTN_MODE && value == 1) {
-			/* Toggle menu - if visible, close it; if not, show it */
-			if (m->gamepad_menu.visible)
-				gamepad_menu_hide(m);
-			else
-				gamepad_menu_show(m);
-			return 1;
-		}
+		if (m->pc_gaming.install_popup_visible && button == BTN_MODE)
+			return 0;  /* Let Steam handle it */
 		/* Fall through to mouse click emulation if a popup client has focus */
 	}
 
 	gm = &m->gamepad_menu;
 
-	/* BTN_MODE (guide button) - toggle menu (on press only) */
-	if (button == BTN_MODE && value == 1) {
-		if (gm->visible)
-			gamepad_menu_hide(m);
-		else
-			gamepad_menu_show(m);
-		return 1;
+	/* BTN_MODE (guide button) - hold for 1 second to toggle menu
+	 * Pass through to Steam/other apps for normal press */
+	if (button == BTN_MODE) {
+		GamepadDevice *gp;
+		wl_list_for_each(gp, &gamepads, link) {
+			if (value == 1) {
+				/* Guide pressed - start hold timer */
+				gp->guide_press_ms = monotonic_msec();
+			} else {
+				/* Guide released - cancel hold */
+				gp->guide_press_ms = 0;
+			}
+		}
+		return 0;  /* Don't consume - let Steam/other apps receive it */
 	}
 
 	/* Mouse click emulation with shoulder buttons (when menu is not visible) */
@@ -19155,15 +19165,9 @@ gamepad_device_add(const char *path)
 	gp->last_activity_ms = monotonic_msec();
 	gp->suspended = 0;
 	gp->grabbed = 0;
+	gp->guide_press_ms = 0;  /* No guide button press in progress */
 
-	/* Grab exclusive access to gamepad - prevents Steam from receiving guide button
-	 * This is always enabled so nixlytile has full control over gamepad input */
-	if (ioctl(fd, EVIOCGRAB, 1) == 0) {
-		gp->grabbed = 1;
-		wlr_log(WLR_INFO, "Gamepad grabbed exclusively (Steam won't receive guide button)");
-	} else {
-		wlr_log(WLR_DEBUG, "Could not grab gamepad exclusively: %s", strerror(errno));
-	}
+	/* Don't grab gamepad - let Steam and other apps receive input normally */
 
 	/* Add to event loop */
 	gp->event_source = wl_event_loop_add_fd(event_loop, fd,
@@ -19202,12 +19206,8 @@ gamepad_device_remove(const char *path)
 			wlr_log(WLR_INFO, "Gamepad disconnected: %s (%s)", gp->name, gp->path);
 			if (gp->event_source)
 				wl_event_source_remove(gp->event_source);
-			if (gp->fd >= 0) {
-				/* Release exclusive grab before closing */
-				if (gp->grabbed)
-					ioctl(gp->fd, EVIOCGRAB, 0);
+			if (gp->fd >= 0)
 				close(gp->fd);
-			}
 			wl_list_remove(&gp->link);
 			free(gp);
 			return;
@@ -19557,10 +19557,33 @@ gamepad_update_cursor(void)
 static int
 gamepad_cursor_timer_cb(void *data)
 {
+	GamepadDevice *gp;
+	Monitor *m;
+	int64_t now;
+
 	(void)data;
 
 	/* Update cursor position */
 	gamepad_update_cursor();
+
+	/* Check for guide button hold (1 second) */
+	now = monotonic_msec();
+	m = selmon ? selmon : (wl_list_empty(&mons) ? NULL :
+		wl_container_of(mons.next, m, link));
+	if (m) {
+		wl_list_for_each(gp, &gamepads, link) {
+			if (gp->guide_press_ms > 0 &&
+			    (now - gp->guide_press_ms) >= GUIDE_HOLD_MS) {
+				/* Held for 1 second - toggle menu */
+				gp->guide_press_ms = 0;  /* Prevent repeated triggers */
+				if (m->gamepad_menu.visible)
+					gamepad_menu_hide(m);
+				else
+					gamepad_menu_show(m);
+				break;  /* Only trigger once */
+			}
+		}
+	}
 
 	/* Reschedule timer if we have gamepads */
 	if (!wl_list_empty(&gamepads) && gamepad_cursor_timer) {
