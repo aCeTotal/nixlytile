@@ -13789,13 +13789,13 @@ schedule_nixpkgs_cache_timer(void)
 	wl_event_source_timer_update(nixpkgs_cache_timer, 604800000);
 }
 
-/* Check if any client is currently fullscreen, return the client if found */
+/* Check if any client is currently fullscreen AND visible, return the client if found */
 static Client *
 get_fullscreen_client(void)
 {
 	Client *c;
 	wl_list_for_each(c, &clients, link) {
-		if (c->isfullscreen && client_surface(c)->mapped)
+		if (c->isfullscreen && client_surface(c)->mapped && VISIBLEON(c, c->mon))
 			return c;
 	}
 	return NULL;
@@ -14063,6 +14063,15 @@ update_game_mode(void)
 		 */
 		focusclient(c, 0);
 
+		/*
+		 * Enable game VRR for optimal frame pacing.
+		 * This is also done in setfullscreen(), but we need it here too
+		 * for when returning to a tag with a fullscreen game.
+		 */
+		if (c && c->mon && (is_game_content(c) || client_wants_tearing(c))) {
+			enable_game_vrr(c->mon);
+		}
+
 	} else if (game_mode_active && !was_active && !game_mode_ultra) {
 		/*
 		 * ENTERING REGULAR GAME MODE (non-game fullscreen like video)
@@ -14096,6 +14105,9 @@ update_game_mode(void)
 				m->showbar = 1;
 				if (m->statusbar.tree)
 					wlr_scene_node_set_enabled(&m->statusbar.tree->node, 1);
+				/* Disable game VRR on all monitors when leaving game mode */
+				if (m->game_vrr_active)
+					disable_game_vrr(m);
 			}
 
 			/* Schedule deferred timer restarts for non-critical tasks */
@@ -29253,6 +29265,8 @@ tag(const Arg *arg)
 	focusclient(sel, 1);
 	arrange(selmon);
 	printstatus();
+	/* Update game mode - fullscreen client visibility may have changed */
+	update_game_mode();
 }
 
 void
@@ -29386,9 +29400,13 @@ stats_panel_anim_cb(void *data)
 		progress = (float)elapsed_ms / (float)STATS_PANEL_ANIM_DURATION;
 		progress = ease_out_cubic(progress);
 
-		int start_x = m->stats_panel_visible ?
-			(m->m.x + m->m.width) :
-			(m->m.x + m->m.width - m->stats_panel_width);
+		/* Determine start position based on target:
+		 * If sliding in (target is on-screen), start from off-screen right
+		 * If sliding out (target is off-screen), start from on-screen position */
+		int off_screen_x = m->m.x + m->m.width;
+		int on_screen_x = m->m.x + m->m.width - m->stats_panel_width;
+		int sliding_in = (m->stats_panel_target_x < off_screen_x);
+		int start_x = sliding_in ? off_screen_x : on_screen_x;
 		int end_x = m->stats_panel_target_x;
 
 		new_x = start_x + (int)((float)(end_x - start_x) * progress);
@@ -29437,6 +29455,11 @@ stats_panel_refresh_cb(void *data)
 
 	if (!m || !m->stats_panel_visible || !m->stats_panel_tree)
 		return 0;
+
+	if (!statusfont.font) {
+		wlr_log(WLR_ERROR, "stats_panel_refresh_cb: statusfont not initialized!");
+		return 0;
+	}
 
 	/* Calculate metrics */
 	if (m->present_interval_ns > 0) {
@@ -29997,6 +30020,8 @@ gamepanel(const Arg *arg)
 {
 	Monitor *m = selmon;
 
+	wlr_log(WLR_INFO, "gamepanel() called, selmon=%p", (void*)m);
+
 	if (!m)
 		return;
 
@@ -30026,6 +30051,7 @@ gamepanel(const Arg *arg)
 
 	/* Toggle visibility */
 	if (m->stats_panel_visible) {
+		wlr_log(WLR_INFO, "gamepanel: sliding OUT, panel was visible");
 		/* Slide out */
 		m->stats_panel_target_x = m->m.x + m->m.width;
 		m->stats_panel_anim_start = get_time_ns();
@@ -30035,6 +30061,9 @@ gamepanel(const Arg *arg)
 		/* Cancel refresh timer */
 		wl_event_source_timer_update(m->stats_panel_timer, 0);
 	} else {
+		wlr_log(WLR_INFO, "gamepanel: sliding IN, panel_tree=%p, width=%d, pos=(%d,%d)",
+			(void*)m->stats_panel_tree, m->stats_panel_width,
+			m->stats_panel_target_x, m->m.y);
 		/* Slide in */
 		m->stats_panel_visible = 1;
 		m->stats_panel_target_x = m->m.x + m->m.width - m->stats_panel_width;
@@ -30045,6 +30074,11 @@ gamepanel(const Arg *arg)
 		/* Enable and position */
 		wlr_scene_node_set_enabled(&m->stats_panel_tree->node, 1);
 		wlr_scene_node_set_position(&m->stats_panel_tree->node,
+			m->stats_panel_current_x, m->m.y);
+		/* Ensure panel is on top of other overlays in LyrBlock */
+		wlr_scene_node_raise_to_top(&m->stats_panel_tree->node);
+
+		wlr_log(WLR_INFO, "gamepanel: enabled node at x=%d y=%d, raised to top, starting animation",
 			m->stats_panel_current_x, m->m.y);
 
 		/* Initial render and start animation */
@@ -30230,6 +30264,8 @@ toggletag(const Arg *arg)
 	focusclient(focustop(selmon), 1);
 	arrange(selmon);
 	printstatus();
+	/* Update game mode - fullscreen client visibility may have changed */
+	update_game_mode();
 }
 
 void
@@ -30243,6 +30279,8 @@ toggleview(const Arg *arg)
 	focusclient(focustop(selmon), 1);
 	arrange(selmon);
 	printstatus();
+	/* Update game mode when toggling tag visibility */
+	update_game_mode();
 }
 
 void
@@ -30445,6 +30483,8 @@ view(const Arg *arg)
 	focusclient(focustop(selmon), 1);
 	arrange(selmon);
 	printstatus();
+	/* Update game mode when switching tags - a fullscreen game may become visible/hidden */
+	update_game_mode();
 }
 
 void
