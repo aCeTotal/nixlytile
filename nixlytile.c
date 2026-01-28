@@ -43,6 +43,7 @@
 #include <wlr/backend/libinput.h>
 #include <wlr/render/allocator.h>
 #include <wlr/render/wlr_renderer.h>
+#include <wlr/render/drm_format_set.h>
 #include <wlr/interfaces/wlr_buffer.h>
 #include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_alpha_modifier_v1.h>
@@ -888,6 +889,12 @@ struct Monitor {
 	uint64_t max_input_latency_ns;    /* maximum observed input latency */
 	/* Memory pressure */
 	int memory_pressure;              /* 0-100, current memory usage % */
+	/* HDR and color depth support */
+	int supports_10bit;               /* 1 if monitor supports 10-bit color */
+	int render_10bit_active;          /* 1 if 10-bit rendering is currently active */
+	int max_bpc;                      /* maximum bits per channel (8, 10, 12, 16) */
+	int hdr_capable;                  /* 1 if monitor reports HDR support in EDID */
+	int hdr_active;                   /* 1 if HDR is currently enabled */
 	/* Stats panel (sliding overlay from right) */
 	struct wlr_scene_tree *stats_panel_tree;
 	struct wl_event_source *stats_panel_timer;
@@ -1171,6 +1178,10 @@ static void run(const char *startup_cmd);
 static void set_adaptive_sync(Monitor *m, int enabled);
 static void set_video_refresh_rate(Monitor *m, Client *c);
 static void restore_max_refresh_rate(Monitor *m);
+static int detect_10bit_support(Monitor *m);
+static int set_drm_color_properties(Monitor *m, int max_bpc);
+static int enable_10bit_rendering(Monitor *m);
+static void init_monitor_color_settings(Monitor *m);
 static int is_video_content(Client *c);
 static void update_game_vrr(Monitor *m, float current_fps);
 static void enable_game_vrr(Monitor *m);
@@ -1299,6 +1310,9 @@ static void set_steam_env(void);
 static int is_steam_cmd(const char *cmd);
 static int is_steam_client(Client *c);
 static int is_steam_popup(Client *c);
+static int is_steam_child_process(pid_t pid);
+static int is_steam_game(Client *c);
+static int looks_like_game(Client *c);
 static void detect_gpus(void);
 static int cpu_popup_refresh_timeout(void *data);
 static void schedule_cpu_popup_refresh(uint32_t ms);
@@ -1426,6 +1440,7 @@ static void applyxkbdefaultsfromsystem(struct xkb_rule_names *names);
 static struct xkb_rule_names getxkbrules(void);
 static double backlight_percent(void);
 static double pipewire_volume_percent(int *is_headset_out);
+static void volume_invalidate_cache(int is_headset);
 static int findbacklightdevice(char *brightness_path, size_t brightness_len,
 		char *max_path, size_t max_len);
 static int set_backlight_relative(double delta_percent);
@@ -10508,21 +10523,72 @@ apply_startup_defaults(void)
 		light_cached_percent = light_default;
 	}
 
-	/* Speaker/headset volume */
+	/*
+	 * Speaker/headset volume - read actual state from PipeWire first,
+	 * then unmute and set to default. This ensures statusbar shows
+	 * correct state from the very beginning.
+	 */
+	{
+		int is_headset = 0;
+		double actual_vol;
+
+		/* Invalidate cache to force fresh read from PipeWire */
+		volume_invalidate_cache(0); /* speaker */
+		volume_invalidate_cache(1); /* headset */
+
+		/* Read actual current state from PipeWire */
+		actual_vol = pipewire_volume_percent(&is_headset);
+		(void)actual_vol; /* We just want the mute state synced */
+
+		/* Now unmute and set volume */
+		set_pipewire_mute(0);
+
+		/* Update all mute state variables to match */
+		volume_muted = 0;
+		volume_cached_speaker_muted = 0;
+		volume_cached_headset_muted = 0;
+
+		/* Invalidate cache again so next read gets fresh data */
+		volume_invalidate_cache(0);
+		volume_invalidate_cache(1);
+	}
+
 	if (set_pipewire_volume(speaker_default) == 0) {
 		speaker_active = speaker_default;
 		speaker_stored = speaker_default;
 		volume_last_speaker_percent = speaker_default;
 		volume_last_headset_percent = speaker_default;
-		volume_muted = 0;
 	}
 
-	/* Microphone volume */
+	/*
+	 * Microphone volume - read actual state from PipeWire first,
+	 * then unmute and set to default.
+	 */
+	{
+		double actual_mic;
+
+		/* Invalidate cache to force fresh read */
+		mic_last_read_ms = 0;
+
+		/* Read actual current state from PipeWire */
+		actual_mic = pipewire_mic_volume_percent();
+		(void)actual_mic;
+
+		/* Now unmute and set volume */
+		set_pipewire_mic_mute(0);
+
+		/* Update all mic mute state variables to match */
+		mic_muted = 0;
+		mic_cached_muted = 0;
+
+		/* Invalidate cache again */
+		mic_last_read_ms = 0;
+	}
+
 	if (set_pipewire_mic_volume(mic_default) == 0) {
 		microphone_active = mic_default;
 		microphone_stored = mic_default;
 		mic_last_percent = mic_default;
-		mic_muted = 0;
 	}
 
 	applied = 1;
@@ -10904,7 +10970,11 @@ toggle_pipewire_mute(void)
 	/* Always force a fresh read from PipeWire to get accurate mute state */
 	volume_invalidate_cache(is_headset);
 	vol = pipewire_volume_percent(&is_headset);
-	current = vol >= 0.0 ? volume_muted : 0;
+	/*
+	 * Determine current mute state. If volume_muted is still -1 (unknown),
+	 * treat it as unmuted (0) so first click will mute.
+	 */
+	current = (vol >= 0.0 && volume_muted == 1) ? 1 : 0;
 	base = vol >= 0.0 ? vol : volume_last_for_type(is_headset);
 
 	if (current == 0) { /* muting */
@@ -10950,7 +11020,11 @@ toggle_pipewire_mic_mute(void)
 	/* Always force a fresh read from PipeWire to get accurate mute state */
 	mic_last_read_ms = 0;
 	vol = pipewire_mic_volume_percent();
-	current = vol >= 0.0 ? mic_muted : 0;
+	/*
+	 * Determine current mute state. If mic_muted is still -1 (unknown),
+	 * treat it as unmuted (0) so first click will mute.
+	 */
+	current = (vol >= 0.0 && mic_muted == 1) ? 1 : 0;
 	base = vol >= 0.0 ? vol : mic_last_percent;
 
 	if (current == 0) { /* muting */
@@ -14155,6 +14229,21 @@ update_game_mode(void)
 		 */
 		if (c && c->mon && (is_game_content(c) || client_wants_tearing(c))) {
 			enable_game_vrr(c->mon);
+		}
+
+	} else if (game_mode_ultra && was_ultra && c) {
+		/*
+		 * RETURNING TO ULTRA GAME MODE (e.g., switching back to tag with fullscreen game)
+		 * Ensure the game gets keyboard focus - this is the main fix for the bug where
+		 * switching tags and back causes games to lose keyboard focus.
+		 */
+		struct wlr_surface *focused = seat->keyboard_state.focused_surface;
+		if (focused != client_surface(c)) {
+			wlr_log(WLR_INFO, "Returning to fullscreen game '%s' - ensuring keyboard focus",
+				client_get_appid(c) ? client_get_appid(c) : "(unknown)");
+			exclusive_focus = NULL;
+			focusclient(c, 1);
+			schedule_game_focus_check();
 		}
 
 	} else if (game_mode_active && !was_active && !game_mode_ultra) {
@@ -22990,6 +23079,10 @@ createmon(struct wl_listener *listener, void *data)
 		if (c->output && strcmp(wlr_output->name, c->output) == 0)
 			c->mon = m;
 	}
+
+	/* Initialize HDR and 10-bit color settings */
+	init_monitor_color_settings(m);
+
 	updatemons(NULL, NULL);
 }
 
@@ -24002,6 +24095,32 @@ mapnotify(struct wl_listener *listener, void *data)
 			/* Show cursor for popup interaction */
 			wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
 		}
+	}
+
+	/*
+	 * AUTO-FULLSCREEN FOR GAMES
+	 *
+	 * Steam games often start in windowed mode and then request fullscreen
+	 * after a delay (sometimes several seconds). This causes an annoying
+	 * flash where the game appears windowed before going fullscreen.
+	 *
+	 * To fix this, we detect games at map time and immediately set them
+	 * to fullscreen, skipping the windowed phase entirely.
+	 *
+	 * Detection criteria:
+	 * - Client is a child process of Steam (game launcher)
+	 * - Client uses content-type=game protocol hint
+	 * - Client requests tearing (low-latency mode used by games)
+	 */
+	if (!c->isfloating && !c->isfullscreen && looks_like_game(c)) {
+		wlr_log(WLR_INFO, "Auto-fullscreen: detected game '%s', setting fullscreen immediately",
+			client_get_appid(c) ? client_get_appid(c) : "(unknown)");
+		setfullscreen(c, 1);
+		/* Immediately focus the game */
+		exclusive_focus = NULL;
+		focusclient(c, 1);
+		printstatus();
+		return; /* Skip unset_fullscreen logic - we just set fullscreen */
 	}
 
 	printstatus();
@@ -25991,6 +26110,271 @@ restore_max_refresh_rate(Monitor *m)
 		}
 	}
 	wlr_output_state_finish(&state);
+}
+
+/*
+ * ============================================================================
+ * HDR AND 10-BIT COLOR SUPPORT
+ * ============================================================================
+ *
+ * This section handles:
+ * - Detection of 10-bit and HDR capable monitors
+ * - Setting optimal render format (XRGB2101010 for 10-bit, XRGB8888 for 8-bit)
+ * - Configuring DRM connector properties for best color output:
+ *   - max bpc: Maximum bits per channel (typically 8, 10, 12, or 16)
+ *   - Colorspace/output_color_format: RGB 4:4:4 vs YCbCr 4:2:2/4:2:0
+ *
+ * Note: Full HDR (PQ/BT.2020) requires wlroots with HDR10 support which is
+ * still pending merge (MR !5002). This code prepares the infrastructure.
+ */
+
+/*
+ * Check if an output supports 10-bit or higher color depth.
+ * This queries the DRM connector's max bpc property and supported formats.
+ */
+static int
+detect_10bit_support(Monitor *m)
+{
+	const struct wlr_drm_format_set *formats;
+	const struct wlr_drm_format *fmt;
+	int has_10bit = 0;
+
+	if (!m || !m->wlr_output)
+		return 0;
+
+	/* Check primary plane formats for 10-bit support */
+	formats = wlr_output_get_primary_formats(m->wlr_output, WLR_BUFFER_CAP_DMABUF);
+	if (formats) {
+		/* Look for XRGB2101010 or XBGR2101010 (10-bit RGB formats) */
+		fmt = wlr_drm_format_set_get(formats, DRM_FORMAT_XRGB2101010);
+		if (fmt) {
+			has_10bit = 1;
+			wlr_log(WLR_INFO, "Monitor %s supports DRM_FORMAT_XRGB2101010 (10-bit)",
+				m->wlr_output->name);
+		}
+
+		fmt = wlr_drm_format_set_get(formats, DRM_FORMAT_XBGR2101010);
+		if (fmt) {
+			has_10bit = 1;
+			wlr_log(WLR_INFO, "Monitor %s supports DRM_FORMAT_XBGR2101010 (10-bit)",
+				m->wlr_output->name);
+		}
+
+		/* Also check for ARGB2101010 (10-bit with alpha) */
+		fmt = wlr_drm_format_set_get(formats, DRM_FORMAT_ARGB2101010);
+		if (fmt) {
+			has_10bit = 1;
+			wlr_log(WLR_INFO, "Monitor %s supports DRM_FORMAT_ARGB2101010 (10-bit+alpha)",
+				m->wlr_output->name);
+		}
+	}
+
+	return has_10bit;
+}
+
+/*
+ * Set DRM connector properties for optimal color output.
+ * This sets:
+ * - max bpc: Maximum bits per channel (10 for 10-bit, 12 for HDR, etc.)
+ * - Colorspace: BT709/BT2020 (for HDR)
+ *
+ * Note: These are low-level DRM properties, accessed via libdrm.
+ */
+static int
+set_drm_color_properties(Monitor *m, int max_bpc)
+{
+	int drm_fd;
+	uint32_t conn_id;
+	drmModeConnector *conn = NULL;
+	drmModePropertyRes *prop = NULL;
+	int i;
+	int success = 0;
+
+	if (!m || !m->wlr_output || !wlr_output_is_drm(m->wlr_output))
+		return 0;
+
+	/* Get DRM fd from renderer */
+	drm_fd = wlr_renderer_get_drm_fd(drw);
+	if (drm_fd < 0) {
+		wlr_log(WLR_DEBUG, "Cannot get DRM fd for color properties");
+		return 0;
+	}
+
+	/* Get connector ID from wlroots */
+	conn_id = wlr_drm_connector_get_id(m->wlr_output);
+	if (conn_id == 0) {
+		wlr_log(WLR_DEBUG, "Cannot get DRM connector ID for %s", m->wlr_output->name);
+		return 0;
+	}
+
+	/* Get connector to access properties */
+	conn = drmModeGetConnector(drm_fd, conn_id);
+	if (!conn) {
+		wlr_log(WLR_DEBUG, "Cannot get DRM connector %u", conn_id);
+		return 0;
+	}
+
+	/* Find and set max bpc property */
+	for (i = 0; i < conn->count_props; i++) {
+		prop = drmModeGetProperty(drm_fd, conn->props[i]);
+		if (!prop)
+			continue;
+
+		if (strcmp(prop->name, "max bpc") == 0) {
+			/* Check if requested bpc is within range */
+			if (prop->flags & DRM_MODE_PROP_RANGE) {
+				uint64_t min_bpc = prop->values[0];
+				uint64_t max_supported_bpc = prop->values[1];
+
+				if (max_bpc < (int)min_bpc)
+					max_bpc = (int)min_bpc;
+				if (max_bpc > (int)max_supported_bpc)
+					max_bpc = (int)max_supported_bpc;
+
+				if (drmModeConnectorSetProperty(drm_fd, conn_id,
+						conn->props[i], max_bpc) == 0) {
+					wlr_log(WLR_INFO, "Set max bpc to %d for %s (supports %lu-%lu)",
+						max_bpc, m->wlr_output->name, min_bpc, max_supported_bpc);
+					m->max_bpc = max_bpc;
+					success = 1;
+				} else {
+					wlr_log(WLR_ERROR, "Failed to set max bpc to %d for %s",
+						max_bpc, m->wlr_output->name);
+				}
+			}
+			drmModeFreeProperty(prop);
+			break;
+		}
+		drmModeFreeProperty(prop);
+	}
+
+	/* Also look for Colorspace or output_color_format property for RGB full */
+	for (i = 0; i < conn->count_props; i++) {
+		prop = drmModeGetProperty(drm_fd, conn->props[i]);
+		if (!prop)
+			continue;
+
+		/* AMD uses "Colorspace", Intel uses "output_colorspace" */
+		if (strcmp(prop->name, "Colorspace") == 0 ||
+		    strcmp(prop->name, "output_colorspace") == 0) {
+			/* Try to find RGB_Wide_Fixed or Default (RGB full range) */
+			if (prop->flags & DRM_MODE_PROP_ENUM) {
+				int j;
+				uint64_t rgb_value = 0; /* Default is usually 0 */
+
+				for (j = 0; j < prop->count_enums; j++) {
+					/* Prefer Default or RGB_Wide_Fixed for best color */
+					if (strcmp(prop->enums[j].name, "Default") == 0 ||
+					    strcmp(prop->enums[j].name, "RGB_Wide_Fixed") == 0) {
+						rgb_value = prop->enums[j].value;
+						break;
+					}
+				}
+
+				if (drmModeConnectorSetProperty(drm_fd, conn_id,
+						conn->props[i], rgb_value) == 0) {
+					wlr_log(WLR_INFO, "Set colorspace to RGB for %s",
+						m->wlr_output->name);
+				}
+			}
+			drmModeFreeProperty(prop);
+			break;
+		}
+		drmModeFreeProperty(prop);
+	}
+
+	drmModeFreeConnector(conn);
+	return success;
+}
+
+/*
+ * Enable 10-bit rendering for a monitor.
+ * This sets the render format to XRGB2101010 for better color gradients.
+ */
+static int
+enable_10bit_rendering(Monitor *m)
+{
+	struct wlr_output_state state;
+	int success = 0;
+
+	if (!m || !m->wlr_output || !m->wlr_output->enabled)
+		return 0;
+
+	if (!m->supports_10bit) {
+		wlr_log(WLR_DEBUG, "Monitor %s does not support 10-bit", m->wlr_output->name);
+		return 0;
+	}
+
+	if (m->render_10bit_active) {
+		wlr_log(WLR_DEBUG, "10-bit already active on %s", m->wlr_output->name);
+		return 1;
+	}
+
+	wlr_output_state_init(&state);
+	wlr_output_state_set_render_format(&state, DRM_FORMAT_XRGB2101010);
+
+	if (wlr_output_test_state(m->wlr_output, &state)) {
+		if (wlr_output_commit_state(m->wlr_output, &state)) {
+			m->render_10bit_active = 1;
+			success = 1;
+			wlr_log(WLR_INFO, "Enabled 10-bit rendering on %s", m->wlr_output->name);
+
+			/* Also set max bpc to 10 via DRM */
+			set_drm_color_properties(m, 10);
+
+			/* Show notification */
+			toast_show(m, "10-bit color", 1500);
+		} else {
+			wlr_log(WLR_ERROR, "Failed to commit 10-bit state on %s", m->wlr_output->name);
+		}
+	} else {
+		wlr_log(WLR_DEBUG, "10-bit render format not supported by backend on %s",
+			m->wlr_output->name);
+	}
+
+	wlr_output_state_finish(&state);
+	return success;
+}
+
+/*
+ * Initialize HDR and color depth settings for a new monitor.
+ * Called from createmon() after the output is initialized.
+ */
+static void
+init_monitor_color_settings(Monitor *m)
+{
+	if (!m || !m->wlr_output)
+		return;
+
+	/* Detect capabilities */
+	m->supports_10bit = detect_10bit_support(m);
+	m->render_10bit_active = 0;
+	m->max_bpc = 8;  /* Default */
+	m->hdr_capable = 0;  /* Will be set when wlroots gets HDR support */
+	m->hdr_active = 0;
+
+	wlr_log(WLR_INFO, "Monitor %s: 10-bit=%s, HDR=%s",
+		m->wlr_output->name,
+		m->supports_10bit ? "yes" : "no",
+		m->hdr_capable ? "yes" : "no");
+
+	/*
+	 * Automatically enable 10-bit rendering if supported.
+	 * This provides smoother gradients and better color accuracy.
+	 */
+	if (m->supports_10bit) {
+		/* Try to enable 10-bit - if it fails, we fall back to 8-bit automatically */
+		enable_10bit_rendering(m);
+	}
+
+	/*
+	 * Always try to set max bpc even if 10-bit rendering isn't available.
+	 * This ensures we're using the best color depth the display link supports.
+	 */
+	if (wlr_output_is_drm(m->wlr_output)) {
+		int target_bpc = m->supports_10bit ? 10 : 8;
+		set_drm_color_properties(m, target_bpc);
+	}
 }
 
 /* Track frame commit timestamp for a client (only when buffer changes) */
@@ -29239,6 +29623,28 @@ set_steam_env(void)
 {
 	GpuInfo *dgpu;
 
+	/*
+	 * AUDIO: Ensure Steam and games use PipeWire for audio
+	 *
+	 * SDL_AUDIODRIVER=pipewire: Tell SDL (used by many games) to use PipeWire directly
+	 * PULSE_SERVER: Point PulseAudio clients to PipeWire's pulse socket
+	 * PIPEWIRE_RUNTIME_DIR: Ensure PipeWire socket is found
+	 *
+	 * Note: Modern PipeWire provides PulseAudio compatibility, so most games
+	 * will work via the pulse socket even without explicit PipeWire support.
+	 */
+	setenv("SDL_AUDIODRIVER", "pipewire,pulseaudio,alsa", 0); /* Don't override if already set */
+
+	/* Ensure XDG_RUNTIME_DIR is set (needed for PipeWire socket) */
+	if (!getenv("XDG_RUNTIME_DIR")) {
+		char runtime_dir[256];
+		snprintf(runtime_dir, sizeof(runtime_dir), "/run/user/%d", getuid());
+		setenv("XDG_RUNTIME_DIR", runtime_dir, 1);
+	}
+
+	/* For Proton/Wine games: use PipeWire via the PulseAudio interface */
+	setenv("PULSE_LATENCY_MSEC", "60", 0); /* Reasonable latency for games */
+
 	/* UI scaling fix for better Big Picture performance on hybrid systems */
 	setenv("STEAM_FORCE_DESKTOPUI_SCALING", "1", 1);
 
@@ -29316,6 +29722,106 @@ is_steam_popup(Client *c)
 	/* Also check for common game launcher popups */
 	if (strcasestr(app_id, "steamwebhelper"))
 		return 1;
+	return 0;
+}
+
+/*
+ * Check if a process is a child of Steam (i.e., a game launched by Steam).
+ * This reads /proc/pid/stat to get the parent PID and checks recursively.
+ */
+static int
+is_steam_child_process(pid_t pid)
+{
+	char path[64], buf[512], comm[64];
+	FILE *f;
+	pid_t ppid;
+	int depth = 0;
+	const int max_depth = 10; /* Prevent infinite loops */
+
+	while (pid > 1 && depth < max_depth) {
+		snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+		f = fopen(path, "r");
+		if (!f)
+			return 0;
+
+		/* Format: pid (comm) state ppid ... */
+		if (fscanf(f, "%*d (%63[^)]) %*c %d", comm, &ppid) != 2) {
+			fclose(f);
+			return 0;
+		}
+		fclose(f);
+
+		/* Check if parent is steam, steam.sh, or reaper (Steam's process manager) */
+		if (strcasestr(comm, "steam") || strcasestr(comm, "reaper"))
+			return 1;
+
+		pid = ppid;
+		depth++;
+	}
+	return 0;
+}
+
+/*
+ * Check if client is a Steam game (launched by Steam, not Steam itself).
+ * Steam games are child processes of Steam and typically:
+ * - Don't have "steam" in their app_id
+ * - Are not floating (popups are floating)
+ * - May request fullscreen after a delay
+ */
+static int
+is_steam_game(Client *c)
+{
+	const char *app_id;
+	pid_t pid;
+
+	if (!c)
+		return 0;
+
+	/* Exclude Steam itself and its popups */
+	app_id = client_get_appid(c);
+	if (app_id && strcasestr(app_id, "steam"))
+		return 0;
+
+	/* Exclude floating windows (likely dialogs/launchers) */
+	if (c->isfloating)
+		return 0;
+
+	/* Check if it's a child of Steam */
+	pid = client_get_pid(c);
+	if (pid > 1 && is_steam_child_process(pid)) {
+		wlr_log(WLR_INFO, "Detected Steam game: app_id='%s', pid=%d",
+			app_id ? app_id : "(null)", pid);
+		return 1;
+	}
+
+	return 0;
+}
+
+/*
+ * Check if client looks like a game based on various heuristics:
+ * - Launched by Steam
+ * - Has game-related app_id patterns
+ * - Uses content-type game hint
+ * - Requests tearing (for low latency)
+ */
+static int
+looks_like_game(Client *c)
+{
+	if (!c)
+		return 0;
+
+	/* Check content-type protocol hint */
+	if (is_game_content(c))
+		return 1;
+
+	/* Check if it wants tearing (games often request this) */
+	if (client_wants_tearing(c))
+		return 1;
+
+	/* Check if it's a Steam game */
+	if (is_steam_game(c))
+		return 1;
+
 	return 0;
 }
 
@@ -30618,12 +31124,34 @@ urgent(struct wl_listener *listener, void *data)
 void
 view(const Arg *arg)
 {
+	Client *c, *fullscreen_c = NULL;
+
 	if (!selmon || (arg->ui & TAGMASK) == selmon->tagset[selmon->seltags])
 		return;
 	selmon->seltags ^= 1; /* toggle sel tagset */
 	if (arg->ui & TAGMASK)
 		selmon->tagset[selmon->seltags] = arg->ui & TAGMASK;
-	focusclient(focustop(selmon), 1);
+
+	/*
+	 * Check if there's a fullscreen client on the new tag.
+	 * If so, focus it directly instead of using focustop() which relies on
+	 * the focus stack order. This fixes the bug where switching tags and back
+	 * causes fullscreen games to lose keyboard focus.
+	 */
+	wl_list_for_each(c, &clients, link) {
+		if (c->isfullscreen && VISIBLEON(c, selmon)) {
+			fullscreen_c = c;
+			break;
+		}
+	}
+
+	if (fullscreen_c) {
+		exclusive_focus = NULL;  /* Clear any exclusive focus that might block */
+		focusclient(fullscreen_c, 1);
+	} else {
+		focusclient(focustop(selmon), 1);
+	}
+
 	arrange(selmon);
 	printstatus();
 	/* Update game mode when switching tags - a fullscreen game may become visible/hidden */
