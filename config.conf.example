@@ -339,7 +339,7 @@ launcher = wmenu-run
 bind = mod+q killclient
 bind = mod+shift+Q quit
 bind = mod+shift+space togglefloating
-bind = mod+shift+f togglefullscreen
+bind = mod+f togglefullscreen
 bind = mod+shift+g togglegaps
 bind = mod+b togglestatusbar
 bind = mod+shift+h htpc_mode_toggle
@@ -380,7 +380,7 @@ bind = mod+shift+Return spawn foot
 
 # Application launcher / search modal
 bind = mod+p modal_show
-bind = mod+f modal_show_files
+bind = mod+v modal_show_files
 bind = mod+g modal_show_git
 bind = mod+i nixpkgs_show
 

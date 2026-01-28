@@ -1254,6 +1254,8 @@ static void nixpkgs_cache_update_start(void);
 static void pc_gaming_cache_update_start(void);
 static int cache_update_timer_cb(void *data);
 static int nixpkgs_cache_timer_cb(void *data);
+static int game_focus_timer_cb(void *data);
+static void schedule_game_focus_check(void);
 static void schedule_cache_update_timer(void);
 static void schedule_nixpkgs_cache_timer(void);
 static void update_game_mode(void);
@@ -1562,6 +1564,10 @@ static pid_t game_mode_pid = 0;  /* PID of fullscreen game process */
 static int game_mode_nice_applied = 0;  /* 1 if we changed nice value */
 static int game_mode_ioclass_applied = 0;  /* 1 if we changed IO priority */
 static int htpc_mode_active = 0; /* HTPC mode - hides statusbar, stops background tasks */
+static struct wl_event_source *game_focus_timer = NULL;  /* Timer for re-checking game focus */
+static int game_focus_retries = 0;  /* Number of focus retry attempts */
+#define GAME_FOCUS_RETRY_MS 50      /* Check focus every 50ms */
+#define GAME_FOCUS_MAX_RETRIES 20   /* Try for up to 1 second (20 * 50ms) */
 static struct wl_event_source *status_timer;
 static struct wl_event_source *status_cpu_timer;
 static struct wl_event_source *status_hover_timer;
@@ -7082,8 +7088,12 @@ focus_or_launch_app(const char *app_id, const char *launch_cmd)
 				set_dgpu_env();
 			if (is_steam_cmd(launch_cmd)) {
 				set_steam_env();
-				/* Launch Steam with GPU acceleration flags */
-				execlp("steam", "steam", "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
+				/* Launch Steam - Big Picture in HTPC mode, normal otherwise */
+				if (htpc_mode_active) {
+					execlp("steam", "steam", "-bigpicture", "-cef-force-gpu", "-cef-disable-sandbox", "steam://open/games", (char *)NULL);
+				} else {
+					execlp("steam", "steam", "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
+				}
 				_exit(1);
 			}
 			execlp("sh", "sh", "-c", launch_cmd, NULL);
@@ -12849,8 +12859,12 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 						set_dgpu_env();
 					if (is_steam_cmd(cmd_str)) {
 						set_steam_env();
-						/* Launch Steam with GPU acceleration flags - same as HTPC mode */
-						execlp("steam", "steam", "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
+						/* Launch Steam - Big Picture in HTPC mode, normal otherwise */
+						if (htpc_mode_active) {
+							execlp("steam", "steam", "-bigpicture", "-cef-force-gpu", "-cef-disable-sandbox", "steam://open/games", (char *)NULL);
+						} else {
+							execlp("steam", "steam", "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
+						}
 					}
 					execl("/bin/sh", "sh", "-c", cmd_str, NULL);
 					_exit(127);
@@ -13789,6 +13803,68 @@ schedule_nixpkgs_cache_timer(void)
 	wl_event_source_timer_update(nixpkgs_cache_timer, 604800000);
 }
 
+/*
+ * Game focus timer callback - ensures fullscreen games receive keyboard focus.
+ * This handles race conditions where games create multiple windows rapidly
+ * and focus can be stolen by transient windows.
+ */
+static int
+game_focus_timer_cb(void *data)
+{
+	Client *c;
+	struct wlr_surface *focused;
+
+	(void)data;
+
+	c = game_mode_client;
+	if (!c || !c->isfullscreen || !game_mode_ultra) {
+		/* Game exited or no longer fullscreen, stop retrying */
+		game_focus_retries = 0;
+		return 0;
+	}
+
+	focused = seat->keyboard_state.focused_surface;
+
+	/* Check if the game already has keyboard focus */
+	if (focused == client_surface(c)) {
+		wlr_log(WLR_INFO, "Game focus confirmed for '%s' after %d retries",
+			client_get_appid(c) ? client_get_appid(c) : "(unknown)",
+			GAME_FOCUS_MAX_RETRIES - game_focus_retries);
+		game_focus_retries = 0;
+		return 0;
+	}
+
+	/* Game doesn't have focus, try to give it focus */
+	wlr_log(WLR_INFO, "Game focus retry %d/%d for '%s' (current focus=%p, game=%p)",
+		GAME_FOCUS_MAX_RETRIES - game_focus_retries + 1, GAME_FOCUS_MAX_RETRIES,
+		client_get_appid(c) ? client_get_appid(c) : "(unknown)",
+		(void*)focused, (void*)client_surface(c));
+
+	exclusive_focus = NULL;
+	focusclient(c, 1);
+
+	game_focus_retries--;
+	if (game_focus_retries > 0) {
+		/* Schedule another check */
+		wl_event_source_timer_update(game_focus_timer, GAME_FOCUS_RETRY_MS);
+	} else {
+		wlr_log(WLR_INFO, "Game focus retries exhausted for '%s'",
+			client_get_appid(c) ? client_get_appid(c) : "(unknown)");
+	}
+
+	return 0;
+}
+
+static void
+schedule_game_focus_check(void)
+{
+	if (!game_focus_timer) {
+		game_focus_timer = wl_event_loop_add_timer(event_loop, game_focus_timer_cb, NULL);
+	}
+	game_focus_retries = GAME_FOCUS_MAX_RETRIES;
+	wl_event_source_timer_update(game_focus_timer, GAME_FOCUS_RETRY_MS);
+}
+
 /* Check if any client is currently fullscreen AND visible, return the client if found */
 static Client *
 get_fullscreen_client(void)
@@ -14060,8 +14136,17 @@ update_game_mode(void)
 		/*
 		 * Ensure the game client has keyboard focus.
 		 * This is critical for games to receive keyboard input immediately.
+		 * Use lift=1 to raise to top and warp cursor for immediate input.
 		 */
-		focusclient(c, 0);
+		exclusive_focus = NULL;  /* Clear any exclusive focus that might block */
+		focusclient(c, 1);
+
+		/*
+		 * Schedule repeated focus checks to handle race conditions.
+		 * Games often create multiple windows during startup, and focus
+		 * can be stolen by transient splash screens or loading windows.
+		 */
+		schedule_game_focus_check();
 
 		/*
 		 * Enable game VRR for optimal frame pacing.
@@ -14260,12 +14345,31 @@ static void
 htpc_mode_exit(void)
 {
 	Monitor *m;
+	Client *c, *tmp;
 
 	if (!htpc_mode_active)
 		return;
 
 	htpc_mode_active = 0;
-	wlr_log(WLR_INFO, "HTPC mode deactivated - showing statusbar, resuming background tasks");
+	wlr_log(WLR_INFO, "HTPC mode deactivated - cleaning up, showing statusbar, resuming background tasks");
+
+	/* Kill Steam and close all clients to get clean tags */
+	if (fork() == 0) {
+		setsid();
+		execl("/bin/sh", "sh", "-c", "pkill -9 steam 2>/dev/null", (char *)NULL);
+		_exit(0);
+	}
+
+	/* Close all remaining client windows */
+	wl_list_for_each_safe(c, tmp, &clients, link) {
+		client_send_close(c);
+	}
+
+	/* Switch to tag 1 on all monitors */
+	wl_list_for_each(m, &mons, link) {
+		m->seltags ^= 1;
+		m->tagset[m->seltags] = 1 << 0; /* Tag 1 = bit 0 */
+	}
 
 	/* Restore normal wallpaper */
 	{
@@ -23252,7 +23356,10 @@ focusclient(Client *c, int lift)
 	motionnotify(0, NULL, 0, 0, 0, 0);
 
 	/* Have a client, so focus its top-level wlr_surface */
-	client_notify_enter(client_surface(c), wlr_seat_get_keyboard(seat));
+	struct wlr_keyboard *kb = wlr_seat_get_keyboard(seat);
+	wlr_log(WLR_INFO, "focusclient: giving keyboard focus to '%s', keyboard=%p",
+		client_get_appid(c) ? client_get_appid(c) : "(null)", (void*)kb);
+	client_notify_enter(client_surface(c), kb);
 
 	/* Activate the new client */
 	client_activate_surface(client_surface(c), 1);
@@ -23655,6 +23762,11 @@ keypress(struct wl_listener *listener, void *data)
 
 	wlr_seat_set_keyboard(seat, &group->wlr_group->keyboard);
 	/* Pass unhandled keycodes along to the client. */
+	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+		struct wlr_surface *focused = seat->keyboard_state.focused_surface;
+		wlr_log(WLR_DEBUG, "keypress: forwarding key %d to client, focused_surface=%p",
+			event->keycode, (void*)focused);
+	}
 	wlr_seat_keyboard_notify_key(seat, event->time_msec,
 			event->keycode, event->state);
 }
@@ -23796,8 +23908,11 @@ mapnotify(struct wl_listener *listener, void *data)
 		wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
 		client_set_size(c, c->geom.width, c->geom.height);
 		if (client_wants_focus(c)) {
+			wlr_log(WLR_INFO, "mapnotify: unmanaged client wants focus, setting exclusive_focus");
 			focusclient(c, 1);
 			exclusive_focus = c;
+		} else {
+			wlr_log(WLR_INFO, "mapnotify: unmanaged client mapped but doesn't want focus");
 		}
 		goto unset_fullscreen;
 	}
@@ -27439,6 +27554,20 @@ setfloating(Client *c, int floating)
 void
 setfullscreen(Client *c, int fullscreen)
 {
+	/*
+	 * In HTPC mode, games and Steam Big Picture are locked to fullscreen
+	 * and cannot exit fullscreen. This prevents accidental unfullscreen
+	 * from game menus or escape keys. The app must be closed to exit fullscreen.
+	 */
+	if (htpc_mode_active && !fullscreen && c->isfullscreen &&
+	    (is_game_content(c) || is_steam_client(c))) {
+		wlr_log(WLR_INFO, "HTPC: Blocking unfullscreen for '%s'",
+			client_get_appid(c) ? client_get_appid(c) : "(unknown)");
+		/* Re-assert fullscreen state to the client */
+		client_set_fullscreen(c, 1);
+		return;
+	}
+
 	c->isfullscreen = fullscreen;
 	if (!c->mon || !client_surface(c)->mapped)
 		return;
@@ -27489,8 +27618,13 @@ setfullscreen(Client *c, int fullscreen)
 	update_game_mode();
 
 	/* Ensure fullscreen client gets keyboard focus immediately */
-	if (fullscreen)
-		focusclient(c, 0);
+	if (fullscreen) {
+		exclusive_focus = NULL;  /* Clear any exclusive focus that might block */
+		focusclient(c, 1);
+		/* Schedule focus retries for games to handle startup race conditions */
+		if (is_game_content(c))
+			schedule_game_focus_check();
+	}
 }
 
 void
@@ -29217,8 +29351,12 @@ spawn(const Arg *arg)
 					set_dgpu_env();
 				if (is_steam_cmd(argv[0])) {
 					set_steam_env();
-					/* Launch Steam with GPU acceleration flags */
-					execlp("steam", "steam", "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
+					/* Launch Steam - Big Picture in HTPC mode, normal otherwise */
+					if (htpc_mode_active) {
+						execlp("steam", "steam", "-bigpicture", "-cef-force-gpu", "-cef-disable-sandbox", "steam://open/games", (char *)NULL);
+					} else {
+						execlp("steam", "steam", "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
+					}
 				}
 				execvp(argv[0], argv);
 				/* If execvp fails, die */
@@ -29233,7 +29371,12 @@ spawn(const Arg *arg)
 			set_steam_env();
 			/* If cmd is just "steam" or starts with "steam ", launch with GPU flags */
 			if (strcmp(cmd, "steam") == 0) {
-				execlp("steam", "steam", "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
+				/* Launch Steam - Big Picture in HTPC mode, normal otherwise */
+				if (htpc_mode_active) {
+					execlp("steam", "steam", "-bigpicture", "-cef-force-gpu", "-cef-disable-sandbox", "steam://open/games", (char *)NULL);
+				} else {
+					execlp("steam", "steam", "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
+				}
 			}
 		}
 		execl("/bin/sh", "sh", "-c", cmd, NULL);
