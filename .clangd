@@ -1,0 +1,7 @@
+# Auto-generated for NixOS
+CompileFlags:
+  Add:
+    - "-I/nix/store/mjf8jlq9grydcdvyw6hb063x5c34g5gf-gcc-15.2.0/lib/gcc/x86_64-unknown-linux-gnu/15.2.0/include"
+    - "-I/nix/store/mjf8jlq9grydcdvyw6hb063x5c34g5gf-gcc-15.2.0/include"
+    - "-I/nix/store/mjf8jlq9grydcdvyw6hb063x5c34g5gf-gcc-15.2.0/lib/gcc/x86_64-unknown-linux-gnu/15.2.0/include-fixed"
+    - "-I/nix/store/rwalsamz4246k8f1zzxa54qx7w3fbzdg-glibc-2.42-47-dev/include"

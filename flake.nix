@@ -151,6 +151,7 @@
               wrapProgram $out/bin/nixlytile \
                 --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps} \
                 --prefix XDG_DATA_DIRS : "${pkgs.papirus-icon-theme}/share:${pkgs.adwaita-icon-theme}/share:${pkgs.hicolor-icon-theme}/share:${pkgs.shared-mime-info}/share"
+
               runHook postInstall
             '';
 

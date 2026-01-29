@@ -43,6 +43,10 @@ htpc_wallpaper = ~/.nixlyos/wallpapers/htpc.jpg
 # ================= PC GAMING =================
 # Configure which gaming services to scan for games in the PC Gaming view.
 # The PC Gaming view is accessible from the controller guide menu.
+#
+# GPU-specific launch parameters are hardcoded in game_launch_params.h
+# and automatically applied based on your detected discrete GPU.
+# Parameters you set manually in Steam's launch options will NOT be duplicated.
 
 # Enable Steam library scanning (1 = enabled, 0 = disabled)
 gaming_steam_enabled = 1

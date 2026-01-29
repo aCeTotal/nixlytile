@@ -56,7 +56,7 @@ tearing-control-v1-protocol.h:
 config.h:
 	cp config.def.h $@
 clean:
-	rm -f nixlytile *.o *-protocol.h
+	rm -f nixlytile *.o *-protocol.h game_params.conf
 
 dist: clean
 	mkdir -p nixlytile-$(VERSION)
@@ -66,7 +66,44 @@ dist: clean
 	tar -caf nixlytile-$(VERSION).tar.gz nixlytile-$(VERSION)
 	rm -rf nixlytile-$(VERSION)
 
-install: nixlytile
+# Generate game_params.conf from game_launch_params.h
+# Format: APPID|nvidia_params|amd_params|amd_amdvlk_params|intel_params
+game_params.conf: game_launch_params.h
+	@echo "Generating game_params.conf from game_launch_params.h..."
+	@echo "# Auto-generated from game_launch_params.h" > $@
+	@echo "# Format: APPID|nvidia_params|amd_params|amd_amdvlk_params|intel_params" >> $@
+	@echo "# Generated: $$(date)" >> $@
+	@echo "" >> $@
+	@awk ' \
+		/\.game_id *= *"/ { \
+			match($$0, /"[^"]+"/); \
+			game_id = substr($$0, RSTART+1, RLENGTH-2) \
+		} \
+		/\.nvidia *= *"/ { \
+			match($$0, /"[^"]*"/); \
+			nvidia = substr($$0, RSTART+1, RLENGTH-2) \
+		} \
+		/\.amd *= *"/ && !/\.amd_amdvlk/ { \
+			match($$0, /"[^"]*"/); \
+			amd = substr($$0, RSTART+1, RLENGTH-2) \
+		} \
+		/\.amd_amdvlk *= *"/ { \
+			match($$0, /"[^"]*"/); \
+			amdvlk = substr($$0, RSTART+1, RLENGTH-2) \
+		} \
+		/\.intel *= *"/ { \
+			match($$0, /"[^"]*"/); \
+			intel = substr($$0, RSTART+1, RLENGTH-2) \
+		} \
+		/^\t\},$$/ || /^\t\}$$/ { \
+			if (game_id != "" && game_id !~ /NULL/) { \
+				print game_id "|" nvidia "|" amd "|" amdvlk "|" intel \
+			} \
+			game_id = ""; nvidia = ""; amd = ""; amdvlk = ""; intel = "" \
+		} \
+	' game_launch_params.h >> $@
+
+install: nixlytile game_params.conf
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
 	rm -f $(DESTDIR)$(PREFIX)/bin/nixlytile
 	cp -f nixlytile $(DESTDIR)$(PREFIX)/bin
@@ -76,6 +113,8 @@ install: nixlytile
 	mkdir -p $(DESTDIR)$(DATADIR)/nixlytile
 	cp -f config.conf.example $(DESTDIR)$(DATADIR)/nixlytile/config.conf.example
 	chmod 644 $(DESTDIR)$(DATADIR)/nixlytile/config.conf.example
+	cp -f game_params.conf $(DESTDIR)$(DATADIR)/nixlytile/game_params.conf
+	chmod 644 $(DESTDIR)$(DATADIR)/nixlytile/game_params.conf
 	mkdir -p $(DESTDIR)$(MANDIR)/man1
 	cp -f nixlytile.1 $(DESTDIR)$(MANDIR)/man1
 	chmod 644 $(DESTDIR)$(MANDIR)/man1/nixlytile.1

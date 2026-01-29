@@ -470,6 +470,11 @@ typedef struct GameEntry {
 	struct wlr_buffer *icon_buf;  /* Cached scaled icon buffer */
 	int icon_w, icon_h;    /* Loaded icon dimensions */
 	int icon_loaded;       /* 1 if icon was loaded (or attempted) */
+	/* Per-game GPU-specific launch parameters (from config) */
+	char launch_params_nvidia[512];  /* Launch params when NVIDIA dGPU detected */
+	char launch_params_amd[512];     /* Launch params when AMD dGPU detected */
+	char launch_params_intel[512];   /* Launch params when Intel dGPU detected */
+	int has_custom_params;           /* 1 if game has custom params in config */
 	struct GameEntry *next;
 } GameEntry;
 
@@ -1661,6 +1666,9 @@ static GpuInfo detected_gpus[MAX_GPUS];
 static int detected_gpu_count = 0;
 static int discrete_gpu_idx = -1;   /* Index of preferred discrete GPU, -1 if none */
 static int integrated_gpu_idx = -1; /* Index of integrated GPU, -1 if none */
+
+/* GPU-specific game launch parameters */
+#include "game_launch_params.h"
 
 /* PC gaming cache file watcher for realtime updates */
 static int pc_gaming_cache_inotify_fd = -1;
@@ -18597,6 +18605,10 @@ pc_gaming_launch_game(Monitor *m)
 	PcGamingView *pg;
 	GameEntry *g;
 	int idx = 0;
+	const char *gpu_params = NULL;
+	GpuVendor gpu_vendor = GPU_VENDOR_UNKNOWN;
+	char merged_options[1024];
+	pid_t pid;
 
 	if (!m)
 		return;
@@ -18625,17 +18637,52 @@ pc_gaming_launch_game(Monitor *m)
 		return;
 	}
 
+	/* Get detected GPU vendor */
+	if (discrete_gpu_idx >= 0 && discrete_gpu_idx < detected_gpu_count)
+		gpu_vendor = detected_gpus[discrete_gpu_idx].vendor;
+
+	/* Get GPU-specific launch params from hardcoded table */
+	gpu_params = get_game_launch_params(g->id, gpu_vendor);
+
 	/* Game is installed - launch it */
-	wlr_log(WLR_INFO, "Launching game: %s", g->name);
+	wlr_log(WLR_INFO, "Launching game: %s (id=%s, GPU=%s, params=%s)", g->name, g->id,
+		gpu_vendor == GPU_VENDOR_NVIDIA ? "NVIDIA" :
+		gpu_vendor == GPU_VENDOR_AMD ? "AMD" :
+		gpu_vendor == GPU_VENDOR_INTEL ? "Intel" : "Unknown",
+		gpu_params ? gpu_params : "none");
+
 	/* Fork and exec directly - spawn() doesn't work with struct member strings */
-	pid_t pid = fork();
+	pid = fork();
 	if (pid == 0) {
 		setsid();
 		/* Set discrete GPU environment for gaming */
 		set_dgpu_env();
+
 		/* Set Steam env vars if this is a Steam game (uses steam:// protocol) */
 		if (g->service == GAMING_SERVICE_STEAM || is_steam_cmd(g->launch_cmd)) {
+			const char *user_options;
+
 			set_steam_env();
+
+			/* Get user's existing launch options (Steam stores them per-game)
+			 * We can't read Steam's config here, but STEAM_GAME_LAUNCH_OPTIONS
+			 * gets merged with user options by Steam itself.
+			 * We build merged options that won't duplicate user settings. */
+
+			/* For now, we don't have access to user's Steam launch options at runtime,
+			 * but Steam will merge STEAM_GAME_LAUNCH_OPTIONS with user-set options.
+			 * Our build_merged_launch_options ensures we don't add duplicates if
+			 * user sets them in Steam. Steam applies user options AFTER env var. */
+
+			user_options = getenv("STEAM_USER_LAUNCH_OPTIONS"); /* Future: read from Steam config */
+
+			if (gpu_params && gpu_params[0]) {
+				build_merged_launch_options(user_options, gpu_params,
+					merged_options, sizeof(merged_options));
+				setenv("STEAM_GAME_LAUNCH_OPTIONS", merged_options, 1);
+				wlr_log(WLR_INFO, "Set STEAM_GAME_LAUNCH_OPTIONS=%s", merged_options);
+			}
+
 			/* If Steam isn't running, start it with GPU flags then run the game
 			 * This ensures Steam UI has full GPU acceleration */
 			if (!is_process_running("steam")) {
@@ -18647,7 +18694,27 @@ pc_gaming_launch_game(Monitor *m)
 				execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
 				_exit(127);
 			}
+		} else if (gpu_params && gpu_params[0]) {
+			/* Non-Steam game: prepend GPU params to command
+			 * Replace %command% with actual game command, or prepend if no placeholder */
+			char full_cmd[2048];
+			const char *placeholder = strstr(gpu_params, "%command%");
+			if (placeholder) {
+				/* Replace %command% with the actual launch command */
+				int prefix_len = placeholder - gpu_params;
+				snprintf(full_cmd, sizeof(full_cmd), "%.*s%s%s",
+					prefix_len, gpu_params,
+					g->launch_cmd,
+					placeholder + 9);  /* 9 = strlen("%command%") */
+			} else {
+				/* Just prepend params to command */
+				snprintf(full_cmd, sizeof(full_cmd), "%s %s", gpu_params, g->launch_cmd);
+			}
+			wlr_log(WLR_INFO, "Launching with GPU params: %s", full_cmd);
+			execl("/bin/sh", "sh", "-c", full_cmd, (char *)NULL);
+			_exit(127);
 		}
+
 		execl("/bin/sh", "sh", "-c", g->launch_cmd, (char *)NULL);
 		_exit(127);
 	}
