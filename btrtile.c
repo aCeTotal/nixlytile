@@ -468,11 +468,20 @@ insert_client(Monitor *m, Client *focused_client, Client *new_client)
 	focused_node = focused_client ?
 		find_client_node(*root, focused_client) : NULL;
 	if (!focused_node) {
-		/* No focused node found - add to root with horizontal split */
-		old_root = *root;
-		new_client_node = create_client_node(new_client);
-		*root = create_split_node(0, old_root, new_client_node);
-		return 1;
+		/* No focused node found - try to find any visible client to add to */
+		Client *any_visible = first_active_client(*root, m);
+		if (any_visible) {
+			focused_node = find_client_node(*root, any_visible);
+			focused_client = any_visible;
+		}
+		if (!focused_node) {
+			/* Still no node - this shouldn't happen if we have columns,
+			 * but create a vertical split to maintain column structure */
+			old_root = *root;
+			new_client_node = create_client_node(new_client);
+			*root = create_split_node(1, old_root, new_client_node);
+			return 1;
+		}
 	}
 
 	/* Check column constraint (max 4 tiles per column) */
@@ -964,13 +973,25 @@ count_columns(LayoutNode *node, Monitor *m)
 	 * A "column" is a subtree rooted at either:
 	 * - A client node under vertical splits
 	 * - A horizontal split under vertical splits
-	 * Once we hit a horizontal split, that's one column (don't recurse). */
+	 * Once we hit a horizontal split, that's one column (don't recurse).
+	 * IMPORTANT: Only count columns that have visible clients! */
 	if (!node)
 		return 0;
-	if (node->is_client_node)
-		return 1;
-	if (!node->is_split_vertically)
-		return 1; /* Horizontal split = 1 column (don't look inside) */
+	if (node->is_client_node) {
+		/* Only count if the client is actually visible */
+		Client *c = node->client;
+		if (!c)
+			return 0;
+		if (c == dragging_client)
+			return 1;
+		if (VISIBLEON(c, m) && !c->isfloating && !c->isfullscreen)
+			return 1;
+		return 0;
+	}
+	if (!node->is_split_vertically) {
+		/* Horizontal split = 1 column, but only if it has visible content */
+		return visible_count(node, m) > 0 ? 1 : 0;
+	}
 
 	/* Vertical split at top level - recurse to count columns */
 	return count_columns(node->left, m) + count_columns(node->right, m);

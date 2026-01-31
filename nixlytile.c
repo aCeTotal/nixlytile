@@ -1270,8 +1270,6 @@ static void nixpkgs_cache_update_start(void);
 static void pc_gaming_cache_update_start(void);
 static int cache_update_timer_cb(void *data);
 static int nixpkgs_cache_timer_cb(void *data);
-static int game_focus_timer_cb(void *data);
-static void schedule_game_focus_check(void);
 static void schedule_cache_update_timer(void);
 static void schedule_nixpkgs_cache_timer(void);
 static void update_game_mode(void);
@@ -1584,10 +1582,6 @@ static pid_t game_mode_pid = 0;  /* PID of fullscreen game process */
 static int game_mode_nice_applied = 0;  /* 1 if we changed nice value */
 static int game_mode_ioclass_applied = 0;  /* 1 if we changed IO priority */
 static int htpc_mode_active = 0; /* HTPC mode - hides statusbar, stops background tasks */
-static struct wl_event_source *game_focus_timer = NULL;  /* Timer for re-checking game focus */
-static int game_focus_retries = 0;  /* Number of focus retry attempts */
-#define GAME_FOCUS_RETRY_MS 50      /* Check focus every 50ms */
-#define GAME_FOCUS_MAX_RETRIES 20   /* Try for up to 1 second (20 * 50ms) */
 static struct wl_event_source *status_timer;
 static struct wl_event_source *status_cpu_timer;
 static struct wl_event_source *status_hover_timer;
@@ -4438,8 +4432,9 @@ renderdiscord(Monitor *m, int bar_height)
 	module->width = 0;
 	module->x = 0;
 
-	/* Only show if Discord process is running */
-	discord_running = is_process_running("Discord");
+	/* Only show if Discord process is running.
+	 * Check both "Discord" and ".Discord" for NixOS wrapped version */
+	discord_running = is_process_running("Discord") || is_process_running(".Discord");
 	if (!discord_running) {
 		wlr_scene_node_set_enabled(&module->tree->node, 0);
 		return;
@@ -7118,6 +7113,21 @@ focus_or_launch_app(const char *app_id, const char *launch_cmd)
 					execlp("steam", "steam", "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
 				}
 				_exit(1);
+			}
+			/* Discord: clean up stale singleton files before launching.
+			 * Discord uses Electron which creates SingletonLock/Socket files
+			 * that can become stale if the process crashes or is killed. */
+			if (strcasecmp(launch_cmd, "discord") == 0) {
+				const char *home = getenv("HOME");
+				if (home) {
+					char path[PATH_MAX];
+					snprintf(path, sizeof(path), "%s/.config/discord/SingletonLock", home);
+					unlink(path);
+					snprintf(path, sizeof(path), "%s/.config/discord/SingletonCookie", home);
+					unlink(path);
+					snprintf(path, sizeof(path), "%s/.config/discord/SingletonSocket", home);
+					unlink(path);
+				}
 			}
 			execlp("sh", "sh", "-c", launch_cmd, NULL);
 			_exit(1);
@@ -13885,68 +13895,6 @@ schedule_nixpkgs_cache_timer(void)
 	wl_event_source_timer_update(nixpkgs_cache_timer, 604800000);
 }
 
-/*
- * Game focus timer callback - ensures fullscreen games receive keyboard focus.
- * This handles race conditions where games create multiple windows rapidly
- * and focus can be stolen by transient windows.
- */
-static int
-game_focus_timer_cb(void *data)
-{
-	Client *c;
-	struct wlr_surface *focused;
-
-	(void)data;
-
-	c = game_mode_client;
-	if (!c || !c->isfullscreen || !game_mode_ultra) {
-		/* Game exited or no longer fullscreen, stop retrying */
-		game_focus_retries = 0;
-		return 0;
-	}
-
-	focused = seat->keyboard_state.focused_surface;
-
-	/* Check if the game already has keyboard focus */
-	if (focused == client_surface(c)) {
-		wlr_log(WLR_INFO, "Game focus confirmed for '%s' after %d retries",
-			client_get_appid(c) ? client_get_appid(c) : "(unknown)",
-			GAME_FOCUS_MAX_RETRIES - game_focus_retries);
-		game_focus_retries = 0;
-		return 0;
-	}
-
-	/* Game doesn't have focus, try to give it focus */
-	wlr_log(WLR_INFO, "Game focus retry %d/%d for '%s' (current focus=%p, game=%p)",
-		GAME_FOCUS_MAX_RETRIES - game_focus_retries + 1, GAME_FOCUS_MAX_RETRIES,
-		client_get_appid(c) ? client_get_appid(c) : "(unknown)",
-		(void*)focused, (void*)client_surface(c));
-
-	exclusive_focus = NULL;
-	focusclient(c, 1);
-
-	game_focus_retries--;
-	if (game_focus_retries > 0) {
-		/* Schedule another check */
-		wl_event_source_timer_update(game_focus_timer, GAME_FOCUS_RETRY_MS);
-	} else {
-		wlr_log(WLR_INFO, "Game focus retries exhausted for '%s'",
-			client_get_appid(c) ? client_get_appid(c) : "(unknown)");
-	}
-
-	return 0;
-}
-
-static void
-schedule_game_focus_check(void)
-{
-	if (!game_focus_timer) {
-		game_focus_timer = wl_event_loop_add_timer(event_loop, game_focus_timer_cb, NULL);
-	}
-	game_focus_retries = GAME_FOCUS_MAX_RETRIES;
-	wl_event_source_timer_update(game_focus_timer, GAME_FOCUS_RETRY_MS);
-}
-
 /* Check if any client is currently fullscreen AND visible, return the client if found */
 static Client *
 get_fullscreen_client(void)
@@ -14224,13 +14172,6 @@ update_game_mode(void)
 		focusclient(c, 1);
 
 		/*
-		 * Schedule repeated focus checks to handle race conditions.
-		 * Games often create multiple windows during startup, and focus
-		 * can be stolen by transient splash screens or loading windows.
-		 */
-		schedule_game_focus_check();
-
-		/*
 		 * Enable game VRR for optimal frame pacing.
 		 * This is also done in setfullscreen(), but we need it here too
 		 * for when returning to a tag with a fullscreen game.
@@ -14242,16 +14183,11 @@ update_game_mode(void)
 	} else if (game_mode_ultra && was_ultra && c) {
 		/*
 		 * RETURNING TO ULTRA GAME MODE (e.g., switching back to tag with fullscreen game)
-		 * Ensure the game gets keyboard focus - this is the main fix for the bug where
-		 * switching tags and back causes games to lose keyboard focus.
+		 * Focus is now handled automatically by arrange() for all fullscreen clients.
+		 * Re-enable VRR in case it was disabled when switching away.
 		 */
-		struct wlr_surface *focused = seat->keyboard_state.focused_surface;
-		if (focused != client_surface(c)) {
-			wlr_log(WLR_INFO, "Returning to fullscreen game '%s' - ensuring keyboard focus",
-				client_get_appid(c) ? client_get_appid(c) : "(unknown)");
-			exclusive_focus = NULL;
-			focusclient(c, 1);
-			schedule_game_focus_check();
+		if (c->mon && !c->mon->game_vrr_active) {
+			enable_game_vrr(c->mon);
 		}
 
 	} else if (game_mode_active && !was_active && !game_mode_ultra) {
@@ -21366,7 +21302,15 @@ arrange(Monitor *m)
 	 * This allows games and videos to achieve direct scanout for best
 	 * frame pacing and lowest latency when they fill the screen.
 	 */
-	c = focustop(m);
+	/* Find fullscreen client on this monitor's current tag */
+	c = NULL;
+	wl_list_for_each(c, &clients, link) {
+		if (c->isfullscreen && VISIBLEON(c, m))
+			break;
+	}
+	if (&c->link == &clients)
+		c = NULL;
+
 	if (c && c->isfullscreen) {
 		/* Check if window covers the full monitor */
 		int covers_full_screen =
@@ -21386,6 +21330,17 @@ arrange(Monitor *m)
 		 */
 		wlr_scene_node_set_enabled(&layers[LyrBg]->node, !covers_full_screen);
 		wlr_scene_node_set_enabled(&root_bg->node, !covers_full_screen);
+
+		/*
+		 * AUTOMATIC FOCUS FOR FULLSCREEN CLIENTS
+		 * If there's a visible fullscreen client on the current tag, it MUST
+		 * have keyboard focus. This handles Steam games and other apps that
+		 * go fullscreen but don't receive focus automatically.
+		 */
+		if (m == selmon && seat->keyboard_state.focused_surface != client_surface(c)) {
+			exclusive_focus = NULL;
+			focusclient(c, 0);  /* Don't lift/warp, just give focus */
+		}
 	} else {
 		wlr_scene_node_set_enabled(&m->fullscreen_bg->node, 0);
 		wlr_scene_node_set_enabled(&layers[LyrBg]->node, 1);
@@ -28072,9 +28027,6 @@ setfullscreen(Client *c, int fullscreen)
 	if (fullscreen) {
 		exclusive_focus = NULL;  /* Clear any exclusive focus that might block */
 		focusclient(c, 1);
-		/* Schedule focus retries for games to handle startup race conditions */
-		if (is_game_content(c))
-			schedule_game_focus_check();
 	}
 }
 
