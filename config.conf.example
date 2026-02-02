@@ -28,17 +28,21 @@ lock_cursor = 0
 # killing all windows, and disabling background tasks to minimize
 # CPU, IO, and RAM load.
 
-# Enable HTPC mode features (1 = enabled, 0 = disabled)
-htpc_mode_enabled = 1
-
-# Start in HTPC mode when nixlytile launches (1 = enabled)
-htpc_mode_autostart = 0
-
-# Auto-enter HTPC mode when a game controller connects (1 = enabled)
-htpc_mode_auto_on_controller = 1
+# HTPC mode setting:
+#   0 = disabled (HTPC mode completely off)
+#   1 = auto-enter HTPC mode when a game controller connects
+#   2 = always on (starts in HTPC mode at boot)
+htpc_mode = 1
 
 # Wallpaper to display in HTPC mode (supports ~ and $HOME)
 htpc_wallpaper = ~/.nixlyos/wallpapers/htpc.jpg
+
+# HTPC menu pages (1 = show, 0 = hide)
+htpc_page_pcgaming = 1
+htpc_page_retrogaming = 1
+htpc_page_movies = 1
+htpc_page_tvshows = 1
+htpc_page_quit = 1
 
 # ================= PC GAMING =================
 # Configure which gaming services to scan for games in the PC Gaming view.

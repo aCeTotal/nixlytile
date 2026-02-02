@@ -1,10 +1,11 @@
 /*
  * Nixly Media Server
- * Lossless streaming server for movies and TV shows
+ * Lossless streaming server for movies and TV shows with TMDB metadata
  *
  * - Serves media files without transcoding (full quality)
- * - SQLite database for media library
+ * - SQLite database with TMDB metadata
  * - HTTP server with range request support for seeking
+ * - Real-time file watching with inotify
  */
 
 #include <stdio.h>
@@ -22,24 +23,147 @@
 
 #include "database.h"
 #include "scanner.h"
+#include "config.h"
+#include "tmdb.h"
+#include "watcher.h"
 
-#define DEFAULT_PORT 8080
 #define MAX_CONNECTIONS 100
 #define BUFFER_SIZE 65536
 #define MAX_PATH 4096
 #define MAX_HEADER 8192
+#define DISCOVERY_PORT 8081
+#define DISCOVERY_MAGIC "NIXLY_DISCOVER"
+#define DISCOVERY_RESPONSE "NIXLY_SERVER"
 
 static int server_fd = -1;
+static int discovery_fd = -1;
 static volatile int running = 1;
 
-/* Media library paths */
-static char *media_paths[64];
-static int media_path_count = 0;
+/* Periodic sync thread - checks for changes every 5 minutes as backup to inotify */
+static void *sync_thread(void *arg) {
+    (void)arg;
+
+    while (running) {
+        /* Sleep for 5 minutes */
+        for (int i = 0; i < 300 && running; i++) {
+            sleep(1);
+        }
+
+        if (!running) break;
+
+        printf("Periodic sync: Checking for changes...\n");
+
+        /* Remove entries for deleted files */
+        int removed = database_cleanup_missing();
+        if (removed > 0) {
+            printf("Periodic sync: Removed %d missing entries\n", removed);
+        }
+
+        /* Scan for new files */
+        int before = database_get_count();
+        for (int i = 0; i < server_config.media_path_count; i++) {
+            scanner_scan_directory(server_config.media_paths[i]);
+        }
+        for (int i = 0; i < server_config.movies_path_count; i++) {
+            scanner_scan_directory(server_config.movies_paths[i]);
+        }
+        for (int i = 0; i < server_config.tvshows_path_count; i++) {
+            scanner_scan_directory(server_config.tvshows_paths[i]);
+        }
+        int after = database_get_count();
+
+        if (after != before) {
+            printf("Periodic sync: Media count changed %d -> %d\n", before, after);
+        }
+
+        /* Fetch any missing TMDB metadata */
+        scanner_fetch_missing_tmdb();
+    }
+
+    return NULL;
+}
+
+/* Discovery thread - responds to broadcast queries */
+static void *discovery_thread(void *arg) {
+    (void)arg;
+    struct sockaddr_in addr, client_addr;
+    socklen_t addr_len;
+    char buf[128];
+    char response[128];
+
+    discovery_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (discovery_fd < 0) {
+        perror("discovery socket");
+        return NULL;
+    }
+
+    int reuse = 1;
+    setsockopt(discovery_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(DISCOVERY_PORT);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(discovery_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("discovery bind");
+        close(discovery_fd);
+        discovery_fd = -1;
+        return NULL;
+    }
+
+    printf("Discovery: Listening on UDP port %d\n", DISCOVERY_PORT);
+
+    while (running) {
+        addr_len = sizeof(client_addr);
+        ssize_t len = recvfrom(discovery_fd, buf, sizeof(buf) - 1, 0,
+                               (struct sockaddr *)&client_addr, &addr_len);
+        if (len > 0) {
+            buf[len] = '\0';
+            if (strncmp(buf, DISCOVERY_MAGIC, strlen(DISCOVERY_MAGIC)) == 0) {
+                /* Respond with our port */
+                snprintf(response, sizeof(response), "%s:%d", DISCOVERY_RESPONSE, server_config.port);
+
+                char client_ip[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
+                printf("Discovery: Request from %s, responding with port %d\n",
+                       client_ip, server_config.port);
+
+                sendto(discovery_fd, response, strlen(response), 0,
+                       (struct sockaddr *)&client_addr, addr_len);
+            }
+        }
+    }
+
+    close(discovery_fd);
+    discovery_fd = -1;
+    return NULL;
+}
 
 typedef struct {
     int client_fd;
     struct sockaddr_in client_addr;
 } ClientConnection;
+
+/* File change callback - keeps database in sync */
+static void on_file_change(const char *filepath, int is_delete, WatchType type) {
+    (void)type; /* We handle all types the same for now */
+
+    if (is_delete) {
+        /* Remove from database */
+        if (database_delete_by_path(filepath) == 0) {
+            printf("DB: Removed %s\n", filepath);
+        }
+    } else {
+        /* Add to database if it's a media file */
+        if (scanner_is_media_file(filepath)) {
+            int id = scanner_scan_file(filepath, 1);
+            if (id > 0) {
+                printf("DB: Added %s (id=%d)\n", filepath, id);
+            }
+        }
+    }
+}
 
 /* HTTP response helpers */
 static void send_response(int fd, int status, const char *status_text,
@@ -81,8 +205,47 @@ static const char *get_mime_type(const char *path) {
     if (strcasecmp(ext, ".ts") == 0) return "video/mp2t";
     if (strcasecmp(ext, ".json") == 0) return "application/json";
     if (strcasecmp(ext, ".html") == 0) return "text/html";
+    if (strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0) return "image/jpeg";
+    if (strcasecmp(ext, ".png") == 0) return "image/png";
 
     return "application/octet-stream";
+}
+
+/* Serve a local file (for cached images) */
+static void serve_file(int fd, const char *filepath) {
+    struct stat st;
+    if (stat(filepath, &st) != 0) {
+        send_error(fd, 404, "File not found");
+        return;
+    }
+
+    int file_fd = open(filepath, O_RDONLY);
+    if (file_fd < 0) {
+        send_error(fd, 500, "Cannot open file");
+        return;
+    }
+
+    const char *mime = get_mime_type(filepath);
+    char header[MAX_HEADER];
+    int header_len = snprintf(header, sizeof(header),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %ld\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Cache-Control: max-age=86400\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        mime, st.st_size);
+
+    write(fd, header, header_len);
+
+    char buffer[BUFFER_SIZE];
+    ssize_t bytes;
+    while ((bytes = read(file_fd, buffer, sizeof(buffer))) > 0) {
+        write(fd, buffer, bytes);
+    }
+
+    close(file_fd);
 }
 
 /* Stream file with range request support (for seeking in video) */
@@ -170,7 +333,12 @@ static void stream_file(int fd, const char *filepath, const char *range_header) 
 
 /* Handle API requests */
 static void handle_api(int fd, const char *path) {
-    if (strcmp(path, "/api/library") == 0) {
+    if (strcmp(path, "/api/status") == 0) {
+        /* Simple status check for discovery */
+        send_response(fd, 200, "OK", "application/json",
+                     "{\"status\": \"ok\", \"server\": \"nixly\"}", 35);
+    }
+    else if (strcmp(path, "/api/library") == 0) {
         /* Return entire media library as JSON */
         char *json = database_get_library_json();
         if (json) {
@@ -180,7 +348,7 @@ static void handle_api(int fd, const char *path) {
             send_error(fd, 500, "Database error");
         }
     }
-    else if (strncmp(path, "/api/movies", 11) == 0) {
+    else if (strcmp(path, "/api/movies") == 0) {
         char *json = database_get_movies_json();
         if (json) {
             send_response(fd, 200, "OK", "application/json", json, strlen(json));
@@ -189,7 +357,7 @@ static void handle_api(int fd, const char *path) {
             send_error(fd, 500, "Database error");
         }
     }
-    else if (strncmp(path, "/api/tvshows", 12) == 0) {
+    else if (strcmp(path, "/api/tvshows") == 0) {
         char *json = database_get_tvshows_json();
         if (json) {
             send_response(fd, 200, "OK", "application/json", json, strlen(json));
@@ -198,12 +366,27 @@ static void handle_api(int fd, const char *path) {
             send_error(fd, 500, "Database error");
         }
     }
-    else if (strncmp(path, "/api/scan", 9) == 0) {
+    else if (strcmp(path, "/api/scan") == 0) {
         /* Trigger library rescan */
-        for (int i = 0; i < media_path_count; i++) {
-            scanner_scan_directory(media_paths[i]);
+        printf("API: Starting rescan...\n");
+        for (int i = 0; i < server_config.media_path_count; i++) {
+            scanner_scan_directory(server_config.media_paths[i]);
         }
-        send_response(fd, 200, "OK", "application/json", "{\"status\": \"scan started\"}", 26);
+        for (int i = 0; i < server_config.movies_path_count; i++) {
+            scanner_scan_directory(server_config.movies_paths[i]);
+        }
+        for (int i = 0; i < server_config.tvshows_path_count; i++) {
+            scanner_scan_directory(server_config.tvshows_paths[i]);
+        }
+        send_response(fd, 200, "OK", "application/json",
+                     "{\"status\": \"scan complete\"}", 27);
+    }
+    else if (strcmp(path, "/api/tmdb/refresh") == 0) {
+        /* Fetch missing TMDB metadata */
+        printf("API: Fetching missing TMDB metadata...\n");
+        scanner_fetch_missing_tmdb();
+        send_response(fd, 200, "OK", "application/json",
+                     "{\"status\": \"tmdb refresh complete\"}", 35);
     }
     else if (strncmp(path, "/api/media/", 11) == 0) {
         /* Get media info by ID */
@@ -215,6 +398,64 @@ static void handle_api(int fd, const char *path) {
         } else {
             send_error(fd, 404, "Media not found");
         }
+    }
+    /* Retro gaming API endpoints */
+    else if (strcmp(path, "/api/roms") == 0) {
+        char *json = database_get_roms_json();
+        if (json) {
+            send_response(fd, 200, "OK", "application/json", json, strlen(json));
+            free(json);
+        } else {
+            send_error(fd, 500, "Database error");
+        }
+    }
+    else if (strncmp(path, "/api/roms/console/", 18) == 0) {
+        int console = atoi(path + 18);
+        if (console >= 0 && console < CONSOLE_COUNT) {
+            char *json = database_get_roms_by_console_json((ConsoleType)console);
+            if (json) {
+                send_response(fd, 200, "OK", "application/json", json, strlen(json));
+                free(json);
+            } else {
+                send_error(fd, 500, "Database error");
+            }
+        } else {
+            send_error(fd, 400, "Invalid console ID");
+        }
+    }
+    else if (strncmp(path, "/api/rom/", 9) == 0) {
+        int id = atoi(path + 9);
+        char *json = database_get_rom_json(id);
+        if (json) {
+            send_response(fd, 200, "OK", "application/json", json, strlen(json));
+            free(json);
+        } else {
+            send_error(fd, 404, "ROM not found");
+        }
+    }
+    else if (strcmp(path, "/api/consoles") == 0) {
+        char json[1024];
+        int len = snprintf(json, sizeof(json),
+            "[{\"id\":0,\"name\":\"NES\",\"count\":%d},"
+            "{\"id\":1,\"name\":\"SNES\",\"count\":%d},"
+            "{\"id\":2,\"name\":\"Nintendo 64\",\"count\":%d},"
+            "{\"id\":3,\"name\":\"GameCube\",\"count\":%d},"
+            "{\"id\":4,\"name\":\"Wii\",\"count\":%d},"
+            "{\"id\":5,\"name\":\"Switch\",\"count\":%d}]",
+            database_get_rom_count_by_console(CONSOLE_NES),
+            database_get_rom_count_by_console(CONSOLE_SNES),
+            database_get_rom_count_by_console(CONSOLE_N64),
+            database_get_rom_count_by_console(CONSOLE_GAMECUBE),
+            database_get_rom_count_by_console(CONSOLE_WII),
+            database_get_rom_count_by_console(CONSOLE_SWITCH));
+        send_response(fd, 200, "OK", "application/json", json, len);
+    }
+    else if (strcmp(path, "/api/status") == 0) {
+        char json[512];
+        int len = snprintf(json, sizeof(json),
+            "{\"movies\":%d,\"tvshows\":%d,\"roms\":%d,\"total\":%d}",
+            0, 0, database_get_rom_count(), database_get_count());
+        send_response(fd, 200, "OK", "application/json", json, len);
     }
     else {
         send_error(fd, 404, "API endpoint not found");
@@ -266,6 +507,13 @@ static void handle_request(int fd, const char *request) {
             send_error(fd, 404, "Media not found");
         }
     }
+    else if (strncmp(path, "/image/", 7) == 0) {
+        /* Serve cached image */
+        char filepath[MAX_PATH];
+        snprintf(filepath, sizeof(filepath), "%s/%s",
+                 server_config.cache_dir, path + 7);
+        serve_file(fd, filepath);
+    }
     else if (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0) {
         const char *html =
             "<!DOCTYPE html><html><head><title>Nixly Media Server</title></head>"
@@ -277,7 +525,9 @@ static void handle_request(int fd, const char *request) {
             "<li><a href='/api/tvshows'>/api/tvshows</a> - TV Shows list</li>"
             "<li>/api/media/{id} - Media details</li>"
             "<li>/api/scan - Rescan library</li>"
+            "<li>/api/tmdb/refresh - Fetch missing TMDB data</li>"
             "<li>/stream/{id} - Stream media file</li>"
+            "<li>/image/{filename} - Cached poster/backdrop</li>"
             "</ul></body></html>";
         send_response(fd, 200, "OK", "text/html", html, strlen(html));
     }
@@ -313,25 +563,25 @@ static void signal_handler(int sig) {
 }
 
 static void print_usage(const char *prog) {
-    fprintf(stderr, "Usage: %s [options] <media_path> [media_path2 ...]\n", prog);
+    fprintf(stderr, "Usage: %s [options]\n", prog);
     fprintf(stderr, "Options:\n");
-    fprintf(stderr, "  -p <port>    Port to listen on (default: %d)\n", DEFAULT_PORT);
-    fprintf(stderr, "  -d <db>      Database file path (default: nixly.db)\n");
+    fprintf(stderr, "  -c <config>  Config file path (default: ~/.config/nixly-server/config.conf)\n");
+    fprintf(stderr, "  -p <port>    Override port (default: %d)\n", server_config.port);
     fprintf(stderr, "  -h           Show this help\n");
 }
 
 int main(int argc, char *argv[]) {
-    int port = DEFAULT_PORT;
-    const char *db_path = "nixly.db";
+    const char *config_path = "~/.config/nixly-server/config.conf";
+    int port_override = 0;
     int opt;
 
-    while ((opt = getopt(argc, argv, "p:d:h")) != -1) {
+    while ((opt = getopt(argc, argv, "c:p:h")) != -1) {
         switch (opt) {
-            case 'p':
-                port = atoi(optarg);
+            case 'c':
+                config_path = optarg;
                 break;
-            case 'd':
-                db_path = optarg;
+            case 'p':
+                port_override = atoi(optarg);
                 break;
             case 'h':
             default:
@@ -340,15 +590,11 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    /* Collect media paths */
-    for (int i = optind; i < argc && media_path_count < 64; i++) {
-        media_paths[media_path_count++] = argv[i];
-    }
+    /* Load configuration */
+    config_load(config_path);
 
-    if (media_path_count == 0) {
-        fprintf(stderr, "Error: At least one media path required\n");
-        print_usage(argv[0]);
-        return 1;
+    if (port_override > 0) {
+        server_config.port = port_override;
     }
 
     /* Setup signal handlers */
@@ -356,19 +602,77 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, signal_handler);
     signal(SIGPIPE, SIG_IGN);
 
+    /* Create cache directory */
+    char cache_expanded[MAX_PATH];
+    const char *home = getenv("HOME");
+    if (server_config.cache_dir[0] == '~' && home) {
+        snprintf(cache_expanded, sizeof(cache_expanded), "%s%s",
+                 home, server_config.cache_dir + 1);
+        strcpy(server_config.cache_dir, cache_expanded);
+    }
+    mkdir(server_config.cache_dir, 0755);
+
     /* Initialize database */
-    if (database_init(db_path) != 0) {
+    if (database_init(server_config.db_path) != 0) {
         fprintf(stderr, "Failed to initialize database\n");
         return 1;
     }
 
+    /* Initialize TMDB */
+    if (server_config.tmdb_api_key[0]) {
+        if (tmdb_init(server_config.tmdb_api_key, server_config.tmdb_language) == 0) {
+            printf("TMDB: Initialized with API key\n");
+        }
+    }
+
+    /* Clean up entries for files that no longer exist */
+    printf("Checking for removed files...\n");
+    int removed = database_cleanup_missing();
+    if (removed > 0) {
+        printf("Removed %d entries for missing files\n", removed);
+    }
+
     /* Initial scan of media directories */
     printf("Scanning media directories...\n");
-    for (int i = 0; i < media_path_count; i++) {
-        printf("  Scanning: %s\n", media_paths[i]);
-        scanner_scan_directory(media_paths[i]);
+    for (int i = 0; i < server_config.media_path_count; i++) {
+        printf("  Media: %s\n", server_config.media_paths[i]);
+        scanner_scan_directory(server_config.media_paths[i]);
+    }
+    for (int i = 0; i < server_config.movies_path_count; i++) {
+        printf("  Movies: %s\n", server_config.movies_paths[i]);
+        scanner_scan_directory(server_config.movies_paths[i]);
+    }
+    for (int i = 0; i < server_config.tvshows_path_count; i++) {
+        printf("  TV Shows: %s\n", server_config.tvshows_paths[i]);
+        scanner_scan_directory(server_config.tvshows_paths[i]);
     }
     printf("Scan complete. Found %d media files.\n", database_get_count());
+
+    /* Fetch TMDB metadata for any entries missing it */
+    scanner_fetch_missing_tmdb();
+
+    /* Initialize file watcher */
+    if (watcher_init() == 0) {
+        watcher_set_callback(on_file_change);
+
+        /* Generic media paths (watches everything) */
+        for (int i = 0; i < server_config.media_path_count; i++) {
+            watcher_add_path(server_config.media_paths[i], WATCH_TYPE_MEDIA);
+        }
+
+        /* Specific type paths (backwards compatibility) */
+        for (int i = 0; i < server_config.movies_path_count; i++) {
+            watcher_add_path(server_config.movies_paths[i], WATCH_TYPE_MOVIES);
+        }
+        for (int i = 0; i < server_config.tvshows_path_count; i++) {
+            watcher_add_path(server_config.tvshows_paths[i], WATCH_TYPE_TVSHOWS);
+        }
+        for (int i = 0; i < server_config.roms_path_count; i++) {
+            watcher_add_path(server_config.roms_paths[i], WATCH_TYPE_ROMS);
+        }
+
+        watcher_start();
+    }
 
     /* Create server socket */
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -382,7 +686,7 @@ int main(int argc, char *argv[]) {
 
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
-        .sin_port = htons(port),
+        .sin_port = htons(server_config.port),
         .sin_addr.s_addr = INADDR_ANY
     };
 
@@ -396,8 +700,31 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    printf("Nixly Media Server running on http://0.0.0.0:%d\n", port);
-    printf("Serving %d media paths\n", media_path_count);
+    /* Start discovery thread */
+    pthread_t discovery_tid;
+    if (pthread_create(&discovery_tid, NULL, discovery_thread, NULL) != 0) {
+        fprintf(stderr, "Warning: Failed to start discovery thread\n");
+    } else {
+        pthread_detach(discovery_tid);
+    }
+
+    /* Start periodic sync thread (backup to inotify) */
+    pthread_t sync_tid;
+    if (pthread_create(&sync_tid, NULL, sync_thread, NULL) != 0) {
+        fprintf(stderr, "Warning: Failed to start sync thread\n");
+    } else {
+        pthread_detach(sync_tid);
+    }
+
+    printf("\n");
+    printf("========================================\n");
+    printf("  Nixly Media Server running\n");
+    printf("  http://0.0.0.0:%d\n", server_config.port);
+    printf("  Discovery: UDP port %d\n", DISCOVERY_PORT);
+    printf("========================================\n");
+    printf("  Media files: %d\n", database_get_count());
+    printf("  Watching %d directories\n", watcher_get_count());
+    printf("========================================\n\n");
 
     /* Accept connections */
     while (running) {
@@ -420,6 +747,13 @@ int main(int argc, char *argv[]) {
         pthread_detach(thread);
     }
 
+    /* Cleanup */
+    if (discovery_fd >= 0) {
+        close(discovery_fd);
+        discovery_fd = -1;
+    }
+    watcher_cleanup();
+    tmdb_cleanup();
     database_close();
     printf("\nServer stopped.\n");
     return 0;

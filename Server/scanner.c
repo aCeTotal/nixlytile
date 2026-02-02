@@ -1,6 +1,7 @@
 /*
  * Nixly Media Server - File Scanner Module
- * Scans directories for media files and extracts metadata using FFmpeg
+ * Scans directories for media files, extracts metadata using FFmpeg,
+ * and fetches metadata from TMDB
  */
 
 #include <stdio.h>
@@ -15,6 +16,8 @@
 
 #include "scanner.h"
 #include "database.h"
+#include "tmdb.h"
+#include "config.h"
 
 /* Supported video extensions */
 static const char *video_extensions[] = {
@@ -34,10 +37,163 @@ int scanner_is_media_file(const char *path) {
     return 0;
 }
 
-/* Try to parse TV show info from filename
- * Patterns: Show.Name.S01E02, Show Name - 1x02, etc.
+/* Try to extract year from title like "Movie Name (2020)" or "Movie Name 2020 1080p BluRay" */
+static int extract_year_from_title(const char *title, char *clean_title, size_t clean_size) {
+    int year = 0;
+    strncpy(clean_title, title, clean_size - 1);
+    clean_title[clean_size - 1] = '\0';
+
+    /* Look for (YYYY) pattern first */
+    char *paren = strrchr(clean_title, '(');
+    if (paren && strlen(paren) >= 5) {
+        int y = atoi(paren + 1);
+        if (y >= 1900 && y <= 2100) {
+            year = y;
+            /* Remove year from title */
+            while (paren > clean_title && *(paren - 1) == ' ') paren--;
+            *paren = '\0';
+            return year;
+        }
+    }
+
+    /* Scene release pattern: Look for FIRST year followed by resolution/source keywords
+     * e.g., "Dying Young 1991 1080p BluRay" -> title="Dying Young", year=1991 */
+    char *p = clean_title;
+    while (*p) {
+        /* Check if we found a 4-digit number that could be a year */
+        if (isdigit(p[0]) && isdigit(p[1]) && isdigit(p[2]) && isdigit(p[3])) {
+            int y = atoi(p);
+            if (y >= 1900 && y <= 2100) {
+                /* Check what comes after - if it's resolution/source keywords, this is likely the year */
+                char *after = p + 4;
+                /* Skip space/dot */
+                while (*after == ' ' || *after == '.') after++;
+
+                /* Common scene release keywords that follow the year */
+                int is_scene = 0;
+                if (strncasecmp(after, "1080", 4) == 0 ||
+                    strncasecmp(after, "2160", 4) == 0 ||
+                    strncasecmp(after, "720", 3) == 0 ||
+                    strncasecmp(after, "480", 3) == 0 ||
+                    strncasecmp(after, "4K", 2) == 0 ||
+                    strncasecmp(after, "BluRay", 6) == 0 ||
+                    strncasecmp(after, "BDRip", 5) == 0 ||
+                    strncasecmp(after, "WEB", 3) == 0 ||
+                    strncasecmp(after, "HDTV", 4) == 0 ||
+                    strncasecmp(after, "DVDRip", 6) == 0 ||
+                    strncasecmp(after, "Remux", 5) == 0 ||
+                    strncasecmp(after, "x264", 4) == 0 ||
+                    strncasecmp(after, "x265", 4) == 0 ||
+                    strncasecmp(after, "HEVC", 4) == 0 ||
+                    strncasecmp(after, "HDR", 3) == 0 ||
+                    *after == '\0') {
+                    is_scene = 1;
+                }
+
+                if (is_scene) {
+                    year = y;
+                    /* Truncate title at the year */
+                    while (p > clean_title && (*(p-1) == ' ' || *(p-1) == '.')) p--;
+                    *p = '\0';
+                    return year;
+                }
+            }
+        }
+        p++;
+    }
+
+    /* Fallback: try YYYY at end without parentheses */
+    if (year == 0) {
+        size_t len = strlen(clean_title);
+        if (len >= 4) {
+            int y = atoi(clean_title + len - 4);
+            if (y >= 1900 && y <= 2100) {
+                char *space = clean_title + len - 5;
+                if (space >= clean_title && (*space == ' ' || *space == '.')) {
+                    year = y;
+                    *space = '\0';
+                }
+            }
+        }
+    }
+
+    return year;
+}
+
+/* Extract year from show name like "Macgyver.1985" or "Show (2020)"
+ * Returns year and modifies show_name to remove the year portion
  */
-static int parse_tv_info(const char *filename, char *show_name, int *season, int *episode) {
+static int extract_year_from_show(char *show_name) {
+    int year = 0;
+    size_t len = strlen(show_name);
+
+    /* Look for (YYYY) pattern first */
+    char *paren = strrchr(show_name, '(');
+    if (paren && strlen(paren) >= 5) {
+        int y = atoi(paren + 1);
+        if (y >= 1900 && y <= 2100) {
+            year = y;
+            while (paren > show_name && *(paren - 1) == ' ') paren--;
+            *paren = '\0';
+            return year;
+        }
+    }
+
+    /* Look for .YYYY or space YYYY at end */
+    if (len >= 4) {
+        char *p = show_name + len - 4;
+        int y = atoi(p);
+        if (y >= 1900 && y <= 2100) {
+            /* Check if preceded by space or dot */
+            if (p > show_name && (*(p-1) == ' ' || *(p-1) == '.')) {
+                year = y;
+                *(p-1) = '\0';
+            }
+        }
+    }
+
+    return year;
+}
+
+/* Clean up show/movie title - convert separators to spaces, preserve special chars */
+static void clean_title(char *title) {
+    char *src = title;
+    char *dst = title;
+    int last_was_space = 0;
+
+    while (*src) {
+        /* Convert dots and underscores to spaces, but preserve other special chars */
+        if (*src == '.' || *src == '_') {
+            if (!last_was_space) {
+                *dst++ = ' ';
+                last_was_space = 1;
+            }
+        } else {
+            *dst++ = *src;
+            last_was_space = (*src == ' ');
+        }
+        src++;
+    }
+    *dst = '\0';
+
+    /* Trim trailing spaces */
+    size_t len = strlen(title);
+    while (len > 0 && title[len-1] == ' ') {
+        title[--len] = '\0';
+    }
+
+    /* Trim leading spaces */
+    src = title;
+    while (*src == ' ') src++;
+    if (src != title) {
+        memmove(title, src, strlen(src) + 1);
+    }
+}
+
+/* Try to parse TV show info from filename
+ * Patterns: Show.Name.S01E02, Show Name - 1x02, Show.Name.1985.S01E02, etc.
+ */
+static int parse_tv_info(const char *filename, char *show_name, int *season, int *episode, int *year) {
     const char *base = strrchr(filename, '/');
     base = base ? base + 1 : filename;
 
@@ -48,6 +204,8 @@ static int parse_tv_info(const char *filename, char *show_name, int *season, int
     /* Remove extension */
     char *ext = strrchr(name, '.');
     if (ext) *ext = '\0';
+
+    *year = 0;
 
     /* Try S01E02 pattern */
     char *s = name;
@@ -64,13 +222,9 @@ static int parse_tv_info(const char *filename, char *show_name, int *season, int
                 if (len > 0) {
                     strncpy(show_name, name, len);
                     show_name[len] = '\0';
-                    /* Clean up dots and underscores */
-                    for (char *p = show_name; *p; p++) {
-                        if (*p == '.' || *p == '_') *p = ' ';
-                    }
-                    /* Trim trailing spaces */
-                    char *end = show_name + strlen(show_name) - 1;
-                    while (end > show_name && *end == ' ') *end-- = '\0';
+                    clean_title(show_name);
+                    /* Extract year from show name (e.g., "Macgyver 1985") */
+                    *year = extract_year_from_show(show_name);
                 }
                 return 1;
             }
@@ -86,11 +240,8 @@ static int parse_tv_info(const char *filename, char *show_name, int *season, int
                 if (len > 0) {
                     strncpy(show_name, name, len);
                     show_name[len] = '\0';
-                    for (char *p = show_name; *p; p++) {
-                        if (*p == '.' || *p == '_') *p = ' ';
-                    }
-                    char *end = show_name + strlen(show_name) - 1;
-                    while (end > show_name && (*end == ' ' || *end == '-')) *end-- = '\0';
+                    clean_title(show_name);
+                    *year = extract_year_from_show(show_name);
                 }
                 return 1;
             }
@@ -113,14 +264,291 @@ static void extract_title(const char *filepath, char *title, size_t title_size) 
     char *ext = strrchr(title, '.');
     if (ext) *ext = '\0';
 
-    /* Replace dots and underscores with spaces */
-    for (char *p = title; *p; p++) {
-        if (*p == '.' || *p == '_') *p = ' ';
+    /* Clean up the title (preserves special chars like colons) */
+    clean_title(title);
+}
+
+/* Generate search variations for a movie title */
+static void generate_movie_variations(const char *name, char variations[][256], int *count, int year) {
+    *count = 0;
+
+    /* Original name */
+    strncpy(variations[(*count)++], name, 255);
+    variations[*count - 1][255] = '\0';
+
+    /* Try removing year suffix if present in name */
+    char temp[256];
+    strncpy(temp, name, sizeof(temp) - 1);
+    temp[sizeof(temp) - 1] = '\0';
+    size_t len = strlen(temp);
+    if (len > 5) {
+        char *last_space = strrchr(temp, ' ');
+        if (last_space && strlen(last_space + 1) == 4) {
+            int potential_year = atoi(last_space + 1);
+            if (potential_year >= 1900 && potential_year <= 2100) {
+                *last_space = '\0';
+                if (*count < 6) {
+                    strncpy(variations[(*count)++], temp, 255);
+                    variations[*count - 1][255] = '\0';
+                }
+            }
+        }
+    }
+
+    /* Try without special characters */
+    strncpy(temp, name, sizeof(temp) - 1);
+    temp[sizeof(temp) - 1] = '\0';
+    char *src = temp, *dst = temp;
+    while (*src) {
+        if ((*src >= 'A' && *src <= 'Z') || (*src >= 'a' && *src <= 'z') ||
+            (*src >= '0' && *src <= '9') || *src == ' ') {
+            *dst++ = *src;
+        } else if (*src == ':' || *src == '-' || *src == '\'') {
+            if (dst > temp && *(dst-1) != ' ') *dst++ = ' ';
+        }
+        src++;
+    }
+    *dst = '\0';
+    /* Collapse multiple spaces */
+    src = dst = temp;
+    int last_space = 0;
+    while (*src) {
+        if (*src == ' ') {
+            if (!last_space) *dst++ = ' ';
+            last_space = 1;
+        } else {
+            *dst++ = *src;
+            last_space = 0;
+        }
+        src++;
+    }
+    *dst = '\0';
+    /* Trim trailing space */
+    len = strlen(temp);
+    while (len > 0 && temp[len-1] == ' ') temp[--len] = '\0';
+
+    if (strcmp(temp, name) != 0 && *count < 6) {
+        strncpy(variations[(*count)++], temp, 255);
+        variations[*count - 1][255] = '\0';
+    }
+
+    (void)year; /* May use in future */
+}
+
+/* Fetch TMDB metadata for a movie */
+static void fetch_movie_metadata(int db_id, const char *title) {
+    char clean_title[256];
+    int year = extract_year_from_title(title, clean_title, sizeof(clean_title));
+
+    printf("  TMDB search: \"%s\" (year: %d)\n", clean_title, year);
+
+    /* Generate search variations */
+    char variations[6][256];
+    int var_count = 0;
+    generate_movie_variations(clean_title, variations, &var_count, year);
+
+    TmdbMovie *movie = NULL;
+
+    /* Try each variation until we find a match */
+    for (int i = 0; i < var_count && !movie; i++) {
+        printf("  TMDB try %d: \"%s\" (year: %d)\n", i + 1, variations[i], year);
+        /* First try with year filter */
+        movie = tmdb_search_movie(variations[i], year);
+        /* If no result with year, try without */
+        if (!movie && year > 0) {
+            printf("  TMDB try %d: \"%s\" (no year filter)\n", i + 1, variations[i]);
+            movie = tmdb_search_movie(variations[i], 0);
+        }
+    }
+
+    if (movie) {
+        MediaEntry tmdb_data = {0};
+        tmdb_data.tmdb_id = movie->tmdb_id;
+        tmdb_data.tmdb_title = movie->title;
+        tmdb_data.overview = movie->overview;
+        tmdb_data.release_date = movie->release_date;
+        tmdb_data.year = movie->year;
+        tmdb_data.rating = movie->rating;
+        tmdb_data.vote_count = movie->vote_count;
+        tmdb_data.genres = movie->genres;
+
+        /* Download images */
+        if (movie->poster_path) {
+            tmdb_data.poster_path = tmdb_download_image(movie->poster_path, "w500",
+                                                        server_config.cache_dir);
+        }
+        if (movie->backdrop_path) {
+            tmdb_data.backdrop_path = tmdb_download_image(movie->backdrop_path, "w1280",
+                                                          server_config.cache_dir);
+        }
+
+        database_update_tmdb(db_id, &tmdb_data);
+
+        printf("  TMDB: Found \"%s\" (%d) - %.1f/10\n",
+               movie->title, movie->year, movie->rating);
+
+        free(tmdb_data.poster_path);
+        free(tmdb_data.backdrop_path);
+        tmdb_free_movie(movie);
+    } else {
+        printf("  TMDB: No match found after %d attempts\n", var_count);
     }
 }
 
+/* Generate search variations for a show name */
+static void generate_search_variations(const char *name, char variations[][256], int *count, int year) {
+    *count = 0;
+
+    /* Original name */
+    strncpy(variations[(*count)++], name, 255);
+
+    /* Without year suffix if present */
+    char temp[256];
+    strncpy(temp, name, sizeof(temp) - 1);
+    temp[sizeof(temp) - 1] = '\0';
+
+    /* Try removing common suffixes like "US", "UK", year in parens */
+    size_t len = strlen(temp);
+    if (len > 3 && strcmp(temp + len - 2, "US") == 0) {
+        temp[len - 2] = '\0';
+        while (len > 0 && temp[len-1] == ' ') temp[--len] = '\0';
+        strncpy(variations[(*count)++], temp, 255);
+    }
+
+    /* Try removing year suffix (e.g., "MacGyver 1985" -> "MacGyver") */
+    strncpy(temp, name, sizeof(temp) - 1);
+    temp[sizeof(temp) - 1] = '\0';
+    len = strlen(temp);
+    if (len > 5) {
+        /* Check if ends with 4-digit year (19xx or 20xx) */
+        char *last_space = strrchr(temp, ' ');
+        if (last_space && strlen(last_space + 1) == 4) {
+            int potential_year = atoi(last_space + 1);
+            if (potential_year >= 1900 && potential_year <= 2100) {
+                *last_space = '\0';
+                if (*count < 6)
+                    strncpy(variations[(*count)++], temp, 255);
+            }
+        }
+    }
+
+    /* If year is known, add it in different formats */
+    if (year > 0 && *count < 6) {
+        snprintf(variations[*count], 255, "%s (%d)", name, year);
+        (*count)++;
+        snprintf(variations[*count], 255, "%s %d", name, year);
+        (*count)++;
+    }
+
+    /* Try without special characters for difficult matches */
+    strncpy(temp, name, sizeof(temp) - 1);
+    char *src = temp, *dst = temp;
+    while (*src) {
+        if ((*src >= 'A' && *src <= 'Z') || (*src >= 'a' && *src <= 'z') ||
+            (*src >= '0' && *src <= '9') || *src == ' ') {
+            *dst++ = *src;
+        } else if (*src == ':' || *src == '-') {
+            /* Replace colon/dash with space if not already followed by space */
+            if (dst > temp && *(dst-1) != ' ') *dst++ = ' ';
+        }
+        src++;
+    }
+    *dst = '\0';
+    /* Collapse multiple spaces */
+    src = dst = temp;
+    int last_space = 0;
+    while (*src) {
+        if (*src == ' ') {
+            if (!last_space) *dst++ = ' ';
+            last_space = 1;
+        } else {
+            *dst++ = *src;
+            last_space = 0;
+        }
+        src++;
+    }
+    *dst = '\0';
+    if (strcmp(temp, name) != 0 && *count < 6) {
+        strncpy(variations[(*count)++], temp, 255);
+    }
+}
+
+/* Fetch TMDB metadata for a TV episode */
+static void fetch_episode_metadata(int db_id, const char *show_name, int season, int episode, int year) {
+    printf("  TMDB search: \"%s\" S%02dE%02d (year: %d)\n", show_name, season, episode, year);
+
+    /* Generate search variations */
+    char variations[6][256];
+    int var_count = 0;
+    generate_search_variations(show_name, variations, &var_count, year);
+
+    TmdbTvShow *show = NULL;
+
+    /* Try each variation until we find a match */
+    for (int i = 0; i < var_count && !show; i++) {
+        printf("  TMDB try %d: \"%s\" (year: %d)\n", i + 1, variations[i], year);
+        /* First try with year filter for precise matching */
+        show = tmdb_search_tvshow(variations[i], year);
+        /* If no result with year filter, try without API filter but still use year for scoring */
+        if (!show && year > 0) {
+            printf("  TMDB try %d: \"%s\" (no API filter, scoring by year %d)\n", i + 1, variations[i], year);
+            show = tmdb_search_tvshow_ex(variations[i], 0, year);
+        }
+    }
+
+    if (!show) {
+        printf("  TMDB: Show not found after %d attempts\n", var_count);
+        return;
+    }
+
+    MediaEntry tmdb_data = {0};
+    tmdb_data.tmdb_show_id = show->tmdb_id;
+    tmdb_data.tmdb_title = show->name;
+    tmdb_data.overview = show->overview;
+    tmdb_data.year = show->year;
+    tmdb_data.rating = show->rating;
+    tmdb_data.vote_count = show->vote_count;
+    tmdb_data.genres = show->genres;
+
+    /* Download show poster */
+    if (show->poster_path) {
+        tmdb_data.poster_path = tmdb_download_image(show->poster_path, "w500",
+                                                    server_config.cache_dir);
+    }
+    if (show->backdrop_path) {
+        tmdb_data.backdrop_path = tmdb_download_image(show->backdrop_path, "w1280",
+                                                      server_config.cache_dir);
+    }
+
+    /* Get episode details */
+    TmdbEpisode *ep = tmdb_get_episode(show->tmdb_id, season, episode);
+    if (ep) {
+        tmdb_data.tmdb_id = show->tmdb_id; /* Use show ID for episodes */
+        tmdb_data.episode_title = ep->name;
+        tmdb_data.episode_overview = ep->overview;
+
+        if (ep->still_path) {
+            tmdb_data.still_path = tmdb_download_image(ep->still_path, "w300",
+                                                       server_config.cache_dir);
+        }
+
+        printf("  TMDB: Found \"%s\" - \"%s\"\n", show->name, ep->name);
+        tmdb_free_episode(ep);
+    } else {
+        tmdb_data.tmdb_id = show->tmdb_id;
+        printf("  TMDB: Found show \"%s\", episode not found\n", show->name);
+    }
+
+    database_update_tmdb(db_id, &tmdb_data);
+
+    free(tmdb_data.poster_path);
+    free(tmdb_data.backdrop_path);
+    free(tmdb_data.still_path);
+    tmdb_free_tvshow(show);
+}
+
 /* Probe media file with FFmpeg and add to database */
-static int scan_media_file(const char *filepath) {
+int scanner_scan_file(const char *filepath, int fetch_tmdb) {
     /* Skip if already in database */
     if (database_file_exists(filepath)) {
         return 0;
@@ -182,13 +610,14 @@ static int scan_media_file(const char *filepath) {
     /* Determine type and extract title */
     char title[256];
     char show_name[256] = {0};
-    int season = 0, episode = 0;
+    int season = 0, episode = 0, show_year = 0;
 
-    if (parse_tv_info(filepath, show_name, &season, &episode)) {
+    if (parse_tv_info(filepath, show_name, &season, &episode, &show_year)) {
         entry.type = MEDIA_TYPE_EPISODE;
         entry.show_name = show_name;
         entry.season = season;
         entry.episode = episode;
+        entry.year = show_year;
         snprintf(title, sizeof(title), "%s S%02dE%02d", show_name, season, episode);
         entry.title = title;
     } else {
@@ -200,10 +629,19 @@ static int scan_media_file(const char *filepath) {
     printf("  Added: %s (%dx%d, %d min)\n",
            entry.title, entry.width, entry.height, entry.duration / 60);
 
-    database_add_media(&entry);
+    int db_id = database_add_media(&entry);
     avformat_close_input(&fmt_ctx);
 
-    return 0;
+    /* Fetch TMDB metadata in background or immediately */
+    if (fetch_tmdb && db_id > 0 && server_config.tmdb_api_key[0]) {
+        if (entry.type == MEDIA_TYPE_MOVIE) {
+            fetch_movie_metadata(db_id, title);
+        } else if (entry.type == MEDIA_TYPE_EPISODE) {
+            fetch_episode_metadata(db_id, show_name, season, episode, show_year);
+        }
+    }
+
+    return db_id;
 }
 
 /* Recursively scan directory */
@@ -232,7 +670,7 @@ int scanner_scan_directory(const char *path) {
             count += scanner_scan_directory(fullpath);
         }
         else if (S_ISREG(st.st_mode) && scanner_is_media_file(fullpath)) {
-            if (scan_media_file(fullpath) == 0) {
+            if (scanner_scan_file(fullpath, 1) >= 0) {
                 count++;
             }
         }
@@ -240,4 +678,37 @@ int scanner_scan_directory(const char *path) {
 
     closedir(dir);
     return count;
+}
+
+/* Fetch TMDB metadata for entries missing it */
+void scanner_fetch_missing_tmdb(void) {
+    if (!server_config.tmdb_api_key[0]) {
+        printf("TMDB API key not configured, skipping metadata fetch\n");
+        return;
+    }
+
+    MediaEntry *entries = NULL;
+    int count = 0;
+
+    if (database_get_entries_without_tmdb(&entries, &count) != 0 || count == 0) {
+        printf("All entries have TMDB metadata\n");
+        return;
+    }
+
+    printf("Fetching TMDB metadata for %d entries...\n", count);
+
+    for (int i = 0; i < count; i++) {
+        MediaEntry *e = &entries[i];
+
+        if (e->type == MEDIA_TYPE_MOVIE) {
+            fetch_movie_metadata(e->id, e->title);
+        } else if (e->type == MEDIA_TYPE_EPISODE && e->show_name) {
+            fetch_episode_metadata(e->id, e->show_name, e->season, e->episode, e->year);
+        }
+
+        database_free_entry(e);
+    }
+
+    free(entries);
+    printf("TMDB metadata fetch complete\n");
 }

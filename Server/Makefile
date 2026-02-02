@@ -1,15 +1,19 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -g
-LDFLAGS = -lpthread -lsqlite3 -lssl -lcrypto
+LDFLAGS = -lpthread -lsqlite3 -lcurl
 
 # FFmpeg libraries for media probing
-FFMPEG_CFLAGS = $(shell pkg-config --cflags libavformat libavcodec libavutil)
-FFMPEG_LIBS = $(shell pkg-config --libs libavformat libavcodec libavutil)
+FFMPEG_CFLAGS = $(shell pkg-config --cflags libavformat libavcodec libavutil 2>/dev/null)
+FFMPEG_LIBS = $(shell pkg-config --libs libavformat libavcodec libavutil 2>/dev/null)
 
-CFLAGS += $(FFMPEG_CFLAGS)
-LDFLAGS += $(FFMPEG_LIBS)
+# cJSON for parsing TMDB responses
+CJSON_CFLAGS = $(shell pkg-config --cflags libcjson 2>/dev/null)
+CJSON_LIBS = $(shell pkg-config --libs libcjson 2>/dev/null)
 
-SRC = server.c database.c scanner.c
+CFLAGS += $(FFMPEG_CFLAGS) $(CJSON_CFLAGS)
+LDFLAGS += $(FFMPEG_LIBS) $(CJSON_LIBS)
+
+SRC = server.c database.c scanner.c config.c tmdb.c watcher.c
 OBJ = $(SRC:.c=.o)
 TARGET = nixly-server
 

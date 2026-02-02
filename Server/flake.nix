@@ -17,7 +17,7 @@
 
           buildInputs = with pkgs; [
             # FFmpeg for media probing (not transcoding - we serve lossless)
-            ffmpeg-full
+            ffmpeg-headless
 
             # Database - SQLite for fast local database
             sqlite
@@ -27,8 +27,12 @@
             gnumake
             pkg-config
 
-            # Networking
+            # Networking and HTTP
             openssl
+            curl
+
+            # JSON parsing for TMDB responses
+            cjson
 
             # Development tools
             gdb

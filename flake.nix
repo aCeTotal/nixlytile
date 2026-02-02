@@ -163,9 +163,46 @@
               mainProgram = "nixlytile";
             };
           };
+          serverPackage = pkgs.stdenv.mkDerivation {
+            pname = "nixly-server";
+            version = "git";
+            src = ./Server;
+
+            nativeBuildInputs = [
+              pkgs.pkg-config
+            ];
+
+            buildInputs = [
+              pkgs.sqlite
+              pkgs.ffmpeg
+              pkgs.curl
+              pkgs.cjson
+            ];
+
+            buildPhase = ''
+              runHook preBuild
+              make CC=${pkgs.stdenv.cc}/bin/cc
+              runHook postBuild
+            '';
+
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out/bin
+              cp nixly-server $out/bin/
+              runHook postInstall
+            '';
+
+            meta = with pkgs.lib; {
+              description = "Nixly Media Server - lossless media streaming";
+              license = licenses.gpl3Plus;
+              platforms = platforms.linux;
+              mainProgram = "nixly-server";
+            };
+          };
         in {
           default = defaultPackage;
           nixlytile = defaultPackage;
+          server = serverPackage;
         });
 
       devShells = forAllSystems (system:
@@ -245,6 +282,25 @@
               echo "$SHORT_COMMIT"
             '';
           };
+          testScript = pkgs.writeShellApplication {
+            name = "nixlytile-test";
+            runtimeInputs = [ self.packages.${system}.server self.packages.${system}.nixlytile ];
+            text = ''
+              cleanup() {
+                echo "Stopping server..."
+                kill "$SERVER_PID" 2>/dev/null || true
+              }
+              trap cleanup EXIT
+
+              echo "Starting nixly-server..."
+              nixly-server -p 8080 &
+              SERVER_PID=$!
+              sleep 1
+
+              echo "Starting nixlytile..."
+              nixlytile "$@"
+            '';
+          };
         in {
           build = {
             type = "app";
@@ -253,6 +309,10 @@
           gethash = {
             type = "app";
             program = "${gethashScript}/bin/nixlytile-gethash";
+          };
+          test = {
+            type = "app";
+            program = "${testScript}/bin/nixlytile-test";
           };
         });
     };

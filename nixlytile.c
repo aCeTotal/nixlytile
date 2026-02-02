@@ -4,6 +4,8 @@
 #define _DEFAULT_SOURCE
 
 #include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <dirent.h>
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -371,6 +373,13 @@ typedef struct WifiNetwork {
 	struct wl_list link;
 } WifiNetwork;
 
+typedef struct VpnConnection {
+	char name[128];
+	char uuid[64];
+	int active;  /* 1 = currently connected */
+	struct wl_list link;
+} VpnConnection;
+
 typedef struct {
 	struct wlr_scene_tree *tree;
 	struct wlr_scene_tree *bg;
@@ -382,8 +391,9 @@ typedef struct {
 	int submenu_x, submenu_y;
 	int visible;
 	int submenu_visible;
-	int hover;
+	int hover;           /* 0 = WiFi row, 1 = VPN row, -1 = none */
 	int submenu_hover;
+	int submenu_type;    /* 0 = WiFi submenu, 1 = VPN submenu */
 	struct wl_list entries;   /* main menu entries */
 	struct wl_list networks;  /* WifiNetwork list */
 } NetMenu;
@@ -485,6 +495,7 @@ typedef struct {
 	struct wlr_scene_tree *grid;
 	struct wlr_scene_tree *sidebar;
 	int visible;
+	unsigned int view_tag;     /* Tag this view belongs to (for HTPC mode) */
 	int width, height;
 	int scroll_offset;     /* Vertical scroll offset in pixels */
 	int selected_idx;      /* Currently selected game index */
@@ -504,6 +515,85 @@ typedef struct {
 	char install_game_name[256];
 	GamingServiceType install_game_service;
 } PcGamingView;
+
+/* Retro gaming console types */
+typedef enum {
+	RETRO_NES = 0,
+	RETRO_SNES,
+	RETRO_N64,
+	RETRO_GAMECUBE,
+	RETRO_WII,
+	RETRO_SWITCH,
+	RETRO_CONSOLE_COUNT
+} RetroConsole;
+
+static const char *retro_console_names[] = {
+	"NES", "SNES", "Nintendo 64", "GameCube", "Wii", "Switch"
+};
+
+/* Retro gaming view */
+typedef struct {
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_tree *dim;
+	struct wlr_scene_tree *menu_bar;
+	int visible;
+	unsigned int view_tag;     /* Tag this view belongs to (for HTPC mode) */
+	int width, height;
+	int selected_console;      /* Currently selected console */
+	int target_console;        /* Target for animation */
+	int anim_direction;        /* Animation direction: -1=left, 1=right, 0=none */
+	float slide_offset;        /* Animation offset for smooth slide (-1.0 to 1.0) */
+	uint64_t slide_start_ms;   /* Animation start time */
+} RetroGamingView;
+
+/* Media types for Movies/TV-shows grid views */
+typedef enum {
+	MEDIA_VIEW_MOVIES = 0,
+	MEDIA_VIEW_TVSHOWS = 1
+} MediaViewType;
+
+/* Individual media entry (movie or TV episode) */
+typedef struct MediaItem {
+	int id;                    /* Database ID */
+	int type;                  /* 0=movie, 1=tvshow, 2=episode */
+	char title[256];           /* Display title */
+	char show_name[256];       /* For episodes: parent show name */
+	int season;                /* For episodes */
+	int episode;               /* For episodes */
+	int duration;              /* Duration in seconds */
+	int year;
+	float rating;              /* TMDB rating 0-10 */
+	char poster_path[512];     /* Path to poster image */
+	char backdrop_path[512];   /* Path to backdrop */
+	char overview[2048];       /* Plot summary */
+	char genres[256];
+	struct wlr_buffer *poster_buf;  /* Cached scaled poster buffer */
+	int poster_w, poster_h;    /* Loaded poster dimensions */
+	int poster_loaded;         /* 1 if poster was loaded (or attempted) */
+	struct MediaItem *next;
+} MediaItem;
+
+/* Media grid view (used for Movies and TV-shows) */
+typedef struct {
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_tree *grid;
+	struct wlr_scene_tree *detail_panel;  /* Right side panel with details */
+	int visible;
+	unsigned int view_tag;     /* Tag this view belongs to (for HTPC mode) */
+	int width, height;
+	int scroll_offset;         /* Vertical scroll offset */
+	int selected_idx;          /* Currently selected item */
+	int item_count;
+	int cols;                  /* Number of columns in grid */
+	MediaItem *items;          /* Linked list of items */
+	MediaViewType view_type;   /* Movies or TV-shows */
+	int needs_refresh;
+	uint64_t last_refresh_ms;
+	/* Server connection */
+	char server_url[256];      /* http://localhost:8080 */
+	/* Change detection */
+	uint32_t last_data_hash;   /* Simple hash of last response to detect changes */
+} MediaGridView;
 
 /* Axis calibration info */
 typedef struct AxisCalibration {
@@ -529,7 +619,6 @@ typedef struct GamepadDevice {
 	int64_t last_activity_ms;  /* Last input timestamp (monotonic ms) */
 	int suspended;             /* 1 if gamepad is suspended/powered off */
 	int grabbed;               /* 1 if EVIOCGRAB is active (exclusive access) */
-	int64_t guide_press_ms;    /* Timestamp when guide button was pressed (0 if not held) */
 } GamepadDevice;
 
 typedef struct TrayMenuEntry {
@@ -809,6 +898,9 @@ struct Monitor {
 	SudoPopup sudo_popup;
 	GamepadMenu gamepad_menu;
 	PcGamingView pc_gaming;
+	RetroGamingView retro_gaming;
+	MediaGridView movies_view;
+	MediaGridView tvshows_view;
 	const Layout *lt[2];
 	int gaps;
 	int showbar;
@@ -975,6 +1067,8 @@ typedef struct {
 static void applybounds(Client *c, struct wlr_box *bbox);
 static void applyrules(Client *c);
 static void arrange(Monitor *m);
+static int htpc_view_is_active(Monitor *m, unsigned int view_tag, int visible);
+static void htpc_views_update_visibility(Monitor *m);
 static void arrangelayer(Monitor *m, struct wl_list *list,
 		struct wlr_box *usable_area, int exclusive);
 static void arrangelayers(Monitor *m);
@@ -1112,6 +1206,10 @@ static void request_wifi_scan(void);
 static void wifi_scan_plan_rescan(void);
 static int wifi_scan_event_cb(int fd, uint32_t mask, void *data);
 static void connect_wifi_ssid(const char *ssid);
+static void vpn_connections_clear(void);
+static int vpn_scan_event_cb(int fd, uint32_t mask, void *data);
+static void vpn_connect(const char *name);
+static int vpn_connect_event_cb(int fd, uint32_t mask, void *data);
 static void connect_wifi_with_prompt(const char *ssid, int secure);
 static void wifi_popup_show(Monitor *m, const char *ssid);
 static void wifi_popup_hide(Monitor *m);
@@ -1275,6 +1373,7 @@ static void schedule_nixpkgs_cache_timer(void);
 static void update_game_mode(void);
 static void htpc_mode_enter(void);
 static void htpc_mode_exit(void);
+static void steam_set_ge_proton_default(void);
 static uint64_t get_time_ns(void);
 static void htpc_mode_toggle(const Arg *arg);
 static void config_expand_path(const char *src, char *dst, size_t dstlen);
@@ -1316,6 +1415,8 @@ static int is_steam_popup(Client *c);
 static int is_steam_child_process(pid_t pid);
 static int is_steam_game(Client *c);
 static int looks_like_game(Client *c);
+static int game_refocus_timer_cb(void *data);
+static void schedule_game_refocus(Client *c, uint32_t ms);
 static void detect_gpus(void);
 static int cpu_popup_refresh_timeout(void *data);
 static void schedule_cpu_popup_refresh(uint32_t ms);
@@ -1346,7 +1447,12 @@ static void gamepad_turn_off_led_sysfs(GamepadDevice *gp);
 static void gamepad_suspend(GamepadDevice *gp);
 static void gamepad_resume(GamepadDevice *gp);
 static int gamepad_any_monitor_active(void);
+static void gamepad_grab(GamepadDevice *gp);
+static void gamepad_ungrab(GamepadDevice *gp);
+static void gamepad_update_grab_state(void);
+static int gamepad_should_grab(void);
 static void cec_switch_to_active_source(void);
+static void steam_launch_bigpicture(void);
 
 /* Bluetooth controller auto-pairing */
 static int bt_bus_event_cb(int fd, uint32_t mask, void *data);
@@ -1387,6 +1493,29 @@ static void pc_gaming_filter_non_games(Monitor *m);
 static void pc_gaming_update_install_status(Monitor *m);
 static int pc_gaming_cache_inotify_cb(int fd, uint32_t mask, void *data);
 static void pc_gaming_cache_watch_setup(void);
+
+/* Retro Gaming view functions */
+static void retro_gaming_show(Monitor *m);
+static void retro_gaming_hide(Monitor *m);
+static void retro_gaming_hide_all(void);
+static Monitor *retro_gaming_visible_monitor(void);
+static void retro_gaming_render(Monitor *m);
+static int retro_gaming_handle_button(Monitor *m, int button, int value);
+static int retro_gaming_animate(void *data);
+
+/* Media Grid view functions (Movies & TV-shows) */
+static void media_view_show(Monitor *m, MediaViewType type);
+static void media_view_hide(Monitor *m, MediaViewType type);
+static void media_view_hide_all(void);
+static void media_view_render(Monitor *m, MediaViewType type);
+static int media_view_refresh(Monitor *m, MediaViewType type);
+static int media_view_poll_timer_cb(void *data);
+static void media_view_free_items(MediaGridView *view);
+static int media_view_handle_button(Monitor *m, MediaViewType type, int button, int value);
+static int media_view_handle_key(Monitor *m, MediaViewType type, xkb_keysym_t sym);
+static void media_view_scroll(Monitor *m, MediaViewType type, int delta);
+static void media_view_load_poster(MediaItem *item, int target_w, int target_h);
+static Monitor *media_view_visible_monitor(void);
 
 static void rendercpu(StatusModule *module, int bar_height, const char *text);
 static void rendercpupopup(Monitor *m);
@@ -1452,6 +1581,7 @@ static int findbatterydevice(char *capacity_path, size_t capacity_len);
 static int findbluetoothdevice(void);
 static int is_process_running(const char *name);
 static Client *find_client_by_app_id(const char *app_id);
+static Client *find_discord_client(void);
 static void focus_or_launch_app(const char *app_id, const char *launch_cmd);
 static void schedule_status_timer(void);
 static void schedule_next_status_refresh(void);
@@ -1615,16 +1745,47 @@ static char gamepad_pending_paths[GAMEPAD_PENDING_MAX][128];
 static int gamepad_pending_count = 0;
 static struct wl_event_source *gamepad_pending_timer = NULL;
 
-/* Gamepad menu items */
-static const GamepadMenuItem gamepad_menu_items[] = {
-	{ "Movies",    NULL },
-	{ "TV-shows",  NULL },
-	{ "PC-gaming",    NULL },
-	{ "Retro-gaming", NULL },
-	{ "Formula1TV",   NULL },
-	{ "Quit HTPC",    NULL },
-};
-#define GAMEPAD_MENU_ITEM_COUNT 6
+/* HTPC menu page toggles (0=disabled, 1=enabled) */
+static int htpc_page_pcgaming = 1;
+static int htpc_page_retrogaming = 1;
+static int htpc_page_movies = 1;
+static int htpc_page_tvshows = 1;
+static int htpc_page_quit = 1;
+
+/* Built HTPC menu based on enabled pages */
+#define HTPC_MENU_MAX_ITEMS 8
+static struct {
+	char label[64];
+	char command[256];
+} htpc_menu_items[HTPC_MENU_MAX_ITEMS];
+static int htpc_menu_item_count = 0;
+
+static void htpc_menu_build(void)
+{
+	htpc_menu_item_count = 0;
+
+	/* Order matches tag numbers: TV-shows=1, Movies=2, Retro-gaming=3, PC-gaming=4 */
+	if (htpc_page_tvshows) {
+		snprintf(htpc_menu_items[htpc_menu_item_count].label, 64, "TV-shows");
+		htpc_menu_items[htpc_menu_item_count].command[0] = '\0';
+		htpc_menu_item_count++;
+	}
+	if (htpc_page_movies) {
+		snprintf(htpc_menu_items[htpc_menu_item_count].label, 64, "Movies");
+		htpc_menu_items[htpc_menu_item_count].command[0] = '\0';
+		htpc_menu_item_count++;
+	}
+	if (htpc_page_retrogaming) {
+		snprintf(htpc_menu_items[htpc_menu_item_count].label, 64, "Retro-gaming");
+		htpc_menu_items[htpc_menu_item_count].command[0] = '\0';
+		htpc_menu_item_count++;
+	}
+	if (htpc_page_pcgaming) {
+		snprintf(htpc_menu_items[htpc_menu_item_count].label, 64, "PC-gaming");
+		htpc_menu_items[htpc_menu_item_count].command[0] = '\0';
+		htpc_menu_item_count++;
+	}
+}
 
 /* PC Gaming service configuration */
 static int gaming_service_enabled[GAMING_SERVICE_COUNT] = {1, 1, 1, 1}; /* All enabled by default */
@@ -1675,7 +1836,6 @@ static struct wl_event_source *gamepad_cursor_timer = NULL;
 #define GAMEPAD_DEADZONE 4000           /* Deadzone threshold (out of 32767) */
 #define GAMEPAD_CURSOR_SPEED 15.0       /* Base cursor speed in pixels per update */
 #define GAMEPAD_CURSOR_ACCEL 2.5        /* Acceleration factor at full tilt */
-#define GUIDE_HOLD_MS 1000              /* Hold guide button 1 second for menu */
 
 /* Bluetooth controller auto-pairing */
 static struct wl_event_source *bt_scan_timer = NULL;
@@ -1768,6 +1928,9 @@ static struct wl_event_source *popup_delay_timer = NULL;
 static struct wl_event_source *video_check_timer = NULL;
 static struct wl_event_source *hz_osd_timer = NULL;
 static struct wl_event_source *pc_gaming_install_timer = NULL;
+static struct wl_event_source *game_refocus_timer = NULL;
+static struct wl_event_source *media_view_poll_timer = NULL;
+static Client *game_refocus_client = NULL;
 static char wifi_scan_buf[8192];
 static size_t wifi_scan_len = 0;
 static int wifi_scan_inflight;
@@ -1777,6 +1940,20 @@ static int wifi_networks_accept_updates;
 static int wifi_networks_freeze_existing;
 static struct wl_list wifi_networks; /* WifiNetwork */
 static int wifi_networks_initialized;
+static struct wl_list vpn_connections; /* VpnConnection */
+static int vpn_list_initialized;
+static pid_t vpn_scan_pid = -1;
+static int vpn_scan_fd = -1;
+static struct wl_event_source *vpn_scan_event;
+static char vpn_scan_buf[8192];
+static size_t vpn_scan_len;
+static int vpn_scan_inflight;
+static pid_t vpn_connect_pid = -1;
+static int vpn_connect_fd = -1;
+static struct wl_event_source *vpn_connect_event;
+static char vpn_connect_buf[4096];
+static size_t vpn_connect_len;
+static char vpn_pending_name[128];
 static char net_text[64] = "Net: --";
 static char net_local_ip[64] = "--";
 static char net_public_ip[64] = "--";
@@ -7072,6 +7249,44 @@ find_client_by_app_id(const char *app_id)
 	return NULL;
 }
 
+/* Find Discord client - checks multiple possible app_id variations.
+ * Discord on NixOS/Linux can have various app_ids like:
+ * "discord", "Discord", ".Discord-wrapped", "vesktop", etc. */
+static Client *
+find_discord_client(void)
+{
+	Client *c;
+	const char *discord_ids[] = {
+		"discord", "Discord", ".Discord", ".Discord-wrapped",
+		"vesktop", "Vesktop", "webcord", "WebCord",
+		"armcord", "ArmCord", "legcord", "Legcord",
+		NULL
+	};
+
+	wl_list_for_each(c, &clients, link) {
+		const char *cid = NULL;
+
+		if (c->type == XDGShell && c->surface.xdg && c->surface.xdg->toplevel) {
+			cid = c->surface.xdg->toplevel->app_id;
+		}
+#ifdef XWAYLAND
+		if (c->type == X11 && c->surface.xwayland) {
+			cid = c->surface.xwayland->class;
+		}
+#endif
+		if (!cid)
+			continue;
+
+		/* Check exact matches and substring matches */
+		for (int i = 0; discord_ids[i]; i++) {
+			if (strcasecmp(cid, discord_ids[i]) == 0 ||
+			    strcasestr(cid, discord_ids[i]))
+				return c;
+		}
+	}
+	return NULL;
+}
+
 static void
 focus_or_launch_app(const char *app_id, const char *launch_cmd)
 {
@@ -7080,8 +7295,12 @@ focus_or_launch_app(const char *app_id, const char *launch_cmd)
 	if (!app_id || !app_id[0])
 		return;
 
-	/* Find the client with matching app_id */
-	found = find_client_by_app_id(app_id);
+	/* Find the client with matching app_id.
+	 * For Discord, use specialized search that checks multiple app_id variants */
+	if (strcasecmp(app_id, "discord") == 0)
+		found = find_discord_client();
+	else
+		found = find_client_by_app_id(app_id);
 
 	if (found) {
 		/* Focus the client and switch to its tag/workspace */
@@ -9754,16 +9973,18 @@ transfer_status_menus(Monitor *from, Monitor *to)
 static void
 net_menu_render(Monitor *m)
 {
-	const char *label = "Available networks";
+	const char *wifi_label = "Available networks";
+	const char *vpn_label = "VPN";
 	int padding = statusbar_module_padding;
 	int line_spacing = 4;
 	int row_h;
-	int text_w;
+	int wifi_text_w, vpn_text_w;
 	int max_w;
 	NetMenu *menu;
 	struct wlr_scene_node *node, *tmp;
 	float border_col[4] = {0, 0, 0, 1};
 	int border_px = 1;
+	int y;
 
 	if (!m || !m->statusbar.net_menu.tree)
 		return;
@@ -9785,10 +10006,11 @@ net_menu_render(Monitor *m)
 	row_h = statusfont.height + line_spacing;
 	if (row_h < statusfont.height)
 		row_h = statusfont.height;
-	text_w = status_text_width(label);
-	max_w = text_w + 2 * padding + row_h; /* space for arrow */
+	wifi_text_w = status_text_width(wifi_label);
+	vpn_text_w = status_text_width(vpn_label);
+	max_w = (wifi_text_w > vpn_text_w ? wifi_text_w : vpn_text_w) + 2 * padding + row_h; /* space for arrow */
 	menu->width = max_w;
-	menu->height = row_h + 2 * padding;
+	menu->height = 2 * row_h + 2 * padding; /* Two rows */
 
 	if (!menu->bg && !(menu->bg = wlr_scene_tree_create(menu->tree)))
 		return;
@@ -9802,12 +10024,24 @@ net_menu_render(Monitor *m)
 	drawrect(menu->bg, 0, 0, border_px, menu->height, border_col);
 	drawrect(menu->bg, menu->width - border_px, 0, border_px, menu->height, border_col);
 
+	/* Row 0: Available networks */
+	y = padding;
 	{
 		char text[256];
-		snprintf(text, sizeof(text), "%s  >", label);
-		drawrect(menu->tree, padding, padding, menu->width - 2 * padding, row_h,
+		snprintf(text, sizeof(text), "%s  >", wifi_label);
+		drawrect(menu->tree, padding, y, menu->width - 2 * padding, row_h,
 				menu->hover == 0 ? net_menu_row_bg_hover : net_menu_row_bg);
-		tray_menu_draw_text(menu->tree, text, padding + 4, padding, row_h);
+		tray_menu_draw_text(menu->tree, text, padding + 4, y, row_h);
+	}
+
+	/* Row 1: VPN */
+	y += row_h;
+	{
+		char text[256];
+		snprintf(text, sizeof(text), "%s  >", vpn_label);
+		drawrect(menu->tree, padding, y, menu->width - 2 * padding, row_h,
+				menu->hover == 1 ? net_menu_row_bg_hover : net_menu_row_bg);
+		tray_menu_draw_text(menu->tree, text, padding + 4, y, row_h);
 	}
 
 	menu->visible = 1;
@@ -9826,7 +10060,6 @@ net_menu_submenu_render(Monitor *m)
 	int total_h = 0;
 	int y;
 	int count = 0;
-	WifiNetwork *n;
 	char line[256];
 	float border_col[4] = {0, 0, 0, 1};
 	int border_px = 1;
@@ -9851,27 +10084,55 @@ net_menu_submenu_render(Monitor *m)
 	if (row_h < statusfont.height)
 		row_h = statusfont.height;
 
-	if (wifi_scan_inflight && wl_list_empty(&wifi_networks)) {
-		snprintf(line, sizeof(line), "Scanning...");
-		max_w = status_text_width(line);
-		total_h = row_h + 2 * padding;
-	} else if (wl_list_empty(&wifi_networks)) {
-		snprintf(line, sizeof(line), "No networks");
-		max_w = status_text_width(line);
-		total_h = row_h + 2 * padding;
-	} else {
-		wl_list_for_each(n, &wifi_networks, link) {
-			int w;
-			int is_connected = (net_ssid[0] && strcmp(n->ssid, net_ssid) == 0);
-			count++;
-			snprintf(line, sizeof(line), "%s (%d%%%s%s)", n->ssid, n->strength,
-					n->secure ? ", secured" : "",
-					is_connected ? ", Connected" : "");
-			w = status_text_width(line);
-			if (w > max_w)
-				max_w = w;
+	/* Render based on submenu_type: 0 = WiFi, 1 = VPN */
+	if (menu->submenu_type == 0) {
+		/* WiFi submenu */
+		WifiNetwork *n;
+		if (wifi_scan_inflight && wl_list_empty(&wifi_networks)) {
+			snprintf(line, sizeof(line), "Scanning...");
+			max_w = status_text_width(line);
+			total_h = row_h + 2 * padding;
+		} else if (wl_list_empty(&wifi_networks)) {
+			snprintf(line, sizeof(line), "No networks");
+			max_w = status_text_width(line);
+			total_h = row_h + 2 * padding;
+		} else {
+			wl_list_for_each(n, &wifi_networks, link) {
+				int w;
+				int is_connected = (net_ssid[0] && strcmp(n->ssid, net_ssid) == 0);
+				count++;
+				snprintf(line, sizeof(line), "%s (%d%%%s%s)", n->ssid, n->strength,
+						n->secure ? ", secured" : "",
+						is_connected ? ", Connected" : "");
+				w = status_text_width(line);
+				if (w > max_w)
+					max_w = w;
+			}
+			total_h = padding * 2 + count * row_h;
 		}
-		total_h = padding * 2 + count * row_h;
+	} else {
+		/* VPN submenu */
+		VpnConnection *v;
+		if (vpn_scan_inflight && wl_list_empty(&vpn_connections)) {
+			snprintf(line, sizeof(line), "Loading...");
+			max_w = status_text_width(line);
+			total_h = row_h + 2 * padding;
+		} else if (wl_list_empty(&vpn_connections)) {
+			snprintf(line, sizeof(line), "No VPN connections");
+			max_w = status_text_width(line);
+			total_h = row_h + 2 * padding;
+		} else {
+			wl_list_for_each(v, &vpn_connections, link) {
+				int w;
+				count++;
+				snprintf(line, sizeof(line), "%s%s", v->name,
+						v->active ? " (Connected)" : "");
+				w = status_text_width(line);
+				if (w > max_w)
+					max_w = w;
+			}
+			total_h = padding * 2 + count * row_h;
+		}
 	}
 
 	if (max_w <= 0)
@@ -9893,25 +10154,50 @@ net_menu_submenu_render(Monitor *m)
 	drawrect(menu->submenu_bg, menu->submenu_width - border_px, 0, border_px, menu->submenu_height, border_col);
 
 	y = padding;
-	if (wl_list_empty(&wifi_networks)) {
-		drawrect(menu->submenu_tree, padding, y, menu->submenu_width - 2 * padding, row_h,
-				net_menu_row_bg);
-		tray_menu_draw_text(menu->submenu_tree, line, padding + 4, y, row_h);
+	if (menu->submenu_type == 0) {
+		/* WiFi items */
+		if (wl_list_empty(&wifi_networks)) {
+			drawrect(menu->submenu_tree, padding, y, menu->submenu_width - 2 * padding, row_h,
+					net_menu_row_bg);
+			tray_menu_draw_text(menu->submenu_tree, line, padding + 4, y, row_h);
+		} else {
+			WifiNetwork *n;
+			int idx = 0;
+			wl_list_for_each(n, &wifi_networks, link) {
+				int x = padding;
+				int hover = (menu->submenu_hover == idx);
+				int is_connected = (net_ssid[0] && strcmp(n->ssid, net_ssid) == 0);
+				snprintf(line, sizeof(line), "%s (%d%%%s%s)", n->ssid, n->strength,
+						n->secure ? ", secured" : "",
+						is_connected ? ", Connected" : "");
+				drawrect(menu->submenu_tree, x, y, menu->submenu_width - 2 * padding, row_h,
+						hover ? net_menu_row_bg_hover : net_menu_row_bg);
+				tray_menu_draw_text(menu->submenu_tree, line, x + 4, y, row_h);
+				n->secure = n->secure ? 1 : 0;
+				idx++;
+				y += row_h;
+			}
+		}
 	} else {
-		int idx = 0;
-		wl_list_for_each(n, &wifi_networks, link) {
-			int x = padding;
-			int hover = (menu->submenu_hover == idx);
-			int is_connected = (net_ssid[0] && strcmp(n->ssid, net_ssid) == 0);
-			snprintf(line, sizeof(line), "%s (%d%%%s%s)", n->ssid, n->strength,
-					n->secure ? ", secured" : "",
-					is_connected ? ", Connected" : "");
-			drawrect(menu->submenu_tree, x, y, menu->submenu_width - 2 * padding, row_h,
-					hover ? net_menu_row_bg_hover : net_menu_row_bg);
-			tray_menu_draw_text(menu->submenu_tree, line, x + 4, y, row_h);
-			n->secure = n->secure ? 1 : 0;
-			idx++;
-			y += row_h;
+		/* VPN items */
+		if (wl_list_empty(&vpn_connections)) {
+			drawrect(menu->submenu_tree, padding, y, menu->submenu_width - 2 * padding, row_h,
+					net_menu_row_bg);
+			tray_menu_draw_text(menu->submenu_tree, line, padding + 4, y, row_h);
+		} else {
+			VpnConnection *v;
+			int idx = 0;
+			wl_list_for_each(v, &vpn_connections, link) {
+				int x = padding;
+				int hover = (menu->submenu_hover == idx);
+				snprintf(line, sizeof(line), "%s%s", v->name,
+						v->active ? " (Connected)" : "");
+				drawrect(menu->submenu_tree, x, y, menu->submenu_width - 2 * padding, row_h,
+						hover ? net_menu_row_bg_hover : net_menu_row_bg);
+				tray_menu_draw_text(menu->submenu_tree, line, x + 4, y, row_h);
+				idx++;
+				y += row_h;
+			}
 		}
 	}
 
@@ -9963,6 +10249,325 @@ request_wifi_scan(void)
 			waitpid(wifi_scan_pid, NULL, WNOHANG);
 		wifi_scan_pid = -1;
 	}
+}
+
+static void
+vpn_connections_clear(void)
+{
+	VpnConnection *v, *tmp;
+	wl_list_for_each_safe(v, tmp, &vpn_connections, link) {
+		wl_list_remove(&v->link);
+		free(v);
+	}
+}
+
+static void
+vpn_scan_finish(void)
+{
+	if (vpn_scan_event) {
+		wl_event_source_remove(vpn_scan_event);
+		vpn_scan_event = NULL;
+	}
+	if (vpn_scan_fd >= 0) {
+		close(vpn_scan_fd);
+		vpn_scan_fd = -1;
+	}
+	if (vpn_scan_pid > 0) {
+		waitpid(vpn_scan_pid, NULL, WNOHANG);
+		vpn_scan_pid = -1;
+	}
+	vpn_scan_inflight = 0;
+}
+
+static int
+vpn_scan_event_cb(int fd, uint32_t mask, void *data)
+{
+	ssize_t n;
+	char *saveptr = NULL;
+	char *line;
+	(void)data;
+	(void)mask;
+
+	for (;;) {
+		if (vpn_scan_len >= sizeof(vpn_scan_buf) - 1)
+			break;
+		n = read(fd, vpn_scan_buf + vpn_scan_len,
+				sizeof(vpn_scan_buf) - 1 - vpn_scan_len);
+		if (n > 0) {
+			vpn_scan_len += (size_t)n;
+			continue;
+		} else if (n == 0) {
+			break;
+		} else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+			return 0;
+		} else {
+			break;
+		}
+	}
+
+	vpn_scan_buf[vpn_scan_len] = '\0';
+
+	vpn_connections_clear();
+
+	/* Parse nmcli output: NAME:UUID:TYPE:DEVICE
+	 * We only want VPN connections (TYPE=vpn) */
+	line = strtok_r(vpn_scan_buf, "\n", &saveptr);
+	while (line) {
+		char *uuid_s, *type_s, *device_s;
+		VpnConnection *ventry;
+		char name[128] = {0};
+		char uuid[64] = {0};
+		int active = 0;
+
+		/* Parse NAME:UUID:TYPE:DEVICE */
+		uuid_s = strchr(line, ':');
+		if (uuid_s) {
+			*uuid_s = '\0';
+			uuid_s++;
+			type_s = strchr(uuid_s, ':');
+			if (type_s) {
+				*type_s = '\0';
+				type_s++;
+				device_s = strchr(type_s, ':');
+				if (device_s) {
+					*device_s = '\0';
+					device_s++;
+				}
+			} else {
+				device_s = NULL;
+			}
+		} else {
+			type_s = NULL;
+			device_s = NULL;
+		}
+
+		/* Only process VPN connections */
+		if (!type_s || strcmp(type_s, "vpn") != 0) {
+			line = strtok_r(NULL, "\n", &saveptr);
+			continue;
+		}
+
+		if (line[0])
+			snprintf(name, sizeof(name), "%s", line);
+		if (!name[0]) {
+			line = strtok_r(NULL, "\n", &saveptr);
+			continue;
+		}
+		if (uuid_s)
+			snprintf(uuid, sizeof(uuid), "%s", uuid_s);
+		/* Active if DEVICE is not empty (e.g., has interface like "tun0") */
+		if (device_s && device_s[0] && strcmp(device_s, "--") != 0)
+			active = 1;
+
+		ventry = ecalloc(1, sizeof(*ventry));
+		snprintf(ventry->name, sizeof(ventry->name), "%s", name);
+		snprintf(ventry->uuid, sizeof(ventry->uuid), "%s", uuid);
+		ventry->active = active;
+		wl_list_insert(vpn_connections.prev, &ventry->link);
+
+		line = strtok_r(NULL, "\n", &saveptr);
+	}
+
+	vpn_scan_finish();
+
+	/* Update submenu if visible and showing VPN */
+	{
+		Monitor *m;
+		wl_list_for_each(m, &mons, link) {
+			if (m->statusbar.net_menu.visible && m->statusbar.net_menu.submenu_type == 1) {
+				net_menu_submenu_render(m);
+				if (m->statusbar.net_menu.submenu_tree)
+					wlr_scene_node_set_position(&m->statusbar.net_menu.submenu_tree->node,
+							m->statusbar.net_menu.submenu_x, m->statusbar.net_menu.submenu_y);
+			}
+		}
+	}
+	return 0;
+}
+
+static void
+request_vpn_scan(void)
+{
+	/* Get all VPN connections with their status */
+	const char *cmd = "nmcli -t -f NAME,UUID,TYPE,DEVICE connection show";
+	int pipefd[2] = {-1, -1};
+
+	if (vpn_scan_inflight)
+		return;
+
+	if (pipe(pipefd) != 0)
+		return;
+
+	vpn_scan_pid = fork();
+	if (vpn_scan_pid == 0) {
+		close(pipefd[0]);
+		dup2(pipefd[1], STDOUT_FILENO);
+		dup2(pipefd[1], STDERR_FILENO);
+		close(pipefd[1]);
+		execl("/bin/sh", "/bin/sh", "-c", cmd, NULL);
+		_exit(127);
+	} else if (vpn_scan_pid < 0) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		vpn_scan_pid = -1;
+		return;
+	}
+
+	close(pipefd[1]);
+	vpn_scan_fd = pipefd[0];
+	fcntl(vpn_scan_fd, F_SETFL, fcntl(vpn_scan_fd, F_GETFL) | O_NONBLOCK);
+	vpn_scan_len = 0;
+	vpn_scan_buf[0] = '\0';
+	vpn_scan_inflight = 1;
+	vpn_scan_event = wl_event_loop_add_fd(event_loop, vpn_scan_fd,
+			WL_EVENT_READABLE | WL_EVENT_HANGUP, vpn_scan_event_cb, NULL);
+	if (!vpn_scan_event) {
+		vpn_scan_inflight = 0;
+		close(vpn_scan_fd);
+		vpn_scan_fd = -1;
+		if (vpn_scan_pid > 0)
+			waitpid(vpn_scan_pid, NULL, WNOHANG);
+		vpn_scan_pid = -1;
+	}
+}
+
+static void
+vpn_connect_finish(void)
+{
+	if (vpn_connect_event) {
+		wl_event_source_remove(vpn_connect_event);
+		vpn_connect_event = NULL;
+	}
+	if (vpn_connect_fd >= 0) {
+		close(vpn_connect_fd);
+		vpn_connect_fd = -1;
+	}
+	if (vpn_connect_pid > 0) {
+		int status;
+		waitpid(vpn_connect_pid, &status, 0);
+		vpn_connect_pid = -1;
+	}
+}
+
+static int
+vpn_connect_event_cb(int fd, uint32_t mask, void *data)
+{
+	ssize_t n;
+	int success = 0;
+	(void)data;
+	(void)mask;
+
+	for (;;) {
+		if (vpn_connect_len >= sizeof(vpn_connect_buf) - 1)
+			break;
+		n = read(fd, vpn_connect_buf + vpn_connect_len,
+				sizeof(vpn_connect_buf) - 1 - vpn_connect_len);
+		if (n > 0) {
+			vpn_connect_len += (size_t)n;
+			continue;
+		} else if (n == 0) {
+			break;
+		} else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+			return 0;
+		} else {
+			break;
+		}
+	}
+
+	vpn_connect_buf[vpn_connect_len] = '\0';
+
+	/* Check if connection was successful by looking at the output */
+	if (strstr(vpn_connect_buf, "successfully activated") ||
+	    strstr(vpn_connect_buf, "Connection successfully activated")) {
+		success = 1;
+	}
+
+	vpn_connect_finish();
+
+	if (!success && vpn_pending_name[0]) {
+		/* Show error toast */
+		char error_msg[256];
+		/* Extract error message if possible, otherwise generic */
+		if (strstr(vpn_connect_buf, "Error:")) {
+			snprintf(error_msg, sizeof(error_msg), "VPN failed: %s", vpn_pending_name);
+		} else {
+			snprintf(error_msg, sizeof(error_msg), "VPN connection failed: %s", vpn_pending_name);
+		}
+		toast_show(selmon, error_msg, 3000);
+	}
+
+	/* Refresh VPN list to update status */
+	request_vpn_scan();
+	vpn_pending_name[0] = '\0';
+
+	return 0;
+}
+
+static void
+vpn_connect(const char *name)
+{
+	char cmd[512];
+	int pipefd[2] = {-1, -1};
+
+	if (!name || !name[0])
+		return;
+
+	/* Check if already connecting */
+	if (vpn_connect_pid > 0)
+		return;
+
+	snprintf(cmd, sizeof(cmd), "nmcli connection up \"%s\" 2>&1", name);
+	snprintf(vpn_pending_name, sizeof(vpn_pending_name), "%s", name);
+
+	if (pipe(pipefd) != 0) {
+		toast_show(selmon, "VPN: Failed to create pipe", 3000);
+		return;
+	}
+
+	vpn_connect_pid = fork();
+	if (vpn_connect_pid == 0) {
+		close(pipefd[0]);
+		dup2(pipefd[1], STDOUT_FILENO);
+		dup2(pipefd[1], STDERR_FILENO);
+		close(pipefd[1]);
+		execl("/bin/sh", "/bin/sh", "-c", cmd, NULL);
+		_exit(127);
+	} else if (vpn_connect_pid < 0) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		vpn_connect_pid = -1;
+		toast_show(selmon, "VPN: Failed to fork", 3000);
+		return;
+	}
+
+	close(pipefd[1]);
+	vpn_connect_fd = pipefd[0];
+	fcntl(vpn_connect_fd, F_SETFL, fcntl(vpn_connect_fd, F_GETFL) | O_NONBLOCK);
+	vpn_connect_len = 0;
+	vpn_connect_buf[0] = '\0';
+	vpn_connect_event = wl_event_loop_add_fd(event_loop, vpn_connect_fd,
+			WL_EVENT_READABLE | WL_EVENT_HANGUP, vpn_connect_event_cb, NULL);
+	if (!vpn_connect_event) {
+		close(vpn_connect_fd);
+		vpn_connect_fd = -1;
+		if (vpn_connect_pid > 0)
+			waitpid(vpn_connect_pid, NULL, WNOHANG);
+		vpn_connect_pid = -1;
+		toast_show(selmon, "VPN: Failed to add event", 3000);
+	}
+}
+
+static VpnConnection *
+vpn_connection_at_index(int idx)
+{
+	VpnConnection *v;
+	int i = 0;
+	wl_list_for_each(v, &vpn_connections, link) {
+		if (i == idx)
+			return v;
+		i++;
+	}
+	return NULL;
 }
 
 static void
@@ -11546,10 +12151,11 @@ wifi_scan_event_cb(int fd, uint32_t mask, void *data)
 
 	wifi_scan_finish();
 
+	/* Update submenu if visible and showing WiFi */
 	{
 		Monitor *m;
 		wl_list_for_each(m, &mons, link) {
-			if (m->statusbar.net_menu.visible) {
+			if (m->statusbar.net_menu.visible && m->statusbar.net_menu.submenu_type == 0) {
 				net_menu_submenu_render(m);
 				if (m->statusbar.net_menu.submenu_tree)
 					wlr_scene_node_set_position(&m->statusbar.net_menu.submenu_tree->node,
@@ -11664,6 +12270,62 @@ schedule_popup_delay(uint32_t ms)
 		wl_event_source_timer_update(popup_delay_timer, ms);
 }
 
+/*
+ * Game refocus timer - re-focuses game clients after a short delay.
+ * This fixes keyboard input not working immediately for XWayland games
+ * (like Witcher 3 via Steam/Proton) which need time to fully initialize
+ * their input handling after the window maps.
+ */
+static int
+game_refocus_timer_cb(void *data)
+{
+	Client *c = game_refocus_client;
+	(void)data;
+
+	game_refocus_client = NULL;
+
+	if (!c || !client_surface(c) || !client_surface(c)->mapped)
+		return 0;
+
+	/* Only refocus if this client is still the focused client */
+	if (seat->keyboard_state.focused_surface != client_surface(c))
+		return 0;
+
+	wlr_log(WLR_INFO, "game_refocus: re-focusing game '%s' after delay",
+		client_get_appid(c) ? client_get_appid(c) : "(unknown)");
+
+	/* Re-send keyboard enter to ensure the client has focus */
+	struct wlr_keyboard *kb = wlr_seat_get_keyboard(seat);
+	client_notify_enter(client_surface(c), kb);
+	client_activate_surface(client_surface(c), 1);
+
+#ifdef XWAYLAND
+	/* For XWayland clients, also re-activate the X11 surface */
+	if (c->type == X11 && c->surface.xwayland) {
+		wlr_xwayland_surface_activate(c->surface.xwayland, 1);
+		wlr_xwayland_surface_restack(c->surface.xwayland, NULL, XCB_STACK_MODE_ABOVE);
+	}
+#endif
+
+	return 0;
+}
+
+static void
+schedule_game_refocus(Client *c, uint32_t ms)
+{
+	if (!event_loop || !c)
+		return;
+	if (!game_refocus_timer)
+		game_refocus_timer = wl_event_loop_add_timer(event_loop,
+				game_refocus_timer_cb, NULL);
+	if (game_refocus_timer) {
+		game_refocus_client = c;
+		wl_event_source_timer_update(game_refocus_timer, ms);
+	}
+}
+
+static void request_vpn_scan(void);
+
 static void
 net_menu_open(Monitor *m)
 {
@@ -11686,7 +12348,9 @@ net_menu_open(Monitor *m)
 		wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
 		m->statusbar.net_popup.visible = 0;
 	}
+	/* Pre-fetch both WiFi and VPN data */
 	request_wifi_scan();
+	request_vpn_scan();
 	net_menu_render(m);
 	if (menu->width <= 0 || menu->height <= 0)
 		return;
@@ -11705,13 +12369,15 @@ net_menu_open(Monitor *m)
 	wlr_scene_node_set_position(&menu->tree->node, menu->x, menu->y);
 	wlr_scene_node_set_enabled(&menu->tree->node, 1);
 	menu->visible = 1;
-	menu->hover = 0;
+	menu->hover = -1;  /* No row hovered initially */
+	menu->submenu_visible = 0;
+	menu->submenu_type = -1;
 
 	menu->submenu_x = menu->x + menu->width + offset;
 	menu->submenu_y = menu->y + offset;
+	/* Don't show submenu automatically - wait for hover */
 	if (menu->submenu_tree) {
-		net_menu_submenu_render(m);
-		wlr_scene_node_set_position(&menu->submenu_tree->node, menu->submenu_x, menu->submenu_y);
+		wlr_scene_node_set_enabled(&menu->submenu_tree->node, 0);
 	}
 	wifi_scan_plan_rescan();
 }
@@ -11722,8 +12388,10 @@ net_menu_update_hover(Monitor *m, double cx, double cy)
 	NetMenu *menu;
 	int lx, ly;
 	int row_h, padding;
-	int prev_hover, prev_sub;
+	int prev_hover, prev_sub, prev_submenu_type;
 	int new_hover = -1, new_sub = -1;
+	int show_submenu = 0;
+	const int offset = statusbar_module_padding;
 
 	if (!m || !m->statusbar.net_menu.visible || !m->statusbar.net_menu.submenu_tree)
 		return;
@@ -11735,33 +12403,83 @@ net_menu_update_hover(Monitor *m, double cx, double cy)
 	if (row_h < statusfont.height)
 		row_h = statusfont.height;
 
+	/* Check if hovering over main menu rows */
 	if (lx >= menu->x && lx < menu->x + menu->width &&
 			ly >= menu->y && ly < menu->y + menu->height) {
-		new_hover = 0;
+		int rel_y = ly - menu->y - padding;
+		if (rel_y >= 0 && rel_y < row_h) {
+			new_hover = 0;  /* WiFi row */
+		} else if (rel_y >= row_h && rel_y < 2 * row_h) {
+			new_hover = 1;  /* VPN row */
+		}
 	}
 
+	/* Check if hovering over submenu */
 	if (menu->submenu_visible &&
 			lx >= menu->submenu_x && lx < menu->submenu_x + menu->submenu_width &&
 			ly >= menu->submenu_y && ly < menu->submenu_y + menu->submenu_height) {
-		if (wl_list_empty(&wifi_networks)) {
-			new_sub = -1;
-		} else {
-			int rel_y = ly - menu->submenu_y - padding;
-			if (rel_y >= 0) {
-				new_sub = rel_y / row_h;
+		/* Keep current main menu hover when in submenu */
+		new_hover = menu->hover;
+		if (menu->submenu_type == 0) {
+			/* WiFi submenu */
+			if (!wl_list_empty(&wifi_networks)) {
+				int rel_y = ly - menu->submenu_y - padding;
+				if (rel_y >= 0) {
+					new_sub = rel_y / row_h;
+				}
+			}
+		} else if (menu->submenu_type == 1) {
+			/* VPN submenu */
+			if (!wl_list_empty(&vpn_connections)) {
+				int rel_y = ly - menu->submenu_y - padding;
+				if (rel_y >= 0) {
+					new_sub = rel_y / row_h;
+				}
 			}
 		}
 	}
 
 	prev_hover = menu->hover;
 	prev_sub = menu->submenu_hover;
+	prev_submenu_type = menu->submenu_type;
 	menu->hover = new_hover;
 	menu->submenu_hover = new_sub;
+
+	/* Determine if we should show submenu and which type */
+	if (new_hover == 0) {
+		menu->submenu_type = 0;  /* WiFi */
+		show_submenu = 1;
+		/* Adjust submenu Y position for WiFi row */
+		menu->submenu_y = menu->y + offset;
+	} else if (new_hover == 1) {
+		menu->submenu_type = 1;  /* VPN */
+		show_submenu = 1;
+		/* Adjust submenu Y position for VPN row */
+		menu->submenu_y = menu->y + row_h + offset;
+	} else if (new_hover == -1 && !menu->submenu_visible) {
+		/* Not hovering over anything and submenu not visible */
+		show_submenu = 0;
+	} else {
+		/* Keep submenu if hovering over it */
+		show_submenu = menu->submenu_visible;
+	}
+
 	if (menu->hover != prev_hover)
 		net_menu_render(m);
-	if (menu->submenu_hover != prev_sub) {
-		net_menu_submenu_render(m);
-		wlr_scene_node_set_position(&menu->submenu_tree->node, menu->submenu_x, menu->submenu_y);
+
+	if (show_submenu) {
+		if (menu->submenu_type != prev_submenu_type || !menu->submenu_visible) {
+			menu->submenu_hover = -1;
+			net_menu_submenu_render(m);
+			wlr_scene_node_set_position(&menu->submenu_tree->node, menu->submenu_x, menu->submenu_y);
+		} else if (menu->submenu_hover != prev_sub) {
+			net_menu_submenu_render(m);
+			wlr_scene_node_set_position(&menu->submenu_tree->node, menu->submenu_x, menu->submenu_y);
+		}
+	} else if (menu->submenu_visible) {
+		/* Hide submenu */
+		wlr_scene_node_set_enabled(&menu->submenu_tree->node, 0);
+		menu->submenu_visible = 0;
 	}
 }
 
@@ -11794,7 +12512,7 @@ net_menu_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 
 	if (lx >= menu->x && lx < menu->x + menu->width &&
 			ly >= menu->y && ly < menu->y + menu->height) {
-		/* main menu, only one entry */
+		/* main menu rows - just consume click, hover handles submenu */
 		return 1;
 	}
 
@@ -11803,10 +12521,13 @@ net_menu_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 			ly >= menu->submenu_y && ly < menu->submenu_y + menu->submenu_height) {
 		if (button != BTN_LEFT)
 			return 1;
-		if (!wl_list_empty(&wifi_networks)) {
-			int rel_y = ly - menu->submenu_y - padding;
-			int idx = rel_y / row_h;
-			if (rel_y >= 0) {
+
+		int rel_y = ly - menu->submenu_y - padding;
+		int idx = rel_y / row_h;
+
+		if (menu->submenu_type == 0) {
+			/* WiFi submenu */
+			if (!wl_list_empty(&wifi_networks) && rel_y >= 0) {
 				WifiNetwork *n = wifi_network_at_index(idx);
 				if (n) {
 					/* Copy SSID before hiding menu - net_menu_hide_all() frees WifiNetwork structs */
@@ -11822,6 +12543,20 @@ net_menu_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 						/* Open network: connect directly without password */
 						connect_wifi_ssid(ssid_copy);
 					}
+					return 1;
+				}
+			}
+		} else if (menu->submenu_type == 1) {
+			/* VPN submenu */
+			if (!wl_list_empty(&vpn_connections) && rel_y >= 0) {
+				VpnConnection *v = vpn_connection_at_index(idx);
+				if (v) {
+					/* Copy name before hiding menu */
+					char name_copy[128];
+					snprintf(name_copy, sizeof(name_copy), "%s", v->name);
+					net_menu_hide_all();
+					/* Connect to VPN immediately */
+					vpn_connect(name_copy);
 					return 1;
 				}
 			}
@@ -14248,6 +14983,139 @@ update_game_mode(void)
 	}
 }
 
+/* Set GE-Proton as the default compatibility tool in Steam */
+static void
+steam_set_ge_proton_default(void)
+{
+	char compat_dir[PATH_MAX];
+	char config_path[PATH_MAX];
+	char ge_proton_name[128] = {0};
+	int best_major = 0, best_minor = 0;
+	const char *home = getenv("HOME");
+	DIR *dir;
+	struct dirent *entry;
+	FILE *fp;
+	char *config_content = NULL;
+	size_t config_size = 0;
+
+	if (!home)
+		return;
+
+	/* Find newest GE-Proton in compatibilitytools.d */
+	snprintf(compat_dir, sizeof(compat_dir), "%s/.steam/root/compatibilitytools.d", home);
+	dir = opendir(compat_dir);
+	if (!dir) {
+		snprintf(compat_dir, sizeof(compat_dir), "%s/.local/share/Steam/compatibilitytools.d", home);
+		dir = opendir(compat_dir);
+	}
+
+	if (dir) {
+		while ((entry = readdir(dir)) != NULL) {
+			if (strncmp(entry->d_name, "GE-Proton", 9) == 0) {
+				int major = 0, minor = 0;
+				/* Parse GE-ProtonX-Y format */
+				if (sscanf(entry->d_name, "GE-Proton%d-%d", &major, &minor) >= 1) {
+					if (major > best_major || (major == best_major && minor > best_minor)) {
+						best_major = major;
+						best_minor = minor;
+						snprintf(ge_proton_name, sizeof(ge_proton_name), "%s", entry->d_name);
+					}
+				}
+			}
+		}
+		closedir(dir);
+	}
+
+	if (!ge_proton_name[0]) {
+		wlr_log(WLR_INFO, "No GE-Proton found in compatibilitytools.d");
+		return;
+	}
+
+	wlr_log(WLR_INFO, "Setting %s as default Steam compatibility tool", ge_proton_name);
+
+	/* Read current config.vdf */
+	snprintf(config_path, sizeof(config_path), "%s/.steam/steam/config/config.vdf", home);
+	fp = fopen(config_path, "r");
+	if (!fp) {
+		snprintf(config_path, sizeof(config_path), "%s/.local/share/Steam/config/config.vdf", home);
+		fp = fopen(config_path, "r");
+	}
+
+	if (!fp) {
+		wlr_log(WLR_ERROR, "Could not open Steam config.vdf");
+		return;
+	}
+
+	/* Read entire file */
+	fseek(fp, 0, SEEK_END);
+	config_size = ftell(fp);
+	fseek(fp, 0, SEEK_SET);
+	config_content = malloc(config_size + 4096); /* Extra space for modifications */
+	if (!config_content) {
+		fclose(fp);
+		return;
+	}
+	fread(config_content, 1, config_size, fp);
+	config_content[config_size] = '\0';
+	fclose(fp);
+
+	/* Check if CompatToolMapping already exists with our GE-Proton */
+	if (strstr(config_content, ge_proton_name)) {
+		wlr_log(WLR_INFO, "%s already configured in Steam", ge_proton_name);
+		free(config_content);
+		return;
+	}
+
+	/* Find CompatToolMapping section or create it */
+	char *compat_section = strstr(config_content, "\"CompatToolMapping\"");
+	if (compat_section) {
+		/* Find the "0" entry (global default) within CompatToolMapping */
+		char *zero_entry = strstr(compat_section, "\"0\"");
+		if (zero_entry && zero_entry < compat_section + 500) {
+			/* Replace existing "0" entry - find its closing brace */
+			char *entry_start = zero_entry;
+			char *brace_open = strchr(entry_start, '{');
+			if (brace_open) {
+				int depth = 1;
+				char *brace_close = brace_open + 1;
+				while (*brace_close && depth > 0) {
+					if (*brace_close == '{') depth++;
+					else if (*brace_close == '}') depth--;
+					brace_close++;
+				}
+				/* Replace content between braces */
+				char new_entry[512];
+				snprintf(new_entry, sizeof(new_entry),
+					"{\n\t\t\t\t\t\t\"name\"\t\t\"%s\"\n"
+					"\t\t\t\t\t\t\"config\"\t\t\"\"\n"
+					"\t\t\t\t\t\t\"priority\"\t\t\"75\"\n"
+					"\t\t\t\t\t}",
+					ge_proton_name);
+
+				/* Build new config */
+				size_t prefix_len = brace_open - config_content + 1;
+				size_t suffix_start = brace_close - config_content;
+				char *new_config = malloc(config_size + 4096);
+				if (new_config) {
+					memcpy(new_config, config_content, prefix_len);
+					strcpy(new_config + prefix_len, new_entry + 1); /* Skip first { */
+					strcat(new_config, config_content + suffix_start);
+
+					fp = fopen(config_path, "w");
+					if (fp) {
+						fputs(new_config, fp);
+						fclose(fp);
+						wlr_log(WLR_INFO, "Updated Steam config with %s as default", ge_proton_name);
+					}
+					free(new_config);
+				}
+			}
+		}
+	}
+
+	free(config_content);
+}
+
 /* HTPC mode - optimized for controller/TV usage */
 static void
 htpc_mode_enter(void)
@@ -14255,7 +15123,7 @@ htpc_mode_enter(void)
 	Monitor *m;
 	Client *c, *tmp;
 
-	if (!htpc_mode_enabled || htpc_mode_active)
+	if (htpc_mode == 0 || htpc_mode_active)
 		return;
 
 	htpc_mode_active = 1;
@@ -14308,6 +15176,12 @@ htpc_mode_enter(void)
 	if (config_rewatch_timer)
 		wl_event_source_timer_update(config_rewatch_timer, 0);
 
+	/* Start media view poll timer (3 second refresh) */
+	if (!media_view_poll_timer)
+		media_view_poll_timer = wl_event_loop_add_timer(event_loop, media_view_poll_timer_cb, NULL);
+	if (media_view_poll_timer)
+		wl_event_source_timer_update(media_view_poll_timer, 3000);
+
 	/* Kill non-essential processes */
 	if (fork() == 0) {
 		setsid();
@@ -14348,22 +15222,8 @@ htpc_mode_enter(void)
 		selmon->tagset[selmon->seltags] = 1 << 0; /* Tag 1 = bit 0 */
 	}
 
-	/* Start Steam Big Picture on tag 2 (in background)
-	 * Steam will open on tag 2, user stays on tag 1 until they select PC-gaming */
-	{
-		pid_t pid = fork();
-		if (pid == 0) {
-			setsid();
-			set_dgpu_env();
-			set_steam_env();
-			/* Kill existing Steam, then start Big Picture mode */
-			execl("/bin/sh", "sh", "-c",
-				"pkill -9 steam 2>/dev/null; sleep 1; "
-				"steam -bigpicture -cef-force-gpu -cef-disable-sandbox steam://open/games",
-				(char *)NULL);
-			_exit(127);
-		}
-	}
+	/* NOTE: Steam is NOT started here - it will be launched on-demand
+	 * when the user selects PC-gaming or switches to tag 4 */
 
 	/* Re-arrange all monitors */
 	wl_list_for_each(m, &mons, link) {
@@ -14372,6 +15232,9 @@ htpc_mode_enter(void)
 
 	/* Clear focus since all clients are being closed */
 	focusclient(NULL, 0);
+
+	/* Grab gamepads for HTPC UI navigation (unless on Steam tag) */
+	gamepad_update_grab_state();
 }
 
 static void
@@ -14385,6 +15248,10 @@ htpc_mode_exit(void)
 
 	htpc_mode_active = 0;
 	wlr_log(WLR_INFO, "HTPC mode deactivated - cleaning up, showing statusbar, resuming background tasks");
+
+	/* Stop media view poll timer */
+	if (media_view_poll_timer)
+		wl_event_source_timer_update(media_view_poll_timer, 0);
 
 	/* Kill Steam and close all clients to get clean tags */
 	if (fork() == 0) {
@@ -14438,6 +15305,9 @@ htpc_mode_exit(void)
 	wl_list_for_each(m, &mons, link) {
 		arrange(m);
 	}
+
+	/* Release gamepad grab when leaving HTPC mode */
+	gamepad_update_grab_state();
 }
 
 static void
@@ -14445,7 +15315,7 @@ htpc_mode_toggle(const Arg *arg)
 {
 	(void)arg;
 
-	if (!htpc_mode_enabled)
+	if (htpc_mode == 0)
 		return;
 
 	if (htpc_mode_active)
@@ -16507,8 +17377,8 @@ gamepad_menu_show(Monitor *m)
 {
 	GamepadMenu *gm;
 	int w, h, x, y;
-	/* 80% opaque dark overlay for blur-like effect */
-	float dim_color[4] = {0.05f, 0.05f, 0.08f, 0.80f};
+	/* Near-opaque dark overlay to obscure background (simulates heavy blur) */
+	float dim_color[4] = {0.08f, 0.08f, 0.10f, 0.97f};
 
 	if (!m)
 		return;
@@ -16517,11 +17387,12 @@ gamepad_menu_show(Monitor *m)
 
 	gm = &m->gamepad_menu;
 	gm->selected = 0;
-	gm->item_count = GAMEPAD_MENU_ITEM_COUNT;
+	htpc_menu_build();  /* Build menu based on enabled pages */
+	gm->item_count = htpc_menu_item_count;
 
 	/* Calculate popup size - just buttons, no title/hints */
 	w = 300;
-	h = 20 + GAMEPAD_MENU_ITEM_COUNT * 55 + 20;
+	h = 20 + htpc_menu_item_count * 55 + 20;
 
 	/* Center on monitor */
 	x = m->m.x + (m->m.width - w) / 2;
@@ -16531,7 +17402,7 @@ gamepad_menu_show(Monitor *m)
 	gm->height = h;
 	gm->visible = 1;
 
-	/* Always create dim overlay with 80% opacity for blur-like effect */
+	/* Create dim overlay to obscure background */
 	if (!gm->dim)
 		gm->dim = wlr_scene_tree_create(layers[LyrBlock]);
 	if (gm->dim) {
@@ -16640,17 +17511,17 @@ gamepad_menu_render(Monitor *m)
 		drawrect(gm->bg, gm->width - 2, 0, 2, gm->height, border_color);
 	}
 
-	/* Draw menu items as buttons */
-	y_offset = padding;
+	/* Draw menu items as buttons with equal spacing */
+	int current_y = padding;
 	for (int i = 0; i < gm->item_count; i++) {
-		const char *label = gamepad_menu_items[i].label;
+		const char *label = htpc_menu_items[i].label;
 		int button_x = padding;
-		int button_y = y_offset + i * item_height;
 		int button_w = gm->width - 2 * padding;
 		int button_h = item_height - button_margin;
 		int label_w = status_text_width(label);
 		/* Center label horizontally within button */
 		int label_x = (button_w - label_w) / 2;
+		int button_y = current_y;
 
 		/* Draw button background */
 		if (i == gm->selected) {
@@ -16675,6 +17546,8 @@ gamepad_menu_render(Monitor *m)
 			/* tray_render_label centers text vertically within bar_height */
 			tray_render_label(&mod, label, label_x, button_h, statusbar_fg);
 		}
+
+		current_y += item_height;
 	}
 }
 
@@ -16692,51 +17565,88 @@ gamepad_menu_select(Monitor *m)
 	if (!gm->visible || gm->selected < 0 || gm->selected >= gm->item_count)
 		return;
 
-	label = gamepad_menu_items[gm->selected].label;
-	cmd = gamepad_menu_items[gm->selected].command;
+	label = htpc_menu_items[gm->selected].label;
+	cmd = htpc_menu_items[gm->selected].command;
 
-	/* Handle PC-gaming - switch to tag 2 and launch Steam Big Picture if not running */
+	/* Handle PC-gaming - switch to tag 4 and show PC gaming view */
 	if (strcmp(label, "PC-gaming") == 0) {
-		gamepad_menu_hide(m);
-		wlr_log(WLR_INFO, "Switching to PC Gaming (tag 2)");
+		gamepad_menu_hide_all();
+		wlr_log(WLR_INFO, "Switching to PC Gaming (tag 4)");
 
-		/* Switch to tag 2 */
+		/* Launch Steam Big Picture if not already running */
+		steam_launch_bigpicture();
+
+		/* Switch to tag 4 */
 		if (selmon) {
 			selmon->seltags ^= 1;
-			selmon->tagset[selmon->seltags] = 1 << 1; /* Tag 2 = bit 1 */
+			selmon->tagset[selmon->seltags] = 1 << 3; /* Tag 4 = bit 3 */
 			focusclient(focustop(selmon), 1);
 			arrange(selmon);
 			printstatus();
 		}
 
-		/* Only launch Steam if not already running */
-		if (!is_process_running("steam")) {
-			wlr_log(WLR_INFO, "Steam not running, launching Big Picture mode");
-			pid_t pid = fork();
-			if (pid == 0) {
-				setsid();
-				set_dgpu_env();
-				set_steam_env();
-				execlp("steam", "steam", "-bigpicture", "-cef-force-gpu", "-cef-disable-sandbox", "steam://open/games", (char *)NULL);
-				_exit(127);
-			}
-		} else {
-			wlr_log(WLR_INFO, "Steam already running, just switching to tag 2");
-		}
+		/* Show PC gaming view (like retro_gaming_show for Retro-gaming) */
+		pc_gaming_show(m);
 		return;
 	}
 
-	/* Handle Movies - show grid view */
+	/* Handle Retro-gaming - switch to tag 3 and show retro console selection */
+	if (strcmp(label, "Retro-gaming") == 0) {
+		gamepad_menu_hide_all();
+		wlr_log(WLR_INFO, "Switching to Retro Gaming (tag 3)");
+
+		/* Switch to tag 3 */
+		if (selmon) {
+			selmon->seltags ^= 1;
+			selmon->tagset[selmon->seltags] = 1 << 2; /* Tag 3 = bit 2 */
+			focusclient(focustop(selmon), 1);
+			arrange(selmon);
+			printstatus();
+		}
+
+		retro_gaming_show(m);
+		return;
+	}
+
+	/* Handle Movies - switch to tag 2 and show movies grid view */
 	if (strcmp(label, "Movies") == 0) {
-		gamepad_menu_hide(m);
-		wlr_log(WLR_INFO, "Opening Movies view");
-		pc_gaming_show(m);
+		gamepad_menu_hide_all();
+		wlr_log(WLR_INFO, "Switching to Movies (tag 2)");
+
+		/* Switch to tag 2 - use m consistently (same monitor as menu) */
+		m->seltags ^= 1;
+		m->tagset[m->seltags] = 1 << 1; /* Tag 2 = bit 1 */
+
+		/* Show view BEFORE arrange so htpc_views_update_visibility sees correct state */
+		media_view_show(m, MEDIA_VIEW_MOVIES);
+
+		focusclient(focustop(m), 1);
+		arrange(m);
+		printstatus();
+		return;
+	}
+
+	/* Handle TV-shows - switch to tag 1 and show tvshows grid view */
+	if (strcmp(label, "TV-shows") == 0) {
+		gamepad_menu_hide_all();
+		wlr_log(WLR_INFO, "Switching to TV-shows (tag 1)");
+
+		/* Switch to tag 1 - use m consistently (same monitor as menu) */
+		m->seltags ^= 1;
+		m->tagset[m->seltags] = 1 << 0; /* Tag 1 = bit 0 */
+
+		/* Show view BEFORE arrange so htpc_views_update_visibility sees correct state */
+		media_view_show(m, MEDIA_VIEW_TVSHOWS);
+
+		focusclient(focustop(m), 1);
+		arrange(m);
+		printstatus();
 		return;
 	}
 
 	/* Handle Quit HTPC - exit HTPC mode and return to normal desktop */
 	if (strcmp(label, "Quit HTPC") == 0) {
-		gamepad_menu_hide(m);
+		gamepad_menu_hide_all();
 		wlr_log(WLR_INFO, "Exiting HTPC mode");
 		htpc_mode_exit();
 		return;
@@ -16750,7 +17660,7 @@ gamepad_menu_select(Monitor *m)
 		wlr_log(WLR_INFO, "Gamepad menu selected: %s", label);
 	}
 
-	gamepad_menu_hide(m);
+	gamepad_menu_hide_all();
 }
 
 /* Handle gamepad button press - returns 1 if handled */
@@ -16790,32 +17700,80 @@ gamepad_menu_handle_button(Monitor *m, int button, int value)
 		return 1;  /* Consume other buttons when popup is open */
 	}
 
-	/* Check if PC gaming view is visible - handle input there first */
-	if (m->pc_gaming.visible) {
-		if (pc_gaming_handle_button(m, button, value))
-			return 1;
-		/* Block guide button when install popup is visible */
-		if (m->pc_gaming.install_popup_visible && button == BTN_MODE)
-			return 0;  /* Let Steam handle it */
-		/* Fall through to mouse click emulation if a popup client has focus */
-	}
-
 	gm = &m->gamepad_menu;
 
-	/* BTN_MODE (guide button) - hold for 1 second to toggle menu
-	 * Pass through to Steam/other apps for normal press */
-	if (button == BTN_MODE) {
-		GamepadDevice *gp;
-		wl_list_for_each(gp, &gamepads, link) {
-			if (value == 1) {
-				/* Guide pressed - start hold timer */
-				gp->guide_press_ms = monotonic_msec();
-			} else {
-				/* Guide released - cancel hold */
-				gp->guide_press_ms = 0;
+	/* BTN_MODE (guide button) - instant press to toggle menu */
+	if (button == BTN_MODE && value == 1) {
+		if (gm->visible)
+			gamepad_menu_hide(m);
+		else
+			gamepad_menu_show(m);
+		return 1;  /* Consume the event */
+	}
+
+	/* Menu navigation takes priority when menu is visible (on button press only) */
+	if (gm->visible && value == 1) {
+		switch (button) {
+		case BTN_SOUTH:  /* A button - select */
+			gamepad_menu_select(m);
+			return 1;
+		case BTN_EAST:   /* B button - close */
+			gamepad_menu_hide(m);
+			return 1;
+		case BTN_DPAD_UP:
+			if (gm->selected > 0) {
+				gm->selected--;
+				gamepad_menu_render(m);
+			}
+			return 1;
+		case BTN_DPAD_DOWN:
+			if (gm->selected < gm->item_count - 1) {
+				gm->selected++;
+				gamepad_menu_render(m);
+			}
+			return 1;
+		}
+	}
+
+	/* Check if PC gaming view is active on ANY monitor
+	 * Use pc_gaming_visible_monitor() to find the correct monitor since
+	 * selmon may have changed due to mouse movement */
+	{
+		Monitor *pg_mon = pc_gaming_visible_monitor();
+		if (pg_mon && htpc_view_is_active(pg_mon, pg_mon->pc_gaming.view_tag, pg_mon->pc_gaming.visible)) {
+			if (pc_gaming_handle_button(pg_mon, button, value))
+				return 1;
+			/* Block guide button when install popup is visible */
+			if (pg_mon->pc_gaming.install_popup_visible && button == BTN_MODE)
+				return 0;  /* Let Steam handle it */
+			/* Fall through to mouse click emulation if a popup client has focus */
+		}
+	}
+
+	/* Check if Retro gaming view is active on ANY monitor */
+	{
+		Monitor *rg_mon = retro_gaming_visible_monitor();
+		if (rg_mon && htpc_view_is_active(rg_mon, rg_mon->retro_gaming.view_tag, rg_mon->retro_gaming.visible)) {
+			if (retro_gaming_handle_button(rg_mon, button, value))
+				return 1;
+		}
+	}
+
+	/* Check if Movies or TV-shows view is active on ANY monitor
+	 * Use media_view_visible_monitor() to find the correct monitor since
+	 * selmon may have changed due to mouse movement */
+	{
+		Monitor *media_mon = media_view_visible_monitor();
+		if (media_mon) {
+			if (htpc_view_is_active(media_mon, media_mon->movies_view.view_tag, media_mon->movies_view.visible)) {
+				if (media_view_handle_button(media_mon, MEDIA_VIEW_MOVIES, button, value))
+					return 1;
+			}
+			if (htpc_view_is_active(media_mon, media_mon->tvshows_view.view_tag, media_mon->tvshows_view.visible)) {
+				if (media_view_handle_button(media_mon, MEDIA_VIEW_TVSHOWS, button, value))
+					return 1;
 			}
 		}
-		return 0;  /* Don't consume - let Steam/other apps receive it */
 	}
 
 	/* Mouse click emulation with shoulder buttons (when menu is not visible) */
@@ -16849,31 +17807,6 @@ gamepad_menu_handle_button(Monitor *m, int button, int value)
 			return 1;
 		}
 		return 0;
-	}
-
-	/* Menu navigation (only on button press) */
-	if (value != 1)
-		return 0;
-
-	switch (button) {
-	case BTN_SOUTH:  /* A button - select */
-		gamepad_menu_select(m);
-		return 1;
-	case BTN_EAST:   /* B button - close */
-		gamepad_menu_hide(m);
-		return 1;
-	case BTN_DPAD_UP:
-		if (gm->selected > 0) {
-			gm->selected--;
-			gamepad_menu_render(m);
-		}
-		return 1;
-	case BTN_DPAD_DOWN:
-		if (gm->selected < gm->item_count - 1) {
-			gm->selected++;
-			gamepad_menu_render(m);
-		}
-		return 1;
 	}
 
 	return 0;
@@ -18466,6 +19399,7 @@ pc_gaming_show(Monitor *m)
 	pg->scroll_offset = 0;
 	pg->service_filter = -1;
 	pg->needs_refresh = 1;
+	pg->view_tag = 1 << 3;  /* Tag 4 = bit 3 */
 
 	/* Fullscreen on monitor - directly on background */
 	pg->width = m->m.width;
@@ -18954,7 +19888,8 @@ pc_gaming_handle_button(Monitor *m, int button, int value)
 		return 0;
 
 	pg = &m->pc_gaming;
-	if (!pg->visible)
+	/* Only handle input if view is visible AND on current tag */
+	if (!htpc_view_is_active(m, pg->view_tag, pg->visible))
 		return 0;
 
 	/* If a window has focus (e.g. Steam dialog), click it and return to PC gaming */
@@ -19116,6 +20051,1311 @@ pc_gaming_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 	return 1;  /* Consume all keys while view is open */
 }
 
+/* ============================================================================
+ * Retro Gaming View Implementation
+ * ============================================================================ */
+
+#define RETRO_SLIDE_DURATION_MS 200  /* Smooth slide animation duration */
+static struct wl_event_source *retro_anim_timer = NULL;
+
+static void
+retro_gaming_show(Monitor *m)
+{
+	RetroGamingView *rg;
+	float dim_color[4] = {0.05f, 0.05f, 0.08f, 0.98f};
+
+	if (!m)
+		return;
+
+	retro_gaming_hide_all();
+
+	rg = &m->retro_gaming;
+	rg->selected_console = RETRO_NES;
+	rg->target_console = RETRO_NES;
+	rg->anim_direction = 0;
+	rg->slide_offset = 0.0f;
+	rg->width = m->m.width;
+	rg->height = m->m.height;
+	rg->visible = 1;
+	rg->view_tag = 1 << 2;  /* Tag 3 = bit 2 */
+
+	/* Create dim overlay */
+	if (!rg->dim)
+		rg->dim = wlr_scene_tree_create(layers[LyrBlock]);
+	if (rg->dim) {
+		struct wlr_scene_node *node, *tmp;
+		wl_list_for_each_safe(node, tmp, &rg->dim->children, link)
+			wlr_scene_node_destroy(node);
+		wlr_scene_node_set_position(&rg->dim->node, m->m.x, m->m.y);
+		drawrect(rg->dim, 0, 0, m->m.width, m->m.height, dim_color);
+		wlr_scene_node_set_enabled(&rg->dim->node, 1);
+		wlr_scene_node_raise_to_top(&rg->dim->node);
+	}
+
+	/* Create main tree */
+	if (!rg->tree)
+		rg->tree = wlr_scene_tree_create(layers[LyrBlock]);
+	if (rg->tree) {
+		wlr_scene_node_set_position(&rg->tree->node, m->m.x, m->m.y);
+		wlr_scene_node_set_enabled(&rg->tree->node, 1);
+		wlr_scene_node_raise_to_top(&rg->tree->node);
+	}
+
+	retro_gaming_render(m);
+}
+
+static void
+retro_gaming_hide(Monitor *m)
+{
+	RetroGamingView *rg;
+
+	if (!m)
+		return;
+
+	rg = &m->retro_gaming;
+	rg->visible = 0;
+
+	if (rg->tree)
+		wlr_scene_node_set_enabled(&rg->tree->node, 0);
+	if (rg->dim)
+		wlr_scene_node_set_enabled(&rg->dim->node, 0);
+}
+
+static void
+retro_gaming_hide_all(void)
+{
+	Monitor *m;
+	wl_list_for_each(m, &mons, link) {
+		retro_gaming_hide(m);
+	}
+}
+
+static void
+retro_gaming_render(Monitor *m)
+{
+	RetroGamingView *rg;
+	struct wlr_scene_node *node, *tmp;
+	int menu_bar_h = 80;
+	int item_spacing = 40;
+	int total_width = 0;
+	int x_offset;
+	float bg_color[4] = {0.08f, 0.08f, 0.10f, 1.0f};
+	float selected_color[4] = {0.20f, 0.45f, 0.85f, 1.0f};
+	float hover_underline[4] = {0.20f, 0.45f, 0.85f, 1.0f};
+
+	if (!m || !statusfont.font)
+		return;
+
+	rg = &m->retro_gaming;
+	if (!rg->visible || !rg->tree)
+		return;
+
+	/* Clear previous content */
+	wl_list_for_each_safe(node, tmp, &rg->tree->children, link) {
+		wlr_scene_node_destroy(node);
+	}
+
+	/* Draw menu bar background */
+	drawrect(rg->tree, 0, 0, rg->width, menu_bar_h, bg_color);
+
+	/* Calculate total width and positions of menu items */
+	int item_positions[RETRO_CONSOLE_COUNT];
+	int item_widths[RETRO_CONSOLE_COUNT];
+	for (int i = 0; i < RETRO_CONSOLE_COUNT; i++) {
+		item_widths[i] = status_text_width(retro_console_names[i]);
+		total_width += item_widths[i];
+		if (i < RETRO_CONSOLE_COUNT - 1)
+			total_width += item_spacing;
+	}
+
+	/* Calculate item positions (menu items stay fixed) */
+	x_offset = (rg->width - total_width) / 2;
+	for (int i = 0; i < RETRO_CONSOLE_COUNT; i++) {
+		item_positions[i] = x_offset;
+		x_offset += item_widths[i] + item_spacing;
+	}
+
+	/* Calculate animated pill position */
+	int pill_pad = 15;
+	int pill_h = 40;
+	int pill_y = (menu_bar_h - pill_h) / 2;
+
+	/* Interpolate pill position during animation */
+	int from_console = rg->selected_console;
+	int to_console = rg->target_console;
+	float anim_progress = 1.0f - fabsf(rg->slide_offset);  /* slide_offset goes from +-1 to 0 */
+
+	int pill_x, pill_w;
+	if (from_console == to_console || anim_progress >= 1.0f) {
+		/* No animation or animation complete */
+		pill_x = item_positions[rg->selected_console] - pill_pad;
+		pill_w = item_widths[rg->selected_console] + pill_pad * 2;
+	} else {
+		/* Animate pill between positions */
+		int from_x = item_positions[from_console] - pill_pad;
+		int from_w = item_widths[from_console] + pill_pad * 2;
+		int to_x = item_positions[to_console] - pill_pad;
+		int to_w = item_widths[to_console] + pill_pad * 2;
+
+		/* Ease-out interpolation */
+		float ease = 1.0f - (1.0f - anim_progress) * (1.0f - anim_progress);
+		pill_x = from_x + (int)((to_x - from_x) * ease);
+		pill_w = from_w + (int)((to_w - from_w) * ease);
+	}
+
+	/* Draw selection pill (animated) */
+	drawrect(rg->tree, pill_x, pill_y, pill_w, pill_h, selected_color);
+
+	/* Draw menu items (fixed positions) */
+	for (int i = 0; i < RETRO_CONSOLE_COUNT; i++) {
+		const char *name = retro_console_names[i];
+		int text_y = (menu_bar_h - 20) / 2;
+		int is_target = (i == rg->target_console);
+
+		/* Draw text */
+		struct wlr_scene_tree *text_tree = wlr_scene_tree_create(rg->tree);
+		if (text_tree) {
+			wlr_scene_node_set_position(&text_tree->node, item_positions[i], text_y);
+			StatusModule mod = {0};
+			mod.tree = text_tree;
+			float text_color[4] = {1.0f, 1.0f, 1.0f, is_target ? 1.0f : 0.7f};
+			tray_render_label(&mod, name, 0, 20, text_color);
+		}
+	}
+
+	/* Draw underline (animated with pill) */
+	int underline_x = pill_x + pill_pad;
+	int underline_w = pill_w - pill_pad * 2;
+	drawrect(rg->tree, underline_x, menu_bar_h - 4, underline_w, 3, hover_underline);
+
+	/* Draw separator line */
+	float sep_color[4] = {0.3f, 0.3f, 0.35f, 1.0f};
+	drawrect(rg->tree, 0, menu_bar_h - 1, rg->width, 1, sep_color);
+
+	/* Content area */
+	float content_bg[4] = {0.06f, 0.06f, 0.08f, 1.0f};
+	drawrect(rg->tree, 0, menu_bar_h, rg->width, rg->height - menu_bar_h, content_bg);
+
+	/* Show target console name in content area (shows destination immediately) */
+	struct wlr_scene_tree *content_tree = wlr_scene_tree_create(rg->tree);
+	if (content_tree) {
+		const char *console = retro_console_names[rg->target_console];
+		int cw = status_text_width(console);
+		int cx = (rg->width - cw) / 2;
+		int cy = menu_bar_h + (rg->height - menu_bar_h) / 2 - 20;
+		wlr_scene_node_set_position(&content_tree->node, cx, cy);
+		StatusModule mod = {0};
+		mod.tree = content_tree;
+		float white[4] = {1.0f, 1.0f, 1.0f, 0.5f};
+		tray_render_label(&mod, console, 0, 40, white);
+	}
+}
+
+static int
+retro_gaming_animate(void *data)
+{
+	Monitor *m = data;
+	RetroGamingView *rg;
+	uint64_t now, elapsed;
+	float progress;
+
+	if (!m)
+		return 0;
+
+	rg = &m->retro_gaming;
+	if (!rg->visible)
+		return 0;
+
+	now = monotonic_msec();
+	elapsed = now - rg->slide_start_ms;
+	progress = (float)elapsed / RETRO_SLIDE_DURATION_MS;
+
+	if (progress >= 1.0f) {
+		/* Animation complete */
+		rg->selected_console = rg->target_console;
+		rg->slide_offset = 0.0f;
+		rg->anim_direction = 0;
+		retro_gaming_render(m);
+		return 0;
+	}
+
+	/* Ease-out animation - slide_offset goes from 1.0 to 0.0 */
+	float ease = 1.0f - (1.0f - progress) * (1.0f - progress);
+	rg->slide_offset = (1.0f - ease) * (rg->anim_direction < 0 ? 1.0f : -1.0f);
+
+	retro_gaming_render(m);
+
+	/* Continue animation */
+	if (retro_anim_timer)
+		wl_event_source_timer_update(retro_anim_timer, 16);  /* ~60fps */
+
+	return 0;
+}
+
+static int
+retro_gaming_handle_button(Monitor *m, int button, int value)
+{
+	RetroGamingView *rg;
+	int direction = 0;
+
+	if (!m)
+		return 0;
+
+	rg = &m->retro_gaming;
+	/* Only handle input if view is visible AND on current tag */
+	if (!htpc_view_is_active(m, rg->view_tag, rg->visible))
+		return 0;
+
+	/* Only handle button press */
+	if (value != 1)
+		return 0;
+
+	/* Navigation: D-pad left/right, shoulder buttons */
+	switch (button) {
+	case BTN_DPAD_LEFT:
+	case BTN_TL:  /* Left shoulder */
+		direction = -1;
+		break;
+	case BTN_DPAD_RIGHT:
+	case BTN_TR:  /* Right shoulder */
+		direction = 1;
+		break;
+	case BTN_EAST:  /* B button - go back */
+		retro_gaming_hide(m);
+		return 1;
+	case BTN_MODE:  /* Guide button - let main handler show menu overlay */
+		return 0;
+	case BTN_SOUTH:  /* A button - select current console */
+		/* TODO: Enter console's game list */
+		return 1;
+	}
+
+	if (direction != 0) {
+		int new_target = rg->target_console + direction;
+		if (new_target >= 0 && new_target < RETRO_CONSOLE_COUNT) {
+			/* If animation is in progress, update selected to current target first */
+			if (rg->anim_direction != 0) {
+				rg->selected_console = rg->target_console;
+			}
+			rg->target_console = new_target;
+			rg->anim_direction = direction;
+			rg->slide_start_ms = monotonic_msec();
+			rg->slide_offset = (direction < 0) ? 1.0f : -1.0f;
+
+			/* Start animation timer */
+			if (!retro_anim_timer)
+				retro_anim_timer = wl_event_loop_add_timer(
+					wl_display_get_event_loop(dpy),
+					retro_gaming_animate, m);
+			if (retro_anim_timer)
+				wl_event_source_timer_update(retro_anim_timer, 16);
+		}
+		return 1;
+	}
+
+	return 0;
+}
+
+/* =========================================================== */
+/* Media Grid View (Movies & TV-shows) */
+/* =========================================================== */
+
+#define MEDIA_GRID_PADDING 40
+#define MEDIA_GRID_GAP 20
+#define MEDIA_SERVER_PORT 8080
+#define MEDIA_DISCOVERY_PORT 8081
+#define MEDIA_DISCOVERY_MAGIC "NIXLY_DISCOVER"
+#define MEDIA_DISCOVERY_RESPONSE "NIXLY_SERVER"
+#define MAX_MEDIA_SERVERS 16
+
+/* Configured media servers (from config file) */
+static char media_servers[MAX_MEDIA_SERVERS][256];
+static int media_server_count = 0;
+static int current_server_idx = 0;  /* Which configured server to use */
+
+/* Discovered server URL (auto-discovered or fallback to localhost) */
+static char discovered_server_url[256] = "";
+static int server_discovered = 0;
+static uint64_t last_discovery_attempt_ms = 0;
+
+/* Try to discover nixly-server on local network via UDP broadcast */
+static int
+discover_nixly_server(void)
+{
+	int sock;
+	struct sockaddr_in broadcast_addr, recv_addr;
+	socklen_t addr_len = sizeof(recv_addr);
+	char recv_buf[256];
+	ssize_t recv_len;
+	struct timeval tv;
+	int broadcast_enable = 1;
+
+	/* Create UDP socket */
+	sock = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sock < 0) {
+		wlr_log(WLR_DEBUG, "Discovery: failed to create socket");
+		return 0;
+	}
+
+	/* Enable broadcast */
+	if (setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcast_enable, sizeof(broadcast_enable)) < 0) {
+		wlr_log(WLR_DEBUG, "Discovery: failed to enable broadcast");
+		close(sock);
+		return 0;
+	}
+
+	/* Set receive timeout (500ms) */
+	tv.tv_sec = 0;
+	tv.tv_usec = 500000;
+	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+	/* Broadcast discovery message to local network */
+	memset(&broadcast_addr, 0, sizeof(broadcast_addr));
+	broadcast_addr.sin_family = AF_INET;
+	broadcast_addr.sin_port = htons(MEDIA_DISCOVERY_PORT);
+	broadcast_addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+
+	if (sendto(sock, MEDIA_DISCOVERY_MAGIC, strlen(MEDIA_DISCOVERY_MAGIC), 0,
+		   (struct sockaddr *)&broadcast_addr, sizeof(broadcast_addr)) < 0) {
+		wlr_log(WLR_DEBUG, "Discovery: broadcast send failed");
+		close(sock);
+		return 0;
+	}
+
+	/* Wait for response */
+	recv_len = recvfrom(sock, recv_buf, sizeof(recv_buf) - 1, 0,
+			    (struct sockaddr *)&recv_addr, &addr_len);
+	close(sock);
+
+	if (recv_len > 0) {
+		recv_buf[recv_len] = '\0';
+		if (strncmp(recv_buf, MEDIA_DISCOVERY_RESPONSE, strlen(MEDIA_DISCOVERY_RESPONSE)) == 0) {
+			/* Extract port if provided, otherwise use default */
+			int port = MEDIA_SERVER_PORT;
+			char *port_str = strchr(recv_buf, ':');
+			if (port_str) {
+				port = atoi(port_str + 1);
+				if (port <= 0 || port > 65535)
+					port = MEDIA_SERVER_PORT;
+			}
+
+			char ip_str[INET_ADDRSTRLEN];
+			inet_ntop(AF_INET, &recv_addr.sin_addr, ip_str, sizeof(ip_str));
+			snprintf(discovered_server_url, sizeof(discovered_server_url),
+				 "http://%s:%d", ip_str, port);
+
+			wlr_log(WLR_INFO, "Discovered nixly-server at %s", discovered_server_url);
+			server_discovered = 1;
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+/* Try localhost as fallback */
+static int
+try_localhost_server(void)
+{
+	char cmd[256];
+	FILE *fp;
+
+	snprintf(cmd, sizeof(cmd), "curl -s --connect-timeout 1 http://localhost:%d/api/status 2>/dev/null", MEDIA_SERVER_PORT);
+	fp = popen(cmd, "r");
+	if (fp) {
+		char buf[64];
+		if (fgets(buf, sizeof(buf), fp) && strstr(buf, "ok")) {
+			pclose(fp);
+			snprintf(discovered_server_url, sizeof(discovered_server_url),
+				 "http://localhost:%d", MEDIA_SERVER_PORT);
+			wlr_log(WLR_INFO, "Found nixly-server on localhost");
+			server_discovered = 1;
+			return 1;
+		}
+		pclose(fp);
+	}
+	return 0;
+}
+
+/* Get server URL (uses config or discovers if needed) */
+static const char *
+get_media_server_url(void)
+{
+	uint64_t now = monotonic_msec();
+
+	/* If servers are configured in config, use them (skip auto-discovery) */
+	if (media_server_count > 0) {
+		/* Use the current configured server */
+		if (current_server_idx < media_server_count)
+			return media_servers[current_server_idx];
+		return media_servers[0];
+	}
+
+	/* Auto-discovery mode (no servers configured) */
+	/* Don't retry too often (every 5 seconds) */
+	if (!server_discovered && (now - last_discovery_attempt_ms > 5000)) {
+		last_discovery_attempt_ms = now;
+
+		/* Try localhost first (most common case) */
+		if (!try_localhost_server()) {
+			/* Try broadcast discovery */
+			discover_nixly_server();
+		}
+	}
+
+	if (server_discovered)
+		return discovered_server_url;
+
+	/* Fallback to localhost even if not responding */
+	return "http://localhost:8080";
+}
+
+static MediaGridView *
+media_get_view(Monitor *m, MediaViewType type)
+{
+	if (!m) return NULL;
+	return (type == MEDIA_VIEW_MOVIES) ? &m->movies_view : &m->tvshows_view;
+}
+
+static void
+media_view_free_items(MediaGridView *view)
+{
+	MediaItem *item, *next;
+	if (!view) return;
+
+	item = view->items;
+	while (item) {
+		next = item->next;
+		if (item->poster_buf)
+			wlr_buffer_drop(item->poster_buf);
+		free(item);
+		item = next;
+	}
+	view->items = NULL;
+	view->item_count = 0;
+}
+
+/* Simple JSON string extraction helper with escape sequence handling */
+static int
+json_extract_string(const char *json, const char *key, char *out, size_t out_size)
+{
+	char search[128];
+	snprintf(search, sizeof(search), "\"%s\":", key);
+	const char *pos = strstr(json, search);
+	if (!pos) return 0;
+
+	pos = strchr(pos, ':');
+	if (!pos) return 0;
+	pos++;
+	while (*pos == ' ') pos++;
+
+	if (*pos == '"') {
+		pos++;
+		/* Find end quote, handling escaped quotes */
+		const char *src = pos;
+		char *dst = out;
+		char *dst_end = out + out_size - 1;
+
+		while (*src && *src != '"' && dst < dst_end) {
+			if (*src == '\\' && src[1]) {
+				src++;
+				switch (*src) {
+				case '"': *dst++ = '"'; break;
+				case '\\': *dst++ = '\\'; break;
+				case 'n': *dst++ = '\n'; break;
+				case 'r': *dst++ = '\r'; break;
+				case 't': *dst++ = '\t'; break;
+				default: *dst++ = *src; break;
+				}
+				src++;
+			} else {
+				*dst++ = *src++;
+			}
+		}
+		*dst = '\0';
+		return 1;
+	} else if (strncmp(pos, "null", 4) == 0) {
+		out[0] = '\0';
+		return 1;
+	}
+	return 0;
+}
+
+static int
+json_extract_int(const char *json, const char *key)
+{
+	char search[128];
+	snprintf(search, sizeof(search), "\"%s\":", key);
+	const char *pos = strstr(json, search);
+	if (!pos) return 0;
+	pos = strchr(pos, ':');
+	if (!pos) return 0;
+	return atoi(pos + 1);
+}
+
+static float
+json_extract_float(const char *json, const char *key)
+{
+	char search[128];
+	snprintf(search, sizeof(search), "\"%s\":", key);
+	const char *pos = strstr(json, search);
+	if (!pos) return 0.0f;
+	pos = strchr(pos, ':');
+	if (!pos) return 0.0f;
+	return atof(pos + 1);
+}
+
+/* Poll timer callback - refresh media views every 3 seconds */
+static int
+media_view_poll_timer_cb(void *data)
+{
+	Monitor *m;
+	(void)data;
+
+	if (!htpc_mode_active) {
+		/* Re-arm timer even when inactive */
+		if (media_view_poll_timer)
+			wl_event_source_timer_update(media_view_poll_timer, 3000);
+		return 0;
+	}
+
+	wl_list_for_each(m, &mons, link) {
+		/* Update movies view if visible */
+		if (m->movies_view.visible) {
+			int saved_idx = m->movies_view.selected_idx;
+			int saved_scroll = m->movies_view.scroll_offset;
+			if (media_view_refresh(m, MEDIA_VIEW_MOVIES)) {
+				/* Data changed - restore navigation and re-render */
+				if (saved_idx < m->movies_view.item_count)
+					m->movies_view.selected_idx = saved_idx;
+				else if (m->movies_view.item_count > 0)
+					m->movies_view.selected_idx = m->movies_view.item_count - 1;
+				m->movies_view.scroll_offset = saved_scroll;
+				media_view_render(m, MEDIA_VIEW_MOVIES);
+			}
+		}
+
+		/* Update tvshows view if visible */
+		if (m->tvshows_view.visible) {
+			int saved_idx = m->tvshows_view.selected_idx;
+			int saved_scroll = m->tvshows_view.scroll_offset;
+			if (media_view_refresh(m, MEDIA_VIEW_TVSHOWS)) {
+				/* Data changed - restore navigation and re-render */
+				if (saved_idx < m->tvshows_view.item_count)
+					m->tvshows_view.selected_idx = saved_idx;
+				else if (m->tvshows_view.item_count > 0)
+					m->tvshows_view.selected_idx = m->tvshows_view.item_count - 1;
+				m->tvshows_view.scroll_offset = saved_scroll;
+				media_view_render(m, MEDIA_VIEW_TVSHOWS);
+			}
+		}
+	}
+
+	/* Re-arm timer for next poll */
+	if (media_view_poll_timer)
+		wl_event_source_timer_update(media_view_poll_timer, 3000);
+
+	return 0;
+}
+
+/* Fetch media list from server - returns 1 if data changed, 0 otherwise */
+static int
+media_view_refresh(Monitor *m, MediaViewType type)
+{
+	MediaGridView *view;
+	FILE *fp;
+	char cmd[512];
+	char buffer[1024 * 1024];  /* 1MB buffer for JSON */
+	size_t bytes_read;
+	const char *endpoint;
+	uint32_t new_hash;
+
+	if (!m) return 0;
+	view = media_get_view(m, type);
+	if (!view) return 0;
+
+	view->needs_refresh = 0;
+	view->last_refresh_ms = monotonic_msec();
+
+	endpoint = (type == MEDIA_VIEW_MOVIES) ? "/api/movies" : "/api/tvshows";
+	snprintf(cmd, sizeof(cmd), "curl -s '%s%s' 2>/dev/null", get_media_server_url(), endpoint);
+
+	fp = popen(cmd, "r");
+	if (!fp) {
+		wlr_log(WLR_ERROR, "Failed to fetch media list from server");
+		return 0;
+	}
+
+	bytes_read = fread(buffer, 1, sizeof(buffer) - 1, fp);
+	pclose(fp);
+
+	if (bytes_read == 0) {
+		wlr_log(WLR_INFO, "No media data from server (server may be offline)");
+		return 0;
+	}
+	buffer[bytes_read] = '\0';
+
+	/* Calculate simple hash to detect changes (djb2 algorithm) */
+	new_hash = 5381;
+	for (size_t i = 0; i < bytes_read; i++)
+		new_hash = ((new_hash << 5) + new_hash) + (unsigned char)buffer[i];
+
+	/* Skip update if data hasn't changed */
+	if (view->items && new_hash == view->last_data_hash) {
+		return 0;
+	}
+	view->last_data_hash = new_hash;
+
+	/* Data changed - free old items and parse new data */
+	media_view_free_items(view);
+
+	/* Parse JSON array - simple parser for our known format */
+	const char *pos = strchr(buffer, '[');
+	if (!pos) return 0;
+	pos++;
+
+	MediaItem *last = NULL;
+	int count = 0;
+
+	while (*pos) {
+		/* Find start of object */
+		const char *obj_start = strchr(pos, '{');
+		if (!obj_start) break;
+
+		/* Find end of object */
+		int depth = 1;
+		const char *obj_end = obj_start + 1;
+		while (*obj_end && depth > 0) {
+			if (*obj_end == '{') depth++;
+			else if (*obj_end == '}') depth--;
+			obj_end++;
+		}
+
+		if (depth != 0) break;
+
+		/* Extract this object */
+		size_t obj_len = obj_end - obj_start;
+		char *obj_json = malloc(obj_len + 1);
+		if (!obj_json) break;
+		strncpy(obj_json, obj_start, obj_len);
+		obj_json[obj_len] = '\0';
+
+		/* Create media item */
+		MediaItem *item = calloc(1, sizeof(MediaItem));
+		if (item) {
+			item->id = json_extract_int(obj_json, "id");
+			item->type = json_extract_int(obj_json, "type");
+
+			/* For TV-shows: prefer tmdb_title > show_name > title
+			 * For Movies: prefer tmdb_title > title */
+			json_extract_string(obj_json, "show_name", item->show_name, sizeof(item->show_name));
+			if (!json_extract_string(obj_json, "tmdb_title", item->title, sizeof(item->title)) ||
+			    item->title[0] == '\0') {
+				/* Fallback: use show_name for TV-shows, title for movies */
+				if (item->show_name[0])
+					snprintf(item->title, sizeof(item->title), "%s", item->show_name);
+				else
+					json_extract_string(obj_json, "title", item->title, sizeof(item->title));
+			}
+			item->season = json_extract_int(obj_json, "season");
+			item->episode = json_extract_int(obj_json, "episode");
+			item->duration = json_extract_int(obj_json, "duration");
+			item->year = json_extract_int(obj_json, "year");
+			item->rating = json_extract_float(obj_json, "rating");
+			json_extract_string(obj_json, "poster", item->poster_path, sizeof(item->poster_path));
+			json_extract_string(obj_json, "backdrop", item->backdrop_path, sizeof(item->backdrop_path));
+			json_extract_string(obj_json, "overview", item->overview, sizeof(item->overview));
+			json_extract_string(obj_json, "genres", item->genres, sizeof(item->genres));
+
+			/* Add to linked list */
+			if (!view->items) {
+				view->items = item;
+			} else {
+				last->next = item;
+			}
+			last = item;
+			count++;
+		}
+
+		free(obj_json);
+		pos = obj_end;
+	}
+
+	view->item_count = count;
+	wlr_log(WLR_INFO, "Media view: loaded %d items for %s",
+		count, type == MEDIA_VIEW_MOVIES ? "Movies" : "TV-shows");
+	return 1;  /* Data changed */
+}
+
+/* Load poster image for a media item - scale-to-fill (cover) the target area */
+static void
+media_view_load_poster(MediaItem *item, int target_w, int target_h)
+{
+	GdkPixbuf *pixbuf = NULL;
+	GdkPixbuf *scaled = NULL;
+	GdkPixbuf *cropped = NULL;
+	GError *gerr = NULL;
+	int orig_w, orig_h, scaled_w, scaled_h, crop_x, crop_y;
+	double scale_w, scale_h, scale;
+	guchar *pixels;
+	int nchan, stride;
+	uint8_t *argb = NULL;
+	size_t bufsize;
+	struct wlr_buffer *buf = NULL;
+
+	if (!item || item->poster_loaded)
+		return;
+
+	item->poster_loaded = 1;
+
+	/* Check if poster path exists */
+	if (item->poster_path[0] == '\0' || strcmp(item->poster_path, "null") == 0)
+		return;
+
+	/* Check if it's a local file */
+	if (item->poster_path[0] != '/')
+		return;
+
+	pixbuf = gdk_pixbuf_new_from_file(item->poster_path, &gerr);
+	if (!pixbuf) {
+		if (gerr) {
+			wlr_log(WLR_DEBUG, "Failed to load poster %s: %s",
+				item->poster_path, gerr->message);
+			g_error_free(gerr);
+		}
+		return;
+	}
+
+	orig_w = gdk_pixbuf_get_width(pixbuf);
+	orig_h = gdk_pixbuf_get_height(pixbuf);
+	if (orig_w <= 0 || orig_h <= 0 || target_w <= 0 || target_h <= 0) {
+		g_object_unref(pixbuf);
+		return;
+	}
+
+	/* Scale-to-fill: scale so the image covers the entire target area */
+	scale_w = (double)target_w / (double)orig_w;
+	scale_h = (double)target_h / (double)orig_h;
+	scale = (scale_w > scale_h) ? scale_w : scale_h;  /* Use larger scale to cover */
+
+	scaled_w = (int)lround(orig_w * scale);
+	scaled_h = (int)lround(orig_h * scale);
+	if (scaled_w < target_w) scaled_w = target_w;
+	if (scaled_h < target_h) scaled_h = target_h;
+
+	scaled = gdk_pixbuf_scale_simple(pixbuf, scaled_w, scaled_h, GDK_INTERP_BILINEAR);
+	g_object_unref(pixbuf);
+	if (!scaled)
+		return;
+
+	/* Crop to center */
+	crop_x = (scaled_w - target_w) / 2;
+	crop_y = (scaled_h - target_h) / 2;
+	if (crop_x < 0) crop_x = 0;
+	if (crop_y < 0) crop_y = 0;
+
+	cropped = gdk_pixbuf_new_subpixbuf(scaled, crop_x, crop_y, target_w, target_h);
+	if (!cropped) {
+		g_object_unref(scaled);
+		return;
+	}
+
+	/* Convert to ARGB32 for wlr_buffer */
+	nchan = gdk_pixbuf_get_n_channels(cropped);
+	stride = gdk_pixbuf_get_rowstride(cropped);
+	pixels = gdk_pixbuf_get_pixels(cropped);
+
+	bufsize = (size_t)target_w * (size_t)target_h * 4;
+	argb = malloc(bufsize);
+	if (!argb) {
+		g_object_unref(cropped);
+		g_object_unref(scaled);
+		return;
+	}
+
+	for (int y = 0; y < target_h; y++) {
+		guchar *row = pixels + y * stride;
+		for (int x = 0; x < target_w; x++) {
+			uint8_t r = row[x * nchan + 0];
+			uint8_t g = row[x * nchan + 1];
+			uint8_t b = row[x * nchan + 2];
+			uint8_t a = (nchan >= 4) ? row[x * nchan + 3] : 255;
+			size_t off = ((size_t)y * (size_t)target_w + (size_t)x) * 4;
+			/* ARGB32 format */
+			argb[off + 0] = b;
+			argb[off + 1] = g;
+			argb[off + 2] = r;
+			argb[off + 3] = a;
+		}
+	}
+
+	buf = statusbar_buffer_from_argb32_raw((uint32_t *)argb, target_w, target_h);
+	free(argb);
+	g_object_unref(cropped);
+	g_object_unref(scaled);
+
+	if (buf) {
+		item->poster_buf = buf;
+		item->poster_w = target_w;
+		item->poster_h = target_h;
+	}
+}
+
+/* Ensure selected item is visible (scroll if needed) */
+static void
+media_view_ensure_visible(Monitor *m, MediaViewType type)
+{
+	MediaGridView *view = media_get_view(m, type);
+	if (!view) return;
+
+	int padding = MEDIA_GRID_PADDING;
+	int gap = MEDIA_GRID_GAP;
+	int grid_width = view->width - 2 * padding;
+	int cols = 5;
+	int tile_w = (grid_width - ((cols - 1) * gap)) / cols;
+	int tile_h = (tile_w * 3) / 2;  /* 2:3 poster ratio */
+
+	int row = view->selected_idx / cols;
+	int y_start = row * (tile_h + gap);
+	int y_end = y_start + tile_h;
+	int visible_h = view->height - 2 * padding;
+
+	if (y_start < view->scroll_offset) {
+		view->scroll_offset = y_start;
+	} else if (y_end > view->scroll_offset + visible_h) {
+		view->scroll_offset = y_end - visible_h;
+	}
+
+	if (view->scroll_offset < 0)
+		view->scroll_offset = 0;
+}
+
+/* Render the media grid view */
+static void
+media_view_render(Monitor *m, MediaViewType type)
+{
+	MediaGridView *view;
+	struct wlr_scene_node *node, *tmp;
+	int padding = MEDIA_GRID_PADDING;
+	int gap = MEDIA_GRID_GAP;
+	float tile_color[4] = {0.12f, 0.12f, 0.15f, 0.95f};
+	float text_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+	float name_bg[4] = {0.0f, 0.0f, 0.0f, 0.75f};
+	float dim_color[4] = {0.05f, 0.05f, 0.08f, 0.98f};
+
+	if (!m || !statusfont.font)
+		return;
+
+	view = media_get_view(m, type);
+	if (!view || !view->visible || !view->tree)
+		return;
+
+	/* Refresh if needed */
+	if (view->needs_refresh || !view->items) {
+		media_view_refresh(m, type);
+	}
+
+	/* Clear previous content */
+	wl_list_for_each_safe(node, tmp, &view->tree->children, link) {
+		wlr_scene_node_destroy(node);
+	}
+	view->grid = NULL;
+	view->detail_panel = NULL;
+
+	/* Background dim */
+	drawrect(view->tree, 0, 0, view->width, view->height, dim_color);
+
+	/* Calculate grid dimensions */
+	int grid_width = view->width - 2 * padding;
+	int grid_height = view->height - 2 * padding;
+
+	/* Fixed 5 columns */
+	view->cols = 5;
+	int tile_w = (grid_width - ((view->cols - 1) * gap)) / view->cols;
+	int tile_h = (tile_w * 3) / 2;  /* 2:3 poster ratio */
+	int name_bar_h = 32;
+
+	/* Ensure selected is visible */
+	media_view_ensure_visible(m, type);
+
+	/* Create grid container */
+	view->grid = wlr_scene_tree_create(view->tree);
+	if (!view->grid) return;
+	wlr_scene_node_set_position(&view->grid->node, padding, padding);
+
+	/* Draw tiles */
+	MediaItem *item = view->items;
+	int idx = 0;
+	int visible_start = view->scroll_offset / (tile_h + gap);
+	int visible_rows = (grid_height + gap) / (tile_h + gap) + 2;
+
+	while (item) {
+		int row = idx / view->cols;
+		int col = idx % view->cols;
+
+		/* Only render visible tiles */
+		if (row >= visible_start && row < visible_start + visible_rows) {
+			int tx = col * (tile_w + gap);
+			int ty = row * (tile_h + gap) - view->scroll_offset;
+
+			if (ty + tile_h > 0 && ty < grid_height) {
+				int is_selected = (idx == view->selected_idx);
+				int glow_size = is_selected ? 6 : 0;
+
+				struct wlr_scene_tree *tile = wlr_scene_tree_create(view->grid);
+				if (!tile) {
+					item = item->next;
+					idx++;
+					continue;
+				}
+
+				if (is_selected) {
+					wlr_scene_node_set_position(&tile->node, tx - glow_size, ty - glow_size);
+
+					/* Draw glow effect */
+					float glow1[4] = {0.2f, 0.5f, 1.0f, 0.2f};
+					float glow2[4] = {0.3f, 0.6f, 1.0f, 0.35f};
+					drawrect(tile, 0, 0, tile_w + glow_size * 2, tile_h + glow_size * 2, glow1);
+					drawrect(tile, 2, 2, tile_w + glow_size * 2 - 4, tile_h + glow_size * 2 - 4, glow2);
+					drawrect(tile, glow_size, glow_size, tile_w, tile_h, tile_color);
+				} else {
+					wlr_scene_node_set_position(&tile->node, tx, ty);
+					drawrect(tile, 0, 0, tile_w, tile_h, tile_color);
+				}
+
+				int img_offset = is_selected ? glow_size : 0;
+
+				/* Load and display poster */
+				if (!item->poster_loaded) {
+					media_view_load_poster(item, tile_w, tile_h - name_bar_h);
+				}
+				if (item->poster_buf) {
+					struct wlr_scene_buffer *img = wlr_scene_buffer_create(tile, item->poster_buf);
+					if (img) {
+						wlr_scene_node_set_position(&img->node, img_offset, img_offset);
+					}
+				}
+
+				/* Title bar at bottom */
+				drawrect(tile, img_offset, img_offset + tile_h - name_bar_h - glow_size,
+				         tile_w, name_bar_h, name_bg);
+
+				/* Title text */
+				struct wlr_scene_tree *text_tree = wlr_scene_tree_create(tile);
+				if (text_tree) {
+					char display_title[128];
+					if (type == MEDIA_VIEW_TVSHOWS) {
+						/* TV-shows view: show title with year in parentheses */
+						const char *title = item->title[0] ? item->title :
+						                    (item->show_name[0] ? item->show_name : "Unknown");
+						if (item->year > 0)
+							snprintf(display_title, sizeof(display_title), "%s (%d)", title, item->year);
+						else
+							snprintf(display_title, sizeof(display_title), "%s", title);
+					} else {
+						/* Movies view: show movie title with year */
+						if (item->year > 0)
+							snprintf(display_title, sizeof(display_title), "%s (%d)", item->title, item->year);
+						else
+							snprintf(display_title, sizeof(display_title), "%s", item->title);
+					}
+
+					/* Truncate if too long */
+					int max_chars = tile_w / 8;
+					if ((int)strlen(display_title) > max_chars && max_chars > 3) {
+						display_title[max_chars - 3] = '.';
+						display_title[max_chars - 2] = '.';
+						display_title[max_chars - 1] = '.';
+						display_title[max_chars] = '\0';
+					}
+
+					wlr_scene_node_set_position(&text_tree->node,
+						img_offset + 6, img_offset + tile_h - name_bar_h + 6 - glow_size);
+					StatusModule mod = {0};
+					mod.tree = text_tree;
+					tray_render_label(&mod, display_title, 0, 18, text_color);
+				}
+
+				/* Rating badge for selected */
+				if (is_selected && item->rating > 0) {
+					char rating_str[16];
+					snprintf(rating_str, sizeof(rating_str), "%.1f", item->rating);
+					float rating_bg[4] = {0.1f, 0.1f, 0.1f, 0.85f};
+					float rating_fg[4] = {1.0f, 0.8f, 0.2f, 1.0f};
+
+					struct wlr_scene_tree *badge = wlr_scene_tree_create(tile);
+					if (badge) {
+						int badge_w = 40, badge_h = 22;
+						wlr_scene_node_set_position(&badge->node,
+							img_offset + tile_w - badge_w - 4, img_offset + 4);
+						drawrect(badge, 0, 0, badge_w, badge_h, rating_bg);
+						StatusModule mod = {0};
+						mod.tree = badge;
+						tray_render_label(&mod, rating_str, 6, 16, rating_fg);
+					}
+				}
+			}
+		}
+
+		item = item->next;
+		idx++;
+	}
+
+	/* Show count in corner */
+	char count_str[64];
+	snprintf(count_str, sizeof(count_str), "%d %s",
+	         view->item_count,
+	         type == MEDIA_VIEW_MOVIES ? "Movies" : "Episodes");
+	struct wlr_scene_tree *count_tree = wlr_scene_tree_create(view->tree);
+	if (count_tree) {
+		wlr_scene_node_set_position(&count_tree->node, padding, view->height - 30);
+		StatusModule mod = {0};
+		mod.tree = count_tree;
+		float count_color[4] = {0.7f, 0.7f, 0.7f, 1.0f};
+		tray_render_label(&mod, count_str, 0, 18, count_color);
+	}
+}
+
+static void
+media_view_show(Monitor *m, MediaViewType type)
+{
+	MediaGridView *view;
+	float dim_color[4] = {0.05f, 0.05f, 0.08f, 0.98f};
+
+	if (!m) return;
+
+	view = media_get_view(m, type);
+	if (!view) return;
+
+	/* Hide the other media view first to ensure clean state */
+	if (type == MEDIA_VIEW_MOVIES)
+		media_view_hide(m, MEDIA_VIEW_TVSHOWS);
+	else
+		media_view_hide(m, MEDIA_VIEW_MOVIES);
+
+	if (view->visible) return;
+
+	view->visible = 1;
+	/* Set view tag: Movies = Tag 2 (bit 1), TV-shows = Tag 1 (bit 0) */
+	view->view_tag = (type == MEDIA_VIEW_MOVIES) ? (1 << 1) : (1 << 0);
+	view->width = m->m.width;
+	view->height = m->m.height;
+	view->view_type = type;
+	view->selected_idx = 0;
+	view->scroll_offset = 0;
+	view->needs_refresh = 1;
+
+	strcpy(view->server_url, get_media_server_url());
+
+	/* Create scene tree on LyrBlock layer (same as other HTPC overlays) */
+	if (!view->tree) {
+		view->tree = wlr_scene_tree_create(layers[LyrBlock]);
+	}
+	if (view->tree) {
+		wlr_scene_node_set_position(&view->tree->node, m->m.x, m->m.y);
+		wlr_scene_node_set_enabled(&view->tree->node, true);
+		wlr_scene_node_raise_to_top(&view->tree->node);
+	}
+
+	/* Hide mouse cursor in media views */
+	wlr_cursor_set_surface(cursor, NULL, 0, 0);
+
+	media_view_render(m, type);
+}
+
+static void
+media_view_hide(Monitor *m, MediaViewType type)
+{
+	MediaGridView *view;
+
+	if (!m) return;
+
+	view = media_get_view(m, type);
+	if (!view || !view->visible) return;
+
+	view->visible = 0;
+
+	if (view->tree) {
+		wlr_scene_node_set_enabled(&view->tree->node, false);
+	}
+}
+
+static void
+media_view_hide_all(void)
+{
+	Monitor *m;
+	wl_list_for_each(m, &mons, link) {
+		media_view_hide(m, MEDIA_VIEW_MOVIES);
+		media_view_hide(m, MEDIA_VIEW_TVSHOWS);
+	}
+}
+
+static Monitor *
+media_view_visible_monitor(void)
+{
+	Monitor *m;
+	wl_list_for_each(m, &mons, link) {
+		if (m->movies_view.visible || m->tvshows_view.visible)
+			return m;
+	}
+	return NULL;
+}
+
+/* Find monitor with visible Retro Gaming view */
+static Monitor *
+retro_gaming_visible_monitor(void)
+{
+	Monitor *m;
+	wl_list_for_each(m, &mons, link) {
+		if (m->retro_gaming.visible)
+			return m;
+	}
+	return NULL;
+}
+
+static void
+media_view_scroll(Monitor *m, MediaViewType type, int delta)
+{
+	MediaGridView *view = media_get_view(m, type);
+	if (!view) return;
+
+	view->scroll_offset += delta;
+	if (view->scroll_offset < 0)
+		view->scroll_offset = 0;
+
+	media_view_render(m, type);
+}
+
+static int
+media_view_handle_button(Monitor *m, MediaViewType type, int button, int value)
+{
+	MediaGridView *view;
+
+	if (!m) return 0;
+
+	view = media_get_view(m, type);
+	if (!view) return 0;
+
+	/* Only handle input if view is visible AND on current tag */
+	if (!htpc_view_is_active(m, view->view_tag, view->visible)) return 0;
+
+	/* Only handle button press */
+	if (value != 1) return 0;
+
+	int old_idx = view->selected_idx;
+	int cols = view->cols > 0 ? view->cols : 5;
+
+	switch (button) {
+	case BTN_DPAD_UP:
+		if (view->selected_idx >= cols)
+			view->selected_idx -= cols;
+		break;
+	case BTN_DPAD_DOWN:
+		if (view->selected_idx + cols < view->item_count)
+			view->selected_idx += cols;
+		break;
+	case BTN_DPAD_LEFT:
+		if (view->selected_idx > 0)
+			view->selected_idx--;
+		break;
+	case BTN_DPAD_RIGHT:
+		if (view->selected_idx < view->item_count - 1)
+			view->selected_idx++;
+		break;
+	case BTN_EAST:   /* B button - go back */
+		media_view_hide(m, type);
+		return 1;
+	case BTN_MODE:   /* Guide button - let main handler show menu overlay */
+		return 0;
+	case BTN_SOUTH:  /* A button - play */
+		/* TODO: Open media player */
+		return 1;
+	case BTN_TL:     /* LB - scroll up */
+		view->scroll_offset -= 200;
+		if (view->scroll_offset < 0) view->scroll_offset = 0;
+		break;
+	case BTN_TR:     /* RB - scroll down */
+		view->scroll_offset += 200;
+		break;
+	default:
+		return 0;
+	}
+
+	if (view->selected_idx != old_idx || button == BTN_TL || button == BTN_TR) {
+		media_view_render(m, type);
+	}
+
+	return 1;
+}
+
+static int
+media_view_handle_key(Monitor *m, MediaViewType type, xkb_keysym_t sym)
+{
+	MediaGridView *view;
+
+	if (!m) return 0;
+
+	view = media_get_view(m, type);
+	if (!view) return 0;
+
+	/* Only handle input if view is visible AND on current tag */
+	if (!htpc_view_is_active(m, view->view_tag, view->visible)) return 0;
+
+	int old_idx = view->selected_idx;
+	int cols = view->cols > 0 ? view->cols : 5;
+
+	switch (sym) {
+	case XKB_KEY_Escape:
+		media_view_hide(m, type);
+		return 1;
+	case XKB_KEY_Return:
+	case XKB_KEY_KP_Enter:
+		/* TODO: Play selected media */
+		return 1;
+	case XKB_KEY_Up:
+	case XKB_KEY_k:
+		if (view->selected_idx >= cols)
+			view->selected_idx -= cols;
+		break;
+	case XKB_KEY_Down:
+	case XKB_KEY_j:
+		if (view->selected_idx + cols < view->item_count)
+			view->selected_idx += cols;
+		break;
+	case XKB_KEY_Left:
+	case XKB_KEY_h:
+		if (view->selected_idx > 0)
+			view->selected_idx--;
+		break;
+	case XKB_KEY_Right:
+	case XKB_KEY_l:
+		if (view->selected_idx < view->item_count - 1)
+			view->selected_idx++;
+		break;
+	case XKB_KEY_Page_Up:
+		view->scroll_offset -= 400;
+		if (view->scroll_offset < 0) view->scroll_offset = 0;
+		media_view_render(m, type);
+		return 1;
+	case XKB_KEY_Page_Down:
+		view->scroll_offset += 400;
+		media_view_render(m, type);
+		return 1;
+	default:
+		return 0;
+	}
+
+	if (view->selected_idx != old_idx) {
+		media_view_render(m, type);
+	}
+
+	return 1;
+}
+
+/* =========================================================== */
+/* End Media Grid View */
+/* =========================================================== */
+
 /* Check if device is a gamepad (not keyboard/mouse) */
 static int
 gamepad_is_gamepad_device(int fd)
@@ -19243,50 +21483,117 @@ gamepad_event_cb(int fd, uint32_t mask, void *data)
 				break;
 			case ABS_HAT0X:
 				/* D-pad left/right for navigation */
-				if (m && m->pc_gaming.visible && ev.value != 0) {
-					PcGamingView *pg = &m->pc_gaming;
-					/* Handle install popup if visible */
-					if (pg->install_popup_visible) {
-						if (ev.value == -1 && pg->install_popup_selected > 0) {
-							pg->install_popup_selected--;
-							pc_gaming_install_popup_render(m);
-						} else if (ev.value == 1 && pg->install_popup_selected < 1) {
-							pg->install_popup_selected++;
-							pc_gaming_install_popup_render(m);
+				if (ev.value != 0) {
+					int handled = 0;
+					int button = ev.value < 0 ? BTN_DPAD_LEFT : BTN_DPAD_RIGHT;
+
+					/* Check Retro gaming on any monitor (must be active on current tag) */
+					Monitor *rg_mon = retro_gaming_visible_monitor();
+					if (rg_mon && htpc_view_is_active(rg_mon, rg_mon->retro_gaming.view_tag, rg_mon->retro_gaming.visible)) {
+						handled = retro_gaming_handle_button(rg_mon, button, 1);
+					}
+
+					/* Check PC gaming on any monitor */
+					if (!handled) {
+						Monitor *pg_mon = pc_gaming_visible_monitor();
+						if (pg_mon && htpc_view_is_active(pg_mon, pg_mon->pc_gaming.view_tag, pg_mon->pc_gaming.visible)) {
+							PcGamingView *pg = &pg_mon->pc_gaming;
+							/* Handle install popup if visible */
+							if (pg->install_popup_visible) {
+								if (ev.value == -1 && pg->install_popup_selected > 0) {
+									pg->install_popup_selected--;
+									pc_gaming_install_popup_render(pg_mon);
+									handled = 1;
+								} else if (ev.value == 1 && pg->install_popup_selected < 1) {
+									pg->install_popup_selected++;
+									pc_gaming_install_popup_render(pg_mon);
+									handled = 1;
+								}
+							} else {
+								if (ev.value == -1 && pg->selected_idx > 0) {
+									pg->selected_idx--;
+									pc_gaming_render(pg_mon);
+									handled = 1;
+								} else if (ev.value == 1 && pg->selected_idx < pg->game_count - 1) {
+									pg->selected_idx++;
+									pc_gaming_render(pg_mon);
+									handled = 1;
+								}
+							}
 						}
-					} else {
-						if (ev.value == -1 && pg->selected_idx > 0) {
-							pg->selected_idx--;
-							pc_gaming_render(m);
-						} else if (ev.value == 1 && pg->selected_idx < pg->game_count - 1) {
-							pg->selected_idx++;
-							pc_gaming_render(m);
+					}
+
+					/* Check Media views on any monitor */
+					if (!handled) {
+						Monitor *media_mon = media_view_visible_monitor();
+						if (media_mon) {
+							if (htpc_view_is_active(media_mon, media_mon->movies_view.view_tag, media_mon->movies_view.visible)) {
+								media_view_handle_button(media_mon, MEDIA_VIEW_MOVIES, button, 1);
+							} else if (htpc_view_is_active(media_mon, media_mon->tvshows_view.view_tag, media_mon->tvshows_view.visible)) {
+								media_view_handle_button(media_mon, MEDIA_VIEW_TVSHOWS, button, 1);
+							}
 						}
 					}
 				}
 				break;
 			case ABS_HAT0Y:
 				/* D-pad up/down for menu/grid navigation */
-				if (m && m->pc_gaming.visible && ev.value != 0) {
-					PcGamingView *pg = &m->pc_gaming;
-					/* Skip if install popup is visible */
-					if (pg->install_popup_visible)
-						break;
-					if (ev.value == -1 && pg->selected_idx >= pg->cols) {
-						pg->selected_idx -= pg->cols;
-						pc_gaming_render(m);
-					} else if (ev.value == 1 && pg->selected_idx + pg->cols < pg->game_count) {
-						pg->selected_idx += pg->cols;
-						pc_gaming_render(m);
+				if (ev.value != 0) {
+					int handled = 0;
+					int button = ev.value < 0 ? BTN_DPAD_UP : BTN_DPAD_DOWN;
+
+					/* Check gamepad menu on selmon first (uses m) */
+					if (m && m->gamepad_menu.visible) {
+						GamepadMenu *gm = &m->gamepad_menu;
+						if (ev.value == -1 && gm->selected > 0) {
+							gm->selected--;
+							gamepad_menu_render(m);
+							handled = 1;
+						} else if (ev.value == 1 && gm->selected < gm->item_count - 1) {
+							gm->selected++;
+							gamepad_menu_render(m);
+							handled = 1;
+						}
 					}
-				} else if (m && m->gamepad_menu.visible) {
-					GamepadMenu *gm = &m->gamepad_menu;
-					if (ev.value == -1 && gm->selected > 0) {
-						gm->selected--;
-						gamepad_menu_render(m);
-					} else if (ev.value == 1 && gm->selected < gm->item_count - 1) {
-						gm->selected++;
-						gamepad_menu_render(m);
+
+					/* Check Retro gaming on any monitor (must be active on current tag) */
+					if (!handled) {
+						Monitor *rg_mon = retro_gaming_visible_monitor();
+						if (rg_mon && htpc_view_is_active(rg_mon, rg_mon->retro_gaming.view_tag, rg_mon->retro_gaming.visible)) {
+							handled = retro_gaming_handle_button(rg_mon, button, 1);
+						}
+					}
+
+					/* Check PC gaming on any monitor */
+					if (!handled) {
+						Monitor *pg_mon = pc_gaming_visible_monitor();
+						if (pg_mon && htpc_view_is_active(pg_mon, pg_mon->pc_gaming.view_tag, pg_mon->pc_gaming.visible)) {
+							PcGamingView *pg = &pg_mon->pc_gaming;
+							/* Skip if install popup is visible */
+							if (!pg->install_popup_visible) {
+								if (ev.value == -1 && pg->selected_idx >= pg->cols) {
+									pg->selected_idx -= pg->cols;
+									pc_gaming_render(pg_mon);
+									handled = 1;
+								} else if (ev.value == 1 && pg->selected_idx + pg->cols < pg->game_count) {
+									pg->selected_idx += pg->cols;
+									pc_gaming_render(pg_mon);
+									handled = 1;
+								}
+							}
+						}
+					}
+
+					/* Check Media views on any monitor */
+					if (!handled) {
+						Monitor *media_mon = media_view_visible_monitor();
+						if (media_mon) {
+							if (htpc_view_is_active(media_mon, media_mon->movies_view.view_tag, media_mon->movies_view.visible)) {
+								media_view_handle_button(media_mon, MEDIA_VIEW_MOVIES, button, 1);
+							} else if (htpc_view_is_active(media_mon, media_mon->tvshows_view.view_tag, media_mon->tvshows_view.visible)) {
+								media_view_handle_button(media_mon, MEDIA_VIEW_TVSHOWS, button, 1);
+							}
+						}
 					}
 				}
 				break;
@@ -19402,7 +21709,6 @@ gamepad_device_add(const char *path)
 	gp->last_activity_ms = monotonic_msec();
 	gp->suspended = 0;
 	gp->grabbed = 0;
-	gp->guide_press_ms = 0;  /* No guide button press in progress */
 
 	/* Don't grab gamepad - let Steam and other apps receive input normally */
 
@@ -19422,12 +21728,15 @@ gamepad_device_add(const char *path)
 
 	wlr_log(WLR_INFO, "Gamepad connected: %s (%s)", name, path);
 
-	/* Enter HTPC mode when controller connects (if enabled) */
-	if (htpc_mode_auto_on_controller)
+	/* Enter HTPC mode when controller connects (if mode == 1) */
+	if (htpc_mode == 1)
 		htpc_mode_enter();
 
 	/* Switch TV/Monitor to this HDMI input via CEC */
 	cec_switch_to_active_source();
+
+	/* Update grab state for new gamepad (grab if in HTPC mode on non-Steam tag) */
+	gamepad_update_grab_state();
 }
 
 static void
@@ -19448,6 +21757,83 @@ gamepad_device_remove(const char *path)
 			wl_list_remove(&gp->link);
 			free(gp);
 			return;
+		}
+	}
+}
+
+/* Grab exclusive access to gamepad (prevents Steam from receiving input) */
+static void
+gamepad_grab(GamepadDevice *gp)
+{
+	if (!gp || gp->fd < 0 || gp->grabbed)
+		return;
+
+	if (ioctl(gp->fd, EVIOCGRAB, 1) == 0) {
+		gp->grabbed = 1;
+		wlr_log(WLR_INFO, "Gamepad grabbed: %s", gp->name);
+	}
+}
+
+/* Release exclusive access to gamepad (allows Steam to receive input) */
+static void
+gamepad_ungrab(GamepadDevice *gp)
+{
+	if (!gp || gp->fd < 0 || !gp->grabbed)
+		return;
+
+	if (ioctl(gp->fd, EVIOCGRAB, 0) == 0) {
+		gp->grabbed = 0;
+		wlr_log(WLR_INFO, "Gamepad ungrabbed: %s", gp->name);
+	}
+}
+
+/*
+ * Determine if nixlytile should grab gamepads.
+ * We grab when we need the input (HTPC views on non-Steam tags).
+ * We release when Steam/games need it (Steam focused or on Steam tag).
+ */
+static int
+gamepad_should_grab(void)
+{
+	Client *focused;
+	unsigned int steam_tag;
+
+	/* Only grab in HTPC mode */
+	if (!htpc_mode_active)
+		return 0;
+
+	/* Steam is on tag 4 (index 3) */
+	steam_tag = 1 << 3;
+
+	/* If we're on the Steam tag, let Steam have the gamepad */
+	if (selmon && (selmon->tagset[selmon->seltags] & steam_tag))
+		return 0;
+
+	/* If Steam or a Steam game is focused, let it have the gamepad */
+	focused = focustop(selmon);
+	if (focused && (is_steam_client(focused) || is_steam_game(focused)))
+		return 0;
+
+	/* We're on a non-Steam tag in HTPC mode - grab for our UI */
+	return 1;
+}
+
+/* Update grab state for all gamepads based on current context */
+static void
+gamepad_update_grab_state(void)
+{
+	GamepadDevice *gp;
+	int should_grab;
+
+	should_grab = gamepad_should_grab();
+
+	wl_list_for_each(gp, &gamepads, link) {
+		if (gp->suspended)
+			continue;
+		if (should_grab && !gp->grabbed) {
+			gamepad_grab(gp);
+		} else if (!should_grab && gp->grabbed) {
+			gamepad_ungrab(gp);
 		}
 	}
 }
@@ -19554,8 +21940,46 @@ gamepad_update_cursor(void)
 	if (wl_list_empty(&gamepads))
 		return;
 
+	/* Handle Retro gaming view joystick navigation */
+	if (selmon && htpc_view_is_active(selmon, selmon->retro_gaming.view_tag, selmon->retro_gaming.visible)) {
+		int nav_x = 0;
+
+		/* Read joystick values from all gamepads */
+		wl_list_for_each(gp, &gamepads, link) {
+			if (gp->suspended)
+				continue;
+
+			int lx_offset = gp->left_x - gp->cal_lx.center;
+			int lx_range = (gp->cal_lx.max - gp->cal_lx.min) / 2;
+			if (lx_range == 0) lx_range = 32767;
+
+			/* Threshold at 50% deflection for navigation */
+			int nav_threshold = lx_range / 2;
+
+			if (lx_offset < -nav_threshold) nav_x = -1;
+			else if (lx_offset > nav_threshold) nav_x = 1;
+		}
+
+		/* Handle navigation with repeat */
+		if (nav_x != 0) {
+			uint64_t delay = joystick_nav_repeat_started ? JOYSTICK_NAV_REPEAT_RATE : JOYSTICK_NAV_INITIAL_DELAY;
+
+			if (joystick_nav_last_move == 0 || (now - joystick_nav_last_move) >= delay) {
+				joystick_nav_last_move = now;
+				joystick_nav_repeat_started = 1;
+				retro_gaming_handle_button(selmon, nav_x < 0 ? BTN_DPAD_LEFT : BTN_DPAD_RIGHT, 1);
+			}
+		} else {
+			/* Reset repeat state when joystick returns to center */
+			joystick_nav_last_move = 0;
+			joystick_nav_repeat_started = 0;
+		}
+
+		return;
+	}
+
 	/* Handle PC gaming view joystick navigation */
-	if (selmon && selmon->pc_gaming.visible) {
+	if (selmon && htpc_view_is_active(selmon, selmon->pc_gaming.view_tag, selmon->pc_gaming.visible)) {
 		PcGamingView *pg = &selmon->pc_gaming;
 		Client *popup_client = focustop(selmon);
 
@@ -19639,6 +22063,85 @@ gamepad_update_cursor(void)
 
 			/* Don't move mouse cursor while in PC gaming view without popup */
 			return;
+		}
+	}
+
+	/* Handle Media views (Movies/TV-shows) joystick navigation */
+	{
+		Monitor *media_mon = media_view_visible_monitor();
+		if (media_mon) {
+			MediaGridView *view = NULL;
+			MediaViewType view_type = MEDIA_VIEW_MOVIES;
+
+			if (htpc_view_is_active(media_mon, media_mon->movies_view.view_tag, media_mon->movies_view.visible)) {
+				view = &media_mon->movies_view;
+				view_type = MEDIA_VIEW_MOVIES;
+			} else if (htpc_view_is_active(media_mon, media_mon->tvshows_view.view_tag, media_mon->tvshows_view.visible)) {
+				view = &media_mon->tvshows_view;
+				view_type = MEDIA_VIEW_TVSHOWS;
+			}
+
+			if (view) {
+				int nav_x = 0, nav_y = 0;
+
+				/* Read joystick values from all gamepads */
+				wl_list_for_each(gp, &gamepads, link) {
+					if (gp->suspended)
+						continue;
+
+					int lx_offset = gp->left_x - gp->cal_lx.center;
+					int ly_offset = gp->left_y - gp->cal_ly.center;
+					int lx_range = (gp->cal_lx.max - gp->cal_lx.min) / 2;
+					int ly_range = (gp->cal_ly.max - gp->cal_ly.min) / 2;
+					if (lx_range == 0) lx_range = 32767;
+					if (ly_range == 0) ly_range = 32767;
+
+					/* Threshold at 50% deflection for navigation */
+					int nav_threshold_x = lx_range / 2;
+					int nav_threshold_y = ly_range / 2;
+
+					if (lx_offset < -nav_threshold_x) nav_x = -1;
+					else if (lx_offset > nav_threshold_x) nav_x = 1;
+					if (ly_offset < -nav_threshold_y) nav_y = -1;
+					else if (ly_offset > nav_threshold_y) nav_y = 1;
+				}
+
+				/* Handle navigation with repeat */
+				if (nav_x != 0 || nav_y != 0) {
+					int should_move = 0;
+					uint64_t delay = joystick_nav_repeat_started ? JOYSTICK_NAV_REPEAT_RATE : JOYSTICK_NAV_INITIAL_DELAY;
+
+					if (joystick_nav_last_move == 0 || (now - joystick_nav_last_move) >= delay) {
+						should_move = 1;
+						joystick_nav_last_move = now;
+						joystick_nav_repeat_started = 1;
+					}
+
+					if (should_move) {
+						int cols = view->cols > 0 ? view->cols : 5;
+						int old_idx = view->selected_idx;
+
+						if (nav_x == -1 && view->selected_idx > 0)
+							view->selected_idx--;
+						else if (nav_x == 1 && view->selected_idx < view->item_count - 1)
+							view->selected_idx++;
+						if (nav_y == -1 && view->selected_idx >= cols)
+							view->selected_idx -= cols;
+						else if (nav_y == 1 && view->selected_idx + cols < view->item_count)
+							view->selected_idx += cols;
+
+						if (view->selected_idx != old_idx)
+							media_view_render(media_mon, view_type);
+					}
+				} else {
+					/* Reset repeat state when joystick returns to center */
+					joystick_nav_last_move = 0;
+					joystick_nav_repeat_started = 0;
+				}
+
+				/* Don't move mouse cursor while in media view */
+				return;
+			}
 		}
 	}
 
@@ -19803,24 +22306,6 @@ gamepad_cursor_timer_cb(void *data)
 	/* Update cursor position */
 	gamepad_update_cursor();
 
-	/* Check for guide button hold (1 second) */
-	now = monotonic_msec();
-	m = selmon ? selmon : (wl_list_empty(&mons) ? NULL :
-		wl_container_of(mons.next, m, link));
-	if (m) {
-		wl_list_for_each(gp, &gamepads, link) {
-			if (gp->guide_press_ms > 0 &&
-			    (now - gp->guide_press_ms) >= GUIDE_HOLD_MS) {
-				/* Held for 1 second - toggle menu */
-				gp->guide_press_ms = 0;  /* Prevent repeated triggers */
-				if (m->gamepad_menu.visible)
-					gamepad_menu_hide(m);
-				else
-					gamepad_menu_show(m);
-				break;  /* Only trigger once */
-			}
-		}
-	}
 
 	/* Reschedule timer if we have gamepads */
 	if (!wl_list_empty(&gamepads) && gamepad_cursor_timer) {
@@ -21277,6 +23762,53 @@ updatestatusclock(void *data)
 	return 0;
 }
 
+/* Check if a view is active (visible and on current tag) */
+static int
+htpc_view_is_active(Monitor *m, unsigned int view_tag, int visible)
+{
+	if (!m || !htpc_mode_active || !visible || !view_tag)
+		return 0;
+	return (view_tag & m->tagset[m->seltags]) != 0;
+}
+
+/* Update HTPC view visibility based on current tag */
+static void
+htpc_views_update_visibility(Monitor *m)
+{
+	unsigned int tagset;
+
+	if (!m || !htpc_mode_active)
+		return;
+
+	tagset = m->tagset[m->seltags];
+
+	/* PC Gaming view - visible on tag 4 (bit 3) */
+	if (m->pc_gaming.tree) {
+		int vis = m->pc_gaming.visible && (m->pc_gaming.view_tag & tagset);
+		wlr_scene_node_set_enabled(&m->pc_gaming.tree->node, vis);
+	}
+
+	/* Retro Gaming view - visible on tag 3 (bit 2) */
+	if (m->retro_gaming.tree) {
+		int vis = m->retro_gaming.visible && (m->retro_gaming.view_tag & tagset);
+		wlr_scene_node_set_enabled(&m->retro_gaming.tree->node, vis);
+		if (m->retro_gaming.dim)
+			wlr_scene_node_set_enabled(&m->retro_gaming.dim->node, vis);
+	}
+
+	/* Movies view - visible on tag 2 (bit 1) */
+	if (m->movies_view.tree) {
+		int vis = m->movies_view.visible && (m->movies_view.view_tag & tagset);
+		wlr_scene_node_set_enabled(&m->movies_view.tree->node, vis);
+	}
+
+	/* TV-shows view - visible on tag 1 (bit 0) */
+	if (m->tvshows_view.tree) {
+		int vis = m->tvshows_view.visible && (m->tvshows_view.view_tag & tagset);
+		wlr_scene_node_set_enabled(&m->tvshows_view.tree->node, vis);
+	}
+}
+
 void
 arrange(Monitor *m)
 {
@@ -21284,6 +23816,9 @@ arrange(Monitor *m)
 
 	if (!m->wlr_output->enabled)
 		return;
+
+	/* Update HTPC view visibility when tags change */
+	htpc_views_update_visibility(m);
 
 	wl_list_for_each(c, &clients, link) {
 		if (c->mon == m) {
@@ -22651,6 +25186,10 @@ initstatusbar(Monitor *m)
 		wl_list_init(&wifi_networks);
 		wifi_networks_initialized = 1;
 	}
+	if (!vpn_list_initialized) {
+		wl_list_init(&vpn_connections);
+		vpn_list_initialized = 1;
+	}
 	wl_list_init(&m->statusbar.net_menu.entries);
 	wl_list_init(&m->statusbar.net_menu.networks);
 	m->showbar = 1;
@@ -22879,7 +25418,8 @@ initstatusbar(Monitor *m)
 			m->gamepad_menu.bg = NULL;
 			m->gamepad_menu.visible = 0;
 			m->gamepad_menu.selected = 0;
-			m->gamepad_menu.item_count = GAMEPAD_MENU_ITEM_COUNT;
+			htpc_menu_build();
+		m->gamepad_menu.item_count = htpc_menu_item_count;
 			wlr_scene_node_set_enabled(&m->gamepad_menu.tree->node, 0);
 		}
 	}
@@ -23461,8 +26001,10 @@ focusclient(Client *c, int lift)
 	if (!c) {
 		/* With no client, all we have left is to clear focus */
 		wlr_seat_keyboard_notify_clear_focus(seat);
-		/* Hide cursor if PC gaming view is visible */
-		if (selmon && selmon->pc_gaming.visible)
+		/* Hide cursor if HTPC views are visible */
+		if (selmon && (selmon->pc_gaming.visible ||
+		               selmon->movies_view.visible ||
+		               selmon->tvshows_view.visible))
 			wlr_cursor_set_surface(cursor, NULL, 0, 0);
 		return;
 	}
@@ -23478,6 +26020,9 @@ focusclient(Client *c, int lift)
 
 	/* Activate the new client */
 	client_activate_surface(client_surface(c), 1);
+
+	/* Update gamepad grab state - release for Steam/games, grab for HTPC views */
+	gamepad_update_grab_state();
 }
 
 void
@@ -23765,6 +26310,22 @@ keypress(struct wl_listener *listener, void *data)
 			for (i = 0; i < nsyms; i++) {
 				if (pc_gaming_handle_key(pc_gaming_mon, mods, syms[i]))
 					handled = 1;
+			}
+		}
+		/* Media views (Movies/TV-shows) */
+		if (!handled) {
+			Monitor *media_mon = media_view_visible_monitor();
+			if (media_mon) {
+				for (i = 0; i < nsyms; i++) {
+					/* Check which view is active */
+					if (htpc_view_is_active(media_mon, media_mon->movies_view.view_tag, media_mon->movies_view.visible)) {
+						if (media_view_handle_key(media_mon, MEDIA_VIEW_MOVIES, syms[i]))
+							handled = 1;
+					} else if (htpc_view_is_active(media_mon, media_mon->tvshows_view.view_tag, media_mon->tvshows_view.visible)) {
+						if (media_view_handle_key(media_mon, MEDIA_VIEW_TVSHOWS, syms[i]))
+							handled = 1;
+					}
+				}
 			}
 		}
 		/* Nixpkgs popup */
@@ -24094,14 +26655,14 @@ mapnotify(struct wl_listener *listener, void *data)
 
 	/*
 	 * HTPC mode Steam handling:
-	 * - Force Steam main window to fullscreen on tag 2
+	 * - Force Steam main window to fullscreen on tag 4
 	 * - Steam popups/dialogs stay floating but get focus and raised to top
 	 */
 	if (htpc_mode_active) {
 		if (is_steam_client(c) && !c->isfloating) {
-			/* Steam main window - place on tag 2 and fullscreen */
-			wlr_log(WLR_INFO, "HTPC: Placing Steam on tag 2 and fullscreen");
-			c->tags = 1 << 1; /* Tag 2 = bit 1 */
+			/* Steam main window - place on tag 4 and fullscreen */
+			wlr_log(WLR_INFO, "HTPC: Placing Steam on tag 4 and fullscreen");
+			c->tags = 1 << 3; /* Tag 4 = bit 3 */
 			setfullscreen(c, 1);
 		} else if (is_steam_popup(c) || (p && is_steam_popup(p))) {
 			/* Steam popup/dialog - ensure it's floating, centered, and focused */
@@ -24141,6 +26702,16 @@ mapnotify(struct wl_listener *listener, void *data)
 		/* Immediately focus the game */
 		exclusive_focus = NULL;
 		focusclient(c, 1);
+		/*
+		 * Schedule a delayed refocus for XWayland games.
+		 * Wine/Proton games often need extra time after mapping before
+		 * they properly accept keyboard input. Without this, users
+		 * can't skip intros until they switch tags and back.
+		 */
+#ifdef XWAYLAND
+		if (c->type == X11)
+			schedule_game_refocus(c, 150);
+#endif
 		printstatus();
 		return; /* Skip unset_fullscreen logic - we just set fullscreen */
 	}
@@ -24615,8 +27186,15 @@ focus:
 	/* If there's no client surface under the cursor, set the cursor image to a
 	 * default. This is what makes the cursor image appear when you move it
 	 * off of a client or over its border. */
-	if (!surface && !seat->drag)
-		wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
+	if (!surface && !seat->drag) {
+		/* Hide cursor when HTPC media views are visible */
+		if (htpc_mode_active && selmon &&
+		    (selmon->movies_view.visible || selmon->tvshows_view.visible ||
+		     selmon->pc_gaming.visible || selmon->retro_gaming.visible))
+			wlr_cursor_set_surface(cursor, NULL, 0, 0);
+		else
+			wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
+	}
 
 	pointerfocus(c, surface, sx, sy, time);
 }
@@ -27918,6 +30496,11 @@ setcursor(struct wl_listener *listener, void *data)
 	 * event, which will result in the client requesting set the cursor surface */
 	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
 		return;
+	/* Keep cursor hidden in HTPC views */
+	if (selmon && (selmon->pc_gaming.visible ||
+	               selmon->movies_view.visible ||
+	               selmon->tvshows_view.visible))
+		return;
 	/* This can be sent by any client, so we check to make sure this one
 	 * actually has pointer focus first. If so, we can tell the cursor to
 	 * use the provided surface as the cursor image. It will set the
@@ -27933,6 +30516,11 @@ setcursorshape(struct wl_listener *listener, void *data)
 {
 	struct wlr_cursor_shape_manager_v1_request_set_shape_event *event = data;
 	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
+		return;
+	/* Keep cursor hidden in HTPC views */
+	if (selmon && (selmon->pc_gaming.visible ||
+	               selmon->movies_view.visible ||
+	               selmon->tvshows_view.visible))
 		return;
 	/* This can be sent by any client, so we check to make sure this one
 	 * actually has pointer focus first. If so, we can tell the cursor to
@@ -28163,12 +30751,32 @@ static void config_set_value(const char *key, const char *value)
 	else if (strcmp(key, "borderpx") == 0) borderpx = (unsigned int)atoi(value);
 	else if (strcmp(key, "lock_cursor") == 0) lock_cursor = atoi(value);
 
-	/* HTPC mode */
-	else if (strcmp(key, "htpc_mode_enabled") == 0) htpc_mode_enabled = atoi(value);
-	else if (strcmp(key, "htpc_mode_autostart") == 0) htpc_mode_autostart = atoi(value);
-	else if (strcmp(key, "htpc_mode_auto_on_controller") == 0) htpc_mode_auto_on_controller = atoi(value);
+	/* HTPC mode (0=disabled, 1=auto on controller, 2=always on) */
+	else if (strcmp(key, "htpc_mode") == 0) htpc_mode = atoi(value);
 	else if (strcmp(key, "htpc_wallpaper") == 0) {
 		config_expand_path(value, htpc_wallpaper_path, sizeof(htpc_wallpaper_path));
+	}
+	else if (strcmp(key, "htpc_page_pcgaming") == 0) htpc_page_pcgaming = atoi(value);
+	else if (strcmp(key, "htpc_page_retrogaming") == 0) htpc_page_retrogaming = atoi(value);
+	else if (strcmp(key, "htpc_page_movies") == 0) htpc_page_movies = atoi(value);
+	else if (strcmp(key, "htpc_page_tvshows") == 0) htpc_page_tvshows = atoi(value);
+	else if (strcmp(key, "htpc_page_quit") == 0) htpc_page_quit = atoi(value);
+
+	/* Media server configuration (disables auto-discovery if set) */
+	else if (strcmp(key, "media_server") == 0) {
+		if (media_server_count < MAX_MEDIA_SERVERS && *value) {
+			/* Add http:// prefix if missing */
+			if (strncmp(value, "http://", 7) != 0 && strncmp(value, "https://", 8) != 0) {
+				snprintf(media_servers[media_server_count], sizeof(media_servers[0]),
+					 "http://%s", value);
+			} else {
+				strncpy(media_servers[media_server_count], value,
+					sizeof(media_servers[0]) - 1);
+			}
+			media_server_count++;
+			wlr_log(WLR_INFO, "Added media server: %s (total: %d)",
+				media_servers[media_server_count - 1], media_server_count);
+		}
 	}
 
 	/* PC Gaming services */
@@ -29711,6 +32319,31 @@ is_steam_cmd(const char *cmd)
 	return strcasestr(cmd, "steam") != NULL;
 }
 
+/* Launch Steam Big Picture mode if not already running */
+static void
+steam_launch_bigpicture(void)
+{
+	pid_t pid;
+
+	/* Check if Steam is already running */
+	if (is_process_running("steam")) {
+		wlr_log(WLR_INFO, "Steam already running, not launching again");
+		return;
+	}
+
+	wlr_log(WLR_INFO, "Launching Steam Big Picture mode");
+
+	pid = fork();
+	if (pid == 0) {
+		setsid();
+		set_dgpu_env();
+		set_steam_env();
+		execlp("steam", "steam", "-bigpicture", "-cef-force-gpu",
+			"-cef-disable-sandbox", "steam://open/games", (char *)NULL);
+		_exit(127);
+	}
+}
+
 /* Check if client is Steam main window */
 static int
 is_steam_client(Client *c)
@@ -31044,6 +33677,24 @@ updatemons(struct wl_listener *listener, void *data)
 			wlr_output_layout_add_auto(output_layout, m->wlr_output);
 	}
 
+	/*
+	 * Restore clients to their original monitor after suspend/resume.
+	 * When a monitor is disabled (e.g., laptop suspend), closemon() moves
+	 * all clients to another monitor. But c->output still remembers which
+	 * monitor the client originally belonged to. When the monitor wakes up,
+	 * we need to move clients back to their original monitor.
+	 */
+	wl_list_for_each(m, &mons, link) {
+		if (!m->wlr_output->enabled)
+			continue;
+		wl_list_for_each(c, &clients, link) {
+			if (c->output && c->mon != m
+					&& strcmp(m->wlr_output->name, c->output) == 0) {
+				c->mon = m;
+			}
+		}
+	}
+
 	/* Now that we update the output layout we can get its box */
 	wlr_output_layout_get_box(output_layout, NULL, &sgeom);
 
@@ -31175,6 +33826,8 @@ view(const Arg *arg)
 	printstatus();
 	/* Update game mode when switching tags - a fullscreen game may become visible/hidden */
 	update_game_mode();
+	/* Update gamepad grab state - grab for HTPC views, release for Steam */
+	gamepad_update_grab_state();
 }
 
 void
@@ -31482,8 +34135,11 @@ main(int argc, char *argv[])
 	bt_controller_setup();
 	pc_gaming_cache_watch_setup();
 
-	/* Enter HTPC mode at startup if configured or if controller already connected */
-	if (htpc_mode_autostart || (htpc_mode_auto_on_controller && !wl_list_empty(&gamepads)))
+	/* Set GE-Proton as default Steam compatibility tool */
+	steam_set_ge_proton_default();
+
+	/* Enter HTPC mode at startup if always-on (mode 2), or on controller if mode 1 */
+	if (htpc_mode == 2 || (htpc_mode == 1 && !wl_list_empty(&gamepads)))
 		htpc_mode_enter();
 
 	/* Start only git cache immediately, stagger others via timer
