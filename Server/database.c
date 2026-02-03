@@ -125,6 +125,11 @@ int database_init(const char *db_path) {
         "ALTER TABLE media ADD COLUMN episode_title TEXT",
         "ALTER TABLE media ADD COLUMN episode_overview TEXT",
         "ALTER TABLE media ADD COLUMN still_path TEXT",
+        "ALTER TABLE media ADD COLUMN tmdb_total_seasons INTEGER",
+        "ALTER TABLE media ADD COLUMN tmdb_total_episodes INTEGER",
+        "ALTER TABLE media ADD COLUMN tmdb_episode_runtime INTEGER",
+        "ALTER TABLE media ADD COLUMN tmdb_status TEXT",
+        "ALTER TABLE media ADD COLUMN tmdb_next_episode TEXT",
         NULL
     };
 
@@ -186,7 +191,9 @@ int database_update_tmdb(int id, MediaEntry *tmdb_data) {
         "UPDATE media SET "
         "tmdb_id=?, tmdb_title=?, overview=?, poster_path=?, backdrop_path=?, "
         "release_date=?, year=?, rating=?, vote_count=?, genres=?, "
-        "tmdb_show_id=?, episode_title=?, episode_overview=?, still_path=? "
+        "tmdb_show_id=?, episode_title=?, episode_overview=?, still_path=?, "
+        "tmdb_total_seasons=?, tmdb_total_episodes=?, tmdb_episode_runtime=?, "
+        "tmdb_status=?, tmdb_next_episode=? "
         "WHERE id=?";
 
     sqlite3_stmt *stmt;
@@ -207,7 +214,12 @@ int database_update_tmdb(int id, MediaEntry *tmdb_data) {
     sqlite3_bind_text(stmt, 12, tmdb_data->episode_title, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 13, tmdb_data->episode_overview, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 14, tmdb_data->still_path, -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 15, id);
+    sqlite3_bind_int(stmt, 15, tmdb_data->tmdb_total_seasons);
+    sqlite3_bind_int(stmt, 16, tmdb_data->tmdb_total_episodes);
+    sqlite3_bind_int(stmt, 17, tmdb_data->tmdb_episode_runtime);
+    sqlite3_bind_text(stmt, 18, tmdb_data->tmdb_status, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 19, tmdb_data->tmdb_next_episode, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 20, id);
 
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -489,6 +501,43 @@ char *database_get_movies_json(void) {
     );
 }
 
+/* Helper to build seasons string like "Season 1 (10 ep), Season 2 (8 ep)" */
+static char *build_seasons_string(const char *show_identifier) {
+    const char *sql =
+        "SELECT season, COUNT(*) as ep_count "
+        "FROM media "
+        "WHERE type IN (1, 2) AND COALESCE(tmdb_title, show_name, title) = ? "
+        "GROUP BY season "
+        "ORDER BY season";
+
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        return strdup("");
+    }
+
+    sqlite3_bind_text(stmt, 1, show_identifier, -1, SQLITE_STATIC);
+
+    char *result = malloc(1024);
+    size_t used = 0;
+    result[0] = '\0';
+
+    int first = 1;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        int season = sqlite3_column_int(stmt, 0);
+        int ep_count = sqlite3_column_int(stmt, 1);
+
+        if (!first) {
+            used += snprintf(result + used, 1024 - used, ", ");
+        }
+        first = 0;
+
+        used += snprintf(result + used, 1024 - used, "Season %d (%d ep)", season, ep_count);
+    }
+
+    sqlite3_finalize(stmt);
+    return result;
+}
+
 char *database_get_tvshows_json(void) {
     /* Group by show - return one entry per unique show with episode count */
     /* Use MAX() for poster/backdrop to get first non-NULL value */
@@ -496,7 +545,9 @@ char *database_get_tvshows_json(void) {
         "SELECT MIN(id), MAX(type), MAX(title), MAX(show_name), MIN(season), COUNT(*) as episode_count, "
         "SUM(size), SUM(duration), MAX(width), MAX(height), "
         "MAX(tmdb_id), MAX(tmdb_title), MAX(overview), MAX(poster_path), MAX(backdrop_path), "
-        "MAX(year), MAX(rating), MAX(genres) "
+        "MAX(year), MAX(rating), MAX(genres), COALESCE(MAX(tmdb_title), MAX(show_name), MAX(title)) as show_key, "
+        "MAX(tmdb_total_seasons), MAX(tmdb_total_episodes), MAX(tmdb_episode_runtime), "
+        "MAX(tmdb_status), MAX(tmdb_next_episode) "
         "FROM media WHERE type IN (1, 2) "
         "GROUP BY COALESCE(tmdb_title, show_name, title) "
         "ORDER BY COALESCE(tmdb_title, show_name, title)";
@@ -539,6 +590,15 @@ char *database_get_tvshows_json(void) {
         int year = sqlite3_column_int(stmt, 15);
         float rating = (float)sqlite3_column_double(stmt, 16);
         const char *genres = (const char *)sqlite3_column_text(stmt, 17);
+        const char *show_key = (const char *)sqlite3_column_text(stmt, 18);
+        int tmdb_total_seasons = sqlite3_column_int(stmt, 19);
+        int tmdb_total_episodes = sqlite3_column_int(stmt, 20);
+        int tmdb_episode_runtime = sqlite3_column_int(stmt, 21);
+        const char *tmdb_status = (const char *)sqlite3_column_text(stmt, 22);
+        const char *tmdb_next_episode = (const char *)sqlite3_column_text(stmt, 23);
+
+        /* Build seasons string */
+        char *seasons_str = build_seasons_string(show_key);
 
         char *title_esc = json_escape(title);
         char *show_esc = json_escape(show_name);
@@ -547,19 +607,27 @@ char *database_get_tvshows_json(void) {
         char *poster_esc = json_escape(poster);
         char *backdrop_esc = json_escape(backdrop);
         char *genres_esc = json_escape(genres);
+        char *seasons_esc = json_escape(seasons_str);
+        char *status_esc = json_escape(tmdb_status);
+        char *next_ep_esc = json_escape(tmdb_next_episode);
 
         buf_used += snprintf(json + buf_used, buf_size - buf_used,
             "{\"id\":%d,\"type\":%d,\"title\":%s,\"show_name\":%s,"
-            "\"season\":%d,\"episode_count\":%d,\"size\":%ld,\"duration\":%d,"
+            "\"season\":%d,\"episode_count\":%d,\"seasons\":%s,\"size\":%ld,\"duration\":%d,"
             "\"width\":%d,\"height\":%d,"
             "\"tmdb_id\":%d,\"tmdb_title\":%s,\"overview\":%s,"
             "\"poster\":%s,\"backdrop\":%s,\"year\":%d,\"rating\":%.1f,"
-            "\"genres\":%s}",
+            "\"genres\":%s,"
+            "\"tmdb_total_seasons\":%d,\"tmdb_total_episodes\":%d,\"tmdb_episode_runtime\":%d,"
+            "\"tmdb_status\":%s,\"tmdb_next_episode\":%s}",
             id, type, title_esc, show_esc,
-            season, episode_count, size, duration, width, height,
+            season, episode_count, seasons_esc, size, duration, width, height,
             tmdb_id, tmdb_title_esc, overview_esc,
-            poster_esc, backdrop_esc, year, rating, genres_esc);
+            poster_esc, backdrop_esc, year, rating, genres_esc,
+            tmdb_total_seasons, tmdb_total_episodes, tmdb_episode_runtime,
+            status_esc, next_ep_esc);
 
+        free(seasons_str);
         free(title_esc);
         free(show_esc);
         free(tmdb_title_esc);
@@ -567,6 +635,9 @@ char *database_get_tvshows_json(void) {
         free(poster_esc);
         free(backdrop_esc);
         free(genres_esc);
+        free(seasons_esc);
+        free(status_esc);
+        free(next_ep_esc);
     }
 
     json[buf_used++] = ']';
@@ -667,6 +738,63 @@ char *database_get_media_json(int id) {
     return json;
 }
 
+int database_update_show_status(int tmdb_show_id, const char *status, const char *next_episode,
+                                int total_seasons, int total_episodes, int episode_runtime) {
+    const char *sql =
+        "UPDATE media SET tmdb_status=?, tmdb_next_episode=?, "
+        "tmdb_total_seasons=?, tmdb_total_episodes=?, tmdb_episode_runtime=? "
+        "WHERE tmdb_show_id=? OR tmdb_id=?";
+
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return -1;
+
+    sqlite3_bind_text(stmt, 1, status, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, next_episode, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 3, total_seasons);
+    sqlite3_bind_int(stmt, 4, total_episodes);
+    sqlite3_bind_int(stmt, 5, episode_runtime);
+    sqlite3_bind_int(stmt, 6, tmdb_show_id);
+    sqlite3_bind_int(stmt, 7, tmdb_show_id);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int database_get_active_show_ids(int **ids, int *count) {
+    const char *sql =
+        "SELECT DISTINCT COALESCE(tmdb_show_id, tmdb_id) "
+        "FROM media WHERE type IN (1, 2) "
+        "AND COALESCE(tmdb_show_id, tmdb_id) > 0 "
+        "AND (tmdb_status IS NULL OR tmdb_status NOT IN ('Ended', 'Canceled') "
+        "     OR tmdb_total_seasons IS NULL OR tmdb_total_seasons = 0)";
+
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        *ids = NULL;
+        *count = 0;
+        return -1;
+    }
+
+    int capacity = 64;
+    int n = 0;
+    *ids = malloc(capacity * sizeof(int));
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (n >= capacity) {
+            capacity *= 2;
+            *ids = realloc(*ids, capacity * sizeof(int));
+        }
+        (*ids)[n++] = sqlite3_column_int(stmt, 0);
+    }
+
+    sqlite3_finalize(stmt);
+    *count = n;
+    return 0;
+}
+
 void database_free_entry(MediaEntry *entry) {
     if (entry) {
         free(entry->title);
@@ -684,6 +812,8 @@ void database_free_entry(MediaEntry *entry) {
         free(entry->episode_title);
         free(entry->episode_overview);
         free(entry->still_path);
+        free(entry->tmdb_status);
+        free(entry->tmdb_next_episode);
     }
 }
 
@@ -968,4 +1098,160 @@ void database_free_rom(RomEntry *entry) {
         free(entry->region);
         free(entry->added_date);
     }
+}
+
+/* Get seasons for a TV show */
+char *database_get_show_seasons_json(const char *show_name) {
+    const char *sql =
+        "SELECT DISTINCT season, COUNT(*) as episode_count "
+        "FROM media "
+        "WHERE type IN (1, 2) AND (COALESCE(tmdb_title, show_name, title) = ? OR show_name = ?) "
+        "GROUP BY season "
+        "ORDER BY season";
+
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        return NULL;
+    }
+
+    sqlite3_bind_text(stmt, 1, show_name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, show_name, -1, SQLITE_STATIC);
+
+    size_t buf_size = 4096;
+    size_t buf_used = 0;
+    char *json = malloc(buf_size);
+    json[buf_used++] = '[';
+
+    int first = 1;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (!first) json[buf_used++] = ',';
+        first = 0;
+
+        int season = sqlite3_column_int(stmt, 0);
+        int count = sqlite3_column_int(stmt, 1);
+
+        buf_used += snprintf(json + buf_used, buf_size - buf_used,
+            "{\"season\":%d,\"episode_count\":%d}", season, count);
+    }
+
+    json[buf_used++] = ']';
+    json[buf_used] = '\0';
+
+    sqlite3_finalize(stmt);
+    return json;
+}
+
+/* Get episodes for a specific season of a TV show */
+char *database_get_show_episodes_json(const char *show_name, int season) {
+    const char *sql =
+        "SELECT id, type, title, show_name, season, episode, size, duration, "
+        "width, height, tmdb_id, tmdb_title, overview, poster_path, backdrop_path, "
+        "year, rating, genres, episode_title, episode_overview, still_path, filepath "
+        "FROM media "
+        "WHERE type IN (1, 2) AND (COALESCE(tmdb_title, show_name, title) = ? OR show_name = ?) "
+        "AND season = ? "
+        "ORDER BY episode";
+
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        return NULL;
+    }
+
+    sqlite3_bind_text(stmt, 1, show_name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, show_name, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 3, season);
+
+    size_t buf_size = 65536;
+    size_t buf_used = 0;
+    char *json = malloc(buf_size);
+    json[buf_used++] = '[';
+
+    int first = 1;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (buf_used > buf_size - 4096) {
+            buf_size *= 2;
+            json = realloc(json, buf_size);
+        }
+
+        if (!first) json[buf_used++] = ',';
+        first = 0;
+
+        int id = sqlite3_column_int(stmt, 0);
+        int type = sqlite3_column_int(stmt, 1);
+        const char *title = (const char *)sqlite3_column_text(stmt, 2);
+        const char *sname = (const char *)sqlite3_column_text(stmt, 3);
+        int s = sqlite3_column_int(stmt, 4);
+        int e = sqlite3_column_int(stmt, 5);
+        int64_t size = sqlite3_column_int64(stmt, 6);
+        int duration = sqlite3_column_int(stmt, 7);
+        int width = sqlite3_column_int(stmt, 8);
+        int height = sqlite3_column_int(stmt, 9);
+        int tmdb_id = sqlite3_column_int(stmt, 10);
+        const char *tmdb_title = (const char *)sqlite3_column_text(stmt, 11);
+        const char *overview = (const char *)sqlite3_column_text(stmt, 12);
+        const char *poster = (const char *)sqlite3_column_text(stmt, 13);
+        const char *backdrop = (const char *)sqlite3_column_text(stmt, 14);
+        int year = sqlite3_column_int(stmt, 15);
+        float rating = (float)sqlite3_column_double(stmt, 16);
+        const char *genres = (const char *)sqlite3_column_text(stmt, 17);
+        const char *ep_title = (const char *)sqlite3_column_text(stmt, 18);
+        const char *ep_overview = (const char *)sqlite3_column_text(stmt, 19);
+        const char *still = (const char *)sqlite3_column_text(stmt, 20);
+        const char *filepath = (const char *)sqlite3_column_text(stmt, 21);
+
+        /* Build episode_display: "Episode 1 (60 min) - Episode Title" */
+        char ep_display[512];
+        int duration_min = duration / 60;
+        if (ep_title && ep_title[0]) {
+            snprintf(ep_display, sizeof(ep_display), "Episode %d (%d min) - %s", e, duration_min, ep_title);
+        } else {
+            snprintf(ep_display, sizeof(ep_display), "Episode %d (%d min)", e, duration_min);
+        }
+
+        char *title_esc = json_escape(title);
+        char *show_esc = json_escape(sname);
+        char *tmdb_esc = json_escape(tmdb_title);
+        char *ov_esc = json_escape(overview);
+        char *poster_esc = json_escape(poster);
+        char *back_esc = json_escape(backdrop);
+        char *genres_esc = json_escape(genres);
+        char *ept_esc = json_escape(ep_title);
+        char *epo_esc = json_escape(ep_overview);
+        char *still_esc = json_escape(still);
+        char *path_esc = json_escape(filepath);
+        char *ep_display_esc = json_escape(ep_display);
+
+        buf_used += snprintf(json + buf_used, buf_size - buf_used,
+            "{\"id\":%d,\"type\":%d,\"title\":%s,\"show_name\":%s,"
+            "\"season\":%d,\"episode\":%d,\"episode_display\":%s,\"size\":%ld,\"duration\":%d,"
+            "\"width\":%d,\"height\":%d,"
+            "\"tmdb_id\":%d,\"tmdb_title\":%s,\"overview\":%s,"
+            "\"poster\":%s,\"backdrop\":%s,\"year\":%d,\"rating\":%.1f,"
+            "\"genres\":%s,\"episode_title\":%s,\"episode_overview\":%s,"
+            "\"still\":%s,\"filepath\":%s}",
+            id, type, title_esc, show_esc,
+            s, e, ep_display_esc, size, duration, width, height,
+            tmdb_id, tmdb_esc, ov_esc,
+            poster_esc, back_esc, year, rating,
+            genres_esc, ept_esc, epo_esc, still_esc, path_esc);
+
+        free(title_esc);
+        free(show_esc);
+        free(tmdb_esc);
+        free(ov_esc);
+        free(poster_esc);
+        free(back_esc);
+        free(genres_esc);
+        free(ept_esc);
+        free(epo_esc);
+        free(still_esc);
+        free(path_esc);
+        free(ep_display_esc);
+    }
+
+    json[buf_used++] = ']';
+    json[buf_used] = '\0';
+
+    sqlite3_finalize(stmt);
+    return json;
 }

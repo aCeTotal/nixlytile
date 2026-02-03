@@ -509,6 +509,11 @@ static void fetch_episode_metadata(int db_id, const char *show_name, int season,
     tmdb_data.rating = show->rating;
     tmdb_data.vote_count = show->vote_count;
     tmdb_data.genres = show->genres;
+    tmdb_data.tmdb_total_seasons = show->number_of_seasons;
+    tmdb_data.tmdb_total_episodes = show->number_of_episodes;
+    tmdb_data.tmdb_episode_runtime = show->episode_run_time;
+    tmdb_data.tmdb_status = show->status;
+    tmdb_data.tmdb_next_episode = show->next_episode_date;
 
     /* Download show poster */
     if (show->poster_path) {
@@ -526,6 +531,16 @@ static void fetch_episode_metadata(int db_id, const char *show_name, int season,
         tmdb_data.tmdb_id = show->tmdb_id; /* Use show ID for episodes */
         tmdb_data.episode_title = ep->name;
         tmdb_data.episode_overview = ep->overview;
+
+        /* Use episode rating instead of show rating */
+        if (ep->rating > 0) {
+            tmdb_data.rating = ep->rating;
+        }
+
+        /* Fallback: use individual episode runtime if show-level runtime is 0 */
+        if (tmdb_data.tmdb_episode_runtime == 0 && ep->runtime > 0) {
+            tmdb_data.tmdb_episode_runtime = ep->runtime;
+        }
 
         if (ep->still_path) {
             tmdb_data.still_path = tmdb_download_image(ep->still_path, "w300",
@@ -711,4 +726,37 @@ void scanner_fetch_missing_tmdb(void) {
 
     free(entries);
     printf("TMDB metadata fetch complete\n");
+}
+
+void scanner_refresh_show_status(void) {
+    if (!server_config.tmdb_api_key[0]) return;
+
+    int *ids = NULL;
+    int count = 0;
+
+    if (database_get_active_show_ids(&ids, &count) != 0 || count == 0) {
+        free(ids);
+        return;
+    }
+
+    printf("Refreshing status for %d active shows...\n", count);
+
+    for (int i = 0; i < count; i++) {
+        TmdbTvShow *show = tmdb_get_show_status(ids[i]);
+        if (show) {
+            database_update_show_status(ids[i], show->status, show->next_episode_date,
+                                        show->number_of_seasons, show->number_of_episodes,
+                                        show->episode_run_time);
+            printf("  Show %d: %s (%d seasons, %d episodes, %d min/ep, next: %s)\n",
+                   ids[i],
+                   show->status ? show->status : "?",
+                   show->number_of_seasons, show->number_of_episodes,
+                   show->episode_run_time,
+                   show->next_episode_date ? show->next_episode_date : "none");
+            tmdb_free_tvshow(show);
+        }
+    }
+
+    free(ids);
+    printf("Show status refresh complete\n");
 }

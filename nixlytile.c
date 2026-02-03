@@ -567,11 +567,35 @@ typedef struct MediaItem {
 	char backdrop_path[512];   /* Path to backdrop */
 	char overview[2048];       /* Plot summary */
 	char genres[256];
+	char episode_title[256];   /* Episode title from TMDB */
+	char filepath[1024];       /* Path to media file for playback */
+	int tmdb_total_seasons;    /* Total seasons from TMDB */
+	int tmdb_total_episodes;   /* Total episodes from TMDB */
+	int tmdb_episode_runtime;  /* Typical episode runtime in minutes from TMDB */
+	char tmdb_status[64];      /* "Returning Series", "Ended", "Canceled" */
+	char tmdb_next_episode[16]; /* YYYY-MM-DD of next episode */
 	struct wlr_buffer *poster_buf;  /* Cached scaled poster buffer */
+	struct wlr_buffer *backdrop_buf; /* Cached scaled backdrop buffer */
 	int poster_w, poster_h;    /* Loaded poster dimensions */
+	int backdrop_w, backdrop_h;
 	int poster_loaded;         /* 1 if poster was loaded (or attempted) */
+	int backdrop_loaded;
 	struct MediaItem *next;
 } MediaItem;
+
+/* Season info for TV shows */
+typedef struct MediaSeason {
+	int season;
+	int episode_count;
+	struct MediaSeason *next;
+} MediaSeason;
+
+/* Detail view focus area */
+typedef enum {
+	DETAIL_FOCUS_INFO = 0,     /* Main info area (play button) */
+	DETAIL_FOCUS_SEASONS,      /* Season list (TV shows only) */
+	DETAIL_FOCUS_EPISODES      /* Episode list (TV shows only) */
+} DetailFocusArea;
 
 /* Media grid view (used for Movies and TV-shows) */
 typedef struct {
@@ -593,6 +617,22 @@ typedef struct {
 	char server_url[256];      /* http://localhost:8080 */
 	/* Change detection */
 	uint32_t last_data_hash;   /* Simple hash of last response to detect changes */
+
+	/* Detail view state */
+	int in_detail_view;        /* 1 if showing detail view, 0 for grid */
+	MediaItem *detail_item;    /* Item being shown in detail view */
+	DetailFocusArea detail_focus;  /* Current focus area in detail view */
+
+	/* TV show detail view */
+	MediaSeason *seasons;      /* List of seasons for current show */
+	int season_count;
+	int selected_season_idx;   /* Currently selected season */
+	int selected_season;       /* Actual season number */
+	MediaItem *episodes;       /* Episodes for selected season */
+	int episode_count;
+	int selected_episode_idx;  /* Currently selected episode */
+	int season_scroll_offset;  /* Scroll offset for season list */
+	int episode_scroll_offset; /* Scroll offset for episode list */
 } MediaGridView;
 
 /* Axis calibration info */
@@ -2547,10 +2587,44 @@ status_text_width(const char *text)
 	if (!statusfont.font)
 		return (int)strlen(text) * 8;
 
-	for (int i = 0; text[i]; i++) {
+	for (int i = 0; text[i]; ) {
 		long kern_x = 0, kern_y = 0;
-		uint32_t cp = (unsigned char)text[i];
+		uint32_t cp;
+		unsigned char c = (unsigned char)text[i];
 		const struct fcft_glyph *glyph;
+
+		/* Decode UTF-8 to Unicode codepoint */
+		if ((c & 0x80) == 0) {
+			cp = c;
+			i += 1;
+		} else if ((c & 0xE0) == 0xC0) {
+			cp = (c & 0x1F) << 6;
+			if (text[i + 1])
+				cp |= ((unsigned char)text[i + 1] & 0x3F);
+			i += 2;
+		} else if ((c & 0xF0) == 0xE0) {
+			cp = (c & 0x0F) << 12;
+			if (text[i + 1]) {
+				cp |= ((unsigned char)text[i + 1] & 0x3F) << 6;
+				if (text[i + 2])
+					cp |= ((unsigned char)text[i + 2] & 0x3F);
+			}
+			i += 3;
+		} else if ((c & 0xF8) == 0xF0) {
+			cp = (c & 0x07) << 18;
+			if (text[i + 1]) {
+				cp |= ((unsigned char)text[i + 1] & 0x3F) << 12;
+				if (text[i + 2]) {
+					cp |= ((unsigned char)text[i + 2] & 0x3F) << 6;
+					if (text[i + 3])
+						cp |= ((unsigned char)text[i + 3] & 0x3F);
+				}
+			}
+			i += 4;
+		} else {
+			i += 1;
+			continue;
+		}
 
 		if (prev_cp)
 			fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
@@ -2560,7 +2634,7 @@ status_text_width(const char *text)
 				statusbar_font_subpixel);
 		if (glyph && glyph->pix) {
 			pen_x += glyph->advance.x;
-			if (text[i + 1])
+			if (text[i])
 				pen_x += statusbar_font_spacing;
 		}
 		prev_cp = cp;
@@ -2596,9 +2670,48 @@ tray_render_label(StatusModule *module, const char *text, int x, int bar_height,
 		return w;
 	}
 
-	for (i = 0; text[i]; i++) {
+	for (i = 0; text[i]; ) {
 		long kern_x = 0, kern_y = 0;
-		uint32_t cp = (unsigned char)text[i];
+		uint32_t cp;
+		unsigned char c = (unsigned char)text[i];
+
+		/* Decode UTF-8 to Unicode codepoint */
+		if ((c & 0x80) == 0) {
+			/* ASCII (0xxxxxxx) */
+			cp = c;
+			i += 1;
+		} else if ((c & 0xE0) == 0xC0) {
+			/* 2-byte sequence (110xxxxx 10xxxxxx) */
+			cp = (c & 0x1F) << 6;
+			if (text[i + 1])
+				cp |= ((unsigned char)text[i + 1] & 0x3F);
+			i += 2;
+		} else if ((c & 0xF0) == 0xE0) {
+			/* 3-byte sequence (1110xxxx 10xxxxxx 10xxxxxx) */
+			cp = (c & 0x0F) << 12;
+			if (text[i + 1]) {
+				cp |= ((unsigned char)text[i + 1] & 0x3F) << 6;
+				if (text[i + 2])
+					cp |= ((unsigned char)text[i + 2] & 0x3F);
+			}
+			i += 3;
+		} else if ((c & 0xF8) == 0xF0) {
+			/* 4-byte sequence (11110xxx 10xxxxxx 10xxxxxx 10xxxxxx) */
+			cp = (c & 0x07) << 18;
+			if (text[i + 1]) {
+				cp |= ((unsigned char)text[i + 1] & 0x3F) << 12;
+				if (text[i + 2]) {
+					cp |= ((unsigned char)text[i + 2] & 0x3F) << 6;
+					if (text[i + 3])
+						cp |= ((unsigned char)text[i + 3] & 0x3F);
+				}
+			}
+			i += 4;
+		} else {
+			/* Invalid UTF-8, skip byte */
+			i += 1;
+			continue;
+		}
 
 		if (prev_cp)
 			fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
@@ -2617,7 +2730,7 @@ tray_render_label(StatusModule *module, const char *text, int x, int bar_height,
 			if (-glyph->y + glyph->height > max_y)
 				max_y = -glyph->y + glyph->height;
 			pen_x += glyph->advance.x;
-			if (text[i + 1])
+			if (text[i])
 				pen_x += statusbar_font_spacing;
 		}
 		prev_cp = cp;
@@ -15216,10 +15329,12 @@ htpc_mode_enter(void)
 		}
 	}
 
-	/* Ensure we start on tag 1 */
+	/* Ensure we start on tag 1 (TV-shows) */
 	if (selmon) {
 		selmon->seltags ^= 1;
 		selmon->tagset[selmon->seltags] = 1 << 0; /* Tag 1 = bit 0 */
+		/* Show TV-shows view as default */
+		media_view_show(selmon, MEDIA_VIEW_TVSHOWS);
 	}
 
 	/* NOTE: Steam is NOT started here - it will be launched on-demand
@@ -20320,8 +20435,7 @@ retro_gaming_handle_button(Monitor *m, int button, int value)
 	case BTN_TR:  /* Right shoulder */
 		direction = 1;
 		break;
-	case BTN_EAST:  /* B button - go back */
-		retro_gaming_hide(m);
+	case BTN_EAST:  /* B button - do nothing in main view (can't be closed) */
 		return 1;
 	case BTN_MODE:  /* Guide button - let main handler show menu overlay */
 		return 0;
@@ -20766,6 +20880,11 @@ media_view_refresh(Monitor *m, MediaViewType type)
 			json_extract_string(obj_json, "backdrop", item->backdrop_path, sizeof(item->backdrop_path));
 			json_extract_string(obj_json, "overview", item->overview, sizeof(item->overview));
 			json_extract_string(obj_json, "genres", item->genres, sizeof(item->genres));
+			item->tmdb_total_seasons = json_extract_int(obj_json, "tmdb_total_seasons");
+			item->tmdb_total_episodes = json_extract_int(obj_json, "tmdb_total_episodes");
+			item->tmdb_episode_runtime = json_extract_int(obj_json, "tmdb_episode_runtime");
+			json_extract_string(obj_json, "tmdb_status", item->tmdb_status, sizeof(item->tmdb_status));
+			json_extract_string(obj_json, "tmdb_next_episode", item->tmdb_next_episode, sizeof(item->tmdb_next_episode));
 
 			/* Add to linked list */
 			if (!view->items) {
@@ -20899,6 +21018,936 @@ media_view_load_poster(MediaItem *item, int target_w, int target_h)
 		item->poster_w = target_w;
 		item->poster_h = target_h;
 	}
+}
+
+/* Load backdrop image for detail view - scale-to-fill */
+static void
+media_view_load_backdrop(MediaItem *item, int target_w, int target_h)
+{
+	GdkPixbuf *pixbuf = NULL;
+	GdkPixbuf *scaled = NULL;
+	GdkPixbuf *cropped = NULL;
+	GError *gerr = NULL;
+	int orig_w, orig_h, scaled_w, scaled_h, crop_x, crop_y;
+	double scale_w, scale_h, scale;
+	guchar *pixels;
+	int nchan, stride;
+	uint8_t *argb = NULL;
+	size_t bufsize;
+	struct wlr_buffer *buf = NULL;
+
+	if (!item || item->backdrop_loaded)
+		return;
+
+	item->backdrop_loaded = 1;
+
+	if (item->backdrop_path[0] == '\0')
+		return;
+
+	pixbuf = gdk_pixbuf_new_from_file(item->backdrop_path, &gerr);
+	if (!pixbuf) {
+		if (gerr) g_error_free(gerr);
+		return;
+	}
+
+	orig_w = gdk_pixbuf_get_width(pixbuf);
+	orig_h = gdk_pixbuf_get_height(pixbuf);
+
+	scale_w = (double)target_w / orig_w;
+	scale_h = (double)target_h / orig_h;
+	scale = (scale_w > scale_h) ? scale_w : scale_h;
+
+	scaled_w = (int)(orig_w * scale);
+	scaled_h = (int)(orig_h * scale);
+
+	scaled = gdk_pixbuf_scale_simple(pixbuf, scaled_w, scaled_h, GDK_INTERP_BILINEAR);
+	g_object_unref(pixbuf);
+
+	if (!scaled)
+		return;
+
+	crop_x = (scaled_w - target_w) / 2;
+	crop_y = (scaled_h - target_h) / 2;
+
+	cropped = gdk_pixbuf_new_subpixbuf(scaled, crop_x, crop_y, target_w, target_h);
+	if (!cropped) {
+		g_object_unref(scaled);
+		return;
+	}
+
+	pixels = gdk_pixbuf_get_pixels(cropped);
+	nchan = gdk_pixbuf_get_n_channels(cropped);
+	stride = gdk_pixbuf_get_rowstride(cropped);
+
+	bufsize = target_w * target_h * 4;
+	argb = malloc(bufsize);
+	if (!argb) {
+		g_object_unref(cropped);
+		g_object_unref(scaled);
+		return;
+	}
+
+	for (int y = 0; y < target_h; y++) {
+		guchar *row = pixels + y * stride;
+		for (int x = 0; x < target_w; x++) {
+			guchar r = row[x * nchan + 0];
+			guchar g = row[x * nchan + 1];
+			guchar b = row[x * nchan + 2];
+			guchar a = (nchan == 4) ? row[x * nchan + 3] : 255;
+
+			size_t off = (y * target_w + x) * 4;
+			argb[off + 0] = b;
+			argb[off + 1] = g;
+			argb[off + 2] = r;
+			argb[off + 3] = a;
+		}
+	}
+
+	buf = statusbar_buffer_from_argb32_raw((uint32_t *)argb, target_w, target_h);
+	free(argb);
+	g_object_unref(cropped);
+	g_object_unref(scaled);
+
+	if (buf) {
+		item->backdrop_buf = buf;
+		item->backdrop_w = target_w;
+		item->backdrop_h = target_h;
+	}
+}
+
+/* Free seasons list */
+static void
+media_view_free_seasons(MediaGridView *view)
+{
+	MediaSeason *s = view->seasons;
+	while (s) {
+		MediaSeason *next = s->next;
+		free(s);
+		s = next;
+	}
+	view->seasons = NULL;
+	view->season_count = 0;
+}
+
+/* Free episodes list */
+static void
+media_view_free_episodes(MediaGridView *view)
+{
+	MediaItem *item = view->episodes;
+	while (item) {
+		MediaItem *next = item->next;
+		if (item->poster_buf)
+			wlr_buffer_drop(item->poster_buf);
+		if (item->backdrop_buf)
+			wlr_buffer_drop(item->backdrop_buf);
+		free(item);
+		item = next;
+	}
+	view->episodes = NULL;
+	view->episode_count = 0;
+}
+
+/* Fetch seasons for a TV show */
+static void
+media_view_fetch_seasons(MediaGridView *view, const char *show_name)
+{
+	FILE *fp;
+	char cmd[1024];
+	char buffer[8192];
+	size_t bytes_read;
+
+	media_view_free_seasons(view);
+
+	/* URL-encode spaces in show name */
+	char encoded_name[512];
+	char *dst = encoded_name;
+	for (const char *src = show_name; *src && dst < encoded_name + sizeof(encoded_name) - 4; src++) {
+		if (*src == ' ') {
+			*dst++ = '%';
+			*dst++ = '2';
+			*dst++ = '0';
+		} else {
+			*dst++ = *src;
+		}
+	}
+	*dst = '\0';
+
+	snprintf(cmd, sizeof(cmd), "curl -s '%s/api/show/%s/seasons' 2>/dev/null",
+	         view->server_url, encoded_name);
+
+	fp = popen(cmd, "r");
+	if (!fp) return;
+
+	bytes_read = fread(buffer, 1, sizeof(buffer) - 1, fp);
+	pclose(fp);
+
+	if (bytes_read == 0) return;
+	buffer[bytes_read] = '\0';
+
+	/* Parse JSON array */
+	const char *pos = strchr(buffer, '[');
+	if (!pos) return;
+	pos++;
+
+	MediaSeason *last = NULL;
+	int count = 0;
+
+	while (*pos) {
+		const char *obj_start = strchr(pos, '{');
+		if (!obj_start) break;
+
+		int depth = 1;
+		const char *obj_end = obj_start + 1;
+		while (*obj_end && depth > 0) {
+			if (*obj_end == '{') depth++;
+			else if (*obj_end == '}') depth--;
+			obj_end++;
+		}
+
+		if (depth != 0) break;
+
+		size_t obj_len = obj_end - obj_start;
+		char *obj_json = malloc(obj_len + 1);
+		if (!obj_json) break;
+		strncpy(obj_json, obj_start, obj_len);
+		obj_json[obj_len] = '\0';
+
+		MediaSeason *season = calloc(1, sizeof(MediaSeason));
+		if (season) {
+			season->season = json_extract_int(obj_json, "season");
+			season->episode_count = json_extract_int(obj_json, "episode_count");
+
+			if (!view->seasons) {
+				view->seasons = season;
+			} else {
+				last->next = season;
+			}
+			last = season;
+			count++;
+		}
+
+		free(obj_json);
+		pos = obj_end;
+	}
+
+	view->season_count = count;
+}
+
+/* Fetch episodes for a specific season */
+static void
+media_view_fetch_episodes(MediaGridView *view, const char *show_name, int season)
+{
+	FILE *fp;
+	char cmd[1024];
+	char buffer[1024 * 256];
+	size_t bytes_read;
+
+	media_view_free_episodes(view);
+
+	/* URL-encode spaces in show name */
+	char encoded_name[512];
+	char *dst = encoded_name;
+	for (const char *src = show_name; *src && dst < encoded_name + sizeof(encoded_name) - 4; src++) {
+		if (*src == ' ') {
+			*dst++ = '%';
+			*dst++ = '2';
+			*dst++ = '0';
+		} else {
+			*dst++ = *src;
+		}
+	}
+	*dst = '\0';
+
+	snprintf(cmd, sizeof(cmd), "curl -s '%s/api/show/%s/episodes/%d' 2>/dev/null",
+	         view->server_url, encoded_name, season);
+
+	fp = popen(cmd, "r");
+	if (!fp) return;
+
+	bytes_read = fread(buffer, 1, sizeof(buffer) - 1, fp);
+	pclose(fp);
+
+	if (bytes_read == 0) return;
+	buffer[bytes_read] = '\0';
+
+	/* Parse JSON array */
+	const char *pos = strchr(buffer, '[');
+	if (!pos) return;
+	pos++;
+
+	MediaItem *last = NULL;
+	int count = 0;
+
+	while (*pos) {
+		const char *obj_start = strchr(pos, '{');
+		if (!obj_start) break;
+
+		int depth = 1;
+		const char *obj_end = obj_start + 1;
+		while (*obj_end && depth > 0) {
+			if (*obj_end == '{') depth++;
+			else if (*obj_end == '}') depth--;
+			obj_end++;
+		}
+
+		if (depth != 0) break;
+
+		size_t obj_len = obj_end - obj_start;
+		char *obj_json = malloc(obj_len + 1);
+		if (!obj_json) break;
+		strncpy(obj_json, obj_start, obj_len);
+		obj_json[obj_len] = '\0';
+
+		MediaItem *item = calloc(1, sizeof(MediaItem));
+		if (item) {
+			item->id = json_extract_int(obj_json, "id");
+			item->type = json_extract_int(obj_json, "type");
+			json_extract_string(obj_json, "title", item->title, sizeof(item->title));
+			json_extract_string(obj_json, "show_name", item->show_name, sizeof(item->show_name));
+			item->season = json_extract_int(obj_json, "season");
+			item->episode = json_extract_int(obj_json, "episode");
+			item->duration = json_extract_int(obj_json, "duration");
+			item->year = json_extract_int(obj_json, "year");
+			item->rating = json_extract_float(obj_json, "rating");
+			json_extract_string(obj_json, "poster", item->poster_path, sizeof(item->poster_path));
+			json_extract_string(obj_json, "backdrop", item->backdrop_path, sizeof(item->backdrop_path));
+			json_extract_string(obj_json, "overview", item->overview, sizeof(item->overview));
+			json_extract_string(obj_json, "episode_title", item->episode_title, sizeof(item->episode_title));
+			json_extract_string(obj_json, "filepath", item->filepath, sizeof(item->filepath));
+
+			if (!view->episodes) {
+				view->episodes = item;
+			} else {
+				last->next = item;
+			}
+			last = item;
+			count++;
+		}
+
+		free(obj_json);
+		pos = obj_end;
+	}
+
+	view->episode_count = count;
+}
+
+/* Render detail view for a movie or TV show */
+static void
+media_view_render_detail(Monitor *m, MediaViewType type)
+{
+	MediaGridView *view;
+	struct wlr_scene_node *node, *tmp;
+	float bg_color[4] = {0.05f, 0.05f, 0.08f, 0.98f};
+	float text_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+	float dim_text[4] = {0.7f, 0.7f, 0.7f, 1.0f};
+	float accent_color[4] = {0.2f, 0.5f, 1.0f, 1.0f};
+	float panel_bg[4] = {0.08f, 0.08f, 0.12f, 0.95f};
+	float selected_bg[4] = {0.15f, 0.35f, 0.65f, 0.9f};
+	float hover_bg[4] = {0.12f, 0.12f, 0.18f, 0.9f};
+
+	if (!m || !statusfont.font)
+		return;
+
+	view = media_get_view(m, type);
+	if (!view || !view->visible || !view->tree || !view->in_detail_view)
+		return;
+
+	MediaItem *item = view->detail_item;
+	if (!item) return;
+
+	/* Clear previous content */
+	wl_list_for_each_safe(node, tmp, &view->tree->children, link) {
+		wlr_scene_node_destroy(node);
+	}
+	view->grid = NULL;
+	view->detail_panel = NULL;
+
+	/* Background */
+	drawrect(view->tree, 0, 0, view->width, view->height, bg_color);
+
+	/* Load and display backdrop if available */
+	int backdrop_h = view->height * 60 / 100;  /* 60% of screen height */
+	if (!item->backdrop_loaded && item->backdrop_path[0]) {
+		media_view_load_backdrop(item, view->width, backdrop_h);
+	}
+	if (item->backdrop_buf) {
+		struct wlr_scene_buffer *backdrop = wlr_scene_buffer_create(view->tree, item->backdrop_buf);
+		if (backdrop) {
+			wlr_scene_node_set_position(&backdrop->node, 0, 0);
+		}
+		/* Gradient overlay on backdrop */
+		float gradient[4] = {0.05f, 0.05f, 0.08f, 0.7f};
+		drawrect(view->tree, 650, backdrop_h - 180, view->width - 650, 180, gradient);
+	}
+
+	/* Left side: poster and info */
+	int poster_w = 280;
+	int poster_h = 420;
+	int info_x = 60;
+	int info_y = (backdrop_h > 0 ? backdrop_h - poster_h / 2 : 60) + 30;
+
+	/* Poster */
+	if (!item->poster_loaded) {
+		media_view_load_poster(item, poster_w, poster_h);
+	}
+	if (item->poster_buf) {
+		/* Poster shadow/border */
+		float poster_shadow[4] = {0.0f, 0.0f, 0.0f, 0.5f};
+		drawrect(view->tree, info_x - 4, info_y - 4, poster_w + 8, poster_h + 8, poster_shadow);
+
+		struct wlr_scene_buffer *poster = wlr_scene_buffer_create(view->tree, item->poster_buf);
+		if (poster) {
+			wlr_scene_node_set_position(&poster->node, info_x, info_y);
+		}
+	}
+
+	/* Details box - starts at top-right corner of thumbnail (with gap for shadow) */
+	int details_box_x = info_x + poster_w + 72;  /* 72px gap after poster shadow */
+	int details_box_y = info_y;  /* Aligned with poster top */
+	int details_box_w = 300;
+	int details_box_h = 380;
+	float details_box_bg[4] = {0.08f, 0.08f, 0.12f, 0.95f};  /* Match panel_bg */
+	drawrect(view->tree, details_box_x, details_box_y, details_box_w, details_box_h, details_box_bg);
+
+	/* Title and metadata inside details box */
+	int text_x = details_box_x + 15;  /* Inside details box with padding */
+	int text_y = details_box_y + 20;
+	int text_max_w = 200;  /* Max width before wrapping */
+	int chars_per_line = text_max_w / 9;  /* ~9px per char at size 16 */
+
+	/* Bold label color (brighter white) */
+	float label_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+
+	/* Title (bold/large) */
+	struct wlr_scene_tree *title_tree = wlr_scene_tree_create(view->tree);
+	if (title_tree) {
+		wlr_scene_node_set_position(&title_tree->node, text_x, text_y);
+		StatusModule mod = {0};
+		mod.tree = title_tree;
+		tray_render_label(&mod, item->title, 0, 28, text_color);
+	}
+	text_y += 50;
+
+	/* Score */
+	if (item->rating > 0) {
+		/* Bold label */
+		struct wlr_scene_tree *label_tree = wlr_scene_tree_create(view->tree);
+		if (label_tree) {
+			wlr_scene_node_set_position(&label_tree->node, text_x, text_y);
+			StatusModule mod = {0};
+			mod.tree = label_tree;
+			tray_render_label(&mod, "Score:", 0, 16, label_color);
+		}
+		/* Value */
+		char score_val[32];
+		snprintf(score_val, sizeof(score_val), "%.1f", item->rating);
+		struct wlr_scene_tree *val_tree = wlr_scene_tree_create(view->tree);
+		if (val_tree) {
+			wlr_scene_node_set_position(&val_tree->node, text_x + 160, text_y);
+			StatusModule mod = {0};
+			mod.tree = val_tree;
+			tray_render_label(&mod, score_val, 0, 16, dim_text);
+		}
+		text_y += 35;
+	}
+
+	/* Total duration */
+	{
+		/* For TV shows: use TMDB episode_runtime * total_episodes if available */
+		int total_duration_sec = item->duration;
+		if (type == MEDIA_VIEW_TVSHOWS && item->tmdb_episode_runtime > 0 && item->tmdb_total_episodes > 0) {
+			total_duration_sec = item->tmdb_episode_runtime * item->tmdb_total_episodes * 60;
+		}
+		if (total_duration_sec > 0) {
+			/* Bold label */
+			struct wlr_scene_tree *label_tree = wlr_scene_tree_create(view->tree);
+			if (label_tree) {
+				wlr_scene_node_set_position(&label_tree->node, text_x, text_y);
+				StatusModule mod = {0};
+				mod.tree = label_tree;
+				tray_render_label(&mod, "Total duration:", 0, 16, label_color);
+			}
+			/* Value */
+			char duration_val[32];
+			int hours = total_duration_sec / 3600;
+			int mins = (total_duration_sec % 3600) / 60;
+			if (hours > 0)
+				snprintf(duration_val, sizeof(duration_val), "%dh %dm", hours, mins);
+			else
+				snprintf(duration_val, sizeof(duration_val), "%dm", mins);
+			struct wlr_scene_tree *val_tree = wlr_scene_tree_create(view->tree);
+			if (val_tree) {
+				wlr_scene_node_set_position(&val_tree->node, text_x + 160, text_y);
+				StatusModule mod = {0};
+				mod.tree = val_tree;
+				tray_render_label(&mod, duration_val, 0, 16, dim_text);
+			}
+			text_y += 35;
+		}
+	}
+
+	/* Sjanger - with text wrapping */
+	if (item->genres[0]) {
+		/* Bold label */
+		struct wlr_scene_tree *label_tree = wlr_scene_tree_create(view->tree);
+		if (label_tree) {
+			wlr_scene_node_set_position(&label_tree->node, text_x, text_y);
+			StatusModule mod = {0};
+			mod.tree = label_tree;
+			tray_render_label(&mod, "Sjanger:", 0, 16, label_color);
+		}
+		text_y += 22;
+		/* Value with word wrap at 250px */
+		char wrapped_genre[512];
+		int src_idx = 0, dst_idx = 0, line_len = 0;
+		while (item->genres[src_idx] && dst_idx < (int)sizeof(wrapped_genre) - 1) {
+			char c = item->genres[src_idx++];
+			if (line_len >= chars_per_line && (c == ' ' || c == ',')) {
+				wrapped_genre[dst_idx++] = '\n';
+				line_len = 0;
+				if (c == ' ') continue;
+			}
+			wrapped_genre[dst_idx++] = c;
+			line_len++;
+		}
+		wrapped_genre[dst_idx] = '\0';
+		/* Render wrapped lines */
+		char *line = wrapped_genre;
+		while (line && *line) {
+			char *nl = strchr(line, '\n');
+			char line_buf[256];
+			if (nl) {
+				int len = nl - line;
+				if (len > 255) len = 255;
+				strncpy(line_buf, line, len);
+				line_buf[len] = '\0';
+				line = nl + 1;
+			} else {
+				strncpy(line_buf, line, 255);
+				line_buf[255] = '\0';
+				line = NULL;
+			}
+			struct wlr_scene_tree *val_tree = wlr_scene_tree_create(view->tree);
+			if (val_tree) {
+				wlr_scene_node_set_position(&val_tree->node, text_x, text_y);
+				StatusModule mod = {0};
+				mod.tree = val_tree;
+				tray_render_label(&mod, line_buf, 0, 16, dim_text);
+			}
+			text_y += 20;
+		}
+		text_y += 15;
+	}
+
+	/* Release date */
+	if (item->year > 0) {
+		/* Bold label */
+		struct wlr_scene_tree *label_tree = wlr_scene_tree_create(view->tree);
+		if (label_tree) {
+			wlr_scene_node_set_position(&label_tree->node, text_x, text_y);
+			StatusModule mod = {0};
+			mod.tree = label_tree;
+			tray_render_label(&mod, "Release date:", 0, 16, label_color);
+		}
+		/* Value */
+		char year_val[16];
+		snprintf(year_val, sizeof(year_val), "%d", item->year);
+		struct wlr_scene_tree *val_tree = wlr_scene_tree_create(view->tree);
+		if (val_tree) {
+			wlr_scene_node_set_position(&val_tree->node, text_x + 160, text_y);
+			StatusModule mod = {0};
+			mod.tree = val_tree;
+			tray_render_label(&mod, year_val, 0, 16, dim_text);
+		}
+		text_y += 35;
+	}
+
+	/* Seasons and Episodes (for TV shows only) */
+	if (type == MEDIA_VIEW_TVSHOWS && (item->tmdb_total_seasons > 0 || view->season_count > 0)) {
+		/* Use TMDB totals if available, otherwise fall back to local counts */
+		int display_seasons = item->tmdb_total_seasons > 0 ? item->tmdb_total_seasons : view->season_count;
+		int display_episodes = item->tmdb_total_episodes;
+		if (display_episodes <= 0) {
+			display_episodes = 0;
+			MediaSeason *s;
+			for (s = view->seasons; s; s = s->next) {
+				display_episodes += s->episode_count;
+			}
+		}
+
+		/* Seasons - bold label */
+		struct wlr_scene_tree *slabel_tree = wlr_scene_tree_create(view->tree);
+		if (slabel_tree) {
+			wlr_scene_node_set_position(&slabel_tree->node, text_x, text_y);
+			StatusModule mod = {0};
+			mod.tree = slabel_tree;
+			tray_render_label(&mod, "Seasons:", 0, 16, label_color);
+		}
+		char seasons_val[16];
+		snprintf(seasons_val, sizeof(seasons_val), "%d", display_seasons);
+		struct wlr_scene_tree *sval_tree = wlr_scene_tree_create(view->tree);
+		if (sval_tree) {
+			wlr_scene_node_set_position(&sval_tree->node, text_x + 160, text_y);
+			StatusModule mod = {0};
+			mod.tree = sval_tree;
+			tray_render_label(&mod, seasons_val, 0, 16, dim_text);
+		}
+		text_y += 35;
+
+		/* Episodes - bold label */
+		struct wlr_scene_tree *elabel_tree = wlr_scene_tree_create(view->tree);
+		if (elabel_tree) {
+			wlr_scene_node_set_position(&elabel_tree->node, text_x, text_y);
+			StatusModule mod = {0};
+			mod.tree = elabel_tree;
+			tray_render_label(&mod, "Episodes:", 0, 16, label_color);
+		}
+		char episodes_val[16];
+		snprintf(episodes_val, sizeof(episodes_val), "%d", display_episodes);
+		struct wlr_scene_tree *eval_tree = wlr_scene_tree_create(view->tree);
+		if (eval_tree) {
+			wlr_scene_node_set_position(&eval_tree->node, text_x + 160, text_y);
+			StatusModule mod = {0};
+			mod.tree = eval_tree;
+			tray_render_label(&mod, episodes_val, 0, 16, dim_text);
+		}
+		text_y += 35;
+	}
+
+	/* Next episode / Ended status (TV shows only) */
+	if (type == MEDIA_VIEW_TVSHOWS && item->tmdb_status[0]) {
+		struct wlr_scene_tree *nlabel_tree = wlr_scene_tree_create(view->tree);
+		if (nlabel_tree) {
+			wlr_scene_node_set_position(&nlabel_tree->node, text_x, text_y);
+			StatusModule mod = {0};
+			mod.tree = nlabel_tree;
+			tray_render_label(&mod, "Next episode:", 0, 16, label_color);
+		}
+		char next_val[32];
+		if (strcmp(item->tmdb_status, "Ended") == 0 ||
+		    strcmp(item->tmdb_status, "Canceled") == 0) {
+			snprintf(next_val, sizeof(next_val), "Ended");
+		} else if (item->tmdb_next_episode[0]) {
+			snprintf(next_val, sizeof(next_val), "%s", item->tmdb_next_episode);
+		} else {
+			snprintf(next_val, sizeof(next_val), "TBA");
+		}
+		struct wlr_scene_tree *nval_tree = wlr_scene_tree_create(view->tree);
+		if (nval_tree) {
+			wlr_scene_node_set_position(&nval_tree->node, text_x + 160, text_y);
+			StatusModule mod = {0};
+			mod.tree = nval_tree;
+			tray_render_label(&mod, next_val, 0, 16, dim_text);
+		}
+		text_y += 35;
+	}
+
+	/* Overview bar - horizontal bar to the right of details_box (transparent, no background) */
+	if (item->overview[0]) {
+		int overview_bar_x = details_box_x + details_box_w + 85;
+		int overview_bar_y = details_box_y;
+		int overview_bar_w = view->width - overview_bar_x - 40;
+		int overview_bar_h = 80;
+
+		/* Word wrap overview text for horizontal bar */
+		char wrapped[4096];
+		int wrap_width = 800 / 9;  /* Max 800px line width for font size 16 */
+		int src_idx = 0, dst_idx = 0, line_len = 0;
+		int max_lines = 12;  /* Allow more lines to show full overview */
+		int current_line = 0;
+
+		while (item->overview[src_idx] && dst_idx < (int)sizeof(wrapped) - 1 && current_line < max_lines) {
+			char c = item->overview[src_idx++];
+			if (c == '\n' || (line_len >= wrap_width && c == ' ')) {
+				wrapped[dst_idx++] = '\n';
+				line_len = 0;
+				current_line++;
+			} else {
+				wrapped[dst_idx++] = c;
+				line_len++;
+			}
+		}
+		wrapped[dst_idx] = '\0';
+
+		/* Render overview lines in horizontal bar */
+		int ov_text_x = overview_bar_x - 35;
+		int ov_text_y = overview_bar_y + 12;
+		char *line = wrapped;
+		int lines_rendered = 0;
+		while (*line && lines_rendered < max_lines) {
+			char *newline = strchr(line, '\n');
+			if (newline) *newline = '\0';
+
+			struct wlr_scene_tree *line_tree = wlr_scene_tree_create(view->tree);
+			if (line_tree) {
+				wlr_scene_node_set_position(&line_tree->node, ov_text_x, ov_text_y);
+				StatusModule mod = {0};
+				mod.tree = line_tree;
+				tray_render_label(&mod, line, 0, 16, dim_text);
+			}
+			ov_text_y += 20;
+			lines_rendered++;
+
+			if (newline) {
+				line = newline + 1;
+			} else {
+				break;
+			}
+		}
+	}
+
+	/* Play button (for movies) or focus indicator */
+	if (type == MEDIA_VIEW_MOVIES || (type == MEDIA_VIEW_TVSHOWS && view->detail_focus == DETAIL_FOCUS_INFO)) {
+		int btn_y = info_y + poster_h + 30;
+		int btn_w = 160;
+		int btn_h = 50;
+
+		float *btn_bg = (view->detail_focus == DETAIL_FOCUS_INFO) ? selected_bg : hover_bg;
+		drawrect(view->tree, info_x, btn_y, btn_w, btn_h, btn_bg);
+
+		struct wlr_scene_tree *btn_tree = wlr_scene_tree_create(view->tree);
+		if (btn_tree) {
+			wlr_scene_node_set_position(&btn_tree->node, info_x + 50, btn_y + 15);
+			StatusModule mod = {0};
+			mod.tree = btn_tree;
+			tray_render_label(&mod, "▶ Play", 0, 20, text_color);
+		}
+	}
+
+	/* For TV shows: show seasons and episodes columns - placed on right side */
+	if (type == MEDIA_VIEW_TVSHOWS) {
+		/* Position columns on the right side */
+		int panel_y = info_y + poster_h - 190;  /* 150px higher */
+		int panel_h = view->height - panel_y - 30;
+		int col_gap = 15;
+		int season_col_w = 550;
+		int episode_col_w = 550;
+		int episode_col_x = view->width - 40 - episode_col_w;
+		int panel_x = episode_col_x - col_gap - season_col_w;
+		int row_h = 40;
+		int ep_row_h = 55;
+		int header_h = 45;
+
+		/* Seasons column with clipping area */
+		drawrect(view->tree, panel_x, panel_y, season_col_w, panel_h, panel_bg);
+
+		/* Seasons header */
+		struct wlr_scene_tree *sh_tree = wlr_scene_tree_create(view->tree);
+		if (sh_tree) {
+			wlr_scene_node_set_position(&sh_tree->node, panel_x + 12, panel_y + 12);
+			StatusModule mod = {0};
+			mod.tree = sh_tree;
+			tray_render_label(&mod, "Seasons", 0, 16, accent_color);
+		}
+
+		/* Season list with scroll */
+		int content_y = panel_y + header_h;
+		int content_h = panel_h - header_h - 5;
+		int visible_rows = content_h / row_h;
+
+		/* Ensure selected season is visible */
+		if (view->selected_season_idx < view->season_scroll_offset) {
+			view->season_scroll_offset = view->selected_season_idx;
+		} else if (view->selected_season_idx >= view->season_scroll_offset + visible_rows) {
+			view->season_scroll_offset = view->selected_season_idx - visible_rows + 1;
+		}
+		if (view->season_scroll_offset < 0) view->season_scroll_offset = 0;
+
+		MediaSeason *season = view->seasons;
+		int season_idx = 0;
+		/* Skip to scroll offset */
+		while (season && season_idx < view->season_scroll_offset) {
+			season = season->next;
+			season_idx++;
+		}
+
+		int season_y = content_y;
+		while (season && season_y + row_h <= panel_y + panel_h) {
+			int is_selected = (season_idx == view->selected_season_idx);
+			int is_focused = (view->detail_focus == DETAIL_FOCUS_SEASONS);
+
+			float *row_bg = (is_selected && is_focused) ? selected_bg :
+			                (is_selected ? hover_bg : NULL);
+
+			if (row_bg) {
+				drawrect(view->tree, panel_x + 4, season_y, season_col_w - 8, row_h - 4, row_bg);
+			}
+
+			char season_str[64];
+			snprintf(season_str, sizeof(season_str), "Season %d", season->season);
+
+			struct wlr_scene_tree *s_tree = wlr_scene_tree_create(view->tree);
+			if (s_tree) {
+				wlr_scene_node_set_position(&s_tree->node, panel_x + 12, season_y + 10);
+				StatusModule mod = {0};
+				mod.tree = s_tree;
+				float *color = is_selected ? text_color : dim_text;
+				tray_render_label(&mod, season_str, 0, 14, color);
+			}
+
+			season_y += row_h;
+			season_idx++;
+			season = season->next;
+		}
+
+		/* Scroll indicator for seasons if needed */
+		int total_seasons = 0;
+		for (MediaSeason *s = view->seasons; s; s = s->next) total_seasons++;
+		if (total_seasons > visible_rows) {
+			int scroll_track_h = content_h - 10;
+			int scroll_thumb_h = (visible_rows * scroll_track_h) / total_seasons;
+			if (scroll_thumb_h < 20) scroll_thumb_h = 20;
+			int scroll_thumb_y = content_y + 5 + (view->season_scroll_offset * (scroll_track_h - scroll_thumb_h)) / (total_seasons - visible_rows);
+			float scroll_color[4] = {0.3f, 0.3f, 0.4f, 0.6f};
+			drawrect(view->tree, panel_x + season_col_w - 6, scroll_thumb_y, 4, scroll_thumb_h, scroll_color);
+		}
+
+		/* Episodes column */
+		drawrect(view->tree, episode_col_x, panel_y, episode_col_w, panel_h, panel_bg);
+
+		/* Episodes header */
+		struct wlr_scene_tree *eh_tree = wlr_scene_tree_create(view->tree);
+		if (eh_tree) {
+			char ep_header[64];
+			snprintf(ep_header, sizeof(ep_header), "Season %d", view->selected_season);
+			wlr_scene_node_set_position(&eh_tree->node, episode_col_x + 12, panel_y + 12);
+			StatusModule mod = {0};
+			mod.tree = eh_tree;
+			tray_render_label(&mod, ep_header, 0, 16, accent_color);
+		}
+
+		/* Episode list with scroll */
+		int ep_content_y = panel_y + header_h;
+		int ep_content_h = panel_h - header_h - 5;
+		int ep_visible_rows = ep_content_h / ep_row_h;
+
+		/* Ensure selected episode is visible */
+		if (view->selected_episode_idx < view->episode_scroll_offset) {
+			view->episode_scroll_offset = view->selected_episode_idx;
+		} else if (view->selected_episode_idx >= view->episode_scroll_offset + ep_visible_rows) {
+			view->episode_scroll_offset = view->selected_episode_idx - ep_visible_rows + 1;
+		}
+		if (view->episode_scroll_offset < 0) view->episode_scroll_offset = 0;
+
+		MediaItem *ep = view->episodes;
+		int ep_idx = 0;
+		/* Skip to scroll offset */
+		while (ep && ep_idx < view->episode_scroll_offset) {
+			ep = ep->next;
+			ep_idx++;
+		}
+
+		int ep_y = ep_content_y;
+		while (ep && ep_y + ep_row_h <= panel_y + panel_h) {
+			int is_selected = (ep_idx == view->selected_episode_idx);
+			int is_focused = (view->detail_focus == DETAIL_FOCUS_EPISODES);
+
+			float *row_bg = (is_selected && is_focused) ? selected_bg :
+			                (is_selected ? hover_bg : NULL);
+
+			if (row_bg) {
+				drawrect(view->tree, episode_col_x + 4, ep_y, episode_col_w - 12, ep_row_h - 4, row_bg);
+			}
+
+			/* Episode number */
+			char ep_str[300];
+			snprintf(ep_str, sizeof(ep_str), "Episode %d", ep->episode);
+
+			struct wlr_scene_tree *ep_tree = wlr_scene_tree_create(view->tree);
+			if (ep_tree) {
+				wlr_scene_node_set_position(&ep_tree->node, episode_col_x + 12, ep_y + 18);
+				StatusModule mod = {0};
+				mod.tree = ep_tree;
+				float *color = is_selected ? text_color : dim_text;
+				tray_render_label(&mod, ep_str, 0, 14, color);
+			}
+
+			ep_y += ep_row_h;
+			ep_idx++;
+			ep = ep->next;
+		}
+
+		/* Scroll indicator for episodes if needed */
+		if (view->episode_count > ep_visible_rows) {
+			int ep_scroll_track_h = ep_content_h - 10;
+			int ep_scroll_thumb_h = (ep_visible_rows * ep_scroll_track_h) / view->episode_count;
+			if (ep_scroll_thumb_h < 20) ep_scroll_thumb_h = 20;
+			int ep_scroll_thumb_y = ep_content_y + 5;
+			if (view->episode_count > ep_visible_rows) {
+				ep_scroll_thumb_y += (view->episode_scroll_offset * (ep_scroll_track_h - ep_scroll_thumb_h)) / (view->episode_count - ep_visible_rows);
+			}
+			float scroll_color[4] = {0.3f, 0.3f, 0.4f, 0.6f};
+			drawrect(view->tree, episode_col_x + episode_col_w - 8, ep_scroll_thumb_y, 4, ep_scroll_thumb_h, scroll_color);
+		}
+	}
+
+	/* Navigation hint at bottom */
+	struct wlr_scene_tree *hint_tree = wlr_scene_tree_create(view->tree);
+	if (hint_tree) {
+		const char *hint = type == MEDIA_VIEW_MOVIES ?
+		                   "A/Enter: Play   B/Esc: Back" :
+		                   "←→: Switch columns   ↑↓: Navigate   A/Enter: Play   B/Esc: Back";
+		wlr_scene_node_set_position(&hint_tree->node, 60, view->height - 40);
+		StatusModule mod = {0};
+		mod.tree = hint_tree;
+		float hint_color[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+		tray_render_label(&mod, hint, 0, 14, hint_color);
+	}
+}
+
+/* Enter detail view for selected item */
+static void
+media_view_enter_detail(Monitor *m, MediaViewType type)
+{
+	MediaGridView *view = media_get_view(m, type);
+	if (!view || !view->items) return;
+
+	/* Find selected item */
+	MediaItem *item = view->items;
+	for (int i = 0; i < view->selected_idx && item; i++) {
+		item = item->next;
+	}
+	if (!item) return;
+
+	view->in_detail_view = 1;
+	view->detail_item = item;
+	view->detail_focus = DETAIL_FOCUS_INFO;
+
+	/* For TV shows, load seasons */
+	if (type == MEDIA_VIEW_TVSHOWS) {
+		const char *show_name = item->title[0] ? item->title : item->show_name;
+		media_view_fetch_seasons(view, show_name);
+
+		/* Select first season and load its episodes */
+		view->selected_season_idx = 0;
+		view->season_scroll_offset = 0;
+		if (view->seasons) {
+			view->selected_season = view->seasons->season;
+			media_view_fetch_episodes(view, show_name, view->selected_season);
+		}
+		view->selected_episode_idx = 0;
+		view->episode_scroll_offset = 0;
+		view->detail_focus = DETAIL_FOCUS_SEASONS;
+	}
+
+	media_view_render_detail(m, type);
+}
+
+/* Exit detail view back to grid */
+static void
+media_view_exit_detail(Monitor *m, MediaViewType type)
+{
+	MediaGridView *view = media_get_view(m, type);
+	if (!view) return;
+
+	view->in_detail_view = 0;
+	view->detail_item = NULL;
+
+	/* Free TV show data */
+	media_view_free_seasons(view);
+	media_view_free_episodes(view);
+
+	media_view_render(m, type);
 }
 
 /* Ensure selected item is visible (scroll if needed) */
@@ -21226,6 +22275,131 @@ media_view_scroll(Monitor *m, MediaViewType type, int delta)
 	media_view_render(m, type);
 }
 
+/* Handle detail view button input */
+static int
+media_view_handle_detail_button(Monitor *m, MediaViewType type, int button)
+{
+	MediaGridView *view = media_get_view(m, type);
+	if (!view) return 0;
+
+	int needs_render = 0;
+
+	switch (button) {
+	case BTN_EAST:   /* B button - go back to grid */
+		media_view_exit_detail(m, type);
+		return 1;
+
+	case BTN_SOUTH:  /* A button - play selected */
+		if (type == MEDIA_VIEW_MOVIES) {
+			/* Play movie - TODO: launch player */
+			wlr_log(WLR_INFO, "Play movie: %s", view->detail_item ? view->detail_item->title : "unknown");
+		} else if (type == MEDIA_VIEW_TVSHOWS) {
+			if (view->detail_focus == DETAIL_FOCUS_EPISODES && view->episodes) {
+				/* Play selected episode */
+				MediaItem *ep = view->episodes;
+				for (int i = 0; i < view->selected_episode_idx && ep; i++)
+					ep = ep->next;
+				if (ep) {
+					wlr_log(WLR_INFO, "Play episode: S%02dE%02d %s",
+					        ep->season, ep->episode, ep->episode_title);
+				}
+			} else if (view->detail_focus == DETAIL_FOCUS_SEASONS) {
+				/* Move to episodes column */
+				view->detail_focus = DETAIL_FOCUS_EPISODES;
+				view->selected_episode_idx = 0;
+				needs_render = 1;
+			}
+		}
+		break;
+
+	case BTN_DPAD_UP:
+		if (type == MEDIA_VIEW_TVSHOWS) {
+			if (view->detail_focus == DETAIL_FOCUS_SEASONS) {
+				if (view->selected_season_idx > 0) {
+					view->selected_season_idx--;
+					/* Load episodes for new season */
+					MediaSeason *s = view->seasons;
+					for (int i = 0; i < view->selected_season_idx && s; i++)
+						s = s->next;
+					if (s) {
+						view->selected_season = s->season;
+						const char *show = view->detail_item->title[0] ?
+						                   view->detail_item->title : view->detail_item->show_name;
+						media_view_fetch_episodes(view, show, s->season);
+						view->selected_episode_idx = 0;
+						view->episode_scroll_offset = 0;
+					}
+					needs_render = 1;
+				}
+			} else if (view->detail_focus == DETAIL_FOCUS_EPISODES) {
+				if (view->selected_episode_idx > 0) {
+					view->selected_episode_idx--;
+					needs_render = 1;
+				}
+			}
+		}
+		break;
+
+	case BTN_DPAD_DOWN:
+		if (type == MEDIA_VIEW_TVSHOWS) {
+			if (view->detail_focus == DETAIL_FOCUS_SEASONS) {
+				if (view->selected_season_idx < view->season_count - 1) {
+					view->selected_season_idx++;
+					/* Load episodes for new season */
+					MediaSeason *s = view->seasons;
+					for (int i = 0; i < view->selected_season_idx && s; i++)
+						s = s->next;
+					if (s) {
+						view->selected_season = s->season;
+						const char *show = view->detail_item->title[0] ?
+						                   view->detail_item->title : view->detail_item->show_name;
+						media_view_fetch_episodes(view, show, s->season);
+						view->selected_episode_idx = 0;
+						view->episode_scroll_offset = 0;
+					}
+					needs_render = 1;
+				}
+			} else if (view->detail_focus == DETAIL_FOCUS_EPISODES) {
+				if (view->selected_episode_idx < view->episode_count - 1) {
+					view->selected_episode_idx++;
+					needs_render = 1;
+				}
+			}
+		}
+		break;
+
+	case BTN_DPAD_LEFT:
+		if (type == MEDIA_VIEW_TVSHOWS) {
+			if (view->detail_focus == DETAIL_FOCUS_EPISODES) {
+				view->detail_focus = DETAIL_FOCUS_SEASONS;
+				needs_render = 1;
+			}
+		}
+		break;
+
+	case BTN_DPAD_RIGHT:
+		if (type == MEDIA_VIEW_TVSHOWS) {
+			if (view->detail_focus == DETAIL_FOCUS_SEASONS && view->episode_count > 0) {
+				view->detail_focus = DETAIL_FOCUS_EPISODES;
+				needs_render = 1;
+			}
+		}
+		break;
+
+	case BTN_MODE:   /* Guide button */
+		return 0;
+
+	default:
+		return 0;
+	}
+
+	if (needs_render) {
+		media_view_render_detail(m, type);
+	}
+
+	return 1;
+}
+
 static int
 media_view_handle_button(Monitor *m, MediaViewType type, int button, int value)
 {
@@ -21241,6 +22415,11 @@ media_view_handle_button(Monitor *m, MediaViewType type, int button, int value)
 
 	/* Only handle button press */
 	if (value != 1) return 0;
+
+	/* Handle detail view separately */
+	if (view->in_detail_view) {
+		return media_view_handle_detail_button(m, type, button);
+	}
 
 	int old_idx = view->selected_idx;
 	int cols = view->cols > 0 ? view->cols : 5;
@@ -21262,13 +22441,12 @@ media_view_handle_button(Monitor *m, MediaViewType type, int button, int value)
 		if (view->selected_idx < view->item_count - 1)
 			view->selected_idx++;
 		break;
-	case BTN_EAST:   /* B button - go back */
-		media_view_hide(m, type);
+	case BTN_EAST:   /* B button - do nothing in grid view (main views can't be closed) */
 		return 1;
 	case BTN_MODE:   /* Guide button - let main handler show menu overlay */
 		return 0;
-	case BTN_SOUTH:  /* A button - play */
-		/* TODO: Open media player */
+	case BTN_SOUTH:  /* A button - enter detail view */
+		media_view_enter_detail(m, type);
 		return 1;
 	case BTN_TL:     /* LB - scroll up */
 		view->scroll_offset -= 200;
@@ -21288,6 +22466,129 @@ media_view_handle_button(Monitor *m, MediaViewType type, int button, int value)
 	return 1;
 }
 
+/* Handle detail view keyboard input */
+static int
+media_view_handle_detail_key(Monitor *m, MediaViewType type, xkb_keysym_t sym)
+{
+	MediaGridView *view = media_get_view(m, type);
+	if (!view) return 0;
+
+	int needs_render = 0;
+
+	switch (sym) {
+	case XKB_KEY_Escape:
+		media_view_exit_detail(m, type);
+		return 1;
+
+	case XKB_KEY_Return:
+	case XKB_KEY_KP_Enter:
+		if (type == MEDIA_VIEW_MOVIES) {
+			/* Play movie */
+			wlr_log(WLR_INFO, "Play movie: %s", view->detail_item ? view->detail_item->title : "unknown");
+		} else if (type == MEDIA_VIEW_TVSHOWS) {
+			if (view->detail_focus == DETAIL_FOCUS_EPISODES && view->episodes) {
+				MediaItem *ep = view->episodes;
+				for (int i = 0; i < view->selected_episode_idx && ep; i++)
+					ep = ep->next;
+				if (ep) {
+					wlr_log(WLR_INFO, "Play episode: S%02dE%02d %s",
+					        ep->season, ep->episode, ep->episode_title);
+				}
+			} else if (view->detail_focus == DETAIL_FOCUS_SEASONS) {
+				view->detail_focus = DETAIL_FOCUS_EPISODES;
+				view->selected_episode_idx = 0;
+				needs_render = 1;
+			}
+		}
+		break;
+
+	case XKB_KEY_Up:
+	case XKB_KEY_k:
+		if (type == MEDIA_VIEW_TVSHOWS) {
+			if (view->detail_focus == DETAIL_FOCUS_SEASONS) {
+				if (view->selected_season_idx > 0) {
+					view->selected_season_idx--;
+					MediaSeason *s = view->seasons;
+					for (int i = 0; i < view->selected_season_idx && s; i++)
+						s = s->next;
+					if (s) {
+						view->selected_season = s->season;
+						const char *show = view->detail_item->title[0] ?
+						                   view->detail_item->title : view->detail_item->show_name;
+						media_view_fetch_episodes(view, show, s->season);
+						view->selected_episode_idx = 0;
+						view->episode_scroll_offset = 0;
+					}
+					needs_render = 1;
+				}
+			} else if (view->detail_focus == DETAIL_FOCUS_EPISODES) {
+				if (view->selected_episode_idx > 0) {
+					view->selected_episode_idx--;
+					needs_render = 1;
+				}
+			}
+		}
+		break;
+
+	case XKB_KEY_Down:
+	case XKB_KEY_j:
+		if (type == MEDIA_VIEW_TVSHOWS) {
+			if (view->detail_focus == DETAIL_FOCUS_SEASONS) {
+				if (view->selected_season_idx < view->season_count - 1) {
+					view->selected_season_idx++;
+					MediaSeason *s = view->seasons;
+					for (int i = 0; i < view->selected_season_idx && s; i++)
+						s = s->next;
+					if (s) {
+						view->selected_season = s->season;
+						const char *show = view->detail_item->title[0] ?
+						                   view->detail_item->title : view->detail_item->show_name;
+						media_view_fetch_episodes(view, show, s->season);
+						view->selected_episode_idx = 0;
+						view->episode_scroll_offset = 0;
+					}
+					needs_render = 1;
+				}
+			} else if (view->detail_focus == DETAIL_FOCUS_EPISODES) {
+				if (view->selected_episode_idx < view->episode_count - 1) {
+					view->selected_episode_idx++;
+					needs_render = 1;
+				}
+			}
+		}
+		break;
+
+	case XKB_KEY_Left:
+	case XKB_KEY_h:
+		if (type == MEDIA_VIEW_TVSHOWS) {
+			if (view->detail_focus == DETAIL_FOCUS_EPISODES) {
+				view->detail_focus = DETAIL_FOCUS_SEASONS;
+				needs_render = 1;
+			}
+		}
+		break;
+
+	case XKB_KEY_Right:
+	case XKB_KEY_l:
+		if (type == MEDIA_VIEW_TVSHOWS) {
+			if (view->detail_focus == DETAIL_FOCUS_SEASONS && view->episode_count > 0) {
+				view->detail_focus = DETAIL_FOCUS_EPISODES;
+				needs_render = 1;
+			}
+		}
+		break;
+
+	default:
+		return 0;
+	}
+
+	if (needs_render) {
+		media_view_render_detail(m, type);
+	}
+
+	return 1;
+}
+
 static int
 media_view_handle_key(Monitor *m, MediaViewType type, xkb_keysym_t sym)
 {
@@ -21301,16 +22602,22 @@ media_view_handle_key(Monitor *m, MediaViewType type, xkb_keysym_t sym)
 	/* Only handle input if view is visible AND on current tag */
 	if (!htpc_view_is_active(m, view->view_tag, view->visible)) return 0;
 
+	/* Handle detail view separately */
+	if (view->in_detail_view) {
+		return media_view_handle_detail_key(m, type, sym);
+	}
+
 	int old_idx = view->selected_idx;
 	int cols = view->cols > 0 ? view->cols : 5;
 
 	switch (sym) {
 	case XKB_KEY_Escape:
-		media_view_hide(m, type);
+		/* Do nothing in grid view - main views can't be closed */
 		return 1;
 	case XKB_KEY_Return:
 	case XKB_KEY_KP_Enter:
-		/* TODO: Play selected media */
+		/* Enter detail view */
+		media_view_enter_detail(m, type);
 		return 1;
 	case XKB_KEY_Up:
 	case XKB_KEY_k:
@@ -22118,20 +23425,79 @@ gamepad_update_cursor(void)
 					}
 
 					if (should_move) {
-						int cols = view->cols > 0 ? view->cols : 5;
-						int old_idx = view->selected_idx;
+						/* Handle detail view navigation for TV shows */
+						if (view->in_detail_view && view_type == MEDIA_VIEW_TVSHOWS) {
+							int needs_render = 0;
 
-						if (nav_x == -1 && view->selected_idx > 0)
-							view->selected_idx--;
-						else if (nav_x == 1 && view->selected_idx < view->item_count - 1)
-							view->selected_idx++;
-						if (nav_y == -1 && view->selected_idx >= cols)
-							view->selected_idx -= cols;
-						else if (nav_y == 1 && view->selected_idx + cols < view->item_count)
-							view->selected_idx += cols;
+							/* Left/Right switches between seasons and episodes */
+							if (nav_x == -1 && view->detail_focus == DETAIL_FOCUS_EPISODES) {
+								view->detail_focus = DETAIL_FOCUS_SEASONS;
+								needs_render = 1;
+							} else if (nav_x == 1 && view->detail_focus == DETAIL_FOCUS_SEASONS && view->episode_count > 0) {
+								view->detail_focus = DETAIL_FOCUS_EPISODES;
+								needs_render = 1;
+							}
 
-						if (view->selected_idx != old_idx)
-							media_view_render(media_mon, view_type);
+							/* Up/Down navigates within the current column */
+							if (view->detail_focus == DETAIL_FOCUS_SEASONS) {
+								if (nav_y == -1 && view->selected_season_idx > 0) {
+									view->selected_season_idx--;
+									MediaSeason *s = view->seasons;
+									for (int i = 0; i < view->selected_season_idx && s; i++)
+										s = s->next;
+									if (s) {
+										view->selected_season = s->season;
+										const char *show = view->detail_item->title[0] ?
+										                   view->detail_item->title : view->detail_item->show_name;
+										media_view_fetch_episodes(view, show, s->season);
+										view->selected_episode_idx = 0;
+										view->episode_scroll_offset = 0;
+									}
+									needs_render = 1;
+								} else if (nav_y == 1 && view->selected_season_idx < view->season_count - 1) {
+									view->selected_season_idx++;
+									MediaSeason *s = view->seasons;
+									for (int i = 0; i < view->selected_season_idx && s; i++)
+										s = s->next;
+									if (s) {
+										view->selected_season = s->season;
+										const char *show = view->detail_item->title[0] ?
+										                   view->detail_item->title : view->detail_item->show_name;
+										media_view_fetch_episodes(view, show, s->season);
+										view->selected_episode_idx = 0;
+										view->episode_scroll_offset = 0;
+									}
+									needs_render = 1;
+								}
+							} else if (view->detail_focus == DETAIL_FOCUS_EPISODES) {
+								if (nav_y == -1 && view->selected_episode_idx > 0) {
+									view->selected_episode_idx--;
+									needs_render = 1;
+								} else if (nav_y == 1 && view->selected_episode_idx < view->episode_count - 1) {
+									view->selected_episode_idx++;
+									needs_render = 1;
+								}
+							}
+
+							if (needs_render)
+								media_view_render_detail(media_mon, view_type);
+						} else {
+							/* Grid view navigation */
+							int cols = view->cols > 0 ? view->cols : 5;
+							int old_idx = view->selected_idx;
+
+							if (nav_x == -1 && view->selected_idx > 0)
+								view->selected_idx--;
+							else if (nav_x == 1 && view->selected_idx < view->item_count - 1)
+								view->selected_idx++;
+							if (nav_y == -1 && view->selected_idx >= cols)
+								view->selected_idx -= cols;
+							else if (nav_y == 1 && view->selected_idx + cols < view->item_count)
+								view->selected_idx += cols;
+
+							if (view->selected_idx != old_idx)
+								media_view_render(media_mon, view_type);
+						}
 					}
 				} else {
 					/* Reset repeat state when joystick returns to center */

@@ -21,4 +21,7 @@ int scanner_scan_directory(const char *path);
 /* Fetch TMDB metadata for entries that don't have it */
 void scanner_fetch_missing_tmdb(void);
 
+/* Refresh show status (status + next_episode_date) for active shows */
+void scanner_refresh_show_status(void);
+
 #endif /* SCANNER_H */

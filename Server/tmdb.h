@@ -37,6 +37,9 @@ typedef struct {
     char *genres;
     int number_of_seasons;
     int number_of_episodes;
+    int episode_run_time;     /* Typical episode runtime in minutes */
+    char *status;             /* "Returning Series", "Ended", "Canceled", etc. */
+    char *next_episode_date;  /* YYYY-MM-DD of next episode, NULL if none */
 } TmdbTvShow;
 
 typedef struct {
@@ -70,6 +73,9 @@ TmdbTvShow *tmdb_search_tvshow_ex(const char *title, int api_filter_year, int wa
 
 /* Get episode details */
 TmdbEpisode *tmdb_get_episode(int tv_id, int season, int episode);
+
+/* Get show status (status + next_episode_date) - lightweight refresh */
+TmdbTvShow *tmdb_get_show_status(int tv_id);
 
 /* Download image to local cache, returns local path */
 char *tmdb_download_image(const char *tmdb_path, const char *size, const char *cache_dir);

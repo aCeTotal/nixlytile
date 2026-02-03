@@ -376,6 +376,76 @@ TmdbTvShow *tmdb_search_tvshow_ex(const char *title, int api_filter_year, int wa
     t->number_of_seasons = get_int(json, "number_of_seasons");
     t->number_of_episodes = get_int(json, "number_of_episodes");
 
+    /* episode_run_time is an array - take the first value */
+    cJSON *runtimes = cJSON_GetObjectItem(json, "episode_run_time");
+    if (runtimes && cJSON_IsArray(runtimes) && cJSON_GetArraySize(runtimes) > 0) {
+        cJSON *first = cJSON_GetArrayItem(runtimes, 0);
+        if (first && cJSON_IsNumber(first)) {
+            t->episode_run_time = first->valueint;
+        }
+    }
+
+    /* Fallback: use last_episode_to_air.runtime if episode_run_time array was empty */
+    if (t->episode_run_time == 0) {
+        cJSON *last_ep = cJSON_GetObjectItem(json, "last_episode_to_air");
+        if (last_ep && cJSON_IsObject(last_ep)) {
+            t->episode_run_time = get_int(last_ep, "runtime");
+        }
+    }
+
+    /* Show status: "Returning Series", "Ended", "Canceled", etc. */
+    t->status = get_string(json, "status");
+
+    /* Next episode to air */
+    cJSON *next_ep = cJSON_GetObjectItem(json, "next_episode_to_air");
+    if (next_ep && cJSON_IsObject(next_ep)) {
+        t->next_episode_date = get_string(next_ep, "air_date");
+    }
+
+    cJSON_Delete(json);
+    return t;
+}
+
+/* Lightweight fetch: get just show status and next episode date */
+TmdbTvShow *tmdb_get_show_status(int tv_id) {
+    char endpoint[256];
+    snprintf(endpoint, sizeof(endpoint), "/tv/%d", tv_id);
+
+    char *response = tmdb_request(endpoint);
+    if (!response) return NULL;
+
+    cJSON *json = cJSON_Parse(response);
+    free(response);
+    if (!json) return NULL;
+
+    TmdbTvShow *t = calloc(1, sizeof(TmdbTvShow));
+    t->tmdb_id = get_int(json, "id");
+    t->status = get_string(json, "status");
+    t->number_of_seasons = get_int(json, "number_of_seasons");
+    t->number_of_episodes = get_int(json, "number_of_episodes");
+
+    /* episode_run_time array */
+    cJSON *runtimes = cJSON_GetObjectItem(json, "episode_run_time");
+    if (runtimes && cJSON_IsArray(runtimes) && cJSON_GetArraySize(runtimes) > 0) {
+        cJSON *first = cJSON_GetArrayItem(runtimes, 0);
+        if (first && cJSON_IsNumber(first)) {
+            t->episode_run_time = first->valueint;
+        }
+    }
+
+    /* Fallback: use last_episode_to_air.runtime */
+    if (t->episode_run_time == 0) {
+        cJSON *last_ep = cJSON_GetObjectItem(json, "last_episode_to_air");
+        if (last_ep && cJSON_IsObject(last_ep)) {
+            t->episode_run_time = get_int(last_ep, "runtime");
+        }
+    }
+
+    cJSON *next_ep = cJSON_GetObjectItem(json, "next_episode_to_air");
+    if (next_ep && cJSON_IsObject(next_ep)) {
+        t->next_episode_date = get_string(next_ep, "air_date");
+    }
+
     cJSON_Delete(json);
     return t;
 }
@@ -491,6 +561,8 @@ void tmdb_free_tvshow(TmdbTvShow *t) {
     free(t->backdrop_path);
     free(t->first_air_date);
     free(t->genres);
+    free(t->status);
+    free(t->next_episode_date);
     free(t);
 }
 

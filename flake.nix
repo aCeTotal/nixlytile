@@ -170,6 +170,7 @@
 
             nativeBuildInputs = [
               pkgs.pkg-config
+              pkgs.autoPatchelfHook
             ];
 
             buildInputs = [

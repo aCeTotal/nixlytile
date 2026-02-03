@@ -78,6 +78,9 @@ static void *sync_thread(void *arg) {
 
         /* Fetch any missing TMDB metadata */
         scanner_fetch_missing_tmdb();
+
+        /* Refresh show status (next episode dates, ended status) */
+        scanner_refresh_show_status();
     }
 
     return NULL;
@@ -366,6 +369,66 @@ static void handle_api(int fd, const char *path) {
             send_error(fd, 500, "Database error");
         }
     }
+    else if (strncmp(path, "/api/show/", 10) == 0) {
+        /* /api/show/{show_name}/seasons or /api/show/{show_name}/episodes/{season} */
+        char show_name[256];
+        char *show_start = (char *)path + 10;
+        char *seasons_pos = strstr(show_start, "/seasons");
+        char *episodes_pos = strstr(show_start, "/episodes/");
+
+        if (seasons_pos) {
+            /* Extract show name (URL decoded) */
+            size_t name_len = seasons_pos - show_start;
+            if (name_len >= sizeof(show_name)) name_len = sizeof(show_name) - 1;
+            strncpy(show_name, show_start, name_len);
+            show_name[name_len] = '\0';
+
+            /* Simple URL decode for spaces */
+            for (char *p = show_name; *p; p++) {
+                if (*p == '+') *p = ' ';
+                else if (*p == '%' && p[1] == '2' && p[2] == '0') {
+                    *p = ' ';
+                    memmove(p + 1, p + 3, strlen(p + 3) + 1);
+                }
+            }
+
+            char *json = database_get_show_seasons_json(show_name);
+            if (json) {
+                send_response(fd, 200, "OK", "application/json", json, strlen(json));
+                free(json);
+            } else {
+                send_error(fd, 500, "Database error");
+            }
+        }
+        else if (episodes_pos) {
+            /* Extract show name */
+            size_t name_len = episodes_pos - show_start;
+            if (name_len >= sizeof(show_name)) name_len = sizeof(show_name) - 1;
+            strncpy(show_name, show_start, name_len);
+            show_name[name_len] = '\0';
+
+            /* Simple URL decode */
+            for (char *p = show_name; *p; p++) {
+                if (*p == '+') *p = ' ';
+                else if (*p == '%' && p[1] == '2' && p[2] == '0') {
+                    *p = ' ';
+                    memmove(p + 1, p + 3, strlen(p + 3) + 1);
+                }
+            }
+
+            int season = atoi(episodes_pos + 10);
+            char *json = database_get_show_episodes_json(show_name, season);
+            if (json) {
+                send_response(fd, 200, "OK", "application/json", json, strlen(json));
+                free(json);
+            } else {
+                send_error(fd, 500, "Database error");
+            }
+        }
+        else {
+            send_error(fd, 400, "Invalid show endpoint");
+        }
+    }
     else if (strcmp(path, "/api/scan") == 0) {
         /* Trigger library rescan */
         printf("API: Starting rescan...\n");
@@ -650,6 +713,9 @@ int main(int argc, char *argv[]) {
 
     /* Fetch TMDB metadata for any entries missing it */
     scanner_fetch_missing_tmdb();
+
+    /* Refresh show status (next episode dates, ended status) */
+    scanner_refresh_show_status();
 
     /* Initialize file watcher */
     if (watcher_init() == 0) {

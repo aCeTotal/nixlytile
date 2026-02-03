@@ -58,6 +58,13 @@ typedef struct {
     char *episode_title;  /* Episode name from TMDB */
     char *episode_overview;
     char *still_path;     /* Episode screenshot */
+
+    /* TMDB show totals (stored per-episode, aggregated for show view) */
+    int tmdb_total_seasons;    /* Total seasons from TMDB */
+    int tmdb_total_episodes;   /* Total episodes from TMDB */
+    int tmdb_episode_runtime;  /* Typical episode runtime in minutes from TMDB */
+    char *tmdb_status;         /* "Returning Series", "Ended", "Canceled", etc. */
+    char *tmdb_next_episode;   /* YYYY-MM-DD of next episode air date */
 } MediaEntry;
 
 typedef struct {
@@ -109,6 +116,8 @@ char *database_get_library_json(void);
 char *database_get_movies_json(void);
 char *database_get_tvshows_json(void);
 char *database_get_media_json(int id);
+char *database_get_show_seasons_json(const char *show_name);
+char *database_get_show_episodes_json(const char *show_name, int season);
 
 /* Retro gaming functions */
 int database_add_rom(RomEntry *entry);
@@ -119,6 +128,13 @@ char *database_get_rom_filepath(int id);
 char *database_get_roms_json(void);
 char *database_get_roms_by_console_json(ConsoleType console);
 char *database_get_rom_json(int id);
+
+/* Update show status and totals for all episodes of a show */
+int database_update_show_status(int tmdb_show_id, const char *status, const char *next_episode,
+                                int total_seasons, int total_episodes, int episode_runtime);
+
+/* Get unique TMDB show IDs for active (non-ended) shows */
+int database_get_active_show_ids(int **ids, int *count);
 
 /* Free entries */
 void database_free_entry(MediaEntry *entry);
