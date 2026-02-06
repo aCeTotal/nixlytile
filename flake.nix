@@ -104,6 +104,12 @@
 
             # Notifications
             libnotify          # notify-send
+
+            # Virtual keyboard input
+            wtype              # for on-screen keyboard
+
+            # Browser for streaming services (NRK, F1TV)
+            chromium
           ];
           defaultPackage = pkgs.stdenv.mkDerivation {
             pname = "nixlytile";
@@ -171,6 +177,7 @@
             nativeBuildInputs = [
               pkgs.pkg-config
               pkgs.autoPatchelfHook
+              pkgs.makeWrapper
             ];
 
             buildInputs = [
@@ -190,6 +197,8 @@
               runHook preInstall
               mkdir -p $out/bin
               cp nixly-server $out/bin/
+              wrapProgram $out/bin/nixly-server \
+                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.ffmpeg ]}
               runHook postInstall
             '';
 

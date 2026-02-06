@@ -47,6 +47,9 @@ void config_init_defaults(void) {
     strcpy(server_config.tmdb_language, "en-US");
     strcpy(server_config.cache_dir, "~/.cache/nixly-server");
 
+    /* Transcoder output directory (empty = Nixly_Media per source path) */
+    server_config.output_path[0] = '\0';
+
     /* Default: watch all of /home/total/media/ */
     strcpy(server_config.media_paths[0], "/home/total/media");
     server_config.media_path_count = 1;
@@ -104,6 +107,9 @@ int config_load(const char *path) {
         }
         else if (strcmp(key, "cache_dir") == 0) {
             expand_path(value, server_config.cache_dir, sizeof(server_config.cache_dir));
+        }
+        else if (strcmp(key, "output_path") == 0) {
+            expand_path(value, server_config.output_path, sizeof(server_config.output_path));
         }
         else if (strcmp(key, "movies_path") == 0) {
             if (server_config.movies_path_count < MAX_WATCH_PATHS) {
@@ -163,6 +169,12 @@ int config_save(const char *path) {
 
     fprintf(f, "# Cache directory for thumbnails\n");
     fprintf(f, "cache_dir = %s\n\n", server_config.cache_dir);
+
+    fprintf(f, "# Transcoder output override (empty = Nixly_Media inside each source path)\n");
+    if (server_config.output_path[0])
+        fprintf(f, "output_path = %s\n\n", server_config.output_path);
+    else
+        fprintf(f, "# output_path =\n\n");
 
     fprintf(f, "# Movies directories (can have multiple)\n");
     for (int i = 0; i < server_config.movies_path_count; i++) {

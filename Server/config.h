@@ -33,6 +33,9 @@ typedef struct {
 
     /* Cache directory for thumbnails */
     char cache_dir[MAX_PATH_LEN];
+
+    /* Transcoder output override (empty = Nixly_Media inside each source path) */
+    char output_path[MAX_PATH_LEN];
 } ServerConfig;
 
 /* Global config */

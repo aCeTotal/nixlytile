@@ -26,6 +26,7 @@
 #include "config.h"
 #include "tmdb.h"
 #include "watcher.h"
+#include "transcoder.h"
 
 #define MAX_CONNECTIONS 100
 #define BUFFER_SIZE 65536
@@ -38,15 +39,24 @@
 static int server_fd = -1;
 static int discovery_fd = -1;
 static volatile int running = 1;
+static volatile int transcoder_restart_pending = 0;
 
 /* Periodic sync thread - checks for changes every 5 minutes as backup to inotify */
 static void *sync_thread(void *arg) {
     (void)arg;
 
     while (running) {
-        /* Sleep for 5 minutes */
+        /* Sleep for 5 minutes, but check transcoder restart flag every second */
         for (int i = 0; i < 300 && running; i++) {
             sleep(1);
+
+            /* Check if transcoder needs restart (new files arrived while running) */
+            if (transcoder_restart_pending &&
+                transcoder_get_state() == TRANSCODE_IDLE) {
+                transcoder_restart_pending = 0;
+                printf("Restarting transcoder for newly detected files...\n");
+                transcoder_start();
+            }
         }
 
         if (!running) break;
@@ -81,6 +91,11 @@ static void *sync_thread(void *arg) {
 
         /* Refresh show status (next episode dates, ended status) */
         scanner_refresh_show_status();
+
+        /* Start transcoder if idle (will pick up any unconverted files) */
+        if (transcoder_get_state() == TRANSCODE_IDLE) {
+            transcoder_start();
+        }
     }
 
     return NULL;
@@ -148,7 +163,7 @@ typedef struct {
     struct sockaddr_in client_addr;
 } ClientConnection;
 
-/* File change callback - keeps database in sync */
+/* File change callback - keeps database in sync and triggers transcoding */
 static void on_file_change(const char *filepath, int is_delete, WatchType type) {
     (void)type; /* We handle all types the same for now */
 
@@ -158,11 +173,28 @@ static void on_file_change(const char *filepath, int is_delete, WatchType type) 
             printf("DB: Removed %s\n", filepath);
         }
     } else {
-        /* Add to database if it's a media file */
+        /* Check if it's a media file that needs processing */
         if (scanner_is_media_file(filepath)) {
-            int id = scanner_scan_file(filepath, 1);
-            if (id > 0) {
-                printf("DB: Added %s (id=%d)\n", filepath, id);
+            /* Skip already converted files */
+            const char *base = strrchr(filepath, '/');
+            base = base ? base + 1 : filepath;
+            if (strstr(base, ".x265.CRF14") != NULL) {
+                /* This is an output file from transcoder, add to DB */
+                int id = scanner_scan_file(filepath, 1);
+                if (id > 0) {
+                    printf("DB: Added converted file %s (id=%d)\n", filepath, id);
+                }
+            } else {
+                /* New source file detected - trigger transcoder if idle */
+                printf("New media file detected: %s\n", filepath);
+                if (transcoder_get_state() == TRANSCODE_IDLE) {
+                    printf("Starting transcoder for new files...\n");
+                    transcoder_start();
+                } else {
+                    /* Mark for restart when current run finishes */
+                    transcoder_restart_pending = 1;
+                    printf("Transcoder running, will restart when done\n");
+                }
             }
         }
     }
@@ -451,6 +483,37 @@ static void handle_api(int fd, const char *path) {
         send_response(fd, 200, "OK", "application/json",
                      "{\"status\": \"tmdb refresh complete\"}", 35);
     }
+    else if (strcmp(path, "/api/transcode/status") == 0) {
+        const char *state_str = "idle";
+        TranscodeState ts = transcoder_get_state();
+        if (ts == TRANSCODE_RUNNING) state_str = "running";
+        else if (ts == TRANSCODE_STOPPED) state_str = "stopped";
+
+        char json[512];
+        int len = snprintf(json, sizeof(json),
+            "{\"state\":\"%s\",\"current\":\"%s\",\"completed\":%d,\"total\":%d,\"percent\":%.1f}",
+            state_str,
+            transcoder_get_current_file(),
+            transcoder_get_completed_jobs(),
+            transcoder_get_total_jobs(),
+            transcoder_get_progress());
+        send_response(fd, 200, "OK", "application/json", json, len);
+    }
+    else if (strcmp(path, "/api/transcode/start") == 0) {
+        if (transcoder_get_state() == TRANSCODE_RUNNING) {
+            send_response(fd, 200, "OK", "application/json",
+                         "{\"status\":\"already running\"}", 28);
+        } else {
+            transcoder_start();
+            send_response(fd, 200, "OK", "application/json",
+                         "{\"status\":\"started\"}", 20);
+        }
+    }
+    else if (strcmp(path, "/api/transcode/stop") == 0) {
+        transcoder_stop();
+        send_response(fd, 200, "OK", "application/json",
+                     "{\"status\":\"stopped\"}", 20);
+    }
     else if (strncmp(path, "/api/media/", 11) == 0) {
         /* Get media info by ID */
         int id = atoi(path + 11);
@@ -675,6 +738,14 @@ int main(int argc, char *argv[]) {
     }
     mkdir(server_config.cache_dir, 0755);
 
+    /* Expand output path */
+    if (server_config.output_path[0] == '~' && home) {
+        char out_expanded[MAX_PATH];
+        snprintf(out_expanded, sizeof(out_expanded), "%s%s",
+                 home, server_config.output_path + 1);
+        strcpy(server_config.output_path, out_expanded);
+    }
+
     /* Initialize database */
     if (database_init(server_config.db_path) != 0) {
         fprintf(stderr, "Failed to initialize database\n");
@@ -739,6 +810,10 @@ int main(int argc, char *argv[]) {
 
         watcher_start();
     }
+
+    /* Initialize and start transcoder */
+    transcoder_init();
+    transcoder_start();
 
     /* Create server socket */
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -814,6 +889,7 @@ int main(int argc, char *argv[]) {
     }
 
     /* Cleanup */
+    transcoder_cleanup();
     if (discovery_fd >= 0) {
         close(discovery_fd);
         discovery_fd = -1;

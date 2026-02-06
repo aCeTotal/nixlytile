@@ -86,6 +86,7 @@
 #include <wlr/types/wlr_single_pixel_buffer_v1.h>
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_tearing_control_v1.h>
+#include <wlr/types/wlr_text_input_v3.h>
 #include <wlr/types/wlr_viewporter.h>
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
 #include <wlr/types/wlr_virtual_pointer_v1.h>
@@ -436,6 +437,26 @@ typedef struct {
 	struct wl_event_source *wait_timer; /* timer to poll child exit */
 } SudoPopup;
 
+/* On-screen keyboard for HTPC mode */
+#define OSK_ROWS 5
+#define OSK_COLS 12
+typedef struct {
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_tree *bg;
+	int visible;
+	int width, height;
+	int sel_row, sel_col;        /* currently selected key */
+	int shift_active;            /* 1 = shift/uppercase mode */
+	int caps_lock;               /* 1 = caps lock on */
+	char input_buffer[1024];     /* text being composed */
+	int input_len;
+	int input_cursor;
+	void (*callback)(const char *text, void *data);  /* called when Enter pressed */
+	void *callback_data;
+	/* Target client for key injection */
+	struct wlr_surface *target_surface;
+} OnScreenKeyboard;
+
 /* Gamepad menu item */
 typedef struct {
 	const char *label;
@@ -448,6 +469,7 @@ typedef struct {
 	struct wlr_scene_tree *bg;
 	struct wlr_scene_tree *dim;  /* fullscreen dim overlay */
 	int visible;
+	int x, y;      /* position on screen */
 	int width, height;
 	int selected;  /* currently selected menu item (0-2) */
 	int item_count;
@@ -897,6 +919,15 @@ typedef struct {
 } KeyboardGroup;
 
 typedef struct {
+	struct wlr_text_input_v3 *text_input;
+	struct wl_list link;
+	struct wl_listener enable;
+	struct wl_listener disable;
+	struct wl_listener commit;
+	struct wl_listener destroy;
+} TextInput;
+
+typedef struct {
 	/* Must keep this field first */
 	unsigned int type; /* LayerShell */
 
@@ -936,6 +967,7 @@ struct Monitor {
 	NixpkgsOverlay nixpkgs;
 	WifiPasswordPopup wifi_popup;
 	SudoPopup sudo_popup;
+	OnScreenKeyboard osk;
 	GamepadMenu gamepad_menu;
 	PcGamingView pc_gaming;
 	RetroGamingView retro_gaming;
@@ -1270,6 +1302,15 @@ static Monitor *sudo_popup_visible_monitor(void);
 static void sudo_popup_execute(Monitor *m);
 static int sudo_popup_cb(int fd, uint32_t mask, void *data);
 static int sudo_popup_wait_timer(void *data);
+static void osk_show(Monitor *m, struct wlr_surface *target);
+static void osk_hide(Monitor *m);
+static void osk_hide_all(void);
+static void osk_render(Monitor *m);
+static int osk_handle_button(Monitor *m, int button, int value);
+static Monitor *osk_visible_monitor(void);
+static void osk_send_key(Monitor *m);
+static void osk_send_backspace(Monitor *m);
+static void osk_send_text(const char *text);
 static int status_task_hover_active(void (*fn)(void));
 static void trigger_status_task_now(void (*fn)(void));
 static int public_ip_event_cb(int fd, uint32_t mask, void *data);
@@ -1454,6 +1495,7 @@ static int is_steam_client(Client *c);
 static int is_steam_popup(Client *c);
 static int is_steam_child_process(pid_t pid);
 static int is_steam_game(Client *c);
+static int is_browser_client(Client *c);
 static int looks_like_game(Client *c);
 static int game_refocus_timer_cb(void *data);
 static void schedule_game_refocus(Client *c, uint32_t ms);
@@ -1471,6 +1513,7 @@ static void gamepad_menu_hide_all(void);
 static Monitor *gamepad_menu_visible_monitor(void);
 static void gamepad_menu_render(Monitor *m);
 static int gamepad_menu_handle_button(Monitor *m, int button, int value);
+static int gamepad_menu_handle_click(Monitor *m, int cx, int cy, uint32_t button);
 static void gamepad_menu_select(Monitor *m);
 static void gamepad_device_add(const char *path);
 static void gamepad_device_remove(const char *path);
@@ -1493,6 +1536,8 @@ static void gamepad_update_grab_state(void);
 static int gamepad_should_grab(void);
 static void cec_switch_to_active_source(void);
 static void steam_launch_bigpicture(void);
+static void steam_kill(void);
+static void live_tv_kill(void);
 
 /* Bluetooth controller auto-pairing */
 static int bt_bus_event_cb(int fd, uint32_t mask, void *data);
@@ -1705,6 +1750,9 @@ static struct wlr_content_type_manager_v1 *content_type_mgr;
 static struct wlr_tearing_control_manager_v1 *tearing_control_mgr;
 static struct wlr_virtual_keyboard_manager_v1 *virtual_keyboard_mgr;
 static struct wlr_virtual_pointer_manager_v1 *virtual_pointer_mgr;
+static struct wlr_text_input_manager_v3 *text_input_mgr;
+static struct wlr_text_input_v3 *active_text_input;
+static struct wl_list text_inputs; /* TextInput.link */
 static struct wlr_cursor_shape_manager_v1 *cursor_shape_mgr;
 static struct wlr_output_power_manager_v1 *power_mgr;
 
@@ -1790,10 +1838,22 @@ static int htpc_page_pcgaming = 1;
 static int htpc_page_retrogaming = 1;
 static int htpc_page_movies = 1;
 static int htpc_page_tvshows = 1;
+static int htpc_page_nrk = 1;
+static int htpc_page_netflix = 1;
+static int htpc_page_viaplay = 1;
+static int htpc_page_tv2play = 1;
+static int htpc_page_f1tv = 1;
 static int htpc_page_quit = 1;
 
+/* Streaming service URLs */
+#define NRK_URL "https://nrk.no/direkte/nrk1"
+#define NETFLIX_URL "https://www.netflix.com/browse"
+#define VIAPLAY_URL "https://viaplay.no"
+#define TV2PLAY_URL "https://play.tv2.no"
+#define F1TV_URL "https://f1tv.formula1.com/detail/1000005614/f1-live"
+
 /* Built HTPC menu based on enabled pages */
-#define HTPC_MENU_MAX_ITEMS 8
+#define HTPC_MENU_MAX_ITEMS 12
 static struct {
 	char label[64];
 	char command[256];
@@ -1823,6 +1883,32 @@ static void htpc_menu_build(void)
 	if (htpc_page_pcgaming) {
 		snprintf(htpc_menu_items[htpc_menu_item_count].label, 64, "PC-gaming");
 		htpc_menu_items[htpc_menu_item_count].command[0] = '\0';
+		htpc_menu_item_count++;
+	}
+	/* Live TV streaming services */
+	if (htpc_page_nrk) {
+		snprintf(htpc_menu_items[htpc_menu_item_count].label, 64, "NRK");
+		snprintf(htpc_menu_items[htpc_menu_item_count].command, 256, "%s", NRK_URL);
+		htpc_menu_item_count++;
+	}
+	if (htpc_page_netflix) {
+		snprintf(htpc_menu_items[htpc_menu_item_count].label, 64, "Netflix");
+		snprintf(htpc_menu_items[htpc_menu_item_count].command, 256, "%s", NETFLIX_URL);
+		htpc_menu_item_count++;
+	}
+	if (htpc_page_viaplay) {
+		snprintf(htpc_menu_items[htpc_menu_item_count].label, 64, "Viaplay");
+		snprintf(htpc_menu_items[htpc_menu_item_count].command, 256, "%s", VIAPLAY_URL);
+		htpc_menu_item_count++;
+	}
+	if (htpc_page_tv2play) {
+		snprintf(htpc_menu_items[htpc_menu_item_count].label, 64, "TV2 Play");
+		snprintf(htpc_menu_items[htpc_menu_item_count].command, 256, "%s", TV2PLAY_URL);
+		htpc_menu_item_count++;
+	}
+	if (htpc_page_f1tv) {
+		snprintf(htpc_menu_items[htpc_menu_item_count].label, 64, "F1TV");
+		snprintf(htpc_menu_items[htpc_menu_item_count].command, 256, "%s", F1TV_URL);
 		htpc_menu_item_count++;
 	}
 }
@@ -1970,6 +2056,11 @@ static struct wl_event_source *hz_osd_timer = NULL;
 static struct wl_event_source *pc_gaming_install_timer = NULL;
 static struct wl_event_source *game_refocus_timer = NULL;
 static struct wl_event_source *media_view_poll_timer = NULL;
+static struct wl_event_source *osk_dpad_repeat_timer = NULL;
+static int osk_dpad_held_button = 0;  /* BTN_DPAD_UP/DOWN/LEFT/RIGHT or 0 if none */
+static Monitor *osk_dpad_held_mon = NULL;
+#define OSK_DPAD_INITIAL_DELAY 400  /* ms before repeat starts */
+#define OSK_DPAD_REPEAT_RATE 50     /* ms between repeats (fast sliding) */
 static Client *game_refocus_client = NULL;
 static char wifi_scan_buf[8192];
 static size_t wifi_scan_len = 0;
@@ -2171,6 +2262,9 @@ static struct wl_listener new_idle_inhibitor = {.notify = createidleinhibitor};
 static struct wl_listener new_input_device = {.notify = inputdevice};
 static struct wl_listener new_virtual_keyboard = {.notify = virtualkeyboard};
 static struct wl_listener new_virtual_pointer = {.notify = virtualpointer};
+static void textinput(struct wl_listener *listener, void *data);
+static void text_input_focus_change(struct wlr_surface *old, struct wlr_surface *new);
+static struct wl_listener new_text_input = {.notify = textinput};
 static struct wl_listener new_pointer_constraint = {.notify = createpointerconstraint};
 static struct wl_listener new_output = {.notify = createmon};
 static struct wl_listener new_xdg_toplevel = {.notify = createnotify};
@@ -9119,6 +9213,8 @@ wifi_popup_hide(Monitor *m)
 	m->wifi_popup.error = 0;
 	m->wifi_popup.try_saved = 0;
 	wlr_scene_node_set_enabled(&m->wifi_popup.tree->node, 0);
+	/* Also hide on-screen keyboard */
+	osk_hide(m);
 }
 
 static void
@@ -9148,6 +9244,10 @@ wifi_popup_show(Monitor *m, const char *ssid)
 	m->wifi_popup.visible = 1;
 
 	wifi_popup_render(m);
+
+	/* Show on-screen keyboard in HTPC mode */
+	if (htpc_mode_active)
+		osk_show(m, NULL);
 }
 
 static void
@@ -9562,6 +9662,8 @@ sudo_popup_hide(Monitor *m)
 	}
 	if (m->sudo_popup.tree)
 		wlr_scene_node_set_enabled(&m->sudo_popup.tree->node, 0);
+	/* Also hide on-screen keyboard */
+	osk_hide(m);
 }
 
 static void
@@ -9994,6 +10096,538 @@ sudo_popup_show(Monitor *m, const char *title, const char *cmd, const char *pkg_
 	m->sudo_popup.visible = 1;
 
 	sudo_popup_render(m);
+
+	/* Show on-screen keyboard in HTPC mode */
+	if (htpc_mode_active)
+		osk_show(m, NULL);
+}
+
+/* ==================== ON-SCREEN KEYBOARD ==================== */
+
+/* Keyboard layout - Norwegian QWERTY with special characters */
+static const char *osk_layout_lower[OSK_ROWS][OSK_COLS] = {
+	{"1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "+", "\\"},
+	{"q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "å", "¨"},
+	{"a", "s", "d", "f", "g", "h", "j", "k", "l", "ø", "æ", "'"},
+	{"<", "z", "x", "c", "v", "b", "n", "m", ",", ".", "-", "⌫"},
+	{"⇧", "@", "#", " ", " ", " ", " ", " ", "?", "!", "↵", "↵"},
+};
+
+static const char *osk_layout_upper[OSK_ROWS][OSK_COLS] = {
+	{"!", "\"", "#", "¤", "%", "&", "/", "(", ")", "=", "?", "`"},
+	{"Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "Å", "^"},
+	{"A", "S", "D", "F", "G", "H", "J", "K", "L", "Ø", "Æ", "*"},
+	{">", "Z", "X", "C", "V", "B", "N", "M", ";", ":", "_", "⌫"},
+	{"⇧", "@", "#", " ", " ", " ", " ", " ", "?", "!", "↵", "↵"},
+};
+
+static Monitor *
+osk_visible_monitor(void)
+{
+	Monitor *m;
+	wl_list_for_each(m, &mons, link) {
+		if (m->osk.visible)
+			return m;
+	}
+	return NULL;
+}
+
+static void
+osk_hide(Monitor *m)
+{
+	if (!m || !m->osk.tree)
+		return;
+
+	m->osk.visible = 0;
+	wlr_scene_node_set_enabled(&m->osk.tree->node, 0);
+	m->osk.target_surface = NULL;
+}
+
+static void
+osk_hide_all(void)
+{
+	Monitor *m;
+	wl_list_for_each(m, &mons, link) {
+		osk_hide(m);
+	}
+}
+
+static void
+osk_render(Monitor *m)
+{
+	OnScreenKeyboard *osk;
+	struct wlr_scene_node *node, *tmp;
+	int key_width = 60;
+	int key_height = 50;
+	int key_spacing = 4;
+	int padding = 10;
+	int total_width, total_height;
+	int start_x, start_y;
+	const char *(*layout)[OSK_COLS];
+
+	if (!m || !m->osk.tree)
+		return;
+
+	osk = &m->osk;
+
+	/* Clear previous content */
+	wl_list_for_each_safe(node, tmp, &osk->tree->children, link) {
+		if (osk->bg && node == &osk->bg->node)
+			continue;
+		wlr_scene_node_destroy(node);
+	}
+
+	if (!osk->visible || !statusfont.font) {
+		wlr_scene_node_set_enabled(&osk->tree->node, 0);
+		return;
+	}
+
+	/* Select layout based on shift state */
+	layout = (osk->shift_active || osk->caps_lock) ? osk_layout_upper : osk_layout_lower;
+
+	total_width = OSK_COLS * (key_width + key_spacing) - key_spacing + 2 * padding;
+	total_height = OSK_ROWS * (key_height + key_spacing) - key_spacing + 2 * padding;
+
+	osk->width = total_width;
+	osk->height = total_height;
+
+	/* Position at bottom center of monitor */
+	start_x = m->m.x + (m->m.width - total_width) / 2;
+	start_y = m->m.y + m->m.height - total_height - 20;
+
+	wlr_scene_node_set_position(&osk->tree->node, start_x, start_y);
+
+	/* Background */
+	if (!osk->bg)
+		osk->bg = wlr_scene_tree_create(osk->tree);
+	if (osk->bg) {
+		wl_list_for_each_safe(node, tmp, &osk->bg->children, link)
+			wlr_scene_node_destroy(node);
+		wlr_scene_node_set_position(&osk->bg->node, 0, 0);
+		float bg_color[4] = {0.1f, 0.1f, 0.12f, 0.95f};
+		drawrect(osk->bg, 0, 0, total_width, total_height, bg_color);
+		/* Border */
+		float border_col[4] = {0.3f, 0.3f, 0.35f, 1.0f};
+		drawrect(osk->bg, 0, 0, total_width, 2, border_col);
+	}
+
+	/* Draw keys */
+	for (int row = 0; row < OSK_ROWS; row++) {
+		for (int col = 0; col < OSK_COLS; col++) {
+			int key_x = padding + col * (key_width + key_spacing);
+			int key_y = padding + row * (key_height + key_spacing);
+			const char *label = layout[row][col];
+			int is_selected = (row == osk->sel_row && col == osk->sel_col);
+			int is_special = 0;
+			int actual_width = key_width;
+
+			/* Check for special keys */
+			if (strcmp(label, "⇧") == 0 || strcmp(label, "⌫") == 0 ||
+			    strcmp(label, "↵") == 0) {
+				is_special = 1;
+			}
+
+			/* Space bar spans multiple keys */
+			if (row == 4 && col >= 3 && col <= 7) {
+				if (col == 3) {
+					actual_width = 5 * (key_width + key_spacing) - key_spacing;
+				} else {
+					continue; /* Skip cells covered by space bar */
+				}
+			}
+
+			/* Enter key spans 2 columns */
+			if (row == 4 && col == 11) {
+				continue; /* Already drawn at col 10 */
+			}
+			if (row == 4 && col == 10) {
+				actual_width = 2 * (key_width + key_spacing) - key_spacing;
+			}
+
+			/* Key background */
+			float key_bg[4];
+			if (is_selected) {
+				key_bg[0] = 0.3f; key_bg[1] = 0.5f; key_bg[2] = 0.8f; key_bg[3] = 1.0f;
+			} else if (is_special) {
+				key_bg[0] = 0.25f; key_bg[1] = 0.25f; key_bg[2] = 0.3f; key_bg[3] = 1.0f;
+			} else {
+				key_bg[0] = 0.2f; key_bg[1] = 0.2f; key_bg[2] = 0.22f; key_bg[3] = 1.0f;
+			}
+
+			/* Highlight shift key when active */
+			if (strcmp(label, "⇧") == 0 && (osk->shift_active || osk->caps_lock)) {
+				key_bg[0] = 0.4f; key_bg[1] = 0.6f; key_bg[2] = 0.3f; key_bg[3] = 1.0f;
+			}
+
+			drawrect(osk->tree, key_x, key_y, actual_width, key_height, key_bg);
+
+			/* Key border */
+			float key_border[4] = {0.35f, 0.35f, 0.4f, 1.0f};
+			drawrect(osk->tree, key_x, key_y, actual_width, 1, key_border);
+			drawrect(osk->tree, key_x, key_y + key_height - 1, actual_width, 1, key_border);
+			drawrect(osk->tree, key_x, key_y, 1, key_height, key_border);
+			drawrect(osk->tree, key_x + actual_width - 1, key_y, 1, key_height, key_border);
+
+			/* Draw label */
+			const char *display_label = label;
+			if (row == 4 && col == 3) display_label = "SPACE";
+
+			int text_width = 0;
+			int pen_x = 0;
+			uint32_t prev_cp = 0;
+
+			/* Calculate text width */
+			const char *p = display_label;
+			while (*p) {
+				uint32_t cp;
+				int bytes = 1;
+				if ((*p & 0x80) == 0) {
+					cp = *p;
+				} else if ((*p & 0xE0) == 0xC0) {
+					cp = (*p & 0x1F) << 6 | (*(p+1) & 0x3F);
+					bytes = 2;
+				} else if ((*p & 0xF0) == 0xE0) {
+					cp = (*p & 0x0F) << 12 | (*(p+1) & 0x3F) << 6 | (*(p+2) & 0x3F);
+					bytes = 3;
+				} else {
+					cp = '?';
+				}
+				const struct fcft_glyph *glyph = fcft_rasterize_char_utf32(statusfont.font, cp, statusbar_font_subpixel);
+				if (glyph)
+					text_width += glyph->advance.x;
+				p += bytes;
+			}
+
+			/* Draw centered text */
+			int text_x = key_x + (actual_width - text_width) / 2;
+			int text_y = key_y + (key_height + statusfont.height) / 2 - statusfont.descent;
+
+			p = display_label;
+			pen_x = 0;
+			prev_cp = 0;
+			while (*p) {
+				uint32_t cp;
+				int bytes = 1;
+				if ((*p & 0x80) == 0) {
+					cp = *p;
+				} else if ((*p & 0xE0) == 0xC0) {
+					cp = (*p & 0x1F) << 6 | (*(p+1) & 0x3F);
+					bytes = 2;
+				} else if ((*p & 0xF0) == 0xE0) {
+					cp = (*p & 0x0F) << 12 | (*(p+1) & 0x3F) << 6 | (*(p+2) & 0x3F);
+					bytes = 3;
+				} else {
+					cp = '?';
+				}
+
+				long kern_x = 0, kern_y = 0;
+				if (prev_cp)
+					fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
+				pen_x += (int)kern_x;
+
+				const struct fcft_glyph *glyph = fcft_rasterize_char_utf32(statusfont.font, cp, statusbar_font_subpixel);
+				if (glyph && glyph->pix) {
+					struct wlr_buffer *buffer = statusbar_buffer_from_glyph(glyph);
+					if (buffer) {
+						struct wlr_scene_buffer *scene_buf = wlr_scene_buffer_create(osk->tree, NULL);
+						if (scene_buf) {
+							wlr_scene_buffer_set_buffer(scene_buf, buffer);
+							wlr_scene_node_set_position(&scene_buf->node,
+								text_x + pen_x + glyph->x,
+								text_y - glyph->y);
+						}
+						wlr_buffer_drop(buffer);
+					}
+				}
+				if (glyph)
+					pen_x += glyph->advance.x;
+				prev_cp = cp;
+				p += bytes;
+			}
+		}
+	}
+
+	wlr_scene_node_set_enabled(&osk->tree->node, 1);
+	wlr_scene_node_raise_to_top(&osk->tree->node);
+}
+
+static void
+osk_show(Monitor *m, struct wlr_surface *target)
+{
+	if (!m)
+		return;
+
+	/* Hide any existing OSK on other monitors */
+	osk_hide_all();
+
+	/* Create scene tree if needed */
+	if (!m->osk.tree) {
+		m->osk.tree = wlr_scene_tree_create(layers[LyrBlock]);
+		if (!m->osk.tree)
+			return;
+	}
+
+	m->osk.visible = 1;
+	m->osk.sel_row = 2;  /* Start on middle row */
+	m->osk.sel_col = 5;  /* Start in middle */
+	m->osk.shift_active = 0;
+	m->osk.caps_lock = 0;
+	m->osk.target_surface = target;
+
+	osk_render(m);
+}
+
+/* Send a Unicode character to the focused surface via wlr_seat */
+static void
+osk_send_text(const char *text)
+{
+	if (!text || !text[0])
+		return;
+
+	/* Use zwp_text_input or direct keyboard events */
+	/* For now, we'll use xdotool-style key injection via uinput
+	 * or the simpler approach of using wtype */
+
+	/* Fork and use wtype to send text */
+	pid_t pid = fork();
+	if (pid == 0) {
+		setsid();
+		execlp("wtype", "wtype", text, (char *)NULL);
+		/* Fallback: try ydotool */
+		execlp("ydotool", "ydotool", "type", text, (char *)NULL);
+		_exit(127);
+	}
+}
+
+static void
+osk_send_backspace(Monitor *m)
+{
+	(void)m;
+	/* Send backspace using wtype */
+	pid_t pid = fork();
+	if (pid == 0) {
+		setsid();
+		execlp("wtype", "wtype", "-k", "BackSpace", (char *)NULL);
+		_exit(127);
+	}
+}
+
+static void
+osk_send_key(Monitor *m)
+{
+	OnScreenKeyboard *osk;
+	const char *(*layout)[OSK_COLS];
+	const char *key;
+
+	if (!m)
+		return;
+
+	osk = &m->osk;
+	layout = (osk->shift_active || osk->caps_lock) ? osk_layout_upper : osk_layout_lower;
+	key = layout[osk->sel_row][osk->sel_col];
+
+	/* Handle special keys */
+	if (strcmp(key, "⇧") == 0) {
+		/* Toggle shift */
+		if (osk->shift_active) {
+			osk->caps_lock = !osk->caps_lock;
+			osk->shift_active = 0;
+		} else {
+			osk->shift_active = 1;
+		}
+		osk_render(m);
+		return;
+	}
+
+	if (strcmp(key, "⌫") == 0) {
+		/* Backspace */
+		osk_send_backspace(m);
+		return;
+	}
+
+	if (strcmp(key, "↵") == 0) {
+		/* Enter - send enter and optionally hide keyboard */
+		pid_t pid = fork();
+		if (pid == 0) {
+			setsid();
+			execlp("wtype", "wtype", "-k", "Return", (char *)NULL);
+			_exit(127);
+		}
+		return;
+	}
+
+	/* Regular key */
+	osk_send_text(key);
+
+	/* Turn off shift after typing (unless caps lock) */
+	if (osk->shift_active && !osk->caps_lock) {
+		osk->shift_active = 0;
+		osk_render(m);
+	}
+}
+
+static int
+osk_handle_button(Monitor *m, int button, int value)
+{
+	OnScreenKeyboard *osk;
+
+	if (!m || !m->osk.visible)
+		return 0;
+
+	/* Only handle button press */
+	if (value != 1)
+		return 0;
+
+	osk = &m->osk;
+
+	switch (button) {
+	case BTN_SOUTH:  /* A button - press selected key */
+		osk_send_key(m);
+		return 1;
+
+	case BTN_EAST:   /* B button - backspace (delete last character) */
+		osk_send_backspace(m);
+		return 1;
+
+	case BTN_WEST:   /* X button - toggle shift */
+		osk->shift_active = !osk->shift_active;
+		osk_render(m);
+		return 1;
+
+	case BTN_NORTH:  /* Y button - close keyboard */
+		osk_hide(m);
+		return 1;
+
+	case BTN_START:  /* Start button - also close keyboard */
+	case BTN_SELECT: /* Select button - also close keyboard */
+		osk_hide(m);
+		return 1;
+
+	case BTN_DPAD_UP:
+		if (osk->sel_row > 0) {
+			osk->sel_row--;
+			/* Skip cells covered by space bar */
+			if (osk->sel_row == 4 && osk->sel_col >= 4 && osk->sel_col <= 7)
+				osk->sel_col = 3;
+			osk_render(m);
+		}
+		return 1;
+
+	case BTN_DPAD_DOWN:
+		if (osk->sel_row < OSK_ROWS - 1) {
+			osk->sel_row++;
+			/* Skip cells covered by space bar */
+			if (osk->sel_row == 4 && osk->sel_col >= 4 && osk->sel_col <= 7)
+				osk->sel_col = 3;
+			osk_render(m);
+		}
+		return 1;
+
+	case BTN_DPAD_LEFT:
+		if (osk->sel_col > 0) {
+			osk->sel_col--;
+			/* Skip cells covered by space bar */
+			if (osk->sel_row == 4 && osk->sel_col >= 4 && osk->sel_col <= 7)
+				osk->sel_col = 3;
+			/* Skip enter key duplicate */
+			if (osk->sel_row == 4 && osk->sel_col == 11)
+				osk->sel_col = 10;
+			osk_render(m);
+		}
+		return 1;
+
+	case BTN_DPAD_RIGHT:
+		if (osk->sel_col < OSK_COLS - 1) {
+			osk->sel_col++;
+			/* Skip cells covered by space bar */
+			if (osk->sel_row == 4 && osk->sel_col >= 4 && osk->sel_col <= 7)
+				osk->sel_col = 8;
+			/* Skip enter key duplicate */
+			if (osk->sel_row == 4 && osk->sel_col == 11)
+				osk->sel_col = 10;
+			osk_render(m);
+		}
+		return 1;
+
+	case BTN_TL:  /* Left bumper - move to start of row */
+		osk->sel_col = 0;
+		osk_render(m);
+		return 1;
+
+	case BTN_TR:  /* Right bumper - move to end of row */
+		osk->sel_col = OSK_COLS - 1;
+		if (osk->sel_row == 4)
+			osk->sel_col = 10; /* Enter key */
+		osk_render(m);
+		return 1;
+	}
+
+	return 0;
+}
+
+/* OSK d-pad repeat timer callback - called repeatedly while d-pad is held */
+static int
+osk_dpad_repeat_cb(void *data)
+{
+	(void)data;
+
+	/* Check if still valid */
+	if (!osk_dpad_held_button || !osk_dpad_held_mon || !osk_dpad_held_mon->osk.visible) {
+		osk_dpad_held_button = 0;
+		osk_dpad_held_mon = NULL;
+		return 0;
+	}
+
+	/* Try to move in the held direction */
+	OnScreenKeyboard *osk = &osk_dpad_held_mon->osk;
+	int old_row = osk->sel_row;
+	int old_col = osk->sel_col;
+
+	/* Call the button handler (it will move if possible) */
+	osk_handle_button(osk_dpad_held_mon, osk_dpad_held_button, 1);
+
+	/* If position changed, schedule next repeat */
+	if (osk->sel_row != old_row || osk->sel_col != old_col) {
+		if (osk_dpad_repeat_timer)
+			wl_event_source_timer_update(osk_dpad_repeat_timer, OSK_DPAD_REPEAT_RATE);
+	} else {
+		/* Hit a wall - stop repeating */
+		osk_dpad_held_button = 0;
+		osk_dpad_held_mon = NULL;
+	}
+
+	return 0;
+}
+
+/* Start OSK d-pad repeat for a direction */
+static void
+osk_dpad_repeat_start(Monitor *m, int button)
+{
+	if (!m || !m->osk.visible)
+		return;
+
+	osk_dpad_held_button = button;
+	osk_dpad_held_mon = m;
+
+	/* Create timer if needed */
+	if (!osk_dpad_repeat_timer) {
+		osk_dpad_repeat_timer = wl_event_loop_add_timer(
+			wl_display_get_event_loop(dpy), osk_dpad_repeat_cb, NULL);
+	}
+
+	/* Start with initial delay */
+	if (osk_dpad_repeat_timer)
+		wl_event_source_timer_update(osk_dpad_repeat_timer, OSK_DPAD_INITIAL_DELAY);
+}
+
+/* Stop OSK d-pad repeat */
+static void
+osk_dpad_repeat_stop(void)
+{
+	osk_dpad_held_button = 0;
+	osk_dpad_held_mon = NULL;
+	if (osk_dpad_repeat_timer)
+		wl_event_source_timer_update(osk_dpad_repeat_timer, 0);
 }
 
 static void
@@ -17507,12 +18141,16 @@ gamepad_menu_show(Monitor *m)
 
 	/* Calculate popup size - just buttons, no title/hints */
 	w = 300;
-	h = 20 + htpc_menu_item_count * 55 + 20;
+	/* Add extra separator space between gaming and streaming sections */
+	int separator_gap = 20;
+	h = 20 + htpc_menu_item_count * 55 + separator_gap + 20;
 
 	/* Center on monitor */
 	x = m->m.x + (m->m.width - w) / 2;
 	y = m->m.y + (m->m.height - h) / 2;
 
+	gm->x = x;
+	gm->y = y;
 	gm->width = w;
 	gm->height = h;
 	gm->visible = 1;
@@ -17663,7 +18301,65 @@ gamepad_menu_render(Monitor *m)
 		}
 
 		current_y += item_height;
+
+		/* Add extra separator gap after PC-gaming (before streaming services) */
+		if (strcmp(label, "PC-gaming") == 0)
+			current_y += 20;
 	}
+}
+
+/* Handle mouse click on gamepad menu - returns 1 if click was inside menu */
+static int
+gamepad_menu_handle_click(Monitor *m, int cx, int cy, uint32_t button)
+{
+	GamepadMenu *gm;
+	int padding = 15;
+	int item_height = 55;
+	int relx, rely;
+	int clicked_item;
+
+	if (!m)
+		return 0;
+
+	gm = &m->gamepad_menu;
+	if (!gm->visible)
+		return 0;
+
+	/* Check if click is inside menu bounds */
+	relx = cx - gm->x;
+	rely = cy - gm->y;
+
+	if (relx < 0 || rely < 0 || relx >= gm->width || rely >= gm->height) {
+		/* Click outside menu - close it */
+		gamepad_menu_hide(m);
+		return 1;
+	}
+
+	/* Only handle left click for selection */
+	if (button != BTN_LEFT)
+		return 1;
+
+	/* Calculate which item was clicked - account for separator gap */
+	clicked_item = -1;
+	int current_y = padding;
+	for (int i = 0; i < gm->item_count; i++) {
+		int button_h = item_height - 10; /* button_margin */
+		if (rely >= current_y && rely < current_y + button_h) {
+			clicked_item = i;
+			break;
+		}
+		current_y += item_height;
+		/* Account for separator after PC-gaming */
+		if (strcmp(htpc_menu_items[i].label, "PC-gaming") == 0)
+			current_y += 20;
+	}
+
+	if (clicked_item >= 0 && clicked_item < gm->item_count) {
+		gm->selected = clicked_item;
+		gamepad_menu_select(m);
+	}
+
+	return 1;
 }
 
 static void
@@ -17683,31 +18379,20 @@ gamepad_menu_select(Monitor *m)
 	label = htpc_menu_items[gm->selected].label;
 	cmd = htpc_menu_items[gm->selected].command;
 
-	/* Handle PC-gaming - switch to tag 4 and show PC gaming view */
+	/* Handle PC-gaming - launch Steam Big Picture only */
 	if (strcmp(label, "PC-gaming") == 0) {
 		gamepad_menu_hide_all();
-		wlr_log(WLR_INFO, "Switching to PC Gaming (tag 4)");
+		wlr_log(WLR_INFO, "Launching Steam Big Picture");
 
 		/* Launch Steam Big Picture if not already running */
 		steam_launch_bigpicture();
-
-		/* Switch to tag 4 */
-		if (selmon) {
-			selmon->seltags ^= 1;
-			selmon->tagset[selmon->seltags] = 1 << 3; /* Tag 4 = bit 3 */
-			focusclient(focustop(selmon), 1);
-			arrange(selmon);
-			printstatus();
-		}
-
-		/* Show PC gaming view (like retro_gaming_show for Retro-gaming) */
-		pc_gaming_show(m);
 		return;
 	}
 
 	/* Handle Retro-gaming - switch to tag 3 and show retro console selection */
 	if (strcmp(label, "Retro-gaming") == 0) {
 		gamepad_menu_hide_all();
+		steam_kill();
 		wlr_log(WLR_INFO, "Switching to Retro Gaming (tag 3)");
 
 		/* Switch to tag 3 */
@@ -17726,6 +18411,8 @@ gamepad_menu_select(Monitor *m)
 	/* Handle Movies - switch to tag 2 and show movies grid view */
 	if (strcmp(label, "Movies") == 0) {
 		gamepad_menu_hide_all();
+		steam_kill();
+		live_tv_kill();
 		wlr_log(WLR_INFO, "Switching to Movies (tag 2)");
 
 		/* Switch to tag 2 - use m consistently (same monitor as menu) */
@@ -17744,6 +18431,8 @@ gamepad_menu_select(Monitor *m)
 	/* Handle TV-shows - switch to tag 1 and show tvshows grid view */
 	if (strcmp(label, "TV-shows") == 0) {
 		gamepad_menu_hide_all();
+		steam_kill();
+		live_tv_kill();
 		wlr_log(WLR_INFO, "Switching to TV-shows (tag 1)");
 
 		/* Switch to tag 1 - use m consistently (same monitor as menu) */
@@ -17759,9 +18448,145 @@ gamepad_menu_select(Monitor *m)
 		return;
 	}
 
+	/* Handle NRK - launch Chromium kiosk with nrk.no */
+	if (strcmp(label, "NRK") == 0) {
+		gamepad_menu_hide_all();
+		steam_kill();
+		live_tv_kill();
+		media_view_hide_all();
+		retro_gaming_hide_all();
+		pc_gaming_hide_all();
+		wlr_log(WLR_INFO, "Launching NRK stream in Chromium kiosk");
+		pid_t pid = fork();
+		if (pid == 0) {
+			setsid();
+			execlp("chromium", "chromium",
+				"--ozone-platform=wayland",
+				"--kiosk", "--start-fullscreen",
+				"--autoplay-policy=no-user-gesture-required",
+				"--enable-features=VaapiVideoDecoder,PlatformHEVCDecoderSupport",
+				"--disable-gpu-vsync",
+				"--disable-frame-rate-limit",
+				"--force-device-scale-factor=1",
+				"--disable-translate",
+				NRK_URL, (char *)NULL);
+			_exit(127);
+		}
+		return;
+	}
+
+	/* Handle Netflix - launch Chromium kiosk */
+	if (strcmp(label, "Netflix") == 0) {
+		gamepad_menu_hide_all();
+		steam_kill();
+		live_tv_kill();
+		media_view_hide_all();
+		retro_gaming_hide_all();
+		pc_gaming_hide_all();
+		wlr_log(WLR_INFO, "Launching Netflix in Chromium kiosk");
+		pid_t pid = fork();
+		if (pid == 0) {
+			setsid();
+			execlp("chromium", "chromium",
+				"--ozone-platform=wayland",
+				"--kiosk", "--start-fullscreen",
+				"--autoplay-policy=no-user-gesture-required",
+				"--enable-features=VaapiVideoDecoder,PlatformHEVCDecoderSupport",
+				"--disable-gpu-vsync",
+				"--disable-frame-rate-limit",
+				"--force-device-scale-factor=1",
+				"--disable-translate",
+				NETFLIX_URL, (char *)NULL);
+			_exit(127);
+		}
+		return;
+	}
+
+	/* Handle Viaplay - launch Chromium kiosk */
+	if (strcmp(label, "Viaplay") == 0) {
+		gamepad_menu_hide_all();
+		steam_kill();
+		live_tv_kill();
+		media_view_hide_all();
+		retro_gaming_hide_all();
+		pc_gaming_hide_all();
+		wlr_log(WLR_INFO, "Launching Viaplay in Chromium kiosk");
+		pid_t pid = fork();
+		if (pid == 0) {
+			setsid();
+			execlp("chromium", "chromium",
+				"--ozone-platform=wayland",
+				"--kiosk", "--start-fullscreen",
+				"--autoplay-policy=no-user-gesture-required",
+				"--enable-features=VaapiVideoDecoder,PlatformHEVCDecoderSupport",
+				"--disable-gpu-vsync",
+				"--disable-frame-rate-limit",
+				"--force-device-scale-factor=1",
+				"--disable-translate",
+				VIAPLAY_URL, (char *)NULL);
+			_exit(127);
+		}
+		return;
+	}
+
+	/* Handle TV2 Play - launch Chromium kiosk */
+	if (strcmp(label, "TV2 Play") == 0) {
+		gamepad_menu_hide_all();
+		steam_kill();
+		live_tv_kill();
+		media_view_hide_all();
+		retro_gaming_hide_all();
+		pc_gaming_hide_all();
+		wlr_log(WLR_INFO, "Launching TV2 Play in Chromium kiosk");
+		pid_t pid = fork();
+		if (pid == 0) {
+			setsid();
+			execlp("chromium", "chromium",
+				"--ozone-platform=wayland",
+				"--kiosk", "--start-fullscreen",
+				"--autoplay-policy=no-user-gesture-required",
+				"--enable-features=VaapiVideoDecoder,PlatformHEVCDecoderSupport",
+				"--disable-gpu-vsync",
+				"--disable-frame-rate-limit",
+				"--force-device-scale-factor=1",
+				"--disable-translate",
+				TV2PLAY_URL, (char *)NULL);
+			_exit(127);
+		}
+		return;
+	}
+
+	/* Handle F1TV - launch browser with F1TV 4K live stream */
+	if (strcmp(label, "F1TV") == 0) {
+		gamepad_menu_hide_all();
+		steam_kill();
+		live_tv_kill();
+		media_view_hide_all();
+		retro_gaming_hide_all();
+		pc_gaming_hide_all();
+		wlr_log(WLR_INFO, "Launching F1TV stream in Chromium kiosk");
+		pid_t pid = fork();
+		if (pid == 0) {
+			setsid();
+			execlp("chromium", "chromium",
+				"--ozone-platform=wayland",
+				"--kiosk", "--start-fullscreen",
+				"--autoplay-policy=no-user-gesture-required",
+				"--enable-features=VaapiVideoDecoder,PlatformHEVCDecoderSupport",
+				"--disable-gpu-vsync",
+				"--disable-frame-rate-limit",
+				"--force-device-scale-factor=1",
+				"--disable-translate",
+				F1TV_URL, (char *)NULL);
+			_exit(127);
+		}
+		return;
+	}
+
 	/* Handle Quit HTPC - exit HTPC mode and return to normal desktop */
 	if (strcmp(label, "Quit HTPC") == 0) {
 		gamepad_menu_hide_all();
+		steam_kill();
 		wlr_log(WLR_INFO, "Exiting HTPC mode");
 		htpc_mode_exit();
 		return;
@@ -17786,6 +18611,16 @@ gamepad_menu_handle_button(Monitor *m, int button, int value)
 
 	if (!m)
 		return 0;
+
+	/* Handle on-screen keyboard FIRST - it has highest priority when visible
+	 * Check all monitors since OSK might be on a different monitor */
+	{
+		Monitor *osk_mon = osk_visible_monitor();
+		if (osk_mon) {
+			if (osk_handle_button(osk_mon, button, value))
+				return 1;
+		}
+	}
 
 	/* Handle wifi popup with gamepad (A = connect, B = cancel) */
 	if (m->wifi_popup.visible && value == 1) {
@@ -17893,10 +18728,34 @@ gamepad_menu_handle_button(Monitor *m, int button, int value)
 
 	/* Mouse click emulation with shoulder buttons (when menu is not visible) */
 	if (!gm->visible) {
-		/* Skip click emulation if a fullscreen client has focus (let game handle it) */
+		/* Skip click emulation if a fullscreen client has focus (let game handle it)
+		 * Exception: In HTPC mode, allow click emulation for browsers */
 		Client *focused = focustop(selmon);
-		if (focused && focused->isfullscreen)
+		if (focused && focused->isfullscreen &&
+		    !(htpc_mode_active && is_browser_client(focused)))
 			return 0;
+
+		/* Y button (BTN_NORTH) - toggle on-screen keyboard in HTPC mode */
+		if (button == BTN_NORTH && value == 1 && htpc_mode_active) {
+			Monitor *osk_mon = osk_visible_monitor();
+			if (osk_mon) {
+				osk_hide(osk_mon);
+			} else if (selmon) {
+				osk_show(selmon, NULL);
+			}
+			return 1;
+		}
+
+		/* X button (BTN_WEST) - show OSK when in browser (for text input) */
+		if (button == BTN_WEST && value == 1 && htpc_mode_active) {
+			if (focused && is_browser_client(focused)) {
+				Monitor *osk_mon = osk_visible_monitor();
+				if (!osk_mon && selmon) {
+					osk_show(selmon, NULL);
+				}
+				return 1;
+			}
+		}
 
 		uint32_t time_msec = (uint32_t)(monotonic_msec() & 0xFFFFFFFF);
 		uint32_t mapped_button = 0;
@@ -22794,6 +23653,14 @@ gamepad_event_cb(int fd, uint32_t mask, void *data)
 					int handled = 0;
 					int button = ev.value < 0 ? BTN_DPAD_LEFT : BTN_DPAD_RIGHT;
 
+					/* Check OSK first - highest priority */
+					Monitor *osk_mon = osk_visible_monitor();
+					if (osk_mon) {
+						handled = osk_handle_button(osk_mon, button, 1);
+						/* Start repeat timer for hold-to-slide */
+						osk_dpad_repeat_start(osk_mon, button);
+					}
+
 					/* Check Retro gaming on any monitor (must be active on current tag) */
 					Monitor *rg_mon = retro_gaming_visible_monitor();
 					if (rg_mon && htpc_view_is_active(rg_mon, rg_mon->retro_gaming.view_tag, rg_mon->retro_gaming.visible)) {
@@ -22841,6 +23708,10 @@ gamepad_event_cb(int fd, uint32_t mask, void *data)
 							}
 						}
 					}
+				} else {
+					/* D-pad released - stop OSK repeat if active */
+					if (osk_dpad_held_button == BTN_DPAD_LEFT || osk_dpad_held_button == BTN_DPAD_RIGHT)
+						osk_dpad_repeat_stop();
 				}
 				break;
 			case ABS_HAT0Y:
@@ -22848,6 +23719,14 @@ gamepad_event_cb(int fd, uint32_t mask, void *data)
 				if (ev.value != 0) {
 					int handled = 0;
 					int button = ev.value < 0 ? BTN_DPAD_UP : BTN_DPAD_DOWN;
+
+					/* Check OSK first - highest priority */
+					Monitor *osk_mon_y = osk_visible_monitor();
+					if (osk_mon_y) {
+						handled = osk_handle_button(osk_mon_y, button, 1);
+						/* Start repeat timer for hold-to-slide */
+						osk_dpad_repeat_start(osk_mon_y, button);
+					}
 
 					/* Check gamepad menu on selmon first (uses m) */
 					if (m && m->gamepad_menu.visible) {
@@ -22902,6 +23781,10 @@ gamepad_event_cb(int fd, uint32_t mask, void *data)
 							}
 						}
 					}
+				} else {
+					/* D-pad released - stop OSK repeat if active */
+					if (osk_dpad_held_button == BTN_DPAD_UP || osk_dpad_held_button == BTN_DPAD_DOWN)
+						osk_dpad_repeat_stop();
 				}
 				break;
 			}
@@ -23282,6 +24165,32 @@ gamepad_update_cursor(void)
 			joystick_nav_repeat_started = 0;
 		}
 
+		/* Right joystick scrolls in retro gaming view */
+		wl_list_for_each(gp, &gamepads, link) {
+			if (gp->suspended)
+				continue;
+
+			int ry_offset = gp->right_y - gp->cal_ry.center;
+			int ry_range = (gp->cal_ry.max - gp->cal_ry.min) / 2;
+			if (ry_range == 0) ry_range = 32767;
+			int ry_deadzone = gp->cal_ry.flat > 0 ? gp->cal_ry.flat : (ry_range * GAMEPAD_DEADZONE / 32767);
+
+			if (abs(ry_offset) > ry_deadzone) {
+				double ny = (double)ry_offset / (double)ry_range;
+				if (ny > 1.0) ny = 1.0;
+				if (ny < -1.0) ny = -1.0;
+
+				double scroll_amount = ny * 3.0;
+				uint32_t time_msec = (uint32_t)(monotonic_msec() & 0xFFFFFFFF);
+
+				wlr_seat_pointer_notify_axis(seat, time_msec,
+					WL_POINTER_AXIS_VERTICAL_SCROLL,
+					scroll_amount, (int32_t)(scroll_amount * 120),
+					WL_POINTER_AXIS_SOURCE_CONTINUOUS,
+					WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+			}
+		}
+
 		return;
 	}
 
@@ -23366,6 +24275,32 @@ gamepad_update_cursor(void)
 				/* Reset repeat state when joystick returns to center */
 				joystick_nav_last_move = 0;
 				joystick_nav_repeat_started = 0;
+			}
+
+			/* Right joystick scrolls in PC gaming view */
+			wl_list_for_each(gp, &gamepads, link) {
+				if (gp->suspended)
+					continue;
+
+				int ry_offset = gp->right_y - gp->cal_ry.center;
+				int ry_range = (gp->cal_ry.max - gp->cal_ry.min) / 2;
+				if (ry_range == 0) ry_range = 32767;
+				int ry_deadzone = gp->cal_ry.flat > 0 ? gp->cal_ry.flat : (ry_range * GAMEPAD_DEADZONE / 32767);
+
+				if (abs(ry_offset) > ry_deadzone) {
+					double ny = (double)ry_offset / (double)ry_range;
+					if (ny > 1.0) ny = 1.0;
+					if (ny < -1.0) ny = -1.0;
+
+					double scroll_amount = ny * 3.0;
+					uint32_t time_msec = (uint32_t)(monotonic_msec() & 0xFFFFFFFF);
+
+					wlr_seat_pointer_notify_axis(seat, time_msec,
+						WL_POINTER_AXIS_VERTICAL_SCROLL,
+						scroll_amount, (int32_t)(scroll_amount * 120),
+						WL_POINTER_AXIS_SOURCE_CONTINUOUS,
+						WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+				}
 			}
 
 			/* Don't move mouse cursor while in PC gaming view without popup */
@@ -23505,18 +24440,48 @@ gamepad_update_cursor(void)
 					joystick_nav_repeat_started = 0;
 				}
 
+				/* Right joystick scrolls in media view */
+				wl_list_for_each(gp, &gamepads, link) {
+					if (gp->suspended)
+						continue;
+
+					int ry_offset = gp->right_y - gp->cal_ry.center;
+					int ry_range = (gp->cal_ry.max - gp->cal_ry.min) / 2;
+					if (ry_range == 0) ry_range = 32767;
+					int ry_deadzone = gp->cal_ry.flat > 0 ? gp->cal_ry.flat : (ry_range * GAMEPAD_DEADZONE / 32767);
+
+					if (abs(ry_offset) > ry_deadzone) {
+						double ny = (double)ry_offset / (double)ry_range;
+						if (ny > 1.0) ny = 1.0;
+						if (ny < -1.0) ny = -1.0;
+
+						double scroll_amount = ny * 3.0;
+						uint32_t time_msec = (uint32_t)(monotonic_msec() & 0xFFFFFFFF);
+
+						wlr_seat_pointer_notify_axis(seat, time_msec,
+							WL_POINTER_AXIS_VERTICAL_SCROLL,
+							scroll_amount, (int32_t)(scroll_amount * 120),
+							WL_POINTER_AXIS_SOURCE_CONTINUOUS,
+							WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+					}
+				}
+
 				/* Don't move mouse cursor while in media view */
 				return;
 			}
 		}
 	}
 
-	/* Skip gamepad cursor control if a fullscreen client has focus (let game handle it)
-	 * Exception: In HTPC mode, allow cursor control for Steam popups over fullscreen */
+	/* Check if we should skip cursor movement for fullscreen clients
+	 * (let game handle joystick input), but always allow right stick scrolling */
+	int skip_cursor_move = 0;
 	Client *focused = focustop(selmon);
 	if (focused && focused->isfullscreen) {
-		/* In HTPC mode, check if there's a floating Steam popup that needs mouse control */
-		if (htpc_mode_active) {
+		/* In HTPC mode, allow cursor control for browsers (kiosk mode) */
+		if (htpc_mode_active && is_browser_client(focused)) {
+			/* Browser in fullscreen - allow gamepad cursor control and scroll */
+		} else if (htpc_mode_active) {
+			/* Check for Steam popup that needs mouse control */
 			Client *popup = NULL;
 			Client *c;
 			wl_list_for_each(c, &clients, link) {
@@ -23525,17 +24490,26 @@ gamepad_update_cursor(void)
 					break;
 				}
 			}
-			if (!popup)
-				return; /* No popup, let game handle input */
+			if (!popup) {
+				/* No popup - skip cursor but still allow scroll for focused client */
+				skip_cursor_move = 1;
+			}
 			/* There's a Steam popup - allow mouse control below */
+		} else if (is_browser_client(focused)) {
+			/* Browser fullscreen outside HTPC mode - still allow scroll */
 		} else {
-			return;
+			/* Fullscreen game - skip cursor but allow scroll to pass through */
+			skip_cursor_move = 1;
 		}
 	}
 
-	/* Skip gamepad cursor movement if physical mouse was used recently */
+	/* Also skip cursor movement if physical mouse was used recently */
 	if (last_pointer_motion_ms && (now - last_pointer_motion_ms) < 100)
-		return;
+		skip_cursor_move = 1;
+
+	/* Collect scroll input from right sticks */
+	double scroll_x = 0, scroll_y = 0;
+	int any_scroll = 0;
 
 	wl_list_for_each(gp, &gamepads, link) {
 		double dx = 0, dy = 0;
@@ -23598,45 +24572,29 @@ gamepad_update_cursor(void)
 		int rx_deadzone = gp->cal_rx.flat > 0 ? gp->cal_rx.flat : (rx_range * GAMEPAD_DEADZONE / 32767);
 		int ry_deadzone = gp->cal_ry.flat > 0 ? gp->cal_ry.flat : (ry_range * GAMEPAD_DEADZONE / 32767);
 
-		/* Right stick controls scrolling */
+		/* Collect right stick scroll values */
 		if (abs(ry_offset) > ry_deadzone) {
 			double ny = (double)ry_offset / (double)ry_range;
 			if (ny > 1.0) ny = 1.0;
 			if (ny < -1.0) ny = -1.0;
-
-			/* Send scroll event - negative Y = scroll up, positive Y = scroll down */
-			double scroll_amount = ny * 3.0;  /* Adjust scroll speed */
-			uint32_t time_msec = (uint32_t)(monotonic_msec() & 0xFFFFFFFF);
-
-			wlr_seat_pointer_notify_axis(seat, time_msec,
-				WL_POINTER_AXIS_VERTICAL_SCROLL,
-				scroll_amount, (int32_t)(scroll_amount * 120),
-				WL_POINTER_AXIS_SOURCE_CONTINUOUS,
-				WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+			scroll_y += ny * 3.0;
+			any_scroll = 1;
 		}
 
-		/* Right stick X for horizontal scroll */
 		if (abs(rx_offset) > rx_deadzone) {
 			double nx = (double)rx_offset / (double)rx_range;
 			if (nx > 1.0) nx = 1.0;
 			if (nx < -1.0) nx = -1.0;
-
-			double scroll_amount = nx * 3.0;
-			uint32_t time_msec = (uint32_t)(monotonic_msec() & 0xFFFFFFFF);
-
-			wlr_seat_pointer_notify_axis(seat, time_msec,
-				WL_POINTER_AXIS_HORIZONTAL_SCROLL,
-				scroll_amount, (int32_t)(scroll_amount * 120),
-				WL_POINTER_AXIS_SOURCE_CONTINUOUS,
-				WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+			scroll_x += nx * 3.0;
+			any_scroll = 1;
 		}
 
 		total_dx += dx;
 		total_dy += dy;
 	}
 
-	/* Move cursor if there's any input */
-	if (any_input && cursor && (fabs(total_dx) > 0.1 || fabs(total_dy) > 0.1)) {
+	/* Move cursor if there's any input (skip if physical mouse was used recently) */
+	if (!skip_cursor_move && any_input && cursor && (fabs(total_dx) > 0.1 || fabs(total_dy) > 0.1)) {
 		/* Move cursor directly (fast) */
 		wlr_cursor_move(cursor, NULL, total_dx, total_dy);
 		wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
@@ -23646,8 +24604,10 @@ gamepad_update_cursor(void)
 			updatetaghover(selmon, cursor->x, cursor->y);
 			updatenethover(selmon, cursor->x, cursor->y);
 		}
+	}
 
-		/* Update pointer focus for clients */
+	/* Update pointer focus for cursor movement */
+	if (!skip_cursor_move && any_input && cursor) {
 		double sx, sy;
 		struct wlr_surface *surface = NULL;
 		Client *c = NULL;
@@ -23656,6 +24616,38 @@ gamepad_update_cursor(void)
 			uint32_t time_msec = (uint32_t)(now & 0xFFFFFFFF);
 			wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
 			wlr_seat_pointer_notify_motion(seat, time_msec, sx, sy);
+		}
+	}
+
+	/* Send scroll events to focused window (not cursor position) */
+	if (any_scroll) {
+		Client *scroll_target = focustop(selmon);
+		if (scroll_target && client_surface(scroll_target) && client_surface(scroll_target)->mapped) {
+			struct wlr_surface *target_surface = client_surface(scroll_target);
+			uint32_t time_msec = (uint32_t)(now & 0xFFFFFFFF);
+
+			/* Calculate surface-local coordinates (center of window) */
+			double sx = scroll_target->geom.width / 2.0;
+			double sy = scroll_target->geom.height / 2.0;
+
+			/* Enter pointer focus on the focused window for scroll events */
+			wlr_seat_pointer_notify_enter(seat, target_surface, sx, sy);
+
+			if (fabs(scroll_y) > 0.01) {
+				wlr_seat_pointer_notify_axis(seat, time_msec,
+					WL_POINTER_AXIS_VERTICAL_SCROLL,
+					scroll_y, (int32_t)(scroll_y * 120),
+					WL_POINTER_AXIS_SOURCE_CONTINUOUS,
+					WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+			}
+			if (fabs(scroll_x) > 0.01) {
+				wlr_seat_pointer_notify_axis(seat, time_msec,
+					WL_POINTER_AXIS_HORIZONTAL_SCROLL,
+					scroll_x, (int32_t)(scroll_x * 120),
+					WL_POINTER_AXIS_SOURCE_CONTINUOUS,
+					WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+			}
+			wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 		}
 	}
 }
@@ -25792,6 +26784,14 @@ buttonpress(struct wl_listener *listener, void *data)
 			}
 		}
 
+		/* Handle gamepad/HTPC menu clicks */
+		if (selmon && selmon->gamepad_menu.visible) {
+			int cx = (int)lround(cursor->x);
+			int cy = (int)lround(cursor->y);
+			if (gamepad_menu_handle_click(selmon, cx, cy, event->button))
+				return;
+		}
+
 		if (selmon && selmon->statusbar.tray_menu.visible) {
 			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
 			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
@@ -26045,6 +27045,7 @@ cleanup(void)
 {
 	TrayItem *it, *tmp;
 
+	wlr_log(WLR_ERROR, "cleanup() called - starting cleanup sequence");
 	cleanuplisteners();
 	gamepad_cleanup();
 	bt_controller_cleanup();
@@ -27367,6 +28368,8 @@ focusclient(Client *c, int lift)
 	if (!c) {
 		/* With no client, all we have left is to clear focus */
 		wlr_seat_keyboard_notify_clear_focus(seat);
+		/* Notify text inputs about focus loss */
+		text_input_focus_change(old, NULL);
 		/* Hide cursor if HTPC views are visible */
 		if (selmon && (selmon->pc_gaming.visible ||
 		               selmon->movies_view.visible ||
@@ -27383,6 +28386,9 @@ focusclient(Client *c, int lift)
 	wlr_log(WLR_INFO, "focusclient: giving keyboard focus to '%s', keyboard=%p",
 		client_get_appid(c) ? client_get_appid(c) : "(null)", (void*)kb);
 	client_notify_enter(client_surface(c), kb);
+
+	/* Notify text inputs about focus change */
+	text_input_focus_change(old, client_surface(c));
 
 	/* Activate the new client */
 	client_activate_surface(client_surface(c), 1);
@@ -27540,10 +28546,17 @@ gpureset(struct wl_listener *listener, void *data)
 void
 handlesig(int signo)
 {
-	if (signo == SIGCHLD)
+	if (signo == SIGCHLD) {
 		while (waitpid(-1, NULL, WNOHANG) > 0);
-	else if (signo == SIGINT || signo == SIGTERM)
+	} else if (signo == SIGINT) {
+		write(STDERR_FILENO, "handlesig: SIGINT received, quitting\n", 37);
 		quit(NULL);
+	} else if (signo == SIGTERM) {
+		write(STDERR_FILENO, "handlesig: SIGTERM received, quitting\n", 38);
+		quit(NULL);
+	} else if (signo == SIGPIPE) {
+		write(STDERR_FILENO, "handlesig: SIGPIPE received (ignored)\n", 38);
+	}
 }
 
 void
@@ -28926,6 +29939,7 @@ setsticky(Client *c, int sticky)
 void
 quit(const Arg *arg)
 {
+	wlr_log(WLR_ERROR, "quit() called - terminating display");
 	wl_display_terminate(dpy);
 }
 
@@ -33213,6 +34227,7 @@ setup(void)
 	 */
 	wl_list_init(&clients);
 	wl_list_init(&fstack);
+	wl_list_init(&text_inputs);
 
 	xdg_shell = wlr_xdg_shell_create(dpy, 6);
 	wl_signal_add(&xdg_shell->events.new_toplevel, &new_xdg_toplevel);
@@ -33290,6 +34305,8 @@ setup(void)
 	virtual_pointer_mgr = wlr_virtual_pointer_manager_v1_create(dpy);
     wl_signal_add(&virtual_pointer_mgr->events.new_virtual_pointer,
             &new_virtual_pointer);
+	text_input_mgr = wlr_text_input_manager_v3_create(dpy);
+	wl_signal_add(&text_input_mgr->events.text_input, &new_text_input);
 
 	seat = wlr_seat_create(dpy, "seat0");
 	wl_signal_add(&seat->events.request_set_cursor, &request_cursor);
@@ -33710,6 +34727,58 @@ steam_launch_bigpicture(void)
 	}
 }
 
+/* Kill Steam process immediately */
+static void
+steam_kill(void)
+{
+	pid_t pid;
+
+	if (!is_process_running("steam")) {
+		return;
+	}
+
+	wlr_log(WLR_INFO, "Killing Steam process");
+
+	/* Use pkill to kill all steam processes */
+	pid = fork();
+	if (pid == 0) {
+		setsid();
+		execlp("pkill", "pkill", "-9", "steam", (char *)NULL);
+		_exit(127);
+	}
+}
+
+/* Kill streaming processes (mpv and Chrome kiosk for live TV) */
+static void
+live_tv_kill(void)
+{
+	pid_t pid;
+	int status;
+
+	/* Kill mpv if running */
+	if (is_process_running("mpv")) {
+		wlr_log(WLR_INFO, "Killing live TV mpv process");
+		pid = fork();
+		if (pid == 0) {
+			setsid();
+			execlp("pkill", "pkill", "-9", "mpv", (char *)NULL);
+			_exit(127);
+		}
+		if (pid > 0)
+			waitpid(pid, &status, 0);
+	}
+
+	/* Kill Chrome kiosk instances used for streaming (NRK, Netflix, Viaplay, TV2 Play, F1TV) */
+	pid = fork();
+	if (pid == 0) {
+		setsid();
+		execlp("pkill", "pkill", "-9", "-f", "chromium.*--kiosk.*(nrk\\.no|netflix\\.com|viaplay\\.no|tv2\\.no|f1tv)", (char *)NULL);
+		_exit(127);
+	}
+	if (pid > 0)
+		waitpid(pid, &status, 0);
+}
+
 /* Check if client is Steam main window */
 static int
 is_steam_client(Client *c)
@@ -33812,6 +34881,29 @@ is_steam_game(Client *c)
 		return 1;
 	}
 
+	return 0;
+}
+
+/* Check if client is a browser (Chrome, Chromium, Firefox, etc.) */
+static int
+is_browser_client(Client *c)
+{
+	const char *app_id;
+	if (!c)
+		return 0;
+	app_id = client_get_appid(c);
+	if (!app_id)
+		return 0;
+	/* Check for common browser app_ids */
+	if (strcasestr(app_id, "chrome") ||
+	    strcasestr(app_id, "chromium") ||
+	    strcasestr(app_id, "google-chrome") ||
+	    strcasestr(app_id, "firefox") ||
+	    strcasestr(app_id, "brave") ||
+	    strcasestr(app_id, "vivaldi") ||
+	    strcasestr(app_id, "opera") ||
+	    strcasestr(app_id, "edge"))
+		return 1;
 	return 0;
 }
 
@@ -35208,6 +36300,138 @@ virtualkeyboard(struct wl_listener *listener, void *data)
 
 	/* Add the new keyboard to the group */
 	wlr_keyboard_group_add_keyboard(group->wlr_group, &kb->keyboard);
+
+	/* IMPORTANT: Restore global keyboard group as seat keyboard.
+	 * createkeyboardgroup() sets seat keyboard to the new group, but for virtual
+	 * keyboards we must keep the global kb_group as seat keyboard to avoid
+	 * use-after-free when the virtual keyboard is destroyed */
+	wlr_seat_set_keyboard(seat, &kb_group->wlr_group->keyboard);
+}
+
+/* Text input support for virtual keyboard */
+
+static void
+textinput_enable(struct wl_listener *listener, void *data)
+{
+	TextInput *ti_wrap = wl_container_of(listener, ti_wrap, enable);
+	struct wlr_text_input_v3 *ti = ti_wrap->text_input;
+	(void)data;
+
+	wlr_log(WLR_INFO, "Text input enabled for surface %p", (void*)ti->focused_surface);
+	active_text_input = ti;
+
+	/* Show OSK in HTPC mode when text input is enabled */
+	if (htpc_mode_active && selmon) {
+		osk_show(selmon, ti->focused_surface);
+	}
+}
+
+static void
+textinput_disable(struct wl_listener *listener, void *data)
+{
+	TextInput *ti_wrap = wl_container_of(listener, ti_wrap, disable);
+	struct wlr_text_input_v3 *ti = ti_wrap->text_input;
+	(void)data;
+
+	wlr_log(WLR_INFO, "Text input disabled");
+	if (active_text_input == ti) {
+		active_text_input = NULL;
+		/* Hide OSK when text input is disabled */
+		if (htpc_mode_active) {
+			osk_hide_all();
+		}
+	}
+}
+
+static void
+textinput_commit(struct wl_listener *listener, void *data)
+{
+	(void)listener;
+	(void)data;
+	/* Text input committed - nothing to do here for now */
+}
+
+static void
+textinput_destroy(struct wl_listener *listener, void *data)
+{
+	TextInput *ti_wrap = wl_container_of(listener, ti_wrap, destroy);
+	struct wlr_text_input_v3 *ti = ti_wrap->text_input;
+	(void)data;
+
+	wlr_log(WLR_INFO, "Text input destroyed");
+	if (active_text_input == ti) {
+		active_text_input = NULL;
+		if (htpc_mode_active) {
+			osk_hide_all();
+		}
+	}
+
+	/* Remove listeners and free */
+	wl_list_remove(&ti_wrap->enable.link);
+	wl_list_remove(&ti_wrap->disable.link);
+	wl_list_remove(&ti_wrap->commit.link);
+	wl_list_remove(&ti_wrap->destroy.link);
+	wl_list_remove(&ti_wrap->link);
+	free(ti_wrap);
+}
+
+void
+textinput(struct wl_listener *listener, void *data)
+{
+	struct wlr_text_input_v3 *ti = data;
+	TextInput *ti_wrap;
+	(void)listener;
+
+	wlr_log(WLR_INFO, "New text input created");
+
+	ti_wrap = ecalloc(1, sizeof(*ti_wrap));
+	ti_wrap->text_input = ti;
+
+	/* Set up listeners for this text input */
+	LISTEN(&ti->events.enable, &ti_wrap->enable, textinput_enable);
+	LISTEN(&ti->events.disable, &ti_wrap->disable, textinput_disable);
+	LISTEN(&ti->events.commit, &ti_wrap->commit, textinput_commit);
+	LISTEN(&ti->events.destroy, &ti_wrap->destroy, textinput_destroy);
+
+	wl_list_insert(&text_inputs, &ti_wrap->link);
+
+	/* If a surface already has keyboard focus, send enter to this text input
+	 * but only if the text input belongs to the same client as the surface */
+	struct wlr_surface *focused = seat->keyboard_state.focused_surface;
+	if (focused) {
+		struct wl_client *ti_client = wl_resource_get_client(ti->resource);
+		struct wl_client *surface_client = wl_resource_get_client(focused->resource);
+		if (ti_client == surface_client) {
+			wlr_text_input_v3_send_enter(ti, focused);
+		}
+	}
+}
+
+/* Notify all text inputs about focus change */
+static void
+text_input_focus_change(struct wlr_surface *old, struct wlr_surface *new)
+{
+	TextInput *ti_wrap;
+
+	wl_list_for_each(ti_wrap, &text_inputs, link) {
+		struct wlr_text_input_v3 *ti = ti_wrap->text_input;
+		if (!ti || !ti->resource)
+			continue;
+
+		/* Send leave if text input has any focused surface */
+		if (ti->focused_surface) {
+			wlr_text_input_v3_send_leave(ti);
+		}
+
+		/* Send enter for new surface - only if text input belongs to same client */
+		if (new && new->resource) {
+			struct wl_client *ti_client = wl_resource_get_client(ti->resource);
+			struct wl_client *surface_client = wl_resource_get_client(new->resource);
+			if (ti_client == surface_client) {
+				wlr_text_input_v3_send_enter(ti, new);
+			}
+		}
+	}
 }
 
 void
