@@ -15,7 +15,9 @@
 #include <pthread.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/sendfile.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -28,8 +30,9 @@
 #include "watcher.h"
 #include "transcoder.h"
 
-#define MAX_CONNECTIONS 100
-#define BUFFER_SIZE 65536
+/* No connection limit - kernel handles backlog */
+#define BUFFER_SIZE 262144  /* 256KB for efficient streaming */
+#define STREAM_CHUNK_SIZE 1048576  /* 1MB sendfile chunks */
 #define MAX_PATH 4096
 #define MAX_HEADER 8192
 #define DISCOVERY_PORT 8081
@@ -40,6 +43,17 @@ static int server_fd = -1;
 static int discovery_fd = -1;
 static volatile int running = 1;
 static volatile int transcoder_restart_pending = 0;
+
+/* Connection limiting based on bandwidth */
+#define STREAM_BITRATE_MBPS 70  /* Assumed bitrate per stream for lossless 4K */
+static volatile int active_streams = 0;
+static pthread_mutex_t stream_lock = PTHREAD_MUTEX_INITIALIZER;
+
+
+static int get_max_streams(void) {
+    if (server_config.upload_mbps <= 0) return 1000;  /* Effectively unlimited */
+    return server_config.upload_mbps / STREAM_BITRATE_MBPS;
+}
 
 /* Periodic sync thread - checks for changes every 5 minutes as backup to inotify */
 static void *sync_thread(void *arg) {
@@ -161,7 +175,27 @@ static void *discovery_thread(void *arg) {
 typedef struct {
     int client_fd;
     struct sockaddr_in client_addr;
+    int is_local;  /* 1 if client is on local network */
 } ClientConnection;
+
+/* Check if client IP is on local network (private IP ranges) */
+static int is_local_client(struct sockaddr_in *addr) {
+    uint32_t ip = ntohl(addr->sin_addr.s_addr);
+
+    /* 127.0.0.0/8 - localhost */
+    if ((ip >> 24) == 127) return 1;
+
+    /* 10.0.0.0/8 - private */
+    if ((ip >> 24) == 10) return 1;
+
+    /* 172.16.0.0/12 - private */
+    if ((ip >> 20) == (172 << 4 | 1)) return 1;
+
+    /* 192.168.0.0/16 - private */
+    if ((ip >> 16) == (192 << 8 | 168)) return 1;
+
+    return 0;
+}
 
 /* File change callback - keeps database in sync and triggers transcoding */
 static void on_file_change(const char *filepath, int is_delete, WatchType type) {
@@ -283,7 +317,9 @@ static void serve_file(int fd, const char *filepath) {
     close(file_fd);
 }
 
-/* Stream file with range request support (for seeking in video) */
+/* Stream file with range request support (for seeking in video)
+ * Uses sendfile() for zero-copy kernel-to-socket transfer - most efficient
+ * for lossless streaming of large media files */
 static void stream_file(int fd, const char *filepath, const char *range_header) {
     struct stat st;
     if (stat(filepath, &st) != 0) {
@@ -325,7 +361,7 @@ static void stream_file(int fd, const char *filepath, const char *range_header) 
             "Content-Range: bytes %ld-%ld/%ld\r\n"
             "Accept-Ranges: bytes\r\n"
             "Access-Control-Allow-Origin: *\r\n"
-            "Connection: close\r\n"
+            "Connection: keep-alive\r\n"
             "\r\n",
             mime, content_length, start, end, st.st_size);
     } else {
@@ -335,32 +371,34 @@ static void stream_file(int fd, const char *filepath, const char *range_header) 
             "Content-Length: %ld\r\n"
             "Accept-Ranges: bytes\r\n"
             "Access-Control-Allow-Origin: *\r\n"
-            "Connection: close\r\n"
+            "Connection: keep-alive\r\n"
             "\r\n",
             mime, st.st_size);
     }
 
     write(fd, header, header_len);
 
-    /* Seek to start position */
-    if (start > 0) {
-        lseek(file_fd, start, SEEK_SET);
-    }
-
-    /* Stream the file - no transcoding, pure lossless transfer */
-    char buffer[BUFFER_SIZE];
+    /* Stream using sendfile() - zero-copy kernel-to-socket transfer
+     * This is the most efficient way to stream large files:
+     * - No user-space buffer copies
+     * - Kernel handles DMA directly from disk to network
+     * - Supports lossless transfer of any codec (video, audio, subtitles) */
+    off_t offset = start;
     off_t remaining = content_length;
 
     while (remaining > 0 && running) {
-        size_t to_read = (remaining < BUFFER_SIZE) ? remaining : BUFFER_SIZE;
-        ssize_t bytes_read = read(file_fd, buffer, to_read);
+        /* Send in chunks to allow checking 'running' flag and handle partial sends */
+        size_t chunk = (remaining > STREAM_CHUNK_SIZE) ? STREAM_CHUNK_SIZE : remaining;
+        ssize_t sent = sendfile(fd, file_fd, &offset, chunk);
 
-        if (bytes_read <= 0) break;
+        if (sent <= 0) {
+            if (sent < 0 && (errno == EAGAIN || errno == EINTR)) {
+                continue;  /* Retry on temporary errors */
+            }
+            break;  /* Client disconnected or error */
+        }
 
-        ssize_t bytes_written = write(fd, buffer, bytes_read);
-        if (bytes_written <= 0) break;
-
-        remaining -= bytes_read;
+        remaining -= sent;
     }
 
     close(file_fd);
@@ -369,9 +407,32 @@ static void stream_file(int fd, const char *filepath, const char *range_header) 
 /* Handle API requests */
 static void handle_api(int fd, const char *path) {
     if (strcmp(path, "/api/status") == 0) {
-        /* Simple status check for discovery */
-        send_response(fd, 200, "OK", "application/json",
-                     "{\"status\": \"ok\", \"server\": \"nixly\"}", 35);
+        /* Status with server identity, rating, locality, and stream capacity
+         * Priority: local servers get 1000 + rating, remote get just rating
+         * Clients use priority to select best source for duplicate content */
+        int max = get_max_streams();
+        int rating = config_get_server_rating();
+        int is_local = config_get_client_local();
+        int priority = config_get_server_priority();
+        char json[512];
+        int len = snprintf(json, sizeof(json),
+            "{\"status\":\"ok\","
+            "\"server_id\":\"%s\","
+            "\"server_name\":\"%s\","
+            "\"rating\":%d,"
+            "\"is_local\":%s,"
+            "\"priority\":%d,"
+            "\"upload_mbps\":%d,"
+            "\"active_streams\":%d,"
+            "\"max_streams\":%d}",
+            server_config.server_id,
+            server_config.server_name,
+            rating,
+            is_local ? "true" : "false",
+            priority,
+            server_config.upload_mbps,
+            active_streams, max);
+        send_response(fd, 200, "OK", "application/json", json, len);
     }
     else if (strcmp(path, "/api/library") == 0) {
         /* Return entire media library as JSON */
@@ -576,7 +637,7 @@ static void handle_api(int fd, const char *path) {
             database_get_rom_count_by_console(CONSOLE_SWITCH));
         send_response(fd, 200, "OK", "application/json", json, len);
     }
-    else if (strcmp(path, "/api/status") == 0) {
+    else if (strcmp(path, "/api/counts") == 0) {
         char json[512];
         int len = snprintf(json, sizeof(json),
             "{\"movies\":%d,\"tvshows\":%d,\"roms\":%d,\"total\":%d}",
@@ -664,15 +725,62 @@ static void handle_request(int fd, const char *request) {
     if (range_header) free(range_header);
 }
 
+/* Optimize socket for high-throughput streaming */
+static void optimize_socket(int fd) {
+    /* TCP_NODELAY: disable Nagle's algorithm for lower latency */
+    int nodelay = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+
+    /* Large send buffer for streaming (4MB) */
+    int sndbuf = 4 * 1024 * 1024;
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+
+    /* TCP_CORK: batch small writes for efficiency (disabled for streaming) */
+    int cork = 0;
+    setsockopt(fd, IPPROTO_TCP, TCP_CORK, &cork, sizeof(cork));
+}
+
 /* Client handler thread */
 static void *client_handler(void *arg) {
     ClientConnection *conn = (ClientConnection *)arg;
     char buffer[MAX_HEADER];
+    int is_stream = 0;
+
+    /* Set thread-local flag for local client detection */
+    config_set_client_local(is_local_client(&conn->client_addr));
+
+    /* Optimize socket for streaming before handling request */
+    optimize_socket(conn->client_fd);
 
     ssize_t bytes = recv(conn->client_fd, buffer, sizeof(buffer) - 1, 0);
     if (bytes > 0) {
         buffer[bytes] = '\0';
+
+        /* Check if this is a stream request (counts against bandwidth limit) */
+        if (strstr(buffer, "/stream/") != NULL) {
+            int max = get_max_streams();
+            pthread_mutex_lock(&stream_lock);
+            if (active_streams >= max) {
+                pthread_mutex_unlock(&stream_lock);
+                send_error(conn->client_fd, 503,
+                    "Server busy - max concurrent streams reached");
+                close(conn->client_fd);
+                free(conn);
+                return NULL;
+            }
+            active_streams++;
+            is_stream = 1;
+            pthread_mutex_unlock(&stream_lock);
+        }
+
         handle_request(conn->client_fd, buffer);
+    }
+
+    /* Decrement stream count if this was a stream */
+    if (is_stream) {
+        pthread_mutex_lock(&stream_lock);
+        active_streams--;
+        pthread_mutex_unlock(&stream_lock);
     }
 
     close(conn->client_fd);
@@ -836,7 +944,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    if (listen(server_fd, MAX_CONNECTIONS) < 0) {
+    /* SOMAXCONN = kernel max (typically 4096+), allows unlimited concurrent streams */
+    if (listen(server_fd, SOMAXCONN) < 0) {
         perror("listen");
         return 1;
     }
@@ -857,11 +966,18 @@ int main(int argc, char *argv[]) {
         pthread_detach(sync_tid);
     }
 
+    int max_streams = get_max_streams();
+    int rating = config_get_server_rating();
     printf("\n");
     printf("========================================\n");
     printf("  Nixly Media Server running\n");
     printf("  http://0.0.0.0:%d\n", server_config.port);
     printf("  Discovery: UDP port %d\n", DISCOVERY_PORT);
+    printf("========================================\n");
+    printf("  Server: %s\n", server_config.server_name);
+    printf("  ID: %s\n", server_config.server_id);
+    printf("  Rating: %d/10 (%d Mbps)\n", rating, server_config.upload_mbps);
+    printf("  Max streams: %d\n", max_streams);
     printf("========================================\n");
     printf("  Media files: %d\n", database_get_count());
     printf("  Watching %d directories\n", watcher_get_count());

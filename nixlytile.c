@@ -6,6 +6,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <dirent.h>
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -114,6 +115,7 @@
 #endif
 
 #include "util.h"
+#include "videoplayer.h"
 
 /* macros */
 #ifndef MAX
@@ -596,6 +598,11 @@ typedef struct MediaItem {
 	int tmdb_episode_runtime;  /* Typical episode runtime in minutes from TMDB */
 	char tmdb_status[64];      /* "Returning Series", "Ended", "Canceled" */
 	char tmdb_next_episode[16]; /* YYYY-MM-DD of next episode */
+	/* Multi-server deduplication */
+	int tmdb_id;               /* TMDB ID for deduplication */
+	char server_id[64];        /* Source server ID */
+	char server_url[256];      /* Server URL for streaming */
+	int server_priority;       /* Server priority (local=1000+rating, remote=rating) */
 	struct wlr_buffer *poster_buf;  /* Cached scaled poster buffer */
 	struct wlr_buffer *backdrop_buf; /* Cached scaled backdrop buffer */
 	int poster_w, poster_h;    /* Loaded poster dimensions */
@@ -1384,6 +1391,9 @@ static void show_hz_osd(Monitor *m, const char *msg);
 static void hide_hz_osd(Monitor *m);
 static int hz_osd_timeout(void *data);
 static void testhzosd(const Arg *arg);
+static void render_playback_osd(void);
+static void hide_playback_osd(void);
+static int playback_osd_timeout(void *data);
 static void setcustomhz(const Arg *arg);
 static void setcursor(struct wl_listener *listener, void *data);
 static void setcursorshape(struct wl_listener *listener, void *data);
@@ -1593,6 +1603,7 @@ static void media_view_show(Monitor *m, MediaViewType type);
 static void media_view_hide(Monitor *m, MediaViewType type);
 static void media_view_hide_all(void);
 static void media_view_render(Monitor *m, MediaViewType type);
+static void media_view_render_detail(Monitor *m, MediaViewType type);
 static int media_view_refresh(Monitor *m, MediaViewType type);
 static int media_view_poll_timer_cb(void *data);
 static void media_view_free_items(MediaGridView *view);
@@ -1721,7 +1732,8 @@ static struct wl_event_source *config_watch_source = NULL;
 static struct wl_event_source *config_rewatch_timer = NULL;
 static int config_needs_rewatch = 0;
 static struct wl_display *dpy;
-static struct wl_event_loop *event_loop;
+struct wl_event_loop *event_loop;  /* Non-static: accessed by videoplayer */
+static VideoPlayer *active_videoplayer = NULL;
 static struct wlr_backend *backend;
 static struct wlr_scene *scene;
 static struct wlr_scene_tree *layers[NUM_LAYERS];
@@ -1844,6 +1856,70 @@ static int htpc_page_viaplay = 1;
 static int htpc_page_tv2play = 1;
 static int htpc_page_f1tv = 1;
 static int htpc_page_quit = 1;
+
+/* Client network bandwidth for media streaming (Mbps) */
+static int client_download_mbps = 100;  /* Default 100 Mbps */
+
+/* Media playback state */
+typedef enum {
+	PLAYBACK_IDLE = 0,
+	PLAYBACK_BUFFERING,
+	PLAYBACK_PLAYING,
+	PLAYBACK_ACTIVE      /* mpv is running and controllable */
+} PlaybackState;
+
+/* OSD bar menu selection */
+typedef enum {
+	OSD_MENU_NONE = 0,
+	OSD_MENU_SOUND,
+	OSD_MENU_SUBTITLES
+} OsdMenuType;
+
+static PlaybackState playback_state = PLAYBACK_IDLE;
+static int playback_buffer_seconds = 0;    /* Seconds to buffer before playback */
+static int playback_buffer_progress = 0;   /* Current buffer progress (0-100) */
+static char playback_message[512] = "";    /* Message to display during buffering */
+static char playback_url[512] = "";        /* URL to play */
+static int64_t playback_file_size = 0;     /* File size in bytes */
+static int playback_duration = 0;          /* Duration in seconds */
+static int playback_is_movie = 0;          /* 1 for movie, 0 for episode */
+static uint64_t playback_start_time = 0;   /* When buffering started */
+
+/* mpv IPC control */
+#define MPV_SOCKET_PATH "/tmp/nixly-mpv-socket"
+#define MPV_CACHE_DIR "/tmp/nixly-media-cache"
+static int mpv_ipc_fd = -1;                /* IPC socket fd */
+static pid_t mpv_pid = 0;                  /* mpv process ID */
+static int mpv_paused = 0;                 /* 1 if paused */
+static double mpv_position = 0.0;          /* Current playback position */
+static double mpv_duration_sec = 0.0;      /* Total duration */
+static int mpv_media_id = 0;               /* Current media ID for resume */
+
+/* OSD control bar */
+static int osd_visible = 0;                /* 1 if OSD bar is visible */
+static uint64_t osd_show_time = 0;         /* When OSD was last shown */
+static OsdMenuType osd_menu_open = OSD_MENU_NONE;
+static int osd_menu_selection = 0;         /* Selected item in open menu */
+
+/* Audio/subtitle tracks from mpv */
+#define MAX_TRACKS 32
+static struct {
+	int id;
+	char title[128];
+	char lang[16];
+	int selected;
+} audio_tracks[MAX_TRACKS], subtitle_tracks[MAX_TRACKS];
+static int audio_track_count = 0;
+static int subtitle_track_count = 0;
+
+/* Resume positions cache */
+#define RESUME_CACHE_FILE "/tmp/nixly-resume-cache"
+typedef struct {
+	int media_id;
+	double position;
+} ResumeEntry;
+static ResumeEntry resume_cache[256];
+static int resume_cache_count = 0;
 
 /* Streaming service URLs */
 #define NRK_URL "https://nrk.no/direkte/nrk1"
@@ -2053,6 +2129,8 @@ static struct wl_event_source *ram_popup_refresh_timer = NULL;
 static struct wl_event_source *popup_delay_timer = NULL;
 static struct wl_event_source *video_check_timer = NULL;
 static struct wl_event_source *hz_osd_timer = NULL;
+static struct wl_event_source *playback_osd_timer = NULL;
+static struct wlr_scene_tree *playback_osd_tree = NULL;
 static struct wl_event_source *pc_gaming_install_timer = NULL;
 static struct wl_event_source *game_refocus_timer = NULL;
 static struct wl_event_source *media_view_poll_timer = NULL;
@@ -21341,27 +21419,63 @@ retro_gaming_handle_button(Monitor *m, int button, int value)
 #define MEDIA_DISCOVERY_RESPONSE "NIXLY_SERVER"
 #define MAX_MEDIA_SERVERS 16
 
-/* Configured media servers (from config file) */
-static char media_servers[MAX_MEDIA_SERVERS][256];
+/* Server info with priority for multi-server deduplication */
+typedef struct {
+	char url[256];
+	char server_id[64];
+	char server_name[128];
+	int priority;       /* Local: 1000+rating, Remote: rating */
+	int is_local;       /* Auto-discovered on local network */
+	int is_configured;  /* From config file */
+} MediaServer;
+
+static MediaServer media_servers[MAX_MEDIA_SERVERS];
 static int media_server_count = 0;
-static int current_server_idx = 0;  /* Which configured server to use */
 
 /* Discovered server URL (auto-discovered or fallback to localhost) */
 static char discovered_server_url[256] = "";
 static int server_discovered = 0;
 static uint64_t last_discovery_attempt_ms = 0;
 
-/* Try to discover nixly-server on local network via UDP broadcast */
+/* Add server to list (avoiding duplicates) */
+static void
+add_media_server(const char *url, int is_local, int is_configured)
+{
+	/* Check for duplicates */
+	for (int i = 0; i < media_server_count; i++) {
+		if (strcmp(media_servers[i].url, url) == 0)
+			return;
+	}
+
+	if (media_server_count >= MAX_MEDIA_SERVERS)
+		return;
+
+	MediaServer *srv = &media_servers[media_server_count];
+	strncpy(srv->url, url, sizeof(srv->url) - 1);
+	srv->server_id[0] = '\0';
+	srv->server_name[0] = '\0';
+	srv->priority = is_local ? 1000 : 0;  /* Will be updated from /api/status */
+	srv->is_local = is_local;
+	srv->is_configured = is_configured;
+	media_server_count++;
+
+	wlr_log(WLR_INFO, "Added media server: %s (local=%d, configured=%d)",
+		url, is_local, is_configured);
+}
+
+/* Try to discover nixly-server on local network via UDP broadcast
+ * Returns number of servers discovered */
 static int
 discover_nixly_server(void)
 {
 	int sock;
 	struct sockaddr_in broadcast_addr, recv_addr;
-	socklen_t addr_len = sizeof(recv_addr);
+	socklen_t addr_len;
 	char recv_buf[256];
 	ssize_t recv_len;
 	struct timeval tv;
 	int broadcast_enable = 1;
+	int discovered_count = 0;
 
 	/* Create UDP socket */
 	sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -21377,9 +21491,9 @@ discover_nixly_server(void)
 		return 0;
 	}
 
-	/* Set receive timeout (500ms) */
+	/* Set receive timeout (200ms per response, allows multiple servers) */
 	tv.tv_sec = 0;
-	tv.tv_usec = 500000;
+	tv.tv_usec = 200000;
 	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
 	/* Broadcast discovery message to local network */
@@ -21395,12 +21509,15 @@ discover_nixly_server(void)
 		return 0;
 	}
 
-	/* Wait for response */
-	recv_len = recvfrom(sock, recv_buf, sizeof(recv_buf) - 1, 0,
-			    (struct sockaddr *)&recv_addr, &addr_len);
-	close(sock);
+	/* Collect responses from multiple servers (wait up to 1 second total) */
+	for (int attempts = 0; attempts < 5 && discovered_count < MAX_MEDIA_SERVERS; attempts++) {
+		addr_len = sizeof(recv_addr);
+		recv_len = recvfrom(sock, recv_buf, sizeof(recv_buf) - 1, 0,
+				    (struct sockaddr *)&recv_addr, &addr_len);
 
-	if (recv_len > 0) {
+		if (recv_len <= 0)
+			break;  /* Timeout, no more servers */
+
 		recv_buf[recv_len] = '\0';
 		if (strncmp(recv_buf, MEDIA_DISCOVERY_RESPONSE, strlen(MEDIA_DISCOVERY_RESPONSE)) == 0) {
 			/* Extract port if provided, otherwise use default */
@@ -21414,16 +21531,24 @@ discover_nixly_server(void)
 
 			char ip_str[INET_ADDRSTRLEN];
 			inet_ntop(AF_INET, &recv_addr.sin_addr, ip_str, sizeof(ip_str));
-			snprintf(discovered_server_url, sizeof(discovered_server_url),
-				 "http://%s:%d", ip_str, port);
 
-			wlr_log(WLR_INFO, "Discovered nixly-server at %s", discovered_server_url);
-			server_discovered = 1;
-			return 1;
+			char url[256];
+			snprintf(url, sizeof(url), "http://%s:%d", ip_str, port);
+
+			/* Add as local server (auto-discovered) */
+			add_media_server(url, 1, 0);
+			discovered_count++;
+
+			/* Also set legacy discovered_server_url for compatibility */
+			if (!server_discovered) {
+				strncpy(discovered_server_url, url, sizeof(discovered_server_url) - 1);
+				server_discovered = 1;
+			}
 		}
 	}
 
-	return 0;
+	close(sock);
+	return discovered_count;
 }
 
 /* Try localhost as fallback */
@@ -21439,8 +21564,10 @@ try_localhost_server(void)
 		char buf[64];
 		if (fgets(buf, sizeof(buf), fp) && strstr(buf, "ok")) {
 			pclose(fp);
-			snprintf(discovered_server_url, sizeof(discovered_server_url),
-				 "http://localhost:%d", MEDIA_SERVER_PORT);
+			char url[256];
+			snprintf(url, sizeof(url), "http://localhost:%d", MEDIA_SERVER_PORT);
+			add_media_server(url, 1, 0);  /* Local, not configured */
+			snprintf(discovered_server_url, sizeof(discovered_server_url), "%s", url);
 			wlr_log(WLR_INFO, "Found nixly-server on localhost");
 			server_discovered = 1;
 			return 1;
@@ -21450,37 +21577,480 @@ try_localhost_server(void)
 	return 0;
 }
 
-/* Get server URL (uses config or discovers if needed) */
-static const char *
-get_media_server_url(void)
+/* Run discovery for local servers (always runs, even with configured servers) */
+static void
+run_local_discovery(void)
 {
 	uint64_t now = monotonic_msec();
 
-	/* If servers are configured in config, use them (skip auto-discovery) */
-	if (media_server_count > 0) {
-		/* Use the current configured server */
-		if (current_server_idx < media_server_count)
-			return media_servers[current_server_idx];
-		return media_servers[0];
+	/* Don't retry too often (every 30 seconds) */
+	if (now - last_discovery_attempt_ms < 30000)
+		return;
+	last_discovery_attempt_ms = now;
+
+	/* Try localhost first */
+	try_localhost_server();
+
+	/* Then broadcast discovery for other local servers */
+	discover_nixly_server();
+}
+
+/* Get best server URL (highest priority) */
+static const char *
+get_media_server_url(void)
+{
+	/* Always try to discover local servers */
+	run_local_discovery();
+
+	if (media_server_count == 0) {
+		/* Fallback to localhost even if not responding */
+		return "http://localhost:8080";
 	}
 
-	/* Auto-discovery mode (no servers configured) */
-	/* Don't retry too often (every 5 seconds) */
-	if (!server_discovered && (now - last_discovery_attempt_ms > 5000)) {
-		last_discovery_attempt_ms = now;
+	/* Find server with highest priority (local servers have priority 1000+) */
+	int best_idx = 0;
+	for (int i = 1; i < media_server_count; i++) {
+		if (media_servers[i].priority > media_servers[best_idx].priority)
+			best_idx = i;
+	}
 
-		/* Try localhost first (most common case) */
-		if (!try_localhost_server()) {
-			/* Try broadcast discovery */
-			discover_nixly_server();
+	return media_servers[best_idx].url;
+}
+
+/* Get all servers (for fetching from multiple sources) */
+static int
+get_all_media_servers(MediaServer **servers)
+{
+	*servers = media_servers;
+	return media_server_count;
+}
+
+/* Calculate if buffering is needed and how long
+ * Returns buffer time in seconds, 0 if direct playback is possible */
+static int
+calculate_buffer_time(int64_t file_size, int duration, int bandwidth_mbps)
+{
+	if (duration <= 0 || file_size <= 0 || bandwidth_mbps <= 0)
+		return 0;
+
+	/* Calculate file bitrate in Mbps */
+	double file_bitrate_mbps = ((double)file_size * 8.0) / ((double)duration * 1000000.0);
+
+	/* If client bandwidth >= file bitrate, can stream directly */
+	if (bandwidth_mbps >= file_bitrate_mbps)
+		return 0;
+
+	/* Need to buffer. Calculate how much time to wait.
+	 * We need to download enough so that by the time the video ends,
+	 * we've downloaded the whole file.
+	 *
+	 * Let T = total duration, B = buffer time, D = download speed, P = playback speed (bitrate)
+	 * During buffer: download B * D bytes
+	 * During playback: download T * D bytes while playing T * P bytes
+	 * Total downloaded: (B + T) * D >= T * P (file size)
+	 * B >= T * (P - D) / D = T * (P/D - 1)
+	 *
+	 * In Mbps terms: B >= T * (file_bitrate / bandwidth - 1)
+	 */
+	double ratio = file_bitrate_mbps / (double)bandwidth_mbps;
+	int buffer_seconds = (int)(duration * (ratio - 1.0)) + 30;  /* +30s safety margin */
+
+	if (buffer_seconds < 30)
+		buffer_seconds = 30;
+
+	return buffer_seconds;
+}
+
+/* Load resume position for media ID */
+static double
+load_resume_position(int media_id)
+{
+	int i;
+	for (i = 0; i < resume_cache_count; i++) {
+		if (resume_cache[i].media_id == media_id)
+			return resume_cache[i].position;
+	}
+	return 0.0;
+}
+
+/* Save resume position for media ID */
+static void
+save_resume_position(int media_id, double position)
+{
+	int i;
+	/* Update existing entry */
+	for (i = 0; i < resume_cache_count; i++) {
+		if (resume_cache[i].media_id == media_id) {
+			resume_cache[i].position = position;
+			return;
+		}
+	}
+	/* Add new entry */
+	if (resume_cache_count < 256) {
+		resume_cache[resume_cache_count].media_id = media_id;
+		resume_cache[resume_cache_count].position = position;
+		resume_cache_count++;
+	}
+}
+
+/* Send command to mpv via IPC socket */
+static int
+mpv_send_command(const char *cmd)
+{
+	struct sockaddr_un addr;
+	int fd;
+	ssize_t written;
+
+	if (mpv_pid <= 0) return -1;
+
+	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fd < 0) return -1;
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	strncpy(addr.sun_path, MPV_SOCKET_PATH, sizeof(addr.sun_path) - 1);
+
+	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		close(fd);
+		return -1;
+	}
+
+	written = write(fd, cmd, strlen(cmd));
+	close(fd);
+	return (written > 0) ? 0 : -1;
+}
+
+/* Toggle pause/play */
+static void
+mpv_toggle_pause(void)
+{
+	mpv_send_command("{\"command\":[\"cycle\",\"pause\"]}\n");
+	mpv_paused = !mpv_paused;
+	osd_visible = 1;
+	osd_show_time = monotonic_msec();
+	wlr_log(WLR_INFO, "mpv: %s", mpv_paused ? "paused" : "playing");
+}
+
+/* Stop playback and save position */
+static void
+mpv_stop_playback(void)
+{
+	if (mpv_pid > 0) {
+		/* Save position before quitting */
+		if (mpv_media_id > 0 && mpv_position > 0)
+			save_resume_position(mpv_media_id, mpv_position);
+
+		/* Quit mpv */
+		mpv_send_command("{\"command\":[\"quit\"]}\n");
+
+		/* Wait briefly then kill if needed */
+		usleep(100000);
+		kill(mpv_pid, SIGTERM);
+		mpv_pid = 0;
+	}
+	playback_state = PLAYBACK_IDLE;
+	osd_visible = 0;
+	osd_menu_open = OSD_MENU_NONE;
+
+	/* Hide OSD overlay */
+	if (playback_osd_tree)
+		wlr_scene_node_set_enabled(&playback_osd_tree->node, 0);
+
+	wlr_log(WLR_INFO, "mpv: stopped playback");
+}
+
+/* Switch audio track */
+static void
+mpv_set_audio_track(int track_id)
+{
+	char cmd[128];
+	snprintf(cmd, sizeof(cmd), "{\"command\":[\"set_property\",\"aid\",%d]}\n", track_id);
+	mpv_send_command(cmd);
+	wlr_log(WLR_INFO, "mpv: set audio track %d", track_id);
+}
+
+/* Switch subtitle track (0 = off) */
+static void
+mpv_set_subtitle_track(int track_id)
+{
+	char cmd[128];
+	if (track_id == 0)
+		snprintf(cmd, sizeof(cmd), "{\"command\":[\"set_property\",\"sid\",\"no\"]}\n");
+	else
+		snprintf(cmd, sizeof(cmd), "{\"command\":[\"set_property\",\"sid\",%d]}\n", track_id);
+	mpv_send_command(cmd);
+	wlr_log(WLR_INFO, "mpv: set subtitle track %d", track_id);
+}
+
+/* Launch mpv with IPC socket */
+static void
+launch_mpv_player(double start_pos)
+{
+	char start_str[32];
+	char socket_arg[128];
+	char cache_dir_arg[256];
+	char video_sync_arg[64];
+
+	/* Remove old socket */
+	unlink(MPV_SOCKET_PATH);
+
+	/* Create cache directory */
+	mkdir(MPV_CACHE_DIR, 0755);
+
+	snprintf(start_str, sizeof(start_str), "--start=%.1f", start_pos);
+	snprintf(socket_arg, sizeof(socket_arg), "--input-ipc-server=%s", MPV_SOCKET_PATH);
+	snprintf(cache_dir_arg, sizeof(cache_dir_arg), "--cache-dir=%s", MPV_CACHE_DIR);
+	snprintf(video_sync_arg, sizeof(video_sync_arg), "--video-sync=display-resample");
+
+	mpv_pid = fork();
+	if (mpv_pid == 0) {
+		setsid();
+		execlp("mpv", "mpv",
+		       "--fullscreen",
+		       "--hwdec=auto-safe",
+		       "--vo=gpu",
+		       "--gpu-context=wayland",
+		       video_sync_arg,           /* Smooth playback sync to display */
+		       "--interpolation=yes",    /* Frame interpolation for smoothness */
+		       "--tscale=oversample",    /* Temporal scaling */
+		       "--audio-channels=7.1,5.1,stereo",
+		       "--audio-passthrough=yes",
+		       "--cache=yes",
+		       "--cache-secs=300",       /* 5 min cache for resume */
+		       "--demuxer-max-bytes=500M",
+		       "--demuxer-max-back-bytes=200M",
+		       cache_dir_arg,
+		       "--cache-pause-initial=yes",
+		       "--cache-pause-wait=3",
+		       socket_arg,
+		       "--osd-level=0",          /* No OSD, we handle it */
+		       "--no-input-default-bindings",
+		       "--input-vo-keyboard=no",
+		       start_pos > 0 ? start_str : "--start=0",
+		       playback_url,
+		       (char *)NULL);
+		_exit(1);
+	}
+
+	mpv_paused = 0;
+	osd_visible = 0;
+	osd_menu_open = OSD_MENU_NONE;
+
+	/* Initialize with placeholder tracks until we fetch real ones from mpv */
+	audio_track_count = 2;
+	audio_tracks[0].id = 1;
+	strcpy(audio_tracks[0].lang, "English");
+	strcpy(audio_tracks[0].title, "Surround 5.1");
+	audio_tracks[0].selected = 1;
+	audio_tracks[1].id = 2;
+	strcpy(audio_tracks[1].lang, "English");
+	strcpy(audio_tracks[1].title, "Stereo");
+	audio_tracks[1].selected = 0;
+
+	subtitle_track_count = 3;
+	subtitle_tracks[0].id = 1;
+	strcpy(subtitle_tracks[0].lang, "English");
+	strcpy(subtitle_tracks[0].title, "SDH");
+	subtitle_tracks[0].selected = 0;
+	subtitle_tracks[1].id = 2;
+	strcpy(subtitle_tracks[1].lang, "Norwegian");
+	strcpy(subtitle_tracks[1].title, "");
+	subtitle_tracks[1].selected = 0;
+	subtitle_tracks[2].id = 3;
+	strcpy(subtitle_tracks[2].lang, "Swedish");
+	strcpy(subtitle_tracks[2].title, "Forced");
+	subtitle_tracks[2].selected = 0;
+
+	playback_state = PLAYBACK_ACTIVE;
+	wlr_log(WLR_INFO, "mpv: launched with pid %d, socket %s", mpv_pid, MPV_SOCKET_PATH);
+}
+
+/* Launch integrated video player for local files or streaming URLs */
+static void
+launch_integrated_player_with_resume(const char *url, double resume_pos)
+{
+	if (!url || !selmon)
+		return;
+
+	/* Create video player if needed */
+	if (!active_videoplayer) {
+		active_videoplayer = videoplayer_create(selmon);
+		if (!active_videoplayer) {
+			wlr_log(WLR_ERROR, "Failed to create video player");
+			return;
+		}
+		/* Initialize scene tree on LyrBlock layer (above all HTPC content) */
+		if (videoplayer_init_scene(active_videoplayer, layers[LyrBlock]) != 0) {
+			wlr_log(WLR_ERROR, "Failed to init video player scene");
+			videoplayer_destroy(active_videoplayer);
+			active_videoplayer = NULL;
+			return;
 		}
 	}
 
-	if (server_discovered)
-		return discovered_server_url;
+	/* Open and play file/stream */
+	if (videoplayer_open(active_videoplayer, url) == 0) {
+		/* Position at fullscreen (top-left corner, video will scale to fill) */
+		videoplayer_set_position(active_videoplayer, selmon->m.x, selmon->m.y);
+		videoplayer_set_fullscreen_size(active_videoplayer, selmon->m.width, selmon->m.height);
+		videoplayer_set_visible(active_videoplayer, 1);
 
-	/* Fallback to localhost even if not responding */
-	return "http://localhost:8080";
+		/* Raise video player above all other content */
+		if (active_videoplayer->tree)
+			wlr_scene_node_raise_to_top(&active_videoplayer->tree->node);
+
+		/* Set up frame timing based on display refresh rate */
+		float display_hz = 60.0f;
+		if (selmon->wlr_output->current_mode) {
+			display_hz = (float)selmon->wlr_output->current_mode->refresh / 1000.0f;
+		}
+		videoplayer_setup_display_mode(active_videoplayer, display_hz, selmon->vrr_capable);
+
+		/* Seek to resume position if specified */
+		if (resume_pos > 0) {
+			int64_t resume_us = (int64_t)(resume_pos * 1000000.0);
+			videoplayer_seek(active_videoplayer, resume_us);
+		}
+		videoplayer_play(active_videoplayer);
+		playback_state = PLAYBACK_PLAYING;
+		wlr_log(WLR_INFO, "Integrated player: playing %s (resume at %.1fs)", url, resume_pos);
+	} else {
+		wlr_log(WLR_ERROR, "Integrated player: failed to open %s", url);
+	}
+}
+
+/* Launch integrated video player (no resume) */
+static void
+launch_integrated_player(const char *filepath)
+{
+	launch_integrated_player_with_resume(filepath, 0.0);
+}
+
+/* Stop integrated video player */
+static void
+stop_integrated_player(void)
+{
+	if (active_videoplayer) {
+		videoplayer_stop(active_videoplayer);
+		videoplayer_set_visible(active_videoplayer, 0);
+		playback_state = PLAYBACK_IDLE;
+	}
+}
+
+/* Start media playback (with buffering check) */
+static void
+media_start_playback(MediaItem *item, int is_movie)
+{
+	double resume_pos;
+	char cmd[768];
+	FILE *fp;
+
+	if (!item) return;
+
+	/* Build stream URL */
+	snprintf(playback_url, sizeof(playback_url), "%s/stream/%d",
+		 item->server_url[0] ? item->server_url : get_media_server_url(), item->id);
+
+	playback_is_movie = is_movie;
+	playback_duration = item->duration;
+	mpv_media_id = item->id;
+
+	/* Check for resume position */
+	resume_pos = load_resume_position(item->id);
+
+	/* Fetch file size from server to calculate bitrate */
+	snprintf(cmd, sizeof(cmd),
+		 "curl -sI '%s' 2>/dev/null | grep -i content-length | awk '{print $2}' | tr -d '\\r'",
+		 playback_url);
+	fp = popen(cmd, "r");
+	if (fp) {
+		char buf[64];
+		if (fgets(buf, sizeof(buf), fp)) {
+			playback_file_size = atoll(buf);
+		}
+		pclose(fp);
+	}
+
+	/* Calculate buffer time */
+	playback_buffer_seconds = calculate_buffer_time(playback_file_size, playback_duration, client_download_mbps);
+
+	if (playback_buffer_seconds > 0) {
+		/* Need to buffer first */
+		int minutes = (playback_buffer_seconds + 59) / 60;
+		const char *media_type = is_movie ? "movie" : "episode";
+
+		snprintf(playback_message, sizeof(playback_message),
+			"Due to your internet connection being only %d Mbps,\n"
+			"parts of this %s need to be downloaded before playback can begin.\n\n"
+			"We recommend upgrading your internet connection\n"
+			"for uninterrupted direct playback.\n\n"
+			"Estimated wait time: approximately %d minute%s.",
+			client_download_mbps,
+			media_type,
+			minutes,
+			minutes == 1 ? "" : "s");
+
+		playback_state = PLAYBACK_BUFFERING;
+		playback_buffer_progress = 0;
+		playback_start_time = monotonic_msec();
+
+		wlr_log(WLR_INFO, "Media playback: buffering %d seconds before starting", playback_buffer_seconds);
+	} else {
+		/* Can play directly - use integrated player */
+		wlr_log(WLR_INFO, "Media playback: starting direct playback of %s (resume at %.1fs)",
+			item->title, resume_pos);
+		launch_integrated_player_with_resume(playback_url, resume_pos);
+	}
+}
+
+/* Check buffering progress and start playback when ready */
+static void
+media_check_buffering(void)
+{
+	if (playback_state != PLAYBACK_BUFFERING)
+		return;
+
+	uint64_t elapsed_ms = monotonic_msec() - playback_start_time;
+	int elapsed_sec = elapsed_ms / 1000;
+
+	playback_buffer_progress = (elapsed_sec * 100) / playback_buffer_seconds;
+	if (playback_buffer_progress > 100)
+		playback_buffer_progress = 100;
+
+	/* Update remaining time in message */
+	int remaining_sec = playback_buffer_seconds - elapsed_sec;
+	if (remaining_sec < 0) remaining_sec = 0;
+	int minutes = (remaining_sec + 59) / 60;
+
+	const char *media_type = playback_is_movie ? "movie" : "episode";
+	snprintf(playback_message, sizeof(playback_message),
+		"Due to your internet connection being only %d Mbps,\n"
+		"parts of this %s need to be downloaded before playback can begin.\n\n"
+		"We recommend upgrading your internet connection\n"
+		"for uninterrupted direct playback.\n\n"
+		"Estimated wait time: approximately %d minute%s.",
+		client_download_mbps,
+		media_type,
+		minutes,
+		minutes == 1 ? "" : "s");
+
+	if (elapsed_sec >= playback_buffer_seconds) {
+		/* Buffer complete - start playback with integrated player */
+		double resume_pos = load_resume_position(mpv_media_id);
+		wlr_log(WLR_INFO, "Media playback: buffer complete, starting playback");
+		launch_integrated_player_with_resume(playback_url, resume_pos);
+	}
+}
+
+/* Cancel buffering */
+static void
+media_cancel_buffering(void)
+{
+	if (playback_state == PLAYBACK_BUFFERING) {
+		playback_state = PLAYBACK_IDLE;
+		playback_message[0] = '\0';
+		wlr_log(WLR_INFO, "Media playback: buffering cancelled");
+	}
 }
 
 static MediaGridView *
@@ -21624,78 +22194,48 @@ media_view_poll_timer_cb(void *data)
 		}
 	}
 
-	/* Re-arm timer for next poll */
-	if (media_view_poll_timer)
-		wl_event_source_timer_update(media_view_poll_timer, 3000);
+	/* Check buffering progress */
+	if (playback_state == PLAYBACK_BUFFERING) {
+		int old_progress = playback_buffer_progress;
+		PlaybackState old_state = playback_state;
+		Monitor *bm;
+
+		media_check_buffering();
+
+		/* Re-render if progress changed or state changed */
+		if (playback_buffer_progress != old_progress || playback_state != old_state) {
+			wl_list_for_each(bm, &mons, link) {
+				if (bm->movies_view.visible && bm->movies_view.in_detail_view)
+					media_view_render_detail(bm, MEDIA_VIEW_MOVIES);
+				if (bm->tvshows_view.visible && bm->tvshows_view.in_detail_view)
+					media_view_render_detail(bm, MEDIA_VIEW_TVSHOWS);
+			}
+		}
+	}
+
+	/* Re-arm timer for next poll (1s during buffering, 3s otherwise) */
+	{
+		int interval = (playback_state == PLAYBACK_BUFFERING) ? 1000 : 3000;
+		if (media_view_poll_timer)
+			wl_event_source_timer_update(media_view_poll_timer, interval);
+	}
 
 	return 0;
 }
 
-/* Fetch media list from server - returns 1 if data changed, 0 otherwise */
+/* Parse media items from JSON buffer into temp array for deduplication */
 static int
-media_view_refresh(Monitor *m, MediaViewType type)
+parse_media_json(const char *buffer, const char *server_url, MediaItem **out_items, int max_items)
 {
-	MediaGridView *view;
-	FILE *fp;
-	char cmd[512];
-	char buffer[1024 * 1024];  /* 1MB buffer for JSON */
-	size_t bytes_read;
-	const char *endpoint;
-	uint32_t new_hash;
-
-	if (!m) return 0;
-	view = media_get_view(m, type);
-	if (!view) return 0;
-
-	view->needs_refresh = 0;
-	view->last_refresh_ms = monotonic_msec();
-
-	endpoint = (type == MEDIA_VIEW_MOVIES) ? "/api/movies" : "/api/tvshows";
-	snprintf(cmd, sizeof(cmd), "curl -s '%s%s' 2>/dev/null", get_media_server_url(), endpoint);
-
-	fp = popen(cmd, "r");
-	if (!fp) {
-		wlr_log(WLR_ERROR, "Failed to fetch media list from server");
-		return 0;
-	}
-
-	bytes_read = fread(buffer, 1, sizeof(buffer) - 1, fp);
-	pclose(fp);
-
-	if (bytes_read == 0) {
-		wlr_log(WLR_INFO, "No media data from server (server may be offline)");
-		return 0;
-	}
-	buffer[bytes_read] = '\0';
-
-	/* Calculate simple hash to detect changes (djb2 algorithm) */
-	new_hash = 5381;
-	for (size_t i = 0; i < bytes_read; i++)
-		new_hash = ((new_hash << 5) + new_hash) + (unsigned char)buffer[i];
-
-	/* Skip update if data hasn't changed */
-	if (view->items && new_hash == view->last_data_hash) {
-		return 0;
-	}
-	view->last_data_hash = new_hash;
-
-	/* Data changed - free old items and parse new data */
-	media_view_free_items(view);
-
-	/* Parse JSON array - simple parser for our known format */
 	const char *pos = strchr(buffer, '[');
 	if (!pos) return 0;
 	pos++;
 
-	MediaItem *last = NULL;
 	int count = 0;
-
-	while (*pos) {
-		/* Find start of object */
+	while (*pos && count < max_items) {
 		const char *obj_start = strchr(pos, '{');
 		if (!obj_start) break;
 
-		/* Find end of object */
 		int depth = 1;
 		const char *obj_end = obj_start + 1;
 		while (*obj_end && depth > 0) {
@@ -21703,28 +22243,21 @@ media_view_refresh(Monitor *m, MediaViewType type)
 			else if (*obj_end == '}') depth--;
 			obj_end++;
 		}
-
 		if (depth != 0) break;
 
-		/* Extract this object */
 		size_t obj_len = obj_end - obj_start;
 		char *obj_json = malloc(obj_len + 1);
 		if (!obj_json) break;
 		strncpy(obj_json, obj_start, obj_len);
 		obj_json[obj_len] = '\0';
 
-		/* Create media item */
 		MediaItem *item = calloc(1, sizeof(MediaItem));
 		if (item) {
 			item->id = json_extract_int(obj_json, "id");
 			item->type = json_extract_int(obj_json, "type");
-
-			/* For TV-shows: prefer tmdb_title > show_name > title
-			 * For Movies: prefer tmdb_title > title */
 			json_extract_string(obj_json, "show_name", item->show_name, sizeof(item->show_name));
 			if (!json_extract_string(obj_json, "tmdb_title", item->title, sizeof(item->title)) ||
 			    item->title[0] == '\0') {
-				/* Fallback: use show_name for TV-shows, title for movies */
 				if (item->show_name[0])
 					snprintf(item->title, sizeof(item->title), "%s", item->show_name);
 				else
@@ -21744,24 +22277,157 @@ media_view_refresh(Monitor *m, MediaViewType type)
 			item->tmdb_episode_runtime = json_extract_int(obj_json, "tmdb_episode_runtime");
 			json_extract_string(obj_json, "tmdb_status", item->tmdb_status, sizeof(item->tmdb_status));
 			json_extract_string(obj_json, "tmdb_next_episode", item->tmdb_next_episode, sizeof(item->tmdb_next_episode));
+			item->tmdb_id = json_extract_int(obj_json, "tmdb_id");
+			json_extract_string(obj_json, "server_id", item->server_id, sizeof(item->server_id));
+			item->server_priority = json_extract_int(obj_json, "server_priority");
+			strncpy(item->server_url, server_url, sizeof(item->server_url) - 1);
 
-			/* Add to linked list */
+			out_items[count++] = item;
+		}
+		free(obj_json);
+		pos = obj_end;
+	}
+	return count;
+}
+
+/* Fetch media list from ALL servers, deduplicate by tmdb_id keeping highest priority */
+static int
+media_view_refresh(Monitor *m, MediaViewType type)
+{
+	MediaGridView *view;
+	FILE *fp;
+	char cmd[512];
+	char buffer[1024 * 1024];  /* 1MB buffer for JSON */
+	size_t bytes_read;
+	const char *endpoint;
+	uint32_t new_hash = 5381;
+
+	if (!m) return 0;
+	view = media_get_view(m, type);
+	if (!view) return 0;
+
+	view->needs_refresh = 0;
+	view->last_refresh_ms = monotonic_msec();
+
+	/* Run discovery to find local servers */
+	run_local_discovery();
+
+	endpoint = (type == MEDIA_VIEW_MOVIES) ? "/api/movies" : "/api/tvshows";
+
+	/* Temporary storage for all items from all servers */
+	#define MAX_TEMP_ITEMS 2000
+	MediaItem **temp_items = calloc(MAX_TEMP_ITEMS, sizeof(MediaItem *));
+	int total_items = 0;
+
+	/* Fetch from all configured/discovered servers */
+	MediaServer *servers;
+	int server_count = get_all_media_servers(&servers);
+
+	if (server_count == 0) {
+		/* Fallback to localhost */
+		snprintf(cmd, sizeof(cmd), "curl -s 'http://localhost:8080%s' 2>/dev/null", endpoint);
+		fp = popen(cmd, "r");
+		if (fp) {
+			bytes_read = fread(buffer, 1, sizeof(buffer) - 1, fp);
+			pclose(fp);
+			if (bytes_read > 0) {
+				buffer[bytes_read] = '\0';
+				for (size_t i = 0; i < bytes_read; i++)
+					new_hash = ((new_hash << 5) + new_hash) + (unsigned char)buffer[i];
+				total_items = parse_media_json(buffer, "http://localhost:8080", temp_items, MAX_TEMP_ITEMS);
+			}
+		}
+	} else {
+		for (int s = 0; s < server_count && total_items < MAX_TEMP_ITEMS; s++) {
+			snprintf(cmd, sizeof(cmd), "curl -s --connect-timeout 2 '%s%s' 2>/dev/null",
+				 servers[s].url, endpoint);
+			fp = popen(cmd, "r");
+			if (!fp) continue;
+
+			bytes_read = fread(buffer, 1, sizeof(buffer) - 1, fp);
+			pclose(fp);
+			if (bytes_read == 0) continue;
+			buffer[bytes_read] = '\0';
+
+			/* Update hash with this server's data */
+			for (size_t i = 0; i < bytes_read; i++)
+				new_hash = ((new_hash << 5) + new_hash) + (unsigned char)buffer[i];
+
+			int parsed = parse_media_json(buffer, servers[s].url,
+						      &temp_items[total_items], MAX_TEMP_ITEMS - total_items);
+			total_items += parsed;
+			wlr_log(WLR_DEBUG, "Fetched %d items from %s", parsed, servers[s].url);
+		}
+	}
+
+	/* Skip update if data hasn't changed */
+	if (view->items && new_hash == view->last_data_hash) {
+		for (int i = 0; i < total_items; i++)
+			free(temp_items[i]);
+		free(temp_items);
+		return 0;
+	}
+	view->last_data_hash = new_hash;
+
+	/* Data changed - free old items */
+	media_view_free_items(view);
+
+	/* Deduplicate by tmdb_id: keep only the item with highest server_priority
+	 * For items without tmdb_id (0), keep all of them */
+	MediaItem *last = NULL;
+	int count = 0;
+
+	for (int i = 0; i < total_items; i++) {
+		MediaItem *item = temp_items[i];
+		if (!item) continue;
+
+		int dominated = 0;
+
+		/* Check if another item with same tmdb_id has higher priority */
+		if (item->tmdb_id > 0) {
+			for (int j = 0; j < total_items; j++) {
+				if (i == j || !temp_items[j]) continue;
+				MediaItem *other = temp_items[j];
+				if (other->tmdb_id == item->tmdb_id &&
+				    other->type == item->type &&
+				    other->season == item->season &&
+				    other->episode == item->episode) {
+					/* Same content - check priority */
+					if (other->server_priority > item->server_priority) {
+						dominated = 1;
+						break;
+					}
+					/* If same priority, keep first one (lower index) */
+					if (other->server_priority == item->server_priority && j < i) {
+						dominated = 1;
+						break;
+					}
+				}
+			}
+		}
+
+		if (dominated) {
+			/* This item is dominated by a better source - discard */
+			free(item);
+			temp_items[i] = NULL;
+		} else {
+			/* Keep this item - add to linked list */
 			if (!view->items) {
 				view->items = item;
 			} else {
 				last->next = item;
 			}
 			last = item;
+			item->next = NULL;
 			count++;
 		}
-
-		free(obj_json);
-		pos = obj_end;
 	}
 
+	free(temp_items);
 	view->item_count = count;
-	wlr_log(WLR_INFO, "Media view: loaded %d items for %s",
-		count, type == MEDIA_VIEW_MOVIES ? "Movies" : "TV-shows");
+
+	wlr_log(WLR_INFO, "Media view: loaded %d items for %s (after dedup from %d servers)",
+		count, type == MEDIA_VIEW_MOVIES ? "Movies" : "TV-shows", server_count);
 	return 1;  /* Data changed */
 }
 
@@ -22190,6 +22856,125 @@ media_view_fetch_episodes(MediaGridView *view, const char *show_name, int season
 	view->episode_count = count;
 }
 
+/* Render buffering overlay */
+static void
+media_render_buffering_overlay(Monitor *m, MediaViewType type)
+{
+	MediaGridView *view;
+	struct wlr_scene_node *node, *tmp;
+	float bg_color[4] = {0.02f, 0.02f, 0.05f, 0.98f};
+	float text_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+	float warning_color[4] = {1.0f, 0.8f, 0.2f, 1.0f};
+	float progress_bg[4] = {0.15f, 0.15f, 0.2f, 1.0f};
+	float progress_fill[4] = {0.2f, 0.6f, 1.0f, 1.0f};
+	StatusModule mod = {0};
+	struct wlr_scene_tree *text_tree;
+	int center_x, center_y, line_y, line_height;
+	char *msg;
+	char line[256];
+
+	if (!m || !statusfont.font)
+		return;
+
+	view = media_get_view(m, type);
+	if (!view || !view->visible || !view->tree)
+		return;
+
+	/* Clear previous content */
+	wl_list_for_each_safe(node, tmp, &view->tree->children, link) {
+		wlr_scene_node_destroy(node);
+	}
+	view->grid = NULL;
+	view->detail_panel = NULL;
+
+	/* Dark background */
+	drawrect(view->tree, 0, 0, view->width, view->height, bg_color);
+
+	/* Center the message */
+	center_x = view->width / 2;
+	center_y = view->height / 2 - 100;
+
+	/* Warning icon area */
+	{
+		float icon_bg[4] = {0.15f, 0.12f, 0.05f, 1.0f};
+		drawrect(view->tree, center_x - 40, center_y - 80, 80, 80, icon_bg);
+	}
+
+	/* Warning symbol */
+	text_tree = wlr_scene_tree_create(view->tree);
+	if (text_tree) {
+		wlr_scene_node_set_position(&text_tree->node, center_x - 20, center_y - 60);
+		mod.tree = text_tree;
+		tray_render_label(&mod, "!", 0, 40, warning_color);
+	}
+
+	/* Render message lines */
+	msg = playback_message;
+	line_y = center_y + 20;
+	line_height = 32;
+
+	while (*msg) {
+		/* Extract line until \n */
+		char *nl = strchr(msg, '\n');
+		size_t len = nl ? (size_t)(nl - msg) : strlen(msg);
+		int text_w;
+
+		if (len >= sizeof(line)) len = sizeof(line) - 1;
+		strncpy(line, msg, len);
+		line[len] = '\0';
+
+		/* Center text */
+		text_w = (int)len * 10;  /* Approximate */
+		text_tree = wlr_scene_tree_create(view->tree);
+		if (text_tree) {
+			wlr_scene_node_set_position(&text_tree->node, center_x - text_w / 2, line_y);
+			mod.tree = text_tree;
+			tray_render_label(&mod, line, 0, 24, text_color);
+		}
+		line_y += line_height;
+
+		if (nl)
+			msg = nl + 1;
+		else
+			break;
+	}
+
+	/* Progress bar */
+	{
+		int bar_w = 400;
+		int bar_h = 20;
+		int bar_x = center_x - bar_w / 2;
+		int bar_y = line_y + 40;
+		int fill_w;
+		char pct[32];
+
+		drawrect(view->tree, bar_x, bar_y, bar_w, bar_h, progress_bg);
+		fill_w = (bar_w * playback_buffer_progress) / 100;
+		if (fill_w > 0)
+			drawrect(view->tree, bar_x, bar_y, fill_w, bar_h, progress_fill);
+
+		/* Progress percentage */
+		snprintf(pct, sizeof(pct), "%d%%", playback_buffer_progress);
+		text_tree = wlr_scene_tree_create(view->tree);
+		if (text_tree) {
+			wlr_scene_node_set_position(&text_tree->node, center_x - 20, bar_y + bar_h + 20);
+			mod.tree = text_tree;
+			tray_render_label(&mod, pct, 0, 24, text_color);
+		}
+
+		/* Cancel hint */
+		{
+			float hint_color[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+			text_tree = wlr_scene_tree_create(view->tree);
+			if (text_tree) {
+				wlr_scene_node_set_position(&text_tree->node, center_x - 140, view->height - 60);
+				mod.tree = text_tree;
+				tray_render_label(&mod, "Press B or Escape to cancel", 0, 24, hint_color);
+			}
+		}
+	}
+}
+
 /* Render detail view for a movie or TV show */
 static void
 media_view_render_detail(Monitor *m, MediaViewType type)
@@ -22210,6 +22995,12 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 	view = media_get_view(m, type);
 	if (!view || !view->visible || !view->tree || !view->in_detail_view)
 		return;
+
+	/* If buffering, show buffering overlay instead */
+	if (playback_state == PLAYBACK_BUFFERING) {
+		media_render_buffering_overlay(m, type);
+		return;
+	}
 
 	MediaItem *item = view->detail_item;
 	if (!item) return;
@@ -23134,6 +23925,88 @@ media_view_scroll(Monitor *m, MediaViewType type, int delta)
 	media_view_render(m, type);
 }
 
+/* Handle playback OSD menu navigation */
+static int
+handle_playback_osd_input(int button)
+{
+	int handled = 0;
+
+	/* Any input shows OSD */
+	osd_visible = 1;
+	osd_show_time = monotonic_msec();
+
+	switch (button) {
+	case BTN_SOUTH:  /* A button - pause/play or select menu item */
+		if (osd_menu_open == OSD_MENU_NONE) {
+			mpv_toggle_pause();
+		} else if (osd_menu_open == OSD_MENU_SOUND) {
+			if (osd_menu_selection < audio_track_count)
+				mpv_set_audio_track(audio_tracks[osd_menu_selection].id);
+			osd_menu_open = OSD_MENU_NONE;
+		} else if (osd_menu_open == OSD_MENU_SUBTITLES) {
+			if (osd_menu_selection == 0)
+				mpv_set_subtitle_track(0);  /* Off */
+			else if (osd_menu_selection <= subtitle_track_count)
+				mpv_set_subtitle_track(subtitle_tracks[osd_menu_selection - 1].id);
+			osd_menu_open = OSD_MENU_NONE;
+		}
+		handled = 1;
+		break;
+
+	case BTN_EAST:   /* B button - close menu or stop playback */
+		if (osd_menu_open != OSD_MENU_NONE) {
+			osd_menu_open = OSD_MENU_NONE;
+		} else {
+			mpv_stop_playback();
+			hide_playback_osd();
+			return 1;  /* Don't render OSD after stopping */
+		}
+		handled = 1;
+		break;
+
+	case BTN_DPAD_UP:
+		if (osd_menu_open != OSD_MENU_NONE && osd_menu_selection > 0)
+			osd_menu_selection--;
+		handled = 1;
+		break;
+
+	case BTN_DPAD_DOWN:
+		if (osd_menu_open == OSD_MENU_SOUND && osd_menu_selection < audio_track_count - 1)
+			osd_menu_selection++;
+		else if (osd_menu_open == OSD_MENU_SUBTITLES && osd_menu_selection < subtitle_track_count)
+			osd_menu_selection++;
+		handled = 1;
+		break;
+
+	case BTN_DPAD_LEFT:
+		if (osd_menu_open == OSD_MENU_SUBTITLES) {
+			osd_menu_open = OSD_MENU_SOUND;
+			osd_menu_selection = 0;
+		} else if (osd_menu_open == OSD_MENU_NONE) {
+			/* Could add seek left here */
+		}
+		handled = 1;
+		break;
+
+	case BTN_DPAD_RIGHT:
+		if (osd_menu_open == OSD_MENU_NONE) {
+			osd_menu_open = OSD_MENU_SOUND;
+			osd_menu_selection = 0;
+		} else if (osd_menu_open == OSD_MENU_SOUND) {
+			osd_menu_open = OSD_MENU_SUBTITLES;
+			osd_menu_selection = 0;
+		}
+		handled = 1;
+		break;
+	}
+
+	/* Re-render OSD after input */
+	if (handled)
+		render_playback_osd();
+
+	return handled;
+}
+
 /* Handle detail view button input */
 static int
 media_view_handle_detail_button(Monitor *m, MediaViewType type, int button)
@@ -23143,15 +24016,29 @@ media_view_handle_detail_button(Monitor *m, MediaViewType type, int button)
 
 	int needs_render = 0;
 
+	/* If playback is active, handle playback controls */
+	if (playback_state == PLAYBACK_ACTIVE) {
+		return handle_playback_osd_input(button);
+	}
+
 	switch (button) {
-	case BTN_EAST:   /* B button - go back to grid */
+	case BTN_EAST:   /* B button - go back to grid or cancel buffering */
+		if (playback_state == PLAYBACK_BUFFERING) {
+			media_cancel_buffering();
+			media_view_render_detail(m, type);
+			return 1;
+		}
 		media_view_exit_detail(m, type);
 		return 1;
 
 	case BTN_SOUTH:  /* A button - play selected */
 		if (type == MEDIA_VIEW_MOVIES) {
-			/* Play movie - TODO: launch player */
-			wlr_log(WLR_INFO, "Play movie: %s", view->detail_item ? view->detail_item->title : "unknown");
+			/* Play movie */
+			if (view->detail_item) {
+				wlr_log(WLR_INFO, "Play movie: %s", view->detail_item->title);
+				media_start_playback(view->detail_item, 1);
+				needs_render = 1;
+			}
 		} else if (type == MEDIA_VIEW_TVSHOWS) {
 			if (view->detail_focus == DETAIL_FOCUS_EPISODES && view->episodes) {
 				/* Play selected episode */
@@ -23161,6 +24048,8 @@ media_view_handle_detail_button(Monitor *m, MediaViewType type, int button)
 				if (ep) {
 					wlr_log(WLR_INFO, "Play episode: S%02dE%02d %s",
 					        ep->season, ep->episode, ep->episode_title);
+					media_start_playback(ep, 0);
+					needs_render = 1;
 				}
 			} else if (view->detail_focus == DETAIL_FOCUS_SEASONS) {
 				/* Move to episodes column */
@@ -23325,6 +24214,105 @@ media_view_handle_button(Monitor *m, MediaViewType type, int button, int value)
 	return 1;
 }
 
+/* Handle playback keyboard input */
+static int
+handle_playback_key(xkb_keysym_t sym)
+{
+	int handled = 0;
+
+	/* Any input shows OSD */
+	osd_visible = 1;
+	osd_show_time = monotonic_msec();
+
+	switch (sym) {
+	case XKB_KEY_space:
+	case XKB_KEY_Return:
+	case XKB_KEY_KP_Enter:
+		if (osd_menu_open == OSD_MENU_NONE) {
+			mpv_toggle_pause();
+		} else if (osd_menu_open == OSD_MENU_SOUND) {
+			if (osd_menu_selection < audio_track_count)
+				mpv_set_audio_track(audio_tracks[osd_menu_selection].id);
+			osd_menu_open = OSD_MENU_NONE;
+		} else if (osd_menu_open == OSD_MENU_SUBTITLES) {
+			if (osd_menu_selection == 0)
+				mpv_set_subtitle_track(0);
+			else if (osd_menu_selection <= subtitle_track_count)
+				mpv_set_subtitle_track(subtitle_tracks[osd_menu_selection - 1].id);
+			osd_menu_open = OSD_MENU_NONE;
+		}
+		handled = 1;
+		break;
+
+	case XKB_KEY_Escape:
+	case XKB_KEY_q:
+		if (osd_menu_open != OSD_MENU_NONE) {
+			osd_menu_open = OSD_MENU_NONE;
+		} else {
+			mpv_stop_playback();
+			hide_playback_osd();
+			return 1;  /* Don't render OSD after stopping */
+		}
+		handled = 1;
+		break;
+
+	case XKB_KEY_Up:
+	case XKB_KEY_k:
+		if (osd_menu_open != OSD_MENU_NONE && osd_menu_selection > 0)
+			osd_menu_selection--;
+		handled = 1;
+		break;
+
+	case XKB_KEY_Down:
+	case XKB_KEY_j:
+		if (osd_menu_open == OSD_MENU_SOUND && osd_menu_selection < audio_track_count - 1)
+			osd_menu_selection++;
+		else if (osd_menu_open == OSD_MENU_SUBTITLES && osd_menu_selection < subtitle_track_count)
+			osd_menu_selection++;
+		handled = 1;
+		break;
+
+	case XKB_KEY_Left:
+	case XKB_KEY_h:
+		if (osd_menu_open == OSD_MENU_SUBTITLES) {
+			osd_menu_open = OSD_MENU_SOUND;
+			osd_menu_selection = 0;
+		}
+		handled = 1;
+		break;
+
+	case XKB_KEY_Right:
+	case XKB_KEY_l:
+		if (osd_menu_open == OSD_MENU_NONE) {
+			osd_menu_open = OSD_MENU_SOUND;
+			osd_menu_selection = 0;
+		} else if (osd_menu_open == OSD_MENU_SOUND) {
+			osd_menu_open = OSD_MENU_SUBTITLES;
+			osd_menu_selection = 0;
+		}
+		handled = 1;
+		break;
+
+	case XKB_KEY_a:  /* Audio shortcut */
+		osd_menu_open = OSD_MENU_SOUND;
+		osd_menu_selection = 0;
+		handled = 1;
+		break;
+
+	case XKB_KEY_s:  /* Subtitle shortcut */
+		osd_menu_open = OSD_MENU_SUBTITLES;
+		osd_menu_selection = 0;
+		handled = 1;
+		break;
+	}
+
+	/* Re-render OSD after input */
+	if (handled)
+		render_playback_osd();
+
+	return handled;
+}
+
 /* Handle detail view keyboard input */
 static int
 media_view_handle_detail_key(Monitor *m, MediaViewType type, xkb_keysym_t sym)
@@ -23334,8 +24322,18 @@ media_view_handle_detail_key(Monitor *m, MediaViewType type, xkb_keysym_t sym)
 
 	int needs_render = 0;
 
+	/* If playback is active, handle playback controls */
+	if (playback_state == PLAYBACK_ACTIVE) {
+		return handle_playback_key(sym);
+	}
+
 	switch (sym) {
 	case XKB_KEY_Escape:
+		if (playback_state == PLAYBACK_BUFFERING) {
+			media_cancel_buffering();
+			media_view_render_detail(m, type);
+			return 1;
+		}
 		media_view_exit_detail(m, type);
 		return 1;
 
@@ -23343,7 +24341,11 @@ media_view_handle_detail_key(Monitor *m, MediaViewType type, xkb_keysym_t sym)
 	case XKB_KEY_KP_Enter:
 		if (type == MEDIA_VIEW_MOVIES) {
 			/* Play movie */
-			wlr_log(WLR_INFO, "Play movie: %s", view->detail_item ? view->detail_item->title : "unknown");
+			if (view->detail_item) {
+				wlr_log(WLR_INFO, "Play movie: %s", view->detail_item->title);
+				media_start_playback(view->detail_item, 1);
+				needs_render = 1;
+			}
 		} else if (type == MEDIA_VIEW_TVSHOWS) {
 			if (view->detail_focus == DETAIL_FOCUS_EPISODES && view->episodes) {
 				MediaItem *ep = view->episodes;
@@ -23352,6 +24354,8 @@ media_view_handle_detail_key(Monitor *m, MediaViewType type, xkb_keysym_t sym)
 				if (ep) {
 					wlr_log(WLR_INFO, "Play episode: S%02dE%02d %s",
 					        ep->season, ep->episode, ep->episode_title);
+					media_start_playback(ep, 0);
+					needs_render = 1;
 				}
 			} else if (view->detail_focus == DETAIL_FOCUS_SEASONS) {
 				view->detail_focus = DETAIL_FOCUS_EPISODES;
@@ -27046,6 +28050,11 @@ cleanup(void)
 	TrayItem *it, *tmp;
 
 	wlr_log(WLR_ERROR, "cleanup() called - starting cleanup sequence");
+	/* Cleanup video player */
+	if (active_videoplayer) {
+		videoplayer_destroy(active_videoplayer);
+		active_videoplayer = NULL;
+	}
 	cleanuplisteners();
 	gamepad_cleanup();
 	bt_controller_cleanup();
@@ -28684,6 +29693,19 @@ keypress(struct wl_listener *listener, void *data)
 					handled = 1;
 			}
 		}
+		/* Video player - handle before other views */
+		if (active_videoplayer && active_videoplayer->state != VP_STATE_IDLE && !handled) {
+			for (i = 0; i < nsyms; i++) {
+				if (videoplayer_handle_key(active_videoplayer, mods, syms[i])) {
+					handled = 1;
+					/* Check if player was stopped (Escape/Q) */
+					if (active_videoplayer->state == VP_STATE_IDLE) {
+						videoplayer_set_visible(active_videoplayer, 0);
+						playback_state = PLAYBACK_IDLE;
+					}
+				}
+			}
+		}
 		/* PC Gaming view */
 		if (pc_gaming_mon && !handled) {
 			for (i = 0; i < nsyms; i++) {
@@ -29997,6 +31019,14 @@ rendermon(struct wl_listener *listener, void *data)
 	int use_frame_pacing = 0;
 
 	frame_start_ns = get_time_ns();
+
+	/* Update integrated video player frame if playing
+	 * Use last vsync time if available for precise frame pacing,
+	 * otherwise fall back to current time */
+	if (active_videoplayer && active_videoplayer->state == VP_STATE_PLAYING) {
+		uint64_t vsync_time = (m->last_present_ns > 0) ? m->last_present_ns : frame_start_ns;
+		videoplayer_present_frame(active_videoplayer, vsync_time);
+	}
 
 	/*
 	 * Check for fullscreen client and determine content type for optimal handling.
@@ -32355,6 +33385,223 @@ testhzosd(const Arg *arg)
 	show_hz_osd(m, osd_msg);
 }
 
+/* Playback OSD timeout callback - hide OSD after delay */
+static int
+playback_osd_timeout(void *data)
+{
+	(void)data;
+	if (playback_state == PLAYBACK_ACTIVE && !mpv_paused) {
+		hide_playback_osd();
+	}
+	return 0;
+}
+
+/* Hide playback OSD bar */
+static void
+hide_playback_osd(void)
+{
+	if (playback_osd_tree)
+		wlr_scene_node_set_enabled(&playback_osd_tree->node, 0);
+	osd_visible = 0;
+}
+
+/* Render playback OSD bar at bottom of screen */
+static void
+render_playback_osd(void)
+{
+	Monitor *m = selmon;
+	struct wlr_scene_node *node, *tmp;
+	struct wlr_scene_tree *text_tree;
+	StatusModule mod = {0};
+	int bar_h = 50;
+	int bar_y, bar_w;
+	int padding = 15;
+	int btn_w = 100;
+	int btn_h = 36;
+	int menu_w = 180;
+	int menu_item_h = 32;
+	float bar_bg[4] = {0.08f, 0.08f, 0.12f, 0.92f};
+	float text_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+	float dim_text[4] = {0.7f, 0.7f, 0.7f, 1.0f};
+	float btn_bg[4] = {0.15f, 0.15f, 0.22f, 0.95f};
+	float btn_selected[4] = {0.2f, 0.5f, 1.0f, 0.95f};
+	float menu_bg[4] = {0.1f, 0.1f, 0.15f, 0.98f};
+	float menu_selected[4] = {0.2f, 0.45f, 0.85f, 0.95f};
+
+	if (!m || !statusfont.font || playback_state != PLAYBACK_ACTIVE)
+		return;
+
+	bar_w = m->m.width;
+	bar_y = m->m.height - bar_h;
+
+	/* Create tree if needed */
+	if (!playback_osd_tree) {
+		playback_osd_tree = wlr_scene_tree_create(layers[LyrOverlay]);
+		if (!playback_osd_tree)
+			return;
+	}
+
+	/* Clear previous content */
+	wl_list_for_each_safe(node, tmp, &playback_osd_tree->children, link) {
+		wlr_scene_node_destroy(node);
+	}
+
+	/* Bar background */
+	drawrect(playback_osd_tree, 0, 0, bar_w, bar_h, bar_bg);
+
+	/* Left side: Playing/Paused status */
+	{
+		const char *status = mpv_paused ? "Paused" : "Playing";
+		float status_box_bg[4] = {0.12f, 0.12f, 0.18f, 0.95f};
+		int status_w = 90;
+
+		drawrect(playback_osd_tree, padding, (bar_h - btn_h) / 2, status_w, btn_h, status_box_bg);
+
+		text_tree = wlr_scene_tree_create(playback_osd_tree);
+		if (text_tree) {
+			wlr_scene_node_set_position(&text_tree->node, padding + 12, (bar_h - 16) / 2);
+			mod.tree = text_tree;
+			tray_render_label(&mod, status, 0, 16, text_color);
+		}
+	}
+
+	/* Right side: Sound and Subtitles buttons */
+	int right_x = bar_w - padding - btn_w * 2 - 10;  /* 10px gap between buttons */
+
+	/* Sound button */
+	{
+		float *bg = (osd_menu_open == OSD_MENU_SOUND) ? btn_selected : btn_bg;
+		drawrect(playback_osd_tree, right_x, (bar_h - btn_h) / 2, btn_w, btn_h, bg);
+
+		text_tree = wlr_scene_tree_create(playback_osd_tree);
+		if (text_tree) {
+			wlr_scene_node_set_position(&text_tree->node, right_x + 25, (bar_h - 16) / 2);
+			mod.tree = text_tree;
+			tray_render_label(&mod, "Sound", 0, 16, text_color);
+		}
+	}
+
+	/* Subtitles button */
+	{
+		int sub_x = right_x + btn_w + 10;
+		float *bg = (osd_menu_open == OSD_MENU_SUBTITLES) ? btn_selected : btn_bg;
+		drawrect(playback_osd_tree, sub_x, (bar_h - btn_h) / 2, btn_w, btn_h, bg);
+
+		text_tree = wlr_scene_tree_create(playback_osd_tree);
+		if (text_tree) {
+			wlr_scene_node_set_position(&text_tree->node, sub_x + 15, (bar_h - 16) / 2);
+			mod.tree = text_tree;
+			tray_render_label(&mod, "Subtitles", 0, 16, text_color);
+		}
+	}
+
+	/* Sound menu (opens upward from button) */
+	if (osd_menu_open == OSD_MENU_SOUND && audio_track_count > 0) {
+		int menu_h = audio_track_count * menu_item_h + 8;
+		int menu_x = right_x;
+		int menu_y = -menu_h - 5;  /* Above the bar */
+
+		drawrect(playback_osd_tree, menu_x, menu_y, menu_w, menu_h, menu_bg);
+
+		int item_y = menu_y + 4;
+		for (int i = 0; i < audio_track_count; i++) {
+			float *item_bg = (i == osd_menu_selection) ? menu_selected : menu_bg;
+			if (i == osd_menu_selection) {
+				drawrect(playback_osd_tree, menu_x + 2, item_y, menu_w - 4, menu_item_h - 2, item_bg);
+			}
+
+			char label[160];
+			if (audio_tracks[i].lang[0] && audio_tracks[i].title[0])
+				snprintf(label, sizeof(label), "%s (%s)", audio_tracks[i].lang, audio_tracks[i].title);
+			else if (audio_tracks[i].lang[0])
+				snprintf(label, sizeof(label), "%s", audio_tracks[i].lang);
+			else if (audio_tracks[i].title[0])
+				snprintf(label, sizeof(label), "%s", audio_tracks[i].title);
+			else
+				snprintf(label, sizeof(label), "Track %d", audio_tracks[i].id);
+
+			text_tree = wlr_scene_tree_create(playback_osd_tree);
+			if (text_tree) {
+				wlr_scene_node_set_position(&text_tree->node, menu_x + 10, item_y + 8);
+				mod.tree = text_tree;
+				float *tc = (i == osd_menu_selection) ? text_color : dim_text;
+				tray_render_label(&mod, label, 0, 14, tc);
+			}
+			item_y += menu_item_h;
+		}
+	}
+
+	/* Subtitles menu (opens upward from button) */
+	if (osd_menu_open == OSD_MENU_SUBTITLES) {
+		int items = subtitle_track_count + 1;  /* +1 for "Off" */
+		int menu_h = items * menu_item_h + 8;
+		int menu_x = right_x + btn_w + 10;
+		int menu_y = -menu_h - 5;  /* Above the bar */
+
+		drawrect(playback_osd_tree, menu_x, menu_y, menu_w, menu_h, menu_bg);
+
+		int item_y = menu_y + 4;
+
+		/* "Off" option */
+		{
+			float *item_bg = (0 == osd_menu_selection) ? menu_selected : menu_bg;
+			if (0 == osd_menu_selection) {
+				drawrect(playback_osd_tree, menu_x + 2, item_y, menu_w - 4, menu_item_h - 2, item_bg);
+			}
+
+			text_tree = wlr_scene_tree_create(playback_osd_tree);
+			if (text_tree) {
+				wlr_scene_node_set_position(&text_tree->node, menu_x + 10, item_y + 8);
+				mod.tree = text_tree;
+				float *tc = (0 == osd_menu_selection) ? text_color : dim_text;
+				tray_render_label(&mod, "Off", 0, 14, tc);
+			}
+			item_y += menu_item_h;
+		}
+
+		/* Subtitle tracks */
+		for (int i = 0; i < subtitle_track_count; i++) {
+			int sel_idx = i + 1;  /* +1 because "Off" is index 0 */
+			float *item_bg = (sel_idx == osd_menu_selection) ? menu_selected : menu_bg;
+			if (sel_idx == osd_menu_selection) {
+				drawrect(playback_osd_tree, menu_x + 2, item_y, menu_w - 4, menu_item_h - 2, item_bg);
+			}
+
+			char label[160];
+			if (subtitle_tracks[i].lang[0] && subtitle_tracks[i].title[0])
+				snprintf(label, sizeof(label), "%s (%s)", subtitle_tracks[i].lang, subtitle_tracks[i].title);
+			else if (subtitle_tracks[i].lang[0])
+				snprintf(label, sizeof(label), "%s", subtitle_tracks[i].lang);
+			else if (subtitle_tracks[i].title[0])
+				snprintf(label, sizeof(label), "%s", subtitle_tracks[i].title);
+			else
+				snprintf(label, sizeof(label), "Track %d", subtitle_tracks[i].id);
+
+			text_tree = wlr_scene_tree_create(playback_osd_tree);
+			if (text_tree) {
+				wlr_scene_node_set_position(&text_tree->node, menu_x + 10, item_y + 8);
+				mod.tree = text_tree;
+				float *tc = (sel_idx == osd_menu_selection) ? text_color : dim_text;
+				tray_render_label(&mod, label, 0, 14, tc);
+			}
+			item_y += menu_item_h;
+		}
+	}
+
+	/* Position and show */
+	wlr_scene_node_set_position(&playback_osd_tree->node, m->m.x, m->m.y + bar_y);
+	wlr_scene_node_set_enabled(&playback_osd_tree->node, 1);
+	osd_visible = 1;
+
+	/* Schedule auto-hide (1 second) when playing, not paused */
+	if (!mpv_paused && osd_menu_open == OSD_MENU_NONE) {
+		if (!playback_osd_timer)
+			playback_osd_timer = wl_event_loop_add_timer(event_loop, playback_osd_timeout, NULL);
+		if (playback_osd_timer)
+			wl_event_source_timer_update(playback_osd_timer, 1000);
+	}
+}
+
 /*
  * Generate CVT (Coordinated Video Timings) modeline for a given resolution and refresh rate.
  * This creates a full drmModeModeInfo structure with proper timing parameters.
@@ -33142,20 +34389,26 @@ static void config_set_value(const char *key, const char *value)
 	else if (strcmp(key, "htpc_page_tvshows") == 0) htpc_page_tvshows = atoi(value);
 	else if (strcmp(key, "htpc_page_quit") == 0) htpc_page_quit = atoi(value);
 
-	/* Media server configuration (disables auto-discovery if set) */
+	/* Client download bandwidth for streaming (Mbps) */
+	else if (strcmp(key, "client_download_mbps") == 0) {
+		client_download_mbps = atoi(value);
+		if (client_download_mbps < 1) client_download_mbps = 1;
+		wlr_log(WLR_INFO, "Client download bandwidth: %d Mbps", client_download_mbps);
+	}
+
+	/* Media server configuration (external servers, local always auto-discovered) */
 	else if (strcmp(key, "media_server") == 0) {
-		if (media_server_count < MAX_MEDIA_SERVERS && *value) {
+		if (*value) {
+			char url[256];
 			/* Add http:// prefix if missing */
 			if (strncmp(value, "http://", 7) != 0 && strncmp(value, "https://", 8) != 0) {
-				snprintf(media_servers[media_server_count], sizeof(media_servers[0]),
-					 "http://%s", value);
+				snprintf(url, sizeof(url), "http://%s", value);
 			} else {
-				strncpy(media_servers[media_server_count], value,
-					sizeof(media_servers[0]) - 1);
+				strncpy(url, value, sizeof(url) - 1);
+				url[sizeof(url) - 1] = '\0';
 			}
-			media_server_count++;
-			wlr_log(WLR_INFO, "Added media server: %s (total: %d)",
-				media_servers[media_server_count - 1], media_server_count);
+			/* Add as external configured server (is_local=0, is_configured=1) */
+			add_media_server(url, 0, 1);
 		}
 	}
 

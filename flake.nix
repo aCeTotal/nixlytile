@@ -138,6 +138,11 @@
             pkgs.xwayland
             pkgs.systemd
             pkgs.brightnessctl
+            # Video player dependencies
+            pkgs.ffmpeg
+            pkgs.pipewire
+            pkgs.libass
+            pkgs.libva
           ] ++ ps.iconDeps;
 
             makeFlags = [ "PKG_CONFIG=${pkgs.pkg-config}/bin/pkg-config" ];

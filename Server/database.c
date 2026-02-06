@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <sqlite3.h>
 #include "database.h"
+#include "config.h"
 
 static sqlite3 *db = NULL;
 
@@ -457,17 +458,23 @@ static char *build_json_array(const char *sql) {
         char *backdrop_esc = json_escape(backdrop);
         char *genres_esc = json_escape(genres);
 
+        /* Include server_id, rating and priority for multi-server deduplication
+         * Clients use tmdb_id to detect duplicates and prefer higher priority servers
+         * Priority: local (1000+rating) > remote (rating only) */
         buf_used += snprintf(json + buf_used, buf_size - buf_used,
             "{\"id\":%d,\"type\":%d,\"title\":%s,\"show_name\":%s,"
             "\"season\":%d,\"episode\":%d,\"size\":%ld,\"duration\":%d,"
             "\"width\":%d,\"height\":%d,"
             "\"tmdb_id\":%d,\"tmdb_title\":%s,\"overview\":%s,"
             "\"poster\":%s,\"backdrop\":%s,\"year\":%d,\"rating\":%.1f,"
-            "\"genres\":%s}",
+            "\"genres\":%s,"
+            "\"server_id\":\"%s\",\"server_rating\":%d,\"server_priority\":%d}",
             id, type, title_esc, show_esc,
             season, episode, size, duration, width, height,
             tmdb_id, tmdb_title_esc, overview_esc,
-            poster_esc, backdrop_esc, year, rating, genres_esc);
+            poster_esc, backdrop_esc, year, rating, genres_esc,
+            server_config.server_id, config_get_server_rating(),
+            config_get_server_priority());
 
         free(title_esc);
         free(show_esc);
@@ -706,7 +713,8 @@ char *database_get_media_json(int id) {
             "\"tmdb_id\":%d,\"tmdb_title\":%s,\"overview\":%s,"
             "\"poster\":%s,\"backdrop\":%s,\"release_date\":%s,"
             "\"year\":%d,\"rating\":%.1f,\"vote_count\":%d,\"genres\":%s,"
-            "\"episode_title\":%s,\"episode_overview\":%s,\"still\":%s}",
+            "\"episode_title\":%s,\"episode_overview\":%s,\"still\":%s,"
+            "\"server_id\":\"%s\",\"server_rating\":%d,\"server_priority\":%d}",
             sqlite3_column_int(stmt, 0),
             sqlite3_column_int(stmt, 1),
             title_esc, path_esc, show_esc,
@@ -725,7 +733,9 @@ char *database_get_media_json(int id) {
             sqlite3_column_int(stmt, 21),
             sqlite3_column_double(stmt, 22),
             sqlite3_column_int(stmt, 23),
-            genres_esc, ept_esc, epo_esc, still_esc);
+            genres_esc, ept_esc, epo_esc, still_esc,
+            server_config.server_id, config_get_server_rating(),
+            config_get_server_priority());
 
         free(title_esc); free(path_esc); free(show_esc);
         free(cv_esc); free(ca_esc); free(added_esc);

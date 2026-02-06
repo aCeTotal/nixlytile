@@ -9,7 +9,21 @@
 #include <sys/stat.h>
 #include <pwd.h>
 #include <unistd.h>
+#include <time.h>
 #include "config.h"
+
+/* Generate a unique server ID based on hostname and random component */
+static void generate_server_id(char *buf, size_t len) {
+    char hostname[64] = "nixly";
+    gethostname(hostname, sizeof(hostname) - 1);
+    hostname[sizeof(hostname) - 1] = '\0';
+
+    /* Simple random suffix */
+    srand(time(NULL) ^ getpid());
+    unsigned int r = rand();
+
+    snprintf(buf, len, "%s-%08x", hostname, r);
+}
 
 ServerConfig server_config;
 
@@ -41,6 +55,14 @@ void config_init_defaults(void) {
 
     server_config.port = 8080;
     strcpy(server_config.db_path, "nixly.db");
+
+    /* Default: 500 Mbps upload = ~7 simultaneous 70 Mbps streams */
+    server_config.upload_mbps = 500;
+
+    /* Server identity - generate unique ID, use hostname as name */
+    generate_server_id(server_config.server_id, sizeof(server_config.server_id));
+    gethostname(server_config.server_name, sizeof(server_config.server_name) - 1);
+    server_config.server_name[sizeof(server_config.server_name) - 1] = '\0';
 
     /* TMDB API key - hardcoded */
     strcpy(server_config.tmdb_api_key, "d415e076cfcbbe11dd7366a6e2f63321");
@@ -95,6 +117,15 @@ int config_load(const char *path) {
 
         if (strcmp(key, "port") == 0) {
             server_config.port = atoi(value);
+        }
+        else if (strcmp(key, "upload_mbps") == 0) {
+            server_config.upload_mbps = atoi(value);
+        }
+        else if (strcmp(key, "server_id") == 0) {
+            strncpy(server_config.server_id, value, sizeof(server_config.server_id) - 1);
+        }
+        else if (strcmp(key, "server_name") == 0) {
+            strncpy(server_config.server_name, value, sizeof(server_config.server_name) - 1);
         }
         else if (strcmp(key, "db_path") == 0) {
             expand_path(value, server_config.db_path, sizeof(server_config.db_path));
@@ -161,6 +192,14 @@ int config_save(const char *path) {
     fprintf(f, "# Database path\n");
     fprintf(f, "db_path = %s\n\n", server_config.db_path);
 
+    fprintf(f, "# Upload speed in Mbps (max streams = upload_mbps / 70)\n");
+    fprintf(f, "# Server rating = upload_mbps / 100 (1-10 scale)\n");
+    fprintf(f, "upload_mbps = %d\n\n", server_config.upload_mbps);
+
+    fprintf(f, "# Server identity (for multi-server deduplication)\n");
+    fprintf(f, "server_id = %s\n", server_config.server_id);
+    fprintf(f, "server_name = %s\n\n", server_config.server_name);
+
     fprintf(f, "# TMDB API key (get from https://www.themoviedb.org/settings/api)\n");
     fprintf(f, "tmdb_api_key = %s\n\n", server_config.tmdb_api_key);
 
@@ -198,4 +237,31 @@ int config_save(const char *path) {
 
     fclose(f);
     return 0;
+}
+
+/* Calculate server rating based on upload speed
+ * 1000 Mbps or more = 10, 900 = 9, 800 = 8, ... 100 = 1
+ * Used by clients to prefer servers with better bandwidth */
+int config_get_server_rating(void) {
+    int rating = server_config.upload_mbps / 100;
+    if (rating < 1) rating = 1;
+    if (rating > 10) rating = 10;
+    return rating;
+}
+
+/* Thread-local client locality flag */
+static __thread int current_client_local = 0;
+
+void config_set_client_local(int is_local) {
+    current_client_local = is_local;
+}
+
+int config_get_client_local(void) {
+    return current_client_local;
+}
+
+/* Get priority: local servers are always preferred (1000+) over remote */
+int config_get_server_priority(void) {
+    int rating = config_get_server_rating();
+    return current_client_local ? (1000 + rating) : rating;
 }

@@ -13,6 +13,13 @@ typedef struct {
     int port;
     char db_path[MAX_PATH_LEN];
 
+    /* Bandwidth limit: upload speed in Mbps, 0 = unlimited */
+    int upload_mbps;
+
+    /* Server identity for multi-server deduplication */
+    char server_id[64];      /* Unique server ID (auto-generated if empty) */
+    char server_name[128];   /* Human-readable name */
+
     /* TMDB API */
     char tmdb_api_key[128];
     char tmdb_language[8];          /* e.g., "en-US", "nb-NO" */
@@ -49,5 +56,18 @@ int config_save(const char *path);
 
 /* Initialize with defaults */
 void config_init_defaults(void);
+
+/* Get server rating (1-10) based on upload_mbps */
+int config_get_server_rating(void);
+
+/* Get server priority for current client
+ * Local clients: 1000 + rating
+ * Remote clients: rating
+ * Used for multi-server deduplication */
+int config_get_server_priority(void);
+
+/* Set/get current client locality (called by server per-request) */
+void config_set_client_local(int is_local);
+int config_get_client_local(void);
 
 #endif /* CONFIG_H */

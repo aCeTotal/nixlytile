@@ -12,18 +12,36 @@ DEVCFLAGS = -g -Wpedantic -Wall -Wextra -Wdeclaration-after-statement \
 	-Wfloat-conversion
 
 # CFLAGS / LDFLAGS
-PKGS      = wayland-server xkbcommon libinput libdrm $(XLIBS) fcft pixman-1 libsystemd gdk-pixbuf-2.0 cairo librsvg-2.0
+PKGS      = wayland-server xkbcommon libinput libdrm $(XLIBS) fcft pixman-1 libsystemd gdk-pixbuf-2.0 cairo librsvg-2.0 \
+            libavformat libavcodec libavutil libswscale libswresample libpipewire-0.3 libass
 NLCFLAGS = `$(PKG_CONFIG) --cflags $(PKGS)` $(WLR_INCS) $(CPPFLAGS_EXTRA) $(DEVCFLAGS) $(CFLAGS)
-LDLIBS    = `$(PKG_CONFIG) --libs $(PKGS)` $(WLR_LIBS) -lm $(LIBS)
+LDLIBS    = `$(PKG_CONFIG) --libs $(PKGS)` $(WLR_LIBS) -lm -lpthread $(LIBS)
+
+# Video player object files
+VP_OBJS = videoplayer.o videoplayer_decode.o videoplayer_render.o videoplayer_audio.o videoplayer_ui.o
 
 all: nixlytile
-nixlytile: nixlytile.o util.o
-	$(CC) nixlytile.o util.o $(NLCFLAGS) $(LDFLAGS) $(LDLIBS) -o $@
+nixlytile: nixlytile.o util.o $(VP_OBJS)
+	$(CC) nixlytile.o util.o $(VP_OBJS) $(NLCFLAGS) $(LDFLAGS) $(LDLIBS) -o $@
 nixlytile.o: nixlytile.c client.h config.h config.mk cursor-shape-v1-protocol.h \
 	pointer-constraints-unstable-v1-protocol.h wlr-layer-shell-unstable-v1-protocol.h \
 	wlr-output-power-management-unstable-v1-protocol.h xdg-shell-protocol.h \
 	content-type-v1-protocol.h tearing-control-v1-protocol.h
 util.o: util.c util.h
+
+# Video player modules (allow C99 style declarations)
+VP_CFLAGS = $(NLCFLAGS) -Wno-declaration-after-statement
+
+videoplayer.o: videoplayer.c videoplayer.h
+	$(CC) $(CPPFLAGS) $(VP_CFLAGS) -o $@ -c $<
+videoplayer_decode.o: videoplayer_decode.c videoplayer.h
+	$(CC) $(CPPFLAGS) $(VP_CFLAGS) -o $@ -c $<
+videoplayer_render.o: videoplayer_render.c videoplayer.h
+	$(CC) $(CPPFLAGS) $(VP_CFLAGS) -o $@ -c $<
+videoplayer_audio.o: videoplayer_audio.c videoplayer.h
+	$(CC) $(CPPFLAGS) $(VP_CFLAGS) -o $@ -c $<
+videoplayer_ui.o: videoplayer_ui.c videoplayer.h
+	$(CC) $(CPPFLAGS) $(VP_CFLAGS) -o $@ -c $<
 
 # wayland-scanner is a tool which generates C headers and rigging for Wayland
 # protocols, which are specified in XML. wlroots requires you to rig these up
@@ -62,6 +80,8 @@ dist: clean
 	mkdir -p nixlytile-$(VERSION)
 	cp -R LICENSE* Makefile CHANGELOG.md README.md client.h config.def.h \
 		config.mk protocols nixlytile.1 nixlytile.c util.c util.h nixlytile.desktop images \
+		videoplayer.h videoplayer.c videoplayer_decode.c videoplayer_render.c \
+		videoplayer_audio.c videoplayer_ui.c \
 		nixlytile-$(VERSION)
 	tar -caf nixlytile-$(VERSION).tar.gz nixlytile-$(VERSION)
 	rm -rf nixlytile-$(VERSION)
