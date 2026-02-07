@@ -4,59 +4,59 @@
                         ((hex >> 8) & 0xFF) / 255.0f, \
                         (hex & 0xFF) / 255.0f }
 /* appearance */
-static const int sloppyfocus               = 1;  /* focus follows mouse */
-static const int bypass_surface_visibility = 0;  /* 1 means idle inhibitors will disable idle tracking even if it's surface isn't visible  */
-static const int smartgaps                 = 0;  /* 1 means no outer gap when there is only one window */
-static int gaps                            = 1;  /* 1 means gaps between windows are added */
-static const unsigned int gappx            = 5;  /* gap pixel between windows */
-static const unsigned int borderpx         = 1;  /* border pixel of windows */
-static const float rootcolor[]             = COLOR(0x222222ff);
-static const float bordercolor[]           = COLOR(0x444444ff);
-static const float focuscolor[]            = COLOR(0x005577ff);
-static const float urgentcolor[]           = COLOR(0xff0000ff);
-static const unsigned int statusbar_height = 26;
-static const unsigned int statusbar_module_spacing = 10;
-static const unsigned int statusbar_module_padding = 8;
-static const unsigned int statusbar_icon_text_gap = 6; /* gap between icon and text */
-static const unsigned int statusbar_icon_text_gap_volume = 10;
-static const unsigned int statusbar_icon_text_gap_microphone = 8;
-static const unsigned int statusbar_icon_text_gap_cpu = statusbar_icon_text_gap;
-static const unsigned int statusbar_icon_text_gap_ram = statusbar_icon_text_gap;
-static const unsigned int statusbar_icon_text_gap_light = statusbar_icon_text_gap;
-static const unsigned int statusbar_icon_text_gap_battery = 2; /* slightly tighter */
-static const unsigned int statusbar_icon_text_gap_clock = statusbar_icon_text_gap;
-static const unsigned int statusbar_top_gap = 3;
-static const float statusbar_fg[]          = COLOR(0xffffffff);
-static const float statusbar_bg[]          = COLOR(0x00000016);
-static const float statusbar_popup_bg[]    = COLOR(0x00000080); /* ~50% */
-static const float statusbar_volume_muted_fg[] = COLOR(0xff4c4cff);
-static const float statusbar_mic_muted_fg[] = COLOR(0xff4c4cff);
-static const float statusbar_tag_bg[]      = COLOR(0x00000033);
-static const float statusbar_tag_active_bg[] = COLOR(0x3399ff44);
-static const float statusbar_tag_hover_bg[] = COLOR(0x66b3ffaa);
-static const int statusbar_hover_fade_ms   = 0;
-static const char *statusbar_fonts[] = {
+const int sloppyfocus               = 1;  /* focus follows mouse */
+const int bypass_surface_visibility = 0;  /* 1 means idle inhibitors will disable idle tracking even if it's surface isn't visible  */
+const int smartgaps                 = 0;  /* 1 means no outer gap when there is only one window */
+int gaps                            = 1;  /* 1 means gaps between windows are added */
+const unsigned int gappx            = 5;  /* gap pixel between windows */
+const unsigned int borderpx         = 1;  /* border pixel of windows */
+const float rootcolor[]             = COLOR(0x222222ff);
+const float bordercolor[]           = COLOR(0x444444ff);
+const float focuscolor[]            = COLOR(0x005577ff);
+const float urgentcolor[]           = COLOR(0xff0000ff);
+const unsigned int statusbar_height = 26;
+const unsigned int statusbar_module_spacing = 10;
+const unsigned int statusbar_module_padding = 8;
+const unsigned int statusbar_icon_text_gap = 6; /* gap between icon and text */
+const unsigned int statusbar_icon_text_gap_volume = 10;
+const unsigned int statusbar_icon_text_gap_microphone = 8;
+const unsigned int statusbar_icon_text_gap_cpu = statusbar_icon_text_gap;
+const unsigned int statusbar_icon_text_gap_ram = statusbar_icon_text_gap;
+const unsigned int statusbar_icon_text_gap_light = statusbar_icon_text_gap;
+const unsigned int statusbar_icon_text_gap_battery = 2; /* slightly tighter */
+const unsigned int statusbar_icon_text_gap_clock = statusbar_icon_text_gap;
+const unsigned int statusbar_top_gap = 3;
+const float statusbar_fg[]          = COLOR(0xffffffff);
+const float statusbar_bg[]          = COLOR(0x00000016);
+const float statusbar_popup_bg[]    = COLOR(0x00000080); /* ~50% */
+const float statusbar_volume_muted_fg[] = COLOR(0xff4c4cff);
+const float statusbar_mic_muted_fg[] = COLOR(0xff4c4cff);
+const float statusbar_tag_bg[]      = COLOR(0x00000033);
+const float statusbar_tag_active_bg[] = COLOR(0x3399ff44);
+const float statusbar_tag_hover_bg[] = COLOR(0x66b3ffaa);
+const int statusbar_hover_fade_ms   = 0;
+const char *statusbar_fonts[] = {
 	"monospace:size=16:weight=Bold",
 	"monospace:size=16"
 };
-static const char *statusbar_font_attributes = NULL;
-static const int statusbar_font_spacing = 0;
-static const int statusbar_font_force_color = 1;
-static const enum fcft_subpixel statusbar_font_subpixel = FCFT_SUBPIXEL_DEFAULT;
-static const int statusbar_workspace_padding = 8;
-static const int statusbar_workspace_spacing = 4;
-static const int statusbar_thumb_height = 40;
-static const int statusbar_thumb_gap = 2;
-static const float statusbar_thumb_window[] = COLOR(0xffffff55);
+const char *statusbar_font_attributes = NULL;
+const int statusbar_font_spacing = 0;
+const int statusbar_font_force_color = 1;
+const enum fcft_subpixel statusbar_font_subpixel = FCFT_SUBPIXEL_DEFAULT;
+const int statusbar_workspace_padding = 8;
+const int statusbar_workspace_spacing = 4;
+const int statusbar_thumb_height = 40;
+const int statusbar_thumb_gap = 2;
+const float statusbar_thumb_window[] = COLOR(0xffffff55);
 /* This conforms to the xdg-protocol. Set the alpha to zero to restore the old behavior */
-static const float fullscreen_bg[]         = {0.1f, 0.1f, 0.1f, 1.0f}; /* You can also use glsl colors */
-static const float resize_factor           = 0.0002f; /* Resize multiplier for mouse resizing, depends on mouse sensivity. */
-static const uint32_t resize_interval_ms   = 24; /* Min interval between mouse-driven resize updates (higher smooths heavy apps). */
-static const double   resize_min_pixels    = 3.0; /* Min pointer movement before a new resize if within interval. */
-static const float    resize_ratio_epsilon = 0.002f; /* Smallest ratio change that should trigger an arrange. */
+const float fullscreen_bg[]         = {0.1f, 0.1f, 0.1f, 1.0f}; /* You can also use glsl colors */
+const float resize_factor           = 0.0002f; /* Resize multiplier for mouse resizing, depends on mouse sensivity. */
+const uint32_t resize_interval_ms   = 24; /* Min interval between mouse-driven resize updates (higher smooths heavy apps). */
+const double   resize_min_pixels    = 3.0; /* Min pointer movement before a new resize if within interval. */
+const float    resize_ratio_epsilon = 0.002f; /* Smallest ratio change that should trigger an arrange. */
 
 /* window resizing */
-static const int lock_cursor = 0;	/* 1: lock cursor, 0: don't lock */
+const int lock_cursor = 0;	/* 1: lock cursor, 0: don't lock */
 
 enum Direction { DIR_LEFT, DIR_RIGHT, DIR_UP, DIR_DOWN };
 
@@ -64,10 +64,10 @@ enum Direction { DIR_LEFT, DIR_RIGHT, DIR_UP, DIR_DOWN };
 #define TAGCOUNT (9)
 
 /* logging */
-static int log_level = WLR_SILENCE;
+int log_level = WLR_SILENCE;
 
 /* NOTE: ALWAYS keep a rule declared even if you don't use rules (e.g leave at least one example) */
-static const Rule rules[] = {
+const Rule rules[] = {
 	/* app_id             title       tags mask     isfloating   monitor */
 	/* examples: */
 	{ "Gimp_EXAMPLE",     NULL,       0,            1,           -1 }, /* Start on currently visible tags floating, not tiled */
@@ -75,7 +75,7 @@ static const Rule rules[] = {
 };
 
 /* layout(s) */
-static const Layout layouts[] = {
+const Layout layouts[] = {
 	/* symbol     arrange function */
 	{ "|w|",      btrtile },
 	{ "[]=",      tile },
@@ -89,7 +89,7 @@ static const Layout layouts[] = {
  * https://gitlab.freedesktop.org/xorg/xserver/-/issues/899
 */
 /* NOTE: ALWAYS add a fallback rule, even if you are completely sure it won't be used */
-static const MonitorRule monrules[] = {
+const MonitorRule monrules[] = {
 	/* name       mfact  nmaster scale layout       rotate/reflect                x    y */
 	/* example of a HiDPI laptop monitor:
 	{ "eDP-1",    0.5f,  1,      2,    &layouts[0], WL_OUTPUT_TRANSFORM_NORMAL,   -1,  -1 },
@@ -99,7 +99,7 @@ static const MonitorRule monrules[] = {
 };
 
 /* keyboard */
-static const struct xkb_rule_names xkb_rules = {
+const struct xkb_rule_names xkb_rules = {
 	/* can specify fields: rules, model, layout, variant, options */
 	/* example:
 	.options = "ctrl:nocaps",
@@ -107,51 +107,51 @@ static const struct xkb_rule_names xkb_rules = {
 	.options = NULL,
 };
 
-static const int repeat_delay = 250;
-static const int repeat_rate = 60;
+const int repeat_delay = 250;
+const int repeat_rate = 60;
 
 /* Trackpad */
-static const int tap_to_click = 1;
-static const int tap_and_drag = 1;
-static const int drag_lock = 1;
-static const int natural_scrolling = 0;
-static const int disable_while_typing = 1;
-static const int left_handed = 0;
-static const int middle_button_emulation = 0;
+const int tap_to_click = 1;
+const int tap_and_drag = 1;
+const int drag_lock = 1;
+const int natural_scrolling = 0;
+const int disable_while_typing = 1;
+const int left_handed = 0;
+const int middle_button_emulation = 0;
 /* You can choose between:
 LIBINPUT_CONFIG_SCROLL_NO_SCROLL
 LIBINPUT_CONFIG_SCROLL_2FG
 LIBINPUT_CONFIG_SCROLL_EDGE
 LIBINPUT_CONFIG_SCROLL_ON_BUTTON_DOWN
 */
-static const enum libinput_config_scroll_method scroll_method = LIBINPUT_CONFIG_SCROLL_2FG;
+const enum libinput_config_scroll_method scroll_method = LIBINPUT_CONFIG_SCROLL_2FG;
 
 /* You can choose between:
 LIBINPUT_CONFIG_CLICK_METHOD_NONE
 LIBINPUT_CONFIG_CLICK_METHOD_BUTTON_AREAS
 LIBINPUT_CONFIG_CLICK_METHOD_CLICKFINGER
 */
-static const enum libinput_config_click_method click_method = LIBINPUT_CONFIG_CLICK_METHOD_BUTTON_AREAS;
+const enum libinput_config_click_method click_method = LIBINPUT_CONFIG_CLICK_METHOD_BUTTON_AREAS;
 
 /* You can choose between:
 LIBINPUT_CONFIG_SEND_EVENTS_ENABLED
 LIBINPUT_CONFIG_SEND_EVENTS_DISABLED
 LIBINPUT_CONFIG_SEND_EVENTS_DISABLED_ON_EXTERNAL_MOUSE
 */
-static const uint32_t send_events_mode = LIBINPUT_CONFIG_SEND_EVENTS_ENABLED;
+const uint32_t send_events_mode = LIBINPUT_CONFIG_SEND_EVENTS_ENABLED;
 
 /* You can choose between:
 LIBINPUT_CONFIG_ACCEL_PROFILE_FLAT
 LIBINPUT_CONFIG_ACCEL_PROFILE_ADAPTIVE
 */
-static const enum libinput_config_accel_profile accel_profile = LIBINPUT_CONFIG_ACCEL_PROFILE_ADAPTIVE;
-static const double accel_speed = 0.0;
+const enum libinput_config_accel_profile accel_profile = LIBINPUT_CONFIG_ACCEL_PROFILE_ADAPTIVE;
+const double accel_speed = 0.0;
 
 /* You can choose between:
 LIBINPUT_CONFIG_TAP_MAP_LRM -- 1/2/3 finger tap maps to left/right/middle
 LIBINPUT_CONFIG_TAP_MAP_LMR -- 1/2/3 finger tap maps to left/middle/right
 */
-static const enum libinput_config_tap_button_map button_map = LIBINPUT_CONFIG_TAP_MAP_LRM;
+const enum libinput_config_tap_button_map button_map = LIBINPUT_CONFIG_TAP_MAP_LRM;
 
 /* If you want to use the windows key for MODKEY, use WLR_MODIFIER_LOGO */
 #define MODKEY WLR_MODIFIER_LOGO
@@ -166,16 +166,16 @@ static const enum libinput_config_tap_button_map button_map = LIBINPUT_CONFIG_TA
 #define SHCMD(cmd) { .v = (const char*[]){ "/bin/sh", "-c", cmd, NULL } }
 
 /* commands */
-static const char *termcmd[] = { "foot", NULL };
-static const char *alacrittycmd[] = { "alacritty", NULL };
-static const char *btopcmd[] = { "alacritty", "-e", "btop", NULL };
-static const char *chromecmd[] = { "google-chrome-stable", NULL };
-static const char *menucmd[] = { "wmenu-run", NULL };
+const char *termcmd[] = { "foot", NULL };
+const char *alacrittycmd[] = { "alacritty", NULL };
+const char *btopcmd[] = { "alacritty", "-e", "btop", NULL };
+const char *chromecmd[] = { "google-chrome-stable", NULL };
+const char *menucmd[] = { "wmenu-run", NULL };
 /* Startup command run when no -s is provided; closes stdin to avoid status pipe */
-static const char *const autostart_cmd =
+const char *const autostart_cmd =
 	"swaybg -i \"$HOME/.nixlyos/wallpapers/beach.jpg\" -m fill <&-";
 
-static const Key keys[] = {
+const Key keys[] = {
 /* Note that Shift changes certain key codes: c -> C, 2 -> at, etc. */
 /* modifier                  key                 function        argument */
 { MODKEY,                    XKB_KEY_p,          modal_show,     {0} },
@@ -241,7 +241,7 @@ static const Key keys[] = {
 	CHVT(7), CHVT(8), CHVT(9), CHVT(10), CHVT(11), CHVT(12),
 };
 
-static const Button buttons[] = {
+const Button buttons[] = {
 	{ MODKEY, BTN_LEFT,   moveresize,     {.ui = CurMove} },
 	{ MODKEY, BTN_MIDDLE, togglefloating, {0} },
 	{ MODKEY, BTN_RIGHT,  moveresize,     {.ui = CurResize} },

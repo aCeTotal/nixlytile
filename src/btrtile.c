@@ -1,69 +1,22 @@
-/* ************************************************************************** */
-/*                                                                            */
-/*                                                        :::      ::::::::   */
-/*   btrtile.c                                          :+:      :+:    :+:   */
-/*                                                    +:+ +:+         +:+     */
-/*   By: jmakkone <jmakkone@student.hive.fi>        +#+  +:+       +#+        */
-/*                                                +#+#+#+#+#+   +#+           */
-/*   Created: 2024/12/15 00:26:07 by jmakkone          #+#    #+#             */
-/*   Updated: 2025/02/13 23:25:03 by jmakkone         ###   ########.fr       */
-/*                                                                            */
-/* ************************************************************************** */
+/* btrtile.c - Binary tree tiling layout */
+#include "nixlytile.h"
+#include "client.h"
 
-typedef struct LayoutNode {
-	unsigned int is_client_node;
-	unsigned int is_split_vertically;
-	float split_ratio;
-	struct LayoutNode *left;
-	struct LayoutNode *right;
-	struct LayoutNode *split_node;
-	Client *client;
-} LayoutNode;
 
-static void apply_layout(Monitor *m, LayoutNode *node,
+
+void apply_layout(Monitor *m, LayoutNode *node,
 						struct wlr_box area, unsigned int is_root);
-static void btrtile(Monitor *m);
-static LayoutNode *create_client_node(Client *c);
-static LayoutNode *create_split_node(unsigned int is_split_vertically,
+LayoutNode *create_split_node(unsigned int is_split_vertically,
 									LayoutNode *left, LayoutNode *right);
-static void destroy_node(LayoutNode *node);
-static void destroy_tree(Monitor *m);
-static LayoutNode *find_client_node(LayoutNode *node, Client *c);
-static LayoutNode *find_suitable_split(LayoutNode *start, unsigned int need_vert);
-static void init_tree(Monitor *m);
-static int insert_client(Monitor *m, Client *focused_client, Client *new_client);
-static void insert_client_at(Monitor *m, Client *target, Client *new_client, double cx, double cy);
-static LayoutNode *remove_client_node(LayoutNode *node, Client *c);
-static void remove_client(Monitor *m, Client *c);
-static void focusdir(const Arg *arg);
-static void setratio_h(const Arg *arg);
-static void setratio_v(const Arg *arg);
-static void swapclients(const Arg *arg);
-static int collect_columns(LayoutNode *node, Monitor *m, LayoutNode **out_nodes,
+int collect_columns(LayoutNode *node, Monitor *m, LayoutNode **out_nodes,
 		unsigned int *out_counts, Client **out_clients, int max_out);
-static Client *first_visible_client(LayoutNode *node, Monitor *m);
-static Client *first_active_client(LayoutNode *node, Monitor *m);
-static Client *pick_target_client(Monitor *m, Client *focused_client);
-static unsigned int count_columns(LayoutNode *node, Monitor *m);
-static unsigned int visible_count(LayoutNode *node, Monitor *m);
-static unsigned int placement_count(LayoutNode *node, Monitor *m);
-static unsigned int target_columns(Monitor *m);
-static Client *xytoclient(double x, double y);
-static void start_tile_drag(Monitor *m, Client *c);
-static void end_tile_drag(void);
-static void swap_columns(Monitor *m, Client *c1, Client *c2);
-static LayoutNode *find_column_root(LayoutNode *node, Monitor *m);
-static unsigned int count_in_column(LayoutNode *col_node, Monitor *m);
-static int same_column(Monitor *m, Client *c1, Client *c2);
-static int can_move_tile(Monitor *m, Client *source, Client *target);
-static void swap_tiles_in_tree(Monitor *m, Client *c1, Client *c2);
 
-static int resizing_from_mouse = 0;
-static int split_side_toggle = 0;
-static int col_pick_toggle = 0;
+int resizing_from_mouse = 0;
+int split_side_toggle = 0;
+int col_pick_toggle = 0;
 
 /* Get the index of the primary (lowest set) tag bit */
-static unsigned int
+unsigned int
 get_tag_index(uint32_t tags)
 {
 	unsigned int i;
@@ -75,7 +28,7 @@ get_tag_index(uint32_t tags)
 }
 
 /* Get current tag's root */
-static LayoutNode **
+LayoutNode **
 get_current_root(Monitor *m)
 {
 	if (m)
@@ -84,7 +37,7 @@ get_current_root(Monitor *m)
 }
 
 /* Count tiled clients on a specific tag */
-static unsigned int
+unsigned int
 count_tiles_on_tag(Monitor *m, uint32_t tag)
 {
 	Client *c;
@@ -98,7 +51,7 @@ count_tiles_on_tag(Monitor *m, uint32_t tag)
 }
 
 /* Find an available tag with space for more tiles */
-static uint32_t
+uint32_t
 find_available_tag(Monitor *m)
 {
 	unsigned int i;
@@ -115,17 +68,16 @@ find_available_tag(Monitor *m)
 	/* All tags full, return 0 */
 	return 0;
 }
-static double resize_last_update_x __attribute__((unused)),
+double resize_last_update_x __attribute__((unused)),
              resize_last_update_y __attribute__((unused));
-static uint32_t last_resize_time __attribute__((unused)) = 0;
 
 /* Drag state tracking */
-static Client *dragging_client = NULL;
-static LayoutNode *drag_source_node = NULL;
-static int drag_was_alone_in_column = 0;
-static struct wlr_box drag_placeholder_box = {0};
+Client *dragging_client = NULL;
+LayoutNode *drag_source_node = NULL;
+int drag_was_alone_in_column = 0;
+struct wlr_box drag_placeholder_box = {0};
 
-static void
+void
 apply_layout(Monitor *m, LayoutNode *node,
              struct wlr_box area, unsigned int is_root)
 {
@@ -232,7 +184,7 @@ apply_layout(Monitor *m, LayoutNode *node,
 	apply_layout(m, node->right, right_area, 0);
 }
 
-static void
+void
 btrtile(Monitor *m)
 {
 	Client *c;
@@ -295,7 +247,7 @@ btrtile(Monitor *m)
 	apply_layout(m, *root, full_area, 1);
 }
 
-static LayoutNode *
+LayoutNode *
 create_client_node(Client *c)
 {
 	LayoutNode *node = calloc(1, sizeof(LayoutNode));
@@ -308,7 +260,7 @@ create_client_node(Client *c)
 	return node;
 }
 
-static LayoutNode *
+LayoutNode *
 create_split_node(unsigned int is_split_vertically,
 				LayoutNode *left, LayoutNode *right)
 {
@@ -328,7 +280,7 @@ create_split_node(unsigned int is_split_vertically,
 	return node;
 }
 
-static void
+void
 destroy_node(LayoutNode *node)
 {
 	if (!node)
@@ -340,7 +292,7 @@ destroy_node(LayoutNode *node)
 	free(node);
 }
 
-static void
+void
 destroy_tree(Monitor *m)
 {
 	unsigned int i;
@@ -354,7 +306,7 @@ destroy_tree(Monitor *m)
 	}
 }
 
-static LayoutNode *
+LayoutNode *
 find_client_node(LayoutNode *node, Client *c)
 {
 	LayoutNode *res;
@@ -368,7 +320,7 @@ find_client_node(LayoutNode *node, Client *c)
 	return res ? res : find_client_node(node->right, c);
 }
 
-static LayoutNode *
+LayoutNode *
 find_suitable_split(LayoutNode *start_node, unsigned int need_vertical)
 {
 	LayoutNode *n = start_node;
@@ -385,7 +337,7 @@ find_suitable_split(LayoutNode *start_node, unsigned int need_vertical)
 	return NULL;
 }
 
-static void
+void
 init_tree(Monitor *m)
 {
 	unsigned int i;
@@ -399,7 +351,7 @@ init_tree(Monitor *m)
 /* Reset horizontal split ratios in a column to equal distribution.
  * For N tiles, each should get 1/N of the height.
  * In a binary tree, this means ratio = left_count / (left_count + right_count) */
-static void
+void
 reset_column_ratios(LayoutNode *node, Monitor *m)
 {
 	unsigned int left_count, right_count;
@@ -420,7 +372,7 @@ reset_column_ratios(LayoutNode *node, Monitor *m)
 	reset_column_ratios(node->right, m);
 }
 
-static int
+int
 insert_client(Monitor *m, Client *focused_client, Client *new_client)
 {
 	Client *old_client;
@@ -528,7 +480,7 @@ insert_client(Monitor *m, Client *focused_client, Client *new_client)
 	return 1;
 }
 
-static void
+void
 insert_client_at(Monitor *m, Client *target, Client *new_client, double cx, double cy)
 {
 	Client *old_client;
@@ -609,7 +561,7 @@ insert_client_at(Monitor *m, Client *target, Client *new_client, double cx, doub
 	}
 }
 
-static LayoutNode *
+LayoutNode *
 remove_client_node(LayoutNode *node, Client *c)
 {
 	LayoutNode *tmp;
@@ -656,7 +608,7 @@ remove_client_node(LayoutNode *node, Client *c)
 
 /* Find and convert a horizontal split to vertical to create a new column.
  * Returns 1 if a promotion was made, 0 otherwise. */
-static int
+int
 promote_to_column(LayoutNode *node, Monitor *m)
 {
 	if (!node || node->is_client_node)
@@ -682,7 +634,7 @@ promote_to_column(LayoutNode *node, Monitor *m)
 
 /* Ensure we always have max columns before stacking.
  * When a column disappears, un-stack tiles to fill up to max columns. */
-static void
+void
 ensure_proper_columns(Monitor *m, LayoutNode **root)
 {
 	LayoutNode *r;
@@ -705,7 +657,7 @@ ensure_proper_columns(Monitor *m, LayoutNode **root)
 	}
 }
 
-static void
+void
 remove_client(Monitor *m, Client *c)
 {
 	unsigned int current_tag;
@@ -734,7 +686,7 @@ remove_client(Monitor *m, Client *c)
 	}
 }
 
-static void
+void
 setratio_h(const Arg *arg)
 {
 	Client *sel = focustop(selmon);
@@ -766,7 +718,7 @@ setratio_h(const Arg *arg)
 	}
 }
 
-static void
+void
 setratio_v(const Arg *arg)
 {
 	Client *sel = focustop(selmon);
@@ -798,7 +750,7 @@ setratio_v(const Arg *arg)
 	}
 }
 
-static void swapclients(const Arg *arg) {
+void swapclients(const Arg *arg) {
 	Client *c, *tmp, *target = NULL, *sel = focustop(selmon);
 	LayoutNode *sel_node, *target_node;
 	int closest_dist = INT_MAX, dist, sel_center_x, sel_center_y,
@@ -887,7 +839,7 @@ static void swapclients(const Arg *arg) {
 	}
 }
 
-static void focusdir(const Arg *arg) {
+void focusdir(const Arg *arg) {
 	Client *c, *target = NULL, *sel = focustop(selmon);
 	int closest_dist = INT_MAX, dist, sel_center_x, sel_center_y,
 		cand_center_x, cand_center_y;
@@ -966,7 +918,7 @@ static void focusdir(const Arg *arg) {
 	}
 }
 
-static unsigned int
+unsigned int
 count_columns(LayoutNode *node, Monitor *m)
 {
 	/* Count columns at the top level only.
@@ -997,7 +949,7 @@ count_columns(LayoutNode *node, Monitor *m)
 	return count_columns(node->left, m) + count_columns(node->right, m);
 }
 
-static int
+int
 collect_columns(LayoutNode *node, Monitor *m, LayoutNode **out_nodes,
 		unsigned int *out_counts, Client **out_clients, int max_out)
 {
@@ -1032,7 +984,7 @@ collect_columns(LayoutNode *node, Monitor *m, LayoutNode **out_nodes,
 	return used;
 }
 
-static unsigned int
+unsigned int
 visible_count(LayoutNode *node, Monitor *m)
 {
 	Client *c;
@@ -1055,7 +1007,7 @@ visible_count(LayoutNode *node, Monitor *m)
 	return visible_count(node->left, m) + visible_count(node->right, m);
 }
 
-static unsigned int
+unsigned int
 placement_count(LayoutNode *node, Monitor *m)
 {
 	Client *c;
@@ -1071,7 +1023,7 @@ placement_count(LayoutNode *node, Monitor *m)
 	return placement_count(node->left, m) + placement_count(node->right, m);
 }
 
-static unsigned int
+unsigned int
 target_columns(Monitor *m)
 {
 	float ratio;
@@ -1088,7 +1040,7 @@ target_columns(Monitor *m)
 	return 2;
 }
 
-static Client *
+Client *
 first_visible_client(LayoutNode *node, Monitor *m)
 {
 	Client *c;
@@ -1104,7 +1056,7 @@ first_visible_client(LayoutNode *node, Monitor *m)
 	return c ? c : first_visible_client(node->right, m);
 }
 
-static Client *
+Client *
 first_active_client(LayoutNode *node, Monitor *m)
 {
 	Client *c;
@@ -1122,7 +1074,7 @@ first_active_client(LayoutNode *node, Monitor *m)
 	return c ? c : first_active_client(node->right, m);
 }
 
-static Client *
+Client *
 largest_client_in_column(LayoutNode *col_node, Monitor *m)
 {
 	Client *c, *largest = NULL;
@@ -1158,7 +1110,7 @@ largest_client_in_column(LayoutNode *col_node, Monitor *m)
 	return largest;
 }
 
-static Client *
+Client *
 pick_target_client(Monitor *m, Client *focused_client)
 {
 	LayoutNode *col_nodes[64];
@@ -1205,7 +1157,7 @@ pick_target_client(Monitor *m, Client *focused_client)
 	return first_active_client(*root, m);
 }
 
-static Client *
+Client *
 xytoclient(double x, double y) {
 	Client *c, *closest = NULL;
 	double dist, mindist = INT_MAX, dx, dy;
@@ -1248,7 +1200,7 @@ xytoclient(double x, double y) {
 	return closest;
 }
 
-static LayoutNode *
+LayoutNode *
 find_column_root(LayoutNode *node, Monitor *m)
 {
 	LayoutNode *n, *col_candidate;
@@ -1281,7 +1233,7 @@ find_column_root(LayoutNode *node, Monitor *m)
 	return col_candidate;
 }
 
-static unsigned int
+unsigned int
 count_in_column(LayoutNode *col_node, Monitor *m)
 {
 	if (!col_node)
@@ -1290,7 +1242,7 @@ count_in_column(LayoutNode *col_node, Monitor *m)
 }
 
 /* Check if two clients are in the same column */
-static int
+int
 same_column(Monitor *m, Client *c1, Client *c2)
 {
 	LayoutNode *node1, *node2, *col1, *col2;
@@ -1316,7 +1268,7 @@ same_column(Monitor *m, Client *c1, Client *c2)
 
 /* Check if moving a tile from source to target is allowed
  * Returns: 0 = blocked, 1 = normal move, 2 = swap in same column */
-static int
+int
 can_move_tile(Monitor *m, Client *source, Client *target)
 {
 	LayoutNode *source_node, *target_node, *source_col, *target_col;
@@ -1370,7 +1322,7 @@ can_move_tile(Monitor *m, Client *source, Client *target)
  * - If source is a direct child of column root: swap subtrees (big tile ↔ group of small tiles)
  * - If both are siblings (same parent): swap children of their parent
  * - Otherwise: just swap client pointers */
-static void
+void
 swap_tiles_in_tree(Monitor *m, Client *c1, Client *c2)
 {
 	LayoutNode *node1, *node2, *col_root;
@@ -1426,7 +1378,7 @@ swap_tiles_in_tree(Monitor *m, Client *c1, Client *c2)
 	}
 }
 
-static void
+void
 start_tile_drag(Monitor *m, Client *c)
 {
 	LayoutNode *client_node, *col_root;
@@ -1452,7 +1404,7 @@ start_tile_drag(Monitor *m, Client *c)
 	drag_was_alone_in_column = (count_in_column(col_root, m) == 1);
 }
 
-static void
+void
 end_tile_drag(void)
 {
 	dragging_client = NULL;
@@ -1461,7 +1413,7 @@ end_tile_drag(void)
 	drag_placeholder_box = (struct wlr_box){0};
 }
 
-static void
+void
 swap_columns(Monitor *m, Client *c1, Client *c2)
 {
 	LayoutNode *node1, *node2, *col1, *col2;
