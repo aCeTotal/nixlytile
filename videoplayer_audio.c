@@ -10,6 +10,8 @@
 #include <string.h>
 #include <math.h>
 #include <errno.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
@@ -24,6 +26,38 @@
 /* IEC61937 constants for TrueHD/Atmos passthrough */
 #define IEC61937_HEADER_SIZE 8
 #define IEC61937_TRUEHD_BURST_SIZE 61440  /* MAT frame size */
+
+/* ================================================================
+ *  Audio Command Pipe (non-blocking from compositor thread)
+ * ================================================================ */
+
+typedef enum {
+    AUDIO_CMD_PLAY = 1,
+    AUDIO_CMD_PAUSE,
+    AUDIO_CMD_VOLUME,
+    AUDIO_CMD_MUTE,
+    AUDIO_CMD_RECREATE,
+    AUDIO_CMD_QUIT
+} AudioCmdType;
+
+typedef struct {
+    uint32_t type;              /* AudioCmdType */
+    union {
+        float volume;           /* for AUDIO_CMD_VOLUME */
+        int32_t mute;           /* for AUDIO_CMD_MUTE */
+    };
+} AudioCmd;  /* 8 bytes — atomic write for pipe ≤ PIPE_BUF */
+
+/* Forward declarations for cmd thread */
+static void audio_cmd_send(VideoPlayer *vp, const AudioCmd *cmd);
+static void *audio_cmd_thread_func(void *arg);
+static void audio_cmd_apply_volume(VideoPlayer *vp, float volume);
+static void audio_cmd_apply_mute(VideoPlayer *vp, int mute);
+
+/* Forward declarations for recovery (used by cmd thread) */
+void videoplayer_audio_play(VideoPlayer *vp);
+int videoplayer_audio_init(VideoPlayer *vp);
+void videoplayer_audio_cleanup(VideoPlayer *vp);
 
 /* ================================================================
  *  Ring Buffer Implementation
@@ -260,14 +294,13 @@ static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
         pthread_mutex_unlock(&vp->audio.lock);
     }
 
-    /* When stream becomes ready/paused after any interruption, reactivate if playing */
-    if (state == PW_STREAM_STATE_PAUSED) {
-        /* Stream is ready but paused - if we're playing, activate it */
-        if (vp->state == VP_STATE_PLAYING) {
-            fprintf(stderr, "[audio] Stream paused, reactivating for playback\n");
-            pw_stream_set_active(vp->audio.stream, true);
-        }
-    }
+    /* NOTE: We intentionally do NOT call pw_stream_set_active(true) when entering
+     * PAUSED state. During Bluetooth device reconnection, PipeWire may rapidly
+     * cycle between STREAMING and PAUSED as it reconfigures audio routing.
+     * Immediately reactivating causes STREAMING<->PAUSED oscillation that
+     * destabilizes PipeWire. Instead, the recovery mechanism in
+     * videoplayer_audio_check_recovery() handles reconnection after PipeWire
+     * has fully stabilized. */
 
     /* Handle UNCONNECTED state - stream was disconnected, need to try reconnecting */
     if (state == PW_STREAM_STATE_UNCONNECTED && old != PW_STREAM_STATE_CONNECTING) {
@@ -294,6 +327,155 @@ static const struct pw_stream_events stream_events = {
     .state_changed = on_stream_state_changed,
     .process = on_process,
 };
+
+/* ================================================================
+ *  Audio Command Pipe Implementation
+ * ================================================================ */
+
+static void audio_cmd_send(VideoPlayer *vp, const AudioCmd *cmd)
+{
+    if (vp->audio.cmd_pipe[1] < 0)
+        return;
+
+    /* write() of ≤ PIPE_BUF bytes is atomic and non-blocking (pipe is O_NONBLOCK) */
+    ssize_t n = write(vp->audio.cmd_pipe[1], cmd, sizeof(*cmd));
+    if (n < 0 && errno != EAGAIN)
+        fprintf(stderr, "[audio] cmd pipe write error: %s\n", strerror(errno));
+}
+
+static void *audio_cmd_thread_func(void *arg)
+{
+    VideoPlayer *vp = arg;
+    AudioCmd cmd;
+    ssize_t n;
+
+    fprintf(stderr, "[audio-cmd] Command thread started\n");
+
+    while (1) {
+        /* Blocking read on pipe — wakes when compositor sends a command */
+        n = read(vp->audio.cmd_pipe[0], &cmd, sizeof(cmd));
+        if (n != sizeof(cmd)) {
+            if (n == 0 || (n < 0 && errno != EINTR)) {
+                fprintf(stderr, "[audio-cmd] Pipe closed or error, exiting\n");
+                break;
+            }
+            continue;  /* EINTR — retry */
+        }
+
+        switch (cmd.type) {
+        case AUDIO_CMD_PLAY:
+            if (vp->audio.stream && vp->audio.loop && !vp->audio.stream_interrupted) {
+                pw_thread_loop_lock(vp->audio.loop);
+                pw_stream_set_active(vp->audio.stream, true);
+                pw_thread_loop_unlock(vp->audio.loop);
+            }
+            break;
+
+        case AUDIO_CMD_PAUSE:
+            if (vp->audio.stream && vp->audio.loop && !vp->audio.stream_interrupted) {
+                pw_thread_loop_lock(vp->audio.loop);
+                pw_stream_set_active(vp->audio.stream, false);
+                pw_thread_loop_unlock(vp->audio.loop);
+            }
+            break;
+
+        case AUDIO_CMD_VOLUME:
+            audio_cmd_apply_volume(vp, cmd.volume);
+            break;
+
+        case AUDIO_CMD_MUTE:
+            audio_cmd_apply_mute(vp, cmd.mute);
+            break;
+
+        case AUDIO_CMD_RECREATE:
+            fprintf(stderr, "[audio-cmd] Recreating audio stream\n");
+            videoplayer_audio_cleanup(vp);
+            if (videoplayer_audio_init(vp) == 0) {
+                fprintf(stderr, "[audio-cmd] Stream recreated successfully\n");
+                if (vp->state == VP_STATE_PLAYING) {
+                    /* Directly activate — we're already on the cmd thread */
+                    if (vp->audio.stream && vp->audio.loop) {
+                        pw_thread_loop_lock(vp->audio.loop);
+                        pw_stream_set_active(vp->audio.stream, true);
+                        pw_thread_loop_unlock(vp->audio.loop);
+                    }
+                }
+            } else {
+                fprintf(stderr, "[audio-cmd] Stream recreation failed\n");
+            }
+            vp->audio.audio_recreating = 0;
+            break;
+
+        case AUDIO_CMD_QUIT:
+            fprintf(stderr, "[audio-cmd] Command thread exiting\n");
+            goto done;
+
+        default:
+            fprintf(stderr, "[audio-cmd] Unknown command %u\n", cmd.type);
+            break;
+        }
+    }
+
+done:
+    vp->audio.cmd_thread_running = 0;
+    return NULL;
+}
+
+static int audio_cmd_pipe_init(VideoPlayer *vp)
+{
+    /* Guard: don't re-create during RECREATE (cmd thread is still running) */
+    if (vp->audio.cmd_thread_running)
+        return 0;
+
+    vp->audio.cmd_pipe[0] = -1;
+    vp->audio.cmd_pipe[1] = -1;
+
+    if (pipe(vp->audio.cmd_pipe) < 0) {
+        fprintf(stderr, "[audio] Failed to create cmd pipe: %s\n", strerror(errno));
+        return -1;
+    }
+
+    /* Write end non-blocking (compositor thread must never block) */
+    int flags = fcntl(vp->audio.cmd_pipe[1], F_GETFL);
+    fcntl(vp->audio.cmd_pipe[1], F_SETFL, flags | O_NONBLOCK);
+    /* Read end stays blocking (cmd thread blocks on it) */
+
+    vp->audio.cmd_thread_running = 1;
+    if (pthread_create(&vp->audio.cmd_thread, NULL, audio_cmd_thread_func, vp) != 0) {
+        fprintf(stderr, "[audio] Failed to create cmd thread: %s\n", strerror(errno));
+        close(vp->audio.cmd_pipe[0]);
+        close(vp->audio.cmd_pipe[1]);
+        vp->audio.cmd_pipe[0] = -1;
+        vp->audio.cmd_pipe[1] = -1;
+        vp->audio.cmd_thread_running = 0;
+        return -1;
+    }
+
+    fprintf(stderr, "[audio] Command pipe and thread initialized\n");
+    return 0;
+}
+
+void videoplayer_audio_cmd_shutdown(VideoPlayer *vp)
+{
+    if (!vp)
+        return;
+
+    if (vp->audio.cmd_thread_running) {
+        AudioCmd cmd = { .type = AUDIO_CMD_QUIT };
+        audio_cmd_send(vp, &cmd);
+        pthread_join(vp->audio.cmd_thread, NULL);
+        vp->audio.cmd_thread_running = 0;
+    }
+
+    if (vp->audio.cmd_pipe[0] >= 0) {
+        close(vp->audio.cmd_pipe[0]);
+        vp->audio.cmd_pipe[0] = -1;
+    }
+    if (vp->audio.cmd_pipe[1] >= 0) {
+        close(vp->audio.cmd_pipe[1]);
+        vp->audio.cmd_pipe[1] = -1;
+    }
+}
 
 /* ================================================================
  *  Audio Initialization
@@ -338,6 +520,7 @@ int videoplayer_audio_init(VideoPlayer *vp)
     vp->audio.stall_count = 0;
     vp->audio.recovery_frames = 0;
     vp->audio.stream_interrupted = 0;
+    vp->audio.audio_recreating = 0;
 
     /* Initialize ring buffer */
     if (ring_buffer_init(&vp->audio.ring, AUDIO_RING_BUFFER_SIZE) < 0) {
@@ -489,6 +672,11 @@ int videoplayer_audio_init(VideoPlayer *vp)
 
     fprintf(stderr, "[audio] Initialized: %d channels @ %d Hz\n", channels, sample_rate);
 
+    /* Start command pipe + thread (skips if already running during RECREATE) */
+    if (audio_cmd_pipe_init(vp) < 0) {
+        fprintf(stderr, "[audio] Warning: cmd pipe init failed, falling back to direct calls\n");
+    }
+
     return 0;
 }
 
@@ -546,30 +734,17 @@ void videoplayer_audio_cleanup(VideoPlayer *vp)
     fprintf(stderr, "[audio] Cleanup complete\n");
 }
 
-/* Forward declaration for recovery (defined later in this file) */
-void videoplayer_audio_play(VideoPlayer *vp);
-
 /* ================================================================
  *  Stream Recovery (for Bluetooth/device reconnection)
  * ================================================================ */
 
 /*
  * Check if audio stream needs recovery and attempt to restore it.
- * This should be called periodically (e.g., from decode thread or present_frame).
+ * This should be called periodically (e.g., from present_frame ~every second).
  * Returns: 0 = no action needed, 1 = recovery in progress, -1 = recovery failed
  *
- * IMPORTANT: This function MUST be non-blocking to prevent freezing the compositor
- * when Bluetooth controllers disconnect/reconnect (which can cause PipeWire to be busy).
- *
- * NOTE: PipeWire doesn't provide a trylock or timed lock function, so we CANNOT
- * safely check stream state from the compositor main thread without risking a block.
- * Instead, we rely on the on_stream_state_changed callback to:
- *   1. Set stream_interrupted when stream goes bad
- *   2. Attempt reactivation when stream becomes paused
- *   3. Clear stream_interrupted when stream resumes streaming
- *
- * This function now only checks the volatile stream_interrupted flag which is
- * updated asynchronously by the PipeWire thread.
+ * IMPORTANT: This function is non-blocking — it sends a command via pipe
+ * to the audio command thread which handles the actual PipeWire recreation.
  */
 int videoplayer_audio_check_recovery(VideoPlayer *vp)
 {
@@ -579,37 +754,32 @@ int videoplayer_audio_check_recovery(VideoPlayer *vp)
     if (!vp)
         return 0;
 
+    /* If recreation is already in progress, just wait */
+    if (vp->audio.audio_recreating)
+        return 1;
+
     /* If no stream exists at all, nothing to recover */
     if (!vp->audio.stream || !vp->audio.loop)
         return 0;
 
-    /* Just check the volatile flag - no locking required.
-     * The on_stream_state_changed callback handles all the actual recovery. */
+    /* Just check the volatile flag - no locking required. */
     if (vp->audio.stream_interrupted) {
         interrupted_ticks++;
 
-        /* After ~5 seconds of continuous interruption, recreate the stream.
-         * This handles cases where PipeWire moved us to UNCONNECTED and
-         * the stream can't recover on its own. */
+        /* After ~5 seconds of continuous interruption, send RECREATE command */
         if (interrupted_ticks >= 5) {
-            fprintf(stderr, "[audio] Stream interrupted for %d seconds, recreating stream\n",
+            fprintf(stderr, "[audio] Stream interrupted for %d seconds, sending RECREATE command\n",
                     interrupted_ticks);
             interrupted_ticks = 0;
 
-            /* Tear down and rebuild the PipeWire stream */
-            videoplayer_audio_cleanup(vp);
-            if (videoplayer_audio_init(vp) == 0) {
-                fprintf(stderr, "[audio] Stream recreated successfully\n");
-                if (vp->state == VP_STATE_PLAYING)
-                    videoplayer_audio_play(vp);
-                return 0;
-            } else {
-                fprintf(stderr, "[audio] Stream recreation failed\n");
-                return -1;
+            if (!vp->audio.audio_recreating) {
+                vp->audio.audio_recreating = 1;
+                AudioCmd cmd = { .type = AUDIO_CMD_RECREATE };
+                audio_cmd_send(vp, &cmd);
             }
         }
 
-        return 1;  /* Recovery in progress (handled by PipeWire thread) */
+        return 1;  /* Recovery in progress */
     }
 
     /* Stream is healthy, reset the counter */
@@ -631,11 +801,10 @@ void videoplayer_audio_play(VideoPlayer *vp)
         return;
     }
 
-    pw_thread_loop_lock(vp->audio.loop);
-    pw_stream_set_active(vp->audio.stream, true);
-    pw_thread_loop_unlock(vp->audio.loop);
+    AudioCmd cmd = { .type = AUDIO_CMD_PLAY };
+    audio_cmd_send(vp, &cmd);
 
-    fprintf(stderr, "[audio] Play\n");
+    fprintf(stderr, "[audio] Play (queued)\n");
 }
 
 void videoplayer_audio_pause(VideoPlayer *vp)
@@ -648,11 +817,10 @@ void videoplayer_audio_pause(VideoPlayer *vp)
         return;
     }
 
-    pw_thread_loop_lock(vp->audio.loop);
-    pw_stream_set_active(vp->audio.stream, false);
-    pw_thread_loop_unlock(vp->audio.loop);
+    AudioCmd cmd = { .type = AUDIO_CMD_PAUSE };
+    audio_cmd_send(vp, &cmd);
 
-    fprintf(stderr, "[audio] Pause\n");
+    fprintf(stderr, "[audio] Pause (queued)\n");
 }
 
 /* ================================================================
@@ -865,10 +1033,6 @@ void videoplayer_audio_set_clock(VideoPlayer *vp, int64_t pts_us)
 
 void videoplayer_audio_set_volume(VideoPlayer *vp, float volume)
 {
-    uint8_t buffer[1024];
-    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-    struct spa_pod_frame f;
-
     if (!vp)
         return;
 
@@ -878,8 +1042,25 @@ void videoplayer_audio_set_volume(VideoPlayer *vp, float volume)
     if (volume > 1.0f)
         volume = 1.0f;
 
-    /* Store volume for software mixing fallback */
+    /* Store volume immediately for software mixing (on_process uses this) */
     vp->audio.volume = volume;
+
+    if (!vp->audio.stream || !vp->audio.loop)
+        return;
+
+    /* Send to cmd thread for PipeWire param update */
+    AudioCmd cmd = { .type = AUDIO_CMD_VOLUME, .volume = volume };
+    audio_cmd_send(vp, &cmd);
+
+    fprintf(stderr, "[audio] Volume set to %.0f%%\n", volume * 100);
+}
+
+/* Internal: apply volume to PipeWire stream (called from cmd thread) */
+static void audio_cmd_apply_volume(VideoPlayer *vp, float volume)
+{
+    uint8_t buffer[1024];
+    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+    struct spa_pod_frame f;
 
     if (!vp->audio.stream || !vp->audio.loop)
         return;
@@ -894,7 +1075,6 @@ void videoplayer_audio_set_volume(VideoPlayer *vp, float volume)
 
     pw_thread_loop_lock(vp->audio.loop);
 
-    /* Build Props pod with channelVolumes */
     spa_pod_builder_push_object(&b, &f, SPA_TYPE_OBJECT_Props, SPA_PARAM_Props);
     spa_pod_builder_prop(&b, SPA_PROP_channelVolumes, 0);
     spa_pod_builder_array(&b, sizeof(float), SPA_TYPE_Float,
@@ -904,27 +1084,37 @@ void videoplayer_audio_set_volume(VideoPlayer *vp, float volume)
     pw_stream_set_param(vp->audio.stream, SPA_PARAM_Props, pod);
 
     pw_thread_loop_unlock(vp->audio.loop);
-
-    fprintf(stderr, "[audio] Volume set to %.0f%%\n", volume * 100);
 }
 
 void videoplayer_audio_set_mute(VideoPlayer *vp, int mute)
 {
-    uint8_t buffer[256];
-    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-
     if (!vp)
         return;
 
-    /* Store mute state for software mixing fallback */
+    /* Store mute state immediately for software mixing (on_process uses this) */
     vp->audio.muted = mute;
+
+    if (!vp->audio.stream || !vp->audio.loop)
+        return;
+
+    /* Send to cmd thread for PipeWire param update */
+    AudioCmd cmd = { .type = AUDIO_CMD_MUTE, .mute = mute };
+    audio_cmd_send(vp, &cmd);
+
+    fprintf(stderr, "[audio] Mute %s\n", mute ? "on" : "off");
+}
+
+/* Internal: apply mute to PipeWire stream (called from cmd thread) */
+static void audio_cmd_apply_mute(VideoPlayer *vp, int mute)
+{
+    uint8_t buffer[256];
+    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 
     if (!vp->audio.stream || !vp->audio.loop)
         return;
 
     pw_thread_loop_lock(vp->audio.loop);
 
-    /* Build Props pod with mute */
     struct spa_pod *pod = spa_pod_builder_add_object(&b,
         SPA_TYPE_OBJECT_Props, SPA_PARAM_Props,
         SPA_PROP_mute, SPA_POD_Bool(mute ? true : false));
@@ -932,8 +1122,6 @@ void videoplayer_audio_set_mute(VideoPlayer *vp, int mute)
     pw_stream_set_param(vp->audio.stream, SPA_PARAM_Props, pod);
 
     pw_thread_loop_unlock(vp->audio.loop);
-
-    fprintf(stderr, "[audio] Mute %s\n", mute ? "on" : "off");
 }
 
 /* ================================================================

@@ -207,6 +207,7 @@ typedef struct VideoPlayerAudio {
     int stall_count;               /* Frames since audio clock progressed */
     int recovery_frames;           /* Frames to wait after audio recovery before using A/V sync */
     volatile int stream_interrupted; /* Set when stream is interrupted (controller reconnect, etc.) */
+    volatile int audio_recreating;   /* Set while background thread is recreating audio stream */
 
     /* Passthrough mode */
     int passthrough_mode;          /* IEC61937 for TrueHD/Atmos */
@@ -222,6 +223,11 @@ typedef struct VideoPlayerAudio {
     /* Volume/Mute */
     float volume;
     int muted;
+
+    /* Audio command pipe (non-blocking from compositor thread) */
+    int cmd_pipe[2];                 /* [0]=read (cmd thread), [1]=write (compositor) */
+    pthread_t cmd_thread;
+    volatile int cmd_thread_running;
 
     pthread_mutex_t lock;
 } VideoPlayerAudio;

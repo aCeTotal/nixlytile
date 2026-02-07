@@ -31,6 +31,7 @@ extern void videoplayer_hide_control_bar(VideoPlayer *vp);
 /* Forward declarations for audio */
 extern int videoplayer_audio_init(VideoPlayer *vp);
 extern void videoplayer_audio_cleanup(VideoPlayer *vp);
+extern void videoplayer_audio_cmd_shutdown(VideoPlayer *vp);
 extern void videoplayer_audio_play(VideoPlayer *vp);
 extern void videoplayer_audio_pause(VideoPlayer *vp);
 
@@ -81,6 +82,9 @@ void videoplayer_destroy(VideoPlayer *vp)
     /* Stop playback and close file */
     videoplayer_stop(vp);
 
+    /* Shut down audio command thread before cleaning up PipeWire */
+    videoplayer_audio_cmd_shutdown(vp);
+
     /* Cleanup audio */
     videoplayer_audio_cleanup(vp);
 
@@ -110,22 +114,16 @@ void videoplayer_play(VideoPlayer *vp)
     if (vp->state == VP_STATE_IDLE || vp->state == VP_STATE_ERROR)
         return;
 
-    /* Wait for initial buffering (at least 2 frames) - shorter wait for faster start */
-    int wait_count = 0;
-    while (vp->frames_queued < 2 && wait_count < 50) {
-        usleep(10000);  /* 10ms */
-        wait_count++;
-    }
-
     /* Reset frame timing so first frame presents immediately.
      * Without this, stale last_frame_ns from before pause causes
-     * the cadence-locked timing to either skip ahead or wait. */
+     * the cadence-locked timing to either skip ahead or wait.
+     * No busy-wait: present_frame() handles empty queue gracefully. */
     vp->last_frame_ns = 0;
     vp->current_repeat = 0;
 
     vp->state = VP_STATE_PLAYING;
 
-    /* Start audio playback */
+    /* Start audio playback (non-blocking, sends via pipe) */
     videoplayer_audio_play(vp);
 
     fprintf(stderr, "[videoplayer] Play (buffered %d frames)\n", vp->frames_queued);

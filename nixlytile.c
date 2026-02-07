@@ -24488,6 +24488,12 @@ gamepad_event_cb(int fd, uint32_t mask, void *data)
 
 		/* Handle axis events */
 		if (ev.type == EV_ABS) {
+			/* Ignore synthetic D-pad events during connect grace period (500ms).
+			 * Bluetooth controllers may send ABS_HAT0X/Y on reconnect. */
+			if ((ev.code == ABS_HAT0X || ev.code == ABS_HAT0Y) &&
+			    gp->connect_time_ms && monotonic_msec() - gp->connect_time_ms < 500)
+				continue;
+
 			/* Joystick axes for cursor movement */
 			switch (ev.code) {
 			case ABS_X:
