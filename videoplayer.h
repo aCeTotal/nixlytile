@@ -116,7 +116,7 @@ typedef struct SubtitleTrack {
  *  Frame Queue
  * ================================================================ */
 
-#define VP_FRAME_QUEUE_SIZE 8      /* Larger buffer for smooth playback */
+#define VP_FRAME_QUEUE_SIZE 16     /* Large buffer for smooth playback */
 
 typedef struct VideoPlayerFrame {
     struct wlr_buffer *buffer;
@@ -168,7 +168,7 @@ typedef struct VideoPlayerControlBar {
  *  Audio Ring Buffer
  * ================================================================ */
 
-#define AUDIO_RING_BUFFER_SIZE (48000 * 8 * sizeof(float))  /* ~0.5 seconds of 8ch 48kHz */
+#define AUDIO_RING_BUFFER_SIZE (48000 * 8 * sizeof(float) * 2)  /* ~1 second of 8ch 48kHz */
 
 typedef struct AudioRingBuffer {
     uint8_t *data;
@@ -200,6 +200,13 @@ typedef struct VideoPlayerAudio {
     uint64_t audio_played_samples; /* Samples actually played */
     int sample_rate;
     int channels;
+
+    /* Sync tracking (per-instance, not static) */
+    int64_t last_clock;            /* Last returned clock value (for trylock fallback) */
+    int64_t last_audio_pts;        /* Last audio PTS for stall detection */
+    int stall_count;               /* Frames since audio clock progressed */
+    int recovery_frames;           /* Frames to wait after audio recovery before using A/V sync */
+    volatile int stream_interrupted; /* Set when stream is interrupted (controller reconnect, etc.) */
 
     /* Passthrough mode */
     int passthrough_mode;          /* IEC61937 for TrueHD/Atmos */

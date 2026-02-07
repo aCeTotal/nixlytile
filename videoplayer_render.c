@@ -218,6 +218,9 @@ struct wlr_buffer *videoplayer_create_scaled_buffer(AVFrame *frame,
 /* External audio clock function */
 extern int64_t videoplayer_audio_get_clock(VideoPlayer *vp);
 
+/* Audio recovery function - check if stream needs reconnection */
+extern int videoplayer_audio_check_recovery(VideoPlayer *vp);
+
 static uint64_t get_time_ns(void)
 {
     struct timespec ts;
@@ -226,9 +229,9 @@ static uint64_t get_time_ns(void)
 }
 
 /* A/V sync thresholds in microseconds */
-#define AV_SYNC_THRESHOLD_MIN   10000    /* 10ms - below this, don't adjust */
-#define AV_SYNC_THRESHOLD_MAX   100000   /* 100ms - above this, hard sync */
-#define AV_SYNC_FRAMESKIP_THRESH 50000   /* 50ms - skip frame if behind by this much */
+#define AV_SYNC_THRESHOLD_MIN   20000    /* 20ms - below this, don't adjust */
+#define AV_SYNC_THRESHOLD_MAX   200000   /* 200ms - above this, hard sync */
+#define AV_SYNC_FRAMESKIP_THRESH 100000  /* 100ms - skip frame if behind by this much */
 
 /*
  * Calculate frame repeat pattern for non-VRR displays
@@ -249,24 +252,22 @@ static void calculate_frame_pacing(VideoPlayer *vp, float display_hz)
 
     float ratio = display_hz / video_fps;
 
-    if (fabsf(ratio - roundf(ratio)) < 0.05f) {
-        /* Clean multiple - e.g., 120Hz / 24fps = 5x, 144Hz / 24fps = 6x */
-        vp->frame_repeat_mode = 1;
-        vp->frame_repeat_count = (int)roundf(ratio);
-    } else if (video_fps >= 23.9 && video_fps <= 24.1 &&
-               display_hz >= 59.9 && display_hz <= 60.1) {
+    if (video_fps >= 23.9 && video_fps <= 24.1 &&
+        display_hz >= 59.9 && display_hz <= 60.1) {
         /* 24fps on 60Hz - use 3:2 pulldown */
         vp->frame_repeat_mode = 2;
         vp->frame_repeat_count = 0;
-    } else if (video_fps >= 29.9 && video_fps <= 30.1 &&
-               display_hz >= 59.9 && display_hz <= 60.1) {
-        /* 30fps on 60Hz - 2x repeat */
+    } else if (fabsf(ratio - roundf(ratio)) < 0.002f) {
+        /* Exact integer multiple - e.g., 24.000@120Hz = 5x, 30.000@60Hz = 2x
+         * Tight threshold (0.002) avoids misclassifying 23.976fps as clean. */
         vp->frame_repeat_mode = 1;
-        vp->frame_repeat_count = 2;
+        vp->frame_repeat_count = (int)roundf(ratio);
     } else {
-        /* General case - calculate optimal repeat pattern */
-        vp->frame_repeat_mode = 1;
-        vp->frame_repeat_count = MAX(1, (int)roundf(ratio));
+        /* Non-clean ratio (23.976@120Hz, 25@60Hz, etc.) - use frame interval
+         * directly. Cadence-locked timing naturally produces the correct
+         * variable-vsync pattern (e.g., 5-5-5-5-6 for 23.976@120Hz). */
+        vp->frame_repeat_mode = 0;
+        vp->frame_repeat_count = 0;
     }
 
     fprintf(stderr, "[videoplayer] Frame pacing: %.3f fps on %.2f Hz, mode=%d, count=%d, display_interval=%lu ns\n",
@@ -277,31 +278,40 @@ static void calculate_frame_pacing(VideoPlayer *vp, float display_hz)
 /*
  * Check if audio clock is valid and progressing
  * Returns 1 if we should use A/V sync, 0 to fall back to timing-based
+ *
+ * NOTE: Audio sync is now OPTIONAL - video always plays smoothly based on timing.
+ * Audio sync only provides gentle adjustments when audio is healthy.
  */
 static int is_audio_clock_valid(VideoPlayer *vp)
 {
-    static int64_t last_audio_pts = 0;
-    static int stall_count = 0;
+    /* Check if audio stream is currently interrupted */
+    if (vp->audio.stream_interrupted) {
+        return 0;
+    }
+
+    /* Check if we're in recovery period after an interruption */
+    if (vp->audio.recovery_frames > 0) {
+        vp->audio.recovery_frames--;
+        return 0;
+    }
 
     int64_t audio_pts_us = videoplayer_audio_get_clock(vp);
 
     /* Audio not started yet */
     if (audio_pts_us <= 0) {
-        stall_count = 0;
-        last_audio_pts = 0;
         return 0;
     }
 
     /* Check if audio is progressing */
-    if (audio_pts_us == last_audio_pts) {
-        stall_count++;
-        /* If stalled for more than 10 frames (~160ms at 60Hz), audio may be stuck */
-        if (stall_count > 10) {
+    if (audio_pts_us == vp->audio.last_audio_pts) {
+        vp->audio.stall_count++;
+        /* If stalled for more than 10 frames, audio may be stuck */
+        if (vp->audio.stall_count > 10) {
             return 0;
         }
     } else {
-        stall_count = 0;
-        last_audio_pts = audio_pts_us;
+        vp->audio.stall_count = 0;
+        vp->audio.last_audio_pts = audio_pts_us;
     }
 
     return 1;
@@ -325,13 +335,16 @@ static int64_t get_av_diff_us(VideoPlayer *vp, int64_t video_pts_us)
 /*
  * Determine frame presentation action based on A/V sync
  * Returns: 0 = show frame, 1 = skip frame (video behind), -1 = repeat current (video ahead)
+ *
+ * IMPORTANT: This is now very conservative - video playback is NEVER blocked.
+ * We only skip frames if we're VERY far behind, and never repeat frames aggressively.
  */
 static int get_frame_action(VideoPlayer *vp, int64_t video_pts_us)
 {
-    /* If audio clock is invalid/stalled, don't use A/V sync */
+    /* If audio clock is invalid/stalled, always show frame */
     if (!is_audio_clock_valid(vp)) {
         vp->av_sync_offset_us = 0;
-        return 0;  /* Always show frame when no valid audio sync */
+        return 0;
     }
 
     int64_t av_diff = get_av_diff_us(vp, video_pts_us);
@@ -339,28 +352,22 @@ static int get_frame_action(VideoPlayer *vp, int64_t video_pts_us)
     /* Store for debugging/display */
     vp->av_sync_offset_us = av_diff;
 
+    /* Only skip if we're VERY far behind (>100ms) */
     if (av_diff < -AV_SYNC_FRAMESKIP_THRESH) {
-        /* Video is significantly behind audio - skip this frame */
-        return 1;
-    } else if (av_diff > AV_SYNC_THRESHOLD_MAX) {
-        /* Video is way ahead - repeat current frame (don't advance) */
-        return -1;
-    } else if (av_diff > AV_SYNC_THRESHOLD_MIN) {
-        /* Video slightly ahead - slow down by occasionally repeating */
-        /* Use frame interval to calculate probability */
-        int64_t frame_duration_us = vp->frame_interval_ns / 1000;
-        if (av_diff > frame_duration_us) {
-            return -1;  /* Repeat frame */
-        }
+        return 1;  /* Skip frame to catch up */
     }
 
-    /* Normal - show the frame */
+    /* Never repeat frames - it causes stuttering. Just show them. */
+    /* Audio will naturally sync over time. */
+
     return 0;
 }
 
 /*
  * Check if we should present a frame at this vsync
- * Uses audio clock synchronization when available, falls back to timing
+ *
+ * SIMPLIFIED: Always use timing-based presentation for rock-solid playback.
+ * Audio sync only affects whether we skip frames when very far behind.
  */
 static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, int64_t next_frame_pts_us)
 {
@@ -373,39 +380,71 @@ static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, 
 
     uint64_t elapsed_ns = vsync_time_ns - vp->last_frame_ns;
 
-    /* Get A/V sync action (returns 0 if audio clock is invalid) */
-    int action = get_frame_action(vp, next_frame_pts_us);
-
-    if (action == 1) {
-        /* Skip frame - video is behind audio */
-        vp->last_frame_ns = vsync_time_ns;
-        return 2;  /* Special return: skip and get next frame immediately */
-    } else if (action == -1) {
-        /* Repeat frame - video is ahead of audio
-         * But don't repeat forever - cap at 2x normal frame interval */
-        if (elapsed_ns < vp->frame_interval_ns * 2) {
-            return 0;
-        }
-        /* Waited too long - force presentation to prevent complete stall */
+    /* Safety: if frame_interval_ns is invalid, use 24fps default */
+    uint64_t frame_interval = vp->frame_interval_ns;
+    if (frame_interval == 0 || frame_interval > 1000000000) {
+        frame_interval = 41666666;  /* ~24fps */
     }
 
-    /* Timing-based presentation */
+    /* Check A/V sync - only for frame skipping when far behind */
+    int action = get_frame_action(vp, next_frame_pts_us);
+    if (action == 1) {
+        /* Video is far behind audio - skip this frame */
+        vp->last_frame_ns = vsync_time_ns;
+        return 2;  /* Skip and get next frame immediately */
+    }
+
+    /*
+     * Cadence-locked frame timing: advance last_frame_ns by the ideal step
+     * instead of anchoring to vsync_time_ns. This prevents drift accumulation
+     * and produces correct patterns for all refresh rate / fps combinations.
+     *
+     * After advancing, if the ideal time is too far behind wall clock
+     * (pause/resume/seek), snap to present to avoid rapid catch-up.
+     */
+
+    uint64_t step;
+    uint64_t display_interval_ns = vp->display_interval_ns > 0
+        ? vp->display_interval_ns : frame_interval / 5;
+
     if (vp->frame_repeat_mode == 2) {
         /* 3:2 pulldown for 24fps on 60Hz */
         int target_repeats = (vp->current_repeat % 2 == 0) ? 2 : 3;
-        uint64_t target_time = vp->display_interval_ns * target_repeats;
+        step = vp->display_interval_ns * target_repeats;
 
-        if (elapsed_ns >= target_time - vp->display_interval_ns / 4) {
+        if (elapsed_ns >= step - vp->display_interval_ns / 4) {
             vp->current_repeat++;
-            vp->last_frame_ns = vsync_time_ns;
+            /* Cadence-locked: advance by ideal step, not to wall clock */
+            vp->last_frame_ns += step;
+            /* Safety snap: if more than 2 steps behind, reset to now */
+            if (vsync_time_ns > vp->last_frame_ns + step * 2)
+                vp->last_frame_ns = vsync_time_ns;
+            return 1;
+        }
+    } else if (vp->frame_repeat_mode == 1 && vp->frame_repeat_count > 0 &&
+               vp->display_interval_ns > 0) {
+        /* Fixed repeat mode for exact integer ratios (24.000@120Hz, 30.000@60Hz).
+         * Uses display_interval-aligned step for perfect vsync cadence. */
+        step = (uint64_t)vp->frame_repeat_count * vp->display_interval_ns;
+
+        if (elapsed_ns >= step - vp->display_interval_ns / 3) {
+            vp->last_frame_ns += step;
+            if (vsync_time_ns > vp->last_frame_ns + step * 2)
+                vp->last_frame_ns = vsync_time_ns;
             return 1;
         }
     } else {
-        /* Fixed repeat or VRR mode */
-        /* Present when elapsed time reaches frame interval */
-        /* Use 90% threshold to align with vsync */
-        if (elapsed_ns >= vp->frame_interval_ns * 9 / 10) {
-            vp->last_frame_ns = vsync_time_ns;
+        /* Frame-interval mode (VRR, and non-clean ratios like 23.976@120Hz).
+         * Uses video's exact frame interval as step. Naturally produces the
+         * correct variable-vsync pattern (e.g., mostly 5 vsyncs with occasional
+         * 6 for 23.976@120Hz). half-display-interval tolerance finds nearest vsync. */
+        step = frame_interval;
+        uint64_t tolerance = display_interval_ns / 2;
+
+        if (elapsed_ns + tolerance >= step) {
+            vp->last_frame_ns += step;
+            if (vsync_time_ns > vp->last_frame_ns + step * 2)
+                vp->last_frame_ns = vsync_time_ns;
             return 1;
         }
     }
@@ -419,8 +458,17 @@ static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, 
 
 void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
 {
+    static int recovery_check_counter = 0;
+
     if (!vp || vp->state != VP_STATE_PLAYING)
         return;
+
+    /* Periodically check if audio stream needs recovery (every ~1 second at 60Hz).
+     * This handles Bluetooth controller reconnection etc. without blocking. */
+    if (++recovery_check_counter >= 60) {
+        recovery_check_counter = 0;
+        videoplayer_audio_check_recovery(vp);
+    }
 
     struct wlr_buffer *buffer = NULL;
     int frames_consumed = 0;
@@ -612,11 +660,12 @@ void videoplayer_setup_display_mode(VideoPlayer *vp, float display_hz, int vrr_c
 
     if (vrr_capable) {
         /* VRR mode - present at video framerate, synced to audio */
+        float fps = vp->video_fps > 0 ? vp->video_fps : 24.0f;
         vp->frame_repeat_mode = 0;
-        vp->frame_repeat_count = 1;
-        vp->frame_interval_ns = (uint64_t)(1000000000.0 / vp->video_fps);
+        vp->frame_repeat_count = 0;
+        vp->frame_interval_ns = (uint64_t)(1000000000.0 / fps);
         fprintf(stderr, "[videoplayer] VRR mode enabled, target %.3f fps, display %.2f Hz\n",
-                vp->video_fps, display_hz);
+                fps, display_hz);
     } else {
         /* Fixed refresh - calculate optimal frame repeat pattern */
         calculate_frame_pacing(vp, display_hz);

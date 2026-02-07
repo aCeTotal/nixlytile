@@ -688,6 +688,7 @@ typedef struct GamepadDevice {
 	int64_t last_activity_ms;  /* Last input timestamp (monotonic ms) */
 	int suspended;             /* 1 if gamepad is suspended/powered off */
 	int grabbed;               /* 1 if EVIOCGRAB is active (exclusive access) */
+	uint64_t connect_time_ms;  /* Timestamp of connection (ignore events within 500ms) */
 } GamepadDevice;
 
 typedef struct TrayMenuEntry {
@@ -1534,6 +1535,7 @@ static void gamepad_setup(void);
 static void gamepad_cleanup(void);
 static int gamepad_cursor_timer_cb(void *data);
 static int gamepad_pending_timer_cb(void *data);
+static int handle_playback_osd_input(int button);
 static void gamepad_update_cursor(void);
 static int gamepad_inactivity_timer_cb(void *data);
 static void gamepad_turn_off_led_sysfs(GamepadDevice *gp);
@@ -1865,7 +1867,7 @@ typedef enum {
 	PLAYBACK_IDLE = 0,
 	PLAYBACK_BUFFERING,
 	PLAYBACK_PLAYING,
-	PLAYBACK_ACTIVE      /* mpv is running and controllable */
+	PLAYBACK_ACTIVE      /* Video player is running and controllable */
 } PlaybackState;
 
 /* OSD bar menu selection */
@@ -1885,15 +1887,8 @@ static int playback_duration = 0;          /* Duration in seconds */
 static int playback_is_movie = 0;          /* 1 for movie, 0 for episode */
 static uint64_t playback_start_time = 0;   /* When buffering started */
 
-/* mpv IPC control */
-#define MPV_SOCKET_PATH "/tmp/nixly-mpv-socket"
-#define MPV_CACHE_DIR "/tmp/nixly-media-cache"
-static int mpv_ipc_fd = -1;                /* IPC socket fd */
-static pid_t mpv_pid = 0;                  /* mpv process ID */
-static int mpv_paused = 0;                 /* 1 if paused */
-static double mpv_position = 0.0;          /* Current playback position */
-static double mpv_duration_sec = 0.0;      /* Total duration */
-static int mpv_media_id = 0;               /* Current media ID for resume */
+/* Media playback state */
+static int playback_media_id = 0;          /* Current media ID for resume */
 
 /* OSD control bar */
 static int osd_visible = 0;                /* 1 if OSD bar is visible */
@@ -1901,7 +1896,7 @@ static uint64_t osd_show_time = 0;         /* When OSD was last shown */
 static OsdMenuType osd_menu_open = OSD_MENU_NONE;
 static int osd_menu_selection = 0;         /* Selected item in open menu */
 
-/* Audio/subtitle tracks from mpv */
+/* Audio/subtitle tracks for OSD display */
 #define MAX_TRACKS 32
 static struct {
 	int id;
@@ -5331,7 +5326,7 @@ cpu_proc_is_critical(pid_t pid, const char *name)
 		"discord", "slack", "teams", "zoom", "skype", "telegram", "signal",
 		"element", "fractal", "nheko", "thunderbird", "geary", "evolution",
 		/* Media players */
-		"vlc", "mpv", "celluloid", "totem", "parole", "smplayer",
+		"vlc", "celluloid", "totem", "parole", "smplayer",
 		"spotify", "rhythmbox", "clementine", "strawberry", "elisa",
 		/* Games */
 		"steam", "lutris", "heroic", "bottles", "wine", "proton",
@@ -9323,8 +9318,8 @@ wifi_popup_show(Monitor *m, const char *ssid)
 
 	wifi_popup_render(m);
 
-	/* Show on-screen keyboard in HTPC mode */
-	if (htpc_mode_active)
+	/* Show on-screen keyboard in HTPC mode when controller is connected */
+	if (htpc_mode_active && !wl_list_empty(&gamepads))
 		osk_show(m, NULL);
 }
 
@@ -10175,8 +10170,8 @@ sudo_popup_show(Monitor *m, const char *title, const char *cmd, const char *pkg_
 
 	sudo_popup_render(m);
 
-	/* Show on-screen keyboard in HTPC mode */
-	if (htpc_mode_active)
+	/* Show on-screen keyboard in HTPC mode when controller is connected */
+	if (htpc_mode_active && !wl_list_empty(&gamepads))
 		osk_show(m, NULL);
 }
 
@@ -15948,7 +15943,7 @@ htpc_mode_enter(void)
 	Monitor *m;
 	Client *c, *tmp;
 
-	if (htpc_mode == 0 || htpc_mode_active)
+	if (htpc_mode_active)
 		return;
 
 	htpc_mode_active = 1;
@@ -16015,7 +16010,7 @@ htpc_mode_enter(void)
 			"pkill -9 -f 'code|codium|sublime' 2>/dev/null; "
 			"pkill -9 -f 'firefox|chromium|brave|chrome' 2>/dev/null; "
 			"pkill -9 -f 'discord|slack|telegram|signal' 2>/dev/null; "
-			"pkill -9 -f 'spotify|rhythmbox|vlc|mpv' 2>/dev/null; "
+			"pkill -9 -f 'spotify|rhythmbox|vlc' 2>/dev/null;"
 			"pkill -9 -f 'gimp|inkscape|blender|kdenlive' 2>/dev/null; "
 			"pkill -9 -f 'libreoffice|evince|zathura' 2>/dev/null; "
 			"pkill -9 -f 'alacritty|foot|kitty|wezterm|konsole|gnome-terminal' 2>/dev/null; "
@@ -16141,14 +16136,6 @@ static void
 htpc_mode_toggle(const Arg *arg)
 {
 	(void)arg;
-
-	if (htpc_mode == 0)
-		return;
-
-	if (htpc_mode_active)
-		htpc_mode_exit();
-	else
-		htpc_mode_enter();
 }
 
 static void
@@ -18661,12 +18648,12 @@ gamepad_menu_select(Monitor *m)
 		return;
 	}
 
-	/* Handle Quit HTPC - exit HTPC mode and return to normal desktop */
+	/* Handle Quit HTPC - shutdown system (htpc-only has no desktop to return to) */
 	if (strcmp(label, "Quit HTPC") == 0) {
 		gamepad_menu_hide_all();
 		steam_kill();
-		wlr_log(WLR_INFO, "Exiting HTPC mode");
-		htpc_mode_exit();
+		wlr_log(WLR_INFO, "Quit HTPC: shutting down");
+		quit(NULL);
 		return;
 	}
 
@@ -18785,6 +18772,12 @@ gamepad_menu_handle_button(Monitor *m, int button, int value)
 			if (retro_gaming_handle_button(rg_mon, button, value))
 				return 1;
 		}
+	}
+
+	/* Handle integrated video player controls first (highest priority when playing) */
+	if (active_videoplayer && playback_state == PLAYBACK_PLAYING && value == 1) {
+		if (handle_playback_osd_input(button))
+			return 1;
 	}
 
 	/* Check if Movies or TV-shows view is active on ANY monitor
@@ -21693,230 +21686,71 @@ save_resume_position(int media_id, double position)
 	}
 }
 
-/* Send command to mpv via IPC socket */
-static int
-mpv_send_command(const char *cmd)
-{
-	struct sockaddr_un addr;
-	int fd;
-	ssize_t written;
-
-	if (mpv_pid <= 0) return -1;
-
-	fd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (fd < 0) return -1;
-
-	memset(&addr, 0, sizeof(addr));
-	addr.sun_family = AF_UNIX;
-	strncpy(addr.sun_path, MPV_SOCKET_PATH, sizeof(addr.sun_path) - 1);
-
-	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-		close(fd);
-		return -1;
-	}
-
-	written = write(fd, cmd, strlen(cmd));
-	close(fd);
-	return (written > 0) ? 0 : -1;
-}
-
-/* Toggle pause/play */
-static void
-mpv_toggle_pause(void)
-{
-	mpv_send_command("{\"command\":[\"cycle\",\"pause\"]}\n");
-	mpv_paused = !mpv_paused;
-	osd_visible = 1;
-	osd_show_time = monotonic_msec();
-	wlr_log(WLR_INFO, "mpv: %s", mpv_paused ? "paused" : "playing");
-}
-
-/* Stop playback and save position */
-static void
-mpv_stop_playback(void)
-{
-	if (mpv_pid > 0) {
-		/* Save position before quitting */
-		if (mpv_media_id > 0 && mpv_position > 0)
-			save_resume_position(mpv_media_id, mpv_position);
-
-		/* Quit mpv */
-		mpv_send_command("{\"command\":[\"quit\"]}\n");
-
-		/* Wait briefly then kill if needed */
-		usleep(100000);
-		kill(mpv_pid, SIGTERM);
-		mpv_pid = 0;
-	}
-	playback_state = PLAYBACK_IDLE;
-	osd_visible = 0;
-	osd_menu_open = OSD_MENU_NONE;
-
-	/* Hide OSD overlay */
-	if (playback_osd_tree)
-		wlr_scene_node_set_enabled(&playback_osd_tree->node, 0);
-
-	wlr_log(WLR_INFO, "mpv: stopped playback");
-}
-
-/* Switch audio track */
-static void
-mpv_set_audio_track(int track_id)
-{
-	char cmd[128];
-	snprintf(cmd, sizeof(cmd), "{\"command\":[\"set_property\",\"aid\",%d]}\n", track_id);
-	mpv_send_command(cmd);
-	wlr_log(WLR_INFO, "mpv: set audio track %d", track_id);
-}
-
-/* Switch subtitle track (0 = off) */
-static void
-mpv_set_subtitle_track(int track_id)
-{
-	char cmd[128];
-	if (track_id == 0)
-		snprintf(cmd, sizeof(cmd), "{\"command\":[\"set_property\",\"sid\",\"no\"]}\n");
-	else
-		snprintf(cmd, sizeof(cmd), "{\"command\":[\"set_property\",\"sid\",%d]}\n", track_id);
-	mpv_send_command(cmd);
-	wlr_log(WLR_INFO, "mpv: set subtitle track %d", track_id);
-}
-
-/* Launch mpv with IPC socket */
-static void
-launch_mpv_player(double start_pos)
-{
-	char start_str[32];
-	char socket_arg[128];
-	char cache_dir_arg[256];
-	char video_sync_arg[64];
-
-	/* Remove old socket */
-	unlink(MPV_SOCKET_PATH);
-
-	/* Create cache directory */
-	mkdir(MPV_CACHE_DIR, 0755);
-
-	snprintf(start_str, sizeof(start_str), "--start=%.1f", start_pos);
-	snprintf(socket_arg, sizeof(socket_arg), "--input-ipc-server=%s", MPV_SOCKET_PATH);
-	snprintf(cache_dir_arg, sizeof(cache_dir_arg), "--cache-dir=%s", MPV_CACHE_DIR);
-	snprintf(video_sync_arg, sizeof(video_sync_arg), "--video-sync=display-resample");
-
-	mpv_pid = fork();
-	if (mpv_pid == 0) {
-		setsid();
-		execlp("mpv", "mpv",
-		       "--fullscreen",
-		       "--hwdec=auto-safe",
-		       "--vo=gpu",
-		       "--gpu-context=wayland",
-		       video_sync_arg,           /* Smooth playback sync to display */
-		       "--interpolation=yes",    /* Frame interpolation for smoothness */
-		       "--tscale=oversample",    /* Temporal scaling */
-		       "--audio-channels=7.1,5.1,stereo",
-		       "--audio-passthrough=yes",
-		       "--cache=yes",
-		       "--cache-secs=300",       /* 5 min cache for resume */
-		       "--demuxer-max-bytes=500M",
-		       "--demuxer-max-back-bytes=200M",
-		       cache_dir_arg,
-		       "--cache-pause-initial=yes",
-		       "--cache-pause-wait=3",
-		       socket_arg,
-		       "--osd-level=0",          /* No OSD, we handle it */
-		       "--no-input-default-bindings",
-		       "--input-vo-keyboard=no",
-		       start_pos > 0 ? start_str : "--start=0",
-		       playback_url,
-		       (char *)NULL);
-		_exit(1);
-	}
-
-	mpv_paused = 0;
-	osd_visible = 0;
-	osd_menu_open = OSD_MENU_NONE;
-
-	/* Initialize with placeholder tracks until we fetch real ones from mpv */
-	audio_track_count = 2;
-	audio_tracks[0].id = 1;
-	strcpy(audio_tracks[0].lang, "English");
-	strcpy(audio_tracks[0].title, "Surround 5.1");
-	audio_tracks[0].selected = 1;
-	audio_tracks[1].id = 2;
-	strcpy(audio_tracks[1].lang, "English");
-	strcpy(audio_tracks[1].title, "Stereo");
-	audio_tracks[1].selected = 0;
-
-	subtitle_track_count = 3;
-	subtitle_tracks[0].id = 1;
-	strcpy(subtitle_tracks[0].lang, "English");
-	strcpy(subtitle_tracks[0].title, "SDH");
-	subtitle_tracks[0].selected = 0;
-	subtitle_tracks[1].id = 2;
-	strcpy(subtitle_tracks[1].lang, "Norwegian");
-	strcpy(subtitle_tracks[1].title, "");
-	subtitle_tracks[1].selected = 0;
-	subtitle_tracks[2].id = 3;
-	strcpy(subtitle_tracks[2].lang, "Swedish");
-	strcpy(subtitle_tracks[2].title, "Forced");
-	subtitle_tracks[2].selected = 0;
-
-	playback_state = PLAYBACK_ACTIVE;
-	wlr_log(WLR_INFO, "mpv: launched with pid %d, socket %s", mpv_pid, MPV_SOCKET_PATH);
-}
-
-/* Launch integrated video player for local files or streaming URLs */
+/* Launch integrated video player for local files or streaming URLs
+ * Uses FFmpeg + PipeWire for HDR, lossless video/audio, and proper frame timing */
 static void
 launch_integrated_player_with_resume(const char *url, double resume_pos)
 {
 	if (!url || !selmon)
 		return;
 
-	/* Create video player if needed */
+	/* Copy URL to playback_url for tracking */
+	strncpy(playback_url, url, sizeof(playback_url) - 1);
+	playback_url[sizeof(playback_url) - 1] = '\0';
+
+	/* Hide media views first */
+	media_view_hide_all();
+
+	/* Create video player if it doesn't exist */
 	if (!active_videoplayer) {
 		active_videoplayer = videoplayer_create(selmon);
 		if (!active_videoplayer) {
 			wlr_log(WLR_ERROR, "Failed to create video player");
 			return;
 		}
-		/* Initialize scene tree on LyrBlock layer (above all HTPC content) */
-		if (videoplayer_init_scene(active_videoplayer, layers[LyrBlock]) != 0) {
-			wlr_log(WLR_ERROR, "Failed to init video player scene");
+
+		/* Initialize scene on block layer (topmost) so player is always above HTPC UI */
+		if (videoplayer_init_scene(active_videoplayer, layers[LyrBlock]) < 0) {
+			wlr_log(WLR_ERROR, "Failed to initialize video player scene");
 			videoplayer_destroy(active_videoplayer);
 			active_videoplayer = NULL;
 			return;
 		}
 	}
 
-	/* Open and play file/stream */
-	if (videoplayer_open(active_videoplayer, url) == 0) {
-		/* Position at fullscreen (top-left corner, video will scale to fill) */
-		videoplayer_set_position(active_videoplayer, selmon->m.x, selmon->m.y);
-		videoplayer_set_fullscreen_size(active_videoplayer, selmon->m.width, selmon->m.height);
-		videoplayer_set_visible(active_videoplayer, 1);
-
-		/* Raise video player above all other content */
-		if (active_videoplayer->tree)
-			wlr_scene_node_raise_to_top(&active_videoplayer->tree->node);
-
-		/* Set up frame timing based on display refresh rate */
-		float display_hz = 60.0f;
-		if (selmon->wlr_output->current_mode) {
-			display_hz = (float)selmon->wlr_output->current_mode->refresh / 1000.0f;
-		}
-		videoplayer_setup_display_mode(active_videoplayer, display_hz, selmon->vrr_capable);
-
-		/* Seek to resume position if specified */
-		if (resume_pos > 0) {
-			int64_t resume_us = (int64_t)(resume_pos * 1000000.0);
-			videoplayer_seek(active_videoplayer, resume_us);
-		}
-		videoplayer_play(active_videoplayer);
-		playback_state = PLAYBACK_PLAYING;
-		wlr_log(WLR_INFO, "Integrated player: playing %s (resume at %.1fs)", url, resume_pos);
-	} else {
-		wlr_log(WLR_ERROR, "Integrated player: failed to open %s", url);
+	/* Open the file/URL */
+	if (videoplayer_open(active_videoplayer, url) < 0) {
+		wlr_log(WLR_ERROR, "Failed to open video: %s - %s",
+			url, active_videoplayer->error_msg);
+		return;
 	}
+
+	/* Setup display mode based on monitor capabilities */
+	float display_hz = selmon->wlr_output->current_mode ?
+		selmon->wlr_output->current_mode->refresh / 1000.0f : 60.0f;
+	videoplayer_setup_display_mode(active_videoplayer, display_hz, selmon->vrr_capable);
+
+	/* Set fullscreen size to cover entire monitor */
+	videoplayer_set_fullscreen_size(active_videoplayer, selmon->m.width, selmon->m.height);
+
+	/* Position at monitor origin */
+	videoplayer_set_position(active_videoplayer, selmon->m.x, selmon->m.y);
+
+	/* Make visible */
+	videoplayer_set_visible(active_videoplayer, 1);
+
+	/* Seek to resume position if provided */
+	if (resume_pos > 0.0) {
+		int64_t resume_us = (int64_t)(resume_pos * 1000000.0);
+		videoplayer_seek(active_videoplayer, resume_us);
+	}
+
+	/* Start playback */
+	videoplayer_play(active_videoplayer);
+
+	playback_state = PLAYBACK_PLAYING;
+
+	wlr_log(WLR_INFO, "Started integrated video player: %s (resume at %.1fs)", url, resume_pos);
 }
 
 /* Launch integrated video player (no resume) */
@@ -21930,10 +21764,11 @@ launch_integrated_player(const char *filepath)
 static void
 stop_integrated_player(void)
 {
-	if (active_videoplayer) {
+	if (active_videoplayer && active_videoplayer->state != VP_STATE_IDLE) {
 		videoplayer_stop(active_videoplayer);
 		videoplayer_set_visible(active_videoplayer, 0);
 		playback_state = PLAYBACK_IDLE;
+		wlr_log(WLR_INFO, "Stopped integrated video player");
 	}
 }
 
@@ -21953,7 +21788,7 @@ media_start_playback(MediaItem *item, int is_movie)
 
 	playback_is_movie = is_movie;
 	playback_duration = item->duration;
-	mpv_media_id = item->id;
+	playback_media_id = item->id;
 
 	/* Check for resume position */
 	resume_pos = load_resume_position(item->id);
@@ -22036,7 +21871,7 @@ media_check_buffering(void)
 
 	if (elapsed_sec >= playback_buffer_seconds) {
 		/* Buffer complete - start playback with integrated player */
-		double resume_pos = load_resume_position(mpv_media_id);
+		double resume_pos = load_resume_position(playback_media_id);
 		wlr_log(WLR_INFO, "Media playback: buffer complete, starting playback");
 		launch_integrated_player_with_resume(playback_url, resume_pos);
 	}
@@ -23938,16 +23773,19 @@ handle_playback_osd_input(int button)
 	switch (button) {
 	case BTN_SOUTH:  /* A button - pause/play or select menu item */
 		if (osd_menu_open == OSD_MENU_NONE) {
-			mpv_toggle_pause();
+			if (active_videoplayer)
+				videoplayer_toggle_pause(active_videoplayer);
 		} else if (osd_menu_open == OSD_MENU_SOUND) {
-			if (osd_menu_selection < audio_track_count)
-				mpv_set_audio_track(audio_tracks[osd_menu_selection].id);
+			if (active_videoplayer && osd_menu_selection < audio_track_count)
+				videoplayer_set_audio_track(active_videoplayer, osd_menu_selection);
 			osd_menu_open = OSD_MENU_NONE;
 		} else if (osd_menu_open == OSD_MENU_SUBTITLES) {
-			if (osd_menu_selection == 0)
-				mpv_set_subtitle_track(0);  /* Off */
-			else if (osd_menu_selection <= subtitle_track_count)
-				mpv_set_subtitle_track(subtitle_tracks[osd_menu_selection - 1].id);
+			if (active_videoplayer) {
+				if (osd_menu_selection == 0)
+					videoplayer_set_subtitle_track(active_videoplayer, -1);  /* Off */
+				else if (osd_menu_selection <= subtitle_track_count)
+					videoplayer_set_subtitle_track(active_videoplayer, osd_menu_selection - 1);
+			}
 			osd_menu_open = OSD_MENU_NONE;
 		}
 		handled = 1;
@@ -23957,7 +23795,7 @@ handle_playback_osd_input(int button)
 		if (osd_menu_open != OSD_MENU_NONE) {
 			osd_menu_open = OSD_MENU_NONE;
 		} else {
-			mpv_stop_playback();
+			stop_integrated_player();
 			hide_playback_osd();
 			return 1;  /* Don't render OSD after stopping */
 		}
@@ -24017,7 +23855,7 @@ media_view_handle_detail_button(Monitor *m, MediaViewType type, int button)
 	int needs_render = 0;
 
 	/* If playback is active, handle playback controls */
-	if (playback_state == PLAYBACK_ACTIVE) {
+	if (playback_state == PLAYBACK_PLAYING) {
 		return handle_playback_osd_input(button);
 	}
 
@@ -24229,16 +24067,19 @@ handle_playback_key(xkb_keysym_t sym)
 	case XKB_KEY_Return:
 	case XKB_KEY_KP_Enter:
 		if (osd_menu_open == OSD_MENU_NONE) {
-			mpv_toggle_pause();
+			if (active_videoplayer)
+				videoplayer_toggle_pause(active_videoplayer);
 		} else if (osd_menu_open == OSD_MENU_SOUND) {
-			if (osd_menu_selection < audio_track_count)
-				mpv_set_audio_track(audio_tracks[osd_menu_selection].id);
+			if (active_videoplayer && osd_menu_selection < audio_track_count)
+				videoplayer_set_audio_track(active_videoplayer, osd_menu_selection);
 			osd_menu_open = OSD_MENU_NONE;
 		} else if (osd_menu_open == OSD_MENU_SUBTITLES) {
-			if (osd_menu_selection == 0)
-				mpv_set_subtitle_track(0);
-			else if (osd_menu_selection <= subtitle_track_count)
-				mpv_set_subtitle_track(subtitle_tracks[osd_menu_selection - 1].id);
+			if (active_videoplayer) {
+				if (osd_menu_selection == 0)
+					videoplayer_set_subtitle_track(active_videoplayer, -1);  /* Off */
+				else if (osd_menu_selection <= subtitle_track_count)
+					videoplayer_set_subtitle_track(active_videoplayer, osd_menu_selection - 1);
+			}
 			osd_menu_open = OSD_MENU_NONE;
 		}
 		handled = 1;
@@ -24249,7 +24090,7 @@ handle_playback_key(xkb_keysym_t sym)
 		if (osd_menu_open != OSD_MENU_NONE) {
 			osd_menu_open = OSD_MENU_NONE;
 		} else {
-			mpv_stop_playback();
+			stop_integrated_player();
 			hide_playback_osd();
 			return 1;  /* Don't render OSD after stopping */
 		}
@@ -24323,7 +24164,7 @@ media_view_handle_detail_key(Monitor *m, MediaViewType type, xkb_keysym_t sym)
 	int needs_render = 0;
 
 	/* If playback is active, handle playback controls */
-	if (playback_state == PLAYBACK_ACTIVE) {
+	if (playback_state == PLAYBACK_PLAYING) {
 		return handle_playback_key(sym);
 	}
 
@@ -24624,6 +24465,16 @@ gamepad_event_cb(int fd, uint32_t mask, void *data)
 			continue;  /* Ignore other input while suspended */
 		}
 
+		/* Ignore button presses during connect grace period (500ms).
+		 * Bluetooth controllers often send synthetic events on reconnect
+		 * (e.g., BTN_EAST) that would inadvertently stop video playback. */
+		if (gp->connect_time_ms && ev.type == EV_KEY && ev.value == 1 &&
+		    monotonic_msec() - gp->connect_time_ms < 500) {
+			wlr_log(WLR_DEBUG, "Ignoring synthetic button during connect grace: %d",
+				ev.code);
+			continue;
+		}
+
 		/* Find the currently selected monitor */
 		m = selmon ? selmon : (wl_list_empty(&mons) ? NULL :
 			wl_container_of(mons.next, m, link));
@@ -24903,6 +24754,9 @@ gamepad_device_add(const char *path)
 	gp->last_activity_ms = monotonic_msec();
 	gp->suspended = 0;
 	gp->grabbed = 0;
+	/* Record connect time - ignore button presses within 500ms to filter
+	 * synthetic events Bluetooth controllers send on reconnect */
+	gp->connect_time_ms = monotonic_msec();
 
 	/* Don't grab gamepad - let Steam and other apps receive input normally */
 
@@ -24921,10 +24775,6 @@ gamepad_device_add(const char *path)
 	wl_list_insert(&gamepads, &gp->link);
 
 	wlr_log(WLR_INFO, "Gamepad connected: %s (%s)", name, path);
-
-	/* Enter HTPC mode when controller connects (if mode == 1) */
-	if (htpc_mode == 1)
-		htpc_mode_enter();
 
 	/* Switch TV/Monitor to this HDMI input via CEC */
 	cec_switch_to_active_source();
@@ -25733,25 +25583,46 @@ bt_is_gamepad_name(const char *name)
 	return 0;
 }
 
-/* Trust a Bluetooth device (allows auto-reconnect) */
+/* Async callback for trust property set */
+static int
+bt_trust_cb(sd_bus_message *reply, void *userdata, sd_bus_error *error)
+{
+	char *path = userdata;
+
+	if (sd_bus_error_is_set(error))
+		wlr_log(WLR_DEBUG, "Failed to trust %s: %s", path, error->message);
+	else
+		wlr_log(WLR_DEBUG, "Trusted device: %s", path);
+
+	free(path);
+	return 0;
+}
+
+/* Trust a Bluetooth device asynchronously (allows auto-reconnect) */
 static void
 bt_trust_device(const char *path)
 {
-	sd_bus_error error = SD_BUS_ERROR_NULL;
 	int r;
+	char *path_copy;
 
 	if (!bt_bus || !path)
 		return;
 
-	/* This is a quick local operation, keep synchronous */
-	r = sd_bus_set_property(bt_bus, "org.bluez", path,
-		"org.bluez.Device1", "Trusted",
-		&error, "b", 1);
+	path_copy = strdup(path);
+	if (!path_copy)
+		return;
 
-	if (r < 0)
-		wlr_log(WLR_DEBUG, "Failed to trust %s: %s", path, error.message);
+	r = sd_bus_call_method_async(bt_bus, NULL,
+		"org.bluez", path,
+		"org.freedesktop.DBus.Properties", "Set",
+		bt_trust_cb, path_copy,
+		"ssv", "org.bluez.Device1", "Trusted", "b", 1);
 
-	sd_bus_error_free(&error);
+	if (r < 0) {
+		wlr_log(WLR_DEBUG, "Failed to send trust request for %s: %s",
+			path, strerror(-r));
+		free(path_copy);
+	}
 }
 
 /* Async callback for Pair method */
@@ -33390,7 +33261,8 @@ static int
 playback_osd_timeout(void *data)
 {
 	(void)data;
-	if (playback_state == PLAYBACK_ACTIVE && !mpv_paused) {
+	if (playback_state == PLAYBACK_PLAYING &&
+	    active_videoplayer && active_videoplayer->state == VP_STATE_PLAYING) {
 		hide_playback_osd();
 	}
 	return 0;
@@ -33428,7 +33300,7 @@ render_playback_osd(void)
 	float menu_bg[4] = {0.1f, 0.1f, 0.15f, 0.98f};
 	float menu_selected[4] = {0.2f, 0.45f, 0.85f, 0.95f};
 
-	if (!m || !statusfont.font || playback_state != PLAYBACK_ACTIVE)
+	if (!m || !statusfont.font || playback_state != PLAYBACK_PLAYING)
 		return;
 
 	bar_w = m->m.width;
@@ -33451,7 +33323,8 @@ render_playback_osd(void)
 
 	/* Left side: Playing/Paused status */
 	{
-		const char *status = mpv_paused ? "Paused" : "Playing";
+		int is_paused = active_videoplayer && active_videoplayer->state == VP_STATE_PAUSED;
+		const char *status = is_paused ? "Paused" : "Playing";
 		float status_box_bg[4] = {0.12f, 0.12f, 0.18f, 0.95f};
 		int status_w = 90;
 
@@ -33594,7 +33467,8 @@ render_playback_osd(void)
 	osd_visible = 1;
 
 	/* Schedule auto-hide (1 second) when playing, not paused */
-	if (!mpv_paused && osd_menu_open == OSD_MENU_NONE) {
+	int is_playing = active_videoplayer && active_videoplayer->state == VP_STATE_PLAYING;
+	if (is_playing && osd_menu_open == OSD_MENU_NONE) {
 		if (!playback_osd_timer)
 			playback_osd_timer = wl_event_loop_add_timer(event_loop, playback_osd_timeout, NULL);
 		if (playback_osd_timer)
@@ -34378,8 +34252,8 @@ static void config_set_value(const char *key, const char *value)
 	else if (strcmp(key, "borderpx") == 0) borderpx = (unsigned int)atoi(value);
 	else if (strcmp(key, "lock_cursor") == 0) lock_cursor = atoi(value);
 
-	/* HTPC mode (0=disabled, 1=auto on controller, 2=always on) */
-	else if (strcmp(key, "htpc_mode") == 0) htpc_mode = atoi(value);
+	/* nixlytile mode (1=desktop, 2=htpc) */
+	else if (strcmp(key, "nixlytile_mode") == 0) nixlytile_mode = atoi(value);
 	else if (strcmp(key, "htpc_wallpaper") == 0) {
 		config_expand_path(value, htpc_wallpaper_path, sizeof(htpc_wallpaper_path));
 	}
@@ -36001,25 +35875,12 @@ steam_kill(void)
 	}
 }
 
-/* Kill streaming processes (mpv and Chrome kiosk for live TV) */
+/* Kill Chrome kiosk instances used for live TV streaming */
 static void
 live_tv_kill(void)
 {
 	pid_t pid;
 	int status;
-
-	/* Kill mpv if running */
-	if (is_process_running("mpv")) {
-		wlr_log(WLR_INFO, "Killing live TV mpv process");
-		pid = fork();
-		if (pid == 0) {
-			setsid();
-			execlp("pkill", "pkill", "-9", "mpv", (char *)NULL);
-			_exit(127);
-		}
-		if (pid > 0)
-			waitpid(pid, &status, 0);
-	}
 
 	/* Kill Chrome kiosk instances used for streaming (NRK, Netflix, Viaplay, TV2 Play, F1TV) */
 	pid = fork();
@@ -37573,8 +37434,8 @@ textinput_enable(struct wl_listener *listener, void *data)
 	wlr_log(WLR_INFO, "Text input enabled for surface %p", (void*)ti->focused_surface);
 	active_text_input = ti;
 
-	/* Show OSK in HTPC mode when text input is enabled */
-	if (htpc_mode_active && selmon) {
+	/* Show OSK in HTPC mode when text input is enabled and controller is connected */
+	if (htpc_mode_active && selmon && !wl_list_empty(&gamepads)) {
 		osk_show(selmon, ti->focused_surface);
 	}
 }
@@ -37981,8 +37842,8 @@ main(int argc, char *argv[])
 	/* Set GE-Proton as default Steam compatibility tool */
 	steam_set_ge_proton_default();
 
-	/* Enter HTPC mode at startup if always-on (mode 2), or on controller if mode 1 */
-	if (htpc_mode == 2 || (htpc_mode == 1 && !wl_list_empty(&gamepads)))
+	/* Enter HTPC mode at startup if htpc-only mode */
+	if (nixlytile_mode == 2)
 		htpc_mode_enter();
 
 	/* Start only git cache immediately, stagger others via timer

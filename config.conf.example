@@ -23,16 +23,10 @@ borderpx = 1
 # Lock cursor during resize (1 = lock, 0 = free)
 lock_cursor = 0
 
-# ================= HTPC MODE =================
-# HTPC mode optimizes for controller/TV usage by hiding the statusbar,
-# killing all windows, and disabling background tasks to minimize
-# CPU, IO, and RAM load.
-
-# HTPC mode setting:
-#   0 = disabled (HTPC mode completely off)
-#   1 = auto-enter HTPC mode when a game controller connects
-#   2 = always on (starts in HTPC mode at boot)
-htpc_mode = 1
+# ================= NIXLYTILE MODE =================
+# 1 = desktop only (normal window manager)
+# 2 = htpc only (controller/TV, starts directly in HTPC mode)
+nixlytile_mode = 1
 
 # Wallpaper to display in HTPC mode (supports ~ and $HOME)
 htpc_wallpaper = ~/.nixlyos/wallpapers/htpc.jpg
@@ -328,7 +322,6 @@ launcher = wmenu-run
 #   togglefullscreen        - Toggle fullscreen
 #   togglegaps              - Toggle gaps
 #   togglestatusbar         - Toggle statusbar
-#   htpc_mode_toggle        - Toggle HTPC mode (hides statusbar, pauses background tasks)
 #   focusmon <left/right>   - Focus monitor in direction
 #   tagmon <left/right>     - Move window to monitor
 #   modal_show              - Open modal (apps tab)
@@ -350,7 +343,6 @@ bind = mod+shift+space togglefloating
 bind = mod+f togglefullscreen
 bind = mod+shift+g togglegaps
 bind = mod+b togglestatusbar
-bind = mod+shift+h htpc_mode_toggle
 
 # === Focus navigation ===
 bind = mod+j focusstack +1

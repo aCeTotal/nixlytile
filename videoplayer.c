@@ -110,16 +110,18 @@ void videoplayer_play(VideoPlayer *vp)
     if (vp->state == VP_STATE_IDLE || vp->state == VP_STATE_ERROR)
         return;
 
-    /* Wait for initial buffering (at least 4 frames) */
+    /* Wait for initial buffering (at least 2 frames) - shorter wait for faster start */
     int wait_count = 0;
-    while (vp->frames_queued < 4 && wait_count < 100) {
+    while (vp->frames_queued < 2 && wait_count < 50) {
         usleep(10000);  /* 10ms */
         wait_count++;
     }
 
-    if (vp->frames_queued == 0) {
-        fprintf(stderr, "[videoplayer] Warning: No frames buffered after waiting\n");
-    }
+    /* Reset frame timing so first frame presents immediately.
+     * Without this, stale last_frame_ns from before pause causes
+     * the cadence-locked timing to either skip ahead or wait. */
+    vp->last_frame_ns = 0;
+    vp->current_repeat = 0;
 
     vp->state = VP_STATE_PLAYING;
 

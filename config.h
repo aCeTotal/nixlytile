@@ -71,9 +71,8 @@ enum Direction { DIR_LEFT, DIR_RIGHT, DIR_UP, DIR_DOWN };
 /* logging */
 static int log_level = WLR_DEBUG;
 
-/* HTPC mode - optimized for controller/TV usage */
-/* 0 = disabled, 1 = auto-enter on controller connect, 2 = always on (autostart) */
-static int htpc_mode = 1;
+/* nixlytile mode: 1 = desktop only, 2 = htpc only (starts in HTPC mode) */
+static int nixlytile_mode = 2;
 static char htpc_wallpaper_path[PATH_MAX] = "$HOME/.nixlyos/wallpapers/htpc.jpg";
 
 /* NOTE: ALWAYS keep a rule declared even if you don't use rules (e.g leave at least one example) */

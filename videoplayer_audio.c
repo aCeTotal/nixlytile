@@ -218,18 +218,75 @@ static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
                                      enum pw_stream_state state, const char *error)
 {
     VideoPlayer *vp = userdata;
-    (void)old;
 
-    fprintf(stderr, "[audio] Stream state: %s", pw_stream_state_as_string(state));
+    fprintf(stderr, "[audio] Stream state: %s -> %s",
+            pw_stream_state_as_string(old),
+            pw_stream_state_as_string(state));
     if (error)
         fprintf(stderr, " (error: %s)", error);
     fprintf(stderr, "\n");
 
     if (state == PW_STREAM_STATE_ERROR) {
         fprintf(stderr, "[audio] Stream error: %s\n", error ? error : "unknown");
+        /* Mark as interrupted so video continues with timing-based playback */
+        vp->audio.stream_interrupted = 1;
     }
 
-    (void)vp;
+    /* When stream is interrupted (e.g., Bluetooth/controller reconnection),
+     * flush the ring buffer and reset sync state.
+     * IMPORTANT: Set interrupted flag BEFORE taking lock to prevent render thread
+     * from using stale A/V sync during the transition */
+    if (old == PW_STREAM_STATE_STREAMING &&
+        (state == PW_STREAM_STATE_PAUSED || state == PW_STREAM_STATE_UNCONNECTED ||
+         state == PW_STREAM_STATE_ERROR)) {
+        fprintf(stderr, "[audio] Stream interrupted, flushing buffer - video will continue with timing-based playback\n");
+
+        /* Signal render thread to use timing-based playback immediately */
+        vp->audio.stream_interrupted = 1;
+
+        ring_buffer_clear(&vp->audio.ring);
+
+        /* Reset sync tracking */
+        pthread_mutex_lock(&vp->audio.lock);
+        vp->audio.audio_pts_us = 0;
+        vp->audio.base_pts_us = 0;
+        vp->audio.audio_written_samples = 0;
+        vp->audio.audio_played_samples = 0;
+        vp->audio.last_clock = 0;
+        vp->audio.last_audio_pts = 0;
+        vp->audio.stall_count = 0;
+        /* Set recovery frames - wait for audio to stabilize before using A/V sync again */
+        vp->audio.recovery_frames = 60;  /* ~1 second at 60Hz for better stability */
+        pthread_mutex_unlock(&vp->audio.lock);
+    }
+
+    /* When stream becomes ready/paused after any interruption, reactivate if playing */
+    if (state == PW_STREAM_STATE_PAUSED) {
+        /* Stream is ready but paused - if we're playing, activate it */
+        if (vp->state == VP_STATE_PLAYING) {
+            fprintf(stderr, "[audio] Stream paused, reactivating for playback\n");
+            pw_stream_set_active(vp->audio.stream, true);
+        }
+    }
+
+    /* Handle UNCONNECTED state - stream was disconnected, need to try reconnecting */
+    if (state == PW_STREAM_STATE_UNCONNECTED && old != PW_STREAM_STATE_CONNECTING) {
+        fprintf(stderr, "[audio] Stream unconnected - will attempt reconnection on next audio frame\n");
+        /* Keep stream_interrupted = 1 - video continues independently */
+    }
+
+    /* When stream resumes streaming, reset video timing for clean sync */
+    if (state == PW_STREAM_STATE_STREAMING &&
+        (old == PW_STREAM_STATE_PAUSED || old == PW_STREAM_STATE_CONNECTING)) {
+        fprintf(stderr, "[audio] Stream resumed streaming, video will resync gradually\n");
+        /* Clear interrupted flag - audio is streaming again */
+        vp->audio.stream_interrupted = 0;
+
+        /* Reset sync state for clean restart */
+        pthread_mutex_lock(&vp->audio.lock);
+        vp->audio.recovery_frames = 60;  /* Allow gradual resync */
+        pthread_mutex_unlock(&vp->audio.lock);
+    }
 }
 
 static const struct pw_stream_events stream_events = {
@@ -276,6 +333,11 @@ int videoplayer_audio_init(VideoPlayer *vp)
     vp->audio.muted = 0;
     vp->audio.base_pts_us = 0;
     vp->audio.audio_played_samples = 0;
+    vp->audio.last_clock = 0;
+    vp->audio.last_audio_pts = 0;
+    vp->audio.stall_count = 0;
+    vp->audio.recovery_frames = 0;
+    vp->audio.stream_interrupted = 0;
 
     /* Initialize ring buffer */
     if (ring_buffer_init(&vp->audio.ring, AUDIO_RING_BUFFER_SIZE) < 0) {
@@ -332,7 +394,9 @@ int videoplayer_audio_init(VideoPlayer *vp)
         return -1;
     }
 
-    /* Create stream properties */
+    /* Create stream properties
+     * Allow PipeWire to move our stream when devices change (e.g., Bluetooth connect).
+     * The on_stream_state_changed callback handles interruptions gracefully. */
     props = pw_properties_new(
         PW_KEY_MEDIA_TYPE, "Audio",
         PW_KEY_MEDIA_CATEGORY, "Playback",
@@ -482,6 +546,77 @@ void videoplayer_audio_cleanup(VideoPlayer *vp)
     fprintf(stderr, "[audio] Cleanup complete\n");
 }
 
+/* Forward declaration for recovery (defined later in this file) */
+void videoplayer_audio_play(VideoPlayer *vp);
+
+/* ================================================================
+ *  Stream Recovery (for Bluetooth/device reconnection)
+ * ================================================================ */
+
+/*
+ * Check if audio stream needs recovery and attempt to restore it.
+ * This should be called periodically (e.g., from decode thread or present_frame).
+ * Returns: 0 = no action needed, 1 = recovery in progress, -1 = recovery failed
+ *
+ * IMPORTANT: This function MUST be non-blocking to prevent freezing the compositor
+ * when Bluetooth controllers disconnect/reconnect (which can cause PipeWire to be busy).
+ *
+ * NOTE: PipeWire doesn't provide a trylock or timed lock function, so we CANNOT
+ * safely check stream state from the compositor main thread without risking a block.
+ * Instead, we rely on the on_stream_state_changed callback to:
+ *   1. Set stream_interrupted when stream goes bad
+ *   2. Attempt reactivation when stream becomes paused
+ *   3. Clear stream_interrupted when stream resumes streaming
+ *
+ * This function now only checks the volatile stream_interrupted flag which is
+ * updated asynchronously by the PipeWire thread.
+ */
+int videoplayer_audio_check_recovery(VideoPlayer *vp)
+{
+    /* Track how long we've been interrupted (called ~every second from render thread) */
+    static int interrupted_ticks = 0;
+
+    if (!vp)
+        return 0;
+
+    /* If no stream exists at all, nothing to recover */
+    if (!vp->audio.stream || !vp->audio.loop)
+        return 0;
+
+    /* Just check the volatile flag - no locking required.
+     * The on_stream_state_changed callback handles all the actual recovery. */
+    if (vp->audio.stream_interrupted) {
+        interrupted_ticks++;
+
+        /* After ~5 seconds of continuous interruption, recreate the stream.
+         * This handles cases where PipeWire moved us to UNCONNECTED and
+         * the stream can't recover on its own. */
+        if (interrupted_ticks >= 5) {
+            fprintf(stderr, "[audio] Stream interrupted for %d seconds, recreating stream\n",
+                    interrupted_ticks);
+            interrupted_ticks = 0;
+
+            /* Tear down and rebuild the PipeWire stream */
+            videoplayer_audio_cleanup(vp);
+            if (videoplayer_audio_init(vp) == 0) {
+                fprintf(stderr, "[audio] Stream recreated successfully\n");
+                if (vp->state == VP_STATE_PLAYING)
+                    videoplayer_audio_play(vp);
+                return 0;
+            } else {
+                fprintf(stderr, "[audio] Stream recreation failed\n");
+                return -1;
+            }
+        }
+
+        return 1;  /* Recovery in progress (handled by PipeWire thread) */
+    }
+
+    /* Stream is healthy, reset the counter */
+    interrupted_ticks = 0;
+    return 0;
+}
+
 /* ================================================================
  *  Playback Control
  * ================================================================ */
@@ -490,6 +625,11 @@ void videoplayer_audio_play(VideoPlayer *vp)
 {
     if (!vp || !vp->audio.stream)
         return;
+
+    if (vp->audio.stream_interrupted) {
+        fprintf(stderr, "[audio] Play skipped - stream interrupted\n");
+        return;
+    }
 
     pw_thread_loop_lock(vp->audio.loop);
     pw_stream_set_active(vp->audio.stream, true);
@@ -502,6 +642,11 @@ void videoplayer_audio_pause(VideoPlayer *vp)
 {
     if (!vp || !vp->audio.stream)
         return;
+
+    if (vp->audio.stream_interrupted) {
+        fprintf(stderr, "[audio] Pause skipped - stream interrupted\n");
+        return;
+    }
 
     pw_thread_loop_lock(vp->audio.loop);
     pw_stream_set_active(vp->audio.stream, false);
@@ -525,8 +670,15 @@ int videoplayer_audio_queue_frame(VideoPlayer *vp, AVFrame *frame)
     if (!vp || !frame)
         return -1;
 
+    /* If audio stream is not available or interrupted, silently drop audio frames.
+     * Video playback continues independently with timing-based presentation. */
     if (!vp->audio.stream)
-        return -1;
+        return 0;  /* Return success to avoid blocking decode thread */
+
+    /* If stream is interrupted (e.g., Bluetooth controller reconnect), drop audio
+     * rather than queuing to a stale buffer. Video continues smoothly. */
+    if (vp->audio.stream_interrupted)
+        return 0;
 
     /* Initialize or update resampler if needed */
     if (!vp->audio.swr_ctx) {
@@ -618,18 +770,25 @@ int videoplayer_audio_queue_frame(VideoPlayer *vp, AVFrame *frame)
     /* Calculate byte size of output */
     out_size = out_samples * vp->audio.channels * sizeof(float);
 
-    /* Update base PTS for first samples */
-    pthread_mutex_lock(&vp->audio.lock);
-    if (vp->audio.audio_written_samples == 0 && frame->pts != AV_NOPTS_VALUE) {
-        /* This is the first frame, set base PTS */
-        AVRational tb = vp->fmt_ctx->streams[vp->audio_tracks[vp->current_audio_track].stream_index]->time_base;
-        vp->audio.base_pts_us = av_rescale_q(frame->pts, tb, AV_TIME_BASE_Q);
-    }
-    vp->audio.audio_written_samples += out_samples;
-    pthread_mutex_unlock(&vp->audio.lock);
-
-    /* Write to ring buffer */
+    /* Write to ring buffer FIRST, then count only what was actually written.
+     * This prevents audio_written_samples from inflating on partial writes,
+     * which would make the audio clock run ahead and trigger false frame skips. */
     size_t written = ring_buffer_write(&vp->audio.ring, out_buffer, out_size);
+
+    if (written > 0) {
+        uint32_t stride = vp->audio.channels * sizeof(float);
+        uint32_t samples_written = written / stride;
+
+        pthread_mutex_lock(&vp->audio.lock);
+        if (vp->audio.audio_written_samples == 0 && frame->pts != AV_NOPTS_VALUE) {
+            /* This is the first frame, set base PTS */
+            AVRational tb = vp->fmt_ctx->streams[vp->audio_tracks[vp->current_audio_track].stream_index]->time_base;
+            vp->audio.base_pts_us = av_rescale_q(frame->pts, tb, AV_TIME_BASE_Q);
+        }
+        vp->audio.audio_written_samples += samples_written;
+        pthread_mutex_unlock(&vp->audio.lock);
+    }
+
     if (written < (size_t)out_size) {
         /* Buffer full - this is normal, caller should retry later */
         return 1;
@@ -650,12 +809,17 @@ void videoplayer_audio_flush(VideoPlayer *vp)
     /* Clear ring buffer */
     ring_buffer_clear(&vp->audio.ring);
 
-    /* Reset audio clock */
+    /* Reset audio clock and sync tracking */
     pthread_mutex_lock(&vp->audio.lock);
     vp->audio.audio_pts_us = 0;
     vp->audio.base_pts_us = 0;
     vp->audio.audio_written_samples = 0;
     vp->audio.audio_played_samples = 0;
+    vp->audio.last_clock = 0;
+    vp->audio.last_audio_pts = 0;
+    vp->audio.stall_count = 0;
+    vp->audio.recovery_frames = 0;
+    vp->audio.stream_interrupted = 0;
     pthread_mutex_unlock(&vp->audio.lock);
 
     /* Reset resampler if present */
@@ -674,11 +838,15 @@ int64_t videoplayer_audio_get_clock(VideoPlayer *vp)
     if (!vp)
         return 0;
 
-    pthread_mutex_lock(&vp->audio.lock);
-    int64_t clock = vp->audio.audio_pts_us;
-    pthread_mutex_unlock(&vp->audio.lock);
+    /* Use trylock to avoid blocking render thread if PipeWire thread
+     * holds the mutex (e.g., during Bluetooth controller reconnection) */
+    if (pthread_mutex_trylock(&vp->audio.lock) == 0) {
+        vp->audio.last_clock = vp->audio.audio_pts_us;
+        pthread_mutex_unlock(&vp->audio.lock);
+    }
+    /* If we couldn't get the lock, return last known value (per-instance) */
 
-    return clock;
+    return vp->audio.last_clock;
 }
 
 void videoplayer_audio_set_clock(VideoPlayer *vp, int64_t pts_us)
@@ -850,7 +1018,8 @@ static int init_passthrough_stream(VideoPlayer *vp)
 
     pw_thread_loop_lock(vp->audio.loop);
 
-    /* Create stream properties for passthrough */
+    /* Create stream properties for passthrough
+     * Allow PipeWire to move stream on device changes (e.g., Bluetooth). */
     props = pw_properties_new(
         PW_KEY_MEDIA_TYPE, "Audio",
         PW_KEY_MEDIA_CATEGORY, "Playback",

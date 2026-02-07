@@ -486,6 +486,15 @@ void videoplayer_close(VideoPlayer *vp)
         pthread_join(vp->decode_thread, NULL);
     }
 
+    /* Free any remaining frame queue buffers before destroying the mutex */
+    for (int i = 0; i < VP_FRAME_QUEUE_SIZE; i++) {
+        if (vp->frame_queue[i].buffer) {
+            wlr_buffer_drop(vp->frame_queue[i].buffer);
+            vp->frame_queue[i].buffer = NULL;
+        }
+        vp->frame_queue[i].ready = 0;
+    }
+
     /* Clean up frame queue */
     pthread_mutex_destroy(&vp->frame_mutex);
     pthread_cond_destroy(&vp->frame_cond);
@@ -830,6 +839,7 @@ static void *decode_thread_func(void *arg)
     VideoPlayer *vp = arg;
     AVPacket *pkt = av_packet_alloc();
     int ret;
+    int read_error_count = 0;
 
     if (!pkt) {
         fprintf(stderr, "[videoplayer] Failed to allocate packet\n");
@@ -852,8 +862,15 @@ static void *decode_thread_func(void *arg)
                 if (vp->audio_codec_ctx)
                     avcodec_flush_buffers(vp->audio_codec_ctx);
 
-                /* Clear frame queue */
+                /* Clear frame queue - free any buffered frames to avoid leaks */
                 pthread_mutex_lock(&vp->frame_mutex);
+                for (int i = 0; i < VP_FRAME_QUEUE_SIZE; i++) {
+                    if (vp->frame_queue[i].buffer) {
+                        wlr_buffer_drop(vp->frame_queue[i].buffer);
+                        vp->frame_queue[i].buffer = NULL;
+                    }
+                    vp->frame_queue[i].ready = 0;
+                }
                 vp->frames_queued = 0;
                 vp->frame_read_idx = 0;
                 vp->frame_write_idx = 0;
@@ -867,29 +884,60 @@ static void *decode_thread_func(void *arg)
             vp->seek_requested = 0;
         }
 
-        /* Check if frame queue is full */
+        /* Check if frame queue is full - use timed wait to prevent deadlock */
         pthread_mutex_lock(&vp->frame_mutex);
-        while (vp->frames_queued >= VP_FRAME_QUEUE_SIZE && vp->decode_running) {
-            pthread_cond_wait(&vp->frame_cond, &vp->frame_mutex);
+        if (vp->frames_queued >= VP_FRAME_QUEUE_SIZE && vp->decode_running) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += 50000000;  /* 50ms timeout */
+            if (ts.tv_nsec >= 1000000000) {
+                ts.tv_sec++;
+                ts.tv_nsec -= 1000000000;
+            }
+            pthread_cond_timedwait(&vp->frame_cond, &vp->frame_mutex, &ts);
         }
         pthread_mutex_unlock(&vp->frame_mutex);
 
         if (!vp->decode_running)
             break;
 
+        /* If queue is still full after wait, skip this iteration */
+        if (vp->frames_queued >= VP_FRAME_QUEUE_SIZE) {
+            usleep(5000);  /* Small sleep before retry */
+            continue;
+        }
+
         /* Read packet */
         ret = av_read_frame(vp->fmt_ctx, pkt);
         if (ret < 0) {
             if (ret == AVERROR_EOF) {
-                /* End of file - loop or stop */
-                fprintf(stderr, "[videoplayer] End of file\n");
-                usleep(10000);
-                continue;
+                /* End of file - wait for frames to drain, then pause */
+                fprintf(stderr, "[videoplayer] End of file reached\n");
+                while (vp->frames_queued > 0 && vp->decode_running) {
+                    usleep(50000);  /* 50ms */
+                }
+                /* Transition to paused so present_frame stops consuming
+                 * and the last frame stays visible on screen. */
+                vp->state = VP_STATE_PAUSED;
+                fprintf(stderr, "[videoplayer] Playback finished, state -> paused\n");
+                break;  /* Exit decode loop */
             }
-            /* Error */
+            /* Persistent read error - count consecutive failures */
+            read_error_count++;
+            if (read_error_count >= 100) {
+                fprintf(stderr, "[videoplayer] Too many consecutive read errors (%d), stopping\n",
+                        read_error_count);
+                vp->state = VP_STATE_ERROR;
+                snprintf(vp->error_msg, sizeof(vp->error_msg),
+                         "Persistent read error (corrupt file?)");
+                break;
+            }
             usleep(1000);
             continue;
         }
+
+        /* Successful read - reset error counter */
+        read_error_count = 0;
 
         /* Video packet */
         if (pkt->stream_index == vp->video.stream_index) {
@@ -968,17 +1016,18 @@ static void *decode_thread_func(void *arg)
             ret = avcodec_send_packet(vp->audio_codec_ctx, pkt);
             if (ret >= 0) {
                 while (avcodec_receive_frame(vp->audio_codec_ctx, vp->audio_frame) >= 0) {
-                    /* Queue audio frame to PipeWire ring buffer with retry */
+                    /* Queue audio frame to PipeWire ring buffer - don't block too long */
                     int queue_ret;
                     int retry_count = 0;
                     do {
                         queue_ret = videoplayer_audio_queue_frame(vp, vp->audio_frame);
                         if (queue_ret == 1) {
-                            /* Buffer full, wait and retry */
-                            usleep(5000);
+                            /* Buffer full, short wait and retry */
+                            usleep(2000);
                             retry_count++;
                         }
-                    } while (queue_ret == 1 && retry_count < 20 && vp->decode_running);
+                    } while (queue_ret == 1 && retry_count < 5 && vp->decode_running);
+                    /* Drop audio frame if buffer stays full - prioritize video smoothness */
                     av_frame_unref(vp->audio_frame);
                 }
             }
