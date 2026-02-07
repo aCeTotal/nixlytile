@@ -37340,6 +37340,10 @@ updatemons(struct wl_listener *listener, void *data)
 	 * at the wrong position after all. */
 	wlr_cursor_move(cursor, NULL, 0, 0);
 
+	/* Enter HTPC mode once selmon is available (deferred from startup) */
+	if (nixlytile_mode == 2 && !htpc_mode_active && selmon)
+		htpc_mode_enter();
+
 	wlr_output_manager_v1_set_configuration(output_mgr, config);
 }
 
@@ -37846,9 +37850,8 @@ main(int argc, char *argv[])
 	/* Set GE-Proton as default Steam compatibility tool */
 	steam_set_ge_proton_default();
 
-	/* Enter HTPC mode at startup if htpc-only mode */
-	if (nixlytile_mode == 2)
-		htpc_mode_enter();
+	/* HTPC mode (nixlytile_mode == 2) is entered from updatemons()
+	 * once the first monitor is ready and selmon is set */
 
 	/* Start only git cache immediately, stagger others via timer
 	 * Phase 0=git (done), 1=file (in 30s), 2=gaming (in 60s) */
