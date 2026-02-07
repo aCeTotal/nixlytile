@@ -32194,6 +32194,10 @@ enable_10bit_rendering(Monitor *m)
 	wlr_output_state_init(&state);
 	wlr_output_state_set_render_format(&state, DRM_FORMAT_XRGB2101010);
 
+	/* Preserve current mode so we don't reset to preferred/default mode */
+	if (m->wlr_output->current_mode)
+		wlr_output_state_set_mode(&state, m->wlr_output->current_mode);
+
 	if (wlr_output_test_state(m->wlr_output, &state)) {
 		if (wlr_output_commit_state(m->wlr_output, &state)) {
 			m->render_10bit_active = 1;
