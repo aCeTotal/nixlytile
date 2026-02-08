@@ -10,6 +10,16 @@ LayoutNode *create_split_node(unsigned int is_split_vertically,
 									LayoutNode *left, LayoutNode *right);
 int collect_columns(LayoutNode *node, Monitor *m, LayoutNode **out_nodes,
 		unsigned int *out_counts, Client **out_clients, int max_out);
+LayoutNode *find_client_node(LayoutNode *node, Client *c);
+int insert_client(Monitor *m, Client *focused_client, Client *new_client);
+unsigned int visible_count(LayoutNode *node, Monitor *m);
+unsigned int count_columns(LayoutNode *node, Monitor *m);
+unsigned int target_columns(Monitor *m);
+unsigned int placement_count(LayoutNode *node, Monitor *m);
+Client *first_active_client(LayoutNode *node, Monitor *m);
+Client *pick_target_client(Monitor *m, Client *focused_client);
+LayoutNode *find_column_root(LayoutNode *node, Monitor *m);
+unsigned int count_in_column(LayoutNode *col_node, Monitor *m);
 
 int resizing_from_mouse = 0;
 int split_side_toggle = 0;

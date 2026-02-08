@@ -133,6 +133,9 @@
 #define VISIBLEON(C, M)         ((M) && (C)->mon == (M) && (((C)->tags & (M)->tagset[(M)->seltags]) || (C)->issticky))
 #define LENGTH(X)               (sizeof X / sizeof X[0])
 #define END(A)                  ((A) + LENGTH(A))
+#ifndef TAGCOUNT
+#define TAGCOUNT (9)
+#endif
 #define TAGMASK                 ((1u << TAGCOUNT) - 1)
 #define MAX_TAGS                32
 #define STATUS_FAST_MS          3000
@@ -173,6 +176,40 @@
 #ifndef WLR_SILENCE
 #define WLR_SILENCE (WLR_ERROR - 1)
 #endif
+
+/* ── runtime config constants ─────────────────────────────────────── */
+#ifndef MAX_KEYS
+#define MAX_KEYS 256
+#endif
+#ifndef MAX_SPAWN_CMD
+#define MAX_SPAWN_CMD 512
+#endif
+
+/* ── retro gaming constants ────────────────────────────────────────── */
+#define RETRO_SLIDE_DURATION_MS 200  /* Smooth slide animation duration */
+
+/* ── media grid constants ─────────────────────────────────────────── */
+#define MEDIA_GRID_PADDING 40
+#define MEDIA_GRID_GAP 20
+#define MEDIA_SERVER_PORT 8080
+#define MEDIA_DISCOVERY_PORT 8081
+#define MEDIA_DISCOVERY_MAGIC "NIXLY_DISCOVER"
+#define MEDIA_DISCOVERY_RESPONSE "NIXLY_SERVER"
+#define MAX_MEDIA_SERVERS 16
+
+/* ── joystick navigation constants ────────────────────────────────── */
+#define JOYSTICK_NAV_INITIAL_DELAY 300  /* ms before repeat starts */
+#define JOYSTICK_NAV_REPEAT_RATE 150    /* ms between repeats */
+
+/* ── stats panel constants ────────────────────────────────────────── */
+#define STATS_PANEL_ANIM_DURATION 250
+
+/* ── game VRR constants ───────────────────────────────────────────── */
+#define GAME_VRR_MIN_INTERVAL_NS (500ULL * 1000000ULL)
+#define GAME_VRR_STABLE_FRAMES 30
+#define GAME_VRR_FPS_DEADBAND 3.0f
+#define GAME_VRR_MIN_FPS 20.0f
+#define GAME_VRR_MAX_FPS 165.0f
 
 /* ── enums ─────────────────────────────────────────────────────────── */
 enum { CurNormal, CurPressed, CurMove, CurResize };
@@ -442,7 +479,7 @@ typedef struct {
 	uint64_t next_due_ms;
 } StatusRefreshTask;
 
-typedef struct {
+typedef struct TrayMenuEntry {
 	int id;
 	int enabled;
 	int is_separator;
@@ -942,6 +979,17 @@ typedef struct {
 	int video_detect_phase;
 } Client;
 
+/* ── binary tree tiling layout node ───────────────────────────────── */
+struct LayoutNode {
+	int is_client_node;
+	float split_ratio;
+	unsigned int is_split_vertically;
+	Client *client;
+	LayoutNode *left;
+	LayoutNode *right;
+	LayoutNode *split_node;
+};
+
 /* ── keyboard / text input ─────────────────────────────────────────── */
 typedef struct {
 	struct wlr_keyboard_group *wlr_group;
@@ -1147,10 +1195,13 @@ extern int modal_file_search_minlen;
 extern int lock_cursor;
 extern int log_level;
 extern int nixlytile_mode;
-extern char htpc_wallpaper_path[];
+extern char htpc_wallpaper_path[PATH_MAX];
 extern const Rule rules[];
+extern const size_t nrules;
 extern const Layout layouts[];
+extern const size_t nlayouts;
 extern const MonitorRule monrules[];
+extern const size_t nmonrules;
 extern const struct xkb_rule_names xkb_rules;
 extern int repeat_delay;
 extern int repeat_rate;
@@ -1173,15 +1224,18 @@ extern const Key default_keys[];
 extern const Key *keys;
 extern size_t keys_count;
 extern const Button buttons[];
-extern char spawn_cmd_terminal[];
-extern char spawn_cmd_terminal_alt[];
-extern char spawn_cmd_browser[];
-extern char spawn_cmd_filemanager[];
-extern char spawn_cmd_launcher[];
+extern const size_t nbuttons;
+extern char spawn_cmd_terminal[MAX_SPAWN_CMD];
+extern char spawn_cmd_terminal_alt[MAX_SPAWN_CMD];
+extern char spawn_cmd_browser[MAX_SPAWN_CMD];
+extern char spawn_cmd_filemanager[MAX_SPAWN_CMD];
+extern char spawn_cmd_launcher[MAX_SPAWN_CMD];
+extern const char *netcmd[];
+extern const char *btopcmd[];
 extern Key runtime_keys[];
 extern size_t runtime_keys_count;
-extern char wallpaper_path[];
-extern char autostart_cmd[];
+extern char wallpaper_path[PATH_MAX];
+extern char autostart_cmd[4096];
 
 /* core compositor */
 extern pid_t child_pid;
@@ -1248,6 +1302,8 @@ extern struct wlr_box resize_start_box_f;
 extern double resize_start_x, resize_start_y;
 extern LayoutNode *resize_split_node;
 extern LayoutNode *resize_split_node_h;
+extern uint64_t joystick_nav_last_move;
+extern int joystick_nav_repeat_started;
 extern int fullscreen_adaptive_sync_enabled;
 extern int fps_limit_enabled;
 extern int fps_limit_value;
@@ -1262,7 +1318,7 @@ extern int htpc_mode_active;
 /* config hot-reload */
 extern int config_inotify_fd;
 extern int config_watch_wd;
-extern char config_path_cached[];
+extern char config_path_cached[PATH_MAX];
 extern struct wl_event_source *config_watch_source;
 extern struct wl_event_source *config_rewatch_timer;
 extern int config_needs_rewatch;
@@ -1305,8 +1361,8 @@ extern int client_download_mbps;
 extern PlaybackState playback_state;
 extern int playback_buffer_seconds;
 extern int playback_buffer_progress;
-extern char playback_message[];
-extern char playback_url[];
+extern char playback_message[512];
+extern char playback_url[512];
 extern int64_t playback_file_size;
 extern int playback_duration;
 extern int playback_is_movie;
@@ -1340,12 +1396,12 @@ extern const char *bt_gamepad_patterns[];
 extern pid_t public_ip_pid;
 extern int public_ip_fd;
 extern struct wl_event_source *public_ip_event;
-extern char public_ip_buf[];
+extern char public_ip_buf[128];
 extern size_t public_ip_len;
 extern pid_t ssid_pid;
 extern int ssid_fd;
 extern struct wl_event_source *ssid_event;
-extern char ssid_buf[];
+extern char ssid_buf[256];
 extern size_t ssid_len;
 extern time_t ssid_last_time;
 
@@ -1365,21 +1421,21 @@ extern struct wl_list tray_items;
 extern struct CpuSample cpu_prev[];
 extern int cpu_prev_count;
 extern double cpu_last_percent;
-extern char cpu_text[];
+extern char cpu_text[32];
 extern double ram_last_mb;
-extern char ram_text[];
+extern char ram_text[32];
 extern double battery_last_percent;
-extern char battery_text[];
+extern char battery_text[32];
 extern double net_last_down_bps;
 extern double net_last_up_bps;
-extern char last_clock_render[];
-extern char last_cpu_render[];
-extern char last_ram_render[];
-extern char last_light_render[];
-extern char last_volume_render[];
-extern char last_mic_render[];
-extern char last_battery_render[];
-extern char last_net_render[];
+extern char last_clock_render[32];
+extern char last_cpu_render[32];
+extern char last_ram_render[32];
+extern char last_light_render[32];
+extern char last_volume_render[32];
+extern char last_mic_render[32];
+extern char last_battery_render[32];
+extern char last_net_render[64];
 extern int last_clock_h, last_cpu_h, last_ram_h;
 extern int last_light_h, last_volume_h, last_mic_h;
 extern int last_battery_h, last_net_h;
@@ -1400,26 +1456,26 @@ extern const float *mic_text_color;
 extern const float *statusbar_fg_override;
 extern double light_last_percent;
 extern double light_cached_percent;
-extern char light_text[];
+extern char light_text[32];
 extern double mic_last_percent;
-extern char mic_text[];
+extern char mic_text[32];
 extern double volume_last_speaker_percent;
 extern double volume_last_headset_percent;
 extern double speaker_active;
 extern double speaker_stored;
 extern double microphone_active;
 extern double microphone_stored;
-extern char volume_text[];
+extern char volume_text[32];
 extern int volume_muted;
 extern int mic_muted;
 extern int mic_last_color_is_muted;
 extern int volume_last_color_is_muted;
-extern char backlight_brightness_path[];
-extern char backlight_max_path[];
+extern char backlight_brightness_path[PATH_MAX];
+extern char backlight_max_path[PATH_MAX];
 extern int backlight_available;
 extern int backlight_writable;
-extern char battery_capacity_path[];
-extern char battery_device_dir[];
+extern char battery_capacity_path[PATH_MAX];
+extern char battery_device_dir[PATH_MAX];
 extern int battery_available;
 extern double cpu_last_core_percent[];
 extern int cpu_core_count;
@@ -1443,7 +1499,7 @@ extern struct wl_event_source *osk_dpad_repeat_timer;
 extern int osk_dpad_held_button;
 extern Monitor *osk_dpad_held_mon;
 extern Client *game_refocus_client;
-extern char wifi_scan_buf[];
+extern char wifi_scan_buf[8192];
 extern size_t wifi_scan_len;
 extern int wifi_scan_inflight;
 extern unsigned int wifi_networks_generation;
@@ -1457,51 +1513,51 @@ extern int vpn_list_initialized;
 extern pid_t vpn_scan_pid;
 extern int vpn_scan_fd;
 extern struct wl_event_source *vpn_scan_event;
-extern char vpn_scan_buf[];
+extern char vpn_scan_buf[8192];
 extern size_t vpn_scan_len;
 extern int vpn_scan_inflight;
 extern pid_t vpn_connect_pid;
 extern int vpn_connect_fd;
 extern struct wl_event_source *vpn_connect_event;
-extern char vpn_connect_buf[];
+extern char vpn_connect_buf[4096];
 extern size_t vpn_connect_len;
-extern char vpn_pending_name[];
-extern char net_text[];
-extern char net_local_ip[];
-extern char net_public_ip[];
-extern char net_down_text[];
-extern char net_up_text[];
-extern char net_ssid[];
+extern char vpn_pending_name[128];
+extern char net_text[64];
+extern char net_local_ip[64];
+extern char net_public_ip[64];
+extern char net_down_text[32];
+extern char net_up_text[32];
+extern char net_ssid[64];
 extern double net_last_wifi_quality;
 extern int net_link_speed_mbps;
-extern char net_iface[];
-extern char net_prev_iface[];
+extern char net_iface[64];
+extern char net_prev_iface[64];
 extern int net_is_wireless;
 extern int net_available;
 
 /* icon paths + buffers */
-extern char net_icon_path[];
-extern char net_icon_loaded_path[];
-extern char cpu_icon_path[];
-extern char cpu_icon_loaded_path[];
-extern char light_icon_path[];
-extern char light_icon_loaded_path[];
-extern char ram_icon_path[];
-extern char ram_icon_loaded_path[];
-extern char battery_icon_path[];
-extern char battery_icon_loaded_path[];
-extern char mic_icon_path[];
-extern char mic_icon_loaded_path[];
-extern char volume_icon_path[];
-extern char volume_icon_loaded_path[];
-extern char clock_icon_path[];
-extern char clock_icon_loaded_path[];
-extern char bluetooth_icon_path[];
-extern char bluetooth_icon_loaded_path[];
-extern char steam_icon_path[];
-extern char steam_icon_loaded_path[];
-extern char discord_icon_path[];
-extern char discord_icon_loaded_path[];
+extern char net_icon_path[PATH_MAX];
+extern char net_icon_loaded_path[PATH_MAX];
+extern char cpu_icon_path[PATH_MAX];
+extern char cpu_icon_loaded_path[PATH_MAX];
+extern char light_icon_path[PATH_MAX];
+extern char light_icon_loaded_path[PATH_MAX];
+extern char ram_icon_path[PATH_MAX];
+extern char ram_icon_loaded_path[PATH_MAX];
+extern char battery_icon_path[PATH_MAX];
+extern char battery_icon_loaded_path[PATH_MAX];
+extern char mic_icon_path[PATH_MAX];
+extern char mic_icon_loaded_path[PATH_MAX];
+extern char volume_icon_path[PATH_MAX];
+extern char volume_icon_loaded_path[PATH_MAX];
+extern char clock_icon_path[PATH_MAX];
+extern char clock_icon_loaded_path[PATH_MAX];
+extern char bluetooth_icon_path[PATH_MAX];
+extern char bluetooth_icon_loaded_path[PATH_MAX];
+extern char steam_icon_path[PATH_MAX];
+extern char steam_icon_loaded_path[PATH_MAX];
+extern char discord_icon_path[PATH_MAX];
+extern char discord_icon_loaded_path[PATH_MAX];
 extern int net_icon_loaded_h, net_icon_w, net_icon_h;
 extern struct wlr_buffer *net_icon_buf;
 extern int clock_icon_loaded_h, clock_icon_w, clock_icon_h;
@@ -1552,12 +1608,12 @@ extern const char volume_icon_headset[];
 extern const char volume_icon_headset_muted[];
 extern const char mic_icon_unmuted[];
 extern const char mic_icon_muted[];
-extern char net_icon_wifi_100_resolved[];
-extern char net_icon_wifi_75_resolved[];
-extern char net_icon_wifi_50_resolved[];
-extern char net_icon_wifi_25_resolved[];
-extern char net_icon_eth_resolved[];
-extern char net_icon_no_conn_resolved[];
+extern char net_icon_wifi_100_resolved[PATH_MAX];
+extern char net_icon_wifi_75_resolved[PATH_MAX];
+extern char net_icon_wifi_50_resolved[PATH_MAX];
+extern char net_icon_wifi_25_resolved[PATH_MAX];
+extern char net_icon_eth_resolved[PATH_MAX];
+extern char net_icon_no_conn_resolved[PATH_MAX];
 
 /* misc */
 extern const double light_step;
@@ -1565,14 +1621,14 @@ extern const double volume_step;
 extern const double volume_max_percent;
 extern const double mic_step;
 extern const double mic_max_percent;
-extern char sysicons_text[];
+extern char sysicons_text[64];
 extern DesktopEntry desktop_entries[];
 extern int desktop_entry_count;
 extern int desktop_entries_loaded;
 extern NixpkgEntry nixpkg_entries[];
 extern int nixpkg_entry_count;
 extern int nixpkg_entries_loaded;
-extern char nixpkgs_cache_path[];
+extern char nixpkgs_cache_path[PATH_MAX];
 extern struct wlr_buffer *nixpkg_ok_icon_buf;
 extern int nixpkg_ok_icon_height;
 extern const uint32_t cpu_popup_refresh_interval_ms;
@@ -1586,11 +1642,13 @@ extern char *runtime_fonts[];
 extern int runtime_fonts_set;
 
 /* HTPC menu */
-extern struct { char label[64]; char command[256]; } htpc_menu_items[];
+struct HtpcMenuItem { char label[64]; char command[256]; };
+extern struct HtpcMenuItem htpc_menu_items[];
 extern int htpc_menu_item_count;
 
 /* Audio/subtitle tracks for OSD */
-extern struct { int id; char title[128]; char lang[16]; int selected; } audio_tracks[], subtitle_tracks[];
+struct TrackInfo { int id; char title[128]; char lang[16]; int selected; };
+extern struct TrackInfo audio_tracks[], subtitle_tracks[];
 extern int audio_track_count;
 extern int subtitle_track_count;
 extern ResumeEntry resume_cache[];
@@ -1817,6 +1875,19 @@ void schedule_video_check(uint32_t ms);
 int enable_vrr_video_mode(Monitor *m, float video_hz);
 void disable_vrr_video_mode(Monitor *m);
 int set_custom_video_mode(Monitor *m, float exact_hz);
+
+typedef struct {
+	int method;
+	struct wlr_output_mode *mode;
+	int multiplier;
+	float target_hz;
+	float actual_hz;
+	float score;
+	float judder_ms;
+} VideoModeCandidate;
+VideoModeCandidate find_best_video_mode(Monitor *m, float video_hz);
+float score_video_mode(int method, float video_hz, float display_hz, int multiplier);
+float calculate_judder_ms(float video_hz, float display_hz);
 void generate_cvt_mode(drmModeModeInfo *mode, int hdisplay, int vdisplay, float vrefresh);
 void show_hz_osd(Monitor *m, const char *msg);
 void hide_hz_osd(Monitor *m);
@@ -1863,6 +1934,9 @@ void refreshstatusram(void);
 void refreshstatusicons(void);
 void refreshstatustags(void);
 void init_status_refresh_tasks(void);
+void seed_status_rng(void);
+double volume_last_for_type(int is_headset);
+void volume_cache_store(int is_headset, double level, int muted, uint64_t now);
 int status_should_render(StatusModule *module, int barh, const char *text,
 		char *last_text, size_t last_len, int *last_h);
 void initial_status_refresh(void);
@@ -1885,6 +1959,11 @@ int ensure_clock_icon_buffer(int target_h);
 void drop_clock_icon_buffer(void);
 int ensure_mic_icon_buffer(int target_h);
 void drop_mic_icon_buffer(void);
+void drop_net_icon_buffer(void);
+void drop_bluetooth_icon_buffer(void);
+void drop_steam_icon_buffer(void);
+void drop_discord_icon_buffer(void);
+void init_net_icon_paths(void);
 int ensure_volume_icon_buffer(int target_h);
 void drop_volume_icon_buffer(void);
 void rendercpupopup(Monitor *m);
@@ -1988,7 +2067,11 @@ void wifi_networks_clear(void);
 void request_wifi_scan(void);
 void wifi_scan_plan_rescan(void);
 int wifi_scan_event_cb(int fd, uint32_t mask, void *data);
+int wifi_scan_timer_cb(void *data);
+void wifi_scan_finish(void);
 void connect_wifi_ssid(const char *ssid);
+void transfer_status_menus(Monitor *from, Monitor *to);
+int net_menu_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 void vpn_connections_clear(void);
 int vpn_scan_event_cb(int fd, uint32_t mask, void *data);
 void vpn_connect(const char *name);
@@ -2027,6 +2110,8 @@ void osk_hide(Monitor *m);
 void osk_hide_all(void);
 void osk_render(Monitor *m);
 int osk_handle_button(Monitor *m, int button, int value);
+void osk_dpad_repeat_start(Monitor *m, int button);
+void osk_dpad_repeat_stop(void);
 Monitor *osk_visible_monitor(void);
 void osk_send_key(Monitor *m);
 void osk_send_backspace(Monitor *m);
@@ -2136,6 +2221,13 @@ void media_view_render_detail(Monitor *m, MediaViewType type);
 int media_view_refresh(Monitor *m, MediaViewType type);
 int media_view_poll_timer_cb(void *data);
 void media_view_free_items(MediaGridView *view);
+void media_view_free_seasons(MediaGridView *view);
+void media_view_free_episodes(MediaGridView *view);
+void media_view_fetch_seasons(MediaGridView *view, const char *show_name);
+void media_view_fetch_episodes(MediaGridView *view, const char *show_name, int season);
+int json_extract_int(const char *json, const char *key);
+int json_extract_string(const char *json, const char *key, char *out, size_t out_size);
+float json_extract_float(const char *json, const char *key);
 int media_view_handle_button(Monitor *m, MediaViewType type, int button, int value);
 int media_view_handle_key(Monitor *m, MediaViewType type, xkb_keysym_t sym);
 void media_view_scroll(Monitor *m, MediaViewType type, int delta);
@@ -2178,6 +2270,7 @@ void bt_controller_setup(void);
 void bt_controller_cleanup(void);
 int bt_scan_timer_cb(void *data);
 void bt_start_discovery(void);
+int bt_get_objects_disconnect_cb(sd_bus_message *reply, void *userdata, sd_bus_error *error);
 void bt_stop_discovery(void);
 int bt_is_gamepad_name(const char *name);
 void bt_pair_device(const char *path);
@@ -2247,6 +2340,9 @@ LayoutNode *ancestor_split(LayoutNode *node, int want_vert);
 /* btrtile.c */
 void btrtile_insert(LayoutNode **root, Client *c, Monitor *m);
 void btrtile_remove(LayoutNode **root, Client *c);
+void remove_client(Monitor *m, Client *c);
+void destroy_tree(Monitor *m);
+void init_tree(Monitor *m);
 void btrtile_apply(LayoutNode *root, struct wlr_box area, Monitor *m);
 LayoutNode *btrtile_find(LayoutNode *root, Client *c);
 LayoutNode *btrtile_focus_dir(LayoutNode *root, Client *current, int dir);
@@ -2254,6 +2350,19 @@ void btrtile_swap(LayoutNode *a, LayoutNode *b);
 void btrtile_free(LayoutNode *root);
 int btrtile_count(LayoutNode *root);
 void btrtile_set_ratio(LayoutNode *node, float ratio);
+LayoutNode **get_current_root(Monitor *m);
+LayoutNode *find_client_node(LayoutNode *node, Client *c);
+int insert_client(Monitor *m, Client *focused_client, Client *new_client);
+void insert_client_at(Monitor *m, Client *target, Client *new_client, double cx, double cy);
+Client *xytoclient(double x, double y);
+void start_tile_drag(Monitor *m, Client *c);
+void end_tile_drag(void);
+int same_column(Monitor *m, Client *c1, Client *c2);
+void swap_columns(Monitor *m, Client *c1, Client *c2);
+int can_move_tile(Monitor *m, Client *source, Client *target);
+void swap_tiles_in_tree(Monitor *m, Client *c1, Client *c2);
+extern int resizing_from_mouse;
+extern int drag_was_alone_in_column;
 
 /* XWayland */
 #ifdef XWAYLAND

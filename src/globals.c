@@ -163,12 +163,7 @@ OsdMenuType osd_menu_open = OSD_MENU_NONE;
 int osd_menu_selection = 0;         /* Selected item in open menu */
 
 /* Audio/subtitle tracks for OSD display */
-struct {
-	int id;
-	char title[128];
-	char lang[16];
-	int selected;
-} audio_tracks[MAX_TRACKS], subtitle_tracks[MAX_TRACKS];
+struct TrackInfo audio_tracks[MAX_TRACKS], subtitle_tracks[MAX_TRACKS];
 int audio_track_count = 0;
 int subtitle_track_count = 0;
 
@@ -179,10 +174,7 @@ int resume_cache_count = 0;
 /* Streaming service URLs */
 
 /* Built HTPC menu based on enabled pages */
-struct {
-	char label[64];
-	char command[256];
-} htpc_menu_items[HTPC_MENU_MAX_ITEMS];
+struct HtpcMenuItem htpc_menu_items[HTPC_MENU_MAX_ITEMS];
 int htpc_menu_item_count = 0;
 
 
@@ -545,6 +537,7 @@ int runtime_fonts_set = 0;
 /* configuration, allows nested code to access above variables */
 #include "config.h"
 
-/* Runtime font storage */
-char *runtime_fonts[8];
-int runtime_fonts_set = 0;
+const size_t nrules = LENGTH(rules);
+const size_t nlayouts = LENGTH(layouts);
+const size_t nmonrules = LENGTH(monrules);
+const size_t nbuttons = LENGTH(buttons);

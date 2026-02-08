@@ -496,7 +496,7 @@ handle_pointer_button_internal(uint32_t button, uint32_t state, uint32_t time_ms
 
 		keyboard = wlr_seat_get_keyboard(seat);
 		mods = keyboard ? wlr_keyboard_get_modifiers(keyboard) : 0;
-		for (b = buttons; b < END(buttons); b++) {
+		for (b = buttons; b < buttons + nbuttons; b++) {
 			if (CLEANMASK(mods) == CLEANMASK(b->mod) &&
 					button == b->button && b->func) {
 				b->func(&b->arg);
@@ -692,7 +692,7 @@ buttonpress(struct wl_listener *listener, void *data)
 
 		keyboard = wlr_seat_get_keyboard(seat);
 		mods = keyboard ? wlr_keyboard_get_modifiers(keyboard) : 0;
-		for (b = buttons; b < END(buttons); b++) {
+		for (b = buttons; b < buttons + nbuttons; b++) {
 			if (CLEANMASK(mods) == CLEANMASK(b->mod) &&
 					event->button == b->button && b->func) {
 				b->func(&b->arg);

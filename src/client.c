@@ -32,7 +32,7 @@ applyrules(Client *c)
 	appid = client_get_appid(c);
 	title = client_get_title(c);
 
-	for (r = rules; r < END(rules); r++) {
+	for (r = rules; r < rules + nrules; r++) {
 		if ((!r->title || strstr(title, r->title))
 				&& (!r->id || strstr(appid, r->id))) {
 			c->isfloating = r->isfloating;

@@ -63,8 +63,6 @@ int      modal_file_search_minlen = 1; /* Min chars before starting a file searc
 /* window resizing */
 int lock_cursor = 0;	/* 1: lock cursor, 0: don't lock */
 
-enum Direction { DIR_LEFT, DIR_RIGHT, DIR_UP, DIR_DOWN };
-
 /* tagging - TAGCOUNT must be no greater than 31 */
 #define TAGCOUNT (9)
 

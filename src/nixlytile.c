@@ -35,6 +35,13 @@ has_nixlytile_session_target(void)
 
 
 
+/* Forward declarations for pixman buffer impl (defined in draw.c) */
+void pixman_buffer_destroy(struct wlr_buffer *wlr_buffer);
+bool pixman_buffer_get_dmabuf(struct wlr_buffer *wlr_buffer, struct wlr_dmabuf_attributes *attribs);
+bool pixman_buffer_get_shm(struct wlr_buffer *wlr_buffer, struct wlr_shm_attributes *attribs);
+bool pixman_buffer_begin_data_ptr_access(struct wlr_buffer *wlr_buffer, uint32_t flags, void **data, uint32_t *format, size_t *stride);
+void pixman_buffer_end_data_ptr_access(struct wlr_buffer *wlr_buffer);
+
 const struct wlr_buffer_impl pixman_buffer_impl = {
 	.destroy = pixman_buffer_destroy,
 	.get_dmabuf = pixman_buffer_get_dmabuf,
@@ -751,7 +758,6 @@ pc_gaming_merge_sorted(GameEntry *a, GameEntry *b)
  * Retro Gaming View Implementation
  * ============================================================================ */
 
-#define RETRO_SLIDE_DURATION_MS 200  /* Smooth slide animation duration */
 struct wl_event_source *retro_anim_timer = NULL;
 
 
@@ -764,13 +770,6 @@ struct wl_event_source *retro_anim_timer = NULL;
 /* Media Grid View (Movies & TV-shows) */
 /* =========================================================== */
 
-#define MEDIA_GRID_PADDING 40
-#define MEDIA_GRID_GAP 20
-#define MEDIA_SERVER_PORT 8080
-#define MEDIA_DISCOVERY_PORT 8081
-#define MEDIA_DISCOVERY_MAGIC "NIXLY_DISCOVER"
-#define MEDIA_DISCOVERY_RESPONSE "NIXLY_SERVER"
-#define MAX_MEDIA_SERVERS 16
 
 /* Server info with priority for multi-server deduplication */
 typedef struct {
@@ -1155,8 +1154,6 @@ media_view_fetch_episodes(MediaGridView *view, const char *show_name, int season
 /* Joystick navigation state for PC gaming view */
 uint64_t joystick_nav_last_move = 0;
 int joystick_nav_repeat_started = 0;
-#define JOYSTICK_NAV_INITIAL_DELAY 300  /* ms before repeat starts */
-#define JOYSTICK_NAV_REPEAT_RATE 150    /* ms between repeats */
 
 /* Update cursor position based on joystick input from all gamepads */
 
@@ -1513,7 +1510,8 @@ node_contains_client(LayoutNode *node, Client *c)
 		return 0;
 	if (node->is_client_node)
 		return node->client == c;
-	return node_contains_client(node->left, c) || node_contains_client(node->right, c);
+	else
+		return node_contains_client(node->left, c) || node_contains_client(node->right, c);
 }
 
 
@@ -1694,16 +1692,6 @@ run(const char *startup_cmd)
  * - Smooth transitions: VRR handles the actual rate change smoothly
  */
 
-/* Minimum time between VRR adjustments (500ms) */
-#define GAME_VRR_MIN_INTERVAL_NS (500ULL * 1000000ULL)
-/* Frames needed at stable FPS before adjusting */
-#define GAME_VRR_STABLE_FRAMES 30
-/* FPS change threshold to trigger adjustment (3 FPS) */
-#define GAME_VRR_FPS_DEADBAND 3.0f
-/* Minimum FPS to track (below this, don't adjust) */
-#define GAME_VRR_MIN_FPS 20.0f
-/* Maximum FPS to track (above this, use native refresh) */
-#define GAME_VRR_MAX_FPS 165.0f
 
 /*
  * Enable game VRR mode - activates adaptive sync for game framerate matching.
@@ -1795,15 +1783,6 @@ run(const char *startup_cmd)
  * - Lower multiplier: bonus (2x > 3x > 4x)
  * - Precision penalty: deduct for non-exact matches
  */
-typedef struct {
-	int method;              /* 0=none, 1=existing_mode, 2=custom_cvt, 3=vrr */
-	struct wlr_output_mode *mode;
-	int multiplier;
-	float target_hz;
-	float actual_hz;
-	float score;
-	float judder_ms;         /* estimated judder per frame in ms */
-} VideoModeCandidate;
 
 /*
  * Calculate judder (frame timing error) for a given mode/video Hz combination.
@@ -2611,8 +2590,6 @@ spawn(const Arg *arg)
 
 
 
-/* Stats panel animation duration in ms */
-#define STATS_PANEL_ANIM_DURATION 250
 
 /* Ease-out cubic for smooth deceleration */
 
