@@ -134,7 +134,7 @@ clean:
 
 dist: clean
 	mkdir -p nixlytile-$(VERSION)
-	cp -R Makefile README.md config.mk protocols \
+	cp -R Makefile config.mk protocols \
 		nixlytile.1 nixlytile.desktop images src \
 		nixlytile-$(VERSION)
 	tar -caf nixlytile-$(VERSION).tar.gz nixlytile-$(VERSION)
