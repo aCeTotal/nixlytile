@@ -810,6 +810,38 @@ gamepad_event_cb(int fd, uint32_t mask, void *data)
 			case ABS_RY:
 				gp->right_y = ev.value;
 				break;
+			}
+
+			/* Show playback OSD on stick movement during video playback */
+			if (active_videoplayer && playback_state == PLAYBACK_PLAYING &&
+			    (ev.code == ABS_X || ev.code == ABS_Y ||
+			     ev.code == ABS_RX || ev.code == ABS_RY)) {
+				int offset = 0, range = 32767;
+				switch (ev.code) {
+				case ABS_X:
+					offset = gp->left_x - gp->cal_lx.center;
+					range = (gp->cal_lx.max - gp->cal_lx.min) / 2;
+					break;
+				case ABS_Y:
+					offset = gp->left_y - gp->cal_ly.center;
+					range = (gp->cal_ly.max - gp->cal_ly.min) / 2;
+					break;
+				case ABS_RX:
+					offset = gp->right_x - gp->cal_rx.center;
+					range = (gp->cal_rx.max - gp->cal_rx.min) / 2;
+					break;
+				case ABS_RY:
+					offset = gp->right_y - gp->cal_ry.center;
+					range = (gp->cal_ry.max - gp->cal_ry.min) / 2;
+					break;
+				}
+				if (range == 0) range = 32767;
+				int deadzone = range * GAMEPAD_DEADZONE / 32767;
+				if (abs(offset) > deadzone)
+					render_playback_osd();
+			}
+
+			switch (ev.code) {
 			case ABS_HAT0X:
 				/* D-pad left/right for navigation */
 				if (ev.value != 0) {

@@ -1016,18 +1016,16 @@ static void *decode_thread_func(void *arg)
             ret = avcodec_send_packet(vp->audio_codec_ctx, pkt);
             if (ret >= 0) {
                 while (avcodec_receive_frame(vp->audio_codec_ctx, vp->audio_frame) >= 0) {
-                    /* Queue audio frame to PipeWire ring buffer - don't block too long */
-                    int queue_ret;
-                    int retry_count = 0;
-                    do {
-                        queue_ret = videoplayer_audio_queue_frame(vp, vp->audio_frame);
-                        if (queue_ret == 1) {
-                            /* Buffer full, short wait and retry */
-                            usleep(2000);
-                            retry_count++;
-                        }
-                    } while (queue_ret == 1 && retry_count < 5 && vp->decode_running);
-                    /* Drop audio frame if buffer stays full - prioritize video smoothness */
+                    /* Queue audio frame to PipeWire ring buffer.
+                     * Minimal retry to avoid stalling the decode thread — if the ring buffer
+                     * stays full (e.g., Bluetooth reconnecting), the stall detector in
+                     * videoplayer_audio_queue_frame sets stream_interrupted after 3 consecutive
+                     * failures, causing all subsequent audio to be dropped instantly. */
+                    int queue_ret = videoplayer_audio_queue_frame(vp, vp->audio_frame);
+                    if (queue_ret == 1 && vp->decode_running) {
+                        usleep(1000);
+                        videoplayer_audio_queue_frame(vp, vp->audio_frame);
+                    }
                     av_frame_unref(vp->audio_frame);
                 }
             }

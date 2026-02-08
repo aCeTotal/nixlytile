@@ -1083,6 +1083,9 @@ keypress(struct wl_listener *listener, void *data)
 					if (active_videoplayer->state == VP_STATE_IDLE) {
 						videoplayer_set_visible(active_videoplayer, 0);
 						playback_state = PLAYBACK_IDLE;
+					} else {
+						/* Show OSD on any key during playback */
+						render_playback_osd();
 					}
 				}
 			}

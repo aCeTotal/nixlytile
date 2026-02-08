@@ -256,9 +256,6 @@ launch_integrated_player_with_resume(const char *url, double resume_pos)
 	strncpy(playback_url, url, sizeof(playback_url) - 1);
 	playback_url[sizeof(playback_url) - 1] = '\0';
 
-	/* Hide media views first */
-	media_view_hide_all();
-
 	/* Create video player if it doesn't exist */
 	if (!active_videoplayer) {
 		active_videoplayer = videoplayer_create(selmon);
@@ -307,6 +304,9 @@ launch_integrated_player_with_resume(const char *url, double resume_pos)
 	videoplayer_play(active_videoplayer);
 
 	playback_state = PLAYBACK_PLAYING;
+
+	/* Show control bar initially */
+	render_playback_osd();
 
 	wlr_log(WLR_INFO, "Started integrated video player: %s (resume at %.1fs)", url, resume_pos);
 }
@@ -901,7 +901,8 @@ media_view_load_backdrop(MediaItem *item, int target_w, int target_h)
 		return;
 
 	crop_x = (scaled_w - target_w) / 2;
-	crop_y = (scaled_h - target_h) / 2;
+	crop_y = (scaled_h - target_h) / 2 - 100;
+	if (crop_y < 0) crop_y = 0;
 
 	cropped = gdk_pixbuf_new_subpixbuf(scaled, crop_x, crop_y, target_w, target_h);
 	if (!cropped) {
@@ -1257,7 +1258,7 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 		}
 	}
 
-	/* Sjanger - with text wrapping */
+	/* Genre - with text wrapping */
 	if (item->genres[0]) {
 		/* Bold label */
 		struct wlr_scene_tree *label_tree = wlr_scene_tree_create(view->tree);
@@ -1265,7 +1266,7 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 			wlr_scene_node_set_position(&label_tree->node, text_x, text_y);
 			StatusModule mod = {0};
 			mod.tree = label_tree;
-			tray_render_label(&mod, "Sjanger:", 0, 16, label_color);
+			tray_render_label(&mod, "Genre:", 0, 16, label_color);
 		}
 		text_y += 22;
 		/* Value with word wrap at 250px */

@@ -470,8 +470,22 @@ rendermon(struct wl_listener *listener, void *data)
 	 * Use last vsync time if available for precise frame pacing,
 	 * otherwise fall back to current time */
 	if (active_videoplayer && active_videoplayer->state == VP_STATE_PLAYING) {
-		uint64_t vsync_time = (m->last_present_ns > 0) ? m->last_present_ns : frame_start_ns;
+		/* Use current wall-clock time, not last_present_ns.
+		 * last_present_ns only updates on page flips.  When the video player
+		 * skips a vsync (e.g. 24fps on 60Hz), no commit/flip occurs, so
+		 * last_present_ns stays stale.  Using it would freeze the frame-pacing
+		 * logic and require unrelated damage (mouse move) to unstick it.
+		 * frame_start_ns is captured at the top of rendermon via
+		 * get_time_ns() and advances on every call — including vblank-
+		 * scheduled ones — so frame pacing never stalls. */
+		uint64_t vsync_time = frame_start_ns;
 		videoplayer_present_frame(active_videoplayer, vsync_time);
+		/* Keep the rendering loop alive: the video player needs continuous
+		 * vsyncs even when no new video frame is presented this cycle
+		 * (e.g., 24fps content on a 60Hz display skips most vsyncs).
+		 * Without this, the output stops scheduling frame events once
+		 * there is no scene damage, causing the video to freeze. */
+		wlr_output_schedule_frame(m->wlr_output);
 	}
 
 	/*
@@ -2436,9 +2450,10 @@ render_playback_osd(void)
 	bar_w = m->m.width;
 	bar_y = m->m.height - bar_h;
 
-	/* Create tree if needed */
+	/* Create tree if needed - must be on LyrBlock (same as video player)
+	 * so it renders above the video. Later siblings render on top. */
 	if (!playback_osd_tree) {
-		playback_osd_tree = wlr_scene_tree_create(layers[LyrOverlay]);
+		playback_osd_tree = wlr_scene_tree_create(layers[LyrBlock]);
 		if (!playback_osd_tree)
 			return;
 	}
@@ -2591,18 +2606,19 @@ render_playback_osd(void)
 		}
 	}
 
-	/* Position and show */
+	/* Position and show - raise to top so OSD is always above video player */
+	wlr_scene_node_raise_to_top(&playback_osd_tree->node);
 	wlr_scene_node_set_position(&playback_osd_tree->node, m->m.x, m->m.y + bar_y);
 	wlr_scene_node_set_enabled(&playback_osd_tree->node, 1);
 	osd_visible = 1;
 
-	/* Schedule auto-hide (1 second) when playing, not paused */
+	/* Schedule auto-hide (2 seconds) when playing, not paused */
 	int is_playing = active_videoplayer && active_videoplayer->state == VP_STATE_PLAYING;
 	if (is_playing && osd_menu_open == OSD_MENU_NONE) {
 		if (!playback_osd_timer)
 			playback_osd_timer = wl_event_loop_add_timer(event_loop, playback_osd_timeout, NULL);
 		if (playback_osd_timer)
-			wl_event_source_timer_update(playback_osd_timer, 1000);
+			wl_event_source_timer_update(playback_osd_timer, 2000);
 	}
 }
 

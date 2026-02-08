@@ -386,14 +386,6 @@ static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, 
         frame_interval = 41666666;  /* ~24fps */
     }
 
-    /* Check A/V sync - only for frame skipping when far behind */
-    int action = get_frame_action(vp, next_frame_pts_us);
-    if (action == 1) {
-        /* Video is far behind audio - skip this frame */
-        vp->last_frame_ns = vsync_time_ns;
-        return 2;  /* Skip and get next frame immediately */
-    }
-
     /*
      * Cadence-locked frame timing: advance last_frame_ns by the ideal step
      * instead of anchoring to vsync_time_ns. This prevents drift accumulation
@@ -406,6 +398,7 @@ static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, 
     uint64_t step;
     uint64_t display_interval_ns = vp->display_interval_ns > 0
         ? vp->display_interval_ns : frame_interval / 5;
+    int time_to_present = 0;
 
     if (vp->frame_repeat_mode == 2) {
         /* 3:2 pulldown for 24fps on 60Hz */
@@ -413,13 +406,7 @@ static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, 
         step = vp->display_interval_ns * target_repeats;
 
         if (elapsed_ns >= step - vp->display_interval_ns / 4) {
-            vp->current_repeat++;
-            /* Cadence-locked: advance by ideal step, not to wall clock */
-            vp->last_frame_ns += step;
-            /* Safety snap: if more than 2 steps behind, reset to now */
-            if (vsync_time_ns > vp->last_frame_ns + step * 2)
-                vp->last_frame_ns = vsync_time_ns;
-            return 1;
+            time_to_present = 1;
         }
     } else if (vp->frame_repeat_mode == 1 && vp->frame_repeat_count > 0 &&
                vp->display_interval_ns > 0) {
@@ -428,10 +415,7 @@ static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, 
         step = (uint64_t)vp->frame_repeat_count * vp->display_interval_ns;
 
         if (elapsed_ns >= step - vp->display_interval_ns / 3) {
-            vp->last_frame_ns += step;
-            if (vsync_time_ns > vp->last_frame_ns + step * 2)
-                vp->last_frame_ns = vsync_time_ns;
-            return 1;
+            time_to_present = 1;
         }
     } else {
         /* Frame-interval mode (VRR, and non-clean ratios like 23.976@120Hz).
@@ -442,14 +426,36 @@ static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, 
         uint64_t tolerance = display_interval_ns / 2;
 
         if (elapsed_ns + tolerance >= step) {
-            vp->last_frame_ns += step;
-            if (vsync_time_ns > vp->last_frame_ns + step * 2)
-                vp->last_frame_ns = vsync_time_ns;
-            return 1;
+            time_to_present = 1;
         }
     }
 
-    return 0;
+    if (!time_to_present) {
+        return 0;
+    }
+
+    /* Timing says it's time for a new frame.
+     * Check A/V sync for frame skipping (only at video framerate, not every vsync,
+     * so recovery_frames countdown is properly paced). */
+    int action = get_frame_action(vp, next_frame_pts_us);
+    if (action == 1) {
+        /* Video is far behind audio - skip this frame */
+        vp->last_frame_ns = vsync_time_ns;
+        return 2;  /* Skip and get next frame immediately */
+    }
+
+    /* Present the frame */
+    if (vp->frame_repeat_mode == 2) {
+        vp->current_repeat++;
+    }
+    vp->last_frame_ns += step;
+    /* If we've fallen more than one step behind wall clock (e.g., after brief
+     * queue exhaustion or a compositor hiccup), snap forward to avoid rapid
+     * catch-up where multiple frames would be presented at consecutive vsyncs.
+     * One step of slack allows the normal cadence to absorb minor jitter. */
+    if (vsync_time_ns > vp->last_frame_ns + step)
+        vp->last_frame_ns = vsync_time_ns;
+    return 1;
 }
 
 /* ================================================================
@@ -463,11 +469,37 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
     if (!vp || vp->state != VP_STATE_PLAYING)
         return;
 
-    /* Periodically check if audio stream needs recovery (every ~1 second at 60Hz).
+    /* Check if audio thread requested a timing reset (e.g., after BT reconnection).
+     * This ensures video frame presentation resumes immediately even if the old
+     * timing state would have delayed presentation. */
+    if (vp->audio.needs_timing_reset) {
+        vp->audio.needs_timing_reset = 0;
+        vp->last_frame_ns = 0;
+        vp->current_repeat = 0;
+        fprintf(stderr, "[videoplayer] Frame timing reset (audio state change)\n");
+    }
+
+    /* Periodically check if audio stream needs recovery (every ~0.5 second at 60Hz).
      * This handles Bluetooth controller reconnection etc. without blocking. */
-    if (++recovery_check_counter >= 60) {
+    if (++recovery_check_counter >= 30) {
         recovery_check_counter = 0;
         videoplayer_audio_check_recovery(vp);
+    }
+
+    /* Video stall detector: if frames are available but we haven't presented
+     * any frame for >500ms, force-reset timing. This catches edge cases where
+     * the frame pacing logic gets stuck (e.g., after audio device changes). */
+    if (vp->last_present_time_ns > 0 &&
+        vsync_time_ns > vp->last_present_time_ns + 500000000ULL) {
+        pthread_mutex_lock(&vp->frame_mutex);
+        int has_frames = vp->frames_queued > 0;
+        pthread_mutex_unlock(&vp->frame_mutex);
+
+        if (has_frames) {
+            fprintf(stderr, "[videoplayer] Video stall detected (>500ms), forcing timing reset\n");
+            vp->last_frame_ns = 0;
+            vp->current_repeat = 0;
+        }
     }
 
     struct wlr_buffer *buffer = NULL;
@@ -546,6 +578,7 @@ present_buffer:
     if (buffer) {
         videoplayer_update_frame_buffer(vp, buffer);
         wlr_buffer_drop(buffer);  /* Scene holds its own reference */
+        vp->last_present_time_ns = vsync_time_ns;
     }
 }
 
@@ -623,6 +656,8 @@ void videoplayer_set_visible(VideoPlayer *vp, int visible)
         return;
 
     wlr_scene_node_set_enabled(&vp->tree->node, visible);
+    if (visible)
+        wlr_scene_node_raise_to_top(&vp->tree->node);
 }
 
 void videoplayer_set_fullscreen_size(VideoPlayer *vp, int width, int height)
@@ -673,6 +708,7 @@ void videoplayer_setup_display_mode(VideoPlayer *vp, float display_hz, int vrr_c
 
     /* Reset timing state for clean start */
     vp->last_frame_ns = 0;
+    vp->last_present_time_ns = 0;
     vp->current_repeat = 0;
     vp->av_sync_offset_us = 0;
 }

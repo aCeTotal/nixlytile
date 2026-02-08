@@ -208,6 +208,9 @@ typedef struct VideoPlayerAudio {
     int recovery_frames;           /* Frames to wait after audio recovery before using A/V sync */
     volatile int stream_interrupted; /* Set when stream is interrupted (controller reconnect, etc.) */
     volatile int audio_recreating;   /* Set while background thread is recreating audio stream */
+    volatile int needs_timing_reset; /* Set by audio thread to tell render thread to reset frame timing */
+    int write_stall_count;           /* Consecutive buffer-full writes (stall detection for decode thread) */
+    int reactivate_attempts;         /* Attempts to reactivate stream before RECREATE */
 
     /* Passthrough mode */
     int passthrough_mode;          /* IEC61937 for TrueHD/Atmos */
@@ -326,6 +329,7 @@ typedef struct VideoPlayer {
 
     /* Frame pacing */
     uint64_t last_frame_ns;
+    uint64_t last_present_time_ns;         /* Wall-clock time of last actual frame presentation */
     uint64_t frame_interval_ns;
     uint64_t display_interval_ns;          /* Display refresh interval */
     int64_t av_sync_offset_us;

@@ -119,6 +119,7 @@ void videoplayer_play(VideoPlayer *vp)
      * the cadence-locked timing to either skip ahead or wait.
      * No busy-wait: present_frame() handles empty queue gracefully. */
     vp->last_frame_ns = 0;
+    vp->last_present_time_ns = 0;
     vp->current_repeat = 0;
 
     vp->state = VP_STATE_PLAYING;

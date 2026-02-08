@@ -277,6 +277,10 @@ static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
 
         /* Signal render thread to use timing-based playback immediately */
         vp->audio.stream_interrupted = 1;
+        /* Tell render thread to reset frame timing so video never stalls */
+        vp->audio.needs_timing_reset = 1;
+        /* Reset reactivation counter for staged recovery */
+        vp->audio.reactivate_attempts = 0;
 
         ring_buffer_clear(&vp->audio.ring);
 
@@ -289,8 +293,7 @@ static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
         vp->audio.last_clock = 0;
         vp->audio.last_audio_pts = 0;
         vp->audio.stall_count = 0;
-        /* Set recovery frames - wait for audio to stabilize before using A/V sync again */
-        vp->audio.recovery_frames = 60;  /* ~1 second at 60Hz for better stability */
+        vp->audio.recovery_frames = 15;
         pthread_mutex_unlock(&vp->audio.lock);
     }
 
@@ -300,7 +303,7 @@ static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
      * Immediately reactivating causes STREAMING<->PAUSED oscillation that
      * destabilizes PipeWire. Instead, the recovery mechanism in
      * videoplayer_audio_check_recovery() handles reconnection after PipeWire
-     * has fully stabilized. */
+     * has fully stabilized (with staged reactivation → recreate). */
 
     /* Handle UNCONNECTED state - stream was disconnected, need to try reconnecting */
     if (state == PW_STREAM_STATE_UNCONNECTED && old != PW_STREAM_STATE_CONNECTING) {
@@ -314,10 +317,21 @@ static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
         fprintf(stderr, "[audio] Stream resumed streaming, video will resync gradually\n");
         /* Clear interrupted flag - audio is streaming again */
         vp->audio.stream_interrupted = 0;
+        vp->audio.write_stall_count = 0;
+        vp->audio.reactivate_attempts = 0;
+        /* Tell render thread to reset frame timing for immediate video resume */
+        vp->audio.needs_timing_reset = 1;
+
+        /* Flush ring buffer for clean audio restart */
+        ring_buffer_clear(&vp->audio.ring);
 
         /* Reset sync state for clean restart */
         pthread_mutex_lock(&vp->audio.lock);
-        vp->audio.recovery_frames = 60;  /* Allow gradual resync */
+        vp->audio.audio_pts_us = 0;
+        vp->audio.base_pts_us = 0;
+        vp->audio.audio_written_samples = 0;
+        vp->audio.audio_played_samples = 0;
+        vp->audio.recovery_frames = 15;
         pthread_mutex_unlock(&vp->audio.lock);
     }
 }
@@ -364,7 +378,7 @@ static void *audio_cmd_thread_func(void *arg)
 
         switch (cmd.type) {
         case AUDIO_CMD_PLAY:
-            if (vp->audio.stream && vp->audio.loop && !vp->audio.stream_interrupted) {
+            if (vp->audio.stream && vp->audio.loop) {
                 pw_thread_loop_lock(vp->audio.loop);
                 pw_stream_set_active(vp->audio.stream, true);
                 pw_thread_loop_unlock(vp->audio.loop);
@@ -521,6 +535,9 @@ int videoplayer_audio_init(VideoPlayer *vp)
     vp->audio.recovery_frames = 0;
     vp->audio.stream_interrupted = 0;
     vp->audio.audio_recreating = 0;
+    vp->audio.needs_timing_reset = 0;
+    vp->audio.write_stall_count = 0;
+    vp->audio.reactivate_attempts = 0;
 
     /* Initialize ring buffer */
     if (ring_buffer_init(&vp->audio.ring, AUDIO_RING_BUFFER_SIZE) < 0) {
@@ -740,15 +757,19 @@ void videoplayer_audio_cleanup(VideoPlayer *vp)
 
 /*
  * Check if audio stream needs recovery and attempt to restore it.
- * This should be called periodically (e.g., from present_frame ~every second).
+ * Called periodically from the render thread (~every 0.5s).
  * Returns: 0 = no action needed, 1 = recovery in progress, -1 = recovery failed
+ *
+ * Staged recovery:
+ *   1s: Try pw_stream_set_active(true) — handles simple PipeWire pause/resume
+ *   2s: Full RECREATE — handles stream destruction / device change
  *
  * IMPORTANT: This function is non-blocking — it sends a command via pipe
  * to the audio command thread which handles the actual PipeWire recreation.
  */
 int videoplayer_audio_check_recovery(VideoPlayer *vp)
 {
-    /* Track how long we've been interrupted (called ~every second from render thread) */
+    /* Track how long we've been interrupted (called ~every 0.5s from render thread) */
     static int interrupted_ticks = 0;
 
     if (!vp)
@@ -766,9 +787,22 @@ int videoplayer_audio_check_recovery(VideoPlayer *vp)
     if (vp->audio.stream_interrupted) {
         interrupted_ticks++;
 
-        /* After ~5 seconds of continuous interruption, send RECREATE command */
-        if (interrupted_ticks >= 5) {
-            fprintf(stderr, "[audio] Stream interrupted for %d seconds, sending RECREATE command\n",
+        /* Stage 1: After ~1 second, try reactivating the existing stream.
+         * This handles the common case where PipeWire paused the stream
+         * during BT device routing and just needs it set active again. */
+        if (interrupted_ticks == 2 && vp->audio.reactivate_attempts < 2) {
+            fprintf(stderr, "[audio] Trying stream reactivation (attempt %d)\n",
+                    vp->audio.reactivate_attempts + 1);
+            vp->audio.reactivate_attempts++;
+
+            AudioCmd cmd = { .type = AUDIO_CMD_PLAY };
+            audio_cmd_send(vp, &cmd);
+        }
+
+        /* Stage 2: After ~2 seconds, do a full RECREATE.
+         * The stream is probably dead — destroy and rebuild. */
+        if (interrupted_ticks >= 4) {
+            fprintf(stderr, "[audio] Stream interrupted for %d ticks, sending RECREATE command\n",
                     interrupted_ticks);
             interrupted_ticks = 0;
 
@@ -958,10 +992,24 @@ int videoplayer_audio_queue_frame(VideoPlayer *vp, AVFrame *frame)
     }
 
     if (written < (size_t)out_size) {
-        /* Buffer full - this is normal, caller should retry later */
+        /* Buffer full - check if this is a sustained stall (e.g., Bluetooth device
+         * reconnecting). PipeWire may stop consuming audio before firing
+         * on_stream_state_changed. Detect this early to prevent the decode thread
+         * from stalling on audio retries and starving video frame production. */
+        vp->audio.write_stall_count++;
+        if (vp->audio.write_stall_count >= 3) {
+            fprintf(stderr, "[audio] Ring buffer stall detected (%d consecutive full writes)"
+                    " - triggering early interruption for smooth video\n",
+                    vp->audio.write_stall_count);
+            vp->audio.stream_interrupted = 1;
+            vp->audio.write_stall_count = 0;
+            return 0;  /* Drop frame immediately - video continues smoothly */
+        }
         return 1;
     }
 
+    /* Successful write - reset stall counter */
+    vp->audio.write_stall_count = 0;
     return 0;
 }
 
@@ -988,6 +1036,9 @@ void videoplayer_audio_flush(VideoPlayer *vp)
     vp->audio.stall_count = 0;
     vp->audio.recovery_frames = 0;
     vp->audio.stream_interrupted = 0;
+    vp->audio.needs_timing_reset = 0;
+    vp->audio.write_stall_count = 0;
+    vp->audio.reactivate_attempts = 0;
     pthread_mutex_unlock(&vp->audio.lock);
 
     /* Reset resampler if present */
