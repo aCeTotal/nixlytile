@@ -772,15 +772,6 @@ struct wl_event_source *retro_anim_timer = NULL;
 
 
 /* Server info with priority for multi-server deduplication */
-typedef struct {
-	char url[256];
-	char server_id[64];
-	char server_name[128];
-	int priority;       /* Local: 1000+rating, Remote: rating */
-	int is_local;       /* Auto-discovered on local network */
-	int is_configured;  /* From config file */
-} MediaServer;
-
 MediaServer media_servers[MAX_MEDIA_SERVERS];
 int media_server_count = 0;
 
@@ -1503,16 +1494,7 @@ handlesig(int signo)
 
 
 
-int __attribute__((unused))
-node_contains_client(LayoutNode *node, Client *c)
-{
-	if (!node)
-		return 0;
-	if (node->is_client_node)
-		return node->client == c;
-	else
-		return node_contains_client(node->left, c) || node_contains_client(node->right, c);
-}
+/* node_contains_client moved to layout.c */
 
 
 
@@ -2056,8 +2038,6 @@ char *runtime_spawn_cmds[MAX_KEYS];
 int runtime_spawn_cmd_count = 0;
 
 /* ========== Runtime Monitor Configuration ========== */
-#define MAX_MONITORS 16
-
 RuntimeMonitorConfig runtime_monitors[MAX_MONITORS];
 int runtime_monitor_count = 0;
 
@@ -2065,12 +2045,6 @@ int runtime_monitor_count = 0;
 int monitor_master_set = 0;  /* Track if master was explicitly configured */
 
 /* Function lookup for keybindings */
-typedef struct {
-	const char *name;
-	void (*func)(const Arg *);
-	int arg_type; /* 0=none, 1=int, 2=uint, 3=float, 4=spawn */
-} FuncEntry;
-
 const FuncEntry func_table[] = {
 	{ "quit",              quit,              0 },
 	{ "killclient",        killclient,        0 },
@@ -2603,16 +2577,7 @@ spawn(const Arg *arg)
 
 /* Handle keyboard input when stats panel is visible */
 
-void
-__attribute__((unused)) togglesticky(const Arg *arg)
-{
-	Client *c = focustop(selmon);
-
-	if (!c)
-		return;
-
-	setsticky(c, !c->issticky);
-}
+/* togglesticky moved to client.c */
 
 
 

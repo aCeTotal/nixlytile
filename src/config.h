@@ -305,6 +305,8 @@ const Key default_keys[] = {
 	CHVT(7), CHVT(8), CHVT(9), CHVT(10), CHVT(11), CHVT(12),
 };
 
+const size_t default_keys_count = LENGTH(default_keys);
+
 /* Pointer to active keybindings (runtime or default) */
 const Key *keys = default_keys;
 size_t keys_count = LENGTH(default_keys);

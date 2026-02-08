@@ -6,7 +6,7 @@ include config.mk
 SRC = src
 
 # flags for compiling
-CPPFLAGS_EXTRA = -I$(SRC) -I. -DWLR_USE_UNSTABLE -D_POSIX_C_SOURCE=200809L \
+CPPFLAGS_EXTRA = -I$(SRC) -I$(SRC)/videoplayer -I. -DWLR_USE_UNSTABLE -D_POSIX_C_SOURCE=200809L \
 	-DVERSION=\"$(VERSION)\" $(XWAYLAND)
 DEVCFLAGS = -g -Wpedantic -Wall -Wextra -Wdeclaration-after-statement \
 	-Wno-unused-parameter -Wshadow -Wunused-macros -Werror=strict-prototypes \
@@ -87,17 +87,18 @@ layer.o: $(SRC)/layer.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 
 # Video player modules
+VP_DIR = $(SRC)/videoplayer
 VP_CFLAGS = $(NLCFLAGS) -Wno-declaration-after-statement
 
-videoplayer.o: $(SRC)/videoplayer.c $(SRC)/videoplayer.h
+videoplayer.o: $(VP_DIR)/videoplayer.c $(VP_DIR)/videoplayer.h
 	$(CC) $(CPPFLAGS) $(VP_CFLAGS) -o $@ -c $<
-videoplayer_decode.o: $(SRC)/videoplayer_decode.c $(SRC)/videoplayer.h
+videoplayer_decode.o: $(VP_DIR)/videoplayer_decode.c $(VP_DIR)/videoplayer.h
 	$(CC) $(CPPFLAGS) $(VP_CFLAGS) -o $@ -c $<
-videoplayer_render.o: $(SRC)/videoplayer_render.c $(SRC)/videoplayer.h
+videoplayer_render.o: $(VP_DIR)/videoplayer_render.c $(VP_DIR)/videoplayer.h
 	$(CC) $(CPPFLAGS) $(VP_CFLAGS) -o $@ -c $<
-videoplayer_audio.o: $(SRC)/videoplayer_audio.c $(SRC)/videoplayer.h
+videoplayer_audio.o: $(VP_DIR)/videoplayer_audio.c $(VP_DIR)/videoplayer.h
 	$(CC) $(CPPFLAGS) $(VP_CFLAGS) -o $@ -c $<
-videoplayer_ui.o: $(SRC)/videoplayer_ui.c $(SRC)/videoplayer.h
+videoplayer_ui.o: $(VP_DIR)/videoplayer_ui.c $(VP_DIR)/videoplayer.h
 	$(CC) $(CPPFLAGS) $(VP_CFLAGS) -o $@ -c $<
 
 # wayland-scanner generated protocol headers (output into src/)
@@ -133,7 +134,7 @@ clean:
 
 dist: clean
 	mkdir -p nixlytile-$(VERSION)
-	cp -R LICENSE* Makefile CHANGELOG.md README.md config.mk protocols \
+	cp -R Makefile README.md config.mk protocols \
 		nixlytile.1 nixlytile.desktop images src \
 		nixlytile-$(VERSION)
 	tar -caf nixlytile-$(VERSION).tar.gz nixlytile-$(VERSION)

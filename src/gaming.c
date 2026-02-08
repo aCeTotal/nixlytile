@@ -1,6 +1,10 @@
-/* gaming.c - Auto-extracted from nixlytile.c */
 #include "nixlytile.h"
 #include "client.h"
+#include "game_launch_params.h"
+
+const char *retro_console_names[] = {
+	"NES", "SNES", "Nintendo 64", "GameCube", "Wii", "Switch"
+};
 
 void
 pc_gaming_cache_update_start(void)

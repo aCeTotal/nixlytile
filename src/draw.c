@@ -1,6 +1,87 @@
-/* draw.c - Auto-extracted from nixlytile.c */
 #include "nixlytile.h"
 #include "client.h"
+
+void
+drawrect(struct wlr_scene_tree *parent, int x, int y,
+		int width, int height, const float color[static 4])
+{
+	struct wlr_scene_rect *r;
+	float col[4];
+
+	if (!parent || width <= 0 || height <= 0)
+		return;
+
+	col[0] = color[0];
+	col[1] = color[1];
+	col[2] = color[2];
+	col[3] = color[3];
+
+	r = wlr_scene_rect_create(parent, width, height, col);
+	if (r)
+		wlr_scene_node_set_position(&r->node, x, y);
+}
+
+void
+drawhoverrect(struct wlr_scene_tree *parent, int x, int y,
+		int width, int height, const float color[static 4], float fade)
+{
+	struct wlr_scene_rect *r;
+	float col[4];
+
+	if (!parent || width <= 0 || height <= 0)
+		return;
+
+	if (fade < 0.0f)
+		fade = 0.0f;
+	if (fade > 1.0f)
+		fade = 1.0f;
+
+	col[0] = color[0];
+	col[1] = color[1];
+	col[2] = color[2];
+	col[3] = color[3] * fade;
+
+	r = wlr_scene_rect_create(parent, width, height, col);
+	if (r)
+		wlr_scene_node_set_position(&r->node, x, y);
+}
+
+void
+drawroundedrect(struct wlr_scene_tree *parent, int x, int y,
+		int width, int height, const float color[static 4])
+{
+	int radius, yy, inset_top, inset_bottom, inset, start, h, w;
+	struct wlr_scene_rect *r;
+
+	if (!parent || width <= 0 || height <= 0)
+		return;
+
+	radius = MIN(4, MIN(width, height) / 4);
+
+	yy = 0;
+	while (yy < height) {
+		inset_top = radius ? MAX(0, radius - yy) : 0;
+		inset_bottom = radius ? MAX(0, radius - ((height - 1) - yy)) : 0;
+		inset = MAX(inset_top, inset_bottom);
+		start = yy;
+
+		while (yy < height) {
+			inset_top = radius ? MAX(0, radius - yy) : 0;
+			inset_bottom = radius ? MAX(0, radius - ((height - 1) - yy)) : 0;
+			if (MAX(inset_top, inset_bottom) != inset)
+				break;
+			yy++;
+		}
+
+		h = yy - start;
+		w = width - 2 * inset;
+		if (h > 0 && w > 0) {
+			r = wlr_scene_rect_create(parent, w, h, color);
+			if (r)
+				wlr_scene_node_set_position(&r->node, x + inset, y + start);
+		}
+	}
+}
 
 void
 pixman_buffer_destroy(struct wlr_buffer *wlr_buffer)

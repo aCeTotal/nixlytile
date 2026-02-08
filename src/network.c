@@ -1,4 +1,3 @@
-/* network.c - Auto-extracted from nixlytile.c */
 #include "nixlytile.h"
 #include "client.h"
 
@@ -1208,7 +1207,7 @@ wifi_scan_timer_cb(void *data)
 
 void request_vpn_scan(void);
 
-static void
+void
 net_menu_open(Monitor *m)
 {
 	const int offset = statusbar_module_padding;

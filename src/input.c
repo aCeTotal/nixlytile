@@ -1,4 +1,3 @@
-/* input.c - Auto-extracted from nixlytile.c */
 #include "nixlytile.h"
 #include "client.h"
 
@@ -1370,19 +1369,7 @@ subtree_bounds(LayoutNode *node, Monitor *m, struct wlr_box *out)
 	return 1;
 }
 
-__attribute__((unused)) LayoutNode *
-ancestor_split(LayoutNode *node, int want_vert)
-{
-	if (!node)
-		return NULL;
-	node = node->split_node;
-	while (node) {
-		if (!node->is_client_node && node->is_split_vertically == (unsigned int)want_vert)
-			return node;
-		node = node->split_node;
-	}
-	return NULL;
-}
+/* ancestor_split moved to layout.c */
 
 LayoutNode *
 closest_split_node(LayoutNode *client_node, int want_vert, double pointer,

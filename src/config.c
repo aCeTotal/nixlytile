@@ -1,4 +1,3 @@
-/* config.c - Auto-extracted from nixlytile.c */
 #include "nixlytile.h"
 #include "client.h"
 
@@ -737,7 +736,7 @@ init_keybindings(void)
 		wlr_log(WLR_INFO, "Using %zu custom keybindings from config", keys_count);
 	} else {
 		keys = default_keys;
-		keys_count = LENGTH(default_keys);
+		keys_count = default_keys_count;
 		wlr_log(WLR_INFO, "Using %zu default keybindings", keys_count);
 	}
 }

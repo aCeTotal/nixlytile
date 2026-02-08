@@ -1,4 +1,3 @@
-/* statusbar.c - Auto-extracted from nixlytile.c */
 #include "nixlytile.h"
 #include "client.h"
 
@@ -1528,7 +1527,7 @@ kill_processes_with_name(const char *name)
 		size_t len;
 		int is_num = 1;
 
-		if (!ent->d_name || !*ent->d_name)
+		if (!*ent->d_name)
 			continue;
 		for (size_t i = 0; ent->d_name[i]; i++) {
 			if (!isdigit((unsigned char)ent->d_name[i])) {
@@ -2385,7 +2384,7 @@ schedule_ram_popup_refresh(uint32_t ms)
 int readulong(const char *path, unsigned long long *out);
 
 /* Battery Popup Functions */
-static void
+void
 read_battery_info(BatteryPopup *p)
 {
 	char path[PATH_MAX];
@@ -3707,7 +3706,7 @@ set_backlight_percent(double percent)
 {
 	unsigned long long max, target;
 	FILE *fp;
-	int attempted = 0;
+	int attempted __attribute__((unused)) = 0;
 
 	if (percent < 0.0)
 		percent = 0.0;
@@ -5176,7 +5175,7 @@ init_status_refresh_tasks(void)
 	uint64_t now = monotonic_msec();
 	uint32_t offset = 100;
 
-	for (size_t i = 0; i < LENGTH(status_tasks); i++) {
+	for (size_t i = 0; i < STATUS_TASKS_COUNT; i++) {
 		status_tasks[i].next_due_ms = now + offset;
 		offset += 200; /* stagger initial fills to avoid clumping */
 	}
@@ -5187,7 +5186,7 @@ trigger_status_task_now(void (*fn)(void))
 {
 	uint64_t now = monotonic_msec();
 
-	for (size_t i = 0; i < LENGTH(status_tasks); i++) {
+	for (size_t i = 0; i < STATUS_TASKS_COUNT; i++) {
 		if (status_tasks[i].fn == fn) {
 			status_tasks[i].next_due_ms = now;
 			schedule_next_status_refresh();
@@ -5199,7 +5198,7 @@ trigger_status_task_now(void (*fn)(void))
 void
 set_status_task_due(void (*fn)(void), uint64_t due_ms)
 {
-	for (size_t i = 0; i < LENGTH(status_tasks); i++) {
+	for (size_t i = 0; i < STATUS_TASKS_COUNT; i++) {
 		if (status_tasks[i].fn == fn) {
 			status_tasks[i].next_due_ms = due_ms;
 			schedule_next_status_refresh();
@@ -5234,7 +5233,7 @@ schedule_next_status_refresh(void)
 	if (!status_cpu_timer || game_mode_active || htpc_mode_active)
 		return;
 
-	for (size_t i = 0; i < LENGTH(status_tasks); i++) {
+	for (size_t i = 0; i < STATUS_TASKS_COUNT; i++) {
 		if (status_tasks[i].next_due_ms < next)
 			next = status_tasks[i].next_due_ms;
 	}
@@ -5284,7 +5283,7 @@ updatestatuscpu(void *data)
 		return 0;
 	}
 
-	for (size_t i = 0; i < LENGTH(status_tasks); i++) {
+	for (size_t i = 0; i < STATUS_TASKS_COUNT; i++) {
 		if (!found || status_tasks[i].next_due_ms < best) {
 			best = status_tasks[i].next_due_ms;
 			chosen = i;

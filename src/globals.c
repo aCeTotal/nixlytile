@@ -100,7 +100,7 @@ struct wl_event_source *status_hover_timer;
 struct wl_event_source *cache_update_timer;
 struct wl_event_source *nixpkgs_cache_timer;
 int cache_update_phase = 0; /* 0=git, 1=file, 2=gaming, then restart */
-StatusRefreshTask status_tasks[] = {
+StatusRefreshTask status_tasks[STATUS_TASKS_COUNT] = {
 	{ refreshstatuscpu, 0 },
 	{ refreshstatusram, 0 },
 	{ refreshstatuslight, 0 },
@@ -111,6 +111,10 @@ StatusRefreshTask status_tasks[] = {
 	{ refreshstatusicons, 0 },
 };
 int status_rng_seeded;
+
+const float net_menu_row_bg[4] = {0.15f, 0.15f, 0.15f, 1.0f};
+const float net_menu_row_bg_hover[4] = {0.25f, 0.25f, 0.25f, 1.0f};
+const double status_icon_scale = 2.0;
 
 /* Gamepad controller support */
 struct wl_list gamepads;  /* GamepadDevice.link */
@@ -471,7 +475,7 @@ const double mic_max_percent = 150.0;
 double cpu_last_core_percent[MAX_CPU_CORES];
 int cpu_core_count;
 char sysicons_text[64] = "Tray";
-DesktopEntry desktop_entries[4096];
+DesktopEntry desktop_entries[DESKTOP_ENTRIES_MAX];
 int desktop_entry_count = 0;
 int desktop_entries_loaded = 0;
 

@@ -1,4 +1,3 @@
-/* popup.c - Auto-extracted from nixlytile.c */
 #include "nixlytile.h"
 #include "client.h"
 

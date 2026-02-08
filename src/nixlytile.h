@@ -119,7 +119,7 @@
 #endif
 
 #include "util.h"
-#include "videoplayer.h"
+#include "videoplayer/videoplayer.h"
 
 /* ── macros ────────────────────────────────────────────────────────── */
 #ifndef MAX
@@ -196,6 +196,25 @@
 #define MEDIA_DISCOVERY_MAGIC "NIXLY_DISCOVER"
 #define MEDIA_DISCOVERY_RESPONSE "NIXLY_SERVER"
 #define MAX_MEDIA_SERVERS 16
+
+typedef struct {
+	char url[256];
+	char server_id[64];
+	char server_name[128];
+	int priority;
+	int is_local;
+	int is_configured;
+} MediaServer;
+
+extern MediaServer media_servers[MAX_MEDIA_SERVERS];
+extern int media_server_count;
+extern uint64_t last_discovery_attempt_ms;
+extern char discovered_server_url[256];
+extern int server_discovered;
+extern const char *osk_layout_lower[OSK_ROWS][OSK_COLS];
+extern const char *osk_layout_upper[OSK_ROWS][OSK_COLS];
+
+#define MAX_MONITORS 16
 
 /* ── joystick navigation constants ────────────────────────────────── */
 #define JOYSTICK_NAV_INITIAL_DELAY 300  /* ms before repeat starts */
@@ -348,6 +367,22 @@ typedef struct {
 	int transform;
 } RuntimeMonitorConfig;
 
+extern RuntimeMonitorConfig runtime_monitors[MAX_MONITORS];
+extern int runtime_monitor_count;
+extern int monitor_master_set;
+
+typedef struct {
+	const char *name;
+	void (*func)(const Arg *);
+	int arg_type;
+} FuncEntry;
+
+extern const FuncEntry func_table[];
+MonitorPosition config_parse_monitor_position(const char *pos);
+xkb_keysym_t config_parse_keysym(const char *name);
+void add_media_server(const char *url, int is_local, int is_configured);
+extern const struct wlr_buffer_impl pixman_buffer_impl;
+
 typedef struct {
 	struct wlr_pointer_constraint_v1 *constraint;
 	struct wl_listener destroy;
@@ -479,6 +514,8 @@ typedef struct {
 	uint64_t next_due_ms;
 } StatusRefreshTask;
 
+#define STATUS_TASKS_COUNT 8
+
 typedef struct TrayMenuEntry {
 	int id;
 	int enabled;
@@ -506,6 +543,24 @@ typedef struct {
 	struct wl_list entries;
 } TrayMenu;
 
+typedef struct {
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_tree *bg;
+	struct wlr_scene_tree *submenu_tree;
+	struct wlr_scene_tree *submenu_bg;
+	int width, height;
+	int submenu_width, submenu_height;
+	int x, y;
+	int submenu_x, submenu_y;
+	int visible;
+	int submenu_visible;
+	int hover;
+	int submenu_hover;
+	int submenu_type;
+	struct wl_list entries;
+	struct wl_list networks;
+} NetMenu;
+
 struct StatusBar {
 	struct wlr_scene_tree *tree;
 	struct wlr_box area;
@@ -527,23 +582,7 @@ struct StatusBar {
 	BatteryPopup battery_popup;
 	NetPopup net_popup;
 	TrayMenu tray_menu;
-	struct {
-		struct wlr_scene_tree *tree;
-		struct wlr_scene_tree *bg;
-		struct wlr_scene_tree *submenu_tree;
-		struct wlr_scene_tree *submenu_bg;
-		int width, height;
-		int submenu_width, submenu_height;
-		int x, y;
-		int submenu_x, submenu_y;
-		int visible;
-		int submenu_visible;
-		int hover;
-		int submenu_hover;
-		int submenu_type;
-		struct wl_list entries;
-		struct wl_list networks;
-	} net_menu;
+	NetMenu net_menu;
 	StatusModule sysicons;
 };
 
@@ -1221,6 +1260,7 @@ extern enum libinput_config_tap_button_map button_map;
 extern unsigned int modkey;
 extern unsigned int monitorkey;
 extern const Key default_keys[];
+extern const size_t default_keys_count;
 extern const Key *keys;
 extern size_t keys_count;
 extern const Button buttons[];
@@ -1232,7 +1272,9 @@ extern char spawn_cmd_filemanager[MAX_SPAWN_CMD];
 extern char spawn_cmd_launcher[MAX_SPAWN_CMD];
 extern const char *netcmd[];
 extern const char *btopcmd[];
-extern Key runtime_keys[];
+extern Key runtime_keys[MAX_KEYS];
+extern char *runtime_spawn_cmds[MAX_KEYS];
+extern int runtime_spawn_cmd_count;
 extern size_t runtime_keys_count;
 extern char wallpaper_path[PATH_MAX];
 extern char autostart_cmd[4096];
@@ -1330,7 +1372,7 @@ extern struct wl_event_source *status_hover_timer;
 extern struct wl_event_source *cache_update_timer;
 extern struct wl_event_source *nixpkgs_cache_timer;
 extern int cache_update_phase;
-extern StatusRefreshTask status_tasks[];
+extern StatusRefreshTask status_tasks[STATUS_TASKS_COUNT];
 extern int status_rng_seeded;
 
 /* gamepad */
@@ -1347,6 +1389,8 @@ extern struct wl_event_source *gamepad_cursor_timer;
 /* HTPC */
 extern int htpc_page_pcgaming;
 extern int htpc_page_retrogaming;
+extern struct wl_event_source *retro_anim_timer;
+extern const char *dgpu_programs[];
 extern int htpc_page_movies;
 extern int htpc_page_tvshows;
 extern int htpc_page_nrk;
@@ -1622,7 +1666,8 @@ extern const double volume_max_percent;
 extern const double mic_step;
 extern const double mic_max_percent;
 extern char sysicons_text[64];
-extern DesktopEntry desktop_entries[];
+#define DESKTOP_ENTRIES_MAX 4096
+extern DesktopEntry desktop_entries[DESKTOP_ENTRIES_MAX];
 extern int desktop_entry_count;
 extern int desktop_entries_loaded;
 extern NixpkgEntry nixpkg_entries[];
@@ -1710,6 +1755,17 @@ struct wlr_buffer *statusbar_scaled_buffer_from_argb32(const uint32_t *data,
 struct wlr_buffer *statusbar_scaled_buffer_from_argb32_raw(const uint32_t *data,
 		int width, int height, int target_h);
 struct wlr_buffer *statusbar_buffer_from_glyph(const struct fcft_glyph *glyph);
+struct wlr_buffer *statusbar_buffer_from_pixbuf(GdkPixbuf *pixbuf, int target_h, int *out_w, int *out_h);
+struct wlr_buffer *statusbar_buffer_from_wifi100(int target_h, int *out_w, int *out_h);
+void recolor_wifi100_pixbuf(GdkPixbuf *pixbuf);
+int tray_load_svg_pixbuf(const char *path, int desired_h, GdkPixbuf **out_pixbuf);
+int has_svg_extension(const char *path);
+int pathisdir(const char *path);
+int strip_symbolic_suffix(const char *name, char *out, size_t outlen);
+void tray_consider_icon(const char *path, int size_hint, int desired_h,
+	char *best_path, int *best_diff, int *found);
+void add_icon_root_paths(const char *base, const char *themes[], size_t theme_count,
+	char pathbufs[][PATH_MAX], size_t *pathcount, size_t max_paths);
 int loadstatusfont(void);
 void freestatusfont(void);
 int status_text_width(const char *text);
@@ -1935,6 +1991,7 @@ void refreshstatusicons(void);
 void refreshstatustags(void);
 void init_status_refresh_tasks(void);
 void seed_status_rng(void);
+uint32_t random_status_delay_ms(void);
 double volume_last_for_type(int is_headset);
 void volume_cache_store(int is_headset, double level, int muted, uint64_t now);
 int status_should_render(StatusModule *module, int barh, const char *text,
@@ -2040,6 +2097,7 @@ void tray_menu_hide_all(void);
 int tray_item_get_menu_path(TrayItem *it);
 int tray_menu_open_at(Monitor *m, TrayItem *it, int icon_x);
 void tray_menu_render(Monitor *m);
+void tray_menu_draw_text(struct wlr_scene_tree *tree, const char *text, int x, int y, int row_h);
 TrayMenuEntry *tray_menu_entry_at(Monitor *m, int lx, int ly);
 int tray_menu_send_event(TrayMenu *menu, TrayMenuEntry *entry, uint32_t time_msec);
 int tray_menu_parse_node(sd_bus_message *msg, TrayMenu *menu, int depth, int max_depth);
@@ -2073,6 +2131,8 @@ void connect_wifi_ssid(const char *ssid);
 void transfer_status_menus(Monitor *from, Monitor *to);
 int net_menu_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 void vpn_connections_clear(void);
+VpnConnection *vpn_connection_at_index(int idx);
+WifiNetwork *wifi_network_at_index(int idx);
 int vpn_scan_event_cb(int fd, uint32_t mask, void *data);
 void vpn_connect(const char *name);
 int vpn_connect_event_cb(int fd, uint32_t mask, void *data);
@@ -2179,6 +2239,7 @@ int cache_update_timer_cb(void *data);
 void schedule_cache_update_timer(void);
 
 /* gaming.c */
+GameEntry *pc_gaming_merge_sorted(GameEntry *a, GameEntry *b);
 void pc_gaming_show(Monitor *m);
 void pc_gaming_hide(Monitor *m);
 void pc_gaming_hide_all(void);
@@ -2213,6 +2274,10 @@ void set_dgpu_env(void);
 void set_steam_env(void);
 
 /* media.c */
+MediaGridView *media_get_view(Monitor *m, MediaViewType type);
+const char *get_media_server_url(void);
+int get_all_media_servers(MediaServer **servers);
+int parse_media_json(const char *buffer, const char *server_url, MediaItem **out_items, int max_items);
 void media_view_show(Monitor *m, MediaViewType type);
 void media_view_hide(Monitor *m, MediaViewType type);
 void media_view_hide_all(void);
