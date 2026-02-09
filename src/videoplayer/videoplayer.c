@@ -25,6 +25,7 @@ extern void videoplayer_set_subtitle_track(VideoPlayer *vp, int index);
 extern void videoplayer_cycle_audio_track(VideoPlayer *vp);
 extern void videoplayer_cycle_subtitle_track(VideoPlayer *vp);
 extern void videoplayer_cleanup_scene(VideoPlayer *vp);
+extern void videoplayer_cleanup_control_bar(VideoPlayer *vp);
 extern void videoplayer_show_control_bar(VideoPlayer *vp);
 extern void videoplayer_hide_control_bar(VideoPlayer *vp);
 
@@ -91,6 +92,9 @@ void videoplayer_destroy(VideoPlayer *vp)
     /* Cleanup subtitles */
     videoplayer_subtitle_cleanup(vp);
 
+    /* Cleanup control bar (removes hide timer) */
+    videoplayer_cleanup_control_bar(vp);
+
     /* Cleanup scene */
     videoplayer_cleanup_scene(vp);
 
@@ -121,6 +125,14 @@ void videoplayer_play(VideoPlayer *vp)
     vp->last_frame_ns = 0;
     vp->last_present_time_ns = 0;
     vp->current_repeat = 0;
+
+    /* Reset A/V sync tracking for clean start after pause.
+     * Use a large recovery window (max ~2.5s at 24fps) but exit early
+     * once audio clock is confirmed progressing. This prevents stuttering
+     * when audio takes time to reactivate after pause/resume. */
+    vp->audio.stall_count = 0;
+    vp->audio.last_audio_pts = 0;
+    vp->audio.recovery_frames = 60;
 
     vp->state = VP_STATE_PLAYING;
 
@@ -168,6 +180,9 @@ void videoplayer_stop(VideoPlayer *vp)
 
     if (vp->state == VP_STATE_IDLE)
         return;
+
+    /* Hide control bar before closing */
+    videoplayer_hide_control_bar(vp);
 
     /* Close the file - this stops decode thread */
     videoplayer_close(vp);

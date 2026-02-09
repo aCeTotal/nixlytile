@@ -21,15 +21,78 @@ modal_hide_all(void)
 		modal_hide(m);
 }
 
+static void
+modal_show_internal(Monitor *m, int tab_index, int cycling)
+{
+	ModalOverlay *mo;
+	int mw, mh, w, h, x, y;
+	int min_w = 300, min_h = 200;
+	int max_w = 1400, max_h = 800;
+
+	mw = m->w.width > 0 ? m->w.width : m->m.width;
+	mh = m->w.height > 0 ? m->w.height : m->m.height;
+	w = mw > 0 ? (int)(mw * 0.8) : 1100;
+	h = mh > 0 ? (int)(mh * 0.6) : 500;
+	if (w < min_w) w = min_w;
+	if (h < min_h) h = min_h;
+	if (w > max_w) w = max_w;
+	if (h > max_h) h = max_h;
+
+	x = m->m.x + (m->m.width - w) / 2;
+	y = m->m.y + (m->m.height - h) / 2;
+	if (x < m->m.x) x = m->m.x;
+	if (y < m->m.y) y = m->m.y;
+
+	mo = &m->modal;
+	mo->width = w;
+	mo->height = h;
+	mo->x = x;
+	mo->y = y;
+
+	if (!mo->bg)
+		mo->bg = wlr_scene_tree_create(mo->tree);
+	if (mo->bg) {
+		struct wlr_scene_node *node, *tmp;
+		wl_list_for_each_safe(node, tmp, &mo->bg->children, link)
+			wlr_scene_node_destroy(node);
+		drawrect(mo->bg, 0, 0, w, h, statusbar_popup_bg);
+	}
+
+	wlr_scene_node_set_position(&mo->tree->node, x, y);
+	wlr_scene_node_set_enabled(&mo->tree->node, 1);
+
+	if (cycling)
+		mo->active_idx = (mo->active_idx + 1) % 3;
+	else
+		mo->active_idx = tab_index;
+
+	modal_file_search_stop(m);
+	modal_file_search_clear_results(m);
+	modal_git_search_stop(m);
+	modal_git_search_clear_results(m);
+	mo->file_search_last[0] = '\0';
+	mo->git_search_last[0] = '\0';
+	mo->git_search_done = 0;
+	for (int i = 0; i < 3; i++) {
+		mo->search[i][0] = '\0';
+		mo->search_len[i] = 0;
+		mo->search_rendered[i][0] = '\0';
+		mo->selected[i] = -1;
+		mo->scroll[i] = 0;
+	}
+	mo->search_field_tree = NULL;
+	mo->render_pending = 0;
+	if (mo->render_timer)
+		wl_event_source_timer_update(mo->render_timer, 0);
+	mo->file_search_fallback = 0;
+	mo->visible = 1;
+}
+
 void
 modal_show(const Arg *arg)
 {
 	Monitor *m = selmon ? selmon : xytomon(cursor->x, cursor->y);
 	Monitor *vm = modal_visible_monitor();
-	ModalOverlay *mo;
-	int mw, mh, w, h, x, y;
-	int min_w = 300, min_h = 200;
-	int max_w = 1400, max_h = 800;
 	int cycling = 0;
 
 	(void)arg;
@@ -42,69 +105,7 @@ modal_show(const Arg *arg)
 	else if (vm == m)
 		cycling = 1;
 
-	mw = m->w.width > 0 ? m->w.width : m->m.width;
-	mh = m->w.height > 0 ? m->w.height : m->m.height;
-	w = mw > 0 ? (int)(mw * 0.8) : 1100;
-	h = mh > 0 ? (int)(mh * 0.6) : 500;
-	if (w < min_w)
-		w = min_w;
-	if (h < min_h)
-		h = min_h;
-	if (w > max_w)
-		w = max_w;
-	if (h > max_h)
-		h = max_h;
-
-	x = m->m.x + (m->m.width - w) / 2;
-	y = m->m.y + (m->m.height - h) / 2;
-	if (x < m->m.x)
-		x = m->m.x;
-	if (y < m->m.y)
-		y = m->m.y;
-
-	mo = &m->modal;
-	mo->width = w;
-	mo->height = h;
-	mo->x = x;
-	mo->y = y;
-
-	if (!mo->bg)
-		mo->bg = wlr_scene_tree_create(mo->tree);
-	if (mo->bg) {
-		struct wlr_scene_node *node, *tmp;
-		wl_list_for_each_safe(node, tmp, &mo->bg->children, link)
-			wlr_scene_node_destroy(node);
-		drawrect(mo->bg, 0, 0, w, h, statusbar_popup_bg);
-	}
-
-	wlr_scene_node_set_position(&mo->tree->node, x, y);
-	wlr_scene_node_set_enabled(&mo->tree->node, 1);
-	if (cycling)
-		mo->active_idx = (mo->active_idx + 1) % 3;
-	else if (mo->active_idx < 0 || mo->active_idx > 2)
-		mo->active_idx = 0;
-	else
-		mo->active_idx = 0;
-	modal_file_search_stop(m);
-	modal_file_search_clear_results(m);
-	modal_git_search_stop(m);
-	modal_git_search_clear_results(m);
-	mo->file_search_last[0] = '\0';
-	mo->git_search_last[0] = '\0';
-	mo->git_search_done = 0;
-	for (int i = 0; i < 3; i++) {
-		mo->search[i][0] = '\0';
-		mo->search_len[i] = 0;
-		mo->search_rendered[i][0] = '\0';
-		mo->selected[i] = -1;
-		mo->scroll[i] = 0;
-	}
-	mo->search_field_tree = NULL; /* will be recreated on render */
-	mo->render_pending = 0;
-	if (mo->render_timer)
-		wl_event_source_timer_update(mo->render_timer, 0);
-	mo->file_search_fallback = 0;
-	mo->visible = 1;
+	modal_show_internal(m, 0, cycling);
 	modal_update_results(m);
 	modal_render(m);
 }
@@ -113,10 +114,6 @@ void
 modal_show_files(const Arg *arg)
 {
 	Monitor *m = selmon ? selmon : xytomon(cursor->x, cursor->y);
-	ModalOverlay *mo;
-	int mw, mh, w, h, x, y;
-	int min_w = 300, min_h = 200;
-	int max_w = 1400, max_h = 800;
 
 	(void)arg;
 
@@ -124,59 +121,7 @@ modal_show_files(const Arg *arg)
 		return;
 
 	modal_hide_all();
-
-	mw = m->w.width > 0 ? m->w.width : m->m.width;
-	mh = m->w.height > 0 ? m->w.height : m->m.height;
-	w = mw > 0 ? (int)(mw * 0.8) : 1100;
-	h = mh > 0 ? (int)(mh * 0.6) : 500;
-	if (w < min_w) w = min_w;
-	if (h < min_h) h = min_h;
-	if (w > max_w) w = max_w;
-	if (h > max_h) h = max_h;
-
-	x = m->m.x + (m->m.width - w) / 2;
-	y = m->m.y + (m->m.height - h) / 2;
-	if (x < m->m.x) x = m->m.x;
-	if (y < m->m.y) y = m->m.y;
-
-	mo = &m->modal;
-	mo->width = w;
-	mo->height = h;
-	mo->x = x;
-	mo->y = y;
-
-	if (!mo->bg)
-		mo->bg = wlr_scene_tree_create(mo->tree);
-	if (mo->bg) {
-		struct wlr_scene_node *node, *tmp;
-		wl_list_for_each_safe(node, tmp, &mo->bg->children, link)
-			wlr_scene_node_destroy(node);
-		drawrect(mo->bg, 0, 0, w, h, statusbar_popup_bg);
-	}
-
-	wlr_scene_node_set_position(&mo->tree->node, x, y);
-	wlr_scene_node_set_enabled(&mo->tree->node, 1);
-	mo->active_idx = 1; /* File search tab */
-	modal_file_search_stop(m);
-	modal_file_search_clear_results(m);
-	modal_git_search_stop(m);
-	modal_git_search_clear_results(m);
-	mo->file_search_last[0] = '\0';
-	mo->git_search_last[0] = '\0';
-	mo->git_search_done = 0;
-	for (int i = 0; i < 3; i++) {
-		mo->search[i][0] = '\0';
-		mo->search_len[i] = 0;
-		mo->search_rendered[i][0] = '\0';
-		mo->selected[i] = -1;
-		mo->scroll[i] = 0;
-	}
-	mo->search_field_tree = NULL;
-	mo->render_pending = 0;
-	if (mo->render_timer)
-		wl_event_source_timer_update(mo->render_timer, 0);
-	mo->file_search_fallback = 0;
-	mo->visible = 1;
+	modal_show_internal(m, 1, 0);
 	modal_update_results(m);
 	modal_render(m);
 }
@@ -185,10 +130,6 @@ void
 modal_show_git(const Arg *arg)
 {
 	Monitor *m = selmon ? selmon : xytomon(cursor->x, cursor->y);
-	ModalOverlay *mo;
-	int mw, mh, w, h, x, y;
-	int min_w = 300, min_h = 200;
-	int max_w = 1400, max_h = 800;
 
 	(void)arg;
 
@@ -196,60 +137,8 @@ modal_show_git(const Arg *arg)
 		return;
 
 	modal_hide_all();
-
-	mw = m->w.width > 0 ? m->w.width : m->m.width;
-	mh = m->w.height > 0 ? m->w.height : m->m.height;
-	w = mw > 0 ? (int)(mw * 0.8) : 1100;
-	h = mh > 0 ? (int)(mh * 0.6) : 500;
-	if (w < min_w) w = min_w;
-	if (h < min_h) h = min_h;
-	if (w > max_w) w = max_w;
-	if (h > max_h) h = max_h;
-
-	x = m->m.x + (m->m.width - w) / 2;
-	y = m->m.y + (m->m.height - h) / 2;
-	if (x < m->m.x) x = m->m.x;
-	if (y < m->m.y) y = m->m.y;
-
-	mo = &m->modal;
-	mo->width = w;
-	mo->height = h;
-	mo->x = x;
-	mo->y = y;
-
-	if (!mo->bg)
-		mo->bg = wlr_scene_tree_create(mo->tree);
-	if (mo->bg) {
-		struct wlr_scene_node *node, *tmp;
-		wl_list_for_each_safe(node, tmp, &mo->bg->children, link)
-			wlr_scene_node_destroy(node);
-		drawrect(mo->bg, 0, 0, w, h, statusbar_popup_bg);
-	}
-
-	wlr_scene_node_set_position(&mo->tree->node, x, y);
-	wlr_scene_node_set_enabled(&mo->tree->node, 1);
-	mo->active_idx = 2; /* Git projects tab */
-	modal_file_search_stop(m);
-	modal_file_search_clear_results(m);
-	modal_git_search_stop(m);
-	modal_git_search_clear_results(m);
-	mo->file_search_last[0] = '\0';
-	mo->git_search_last[0] = '\0';
-	mo->git_search_done = 0;
-	for (int i = 0; i < 3; i++) {
-		mo->search[i][0] = '\0';
-		mo->search_len[i] = 0;
-		mo->search_rendered[i][0] = '\0';
-		mo->selected[i] = -1;
-		mo->scroll[i] = 0;
-	}
-	mo->search_field_tree = NULL;
-	mo->render_pending = 0;
-	if (mo->render_timer)
-		wl_event_source_timer_update(mo->render_timer, 0);
-	mo->file_search_fallback = 0;
-	mo->visible = 1;
-	modal_git_search_start(m); /* Start git search immediately */
+	modal_show_internal(m, 2, 0);
+	modal_git_search_start(m);
 	modal_render(m);
 }
 
@@ -1973,14 +1862,9 @@ modal_render(Monitor *m)
 		wl_list_for_each_safe(node, tmp, &mo->bg->children, link)
 			wlr_scene_node_destroy(node);
 		drawrect(mo->bg, 0, 0, mo->width, mo->height, statusbar_popup_bg);
-		/* 1px black border */
 		if (mo->width > 0 && mo->height > 0) {
 			const float border[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-			drawrect(mo->bg, 0, 0, mo->width, 1, border); /* top */
-			drawrect(mo->bg, 0, mo->height - 1, mo->width, 1, border); /* bottom */
-			drawrect(mo->bg, 0, 0, 1, mo->height, border); /* left */
-			if (mo->width > 1)
-				drawrect(mo->bg, mo->width - 1, 0, 1, mo->height, border); /* right */
+			draw_border(mo->bg, 0, 0, mo->width, mo->height, 1, border);
 		}
 	}
 
@@ -2025,10 +1909,7 @@ modal_render(Monitor *m)
 
 		if (mo->bg) {
 			drawrect(mo->bg, field_x, field_y, field_w, field_h, field_bg);
-			drawrect(mo->bg, field_x, field_y, field_w, 1, border);
-			drawrect(mo->bg, field_x, field_y + field_h - 1, field_w, 1, border);
-			drawrect(mo->bg, field_x, field_y, 1, field_h, border);
-			drawrect(mo->bg, field_x + field_w - 1, field_y, 1, field_h, border);
+			draw_border(mo->bg, field_x, field_y, field_w, field_h, 1, border);
 		}
 
 		/* Use search_field_tree so it's consistent with modal_render_search_field */

@@ -136,187 +136,247 @@ void config_expand_path(const char *src, char *dst, size_t dstlen)
 	}
 }
 
+/* Modifier name-to-value lookup table */
+static const struct {
+	const char *name;
+	unsigned int mod;
+} mod_map[] = {
+	{"super", WLR_MODIFIER_LOGO}, {"logo", WLR_MODIFIER_LOGO}, {"mod4", WLR_MODIFIER_LOGO},
+	{"alt", WLR_MODIFIER_ALT}, {"mod1", WLR_MODIFIER_ALT},
+	{"ctrl", WLR_MODIFIER_CTRL}, {"control", WLR_MODIFIER_CTRL},
+	{"shift", WLR_MODIFIER_SHIFT},
+};
+
+static unsigned int
+parse_modifier_value(const char *name)
+{
+	for (size_t i = 0; i < LENGTH(mod_map); i++) {
+		if (strcasecmp(name, mod_map[i].name) == 0)
+			return mod_map[i].mod;
+	}
+	return 0;
+}
+
+/* Config entry types for the lookup table */
+enum ConfigType {
+	CFG_INT,
+	CFG_UINT,
+	CFG_FLOAT,
+	CFG_DOUBLE,
+	CFG_COLOR,
+	CFG_STR,
+	CFG_CUSTOM,
+};
+
+typedef struct {
+	const char *key;
+	enum ConfigType type;
+	void *ptr;
+	size_t str_size;
+	void (*custom)(const char *value);
+} ConfigEntry;
+
+static void config_set_font(const char *value)
+{
+	char *copy = config_strdup(value);
+	char *saveptr, *tok;
+	int i = 0;
+	for (tok = strtok_r(copy, ",", &saveptr); tok && i < 7; tok = strtok_r(NULL, ",", &saveptr)) {
+		config_trim(tok);
+		if (*tok) runtime_fonts[i++] = config_strdup(tok);
+	}
+	runtime_fonts[i] = NULL;
+	runtime_fonts_set = 1;
+	free(copy);
+}
+
+static void config_set_modkey(const char *value)
+{
+	unsigned int m = parse_modifier_value(value);
+	if (m) modkey = m;
+}
+
+static void config_set_monitorkey(const char *value)
+{
+	unsigned int m = parse_modifier_value(value);
+	if (m) monitorkey = m;
+}
+
+static void config_set_htpc_wallpaper(const char *value)
+{
+	config_expand_path(value, htpc_wallpaper_path, sizeof(htpc_wallpaper_path));
+}
+
+static void config_set_client_download(const char *value)
+{
+	client_download_mbps = atoi(value);
+	if (client_download_mbps < 1) client_download_mbps = 1;
+	wlr_log(WLR_INFO, "Client download bandwidth: %d Mbps", client_download_mbps);
+}
+
+static void config_set_media_server(const char *value)
+{
+	if (*value) {
+		char url[256];
+		if (strncmp(value, "http://", 7) != 0 && strncmp(value, "https://", 8) != 0) {
+			snprintf(url, sizeof(url), "http://%s", value);
+		} else {
+			strncpy(url, value, sizeof(url) - 1);
+			url[sizeof(url) - 1] = '\0';
+		}
+		add_media_server(url, 0, 1);
+	}
+}
+
+static void config_set_accel_profile(const char *value)
+{
+	if (strcmp(value, "flat") == 0) accel_profile = LIBINPUT_CONFIG_ACCEL_PROFILE_FLAT;
+	else if (strcmp(value, "adaptive") == 0) accel_profile = LIBINPUT_CONFIG_ACCEL_PROFILE_ADAPTIVE;
+}
+
+static void config_set_scroll_method(const char *value)
+{
+	if (strcmp(value, "none") == 0) scroll_method = LIBINPUT_CONFIG_SCROLL_NO_SCROLL;
+	else if (strcmp(value, "2fg") == 0) scroll_method = LIBINPUT_CONFIG_SCROLL_2FG;
+	else if (strcmp(value, "edge") == 0) scroll_method = LIBINPUT_CONFIG_SCROLL_EDGE;
+	else if (strcmp(value, "button") == 0) scroll_method = LIBINPUT_CONFIG_SCROLL_ON_BUTTON_DOWN;
+}
+
+static void config_set_click_method(const char *value)
+{
+	if (strcmp(value, "none") == 0) click_method = LIBINPUT_CONFIG_CLICK_METHOD_NONE;
+	else if (strcmp(value, "button_areas") == 0) click_method = LIBINPUT_CONFIG_CLICK_METHOD_BUTTON_AREAS;
+	else if (strcmp(value, "clickfinger") == 0) click_method = LIBINPUT_CONFIG_CLICK_METHOD_CLICKFINGER;
+}
+
+static void config_set_button_map(const char *value)
+{
+	if (strcmp(value, "lrm") == 0) button_map = LIBINPUT_CONFIG_TAP_MAP_LRM;
+	else if (strcmp(value, "lmr") == 0) button_map = LIBINPUT_CONFIG_TAP_MAP_LMR;
+}
+
+static const ConfigEntry config_entries[] = {
+	/* General appearance */
+	{"sloppyfocus",              CFG_INT,    &sloppyfocus,              0, NULL},
+	{"bypass_surface_visibility",CFG_INT,    &bypass_surface_visibility,0, NULL},
+	{"smartgaps",                CFG_INT,    &smartgaps,                0, NULL},
+	{"gaps",                     CFG_INT,    &gaps,                     0, NULL},
+	{"gappx",                    CFG_UINT,   &gappx,                   0, NULL},
+	{"borderpx",                 CFG_UINT,   &borderpx,                0, NULL},
+	{"lock_cursor",              CFG_INT,    &lock_cursor,              0, NULL},
+	/* nixlytile mode */
+	{"nixlytile_mode",           CFG_INT,    &nixlytile_mode,          0, NULL},
+	{"htpc_wallpaper",           CFG_CUSTOM, NULL, 0, config_set_htpc_wallpaper},
+	{"htpc_page_pcgaming",       CFG_INT,    &htpc_page_pcgaming,      0, NULL},
+	{"htpc_page_retrogaming",    CFG_INT,    &htpc_page_retrogaming,   0, NULL},
+	{"htpc_page_movies",         CFG_INT,    &htpc_page_movies,        0, NULL},
+	{"htpc_page_tvshows",        CFG_INT,    &htpc_page_tvshows,       0, NULL},
+	{"htpc_page_quit",           CFG_INT,    &htpc_page_quit,          0, NULL},
+	/* Streaming */
+	{"client_download_mbps",     CFG_CUSTOM, NULL, 0, config_set_client_download},
+	{"media_server",             CFG_CUSTOM, NULL, 0, config_set_media_server},
+	/* PC Gaming services */
+	{"gaming_steam_enabled",     CFG_INT,    &gaming_service_enabled[GAMING_SERVICE_STEAM],   0, NULL},
+	{"gaming_heroic_enabled",    CFG_INT,    &gaming_service_enabled[GAMING_SERVICE_HEROIC],  0, NULL},
+	{"gaming_lutris_enabled",    CFG_INT,    &gaming_service_enabled[GAMING_SERVICE_LUTRIS],  0, NULL},
+	{"gaming_bottles_enabled",   CFG_INT,    &gaming_service_enabled[GAMING_SERVICE_BOTTLES], 0, NULL},
+	/* Colors */
+	{"rootcolor",                CFG_COLOR,  rootcolor,                 0, NULL},
+	{"bordercolor",              CFG_COLOR,  bordercolor,               0, NULL},
+	{"focuscolor",               CFG_COLOR,  focuscolor,                0, NULL},
+	{"urgentcolor",              CFG_COLOR,  urgentcolor,               0, NULL},
+	{"fullscreen_bg",            CFG_COLOR,  fullscreen_bg,             0, NULL},
+	/* Statusbar */
+	{"statusbar_height",         CFG_UINT,   &statusbar_height,         0, NULL},
+	{"statusbar_module_spacing", CFG_UINT,   &statusbar_module_spacing, 0, NULL},
+	{"statusbar_module_padding", CFG_UINT,   &statusbar_module_padding, 0, NULL},
+	{"statusbar_icon_text_gap",  CFG_UINT,   &statusbar_icon_text_gap,  0, NULL},
+	{"statusbar_top_gap",        CFG_UINT,   &statusbar_top_gap,        0, NULL},
+	{"statusbar_fg",             CFG_COLOR,  statusbar_fg,              0, NULL},
+	{"statusbar_bg",             CFG_COLOR,  statusbar_bg,              0, NULL},
+	{"statusbar_popup_bg",       CFG_COLOR,  statusbar_popup_bg,        0, NULL},
+	{"statusbar_volume_muted_fg",CFG_COLOR,  statusbar_volume_muted_fg, 0, NULL},
+	{"statusbar_mic_muted_fg",   CFG_COLOR,  statusbar_mic_muted_fg,    0, NULL},
+	{"statusbar_tag_bg",         CFG_COLOR,  statusbar_tag_bg,          0, NULL},
+	{"statusbar_tag_active_bg",  CFG_COLOR,  statusbar_tag_active_bg,   0, NULL},
+	{"statusbar_tag_hover_bg",   CFG_COLOR,  statusbar_tag_hover_bg,    0, NULL},
+	{"statusbar_hover_fade_ms",  CFG_INT,    &statusbar_hover_fade_ms,  0, NULL},
+	{"statusbar_tray_force_rgba",CFG_INT,    &statusbar_tray_force_rgba,0, NULL},
+	{"statusbar_font_spacing",   CFG_INT,    &statusbar_font_spacing,   0, NULL},
+	{"statusbar_font_force_color",CFG_INT,   &statusbar_font_force_color,0, NULL},
+	{"statusbar_workspace_padding",CFG_INT,  &statusbar_workspace_padding,0, NULL},
+	{"statusbar_workspace_spacing",CFG_INT,  &statusbar_workspace_spacing,0, NULL},
+	{"statusbar_thumb_height",   CFG_INT,    &statusbar_thumb_height,   0, NULL},
+	{"statusbar_thumb_gap",      CFG_INT,    &statusbar_thumb_gap,      0, NULL},
+	{"statusbar_thumb_window",   CFG_COLOR,  statusbar_thumb_window,    0, NULL},
+	{"statusbar_font",           CFG_CUSTOM, NULL, 0, config_set_font},
+	/* Keyboard */
+	{"repeat_delay",             CFG_INT,    &repeat_delay,             0, NULL},
+	{"repeat_rate",              CFG_INT,    &repeat_rate,              0, NULL},
+	/* Trackpad */
+	{"tap_to_click",             CFG_INT,    &tap_to_click,             0, NULL},
+	{"tap_and_drag",             CFG_INT,    &tap_and_drag,             0, NULL},
+	{"drag_lock",                CFG_INT,    &drag_lock,                0, NULL},
+	{"natural_scrolling",        CFG_INT,    &natural_scrolling,        0, NULL},
+	{"disable_while_typing",     CFG_INT,    &disable_while_typing,     0, NULL},
+	{"left_handed",              CFG_INT,    &left_handed,              0, NULL},
+	{"middle_button_emulation",  CFG_INT,    &middle_button_emulation,  0, NULL},
+	{"accel_speed",              CFG_DOUBLE, &accel_speed,              0, NULL},
+	{"accel_profile",            CFG_CUSTOM, NULL, 0, config_set_accel_profile},
+	{"scroll_method",            CFG_CUSTOM, NULL, 0, config_set_scroll_method},
+	{"click_method",             CFG_CUSTOM, NULL, 0, config_set_click_method},
+	{"button_map",               CFG_CUSTOM, NULL, 0, config_set_button_map},
+	/* Resizing */
+	{"resize_factor",            CFG_FLOAT,  &resize_factor,            0, NULL},
+	{"resize_interval_ms",       CFG_UINT,   &resize_interval_ms,       0, NULL},
+	{"resize_min_pixels",        CFG_DOUBLE, &resize_min_pixels,        0, NULL},
+	{"resize_ratio_epsilon",     CFG_FLOAT,  &resize_ratio_epsilon,     0, NULL},
+	{"modal_file_search_minlen", CFG_INT,    &modal_file_search_minlen, 0, NULL},
+	/* Wallpaper and autostart */
+	{"wallpaper",                CFG_STR,    wallpaper_path,            sizeof(wallpaper_path), NULL},
+	{"autostart",                CFG_STR,    autostart_cmd,             sizeof(autostart_cmd), NULL},
+	/* Modifier keys */
+	{"modkey",                   CFG_CUSTOM, NULL, 0, config_set_modkey},
+	{"monitorkey",               CFG_CUSTOM, NULL, 0, config_set_monitorkey},
+	/* Spawn commands */
+	{"terminal",                 CFG_STR,    spawn_cmd_terminal,        sizeof(spawn_cmd_terminal), NULL},
+	{"terminal_alt",             CFG_STR,    spawn_cmd_terminal_alt,    sizeof(spawn_cmd_terminal_alt), NULL},
+	{"browser",                  CFG_STR,    spawn_cmd_browser,         sizeof(spawn_cmd_browser), NULL},
+	{"filemanager",              CFG_STR,    spawn_cmd_filemanager,     sizeof(spawn_cmd_filemanager), NULL},
+	{"launcher",                 CFG_STR,    spawn_cmd_launcher,        sizeof(spawn_cmd_launcher), NULL},
+};
+
 void config_set_value(const char *key, const char *value)
 {
-	/* General appearance */
-	if (strcmp(key, "sloppyfocus") == 0) sloppyfocus = atoi(value);
-	else if (strcmp(key, "bypass_surface_visibility") == 0) bypass_surface_visibility = atoi(value);
-	else if (strcmp(key, "smartgaps") == 0) smartgaps = atoi(value);
-	else if (strcmp(key, "gaps") == 0) gaps = atoi(value);
-	else if (strcmp(key, "gappx") == 0) gappx = (unsigned int)atoi(value);
-	else if (strcmp(key, "borderpx") == 0) borderpx = (unsigned int)atoi(value);
-	else if (strcmp(key, "lock_cursor") == 0) lock_cursor = atoi(value);
+	for (size_t i = 0; i < LENGTH(config_entries); i++) {
+		const ConfigEntry *e = &config_entries[i];
+		if (strcmp(key, e->key) != 0)
+			continue;
 
-	/* nixlytile mode (1=desktop, 2=htpc) */
-	else if (strcmp(key, "nixlytile_mode") == 0) nixlytile_mode = atoi(value);
-	else if (strcmp(key, "htpc_wallpaper") == 0) {
-		config_expand_path(value, htpc_wallpaper_path, sizeof(htpc_wallpaper_path));
-	}
-	else if (strcmp(key, "htpc_page_pcgaming") == 0) htpc_page_pcgaming = atoi(value);
-	else if (strcmp(key, "htpc_page_retrogaming") == 0) htpc_page_retrogaming = atoi(value);
-	else if (strcmp(key, "htpc_page_movies") == 0) htpc_page_movies = atoi(value);
-	else if (strcmp(key, "htpc_page_tvshows") == 0) htpc_page_tvshows = atoi(value);
-	else if (strcmp(key, "htpc_page_quit") == 0) htpc_page_quit = atoi(value);
-
-	/* Client download bandwidth for streaming (Mbps) */
-	else if (strcmp(key, "client_download_mbps") == 0) {
-		client_download_mbps = atoi(value);
-		if (client_download_mbps < 1) client_download_mbps = 1;
-		wlr_log(WLR_INFO, "Client download bandwidth: %d Mbps", client_download_mbps);
-	}
-
-	/* Media server configuration (external servers, local always auto-discovered) */
-	else if (strcmp(key, "media_server") == 0) {
-		if (*value) {
-			char url[256];
-			/* Add http:// prefix if missing */
-			if (strncmp(value, "http://", 7) != 0 && strncmp(value, "https://", 8) != 0) {
-				snprintf(url, sizeof(url), "http://%s", value);
-			} else {
-				strncpy(url, value, sizeof(url) - 1);
-				url[sizeof(url) - 1] = '\0';
-			}
-			/* Add as external configured server (is_local=0, is_configured=1) */
-			add_media_server(url, 0, 1);
+		switch (e->type) {
+		case CFG_INT:
+			*(int *)e->ptr = atoi(value);
+			break;
+		case CFG_UINT:
+			*(unsigned int *)e->ptr = (unsigned int)atoi(value);
+			break;
+		case CFG_FLOAT:
+			*(float *)e->ptr = (float)atof(value);
+			break;
+		case CFG_DOUBLE:
+			*(double *)e->ptr = atof(value);
+			break;
+		case CFG_COLOR:
+			config_parse_color(value, (float *)e->ptr);
+			break;
+		case CFG_STR:
+			snprintf((char *)e->ptr, e->str_size, "%s", value);
+			break;
+		case CFG_CUSTOM:
+			if (e->custom) e->custom(value);
+			break;
 		}
-	}
-
-	/* PC Gaming services */
-	else if (strcmp(key, "gaming_steam_enabled") == 0) gaming_service_enabled[GAMING_SERVICE_STEAM] = atoi(value);
-	else if (strcmp(key, "gaming_heroic_enabled") == 0) gaming_service_enabled[GAMING_SERVICE_HEROIC] = atoi(value);
-	else if (strcmp(key, "gaming_lutris_enabled") == 0) gaming_service_enabled[GAMING_SERVICE_LUTRIS] = atoi(value);
-	else if (strcmp(key, "gaming_bottles_enabled") == 0) gaming_service_enabled[GAMING_SERVICE_BOTTLES] = atoi(value);
-
-	/* Colors */
-	else if (strcmp(key, "rootcolor") == 0) config_parse_color(value, rootcolor);
-	else if (strcmp(key, "bordercolor") == 0) config_parse_color(value, bordercolor);
-	else if (strcmp(key, "focuscolor") == 0) config_parse_color(value, focuscolor);
-	else if (strcmp(key, "urgentcolor") == 0) config_parse_color(value, urgentcolor);
-	else if (strcmp(key, "fullscreen_bg") == 0) config_parse_color(value, fullscreen_bg);
-
-	/* Statusbar */
-	else if (strcmp(key, "statusbar_height") == 0) statusbar_height = (unsigned int)atoi(value);
-	else if (strcmp(key, "statusbar_module_spacing") == 0) statusbar_module_spacing = (unsigned int)atoi(value);
-	else if (strcmp(key, "statusbar_module_padding") == 0) statusbar_module_padding = (unsigned int)atoi(value);
-	else if (strcmp(key, "statusbar_icon_text_gap") == 0) statusbar_icon_text_gap = (unsigned int)atoi(value);
-	else if (strcmp(key, "statusbar_top_gap") == 0) statusbar_top_gap = (unsigned int)atoi(value);
-	else if (strcmp(key, "statusbar_fg") == 0) config_parse_color(value, statusbar_fg);
-	else if (strcmp(key, "statusbar_bg") == 0) config_parse_color(value, statusbar_bg);
-	else if (strcmp(key, "statusbar_popup_bg") == 0) config_parse_color(value, statusbar_popup_bg);
-	else if (strcmp(key, "statusbar_volume_muted_fg") == 0) config_parse_color(value, statusbar_volume_muted_fg);
-	else if (strcmp(key, "statusbar_mic_muted_fg") == 0) config_parse_color(value, statusbar_mic_muted_fg);
-	else if (strcmp(key, "statusbar_tag_bg") == 0) config_parse_color(value, statusbar_tag_bg);
-	else if (strcmp(key, "statusbar_tag_active_bg") == 0) config_parse_color(value, statusbar_tag_active_bg);
-	else if (strcmp(key, "statusbar_tag_hover_bg") == 0) config_parse_color(value, statusbar_tag_hover_bg);
-	else if (strcmp(key, "statusbar_hover_fade_ms") == 0) statusbar_hover_fade_ms = atoi(value);
-	else if (strcmp(key, "statusbar_tray_force_rgba") == 0) statusbar_tray_force_rgba = atoi(value);
-	else if (strcmp(key, "statusbar_font_spacing") == 0) statusbar_font_spacing = atoi(value);
-	else if (strcmp(key, "statusbar_font_force_color") == 0) statusbar_font_force_color = atoi(value);
-	else if (strcmp(key, "statusbar_workspace_padding") == 0) statusbar_workspace_padding = atoi(value);
-	else if (strcmp(key, "statusbar_workspace_spacing") == 0) statusbar_workspace_spacing = atoi(value);
-	else if (strcmp(key, "statusbar_thumb_height") == 0) statusbar_thumb_height = atoi(value);
-	else if (strcmp(key, "statusbar_thumb_gap") == 0) statusbar_thumb_gap = atoi(value);
-	else if (strcmp(key, "statusbar_thumb_window") == 0) config_parse_color(value, statusbar_thumb_window);
-	else if (strcmp(key, "statusbar_font") == 0) {
-		/* Parse comma-separated fonts into runtime array */
-		char *copy = config_strdup(value);
-		char *saveptr, *tok;
-		int i = 0;
-		for (tok = strtok_r(copy, ",", &saveptr); tok && i < 7; tok = strtok_r(NULL, ",", &saveptr)) {
-			config_trim(tok);
-			if (*tok) runtime_fonts[i++] = config_strdup(tok);
-		}
-		runtime_fonts[i] = NULL;
-		runtime_fonts_set = 1;
-		free(copy);
-	}
-
-	/* Keyboard */
-	else if (strcmp(key, "repeat_delay") == 0) repeat_delay = atoi(value);
-	else if (strcmp(key, "repeat_rate") == 0) repeat_rate = atoi(value);
-
-	/* Trackpad */
-	else if (strcmp(key, "tap_to_click") == 0) tap_to_click = atoi(value);
-	else if (strcmp(key, "tap_and_drag") == 0) tap_and_drag = atoi(value);
-	else if (strcmp(key, "drag_lock") == 0) drag_lock = atoi(value);
-	else if (strcmp(key, "natural_scrolling") == 0) natural_scrolling = atoi(value);
-	else if (strcmp(key, "disable_while_typing") == 0) disable_while_typing = atoi(value);
-	else if (strcmp(key, "left_handed") == 0) left_handed = atoi(value);
-	else if (strcmp(key, "middle_button_emulation") == 0) middle_button_emulation = atoi(value);
-	else if (strcmp(key, "accel_speed") == 0) accel_speed = atof(value);
-	else if (strcmp(key, "accel_profile") == 0) {
-		if (strcmp(value, "flat") == 0) accel_profile = LIBINPUT_CONFIG_ACCEL_PROFILE_FLAT;
-		else if (strcmp(value, "adaptive") == 0) accel_profile = LIBINPUT_CONFIG_ACCEL_PROFILE_ADAPTIVE;
-	}
-	else if (strcmp(key, "scroll_method") == 0) {
-		if (strcmp(value, "none") == 0) scroll_method = LIBINPUT_CONFIG_SCROLL_NO_SCROLL;
-		else if (strcmp(value, "2fg") == 0) scroll_method = LIBINPUT_CONFIG_SCROLL_2FG;
-		else if (strcmp(value, "edge") == 0) scroll_method = LIBINPUT_CONFIG_SCROLL_EDGE;
-		else if (strcmp(value, "button") == 0) scroll_method = LIBINPUT_CONFIG_SCROLL_ON_BUTTON_DOWN;
-	}
-	else if (strcmp(key, "click_method") == 0) {
-		if (strcmp(value, "none") == 0) click_method = LIBINPUT_CONFIG_CLICK_METHOD_NONE;
-		else if (strcmp(value, "button_areas") == 0) click_method = LIBINPUT_CONFIG_CLICK_METHOD_BUTTON_AREAS;
-		else if (strcmp(value, "clickfinger") == 0) click_method = LIBINPUT_CONFIG_CLICK_METHOD_CLICKFINGER;
-	}
-	else if (strcmp(key, "button_map") == 0) {
-		if (strcmp(value, "lrm") == 0) button_map = LIBINPUT_CONFIG_TAP_MAP_LRM;
-		else if (strcmp(value, "lmr") == 0) button_map = LIBINPUT_CONFIG_TAP_MAP_LMR;
-	}
-
-	/* Resizing */
-	else if (strcmp(key, "resize_factor") == 0) resize_factor = (float)atof(value);
-	else if (strcmp(key, "resize_interval_ms") == 0) resize_interval_ms = (uint32_t)atoi(value);
-	else if (strcmp(key, "resize_min_pixels") == 0) resize_min_pixels = atof(value);
-	else if (strcmp(key, "resize_ratio_epsilon") == 0) resize_ratio_epsilon = (float)atof(value);
-	else if (strcmp(key, "modal_file_search_minlen") == 0) modal_file_search_minlen = atoi(value);
-
-	/* Wallpaper and autostart */
-	else if (strcmp(key, "wallpaper") == 0) {
-		/* Store wallpaper path - autostart_cmd is built in main() */
-		snprintf(wallpaper_path, sizeof(wallpaper_path), "%s", value);
-	}
-	else if (strcmp(key, "autostart") == 0) {
-		snprintf(autostart_cmd, sizeof(autostart_cmd), "%s", value);
-	}
-
-	/* Modifier keys */
-	else if (strcmp(key, "modkey") == 0) {
-		if (strcmp(value, "super") == 0 || strcmp(value, "logo") == 0 || strcmp(value, "mod4") == 0)
-			modkey = WLR_MODIFIER_LOGO;
-		else if (strcmp(value, "alt") == 0 || strcmp(value, "mod1") == 0)
-			modkey = WLR_MODIFIER_ALT;
-		else if (strcmp(value, "ctrl") == 0 || strcmp(value, "control") == 0)
-			modkey = WLR_MODIFIER_CTRL;
-		else if (strcmp(value, "shift") == 0)
-			modkey = WLR_MODIFIER_SHIFT;
-	}
-	else if (strcmp(key, "monitorkey") == 0) {
-		if (strcmp(value, "super") == 0 || strcmp(value, "logo") == 0 || strcmp(value, "mod4") == 0)
-			monitorkey = WLR_MODIFIER_LOGO;
-		else if (strcmp(value, "alt") == 0 || strcmp(value, "mod1") == 0)
-			monitorkey = WLR_MODIFIER_ALT;
-		else if (strcmp(value, "ctrl") == 0 || strcmp(value, "control") == 0)
-			monitorkey = WLR_MODIFIER_CTRL;
-		else if (strcmp(value, "shift") == 0)
-			monitorkey = WLR_MODIFIER_SHIFT;
-	}
-
-	/* Spawn commands */
-	else if (strcmp(key, "terminal") == 0) {
-		snprintf(spawn_cmd_terminal, sizeof(spawn_cmd_terminal), "%s", value);
-	}
-	else if (strcmp(key, "terminal_alt") == 0) {
-		snprintf(spawn_cmd_terminal_alt, sizeof(spawn_cmd_terminal_alt), "%s", value);
-	}
-	else if (strcmp(key, "browser") == 0) {
-		snprintf(spawn_cmd_browser, sizeof(spawn_cmd_browser), "%s", value);
-	}
-	else if (strcmp(key, "filemanager") == 0) {
-		snprintf(spawn_cmd_filemanager, sizeof(spawn_cmd_filemanager), "%s", value);
-	}
-	else if (strcmp(key, "launcher") == 0) {
-		snprintf(spawn_cmd_launcher, sizeof(spawn_cmd_launcher), "%s", value);
+		return;
 	}
 }
 
@@ -327,17 +387,12 @@ unsigned int config_parse_modifiers(const char *mods_str)
 	char *saveptr, *tok;
 
 	for (tok = strtok_r(copy, "+", &saveptr); tok; tok = strtok_r(NULL, "+", &saveptr)) {
+		unsigned int m;
 		config_trim(tok);
-		if (strcasecmp(tok, "super") == 0 || strcasecmp(tok, "logo") == 0 || strcasecmp(tok, "mod4") == 0)
-			mods |= WLR_MODIFIER_LOGO;
-		else if (strcasecmp(tok, "alt") == 0 || strcasecmp(tok, "mod1") == 0)
-			mods |= WLR_MODIFIER_ALT;
-		else if (strcasecmp(tok, "ctrl") == 0 || strcasecmp(tok, "control") == 0)
-			mods |= WLR_MODIFIER_CTRL;
-		else if (strcasecmp(tok, "shift") == 0)
-			mods |= WLR_MODIFIER_SHIFT;
-		else if (strcasecmp(tok, "mod") == 0)
+		if (strcasecmp(tok, "mod") == 0)
 			mods |= modkey;
+		else if ((m = parse_modifier_value(tok)) != 0)
+			mods |= m;
 	}
 	free(copy);
 	return mods;
@@ -440,22 +495,28 @@ int config_parse_binding(const char *line)
 
 int config_parse_transform(const char *str)
 {
-	if (!str || !*str || strcasecmp(str, "normal") == 0 || strcasecmp(str, "0") == 0)
+	static const struct { const char *name; int transform; } transform_map[] = {
+		{"normal",      WL_OUTPUT_TRANSFORM_NORMAL},
+		{"0",           WL_OUTPUT_TRANSFORM_NORMAL},
+		{"90",          WL_OUTPUT_TRANSFORM_90},
+		{"rotate-90",   WL_OUTPUT_TRANSFORM_90},
+		{"180",         WL_OUTPUT_TRANSFORM_180},
+		{"rotate-180",  WL_OUTPUT_TRANSFORM_180},
+		{"270",         WL_OUTPUT_TRANSFORM_270},
+		{"rotate-270",  WL_OUTPUT_TRANSFORM_270},
+		{"flipped",     WL_OUTPUT_TRANSFORM_FLIPPED},
+		{"flipped-90",  WL_OUTPUT_TRANSFORM_FLIPPED_90},
+		{"flipped-180", WL_OUTPUT_TRANSFORM_FLIPPED_180},
+		{"flipped-270", WL_OUTPUT_TRANSFORM_FLIPPED_270},
+	};
+
+	if (!str || !*str)
 		return WL_OUTPUT_TRANSFORM_NORMAL;
-	if (strcasecmp(str, "90") == 0 || strcasecmp(str, "rotate-90") == 0)
-		return WL_OUTPUT_TRANSFORM_90;
-	if (strcasecmp(str, "180") == 0 || strcasecmp(str, "rotate-180") == 0)
-		return WL_OUTPUT_TRANSFORM_180;
-	if (strcasecmp(str, "270") == 0 || strcasecmp(str, "rotate-270") == 0)
-		return WL_OUTPUT_TRANSFORM_270;
-	if (strcasecmp(str, "flipped") == 0)
-		return WL_OUTPUT_TRANSFORM_FLIPPED;
-	if (strcasecmp(str, "flipped-90") == 0)
-		return WL_OUTPUT_TRANSFORM_FLIPPED_90;
-	if (strcasecmp(str, "flipped-180") == 0)
-		return WL_OUTPUT_TRANSFORM_FLIPPED_180;
-	if (strcasecmp(str, "flipped-270") == 0)
-		return WL_OUTPUT_TRANSFORM_FLIPPED_270;
+
+	for (size_t i = 0; i < LENGTH(transform_map); i++) {
+		if (strcasecmp(str, transform_map[i].name) == 0)
+			return transform_map[i].transform;
+	}
 	return WL_OUTPUT_TRANSFORM_NORMAL;
 }
 
@@ -542,12 +603,14 @@ int config_parse_monitor(const char *line)
 
 int get_connector_priority(const char *name)
 {
-	/* Priority: HDMI > DP > eDP > others */
-	if (strncmp(name, "HDMI", 4) == 0) return 1;
-	if (strncmp(name, "DP-", 3) == 0) return 2;
-	if (strncmp(name, "eDP", 3) == 0) return 3;
-	if (strncmp(name, "VGA", 3) == 0) return 4;
-	if (strncmp(name, "DVI", 3) == 0) return 5;
+	static const struct { const char *prefix; int len; int priority; } connector_prio[] = {
+		{"HDMI", 4, 1}, {"DP-", 3, 2}, {"eDP", 3, 3}, {"VGA", 3, 4}, {"DVI", 3, 5},
+	};
+
+	for (size_t i = 0; i < LENGTH(connector_prio); i++) {
+		if (strncmp(name, connector_prio[i].prefix, connector_prio[i].len) == 0)
+			return connector_prio[i].priority;
+	}
 	return 10;
 }
 

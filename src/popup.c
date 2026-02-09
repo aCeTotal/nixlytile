@@ -1,6 +1,51 @@
 #include "nixlytile.h"
 #include "client.h"
 
+static void
+render_text_glyphs(struct wlr_scene_tree *tree, const char *text,
+		int base_x, int base_y)
+{
+	int pen_x = 0;
+	uint32_t prev_cp = 0;
+
+	if (!tree || !text || !statusfont.font)
+		return;
+
+	for (size_t i = 0; text[i]; i++) {
+		long kern_x = 0, kern_y = 0;
+		uint32_t cp = (unsigned char)text[i];
+		const struct fcft_glyph *glyph;
+		struct wlr_buffer *buffer;
+		struct wlr_scene_buffer *scene_buf;
+
+		if (prev_cp)
+			fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
+		pen_x += (int)kern_x;
+
+		glyph = fcft_rasterize_char_utf32(statusfont.font, cp, statusbar_font_subpixel);
+		if (!glyph || !glyph->pix) {
+			prev_cp = cp;
+			continue;
+		}
+
+		buffer = statusbar_buffer_from_glyph(glyph);
+		if (buffer) {
+			scene_buf = wlr_scene_buffer_create(tree, NULL);
+			if (scene_buf) {
+				wlr_scene_buffer_set_buffer(scene_buf, buffer);
+				wlr_scene_node_set_position(&scene_buf->node,
+					base_x + pen_x + glyph->x,
+					base_y - glyph->y);
+			}
+			wlr_buffer_drop(buffer);
+		}
+		pen_x += glyph->advance.x;
+		if (text[i + 1])
+			pen_x += statusbar_font_spacing;
+		prev_cp = cp;
+	}
+}
+
 int
 wifi_popup_connect_cb(int fd, uint32_t mask, void *data)
 {
@@ -71,22 +116,9 @@ wifi_popup_connect_cb(int fd, uint32_t mask, void *data)
 	return 0;
 }
 
-void
-wifi_popup_connect(Monitor *m)
+static void
+wifi_cleanup_connection(WifiPasswordPopup *p)
 {
-	WifiPasswordPopup *p;
-	int pipefd[2];
-	pid_t pid;
-
-	if (!m)
-		return;
-
-	p = &m->wifi_popup;
-
-	if (p->connecting || p->password_len == 0)
-		return;
-
-	/* Clean up any previous connection attempt */
 	if (p->connect_event) {
 		wl_event_source_remove(p->connect_event);
 		p->connect_event = NULL;
@@ -100,146 +132,120 @@ wifi_popup_connect(Monitor *m)
 		waitpid(p->connect_pid, NULL, WNOHANG);
 		p->connect_pid = -1;
 	}
+}
+
+static int
+wifi_spawn_connect(Monitor *m, WifiPasswordPopup *p,
+		void (*child_exec)(WifiPasswordPopup *p, const char *ssid))
+{
+	int pipefd[2];
+	pid_t pid;
+
+	wifi_cleanup_connection(p);
 
 	if (pipe(pipefd) < 0)
-		return;
+		return -1;
 
 	pid = fork();
 	if (pid < 0) {
 		close(pipefd[0]);
 		close(pipefd[1]);
-		return;
+		return -1;
 	}
 
 	if (pid == 0) {
-		/* Child */
 		close(pipefd[0]);
 		dup2(pipefd[1], STDOUT_FILENO);
 		dup2(pipefd[1], STDERR_FILENO);
 		close(pipefd[1]);
 		setsid();
-
-		/* Delete any existing corrupted connection profile first (ignore errors),
-		 * then connect with the new password.
-		 * Use execlp with separate args to avoid shell escaping issues. */
-		{
-			pid_t del_pid = fork();
-			if (del_pid == 0) {
-				/* Delete child - silence output */
-				int null_fd = open("/dev/null", O_RDWR);
-				if (null_fd >= 0) {
-					dup2(null_fd, STDOUT_FILENO);
-					dup2(null_fd, STDERR_FILENO);
-					close(null_fd);
-				}
-				execlp("nmcli", "nmcli", "connection", "delete", p->ssid, (char *)NULL);
-				_exit(0);
-			}
-			if (del_pid > 0)
-				waitpid(del_pid, NULL, 0);
-		}
-
-		/* Now connect with password */
-		if (net_iface[0])
-			execlp("nmcli", "nmcli", "device", "wifi", "connect",
-				p->ssid, "password", p->password, "ifname", net_iface, (char *)NULL);
-		else
-			execlp("nmcli", "nmcli", "device", "wifi", "connect",
-				p->ssid, "password", p->password, (char *)NULL);
+		child_exec(p, p->ssid);
 		_exit(1);
 	}
 
-	/* Parent */
 	close(pipefd[1]);
-
 	int flags = fcntl(pipefd[0], F_GETFL, 0);
 	fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
 
 	p->connect_pid = pid;
 	p->connect_fd = pipefd[0];
 	p->connecting = 1;
-	p->error = 0;
 	p->connect_event = wl_event_loop_add_fd(event_loop,
 		pipefd[0], WL_EVENT_READABLE | WL_EVENT_HANGUP,
 		wifi_popup_connect_cb, m);
+	return 0;
+}
 
-	wifi_popup_render(m);
+static void
+wifi_child_connect_with_password(WifiPasswordPopup *p, const char *ssid)
+{
+	/* Delete any existing corrupted connection profile first */
+	pid_t del_pid = fork();
+	if (del_pid == 0) {
+		int null_fd = open("/dev/null", O_RDWR);
+		if (null_fd >= 0) {
+			dup2(null_fd, STDOUT_FILENO);
+			dup2(null_fd, STDERR_FILENO);
+			close(null_fd);
+		}
+		execlp("nmcli", "nmcli", "connection", "delete", ssid, (char *)NULL);
+		_exit(0);
+	}
+	if (del_pid > 0)
+		waitpid(del_pid, NULL, 0);
+
+	if (net_iface[0])
+		execlp("nmcli", "nmcli", "device", "wifi", "connect",
+			ssid, "password", p->password, "ifname", net_iface, (char *)NULL);
+	else
+		execlp("nmcli", "nmcli", "device", "wifi", "connect",
+			ssid, "password", p->password, (char *)NULL);
+}
+
+static void
+wifi_child_connect_saved(WifiPasswordPopup *p, const char *ssid)
+{
+	(void)p;
+	if (net_iface[0])
+		execlp("nmcli", "nmcli", "device", "wifi", "connect", ssid, "ifname", net_iface, (char *)NULL);
+	else
+		execlp("nmcli", "nmcli", "device", "wifi", "connect", ssid, (char *)NULL);
+}
+
+void
+wifi_popup_connect(Monitor *m)
+{
+	WifiPasswordPopup *p;
+
+	if (!m)
+		return;
+
+	p = &m->wifi_popup;
+	if (p->connecting || p->password_len == 0)
+		return;
+
+	p->error = 0;
+	if (wifi_spawn_connect(m, p, wifi_child_connect_with_password) == 0)
+		wifi_popup_render(m);
 }
 
 void
 wifi_try_saved_connect(Monitor *m, const char *ssid)
 {
 	WifiPasswordPopup *p;
-	int pipefd[2];
-	pid_t pid;
 
 	if (!m || !ssid || !*ssid)
 		return;
 
 	p = &m->wifi_popup;
-
-	/* Store SSID for potential password popup later */
 	snprintf(p->ssid, sizeof(p->ssid), "%s", ssid);
 	p->password[0] = '\0';
 	p->password_len = 0;
-	p->visible = 0;  /* Don't show popup yet */
+	p->visible = 0;
 	p->error = 0;
-	p->try_saved = 1;  /* Mark that we're trying saved credentials */
+	p->try_saved = 1;
 
-	/* Clean up any previous connection attempt */
-	if (p->connect_event) {
-		wl_event_source_remove(p->connect_event);
-		p->connect_event = NULL;
-	}
-	if (p->connect_fd >= 0) {
-		close(p->connect_fd);
-		p->connect_fd = -1;
-	}
-	if (p->connect_pid > 0) {
-		kill(p->connect_pid, SIGTERM);
-		waitpid(p->connect_pid, NULL, WNOHANG);
-		p->connect_pid = -1;
-	}
-
-	if (pipe(pipefd) < 0)
-		return;
-
-	pid = fork();
-	if (pid < 0) {
-		close(pipefd[0]);
-		close(pipefd[1]);
-		return;
-	}
-
-	if (pid == 0) {
-		/* Child */
-		close(pipefd[0]);
-		dup2(pipefd[1], STDOUT_FILENO);
-		dup2(pipefd[1], STDERR_FILENO);
-		close(pipefd[1]);
-		setsid();
-
-		/* Try connecting without password - nmcli will use saved credentials
-		 * Include ifname to ensure proper network switching */
-		if (net_iface[0])
-			execlp("nmcli", "nmcli", "device", "wifi", "connect", ssid, "ifname", net_iface, (char *)NULL);
-		else
-			execlp("nmcli", "nmcli", "device", "wifi", "connect", ssid, (char *)NULL);
-		_exit(1);
-	}
-
-	/* Parent */
-	close(pipefd[1]);
-
-	int flags = fcntl(pipefd[0], F_GETFL, 0);
-	fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
-
-	p->connect_pid = pid;
-	p->connect_fd = pipefd[0];
-	p->connecting = 1;
-	p->connect_event = wl_event_loop_add_fd(event_loop,
-		pipefd[0], WL_EVENT_READABLE | WL_EVENT_HANGUP,
-		wifi_popup_connect_cb, m);
+	wifi_spawn_connect(m, p, wifi_child_connect_saved);
 }
 
 Monitor *
@@ -408,52 +414,14 @@ wifi_popup_render(Monitor *m)
 		drawrect(p->bg, 0, 0, total_width, total_height, statusbar_popup_bg);
 		/* Border */
 		float border_col[4] = {0.3f, 0.3f, 0.3f, 1.0f};
-		drawrect(p->bg, 0, 0, total_width, 1, border_col);
-		drawrect(p->bg, 0, total_height - 1, total_width, 1, border_col);
-		drawrect(p->bg, 0, 0, 1, total_height, border_col);
-		drawrect(p->bg, total_width - 1, 0, 1, total_height, border_col);
+		draw_border(p->bg, 0, 0, total_width, total_height, 1, border_col);
 	}
 
 	/* Draw title */
 	{
 		int origin_x = padding + (total_width - 2 * padding - title_width) / 2;
 		int origin_y = padding + statusfont.ascent;
-		int pen_x = 0;
-		uint32_t prev_cp = 0;
-
-		for (size_t i = 0; title[i]; i++) {
-			long kern_x = 0, kern_y = 0;
-			uint32_t cp = (unsigned char)title[i];
-			const struct fcft_glyph *glyph;
-			struct wlr_buffer *buffer;
-			struct wlr_scene_buffer *scene_buf;
-
-			if (prev_cp)
-				fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
-			pen_x += (int)kern_x;
-
-			glyph = fcft_rasterize_char_utf32(statusfont.font, cp, statusbar_font_subpixel);
-			if (!glyph || !glyph->pix) {
-				prev_cp = cp;
-				continue;
-			}
-
-			buffer = statusbar_buffer_from_glyph(glyph);
-			if (buffer) {
-				scene_buf = wlr_scene_buffer_create(p->tree, NULL);
-				if (scene_buf) {
-					wlr_scene_buffer_set_buffer(scene_buf, buffer);
-					wlr_scene_node_set_position(&scene_buf->node,
-						origin_x + pen_x + glyph->x,
-						origin_y - glyph->y);
-				}
-				wlr_buffer_drop(buffer);
-			}
-			pen_x += glyph->advance.x;
-			if (title[i + 1])
-				pen_x += statusbar_font_spacing;
-			prev_cp = cp;
-		}
+		render_text_glyphs(p->tree, title, origin_x, origin_y);
 	}
 
 	/* Draw input box */
@@ -466,10 +434,7 @@ wifi_popup_render(Monitor *m)
 		float *border = p->error ? error_border : input_border;
 
 		drawrect(p->tree, input_x, input_y, input_width, input_height, input_bg);
-		drawrect(p->tree, input_x, input_y, input_width, 1, border);
-		drawrect(p->tree, input_x, input_y + input_height - 1, input_width, 1, border);
-		drawrect(p->tree, input_x, input_y, 1, input_height, border);
-		drawrect(p->tree, input_x + input_width - 1, input_y, 1, input_height, border);
+		draw_border(p->tree, input_x, input_y, input_width, input_height, 1, border);
 
 		/* Draw password as dots */
 		{
@@ -517,65 +482,10 @@ wifi_popup_render(Monitor *m)
 			drawrect(p->tree, btn_x, btn_y, button_width, button_height, btn_bg);
 
 		/* Center button text */
-		int btn_text_width = 0;
-		{
-			int pen_x = 0;
-			uint32_t prev_cp = 0;
-			for (size_t i = 0; btn_text[i]; i++) {
-				long kern_x = 0, kern_y = 0;
-				uint32_t cp = (unsigned char)btn_text[i];
-				const struct fcft_glyph *glyph;
-				if (prev_cp)
-					fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
-				pen_x += (int)kern_x;
-				glyph = fcft_rasterize_char_utf32(statusfont.font, cp, statusbar_font_subpixel);
-				if (glyph)
-					pen_x += glyph->advance.x;
-				if (btn_text[i + 1])
-					pen_x += statusbar_font_spacing;
-				prev_cp = cp;
-			}
-			btn_text_width = pen_x;
-		}
-
+		int btn_text_width = status_text_width(btn_text);
 		int text_x = btn_x + (button_width - btn_text_width) / 2;
 		int text_y = btn_y + (button_height - statusfont.height) / 2 + statusfont.ascent;
-		int pen_x = 0;
-		uint32_t prev_cp = 0;
-
-		for (size_t i = 0; btn_text[i]; i++) {
-			long kern_x = 0, kern_y = 0;
-			uint32_t cp = (unsigned char)btn_text[i];
-			const struct fcft_glyph *glyph;
-			struct wlr_buffer *buffer;
-			struct wlr_scene_buffer *scene_buf;
-
-			if (prev_cp)
-				fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
-			pen_x += (int)kern_x;
-
-			glyph = fcft_rasterize_char_utf32(statusfont.font, cp, statusbar_font_subpixel);
-			if (!glyph || !glyph->pix) {
-				prev_cp = cp;
-				continue;
-			}
-
-			buffer = statusbar_buffer_from_glyph(glyph);
-			if (buffer) {
-				scene_buf = wlr_scene_buffer_create(p->tree, NULL);
-				if (scene_buf) {
-					wlr_scene_buffer_set_buffer(scene_buf, buffer);
-					wlr_scene_node_set_position(&scene_buf->node,
-						text_x + pen_x + glyph->x,
-						text_y - glyph->y);
-				}
-				wlr_buffer_drop(buffer);
-			}
-			pen_x += glyph->advance.x;
-			if (btn_text[i + 1])
-				pen_x += statusbar_font_spacing;
-			prev_cp = cp;
-		}
+		render_text_glyphs(p->tree, btn_text, text_x, text_y);
 	}
 
 	wlr_scene_node_set_enabled(&p->tree->node, 1);
@@ -809,10 +719,7 @@ sudo_popup_render(Monitor *m)
 		drawrect(p->bg, 0, 0, total_width, total_height, statusbar_popup_bg);
 		/* Border */
 		const float border[4] = {0.3f, 0.3f, 0.3f, 1.0f};
-		drawrect(p->bg, 0, 0, total_width, 1, border);
-		drawrect(p->bg, 0, total_height - 1, total_width, 1, border);
-		drawrect(p->bg, 0, 0, 1, total_height, border);
-		drawrect(p->bg, total_width - 1, 0, 1, total_height, border);
+		draw_border(p->bg, 0, 0, total_width, total_height, 1, border);
 	}
 
 	/* Draw title */
@@ -843,10 +750,7 @@ sudo_popup_render(Monitor *m)
 
 			/* Input background */
 			drawrect(input_tree, 0, 0, input_width, input_height, input_bg);
-			drawrect(input_tree, 0, 0, input_width, 1, input_border);
-			drawrect(input_tree, 0, input_height - 1, input_width, 1, input_border);
-			drawrect(input_tree, 0, 0, 1, input_height, input_border);
-			drawrect(input_tree, input_width - 1, 0, 1, input_height, input_border);
+			draw_border(input_tree, 0, 0, input_width, input_height, 1, input_border);
 
 			/* Masked password (show dots) */
 			for (i = 0; i < p->password_len && i < 256; i++)
@@ -1311,10 +1215,7 @@ osk_render(Monitor *m)
 
 			/* Key border */
 			float key_border[4] = {0.35f, 0.35f, 0.4f, 1.0f};
-			drawrect(osk->tree, key_x, key_y, actual_width, 1, key_border);
-			drawrect(osk->tree, key_x, key_y + key_height - 1, actual_width, 1, key_border);
-			drawrect(osk->tree, key_x, key_y, 1, key_height, key_border);
-			drawrect(osk->tree, key_x + actual_width - 1, key_y, 1, key_height, key_border);
+			draw_border(osk->tree, key_x, key_y, actual_width, key_height, 1, key_border);
 
 			/* Draw label */
 			const char *display_label = label;
@@ -1722,10 +1623,7 @@ toast_show(Monitor *m, const char *message, int duration_ms)
 	/* Draw background */
 	drawrect(m->toast_tree, 0, 0, w, h, bg);
 	/* Draw border */
-	drawrect(m->toast_tree, 0, 0, w, 1, border);
-	drawrect(m->toast_tree, 0, h - 1, w, 1, border);
-	drawrect(m->toast_tree, 0, 0, 1, h, border);
-	drawrect(m->toast_tree, w - 1, 0, 1, h, border);
+	draw_border(m->toast_tree, 0, 0, w, h, 1, border);
 
 	/* Draw text */
 	mod.tree = m->toast_tree;

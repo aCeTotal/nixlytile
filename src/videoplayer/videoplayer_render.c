@@ -221,6 +221,9 @@ extern int64_t videoplayer_audio_get_clock(VideoPlayer *vp);
 /* Audio recovery function - check if stream needs reconnection */
 extern int videoplayer_audio_check_recovery(VideoPlayer *vp);
 
+/* Playback control */
+extern void videoplayer_pause(VideoPlayer *vp);
+
 static uint64_t get_time_ns(void)
 {
     struct timespec ts;
@@ -232,6 +235,7 @@ static uint64_t get_time_ns(void)
 #define AV_SYNC_THRESHOLD_MIN   20000    /* 20ms - below this, don't adjust */
 #define AV_SYNC_THRESHOLD_MAX   200000   /* 200ms - above this, hard sync */
 #define AV_SYNC_FRAMESKIP_THRESH 100000  /* 100ms - skip frame if behind by this much */
+#define AV_SYNC_HOLD_THRESH      60000  /* 60ms - hold frame if video is ahead of audio */
 
 /*
  * Calculate frame repeat pattern for non-VRR displays
@@ -289,8 +293,24 @@ static int is_audio_clock_valid(VideoPlayer *vp)
         return 0;
     }
 
-    /* Check if we're in recovery period after an interruption */
+    /* During recovery after pause/resume or device change, wait for
+     * audio clock to actually start progressing before enabling A/V sync.
+     * This prevents stuttering when audio takes time to reactivate. */
     if (vp->audio.recovery_frames > 0) {
+        int64_t rec_pts = videoplayer_audio_get_clock(vp);
+
+        if (rec_pts > 0 && vp->audio.last_audio_pts > 0 &&
+            rec_pts > vp->audio.last_audio_pts) {
+            /* Audio is alive and progressing - end recovery early */
+            vp->audio.recovery_frames = 0;
+            vp->audio.stall_count = 0;
+            vp->audio.last_audio_pts = rec_pts;
+            return 1;
+        }
+
+        if (rec_pts > 0)
+            vp->audio.last_audio_pts = rec_pts;
+
         vp->audio.recovery_frames--;
         return 0;
     }
@@ -357,8 +377,10 @@ static int get_frame_action(VideoPlayer *vp, int64_t video_pts_us)
         return 1;  /* Skip frame to catch up */
     }
 
-    /* Never repeat frames - it causes stuttering. Just show them. */
-    /* Audio will naturally sync over time. */
+    /* Video is too far ahead of audio - hold frame to let audio catch up */
+    if (av_diff > AV_SYNC_HOLD_THRESH) {
+        return -1;
+    }
 
     return 0;
 }
@@ -444,6 +466,11 @@ static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, 
         return 2;  /* Skip and get next frame immediately */
     }
 
+    if (action == -1) {
+        /* Video is ahead of audio - hold, let audio catch up */
+        return 0;
+    }
+
     /* Present the frame */
     if (vp->frame_repeat_mode == 2) {
         vp->current_repeat++;
@@ -477,6 +504,14 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
         vp->last_frame_ns = 0;
         vp->current_repeat = 0;
         fprintf(stderr, "[videoplayer] Frame timing reset (audio state change)\n");
+    }
+
+    /* Auto-pause when audio device changes (e.g., Bluetooth connection) */
+    if (vp->audio.needs_device_pause) {
+        vp->audio.needs_device_pause = 0;
+        fprintf(stderr, "[videoplayer] Audio device change detected, pausing\n");
+        videoplayer_pause(vp);
+        return;
     }
 
     /* Periodically check if audio stream needs recovery (every ~0.5 second at 60Hz).

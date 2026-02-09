@@ -269,32 +269,42 @@ static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
     /* When stream is interrupted (e.g., Bluetooth/controller reconnection),
      * flush the ring buffer and reset sync state.
      * IMPORTANT: Set interrupted flag BEFORE taking lock to prevent render thread
-     * from using stale A/V sync during the transition */
+     * from using stale A/V sync during the transition.
+     *
+     * EXCEPTION: User-initiated pause (pw_stream_set_active(false)) also causes
+     * STREAMING→PAUSED but should NOT be treated as an interruption — the ring
+     * buffer and sync state must be preserved for seamless resume. */
     if (old == PW_STREAM_STATE_STREAMING &&
         (state == PW_STREAM_STATE_PAUSED || state == PW_STREAM_STATE_UNCONNECTED ||
          state == PW_STREAM_STATE_ERROR)) {
-        fprintf(stderr, "[audio] Stream interrupted, flushing buffer - video will continue with timing-based playback\n");
 
-        /* Signal render thread to use timing-based playback immediately */
-        vp->audio.stream_interrupted = 1;
-        /* Tell render thread to reset frame timing so video never stalls */
-        vp->audio.needs_timing_reset = 1;
-        /* Reset reactivation counter for staged recovery */
-        vp->audio.reactivate_attempts = 0;
+        if (state == PW_STREAM_STATE_PAUSED && vp->audio.user_paused) {
+            fprintf(stderr, "[audio] User-initiated pause, keeping audio state\n");
+        } else {
+            fprintf(stderr, "[audio] Stream interrupted, flushing buffer - video will continue with timing-based playback\n");
 
-        ring_buffer_clear(&vp->audio.ring);
+            /* Signal render thread to use timing-based playback immediately */
+            vp->audio.stream_interrupted = 1;
+            vp->audio.needs_device_pause = 1;
+            /* Tell render thread to reset frame timing so video never stalls */
+            vp->audio.needs_timing_reset = 1;
+            /* Reset reactivation counter for staged recovery */
+            vp->audio.reactivate_attempts = 0;
 
-        /* Reset sync tracking */
-        pthread_mutex_lock(&vp->audio.lock);
-        vp->audio.audio_pts_us = 0;
-        vp->audio.base_pts_us = 0;
-        vp->audio.audio_written_samples = 0;
-        vp->audio.audio_played_samples = 0;
-        vp->audio.last_clock = 0;
-        vp->audio.last_audio_pts = 0;
-        vp->audio.stall_count = 0;
-        vp->audio.recovery_frames = 15;
-        pthread_mutex_unlock(&vp->audio.lock);
+            ring_buffer_clear(&vp->audio.ring);
+
+            /* Reset sync tracking */
+            pthread_mutex_lock(&vp->audio.lock);
+            vp->audio.audio_pts_us = 0;
+            vp->audio.base_pts_us = 0;
+            vp->audio.audio_written_samples = 0;
+            vp->audio.audio_played_samples = 0;
+            vp->audio.last_clock = 0;
+            vp->audio.last_audio_pts = 0;
+            vp->audio.stall_count = 0;
+            vp->audio.recovery_frames = 15;
+            pthread_mutex_unlock(&vp->audio.lock);
+        }
     }
 
     /* NOTE: We intentionally do NOT call pw_stream_set_active(true) when entering
@@ -311,34 +321,62 @@ static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
         /* Keep stream_interrupted = 1 - video continues independently */
     }
 
-    /* When stream resumes streaming, reset video timing for clean sync */
+    /* When stream resumes streaming after interruption, reset for clean sync.
+     * For user-initiated resume (after user_paused), ring buffer and sync
+     * state are still valid — just resume playback seamlessly. */
     if (state == PW_STREAM_STATE_STREAMING &&
         (old == PW_STREAM_STATE_PAUSED || old == PW_STREAM_STATE_CONNECTING)) {
-        fprintf(stderr, "[audio] Stream resumed streaming, video will resync gradually\n");
-        /* Clear interrupted flag - audio is streaming again */
-        vp->audio.stream_interrupted = 0;
+
         vp->audio.write_stall_count = 0;
         vp->audio.reactivate_attempts = 0;
-        /* Tell render thread to reset frame timing for immediate video resume */
-        vp->audio.needs_timing_reset = 1;
 
-        /* Flush ring buffer for clean audio restart */
-        ring_buffer_clear(&vp->audio.ring);
+        if (vp->audio.stream_interrupted) {
+            /* Recovery from device interruption - full reset needed */
+            fprintf(stderr, "[audio] Stream resumed after interruption, video will resync gradually\n");
+            vp->audio.stream_interrupted = 0;
+            vp->audio.needs_timing_reset = 1;
 
-        /* Reset sync state for clean restart */
-        pthread_mutex_lock(&vp->audio.lock);
-        vp->audio.audio_pts_us = 0;
-        vp->audio.base_pts_us = 0;
-        vp->audio.audio_written_samples = 0;
-        vp->audio.audio_played_samples = 0;
-        vp->audio.recovery_frames = 15;
-        pthread_mutex_unlock(&vp->audio.lock);
+            ring_buffer_clear(&vp->audio.ring);
+
+            pthread_mutex_lock(&vp->audio.lock);
+            vp->audio.audio_pts_us = 0;
+            vp->audio.base_pts_us = 0;
+            vp->audio.audio_written_samples = 0;
+            vp->audio.audio_played_samples = 0;
+            vp->audio.recovery_frames = 15;
+            pthread_mutex_unlock(&vp->audio.lock);
+        } else {
+            /* User-initiated resume - audio state is intact, just continue */
+            fprintf(stderr, "[audio] Stream resumed (user unpause)\n");
+        }
+    }
+}
+
+static void on_param_changed(void *userdata, uint32_t id, const struct spa_pod *param)
+{
+    VideoPlayer *vp = userdata;
+
+    if (!vp || !param)
+        return;
+
+    if (id == SPA_PARAM_Format) {
+        /* Format renegotiation. During initial setup this is normal.
+         * During active playback, this indicates a device change
+         * (e.g., Bluetooth connection causing PipeWire to move the stream). */
+        if (vp->state == VP_STATE_PLAYING && !vp->audio.user_paused &&
+            !vp->audio.stream_interrupted) {
+            fprintf(stderr, "[audio] Format change during playback - device change detected, pausing\n");
+            vp->audio.stream_interrupted = 1;
+            vp->audio.needs_device_pause = 1;
+            vp->audio.needs_timing_reset = 1;
+        }
     }
 }
 
 static const struct pw_stream_events stream_events = {
     PW_VERSION_STREAM_EVENTS,
     .state_changed = on_stream_state_changed,
+    .param_changed = on_param_changed,
     .process = on_process,
 };
 
@@ -536,6 +574,8 @@ int videoplayer_audio_init(VideoPlayer *vp)
     vp->audio.stream_interrupted = 0;
     vp->audio.audio_recreating = 0;
     vp->audio.needs_timing_reset = 0;
+    vp->audio.user_paused = 0;
+    vp->audio.needs_device_pause = 0;
     vp->audio.write_stall_count = 0;
     vp->audio.reactivate_attempts = 0;
 
@@ -835,6 +875,10 @@ void videoplayer_audio_play(VideoPlayer *vp)
         return;
     }
 
+    /* Clear user_paused before resuming so on_stream_state_changed
+     * knows this is a normal resume from user pause */
+    vp->audio.user_paused = 0;
+
     AudioCmd cmd = { .type = AUDIO_CMD_PLAY };
     audio_cmd_send(vp, &cmd);
 
@@ -850,6 +894,10 @@ void videoplayer_audio_pause(VideoPlayer *vp)
         fprintf(stderr, "[audio] Pause skipped - stream interrupted\n");
         return;
     }
+
+    /* Mark as user-initiated pause so on_stream_state_changed doesn't
+     * treat STREAMING→PAUSED as a device interruption */
+    vp->audio.user_paused = 1;
 
     AudioCmd cmd = { .type = AUDIO_CMD_PAUSE };
     audio_cmd_send(vp, &cmd);
@@ -1036,6 +1084,7 @@ void videoplayer_audio_flush(VideoPlayer *vp)
     vp->audio.stall_count = 0;
     vp->audio.recovery_frames = 0;
     vp->audio.stream_interrupted = 0;
+    vp->audio.needs_device_pause = 0;
     vp->audio.needs_timing_reset = 0;
     vp->audio.write_stall_count = 0;
     vp->audio.reactivate_attempts = 0;

@@ -499,14 +499,9 @@ nixpkgs_render(Monitor *m)
 		wl_list_for_each_safe(node, tmp, &no->bg->children, link)
 			wlr_scene_node_destroy(node);
 		drawrect(no->bg, 0, 0, no->width, no->height, statusbar_popup_bg);
-		/* 1px black border */
 		if (no->width > 0 && no->height > 0) {
 			const float border[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-			drawrect(no->bg, 0, 0, no->width, 1, border); /* top */
-			drawrect(no->bg, 0, no->height - 1, no->width, 1, border); /* bottom */
-			drawrect(no->bg, 0, 0, 1, no->height, border); /* left */
-			if (no->width > 1)
-				drawrect(no->bg, no->width - 1, 0, 1, no->height, border); /* right */
+			draw_border(no->bg, 0, 0, no->width, no->height, 1, border);
 		}
 	}
 
@@ -546,10 +541,7 @@ nixpkgs_render(Monitor *m)
 
 		if (no->bg) {
 			drawrect(no->bg, field_x, field_y, field_w, field_h, field_bg);
-			drawrect(no->bg, field_x, field_y, field_w, 1, border);
-			drawrect(no->bg, field_x, field_y + field_h - 1, field_w, 1, border);
-			drawrect(no->bg, field_x, field_y, 1, field_h, border);
-			drawrect(no->bg, field_x + field_w - 1, field_y, 1, field_h, border);
+			draw_border(no->bg, field_x, field_y, field_w, field_h, 1, border);
 		}
 
 		if (!no->search_field_tree)
@@ -589,6 +581,72 @@ nixpkgs_render(Monitor *m)
 	}
 }
 
+static void
+nixpkgs_render_row(NixpkgsOverlay *no, int idx, int y, int line_h, int pad,
+	int selected, int row_idx)
+{
+	static const float sel_bg[4] = {0.2f, 0.4f, 0.6f, 0.8f};
+	static const float version_fg[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+	const char *name = nixpkg_entries[idx].name;
+	const char *version = nixpkg_entries[idx].version;
+	struct wlr_scene_tree *row;
+	struct wlr_scene_rect *highlight;
+	StatusModule mod = {0};
+	int name_w;
+
+	row = wlr_scene_tree_create(no->results_tree);
+	if (!row)
+		return;
+	wlr_scene_node_set_position(&row->node, pad, y);
+
+	highlight = wlr_scene_rect_create(row, no->width - pad * 2, line_h, sel_bg);
+	if (highlight) {
+		wlr_scene_node_set_position(&highlight->node, 0, 0);
+		wlr_scene_node_set_enabled(&highlight->node, selected);
+		no->row_highlights[row_idx] = highlight;
+	}
+
+	mod.tree = row;
+	tray_render_label(&mod, name, 4, line_h, statusbar_fg);
+
+	name_w = status_text_width(name);
+	if (version && version[0]) {
+		char ver_str[80];
+		snprintf(ver_str, sizeof(ver_str), "(%s)", version);
+		tray_render_label(&mod, ver_str, 4 + name_w + 8, line_h, version_fg);
+
+		if (nixpkg_entries[idx].installed) {
+			int icon_h = line_h - 4;
+			if (ensure_nixpkg_ok_icon(icon_h) == 0 && nixpkg_ok_icon_buf) {
+				int ver_w = status_text_width(ver_str);
+				int icon_x = 4 + name_w + 8 + ver_w + 6;
+				int icon_y = (line_h - icon_h) / 2;
+				struct wlr_scene_buffer *icon_node =
+					wlr_scene_buffer_create(row, nixpkg_ok_icon_buf);
+				if (icon_node)
+					wlr_scene_node_set_position(&icon_node->node, icon_x, icon_y);
+			}
+		}
+	} else if (nixpkg_entries[idx].installed) {
+		int icon_h = line_h - 4;
+		if (ensure_nixpkg_ok_icon(icon_h) == 0 && nixpkg_ok_icon_buf) {
+			int icon_x = 4 + name_w + 8;
+			int icon_y = (line_h - icon_h) / 2;
+			struct wlr_scene_buffer *icon_node =
+				wlr_scene_buffer_create(row, nixpkg_ok_icon_buf);
+			if (icon_node)
+				wlr_scene_node_set_position(&icon_node->node, icon_x, icon_y);
+		}
+	}
+
+	{
+		const char *source_text = "Source (Mod+w)";
+		int source_w = status_text_width(source_text);
+		int source_x = no->width - pad * 2 - source_w - 8;
+		tray_render_label(&mod, source_text, source_x, line_h, version_fg);
+	}
+}
+
 void
 nixpkgs_render_results(Monitor *m)
 {
@@ -608,19 +666,16 @@ nixpkgs_render_results(Monitor *m)
 		return;
 
 	nixpkgs_layout_metrics(&field_h, &line_h, &pad);
-	line_y = 32 + pad + field_h + pad; /* title + pad + field + pad */
+	line_y = 32 + pad + field_h + pad;
 
-	/* Destroy old results tree */
 	if (no->results_tree) {
 		wlr_scene_node_destroy(&no->results_tree->node);
 		no->results_tree = NULL;
 	}
-	/* Clear cached highlights */
 	no->row_highlight_count = 0;
 	for (i = 0; i < MODAL_MAX_RESULTS; i++)
 		no->row_highlights[i] = NULL;
 
-	/* Create new results tree */
 	no->results_tree = wlr_scene_tree_create(no->tree);
 	if (!no->results_tree)
 		return;
@@ -641,76 +696,8 @@ nixpkgs_render_results(Monitor *m)
 	no->scroll = start;
 
 	for (i = start; i < no->result_count && rendered_count < max_lines; i++) {
-		int idx = no->result_indices[i];
-		const char *name = nixpkg_entries[idx].name;
-		const char *version = nixpkg_entries[idx].version;
-		int y = rendered_count * line_h;
-		struct wlr_scene_tree *row;
-		struct wlr_scene_rect *highlight;
-		StatusModule mod = {0};
-		int sel = (i == no->selected);
-		const float sel_bg[4] = {0.2f, 0.4f, 0.6f, 0.8f};
-		const float version_fg[4] = {0.5f, 0.5f, 0.5f, 1.0f}; /* grey for version */
-		int name_w;
-
-		row = wlr_scene_tree_create(no->results_tree);
-		if (!row)
-			continue;
-		wlr_scene_node_set_position(&row->node, pad, y);
-
-		/* Create highlight rect (hidden by default unless selected) */
-		highlight = wlr_scene_rect_create(row, no->width - pad * 2, line_h, sel_bg);
-		if (highlight) {
-			wlr_scene_node_set_position(&highlight->node, 0, 0);
-			wlr_scene_node_set_enabled(&highlight->node, sel);
-			no->row_highlights[rendered_count] = highlight;
-		}
-
-		/* Render package name */
-		mod.tree = row;
-		tray_render_label(&mod, name, 4, line_h, statusbar_fg);
-
-		/* Render version in grey parentheses if available */
-		name_w = status_text_width(name);
-		if (version && version[0]) {
-			char ver_str[80];
-			snprintf(ver_str, sizeof(ver_str), "(%s)", version);
-			tray_render_label(&mod, ver_str, 4 + name_w + 8, line_h, version_fg);
-
-			/* Show ok.svg icon if package is installed */
-			if (nixpkg_entries[idx].installed) {
-				int icon_h = line_h - 4;
-				if (ensure_nixpkg_ok_icon(icon_h) == 0 && nixpkg_ok_icon_buf) {
-					int ver_w = status_text_width(ver_str);
-					int icon_x = 4 + name_w + 8 + ver_w + 6;
-					int icon_y = (line_h - icon_h) / 2;
-					struct wlr_scene_buffer *icon_node =
-						wlr_scene_buffer_create(row, nixpkg_ok_icon_buf);
-					if (icon_node)
-						wlr_scene_node_set_position(&icon_node->node, icon_x, icon_y);
-				}
-			}
-		} else if (nixpkg_entries[idx].installed) {
-			/* No version but installed - show icon after name */
-			int icon_h = line_h - 4;
-			if (ensure_nixpkg_ok_icon(icon_h) == 0 && nixpkg_ok_icon_buf) {
-				int icon_x = 4 + name_w + 8;
-				int icon_y = (line_h - icon_h) / 2;
-				struct wlr_scene_buffer *icon_node =
-					wlr_scene_buffer_create(row, nixpkg_ok_icon_buf);
-				if (icon_node)
-					wlr_scene_node_set_position(&icon_node->node, icon_x, icon_y);
-			}
-		}
-
-		/* Render "Source (Mod+w)" on the right side */
-		{
-			const char *source_text = "Source (Mod+w)";
-			int source_w = status_text_width(source_text);
-			int source_x = no->width - pad * 2 - source_w - 8;
-			tray_render_label(&mod, source_text, source_x, line_h, version_fg);
-		}
-
+		nixpkgs_render_row(no, no->result_indices[i], rendered_count * line_h,
+			line_h, pad, i == no->selected, rendered_count);
 		rendered_count++;
 	}
 	no->row_highlight_count = rendered_count;

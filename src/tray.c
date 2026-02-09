@@ -200,6 +200,33 @@ tray_lookup_icon_in_root(const char *base, const char *name, int desired_h,
 	return *found ? 0 : -1;
 }
 
+/* Parse a separator-delimited env var and add icon paths for each entry */
+static void
+tray_search_icon_prefix(const char *envval, char sep, const char *suffix,
+		const char *pixmap_suffix, const char *themes[], size_t theme_count,
+		char pathbufs[][PATH_MAX], size_t *pathcount, size_t maxpaths)
+{
+	while (envval && *envval && *pathcount < maxpaths) {
+		const char *end = strchrnul(envval, sep);
+		size_t len = (size_t)(end - envval);
+		if (len > 0 && len < PATH_MAX - 20) {
+			char path[PATH_MAX];
+			snprintf(path, sizeof(path), "%.*s%s", (int)len, envval, suffix);
+			add_icon_root_paths(path, themes, theme_count, pathbufs, pathcount, maxpaths);
+			if (pixmap_suffix && *pathcount < maxpaths) {
+				snprintf(path, sizeof(path), "%.*s%s", (int)len, envval, pixmap_suffix);
+				if (*pathcount < maxpaths) {
+					snprintf(pathbufs[*pathcount], sizeof(pathbufs[*pathcount]), "%s", path);
+					(*pathcount)++;
+				}
+			}
+		}
+		if (*end == '\0')
+			break;
+		envval = end + 1;
+	}
+}
+
 int
 tray_find_icon_path(const char *name, const char *theme_path, int desired_h,
 		char *out, size_t outlen)
@@ -277,42 +304,12 @@ tray_find_icon_path(const char *name, const char *theme_path, int desired_h,
 	xdg_data_dirs = getenv("XDG_DATA_DIRS");
 	if (!xdg_data_dirs || !*xdg_data_dirs)
 		xdg_data_dirs = "/usr/local/share:/usr/share";
-	while (*xdg_data_dirs && pathcount < LENGTH(pathbufs)) {
-		const char *end = strchrnul(xdg_data_dirs, ':');
-		size_t len = (size_t)(end - xdg_data_dirs);
-		if (len > 0 && len < sizeof(pathbufs[0]) - 7) {
-			char path[PATH_MAX];
-			snprintf(path, sizeof(path), "%.*s/icons",
-					(int)len, xdg_data_dirs);
-			add_icon_root_paths(path, themes, theme_count, pathbufs, &pathcount, LENGTH(pathbufs));
-		}
-		if (*end == '\0')
-			break;
-		xdg_data_dirs = end + 1;
-	}
+	tray_search_icon_prefix(xdg_data_dirs, ':', "/icons", NULL,
+			themes, theme_count, pathbufs, &pathcount, LENGTH(pathbufs));
 
-	{
-		const char *nix_profiles = getenv("NIX_PROFILES");
-		while (nix_profiles && *nix_profiles && pathcount < LENGTH(pathbufs)) {
-			const char *end = strchrnul(nix_profiles, ' ');
-			size_t len = (size_t)(end - nix_profiles);
-			if (len > 0 && len < sizeof(pathbufs[0]) - 14 && pathcount < LENGTH(pathbufs)) {
-				char path[PATH_MAX];
-				snprintf(path, sizeof(path),
-						"%.*s/share/icons", (int)len, nix_profiles);
-				add_icon_root_paths(path, themes, theme_count, pathbufs, &pathcount, LENGTH(pathbufs));
-			}
-			if (len > 0 && len < sizeof(pathbufs[0]) - 16 && pathcount < LENGTH(pathbufs)) {
-				char path[PATH_MAX];
-				snprintf(path, sizeof(path),
-						"%.*s/share/pixmaps", (int)len, nix_profiles);
-				ADD_PATH(path);
-			}
-			if (*end == '\0')
-				break;
-			nix_profiles = end + 1;
-		}
-	}
+	tray_search_icon_prefix(getenv("NIX_PROFILES"), ' ',
+			"/share/icons", "/share/pixmaps",
+			themes, theme_count, pathbufs, &pathcount, LENGTH(pathbufs));
 
 	if (pathcount < LENGTH(pathbufs)) {
 		add_icon_root_paths("/run/current-system/sw/share/icons", themes, theme_count, pathbufs, &pathcount, LENGTH(pathbufs));
@@ -816,7 +813,9 @@ tray_menu_parse_node_body(sd_bus_message *msg, TrayMenu *menu, int depth, int ma
 			r = -EINVAL;
 			break;
 		}
-		if (key && strcmp(key, "label") == 0) {
+		if (!key) {
+			sd_bus_message_skip(msg, "v");
+		} else if (strcmp(key, "label") == 0) {
 			const char *val = NULL;
 			if (sd_bus_message_enter_container(msg, 'v', "s") >= 0) {
 				if (sd_bus_message_read(msg, "s", &val) >= 0 && val)
@@ -825,7 +824,7 @@ tray_menu_parse_node_body(sd_bus_message *msg, TrayMenu *menu, int depth, int ma
 			} else {
 				sd_bus_message_skip(msg, "v");
 			}
-		} else if (key && strcmp(key, "enabled") == 0) {
+		} else if (strcmp(key, "enabled") == 0) {
 			int v = 1;
 			if (sd_bus_message_enter_container(msg, 'v', "b") >= 0) {
 				sd_bus_message_read(msg, "b", &v);
@@ -834,7 +833,7 @@ tray_menu_parse_node_body(sd_bus_message *msg, TrayMenu *menu, int depth, int ma
 			} else {
 				sd_bus_message_skip(msg, "v");
 			}
-		} else if (key && strcmp(key, "visible") == 0) {
+		} else if (strcmp(key, "visible") == 0) {
 			int v = 1;
 			if (sd_bus_message_enter_container(msg, 'v', "b") >= 0) {
 				sd_bus_message_read(msg, "b", &v);
@@ -843,7 +842,7 @@ tray_menu_parse_node_body(sd_bus_message *msg, TrayMenu *menu, int depth, int ma
 			} else {
 				sd_bus_message_skip(msg, "v");
 			}
-		} else if (key && strcmp(key, "type") == 0) {
+		} else if (strcmp(key, "type") == 0) {
 			const char *val = NULL;
 			if (sd_bus_message_enter_container(msg, 'v', "s") >= 0) {
 				if (sd_bus_message_read(msg, "s", &val) >= 0 && val
@@ -853,7 +852,7 @@ tray_menu_parse_node_body(sd_bus_message *msg, TrayMenu *menu, int depth, int ma
 			} else {
 				sd_bus_message_skip(msg, "v");
 			}
-		} else if (key && strcmp(key, "toggle-type") == 0) {
+		} else if (strcmp(key, "toggle-type") == 0) {
 			const char *val = NULL;
 			if (sd_bus_message_enter_container(msg, 'v', "s") >= 0) {
 				if (sd_bus_message_read(msg, "s", &val) >= 0 && val) {
@@ -866,7 +865,7 @@ tray_menu_parse_node_body(sd_bus_message *msg, TrayMenu *menu, int depth, int ma
 			} else {
 				sd_bus_message_skip(msg, "v");
 			}
-		} else if (key && strcmp(key, "toggle-state") == 0) {
+		} else if (strcmp(key, "toggle-state") == 0) {
 			int32_t state = 0;
 			if (sd_bus_message_enter_container(msg, 'v', "i") >= 0) {
 				sd_bus_message_read(msg, "i", &state);
@@ -877,7 +876,7 @@ tray_menu_parse_node_body(sd_bus_message *msg, TrayMenu *menu, int depth, int ma
 			} else {
 				sd_bus_message_skip(msg, "v");
 			}
-		} else if (key && strcmp(key, "children-display") == 0) {
+		} else if (strcmp(key, "children-display") == 0) {
 			const char *val = NULL;
 			if (sd_bus_message_enter_container(msg, 'v', "s") >= 0) {
 				if (sd_bus_message_read(msg, "s", &val) >= 0 && val

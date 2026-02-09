@@ -1,11 +1,27 @@
 #include "nixlytile.h"
 #include "client.h"
 
+static inline void
+cleanup_async_task(struct wl_event_source **ev, int *fd, pid_t *pid)
+{
+	if (*ev) {
+		wl_event_source_remove(*ev);
+		*ev = NULL;
+	}
+	if (*fd >= 0) {
+		close(*fd);
+		*fd = -1;
+	}
+	if (*pid > 0) {
+		waitpid(*pid, NULL, WNOHANG);
+		*pid = -1;
+	}
+}
+
 void
 request_public_ip_async_ex(int force)
 {
 	const char *cmd;
-	int pipefd[2] = {-1, -1};
 	time_t now = time(NULL);
 
 	if (now == (time_t)-1)
@@ -22,29 +38,9 @@ request_public_ip_async_ex(int force)
 	if (!cmd || !cmd[0])
 		cmd = "curl -4 -s https://ifconfig.me";
 
-	if (pipe(pipefd) != 0)
+	if (spawn_async_read(cmd, &public_ip_pid, &public_ip_fd) != 0)
 		return;
 
-	public_ip_pid = fork();
-	if (public_ip_pid == 0) {
-		/* child */
-		close(pipefd[0]);
-		dup2(pipefd[1], STDOUT_FILENO);
-		dup2(pipefd[1], STDERR_FILENO);
-		close(pipefd[1]);
-		execl("/bin/sh", "/bin/sh", "-c", cmd, NULL);
-		_exit(127);
-	} else if (public_ip_pid < 0) {
-		close(pipefd[0]);
-		close(pipefd[1]);
-		public_ip_pid = -1;
-		return;
-	}
-
-	/* parent */
-	close(pipefd[1]);
-	public_ip_fd = pipefd[0];
-	fcntl(public_ip_fd, F_SETFL, fcntl(public_ip_fd, F_GETFL) | O_NONBLOCK);
 	public_ip_len = 0;
 	public_ip_buf[0] = '\0';
 	net_public_ip_last = now; /* rate-limit even if fetch fails */
@@ -64,18 +60,7 @@ request_public_ip_async(void)
 void
 stop_public_ip_fetch(void)
 {
-	if (public_ip_event) {
-		wl_event_source_remove(public_ip_event);
-		public_ip_event = NULL;
-	}
-	if (public_ip_fd >= 0) {
-		close(public_ip_fd);
-		public_ip_fd = -1;
-	}
-	if (public_ip_pid > 0) {
-		waitpid(public_ip_pid, NULL, WNOHANG);
-		public_ip_pid = -1;
-	}
+	cleanup_async_task(&public_ip_event, &public_ip_fd, &public_ip_pid);
 	public_ip_len = 0;
 	public_ip_buf[0] = '\0';
 }
@@ -124,7 +109,6 @@ public_ip_event_cb(int fd, uint32_t mask, void *data)
 void
 request_ssid_async(const char *iface)
 {
-	int pipefd[2] = {-1, -1};
 	char cmd[256];
 	const char *iw = "/run/current-system/sw/bin/iw";
 	const char *nmcli = "/run/current-system/sw/bin/nmcli";
@@ -149,27 +133,9 @@ request_ssid_async(const char *iface)
 				nmcli, iw, iface) >= (int)sizeof(cmd))
 		return;
 
-	if (pipe(pipefd) != 0)
+	if (spawn_async_read(cmd, &ssid_pid, &ssid_fd) != 0)
 		return;
 
-	ssid_pid = fork();
-	if (ssid_pid == 0) {
-		close(pipefd[0]);
-		dup2(pipefd[1], STDOUT_FILENO);
-		dup2(pipefd[1], STDERR_FILENO);
-		close(pipefd[1]);
-		execl("/bin/sh", "/bin/sh", "-c", cmd, NULL);
-		_exit(127);
-	} else if (ssid_pid < 0) {
-		close(pipefd[0]);
-		close(pipefd[1]);
-		ssid_pid = -1;
-		return;
-	}
-
-	close(pipefd[1]);
-	ssid_fd = pipefd[0];
-	fcntl(ssid_fd, F_SETFL, fcntl(ssid_fd, F_GETFL) | O_NONBLOCK);
 	ssid_len = 0;
 	ssid_buf[0] = '\0';
 	ssid_event = wl_event_loop_add_fd(event_loop, ssid_fd,
@@ -182,18 +148,7 @@ request_ssid_async(const char *iface)
 void
 stop_ssid_fetch(void)
 {
-	if (ssid_event) {
-		wl_event_source_remove(ssid_event);
-		ssid_event = NULL;
-	}
-	if (ssid_fd >= 0) {
-		close(ssid_fd);
-		ssid_fd = -1;
-	}
-	if (ssid_pid > 0) {
-		waitpid(ssid_pid, NULL, WNOHANG);
-		ssid_pid = -1;
-	}
+	cleanup_async_task(&ssid_event, &ssid_fd, &ssid_pid);
 	ssid_len = 0;
 	ssid_buf[0] = '\0';
 }
@@ -471,10 +426,7 @@ net_menu_render(Monitor *m)
 	wl_list_for_each_safe(node, tmp, &menu->bg->children, link)
 		wlr_scene_node_destroy(node);
 	drawrect(menu->bg, 0, 0, menu->width, menu->height, net_menu_row_bg);
-	drawrect(menu->bg, 0, 0, menu->width, border_px, border_col);
-	drawrect(menu->bg, 0, menu->height - border_px, menu->width, border_px, border_col);
-	drawrect(menu->bg, 0, 0, border_px, menu->height, border_col);
-	drawrect(menu->bg, menu->width - border_px, 0, border_px, menu->height, border_col);
+	draw_border(menu->bg, 0, 0, menu->width, menu->height, border_px, border_col);
 
 	/* Row 0: Available networks */
 	y = padding;
@@ -600,10 +552,7 @@ net_menu_submenu_render(Monitor *m)
 	wl_list_for_each_safe(node, tmp, &menu->submenu_bg->children, link)
 		wlr_scene_node_destroy(node);
 	drawrect(menu->submenu_bg, 0, 0, menu->submenu_width, menu->submenu_height, net_menu_row_bg);
-	drawrect(menu->submenu_bg, 0, 0, menu->submenu_width, border_px, border_col);
-	drawrect(menu->submenu_bg, 0, menu->submenu_height - border_px, menu->submenu_width, border_px, border_col);
-	drawrect(menu->submenu_bg, 0, 0, border_px, menu->submenu_height, border_col);
-	drawrect(menu->submenu_bg, menu->submenu_width - border_px, 0, border_px, menu->submenu_height, border_col);
+	draw_border(menu->submenu_bg, 0, 0, menu->submenu_width, menu->submenu_height, border_px, border_col);
 
 	y = padding;
 	if (menu->submenu_type == 0) {
@@ -661,33 +610,14 @@ void
 request_wifi_scan(void)
 {
 	const char *cmd = "nmcli -t -f SSID,SIGNAL,SECURITY device wifi list --rescan auto";
-	int pipefd[2] = {-1, -1};
 
 	if (wifi_scan_inflight)
 		return;
 
-	if (pipe(pipefd) != 0)
-		return;
-
 	wifi_scan_generation = wifi_networks_generation;
-	wifi_scan_pid = fork();
-	if (wifi_scan_pid == 0) {
-		close(pipefd[0]);
-		dup2(pipefd[1], STDOUT_FILENO);
-		dup2(pipefd[1], STDERR_FILENO);
-		close(pipefd[1]);
-		execl("/bin/sh", "/bin/sh", "-c", cmd, NULL);
-		_exit(127);
-	} else if (wifi_scan_pid < 0) {
-		close(pipefd[0]);
-		close(pipefd[1]);
-		wifi_scan_pid = -1;
+	if (spawn_async_read(cmd, &wifi_scan_pid, &wifi_scan_fd) != 0)
 		return;
-	}
 
-	close(pipefd[1]);
-	wifi_scan_fd = pipefd[0];
-	fcntl(wifi_scan_fd, F_SETFL, fcntl(wifi_scan_fd, F_GETFL) | O_NONBLOCK);
 	wifi_scan_len = 0;
 	wifi_scan_buf[0] = '\0';
 	wifi_scan_inflight = 1;
@@ -695,11 +625,7 @@ request_wifi_scan(void)
 			WL_EVENT_READABLE | WL_EVENT_HANGUP, wifi_scan_event_cb, NULL);
 	if (!wifi_scan_event) {
 		wifi_scan_inflight = 0;
-		close(wifi_scan_fd);
-		wifi_scan_fd = -1;
-		if (wifi_scan_pid > 0)
-			waitpid(wifi_scan_pid, NULL, WNOHANG);
-		wifi_scan_pid = -1;
+		cleanup_async_task(&wifi_scan_event, &wifi_scan_fd, &wifi_scan_pid);
 	}
 }
 
@@ -716,18 +642,7 @@ vpn_connections_clear(void)
 void
 vpn_scan_finish(void)
 {
-	if (vpn_scan_event) {
-		wl_event_source_remove(vpn_scan_event);
-		vpn_scan_event = NULL;
-	}
-	if (vpn_scan_fd >= 0) {
-		close(vpn_scan_fd);
-		vpn_scan_fd = -1;
-	}
-	if (vpn_scan_pid > 0) {
-		waitpid(vpn_scan_pid, NULL, WNOHANG);
-		vpn_scan_pid = -1;
-	}
+	cleanup_async_task(&vpn_scan_event, &vpn_scan_fd, &vpn_scan_pid);
 	vpn_scan_inflight = 0;
 }
 
@@ -842,32 +757,13 @@ request_vpn_scan(void)
 {
 	/* Get all VPN connections with their status */
 	const char *cmd = "nmcli -t -f NAME,UUID,TYPE,DEVICE connection show";
-	int pipefd[2] = {-1, -1};
 
 	if (vpn_scan_inflight)
 		return;
 
-	if (pipe(pipefd) != 0)
+	if (spawn_async_read(cmd, &vpn_scan_pid, &vpn_scan_fd) != 0)
 		return;
 
-	vpn_scan_pid = fork();
-	if (vpn_scan_pid == 0) {
-		close(pipefd[0]);
-		dup2(pipefd[1], STDOUT_FILENO);
-		dup2(pipefd[1], STDERR_FILENO);
-		close(pipefd[1]);
-		execl("/bin/sh", "/bin/sh", "-c", cmd, NULL);
-		_exit(127);
-	} else if (vpn_scan_pid < 0) {
-		close(pipefd[0]);
-		close(pipefd[1]);
-		vpn_scan_pid = -1;
-		return;
-	}
-
-	close(pipefd[1]);
-	vpn_scan_fd = pipefd[0];
-	fcntl(vpn_scan_fd, F_SETFL, fcntl(vpn_scan_fd, F_GETFL) | O_NONBLOCK);
 	vpn_scan_len = 0;
 	vpn_scan_buf[0] = '\0';
 	vpn_scan_inflight = 1;
@@ -875,30 +771,14 @@ request_vpn_scan(void)
 			WL_EVENT_READABLE | WL_EVENT_HANGUP, vpn_scan_event_cb, NULL);
 	if (!vpn_scan_event) {
 		vpn_scan_inflight = 0;
-		close(vpn_scan_fd);
-		vpn_scan_fd = -1;
-		if (vpn_scan_pid > 0)
-			waitpid(vpn_scan_pid, NULL, WNOHANG);
-		vpn_scan_pid = -1;
+		cleanup_async_task(&vpn_scan_event, &vpn_scan_fd, &vpn_scan_pid);
 	}
 }
 
 void
 vpn_connect_finish(void)
 {
-	if (vpn_connect_event) {
-		wl_event_source_remove(vpn_connect_event);
-		vpn_connect_event = NULL;
-	}
-	if (vpn_connect_fd >= 0) {
-		close(vpn_connect_fd);
-		vpn_connect_fd = -1;
-	}
-	if (vpn_connect_pid > 0) {
-		int status;
-		waitpid(vpn_connect_pid, &status, 0);
-		vpn_connect_pid = -1;
-	}
+	cleanup_async_task(&vpn_connect_event, &vpn_connect_fd, &vpn_connect_pid);
 }
 
 int
@@ -959,7 +839,6 @@ void
 vpn_connect(const char *name)
 {
 	char cmd[512];
-	int pipefd[2] = {-1, -1};
 
 	if (!name || !name[0])
 		return;
@@ -971,40 +850,17 @@ vpn_connect(const char *name)
 	snprintf(cmd, sizeof(cmd), "nmcli connection up \"%s\" 2>&1", name);
 	snprintf(vpn_pending_name, sizeof(vpn_pending_name), "%s", name);
 
-	if (pipe(pipefd) != 0) {
-		toast_show(selmon, "VPN: Failed to create pipe", 3000);
+	if (spawn_async_read(cmd, &vpn_connect_pid, &vpn_connect_fd) != 0) {
+		toast_show(selmon, "VPN: Failed to spawn", 3000);
 		return;
 	}
 
-	vpn_connect_pid = fork();
-	if (vpn_connect_pid == 0) {
-		close(pipefd[0]);
-		dup2(pipefd[1], STDOUT_FILENO);
-		dup2(pipefd[1], STDERR_FILENO);
-		close(pipefd[1]);
-		execl("/bin/sh", "/bin/sh", "-c", cmd, NULL);
-		_exit(127);
-	} else if (vpn_connect_pid < 0) {
-		close(pipefd[0]);
-		close(pipefd[1]);
-		vpn_connect_pid = -1;
-		toast_show(selmon, "VPN: Failed to fork", 3000);
-		return;
-	}
-
-	close(pipefd[1]);
-	vpn_connect_fd = pipefd[0];
-	fcntl(vpn_connect_fd, F_SETFL, fcntl(vpn_connect_fd, F_GETFL) | O_NONBLOCK);
 	vpn_connect_len = 0;
 	vpn_connect_buf[0] = '\0';
 	vpn_connect_event = wl_event_loop_add_fd(event_loop, vpn_connect_fd,
 			WL_EVENT_READABLE | WL_EVENT_HANGUP, vpn_connect_event_cb, NULL);
 	if (!vpn_connect_event) {
-		close(vpn_connect_fd);
-		vpn_connect_fd = -1;
-		if (vpn_connect_pid > 0)
-			waitpid(vpn_connect_pid, NULL, WNOHANG);
-		vpn_connect_pid = -1;
+		cleanup_async_task(&vpn_connect_event, &vpn_connect_fd, &vpn_connect_pid);
 		toast_show(selmon, "VPN: Failed to add event", 3000);
 	}
 }
@@ -1052,18 +908,7 @@ wifi_networks_insert_sorted(WifiNetwork *n)
 void
 wifi_scan_finish(void)
 {
-	if (wifi_scan_event) {
-		wl_event_source_remove(wifi_scan_event);
-		wifi_scan_event = NULL;
-	}
-	if (wifi_scan_fd >= 0) {
-		close(wifi_scan_fd);
-		wifi_scan_fd = -1;
-	}
-	if (wifi_scan_pid > 0) {
-		waitpid(wifi_scan_pid, NULL, WNOHANG);
-		wifi_scan_pid = -1;
-	}
+	cleanup_async_task(&wifi_scan_event, &wifi_scan_fd, &wifi_scan_pid);
 	wifi_scan_inflight = 0;
 }
 

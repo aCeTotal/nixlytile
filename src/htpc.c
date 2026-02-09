@@ -999,6 +999,36 @@ stats_panel_anim_cb(void *data)
 	return 0;
 }
 
+static int
+stats_render_separator(struct wlr_scene_tree *tree, int y, int w,
+		int padding, const float color[4])
+{
+	drawrect(tree, padding, y, w - padding * 2, 1, color);
+	return 12;
+}
+
+static int
+stats_render_section_header(StatusModule *mod, const char *title,
+		int y, int line_height, int padding, const float color[4])
+{
+	char line[128];
+	snprintf(line, sizeof(line), "%s", title);
+	tray_render_label(mod, line, padding, y + line_height, color);
+	return line_height + 4;
+}
+
+static int
+stats_render_field(StatusModule *mod, const char *label, const char *value,
+		int y, int line_height, int padding, int col2_x,
+		const float label_color[4], const float value_color[4])
+{
+	char line[128];
+	snprintf(line, sizeof(line), "  %s", label);
+	tray_render_label(mod, line, padding, y + line_height, label_color);
+	tray_render_label(mod, value, col2_x, y + line_height, value_color);
+	return line_height;
+}
+
 int
 stats_panel_refresh_cb(void *data)
 {
@@ -1087,13 +1117,12 @@ stats_panel_refresh_cb(void *data)
 
 	/* Separator */
 	static const float sep_color[4] = {0.3f, 0.3f, 0.4f, 1.0f};
-	drawrect(m->stats_panel_tree, padding, y_offset, m->stats_panel_width - padding * 2, 1, sep_color);
-	y_offset += 12;
+	y_offset += stats_render_separator(m->stats_panel_tree, y_offset,
+			m->stats_panel_width, padding, sep_color);
 
 	/* ============ VRR STATUS SECTION ============ */
-	snprintf(line, sizeof(line), "VRR / Adaptive Sync");
-	tray_render_label(&mod, line, padding, y_offset + line_height, section_color);
-	y_offset += line_height + 4;
+	y_offset += stats_render_section_header(&mod, "VRR / Adaptive Sync",
+			y_offset, line_height, padding, section_color);
 
 	/* VRR Support status */
 	snprintf(line, sizeof(line), "  Support:");
@@ -1140,15 +1169,13 @@ stats_panel_refresh_cb(void *data)
 	}
 	y_offset += line_height + 8;
 
-	/* Separator */
-	drawrect(m->stats_panel_tree, padding, y_offset, m->stats_panel_width - padding * 2, 1, sep_color);
-	y_offset += 12;
+	y_offset += stats_render_separator(m->stats_panel_tree, y_offset,
+			m->stats_panel_width, padding, sep_color);
 
 	/* ============ FRAME SMOOTHING SECTION ============ */
 	static const float smooth_color[4] = {0.5f, 1.0f, 0.7f, 1.0f};  /* Mint green */
-	snprintf(line, sizeof(line), "Frame Smoothing");
-	tray_render_label(&mod, line, padding, y_offset + line_height, section_color);
-	y_offset += line_height + 4;
+	y_offset += stats_render_section_header(&mod, "Frame Smoothing",
+			y_offset, line_height, padding, section_color);
 
 	/* Frame repeat status */
 	snprintf(line, sizeof(line), "  Repeat:");
@@ -1200,22 +1227,19 @@ stats_panel_refresh_cb(void *data)
 
 	/* Frames repeated counter */
 	if (m->frames_repeated > 0) {
-		snprintf(line, sizeof(line), "  Repeated:");
-		tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
 		snprintf(line, sizeof(line), "%lu", m->frames_repeated);
-		tray_render_label(&mod, line, col2_x, y_offset + line_height, smooth_color);
-		y_offset += line_height;
+		y_offset += stats_render_field(&mod, "Repeated:", line,
+				y_offset, line_height, padding, col2_x, label_color, smooth_color);
 	}
 	y_offset += 8;
 
 	/* Separator */
-	drawrect(m->stats_panel_tree, padding, y_offset, m->stats_panel_width - padding * 2, 1, sep_color);
-	y_offset += 12;
+	y_offset += stats_render_separator(m->stats_panel_tree, y_offset,
+			m->stats_panel_width, padding, sep_color);
 
 	/* ============ REAL-TIME COMPARISON SECTION ============ */
-	snprintf(line, sizeof(line), "Real-Time Sync");
-	tray_render_label(&mod, line, padding, y_offset + line_height, section_color);
-	y_offset += line_height + 4;
+	y_offset += stats_render_section_header(&mod, "Real-Time Sync",
+			y_offset, line_height, padding, section_color);
 
 	/* Two-column headers */
 	snprintf(line, sizeof(line), "  SCREEN");
@@ -1256,13 +1280,12 @@ stats_panel_refresh_cb(void *data)
 	y_offset += 8;
 
 	/* Separator */
-	drawrect(m->stats_panel_tree, padding, y_offset, m->stats_panel_width - padding * 2, 1, sep_color);
-	y_offset += 12;
+	y_offset += stats_render_separator(m->stats_panel_tree, y_offset,
+			m->stats_panel_width, padding, sep_color);
 
 	/* ============ RENDERING SECTION ============ */
-	snprintf(line, sizeof(line), "Rendering");
-	tray_render_label(&mod, line, padding, y_offset + line_height, section_color);
-	y_offset += line_height + 4;
+	y_offset += stats_render_section_header(&mod, "Rendering",
+			y_offset, line_height, padding, section_color);
 
 	snprintf(line, sizeof(line), "  Mode:");
 	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
@@ -1294,13 +1317,12 @@ stats_panel_refresh_cb(void *data)
 	y_offset += 8;
 
 	/* Separator */
-	drawrect(m->stats_panel_tree, padding, y_offset, m->stats_panel_width - padding * 2, 1, sep_color);
-	y_offset += 12;
+	y_offset += stats_render_separator(m->stats_panel_tree, y_offset,
+			m->stats_panel_width, padding, sep_color);
 
 	/* ============ GAME MODE SECTION ============ */
-	snprintf(line, sizeof(line), "Game Mode");
-	tray_render_label(&mod, line, padding, y_offset + line_height, section_color);
-	y_offset += line_height + 4;
+	y_offset += stats_render_section_header(&mod, "Game Mode",
+			y_offset, line_height, padding, section_color);
 
 	snprintf(line, sizeof(line), "  Status:");
 	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
@@ -1366,24 +1388,20 @@ stats_panel_refresh_cb(void *data)
 
 	/* Show priority boost if active */
 	if (game_mode_nice_applied || game_mode_ioclass_applied) {
-		snprintf(line, sizeof(line), "  Priority:");
-		tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
-		snprintf(line, sizeof(line), "Boosted");
-		tray_render_label(&mod, line, col2_x, y_offset + line_height, good_color);
-		y_offset += line_height;
+		y_offset += stats_render_field(&mod, "Priority:", "Boosted",
+				y_offset, line_height, padding, col2_x, label_color, good_color);
 	}
 	y_offset += 8;
 
 	/* Separator */
-	drawrect(m->stats_panel_tree, padding, y_offset, m->stats_panel_width - padding * 2, 1, sep_color);
-	y_offset += 12;
+	y_offset += stats_render_separator(m->stats_panel_tree, y_offset,
+			m->stats_panel_width, padding, sep_color);
 
 	/* ============ INPUT LATENCY SECTION ============ */
 	if (game_mode_ultra) {
 		static const float latency_color[4] = {1.0f, 0.6f, 0.2f, 1.0f};  /* Orange */
-		snprintf(line, sizeof(line), "Input Latency");
-		tray_render_label(&mod, line, padding, y_offset + line_height, section_color);
-		y_offset += line_height + 4;
+		y_offset += stats_render_section_header(&mod, "Input Latency",
+				y_offset, line_height, padding, section_color);
 
 		/* Current input-to-frame latency */
 		snprintf(line, sizeof(line), "  Current:");
@@ -1402,19 +1420,15 @@ stats_panel_refresh_cb(void *data)
 
 		/* Min/Max latency */
 		if (m->min_input_latency_ns > 0) {
-			snprintf(line, sizeof(line), "  Range:");
-			tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
 			snprintf(line, sizeof(line), "%.1f-%.1f ms",
 				(float)m->min_input_latency_ns / 1000000.0f,
 				(float)m->max_input_latency_ns / 1000000.0f);
-			tray_render_label(&mod, line, col2_x, y_offset + line_height, value_color);
-			y_offset += line_height;
+			y_offset += stats_render_field(&mod, "Range:", line,
+					y_offset, line_height, padding, col2_x, label_color, value_color);
 		}
 
 		/* Frame timing jitter/variance */
 		if (m->frame_variance_ns > 0) {
-			snprintf(line, sizeof(line), "  Jitter:");
-			tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
 			/* Convert variance to approximate jitter in ms (sqrt approximation) */
 			float jitter_ms = 0.0f;
 			uint64_t v = m->frame_variance_ns;
@@ -1422,27 +1436,25 @@ stats_panel_refresh_cb(void *data)
 			while (sqrt_approx * sqrt_approx < v) sqrt_approx += 10000;
 			jitter_ms = (float)sqrt_approx / 1000000.0f;
 			snprintf(line, sizeof(line), "%.2f ms", jitter_ms);
-			tray_render_label(&mod, line, col2_x, y_offset + line_height,
-				jitter_ms < 1.0f ? good_color :
-				(jitter_ms < 3.0f ? warn_color : bad_color));
-			y_offset += line_height;
+			y_offset += stats_render_field(&mod, "Jitter:", line,
+					y_offset, line_height, padding, col2_x, label_color,
+					jitter_ms < 1.0f ? good_color :
+					(jitter_ms < 3.0f ? warn_color : bad_color));
 		}
 
 		/* Prediction accuracy */
 		if (m->prediction_accuracy > 0.0f) {
-			snprintf(line, sizeof(line), "  Prediction:");
-			tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
 			snprintf(line, sizeof(line), "%.0f%% accurate", m->prediction_accuracy);
-			tray_render_label(&mod, line, col2_x, y_offset + line_height,
-				m->prediction_accuracy > 80.0f ? good_color :
-				(m->prediction_accuracy > 50.0f ? warn_color : bad_color));
+			y_offset += stats_render_field(&mod, "Prediction:", line,
+					y_offset, line_height, padding, col2_x, label_color,
+					m->prediction_accuracy > 80.0f ? good_color :
+					(m->prediction_accuracy > 50.0f ? warn_color : bad_color));
 			y_offset += line_height;
 		}
 		y_offset += 8;
 
-		/* Separator */
-		drawrect(m->stats_panel_tree, padding, y_offset, m->stats_panel_width - padding * 2, 1, sep_color);
-		y_offset += 12;
+		y_offset += stats_render_separator(m->stats_panel_tree, y_offset,
+				m->stats_panel_width, padding, sep_color);
 	}
 
 	/* ============ SYSTEM HEALTH SECTION ============ */
@@ -1450,17 +1462,14 @@ stats_panel_refresh_cb(void *data)
 		int mem_pressure = get_memory_pressure();
 		m->memory_pressure = mem_pressure;
 
-		snprintf(line, sizeof(line), "System Health");
-		tray_render_label(&mod, line, padding, y_offset + line_height, section_color);
-		y_offset += line_height + 4;
+		y_offset += stats_render_section_header(&mod, "System Health",
+				y_offset, line_height, padding, section_color);
 
-		snprintf(line, sizeof(line), "  Memory:");
-		tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
 		snprintf(line, sizeof(line), "%d%% used", mem_pressure);
-		tray_render_label(&mod, line, col2_x, y_offset + line_height,
-			mem_pressure < 70 ? good_color :
-			(mem_pressure < 90 ? warn_color : bad_color));
-		y_offset += line_height;
+		y_offset += stats_render_field(&mod, "Memory:", line,
+				y_offset, line_height, padding, col2_x, label_color,
+				mem_pressure < 70 ? good_color :
+				(mem_pressure < 90 ? warn_color : bad_color));
 
 		/* Show warning if memory pressure is high */
 		if (mem_pressure >= 90) {
@@ -1472,42 +1481,35 @@ stats_panel_refresh_cb(void *data)
 	}
 
 	/* Separator */
-	drawrect(m->stats_panel_tree, padding, y_offset, m->stats_panel_width - padding * 2, 1, sep_color);
-	y_offset += 12;
+	y_offset += stats_render_separator(m->stats_panel_tree, y_offset,
+			m->stats_panel_width, padding, sep_color);
 
 	/* ============ FRAME STATS SECTION ============ */
-	snprintf(line, sizeof(line), "Frame Statistics");
-	tray_render_label(&mod, line, padding, y_offset + line_height, section_color);
-	y_offset += line_height + 4;
+	y_offset += stats_render_section_header(&mod, "Frame Statistics",
+			y_offset, line_height, padding, section_color);
 
-	snprintf(line, sizeof(line), "  Presented:");
-	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
 	snprintf(line, sizeof(line), "%lu", m->frames_presented);
-	tray_render_label(&mod, line, col2_x, y_offset + line_height, value_color);
-	y_offset += line_height;
+	y_offset += stats_render_field(&mod, "Presented:", line,
+			y_offset, line_height, padding, col2_x, label_color, value_color);
 
-	snprintf(line, sizeof(line), "  Dropped:");
-	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
 	snprintf(line, sizeof(line), "%lu", m->frames_dropped);
-	tray_render_label(&mod, line, col2_x, y_offset + line_height,
-		m->frames_dropped == 0 ? good_color : bad_color);
-	y_offset += line_height;
+	y_offset += stats_render_field(&mod, "Dropped:", line,
+			y_offset, line_height, padding, col2_x, label_color,
+			m->frames_dropped == 0 ? good_color : bad_color);
 
-	snprintf(line, sizeof(line), "  Held:");
-	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
 	snprintf(line, sizeof(line), "%lu", m->frames_held);
-	tray_render_label(&mod, line, col2_x, y_offset + line_height,
-		m->frames_held < 10 ? good_color : warn_color);
-	y_offset += line_height + 8;
+	y_offset += stats_render_field(&mod, "Held:", line,
+			y_offset, line_height, padding, col2_x, label_color,
+			m->frames_held < 10 ? good_color : warn_color);
+	y_offset += 8;
 
 	/* Separator */
-	drawrect(m->stats_panel_tree, padding, y_offset, m->stats_panel_width - padding * 2, 1, sep_color);
-	y_offset += 12;
+	y_offset += stats_render_separator(m->stats_panel_tree, y_offset,
+			m->stats_panel_width, padding, sep_color);
 
 	/* ============ FPS LIMITER SECTION ============ */
-	snprintf(line, sizeof(line), "FPS Limiter");
-	tray_render_label(&mod, line, padding, y_offset + line_height, section_color);
-	y_offset += line_height + 4;
+	y_offset += stats_render_section_header(&mod, "FPS Limiter",
+			y_offset, line_height, padding, section_color);
 
 	snprintf(line, sizeof(line), "  Status:");
 	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
@@ -1535,13 +1537,12 @@ stats_panel_refresh_cb(void *data)
 	y_offset += 8;
 
 	/* Separator */
-	drawrect(m->stats_panel_tree, padding, y_offset, m->stats_panel_width - padding * 2, 1, sep_color);
-	y_offset += 12;
+	y_offset += stats_render_separator(m->stats_panel_tree, y_offset,
+			m->stats_panel_width, padding, sep_color);
 
 	/* ============ CONTROLS SECTION ============ */
-	snprintf(line, sizeof(line), "Controls");
-	tray_render_label(&mod, line, padding, y_offset + line_height, section_color);
-	y_offset += line_height + 4;
+	y_offset += stats_render_section_header(&mod, "Controls",
+			y_offset, line_height, padding, section_color);
 
 	static const float hint_color[4] = {0.5f, 0.5f, 0.6f, 1.0f};
 	static const float key_color[4] = {0.7f, 0.8f, 0.9f, 1.0f};

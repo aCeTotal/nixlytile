@@ -285,13 +285,13 @@ int videoplayer_init_control_bar(VideoPlayer *vp, struct wlr_scene_tree *parent,
     /* Right side buttons (from right to left) */
     int right_x = bar->width - padding;
 
-    /* Subtitle button */
-    bar->subtitle_w = button_size;
+    /* Subtitle button (wider to show track info) */
+    bar->subtitle_w = 90;
     bar->subtitle_x = right_x - bar->subtitle_w;
     right_x = bar->subtitle_x - padding;
 
-    /* Audio button */
-    bar->audio_w = button_size;
+    /* Audio button (wider to show track info) */
+    bar->audio_w = 120;
     bar->audio_x = right_x - bar->audio_w;
     right_x = bar->audio_x - padding;
 
@@ -394,6 +394,38 @@ static void draw_rounded_rect(struct wlr_scene_tree *parent, int x, int y,
 /* ================================================================
  *  Control Bar Rendering
  * ================================================================ */
+
+static const char *audio_codec_display_name(AudioTrack *track)
+{
+    if (track->is_atmos) return "Atmos";
+    switch (track->codec_id) {
+    case AV_CODEC_ID_TRUEHD: return "TrueHD";
+    case AV_CODEC_ID_AC3: return "AC3";
+    case AV_CODEC_ID_EAC3: return "EAC3";
+    case AV_CODEC_ID_DTS: return "DTS";
+    case AV_CODEC_ID_AAC: return "AAC";
+    case AV_CODEC_ID_FLAC: return "FLAC";
+    case AV_CODEC_ID_OPUS: return "Opus";
+    case AV_CODEC_ID_VORBIS: return "Vorbis";
+    case AV_CODEC_ID_MP3: return "MP3";
+    default: return avcodec_get_name(track->codec_id);
+    }
+}
+
+static const char *subtitle_format_name(SubtitleTrack *track)
+{
+    switch (track->codec_id) {
+    case AV_CODEC_ID_ASS:
+    case AV_CODEC_ID_SSA: return "ASS";
+    case AV_CODEC_ID_SUBRIP:
+    case AV_CODEC_ID_SRT: return "SRT";
+    case AV_CODEC_ID_HDMV_PGS_SUBTITLE: return "PGS";
+    case AV_CODEC_ID_DVD_SUBTITLE: return "VOB";
+    case AV_CODEC_ID_WEBVTT: return "VTT";
+    case AV_CODEC_ID_MOV_TEXT: return "TX3G";
+    default: return track->is_text_based ? "Text" : "Bitmap";
+    }
+}
 
 void videoplayer_render_control_bar(VideoPlayer *vp)
 {
@@ -527,35 +559,77 @@ void videoplayer_render_control_bar(VideoPlayer *vp)
         (void)icon_h;
     }
 
-    /* Audio track button */
+    /* Audio track button - show current track info */
     {
-        int btn_y = y_center - CONTROL_BAR_BUTTON_SIZE / 2;
-        int icon_x = bar->audio_x + 8;
-        int icon_y = btn_y + 8;
+        char audio_label[64];
 
-        /* Audio track icon - speaker with number */
-        draw_rect(bar->bg, icon_x, icon_y + 8, 8, 8, color_button);
-        draw_rect(bar->bg, icon_x + 8, icon_y + 4, 4, 16, color_button);
+        if (vp->audio_track_count > 0) {
+            AudioTrack *track = &vp->audio_tracks[vp->current_audio_track];
+            const char *codec_display = audio_codec_display_name(track);
+            const char *ch_str;
 
-        /* Track number indicator */
-        if (vp->audio_track_count > 1) {
-            draw_rect(bar->bg, icon_x + 16, icon_y + 8, 8, 8, color_button);
+            switch (track->channels) {
+            case 8:  ch_str = "7.1"; break;
+            case 6:  ch_str = "5.1"; break;
+            case 2:  ch_str = "2.0"; break;
+            case 1:  ch_str = "1.0"; break;
+            default: ch_str = ""; break;
+            }
+
+            if (track->language[0]) {
+                snprintf(audio_label, sizeof(audio_label), "%s %s %s",
+                         track->language, codec_display, ch_str);
+            } else {
+                snprintf(audio_label, sizeof(audio_label), "%s %s",
+                         codec_display, ch_str);
+            }
+        } else {
+            snprintf(audio_label, sizeof(audio_label), "No Audio");
+        }
+
+        struct wlr_buffer *audio_buf = create_text_buffer(audio_label,
+                                                           bar->audio_w, 24,
+                                                           color_text, "sans-serif", 12.0);
+        if (audio_buf) {
+            struct wlr_scene_buffer *audio_node = wlr_scene_buffer_create(bar->bg, audio_buf);
+            if (audio_node) {
+                wlr_scene_node_set_position(&audio_node->node, bar->audio_x, y_center - 12);
+            }
+            wlr_buffer_drop(audio_buf);
         }
     }
 
-    /* Subtitle button */
+    /* Subtitle button - show current track info */
     {
-        int btn_y = y_center - CONTROL_BAR_BUTTON_SIZE / 2;
-        int icon_x = bar->subtitle_x + 8;
-        int icon_y = btn_y + 8;
+        char sub_label[64];
 
-        /* CC icon */
-        draw_rect(bar->bg, icon_x, icon_y, 24, 20, color_button);
+        if (vp->current_subtitle_track >= 0 &&
+            vp->current_subtitle_track < vp->subtitle_track_count) {
+            SubtitleTrack *track = &vp->subtitle_tracks[vp->current_subtitle_track];
+            const char *sub_fmt = subtitle_format_name(track);
 
-        if (vp->current_subtitle_track < 0) {
-            /* Subtitles off - strike through */
-            draw_rect(bar->bg, icon_x, icon_y + 9, 24, 2,
-                      (const float[]){0.1f, 0.1f, 0.1f, 1.0f});
+            if (track->language[0]) {
+                snprintf(sub_label, sizeof(sub_label), "%s %s",
+                         track->language, sub_fmt);
+            } else {
+                snprintf(sub_label, sizeof(sub_label), "%s %d",
+                         sub_fmt, vp->current_subtitle_track + 1);
+            }
+        } else if (vp->subtitle_track_count > 0) {
+            snprintf(sub_label, sizeof(sub_label), "CC Off");
+        } else {
+            snprintf(sub_label, sizeof(sub_label), "No Subs");
+        }
+
+        struct wlr_buffer *sub_buf = create_text_buffer(sub_label,
+                                                         bar->subtitle_w, 24,
+                                                         color_text, "sans-serif", 12.0);
+        if (sub_buf) {
+            struct wlr_scene_buffer *sub_node = wlr_scene_buffer_create(bar->bg, sub_buf);
+            if (sub_node) {
+                wlr_scene_node_set_position(&sub_node->node, bar->subtitle_x, y_center - 12);
+            }
+            wlr_buffer_drop(sub_buf);
         }
     }
 }

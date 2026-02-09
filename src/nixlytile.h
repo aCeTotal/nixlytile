@@ -1746,6 +1746,8 @@ void drawrect(struct wlr_scene_tree *parent, int x, int y,
 		int width, int height, const float color[static 4]);
 void drawhoverrect(struct wlr_scene_tree *parent, int x, int y,
 		int width, int height, const float color[static 4], float fade);
+void draw_border(struct wlr_scene_tree *parent, int x, int y,
+		int w, int h, int thickness, const float color[static 4]);
 void drawroundedrect(struct wlr_scene_tree *parent, int x, int y,
 		int width, int height, const float color[static 4]);
 struct wlr_buffer *statusbar_buffer_from_argb32(const uint32_t *data, int width, int height);

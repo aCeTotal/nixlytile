@@ -47,6 +47,16 @@ drawhoverrect(struct wlr_scene_tree *parent, int x, int y,
 }
 
 void
+draw_border(struct wlr_scene_tree *parent, int x, int y,
+		int w, int h, int thickness, const float color[static 4])
+{
+	drawrect(parent, x, y, w, thickness, color);                /* top */
+	drawrect(parent, x, y + h - thickness, w, thickness, color); /* bottom */
+	drawrect(parent, x, y, thickness, h, color);                /* left */
+	drawrect(parent, x + w - thickness, y, thickness, h, color); /* right */
+}
+
+void
 drawroundedrect(struct wlr_scene_tree *parent, int x, int y,
 		int width, int height, const float color[static 4])
 {
@@ -790,7 +800,8 @@ init_net_icon_paths(void)
 }
 
 struct wlr_buffer *
-statusbar_scaled_buffer_from_argb32(const uint32_t *data, int width, int height, int target_h)
+statusbar_scaled_buffer_from_argb32_ex(const uint32_t *data, int width, int height,
+		int target_h, int fix_format)
 {
 	pixman_image_t *src = NULL, *dst = NULL;
 	struct PixmanBuffer *buf;
@@ -817,10 +828,11 @@ statusbar_scaled_buffer_from_argb32(const uint32_t *data, int width, int height,
 	if (!src_copy || !dst_copy)
 		goto fail;
 	memcpy(src_copy, data, src_size);
-	fix_tray_argb32((uint32_t *)src_copy, (size_t)width * (size_t)height, 0);
 
-	/* If the first pass produced fully transparent data, retry assuming RGBA order */
-	{
+	if (fix_format) {
+		fix_tray_argb32((uint32_t *)src_copy, (size_t)width * (size_t)height, 0);
+
+		/* If the first pass produced fully transparent data, retry assuming RGBA order */
 		size_t alpha_sum = 0;
 		for (size_t n = 0; n < (size_t)width * (size_t)height; n++)
 			alpha_sum += src_copy[n * 4];
@@ -837,7 +849,6 @@ statusbar_scaled_buffer_from_argb32(const uint32_t *data, int width, int height,
 	if (!src || !dst)
 		goto fail;
 
-	/* Scale with a simple bilinear filter to fit the bar height */
 	pixman_transform_init_identity(&transform);
 	pixman_transform_scale(&transform, NULL,
 			pixman_double_to_fixed((double)width / (double)target_w),
@@ -876,76 +887,15 @@ fail:
 }
 
 struct wlr_buffer *
+statusbar_scaled_buffer_from_argb32(const uint32_t *data, int width, int height, int target_h)
+{
+	return statusbar_scaled_buffer_from_argb32_ex(data, width, height, target_h, 1);
+}
+
+struct wlr_buffer *
 statusbar_scaled_buffer_from_argb32_raw(const uint32_t *data, int width, int height, int target_h)
 {
-	pixman_image_t *src = NULL, *dst = NULL;
-	struct PixmanBuffer *buf;
-	uint8_t *src_copy = NULL;
-	uint8_t *dst_copy = NULL;
-	size_t src_stride, dst_stride, src_size, dst_size;
-	int target_w;
-	pixman_transform_t transform;
-
-	if (!data || width <= 0 || height <= 0 || target_h <= 0)
-		return NULL;
-
-	target_w = (int)lround(((double)width * (double)target_h) / (double)height);
-	if (target_w <= 0)
-		target_w = 1;
-
-	src_stride = (size_t)width * 4;
-	dst_stride = (size_t)target_w * 4;
-	src_size = src_stride * (size_t)height;
-	dst_size = dst_stride * (size_t)target_h;
-
-	src_copy = calloc(1, src_size);
-	dst_copy = calloc(1, dst_size);
-	if (!src_copy || !dst_copy)
-		goto fail;
-	memcpy(src_copy, data, src_size);
-
-	src = pixman_image_create_bits_no_clear(PIXMAN_a8r8g8b8, width, height,
-			(uint32_t *)src_copy, (int)src_stride);
-	dst = pixman_image_create_bits_no_clear(PIXMAN_a8r8g8b8, target_w, target_h,
-			(uint32_t *)dst_copy, (int)dst_stride);
-	if (!src || !dst)
-		goto fail;
-
-	pixman_transform_init_identity(&transform);
-	pixman_transform_scale(&transform, NULL,
-			pixman_double_to_fixed((double)width / (double)target_w),
-			pixman_double_to_fixed((double)height / (double)target_h));
-	pixman_image_set_transform(src, &transform);
-	pixman_image_set_filter(src, PIXMAN_FILTER_BILINEAR, NULL, 0);
-
-	pixman_image_composite32(PIXMAN_OP_SRC, src, NULL, dst,
-			0, 0, 0, 0, 0, 0, target_w, target_h);
-
-	pixman_image_unref(src);
-	free(src_copy);
-	src = NULL;
-	src_copy = NULL;
-
-	buf = ecalloc(1, sizeof(*buf));
-	if (!buf)
-		goto fail;
-
-	buf->image = dst;
-	buf->data = dst_copy;
-	buf->drm_format = DRM_FORMAT_ARGB8888;
-	buf->stride = (int)dst_stride;
-	buf->owns_data = 1;
-	wlr_buffer_init(&buf->base, &pixman_buffer_impl, target_w, target_h);
-	return &buf->base;
-
-fail:
-	if (src)
-		pixman_image_unref(src);
-	if (dst)
-		pixman_image_unref(dst);
-	free(src_copy);
-	free(dst_copy);
-	return NULL;
+	return statusbar_scaled_buffer_from_argb32_ex(data, width, height, target_h, 0);
 }
 
 struct wlr_buffer *

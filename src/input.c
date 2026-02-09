@@ -327,6 +327,109 @@ axisnotify(struct wl_listener *listener, void *data)
 	}
 }
 
+/* Returns 1 if click was handled by a statusbar module */
+static int
+handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
+{
+	StatusModule *tags = &m->statusbar.tags;
+	StatusModule *mic = &m->statusbar.mic;
+	StatusModule *vol = &m->statusbar.volume;
+	StatusModule *cpu = &m->statusbar.cpu;
+	StatusModule *sys = &m->statusbar.sysicons;
+	StatusModule *bt = &m->statusbar.bluetooth;
+	StatusModule *stm = &m->statusbar.steam;
+	StatusModule *dsc = &m->statusbar.discord;
+
+	if (m->statusbar.cpu_popup.visible) {
+		if (cpu_popup_handle_click(m, lx, ly, button))
+			return 1;
+	}
+
+	if (m->statusbar.ram_popup.visible) {
+		if (ram_popup_handle_click(m, lx, ly, button))
+			return 1;
+	}
+
+	if (lx < 0 || ly < 0 ||
+			lx >= m->statusbar.area.width ||
+			ly >= m->statusbar.area.height)
+		return 0;
+
+	if (button == BTN_RIGHT &&
+			sys->width > 0 &&
+			lx >= sys->x && lx < sys->x + sys->width) {
+		net_menu_hide_all();
+		net_menu_open(m);
+		return 1;
+	}
+
+	if (button == BTN_LEFT &&
+			sys->width > 0 &&
+			lx >= sys->x && lx < sys->x + sys->width) {
+		Arg arg = { .v = netcmd };
+		spawn(&arg);
+		return 1;
+	}
+
+	if (cpu->width > 0 && lx >= cpu->x && lx < cpu->x + cpu->width) {
+		Arg arg = { .v = btopcmd };
+		spawn(&arg);
+		return 1;
+	}
+
+	if (mic->width > 0 && lx >= mic->x && lx < mic->x + mic->width) {
+		toggle_pipewire_mic_mute();
+		return 1;
+	}
+
+	if (vol->width > 0 && lx >= vol->x && lx < vol->x + vol->width) {
+		toggle_pipewire_mute();
+		return 1;
+	}
+
+	/* Bluetooth module click - open bluetooth manager */
+	if (button == BTN_LEFT &&
+			bt->width > 0 &&
+			lx >= bt->x && lx < bt->x + bt->width) {
+		pid_t pid = fork();
+		if (pid == 0) {
+			setsid();
+			execlp("blueman-manager", "blueman-manager", NULL);
+			_exit(1);
+		}
+		return 1;
+	}
+
+	/* Steam module click - focus or launch Steam */
+	if (button == BTN_LEFT &&
+			stm->width > 0 &&
+			lx >= stm->x && lx < stm->x + stm->width) {
+		focus_or_launch_app("steam", "steam");
+		return 1;
+	}
+
+	/* Discord module click - focus or launch Discord */
+	if (button == BTN_LEFT &&
+			dsc->width > 0 &&
+			lx >= dsc->x && lx < dsc->x + dsc->width) {
+		focus_or_launch_app("discord", "discord");
+		return 1;
+	}
+
+	if (button == BTN_LEFT && lx < tags->width) {
+		for (int i = 0; i < tags->box_count; i++) {
+			int bx = tags->box_x[i];
+			int bw = tags->box_w[i];
+			if (lx >= bx && lx < bx + bw) {
+				Arg arg = { .ui = 1u << tags->box_tag[i] };
+				view(&arg);
+				return 1;
+			}
+		}
+	}
+	return 0;
+}
+
 void
 handle_pointer_button_internal(uint32_t button, uint32_t state, uint32_t time_msec)
 {
@@ -391,101 +494,8 @@ handle_pointer_button_internal(uint32_t button, uint32_t state, uint32_t time_ms
 		if (selmon && selmon->showbar) {
 			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
 			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
-			StatusModule *tags = &selmon->statusbar.tags;
-			StatusModule *mic = &selmon->statusbar.mic;
-			StatusModule *vol = &selmon->statusbar.volume;
-			StatusModule *cpu = &selmon->statusbar.cpu;
-			StatusModule *sys = &selmon->statusbar.sysicons;
-			StatusModule *bt = &selmon->statusbar.bluetooth;
-			StatusModule *stm = &selmon->statusbar.steam;
-			StatusModule *dsc = &selmon->statusbar.discord;
-
-			if (selmon->statusbar.cpu_popup.visible) {
-				if (cpu_popup_handle_click(selmon, lx, ly, button))
-					return;
-			}
-
-			if (selmon->statusbar.ram_popup.visible) {
-				if (ram_popup_handle_click(selmon, lx, ly, button))
-					return;
-			}
-
-			if (lx >= 0 && ly >= 0 &&
-					lx < selmon->statusbar.area.width &&
-					ly < selmon->statusbar.area.height) {
-				if (button == BTN_RIGHT &&
-						sys->width > 0 &&
-						lx >= sys->x && lx < sys->x + sys->width) {
-					net_menu_hide_all();
-					net_menu_open(selmon);
-					return;
-				}
-
-				if (button == BTN_LEFT &&
-						sys->width > 0 &&
-						lx >= sys->x && lx < sys->x + sys->width) {
-					Arg arg = { .v = netcmd };
-					spawn(&arg);
-					return;
-				}
-
-				if (cpu->width > 0 && lx >= cpu->x && lx < cpu->x + cpu->width) {
-					Arg arg = { .v = btopcmd };
-					spawn(&arg);
-					return;
-				}
-
-				if (mic->width > 0 && lx >= mic->x && lx < mic->x + mic->width) {
-					toggle_pipewire_mic_mute();
-					return;
-				}
-
-				if (vol->width > 0 && lx >= vol->x && lx < vol->x + vol->width) {
-					toggle_pipewire_mute();
-					return;
-				}
-
-				/* Bluetooth module click - open bluetooth manager */
-				if (button == BTN_LEFT &&
-						bt->width > 0 &&
-						lx >= bt->x && lx < bt->x + bt->width) {
-					pid_t pid = fork();
-					if (pid == 0) {
-						setsid();
-						execlp("blueman-manager", "blueman-manager", NULL);
-						_exit(1);
-					}
-					return;
-				}
-
-				/* Steam module click - focus or launch Steam */
-				if (button == BTN_LEFT &&
-						stm->width > 0 &&
-						lx >= stm->x && lx < stm->x + stm->width) {
-					focus_or_launch_app("steam", "steam");
-					return;
-				}
-
-				/* Discord module click - focus or launch Discord */
-				if (button == BTN_LEFT &&
-						dsc->width > 0 &&
-						lx >= dsc->x && lx < dsc->x + dsc->width) {
-					focus_or_launch_app("discord", "discord");
-					return;
-				}
-
-				if (button == BTN_LEFT && lx < tags->width) {
-					for (int i = 0; i < tags->box_count; i++) {
-						int bx = tags->box_x[i];
-						int bw = tags->box_w[i];
-						if (lx >= bx && lx < bx + bw) {
-							Arg arg = { .ui = 1u << tags->box_tag[i] };
-							view(&arg);
-							return;
-						}
-					}
-				}
-			}
+			if (handle_statusbar_clicks(selmon, lx, ly, button))
+				return;
 		}
 
 		/* Change focus if the button was _pressed_ over a client */
@@ -587,101 +597,8 @@ buttonpress(struct wl_listener *listener, void *data)
 		if (selmon && selmon->showbar) {
 			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
 			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
-			StatusModule *tags = &selmon->statusbar.tags;
-			StatusModule *mic = &selmon->statusbar.mic;
-			StatusModule *vol = &selmon->statusbar.volume;
-			StatusModule *cpu = &selmon->statusbar.cpu;
-			StatusModule *sys = &selmon->statusbar.sysicons;
-			StatusModule *bt = &selmon->statusbar.bluetooth;
-			StatusModule *stm = &selmon->statusbar.steam;
-			StatusModule *dsc = &selmon->statusbar.discord;
-
-			if (selmon->statusbar.cpu_popup.visible) {
-				if (cpu_popup_handle_click(selmon, lx, ly, event->button))
-					return;
-			}
-
-			if (selmon->statusbar.ram_popup.visible) {
-				if (ram_popup_handle_click(selmon, lx, ly, event->button))
-					return;
-			}
-
-			if (lx >= 0 && ly >= 0 &&
-					lx < selmon->statusbar.area.width &&
-					ly < selmon->statusbar.area.height) {
-				if (event->button == BTN_RIGHT &&
-						sys->width > 0 &&
-						lx >= sys->x && lx < sys->x + sys->width) {
-					net_menu_hide_all();
-					net_menu_open(selmon);
-					return;
-				}
-
-				if (event->button == BTN_LEFT &&
-						sys->width > 0 &&
-						lx >= sys->x && lx < sys->x + sys->width) {
-					Arg arg = { .v = netcmd };
-					spawn(&arg);
-					return;
-				}
-
-				if (cpu->width > 0 && lx >= cpu->x && lx < cpu->x + cpu->width) {
-					Arg arg = { .v = btopcmd };
-					spawn(&arg);
-					return;
-				}
-
-				if (mic->width > 0 && lx >= mic->x && lx < mic->x + mic->width) {
-					toggle_pipewire_mic_mute();
-					return;
-				}
-
-				if (vol->width > 0 && lx >= vol->x && lx < vol->x + vol->width) {
-					toggle_pipewire_mute();
-					return;
-				}
-
-				/* Bluetooth module click - open bluetooth manager */
-				if (event->button == BTN_LEFT &&
-						bt->width > 0 &&
-						lx >= bt->x && lx < bt->x + bt->width) {
-					pid_t pid = fork();
-					if (pid == 0) {
-						setsid();
-						execlp("blueman-manager", "blueman-manager", NULL);
-						_exit(1);
-					}
-					return;
-				}
-
-				/* Steam module click - focus or launch Steam */
-				if (event->button == BTN_LEFT &&
-						stm->width > 0 &&
-						lx >= stm->x && lx < stm->x + stm->width) {
-					focus_or_launch_app("steam", "steam");
-					return;
-				}
-
-				/* Discord module click - focus or launch Discord */
-				if (event->button == BTN_LEFT &&
-						dsc->width > 0 &&
-						lx >= dsc->x && lx < dsc->x + dsc->width) {
-					focus_or_launch_app("discord", "discord");
-					return;
-				}
-
-				if (event->button == BTN_LEFT && lx < tags->width) {
-					for (int i = 0; i < tags->box_count; i++) {
-						int bx = tags->box_x[i];
-						int bw = tags->box_w[i];
-						if (lx >= bx && lx < bx + bw) {
-							Arg arg = { .ui = 1u << tags->box_tag[i] };
-							view(&arg);
-							return;
-						}
-					}
-				}
-			}
+			if (handle_statusbar_clicks(selmon, lx, ly, event->button))
+				return;
 		}
 
 		/* Change focus if the button was _pressed_ over a client */

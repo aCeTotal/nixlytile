@@ -2,6 +2,20 @@
 #include "client.h"
 #include "game_launch_params.h"
 
+static GameEntry *
+find_game_by_id(GameEntry *head, const char *id, int match_service, GamingServiceType service)
+{
+	GameEntry *g = head;
+	while (g) {
+		if (strcmp(g->id, id) == 0 &&
+				(!match_service || g->service == service)) {
+			return g;
+		}
+		g = g->next;
+	}
+	return NULL;
+}
+
 const char *retro_console_names[] = {
 	"NES", "SNES", "Nintendo 64", "GameCube", "Wii", "Switch"
 };
@@ -373,24 +387,7 @@ pc_gaming_fetch_steam_names_batch(Monitor *m)
 	}
 
 	/* Read results */
-	result_fp = fopen(result_path, "r");
-	if (!result_fp) {
-		unlink(result_path);
-		return;
-	}
-
-	fseek(result_fp, 0, SEEK_END);
-	long fsize = ftell(result_fp);
-	fseek(result_fp, 0, SEEK_SET);
-
-	if (fsize > 0) {
-		buf = malloc(fsize + 1);
-		if (buf) {
-			buf_size = fread(buf, 1, fsize, result_fp);
-			buf[buf_size] = '\0';
-		}
-	}
-	fclose(result_fp);
+	buf = read_file_to_string(result_path, &buf_size);
 	unlink(result_path);
 
 	if (!buf || buf_size == 0) {
@@ -534,16 +531,10 @@ pc_gaming_load_steam_playtime(Monitor *m)
 				val_start++;
 				int playtime = atoi(val_start);
 
-				/* Find and update game entry */
-				GameEntry *g = m->pc_gaming.games;
-				while (g) {
-					if (g->service == GAMING_SERVICE_STEAM &&
-					    strcmp(g->id, current_appid) == 0) {
-						g->playtime_minutes = playtime;
-						break;
-					}
-					g = g->next;
-				}
+				GameEntry *g = find_game_by_id(m->pc_gaming.games,
+						current_appid, 1, GAMING_SERVICE_STEAM);
+				if (g)
+					g->playtime_minutes = playtime;
 			}
 		}
 
@@ -557,15 +548,10 @@ pc_gaming_load_steam_playtime(Monitor *m)
 
 				/* Only use if > 86400 (skip placeholder values) */
 				if (lastplayed > 86400) {
-					GameEntry *g = m->pc_gaming.games;
-					while (g) {
-						if (g->service == GAMING_SERVICE_STEAM &&
-						    strcmp(g->id, current_appid) == 0) {
-							g->acquired_time = (time_t)lastplayed;
-							break;
-						}
-						g = g->next;
-					}
+					GameEntry *g = find_game_by_id(m->pc_gaming.games,
+							current_appid, 1, GAMING_SERVICE_STEAM);
+					if (g)
+						g->acquired_time = (time_t)lastplayed;
 				}
 			}
 		}
@@ -1018,14 +1004,10 @@ pc_gaming_scan_steam(Monitor *m)
 
 			/* Update existing entry with real name and mark as installed */
 			if (appid[0] && name[0]) {
-				GameEntry *g = m->pc_gaming.games;
-				while (g) {
-					if (strcmp(g->id, appid) == 0) {
-						snprintf(g->name, sizeof(g->name), "%s", name);
-						g->installed = 1;
-						break;
-					}
-					g = g->next;
+				GameEntry *g = find_game_by_id(m->pc_gaming.games, appid, 0, 0);
+				if (g) {
+					snprintf(g->name, sizeof(g->name), "%s", name);
+					g->installed = 1;
 				}
 			}
 		}
@@ -1070,150 +1052,73 @@ pc_gaming_scan_heroic(Monitor *m)
 	if (!home)
 		return;
 
-	/* Check Heroic legendary library cache */
-	snprintf(path, sizeof(path), "%s/.config/heroic/store_cache/legendary_library.json", home);
-	fp = fopen(path, "r");
-	if (fp) {
-		fseek(fp, 0, SEEK_END);
-		fsize = ftell(fp);
-		fseek(fp, 0, SEEK_SET);
+	/* Parse Heroic library JSON files (Epic + GOG use same format) */
+	{
+		static const char *heroic_libs[] = {
+			"legendary_library.json",
+			"gog_library.json",
+		};
+		for (size_t li = 0; li < LENGTH(heroic_libs); li++) {
+			size_t flen = 0;
+			snprintf(path, sizeof(path), "%s/.config/heroic/store_cache/%s",
+					home, heroic_libs[li]);
+			content = read_file_to_string(path, &flen);
+			if (!content || flen < 3 || flen > 10 * 1024 * 1024) {
+				free(content);
+				continue;
+			}
 
-		if (fsize > 2 && fsize < 10 * 1024 * 1024) {
-			content = malloc(fsize + 1);
-			if (content) {
-				if (fread(content, 1, fsize, fp) == (size_t)fsize) {
-					content[fsize] = '\0';
+			p = content;
+			while ((p = strstr(p, "\"app_name\"")) != NULL) {
+				char app_name[128] = "";
+				char title[256] = "";
 
-					/* Simple JSON parsing for Epic games */
-					p = content;
-					while ((p = strstr(p, "\"app_name\"")) != NULL) {
-						char app_name[128] = "";
-						char title[256] = "";
-
-						/* Extract app_name */
-						char *val = strchr(p + 10, '"');
-						if (val) {
-							val++;
-							end = strchr(val, '"');
-							if (end) {
-								size_t len = end - val;
-								if (len < sizeof(app_name)) {
-									memcpy(app_name, val, len);
-									app_name[len] = '\0';
-								}
-							}
+				char *val = strchr(p + 10, '"');
+				if (val) {
+					val++;
+					end = strchr(val, '"');
+					if (end) {
+						size_t len = end - val;
+						if (len < sizeof(app_name)) {
+							memcpy(app_name, val, len);
+							app_name[len] = '\0';
 						}
-
-						/* Find title nearby */
-						char *title_key = strstr(p, "\"title\"");
-						if (title_key && title_key - p < 500) {
-							val = strchr(title_key + 7, '"');
-							if (val) {
-								val++;
-								end = strchr(val, '"');
-								if (end) {
-									size_t len = end - val;
-									if (len < sizeof(title)) {
-										memcpy(title, val, len);
-										title[len] = '\0';
-									}
-								}
-							}
-						}
-
-						if (app_name[0] && title[0]) {
-							char launch[512];
-							char icon[512] = "";
-							snprintf(launch, sizeof(launch), "heroic --no-gui --launch %s", app_name);
-							/* Find icon from Heroic image cache */
-							snprintf(icon, sizeof(icon), "%s/.config/heroic/images-cache/%s/art_square.jpg", home, app_name);
-							if (access(icon, F_OK) != 0) {
-								snprintf(icon, sizeof(icon), "%s/.config/heroic/images-cache/%s/logo.png", home, app_name);
-								if (access(icon, F_OK) != 0)
-									icon[0] = '\0';
-							}
-							pc_gaming_add_game(m, app_name, title, launch, icon, GAMING_SERVICE_HEROIC, 0);
-						}
-
-						p++;
 					}
 				}
-				free(content);
-			}
-		}
-		fclose(fp);
-	}
 
-	/* Check GOG library cache */
-	snprintf(path, sizeof(path), "%s/.config/heroic/store_cache/gog_library.json", home);
-	fp = fopen(path, "r");
-	if (fp) {
-		fseek(fp, 0, SEEK_END);
-		fsize = ftell(fp);
-		fseek(fp, 0, SEEK_SET);
-
-		if (fsize > 2 && fsize < 10 * 1024 * 1024) {
-			content = malloc(fsize + 1);
-			if (content) {
-				if (fread(content, 1, fsize, fp) == (size_t)fsize) {
-					content[fsize] = '\0';
-
-					/* Simple JSON parsing for GOG games */
-					p = content;
-					while ((p = strstr(p, "\"app_name\"")) != NULL) {
-						char app_name[128] = "";
-						char title[256] = "";
-
-						char *val = strchr(p + 10, '"');
-						if (val) {
-							val++;
-							end = strchr(val, '"');
-							if (end) {
-								size_t len = end - val;
-								if (len < sizeof(app_name)) {
-									memcpy(app_name, val, len);
-									app_name[len] = '\0';
-								}
+				char *title_key = strstr(p, "\"title\"");
+				if (title_key && title_key - p < 500) {
+					val = strchr(title_key + 7, '"');
+					if (val) {
+						val++;
+						end = strchr(val, '"');
+						if (end) {
+							size_t len = end - val;
+							if (len < sizeof(title)) {
+								memcpy(title, val, len);
+								title[len] = '\0';
 							}
 						}
-
-						char *title_key = strstr(p, "\"title\"");
-						if (title_key && title_key - p < 500) {
-							val = strchr(title_key + 7, '"');
-							if (val) {
-								val++;
-								end = strchr(val, '"');
-								if (end) {
-									size_t len = end - val;
-									if (len < sizeof(title)) {
-										memcpy(title, val, len);
-										title[len] = '\0';
-									}
-								}
-							}
-						}
-
-						if (app_name[0] && title[0]) {
-							char launch[512];
-							char icon[512] = "";
-							snprintf(launch, sizeof(launch), "heroic --no-gui --launch %s", app_name);
-							/* Find icon from Heroic image cache */
-							snprintf(icon, sizeof(icon), "%s/.config/heroic/images-cache/%s/art_square.jpg", home, app_name);
-							if (access(icon, F_OK) != 0) {
-								snprintf(icon, sizeof(icon), "%s/.config/heroic/images-cache/%s/logo.png", home, app_name);
-								if (access(icon, F_OK) != 0)
-									icon[0] = '\0';
-							}
-							pc_gaming_add_game(m, app_name, title, launch, icon, GAMING_SERVICE_HEROIC, 0);
-						}
-
-						p++;
 					}
 				}
-				free(content);
+
+				if (app_name[0] && title[0]) {
+					char launch[512];
+					char icon[512] = "";
+					snprintf(launch, sizeof(launch), "heroic --no-gui --launch %s", app_name);
+					snprintf(icon, sizeof(icon), "%s/.config/heroic/images-cache/%s/art_square.jpg", home, app_name);
+					if (access(icon, F_OK) != 0) {
+						snprintf(icon, sizeof(icon), "%s/.config/heroic/images-cache/%s/logo.png", home, app_name);
+						if (access(icon, F_OK) != 0)
+							icon[0] = '\0';
+					}
+					pc_gaming_add_game(m, app_name, title, launch, icon, GAMING_SERVICE_HEROIC, 0);
+				}
+
+				p++;
 			}
+			free(content);
 		}
-		fclose(fp);
 	}
 }
 
@@ -1516,10 +1421,7 @@ pc_gaming_render(Monitor *m)
 				if (is_selected) {
 					int bw = 3;
 					float bright_border[4] = {0.4f, 0.75f, 1.0f, 1.0f};
-					drawrect(tile_tree, glow_size, glow_size, tile_w, bw, bright_border);
-					drawrect(tile_tree, glow_size, glow_size + tile_h - bw, tile_w, bw, bright_border);
-					drawrect(tile_tree, glow_size, glow_size, bw, tile_h, bright_border);
-					drawrect(tile_tree, glow_size + tile_w - bw, glow_size, bw, tile_h, bright_border);
+					draw_border(tile_tree, glow_size, glow_size, tile_w, tile_h, bw, bright_border);
 				}
 
 				/* Name bar at bottom of tile */
@@ -1929,10 +1831,7 @@ pc_gaming_install_popup_render(Monitor *m)
 	drawrect(pg->install_popup, 0, 0, popup_w, popup_h, bg_color);
 
 	/* Border */
-	drawrect(pg->install_popup, 0, 0, popup_w, 2, border_color);
-	drawrect(pg->install_popup, 0, popup_h - 2, popup_w, 2, border_color);
-	drawrect(pg->install_popup, 0, 0, 2, popup_h, border_color);
-	drawrect(pg->install_popup, popup_w - 2, 0, 2, popup_h, border_color);
+	draw_border(pg->install_popup, 0, 0, popup_w, popup_h, 2, border_color);
 
 	/* Title - game name (truncated) */
 	{
@@ -2062,14 +1961,10 @@ pc_gaming_install_popup_handle_button(Monitor *m, int button, int value)
 				wlr_log(WLR_INFO, "Installing game via %s: %s",
 					gaming_service_names[pg->install_game_service], pg->install_game_name);
 				/* Mark game as installing immediately so progress bar shows */
-				GameEntry *g = pg->games;
-				while (g) {
-					if (strcmp(g->id, pg->install_game_id) == 0) {
-						g->is_installing = 1;
-						g->install_progress = 0;
-						break;
-					}
-					g = g->next;
+				GameEntry *g = find_game_by_id(pg->games, pg->install_game_id, 0, 0);
+				if (g) {
+					g->is_installing = 1;
+					g->install_progress = 0;
 				}
 				/* Fork and exec directly - spawn() doesn't work with stack strings */
 				pid_t pid = fork();

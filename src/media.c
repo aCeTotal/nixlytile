@@ -459,22 +459,30 @@ media_view_free_items(MediaGridView *view)
 	view->item_count = 0;
 }
 
+static const char *
+json_find_value(const char *json, const char *key)
+{
+	char search[128];
+	const char *pos;
+
+	snprintf(search, sizeof(search), "\"%s\":", key);
+	pos = strstr(json, search);
+	if (!pos) return NULL;
+	pos = strchr(pos, ':');
+	if (!pos) return NULL;
+	pos++;
+	while (*pos == ' ') pos++;
+	return pos;
+}
+
 int
 json_extract_string(const char *json, const char *key, char *out, size_t out_size)
 {
-	char search[128];
-	snprintf(search, sizeof(search), "\"%s\":", key);
-	const char *pos = strstr(json, search);
+	const char *pos = json_find_value(json, key);
 	if (!pos) return 0;
-
-	pos = strchr(pos, ':');
-	if (!pos) return 0;
-	pos++;
-	while (*pos == ' ') pos++;
 
 	if (*pos == '"') {
 		pos++;
-		/* Find end quote, handling escaped quotes */
 		const char *src = pos;
 		char *dst = out;
 		char *dst_end = out + out_size - 1;
@@ -507,25 +515,15 @@ json_extract_string(const char *json, const char *key, char *out, size_t out_siz
 int
 json_extract_int(const char *json, const char *key)
 {
-	char search[128];
-	snprintf(search, sizeof(search), "\"%s\":", key);
-	const char *pos = strstr(json, search);
-	if (!pos) return 0;
-	pos = strchr(pos, ':');
-	if (!pos) return 0;
-	return atoi(pos + 1);
+	const char *pos = json_find_value(json, key);
+	return pos ? atoi(pos) : 0;
 }
 
 float
 json_extract_float(const char *json, const char *key)
 {
-	char search[128];
-	snprintf(search, sizeof(search), "\"%s\":", key);
-	const char *pos = strstr(json, search);
-	if (!pos) return 0.0f;
-	pos = strchr(pos, ':');
-	if (!pos) return 0.0f;
-	return atof(pos + 1);
+	const char *pos = json_find_value(json, key);
+	return pos ? (float)atof(pos) : 0.0f;
 }
 
 int
@@ -1098,6 +1096,84 @@ media_render_buffering_overlay(Monitor *m, MediaViewType type)
 	}
 }
 
+/* Render a "Label: Value" pair side by side, returns y advance */
+static int
+media_render_label_value(struct wlr_scene_tree *tree,
+		const char *label, const char *value,
+		int x, int y, int label_w,
+		const float label_color[4], const float value_color[4])
+{
+	struct wlr_scene_tree *lt = wlr_scene_tree_create(tree);
+	if (lt) {
+		wlr_scene_node_set_position(&lt->node, x, y);
+		StatusModule mod = {0};
+		mod.tree = lt;
+		tray_render_label(&mod, label, 0, 16, label_color);
+	}
+	struct wlr_scene_tree *vt = wlr_scene_tree_create(tree);
+	if (vt) {
+		wlr_scene_node_set_position(&vt->node, x + label_w, y);
+		StatusModule mod = {0};
+		mod.tree = vt;
+		tray_render_label(&mod, value, 0, 16, value_color);
+	}
+	return 35;
+}
+
+/* Word-wrap text and render line-by-line, returns total y advance */
+static int
+media_render_wrapped_text(struct wlr_scene_tree *tree,
+		const char *text, int x, int y, int wrap_chars, int max_lines,
+		int line_h, const float color[4])
+{
+	char wrapped[4096];
+	int src_idx = 0, dst_idx = 0, line_len = 0;
+	int current_line = 0;
+
+	while (text[src_idx] && dst_idx < (int)sizeof(wrapped) - 1 &&
+			(max_lines <= 0 || current_line < max_lines)) {
+		char c = text[src_idx++];
+		if (c == '\n' || (line_len >= wrap_chars && (c == ' ' || c == ','))) {
+			wrapped[dst_idx++] = '\n';
+			line_len = 0;
+			current_line++;
+			if (c == ' ') continue;
+		}
+		wrapped[dst_idx++] = c;
+		line_len++;
+	}
+	wrapped[dst_idx] = '\0';
+
+	int total_y = 0;
+	char *line = wrapped;
+	int lines_rendered = 0;
+	while (*line && (max_lines <= 0 || lines_rendered < max_lines)) {
+		char *nl = strchr(line, '\n');
+		char line_buf[256];
+		if (nl) {
+			int len = nl - line;
+			if (len > 255) len = 255;
+			strncpy(line_buf, line, len);
+			line_buf[len] = '\0';
+			line = nl + 1;
+		} else {
+			strncpy(line_buf, line, 255);
+			line_buf[255] = '\0';
+			line = (char *)"";
+		}
+		struct wlr_scene_tree *lt = wlr_scene_tree_create(tree);
+		if (lt) {
+			wlr_scene_node_set_position(&lt->node, x, y + total_y);
+			StatusModule mod = {0};
+			mod.tree = lt;
+			tray_render_label(&mod, line_buf, 0, 16, color);
+		}
+		total_y += line_h;
+		lines_rendered++;
+	}
+	return total_y;
+}
+
 void
 media_view_render_detail(Monitor *m, MediaViewType type)
 {
@@ -1202,25 +1278,10 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 
 	/* Score */
 	if (item->rating > 0) {
-		/* Bold label */
-		struct wlr_scene_tree *label_tree = wlr_scene_tree_create(view->tree);
-		if (label_tree) {
-			wlr_scene_node_set_position(&label_tree->node, text_x, text_y);
-			StatusModule mod = {0};
-			mod.tree = label_tree;
-			tray_render_label(&mod, "Score:", 0, 16, label_color);
-		}
-		/* Value */
 		char score_val[32];
 		snprintf(score_val, sizeof(score_val), "%.1f", item->rating);
-		struct wlr_scene_tree *val_tree = wlr_scene_tree_create(view->tree);
-		if (val_tree) {
-			wlr_scene_node_set_position(&val_tree->node, text_x + 160, text_y);
-			StatusModule mod = {0};
-			mod.tree = val_tree;
-			tray_render_label(&mod, score_val, 0, 16, dim_text);
-		}
-		text_y += 35;
+		text_y += media_render_label_value(view->tree, "Score:", score_val,
+				text_x, text_y, 160, label_color, dim_text);
 	}
 
 	/* Total duration */
@@ -1231,15 +1292,6 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 			total_duration_sec = item->tmdb_episode_runtime * item->tmdb_total_episodes * 60;
 		}
 		if (total_duration_sec > 0) {
-			/* Bold label */
-			struct wlr_scene_tree *label_tree = wlr_scene_tree_create(view->tree);
-			if (label_tree) {
-				wlr_scene_node_set_position(&label_tree->node, text_x, text_y);
-				StatusModule mod = {0};
-				mod.tree = label_tree;
-				tray_render_label(&mod, "Total duration:", 0, 16, label_color);
-			}
-			/* Value */
 			char duration_val[32];
 			int hours = total_duration_sec / 3600;
 			int mins = (total_duration_sec % 3600) / 60;
@@ -1247,91 +1299,32 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 				snprintf(duration_val, sizeof(duration_val), "%dh %dm", hours, mins);
 			else
 				snprintf(duration_val, sizeof(duration_val), "%dm", mins);
-			struct wlr_scene_tree *val_tree = wlr_scene_tree_create(view->tree);
-			if (val_tree) {
-				wlr_scene_node_set_position(&val_tree->node, text_x + 160, text_y);
-				StatusModule mod = {0};
-				mod.tree = val_tree;
-				tray_render_label(&mod, duration_val, 0, 16, dim_text);
-			}
-			text_y += 35;
+			text_y += media_render_label_value(view->tree, "Total duration:", duration_val,
+					text_x, text_y, 160, label_color, dim_text);
 		}
 	}
 
 	/* Genre - with text wrapping */
 	if (item->genres[0]) {
-		/* Bold label */
-		struct wlr_scene_tree *label_tree = wlr_scene_tree_create(view->tree);
-		if (label_tree) {
-			wlr_scene_node_set_position(&label_tree->node, text_x, text_y);
+		struct wlr_scene_tree *lt = wlr_scene_tree_create(view->tree);
+		if (lt) {
+			wlr_scene_node_set_position(&lt->node, text_x, text_y);
 			StatusModule mod = {0};
-			mod.tree = label_tree;
+			mod.tree = lt;
 			tray_render_label(&mod, "Genre:", 0, 16, label_color);
 		}
 		text_y += 22;
-		/* Value with word wrap at 250px */
-		char wrapped_genre[512];
-		int src_idx = 0, dst_idx = 0, line_len = 0;
-		while (item->genres[src_idx] && dst_idx < (int)sizeof(wrapped_genre) - 1) {
-			char c = item->genres[src_idx++];
-			if (line_len >= chars_per_line && (c == ' ' || c == ',')) {
-				wrapped_genre[dst_idx++] = '\n';
-				line_len = 0;
-				if (c == ' ') continue;
-			}
-			wrapped_genre[dst_idx++] = c;
-			line_len++;
-		}
-		wrapped_genre[dst_idx] = '\0';
-		/* Render wrapped lines */
-		char *line = wrapped_genre;
-		while (line && *line) {
-			char *nl = strchr(line, '\n');
-			char line_buf[256];
-			if (nl) {
-				int len = nl - line;
-				if (len > 255) len = 255;
-				strncpy(line_buf, line, len);
-				line_buf[len] = '\0';
-				line = nl + 1;
-			} else {
-				strncpy(line_buf, line, 255);
-				line_buf[255] = '\0';
-				line = NULL;
-			}
-			struct wlr_scene_tree *val_tree = wlr_scene_tree_create(view->tree);
-			if (val_tree) {
-				wlr_scene_node_set_position(&val_tree->node, text_x, text_y);
-				StatusModule mod = {0};
-				mod.tree = val_tree;
-				tray_render_label(&mod, line_buf, 0, 16, dim_text);
-			}
-			text_y += 20;
-		}
+		text_y += media_render_wrapped_text(view->tree, item->genres,
+				text_x, text_y, chars_per_line, 0, 20, dim_text);
 		text_y += 15;
 	}
 
 	/* Release date */
 	if (item->year > 0) {
-		/* Bold label */
-		struct wlr_scene_tree *label_tree = wlr_scene_tree_create(view->tree);
-		if (label_tree) {
-			wlr_scene_node_set_position(&label_tree->node, text_x, text_y);
-			StatusModule mod = {0};
-			mod.tree = label_tree;
-			tray_render_label(&mod, "Release date:", 0, 16, label_color);
-		}
-		/* Value */
 		char year_val[16];
 		snprintf(year_val, sizeof(year_val), "%d", item->year);
-		struct wlr_scene_tree *val_tree = wlr_scene_tree_create(view->tree);
-		if (val_tree) {
-			wlr_scene_node_set_position(&val_tree->node, text_x + 160, text_y);
-			StatusModule mod = {0};
-			mod.tree = val_tree;
-			tray_render_label(&mod, year_val, 0, 16, dim_text);
-		}
-		text_y += 35;
+		text_y += media_render_label_value(view->tree, "Release date:", year_val,
+				text_x, text_y, 160, label_color, dim_text);
 	}
 
 	/* Seasons and Episodes (for TV shows only) */
@@ -1347,54 +1340,19 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 			}
 		}
 
-		/* Seasons - bold label */
-		struct wlr_scene_tree *slabel_tree = wlr_scene_tree_create(view->tree);
-		if (slabel_tree) {
-			wlr_scene_node_set_position(&slabel_tree->node, text_x, text_y);
-			StatusModule mod = {0};
-			mod.tree = slabel_tree;
-			tray_render_label(&mod, "Seasons:", 0, 16, label_color);
-		}
 		char seasons_val[16];
 		snprintf(seasons_val, sizeof(seasons_val), "%d", display_seasons);
-		struct wlr_scene_tree *sval_tree = wlr_scene_tree_create(view->tree);
-		if (sval_tree) {
-			wlr_scene_node_set_position(&sval_tree->node, text_x + 160, text_y);
-			StatusModule mod = {0};
-			mod.tree = sval_tree;
-			tray_render_label(&mod, seasons_val, 0, 16, dim_text);
-		}
-		text_y += 35;
+		text_y += media_render_label_value(view->tree, "Seasons:", seasons_val,
+				text_x, text_y, 160, label_color, dim_text);
 
-		/* Episodes - bold label */
-		struct wlr_scene_tree *elabel_tree = wlr_scene_tree_create(view->tree);
-		if (elabel_tree) {
-			wlr_scene_node_set_position(&elabel_tree->node, text_x, text_y);
-			StatusModule mod = {0};
-			mod.tree = elabel_tree;
-			tray_render_label(&mod, "Episodes:", 0, 16, label_color);
-		}
 		char episodes_val[16];
 		snprintf(episodes_val, sizeof(episodes_val), "%d", display_episodes);
-		struct wlr_scene_tree *eval_tree = wlr_scene_tree_create(view->tree);
-		if (eval_tree) {
-			wlr_scene_node_set_position(&eval_tree->node, text_x + 160, text_y);
-			StatusModule mod = {0};
-			mod.tree = eval_tree;
-			tray_render_label(&mod, episodes_val, 0, 16, dim_text);
-		}
-		text_y += 35;
+		text_y += media_render_label_value(view->tree, "Episodes:", episodes_val,
+				text_x, text_y, 160, label_color, dim_text);
 	}
 
 	/* Next episode / Ended status (TV shows only) */
 	if (type == MEDIA_VIEW_TVSHOWS && item->tmdb_status[0]) {
-		struct wlr_scene_tree *nlabel_tree = wlr_scene_tree_create(view->tree);
-		if (nlabel_tree) {
-			wlr_scene_node_set_position(&nlabel_tree->node, text_x, text_y);
-			StatusModule mod = {0};
-			mod.tree = nlabel_tree;
-			tray_render_label(&mod, "Next episode:", 0, 16, label_color);
-		}
 		char next_val[32];
 		if (strcmp(item->tmdb_status, "Ended") == 0 ||
 		    strcmp(item->tmdb_status, "Canceled") == 0) {
@@ -1404,68 +1362,20 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 		} else {
 			snprintf(next_val, sizeof(next_val), "TBA");
 		}
-		struct wlr_scene_tree *nval_tree = wlr_scene_tree_create(view->tree);
-		if (nval_tree) {
-			wlr_scene_node_set_position(&nval_tree->node, text_x + 160, text_y);
-			StatusModule mod = {0};
-			mod.tree = nval_tree;
-			tray_render_label(&mod, next_val, 0, 16, dim_text);
-		}
-		text_y += 35;
+		text_y += media_render_label_value(view->tree, "Next episode:", next_val,
+				text_x, text_y, 160, label_color, dim_text);
 	}
 
 	/* Overview bar - horizontal bar to the right of details_box (transparent, no background) */
 	if (item->overview[0]) {
 		int overview_bar_x = details_box_x + details_box_w + 85;
 		int overview_bar_y = details_box_y;
-		int overview_bar_w = view->width - overview_bar_x - 40;
-		int overview_bar_h = 80;
-
-		/* Word wrap overview text for horizontal bar */
-		char wrapped[4096];
-		int wrap_width = 800 / 9;  /* Max 800px line width for font size 16 */
-		int src_idx = 0, dst_idx = 0, line_len = 0;
-		int max_lines = 12;  /* Allow more lines to show full overview */
-		int current_line = 0;
-
-		while (item->overview[src_idx] && dst_idx < (int)sizeof(wrapped) - 1 && current_line < max_lines) {
-			char c = item->overview[src_idx++];
-			if (c == '\n' || (line_len >= wrap_width && c == ' ')) {
-				wrapped[dst_idx++] = '\n';
-				line_len = 0;
-				current_line++;
-			} else {
-				wrapped[dst_idx++] = c;
-				line_len++;
-			}
-		}
-		wrapped[dst_idx] = '\0';
-
-		/* Render overview lines in horizontal bar */
 		int ov_text_x = overview_bar_x - 35;
 		int ov_text_y = overview_bar_y + 12;
-		char *line = wrapped;
-		int lines_rendered = 0;
-		while (*line && lines_rendered < max_lines) {
-			char *newline = strchr(line, '\n');
-			if (newline) *newline = '\0';
+		int wrap_width = 800 / 9;  /* Max 800px line width for font size 16 */
 
-			struct wlr_scene_tree *line_tree = wlr_scene_tree_create(view->tree);
-			if (line_tree) {
-				wlr_scene_node_set_position(&line_tree->node, ov_text_x, ov_text_y);
-				StatusModule mod = {0};
-				mod.tree = line_tree;
-				tray_render_label(&mod, line, 0, 16, dim_text);
-			}
-			ov_text_y += 20;
-			lines_rendered++;
-
-			if (newline) {
-				line = newline + 1;
-			} else {
-				break;
-			}
-		}
+		media_render_wrapped_text(view->tree, item->overview,
+				ov_text_x, ov_text_y, wrap_width, 12, 20, dim_text);
 	}
 
 	/* Play button (for movies) or focus indicator */

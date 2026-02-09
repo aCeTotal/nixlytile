@@ -138,10 +138,7 @@ gamepad_menu_render(Monitor *m)
 		wlr_scene_node_set_position(&gm->bg->node, 0, 0);
 		drawrect(gm->bg, 0, 0, gm->width, gm->height, bg_color);
 		/* Outer border */
-		drawrect(gm->bg, 0, 0, gm->width, 2, border_color);
-		drawrect(gm->bg, 0, gm->height - 2, gm->width, 2, border_color);
-		drawrect(gm->bg, 0, 0, 2, gm->height, border_color);
-		drawrect(gm->bg, gm->width - 2, 0, 2, gm->height, border_color);
+		draw_border(gm->bg, 0, 0, gm->width, gm->height, 2, border_color);
 	}
 
 	/* Draw menu items as buttons with equal spacing */
@@ -165,10 +162,7 @@ gamepad_menu_render(Monitor *m)
 
 		/* Button border */
 		float btn_border[4] = {0.4f, 0.4f, 0.45f, 1.0f};
-		drawrect(gm->tree, button_x, button_y, button_w, 1, btn_border);
-		drawrect(gm->tree, button_x, button_y + button_h - 1, button_w, 1, btn_border);
-		drawrect(gm->tree, button_x, button_y, 1, button_h, btn_border);
-		drawrect(gm->tree, button_x + button_w - 1, button_y, 1, button_h, btn_border);
+		draw_border(gm->tree, button_x, button_y, button_w, button_h, 1, btn_border);
 
 		/* Button label - create subtree positioned at button location */
 		struct wlr_scene_tree *label_tree = wlr_scene_tree_create(gm->tree);
@@ -327,139 +321,43 @@ gamepad_menu_select(Monitor *m)
 		return;
 	}
 
-	/* Handle NRK - launch Chromium kiosk with nrk.no */
-	if (strcmp(label, "NRK") == 0) {
-		gamepad_menu_hide_all();
-		steam_kill();
-		live_tv_kill();
-		media_view_hide_all();
-		retro_gaming_hide_all();
-		pc_gaming_hide_all();
-		wlr_log(WLR_INFO, "Launching NRK stream in Chromium kiosk");
-		pid_t pid = fork();
-		if (pid == 0) {
-			setsid();
-			execlp("chromium", "chromium",
-				"--ozone-platform=wayland",
-				"--kiosk", "--start-fullscreen",
-				"--autoplay-policy=no-user-gesture-required",
-				"--enable-features=VaapiVideoDecoder,PlatformHEVCDecoderSupport",
-				"--disable-gpu-vsync",
-				"--disable-frame-rate-limit",
-				"--force-device-scale-factor=1",
-				"--disable-translate",
-				NRK_URL, (char *)NULL);
-			_exit(127);
-		}
-		return;
-	}
+	/* Handle streaming services via Chromium kiosk */
+	{
+		static const struct { const char *label; const char *url; } kiosk_services[] = {
+			{"NRK",      NRK_URL},
+			{"Netflix",  NETFLIX_URL},
+			{"Viaplay",  VIAPLAY_URL},
+			{"TV2 Play", TV2PLAY_URL},
+			{"F1TV",     F1TV_URL},
+		};
 
-	/* Handle Netflix - launch Chromium kiosk */
-	if (strcmp(label, "Netflix") == 0) {
-		gamepad_menu_hide_all();
-		steam_kill();
-		live_tv_kill();
-		media_view_hide_all();
-		retro_gaming_hide_all();
-		pc_gaming_hide_all();
-		wlr_log(WLR_INFO, "Launching Netflix in Chromium kiosk");
-		pid_t pid = fork();
-		if (pid == 0) {
-			setsid();
-			execlp("chromium", "chromium",
-				"--ozone-platform=wayland",
-				"--kiosk", "--start-fullscreen",
-				"--autoplay-policy=no-user-gesture-required",
-				"--enable-features=VaapiVideoDecoder,PlatformHEVCDecoderSupport",
-				"--disable-gpu-vsync",
-				"--disable-frame-rate-limit",
-				"--force-device-scale-factor=1",
-				"--disable-translate",
-				NETFLIX_URL, (char *)NULL);
-			_exit(127);
+		for (size_t i = 0; i < LENGTH(kiosk_services); i++) {
+			if (strcmp(label, kiosk_services[i].label) == 0) {
+				gamepad_menu_hide_all();
+				steam_kill();
+				live_tv_kill();
+				media_view_hide_all();
+				retro_gaming_hide_all();
+				pc_gaming_hide_all();
+				wlr_log(WLR_INFO, "Launching %s in Chromium kiosk", kiosk_services[i].label);
+				pid_t pid = fork();
+				if (pid == 0) {
+					setsid();
+					execlp("chromium", "chromium",
+						"--ozone-platform=wayland",
+						"--kiosk", "--start-fullscreen",
+						"--autoplay-policy=no-user-gesture-required",
+						"--enable-features=VaapiVideoDecoder,PlatformHEVCDecoderSupport",
+						"--disable-gpu-vsync",
+						"--disable-frame-rate-limit",
+						"--force-device-scale-factor=1",
+						"--disable-translate",
+						kiosk_services[i].url, (char *)NULL);
+					_exit(127);
+				}
+				return;
+			}
 		}
-		return;
-	}
-
-	/* Handle Viaplay - launch Chromium kiosk */
-	if (strcmp(label, "Viaplay") == 0) {
-		gamepad_menu_hide_all();
-		steam_kill();
-		live_tv_kill();
-		media_view_hide_all();
-		retro_gaming_hide_all();
-		pc_gaming_hide_all();
-		wlr_log(WLR_INFO, "Launching Viaplay in Chromium kiosk");
-		pid_t pid = fork();
-		if (pid == 0) {
-			setsid();
-			execlp("chromium", "chromium",
-				"--ozone-platform=wayland",
-				"--kiosk", "--start-fullscreen",
-				"--autoplay-policy=no-user-gesture-required",
-				"--enable-features=VaapiVideoDecoder,PlatformHEVCDecoderSupport",
-				"--disable-gpu-vsync",
-				"--disable-frame-rate-limit",
-				"--force-device-scale-factor=1",
-				"--disable-translate",
-				VIAPLAY_URL, (char *)NULL);
-			_exit(127);
-		}
-		return;
-	}
-
-	/* Handle TV2 Play - launch Chromium kiosk */
-	if (strcmp(label, "TV2 Play") == 0) {
-		gamepad_menu_hide_all();
-		steam_kill();
-		live_tv_kill();
-		media_view_hide_all();
-		retro_gaming_hide_all();
-		pc_gaming_hide_all();
-		wlr_log(WLR_INFO, "Launching TV2 Play in Chromium kiosk");
-		pid_t pid = fork();
-		if (pid == 0) {
-			setsid();
-			execlp("chromium", "chromium",
-				"--ozone-platform=wayland",
-				"--kiosk", "--start-fullscreen",
-				"--autoplay-policy=no-user-gesture-required",
-				"--enable-features=VaapiVideoDecoder,PlatformHEVCDecoderSupport",
-				"--disable-gpu-vsync",
-				"--disable-frame-rate-limit",
-				"--force-device-scale-factor=1",
-				"--disable-translate",
-				TV2PLAY_URL, (char *)NULL);
-			_exit(127);
-		}
-		return;
-	}
-
-	/* Handle F1TV - launch browser with F1TV 4K live stream */
-	if (strcmp(label, "F1TV") == 0) {
-		gamepad_menu_hide_all();
-		steam_kill();
-		live_tv_kill();
-		media_view_hide_all();
-		retro_gaming_hide_all();
-		pc_gaming_hide_all();
-		wlr_log(WLR_INFO, "Launching F1TV stream in Chromium kiosk");
-		pid_t pid = fork();
-		if (pid == 0) {
-			setsid();
-			execlp("chromium", "chromium",
-				"--ozone-platform=wayland",
-				"--kiosk", "--start-fullscreen",
-				"--autoplay-policy=no-user-gesture-required",
-				"--enable-features=VaapiVideoDecoder,PlatformHEVCDecoderSupport",
-				"--disable-gpu-vsync",
-				"--disable-frame-rate-limit",
-				"--force-device-scale-factor=1",
-				"--disable-translate",
-				F1TV_URL, (char *)NULL);
-			_exit(127);
-		}
-		return;
 	}
 
 	/* Handle Quit HTPC - shutdown system (htpc-only has no desktop to return to) */
@@ -1297,6 +1195,91 @@ gamepad_scan_devices(void)
 	closedir(dir);
 }
 
+/* Read left stick X/Y nav direction from all gamepads (-1/0/1 per axis) */
+static void
+gamepad_read_nav_xy(int *out_x, int *out_y)
+{
+	GamepadDevice *gp;
+
+	*out_x = 0;
+	*out_y = 0;
+	wl_list_for_each(gp, &gamepads, link) {
+		if (gp->suspended)
+			continue;
+
+		int lx_offset = gp->left_x - gp->cal_lx.center;
+		int ly_offset = gp->left_y - gp->cal_ly.center;
+		int lx_range = (gp->cal_lx.max - gp->cal_lx.min) / 2;
+		int ly_range = (gp->cal_ly.max - gp->cal_ly.min) / 2;
+		if (lx_range == 0) lx_range = 32767;
+		if (ly_range == 0) ly_range = 32767;
+
+		/* Threshold at 50% deflection for navigation */
+		int nav_threshold_x = lx_range / 2;
+		int nav_threshold_y = ly_range / 2;
+
+		if (lx_offset < -nav_threshold_x) *out_x = -1;
+		else if (lx_offset > nav_threshold_x) *out_x = 1;
+		if (out_y) {
+			if (ly_offset < -nav_threshold_y) *out_y = -1;
+			else if (ly_offset > nav_threshold_y) *out_y = 1;
+		}
+	}
+}
+
+/* Check nav repeat timing, returns 1 if a step should fire */
+static int
+gamepad_nav_should_step(int active, uint64_t now)
+{
+	if (active) {
+		uint64_t delay = joystick_nav_repeat_started ?
+				JOYSTICK_NAV_REPEAT_RATE : JOYSTICK_NAV_INITIAL_DELAY;
+		if (joystick_nav_last_move == 0 || (now - joystick_nav_last_move) >= delay) {
+			joystick_nav_last_move = now;
+			joystick_nav_repeat_started = 1;
+			return 1;
+		}
+		return 0;
+	}
+	/* Reset repeat state when joystick returns to center */
+	joystick_nav_last_move = 0;
+	joystick_nav_repeat_started = 0;
+	return 0;
+}
+
+/* Send right stick scroll from all gamepads */
+static void
+gamepad_send_right_stick_scroll(void)
+{
+	GamepadDevice *gp;
+
+	wl_list_for_each(gp, &gamepads, link) {
+		if (gp->suspended)
+			continue;
+
+		int ry_offset = gp->right_y - gp->cal_ry.center;
+		int ry_range = (gp->cal_ry.max - gp->cal_ry.min) / 2;
+		if (ry_range == 0) ry_range = 32767;
+		int ry_deadzone = gp->cal_ry.flat > 0 ? gp->cal_ry.flat :
+				(ry_range * GAMEPAD_DEADZONE / 32767);
+
+		if (abs(ry_offset) > ry_deadzone) {
+			double ny = (double)ry_offset / (double)ry_range;
+			if (ny > 1.0) ny = 1.0;
+			if (ny < -1.0) ny = -1.0;
+
+			double scroll_amount = ny * 3.0;
+			uint32_t time_msec = (uint32_t)(monotonic_msec() & 0xFFFFFFFF);
+
+			wlr_seat_pointer_notify_axis(seat, time_msec,
+				WL_POINTER_AXIS_VERTICAL_SCROLL,
+				scroll_amount, (int32_t)(scroll_amount * 120),
+				WL_POINTER_AXIS_SOURCE_CONTINUOUS,
+				WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+		}
+	}
+}
+
 void
 gamepad_update_cursor(void)
 {
@@ -1310,65 +1293,13 @@ gamepad_update_cursor(void)
 
 	/* Handle Retro gaming view joystick navigation */
 	if (selmon && htpc_view_is_active(selmon, selmon->retro_gaming.view_tag, selmon->retro_gaming.visible)) {
-		int nav_x = 0;
+		int nav_x = 0, nav_y_unused = 0;
+		gamepad_read_nav_xy(&nav_x, &nav_y_unused);
 
-		/* Read joystick values from all gamepads */
-		wl_list_for_each(gp, &gamepads, link) {
-			if (gp->suspended)
-				continue;
+		if (gamepad_nav_should_step(nav_x != 0, now))
+			retro_gaming_handle_button(selmon, nav_x < 0 ? BTN_DPAD_LEFT : BTN_DPAD_RIGHT, 1);
 
-			int lx_offset = gp->left_x - gp->cal_lx.center;
-			int lx_range = (gp->cal_lx.max - gp->cal_lx.min) / 2;
-			if (lx_range == 0) lx_range = 32767;
-
-			/* Threshold at 50% deflection for navigation */
-			int nav_threshold = lx_range / 2;
-
-			if (lx_offset < -nav_threshold) nav_x = -1;
-			else if (lx_offset > nav_threshold) nav_x = 1;
-		}
-
-		/* Handle navigation with repeat */
-		if (nav_x != 0) {
-			uint64_t delay = joystick_nav_repeat_started ? JOYSTICK_NAV_REPEAT_RATE : JOYSTICK_NAV_INITIAL_DELAY;
-
-			if (joystick_nav_last_move == 0 || (now - joystick_nav_last_move) >= delay) {
-				joystick_nav_last_move = now;
-				joystick_nav_repeat_started = 1;
-				retro_gaming_handle_button(selmon, nav_x < 0 ? BTN_DPAD_LEFT : BTN_DPAD_RIGHT, 1);
-			}
-		} else {
-			/* Reset repeat state when joystick returns to center */
-			joystick_nav_last_move = 0;
-			joystick_nav_repeat_started = 0;
-		}
-
-		/* Right joystick scrolls in retro gaming view */
-		wl_list_for_each(gp, &gamepads, link) {
-			if (gp->suspended)
-				continue;
-
-			int ry_offset = gp->right_y - gp->cal_ry.center;
-			int ry_range = (gp->cal_ry.max - gp->cal_ry.min) / 2;
-			if (ry_range == 0) ry_range = 32767;
-			int ry_deadzone = gp->cal_ry.flat > 0 ? gp->cal_ry.flat : (ry_range * GAMEPAD_DEADZONE / 32767);
-
-			if (abs(ry_offset) > ry_deadzone) {
-				double ny = (double)ry_offset / (double)ry_range;
-				if (ny > 1.0) ny = 1.0;
-				if (ny < -1.0) ny = -1.0;
-
-				double scroll_amount = ny * 3.0;
-				uint32_t time_msec = (uint32_t)(monotonic_msec() & 0xFFFFFFFF);
-
-				wlr_seat_pointer_notify_axis(seat, time_msec,
-					WL_POINTER_AXIS_VERTICAL_SCROLL,
-					scroll_amount, (int32_t)(scroll_amount * 120),
-					WL_POINTER_AXIS_SOURCE_CONTINUOUS,
-					WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
-			}
-		}
-
+		gamepad_send_right_stick_scroll();
 		return;
 	}
 
@@ -1385,101 +1316,38 @@ gamepad_update_cursor(void)
 		} else {
 			/* No popup window - use grid navigation */
 			int nav_x = 0, nav_y = 0;
+			gamepad_read_nav_xy(&nav_x, &nav_y);
 
-			/* Read joystick values from all gamepads */
-			wl_list_for_each(gp, &gamepads, link) {
-				if (gp->suspended)
-					continue;
+			if (gamepad_nav_should_step(nav_x != 0 || nav_y != 0, now)) {
+				if (pg->install_popup_visible) {
+					/* Navigate install popup */
+					if (nav_x == -1 && pg->install_popup_selected > 0) {
+						pg->install_popup_selected--;
+						pc_gaming_install_popup_render(selmon);
+					} else if (nav_x == 1 && pg->install_popup_selected < 1) {
+						pg->install_popup_selected++;
+						pc_gaming_install_popup_render(selmon);
+					}
+				} else {
+					/* Navigate game grid */
+					int new_idx = pg->selected_idx;
+					if (nav_x == -1 && new_idx > 0)
+						new_idx--;
+					else if (nav_x == 1 && new_idx < pg->game_count - 1)
+						new_idx++;
+					if (nav_y == -1 && new_idx >= pg->cols)
+						new_idx -= pg->cols;
+					else if (nav_y == 1 && new_idx + pg->cols < pg->game_count)
+						new_idx += pg->cols;
 
-				int lx_offset = gp->left_x - gp->cal_lx.center;
-				int ly_offset = gp->left_y - gp->cal_ly.center;
-				int lx_range = (gp->cal_lx.max - gp->cal_lx.min) / 2;
-				int ly_range = (gp->cal_ly.max - gp->cal_ly.min) / 2;
-				if (lx_range == 0) lx_range = 32767;
-				if (ly_range == 0) ly_range = 32767;
-				int lx_deadzone = gp->cal_lx.flat > 0 ? gp->cal_lx.flat : (lx_range * GAMEPAD_DEADZONE / 32767);
-				int ly_deadzone = gp->cal_ly.flat > 0 ? gp->cal_ly.flat : (ly_range * GAMEPAD_DEADZONE / 32767);
-
-				/* Threshold at 50% deflection for navigation */
-				int nav_threshold_x = lx_range / 2;
-				int nav_threshold_y = ly_range / 2;
-
-				if (lx_offset < -nav_threshold_x) nav_x = -1;
-				else if (lx_offset > nav_threshold_x) nav_x = 1;
-				if (ly_offset < -nav_threshold_y) nav_y = -1;
-				else if (ly_offset > nav_threshold_y) nav_y = 1;
-			}
-
-			/* Handle navigation with repeat */
-			if (nav_x != 0 || nav_y != 0) {
-				int should_move = 0;
-				uint64_t delay = joystick_nav_repeat_started ? JOYSTICK_NAV_REPEAT_RATE : JOYSTICK_NAV_INITIAL_DELAY;
-
-				if (joystick_nav_last_move == 0 || (now - joystick_nav_last_move) >= delay) {
-					should_move = 1;
-					joystick_nav_last_move = now;
-					joystick_nav_repeat_started = 1;
-				}
-
-				if (should_move) {
-					if (pg->install_popup_visible) {
-						/* Navigate install popup */
-						if (nav_x == -1 && pg->install_popup_selected > 0) {
-							pg->install_popup_selected--;
-							pc_gaming_install_popup_render(selmon);
-						} else if (nav_x == 1 && pg->install_popup_selected < 1) {
-							pg->install_popup_selected++;
-							pc_gaming_install_popup_render(selmon);
-						}
-					} else {
-						/* Navigate game grid */
-						int new_idx = pg->selected_idx;
-						if (nav_x == -1 && new_idx > 0)
-							new_idx--;
-						else if (nav_x == 1 && new_idx < pg->game_count - 1)
-							new_idx++;
-						if (nav_y == -1 && new_idx >= pg->cols)
-							new_idx -= pg->cols;
-						else if (nav_y == 1 && new_idx + pg->cols < pg->game_count)
-							new_idx += pg->cols;
-
-						if (new_idx != pg->selected_idx) {
-							pg->selected_idx = new_idx;
-							pc_gaming_render(selmon);
-						}
+					if (new_idx != pg->selected_idx) {
+						pg->selected_idx = new_idx;
+						pc_gaming_render(selmon);
 					}
 				}
-			} else {
-				/* Reset repeat state when joystick returns to center */
-				joystick_nav_last_move = 0;
-				joystick_nav_repeat_started = 0;
 			}
 
-			/* Right joystick scrolls in PC gaming view */
-			wl_list_for_each(gp, &gamepads, link) {
-				if (gp->suspended)
-					continue;
-
-				int ry_offset = gp->right_y - gp->cal_ry.center;
-				int ry_range = (gp->cal_ry.max - gp->cal_ry.min) / 2;
-				if (ry_range == 0) ry_range = 32767;
-				int ry_deadzone = gp->cal_ry.flat > 0 ? gp->cal_ry.flat : (ry_range * GAMEPAD_DEADZONE / 32767);
-
-				if (abs(ry_offset) > ry_deadzone) {
-					double ny = (double)ry_offset / (double)ry_range;
-					if (ny > 1.0) ny = 1.0;
-					if (ny < -1.0) ny = -1.0;
-
-					double scroll_amount = ny * 3.0;
-					uint32_t time_msec = (uint32_t)(monotonic_msec() & 0xFFFFFFFF);
-
-					wlr_seat_pointer_notify_axis(seat, time_msec,
-						WL_POINTER_AXIS_VERTICAL_SCROLL,
-						scroll_amount, (int32_t)(scroll_amount * 120),
-						WL_POINTER_AXIS_SOURCE_CONTINUOUS,
-						WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
-				}
-			}
+			gamepad_send_right_stick_scroll();
 
 			/* Don't move mouse cursor while in PC gaming view without popup */
 			return;
@@ -1503,146 +1371,85 @@ gamepad_update_cursor(void)
 
 			if (view) {
 				int nav_x = 0, nav_y = 0;
+				gamepad_read_nav_xy(&nav_x, &nav_y);
 
-				/* Read joystick values from all gamepads */
-				wl_list_for_each(gp, &gamepads, link) {
-					if (gp->suspended)
-						continue;
+				if (gamepad_nav_should_step(nav_x != 0 || nav_y != 0, now)) {
+					/* Handle detail view navigation for TV shows */
+					if (view->in_detail_view && view_type == MEDIA_VIEW_TVSHOWS) {
+						int needs_render = 0;
 
-					int lx_offset = gp->left_x - gp->cal_lx.center;
-					int ly_offset = gp->left_y - gp->cal_ly.center;
-					int lx_range = (gp->cal_lx.max - gp->cal_lx.min) / 2;
-					int ly_range = (gp->cal_ly.max - gp->cal_ly.min) / 2;
-					if (lx_range == 0) lx_range = 32767;
-					if (ly_range == 0) ly_range = 32767;
-
-					/* Threshold at 50% deflection for navigation */
-					int nav_threshold_x = lx_range / 2;
-					int nav_threshold_y = ly_range / 2;
-
-					if (lx_offset < -nav_threshold_x) nav_x = -1;
-					else if (lx_offset > nav_threshold_x) nav_x = 1;
-					if (ly_offset < -nav_threshold_y) nav_y = -1;
-					else if (ly_offset > nav_threshold_y) nav_y = 1;
-				}
-
-				/* Handle navigation with repeat */
-				if (nav_x != 0 || nav_y != 0) {
-					int should_move = 0;
-					uint64_t delay = joystick_nav_repeat_started ? JOYSTICK_NAV_REPEAT_RATE : JOYSTICK_NAV_INITIAL_DELAY;
-
-					if (joystick_nav_last_move == 0 || (now - joystick_nav_last_move) >= delay) {
-						should_move = 1;
-						joystick_nav_last_move = now;
-						joystick_nav_repeat_started = 1;
-					}
-
-					if (should_move) {
-						/* Handle detail view navigation for TV shows */
-						if (view->in_detail_view && view_type == MEDIA_VIEW_TVSHOWS) {
-							int needs_render = 0;
-
-							/* Left/Right switches between seasons and episodes */
-							if (nav_x == -1 && view->detail_focus == DETAIL_FOCUS_EPISODES) {
-								view->detail_focus = DETAIL_FOCUS_SEASONS;
-								needs_render = 1;
-							} else if (nav_x == 1 && view->detail_focus == DETAIL_FOCUS_SEASONS && view->episode_count > 0) {
-								view->detail_focus = DETAIL_FOCUS_EPISODES;
-								needs_render = 1;
-							}
-
-							/* Up/Down navigates within the current column */
-							if (view->detail_focus == DETAIL_FOCUS_SEASONS) {
-								if (nav_y == -1 && view->selected_season_idx > 0) {
-									view->selected_season_idx--;
-									MediaSeason *s = view->seasons;
-									for (int i = 0; i < view->selected_season_idx && s; i++)
-										s = s->next;
-									if (s) {
-										view->selected_season = s->season;
-										const char *show = view->detail_item->title[0] ?
-										                   view->detail_item->title : view->detail_item->show_name;
-										media_view_fetch_episodes(view, show, s->season);
-										view->selected_episode_idx = 0;
-										view->episode_scroll_offset = 0;
-									}
-									needs_render = 1;
-								} else if (nav_y == 1 && view->selected_season_idx < view->season_count - 1) {
-									view->selected_season_idx++;
-									MediaSeason *s = view->seasons;
-									for (int i = 0; i < view->selected_season_idx && s; i++)
-										s = s->next;
-									if (s) {
-										view->selected_season = s->season;
-										const char *show = view->detail_item->title[0] ?
-										                   view->detail_item->title : view->detail_item->show_name;
-										media_view_fetch_episodes(view, show, s->season);
-										view->selected_episode_idx = 0;
-										view->episode_scroll_offset = 0;
-									}
-									needs_render = 1;
-								}
-							} else if (view->detail_focus == DETAIL_FOCUS_EPISODES) {
-								if (nav_y == -1 && view->selected_episode_idx > 0) {
-									view->selected_episode_idx--;
-									needs_render = 1;
-								} else if (nav_y == 1 && view->selected_episode_idx < view->episode_count - 1) {
-									view->selected_episode_idx++;
-									needs_render = 1;
-								}
-							}
-
-							if (needs_render)
-								media_view_render_detail(media_mon, view_type);
-						} else {
-							/* Grid view navigation */
-							int cols = view->cols > 0 ? view->cols : 5;
-							int old_idx = view->selected_idx;
-
-							if (nav_x == -1 && view->selected_idx > 0)
-								view->selected_idx--;
-							else if (nav_x == 1 && view->selected_idx < view->item_count - 1)
-								view->selected_idx++;
-							if (nav_y == -1 && view->selected_idx >= cols)
-								view->selected_idx -= cols;
-							else if (nav_y == 1 && view->selected_idx + cols < view->item_count)
-								view->selected_idx += cols;
-
-							if (view->selected_idx != old_idx)
-								media_view_render(media_mon, view_type);
+						/* Left/Right switches between seasons and episodes */
+						if (nav_x == -1 && view->detail_focus == DETAIL_FOCUS_EPISODES) {
+							view->detail_focus = DETAIL_FOCUS_SEASONS;
+							needs_render = 1;
+						} else if (nav_x == 1 && view->detail_focus == DETAIL_FOCUS_SEASONS && view->episode_count > 0) {
+							view->detail_focus = DETAIL_FOCUS_EPISODES;
+							needs_render = 1;
 						}
+
+						/* Up/Down navigates within the current column */
+						if (view->detail_focus == DETAIL_FOCUS_SEASONS) {
+							if (nav_y == -1 && view->selected_season_idx > 0) {
+								view->selected_season_idx--;
+								MediaSeason *s = view->seasons;
+								for (int i = 0; i < view->selected_season_idx && s; i++)
+									s = s->next;
+								if (s) {
+									view->selected_season = s->season;
+									const char *show = view->detail_item->title[0] ?
+									                   view->detail_item->title : view->detail_item->show_name;
+									media_view_fetch_episodes(view, show, s->season);
+									view->selected_episode_idx = 0;
+									view->episode_scroll_offset = 0;
+								}
+								needs_render = 1;
+							} else if (nav_y == 1 && view->selected_season_idx < view->season_count - 1) {
+								view->selected_season_idx++;
+								MediaSeason *s = view->seasons;
+								for (int i = 0; i < view->selected_season_idx && s; i++)
+									s = s->next;
+								if (s) {
+									view->selected_season = s->season;
+									const char *show = view->detail_item->title[0] ?
+									                   view->detail_item->title : view->detail_item->show_name;
+									media_view_fetch_episodes(view, show, s->season);
+									view->selected_episode_idx = 0;
+									view->episode_scroll_offset = 0;
+								}
+								needs_render = 1;
+							}
+						} else if (view->detail_focus == DETAIL_FOCUS_EPISODES) {
+							if (nav_y == -1 && view->selected_episode_idx > 0) {
+								view->selected_episode_idx--;
+								needs_render = 1;
+							} else if (nav_y == 1 && view->selected_episode_idx < view->episode_count - 1) {
+								view->selected_episode_idx++;
+								needs_render = 1;
+							}
+						}
+
+						if (needs_render)
+							media_view_render_detail(media_mon, view_type);
+					} else {
+						/* Grid view navigation */
+						int cols = view->cols > 0 ? view->cols : 5;
+						int old_idx = view->selected_idx;
+
+						if (nav_x == -1 && view->selected_idx > 0)
+							view->selected_idx--;
+						else if (nav_x == 1 && view->selected_idx < view->item_count - 1)
+							view->selected_idx++;
+						if (nav_y == -1 && view->selected_idx >= cols)
+							view->selected_idx -= cols;
+						else if (nav_y == 1 && view->selected_idx + cols < view->item_count)
+							view->selected_idx += cols;
+
+						if (view->selected_idx != old_idx)
+							media_view_render(media_mon, view_type);
 					}
-				} else {
-					/* Reset repeat state when joystick returns to center */
-					joystick_nav_last_move = 0;
-					joystick_nav_repeat_started = 0;
 				}
 
-				/* Right joystick scrolls in media view */
-				wl_list_for_each(gp, &gamepads, link) {
-					if (gp->suspended)
-						continue;
-
-					int ry_offset = gp->right_y - gp->cal_ry.center;
-					int ry_range = (gp->cal_ry.max - gp->cal_ry.min) / 2;
-					if (ry_range == 0) ry_range = 32767;
-					int ry_deadzone = gp->cal_ry.flat > 0 ? gp->cal_ry.flat : (ry_range * GAMEPAD_DEADZONE / 32767);
-
-					if (abs(ry_offset) > ry_deadzone) {
-						double ny = (double)ry_offset / (double)ry_range;
-						if (ny > 1.0) ny = 1.0;
-						if (ny < -1.0) ny = -1.0;
-
-						double scroll_amount = ny * 3.0;
-						uint32_t time_msec = (uint32_t)(monotonic_msec() & 0xFFFFFFFF);
-
-						wlr_seat_pointer_notify_axis(seat, time_msec,
-							WL_POINTER_AXIS_VERTICAL_SCROLL,
-							scroll_amount, (int32_t)(scroll_amount * 120),
-							WL_POINTER_AXIS_SOURCE_CONTINUOUS,
-							WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
-					}
-				}
+				gamepad_send_right_stick_scroll();
 
 				/* Don't move mouse cursor while in media view */
 				return;

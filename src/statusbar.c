@@ -150,6 +150,46 @@ render_icon_label(StatusModule *module, int bar_height, const char *text,
 		tray_render_label(module, text, x, bar_height, fg);
 }
 
+static int
+utf8_decode(const char *text, int pos, uint32_t *cp)
+{
+	unsigned char c = (unsigned char)text[pos];
+
+	if ((c & 0x80) == 0) {
+		*cp = c;
+		return 1;
+	}
+	if ((c & 0xE0) == 0xC0) {
+		*cp = (c & 0x1F) << 6;
+		if (text[pos + 1])
+			*cp |= ((unsigned char)text[pos + 1] & 0x3F);
+		return 2;
+	}
+	if ((c & 0xF0) == 0xE0) {
+		*cp = (c & 0x0F) << 12;
+		if (text[pos + 1]) {
+			*cp |= ((unsigned char)text[pos + 1] & 0x3F) << 6;
+			if (text[pos + 2])
+				*cp |= ((unsigned char)text[pos + 2] & 0x3F);
+		}
+		return 3;
+	}
+	if ((c & 0xF8) == 0xF0) {
+		*cp = (c & 0x07) << 18;
+		if (text[pos + 1]) {
+			*cp |= ((unsigned char)text[pos + 1] & 0x3F) << 12;
+			if (text[pos + 2]) {
+				*cp |= ((unsigned char)text[pos + 2] & 0x3F) << 6;
+				if (text[pos + 3])
+					*cp |= ((unsigned char)text[pos + 3] & 0x3F);
+			}
+		}
+		return 4;
+	}
+	*cp = 0xFFFD; /* replacement character */
+	return 1;
+}
+
 int
 status_text_width(const char *text)
 {
@@ -165,41 +205,14 @@ status_text_width(const char *text)
 	for (int i = 0; text[i]; ) {
 		long kern_x = 0, kern_y = 0;
 		uint32_t cp;
-		unsigned char c = (unsigned char)text[i];
 		const struct fcft_glyph *glyph;
+		int len = utf8_decode(text, i, &cp);
 
-		/* Decode UTF-8 to Unicode codepoint */
-		if ((c & 0x80) == 0) {
-			cp = c;
-			i += 1;
-		} else if ((c & 0xE0) == 0xC0) {
-			cp = (c & 0x1F) << 6;
-			if (text[i + 1])
-				cp |= ((unsigned char)text[i + 1] & 0x3F);
-			i += 2;
-		} else if ((c & 0xF0) == 0xE0) {
-			cp = (c & 0x0F) << 12;
-			if (text[i + 1]) {
-				cp |= ((unsigned char)text[i + 1] & 0x3F) << 6;
-				if (text[i + 2])
-					cp |= ((unsigned char)text[i + 2] & 0x3F);
-			}
-			i += 3;
-		} else if ((c & 0xF8) == 0xF0) {
-			cp = (c & 0x07) << 18;
-			if (text[i + 1]) {
-				cp |= ((unsigned char)text[i + 1] & 0x3F) << 12;
-				if (text[i + 2]) {
-					cp |= ((unsigned char)text[i + 2] & 0x3F) << 6;
-					if (text[i + 3])
-						cp |= ((unsigned char)text[i + 3] & 0x3F);
-				}
-			}
-			i += 4;
-		} else {
-			i += 1;
+		if (cp == 0xFFFD) {
+			i += len;
 			continue;
 		}
+		i += len;
 
 		if (prev_cp)
 			fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
@@ -248,45 +261,13 @@ tray_render_label(StatusModule *module, const char *text, int x, int bar_height,
 	for (i = 0; text[i]; ) {
 		long kern_x = 0, kern_y = 0;
 		uint32_t cp;
-		unsigned char c = (unsigned char)text[i];
+		int len = utf8_decode(text, i, &cp);
 
-		/* Decode UTF-8 to Unicode codepoint */
-		if ((c & 0x80) == 0) {
-			/* ASCII (0xxxxxxx) */
-			cp = c;
-			i += 1;
-		} else if ((c & 0xE0) == 0xC0) {
-			/* 2-byte sequence (110xxxxx 10xxxxxx) */
-			cp = (c & 0x1F) << 6;
-			if (text[i + 1])
-				cp |= ((unsigned char)text[i + 1] & 0x3F);
-			i += 2;
-		} else if ((c & 0xF0) == 0xE0) {
-			/* 3-byte sequence (1110xxxx 10xxxxxx 10xxxxxx) */
-			cp = (c & 0x0F) << 12;
-			if (text[i + 1]) {
-				cp |= ((unsigned char)text[i + 1] & 0x3F) << 6;
-				if (text[i + 2])
-					cp |= ((unsigned char)text[i + 2] & 0x3F);
-			}
-			i += 3;
-		} else if ((c & 0xF8) == 0xF0) {
-			/* 4-byte sequence (11110xxx 10xxxxxx 10xxxxxx 10xxxxxx) */
-			cp = (c & 0x07) << 18;
-			if (text[i + 1]) {
-				cp |= ((unsigned char)text[i + 1] & 0x3F) << 12;
-				if (text[i + 2]) {
-					cp |= ((unsigned char)text[i + 2] & 0x3F) << 6;
-					if (text[i + 3])
-						cp |= ((unsigned char)text[i + 3] & 0x3F);
-				}
-			}
-			i += 4;
-		} else {
-			/* Invalid UTF-8, skip byte */
-			i += 1;
+		if (cp == 0xFFFD) {
+			i += len;
 			continue;
 		}
+		i += len;
 
 		if (prev_cp)
 			fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
@@ -421,404 +402,87 @@ rendermic(StatusModule *module, int bar_height, const char *text)
 			status_text_width("100%"), statusbar_icon_text_gap_microphone, mic_text_color);
 }
 
-void
-drop_cpu_icon_buffer(void)
+static void
+drop_icon_buf(struct wlr_buffer **buf, int *loaded_h, int *w, int *h,
+		char *loaded_path)
 {
-	if (cpu_icon_buf) {
-		wlr_buffer_drop(cpu_icon_buf);
-		cpu_icon_buf = NULL;
+	if (*buf) {
+		wlr_buffer_drop(*buf);
+		*buf = NULL;
 	}
-	cpu_icon_loaded_h = 0;
-	cpu_icon_w = cpu_icon_h = 0;
-	cpu_icon_loaded_path[0] = '\0';
+	*loaded_h = 0;
+	*w = *h = 0;
+	loaded_path[0] = '\0';
 }
 
-int
-ensure_cpu_icon_buffer(int target_h)
+static int
+ensure_icon_buf(const char *icon_path, struct wlr_buffer **buf, int *loaded_h,
+		int *w, int *h, char *loaded_path, size_t loaded_path_size,
+		const char *label, int target_h)
 {
 	GdkPixbuf *pixbuf = NULL;
 	GError *gerr = NULL;
-	struct wlr_buffer *buf;
-	int w = 0, h = 0;
+	struct wlr_buffer *newbuf;
+	int nw = 0, nh = 0;
 	char resolved[PATH_MAX];
-	const char *path = cpu_icon_path;
+	const char *path = icon_path;
 
 	if (target_h <= 0)
 		return -1;
 
-	if (resolve_asset_path(cpu_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
+	if (resolve_asset_path(icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
 		path = resolved;
 
-	if (cpu_icon_buf && cpu_icon_loaded_h == target_h &&
-			strncmp(cpu_icon_loaded_path, path, sizeof(cpu_icon_loaded_path)) == 0)
+	if (*buf && *loaded_h == target_h &&
+			strncmp(loaded_path, path, loaded_path_size) == 0)
 		return 0;
 
 	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
 		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
 		if (!pixbuf) {
 			if (gerr) {
-				wlr_log(WLR_ERROR, "cpu icon: failed to load '%s': %s",
-						path, gerr->message);
+				wlr_log(WLR_ERROR, "%s icon: failed to load '%s': %s",
+						label, path, gerr->message);
 				g_error_free(gerr);
 			}
 			return -1;
 		}
 	}
 
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
+	newbuf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &nw, &nh);
+	if (!newbuf)
 		return -1;
 
-	drop_cpu_icon_buffer();
-	cpu_icon_buf = buf;
-	cpu_icon_w = w;
-	cpu_icon_h = h;
-	cpu_icon_loaded_h = target_h;
-	snprintf(cpu_icon_loaded_path, sizeof(cpu_icon_loaded_path), "%s", path);
+	drop_icon_buf(buf, loaded_h, w, h, loaded_path);
+	*buf = newbuf;
+	*w = nw;
+	*h = nh;
+	*loaded_h = target_h;
+	snprintf(loaded_path, loaded_path_size, "%s", path);
 	return 0;
 }
 
-void
-drop_clock_icon_buffer(void)
-{
-	if (clock_icon_buf) {
-		wlr_buffer_drop(clock_icon_buf);
-		clock_icon_buf = NULL;
-	}
-	clock_icon_loaded_h = 0;
-	clock_icon_w = clock_icon_h = 0;
-	clock_icon_loaded_path[0] = '\0';
+#define DEFINE_ICON_FUNCS(name, Name) \
+void drop_##name##_icon_buffer(void) { \
+	drop_icon_buf(&name##_icon_buf, &name##_icon_loaded_h, \
+			&name##_icon_w, &name##_icon_h, name##_icon_loaded_path); \
+} \
+int ensure_##name##_icon_buffer(int target_h) { \
+	return ensure_icon_buf(name##_icon_path, &name##_icon_buf, \
+			&name##_icon_loaded_h, &name##_icon_w, &name##_icon_h, \
+			name##_icon_loaded_path, sizeof(name##_icon_loaded_path), \
+			Name, target_h); \
 }
 
-int
-ensure_clock_icon_buffer(int target_h)
-{
-	GdkPixbuf *pixbuf = NULL;
-	GError *gerr = NULL;
-	struct wlr_buffer *buf;
-	int w = 0, h = 0;
-	char resolved[PATH_MAX];
-	const char *path = clock_icon_path;
+DEFINE_ICON_FUNCS(cpu, "cpu")
+DEFINE_ICON_FUNCS(clock, "clock")
+DEFINE_ICON_FUNCS(light, "light")
+DEFINE_ICON_FUNCS(ram, "ram")
+DEFINE_ICON_FUNCS(volume, "volume")
+DEFINE_ICON_FUNCS(battery, "battery")
+DEFINE_ICON_FUNCS(mic, "mic")
 
-	if (target_h <= 0)
-		return -1;
-
-	if (resolve_asset_path(clock_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
-		path = resolved;
-
-	if (clock_icon_buf && clock_icon_loaded_h == target_h &&
-			strncmp(clock_icon_loaded_path, path, sizeof(clock_icon_loaded_path)) == 0)
-		return 0;
-
-	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
-		if (!pixbuf) {
-			if (gerr) {
-				wlr_log(WLR_ERROR, "clock icon: failed to load '%s': %s",
-						path, gerr->message);
-				g_error_free(gerr);
-			}
-			return -1;
-		}
-	}
-
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-
-	drop_clock_icon_buffer();
-	clock_icon_buf = buf;
-	clock_icon_w = w;
-	clock_icon_h = h;
-	clock_icon_loaded_h = target_h;
-	snprintf(clock_icon_loaded_path, sizeof(clock_icon_loaded_path), "%s", path);
-	return 0;
-}
-
-void
-drop_light_icon_buffer(void)
-{
-	if (light_icon_buf) {
-		wlr_buffer_drop(light_icon_buf);
-		light_icon_buf = NULL;
-	}
-	light_icon_loaded_h = 0;
-	light_icon_w = light_icon_h = 0;
-	light_icon_loaded_path[0] = '\0';
-}
-
-int
-ensure_light_icon_buffer(int target_h)
-{
-	GdkPixbuf *pixbuf = NULL;
-	GError *gerr = NULL;
-	struct wlr_buffer *buf;
-	int w = 0, h = 0;
-	char resolved[PATH_MAX];
-	const char *path = light_icon_path;
-
-	if (target_h <= 0)
-		return -1;
-
-	if (resolve_asset_path(light_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
-		path = resolved;
-
-	if (light_icon_buf && light_icon_loaded_h == target_h &&
-			strncmp(light_icon_loaded_path, path, sizeof(light_icon_loaded_path)) == 0)
-		return 0;
-
-	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
-		if (!pixbuf) {
-			if (gerr) {
-				wlr_log(WLR_ERROR, "light icon: failed to load '%s': %s",
-						path, gerr->message);
-				g_error_free(gerr);
-			}
-			return -1;
-		}
-	}
-
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-
-	drop_light_icon_buffer();
-	light_icon_buf = buf;
-	light_icon_w = w;
-	light_icon_h = h;
-	light_icon_loaded_h = target_h;
-	snprintf(light_icon_loaded_path, sizeof(light_icon_loaded_path), "%s", path);
-	return 0;
-}
-
-void
-drop_ram_icon_buffer(void)
-{
-	if (ram_icon_buf) {
-		wlr_buffer_drop(ram_icon_buf);
-		ram_icon_buf = NULL;
-	}
-	ram_icon_loaded_h = 0;
-	ram_icon_w = ram_icon_h = 0;
-	ram_icon_loaded_path[0] = '\0';
-}
-
-int
-ensure_ram_icon_buffer(int target_h)
-{
-	GdkPixbuf *pixbuf = NULL;
-	GError *gerr = NULL;
-	struct wlr_buffer *buf;
-	int w = 0, h = 0;
-	char resolved[PATH_MAX];
-	const char *path = ram_icon_path;
-
-	if (target_h <= 0)
-		return -1;
-
-	if (resolve_asset_path(ram_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
-		path = resolved;
-
-	if (ram_icon_buf && ram_icon_loaded_h == target_h &&
-			strncmp(ram_icon_loaded_path, path, sizeof(ram_icon_loaded_path)) == 0)
-		return 0;
-
-	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
-		if (!pixbuf) {
-			if (gerr) {
-				wlr_log(WLR_ERROR, "ram icon: failed to load '%s': %s",
-						path, gerr->message);
-				g_error_free(gerr);
-			}
-			return -1;
-		}
-	}
-
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-
-	drop_ram_icon_buffer();
-	ram_icon_buf = buf;
-	ram_icon_w = w;
-	ram_icon_h = h;
-	ram_icon_loaded_h = target_h;
-	snprintf(ram_icon_loaded_path, sizeof(ram_icon_loaded_path), "%s", path);
-	return 0;
-}
-
-void
-drop_volume_icon_buffer(void)
-{
-	if (volume_icon_buf) {
-		wlr_buffer_drop(volume_icon_buf);
-		volume_icon_buf = NULL;
-	}
-	volume_icon_loaded_h = 0;
-	volume_icon_w = volume_icon_h = 0;
-	volume_icon_loaded_path[0] = '\0';
-}
-
-int
-ensure_volume_icon_buffer(int target_h)
-{
-	GdkPixbuf *pixbuf = NULL;
-	GError *gerr = NULL;
-	struct wlr_buffer *buf;
-	int w = 0, h = 0;
-	char resolved[PATH_MAX];
-	const char *path = volume_icon_path;
-
-	if (target_h <= 0)
-		return -1;
-
-	if (resolve_asset_path(volume_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
-		path = resolved;
-
-	if (volume_icon_buf && volume_icon_loaded_h == target_h &&
-			strncmp(volume_icon_loaded_path, path, sizeof(volume_icon_loaded_path)) == 0)
-		return 0;
-
-	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
-		if (!pixbuf) {
-			if (gerr) {
-				wlr_log(WLR_ERROR, "volume icon: failed to load '%s': %s",
-						path, gerr->message);
-				g_error_free(gerr);
-			}
-			return -1;
-		}
-	}
-
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-
-	drop_volume_icon_buffer();
-	volume_icon_buf = buf;
-	volume_icon_w = w;
-	volume_icon_h = h;
-	volume_icon_loaded_h = target_h;
-	snprintf(volume_icon_loaded_path, sizeof(volume_icon_loaded_path), "%s", path);
-	return 0;
-}
-
-void
-drop_battery_icon_buffer(void)
-{
-	if (battery_icon_buf) {
-		wlr_buffer_drop(battery_icon_buf);
-		battery_icon_buf = NULL;
-	}
-	battery_icon_loaded_h = 0;
-	battery_icon_w = battery_icon_h = 0;
-	battery_icon_loaded_path[0] = '\0';
-}
-
-int
-ensure_battery_icon_buffer(int target_h)
-{
-	GdkPixbuf *pixbuf = NULL;
-	GError *gerr = NULL;
-	struct wlr_buffer *buf;
-	int w = 0, h = 0;
-	char resolved[PATH_MAX];
-	const char *path = battery_icon_path;
-
-	if (target_h <= 0)
-		return -1;
-
-	if (resolve_asset_path(battery_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
-		path = resolved;
-
-	if (battery_icon_buf && battery_icon_loaded_h == target_h &&
-			strncmp(battery_icon_loaded_path, path, sizeof(battery_icon_loaded_path)) == 0)
-		return 0;
-
-	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
-		if (!pixbuf) {
-			if (gerr) {
-				wlr_log(WLR_ERROR, "battery icon: failed to load '%s': %s",
-						path, gerr->message);
-				g_error_free(gerr);
-			}
-			return -1;
-		}
-	}
-
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-
-	drop_battery_icon_buffer();
-	battery_icon_buf = buf;
-	battery_icon_w = w;
-	battery_icon_h = h;
-	battery_icon_loaded_h = target_h;
-	snprintf(battery_icon_loaded_path, sizeof(battery_icon_loaded_path), "%s", path);
-	return 0;
-}
-
-void
-drop_mic_icon_buffer(void)
-{
-	if (mic_icon_buf) {
-		wlr_buffer_drop(mic_icon_buf);
-		mic_icon_buf = NULL;
-	}
-	mic_icon_loaded_h = 0;
-	mic_icon_w = mic_icon_h = 0;
-	mic_icon_loaded_path[0] = '\0';
-}
-
-int
-ensure_mic_icon_buffer(int target_h)
-{
-	GdkPixbuf *pixbuf = NULL;
-	GError *gerr = NULL;
-	struct wlr_buffer *buf;
-	int w = 0, h = 0;
-	char resolved[PATH_MAX];
-	const char *path = mic_icon_path;
-
-	if (target_h <= 0)
-		return -1;
-
-	if (resolve_asset_path(mic_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
-		path = resolved;
-
-	if (mic_icon_buf && mic_icon_loaded_h == target_h &&
-			strncmp(mic_icon_loaded_path, path, sizeof(mic_icon_loaded_path)) == 0)
-		return 0;
-
-	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
-		if (!pixbuf) {
-			if (gerr) {
-				wlr_log(WLR_ERROR, "mic icon: failed to load '%s': %s",
-						path, gerr->message);
-				g_error_free(gerr);
-			}
-			return -1;
-		}
-	}
-
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-
-	drop_mic_icon_buffer();
-	mic_icon_buf = buf;
-	mic_icon_w = w;
-	mic_icon_h = h;
-	mic_icon_loaded_h = target_h;
-	snprintf(mic_icon_loaded_path, sizeof(mic_icon_loaded_path), "%s", path);
-	return 0;
-}
+#undef DEFINE_ICON_FUNCS
 
 void
 drop_net_icon_buffer(void)
@@ -915,25 +579,14 @@ ensure_net_icon_buffer(int target_h)
 	return -1;
 }
 
-void
-drop_bluetooth_icon_buffer(void)
-{
-	if (bluetooth_icon_buf) {
-		wlr_buffer_drop(bluetooth_icon_buf);
-		bluetooth_icon_buf = NULL;
-	}
-	bluetooth_icon_loaded_h = 0;
-	bluetooth_icon_loaded_path[0] = '\0';
-	bluetooth_icon_w = 0;
-	bluetooth_icon_h = 0;
-}
-
-int
-load_bluetooth_icon_buffer(const char *path, int target_h)
+static int
+load_icon_buf(const char *path, struct wlr_buffer **buf, int *loaded_h,
+		int *w, int *h, char *loaded_path, size_t loaded_path_size,
+		const char *label, int target_h)
 {
 	GError *gerr = NULL;
-	struct wlr_buffer *buf;
-	int w = 0, h = 0;
+	struct wlr_buffer *newbuf;
+	int nw = 0, nh = 0;
 	GdkPixbuf *pixbuf = NULL;
 	char resolved[PATH_MAX];
 	const char *load_path = path;
@@ -948,343 +601,135 @@ load_bluetooth_icon_buffer(const char *path, int target_h)
 		pixbuf = gdk_pixbuf_new_from_file(load_path, &gerr);
 		if (!pixbuf) {
 			if (gerr) {
-				wlr_log(WLR_ERROR, "bluetooth icon: failed to load '%s': %s", load_path, gerr->message);
+				wlr_log(WLR_ERROR, "%s icon: failed to load '%s': %s",
+						label, load_path, gerr->message);
 				g_error_free(gerr);
 			}
 			return -1;
 		}
 	}
 
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
+	newbuf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &nw, &nh);
+	if (!newbuf)
 		return -1;
 
-	drop_bluetooth_icon_buffer();
-	bluetooth_icon_buf = buf;
-	bluetooth_icon_w = w;
-	bluetooth_icon_h = h;
-	bluetooth_icon_loaded_h = target_h;
-	snprintf(bluetooth_icon_loaded_path, sizeof(bluetooth_icon_loaded_path), "%s", load_path);
+	drop_icon_buf(buf, loaded_h, w, h, loaded_path);
+	*buf = newbuf;
+	*w = nw;
+	*h = nh;
+	*loaded_h = target_h;
+	snprintf(loaded_path, loaded_path_size, "%s", load_path);
 	return 0;
 }
 
-int
-ensure_bluetooth_icon_buffer(int target_h)
+#define DEFINE_ICON_LOAD_FUNCS(name, Name) \
+void drop_##name##_icon_buffer(void) { \
+	drop_icon_buf(&name##_icon_buf, &name##_icon_loaded_h, \
+			&name##_icon_w, &name##_icon_h, name##_icon_loaded_path); \
+} \
+int load_##name##_icon_buffer(const char *path, int target_h) { \
+	return load_icon_buf(path, &name##_icon_buf, &name##_icon_loaded_h, \
+			&name##_icon_w, &name##_icon_h, name##_icon_loaded_path, \
+			sizeof(name##_icon_loaded_path), Name, target_h); \
+} \
+int ensure_##name##_icon_buffer(int target_h) { \
+	if (target_h <= 0) return -1; \
+	if (name##_icon_buf && name##_icon_loaded_h == target_h && \
+			strncmp(name##_icon_loaded_path, name##_icon_path, \
+				sizeof(name##_icon_loaded_path)) == 0) \
+		return 0; \
+	return load_##name##_icon_buffer(name##_icon_path, target_h); \
+}
+
+DEFINE_ICON_LOAD_FUNCS(bluetooth, "bluetooth")
+DEFINE_ICON_LOAD_FUNCS(steam, "steam")
+DEFINE_ICON_LOAD_FUNCS(discord, "discord")
+
+#undef DEFINE_ICON_LOAD_FUNCS
+
+static void
+render_icon_module(StatusModule *module, int bar_height,
+		int (*ensure_icon)(int), struct wlr_buffer **icon_buf,
+		int *icon_w, int *icon_h, int feature_available)
 {
+	int padding, target_h, icon_x, icon_y, base_h;
+	struct wlr_scene_buffer *scene_buf;
+
+	if (!module || !module->tree)
+		return;
+
+	clearstatusmodule(module);
+	module->width = 0;
+	module->x = 0;
+
+	if (!feature_available) {
+		wlr_scene_node_set_enabled(&module->tree->node, 0);
+		return;
+	}
+
+	padding = statusbar_module_padding / 2;
+	if (padding < 1)
+		padding = 1;
+	base_h = bar_height - 2 * padding;
+	target_h = (int)lround(base_h * 1.5);
+	if (target_h > bar_height)
+		target_h = bar_height;
 	if (target_h <= 0)
-		return -1;
-
-	if (bluetooth_icon_buf && bluetooth_icon_loaded_h == target_h &&
-			strncmp(bluetooth_icon_loaded_path, bluetooth_icon_path, sizeof(bluetooth_icon_loaded_path)) == 0)
-		return 0;
-
-	return load_bluetooth_icon_buffer(bluetooth_icon_path, target_h);
-}
-
-void
-drop_steam_icon_buffer(void)
-{
-	if (steam_icon_buf) {
-		wlr_buffer_drop(steam_icon_buf);
-		steam_icon_buf = NULL;
-	}
-	steam_icon_loaded_h = 0;
-	steam_icon_loaded_path[0] = '\0';
-	steam_icon_w = 0;
-	steam_icon_h = 0;
-}
-
-int
-load_steam_icon_buffer(const char *path, int target_h)
-{
-	GError *gerr = NULL;
-	struct wlr_buffer *buf;
-	int w = 0, h = 0;
-	GdkPixbuf *pixbuf = NULL;
-	char resolved[PATH_MAX];
-	const char *load_path = path;
-
-	if (!path || !*path || target_h <= 0)
-		return -1;
-
-	if (resolve_asset_path(path, resolved, sizeof(resolved)) == 0)
-		load_path = resolved;
-
-	if (tray_load_svg_pixbuf(load_path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(load_path, &gerr);
-		if (!pixbuf) {
-			if (gerr) {
-				wlr_log(WLR_ERROR, "steam icon: failed to load '%s': %s", load_path, gerr->message);
-				g_error_free(gerr);
-			}
-			return -1;
-		}
-	}
-
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-
-	drop_steam_icon_buffer();
-	steam_icon_buf = buf;
-	steam_icon_w = w;
-	steam_icon_h = h;
-	steam_icon_loaded_h = target_h;
-	snprintf(steam_icon_loaded_path, sizeof(steam_icon_loaded_path), "%s", load_path);
-	return 0;
-}
-
-int
-ensure_steam_icon_buffer(int target_h)
-{
+		target_h = bar_height - padding;
 	if (target_h <= 0)
-		return -1;
+		target_h = 1;
 
-	if (steam_icon_buf && steam_icon_loaded_h == target_h &&
-			strncmp(steam_icon_loaded_path, steam_icon_path, sizeof(steam_icon_loaded_path)) == 0)
-		return 0;
-
-	return load_steam_icon_buffer(steam_icon_path, target_h);
-}
-
-void
-drop_discord_icon_buffer(void)
-{
-	if (discord_icon_buf) {
-		wlr_buffer_drop(discord_icon_buf);
-		discord_icon_buf = NULL;
-	}
-	discord_icon_loaded_h = 0;
-	discord_icon_loaded_path[0] = '\0';
-	discord_icon_w = 0;
-	discord_icon_h = 0;
-}
-
-int
-load_discord_icon_buffer(const char *path, int target_h)
-{
-	GError *gerr = NULL;
-	struct wlr_buffer *buf;
-	int w = 0, h = 0;
-	GdkPixbuf *pixbuf = NULL;
-	char resolved[PATH_MAX];
-	const char *load_path = path;
-
-	if (!path || !*path || target_h <= 0)
-		return -1;
-
-	if (resolve_asset_path(path, resolved, sizeof(resolved)) == 0)
-		load_path = resolved;
-
-	if (tray_load_svg_pixbuf(load_path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(load_path, &gerr);
-		if (!pixbuf) {
-			if (gerr) {
-				wlr_log(WLR_ERROR, "discord icon: failed to load '%s': %s", load_path, gerr->message);
-				g_error_free(gerr);
-			}
-			return -1;
-		}
+	if (ensure_icon(target_h) != 0 || !*icon_buf ||
+			*icon_w <= 0 || *icon_h <= 0) {
+		wlr_scene_node_set_enabled(&module->tree->node, 0);
+		return;
 	}
 
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
+	module->width = *icon_w + 2 * padding;
+	if (module->width < *icon_w)
+		module->width = *icon_w;
 
-	drop_discord_icon_buffer();
-	discord_icon_buf = buf;
-	discord_icon_w = w;
-	discord_icon_h = h;
-	discord_icon_loaded_h = target_h;
-	snprintf(discord_icon_loaded_path, sizeof(discord_icon_loaded_path), "%s", load_path);
-	return 0;
-}
+	updatemodulebg(module, module->width, bar_height, statusbar_bg);
 
-int
-ensure_discord_icon_buffer(int target_h)
-{
-	if (target_h <= 0)
-		return -1;
+	scene_buf = wlr_scene_buffer_create(module->tree, NULL);
+	if (scene_buf) {
+		int usable_w = module->width - 2 * padding;
+		icon_x = padding + MAX(0, (usable_w - *icon_w) / 2);
+		icon_y = MAX(0, (bar_height - *icon_h) / 2);
+		wlr_scene_buffer_set_buffer(scene_buf, *icon_buf);
+		wlr_scene_node_set_position(&scene_buf->node, icon_x, icon_y);
+	}
 
-	if (discord_icon_buf && discord_icon_loaded_h == target_h &&
-			strncmp(discord_icon_loaded_path, discord_icon_path, sizeof(discord_icon_loaded_path)) == 0)
-		return 0;
-
-	return load_discord_icon_buffer(discord_icon_path, target_h);
+	wlr_scene_node_set_enabled(&module->tree->node, module->width > 0);
 }
 
 void
 renderbluetooth(Monitor *m, int bar_height)
 {
-	StatusModule *module;
-	int padding, target_h, icon_x, icon_y, base_h;
-	struct wlr_scene_buffer *scene_buf;
-
-	if (!m || !m->statusbar.bluetooth.tree)
-		return;
-
-	module = &m->statusbar.bluetooth;
-	clearstatusmodule(module);
-	module->width = 0;
-	module->x = 0;
-
-	/* Only show if bluetooth is available */
-	if (!bluetooth_available) {
-		wlr_scene_node_set_enabled(&module->tree->node, 0);
-		return;
-	}
-
-	padding = statusbar_module_padding / 2;
-	if (padding < 1)
-		padding = 1;
-	base_h = bar_height - 2 * padding;
-	target_h = (int)lround(base_h * 1.5);
-	if (target_h > bar_height)
-		target_h = bar_height;
-	if (target_h <= 0)
-		target_h = bar_height - padding;
-	if (target_h <= 0)
-		target_h = 1;
-
-	if (ensure_bluetooth_icon_buffer(target_h) != 0 || !bluetooth_icon_buf ||
-			bluetooth_icon_w <= 0 || bluetooth_icon_h <= 0) {
-		wlr_scene_node_set_enabled(&module->tree->node, 0);
-		return;
-	}
-
-	module->width = bluetooth_icon_w + 2 * padding;
-	if (module->width < bluetooth_icon_w)
-		module->width = bluetooth_icon_w;
-
-	updatemodulebg(module, module->width, bar_height, statusbar_bg);
-
-	scene_buf = wlr_scene_buffer_create(module->tree, NULL);
-	if (scene_buf) {
-		int usable_w = module->width - 2 * padding;
-		icon_x = padding + MAX(0, (usable_w - bluetooth_icon_w) / 2);
-		icon_y = MAX(0, (bar_height - bluetooth_icon_h) / 2);
-		wlr_scene_buffer_set_buffer(scene_buf, bluetooth_icon_buf);
-		wlr_scene_node_set_position(&scene_buf->node, icon_x, icon_y);
-	}
-
-	wlr_scene_node_set_enabled(&module->tree->node, module->width > 0);
+	if (!m) return;
+	render_icon_module(&m->statusbar.bluetooth, bar_height,
+			ensure_bluetooth_icon_buffer, &bluetooth_icon_buf,
+			&bluetooth_icon_w, &bluetooth_icon_h, bluetooth_available);
 }
 
 void
 rendersteam(Monitor *m, int bar_height)
 {
-	StatusModule *module;
-	int padding, target_h, icon_x, icon_y, base_h;
-	struct wlr_scene_buffer *scene_buf;
-
-	if (!m || !m->statusbar.steam.tree)
-		return;
-
-	module = &m->statusbar.steam;
-	clearstatusmodule(module);
-	module->width = 0;
-	module->x = 0;
-
-	/* Only show if Steam process is running */
+	if (!m) return;
 	steam_running = is_process_running("steam");
-	if (!steam_running) {
-		wlr_scene_node_set_enabled(&module->tree->node, 0);
-		return;
-	}
-
-	padding = statusbar_module_padding / 2;
-	if (padding < 1)
-		padding = 1;
-	base_h = bar_height - 2 * padding;
-	target_h = (int)lround(base_h * 1.5);
-	if (target_h > bar_height)
-		target_h = bar_height;
-	if (target_h <= 0)
-		target_h = bar_height - padding;
-	if (target_h <= 0)
-		target_h = 1;
-
-	if (ensure_steam_icon_buffer(target_h) != 0 || !steam_icon_buf ||
-			steam_icon_w <= 0 || steam_icon_h <= 0) {
-		wlr_scene_node_set_enabled(&module->tree->node, 0);
-		return;
-	}
-
-	module->width = steam_icon_w + 2 * padding;
-	if (module->width < steam_icon_w)
-		module->width = steam_icon_w;
-
-	updatemodulebg(module, module->width, bar_height, statusbar_bg);
-
-	scene_buf = wlr_scene_buffer_create(module->tree, NULL);
-	if (scene_buf) {
-		int usable_w = module->width - 2 * padding;
-		icon_x = padding + MAX(0, (usable_w - steam_icon_w) / 2);
-		icon_y = MAX(0, (bar_height - steam_icon_h) / 2);
-		wlr_scene_buffer_set_buffer(scene_buf, steam_icon_buf);
-		wlr_scene_node_set_position(&scene_buf->node, icon_x, icon_y);
-	}
-
-	wlr_scene_node_set_enabled(&module->tree->node, module->width > 0);
+	render_icon_module(&m->statusbar.steam, bar_height,
+			ensure_steam_icon_buffer, &steam_icon_buf,
+			&steam_icon_w, &steam_icon_h, steam_running);
 }
 
 void
 renderdiscord(Monitor *m, int bar_height)
 {
-	StatusModule *module;
-	int padding, target_h, icon_x, icon_y, base_h;
-	struct wlr_scene_buffer *scene_buf;
-
-	if (!m || !m->statusbar.discord.tree)
-		return;
-
-	module = &m->statusbar.discord;
-	clearstatusmodule(module);
-	module->width = 0;
-	module->x = 0;
-
-	/* Only show if Discord process is running.
-	 * Check both "Discord" and ".Discord" for NixOS wrapped version */
+	if (!m) return;
 	discord_running = is_process_running("Discord") || is_process_running(".Discord");
-	if (!discord_running) {
-		wlr_scene_node_set_enabled(&module->tree->node, 0);
-		return;
-	}
-
-	padding = statusbar_module_padding / 2;
-	if (padding < 1)
-		padding = 1;
-	base_h = bar_height - 2 * padding;
-	target_h = (int)lround(base_h * 1.5);
-	if (target_h > bar_height)
-		target_h = bar_height;
-	if (target_h <= 0)
-		target_h = bar_height - padding;
-	if (target_h <= 0)
-		target_h = 1;
-
-	if (ensure_discord_icon_buffer(target_h) != 0 || !discord_icon_buf ||
-			discord_icon_w <= 0 || discord_icon_h <= 0) {
-		wlr_scene_node_set_enabled(&module->tree->node, 0);
-		return;
-	}
-
-	module->width = discord_icon_w + 2 * padding;
-	if (module->width < discord_icon_w)
-		module->width = discord_icon_w;
-
-	updatemodulebg(module, module->width, bar_height, statusbar_bg);
-
-	scene_buf = wlr_scene_buffer_create(module->tree, NULL);
-	if (scene_buf) {
-		int usable_w = module->width - 2 * padding;
-		icon_x = padding + MAX(0, (usable_w - discord_icon_w) / 2);
-		icon_y = MAX(0, (bar_height - discord_icon_h) / 2);
-		wlr_scene_buffer_set_buffer(scene_buf, discord_icon_buf);
-		wlr_scene_node_set_position(&scene_buf->node, icon_x, icon_y);
-	}
-
-	wlr_scene_node_set_enabled(&module->tree->node, module->width > 0);
+	render_icon_module(&m->statusbar.discord, bar_height,
+			ensure_discord_icon_buffer, &discord_icon_buf,
+			&discord_icon_w, &discord_icon_h, discord_running);
 }
 
 void
@@ -1649,6 +1094,94 @@ read_top_cpu_processes(CpuPopup *p)
 	return count;
 }
 
+static void
+cpu_popup_format_line(char *buf, size_t buflen, int index, double perc)
+{
+	if (perc < 0.0) {
+		if (index < cpu_core_count)
+			snprintf(buf, buflen, "C%d: --%%", index);
+		else
+			snprintf(buf, buflen, "Avg: --%%");
+	} else if (index < cpu_core_count) {
+		snprintf(buf, buflen, "C%d: %d%%", index, (int)lround(perc));
+	} else {
+		int avg_disp = (perc < 1.0) ? 0 : (int)lround(perc);
+		snprintf(buf, buflen, "Avg: %d%%", avg_disp);
+	}
+}
+
+static void
+popup_render_proc_row(struct wlr_scene_tree *tree, const char *label,
+		int row_x, int row_y, int row_height,
+		int max_proc_text_w, int button_gap,
+		int kill_w, int kill_h, int kill_text_w,
+		int is_hover, int has_kill,
+		int *out_y, int *out_h,
+		int *out_kx, int *out_ky, int *out_kw, int *out_kh, int *out_hk)
+{
+	struct wlr_scene_tree *row;
+	StatusModule mod = {0};
+
+	row = wlr_scene_tree_create(tree);
+	if (row) {
+		wlr_scene_node_set_position(&row->node, row_x, row_y);
+		mod.tree = row;
+		tray_render_label(&mod, label, 0, row_height, statusbar_fg);
+	}
+
+	*out_y = row_y;
+	*out_h = row_height;
+	if (has_kill && kill_w > 0 && kill_h > 0) {
+		int btn_x = row_x + max_proc_text_w + button_gap;
+		int btn_y = row_y + (row_height - kill_h) / 2;
+		struct wlr_scene_tree *btn;
+		StatusModule btn_mod = {0};
+		const float *btn_color = is_hover ?
+				statusbar_tag_active_bg : statusbar_volume_muted_fg;
+
+		*out_kx = btn_x;
+		*out_ky = btn_y;
+		*out_kw = kill_w;
+		*out_kh = kill_h;
+		*out_hk = 1;
+		drawrect(tree, btn_x, btn_y, kill_w, kill_h, btn_color);
+
+		btn = wlr_scene_tree_create(tree);
+		if (btn) {
+			int text_x = (kill_w - kill_text_w) / 2;
+			if (text_x < 2)
+				text_x = 2;
+			wlr_scene_node_set_position(&btn->node, btn_x, btn_y);
+			btn_mod.tree = btn;
+			tray_render_label(&btn_mod, "Kill", text_x, kill_h, statusbar_fg);
+		}
+	} else {
+		*out_kx = *out_ky = *out_kw = *out_kh = 0;
+		*out_hk = 0;
+	}
+}
+
+static void
+cpu_popup_render_procs(CpuPopup *p, int right_x, int padding,
+		int row_height, int line_spacing, int max_proc_text_w,
+		int button_gap, int kill_w, int kill_h, int kill_text_w,
+		int hover_idx)
+{
+	for (int i = 0; i < p->proc_count; i++) {
+		CpuProcEntry *e = &p->procs[i];
+		int cpu_disp = (int)lround(e->cpu < 0.0 ? 0.0 : e->cpu);
+		int row_y = padding + i * (row_height + line_spacing);
+		char proc_line[128];
+
+		snprintf(proc_line, sizeof(proc_line), "%s %d%%", e->name, cpu_disp);
+		popup_render_proc_row(p->tree, proc_line, right_x, row_y,
+				row_height, max_proc_text_w, button_gap,
+				kill_w, kill_h, kill_text_w, hover_idx == i, e->has_kill,
+				&e->y, &e->height,
+				&e->kill_x, &e->kill_y, &e->kill_w, &e->kill_h, &e->has_kill);
+	}
+}
+
 void
 rendercpupopup(Monitor *m)
 {
@@ -1657,20 +1190,12 @@ rendercpupopup(Monitor *m)
 	int line_count;
 	int left_w = 0, right_w = 0;
 	int left_h = 0, right_h = 0;
-	int content_h;
-	int column_gap;
-	int row_height;
-	int button_gap;
-	int kill_text_w;
-	int kill_w;
-	int kill_h;
+	int column_gap, row_height, button_gap;
+	int kill_text_w, kill_w, kill_h;
 	uint64_t now;
-	int use_right_gap;
 	int hover_idx;
-	int popup_x = m->statusbar.cpu.x;
-	int need_fetch_now;
-	int max_proc_text_w = 0;
-	int any_has_kill = 0;
+	int popup_x;
+	int max_proc_text_w = 0, any_has_kill = 0;
 	char line[64];
 	struct wlr_scene_node *node, *tmp;
 
@@ -1678,6 +1203,7 @@ rendercpupopup(Monitor *m)
 		return;
 
 	p = &m->statusbar.cpu_popup;
+	popup_x = m->statusbar.cpu.x;
 	hover_idx = p->hover_idx;
 	if (hover_idx < -1 || hover_idx >= (int)LENGTH(p->procs))
 		hover_idx = -1;
@@ -1689,8 +1215,6 @@ rendercpupopup(Monitor *m)
 	kill_text_w = status_text_width("Kill");
 	kill_w = kill_text_w + 12;
 	kill_h = row_height;
-	now = monotonic_msec();
-	need_fetch_now = 0;
 	now = monotonic_msec();
 
 	/* Clear previous buffers but keep bg */
@@ -1708,7 +1232,7 @@ rendercpupopup(Monitor *m)
 		return;
 	}
 
-	/* Only fetch data after suppress delay has passed */
+	/* Fetch process data if needed */
 	if (p->suppress_refresh_until_ms == 0 || now >= p->suppress_refresh_until_ms) {
 		if (p->last_fetch_ms == 0 ||
 				now < p->last_fetch_ms ||
@@ -1716,9 +1240,7 @@ rendercpupopup(Monitor *m)
 			p->refresh_data = 1;
 
 		if (p->refresh_data) {
-			if (p->last_fetch_ms == 0 || now - p->last_fetch_ms >= 200)
-				need_fetch_now = 1;
-			if (need_fetch_now) {
+			if (p->last_fetch_ms == 0 || now - p->last_fetch_ms >= 200) {
 				read_top_cpu_processes(p);
 				p->last_fetch_ms = now;
 			}
@@ -1727,63 +1249,46 @@ rendercpupopup(Monitor *m)
 			p->refresh_data = 0;
 		}
 	}
-	line_count = cpu_core_count + 1; /* +1 for avg line */
 
+	/* Measure left column (core percentages) */
+	line_count = cpu_core_count + 1;
 	for (int i = 0; i < line_count; i++) {
 		double perc = (i < cpu_core_count) ? cpu_last_core_percent[i] : cpu_last_percent;
-
-		if (perc < 0.0) {
-			if (i < cpu_core_count)
-				snprintf(line, sizeof(line), "C%d: --%%", i);
-			else
-				snprintf(line, sizeof(line), "Avg: --%%");
-		} else if (i < cpu_core_count) {
-			snprintf(line, sizeof(line), "C%d: %d%%", i, (int)lround(perc));
-		} else {
-			int avg_disp = (perc < 1.0) ? 0 : (int)lround(perc);
-			snprintf(line, sizeof(line), "Avg: %d%%", avg_disp);
-		}
+		cpu_popup_format_line(line, sizeof(line), i, perc);
 		left_w = MAX(left_w, status_text_width(line));
 	}
 	left_h = line_count * row_height + (line_count - 1) * line_spacing;
 
-	/* First pass: find max text width for vertical kill button alignment */
+	/* Measure right column (process list) */
 	for (int i = 0; i < p->proc_count; i++) {
 		CpuProcEntry *e = &p->procs[i];
 		int cpu_disp = (int)lround(e->cpu < 0.0 ? 0.0 : e->cpu);
-		int text_w;
 		char proc_line[128];
-
 		snprintf(proc_line, sizeof(proc_line), "%s %d%%", e->name, cpu_disp);
-		text_w = status_text_width(proc_line);
-		max_proc_text_w = MAX(max_proc_text_w, text_w);
+		max_proc_text_w = MAX(max_proc_text_w, status_text_width(proc_line));
 		if (e->has_kill)
 			any_has_kill = 1;
 	}
-	/* Calculate right_w with aligned kill buttons */
 	if (p->proc_count > 0) {
 		right_w = max_proc_text_w;
 		if (any_has_kill)
 			right_w += button_gap + kill_w;
-	}
-	if (p->proc_count > 0)
 		right_h = p->proc_count * row_height + (p->proc_count - 1) * line_spacing;
+	}
 
-	content_h = MAX(left_h, right_h);
-	use_right_gap = right_w > 0 ? column_gap : 0;
+	/* Layout */
+	int use_right_gap = right_w > 0 ? column_gap : 0;
 	p->width = 2 * padding + left_w + use_right_gap + right_w;
-	p->height = content_h + 2 * padding;
+	p->height = MAX(left_h, right_h) + 2 * padding;
 
 	if (p->width > 0 && m->statusbar.area.width > 0) {
 		int max_x = m->statusbar.area.width - p->width;
-		if (max_x < 0)
-			max_x = 0;
-		if (popup_x > max_x)
-			popup_x = max_x;
-		if (popup_x < 0)
-			popup_x = 0;
+		if (max_x < 0) max_x = 0;
+		if (popup_x > max_x) popup_x = max_x;
+		if (popup_x < 0) popup_x = 0;
 	}
 
+	/* Background */
 	if (!p->bg && !(p->bg = wlr_scene_tree_create(p->tree)))
 		return;
 	wlr_scene_node_set_enabled(&p->bg->node, 1);
@@ -1792,88 +1297,27 @@ rendercpupopup(Monitor *m)
 		wlr_scene_node_destroy(node);
 	drawrect(p->bg, 0, 0, p->width, p->height, statusbar_popup_bg);
 
+	/* Render left column (core percentages) */
 	for (int i = 0; i < line_count; i++) {
 		double perc = (i < cpu_core_count) ? cpu_last_core_percent[i] : cpu_last_percent;
 		int row_y = padding + i * (row_height + line_spacing);
 		struct wlr_scene_tree *row;
 		StatusModule mod = {0};
 
-		if (perc < 0.0) {
-			if (i < cpu_core_count)
-				snprintf(line, sizeof(line), "C%d: --%%", i);
-			else
-				snprintf(line, sizeof(line), "Avg: --%%");
-		} else if (i < cpu_core_count) {
-			snprintf(line, sizeof(line), "C%d: %d%%", i, (int)lround(perc));
-		} else {
-			int avg_disp = (perc < 1.0) ? 0 : (int)lround(perc);
-			snprintf(line, sizeof(line), "Avg: %d%%", avg_disp);
-		}
-
+		cpu_popup_format_line(line, sizeof(line), i, perc);
 		row = wlr_scene_tree_create(p->tree);
-		if (!row)
-			continue;
+		if (!row) continue;
 		wlr_scene_node_set_position(&row->node, padding, row_y);
 		mod.tree = row;
 		tray_render_label(&mod, line, 0, row_height, statusbar_fg);
 	}
 
+	/* Render right column (process list) */
 	if (right_w > 0) {
 		int right_x = padding + left_w + use_right_gap;
-		for (int i = 0; i < p->proc_count; i++) {
-			CpuProcEntry *e = &p->procs[i];
-			int cpu_disp = (int)lround(e->cpu < 0.0 ? 0.0 : e->cpu);
-			int row_y = padding + i * (row_height + line_spacing);
-			int text_w;
-			char proc_line[128];
-			struct wlr_scene_tree *row;
-			StatusModule mod = {0};
-
-			snprintf(proc_line, sizeof(proc_line), "%s %d%%", e->name, cpu_disp);
-			row = wlr_scene_tree_create(p->tree);
-			if (row) {
-				wlr_scene_node_set_position(&row->node, right_x, row_y);
-				mod.tree = row;
-				text_w = tray_render_label(&mod, proc_line, 0, row_height, statusbar_fg);
-				if (text_w <= 0)
-					text_w = status_text_width(proc_line);
-			} else {
-				text_w = status_text_width(proc_line);
-			}
-
-			e->y = row_y;
-			e->height = row_height;
-		if (e->has_kill && kill_w > 0 && kill_h > 0) {
-			int btn_x = right_x + max_proc_text_w + button_gap;
-			int btn_y = row_y + (row_height - kill_h) / 2;
-			struct wlr_scene_tree *btn;
-			StatusModule btn_mod = {0};
-			const float *btn_color = statusbar_volume_muted_fg;
-			int is_hover = (hover_idx == i);
-
-			if (is_hover)
-				btn_color = statusbar_tag_active_bg;
-
-			e->kill_x = btn_x;
-				e->kill_y = btn_y;
-				e->kill_w = kill_w;
-				e->kill_h = kill_h;
-				drawrect(p->tree, btn_x, btn_y, kill_w, kill_h, btn_color);
-
-				btn = wlr_scene_tree_create(p->tree);
-				if (btn) {
-					int text_x = (kill_w - kill_text_w) / 2;
-					if (text_x < 2)
-						text_x = 2;
-					wlr_scene_node_set_position(&btn->node, btn_x, btn_y);
-					btn_mod.tree = btn;
-					tray_render_label(&btn_mod, "Kill", text_x, kill_h, statusbar_fg);
-				}
-			} else {
-				e->kill_x = e->kill_y = e->kill_w = e->kill_h = 0;
-				e->has_kill = 0;
-			}
-		}
+		cpu_popup_render_procs(p, right_x, padding, row_height, line_spacing,
+				max_proc_text_w, button_gap, kill_w, kill_h, kill_text_w,
+				hover_idx);
 	}
 
 	if (p->width <= 0 || p->height <= 0)
@@ -2241,51 +1685,14 @@ renderrampopup(Monitor *m)
 		int row_y = padding + i * (row_height + line_spacing);
 		char proc_line[128];
 		char mem_str[16];
-		struct wlr_scene_tree *row;
-		StatusModule mod = {0};
 
 		format_mem_size(e->mem_kb, mem_str, sizeof(mem_str));
 		snprintf(proc_line, sizeof(proc_line), "%s %s", e->name, mem_str);
-		row = wlr_scene_tree_create(p->tree);
-		if (row) {
-			wlr_scene_node_set_position(&row->node, padding, row_y);
-			mod.tree = row;
-			tray_render_label(&mod, proc_line, 0, row_height, statusbar_fg);
-		}
-
-		e->y = row_y;
-		e->height = row_height;
-
-		if (e->has_kill && kill_w > 0 && kill_h > 0) {
-			int btn_x = padding + max_proc_text_w + button_gap;
-			int btn_y = row_y + (row_height - kill_h) / 2;
-			struct wlr_scene_tree *btn;
-			StatusModule btn_mod = {0};
-			const float *btn_color = statusbar_volume_muted_fg;
-			int is_hover = (hover_idx == i);
-
-			if (is_hover)
-				btn_color = statusbar_tag_active_bg;
-
-			e->kill_x = btn_x;
-			e->kill_y = btn_y;
-			e->kill_w = kill_w;
-			e->kill_h = kill_h;
-			drawrect(p->tree, btn_x, btn_y, kill_w, kill_h, btn_color);
-
-			btn = wlr_scene_tree_create(p->tree);
-			if (btn) {
-				int text_x = (kill_w - kill_text_w) / 2;
-				if (text_x < 2)
-					text_x = 2;
-				wlr_scene_node_set_position(&btn->node, btn_x, btn_y);
-				btn_mod.tree = btn;
-				tray_render_label(&btn_mod, "Kill", text_x, kill_h, statusbar_fg);
-			}
-		} else {
-			e->kill_x = e->kill_y = e->kill_w = e->kill_h = 0;
-			e->has_kill = 0;
-		}
+		popup_render_proc_row(p->tree, proc_line, padding, row_y,
+				row_height, max_proc_text_w, button_gap,
+				kill_w, kill_h, kill_text_w, hover_idx == i, e->has_kill,
+				&e->y, &e->height,
+				&e->kill_x, &e->kill_y, &e->kill_w, &e->kill_h, &e->has_kill);
 	}
 
 	if (p->width <= 0 || p->height <= 0)
@@ -4170,72 +3577,61 @@ toggle_pipewire_mic_mute(void)
 void
 positionstatusmodules(Monitor *m)
 {
+	static const size_t all_module_offsets[] = {
+		offsetof(StatusBar, tags),
+		offsetof(StatusBar, traylabel),
+		offsetof(StatusBar, sysicons),
+		offsetof(StatusBar, bluetooth),
+		offsetof(StatusBar, steam),
+		offsetof(StatusBar, discord),
+		offsetof(StatusBar, cpu),
+		offsetof(StatusBar, net),
+		offsetof(StatusBar, battery),
+		offsetof(StatusBar, light),
+		offsetof(StatusBar, mic),
+		offsetof(StatusBar, volume),
+		offsetof(StatusBar, ram),
+		offsetof(StatusBar, clock),
+	};
+	/* Left-to-right modules: offset, spacing_after (-1 = use default) */
+	static const struct { size_t off; int gap; } ltr_layout[] = {
+		{ offsetof(StatusBar, tags),      -1 },
+		{ offsetof(StatusBar, sysicons),   2 },  /* grouped icons */
+		{ offsetof(StatusBar, bluetooth),  2 },
+		{ offsetof(StatusBar, steam),      2 },
+		{ offsetof(StatusBar, discord),   -1 },
+		{ offsetof(StatusBar, net),       -1 },
+		{ offsetof(StatusBar, traylabel), -1 },
+	};
+	/* Right-to-left modules (all use default spacing) */
+	static const size_t rtl_offsets[] = {
+		offsetof(StatusBar, clock),
+		offsetof(StatusBar, ram),
+		offsetof(StatusBar, cpu),
+		offsetof(StatusBar, mic),
+		offsetof(StatusBar, volume),
+		offsetof(StatusBar, light),
+		offsetof(StatusBar, battery),
+	};
 	int x, spacing;
+	unsigned int i;
+	StatusModule *mod;
 
 	if (!m || !m->statusbar.tree)
 		return;
 
 	if (!m->showbar || !m->statusbar.area.width || !m->statusbar.area.height) {
 		wlr_scene_node_set_enabled(&m->statusbar.tree->node, 0);
-		if (m->statusbar.tags.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.tags.tree->node, 0);
-			m->statusbar.tags.x = 0;
-		}
-		if (m->statusbar.traylabel.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.traylabel.tree->node, 0);
-			m->statusbar.traylabel.x = 0;
-		}
-		if (m->statusbar.sysicons.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.sysicons.tree->node, 0);
-			m->statusbar.sysicons.x = 0;
-		}
-		if (m->statusbar.bluetooth.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.bluetooth.tree->node, 0);
-			m->statusbar.bluetooth.x = 0;
-		}
-		if (m->statusbar.steam.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.steam.tree->node, 0);
-			m->statusbar.steam.x = 0;
-		}
-		if (m->statusbar.discord.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.discord.tree->node, 0);
-			m->statusbar.discord.x = 0;
+		for (i = 0; i < LENGTH(all_module_offsets); i++) {
+			mod = (StatusModule *)((char *)&m->statusbar + all_module_offsets[i]);
+			if (mod->tree) {
+				wlr_scene_node_set_enabled(&mod->tree->node, 0);
+				mod->x = 0;
+			}
 		}
 		if (m->statusbar.tray_menu.tree) {
 			wlr_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 0);
 			m->statusbar.tray_menu.visible = 0;
-		}
-		if (m->statusbar.cpu.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.cpu.tree->node, 0);
-			m->statusbar.cpu.x = 0;
-		}
-		if (m->statusbar.net.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.net.tree->node, 0);
-			m->statusbar.net.x = 0;
-		}
-		if (m->statusbar.battery.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.battery.tree->node, 0);
-			m->statusbar.battery.x = 0;
-		}
-			if (m->statusbar.light.tree) {
-				wlr_scene_node_set_enabled(&m->statusbar.light.tree->node, 0);
-				m->statusbar.light.x = 0;
-			}
-			if (m->statusbar.mic.tree) {
-				wlr_scene_node_set_enabled(&m->statusbar.mic.tree->node, 0);
-				m->statusbar.mic.x = 0;
-			}
-			if (m->statusbar.volume.tree) {
-				wlr_scene_node_set_enabled(&m->statusbar.volume.tree->node, 0);
-				m->statusbar.volume.x = 0;
-			}
-		if (m->statusbar.ram.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.ram.tree->node, 0);
-			m->statusbar.ram.x = 0;
-		}
-		if (m->statusbar.clock.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.clock.tree->node, 0);
-			m->statusbar.clock.x = 0;
 		}
 		if (m->statusbar.cpu_popup.tree) {
 			wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
@@ -4249,137 +3645,40 @@ positionstatusmodules(Monitor *m)
 	}
 
 	wlr_scene_node_set_enabled(&m->statusbar.tree->node, 1);
-	if (m->statusbar.tags.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.tags.tree->node,
-				m->statusbar.tags.width > 0);
-	if (m->statusbar.traylabel.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.traylabel.tree->node,
-				m->statusbar.traylabel.width > 0);
-	if (m->statusbar.sysicons.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.sysicons.tree->node,
-				m->statusbar.sysicons.width > 0);
-	if (m->statusbar.bluetooth.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.bluetooth.tree->node,
-				m->statusbar.bluetooth.width > 0);
-	if (m->statusbar.steam.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.steam.tree->node,
-				m->statusbar.steam.width > 0);
-	if (m->statusbar.discord.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.discord.tree->node,
-				m->statusbar.discord.width > 0);
-	if (m->statusbar.cpu.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.cpu.tree->node,
-				m->statusbar.cpu.width > 0);
-	if (m->statusbar.net.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.net.tree->node,
-				m->statusbar.net.width > 0);
-	if (m->statusbar.battery.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.battery.tree->node,
-				m->statusbar.battery.width > 0);
-	if (m->statusbar.light.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.light.tree->node,
-				m->statusbar.light.width > 0);
-	if (m->statusbar.mic.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.mic.tree->node,
-				m->statusbar.mic.width > 0);
-	if (m->statusbar.volume.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.volume.tree->node,
-				m->statusbar.volume.width > 0);
-	if (m->statusbar.ram.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.ram.tree->node,
-				m->statusbar.ram.width > 0);
-	if (m->statusbar.clock.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.clock.tree->node,
-				m->statusbar.clock.width > 0);
+	for (i = 0; i < LENGTH(all_module_offsets); i++) {
+		mod = (StatusModule *)((char *)&m->statusbar + all_module_offsets[i]);
+		if (mod->tree)
+			wlr_scene_node_set_enabled(&mod->tree->node, mod->width > 0);
+	}
 	if (m->statusbar.cpu_popup.tree && m->statusbar.cpu.width > 0) {
 		if (!m->statusbar.cpu_popup.visible)
 			wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
 	}
+
+	/* Position left-to-right modules */
 	x = 0;
 	spacing = statusbar_module_spacing;
-
-	if (m->statusbar.tags.width > 0) {
-		wlr_scene_node_set_position(&m->statusbar.tags.tree->node, x, 0);
-		m->statusbar.tags.x = x;
-		x += m->statusbar.tags.width + spacing;
-	}
-	/* Group connection-related icons together with minimal spacing */
-	if (m->statusbar.sysicons.width > 0) {
-		wlr_scene_node_set_position(&m->statusbar.sysicons.tree->node, x, 0);
-		m->statusbar.sysicons.x = x;
-		x += m->statusbar.sysicons.width + 2;
-	}
-	if (m->statusbar.bluetooth.width > 0) {
-		wlr_scene_node_set_position(&m->statusbar.bluetooth.tree->node, x, 0);
-		m->statusbar.bluetooth.x = x;
-		x += m->statusbar.bluetooth.width + 2;
-	}
-	if (m->statusbar.steam.width > 0) {
-		wlr_scene_node_set_position(&m->statusbar.steam.tree->node, x, 0);
-		m->statusbar.steam.x = x;
-		x += m->statusbar.steam.width + 2;
-	}
-	if (m->statusbar.discord.width > 0) {
-		wlr_scene_node_set_position(&m->statusbar.discord.tree->node, x, 0);
-		m->statusbar.discord.x = x;
-		x += m->statusbar.discord.width + spacing;
-	}
-	if (m->statusbar.net.width > 0) {
-		wlr_scene_node_set_position(&m->statusbar.net.tree->node, x, 0);
-		m->statusbar.net.x = x;
-		x += m->statusbar.net.width + spacing;
-	}
-	if (m->statusbar.traylabel.width > 0) {
-		wlr_scene_node_set_position(&m->statusbar.traylabel.tree->node, x, 0);
-		m->statusbar.traylabel.x = x;
-		x += m->statusbar.traylabel.width + spacing;
+	for (i = 0; i < LENGTH(ltr_layout); i++) {
+		mod = (StatusModule *)((char *)&m->statusbar + ltr_layout[i].off);
+		if (mod->width > 0) {
+			wlr_scene_node_set_position(&mod->tree->node, x, 0);
+			mod->x = x;
+			x += mod->width + (ltr_layout[i].gap >= 0 ? ltr_layout[i].gap : spacing);
+		}
 	}
 
+	/* Position right-to-left modules */
 	x = m->statusbar.area.width;
-	spacing = statusbar_module_spacing;
+	for (i = 0; i < LENGTH(rtl_offsets); i++) {
+		mod = (StatusModule *)((char *)&m->statusbar + rtl_offsets[i]);
+		if (mod->width > 0) {
+			x -= mod->width;
+			wlr_scene_node_set_position(&mod->tree->node, x, 0);
+			mod->x = x;
+			x -= spacing;
+		}
+	}
 
-	if (m->statusbar.clock.width > 0) {
-		x -= m->statusbar.clock.width;
-		wlr_scene_node_set_position(&m->statusbar.clock.tree->node, x, 0);
-		m->statusbar.clock.x = x;
-		x -= spacing;
-	}
-	if (m->statusbar.ram.width > 0) {
-		x -= m->statusbar.ram.width;
-		wlr_scene_node_set_position(&m->statusbar.ram.tree->node, x, 0);
-		m->statusbar.ram.x = x;
-		x -= spacing;
-	}
-	if (m->statusbar.cpu.width > 0) {
-		x -= m->statusbar.cpu.width;
-		wlr_scene_node_set_position(&m->statusbar.cpu.tree->node, x, 0);
-		m->statusbar.cpu.x = x;
-		x -= spacing;
-	}
-	if (m->statusbar.mic.width > 0) {
-		x -= m->statusbar.mic.width;
-		wlr_scene_node_set_position(&m->statusbar.mic.tree->node, x, 0);
-		m->statusbar.mic.x = x;
-		x -= spacing;
-	}
-	if (m->statusbar.volume.width > 0) {
-		x -= m->statusbar.volume.width;
-		wlr_scene_node_set_position(&m->statusbar.volume.tree->node, x, 0);
-		m->statusbar.volume.x = x;
-		x -= spacing;
-	}
-	if (m->statusbar.light.width > 0) {
-		x -= m->statusbar.light.width;
-		wlr_scene_node_set_position(&m->statusbar.light.tree->node, x, 0);
-		m->statusbar.light.x = x;
-		x -= spacing;
-	}
-	if (m->statusbar.battery.width > 0) {
-		x -= m->statusbar.battery.width;
-		wlr_scene_node_set_position(&m->statusbar.battery.tree->node, x, 0);
-		m->statusbar.battery.x = x;
-		x -= spacing;
-	}
 	if (m->statusbar.cpu_popup.tree) {
 		if (m->statusbar.cpu.width > 0 && m->statusbar.area.height > 0) {
 			int popup_x = m->statusbar.cpu.x;

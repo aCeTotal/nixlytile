@@ -209,6 +209,8 @@ typedef struct VideoPlayerAudio {
     volatile int stream_interrupted; /* Set when stream is interrupted (controller reconnect, etc.) */
     volatile int audio_recreating;   /* Set while background thread is recreating audio stream */
     volatile int needs_timing_reset; /* Set by audio thread to tell render thread to reset frame timing */
+    volatile int user_paused;        /* Set when user explicitly pauses (vs device interruption) */
+    volatile int needs_device_pause; /* Set when device change should pause playback */
     int write_stall_count;           /* Consecutive buffer-full writes (stall detection for decode thread) */
     int reactivate_attempts;         /* Attempts to reactivate stream before RECREATE */
 

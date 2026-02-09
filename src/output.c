@@ -448,6 +448,221 @@ powermgrsetmode(struct wl_listener *listener, void *data)
 	updatemons(NULL, NULL);
 }
 
+static void
+present_videoplayer_frame(Monitor *m, uint64_t frame_start_ns)
+{
+	if (active_videoplayer && active_videoplayer->state == VP_STATE_PLAYING) {
+		videoplayer_present_frame(active_videoplayer, frame_start_ns);
+		wlr_output_schedule_frame(m->wlr_output);
+	}
+}
+
+static void
+classify_fullscreen_content(Monitor *m, int *out_game, int *out_video, int *out_tearing)
+{
+	Client *c = focustop(m);
+
+	*out_game = 0;
+	*out_video = 0;
+	*out_tearing = 0;
+
+	if (c && c->isfullscreen) {
+		*out_game = client_wants_tearing(c) || is_game_content(c);
+		*out_video = is_video_content(c) || c->detected_video_hz > 0.0f;
+		if (*out_game && !*out_video)
+			*out_tearing = 1;
+	}
+}
+
+static void
+track_game_frame_pacing(Monitor *m, uint64_t frame_start_ns)
+{
+	/* Track game's frame submission interval */
+	if (m->game_frame_submit_ns > 0 && frame_start_ns > m->game_frame_submit_ns) {
+		uint64_t game_interval = frame_start_ns - m->game_frame_submit_ns;
+
+		/* Only track reasonable intervals (8ms - 100ms = ~10-120fps) */
+		if (game_interval > 8000000 && game_interval < 100000000) {
+			m->game_frame_intervals[m->game_frame_interval_idx] = game_interval;
+			m->game_frame_interval_idx = (m->game_frame_interval_idx + 1) % 8;
+			if (m->game_frame_interval_count < 8)
+				m->game_frame_interval_count++;
+
+			/* Calculate estimated game FPS from rolling average */
+			if (m->game_frame_interval_count >= 4) {
+				uint64_t avg_interval = 0;
+				uint64_t variance_sum = 0;
+				for (int i = 0; i < m->game_frame_interval_count; i++)
+					avg_interval += m->game_frame_intervals[i];
+				avg_interval /= m->game_frame_interval_count;
+				m->estimated_game_fps = 1000000000.0f / (float)avg_interval;
+
+				for (int i = 0; i < m->game_frame_interval_count; i++) {
+					int64_t diff = (int64_t)m->game_frame_intervals[i] - (int64_t)avg_interval;
+					variance_sum += (uint64_t)(diff * diff);
+				}
+				m->frame_variance_ns = variance_sum / m->game_frame_interval_count;
+
+				/* Predictive frame timing */
+				m->predicted_next_frame_ns = frame_start_ns + avg_interval;
+
+				/* Add margin based on variance */
+				if (m->frame_variance_ns > 0) {
+					uint64_t margin = 0;
+					uint64_t v = m->frame_variance_ns;
+					while (v > margin * margin)
+						margin += 100000; /* 0.1ms steps */
+					m->predicted_next_frame_ns += margin;
+				}
+
+				/* Track prediction accuracy */
+				if (m->predicted_next_frame_ns > 0) {
+					int64_t prediction_error = (int64_t)frame_start_ns - (int64_t)(m->predicted_next_frame_ns - avg_interval);
+					if (prediction_error < 0) prediction_error = -prediction_error;
+
+					if (prediction_error < 2000000) {
+						m->prediction_accuracy = m->prediction_accuracy * 0.9f + 10.0f;
+					} else if (prediction_error < (int64_t)avg_interval / 4) {
+						m->prediction_accuracy = m->prediction_accuracy * 0.9f + 5.0f;
+						if (frame_start_ns < m->predicted_next_frame_ns - avg_interval)
+							m->frames_early++;
+						else
+							m->frames_late++;
+					} else {
+						m->prediction_accuracy = m->prediction_accuracy * 0.9f;
+						m->frames_late++;
+					}
+					if (m->prediction_accuracy > 100.0f) m->prediction_accuracy = 100.0f;
+				}
+
+				/* Update dynamic game VRR */
+				if (m->game_vrr_active)
+					update_game_vrr(m, m->estimated_game_fps);
+			}
+		}
+	}
+	m->game_frame_submit_ns = frame_start_ns;
+	m->pending_game_frame = 1;
+
+	/* Frame hold/release decision */
+	if (m->present_interval_ns > 0 && m->target_present_ns > 0) {
+		uint64_t time_to_target = 0;
+		if (frame_start_ns < m->target_present_ns)
+			time_to_target = m->target_present_ns - frame_start_ns;
+
+		if (time_to_target > 2000000)
+			m->frames_held++;
+	}
+}
+
+static void
+calculate_frame_repeat(Monitor *m, int is_game, int allow_tearing)
+{
+	float display_hz = 0.0f;
+	float game_fps = m->estimated_game_fps;
+	int optimal_repeat = 1;
+
+	if (m->present_interval_ns > 0)
+		display_hz = 1000000000.0f / (float)m->present_interval_ns;
+	else if (m->wlr_output->current_mode)
+		display_hz = (float)m->wlr_output->current_mode->refresh / 1000.0f;
+
+	if (game_fps > 5.0f && display_hz > 30.0f) {
+		float ratio = display_hz / game_fps;
+		float min_error = 9999.0f;
+
+		for (int n = 1; n <= 6; n++) {
+			float effective_fps = display_hz / (float)n;
+			float error = fabsf(effective_fps - game_fps);
+			float frac_error = fabsf(ratio - (float)n);
+
+			if (frac_error < 0.15f && error < min_error) {
+				min_error = error;
+				optimal_repeat = n;
+			}
+		}
+
+		/* Only enable repeat if within 10% match */
+		if (optimal_repeat > 1) {
+			float target_fps = display_hz / (float)optimal_repeat;
+			float match_quality = fabsf(game_fps - target_fps) / target_fps;
+			if (match_quality > 0.10f)
+				optimal_repeat = 1;
+		}
+	}
+
+	/* Update frame repeat state */
+	if (optimal_repeat != m->frame_repeat_count) {
+		if (optimal_repeat > 1 && !m->frame_repeat_enabled) {
+			m->frame_repeat_enabled = 1;
+			m->frame_repeat_interval_ns = m->present_interval_ns;
+			wlr_log(WLR_INFO, "Frame repeat enabled: %dx (%.1f FPS → %.1f Hz display)",
+				optimal_repeat, game_fps, display_hz);
+		} else if (optimal_repeat == 1 && m->frame_repeat_enabled) {
+			m->frame_repeat_enabled = 0;
+			wlr_log(WLR_INFO, "Frame repeat disabled - game FPS matches display");
+		}
+		m->frame_repeat_count = optimal_repeat;
+		m->frame_repeat_current = 0;
+	}
+
+	/* Calculate judder score (0-100, lower is better) */
+	if (game_fps > 0.0f && display_hz > 0.0f) {
+		float ideal_interval_ms = 1000.0f / game_fps;
+		float actual_interval_ms = 1000.0f / display_hz * (float)optimal_repeat;
+		float deviation_pct = fabsf(ideal_interval_ms - actual_interval_ms) / ideal_interval_ms * 100.0f;
+		m->judder_score = (int)(deviation_pct * 10.0f);
+		if (m->judder_score > 100) m->judder_score = 100;
+	}
+
+	m->adaptive_pacing_enabled = 1;
+	m->target_frame_time_ms = 1000.0f / game_fps;
+}
+
+static void
+commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearing,
+	int use_frame_pacing, uint64_t frame_start_ns)
+{
+	uint64_t commit_end_ns;
+
+	m->frames_since_content_change = 0;
+
+	if (allow_tearing && wlr_output_is_drm(m->wlr_output))
+		state->tearing_page_flip = true;
+
+	if (!wlr_output_commit_state(m->wlr_output, state)) {
+		if (allow_tearing) {
+			state->tearing_page_flip = false;
+			wlr_output_commit_state(m->wlr_output, state);
+		}
+	}
+
+	commit_end_ns = get_time_ns();
+	m->last_commit_duration_ns = commit_end_ns - frame_start_ns;
+
+	/* Input latency tracking */
+	if (game_mode_ultra && m->last_input_ns > 0) {
+		uint64_t input_latency = commit_end_ns - m->last_input_ns;
+		if (input_latency < 500000000ULL) {
+			m->input_to_frame_ns = input_latency;
+			if (m->min_input_latency_ns == 0 || input_latency < m->min_input_latency_ns)
+				m->min_input_latency_ns = input_latency;
+			if (input_latency > m->max_input_latency_ns)
+				m->max_input_latency_ns = input_latency;
+		}
+	}
+
+	/* Rolling average of commit time */
+	if (m->rolling_commit_time_ns == 0) {
+		m->rolling_commit_time_ns = m->last_commit_duration_ns;
+	} else {
+		m->rolling_commit_time_ns =
+			(m->rolling_commit_time_ns * 98 + m->last_commit_duration_ns * 2) / 100;
+		if (m->last_commit_duration_ns > m->rolling_commit_time_ns)
+			m->rolling_commit_time_ns = m->last_commit_duration_ns;
+	}
+}
+
 void
 rendermon(struct wl_listener *listener, void *data)
 {
@@ -455,9 +670,8 @@ rendermon(struct wl_listener *listener, void *data)
 	struct wlr_scene_output_state_options opts = {0};
 	struct wlr_output_state state;
 	struct timespec now;
-	uint64_t frame_start_ns, commit_end_ns;
+	uint64_t frame_start_ns;
 	int needs_frame = 0;
-	Client *fullscreen_client = NULL;
 	int allow_tearing = 0;
 	int is_video = 0;
 	int is_game = 0;
@@ -466,41 +680,9 @@ rendermon(struct wl_listener *listener, void *data)
 
 	frame_start_ns = get_time_ns();
 
-	/* Update integrated video player frame if playing
-	 * Use last vsync time if available for precise frame pacing,
-	 * otherwise fall back to current time */
-	if (active_videoplayer && active_videoplayer->state == VP_STATE_PLAYING) {
-		/* Use current wall-clock time, not last_present_ns.
-		 * last_present_ns only updates on page flips.  When the video player
-		 * skips a vsync (e.g. 24fps on 60Hz), no commit/flip occurs, so
-		 * last_present_ns stays stale.  Using it would freeze the frame-pacing
-		 * logic and require unrelated damage (mouse move) to unstick it.
-		 * frame_start_ns is captured at the top of rendermon via
-		 * get_time_ns() and advances on every call — including vblank-
-		 * scheduled ones — so frame pacing never stalls. */
-		uint64_t vsync_time = frame_start_ns;
-		videoplayer_present_frame(active_videoplayer, vsync_time);
-		/* Keep the rendering loop alive: the video player needs continuous
-		 * vsyncs even when no new video frame is presented this cycle
-		 * (e.g., 24fps content on a 60Hz display skips most vsyncs).
-		 * Without this, the output stops scheduling frame events once
-		 * there is no scene damage, causing the video to freeze. */
-		wlr_output_schedule_frame(m->wlr_output);
-	}
+	present_videoplayer_frame(m, frame_start_ns);
 
-	/*
-	 * Check for fullscreen client and determine content type for optimal handling.
-	 */
-	fullscreen_client = focustop(m);
-	if (fullscreen_client && fullscreen_client->isfullscreen) {
-		is_game = client_wants_tearing(fullscreen_client) || is_game_content(fullscreen_client);
-		is_video = is_video_content(fullscreen_client) || fullscreen_client->detected_video_hz > 0.0f;
-
-		/* Games get tearing for lowest latency, unless it's video content */
-		if (is_game && !is_video) {
-			allow_tearing = 1;
-		}
-	}
+	classify_fullscreen_content(m, &is_game, &is_video, &allow_tearing);
 
 	/*
 	 * Build output state. This determines if we actually need to render.
@@ -544,360 +726,28 @@ rendermon(struct wl_listener *listener, void *data)
 			m->wlr_output->name, m->frames_presented, m->frames_dropped, m->frames_held);
 	}
 
-	/*
-	 * Frame pacing logic for games in direct scanout mode.
-	 *
-	 * When we have direct scanout with a game, we can optimize frame timing:
-	 * 1. Track the game's frame submission rate
-	 * 2. Hold frames that arrive too early (would cause judder)
-	 * 3. Release frames at optimal vblank timing
-	 *
-	 * This is similar to Gamescope's frame pacing but integrated into
-	 * the compositor for seamless operation.
-	 */
+	/* Frame pacing for games in direct scanout mode */
 	if (is_direct_scanout && is_game && !allow_tearing && m->frame_pacing_active) {
 		use_frame_pacing = 1;
-
-		/* Track game's frame submission interval */
-		if (m->game_frame_submit_ns > 0 && frame_start_ns > m->game_frame_submit_ns) {
-			uint64_t game_interval = frame_start_ns - m->game_frame_submit_ns;
-
-			/* Only track reasonable intervals (8ms - 100ms = ~10-120fps) */
-			if (game_interval > 8000000 && game_interval < 100000000) {
-				m->game_frame_intervals[m->game_frame_interval_idx] = game_interval;
-				m->game_frame_interval_idx = (m->game_frame_interval_idx + 1) % 8;
-				if (m->game_frame_interval_count < 8)
-					m->game_frame_interval_count++;
-
-				/* Calculate estimated game FPS from rolling average */
-				if (m->game_frame_interval_count >= 4) {
-					uint64_t avg_interval = 0;
-					uint64_t variance_sum = 0;
-					for (int i = 0; i < m->game_frame_interval_count; i++)
-						avg_interval += m->game_frame_intervals[i];
-					avg_interval /= m->game_frame_interval_count;
-					m->estimated_game_fps = 1000000000.0f / (float)avg_interval;
-
-					/*
-					 * Calculate frame time variance (jitter).
-					 * Low variance = consistent frame times = smooth gameplay.
-					 * High variance = inconsistent = potential stutter.
-					 */
-					for (int i = 0; i < m->game_frame_interval_count; i++) {
-						int64_t diff = (int64_t)m->game_frame_intervals[i] - (int64_t)avg_interval;
-						variance_sum += (uint64_t)(diff * diff);
-					}
-					m->frame_variance_ns = variance_sum / m->game_frame_interval_count;
-
-					/*
-					 * PREDICTIVE FRAME TIMING
-					 *
-					 * Predict when the next frame will arrive based on:
-					 * 1. Average frame interval
-					 * 2. Recent trend (acceleration/deceleration)
-					 * 3. Variance (add margin for high-jitter games)
-					 *
-					 * This allows the compositor to prepare for the frame
-					 * and commit at optimal vblank timing.
-					 */
-					m->predicted_next_frame_ns = frame_start_ns + avg_interval;
-
-					/* Add margin based on variance (higher jitter = more margin) */
-					if (m->frame_variance_ns > 0) {
-						/* sqrt approximation for margin: variance^0.5 */
-						uint64_t margin = 0;
-						uint64_t v = m->frame_variance_ns;
-						while (v > margin * margin)
-							margin += 100000; /* 0.1ms steps */
-						m->predicted_next_frame_ns += margin;
-					}
-
-					/* Track prediction accuracy */
-					if (m->predicted_next_frame_ns > 0) {
-						int64_t prediction_error = (int64_t)frame_start_ns - (int64_t)(m->predicted_next_frame_ns - avg_interval);
-						if (prediction_error < 0) prediction_error = -prediction_error;
-
-						/* Frame is "on time" if within 2ms of prediction */
-						if (prediction_error < 2000000) {
-							/* Good prediction */
-							m->prediction_accuracy = m->prediction_accuracy * 0.9f + 10.0f;
-						} else if (prediction_error < (int64_t)avg_interval / 4) {
-							/* Acceptable prediction */
-							m->prediction_accuracy = m->prediction_accuracy * 0.9f + 5.0f;
-							if (frame_start_ns < m->predicted_next_frame_ns - avg_interval)
-								m->frames_early++;
-							else
-								m->frames_late++;
-						} else {
-							/* Poor prediction */
-							m->prediction_accuracy = m->prediction_accuracy * 0.9f;
-							m->frames_late++;
-						}
-						if (m->prediction_accuracy > 100.0f) m->prediction_accuracy = 100.0f;
-					}
-
-					/*
-					 * Update dynamic game VRR.
-					 * This adjusts the display to match the game's framerate,
-					 * eliminating judder when games run below native refresh.
-					 */
-					if (m->game_vrr_active) {
-						update_game_vrr(m, m->estimated_game_fps);
-					}
-				}
-			}
-		}
-		m->game_frame_submit_ns = frame_start_ns;
-		m->pending_game_frame = 1;
-
-		/*
-		 * Frame hold/release decision:
-		 *
-		 * If the game is running slower than display refresh, present immediately.
-		 * If the game is running faster, we may want to hold frames to prevent
-		 * judder from uneven frame presentation.
-		 *
-		 * Key insight: With direct scanout, the display directly shows the
-		 * game's buffer. We control WHEN it flips via the commit timing.
-		 */
-		if (m->present_interval_ns > 0 && m->target_present_ns > 0) {
-			uint64_t time_to_target = 0;
-			if (frame_start_ns < m->target_present_ns)
-				time_to_target = m->target_present_ns - frame_start_ns;
-
-			/*
-			 * If we're more than 2ms early, the frame arrived too soon.
-			 * In a perfect world we'd hold it, but that requires async
-			 * frame scheduling which is complex. For now, just track it.
-			 */
-			if (time_to_target > 2000000) {
-				m->frames_held++;
-				/*
-				 * Note: True frame holding would require:
-				 * 1. Storing the buffer
-				 * 2. Setting up a timer for optimal commit time
-				 * 3. Committing at the right moment
-				 *
-				 * wlroots doesn't easily support this, so we commit
-				 * immediately but track that we could have held it.
-				 */
-			}
-		}
+		track_game_frame_pacing(m, frame_start_ns);
 	}
 
-	/*
-	 * ============ FRAME DOUBLING/TRIPLING FOR SMOOTH LOW-FPS PLAYBACK ============
-	 *
-	 * When a game runs at a framerate that doesn't divide evenly into the
-	 * display refresh rate, you get "judder" - uneven frame presentation times.
-	 *
-	 * Example: 30 FPS game on 60 Hz display
-	 *   Without frame doubling: frame times are 16.6ms, 16.6ms (uneven feel)
-	 *   With frame doubling: each game frame shown 2x = perfect 33.3ms cadence
-	 *
-	 * Example: 24 FPS video on 120 Hz display
-	 *   Without: judder from 5:5:5:5:5 pattern not matching 24fps
-	 *   With frame 5x repeat: each frame shown 5 times = perfect 41.6ms cadence
-	 *
-	 * This technique is used by:
-	 * - Gamescope (Steam Deck compositor)
-	 * - High-end TVs (motion interpolation alternative)
-	 * - Professional video players
-	 *
-	 * We ONLY use this when VRR is NOT available or disabled, as VRR solves
-	 * this problem by adjusting the display refresh to match content.
-	 */
+	/* Frame doubling/tripling for smooth low-FPS playback (non-VRR) */
 	if (is_game && m->frame_pacing_active && !m->game_vrr_active && !allow_tearing) {
-		float display_hz = 0.0f;
-		float game_fps = m->estimated_game_fps;
-		int optimal_repeat = 1;
-
-		/* Get current display refresh rate */
-		if (m->present_interval_ns > 0) {
-			display_hz = 1000000000.0f / (float)m->present_interval_ns;
-		} else if (m->wlr_output->current_mode) {
-			display_hz = (float)m->wlr_output->current_mode->refresh / 1000.0f;
-		}
-
-		/*
-		 * Calculate optimal frame repeat count.
-		 * We want to find integer N where: display_hz / N ≈ game_fps
-		 *
-		 * This gives perfectly even frame timing without interpolation.
-		 */
-		if (game_fps > 5.0f && display_hz > 30.0f) {
-			float ratio = display_hz / game_fps;
-
-			/*
-			 * Find the best integer repeat count (1-6x).
-			 * We check which integer gives the smallest error.
-			 */
-			float min_error = 9999.0f;
-			for (int n = 1; n <= 6; n++) {
-				float effective_fps = display_hz / (float)n;
-				float error = fabsf(effective_fps - game_fps);
-				/* Also check if game fps is close to a fraction */
-				float frac_error = fabsf(ratio - (float)n);
-
-				if (frac_error < 0.15f && error < min_error) {
-					min_error = error;
-					optimal_repeat = n;
-				}
-			}
-
-			/*
-			 * Common patterns we optimize for:
-			 *
-			 * 60Hz display:
-			 *   30 FPS → 2x repeat (60/2=30) ✓
-			 *   20 FPS → 3x repeat (60/3=20) ✓
-			 *   15 FPS → 4x repeat (60/4=15) ✓
-			 *
-			 * 120Hz display:
-			 *   60 FPS → 2x repeat (120/2=60) ✓
-			 *   40 FPS → 3x repeat (120/3=40) ✓
-			 *   30 FPS → 4x repeat (120/4=30) ✓
-			 *   24 FPS → 5x repeat (120/5=24) ✓ (perfect for film content)
-			 *
-			 * 144Hz display:
-			 *   72 FPS → 2x repeat (144/2=72) ✓
-			 *   48 FPS → 3x repeat (144/3=48) ✓
-			 *   36 FPS → 4x repeat (144/4=36) ✓
-			 */
-
-			/* Only enable repeat if we have a good match (within 10%) */
-			if (optimal_repeat > 1) {
-				float target_fps = display_hz / (float)optimal_repeat;
-				float match_quality = fabsf(game_fps - target_fps) / target_fps;
-
-				if (match_quality > 0.10f) {
-					/* Not a good match, disable repeat */
-					optimal_repeat = 1;
-				}
-			}
-		}
-
-		/* Update frame repeat state */
-		if (optimal_repeat != m->frame_repeat_count) {
-			if (optimal_repeat > 1 && !m->frame_repeat_enabled) {
-				m->frame_repeat_enabled = 1;
-				m->frame_repeat_interval_ns = m->present_interval_ns;
-				wlr_log(WLR_INFO, "Frame repeat enabled: %dx (%.1f FPS → %.1f Hz display)",
-					optimal_repeat, game_fps, display_hz);
-			} else if (optimal_repeat == 1 && m->frame_repeat_enabled) {
-				m->frame_repeat_enabled = 0;
-				wlr_log(WLR_INFO, "Frame repeat disabled - game FPS matches display");
-			}
-			m->frame_repeat_count = optimal_repeat;
-			m->frame_repeat_current = 0;
-		}
-
-		/*
-		 * Calculate judder score (0-100, lower is better).
-		 * This measures how well game fps matches display refresh.
-		 */
-		if (game_fps > 0.0f && display_hz > 0.0f) {
-			float ideal_interval_ms = 1000.0f / game_fps;
-			float actual_interval_ms = 1000.0f / display_hz * (float)optimal_repeat;
-			float deviation_pct = fabsf(ideal_interval_ms - actual_interval_ms) / ideal_interval_ms * 100.0f;
-			m->judder_score = (int)(deviation_pct * 10.0f); /* Scale to 0-100ish */
-			if (m->judder_score > 100) m->judder_score = 100;
-		}
-
-		/* Enable adaptive pacing for smoother non-VRR playback */
-		m->adaptive_pacing_enabled = 1;
-		m->target_frame_time_ms = 1000.0f / game_fps;
-
-	} else {
-		/* Reset frame repeat state when not applicable */
-		if (m->frame_repeat_enabled) {
-			m->frame_repeat_enabled = 0;
-			m->frame_repeat_count = 1;
-			m->frame_repeat_current = 0;
-			m->adaptive_pacing_enabled = 0;
-			wlr_log(WLR_INFO, "Frame repeat disabled - VRR active or tearing enabled");
-		}
+		calculate_frame_repeat(m, is_game, allow_tearing);
+	} else if (m->frame_repeat_enabled) {
+		m->frame_repeat_enabled = 0;
+		m->frame_repeat_count = 1;
+		m->frame_repeat_current = 0;
+		m->adaptive_pacing_enabled = 0;
+		wlr_log(WLR_INFO, "Frame repeat disabled - VRR active or tearing enabled");
 	}
 
 	if (needs_frame) {
-		m->frames_since_content_change = 0;
-
-		/*
-		 * Apply tearing for games that want it - async page flips bypass vsync.
-		 * This gives the lowest possible input latency at the cost of
-		 * potential screen tearing (which some gamers prefer).
-		 *
-		 * Note: When frame pacing is active and tearing is NOT requested,
-		 * we rely on vsync'd commits for smooth presentation.
-		 */
-		if (allow_tearing && wlr_output_is_drm(m->wlr_output)) {
-			state.tearing_page_flip = true;
-		}
-
-		/* Commit the frame */
-		if (!wlr_output_commit_state(m->wlr_output, &state)) {
-			/* Fallback: retry without tearing if it failed */
-			if (allow_tearing) {
-				state.tearing_page_flip = false;
-				wlr_output_commit_state(m->wlr_output, &state);
-			}
-		}
-
-		/* Track commit timing for frame pacing analysis */
-		commit_end_ns = get_time_ns();
-		m->last_commit_duration_ns = commit_end_ns - frame_start_ns;
-
-		/*
-		 * INPUT LATENCY TRACKING
-		 *
-		 * Measure time from last input event to frame commit.
-		 * This is a key component of "input-to-photon" latency:
-		 *   Total latency = input processing + game logic + render + commit + scanout
-		 *
-		 * We measure: input event → frame commit (what compositor controls)
-		 * The remaining latency (scanout) depends on display.
-		 */
-		if (game_mode_ultra && m->last_input_ns > 0) {
-			uint64_t input_latency = commit_end_ns - m->last_input_ns;
-
-			/* Only track reasonable latencies (< 500ms) */
-			if (input_latency < 500000000ULL) {
-				m->input_to_frame_ns = input_latency;
-
-				/* Track min/max for statistics */
-				if (m->min_input_latency_ns == 0 || input_latency < m->min_input_latency_ns)
-					m->min_input_latency_ns = input_latency;
-				if (input_latency > m->max_input_latency_ns)
-					m->max_input_latency_ns = input_latency;
-			}
-		}
-
-		/*
-		 * Update rolling average of commit time (Gamescope-style).
-		 * Use 98% decay rate - this means spikes are remembered but
-		 * gradually fade, while sustained high times are tracked accurately.
-		 */
-		if (m->rolling_commit_time_ns == 0) {
-			m->rolling_commit_time_ns = m->last_commit_duration_ns;
-		} else {
-			/* Rolling average: 98% old + 2% new */
-			m->rolling_commit_time_ns =
-				(m->rolling_commit_time_ns * 98 + m->last_commit_duration_ns * 2) / 100;
-
-			/* But always track upward spikes immediately */
-			if (m->last_commit_duration_ns > m->rolling_commit_time_ns) {
-				m->rolling_commit_time_ns = m->last_commit_duration_ns;
-			}
-		}
+		commit_output_frame(m, &state, allow_tearing, use_frame_pacing, frame_start_ns);
 	} else {
 		m->frames_since_content_change++;
-
-		/*
-		 * If frame pacing is active but no new frame, track potential drop.
-		 * This happens when the game misses a vblank deadline.
-		 */
 		if (use_frame_pacing && m->pending_game_frame) {
-			/* Game didn't submit a new frame - previous one will be shown again */
 			m->frames_dropped++;
 			m->pending_game_frame = 0;
 		}
@@ -1084,12 +934,22 @@ set_adaptive_sync(Monitor *m, int enable)
 	wlr_output_manager_v1_set_configuration(output_mgr, config);
 }
 
+static int
+commit_adaptive_sync(Monitor *m, int enable)
+{
+	struct wlr_output_state state;
+	int ok;
+
+	wlr_output_state_init(&state);
+	wlr_output_state_set_adaptive_sync_enabled(&state, enable);
+	ok = wlr_output_commit_state(m->wlr_output, &state);
+	wlr_output_state_finish(&state);
+	return ok;
+}
+
 void
 enable_game_vrr(Monitor *m)
 {
-	struct wlr_output_state state;
-	char osd_msg[64];
-
 	if (!m || !m->vrr_capable || m->game_vrr_active)
 		return;
 
@@ -1098,41 +958,28 @@ enable_game_vrr(Monitor *m)
 		return;
 	}
 
-	wlr_output_state_init(&state);
-	wlr_output_state_set_adaptive_sync_enabled(&state, 1);
-
-	if (wlr_output_commit_state(m->wlr_output, &state)) {
+	if (commit_adaptive_sync(m, 1)) {
 		m->game_vrr_active = 1;
 		m->game_vrr_target_fps = 0.0f;
 		m->game_vrr_last_fps = 0.0f;
 		m->game_vrr_last_change_ns = get_time_ns();
 		m->game_vrr_stable_frames = 0;
 
-		snprintf(osd_msg, sizeof(osd_msg), "Game VRR Enabled");
-		show_hz_osd(m, osd_msg);
+		show_hz_osd(m, "Game VRR Enabled");
 		wlr_log(WLR_INFO, "Game VRR enabled on %s", m->wlr_output->name);
 	}
-
-	wlr_output_state_finish(&state);
 }
 
 void
 disable_game_vrr(Monitor *m)
 {
-	struct wlr_output_state state;
-
 	if (!m || !m->game_vrr_active)
 		return;
 
-	wlr_output_state_init(&state);
-	wlr_output_state_set_adaptive_sync_enabled(&state, 0);
-
-	if (wlr_output_commit_state(m->wlr_output, &state)) {
+	if (commit_adaptive_sync(m, 0)) {
 		wlr_log(WLR_INFO, "Game VRR disabled on %s (was targeting %.1f FPS)",
 			m->wlr_output->name, m->game_vrr_target_fps);
 	}
-
-	wlr_output_state_finish(&state);
 
 	m->game_vrr_active = 0;
 	m->game_vrr_target_fps = 0.0f;
