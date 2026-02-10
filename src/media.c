@@ -264,6 +264,23 @@ launch_integrated_player_with_resume(const char *url, double resume_pos)
 			return;
 		}
 
+		/* Pass display color capabilities to video player.
+		 * Only enable 10-bit video output if the renderer can actually
+		 * texture ARGB2101010 buffers (via data_ptr access).  The output
+		 * being 10-bit (XRGB2101010) doesn't guarantee the renderer can
+		 * import that format as an input texture. */
+		active_videoplayer->output_10bit = 0;
+		if (selmon->render_10bit_active) {
+			const struct wlr_drm_format_set *tex_fmts =
+				wlr_renderer_get_texture_formats(drw, WLR_BUFFER_CAP_DATA_PTR);
+			if (tex_fmts && wlr_drm_format_set_get(tex_fmts, DRM_FORMAT_ARGB2101010)) {
+				active_videoplayer->output_10bit = 1;
+				wlr_log(WLR_INFO, "Video player: 10-bit output enabled (renderer supports ARGB2101010)");
+			} else {
+				wlr_log(WLR_INFO, "Video player: 10-bit output disabled (renderer lacks ARGB2101010 texture support)");
+			}
+		}
+
 		/* Initialize scene on block layer (topmost) so player is always above HTPC UI */
 		if (videoplayer_init_scene(active_videoplayer, layers[LyrBlock]) < 0) {
 			wlr_log(WLR_ERROR, "Failed to initialize video player scene");

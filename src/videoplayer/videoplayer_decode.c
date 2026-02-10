@@ -45,6 +45,8 @@ extern void videoplayer_audio_cmd_shutdown(VideoPlayer *vp);
 extern void videoplayer_audio_play(VideoPlayer *vp);
 extern void videoplayer_audio_pause(VideoPlayer *vp);
 extern void videoplayer_audio_flush(VideoPlayer *vp);
+extern void videoplayer_hide_control_bar(VideoPlayer *vp);
+extern void videoplayer_show_seek_osd(VideoPlayer *vp);
 
 /* Subtitle processing */
 static void videoplayer_process_subtitle_packet(VideoPlayer *vp, AVPacket *pkt)
@@ -466,6 +468,14 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
         }
     }
 
+    /* Build HDR tonemapping LUT if content is HDR */
+    if (vp->video.is_hdr) {
+        videoplayer_build_hdr_lut(vp);
+        fprintf(stderr, "[videoplayer] HDR content detected: %s, %d-bit\n",
+                vp->video.color_trc == AVCOL_TRC_ARIB_STD_B67 ? "HLG" : "PQ/HDR10",
+                vp->video.bit_depth);
+    }
+
     /* Initialize decoders */
     ret = init_video_decoder(vp);
     if (ret < 0) {
@@ -670,6 +680,9 @@ void videoplayer_close(VideoPlayer *vp)
         sws_freeContext(vp->sws_ctx);
         vp->sws_ctx = NULL;
     }
+
+    /* Free HDR tonemapping resources */
+    videoplayer_cleanup_hdr_lut(vp);
 
     /* Free codec contexts */
     avcodec_free_context(&vp->video_codec_ctx);
@@ -1651,10 +1664,14 @@ void videoplayer_seek(VideoPlayer *vp, int64_t position_us)
     vp->last_frame_ns = 0;
     vp->last_present_time_ns = 0;
     vp->current_repeat = 0;
+    vp->cadence_accum = 0.0f;
 
     vp->seek_target_us = position_us;
     vp->seek_flush_done = 0;
     vp->seek_requested = 1;
+
+    /* Show control bar with seek position (time display uses seek_target_us) */
+    videoplayer_show_control_bar(vp);
 
     if (vp->debug_log) {
         fprintf(vp->debug_log, "# SEEK | target=%.2fs (from pos=%.2fs)\n",

@@ -138,6 +138,7 @@ void videoplayer_play(VideoPlayer *vp)
     vp->last_frame_ns = 0;
     vp->last_present_time_ns = 0;
     vp->current_repeat = 0;
+    vp->cadence_accum = 0.0f;
 
     /* Clear any false stream_interrupted flag set during pause.
      * While paused, PipeWire stops consuming the ring buffer, so the decode
@@ -579,6 +580,18 @@ void videoplayer_show_control_bar(VideoPlayer *vp)
 
 __attribute__((weak))
 void videoplayer_hide_control_bar(VideoPlayer *vp)
+{
+    (void)vp;
+}
+
+__attribute__((weak))
+void videoplayer_show_seek_osd(VideoPlayer *vp)
+{
+    (void)vp;
+}
+
+__attribute__((weak))
+void videoplayer_hide_seek_osd(VideoPlayer *vp)
 {
     (void)vp;
 }

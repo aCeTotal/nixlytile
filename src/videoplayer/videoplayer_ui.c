@@ -300,8 +300,8 @@ int videoplayer_init_control_bar(VideoPlayer *vp, struct wlr_scene_tree *parent,
     bar->volume_x = right_x - bar->volume_w;
     right_x = bar->volume_x - padding;
 
-    /* Time display */
-    bar->time_w = 120;  /* "00:00:00 / 00:00:00" */
+    /* Time display (position / duration  -remaining) */
+    bar->time_w = 260;
     bar->time_x = right_x - bar->time_w;
     right_x = bar->time_x - padding;
 
@@ -497,7 +497,8 @@ void videoplayer_render_control_bar(VideoPlayer *vp)
 
         /* Progress fill */
         if (vp->duration_us > 0) {
-            progress = (float)vp->position_us / vp->duration_us;
+            int64_t display_pos = vp->seek_requested ? vp->seek_target_us : vp->position_us;
+            progress = (float)display_pos / vp->duration_us;
             if (progress < 0.0f) progress = 0.0f;
             if (progress > 1.0f) progress = 1.0f;
 
@@ -509,17 +510,22 @@ void videoplayer_render_control_bar(VideoPlayer *vp)
         }
     }
 
-    /* Time display */
+    /* Time display: position / duration  -remaining */
     {
-        char pos_str[16], dur_str[16];
-        videoplayer_format_time(pos_str, sizeof(pos_str), vp->position_us);
+        char pos_str[16], dur_str[16], rem_str[16];
+        int64_t pos = vp->seek_requested ? vp->seek_target_us : vp->position_us;
+        int64_t remaining = vp->duration_us - pos;
+        if (remaining < 0) remaining = 0;
+
+        videoplayer_format_time(pos_str, sizeof(pos_str), pos);
         videoplayer_format_time(dur_str, sizeof(dur_str), vp->duration_us);
-        snprintf(time_str, sizeof(time_str), "%s / %s", pos_str, dur_str);
+        videoplayer_format_time(rem_str, sizeof(rem_str), remaining);
+        snprintf(time_str, sizeof(time_str), "%s / %s  -%s", pos_str, dur_str, rem_str);
 
         /* Render time text using Cairo */
         struct wlr_buffer *text_buf = create_text_buffer(time_str,
                                                           bar->time_w, 24,
-                                                          color_text, "monospace", 14.0);
+                                                          color_text, "monospace", 13.0);
         if (text_buf) {
             struct wlr_scene_buffer *text_node = wlr_scene_buffer_create(bar->bg, text_buf);
             if (text_node) {
@@ -632,6 +638,41 @@ void videoplayer_render_control_bar(VideoPlayer *vp)
             wlr_buffer_drop(sub_buf);
         }
     }
+}
+
+/* ================================================================
+ *  Seek OSD
+ * ================================================================ */
+
+#define SEEK_OSD_HIDE_MS  1500
+#define SEEK_OSD_WIDTH    360
+#define SEEK_OSD_HEIGHT   44
+
+static int seek_osd_hide_timer_cb(void *data)
+{
+    VideoPlayer *vp = data;
+
+    if (vp)
+        videoplayer_hide_seek_osd(vp);
+
+    return 0;
+}
+
+void videoplayer_show_seek_osd(VideoPlayer *vp)
+{
+    if (!vp)
+        return;
+
+    /* Show seek info directly in the control bar instead of a separate OSD */
+    videoplayer_show_control_bar(vp);
+}
+
+void videoplayer_hide_seek_osd(VideoPlayer *vp)
+{
+    if (!vp || !vp->seek_osd_tree)
+        return;
+
+    wlr_scene_node_set_enabled(&vp->seek_osd_tree->node, false);
 }
 
 /* ================================================================

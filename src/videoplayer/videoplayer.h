@@ -286,6 +286,8 @@ typedef struct VideoPlayer {
     struct wlr_scene_tree *subtitle_tree;  /* Subtitle overlay */
     struct wlr_scene_buffer *frame_node;   /* Current video frame */
     VideoPlayerControlBar control_bar;
+    struct wlr_scene_tree *seek_osd_tree;  /* Seek position OSD overlay */
+    struct wl_event_source *seek_osd_timer;
     int fullscreen_width;                  /* Current fullscreen size */
     int fullscreen_height;
 
@@ -367,9 +369,12 @@ typedef struct VideoPlayer {
     uint64_t frame_interval_ns;
     uint64_t display_interval_ns;          /* Display refresh interval */
     int64_t av_sync_offset_us;
-    int frame_repeat_mode;                 /* 0=VRR, 1=fixed, 2=3:2 pulldown */
+    int frame_repeat_mode;                 /* 0=VRR, 1=fixed, 2=3:2 pulldown, 3=cadence */
     int frame_repeat_count;
     int current_repeat;
+    int cadence_base;                      /* Floor of display_hz/video_fps */
+    float cadence_frac;                    /* Fractional part of ratio */
+    float cadence_accum;                   /* Bresenham accumulator */
     float video_fps;
     float display_hz;                      /* Current display refresh rate */
 
@@ -401,6 +406,12 @@ typedef struct VideoPlayer {
 
     /* Playback speed */
     float speed;                           /* 1.0 = normal */
+
+    /* Color management / HDR tonemapping */
+    uint16_t *hdr_lut;             /* 65536-entry PQ/HLG → sRGB LUT (NULL for SDR) */
+    uint8_t *hdr_tmp_buffer;       /* Reusable RGBA64 intermediate buffer */
+    size_t hdr_tmp_size;
+    int output_10bit;              /* Display supports 10-bit (set by compositor) */
 
     /* Debug log file (written to ~/nixlytile/videoplayer_debug.log) */
     FILE *debug_log;
@@ -459,7 +470,13 @@ int videoplayer_handle_button(VideoPlayer *vp, int x, int y, uint32_t button, in
 void videoplayer_show_control_bar(VideoPlayer *vp);
 void videoplayer_hide_control_bar(VideoPlayer *vp);
 void videoplayer_render_control_bar(VideoPlayer *vp);
+void videoplayer_show_seek_osd(VideoPlayer *vp);
+void videoplayer_hide_seek_osd(VideoPlayer *vp);
 void videoplayer_render_subtitles(VideoPlayer *vp, int64_t pts_us);
+
+/* Color management */
+void videoplayer_build_hdr_lut(VideoPlayer *vp);
+void videoplayer_cleanup_hdr_lut(VideoPlayer *vp);
 
 /* Utility */
 const char *videoplayer_state_str(VideoPlayerState state);

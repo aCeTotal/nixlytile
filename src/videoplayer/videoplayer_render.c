@@ -99,6 +99,261 @@ static const struct wlr_buffer_impl video_pixman_buffer_impl = {
 };
 
 /* ================================================================
+ *  Color Management
+ * ================================================================ */
+
+/* Chroma 4:4:4 quality upsampling + accurate rounding */
+#define SWS_QUALITY_FLAGS \
+    (SWS_LANCZOS | SWS_FULL_CHR_H_INT | SWS_FULL_CHR_H_INP | SWS_ACCURATE_RND)
+
+/* Map FFmpeg color space to swscale coefficient table index */
+static int get_sws_colorspace(enum AVColorSpace cs, int height)
+{
+    switch (cs) {
+    case AVCOL_SPC_BT709:       return SWS_CS_ITU709;
+    case AVCOL_SPC_BT2020_NCL:
+    case AVCOL_SPC_BT2020_CL:  return SWS_CS_BT2020;
+    case AVCOL_SPC_SMPTE170M:
+    case AVCOL_SPC_BT470BG:    return SWS_CS_ITU601;
+    case AVCOL_SPC_SMPTE240M:  return SWS_CS_SMPTE240M;
+    case AVCOL_SPC_FCC:        return SWS_CS_FCC;
+    default:
+        /* Heuristic: HD content (>=720p) is almost always BT.709 */
+        return (height >= 720) ? SWS_CS_ITU709 : SWS_CS_ITU601;
+    }
+}
+
+/* Configure correct colorspace handling on swscale context.
+ * Sets the YUV→RGB matrix coefficients and input/output range. */
+static void configure_sws_colorspace(struct SwsContext *sws, VideoPlayer *vp)
+{
+    int src_cs = get_sws_colorspace(vp->video.color_space, vp->video.height);
+    int src_range = (vp->video.color_range == AVCOL_RANGE_JPEG) ? 1 : 0;
+    int dst_range = 1;  /* Full range for RGB display output */
+
+    const int *src_table = sws_getCoefficients(src_cs);
+    const int *dst_table = sws_getCoefficients(SWS_CS_ITU709);
+
+    sws_setColorspaceDetails(sws,
+        src_table, src_range,
+        dst_table, dst_range,
+        0, 1 << 16, 1 << 16);  /* brightness=0, contrast=1.0, saturation=1.0 */
+}
+
+/* ================================================================
+ *  HDR Tonemapping LUT
+ * ================================================================ */
+
+/* PQ (SMPTE ST 2084) constants */
+#define PQ_M1  0.1593017578125       /* 2610/16384 */
+#define PQ_M2  78.84375              /* 2523/32 * 128 */
+#define PQ_C1  0.8359375             /* 3424/4096 */
+#define PQ_C2  18.8515625            /* 2413/128 */
+#define PQ_C3  18.6875               /* 2392/128 */
+
+/* Hable (Uncharted 2) tonemap operator */
+static inline float hable_partial(float x)
+{
+    float A = 0.15f, B = 0.50f, C = 0.10f, D = 0.20f, E = 0.02f, F = 0.30f;
+    return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
+}
+
+/*
+ * Build HDR tonemapping lookup table for PQ (HDR10) content.
+ * Maps 16-bit PQ signal → 16-bit sRGB value.
+ * 65536 entries × 2 bytes = 128 KB (fits in L2 cache).
+ * Called once per file when HDR content is detected.
+ */
+static void build_pq_lut(VideoPlayer *vp)
+{
+    float peak_nits = 1000.0f;
+
+    /* Get peak luminance from content metadata */
+    if (vp->video.has_content_light && vp->video.content_light.MaxCLL > 0)
+        peak_nits = (float)vp->video.content_light.MaxCLL;
+    else if (vp->video.has_mastering_display) {
+        AVRational ml = vp->video.mastering.max_luminance;
+        if (ml.num > 0 && ml.den > 0) {
+            float lum = (float)ml.num / ml.den;
+            if (lum > 100.0f)
+                peak_nits = lum;
+        }
+    }
+
+    if (peak_nits < 400.0f) peak_nits = 1000.0f;
+    if (peak_nits > 10000.0f) peak_nits = 10000.0f;
+
+    /* SDR reference white per BT.2408 */
+    float sdr_white = 203.0f;
+    float Lw = peak_nits / sdr_white;
+    float hw = hable_partial(Lw);
+
+    vp->hdr_lut = malloc(65536 * sizeof(uint16_t));
+    if (!vp->hdr_lut) return;
+
+    for (int i = 0; i < 65536; i++) {
+        float N = i / 65535.0f;
+
+        /* PQ EOTF: signal → linear light (cd/m²) */
+        float Np = powf(N, 1.0f / PQ_M2);
+        float num = Np - PQ_C1;
+        if (num < 0.0f) num = 0.0f;
+        float den = PQ_C2 - PQ_C3 * Np;
+        if (den <= 0.0f) den = 1e-10f;
+        float linear_nits = powf(num / den, 1.0f / PQ_M1) * 10000.0f;
+
+        /* Normalize to SDR reference white */
+        float L = linear_nits / sdr_white;
+
+        /* Hable tonemapping */
+        float mapped = hable_partial(L) / hw;
+        if (mapped > 1.0f) mapped = 1.0f;
+        if (mapped < 0.0f) mapped = 0.0f;
+
+        /* sRGB OETF (gamma) */
+        float srgb;
+        if (mapped <= 0.0031308f)
+            srgb = 12.92f * mapped;
+        else
+            srgb = 1.055f * powf(mapped, 1.0f / 2.4f) - 0.055f;
+
+        /* Store as 16-bit for both 8-bit (>>8) and 10-bit (>>6) output */
+        int val = (int)(srgb * 65535.0f + 0.5f);
+        vp->hdr_lut[i] = (uint16_t)(val < 0 ? 0 : (val > 65535 ? 65535 : val));
+    }
+
+    fprintf(stderr, "[videoplayer] Built PQ tonemap LUT (peak=%.0f nits, Hable)\n", peak_nits);
+}
+
+/*
+ * Build HDR tonemapping lookup table for HLG content.
+ */
+static void build_hlg_lut(VideoPlayer *vp)
+{
+    vp->hdr_lut = malloc(65536 * sizeof(uint16_t));
+    if (!vp->hdr_lut) return;
+
+    float system_gamma = 1.2f;  /* BT.2100 OOTF for SDR display */
+
+    for (int i = 0; i < 65536; i++) {
+        float E = i / 65535.0f;
+
+        /* HLG inverse OETF → scene light */
+        float scene;
+        if (E <= 0.5f) {
+            scene = E * E / 3.0f;
+        } else {
+            float a = 0.17883277f;
+            float b = 0.28466892f;
+            float c = 0.55991073f;
+            scene = (expf((E - c) / a) + b) / 12.0f;
+        }
+
+        /* Apply OOTF system gamma for SDR display */
+        float display = powf(scene, system_gamma);
+        if (display > 1.0f) display = 1.0f;
+        if (display < 0.0f) display = 0.0f;
+
+        /* sRGB OETF */
+        float srgb;
+        if (display <= 0.0031308f)
+            srgb = 12.92f * display;
+        else
+            srgb = 1.055f * powf(display, 1.0f / 2.4f) - 0.055f;
+
+        int val = (int)(srgb * 65535.0f + 0.5f);
+        vp->hdr_lut[i] = (uint16_t)(val < 0 ? 0 : (val > 65535 ? 65535 : val));
+    }
+
+    fprintf(stderr, "[videoplayer] Built HLG tonemap LUT\n");
+}
+
+void videoplayer_build_hdr_lut(VideoPlayer *vp)
+{
+    if (!vp || !vp->video.is_hdr) return;
+
+    /* Free any existing LUT from previous file */
+    free(vp->hdr_lut);
+    vp->hdr_lut = NULL;
+
+    if (vp->video.color_trc == AVCOL_TRC_ARIB_STD_B67)
+        build_hlg_lut(vp);
+    else
+        build_pq_lut(vp);
+}
+
+void videoplayer_cleanup_hdr_lut(VideoPlayer *vp)
+{
+    if (!vp) return;
+    free(vp->hdr_lut);
+    vp->hdr_lut = NULL;
+    free(vp->hdr_tmp_buffer);
+    vp->hdr_tmp_buffer = NULL;
+    vp->hdr_tmp_size = 0;
+}
+
+/* ================================================================
+ *  HDR Tonemapping + Packing
+ * ================================================================ */
+
+/*
+ * Apply HDR tonemapping LUT and pack RGBA64 → output format.
+ * The LUT stores 16-bit sRGB values; we shift to 8-bit or 10-bit.
+ */
+static void tonemap_and_pack(const uint8_t *src, int src_stride,
+                              void *dst, int dst_stride,
+                              int width, int height,
+                              const uint16_t *lut,
+                              int output_10bit)
+{
+    for (int y = 0; y < height; y++) {
+        const uint16_t *s = (const uint16_t *)(src + y * src_stride);
+
+        if (output_10bit) {
+            uint32_t *d = (uint32_t *)((uint8_t *)dst + y * dst_stride);
+            for (int x = 0; x < width; x++) {
+                uint32_t r10 = lut[s[0]] >> 6;
+                uint32_t g10 = lut[s[1]] >> 6;
+                uint32_t b10 = lut[s[2]] >> 6;
+                d[x] = (3u << 30) | (r10 << 20) | (g10 << 10) | b10;
+                s += 4;
+            }
+        } else {
+            uint8_t *d = (uint8_t *)dst + y * dst_stride;
+            for (int x = 0; x < width; x++) {
+                d[0] = lut[s[2]] >> 8;  /* B */
+                d[1] = lut[s[1]] >> 8;  /* G */
+                d[2] = lut[s[0]] >> 8;  /* R */
+                d[3] = 0xFF;            /* A */
+                s += 4;
+                d += 4;
+            }
+        }
+    }
+}
+
+/*
+ * Pack RGBA64LE → ARGB2101010 (10-bit output, no tonemapping for SDR).
+ */
+static void pack_rgba64_to_10bit(const uint8_t *src, int src_stride,
+                                  void *dst, int dst_stride,
+                                  int width, int height)
+{
+    for (int y = 0; y < height; y++) {
+        const uint16_t *s = (const uint16_t *)(src + y * src_stride);
+        uint32_t *d = (uint32_t *)((uint8_t *)dst + y * dst_stride);
+
+        for (int x = 0; x < width; x++) {
+            uint32_t r10 = s[0] >> 6;
+            uint32_t g10 = s[1] >> 6;
+            uint32_t b10 = s[2] >> 6;
+            d[x] = (3u << 30) | (r10 << 20) | (g10 << 10) | b10;
+            s += 4;
+        }
+    }
+}
+
+/* ================================================================
  *  Frame Conversion
  * ================================================================ */
 
@@ -107,9 +362,21 @@ struct wlr_buffer *videoplayer_create_frame_buffer(VideoPlayer *vp, AVFrame *fra
     struct VideoPixmanBuffer *buf;
     int width = frame->width;
     int height = frame->height;
+    int is_hdr = vp->video.is_hdr && vp->hdr_lut;
+    int output_10bit = vp->output_10bit;
+    int need_rgba64 = is_hdr || output_10bit;
+
+    /* Output is always 32-bit packed (both ARGB8888 and ARGB2101010 are 4 bytes) */
     int stride = width * 4;
-    void *data = NULL;
     size_t alloc_size = (size_t)height * stride;
+    void *data = NULL;
+
+    pixman_format_code_t pix_fmt = output_10bit
+        ? PIXMAN_a2r10g10b10
+        : PIXMAN_a8r8g8b8;
+    uint32_t drm_fmt = output_10bit
+        ? DRM_FORMAT_ARGB2101010
+        : DRM_FORMAT_ARGB8888;
 
     /* Allocate buffer struct */
     buf = calloc(1, sizeof(*buf));
@@ -134,32 +401,76 @@ struct wlr_buffer *videoplayer_create_frame_buffer(VideoPlayer *vp, AVFrame *fra
         }
     }
 
-    /* Initialize or update sws context */
+    /* Source pixel format */
     enum AVPixelFormat src_fmt = frame->format;
     if (src_fmt == AV_PIX_FMT_NONE)
         src_fmt = AV_PIX_FMT_YUV420P;
 
-    vp->sws_ctx = sws_getCachedContext(vp->sws_ctx,
-                                        width, height, src_fmt,
-                                        width, height, AV_PIX_FMT_BGRA,
-                                        SWS_BILINEAR, NULL, NULL, NULL);
-    if (!vp->sws_ctx) {
-        free(data);
-        free(buf);
-        return NULL;
+    if (need_rgba64) {
+        /* ── High-precision path: YUV → RGBA64LE → pack to output ── */
+        int rgba64_stride = width * 8;
+        size_t rgba64_size = (size_t)height * rgba64_stride;
+
+        /* Allocate/reuse temporary RGBA64 buffer */
+        if (!vp->hdr_tmp_buffer || vp->hdr_tmp_size < rgba64_size) {
+            free(vp->hdr_tmp_buffer);
+            vp->hdr_tmp_buffer = malloc(rgba64_size);
+            vp->hdr_tmp_size = rgba64_size;
+        }
+        if (!vp->hdr_tmp_buffer) {
+            free(data); free(buf); return NULL;
+        }
+
+        /* swscale to RGBA64LE with Lanczos chroma upsampling */
+        vp->sws_ctx = sws_getCachedContext(vp->sws_ctx,
+            width, height, src_fmt,
+            width, height, AV_PIX_FMT_RGBA64LE,
+            SWS_QUALITY_FLAGS, NULL, NULL, NULL);
+        if (!vp->sws_ctx) {
+            free(data); free(buf); return NULL;
+        }
+
+        configure_sws_colorspace(vp->sws_ctx, vp);
+
+        uint8_t *tmp_data[4] = { vp->hdr_tmp_buffer, NULL, NULL, NULL };
+        int tmp_stride[4] = { rgba64_stride, 0, 0, 0 };
+
+        sws_scale(vp->sws_ctx,
+                  (const uint8_t *const *)frame->data, frame->linesize,
+                  0, height, tmp_data, tmp_stride);
+
+        /* Apply tonemapping LUT and/or pack to output format */
+        if (is_hdr) {
+            tonemap_and_pack(vp->hdr_tmp_buffer, rgba64_stride,
+                             data, stride, width, height,
+                             vp->hdr_lut, output_10bit);
+        } else {
+            /* SDR on 10-bit display: just pack to 10-bit */
+            pack_rgba64_to_10bit(vp->hdr_tmp_buffer, rgba64_stride,
+                                  data, stride, width, height);
+        }
+    } else {
+        /* ── Fast path: SDR → direct BGRA ── */
+        vp->sws_ctx = sws_getCachedContext(vp->sws_ctx,
+            width, height, src_fmt,
+            width, height, AV_PIX_FMT_BGRA,
+            SWS_BILINEAR, NULL, NULL, NULL);
+        if (!vp->sws_ctx) {
+            free(data); free(buf); return NULL;
+        }
+
+        configure_sws_colorspace(vp->sws_ctx, vp);
+
+        uint8_t *dst_data[4] = { data, NULL, NULL, NULL };
+        int dst_linesize[4] = { stride, 0, 0, 0 };
+
+        sws_scale(vp->sws_ctx,
+                  (const uint8_t *const *)frame->data, frame->linesize,
+                  0, height, dst_data, dst_linesize);
     }
 
-    /* Convert to BGRA */
-    uint8_t *dst_data[4] = { data, NULL, NULL, NULL };
-    int dst_linesize[4] = { stride, 0, 0, 0 };
-
-    sws_scale(vp->sws_ctx,
-              (const uint8_t *const *)frame->data, frame->linesize,
-              0, height,
-              dst_data, dst_linesize);
-
     /* Create pixman image */
-    buf->image = pixman_image_create_bits(PIXMAN_a8r8g8b8,
+    buf->image = pixman_image_create_bits(pix_fmt,
                                            width, height,
                                            data, stride);
     if (!buf->image) {
@@ -169,7 +480,7 @@ struct wlr_buffer *videoplayer_create_frame_buffer(VideoPlayer *vp, AVFrame *fra
     }
 
     buf->data = data;
-    buf->drm_format = DRM_FORMAT_ARGB8888;
+    buf->drm_format = drm_fmt;
     buf->stride = stride;
     buf->owns_data = 1;
     buf->vp = vp;
@@ -208,11 +519,20 @@ struct wlr_buffer *videoplayer_create_scaled_buffer(AVFrame *frame,
 
     sws = sws_getContext(frame->width, frame->height, src_fmt,
                           target_width, target_height, AV_PIX_FMT_BGRA,
-                          SWS_BILINEAR, NULL, NULL, NULL);
+                          SWS_QUALITY_FLAGS, NULL, NULL, NULL);
     if (!sws) {
         free(data);
         free(buf);
         return NULL;
+    }
+
+    /* Apply correct colorspace for thumbnails (heuristic: >=720p = BT.709) */
+    {
+        int cs = (frame->height >= 720) ? SWS_CS_ITU709 : SWS_CS_ITU601;
+        const int *src_table = sws_getCoefficients(cs);
+        const int *dst_table = sws_getCoefficients(SWS_CS_ITU709);
+        sws_setColorspaceDetails(sws, src_table, 0, dst_table, 1,
+                                  0, 1 << 16, 1 << 16);
     }
 
     uint8_t *dst_data[4] = { data, NULL, NULL, NULL };
@@ -300,16 +620,25 @@ static void calculate_frame_pacing(VideoPlayer *vp, float display_hz)
         vp->frame_repeat_mode = 1;
         vp->frame_repeat_count = (int)roundf(ratio);
     } else {
-        /* Non-clean ratio (23.976@120Hz, 25@60Hz, etc.) - use frame interval
-         * directly. Cadence-locked timing naturally produces the correct
-         * variable-vsync pattern (e.g., 5-5-5-5-6 for 23.976@120Hz). */
-        vp->frame_repeat_mode = 0;
-        vp->frame_repeat_count = 0;
+        /* Non-clean ratio on fixed-refresh display.
+         * Bresenham cadence: distribute the extra vsyncs evenly.
+         * E.g., 23.976@300Hz -> base=12, frac~=0.52 -> pattern 12-13-12-13... */
+        int base = (int)floorf(ratio);
+        vp->frame_repeat_mode = 3;
+        vp->frame_repeat_count = base;
+        vp->cadence_base = base;
+        vp->cadence_frac = ratio - (float)base;
+        vp->cadence_accum = 0.0f;
     }
 
-    fprintf(stderr, "[videoplayer] Frame pacing: %.3f fps on %.2f Hz, mode=%d, count=%d, display_interval=%lu ns\n",
-            video_fps, display_hz, vp->frame_repeat_mode, vp->frame_repeat_count,
-            (unsigned long)vp->display_interval_ns);
+    if (vp->frame_repeat_mode == 3) {
+        fprintf(stderr, "[videoplayer] Frame pacing: %.3f fps on %.2f Hz, mode=3 (cadence), base=%d, frac=%.4f\n",
+                video_fps, display_hz, vp->cadence_base, vp->cadence_frac);
+    } else {
+        fprintf(stderr, "[videoplayer] Frame pacing: %.3f fps on %.2f Hz, mode=%d, count=%d, display_interval=%lu ns\n",
+                video_fps, display_hz, vp->frame_repeat_mode, vp->frame_repeat_count,
+                (unsigned long)vp->display_interval_ns);
+    }
 }
 
 /*
@@ -487,6 +816,7 @@ static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, 
         /* First frame - always present */
         vp->last_frame_ns = vsync_time_ns;
         vp->current_repeat = 0;
+        vp->cadence_accum = 0.0f;
         return 1;
     }
 
@@ -537,11 +867,23 @@ static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, 
         if (elapsed_ns >= step - vp->display_interval_ns / 3) {
             time_to_present = 1;
         }
+    } else if (vp->frame_repeat_mode == 3 && vp->display_interval_ns > 0) {
+        /* Bresenham cadence for non-integer ratios on fixed-refresh.
+         * Peek at what the repeat count would be if we present now. */
+        int repeats = vp->cadence_base;
+        float test_accum = vp->cadence_accum + vp->cadence_frac;
+        if (test_accum >= 1.0f) {
+            repeats++;
+        }
+        step = (uint64_t)repeats * vp->display_interval_ns;
+
+        if (elapsed_ns >= step - vp->display_interval_ns / 3) {
+            time_to_present = 1;
+        }
     } else {
-        /* Frame-interval mode (VRR, and non-clean ratios like 23.976@120Hz).
-         * Uses video's exact frame interval as step. Naturally produces the
-         * correct variable-vsync pattern (e.g., mostly 5 vsyncs with occasional
-         * 6 for 23.976@120Hz). half-display-interval tolerance finds nearest vsync. */
+        /* Frame-interval mode (VRR).
+         * Uses video's exact frame interval as step. half-display-interval
+         * tolerance finds nearest vsync. */
         step = frame_interval;
         uint64_t tolerance = display_interval_ns / 2;
 
@@ -570,6 +912,11 @@ static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, 
     /* Present the frame */
     if (vp->frame_repeat_mode == 2) {
         vp->current_repeat++;
+    } else if (vp->frame_repeat_mode == 3) {
+        vp->cadence_accum += vp->cadence_frac;
+        if (vp->cadence_accum >= 1.0f) {
+            vp->cadence_accum -= 1.0f;
+        }
     }
     vp->last_frame_ns += step;
     /* If we've fallen more than one step behind wall clock (e.g., after brief
@@ -650,6 +997,7 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
         vp->audio.needs_timing_reset = 0;
         vp->last_frame_ns = 0;
         vp->current_repeat = 0;
+        vp->cadence_accum = 0.0f;
         fprintf(stderr, "[videoplayer] Frame timing reset (audio state change)\n");
         if (vp->debug_log) {
             fprintf(vp->debug_log, "# RESET | timing reset (audio state change)\n");
@@ -690,6 +1038,7 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
             }
             vp->last_frame_ns = 0;
             vp->current_repeat = 0;
+            vp->cadence_accum = 0.0f;
             /* Reset A/V sync for clean restart */
             vp->av_sync_established = 0;
         }
@@ -718,6 +1067,7 @@ present_next:
             vp->last_frame_ns = 0;
             vp->last_present_time_ns = 0;
             vp->current_repeat = 0;
+            vp->cadence_accum = 0.0f;
 
             /* Pause and flush audio so it restarts aligned with video */
             extern void videoplayer_audio_pause(VideoPlayer *vp);
@@ -896,6 +1246,13 @@ int videoplayer_init_scene(VideoPlayer *vp, struct wlr_scene_tree *parent)
     /* Position subtitle tree above video */
     wlr_scene_node_raise_to_top(&vp->subtitle_tree->node);
 
+    /* Create seek OSD overlay (above subtitles) */
+    vp->seek_osd_tree = wlr_scene_tree_create(vp->tree);
+    if (vp->seek_osd_tree) {
+        wlr_scene_node_raise_to_top(&vp->seek_osd_tree->node);
+        wlr_scene_node_set_enabled(&vp->seek_osd_tree->node, false);
+    }
+
     /* Create initial frame buffer node (empty) */
     vp->frame_node = wlr_scene_buffer_create(vp->video_tree, NULL);
 
@@ -981,6 +1338,7 @@ void videoplayer_setup_display_mode(VideoPlayer *vp, float display_hz, int vrr_c
     vp->last_frame_ns = 0;
     vp->last_present_time_ns = 0;
     vp->current_repeat = 0;
+    vp->cadence_accum = 0.0f;
     vp->av_sync_offset_us = 0;
 
     /* Update debug log with actual display parameters (header was written
@@ -1001,11 +1359,17 @@ void videoplayer_cleanup_scene(VideoPlayer *vp)
     if (!vp)
         return;
 
+    if (vp->seek_osd_timer) {
+        wl_event_source_remove(vp->seek_osd_timer);
+        vp->seek_osd_timer = NULL;
+    }
+
     if (vp->tree) {
         wlr_scene_node_destroy(&vp->tree->node);
         vp->tree = NULL;
         vp->video_tree = NULL;
         vp->subtitle_tree = NULL;
+        vp->seek_osd_tree = NULL;
         vp->frame_node = NULL;
     }
 }
