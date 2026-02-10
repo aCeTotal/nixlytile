@@ -486,9 +486,19 @@ gamepad_menu_handle_button(Monitor *m, int button, int value)
 	}
 
 	/* Handle integrated video player controls first (highest priority when playing) */
-	if (active_videoplayer && playback_state == PLAYBACK_PLAYING && value == 1) {
-		if (handle_playback_osd_input(button))
-			return 1;
+	if (active_videoplayer && playback_state == PLAYBACK_PLAYING) {
+		if (value == 1) {
+			if (handle_playback_osd_input(button))
+				return 1;
+		} else if (value == 0) {
+			/* Button release - stop hold-to-seek for shoulder buttons */
+			if ((button == BTN_TL || button == BTN_TR) &&
+			    active_videoplayer->control_bar.seek_hold_active) {
+				videoplayer_seek_hold_stop(active_videoplayer);
+				render_playback_osd();
+				return 1;
+			}
+		}
 	}
 
 	/* Check if Movies or TV-shows view is active on ANY monitor
@@ -805,6 +815,11 @@ gamepad_event_cb(int fd, uint32_t mask, void *data)
 					/* D-pad released - stop OSK repeat if active */
 					if (osk_dpad_held_button == BTN_DPAD_LEFT || osk_dpad_held_button == BTN_DPAD_RIGHT)
 						osk_dpad_repeat_stop();
+					/* Stop video player hold-to-seek on D-pad release */
+					if (active_videoplayer && active_videoplayer->control_bar.seek_hold_active) {
+						videoplayer_seek_hold_stop(active_videoplayer);
+						render_playback_osd();
+					}
 				}
 				break;
 			case ABS_HAT0Y:
@@ -1290,6 +1305,25 @@ gamepad_update_cursor(void)
 
 	if (wl_list_empty(&gamepads))
 		return;
+
+	/* Handle video player joystick seeking (left stick left/right) */
+	if (active_videoplayer && playback_state == PLAYBACK_PLAYING) {
+		int nav_x = 0, nav_y_unused = 0;
+		gamepad_read_nav_xy(&nav_x, &nav_y_unused);
+
+		if (nav_x != 0) {
+			/* Joystick deflected past threshold - start/continue seek */
+			if (!active_videoplayer->control_bar.seek_hold_active ||
+			    active_videoplayer->control_bar.seek_hold_direction != nav_x) {
+				videoplayer_seek_hold_start(active_videoplayer, nav_x);
+			}
+		} else if (active_videoplayer->control_bar.seek_hold_active) {
+			/* Joystick returned to center - stop seek */
+			videoplayer_seek_hold_stop(active_videoplayer);
+			render_playback_osd();
+		}
+		return;
+	}
 
 	/* Handle Retro gaming view joystick navigation */
 	if (selmon && htpc_view_is_active(selmon, selmon->retro_gaming.view_tag, selmon->retro_gaming.visible)) {

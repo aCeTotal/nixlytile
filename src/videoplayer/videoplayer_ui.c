@@ -132,6 +132,12 @@ static struct wlr_buffer *create_text_buffer(const char *text, int width, int he
 
 /* External declarations */
 extern struct wl_event_loop *event_loop;
+extern void render_playback_osd(void);
+
+/* Hold-to-seek timing constants */
+#define SEEK_HOLD_TICK_MS      100   /* Timer interval during hold */
+#define SEEK_HOLD_HIDE_MS      1500  /* Auto-hide after seek release */
+#define UI_UPDATE_TICK_MS      250   /* Real-time time display update */
 
 /* ================================================================
  *  Colors
@@ -197,6 +203,9 @@ static void reset_hide_timer(VideoPlayer *vp)
     }
 }
 
+/* Forward declarations */
+static int ui_update_timer_cb(void *data);
+
 /* ================================================================
  *  Control Bar Visibility
  * ================================================================ */
@@ -222,6 +231,16 @@ void videoplayer_show_control_bar(VideoPlayer *vp)
 
 reset_timer:
     reset_hide_timer(vp);
+
+    /* Start UI update timer for real-time time display */
+    if (!bar->ui_update_timer && event_loop) {
+        bar->ui_update_timer = wl_event_loop_add_timer(event_loop,
+                                                        ui_update_timer_cb, vp);
+    }
+    if (bar->ui_update_timer &&
+        (vp->state == VP_STATE_PLAYING || bar->seek_hold_active)) {
+        wl_event_source_timer_update(bar->ui_update_timer, UI_UPDATE_TICK_MS);
+    }
 }
 
 void videoplayer_hide_control_bar(VideoPlayer *vp)
@@ -239,6 +258,10 @@ void videoplayer_hide_control_bar(VideoPlayer *vp)
     if (bar->tree) {
         wlr_scene_node_set_enabled(&bar->tree->node, 0);
     }
+
+    /* Stop UI update timer */
+    if (bar->ui_update_timer)
+        wl_event_source_timer_update(bar->ui_update_timer, 0);
 }
 
 /* ================================================================
@@ -327,6 +350,17 @@ void videoplayer_cleanup_control_bar(VideoPlayer *vp)
     if (bar->hide_timer) {
         wl_event_source_remove(bar->hide_timer);
         bar->hide_timer = NULL;
+    }
+
+    if (bar->seek_hold_timer) {
+        wl_event_source_remove(bar->seek_hold_timer);
+        bar->seek_hold_timer = NULL;
+    }
+    bar->seek_hold_active = 0;
+
+    if (bar->ui_update_timer) {
+        wl_event_source_remove(bar->ui_update_timer);
+        bar->ui_update_timer = NULL;
     }
 
     if (bar->tree) {
@@ -497,7 +531,8 @@ void videoplayer_render_control_bar(VideoPlayer *vp)
 
         /* Progress fill */
         if (vp->duration_us > 0) {
-            int64_t display_pos = vp->seek_requested ? vp->seek_target_us : vp->position_us;
+            int64_t display_pos = (vp->seek_requested || vp->control_bar.seek_hold_active)
+                ? vp->seek_target_us : vp->position_us;
             progress = (float)display_pos / vp->duration_us;
             if (progress < 0.0f) progress = 0.0f;
             if (progress > 1.0f) progress = 1.0f;
@@ -513,7 +548,8 @@ void videoplayer_render_control_bar(VideoPlayer *vp)
     /* Time display: position / duration  -remaining */
     {
         char pos_str[16], dur_str[16], rem_str[16];
-        int64_t pos = vp->seek_requested ? vp->seek_target_us : vp->position_us;
+        int64_t pos = (vp->seek_requested || vp->control_bar.seek_hold_active)
+            ? vp->seek_target_us : vp->position_us;
         int64_t remaining = vp->duration_us - pos;
         if (remaining < 0) remaining = 0;
 
@@ -638,6 +674,174 @@ void videoplayer_render_control_bar(VideoPlayer *vp)
             wlr_buffer_drop(sub_buf);
         }
     }
+}
+
+/* ================================================================
+ *  Hold-to-Seek
+ * ================================================================ */
+
+static int64_t seek_hold_increment(int tick_count)
+{
+    /* Acceleration: the longer you hold, the faster it seeks.
+     * At 100ms ticks: 0-5 ticks = 10x, 5-20 = 30x, 20-50 = 60x, 50+ = 120x */
+    if (tick_count < 5)
+        return 1000000LL;   /* 1s per tick = 10x speed */
+    else if (tick_count < 20)
+        return 3000000LL;   /* 3s per tick = 30x speed */
+    else if (tick_count < 50)
+        return 6000000LL;   /* 6s per tick = 60x speed */
+    else
+        return 12000000LL;  /* 12s per tick = 120x speed */
+}
+
+static int seek_hold_timer_cb(void *data)
+{
+    VideoPlayer *vp = data;
+    VideoPlayerControlBar *bar;
+
+    if (!vp)
+        return 0;
+
+    bar = &vp->control_bar;
+    if (!bar->seek_hold_active)
+        return 0;
+
+    int64_t increment = seek_hold_increment(bar->seek_hold_count);
+    int64_t new_pos = vp->seek_target_us + bar->seek_hold_direction * increment;
+
+    /* Clamp */
+    if (new_pos < 0)
+        new_pos = 0;
+    if (vp->duration_us > 0 && new_pos > vp->duration_us)
+        new_pos = vp->duration_us;
+
+    vp->seek_target_us = new_pos;
+    bar->seek_hold_count++;
+
+    /* Re-render OSD for real-time update */
+    render_playback_osd();
+    videoplayer_render_control_bar(vp);
+
+    /* Schedule next tick */
+    if (bar->seek_hold_timer)
+        wl_event_source_timer_update(bar->seek_hold_timer, SEEK_HOLD_TICK_MS);
+
+    return 0;
+}
+
+static void reset_hide_timer_ms(VideoPlayer *vp, int ms)
+{
+    VideoPlayerControlBar *bar = &vp->control_bar;
+
+    bar->last_activity_ms = get_time_ms();
+
+    if (!bar->hide_timer && event_loop) {
+        bar->hide_timer = wl_event_loop_add_timer(event_loop,
+                                                   control_bar_hide_timer_cb, vp);
+    }
+
+    if (bar->hide_timer) {
+        wl_event_source_timer_update(bar->hide_timer, ms);
+    }
+}
+
+void videoplayer_seek_hold_start(VideoPlayer *vp, int direction)
+{
+    VideoPlayerControlBar *bar;
+
+    if (!vp)
+        return;
+
+    bar = &vp->control_bar;
+
+    /* If already holding in the same direction, ignore (key repeat) */
+    if (bar->seek_hold_active && bar->seek_hold_direction == direction)
+        return;
+
+    /* If holding in opposite direction, stop first */
+    if (bar->seek_hold_active)
+        videoplayer_seek_hold_stop(vp);
+
+    bar->seek_hold_active = 1;
+    bar->seek_hold_direction = direction;
+    bar->seek_hold_start_ms = get_time_ms();
+    bar->seek_hold_count = 0;
+    bar->seek_hold_base_us = vp->seek_requested ? vp->seek_target_us : vp->position_us;
+
+    /* Initial seek - immediate first step (5 seconds) */
+    int64_t initial_seek = 5 * 1000000LL;
+    vp->seek_target_us = bar->seek_hold_base_us + direction * initial_seek;
+
+    /* Clamp */
+    if (vp->seek_target_us < 0)
+        vp->seek_target_us = 0;
+    if (vp->duration_us > 0 && vp->seek_target_us > vp->duration_us)
+        vp->seek_target_us = vp->duration_us;
+
+    /* Show control bar and OSD */
+    videoplayer_show_control_bar(vp);
+    render_playback_osd();
+
+    /* Start hold timer */
+    if (!bar->seek_hold_timer && event_loop) {
+        bar->seek_hold_timer = wl_event_loop_add_timer(event_loop,
+                                                        seek_hold_timer_cb, vp);
+    }
+    if (bar->seek_hold_timer)
+        wl_event_source_timer_update(bar->seek_hold_timer, SEEK_HOLD_TICK_MS);
+}
+
+void videoplayer_seek_hold_stop(VideoPlayer *vp)
+{
+    VideoPlayerControlBar *bar;
+
+    if (!vp)
+        return;
+
+    bar = &vp->control_bar;
+
+    if (!bar->seek_hold_active)
+        return;
+
+    bar->seek_hold_active = 0;
+
+    /* Stop timer */
+    if (bar->seek_hold_timer)
+        wl_event_source_timer_update(bar->seek_hold_timer, 0);
+
+    /* Commit the seek to the actual position */
+    videoplayer_seek(vp, vp->seek_target_us);
+
+    /* Update OSD */
+    render_playback_osd();
+
+    /* Schedule auto-hide after 1.5 seconds */
+    reset_hide_timer_ms(vp, SEEK_HOLD_HIDE_MS);
+}
+
+/* ================================================================
+ *  Real-time UI Update Timer
+ * ================================================================ */
+
+static int ui_update_timer_cb(void *data)
+{
+    VideoPlayer *vp = data;
+
+    if (!vp || !vp->control_bar.visible)
+        return 0;
+
+    /* Re-render to update time display */
+    videoplayer_render_control_bar(vp);
+    render_playback_osd();
+
+    /* Continue if still visible and playing (or hold-seeking) */
+    if (vp->control_bar.visible &&
+        (vp->state == VP_STATE_PLAYING || vp->control_bar.seek_hold_active)) {
+        if (vp->control_bar.ui_update_timer)
+            wl_event_source_timer_update(vp->control_bar.ui_update_timer, UI_UPDATE_TICK_MS);
+    }
+
+    return 0;
 }
 
 /* ================================================================

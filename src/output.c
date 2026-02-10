@@ -2335,6 +2335,52 @@ render_playback_osd(void)
 	/* Right side: Sound and Subtitles buttons */
 	int right_x = bar_w - padding - btn_w * 2 - 10;  /* 10px gap between buttons */
 
+	/* Progress bar and time display */
+	if (active_videoplayer && active_videoplayer->duration_us > 0) {
+		int64_t pos = (active_videoplayer->seek_requested || active_videoplayer->control_bar.seek_hold_active)
+			? active_videoplayer->seek_target_us
+			: active_videoplayer->position_us;
+		int64_t dur = active_videoplayer->duration_us;
+		float progress_bg[4] = {0.25f, 0.25f, 0.3f, 1.0f};
+		float progress_fg[4] = {0.3f, 0.6f, 1.0f, 1.0f};
+
+		/* Time text: "pos / dur" */
+		char pos_str[16], dur_str[16], time_str[40];
+		videoplayer_format_time(pos_str, sizeof(pos_str), pos);
+		videoplayer_format_time(dur_str, sizeof(dur_str), dur);
+		snprintf(time_str, sizeof(time_str), "%s / %s", pos_str, dur_str);
+
+		int time_w = 140;
+		int time_x = right_x - padding - time_w;
+
+		/* Progress bar fills space between status and time */
+		int prog_x = padding + 90 + padding;
+		int prog_w = time_x - padding - prog_x;
+		int prog_h = 6;
+		int prog_y = (bar_h - prog_h) / 2;
+
+		if (prog_w > 50) {
+			/* Progress bar background */
+			drawrect(playback_osd_tree, prog_x, prog_y, prog_w, prog_h, progress_bg);
+
+			/* Progress bar fill */
+			float frac = (float)pos / dur;
+			if (frac < 0.0f) frac = 0.0f;
+			if (frac > 1.0f) frac = 1.0f;
+			int fill_w = (int)(prog_w * frac);
+			if (fill_w > 0)
+				drawrect(playback_osd_tree, prog_x, prog_y, fill_w, prog_h, progress_fg);
+		}
+
+		/* Time text */
+		text_tree = wlr_scene_tree_create(playback_osd_tree);
+		if (text_tree) {
+			wlr_scene_node_set_position(&text_tree->node, time_x, (bar_h - 14) / 2);
+			mod.tree = text_tree;
+			tray_render_label(&mod, time_str, 0, 14, dim_text);
+		}
+	}
+
 	/* Sound button */
 	{
 		float *bg = (osd_menu_open == OSD_MENU_SOUND) ? btn_selected : btn_bg;

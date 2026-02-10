@@ -169,6 +169,17 @@ typedef struct VideoPlayerControlBar {
     float hover_alpha;
     uint64_t last_activity_ms;
     struct wl_event_source *hide_timer;
+
+    /* Hold-to-seek state */
+    int seek_hold_active;
+    int seek_hold_direction;       /* +1 forward, -1 backward */
+    uint64_t seek_hold_start_ms;
+    int seek_hold_count;
+    struct wl_event_source *seek_hold_timer;
+    int64_t seek_hold_base_us;
+
+    /* Real-time UI update timer */
+    struct wl_event_source *ui_update_timer;
 } VideoPlayerControlBar;
 
 /* ================================================================
@@ -463,10 +474,18 @@ void videoplayer_setup_display_mode(VideoPlayer *vp, float display_hz, int vrr_c
 
 /* Input handling */
 int videoplayer_handle_key(VideoPlayer *vp, uint32_t mods, xkb_keysym_t sym);
+int videoplayer_handle_key_release(VideoPlayer *vp, xkb_keysym_t sym);
 int videoplayer_handle_motion(VideoPlayer *vp, int x, int y);
 int videoplayer_handle_button(VideoPlayer *vp, int x, int y, uint32_t button, int pressed);
 
+/* Hold-to-seek */
+void videoplayer_seek_hold_start(VideoPlayer *vp, int direction);
+void videoplayer_seek_hold_stop(VideoPlayer *vp);
+
 /* UI */
+int videoplayer_init_control_bar(VideoPlayer *vp, struct wlr_scene_tree *parent,
+                                  int screen_width, int screen_height);
+void videoplayer_cleanup_control_bar(VideoPlayer *vp);
 void videoplayer_show_control_bar(VideoPlayer *vp);
 void videoplayer_hide_control_bar(VideoPlayer *vp);
 void videoplayer_render_control_bar(VideoPlayer *vp);

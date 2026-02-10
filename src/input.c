@@ -1105,6 +1105,16 @@ keypress(struct wl_listener *listener, void *data)
 		}
 	}
 
+	/* Handle key release for video player hold-to-seek */
+	if (event->state == WL_KEYBOARD_KEY_STATE_RELEASED &&
+	    active_videoplayer && active_videoplayer->control_bar.seek_hold_active) {
+		for (i = 0; i < nsyms; i++) {
+			if (videoplayer_handle_key_release(active_videoplayer, syms[i])) {
+				render_playback_osd();
+			}
+		}
+	}
+
 	/* Don't enable key repeat for modal/nixpkgs text input to avoid double characters.
 	 * Only allow repeat for navigation keys (arrows, backspace) in modal/nixpkgs. */
 	{

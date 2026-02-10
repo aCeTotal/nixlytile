@@ -299,12 +299,14 @@ int videoplayer_handle_key(VideoPlayer *vp, uint32_t mods, xkb_keysym_t sym)
     case XKB_KEY_space:
     case XKB_KEY_k:
     case XKB_KEY_K:
+        if (vp->control_bar.seek_hold_active)
+            videoplayer_seek_hold_stop(vp);
         videoplayer_toggle_pause(vp);
         return 1;
 
-    /* Seek backward */
+    /* Seek backward (hold-to-seek with acceleration) */
     case XKB_KEY_Left:
-        videoplayer_seek_relative(vp, -SEEK_SMALL);
+        videoplayer_seek_hold_start(vp, -1);
         return 1;
 
     case XKB_KEY_j:
@@ -312,9 +314,9 @@ int videoplayer_handle_key(VideoPlayer *vp, uint32_t mods, xkb_keysym_t sym)
         videoplayer_seek_relative(vp, -SEEK_LARGE);
         return 1;
 
-    /* Seek forward */
+    /* Seek forward (hold-to-seek with acceleration) */
     case XKB_KEY_Right:
-        videoplayer_seek_relative(vp, SEEK_SMALL);
+        videoplayer_seek_hold_start(vp, 1);
         return 1;
 
     case XKB_KEY_l:
@@ -355,6 +357,8 @@ int videoplayer_handle_key(VideoPlayer *vp, uint32_t mods, xkb_keysym_t sym)
     case XKB_KEY_Escape:
     case XKB_KEY_q:
     case XKB_KEY_Q:
+        if (vp->control_bar.seek_hold_active)
+            videoplayer_seek_hold_stop(vp);
         videoplayer_stop(vp);
         return 1;
 
@@ -526,6 +530,30 @@ int videoplayer_handle_button(VideoPlayer *vp, int x, int y, uint32_t button, in
     }
 
     return 1;  /* Consumed click */
+}
+
+int videoplayer_handle_key_release(VideoPlayer *vp, xkb_keysym_t sym)
+{
+    if (!vp)
+        return 0;
+
+    if (vp->state == VP_STATE_IDLE || vp->state == VP_STATE_ERROR)
+        return 0;
+
+    switch (sym) {
+    case XKB_KEY_Left:
+    case XKB_KEY_Right:
+        if (vp->control_bar.seek_hold_active) {
+            videoplayer_seek_hold_stop(vp);
+            return 1;
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    return 0;
 }
 
 /* ================================================================

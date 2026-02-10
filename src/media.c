@@ -2031,19 +2031,32 @@ handle_playback_osd_input(int button)
 		if (osd_menu_open == OSD_MENU_SUBTITLES) {
 			osd_menu_open = OSD_MENU_SOUND;
 			osd_menu_selection = 0;
-		} else if (osd_menu_open == OSD_MENU_NONE) {
-			/* Could add seek left here */
+		} else if (osd_menu_open == OSD_MENU_NONE && active_videoplayer) {
+			videoplayer_seek_hold_start(active_videoplayer, -1);
 		}
 		handled = 1;
 		break;
 
 	case BTN_DPAD_RIGHT:
-		if (osd_menu_open == OSD_MENU_NONE) {
-			osd_menu_open = OSD_MENU_SOUND;
-			osd_menu_selection = 0;
+		if (osd_menu_open == OSD_MENU_NONE && active_videoplayer) {
+			videoplayer_seek_hold_start(active_videoplayer, 1);
 		} else if (osd_menu_open == OSD_MENU_SOUND) {
 			osd_menu_open = OSD_MENU_SUBTITLES;
 			osd_menu_selection = 0;
+		}
+		handled = 1;
+		break;
+
+	case BTN_TL:  /* Left shoulder - seek backward */
+		if (active_videoplayer) {
+			videoplayer_seek_hold_start(active_videoplayer, -1);
+		}
+		handled = 1;
+		break;
+
+	case BTN_TR:  /* Right shoulder - seek forward */
+		if (active_videoplayer) {
+			videoplayer_seek_hold_start(active_videoplayer, 1);
 		}
 		handled = 1;
 		break;

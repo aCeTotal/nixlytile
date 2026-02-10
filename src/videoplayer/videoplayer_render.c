@@ -1306,6 +1306,9 @@ void videoplayer_set_fullscreen_size(VideoPlayer *vp, int width, int height)
     /* Store fullscreen dimensions for control bar positioning */
     vp->fullscreen_width = width;
     vp->fullscreen_height = height;
+
+    /* Control bar is rendered in the compositor's playback OSD (output.c),
+     * not as a separate videoplayer overlay. */
 }
 
 /* ================================================================
