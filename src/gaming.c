@@ -1566,9 +1566,6 @@ pc_gaming_show(Monitor *m)
 	wlr_scene_node_set_enabled(&pg->tree->node, 1);
 	wlr_scene_node_raise_to_top(&pg->tree->node);
 
-	/* Hide mouse cursor in PC gaming view */
-	wlr_cursor_set_surface(cursor, NULL, 0, 0);
-
 	/* Update install status and start timer */
 	pc_gaming_update_install_status(m);
 	pc_gaming_start_install_timer();

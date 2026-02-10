@@ -451,7 +451,9 @@ powermgrsetmode(struct wl_listener *listener, void *data)
 static void
 present_videoplayer_frame(Monitor *m, uint64_t frame_start_ns)
 {
-	if (active_videoplayer && active_videoplayer->state == VP_STATE_PLAYING) {
+	if (active_videoplayer &&
+	    (active_videoplayer->state == VP_STATE_PLAYING ||
+	     active_videoplayer->state == VP_STATE_BUFFERING)) {
 		videoplayer_present_frame(active_videoplayer, frame_start_ns);
 		wlr_output_schedule_frame(m->wlr_output);
 	}

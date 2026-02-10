@@ -116,10 +116,17 @@ typedef struct SubtitleTrack {
  *  Frame Queue
  * ================================================================ */
 
-#define VP_FRAME_QUEUE_SIZE 16     /* Large buffer for smooth playback */
+#define VP_FRAME_QUEUE_SIZE 16     /* Pre-converted BGRA buffers for smooth playback */
+#define VP_BUFFER_POOL_SIZE 24     /* Recycled pixel data buffers to avoid mmap/munmap */
+#define VP_PACKET_QUEUE_SIZE 256   /* Demuxed packets buffered between I/O and decode threads */
+
+typedef struct PacketQueueEntry {
+    AVPacket *pkt;
+    int ready;
+} PacketQueueEntry;
 
 typedef struct VideoPlayerFrame {
-    struct wlr_buffer *buffer;
+    struct wlr_buffer *buffer;     /* Pre-converted BGRA buffer, ready for display */
     int64_t pts_us;                /* Presentation timestamp (microseconds) */
     int64_t duration_us;           /* Frame duration (microseconds) */
     int width;
@@ -168,7 +175,7 @@ typedef struct VideoPlayerControlBar {
  *  Audio Ring Buffer
  * ================================================================ */
 
-#define AUDIO_RING_BUFFER_SIZE (48000 * 8 * sizeof(float) * 2)  /* ~1 second of 8ch 48kHz */
+#define AUDIO_RING_BUFFER_SIZE (48000 * 8 * sizeof(float) * 4)  /* ~4 seconds of 8ch 48kHz */
 
 typedef struct AudioRingBuffer {
     uint8_t *data;
@@ -201,8 +208,11 @@ typedef struct VideoPlayerAudio {
     int sample_rate;
     int channels;
 
+    /* Clock interpolation for smooth A/V sync */
+    uint64_t clock_update_ns;      /* Wallclock time of last on_process update */
+    int64_t  clock_snapshot_us;    /* audio_pts_us at that moment */
+
     /* Sync tracking (per-instance, not static) */
-    int64_t last_clock;            /* Last returned clock value (for trylock fallback) */
     int64_t last_audio_pts;        /* Last audio PTS for stall detection */
     int stall_count;               /* Frames since audio clock progressed */
     int recovery_frames;           /* Frames to wait after audio recovery before using A/V sync */
@@ -326,6 +336,28 @@ typedef struct VideoPlayer {
     volatile int seek_requested;
     int64_t seek_target_us;
 
+    /* Demux thread (I/O separated from decode) */
+    pthread_t demux_thread;
+    volatile int demux_running;
+    volatile int demux_eof;
+    volatile int seek_flush_done;
+
+    /* Packet queue (demux → decode) */
+    PacketQueueEntry packet_queue[VP_PACKET_QUEUE_SIZE];
+    int pkt_read_idx;
+    int pkt_write_idx;
+    int pkts_queued;
+    pthread_mutex_t pkt_mutex;
+    pthread_cond_t pkt_not_empty;
+    pthread_cond_t pkt_not_full;
+
+    /* VA-API verification */
+    volatile int vaapi_format_rejected;
+    int hw_verified;
+
+    /* Local file flag - used for reduced probing and lower buffer thresholds */
+    int is_local_file;
+
     /* Audio */
     VideoPlayerAudio audio;
 
@@ -341,12 +373,44 @@ typedef struct VideoPlayer {
     float video_fps;
     float display_hz;                      /* Current display refresh rate */
 
+    /* Relative A/V sync — compares elapsed time from a common reference
+     * to cancel constant PTS offsets between audio and video streams.
+     * Without this, HTTP streams where audio base_pts != video base_pts
+     * show a permanent offset that triggers continuous frame-skipping. */
+    int64_t av_sync_video_base_us;
+    int64_t av_sync_audio_base_us;
+    int av_sync_established;
+
+    /* Buffer pool - reuse pixel data buffers to avoid per-frame mmap/munmap.
+     * Without this, each frame triggers mmap+munmap system calls (8-33MB per frame),
+     * causing page faults, TLB flushes, and significant stutter. */
+    struct {
+        void *data[VP_BUFFER_POOL_SIZE];
+        int count;
+        size_t alloc_size;                 /* Expected buffer size (width*height*4) */
+        pthread_mutex_t lock;
+    } buffer_pool;
+
+    /* Per-instance counters (not static - avoids stale state across open/close cycles) */
+    int recovery_check_counter;            /* Periodic audio recovery check */
+    int audio_interrupted_ticks;           /* Ticks since audio was interrupted */
+
     /* Volume */
     float volume;                          /* 0.0 - 1.0 */
     int muted;
 
     /* Playback speed */
     float speed;                           /* 1.0 = normal */
+
+    /* Debug log file (written to ~/nixlytile/videoplayer_debug.log) */
+    FILE *debug_log;
+    int debug_frame_count;                 /* Frames since open */
+    int debug_vsync_count;                 /* Vsyncs since last video frame presentation */
+    uint64_t debug_last_present_ns;        /* Wall-clock of last presented video frame */
+    int debug_total_skips;                 /* Total frames skipped (A/V sync) since open */
+    int debug_total_empty;                 /* Total queue-empty events since open */
+    int debug_total_snaps;                 /* Total timing snap-forwards since open */
+    volatile int debug_audio_underruns;    /* Audio buffer underruns in PipeWire on_process */
 } VideoPlayer;
 
 /* ================================================================

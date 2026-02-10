@@ -17,7 +17,16 @@
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/props.h>
 
+#include <time.h>
+
 #include "videoplayer.h"
+
+static uint64_t get_time_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
 
 /* Audio buffer settings */
 #define AUDIO_BUFFER_FRAMES 2048
@@ -203,6 +212,7 @@ static void on_process(void *userdata)
     /* Fill remaining with silence if not enough data */
     if (bytes_read < bytes_needed) {
         memset((uint8_t *)dst + bytes_read, 0, bytes_needed - bytes_read);
+        vp->debug_audio_underruns++;
     }
 
     /* Apply volume and mute */
@@ -219,25 +229,26 @@ static void on_process(void *userdata)
         }
     }
 
-    /* Update audio clock based on samples actually played */
+    /* Update audio clock based on samples actually played.
+     * Use audio_played_samples directly — it's incremented here under
+     * audio.lock, so it's race-free. The previous approach (written -
+     * ring_buffer_available) had a TOCTOU race: the decode thread could
+     * increment audio_written_samples between the ring_buffer_available
+     * read and the audio.lock acquisition, inflating the clock and
+     * causing periodic A/V sync jumps. */
     if (bytes_read > 0) {
         uint32_t frames_played = bytes_read / stride;
-
-        /* Get buffer level BEFORE taking audio.lock to avoid deadlock */
-        size_t buffer_bytes = ring_buffer_available(&vp->audio.ring);
-        size_t buffer_samples = buffer_bytes / stride;
 
         pthread_mutex_lock(&vp->audio.lock);
         vp->audio.audio_played_samples += frames_played;
 
-        /* Calculate audio PTS based on difference between written and remaining in buffer */
-        /* This gives us the actual playback position */
-        uint64_t played_from_written = 0;
-        if (vp->audio.audio_written_samples > buffer_samples) {
-            played_from_written = vp->audio.audio_written_samples - buffer_samples;
-        }
-        int64_t samples_to_us = (played_from_written * 1000000LL) / vp->audio.sample_rate;
+        int64_t samples_to_us = ((int64_t)vp->audio.audio_played_samples * 1000000LL) / vp->audio.sample_rate;
         vp->audio.audio_pts_us = vp->audio.base_pts_us + samples_to_us;
+
+        /* Snapshot for clock interpolation — render thread extrapolates
+         * between on_process calls to avoid discrete stepping artifacts */
+        vp->audio.clock_snapshot_us = vp->audio.audio_pts_us;
+        vp->audio.clock_update_ns = get_time_ns();
         pthread_mutex_unlock(&vp->audio.lock);
     }
 
@@ -285,7 +296,6 @@ static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
 
             /* Signal render thread to use timing-based playback immediately */
             vp->audio.stream_interrupted = 1;
-            vp->audio.needs_device_pause = 1;
             /* Tell render thread to reset frame timing so video never stalls */
             vp->audio.needs_timing_reset = 1;
             /* Reset reactivation counter for staged recovery */
@@ -299,7 +309,8 @@ static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
             vp->audio.base_pts_us = 0;
             vp->audio.audio_written_samples = 0;
             vp->audio.audio_played_samples = 0;
-            vp->audio.last_clock = 0;
+            vp->audio.clock_update_ns = 0;
+            vp->audio.clock_snapshot_us = 0;
             vp->audio.last_audio_pts = 0;
             vp->audio.stall_count = 0;
             vp->audio.recovery_frames = 15;
@@ -343,6 +354,8 @@ static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
             vp->audio.base_pts_us = 0;
             vp->audio.audio_written_samples = 0;
             vp->audio.audio_played_samples = 0;
+            vp->audio.clock_update_ns = 0;
+            vp->audio.clock_snapshot_us = 0;
             vp->audio.recovery_frames = 15;
             pthread_mutex_unlock(&vp->audio.lock);
         } else {
@@ -365,9 +378,8 @@ static void on_param_changed(void *userdata, uint32_t id, const struct spa_pod *
          * (e.g., Bluetooth connection causing PipeWire to move the stream). */
         if (vp->state == VP_STATE_PLAYING && !vp->audio.user_paused &&
             !vp->audio.stream_interrupted) {
-            fprintf(stderr, "[audio] Format change during playback - device change detected, pausing\n");
+            fprintf(stderr, "[audio] Format change during playback - device change detected\n");
             vp->audio.stream_interrupted = 1;
-            vp->audio.needs_device_pause = 1;
             vp->audio.needs_timing_reset = 1;
         }
     }
@@ -567,7 +579,8 @@ int videoplayer_audio_init(VideoPlayer *vp)
     vp->audio.muted = 0;
     vp->audio.base_pts_us = 0;
     vp->audio.audio_played_samples = 0;
-    vp->audio.last_clock = 0;
+    vp->audio.clock_update_ns = 0;
+    vp->audio.clock_snapshot_us = 0;
     vp->audio.last_audio_pts = 0;
     vp->audio.stall_count = 0;
     vp->audio.recovery_frames = 0;
@@ -725,6 +738,12 @@ int videoplayer_audio_init(VideoPlayer *vp)
         return -1;
     }
 
+    /* Start stream inactive — audio must not play until videoplayer_play()
+     * sends AUDIO_CMD_PLAY.  Without this, PipeWire starts consuming the
+     * ring buffer immediately while video is still in PAUSED state, causing
+     * the audio clock to run ahead of video and creating A/V desync. */
+    pw_stream_set_active(vp->audio.stream, false);
+
     pw_thread_loop_unlock(vp->audio.loop);
 
     fprintf(stderr, "[audio] Initialized: %d channels @ %d Hz\n", channels, sample_rate);
@@ -809,9 +828,6 @@ void videoplayer_audio_cleanup(VideoPlayer *vp)
  */
 int videoplayer_audio_check_recovery(VideoPlayer *vp)
 {
-    /* Track how long we've been interrupted (called ~every 0.5s from render thread) */
-    static int interrupted_ticks = 0;
-
     if (!vp)
         return 0;
 
@@ -825,12 +841,12 @@ int videoplayer_audio_check_recovery(VideoPlayer *vp)
 
     /* Just check the volatile flag - no locking required. */
     if (vp->audio.stream_interrupted) {
-        interrupted_ticks++;
+        vp->audio_interrupted_ticks++;
 
         /* Stage 1: After ~1 second, try reactivating the existing stream.
          * This handles the common case where PipeWire paused the stream
          * during BT device routing and just needs it set active again. */
-        if (interrupted_ticks == 2 && vp->audio.reactivate_attempts < 2) {
+        if (vp->audio_interrupted_ticks == 2 && vp->audio.reactivate_attempts < 2) {
             fprintf(stderr, "[audio] Trying stream reactivation (attempt %d)\n",
                     vp->audio.reactivate_attempts + 1);
             vp->audio.reactivate_attempts++;
@@ -841,10 +857,10 @@ int videoplayer_audio_check_recovery(VideoPlayer *vp)
 
         /* Stage 2: After ~2 seconds, do a full RECREATE.
          * The stream is probably dead — destroy and rebuild. */
-        if (interrupted_ticks >= 4) {
+        if (vp->audio_interrupted_ticks >= 4) {
             fprintf(stderr, "[audio] Stream interrupted for %d ticks, sending RECREATE command\n",
-                    interrupted_ticks);
-            interrupted_ticks = 0;
+                    vp->audio_interrupted_ticks);
+            vp->audio_interrupted_ticks = 0;
 
             if (!vp->audio.audio_recreating) {
                 vp->audio.audio_recreating = 1;
@@ -857,7 +873,7 @@ int videoplayer_audio_check_recovery(VideoPlayer *vp)
     }
 
     /* Stream is healthy, reset the counter */
-    interrupted_ticks = 0;
+    vp->audio_interrupted_ticks = 0;
     return 0;
 }
 
@@ -928,6 +944,15 @@ int videoplayer_audio_queue_frame(VideoPlayer *vp, AVFrame *frame)
     /* If stream is interrupted (e.g., Bluetooth controller reconnect), drop audio
      * rather than queuing to a stale buffer. Video continues smoothly. */
     if (vp->audio.stream_interrupted)
+        return 0;
+
+    /* During user-initiated pause, PipeWire isn't consuming the ring buffer,
+     * so writes would fill it up and trigger the stall detector.  Drop audio.
+     * But during initial buffering (open → play transition, user_paused=0),
+     * we MUST keep audio in the ring buffer so it's ready when play() starts.
+     * Without this, the first ~667ms of audio is lost, creating massive A/V
+     * desync that causes aggressive frame-skipping on playback start. */
+    if (vp->state == VP_STATE_PAUSED && vp->audio.user_paused)
         return 0;
 
     /* Initialize or update resampler if needed */
@@ -1045,7 +1070,7 @@ int videoplayer_audio_queue_frame(VideoPlayer *vp, AVFrame *frame)
          * on_stream_state_changed. Detect this early to prevent the decode thread
          * from stalling on audio retries and starving video frame production. */
         vp->audio.write_stall_count++;
-        if (vp->audio.write_stall_count >= 3) {
+        if (vp->audio.write_stall_count >= 50) {
             fprintf(stderr, "[audio] Ring buffer stall detected (%d consecutive full writes)"
                     " - triggering early interruption for smooth video\n",
                     vp->audio.write_stall_count);
@@ -1079,7 +1104,8 @@ void videoplayer_audio_flush(VideoPlayer *vp)
     vp->audio.base_pts_us = 0;
     vp->audio.audio_written_samples = 0;
     vp->audio.audio_played_samples = 0;
-    vp->audio.last_clock = 0;
+    vp->audio.clock_update_ns = 0;
+    vp->audio.clock_snapshot_us = 0;
     vp->audio.last_audio_pts = 0;
     vp->audio.stall_count = 0;
     vp->audio.recovery_frames = 0;
@@ -1106,15 +1132,28 @@ int64_t videoplayer_audio_get_clock(VideoPlayer *vp)
     if (!vp)
         return 0;
 
-    /* Use trylock to avoid blocking render thread if PipeWire thread
-     * holds the mutex (e.g., during Bluetooth controller reconnection) */
-    if (pthread_mutex_trylock(&vp->audio.lock) == 0) {
-        vp->audio.last_clock = vp->audio.audio_pts_us;
-        pthread_mutex_unlock(&vp->audio.lock);
-    }
-    /* If we couldn't get the lock, return last known value (per-instance) */
+    /* Read the last on_process snapshot under lock, then interpolate
+     * using wallclock elapsed time.  This gives a smooth, continuous
+     * audio clock instead of one that jumps in discrete PipeWire
+     * quantum steps (~21ms), eliminating the beat-frequency hickup. */
+    pthread_mutex_lock(&vp->audio.lock);
+    int64_t  base_us = vp->audio.clock_snapshot_us;
+    uint64_t base_ns = vp->audio.clock_update_ns;
+    pthread_mutex_unlock(&vp->audio.lock);
 
-    return vp->audio.last_clock;
+    if (base_us <= 0 || base_ns == 0)
+        return 0;
+
+    uint64_t now_ns = get_time_ns();
+    if (now_ns > base_ns) {
+        int64_t elapsed_us = (int64_t)(now_ns - base_ns) / 1000;
+        /* Cap interpolation to one PipeWire period (~50ms) to avoid
+         * runaway extrapolation if on_process stops calling */
+        if (elapsed_us > 50000)
+            elapsed_us = 50000;
+        return base_us + elapsed_us;
+    }
+    return base_us;
 }
 
 void videoplayer_audio_set_clock(VideoPlayer *vp, int64_t pts_us)

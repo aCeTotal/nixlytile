@@ -35,6 +35,7 @@ extern void videoplayer_audio_cleanup(VideoPlayer *vp);
 extern void videoplayer_audio_cmd_shutdown(VideoPlayer *vp);
 extern void videoplayer_audio_play(VideoPlayer *vp);
 extern void videoplayer_audio_pause(VideoPlayer *vp);
+extern void videoplayer_audio_flush(VideoPlayer *vp);
 
 /* Forward declarations for subtitles */
 extern int videoplayer_subtitle_init(VideoPlayer *vp);
@@ -70,6 +71,9 @@ VideoPlayer *videoplayer_create(struct Monitor *mon)
     /* Initialize audio mutex */
     pthread_mutex_init(&vp->audio.lock, NULL);
 
+    /* Initialize buffer pool mutex */
+    pthread_mutex_init(&vp->buffer_pool.lock, NULL);
+
     fprintf(stderr, "[videoplayer] Created video player instance\n");
 
     return vp;
@@ -101,6 +105,15 @@ void videoplayer_destroy(VideoPlayer *vp)
     /* Cleanup audio mutex */
     pthread_mutex_destroy(&vp->audio.lock);
 
+    /* Free buffer pool */
+    pthread_mutex_lock(&vp->buffer_pool.lock);
+    for (int i = 0; i < vp->buffer_pool.count; i++) {
+        free(vp->buffer_pool.data[i]);
+    }
+    vp->buffer_pool.count = 0;
+    pthread_mutex_unlock(&vp->buffer_pool.lock);
+    pthread_mutex_destroy(&vp->buffer_pool.lock);
+
     free(vp);
 
     fprintf(stderr, "[videoplayer] Destroyed video player instance\n");
@@ -126,13 +139,44 @@ void videoplayer_play(VideoPlayer *vp)
     vp->last_present_time_ns = 0;
     vp->current_repeat = 0;
 
-    /* Reset A/V sync tracking for clean start after pause.
-     * Use a large recovery window (max ~2.5s at 24fps) but exit early
-     * once audio clock is confirmed progressing. This prevents stuttering
-     * when audio takes time to reactivate after pause/resume. */
+    /* Clear any false stream_interrupted flag set during pause.
+     * While paused, PipeWire stops consuming the ring buffer, so the decode
+     * thread's audio writes can trigger the stall detector (3 consecutive
+     * buffer-full writes → stream_interrupted=1). This is a false positive —
+     * the stream is healthy, just inactive. Must clear BEFORE calling
+     * videoplayer_audio_play() which skips activation if interrupted. */
+    vp->audio.stream_interrupted = 0;
+    vp->audio.write_stall_count = 0;
+
+    /* If the frame queue is low (e.g., just opened, or after a seek while
+     * paused), enter BUFFERING state to let the decode thread fill the queue
+     * before starting playback.  present_frame() will call play() again once
+     * VP_FRAME_QUEUE_SIZE*3/4 frames are ready.  This ensures the buffer is
+     * nearly full before playback begins, giving maximum runway to absorb
+     * HTTP streaming jitter or decode variance without ever running empty. */
+    pthread_mutex_lock(&vp->frame_mutex);
+    int queued = vp->frames_queued;
+    pthread_mutex_unlock(&vp->frame_mutex);
+
+    if (queued < VP_FRAME_QUEUE_SIZE * 3 / 4) {
+        vp->state = VP_STATE_BUFFERING;
+        fprintf(stderr, "[videoplayer] Play -> Buffering first (%d/%d frames)\n",
+                queued, VP_FRAME_QUEUE_SIZE * 3 / 4);
+        return;
+    }
+
+    /* Reset relative A/V sync so bases are recaptured after play/resume.
+     * This ensures the first valid audio-video comparison establishes a
+     * clean reference point, cancelling any PTS offset between streams. */
+    vp->av_sync_established = 0;
+
+    /* Reset A/V sync tracking for clean start after pause/buffer.
+     * Recovery window exits early once audio clock is confirmed progressing.
+     * Keep this short — long recovery disables A/V sync, allowing drift that
+     * causes a visible correction (frame skip) when sync re-engages. */
     vp->audio.stall_count = 0;
     vp->audio.last_audio_pts = 0;
-    vp->audio.recovery_frames = 60;
+    vp->audio.recovery_frames = 5;
 
     vp->state = VP_STATE_PLAYING;
 
@@ -168,7 +212,7 @@ void videoplayer_toggle_pause(VideoPlayer *vp)
 
     if (vp->state == VP_STATE_PLAYING) {
         videoplayer_pause(vp);
-    } else if (vp->state == VP_STATE_PAUSED) {
+    } else if (vp->state == VP_STATE_PAUSED || vp->state == VP_STATE_BUFFERING) {
         videoplayer_play(vp);
     }
 }

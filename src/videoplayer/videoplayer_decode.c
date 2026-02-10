@@ -11,8 +11,10 @@
 #include <unistd.h>
 #include <errno.h>
 #include <pthread.h>
+#include <sys/stat.h>
 
 #include <wlr/types/wlr_buffer.h>
+#include <wlr/types/wlr_scene.h>
 
 #include "videoplayer.h"
 
@@ -32,10 +34,14 @@ static int init_nvdec(VideoPlayer *vp);
 static int init_software_decoder(VideoPlayer *vp);
 static enum AVPixelFormat get_vaapi_format(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts);
 static void *decode_thread_func(void *arg);
+static void *demux_thread_func(void *arg);
 
-/* External audio functions */
+/* External functions */
+extern void videoplayer_play(VideoPlayer *vp);
 extern int videoplayer_audio_queue_frame(VideoPlayer *vp, AVFrame *frame);
 extern int videoplayer_audio_init(VideoPlayer *vp);
+extern void videoplayer_audio_cleanup(VideoPlayer *vp);
+extern void videoplayer_audio_cmd_shutdown(VideoPlayer *vp);
 extern void videoplayer_audio_play(VideoPlayer *vp);
 extern void videoplayer_audio_flush(VideoPlayer *vp);
 
@@ -331,8 +337,34 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
     snprintf(vp->filepath, sizeof(vp->filepath), "%s", filepath);
     vp->state = VP_STATE_LOADING;
 
-    /* Open file */
-    ret = avformat_open_input(&vp->fmt_ctx, filepath, NULL, NULL);
+    /* Detect local vs HTTP file for tuning probe/buffer parameters.
+     * Localhost HTTP (Jellyfin, Plex, etc.) gets the same fast treatment as
+     * local files: data is available instantly, no reconnect needed. */
+    int is_http = (strncmp(filepath, "http://", 7) == 0 ||
+                   strncmp(filepath, "https://", 8) == 0);
+    int is_localhost = is_http &&
+        (strstr(filepath, "://localhost") != NULL ||
+         strstr(filepath, "://127.0.0.1") != NULL ||
+         strstr(filepath, "://[::1]") != NULL);
+    vp->is_local_file = !is_http || is_localhost;
+
+    /* Open file - set HTTP-specific options for streaming resilience.
+     * Localhost doesn't need reconnect/timeout — it only adds latency. */
+    AVDictionary *opts = NULL;
+    if (is_http && !is_localhost) {
+        av_dict_set(&opts, "reconnect", "1", 0);
+        av_dict_set(&opts, "reconnect_streamed", "1", 0);
+        av_dict_set(&opts, "reconnect_delay_max", "2", 0);
+        av_dict_set(&opts, "rw_timeout", "5000000", 0);  /* 5s I/O timeout */
+        av_dict_set(&opts, "multiple_requests", "1", 0);  /* Reuse HTTP connection */
+        fprintf(stderr, "[videoplayer] HTTP stream: enabling reconnect + buffering options\n");
+    } else if (is_localhost) {
+        av_dict_set(&opts, "multiple_requests", "1", 0);
+        fprintf(stderr, "[videoplayer] Localhost stream: fast-start mode\n");
+    }
+
+    ret = avformat_open_input(&vp->fmt_ctx, filepath, NULL, &opts);
+    av_dict_free(&opts);
     if (ret < 0) {
         char errbuf[256];
         av_strerror(ret, errbuf, sizeof(errbuf));
@@ -340,6 +372,14 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
                  "Failed to open file: %s", errbuf);
         vp->state = VP_STATE_ERROR;
         return -1;
+    }
+
+    /* For local files, reduce probe time. The default analyzeduration (5s)
+     * is designed for unreliable network streams. Local files have all data
+     * available instantly, so 500ms is plenty for format/codec detection. */
+    if (vp->is_local_file) {
+        vp->fmt_ctx->max_analyze_duration = 500000;  /* 0.5s */
+        vp->fmt_ctx->probesize = 500000;              /* 500KB */
     }
 
     /* Find stream info */
@@ -456,6 +496,31 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
     pthread_mutex_init(&vp->frame_mutex, NULL);
     pthread_cond_init(&vp->frame_cond, NULL);
 
+    /* Initialize packet queue */
+    pthread_mutex_init(&vp->pkt_mutex, NULL);
+    pthread_cond_init(&vp->pkt_not_empty, NULL);
+    pthread_cond_init(&vp->pkt_not_full, NULL);
+    vp->pkt_read_idx = 0;
+    vp->pkt_write_idx = 0;
+    vp->pkts_queued = 0;
+    vp->demux_eof = 0;
+    vp->seek_flush_done = 0;
+    for (int i = 0; i < VP_PACKET_QUEUE_SIZE; i++) {
+        vp->packet_queue[i].pkt = av_packet_alloc();
+        vp->packet_queue[i].ready = 0;
+    }
+
+    /* Start demux thread (I/O) */
+    vp->demux_running = 1;
+    ret = pthread_create(&vp->demux_thread, NULL, demux_thread_func, vp);
+    if (ret != 0) {
+        snprintf(vp->error_msg, sizeof(vp->error_msg),
+                 "Failed to create demux thread: %s", strerror(ret));
+        vp->demux_running = 0;
+        vp->state = VP_STATE_ERROR;
+        return -1;
+    }
+
     /* Start decode thread */
     vp->decode_running = 1;
     ret = pthread_create(&vp->decode_thread, NULL, decode_thread_func, vp);
@@ -463,13 +528,61 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
         snprintf(vp->error_msg, sizeof(vp->error_msg),
                  "Failed to create decode thread: %s", strerror(ret));
         vp->decode_running = 0;
+        /* Also stop demux thread */
+        vp->demux_running = 0;
+        pthread_cond_broadcast(&vp->pkt_not_full);
+        pthread_join(vp->demux_thread, NULL);
         vp->state = VP_STATE_ERROR;
         return -1;
     }
 
-    vp->state = VP_STATE_PAUSED;
+    /* Set frame interval from actual video FPS now that it's known.
+     * videoplayer_setup_display_mode() may have been called before open()
+     * when video_fps was still 0, leaving frame_interval_ns at a fallback. */
+    if (vp->video_fps > 0)
+        vp->frame_interval_ns = (uint64_t)(1000000000.0 / vp->video_fps);
+
+    /* Recalculate frame pacing with correct FPS if display Hz is known */
+    if (vp->display_hz > 0)
+        videoplayer_setup_display_mode(vp, vp->display_hz, vp->frame_repeat_mode == 0);
+
     fprintf(stderr, "[videoplayer] Opened: %s (duration: %.2fs)\n",
             filepath, vp->duration_us / 1000000.0);
+
+    /* Start in BUFFERING state — present_frame() waits for the decode thread
+     * to fill the frame queue to VP_FRAME_QUEUE_SIZE*3/4 before transitioning
+     * to PLAYING. This gives the decode thread a large head start so the queue
+     * has enough frames to absorb HTTP streaming jitter and decode variance.
+     * Audio is also deferred until the buffer is ready, so A/V start together. */
+    vp->state = VP_STATE_BUFFERING;
+
+    /* Open debug log for this playback session */
+    vp->debug_frame_count = 0;
+    vp->debug_vsync_count = 0;
+    vp->debug_last_present_ns = 0;
+    vp->debug_total_skips = 0;
+    vp->debug_total_empty = 0;
+    vp->debug_total_snaps = 0;
+    vp->debug_audio_underruns = 0;
+    if (!vp->debug_log) {
+        const char *home = getenv("HOME");
+        if (home) {
+            char logpath[PATH_MAX];
+            snprintf(logpath, sizeof(logpath), "%s/nixlytile/videoplayer_debug.log", home);
+            vp->debug_log = fopen(logpath, "w");
+            if (vp->debug_log) {
+                fprintf(vp->debug_log, "# Nixlytile Video Player Debug Log\n");
+                fprintf(vp->debug_log, "# File: %s\n", filepath);
+                fprintf(vp->debug_log, "# Video: %dx%d @ %.3f fps, HW=%d\n",
+                        vp->video.width, vp->video.height, vp->video_fps, vp->hw_accel);
+                fprintf(vp->debug_log, "# Display: %.2f Hz, frame_interval=%lu ns, pacing_mode=%d\n",
+                        vp->display_hz, (unsigned long)vp->frame_interval_ns, vp->frame_repeat_mode);
+                fprintf(vp->debug_log, "# frame | state  | q=queued | avsync | pos_ms | v=vsyncs | dt=actual/expected us\n");
+                fflush(vp->debug_log);
+                fprintf(stderr, "[videoplayer] Debug log: %s\n", logpath);
+            }
+        }
+    }
 
     return 0;
 }
@@ -479,12 +592,30 @@ void videoplayer_close(VideoPlayer *vp)
     if (!vp)
         return;
 
-    /* Stop decode thread */
-    if (vp->decode_running) {
+    /* Stop both threads. We check the flags before clearing to know
+     * which threads were actually started and need joining. */
+    {
+        int had_demux = vp->demux_running;
+        int had_decode = vp->decode_running;
+        vp->demux_running = 0;
         vp->decode_running = 0;
+
+        /* Wake up all waiting threads */
         pthread_cond_broadcast(&vp->frame_cond);
-        pthread_join(vp->decode_thread, NULL);
+        pthread_cond_broadcast(&vp->pkt_not_empty);
+        pthread_cond_broadcast(&vp->pkt_not_full);
+
+        if (had_demux)
+            pthread_join(vp->demux_thread, NULL);
+        if (had_decode)
+            pthread_join(vp->decode_thread, NULL);
     }
+
+    /* Release the scene node's buffer reference BEFORE freeing queue buffers.
+     * This ensures the buffer's destroy callback can return pixel data to the
+     * pool while the pool is still valid. */
+    if (vp->frame_node)
+        wlr_scene_buffer_set_buffer(vp->frame_node, NULL);
 
     /* Free any remaining frame queue buffers before destroying the mutex */
     for (int i = 0; i < VP_FRAME_QUEUE_SIZE; i++) {
@@ -495,9 +626,37 @@ void videoplayer_close(VideoPlayer *vp)
         vp->frame_queue[i].ready = 0;
     }
 
+    /* Free buffer pool (after all buffers have been returned/freed above) */
+    pthread_mutex_lock(&vp->buffer_pool.lock);
+    for (int i = 0; i < vp->buffer_pool.count; i++) {
+        free(vp->buffer_pool.data[i]);
+    }
+    vp->buffer_pool.count = 0;
+    vp->buffer_pool.alloc_size = 0;
+    pthread_mutex_unlock(&vp->buffer_pool.lock);
+
     /* Clean up frame queue */
     pthread_mutex_destroy(&vp->frame_mutex);
     pthread_cond_destroy(&vp->frame_cond);
+
+    /* Clean up packet queue */
+    for (int i = 0; i < VP_PACKET_QUEUE_SIZE; i++) {
+        if (vp->packet_queue[i].pkt) {
+            av_packet_free(&vp->packet_queue[i].pkt);
+        }
+        vp->packet_queue[i].ready = 0;
+    }
+    vp->pkts_queued = 0;
+    vp->pkt_read_idx = 0;
+    vp->pkt_write_idx = 0;
+    pthread_mutex_destroy(&vp->pkt_mutex);
+    pthread_cond_destroy(&vp->pkt_not_empty);
+    pthread_cond_destroy(&vp->pkt_not_full);
+
+    /* Cleanup audio output (PipeWire, ring buffer, resampler).
+     * Must shut down cmd thread first — it holds PipeWire locks. */
+    videoplayer_audio_cmd_shutdown(vp);
+    videoplayer_audio_cleanup(vp);
 
     /* Free frames */
     av_frame_free(&vp->decode_frame);
@@ -522,6 +681,15 @@ void videoplayer_close(VideoPlayer *vp)
     /* Close format context */
     avformat_close_input(&vp->fmt_ctx);
 
+    /* Close debug log */
+    if (vp->debug_log) {
+        fprintf(vp->debug_log, "# Closed after %d frames | skips=%d empty=%d snaps=%d underruns=%d\n",
+                vp->debug_frame_count, vp->debug_total_skips, vp->debug_total_empty,
+                vp->debug_total_snaps, vp->debug_audio_underruns);
+        fclose(vp->debug_log);
+        vp->debug_log = NULL;
+    }
+
     /* Reset state */
     vp->state = VP_STATE_IDLE;
     vp->filepath[0] = '\0';
@@ -534,6 +702,10 @@ void videoplayer_close(VideoPlayer *vp)
     vp->frames_queued = 0;
     vp->frame_read_idx = 0;
     vp->frame_write_idx = 0;
+    vp->vaapi_format_rejected = 0;
+    vp->hw_verified = 0;
+    vp->demux_eof = 0;
+    vp->seek_flush_done = 0;
     memset(&vp->video, 0, sizeof(vp->video));
 }
 
@@ -545,35 +717,58 @@ static enum AVPixelFormat get_vaapi_format(AVCodecContext *ctx,
                                             const enum AVPixelFormat *pix_fmts)
 {
     const enum AVPixelFormat *p;
+    VideoPlayer *vp = (VideoPlayer *)ctx->opaque;
+
+    fprintf(stderr, "[videoplayer] VA-API format negotiation, offered formats:");
+    for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+        fprintf(stderr, " %s", av_get_pix_fmt_name(*p));
+    }
+    fprintf(stderr, "\n");
 
     for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
-        if (*p == AV_PIX_FMT_VAAPI)
+        if (*p == AV_PIX_FMT_VAAPI) {
+            fprintf(stderr, "[videoplayer] VA-API format accepted\n");
             return *p;
+        }
     }
 
-    fprintf(stderr, "[videoplayer] VA-API format not available, falling back\n");
+    fprintf(stderr, "[videoplayer] VA-API format NOT in list, rejecting\n");
+    if (vp)
+        vp->vaapi_format_rejected = 1;
     return AV_PIX_FMT_NONE;
 }
 
 static int init_vaapi(VideoPlayer *vp)
 {
     int ret;
-    const char *device = VAAPI_DEVICE;
+    struct stat st;
+    const char *device = NULL;
 
-    /* Try primary device */
+    /* Check which DRI render node exists */
+    if (stat(VAAPI_DEVICE, &st) == 0) {
+        device = VAAPI_DEVICE;
+        fprintf(stderr, "[videoplayer] Found render node: %s\n", VAAPI_DEVICE);
+    } else if (stat(VAAPI_DEVICE_ALT, &st) == 0) {
+        device = VAAPI_DEVICE_ALT;
+        fprintf(stderr, "[videoplayer] Found render node: %s\n", VAAPI_DEVICE_ALT);
+    } else {
+        fprintf(stderr, "[videoplayer] No DRI render node found (%s, %s)\n",
+                VAAPI_DEVICE, VAAPI_DEVICE_ALT);
+        return -1;
+    }
+
+    /* Set opaque for get_vaapi_format callback communication */
+    vp->video_codec_ctx->opaque = vp;
+    vp->vaapi_format_rejected = 0;
+    vp->hw_verified = 0;
+
+    /* Create HW device context */
     ret = av_hwdevice_ctx_create(&vp->hw_device_ctx, AV_HWDEVICE_TYPE_VAAPI,
                                   device, NULL, 0);
     if (ret < 0) {
-        /* Try alternate device */
-        device = VAAPI_DEVICE_ALT;
-        ret = av_hwdevice_ctx_create(&vp->hw_device_ctx, AV_HWDEVICE_TYPE_VAAPI,
-                                      device, NULL, 0);
-    }
-
-    if (ret < 0) {
         char errbuf[256];
         av_strerror(ret, errbuf, sizeof(errbuf));
-        fprintf(stderr, "[videoplayer] VA-API init failed: %s\n", errbuf);
+        fprintf(stderr, "[videoplayer] VA-API init failed on %s: %s\n", device, errbuf);
         return -1;
     }
 
@@ -811,6 +1006,228 @@ static int init_subtitle_decoder(VideoPlayer *vp)
 }
 
 /* ================================================================
+ *  Packet Queue (demux → decode)
+ * ================================================================ */
+
+/* Put a packet into the queue. Called from demux thread.
+ * Returns 0 on success, -1 if shutting down. */
+static int packet_queue_put(VideoPlayer *vp, AVPacket *pkt)
+{
+    pthread_mutex_lock(&vp->pkt_mutex);
+
+    /* Wait until space is available */
+    while (vp->pkts_queued >= VP_PACKET_QUEUE_SIZE && vp->demux_running) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 50000000;  /* 50ms timeout */
+        if (ts.tv_nsec >= 1000000000) {
+            ts.tv_sec++;
+            ts.tv_nsec -= 1000000000;
+        }
+        pthread_cond_timedwait(&vp->pkt_not_full, &vp->pkt_mutex, &ts);
+    }
+
+    if (!vp->demux_running) {
+        pthread_mutex_unlock(&vp->pkt_mutex);
+        return -1;
+    }
+
+    PacketQueueEntry *e = &vp->packet_queue[vp->pkt_write_idx];
+    av_packet_move_ref(e->pkt, pkt);
+    e->ready = 1;
+
+    vp->pkt_write_idx = (vp->pkt_write_idx + 1) % VP_PACKET_QUEUE_SIZE;
+    vp->pkts_queued++;
+
+    pthread_cond_signal(&vp->pkt_not_empty);
+    pthread_mutex_unlock(&vp->pkt_mutex);
+    return 0;
+}
+
+/* Get a packet from the queue. Called from decode thread.
+ * Returns 0 on success with pkt filled, 1 on EOF, -1 on shutdown. */
+static int packet_queue_get(VideoPlayer *vp, AVPacket *pkt)
+{
+    pthread_mutex_lock(&vp->pkt_mutex);
+
+    while (vp->pkts_queued == 0 && vp->decode_running) {
+        if (vp->demux_eof) {
+            pthread_mutex_unlock(&vp->pkt_mutex);
+            return 1;  /* EOF */
+        }
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 50000000;  /* 50ms timeout */
+        if (ts.tv_nsec >= 1000000000) {
+            ts.tv_sec++;
+            ts.tv_nsec -= 1000000000;
+        }
+        pthread_cond_timedwait(&vp->pkt_not_empty, &vp->pkt_mutex, &ts);
+    }
+
+    if (!vp->decode_running) {
+        pthread_mutex_unlock(&vp->pkt_mutex);
+        return -1;
+    }
+
+    /* Re-check EOF after wait (demux may have set it while we were waiting) */
+    if (vp->pkts_queued == 0 && vp->demux_eof) {
+        pthread_mutex_unlock(&vp->pkt_mutex);
+        return 1;
+    }
+
+    if (vp->pkts_queued == 0) {
+        pthread_mutex_unlock(&vp->pkt_mutex);
+        return 0;  /* Spurious wakeup, caller retries */
+    }
+
+    PacketQueueEntry *e = &vp->packet_queue[vp->pkt_read_idx];
+    av_packet_move_ref(pkt, e->pkt);
+    e->ready = 0;
+
+    vp->pkt_read_idx = (vp->pkt_read_idx + 1) % VP_PACKET_QUEUE_SIZE;
+    vp->pkts_queued--;
+
+    pthread_cond_signal(&vp->pkt_not_full);
+    pthread_mutex_unlock(&vp->pkt_mutex);
+    return 0;
+}
+
+/* Flush all packets in the queue. Called with pkt_mutex held. */
+static void packet_queue_flush_locked(VideoPlayer *vp)
+{
+    while (vp->pkts_queued > 0) {
+        PacketQueueEntry *e = &vp->packet_queue[vp->pkt_read_idx];
+        if (e->ready) {
+            av_packet_unref(e->pkt);
+            e->ready = 0;
+        }
+        vp->pkt_read_idx = (vp->pkt_read_idx + 1) % VP_PACKET_QUEUE_SIZE;
+        vp->pkts_queued--;
+    }
+    vp->pkt_read_idx = 0;
+    vp->pkt_write_idx = 0;
+    pthread_cond_broadcast(&vp->pkt_not_full);
+}
+
+/* ================================================================
+ *  Demux Thread (I/O)
+ * ================================================================ */
+
+static void *demux_thread_func(void *arg)
+{
+    VideoPlayer *vp = arg;
+    AVPacket *pkt = av_packet_alloc();
+    int ret;
+    int read_error_count = 0;
+
+    if (!pkt) {
+        fprintf(stderr, "[videoplayer] Demux: failed to allocate packet\n");
+        return NULL;
+    }
+
+    fprintf(stderr, "[videoplayer] Demux thread started\n");
+
+    while (vp->demux_running) {
+        /* Handle seek request — demux thread owns av_seek_frame.
+         * After completing the seek, wait for the decode thread to clear
+         * seek_requested before continuing. Without this, the demux thread
+         * loops back and re-enters the seek block (seek_requested is still
+         * set because the decode thread hasn't processed it yet), causing
+         * redundant seeks that flush the newly-read post-seek packets. */
+        if (vp->seek_requested && !vp->seek_flush_done) {
+            int64_t seek_target = vp->seek_target_us;
+            int64_t seek_ts = av_rescale_q(seek_target, AV_TIME_BASE_Q,
+                                           vp->fmt_ctx->streams[vp->video.stream_index]->time_base);
+
+            /* Flush packet queue before seeking */
+            pthread_mutex_lock(&vp->pkt_mutex);
+            packet_queue_flush_locked(vp);
+            pthread_mutex_unlock(&vp->pkt_mutex);
+
+            ret = av_seek_frame(vp->fmt_ctx, vp->video.stream_index, seek_ts,
+                                AVSEEK_FLAG_BACKWARD);
+            if (ret < 0) {
+                char errbuf[256];
+                av_strerror(ret, errbuf, sizeof(errbuf));
+                fprintf(stderr, "[videoplayer] Demux: seek failed: %s\n", errbuf);
+            }
+
+            vp->demux_eof = 0;
+            read_error_count = 0;
+
+            /* Signal decode thread that seek flush is done */
+            vp->seek_flush_done = 1;
+            pthread_cond_broadcast(&vp->pkt_not_empty);
+        }
+
+        /* Wait for decode thread to finish processing the seek before
+         * reading new packets. This prevents redundant seeks and ensures
+         * the decode thread has flushed its codecs and frame queue. */
+        if (vp->seek_requested) {
+            usleep(1000);
+            continue;
+        }
+
+        /* If at EOF, wait for seek or shutdown */
+        if (vp->demux_eof) {
+            usleep(50000);
+            continue;
+        }
+
+        /* Wait if packet queue is full */
+        pthread_mutex_lock(&vp->pkt_mutex);
+        if (vp->pkts_queued >= VP_PACKET_QUEUE_SIZE) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += 50000000;
+            if (ts.tv_nsec >= 1000000000) {
+                ts.tv_sec++;
+                ts.tv_nsec -= 1000000000;
+            }
+            pthread_cond_timedwait(&vp->pkt_not_full, &vp->pkt_mutex, &ts);
+        }
+        pthread_mutex_unlock(&vp->pkt_mutex);
+
+        if (!vp->demux_running)
+            break;
+
+        /* Read packet — the I/O-heavy operation, now isolated from decode */
+        ret = av_read_frame(vp->fmt_ctx, pkt);
+        if (ret < 0) {
+            if (ret == AVERROR_EOF) {
+                fprintf(stderr, "[videoplayer] Demux: EOF reached\n");
+                vp->demux_eof = 1;
+                pthread_cond_broadcast(&vp->pkt_not_empty);
+                continue;
+            }
+            read_error_count++;
+            if (read_error_count >= 100) {
+                fprintf(stderr, "[videoplayer] Demux: too many read errors (%d), stopping\n",
+                        read_error_count);
+                vp->demux_eof = 1;
+                pthread_cond_broadcast(&vp->pkt_not_empty);
+                break;
+            }
+            usleep(1000);
+            continue;
+        }
+
+        read_error_count = 0;
+
+        /* Put packet into queue for decode thread */
+        if (packet_queue_put(vp, pkt) < 0) {
+            av_packet_unref(pkt);
+            break;
+        }
+    }
+
+    av_packet_free(&pkt);
+    fprintf(stderr, "[videoplayer] Demux thread stopped\n");
+    return NULL;
+}
+
+/* ================================================================
  *  Decode Thread
  * ================================================================ */
 
@@ -834,59 +1251,84 @@ static int transfer_hw_frame(VideoPlayer *vp, AVFrame *hw_frame, AVFrame *sw_fra
     return 0;
 }
 
-static void *decode_thread_func(void *arg)
+/* Helper: drain all available video frames from the decoder and queue them.
+ * BLOCKING: waits for frame queue space (up to 50ms) when the queue is full.
+ * This throttles the decode thread to the render thread's consumption rate,
+ * preventing the VAAPI decoder from racing ahead and discarding frames.
+ * The audio ring buffer has 0.5-4s of pre-buffered data, so the ~42ms wait
+ * (one frame at 24fps) won't cause PipeWire underruns. */
+static void drain_video_frames(VideoPlayer *vp)
 {
-    VideoPlayer *vp = arg;
-    AVPacket *pkt = av_packet_alloc();
     int ret;
-    int read_error_count = 0;
 
-    if (!pkt) {
-        fprintf(stderr, "[videoplayer] Failed to allocate packet\n");
-        return NULL;
-    }
-
-    fprintf(stderr, "[videoplayer] Decode thread started\n");
-
-    while (vp->decode_running) {
-        /* Handle seek request */
-        if (vp->seek_requested) {
-            int64_t seek_target = vp->seek_target_us;
-            int64_t seek_ts = av_rescale_q(seek_target, AV_TIME_BASE_Q,
-                                           vp->fmt_ctx->streams[vp->video.stream_index]->time_base);
-
-            ret = av_seek_frame(vp->fmt_ctx, vp->video.stream_index, seek_ts,
-                                AVSEEK_FLAG_BACKWARD);
-            if (ret >= 0) {
-                avcodec_flush_buffers(vp->video_codec_ctx);
-                if (vp->audio_codec_ctx)
-                    avcodec_flush_buffers(vp->audio_codec_ctx);
-
-                /* Clear frame queue - free any buffered frames to avoid leaks */
-                pthread_mutex_lock(&vp->frame_mutex);
-                for (int i = 0; i < VP_FRAME_QUEUE_SIZE; i++) {
-                    if (vp->frame_queue[i].buffer) {
-                        wlr_buffer_drop(vp->frame_queue[i].buffer);
-                        vp->frame_queue[i].buffer = NULL;
-                    }
-                    vp->frame_queue[i].ready = 0;
-                }
-                vp->frames_queued = 0;
-                vp->frame_read_idx = 0;
-                vp->frame_write_idx = 0;
-                pthread_mutex_unlock(&vp->frame_mutex);
-
-                /* Flush audio buffer */
-                videoplayer_audio_flush(vp);
-
-                vp->position_us = seek_target;
-            }
-            vp->seek_requested = 0;
+    while (1) {
+        ret = avcodec_receive_frame(vp->video_codec_ctx, vp->decode_frame);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+            break;
+        if (ret < 0) {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            fprintf(stderr, "[videoplayer] receive_frame error: %s\n", errbuf);
+            break;
         }
 
-        /* Check if frame queue is full - use timed wait to prevent deadlock */
+        /* Post-first-frame HW acceleration verification */
+        if (!vp->hw_verified && vp->hw_accel == VP_HW_VAAPI) {
+            vp->hw_verified = 1;
+            if (vp->decode_frame->format != AV_PIX_FMT_VAAPI) {
+                fprintf(stderr, "[videoplayer] VA-API NOT active! "
+                        "Frame format=%s (expected vaapi), falling back to software\n",
+                        av_get_pix_fmt_name(vp->decode_frame->format));
+                vp->hw_accel = VP_HW_NONE;
+                av_buffer_unref(&vp->hw_device_ctx);
+            } else {
+                fprintf(stderr, "[videoplayer] VA-API confirmed active "
+                        "(frame format=%s)\n",
+                        av_get_pix_fmt_name(vp->decode_frame->format));
+            }
+        }
+        if (!vp->hw_verified && vp->hw_accel == VP_HW_NVDEC) {
+            vp->hw_verified = 1;
+            if (vp->decode_frame->format != AV_PIX_FMT_CUDA) {
+                fprintf(stderr, "[videoplayer] NVDEC NOT active! "
+                        "Frame format=%s (expected cuda), falling back to software\n",
+                        av_get_pix_fmt_name(vp->decode_frame->format));
+                vp->hw_accel = VP_HW_NONE;
+                av_buffer_unref(&vp->hw_device_ctx);
+            } else {
+                fprintf(stderr, "[videoplayer] NVDEC confirmed active "
+                        "(frame format=%s)\n",
+                        av_get_pix_fmt_name(vp->decode_frame->format));
+            }
+        }
+
+        AVFrame *frame_to_use = vp->decode_frame;
+
+        /* Transfer HW frame to system memory */
+        if (vp->hw_accel != VP_HW_NONE &&
+            (vp->decode_frame->format == AV_PIX_FMT_VAAPI ||
+             vp->decode_frame->format == AV_PIX_FMT_CUDA)) {
+            if (transfer_hw_frame(vp, vp->decode_frame, vp->sw_frame) < 0) {
+                av_frame_unref(vp->decode_frame);
+                continue;
+            }
+            frame_to_use = vp->sw_frame;
+        }
+
+        /* Wait for frame queue space BEFORE the expensive YUV→BGRA conversion.
+         * Blocking here is essential: without it, the VAAPI decoder races
+         * through packets much faster than the render thread consumes frames,
+         * discarding ~23 of every 24 decoded frames. This causes ~1-second
+         * PTS gaps in the frame queue, making video play at ~24x speed.
+         *
+         * The wait is typically <42ms (one render frame at 24fps). The audio
+         * ring buffer has 0.5-4s of pre-buffered data, so a brief wait here
+         * won't cause PipeWire underruns. This also naturally throttles the
+         * decode thread to the video framerate, keeping the packet queue
+         * buffered against I/O jitter. */
         pthread_mutex_lock(&vp->frame_mutex);
-        if (vp->frames_queued >= VP_FRAME_QUEUE_SIZE && vp->decode_running) {
+        while (vp->frames_queued >= VP_FRAME_QUEUE_SIZE &&
+               vp->decode_running && !vp->seek_requested) {
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
             ts.tv_nsec += 50000000;  /* 50ms timeout */
@@ -896,131 +1338,247 @@ static void *decode_thread_func(void *arg)
             }
             pthread_cond_timedwait(&vp->frame_cond, &vp->frame_mutex, &ts);
         }
+        int has_space = vp->frames_queued < VP_FRAME_QUEUE_SIZE;
         pthread_mutex_unlock(&vp->frame_mutex);
 
-        if (!vp->decode_running)
+        if (!has_space) {
+            /* Still full — shutting down or seeking, discard to unblock */
+            av_frame_unref(vp->decode_frame);
+            av_frame_unref(vp->sw_frame);
+            continue;
+        }
+
+        /* Calculate PTS in microseconds */
+        int64_t pts_us = 0;
+        if (frame_to_use->pts != AV_NOPTS_VALUE) {
+            AVRational tb = vp->fmt_ctx->streams[vp->video.stream_index]->time_base;
+            pts_us = av_rescale_q(frame_to_use->pts, tb, AV_TIME_BASE_Q);
+        }
+
+        /* Convert YUV→BGRA on the decode thread */
+        struct wlr_buffer *buffer = videoplayer_create_frame_buffer(vp, frame_to_use);
+        if (!buffer) {
+            av_frame_unref(vp->decode_frame);
+            av_frame_unref(vp->sw_frame);
+            continue;
+        }
+
+        /* Queue the frame (non-blocking). Since only we write to the queue
+         * and we confirmed space above, this always succeeds. */
+        pthread_mutex_lock(&vp->frame_mutex);
+        if (vp->frames_queued < VP_FRAME_QUEUE_SIZE) {
+            VideoPlayerFrame *qf = &vp->frame_queue[vp->frame_write_idx];
+
+            if (qf->buffer)
+                wlr_buffer_drop(qf->buffer);
+
+            qf->buffer = buffer;
+            qf->pts_us = pts_us;
+            qf->width = frame_to_use->width;
+            qf->height = frame_to_use->height;
+            qf->ready = 1;
+
+            vp->frame_write_idx = (vp->frame_write_idx + 1) % VP_FRAME_QUEUE_SIZE;
+            vp->frames_queued++;
+            buffer = NULL;  /* Ownership transferred */
+        }
+        pthread_cond_signal(&vp->frame_cond);
+        pthread_mutex_unlock(&vp->frame_mutex);
+
+        /* Drop buffer if queue filled between check and lock (shouldn't happen
+         * since only we write, but defensive). */
+        if (buffer)
+            wlr_buffer_drop(buffer);
+
+        av_frame_unref(vp->decode_frame);
+        av_frame_unref(vp->sw_frame);
+    }
+}
+
+/* Drain all immediately available audio packets from the packet queue.
+ * Called after processing a video packet to prevent sws_scale (which takes
+ * several ms for 1080p) from starving the audio ring buffer.  Without this,
+ * PipeWire's on_process callback finds the ring buffer empty ~75% of the time,
+ * causing clicking/stutter.
+ *
+ * Only dequeues consecutive audio packets at the head of the queue; stops at
+ * the first non-audio packet (video, subtitle) to preserve packet ordering. */
+static void drain_pending_audio(VideoPlayer *vp, AVPacket *scratch_pkt)
+{
+    if (!vp->audio_codec_ctx || vp->audio_track_count == 0)
+        return;
+
+    int audio_stream = vp->audio_tracks[vp->current_audio_track].stream_index;
+
+    while (vp->decode_running && !vp->seek_requested) {
+        pthread_mutex_lock(&vp->pkt_mutex);
+
+        if (vp->pkts_queued == 0) {
+            pthread_mutex_unlock(&vp->pkt_mutex);
             break;
-
-        /* If queue is still full after wait, skip this iteration */
-        if (vp->frames_queued >= VP_FRAME_QUEUE_SIZE) {
-            usleep(5000);  /* Small sleep before retry */
-            continue;
         }
 
-        /* Read packet */
-        ret = av_read_frame(vp->fmt_ctx, pkt);
-        if (ret < 0) {
-            if (ret == AVERROR_EOF) {
-                /* End of file - wait for frames to drain, then pause */
-                fprintf(stderr, "[videoplayer] End of file reached\n");
-                while (vp->frames_queued > 0 && vp->decode_running) {
-                    usleep(50000);  /* 50ms */
+        PacketQueueEntry *e = &vp->packet_queue[vp->pkt_read_idx];
+        if (!e->ready || e->pkt->stream_index != audio_stream) {
+            pthread_mutex_unlock(&vp->pkt_mutex);
+            break;
+        }
+
+        /* Dequeue the audio packet */
+        av_packet_move_ref(scratch_pkt, e->pkt);
+        e->ready = 0;
+        vp->pkt_read_idx = (vp->pkt_read_idx + 1) % VP_PACKET_QUEUE_SIZE;
+        vp->pkts_queued--;
+        pthread_cond_signal(&vp->pkt_not_full);
+        pthread_mutex_unlock(&vp->pkt_mutex);
+
+        /* Decode and queue to ring buffer */
+        int ret = avcodec_send_packet(vp->audio_codec_ctx, scratch_pkt);
+        if (ret >= 0) {
+            while (avcodec_receive_frame(vp->audio_codec_ctx, vp->audio_frame) >= 0) {
+                int qr = videoplayer_audio_queue_frame(vp, vp->audio_frame);
+                if (qr == 1 && vp->decode_running) {
+                    usleep(1000);
+                    videoplayer_audio_queue_frame(vp, vp->audio_frame);
                 }
-                /* Transition to paused so present_frame stops consuming
-                 * and the last frame stays visible on screen. */
-                vp->state = VP_STATE_PAUSED;
-                fprintf(stderr, "[videoplayer] Playback finished, state -> paused\n");
-                break;  /* Exit decode loop */
+                av_frame_unref(vp->audio_frame);
             }
-            /* Persistent read error - count consecutive failures */
-            read_error_count++;
-            if (read_error_count >= 100) {
-                fprintf(stderr, "[videoplayer] Too many consecutive read errors (%d), stopping\n",
-                        read_error_count);
-                vp->state = VP_STATE_ERROR;
-                snprintf(vp->error_msg, sizeof(vp->error_msg),
-                         "Persistent read error (corrupt file?)");
+        }
+        av_packet_unref(scratch_pkt);
+    }
+}
+
+static void *decode_thread_func(void *arg)
+{
+    VideoPlayer *vp = arg;
+    AVPacket *pkt = av_packet_alloc();
+    AVPacket *audio_scratch = av_packet_alloc();
+    int ret;
+
+    if (!pkt || !audio_scratch) {
+        fprintf(stderr, "[videoplayer] Decode: failed to allocate packet\n");
+        av_packet_free(&pkt);
+        av_packet_free(&audio_scratch);
+        return NULL;
+    }
+
+    fprintf(stderr, "[videoplayer] Decode thread started\n");
+
+    while (vp->decode_running) {
+        /* Handle seek: wait for demux thread to flush packet queue and seek */
+        if (vp->seek_requested) {
+            /* Wait for demux thread to complete the seek */
+            while (!vp->seek_flush_done && vp->decode_running)
+                usleep(1000);
+
+            if (!vp->decode_running)
                 break;
+
+            /* Flush codecs */
+            avcodec_flush_buffers(vp->video_codec_ctx);
+            if (vp->audio_codec_ctx)
+                avcodec_flush_buffers(vp->audio_codec_ctx);
+
+            /* Clear frame queue */
+            pthread_mutex_lock(&vp->frame_mutex);
+            for (int i = 0; i < VP_FRAME_QUEUE_SIZE; i++) {
+                if (vp->frame_queue[i].buffer) {
+                    wlr_buffer_drop(vp->frame_queue[i].buffer);
+                    vp->frame_queue[i].buffer = NULL;
+                }
+                vp->frame_queue[i].ready = 0;
             }
-            usleep(1000);
+            vp->frames_queued = 0;
+            vp->frame_read_idx = 0;
+            vp->frame_write_idx = 0;
+            pthread_mutex_unlock(&vp->frame_mutex);
+
+            /* Flush audio buffer and reset A/V sync bases */
+            videoplayer_audio_flush(vp);
+            vp->av_sync_established = 0;
+
+            vp->position_us = vp->seek_target_us;
+            vp->seek_requested = 0;
             continue;
         }
 
-        /* Successful read - reset error counter */
-        read_error_count = 0;
+        /* Get packet from demux thread's packet queue.
+         * IMPORTANT: We always get the packet first, regardless of frame queue
+         * state. Only video packets need frame queue space; audio and subtitle
+         * packets must always be processed to keep the audio ring buffer fed
+         * and prevent A/V desync. */
+        ret = packet_queue_get(vp, pkt);
+        if (ret < 0)
+            break;  /* Shutdown */
+        if (ret == 1) {
+            /* EOF — drain remaining frames, then pause */
+            fprintf(stderr, "[videoplayer] Decode: EOF from demux\n");
+            drain_video_frames(vp);
+            if (vp->state == VP_STATE_BUFFERING)
+                videoplayer_play(vp);
+            while (vp->frames_queued > 0 && vp->decode_running) {
+                usleep(50000);
+            }
+            vp->state = VP_STATE_PAUSED;
+            fprintf(stderr, "[videoplayer] Playback finished, state -> paused\n");
+            /* Wait for seek or shutdown at EOF */
+            while (vp->decode_running && !vp->seek_requested)
+                usleep(50000);
+            continue;
+        }
+        if (pkt->size == 0) {
+            av_packet_unref(pkt);
+            continue;  /* Spurious wakeup with empty packet */
+        }
 
         /* Video packet */
         if (pkt->stream_index == vp->video.stream_index) {
-            ret = avcodec_send_packet(vp->video_codec_ctx, pkt);
-            if (ret < 0) {
+            /* Send packet to decoder with retry loop for EAGAIN.
+             * EAGAIN means the decoder's output buffer is full — drain pending
+             * frames and retry. Without proper retry, packets are silently lost,
+             * causing only keyframes to be decoded (visible as ~500ms PTS gaps
+             * in the frame queue). A single retry is NOT sufficient: VAAPI
+             * decoders may need multiple drain cycles before accepting input
+             * (e.g., when the hardware surface pool is temporarily exhausted). */
+            int sent = 0;
+            for (int attempts = 0; attempts < 50 && vp->decode_running && !vp->seek_requested; attempts++) {
+                ret = avcodec_send_packet(vp->video_codec_ctx, pkt);
+                if (ret == 0) {
+                    sent = 1;
+                    break;
+                }
+                if (ret == AVERROR(EAGAIN)) {
+                    /* Decoder output buffer full — drain frames and retry */
+                    drain_video_frames(vp);
+                    continue;
+                }
+                /* Actual error — log and skip this packet */
+                char errbuf[256];
+                av_strerror(ret, errbuf, sizeof(errbuf));
+                fprintf(stderr, "[videoplayer] video send_packet error: %s (pts=%ld)\n",
+                        errbuf, pkt->pts != AV_NOPTS_VALUE ? (long)pkt->pts : -1);
+                break;
+            }
+            if (!sent) {
                 av_packet_unref(pkt);
                 continue;
             }
 
-            while (ret >= 0) {
-                ret = avcodec_receive_frame(vp->video_codec_ctx, vp->decode_frame);
-                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-                    break;
-                if (ret < 0)
-                    break;
+            /* Drain all available output frames */
+            drain_video_frames(vp);
 
-                AVFrame *frame_to_use = vp->decode_frame;
-
-                /* Transfer HW frame to system memory */
-                if (vp->hw_accel != VP_HW_NONE &&
-                    vp->decode_frame->format == AV_PIX_FMT_VAAPI) {
-                    if (transfer_hw_frame(vp, vp->decode_frame, vp->sw_frame) < 0) {
-                        av_frame_unref(vp->decode_frame);
-                        continue;
-                    }
-                    frame_to_use = vp->sw_frame;
-                }
-
-                /* Calculate PTS in microseconds */
-                int64_t pts_us = 0;
-                if (frame_to_use->pts != AV_NOPTS_VALUE) {
-                    AVRational tb = vp->fmt_ctx->streams[vp->video.stream_index]->time_base;
-                    pts_us = av_rescale_q(frame_to_use->pts, tb, AV_TIME_BASE_Q);
-                }
-
-                /* Create wlr_buffer from frame */
-                struct wlr_buffer *buffer = videoplayer_create_frame_buffer(vp, frame_to_use);
-                if (!buffer) {
-                    av_frame_unref(vp->decode_frame);
-                    av_frame_unref(vp->sw_frame);
-                    continue;
-                }
-
-                /* Queue frame for rendering */
-                pthread_mutex_lock(&vp->frame_mutex);
-                if (vp->frames_queued < VP_FRAME_QUEUE_SIZE) {
-                    VideoPlayerFrame *qf = &vp->frame_queue[vp->frame_write_idx];
-
-                    /* Drop old buffer if present */
-                    if (qf->buffer) {
-                        wlr_buffer_drop(qf->buffer);
-                    }
-
-                    qf->buffer = buffer;
-                    qf->pts_us = pts_us;
-                    qf->width = frame_to_use->width;
-                    qf->height = frame_to_use->height;
-                    qf->ready = 1;
-
-                    vp->frame_write_idx = (vp->frame_write_idx + 1) % VP_FRAME_QUEUE_SIZE;
-                    vp->frames_queued++;
-                    vp->position_us = pts_us;
-                } else {
-                    /* Queue full, drop buffer */
-                    wlr_buffer_drop(buffer);
-                }
-                pthread_mutex_unlock(&vp->frame_mutex);
-
-                av_frame_unref(vp->decode_frame);
-                av_frame_unref(vp->sw_frame);
-            }
+            /* After the CPU-intensive sws_scale, immediately drain any queued
+             * audio packets so the ring buffer stays fed.  This is critical:
+             * sws_scale for 1080p takes several ms, during which PipeWire
+             * keeps consuming from the ring buffer with no new data arriving. */
+            drain_pending_audio(vp, audio_scratch);
         }
-        /* Audio packet */
+        /* Audio packet — always processed, never blocked by frame queue */
         else if (vp->audio_codec_ctx &&
                  pkt->stream_index == vp->audio_tracks[vp->current_audio_track].stream_index) {
             ret = avcodec_send_packet(vp->audio_codec_ctx, pkt);
             if (ret >= 0) {
                 while (avcodec_receive_frame(vp->audio_codec_ctx, vp->audio_frame) >= 0) {
-                    /* Queue audio frame to PipeWire ring buffer.
-                     * Minimal retry to avoid stalling the decode thread — if the ring buffer
-                     * stays full (e.g., Bluetooth reconnecting), the stall detector in
-                     * videoplayer_audio_queue_frame sets stream_interrupted after 3 consecutive
-                     * failures, causing all subsequent audio to be dropped instantly. */
                     int queue_ret = videoplayer_audio_queue_frame(vp, vp->audio_frame);
                     if (queue_ret == 1 && vp->decode_running) {
                         usleep(1000);
@@ -1034,7 +1592,6 @@ static void *decode_thread_func(void *arg)
         else if (vp->current_subtitle_track >= 0 &&
                  vp->subtitle_codec_ctx &&
                  pkt->stream_index == vp->subtitle_tracks[vp->current_subtitle_track].stream_index) {
-            /* Process subtitle packet */
             videoplayer_process_subtitle_packet(vp, pkt);
         }
 
@@ -1042,6 +1599,7 @@ static void *decode_thread_func(void *arg)
     }
 
     av_packet_free(&pkt);
+    av_packet_free(&audio_scratch);
     fprintf(stderr, "[videoplayer] Decode thread stopped\n");
 
     return NULL;
@@ -1063,10 +1621,13 @@ void videoplayer_seek(VideoPlayer *vp, int64_t position_us)
         position_us = vp->duration_us;
 
     vp->seek_target_us = position_us;
+    vp->seek_flush_done = 0;
     vp->seek_requested = 1;
 
-    /* Wake up decode thread */
+    /* Wake up both threads */
     pthread_cond_signal(&vp->frame_cond);
+    pthread_cond_broadcast(&vp->pkt_not_empty);
+    pthread_cond_broadcast(&vp->pkt_not_full);
 }
 
 void videoplayer_seek_relative(VideoPlayer *vp, int64_t offset_us)

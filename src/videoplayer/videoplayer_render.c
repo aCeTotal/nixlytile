@@ -37,6 +37,7 @@ struct VideoPixmanBuffer {
     uint32_t drm_format;
     int stride;
     int owns_data;
+    VideoPlayer *vp;               /* Back-reference for buffer pool recycling */
 };
 
 static void video_pixman_buffer_destroy(struct wlr_buffer *wlr_buffer)
@@ -45,8 +46,26 @@ static void video_pixman_buffer_destroy(struct wlr_buffer *wlr_buffer)
 
     if (buf->image)
         pixman_image_unref(buf->image);
-    if (buf->owns_data && buf->data)
-        free(buf->data);
+
+    if (buf->owns_data && buf->data) {
+        /* Try to return pixel data to the pool for reuse instead of freeing.
+         * This avoids mmap/munmap system calls (8-33MB per frame) that cause
+         * page faults, TLB flushes, and visible stutter. */
+        int returned = 0;
+        if (buf->vp) {
+            size_t buf_size = (size_t)buf->base.height * buf->stride;
+            pthread_mutex_lock(&buf->vp->buffer_pool.lock);
+            if (buf->vp->buffer_pool.count < VP_BUFFER_POOL_SIZE &&
+                buf->vp->buffer_pool.alloc_size == buf_size) {
+                buf->vp->buffer_pool.data[buf->vp->buffer_pool.count++] = buf->data;
+                returned = 1;
+            }
+            pthread_mutex_unlock(&buf->vp->buffer_pool.lock);
+        }
+        if (!returned)
+            free(buf->data);
+    }
+
     free(buf);
 }
 
@@ -89,17 +108,30 @@ struct wlr_buffer *videoplayer_create_frame_buffer(VideoPlayer *vp, AVFrame *fra
     int width = frame->width;
     int height = frame->height;
     int stride = width * 4;
-    void *data;
+    void *data = NULL;
+    size_t alloc_size = (size_t)height * stride;
 
-    /* Allocate buffer */
+    /* Allocate buffer struct */
     buf = calloc(1, sizeof(*buf));
     if (!buf)
         return NULL;
 
-    data = calloc(height, stride);
+    /* Try to recycle a pixel data buffer from the pool.
+     * This avoids mmap/munmap system calls that cause stutter. */
+    pthread_mutex_lock(&vp->buffer_pool.lock);
+    if (vp->buffer_pool.count > 0 && vp->buffer_pool.alloc_size == alloc_size) {
+        data = vp->buffer_pool.data[--vp->buffer_pool.count];
+    } else {
+        vp->buffer_pool.alloc_size = alloc_size;
+    }
+    pthread_mutex_unlock(&vp->buffer_pool.lock);
+
     if (!data) {
-        free(buf);
-        return NULL;
+        data = malloc(alloc_size);
+        if (!data) {
+            free(buf);
+            return NULL;
+        }
     }
 
     /* Initialize or update sws context */
@@ -140,6 +172,7 @@ struct wlr_buffer *videoplayer_create_frame_buffer(VideoPlayer *vp, AVFrame *fra
     buf->drm_format = DRM_FORMAT_ARGB8888;
     buf->stride = stride;
     buf->owns_data = 1;
+    buf->vp = vp;
 
     wlr_buffer_init(&buf->base, &video_pixman_buffer_impl, width, height);
 
@@ -222,6 +255,7 @@ extern int64_t videoplayer_audio_get_clock(VideoPlayer *vp);
 extern int videoplayer_audio_check_recovery(VideoPlayer *vp);
 
 /* Playback control */
+extern void videoplayer_play(VideoPlayer *vp);
 extern void videoplayer_pause(VideoPlayer *vp);
 
 static uint64_t get_time_ns(void)
@@ -235,7 +269,6 @@ static uint64_t get_time_ns(void)
 #define AV_SYNC_THRESHOLD_MIN   20000    /* 20ms - below this, don't adjust */
 #define AV_SYNC_THRESHOLD_MAX   200000   /* 200ms - above this, hard sync */
 #define AV_SYNC_FRAMESKIP_THRESH 100000  /* 100ms - skip frame if behind by this much */
-#define AV_SYNC_HOLD_THRESH      60000  /* 60ms - hold frame if video is ahead of audio */
 
 /*
  * Calculate frame repeat pattern for non-VRR displays
@@ -290,6 +323,7 @@ static int is_audio_clock_valid(VideoPlayer *vp)
 {
     /* Check if audio stream is currently interrupted */
     if (vp->audio.stream_interrupted) {
+        vp->av_sync_established = 0;
         return 0;
     }
 
@@ -301,10 +335,13 @@ static int is_audio_clock_valid(VideoPlayer *vp)
 
         if (rec_pts > 0 && vp->audio.last_audio_pts > 0 &&
             rec_pts > vp->audio.last_audio_pts) {
-            /* Audio is alive and progressing - end recovery early */
+            /* Audio is alive and progressing - end recovery early.
+             * Clear sync so get_av_diff_us recaptures bases with the
+             * now-valid audio clock for accurate relative sync. */
             vp->audio.recovery_frames = 0;
             vp->audio.stall_count = 0;
             vp->audio.last_audio_pts = rec_pts;
+            vp->av_sync_established = 0;
             return 1;
         }
 
@@ -312,6 +349,7 @@ static int is_audio_clock_valid(VideoPlayer *vp)
             vp->audio.last_audio_pts = rec_pts;
 
         vp->audio.recovery_frames--;
+        vp->av_sync_established = 0;
         return 0;
     }
 
@@ -319,13 +357,19 @@ static int is_audio_clock_valid(VideoPlayer *vp)
 
     /* Audio not started yet */
     if (audio_pts_us <= 0) {
+        vp->av_sync_established = 0;
         return 0;
     }
 
     /* Check if audio is progressing */
     if (audio_pts_us == vp->audio.last_audio_pts) {
         vp->audio.stall_count++;
-        /* If stalled for more than 10 frames, audio may be stuck */
+        /* If stalled for more than 10 frames, audio may be stuck.
+         * Fall back to timing-based playback but do NOT clear
+         * av_sync_established — when audio resumes, the existing bases
+         * are still valid and sync continues smoothly. Clearing bases
+         * here caused periodic ~30s A/V sync jumps during HTTP streaming
+         * stalls, as re-establishment captured different offsets. */
         if (vp->audio.stall_count > 10) {
             return 0;
         }
@@ -338,18 +382,65 @@ static int is_audio_clock_valid(VideoPlayer *vp)
 }
 
 /*
- * Get the A/V sync difference in microseconds
- * Positive = video ahead of audio, Negative = video behind audio
+ * Get the A/V sync difference in microseconds using RELATIVE elapsed times.
+ * Positive = video ahead of audio, Negative = video behind audio.
+ *
+ * Uses elapsed time from a common sync-establishment point rather than
+ * absolute PTS values. This cancels any constant PTS offset between
+ * audio and video streams (common in HTTP/HLS streams, remuxed files,
+ * and transport streams where audio base_pts != video base_pts).
+ *
+ * Without relative sync, a stream where audio starts at PTS=5s and video
+ * at PTS=0s shows a permanent -5s offset that triggers continuous frame
+ * skipping, reducing playback to ~2fps.
  */
 static int64_t get_av_diff_us(VideoPlayer *vp, int64_t video_pts_us)
 {
     int64_t audio_pts_us = videoplayer_audio_get_clock(vp);
 
-    /* If no audio clock yet, use position */
     if (audio_pts_us <= 0)
-        audio_pts_us = vp->position_us;
+        return 0;  /* Audio not started, no sync possible */
 
-    return video_pts_us - audio_pts_us;
+    if (!vp->av_sync_established) {
+        /* First valid comparison — snapshot both clocks as reference.
+         * All future comparisons measure elapsed time from this point. */
+        vp->av_sync_video_base_us = video_pts_us;
+        vp->av_sync_audio_base_us = audio_pts_us;
+        vp->av_sync_established = 1;
+        return 0;  /* First frame after sync establishment — show it */
+    }
+
+    int64_t video_elapsed = video_pts_us - vp->av_sync_video_base_us;
+    int64_t audio_elapsed = audio_pts_us - vp->av_sync_audio_base_us;
+    int64_t diff = video_elapsed - audio_elapsed;
+
+    /* PTS discontinuity detection: if diff exceeds 5 seconds, the stream
+     * has a timestamp jump (common in HTTP/HLS streams after remuxing or
+     * server-side seeking).  Re-establish sync bases from the current
+     * positions instead of trying to gradually correct a multi-second gap,
+     * which would cause sustained frame-skipping or drift artifacts. */
+    if (diff > 5000000 || diff < -5000000) {
+        vp->av_sync_video_base_us = video_pts_us;
+        vp->av_sync_audio_base_us = audio_pts_us;
+        return 0;
+    }
+
+    /* Gradual drift correction: shift the video base by 2% of the current
+     * offset each video frame.  This acts as a first-order low-pass filter
+     * that absorbs systematic clock drift between the video frame-interval
+     * timer (CLOCK_MONOTONIC) and PipeWire's sample-rate clock.
+     *
+     * Without this, any drift accumulates indefinitely — typically reaching
+     * +55 to +170 ms over 20-50 seconds — until PipeWire's quantum stepping
+     * causes a sudden correction that the user sees as periodic stuttering.
+     *
+     * 2% per frame at 24 fps ≈ 48% per second, giving a ~2-second time
+     * constant.  This is fast enough to track hardware clock drift and
+     * PipeWire quantum jitter, but slow enough to preserve smooth playback. */
+    int64_t correction = diff / 50;
+    vp->av_sync_video_base_us += correction;
+
+    return diff;
 }
 
 /*
@@ -377,11 +468,10 @@ static int get_frame_action(VideoPlayer *vp, int64_t video_pts_us)
         return 1;  /* Skip frame to catch up */
     }
 
-    /* Video is too far ahead of audio - hold frame to let audio catch up */
-    if (av_diff > AV_SYNC_HOLD_THRESH) {
-        return -1;
-    }
-
+    /* Never hold frames — holding prevents frame queue consumption, which blocks
+     * the decode thread, which starves the audio ring buffer, which stalls the
+     * audio clock, creating a positive-feedback loop that manifests as periodic
+     * multi-second stuttering. Small A/V drift self-corrects via frame-skip. */
     return 0;
 }
 
@@ -399,6 +489,14 @@ static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, 
         vp->current_repeat = 0;
         return 1;
     }
+
+    /* Guard against unsigned underflow: for non-integer fps/refresh ratios
+     * (e.g., 23.976@120Hz), last_frame_ns advances by the exact frame interval
+     * which can drift slightly ahead of vsync_time_ns. Without this check,
+     * uint64_t subtraction wraps to a huge value, causing a frame to present
+     * early followed by a long gap — visible as micro-stutter every ~4 seconds. */
+    if (vsync_time_ns < vp->last_frame_ns)
+        return 0;
 
     uint64_t elapsed_ns = vsync_time_ns - vp->last_frame_ns;
 
@@ -461,14 +559,12 @@ static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, 
      * so recovery_frames countdown is properly paced). */
     int action = get_frame_action(vp, next_frame_pts_us);
     if (action == 1) {
-        /* Video is far behind audio - skip this frame */
-        vp->last_frame_ns = vsync_time_ns;
+        /* Video is far behind audio — skip this frame.
+         * Advance last_frame_ns by one step so timing stays accurate.
+         * Multiple skips per vsync are still possible if the original
+         * elapsed time covers multiple steps (e.g., after a stall). */
+        vp->last_frame_ns += step;
         return 2;  /* Skip and get next frame immediately */
-    }
-
-    if (action == -1) {
-        /* Video is ahead of audio - hold, let audio catch up */
-        return 0;
     }
 
     /* Present the frame */
@@ -480,8 +576,14 @@ static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, 
      * queue exhaustion or a compositor hiccup), snap forward to avoid rapid
      * catch-up where multiple frames would be presented at consecutive vsyncs.
      * One step of slack allows the normal cadence to absorb minor jitter. */
-    if (vsync_time_ns > vp->last_frame_ns + step)
+    if (vsync_time_ns > vp->last_frame_ns + step) {
+        if (vp->debug_log) {
+            fprintf(vp->debug_log, "# SNAP  | gap=%lu us (>1 step behind wall clock)\n",
+                    (unsigned long)((vsync_time_ns - vp->last_frame_ns) / 1000));
+        }
+        vp->debug_total_snaps++;
         vp->last_frame_ns = vsync_time_ns;
+    }
     return 1;
 }
 
@@ -491,10 +593,55 @@ static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, 
 
 void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
 {
-    static int recovery_check_counter = 0;
-
-    if (!vp || vp->state != VP_STATE_PLAYING)
+    if (!vp || (vp->state != VP_STATE_PLAYING && vp->state != VP_STATE_BUFFERING))
         return;
+
+    /* Pre-buffer: while in BUFFERING state (initial open), wait for the decode
+     * thread to fill the frame queue before starting playback. This gives the
+     * decode thread a head start so the queue has enough frames to absorb
+     * decode jitter. Without this, frames are consumed as fast as produced,
+     * keeping the queue at 0-1 frames where any jitter causes stutter.
+     * Seeking naturally provides this head start (present_frame returns while
+     * seek_requested is set), which is why seeking back fixes stutter. */
+    if (vp->state == VP_STATE_BUFFERING) {
+        /* Don't start playback while a seek is pending — the queue may
+         * contain pre-seek frames that would flash wrong content. */
+        if (vp->seek_requested)
+            return;
+
+        pthread_mutex_lock(&vp->frame_mutex);
+        int queued = vp->frames_queued;
+        pthread_mutex_unlock(&vp->frame_mutex);
+
+        /* Also check audio ring buffer has enough data for smooth start.
+         * Without this, PipeWire starts consuming immediately on PLAY while
+         * the decode thread can barely keep up, causing 75%+ underruns.
+         * Require ~0.5s of audio so the ring buffer can absorb decode jitter. */
+        size_t audio_avail = 0;
+        size_t audio_min = 0;
+        if (vp->audio_track_count > 0 && vp->audio.sample_rate > 0) {
+            pthread_mutex_lock(&vp->audio.ring.lock);
+            audio_avail = vp->audio.ring.available;
+            pthread_mutex_unlock(&vp->audio.ring.lock);
+            audio_min = (size_t)vp->audio.sample_rate / 2 *
+                        vp->audio.channels * sizeof(float);  /* 0.5 seconds */
+        }
+
+        if (vp->debug_log) {
+            fprintf(vp->debug_log, "%6d | BUFFER | %2d/%2d | audio=%zu/%zu\n",
+                    vp->debug_frame_count++, queued, VP_FRAME_QUEUE_SIZE * 3 / 4,
+                    audio_avail, audio_min);
+            fflush(vp->debug_log);
+        }
+
+        if (queued >= VP_FRAME_QUEUE_SIZE * 3 / 4 &&
+            (audio_avail >= audio_min || vp->audio_track_count == 0)) {
+            /* Buffer ready - start playback (audio + video together) */
+            videoplayer_play(vp);
+        } else {
+            return;
+        }
+    }
 
     /* Check if audio thread requested a timing reset (e.g., after BT reconnection).
      * This ensures video frame presentation resumes immediately even if the old
@@ -504,26 +651,31 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
         vp->last_frame_ns = 0;
         vp->current_repeat = 0;
         fprintf(stderr, "[videoplayer] Frame timing reset (audio state change)\n");
-    }
-
-    /* Auto-pause when audio device changes (e.g., Bluetooth connection) */
-    if (vp->audio.needs_device_pause) {
-        vp->audio.needs_device_pause = 0;
-        fprintf(stderr, "[videoplayer] Audio device change detected, pausing\n");
-        videoplayer_pause(vp);
-        return;
+        if (vp->debug_log) {
+            fprintf(vp->debug_log, "# RESET | timing reset (audio state change)\n");
+            fflush(vp->debug_log);
+        }
     }
 
     /* Periodically check if audio stream needs recovery (every ~0.5 second at 60Hz).
      * This handles Bluetooth controller reconnection etc. without blocking. */
-    if (++recovery_check_counter >= 30) {
-        recovery_check_counter = 0;
+    if (++vp->recovery_check_counter >= 30) {
+        vp->recovery_check_counter = 0;
         videoplayer_audio_check_recovery(vp);
     }
 
+    /* Don't present stale pre-seek frames. When seeking (e.g., resume playback),
+     * the frame queue may contain frames from the old position. Presenting them
+     * causes a brief flash of wrong content before the seek completes. */
+    if (vp->seek_requested)
+        return;
+
     /* Video stall detector: if frames are available but we haven't presented
      * any frame for >500ms, force-reset timing. This catches edge cases where
-     * the frame pacing logic gets stuck (e.g., after audio device changes). */
+     * the frame pacing logic gets stuck (e.g., after audio device changes).
+     * Note: the rebuffer logic (queue-empty → BUFFERING) handles the common
+     * case of HTTP buffering stalls. This detector handles the rare case where
+     * frames exist but timing is stuck. */
     if (vp->last_present_time_ns > 0 &&
         vsync_time_ns > vp->last_present_time_ns + 500000000ULL) {
         pthread_mutex_lock(&vp->frame_mutex);
@@ -532,20 +684,54 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
 
         if (has_frames) {
             fprintf(stderr, "[videoplayer] Video stall detected (>500ms), forcing timing reset\n");
+            if (vp->debug_log) {
+                fprintf(vp->debug_log, "# STALL | >500ms without presentation, forcing timing reset\n");
+                fflush(vp->debug_log);
+            }
             vp->last_frame_ns = 0;
             vp->current_repeat = 0;
+            /* Reset A/V sync for clean restart */
+            vp->av_sync_established = 0;
         }
     }
 
     struct wlr_buffer *buffer = NULL;
     int frames_consumed = 0;
-    int max_skip = 3;  /* Maximum frames to skip per vsync to prevent stalls */
+    int max_skip = VP_FRAME_QUEUE_SIZE - 2;  /* Allow rapid catch-up, keep 2 frames in queue */
+
+    vp->debug_vsync_count++;  /* Count vsyncs reaching frame logic */
 
 present_next:
     pthread_mutex_lock(&vp->frame_mutex);
 
     if (vp->frames_queued == 0) {
         pthread_mutex_unlock(&vp->frame_mutex);
+
+        /* If we're in PLAYING state and the queue is empty (HTTP buffering stall),
+         * transition back to BUFFERING so the decode thread can refill the queue
+         * before playback resumes.  This prevents the video from appearing frozen
+         * for 25+ seconds while the queue stays at 0.  videoplayer_play() is called
+         * again once enough frames are queued, which resets A/V sync bases for
+         * a clean restart. Flush audio so it restarts in sync with video. */
+        if (vp->state == VP_STATE_PLAYING && !vp->demux_eof) {
+            vp->state = VP_STATE_BUFFERING;
+            vp->last_frame_ns = 0;
+            vp->last_present_time_ns = 0;
+            vp->current_repeat = 0;
+
+            /* Pause and flush audio so it restarts aligned with video */
+            extern void videoplayer_audio_pause(VideoPlayer *vp);
+            extern void videoplayer_audio_flush(VideoPlayer *vp);
+            videoplayer_audio_pause(vp);
+            videoplayer_audio_flush(vp);
+
+            fprintf(stderr, "[videoplayer] Queue empty during playback, rebuffering\n");
+            if (vp->debug_log) {
+                fprintf(vp->debug_log, "# REBUFFER | queue empty, transitioning to BUFFERING\n");
+                fflush(vp->debug_log);
+            }
+        }
+
         goto present_buffer;
     }
 
@@ -567,7 +753,6 @@ present_next:
 
     if (action == 2 && frames_consumed < max_skip) {
         /* Skip this frame - video is behind audio */
-        /* Drop the buffer and advance to next frame */
         if (qf->buffer) {
             wlr_buffer_drop(qf->buffer);
             qf->buffer = NULL;
@@ -590,7 +775,7 @@ present_next:
     /* Update position */
     vp->position_us = qf->pts_us;
 
-    /* Get the buffer to display (drop previous if any) */
+    /* Take the pre-converted buffer (drop previous if any) */
     if (buffer) {
         wlr_buffer_drop(buffer);
     }
@@ -609,11 +794,62 @@ present_next:
     pthread_mutex_unlock(&vp->frame_mutex);
 
 present_buffer:
-    /* Update scene buffer with new frame */
+    /* Buffer is already BGRA - just set it on the scene node */
     if (buffer) {
         videoplayer_update_frame_buffer(vp, buffer);
         wlr_buffer_drop(buffer);  /* Scene holds its own reference */
         vp->last_present_time_ns = vsync_time_ns;
+    }
+
+    /* Debug log: comprehensive per-frame metrics */
+    if (vp->debug_log && vp->state == VP_STATE_PLAYING) {
+        int q;
+        pthread_mutex_lock(&vp->frame_mutex);
+        q = vp->frames_queued;
+        pthread_mutex_unlock(&vp->frame_mutex);
+
+        if (buffer) {
+            /* Frame presented — log cadence and timing */
+            uint64_t actual_us = 0;
+            if (vp->debug_last_present_ns > 0)
+                actual_us = (vsync_time_ns - vp->debug_last_present_ns) / 1000;
+            uint64_t expected_us = vp->frame_interval_ns / 1000;
+
+            fprintf(vp->debug_log,
+                    "%6d | PLAY   | q=%2d | avsync=%+7ld | pos=%7ld | v=%2d | dt=%5lu/%5lu us",
+                    vp->debug_frame_count, q,
+                    (long)vp->av_sync_offset_us,
+                    (long)(vp->position_us / 1000),
+                    vp->debug_vsync_count,
+                    (unsigned long)actual_us,
+                    (unsigned long)expected_us);
+
+            if (frames_consumed > 1) {
+                vp->debug_total_skips += frames_consumed - 1;
+                fprintf(vp->debug_log, " | SKIP %d (total=%d)",
+                        frames_consumed - 1, vp->debug_total_skips);
+            }
+            fprintf(vp->debug_log, "\n");
+
+            vp->debug_last_present_ns = vsync_time_ns;
+            vp->debug_vsync_count = 0;
+        } else {
+            /* Queue empty when frame was needed */
+            vp->debug_total_empty++;
+            fprintf(vp->debug_log,
+                    "%6d | EMPTY  | q=%2d | avsync=%+7ld | pos=%7ld | v=%2d | total_empty=%d\n",
+                    vp->debug_frame_count, q,
+                    (long)vp->av_sync_offset_us,
+                    (long)(vp->position_us / 1000),
+                    vp->debug_vsync_count,
+                    vp->debug_total_empty);
+        }
+
+        vp->debug_frame_count++;
+
+        /* Flush on events and periodically (~1 sec at 24fps) */
+        if (!buffer || frames_consumed > 1 || vp->debug_frame_count % 60 == 0)
+            fflush(vp->debug_log);
     }
 }
 
@@ -746,6 +982,14 @@ void videoplayer_setup_display_mode(VideoPlayer *vp, float display_hz, int vrr_c
     vp->last_present_time_ns = 0;
     vp->current_repeat = 0;
     vp->av_sync_offset_us = 0;
+
+    /* Update debug log with actual display parameters (header was written
+     * before setup_display_mode was called, showing 0.00 Hz). */
+    if (vp->debug_log) {
+        fprintf(vp->debug_log, "# Display updated: %.2f Hz, frame_interval=%lu ns, pacing_mode=%d\n",
+                display_hz, (unsigned long)vp->frame_interval_ns, vp->frame_repeat_mode);
+        fflush(vp->debug_log);
+    }
 }
 
 /* ================================================================

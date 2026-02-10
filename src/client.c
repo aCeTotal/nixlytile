@@ -230,11 +230,6 @@ focusclient(Client *c, int lift)
 		wlr_seat_keyboard_notify_clear_focus(seat);
 		/* Notify text inputs about focus loss */
 		text_input_focus_change(old, NULL);
-		/* Hide cursor if HTPC views are visible */
-		if (selmon && (selmon->pc_gaming.visible ||
-		               selmon->movies_view.visible ||
-		               selmon->tvshows_view.visible))
-			wlr_cursor_set_surface(cursor, NULL, 0, 0);
 		return;
 	}
 

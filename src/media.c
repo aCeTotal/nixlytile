@@ -300,13 +300,19 @@ launch_integrated_player_with_resume(const char *url, double resume_pos)
 		videoplayer_seek(active_videoplayer, resume_us);
 	}
 
-	/* Start playback */
-	videoplayer_play(active_videoplayer);
+	/* Don't call videoplayer_play() here — videoplayer_open() sets state to
+	 * VP_STATE_BUFFERING.  The present_frame() callback will wait for the
+	 * decode thread to fill the frame queue to VP_FRAME_QUEUE_SIZE/2, then
+	 * call videoplayer_play() automatically.  This prevents stutter from
+	 * consuming frames as fast as they're produced (queue stays at 0-1). */
+
+	/* Kick-start the rendering loop. The output may not have pending damage
+	 * after the scene node was enabled, so schedule a frame explicitly to
+	 * ensure present_videoplayer_frame() runs and the BUFFERING→PLAYING
+	 * transition happens without user input. */
+	wlr_output_schedule_frame(selmon->wlr_output);
 
 	playback_state = PLAYBACK_PLAYING;
-
-	/* Show control bar initially */
-	render_playback_osd();
 
 	wlr_log(WLR_INFO, "Started integrated video player: %s (resume at %.1fs)", url, resume_pos);
 }
@@ -323,6 +329,7 @@ stop_integrated_player(void)
 	if (active_videoplayer && active_videoplayer->state != VP_STATE_IDLE) {
 		videoplayer_stop(active_videoplayer);
 		videoplayer_set_visible(active_videoplayer, 0);
+		hide_playback_osd();
 		playback_state = PLAYBACK_IDLE;
 		wlr_log(WLR_INFO, "Stopped integrated video player");
 	}
@@ -534,6 +541,16 @@ media_view_poll_timer_cb(void *data)
 
 	if (!htpc_mode_active) {
 		/* Re-arm timer even when inactive */
+		if (media_view_poll_timer)
+			wl_event_source_timer_update(media_view_poll_timer, 3000);
+		return 0;
+	}
+
+	/* Skip view refresh while video player is active — the blocking popen(curl)
+	 * and UDP discovery calls stall the compositor main loop for ~250ms every
+	 * 30 seconds, causing visible video stutter. Views are hidden behind the
+	 * video overlay anyway. */
+	if (active_videoplayer && playback_state == PLAYBACK_PLAYING) {
 		if (media_view_poll_timer)
 			wl_event_source_timer_update(media_view_poll_timer, 3000);
 		return 0;
@@ -1883,9 +1900,6 @@ media_view_show(Monitor *m, MediaViewType type)
 		wlr_scene_node_set_enabled(&view->tree->node, true);
 		wlr_scene_node_raise_to_top(&view->tree->node);
 	}
-
-	/* Hide mouse cursor in media views */
-	wlr_cursor_set_surface(cursor, NULL, 0, 0);
 
 	media_view_render(m, type);
 }

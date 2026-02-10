@@ -999,6 +999,7 @@ keypress(struct wl_listener *listener, void *data)
 					/* Check if player was stopped (Escape/Q) */
 					if (active_videoplayer->state == VP_STATE_IDLE) {
 						videoplayer_set_visible(active_videoplayer, 0);
+						hide_playback_osd();
 						playback_state = PLAYBACK_IDLE;
 					} else {
 						/* Show OSD on any key during playback */
@@ -1626,15 +1627,8 @@ focus:
 	/* If there's no client surface under the cursor, set the cursor image to a
 	 * default. This is what makes the cursor image appear when you move it
 	 * off of a client or over its border. */
-	if (!surface && !seat->drag) {
-		/* Hide cursor when HTPC media views are visible */
-		if (htpc_mode_active && selmon &&
-		    (selmon->movies_view.visible || selmon->tvshows_view.visible ||
-		     selmon->pc_gaming.visible || selmon->retro_gaming.visible))
-			wlr_cursor_set_surface(cursor, NULL, 0, 0);
-		else
-			wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
-	}
+	if (!surface && !seat->drag)
+		wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
 
 	pointerfocus(c, surface, sx, sy, time);
 }
@@ -1804,11 +1798,6 @@ setcursor(struct wl_listener *listener, void *data)
 	 * event, which will result in the client requesting set the cursor surface */
 	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
 		return;
-	/* Keep cursor hidden in HTPC views */
-	if (selmon && (selmon->pc_gaming.visible ||
-	               selmon->movies_view.visible ||
-	               selmon->tvshows_view.visible))
-		return;
 	/* This can be sent by any client, so we check to make sure this one
 	 * actually has pointer focus first. If so, we can tell the cursor to
 	 * use the provided surface as the cursor image. It will set the
@@ -1824,11 +1813,6 @@ setcursorshape(struct wl_listener *listener, void *data)
 {
 	struct wlr_cursor_shape_manager_v1_request_set_shape_event *event = data;
 	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
-		return;
-	/* Keep cursor hidden in HTPC views */
-	if (selmon && (selmon->pc_gaming.visible ||
-	               selmon->movies_view.visible ||
-	               selmon->tvshows_view.visible))
 		return;
 	/* This can be sent by any client, so we check to make sure this one
 	 * actually has pointer focus first. If so, we can tell the cursor to
