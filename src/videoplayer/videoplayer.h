@@ -272,8 +272,17 @@ typedef struct VideoPlayerSubtitle {
     int64_t current_pts_us;
     int64_t current_end_us;
 
-    /* For bitmap subtitles */
+    /* For bitmap subtitles (PGS/VOBSUB) */
     struct SwsContext *sws_ctx;
+    uint8_t *bitmap_data;          /* BGRA pixel data */
+    int bitmap_w, bitmap_h;        /* Dimensions of the bitmap */
+    int bitmap_x, bitmap_y;        /* Position in video coordinates */
+    int bitmap_stride;
+    int64_t bitmap_start_ms;       /* Display start time */
+    int64_t bitmap_end_ms;         /* Display end time */
+    int bitmap_valid;              /* 1 = active bitmap to display */
+    int bitmap_video_w;            /* Video resolution for scaling */
+    int bitmap_video_h;
 } VideoPlayerSubtitle;
 
 /* ================================================================
@@ -334,6 +343,7 @@ typedef struct VideoPlayer {
     /* Subtitle decoding */
     AVCodecContext *subtitle_codec_ctx;
     VideoPlayerSubtitle subtitle;
+    pthread_mutex_t subtitle_mutex;        /* Protects subtitle.track between decode/render threads */
 
     /* Frame queue (triple buffering) */
     VideoPlayerFrame frame_queue[VP_FRAME_QUEUE_SIZE];

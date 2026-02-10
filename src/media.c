@@ -297,6 +297,28 @@ launch_integrated_player_with_resume(const char *url, double resume_pos)
 		return;
 	}
 
+	/* Sync video player track info to global OSD arrays */
+	audio_track_count = 0;
+	subtitle_track_count = 0;
+	for (int i = 0; i < active_videoplayer->audio_track_count && i < MAX_TRACKS; i++) {
+		audio_tracks[i].id = i;
+		snprintf(audio_tracks[i].title, sizeof(audio_tracks[i].title), "%s",
+			active_videoplayer->audio_tracks[i].title);
+		snprintf(audio_tracks[i].lang, sizeof(audio_tracks[i].lang), "%s",
+			active_videoplayer->audio_tracks[i].language);
+		audio_tracks[i].selected = (i == active_videoplayer->current_audio_track);
+		audio_track_count++;
+	}
+	for (int i = 0; i < active_videoplayer->subtitle_track_count && i < MAX_TRACKS; i++) {
+		subtitle_tracks[i].id = i;
+		snprintf(subtitle_tracks[i].title, sizeof(subtitle_tracks[i].title), "%s",
+			active_videoplayer->subtitle_tracks[i].title);
+		snprintf(subtitle_tracks[i].lang, sizeof(subtitle_tracks[i].lang), "%s",
+			active_videoplayer->subtitle_tracks[i].language);
+		subtitle_tracks[i].selected = (i == active_videoplayer->current_subtitle_track);
+		subtitle_track_count++;
+	}
+
 	/* Setup display mode based on monitor capabilities */
 	float display_hz = selmon->wlr_output->current_mode ?
 		selmon->wlr_output->current_mode->refresh / 1000.0f : 60.0f;
@@ -347,6 +369,8 @@ stop_integrated_player(void)
 		videoplayer_stop(active_videoplayer);
 		videoplayer_set_visible(active_videoplayer, 0);
 		hide_playback_osd();
+		audio_track_count = 0;
+		subtitle_track_count = 0;
 		playback_state = PLAYBACK_IDLE;
 		wlr_log(WLR_INFO, "Stopped integrated video player");
 	}
@@ -2030,19 +2054,21 @@ handle_playback_osd_input(int button)
 	case BTN_DPAD_LEFT:
 		if (osd_menu_open == OSD_MENU_SUBTITLES) {
 			osd_menu_open = OSD_MENU_SOUND;
-			osd_menu_selection = 0;
-		} else if (osd_menu_open == OSD_MENU_NONE && active_videoplayer) {
-			videoplayer_seek_hold_start(active_videoplayer, -1);
+			osd_menu_selection = active_videoplayer ? active_videoplayer->current_audio_track : 0;
+		} else if (osd_menu_open == OSD_MENU_NONE) {
+			osd_menu_open = OSD_MENU_SOUND;
+			osd_menu_selection = active_videoplayer ? active_videoplayer->current_audio_track : 0;
 		}
 		handled = 1;
 		break;
 
 	case BTN_DPAD_RIGHT:
-		if (osd_menu_open == OSD_MENU_NONE && active_videoplayer) {
-			videoplayer_seek_hold_start(active_videoplayer, 1);
-		} else if (osd_menu_open == OSD_MENU_SOUND) {
+		if (osd_menu_open == OSD_MENU_SOUND) {
 			osd_menu_open = OSD_MENU_SUBTITLES;
-			osd_menu_selection = 0;
+			osd_menu_selection = active_videoplayer ? active_videoplayer->current_subtitle_track + 1 : 0;
+		} else if (osd_menu_open == OSD_MENU_NONE) {
+			osd_menu_open = OSD_MENU_SUBTITLES;
+			osd_menu_selection = active_videoplayer ? active_videoplayer->current_subtitle_track + 1 : 0;
 		}
 		handled = 1;
 		break;
@@ -2339,7 +2365,7 @@ handle_playback_key(xkb_keysym_t sym)
 	case XKB_KEY_h:
 		if (osd_menu_open == OSD_MENU_SUBTITLES) {
 			osd_menu_open = OSD_MENU_SOUND;
-			osd_menu_selection = 0;
+			osd_menu_selection = active_videoplayer ? active_videoplayer->current_audio_track : 0;
 		}
 		handled = 1;
 		break;
@@ -2348,23 +2374,23 @@ handle_playback_key(xkb_keysym_t sym)
 	case XKB_KEY_l:
 		if (osd_menu_open == OSD_MENU_NONE) {
 			osd_menu_open = OSD_MENU_SOUND;
-			osd_menu_selection = 0;
+			osd_menu_selection = active_videoplayer ? active_videoplayer->current_audio_track : 0;
 		} else if (osd_menu_open == OSD_MENU_SOUND) {
 			osd_menu_open = OSD_MENU_SUBTITLES;
-			osd_menu_selection = 0;
+			osd_menu_selection = active_videoplayer ? active_videoplayer->current_subtitle_track + 1 : 0;
 		}
 		handled = 1;
 		break;
 
 	case XKB_KEY_a:  /* Audio shortcut */
 		osd_menu_open = OSD_MENU_SOUND;
-		osd_menu_selection = 0;
+		osd_menu_selection = active_videoplayer ? active_videoplayer->current_audio_track : 0;
 		handled = 1;
 		break;
 
 	case XKB_KEY_s:  /* Subtitle shortcut */
 		osd_menu_open = OSD_MENU_SUBTITLES;
-		osd_menu_selection = 0;
+		osd_menu_selection = active_videoplayer ? active_videoplayer->current_subtitle_track + 1 : 0;
 		handled = 1;
 		break;
 	}

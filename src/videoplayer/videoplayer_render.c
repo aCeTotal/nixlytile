@@ -1149,6 +1149,10 @@ present_buffer:
         videoplayer_update_frame_buffer(vp, buffer);
         wlr_buffer_drop(buffer);  /* Scene holds its own reference */
         vp->last_present_time_ns = vsync_time_ns;
+
+        /* Render subtitles for current position */
+        if (vp->current_subtitle_track >= 0)
+            videoplayer_render_subtitles(vp, vp->position_us);
     }
 
     /* Debug log: comprehensive per-frame metrics */

@@ -1029,6 +1029,14 @@ gamepad_device_add(const char *path)
 
 	wlr_log(WLR_INFO, "Gamepad connected: %s (%s)", name, path);
 
+	/* Pause video playback on controller connect to prevent A/V desync.
+	 * Bluetooth connection causes PipeWire audio rerouting which breaks sync.
+	 * User can resume with play button for clean resync. */
+	if (active_videoplayer && playback_state == PLAYBACK_PLAYING) {
+		videoplayer_pause(active_videoplayer);
+		render_playback_osd();
+	}
+
 	/* Switch TV/Monitor to this HDMI input via CEC */
 	cec_switch_to_active_source();
 
@@ -1306,21 +1314,19 @@ gamepad_update_cursor(void)
 	if (wl_list_empty(&gamepads))
 		return;
 
-	/* Handle video player joystick seeking (left stick left/right) */
+	/* Handle video player joystick navigation (left stick = sound/subtitle menu) */
 	if (active_videoplayer && playback_state == PLAYBACK_PLAYING) {
-		int nav_x = 0, nav_y_unused = 0;
-		gamepad_read_nav_xy(&nav_x, &nav_y_unused);
+		int nav_x = 0, nav_y = 0;
+		gamepad_read_nav_xy(&nav_x, &nav_y);
 
-		if (nav_x != 0) {
-			/* Joystick deflected past threshold - start/continue seek */
-			if (!active_videoplayer->control_bar.seek_hold_active ||
-			    active_videoplayer->control_bar.seek_hold_direction != nav_x) {
-				videoplayer_seek_hold_start(active_videoplayer, nav_x);
-			}
-		} else if (active_videoplayer->control_bar.seek_hold_active) {
-			/* Joystick returned to center - stop seek */
-			videoplayer_seek_hold_stop(active_videoplayer);
-			render_playback_osd();
+		if (gamepad_nav_should_step(nav_x != 0 || nav_y != 0, now)) {
+			int btn = 0;
+			if (nav_x == -1) btn = BTN_DPAD_LEFT;
+			else if (nav_x == 1) btn = BTN_DPAD_RIGHT;
+			else if (nav_y == -1) btn = BTN_DPAD_UP;
+			else if (nav_y == 1) btn = BTN_DPAD_DOWN;
+			if (btn)
+				handle_playback_osd_input(btn);
 		}
 		return;
 	}

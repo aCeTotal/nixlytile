@@ -12,15 +12,12 @@
 #include <errno.h>
 #include <pthread.h>
 #include <sys/stat.h>
+#include <dirent.h>
 
 #include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_scene.h>
 
 #include "videoplayer.h"
-
-/* Hardware device paths */
-#define VAAPI_DEVICE "/dev/dri/renderD128"
-#define VAAPI_DEVICE_ALT "/dev/dri/renderD129"
 
 /* ================================================================
  *  Forward Declarations
@@ -33,6 +30,7 @@ static int init_vaapi(VideoPlayer *vp);
 static int init_nvdec(VideoPlayer *vp);
 static int init_software_decoder(VideoPlayer *vp);
 static enum AVPixelFormat get_vaapi_format(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts);
+static enum AVPixelFormat get_nvdec_format(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts);
 static void *decode_thread_func(void *arg);
 static void *demux_thread_func(void *arg);
 
@@ -49,55 +47,159 @@ extern void videoplayer_hide_control_bar(VideoPlayer *vp);
 extern void videoplayer_show_seek_osd(VideoPlayer *vp);
 
 /* Subtitle processing */
+static int subtitle_pkt_count = 0;
 static void videoplayer_process_subtitle_packet(VideoPlayer *vp, AVPacket *pkt)
 {
     AVSubtitle sub;
     int got_sub = 0;
     int ret;
 
-    if (!vp || !pkt || !vp->subtitle_codec_ctx)
+    if (!vp || !pkt || !vp->subtitle_codec_ctx) {
+        fprintf(stderr, "[subtitle] process_packet: NULL guard (vp=%p pkt=%p ctx=%p)\n",
+                (void *)vp, (void *)pkt,
+                vp ? (void *)vp->subtitle_codec_ctx : NULL);
         return;
+    }
+
+    subtitle_pkt_count++;
+    int64_t raw_pts = pkt->pts;
+    int64_t raw_dts = pkt->dts;
 
     ret = avcodec_decode_subtitle2(vp->subtitle_codec_ctx, &sub, &got_sub, pkt);
-    if (ret < 0 || !got_sub)
+    if (ret < 0) {
+        fprintf(stderr, "[subtitle] decode error %d (pkt #%d, pts=%ld dts=%ld)\n",
+                ret, subtitle_pkt_count, (long)raw_pts, (long)raw_dts);
         return;
+    }
+    if (!got_sub) {
+        fprintf(stderr, "[subtitle] pkt #%d: decoded OK but got_sub=0 (pts=%ld)\n",
+                subtitle_pkt_count, (long)raw_pts);
+        return;
+    }
 
-    /* Calculate timing */
+    /* Calculate timing — use PTS with DTS fallback */
     AVRational tb = vp->fmt_ctx->streams[vp->subtitle_tracks[vp->current_subtitle_track].stream_index]->time_base;
-    int64_t start_ms = av_rescale_q(pkt->pts, tb, (AVRational){1, 1000});
+    int64_t pts = pkt->pts;
+    if (pts == AV_NOPTS_VALUE) {
+        pts = pkt->dts;
+        if (pts == AV_NOPTS_VALUE) {
+            fprintf(stderr, "[subtitle] pkt #%d: no PTS or DTS, skipping\n",
+                    subtitle_pkt_count);
+            avsubtitle_free(&sub);
+            return;
+        }
+        fprintf(stderr, "[subtitle] pkt #%d: PTS missing, using DTS=%ld\n",
+                subtitle_pkt_count, (long)pts);
+    }
+
+    int64_t start_ms = av_rescale_q(pts, tb, (AVRational){1, 1000});
     int64_t duration_ms = sub.end_display_time - sub.start_display_time;
     if (duration_ms <= 0)
         duration_ms = 5000;  /* Default 5 seconds */
 
-    /* Process each subtitle rect */
+    fprintf(stderr, "[subtitle] pkt #%d: start=%ldms duration=%ldms rects=%u "
+            "track=%p pos=%ldms\n",
+            subtitle_pkt_count, (long)start_ms, (long)duration_ms,
+            sub.num_rects, (void *)vp->subtitle.track,
+            (long)(vp->position_us / 1000));
+
+    /* Process each subtitle rect.
+     * FFmpeg's rect->ass contains the event text AFTER the timing fields
+     * (e.g. "0,,Default,,0,0,0,,Hello"), so we must use ass_process_chunk()
+     * which takes timing separately, not ass_process_data() which expects
+     * full ASS file format with "Dialogue:" prefix and embedded timing. */
+    int processed = 0;
+    pthread_mutex_lock(&vp->subtitle_mutex);
     for (unsigned i = 0; i < sub.num_rects; i++) {
         AVSubtitleRect *rect = sub.rects[i];
 
         if (!rect)
             continue;
 
-        /* Handle text-based subtitles (ASS/SRT) */
         if (rect->type == SUBTITLE_ASS && rect->ass && vp->subtitle.track) {
-            /* Add ASS dialogue line to track */
-            ass_process_data(vp->subtitle.track, rect->ass, strlen(rect->ass));
+            fprintf(stderr, "[subtitle]   rect[%u] ASS: \"%.*s\"\n",
+                    i, 120, rect->ass);
+            ass_process_chunk(vp->subtitle.track, rect->ass, strlen(rect->ass),
+                              start_ms, duration_ms);
+            processed++;
         }
         else if (rect->type == SUBTITLE_TEXT && rect->text && vp->subtitle.track) {
-            /* Convert plain text to ASS format */
+            fprintf(stderr, "[subtitle]   rect[%u] TEXT: \"%.*s\"\n",
+                    i, 120, rect->text);
             char ass_line[2048];
             snprintf(ass_line, sizeof(ass_line),
-                     "Dialogue: 0,%d:%02d:%02d.%02d,%d:%02d:%02d.%02d,Default,,0,0,0,,%s",
-                     (int)(start_ms / 3600000),
-                     (int)((start_ms / 60000) % 60),
-                     (int)((start_ms / 1000) % 60),
-                     (int)((start_ms / 10) % 100),
-                     (int)((start_ms + duration_ms) / 3600000),
-                     (int)(((start_ms + duration_ms) / 60000) % 60),
-                     (int)(((start_ms + duration_ms) / 1000) % 60),
-                     (int)(((start_ms + duration_ms) / 10) % 100),
-                     rect->text);
-            ass_process_data(vp->subtitle.track, ass_line, strlen(ass_line));
+                     "0,,Default,,0,0,0,,%s", rect->text);
+            ass_process_chunk(vp->subtitle.track, ass_line, strlen(ass_line),
+                              start_ms, duration_ms);
+            processed++;
         }
-        /* Bitmap subtitles (PGS, VOBSUB) would need different handling */
+        else if (rect->type == SUBTITLE_BITMAP && rect->w > 0 && rect->h > 0) {
+            fprintf(stderr, "[subtitle]   rect[%u] BITMAP: %dx%d at (%d,%d) nb_colors=%d\n",
+                    i, rect->w, rect->h, rect->x, rect->y, rect->nb_colors);
+
+            /* Convert palette-indexed bitmap to BGRA */
+            int bw = rect->w;
+            int bh = rect->h;
+            int bstride = bw * 4;
+            uint8_t *bgra = malloc((size_t)bstride * bh);
+            if (bgra && rect->data[0] && rect->data[1]) {
+                const uint32_t *palette = (const uint32_t *)rect->data[1];
+                const uint8_t *src = rect->data[0];
+                int src_stride = rect->linesize[0];
+
+                for (int y = 0; y < bh; y++) {
+                    const uint8_t *srow = src + y * src_stride;
+                    uint8_t *drow = bgra + y * bstride;
+                    for (int x = 0; x < bw; x++) {
+                        uint32_t rgba = palette[srow[x]];
+                        /* Palette is RGBA, convert to BGRA (ARGB8888 in DRM terms) */
+                        uint8_t r = (rgba >>  0) & 0xFF;
+                        uint8_t g = (rgba >>  8) & 0xFF;
+                        uint8_t b = (rgba >> 16) & 0xFF;
+                        uint8_t a = (rgba >> 24) & 0xFF;
+                        drow[x * 4 + 0] = b;
+                        drow[x * 4 + 1] = g;
+                        drow[x * 4 + 2] = r;
+                        drow[x * 4 + 3] = a;
+                    }
+                }
+
+                /* Store bitmap subtitle for render thread */
+                free(vp->subtitle.bitmap_data);
+                vp->subtitle.bitmap_data = bgra;
+                vp->subtitle.bitmap_w = bw;
+                vp->subtitle.bitmap_h = bh;
+                vp->subtitle.bitmap_x = rect->x;
+                vp->subtitle.bitmap_y = rect->y;
+                vp->subtitle.bitmap_stride = bstride;
+                vp->subtitle.bitmap_start_ms = start_ms;
+                vp->subtitle.bitmap_end_ms = start_ms + duration_ms;
+                vp->subtitle.bitmap_video_w = vp->video.width;
+                vp->subtitle.bitmap_video_h = vp->video.height;
+                vp->subtitle.bitmap_valid = 1;
+                processed++;
+
+                fprintf(stderr, "[subtitle]   rect[%u] BITMAP: converted to BGRA, "
+                        "display %ldms-%ldms\n",
+                        i, (long)start_ms, (long)(start_ms + duration_ms));
+            } else {
+                free(bgra);
+                fprintf(stderr, "[subtitle]   rect[%u] BITMAP: conversion failed "
+                        "(bgra=%p data[0]=%p data[1]=%p)\n",
+                        i, (void *)bgra, (void *)rect->data[0], (void *)rect->data[1]);
+            }
+        }
+        else {
+            fprintf(stderr, "[subtitle]   rect[%u] UNKNOWN type=%d ass=%p text=%p track=%p\n",
+                    i, rect->type, (void *)rect->ass, (void *)rect->text,
+                    (void *)vp->subtitle.track);
+        }
+    }
+    pthread_mutex_unlock(&vp->subtitle_mutex);
+
+    if (processed == 0 && sub.num_rects > 0) {
+        fprintf(stderr, "[subtitle] WARNING: %u rects but 0 processed (track=%p)\n",
+                sub.num_rects, (void *)vp->subtitle.track);
     }
 
     avsubtitle_free(&sub);
@@ -459,13 +561,25 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
         vp->current_audio_track = best_audio_stream;
     }
 
-    /* Select default subtitle track (-1 = off) */
+    /* Select default subtitle track (-1 = off).
+     * Priority: forced > default > first available text-based track */
     vp->current_subtitle_track = -1;
     for (int i = 0; i < vp->subtitle_track_count; i++) {
         if (vp->subtitle_tracks[i].is_forced) {
             vp->current_subtitle_track = i;
             break;
         }
+    }
+    if (vp->current_subtitle_track < 0) {
+        for (int i = 0; i < vp->subtitle_track_count; i++) {
+            if (vp->subtitle_tracks[i].is_default) {
+                vp->current_subtitle_track = i;
+                break;
+            }
+        }
+    }
+    if (vp->current_subtitle_track < 0 && vp->subtitle_track_count > 0) {
+        vp->current_subtitle_track = 0;
     }
 
     /* Build HDR tonemapping LUT if content is HDR */
@@ -496,17 +610,34 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
         }
     }
 
+    fprintf(stderr, "[subtitle] Found %d subtitle track(s), selected=%d\n",
+            vp->subtitle_track_count, vp->current_subtitle_track);
+    for (int i = 0; i < vp->subtitle_track_count; i++) {
+        SubtitleTrack *st = &vp->subtitle_tracks[i];
+        fprintf(stderr, "[subtitle]   #%d: stream=%d codec=%d (%s) text=%d "
+                "default=%d forced=%d \"%s\" [%s]\n",
+                i, st->stream_index, st->codec_id,
+                avcodec_get_name(st->codec_id),
+                st->is_text_based, st->is_default, st->is_forced,
+                st->title, st->language);
+    }
+
     if (vp->current_subtitle_track >= 0) {
         ret = init_subtitle_decoder(vp);
         if (ret < 0) {
-            fprintf(stderr, "[videoplayer] Warning: Subtitle decoder init failed\n");
+            fprintf(stderr, "[subtitle] WARNING: decoder init failed for track %d\n",
+                    vp->current_subtitle_track);
             vp->current_subtitle_track = -1;
         }
+    } else {
+        fprintf(stderr, "[subtitle] No subtitle track selected (count=%d)\n",
+                vp->subtitle_track_count);
     }
 
     /* Initialize frame queue mutex/cond */
     pthread_mutex_init(&vp->frame_mutex, NULL);
     pthread_cond_init(&vp->frame_cond, NULL);
+    pthread_mutex_init(&vp->subtitle_mutex, NULL);
 
     /* Initialize packet queue */
     pthread_mutex_init(&vp->pkt_mutex, NULL);
@@ -589,6 +720,21 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
                         vp->video.width, vp->video.height, vp->video_fps, vp->hw_accel);
                 fprintf(vp->debug_log, "# Display: %.2f Hz, frame_interval=%lu ns, pacing_mode=%d\n",
                         vp->display_hz, (unsigned long)vp->frame_interval_ns, vp->frame_repeat_mode);
+                fprintf(vp->debug_log, "# Subtitles: %d track(s), selected=%d, codec_ctx=%p, "
+                        "ass_track=%p, ass_renderer=%p\n",
+                        vp->subtitle_track_count, vp->current_subtitle_track,
+                        (void *)vp->subtitle_codec_ctx,
+                        (void *)vp->subtitle.track,
+                        (void *)vp->subtitle.renderer);
+                for (int si = 0; si < vp->subtitle_track_count; si++) {
+                    SubtitleTrack *st = &vp->subtitle_tracks[si];
+                    fprintf(vp->debug_log, "#   sub[%d]: stream=%d codec=%s text=%d "
+                            "\"%s\" [%s]%s\n",
+                            si, st->stream_index,
+                            avcodec_get_name(st->codec_id),
+                            st->is_text_based, st->title, st->language,
+                            si == vp->current_subtitle_track ? " <-- ACTIVE" : "");
+                }
                 fprintf(vp->debug_log, "# frame | state  | q=queued | avsync | pos_ms | v=vsyncs | dt=actual/expected us\n");
                 fflush(vp->debug_log);
                 fprintf(stderr, "[videoplayer] Debug log: %s\n", logpath);
@@ -753,46 +899,73 @@ static enum AVPixelFormat get_vaapi_format(AVCodecContext *ctx,
     return AV_PIX_FMT_NONE;
 }
 
+static enum AVPixelFormat get_nvdec_format(AVCodecContext *ctx,
+                                            const enum AVPixelFormat *pix_fmts)
+{
+    const enum AVPixelFormat *p;
+
+    fprintf(stderr, "[videoplayer] NVDEC format negotiation, offered formats:");
+    for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+        fprintf(stderr, " %s", av_get_pix_fmt_name(*p));
+    }
+    fprintf(stderr, "\n");
+
+    for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+        if (*p == AV_PIX_FMT_CUDA) {
+            fprintf(stderr, "[videoplayer] NVDEC format accepted\n");
+            return *p;
+        }
+    }
+
+    fprintf(stderr, "[videoplayer] NVDEC format NOT in list, rejecting\n");
+    return AV_PIX_FMT_NONE;
+}
+
 static int init_vaapi(VideoPlayer *vp)
 {
     int ret;
-    struct stat st;
-    const char *device = NULL;
-
-    /* Check which DRI render node exists */
-    if (stat(VAAPI_DEVICE, &st) == 0) {
-        device = VAAPI_DEVICE;
-        fprintf(stderr, "[videoplayer] Found render node: %s\n", VAAPI_DEVICE);
-    } else if (stat(VAAPI_DEVICE_ALT, &st) == 0) {
-        device = VAAPI_DEVICE_ALT;
-        fprintf(stderr, "[videoplayer] Found render node: %s\n", VAAPI_DEVICE_ALT);
-    } else {
-        fprintf(stderr, "[videoplayer] No DRI render node found (%s, %s)\n",
-                VAAPI_DEVICE, VAAPI_DEVICE_ALT);
-        return -1;
-    }
+    char device_path[64];
 
     /* Set opaque for get_vaapi_format callback communication */
     vp->video_codec_ctx->opaque = vp;
     vp->vaapi_format_rejected = 0;
     vp->hw_verified = 0;
 
-    /* Create HW device context */
-    ret = av_hwdevice_ctx_create(&vp->hw_device_ctx, AV_HWDEVICE_TYPE_VAAPI,
-                                  device, NULL, 0);
-    if (ret < 0) {
-        char errbuf[256];
-        av_strerror(ret, errbuf, sizeof(errbuf));
-        fprintf(stderr, "[videoplayer] VA-API init failed on %s: %s\n", device, errbuf);
+    /* Scan /dev/dri/ for render nodes instead of hardcoding renderD128/129.
+     * This handles multi-GPU systems and unusual device numbering. */
+    DIR *dir = opendir("/dev/dri");
+    if (!dir) {
+        fprintf(stderr, "[videoplayer] VA-API: cannot open /dev/dri\n");
         return -1;
     }
 
-    vp->video_codec_ctx->hw_device_ctx = av_buffer_ref(vp->hw_device_ctx);
-    vp->video_codec_ctx->get_format = get_vaapi_format;
-    vp->hw_accel = VP_HW_VAAPI;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (strncmp(ent->d_name, "renderD", 7) != 0)
+            continue;
 
-    fprintf(stderr, "[videoplayer] VA-API initialized on %s\n", device);
-    return 0;
+        snprintf(device_path, sizeof(device_path), "/dev/dri/%s", ent->d_name);
+        fprintf(stderr, "[videoplayer] Trying VA-API on %s\n", device_path);
+
+        ret = av_hwdevice_ctx_create(&vp->hw_device_ctx, AV_HWDEVICE_TYPE_VAAPI,
+                                      device_path, NULL, 0);
+        if (ret == 0) {
+            closedir(dir);
+            vp->video_codec_ctx->hw_device_ctx = av_buffer_ref(vp->hw_device_ctx);
+            vp->video_codec_ctx->get_format = get_vaapi_format;
+            vp->hw_accel = VP_HW_VAAPI;
+            fprintf(stderr, "[videoplayer] VA-API initialized on %s\n", device_path);
+            return 0;
+        }
+
+        char errbuf[256];
+        av_strerror(ret, errbuf, sizeof(errbuf));
+        fprintf(stderr, "[videoplayer] VA-API failed on %s: %s\n", device_path, errbuf);
+    }
+
+    closedir(dir);
+    fprintf(stderr, "[videoplayer] VA-API: no working render node found\n");
+    return -1;
 }
 
 static int init_nvdec(VideoPlayer *vp)
@@ -808,8 +981,11 @@ static int init_nvdec(VideoPlayer *vp)
         return -1;
     }
 
+    vp->video_codec_ctx->opaque = vp;
     vp->video_codec_ctx->hw_device_ctx = av_buffer_ref(vp->hw_device_ctx);
+    vp->video_codec_ctx->get_format = get_nvdec_format;
     vp->hw_accel = VP_HW_NVDEC;
+    vp->hw_verified = 0;
 
     fprintf(stderr, "[videoplayer] NVDEC initialized\n");
     return 0;
@@ -837,39 +1013,85 @@ static int init_video_decoder(VideoPlayer *vp)
         return -1;
     }
 
-    /* Allocate context */
-    vp->video_codec_ctx = avcodec_alloc_context3(codec);
-    if (!vp->video_codec_ctx) {
-        snprintf(vp->error_msg, sizeof(vp->error_msg), "Failed to allocate video codec context");
-        return -1;
-    }
+    /* Determine HW acceleration order based on GPU vendor.
+     * NVIDIA GPUs work best with NVDEC (native CUDA decoder).
+     * AMD/Intel GPUs work best with VA-API.
+     * /dev/nvidia0 exists when the NVIDIA kernel module is loaded. */
+    int prefer_nvdec = (access("/dev/nvidia0", F_OK) == 0);
 
-    ret = avcodec_parameters_to_context(vp->video_codec_ctx, stream->codecpar);
-    if (ret < 0) {
-        snprintf(vp->error_msg, sizeof(vp->error_msg), "Failed to copy codec parameters");
-        return -1;
-    }
+    typedef int (*hw_init_fn)(VideoPlayer *);
+    struct { hw_init_fn init; const char *name; } backends[3];
+    int n_backends = 0;
 
-    /* Try hardware acceleration: VA-API -> NVDEC -> Software */
-    if (init_vaapi(vp) != 0) {
-        if (init_nvdec(vp) != 0) {
+    if (prefer_nvdec) {
+        backends[n_backends++] = (typeof(backends[0])){init_nvdec, "NVDEC"};
+        backends[n_backends++] = (typeof(backends[0])){init_vaapi, "VA-API"};
+        fprintf(stderr, "[videoplayer] NVIDIA GPU detected, trying NVDEC first\n");
+    } else {
+        backends[n_backends++] = (typeof(backends[0])){init_vaapi, "VA-API"};
+        backends[n_backends++] = (typeof(backends[0])){init_nvdec, "NVDEC"};
+        fprintf(stderr, "[videoplayer] Trying VA-API first (AMD/Intel)\n");
+    }
+    /* Software fallback is always last (init=NULL signals software) */
+    backends[n_backends++] = (typeof(backends[0])){NULL, "software"};
+
+    /* Try each backend: HW init → avcodec_open2 → success or next.
+     * This handles cases where HW init succeeds but codec open fails
+     * (e.g., codec not supported by the hardware). */
+    int opened = 0;
+    for (int i = 0; i < n_backends && !opened; i++) {
+        /* Fresh codec context for each attempt */
+        vp->video_codec_ctx = avcodec_alloc_context3(codec);
+        if (!vp->video_codec_ctx) {
+            snprintf(vp->error_msg, sizeof(vp->error_msg),
+                     "Failed to allocate video codec context");
+            return -1;
+        }
+
+        ret = avcodec_parameters_to_context(vp->video_codec_ctx, stream->codecpar);
+        if (ret < 0) {
+            snprintf(vp->error_msg, sizeof(vp->error_msg),
+                     "Failed to copy codec parameters");
+            avcodec_free_context(&vp->video_codec_ctx);
+            return -1;
+        }
+
+        /* Initialize HW backend or software fallback */
+        if (backends[i].init) {
+            if (backends[i].init(vp) != 0) {
+                fprintf(stderr, "[videoplayer] %s: init failed, trying next\n",
+                        backends[i].name);
+                avcodec_free_context(&vp->video_codec_ctx);
+                continue;
+            }
+        } else {
             init_software_decoder(vp);
+        }
+
+        /* Set thread count for software decoding */
+        if (vp->hw_accel == VP_HW_NONE) {
+            vp->video_codec_ctx->thread_count = 0;  /* Auto-detect */
+            vp->video_codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+        }
+
+        /* Open decoder */
+        ret = avcodec_open2(vp->video_codec_ctx, codec, NULL);
+        if (ret == 0) {
+            fprintf(stderr, "[videoplayer] Decoder opened with %s\n", backends[i].name);
+            opened = 1;
+        } else {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            fprintf(stderr, "[videoplayer] %s: avcodec_open2 failed: %s\n",
+                    backends[i].name, errbuf);
+            avcodec_free_context(&vp->video_codec_ctx);
+            av_buffer_unref(&vp->hw_device_ctx);
         }
     }
 
-    /* Set thread count for software decoding */
-    if (vp->hw_accel == VP_HW_NONE) {
-        vp->video_codec_ctx->thread_count = 0;  /* Auto-detect */
-        vp->video_codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
-    }
-
-    /* Open decoder */
-    ret = avcodec_open2(vp->video_codec_ctx, codec, NULL);
-    if (ret < 0) {
-        char errbuf[256];
-        av_strerror(ret, errbuf, sizeof(errbuf));
+    if (!opened) {
         snprintf(vp->error_msg, sizeof(vp->error_msg),
-                 "Failed to open video decoder: %s", errbuf);
+                 "Failed to open video decoder with any backend");
         return -1;
     }
 
@@ -937,60 +1159,92 @@ static int init_audio_decoder(VideoPlayer *vp)
  *  Subtitle Decoder Initialization
  * ================================================================ */
 
-/* Forward declaration for subtitle init */
+/* Forward declarations for subtitle/audio lifecycle */
 extern int videoplayer_subtitle_init(VideoPlayer *vp);
+extern void videoplayer_subtitle_cleanup(VideoPlayer *vp);
 
 static int init_subtitle_decoder(VideoPlayer *vp)
 {
     int ret;
 
-    if (vp->current_subtitle_track < 0)
+    if (vp->current_subtitle_track < 0) {
+        fprintf(stderr, "[subtitle] init_decoder: no track selected\n");
         return -1;
+    }
 
     SubtitleTrack *track = &vp->subtitle_tracks[vp->current_subtitle_track];
     AVStream *stream = vp->fmt_ctx->streams[track->stream_index];
     const AVCodec *codec;
 
+    fprintf(stderr, "[subtitle] init_decoder: track #%d, stream=%d, codec_id=%d (%s), "
+            "text=%d, title=\"%s\", lang=\"%s\"\n",
+            vp->current_subtitle_track, track->stream_index,
+            stream->codecpar->codec_id,
+            avcodec_get_name(stream->codecpar->codec_id),
+            track->is_text_based, track->title, track->language);
+
     codec = avcodec_find_decoder(stream->codecpar->codec_id);
     if (!codec) {
-        fprintf(stderr, "[videoplayer] Unsupported subtitle codec: %d\n",
-                stream->codecpar->codec_id);
+        fprintf(stderr, "[subtitle] init_decoder: no decoder for codec %d (%s)\n",
+                stream->codecpar->codec_id,
+                avcodec_get_name(stream->codecpar->codec_id));
         return -1;
     }
 
     vp->subtitle_codec_ctx = avcodec_alloc_context3(codec);
-    if (!vp->subtitle_codec_ctx)
+    if (!vp->subtitle_codec_ctx) {
+        fprintf(stderr, "[subtitle] init_decoder: alloc context failed\n");
         return -1;
+    }
 
     ret = avcodec_parameters_to_context(vp->subtitle_codec_ctx, stream->codecpar);
-    if (ret < 0)
+    if (ret < 0) {
+        fprintf(stderr, "[subtitle] init_decoder: params_to_context failed: %d\n", ret);
         return -1;
+    }
 
     ret = avcodec_open2(vp->subtitle_codec_ctx, codec, NULL);
-    if (ret < 0)
+    if (ret < 0) {
+        fprintf(stderr, "[subtitle] init_decoder: open2 failed: %d\n", ret);
         return -1;
+    }
+
+    fprintf(stderr, "[subtitle] init_decoder: ffmpeg codec opened OK\n");
 
     /* Initialize libass */
     if (videoplayer_subtitle_init(vp) < 0) {
-        fprintf(stderr, "[videoplayer] Warning: libass init failed\n");
+        fprintf(stderr, "[subtitle] init_decoder: libass init failed\n");
+        return -1;
     }
+
+    fprintf(stderr, "[subtitle] init_decoder: libass state — library=%p renderer=%p\n",
+            (void *)vp->subtitle.library, (void *)vp->subtitle.renderer);
 
     /* Create libass track and load codec extradata (ASS header) */
     if (vp->subtitle.library && vp->subtitle.renderer) {
         vp->subtitle.track = ass_new_track(vp->subtitle.library);
+        fprintf(stderr, "[subtitle] init_decoder: ass_new_track -> %p\n",
+                (void *)vp->subtitle.track);
+
         if (vp->subtitle.track) {
             /* Load ASS header from codec extradata */
             if (stream->codecpar->extradata && stream->codecpar->extradata_size > 0) {
+                fprintf(stderr, "[subtitle] init_decoder: loading codec extradata (%d bytes)\n",
+                        stream->codecpar->extradata_size);
                 ass_process_codec_private(vp->subtitle.track,
                                           (char *)stream->codecpar->extradata,
                                           stream->codecpar->extradata_size);
+            } else {
+                fprintf(stderr, "[subtitle] init_decoder: no codec extradata\n");
             }
 
             /* Set default style for non-ASS subtitles */
             if (stream->codecpar->codec_id == AV_CODEC_ID_SUBRIP ||
                 stream->codecpar->codec_id == AV_CODEC_ID_SRT ||
-                stream->codecpar->codec_id == AV_CODEC_ID_TEXT) {
-                /* Create default ASS header for SRT */
+                stream->codecpar->codec_id == AV_CODEC_ID_TEXT ||
+                stream->codecpar->codec_id == AV_CODEC_ID_WEBVTT ||
+                stream->codecpar->codec_id == AV_CODEC_ID_MOV_TEXT) {
+                fprintf(stderr, "[subtitle] init_decoder: injecting default ASS header for text subs\n");
                 const char *default_header =
                     "[Script Info]\n"
                     "ScriptType: v4.00+\n"
@@ -1002,7 +1256,7 @@ static int init_subtitle_decoder(VideoPlayer *vp)
                     "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
                     "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
                     "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-                    "Style: Default,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,"
+                    "Style: Default,DejaVu Sans,32,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,"
                     "0,0,0,0,100,100,0,0,1,2,1,2,20,20,40,1\n"
                     "\n"
                     "[Events]\n"
@@ -1012,10 +1266,20 @@ static int init_subtitle_decoder(VideoPlayer *vp)
                                           strlen(default_header));
             }
         }
+    } else {
+        fprintf(stderr, "[subtitle] init_decoder: WARNING — libass library/renderer NULL, "
+                "subtitle track NOT created\n");
     }
 
-    fprintf(stderr, "[videoplayer] Subtitle decoder initialized: %s\n",
-            avcodec_get_name(stream->codecpar->codec_id));
+    fprintf(stderr, "[subtitle] init_decoder: DONE — codec=%s, track=%p, "
+            "renderer=%p, extradata=%d bytes\n",
+            avcodec_get_name(stream->codecpar->codec_id),
+            (void *)vp->subtitle.track,
+            (void *)vp->subtitle.renderer,
+            stream->codecpar->extradata_size);
+
+    /* Reset packet counter for new track */
+    subtitle_pkt_count = 0;
 
     return 0;
 }
@@ -1503,6 +1767,8 @@ static void *decode_thread_func(void *arg)
             avcodec_flush_buffers(vp->video_codec_ctx);
             if (vp->audio_codec_ctx)
                 avcodec_flush_buffers(vp->audio_codec_ctx);
+            if (vp->subtitle_codec_ctx)
+                avcodec_flush_buffers(vp->subtitle_codec_ctx);
 
             /* Clear frame queue */
             pthread_mutex_lock(&vp->frame_mutex);
@@ -1705,14 +1971,27 @@ void videoplayer_set_audio_track(VideoPlayer *vp, int index)
     if (index == vp->current_audio_track)
         return;
 
+    /* Tear down old audio pipeline (PipeWire, ring buffer, resampler).
+     * The new track may have different channels/sample_rate, so the
+     * entire audio output must be recreated. Shut down the cmd thread
+     * first since it holds PipeWire locks. */
+    videoplayer_audio_cmd_shutdown(vp);
+    videoplayer_audio_cleanup(vp);
+
     /* Free old audio decoder */
     avcodec_free_context(&vp->audio_codec_ctx);
     av_frame_free(&vp->audio_frame);
 
     vp->current_audio_track = index;
 
-    /* Initialize new audio decoder */
-    init_audio_decoder(vp);
+    /* Initialize new audio decoder and PipeWire output */
+    if (init_audio_decoder(vp) == 0)
+        videoplayer_audio_init(vp);
+
+    /* Seek to current position — flushes packet/frame queues, resets A/V
+     * sync, and restarts demux so all three streams (video, audio, subtitle)
+     * resume from the same position in lockstep. */
+    videoplayer_seek(vp, vp->position_us);
 }
 
 void videoplayer_set_subtitle_track(VideoPlayer *vp, int index)
@@ -1726,14 +2005,28 @@ void videoplayer_set_subtitle_track(VideoPlayer *vp, int index)
     if (index == vp->current_subtitle_track)
         return;
 
+    /* Clean up old subtitle state (libass track/renderer/library, buffers) */
+    videoplayer_subtitle_cleanup(vp);
+
     /* Free old subtitle decoder */
     avcodec_free_context(&vp->subtitle_codec_ctx);
+
+    /* Clear subtitle display immediately */
+    if (vp->subtitle_tree) {
+        struct wlr_scene_node *node, *tmp;
+        wl_list_for_each_safe(node, tmp, &vp->subtitle_tree->children, link) {
+            wlr_scene_node_destroy(node);
+        }
+    }
 
     vp->current_subtitle_track = index;
 
     /* Initialize new subtitle decoder */
     if (index >= 0) {
         init_subtitle_decoder(vp);
+        /* Seek to current position so subtitles start from the correct
+         * frame, synced with video and audio. */
+        videoplayer_seek(vp, vp->position_us);
     }
 }
 

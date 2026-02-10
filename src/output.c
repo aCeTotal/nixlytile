@@ -2333,7 +2333,8 @@ render_playback_osd(void)
 	}
 
 	/* Right side: Sound and Subtitles buttons */
-	int right_x = bar_w - padding - btn_w * 2 - 10;  /* 10px gap between buttons */
+	int sub_btn_w = 130;
+	int right_x = bar_w - padding - btn_w - 10 - sub_btn_w;  /* Sound + gap + Subtitles */
 
 	/* Progress bar and time display */
 	if (active_videoplayer && active_videoplayer->duration_us > 0) {
@@ -2394,15 +2395,15 @@ render_playback_osd(void)
 		}
 	}
 
-	/* Subtitles button */
+	/* Subtitles button (wider to fit text) */
 	{
 		int sub_x = right_x + btn_w + 10;
 		float *bg = (osd_menu_open == OSD_MENU_SUBTITLES) ? btn_selected : btn_bg;
-		drawrect(playback_osd_tree, sub_x, (bar_h - btn_h) / 2, btn_w, btn_h, bg);
+		drawrect(playback_osd_tree, sub_x, (bar_h - btn_h) / 2, sub_btn_w, btn_h, bg);
 
 		text_tree = wlr_scene_tree_create(playback_osd_tree);
 		if (text_tree) {
-			wlr_scene_node_set_position(&text_tree->node, sub_x + 15, (bar_h - 16) / 2);
+			wlr_scene_node_set_position(&text_tree->node, sub_x + 20, (bar_h - 16) / 2);
 			mod.tree = text_tree;
 			tray_render_label(&mod, "Subtitles", 0, 16, text_color);
 		}

@@ -308,13 +308,13 @@ int videoplayer_init_control_bar(VideoPlayer *vp, struct wlr_scene_tree *parent,
     /* Right side buttons (from right to left) */
     int right_x = bar->width - padding;
 
-    /* Subtitle button (wider to show track info) */
-    bar->subtitle_w = 90;
+    /* Subtitle button (wide enough for language list like "English, Norwegian") */
+    bar->subtitle_w = 200;
     bar->subtitle_x = right_x - bar->subtitle_w;
     right_x = bar->subtitle_x - padding;
 
-    /* Audio button (wider to show track info) */
-    bar->audio_w = 120;
+    /* Audio button (wide enough for "Atmos Passthrough") */
+    bar->audio_w = 170;
     bar->audio_x = right_x - bar->audio_w;
     right_x = bar->audio_x - padding;
 
@@ -444,6 +444,62 @@ static const char *audio_codec_display_name(AudioTrack *track)
     case AV_CODEC_ID_MP3: return "MP3";
     default: return avcodec_get_name(track->codec_id);
     }
+}
+
+static const char *language_full_name(const char *code)
+{
+    if (!code || !code[0])
+        return NULL;
+
+    static const struct { const char *code; const char *name; } langs[] = {
+        {"eng", "English"}, {"en", "English"},
+        {"nor", "Norwegian"}, {"nob", "Norwegian"}, {"nno", "Norwegian"}, {"no", "Norwegian"},
+        {"swe", "Swedish"}, {"sv", "Swedish"},
+        {"dan", "Danish"}, {"da", "Danish"},
+        {"fin", "Finnish"}, {"fi", "Finnish"},
+        {"deu", "German"}, {"ger", "German"}, {"de", "German"},
+        {"fra", "French"}, {"fre", "French"}, {"fr", "French"},
+        {"spa", "Spanish"}, {"es", "Spanish"},
+        {"ita", "Italian"}, {"it", "Italian"},
+        {"por", "Portuguese"}, {"pt", "Portuguese"},
+        {"jpn", "Japanese"}, {"ja", "Japanese"},
+        {"kor", "Korean"}, {"ko", "Korean"},
+        {"zho", "Chinese"}, {"chi", "Chinese"}, {"zh", "Chinese"},
+        {"rus", "Russian"}, {"ru", "Russian"},
+        {"ara", "Arabic"}, {"ar", "Arabic"},
+        {"hin", "Hindi"}, {"hi", "Hindi"},
+        {"pol", "Polish"}, {"pl", "Polish"},
+        {"nld", "Dutch"}, {"dut", "Dutch"}, {"nl", "Dutch"},
+        {"tur", "Turkish"}, {"tr", "Turkish"},
+        {"tha", "Thai"}, {"th", "Thai"},
+        {"vie", "Vietnamese"}, {"vi", "Vietnamese"},
+        {"ces", "Czech"}, {"cze", "Czech"}, {"cs", "Czech"},
+        {"hun", "Hungarian"}, {"hu", "Hungarian"},
+        {"ron", "Romanian"}, {"rum", "Romanian"}, {"ro", "Romanian"},
+        {"ell", "Greek"}, {"gre", "Greek"}, {"el", "Greek"},
+        {"heb", "Hebrew"}, {"he", "Hebrew"},
+        {"ind", "Indonesian"}, {"id", "Indonesian"},
+        {"ukr", "Ukrainian"}, {"uk", "Ukrainian"},
+        {"hrv", "Croatian"}, {"hr", "Croatian"},
+        {"srp", "Serbian"}, {"sr", "Serbian"},
+        {"bul", "Bulgarian"}, {"bg", "Bulgarian"},
+        {"slk", "Slovak"}, {"slo", "Slovak"}, {"sk", "Slovak"},
+        {"slv", "Slovenian"}, {"sl", "Slovenian"},
+        {"isl", "Icelandic"}, {"ice", "Icelandic"}, {"is", "Icelandic"},
+        {"cat", "Catalan"}, {"ca", "Catalan"},
+        {"est", "Estonian"}, {"et", "Estonian"},
+        {"lav", "Latvian"}, {"lv", "Latvian"},
+        {"lit", "Lithuanian"}, {"lt", "Lithuanian"},
+        {"msa", "Malay"}, {"may", "Malay"}, {"ms", "Malay"},
+        {"und", "Unknown"},
+    };
+
+    for (size_t i = 0; i < sizeof(langs) / sizeof(langs[0]); i++) {
+        if (strcmp(code, langs[i].code) == 0)
+            return langs[i].name;
+    }
+
+    return NULL;
 }
 
 static const char *subtitle_format_name(SubtitleTrack *track)
@@ -601,29 +657,32 @@ void videoplayer_render_control_bar(VideoPlayer *vp)
         (void)icon_h;
     }
 
-    /* Audio track button - show current track info */
+    /* Audio track button - show quality and channel layout */
     {
         char audio_label[64];
 
         if (vp->audio_track_count > 0) {
             AudioTrack *track = &vp->audio_tracks[vp->current_audio_track];
-            const char *codec_display = audio_codec_display_name(track);
             const char *ch_str;
 
             switch (track->channels) {
             case 8:  ch_str = "7.1"; break;
             case 6:  ch_str = "5.1"; break;
-            case 2:  ch_str = "2.0"; break;
-            case 1:  ch_str = "1.0"; break;
+            case 2:  ch_str = "Stereo"; break;
+            case 1:  ch_str = "Mono"; break;
             default: ch_str = ""; break;
             }
 
-            if (track->language[0]) {
-                snprintf(audio_label, sizeof(audio_label), "%s %s %s",
-                         track->language, codec_display, ch_str);
+            if (track->is_atmos) {
+                if (vp->audio.passthrough_mode)
+                    snprintf(audio_label, sizeof(audio_label), "Atmos Passthrough");
+                else
+                    snprintf(audio_label, sizeof(audio_label), "Atmos %s", ch_str);
+            } else if (track->is_lossless) {
+                snprintf(audio_label, sizeof(audio_label), "Lossless %s", ch_str);
             } else {
-                snprintf(audio_label, sizeof(audio_label), "%s %s",
-                         codec_display, ch_str);
+                const char *codec_display = audio_codec_display_name(track);
+                snprintf(audio_label, sizeof(audio_label), "%s %s", codec_display, ch_str);
             }
         } else {
             snprintf(audio_label, sizeof(audio_label), "No Audio");
@@ -641,24 +700,39 @@ void videoplayer_render_control_bar(VideoPlayer *vp)
         }
     }
 
-    /* Subtitle button - show current track info */
+    /* Subtitle button - list available subtitle languages */
     {
-        char sub_label[64];
+        char sub_label[128];
 
-        if (vp->current_subtitle_track >= 0 &&
-            vp->current_subtitle_track < vp->subtitle_track_count) {
-            SubtitleTrack *track = &vp->subtitle_tracks[vp->current_subtitle_track];
-            const char *sub_fmt = subtitle_format_name(track);
+        if (vp->subtitle_track_count > 0) {
+            /* Collect unique language names */
+            const char *seen[VP_MAX_SUBTITLE_TRACKS];
+            int seen_count = 0;
+            int pos = 0;
 
-            if (track->language[0]) {
-                snprintf(sub_label, sizeof(sub_label), "%s %s",
-                         track->language, sub_fmt);
-            } else {
-                snprintf(sub_label, sizeof(sub_label), "%s %d",
-                         sub_fmt, vp->current_subtitle_track + 1);
+            for (int i = 0; i < vp->subtitle_track_count; i++) {
+                SubtitleTrack *track = &vp->subtitle_tracks[i];
+                const char *name = language_full_name(track->language);
+                if (!name)
+                    name = track->language[0] ? track->language : "Unknown";
+
+                /* Deduplicate */
+                int dup = 0;
+                for (int j = 0; j < seen_count; j++) {
+                    if (strcmp(seen[j], name) == 0) { dup = 1; break; }
+                }
+                if (dup) continue;
+                seen[seen_count++] = name;
+
+                /* Append to label with comma separator */
+                if (pos > 0) {
+                    int w = snprintf(sub_label + pos, sizeof(sub_label) - pos, ", ");
+                    if (w > 0) pos += w;
+                }
+                int w = snprintf(sub_label + pos, sizeof(sub_label) - pos, "%s", name);
+                if (w > 0) pos += w;
+                if (pos >= (int)sizeof(sub_label) - 4) break;
             }
-        } else if (vp->subtitle_track_count > 0) {
-            snprintf(sub_label, sizeof(sub_label), "CC Off");
         } else {
             snprintf(sub_label, sizeof(sub_label), "No Subs");
         }
@@ -683,15 +757,15 @@ void videoplayer_render_control_bar(VideoPlayer *vp)
 static int64_t seek_hold_increment(int tick_count)
 {
     /* Acceleration: the longer you hold, the faster it seeks.
-     * At 100ms ticks: 0-5 ticks = 10x, 5-20 = 30x, 20-50 = 60x, 50+ = 120x */
+     * At 100ms ticks: 0-5 ticks = 20x, 5-20 = 60x, 20-50 = 120x, 50+ = 240x */
     if (tick_count < 5)
-        return 1000000LL;   /* 1s per tick = 10x speed */
+        return 2000000LL;   /* 2s per tick = 20x speed */
     else if (tick_count < 20)
-        return 3000000LL;   /* 3s per tick = 30x speed */
-    else if (tick_count < 50)
         return 6000000LL;   /* 6s per tick = 60x speed */
-    else
+    else if (tick_count < 50)
         return 12000000LL;  /* 12s per tick = 120x speed */
+    else
+        return 24000000LL;  /* 24s per tick = 240x speed */
 }
 
 static int seek_hold_timer_cb(void *data)
@@ -768,8 +842,8 @@ void videoplayer_seek_hold_start(VideoPlayer *vp, int direction)
     bar->seek_hold_count = 0;
     bar->seek_hold_base_us = vp->seek_requested ? vp->seek_target_us : vp->position_us;
 
-    /* Initial seek - immediate first step (5 seconds) */
-    int64_t initial_seek = 5 * 1000000LL;
+    /* Initial seek - immediate first step (10 seconds) */
+    int64_t initial_seek = 10 * 1000000LL;
     vp->seek_target_us = bar->seek_hold_base_us + direction * initial_seek;
 
     /* Clamp */
@@ -968,10 +1042,95 @@ static struct wlr_buffer *create_subtitle_buffer(ASS_Image *images, int width, i
     return &buf->base;
 }
 
+static int sub_render_log_count = 0;
+static int sub_render_shown_count = 0;
+
+/* Create a wlr_buffer from bitmap subtitle BGRA data, scaled to display size */
+static struct wlr_buffer *create_bitmap_subtitle_buffer(VideoPlayer *vp)
+{
+    struct CairoBuffer *buf;
+
+    if (!vp->subtitle.bitmap_data || !vp->subtitle.bitmap_valid)
+        return NULL;
+
+    int fw = vp->fullscreen_width;
+    int fh = vp->fullscreen_height;
+    if (fw <= 0 || fh <= 0)
+        return NULL;
+
+    buf = calloc(1, sizeof(*buf));
+    if (!buf)
+        return NULL;
+
+    buf->stride = fw * 4;
+    buf->data = calloc(fh, buf->stride);
+    if (!buf->data) {
+        free(buf);
+        return NULL;
+    }
+
+    buf->surface = cairo_image_surface_create_for_data(buf->data,
+                                                        CAIRO_FORMAT_ARGB32,
+                                                        fw, fh, buf->stride);
+    if (cairo_surface_status(buf->surface) != CAIRO_STATUS_SUCCESS) {
+        free(buf->data);
+        free(buf);
+        return NULL;
+    }
+
+    cairo_t *cr = cairo_create(buf->surface);
+
+    /* Clear background (transparent) */
+    cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+    cairo_paint(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+
+    /* Create a cairo surface from the bitmap BGRA data */
+    int bw = vp->subtitle.bitmap_w;
+    int bh = vp->subtitle.bitmap_h;
+    int bstride = vp->subtitle.bitmap_stride;
+
+    cairo_surface_t *bmp_surface = cairo_image_surface_create_for_data(
+        vp->subtitle.bitmap_data, CAIRO_FORMAT_ARGB32, bw, bh, bstride);
+
+    if (cairo_surface_status(bmp_surface) != CAIRO_STATUS_SUCCESS) {
+        cairo_destroy(cr);
+        cairo_surface_destroy(buf->surface);
+        free(buf->data);
+        free(buf);
+        return NULL;
+    }
+
+    /* Scale bitmap from video coordinates to fullscreen display.
+     * PGS subtitle positions are relative to the video frame dimensions. */
+    int vid_w = vp->subtitle.bitmap_video_w;
+    int vid_h = vp->subtitle.bitmap_video_h;
+    if (vid_w <= 0) vid_w = bw;
+    if (vid_h <= 0) vid_h = bh;
+
+    double scale_x = (double)fw / vid_w;
+    double scale_y = (double)fh / vid_h;
+    double dst_x = vp->subtitle.bitmap_x * scale_x;
+    double dst_y = vp->subtitle.bitmap_y * scale_y;
+
+    cairo_save(cr);
+    cairo_translate(cr, dst_x, dst_y);
+    cairo_scale(cr, scale_x, scale_y);
+    cairo_set_source_surface(cr, bmp_surface, 0, 0);
+    cairo_paint(cr);
+    cairo_restore(cr);
+
+    cairo_surface_destroy(bmp_surface);
+    cairo_destroy(cr);
+    cairo_surface_flush(buf->surface);
+
+    wlr_buffer_init(&buf->base, &cairo_buffer_impl, fw, fh);
+
+    return &buf->base;
+}
+
 void videoplayer_render_subtitles(VideoPlayer *vp, int64_t pts_us)
 {
-    ASS_Image *images;
-    int changed;
     struct wlr_buffer *sub_buffer;
 
     if (!vp)
@@ -980,63 +1139,163 @@ void videoplayer_render_subtitles(VideoPlayer *vp, int64_t pts_us)
     if (vp->current_subtitle_track < 0)
         return;
 
-    if (!vp->subtitle.renderer || !vp->subtitle.track)
-        return;
-
-    /* Update frame size if needed */
-    ass_set_frame_size(vp->subtitle.renderer,
-                       vp->fullscreen_width, vp->fullscreen_height);
-
-    /* Render subtitles for current PTS (convert to milliseconds) */
-    images = ass_render_frame(vp->subtitle.renderer, vp->subtitle.track,
-                               pts_us / 1000, &changed);
-
-    /* Only update if content changed or we don't have a buffer */
-    if (!changed && vp->subtitle.current_buffer &&
-        pts_us >= vp->subtitle.current_pts_us &&
-        pts_us < vp->subtitle.current_end_us) {
+    if (vp->fullscreen_width <= 0 || vp->fullscreen_height <= 0) {
+        if (sub_render_log_count++ < 5)
+            fprintf(stderr, "[subtitle] render: fullscreen_size=%dx%d — skipping\n",
+                    vp->fullscreen_width, vp->fullscreen_height);
         return;
     }
 
-    /* Clear old subtitle */
-    if (vp->subtitle.current_buffer) {
-        wlr_buffer_drop(vp->subtitle.current_buffer);
-        vp->subtitle.current_buffer = NULL;
-    }
+    long long render_ms = pts_us / 1000;
+    int is_bitmap_track = (vp->current_subtitle_track >= 0 &&
+                           !vp->subtitle_tracks[vp->current_subtitle_track].is_text_based);
 
-    /* Clear subtitle tree */
-    if (vp->subtitle_tree) {
-        struct wlr_scene_node *node, *tmp;
-        wl_list_for_each_safe(node, tmp, &vp->subtitle_tree->children, link) {
-            wlr_scene_node_destroy(node);
+    if (is_bitmap_track) {
+        /* ── Bitmap subtitle path (PGS/VOBSUB) ── */
+        pthread_mutex_lock(&vp->subtitle_mutex);
+        int valid = vp->subtitle.bitmap_valid;
+        int64_t bstart = vp->subtitle.bitmap_start_ms;
+        int64_t bend = vp->subtitle.bitmap_end_ms;
+        pthread_mutex_unlock(&vp->subtitle_mutex);
+
+        /* Check if bitmap is active at current PTS */
+        int show = valid && render_ms >= bstart && render_ms < bend;
+
+        /* Log periodically */
+        if (sub_render_log_count < 20 || sub_render_log_count % 500 == 0) {
+            fprintf(stderr, "[subtitle] render #%d: BITMAP pts=%lldms valid=%d "
+                    "range=[%ld,%ld] show=%d shown=%d\n",
+                    sub_render_log_count, render_ms, valid,
+                    (long)bstart, (long)bend, show, sub_render_shown_count);
         }
-    }
+        sub_render_log_count++;
 
-    if (!images) {
-        /* No subtitles to display */
-        return;
-    }
-
-    /* Create subtitle buffer */
-    sub_buffer = create_subtitle_buffer(images,
-                                         vp->fullscreen_width,
-                                         vp->fullscreen_height);
-    if (!sub_buffer)
-        return;
-
-    /* Display subtitle */
-    if (vp->subtitle_tree) {
-        struct wlr_scene_buffer *sub_node = wlr_scene_buffer_create(vp->subtitle_tree, sub_buffer);
-        if (sub_node) {
-            wlr_scene_node_set_position(&sub_node->node, 0, 0);
+        /* Check if we can reuse existing display */
+        if (show && vp->subtitle.current_buffer &&
+            pts_us >= vp->subtitle.current_pts_us &&
+            pts_us < vp->subtitle.current_end_us) {
+            return;
         }
-    }
 
-    /* Store for caching */
-    vp->subtitle.current_buffer = sub_buffer;
-    vp->subtitle.current_pts_us = pts_us;
-    /* Estimate end time - typically subtitles last a few seconds */
-    vp->subtitle.current_end_us = pts_us + 100000;  /* 100ms minimum */
+        /* Clear old subtitle */
+        if (vp->subtitle.current_buffer) {
+            wlr_buffer_drop(vp->subtitle.current_buffer);
+            vp->subtitle.current_buffer = NULL;
+        }
+
+        /* Clear subtitle tree */
+        if (vp->subtitle_tree) {
+            struct wlr_scene_node *node, *tmp;
+            wl_list_for_each_safe(node, tmp, &vp->subtitle_tree->children, link) {
+                wlr_scene_node_destroy(node);
+            }
+        }
+
+        if (!show)
+            return;
+
+        /* Create bitmap subtitle buffer (scaled to display) */
+        pthread_mutex_lock(&vp->subtitle_mutex);
+        sub_buffer = create_bitmap_subtitle_buffer(vp);
+        pthread_mutex_unlock(&vp->subtitle_mutex);
+
+        if (!sub_buffer) {
+            fprintf(stderr, "[subtitle] render: create_bitmap_subtitle_buffer FAILED\n");
+            return;
+        }
+
+        /* Display */
+        if (vp->subtitle_tree) {
+            struct wlr_scene_buffer *sub_node = wlr_scene_buffer_create(
+                vp->subtitle_tree, sub_buffer);
+            if (sub_node) {
+                wlr_scene_node_set_position(&sub_node->node, 0, 0);
+                sub_render_shown_count++;
+                fprintf(stderr, "[subtitle] render: DISPLAYED bitmap subtitle "
+                        "at pts=%lldms (%dx%d)\n",
+                        render_ms, vp->fullscreen_width, vp->fullscreen_height);
+            }
+        }
+
+        vp->subtitle.current_buffer = sub_buffer;
+        vp->subtitle.current_pts_us = pts_us;
+        vp->subtitle.current_end_us = (int64_t)bend * 1000;
+    } else {
+        /* ── Text subtitle path (ASS/SRT via libass) ── */
+        ASS_Image *images;
+        int changed;
+
+        if (!vp->subtitle.renderer || !vp->subtitle.track) {
+            if (sub_render_log_count++ < 5)
+                fprintf(stderr, "[subtitle] render: renderer=%p track=%p — skipping\n",
+                        (void *)vp->subtitle.renderer, (void *)vp->subtitle.track);
+            return;
+        }
+
+        /* Update frame size if needed */
+        ass_set_frame_size(vp->subtitle.renderer,
+                           vp->fullscreen_width, vp->fullscreen_height);
+
+        /* Render subtitles for current PTS */
+        pthread_mutex_lock(&vp->subtitle_mutex);
+        images = ass_render_frame(vp->subtitle.renderer, vp->subtitle.track,
+                                   render_ms, &changed);
+        pthread_mutex_unlock(&vp->subtitle_mutex);
+
+        if (changed || (sub_render_log_count < 20) ||
+            (sub_render_log_count % 500 == 0)) {
+            fprintf(stderr, "[subtitle] render #%d: pts=%lldms changed=%d images=%p "
+                    "size=%dx%d shown=%d\n",
+                    sub_render_log_count, render_ms, changed, (void *)images,
+                    vp->fullscreen_width, vp->fullscreen_height,
+                    sub_render_shown_count);
+        }
+        sub_render_log_count++;
+
+        /* If nothing changed and we have a valid cached buffer, reuse it */
+        if (!changed && images && vp->subtitle.current_buffer) {
+            return;
+        }
+
+        /* Clear old subtitle display */
+        if (vp->subtitle.current_buffer) {
+            wlr_buffer_drop(vp->subtitle.current_buffer);
+            vp->subtitle.current_buffer = NULL;
+        }
+
+        if (vp->subtitle_tree) {
+            struct wlr_scene_node *node, *tmp;
+            wl_list_for_each_safe(node, tmp, &vp->subtitle_tree->children, link) {
+                wlr_scene_node_destroy(node);
+            }
+        }
+
+        /* No active subtitle at this time — screen is cleared */
+        if (!images)
+            return;
+
+        sub_buffer = create_subtitle_buffer(images,
+                                             vp->fullscreen_width,
+                                             vp->fullscreen_height);
+        if (!sub_buffer) {
+            fprintf(stderr, "[subtitle] render: create_subtitle_buffer FAILED (%dx%d)\n",
+                    vp->fullscreen_width, vp->fullscreen_height);
+            return;
+        }
+
+        if (vp->subtitle_tree) {
+            struct wlr_scene_buffer *sub_node = wlr_scene_buffer_create(
+                vp->subtitle_tree, sub_buffer);
+            if (sub_node) {
+                wlr_scene_node_set_position(&sub_node->node, 0, 0);
+                sub_render_shown_count++;
+                fprintf(stderr, "[subtitle] render: DISPLAYED subtitle at pts=%lldms (%dx%d)\n",
+                        render_ms, vp->fullscreen_width, vp->fullscreen_height);
+            }
+        }
+
+        vp->subtitle.current_buffer = sub_buffer;
+    }
 }
 
 int videoplayer_subtitle_init(VideoPlayer *vp)
@@ -1044,27 +1303,48 @@ int videoplayer_subtitle_init(VideoPlayer *vp)
     if (!vp)
         return -1;
 
+    fprintf(stderr, "[subtitle] init: starting libass initialization\n");
+
     /* Initialize libass */
     vp->subtitle.library = ass_library_init();
     if (!vp->subtitle.library) {
-        fprintf(stderr, "[subtitle] Failed to init libass library\n");
+        fprintf(stderr, "[subtitle] init: FAILED ass_library_init()\n");
         return -1;
     }
+    fprintf(stderr, "[subtitle] init: library=%p\n", (void *)vp->subtitle.library);
 
     vp->subtitle.renderer = ass_renderer_init(vp->subtitle.library);
     if (!vp->subtitle.renderer) {
-        fprintf(stderr, "[subtitle] Failed to init libass renderer\n");
+        fprintf(stderr, "[subtitle] init: FAILED ass_renderer_init()\n");
         ass_library_done(vp->subtitle.library);
         vp->subtitle.library = NULL;
         return -1;
     }
+    fprintf(stderr, "[subtitle] init: renderer=%p\n", (void *)vp->subtitle.renderer);
 
-    /* Configure renderer */
-    ass_set_frame_size(vp->subtitle.renderer, vp->video.width, vp->video.height);
-    ass_set_fonts(vp->subtitle.renderer, NULL, "sans-serif",
+    /* Configure renderer with initial video dimensions */
+    fprintf(stderr, "[subtitle] init: frame_size=%dx%d (video), fullscreen=%dx%d\n",
+            vp->video.width, vp->video.height,
+            vp->fullscreen_width, vp->fullscreen_height);
+
+    int fw = vp->fullscreen_width > 0 ? vp->fullscreen_width : vp->video.width;
+    int fh = vp->fullscreen_height > 0 ? vp->fullscreen_height : vp->video.height;
+    ass_set_frame_size(vp->subtitle.renderer, fw, fh);
+
+    /* Use DejaVu Sans as default font family — always available on NixOS.
+     * fontconfig autodetect resolves the actual .ttf path.
+     * We pass NULL for font path since nix store paths are content-addressed
+     * and can change between builds. */
+    ass_set_fonts(vp->subtitle.renderer, NULL, "DejaVu Sans",
                   ASS_FONTPROVIDER_AUTODETECT, NULL, 1);
+    fprintf(stderr, "[subtitle] init: fonts configured (DejaVu Sans + fontconfig)\n");
 
-    fprintf(stderr, "[subtitle] Initialized libass\n");
+    /* Reset render counters */
+    sub_render_log_count = 0;
+    sub_render_shown_count = 0;
+
+    fprintf(stderr, "[subtitle] init: DONE — library=%p renderer=%p\n",
+            (void *)vp->subtitle.library, (void *)vp->subtitle.renderer);
 
     return 0;
 }
@@ -1098,6 +1378,10 @@ void videoplayer_subtitle_cleanup(VideoPlayer *vp)
         sws_freeContext(vp->subtitle.sws_ctx);
         vp->subtitle.sws_ctx = NULL;
     }
+
+    free(vp->subtitle.bitmap_data);
+    vp->subtitle.bitmap_data = NULL;
+    vp->subtitle.bitmap_valid = 0;
 
     fprintf(stderr, "[subtitle] Cleanup complete\n");
 }
