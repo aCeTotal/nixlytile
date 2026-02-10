@@ -43,6 +43,7 @@ extern int videoplayer_audio_init(VideoPlayer *vp);
 extern void videoplayer_audio_cleanup(VideoPlayer *vp);
 extern void videoplayer_audio_cmd_shutdown(VideoPlayer *vp);
 extern void videoplayer_audio_play(VideoPlayer *vp);
+extern void videoplayer_audio_pause(VideoPlayer *vp);
 extern void videoplayer_audio_flush(VideoPlayer *vp);
 
 /* Subtitle processing */
@@ -360,6 +361,7 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
         fprintf(stderr, "[videoplayer] HTTP stream: enabling reconnect + buffering options\n");
     } else if (is_localhost) {
         av_dict_set(&opts, "multiple_requests", "1", 0);
+        av_dict_set(&opts, "rw_timeout", "5000000", 0);  /* 5s I/O timeout */
         fprintf(stderr, "[videoplayer] Localhost stream: fast-start mode\n");
     }
 
@@ -1015,8 +1017,13 @@ static int packet_queue_put(VideoPlayer *vp, AVPacket *pkt)
 {
     pthread_mutex_lock(&vp->pkt_mutex);
 
-    /* Wait until space is available */
-    while (vp->pkts_queued >= VP_PACKET_QUEUE_SIZE && vp->demux_running) {
+    /* Wait until space is available.
+     * Also break out when a seek is requested — otherwise the demux thread
+     * stays stuck here while the decode thread waits for seek_flush_done,
+     * causing a deadlock (decode waits for demux to seek, demux waits for
+     * decode to drain packets). */
+    while (vp->pkts_queued >= VP_PACKET_QUEUE_SIZE &&
+           vp->demux_running && !vp->seek_requested) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_nsec += 50000000;  /* 50ms timeout */
@@ -1027,7 +1034,7 @@ static int packet_queue_put(VideoPlayer *vp, AVPacket *pkt)
         pthread_cond_timedwait(&vp->pkt_not_full, &vp->pkt_mutex, &ts);
     }
 
-    if (!vp->demux_running) {
+    if (!vp->demux_running || vp->seek_requested) {
         pthread_mutex_unlock(&vp->pkt_mutex);
         return -1;
     }
@@ -1050,7 +1057,7 @@ static int packet_queue_get(VideoPlayer *vp, AVPacket *pkt)
 {
     pthread_mutex_lock(&vp->pkt_mutex);
 
-    while (vp->pkts_queued == 0 && vp->decode_running) {
+    while (vp->pkts_queued == 0 && vp->decode_running && !vp->seek_requested) {
         if (vp->demux_eof) {
             pthread_mutex_unlock(&vp->pkt_mutex);
             return 1;  /* EOF */
@@ -1215,10 +1222,15 @@ static void *demux_thread_func(void *arg)
 
         read_error_count = 0;
 
-        /* Put packet into queue for decode thread */
+        /* Put packet into queue for decode thread.
+         * Returns -1 on shutdown OR seek request (to unblock the demux
+         * thread so it can process the seek). Only exit the thread on
+         * actual shutdown; on seek, discard the packet and loop back. */
         if (packet_queue_put(vp, pkt) < 0) {
             av_packet_unref(pkt);
-            break;
+            if (!vp->demux_running)
+                break;
+            continue;  /* Seek requested — loop back to handle it */
         }
     }
 
@@ -1493,12 +1505,19 @@ static void *decode_thread_func(void *arg)
             vp->frame_write_idx = 0;
             pthread_mutex_unlock(&vp->frame_mutex);
 
-            /* Flush audio buffer and reset A/V sync bases */
+            /* Pause audio and flush buffer for clean restart from new position.
+             * audio_flush must come first to clear stream_interrupted, otherwise
+             * audio_pause checks it and skips the PipeWire deactivation.
+             * videoplayer_play() will re-activate audio after the buffer refills. */
             videoplayer_audio_flush(vp);
+            videoplayer_audio_pause(vp);
             vp->av_sync_established = 0;
 
             vp->position_us = vp->seek_target_us;
             vp->seek_requested = 0;
+
+            fprintf(stderr, "[videoplayer] Seek complete to %.2fs, rebuffering\n",
+                    vp->seek_target_us / 1000000.0);
             continue;
         }
 
@@ -1611,7 +1630,8 @@ static void *decode_thread_func(void *arg)
 
 void videoplayer_seek(VideoPlayer *vp, int64_t position_us)
 {
-    if (!vp || vp->state == VP_STATE_IDLE)
+    if (!vp || vp->state == VP_STATE_IDLE || vp->state == VP_STATE_LOADING ||
+        vp->state == VP_STATE_ERROR)
         return;
 
     /* Clamp to valid range */
@@ -1620,9 +1640,27 @@ void videoplayer_seek(VideoPlayer *vp, int64_t position_us)
     if (vp->duration_us > 0 && position_us > vp->duration_us)
         position_us = vp->duration_us;
 
+    /* Transition to BUFFERING immediately.  This prevents the present_frame
+     * REBUFFER path from triggering when the frame queue empties during seek
+     * processing.  The REBUFFER path pauses and flushes audio from the
+     * compositor thread, which races with the decode thread's swr_convert()
+     * and audio_flush().  By entering BUFFERING here, present_frame simply
+     * waits for the buffer to refill after the seek completes.
+     * The decode thread handles audio pause/flush safely in its seek handler. */
+    vp->state = VP_STATE_BUFFERING;
+    vp->last_frame_ns = 0;
+    vp->last_present_time_ns = 0;
+    vp->current_repeat = 0;
+
     vp->seek_target_us = position_us;
     vp->seek_flush_done = 0;
     vp->seek_requested = 1;
+
+    if (vp->debug_log) {
+        fprintf(vp->debug_log, "# SEEK | target=%.2fs (from pos=%.2fs)\n",
+                position_us / 1000000.0, vp->position_us / 1000000.0);
+        fflush(vp->debug_log);
+    }
 
     /* Wake up both threads */
     pthread_cond_signal(&vp->frame_cond);
