@@ -21,7 +21,7 @@
  *   - 2s cluster time limit for frequent seek points
  *   - All subtitle formats preserved as-is
  *
- * Output: <source_path>/Nixly_Media/TV|Movies/<title>.x265.CRF14.mkv
+ * Output: <converted_path>/nixly_ready_media/TV|Movies/<title>.x265.CRF14.mkv
  */
 
 #include <stdio.h>
@@ -30,6 +30,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/wait.h>
 #include <ctype.h>
 #include <dirent.h>
@@ -47,6 +48,7 @@
 #include "config.h"
 #include "database.h"
 #include "scanner.h"
+#include "tmdb.h"
 
 /* Supported video extensions */
 static const char *video_extensions[] = {
@@ -90,11 +92,14 @@ static int is_already_converted(const char *path) {
 }
 
 static int is_in_output_dir(const char *path) {
-    if (strstr(path, "/Nixly_Media/") != NULL) return 1;
-    /* Also skip the config override output path */
-    if (server_config.output_path[0] &&
-        strncmp(path, server_config.output_path, strlen(server_config.output_path)) == 0)
-        return 1;
+    /* Skip anything inside or named nixly_ready_media */
+    if (strstr(path, "/nixly_ready_media") != NULL) return 1;
+    /* Also skip any converted_paths root dirs */
+    for (int i = 0; i < server_config.converted_path_count; i++) {
+        if (strncmp(path, server_config.converted_paths[i],
+                    strlen(server_config.converted_paths[i])) == 0)
+            return 1;
+    }
     return 0;
 }
 
@@ -855,6 +860,7 @@ static void collect_from_dir(const char *path, JobList *list) {
                     TranscodeJob job = {0};
                     strncpy(job.filepath, main_feature, sizeof(job.filepath) - 1);
                     strncpy(job.source_dir, fullpath, sizeof(job.source_dir) - 1);
+                    job.mtime = st.st_mtime;
 
                     /* Parse title from the Blu-ray folder name */
                     char show_name[256] = {0};
@@ -890,6 +896,7 @@ static void collect_from_dir(const char *path, JobList *list) {
 
             TranscodeJob job = {0};
             strncpy(job.filepath, fullpath, sizeof(job.filepath) - 1);
+            job.mtime = st.st_mtime;
 
             char show_name[256] = {0};
             int season = 0, episode = 0, year = 0;
@@ -918,24 +925,140 @@ static void collect_from_dir(const char *path, JobList *list) {
     closedir(dir);
 }
 
-/* Sort: TV episodes first (show -> season -> episode), then movies by title */
-static int job_compare(const void *a, const void *b) {
+/* Sort by mtime descending (newest first) */
+static int mtime_compare_desc(const void *a, const void *b) {
     const TranscodeJob *ja = (const TranscodeJob *)a;
     const TranscodeJob *jb = (const TranscodeJob *)b;
+    if (jb->mtime > ja->mtime) return 1;
+    if (jb->mtime < ja->mtime) return -1;
+    return 0;
+}
 
-    /* Episodes before movies */
-    if (ja->type != jb->type) {
-        return (ja->type == 0) ? 1 : -1;
+/* Sort episodes by season -> episode (for within a series batch) */
+static int episode_compare(const void *a, const void *b) {
+    const TranscodeJob *ja = (const TranscodeJob *)a;
+    const TranscodeJob *jb = (const TranscodeJob *)b;
+    if (ja->season != jb->season) return ja->season - jb->season;
+    return ja->episode - jb->episode;
+}
+
+/* ================================================================
+ *  Disk Selection (3% reserve)
+ * ================================================================ */
+
+/* Cached show->disk mapping for current transcoder run */
+typedef struct {
+    char show_name[256];
+    int disk_idx;
+} ShowDiskMapping;
+
+static ShowDiskMapping *disk_map = NULL;
+static int disk_map_count = 0;
+
+static void disk_map_reset(void) {
+    free(disk_map);
+    disk_map = NULL;
+    disk_map_count = 0;
+}
+
+/* Select output disk for a job.
+ * Rules:
+ *   1. If show already exists on a disk, use that disk
+ *   2. Otherwise pick first disk with >= 3% free space
+ *   Returns disk index or -1 if no disk has space */
+static int select_output_disk(const char *show_name, int is_episode) {
+    /* Check cached mapping for episodes */
+    if (is_episode && show_name[0]) {
+        for (int i = 0; i < disk_map_count; i++) {
+            if (strcasecmp(disk_map[i].show_name, show_name) == 0)
+                return disk_map[i].disk_idx;
+        }
+
+        /* Check if show already exists on any disk */
+        for (int d = 0; d < server_config.converted_path_count; d++) {
+            char check_path[4096];
+            char norm[256];
+            normalize_title(show_name, norm, sizeof(norm));
+            snprintf(check_path, sizeof(check_path), "%s/nixly_ready_media/TV/%s",
+                     server_config.converted_paths[d], norm);
+            struct stat st;
+            if (stat(check_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+                /* Cache this mapping */
+                disk_map = realloc(disk_map, (disk_map_count + 1) * sizeof(ShowDiskMapping));
+                strncpy(disk_map[disk_map_count].show_name, show_name, 255);
+                disk_map[disk_map_count].show_name[255] = '\0';
+                disk_map[disk_map_count].disk_idx = d;
+                disk_map_count++;
+                printf("  Disk select: Show \"%s\" already on disk %d (%s)\n",
+                       show_name, d, server_config.converted_paths[d]);
+                return d;
+            }
+        }
     }
 
-    if (ja->type == 2) {
-        int cmp = strcasecmp(ja->show_name, jb->show_name);
-        if (cmp != 0) return cmp;
-        if (ja->season != jb->season) return ja->season - jb->season;
-        return ja->episode - jb->episode;
+    /* Pick first disk with >= 3% free space */
+    for (int d = 0; d < server_config.converted_path_count; d++) {
+        struct statvfs vfs;
+        if (statvfs(server_config.converted_paths[d], &vfs) != 0) continue;
+
+        unsigned long long total = (unsigned long long)vfs.f_blocks * vfs.f_frsize;
+        unsigned long long avail = (unsigned long long)vfs.f_bavail * vfs.f_frsize;
+
+        if (total == 0) continue;
+        double pct_free = (double)avail / (double)total * 100.0;
+
+        if (pct_free >= 3.0) {
+            printf("  Disk select: Using disk %d (%s) - %.1f%% free\n",
+                   d, server_config.converted_paths[d], pct_free);
+
+            /* Cache for episodes */
+            if (is_episode && show_name[0]) {
+                disk_map = realloc(disk_map, (disk_map_count + 1) * sizeof(ShowDiskMapping));
+                strncpy(disk_map[disk_map_count].show_name, show_name, 255);
+                disk_map[disk_map_count].show_name[255] = '\0';
+                disk_map[disk_map_count].disk_idx = d;
+                disk_map_count++;
+            }
+            return d;
+        } else {
+            printf("  Disk select: Disk %d (%s) too full (%.1f%% free, need 3%%)\n",
+                   d, server_config.converted_paths[d], pct_free);
+        }
     }
 
-    return strcasecmp(ja->title, jb->title);
+    return -1; /* No disk has space */
+}
+
+/* ================================================================
+ *  TMDB Verification (single job)
+ * ================================================================ */
+
+/* Returns 1 if found in TMDB, 0 if not */
+static int verify_tmdb_single(TranscodeJob *job) {
+    if (job->type == 2) {
+        TmdbTvShow *show = tmdb_search_tvshow(job->show_name, job->year);
+        if (show) {
+            job->tmdb_verified = 1;
+            tmdb_free_tvshow(show);
+            return 1;
+        }
+        job->tmdb_verified = -1;
+        return 0;
+    } else {
+        char search_title[256];
+        strncpy(search_title, job->title, sizeof(search_title) - 1);
+        search_title[sizeof(search_title) - 1] = '\0';
+        int year = strip_year_from_title(search_title);
+
+        TmdbMovie *movie = tmdb_search_movie(search_title, year);
+        if (movie) {
+            job->tmdb_verified = 1;
+            tmdb_free_movie(movie);
+            return 1;
+        }
+        job->tmdb_verified = -1;
+        return 0;
+    }
 }
 
 /* ================================================================
@@ -1230,259 +1353,410 @@ static int run_ffmpeg(const char *input, const char *output,
 }
 
 /* ================================================================
- *  Process one source path
+ *  Source directory cleanup
+ *  After a source file/dir is removed, walk up the directory tree
+ *  and delete any parent that has no remaining video files or
+ *  subdirectories (i.e. only leftover .nfo, .jpg, .txt etc.).
+ *  Stops at unprocessed_path roots.
  * ================================================================ */
 
-static void process_source(const char *source_path) {
-    printf("\nTranscoder: Scanning source: %s\n", source_path);
+static void cleanup_source_dir(const char *removed_path) {
+    char dir[4096];
+    strncpy(dir, removed_path, sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = '\0';
 
-    JobList list = {0};
-    collect_from_dir(source_path, &list);
+    while (1) {
+        /* Get parent directory */
+        char *slash = strrchr(dir, '/');
+        if (!slash) return;
+        *slash = '\0';
 
-    if (list.count == 0) {
-        printf("Transcoder: No files to convert in %s\n", source_path);
-        return;
+        /* Never delete an unprocessed_path root */
+        int is_root = 0;
+        for (int i = 0; i < server_config.unprocessed_path_count; i++) {
+            if (strcmp(dir, server_config.unprocessed_paths[i]) == 0) {
+                is_root = 1;
+                break;
+            }
+        }
+        if (is_root) return;
+
+        /* Check if any video files or subdirectories remain */
+        DIR *d = opendir(dir);
+        if (!d) return;
+
+        int has_content = 0;
+        struct dirent *entry;
+        while ((entry = readdir(d)) != NULL) {
+            if (strcmp(entry->d_name, ".") == 0 ||
+                strcmp(entry->d_name, "..") == 0)
+                continue;
+
+            char fullpath[4096];
+            snprintf(fullpath, sizeof(fullpath), "%s/%s", dir, entry->d_name);
+
+            struct stat st;
+            if (stat(fullpath, &st) == 0 && S_ISDIR(st.st_mode)) {
+                has_content = 1; /* subdirectory still exists */
+                break;
+            }
+
+            if (is_video_file(entry->d_name)) {
+                has_content = 1; /* video file still exists */
+                break;
+            }
+        }
+        closedir(d);
+
+        if (has_content) return;
+
+        /* Only leftover junk remains — delete the whole directory */
+        printf("  Cleaning up source dir: %s\n", dir);
+        rmdir_r(dir);
+        /* Continue checking parent */
     }
+}
 
-    /* Sort: TV shows first (by show/season/episode), then movies */
-    qsort(list.jobs, list.count, sizeof(TranscodeJob), job_compare);
+/* ================================================================
+ *  Duplicate detection: check if episode/movie already exists
+ *  in any nixly_ready_media directory. If so, delete the source.
+ *  Returns 1 if duplicate found (source deleted), 0 otherwise.
+ * ================================================================ */
 
-    pthread_mutex_lock(&tc.lock);
-    tc.total_jobs += list.count;
-    pthread_mutex_unlock(&tc.lock);
+static int check_and_delete_duplicate(TranscodeJob *job) {
+    char norm[256];
 
-    printf("Transcoder: Found %d files to convert\n", list.count);
-
-    /* Output base: config override if set, otherwise Nixly_Media inside source path */
-    char output_base[4096];
-    if (server_config.output_path[0]) {
-        snprintf(output_base, sizeof(output_base), "%s", server_config.output_path);
-    } else {
-        snprintf(output_base, sizeof(output_base), "%s/Nixly_Media", source_path);
-    }
-
-    for (int i = 0; i < list.count && !tc.stop_requested; i++) {
-        TranscodeJob *job = &list.jobs[i];
-
-        pthread_mutex_lock(&tc.lock);
-        strncpy(tc.current_file, job->title, sizeof(tc.current_file) - 1);
-        pthread_mutex_unlock(&tc.lock);
-
-        /* Probe audio and video FIRST to include info in filename */
-        AudioProbe audio;
-        probe_audio(job->filepath, &audio);
-
-        VideoProbe video;
-        probe_video(job->filepath, &video);
-
-        /* Build channel layout string (e.g., "7.1", "5.1", "2.0") */
-        char audio_layout[8];
-        int ch = audio.best_channels;
-        if (ch >= 8)
-            snprintf(audio_layout, sizeof(audio_layout), "7.1");
-        else if (ch >= 6)
-            snprintf(audio_layout, sizeof(audio_layout), "5.1");
-        else if (ch >= 3)
-            snprintf(audio_layout, sizeof(audio_layout), "%d.1", ch - 1);
-        else if (ch == 2)
-            snprintf(audio_layout, sizeof(audio_layout), "2.0");
-        else
-            snprintf(audio_layout, sizeof(audio_layout), "1.0");
-
-        /* Build resolution string (e.g., "4K", "1080p", "720p") */
-        char resolution[8];
-        int h = video.height;
-        if (h >= 2160)
-            snprintf(resolution, sizeof(resolution), "4K");
-        else if (h >= 1080)
-            snprintf(resolution, sizeof(resolution), "1080p");
-        else if (h >= 720)
-            snprintf(resolution, sizeof(resolution), "720p");
-        else if (h >= 480)
-            snprintf(resolution, sizeof(resolution), "480p");
-        else
-            snprintf(resolution, sizeof(resolution), "%dp", h);
-
-        /* Build HDR string (empty if SDR) */
-        const char *hdr_tag = video.is_hdr ? ".HDR" : "";
-
-        /* Build bit depth string (e.g., "10bit", "8bit") */
-        char bit_depth_tag[16];
-        snprintf(bit_depth_tag, sizeof(bit_depth_tag), "%dbit", video.bit_depth);
-
-        /* Build MKV output path with resolution, bit depth, HDR and audio layout */
-        char out_dir[4096];
-        char mkv_path[4096];
-        char norm[256];
+    for (int d = 0; d < server_config.converted_path_count; d++) {
+        char search_dir[4096];
 
         if (job->type == 2) {
-            /* Episode: TV/show.name.year/SeasonN/show.name.year.S01E01.1080p.10bit.x265.CRF14.HDR.7.1.mkv */
+            /* Episode: look for *S<ss>E<ee>*.x265.CRF14*.mkv in
+             * <disk>/nixly_ready_media/TV/<show>[.year]/Season<N>/ */
             normalize_title(job->show_name, norm, sizeof(norm));
-            if (job->year > 0) {
-                snprintf(out_dir, sizeof(out_dir), "%s/TV/%s.%d/Season%d",
-                         output_base, norm, job->year, job->season);
-                snprintf(mkv_path, sizeof(mkv_path), "%s/%s.%d.S%02dE%02d.%s.%s.x265.CRF14%s.%s.mkv",
-                         out_dir, norm, job->year, job->season, job->episode,
-                         resolution, bit_depth_tag, hdr_tag, audio_layout);
-            } else {
-                snprintf(out_dir, sizeof(out_dir), "%s/TV/%s/Season%d",
-                         output_base, norm, job->season);
-                snprintf(mkv_path, sizeof(mkv_path), "%s/%s.S%02dE%02d.%s.%s.x265.CRF14%s.%s.mkv",
-                         out_dir, norm, job->season, job->episode,
-                         resolution, bit_depth_tag, hdr_tag, audio_layout);
+
+            if (job->year > 0)
+                snprintf(search_dir, sizeof(search_dir),
+                         "%s/nixly_ready_media/TV/%s.%d/Season%d",
+                         server_config.converted_paths[d], norm, job->year, job->season);
+            else
+                snprintf(search_dir, sizeof(search_dir),
+                         "%s/nixly_ready_media/TV/%s/Season%d",
+                         server_config.converted_paths[d], norm, job->season);
+
+            char pattern[32];
+            snprintf(pattern, sizeof(pattern), ".S%02dE%02d.", job->season, job->episode);
+
+            DIR *dir = opendir(search_dir);
+            if (!dir) continue;
+
+            struct dirent *entry;
+            int found = 0;
+            while ((entry = readdir(dir)) != NULL) {
+                if (strstr(entry->d_name, pattern) &&
+                    strstr(entry->d_name, ".x265.CRF14")) {
+                    found = 1;
+                    break;
+                }
+            }
+            closedir(dir);
+
+            if (found) {
+                printf("Transcoder: Duplicate — %s S%02dE%02d already converted, deleting source\n",
+                       job->show_name, job->season, job->episode);
+                if (job->source_dir[0]) {
+                    rmdir_r(job->source_dir);
+                    cleanup_source_dir(job->source_dir);
+                } else {
+                    unlink(job->filepath);
+                    cleanup_source_dir(job->filepath);
+                }
+                return 1;
             }
         } else {
-            /* Movie: Movies/movie.title.year.1080p.10bit.x265.CRF14.HDR.7.1.mkv */
+            /* Movie: look for <norm>[.year].*.x265.CRF14*.mkv in
+             * <disk>/nixly_ready_media/Movies/ */
             char raw_title[256];
             strncpy(raw_title, job->title, sizeof(raw_title) - 1);
             raw_title[sizeof(raw_title) - 1] = '\0';
-
-            int year = strip_year_from_title(raw_title);
+            strip_year_from_title(raw_title);
             normalize_title(raw_title, norm, sizeof(norm));
 
-            snprintf(out_dir, sizeof(out_dir), "%s/Movies", output_base);
-            if (year > 0) {
-                snprintf(mkv_path, sizeof(mkv_path), "%s/%s.%d.%s.%s.x265.CRF14%s.%s.mkv",
-                         out_dir, norm, year, resolution, bit_depth_tag, hdr_tag, audio_layout);
-            } else {
-                snprintf(mkv_path, sizeof(mkv_path), "%s/%s.%s.%s.x265.CRF14%s.%s.mkv",
-                         out_dir, norm, resolution, bit_depth_tag, hdr_tag, audio_layout);
-            }
-        }
+            snprintf(search_dir, sizeof(search_dir), "%s/nixly_ready_media/Movies",
+                     server_config.converted_paths[d]);
 
-        /* Create output directory */
-        mkdir_p(out_dir);
+            DIR *dir = opendir(search_dir);
+            if (!dir) continue;
 
-        /* Skip if MKV already exists */
-        struct stat st;
-        if (stat(mkv_path, &st) == 0 && st.st_size > 0) {
-            printf("Transcoder: [%d/%d] Skip (exists): %s\n",
-                   tc.completed_jobs + 1, tc.total_jobs, job->title);
-            pthread_mutex_lock(&tc.lock);
-            tc.completed_jobs++;
-            pthread_mutex_unlock(&tc.lock);
-            continue;
-        }
-
-        printf("\n========================================\n");
-        printf("Transcoder: [%d/%d] %s\n",
-               tc.completed_jobs + 1, tc.total_jobs, job->title);
-        printf("  Input:  %s\n", job->filepath);
-        printf("  Output: %s\n", mkv_path);
-
-        /* Wait for file to be completely written before processing */
-        if (!wait_for_stable_file(job->filepath)) {
-            printf("  Skipping: file not stable or disappeared\n");
-            printf("========================================\n");
-            pthread_mutex_lock(&tc.lock);
-            tc.completed_jobs++;
-            pthread_mutex_unlock(&tc.lock);
-            continue;
-        }
-
-        /* Probe duration and reset progress */
-        double dur = probe_duration(job->filepath);
-        pthread_mutex_lock(&tc.lock);
-        tc.duration_secs = dur;
-        tc.progress_secs = 0;
-        pthread_mutex_unlock(&tc.lock);
-        printf("  Duration: %.1f seconds\n", dur);
-
-        printf("  Audio: best stream=%d (%s), atmos=%s\n",
-               audio.best_audio_idx, audio_layout,
-               audio.atmos_idx >= 0 ? "yes" : "no");
-
-        if (video.is_hdr) {
-            printf("  Video: %s %dx%d %dbit HDR (%s)%s%s\n",
-                   resolution, video.width, video.height, video.bit_depth,
-                   video.color_trc == AVCOL_TRC_SMPTE2084 ? "HDR10" : "HLG",
-                   video.has_master_display ? " +mastering-display" : "",
-                   video.has_cll ? " +content-light" : "");
-        } else {
-            printf("  Video: %s %dx%d %dbit SDR\n", resolution, video.width, video.height, video.bit_depth);
-        }
-
-        /* Probe subtitles (only keep English and Norwegian) */
-        SubtitleProbe subs;
-        probe_subtitles(job->filepath, &subs);
-        int total_subs = subs.count + subs.ext_count;
-        if (total_subs > 0) {
-            printf("  Subtitles: %d embedded", subs.count);
-            if (subs.count > 0) {
-                printf(" (");
-                for (int i = 0; i < subs.count; i++) {
-                    printf("%s%s", i > 0 ? ", " : "",
-                           subs.is_english[i] ? "English" : "Norwegian");
+            size_t norm_len = strlen(norm);
+            struct dirent *entry;
+            int found = 0;
+            while ((entry = readdir(dir)) != NULL) {
+                if (strncmp(entry->d_name, norm, norm_len) == 0 &&
+                    strstr(entry->d_name, ".x265.CRF14")) {
+                    found = 1;
+                    break;
                 }
-                printf(")");
             }
-            if (subs.ext_count > 0) {
-                printf(", %d external (", subs.ext_count);
-                for (int i = 0; i < subs.ext_count; i++) {
-                    printf("%s%s", i > 0 ? ", " : "",
-                           subs.ext_is_english[i] ? "English" : "Norwegian");
-                }
-                printf(")");
-            }
-            printf("\n");
-        } else {
-            printf("  Subtitles: none (English/Norwegian)\n");
-        }
+            closedir(dir);
 
-        /* Run ffmpeg MKV conversion */
-        int ret = run_ffmpeg(job->filepath, mkv_path, &audio, &video, &subs);
-
-        if (ret == 0) {
-            /* Verify MKV exists */
-            if (stat(mkv_path, &st) == 0 && st.st_size > 0) {
-                printf("  Success! Output: %s\n", mkv_path);
-
-                /* Remove old entry from database */
-                database_delete_by_path(job->filepath);
-
-                /* Delete source: entire Blu-ray tree or single file */
+            if (found) {
+                printf("Transcoder: Duplicate — \"%s\" already converted, deleting source\n",
+                       job->title);
                 if (job->source_dir[0]) {
                     rmdir_r(job->source_dir);
-                    printf("  Deleted Blu-ray source: %s\n", job->source_dir);
-                } else if (unlink(job->filepath) == 0) {
-                    printf("  Deleted source: %s\n", job->filepath);
+                    cleanup_source_dir(job->source_dir);
                 } else {
-                    fprintf(stderr, "  Warning: Could not delete source: %s\n",
-                            strerror(errno));
+                    unlink(job->filepath);
+                    cleanup_source_dir(job->filepath);
                 }
-
-                /* Delete external subtitle files */
-                for (int i = 0; i < subs.ext_count; i++) {
-                    if (unlink(subs.ext_files[i]) == 0) {
-                        printf("  Deleted subtitle: %s\n", subs.ext_files[i]);
-                    } else {
-                        fprintf(stderr, "  Warning: Could not delete subtitle: %s (%s)\n",
-                                subs.ext_files[i], strerror(errno));
-                    }
-                }
-
-                /* Scan MKV into database (with TMDB fetch) */
-                scanner_scan_file(mkv_path, 1);
-            } else {
-                fprintf(stderr, "  Error: MKV missing after conversion, keeping source\n");
+                return 1;
             }
-        } else {
-            fprintf(stderr, "  Error: FFmpeg failed for %s, keeping source\n", job->title);
-            unlink(mkv_path); /* Remove partial MKV output */
         }
+    }
 
-        printf("========================================\n");
+    return 0;
+}
 
+/* ================================================================
+ *  Process a single transcode job
+ *  Returns:  0 = success
+ *            1 = skipped (already exists / unstable / duplicate)
+ *           -1 = ffmpeg error
+ *           -2 = no disk space
+ * ================================================================ */
+
+static int process_single_job(TranscodeJob *job) {
+    /* Check if already converted — if so, just delete the source */
+    if (check_and_delete_duplicate(job)) {
+        pthread_mutex_lock(&tc.lock);
+        tc.total_jobs++;
+        tc.completed_jobs++;
+        pthread_mutex_unlock(&tc.lock);
+        return 1;
+    }
+
+    pthread_mutex_lock(&tc.lock);
+    tc.total_jobs++;
+    strncpy(tc.current_file, job->title, sizeof(tc.current_file) - 1);
+    pthread_mutex_unlock(&tc.lock);
+
+    /* Select output disk */
+    int disk_idx = select_output_disk(job->show_name, job->type == 2);
+    if (disk_idx < 0) {
+        fprintf(stderr, "Transcoder: No disk with enough space for \"%s\"\n", job->title);
+        return -2;
+    }
+
+    char output_base[4096];
+    snprintf(output_base, sizeof(output_base), "%s/nixly_ready_media",
+             server_config.converted_paths[disk_idx]);
+
+    /* Probe audio and video FIRST to include info in filename */
+    AudioProbe audio;
+    probe_audio(job->filepath, &audio);
+
+    VideoProbe video;
+    probe_video(job->filepath, &video);
+
+    /* Build channel layout string */
+    char audio_layout[8];
+    int ch = audio.best_channels;
+    if (ch >= 8)       snprintf(audio_layout, sizeof(audio_layout), "7.1");
+    else if (ch >= 6)  snprintf(audio_layout, sizeof(audio_layout), "5.1");
+    else if (ch >= 3)  snprintf(audio_layout, sizeof(audio_layout), "%d.1", ch - 1);
+    else if (ch == 2)  snprintf(audio_layout, sizeof(audio_layout), "2.0");
+    else               snprintf(audio_layout, sizeof(audio_layout), "1.0");
+
+    /* Build resolution string */
+    char resolution[8];
+    int h = video.height;
+    if (h >= 2160)      snprintf(resolution, sizeof(resolution), "4K");
+    else if (h >= 1080) snprintf(resolution, sizeof(resolution), "1080p");
+    else if (h >= 720)  snprintf(resolution, sizeof(resolution), "720p");
+    else if (h >= 480)  snprintf(resolution, sizeof(resolution), "480p");
+    else                snprintf(resolution, sizeof(resolution), "%dp", h);
+
+    const char *hdr_tag = video.is_hdr ? ".HDR" : "";
+
+    char bit_depth_tag[16];
+    snprintf(bit_depth_tag, sizeof(bit_depth_tag), "%dbit", video.bit_depth);
+
+    /* Build MKV output path */
+    char out_dir[4096];
+    char mkv_path[4096];
+    char norm[256];
+
+    if (job->type == 2) {
+        normalize_title(job->show_name, norm, sizeof(norm));
+        if (job->year > 0) {
+            snprintf(out_dir, sizeof(out_dir), "%s/TV/%s.%d/Season%d",
+                     output_base, norm, job->year, job->season);
+            snprintf(mkv_path, sizeof(mkv_path), "%s/%s.%d.S%02dE%02d.%s.%s.x265.CRF14%s.%s.mkv",
+                     out_dir, norm, job->year, job->season, job->episode,
+                     resolution, bit_depth_tag, hdr_tag, audio_layout);
+        } else {
+            snprintf(out_dir, sizeof(out_dir), "%s/TV/%s/Season%d",
+                     output_base, norm, job->season);
+            snprintf(mkv_path, sizeof(mkv_path), "%s/%s.S%02dE%02d.%s.%s.x265.CRF14%s.%s.mkv",
+                     out_dir, norm, job->season, job->episode,
+                     resolution, bit_depth_tag, hdr_tag, audio_layout);
+        }
+    } else {
+        char raw_title[256];
+        strncpy(raw_title, job->title, sizeof(raw_title) - 1);
+        raw_title[sizeof(raw_title) - 1] = '\0';
+
+        int year = strip_year_from_title(raw_title);
+        normalize_title(raw_title, norm, sizeof(norm));
+
+        snprintf(out_dir, sizeof(out_dir), "%s/Movies", output_base);
+        if (year > 0) {
+            snprintf(mkv_path, sizeof(mkv_path), "%s/%s.%d.%s.%s.x265.CRF14%s.%s.mkv",
+                     out_dir, norm, year, resolution, bit_depth_tag, hdr_tag, audio_layout);
+        } else {
+            snprintf(mkv_path, sizeof(mkv_path), "%s/%s.%s.%s.x265.CRF14%s.%s.mkv",
+                     out_dir, norm, resolution, bit_depth_tag, hdr_tag, audio_layout);
+        }
+    }
+
+    mkdir_p(out_dir);
+
+    /* Skip if MKV already exists */
+    struct stat st;
+    if (stat(mkv_path, &st) == 0 && st.st_size > 0) {
+        printf("Transcoder: [%d/%d] Skip (exists): %s\n",
+               tc.completed_jobs + 1, tc.total_jobs, job->title);
         pthread_mutex_lock(&tc.lock);
         tc.completed_jobs++;
         pthread_mutex_unlock(&tc.lock);
+        return 1;
     }
 
-    free(list.jobs);
+    printf("\n========================================\n");
+    printf("Transcoder: [%d/%d] %s\n",
+           tc.completed_jobs + 1, tc.total_jobs, job->title);
+    printf("  Input:  %s\n", job->filepath);
+    printf("  Output: %s\n", mkv_path);
+
+    if (!wait_for_stable_file(job->filepath)) {
+        printf("  Skipping: file not stable or disappeared\n");
+        printf("========================================\n");
+        pthread_mutex_lock(&tc.lock);
+        tc.completed_jobs++;
+        pthread_mutex_unlock(&tc.lock);
+        return 1;
+    }
+
+    double dur = probe_duration(job->filepath);
+    pthread_mutex_lock(&tc.lock);
+    tc.duration_secs = dur;
+    tc.progress_secs = 0;
+    pthread_mutex_unlock(&tc.lock);
+    printf("  Duration: %.1f seconds\n", dur);
+
+    printf("  Audio: best stream=%d (%s), atmos=%s\n",
+           audio.best_audio_idx, audio_layout,
+           audio.atmos_idx >= 0 ? "yes" : "no");
+
+    if (video.is_hdr) {
+        printf("  Video: %s %dx%d %dbit HDR (%s)%s%s\n",
+               resolution, video.width, video.height, video.bit_depth,
+               video.color_trc == AVCOL_TRC_SMPTE2084 ? "HDR10" : "HLG",
+               video.has_master_display ? " +mastering-display" : "",
+               video.has_cll ? " +content-light" : "");
+    } else {
+        printf("  Video: %s %dx%d %dbit SDR\n", resolution, video.width, video.height, video.bit_depth);
+    }
+
+    SubtitleProbe subs;
+    probe_subtitles(job->filepath, &subs);
+    int total_subs = subs.count + subs.ext_count;
+    if (total_subs > 0) {
+        printf("  Subtitles: %d embedded", subs.count);
+        if (subs.count > 0) {
+            printf(" (");
+            for (int j = 0; j < subs.count; j++)
+                printf("%s%s", j > 0 ? ", " : "",
+                       subs.is_english[j] ? "English" : "Norwegian");
+            printf(")");
+        }
+        if (subs.ext_count > 0) {
+            printf(", %d external (", subs.ext_count);
+            for (int j = 0; j < subs.ext_count; j++)
+                printf("%s%s", j > 0 ? ", " : "",
+                       subs.ext_is_english[j] ? "English" : "Norwegian");
+            printf(")");
+        }
+        printf("\n");
+    } else {
+        printf("  Subtitles: none (English/Norwegian)\n");
+    }
+
+    int ret = run_ffmpeg(job->filepath, mkv_path, &audio, &video, &subs);
+
+    if (ret == 0) {
+        if (stat(mkv_path, &st) == 0 && st.st_size > 0) {
+            printf("  Success! Output: %s\n", mkv_path);
+
+            database_delete_by_path(job->filepath);
+
+            if (job->source_dir[0]) {
+                rmdir_r(job->source_dir);
+                printf("  Deleted Blu-ray source: %s\n", job->source_dir);
+                cleanup_source_dir(job->source_dir);
+            } else if (unlink(job->filepath) == 0) {
+                printf("  Deleted source: %s\n", job->filepath);
+                cleanup_source_dir(job->filepath);
+            } else {
+                fprintf(stderr, "  Warning: Could not delete source: %s\n",
+                        strerror(errno));
+            }
+
+            for (int j = 0; j < subs.ext_count; j++) {
+                if (unlink(subs.ext_files[j]) == 0)
+                    printf("  Deleted subtitle: %s\n", subs.ext_files[j]);
+                else
+                    fprintf(stderr, "  Warning: Could not delete subtitle: %s (%s)\n",
+                            subs.ext_files[j], strerror(errno));
+            }
+
+            scanner_scan_file(mkv_path, 1);
+        } else {
+            fprintf(stderr, "  Error: MKV missing after conversion, keeping source\n");
+            ret = -1;
+        }
+    } else {
+        fprintf(stderr, "  Error: FFmpeg failed for %s, keeping source\n", job->title);
+        unlink(mkv_path);
+    }
+
+    printf("========================================\n");
+
+    pthread_mutex_lock(&tc.lock);
+    tc.completed_jobs++;
+    pthread_mutex_unlock(&tc.lock);
+
+    return ret;
+}
+
+/* Helper: scan all unprocessed paths into a job list */
+static void scan_all_sources(JobList *list) {
+    for (int i = 0; i < server_config.unprocessed_path_count; i++)
+        collect_from_dir(server_config.unprocessed_paths[i], list);
 }
 
 /* ================================================================
  *  Background Thread
+ *
+ *  Queue logic:
+ *    1. Scan sources, pick newest file (by mtime)
+ *    2. If movie → convert it, then re-scan (step 1)
+ *    3. If episode → start that series (season-by-season, S01E01 first)
+ *       After EACH episode, re-scan and check for interrupts:
+ *       - If a file exists that is NOT part of the current series
+ *         and has mtime newer than when the series batch started,
+ *         process that one file immediately, then resume the series.
+ *    4. When the series is done → re-scan (step 1)
  * ================================================================ */
 
 static void *transcode_thread(void *arg) {
@@ -1493,20 +1767,125 @@ static void *transcode_thread(void *arg) {
     printf("  Transcoder starting (x265 CRF 14, MKV)\n");
     printf("========================================\n");
 
-    /* Process generic media paths */
-    for (int i = 0; i < server_config.media_path_count && !tc.stop_requested; i++) {
-        process_source(server_config.media_paths[i]);
+    disk_map_reset();
+
+    while (!tc.stop_requested) {
+        /* Scan all sources */
+        JobList list = {0};
+        scan_all_sources(&list);
+
+        if (list.count == 0) {
+            free(list.jobs);
+            break;
+        }
+
+        /* Sort newest first */
+        qsort(list.jobs, list.count, sizeof(TranscodeJob), mtime_compare_desc);
+
+        /* Find newest TMDB-verified job */
+        TranscodeJob *chosen = NULL;
+        for (int i = 0; i < list.count; i++) {
+            if (verify_tmdb_single(&list.jobs[i])) {
+                chosen = &list.jobs[i];
+                break;
+            }
+            printf("  TMDB: \"%s\" not found, skipping\n", list.jobs[i].title);
+        }
+
+        if (!chosen) {
+            printf("Transcoder: No TMDB-verified files remaining\n");
+            free(list.jobs);
+            break;
+        }
+
+        if (chosen->type == 0) {
+            /* Movie: process it, then re-scan */
+            printf("Transcoder: Newest → movie \"%s\"\n", chosen->title);
+            int ret = process_single_job(chosen);
+            free(list.jobs);
+            if (ret == -2) break; /* no disk space */
+            continue;
+        }
+
+        /* ---- Episode: series mode with interrupt support ---- */
+        char series_name[256];
+        strncpy(series_name, chosen->show_name, sizeof(series_name) - 1);
+        series_name[sizeof(series_name) - 1] = '\0';
+        time_t series_start_mtime = chosen->mtime; /* newest mtime when series was picked */
+
+        printf("Transcoder: Newest → \"%s\" S%02dE%02d — starting series\n",
+               series_name, chosen->season, chosen->episode);
+
+        free(list.jobs);
+
+        while (!tc.stop_requested) {
+            /* Re-scan to get current state (source files are deleted after conversion) */
+            JobList scan = {0};
+            scan_all_sources(&scan);
+
+            if (scan.count == 0) {
+                free(scan.jobs);
+                break;
+            }
+
+            /* Check for interrupt: any non-series file newer than series_start_mtime? */
+            qsort(scan.jobs, scan.count, sizeof(TranscodeJob), mtime_compare_desc);
+
+            for (int i = 0; i < scan.count; i++) {
+                TranscodeJob *candidate = &scan.jobs[i];
+
+                /* Skip files from our current series */
+                if (candidate->type == 2 &&
+                    strcasecmp(candidate->show_name, series_name) == 0)
+                    continue;
+
+                /* Only interrupt if this file is newer than when we started the series */
+                if (candidate->mtime <= series_start_mtime)
+                    break; /* sorted desc, so nothing newer follows */
+
+                if (!verify_tmdb_single(candidate)) {
+                    printf("  TMDB: interrupt \"%s\" not found, skipping\n", candidate->title);
+                    continue;
+                }
+
+                /* Interrupt! Process this one file, then resume series */
+                printf("\n  >>> Interrupt: \"%s\" (newer than series start)\n", candidate->title);
+                int ret = process_single_job(candidate);
+                printf("  >>> Resuming series \"%s\"\n\n", series_name);
+                if (ret == -2) { free(scan.jobs); goto done; }
+                break; /* only handle one interrupt per episode */
+            }
+
+            /* Now find the next episode of our series */
+            JobList episodes = {0};
+            for (int i = 0; i < scan.count; i++) {
+                if (scan.jobs[i].type == 2 &&
+                    strcasecmp(scan.jobs[i].show_name, series_name) == 0)
+                    joblist_add(&episodes, &scan.jobs[i]);
+            }
+
+            if (episodes.count == 0) {
+                /* Series is done */
+                printf("Transcoder: Series \"%s\" complete\n", series_name);
+                free(episodes.jobs);
+                free(scan.jobs);
+                break;
+            }
+
+            /* Sort by season → episode, process the first one */
+            qsort(episodes.jobs, episodes.count, sizeof(TranscodeJob), episode_compare);
+
+            int ret = process_single_job(&episodes.jobs[0]);
+            free(episodes.jobs);
+            free(scan.jobs);
+
+            if (ret == -2) goto done; /* no disk space */
+        }
+        /* Series done or stopped — loop back to re-scan for next work */
     }
 
-    /* Process dedicated movies paths */
-    for (int i = 0; i < server_config.movies_path_count && !tc.stop_requested; i++) {
-        process_source(server_config.movies_paths[i]);
-    }
-
-    /* Process dedicated TV show paths */
-    for (int i = 0; i < server_config.tvshows_path_count && !tc.stop_requested; i++) {
-        process_source(server_config.tvshows_paths[i]);
-    }
+done:
+    disk_map_reset();
 
     pthread_mutex_lock(&tc.lock);
     tc.state = TRANSCODE_IDLE;
@@ -1531,10 +1910,11 @@ int transcoder_init(void) {
     pthread_mutex_init(&tc.lock, NULL);
     tc.state = TRANSCODE_IDLE;
 
-    if (server_config.output_path[0])
-        printf("Transcoder: x265 CRF 14 MKV, output: %s\n", server_config.output_path);
-    else
-        printf("Transcoder: x265 CRF 14 MKV, output: Nixly_Media/ per source\n");
+    printf("Transcoder: x265 CRF 14 MKV\n");
+    for (int i = 0; i < server_config.unprocessed_path_count; i++)
+        printf("  Source %d: %s\n", i, server_config.unprocessed_paths[i]);
+    for (int i = 0; i < server_config.converted_path_count; i++)
+        printf("  Dest %d: %s/nixly_ready_media/\n", i, server_config.converted_paths[i]);
     return 0;
 }
 

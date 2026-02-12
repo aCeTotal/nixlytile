@@ -83,16 +83,13 @@ static void *sync_thread(void *arg) {
             printf("Periodic sync: Removed %d missing entries\n", removed);
         }
 
-        /* Scan for new files */
+        /* Scan for new files in nixly_ready_media directories */
         int before = database_get_count();
-        for (int i = 0; i < server_config.media_path_count; i++) {
-            scanner_scan_directory(server_config.media_paths[i]);
-        }
-        for (int i = 0; i < server_config.movies_path_count; i++) {
-            scanner_scan_directory(server_config.movies_paths[i]);
-        }
-        for (int i = 0; i < server_config.tvshows_path_count; i++) {
-            scanner_scan_directory(server_config.tvshows_paths[i]);
+        for (int i = 0; i < server_config.converted_path_count; i++) {
+            char ready_path[MAX_PATH];
+            snprintf(ready_path, sizeof(ready_path), "%s/nixly_ready_media",
+                     server_config.converted_paths[i]);
+            scanner_scan_directory(ready_path);
         }
         int after = database_get_count();
 
@@ -523,16 +520,13 @@ static void handle_api(int fd, const char *path) {
         }
     }
     else if (strcmp(path, "/api/scan") == 0) {
-        /* Trigger library rescan */
+        /* Trigger library rescan of nixly_ready_media directories */
         printf("API: Starting rescan...\n");
-        for (int i = 0; i < server_config.media_path_count; i++) {
-            scanner_scan_directory(server_config.media_paths[i]);
-        }
-        for (int i = 0; i < server_config.movies_path_count; i++) {
-            scanner_scan_directory(server_config.movies_paths[i]);
-        }
-        for (int i = 0; i < server_config.tvshows_path_count; i++) {
-            scanner_scan_directory(server_config.tvshows_paths[i]);
+        for (int i = 0; i < server_config.converted_path_count; i++) {
+            char ready_path[MAX_PATH];
+            snprintf(ready_path, sizeof(ready_path), "%s/nixly_ready_media",
+                     server_config.converted_paths[i]);
+            scanner_scan_directory(ready_path);
         }
         send_response(fd, 200, "OK", "application/json",
                      "{\"status\": \"scan complete\"}", 27);
@@ -846,12 +840,22 @@ int main(int argc, char *argv[]) {
     }
     mkdir(server_config.cache_dir, 0755);
 
-    /* Expand output path */
-    if (server_config.output_path[0] == '~' && home) {
-        char out_expanded[MAX_PATH];
-        snprintf(out_expanded, sizeof(out_expanded), "%s%s",
-                 home, server_config.output_path + 1);
-        strcpy(server_config.output_path, out_expanded);
+    /* Expand db_path and create parent directory */
+    if (server_config.db_path[0] == '~' && home) {
+        char db_expanded[MAX_PATH];
+        snprintf(db_expanded, sizeof(db_expanded), "%s%s",
+                 home, server_config.db_path + 1);
+        strcpy(server_config.db_path, db_expanded);
+    }
+    {
+        char db_dir[MAX_PATH];
+        strncpy(db_dir, server_config.db_path, sizeof(db_dir) - 1);
+        db_dir[sizeof(db_dir) - 1] = '\0';
+        char *slash = strrchr(db_dir, '/');
+        if (slash) {
+            *slash = '\0';
+            mkdir(db_dir, 0755);
+        }
     }
 
     /* Initialize database */
@@ -874,19 +878,14 @@ int main(int argc, char *argv[]) {
         printf("Removed %d entries for missing files\n", removed);
     }
 
-    /* Initial scan of media directories */
-    printf("Scanning media directories...\n");
-    for (int i = 0; i < server_config.media_path_count; i++) {
-        printf("  Media: %s\n", server_config.media_paths[i]);
-        scanner_scan_directory(server_config.media_paths[i]);
-    }
-    for (int i = 0; i < server_config.movies_path_count; i++) {
-        printf("  Movies: %s\n", server_config.movies_paths[i]);
-        scanner_scan_directory(server_config.movies_paths[i]);
-    }
-    for (int i = 0; i < server_config.tvshows_path_count; i++) {
-        printf("  TV Shows: %s\n", server_config.tvshows_paths[i]);
-        scanner_scan_directory(server_config.tvshows_paths[i]);
+    /* Initial scan of nixly_ready_media directories */
+    printf("Scanning converted media directories...\n");
+    for (int i = 0; i < server_config.converted_path_count; i++) {
+        char ready_path[MAX_PATH];
+        snprintf(ready_path, sizeof(ready_path), "%s/nixly_ready_media",
+                 server_config.converted_paths[i]);
+        printf("  Ready media: %s\n", ready_path);
+        scanner_scan_directory(ready_path);
     }
     printf("Scan complete. Found %d media files.\n", database_get_count());
 
@@ -900,18 +899,22 @@ int main(int argc, char *argv[]) {
     if (watcher_init() == 0) {
         watcher_set_callback(on_file_change);
 
-        /* Generic media paths (watches everything) */
-        for (int i = 0; i < server_config.media_path_count; i++) {
-            watcher_add_path(server_config.media_paths[i], WATCH_TYPE_MEDIA);
+        /* Watch unprocessed paths for new source files -> trigger transcoder */
+        for (int i = 0; i < server_config.unprocessed_path_count; i++) {
+            watcher_add_path(server_config.unprocessed_paths[i], WATCH_TYPE_MEDIA);
         }
 
-        /* Specific type paths (backwards compatibility) */
-        for (int i = 0; i < server_config.movies_path_count; i++) {
-            watcher_add_path(server_config.movies_paths[i], WATCH_TYPE_MOVIES);
+        /* Watch nixly_ready_media in converted paths -> scan to DB */
+        for (int i = 0; i < server_config.converted_path_count; i++) {
+            char ready_path[MAX_PATH];
+            snprintf(ready_path, sizeof(ready_path), "%s/nixly_ready_media",
+                     server_config.converted_paths[i]);
+            /* Create the directory if it doesn't exist yet */
+            mkdir(ready_path, 0755);
+            watcher_add_path(ready_path, WATCH_TYPE_MEDIA);
         }
-        for (int i = 0; i < server_config.tvshows_path_count; i++) {
-            watcher_add_path(server_config.tvshows_paths[i], WATCH_TYPE_TVSHOWS);
-        }
+
+        /* ROMs directories */
         for (int i = 0; i < server_config.roms_path_count; i++) {
             watcher_add_path(server_config.roms_paths[i], WATCH_TYPE_ROMS);
         }

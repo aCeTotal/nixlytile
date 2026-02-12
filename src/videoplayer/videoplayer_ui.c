@@ -997,12 +997,32 @@ static struct wlr_buffer *create_subtitle_buffer(ASS_Image *images, int width, i
         if (img->w == 0 || img->h == 0)
             continue;
 
-        /* ASS_Image color format: 0xRRGGBBAA */
+        /* ASS_Image color format: 0xRRGGBBAA
+         * Override colors at render time to ensure clean appearance
+         * regardless of embedded ASS styles (green backgrounds etc.) */
         uint32_t color = img->color;
-        double r = ((color >> 24) & 0xFF) / 255.0;
-        double g = ((color >> 16) & 0xFF) / 255.0;
-        double b = ((color >> 8) & 0xFF) / 255.0;
-        double a = 1.0 - ((color & 0xFF) / 255.0);  /* Invert alpha */
+        double r, g, b, a;
+
+        switch (img->type) {
+        case IMAGE_TYPE_CHARACTER:
+            /* White text, fully opaque */
+            r = 1.0; g = 1.0; b = 1.0;
+            a = 1.0 - ((color & 0xFF) / 255.0);
+            break;
+        case IMAGE_TYPE_OUTLINE:
+            /* Black outline, fully opaque */
+            r = 0.0; g = 0.0; b = 0.0;
+            a = 1.0 - ((color & 0xFF) / 255.0);
+            break;
+        case IMAGE_TYPE_SHADOW:
+            /* Black shadow, semi-transparent */
+            r = 0.0; g = 0.0; b = 0.0;
+            a = (1.0 - ((color & 0xFF) / 255.0)) * 0.5;
+            break;
+        default:
+            /* Unknown image type — skip to prevent colored backgrounds */
+            continue;
+        }
 
         /* Create Cairo surface from ASS bitmap (8-bit alpha) */
         cairo_surface_t *ass_surface = cairo_image_surface_create(
@@ -1102,16 +1122,26 @@ static struct wlr_buffer *create_bitmap_subtitle_buffer(VideoPlayer *vp)
     }
 
     /* Scale bitmap from video coordinates to fullscreen display.
-     * PGS subtitle positions are relative to the video frame dimensions. */
+     * PGS subtitle positions are relative to the video frame dimensions.
+     * Apply 0.75 downscale since PGS bitmaps are typically designed for
+     * cinema-scale viewing and appear oversized on desktop displays.
+     * Anchor the bottom-center of the subtitle to its mapped screen position
+     * so dialogue subs stay at the bottom while becoming smaller. */
     int vid_w = vp->subtitle.bitmap_video_w;
     int vid_h = vp->subtitle.bitmap_video_h;
     if (vid_w <= 0) vid_w = bw;
     if (vid_h <= 0) vid_h = bh;
 
-    double scale_x = (double)fw / vid_w;
-    double scale_y = (double)fh / vid_h;
-    double dst_x = vp->subtitle.bitmap_x * scale_x;
-    double dst_y = vp->subtitle.bitmap_y * scale_y;
+    double pgs_scale = 0.75;
+    double base_scale_x = (double)fw / vid_w;
+    double base_scale_y = (double)fh / vid_h;
+    double scale_x = base_scale_x * pgs_scale;
+    double scale_y = base_scale_y * pgs_scale;
+
+    double bottom_center_x = (vp->subtitle.bitmap_x + bw / 2.0) * base_scale_x;
+    double bottom_y = (vp->subtitle.bitmap_y + bh) * base_scale_y;
+    double dst_x = bottom_center_x - (bw * scale_x) / 2.0;
+    double dst_y = bottom_y - (bh * scale_y);
 
     cairo_save(cr);
     cairo_translate(cr, dst_x, dst_y);
@@ -1252,10 +1282,11 @@ void videoplayer_render_subtitles(VideoPlayer *vp, int64_t pts_us)
         }
         sub_render_log_count++;
 
-        /* If nothing changed and we have a valid cached buffer, reuse it */
-        if (!changed && images && vp->subtitle.current_buffer) {
-            return;
-        }
+        /* Always clear and re-render subtitles.  The libass `changed`
+         * flag is unreliable for detecting subtitle expiry — some versions
+         * return changed=0 when transitioning from visible→empty, causing
+         * expired text to persist on screen.  Re-rendering every frame is
+         * cheap (just cairo compositing a few glyphs at video framerate). */
 
         /* Clear old subtitle display */
         if (vp->subtitle.current_buffer) {
@@ -1338,6 +1369,55 @@ int videoplayer_subtitle_init(VideoPlayer *vp)
     ass_set_fonts(vp->subtitle.renderer, NULL, "DejaVu Sans",
                   ASS_FONTPROVIDER_AUTODETECT, NULL, 1);
     fprintf(stderr, "[subtitle] init: fonts configured (DejaVu Sans + fontconfig)\n");
+
+    /* Scale subtitle fonts down to a reasonable size.
+     * File-embedded ASS styles often have oversized fonts (60-80 at PlayRes 1080)
+     * which are too large for desktop/TV viewing. */
+    ass_set_font_scale(vp->subtitle.renderer, 0.65);
+
+    /* Force style overrides on all subtitle tracks:
+     * - Transparent background (no colored boxes — some ASS files use green/etc.)
+     * - Outline border for readability on any background
+     * - Bottom-center alignment */
+    char *style_overrides[] = {
+        "BackColour=&HFF000000",     /* Fully transparent (ASS alpha: FF=transparent) */
+        "BorderStyle=1",              /* Outline + shadow (not opaque box) */
+        "Outline=2",
+        "Shadow=1",
+        "Alignment=2",               /* Bottom center */
+        "MarginV=50",
+        NULL
+    };
+    ass_set_style_overrides(vp->subtitle.library, style_overrides);
+
+    /* Selective style override for dialogue events.
+     * This overrides even per-event inline tags (\3c, \4c, \bord, \an, etc.)
+     * on events that libass heuristically identifies as normal dialogue,
+     * while preserving sign/typesetting positioning. */
+    ASS_Style override_style;
+    char override_font[] = "DejaVu Sans";
+    memset(&override_style, 0, sizeof(override_style));
+    override_style.Name = override_font;
+    override_style.FontName = override_font;
+    override_style.FontSize = 48;
+    override_style.PrimaryColour = 0x00FFFFFF;   /* White, fully opaque */
+    override_style.SecondaryColour = 0x000000FF;
+    override_style.OutlineColour = 0x00000000;   /* Black, fully opaque */
+    override_style.BackColour = 0xFF000000;      /* Fully transparent */
+    override_style.ScaleX = 1.0;
+    override_style.ScaleY = 1.0;
+    override_style.BorderStyle = 1;              /* Outline + shadow */
+    override_style.Outline = 2.0;
+    override_style.Shadow = 1.0;
+    override_style.Alignment = 2;                /* Bottom center */
+    override_style.MarginV = 50;
+
+    ass_set_selective_style_override_enabled(vp->subtitle.renderer,
+        ASS_OVERRIDE_BIT_COLORS | ASS_OVERRIDE_BIT_BORDER | ASS_OVERRIDE_BIT_ALIGNMENT);
+    ass_set_selective_style_override(vp->subtitle.renderer, &override_style);
+
+    fprintf(stderr, "[subtitle] init: style overrides set (font_scale=0.65, bottom-center, "
+            "no bg, selective override for colors/border/alignment)\n");
 
     /* Reset render counters */
     sub_render_log_count = 0;

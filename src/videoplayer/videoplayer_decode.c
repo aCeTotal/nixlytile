@@ -48,6 +48,39 @@ extern void videoplayer_show_seek_osd(VideoPlayer *vp);
 
 /* Subtitle processing */
 static int subtitle_pkt_count = 0;
+
+/* Strip inline ASS override tags that control outline/back colors.
+ * ASS event text can contain tags like {\4c&H00FF00&} (green back color)
+ * or {\3c&H00FF00&} (green outline) that override our style-level settings.
+ * This function removes \3c, \4c, \3a, \4a tags in-place so the style
+ * defaults (transparent back, black outline) take effect. */
+static void strip_ass_inline_back_tags(char *text)
+{
+    char *r = text, *w = text;
+
+    while (*r) {
+        /* Match \3c, \4c, \3a, \4a */
+        if (*r == '\\' && (r[1] == '3' || r[1] == '4') &&
+            (r[2] == 'c' || r[2] == 'a')) {
+            r += 3;  /* skip \Xc or \Xa */
+            /* Skip &H prefix */
+            if (*r == '&') {
+                r++;
+                if (*r == 'H' || *r == 'h') r++;
+            }
+            /* Skip hex digits */
+            while ((*r >= '0' && *r <= '9') ||
+                   (*r >= 'A' && *r <= 'F') ||
+                   (*r >= 'a' && *r <= 'f'))
+                r++;
+            /* Skip trailing & */
+            if (*r == '&') r++;
+            continue;
+        }
+        *w++ = *r++;
+    }
+    *w = '\0';
+}
 static void videoplayer_process_subtitle_packet(VideoPlayer *vp, AVPacket *pkt)
 {
     AVSubtitle sub;
@@ -96,6 +129,8 @@ static void videoplayer_process_subtitle_packet(VideoPlayer *vp, AVPacket *pkt)
     int64_t duration_ms = sub.end_display_time - sub.start_display_time;
     if (duration_ms <= 0)
         duration_ms = 5000;  /* Default 5 seconds */
+    if (duration_ms > 5500)
+        duration_ms = 5500;  /* Cap at 5.5 seconds */
 
     fprintf(stderr, "[subtitle] pkt #%d: start=%ldms duration=%ldms rects=%u "
             "track=%p pos=%ldms\n",
@@ -117,10 +152,24 @@ static void videoplayer_process_subtitle_packet(VideoPlayer *vp, AVPacket *pkt)
             continue;
 
         if (rect->type == SUBTITLE_ASS && rect->ass && vp->subtitle.track) {
-            fprintf(stderr, "[subtitle]   rect[%u] ASS: \"%.*s\"\n",
+            fprintf(stderr, "[subtitle]   rect[%u] ASS raw: \"%.*s\"\n",
                     i, 120, rect->ass);
-            ass_process_chunk(vp->subtitle.track, rect->ass, strlen(rect->ass),
-                              start_ms, duration_ms);
+            /* Strip inline \3c/\4c/\3a/\4a tags to prevent ASS files
+             * from overriding our transparent-back/black-outline style */
+            size_t alen = strlen(rect->ass);
+            char *cleaned = malloc(alen + 1);
+            if (cleaned) {
+                memcpy(cleaned, rect->ass, alen + 1);
+                strip_ass_inline_back_tags(cleaned);
+                fprintf(stderr, "[subtitle]   rect[%u] ASS cleaned: \"%.*s\"\n",
+                        i, 120, cleaned);
+                ass_process_chunk(vp->subtitle.track, cleaned, strlen(cleaned),
+                                  start_ms, duration_ms);
+                free(cleaned);
+            } else {
+                ass_process_chunk(vp->subtitle.track, rect->ass, alen,
+                                  start_ms, duration_ms);
+            }
             processed++;
         }
         else if (rect->type == SUBTITLE_TEXT && rect->text && vp->subtitle.track) {
@@ -137,7 +186,7 @@ static void videoplayer_process_subtitle_packet(VideoPlayer *vp, AVPacket *pkt)
             fprintf(stderr, "[subtitle]   rect[%u] BITMAP: %dx%d at (%d,%d) nb_colors=%d\n",
                     i, rect->w, rect->h, rect->x, rect->y, rect->nb_colors);
 
-            /* Convert palette-indexed bitmap to BGRA */
+            /* Convert palette-indexed bitmap to ARGB8888 (BGRA byte order on LE) */
             int bw = rect->w;
             int bh = rect->h;
             int bstride = bw * 4;
@@ -147,20 +196,47 @@ static void videoplayer_process_subtitle_packet(VideoPlayer *vp, AVPacket *pkt)
                 const uint8_t *src = rect->data[0];
                 int src_stride = rect->linesize[0];
 
+                /* Pre-process palette: desaturate to remove colored backgrounds
+                 * (PGS bitmaps often have green/colored boxes behind text).
+                 * Force white text + black border, make backgrounds transparent.
+                 * FFmpeg PAL8 palette on LE is 0xAARRGGBB = DRM_FORMAT_ARGB8888. */
+                uint32_t clean_palette[256];
+                for (int p = 0; p < 256; p++) {
+                    uint32_t entry = palette[p];
+                    uint8_t pa = (entry >> 24) & 0xFF;
+                    if (pa == 0) {
+                        clean_palette[p] = 0;
+                        continue;
+                    }
+                    uint8_t pr = (entry >> 16) & 0xFF;
+                    uint8_t pg = (entry >>  8) & 0xFF;
+                    uint8_t pb = (entry >>  0) & 0xFF;
+
+                    /* Luminance */
+                    int lum = (299 * pr + 587 * pg + 114 * pb) / 1000;
+
+                    /* Force clean white-text / black-border look:
+                     * Bright → white, dark → black, mid-range → transparent bg.
+                     * Output is premultiplied alpha for Cairo ARGB32. */
+                    if (lum >= 128) {
+                        /* White text: premultiplied white = (A,A,A,A) */
+                        clean_palette[p] = ((uint32_t)pa << 24) |
+                                           ((uint32_t)pa << 16) |
+                                           ((uint32_t)pa << 8) | pa;
+                    } else if (lum < 40 || pa > 200) {
+                        /* Black border: premultiplied black = (0,0,0,A) */
+                        clean_palette[p] = ((uint32_t)pa << 24);
+                    } else {
+                        /* Semi-transparent mid-range: colored background → drop */
+                        clean_palette[p] = 0;
+                    }
+                }
+
                 for (int y = 0; y < bh; y++) {
                     const uint8_t *srow = src + y * src_stride;
-                    uint8_t *drow = bgra + y * bstride;
+                    uint32_t *drow = (uint32_t *)(bgra + y * bstride);
                     for (int x = 0; x < bw; x++) {
-                        uint32_t rgba = palette[srow[x]];
-                        /* Palette is RGBA, convert to BGRA (ARGB8888 in DRM terms) */
-                        uint8_t r = (rgba >>  0) & 0xFF;
-                        uint8_t g = (rgba >>  8) & 0xFF;
-                        uint8_t b = (rgba >> 16) & 0xFF;
-                        uint8_t a = (rgba >> 24) & 0xFF;
-                        drow[x * 4 + 0] = b;
-                        drow[x * 4 + 1] = g;
-                        drow[x * 4 + 2] = r;
-                        drow[x * 4 + 3] = a;
+                        drow[x] = clean_palette[srow[x]];
                     }
                 }
 
@@ -1256,8 +1332,8 @@ static int init_subtitle_decoder(VideoPlayer *vp)
                     "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
                     "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
                     "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-                    "Style: Default,DejaVu Sans,32,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,"
-                    "0,0,0,0,100,100,0,0,1,2,1,2,20,20,40,1\n"
+                    "Style: Default,DejaVu Sans,48,&H00FFFFFF,&H000000FF,&H00000000,&HFF000000,"
+                    "0,0,0,0,100,100,0,0,1,2,1,2,20,20,50,1\n"
                     "\n"
                     "[Events]\n"
                     "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n";
@@ -1265,6 +1341,29 @@ static int init_subtitle_decoder(VideoPlayer *vp)
                                           (char *)default_header,
                                           strlen(default_header));
             }
+
+            /* Apply forced style overrides (font scale, colors, alignment)
+             * set in videoplayer_subtitle_init() via ass_set_style_overrides() */
+            ass_process_force_style(vp->subtitle.track);
+
+            /* Force transparent background and outline border on ALL styles.
+             * ass_process_force_style only applies to the "Default" style,
+             * so ASS files with other named styles (e.g. "Main", "Top",
+             * "Italics") would keep their original BackColour/BorderStyle.
+             * Iterate over every style and fix them directly. */
+            for (int si = 0; si < vp->subtitle.track->n_styles; si++) {
+                ASS_Style *s = &vp->subtitle.track->styles[si];
+                s->BackColour = 0xFF000000;   /* Fully transparent */
+                s->BorderStyle = 1;           /* Outline + shadow, not opaque box */
+                s->Outline = 2.0;
+                s->Shadow = 1.0;
+                s->Alignment = 2;             /* Bottom center */
+                s->MarginV = 50;
+                fprintf(stderr, "[subtitle] init_decoder: fixed style[%d] \"%s\" "
+                        "-> BackColour=transparent, BorderStyle=1, Alignment=2\n", si, s->Name);
+            }
+            fprintf(stderr, "[subtitle] init_decoder: applied force_style overrides "
+                    "(%d styles fixed)\n", vp->subtitle.track->n_styles);
         }
     } else {
         fprintf(stderr, "[subtitle] init_decoder: WARNING — libass library/renderer NULL, "

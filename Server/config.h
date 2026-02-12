@@ -24,25 +24,20 @@ typedef struct {
     char tmdb_api_key[128];
     char tmdb_language[8];          /* e.g., "en-US", "nb-NO" */
 
-    /* Watch paths */
-    char movies_paths[MAX_WATCH_PATHS][MAX_PATH_LEN];
-    int movies_path_count;
+    /* Source paths with raw media to be transcoded */
+    char unprocessed_paths[MAX_WATCH_PATHS][MAX_PATH_LEN];
+    int unprocessed_path_count;
 
-    char tvshows_paths[MAX_WATCH_PATHS][MAX_PATH_LEN];
-    int tvshows_path_count;
+    /* Destination disks for converted media (output goes to <path>/nixly_ready_media/) */
+    char converted_paths[MAX_WATCH_PATHS][MAX_PATH_LEN];
+    int converted_path_count;
 
+    /* ROMs directories */
     char roms_paths[MAX_WATCH_PATHS][MAX_PATH_LEN];
     int roms_path_count;
 
-    /* Generic media paths (watches all content recursively) */
-    char media_paths[MAX_WATCH_PATHS][MAX_PATH_LEN];
-    int media_path_count;
-
     /* Cache directory for thumbnails */
     char cache_dir[MAX_PATH_LEN];
-
-    /* Transcoder output override (empty = Nixly_Media inside each source path) */
-    char output_path[MAX_PATH_LEN];
 } ServerConfig;
 
 /* Global config */

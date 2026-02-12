@@ -54,7 +54,7 @@ void config_init_defaults(void) {
     memset(&server_config, 0, sizeof(server_config));
 
     server_config.port = 8080;
-    strcpy(server_config.db_path, "nixly.db");
+    strcpy(server_config.db_path, "~/.local/share/nixly-server/nixly.db");
 
     /* Default: 500 Mbps upload = ~7 simultaneous 70 Mbps streams */
     server_config.upload_mbps = 500;
@@ -69,16 +69,9 @@ void config_init_defaults(void) {
     strcpy(server_config.tmdb_language, "en-US");
     strcpy(server_config.cache_dir, "~/.cache/nixly-server");
 
-    /* Transcoder output directory (empty = Nixly_Media per source path) */
-    server_config.output_path[0] = '\0';
-
-    /* Default: watch all of /home/total/media/ */
-    strcpy(server_config.media_paths[0], "/home/total/media");
-    server_config.media_path_count = 1;
-
-    /* Movies/tvshows paths empty by default (use media_paths instead) */
-    server_config.movies_path_count = 0;
-    server_config.tvshows_path_count = 0;
+    /* Unprocessed/converted paths empty by default */
+    server_config.unprocessed_path_count = 0;
+    server_config.converted_path_count = 0;
 }
 
 int config_load(const char *path) {
@@ -139,21 +132,18 @@ int config_load(const char *path) {
         else if (strcmp(key, "cache_dir") == 0) {
             expand_path(value, server_config.cache_dir, sizeof(server_config.cache_dir));
         }
-        else if (strcmp(key, "output_path") == 0) {
-            expand_path(value, server_config.output_path, sizeof(server_config.output_path));
-        }
-        else if (strcmp(key, "movies_path") == 0) {
-            if (server_config.movies_path_count < MAX_WATCH_PATHS) {
-                expand_path(value, server_config.movies_paths[server_config.movies_path_count],
+        else if (strcmp(key, "unprocessed_path") == 0) {
+            if (server_config.unprocessed_path_count < MAX_WATCH_PATHS) {
+                expand_path(value, server_config.unprocessed_paths[server_config.unprocessed_path_count],
                            MAX_PATH_LEN);
-                server_config.movies_path_count++;
+                server_config.unprocessed_path_count++;
             }
         }
-        else if (strcmp(key, "tvshows_path") == 0) {
-            if (server_config.tvshows_path_count < MAX_WATCH_PATHS) {
-                expand_path(value, server_config.tvshows_paths[server_config.tvshows_path_count],
+        else if (strcmp(key, "converted_path") == 0) {
+            if (server_config.converted_path_count < MAX_WATCH_PATHS) {
+                expand_path(value, server_config.converted_paths[server_config.converted_path_count],
                            MAX_PATH_LEN);
-                server_config.tvshows_path_count++;
+                server_config.converted_path_count++;
             }
         }
         else if (strcmp(key, "roms_path") == 0) {
@@ -161,13 +151,6 @@ int config_load(const char *path) {
                 expand_path(value, server_config.roms_paths[server_config.roms_path_count],
                            MAX_PATH_LEN);
                 server_config.roms_path_count++;
-            }
-        }
-        else if (strcmp(key, "media_path") == 0) {
-            if (server_config.media_path_count < MAX_WATCH_PATHS) {
-                expand_path(value, server_config.media_paths[server_config.media_path_count],
-                           MAX_PATH_LEN);
-                server_config.media_path_count++;
             }
         }
     }
@@ -209,30 +192,20 @@ int config_save(const char *path) {
     fprintf(f, "# Cache directory for thumbnails\n");
     fprintf(f, "cache_dir = %s\n\n", server_config.cache_dir);
 
-    fprintf(f, "# Transcoder output override (empty = Nixly_Media inside each source path)\n");
-    if (server_config.output_path[0])
-        fprintf(f, "output_path = %s\n\n", server_config.output_path);
-    else
-        fprintf(f, "# output_path =\n\n");
-
-    fprintf(f, "# Movies directories (can have multiple)\n");
-    for (int i = 0; i < server_config.movies_path_count; i++) {
-        fprintf(f, "movies_path = %s\n", server_config.movies_paths[i]);
+    fprintf(f, "# Source directories with raw media to be transcoded (can have multiple)\n");
+    for (int i = 0; i < server_config.unprocessed_path_count; i++) {
+        fprintf(f, "unprocessed_path = %s\n", server_config.unprocessed_paths[i]);
     }
 
-    fprintf(f, "\n# TV shows directories (can have multiple)\n");
-    for (int i = 0; i < server_config.tvshows_path_count; i++) {
-        fprintf(f, "tvshows_path = %s\n", server_config.tvshows_paths[i]);
+    fprintf(f, "\n# Destination disks for converted media (can have multiple)\n");
+    fprintf(f, "# Transcoded files go to <path>/nixly_ready_media/TV|Movies/\n");
+    for (int i = 0; i < server_config.converted_path_count; i++) {
+        fprintf(f, "converted_path = %s\n", server_config.converted_paths[i]);
     }
 
     fprintf(f, "\n# ROMs directories (can have multiple)\n");
     for (int i = 0; i < server_config.roms_path_count; i++) {
         fprintf(f, "roms_path = %s\n", server_config.roms_paths[i]);
-    }
-
-    fprintf(f, "\n# Generic media directories (watches all content recursively)\n");
-    for (int i = 0; i < server_config.media_path_count; i++) {
-        fprintf(f, "media_path = %s\n", server_config.media_paths[i]);
     }
 
     fclose(f);

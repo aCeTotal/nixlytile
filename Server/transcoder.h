@@ -9,8 +9,8 @@
  *   - Source files are deleted after successful conversion
  *   - HDR (HDR10/HLG) metadata is preserved automatically
  *
- * Output structure (Nixly_Media placed inside each source path):
- *   <source>/Nixly_Media/
+ * Output structure (nixly_ready_media inside each converted_path disk):
+ *   <converted_path>/nixly_ready_media/
  *     TV/
  *       show.name.year/
  *         Season1/
@@ -30,6 +30,8 @@
 #ifndef TRANSCODER_H
 #define TRANSCODER_H
 
+#include <time.h>
+
 #define TRANSCODER_CRF 14
 
 typedef enum {
@@ -47,6 +49,8 @@ typedef struct {
     int season;
     int episode;
     int year;               /* Release year (from filename or TMDB) */
+    time_t mtime;           /* File modification time for priority sorting */
+    int tmdb_verified;      /* 1 = found in TMDB, 0 = not checked, -1 = not found */
 } TranscodeJob;
 
 /* Initialize transcoder (call after config is loaded) */
