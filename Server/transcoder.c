@@ -1461,14 +1461,19 @@ static int check_and_delete_duplicate(TranscodeJob *job) {
             closedir(dir);
 
             if (found) {
-                printf("Transcoder: Duplicate — %s S%02dE%02d already converted, deleting source\n",
-                       job->show_name, job->season, job->episode);
-                if (job->source_dir[0]) {
-                    rmdir_r(job->source_dir);
-                    cleanup_source_dir(job->source_dir);
+                if (server_config.delete_after_conversion) {
+                    printf("Transcoder: Duplicate — %s S%02dE%02d already converted, deleting source\n",
+                           job->show_name, job->season, job->episode);
+                    if (job->source_dir[0]) {
+                        rmdir_r(job->source_dir);
+                        cleanup_source_dir(job->source_dir);
+                    } else {
+                        unlink(job->filepath);
+                        cleanup_source_dir(job->filepath);
+                    }
                 } else {
-                    unlink(job->filepath);
-                    cleanup_source_dir(job->filepath);
+                    printf("Transcoder: Duplicate — %s S%02dE%02d already converted, keeping source\n",
+                           job->show_name, job->season, job->episode);
                 }
                 return 1;
             }
@@ -1500,14 +1505,19 @@ static int check_and_delete_duplicate(TranscodeJob *job) {
             closedir(dir);
 
             if (found) {
-                printf("Transcoder: Duplicate — \"%s\" already converted, deleting source\n",
-                       job->title);
-                if (job->source_dir[0]) {
-                    rmdir_r(job->source_dir);
-                    cleanup_source_dir(job->source_dir);
+                if (server_config.delete_after_conversion) {
+                    printf("Transcoder: Duplicate — \"%s\" already converted, deleting source\n",
+                           job->title);
+                    if (job->source_dir[0]) {
+                        rmdir_r(job->source_dir);
+                        cleanup_source_dir(job->source_dir);
+                    } else {
+                        unlink(job->filepath);
+                        cleanup_source_dir(job->filepath);
+                    }
                 } else {
-                    unlink(job->filepath);
-                    cleanup_source_dir(job->filepath);
+                    printf("Transcoder: Duplicate — \"%s\" already converted, keeping source\n",
+                           job->title);
                 }
                 return 1;
             }
@@ -1700,24 +1710,28 @@ static int process_single_job(TranscodeJob *job) {
 
             database_delete_by_path(job->filepath);
 
-            if (job->source_dir[0]) {
-                rmdir_r(job->source_dir);
-                printf("  Deleted Blu-ray source: %s\n", job->source_dir);
-                cleanup_source_dir(job->source_dir);
-            } else if (unlink(job->filepath) == 0) {
-                printf("  Deleted source: %s\n", job->filepath);
-                cleanup_source_dir(job->filepath);
-            } else {
-                fprintf(stderr, "  Warning: Could not delete source: %s\n",
-                        strerror(errno));
-            }
+            if (server_config.delete_after_conversion) {
+                if (job->source_dir[0]) {
+                    rmdir_r(job->source_dir);
+                    printf("  Deleted Blu-ray source: %s\n", job->source_dir);
+                    cleanup_source_dir(job->source_dir);
+                } else if (unlink(job->filepath) == 0) {
+                    printf("  Deleted source: %s\n", job->filepath);
+                    cleanup_source_dir(job->filepath);
+                } else {
+                    fprintf(stderr, "  Warning: Could not delete source: %s\n",
+                            strerror(errno));
+                }
 
-            for (int j = 0; j < subs.ext_count; j++) {
-                if (unlink(subs.ext_files[j]) == 0)
-                    printf("  Deleted subtitle: %s\n", subs.ext_files[j]);
-                else
-                    fprintf(stderr, "  Warning: Could not delete subtitle: %s (%s)\n",
-                            subs.ext_files[j], strerror(errno));
+                for (int j = 0; j < subs.ext_count; j++) {
+                    if (unlink(subs.ext_files[j]) == 0)
+                        printf("  Deleted subtitle: %s\n", subs.ext_files[j]);
+                    else
+                        fprintf(stderr, "  Warning: Could not delete subtitle: %s (%s)\n",
+                                subs.ext_files[j], strerror(errno));
+                }
+            } else {
+                printf("  Keeping source: %s\n", job->filepath);
             }
 
             scanner_scan_file(mkv_path, 1);

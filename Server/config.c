@@ -72,6 +72,9 @@ void config_init_defaults(void) {
     /* Unprocessed/converted paths empty by default */
     server_config.unprocessed_path_count = 0;
     server_config.converted_path_count = 0;
+
+    /* Keep source files by default */
+    server_config.delete_after_conversion = 0;
 }
 
 int config_load(const char *path) {
@@ -146,6 +149,10 @@ int config_load(const char *path) {
                 server_config.converted_path_count++;
             }
         }
+        else if (strcmp(key, "delete_after_conversion") == 0) {
+            server_config.delete_after_conversion =
+                (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
+        }
         else if (strcmp(key, "roms_path") == 0) {
             if (server_config.roms_path_count < MAX_WATCH_PATHS) {
                 expand_path(value, server_config.roms_paths[server_config.roms_path_count],
@@ -202,6 +209,9 @@ int config_save(const char *path) {
     for (int i = 0; i < server_config.converted_path_count; i++) {
         fprintf(f, "converted_path = %s\n", server_config.converted_paths[i]);
     }
+
+    fprintf(f, "\n# Delete source files after successful conversion (true/false)\n");
+    fprintf(f, "delete_after_conversion = %s\n", server_config.delete_after_conversion ? "true" : "false");
 
     fprintf(f, "\n# ROMs directories (can have multiple)\n");
     for (int i = 0; i < server_config.roms_path_count; i++) {

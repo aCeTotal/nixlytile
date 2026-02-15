@@ -38,6 +38,9 @@ typedef struct {
 
     /* Cache directory for thumbnails */
     char cache_dir[MAX_PATH_LEN];
+
+    /* Delete source files after successful conversion (default: false) */
+    int delete_after_conversion;
 } ServerConfig;
 
 /* Global config */
