@@ -42,7 +42,9 @@ typedef enum {
 
 typedef struct {
     char filepath[4096];
+    char filepath2[4096];       /* Part 2 input (multi-part BDR: p1/p2, part1/part2) */
     char source_dir[4096];  /* Non-empty = Blu-ray root dir (delete whole tree on success) */
+    char source_dir2[4096];     /* Part 2 BDR root dir (for cleanup) */
     int type;               /* 0=movie, 2=episode */
     char show_name[256];
     char title[256];

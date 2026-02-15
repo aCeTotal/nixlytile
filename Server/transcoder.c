@@ -236,6 +236,71 @@ static int find_bluray_main_feature(const char *bdmv_root, char *out, size_t max
     return 0;
 }
 
+/* ================================================================
+ *  Multi-part Blu-ray Detection
+ *  Detects: p1/P1/part1, p2/P2/part2 (case-insensitive)
+ *  Separated by '.', '_', '-', ' ' or at end of name
+ * ================================================================ */
+
+/* Detect part number from a directory name.
+ * Returns 1 or 2 if found, 0 otherwise.
+ * If base_out is non-NULL, writes the path with the part indicator stripped. */
+static int detect_bluray_part(const char *path, char *base_out, size_t base_max) {
+    const char *name = strrchr(path, '/');
+    name = name ? name + 1 : path;
+
+    /* Scan for part indicators in the directory name */
+    for (const char *p = name; *p; p++) {
+        /* Must be at start of name or preceded by a separator */
+        if (p != name && *(p - 1) != '.' && *(p - 1) != '_' &&
+            *(p - 1) != '-' && *(p - 1) != ' ')
+            continue;
+
+        int part = 0;
+        int match_len = 0;
+
+        /* Check "part1"/"part2" first (longer match) */
+        if (strncasecmp(p, "part1", 5) == 0) { part = 1; match_len = 5; }
+        else if (strncasecmp(p, "part2", 5) == 0) { part = 2; match_len = 5; }
+        /* Then "p1"/"p2" */
+        else if (strncasecmp(p, "p1", 2) == 0) { part = 1; match_len = 2; }
+        else if (strncasecmp(p, "p2", 2) == 0) { part = 2; match_len = 2; }
+
+        if (part == 0) continue;
+
+        /* Must be followed by end-of-string, separator, or whitespace */
+        char after = p[match_len];
+        if (after != '\0' && after != '.' && after != '_' &&
+            after != '-' && after != ' ')
+            continue;
+
+        /* Build base path with part indicator stripped */
+        if (base_out) {
+            size_t prefix_len = (size_t)(p - path);
+            /* Also strip the preceding separator */
+            if (prefix_len > 0) {
+                char sep = path[prefix_len - 1];
+                if (sep == '.' || sep == '_' || sep == '-' || sep == ' ')
+                    prefix_len--;
+            }
+            if (prefix_len >= base_max) prefix_len = base_max - 1;
+            memcpy(base_out, path, prefix_len);
+
+            /* Append any suffix after the part indicator */
+            const char *suffix = p + match_len;
+            size_t suffix_len = strlen(suffix);
+            if (prefix_len + suffix_len >= base_max)
+                suffix_len = base_max - 1 - prefix_len;
+            memcpy(base_out + prefix_len, suffix, suffix_len);
+            base_out[prefix_len + suffix_len] = '\0';
+        }
+
+        return part;
+    }
+
+    return 0;
+}
+
 /* Normalize title: lowercase, spaces/separators -> dots, strip specials */
 static void normalize_title(const char *input, char *output, size_t max_len) {
     size_t j = 0;
@@ -533,12 +598,16 @@ static void probe_subtitles(const char *filepath, SubtitleProbe *info) {
 typedef struct {
     int best_audio_idx;     /* Audio-stream-relative index of best (most channels) */
     int best_channels;
+    int nor_audio_idx;      /* Audio-stream-relative index of Norwegian audio (-1 = none) */
+    int nor_channels;
     int atmos_idx;          /* Audio-stream-relative index of TrueHD/Atmos (-1 = none) */
 } AudioProbe;
 
 static void probe_audio(const char *filepath, AudioProbe *info) {
     info->best_audio_idx = 0;
     info->best_channels = 0;
+    info->nor_audio_idx = -1;
+    info->nor_channels = 0;
     info->atmos_idx = -1;
 
     AVFormatContext *fmt_ctx = NULL;
@@ -559,6 +628,16 @@ static void probe_audio(const char *filepath, AudioProbe *info) {
         if (ch > info->best_channels) {
             info->best_channels = ch;
             info->best_audio_idx = audio_idx;
+        }
+
+        /* Norwegian audio: pick the one with most channels */
+        AVDictionaryEntry *lang_tag = av_dict_get(
+            fmt_ctx->streams[i]->metadata, "language", NULL, 0);
+        if (lang_tag && is_norwegian_lang(lang_tag->value)) {
+            if (ch > info->nor_channels) {
+                info->nor_channels = ch;
+                info->nor_audio_idx = audio_idx;
+            }
         }
 
         /* Atmos detection: TrueHD is the primary Atmos carrier (Blu-ray) */
@@ -925,6 +1004,61 @@ static void collect_from_dir(const char *path, JobList *list) {
     closedir(dir);
 }
 
+/* After job collection, merge multi-part BDR entries into single jobs.
+ * Part 1's main feature becomes filepath, part 2's becomes filepath2.
+ * Both source_dir entries are kept for cleanup after conversion. */
+static void merge_multipart_bluray_jobs(JobList *list) {
+    for (int i = 0; i < list->count; i++) {
+        if (!list->jobs[i].source_dir[0]) continue;  /* Only BDR jobs */
+        if (list->jobs[i].filepath2[0]) continue;     /* Already merged */
+
+        char base_i[4096];
+        int part_i = detect_bluray_part(list->jobs[i].source_dir, base_i, sizeof(base_i));
+        if (part_i == 0) continue;
+
+        for (int j = i + 1; j < list->count; j++) {
+            if (!list->jobs[j].source_dir[0]) continue;
+            if (list->jobs[j].filepath2[0]) continue;
+
+            char base_j[4096];
+            int part_j = detect_bluray_part(list->jobs[j].source_dir, base_j, sizeof(base_j));
+            if (part_j == 0 || part_j == part_i) continue;
+
+            if (strcasecmp(base_i, base_j) != 0) continue;
+
+            /* Found matching pair — ensure jobs[i] holds part 1 */
+            if (part_i == 2) {
+                /* Swap: make jobs[i] the part-1 job */
+                char tmp[4096];
+                strncpy(tmp, list->jobs[i].filepath, sizeof(tmp) - 1); tmp[sizeof(tmp) - 1] = '\0';
+                strncpy(list->jobs[i].filepath, list->jobs[j].filepath, sizeof(list->jobs[i].filepath) - 1);
+                strncpy(list->jobs[j].filepath, tmp, sizeof(list->jobs[j].filepath) - 1);
+
+                strncpy(tmp, list->jobs[i].source_dir, sizeof(tmp) - 1); tmp[sizeof(tmp) - 1] = '\0';
+                strncpy(list->jobs[i].source_dir, list->jobs[j].source_dir, sizeof(list->jobs[i].source_dir) - 1);
+                strncpy(list->jobs[j].source_dir, tmp, sizeof(list->jobs[j].source_dir) - 1);
+            }
+
+            /* Copy part 2 into the combined job */
+            strncpy(list->jobs[i].filepath2, list->jobs[j].filepath,
+                    sizeof(list->jobs[i].filepath2) - 1);
+            strncpy(list->jobs[i].source_dir2, list->jobs[j].source_dir,
+                    sizeof(list->jobs[i].source_dir2) - 1);
+
+            /* Use base name (without part indicator) for the title */
+            extract_movie_title(base_i, list->jobs[i].title, sizeof(list->jobs[i].title));
+
+            printf("  Multi-part BDR: \"%s\" (2 parts merged)\n", list->jobs[i].title);
+
+            /* Remove the consumed job by shifting */
+            for (int k = j; k < list->count - 1; k++)
+                list->jobs[k] = list->jobs[k + 1];
+            list->count--;
+            break;
+        }
+    }
+}
+
 /* Sort by mtime descending (newest first) */
 static int mtime_compare_desc(const void *a, const void *b) {
     const TranscodeJob *ja = (const TranscodeJob *)a;
@@ -1078,19 +1212,44 @@ static double probe_duration(const char *filepath) {
     return dur;
 }
 
-static int run_ffmpeg(const char *input, const char *output,
+static int run_ffmpeg(const char *input, const char *input2,
+                      const char *output,
                       AudioProbe *audio, VideoProbe *video,
                       SubtitleProbe *subs) {
     const char *argv[192];
     int argc = 0;
+    char concat_list_path[256] = {0};
 
     argv[argc++] = "ffmpeg";
     argv[argc++] = "-y";
     argv[argc++] = "-nostdin";
     argv[argc++] = "-progress";
     argv[argc++] = "pipe:2";
-    argv[argc++] = "-i";
-    argv[argc++] = input;
+
+    /* Multi-part: use concat demuxer to join parts seamlessly */
+    if (input2 && input2[0]) {
+        snprintf(concat_list_path, sizeof(concat_list_path),
+                 "/tmp/nixly_concat_%d.txt", (int)getpid());
+        FILE *cl = fopen(concat_list_path, "w");
+        if (!cl) {
+            fprintf(stderr, "  Error: cannot create concat list %s\n", concat_list_path);
+            return -1;
+        }
+        fprintf(cl, "file '%s'\nfile '%s'\n", input, input2);
+        fclose(cl);
+
+        argv[argc++] = "-f";
+        argv[argc++] = "concat";
+        argv[argc++] = "-safe";
+        argv[argc++] = "0";
+        argv[argc++] = "-i";
+        argv[argc++] = concat_list_path;
+
+        printf("  Concat: part1 + part2 via demuxer\n");
+    } else {
+        argv[argc++] = "-i";
+        argv[argc++] = input;
+    }
 
     /* Add external subtitle files as additional inputs */
     /* Input 0 = video, Input 1+ = external subtitles */
@@ -1157,16 +1316,19 @@ static int run_ffmpeg(const char *input, const char *output,
         argv[argc++] = "bt2020nc";
     }
 
-    /* Audio track 1: FLAC lossless, preserve source channel layout */
+    /* Audio track 1: Original (best) as FLAC lossless */
+    int audio_out_idx = 0;
     char flac_map[32];
     snprintf(flac_map, sizeof(flac_map), "0:a:%d",
              audio->best_audio_idx >= 0 ? audio->best_audio_idx : 0);
     argv[argc++] = "-map";
     argv[argc++] = flac_map;
-    argv[argc++] = "-c:a:0";
+
+    static char flac_codec_spec[32];
+    snprintf(flac_codec_spec, sizeof(flac_codec_spec), "-c:a:%d", audio_out_idx);
+    argv[argc++] = flac_codec_spec;
     argv[argc++] = "flac";
 
-    /* Name track based on source channel count */
     static char flac_title[64];
     int ch = audio->best_channels;
     if (ch >= 8)
@@ -1179,19 +1341,59 @@ static int run_ffmpeg(const char *input, const char *output,
         snprintf(flac_title, sizeof(flac_title), "title=Lossless 2.0");
     else
         snprintf(flac_title, sizeof(flac_title), "title=Lossless 1.0");
-    argv[argc++] = "-metadata:s:a:0";
+    static char flac_meta_spec[32];
+    snprintf(flac_meta_spec, sizeof(flac_meta_spec), "-metadata:s:a:%d", audio_out_idx);
+    argv[argc++] = flac_meta_spec;
     argv[argc++] = flac_title;
+    audio_out_idx++;
 
-    /* Audio track 2: Atmos (TrueHD) lossless passthrough if available */
-    char atmos_map[32];
+    /* Audio track 2: Norwegian audio as FLAC (if available and not same as original) */
+    static char nor_map[32];
+    static char nor_codec_spec[32];
+    static char nor_meta_spec[32];
+    static char nor_title[64];
+    if (audio->nor_audio_idx >= 0 && audio->nor_audio_idx != audio->best_audio_idx) {
+        snprintf(nor_map, sizeof(nor_map), "0:a:%d", audio->nor_audio_idx);
+        argv[argc++] = "-map";
+        argv[argc++] = nor_map;
+
+        snprintf(nor_codec_spec, sizeof(nor_codec_spec), "-c:a:%d", audio_out_idx);
+        argv[argc++] = nor_codec_spec;
+        argv[argc++] = "flac";
+
+        int nch = audio->nor_channels;
+        if (nch >= 8)
+            snprintf(nor_title, sizeof(nor_title), "title=Norsk 7.1");
+        else if (nch >= 6)
+            snprintf(nor_title, sizeof(nor_title), "title=Norsk 5.1");
+        else if (nch >= 3)
+            snprintf(nor_title, sizeof(nor_title), "title=Norsk %d.1", nch - 1);
+        else if (nch == 2)
+            snprintf(nor_title, sizeof(nor_title), "title=Norsk 2.0");
+        else
+            snprintf(nor_title, sizeof(nor_title), "title=Norsk 1.0");
+        snprintf(nor_meta_spec, sizeof(nor_meta_spec), "-metadata:s:a:%d", audio_out_idx);
+        argv[argc++] = nor_meta_spec;
+        argv[argc++] = nor_title;
+        audio_out_idx++;
+    }
+
+    /* Atmos (TrueHD) lossless passthrough if available */
+    static char atmos_map[32];
+    static char atmos_codec_spec[32];
+    static char atmos_meta_spec[32];
     if (audio->atmos_idx >= 0) {
         snprintf(atmos_map, sizeof(atmos_map), "0:a:%d", audio->atmos_idx);
         argv[argc++] = "-map";
         argv[argc++] = atmos_map;
-        argv[argc++] = "-c:a:1";
+
+        snprintf(atmos_codec_spec, sizeof(atmos_codec_spec), "-c:a:%d", audio_out_idx);
+        argv[argc++] = atmos_codec_spec;
         argv[argc++] = "copy";
-        argv[argc++] = "-metadata:s:a:1";
+        snprintf(atmos_meta_spec, sizeof(atmos_meta_spec), "-metadata:s:a:%d", audio_out_idx);
+        argv[argc++] = atmos_meta_spec;
         argv[argc++] = "title=Atmos Passthrough";
+        audio_out_idx++;
     }
 
     /* Subtitles: only English and Norwegian, with proper names
@@ -1343,6 +1545,10 @@ static int run_ffmpeg(const char *input, const char *output,
 
     tc.ffmpeg_pid = 0;
 
+    /* Clean up concat list temp file */
+    if (concat_list_path[0])
+        unlink(concat_list_path);
+
     if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
         return 0;
     }
@@ -1467,6 +1673,10 @@ static int check_and_delete_duplicate(TranscodeJob *job) {
                     if (job->source_dir[0]) {
                         rmdir_r(job->source_dir);
                         cleanup_source_dir(job->source_dir);
+                        if (job->source_dir2[0]) {
+                            rmdir_r(job->source_dir2);
+                            cleanup_source_dir(job->source_dir2);
+                        }
                     } else {
                         unlink(job->filepath);
                         cleanup_source_dir(job->filepath);
@@ -1511,6 +1721,10 @@ static int check_and_delete_duplicate(TranscodeJob *job) {
                     if (job->source_dir[0]) {
                         rmdir_r(job->source_dir);
                         cleanup_source_dir(job->source_dir);
+                        if (job->source_dir2[0]) {
+                            rmdir_r(job->source_dir2);
+                            cleanup_source_dir(job->source_dir2);
+                        }
                     } else {
                         unlink(job->filepath);
                         cleanup_source_dir(job->filepath);
@@ -1646,6 +1860,8 @@ static int process_single_job(TranscodeJob *job) {
     printf("Transcoder: [%d/%d] %s\n",
            tc.completed_jobs + 1, tc.total_jobs, job->title);
     printf("  Input:  %s\n", job->filepath);
+    if (job->filepath2[0])
+        printf("  Input2: %s (multi-part)\n", job->filepath2);
     printf("  Output: %s\n", mkv_path);
 
     if (!wait_for_stable_file(job->filepath)) {
@@ -1657,15 +1873,29 @@ static int process_single_job(TranscodeJob *job) {
         return 1;
     }
 
+    /* For multi-part, also wait for part 2 to be stable */
+    if (job->filepath2[0] && !wait_for_stable_file(job->filepath2)) {
+        printf("  Skipping: part 2 not stable or disappeared\n");
+        printf("========================================\n");
+        pthread_mutex_lock(&tc.lock);
+        tc.completed_jobs++;
+        pthread_mutex_unlock(&tc.lock);
+        return 1;
+    }
+
     double dur = probe_duration(job->filepath);
+    if (job->filepath2[0])
+        dur += probe_duration(job->filepath2);
     pthread_mutex_lock(&tc.lock);
     tc.duration_secs = dur;
     tc.progress_secs = 0;
     pthread_mutex_unlock(&tc.lock);
-    printf("  Duration: %.1f seconds\n", dur);
+    printf("  Duration: %.1f seconds%s\n", dur,
+           job->filepath2[0] ? " (combined)" : "");
 
-    printf("  Audio: best stream=%d (%s), atmos=%s\n",
+    printf("  Audio: best stream=%d (%s), norsk=%s, atmos=%s\n",
            audio.best_audio_idx, audio_layout,
+           audio.nor_audio_idx >= 0 ? "yes" : "no",
            audio.atmos_idx >= 0 ? "yes" : "no");
 
     if (video.is_hdr) {
@@ -1702,19 +1932,27 @@ static int process_single_job(TranscodeJob *job) {
         printf("  Subtitles: none (English/Norwegian)\n");
     }
 
-    int ret = run_ffmpeg(job->filepath, mkv_path, &audio, &video, &subs);
+    int ret = run_ffmpeg(job->filepath, job->filepath2, mkv_path, &audio, &video, &subs);
 
     if (ret == 0) {
         if (stat(mkv_path, &st) == 0 && st.st_size > 0) {
             printf("  Success! Output: %s\n", mkv_path);
 
             database_delete_by_path(job->filepath);
+            if (job->filepath2[0])
+                database_delete_by_path(job->filepath2);
 
             if (server_config.delete_after_conversion) {
                 if (job->source_dir[0]) {
                     rmdir_r(job->source_dir);
                     printf("  Deleted Blu-ray source: %s\n", job->source_dir);
                     cleanup_source_dir(job->source_dir);
+                    /* Also clean part 2 BDR directory */
+                    if (job->source_dir2[0]) {
+                        rmdir_r(job->source_dir2);
+                        printf("  Deleted Blu-ray source (part 2): %s\n", job->source_dir2);
+                        cleanup_source_dir(job->source_dir2);
+                    }
                 } else if (unlink(job->filepath) == 0) {
                     printf("  Deleted source: %s\n", job->filepath);
                     cleanup_source_dir(job->filepath);
@@ -1788,6 +2026,9 @@ static void *transcode_thread(void *arg) {
         JobList list = {0};
         scan_all_sources(&list);
 
+        /* Merge multi-part Blu-ray rips (p1+p2, part1+part2) into single jobs */
+        merge_multipart_bluray_jobs(&list);
+
         if (list.count == 0) {
             free(list.jobs);
             break;
@@ -1836,6 +2077,7 @@ static void *transcode_thread(void *arg) {
             /* Re-scan to get current state (source files are deleted after conversion) */
             JobList scan = {0};
             scan_all_sources(&scan);
+            merge_multipart_bluray_jobs(&scan);
 
             if (scan.count == 0) {
                 free(scan.jobs);
