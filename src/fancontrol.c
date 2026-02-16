@@ -178,6 +178,125 @@ fan_scan_ec(FanPopup *p)
 	p->device_count++;
 }
 
+static int
+msi_sysfs_read_fan_mode(void)
+{
+	char buf[32];
+
+	if (sysfs_read_str("/sys/devices/platform/msi-ec/fan_mode", buf, sizeof(buf)) != 0)
+		return 0;
+	if (strcmp(buf, "silent") == 0)
+		return 1;
+	if (strcmp(buf, "advanced") == 0)
+		return 2;
+	return 0; /* auto */
+}
+
+static int
+msi_sysfs_read_shift_mode(void)
+{
+	char buf[32];
+
+	if (sysfs_read_str("/sys/devices/platform/msi-ec/shift_mode", buf, sizeof(buf)) != 0)
+		return 0;
+	if (strcmp(buf, "comfort") == 0)
+		return 1;
+	if (strcmp(buf, "sport") == 0)
+		return 2;
+	if (strcmp(buf, "turbo") == 0)
+		return 3;
+	return 0; /* eco */
+}
+
+static int
+msi_sysfs_read_cooler_boost(void)
+{
+	char buf[32];
+
+	if (sysfs_read_str("/sys/devices/platform/msi-ec/cooler_boost", buf, sizeof(buf)) != 0)
+		return 0;
+	return strcmp(buf, "on") == 0;
+}
+
+static int
+msi_sysfs_write_str(const char *path, const char *val)
+{
+	FILE *f;
+
+	f = fopen(path, "w");
+	if (!f)
+		return -1;
+	if (fputs(val, f) == EOF) {
+		fclose(f);
+		return -1;
+	}
+	fclose(f);
+	return 0;
+}
+
+static void
+fan_scan_msi_sysfs(FanPopup *p)
+{
+	FanDevice *dev;
+	FanEntry *fe;
+	int val;
+
+	if (!p || !is_msi_laptop())
+		return;
+
+	/* Check if msi-ec sysfs exists */
+	val = sysfs_read_int("/sys/devices/platform/msi-ec/cpu/realtime_fan_speed");
+	if (val < 0)
+		return;
+
+	dev = &p->devices[p->device_count];
+	snprintf(dev->name, sizeof(dev->name), "msi-ec");
+	dev->type = FAN_DEV_MSI_EC;
+	dev->fan_count = 0;
+
+	/* CPU fan */
+	fe = &dev->fans[dev->fan_count];
+	snprintf(fe->label, sizeof(fe->label), "CPU Fan");
+	fe->msi_sysfs = 1;
+	snprintf(fe->msi_sysfs_dir, sizeof(fe->msi_sysfs_dir), "cpu");
+	fe->rpm = val * 100;
+	fe->has_pwm = 0;
+	val = sysfs_read_int("/sys/devices/platform/msi-ec/cpu/realtime_temperature");
+	fe->temp_mc = val > 0 ? val * 1000 : 0;
+	dev->fan_count++;
+	p->total_fans++;
+
+	/* GPU fan */
+	val = sysfs_read_int("/sys/devices/platform/msi-ec/gpu/realtime_fan_speed");
+	if (val >= 0) {
+		fe = &dev->fans[dev->fan_count];
+		snprintf(fe->label, sizeof(fe->label), "GPU Fan");
+		fe->msi_sysfs = 1;
+		snprintf(fe->msi_sysfs_dir, sizeof(fe->msi_sysfs_dir), "gpu");
+		fe->rpm = val * 100;
+		fe->has_pwm = 0;
+		val = sysfs_read_int("/sys/devices/platform/msi-ec/gpu/realtime_temperature");
+		fe->temp_mc = val > 0 ? val * 1000 : 0;
+		dev->fan_count++;
+		p->total_fans++;
+	}
+
+	p->device_count++;
+
+	/* Read system-wide MSI EC controls */
+	p->msi_ec = 1;
+	p->fan_mode = msi_sysfs_read_fan_mode();
+	p->shift_mode = msi_sysfs_read_shift_mode();
+	p->cooler_boost = msi_sysfs_read_cooler_boost();
+
+	/* Default to silent fan mode */
+	if (p->fan_mode != 1) {
+		if (msi_sysfs_write_str("/sys/devices/platform/msi-ec/fan_mode",
+					"silent") == 0)
+			p->fan_mode = 1;
+	}
+}
+
 static FanDevType
 classify_hwmon(const char *name)
 {
@@ -305,6 +424,8 @@ fan_scan_hwmon(FanPopup *p)
 	p->device_count = dev_idx;
 
 	if (p->total_fans == 0)
+		fan_scan_msi_sysfs(p);
+	if (p->total_fans == 0)
 		fan_scan_ec(p);
 }
 
@@ -316,11 +437,32 @@ fan_read_all(FanPopup *p)
 	if (!p)
 		return;
 
+	if (p->msi_ec) {
+		p->fan_mode = msi_sysfs_read_fan_mode();
+		p->shift_mode = msi_sysfs_read_shift_mode();
+		p->cooler_boost = msi_sysfs_read_cooler_boost();
+	}
+
 	for (int d = 0; d < p->device_count; d++) {
 		FanDevice *dev = &p->devices[d];
 
 		for (int f = 0; f < dev->fan_count; f++) {
 			FanEntry *fe = &dev->fans[f];
+
+			if (fe->msi_sysfs) {
+				int val;
+				snprintf(path, sizeof(path),
+						"/sys/devices/platform/msi-ec/%s/realtime_fan_speed",
+						fe->msi_sysfs_dir);
+				val = sysfs_read_int(path);
+				fe->rpm = val > 0 ? val * 100 : 0;
+				snprintf(path, sizeof(path),
+						"/sys/devices/platform/msi-ec/%s/realtime_temperature",
+						fe->msi_sysfs_dir);
+				val = sysfs_read_int(path);
+				fe->temp_mc = val > 0 ? val * 1000 : 0;
+				continue;
+			}
 
 			if (fe->ec_reg_rpm) {
 				int val = ec_read_reg(fe->ec_reg_rpm);
@@ -523,6 +665,24 @@ renderfanpopup(Monitor *m)
 	if (popup_w < 200)
 		popup_w = 200;
 
+	/* Ensure msi-ec control labels fit */
+	if (p->msi_ec) {
+		static const char *fm_labels[] = { "Fan: auto", "Fan: silent", "Fan: advanced" };
+		static const char *sm_labels[] = { "Perf: eco", "Perf: comfort", "Perf: sport", "Perf: turbo" };
+		int w;
+
+		for (int i = 0; i < 3; i++) {
+			w = status_text_width(fm_labels[i]) + 2 * padding;
+			if (w > popup_w) popup_w = w;
+		}
+		for (int i = 0; i < 4; i++) {
+			w = status_text_width(sm_labels[i]) + 2 * padding;
+			if (w > popup_w) popup_w = w;
+		}
+		w = status_text_width("Cooler Boost: ON") + 2 * padding;
+		if (w > popup_w) popup_w = w;
+	}
+
 	/* Calculate height */
 	y = padding;
 	for (int d = 0; d < p->device_count; d++) {
@@ -533,6 +693,11 @@ renderfanpopup(Monitor *m)
 			y += row_height + line_spacing; /* fan row */
 		}
 		y += line_spacing; /* group spacing */
+	}
+	if (p->msi_ec) {
+		/* separator + 3 control rows */
+		y += 4 + line_spacing;
+		y += 3 * (row_height + line_spacing);
 	}
 	y += padding - line_spacing; /* remove last spacing, add bottom padding */
 
@@ -651,6 +816,61 @@ renderfanpopup(Monitor *m)
 		y += line_spacing; /* group spacing */
 	}
 
+	/* MSI EC controls */
+	if (p->msi_ec) {
+		static const char *fan_mode_names[] = { "auto", "silent", "advanced" };
+		static const char *shift_mode_names[] = { "eco", "comfort", "sport", "turbo" };
+		static const float ctrl_col[] = {0.6f, 0.8f, 1.0f, 1.0f};
+		static const float boost_on_col[] = {1.0f, 0.4f, 0.3f, 1.0f};
+		static const float sep_col[] = {0.3f, 0.3f, 0.3f, 1.0f};
+		struct wlr_scene_tree *row;
+		StatusModule mod = {0};
+
+		/* Separator line */
+		drawrect(p->tree, padding, y, popup_w - 2 * padding, 1, sep_col);
+		y += 4 + line_spacing;
+
+		/* Fan mode */
+		p->fanmode_y = y;
+		p->fanmode_h = row_height;
+		snprintf(line, sizeof(line), "Fan: %s",
+				fan_mode_names[p->fan_mode % 3]);
+		row = wlr_scene_tree_create(p->tree);
+		if (row) {
+			wlr_scene_node_set_position(&row->node, padding, y);
+			mod.tree = row;
+			tray_render_label(&mod, line, 0, row_height, ctrl_col);
+		}
+		y += row_height + line_spacing;
+
+		/* Shift mode */
+		p->shiftmode_y = y;
+		p->shiftmode_h = row_height;
+		snprintf(line, sizeof(line), "Perf: %s",
+				shift_mode_names[p->shift_mode % 4]);
+		row = wlr_scene_tree_create(p->tree);
+		if (row) {
+			wlr_scene_node_set_position(&row->node, padding, y);
+			mod.tree = row;
+			tray_render_label(&mod, line, 0, row_height, ctrl_col);
+		}
+		y += row_height + line_spacing;
+
+		/* Cooler boost */
+		p->boost_y = y;
+		p->boost_h = row_height;
+		snprintf(line, sizeof(line), "Cooler Boost: %s",
+				p->cooler_boost ? "ON" : "OFF");
+		row = wlr_scene_tree_create(p->tree);
+		if (row) {
+			wlr_scene_node_set_position(&row->node, padding, y);
+			mod.tree = row;
+			tray_render_label(&mod, line, 0, row_height,
+					p->cooler_boost ? boost_on_col : ctrl_col);
+		}
+		y += row_height + line_spacing;
+	}
+
 	p->last_render_ms = now;
 }
 
@@ -731,6 +951,40 @@ fan_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 
 				flat++;
 			}
+		}
+	}
+
+	/* MSI EC controls */
+	if (p->msi_ec && button == BTN_LEFT) {
+		static const char *fan_modes[] = { "auto", "silent", "advanced" };
+		static const char *shift_modes[] = { "eco", "comfort", "sport", "turbo" };
+
+		if (rel_y >= p->fanmode_y && rel_y < p->fanmode_y + p->fanmode_h) {
+			int next = (p->fan_mode + 1) % 3;
+			if (msi_sysfs_write_str("/sys/devices/platform/msi-ec/fan_mode",
+						fan_modes[next]) == 0) {
+				p->fan_mode = next;
+				renderfanpopup(m);
+			}
+			return 1;
+		}
+		if (rel_y >= p->shiftmode_y && rel_y < p->shiftmode_y + p->shiftmode_h) {
+			int next = (p->shift_mode + 1) % 4;
+			if (msi_sysfs_write_str("/sys/devices/platform/msi-ec/shift_mode",
+						shift_modes[next]) == 0) {
+				p->shift_mode = next;
+				renderfanpopup(m);
+			}
+			return 1;
+		}
+		if (rel_y >= p->boost_y && rel_y < p->boost_y + p->boost_h) {
+			const char *val = p->cooler_boost ? "off" : "on";
+			if (msi_sysfs_write_str("/sys/devices/platform/msi-ec/cooler_boost",
+						val) == 0) {
+				p->cooler_boost = !p->cooler_boost;
+				renderfanpopup(m);
+			}
+			return 1;
 		}
 	}
 

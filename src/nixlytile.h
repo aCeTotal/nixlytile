@@ -541,6 +541,8 @@ typedef struct {
 	int temp_mc;
 	uint8_t ec_reg_rpm;
 	uint8_t ec_reg_temp;
+	int msi_sysfs; /* uses /sys/devices/platform/msi-ec/ */
+	char msi_sysfs_dir[16]; /* "cpu" or "gpu" */
 	int slider_x, slider_y;
 	int slider_w, slider_h;
 	int row_y, row_h;
@@ -568,6 +570,15 @@ typedef struct {
 	int device_count;
 	FanDevice devices[FAN_MAX_DEVICES];
 	int total_fans;
+	/* msi-ec system-wide controls */
+	int msi_ec;
+	int fan_mode;           /* 0=auto, 1=silent, 2=advanced */
+	int shift_mode;         /* 0=eco, 1=comfort, 2=sport, 3=turbo */
+	int cooler_boost;       /* 0=off, 1=on */
+	/* hit areas for msi-ec controls */
+	int fanmode_y, fanmode_h;
+	int shiftmode_y, shiftmode_h;
+	int boost_y, boost_h;
 } FanPopup;
 
 typedef struct TrayMenuEntry {
