@@ -74,4 +74,10 @@ int transcoder_get_completed_jobs(void);
 const char *transcoder_get_current_file(void);
 double transcoder_get_progress(void);
 
+/* Queue management (caller must free returned JSON strings) */
+char *transcoder_get_queue_json(void);
+int transcoder_skip_title(const char *title);
+int transcoder_unskip_title(const char *title);
+int transcoder_prioritize_title(const char *title);
+
 #endif /* TRANSCODER_H */

@@ -35,6 +35,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <sched.h>
 #include <sys/resource.h>
@@ -71,6 +72,32 @@ static struct {
     double duration_secs;   /* Total duration of current file */
     double progress_secs;   /* Current encoding position */
 } tc;
+
+/* Skip list: titles to skip during transcoding */
+#define MAX_SKIP 256
+static struct {
+    char titles[MAX_SKIP][256];
+    int count;
+    pthread_mutex_t lock;
+} skip_list = { .count = 0, .lock = PTHREAD_MUTEX_INITIALIZER };
+
+/* Priority override: title to process next */
+static struct {
+    char title[256];
+    pthread_mutex_t lock;
+} priority_override = { .title = {0}, .lock = PTHREAD_MUTEX_INITIALIZER };
+
+static int is_skipped(const char *title) {
+    pthread_mutex_lock(&skip_list.lock);
+    for (int i = 0; i < skip_list.count; i++) {
+        if (strcmp(skip_list.titles[i], title) == 0) {
+            pthread_mutex_unlock(&skip_list.lock);
+            return 1;
+        }
+    }
+    pthread_mutex_unlock(&skip_list.lock);
+    return 0;
+}
 
 /* ================================================================
  *  Helpers
@@ -1212,19 +1239,128 @@ static double probe_duration(const char *filepath) {
     return dur;
 }
 
+/* Probe duration of a partially-encoded tmp file using ffprobe.
+ * Returns duration in seconds, 0 on failure. */
+static double probe_tmp_duration(const char *filepath) {
+    int pipefd[2];
+    if (pipe(pipefd) < 0) return 0;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return 0;
+    }
+
+    if (pid == 0) {
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[1]);
+        /* Redirect stderr to /dev/null */
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
+        execlp("ffprobe", "ffprobe",
+               "-v", "error",
+               "-show_entries", "format=duration",
+               "-of", "default=nw=1:nk=1",
+               filepath, (char *)NULL);
+        _exit(127);
+    }
+
+    close(pipefd[1]);
+    char buf[64] = {0};
+    ssize_t n = read(pipefd[0], buf, sizeof(buf) - 1);
+    close(pipefd[0]);
+
+    int status;
+    waitpid(pid, &status, 0);
+
+    if (n <= 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        return 0;
+
+    return atof(buf);
+}
+
+/* Concatenate two files with stream copy using ffmpeg concat demuxer.
+ * Returns 0 on success, -1 on failure. */
+static int concat_copy(const char *part1, const char *part2, const char *output) {
+    char list_path[4096];
+    snprintf(list_path, sizeof(list_path), "%s.concat.txt", part1);
+
+    FILE *f = fopen(list_path, "w");
+    if (!f) {
+        fprintf(stderr, "  concat_copy: cannot create list file %s\n", list_path);
+        return -1;
+    }
+    fprintf(f, "file '%s'\nfile '%s'\n", part1, part2);
+    fclose(f);
+
+    printf("  Concat: %s + %s → %s\n", part1, part2, output);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        unlink(list_path);
+        return -1;
+    }
+
+    if (pid == 0) {
+        /* Redirect stderr to /dev/null to avoid noise */
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
+        execlp("ffmpeg", "ffmpeg",
+               "-y", "-nostdin",
+               "-f", "concat", "-safe", "0",
+               "-i", list_path,
+               "-c", "copy",
+               "-f", "matroska",
+               "-reserve_index_space", "524288",
+               "-cluster_size_limit", "2097152",
+               "-cluster_time_limit", "2000",
+               output, (char *)NULL);
+        _exit(127);
+    }
+
+    int status;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) { unlink(list_path); return -1; }
+    }
+
+    unlink(list_path);
+
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        /* Clean up parts */
+        unlink(part1);
+        unlink(part2);
+        return 0;
+    }
+
+    fprintf(stderr, "  concat_copy: ffmpeg exited with status %d\n",
+            WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+    return -1;
+}
+
 static int run_ffmpeg(const char *input, const char *input2,
-                      const char *output,
+                      const char *output, double ss_offset,
                       AudioProbe *audio, VideoProbe *video,
                       SubtitleProbe *subs) {
     const char *argv[192];
     int argc = 0;
     char concat_list_path[256] = {0};
+    char ss_buf[32];
 
     argv[argc++] = "ffmpeg";
     argv[argc++] = "-y";
     argv[argc++] = "-nostdin";
     argv[argc++] = "-progress";
     argv[argc++] = "pipe:2";
+
+    /* Seek offset for resume (placed before -i for input-level seeking) */
+    if (ss_offset > 0) {
+        snprintf(ss_buf, sizeof(ss_buf), "%.3f", ss_offset);
+        argv[argc++] = "-ss";
+        argv[argc++] = ss_buf;
+        printf("  Resume: seeking to %.1f seconds\n", ss_offset);
+    }
 
     /* Multi-part: use concat demuxer to join parts seamlessly */
     if (input2 && input2[0]) {
@@ -1932,7 +2068,58 @@ static int process_single_job(TranscodeJob *job) {
         printf("  Subtitles: none (English/Norwegian)\n");
     }
 
-    int ret = run_ffmpeg(job->filepath, job->filepath2, mkv_path, &audio, &video, &subs);
+    /* Build temp file path: sibling of nixly_ready_media */
+    char temp_dir[4096];
+    snprintf(temp_dir, sizeof(temp_dir), "%s/nixly_transcode_tmp",
+             server_config.converted_paths[disk_idx]);
+    mkdir_p(temp_dir);
+
+    const char *mkv_base = strrchr(mkv_path, '/');
+    mkv_base = mkv_base ? mkv_base + 1 : mkv_path;
+
+    char tmp_path[4096];
+    snprintf(tmp_path, sizeof(tmp_path), "%s/%s.tmp", temp_dir, mkv_base);
+
+    char resume_path[4096];
+    snprintf(resume_path, sizeof(resume_path), "%s.resume", tmp_path);
+
+    int ret;
+
+    /* Check for existing partial encode (resume support) */
+    if (stat(tmp_path, &st) == 0 && st.st_size > 0) {
+        double tmp_dur = probe_tmp_duration(tmp_path);
+        printf("  Resume: found partial encode (%.1f seconds)\n", tmp_dur);
+
+        if (tmp_dur > 30.0) {
+            /* Resume: encode remainder to .tmp.resume, then concat */
+            printf("  Resume: encoding from %.1f seconds onward\n", tmp_dur);
+            ret = run_ffmpeg(job->filepath, job->filepath2, resume_path,
+                             tmp_dur, &audio, &video, &subs);
+
+            if (ret == 0) {
+                /* Concat .tmp + .tmp.resume → final mkv_path */
+                ret = concat_copy(tmp_path, resume_path, mkv_path);
+            } else {
+                /* FFmpeg failed on resume part — keep .tmp for next attempt */
+                fprintf(stderr, "  Error: FFmpeg failed during resume for %s\n", job->title);
+                unlink(resume_path);
+            }
+        } else {
+            /* Too short to resume — start fresh */
+            printf("  Resume: partial too short (%.1fs), restarting\n", tmp_dur);
+            unlink(tmp_path);
+            ret = run_ffmpeg(job->filepath, job->filepath2, tmp_path,
+                             0, &audio, &video, &subs);
+            if (ret == 0)
+                rename(tmp_path, mkv_path);
+        }
+    } else {
+        /* No partial — encode from scratch to temp */
+        ret = run_ffmpeg(job->filepath, job->filepath2, tmp_path,
+                         0, &audio, &video, &subs);
+        if (ret == 0)
+            rename(tmp_path, mkv_path);
+    }
 
     if (ret == 0) {
         if (stat(mkv_path, &st) == 0 && st.st_size > 0) {
@@ -1977,9 +2164,10 @@ static int process_single_job(TranscodeJob *job) {
             fprintf(stderr, "  Error: MKV missing after conversion, keeping source\n");
             ret = -1;
         }
-    } else {
+    } else if (ret != 0) {
+        /* FFmpeg error — keep .tmp for potential resume, only clean .resume */
         fprintf(stderr, "  Error: FFmpeg failed for %s, keeping source\n", job->title);
-        unlink(mkv_path);
+        unlink(resume_path);
     }
 
     printf("========================================\n");
@@ -2017,6 +2205,13 @@ static void *transcode_thread(void *arg) {
     printf("\n");
     printf("========================================\n");
     printf("  Transcoder starting (x265 CRF 14, MKV)\n");
+    for (int i = 0; i < server_config.converted_path_count; i++) {
+        char td[4096];
+        snprintf(td, sizeof(td), "%s/nixly_transcode_tmp",
+                 server_config.converted_paths[i]);
+        mkdir_p(td);
+        printf("  Temp dir: %s\n", td);
+    }
     printf("========================================\n");
 
     disk_map_reset();
@@ -2037,14 +2232,36 @@ static void *transcode_thread(void *arg) {
         /* Sort newest first */
         qsort(list.jobs, list.count, sizeof(TranscodeJob), mtime_compare_desc);
 
-        /* Find newest TMDB-verified job */
+        /* Check for priority override */
         TranscodeJob *chosen = NULL;
-        for (int i = 0; i < list.count; i++) {
-            if (verify_tmdb_single(&list.jobs[i])) {
-                chosen = &list.jobs[i];
-                break;
+        pthread_mutex_lock(&priority_override.lock);
+        if (priority_override.title[0]) {
+            for (int i = 0; i < list.count; i++) {
+                if (strcmp(list.jobs[i].title, priority_override.title) == 0) {
+                    if (verify_tmdb_single(&list.jobs[i])) {
+                        chosen = &list.jobs[i];
+                        printf("Transcoder: Priority override → \"%s\"\n", chosen->title);
+                    }
+                    break;
+                }
             }
-            printf("  TMDB: \"%s\" not found, skipping\n", list.jobs[i].title);
+            priority_override.title[0] = '\0';
+        }
+        pthread_mutex_unlock(&priority_override.lock);
+
+        /* Find newest TMDB-verified, non-skipped job */
+        if (!chosen) {
+            for (int i = 0; i < list.count; i++) {
+                if (is_skipped(list.jobs[i].title)) {
+                    printf("  Skipped (user): \"%s\"\n", list.jobs[i].title);
+                    continue;
+                }
+                if (verify_tmdb_single(&list.jobs[i])) {
+                    chosen = &list.jobs[i];
+                    break;
+                }
+                printf("  TMDB: \"%s\" not found, skipping\n", list.jobs[i].title);
+            }
         }
 
         if (!chosen) {
@@ -2112,11 +2329,12 @@ static void *transcode_thread(void *arg) {
                 break; /* only handle one interrupt per episode */
             }
 
-            /* Now find the next episode of our series */
+            /* Now find the next episode of our series (skip user-skipped) */
             JobList episodes = {0};
             for (int i = 0; i < scan.count; i++) {
                 if (scan.jobs[i].type == 2 &&
-                    strcasecmp(scan.jobs[i].show_name, series_name) == 0)
+                    strcasecmp(scan.jobs[i].show_name, series_name) == 0 &&
+                    !is_skipped(scan.jobs[i].title))
                     joblist_add(&episodes, &scan.jobs[i]);
             }
 
@@ -2241,4 +2459,111 @@ double transcoder_get_progress(void) {
     if (pct > 100.0) pct = 100.0;
     if (pct < 0.0) pct = 0.0;
     return pct;
+}
+
+/* Escape a string for JSON output (handles \, ", control chars) */
+static void json_escape(const char *src, char *dst, size_t dst_size) {
+    size_t j = 0;
+    for (size_t i = 0; src[i] && j + 6 < dst_size; i++) {
+        switch (src[i]) {
+            case '"':  dst[j++] = '\\'; dst[j++] = '"';  break;
+            case '\\': dst[j++] = '\\'; dst[j++] = '\\'; break;
+            case '\n': dst[j++] = '\\'; dst[j++] = 'n';  break;
+            case '\r': dst[j++] = '\\'; dst[j++] = 'r';  break;
+            case '\t': dst[j++] = '\\'; dst[j++] = 't';  break;
+            default:   dst[j++] = src[i]; break;
+        }
+    }
+    dst[j] = '\0';
+}
+
+char *transcoder_get_queue_json(void) {
+    JobList list = {0};
+    scan_all_sources(&list);
+    merge_multipart_bluray_jobs(&list);
+    qsort(list.jobs, list.count, sizeof(TranscodeJob), mtime_compare_desc);
+
+    /* Allocate generously: ~512 bytes per job */
+    size_t buf_size = 512 + (size_t)list.count * 512;
+    char *json = malloc(buf_size);
+    if (!json) { free(list.jobs); return NULL; }
+
+    int pos = 0;
+    pos += snprintf(json + pos, buf_size - pos, "[");
+
+    int first = 1;
+    for (int i = 0; i < list.count; i++) {
+        TranscodeJob *j = &list.jobs[i];
+        char esc_title[512], esc_show[512], esc_path[8192];
+        json_escape(j->title, esc_title, sizeof(esc_title));
+        json_escape(j->show_name, esc_show, sizeof(esc_show));
+        json_escape(j->filepath, esc_path, sizeof(esc_path));
+
+        int skipped = is_skipped(j->title);
+        int is_current = (tc.state == TRANSCODE_RUNNING &&
+                          strcmp(j->title, tc.current_file) == 0);
+
+        if (!first) pos += snprintf(json + pos, buf_size - pos, ",");
+        first = 0;
+
+        pos += snprintf(json + pos, buf_size - pos,
+            "{\"title\":\"%s\",\"type\":%d,\"show\":\"%s\","
+            "\"season\":%d,\"episode\":%d,\"year\":%d,"
+            "\"path\":\"%s\",\"skipped\":%s,\"current\":%s}",
+            esc_title, j->type, esc_show,
+            j->season, j->episode, j->year,
+            esc_path, skipped ? "true" : "false",
+            is_current ? "true" : "false");
+    }
+
+    pos += snprintf(json + pos, buf_size - pos, "]");
+    free(list.jobs);
+    return json;
+}
+
+int transcoder_skip_title(const char *title) {
+    pthread_mutex_lock(&skip_list.lock);
+    /* Check if already skipped */
+    for (int i = 0; i < skip_list.count; i++) {
+        if (strcmp(skip_list.titles[i], title) == 0) {
+            pthread_mutex_unlock(&skip_list.lock);
+            return 0;
+        }
+    }
+    if (skip_list.count >= MAX_SKIP) {
+        pthread_mutex_unlock(&skip_list.lock);
+        return -1;
+    }
+    strncpy(skip_list.titles[skip_list.count], title, 255);
+    skip_list.titles[skip_list.count][255] = '\0';
+    skip_list.count++;
+    printf("Transcoder: Skip added: \"%s\"\n", title);
+    pthread_mutex_unlock(&skip_list.lock);
+    return 0;
+}
+
+int transcoder_unskip_title(const char *title) {
+    pthread_mutex_lock(&skip_list.lock);
+    for (int i = 0; i < skip_list.count; i++) {
+        if (strcmp(skip_list.titles[i], title) == 0) {
+            /* Shift remaining entries down */
+            memmove(&skip_list.titles[i], &skip_list.titles[i + 1],
+                    (skip_list.count - i - 1) * sizeof(skip_list.titles[0]));
+            skip_list.count--;
+            printf("Transcoder: Skip removed: \"%s\"\n", title);
+            pthread_mutex_unlock(&skip_list.lock);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&skip_list.lock);
+    return -1;
+}
+
+int transcoder_prioritize_title(const char *title) {
+    pthread_mutex_lock(&priority_override.lock);
+    strncpy(priority_override.title, title, sizeof(priority_override.title) - 1);
+    priority_override.title[sizeof(priority_override.title) - 1] = '\0';
+    printf("Transcoder: Priority set: \"%s\"\n", title);
+    pthread_mutex_unlock(&priority_override.lock);
+    return 0;
 }

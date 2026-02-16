@@ -401,6 +401,23 @@ static void stream_file(int fd, const char *filepath, const char *range_header) 
     close(file_fd);
 }
 
+/* URL-decode a percent-encoded string (e.g. %20 → space, + → space) */
+static void url_decode(const char *src, char *dst, size_t dst_size) {
+    size_t j = 0;
+    for (size_t i = 0; src[i] && j + 1 < dst_size; i++) {
+        if (src[i] == '%' && src[i+1] && src[i+2]) {
+            char hex[3] = { src[i+1], src[i+2], 0 };
+            dst[j++] = (char)strtol(hex, NULL, 16);
+            i += 2;
+        } else if (src[i] == '+') {
+            dst[j++] = ' ';
+        } else {
+            dst[j++] = src[i];
+        }
+    }
+    dst[j] = '\0';
+}
+
 /* Handle API requests */
 static void handle_api(int fd, const char *path) {
     if (strcmp(path, "/api/status") == 0) {
@@ -569,6 +586,36 @@ static void handle_api(int fd, const char *path) {
         send_response(fd, 200, "OK", "application/json",
                      "{\"status\":\"stopped\"}", 20);
     }
+    else if (strcmp(path, "/api/transcode/queue") == 0) {
+        char *json = transcoder_get_queue_json();
+        if (json) {
+            send_response(fd, 200, "OK", "application/json", json, strlen(json));
+            free(json);
+        } else {
+            send_error(fd, 500, "Queue error");
+        }
+    }
+    else if (strncmp(path, "/api/transcode/skip?title=", 26) == 0) {
+        char title[256];
+        url_decode(path + 26, title, sizeof(title));
+        transcoder_skip_title(title);
+        send_response(fd, 200, "OK", "application/json",
+                     "{\"status\":\"skipped\"}", 20);
+    }
+    else if (strncmp(path, "/api/transcode/unskip?title=", 28) == 0) {
+        char title[256];
+        url_decode(path + 28, title, sizeof(title));
+        transcoder_unskip_title(title);
+        send_response(fd, 200, "OK", "application/json",
+                     "{\"status\":\"unskipped\"}", 22);
+    }
+    else if (strncmp(path, "/api/transcode/prioritize?title=", 32) == 0) {
+        char title[256];
+        url_decode(path + 32, title, sizeof(title));
+        transcoder_prioritize_title(title);
+        send_response(fd, 200, "OK", "application/json",
+                     "{\"status\":\"prioritized\"}", 24);
+    }
     else if (strncmp(path, "/api/media/", 11) == 0) {
         /* Get media info by ID */
         int id = atoi(path + 11);
@@ -695,6 +742,131 @@ static void handle_request(int fd, const char *request) {
                  server_config.cache_dir, path + 7);
         serve_file(fd, filepath);
     }
+    else if (strcmp(path, "/status") == 0) {
+        const char *html =
+"<!DOCTYPE html>\n"
+"<html lang=\"en\">\n"
+"<head>\n"
+"<meta charset=\"UTF-8\">\n"
+"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
+"<title>Nixly Transcoder</title>\n"
+"<style>\n"
+"*{margin:0;padding:0;box-sizing:border-box}\n"
+"body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;\n"
+"  background:#0d1117;color:#c9d1d9;min-height:100vh;padding:20px}\n"
+"h1{color:#58a6ff;margin-bottom:8px;font-size:1.5em}\n"
+".status-bar{background:#161b22;border:1px solid #30363d;border-radius:8px;\n"
+"  padding:16px;margin-bottom:20px}\n"
+".status-bar .state{font-size:1.1em;font-weight:600}\n"
+".state.running{color:#3fb950}.state.idle{color:#8b949e}.state.stopped{color:#f85149}\n"
+".progress-wrap{background:#21262d;border-radius:4px;height:24px;margin:10px 0;\n"
+"  overflow:hidden;position:relative}\n"
+".progress-bar{background:linear-gradient(90deg,#1f6feb,#58a6ff);height:100%;\n"
+"  transition:width .5s ease;border-radius:4px}\n"
+".progress-text{position:absolute;top:0;left:0;right:0;text-align:center;\n"
+"  line-height:24px;font-size:12px;color:#fff;font-weight:600}\n"
+".current{color:#8b949e;font-size:0.9em;margin-top:4px}\n"
+".controls{margin:12px 0;display:flex;gap:8px;flex-wrap:wrap}\n"
+".btn{padding:8px 16px;border:1px solid #30363d;border-radius:6px;\n"
+"  background:#21262d;color:#c9d1d9;cursor:pointer;font-size:13px;\n"
+"  transition:background .15s}\n"
+".btn:hover{background:#30363d}\n"
+".btn.green{border-color:#238636;color:#3fb950}\n"
+".btn.green:hover{background:#238636;color:#fff}\n"
+".btn.red{border-color:#da3633;color:#f85149}\n"
+".btn.red:hover{background:#da3633;color:#fff}\n"
+".btn.blue{border-color:#1f6feb;color:#58a6ff}\n"
+".btn.blue:hover{background:#1f6feb;color:#fff}\n"
+".queue{list-style:none}\n"
+".queue li{display:flex;align-items:center;gap:10px;padding:10px 12px;\n"
+"  background:#161b22;border:1px solid #30363d;border-radius:6px;\n"
+"  margin-bottom:6px;transition:opacity .2s}\n"
+".queue li.skipped{opacity:.4;text-decoration:line-through}\n"
+".queue li.active{border-color:#1f6feb;background:#161b22}\n"
+".queue li .info{flex:1;min-width:0}\n"
+".queue li .title{font-weight:600;color:#c9d1d9;white-space:nowrap;\n"
+"  overflow:hidden;text-overflow:ellipsis}\n"
+".queue li .meta{font-size:0.8em;color:#8b949e}\n"
+".queue li .actions{display:flex;gap:6px;flex-shrink:0}\n"
+".queue li .actions .btn{padding:4px 10px;font-size:12px}\n"
+".tag{display:inline-block;padding:2px 6px;border-radius:3px;font-size:11px;\n"
+"  font-weight:600;margin-right:4px}\n"
+".tag.movie{background:#1f3d1f;color:#3fb950}\n"
+".tag.tv{background:#1f2d4f;color:#58a6ff}\n"
+".counter{color:#8b949e;font-size:0.9em;margin-bottom:10px}\n"
+"</style>\n"
+"</head>\n"
+"<body>\n"
+"<h1>Nixly Transcoder</h1>\n"
+"\n"
+"<div class=\"status-bar\">\n"
+"  <div><span class=\"state\" id=\"state\">Loading...</span></div>\n"
+"  <div class=\"progress-wrap\"><div class=\"progress-bar\" id=\"pbar\"></div>\n"
+"    <div class=\"progress-text\" id=\"ptxt\"></div></div>\n"
+"  <div class=\"current\" id=\"current\"></div>\n"
+"  <div class=\"controls\">\n"
+"    <button class=\"btn green\" onclick=\"apiCall('/api/transcode/start')\">Start</button>\n"
+"    <button class=\"btn red\" onclick=\"apiCall('/api/transcode/stop')\">Stop</button>\n"
+"  </div>\n"
+"</div>\n"
+"\n"
+"<div class=\"counter\" id=\"counter\"></div>\n"
+"<ul class=\"queue\" id=\"queue\"></ul>\n"
+"\n"
+"<script>\n"
+"function apiCall(url){fetch(url).then(()=>setTimeout(refresh,300))}\n"
+"function esc(s){var d=document.createElement('div');d.textContent=s;\n"
+"  return d.innerHTML.replace(/\"/g,'&quot;')}\n"
+"\n"
+"document.getElementById('queue').addEventListener('click',function(e){\n"
+"  var btn=e.target.closest('button[data-action]');\n"
+"  if(!btn)return;\n"
+"  var t=btn.getAttribute('data-title');\n"
+"  var a=btn.getAttribute('data-action');\n"
+"  apiCall('/api/transcode/'+a+'?title='+encodeURIComponent(t));\n"
+"});\n"
+"\n"
+"function refresh(){\n"
+"  fetch('/api/transcode/status').then(function(r){return r.json()}).then(function(d){\n"
+"    var s=document.getElementById('state');\n"
+"    s.textContent=d.state.charAt(0).toUpperCase()+d.state.slice(1);\n"
+"    s.className='state '+d.state;\n"
+"    document.getElementById('pbar').style.width=d.percent+'%';\n"
+"    document.getElementById('ptxt').textContent=\n"
+"      d.state==='running'?d.percent.toFixed(1)+'%':'';\n"
+"    document.getElementById('current').textContent=\n"
+"      d.current?'Encoding: '+d.current:'';\n"
+"  });\n"
+"  fetch('/api/transcode/queue').then(function(r){return r.json()}).then(function(jobs){\n"
+"    var ul=document.getElementById('queue');\n"
+"    document.getElementById('counter').textContent=jobs.length+' files in queue';\n"
+"    ul.innerHTML='';\n"
+"    jobs.forEach(function(j){\n"
+"      var li=document.createElement('li');\n"
+"      if(j.skipped)li.className='skipped';\n"
+"      if(j.current)li.className='active';\n"
+"      var type=j.type===2?'tv':'movie';\n"
+"      var tag='<span class=\"tag '+type+'\">'+(j.type===2?'TV':'Movie')+'</span>';\n"
+"      var meta=j.type===2?'S'+String(j.season).padStart(2,'0')+'E'+\n"
+"        String(j.episode).padStart(2,'0'):'';if(j.year)meta+=' ('+j.year+')';\n"
+"      var t=esc(j.title);\n"
+"      var skipBtn=j.skipped?\n"
+"        '<button class=\"btn\" data-action=\"unskip\" data-title=\"'+t+'\">Unskip</button>':\n"
+"        '<button class=\"btn red\" data-action=\"skip\" data-title=\"'+t+'\">Skip</button>';\n"
+"      li.innerHTML='<div class=\"info\"><div class=\"title\">'+tag+' '+t+\n"
+"        '</div><div class=\"meta\">'+meta+'</div></div>'+\n"
+"        '<div class=\"actions\">'+skipBtn+\n"
+"        '<button class=\"btn blue\" data-action=\"prioritize\" data-title=\"'+t+\n"
+"        '\">Prioritize!</button></div>';\n"
+"      ul.appendChild(li);\n"
+"    });\n"
+"  });\n"
+"}\n"
+"refresh();setInterval(refresh,3000);\n"
+"</script>\n"
+"</body></html>\n";
+        send_response(fd, 200, "OK", "text/html", html, strlen(html));
+    }
     else if (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0) {
         const char *html =
             "<!DOCTYPE html><html><head><title>Nixly Media Server</title></head>"
@@ -709,6 +881,7 @@ static void handle_request(int fd, const char *request) {
             "<li>/api/tmdb/refresh - Fetch missing TMDB data</li>"
             "<li>/stream/{id} - Stream media file</li>"
             "<li>/image/{filename} - Cached poster/backdrop</li>"
+            "<li><a href='/status'>/status</a> - Transcoder status &amp; queue</li>"
             "</ul></body></html>";
         send_response(fd, 200, "OK", "text/html", html, strlen(html));
     }
