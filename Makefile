@@ -28,7 +28,7 @@ VP_OBJS = videoplayer.o videoplayer_decode.o videoplayer_render.o videoplayer_au
 # Compositor module object files
 MOD_OBJS = globals.o client.o layout.o btrtile.o input.o gamepad.o output.o \
            statusbar.o tray.o network.o launcher.o nixpkgs.o gaming.o media.o \
-           popup.o bluetooth.o config.o htpc.o draw.o layer.o
+           popup.o bluetooth.o config.o htpc.o draw.o layer.o fancontrol.o
 
 PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstable-v1-protocol.h \
              $(SRC)/wlr-layer-shell-unstable-v1-protocol.h $(SRC)/wlr-output-power-management-unstable-v1-protocol.h \
@@ -84,6 +84,8 @@ htpc.o: $(SRC)/htpc.c $(SRC)/nixlytile.h $(SRC)/client.h
 draw.o: $(SRC)/draw.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 layer.o: $(SRC)/layer.c $(SRC)/nixlytile.h $(SRC)/client.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+fancontrol.o: $(SRC)/fancontrol.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 
 # Video player modules

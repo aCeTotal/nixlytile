@@ -109,6 +109,7 @@ StatusRefreshTask status_tasks[STATUS_TASKS_COUNT] = {
 	{ refreshstatusbattery, 0 },
 	{ refreshstatusnet, 0 },
 	{ refreshstatusicons, 0 },
+	{ refreshstatusfan, 0 },
 };
 int status_rng_seeded;
 
@@ -432,6 +433,15 @@ int discord_icon_w;
 int discord_icon_h;
 struct wlr_buffer *discord_icon_buf;
 int discord_running;
+char fan_icon_path[PATH_MAX] = "images/svg/fan.svg";
+char fan_icon_loaded_path[PATH_MAX];
+int fan_icon_loaded_h;
+int fan_icon_w;
+int fan_icon_h;
+struct wlr_buffer *fan_icon_buf;
+char fan_text[32] = "--";
+char last_fan_render[32];
+int last_fan_h;
 unsigned long long net_prev_rx;
 unsigned long long net_prev_tx;
 struct timespec net_prev_ts;

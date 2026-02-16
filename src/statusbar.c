@@ -481,6 +481,7 @@ DEFINE_ICON_FUNCS(ram, "ram")
 DEFINE_ICON_FUNCS(volume, "volume")
 DEFINE_ICON_FUNCS(battery, "battery")
 DEFINE_ICON_FUNCS(mic, "mic")
+DEFINE_ICON_FUNCS(fan, "fan")
 
 #undef DEFINE_ICON_FUNCS
 
@@ -3585,6 +3586,7 @@ positionstatusmodules(Monitor *m)
 		offsetof(StatusBar, steam),
 		offsetof(StatusBar, discord),
 		offsetof(StatusBar, cpu),
+		offsetof(StatusBar, fan),
 		offsetof(StatusBar, net),
 		offsetof(StatusBar, battery),
 		offsetof(StatusBar, light),
@@ -3608,6 +3610,7 @@ positionstatusmodules(Monitor *m)
 		offsetof(StatusBar, clock),
 		offsetof(StatusBar, ram),
 		offsetof(StatusBar, cpu),
+		offsetof(StatusBar, fan),
 		offsetof(StatusBar, mic),
 		offsetof(StatusBar, volume),
 		offsetof(StatusBar, light),
@@ -3696,6 +3699,22 @@ positionstatusmodules(Monitor *m)
 			wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
 			m->statusbar.cpu_popup.visible = 0;
 			m->statusbar.cpu_popup.refresh_data = 0;
+		}
+	}
+	if (m->statusbar.fan_popup.tree) {
+		if (m->statusbar.fan.width > 0 && m->statusbar.area.height > 0) {
+			int fan_popup_x = m->statusbar.fan.x;
+			int fan_max_x = m->statusbar.area.width - m->statusbar.fan_popup.width;
+			if (fan_max_x < 0) fan_max_x = 0;
+			if (fan_popup_x > fan_max_x) fan_popup_x = fan_max_x;
+			if (fan_popup_x < 0) fan_popup_x = 0;
+			wlr_scene_node_set_position(&m->statusbar.fan_popup.tree->node,
+					fan_popup_x, m->statusbar.area.height);
+			if (!m->statusbar.fan_popup.visible)
+				wlr_scene_node_set_enabled(&m->statusbar.fan_popup.tree->node, 0);
+		} else {
+			wlr_scene_node_set_enabled(&m->statusbar.fan_popup.tree->node, 0);
+			m->statusbar.fan_popup.visible = 0;
 		}
 	}
 	if (m->statusbar.net_popup.tree) {
@@ -4398,6 +4417,58 @@ refreshstatusicons(void)
 }
 
 void
+refreshstatusfan(void)
+{
+	Monitor *m;
+	int barh;
+	int max_rpm = 0;
+
+	/* Read all fan data and find max RPM for bar display */
+	wl_list_for_each(m, &mons, link) {
+		if (!m->showbar || !m->statusbar.fan.tree)
+			continue;
+
+		FanPopup *p = &m->statusbar.fan_popup;
+
+		/* Scan on first call */
+		if (p->device_count == 0)
+			fan_scan_hwmon(p);
+
+		fan_read_all(p);
+
+		/* Find highest RPM */
+		for (int d = 0; d < p->device_count; d++) {
+			for (int f = 0; f < p->devices[d].fan_count; f++) {
+				if (p->devices[d].fans[f].rpm > max_rpm)
+					max_rpm = p->devices[d].fans[f].rpm;
+			}
+		}
+
+		if (p->total_fans == 0) {
+			clearstatusmodule(&m->statusbar.fan);
+			m->statusbar.fan.width = 0;
+			wlr_scene_node_set_enabled(&m->statusbar.fan.tree->node, 0);
+			continue;
+		}
+
+		if (max_rpm > 0)
+			snprintf(fan_text, sizeof(fan_text), "%d", max_rpm);
+		else
+			snprintf(fan_text, sizeof(fan_text), "--");
+
+		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+		if (status_should_render(&m->statusbar.fan, barh, fan_text,
+					last_fan_render, sizeof(last_fan_render), &last_fan_h)
+				|| m->statusbar.fan_popup.visible) {
+			renderfan(&m->statusbar.fan, barh, fan_text);
+			if (m->statusbar.fan_popup.visible)
+				renderfanpopup(m);
+			positionstatusmodules(m);
+		}
+	}
+}
+
+void
 refreshstatustags(void)
 {
 	Monitor *m;
@@ -4465,6 +4536,7 @@ initial_status_refresh(void)
 	refreshstatusnet();
 	request_public_ip_async(); /* prefetch public IP in background */
 	refreshstatusicons();
+	refreshstatusfan();
 	refreshstatustags();
 }
 
@@ -5069,6 +5141,9 @@ initstatusbar(Monitor *m)
 		m->statusbar.cpu.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.cpu.tree)
 			m->statusbar.cpu.bg = wlr_scene_tree_create(m->statusbar.cpu.tree);
+	m->statusbar.fan.tree = wlr_scene_tree_create(m->statusbar.tree);
+	if (m->statusbar.fan.tree)
+		m->statusbar.fan.bg = wlr_scene_tree_create(m->statusbar.fan.tree);
 	m->statusbar.net.tree = wlr_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.net.tree) {
 		m->statusbar.net.bg = wlr_scene_tree_create(m->statusbar.net.tree);
@@ -5100,6 +5175,16 @@ initstatusbar(Monitor *m)
 		m->statusbar.cpu_popup.last_fetch_ms = 0;
 		m->statusbar.cpu_popup.suppress_refresh_until_ms = 0;
 		wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
+	}
+	m->statusbar.fan_popup.tree = wlr_scene_tree_create(m->statusbar.tree);
+	if (m->statusbar.fan_popup.tree) {
+		m->statusbar.fan_popup.bg = wlr_scene_tree_create(m->statusbar.fan_popup.tree);
+		m->statusbar.fan_popup.visible = 0;
+		m->statusbar.fan_popup.dragging = 0;
+		m->statusbar.fan_popup.last_fetch_ms = 0;
+		m->statusbar.fan_popup.last_render_ms = 0;
+		m->statusbar.fan_popup.hover_start_ms = 0;
+		wlr_scene_node_set_enabled(&m->statusbar.fan_popup.tree->node, 0);
 	}
 	m->statusbar.ram_popup.tree = wlr_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.ram_popup.tree) {

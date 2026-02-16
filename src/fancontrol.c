@@ -1,0 +1,739 @@
+#include "nixlytile.h"
+#include "client.h"
+
+static int
+sysfs_read_int(const char *path)
+{
+	FILE *f;
+	int val = -1;
+
+	f = fopen(path, "r");
+	if (!f)
+		return -1;
+	if (fscanf(f, "%d", &val) != 1)
+		val = -1;
+	fclose(f);
+	return val;
+}
+
+static int
+sysfs_read_str(const char *path, char *buf, size_t len)
+{
+	FILE *f;
+	char *nl;
+
+	if (!buf || len == 0)
+		return -1;
+	buf[0] = '\0';
+	f = fopen(path, "r");
+	if (!f)
+		return -1;
+	if (!fgets(buf, (int)len, f)) {
+		fclose(f);
+		return -1;
+	}
+	fclose(f);
+	nl = strchr(buf, '\n');
+	if (nl)
+		*nl = '\0';
+	return 0;
+}
+
+static int
+sysfs_write_int(const char *path, int val)
+{
+	FILE *f;
+
+	f = fopen(path, "w");
+	if (!f)
+		return -1;
+	if (fprintf(f, "%d\n", val) < 0) {
+		fclose(f);
+		return -1;
+	}
+	fclose(f);
+	return 0;
+}
+
+static FanDevType
+classify_hwmon(const char *name)
+{
+	if (!name || !*name)
+		return FAN_DEV_UNKNOWN;
+	if (strstr(name, "coretemp") || strstr(name, "k10temp"))
+		return FAN_DEV_CPU;
+	if (strstr(name, "it87") || strstr(name, "nct6") ||
+			strstr(name, "nuvoton") || strstr(name, "w83"))
+		return FAN_DEV_CASE;
+	if (strstr(name, "amdgpu"))
+		return FAN_DEV_GPU_AMD;
+	if (strstr(name, "nvidia") || strstr(name, "nouveau"))
+		return FAN_DEV_GPU_NVIDIA;
+	if (strstr(name, "msi"))
+		return FAN_DEV_MSI_EC;
+	return FAN_DEV_UNKNOWN;
+}
+
+static const char *
+fan_dev_type_label(FanDevType type)
+{
+	switch (type) {
+	case FAN_DEV_CPU:          return "CPU";
+	case FAN_DEV_CASE:         return "Motherboard";
+	case FAN_DEV_GPU_AMD:      return "GPU AMD";
+	case FAN_DEV_GPU_NVIDIA:   return "GPU NVIDIA";
+	case FAN_DEV_MSI_EC:       return "MSI EC";
+	case FAN_DEV_UNKNOWN:      return "Fan";
+	}
+	return "Fan";
+}
+
+void
+fan_scan_hwmon(FanPopup *p)
+{
+	DIR *dir;
+	struct dirent *ent;
+	char path[256], namebuf[64];
+	int dev_idx = 0;
+
+	if (!p)
+		return;
+
+	memset(p->devices, 0, sizeof(p->devices));
+	p->device_count = 0;
+	p->total_fans = 0;
+
+	dir = opendir("/sys/class/hwmon");
+	if (!dir)
+		return;
+
+	while ((ent = readdir(dir)) != NULL && dev_idx < FAN_MAX_DEVICES) {
+		int fan_count = 0;
+
+		if (ent->d_name[0] == '.')
+			continue;
+
+		snprintf(path, sizeof(path), "/sys/class/hwmon/%s/name", ent->d_name);
+		if (sysfs_read_str(path, namebuf, sizeof(namebuf)) != 0)
+			continue;
+
+		/* Check if this hwmon has any fans */
+		for (int fi = 1; fi <= 10 && fan_count < FAN_MAX_PER_DEV; fi++) {
+			char fan_path[256];
+			int rpm;
+
+			snprintf(fan_path, sizeof(fan_path),
+					"/sys/class/hwmon/%s/fan%d_input", ent->d_name, fi);
+			rpm = sysfs_read_int(fan_path);
+			if (rpm < 0)
+				continue;
+
+			FanDevice *dev = &p->devices[dev_idx];
+			FanEntry *fe = &dev->fans[fan_count];
+
+			snprintf(dev->hwmon_path, sizeof(dev->hwmon_path),
+					"/sys/class/hwmon/%s", ent->d_name);
+			snprintf(dev->name, sizeof(dev->name), "%s", namebuf);
+			dev->type = classify_hwmon(namebuf);
+
+			snprintf(fe->hwmon_path, sizeof(fe->hwmon_path),
+					"/sys/class/hwmon/%s", ent->d_name);
+			fe->fan_index = fi;
+			fe->rpm = rpm;
+
+			/* Try to read fan label */
+			snprintf(fan_path, sizeof(fan_path),
+					"/sys/class/hwmon/%s/fan%d_label", ent->d_name, fi);
+			if (sysfs_read_str(fan_path, fe->label, sizeof(fe->label)) != 0)
+				snprintf(fe->label, sizeof(fe->label), "%s Fan %d",
+						fan_dev_type_label(dev->type), fi);
+
+			/* Check for PWM control */
+			fe->pwm_index = fi;
+			snprintf(fan_path, sizeof(fan_path),
+					"/sys/class/hwmon/%s/pwm%d", ent->d_name, fi);
+			fe->pwm = sysfs_read_int(fan_path);
+			fe->has_pwm = (fe->pwm >= 0);
+
+			if (fe->has_pwm) {
+				snprintf(fan_path, sizeof(fan_path),
+						"/sys/class/hwmon/%s/pwm%d_enable", ent->d_name, fi);
+				fe->pwm_enable = sysfs_read_int(fan_path);
+				if (fe->pwm_enable < 0)
+					fe->pwm_enable = 2; /* assume auto */
+			}
+
+			/* Read associated temperature */
+			snprintf(fan_path, sizeof(fan_path),
+					"/sys/class/hwmon/%s/temp1_input", ent->d_name);
+			fe->temp_mc = sysfs_read_int(fan_path);
+
+			fan_count++;
+			p->total_fans++;
+		}
+
+		if (fan_count > 0) {
+			p->devices[dev_idx].fan_count = fan_count;
+			dev_idx++;
+		}
+	}
+
+	closedir(dir);
+	p->device_count = dev_idx;
+}
+
+void
+fan_read_all(FanPopup *p)
+{
+	char path[256];
+
+	if (!p)
+		return;
+
+	for (int d = 0; d < p->device_count; d++) {
+		FanDevice *dev = &p->devices[d];
+
+		for (int f = 0; f < dev->fan_count; f++) {
+			FanEntry *fe = &dev->fans[f];
+
+			snprintf(path, sizeof(path), "%s/fan%d_input",
+					fe->hwmon_path, fe->fan_index);
+			fe->rpm = sysfs_read_int(path);
+			if (fe->rpm < 0)
+				fe->rpm = 0;
+
+			if (fe->has_pwm) {
+				snprintf(path, sizeof(path), "%s/pwm%d",
+						fe->hwmon_path, fe->pwm_index);
+				fe->pwm = sysfs_read_int(path);
+				if (fe->pwm < 0)
+					fe->pwm = 0;
+
+				snprintf(path, sizeof(path), "%s/pwm%d_enable",
+						fe->hwmon_path, fe->pwm_index);
+				fe->pwm_enable = sysfs_read_int(path);
+				if (fe->pwm_enable < 0)
+					fe->pwm_enable = 2;
+			}
+
+			snprintf(path, sizeof(path), "%s/temp1_input",
+					fe->hwmon_path);
+			fe->temp_mc = sysfs_read_int(path);
+		}
+	}
+}
+
+void
+fan_write_pwm(FanEntry *f, int pwm)
+{
+	char path[256];
+
+	if (!f || !f->has_pwm)
+		return;
+
+	if (pwm < 0) pwm = 0;
+	if (pwm > 255) pwm = 255;
+
+	snprintf(path, sizeof(path), "%s/pwm%d", f->hwmon_path, f->pwm_index);
+	if (sysfs_write_int(path, pwm) == 0)
+		f->pwm = pwm;
+}
+
+void
+fan_set_manual(FanEntry *f)
+{
+	char path[256];
+
+	if (!f || !f->has_pwm)
+		return;
+
+	snprintf(path, sizeof(path), "%s/pwm%d_enable",
+			f->hwmon_path, f->pwm_index);
+	if (sysfs_write_int(path, 1) == 0)
+		f->pwm_enable = 1;
+}
+
+void
+fan_set_auto(FanEntry *f)
+{
+	char path[256];
+
+	if (!f || !f->has_pwm)
+		return;
+
+	snprintf(path, sizeof(path), "%s/pwm%d_enable",
+			f->hwmon_path, f->pwm_index);
+	if (sysfs_write_int(path, 2) == 0)
+		f->pwm_enable = 2;
+}
+
+/* Get flat fan entry by index across all devices */
+static FanEntry *
+fan_entry_by_flat_idx(FanPopup *p, int idx)
+{
+	int n = 0;
+
+	if (!p || idx < 0)
+		return NULL;
+
+	for (int d = 0; d < p->device_count; d++) {
+		for (int f = 0; f < p->devices[d].fan_count; f++) {
+			if (n == idx)
+				return &p->devices[d].fans[f];
+			n++;
+		}
+	}
+	return NULL;
+}
+
+void
+renderfanpopup(Monitor *m)
+{
+	FanPopup *p;
+	int padding, line_spacing, row_height;
+	int y, popup_w;
+	int slider_w = 120;
+	int slider_h = 10;
+	int label_col_w = 0;
+	int rpm_col_w = 0;
+	int col_gap;
+	char line[128];
+	struct wlr_scene_node *node, *tmp;
+	uint64_t now = monotonic_msec();
+	int flat_idx;
+
+	if (!m || !m->statusbar.fan_popup.tree)
+		return;
+
+	p = &m->statusbar.fan_popup;
+	padding = statusbar_module_padding;
+	line_spacing = 4;
+	col_gap = 12;
+	row_height = statusfont.height > 0 ? statusfont.height : 16;
+
+	/* Clear previous content but keep bg */
+	wl_list_for_each_safe(node, tmp, &p->tree->children, link) {
+		if (p->bg && node == &p->bg->node)
+			continue;
+		wlr_scene_node_destroy(node);
+	}
+
+	if (!statusfont.font || p->total_fans <= 0) {
+		p->width = p->height = 0;
+		if (p->tree)
+			wlr_scene_node_set_enabled(&p->tree->node, 0);
+		p->visible = 0;
+		return;
+	}
+
+	/* Refresh fan data */
+	if (p->last_fetch_ms == 0 || now - p->last_fetch_ms >= 2000) {
+		fan_read_all(p);
+		p->last_fetch_ms = now;
+	}
+
+	/* Measure columns */
+	for (int d = 0; d < p->device_count; d++) {
+		FanDevice *dev = &p->devices[d];
+		int header_w;
+
+		/* Header: "CPU (coretemp) -- 62C" */
+		if (dev->fans[0].temp_mc > 0) {
+			snprintf(line, sizeof(line), "%s (%s) -- %d\302\260C",
+					fan_dev_type_label(dev->type), dev->name,
+					dev->fans[0].temp_mc / 1000);
+		} else {
+			snprintf(line, sizeof(line), "%s (%s)",
+					fan_dev_type_label(dev->type), dev->name);
+		}
+		header_w = status_text_width(line);
+		/* header_w is checked against total later */
+
+		for (int f = 0; f < dev->fan_count; f++) {
+			FanEntry *fe = &dev->fans[f];
+			int lw, rw;
+
+			lw = status_text_width(fe->label);
+			if (lw > label_col_w)
+				label_col_w = lw;
+
+			snprintf(line, sizeof(line), "%d RPM", fe->rpm);
+			rw = status_text_width(line);
+			if (rw > rpm_col_w)
+				rpm_col_w = rw;
+		}
+
+		(void)header_w;
+	}
+
+	popup_w = 2 * padding + label_col_w + col_gap + rpm_col_w + col_gap + slider_w;
+	/* Ensure header fits */
+	for (int d = 0; d < p->device_count; d++) {
+		FanDevice *dev = &p->devices[d];
+		int header_w;
+
+		if (dev->fans[0].temp_mc > 0) {
+			snprintf(line, sizeof(line), "%s (%s) -- %d\302\260C",
+					fan_dev_type_label(dev->type), dev->name,
+					dev->fans[0].temp_mc / 1000);
+		} else {
+			snprintf(line, sizeof(line), "%s (%s)",
+					fan_dev_type_label(dev->type), dev->name);
+		}
+		header_w = status_text_width(line) + 2 * padding;
+		if (header_w > popup_w)
+			popup_w = header_w;
+	}
+	if (popup_w < 200)
+		popup_w = 200;
+
+	/* Calculate height */
+	y = padding;
+	for (int d = 0; d < p->device_count; d++) {
+		FanDevice *dev = &p->devices[d];
+
+		y += row_height + line_spacing; /* header */
+		for (int f = 0; f < dev->fan_count; f++) {
+			y += row_height + line_spacing; /* fan row */
+		}
+		y += line_spacing; /* group spacing */
+	}
+	y += padding - line_spacing; /* remove last spacing, add bottom padding */
+
+	p->width = popup_w;
+	p->height = y;
+
+	/* Background */
+	if (!p->bg && !(p->bg = wlr_scene_tree_create(p->tree)))
+		return;
+	wlr_scene_node_set_enabled(&p->bg->node, 1);
+	wlr_scene_node_set_position(&p->bg->node, 0, 0);
+	wl_list_for_each_safe(node, tmp, &p->bg->children, link)
+		wlr_scene_node_destroy(node);
+	drawrect(p->bg, 0, 0, p->width, p->height, statusbar_popup_bg);
+
+	/* Render content */
+	y = padding;
+	flat_idx = 0;
+	for (int d = 0; d < p->device_count; d++) {
+		FanDevice *dev = &p->devices[d];
+		struct wlr_scene_tree *row;
+		StatusModule mod = {0};
+
+		/* Device header */
+		if (dev->fans[0].temp_mc > 0) {
+			snprintf(line, sizeof(line), "%s (%s) -- %d\302\260C",
+					fan_dev_type_label(dev->type), dev->name,
+					dev->fans[0].temp_mc / 1000);
+		} else {
+			snprintf(line, sizeof(line), "%s (%s)",
+					fan_dev_type_label(dev->type), dev->name);
+		}
+		row = wlr_scene_tree_create(p->tree);
+		if (row) {
+			wlr_scene_node_set_position(&row->node, padding, y);
+			mod.tree = row;
+			tray_render_label(&mod, line, 0, row_height, statusbar_fg);
+		}
+		y += row_height + line_spacing;
+
+		/* Fan rows */
+		for (int f = 0; f < dev->fan_count; f++) {
+			FanEntry *fe = &dev->fans[f];
+			int sx, sy;
+
+			/* Label */
+			row = wlr_scene_tree_create(p->tree);
+			if (row) {
+				wlr_scene_node_set_position(&row->node, padding + 8, y);
+				mod.tree = row;
+				tray_render_label(&mod, fe->label, 0, row_height, statusbar_fg);
+			}
+
+			/* RPM */
+			snprintf(line, sizeof(line), "%d RPM", fe->rpm);
+			row = wlr_scene_tree_create(p->tree);
+			if (row) {
+				wlr_scene_node_set_position(&row->node,
+						padding + 8 + label_col_w + col_gap, y);
+				mod.tree = row;
+				tray_render_label(&mod, line, 0, row_height, statusbar_fg);
+			}
+
+			/* Slider */
+			sx = padding + 8 + label_col_w + col_gap + rpm_col_w + col_gap;
+			sy = y + (row_height - slider_h) / 2;
+
+			fe->slider_x = sx;
+			fe->slider_y = sy;
+			fe->slider_w = slider_w;
+			fe->slider_h = slider_h;
+			fe->row_y = y;
+			fe->row_h = row_height;
+
+			/* Slider background (dark) */
+			{
+				static const float slider_bg[] = {0.2f, 0.2f, 0.2f, 1.0f};
+				drawrect(p->tree, sx, sy, slider_w, slider_h, slider_bg);
+			}
+
+			if (fe->has_pwm) {
+				if (fe->pwm_enable == 1) {
+					/* Manual mode - show fill */
+					int fill_w = (fe->pwm * slider_w) / 255;
+					if (fill_w < 0) fill_w = 0;
+					if (fill_w > slider_w) fill_w = slider_w;
+
+					/* Color gradient: blue (low) to red (high) */
+					float frac = (float)fe->pwm / 255.0f;
+					float fill_col[4];
+					fill_col[0] = 0.2f + 0.6f * frac;     /* R */
+					fill_col[1] = 0.4f * (1.0f - frac);    /* G */
+					fill_col[2] = 0.8f * (1.0f - frac);    /* B */
+					fill_col[3] = 1.0f;
+
+					if (fill_w > 0)
+						drawrect(p->tree, sx, sy, fill_w, slider_h, fill_col);
+				} else {
+					/* Auto mode - show "AUTO" label on slider */
+					row = wlr_scene_tree_create(p->tree);
+					if (row) {
+						int auto_w = status_text_width("AUTO");
+						int auto_x = sx + (slider_w - auto_w) / 2;
+						int auto_y = sy - 1;
+						static const float auto_col[] = {0.5f, 0.7f, 0.5f, 1.0f};
+						wlr_scene_node_set_position(&row->node, auto_x, auto_y);
+						mod.tree = row;
+						tray_render_label(&mod, "AUTO", 0, slider_h + 2, auto_col);
+					}
+				}
+			}
+
+			flat_idx++;
+			y += row_height + line_spacing;
+		}
+		y += line_spacing; /* group spacing */
+	}
+
+	p->last_render_ms = now;
+}
+
+int
+fan_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
+{
+	FanPopup *p;
+	int rel_x, rel_y;
+	int popup_x;
+
+	if (!m || !m->statusbar.fan_popup.visible)
+		return 0;
+
+	p = &m->statusbar.fan_popup;
+	if (!p->tree || p->width <= 0 || p->height <= 0)
+		return 0;
+
+	popup_x = m->statusbar.fan.x;
+	if (p->width > 0 && m->statusbar.area.width > 0) {
+		int max_x = m->statusbar.area.width - p->width;
+		if (max_x < 0) max_x = 0;
+		if (popup_x > max_x) popup_x = max_x;
+		if (popup_x < 0) popup_x = 0;
+	}
+
+	rel_x = lx - popup_x;
+	rel_y = ly - m->statusbar.area.height;
+	if (rel_x < 0 || rel_y < 0 || rel_x >= p->width || rel_y >= p->height)
+		return 0;
+
+	/* Find which fan row was clicked */
+	{
+		int flat = 0;
+
+		for (int d = 0; d < p->device_count; d++) {
+			for (int f = 0; f < p->devices[d].fan_count; f++) {
+				FanEntry *fe = &p->devices[d].fans[f];
+
+				if (!fe->has_pwm) {
+					flat++;
+					continue;
+				}
+
+				/* Right-click on row: toggle auto/manual */
+				if (button == BTN_RIGHT &&
+						rel_y >= fe->row_y && rel_y < fe->row_y + fe->row_h) {
+					if (fe->pwm_enable == 1)
+						fan_set_auto(fe);
+					else
+						fan_set_manual(fe);
+					renderfanpopup(m);
+					return 1;
+				}
+
+				/* Left-click on slider: set PWM */
+				if (button == BTN_LEFT &&
+						rel_x >= fe->slider_x &&
+						rel_x < fe->slider_x + fe->slider_w &&
+						rel_y >= fe->slider_y &&
+						rel_y < fe->slider_y + fe->slider_h) {
+					int new_pwm;
+
+					if (fe->pwm_enable != 1)
+						fan_set_manual(fe);
+
+					new_pwm = ((rel_x - fe->slider_x) * 255) / fe->slider_w;
+					if (new_pwm < 0) new_pwm = 0;
+					if (new_pwm > 255) new_pwm = 255;
+					fan_write_pwm(fe, new_pwm);
+
+					/* Start dragging */
+					p->dragging = 1;
+					p->drag_fan_idx = flat;
+
+					renderfanpopup(m);
+					return 1;
+				}
+
+				flat++;
+			}
+		}
+	}
+
+	return 1; /* click was inside popup, consume it */
+}
+
+void
+fan_popup_handle_drag(Monitor *m, double cx, double cy)
+{
+	FanPopup *p;
+	FanEntry *fe;
+	int popup_x, rel_x;
+	int new_pwm;
+
+	if (!m)
+		return;
+
+	p = &m->statusbar.fan_popup;
+	if (!p->dragging || !p->visible)
+		return;
+
+	fe = fan_entry_by_flat_idx(p, p->drag_fan_idx);
+	if (!fe || !fe->has_pwm) {
+		p->dragging = 0;
+		return;
+	}
+
+	popup_x = m->statusbar.fan.x;
+	if (p->width > 0 && m->statusbar.area.width > 0) {
+		int max_x = m->statusbar.area.width - p->width;
+		if (max_x < 0) max_x = 0;
+		if (popup_x > max_x) popup_x = max_x;
+		if (popup_x < 0) popup_x = 0;
+	}
+
+	rel_x = (int)floor(cx) - m->statusbar.area.x - popup_x;
+	new_pwm = ((rel_x - fe->slider_x) * 255) / fe->slider_w;
+	if (new_pwm < 0) new_pwm = 0;
+	if (new_pwm > 255) new_pwm = 255;
+
+	fan_write_pwm(fe, new_pwm);
+	renderfanpopup(m);
+}
+
+void
+updatefanhover(Monitor *m, double cx, double cy)
+{
+	int lx, ly;
+	int inside = 0;
+	int popup_hover = 0;
+	int was_visible;
+	FanPopup *p;
+	int popup_x;
+	uint64_t now = monotonic_msec();
+
+	if (!m || !m->showbar || !m->statusbar.fan.tree || !m->statusbar.fan_popup.tree) {
+		if (m && m->statusbar.fan_popup.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.fan_popup.tree->node, 0);
+			m->statusbar.fan_popup.visible = 0;
+		}
+		return;
+	}
+
+	p = &m->statusbar.fan_popup;
+	lx = (int)floor(cx) - m->statusbar.area.x;
+	ly = (int)floor(cy) - m->statusbar.area.y;
+
+	popup_x = m->statusbar.fan.x;
+	if (p->width > 0 && m->statusbar.area.width > 0) {
+		int max_x = m->statusbar.area.width - p->width;
+		if (max_x < 0) max_x = 0;
+		if (popup_x > max_x) popup_x = max_x;
+		if (popup_x < 0) popup_x = 0;
+	}
+
+	/* Check if hovering popup area */
+	if (p->visible && p->width > 0 && p->height > 0 &&
+			lx >= popup_x &&
+			lx < popup_x + p->width &&
+			ly >= m->statusbar.area.height &&
+			ly < m->statusbar.area.height + p->height) {
+		popup_hover = 1;
+	}
+
+	/* Check if hovering fan module */
+	if (lx >= m->statusbar.fan.x &&
+			lx < m->statusbar.fan.x + m->statusbar.fan.width &&
+			ly >= 0 && ly < m->statusbar.area.height &&
+			m->statusbar.fan.width > 0) {
+		inside = 1;
+	} else if (popup_hover) {
+		inside = 1;
+	}
+
+	/* Keep visible while dragging */
+	if (p->dragging)
+		inside = 1;
+
+	was_visible = p->visible;
+
+	if (inside) {
+		if (p->hover_start_ms == 0)
+			p->hover_start_ms = now;
+
+		/* 300ms delay before showing */
+		if (!was_visible && (now - p->hover_start_ms) < 300) {
+			schedule_popup_delay(300 - (now - p->hover_start_ms) + 1);
+			return;
+		}
+
+		if (!was_visible) {
+			/* Initial scan on first show */
+			if (p->device_count == 0)
+				fan_scan_hwmon(p);
+		}
+		p->visible = 1;
+		wlr_scene_node_set_enabled(&p->tree->node, 1);
+		wlr_scene_node_set_position(&p->tree->node,
+				popup_x, m->statusbar.area.height);
+		if (!was_visible || (p->last_render_ms == 0 ||
+					now - p->last_render_ms >= 2000)) {
+			renderfanpopup(m);
+		}
+	} else if (p->visible || p->hover_start_ms != 0) {
+		p->visible = 0;
+		p->dragging = 0;
+		wlr_scene_node_set_enabled(&p->tree->node, 0);
+		p->last_render_ms = 0;
+		p->hover_start_ms = 0;
+	}
+}
+
+void
+renderfan(StatusModule *module, int bar_height, const char *text)
+{
+	if (!module || !module->tree)
+		return;
+
+	render_icon_label(module, bar_height, text,
+			ensure_fan_icon_buffer, &fan_icon_buf, &fan_icon_w, &fan_icon_h,
+			0, statusbar_icon_text_gap, statusbar_fg);
+}

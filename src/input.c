@@ -335,6 +335,7 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 	StatusModule *mic = &m->statusbar.mic;
 	StatusModule *vol = &m->statusbar.volume;
 	StatusModule *cpu = &m->statusbar.cpu;
+	StatusModule *fan = &m->statusbar.fan;
 	StatusModule *sys = &m->statusbar.sysicons;
 	StatusModule *bt = &m->statusbar.bluetooth;
 	StatusModule *stm = &m->statusbar.steam;
@@ -347,6 +348,11 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 
 	if (m->statusbar.ram_popup.visible) {
 		if (ram_popup_handle_click(m, lx, ly, button))
+			return 1;
+	}
+
+	if (m->statusbar.fan_popup.visible) {
+		if (fan_popup_handle_click(m, lx, ly, button))
 			return 1;
 	}
 
@@ -374,6 +380,29 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 	if (cpu->width > 0 && lx >= cpu->x && lx < cpu->x + cpu->width) {
 		Arg arg = { .v = btopcmd };
 		spawn(&arg);
+		return 1;
+	}
+
+	/* Fan module click - toggle fan popup */
+	if (button == BTN_LEFT &&
+			fan->width > 0 &&
+			lx >= fan->x && lx < fan->x + fan->width) {
+		FanPopup *fp = &m->statusbar.fan_popup;
+		if (fp->visible) {
+			fp->visible = 0;
+			fp->dragging = 0;
+			if (fp->tree)
+				wlr_scene_node_set_enabled(&fp->tree->node, 0);
+		} else {
+			if (fp->device_count == 0)
+				fan_scan_hwmon(fp);
+			fp->visible = 1;
+			if (fp->tree) {
+				wlr_scene_node_set_enabled(&fp->tree->node, 1);
+				renderfanpopup(m);
+				positionstatusmodules(m);
+			}
+		}
 		return 1;
 	}
 
@@ -513,6 +542,11 @@ handle_pointer_button_internal(uint32_t button, uint32_t state, uint32_t time_ms
 			}
 		}
 	} else if (state == WL_POINTER_BUTTON_STATE_RELEASED) {
+		/* Clear fan slider drag on button release */
+		if (selmon && selmon->statusbar.fan_popup.dragging) {
+			selmon->statusbar.fan_popup.dragging = 0;
+			renderfanpopup(selmon);
+		}
 		/* Reset cursor mode on release */
 		if (cursor_mode == CurPressed)
 			cursor_mode = CurNormal;
@@ -1509,6 +1543,9 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 			updatecpuhover(selmon, cursor->x, cursor->y);
 			updateramhover(selmon, cursor->x, cursor->y);
 			updatebatteryhover(selmon, cursor->x, cursor->y);
+			updatefanhover(selmon, cursor->x, cursor->y);
+			if (selmon->statusbar.fan_popup.dragging)
+				fan_popup_handle_drag(selmon, cursor->x, cursor->y);
 			updatenethover(selmon, cursor->x, cursor->y);
 			net_menu_update_hover(selmon, cursor->x, cursor->y);
 			if (!selmon->statusbar.net_menu.visible)

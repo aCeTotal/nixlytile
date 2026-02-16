@@ -514,7 +514,59 @@ typedef struct {
 	uint64_t next_due_ms;
 } StatusRefreshTask;
 
-#define STATUS_TASKS_COUNT 8
+#define STATUS_TASKS_COUNT 9
+
+#define FAN_MAX_DEVICES   8
+#define FAN_MAX_PER_DEV   6
+#define FAN_MAX_TOTAL    (FAN_MAX_DEVICES * FAN_MAX_PER_DEV)
+
+typedef enum {
+	FAN_DEV_CPU,
+	FAN_DEV_CASE,
+	FAN_DEV_GPU_AMD,
+	FAN_DEV_GPU_NVIDIA,
+	FAN_DEV_MSI_EC,
+	FAN_DEV_UNKNOWN,
+} FanDevType;
+
+typedef struct {
+	char label[64];
+	char hwmon_path[128];
+	int fan_index;
+	int pwm_index;
+	int has_pwm;
+	int rpm;
+	int pwm;
+	int pwm_enable;
+	int temp_mc;
+	int slider_x, slider_y;
+	int slider_w, slider_h;
+	int row_y, row_h;
+} FanEntry;
+
+typedef struct {
+	char name[64];
+	char hwmon_path[128];
+	FanDevType type;
+	int fan_count;
+	FanEntry fans[FAN_MAX_PER_DEV];
+} FanDevice;
+
+typedef struct {
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_tree *bg;
+	int width;
+	int height;
+	int visible;
+	uint64_t last_fetch_ms;
+	uint64_t last_render_ms;
+	uint64_t hover_start_ms;
+	int dragging;
+	int drag_fan_idx;
+	int device_count;
+	FanDevice devices[FAN_MAX_DEVICES];
+	int total_fans;
+} FanPopup;
 
 typedef struct TrayMenuEntry {
 	int id;
@@ -581,9 +633,11 @@ struct StatusBar {
 	RamPopup ram_popup;
 	BatteryPopup battery_popup;
 	NetPopup net_popup;
+	FanPopup fan_popup;
 	TrayMenu tray_menu;
 	NetMenu net_menu;
 	StatusModule sysicons;
+	StatusModule fan;
 };
 
 struct TrayItem {
@@ -1627,6 +1681,13 @@ extern int steam_running;
 extern int discord_icon_loaded_h, discord_icon_w, discord_icon_h;
 extern struct wlr_buffer *discord_icon_buf;
 extern int discord_running;
+extern char fan_icon_path[PATH_MAX];
+extern char fan_icon_loaded_path[PATH_MAX];
+extern int fan_icon_loaded_h, fan_icon_w, fan_icon_h;
+extern struct wlr_buffer *fan_icon_buf;
+extern char fan_text[32];
+extern char last_fan_render[32];
+extern int last_fan_h;
 extern unsigned long long net_prev_rx;
 extern unsigned long long net_prev_tx;
 extern struct timespec net_prev_ts;
@@ -1990,6 +2051,7 @@ void refreshstatusnet(void);
 void refreshstatuscpu(void);
 void refreshstatusram(void);
 void refreshstatusicons(void);
+void refreshstatusfan(void);
 void refreshstatustags(void);
 void init_status_refresh_tasks(void);
 void seed_status_rng(void);
@@ -2047,6 +2109,20 @@ void updatenethover(Monitor *m, double cx, double cy);
 void updatecpuhover(Monitor *m, double cx, double cy);
 void updateramhover(Monitor *m, double cx, double cy);
 void updatebatteryhover(Monitor *m, double cx, double cy);
+
+/* fancontrol.c */
+void fan_scan_hwmon(FanPopup *p);
+void fan_read_all(FanPopup *p);
+void fan_write_pwm(FanEntry *f, int pwm);
+void fan_set_manual(FanEntry *f);
+void fan_set_auto(FanEntry *f);
+void renderfanpopup(Monitor *m);
+int fan_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
+void fan_popup_handle_drag(Monitor *m, double cx, double cy);
+void updatefanhover(Monitor *m, double cx, double cy);
+void renderfan(StatusModule *module, int bar_height, const char *text);
+int ensure_fan_icon_buffer(int target_h);
+void drop_fan_icon_buffer(void);
 int updatestatuscpu(void *data);
 int updatestatusclock(void *data);
 int updatehoverfade(void *data);
