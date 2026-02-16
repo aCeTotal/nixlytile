@@ -215,8 +215,8 @@ btrtile(Monitor *m)
 		wl_list_for_each(c, &clients, link) {
 			if (c == dragging_client && c->mon == m)
 				continue; /* Keep dragging client in tree to preserve space */
-			if (VISIBLEON(c, m) && c->mon == m && !c->isfloating && !c->isfullscreen) {
-				/* Client is visible and tiled - keep in tree */
+			if (VISIBLEON(c, m) && c->mon == m && !c->isfloating) {
+				/* Client is visible and tiled (or fullscreen) - keep in tree */
 			} else {
 				remove_client(m, c);
 			}
@@ -928,6 +928,26 @@ void focusdir(const Arg *arg) {
 	}
 }
 
+/* Count tiled clients including fullscreen (for structural tree decisions).
+ * Unlike visible_count, this includes fullscreen clients so the tree
+ * structure is preserved when toggling fullscreen. */
+static unsigned int
+structural_count(LayoutNode *node, Monitor *m)
+{
+	Client *c;
+	if (!node)
+		return 0;
+	if (node->is_client_node) {
+		c = node->client;
+		if (!c)
+			return 0;
+		if (c == dragging_client)
+			return 1;
+		return (VISIBLEON(c, m) && !c->isfloating) ? 1 : 0;
+	}
+	return structural_count(node->left, m) + structural_count(node->right, m);
+}
+
 unsigned int
 count_columns(LayoutNode *node, Monitor *m)
 {
@@ -936,23 +956,23 @@ count_columns(LayoutNode *node, Monitor *m)
 	 * - A client node under vertical splits
 	 * - A horizontal split under vertical splits
 	 * Once we hit a horizontal split, that's one column (don't recurse).
-	 * IMPORTANT: Only count columns that have visible clients! */
+	 * Uses structural_count to include fullscreen clients so columns
+	 * aren't lost when a client is fullscreened. */
 	if (!node)
 		return 0;
 	if (node->is_client_node) {
-		/* Only count if the client is actually visible */
 		Client *c = node->client;
 		if (!c)
 			return 0;
 		if (c == dragging_client)
 			return 1;
-		if (VISIBLEON(c, m) && !c->isfloating && !c->isfullscreen)
+		if (VISIBLEON(c, m) && !c->isfloating)
 			return 1;
 		return 0;
 	}
 	if (!node->is_split_vertically) {
-		/* Horizontal split = 1 column, but only if it has visible content */
-		return visible_count(node, m) > 0 ? 1 : 0;
+		/* Horizontal split = 1 column, but only if it has clients */
+		return structural_count(node, m) > 0 ? 1 : 0;
 	}
 
 	/* Vertical split at top level - recurse to count columns */
