@@ -57,17 +57,51 @@ discover_nixly_server(void)
 	tv.tv_usec = 200000;
 	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-	/* Broadcast discovery message to local network */
-	memset(&broadcast_addr, 0, sizeof(broadcast_addr));
-	broadcast_addr.sin_family = AF_INET;
-	broadcast_addr.sin_port = htons(MEDIA_DISCOVERY_PORT);
-	broadcast_addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+	/* Send discovery to subnet-directed broadcast on all interfaces */
+	struct ifaddrs *ifap, *ifa;
+	int sent = 0;
+	if (getifaddrs(&ifap) == 0) {
+		for (ifa = ifap; ifa; ifa = ifa->ifa_next) {
+			if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET)
+				continue;
+			if (!(ifa->ifa_flags & IFF_UP) || !(ifa->ifa_flags & IFF_BROADCAST))
+				continue;
+			if (ifa->ifa_flags & IFF_LOOPBACK)
+				continue;
+			if (!ifa->ifa_broadaddr)
+				continue;
 
-	if (sendto(sock, MEDIA_DISCOVERY_MAGIC, strlen(MEDIA_DISCOVERY_MAGIC), 0,
-		   (struct sockaddr *)&broadcast_addr, sizeof(broadcast_addr)) < 0) {
-		wlr_log(WLR_DEBUG, "Discovery: broadcast send failed");
-		close(sock);
-		return 0;
+			struct sockaddr_in *brd = (struct sockaddr_in *)ifa->ifa_broadaddr;
+			memset(&broadcast_addr, 0, sizeof(broadcast_addr));
+			broadcast_addr.sin_family = AF_INET;
+			broadcast_addr.sin_port = htons(MEDIA_DISCOVERY_PORT);
+			broadcast_addr.sin_addr = brd->sin_addr;
+
+			char brd_str[INET_ADDRSTRLEN];
+			inet_ntop(AF_INET, &brd->sin_addr, brd_str, sizeof(brd_str));
+
+			if (sendto(sock, MEDIA_DISCOVERY_MAGIC, strlen(MEDIA_DISCOVERY_MAGIC), 0,
+				   (struct sockaddr *)&broadcast_addr, sizeof(broadcast_addr)) >= 0) {
+				wlr_log(WLR_DEBUG, "Discovery: sent to %s (%s)", brd_str, ifa->ifa_name);
+				sent++;
+			}
+		}
+		freeifaddrs(ifap);
+	}
+
+	/* Fallback to limited broadcast if no interface broadcasts worked */
+	if (!sent) {
+		memset(&broadcast_addr, 0, sizeof(broadcast_addr));
+		broadcast_addr.sin_family = AF_INET;
+		broadcast_addr.sin_port = htons(MEDIA_DISCOVERY_PORT);
+		broadcast_addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+
+		if (sendto(sock, MEDIA_DISCOVERY_MAGIC, strlen(MEDIA_DISCOVERY_MAGIC), 0,
+			   (struct sockaddr *)&broadcast_addr, sizeof(broadcast_addr)) < 0) {
+			wlr_log(WLR_DEBUG, "Discovery: broadcast send failed");
+			close(sock);
+			return 0;
+		}
 	}
 
 	/* Collect responses from multiple servers (wait up to 1 second total) */
