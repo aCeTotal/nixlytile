@@ -190,8 +190,82 @@ static void clean_title(char *title) {
     }
 }
 
+/* Try to extract TV show info from directory structure
+ * Looks for paths like: .../nixly_ready_media/TV/<ShowName>[.Year]/Season<N>/<file>
+ * or: .../TV/<ShowName>/Season<N>/<file>
+ */
+static int parse_tv_info_from_path(const char *filepath, char *show_name, int *season, int *episode, int *year) {
+    *year = 0;
+    *season = 0;
+    *episode = 0;
+
+    /* Look for /TV/ component in path */
+    const char *tv_marker = strstr(filepath, "/TV/");
+    if (!tv_marker) return 0;
+
+    const char *show_start = tv_marker + 4; /* skip "/TV/" */
+    if (*show_start == '\0') return 0;
+
+    /* Find the next slash after show name */
+    const char *show_end = strchr(show_start, '/');
+    if (!show_end) return 0;
+
+    /* Extract show name */
+    size_t slen = show_end - show_start;
+    if (slen == 0 || slen >= 256) return 0;
+    strncpy(show_name, show_start, slen);
+    show_name[slen] = '\0';
+    clean_title(show_name);
+    *year = extract_year_from_show(show_name);
+
+    /* Try to find Season<N> */
+    const char *season_start = show_end + 1;
+    if (strncasecmp(season_start, "Season", 6) == 0) {
+        *season = atoi(season_start + 6);
+        if (*season <= 0) *season = 1;
+    }
+
+    /* Try to extract episode number from filename
+     * Common patterns: Episode 1, E01, Ep01, 01, or just sequential numbering */
+    const char *base = strrchr(filepath, '/');
+    base = base ? base + 1 : filepath;
+
+    char name[256];
+    strncpy(name, base, sizeof(name) - 1);
+    name[sizeof(name) - 1] = '\0';
+    char *ext = strrchr(name, '.');
+    if (ext) *ext = '\0';
+
+    /* Try "Episode N", "E##", "Ep##" patterns */
+    char *p = name;
+    while (*p) {
+        if (strncasecmp(p, "Episode", 7) == 0 && (isdigit(p[7]) || p[7] == ' ')) {
+            const char *num = p + 7;
+            while (*num == ' ') num++;
+            if (isdigit(*num)) { *episode = atoi(num); break; }
+        }
+        if ((p[0] == 'E' || p[0] == 'e') && (p[1] == 'p' || p[1] == 'P') && isdigit(p[2])) {
+            *episode = atoi(p + 2); break;
+        }
+        if ((p[0] == 'E' || p[0] == 'e') && isdigit(p[1]) &&
+            (p == name || !isalpha(*(p-1)))) {
+            *episode = atoi(p + 1); break;
+        }
+        p++;
+    }
+
+    /* Fallback: try leading number in filename (e.g., "01 - Title.mkv") */
+    if (*episode == 0 && isdigit(name[0])) {
+        *episode = atoi(name);
+    }
+
+    /* Must have at least show name to be useful */
+    return (show_name[0] != '\0') ? 1 : 0;
+}
+
 /* Try to parse TV show info from filename
  * Patterns: Show.Name.S01E02, Show Name - 1x02, Show.Name.1985.S01E02, etc.
+ * Falls back to directory structure (e.g., /TV/ShowName/Season1/file.mkv)
  */
 static int parse_tv_info(const char *filename, char *show_name, int *season, int *episode, int *year) {
     const char *base = strrchr(filename, '/');
@@ -249,7 +323,9 @@ static int parse_tv_info(const char *filename, char *show_name, int *season, int
         s++;
     }
 
-    return 0;
+    /* Fallback: try to extract info from directory structure
+     * e.g., /nixly_ready_media/TV/Breaking Bad/Season 1/Episode 1.mkv */
+    return parse_tv_info_from_path(filename, show_name, season, episode, year);
 }
 
 /* Extract clean title from filename */

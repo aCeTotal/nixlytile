@@ -1652,8 +1652,11 @@ static int run_ffmpeg(const char *input, const char *input2,
     if (fp) {
         char line[512];
         while (fgets(line, sizeof(line), fp)) {
-            /* -progress pipe:2 outputs key=value lines, look for out_time_ms= */
-            if (strncmp(line, "out_time_ms=", 12) == 0) {
+            /* -progress pipe:2 outputs key=value lines
+             * Older ffmpeg: out_time_ms= (value in microseconds despite name)
+             * Newer ffmpeg (5.0+): out_time_us= (value in microseconds) */
+            if (strncmp(line, "out_time_us=", 12) == 0 ||
+                strncmp(line, "out_time_ms=", 12) == 0) {
                 long long us = atoll(line + 12);
                 if (us > 0) {
                     pthread_mutex_lock(&tc.lock);
@@ -1871,6 +1874,74 @@ static int check_and_delete_duplicate(TranscodeJob *job) {
                 }
                 return 1;
             }
+        }
+    }
+
+    return 0;
+}
+
+/* Check if a job's output already exists in nixly_ready_media (without deleting source).
+ * Used to filter the queue display on the status page. */
+static int is_already_in_ready_media(TranscodeJob *job) {
+    char norm[256];
+
+    for (int d = 0; d < server_config.converted_path_count; d++) {
+        char search_dir[4096];
+
+        if (job->type == 2) {
+            normalize_title(job->show_name, norm, sizeof(norm));
+
+            if (job->year > 0)
+                snprintf(search_dir, sizeof(search_dir),
+                         "%s/nixly_ready_media/TV/%s.%d/Season%d",
+                         server_config.converted_paths[d], norm, job->year, job->season);
+            else
+                snprintf(search_dir, sizeof(search_dir),
+                         "%s/nixly_ready_media/TV/%s/Season%d",
+                         server_config.converted_paths[d], norm, job->season);
+
+            char pattern[32];
+            snprintf(pattern, sizeof(pattern), ".S%02dE%02d.", job->season, job->episode);
+
+            DIR *dir = opendir(search_dir);
+            if (!dir) continue;
+
+            struct dirent *entry;
+            int found = 0;
+            while ((entry = readdir(dir)) != NULL) {
+                if (strstr(entry->d_name, pattern) &&
+                    strstr(entry->d_name, ".x265.CRF14")) {
+                    found = 1;
+                    break;
+                }
+            }
+            closedir(dir);
+            if (found) return 1;
+        } else {
+            char raw_title[256];
+            strncpy(raw_title, job->title, sizeof(raw_title) - 1);
+            raw_title[sizeof(raw_title) - 1] = '\0';
+            strip_year_from_title(raw_title);
+            normalize_title(raw_title, norm, sizeof(norm));
+
+            snprintf(search_dir, sizeof(search_dir), "%s/nixly_ready_media/Movies",
+                     server_config.converted_paths[d]);
+
+            DIR *dir = opendir(search_dir);
+            if (!dir) continue;
+
+            size_t norm_len = strlen(norm);
+            struct dirent *entry;
+            int found = 0;
+            while ((entry = readdir(dir)) != NULL) {
+                if (strncmp(entry->d_name, norm, norm_len) == 0 &&
+                    strstr(entry->d_name, ".x265.CRF14")) {
+                    found = 1;
+                    break;
+                }
+            }
+            closedir(dir);
+            if (found) return 1;
         }
     }
 
@@ -2497,6 +2568,10 @@ char *transcoder_get_queue_json(void) {
     int first = 1;
     for (int i = 0; i < list.count; i++) {
         TranscodeJob *j = &list.jobs[i];
+
+        /* Skip jobs whose output already exists in nixly_ready_media */
+        if (is_already_in_ready_media(j)) continue;
+
         char esc_title[512], esc_show[512], esc_path[8192];
         json_escape(j->title, esc_title, sizeof(esc_title));
         json_escape(j->show_name, esc_show, sizeof(esc_show));
@@ -2568,5 +2643,11 @@ int transcoder_prioritize_title(const char *title) {
     priority_override.title[sizeof(priority_override.title) - 1] = '\0';
     printf("Transcoder: Priority set: \"%s\"\n", title);
     pthread_mutex_unlock(&priority_override.lock);
+
+    /* Start transcoder immediately if idle */
+    if (transcoder_get_state() != TRANSCODE_RUNNING) {
+        printf("Transcoder: Starting for prioritized title\n");
+        transcoder_start();
+    }
     return 0;
 }

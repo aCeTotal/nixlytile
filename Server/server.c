@@ -196,8 +196,6 @@ static int is_local_client(struct sockaddr_in *addr) {
 
 /* File change callback - keeps database in sync and triggers transcoding */
 static void on_file_change(const char *filepath, int is_delete, WatchType type) {
-    (void)type; /* We handle all types the same for now */
-
     if (is_delete) {
         /* Remove from database */
         if (database_delete_by_path(filepath) == 0) {
@@ -206,14 +204,17 @@ static void on_file_change(const char *filepath, int is_delete, WatchType type) 
     } else {
         /* Check if it's a media file that needs processing */
         if (scanner_is_media_file(filepath)) {
-            /* Skip already converted files */
-            const char *base = strrchr(filepath, '/');
-            base = base ? base + 1 : filepath;
-            if (strstr(base, ".x265.CRF14") != NULL) {
-                /* This is an output file from transcoder, add to DB */
+            /* Check if this file is in a nixly_ready_media directory.
+             * Files here are ready for serving - always add to DB and scrape,
+             * regardless of whether they came from the transcoder or were
+             * placed manually. */
+            int is_ready_media = (strstr(filepath, "/nixly_ready_media/") != NULL);
+
+            if (is_ready_media) {
+                /* Ready media file - add to DB and fetch TMDB metadata */
                 int id = scanner_scan_file(filepath, 1);
                 if (id > 0) {
-                    printf("DB: Added converted file %s (id=%d)\n", filepath, id);
+                    printf("DB: Added ready media %s (id=%d)\n", filepath, id);
                 }
             } else {
                 /* New source file detected - trigger transcoder if idle */
