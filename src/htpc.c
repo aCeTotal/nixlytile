@@ -152,10 +152,13 @@ focus_or_launch_app(const char *app_id, const char *launch_cmd)
 				}
 				_exit(1);
 			}
-			/* Discord: clean up stale singleton files before launching.
-			 * Discord uses Electron which creates SingletonLock/Socket files
-			 * that can become stale if the process crashes or is killed. */
-			if (strcasecmp(launch_cmd, "discord") == 0) {
+			/* Discord: clean up stale singleton files only if the process
+			 * is NOT running.  If Discord is alive (window closed to tray),
+			 * keep the files so the Electron singleton mechanism signals
+			 * the running instance to re-open its window. */
+			if (strcasecmp(launch_cmd, "discord") == 0 &&
+			    !is_process_running("Discord") &&
+			    !is_process_running(".Discord")) {
 				const char *home = getenv("HOME");
 				if (home) {
 					char path[PATH_MAX];

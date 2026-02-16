@@ -29,9 +29,9 @@ schedule_cache_update_timer(void)
 {
 	if (!cache_update_timer || game_mode_active || htpc_mode_active)
 		return;
-	/* 5 minutes between each cache type = 15 min full cycle
-	 * 5 minutes = 5 * 60 * 1000 ms = 300000 ms */
-	wl_event_source_timer_update(cache_update_timer, 300000);
+	/* 30 minutes between each cache type = 90 min full cycle
+	 * 30 minutes = 30 * 60 * 1000 ms = 1800000 ms */
+	wl_event_source_timer_update(cache_update_timer, 1800000);
 }
 
 void

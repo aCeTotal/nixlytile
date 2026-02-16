@@ -3264,7 +3264,7 @@ pipewire_volume_percent(int *is_headset_out)
 	if (is_headset_out)
 		*is_headset_out = is_headset;
 
-	if (last_read != 0 && now - last_read < 8000 && cached >= 0.0) {
+	if (last_read != 0 && now - last_read < 60000 && cached >= 0.0) {
 		volume_muted = cached_muted;
 		if (is_headset)
 			volume_last_headset_percent = cached;
@@ -3302,7 +3302,7 @@ pipewire_mic_volume_percent(void)
 	int muted = 0;
 	uint64_t now = monotonic_msec();
 
-	if (mic_last_read_ms != 0 && now - mic_last_read_ms < 8000) {
+	if (mic_last_read_ms != 0 && now - mic_last_read_ms < 60000) {
 		if (mic_cached >= 0.0) {
 			mic_muted = mic_cached_muted;
 			return mic_cached;
@@ -3910,6 +3910,7 @@ refreshstatusclock(void)
 	Monitor *m;
 	int barh;
 
+	tzset();
 	now = time(NULL);
 	if (now == (time_t)-1)
 		return;
@@ -4622,18 +4623,23 @@ void
 schedule_status_timer(void)
 {
 	struct timespec ts;
-	double now, next;
 	int ms;
+	time_t next_min;
 
 	if (!status_timer || game_mode_active || htpc_mode_active)
 		return;
 
 	clock_gettime(CLOCK_REALTIME, &ts);
-	now = ts.tv_sec + ts.tv_nsec / 1e9;
-	next = ceil(now / 60.0) * 60.0;
-	ms = (int)((next - now) * 1000.0);
-	if (ms < 1)
-		ms = 1;
+
+	/* Next whole minute boundary (integer arithmetic, no float drift) */
+	next_min = (ts.tv_sec / 60 + 1) * 60;
+	ms = (int)((next_min - ts.tv_sec) * 1000 - ts.tv_nsec / 1000000);
+
+	/* Add 50ms margin so we land clearly inside the new minute */
+	ms += 50;
+
+	if (ms < 100)
+		ms = 100;
 
 	wl_event_source_timer_update(status_timer, ms);
 }
@@ -4654,51 +4660,52 @@ updatestatuscpu(void *data)
 		return 0;
 	}
 
-	for (size_t i = 0; i < STATUS_TASKS_COUNT; i++) {
-		if (!found || status_tasks[i].next_due_ms < best) {
-			best = status_tasks[i].next_due_ms;
-			chosen = i;
-			found = 1;
-		}
-	}
+	/* Execute ALL overdue tasks in a single wakeup to reduce timer re-arms */
+	for (;;) {
+		found = 0;
+		best = 0;
+		chosen = 0;
 
-	if (!found) {
-		schedule_next_status_refresh();
-		return 0;
-	}
-
-	if (best > now) {
-		schedule_next_status_refresh();
-		return 0;
-	}
-
-	status_tasks[chosen].fn();
-	if (status_tasks[chosen].fn == refreshstatusnet) {
-		uint64_t delay_ms = 60000;
-		uint64_t allow_fast_after = now;
-		int popup_active = 0;
-		Monitor *m;
-
-		wl_list_for_each(m, &mons, link) {
-			if (m->showbar && m->statusbar.net_popup.visible) {
-				popup_active = 1;
-				if (m->statusbar.net_popup.suppress_refresh_until_ms > allow_fast_after)
-					allow_fast_after = m->statusbar.net_popup.suppress_refresh_until_ms;
+		for (size_t i = 0; i < STATUS_TASKS_COUNT; i++) {
+			if (!found || status_tasks[i].next_due_ms < best) {
+				best = status_tasks[i].next_due_ms;
+				chosen = i;
+				found = 1;
 			}
 		}
 
-		if (popup_active) {
-			if (allow_fast_after > now)
-				delay_ms = allow_fast_after - now;
-			else
-				delay_ms = 1000;
+		if (!found || best > now)
+			break;
+
+		status_tasks[chosen].fn();
+		if (status_tasks[chosen].fn == refreshstatusnet) {
+			uint64_t delay_ms = 60000;
+			uint64_t allow_fast_after = now;
+			int popup_active = 0;
+			Monitor *m;
+
+			wl_list_for_each(m, &mons, link) {
+				if (m->showbar && m->statusbar.net_popup.visible) {
+					popup_active = 1;
+					if (m->statusbar.net_popup.suppress_refresh_until_ms > allow_fast_after)
+						allow_fast_after = m->statusbar.net_popup.suppress_refresh_until_ms;
+				}
+			}
+
+			if (popup_active) {
+				if (allow_fast_after > now)
+					delay_ms = allow_fast_after - now;
+				else
+					delay_ms = 1000;
+			}
+			status_tasks[chosen].next_due_ms = now + delay_ms;
+		} else if (status_task_hover_active(status_tasks[chosen].fn)) {
+			status_tasks[chosen].next_due_ms = now + STATUS_FAST_MS;
+		} else {
+			status_tasks[chosen].next_due_ms = now + random_status_delay_ms();
 		}
-		status_tasks[chosen].next_due_ms = now + delay_ms;
-	} else if (status_task_hover_active(status_tasks[chosen].fn)) {
-		status_tasks[chosen].next_due_ms = now + STATUS_FAST_MS;
-	} else {
-		status_tasks[chosen].next_due_ms = now + random_status_delay_ms();
 	}
+
 	schedule_next_status_refresh();
 	return 0;
 }

@@ -379,7 +379,7 @@ uint32_t
 random_status_delay_ms(void)
 {
 	seed_status_rng();
-	return 5000u + (uint32_t)(rand() % 5001);
+	return 30000u + (uint32_t)(rand() % 30001);
 }
 
 

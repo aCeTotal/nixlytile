@@ -287,7 +287,7 @@ handlestatusscroll(struct wlr_pointer_axis_event *event)
 	if (lx < 0 || ly < 0 || lx >= m->statusbar.area.width || ly >= m->statusbar.area.height)
 		return 0;
 
-	steps = scrollsteps(event);
+	steps = -scrollsteps(event);
 	if (steps == 0)
 		return 0;
 

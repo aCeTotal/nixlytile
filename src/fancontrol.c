@@ -1,5 +1,6 @@
 #include "nixlytile.h"
 #include "client.h"
+#include <sys/io.h>
 
 static int
 sysfs_read_int(const char *path)
@@ -53,6 +54,128 @@ sysfs_write_int(const char *path, int val)
 	}
 	fclose(f);
 	return 0;
+}
+
+/* MSI EC register map */
+#define EC_CMD_PORT    0x66
+#define EC_DATA_PORT   0x62
+#define EC_CMD_READ    0x80
+#define EC_REG_CPU_TEMP  0x68
+#define EC_REG_CPU_FAN   0x71
+#define EC_REG_GPU_TEMP  0x80
+#define EC_REG_GPU_FAN   0x89
+
+static int ec_io_ready;
+
+static int
+ec_init_io(void)
+{
+	if (ec_io_ready)
+		return 0;
+	if (ioperm(EC_DATA_PORT, 1, 1) != 0)
+		return -1;
+	if (ioperm(EC_CMD_PORT, 1, 1) != 0)
+		return -1;
+	ec_io_ready = 1;
+	return 0;
+}
+
+static int
+ec_wait_ibf_clear(void)
+{
+	for (int i = 0; i < 5000; i++) {
+		if (!(inb(EC_CMD_PORT) & 0x02))
+			return 0;
+	}
+	return -1;
+}
+
+static int
+ec_wait_obf_set(void)
+{
+	for (int i = 0; i < 5000; i++) {
+		if (inb(EC_CMD_PORT) & 0x01)
+			return 0;
+	}
+	return -1;
+}
+
+static int
+ec_read_reg(uint8_t addr)
+{
+	if (!ec_io_ready)
+		return -1;
+	if (ec_wait_ibf_clear() != 0)
+		return -1;
+	outb(EC_CMD_READ, EC_CMD_PORT);
+	if (ec_wait_ibf_clear() != 0)
+		return -1;
+	outb(addr, EC_DATA_PORT);
+	if (ec_wait_obf_set() != 0)
+		return -1;
+	return inb(EC_DATA_PORT);
+}
+
+static int
+is_msi_laptop(void)
+{
+	char vendor[64];
+
+	if (sysfs_read_str("/sys/class/dmi/id/sys_vendor", vendor, sizeof(vendor)) != 0)
+		return 0;
+	return strstr(vendor, "Micro-Star") != NULL;
+}
+
+static void
+fan_scan_ec(FanPopup *p)
+{
+	FanDevice *dev;
+	FanEntry *fe;
+	int val;
+
+	if (!p || !is_msi_laptop())
+		return;
+	if (ec_init_io() != 0)
+		return;
+
+	/* Verify we can read at least one register */
+	val = ec_read_reg(EC_REG_CPU_FAN);
+	if (val < 0)
+		return;
+
+	dev = &p->devices[p->device_count];
+	snprintf(dev->name, sizeof(dev->name), "EC");
+	dev->type = FAN_DEV_MSI_EC;
+	dev->fan_count = 0;
+
+	/* CPU fan */
+	fe = &dev->fans[dev->fan_count];
+	snprintf(fe->label, sizeof(fe->label), "CPU Fan");
+	fe->ec_reg_rpm = EC_REG_CPU_FAN;
+	fe->ec_reg_temp = EC_REG_CPU_TEMP;
+	fe->rpm = val * 100;
+	fe->has_pwm = 0;
+	val = ec_read_reg(EC_REG_CPU_TEMP);
+	fe->temp_mc = val > 0 ? val * 1000 : 0;
+	dev->fan_count++;
+	p->total_fans++;
+
+	/* GPU fan */
+	val = ec_read_reg(EC_REG_GPU_FAN);
+	if (val >= 0) {
+		fe = &dev->fans[dev->fan_count];
+		snprintf(fe->label, sizeof(fe->label), "GPU Fan");
+		fe->ec_reg_rpm = EC_REG_GPU_FAN;
+		fe->ec_reg_temp = EC_REG_GPU_TEMP;
+		fe->rpm = val * 100;
+		fe->has_pwm = 0;
+		val = ec_read_reg(EC_REG_GPU_TEMP);
+		fe->temp_mc = val > 0 ? val * 1000 : 0;
+		dev->fan_count++;
+		p->total_fans++;
+	}
+
+	p->device_count++;
 }
 
 static FanDevType
@@ -180,6 +303,9 @@ fan_scan_hwmon(FanPopup *p)
 
 	closedir(dir);
 	p->device_count = dev_idx;
+
+	if (p->total_fans == 0)
+		fan_scan_ec(p);
 }
 
 void
@@ -195,6 +321,16 @@ fan_read_all(FanPopup *p)
 
 		for (int f = 0; f < dev->fan_count; f++) {
 			FanEntry *fe = &dev->fans[f];
+
+			if (fe->ec_reg_rpm) {
+				int val = ec_read_reg(fe->ec_reg_rpm);
+				fe->rpm = val > 0 ? val * 100 : 0;
+				if (fe->ec_reg_temp) {
+					val = ec_read_reg(fe->ec_reg_temp);
+					fe->temp_mc = val > 0 ? val * 1000 : 0;
+				}
+				continue;
+			}
 
 			snprintf(path, sizeof(path), "%s/fan%d_input",
 					fe->hwmon_path, fe->fan_index);

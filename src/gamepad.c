@@ -720,6 +720,12 @@ gamepad_event_cb(int fd, uint32_t mask, void *data)
 				break;
 			}
 
+			/* Re-arm cursor timer on stick axis input (it stops when sticks are at rest) */
+			if ((ev.code == ABS_X || ev.code == ABS_Y ||
+			     ev.code == ABS_RX || ev.code == ABS_RY) &&
+			    gamepad_cursor_timer)
+				wl_event_source_timer_update(gamepad_cursor_timer, GAMEPAD_CURSOR_INTERVAL_MS);
+
 			/* Show playback OSD on stick movement during video playback */
 			if (active_videoplayer && playback_state == PLAYBACK_PLAYING &&
 			    (ev.code == ABS_X || ev.code == ABS_Y ||
@@ -1677,21 +1683,50 @@ gamepad_update_cursor(void)
 	}
 }
 
+static int
+gamepad_any_stick_active(void)
+{
+	GamepadDevice *gp;
+
+	wl_list_for_each(gp, &gamepads, link) {
+		if (gp->suspended)
+			continue;
+
+		int lx_offset = gp->left_x - gp->cal_lx.center;
+		int ly_offset = gp->left_y - gp->cal_ly.center;
+		int lx_range = (gp->cal_lx.max - gp->cal_lx.min) / 2;
+		int ly_range = (gp->cal_ly.max - gp->cal_ly.min) / 2;
+		if (lx_range == 0) lx_range = 32767;
+		if (ly_range == 0) ly_range = 32767;
+		int lx_dz = gp->cal_lx.flat > 0 ? gp->cal_lx.flat : (lx_range * GAMEPAD_DEADZONE / 32767);
+		int ly_dz = gp->cal_ly.flat > 0 ? gp->cal_ly.flat : (ly_range * GAMEPAD_DEADZONE / 32767);
+		if (abs(lx_offset) > lx_dz || abs(ly_offset) > ly_dz)
+			return 1;
+
+		int rx_offset = gp->right_x - gp->cal_rx.center;
+		int ry_offset = gp->right_y - gp->cal_ry.center;
+		int rx_range = (gp->cal_rx.max - gp->cal_rx.min) / 2;
+		int ry_range = (gp->cal_ry.max - gp->cal_ry.min) / 2;
+		if (rx_range == 0) rx_range = 32767;
+		if (ry_range == 0) ry_range = 32767;
+		int rx_dz = gp->cal_rx.flat > 0 ? gp->cal_rx.flat : (rx_range * GAMEPAD_DEADZONE / 32767);
+		int ry_dz = gp->cal_ry.flat > 0 ? gp->cal_ry.flat : (ry_range * GAMEPAD_DEADZONE / 32767);
+		if (abs(rx_offset) > rx_dz || abs(ry_offset) > ry_dz)
+			return 1;
+	}
+	return 0;
+}
+
 int
 gamepad_cursor_timer_cb(void *data)
 {
-	GamepadDevice *gp;
-	Monitor *m;
-	int64_t now;
-
 	(void)data;
 
 	/* Update cursor position */
 	gamepad_update_cursor();
 
-
-	/* Reschedule timer if we have gamepads */
-	if (!wl_list_empty(&gamepads) && gamepad_cursor_timer) {
+	/* Only reschedule if a stick is deflected beyond deadzone */
+	if (!wl_list_empty(&gamepads) && gamepad_cursor_timer && gamepad_any_stick_active()) {
 		wl_event_source_timer_update(gamepad_cursor_timer, GAMEPAD_CURSOR_INTERVAL_MS);
 	}
 

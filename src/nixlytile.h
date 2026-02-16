@@ -156,10 +156,10 @@
 #define GAMEPAD_CURSOR_SPEED 15.0
 #define GAMEPAD_CURSOR_ACCEL 2.5
 #define GAMEPAD_INACTIVITY_TIMEOUT_MS 10000
-#define GAMEPAD_INACTIVITY_CHECK_MS 1000
+#define GAMEPAD_INACTIVITY_CHECK_MS 5000
 #define GAMEPAD_PENDING_MAX 8
-#define BT_SCAN_INTERVAL_MS 30000
-#define BT_SCAN_DURATION_MS 10000
+#define BT_SCAN_INTERVAL_MS 300000
+#define BT_SCAN_DURATION_MS 5000
 #define MAX_CPU_CORES 256
 #define NIXPKGS_MAX_ENTRIES 32768
 #define OSK_ROWS 5
@@ -539,6 +539,8 @@ typedef struct {
 	int pwm;
 	int pwm_enable;
 	int temp_mc;
+	uint8_t ec_reg_rpm;
+	uint8_t ec_reg_temp;
 	int slider_x, slider_y;
 	int slider_w, slider_h;
 	int row_y, row_h;
