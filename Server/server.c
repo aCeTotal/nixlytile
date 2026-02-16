@@ -539,14 +539,67 @@ static void handle_api(int fd, const char *path) {
     else if (strcmp(path, "/api/scan") == 0) {
         /* Trigger library rescan of nixly_ready_media directories */
         printf("API: Starting rescan...\n");
+        int before = database_get_count();
+        int total_found = 0;
         for (int i = 0; i < server_config.converted_path_count; i++) {
             char ready_path[MAX_PATH];
             snprintf(ready_path, sizeof(ready_path), "%s/nixly_ready_media",
                      server_config.converted_paths[i]);
-            scanner_scan_directory(ready_path);
+            int found = scanner_scan_directory(ready_path);
+            printf("API: Scanned %s -> %d new files\n", ready_path, found);
+            if (found > 0) total_found += found;
         }
-        send_response(fd, 200, "OK", "application/json",
-                     "{\"status\": \"scan complete\"}", 27);
+        int after = database_get_count();
+        char json[512];
+        int len = snprintf(json, sizeof(json),
+            "{\"status\":\"scan complete\",\"paths_scanned\":%d,"
+            "\"new_files\":%d,\"total_before\":%d,\"total_after\":%d}",
+            server_config.converted_path_count, total_found, before, after);
+        send_response(fd, 200, "OK", "application/json", json, len);
+    }
+    else if (strcmp(path, "/api/paths") == 0) {
+        /* Diagnostic: show configured paths and what exists */
+        size_t buf_size = 8192;
+        size_t buf_used = 0;
+        char *json = malloc(buf_size);
+        buf_used += snprintf(json + buf_used, buf_size - buf_used,
+            "{\"converted_path_count\":%d,\"converted_paths\":[",
+            server_config.converted_path_count);
+        for (int i = 0; i < server_config.converted_path_count; i++) {
+            char ready_path[MAX_PATH];
+            snprintf(ready_path, sizeof(ready_path), "%s/nixly_ready_media",
+                     server_config.converted_paths[i]);
+            struct stat st;
+            int dir_exists = (stat(ready_path, &st) == 0 && S_ISDIR(st.st_mode));
+            /* Count files in ready_path */
+            int file_count = 0;
+            if (dir_exists) {
+                file_count = scanner_scan_directory(ready_path);
+                if (file_count < 0) file_count = 0;
+            }
+            if (i > 0) json[buf_used++] = ',';
+            buf_used += snprintf(json + buf_used, buf_size - buf_used,
+                "{\"path\":\"%s\",\"ready_media_path\":\"%s\","
+                "\"ready_media_exists\":%s,\"files_found\":%d}",
+                server_config.converted_paths[i], ready_path,
+                dir_exists ? "true" : "false", file_count);
+        }
+        buf_used += snprintf(json + buf_used, buf_size - buf_used,
+            "],\"unprocessed_path_count\":%d,\"unprocessed_paths\":[",
+            server_config.unprocessed_path_count);
+        for (int i = 0; i < server_config.unprocessed_path_count; i++) {
+            struct stat st;
+            int exists = (stat(server_config.unprocessed_paths[i], &st) == 0);
+            if (i > 0) json[buf_used++] = ',';
+            buf_used += snprintf(json + buf_used, buf_size - buf_used,
+                "{\"path\":\"%s\",\"exists\":%s}",
+                server_config.unprocessed_paths[i], exists ? "true" : "false");
+        }
+        buf_used += snprintf(json + buf_used, buf_size - buf_used,
+            "],\"db_path\":\"%s\",\"total_media\":%d}",
+            server_config.db_path, database_get_count());
+        send_response(fd, 200, "OK", "application/json", json, buf_used);
+        free(json);
     }
     else if (strcmp(path, "/api/tmdb/refresh") == 0) {
         /* Fetch missing TMDB metadata */

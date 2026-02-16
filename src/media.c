@@ -726,7 +726,7 @@ media_view_refresh(Monitor *m, MediaViewType type)
 
 	if (server_count == 0) {
 		/* Fallback to localhost */
-		snprintf(cmd, sizeof(cmd), "curl -s 'http://localhost:8080%s' 2>/dev/null", endpoint);
+		snprintf(cmd, sizeof(cmd), "curl -s --connect-timeout 2 'http://localhost:8080%s' 2>/dev/null", endpoint);
 		fp = popen(cmd, "r");
 		if (fp) {
 			bytes_read = fread(buffer, 1, sizeof(buffer) - 1, fp);

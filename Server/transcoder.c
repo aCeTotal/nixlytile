@@ -1986,6 +1986,9 @@ static int process_single_job(TranscodeJob *job) {
     if (stat(mkv_path, &st) == 0 && st.st_size > 0) {
         printf("Transcoder: [%d/%d] Skip (exists): %s\n",
                tc.completed_jobs + 1, tc.total_jobs, job->title);
+        /* Ensure skipped files are in the database (they may be missing after
+         * a DB reset, config change, or if the initial scan missed them) */
+        scanner_scan_file(mkv_path, 1);
         pthread_mutex_lock(&tc.lock);
         tc.completed_jobs++;
         pthread_mutex_unlock(&tc.lock);

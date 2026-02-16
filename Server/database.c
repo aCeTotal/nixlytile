@@ -626,13 +626,16 @@ char *database_get_tvshows_json(void) {
             "\"poster\":%s,\"backdrop\":%s,\"year\":%d,\"rating\":%.1f,"
             "\"genres\":%s,"
             "\"tmdb_total_seasons\":%d,\"tmdb_total_episodes\":%d,\"tmdb_episode_runtime\":%d,"
-            "\"tmdb_status\":%s,\"tmdb_next_episode\":%s}",
+            "\"tmdb_status\":%s,\"tmdb_next_episode\":%s,"
+            "\"server_id\":\"%s\",\"server_rating\":%d,\"server_priority\":%d}",
             id, type, title_esc, show_esc,
             season, episode_count, seasons_esc, size, duration, width, height,
             tmdb_id, tmdb_title_esc, overview_esc,
             poster_esc, backdrop_esc, year, rating, genres_esc,
             tmdb_total_seasons, tmdb_total_episodes, tmdb_episode_runtime,
-            status_esc, next_ep_esc);
+            status_esc, next_ep_esc,
+            server_config.server_id, config_get_server_rating(),
+            config_get_server_priority());
 
         free(seasons_str);
         free(title_esc);
