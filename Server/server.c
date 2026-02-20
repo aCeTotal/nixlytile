@@ -20,6 +20,7 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <errno.h>
 #include <signal.h>
 
@@ -738,6 +739,72 @@ static void handle_api(int fd, const char *path) {
             "{\"movies\":%d,\"tvshows\":%d,\"roms\":%d,\"total\":%d}",
             0, 0, database_get_rom_count(), database_get_count());
         send_response(fd, 200, "OK", "application/json", json, len);
+    }
+    else if (strcmp(path, "/api/debug/ls") == 0) {
+        /* Diagnostic: recursively list files in nixly_ready_media without probing */
+        size_t buf_size = 65536;
+        size_t buf_used = 0;
+        char *json = malloc(buf_size);
+        buf_used += snprintf(json + buf_used, buf_size - buf_used, "{\"paths\":[");
+
+        for (int i = 0; i < server_config.converted_path_count; i++) {
+            char ready_path[MAX_PATH];
+            snprintf(ready_path, sizeof(ready_path), "%s/nixly_ready_media",
+                     server_config.converted_paths[i]);
+
+            /* Recursive listing using a simple stack */
+            char dirs[64][MAX_PATH];
+            int dir_count = 0;
+            strncpy(dirs[0], ready_path, MAX_PATH - 1);
+            dir_count = 1;
+            int first_file = 1;
+
+            while (dir_count > 0) {
+                dir_count--;
+                char *cur_dir = dirs[dir_count];
+                DIR *d = opendir(cur_dir);
+                if (!d) {
+                    if (buf_used < buf_size - 256) {
+                        if (!first_file) json[buf_used++] = ',';
+                        first_file = 0;
+                        buf_used += snprintf(json + buf_used, buf_size - buf_used,
+                            "{\"error\":\"opendir failed\",\"path\":\"%s\",\"errno\":%d,\"strerror\":\"%s\"}",
+                            cur_dir, errno, strerror(errno));
+                    }
+                    continue;
+                }
+                struct dirent *ent;
+                while ((ent = readdir(d)) != NULL) {
+                    if (ent->d_name[0] == '.') continue;
+                    char fullpath[MAX_PATH];
+                    snprintf(fullpath, sizeof(fullpath), "%s/%s", cur_dir, ent->d_name);
+                    struct stat st;
+                    int stat_ok = (stat(fullpath, &st) == 0);
+                    if (stat_ok && S_ISDIR(st.st_mode) && dir_count < 63) {
+                        strncpy(dirs[dir_count], fullpath, MAX_PATH - 1);
+                        dir_count++;
+                    } else if (buf_used < buf_size - 512) {
+                        if (!first_file) json[buf_used++] = ',';
+                        first_file = 0;
+                        int is_media = scanner_is_media_file(fullpath);
+                        buf_used += snprintf(json + buf_used, buf_size - buf_used,
+                            "{\"path\":\"%s\",\"is_dir\":%s,\"is_media\":%s,\"size\":%lld,\"stat_ok\":%s}",
+                            fullpath,
+                            (stat_ok && S_ISDIR(st.st_mode)) ? "true" : "false",
+                            is_media ? "true" : "false",
+                            stat_ok ? (long long)st.st_size : 0LL,
+                            stat_ok ? "true" : "false");
+                    }
+                }
+                closedir(d);
+            }
+        }
+
+        buf_used += snprintf(json + buf_used, buf_size - buf_used,
+            "],\"converted_path_count\":%d,\"db_count\":%d}",
+            server_config.converted_path_count, database_get_count());
+        send_response(fd, 200, "OK", "application/json", json, buf_used);
+        free(json);
     }
     else {
         send_error(fd, 404, "API endpoint not found");

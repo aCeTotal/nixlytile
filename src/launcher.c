@@ -404,6 +404,7 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 				/* Launch with dGPU if desktop entry prefers it or command matches dgpu_programs */
 				pid_t pid = fork();
 				if (pid == 0) {
+					dup2(STDERR_FILENO, STDOUT_FILENO);
 					setsid();
 					if (desktop_entries[idx].prefers_dgpu || should_use_dgpu(cmd_str))
 						set_dgpu_env();
