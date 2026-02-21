@@ -10,6 +10,17 @@ cleanupmon(struct wl_listener *listener, void *data)
 
 	modal_file_search_stop(m);
 
+	/* If a laptop display is being removed, clear is_mirror on any output
+	 * that was mirroring it so it becomes an independent display. */
+	if (strncmp(m->wlr_output->name, "eDP", 3) == 0 ||
+	    strncmp(m->wlr_output->name, "LVDS", 4) == 0) {
+		Monitor *other;
+		wl_list_for_each(other, &mons, link) {
+			if (other->is_mirror)
+				other->is_mirror = 0;
+		}
+	}
+
 	/* m->layers[i] are intentionally not unlinked */
 	for (i = 0; i < LENGTH(m->layers); i++) {
 		wl_list_for_each_safe(l, tmp, &m->layers[i], link)
@@ -50,11 +61,11 @@ closemon(Monitor *m)
 	if (!nmons) {
 		selmon = NULL;
 	} else if (m == selmon) {
-		do /* don't switch to disabled mons */
+		do /* don't switch to disabled or mirror mons */
 			selmon = wl_container_of(mons.next, selmon, link);
-		while (!selmon->wlr_output->enabled && i++ < nmons);
+		while ((!selmon->wlr_output->enabled || selmon->is_mirror) && i++ < nmons);
 
-		if (!selmon->wlr_output->enabled)
+		if (!selmon->wlr_output->enabled || selmon->is_mirror)
 			selmon = NULL;
 	}
 
@@ -116,6 +127,25 @@ find_mode(struct wlr_output *output, int width, int height, float refresh)
 		}
 	}
 	return best;
+}
+
+static Monitor *
+find_laptop_monitor(void)
+{
+	Monitor *m;
+	wl_list_for_each(m, &mons, link) {
+		if (strncmp(m->wlr_output->name, "eDP", 3) == 0 ||
+		    strncmp(m->wlr_output->name, "LVDS", 4) == 0)
+			return m;
+	}
+	return NULL;
+}
+
+static int
+is_external_connector(const char *name)
+{
+	return strncmp(name, "HDMI", 4) == 0 ||
+	       strncmp(name, "DP", 2) == 0;
 }
 
 void
@@ -293,6 +323,24 @@ createmon(struct wl_listener *listener, void *data)
 			m->m.y = pos_y;
 			wlr_log(WLR_INFO, "Positioning monitor %s at %d,%d (slot: %d)",
 				wlr_output->name, pos_x, pos_y, rtcfg->position);
+		}
+	}
+
+	/* Auto-mirror: if this is an external output (HDMI/DP) and a laptop
+	 * display exists, and no explicit position was configured, place this
+	 * output at the laptop's coordinates so it mirrors the same content. */
+	if (m->m.x == -1 && m->m.y == -1 && !use_runtime_config
+			&& is_external_connector(wlr_output->name)) {
+		Monitor *laptop = find_laptop_monitor();
+		if (laptop) {
+			struct wlr_box laptop_box;
+			wlr_output_layout_get_box(output_layout, laptop->wlr_output, &laptop_box);
+			m->m.x = laptop_box.x;
+			m->m.y = laptop_box.y;
+			m->is_mirror = 1;
+			wlr_log(WLR_INFO, "Auto-mirroring %s at laptop %s position (%d,%d)",
+				wlr_output->name, laptop->wlr_output->name,
+				m->m.x, m->m.y);
 		}
 	}
 
@@ -486,8 +534,8 @@ track_game_frame_pacing(Monitor *m, uint64_t frame_start_ns)
 		/* Only track reasonable intervals (8ms - 100ms = ~10-120fps) */
 		if (game_interval > 8000000 && game_interval < 100000000) {
 			m->game_frame_intervals[m->game_frame_interval_idx] = game_interval;
-			m->game_frame_interval_idx = (m->game_frame_interval_idx + 1) % 8;
-			if (m->game_frame_interval_count < 8)
+			m->game_frame_interval_idx = (m->game_frame_interval_idx + 1) % 16;
+			if (m->game_frame_interval_count < 16)
 				m->game_frame_interval_count++;
 
 			/* Calculate estimated game FPS from rolling average */
@@ -557,63 +605,124 @@ track_game_frame_pacing(Monitor *m, uint64_t frame_start_ns)
 	}
 }
 
+/*
+ * Frame repeat: adapt game frame cadence to display refresh rate.
+ *
+ * For a game at X fps on a display at Y Hz, find integer N such that
+ * Y/N is as close to X as possible.  Show each game frame for exactly
+ * N vblanks, giving perfectly even frame times.
+ *
+ * Examples:
+ *   45 fps on 144 Hz → N=3 (48 fps effective, game throttled smoothly)
+ *   30 fps on 120 Hz → N=4 (30 fps effective, exact match)
+ *   40 fps on 144 Hz → N=4 (36 fps effective, game throttled)
+ *   55 fps on 144 Hz → N=3 (48 fps effective)
+ *
+ * The repeat count always picks the N whose effective FPS is closest
+ * to and not dramatically above the game's natural FPS (within 35%).
+ * If no N gives effective FPS within 35%, repeat is disabled.
+ *
+ * Hysteresis prevents rapid toggling: a new repeat count must be the
+ * best candidate for 30 consecutive vblanks (~200ms at 144Hz) before
+ * it's applied.  This makes the system stable with fluctuating FPS.
+ */
+#define FRAME_REPEAT_HYSTERESIS 30  /* vblanks before switching */
 static void
 calculate_frame_repeat(Monitor *m, int is_game, int allow_tearing)
 {
 	float display_hz = 0.0f;
 	float game_fps = m->estimated_game_fps;
-	int optimal_repeat = 1;
+	float ratio;
+	int best_n = 1;
+	float best_error = 9999.0f;
 
 	if (m->present_interval_ns > 0)
 		display_hz = 1000000000.0f / (float)m->present_interval_ns;
 	else if (m->wlr_output->current_mode)
 		display_hz = (float)m->wlr_output->current_mode->refresh / 1000.0f;
 
-	if (game_fps > 5.0f && display_hz > 30.0f) {
-		float ratio = display_hz / game_fps;
-		float min_error = 9999.0f;
+	if (game_fps < 5.0f || display_hz < 30.0f)
+		goto apply;
 
-		for (int n = 1; n <= 6; n++) {
-			float effective_fps = display_hz / (float)n;
-			float error = fabsf(effective_fps - game_fps);
-			float frac_error = fabsf(ratio - (float)n);
+	ratio = display_hz / game_fps;
 
-			if (frac_error < 0.15f && error < min_error) {
-				min_error = error;
-				optimal_repeat = n;
-			}
-		}
+	/* If game FPS is close to display Hz, no repeat needed */
+	if (ratio < 1.5f) {
+		best_n = 1;
+		goto apply;
+	}
 
-		/* Only enable repeat if within 10% match */
-		if (optimal_repeat > 1) {
-			float target_fps = display_hz / (float)optimal_repeat;
-			float match_quality = fabsf(game_fps - target_fps) / target_fps;
-			if (match_quality > 0.10f)
-				optimal_repeat = 1;
+	/*
+	 * Find the integer N whose effective FPS (display_hz / N) is
+	 * closest to the game's natural FPS.  Prefer N where the
+	 * effective FPS is at or above the game FPS (so the game can
+	 * keep up without dropping frames), but allow slightly below.
+	 */
+	for (int n = 2; n <= 10; n++) {
+		float effective_fps = display_hz / (float)n;
+		float error = fabsf(effective_fps - game_fps) / game_fps;
+
+		/* Effective FPS must be within 35% of game FPS */
+		if (error > 0.35f)
+			continue;
+
+		/*
+		 * Slight preference for effective FPS >= game FPS (game can
+		 * keep up).  Penalize N where effective > game by a small
+		 * amount so we don't over-throttle unnecessarily.
+		 */
+		if (effective_fps > game_fps)
+			error *= 1.1f;
+
+		if (error < best_error) {
+			best_error = error;
+			best_n = n;
 		}
 	}
 
-	/* Update frame repeat state */
-	if (optimal_repeat != m->frame_repeat_count) {
-		if (optimal_repeat > 1 && !m->frame_repeat_enabled) {
-			m->frame_repeat_enabled = 1;
-			m->frame_repeat_interval_ns = m->present_interval_ns;
-			wlr_log(WLR_INFO, "Frame repeat enabled: %dx (%.1f FPS → %.1f Hz display)",
-				optimal_repeat, game_fps, display_hz);
-		} else if (optimal_repeat == 1 && m->frame_repeat_enabled) {
-			m->frame_repeat_enabled = 0;
-			wlr_log(WLR_INFO, "Frame repeat disabled - game FPS matches display");
+apply:
+	/*
+	 * Hysteresis: only apply a new repeat count after it has been
+	 * the best candidate for FRAME_REPEAT_HYSTERESIS consecutive
+	 * vblanks.  This prevents rapid toggling between repeat counts
+	 * when the game FPS fluctuates near a boundary.
+	 */
+	if (best_n == m->frame_repeat_count) {
+		/* Already active — reset candidate tracking */
+		m->frame_repeat_candidate = best_n;
+		m->frame_repeat_candidate_age = 0;
+	} else if (best_n == m->frame_repeat_candidate) {
+		/* Same candidate as last vblank — age it */
+		m->frame_repeat_candidate_age++;
+		if (m->frame_repeat_candidate_age >= FRAME_REPEAT_HYSTERESIS) {
+			/* Stable long enough — apply the change.
+			 * Let the current repeat cycle finish before switching
+			 * to avoid a timing glitch mid-cycle. */
+			if (best_n > 1 && !m->frame_repeat_enabled) {
+				m->frame_repeat_enabled = 1;
+				m->frame_repeat_interval_ns = m->present_interval_ns;
+			} else if (best_n == 1 && m->frame_repeat_enabled) {
+				m->frame_repeat_enabled = 0;
+			}
+			wlr_log(WLR_INFO, "Frame repeat %dx → %dx (%.1f FPS @ %.0f Hz)",
+				m->frame_repeat_count, best_n, game_fps, display_hz);
+			m->frame_repeat_count = best_n;
+			m->frame_repeat_current = 0;
+			m->frame_repeat_candidate_age = 0;
 		}
-		m->frame_repeat_count = optimal_repeat;
-		m->frame_repeat_current = 0;
+	} else {
+		/* New candidate — start tracking */
+		m->frame_repeat_candidate = best_n;
+		m->frame_repeat_candidate_age = 1;
 	}
 
 	/* Calculate judder score (0-100, lower is better) */
 	if (game_fps > 0.0f && display_hz > 0.0f) {
-		float ideal_interval_ms = 1000.0f / game_fps;
-		float actual_interval_ms = 1000.0f / display_hz * (float)optimal_repeat;
-		float deviation_pct = fabsf(ideal_interval_ms - actual_interval_ms) / ideal_interval_ms * 100.0f;
-		m->judder_score = (int)(deviation_pct * 10.0f);
+		int active_n = m->frame_repeat_count;
+		float ideal_ms = 1000.0f / game_fps;
+		float actual_ms = 1000.0f / display_hz * (float)active_n;
+		float dev = fabsf(ideal_ms - actual_ms) / ideal_ms * 100.0f;
+		m->judder_score = (int)(dev * 10.0f);
 		if (m->judder_score > 100) m->judder_score = 100;
 	}
 
@@ -719,28 +828,47 @@ rendermon(struct wl_listener *listener, void *data)
 			m->wlr_output->name);
 	} else if (!is_direct_scanout && m->direct_scanout_active) {
 		m->direct_scanout_active = 0;
-		m->frame_pacing_active = 0;
 		m->direct_scanout_notified = 0; /* Reset so next scanout shows OSD again */
-		/* Reset frame pacing statistics on exit */
-		m->pending_game_frame = 0;
-		m->estimated_game_fps = 0.0f;
 		wlr_log(WLR_INFO, "Direct scanout deactivated on %s - stats: %lu presented, %lu dropped, %lu held",
 			m->wlr_output->name, m->frames_presented, m->frames_dropped, m->frames_held);
+		/* Keep frame_pacing_active if game is still fullscreen */
+		if (!is_game) {
+			m->frame_pacing_active = 0;
+			m->pending_game_frame = 0;
+			m->estimated_game_fps = 0.0f;
+		}
 	}
 
-	/* Frame pacing for games in direct scanout mode */
-	if (is_direct_scanout && is_game && !allow_tearing && m->frame_pacing_active) {
+	/* Frame pacing for fullscreen games.
+	 * Enable even without direct scanout — many Proton/Wine games
+	 * don't get direct scanout due to format or size mismatch, but
+	 * still benefit from even frame cadence. */
+	if (is_game && !allow_tearing) {
+		if (!m->frame_pacing_active) {
+			m->frame_pacing_active = 1;
+			wlr_log(WLR_INFO, "Frame pacing enabled for fullscreen game on %s",
+				m->wlr_output->name);
+		}
 		use_frame_pacing = 1;
 		track_game_frame_pacing(m, frame_start_ns);
 	}
 
-	/* Frame doubling/tripling for smooth low-FPS playback (non-VRR) */
-	if (is_game && m->frame_pacing_active && !m->game_vrr_active && !allow_tearing) {
+	/* Frame doubling/tripling for smooth low-FPS playback (non-VRR).
+	 * For video: use detected_video_hz as the fps source.
+	 * For games: use estimated_game_fps from real-time tracking. */
+	if (is_video && !m->vrr_active && m->frame_pacing_active) {
+		Client *vc = focustop(m);
+		if (vc && vc->detected_video_hz > 0.0f)
+			m->estimated_game_fps = vc->detected_video_hz;
+		calculate_frame_repeat(m, 1, 0);
+	} else if (is_game && m->frame_pacing_active && !m->game_vrr_active && !allow_tearing) {
 		calculate_frame_repeat(m, is_game, allow_tearing);
 	} else if (m->frame_repeat_enabled) {
 		m->frame_repeat_enabled = 0;
 		m->frame_repeat_count = 1;
 		m->frame_repeat_current = 0;
+		m->frame_repeat_candidate = 0;
+		m->frame_repeat_candidate_age = 0;
 		m->adaptive_pacing_enabled = 0;
 		wlr_log(WLR_INFO, "Frame repeat disabled - VRR active or tearing enabled");
 	}
@@ -804,7 +932,7 @@ rendermon(struct wl_listener *listener, void *data)
 	 * Instead of uneven frame times (16-17-16-17-16ms), we get
 	 * perfectly consistent frame times (33-33-33-33-33ms for 30fps).
 	 */
-	if (m->frame_repeat_enabled && m->frame_repeat_count > 1 && is_game) {
+	if (m->frame_repeat_enabled && m->frame_repeat_count > 1 && (is_game || is_video)) {
 		m->frame_repeat_current++;
 
 		/*
@@ -1151,8 +1279,8 @@ set_video_refresh_rate(Monitor *m, Client *c)
 	if (!m || !m->wlr_output || !m->wlr_output->enabled || !c)
 		return;
 
-	/* Don't switch if already in video mode */
-	if (m->video_mode_active)
+	/* Don't re-detect if already active */
+	if (m->video_mode_active || m->vrr_active || c->detected_video_hz > 0.0f)
 		return;
 
 	/* Check if content type is video */
@@ -2893,14 +3021,16 @@ check_fullscreen_video(void)
 				c->detected_video_hz, c->video_detect_phase, c->video_detect_retries,
 				m->video_mode_active, m->vrr_active);
 
-		/* Already successfully detected and mode set */
-		if (c->video_detect_phase == 2 && (m->video_mode_active || m->vrr_active)) {
+		/* Already successfully detected */
+		if (c->video_detect_phase == 2 && (m->vrr_active || c->detected_video_hz > 0.0f)) {
 			/* Check if Hz changed significantly - video may have switched */
 			if (hz > 0.0f && fabsf(hz - c->detected_video_hz) > 0.5f) {
 				wlr_log(WLR_INFO, "Video Hz changed from %.3f to %.3f, re-evaluating",
 						c->detected_video_hz, hz);
 				c->detected_video_hz = hz;
-				apply_best_video_mode(m, hz);
+				m->estimated_game_fps = hz;
+				if (m->vrr_active)
+					enable_vrr_video_mode(m, hz);
 			}
 			continue;
 		}
@@ -2916,79 +3046,87 @@ check_fullscreen_video(void)
 
 		/* Phase 1: Analysis - try to detect video framerate */
 		if (c->video_detect_phase == 1) {
+			float use_hz = 0.0f;
+
 			if (hz > 0.0f) {
-				/* Successfully detected! Apply best mode */
-				c->detected_video_hz = hz;
+				use_hz = hz;
+			} else if (!is_video) {
+				/* Try to estimate from raw measurements */
+				double avg_interval = 0;
+				int valid = 0;
+				for (int i = 1; i < c->frame_time_count; i++) {
+					int prev_idx = (c->frame_time_idx - c->frame_time_count + i - 1 + 32) % 32;
+					int curr_idx = (c->frame_time_idx - c->frame_time_count + i + 32) % 32;
+					uint64_t interval = c->frame_times[curr_idx] - c->frame_times[prev_idx];
+					if (interval >= 5 && interval <= 200) {
+						avg_interval += interval;
+						valid++;
+					}
+				}
+
+				if (valid > 0) {
+					avg_interval /= valid;
+					double raw_hz = 1000.0 / avg_interval;
+
+					/* If in video range (20-120 Hz), use rounded standard framerate */
+					if (raw_hz >= 20.0 && raw_hz <= 120.0) {
+						if (raw_hz < 24.5)
+							use_hz = (raw_hz < 24.0) ? 23.976f : 24.0f;
+						else if (raw_hz < 27.5)
+							use_hz = 25.0f;
+						else if (raw_hz < 35.0)
+							use_hz = (raw_hz < 30.0) ? 29.97f : 30.0f;
+						else if (raw_hz < 55.0)
+							use_hz = 50.0f;
+						else if (raw_hz < 65.0)
+							use_hz = (raw_hz < 60.0) ? 59.94f : 60.0f;
+						else
+							use_hz = (float)raw_hz;
+
+						wlr_log(WLR_INFO, "Estimated framerate %.3f Hz (raw ~%.1f Hz) on %s",
+								use_hz, raw_hz, m->wlr_output->name);
+					} else {
+						wlr_log(WLR_DEBUG, "Measured Hz (~%.1f) outside video range", raw_hz);
+					}
+				}
+			}
+
+			if (use_hz > 0.0f) {
+				c->detected_video_hz = use_hz;
 				c->video_detect_phase = 2;
 				c->video_detect_retries = 0;
 
-				wlr_log(WLR_INFO, "Video detected at %.3f Hz on %s, applying best mode",
-						hz, m->wlr_output->name);
-
-				if (apply_best_video_mode(m, hz)) {
-					wlr_log(WLR_INFO, "Successfully applied optimal video mode");
+				/* Try VRR first - best possible solution */
+				if (m->vrr_capable && enable_vrr_video_mode(m, use_hz)) {
+					wlr_log(WLR_INFO, "Video %.3f Hz on %s: using VRR",
+							use_hz, m->wlr_output->name);
 				} else {
-					wlr_log(WLR_ERROR, "Failed to apply video mode");
-				}
-				continue;
-			}
+					/* Use frame repeat at native refresh rate.
+					 * rendermon() will calculate the optimal repeat
+					 * count (e.g. 24fps on 144Hz = 6x repeat). */
+					m->estimated_game_fps = use_hz;
+					m->frame_pacing_active = 1;
 
-			/* No stable framerate detected yet */
-			if (is_video) {
-				/* Content-type says video but can't detect fps.
-				 * Use default 59.94 Hz as fallback. */
-				wlr_log(WLR_INFO, "Video content-type detected but fps unclear, using 59.94 Hz");
-				c->detected_video_hz = 59.94f;
-				c->video_detect_phase = 2;
-				apply_best_video_mode(m, 59.94f);
-				continue;
-			}
+					float display_hz = 0.0f;
+					if (m->wlr_output->current_mode)
+						display_hz = m->wlr_output->current_mode->refresh / 1000.0f;
+					float ratio = display_hz / use_hz;
+					int repeat = (int)(ratio + 0.5f);
+					if (repeat < 1) repeat = 1;
 
-			/* Try to estimate from raw measurements */
-			double avg_interval = 0;
-			int valid = 0;
-			for (int i = 1; i < c->frame_time_count; i++) {
-				int prev_idx = (c->frame_time_idx - c->frame_time_count + i - 1 + 32) % 32;
-				int curr_idx = (c->frame_time_idx - c->frame_time_count + i + 32) % 32;
-				uint64_t interval = c->frame_times[curr_idx] - c->frame_times[prev_idx];
-				if (interval >= 5 && interval <= 200) {
-					avg_interval += interval;
-					valid++;
-				}
-			}
-
-			if (valid > 0) {
-				avg_interval /= valid;
-				double raw_hz = 1000.0 / avg_interval;
-
-				/* If in video range (20-120 Hz), use rounded standard framerate */
-				if (raw_hz >= 20.0 && raw_hz <= 120.0) {
-					float use_hz;
-					if (raw_hz < 24.5)
-						use_hz = (raw_hz < 24.0) ? 23.976f : 24.0f;
-					else if (raw_hz < 27.5)
-						use_hz = 25.0f;
-					else if (raw_hz < 35.0)
-						use_hz = (raw_hz < 30.0) ? 29.97f : 30.0f;
-					else if (raw_hz < 55.0)
-						use_hz = 50.0f;
-					else if (raw_hz < 65.0)
-						use_hz = (raw_hz < 60.0) ? 59.94f : 60.0f;
+					char osd_msg[64];
+					if (repeat > 1 && fabsf(ratio - (float)repeat) < 0.15f)
+						snprintf(osd_msg, sizeof(osd_msg), "%.0f fps %dx @ %.0f Hz",
+								use_hz, repeat, display_hz);
 					else
-						use_hz = (float)raw_hz;
+						snprintf(osd_msg, sizeof(osd_msg), "%.0f fps @ %.0f Hz",
+								use_hz, display_hz);
+					show_hz_osd(m, osd_msg);
 
-					c->detected_video_hz = use_hz;
-					c->video_detect_phase = 2;
-
-					wlr_log(WLR_INFO, "Estimated framerate %.3f Hz (raw ~%.1f Hz) on %s",
-							use_hz, raw_hz, m->wlr_output->name);
-
-					apply_best_video_mode(m, use_hz);
-					continue;
+					wlr_log(WLR_INFO, "Video %.3f Hz on %s: frame repeat at native %.0f Hz (%dx)",
+							use_hz, m->wlr_output->name, display_hz, repeat);
 				}
-
-				/* Hz outside video range - likely not video content */
-				wlr_log(WLR_DEBUG, "Measured Hz (~%.1f) outside video range", raw_hz);
+				continue;
 			}
 
 			/* No video detected - silent retry (1 retry only for speed) */
@@ -3054,7 +3192,7 @@ updatemons(struct wl_listener *listener, void *data)
 	 * we need to move clients back to their original monitor.
 	 */
 	wl_list_for_each(m, &mons, link) {
-		if (!m->wlr_output->enabled)
+		if (!m->wlr_output->enabled || m->is_mirror)
 			continue;
 		wl_list_for_each(c, &clients, link) {
 			if (c->output && c->mon != m
@@ -3108,7 +3246,7 @@ updatemons(struct wl_listener *listener, void *data)
 		config_head->state.x = m->m.x;
 		config_head->state.y = m->m.y;
 
-		if (!selmon) {
+		if (!selmon && !m->is_mirror) {
 			selmon = m;
 		}
 	}

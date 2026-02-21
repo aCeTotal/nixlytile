@@ -540,6 +540,8 @@ typedef struct {
 	int pwm_enable;
 	int temp_mc;
 	uint8_t ec_reg_rpm;
+	uint8_t ec_reg_rpm_h;  /* 16-bit RPM tachometer high byte */
+	uint8_t ec_reg_rpm_l;  /* 16-bit RPM tachometer low byte */
 	uint8_t ec_reg_temp;
 	int msi_sysfs; /* uses /sys/devices/platform/msi-ec/ */
 	char msi_sysfs_dir[16]; /* "cpu" or "gpu" */
@@ -1171,6 +1173,7 @@ struct Monitor {
 	int nmaster;
 	char ltsymbol[16];
 	int asleep;
+	int is_mirror;  /* This output mirrors the laptop display */
 	LayoutNode *root[MAX_TAGS];
 	struct wlr_output_mode *original_mode;
 	int video_mode_active;
@@ -1200,7 +1203,7 @@ struct Monitor {
 	uint64_t target_present_ns;
 	int pending_game_frame;
 	uint64_t game_frame_submit_ns;
-	uint64_t game_frame_intervals[8];
+	uint64_t game_frame_intervals[16];
 	int game_frame_interval_idx;
 	int game_frame_interval_count;
 	float estimated_game_fps;
@@ -1214,6 +1217,8 @@ struct Monitor {
 	int frame_repeat_enabled;
 	int frame_repeat_count;
 	int frame_repeat_current;
+	int frame_repeat_candidate;     /* pending repeat count (hysteresis) */
+	int frame_repeat_candidate_age; /* vblanks candidate has been stable */
 	uint64_t frame_repeat_interval_ns;
 	uint64_t last_game_buffer_id;
 	uint64_t frames_repeated;

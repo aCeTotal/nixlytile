@@ -64,6 +64,11 @@ sysfs_write_int(const char *path, int val)
 #define EC_REG_CPU_FAN   0x71
 #define EC_REG_GPU_TEMP  0x80
 #define EC_REG_GPU_FAN   0x89
+/* RPM tachometer registers (16-bit, big-endian) */
+#define EC_REG_CPU_RPM_H 0xC8
+#define EC_REG_CPU_RPM_L 0xC9
+#define EC_REG_GPU_RPM_H 0xCA
+#define EC_REG_GPU_RPM_L 0xCB
 
 static int ec_io_ready;
 
@@ -116,6 +121,28 @@ ec_read_reg(uint8_t addr)
 	return inb(EC_DATA_PORT);
 }
 
+/* Read 16-bit RPM from tachometer register pair (big-endian).
+ * Returns actual RPM if valid, -1 otherwise. */
+static int
+ec_read_rpm(uint8_t reg_h, uint8_t reg_l)
+{
+	int h, l, rpm;
+
+	if (!ec_io_ready)
+		return -1;
+	h = ec_read_reg(reg_h);
+	l = ec_read_reg(reg_l);
+	if (h < 0 || l < 0)
+		return -1;
+	rpm = (h << 8) | l;
+	/* Validate: 0 means fan off, 100-20000 is reasonable RPM range */
+	if (rpm == 0)
+		return 0;
+	if (rpm >= 100 && rpm <= 20000)
+		return rpm;
+	return -1;
+}
+
 static int
 is_msi_laptop(void)
 {
@@ -152,8 +179,13 @@ fan_scan_ec(FanPopup *p)
 	fe = &dev->fans[dev->fan_count];
 	snprintf(fe->label, sizeof(fe->label), "CPU Fan");
 	fe->ec_reg_rpm = EC_REG_CPU_FAN;
+	fe->ec_reg_rpm_h = EC_REG_CPU_RPM_H;
+	fe->ec_reg_rpm_l = EC_REG_CPU_RPM_L;
 	fe->ec_reg_temp = EC_REG_CPU_TEMP;
-	fe->rpm = val * 100;
+	{
+		int rpm = ec_read_rpm(EC_REG_CPU_RPM_H, EC_REG_CPU_RPM_L);
+		fe->rpm = rpm >= 0 ? rpm : val * 100;
+	}
 	fe->has_pwm = 0;
 	val = ec_read_reg(EC_REG_CPU_TEMP);
 	fe->temp_mc = val > 0 ? val * 1000 : 0;
@@ -166,8 +198,13 @@ fan_scan_ec(FanPopup *p)
 		fe = &dev->fans[dev->fan_count];
 		snprintf(fe->label, sizeof(fe->label), "GPU Fan");
 		fe->ec_reg_rpm = EC_REG_GPU_FAN;
+		fe->ec_reg_rpm_h = EC_REG_GPU_RPM_H;
+		fe->ec_reg_rpm_l = EC_REG_GPU_RPM_L;
 		fe->ec_reg_temp = EC_REG_GPU_TEMP;
-		fe->rpm = val * 100;
+		{
+			int rpm = ec_read_rpm(EC_REG_GPU_RPM_H, EC_REG_GPU_RPM_L);
+			fe->rpm = rpm >= 0 ? rpm : val * 100;
+		}
 		fe->has_pwm = 0;
 		val = ec_read_reg(EC_REG_GPU_TEMP);
 		fe->temp_mc = val > 0 ? val * 1000 : 0;
@@ -254,12 +291,20 @@ fan_scan_msi_sysfs(FanPopup *p)
 	dev->type = FAN_DEV_MSI_EC;
 	dev->fan_count = 0;
 
+	/* Try EC direct access for precise RPM tachometer */
+	ec_init_io();
+
 	/* CPU fan */
 	fe = &dev->fans[dev->fan_count];
 	snprintf(fe->label, sizeof(fe->label), "CPU Fan");
 	fe->msi_sysfs = 1;
 	snprintf(fe->msi_sysfs_dir, sizeof(fe->msi_sysfs_dir), "cpu");
-	fe->rpm = val * 100;
+	fe->ec_reg_rpm_h = EC_REG_CPU_RPM_H;
+	fe->ec_reg_rpm_l = EC_REG_CPU_RPM_L;
+	{
+		int rpm = ec_read_rpm(EC_REG_CPU_RPM_H, EC_REG_CPU_RPM_L);
+		fe->rpm = rpm >= 0 ? rpm : val * 100;
+	}
 	fe->has_pwm = 0;
 	val = sysfs_read_int("/sys/devices/platform/msi-ec/cpu/realtime_temperature");
 	fe->temp_mc = val > 0 ? val * 1000 : 0;
@@ -273,7 +318,12 @@ fan_scan_msi_sysfs(FanPopup *p)
 		snprintf(fe->label, sizeof(fe->label), "GPU Fan");
 		fe->msi_sysfs = 1;
 		snprintf(fe->msi_sysfs_dir, sizeof(fe->msi_sysfs_dir), "gpu");
-		fe->rpm = val * 100;
+		fe->ec_reg_rpm_h = EC_REG_GPU_RPM_H;
+		fe->ec_reg_rpm_l = EC_REG_GPU_RPM_L;
+		{
+			int rpm = ec_read_rpm(EC_REG_GPU_RPM_H, EC_REG_GPU_RPM_L);
+			fe->rpm = rpm >= 0 ? rpm : val * 100;
+		}
 		fe->has_pwm = 0;
 		val = sysfs_read_int("/sys/devices/platform/msi-ec/gpu/realtime_temperature");
 		fe->temp_mc = val > 0 ? val * 1000 : 0;
@@ -450,12 +500,18 @@ fan_read_all(FanPopup *p)
 			FanEntry *fe = &dev->fans[f];
 
 			if (fe->msi_sysfs) {
-				int val;
-				snprintf(path, sizeof(path),
-						"/sys/devices/platform/msi-ec/%s/realtime_fan_speed",
-						fe->msi_sysfs_dir);
-				val = sysfs_read_int(path);
-				fe->rpm = val > 0 ? val * 100 : 0;
+				int val, rpm;
+				/* Try EC tachometer for precise RPM */
+				rpm = ec_read_rpm(fe->ec_reg_rpm_h, fe->ec_reg_rpm_l);
+				if (rpm >= 0) {
+					fe->rpm = rpm;
+				} else {
+					snprintf(path, sizeof(path),
+							"/sys/devices/platform/msi-ec/%s/realtime_fan_speed",
+							fe->msi_sysfs_dir);
+					val = sysfs_read_int(path);
+					fe->rpm = val > 0 ? val * 100 : 0;
+				}
 				snprintf(path, sizeof(path),
 						"/sys/devices/platform/msi-ec/%s/realtime_temperature",
 						fe->msi_sysfs_dir);
@@ -465,10 +521,16 @@ fan_read_all(FanPopup *p)
 			}
 
 			if (fe->ec_reg_rpm) {
-				int val = ec_read_reg(fe->ec_reg_rpm);
-				fe->rpm = val > 0 ? val * 100 : 0;
+				/* Try 16-bit tachometer first */
+				int rpm = ec_read_rpm(fe->ec_reg_rpm_h, fe->ec_reg_rpm_l);
+				if (rpm >= 0) {
+					fe->rpm = rpm;
+				} else {
+					int val = ec_read_reg(fe->ec_reg_rpm);
+					fe->rpm = val > 0 ? val * 100 : 0;
+				}
 				if (fe->ec_reg_temp) {
-					val = ec_read_reg(fe->ec_reg_temp);
+					int val = ec_read_reg(fe->ec_reg_temp);
 					fe->temp_mc = val > 0 ? val * 1000 : 0;
 				}
 				continue;

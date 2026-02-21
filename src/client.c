@@ -696,6 +696,19 @@ setfullscreen(Client *c, int fullscreen)
 		/* Restore max refresh rate when exiting fullscreen */
 		restore_max_refresh_rate(c->mon);
 		c->detected_video_hz = 0.0f;
+		c->video_detect_phase = 0;
+		c->video_detect_retries = 0;
+		if (c->mon) {
+			c->mon->frame_pacing_active = 0;
+			c->mon->estimated_game_fps = 0.0f;
+			c->mon->game_frame_interval_count = 0;
+			c->mon->game_frame_interval_idx = 0;
+			c->mon->frame_repeat_enabled = 0;
+			c->mon->frame_repeat_count = 1;
+			c->mon->frame_repeat_current = 0;
+			c->mon->frame_repeat_candidate = 0;
+			c->mon->frame_repeat_candidate_age = 0;
+		}
 	}
 	arrange(c->mon);
 	printstatus();

@@ -2792,6 +2792,8 @@ main(int argc, char *argv[])
 	cache_update_phase = 1; /* Next: file cache */
 	if (cache_update_timer)
 		wl_event_source_timer_update(cache_update_timer, 30000); /* 30 seconds */
+	/* Generate nixpkgs cache now if missing, then schedule weekly updates */
+	nixpkgs_cache_update_start();
 	schedule_nixpkgs_cache_timer();
 	run(startup_cmd);
 	cleanup();

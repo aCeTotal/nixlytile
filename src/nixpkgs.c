@@ -49,6 +49,10 @@ nixpkgs_cache_update_start(void)
 		home = "/tmp";
 	snprintf(cache_path, sizeof(cache_path), "%s/.cache/nixlytile-nixpkgs-stable.txt", home);
 
+	/* Skip update if cache already exists */
+	if (access(cache_path, F_OK) == 0)
+		return;
+
 	pid = fork();
 	if (pid == 0) {
 		setsid();
@@ -73,6 +77,14 @@ nixpkgs_cache_timer_cb(void *data)
 {
 	(void)data;
 	if (!game_mode_active && !htpc_mode_active) {
+		/* Weekly refresh: remove old cache so update_start regenerates it */
+		char *home = getenv("HOME");
+		if (home) {
+			char path[PATH_MAX];
+			snprintf(path, sizeof(path), "%s/.cache/nixlytile-nixpkgs-stable.txt", home);
+			unlink(path);
+		}
+		nixpkg_entries_loaded = 0;
 		nixpkgs_cache_update_start();
 	}
 	schedule_nixpkgs_cache_timer();
@@ -147,7 +159,7 @@ load_nixpkgs_cache(void)
 	char *home;
 	char *tab;
 
-	if (nixpkg_entries_loaded)
+	if (nixpkg_entries_loaded == 2)
 		return;
 
 	/* Build cache path from flake.nix nixpkgs-stable input */
@@ -159,27 +171,30 @@ load_nixpkgs_cache(void)
 
 	f = fopen(nixpkgs_cache_path, "r");
 	if (!f) {
-		wlr_log(WLR_INFO, "Nixpkgs cache not found at %s, generating...", nixpkgs_cache_path);
-		/* Generate cache in background using nix-env -qa with version */
-		pid_t pid = fork();
-		if (pid == 0) {
-			/* Child: generate cache with versions (format: name<TAB>version)
-			 * Use nixpkgs-stable from ~/.nixlyos flake
-			 * Filter to only show top-level packages (first column has no dots)
-			 * This filters out internal packages like pythonPackages.*, haskellPackages.*, etc. */
-			char cmd[2048];
-			snprintf(cmd, sizeof(cmd),
-				"nix eval --raw ~/.nixlyos#nixpkgs-stable.outPath 2>/dev/null | "
-				"xargs -I{} nix-env -qaP -f {} 2>/dev/null | "
-				"awk 'index($1, \".\") == 0 {print $1\"\\t\"$2}' | "
-				"sed 's/\\t.*-\\([0-9]\\)/\\t\\1/' > '%s'",
-				nixpkgs_cache_path);
-			execl("/bin/sh", "sh", "-c", cmd, NULL);
-			_exit(1);
+		if (nixpkg_entries_loaded == 0) {
+			wlr_log(WLR_INFO, "Nixpkgs cache not found at %s, generating...", nixpkgs_cache_path);
+			/* Generate cache in background using nix-env -qa with version */
+			pid_t pid = fork();
+			if (pid == 0) {
+				/* Child: generate cache with versions (format: name<TAB>version)
+				 * Use nixpkgs-stable from ~/.nixlyos flake
+				 * Filter to only show top-level packages (first column has no dots)
+				 * This filters out internal packages like pythonPackages.*, haskellPackages.*, etc. */
+				char cmd[2048];
+				snprintf(cmd, sizeof(cmd),
+					"nix eval --raw ~/.nixlyos#nixpkgs-stable.outPath 2>/dev/null | "
+					"xargs -I{} nix-env -qaP -f {} 2>/dev/null | "
+					"awk 'index($1, \".\") == 0 {print $1\"\\t\"$2}' | "
+					"sed 's/\\t.*-\\([0-9]\\)/\\t\\1/' > '%s'",
+					nixpkgs_cache_path);
+				execl("/bin/sh", "sh", "-c", cmd, NULL);
+				_exit(1);
+			}
+			/* Load nixlypkgs only; will retry stable on next open */
+			nixpkg_entry_count = 0;
+			load_nixlypkgs_cache();
+			nixpkg_entries_loaded = 1;
 		}
-		nixpkg_entries_loaded = 1; /* Mark as loaded (empty) to avoid re-triggering */
-		/* Still load nixlypkgs even if nixpkgs cache doesn't exist */
-		load_nixlypkgs_cache();
 		return;
 	}
 
@@ -207,7 +222,7 @@ load_nixpkgs_cache(void)
 	/* Also load nixlypkgs packages */
 	load_nixlypkgs_cache();
 
-	nixpkg_entries_loaded = 1;
+	nixpkg_entries_loaded = 2;
 	wlr_log(WLR_INFO, "Loaded %d nixpkgs entries from cache", nixpkg_entry_count);
 
 	/* Load installed packages status */
@@ -336,7 +351,7 @@ ensure_nixpkg_ok_icon(int height)
 void
 ensure_nixpkgs_cache_loaded(void)
 {
-	if (!nixpkg_entries_loaded)
+	if (nixpkg_entries_loaded < 2)
 		load_nixpkgs_cache();
 }
 
