@@ -614,9 +614,12 @@ static void calculate_frame_pacing(VideoPlayer *vp, float display_hz)
         /* 24fps on 60Hz - use 3:2 pulldown */
         vp->frame_repeat_mode = 2;
         vp->frame_repeat_count = 0;
-    } else if (fabsf(ratio - roundf(ratio)) < 0.002f) {
-        /* Exact integer multiple - e.g., 24.000@120Hz = 5x, 30.000@60Hz = 2x
-         * Tight threshold (0.002) avoids misclassifying 23.976fps as clean. */
+    } else if (fabsf(ratio - roundf(ratio)) < 0.02f) {
+        /* Near-integer multiple - e.g., 30fps@300.18Hz = 10x, 60fps@300.18Hz = 5x.
+         * Real displays often deviate from nominal Hz (300.18 vs 300.00).
+         * The tiny residual (e.g., 0.006) is absorbed by the cadence-locked
+         * timing + snap-forward logic; Bresenham cadence would introduce
+         * unnecessary periodic longer frames for these near-perfect ratios. */
         vp->frame_repeat_mode = 1;
         vp->frame_repeat_count = (int)roundf(ratio);
     } else {

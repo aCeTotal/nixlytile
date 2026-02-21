@@ -909,7 +909,9 @@ rendermon(struct wl_listener *listener, void *data)
 		 * continue to wait, effectively limiting its framerate.
 		 */
 		if (elapsed_ns < target_interval_ns) {
-			/* Don't send frame_done yet - limiter is active */
+			/* Don't send frame_done yet - limiter is active.
+			 * Schedule next vblank so rendermon keeps firing. */
+			wlr_output_schedule_frame(m->wlr_output);
 			return;
 		}
 
@@ -942,21 +944,17 @@ rendermon(struct wl_listener *listener, void *data)
 		if (m->frame_repeat_current < m->frame_repeat_count) {
 			/*
 			 * Not time for a new frame yet - skip frame_done.
-			 * The game will wait, and we'll show the same frame again
-			 * on the next vblank. This is frame "doubling" or "tripling".
+			 * The client will wait, and the display shows the same
+			 * frame again on the next vblank (frame "doubling" etc).
+			 *
+			 * CRITICAL: schedule the next vblank so rendermon keeps
+			 * firing.  Without this, the counter gets stuck because
+			 * no pageflip or damage occurs to trigger the next call,
+			 * and frame_done is never sent — the client falls back to
+			 * its own timer, producing uncontrolled frame cadence.
 			 */
 			m->frames_repeated++;
-
-			/*
-			 * We still need to acknowledge this vblank for timing,
-			 * but we DON'T tell the game to render a new frame.
-			 * The display will simply show the previous frame again.
-			 *
-			 * This creates perfect frame cadence:
-			 * - 2x repeat: frame shown at vblank 0 and 1, new frame at 2
-			 * - 3x repeat: frame shown at vblank 0, 1, 2, new frame at 3
-			 * - etc.
-			 */
+			wlr_output_schedule_frame(m->wlr_output);
 			return;
 		}
 
