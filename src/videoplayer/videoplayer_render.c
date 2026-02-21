@@ -998,6 +998,9 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
         vp->last_frame_ns = 0;
         vp->current_repeat = 0;
         vp->cadence_accum = 0.0f;
+        if (vp->blend_current_buf) { wlr_buffer_drop(vp->blend_current_buf); vp->blend_current_buf = NULL; }
+        if (vp->blend_next_buf) { wlr_buffer_drop(vp->blend_next_buf); vp->blend_next_buf = NULL; }
+        vp->blend_base_ns = 0;
         fprintf(stderr, "[videoplayer] Frame timing reset (audio state change)\n");
         if (vp->debug_log) {
             fprintf(vp->debug_log, "# RESET | timing reset (audio state change)\n");
@@ -1039,6 +1042,9 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
             vp->last_frame_ns = 0;
             vp->current_repeat = 0;
             vp->cadence_accum = 0.0f;
+            if (vp->blend_current_buf) { wlr_buffer_drop(vp->blend_current_buf); vp->blend_current_buf = NULL; }
+            if (vp->blend_next_buf) { wlr_buffer_drop(vp->blend_next_buf); vp->blend_next_buf = NULL; }
+            vp->blend_base_ns = 0;
             /* Reset A/V sync for clean restart */
             vp->av_sync_established = 0;
         }
@@ -1068,6 +1074,9 @@ present_next:
             vp->last_present_time_ns = 0;
             vp->current_repeat = 0;
             vp->cadence_accum = 0.0f;
+            if (vp->blend_current_buf) { wlr_buffer_drop(vp->blend_current_buf); vp->blend_current_buf = NULL; }
+            if (vp->blend_next_buf) { wlr_buffer_drop(vp->blend_next_buf); vp->blend_next_buf = NULL; }
+            vp->blend_base_ns = 0;
 
             /* Pause and flush audio so it restarts aligned with video */
             extern void videoplayer_audio_pause(VideoPlayer *vp);
@@ -1082,23 +1091,23 @@ present_next:
             }
         }
 
-        goto present_buffer;
+        goto update_blend;
     }
 
     VideoPlayerFrame *qf = &vp->frame_queue[vp->frame_read_idx];
 
     if (!qf->ready) {
         pthread_mutex_unlock(&vp->frame_mutex);
-        goto present_buffer;
+        goto update_blend;
     }
 
     /* Check if we should present this frame based on A/V sync */
     int action = should_present_frame_synced(vp, vsync_time_ns, qf->pts_us);
 
     if (action == 0) {
-        /* Not time yet - keep current frame */
+        /* Not time for new frame - update blend opacity and return */
         pthread_mutex_unlock(&vp->frame_mutex);
-        return;
+        goto update_blend;
     }
 
     if (action == 2 && frames_consumed < max_skip) {
@@ -1143,16 +1152,71 @@ present_next:
 
     pthread_mutex_unlock(&vp->frame_mutex);
 
-present_buffer:
-    /* Buffer is already BGRA - just set it on the scene node */
+update_blend:
+    /* ── Frame blending: cross-fade between consecutive video frames ──
+     * On high-refresh displays (e.g., 300Hz) with low-fps content (e.g., 30fps),
+     * pure sample-and-hold produces visible stepping during fast motion.
+     * By overlaying the next frame on top of the current frame and ramping
+     * its opacity from 0→1 over each video frame interval, we produce a
+     * natural motion blur that makes motion appear smooth. The GPU handles
+     * the alpha blend in its compositing pass — essentially free. */
+
     if (buffer) {
-        videoplayer_update_frame_buffer(vp, buffer);
-        wlr_buffer_drop(buffer);  /* Scene holds its own reference */
+        /* New video frame dequeued — advance blend layers */
+        if (!vp->blend_current_buf) {
+            /* First frame ever — display directly, no blend target yet */
+            videoplayer_update_frame_buffer(vp, buffer);
+            vp->blend_current_buf = buffer;
+            /* buffer ref from dequeue now owned by blend_current_buf;
+             * scene took its own ref via set_buffer inside update_frame_buffer */
+        } else {
+            /* Promote previous next→current */
+            if (vp->blend_next_buf) {
+                wlr_scene_buffer_set_buffer(vp->frame_node, vp->blend_next_buf);
+                wlr_buffer_drop(vp->blend_current_buf);
+                vp->blend_current_buf = vp->blend_next_buf;
+                /* Ownership transferred — don't drop */
+            }
+            /* Set dequeued frame on blend overlay (starts fully transparent) */
+            if (vp->blend_node) {
+                wlr_scene_buffer_set_buffer(vp->blend_node, buffer);
+                wlr_scene_buffer_set_opacity(vp->blend_node, 0.0f);
+            }
+            vp->blend_next_buf = buffer;
+            /* buffer ref from dequeue now owned by blend_next_buf;
+             * scene took its own ref via set_buffer */
+            vp->blend_base_ns = vsync_time_ns;
+        }
+        buffer = NULL;  /* Ownership transferred to blend system */
         vp->last_present_time_ns = vsync_time_ns;
 
         /* Render subtitles for current position */
         if (vp->current_subtitle_track >= 0)
             videoplayer_render_subtitles(vp, vp->position_us);
+    }
+
+    /* Ramp blend_node opacity each vsync for smooth cross-fade.
+     * Only active when frames repeat across multiple display refreshes. */
+    if (vp->blend_node && vp->blend_current_buf && vp->blend_next_buf &&
+        vp->blend_base_ns > 0 && vp->frame_repeat_mode > 0 &&
+        vsync_time_ns > vp->blend_base_ns) {
+        uint64_t step_ns;
+        if (vp->frame_repeat_mode == 1) {
+            step_ns = (uint64_t)vp->frame_repeat_count * vp->display_interval_ns;
+        } else if (vp->frame_repeat_mode == 3) {
+            /* Use base count — ensures ramp completes before next frame */
+            step_ns = (uint64_t)vp->cadence_base * vp->display_interval_ns;
+        } else if (vp->frame_repeat_mode == 2) {
+            /* 3:2 pulldown — use shorter cycle for conservative ramp */
+            step_ns = vp->display_interval_ns * 2;
+        } else {
+            step_ns = vp->frame_interval_ns;
+        }
+        if (step_ns > 0) {
+            float t = (float)(vsync_time_ns - vp->blend_base_ns) / (float)step_ns;
+            if (t > 1.0f) t = 1.0f;
+            wlr_scene_buffer_set_opacity(vp->blend_node, t);
+        }
     }
 
     /* Debug log: comprehensive per-frame metrics */
@@ -1162,7 +1226,7 @@ present_buffer:
         q = vp->frames_queued;
         pthread_mutex_unlock(&vp->frame_mutex);
 
-        if (buffer) {
+        if (frames_consumed > 0) {
             /* Frame presented — log cadence and timing */
             uint64_t actual_us = 0;
             if (vp->debug_last_present_ns > 0)
@@ -1187,8 +1251,8 @@ present_buffer:
 
             vp->debug_last_present_ns = vsync_time_ns;
             vp->debug_vsync_count = 0;
-        } else {
-            /* Queue empty when frame was needed */
+        } else if (vp->debug_vsync_count > 0 && vp->debug_vsync_count % 300 == 0) {
+            /* Periodic queue-empty log (every 300 vsyncs = ~1s at 300Hz) */
             vp->debug_total_empty++;
             fprintf(vp->debug_log,
                     "%6d | EMPTY  | q=%2d | avsync=%+7ld | pos=%7ld | v=%2d | total_empty=%d\n",
@@ -1202,7 +1266,7 @@ present_buffer:
         vp->debug_frame_count++;
 
         /* Flush on events and periodically (~1 sec at 24fps) */
-        if (!buffer || frames_consumed > 1 || vp->debug_frame_count % 60 == 0)
+        if (frames_consumed > 0 || vp->debug_frame_count % 60 == 0)
             fflush(vp->debug_log);
     }
 }
@@ -1260,6 +1324,10 @@ int videoplayer_init_scene(VideoPlayer *vp, struct wlr_scene_tree *parent)
     /* Create initial frame buffer node (empty) */
     vp->frame_node = wlr_scene_buffer_create(vp->video_tree, NULL);
 
+    /* Create blend overlay for smooth cross-fade between video frames.
+     * Sits on top of frame_node; opacity ramps 0→1 each video frame. */
+    vp->blend_node = wlr_scene_buffer_create(vp->video_tree, NULL);
+
     /* Start with scene hidden */
     wlr_scene_node_set_enabled(&vp->tree->node, false);
 
@@ -1306,6 +1374,9 @@ void videoplayer_set_fullscreen_size(VideoPlayer *vp, int width, int height)
     if (vp->frame_node) {
         wlr_scene_buffer_set_dest_size(vp->frame_node, width, height);
     }
+    if (vp->blend_node) {
+        wlr_scene_buffer_set_dest_size(vp->blend_node, width, height);
+    }
 
     /* Store fullscreen dimensions for control bar positioning */
     vp->fullscreen_width = width;
@@ -1347,6 +1418,9 @@ void videoplayer_setup_display_mode(VideoPlayer *vp, float display_hz, int vrr_c
     vp->current_repeat = 0;
     vp->cadence_accum = 0.0f;
     vp->av_sync_offset_us = 0;
+    if (vp->blend_current_buf) { wlr_buffer_drop(vp->blend_current_buf); vp->blend_current_buf = NULL; }
+    if (vp->blend_next_buf) { wlr_buffer_drop(vp->blend_next_buf); vp->blend_next_buf = NULL; }
+    vp->blend_base_ns = 0;
 
     /* Update debug log with actual display parameters (header was written
      * before setup_display_mode was called, showing 0.00 Hz). */
@@ -1371,6 +1445,17 @@ void videoplayer_cleanup_scene(VideoPlayer *vp)
         vp->seek_osd_timer = NULL;
     }
 
+    /* Drop blend buffer refs before scene destruction */
+    if (vp->blend_current_buf) {
+        wlr_buffer_drop(vp->blend_current_buf);
+        vp->blend_current_buf = NULL;
+    }
+    if (vp->blend_next_buf) {
+        wlr_buffer_drop(vp->blend_next_buf);
+        vp->blend_next_buf = NULL;
+    }
+    vp->blend_base_ns = 0;
+
     if (vp->tree) {
         wlr_scene_node_destroy(&vp->tree->node);
         vp->tree = NULL;
@@ -1378,5 +1463,6 @@ void videoplayer_cleanup_scene(VideoPlayer *vp)
         vp->subtitle_tree = NULL;
         vp->seek_osd_tree = NULL;
         vp->frame_node = NULL;
+        vp->blend_node = NULL;
     }
 }

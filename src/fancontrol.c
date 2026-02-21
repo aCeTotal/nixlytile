@@ -361,6 +361,8 @@ classify_hwmon(const char *name)
 		return FAN_DEV_GPU_AMD;
 	if (strstr(name, "nvidia") || strstr(name, "nouveau"))
 		return FAN_DEV_GPU_NVIDIA;
+	if (strstr(name, "i915") || strstr(name, "xe"))
+		return FAN_DEV_GPU_INTEL;
 	if (strstr(name, "msi"))
 		return FAN_DEV_MSI_EC;
 	return FAN_DEV_UNKNOWN;
@@ -374,6 +376,7 @@ fan_dev_type_label(FanDevType type)
 	case FAN_DEV_CASE:         return "Motherboard";
 	case FAN_DEV_GPU_AMD:      return "GPU AMD";
 	case FAN_DEV_GPU_NVIDIA:   return "GPU NVIDIA";
+	case FAN_DEV_GPU_INTEL:    return "GPU Intel";
 	case FAN_DEV_MSI_EC:       return "MSI EC";
 	case FAN_DEV_UNKNOWN:      return "Fan";
 	}
@@ -605,6 +608,140 @@ fan_set_auto(FanEntry *f)
 			f->hwmon_path, f->pwm_index);
 	if (sysfs_write_int(path, 2) == 0)
 		f->pwm_enable = 2;
+}
+
+/* ── GPU fan boost for game mode ──────────────────────────────────── */
+
+#define FAN_BOOST_MAX_SAVED 8
+
+static struct {
+	char hwmon_path[128];
+	int pwm_index;
+	int saved_pwm_enable;
+	int saved_pwm;
+} fan_boost_saved[FAN_BOOST_MAX_SAVED];
+static int fan_boost_saved_count;
+
+static int
+is_gpu_hwmon(const char *name)
+{
+	if (!name || !*name)
+		return 0;
+	return strstr(name, "amdgpu") || strstr(name, "nvidia") ||
+	       strstr(name, "nouveau") || strstr(name, "i915") ||
+	       strstr(name, "xe");
+}
+
+void
+fan_boost_activate(void)
+{
+	DIR *dir;
+	struct dirent *ent;
+	char path[256], namebuf[64];
+
+	if (fan_boost_active)
+		return;
+
+	fan_boost_saved_count = 0;
+
+	dir = opendir("/sys/class/hwmon");
+	if (!dir) {
+		wlr_log(WLR_INFO, "Fan boost: cannot open /sys/class/hwmon");
+		return;
+	}
+
+	while ((ent = readdir(dir)) != NULL &&
+	       fan_boost_saved_count < FAN_BOOST_MAX_SAVED) {
+		if (ent->d_name[0] == '.')
+			continue;
+
+		snprintf(path, sizeof(path), "/sys/class/hwmon/%s/name",
+				ent->d_name);
+		if (sysfs_read_str(path, namebuf, sizeof(namebuf)) != 0)
+			continue;
+
+		if (!is_gpu_hwmon(namebuf))
+			continue;
+
+		/* Found a GPU hwmon — boost all its PWM fans */
+		for (int fi = 1; fi <= 6 && fan_boost_saved_count < FAN_BOOST_MAX_SAVED; fi++) {
+			int cur_pwm, cur_enable;
+
+			snprintf(path, sizeof(path),
+					"/sys/class/hwmon/%s/pwm%d", ent->d_name, fi);
+			cur_pwm = sysfs_read_int(path);
+			if (cur_pwm < 0)
+				continue;
+
+			snprintf(path, sizeof(path),
+					"/sys/class/hwmon/%s/pwm%d_enable", ent->d_name, fi);
+			cur_enable = sysfs_read_int(path);
+			if (cur_enable < 0)
+				cur_enable = 2;
+
+			/* Save current state */
+			snprintf(fan_boost_saved[fan_boost_saved_count].hwmon_path,
+					sizeof(fan_boost_saved[0].hwmon_path),
+					"/sys/class/hwmon/%s", ent->d_name);
+			fan_boost_saved[fan_boost_saved_count].pwm_index = fi;
+			fan_boost_saved[fan_boost_saved_count].saved_pwm_enable = cur_enable;
+			fan_boost_saved[fan_boost_saved_count].saved_pwm = cur_pwm;
+			fan_boost_saved_count++;
+
+			/* Set manual mode and full speed */
+			snprintf(path, sizeof(path),
+					"/sys/class/hwmon/%s/pwm%d_enable", ent->d_name, fi);
+			sysfs_write_int(path, 1);
+
+			snprintf(path, sizeof(path),
+					"/sys/class/hwmon/%s/pwm%d", ent->d_name, fi);
+			sysfs_write_int(path, 255);
+		}
+	}
+	closedir(dir);
+
+	/* MSI EC cooler boost */
+	if (is_msi_laptop()) {
+		msi_sysfs_write_str("/sys/devices/platform/msi-ec/cooler_boost", "on");
+	}
+
+	fan_boost_active = 1;
+	wlr_log(WLR_INFO, "Fan boost activated (%d GPU fan(s) set to max)",
+			fan_boost_saved_count);
+}
+
+void
+fan_boost_deactivate(void)
+{
+	char path[256];
+
+	if (!fan_boost_active)
+		return;
+
+	for (int i = 0; i < fan_boost_saved_count; i++) {
+		/* Restore pwm_enable first (may switch back to auto) */
+		snprintf(path, sizeof(path), "%s/pwm%d_enable",
+				fan_boost_saved[i].hwmon_path,
+				fan_boost_saved[i].pwm_index);
+		sysfs_write_int(path, fan_boost_saved[i].saved_pwm_enable);
+
+		/* If the saved mode was manual, restore the saved PWM value too */
+		if (fan_boost_saved[i].saved_pwm_enable == 1) {
+			snprintf(path, sizeof(path), "%s/pwm%d",
+					fan_boost_saved[i].hwmon_path,
+					fan_boost_saved[i].pwm_index);
+			sysfs_write_int(path, fan_boost_saved[i].saved_pwm);
+		}
+	}
+
+	/* MSI EC cooler boost off */
+	if (is_msi_laptop()) {
+		msi_sysfs_write_str("/sys/devices/platform/msi-ec/cooler_boost", "off");
+	}
+
+	fan_boost_active = 0;
+	fan_boost_saved_count = 0;
+	wlr_log(WLR_INFO, "Fan boost deactivated - GPU fans restored to auto");
 }
 
 /* Get flat fan entry by index across all devices */

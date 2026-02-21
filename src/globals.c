@@ -93,6 +93,10 @@ Client *game_mode_client = NULL;  /* The fullscreen game client */
 pid_t game_mode_pid = 0;  /* PID of fullscreen game process */
 int game_mode_nice_applied = 0;  /* 1 if we changed nice value */
 int game_mode_ioclass_applied = 0;  /* 1 if we changed IO priority */
+int game_mode_oom_applied = 0;  /* 1 if we changed OOM score */
+int game_mode_governor_applied = 0;  /* 1 if we changed CPU governor */
+int compositor_rt_applied = 0;  /* 1 if compositor has RT scheduling */
+int fan_boost_active = 0; /* 1 if GPU fan boost is active during gaming */
 int htpc_mode_active = 0; /* HTPC mode - hides statusbar, stops background tasks */
 struct wl_event_source *status_timer;
 struct wl_event_source *status_cpu_timer;

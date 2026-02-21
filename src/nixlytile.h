@@ -41,6 +41,9 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/inotify.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <sched.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <time.h>
@@ -525,6 +528,7 @@ typedef enum {
 	FAN_DEV_CASE,
 	FAN_DEV_GPU_AMD,
 	FAN_DEV_GPU_NVIDIA,
+	FAN_DEV_GPU_INTEL,
 	FAN_DEV_MSI_EC,
 	FAN_DEV_UNKNOWN,
 } FanDevType;
@@ -1427,6 +1431,10 @@ extern Client *game_mode_client;
 extern pid_t game_mode_pid;
 extern int game_mode_nice_applied;
 extern int game_mode_ioclass_applied;
+extern int game_mode_oom_applied;
+extern int game_mode_governor_applied;
+extern int compositor_rt_applied;
+extern int fan_boost_active;
 extern int htpc_mode_active;
 
 /* config hot-reload */
@@ -2141,6 +2149,8 @@ void updatefanhover(Monitor *m, double cx, double cy);
 void renderfan(StatusModule *module, int bar_height, const char *text);
 int ensure_fan_icon_buffer(int target_h);
 void drop_fan_icon_buffer(void);
+void fan_boost_activate(void);
+void fan_boost_deactivate(void);
 int updatestatuscpu(void *data);
 int updatestatusclock(void *data);
 int updatehoverfade(void *data);

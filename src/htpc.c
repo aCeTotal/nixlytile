@@ -248,74 +248,146 @@ client_get_pid(Client *c)
 	return pid;
 }
 
+/*
+ * ioprio constants (not always available in headers)
+ */
+#ifndef IOPRIO_CLASS_RT
+#define IOPRIO_CLASS_RT		1
+#define IOPRIO_CLASS_BE		2
+#define IOPRIO_WHO_PROCESS	1
+#define IOPRIO_PRIO_VALUE(class, data)	(((class) << 13) | (data))
+#endif
+
+static void
+set_cpu_governor(const char *governor)
+{
+	DIR *dir;
+	struct dirent *ent;
+	char path[PATH_MAX];
+	FILE *fp;
+	int count = 0;
+
+	dir = opendir("/sys/devices/system/cpu");
+	if (!dir)
+		return;
+
+	while ((ent = readdir(dir))) {
+		if (strncmp(ent->d_name, "cpu", 3) != 0)
+			continue;
+		if (ent->d_name[3] < '0' || ent->d_name[3] > '9')
+			continue;
+
+		snprintf(path, sizeof(path),
+			"/sys/devices/system/cpu/%s/cpufreq/scaling_governor",
+			ent->d_name);
+		fp = fopen(path, "w");
+		if (fp) {
+			fprintf(fp, "%s\n", governor);
+			fclose(fp);
+			count++;
+		}
+	}
+	closedir(dir);
+
+	if (count > 0)
+		wlr_log(WLR_INFO, "CPU governor: %s (%d cores)", governor, count);
+}
+
 void
 apply_game_priority(pid_t pid)
 {
-	char cmd[256];
+	char path[64];
+	FILE *fp;
 
 	if (pid <= 1)
 		return;
 
 	/*
-	 * Set nice value to -5 (requires CAP_SYS_NICE or root).
-	 * This gives the game higher CPU scheduling priority.
-	 * -5 is aggressive but not extreme (-20 is max).
+	 * Set nice value to -10 (requires CAP_SYS_NICE or root).
+	 * Stronger than the old -5 for better CPU scheduling priority.
 	 */
-	snprintf(cmd, sizeof(cmd), "renice -n -5 -p %d 2>/dev/null", pid);
-	if (system(cmd) == 0) {
+	if (setpriority(PRIO_PROCESS, pid, -10) == 0) {
 		game_mode_nice_applied = 1;
-		wlr_log(WLR_INFO, "Game priority: set nice=-5 for PID %d", pid);
+		wlr_log(WLR_INFO, "Game priority: set nice=-10 for PID %d", pid);
+	} else {
+		wlr_log(WLR_INFO, "Game priority: setpriority failed for PID %d: %s",
+			pid, strerror(errno));
 	}
 
 	/*
-	 * Set I/O scheduling to best-effort class with high priority (0).
-	 * This ensures the game gets fast disk access for asset loading.
-	 * Class 2 = best-effort, priority 0 = highest within class.
+	 * Set I/O scheduling to real-time class (highest priority).
+	 * This ensures the game gets the fastest possible disk access.
 	 */
-	snprintf(cmd, sizeof(cmd), "ionice -c 2 -n 0 -p %d 2>/dev/null", pid);
-	if (system(cmd) == 0) {
+	if (syscall(__NR_ioprio_set, IOPRIO_WHO_PROCESS, pid,
+		    IOPRIO_PRIO_VALUE(IOPRIO_CLASS_RT, 0)) == 0) {
 		game_mode_ioclass_applied = 1;
-		wlr_log(WLR_INFO, "Game priority: set ionice class=2 prio=0 for PID %d", pid);
+		wlr_log(WLR_INFO, "Game priority: set ioprio RT class for PID %d", pid);
+	} else {
+		wlr_log(WLR_INFO, "Game priority: ioprio_set failed for PID %d: %s",
+			pid, strerror(errno));
 	}
 
 	/*
-	 * Disable CPU frequency scaling governor to prevent throttling.
-	 * This keeps the CPU at high frequency for consistent performance.
-	 * Note: Only works if user has permission to write to sysfs.
+	 * Protect game from OOM killer by lowering its OOM score.
+	 * -500 makes it much less likely to be killed under memory pressure.
 	 */
-	(void)system("for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do "
-	             "echo performance > \"$cpu\" 2>/dev/null; done");
+	snprintf(path, sizeof(path), "/proc/%d/oom_score_adj", pid);
+	fp = fopen(path, "w");
+	if (fp) {
+		fprintf(fp, "-500\n");
+		fclose(fp);
+		game_mode_oom_applied = 1;
+		wlr_log(WLR_INFO, "Game priority: set oom_score_adj=-500 for PID %d", pid);
+	}
+
+	/*
+	 * Set CPU governor to performance for maximum clock speeds.
+	 */
+	set_cpu_governor("performance");
+	game_mode_governor_applied = 1;
 }
 
 void
 restore_game_priority(pid_t pid)
 {
-	char cmd[256];
+	char path[64];
+	FILE *fp;
 
 	if (pid <= 1)
 		return;
 
 	/* Restore nice value to 0 (normal) */
 	if (game_mode_nice_applied) {
-		snprintf(cmd, sizeof(cmd), "renice -n 0 -p %d 2>/dev/null", pid);
-		(void)system(cmd);
+		setpriority(PRIO_PROCESS, pid, 0);
 		game_mode_nice_applied = 0;
 		wlr_log(WLR_INFO, "Game priority: restored nice=0 for PID %d", pid);
 	}
 
-	/* Restore I/O priority to normal (class 2, priority 4) */
+	/* Restore I/O priority to best-effort class, priority 4 (normal) */
 	if (game_mode_ioclass_applied) {
-		snprintf(cmd, sizeof(cmd), "ionice -c 2 -n 4 -p %d 2>/dev/null", pid);
-		(void)system(cmd);
+		syscall(__NR_ioprio_set, IOPRIO_WHO_PROCESS, pid,
+			IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 4));
 		game_mode_ioclass_applied = 0;
+		wlr_log(WLR_INFO, "Game priority: restored ioprio BE/4 for PID %d", pid);
 	}
 
-	/*
-	 * Restore CPU governor to powersave/schedutil (common defaults).
-	 * This allows the CPU to scale down when not gaming.
-	 */
-	(void)system("for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do "
-	             "echo schedutil > \"$cpu\" 2>/dev/null || echo powersave > \"$cpu\" 2>/dev/null; done");
+	/* Restore OOM score to 0 (normal) */
+	if (game_mode_oom_applied) {
+		snprintf(path, sizeof(path), "/proc/%d/oom_score_adj", pid);
+		fp = fopen(path, "w");
+		if (fp) {
+			fprintf(fp, "0\n");
+			fclose(fp);
+		}
+		game_mode_oom_applied = 0;
+		wlr_log(WLR_INFO, "Game priority: restored oom_score_adj=0 for PID %d", pid);
+	}
+
+	/* Restore CPU governor to schedutil (energy-efficient default) */
+	if (game_mode_governor_applied) {
+		set_cpu_governor("schedutil");
+		game_mode_governor_applied = 0;
+	}
 }
 
 int
@@ -409,14 +481,23 @@ update_game_mode(void)
 			wl_event_source_timer_update(hz_osd_timer, 0);
 		if (pc_gaming_install_timer)
 			wl_event_source_timer_update(pc_gaming_install_timer, 0);
+		if (playback_osd_timer)
+			wl_event_source_timer_update(playback_osd_timer, 0);
+		if (media_view_poll_timer)
+			wl_event_source_timer_update(media_view_poll_timer, 0);
+		if (osk_dpad_repeat_timer)
+			wl_event_source_timer_update(osk_dpad_repeat_timer, 0);
 		/* NOTE: Keep bt_scan_timer - needed for controller reconnection */
 		/* NOTE: Keep gamepad_pending_timer - needed for controller input */
 
-		/* Hide statusbar on the monitor with the game */
-		if (c && c->mon) {
-			c->mon->showbar = 0;
-			if (c->mon->statusbar.tree)
-				wlr_scene_node_set_enabled(&c->mon->statusbar.tree->node, 0);
+		/* Boost GPU fans to prevent thermal throttling */
+		fan_boost_activate();
+
+		/* Hide statusbar on ALL monitors to save GPU compositing time */
+		wl_list_for_each(m, &mons, link) {
+			m->showbar = 0;
+			if (m->statusbar.tree)
+				wlr_scene_node_set_enabled(&m->statusbar.tree->node, 0);
 		}
 
 		/* Hide all popups and menus - they would just be occluded anyway */
@@ -433,6 +514,21 @@ update_game_mode(void)
 		game_mode_pid = client_get_pid(c);
 		if (game_mode_pid > 1) {
 			apply_game_priority(game_mode_pid);
+		}
+
+		/*
+		 * Boost compositor thread to real-time scheduling for lower
+		 * input-to-display latency. Priority 2 is low RT (won't starve
+		 * audio at priority ~50), but enough to wake promptly for vsync.
+		 */
+		{
+			struct sched_param sp = { .sched_priority = 2 };
+			if (sched_setscheduler(0, SCHED_RR, &sp) == 0) {
+				compositor_rt_applied = 1;
+				wlr_log(WLR_INFO, "Compositor RT priority set (SCHED_RR, prio=2)");
+			} else {
+				wlr_log(WLR_INFO, "Compositor RT priority failed: %s", strerror(errno));
+			}
 		}
 
 		/*
@@ -510,6 +606,17 @@ update_game_mode(void)
 			if (game_mode_pid > 1) {
 				restore_game_priority(game_mode_pid);
 			}
+
+			/* Restore compositor to normal scheduling */
+			if (compositor_rt_applied) {
+				struct sched_param sp = { .sched_priority = 0 };
+				sched_setscheduler(0, SCHED_OTHER, &sp);
+				compositor_rt_applied = 0;
+				wlr_log(WLR_INFO, "Compositor scheduling restored to SCHED_OTHER");
+			}
+
+			/* Restore GPU fans to auto */
+			fan_boost_deactivate();
 
 			wlr_log(WLR_INFO, "Ultra game mode deactivated - full system restored");
 		}

@@ -399,6 +399,13 @@ typedef struct VideoPlayer {
     float video_fps;
     float display_hz;                      /* Current display refresh rate */
 
+    /* Frame blending — cross-fade between consecutive video frames for
+     * smooth motion on high-refresh displays (e.g., 30fps on 300Hz) */
+    struct wlr_scene_buffer *blend_node;   /* Next frame overlay (ramps 0→1 opacity) */
+    struct wlr_buffer *blend_current_buf;  /* Our ref to current frame on frame_node */
+    struct wlr_buffer *blend_next_buf;     /* Our ref to next frame on blend_node */
+    uint64_t blend_base_ns;               /* Wall-clock when current blend started */
+
     /* Relative A/V sync — compares elapsed time from a common reference
      * to cancel constant PTS offsets between audio and video streams.
      * Without this, HTTP streams where audio base_pts != video base_pts
