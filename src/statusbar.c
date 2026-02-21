@@ -4436,6 +4436,7 @@ refreshstatusfan(void)
 			fan_scan_hwmon(p);
 
 		fan_read_all(p);
+		p->last_fetch_ms = monotonic_msec();
 
 		/* Find highest RPM */
 		for (int d = 0; d < p->device_count; d++) {
@@ -4699,6 +4700,8 @@ updatestatuscpu(void *data)
 					delay_ms = 1000;
 			}
 			status_tasks[chosen].next_due_ms = now + delay_ms;
+		} else if (status_tasks[chosen].fn == refreshstatusfan) {
+			status_tasks[chosen].next_due_ms = now + 3000;
 		} else if (status_task_hover_active(status_tasks[chosen].fn)) {
 			status_tasks[chosen].next_due_ms = now + STATUS_FAST_MS;
 		} else {

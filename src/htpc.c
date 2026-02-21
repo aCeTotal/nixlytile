@@ -136,9 +136,10 @@ focus_or_launch_app(const char *app_id, const char *launch_cmd)
 			}
 		}
 	} else if (launch_cmd && launch_cmd[0]) {
-		/* No window found - launch/activate the app */
+		/* No window found - launch the app (same as launcher) */
 		pid_t pid = fork();
 		if (pid == 0) {
+			dup2(STDERR_FILENO, STDOUT_FILENO);
 			setsid();
 			if (should_use_dgpu(launch_cmd))
 				set_dgpu_env();
@@ -152,26 +153,8 @@ focus_or_launch_app(const char *app_id, const char *launch_cmd)
 				}
 				_exit(1);
 			}
-			/* Discord: clean up stale singleton files only if the process
-			 * is NOT running.  If Discord is alive (window closed to tray),
-			 * keep the files so the Electron singleton mechanism signals
-			 * the running instance to re-open its window. */
-			if (strcasecmp(launch_cmd, "discord") == 0 &&
-			    !is_process_running("Discord") &&
-			    !is_process_running(".Discord")) {
-				const char *home = getenv("HOME");
-				if (home) {
-					char path[PATH_MAX];
-					snprintf(path, sizeof(path), "%s/.config/discord/SingletonLock", home);
-					unlink(path);
-					snprintf(path, sizeof(path), "%s/.config/discord/SingletonCookie", home);
-					unlink(path);
-					snprintf(path, sizeof(path), "%s/.config/discord/SingletonSocket", home);
-					unlink(path);
-				}
-			}
-			execlp("sh", "sh", "-c", launch_cmd, NULL);
-			_exit(1);
+			execl("/bin/sh", "sh", "-c", launch_cmd, NULL);
+			_exit(127);
 		}
 	}
 }
