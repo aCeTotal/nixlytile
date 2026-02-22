@@ -2465,12 +2465,14 @@ done:
     disk_map_reset();
 
     pthread_mutex_lock(&tc.lock);
-    /* Preserve STOPPED state so user's Stop action persists until Start is clicked.
-     * Only reset to IDLE if the thread finished naturally (not via stop). */
+    /* Preserve STOPPED state so users Stop action persists until Start is clicked.
+     * Only reset to IDLE if the thread finished naturally (not via stop).
+     * Only clear current_file on natural finish — after stop a new thread
+     * may already be running and have set its own current_file. */
     if (tc.state != TRANSCODE_STOPPED) {
         tc.state = TRANSCODE_IDLE;
+        tc.current_file[0] = '\0';
     }
-    tc.current_file[0] = '\0';
     pthread_mutex_unlock(&tc.lock);
 
     printf("\n");
@@ -2550,6 +2552,14 @@ void transcoder_stop(void) {
     }
     tc.stop_requested = 1;
     tc.state = TRANSCODE_STOPPED;
+
+    /* Detach the old thread so transcoder_start() does not block on
+     * pthread_join while ffmpeg is still dying.  The thread will clean
+     * up and exit on its own after seeing stop_requested. */
+    if (tc.thread_active) {
+        pthread_detach(tc.thread);
+        tc.thread_active = 0;
+    }
     pthread_mutex_unlock(&tc.lock);
 
     /* Kill running ffmpeg process if any */

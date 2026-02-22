@@ -1353,6 +1353,8 @@ static int init_subtitle_decoder(VideoPlayer *vp)
              * Iterate over every style and fix them directly. */
             for (int si = 0; si < vp->subtitle.track->n_styles; si++) {
                 ASS_Style *s = &vp->subtitle.track->styles[si];
+                s->PrimaryColour = 0x00FFFFFF; /* White, fully opaque */
+                s->OutlineColour = 0x00000000; /* Black, fully opaque */
                 s->BackColour = 0xFF000000;   /* Fully transparent */
                 s->BorderStyle = 1;           /* Outline + shadow, not opaque box */
                 s->Outline = 2.0;
