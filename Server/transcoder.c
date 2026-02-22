@@ -64,6 +64,7 @@ static struct {
     pthread_mutex_t lock;
     volatile int stop_requested;
     volatile pid_t ffmpeg_pid;
+    int thread_active;
 
     /* Progress */
     char current_file[4096];
@@ -119,14 +120,9 @@ static int is_already_converted(const char *path) {
 }
 
 static int is_in_output_dir(const char *path) {
-    /* Skip anything inside or named nixly_ready_media */
+    /* Skip anything inside nixly_ready_media or nixly_transcode_tmp */
     if (strstr(path, "/nixly_ready_media") != NULL) return 1;
-    /* Also skip any converted_paths root dirs */
-    for (int i = 0; i < server_config.converted_path_count; i++) {
-        if (strncmp(path, server_config.converted_paths[i],
-                    strlen(server_config.converted_paths[i])) == 0)
-            return 1;
-    }
+    if (strstr(path, "/nixly_transcode_tmp") != NULL) return 1;
     return 0;
 }
 
@@ -2436,7 +2432,11 @@ done:
     disk_map_reset();
 
     pthread_mutex_lock(&tc.lock);
-    tc.state = TRANSCODE_IDLE;
+    /* Preserve STOPPED state so user's Stop action persists until Start is clicked.
+     * Only reset to IDLE if the thread finished naturally (not via stop). */
+    if (tc.state != TRANSCODE_STOPPED) {
+        tc.state = TRANSCODE_IDLE;
+    }
     tc.current_file[0] = '\0';
     pthread_mutex_unlock(&tc.lock);
 
@@ -2473,6 +2473,22 @@ int transcoder_start(void) {
         printf("Transcoder: Already running\n");
         return -1;
     }
+
+    /* Join previous thread before starting a new one to prevent
+     * the old thread from overwriting state set by the new thread */
+    if (tc.thread_active) {
+        pthread_t old = tc.thread;
+        tc.thread_active = 0;
+        pthread_mutex_unlock(&tc.lock);
+        pthread_join(old, NULL);
+        pthread_mutex_lock(&tc.lock);
+        /* Re-check after releasing lock */
+        if (tc.state == TRANSCODE_RUNNING) {
+            pthread_mutex_unlock(&tc.lock);
+            return -1;
+        }
+    }
+
     tc.state = TRANSCODE_RUNNING;
     tc.stop_requested = 0;
     tc.total_jobs = 0;
@@ -2481,32 +2497,45 @@ int transcoder_start(void) {
 
     if (pthread_create(&tc.thread, NULL, transcode_thread, NULL) != 0) {
         perror("transcoder: pthread_create");
+        pthread_mutex_lock(&tc.lock);
         tc.state = TRANSCODE_IDLE;
+        pthread_mutex_unlock(&tc.lock);
         return -1;
     }
 
-    pthread_detach(tc.thread);
+    pthread_mutex_lock(&tc.lock);
+    tc.thread_active = 1;
+    pthread_mutex_unlock(&tc.lock);
     return 0;
 }
 
 void transcoder_stop(void) {
+    pthread_mutex_lock(&tc.lock);
+    if (tc.state != TRANSCODE_RUNNING) {
+        pthread_mutex_unlock(&tc.lock);
+        return;
+    }
     tc.stop_requested = 1;
+    tc.state = TRANSCODE_STOPPED;
+    pthread_mutex_unlock(&tc.lock);
 
     /* Kill running ffmpeg process if any */
     pid_t pid = tc.ffmpeg_pid;
     if (pid > 0) {
         kill(pid, SIGTERM);
     }
-
-    pthread_mutex_lock(&tc.lock);
-    tc.state = TRANSCODE_STOPPED;
-    pthread_mutex_unlock(&tc.lock);
 }
 
 void transcoder_cleanup(void) {
-    transcoder_stop();
-    /* Give thread a moment to finish */
-    usleep(100000);
+    /* Force stop even if not running */
+    tc.stop_requested = 1;
+    pid_t pid = tc.ffmpeg_pid;
+    if (pid > 0) kill(pid, SIGTERM);
+
+    if (tc.thread_active) {
+        pthread_join(tc.thread, NULL);
+        tc.thread_active = 0;
+    }
     pthread_mutex_destroy(&tc.lock);
 }
 
