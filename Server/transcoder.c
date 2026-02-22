@@ -2294,6 +2294,20 @@ static void *transcode_thread(void *arg) {
         /* Merge multi-part Blu-ray rips (p1+p2, part1+part2) into single jobs */
         merge_multipart_bluray_jobs(&list);
 
+        /* Filter out files already converted in nixly_ready_media
+         * to prevent infinite loop when source is kept */
+        {
+            int w = 0;
+            for (int i = 0; i < list.count; i++) {
+                if (!is_already_in_ready_media(&list.jobs[i])) {
+                    if (w != i)
+                        list.jobs[w] = list.jobs[i];
+                    w++;
+                }
+            }
+            list.count = w;
+        }
+
         if (list.count == 0) {
             free(list.jobs);
             break;
@@ -2365,6 +2379,19 @@ static void *transcode_thread(void *arg) {
             JobList scan = {0};
             scan_all_sources(&scan);
             merge_multipart_bluray_jobs(&scan);
+
+            /* Filter out already-converted files */
+            {
+                int w = 0;
+                for (int i = 0; i < scan.count; i++) {
+                    if (!is_already_in_ready_media(&scan.jobs[i])) {
+                        if (w != i)
+                            scan.jobs[w] = scan.jobs[i];
+                        w++;
+                    }
+                }
+                scan.count = w;
+            }
 
             if (scan.count == 0) {
                 free(scan.jobs);
@@ -2673,10 +2700,12 @@ int transcoder_prioritize_title(const char *title) {
     printf("Transcoder: Priority set: \"%s\"\n", title);
     pthread_mutex_unlock(&priority_override.lock);
 
-    /* Start transcoder immediately if idle */
-    if (transcoder_get_state() != TRANSCODE_RUNNING) {
-        printf("Transcoder: Starting for prioritized title\n");
-        transcoder_start();
+    if (transcoder_get_state() == TRANSCODE_RUNNING) {
+        /* Interrupt current job — FFmpeg is killed, .tmp preserved for resume later */
+        printf("Transcoder: Interrupting current job for priority\n");
+        transcoder_stop();
     }
+    /* Start (or restart) transcoder — picks up priority override immediately */
+    transcoder_start();
     return 0;
 }
