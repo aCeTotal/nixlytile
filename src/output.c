@@ -788,6 +788,7 @@ rendermon(struct wl_listener *listener, void *data)
 	int is_game = 0;
 	int is_direct_scanout = 0;
 	int use_frame_pacing = 0;
+	int state_built = 0;
 
 	frame_start_ns = get_time_ns();
 
@@ -796,38 +797,45 @@ rendermon(struct wl_listener *listener, void *data)
 	classify_fullscreen_content(m, &is_game, &is_video, &allow_tearing);
 
 	/*
-	 * Video cadence: compositor-side frame pacing for external video players.
+	 * Video frame pacing for external video players (VLC, mpv, etc).
 	 *
-	 * Instead of delaying frame_done (which creates timing coupling and
-	 * judder), we let the video player run freely and control frame
-	 * presentation from the compositor side using a Bresenham cadence clock.
+	 * When a video player is fullscreen, skip rendering on vblanks
+	 * where the player hasn't submitted a new frame.  This avoids
+	 * unnecessary GPU work and lets the player's own PTS-based clock
+	 * drive the frame cadence naturally.
 	 *
-	 * On "hold" vblanks: skip rendering, display keeps old frame.
-	 * On "present" vblanks: render normally, show latest client buffer.
-	 *
-	 * This handles non-integer ratios correctly:
-	 *   24fps @ 60Hz  → 2:3 cadence (alternating 2 and 3 vblank holds)
-	 *   24fps @ 144Hz → 6x fixed (perfect integer match)
-	 *   25fps @ 60Hz  → 2:3 cadence with different distribution
+	 * For 24fps @ 60Hz this produces natural 3:2 pulldown.
+	 * For 24fps @ 144Hz the player submits every 6th vblank.
 	 */
 	if (is_video && !is_game && m->video_cadence_active && !m->vrr_active) {
-		m->video_cadence_counter++;
-		if (m->video_cadence_counter < m->video_cadence_current_n) {
-			/* Hold vblank - display keeps showing the old frame */
+		/*
+		 * Content-driven pacing for external video players.
+		 *
+		 * Instead of a Bresenham cadence clock (which runs out of phase
+		 * with the player's frame submissions and drops every other
+		 * frame), we present whenever the player has submitted a new
+		 * frame.  The player's own PTS-based timing creates the natural
+		 * cadence (e.g., 3:2 pulldown for 24fps@60Hz).
+		 *
+		 * On hold vblanks (no new content): skip rendering entirely.
+		 * The display keeps showing the old frame.  Send frame_done
+		 * so the player can continue its decode pipeline.
+		 *
+		 * On present vblanks (new content): render normally, commit
+		 * the new frame to the display.
+		 */
+		wlr_output_state_init(&state);
+		needs_frame = wlr_scene_output_build_state(m->scene_output, &state, &opts);
+		if (!needs_frame) {
+			/* No new video frame - hold */
+			wlr_output_state_finish(&state);
 			wlr_output_schedule_frame(m->wlr_output);
 			clock_gettime(CLOCK_MONOTONIC, &now);
 			wlr_scene_output_send_frame_done(m->scene_output, &now);
 			return;
 		}
-		/* Present vblank - advance Bresenham cadence for next cycle */
-		m->video_cadence_counter = 0;
-		m->video_cadence_accum += m->video_cadence_frac;
-		m->video_cadence_current_n = m->video_cadence_base;
-		if (m->video_cadence_accum >= 1.0f) {
-			m->video_cadence_current_n++;
-			m->video_cadence_accum -= 1.0f;
-		}
-		/* Fall through to normal render path */
+		state_built = 1;
+		/* New frame available - fall through to commit */
 	} else if (!is_video && m->video_cadence_active) {
 		/* Video exited fullscreen - deactivate cadence */
 		m->video_cadence_active = 0;
@@ -844,8 +852,10 @@ rendermon(struct wl_listener *listener, void *data)
 	 * automatically use direct scanout - bypassing GPU composition entirely.
 	 * This gives optimal frame pacing for games and video.
 	 */
-	wlr_output_state_init(&state);
-	needs_frame = wlr_scene_output_build_state(m->scene_output, &state, &opts);
+	if (!state_built) {
+		wlr_output_state_init(&state);
+		needs_frame = wlr_scene_output_build_state(m->scene_output, &state, &opts);
+	}
 
 	/*
 	 * Detect direct scanout: if the output buffer is a client buffer
@@ -900,10 +910,10 @@ rendermon(struct wl_listener *listener, void *data)
 		Client *vc = focustop(m);
 		if (vc && vc->detected_video_hz > 0.0f)
 			m->estimated_game_fps = vc->detected_video_hz;
-		/* Skip calculate_frame_repeat when Bresenham cadence is active -
-		 * the cadence clock handles frame pacing directly */
-		if (!m->video_cadence_active)
-			calculate_frame_repeat(m, 1, 0);
+		/* Video players manage their own frame timing based on PTS.
+		 * Don't use frame_repeat (delays frame_done) for video -
+		 * the Bresenham cadence handles pacing when active,
+		 * otherwise let the player run freely. */
 	} else if (is_game && m->frame_pacing_active && !m->game_vrr_active && !allow_tearing) {
 		calculate_frame_repeat(m, is_game, allow_tearing);
 	} else if (m->frame_repeat_enabled) {
@@ -977,8 +987,7 @@ rendermon(struct wl_listener *listener, void *data)
 	 * Instead of uneven frame times (16-17-16-17-16ms), we get
 	 * perfectly consistent frame times (33-33-33-33-33ms for 30fps).
 	 */
-	if (m->frame_repeat_enabled && m->frame_repeat_count > 1 &&
-	    (is_game || (is_video && !m->video_cadence_active))) {
+	if (m->frame_repeat_enabled && m->frame_repeat_count > 1 && is_game) {
 		m->frame_repeat_current++;
 
 		/*
@@ -1035,8 +1044,12 @@ outputpresent(struct wl_listener *listener, void *data)
 	present_ns = (uint64_t)event->when.tv_sec * 1000000000ULL +
 		     (uint64_t)event->when.tv_nsec;
 
-	/* Calculate interval between presents (vblank interval) */
-	if (m->last_present_ns > 0 && present_ns > m->last_present_ns) {
+	/* Calculate interval between presents (vblank interval).
+	 * Skip when video cadence is active - presents happen every 2-3
+	 * vblanks during cadence, which would contaminate the measurement
+	 * and give wrong display_hz for future calculations. */
+	if (m->last_present_ns > 0 && present_ns > m->last_present_ns &&
+	    !m->video_cadence_active) {
 		uint64_t interval = present_ns - m->last_present_ns;
 		/* Sanity check: interval should be reasonable (1ms - 100ms) */
 		if (interval > 1000000 && interval < 100000000) {
@@ -3088,7 +3101,7 @@ check_fullscreen_video(void)
 						m->video_cadence_frac = ratio - (float)m->video_cadence_base;
 						m->video_cadence_accum = 0.0f;
 						m->video_cadence_current_n = m->video_cadence_base;
-						m->video_cadence_counter = m->video_cadence_current_n;
+						m->video_cadence_counter = 0;
 						wlr_log(WLR_INFO, "Video cadence recalculated: base=%d frac=%.3f",
 								m->video_cadence_base, m->video_cadence_frac);
 					}
@@ -3193,7 +3206,7 @@ check_fullscreen_video(void)
 							m->video_cadence_frac = ratio - (float)m->video_cadence_base;
 							m->video_cadence_accum = 0.0f;
 							m->video_cadence_current_n = m->video_cadence_base;
-							m->video_cadence_counter = m->video_cadence_current_n;
+							m->video_cadence_counter = 0;
 							m->video_cadence_active = 1;
 						}
 
@@ -3222,7 +3235,7 @@ check_fullscreen_video(void)
 			/* No video detected - silent retry (1 retry only for speed) */
 			c->video_detect_retries++;
 
-			if (c->video_detect_retries < 1) {
+			if (c->video_detect_retries < 2) {
 				/* Clear frame data for fresh scan - no OSD */
 				c->frame_time_idx = 0;
 				c->frame_time_count = 0;
