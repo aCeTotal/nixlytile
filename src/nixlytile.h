@@ -1230,6 +1230,13 @@ struct Monitor {
 	float target_frame_time_ms;
 	uint64_t pacing_adjustment_ns;
 	int judder_score;
+	/* Video cadence (Bresenham) - compositor-side pacing for external video */
+	int video_cadence_active;
+	int video_cadence_base;         /* floor(display_hz / video_fps) */
+	float video_cadence_frac;       /* fractional part of ratio */
+	float video_cadence_accum;      /* Bresenham accumulator (0.0 to 1.0) */
+	int video_cadence_current_n;    /* hold count for current video frame */
+	int video_cadence_counter;      /* vblank counter within current cycle */
 	uint64_t predicted_next_frame_ns;
 	uint64_t frame_variance_ns;
 	int frames_early;
