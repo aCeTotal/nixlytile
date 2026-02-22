@@ -387,6 +387,9 @@ launch_integrated_player_with_resume(const char *url, double resume_pos)
 
 	playback_state = PLAYBACK_PLAYING;
 
+	/* Hide mouse cursor during video playback */
+	wlr_cursor_unset_image(cursor);
+
 	wlr_log(WLR_INFO, "Started integrated video player: %s (resume at %.1fs)", url, resume_pos);
 }
 
@@ -406,6 +409,10 @@ stop_integrated_player(void)
 		audio_track_count = 0;
 		subtitle_track_count = 0;
 		playback_state = PLAYBACK_IDLE;
+
+		/* Restore mouse cursor */
+		wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
+
 		wlr_log(WLR_INFO, "Stopped integrated video player");
 	}
 }

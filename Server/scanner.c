@@ -624,7 +624,6 @@ static void fetch_episode_metadata(int db_id, const char *show_name, int season,
         }
 
         printf("  TMDB: Found \"%s\" - \"%s\"\n", show->name, ep->name);
-        tmdb_free_episode(ep);
     } else {
         tmdb_data.tmdb_id = show->tmdb_id;
         printf("  TMDB: Found show \"%s\", episode not found\n", show->name);
@@ -632,6 +631,7 @@ static void fetch_episode_metadata(int db_id, const char *show_name, int season,
 
     database_update_tmdb(db_id, &tmdb_data);
 
+    if (ep) tmdb_free_episode(ep);
     free(tmdb_data.poster_path);
     free(tmdb_data.backdrop_path);
     free(tmdb_data.still_path);
