@@ -408,6 +408,49 @@ int database_get_entries_without_tmdb(MediaEntry **entries, int *count) {
     return 0;
 }
 
+int database_get_all_entries(MediaEntry **entries, int *count) {
+    const char *sql = "SELECT id, type, title, show_name, season, episode, filepath, year "
+                      "FROM media";
+    sqlite3_stmt *stmt;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        return -1;
+    }
+
+    int n = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) n++;
+    sqlite3_reset(stmt);
+
+    if (n == 0) {
+        *entries = NULL;
+        *count = 0;
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+
+    *entries = calloc(n, sizeof(MediaEntry));
+    *count = n;
+
+    int i = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW && i < n) {
+        (*entries)[i].id = sqlite3_column_int(stmt, 0);
+        (*entries)[i].type = sqlite3_column_int(stmt, 1);
+        const char *t = (const char *)sqlite3_column_text(stmt, 2);
+        (*entries)[i].title = t ? strdup(t) : NULL;
+        const char *s = (const char *)sqlite3_column_text(stmt, 3);
+        (*entries)[i].show_name = s ? strdup(s) : NULL;
+        (*entries)[i].season = sqlite3_column_int(stmt, 4);
+        (*entries)[i].episode = sqlite3_column_int(stmt, 5);
+        const char *f = (const char *)sqlite3_column_text(stmt, 6);
+        (*entries)[i].filepath = f ? strdup(f) : NULL;
+        (*entries)[i].year = sqlite3_column_int(stmt, 7);
+        i++;
+    }
+
+    sqlite3_finalize(stmt);
+    return 0;
+}
+
 /* Build JSON with TMDB data */
 static char *build_json_array(const char *sql) {
     sqlite3_stmt *stmt;

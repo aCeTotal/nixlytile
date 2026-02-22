@@ -804,6 +804,38 @@ void scanner_fetch_missing_tmdb(void) {
     printf("TMDB metadata fetch complete\n");
 }
 
+void scanner_rescan_all_tmdb(void) {
+    if (!server_config.tmdb_api_key[0]) {
+        printf("TMDB API key not configured, skipping rescan\n");
+        return;
+    }
+
+    MediaEntry *entries = NULL;
+    int count = 0;
+
+    if (database_get_all_entries(&entries, &count) != 0 || count == 0) {
+        printf("No entries to rescan\n");
+        return;
+    }
+
+    printf("Re-fetching TMDB metadata for %d entries...\n", count);
+
+    for (int i = 0; i < count; i++) {
+        MediaEntry *e = &entries[i];
+
+        if (e->type == MEDIA_TYPE_MOVIE) {
+            fetch_movie_metadata(e->id, e->title);
+        } else if ((e->type == MEDIA_TYPE_EPISODE || e->type == MEDIA_TYPE_TVSHOW) && e->show_name) {
+            fetch_episode_metadata(e->id, e->show_name, e->season, e->episode, e->year);
+        }
+
+        database_free_entry(e);
+    }
+
+    free(entries);
+    printf("TMDB full rescan complete\n");
+}
+
 void scanner_refresh_show_status(void) {
     if (!server_config.tmdb_api_key[0]) return;
 

@@ -111,6 +111,9 @@ char *database_get_filepath(int id);
 /* Get entries missing TMDB data */
 int database_get_entries_without_tmdb(MediaEntry **entries, int *count);
 
+/* Get all entries for full TMDB rescan */
+int database_get_all_entries(MediaEntry **entries, int *count);
+
 /* JSON exports for API */
 char *database_get_library_json(void);
 char *database_get_movies_json(void);

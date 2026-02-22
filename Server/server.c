@@ -610,6 +610,17 @@ static void handle_api(int fd, const char *path) {
         send_response(fd, 200, "OK", "application/json",
                      "{\"status\": \"tmdb refresh complete\"}", 35);
     }
+    else if (strcmp(path, "/api/tmdb/rescan") == 0) {
+        /* Re-fetch TMDB metadata for ALL entries */
+        printf("API: Full TMDB rescan starting...\n");
+        int before = database_get_count();
+        scanner_rescan_all_tmdb();
+        char json[256];
+        int len = snprintf(json, sizeof(json),
+            "{\"status\":\"tmdb rescan complete\",\"entries_processed\":%d}",
+            before);
+        send_response(fd, 200, "OK", "application/json", json, len);
+    }
     else if (strcmp(path, "/api/transcode/status") == 0) {
         const char *state_str = "idle";
         TranscodeState ts = transcoder_get_state();
@@ -1000,6 +1011,7 @@ static void handle_request(int fd, const char *request) {
             "<li>/api/media/{id} - Media details</li>"
             "<li>/api/scan - Rescan library</li>"
             "<li>/api/tmdb/refresh - Fetch missing TMDB data</li>"
+            "<li>/api/tmdb/rescan - Re-fetch ALL TMDB data</li>"
             "<li>/stream/{id} - Stream media file</li>"
             "<li>/image/{filename} - Cached poster/backdrop</li>"
             "<li><a href='/status'>/status</a> - Transcoder status &amp; queue</li>"

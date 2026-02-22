@@ -832,6 +832,77 @@ media_view_refresh(Monitor *m, MediaViewType type)
 	return 1;  /* Data changed */
 }
 
+/* Download remote image to local cache, return 1 on success with path in out */
+static int
+ensure_local_image(MediaItem *item, const char *path_field, char *out, size_t out_size)
+{
+	static int cache_dir_created = 0;
+	const char *home, *fname;
+	char cache_dir[512];
+	char local_path[512];
+	struct stat st;
+
+	if (!path_field || path_field[0] == '\0' || strcmp(path_field, "null") == 0)
+		return 0;
+
+	/* Extract filename from path (last component after '/') */
+	fname = strrchr(path_field, '/');
+	if (fname)
+		fname++;
+	else
+		fname = path_field;
+
+	if (fname[0] == '\0')
+		return 0;
+
+	/* Build local cache directory */
+	home = getenv("HOME");
+	if (!home)
+		home = "/tmp";
+	snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/nixlytile/media", home);
+	snprintf(local_path, sizeof(local_path), "%s/%s", cache_dir, fname);
+
+	/* Check if already cached locally */
+	if (stat(local_path, &st) == 0 && st.st_size > 0) {
+		snprintf(out, out_size, "%s", local_path);
+		return 1;
+	}
+
+	/* Create cache directory on first call */
+	if (!cache_dir_created) {
+		char cmd[600];
+		snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", cache_dir);
+		system(cmd);
+		cache_dir_created = 1;
+	}
+
+	/* Download from server */
+	if (item->server_url[0] == '\0')
+		return 0;
+
+	{
+		char cmd[1024];
+		int ret;
+		snprintf(cmd, sizeof(cmd),
+			"curl -s -f -o '%s' '%s/image/%s' 2>/dev/null",
+			local_path, item->server_url, fname);
+		ret = system(cmd);
+		if (ret != 0) {
+			wlr_log(WLR_DEBUG, "Failed to download image: %s/image/%s",
+				item->server_url, fname);
+			return 0;
+		}
+	}
+
+	/* Verify download succeeded */
+	if (stat(local_path, &st) == 0 && st.st_size > 0) {
+		snprintf(out, out_size, "%s", local_path);
+		return 1;
+	}
+
+	return 0;
+}
+
 void
 media_view_load_poster(MediaItem *item, int target_w, int target_h)
 {
@@ -846,21 +917,17 @@ media_view_load_poster(MediaItem *item, int target_w, int target_h)
 	uint8_t *argb = NULL;
 	size_t bufsize;
 	struct wlr_buffer *buf = NULL;
+	char local_path[512];
 
 	if (!item || item->poster_loaded)
 		return;
 
 	item->poster_loaded = 1;
 
-	/* Check if poster path exists */
-	if (item->poster_path[0] == '\0' || strcmp(item->poster_path, "null") == 0)
+	if (!ensure_local_image(item, item->poster_path, local_path, sizeof(local_path)))
 		return;
 
-	/* Check if it's a local file */
-	if (item->poster_path[0] != '/')
-		return;
-
-	pixbuf = gdk_pixbuf_new_from_file(item->poster_path, &gerr);
+	pixbuf = gdk_pixbuf_new_from_file(local_path, &gerr);
 	if (!pixbuf) {
 		if (gerr) {
 			wlr_log(WLR_DEBUG, "Failed to load poster %s: %s",
@@ -959,16 +1026,17 @@ media_view_load_backdrop(MediaItem *item, int target_w, int target_h)
 	uint8_t *argb = NULL;
 	size_t bufsize;
 	struct wlr_buffer *buf = NULL;
+	char local_path[512];
 
 	if (!item || item->backdrop_loaded)
 		return;
 
 	item->backdrop_loaded = 1;
 
-	if (item->backdrop_path[0] == '\0')
+	if (!ensure_local_image(item, item->backdrop_path, local_path, sizeof(local_path)))
 		return;
 
-	pixbuf = gdk_pixbuf_new_from_file(item->backdrop_path, &gerr);
+	pixbuf = gdk_pixbuf_new_from_file(local_path, &gerr);
 	if (!pixbuf) {
 		if (gerr) g_error_free(gerr);
 		return;
@@ -1920,19 +1988,6 @@ media_view_render(Monitor *m, MediaViewType type)
 		idx++;
 	}
 
-	/* Show count in corner */
-	char count_str[64];
-	snprintf(count_str, sizeof(count_str), "%d %s",
-	         view->item_count,
-	         type == MEDIA_VIEW_MOVIES ? "Movies" : "Episodes");
-	struct wlr_scene_tree *count_tree = wlr_scene_tree_create(view->tree);
-	if (count_tree) {
-		wlr_scene_node_set_position(&count_tree->node, padding, view->height - 30);
-		StatusModule mod = {0};
-		mod.tree = count_tree;
-		float count_color[4] = {0.7f, 0.7f, 0.7f, 1.0f};
-		tray_render_label(&mod, count_str, 0, 18, count_color);
-	}
 }
 
 void

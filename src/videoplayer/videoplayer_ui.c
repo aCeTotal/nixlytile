@@ -1143,6 +1143,72 @@ static struct wlr_buffer *create_bitmap_subtitle_buffer(VideoPlayer *vp)
     double dst_x = bottom_center_x - (bw * scale_x) / 2.0;
     double dst_y = bottom_y - (bh * scale_y);
 
+    /* Recolor bitmap subtitle to white text with black outline.
+     * PGS/VOBSUB bitmaps may have arbitrary colors (yellow, black, etc.).
+     * Convert to a consistent white-on-black-outline look matching text subs.
+     * Process: extract luminance as text mask, dilate for outline, composite. */
+    {
+        uint8_t *pixels = vp->subtitle.bitmap_data;
+        uint8_t *text_alpha = calloc(bw * bh, 1);
+        uint8_t *outline_alpha = calloc(bw * bh, 1);
+
+        if (text_alpha && outline_alpha) {
+            /* Extract text alpha from bitmap luminance + alpha */
+            for (int y = 0; y < bh; y++) {
+                for (int x = 0; x < bw; x++) {
+                    int idx = y * bstride + x * 4;
+                    uint8_t pb = pixels[idx + 0];  /* BGRA */
+                    uint8_t pg = pixels[idx + 1];
+                    uint8_t pr = pixels[idx + 2];
+                    uint8_t pa = pixels[idx + 3];
+                    /* Luminance weighted by alpha */
+                    int lum = (pr * 299 + pg * 587 + pb * 114) / 1000;
+                    /* Use max of luminance and inverse-luminance to catch both
+                     * white-on-black and black-on-white subtitle styles */
+                    int bright = lum > 128 ? lum : (255 - lum);
+                    text_alpha[y * bw + x] = (uint8_t)((bright * pa) / 255);
+                }
+            }
+
+            /* Dilate text_alpha by 2px to create outline mask */
+            int radius = 2;
+            for (int y = 0; y < bh; y++) {
+                for (int x = 0; x < bw; x++) {
+                    uint8_t max_a = 0;
+                    for (int dy = -radius; dy <= radius; dy++) {
+                        for (int dx = -radius; dx <= radius; dx++) {
+                            int ny = y + dy, nx = x + dx;
+                            if (ny >= 0 && ny < bh && nx >= 0 && nx < bw) {
+                                uint8_t val = text_alpha[ny * bw + nx];
+                                if (val > max_a) max_a = val;
+                            }
+                        }
+                    }
+                    outline_alpha[y * bw + x] = max_a;
+                }
+            }
+
+            /* Rebuild bitmap: black outline first, then white text on top */
+            for (int y = 0; y < bh; y++) {
+                for (int x = 0; x < bw; x++) {
+                    int idx = y * bstride + x * 4;
+                    uint8_t ta = text_alpha[y * bw + x];
+                    uint8_t oa = outline_alpha[y * bw + x];
+                    /* Composite: outline (black) behind text (white) */
+                    uint8_t out_a = ta + (uint8_t)((oa * (255 - ta)) / 255);
+                    uint8_t out_r = out_a > 0 ? (uint8_t)((ta * 255) / out_a) : 0;
+                    pixels[idx + 0] = out_r;  /* B */
+                    pixels[idx + 1] = out_r;  /* G */
+                    pixels[idx + 2] = out_r;  /* R */
+                    pixels[idx + 3] = out_a;  /* A */
+                }
+            }
+        }
+
+        free(text_alpha);
+        free(outline_alpha);
+    }
+
     cairo_save(cr);
     cairo_translate(cr, dst_x, dst_y);
     cairo_scale(cr, scale_x, scale_y);

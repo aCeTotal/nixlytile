@@ -2166,7 +2166,7 @@ static int process_single_job(TranscodeJob *job) {
             ret = run_ffmpeg(job->filepath, job->filepath2, resume_path,
                              tmp_dur, &audio, &video, &subs);
 
-            if (ret == 0) {
+            if (ret == 0 && !tc.stop_requested) {
                 /* Concat .tmp + .tmp.resume → final mkv_path */
                 ret = concat_copy(tmp_path, resume_path, mkv_path);
             } else {
@@ -2180,15 +2180,21 @@ static int process_single_job(TranscodeJob *job) {
             unlink(tmp_path);
             ret = run_ffmpeg(job->filepath, job->filepath2, tmp_path,
                              0, &audio, &video, &subs);
-            if (ret == 0)
+            if (ret == 0 && !tc.stop_requested)
                 rename(tmp_path, mkv_path);
         }
     } else {
         /* No partial — encode from scratch to temp */
         ret = run_ffmpeg(job->filepath, job->filepath2, tmp_path,
                          0, &audio, &video, &subs);
-        if (ret == 0)
+        if (ret == 0 && !tc.stop_requested)
             rename(tmp_path, mkv_path);
+    }
+
+    /* If server is shutting down, never treat as success — keep .tmp for resume */
+    if (tc.stop_requested) {
+        fprintf(stderr, "  Server stopping — keeping partial encode for resume\n");
+        ret = -1;
     }
 
     if (ret == 0) {
