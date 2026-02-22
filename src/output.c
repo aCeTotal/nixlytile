@@ -87,6 +87,9 @@ bestmode(struct wlr_output *output)
 	int best_area = 0, best_refresh = 0;
 
 	wl_list_for_each(mode, &output->modes, link) {
+		/* Skip DCI 4K (4096x2160) - only use UHD (3840x2160) */
+		if (mode->width > 3840 && mode->height == 2160)
+			continue;
 		int area = mode->width * mode->height;
 		if (!best || area > best_area || (area == best_area && mode->refresh > best_refresh)) {
 			best = mode;

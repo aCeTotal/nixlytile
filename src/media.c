@@ -1168,6 +1168,9 @@ media_render_buffering_overlay(Monitor *m, MediaViewType type)
 	if (!view || !view->visible || !view->tree)
 		return;
 
+	float scale = view->height / 1080.0f;
+	if (scale > 2.0f) scale = 2.0f;  /* Cap at 4K (3840x2160) */
+
 	/* Clear previous content */
 	wl_list_for_each_safe(node, tmp, &view->tree->children, link) {
 		wlr_scene_node_destroy(node);
@@ -1180,26 +1183,30 @@ media_render_buffering_overlay(Monitor *m, MediaViewType type)
 
 	/* Center the message */
 	center_x = view->width / 2;
-	center_y = view->height / 2 - 100;
+	center_y = view->height / 2 - (int)(100 * scale);
 
 	/* Warning icon area */
 	{
 		float icon_bg[4] = {0.15f, 0.12f, 0.05f, 1.0f};
-		drawrect(view->tree, center_x - 40, center_y - 80, 80, 80, icon_bg);
+		int icon_size = (int)(80 * scale);
+		int icon_half = (int)(40 * scale);
+		drawrect(view->tree, center_x - icon_half, center_y - icon_size, icon_size, icon_size, icon_bg);
 	}
 
 	/* Warning symbol */
 	text_tree = wlr_scene_tree_create(view->tree);
 	if (text_tree) {
-		wlr_scene_node_set_position(&text_tree->node, center_x - 20, center_y - 60);
+		wlr_scene_node_set_position(&text_tree->node,
+			center_x - (int)(20 * scale), center_y - (int)(60 * scale));
 		mod.tree = text_tree;
-		tray_render_label(&mod, "!", 0, 40, warning_color);
+		tray_render_label(&mod, "!", 0, (int)(40 * scale), warning_color);
 	}
 
 	/* Render message lines */
 	msg = playback_message;
-	line_y = center_y + 20;
-	line_height = 32;
+	line_y = center_y + (int)(20 * scale);
+	line_height = (int)(32 * scale);
+	int char_w = (int)(10 * scale);
 
 	while (*msg) {
 		/* Extract line until \n */
@@ -1212,12 +1219,12 @@ media_render_buffering_overlay(Monitor *m, MediaViewType type)
 		line[len] = '\0';
 
 		/* Center text */
-		text_w = (int)len * 10;  /* Approximate */
+		text_w = (int)len * char_w;  /* Approximate */
 		text_tree = wlr_scene_tree_create(view->tree);
 		if (text_tree) {
 			wlr_scene_node_set_position(&text_tree->node, center_x - text_w / 2, line_y);
 			mod.tree = text_tree;
-			tray_render_label(&mod, line, 0, 24, text_color);
+			tray_render_label(&mod, line, 0, (int)(24 * scale), text_color);
 		}
 		line_y += line_height;
 
@@ -1229,10 +1236,10 @@ media_render_buffering_overlay(Monitor *m, MediaViewType type)
 
 	/* Progress bar */
 	{
-		int bar_w = 400;
-		int bar_h = 20;
+		int bar_w = (int)(400 * scale);
+		int bar_h = (int)(20 * scale);
 		int bar_x = center_x - bar_w / 2;
-		int bar_y = line_y + 40;
+		int bar_y = line_y + (int)(40 * scale);
 		int fill_w;
 		char pct[32];
 
@@ -1245,9 +1252,10 @@ media_render_buffering_overlay(Monitor *m, MediaViewType type)
 		snprintf(pct, sizeof(pct), "%d%%", playback_buffer_progress);
 		text_tree = wlr_scene_tree_create(view->tree);
 		if (text_tree) {
-			wlr_scene_node_set_position(&text_tree->node, center_x - 20, bar_y + bar_h + 20);
+			wlr_scene_node_set_position(&text_tree->node,
+				center_x - (int)(20 * scale), bar_y + bar_h + (int)(20 * scale));
 			mod.tree = text_tree;
-			tray_render_label(&mod, pct, 0, 24, text_color);
+			tray_render_label(&mod, pct, 0, (int)(24 * scale), text_color);
 		}
 
 		/* Cancel hint */
@@ -1255,9 +1263,10 @@ media_render_buffering_overlay(Monitor *m, MediaViewType type)
 			float hint_color[4] = {0.5f, 0.5f, 0.5f, 1.0f};
 			text_tree = wlr_scene_tree_create(view->tree);
 			if (text_tree) {
-				wlr_scene_node_set_position(&text_tree->node, center_x - 140, view->height - 60);
+				wlr_scene_node_set_position(&text_tree->node,
+					center_x - (int)(140 * scale), view->height - (int)(60 * scale));
 				mod.tree = text_tree;
-				tray_render_label(&mod, "Press B or Escape to cancel", 0, 24, hint_color);
+				tray_render_label(&mod, "Press B or Escape to cancel", 0, (int)(24 * scale), hint_color);
 			}
 		}
 	}
@@ -1268,31 +1277,34 @@ static int
 media_render_label_value(struct wlr_scene_tree *tree,
 		const char *label, const char *value,
 		int x, int y, int label_w,
-		const float label_color[4], const float value_color[4])
+		const float label_color[4], const float value_color[4],
+		float scale)
 {
+	int font_size = (int)(16 * scale);
 	struct wlr_scene_tree *lt = wlr_scene_tree_create(tree);
 	if (lt) {
 		wlr_scene_node_set_position(&lt->node, x, y);
 		StatusModule mod = {0};
 		mod.tree = lt;
-		tray_render_label(&mod, label, 0, 16, label_color);
+		tray_render_label(&mod, label, 0, font_size, label_color);
 	}
 	struct wlr_scene_tree *vt = wlr_scene_tree_create(tree);
 	if (vt) {
 		wlr_scene_node_set_position(&vt->node, x + label_w, y);
 		StatusModule mod = {0};
 		mod.tree = vt;
-		tray_render_label(&mod, value, 0, 16, value_color);
+		tray_render_label(&mod, value, 0, font_size, value_color);
 	}
-	return 35;
+	return (int)(35 * scale);
 }
 
 /* Word-wrap text and render line-by-line, returns total y advance */
 static int
 media_render_wrapped_text(struct wlr_scene_tree *tree,
 		const char *text, int x, int y, int wrap_chars, int max_lines,
-		int line_h, const float color[4])
+		int line_h, const float color[4], float scale)
 {
+	int font_size = (int)(16 * scale);
 	char wrapped[4096];
 	int src_idx = 0, dst_idx = 0, line_len = 0;
 	int current_line = 0;
@@ -1333,7 +1345,7 @@ media_render_wrapped_text(struct wlr_scene_tree *tree,
 			wlr_scene_node_set_position(&lt->node, x, y + total_y);
 			StatusModule mod = {0};
 			mod.tree = lt;
-			tray_render_label(&mod, line_buf, 0, 16, color);
+			tray_render_label(&mod, line_buf, 0, font_size, color);
 		}
 		total_y += line_h;
 		lines_rendered++;
@@ -1370,6 +1382,9 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 	MediaItem *item = view->detail_item;
 	if (!item) return;
 
+	float scale = view->height / 1080.0f;
+	if (scale > 2.0f) scale = 2.0f;  /* Cap at 4K (3840x2160) */
+
 	/* Clear previous content */
 	wl_list_for_each_safe(node, tmp, &view->tree->children, link) {
 		wlr_scene_node_destroy(node);
@@ -1392,14 +1407,16 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 		}
 		/* Gradient overlay on backdrop */
 		float gradient[4] = {0.05f, 0.05f, 0.08f, 0.7f};
-		drawrect(view->tree, 650, backdrop_h - 180, view->width - 650, 180, gradient);
+		int grad_x = (int)(650 * scale);
+		int grad_h = (int)(180 * scale);
+		drawrect(view->tree, grad_x, backdrop_h - grad_h, view->width - grad_x, grad_h, gradient);
 	}
 
 	/* Left side: poster and info */
-	int poster_w = 280;
-	int poster_h = 420;
-	int info_x = 60;
-	int info_y = (backdrop_h > 0 ? backdrop_h - poster_h / 2 : 60) + 30;
+	int poster_w = (int)(280 * scale);
+	int poster_h = (int)(420 * scale);
+	int info_x = (int)(60 * scale);
+	int info_y = (backdrop_h > 0 ? backdrop_h - poster_h / 2 : (int)(60 * scale)) + (int)(30 * scale);
 
 	/* Poster */
 	if (!item->poster_loaded) {
@@ -1408,7 +1425,10 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 	if (item->poster_buf) {
 		/* Poster shadow/border */
 		float poster_shadow[4] = {0.0f, 0.0f, 0.0f, 0.5f};
-		drawrect(view->tree, info_x - 4, info_y - 4, poster_w + 8, poster_h + 8, poster_shadow);
+		int shadow_pad = (int)(4 * scale);
+		int shadow_pad2 = (int)(8 * scale);
+		drawrect(view->tree, info_x - shadow_pad, info_y - shadow_pad,
+			poster_w + shadow_pad2, poster_h + shadow_pad2, poster_shadow);
 
 		struct wlr_scene_buffer *poster = wlr_scene_buffer_create(view->tree, item->poster_buf);
 		if (poster) {
@@ -1417,21 +1437,22 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 	}
 
 	/* Details box - starts at top-right corner of thumbnail (with gap for shadow) */
-	int details_box_x = info_x + poster_w + 72;  /* 72px gap after poster shadow */
+	int details_box_x = info_x + poster_w + (int)(72 * scale);
 	int details_box_y = info_y;  /* Aligned with poster top */
-	int details_box_w = 300;
-	int details_box_h = 380;
+	int details_box_w = (int)(300 * scale);
+	int details_box_h = (int)(380 * scale);
 	float details_box_bg[4] = {0.08f, 0.08f, 0.12f, 0.95f};  /* Match panel_bg */
 	drawrect(view->tree, details_box_x, details_box_y, details_box_w, details_box_h, details_box_bg);
 
 	/* Title and metadata inside details box */
-	int text_x = details_box_x + 15;  /* Inside details box with padding */
-	int text_y = details_box_y + 20;
-	int text_max_w = 200;  /* Max width before wrapping */
-	int chars_per_line = text_max_w / 9;  /* ~9px per char at size 16 */
+	int text_x = details_box_x + (int)(15 * scale);
+	int text_y = details_box_y + (int)(20 * scale);
+	int text_max_w = (int)(200 * scale);
+	int chars_per_line = text_max_w / (int)(9 * scale);
 
 	/* Bold label color (brighter white) */
 	float label_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+	int label_w = (int)(160 * scale);
 
 	/* Title (bold/large) */
 	struct wlr_scene_tree *title_tree = wlr_scene_tree_create(view->tree);
@@ -1439,16 +1460,16 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 		wlr_scene_node_set_position(&title_tree->node, text_x, text_y);
 		StatusModule mod = {0};
 		mod.tree = title_tree;
-		tray_render_label(&mod, item->title, 0, 28, text_color);
+		tray_render_label(&mod, item->title, 0, (int)(28 * scale), text_color);
 	}
-	text_y += 50;
+	text_y += (int)(50 * scale);
 
 	/* Score */
 	if (item->rating > 0) {
 		char score_val[32];
 		snprintf(score_val, sizeof(score_val), "%.1f", item->rating);
 		text_y += media_render_label_value(view->tree, "Score:", score_val,
-				text_x, text_y, 160, label_color, dim_text);
+				text_x, text_y, label_w, label_color, dim_text, scale);
 	}
 
 	/* Total duration */
@@ -1467,7 +1488,7 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 			else
 				snprintf(duration_val, sizeof(duration_val), "%dm", mins);
 			text_y += media_render_label_value(view->tree, "Total duration:", duration_val,
-					text_x, text_y, 160, label_color, dim_text);
+					text_x, text_y, label_w, label_color, dim_text, scale);
 		}
 	}
 
@@ -1478,12 +1499,12 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 			wlr_scene_node_set_position(&lt->node, text_x, text_y);
 			StatusModule mod = {0};
 			mod.tree = lt;
-			tray_render_label(&mod, "Genre:", 0, 16, label_color);
+			tray_render_label(&mod, "Genre:", 0, (int)(16 * scale), label_color);
 		}
-		text_y += 22;
+		text_y += (int)(22 * scale);
 		text_y += media_render_wrapped_text(view->tree, item->genres,
-				text_x, text_y, chars_per_line, 0, 20, dim_text);
-		text_y += 15;
+				text_x, text_y, chars_per_line, 0, (int)(20 * scale), dim_text, scale);
+		text_y += (int)(15 * scale);
 	}
 
 	/* Release date */
@@ -1491,7 +1512,7 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 		char year_val[16];
 		snprintf(year_val, sizeof(year_val), "%d", item->year);
 		text_y += media_render_label_value(view->tree, "Release date:", year_val,
-				text_x, text_y, 160, label_color, dim_text);
+				text_x, text_y, label_w, label_color, dim_text, scale);
 	}
 
 	/* Seasons and Episodes (for TV shows only) */
@@ -1510,12 +1531,12 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 		char seasons_val[16];
 		snprintf(seasons_val, sizeof(seasons_val), "%d", display_seasons);
 		text_y += media_render_label_value(view->tree, "Seasons:", seasons_val,
-				text_x, text_y, 160, label_color, dim_text);
+				text_x, text_y, label_w, label_color, dim_text, scale);
 
 		char episodes_val[16];
 		snprintf(episodes_val, sizeof(episodes_val), "%d", display_episodes);
 		text_y += media_render_label_value(view->tree, "Episodes:", episodes_val,
-				text_x, text_y, 160, label_color, dim_text);
+				text_x, text_y, label_w, label_color, dim_text, scale);
 	}
 
 	/* Next episode / Ended status (TV shows only) */
@@ -1530,52 +1551,55 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 			snprintf(next_val, sizeof(next_val), "TBA");
 		}
 		text_y += media_render_label_value(view->tree, "Next episode:", next_val,
-				text_x, text_y, 160, label_color, dim_text);
+				text_x, text_y, label_w, label_color, dim_text, scale);
 	}
 
 	/* Overview bar - horizontal bar to the right of details_box (transparent, no background) */
 	if (item->overview[0]) {
-		int overview_bar_x = details_box_x + details_box_w + 85;
+		int overview_bar_x = details_box_x + details_box_w + (int)(85 * scale);
 		int overview_bar_y = details_box_y;
-		int ov_text_x = overview_bar_x - 35;
-		int ov_text_y = overview_bar_y + 12;
-		int wrap_width = 800 / 9;  /* Max 800px line width for font size 16 */
+		int ov_text_x = overview_bar_x - (int)(35 * scale);
+		int ov_text_y = overview_bar_y + (int)(12 * scale);
+		int wrap_width = (int)(800 * scale) / (int)(9 * scale);
 
 		media_render_wrapped_text(view->tree, item->overview,
-				ov_text_x, ov_text_y, wrap_width, 12, 20, dim_text);
+				ov_text_x, ov_text_y, wrap_width, 12, (int)(20 * scale), dim_text, scale);
 	}
 
 	/* Play button (for movies) or focus indicator */
 	if (type == MEDIA_VIEW_MOVIES || (type == MEDIA_VIEW_TVSHOWS && view->detail_focus == DETAIL_FOCUS_INFO)) {
-		int btn_y = info_y + poster_h + 30;
-		int btn_w = 160;
-		int btn_h = 50;
+		int btn_y = info_y + poster_h + (int)(30 * scale);
+		int btn_w = (int)(160 * scale);
+		int btn_h = (int)(50 * scale);
 
 		float *btn_bg = (view->detail_focus == DETAIL_FOCUS_INFO) ? selected_bg : hover_bg;
 		drawrect(view->tree, info_x, btn_y, btn_w, btn_h, btn_bg);
 
 		struct wlr_scene_tree *btn_tree = wlr_scene_tree_create(view->tree);
 		if (btn_tree) {
-			wlr_scene_node_set_position(&btn_tree->node, info_x + 50, btn_y + 15);
+			wlr_scene_node_set_position(&btn_tree->node,
+				info_x + (int)(50 * scale), btn_y + (int)(15 * scale));
 			StatusModule mod = {0};
 			mod.tree = btn_tree;
-			tray_render_label(&mod, "▶ Play", 0, 20, text_color);
+			tray_render_label(&mod, "▶ Play", 0, (int)(20 * scale), text_color);
 		}
 	}
 
 	/* For TV shows: show seasons and episodes columns - placed on right side */
 	if (type == MEDIA_VIEW_TVSHOWS) {
 		/* Position columns on the right side */
-		int panel_y = info_y + poster_h - 190;  /* 150px higher */
-		int panel_h = view->height - panel_y - 30;
-		int col_gap = 15;
-		int season_col_w = 550;
-		int episode_col_w = 550;
-		int episode_col_x = view->width - 40 - episode_col_w;
+		int panel_y = info_y + poster_h - (int)(190 * scale);
+		int panel_h = view->height - panel_y - (int)(30 * scale);
+		int col_gap = (int)(15 * scale);
+		int season_col_w = (int)(550 * scale);
+		int episode_col_w = (int)(550 * scale);
+		int episode_col_x = view->width - (int)(40 * scale) - episode_col_w;
 		int panel_x = episode_col_x - col_gap - season_col_w;
-		int row_h = 40;
-		int ep_row_h = 55;
-		int header_h = 45;
+		int row_h = (int)(40 * scale);
+		int ep_row_h = (int)(55 * scale);
+		int header_h = (int)(45 * scale);
+		int inner_pad = (int)(12 * scale);
+		int row_pad = (int)(4 * scale);
 
 		/* Seasons column with clipping area */
 		drawrect(view->tree, panel_x, panel_y, season_col_w, panel_h, panel_bg);
@@ -1583,15 +1607,15 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 		/* Seasons header */
 		struct wlr_scene_tree *sh_tree = wlr_scene_tree_create(view->tree);
 		if (sh_tree) {
-			wlr_scene_node_set_position(&sh_tree->node, panel_x + 12, panel_y + 12);
+			wlr_scene_node_set_position(&sh_tree->node, panel_x + inner_pad, panel_y + inner_pad);
 			StatusModule mod = {0};
 			mod.tree = sh_tree;
-			tray_render_label(&mod, "Seasons", 0, 16, accent_color);
+			tray_render_label(&mod, "Seasons", 0, (int)(16 * scale), accent_color);
 		}
 
 		/* Season list with scroll */
 		int content_y = panel_y + header_h;
-		int content_h = panel_h - header_h - 5;
+		int content_h = panel_h - header_h - (int)(5 * scale);
 		int visible_rows = content_h / row_h;
 
 		/* Ensure selected season is visible */
@@ -1619,7 +1643,8 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 			                (is_selected ? hover_bg : NULL);
 
 			if (row_bg) {
-				drawrect(view->tree, panel_x + 4, season_y, season_col_w - 8, row_h - 4, row_bg);
+				drawrect(view->tree, panel_x + row_pad, season_y,
+					season_col_w - row_pad * 2, row_h - row_pad, row_bg);
 			}
 
 			char season_str[64];
@@ -1627,11 +1652,12 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 
 			struct wlr_scene_tree *s_tree = wlr_scene_tree_create(view->tree);
 			if (s_tree) {
-				wlr_scene_node_set_position(&s_tree->node, panel_x + 12, season_y + 10);
+				wlr_scene_node_set_position(&s_tree->node,
+					panel_x + inner_pad, season_y + (int)(10 * scale));
 				StatusModule mod = {0};
 				mod.tree = s_tree;
 				float *color = is_selected ? text_color : dim_text;
-				tray_render_label(&mod, season_str, 0, 14, color);
+				tray_render_label(&mod, season_str, 0, (int)(14 * scale), color);
 			}
 
 			season_y += row_h;
@@ -1643,12 +1669,17 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 		int total_seasons = 0;
 		for (MediaSeason *s = view->seasons; s; s = s->next) total_seasons++;
 		if (total_seasons > visible_rows) {
-			int scroll_track_h = content_h - 10;
+			int scroll_track_h = content_h - (int)(10 * scale);
 			int scroll_thumb_h = (visible_rows * scroll_track_h) / total_seasons;
-			if (scroll_thumb_h < 20) scroll_thumb_h = 20;
-			int scroll_thumb_y = content_y + 5 + (view->season_scroll_offset * (scroll_track_h - scroll_thumb_h)) / (total_seasons - visible_rows);
+			int min_thumb = (int)(20 * scale);
+			if (scroll_thumb_h < min_thumb) scroll_thumb_h = min_thumb;
+			int scroll_thumb_y = content_y + (int)(5 * scale) +
+				(view->season_scroll_offset * (scroll_track_h - scroll_thumb_h)) / (total_seasons - visible_rows);
 			float scroll_color[4] = {0.3f, 0.3f, 0.4f, 0.6f};
-			drawrect(view->tree, panel_x + season_col_w - 6, scroll_thumb_y, 4, scroll_thumb_h, scroll_color);
+			int scroll_w = (int)(4 * scale);
+			int scroll_margin = (int)(6 * scale);
+			drawrect(view->tree, panel_x + season_col_w - scroll_margin,
+				scroll_thumb_y, scroll_w, scroll_thumb_h, scroll_color);
 		}
 
 		/* Episodes column */
@@ -1659,15 +1690,16 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 		if (eh_tree) {
 			char ep_header[64];
 			snprintf(ep_header, sizeof(ep_header), "Season %d", view->selected_season);
-			wlr_scene_node_set_position(&eh_tree->node, episode_col_x + 12, panel_y + 12);
+			wlr_scene_node_set_position(&eh_tree->node,
+				episode_col_x + inner_pad, panel_y + inner_pad);
 			StatusModule mod = {0};
 			mod.tree = eh_tree;
-			tray_render_label(&mod, ep_header, 0, 16, accent_color);
+			tray_render_label(&mod, ep_header, 0, (int)(16 * scale), accent_color);
 		}
 
 		/* Episode list with scroll */
 		int ep_content_y = panel_y + header_h;
-		int ep_content_h = panel_h - header_h - 5;
+		int ep_content_h = panel_h - header_h - (int)(5 * scale);
 		int ep_visible_rows = ep_content_h / ep_row_h;
 
 		/* Ensure selected episode is visible */
@@ -1695,7 +1727,8 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 			                (is_selected ? hover_bg : NULL);
 
 			if (row_bg) {
-				drawrect(view->tree, episode_col_x + 4, ep_y, episode_col_w - 12, ep_row_h - 4, row_bg);
+				drawrect(view->tree, episode_col_x + row_pad, ep_y,
+					episode_col_w - inner_pad, ep_row_h - row_pad, row_bg);
 			}
 
 			/* Episode number */
@@ -1704,11 +1737,12 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 
 			struct wlr_scene_tree *ep_tree = wlr_scene_tree_create(view->tree);
 			if (ep_tree) {
-				wlr_scene_node_set_position(&ep_tree->node, episode_col_x + 12, ep_y + 18);
+				wlr_scene_node_set_position(&ep_tree->node,
+					episode_col_x + inner_pad, ep_y + (int)(18 * scale));
 				StatusModule mod = {0};
 				mod.tree = ep_tree;
 				float *color = is_selected ? text_color : dim_text;
-				tray_render_label(&mod, ep_str, 0, 14, color);
+				tray_render_label(&mod, ep_str, 0, (int)(14 * scale), color);
 			}
 
 			ep_y += ep_row_h;
@@ -1718,15 +1752,19 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 
 		/* Scroll indicator for episodes if needed */
 		if (view->episode_count > ep_visible_rows) {
-			int ep_scroll_track_h = ep_content_h - 10;
+			int ep_scroll_track_h = ep_content_h - (int)(10 * scale);
 			int ep_scroll_thumb_h = (ep_visible_rows * ep_scroll_track_h) / view->episode_count;
-			if (ep_scroll_thumb_h < 20) ep_scroll_thumb_h = 20;
-			int ep_scroll_thumb_y = ep_content_y + 5;
+			int min_thumb = (int)(20 * scale);
+			if (ep_scroll_thumb_h < min_thumb) ep_scroll_thumb_h = min_thumb;
+			int ep_scroll_thumb_y = ep_content_y + (int)(5 * scale);
 			if (view->episode_count > ep_visible_rows) {
 				ep_scroll_thumb_y += (view->episode_scroll_offset * (ep_scroll_track_h - ep_scroll_thumb_h)) / (view->episode_count - ep_visible_rows);
 			}
 			float scroll_color[4] = {0.3f, 0.3f, 0.4f, 0.6f};
-			drawrect(view->tree, episode_col_x + episode_col_w - 8, ep_scroll_thumb_y, 4, ep_scroll_thumb_h, scroll_color);
+			int scroll_w = (int)(4 * scale);
+			int scroll_margin = (int)(8 * scale);
+			drawrect(view->tree, episode_col_x + episode_col_w - scroll_margin,
+				ep_scroll_thumb_y, scroll_w, ep_scroll_thumb_h, scroll_color);
 		}
 	}
 
@@ -1736,11 +1774,12 @@ media_view_render_detail(Monitor *m, MediaViewType type)
 		const char *hint = type == MEDIA_VIEW_MOVIES ?
 		                   "A/Enter: Play   B/Esc: Back" :
 		                   "←→: Switch columns   ↑↓: Navigate   A/Enter: Play   B/Esc: Back";
-		wlr_scene_node_set_position(&hint_tree->node, 60, view->height - 40);
+		wlr_scene_node_set_position(&hint_tree->node,
+			(int)(60 * scale), view->height - (int)(40 * scale));
 		StatusModule mod = {0};
 		mod.tree = hint_tree;
 		float hint_color[4] = {0.5f, 0.5f, 0.5f, 1.0f};
-		tray_render_label(&mod, hint, 0, 14, hint_color);
+		tray_render_label(&mod, hint, 0, (int)(14 * scale), hint_color);
 	}
 }
 
@@ -1803,8 +1842,10 @@ media_view_ensure_visible(Monitor *m, MediaViewType type)
 	MediaGridView *view = media_get_view(m, type);
 	if (!view) return;
 
-	int padding = MEDIA_GRID_PADDING;
-	int gap = MEDIA_GRID_GAP;
+	float scale = view->height / 1080.0f;
+	if (scale > 2.0f) scale = 2.0f;  /* Cap at 4K (3840x2160) */
+	int padding = (int)(MEDIA_GRID_PADDING * scale);
+	int gap = (int)(MEDIA_GRID_GAP * scale);
 	int grid_width = view->width - 2 * padding;
 	int cols = 5;
 	int tile_w = (grid_width - ((cols - 1) * gap)) / cols;
@@ -1830,8 +1871,6 @@ media_view_render(Monitor *m, MediaViewType type)
 {
 	MediaGridView *view;
 	struct wlr_scene_node *node, *tmp;
-	int padding = MEDIA_GRID_PADDING;
-	int gap = MEDIA_GRID_GAP;
 	float tile_color[4] = {0.12f, 0.12f, 0.15f, 0.95f};
 	float text_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 	float name_bg[4] = {0.0f, 0.0f, 0.0f, 0.75f};
@@ -1843,6 +1882,11 @@ media_view_render(Monitor *m, MediaViewType type)
 	view = media_get_view(m, type);
 	if (!view || !view->visible || !view->tree)
 		return;
+
+	float scale = view->height / 1080.0f;
+	if (scale > 2.0f) scale = 2.0f;  /* Cap at 4K (3840x2160) */
+	int padding = (int)(MEDIA_GRID_PADDING * scale);
+	int gap = (int)(MEDIA_GRID_GAP * scale);
 
 	/* Refresh if needed */
 	if (view->needs_refresh || !view->items) {
@@ -1867,7 +1911,7 @@ media_view_render(Monitor *m, MediaViewType type)
 	view->cols = 5;
 	int tile_w = (grid_width - ((view->cols - 1) * gap)) / view->cols;
 	int tile_h = (tile_w * 3) / 2;  /* 2:3 poster ratio */
-	int name_bar_h = 32;
+	int name_bar_h = (int)(32 * scale);
 
 	/* Ensure selected is visible */
 	media_view_ensure_visible(m, type);
@@ -1894,7 +1938,9 @@ media_view_render(Monitor *m, MediaViewType type)
 
 			if (ty + tile_h > 0 && ty < grid_height) {
 				int is_selected = (idx == view->selected_idx);
-				int glow_size = is_selected ? 6 : 0;
+				int glow_size = is_selected ? (int)(6 * scale) : 0;
+				int glow_margin_inner = (int)(2 * scale);
+				int glow_margin_outer = (int)(4 * scale);
 
 				struct wlr_scene_tree *tile = wlr_scene_tree_create(view->grid);
 				if (!tile) {
@@ -1910,7 +1956,9 @@ media_view_render(Monitor *m, MediaViewType type)
 					float glow1[4] = {0.2f, 0.5f, 1.0f, 0.2f};
 					float glow2[4] = {0.3f, 0.6f, 1.0f, 0.35f};
 					drawrect(tile, 0, 0, tile_w + glow_size * 2, tile_h + glow_size * 2, glow1);
-					drawrect(tile, 2, 2, tile_w + glow_size * 2 - 4, tile_h + glow_size * 2 - 4, glow2);
+					drawrect(tile, glow_margin_inner, glow_margin_inner,
+						tile_w + glow_size * 2 - glow_margin_outer,
+						tile_h + glow_size * 2 - glow_margin_outer, glow2);
 					drawrect(tile, glow_size, glow_size, tile_w, tile_h, tile_color);
 				} else {
 					wlr_scene_node_set_position(&tile->node, tx, ty);
@@ -1955,7 +2003,7 @@ media_view_render(Monitor *m, MediaViewType type)
 					}
 
 					/* Truncate if too long */
-					int max_chars = tile_w / 8;
+					int max_chars = tile_w / (int)(8 * scale);
 					if ((int)strlen(display_title) > max_chars && max_chars > 3) {
 						display_title[max_chars - 3] = '.';
 						display_title[max_chars - 2] = '.';
@@ -1963,11 +2011,12 @@ media_view_render(Monitor *m, MediaViewType type)
 						display_title[max_chars] = '\0';
 					}
 
+					int text_offset = (int)(6 * scale);
 					wlr_scene_node_set_position(&text_tree->node,
-						img_offset + 6, img_offset + tile_h - name_bar_h + 6 - glow_size);
+						img_offset + text_offset, img_offset + tile_h - name_bar_h + text_offset - glow_size);
 					StatusModule mod = {0};
 					mod.tree = text_tree;
-					tray_render_label(&mod, display_title, 0, 18, text_color);
+					tray_render_label(&mod, display_title, 0, (int)(18 * scale), text_color);
 				}
 
 				/* Rating badge for selected */
@@ -1979,13 +2028,15 @@ media_view_render(Monitor *m, MediaViewType type)
 
 					struct wlr_scene_tree *badge = wlr_scene_tree_create(tile);
 					if (badge) {
-						int badge_w = 40, badge_h = 22;
+						int badge_w = (int)(40 * scale), badge_h = (int)(22 * scale);
+						int badge_pad = (int)(4 * scale);
+						int badge_text_pad = (int)(6 * scale);
 						wlr_scene_node_set_position(&badge->node,
-							img_offset + tile_w - badge_w - 4, img_offset + 4);
+							img_offset + tile_w - badge_w - badge_pad, img_offset + badge_pad);
 						drawrect(badge, 0, 0, badge_w, badge_h, rating_bg);
 						StatusModule mod = {0};
 						mod.tree = badge;
-						tray_render_label(&mod, rating_str, 6, 16, rating_fg);
+						tray_render_label(&mod, rating_str, badge_text_pad, (int)(16 * scale), rating_fg);
 					}
 				}
 			}
