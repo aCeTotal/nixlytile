@@ -577,6 +577,7 @@ extern int videoplayer_audio_check_recovery(VideoPlayer *vp);
 /* Playback control */
 extern void videoplayer_play(VideoPlayer *vp);
 extern void videoplayer_pause(VideoPlayer *vp);
+extern void videoplayer_audio_play(VideoPlayer *vp);
 
 static uint64_t get_time_ns(void)
 {
@@ -986,7 +987,41 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
 
         if (queued >= VP_FRAME_QUEUE_SIZE * 3 / 4 &&
             (audio_avail >= audio_min || vp->audio_track_count == 0)) {
-            /* Buffer ready - start playback (audio + video together) */
+            /* === Synchronized A/V start ===
+             * Pre-activate PipeWire audio BEFORE starting video so that
+             * audio hardware is actually outputting samples when the first
+             * video frame appears.  Without this, video starts 50-100ms
+             * before audio due to PipeWire's async activation latency.
+             * This also prevents the ring buffer from filling up during
+             * the activation delay, which would trigger false
+             * stream_interrupted stalls that stop playback entirely. */
+            if (vp->audio_track_count > 0 && vp->audio.stream &&
+                !vp->audio.audio_prestart_sent) {
+                /* Phase 1: Activate PipeWire stream ahead of video */
+                vp->audio.stream_interrupted = 0;
+                vp->audio.write_stall_count = 0;
+                vp->audio.user_paused = 0;
+                vp->audio.audio_prestart_sent = 1;
+                vp->audio.audio_prestart_ns = get_time_ns();
+                videoplayer_audio_play(vp);
+                if (vp->debug_log) {
+                    fprintf(vp->debug_log, "# PRESTART | audio pre-activated, waiting for PipeWire on_process\n");
+                    fflush(vp->debug_log);
+                }
+                fprintf(stderr, "[videoplayer] Audio pre-started, waiting for PipeWire...\n");
+                return;
+            }
+            /* Phase 2: Wait for PipeWire to actually start consuming audio */
+            if (vp->audio_track_count > 0 && vp->audio.stream &&
+                vp->audio.audio_prestart_sent && !vp->audio.audio_preroll_done) {
+                uint64_t elapsed_ms = (get_time_ns() - vp->audio.audio_prestart_ns) / 1000000;
+                if (elapsed_ms < 200) {
+                    return;  /* Still waiting for on_process to fire */
+                }
+                fprintf(stderr, "[videoplayer] Audio preroll timeout (%lu ms), starting video anyway\n",
+                        (unsigned long)elapsed_ms);
+            }
+            /* Audio is flowing (or no audio / timeout) — start playback */
             videoplayer_play(vp);
         } else {
             return;

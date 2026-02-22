@@ -2039,6 +2039,9 @@ media_view_show(Monitor *m, MediaViewType type)
 	}
 
 	media_view_render(m, type);
+
+	/* Hide mouse cursor in media browser */
+	wlr_cursor_unset_image(cursor);
 }
 
 void
@@ -2056,6 +2059,10 @@ media_view_hide(Monitor *m, MediaViewType type)
 	if (view->tree) {
 		wlr_scene_node_set_enabled(&view->tree->node, false);
 	}
+
+	/* Restore mouse cursor when leaving media browser */
+	if (!media_view_visible_monitor())
+		wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
 }
 
 void

@@ -48,13 +48,13 @@ static char *url_encode(const char *str) {
     return result;
 }
 
-static char *tmdb_request(const char *endpoint) {
+static char *tmdb_request_lang(const char *endpoint, const char *lang) {
     if (!curl || !api_key) return NULL;
 
     char url[2048];
     char sep = strchr(endpoint, '?') ? '&' : '?';
     snprintf(url, sizeof(url), "%s%s%capi_key=%s&language=%s",
-             TMDB_API_BASE, endpoint, sep, api_key, language ? language : "en-US");
+             TMDB_API_BASE, endpoint, sep, api_key, lang);
 
     MemBuffer chunk = {0};
     chunk.data = malloc(1);
@@ -74,6 +74,31 @@ static char *tmdb_request(const char *endpoint) {
     }
 
     return chunk.data;
+}
+
+static char *tmdb_request(const char *endpoint) {
+    return tmdb_request_lang(endpoint, language ? language : "en-US");
+}
+
+/* Fetch overview with English fallback when configured language returns empty */
+static char *get_overview_fallback(cJSON *json, const char *endpoint) {
+    char *overview = get_string(json, "overview");
+    if (overview && overview[0]) return overview;
+
+    /* Already English or no language set - no fallback needed */
+    if (!language || strcmp(language, "en-US") == 0) return overview;
+
+    free(overview);
+    char *response = tmdb_request_lang(endpoint, "en-US");
+    if (!response) return NULL;
+
+    cJSON *en_json = cJSON_Parse(response);
+    free(response);
+    if (!en_json) return NULL;
+
+    overview = get_string(en_json, "overview");
+    cJSON_Delete(en_json);
+    return overview;
 }
 
 int tmdb_init(const char *key, const char *lang) {
@@ -261,7 +286,7 @@ TmdbMovie *tmdb_search_movie(const char *title, int year) {
     m->tmdb_id = get_int(json, "id");
     m->title = get_string(json, "title");
     m->original_title = get_string(json, "original_title");
-    m->overview = get_string(json, "overview");
+    m->overview = get_overview_fallback(json, endpoint);
     m->poster_path = get_string(json, "poster_path");
     m->backdrop_path = get_string(json, "backdrop_path");
     m->release_date = get_string(json, "release_date");
@@ -365,7 +390,7 @@ TmdbTvShow *tmdb_search_tvshow_ex(const char *title, int api_filter_year, int wa
     t->tmdb_id = get_int(json, "id");
     t->name = get_string(json, "name");
     t->original_name = get_string(json, "original_name");
-    t->overview = get_string(json, "overview");
+    t->overview = get_overview_fallback(json, endpoint);
     t->poster_path = get_string(json, "poster_path");
     t->backdrop_path = get_string(json, "backdrop_path");
     t->first_air_date = get_string(json, "first_air_date");
@@ -470,7 +495,7 @@ TmdbEpisode *tmdb_get_episode(int tv_id, int season, int episode) {
     e->episode_number = get_int(json, "episode_number");
     e->season_number = get_int(json, "season_number");
     e->name = get_string(json, "name");
-    e->overview = get_string(json, "overview");
+    e->overview = get_overview_fallback(json, endpoint);
     e->still_path = get_string(json, "still_path");
     e->air_date = get_string(json, "air_date");
     e->rating = get_float(json, "vote_average");

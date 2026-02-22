@@ -252,6 +252,12 @@ static void on_process(void *userdata)
         pthread_mutex_unlock(&vp->audio.lock);
     }
 
+    /* Signal synchronized A/V start: PipeWire is actually consuming audio.
+     * The render thread waits for this before presenting the first video frame,
+     * ensuring audio hardware is outputting samples when video begins. */
+    if (bytes_read > 0 && !vp->audio.audio_preroll_done)
+        vp->audio.audio_preroll_done = 1;
+
     buf->datas[0].chunk->offset = 0;
     buf->datas[0].chunk->stride = stride;
     buf->datas[0].chunk->size = bytes_needed;
@@ -591,6 +597,9 @@ int videoplayer_audio_init(VideoPlayer *vp)
     vp->audio.needs_device_pause = 0;
     vp->audio.write_stall_count = 0;
     vp->audio.reactivate_attempts = 0;
+    vp->audio.audio_preroll_done = 0;
+    vp->audio.audio_prestart_sent = 0;
+    vp->audio.audio_prestart_ns = 0;
 
     /* Initialize ring buffer */
     if (ring_buffer_init(&vp->audio.ring, AUDIO_RING_BUFFER_SIZE) < 0) {
@@ -1114,6 +1123,9 @@ void videoplayer_audio_flush(VideoPlayer *vp)
     vp->audio.needs_timing_reset = 0;
     vp->audio.write_stall_count = 0;
     vp->audio.reactivate_attempts = 0;
+    vp->audio.audio_preroll_done = 0;
+    vp->audio.audio_prestart_sent = 0;
+    vp->audio.audio_prestart_ns = 0;
     pthread_mutex_unlock(&vp->audio.lock);
 
     /* Reset resampler if present */

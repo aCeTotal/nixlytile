@@ -2234,6 +2234,9 @@ retro_gaming_show(Monitor *m)
 	}
 
 	retro_gaming_render(m);
+
+	/* Hide mouse cursor in retro gaming browser */
+	wlr_cursor_unset_image(cursor);
 }
 
 void
@@ -2251,6 +2254,10 @@ retro_gaming_hide(Monitor *m)
 		wlr_scene_node_set_enabled(&rg->tree->node, 0);
 	if (rg->dim)
 		wlr_scene_node_set_enabled(&rg->dim->node, 0);
+
+	/* Restore mouse cursor when leaving retro gaming browser */
+	if (!retro_gaming_visible_monitor())
+		wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
 }
 
 void

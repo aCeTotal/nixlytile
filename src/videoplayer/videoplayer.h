@@ -235,6 +235,13 @@ typedef struct VideoPlayerAudio {
     int write_stall_count;           /* Consecutive buffer-full writes (stall detection for decode thread) */
     int reactivate_attempts;         /* Attempts to reactivate stream before RECREATE */
 
+    /* Synchronized A/V start: pre-activate PipeWire during buffering so
+     * audio hardware is consuming when video starts — prevents desync and
+     * false stream_interrupted from ring buffer filling during activation */
+    volatile int audio_preroll_done;     /* on_process has consumed real audio data */
+    volatile int audio_prestart_sent;    /* AUDIO_CMD_PLAY sent during buffer fill */
+    uint64_t audio_prestart_ns;          /* Wall-clock time of prestart for timeout */
+
     /* Passthrough mode */
     int passthrough_mode;          /* IEC61937 for TrueHD/Atmos */
     uint8_t *iec_buffer;           /* IEC61937 framing buffer */

@@ -1845,8 +1845,10 @@ setcursor(struct wl_listener *listener, void *data)
 	 * event, which will result in the client requesting set the cursor surface */
 	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
 		return;
-	/* Hide cursor during video playback */
+	/* Hide cursor during video playback and HTPC views */
 	if (playback_state == PLAYBACK_PLAYING)
+		return;
+	if (media_view_visible_monitor() || retro_gaming_visible_monitor())
 		return;
 	/* This can be sent by any client, so we check to make sure this one
 	 * actually has pointer focus first. If so, we can tell the cursor to
@@ -1864,8 +1866,10 @@ setcursorshape(struct wl_listener *listener, void *data)
 	struct wlr_cursor_shape_manager_v1_request_set_shape_event *event = data;
 	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
 		return;
-	/* Hide cursor during video playback */
+	/* Hide cursor during video playback and HTPC views */
 	if (playback_state == PLAYBACK_PLAYING)
+		return;
+	if (media_view_visible_monitor() || retro_gaming_visible_monitor())
 		return;
 	/* This can be sent by any client, so we check to make sure this one
 	 * actually has pointer focus first. If so, we can tell the cursor to
