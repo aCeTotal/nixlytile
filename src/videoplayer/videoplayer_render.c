@@ -974,8 +974,8 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
             pthread_mutex_lock(&vp->audio.ring.lock);
             audio_avail = vp->audio.ring.available;
             pthread_mutex_unlock(&vp->audio.ring.lock);
-            audio_min = (size_t)vp->audio.sample_rate / 2 *
-                        vp->audio.channels * sizeof(float);  /* 0.5 seconds */
+            audio_min = (size_t)vp->audio.sample_rate *
+                        vp->audio.channels * sizeof(float);  /* 1.0 seconds */
         }
 
         if (vp->debug_log) {

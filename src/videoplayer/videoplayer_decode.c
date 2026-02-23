@@ -504,6 +504,18 @@ static int probe_subtitle_stream(VideoPlayer *vp, int stream_idx)
  *  File Opening
  * ================================================================ */
 
+/* FFmpeg I/O interrupt callback — returns 1 to abort blocking I/O.
+ * This is called periodically by FFmpeg during av_read_frame(),
+ * av_seek_frame(), and avformat_open_input() to check if the caller
+ * wants to abort.  Without this, closing a network stream blocks the
+ * compositor event loop for the full rw_timeout (seconds), which can
+ * cause the session manager to kill the compositor. */
+static int ffmpeg_interrupt_cb(void *opaque)
+{
+    VideoPlayer *vp = opaque;
+    return vp && vp->io_abort_requested;
+}
+
 int videoplayer_open(VideoPlayer *vp, const char *filepath)
 {
     int ret;
@@ -517,33 +529,49 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
     /* Store filepath */
     snprintf(vp->filepath, sizeof(vp->filepath), "%s", filepath);
     vp->state = VP_STATE_LOADING;
+    vp->io_abort_requested = 0;
 
     /* Detect local vs HTTP file for tuning probe/buffer parameters.
-     * Localhost HTTP (Jellyfin, Plex, etc.) gets the same fast treatment as
-     * local files: data is available instantly, no reconnect needed. */
+     * Localhost HTTP (Jellyfin, Plex, etc.) gets fast probing (data is
+     * available instantly) but full reconnect/buffering like remote HTTP
+     * because the server may be transcoding or have I/O stalls. */
     int is_http = (strncmp(filepath, "http://", 7) == 0 ||
                    strncmp(filepath, "https://", 8) == 0);
     int is_localhost = is_http &&
         (strstr(filepath, "://localhost") != NULL ||
          strstr(filepath, "://127.0.0.1") != NULL ||
          strstr(filepath, "://[::1]") != NULL);
-    vp->is_local_file = !is_http || is_localhost;
+    vp->is_local_file = !is_http;
 
-    /* Open file - set HTTP-specific options for streaming resilience.
-     * Localhost doesn't need reconnect/timeout — it only adds latency. */
+    /* Open file - all HTTP streams (including localhost) get reconnect and
+     * buffering options.  Localhost media servers (Jellyfin, Plex) can stall
+     * during transcoding or have I/O hiccups, so they need the same
+     * resilience as remote streams. */
     AVDictionary *opts = NULL;
-    if (is_http && !is_localhost) {
+    if (is_http) {
         av_dict_set(&opts, "reconnect", "1", 0);
         av_dict_set(&opts, "reconnect_streamed", "1", 0);
         av_dict_set(&opts, "reconnect_delay_max", "2", 0);
-        av_dict_set(&opts, "rw_timeout", "5000000", 0);  /* 5s I/O timeout */
+        av_dict_set(&opts, "rw_timeout", "10000000", 0);  /* 10s I/O timeout */
         av_dict_set(&opts, "multiple_requests", "1", 0);  /* Reuse HTTP connection */
-        fprintf(stderr, "[videoplayer] HTTP stream: enabling reconnect + buffering options\n");
-    } else if (is_localhost) {
-        av_dict_set(&opts, "multiple_requests", "1", 0);
-        av_dict_set(&opts, "rw_timeout", "5000000", 0);  /* 5s I/O timeout */
-        fprintf(stderr, "[videoplayer] Localhost stream: fast-start mode\n");
+        fprintf(stderr, "[videoplayer] %s HTTP stream: enabling reconnect + buffering options\n",
+                is_localhost ? "Localhost" : "Remote");
     }
+
+    /* Allocate format context and install interrupt callback BEFORE opening.
+     * The callback lets us abort blocking I/O (av_read_frame, av_seek_frame)
+     * immediately when demux_running is cleared, instead of waiting for the
+     * full rw_timeout.  This prevents videoplayer_close() from blocking the
+     * compositor event loop for seconds on network streams. */
+    vp->fmt_ctx = avformat_alloc_context();
+    if (!vp->fmt_ctx) {
+        av_dict_free(&opts);
+        snprintf(vp->error_msg, sizeof(vp->error_msg), "Failed to allocate format context");
+        vp->state = VP_STATE_ERROR;
+        return -1;
+    }
+    vp->fmt_ctx->interrupt_callback.callback = ffmpeg_interrupt_cb;
+    vp->fmt_ctx->interrupt_callback.opaque = vp;
 
     ret = avformat_open_input(&vp->fmt_ctx, filepath, NULL, &opts);
     av_dict_free(&opts);
@@ -556,10 +584,11 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
         return -1;
     }
 
-    /* For local files, reduce probe time. The default analyzeduration (5s)
-     * is designed for unreliable network streams. Local files have all data
-     * available instantly, so 500ms is plenty for format/codec detection. */
-    if (vp->is_local_file) {
+    /* For local files and localhost, reduce probe time. The default
+     * analyzeduration (5s) is designed for unreliable network streams.
+     * Local files and localhost servers have data available instantly,
+     * so 500ms is plenty for format/codec detection. */
+    if (vp->is_local_file || is_localhost) {
         vp->fmt_ctx->max_analyze_duration = 500000;  /* 0.5s */
         vp->fmt_ctx->probesize = 500000;              /* 500KB */
     }
@@ -826,6 +855,16 @@ void videoplayer_close(VideoPlayer *vp)
     if (!vp)
         return;
 
+    /* Set state to IDLE immediately — this prevents present_frame() from
+     * accessing any resources during the close process.  Must be first. */
+    vp->state = VP_STATE_IDLE;
+
+    /* Trigger the FFmpeg interrupt callback to abort any blocking I/O
+     * (av_read_frame, av_seek_frame) immediately.  Without this, the
+     * pthread_join below blocks the compositor event loop for up to
+     * rw_timeout seconds, which can crash the compositor. */
+    vp->io_abort_requested = 1;
+
     /* Stop both threads. We check the flags before clearing to know
      * which threads were actually started and need joining. */
     {
@@ -844,6 +883,20 @@ void videoplayer_close(VideoPlayer *vp)
         if (had_decode)
             pthread_join(vp->decode_thread, NULL);
     }
+
+    /* Release blend buffer refs before scene/pool cleanup.
+     * These hold separate wlr_buffer refs that must be dropped. */
+    if (vp->blend_node)
+        wlr_scene_buffer_set_buffer(vp->blend_node, NULL);
+    if (vp->blend_current_buf) {
+        wlr_buffer_drop(vp->blend_current_buf);
+        vp->blend_current_buf = NULL;
+    }
+    if (vp->blend_next_buf) {
+        wlr_buffer_drop(vp->blend_next_buf);
+        vp->blend_next_buf = NULL;
+    }
+    vp->blend_base_ns = 0;
 
     /* Release the scene node's buffer reference BEFORE freeing queue buffers.
      * This ensures the buffer's destroy callback can return pixel data to the
