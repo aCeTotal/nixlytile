@@ -262,8 +262,58 @@ createmon(struct wl_listener *listener, void *data)
 	LISTEN(&wlr_output->events.request_state, &m->request_state, requestmonstate);
 	LISTEN(&wlr_output->events.present, &m->present, outputpresent);
 
+	/* Detect mirror case early so we can test the mode before committing.
+	 * On some GPUs, committing max resolution on both eDP + HDMI simultaneously
+	 * exceeds bandwidth and causes a DRM hang. */
+	int will_mirror = 0;
+	Monitor *laptop = NULL;
+	if (!use_runtime_config && is_external_connector(wlr_output->name)) {
+		laptop = find_laptop_monitor();
+		if (laptop)
+			will_mirror = 1;
+	}
+
 	wlr_output_state_set_enabled(&state, 1);
-	wlr_output_commit_state(wlr_output, &state);
+
+	/* Test the state before committing to avoid GPU hangs.
+	 * If the best mode fails (bandwidth exceeded), fall back to
+	 * the laptop's resolution, then the output's preferred mode. */
+	if (!wlr_output_test_state(wlr_output, &state)) {
+		wlr_log(WLR_INFO, "Mode test failed for %s, trying fallback modes",
+			wlr_output->name);
+
+		if (laptop && laptop->wlr_output->current_mode) {
+			mode = find_mode(wlr_output,
+				laptop->wlr_output->current_mode->width,
+				laptop->wlr_output->current_mode->height, 0);
+			if (mode) {
+				wlr_output_state_set_mode(&state, mode);
+				wlr_log(WLR_INFO, "Trying laptop resolution %dx%d for %s",
+					mode->width, mode->height, wlr_output->name);
+			}
+		}
+
+		if (!wlr_output_test_state(wlr_output, &state)) {
+			mode = wlr_output_preferred_mode(wlr_output);
+			if (mode) {
+				wlr_output_state_set_mode(&state, mode);
+				wlr_log(WLR_INFO, "Trying preferred mode for %s", wlr_output->name);
+			}
+		}
+	}
+
+	if (!wlr_output_commit_state(wlr_output, &state)) {
+		wlr_log(WLR_ERROR, "Failed to commit output state for %s, disabling",
+			wlr_output->name);
+		wlr_output_state_finish(&state);
+		wl_list_remove(&m->frame.link);
+		wl_list_remove(&m->destroy.link);
+		wl_list_remove(&m->request_state.link);
+		wl_list_remove(&m->present.link);
+		free(m);
+		wlr_output->data = NULL;
+		return;
+	}
 	wlr_output_state_finish(&state);
 
 	/* Check VRR capability - try to enable adaptive sync to test support */
@@ -332,19 +382,15 @@ createmon(struct wl_listener *listener, void *data)
 	/* Auto-mirror: if this is an external output (HDMI/DP) and a laptop
 	 * display exists, and no explicit position was configured, place this
 	 * output at the laptop's coordinates so it mirrors the same content. */
-	if (m->m.x == -1 && m->m.y == -1 && !use_runtime_config
-			&& is_external_connector(wlr_output->name)) {
-		Monitor *laptop = find_laptop_monitor();
-		if (laptop) {
-			struct wlr_box laptop_box;
-			wlr_output_layout_get_box(output_layout, laptop->wlr_output, &laptop_box);
-			m->m.x = laptop_box.x;
-			m->m.y = laptop_box.y;
-			m->is_mirror = 1;
-			wlr_log(WLR_INFO, "Auto-mirroring %s at laptop %s position (%d,%d)",
-				wlr_output->name, laptop->wlr_output->name,
-				m->m.x, m->m.y);
-		}
+	if (will_mirror && m->m.x == -1 && m->m.y == -1) {
+		struct wlr_box laptop_box;
+		wlr_output_layout_get_box(output_layout, laptop->wlr_output, &laptop_box);
+		m->m.x = laptop_box.x;
+		m->m.y = laptop_box.y;
+		m->is_mirror = 1;
+		wlr_log(WLR_INFO, "Auto-mirroring %s at laptop %s position (%d,%d)",
+			wlr_output->name, laptop->wlr_output->name,
+			m->m.x, m->m.y);
 	}
 
 	if (m->m.x == -1 && m->m.y == -1)
@@ -357,8 +403,11 @@ createmon(struct wl_listener *listener, void *data)
 			c->mon = m;
 	}
 
-	/* Initialize HDR and 10-bit color settings */
-	init_monitor_color_settings(m);
+	/* Initialize HDR and 10-bit color settings.
+	 * Skip on mirrored outputs - the legacy DRM ioctls (drmModeConnectorSetProperty)
+	 * can conflict with wlroots' atomic modesetting and cause GPU hangs. */
+	if (!m->is_mirror)
+		init_monitor_color_settings(m);
 
 	updatemons(NULL, NULL);
 }

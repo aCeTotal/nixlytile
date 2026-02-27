@@ -715,17 +715,21 @@ static int is_audio_clock_valid(VideoPlayer *vp)
 }
 
 /*
- * Get the A/V sync difference in microseconds using RELATIVE elapsed times.
- * Positive = video ahead of audio, Negative = video behind audio.
+ * Compute the audio-video sync difference in microseconds.
+ * Positive = video ahead of audio, negative = video behind audio.
  *
- * Uses elapsed time from a common sync-establishment point rather than
- * absolute PTS values. This cancels any constant PTS offset between
- * audio and video streams (common in HTTP/HLS streams, remuxed files,
- * and transport streams where audio base_pts != video base_pts).
+ * Uses a fixed PTS offset captured once at sync establishment.
+ * At establishment, we record offset = video_pts - audio_pts.
+ * Thereafter, diff = (video_pts - audio_pts) - offset.
  *
- * Without relative sync, a stream where audio starts at PTS=5s and video
- * at PTS=0s shows a permanent -5s offset that triggers continuous frame
- * skipping, reducing playback to ~2fps.
+ * This cancels any constant PTS offset between audio and video streams
+ * (common in HTTP/HLS streams, remuxed files, and transport streams
+ * where audio base_pts != video base_pts).
+ *
+ * No per-frame drift correction is applied.  PipeWire quantum jitter
+ * (+-3-5ms) averages to zero over time and does not accumulate.
+ * Bidirectional sync (hold + skip in get_frame_action) keeps sync
+ * bounded without shifting the reference point.
  */
 static int64_t get_av_diff_us(VideoPlayer *vp, int64_t video_pts_us)
 {
@@ -735,53 +739,40 @@ static int64_t get_av_diff_us(VideoPlayer *vp, int64_t video_pts_us)
         return 0;  /* Audio not started, no sync possible */
 
     if (!vp->av_sync_established) {
-        /* First valid comparison — snapshot both clocks as reference.
-         * All future comparisons measure elapsed time from this point. */
-        vp->av_sync_video_base_us = video_pts_us;
-        vp->av_sync_audio_base_us = audio_pts_us;
+        /* First valid comparison — capture PTS offset once.
+         * av_sync_video_base_us stores the fixed offset between streams. */
+        vp->av_sync_video_base_us = video_pts_us - audio_pts_us;
         vp->av_sync_established = 1;
         return 0;  /* First frame after sync establishment — show it */
     }
 
-    int64_t video_elapsed = video_pts_us - vp->av_sync_video_base_us;
-    int64_t audio_elapsed = audio_pts_us - vp->av_sync_audio_base_us;
-    int64_t diff = video_elapsed - audio_elapsed;
+    int64_t diff = (video_pts_us - audio_pts_us) - vp->av_sync_video_base_us;
 
     /* PTS discontinuity detection: if diff exceeds 5 seconds, the stream
      * has a timestamp jump (common in HTTP/HLS streams after remuxing or
-     * server-side seeking).  Re-establish sync bases from the current
-     * positions instead of trying to gradually correct a multi-second gap,
-     * which would cause sustained frame-skipping or drift artifacts. */
+     * server-side seeking).  Re-establish the PTS offset from current
+     * positions instead of trying to correct a multi-second gap. */
     if (diff > 5000000 || diff < -5000000) {
-        vp->av_sync_video_base_us = video_pts_us;
-        vp->av_sync_audio_base_us = audio_pts_us;
+        vp->av_sync_video_base_us = video_pts_us - audio_pts_us;
         return 0;
     }
-
-    /* Gradual drift correction: shift the video base by 2% of the current
-     * offset each video frame.  This acts as a first-order low-pass filter
-     * that absorbs systematic clock drift between the video frame-interval
-     * timer (CLOCK_MONOTONIC) and PipeWire's sample-rate clock.
-     *
-     * Without this, any drift accumulates indefinitely — typically reaching
-     * +55 to +170 ms over 20-50 seconds — until PipeWire's quantum stepping
-     * causes a sudden correction that the user sees as periodic stuttering.
-     *
-     * 2% per frame at 24 fps ≈ 48% per second, giving a ~2-second time
-     * constant.  This is fast enough to track hardware clock drift and
-     * PipeWire quantum jitter, but slow enough to preserve smooth playback. */
-    int64_t correction = diff / 50;
-    vp->av_sync_video_base_us += correction;
 
     return diff;
 }
 
 /*
- * Determine frame presentation action based on A/V sync
- * Returns: 0 = show frame, 1 = skip frame (video behind), -1 = repeat current (video ahead)
+ * Determine frame presentation action based on A/V sync.
+ * Returns: 0 = show frame, 1 = skip frame (video behind), -1 = hold (video ahead)
  *
- * IMPORTANT: This is now very conservative - video playback is NEVER blocked.
- * We only skip frames if we're VERY far behind, and never repeat frames aggressively.
+ * Bidirectional correction:
+ *   - Skip when video is far behind audio (>100ms) to catch up
+ *   - Hold when video is ahead of audio (>20ms) to let audio catch up
+ *   - Dead zone (-100ms to +20ms): present normally
+ *
+ * The 20ms hold threshold is above PipeWire's quantum jitter (~3-5ms)
+ * so jitter alone never triggers a hold.  Hold only delays presentation
+ * by one vsync — it does NOT block frame queue consumption, so the
+ * decode thread and audio ring buffer continue normally.
  */
 static int get_frame_action(VideoPlayer *vp, int64_t video_pts_us)
 {
@@ -796,15 +787,16 @@ static int get_frame_action(VideoPlayer *vp, int64_t video_pts_us)
     /* Store for debugging/display */
     vp->av_sync_offset_us = av_diff;
 
-    /* Only skip if we're VERY far behind (>100ms) */
+    /* Video far behind audio — skip frame to catch up */
     if (av_diff < -AV_SYNC_FRAMESKIP_THRESH) {
-        return 1;  /* Skip frame to catch up */
+        return 1;
     }
 
-    /* Never hold frames — holding prevents frame queue consumption, which blocks
-     * the decode thread, which starves the audio ring buffer, which stalls the
-     * audio clock, creating a positive-feedback loop that manifests as periodic
-     * multi-second stuttering. Small A/V drift self-corrects via frame-skip. */
+    /* Video ahead of audio — hold (don't present yet, re-evaluate next vsync) */
+    if (av_diff > 20000) {
+        return -1;
+    }
+
     return 0;
 }
 
@@ -901,8 +893,8 @@ static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, 
     }
 
     /* Timing says it's time for a new frame.
-     * Check A/V sync for frame skipping (only at video framerate, not every vsync,
-     * so recovery_frames countdown is properly paced). */
+     * Check A/V sync for frame skipping/holding (only at video framerate,
+     * not every vsync, so recovery_frames countdown is properly paced). */
     int action = get_frame_action(vp, next_frame_pts_us);
     if (action == 1) {
         /* Video is far behind audio — skip this frame.
@@ -911,6 +903,14 @@ static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, 
          * elapsed time covers multiple steps (e.g., after a stall). */
         vp->last_frame_ns += step;
         return 2;  /* Skip and get next frame immediately */
+    }
+    if (action == -1) {
+        /* Video is ahead of audio — hold current frame for one vsync.
+         * Do NOT advance last_frame_ns or cadence state so the next
+         * vsync re-evaluates from the same timing position.  Audio
+         * catches up within 1-2 vsyncs, then cadence snap-forward
+         * logic re-synchronizes timing. */
+        return 0;
     }
 
     /* Present the frame */
