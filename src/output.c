@@ -151,6 +151,22 @@ is_external_connector(const char *name)
 	       strncmp(name, "DP", 2) == 0;
 }
 
+static void
+restart_wallpaper(void)
+{
+	char expanded_wp[PATH_MAX];
+	config_expand_path(wallpaper_path, expanded_wp, sizeof(expanded_wp));
+	wlr_log(WLR_INFO, "Restarting wallpaper: %s", expanded_wp);
+
+	pid_t pid = fork();
+	if (pid == 0) {
+		setsid();
+		(void)system("pkill -9 swaybg 2>/dev/null; sleep 0.3");
+		execlp("swaybg", "swaybg", "-i", expanded_wp, "-m", "fill", (char *)NULL);
+		_exit(127);
+	}
+}
+
 void
 createmon(struct wl_listener *listener, void *data)
 {
@@ -410,6 +426,115 @@ createmon(struct wl_listener *listener, void *data)
 		init_monitor_color_settings(m);
 
 	updatemons(NULL, NULL);
+
+	/* Restart swaybg so it discovers the new output and shows wallpaper
+	 * on all screens. swaybg sometimes fails to create a surface for
+	 * outputs that appear after it has already started. */
+	if (is_external_connector(wlr_output->name))
+		restart_wallpaper();
+}
+
+struct wlr_box
+fullscreen_mirror_geom(Monitor *m)
+{
+	Monitor *laptop, *other;
+
+	/* If this monitor is the laptop and has an external mirror,
+	 * use the external's geometry so fullscreen video fills the TV. */
+	if (!m->is_mirror && (strncmp(m->wlr_output->name, "eDP", 3) == 0 ||
+	    strncmp(m->wlr_output->name, "LVDS", 4) == 0)) {
+		wl_list_for_each(other, &mons, link) {
+			if (other->is_mirror && other->wlr_output->enabled)
+				return other->m;
+		}
+	}
+
+	/* If this IS the mirror, find the laptop and return the larger geometry */
+	if (m->is_mirror) {
+		laptop = find_laptop_monitor();
+		if (laptop) {
+			/* Return whichever is larger */
+			if (m->m.width * m->m.height > laptop->m.width * laptop->m.height)
+				return m->m;
+		}
+	}
+
+	return m->m;
+}
+
+void
+togglemirror(const Arg *arg)
+{
+	Monitor *laptop, *ext, *m;
+	Client *c;
+
+	laptop = find_laptop_monitor();
+	if (!laptop)
+		return;
+
+	/* Find the external monitor */
+	ext = NULL;
+	wl_list_for_each(m, &mons, link) {
+		if (m != laptop && m->wlr_output->enabled &&
+		    is_external_connector(m->wlr_output->name)) {
+			ext = m;
+			break;
+		}
+	}
+	if (!ext)
+		return;
+
+	if (ext->is_mirror) {
+		/* Switch from mirror to independent */
+		ext->is_mirror = 0;
+		wlr_output_layout_remove(output_layout, ext->wlr_output);
+		wlr_output_layout_add_auto(output_layout, ext->wlr_output);
+
+		/* Restore clients that belong to this monitor */
+		wl_list_for_each(c, &clients, link) {
+			if (c->output && strcmp(ext->wlr_output->name, c->output) == 0
+					&& c->mon != ext)
+				setmon(c, ext, c->tags);
+		}
+
+		if (!selmon || selmon == laptop)
+			selmon = ext;
+
+		wlr_log(WLR_INFO, "Mirror off: %s is now independent",
+			ext->wlr_output->name);
+	} else {
+		/* Switch from independent to mirror */
+		struct wlr_box laptop_box;
+		wlr_output_layout_get_box(output_layout, laptop->wlr_output, &laptop_box);
+
+		/* Move clients from external to laptop */
+		wl_list_for_each(c, &clients, link) {
+			if (c->mon == ext)
+				setmon(c, laptop, c->tags);
+		}
+
+		ext->is_mirror = 1;
+		wlr_output_layout_remove(output_layout, ext->wlr_output);
+		wlr_output_layout_add(output_layout, ext->wlr_output,
+			laptop_box.x, laptop_box.y);
+		ext->m.x = laptop_box.x;
+		ext->m.y = laptop_box.y;
+
+		if (selmon == ext)
+			selmon = laptop;
+
+		wlr_log(WLR_INFO, "Mirror on: %s now mirrors %s at (%d,%d)",
+			ext->wlr_output->name, laptop->wlr_output->name,
+			laptop_box.x, laptop_box.y);
+	}
+
+	updatemons(NULL, NULL);
+	arrange(laptop);
+	if (!ext->is_mirror)
+		arrange(ext);
+	focusclient(focustop(selmon), 1);
+	printstatus();
+	restart_wallpaper();
 }
 
 Monitor *
@@ -3392,7 +3517,7 @@ updatemons(struct wl_listener *listener, void *data)
 		arrange(m);
 		/* make sure fullscreen clients have the right size */
 		if ((c = focustop(m)) && c->isfullscreen)
-			resize(c, m->m, 0);
+			resize(c, fullscreen_mirror_geom(m), 0);
 
 		/* Try to re-set the gamma LUT when updating monitors,
 		 * it's only really needed when enabling a disabled output, but meh. */

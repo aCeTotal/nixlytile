@@ -1890,6 +1890,8 @@ void setsticky(Client *c, int sticky);
 void togglefloating(const Arg *arg);
 void togglefullscreen(const Arg *arg);
 void togglefullscreenadaptivesync(const Arg *arg);
+struct wlr_box fullscreen_mirror_geom(Monitor *m);
+void togglemirror(const Arg *arg);
 void togglesticky(const Arg *arg);
 void updatetitle(struct wl_listener *listener, void *data);
 void urgent(struct wl_listener *listener, void *data);

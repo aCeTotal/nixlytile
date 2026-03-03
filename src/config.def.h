@@ -171,6 +171,7 @@ const char *alacrittycmd[] = { "alacritty", NULL };
 const char *btopcmd[] = { "alacritty", "-e", "btop", NULL };
 const char *chromecmd[] = { "google-chrome-stable", NULL };
 const char *menucmd[] = { "wmenu-run", NULL };
+const char *screenshotcmd[] = { "/bin/sh", "-c", "slurp | grim -g - - | wl-copy", NULL };
 /* Startup command run when no -s is provided; closes stdin to avoid status pipe */
 const char *const autostart_cmd =
 	"swaybg -i \"$HOME/.nixlyos/wallpapers/beach.jpg\" -m fill <&-";
@@ -230,6 +231,9 @@ const Key keys[] = {
 	TAGKEYS(          XKB_KEY_8, XKB_KEY_asterisk,                   7),
 	TAGKEYS(          XKB_KEY_9, XKB_KEY_parenleft,                  8),
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Q,          quit,           {0} },
+	{ MODKEY,                    XKB_KEY_F1,         togglemirror,   {0} },
+	{ MODKEY,                    XKB_KEY_s,          spawn,          {.v = screenshotcmd} },
+	{ 0,                         XKB_KEY_Print,      spawn,          {.v = screenshotcmd} },
 
 	/* Ctrl-Alt-Backspace and Ctrl-Alt-Fx used to be handled by X server */
 	{ WLR_MODIFIER_CTRL|WLR_MODIFIER_ALT,XKB_KEY_Terminate_Server, quit, {0} },

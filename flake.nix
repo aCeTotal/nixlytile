@@ -108,6 +108,11 @@
             # Virtual keyboard input
             wtype              # for on-screen keyboard
 
+            # Screenshot
+            grim
+            slurp
+            wl-clipboard
+
             # Browser for streaming services (NRK, F1TV)
             chromium
           ];

@@ -662,7 +662,7 @@ setfullscreen(Client *c, int fullscreen)
 
 	if (fullscreen) {
 		c->prev = c->geom;
-		resize(c, c->mon->m, 0);
+		resize(c, fullscreen_mirror_geom(c->mon), 0);
 		set_adaptive_sync(c->mon, 1);
 		/* Reset frame tracking and video detection state */
 		c->frame_time_idx = 0;
