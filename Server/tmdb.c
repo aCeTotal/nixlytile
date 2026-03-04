@@ -80,6 +80,8 @@ static char *tmdb_request(const char *endpoint) {
     return tmdb_request_lang(endpoint, language ? language : "en-US");
 }
 
+static char *get_string(cJSON *obj, const char *key);
+
 /* Fetch overview with English fallback when configured language returns empty */
 static char *get_overview_fallback(cJSON *json, const char *endpoint) {
     char *overview = get_string(json, "overview");
