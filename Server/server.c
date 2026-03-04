@@ -202,6 +202,20 @@ static void on_file_change(const char *filepath, int is_delete, WatchType type) 
         if (database_delete_by_path(filepath) == 0) {
             printf("DB: Removed %s\n", filepath);
         }
+    } else if (type == WATCH_TYPE_ROMS) {
+        /* ROM file detected */
+        if (scanner_is_rom_file(filepath)) {
+            int console = -1;
+            /* Detect console from path */
+            const char *ext = strrchr(filepath, '.');
+            if (ext) {
+                /* Use scanner_scan_rom_file with auto-detection */
+                /* scanner_detect_console is static, so just call scan_rom_directory on parent */
+                scanner_scan_rom_directory(filepath);
+                scanner_fetch_rom_covers();
+            }
+            (void)console;
+        }
     } else {
         /* Check if it's a media file that needs processing */
         if (scanner_is_media_file(filepath)) {
@@ -728,20 +742,34 @@ static void handle_api(int fd, const char *path) {
         }
     }
     else if (strcmp(path, "/api/consoles") == 0) {
-        char json[1024];
+        char json[2048];
         int len = snprintf(json, sizeof(json),
             "[{\"id\":0,\"name\":\"NES\",\"count\":%d},"
             "{\"id\":1,\"name\":\"SNES\",\"count\":%d},"
             "{\"id\":2,\"name\":\"Nintendo 64\",\"count\":%d},"
             "{\"id\":3,\"name\":\"GameCube\",\"count\":%d},"
             "{\"id\":4,\"name\":\"Wii\",\"count\":%d},"
-            "{\"id\":5,\"name\":\"Switch\",\"count\":%d}]",
+            "{\"id\":5,\"name\":\"Game Boy\",\"count\":%d},"
+            "{\"id\":6,\"name\":\"Game Boy Color\",\"count\":%d},"
+            "{\"id\":7,\"name\":\"Game Boy Advance\",\"count\":%d}]",
             database_get_rom_count_by_console(CONSOLE_NES),
             database_get_rom_count_by_console(CONSOLE_SNES),
             database_get_rom_count_by_console(CONSOLE_N64),
             database_get_rom_count_by_console(CONSOLE_GAMECUBE),
             database_get_rom_count_by_console(CONSOLE_WII),
-            database_get_rom_count_by_console(CONSOLE_SWITCH));
+            database_get_rom_count_by_console(CONSOLE_GB),
+            database_get_rom_count_by_console(CONSOLE_GBC),
+            database_get_rom_count_by_console(CONSOLE_GBA));
+        send_response(fd, 200, "OK", "application/json", json, len);
+    }
+    else if (strcmp(path, "/api/roms/scan") == 0) {
+        printf("Manual ROM rescan triggered via API\n");
+        for (int i = 0; i < server_config.roms_path_count; i++)
+            scanner_scan_rom_directory(server_config.roms_paths[i]);
+        scanner_fetch_rom_covers();
+        char json[128];
+        int len = snprintf(json, sizeof(json),
+            "{\"status\":\"ok\",\"total\":%d}", database_get_rom_count());
         send_response(fd, 200, "OK", "application/json", json, len);
     }
     else if (strcmp(path, "/api/counts") == 0) {
@@ -1200,6 +1228,15 @@ int main(int argc, char *argv[]) {
 
     /* Refresh show status (next episode dates, ended status) */
     scanner_refresh_show_status();
+
+    /* Scan ROM directories */
+    printf("Scanning ROM directories...\n");
+    for (int i = 0; i < server_config.roms_path_count; i++) {
+        printf("  ROMs: %s\n", server_config.roms_paths[i]);
+        scanner_scan_rom_directory(server_config.roms_paths[i]);
+    }
+    printf("ROM scan complete. Found %d ROMs.\n", database_get_rom_count());
+    scanner_fetch_rom_covers();
 
     /* Initialize file watcher */
     if (watcher_init() == 0) {

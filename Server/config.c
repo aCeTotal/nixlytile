@@ -69,6 +69,10 @@ void config_init_defaults(void) {
     strcpy(server_config.tmdb_language, "en-US");
     strcpy(server_config.cache_dir, "~/.cache/nixly-server");
 
+    /* Default ROMs path */
+    strcpy(server_config.roms_paths[0], "/mnt/bigdisk1/Emulator");
+    server_config.roms_path_count = 1;
+
     /* Unprocessed/converted paths empty by default */
     server_config.unprocessed_path_count = 0;
     server_config.converted_path_count = 0;

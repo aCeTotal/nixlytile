@@ -253,9 +253,19 @@ typedef enum {
 	RETRO_N64,
 	RETRO_GAMECUBE,
 	RETRO_WII,
-	RETRO_SWITCH,
+	RETRO_GB,
+	RETRO_GBC,
+	RETRO_GBA,
 	RETRO_CONSOLE_COUNT
 } RetroConsole;
+
+typedef struct RomItem {
+	int id;
+	int console;
+	char title[256];
+	char cover_path[512];
+	char filepath[1024];
+} RomItem;
 
 typedef enum {
 	MEDIA_VIEW_MOVIES = 0,
@@ -946,6 +956,17 @@ typedef struct {
 	int anim_direction;
 	float slide_offset;
 	uint64_t slide_start_ms;
+
+	/* Game list state */
+	int in_game_list;           /* 1 = showing game list for selected console */
+	int game_count;
+	int selected_game;
+	int game_scroll_offset;
+	RomItem *games;             /* Array of games for current console */
+	struct wlr_buffer *cover_buf;  /* Cover art buffer for selected game */
+	int cover_w, cover_h;
+	int cover_loaded;
+	int cover_loading_idx;      /* Which game index the cover is for */
 } RetroGamingView;
 
 /* ── media types ───────────────────────────────────────────────────── */
@@ -2383,6 +2404,9 @@ Monitor *retro_gaming_visible_monitor(void);
 void retro_gaming_render(Monitor *m);
 int retro_gaming_handle_button(Monitor *m, int button, int value);
 int retro_gaming_animate(void *data);
+void retro_gaming_fetch_games(Monitor *m);
+void retro_gaming_render_game_list(Monitor *m);
+void retro_gaming_launch_game(Monitor *m);
 void detect_gpus(void);
 int should_use_dgpu(const char *cmd);
 void set_dgpu_env(void);

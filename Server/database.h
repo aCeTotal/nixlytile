@@ -20,8 +20,10 @@ typedef enum {
     CONSOLE_N64 = 2,
     CONSOLE_GAMECUBE = 3,
     CONSOLE_WII = 4,
-    CONSOLE_SWITCH = 5,
-    CONSOLE_COUNT = 6
+    CONSOLE_GB = 5,
+    CONSOLE_GBC = 6,
+    CONSOLE_GBA = 7,
+    CONSOLE_COUNT = 8
 } ConsoleType;
 
 typedef struct {
@@ -131,6 +133,7 @@ char *database_get_rom_filepath(int id);
 char *database_get_roms_json(void);
 char *database_get_roms_by_console_json(ConsoleType console);
 char *database_get_rom_json(int id);
+int database_update_rom_cover(int id, const char *cover_path);
 
 /* Update show status and totals for all episodes of a show */
 int database_update_show_status(int tmdb_show_id, const char *status, const char *next_episode,

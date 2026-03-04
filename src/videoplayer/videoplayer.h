@@ -116,9 +116,9 @@ typedef struct SubtitleTrack {
  *  Frame Queue
  * ================================================================ */
 
-#define VP_FRAME_QUEUE_SIZE 32     /* Pre-converted BGRA buffers for smooth playback */
-#define VP_BUFFER_POOL_SIZE 40     /* Recycled pixel data buffers to avoid mmap/munmap */
-#define VP_PACKET_QUEUE_SIZE 2048  /* Demuxed packets buffered between I/O and decode threads */
+#define VP_FRAME_QUEUE_SIZE 16     /* Pre-converted BGRA buffers for smooth playback */
+#define VP_BUFFER_POOL_SIZE 20     /* Recycled pixel data buffers to avoid mmap/munmap */
+#define VP_PACKET_QUEUE_SIZE 512   /* Demuxed packets buffered between I/O and decode threads */
 
 typedef struct PacketQueueEntry {
     AVPacket *pkt;

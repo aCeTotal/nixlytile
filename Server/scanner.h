@@ -27,4 +27,10 @@ void scanner_rescan_all_tmdb(void);
 /* Refresh show status (status + next_episode_date) for active shows */
 void scanner_refresh_show_status(void);
 
+/* ROM scanning functions */
+int scanner_is_rom_file(const char *path);
+int scanner_scan_rom_file(const char *filepath, int console);
+int scanner_scan_rom_directory(const char *path);
+void scanner_fetch_rom_covers(void);
+
 #endif /* SCANNER_H */

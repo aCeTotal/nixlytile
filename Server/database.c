@@ -875,7 +875,8 @@ void database_free_entry(MediaEntry *entry) {
 
 /* Console name helper */
 static const char *console_names[] = {
-    "NES", "SNES", "Nintendo 64", "GameCube", "Wii", "Switch"
+    "NES", "SNES", "Nintendo 64", "GameCube", "Wii",
+    "Game Boy", "Game Boy Color", "Game Boy Advance"
 };
 
 const char *database_console_name(ConsoleType console) {
@@ -1045,7 +1046,7 @@ char *database_get_roms_json(void) {
 
 char *database_get_roms_by_console_json(ConsoleType console) {
     const char *sql =
-        "SELECT id, console, title, cover_path, size, region "
+        "SELECT id, console, title, cover_path, size, region, filepath "
         "FROM roms WHERE console = ? ORDER BY title";
 
     sqlite3_stmt *stmt;
@@ -1076,20 +1077,24 @@ char *database_get_roms_by_console_json(ConsoleType console) {
         const char *cover = (const char *)sqlite3_column_text(stmt, 3);
         int64_t size = sqlite3_column_int64(stmt, 4);
         const char *region = (const char *)sqlite3_column_text(stmt, 5);
+        const char *filepath = (const char *)sqlite3_column_text(stmt, 6);
 
         char *title_esc = json_escape(title);
         char *cover_esc = json_escape(cover);
         char *region_esc = json_escape(region);
+        char *path_esc = json_escape(filepath);
 
         buf_used += snprintf(json + buf_used, buf_size - buf_used,
             "{\"id\":%d,\"console\":%d,\"console_name\":\"%s\","
-            "\"title\":%s,\"cover\":%s,\"size\":%ld,\"region\":%s}",
+            "\"title\":%s,\"cover\":%s,\"size\":%ld,\"region\":%s,"
+            "\"filepath\":%s}",
             id, cons, database_console_name(cons),
-            title_esc, cover_esc, size, region_esc);
+            title_esc, cover_esc, size, region_esc, path_esc);
 
         free(title_esc);
         free(cover_esc);
         free(region_esc);
+        free(path_esc);
     }
 
     json[buf_used++] = ']';
@@ -1144,6 +1149,21 @@ char *database_get_rom_json(int id) {
 
     sqlite3_finalize(stmt);
     return json;
+}
+
+int database_update_rom_cover(int id, const char *cover_path) {
+    const char *sql = "UPDATE roms SET cover_path = ? WHERE id = ?";
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return -1;
+
+    sqlite3_bind_text(stmt, 1, cover_path, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 2, id);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
 void database_free_rom(RomEntry *entry) {

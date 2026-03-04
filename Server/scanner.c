@@ -10,6 +10,8 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <ctype.h>
+#include <unistd.h>
+#include <curl/curl.h>
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/dict.h>
@@ -867,4 +869,405 @@ void scanner_refresh_show_status(void) {
 
     free(ids);
     printf("Show status refresh complete\n");
+}
+
+/* ==========================================================================
+ * ROM Scanning
+ * ========================================================================== */
+
+/* ROM file extensions per console */
+static const char *rom_extensions_nes[] = {".nes", ".fds", NULL};
+static const char *rom_extensions_snes[] = {".sfc", ".smc", NULL};
+static const char *rom_extensions_n64[] = {".z64", ".n64", ".v64", NULL};
+static const char *rom_extensions_gc[] = {".iso", ".gcm", ".ciso", ".gcz", ".rvz", NULL};
+static const char *rom_extensions_wii[] = {".iso", ".wbfs", ".ciso", ".gcz", ".rvz", NULL};
+static const char *rom_extensions_gb[] = {".gb", NULL};
+static const char *rom_extensions_gbc[] = {".gbc", NULL};
+static const char *rom_extensions_gba[] = {".gba", NULL};
+
+static const char **rom_ext_table[] = {
+    rom_extensions_nes,
+    rom_extensions_snes,
+    rom_extensions_n64,
+    rom_extensions_gc,
+    rom_extensions_wii,
+    rom_extensions_gb,
+    rom_extensions_gbc,
+    rom_extensions_gba,
+};
+
+/* All ROM extensions combined for quick check */
+int scanner_is_rom_file(const char *path) {
+    const char *ext = strrchr(path, '.');
+    if (!ext) return 0;
+
+    for (int c = 0; c < CONSOLE_COUNT; c++) {
+        for (int i = 0; rom_ext_table[c][i]; i++) {
+            if (strcasecmp(ext, rom_ext_table[c][i]) == 0)
+                return 1;
+        }
+    }
+    return 0;
+}
+
+/* Detect console type from directory name */
+static int scanner_detect_console(const char *path) {
+    /* Get the directory component just above the file */
+    char dir[4096];
+    strncpy(dir, path, sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = '\0';
+
+    /* Walk up the path looking for a known console directory name */
+    char *p = dir;
+    while (*p) p++;  /* Go to end */
+
+    /* Try each path component from the file upwards */
+    while (p > dir) {
+        /* Find the start of this component */
+        while (p > dir && *(p - 1) != '/') p--;
+        char *component = p;
+
+        /* Find the end (next slash or end of string) */
+        char *end = strchr(component, '/');
+        char saved = 0;
+        if (end) { saved = *end; *end = '\0'; }
+
+        /* Match directory name to console */
+        if (strcasecmp(component, "nes") == 0) { if (end) *end = saved; return CONSOLE_NES; }
+        if (strcasecmp(component, "snes") == 0) { if (end) *end = saved; return CONSOLE_SNES; }
+        if (strcasecmp(component, "n64") == 0 || strcasecmp(component, "nintendo64") == 0 ||
+            strcasecmp(component, "nintendo 64") == 0) { if (end) *end = saved; return CONSOLE_N64; }
+        if (strcasecmp(component, "gamecube") == 0 || strcasecmp(component, "gc") == 0 ||
+            strcasecmp(component, "ngc") == 0) { if (end) *end = saved; return CONSOLE_GAMECUBE; }
+        if (strcasecmp(component, "wii") == 0) { if (end) *end = saved; return CONSOLE_WII; }
+        if (strcasecmp(component, "gb") == 0 || strcasecmp(component, "gameboy") == 0 ||
+            strcasecmp(component, "game boy") == 0) { if (end) *end = saved; return CONSOLE_GB; }
+        if (strcasecmp(component, "gbc") == 0 || strcasecmp(component, "gameboycolor") == 0 ||
+            strcasecmp(component, "game boy color") == 0) { if (end) *end = saved; return CONSOLE_GBC; }
+        if (strcasecmp(component, "gba") == 0 || strcasecmp(component, "gameboyadvance") == 0 ||
+            strcasecmp(component, "game boy advance") == 0) { if (end) *end = saved; return CONSOLE_GBA; }
+
+        if (end) *end = saved;
+
+        /* Move to parent */
+        if (p > dir) p--;
+        while (p > dir && *(p - 1) != '/') p--;
+    }
+
+    /* Fallback: detect from extension */
+    const char *ext = strrchr(path, '.');
+    if (ext) {
+        if (strcasecmp(ext, ".nes") == 0 || strcasecmp(ext, ".fds") == 0) return CONSOLE_NES;
+        if (strcasecmp(ext, ".sfc") == 0 || strcasecmp(ext, ".smc") == 0) return CONSOLE_SNES;
+        if (strcasecmp(ext, ".z64") == 0 || strcasecmp(ext, ".n64") == 0 || strcasecmp(ext, ".v64") == 0) return CONSOLE_N64;
+        if (strcasecmp(ext, ".gb") == 0) return CONSOLE_GB;
+        if (strcasecmp(ext, ".gbc") == 0) return CONSOLE_GBC;
+        if (strcasecmp(ext, ".gba") == 0) return CONSOLE_GBA;
+        if (strcasecmp(ext, ".wbfs") == 0) return CONSOLE_WII;
+        /* .iso, .gcz, .rvz, .ciso are ambiguous between GC and Wii */
+    }
+
+    return -1;
+}
+
+/* Extract clean ROM title from filename */
+static void scanner_extract_rom_title(const char *filename, char *title, size_t title_size) {
+    const char *base = strrchr(filename, '/');
+    base = base ? base + 1 : filename;
+
+    strncpy(title, base, title_size - 1);
+    title[title_size - 1] = '\0';
+
+    /* Remove extension */
+    char *ext = strrchr(title, '.');
+    if (ext) *ext = '\0';
+
+    /* Remove region/revision tags in parentheses/brackets: (USA), [!], (Rev 1), etc. */
+    char *p = title;
+    char *dst = title;
+    int in_bracket = 0;
+    while (*p) {
+        if (*p == '(' || *p == '[') {
+            /* Trim trailing spaces before bracket */
+            while (dst > title && *(dst - 1) == ' ') dst--;
+            in_bracket++;
+        } else if ((*p == ')' || *p == ']') && in_bracket > 0) {
+            in_bracket--;
+            /* Skip space after closing bracket */
+            if (*(p + 1) == ' ') p++;
+        } else if (!in_bracket) {
+            *dst++ = *p;
+        }
+        p++;
+    }
+    *dst = '\0';
+
+    /* Trim trailing spaces */
+    size_t len = strlen(title);
+    while (len > 0 && title[len - 1] == ' ') title[--len] = '\0';
+}
+
+/* Extract region from filename parentheses */
+static void scanner_extract_region(const char *filename, char *region, size_t region_size) {
+    const char *base = strrchr(filename, '/');
+    base = base ? base + 1 : filename;
+
+    region[0] = '\0';
+
+    /* Look for (USA), (Europe), (Japan), etc. */
+    const char *p = base;
+    while ((p = strchr(p, '(')) != NULL) {
+        p++;
+        const char *end = strchr(p, ')');
+        if (!end) break;
+
+        size_t len = end - p;
+        if (len < region_size) {
+            /* Check if it looks like a region */
+            if (strncasecmp(p, "USA", 3) == 0 ||
+                strncasecmp(p, "Europe", 6) == 0 ||
+                strncasecmp(p, "Japan", 5) == 0 ||
+                strncasecmp(p, "World", 5) == 0 ||
+                strncasecmp(p, "En", 2) == 0) {
+                strncpy(region, p, len);
+                region[len] = '\0';
+                return;
+            }
+        }
+        p = end + 1;
+    }
+}
+
+int scanner_scan_rom_file(const char *filepath, int console) {
+    if (database_rom_exists(filepath))
+        return 0;
+
+    char title[256];
+    char region[64];
+    scanner_extract_rom_title(filepath, title, sizeof(title));
+    scanner_extract_region(filepath, region, sizeof(region));
+
+    struct stat st;
+    int64_t size = 0;
+    if (stat(filepath, &st) == 0)
+        size = st.st_size;
+
+    RomEntry entry = {0};
+    entry.console = console;
+    entry.title = title;
+    entry.filepath = (char *)filepath;
+    entry.cover_path = NULL;
+    entry.size = size;
+    entry.region = region[0] ? region : NULL;
+
+    int rc = database_add_rom(&entry);
+    if (rc == 0) {
+        printf("  ROM: %s [%s] %s\n", title,
+               database_console_name(console),
+               region[0] ? region : "");
+    }
+    return rc;
+}
+
+/* Recursively scan directory for ROM files */
+int scanner_scan_rom_directory(const char *path) {
+    DIR *dir = opendir(path);
+    if (!dir) {
+        /* Not an error if directory doesn't exist yet */
+        return 0;
+    }
+
+    struct dirent *entry;
+    int count = 0;
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+
+        char fullpath[4096];
+        snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
+
+        struct stat st;
+        if (stat(fullpath, &st) != 0) continue;
+
+        if (S_ISDIR(st.st_mode)) {
+            count += scanner_scan_rom_directory(fullpath);
+        } else if (S_ISREG(st.st_mode) && scanner_is_rom_file(fullpath)) {
+            int console = scanner_detect_console(fullpath);
+            if (console >= 0) {
+                if (scanner_scan_rom_file(fullpath, console) == 0)
+                    count++;
+            }
+        }
+    }
+
+    closedir(dir);
+    return count;
+}
+
+/* LibRetro Thumbnails system names */
+static const char *libretro_system_names[] = {
+    [CONSOLE_NES]      = "Nintendo - Nintendo Entertainment System",
+    [CONSOLE_SNES]     = "Nintendo - Super Nintendo Entertainment System",
+    [CONSOLE_N64]      = "Nintendo - Nintendo 64",
+    [CONSOLE_GAMECUBE] = "Nintendo - GameCube",
+    [CONSOLE_WII]      = "Nintendo - Wii",
+    [CONSOLE_GB]       = "Nintendo - Game Boy",
+    [CONSOLE_GBC]      = "Nintendo - Game Boy Color",
+    [CONSOLE_GBA]      = "Nintendo - Game Boy Advance",
+};
+
+/* URL-encode a string for LibRetro thumbnail URLs */
+static void url_encode(const char *src, char *dst, size_t dst_size) {
+    static const char *safe = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~ ";
+    char *p = dst;
+    char *end = dst + dst_size - 4;
+
+    while (*src && p < end) {
+        if (strchr(safe, *src)) {
+            if (*src == ' ')
+                *p++ = '%', *p++ = '2', *p++ = '0';
+            else
+                *p++ = *src;
+        } else {
+            snprintf(p, end - p, "%%%02X", (unsigned char)*src);
+            p += 3;
+        }
+        src++;
+    }
+    *p = '\0';
+}
+
+/* Download a single cover image from LibRetro thumbnails */
+static char *download_rom_cover(const char *game_title, int console, const char *cache_dir) {
+    if (console < 0 || console >= CONSOLE_COUNT) return NULL;
+    const char *system = libretro_system_names[console];
+    if (!system) return NULL;
+
+    /* Build local path */
+    char covers_dir[4096];
+    snprintf(covers_dir, sizeof(covers_dir), "%s/covers", cache_dir);
+    mkdir(covers_dir, 0755);
+
+    /* Sanitize filename: replace / and & with _ */
+    char safe_title[256];
+    strncpy(safe_title, game_title, sizeof(safe_title) - 1);
+    safe_title[sizeof(safe_title) - 1] = '\0';
+    for (char *p = safe_title; *p; p++) {
+        if (*p == '/' || *p == '&' || *p == ':') *p = '_';
+    }
+
+    char local_path[4096];
+    snprintf(local_path, sizeof(local_path), "%s/%d_%s.png", covers_dir, console, safe_title);
+
+    /* Check if already cached */
+    struct stat st;
+    if (stat(local_path, &st) == 0 && st.st_size > 0) {
+        return strdup(local_path);
+    }
+
+    /* Build URL: https://thumbnails.libretro.com/{System}/Named_Boxarts/{GameName}.png */
+    char encoded_system[512];
+    char encoded_title[512];
+    url_encode(system, encoded_system, sizeof(encoded_system));
+    url_encode(game_title, encoded_title, sizeof(encoded_title));
+
+    char url[2048];
+    snprintf(url, sizeof(url),
+        "https://thumbnails.libretro.com/%s/Named_Boxarts/%s.png",
+        encoded_system, encoded_title);
+
+    /* Download using curl */
+    CURL *dl = curl_easy_init();
+    if (!dl) return NULL;
+
+    FILE *f = fopen(local_path, "wb");
+    if (!f) {
+        curl_easy_cleanup(dl);
+        return NULL;
+    }
+
+    curl_easy_setopt(dl, CURLOPT_URL, url);
+    curl_easy_setopt(dl, CURLOPT_WRITEDATA, f);
+    curl_easy_setopt(dl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(dl, CURLOPT_TIMEOUT, 15L);
+    curl_easy_setopt(dl, CURLOPT_FAILONERROR, 1L);  /* Fail on 404 */
+
+    CURLcode res = curl_easy_perform(dl);
+    curl_easy_cleanup(dl);
+    fclose(f);
+
+    if (res != CURLE_OK) {
+        unlink(local_path);
+        return NULL;
+    }
+
+    /* Verify download */
+    if (stat(local_path, &st) == 0 && st.st_size > 100) {
+        return strdup(local_path);
+    }
+
+    unlink(local_path);
+    return NULL;
+}
+
+/* Fetch cover art for all ROMs missing covers */
+void scanner_fetch_rom_covers(void) {
+    const char *sql = "SELECT id, console, title FROM roms WHERE cover_path IS NULL OR cover_path = ''";
+    sqlite3_stmt *stmt;
+
+    /* We need direct access to sqlite3 - use database query functions instead */
+    /* Use the database_get_roms_json and parse, or add a direct function */
+    /* For simplicity, iterate through each console */
+    for (int c = 0; c < CONSOLE_COUNT; c++) {
+        char *json = database_get_roms_by_console_json(c);
+        if (!json) continue;
+
+        /* Simple JSON parsing - find entries without covers */
+        char *p = json;
+        while ((p = strstr(p, "\"id\":")) != NULL) {
+            int id = atoi(p + 5);
+
+            /* Find title */
+            char *tp = strstr(p, "\"title\":");
+            if (!tp) break;
+            tp += 8;
+            /* Skip null or extract quoted string */
+            char title[256] = {0};
+            if (*tp == '"') {
+                tp++;
+                char *te = strchr(tp, '"');
+                if (te) {
+                    size_t len = te - tp;
+                    if (len >= sizeof(title)) len = sizeof(title) - 1;
+                    strncpy(title, tp, len);
+                    title[len] = '\0';
+                }
+            }
+
+            /* Find cover */
+            char *cp = strstr(p, "\"cover\":");
+            int has_cover = 0;
+            if (cp && cp < strstr(p + 1, "\"id\":")) {
+                cp += 8;
+                if (*cp == '"') has_cover = 1;  /* Has a cover path */
+            } else if (cp) {
+                cp += 8;
+                if (*cp == '"') has_cover = 1;
+            }
+
+            if (!has_cover && title[0]) {
+                char *cover = download_rom_cover(title, c, server_config.cache_dir);
+                if (cover) {
+                    database_update_rom_cover(id, cover);
+                    printf("  Cover: %s -> %s\n", title, cover);
+                    free(cover);
+                }
+            }
+
+            /* Advance past this entry */
+            p += 5;
+        }
+        free(json);
+    }
+    printf("ROM cover fetch complete\n");
 }

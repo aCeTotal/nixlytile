@@ -17,7 +17,20 @@ find_game_by_id(GameEntry *head, const char *id, int match_service, GamingServic
 }
 
 const char *retro_console_names[] = {
-	"NES", "SNES", "Nintendo 64", "GameCube", "Wii", "Switch"
+	"NES", "SNES", "Nintendo 64", "GameCube", "Wii",
+	"Game Boy", "Game Boy Color", "Game Boy Advance"
+};
+
+/* Emulator launch commands per console */
+static const char *retro_emulator_cmds[] = {
+	[RETRO_NES]      = "mesen \"%s\"",
+	[RETRO_SNES]     = "mesen \"%s\"",
+	[RETRO_N64]      = "mupen64plus --fullscreen \"%s\"",
+	[RETRO_GAMECUBE] = "dolphin-emu -e \"%s\" -b",
+	[RETRO_WII]      = "dolphin-emu -e \"%s\" -b",
+	[RETRO_GB]       = "mgba-qt -f \"%s\"",
+	[RETRO_GBC]      = "mgba-qt -f \"%s\"",
+	[RETRO_GBA]      = "mgba-qt -f \"%s\"",
 };
 
 void
@@ -2190,6 +2203,366 @@ pc_gaming_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 	return 1;  /* Consume all keys while view is open */
 }
 
+/* ==========================================================================
+ * Retro Gaming - Game List, Cover Art, and Emulator Launch
+ * ========================================================================== */
+
+void
+retro_gaming_fetch_games(Monitor *m)
+{
+	RetroGamingView *rg;
+	FILE *fp;
+	char cmd[512];
+	char *buffer = NULL;
+	size_t buf_size = 0;
+	size_t buf_used = 0;
+	char chunk[4096];
+	size_t bytes;
+
+	if (!m)
+		return;
+
+	rg = &m->retro_gaming;
+
+	/* Free old games */
+	if (rg->games) {
+		free(rg->games);
+		rg->games = NULL;
+	}
+	rg->game_count = 0;
+	rg->selected_game = 0;
+	rg->game_scroll_offset = 0;
+	if (rg->cover_buf) {
+		wlr_buffer_drop(rg->cover_buf);
+		rg->cover_buf = NULL;
+	}
+	rg->cover_loaded = 0;
+	rg->cover_loading_idx = -1;
+
+	snprintf(cmd, sizeof(cmd),
+		"curl -s 'http://localhost:8080/api/roms/console/%d' 2>/dev/null",
+		rg->selected_console);
+
+	fp = popen(cmd, "r");
+	if (!fp) return;
+
+	/* Read entire response */
+	while ((bytes = fread(chunk, 1, sizeof(chunk), fp)) > 0) {
+		if (buf_used + bytes + 1 > buf_size) {
+			buf_size = buf_size ? buf_size * 2 : 16384;
+			buffer = realloc(buffer, buf_size);
+		}
+		memcpy(buffer + buf_used, chunk, bytes);
+		buf_used += bytes;
+	}
+	pclose(fp);
+
+	if (!buffer || buf_used == 0) {
+		free(buffer);
+		return;
+	}
+	buffer[buf_used] = '\0';
+
+	/* Count entries */
+	int count = 0;
+	const char *p = buffer;
+	while ((p = strstr(p, "\"id\":")) != NULL) {
+		count++;
+		p += 5;
+	}
+
+	if (count == 0) {
+		free(buffer);
+		return;
+	}
+
+	rg->games = calloc(count, sizeof(RomItem));
+	if (!rg->games) {
+		free(buffer);
+		return;
+	}
+
+	/* Parse each object */
+	p = buffer;
+	int idx = 0;
+	while (idx < count) {
+		const char *obj_start = strchr(p, '{');
+		if (!obj_start) break;
+
+		int depth = 1;
+		const char *obj_end = obj_start + 1;
+		while (*obj_end && depth > 0) {
+			if (*obj_end == '{') depth++;
+			else if (*obj_end == '}') depth--;
+			obj_end++;
+		}
+		if (depth != 0) break;
+
+		size_t obj_len = obj_end - obj_start;
+		char *obj = malloc(obj_len + 1);
+		if (!obj) break;
+		memcpy(obj, obj_start, obj_len);
+		obj[obj_len] = '\0';
+
+		rg->games[idx].id = json_extract_int(obj, "id");
+		rg->games[idx].console = json_extract_int(obj, "console");
+		json_extract_string(obj, "title", rg->games[idx].title, sizeof(rg->games[idx].title));
+		json_extract_string(obj, "cover", rg->games[idx].cover_path, sizeof(rg->games[idx].cover_path));
+		json_extract_string(obj, "filepath", rg->games[idx].filepath, sizeof(rg->games[idx].filepath));
+
+		free(obj);
+		p = obj_end;
+		idx++;
+	}
+
+	rg->game_count = idx;
+	free(buffer);
+}
+
+static void
+retro_gaming_load_cover(Monitor *m)
+{
+	RetroGamingView *rg;
+	GdkPixbuf *pixbuf = NULL;
+	GError *gerr = NULL;
+	char local_path[512];
+	struct stat st;
+
+	if (!m)
+		return;
+
+	rg = &m->retro_gaming;
+
+	/* Already loaded for this game */
+	if (rg->cover_loaded && rg->cover_loading_idx == rg->selected_game)
+		return;
+
+	/* Drop old cover */
+	if (rg->cover_buf) {
+		wlr_buffer_drop(rg->cover_buf);
+		rg->cover_buf = NULL;
+	}
+	rg->cover_loaded = 1;
+	rg->cover_loading_idx = rg->selected_game;
+	rg->cover_w = 0;
+	rg->cover_h = 0;
+
+	if (rg->selected_game >= rg->game_count)
+		return;
+
+	RomItem *game = &rg->games[rg->selected_game];
+	if (game->cover_path[0] == '\0' || strcmp(game->cover_path, "null") == 0)
+		return;
+
+	/* Check if the cover is a local path or needs download from server */
+	const char *cover = game->cover_path;
+	const char *fname = strrchr(cover, '/');
+	fname = fname ? fname + 1 : cover;
+
+	/* Build local cache path */
+	const char *home = getenv("HOME");
+	if (!home) home = "/tmp";
+	char cache_dir[512];
+	snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/nixlytile/covers", home);
+	snprintf(local_path, sizeof(local_path), "%s/%s", cache_dir, fname);
+
+	/* Check if cached locally */
+	if (stat(local_path, &st) != 0 || st.st_size == 0) {
+		/* Try to download from server */
+		char cmd[1024];
+		snprintf(cmd, sizeof(cmd), "mkdir -p '%s' && curl -s -f -o '%s' 'http://localhost:8080/image/%s' 2>/dev/null",
+			cache_dir, local_path, fname);
+		system(cmd);
+
+		if (stat(local_path, &st) != 0 || st.st_size == 0)
+			return;
+	}
+
+	pixbuf = gdk_pixbuf_new_from_file(local_path, &gerr);
+	if (!pixbuf) {
+		if (gerr) g_error_free(gerr);
+		return;
+	}
+
+	/* Scale to fit the cover area (right side, ~60% width) */
+	int target_h = rg->height - 80 - 40;  /* Below menu bar, with padding */
+	int orig_w = gdk_pixbuf_get_width(pixbuf);
+	int orig_h = gdk_pixbuf_get_height(pixbuf);
+	double scale = (double)target_h / orig_h;
+	int max_w = (rg->width * 55) / 100;
+	if ((int)(orig_w * scale) > max_w)
+		scale = (double)max_w / orig_w;
+
+	int scaled_w = (int)(orig_w * scale);
+	int scaled_h = (int)(orig_h * scale);
+
+	GdkPixbuf *scaled = gdk_pixbuf_scale_simple(pixbuf, scaled_w, scaled_h, GDK_INTERP_BILINEAR);
+	g_object_unref(pixbuf);
+
+	if (!scaled)
+		return;
+
+	rg->cover_buf = statusbar_buffer_from_pixbuf(scaled, scaled_h, &rg->cover_w, &rg->cover_h);
+	g_object_unref(scaled);
+}
+
+void
+retro_gaming_render_game_list(Monitor *m)
+{
+	RetroGamingView *rg;
+	int menu_bar_h = 80;
+	int padding = 20;
+	int item_h = 50;
+	int list_w, list_x, cover_x, cover_w;
+	int content_h;
+	int visible_items;
+	float list_bg[4] = {0.08f, 0.08f, 0.10f, 1.0f};
+	float item_selected[4] = {0.20f, 0.45f, 0.85f, 1.0f};
+	float item_hover[4] = {0.12f, 0.12f, 0.15f, 1.0f};
+	float scrollbar_bg[4] = {0.15f, 0.15f, 0.18f, 1.0f};
+	float scrollbar_fg[4] = {0.35f, 0.35f, 0.40f, 1.0f};
+
+	if (!m)
+		return;
+
+	rg = &m->retro_gaming;
+
+	/* Layout: 40% left = game list, 60% right = cover art */
+	list_w = (rg->width * 40) / 100;
+	list_x = 0;
+	cover_x = list_w;
+	cover_w = rg->width - list_w;
+	content_h = rg->height - menu_bar_h;
+	visible_items = content_h / item_h;
+
+	/* Ensure scroll keeps selected item visible */
+	if (rg->selected_game < rg->game_scroll_offset)
+		rg->game_scroll_offset = rg->selected_game;
+	if (rg->selected_game >= rg->game_scroll_offset + visible_items)
+		rg->game_scroll_offset = rg->selected_game - visible_items + 1;
+
+	/* List background */
+	drawrect(rg->tree, list_x, menu_bar_h, list_w, content_h, list_bg);
+
+	/* Render visible game items */
+	for (int i = 0; i < visible_items && (i + rg->game_scroll_offset) < rg->game_count; i++) {
+		int game_idx = i + rg->game_scroll_offset;
+		int y = menu_bar_h + i * item_h;
+		int is_selected = (game_idx == rg->selected_game);
+
+		/* Background for selected item */
+		if (is_selected) {
+			drawrect(rg->tree, list_x, y, list_w - 8, item_h, item_selected);
+		} else if (game_idx % 2 == 1) {
+			drawrect(rg->tree, list_x, y, list_w - 8, item_h, item_hover);
+		}
+
+		/* Game title text */
+		struct wlr_scene_tree *text_tree = wlr_scene_tree_create(rg->tree);
+		if (text_tree) {
+			wlr_scene_node_set_position(&text_tree->node, list_x + padding, y + (item_h - 20) / 2);
+			StatusModule mod = {0};
+			mod.tree = text_tree;
+			float text_color[4] = {1.0f, 1.0f, 1.0f, is_selected ? 1.0f : 0.8f};
+			/* Truncate title to fit */
+			char display_title[64];
+			int max_chars = (list_w - padding * 2 - 8) / 10;  /* Approximate char width */
+			if (max_chars > (int)sizeof(display_title) - 1)
+				max_chars = sizeof(display_title) - 1;
+			strncpy(display_title, rg->games[game_idx].title, max_chars);
+			display_title[max_chars] = '\0';
+			tray_render_label(&mod, display_title, 0, 20, text_color);
+		}
+	}
+
+	/* Scrollbar */
+	if (rg->game_count > visible_items) {
+		int sb_x = list_x + list_w - 6;
+		int sb_h = content_h;
+		drawrect(rg->tree, sb_x, menu_bar_h, 4, sb_h, scrollbar_bg);
+
+		/* Scrollbar thumb */
+		int thumb_h = (visible_items * sb_h) / rg->game_count;
+		if (thumb_h < 20) thumb_h = 20;
+		int thumb_y = menu_bar_h + (rg->game_scroll_offset * (sb_h - thumb_h)) /
+			(rg->game_count - visible_items);
+		drawrect(rg->tree, sb_x, thumb_y, 4, thumb_h, scrollbar_fg);
+	}
+
+	/* Cover art area */
+	float cover_bg[4] = {0.05f, 0.05f, 0.07f, 1.0f};
+	drawrect(rg->tree, cover_x, menu_bar_h, cover_w, content_h, cover_bg);
+
+	/* Load and render cover art */
+	retro_gaming_load_cover(m);
+
+	if (rg->cover_buf && rg->cover_w > 0 && rg->cover_h > 0) {
+		/* Center cover in the right panel */
+		int cx = cover_x + (cover_w - rg->cover_w) / 2;
+		int cy = menu_bar_h + (content_h - rg->cover_h) / 2;
+
+		struct wlr_scene_buffer *sbuf = wlr_scene_buffer_create(rg->tree, rg->cover_buf);
+		if (sbuf)
+			wlr_scene_node_set_position(&sbuf->node, cx, cy);
+	} else if (rg->game_count > 0) {
+		/* No cover - show game title as fallback */
+		struct wlr_scene_tree *fb_tree = wlr_scene_tree_create(rg->tree);
+		if (fb_tree) {
+			const char *title = rg->games[rg->selected_game].title;
+			int tw = status_text_width(title);
+			int tx = cover_x + (cover_w - tw) / 2;
+			int ty = menu_bar_h + content_h / 2 - 20;
+			wlr_scene_node_set_position(&fb_tree->node, tx, ty);
+			StatusModule mod = {0};
+			mod.tree = fb_tree;
+			float grey[4] = {0.5f, 0.5f, 0.5f, 0.7f};
+			tray_render_label(&mod, title, 0, 40, grey);
+		}
+	}
+}
+
+void
+retro_gaming_launch_game(Monitor *m)
+{
+	RetroGamingView *rg;
+	pid_t pid;
+
+	if (!m)
+		return;
+
+	rg = &m->retro_gaming;
+	if (rg->selected_game >= rg->game_count || !rg->games)
+		return;
+
+	RomItem *game = &rg->games[rg->selected_game];
+	int console = rg->selected_console;
+
+	if (console < 0 || console >= RETRO_CONSOLE_COUNT)
+		return;
+
+	const char *cmd_fmt = retro_emulator_cmds[console];
+	if (!cmd_fmt)
+		return;
+
+	char cmd[2048];
+	snprintf(cmd, sizeof(cmd), cmd_fmt, game->filepath);
+
+	wlr_log(WLR_INFO, "Launching ROM: %s", cmd);
+
+	pid = fork();
+	if (pid == 0) {
+		dup2(STDERR_FILENO, STDOUT_FILENO);
+		setsid();
+		/* Use dGPU for N64/GameCube/Wii emulators */
+		if (console == RETRO_N64 || console == RETRO_GAMECUBE || console == RETRO_WII) {
+			if (should_use_dgpu(cmd))
+				set_dgpu_env();
+		}
+		execl("/bin/sh", "sh", "-c", cmd, NULL);
+		_exit(127);
+	}
+}
+
 void
 retro_gaming_show(Monitor *m)
 {
@@ -2210,6 +2583,14 @@ retro_gaming_show(Monitor *m)
 	rg->height = m->m.height;
 	rg->visible = 1;
 	rg->view_tag = 1 << 2;  /* Tag 3 = bit 2 */
+	rg->in_game_list = 0;
+	rg->game_count = 0;
+	rg->selected_game = 0;
+	rg->game_scroll_offset = 0;
+	if (rg->games) { free(rg->games); rg->games = NULL; }
+	if (rg->cover_buf) { wlr_buffer_drop(rg->cover_buf); rg->cover_buf = NULL; }
+	rg->cover_loaded = 0;
+	rg->cover_loading_idx = -1;
 
 	/* Create dim overlay */
 	if (!rg->dim)
@@ -2249,6 +2630,12 @@ retro_gaming_hide(Monitor *m)
 
 	rg = &m->retro_gaming;
 	rg->visible = 0;
+	rg->in_game_list = 0;
+
+	if (rg->games) { free(rg->games); rg->games = NULL; }
+	rg->game_count = 0;
+	if (rg->cover_buf) { wlr_buffer_drop(rg->cover_buf); rg->cover_buf = NULL; }
+	rg->cover_loaded = 0;
 
 	if (rg->tree)
 		wlr_scene_node_set_enabled(&rg->tree->node, 0);
@@ -2375,18 +2762,37 @@ retro_gaming_render(Monitor *m)
 	float content_bg[4] = {0.06f, 0.06f, 0.08f, 1.0f};
 	drawrect(rg->tree, 0, menu_bar_h, rg->width, rg->height - menu_bar_h, content_bg);
 
-	/* Show target console name in content area (shows destination immediately) */
-	struct wlr_scene_tree *content_tree = wlr_scene_tree_create(rg->tree);
-	if (content_tree) {
-		const char *console = retro_console_names[rg->target_console];
-		int cw = status_text_width(console);
-		int cx = (rg->width - cw) / 2;
-		int cy = menu_bar_h + (rg->height - menu_bar_h) / 2 - 20;
-		wlr_scene_node_set_position(&content_tree->node, cx, cy);
-		StatusModule mod = {0};
-		mod.tree = content_tree;
-		float white[4] = {1.0f, 1.0f, 1.0f, 0.5f};
-		tray_render_label(&mod, console, 0, 40, white);
+	if (rg->in_game_list && rg->game_count > 0) {
+		/* Show game list with cover art */
+		retro_gaming_render_game_list(m);
+	} else if (rg->in_game_list && rg->game_count == 0) {
+		/* No games found for this console */
+		struct wlr_scene_tree *content_tree = wlr_scene_tree_create(rg->tree);
+		if (content_tree) {
+			const char *msg = "No games found";
+			int cw = status_text_width(msg);
+			int cx = (rg->width - cw) / 2;
+			int cy = menu_bar_h + (rg->height - menu_bar_h) / 2 - 20;
+			wlr_scene_node_set_position(&content_tree->node, cx, cy);
+			StatusModule mod = {0};
+			mod.tree = content_tree;
+			float grey[4] = {0.5f, 0.5f, 0.5f, 0.7f};
+			tray_render_label(&mod, msg, 0, 40, grey);
+		}
+	} else {
+		/* Show target console name in content area (shows destination immediately) */
+		struct wlr_scene_tree *content_tree = wlr_scene_tree_create(rg->tree);
+		if (content_tree) {
+			const char *console = retro_console_names[rg->target_console];
+			int cw = status_text_width(console);
+			int cx = (rg->width - cw) / 2;
+			int cy = menu_bar_h + (rg->height - menu_bar_h) / 2 - 20;
+			wlr_scene_node_set_position(&content_tree->node, cx, cy);
+			StatusModule mod = {0};
+			mod.tree = content_tree;
+			float white[4] = {1.0f, 1.0f, 1.0f, 0.5f};
+			tray_render_label(&mod, console, 0, 40, white);
+		}
 	}
 }
 
@@ -2436,6 +2842,7 @@ retro_gaming_handle_button(Monitor *m, int button, int value)
 {
 	RetroGamingView *rg;
 	int direction = 0;
+	int content_h, item_h, visible_items, page_size;
 
 	if (!m)
 		return 0;
@@ -2449,7 +2856,60 @@ retro_gaming_handle_button(Monitor *m, int button, int value)
 	if (value != 1)
 		return 0;
 
-	/* Navigation: D-pad left/right, shoulder buttons */
+	if (rg->in_game_list) {
+		/* === Game list mode === */
+		item_h = 50;
+		content_h = rg->height - 80;
+		visible_items = content_h / item_h;
+		page_size = visible_items > 2 ? visible_items - 2 : 1;
+
+		switch (button) {
+		case BTN_DPAD_UP:
+			if (rg->selected_game > 0) {
+				rg->selected_game--;
+				rg->cover_loaded = 0;  /* Force cover reload */
+				retro_gaming_render(m);
+			}
+			return 1;
+		case BTN_DPAD_DOWN:
+			if (rg->selected_game < rg->game_count - 1) {
+				rg->selected_game++;
+				rg->cover_loaded = 0;  /* Force cover reload */
+				retro_gaming_render(m);
+			}
+			return 1;
+		case BTN_TL:  /* LB = page up */
+			rg->selected_game -= page_size;
+			if (rg->selected_game < 0) rg->selected_game = 0;
+			rg->cover_loaded = 0;
+			retro_gaming_render(m);
+			return 1;
+		case BTN_TR:  /* RB = page down */
+			rg->selected_game += page_size;
+			if (rg->selected_game >= rg->game_count)
+				rg->selected_game = rg->game_count - 1;
+			rg->cover_loaded = 0;
+			retro_gaming_render(m);
+			return 1;
+		case BTN_SOUTH:  /* A button - launch game */
+			retro_gaming_launch_game(m);
+			return 1;
+		case BTN_EAST:  /* B button - back to console selector */
+			rg->in_game_list = 0;
+			if (rg->games) { free(rg->games); rg->games = NULL; }
+			rg->game_count = 0;
+			if (rg->cover_buf) { wlr_buffer_drop(rg->cover_buf); rg->cover_buf = NULL; }
+			rg->cover_loaded = 0;
+			retro_gaming_render(m);
+			return 1;
+		case BTN_MODE:  /* Guide button - let main handler show menu overlay */
+			return 0;
+		default:
+			return 1;
+		}
+	}
+
+	/* === Console selector mode === */
 	switch (button) {
 	case BTN_DPAD_LEFT:
 	case BTN_TL:  /* Left shoulder */
@@ -2463,8 +2923,11 @@ retro_gaming_handle_button(Monitor *m, int button, int value)
 		return 1;
 	case BTN_MODE:  /* Guide button - let main handler show menu overlay */
 		return 0;
-	case BTN_SOUTH:  /* A button - select current console */
-		/* TODO: Enter console's game list */
+	case BTN_SOUTH:  /* A button - enter console's game list */
+		rg->selected_console = rg->target_console;
+		rg->in_game_list = 1;
+		retro_gaming_fetch_games(m);
+		retro_gaming_render(m);
 		return 1;
 	}
 
