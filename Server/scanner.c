@@ -1212,12 +1212,7 @@ static char *download_rom_cover(const char *game_title, int console, const char 
 
 /* Fetch cover art for all ROMs missing covers */
 void scanner_fetch_rom_covers(void) {
-    const char *sql = "SELECT id, console, title FROM roms WHERE cover_path IS NULL OR cover_path = ''";
-    sqlite3_stmt *stmt;
-
-    /* We need direct access to sqlite3 - use database query functions instead */
-    /* Use the database_get_roms_json and parse, or add a direct function */
-    /* For simplicity, iterate through each console */
+    /* Iterate through each console and fetch covers for ROMs missing them */
     for (int c = 0; c < CONSOLE_COUNT; c++) {
         char *json = database_get_roms_by_console_json(c);
         if (!json) continue;

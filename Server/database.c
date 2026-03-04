@@ -1135,7 +1135,7 @@ char *database_get_rom_json(int id) {
         snprintf(json, 4096,
             "{\"id\":%d,\"console\":%d,\"console_name\":\"%s\","
             "\"title\":%s,\"filepath\":%s,\"cover\":%s,"
-            "\"size\":%ld,\"region\":%s,\"added_date\":%s}",
+            "\"size\":%lld,\"region\":%s,\"added_date\":%s}",
             sqlite3_column_int(stmt, 0), cons, database_console_name(cons),
             title_esc, path_esc, cover_esc,
             sqlite3_column_int64(stmt, 5), region_esc, added_esc);
