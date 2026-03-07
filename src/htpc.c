@@ -886,11 +886,11 @@ live_tv_kill(void)
 	pid_t pid;
 	int status;
 
-	/* Kill Chrome kiosk instances used for streaming (NRK, Netflix, Viaplay, TV2 Play, F1TV) */
+	/* Kill Chrome/Chromium kiosk instances used for streaming (NRK, Netflix, Viaplay, TV2 Play, F1TV) */
 	pid = fork();
 	if (pid == 0) {
 		setsid();
-		execlp("pkill", "pkill", "-9", "-f", "chromium.*--kiosk.*(nrk\\.no|netflix\\.com|viaplay\\.no|tv2\\.no|f1tv)", (char *)NULL);
+		execlp("pkill", "pkill", "-9", "-f", "(google-chrome|chromium).*--kiosk.*(nrk\\.no|netflix\\.com|viaplay\\.no|tv2\\.no|f1tv)", (char *)NULL);
 		_exit(127);
 	}
 	if (pid > 0)

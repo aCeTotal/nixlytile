@@ -339,10 +339,21 @@ gamepad_menu_select(Monitor *m)
 				media_view_hide_all();
 				retro_gaming_hide_all();
 				pc_gaming_hide_all();
-				wlr_log(WLR_INFO, "Launching %s in Chromium kiosk", kiosk_services[i].label);
+				wlr_log(WLR_INFO, "Launching %s in Chrome kiosk", kiosk_services[i].label);
 				pid_t pid = fork();
 				if (pid == 0) {
 					setsid();
+					/* Try google-chrome-stable first, then chromium as fallback */
+					execlp("google-chrome-stable", "google-chrome-stable",
+						"--ozone-platform=wayland",
+						"--kiosk", "--start-fullscreen",
+						"--autoplay-policy=no-user-gesture-required",
+						"--enable-features=VaapiVideoDecoder,PlatformHEVCDecoderSupport",
+						"--disable-gpu-vsync",
+						"--disable-frame-rate-limit",
+						"--force-device-scale-factor=1",
+						"--disable-translate",
+						kiosk_services[i].url, (char *)NULL);
 					execlp("chromium", "chromium",
 						"--ozone-platform=wayland",
 						"--kiosk", "--start-fullscreen",

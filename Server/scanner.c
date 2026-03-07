@@ -910,61 +910,55 @@ int scanner_is_rom_file(const char *path) {
     return 0;
 }
 
-/* Detect console type from directory name */
-static int scanner_detect_console(const char *path) {
-    /* Get the directory component just above the file */
-    char dir[4096];
-    strncpy(dir, path, sizeof(dir) - 1);
-    dir[sizeof(dir) - 1] = '\0';
+/* Detect if a disc image is GameCube or Wii by reading magic bytes.
+ * GameCube: magic 0xC2339F3D at offset 0x1C
+ * Wii:      magic 0x5D1C9EA3 at offset 0x18
+ * Returns CONSOLE_GAMECUBE, CONSOLE_WII, or -1 if unknown */
+static int scanner_detect_disc_type(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
 
-    /* Walk up the path looking for a known console directory name */
-    char *p = dir;
-    while (*p) p++;  /* Go to end */
-
-    /* Try each path component from the file upwards */
-    while (p > dir) {
-        /* Find the start of this component */
-        while (p > dir && *(p - 1) != '/') p--;
-        char *component = p;
-
-        /* Find the end (next slash or end of string) */
-        char *end = strchr(component, '/');
-        char saved = 0;
-        if (end) { saved = *end; *end = '\0'; }
-
-        /* Match directory name to console */
-        if (strcasecmp(component, "nes") == 0) { if (end) *end = saved; return CONSOLE_NES; }
-        if (strcasecmp(component, "snes") == 0) { if (end) *end = saved; return CONSOLE_SNES; }
-        if (strcasecmp(component, "n64") == 0 || strcasecmp(component, "nintendo64") == 0 ||
-            strcasecmp(component, "nintendo 64") == 0) { if (end) *end = saved; return CONSOLE_N64; }
-        if (strcasecmp(component, "gamecube") == 0 || strcasecmp(component, "gc") == 0 ||
-            strcasecmp(component, "ngc") == 0) { if (end) *end = saved; return CONSOLE_GAMECUBE; }
-        if (strcasecmp(component, "wii") == 0) { if (end) *end = saved; return CONSOLE_WII; }
-        if (strcasecmp(component, "gb") == 0 || strcasecmp(component, "gameboy") == 0 ||
-            strcasecmp(component, "game boy") == 0) { if (end) *end = saved; return CONSOLE_GB; }
-        if (strcasecmp(component, "gbc") == 0 || strcasecmp(component, "gameboycolor") == 0 ||
-            strcasecmp(component, "game boy color") == 0) { if (end) *end = saved; return CONSOLE_GBC; }
-        if (strcasecmp(component, "gba") == 0 || strcasecmp(component, "gameboyadvance") == 0 ||
-            strcasecmp(component, "game boy advance") == 0) { if (end) *end = saved; return CONSOLE_GBA; }
-
-        if (end) *end = saved;
-
-        /* Move to parent */
-        if (p > dir) p--;
-        while (p > dir && *(p - 1) != '/') p--;
+    unsigned char header[0x20];
+    if (fread(header, 1, sizeof(header), f) < sizeof(header)) {
+        fclose(f);
+        return -1;
     }
+    fclose(f);
 
-    /* Fallback: detect from extension */
+    /* Check Wii magic at offset 0x18 */
+    uint32_t wii_magic = ((uint32_t)header[0x18] << 24) | ((uint32_t)header[0x19] << 16) |
+                         ((uint32_t)header[0x1A] << 8)  | (uint32_t)header[0x1B];
+    if (wii_magic == 0x5D1C9EA3)
+        return CONSOLE_WII;
+
+    /* Check GameCube magic at offset 0x1C */
+    uint32_t gc_magic = ((uint32_t)header[0x1C] << 24) | ((uint32_t)header[0x1D] << 16) |
+                        ((uint32_t)header[0x1E] << 8)  | (uint32_t)header[0x1F];
+    if (gc_magic == 0xC2339F3D)
+        return CONSOLE_GAMECUBE;
+
+    return -1;
+}
+
+/* Detect console type from file extension and metadata */
+static int scanner_detect_console(const char *path) {
     const char *ext = strrchr(path, '.');
-    if (ext) {
-        if (strcasecmp(ext, ".nes") == 0 || strcasecmp(ext, ".fds") == 0) return CONSOLE_NES;
-        if (strcasecmp(ext, ".sfc") == 0 || strcasecmp(ext, ".smc") == 0) return CONSOLE_SNES;
-        if (strcasecmp(ext, ".z64") == 0 || strcasecmp(ext, ".n64") == 0 || strcasecmp(ext, ".v64") == 0) return CONSOLE_N64;
-        if (strcasecmp(ext, ".gb") == 0) return CONSOLE_GB;
-        if (strcasecmp(ext, ".gbc") == 0) return CONSOLE_GBC;
-        if (strcasecmp(ext, ".gba") == 0) return CONSOLE_GBA;
-        if (strcasecmp(ext, ".wbfs") == 0) return CONSOLE_WII;
-        /* .iso, .gcz, .rvz, .ciso are ambiguous between GC and Wii */
+    if (!ext) return -1;
+
+    /* Unique extensions — unambiguous console detection */
+    if (strcasecmp(ext, ".nes") == 0 || strcasecmp(ext, ".fds") == 0) return CONSOLE_NES;
+    if (strcasecmp(ext, ".sfc") == 0 || strcasecmp(ext, ".smc") == 0) return CONSOLE_SNES;
+    if (strcasecmp(ext, ".z64") == 0 || strcasecmp(ext, ".n64") == 0 || strcasecmp(ext, ".v64") == 0) return CONSOLE_N64;
+    if (strcasecmp(ext, ".gb") == 0) return CONSOLE_GB;
+    if (strcasecmp(ext, ".gbc") == 0) return CONSOLE_GBC;
+    if (strcasecmp(ext, ".gba") == 0) return CONSOLE_GBA;
+    if (strcasecmp(ext, ".wbfs") == 0) return CONSOLE_WII;
+    if (strcasecmp(ext, ".gcm") == 0) return CONSOLE_GAMECUBE;
+
+    /* Shared extensions (.iso, .ciso, .gcz, .rvz) — read disc magic bytes */
+    if (strcasecmp(ext, ".iso") == 0 || strcasecmp(ext, ".ciso") == 0 ||
+        strcasecmp(ext, ".gcz") == 0 || strcasecmp(ext, ".rvz") == 0) {
+        return scanner_detect_disc_type(path);
     }
 
     return -1;

@@ -265,6 +265,7 @@ typedef struct RomItem {
 	char title[256];
 	char cover_path[512];
 	char filepath[1024];
+	char server_url[256];
 } RomItem;
 
 typedef enum {
@@ -1375,6 +1376,7 @@ extern char spawn_cmd_browser[MAX_SPAWN_CMD];
 extern char spawn_cmd_filemanager[MAX_SPAWN_CMD];
 extern char spawn_cmd_launcher[MAX_SPAWN_CMD];
 extern const char *netcmd[];
+extern const char *pavucontrolcmd[];
 extern const char *btopcmd[];
 extern Key runtime_keys[MAX_KEYS];
 extern char *runtime_spawn_cmds[MAX_KEYS];

@@ -198,6 +198,7 @@ const char *bravecmd[] = { "brave",
 	NULL };
 const char *menucmd[] __attribute__((unused)) = { "wmenu-run", NULL };
 const char *netcmd[] = { "nm-connection-editor", NULL };
+const char *pavucontrolcmd[] = { "pavucontrol", NULL };
 const char *screenshotcmd[] = { "/bin/sh", "-c", "slurp | grim -g - - | wl-copy", NULL };
 const char *thunarcmd[] = { "thunar", NULL };
 

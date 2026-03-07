@@ -2207,17 +2207,55 @@ pc_gaming_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
  * Retro Gaming - Game List, Cover Art, and Emulator Launch
  * ========================================================================== */
 
+static int
+retro_parse_roms_json(const char *buffer, const char *server_url,
+                      RomItem *items, int max_items)
+{
+	const char *p = buffer;
+	int idx = 0;
+
+	while (idx < max_items) {
+		const char *obj_start = strchr(p, '{');
+		if (!obj_start) break;
+
+		int depth = 1;
+		const char *obj_end = obj_start + 1;
+		while (*obj_end && depth > 0) {
+			if (*obj_end == '{') depth++;
+			else if (*obj_end == '}') depth--;
+			obj_end++;
+		}
+		if (depth != 0) break;
+
+		size_t obj_len = obj_end - obj_start;
+		char *obj = malloc(obj_len + 1);
+		if (!obj) break;
+		memcpy(obj, obj_start, obj_len);
+		obj[obj_len] = '\0';
+
+		items[idx].id = json_extract_int(obj, "id");
+		items[idx].console = json_extract_int(obj, "console");
+		json_extract_string(obj, "title", items[idx].title, sizeof(items[idx].title));
+		json_extract_string(obj, "cover", items[idx].cover_path, sizeof(items[idx].cover_path));
+		json_extract_string(obj, "filepath", items[idx].filepath, sizeof(items[idx].filepath));
+		strncpy(items[idx].server_url, server_url, sizeof(items[idx].server_url) - 1);
+
+		free(obj);
+		p = obj_end;
+		idx++;
+	}
+
+	return idx;
+}
+
 void
 retro_gaming_fetch_games(Monitor *m)
 {
 	RetroGamingView *rg;
 	FILE *fp;
 	char cmd[512];
-	char *buffer = NULL;
-	size_t buf_size = 0;
-	size_t buf_used = 0;
-	char chunk[4096];
-	size_t bytes;
+	char buffer[262144];
+	size_t bytes_read;
 
 	if (!m)
 		return;
@@ -2239,84 +2277,64 @@ retro_gaming_fetch_games(Monitor *m)
 	rg->cover_loaded = 0;
 	rg->cover_loading_idx = -1;
 
-	snprintf(cmd, sizeof(cmd),
-		"curl -s 'http://localhost:8080/api/roms/console/%d' 2>/dev/null",
-		rg->selected_console);
+	/* Temporary buffer for all ROMs from all servers */
+	#define MAX_TEMP_ROMS 2000
+	RomItem *temp_roms = calloc(MAX_TEMP_ROMS, sizeof(RomItem));
+	if (!temp_roms) return;
+	int total_roms = 0;
 
-	fp = popen(cmd, "r");
-	if (!fp) return;
+	/* Fetch from all configured/discovered servers (same pattern as media) */
+	MediaServer *servers;
+	int server_count = get_all_media_servers(&servers);
 
-	/* Read entire response */
-	while ((bytes = fread(chunk, 1, sizeof(chunk), fp)) > 0) {
-		if (buf_used + bytes + 1 > buf_size) {
-			buf_size = buf_size ? buf_size * 2 : 16384;
-			buffer = realloc(buffer, buf_size);
+	if (server_count == 0) {
+		/* Fallback to localhost */
+		snprintf(cmd, sizeof(cmd),
+			"curl -s --connect-timeout 2 'http://localhost:8080/api/roms/console/%d' 2>/dev/null",
+			rg->selected_console);
+		fp = popen(cmd, "r");
+		if (fp) {
+			bytes_read = fread(buffer, 1, sizeof(buffer) - 1, fp);
+			pclose(fp);
+			if (bytes_read > 0) {
+				buffer[bytes_read] = '\0';
+				total_roms = retro_parse_roms_json(buffer, "http://localhost:8080",
+					temp_roms, MAX_TEMP_ROMS);
+			}
 		}
-		memcpy(buffer + buf_used, chunk, bytes);
-		buf_used += bytes;
-	}
-	pclose(fp);
+	} else {
+		for (int s = 0; s < server_count && total_roms < MAX_TEMP_ROMS; s++) {
+			snprintf(cmd, sizeof(cmd),
+				"curl -s --connect-timeout 2 '%s/api/roms/console/%d' 2>/dev/null",
+				servers[s].url, rg->selected_console);
+			fp = popen(cmd, "r");
+			if (!fp) continue;
 
-	if (!buffer || buf_used == 0) {
-		free(buffer);
+			bytes_read = fread(buffer, 1, sizeof(buffer) - 1, fp);
+			pclose(fp);
+			if (bytes_read == 0) continue;
+			buffer[bytes_read] = '\0';
+
+			int parsed = retro_parse_roms_json(buffer, servers[s].url,
+				&temp_roms[total_roms], MAX_TEMP_ROMS - total_roms);
+			total_roms += parsed;
+		}
+	}
+
+	if (total_roms == 0) {
+		free(temp_roms);
 		return;
 	}
-	buffer[buf_used] = '\0';
 
-	/* Count entries */
-	int count = 0;
-	const char *p = buffer;
-	while ((p = strstr(p, "\"id\":")) != NULL) {
-		count++;
-		p += 5;
-	}
-
-	if (count == 0) {
-		free(buffer);
-		return;
-	}
-
-	rg->games = calloc(count, sizeof(RomItem));
+	/* Move to final allocation */
+	rg->games = calloc(total_roms, sizeof(RomItem));
 	if (!rg->games) {
-		free(buffer);
+		free(temp_roms);
 		return;
 	}
-
-	/* Parse each object */
-	p = buffer;
-	int idx = 0;
-	while (idx < count) {
-		const char *obj_start = strchr(p, '{');
-		if (!obj_start) break;
-
-		int depth = 1;
-		const char *obj_end = obj_start + 1;
-		while (*obj_end && depth > 0) {
-			if (*obj_end == '{') depth++;
-			else if (*obj_end == '}') depth--;
-			obj_end++;
-		}
-		if (depth != 0) break;
-
-		size_t obj_len = obj_end - obj_start;
-		char *obj = malloc(obj_len + 1);
-		if (!obj) break;
-		memcpy(obj, obj_start, obj_len);
-		obj[obj_len] = '\0';
-
-		rg->games[idx].id = json_extract_int(obj, "id");
-		rg->games[idx].console = json_extract_int(obj, "console");
-		json_extract_string(obj, "title", rg->games[idx].title, sizeof(rg->games[idx].title));
-		json_extract_string(obj, "cover", rg->games[idx].cover_path, sizeof(rg->games[idx].cover_path));
-		json_extract_string(obj, "filepath", rg->games[idx].filepath, sizeof(rg->games[idx].filepath));
-
-		free(obj);
-		p = obj_end;
-		idx++;
-	}
-
-	rg->game_count = idx;
-	free(buffer);
+	memcpy(rg->games, temp_roms, total_roms * sizeof(RomItem));
+	rg->game_count = total_roms;
+	free(temp_roms);
 }
 
 static void
@@ -2370,8 +2388,9 @@ retro_gaming_load_cover(Monitor *m)
 	if (stat(local_path, &st) != 0 || st.st_size == 0) {
 		/* Try to download from server */
 		char cmd[1024];
-		snprintf(cmd, sizeof(cmd), "mkdir -p '%s' && curl -s -f -o '%s' 'http://localhost:8080/image/%s' 2>/dev/null",
-			cache_dir, local_path, fname);
+		const char *srv = game->server_url[0] ? game->server_url : get_media_server_url();
+		snprintf(cmd, sizeof(cmd), "mkdir -p '%s' && curl -s -f -o '%s' '%s/image/%s' 2>/dev/null",
+			cache_dir, local_path, srv, fname);
 		system(cmd);
 
 		if (stat(local_path, &st) != 0 || st.st_size == 0)
@@ -2583,7 +2602,6 @@ retro_gaming_show(Monitor *m)
 	rg->height = m->m.height;
 	rg->visible = 1;
 	rg->view_tag = 1 << 2;  /* Tag 3 = bit 2 */
-	rg->in_game_list = 0;
 	rg->game_count = 0;
 	rg->selected_game = 0;
 	rg->game_scroll_offset = 0;
@@ -2591,6 +2609,10 @@ retro_gaming_show(Monitor *m)
 	if (rg->cover_buf) { wlr_buffer_drop(rg->cover_buf); rg->cover_buf = NULL; }
 	rg->cover_loaded = 0;
 	rg->cover_loading_idx = -1;
+
+	/* Fetch games immediately for the initial console */
+	rg->in_game_list = 1;
+	retro_gaming_fetch_games(m);
 
 	/* Create dim overlay */
 	if (!rg->dim)
@@ -2820,6 +2842,9 @@ retro_gaming_animate(void *data)
 		rg->selected_console = rg->target_console;
 		rg->slide_offset = 0.0f;
 		rg->anim_direction = 0;
+		/* Auto-fetch and show games for the newly selected console */
+		rg->in_game_list = 1;
+		retro_gaming_fetch_games(m);
 		retro_gaming_render(m);
 		return 0;
 	}
@@ -2857,7 +2882,7 @@ retro_gaming_handle_button(Monitor *m, int button, int value)
 		return 0;
 
 	if (rg->in_game_list) {
-		/* === Game list mode === */
+		/* === Game list mode (with integrated console switching) === */
 		item_h = 50;
 		content_h = rg->height - 80;
 		visible_items = content_h / item_h;
@@ -2894,13 +2919,44 @@ retro_gaming_handle_button(Monitor *m, int button, int value)
 		case BTN_SOUTH:  /* A button - launch game */
 			retro_gaming_launch_game(m);
 			return 1;
-		case BTN_EAST:  /* B button - back to console selector */
-			rg->in_game_list = 0;
-			if (rg->games) { free(rg->games); rg->games = NULL; }
-			rg->game_count = 0;
-			if (rg->cover_buf) { wlr_buffer_drop(rg->cover_buf); rg->cover_buf = NULL; }
-			rg->cover_loaded = 0;
-			retro_gaming_render(m);
+		case BTN_DPAD_LEFT: {  /* Switch to previous console */
+			int new_target = rg->target_console - 1;
+			if (new_target >= 0) {
+				if (rg->anim_direction != 0)
+					rg->selected_console = rg->target_console;
+				rg->target_console = new_target;
+				rg->anim_direction = -1;
+				rg->slide_start_ms = monotonic_msec();
+				rg->slide_offset = 1.0f;
+				if (!retro_anim_timer)
+					retro_anim_timer = wl_event_loop_add_timer(
+						wl_display_get_event_loop(dpy),
+						retro_gaming_animate, m);
+				if (retro_anim_timer)
+					wl_event_source_timer_update(retro_anim_timer, 16);
+			}
+			return 1;
+		}
+		case BTN_DPAD_RIGHT: {  /* Switch to next console */
+			int new_target = rg->target_console + 1;
+			if (new_target < RETRO_CONSOLE_COUNT) {
+				if (rg->anim_direction != 0)
+					rg->selected_console = rg->target_console;
+				rg->target_console = new_target;
+				rg->anim_direction = 1;
+				rg->slide_start_ms = monotonic_msec();
+				rg->slide_offset = -1.0f;
+				if (!retro_anim_timer)
+					retro_anim_timer = wl_event_loop_add_timer(
+						wl_display_get_event_loop(dpy),
+						retro_gaming_animate, m);
+				if (retro_anim_timer)
+					wl_event_source_timer_update(retro_anim_timer, 16);
+			}
+			return 1;
+		}
+		case BTN_EAST:  /* B button - exit retro gaming */
+			retro_gaming_hide(m);
 			return 1;
 		case BTN_MODE:  /* Guide button - let main handler show menu overlay */
 			return 0;
@@ -2909,7 +2965,7 @@ retro_gaming_handle_button(Monitor *m, int button, int value)
 		}
 	}
 
-	/* === Console selector mode === */
+	/* === Console selector mode (fallback) === */
 	switch (button) {
 	case BTN_DPAD_LEFT:
 	case BTN_TL:  /* Left shoulder */
@@ -2919,11 +2975,12 @@ retro_gaming_handle_button(Monitor *m, int button, int value)
 	case BTN_TR:  /* Right shoulder */
 		direction = 1;
 		break;
-	case BTN_EAST:  /* B button - do nothing in main view (can't be closed) */
+	case BTN_EAST:  /* B button - exit retro gaming */
+		retro_gaming_hide(m);
 		return 1;
 	case BTN_MODE:  /* Guide button - let main handler show menu overlay */
 		return 0;
-	case BTN_SOUTH:  /* A button - enter console's game list */
+	case BTN_SOUTH:  /* A button - enter game list and launch */
 		rg->selected_console = rg->target_console;
 		rg->in_game_list = 1;
 		retro_gaming_fetch_games(m);

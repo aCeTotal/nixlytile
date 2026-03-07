@@ -407,12 +407,22 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 	}
 
 	if (mic->width > 0 && lx >= mic->x && lx < mic->x + mic->width) {
-		toggle_pipewire_mic_mute();
+		if (button == BTN_LEFT) {
+			toggle_pipewire_mic_mute();
+		} else if (button == BTN_RIGHT) {
+			Arg arg = { .v = pavucontrolcmd };
+			spawn(&arg);
+		}
 		return 1;
 	}
 
 	if (vol->width > 0 && lx >= vol->x && lx < vol->x + vol->width) {
-		toggle_pipewire_mute();
+		if (button == BTN_LEFT) {
+			toggle_pipewire_mute();
+		} else if (button == BTN_RIGHT) {
+			Arg arg = { .v = pavucontrolcmd };
+			spawn(&arg);
+		}
 		return 1;
 	}
 
