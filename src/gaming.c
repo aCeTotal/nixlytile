@@ -3306,13 +3306,38 @@ set_dgpu_env(void)
 		break;
 	}
 
-	/* Vulkan device selection - prefer discrete GPU */
+	/* Vulkan device selection - prefer discrete GPU.
+	 *
+	 * Multiple layers of selection to guarantee dGPU usage:
+	 *
+	 * 1) VK_LOADER_DRIVERS_SELECT — modern Vulkan loader (1.3.234+)
+	 *    filters ICD files by filename glob.
+	 *
+	 * 2) MESA_VK_DEVICE_SELECT — Mesa's VkLayer_MESA_device_select
+	 *    implicit layer, selects device by PCI vendor:device ID.
+	 *    Without this, the layer defaults to boot_vga (= iGPU).
+	 *
+	 * 3) DXVK_FILTER_DEVICE_NAME — DXVK/Proton device selection by
+	 *    name substring.  Guarantees Proton games use the dGPU.
+	 */
 	switch (dgpu->vendor) {
 	case GPU_VENDOR_NVIDIA:
 		setenv("VK_LOADER_DRIVERS_SELECT", "nvidia*", 1);
+		/* PCI vendor 0x10de = NVIDIA */
+		setenv("MESA_VK_DEVICE_SELECT", "10de:", 1);
+		setenv("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", "1", 1);
+		setenv("DXVK_FILTER_DEVICE_NAME", "NVIDIA", 1);
+		/* Ensure Proton exposes NVIDIA GPU to games */
+		setenv("PROTON_HIDE_NVIDIA_GPU", "0", 1);
+		setenv("PROTON_ENABLE_NVAPI", "1", 1);
+		setenv("DXVK_ENABLE_NVAPI", "1", 1);
 		break;
 	case GPU_VENDOR_AMD:
 		setenv("VK_LOADER_DRIVERS_SELECT", "radeon*,amd*", 1);
+		/* PCI vendor 0x1002 = AMD */
+		setenv("MESA_VK_DEVICE_SELECT", "1002:", 1);
+		setenv("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", "1", 1);
+		setenv("DXVK_FILTER_DEVICE_NAME", "AMD", 1);
 		break;
 	default:
 		setenv("VK_LOADER_DRIVERS_SELECT", "nvidia*,radeon*,amd*", 1);
@@ -3362,35 +3387,17 @@ set_steam_env(void)
 	 * STEAM_WEBHELPER_CEF_FLAGS can override/append to steamwebhelper arguments */
 	setenv("STEAM_WEBHELPER_CEF_FLAGS", "--enable-gpu --enable-gpu-compositing --enable-accelerated-video-decode --ignore-gpu-blocklist", 1);
 
-	/* If we have a discrete NVIDIA GPU, set PRIME offload vars for Steam itself */
+	/* Set dGPU env for Steam — this calls set_dgpu_env() which handles
+	 * ALL GPU vendor-specific vars including Vulkan device selection.
+	 * Redundant with the compositor-level call, but ensures the vars
+	 * are present even if Steam was started before GPU detection. */
+	set_dgpu_env();
+
 	if (discrete_gpu_idx >= 0 && discrete_gpu_idx < detected_gpu_count) {
 		dgpu = &detected_gpus[discrete_gpu_idx];
 		if (dgpu->vendor == GPU_VENDOR_NVIDIA) {
-			/* PRIME render offload for Steam process */
-			setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 1);
-			setenv("__NV_PRIME_RENDER_OFFLOAD_PROVIDER", "NVIDIA-G0", 1);
-			setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 1);
-			setenv("__VK_LAYER_NV_optimus", "NVIDIA_only", 1);
-			/* DRI_PRIME for Mesa fallback */
-			if (dgpu->pci_slot_underscore[0])
-				setenv("DRI_PRIME", dgpu->pci_slot_underscore, 1);
-			else
-				setenv("DRI_PRIME", "1", 1);
-			/* Vulkan ICD selection for NVIDIA */
-			setenv("VK_LOADER_DRIVERS_SELECT", "nvidia*", 1);
-
 			/* NVIDIA-specific CEF args for better ANGLE/Vulkan support */
 			setenv("STEAM_CEF_GPU_ARGS", "--use-angle=vulkan --enable-features=Vulkan,UseSkiaRenderer", 1);
-
-			/* NVIDIA frame pacing env vars for all games launched through Steam */
-			setenv("__GL_MaxFramesAllowed", "1", 0);
-			setenv("__GL_SYNC_TO_VBLANK", "0", 0);
-			setenv("__GL_GSYNC_ALLOWED", "1", 0);
-			setenv("__GL_VRR_ALLOWED", "1", 0);
-			setenv("__GL_YIELD", "NOTHING", 0);
-			setenv("__GL_THREADED_OPTIMIZATIONS", "1", 0);
-			setenv("__GL_SHADER_DISK_CACHE", "1", 0);
-			setenv("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP", "1", 0);
 		}
 	}
 }

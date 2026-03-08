@@ -2281,11 +2281,11 @@ is_steam_popup(Client *c)
 	app_id = client_get_appid(c);
 	if (!app_id)
 		return 0;
-	/* Steam dialogs often have app_id starting with "steam" but may vary */
-	if (strcasestr(app_id, "steam"))
-		return 1;
-	/* Also check for common game launcher popups */
-	if (strcasestr(app_id, "steamwebhelper"))
+	/* Steam dialogs/popups — but NOT games with steam_app_XXXX class.
+	 * Proton/Wine games typically get WM_CLASS "steam_app_12345". */
+	if (strncasecmp(app_id, "steam_app_", 10) == 0)
+		return 0;  /* This is a game, not a popup */
+	if (strcasestr(app_id, "steam") || strcasestr(app_id, "steamwebhelper"))
 		return 1;
 	return 0;
 }
@@ -2331,9 +2331,11 @@ is_steam_game(Client *c)
 	if (!c)
 		return 0;
 
-	/* Exclude Steam itself and its popups */
+	/* Exclude Steam itself and its popups, but NOT games with steam_app_XXXX class */
 	app_id = client_get_appid(c);
-	if (app_id && strcasestr(app_id, "steam"))
+	if (app_id && (strcasecmp(app_id, "steam") == 0 ||
+	    strcasecmp(app_id, "Steam") == 0 ||
+	    strcasestr(app_id, "steamwebhelper")))
 		return 0;
 
 	/* Exclude floating windows (likely dialogs/launchers) */

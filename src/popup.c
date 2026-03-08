@@ -1633,6 +1633,12 @@ toast_show(Monitor *m, const char *message, int duration_ms)
 	wlr_scene_node_set_enabled(&m->toast_tree->node, 1);
 	m->toast_visible = 1;
 
+	/* Schedule a frame to ensure the toast gets rendered.
+	 * Without this, the toast may not appear if no other damage
+	 * triggers a render (e.g., during direct scanout or game mode). */
+	if (m->wlr_output)
+		wlr_output_schedule_frame(m->wlr_output);
+
 	/* Set up timer to hide */
 	if (!m->toast_timer)
 		m->toast_timer = wl_event_loop_add_timer(event_loop, toast_hide_timer, m);
