@@ -377,6 +377,7 @@ const char battery_icon_25[] = "images/svg/battery-25.svg";
 const char battery_icon_50[] = "images/svg/battery-50.svg";
 const char battery_icon_75[] = "images/svg/battery-75.svg";
 const char battery_icon_100[] = "images/svg/battery-100.svg";
+const char battery_icon_charging[] = "images/svg/battery-charging.svg";
 const char volume_icon_speaker_25[] = "images/svg/speaker_25.svg";
 const char volume_icon_speaker_50[] = "images/svg/speaker_50.svg";
 const char volume_icon_speaker_100[] = "images/svg/speaker_100.svg";
@@ -490,6 +491,7 @@ int backlight_writable;
 char battery_capacity_path[PATH_MAX];
 char battery_device_dir[PATH_MAX];  /* e.g. /sys/class/power_supply/BAT0 */
 int battery_available;
+int battery_is_charging;
 const double light_step = 5.0;
 const double volume_step = 3.0;
 const double volume_max_percent = 150.0;

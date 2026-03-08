@@ -4130,6 +4130,27 @@ refreshstatusbattery(void)
 		battery_path_initialized = 1;
 	}
 
+	/* Read charging status from sysfs */
+	if (battery_available && battery_device_dir[0]) {
+		char status_path[PATH_MAX];
+		char status_buf[64] = {0};
+		FILE *fp;
+		char *nl;
+
+		snprintf(status_path, sizeof(status_path), "%s/status",
+				battery_device_dir);
+		fp = fopen(status_path, "r");
+		if (fp) {
+			if (fgets(status_buf, sizeof(status_buf), fp)) {
+				nl = strchr(status_buf, '\n');
+				if (nl) *nl = '\0';
+				battery_is_charging = (strcmp(status_buf, "Charging") == 0
+						|| strcmp(status_buf, "Full") == 0);
+			}
+			fclose(fp);
+		}
+	}
+
 	percent = battery_percent();
 	display = percent;
 
@@ -4150,7 +4171,9 @@ refreshstatusbattery(void)
 		snprintf(battery_text, sizeof(battery_text), "%d%%", (int)lround(display));
 	}
 
-	if (display >= 0.0) {
+	if (battery_is_charging) {
+		icon = battery_icon_charging;
+	} else if (display >= 0.0) {
 		if (display <= 25.0)
 			icon = battery_icon_25;
 		else if (display <= 50.0)

@@ -1664,6 +1664,18 @@ update_game_mode(void)
 	Monitor *m;
 	int is_game = 0;
 
+	/*
+	 * Guard: if ultra game mode is active and the game process is still
+	 * running, NEVER deactivate game mode even if the fullscreen client
+	 * is temporarily not found (e.g., surface unmap during loading,
+	 * brief focus loss, or tag switch).  Deactivating would reset GPU
+	 * power state, clock locks, and fan boost — causing severe FPS drops.
+	 */
+	if (was_ultra && !c && game_mode_pid > 1 && kill(game_mode_pid, 0) == 0) {
+		/* Game process is still alive — keep ultra mode active */
+		return;
+	}
+
 	game_mode_active = (c != NULL);
 	game_mode_client = c;
 

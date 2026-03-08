@@ -1642,6 +1642,7 @@ extern int backlight_writable;
 extern char battery_capacity_path[PATH_MAX];
 extern char battery_device_dir[PATH_MAX];
 extern int battery_available;
+extern int battery_is_charging;
 extern double cpu_last_core_percent[];
 extern int cpu_core_count;
 
@@ -1772,6 +1773,7 @@ extern const char battery_icon_25[];
 extern const char battery_icon_50[];
 extern const char battery_icon_75[];
 extern const char battery_icon_100[];
+extern const char battery_icon_charging[];
 extern const char volume_icon_speaker_25[];
 extern const char volume_icon_speaker_50[];
 extern const char volume_icon_speaker_100[];
