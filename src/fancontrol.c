@@ -610,6 +610,226 @@ fan_set_auto(FanEntry *f)
 		f->pwm_enable = 2;
 }
 
+/* ── Smart thermal fan management ────────────────────────────────── */
+
+/*
+ * Quiet-first fan curve.  Keeps fans silent at low temps, ramps up
+ * smoothly when cooling is needed, goes full-blast in emergencies.
+ *
+ *   < 45 °C   →  PWM   0  (off / silent)
+ *  45–55 °C   →  PWM   0…64  (barely audible)
+ *  55–70 °C   →  PWM  64…140 (moderate)
+ *  70–80 °C   →  PWM 140…200 (noticeable)
+ *  80–90 °C   →  PWM 200…255 (loud)
+ *   ≥ 90 °C   →  PWM 255     (emergency)
+ */
+static int
+fan_curve_pwm(int temp_c)
+{
+	if (temp_c < 45)
+		return 0;
+	if (temp_c < 55)
+		return (temp_c - 45) * 64 / 10;
+	if (temp_c < 70)
+		return 64 + (temp_c - 55) * 76 / 15;
+	if (temp_c < 80)
+		return 140 + (temp_c - 70) * 60 / 10;
+	if (temp_c < 90)
+		return 200 + (temp_c - 80) * 55 / 10;
+	return 255;
+}
+
+#define FAN_THERMAL_MAX      16
+#define FAN_THERMAL_INTERVAL 5000   /* ms between thermal ticks */
+#define FAN_THERMAL_RAMP_UP  30     /* max PWM increase per tick */
+#define FAN_THERMAL_RAMP_DN  10     /* max PWM decrease per tick (quieter) */
+
+static struct {
+	char pwm_path[128];
+	char pwm_enable_path[128];
+	char temp_path[128];
+	int  saved_pwm_enable;
+	int  saved_pwm;
+	int  current_pwm;
+	int  active;
+} fan_thermal_slots[FAN_THERMAL_MAX];
+static int fan_thermal_slot_count;
+
+/*
+ * Scan /sys/class/hwmon for every fan that has both PWM control and a
+ * temperature sensor.  Save the original BIOS state and take ownership
+ * (manual mode).
+ */
+static void
+fan_thermal_scan(void)
+{
+	DIR *dir;
+	struct dirent *ent;
+	char path[256], namebuf[64];
+
+	fan_thermal_slot_count = 0;
+
+	dir = opendir("/sys/class/hwmon");
+	if (!dir)
+		return;
+
+	while ((ent = readdir(dir)) != NULL &&
+	       fan_thermal_slot_count < FAN_THERMAL_MAX) {
+		if (ent->d_name[0] == '.')
+			continue;
+
+		snprintf(path, sizeof(path), "/sys/class/hwmon/%s/name",
+				ent->d_name);
+		if (sysfs_read_str(path, namebuf, sizeof(namebuf)) != 0)
+			continue;
+
+		for (int fi = 1; fi <= 10 &&
+		     fan_thermal_slot_count < FAN_THERMAL_MAX; fi++) {
+			char pwm[256], enable[256], temp[256];
+			int cur_pwm, cur_enable, cur_temp;
+
+			snprintf(pwm, sizeof(pwm),
+					"/sys/class/hwmon/%s/pwm%d",
+					ent->d_name, fi);
+			cur_pwm = sysfs_read_int(pwm);
+			if (cur_pwm < 0)
+				continue;
+
+			snprintf(enable, sizeof(enable),
+					"/sys/class/hwmon/%s/pwm%d_enable",
+					ent->d_name, fi);
+			cur_enable = sysfs_read_int(enable);
+			if (cur_enable < 0)
+				cur_enable = 2;
+
+			/* Need a temperature source */
+			snprintf(temp, sizeof(temp),
+					"/sys/class/hwmon/%s/temp1_input",
+					ent->d_name);
+			cur_temp = sysfs_read_int(temp);
+			if (cur_temp < 0)
+				continue;
+
+			int idx = fan_thermal_slot_count++;
+			snprintf(fan_thermal_slots[idx].pwm_path,
+					sizeof(fan_thermal_slots[0].pwm_path),
+					"%s", pwm);
+			snprintf(fan_thermal_slots[idx].pwm_enable_path,
+					sizeof(fan_thermal_slots[0].pwm_enable_path),
+					"%s", enable);
+			snprintf(fan_thermal_slots[idx].temp_path,
+					sizeof(fan_thermal_slots[0].temp_path),
+					"%s", temp);
+			fan_thermal_slots[idx].saved_pwm_enable = cur_enable;
+			fan_thermal_slots[idx].saved_pwm = cur_pwm;
+			fan_thermal_slots[idx].current_pwm = cur_pwm;
+			fan_thermal_slots[idx].active = 1;
+
+			/* Take ownership: manual mode */
+			sysfs_write_int(enable, 1);
+		}
+	}
+
+	closedir(dir);
+
+	if (fan_thermal_slot_count > 0) {
+		fan_thermal_active = 1;
+		wlr_log(WLR_INFO, "Thermal fan management: managing %d fan(s)",
+				fan_thermal_slot_count);
+	}
+}
+
+static int
+fan_thermal_tick(void *data)
+{
+	(void)data;
+
+	/* Game mode owns the fans — don't interfere */
+	if (fan_boost_active)
+		goto reschedule;
+
+	/* First run: scan and take over */
+	if (!fan_thermal_active)
+		fan_thermal_scan();
+
+	for (int i = 0; i < fan_thermal_slot_count; i++) {
+		int temp_mc, temp_c, target, diff, new_pwm;
+
+		if (!fan_thermal_slots[i].active)
+			continue;
+
+		/* Re-assert manual mode if something else reset it */
+		{
+			int en = sysfs_read_int(fan_thermal_slots[i].pwm_enable_path);
+			if (en >= 0 && en != 1)
+				sysfs_write_int(fan_thermal_slots[i].pwm_enable_path, 1);
+		}
+
+		temp_mc = sysfs_read_int(fan_thermal_slots[i].temp_path);
+		if (temp_mc < 0)
+			continue;
+		temp_c = temp_mc / 1000;
+
+		target = fan_curve_pwm(temp_c);
+
+		/* Smooth ramp: fast up (cooling matters), slow down (quiet) */
+		diff = target - fan_thermal_slots[i].current_pwm;
+		if (diff > FAN_THERMAL_RAMP_UP)
+			diff = FAN_THERMAL_RAMP_UP;
+		if (diff < -FAN_THERMAL_RAMP_DN)
+			diff = -FAN_THERMAL_RAMP_DN;
+
+		new_pwm = fan_thermal_slots[i].current_pwm + diff;
+		if (new_pwm < 0) new_pwm = 0;
+		if (new_pwm > 255) new_pwm = 255;
+
+		if (new_pwm != fan_thermal_slots[i].current_pwm) {
+			sysfs_write_int(fan_thermal_slots[i].pwm_path, new_pwm);
+			fan_thermal_slots[i].current_pwm = new_pwm;
+		}
+	}
+
+reschedule:
+	if (fan_thermal_timer)
+		wl_event_source_timer_update(fan_thermal_timer, FAN_THERMAL_INTERVAL);
+	return 0;
+}
+
+void
+fan_thermal_start(void)
+{
+	if (fan_thermal_timer)
+		return;
+	fan_thermal_timer = wl_event_loop_add_timer(event_loop,
+			fan_thermal_tick, NULL);
+	if (fan_thermal_timer)
+		wl_event_source_timer_update(fan_thermal_timer, FAN_THERMAL_INTERVAL);
+}
+
+void
+fan_thermal_stop(void)
+{
+	int i;
+
+	if (!fan_thermal_active)
+		return;
+
+	/* Restore every fan to its original BIOS state */
+	for (i = 0; i < fan_thermal_slot_count; i++) {
+		if (!fan_thermal_slots[i].active)
+			continue;
+		sysfs_write_int(fan_thermal_slots[i].pwm_enable_path,
+				fan_thermal_slots[i].saved_pwm_enable);
+		if (fan_thermal_slots[i].saved_pwm_enable == 1)
+			sysfs_write_int(fan_thermal_slots[i].pwm_path,
+					fan_thermal_slots[i].saved_pwm);
+	}
+
+	fan_thermal_active = 0;
+	fan_thermal_slot_count = 0;
+	wlr_log(WLR_INFO, "Thermal fan management stopped — fans restored");
+}
+
 /* ── GPU fan boost for game mode ──────────────────────────────────── */
 
 #define FAN_BOOST_MAX_SAVED 8

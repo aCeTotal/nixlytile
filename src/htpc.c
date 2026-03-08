@@ -1667,9 +1667,42 @@ update_game_mode(void)
 	game_mode_active = (c != NULL);
 	game_mode_client = c;
 
-	/* Determine if this is actually a game (vs video or other fullscreen content) */
+	/*
+	 * Determine if this is actually a game.
+	 * Most games (especially XWayland/Steam/Wine) don't set content-type
+	 * or tearing hints.  Flip the default: treat ANY fullscreen app as a
+	 * game UNLESS it explicitly identifies as video, or is a known video
+	 * player by app-id / class name.
+	 */
 	if (c) {
-		is_game = client_wants_tearing(c) || is_game_content(c);
+		if (client_wants_tearing(c) || is_game_content(c)) {
+			/* Explicit game hints — definitely a game */
+			is_game = 1;
+		} else if (is_video_content(c)) {
+			/* Explicit video hint — not a game */
+			is_game = 0;
+		} else {
+			/* No hints — check app-id against known video players */
+			const char *app = client_get_appid(c);
+			static const char *video_apps[] = {
+				"mpv", "vlc", "celluloid", "totem", "kodi",
+				"haruna", "smplayer", "dragon", "parole",
+				"io.github.celluloid_player.Celluloid",
+				"org.videolan.VLC", "io.mpv.Mpv",
+				"org.gnome.Totem", "tv.kodi.Kodi",
+				NULL
+			};
+			is_game = 1; /* default: fullscreen = game */
+			if (app) {
+				for (int i = 0; video_apps[i]; i++) {
+					if (strcasecmp(app, video_apps[i]) == 0 ||
+					    strcasestr(app, video_apps[i])) {
+						is_game = 0;
+						break;
+					}
+				}
+			}
+		}
 	}
 
 	/* Ultra mode activates for games, regular game mode for other fullscreen content */
@@ -1684,7 +1717,7 @@ update_game_mode(void)
 
 		/* Show game detection notification */
 		if (c && c->mon)
-			toast_show(c->mon, "Fullscreen Game detected: Nixly Frame Pacing active!", 2000);
+			toast_show(c->mon, "Fullscreen Game detected: dGPU + Frame Pacing active!", 3000);
 
 		/* Stop ALL background timers to eliminate compositor interrupts */
 		if (cache_update_timer)
@@ -1723,6 +1756,8 @@ update_game_mode(void)
 			wl_event_source_timer_update(media_view_poll_timer, 0);
 		if (osk_dpad_repeat_timer)
 			wl_event_source_timer_update(osk_dpad_repeat_timer, 0);
+		if (fan_thermal_timer)
+			wl_event_source_timer_update(fan_thermal_timer, 0);
 		/* NOTE: Keep bt_scan_timer - needed for controller reconnection */
 		/* NOTE: Keep gamepad_pending_timer - needed for controller input */
 
@@ -1842,6 +1877,10 @@ update_game_mode(void)
 		 */
 		wlr_log(WLR_INFO, "Game mode activated (non-game fullscreen) - pausing background tasks");
 
+		/* Show fullscreen detection notification */
+		if (c && c->mon)
+			toast_show(c->mon, "Fullscreen detected: dGPU active", 3000);
+
 		if (cache_update_timer)
 			wl_event_source_timer_update(cache_update_timer, 0);
 		if (nixpkgs_cache_timer)
@@ -1934,8 +1973,12 @@ update_game_mode(void)
 			/* Restore memory settings */
 			restore_memory_optimization();
 
-			/* Restore GPU fans to auto */
+			/* Restore GPU fans — thermal management will re-take control */
 			fan_boost_deactivate();
+
+			/* Restart thermal fan management timer */
+			if (fan_thermal_timer)
+				wl_event_source_timer_update(fan_thermal_timer, 1000);
 
 			wlr_log(WLR_INFO, "Ultra game mode deactivated - full system restored");
 		}

@@ -1601,9 +1601,9 @@ toast_show(Monitor *m, const char *message, int duration_ms)
 	if (!m)
 		return;
 
-	/* Create toast tree if needed */
+	/* Create toast tree if needed - use LyrOverlay to show above fullscreen */
 	if (!m->toast_tree) {
-		m->toast_tree = wlr_scene_tree_create(layers[LyrTop]);
+		m->toast_tree = wlr_scene_tree_create(layers[LyrOverlay]);
 		if (!m->toast_tree)
 			return;
 	}

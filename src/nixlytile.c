@@ -1269,6 +1269,12 @@ cleanup(void)
 	last_light_render[0] = last_volume_render[0] = last_mic_render[0] = last_battery_render[0] = '\0';
 	last_net_render[0] = '\0';
 	last_clock_h = last_cpu_h = last_ram_h = last_light_h = last_volume_h = last_mic_h = last_battery_h = last_net_h = 0;
+	/* Stop thermal fan management and restore BIOS control */
+	fan_thermal_stop();
+	if (fan_thermal_timer) {
+		wl_event_source_remove(fan_thermal_timer);
+		fan_thermal_timer = NULL;
+	}
 	if (wifi_scan_timer) {
 		wl_event_source_remove(wifi_scan_timer);
 		wifi_scan_timer = NULL;
@@ -2201,6 +2207,7 @@ setup(void)
 	status_hover_timer = wl_event_loop_add_timer(event_loop, updatehoverfade, NULL);
 	cache_update_timer = wl_event_loop_add_timer(event_loop, cache_update_timer_cb, NULL);
 	nixpkgs_cache_timer = wl_event_loop_add_timer(event_loop, nixpkgs_cache_timer_cb, NULL);
+	fan_thermal_start();
 	tray_init();
 	fcft_initialized = fcft_init(FCFT_LOG_COLORIZE_NEVER, 0, FCFT_LOG_CLASS_ERROR);
 	if (!fcft_initialized)
@@ -2755,6 +2762,12 @@ main(int argc, char *argv[])
 
 	/* Detect available GPUs for PRIME offloading */
 	detect_gpus();
+
+	/* Always set dGPU environment so ALL child processes use the discrete GPU.
+	 * This prevents games from accidentally using the integrated GPU when
+	 * launched through Steam, launchers, or other indirect means. */
+	if (discrete_gpu_idx >= 0)
+		set_dgpu_env();
 
 	/* Build autostart command with wallpaper path if not overridden */
 	{
