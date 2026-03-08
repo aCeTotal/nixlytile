@@ -110,7 +110,7 @@ detect_amd_vulkan_driver(void)
 /* Default parameters - applied to ALL games if no specific entry exists */
 static const GameLaunchParams default_game_params = {
 	.game_id    = NULL,
-	.nvidia     = "PROTON_USE_NTSYNC=1 PROTON_ENABLE_NVAPI=1 PROTON_HIDE_NVIDIA_GPU=0 DXVK_ENABLE_NVAPI=1 __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1 %command%",
+	.nvidia     = "PROTON_USE_NTSYNC=1 PROTON_ENABLE_NVAPI=1 PROTON_HIDE_NVIDIA_GPU=0 DXVK_ENABLE_NVAPI=1 DXVK_FRAME_RATE=0 __GL_MaxFramesAllowed=1 __GL_SYNC_TO_VBLANK=0 __GL_GSYNC_ALLOWED=1 __GL_VRR_ALLOWED=1 __GL_YIELD=NOTHING __GL_THREADED_OPTIMIZATIONS=1 __GL_SHADER_DISK_CACHE=1 __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1 %command%",
 	.amd        = "PROTON_USE_NTSYNC=1 RADV_PERFTEST=gpl ENABLE_LAYER_MESA_ANTI_LAG=1 %command%",
 	.amd_amdvlk = "PROTON_USE_NTSYNC=1 %command%",
 	.intel      = "PROTON_USE_NTSYNC=1 PROTON_XESS_UPGRADE=1 %command%",

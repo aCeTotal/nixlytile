@@ -5,6 +5,7 @@
 #ifndef NIXLYTILE_H
 #define NIXLYTILE_H
 
+#define _GNU_SOURCE
 #define _DEFAULT_SOURCE
 
 #include <arpa/inet.h>
@@ -1465,6 +1466,14 @@ extern int game_mode_oom_applied;
 extern int game_mode_governor_applied;
 extern int compositor_rt_applied;
 extern int fan_boost_active;
+extern pid_t frozen_pids[4096];
+extern int frozen_pid_count;
+extern int game_mode_swappiness_applied;
+extern int game_mode_affinity_applied;
+extern int game_mode_raw_input_applied;
+#define MAX_POINTER_DEVICES 32
+extern struct libinput_device *pointer_devices[MAX_POINTER_DEVICES];
+extern int pointer_device_count;
 extern int htpc_mode_active;
 
 /* config hot-reload */
@@ -2490,6 +2499,34 @@ void htpc_mode_exit(void);
 void htpc_mode_toggle(const Arg *arg);
 void htpc_menu_build(void);
 void update_game_mode(void);
+void freeze_background_processes(void);
+void unfreeze_background_processes(void);
+void apply_memory_optimization(void);
+void restore_memory_optimization(void);
+void apply_cpu_latency_qos(void);
+void restore_cpu_latency_qos(void);
+void apply_cpu_affinity(pid_t game_pid);
+void restore_cpu_affinity(pid_t game_pid);
+void apply_transparent_hugepages(void);
+void restore_transparent_hugepages(void);
+void apply_io_scheduler(void);
+void restore_io_scheduler(void);
+void apply_disable_watchdog(void);
+void restore_watchdog(void);
+void apply_raw_input(void);
+void restore_raw_input(void);
+void apply_irq_affinity(void);
+void restore_irq_affinity(void);
+void apply_scheduler_tuning(void);
+void restore_scheduler_tuning(void);
+void apply_gpu_power_state(void);
+void restore_gpu_power_state(void);
+void apply_dirty_writeback_tuning(void);
+void restore_dirty_writeback_tuning(void);
+void apply_disable_split_lock(void);
+void restore_split_lock(void);
+void apply_mglru_tuning(void);
+void restore_mglru_tuning(void);
 void steam_set_ge_proton_default(void);
 void cec_switch_to_active_source(void);
 void steam_launch_bigpicture(void);

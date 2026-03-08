@@ -3247,6 +3247,42 @@ set_dgpu_env(void)
 			setenv("DRI_PRIME", dgpu->pci_slot_underscore, 1);
 		else
 			setenv("DRI_PRIME", "1", 1);
+
+		/*
+		 * NVIDIA frame pacing & performance environment variables.
+		 * These are critical for optimal game performance under Wayland.
+		 */
+
+		/* Limit pre-rendered frames to 1 — minimizes input latency.
+		 * The compositor handles vsync/frame pacing, so deep queuing
+		 * only adds lag without benefit. */
+		setenv("__GL_MaxFramesAllowed", "1", 0);
+
+		/* Disable driver-side vsync — the Wayland compositor handles
+		 * presentation timing. Double-vsync causes input lag. */
+		setenv("__GL_SYNC_TO_VBLANK", "0", 0);
+
+		/* Allow G-Sync/VRR — the compositor enables adaptive sync
+		 * for fullscreen games automatically. */
+		setenv("__GL_GSYNC_ALLOWED", "1", 0);
+		setenv("__GL_VRR_ALLOWED", "1", 0);
+
+		/* Don't yield CPU while waiting for GPU — reduces latency
+		 * at the cost of slightly higher CPU usage. */
+		setenv("__GL_YIELD", "NOTHING", 0);
+
+		/* Enable threaded OpenGL optimizations — offloads GL work
+		 * to a separate thread for better CPU utilization. */
+		setenv("__GL_THREADED_OPTIMIZATIONS", "1", 0);
+
+		/* Persistent shader cache — avoid re-compilation stutters.
+		 * Don't clean up old shaders to keep cache warm. */
+		setenv("__GL_SHADER_DISK_CACHE", "1", 0);
+		setenv("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP", "1", 0);
+
+		/* Use direct rendering for lowest latency (skip composition queue) */
+		setenv("__GL_ALLOW_UNOFFICIAL_PROTOCOL", "1", 0);
+
 		break;
 
 	case GPU_VENDOR_AMD:
@@ -3345,6 +3381,16 @@ set_steam_env(void)
 
 			/* NVIDIA-specific CEF args for better ANGLE/Vulkan support */
 			setenv("STEAM_CEF_GPU_ARGS", "--use-angle=vulkan --enable-features=Vulkan,UseSkiaRenderer", 1);
+
+			/* NVIDIA frame pacing env vars for all games launched through Steam */
+			setenv("__GL_MaxFramesAllowed", "1", 0);
+			setenv("__GL_SYNC_TO_VBLANK", "0", 0);
+			setenv("__GL_GSYNC_ALLOWED", "1", 0);
+			setenv("__GL_VRR_ALLOWED", "1", 0);
+			setenv("__GL_YIELD", "NOTHING", 0);
+			setenv("__GL_THREADED_OPTIMIZATIONS", "1", 0);
+			setenv("__GL_SHADER_DISK_CACHE", "1", 0);
+			setenv("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP", "1", 0);
 		}
 	}
 }

@@ -97,6 +97,13 @@ int game_mode_oom_applied = 0;  /* 1 if we changed OOM score */
 int game_mode_governor_applied = 0;  /* 1 if we changed CPU governor */
 int compositor_rt_applied = 0;  /* 1 if compositor has RT scheduling */
 int fan_boost_active = 0; /* 1 if GPU fan boost is active during gaming */
+pid_t frozen_pids[4096];    /* PIDs frozen during game mode */
+int frozen_pid_count = 0;   /* Number of frozen PIDs */
+int game_mode_swappiness_applied = 0; /* 1 if swappiness was changed */
+int game_mode_affinity_applied = 0;  /* 1 if CPU affinity was changed */
+int game_mode_raw_input_applied = 0; /* 1 if pointer accel was disabled */
+struct libinput_device *pointer_devices[MAX_POINTER_DEVICES];
+int pointer_device_count = 0;
 int htpc_mode_active = 0; /* HTPC mode - hides statusbar, stops background tasks */
 struct wl_event_source *status_timer;
 struct wl_event_source *status_cpu_timer;

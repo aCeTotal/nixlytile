@@ -831,6 +831,10 @@ createpointer(struct wlr_pointer *pointer)
 			libinput_device_config_accel_set_profile(device, accel_profile);
 			libinput_device_config_accel_set_speed(device, accel_speed);
 		}
+
+		/* Track device for raw input toggle in game mode */
+		if (device && pointer_device_count < MAX_POINTER_DEVICES)
+			pointer_devices[pointer_device_count++] = device;
 	}
 
 	wlr_cursor_attach_input_device(cursor, &pointer->base);

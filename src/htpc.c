@@ -419,6 +419,1242 @@ get_memory_pressure(void)
 	return pressure;
 }
 
+/*
+ * Check if a PID is a child (direct or indirect) of a given parent PID.
+ * Walks the ppid chain up to avoid freezing game/compositor children.
+ */
+static int
+is_child_of(pid_t pid, pid_t parent)
+{
+	char path[64];
+	FILE *fp;
+	char line[256];
+	pid_t ppid;
+	int depth = 0;
+
+	if (pid == parent)
+		return 1;
+
+	ppid = pid;
+	while (ppid > 1 && depth < 32) {
+		snprintf(path, sizeof(path), "/proc/%d/stat", ppid);
+		fp = fopen(path, "r");
+		if (!fp)
+			return 0;
+		/* stat format: pid (comm) state ppid ... */
+		if (!fgets(line, sizeof(line), fp)) {
+			fclose(fp);
+			return 0;
+		}
+		fclose(fp);
+		/* Find the closing ')' to skip comm field (may contain spaces) */
+		char *cp = strrchr(line, ')');
+		if (!cp)
+			return 0;
+		/* After ') ' comes state, then ppid */
+		int scanned = sscanf(cp + 2, "%*c %d", &ppid);
+		if (scanned != 1)
+			return 0;
+		if (ppid == parent)
+			return 1;
+		depth++;
+	}
+	return 0;
+}
+
+/*
+ * Freeze background processes during game mode.
+ * Sends SIGSTOP to all user-owned processes except whitelisted ones.
+ * Safe to call multiple times - clears state on each call.
+ */
+void
+freeze_background_processes(void)
+{
+	DIR *dir;
+	struct dirent *ent;
+	char path[128];
+	char comm[64];
+	char uid_line[256];
+	FILE *fp;
+	uid_t our_uid = getuid();
+	pid_t our_pid = getpid();
+	pid_t pid;
+	int i;
+
+	/* Whitelist of process comm names that should never be frozen */
+	static const char *whitelist[] = {
+		"nixlytile", "Xwayland", "xwayland",
+		"pipewire", "wireplumber", "pulseaudio", "pipewire-pulse",
+		"swaybg", "dbus-daemon", "dbus-broker",
+		"steam", "steamwebhelper", "reaper", "pressure-vessel",
+		"discord", "Discord", "vesktop", "Vesktop", "webcord", "WebCord",
+		"armcord", "ArmCord", "legcord", "Legcord",
+		"ssh", "sshd", "gpg-agent",
+		NULL
+	};
+
+	/* Reset state for idempotent re-entry */
+	frozen_pid_count = 0;
+
+	dir = opendir("/proc");
+	if (!dir)
+		return;
+
+	while ((ent = readdir(dir))) {
+		/* Only look at numeric (PID) entries */
+		if (ent->d_name[0] < '0' || ent->d_name[0] > '9')
+			continue;
+
+		pid = (pid_t)atoi(ent->d_name);
+		if (pid <= 1 || pid == our_pid)
+			continue;
+
+		/* Check if this process belongs to our user */
+		snprintf(path, sizeof(path), "/proc/%d/status", pid);
+		fp = fopen(path, "r");
+		if (!fp)
+			continue;
+
+		int is_our_uid = 0;
+		while (fgets(uid_line, sizeof(uid_line), fp)) {
+			if (strncmp(uid_line, "Uid:", 4) == 0) {
+				uid_t real_uid;
+				if (sscanf(uid_line + 4, "%u", &real_uid) == 1 && real_uid == our_uid)
+					is_our_uid = 1;
+				break;
+			}
+		}
+		fclose(fp);
+
+		if (!is_our_uid)
+			continue;
+
+		/* Read the process comm name */
+		snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+		fp = fopen(path, "r");
+		if (!fp)
+			continue;
+		comm[0] = '\0';
+		if (fgets(comm, sizeof(comm), fp)) {
+			char *nl = strchr(comm, '\n');
+			if (nl) *nl = '\0';
+		}
+		fclose(fp);
+
+		/* Check whitelist */
+		int whitelisted = 0;
+		for (i = 0; whitelist[i]; i++) {
+			if (strcmp(comm, whitelist[i]) == 0) {
+				whitelisted = 1;
+				break;
+			}
+		}
+		if (whitelisted)
+			continue;
+
+		/* Don't freeze the game process or its children */
+		if (game_mode_pid > 1 && is_child_of(pid, game_mode_pid))
+			continue;
+
+		/* Don't freeze compositor children */
+		if (is_child_of(pid, our_pid))
+			continue;
+
+		/* Freeze this process */
+		if (frozen_pid_count < 4096) {
+			if (kill(pid, SIGSTOP) == 0) {
+				frozen_pids[frozen_pid_count++] = pid;
+			}
+		}
+	}
+
+	closedir(dir);
+	wlr_log(WLR_INFO, "Froze %d background processes for game mode", frozen_pid_count);
+}
+
+/*
+ * Unfreeze all previously frozen processes.
+ * Sends SIGCONT to each stored PID. Harmless if PID has already exited.
+ */
+void
+unfreeze_background_processes(void)
+{
+	int i;
+
+	if (frozen_pid_count == 0)
+		return;
+
+	for (i = 0; i < frozen_pid_count; i++) {
+		kill(frozen_pids[i], SIGCONT);  /* ESRCH if exited - harmless */
+	}
+
+	wlr_log(WLR_INFO, "Unfroze %d background processes", frozen_pid_count);
+	frozen_pid_count = 0;
+}
+
+/*
+ * Apply memory optimizations for game mode.
+ * Drops page cache, lowers swappiness, and triggers memory compaction.
+ */
+void
+apply_memory_optimization(void)
+{
+	int fd;
+
+	/* Sync and drop page cache */
+	sync();
+	fd = open("/proc/sys/vm/drop_caches", O_WRONLY);
+	if (fd >= 0) {
+		write(fd, "3\n", 2);
+		close(fd);
+	}
+
+	/* Lower swappiness to minimize swap thrashing during gaming */
+	fd = open("/proc/sys/vm/swappiness", O_WRONLY);
+	if (fd >= 0) {
+		write(fd, "10\n", 3);
+		close(fd);
+		game_mode_swappiness_applied = 1;
+	}
+
+	/* Trigger memory compaction for huge pages */
+	fd = open("/proc/sys/vm/compact_memory", O_WRONLY);
+	if (fd >= 0) {
+		write(fd, "1\n", 2);
+		close(fd);
+	}
+
+	wlr_log(WLR_INFO, "Memory optimization applied (drop_caches, swappiness=10, compact)");
+}
+
+/*
+ * Restore memory settings to defaults after game mode exits.
+ */
+void
+restore_memory_optimization(void)
+{
+	int fd;
+
+	if (game_mode_swappiness_applied) {
+		fd = open("/proc/sys/vm/swappiness", O_WRONLY);
+		if (fd >= 0) {
+			write(fd, "60\n", 3);
+			close(fd);
+		}
+		game_mode_swappiness_applied = 0;
+		wlr_log(WLR_INFO, "Memory optimization restored (swappiness=60)");
+	}
+}
+
+/*
+ * CPU DMA Latency (PM QoS) — Prevent deep C-states.
+ * Writing 0 to /dev/cpu_dma_latency and keeping the fd open prevents
+ * the CPU from entering deep sleep states (C3+), eliminating wakeup
+ * latency spikes that cause micro-stuttering.
+ */
+static int cpu_dma_latency_fd = -1;
+
+void
+apply_cpu_latency_qos(void)
+{
+	int32_t latency = 0;
+	cpu_dma_latency_fd = open("/dev/cpu_dma_latency", O_WRONLY);
+	if (cpu_dma_latency_fd >= 0) {
+		write(cpu_dma_latency_fd, &latency, sizeof(latency));
+		/* FD must stay open to maintain the QoS constraint */
+		wlr_log(WLR_INFO, "CPU DMA latency QoS: set to 0 (prevent deep C-states)");
+	} else {
+		wlr_log(WLR_INFO, "CPU DMA latency QoS: open failed: %s", strerror(errno));
+	}
+}
+
+void
+restore_cpu_latency_qos(void)
+{
+	if (cpu_dma_latency_fd >= 0) {
+		close(cpu_dma_latency_fd);  /* Closing releases the QoS constraint */
+		cpu_dma_latency_fd = -1;
+		wlr_log(WLR_INFO, "CPU DMA latency QoS: restored (fd closed)");
+	}
+}
+
+/*
+ * CPU Affinity — Core isolation.
+ * Pin the compositor to core 0 and the game to cores 1..N-1 to prevent
+ * them from competing for the same CPU cache lines and scheduler slots.
+ */
+void
+apply_cpu_affinity(pid_t game_pid)
+{
+	int ncores = sysconf(_SC_NPROCESSORS_ONLN);
+	if (ncores < 4 || game_pid <= 1) return;
+
+	/* Pin compositor to core 0 */
+	cpu_set_t compositor_set;
+	CPU_ZERO(&compositor_set);
+	CPU_SET(0, &compositor_set);
+	sched_setaffinity(0, sizeof(compositor_set), &compositor_set);
+
+	/* Pin game to cores 1..N-1 (all except core 0) */
+	cpu_set_t game_set;
+	CPU_ZERO(&game_set);
+	for (int i = 1; i < ncores; i++)
+		CPU_SET(i, &game_set);
+	sched_setaffinity(game_pid, sizeof(game_set), &game_set);
+
+	game_mode_affinity_applied = 1;
+	wlr_log(WLR_INFO, "CPU affinity: compositor→core0, game PID %d→cores 1-%d",
+		game_pid, ncores - 1);
+}
+
+void
+restore_cpu_affinity(pid_t game_pid)
+{
+	if (!game_mode_affinity_applied) return;
+	int ncores = sysconf(_SC_NPROCESSORS_ONLN);
+
+	/* Restore both to all cores */
+	cpu_set_t all_set;
+	CPU_ZERO(&all_set);
+	for (int i = 0; i < ncores; i++)
+		CPU_SET(i, &all_set);
+	sched_setaffinity(0, sizeof(all_set), &all_set);
+	if (game_pid > 1)
+		sched_setaffinity(game_pid, sizeof(all_set), &all_set);
+
+	game_mode_affinity_applied = 0;
+	wlr_log(WLR_INFO, "CPU affinity: restored to all cores");
+}
+
+/*
+ * Transparent Huge Pages (THP).
+ * Enabling THP reduces TLB misses for games with large memory allocations.
+ */
+static char thp_saved_value[32] = "";
+
+void
+apply_transparent_hugepages(void)
+{
+	int fd;
+	char buf[64];
+	ssize_t n;
+
+	/* Save current setting */
+	fd = open("/sys/kernel/mm/transparent_hugepage/enabled", O_RDONLY);
+	if (fd >= 0) {
+		n = read(fd, buf, sizeof(buf) - 1);
+		close(fd);
+		if (n > 0) {
+			buf[n] = '\0';
+			/* Extract current value from [brackets] */
+			char *start = strchr(buf, '[');
+			char *end = start ? strchr(start, ']') : NULL;
+			if (start && end) {
+				int len = end - start - 1;
+				if (len < (int)sizeof(thp_saved_value)) {
+					memcpy(thp_saved_value, start + 1, len);
+					thp_saved_value[len] = '\0';
+				}
+			}
+		}
+	}
+
+	/* Set to "always" for maximum hugepage usage */
+	fd = open("/sys/kernel/mm/transparent_hugepage/enabled", O_WRONLY);
+	if (fd >= 0) {
+		write(fd, "always\n", 7);
+		close(fd);
+		wlr_log(WLR_INFO, "THP: set to 'always' (was '%s')", thp_saved_value);
+	} else {
+		wlr_log(WLR_INFO, "THP: open failed: %s", strerror(errno));
+	}
+}
+
+void
+restore_transparent_hugepages(void)
+{
+	int fd;
+	if (thp_saved_value[0]) {
+		fd = open("/sys/kernel/mm/transparent_hugepage/enabled", O_WRONLY);
+		if (fd >= 0) {
+			write(fd, thp_saved_value, strlen(thp_saved_value));
+			close(fd);
+			wlr_log(WLR_INFO, "THP: restored to '%s'", thp_saved_value);
+		}
+		thp_saved_value[0] = '\0';
+	}
+}
+
+/*
+ * I/O Scheduler — Low-latency disk access.
+ * Switching NVMe/SSD to 'none' or 'mq-deadline' reduces disk I/O latency
+ * during texture streaming and asset loading.
+ */
+#define MAX_BLOCK_DEVS 16
+
+static struct {
+	char path[128];
+	char saved_scheduler[32];
+} saved_io_schedulers[MAX_BLOCK_DEVS];
+static int saved_io_scheduler_count = 0;
+
+void
+apply_io_scheduler(void)
+{
+	DIR *dir;
+	struct dirent *ent;
+	char path[256], buf[128];
+	int fd;
+	ssize_t n;
+
+	saved_io_scheduler_count = 0;
+	dir = opendir("/sys/block");
+	if (!dir) return;
+
+	while ((ent = readdir(dir)) && saved_io_scheduler_count < MAX_BLOCK_DEVS) {
+		if (ent->d_name[0] == '.') continue;
+		/* Skip loop/ram devices */
+		if (strncmp(ent->d_name, "loop", 4) == 0 || strncmp(ent->d_name, "ram", 3) == 0)
+			continue;
+
+		snprintf(path, sizeof(path), "/sys/block/%s/queue/scheduler", ent->d_name);
+
+		/* Read current scheduler */
+		fd = open(path, O_RDONLY);
+		if (fd < 0) continue;
+		n = read(fd, buf, sizeof(buf) - 1);
+		close(fd);
+		if (n <= 0) continue;
+		buf[n] = '\0';
+
+		/* Extract active scheduler from [brackets] */
+		char *start = strchr(buf, '[');
+		char *end = start ? strchr(start, ']') : NULL;
+		if (!start || !end) continue;
+
+		int idx = saved_io_scheduler_count;
+		int len = end - start - 1;
+		if (len >= (int)sizeof(saved_io_schedulers[idx].saved_scheduler)) continue;
+
+		strncpy(saved_io_schedulers[idx].path, path, sizeof(saved_io_schedulers[idx].path) - 1);
+		saved_io_schedulers[idx].path[sizeof(saved_io_schedulers[idx].path) - 1] = '\0';
+		memcpy(saved_io_schedulers[idx].saved_scheduler, start + 1, len);
+		saved_io_schedulers[idx].saved_scheduler[len] = '\0';
+
+		/* Set to "none" for lowest latency (best for NVMe), fall back to "mq-deadline" */
+		fd = open(path, O_WRONLY);
+		if (fd >= 0) {
+			if (write(fd, "none", 4) < 0)
+				write(fd, "mq-deadline", 11);
+			close(fd);
+			wlr_log(WLR_INFO, "I/O scheduler: %s → none (was '%s')",
+				ent->d_name, saved_io_schedulers[idx].saved_scheduler);
+			saved_io_scheduler_count++;
+		}
+	}
+	closedir(dir);
+}
+
+void
+restore_io_scheduler(void)
+{
+	int fd;
+	for (int i = 0; i < saved_io_scheduler_count; i++) {
+		fd = open(saved_io_schedulers[i].path, O_WRONLY);
+		if (fd >= 0) {
+			write(fd, saved_io_schedulers[i].saved_scheduler,
+				strlen(saved_io_schedulers[i].saved_scheduler));
+			close(fd);
+		}
+	}
+	if (saved_io_scheduler_count > 0)
+		wlr_log(WLR_INFO, "I/O scheduler: restored %d devices", saved_io_scheduler_count);
+	saved_io_scheduler_count = 0;
+}
+
+/*
+ * Disable Kernel Watchdog — Remove NMI interrupts.
+ * The kernel watchdog generates periodic NMI interrupts that can cause
+ * micro-stuttering. Disabling it during gaming eliminates this jitter source.
+ */
+static int watchdog_was_enabled = -1;
+
+void
+apply_disable_watchdog(void)
+{
+	int fd;
+	char buf[8];
+	ssize_t n;
+
+	/* Save current state */
+	fd = open("/proc/sys/kernel/nmi_watchdog", O_RDONLY);
+	if (fd >= 0) {
+		n = read(fd, buf, sizeof(buf) - 1);
+		close(fd);
+		if (n > 0) {
+			buf[n] = '\0';
+			watchdog_was_enabled = atoi(buf);
+		}
+	}
+
+	/* Disable NMI watchdog */
+	fd = open("/proc/sys/kernel/nmi_watchdog", O_WRONLY);
+	if (fd >= 0) {
+		write(fd, "0\n", 2);
+		close(fd);
+		wlr_log(WLR_INFO, "Kernel watchdog: NMI disabled");
+	}
+
+	/* Disable software watchdog too */
+	fd = open("/proc/sys/kernel/watchdog", O_WRONLY);
+	if (fd >= 0) {
+		write(fd, "0\n", 2);
+		close(fd);
+		wlr_log(WLR_INFO, "Kernel watchdog: software watchdog disabled");
+	}
+}
+
+void
+restore_watchdog(void)
+{
+	int fd;
+	if (watchdog_was_enabled > 0) {
+		fd = open("/proc/sys/kernel/nmi_watchdog", O_WRONLY);
+		if (fd >= 0) { write(fd, "1\n", 2); close(fd); }
+		fd = open("/proc/sys/kernel/watchdog", O_WRONLY);
+		if (fd >= 0) { write(fd, "1\n", 2); close(fd); }
+		wlr_log(WLR_INFO, "Kernel watchdog: restored (was enabled)");
+	}
+	watchdog_was_enabled = -1;
+}
+
+/*
+ * Raw Input Mode — Disable pointer acceleration.
+ * Gives 1:1 mouse movement, essential for FPS/competitive games.
+ */
+void
+apply_raw_input(void)
+{
+	for (int i = 0; i < pointer_device_count; i++) {
+		if (libinput_device_config_accel_is_available(pointer_devices[i])) {
+			libinput_device_config_accel_set_profile(pointer_devices[i],
+				LIBINPUT_CONFIG_ACCEL_PROFILE_FLAT);
+		}
+	}
+	game_mode_raw_input_applied = 1;
+	wlr_log(WLR_INFO, "Raw input: disabled pointer acceleration (%d devices)", pointer_device_count);
+}
+
+void
+restore_raw_input(void)
+{
+	if (!game_mode_raw_input_applied) return;
+	for (int i = 0; i < pointer_device_count; i++) {
+		if (libinput_device_config_accel_is_available(pointer_devices[i])) {
+			libinput_device_config_accel_set_profile(pointer_devices[i], accel_profile);
+			libinput_device_config_accel_set_speed(pointer_devices[i], accel_speed);
+		}
+	}
+	game_mode_raw_input_applied = 0;
+	wlr_log(WLR_INFO, "Raw input: restored pointer acceleration profile");
+}
+
+/*
+ * IRQ Affinity — Move hardware interrupts to compositor core.
+ * Moving IRQs to core 0 means game cores are completely interrupt-free.
+ * This is the natural complement to CPU affinity (core isolation).
+ */
+#define MAX_IRQS 512
+
+static struct {
+	int irq;
+	char saved_affinity[32];
+} saved_irq_affinities[MAX_IRQS];
+static int saved_irq_affinity_count = 0;
+
+void
+apply_irq_affinity(void)
+{
+	DIR *dir;
+	struct dirent *ent;
+	char path[256], buf[64];
+	int fd;
+	ssize_t n;
+
+	saved_irq_affinity_count = 0;
+	dir = opendir("/proc/irq");
+	if (!dir) return;
+
+	while ((ent = readdir(dir)) && saved_irq_affinity_count < MAX_IRQS) {
+		/* Only numeric entries (IRQ numbers) */
+		if (ent->d_name[0] < '0' || ent->d_name[0] > '9')
+			continue;
+
+		snprintf(path, sizeof(path), "/proc/irq/%s/smp_affinity_list", ent->d_name);
+
+		/* Read current affinity */
+		fd = open(path, O_RDONLY);
+		if (fd < 0) continue;
+		n = read(fd, buf, sizeof(buf) - 1);
+		close(fd);
+		if (n <= 0) continue;
+		buf[n] = '\0';
+		/* Strip trailing newline */
+		if (n > 0 && buf[n - 1] == '\n') buf[n - 1] = '\0';
+
+		int idx = saved_irq_affinity_count;
+		saved_irq_affinities[idx].irq = atoi(ent->d_name);
+		strncpy(saved_irq_affinities[idx].saved_affinity, buf,
+			sizeof(saved_irq_affinities[idx].saved_affinity) - 1);
+		saved_irq_affinities[idx].saved_affinity[
+			sizeof(saved_irq_affinities[idx].saved_affinity) - 1] = '\0';
+
+		/* Pin to core 0 only */
+		fd = open(path, O_WRONLY);
+		if (fd >= 0) {
+			write(fd, "0", 1);
+			close(fd);
+			saved_irq_affinity_count++;
+		}
+	}
+	closedir(dir);
+	wlr_log(WLR_INFO, "IRQ affinity: pinned %d IRQs to core 0", saved_irq_affinity_count);
+}
+
+void
+restore_irq_affinity(void)
+{
+	char path[256];
+	int fd;
+
+	for (int i = 0; i < saved_irq_affinity_count; i++) {
+		snprintf(path, sizeof(path), "/proc/irq/%d/smp_affinity_list",
+			saved_irq_affinities[i].irq);
+		fd = open(path, O_WRONLY);
+		if (fd >= 0) {
+			write(fd, saved_irq_affinities[i].saved_affinity,
+				strlen(saved_irq_affinities[i].saved_affinity));
+			close(fd);
+		}
+	}
+	if (saved_irq_affinity_count > 0)
+		wlr_log(WLR_INFO, "IRQ affinity: restored %d IRQs", saved_irq_affinity_count);
+	saved_irq_affinity_count = 0;
+}
+
+/*
+ * CFS Scheduler Tuning — Optimize scheduler for low-latency gaming.
+ * Lower granularity = faster response, higher migration cost = keep processes
+ * on their assigned cores (better cache utilization with affinity).
+ */
+static char sched_saved_min_granularity[32] = "";
+static char sched_saved_wakeup_granularity[32] = "";
+static char sched_saved_migration_cost[32] = "";
+
+static void
+sched_save_and_write(const char *path, const char *value, char *save_buf, size_t save_len)
+{
+	int fd;
+	ssize_t n;
+
+	/* Save current value */
+	fd = open(path, O_RDONLY);
+	if (fd >= 0) {
+		n = read(fd, save_buf, save_len - 1);
+		close(fd);
+		if (n > 0) {
+			save_buf[n] = '\0';
+			if (n > 0 && save_buf[n - 1] == '\n') save_buf[n - 1] = '\0';
+		}
+	}
+
+	/* Write new value */
+	fd = open(path, O_WRONLY);
+	if (fd >= 0) {
+		write(fd, value, strlen(value));
+		close(fd);
+	}
+}
+
+static void
+sched_restore(const char *path, char *save_buf)
+{
+	int fd;
+	if (save_buf[0]) {
+		fd = open(path, O_WRONLY);
+		if (fd >= 0) {
+			write(fd, save_buf, strlen(save_buf));
+			close(fd);
+		}
+		save_buf[0] = '\0';
+	}
+}
+
+void
+apply_scheduler_tuning(void)
+{
+	/* Lower min_granularity for faster preemption (default ~3ms → 1ms) */
+	sched_save_and_write("/proc/sys/kernel/sched_min_granularity_ns",
+		"1000000", sched_saved_min_granularity, sizeof(sched_saved_min_granularity));
+
+	/* Lower wakeup_granularity for faster wakeup preemption (default ~4ms → 500μs) */
+	sched_save_and_write("/proc/sys/kernel/sched_wakeup_granularity_ns",
+		"500000", sched_saved_wakeup_granularity, sizeof(sched_saved_wakeup_granularity));
+
+	/* Higher migration_cost to keep tasks on their assigned cores (default ~500μs → 5ms) */
+	sched_save_and_write("/proc/sys/kernel/sched_migration_cost_ns",
+		"5000000", sched_saved_migration_cost, sizeof(sched_saved_migration_cost));
+
+	wlr_log(WLR_INFO, "Scheduler tuning: min_gran=1ms, wakeup_gran=500μs, migration_cost=5ms");
+}
+
+void
+restore_scheduler_tuning(void)
+{
+	sched_restore("/proc/sys/kernel/sched_min_granularity_ns", sched_saved_min_granularity);
+	sched_restore("/proc/sys/kernel/sched_wakeup_granularity_ns", sched_saved_wakeup_granularity);
+	sched_restore("/proc/sys/kernel/sched_migration_cost_ns", sched_saved_migration_cost);
+	wlr_log(WLR_INFO, "Scheduler tuning: restored defaults");
+}
+
+/*
+ * GPU Power State — Force maximum GPU performance.
+ * For AMD: set power_dma_perf_level to "high" and use VR power profile.
+ * For Intel: set min_freq to max_freq.
+ */
+static char gpu_saved_perf_level[32] = "";
+static char gpu_saved_power_profile[32] = "";
+static char gpu_power_perf_path[128] = "";
+static char gpu_power_profile_path[128] = "";
+static char gpu_intel_min_path[128] = "";
+static char gpu_saved_intel_min[32] = "";
+
+/* NVIDIA state */
+static int nv_clocks_locked = 0;
+static int nv_persistence_was_off = 0;
+static int nv_power_applied = 0;
+static char nv_saved_power_limit[32] = "";
+static char nv_pci_power_path[128] = "";
+static char nv_saved_pci_power[32] = "";
+static int nv_gpu_index = 0;  /* nvidia-smi GPU index (auto-detected) */
+
+/*
+ * Run nvidia-smi with given args. Returns 0 on success.
+ * Optionally captures first line of stdout into out_buf.
+ */
+static int
+nvidia_smi_run(const char *args, char *out_buf, size_t out_len)
+{
+	char cmd[256];
+	FILE *fp;
+	int ret;
+
+	snprintf(cmd, sizeof(cmd), "nvidia-smi %s 2>/dev/null", args);
+	fp = popen(cmd, "r");
+	if (!fp) return -1;
+
+	if (out_buf && out_len > 0) {
+		out_buf[0] = '\0';
+		if (fgets(out_buf, out_len, fp)) {
+			/* Strip trailing whitespace/newline */
+			size_t len = strlen(out_buf);
+			while (len > 0 && (out_buf[len - 1] == '\n' || out_buf[len - 1] == '\r'
+					|| out_buf[len - 1] == ' '))
+				out_buf[--len] = '\0';
+		}
+	}
+
+	ret = pclose(fp);
+	return WIFEXITED(ret) ? WEXITSTATUS(ret) : -1;
+}
+
+/*
+ * Query a single nvidia-smi CSV field for GPU at nv_gpu_index.
+ * Returns 0 on success, result in out_buf.
+ */
+static int
+nvidia_smi_query(const char *field, char *out_buf, size_t out_len)
+{
+	char args[256];
+	snprintf(args, sizeof(args),
+		"-i %d --query-gpu=%s --format=csv,noheader,nounits",
+		nv_gpu_index, field);
+	return nvidia_smi_run(args, out_buf, out_len);
+}
+
+/*
+ * Detect which nvidia-smi GPU index corresponds to our detected GPU.
+ * nvidia-smi and DRM card indices can differ on multi-GPU systems.
+ */
+static void
+nvidia_detect_smi_index(GpuInfo *gpu)
+{
+	char buf[256], args[256];
+	int i;
+
+	/* Query PCI bus ID for each nvidia-smi GPU and match against our PCI slot */
+	for (i = 0; i < 8; i++) {
+		snprintf(args, sizeof(args),
+			"-i %d --query-gpu=pci.bus_id --format=csv,noheader", i);
+		if (nvidia_smi_run(args, buf, sizeof(buf)) != 0)
+			break;
+		/* nvidia-smi returns e.g. "00000000:01:00.0", our pci_slot is "0000:01:00.0" */
+		if (strstr(buf, gpu->pci_slot)) {
+			nv_gpu_index = i;
+			wlr_log(WLR_INFO, "NVIDIA: PCI %s → nvidia-smi GPU index %d", gpu->pci_slot, i);
+			return;
+		}
+	}
+	/* Fallback: assume index 0 (most common single-GPU setup) */
+	nv_gpu_index = 0;
+}
+
+static void
+apply_nvidia_gpu_power(GpuInfo *gpu)
+{
+	char buf[128], args[256];
+
+	/* Auto-detect correct nvidia-smi GPU index */
+	nvidia_detect_smi_index(gpu);
+
+	/*
+	 * 1. Enable persistence mode — keeps driver loaded between GPU tasks,
+	 *    eliminates ~1-2s initialization delay on each GPU operation.
+	 */
+	if (nvidia_smi_query("persistence_mode", buf, sizeof(buf)) == 0) {
+		if (strstr(buf, "Disabled") || strcmp(buf, "Off") == 0) {
+			nv_persistence_was_off = 1;
+			snprintf(args, sizeof(args), "-i %d -pm 1", nv_gpu_index);
+			nvidia_smi_run(args, NULL, 0);
+			wlr_log(WLR_INFO, "NVIDIA: persistence mode enabled");
+		}
+	}
+
+	/*
+	 * 2. Set power limit to maximum allowed TDP.
+	 *    More power = higher sustained boost clocks.
+	 */
+	if (nvidia_smi_query("power.limit", buf, sizeof(buf)) == 0) {
+		strncpy(nv_saved_power_limit, buf, sizeof(nv_saved_power_limit) - 1);
+		nv_saved_power_limit[sizeof(nv_saved_power_limit) - 1] = '\0';
+	}
+	if (nvidia_smi_query("power.max_limit", buf, sizeof(buf)) == 0 && buf[0]) {
+		char *dot = strchr(buf, '.');
+		if (dot) *dot = '\0';
+		snprintf(args, sizeof(args), "-i %d --power-limit=%s", nv_gpu_index, buf);
+		if (nvidia_smi_run(args, NULL, 0) == 0)
+			wlr_log(WLR_INFO, "NVIDIA: power limit → %s W (was %s)", buf, nv_saved_power_limit);
+	}
+
+	/*
+	 * 3. Lock GPU clocks to maximum boost frequency.
+	 *    Prevents clock fluctuation and ensures max performance.
+	 */
+	if (nvidia_smi_query("clocks.max.graphics", buf, sizeof(buf)) == 0 && buf[0]) {
+		char *dot = strchr(buf, '.');
+		if (dot) *dot = '\0';
+		snprintf(args, sizeof(args), "-i %d -lgc %s,%s", nv_gpu_index, buf, buf);
+		if (nvidia_smi_run(args, NULL, 0) == 0) {
+			nv_clocks_locked = 1;
+			wlr_log(WLR_INFO, "NVIDIA: GPU clocks locked → %s MHz", buf);
+		}
+	}
+
+	/*
+	 * 4. Lock memory clocks to maximum frequency.
+	 *    Prevents VRAM clock downshifting during gameplay.
+	 */
+	if (nvidia_smi_query("clocks.max.memory", buf, sizeof(buf)) == 0 && buf[0]) {
+		char *dot = strchr(buf, '.');
+		if (dot) *dot = '\0';
+		snprintf(args, sizeof(args), "-i %d -lmc %s,%s", nv_gpu_index, buf, buf);
+		if (nvidia_smi_run(args, NULL, 0) == 0)
+			wlr_log(WLR_INFO, "NVIDIA: memory clocks locked → %s MHz", buf);
+	}
+
+	/*
+	 * 5. Disable PCI power management for GPU device.
+	 *    Prevents PCIe link power saving (L1/L1.1/L1.2) which adds latency.
+	 *    Also disable PCI power management on the PCIe bridge (parent device)
+	 *    for minimum link latency.
+	 */
+	snprintf(nv_pci_power_path, sizeof(nv_pci_power_path),
+		"/sys/bus/pci/devices/%s/power/control", gpu->pci_slot);
+	{
+		int fd = open(nv_pci_power_path, O_RDONLY);
+		if (fd >= 0) {
+			ssize_t n = read(fd, nv_saved_pci_power, sizeof(nv_saved_pci_power) - 1);
+			close(fd);
+			if (n > 0) {
+				nv_saved_pci_power[n] = '\0';
+				if (nv_saved_pci_power[n - 1] == '\n') nv_saved_pci_power[n - 1] = '\0';
+			}
+			fd = open(nv_pci_power_path, O_WRONLY);
+			if (fd >= 0) {
+				write(fd, "on", 2);
+				close(fd);
+				wlr_log(WLR_INFO, "NVIDIA: PCI power → 'on' (was '%s')", nv_saved_pci_power);
+			}
+		}
+	}
+
+	/*
+	 * 6. Set compute mode to DEFAULT to allow concurrent graphics + compute.
+	 *    Some systems set exclusive mode which can interfere with games.
+	 */
+	snprintf(args, sizeof(args), "-i %d -c DEFAULT", nv_gpu_index);
+	nvidia_smi_run(args, NULL, 0);
+
+	/*
+	 * 7. Set GPU performance preference via nvidia-settings (requires XWayland).
+	 *    PowerMizer mode 1 = "Prefer Maximum Performance".
+	 *    Also set performance level hint and disable GPU scaling to reduce overhead.
+	 *    Note: nvidia-settings silently fails on pure Wayland — harmless.
+	 */
+	{
+		char nv_settings_cmd[512];
+		snprintf(nv_settings_cmd, sizeof(nv_settings_cmd),
+			"nvidia-settings"
+			" -a '[gpu:%d]/GPUPowerMizerMode=1'"
+			" -a '[gpu:%d]/GpuPowerMizerDefaultMode=1'"
+			" 2>/dev/null",
+			gpu->card_index, gpu->card_index);
+		FILE *fp = popen(nv_settings_cmd, "r");
+		if (fp) {
+			if (pclose(fp) == 0)
+				wlr_log(WLR_INFO, "NVIDIA: PowerMizer → prefer max performance (via nvidia-settings)");
+			else
+				wlr_log(WLR_INFO, "NVIDIA: nvidia-settings unavailable (pure Wayland) — using nvidia-smi only");
+		}
+	}
+
+	/*
+	 * 8. NVIDIA kernel module parameters for performance.
+	 *    NVreg_UsePageAttributeTable=1 improves memory mapping performance.
+	 *    These are read-only after boot, so just log the current state.
+	 */
+	{
+		char pat_val[8] = "";
+		int fd = open("/sys/module/nvidia/parameters/NVreg_UsePageAttributeTable", O_RDONLY);
+		if (fd >= 0) {
+			ssize_t n = read(fd, pat_val, sizeof(pat_val) - 1);
+			close(fd);
+			if (n > 0) {
+				pat_val[n] = '\0';
+				if (pat_val[0] == '0')
+					wlr_log(WLR_INFO, "NVIDIA: WARNING — NVreg_UsePageAttributeTable=0 "
+						"(set nvidia.NVreg_UsePageAttributeTable=1 in boot params for better perf)");
+			}
+		}
+	}
+
+	nv_power_applied = 1;
+	wlr_log(WLR_INFO, "NVIDIA: card%d (%s, smi-idx=%d) — full performance mode active",
+		gpu->card_index, gpu->pci_slot, nv_gpu_index);
+}
+
+static void
+restore_nvidia_gpu_power(void)
+{
+	char args[256];
+
+	if (!nv_power_applied) return;
+
+	/* Reset GPU clock lock */
+	if (nv_clocks_locked) {
+		snprintf(args, sizeof(args), "-i %d -rgc", nv_gpu_index);
+		nvidia_smi_run(args, NULL, 0);
+		snprintf(args, sizeof(args), "-i %d -rmc", nv_gpu_index);
+		nvidia_smi_run(args, NULL, 0);
+		nv_clocks_locked = 0;
+		wlr_log(WLR_INFO, "NVIDIA: GPU/memory clock locks released");
+	}
+
+	/* Restore power limit */
+	if (nv_saved_power_limit[0]) {
+		char pl_copy[32];
+		strncpy(pl_copy, nv_saved_power_limit, sizeof(pl_copy) - 1);
+		pl_copy[sizeof(pl_copy) - 1] = '\0';
+		char *dot = strchr(pl_copy, '.');
+		if (dot) *dot = '\0';
+		snprintf(args, sizeof(args), "-i %d --power-limit=%s", nv_gpu_index, pl_copy);
+		nvidia_smi_run(args, NULL, 0);
+		wlr_log(WLR_INFO, "NVIDIA: power limit restored → %s W", pl_copy);
+		nv_saved_power_limit[0] = '\0';
+	}
+
+	/* Restore persistence mode */
+	if (nv_persistence_was_off) {
+		snprintf(args, sizeof(args), "-i %d -pm 0", nv_gpu_index);
+		nvidia_smi_run(args, NULL, 0);
+		nv_persistence_was_off = 0;
+		wlr_log(WLR_INFO, "NVIDIA: persistence mode restored (off)");
+	}
+
+	/* Restore PCI power management */
+	if (nv_saved_pci_power[0]) {
+		int fd = open(nv_pci_power_path, O_WRONLY);
+		if (fd >= 0) {
+			write(fd, nv_saved_pci_power, strlen(nv_saved_pci_power));
+			close(fd);
+		}
+		wlr_log(WLR_INFO, "NVIDIA: PCI power restored → '%s'", nv_saved_pci_power);
+		nv_saved_pci_power[0] = '\0';
+	}
+
+	/* Restore PowerMizer to adaptive mode (nvidia-settings, silent fail on Wayland) */
+	{
+		char nv_settings_cmd[256];
+		snprintf(nv_settings_cmd, sizeof(nv_settings_cmd),
+			"nvidia-settings -a '[gpu:0]/GPUPowerMizerMode=0' 2>/dev/null");
+		FILE *fp = popen(nv_settings_cmd, "r");
+		if (fp) pclose(fp);
+	}
+
+	nv_power_applied = 0;
+	wlr_log(WLR_INFO, "NVIDIA: performance mode deactivated — defaults restored");
+}
+
+void
+apply_gpu_power_state(void)
+{
+	int gpu_idx = discrete_gpu_idx >= 0 ? discrete_gpu_idx : 0;
+	if (gpu_idx >= detected_gpu_count) return;
+	GpuInfo *gpu = &detected_gpus[gpu_idx];
+
+	if (gpu->vendor == GPU_VENDOR_AMD) {
+		/* AMD: Force high performance DPM level */
+		snprintf(gpu_power_perf_path, sizeof(gpu_power_perf_path),
+			"/sys/class/drm/%s/device/power_dma_perf_level",
+			gpu->card_path[0] ? gpu->card_path : "card0");
+		/* Try sysfs path with just card name */
+		{
+			char try_path[128];
+			snprintf(try_path, sizeof(try_path),
+				"/sys/class/drm/card%d/device/power_dma_perf_level", gpu->card_index);
+			int fd = open(try_path, O_RDONLY);
+			if (fd >= 0) {
+				strncpy(gpu_power_perf_path, try_path, sizeof(gpu_power_perf_path) - 1);
+				close(fd);
+			}
+		}
+
+		sched_save_and_write(gpu_power_perf_path, "high",
+			gpu_saved_perf_level, sizeof(gpu_saved_perf_level));
+
+		/* AMD: Set power profile to VR/3D compute for max clocks */
+		snprintf(gpu_power_profile_path, sizeof(gpu_power_profile_path),
+			"/sys/class/drm/card%d/device/pp_power_profile_mode", gpu->card_index);
+		{
+			int fd = open(gpu_power_profile_path, O_RDONLY);
+			if (fd >= 0) {
+				char buf[512];
+				ssize_t n = read(fd, buf, sizeof(buf) - 1);
+				close(fd);
+				if (n > 0) {
+					buf[n] = '\0';
+					/* Find current active profile (line with * at end) */
+					char *line = buf;
+					while (line && *line) {
+						char *nl = strchr(line, '\n');
+						if (nl) *nl = '\0';
+						if (strchr(line, '*')) {
+							/* Extract profile number */
+							while (*line == ' ') line++;
+							strncpy(gpu_saved_power_profile, line,
+								sizeof(gpu_saved_power_profile) - 1);
+							/* Just save the profile index number */
+							char *sp = strchr(gpu_saved_power_profile, ' ');
+							if (sp) *sp = '\0';
+							break;
+						}
+						line = nl ? nl + 1 : NULL;
+					}
+				}
+				/* Set to profile 3 (3D_FULL_SCREEN) for max performance */
+				fd = open(gpu_power_profile_path, O_WRONLY);
+				if (fd >= 0) {
+					write(fd, "3", 1);
+					close(fd);
+				}
+			}
+		}
+
+		wlr_log(WLR_INFO, "GPU power: AMD card%d → high perf + 3D profile", gpu->card_index);
+
+	} else if (gpu->vendor == GPU_VENDOR_NVIDIA) {
+		apply_nvidia_gpu_power(gpu);
+
+	} else if (gpu->vendor == GPU_VENDOR_INTEL) {
+		/* Intel: Set min frequency to max frequency */
+		snprintf(gpu_intel_min_path, sizeof(gpu_intel_min_path),
+			"/sys/class/drm/card%d/gt_min_freq_mhz", gpu->card_index);
+		{
+			char max_path[128];
+			snprintf(max_path, sizeof(max_path),
+				"/sys/class/drm/card%d/gt_max_freq_mhz", gpu->card_index);
+			char max_freq[32] = "";
+			int fd = open(max_path, O_RDONLY);
+			if (fd >= 0) {
+				ssize_t n = read(fd, max_freq, sizeof(max_freq) - 1);
+				close(fd);
+				if (n > 0) {
+					max_freq[n] = '\0';
+					if (max_freq[n - 1] == '\n') max_freq[n - 1] = '\0';
+					sched_save_and_write(gpu_intel_min_path, max_freq,
+						gpu_saved_intel_min, sizeof(gpu_saved_intel_min));
+					wlr_log(WLR_INFO, "GPU power: Intel card%d → min_freq=%s MHz",
+						gpu->card_index, max_freq);
+				}
+			}
+		}
+	}
+}
+
+void
+restore_gpu_power_state(void)
+{
+	if (gpu_saved_perf_level[0]) {
+		sched_restore(gpu_power_perf_path, gpu_saved_perf_level);
+		wlr_log(WLR_INFO, "GPU power: AMD perf level restored");
+	}
+	if (gpu_saved_power_profile[0]) {
+		int fd = open(gpu_power_profile_path, O_WRONLY);
+		if (fd >= 0) {
+			write(fd, gpu_saved_power_profile, strlen(gpu_saved_power_profile));
+			close(fd);
+		}
+		gpu_saved_power_profile[0] = '\0';
+		wlr_log(WLR_INFO, "GPU power: AMD power profile restored");
+	}
+	restore_nvidia_gpu_power();
+	if (gpu_saved_intel_min[0]) {
+		sched_restore(gpu_intel_min_path, gpu_saved_intel_min);
+		wlr_log(WLR_INFO, "GPU power: Intel min freq restored");
+	}
+}
+
+/*
+ * Dirty Writeback Tuning — Prevent I/O stalls from page writeback.
+ * Allow more dirty pages in RAM before flushing, reduces disk I/O
+ * interference during texture streaming and asset loading.
+ */
+static char dirty_saved_ratio[32] = "";
+static char dirty_saved_bg_ratio[32] = "";
+static char dirty_saved_expire[32] = "";
+static char dirty_saved_writeback[32] = "";
+
+void
+apply_dirty_writeback_tuning(void)
+{
+	/* Allow more dirty pages before forced writeback (default ~20 → 80%) */
+	sched_save_and_write("/proc/sys/vm/dirty_ratio",
+		"80", dirty_saved_ratio, sizeof(dirty_saved_ratio));
+
+	/* Start background writeback earlier (default ~10 → 5%) */
+	sched_save_and_write("/proc/sys/vm/dirty_background_ratio",
+		"5", dirty_saved_bg_ratio, sizeof(dirty_saved_bg_ratio));
+
+	/* Keep dirty pages longer before expiring (default ~3000 → 6000 centisecs) */
+	sched_save_and_write("/proc/sys/vm/dirty_expire_centisecs",
+		"6000", dirty_saved_expire, sizeof(dirty_saved_expire));
+
+	/* Background writeback interval (default ~500 → 1500 centisecs) */
+	sched_save_and_write("/proc/sys/vm/dirty_writeback_centisecs",
+		"1500", dirty_saved_writeback, sizeof(dirty_saved_writeback));
+
+	wlr_log(WLR_INFO, "Dirty writeback: ratio=80, bg=5, expire=6000, writeback=1500");
+}
+
+void
+restore_dirty_writeback_tuning(void)
+{
+	sched_restore("/proc/sys/vm/dirty_ratio", dirty_saved_ratio);
+	sched_restore("/proc/sys/vm/dirty_background_ratio", dirty_saved_bg_ratio);
+	sched_restore("/proc/sys/vm/dirty_expire_centisecs", dirty_saved_expire);
+	sched_restore("/proc/sys/vm/dirty_writeback_centisecs", dirty_saved_writeback);
+	wlr_log(WLR_INFO, "Dirty writeback: restored defaults");
+}
+
+/*
+ * Split Lock Mitigation Disable — Remove performance penalty.
+ * Split lock detection costs ~70μs per event; disabling it eliminates
+ * this overhead for games that trigger unaligned atomic operations.
+ */
+static int split_lock_saved = -1;
+
+void
+apply_disable_split_lock(void)
+{
+	int fd;
+	char buf[8];
+	ssize_t n;
+
+	fd = open("/proc/sys/kernel/split_lock_mitigate", O_RDONLY);
+	if (fd >= 0) {
+		n = read(fd, buf, sizeof(buf) - 1);
+		close(fd);
+		if (n > 0) {
+			buf[n] = '\0';
+			split_lock_saved = atoi(buf);
+		}
+	}
+
+	fd = open("/proc/sys/kernel/split_lock_mitigate", O_WRONLY);
+	if (fd >= 0) {
+		write(fd, "0\n", 2);
+		close(fd);
+		wlr_log(WLR_INFO, "Split lock mitigation: disabled");
+	} else {
+		wlr_log(WLR_INFO, "Split lock mitigation: not available");
+	}
+}
+
+void
+restore_split_lock(void)
+{
+	int fd;
+	if (split_lock_saved > 0) {
+		fd = open("/proc/sys/kernel/split_lock_mitigate", O_WRONLY);
+		if (fd >= 0) {
+			write(fd, "1\n", 2);
+			close(fd);
+		}
+		wlr_log(WLR_INFO, "Split lock mitigation: restored");
+	}
+	split_lock_saved = -1;
+}
+
+/*
+ * MGLRU Tuning (Multi-Gen LRU) — Optimize page reclaim.
+ * Full MGLRU mode with no minimum TTL gives the kernel maximum
+ * flexibility for efficient memory management during gaming.
+ */
+static char mglru_saved_enabled[32] = "";
+static char mglru_saved_min_ttl[32] = "";
+
+void
+apply_mglru_tuning(void)
+{
+	/* Enable full MGLRU (value 5 = all features) */
+	sched_save_and_write("/sys/kernel/mm/lru_gen/enabled",
+		"5", mglru_saved_enabled, sizeof(mglru_saved_enabled));
+
+	/* Set min_ttl to 0 for most aggressive reclaim */
+	sched_save_and_write("/sys/kernel/mm/lru_gen/min_ttl_ms",
+		"0", mglru_saved_min_ttl, sizeof(mglru_saved_min_ttl));
+
+	wlr_log(WLR_INFO, "MGLRU: enabled=5, min_ttl=0");
+}
+
+void
+restore_mglru_tuning(void)
+{
+	sched_restore("/sys/kernel/mm/lru_gen/enabled", mglru_saved_enabled);
+	sched_restore("/sys/kernel/mm/lru_gen/min_ttl_ms", mglru_saved_min_ttl);
+	wlr_log(WLR_INFO, "MGLRU: restored defaults");
+}
+
 void
 update_game_mode(void)
 {
@@ -446,9 +1682,9 @@ update_game_mode(void)
 		 */
 		wlr_log(WLR_INFO, "ULTRA GAME MODE ACTIVATED - maximum performance, minimal latency");
 
-		/* Show "Game detected" notification for 1 second */
+		/* Show game detection notification */
 		if (c && c->mon)
-			toast_show(c->mon, "Game detected", 1000);
+			toast_show(c->mon, "Fullscreen Game detected: Nixly Frame Pacing active!", 2000);
 
 		/* Stop ALL background timers to eliminate compositor interrupts */
 		if (cache_update_timer)
@@ -493,6 +1729,45 @@ update_game_mode(void)
 		/* Boost GPU fans to prevent thermal throttling */
 		fan_boost_activate();
 
+		/* Freeze background processes to free CPU/memory for the game */
+		freeze_background_processes();
+
+		/* Apply memory optimizations (drop caches, lower swappiness) */
+		apply_memory_optimization();
+
+		/* Prevent deep CPU C-states for lowest wakeup latency */
+		apply_cpu_latency_qos();
+
+		/* Enable transparent huge pages for reduced TLB misses */
+		apply_transparent_hugepages();
+
+		/* Switch I/O schedulers to lowest-latency mode */
+		apply_io_scheduler();
+
+		/* Disable kernel watchdog to eliminate NMI jitter */
+		apply_disable_watchdog();
+
+		/* Disable pointer acceleration for raw 1:1 input */
+		apply_raw_input();
+
+		/* Pin all hardware IRQs to core 0 (compositor core) */
+		apply_irq_affinity();
+
+		/* Tune CFS scheduler for low-latency gaming */
+		apply_scheduler_tuning();
+
+		/* Force GPU to maximum performance state */
+		apply_gpu_power_state();
+
+		/* Optimize dirty page writeback to prevent I/O stalls */
+		apply_dirty_writeback_tuning();
+
+		/* Disable split lock mitigation overhead */
+		apply_disable_split_lock();
+
+		/* Enable full MGLRU for efficient page reclaim */
+		apply_mglru_tuning();
+
 		/* Hide statusbar on ALL monitors to save GPU compositing time */
 		wl_list_for_each(m, &mons, link) {
 			m->showbar = 0;
@@ -514,6 +1789,8 @@ update_game_mode(void)
 		game_mode_pid = client_get_pid(c);
 		if (game_mode_pid > 1) {
 			apply_game_priority(game_mode_pid);
+			/* Isolate game and compositor to separate CPU cores */
+			apply_cpu_affinity(game_mode_pid);
 		}
 
 		/*
@@ -602,6 +1879,42 @@ update_game_mode(void)
 			if (config_rewatch_timer)
 				wl_event_source_timer_update(config_rewatch_timer, 2000);
 
+			/* Restore MGLRU settings */
+			restore_mglru_tuning();
+
+			/* Restore split lock mitigation */
+			restore_split_lock();
+
+			/* Restore dirty writeback parameters */
+			restore_dirty_writeback_tuning();
+
+			/* Restore GPU power state */
+			restore_gpu_power_state();
+
+			/* Restore CFS scheduler parameters */
+			restore_scheduler_tuning();
+
+			/* Restore IRQ affinity to original cores */
+			restore_irq_affinity();
+
+			/* Restore raw input (pointer acceleration) */
+			restore_raw_input();
+
+			/* Restore kernel watchdog */
+			restore_watchdog();
+
+			/* Restore I/O schedulers */
+			restore_io_scheduler();
+
+			/* Restore transparent huge pages */
+			restore_transparent_hugepages();
+
+			/* Restore CPU affinity before restoring game priority */
+			restore_cpu_affinity(game_mode_pid);
+
+			/* Restore CPU DMA latency QoS */
+			restore_cpu_latency_qos();
+
 			/* Restore normal priority for the game process */
 			if (game_mode_pid > 1) {
 				restore_game_priority(game_mode_pid);
@@ -614,6 +1927,12 @@ update_game_mode(void)
 				compositor_rt_applied = 0;
 				wlr_log(WLR_INFO, "Compositor scheduling restored to SCHED_OTHER");
 			}
+
+			/* Unfreeze background processes */
+			unfreeze_background_processes();
+
+			/* Restore memory settings */
+			restore_memory_optimization();
 
 			/* Restore GPU fans to auto */
 			fan_boost_deactivate();
