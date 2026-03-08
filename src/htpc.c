@@ -1273,10 +1273,13 @@ apply_nvidia_gpu_power(GpuInfo *gpu)
 	}
 
 	/*
-	 * 5. Disable PCI power management for GPU device.
-	 *    Prevents PCIe link power saving (L1/L1.1/L1.2) which adds latency.
-	 *    Also disable PCI power management on the PCIe bridge (parent device)
-	 *    for minimum link latency.
+	 * 5. Disable PCI runtime power management for GPU and ALL sibling
+	 *    PCI functions (audio, USB-C, etc).  On laptops with Optimus/PRIME,
+	 *    NVIDIA's dynamic power management (D3cold) has a 5-second idle
+	 *    timeout.  If ANY sibling function suspends, the entire GPU can be
+	 *    powered off — causing a sudden drop to integrated graphics.
+	 *    We must set power/control=on AND autosuspend_delay_ms=-1 on every
+	 *    PCI function sharing the same slot to prevent this.
 	 */
 	snprintf(nv_pci_power_path, sizeof(nv_pci_power_path),
 		"/sys/bus/pci/devices/%s/power/control", gpu->pci_slot);
@@ -1294,6 +1297,47 @@ apply_nvidia_gpu_power(GpuInfo *gpu)
 				write(fd, "on", 2);
 				close(fd);
 				wlr_log(WLR_INFO, "NVIDIA: PCI power → 'on' (was '%s')", nv_saved_pci_power);
+			}
+		}
+		/* Set autosuspend_delay_ms = -1 to prevent kernel runtime PM suspend */
+		char autosuspend_path[128];
+		snprintf(autosuspend_path, sizeof(autosuspend_path),
+			"/sys/bus/pci/devices/%s/power/autosuspend_delay_ms", gpu->pci_slot);
+		fd = open(autosuspend_path, O_WRONLY);
+		if (fd >= 0) {
+			write(fd, "-1", 2);
+			close(fd);
+			wlr_log(WLR_INFO, "NVIDIA: autosuspend_delay_ms → -1");
+		}
+	}
+	/*
+	 * Disable runtime PM on ALL sibling PCI functions (e.g. .1 audio, .2 USB).
+	 * The PCI slot is like "0000:01:00.0" — we scan for 0000:01:00.* siblings.
+	 */
+	{
+		char slot_prefix[64];
+		strncpy(slot_prefix, gpu->pci_slot, sizeof(slot_prefix) - 1);
+		slot_prefix[sizeof(slot_prefix) - 1] = '\0';
+		char *dot = strrchr(slot_prefix, '.');
+		if (dot) {
+			*dot = '\0';  /* "0000:01:00" */
+			for (int fn = 1; fn <= 7; fn++) {
+				char sibling_ctrl[128], sibling_auto[128];
+				snprintf(sibling_ctrl, sizeof(sibling_ctrl),
+					"/sys/bus/pci/devices/%s.%d/power/control", slot_prefix, fn);
+				snprintf(sibling_auto, sizeof(sibling_auto),
+					"/sys/bus/pci/devices/%s.%d/power/autosuspend_delay_ms", slot_prefix, fn);
+				int fd = open(sibling_ctrl, O_WRONLY);
+				if (fd >= 0) {
+					write(fd, "on", 2);
+					close(fd);
+					wlr_log(WLR_INFO, "NVIDIA: sibling %s.%d power → 'on'", slot_prefix, fn);
+				}
+				fd = open(sibling_auto, O_WRONLY);
+				if (fd >= 0) {
+					write(fd, "-1", 2);
+					close(fd);
+				}
 			}
 		}
 	}
@@ -1425,19 +1469,8 @@ apply_gpu_power_state(void)
 	if (gpu->vendor == GPU_VENDOR_AMD) {
 		/* AMD: Force high performance DPM level */
 		snprintf(gpu_power_perf_path, sizeof(gpu_power_perf_path),
-			"/sys/class/drm/%s/device/power_dma_perf_level",
-			gpu->card_path[0] ? gpu->card_path : "card0");
-		/* Try sysfs path with just card name */
-		{
-			char try_path[128];
-			snprintf(try_path, sizeof(try_path),
-				"/sys/class/drm/card%d/device/power_dma_perf_level", gpu->card_index);
-			int fd = open(try_path, O_RDONLY);
-			if (fd >= 0) {
-				strncpy(gpu_power_perf_path, try_path, sizeof(gpu_power_perf_path) - 1);
-				close(fd);
-			}
-		}
+			"/sys/class/drm/card%d/device/power_dpm_force_performance_level",
+			gpu->card_index);
 
 		sched_save_and_write(gpu_power_perf_path, "high",
 			gpu_saved_perf_level, sizeof(gpu_saved_perf_level));
@@ -1727,9 +1760,11 @@ update_game_mode(void)
 		 */
 		wlr_log(WLR_INFO, "ULTRA GAME MODE ACTIVATED - maximum performance, minimal latency");
 
-		/* Show game detection notification */
-		if (c && c->mon)
-			toast_show(c->mon, "Fullscreen Game detected: dGPU + Frame Pacing active!", 3000);
+		/*
+		 * Get game PID FIRST — before freeze_background_processes()
+		 * so the game and its children are excluded from SIGSTOP.
+		 */
+		game_mode_pid = client_get_pid(c);
 
 		/* Stop ALL background timers to eliminate compositor interrupts */
 		if (cache_update_timer)
@@ -1833,7 +1868,6 @@ update_game_mode(void)
 		 * Apply high-priority scheduling to the game process.
 		 * This gives the game more CPU time and faster I/O access.
 		 */
-		game_mode_pid = client_get_pid(c);
 		if (game_mode_pid > 1) {
 			apply_game_priority(game_mode_pid);
 			/* Isolate game and compositor to separate CPU cores */
@@ -1854,6 +1888,15 @@ update_game_mode(void)
 				wlr_log(WLR_INFO, "Compositor RT priority failed: %s", strerror(errno));
 			}
 		}
+
+		/*
+		 * Show game detection notification AFTER all blocking operations
+		 * (nvidia-smi, sysfs writes, process freezing, etc).  If shown
+		 * before, the 3-second toast timer ticks during the blocking work
+		 * and expires before the event loop renders the toast.
+		 */
+		if (c && c->mon)
+			toast_show(c->mon, "Game Mode: dGPU + Frame Pacing active", 3000);
 
 		/*
 		 * Ensure the game client has keyboard focus.

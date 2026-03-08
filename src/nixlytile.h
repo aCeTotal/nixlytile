@@ -504,7 +504,8 @@ typedef struct {
 	uint64_t last_render_ms;
 	uint64_t suppress_refresh_until_ms;
 	uint64_t hover_start_ms;
-	int charging;
+	int charging;           /* on AC power (Charging/Full/Not charging) */
+	int actively_charging;  /* actually charging (not Full/Not charging) */
 	double percent;
 	double voltage_v;
 	double power_w;

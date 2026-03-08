@@ -1810,7 +1810,9 @@ read_battery_info(BatteryPopup *p)
 		if (fgets(buf, sizeof(buf), fp)) {
 			char *nl = strchr(buf, '\n');
 			if (nl) *nl = '\0';
-			p->charging = (strcmp(buf, "Charging") == 0 || strcmp(buf, "Full") == 0);
+			p->charging = (strcmp(buf, "Charging") == 0 || strcmp(buf, "Full") == 0
+				|| strcmp(buf, "Not charging") == 0);
+			p->actively_charging = (strcmp(buf, "Charging") == 0);
 		}
 		fclose(fp);
 	}
@@ -1928,8 +1930,10 @@ renderbatterypopup(Monitor *m)
 	}
 
 	/* Build display lines */
-	if (p->charging) {
+	if (p->actively_charging) {
 		snprintf(lines[line_count++], sizeof(lines[0]), "Charging:");
+	} else if (p->charging) {
+		snprintf(lines[line_count++], sizeof(lines[0]), "AC Power:");
 	} else {
 		snprintf(lines[line_count++], sizeof(lines[0]), "On Battery:");
 	}
@@ -3389,37 +3393,55 @@ int
 set_pipewire_mute(int mute)
 {
 	char arg[8];
+	pid_t pid;
+	int status;
 
 	snprintf(arg, sizeof(arg), "%d", mute ? 1 : 0);
 
-	if (fork() == 0) {
+	pid = fork();
+	if (pid == 0) {
 		setsid();
 		execlp("wpctl", "wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", arg, (char *)NULL);
 		_exit(127);
 	}
+	if (pid < 0)
+		return -1;
 
-	/* Update cached state optimistically */
-	volume_muted = mute;
-	return 0;
+	if (waitpid(pid, &status, 0) == pid &&
+			WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+		volume_muted = mute;
+		return 0;
+	}
+
+	return -1;
 }
 
 int
 set_pipewire_mic_mute(int mute)
 {
 	char arg[8];
+	pid_t pid;
+	int status;
 
 	snprintf(arg, sizeof(arg), "%d", mute ? 1 : 0);
 
-	if (fork() == 0) {
+	pid = fork();
+	if (pid == 0) {
 		setsid();
 		execlp("wpctl", "wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", arg, (char *)NULL);
 		_exit(127);
 	}
+	if (pid < 0)
+		return -1;
 
-	/* Update cached state optimistically */
-	mic_muted = mute;
-	mic_cached_muted = mute;
-	return 0;
+	if (waitpid(pid, &status, 0) == pid &&
+			WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+		mic_muted = mute;
+		mic_cached_muted = mute;
+		return 0;
+	}
+
+	return -1;
 }
 
 int
@@ -3490,7 +3512,6 @@ toggle_pipewire_mute(void)
 		ret = set_pipewire_mute(1);
 		if (ret != 0)
 			return -1;
-		volume_muted = 1;
 		now = monotonic_msec();
 		if (base >= 0.0) {
 			volume_cache_store(is_headset, base, volume_muted, now);
@@ -3503,7 +3524,6 @@ toggle_pipewire_mute(void)
 		ret = set_pipewire_mute(0);
 		if (ret != 0)
 			return -1;
-		volume_muted = 0;
 		if (target >= 0.0)
 			set_pipewire_volume(target);
 		if (target >= 0.0) {
@@ -3540,8 +3560,6 @@ toggle_pipewire_mic_mute(void)
 		ret = set_pipewire_mic_mute(1);
 		if (ret != 0)
 			return -1;
-		mic_muted = 1;
-		mic_cached_muted = mic_muted;
 		if (base >= 0.0) {
 			mic_cached = base;
 			mic_last_percent = base;
@@ -3554,7 +3572,6 @@ toggle_pipewire_mic_mute(void)
 		ret = set_pipewire_mic_mute(0);
 		if (ret != 0)
 			return -1;
-		mic_muted = 0;
 		mic_cached_muted = mic_muted;
 		mic_last_read_ms = 0;
 		mic_cached = -1.0;
@@ -4145,7 +4162,8 @@ refreshstatusbattery(void)
 				nl = strchr(status_buf, '\n');
 				if (nl) *nl = '\0';
 				battery_is_charging = (strcmp(status_buf, "Charging") == 0
-						|| strcmp(status_buf, "Full") == 0);
+						|| strcmp(status_buf, "Full") == 0
+						|| strcmp(status_buf, "Not charging") == 0);
 			}
 			fclose(fp);
 		}
