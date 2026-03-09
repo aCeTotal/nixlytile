@@ -1435,16 +1435,12 @@ restore_nvidia_gpu_power(void)
 		wlr_log(WLR_INFO, "NVIDIA: persistence mode restored (off)");
 	}
 
-	/* Restore PCI power management */
-	if (nv_saved_pci_power[0]) {
-		int fd = open(nv_pci_power_path, O_WRONLY);
-		if (fd >= 0) {
-			write(fd, nv_saved_pci_power, strlen(nv_saved_pci_power));
-			close(fd);
-		}
-		wlr_log(WLR_INFO, "NVIDIA: PCI power restored → '%s'", nv_saved_pci_power);
-		nv_saved_pci_power[0] = '\0';
-	}
+	/*
+	 * Do NOT restore PCI power management — keep power/control=on.
+	 * D3cold prevention is set at startup in detect_gpus() and must
+	 * persist for the compositor's entire lifetime, otherwise the GPU
+	 * suspends after ~15-20s and won't wake for the next game launch.
+	 */
 
 	/* Restore PowerMizer to adaptive mode (nvidia-settings, silent fail on Wayland) */
 	{
@@ -1890,13 +1886,12 @@ update_game_mode(void)
 		}
 
 		/*
-		 * Show game detection notification AFTER all blocking operations
-		 * (nvidia-smi, sysfs writes, process freezing, etc).  If shown
-		 * before, the 3-second toast timer ticks during the blocking work
-		 * and expires before the event loop renders the toast.
+		 * Show game detection notification AFTER all blocking operations.
+		 * Use show_hz_osd() instead of toast_show() — it renders correctly
+		 * even during direct scanout (centered, larger, proven to work).
 		 */
 		if (c && c->mon)
-			toast_show(c->mon, "Game Mode: dGPU + Frame Pacing active", 3000);
+			show_hz_osd(c->mon, "Game Mode Active");
 
 		/*
 		 * Ensure the game client has keyboard focus.
@@ -1934,7 +1929,7 @@ update_game_mode(void)
 
 		/* Show fullscreen detection notification */
 		if (c && c->mon)
-			toast_show(c->mon, "Fullscreen detected: dGPU active", 3000);
+			show_hz_osd(c->mon, "Fullscreen Active");
 
 		if (cache_update_timer)
 			wl_event_source_timer_update(cache_update_timer, 0);
@@ -2036,7 +2031,12 @@ update_game_mode(void)
 				wl_event_source_timer_update(fan_thermal_timer, 1000);
 
 			wlr_log(WLR_INFO, "Ultra game mode deactivated - full system restored");
+
 		}
+
+		/* Show exit notification (for both ultra and regular game mode) */
+		if (selmon)
+			show_hz_osd(selmon, was_ultra ? "Game Mode Off" : "Fullscreen Off");
 
 		game_mode_ultra = 0;
 		game_mode_client = NULL;

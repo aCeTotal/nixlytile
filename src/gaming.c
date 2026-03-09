@@ -3199,6 +3199,63 @@ detect_gpus(void)
 	} else {
 		wlr_log(WLR_INFO, "No discrete GPU detected");
 	}
+
+	/*
+	 * Prevent NVIDIA D3cold immediately at startup.
+	 * Without this, the kernel's runtime PM suspends the dGPU after ~15-20s
+	 * of inactivity, and once in D3cold it won't wake properly for games.
+	 * Set power/control=on on the GPU and ALL sibling PCI functions.
+	 */
+	if (discrete_gpu_idx >= 0) {
+		GpuInfo *dgpu = &detected_gpus[discrete_gpu_idx];
+		if (dgpu->vendor == GPU_VENDOR_NVIDIA && dgpu->pci_slot[0]) {
+			char pci_path[128];
+			int fd;
+
+			/* Main GPU function */
+			snprintf(pci_path, sizeof(pci_path),
+				"/sys/bus/pci/devices/%s/power/control", dgpu->pci_slot);
+			fd = open(pci_path, O_WRONLY);
+			if (fd >= 0) {
+				write(fd, "on", 2);
+				close(fd);
+			}
+			snprintf(pci_path, sizeof(pci_path),
+				"/sys/bus/pci/devices/%s/power/autosuspend_delay_ms", dgpu->pci_slot);
+			fd = open(pci_path, O_WRONLY);
+			if (fd >= 0) {
+				write(fd, "-1", 2);
+				close(fd);
+			}
+
+			/* All sibling PCI functions (.1 audio, .2 USB-C, etc) */
+			char slot_prefix[64];
+			strncpy(slot_prefix, dgpu->pci_slot, sizeof(slot_prefix) - 1);
+			slot_prefix[sizeof(slot_prefix) - 1] = '\0';
+			char *dot = strrchr(slot_prefix, '.');
+			if (dot) {
+				*dot = '\0';
+				for (int fn = 1; fn <= 7; fn++) {
+					snprintf(pci_path, sizeof(pci_path),
+						"/sys/bus/pci/devices/%s.%d/power/control", slot_prefix, fn);
+					fd = open(pci_path, O_WRONLY);
+					if (fd >= 0) {
+						write(fd, "on", 2);
+						close(fd);
+					}
+					snprintf(pci_path, sizeof(pci_path),
+						"/sys/bus/pci/devices/%s.%d/power/autosuspend_delay_ms", slot_prefix, fn);
+					fd = open(pci_path, O_WRONLY);
+					if (fd >= 0) {
+						write(fd, "-1", 2);
+						close(fd);
+					}
+				}
+			}
+
+			wlr_log(WLR_INFO, "NVIDIA: D3cold prevention active — PCI power/control=on at startup");
+		}
+	}
 }
 
 int
