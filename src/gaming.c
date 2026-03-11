@@ -3201,61 +3201,169 @@ detect_gpus(void)
 	}
 
 	/*
-	 * Prevent NVIDIA D3cold immediately at startup.
-	 * Without this, the kernel's runtime PM suspends the dGPU after ~15-20s
-	 * of inactivity, and once in D3cold it won't wake properly for games.
-	 * Set power/control=on on the GPU and ALL sibling PCI functions.
+	 * Prevent dGPU D3cold/runtime-suspend permanently.
+	 *
+	 * Three layers of protection against the GPU switching to integrated:
+	 *
+	 * 1. Set power/control=on + autosuspend_delay_ms=-1 on the GPU and ALL
+	 *    sibling PCI functions (audio, USB-C, etc).  This disables the
+	 *    kernel's runtime PM for the PCI device.
+	 *
+	 * 2. Hold an open fd on the dGPU's render node (/dev/dri/renderDXXX)
+	 *    for the compositor's entire lifetime.  This keeps the GPU "in use"
+	 *    from the driver's perspective, preventing NVIDIA's internal dynamic
+	 *    power management from powering off the GPU even if something
+	 *    external (nvidia-powerd, udev, power-profiles-daemon, tlp)
+	 *    re-enables runtime PM in sysfs.
+	 *
+	 * 3. A periodic watchdog timer (dgpu_power_watchdog_tick) re-asserts
+	 *    the sysfs power settings every 10 seconds, counteracting any
+	 *    external service that overrides them.
 	 */
 	if (discrete_gpu_idx >= 0) {
 		GpuInfo *dgpu = &detected_gpus[discrete_gpu_idx];
-		if (dgpu->vendor == GPU_VENDOR_NVIDIA && dgpu->pci_slot[0]) {
-			char pci_path[128];
-			int fd;
 
-			/* Main GPU function */
+		dgpu_assert_power_on(dgpu);
+
+		/*
+		 * Hold the render node open — prevents the driver from
+		 * considering the GPU idle and triggering D3cold.
+		 */
+		if (dgpu->render_path[0]) {
+			dgpu_render_fd = open(dgpu->render_path, O_RDWR);
+			if (dgpu_render_fd >= 0) {
+				wlr_log(WLR_INFO, "dGPU: holding %s open (fd=%d) to prevent D3cold",
+					dgpu->render_path, dgpu_render_fd);
+			} else {
+				wlr_log(WLR_ERROR, "dGPU: failed to open %s: %s",
+					dgpu->render_path, strerror(errno));
+			}
+		}
+
+		/*
+		 * Check NVreg_DynamicPowerManagement — if set to 0x02 (fine-grained),
+		 * the NVIDIA driver has its own idle timeout that can override sysfs.
+		 * This is a boot-time parameter and cannot be changed at runtime.
+		 */
+		if (dgpu->vendor == GPU_VENDOR_NVIDIA) {
+			char dpm_val[16] = "";
+			int dpm_fd = open("/sys/module/nvidia/parameters/NVreg_DynamicPowerManagement", O_RDONLY);
+			if (dpm_fd >= 0) {
+				ssize_t n = read(dpm_fd, dpm_val, sizeof(dpm_val) - 1);
+				close(dpm_fd);
+				if (n > 0) {
+					dpm_val[n] = '\0';
+					while (n > 0 && (dpm_val[n-1] == '\n' || dpm_val[n-1] == ' '))
+						dpm_val[--n] = '\0';
+					if (strstr(dpm_val, "2") || strstr(dpm_val, "0x02")) {
+						wlr_log(WLR_ERROR,
+							"NVIDIA: WARNING — NVreg_DynamicPowerManagement=%s (fine-grained). "
+							"This allows the driver to independently power off the dGPU. "
+							"Set nvidia.NVreg_DynamicPowerManagement=0x00 in boot params to disable.",
+							dpm_val);
+					} else {
+						wlr_log(WLR_INFO, "NVIDIA: NVreg_DynamicPowerManagement=%s", dpm_val);
+					}
+				}
+			}
+		}
+
+		wlr_log(WLR_INFO, "dGPU: D3cold prevention active — power/control=on + render node held open");
+	}
+}
+
+/*
+ * Assert power/control=on on the dGPU and all its PCI siblings.
+ * Called at startup and periodically by the watchdog timer.
+ */
+void
+dgpu_assert_power_on(GpuInfo *gpu)
+{
+	char pci_path[128];
+	int fd;
+
+	if (!gpu || !gpu->pci_slot[0])
+		return;
+
+	/* Main GPU function */
+	snprintf(pci_path, sizeof(pci_path),
+		"/sys/bus/pci/devices/%s/power/control", gpu->pci_slot);
+	fd = open(pci_path, O_WRONLY);
+	if (fd >= 0) {
+		write(fd, "on", 2);
+		close(fd);
+	}
+	snprintf(pci_path, sizeof(pci_path),
+		"/sys/bus/pci/devices/%s/power/autosuspend_delay_ms", gpu->pci_slot);
+	fd = open(pci_path, O_WRONLY);
+	if (fd >= 0) {
+		write(fd, "-1", 2);
+		close(fd);
+	}
+
+	/* All sibling PCI functions (.1 audio, .2 USB-C, etc) */
+	char slot_prefix[64];
+	strncpy(slot_prefix, gpu->pci_slot, sizeof(slot_prefix) - 1);
+	slot_prefix[sizeof(slot_prefix) - 1] = '\0';
+	char *dot = strrchr(slot_prefix, '.');
+	if (dot) {
+		*dot = '\0';
+		for (int fn = 1; fn <= 7; fn++) {
 			snprintf(pci_path, sizeof(pci_path),
-				"/sys/bus/pci/devices/%s/power/control", dgpu->pci_slot);
+				"/sys/bus/pci/devices/%s.%d/power/control", slot_prefix, fn);
 			fd = open(pci_path, O_WRONLY);
 			if (fd >= 0) {
 				write(fd, "on", 2);
 				close(fd);
 			}
 			snprintf(pci_path, sizeof(pci_path),
-				"/sys/bus/pci/devices/%s/power/autosuspend_delay_ms", dgpu->pci_slot);
+				"/sys/bus/pci/devices/%s.%d/power/autosuspend_delay_ms", slot_prefix, fn);
 			fd = open(pci_path, O_WRONLY);
 			if (fd >= 0) {
 				write(fd, "-1", 2);
 				close(fd);
 			}
-
-			/* All sibling PCI functions (.1 audio, .2 USB-C, etc) */
-			char slot_prefix[64];
-			strncpy(slot_prefix, dgpu->pci_slot, sizeof(slot_prefix) - 1);
-			slot_prefix[sizeof(slot_prefix) - 1] = '\0';
-			char *dot = strrchr(slot_prefix, '.');
-			if (dot) {
-				*dot = '\0';
-				for (int fn = 1; fn <= 7; fn++) {
-					snprintf(pci_path, sizeof(pci_path),
-						"/sys/bus/pci/devices/%s.%d/power/control", slot_prefix, fn);
-					fd = open(pci_path, O_WRONLY);
-					if (fd >= 0) {
-						write(fd, "on", 2);
-						close(fd);
-					}
-					snprintf(pci_path, sizeof(pci_path),
-						"/sys/bus/pci/devices/%s.%d/power/autosuspend_delay_ms", slot_prefix, fn);
-					fd = open(pci_path, O_WRONLY);
-					if (fd >= 0) {
-						write(fd, "-1", 2);
-						close(fd);
-					}
-				}
-			}
-
-			wlr_log(WLR_INFO, "NVIDIA: D3cold prevention active — PCI power/control=on at startup");
 		}
 	}
+}
+
+/*
+ * Watchdog timer callback — re-assert dGPU power/control=on every 60s.
+ * Counteracts nvidia-powerd, power-profiles-daemon, tlp, udev rules,
+ * or any other service that periodically re-enables runtime PM.
+ */
+static int
+dgpu_power_watchdog_tick(void *data)
+{
+	(void)data;
+
+	if (discrete_gpu_idx >= 0 && discrete_gpu_idx < detected_gpu_count) {
+		GpuInfo *dgpu = &detected_gpus[discrete_gpu_idx];
+		dgpu_assert_power_on(dgpu);
+
+		/* Verify the render node fd is still open */
+		if (dgpu_render_fd >= 0 && fcntl(dgpu_render_fd, F_GETFD) < 0) {
+			wlr_log(WLR_ERROR, "dGPU: render node fd lost, re-opening %s",
+				dgpu->render_path);
+			dgpu_render_fd = open(dgpu->render_path, O_RDWR);
+		}
+	}
+
+	/* Re-arm timer */
+	if (dgpu_power_watchdog)
+		wl_event_source_timer_update(dgpu_power_watchdog, 60000);
+	return 0;
+}
+
+void
+dgpu_power_watchdog_start(void)
+{
+	if (discrete_gpu_idx < 0 || dgpu_power_watchdog)
+		return;
+	dgpu_power_watchdog = wl_event_loop_add_timer(event_loop,
+		dgpu_power_watchdog_tick, NULL);
+	if (dgpu_power_watchdog)
+		wl_event_source_timer_update(dgpu_power_watchdog, 60000);
 }
 
 int

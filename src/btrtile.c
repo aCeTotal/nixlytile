@@ -15,6 +15,7 @@ int insert_client(Monitor *m, Client *focused_client, Client *new_client);
 unsigned int visible_count(LayoutNode *node, Monitor *m);
 unsigned int count_columns(LayoutNode *node, Monitor *m);
 unsigned int target_columns(Monitor *m);
+void equalize_column_widths(LayoutNode *node, Monitor *m);
 unsigned int placement_count(LayoutNode *node, Monitor *m);
 Client *first_active_client(LayoutNode *node, Monitor *m);
 Client *pick_target_client(Monitor *m, Client *focused_client);
@@ -358,6 +359,29 @@ init_tree(Monitor *m)
 		m->root[i] = NULL;
 }
 
+/* Set vertical split ratios so all columns get equal width.
+ * For N columns in a binary tree, each vertical split node gets
+ * ratio = left_cols / (left_cols + right_cols).
+ * Example: 3 columns → root=2/3, inner=1/2 → each column is 1/3. */
+void
+equalize_column_widths(LayoutNode *node, Monitor *m)
+{
+	unsigned int left_cols, right_cols;
+
+	if (!node || node->is_client_node)
+		return;
+
+	if (node->is_split_vertically) {
+		left_cols = count_columns(node->left, m);
+		right_cols = count_columns(node->right, m);
+		if (left_cols + right_cols > 0)
+			node->split_ratio = (float)left_cols / (float)(left_cols + right_cols);
+	}
+
+	equalize_column_widths(node->left, m);
+	equalize_column_widths(node->right, m);
+}
+
 /* Reset horizontal split ratios in a column to equal distribution.
  * For N tiles, each should get 1/N of the height.
  * In a binary tree, this means ratio = left_count / (left_count + right_count) */
@@ -415,6 +439,7 @@ insert_client(Monitor *m, Client *focused_client, Client *new_client)
 		new_client_node = create_client_node(new_client);
 		old_root = *root;
 		*root = create_split_node(1, old_root, new_client_node);
+		equalize_column_widths(*root, m);
 		return 1;
 	}
 
@@ -521,9 +546,10 @@ insert_client_at(Monitor *m, Client *target, Client *new_client, double cx, doub
 		old_root = *root;
 		new_client_node = create_client_node(new_client);
 		/* Vertical split for new column, horizontal for tiles within column */
-		if (current_cols < desired_cols)
+		if (current_cols < desired_cols) {
 			*root = create_split_node(1, old_root, new_client_node);
-		else
+			equalize_column_widths(*root, m);
+		} else
 			*root = create_split_node(0, old_root, new_client_node);
 		return;
 	}
@@ -665,6 +691,9 @@ ensure_proper_columns(Monitor *m, LayoutNode **root)
 			break;  /* No more horizontal splits to promote */
 		current_cols = count_columns(*root, m);
 	}
+
+	/* Equalize column widths after structural changes */
+	equalize_column_widths(*root, m);
 }
 
 void
@@ -696,12 +725,73 @@ remove_client(Monitor *m, Client *c)
 	}
 }
 
+/*
+ * Compensate sibling subtree ratio after a vertical split resize.
+ *
+ * In a 3-column layout the tree looks like:
+ *   root(v, R) -> [inner(v, I) -> col1, col2] , col3
+ *
+ * When the user resizes col3, we change R (the root ratio).
+ * Without compensation, col1 and col2 both shrink/grow because they
+ * share the left subtree.  The user expects only the adjacent column
+ * (col2) to absorb the change while col1 stays put.
+ *
+ * Fix: adjust the sibling's internal vertical ratio so that columns
+ * on the far side keep their absolute pixel width.
+ *
+ *   col1_width = W * R * I   (must stay constant)
+ *   => I_new = (R_old * I_old) / R_new
+ */
+void
+compensate_column_resize(LayoutNode *split_node, float old_ratio,
+			float new_ratio, Client *focused)
+{
+	LayoutNode *sibling;
+	int client_on_left;
+	float old_share, new_share, old_internal, new_internal;
+
+	if (!split_node || !split_node->is_split_vertically)
+		return;
+
+	client_on_left = (find_client_node(split_node->left, focused) != NULL);
+	sibling = client_on_left ? split_node->right : split_node->left;
+
+	/* Only needed when the sibling itself is a multi-column subtree */
+	if (!sibling || sibling->is_client_node || !sibling->is_split_vertically)
+		return;
+
+	old_share = client_on_left ? (1.0f - old_ratio) : old_ratio;
+	new_share = client_on_left ? (1.0f - new_ratio) : new_ratio;
+
+	if (new_share < 0.01f)
+		return;
+
+	old_internal = sibling->split_ratio;
+
+	if (client_on_left) {
+		/* Focused on left, sibling on right.
+		 * Keep sibling->right (far columns) fixed.
+		 * right_width = W * old_share * (1 - old_internal)
+		 *             = W * new_share * (1 - new_internal)  */
+		new_internal = 1.0f - (old_share * (1.0f - old_internal)) / new_share;
+	} else {
+		/* Focused on right, sibling on left.
+		 * Keep sibling->left (far columns) fixed.
+		 * left_width = W * old_share * old_internal
+		 *            = W * new_share * new_internal  */
+		new_internal = (old_share * old_internal) / new_share;
+	}
+
+	if (new_internal >= 0.05f && new_internal <= 0.95f)
+		sibling->split_ratio = new_internal;
+}
+
 void
 setratio_h(const Arg *arg)
 {
 	Client *sel = focustop(selmon);
 	LayoutNode *client_node, *split_node;
-	float new_ratio;
+	float old_ratio, new_ratio;
 
 	if (!sel || !selmon || !selmon->lt[selmon->sellt]->arrange)
 		return;
@@ -714,12 +804,15 @@ setratio_h(const Arg *arg)
 	if (!split_node)
 		return;
 
-	new_ratio = (arg->f != 0.0f) ? (split_node->split_ratio + arg->f) : 0.5f;
+	old_ratio = split_node->split_ratio;
+	new_ratio = (arg->f != 0.0f) ? (old_ratio + arg->f) : 0.5f;
 	if (new_ratio < 0.05f)
 		new_ratio = 0.05f;
 	if (new_ratio > 0.95f)
 		new_ratio = 0.95f;
 	split_node->split_ratio = new_ratio;
+
+	compensate_column_resize(split_node, old_ratio, new_ratio, sel);
 
 	/* Skip the arrange if done resizing by mouse,
 	 * we call arrange from motionotify */

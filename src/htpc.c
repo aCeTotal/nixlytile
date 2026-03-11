@@ -1273,74 +1273,12 @@ apply_nvidia_gpu_power(GpuInfo *gpu)
 	}
 
 	/*
-	 * 5. Disable PCI runtime power management for GPU and ALL sibling
-	 *    PCI functions (audio, USB-C, etc).  On laptops with Optimus/PRIME,
-	 *    NVIDIA's dynamic power management (D3cold) has a 5-second idle
-	 *    timeout.  If ANY sibling function suspends, the entire GPU can be
-	 *    powered off — causing a sudden drop to integrated graphics.
-	 *    We must set power/control=on AND autosuspend_delay_ms=-1 on every
-	 *    PCI function sharing the same slot to prevent this.
+	 * 5. Re-assert PCI runtime PM disabled (also done by watchdog timer).
+	 *    This is belt-and-suspenders with the startup D3cold prevention
+	 *    and the 10-second watchdog timer.
 	 */
-	snprintf(nv_pci_power_path, sizeof(nv_pci_power_path),
-		"/sys/bus/pci/devices/%s/power/control", gpu->pci_slot);
-	{
-		int fd = open(nv_pci_power_path, O_RDONLY);
-		if (fd >= 0) {
-			ssize_t n = read(fd, nv_saved_pci_power, sizeof(nv_saved_pci_power) - 1);
-			close(fd);
-			if (n > 0) {
-				nv_saved_pci_power[n] = '\0';
-				if (nv_saved_pci_power[n - 1] == '\n') nv_saved_pci_power[n - 1] = '\0';
-			}
-			fd = open(nv_pci_power_path, O_WRONLY);
-			if (fd >= 0) {
-				write(fd, "on", 2);
-				close(fd);
-				wlr_log(WLR_INFO, "NVIDIA: PCI power → 'on' (was '%s')", nv_saved_pci_power);
-			}
-		}
-		/* Set autosuspend_delay_ms = -1 to prevent kernel runtime PM suspend */
-		char autosuspend_path[128];
-		snprintf(autosuspend_path, sizeof(autosuspend_path),
-			"/sys/bus/pci/devices/%s/power/autosuspend_delay_ms", gpu->pci_slot);
-		fd = open(autosuspend_path, O_WRONLY);
-		if (fd >= 0) {
-			write(fd, "-1", 2);
-			close(fd);
-			wlr_log(WLR_INFO, "NVIDIA: autosuspend_delay_ms → -1");
-		}
-	}
-	/*
-	 * Disable runtime PM on ALL sibling PCI functions (e.g. .1 audio, .2 USB).
-	 * The PCI slot is like "0000:01:00.0" — we scan for 0000:01:00.* siblings.
-	 */
-	{
-		char slot_prefix[64];
-		strncpy(slot_prefix, gpu->pci_slot, sizeof(slot_prefix) - 1);
-		slot_prefix[sizeof(slot_prefix) - 1] = '\0';
-		char *dot = strrchr(slot_prefix, '.');
-		if (dot) {
-			*dot = '\0';  /* "0000:01:00" */
-			for (int fn = 1; fn <= 7; fn++) {
-				char sibling_ctrl[128], sibling_auto[128];
-				snprintf(sibling_ctrl, sizeof(sibling_ctrl),
-					"/sys/bus/pci/devices/%s.%d/power/control", slot_prefix, fn);
-				snprintf(sibling_auto, sizeof(sibling_auto),
-					"/sys/bus/pci/devices/%s.%d/power/autosuspend_delay_ms", slot_prefix, fn);
-				int fd = open(sibling_ctrl, O_WRONLY);
-				if (fd >= 0) {
-					write(fd, "on", 2);
-					close(fd);
-					wlr_log(WLR_INFO, "NVIDIA: sibling %s.%d power → 'on'", slot_prefix, fn);
-				}
-				fd = open(sibling_auto, O_WRONLY);
-				if (fd >= 0) {
-					write(fd, "-1", 2);
-					close(fd);
-				}
-			}
-		}
-	}
+	dgpu_assert_power_on(gpu);
+	wlr_log(WLR_INFO, "NVIDIA: PCI power/control=on re-asserted for game mode");
 
 	/*
 	 * 6. Set compute mode to DEFAULT to allow concurrent graphics + compute.

@@ -1,6 +1,8 @@
 #include "nixlytile.h"
 #include "client.h"
 
+static void (*last_keybinding_func)(const Arg *);
+
 void
 applyxkbdefaultsfromsystem(struct xkb_rule_names *names)
 {
@@ -966,6 +968,7 @@ keybinding(uint32_t mods, xkb_keysym_t sym)
 		const Key *k = &keys[i];
 		if (CLEANMASK(mods) == CLEANMASK(k->mod)
 				&& sym == k->keysym && k->func) {
+			last_keybinding_func = k->func;
 			k->func(&k->arg);
 			return 1;
 		}
@@ -1143,6 +1146,7 @@ keypress(struct wl_listener *listener, void *data)
 			}
 		}
 		if (!handled) {
+			last_keybinding_func = NULL;
 			for (i = 0; i < nsyms; i++)
 				handled = keybinding(mods, syms[i]) || handled;
 		}
@@ -1164,12 +1168,13 @@ keypress(struct wl_listener *listener, void *data)
 	}
 
 	/* Don't enable key repeat for modal/nixpkgs text input to avoid double characters.
-	 * Only allow repeat for navigation keys (arrows, backspace) in modal/nixpkgs. */
+	 * Only allow repeat for navigation keys (arrows, backspace) in modal/nixpkgs.
+	 * Also suppress repeat for toggle actions (e.g. togglestatusbar). */
 	{
 		int allow_repeat = 0;
 		if (handled && group->wlr_group->keyboard.repeat_info.delay > 0) {
 			if (!modal_mon && !nixpkgs_mon) {
-				allow_repeat = 1;
+				allow_repeat = (last_keybinding_func != togglestatusbar);
 			} else {
 				/* In modal/nixpkgs: only allow repeat for navigation keys */
 				for (i = 0; i < nsyms; i++) {
@@ -1623,7 +1628,9 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 						if (ratio > 0.95f)
 							ratio = 0.95f;
 						if (fabs(ratio - current) >= resize_ratio_epsilon) {
+							float old_r = resize_split_node->split_ratio;
 							resize_split_node->split_ratio = (float)ratio;
+							compensate_column_resize(resize_split_node, old_r, (float)ratio, grabc);
 							changed = 1;
 						}
 					}

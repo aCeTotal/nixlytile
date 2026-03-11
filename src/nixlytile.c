@@ -2208,6 +2208,7 @@ setup(void)
 	cache_update_timer = wl_event_loop_add_timer(event_loop, cache_update_timer_cb, NULL);
 	nixpkgs_cache_timer = wl_event_loop_add_timer(event_loop, nixpkgs_cache_timer_cb, NULL);
 	fan_thermal_start();
+	dgpu_power_watchdog_start();
 	tray_init();
 	fcft_initialized = fcft_init(FCFT_LOG_COLORIZE_NEVER, 0, FCFT_LOG_CLASS_ERROR);
 	if (!fcft_initialized)
@@ -2799,12 +2800,11 @@ main(int argc, char *argv[])
 	/* HTPC mode (nixlytile_mode == 2) is entered from updatemons()
 	 * once the first monitor is ready and selmon is set */
 
-	/* Start only git cache immediately, stagger others via timer
-	 * Phase 0=git (done), 1=file (in 30s), 2=gaming (in 60s) */
-	git_cache_update_start();
-	cache_update_phase = 1; /* Next: file cache */
+	/* Defer all cache updates — let the compositor settle first.
+	 * Phase 0=git, 1=file, 2=gaming; each fires 30 min apart. */
+	cache_update_phase = 0;
 	if (cache_update_timer)
-		wl_event_source_timer_update(cache_update_timer, 30000); /* 30 seconds */
+		wl_event_source_timer_update(cache_update_timer, 120000); /* 2 minutes */
 	/* Generate nixpkgs cache now if missing, then schedule weekly updates */
 	nixpkgs_cache_update_start();
 	schedule_nixpkgs_cache_timer();
