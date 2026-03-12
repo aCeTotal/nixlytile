@@ -44,6 +44,7 @@
 #include <sys/inotify.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sched.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -1101,7 +1102,7 @@ typedef struct {
 #endif
 	unsigned int bw;
 	uint32_t tags;
-	int isfloating, isurgent, isfullscreen, issticky, was_tiled;
+	int isfloating, isurgent, isfullscreen, issticky, was_tiled, fakefullscreen;
 	uint32_t resize;
 	int pending_resize_w, pending_resize_h;
 	struct wlr_box old_geom;
@@ -1276,6 +1277,17 @@ struct Monitor {
 	int max_bpc;
 	int hdr_capable;
 	int hdr_active;
+	/* Cached fullscreen content classification (avoid per-vblank protocol lookups) */
+	Client *classify_cache_client;
+	int classify_cache_game;
+	int classify_cache_video;
+	int classify_cache_tearing;
+	/* Cached FPS for frame repeat hysteresis */
+	float frame_repeat_last_fps;
+	/* Stats panel persistent nodes */
+	struct wlr_scene_rect *stats_panel_bg;
+	struct wlr_scene_rect *stats_panel_border;
+	struct wlr_scene_tree *stats_panel_content;
 	struct wlr_scene_tree *stats_panel_tree;
 	struct wl_event_source *stats_panel_timer;
 	struct wl_event_source *stats_panel_anim_timer;

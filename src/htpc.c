@@ -463,6 +463,191 @@ is_child_of(pid_t pid, pid_t parent)
 }
 
 /*
+ * Process names whose entire subtrees are protected during game mode.
+ * Any process with one of these as an ancestor will not be frozen.
+ * This protects Wine/Proton siblings (wineserver, bwrap, etc.) that
+ * are part of the Steam process tree but not children of game_mode_pid.
+ */
+static const char *tree_protect[] = {
+	"steam", "discord", "Discord", "vesktop", "Vesktop",
+	"webcord", "WebCord", "armcord", "ArmCord", "legcord", "Legcord",
+	NULL
+};
+
+/*
+ * Check if a PID has an ancestor whose comm matches a tree_protect entry.
+ * Walks up the ppid chain reading /proc/<pid>/stat.
+ */
+static int
+has_protected_ancestor(pid_t pid)
+{
+	char path[64];
+	char comm[64];
+	FILE *fp;
+	char line[256];
+	pid_t cur;
+	int depth = 0;
+	int i;
+
+	cur = pid;
+	while (cur > 1 && depth < 32) {
+		/* Read comm of current pid */
+		snprintf(path, sizeof(path), "/proc/%d/comm", cur);
+		fp = fopen(path, "r");
+		if (!fp)
+			return 0;
+		comm[0] = '\0';
+		if (fgets(comm, sizeof(comm), fp)) {
+			char *nl = strchr(comm, '\n');
+			if (nl) *nl = '\0';
+		}
+		fclose(fp);
+
+		for (i = 0; tree_protect[i]; i++) {
+			if (strcmp(comm, tree_protect[i]) == 0)
+				return 1;
+		}
+
+		/* Walk to parent */
+		snprintf(path, sizeof(path), "/proc/%d/stat", cur);
+		fp = fopen(path, "r");
+		if (!fp)
+			return 0;
+		if (!fgets(line, sizeof(line), fp)) {
+			fclose(fp);
+			return 0;
+		}
+		fclose(fp);
+		char *cp = strrchr(line, ')');
+		if (!cp)
+			return 0;
+		pid_t ppid;
+		if (sscanf(cp + 2, "%*c %d", &ppid) != 1)
+			return 0;
+		cur = ppid;
+		depth++;
+	}
+	return 0;
+}
+
+#ifndef MADV_PAGEOUT
+#define MADV_PAGEOUT 21
+#endif
+#ifndef __NR_pidfd_open
+#define __NR_pidfd_open 434
+#endif
+#ifndef __NR_process_madvise
+#define __NR_process_madvise 440
+#endif
+
+/*
+ * Force frozen process pages to swap using process_madvise(MADV_PAGEOUT).
+ * This frees physical RAM that SIGSTOP alone leaves resident.
+ */
+static void
+reclaim_frozen_memory(void)
+{
+	struct iovec iov;
+	int pidfd;
+
+	iov.iov_base = 0;
+	iov.iov_len = (size_t)-1;  /* entire address space */
+
+	for (int i = 0; i < frozen_pid_count; i++) {
+		pidfd = syscall(__NR_pidfd_open, frozen_pids[i], 0);
+		if (pidfd < 0)
+			continue;
+		syscall(__NR_process_madvise, pidfd, &iov, (size_t)1, MADV_PAGEOUT, (unsigned int)0);
+		close(pidfd);
+	}
+	wlr_log(WLR_INFO, "Reclaimed memory from %d frozen processes", frozen_pid_count);
+}
+
+/*
+ * Kill all browser processes during game mode.
+ * Browsers are massive memory hogs — freezing them still leaves hundreds
+ * of MB (or GB) of resident memory. Killing them outright frees RAM
+ * for the game and eliminates background CPU wake-ups entirely.
+ * Uses SIGTERM so browsers can save session state for restart.
+ */
+static void
+kill_browsers(void)
+{
+	static const char *browsers[] = {
+		"brave", "firefox", ".firefox-wrappe",
+		"chrome", "chromium", "chromium-browse", "google-chrome-s",
+		"vivaldi", "opera", "epiphany", "librewolf",
+		"zen", ".zen-wrapped",
+		NULL
+	};
+	DIR *dir;
+	struct dirent *ent;
+	char path[128];
+	char comm[64];
+	char uid_line[256];
+	FILE *fp;
+	uid_t our_uid = getuid();
+	pid_t pid;
+	int killed = 0;
+
+	dir = opendir("/proc");
+	if (!dir)
+		return;
+
+	while ((ent = readdir(dir))) {
+		if (ent->d_name[0] < '0' || ent->d_name[0] > '9')
+			continue;
+
+		pid = (pid_t)atoi(ent->d_name);
+		if (pid <= 1)
+			continue;
+
+		/* Only kill our own processes */
+		snprintf(path, sizeof(path), "/proc/%d/status", pid);
+		fp = fopen(path, "r");
+		if (!fp)
+			continue;
+
+		int is_our_uid = 0;
+		while (fgets(uid_line, sizeof(uid_line), fp)) {
+			if (strncmp(uid_line, "Uid:", 4) == 0) {
+				uid_t real_uid;
+				if (sscanf(uid_line + 4, "%u", &real_uid) == 1 && real_uid == our_uid)
+					is_our_uid = 1;
+				break;
+			}
+		}
+		fclose(fp);
+
+		if (!is_our_uid)
+			continue;
+
+		snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+		fp = fopen(path, "r");
+		if (!fp)
+			continue;
+		comm[0] = '\0';
+		if (fgets(comm, sizeof(comm), fp)) {
+			char *nl = strchr(comm, '\n');
+			if (nl) *nl = '\0';
+		}
+		fclose(fp);
+
+		for (int i = 0; browsers[i]; i++) {
+			if (strcmp(comm, browsers[i]) == 0) {
+				kill(pid, SIGTERM);
+				killed++;
+				break;
+			}
+		}
+	}
+
+	closedir(dir);
+	if (killed > 0)
+		wlr_log(WLR_INFO, "Killed %d browser processes for game mode", killed);
+}
+
+/*
  * Freeze background processes during game mode.
  * Sends SIGSTOP to all user-owned processes except whitelisted ones.
  * Safe to call multiple times - clears state on each call.
@@ -481,15 +666,12 @@ freeze_background_processes(void)
 	pid_t pid;
 	int i;
 
-	/* Whitelist of process comm names that should never be frozen */
+	/* Whitelist of process comm names that should never be frozen.
+	 * Steam/Discord subtrees are protected by has_protected_ancestor(). */
 	static const char *whitelist[] = {
 		"nixlytile", "Xwayland", "xwayland",
 		"pipewire", "wireplumber", "pulseaudio", "pipewire-pulse",
-		"swaybg", "dbus-daemon", "dbus-broker",
-		"steam", "steamwebhelper", "reaper", "pressure-vessel",
-		"discord", "Discord", "vesktop", "Vesktop", "webcord", "WebCord",
-		"armcord", "ArmCord", "legcord", "Legcord",
-		"ssh", "sshd", "gpg-agent",
+		"dbus-daemon", "dbus-broker",
 		NULL
 	};
 
@@ -552,6 +734,10 @@ freeze_background_processes(void)
 		if (whitelisted)
 			continue;
 
+		/* Don't freeze any process in a Steam/Discord subtree */
+		if (has_protected_ancestor(pid))
+			continue;
+
 		/* Don't freeze the game process or its children */
 		if (game_mode_pid > 1 && is_child_of(pid, game_mode_pid))
 			continue;
@@ -570,6 +756,10 @@ freeze_background_processes(void)
 
 	closedir(dir);
 	wlr_log(WLR_INFO, "Froze %d background processes for game mode", frozen_pid_count);
+
+	/* Push frozen process pages to swap to free physical RAM */
+	if (frozen_pid_count > 0)
+		reclaim_frozen_memory();
 }
 
 /*
@@ -1745,7 +1935,10 @@ update_game_mode(void)
 		/* Boost GPU fans to prevent thermal throttling */
 		fan_boost_activate();
 
-		/* Freeze background processes to free CPU/memory for the game */
+		/* Kill browsers — they eat GB of RAM even when frozen */
+		kill_browsers();
+
+		/* Freeze remaining background processes to free CPU/memory */
 		freeze_background_processes();
 
 		/* Apply memory optimizations (drop caches, lower swappiness) */
@@ -2415,10 +2608,13 @@ stats_panel_anim_cb(void *data)
 		m->stats_panel_current_x = m->stats_panel_target_x;
 		m->stats_panel_animating = 0;
 
-		/* If we slid out, hide the panel */
+		/* If we slid out, hide the panel and clean up persistent nodes */
 		if (m->stats_panel_target_x >= m->m.x + m->m.width) {
 			wlr_scene_node_set_enabled(&m->stats_panel_tree->node, 0);
 			m->stats_panel_visible = 0;
+			m->stats_panel_bg = NULL;
+			m->stats_panel_border = NULL;
+			m->stats_panel_content = NULL;
 		}
 	} else {
 		/* Calculate eased position */
@@ -2539,21 +2735,27 @@ stats_panel_refresh_cb(void *data)
 		is_synced = fps_diff < 2.0f;
 	}
 
-	/* Clear old content */
-	wl_list_for_each_safe(node, tmp, &m->stats_panel_tree->children, link)
-		wlr_scene_node_destroy(node);
-
-	/* Draw background */
-	drawrect(m->stats_panel_tree, 0, 0, m->stats_panel_width, m->m.height, panel_bg);
-
-	/* Draw left border accent */
-	static const float accent[4] = {0.3f, 0.6f, 1.0f, 1.0f};
-	drawrect(m->stats_panel_tree, 0, 0, 3, m->m.height, accent);
+	/* Create persistent background nodes once, reuse across refreshes */
+	if (!m->stats_panel_bg) {
+		m->stats_panel_bg = wlr_scene_rect_create(m->stats_panel_tree,
+			m->stats_panel_width, m->m.height, panel_bg);
+		static const float accent[4] = {0.3f, 0.6f, 1.0f, 1.0f};
+		m->stats_panel_border = wlr_scene_rect_create(m->stats_panel_tree,
+			3, m->m.height, accent);
+		m->stats_panel_content = wlr_scene_tree_create(m->stats_panel_tree);
+	} else {
+		/* Update background size if monitor changed */
+		wlr_scene_rect_set_size(m->stats_panel_bg, m->stats_panel_width, m->m.height);
+		wlr_scene_rect_set_size(m->stats_panel_border, 3, m->m.height);
+		/* Clear only dynamic content nodes */
+		wl_list_for_each_safe(node, tmp, &m->stats_panel_content->children, link)
+			wlr_scene_node_destroy(node);
+	}
 
 	line_height = statusfont.height + 8;
 	col2_x = m->stats_panel_width / 2;
 	y_offset = padding;
-	mod.tree = m->stats_panel_tree;
+	mod.tree = m->stats_panel_content;
 
 	/* Header */
 	snprintf(line, sizeof(line), "PERFORMANCE MONITOR");

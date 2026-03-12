@@ -197,6 +197,8 @@ focusclient(Client *c, int lift)
 		wl_list_insert(&fstack, &c->flink);
 		selmon = c->mon;
 		c->isurgent = 0;
+		/* Invalidate fullscreen classification cache */
+		c->mon->classify_cache_client = NULL;
 
 		/* Don't change border color if there is an exclusive focus or we are
 		 * handling a drag operation */
@@ -364,6 +366,20 @@ void
 fullscreennotify(struct wl_listener *listener, void *data)
 {
 	Client *c = wl_container_of(listener, c, fullscreen);
+	if (c->fakefullscreen) {
+		/* Game already in fake fullscreen — ack any request, stay tiled */
+		client_set_fullscreen(c, 1);
+		return;
+	}
+	/* Game requesting fullscreen for the first time → fake it */
+	if (client_wants_fullscreen(c) && looks_like_game(c)) {
+		c->fakefullscreen = 1;
+		c->bw = 0;
+		client_set_fullscreen(c, 1);
+		arrange(c->mon);
+		return;
+	}
+	/* Non-game clients: normal fullscreen behavior */
 	setfullscreen(c, client_wants_fullscreen(c));
 }
 
@@ -499,14 +515,13 @@ mapnotify(struct wl_listener *listener, void *data)
 	}
 
 	/*
-	 * AUTO-FULLSCREEN FOR GAMES
+	 * FAKE FULLSCREEN FOR GAMES
 	 *
-	 * Steam games often start in windowed mode and then request fullscreen
-	 * after a delay (sometimes several seconds). This causes an annoying
-	 * flash where the game appears windowed before going fullscreen.
-	 *
-	 * To fix this, we detect games at map time and immediately set them
-	 * to fullscreen, skipping the windowed phase entirely.
+	 * Games are detected at map time and placed in "fake fullscreen":
+	 * the client is told it's fullscreen (protocol lie), but it stays
+	 * tiled with bw=0 so it fills the tile completely. Real fullscreen
+	 * (with game mode, VRR, etc.) only activates when the user manually
+	 * presses modkey+f.
 	 *
 	 * Detection criteria:
 	 * - Client is a child process of Steam (game launcher)
@@ -514,24 +529,18 @@ mapnotify(struct wl_listener *listener, void *data)
 	 * - Client requests tearing (low-latency mode used by games)
 	 */
 	if (!c->isfloating && !c->isfullscreen && looks_like_game(c)) {
-		wlr_log(WLR_INFO, "Auto-fullscreen: detected game '%s', setting fullscreen immediately",
+		wlr_log(WLR_INFO, "Fake fullscreen: detected game '%s', tiling with no borders",
 			client_get_appid(c) ? client_get_appid(c) : "(unknown)");
-		setfullscreen(c, 1);
-		/* Immediately focus the game */
-		exclusive_focus = NULL;
+		c->fakefullscreen = 1;
+		c->bw = 0;
+		client_set_fullscreen(c, 1);  /* Tell client it's fullscreen (protocol lie) */
 		focusclient(c, 1);
-		/*
-		 * Schedule a delayed refocus for XWayland games.
-		 * Wine/Proton games often need extra time after mapping before
-		 * they properly accept keyboard input. Without this, users
-		 * can't skip intros until they switch tags and back.
-		 */
 #ifdef XWAYLAND
 		if (c->type == X11)
 			schedule_game_refocus(c, 150);
 #endif
 		printstatus();
-		return; /* Skip unset_fullscreen logic - we just set fullscreen */
+		return; /* Skip unset_fullscreen logic - game is fake fullscreen */
 	}
 
 	printstatus();
@@ -655,8 +664,15 @@ setfullscreen(Client *c, int fullscreen)
 	c->isfullscreen = fullscreen;
 	if (!c->mon || !client_surface(c)->mapped)
 		return;
-	c->bw = fullscreen ? 0 : borderpx;
-	client_set_fullscreen(c, fullscreen);
+
+	if (c->fakefullscreen && !fullscreen) {
+		/* Returning from real → fake fullscreen: stay borderless, keep protocol lie */
+		c->bw = 0;
+		client_set_fullscreen(c, 1);
+	} else {
+		c->bw = fullscreen ? 0 : borderpx;
+		client_set_fullscreen(c, fullscreen);
+	}
 	wlr_scene_node_reparent(&c->scene->node, layers[c->isfullscreen
 			? LyrFS : c->isfloating ? LyrFloat : LyrTile]);
 
@@ -880,6 +896,12 @@ unmapnotify(struct wl_listener *listener, void *data)
 		set_adaptive_sync(m, 0);
 		restore_max_refresh_rate(m);
 	}
+
+	/* Invalidate fullscreen classification cache */
+	if (c->mon)
+		c->mon->classify_cache_client = NULL;
+	else if (selmon)
+		selmon->classify_cache_client = NULL;
 
 	wlr_scene_node_destroy(&c->scene->node);
 	printstatus();

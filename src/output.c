@@ -689,6 +689,14 @@ classify_fullscreen_content(Monitor *m, int *out_game, int *out_video, int *out_
 {
 	Client *c = focustop(m);
 
+	/* Return cached result if the top client hasn't changed */
+	if (c == m->classify_cache_client) {
+		*out_game = m->classify_cache_game;
+		*out_video = m->classify_cache_video;
+		*out_tearing = m->classify_cache_tearing;
+		return;
+	}
+
 	*out_game = 0;
 	*out_video = 0;
 	*out_tearing = 0;
@@ -699,6 +707,11 @@ classify_fullscreen_content(Monitor *m, int *out_game, int *out_video, int *out_
 		if (*out_game && !*out_video)
 			*out_tearing = 1;
 	}
+
+	m->classify_cache_client = c;
+	m->classify_cache_game = *out_game;
+	m->classify_cache_video = *out_video;
+	m->classify_cache_tearing = *out_tearing;
 }
 
 static void
@@ -733,12 +746,9 @@ track_game_frame_pacing(Monitor *m, uint64_t frame_start_ns)
 				/* Predictive frame timing */
 				m->predicted_next_frame_ns = frame_start_ns + avg_interval;
 
-				/* Add margin based on variance */
+				/* Add margin based on variance (sqrt = stddev) */
 				if (m->frame_variance_ns > 0) {
-					uint64_t margin = 0;
-					uint64_t v = m->frame_variance_ns;
-					while (v > margin * margin)
-						margin += 100000; /* 0.1ms steps */
+					uint64_t margin = (uint64_t)ceil(sqrt((double)m->frame_variance_ns));
 					m->predicted_next_frame_ns += margin;
 				}
 
@@ -843,12 +853,10 @@ calculate_frame_repeat(Monitor *m, int is_game, int allow_tearing)
 		if (error > 0.35f)
 			continue;
 
-		/*
-		 * Slight preference for effective FPS >= game FPS (game can
-		 * keep up).  Penalize N where effective > game by a small
-		 * amount so we don't over-throttle unnecessarily.
-		 */
-		if (effective_fps > game_fps)
+		/* Penalize N where effective FPS is BELOW game FPS
+		 * (game produces frames faster than display shows them → drops).
+		 * When effective >= game, the game paces itself naturally. */
+		if (effective_fps < game_fps)
 			error *= 1.1f;
 
 		if (error < best_error) {
@@ -871,7 +879,17 @@ apply:
 	} else if (best_n == m->frame_repeat_candidate) {
 		/* Same candidate as last vblank — age it */
 		m->frame_repeat_candidate_age++;
-		if (m->frame_repeat_candidate_age >= FRAME_REPEAT_HYSTERESIS) {
+		/* Adaptive hysteresis: fast transitions for large FPS changes,
+		 * slow transitions for small fluctuations near boundaries */
+		int hysteresis_threshold = FRAME_REPEAT_HYSTERESIS;
+		if (m->frame_repeat_count > 0 && best_n != m->frame_repeat_count) {
+			float old_effective = display_hz / (float)m->frame_repeat_count;
+			float new_effective = (best_n > 1) ? display_hz / (float)best_n : game_fps;
+			float change_pct = fabsf(new_effective - old_effective) / old_effective;
+			if (change_pct > 0.3f)
+				hysteresis_threshold = 8;
+		}
+		if (m->frame_repeat_candidate_age >= hysteresis_threshold) {
 			/* Stable long enough — apply the change.
 			 * Let the current repeat cycle finish before switching
 			 * to avoid a timing glitch mid-cycle. */
@@ -968,6 +986,8 @@ rendermon(struct wl_listener *listener, void *data)
 	int state_built = 0;
 
 	frame_start_ns = get_time_ns();
+	now.tv_sec = frame_start_ns / 1000000000ULL;
+	now.tv_nsec = frame_start_ns % 1000000000ULL;
 
 	present_videoplayer_frame(m, frame_start_ns);
 
@@ -1007,7 +1027,6 @@ rendermon(struct wl_listener *listener, void *data)
 			/* No new video frame - hold */
 			wlr_output_state_finish(&state);
 			wlr_output_schedule_frame(m->wlr_output);
-			clock_gettime(CLOCK_MONOTONIC, &now);
 			wlr_scene_output_send_frame_done(m->scene_output, &now);
 			return;
 		}
@@ -1043,19 +1062,18 @@ rendermon(struct wl_listener *listener, void *data)
 		is_direct_scanout = 1;
 	}
 
-	/* Track scanout state transitions and show notification */
+	/* Track scanout state transitions.
+	 * NOTE: Do NOT show OSD here — the OSD scene node would immediately
+	 * break scanout on the next frame, creating a ping-pong loop where
+	 * scanout activates, OSD appears, scanout deactivates (3 sec), OSD
+	 * hides, scanout re-activates, repeat forever. Log only. */
 	if (is_direct_scanout && !m->direct_scanout_active) {
 		m->direct_scanout_active = 1;
 		m->frame_pacing_active = 1; /* Enable frame pacing for direct scanout */
-		if (!m->direct_scanout_notified) {
-			show_hz_osd(m, "Direct Scanout");
-			m->direct_scanout_notified = 1;
-		}
 		wlr_log(WLR_INFO, "Direct scanout activated on %s - frame pacing enabled",
 			m->wlr_output->name);
 	} else if (!is_direct_scanout && m->direct_scanout_active) {
 		m->direct_scanout_active = 0;
-		m->direct_scanout_notified = 0; /* Reset so next scanout shows OSD again */
 		wlr_log(WLR_INFO, "Direct scanout deactivated on %s - stats: %lu presented, %lu dropped, %lu held",
 			m->wlr_output->name, m->frames_presented, m->frames_dropped, m->frames_held);
 		/* Keep frame_pacing_active if game or video cadence is active */
@@ -1077,7 +1095,8 @@ rendermon(struct wl_listener *listener, void *data)
 				m->wlr_output->name);
 		}
 		use_frame_pacing = 1;
-		track_game_frame_pacing(m, frame_start_ns);
+		if (needs_frame)
+			track_game_frame_pacing(m, frame_start_ns);
 	}
 
 	/* Frame doubling/tripling for smooth low-FPS playback (non-VRR).
@@ -1092,7 +1111,14 @@ rendermon(struct wl_listener *listener, void *data)
 		 * the Bresenham cadence handles pacing when active,
 		 * otherwise let the player run freely. */
 	} else if (is_game && m->frame_pacing_active && !m->game_vrr_active && !allow_tearing) {
-		calculate_frame_repeat(m, is_game, allow_tearing);
+		/* Skip recalculation if FPS hasn't changed by more than 2% */
+		float fps_delta = m->estimated_game_fps - m->frame_repeat_last_fps;
+		if (fps_delta < 0) fps_delta = -fps_delta;
+		if (m->frame_repeat_last_fps <= 0.0f ||
+		    fps_delta > m->frame_repeat_last_fps * 0.02f) {
+			m->frame_repeat_last_fps = m->estimated_game_fps;
+			calculate_frame_repeat(m, is_game, allow_tearing);
+		}
 	} else if (m->frame_repeat_enabled) {
 		m->frame_repeat_enabled = 0;
 		m->frame_repeat_count = 1;
@@ -1125,7 +1151,7 @@ rendermon(struct wl_listener *listener, void *data)
 	 */
 	if (fps_limit_enabled && fps_limit_value > 0 && is_game) {
 		uint64_t target_interval_ns = 1000000000ULL / (uint64_t)fps_limit_value;
-		uint64_t now_ns = get_time_ns();
+		uint64_t now_ns = frame_start_ns;
 		uint64_t elapsed_ns = 0;
 
 		if (m->fps_limit_last_frame_ns > 0)
@@ -1203,7 +1229,6 @@ rendermon(struct wl_listener *listener, void *data)
 	 * We always send this, even if we didn't commit, because clients
 	 * need to know a vblank occurred for proper timing.
 	 */
-	clock_gettime(CLOCK_MONOTONIC, &now);
 	wlr_scene_output_send_frame_done(m->scene_output, &now);
 }
 
@@ -2498,6 +2523,16 @@ show_hz_osd(Monitor *m, const char *msg)
 
 	if (!m || !statusfont.font || !msg || !*msg)
 		return;
+
+	/* Don't render OSD if direct scanout is active on this monitor.
+	 * Any visible scene node in LyrOverlay would immediately break
+	 * scanout, forcing GPU composition for the 3-second OSD duration.
+	 * Log the message instead so it's still visible in debug output. */
+	if (m->direct_scanout_active) {
+		wlr_log(WLR_INFO, "OSD suppressed (scanout active on %s): %s",
+			m->wlr_output->name, msg);
+		return;
+	}
 
 	/* Create tree if needed */
 	if (!m->hz_osd_tree) {

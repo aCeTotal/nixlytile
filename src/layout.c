@@ -108,6 +108,10 @@ arrange(Monitor *m)
 		 */
 		wlr_scene_node_set_enabled(&layers[LyrBg]->node, !covers_full_screen);
 		wlr_scene_node_set_enabled(&root_bg->node, !covers_full_screen);
+		wlr_scene_node_set_enabled(&layers[LyrBottom]->node, !covers_full_screen);
+		wlr_scene_node_set_enabled(&layers[LyrTile]->node, !covers_full_screen);
+		wlr_scene_node_set_enabled(&layers[LyrFloat]->node, !covers_full_screen);
+		wlr_scene_node_set_enabled(&layers[LyrTop]->node, !covers_full_screen);
 
 		/*
 		 * AUTOMATIC FOCUS FOR FULLSCREEN CLIENTS
@@ -123,6 +127,10 @@ arrange(Monitor *m)
 		wlr_scene_node_set_enabled(&m->fullscreen_bg->node, 0);
 		wlr_scene_node_set_enabled(&layers[LyrBg]->node, 1);
 		wlr_scene_node_set_enabled(&root_bg->node, 1);
+		wlr_scene_node_set_enabled(&layers[LyrBottom]->node, 1);
+		wlr_scene_node_set_enabled(&layers[LyrTile]->node, 1);
+		wlr_scene_node_set_enabled(&layers[LyrFloat]->node, 1);
+		wlr_scene_node_set_enabled(&layers[LyrTop]->node, 1);
 	}
 
 	strncpy(m->ltsymbol, m->lt[m->sellt]->symbol, LENGTH(m->ltsymbol));
@@ -133,12 +141,14 @@ arrange(Monitor *m)
 		if (c->mon != m || c->scene->node.parent == layers[LyrFS])
 			continue;
 
-		wlr_scene_node_reparent(&c->scene->node,
+		struct wlr_scene_tree *target =
 				(!m->lt[m->sellt]->arrange && c->isfloating)
 						? layers[LyrTile]
 						: (m->lt[m->sellt]->arrange && c->isfloating)
 								? layers[LyrFloat]
-								: c->scene->node.parent);
+								: NULL;
+		if (target && c->scene->node.parent != target)
+			wlr_scene_node_reparent(&c->scene->node, target);
 	}
 
 	if (m->lt[m->sellt]->arrange)
