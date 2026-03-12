@@ -82,6 +82,17 @@ commitnotify(struct wl_listener *listener, void *data)
 	/* mark a pending resize as completed */
 	if (c->resize && c->resize <= c->surface.xdg->current.configure_serial) {
 		c->resize = 0;
+		/*
+		 * If a newer size arrived while we waited for the ack, send it
+		 * immediately instead of discarding it.  This prevents neighbor
+		 * tiles from "lagging behind" during interactive resize — the
+		 * client gets the latest requested geometry right away.
+		 */
+		if (c->pending_resize_w > 0 && c->pending_resize_h > 0 &&
+		    (c->pending_resize_w != c->surface.xdg->toplevel->current.width ||
+		     c->pending_resize_h != c->surface.xdg->toplevel->current.height)) {
+			c->resize = client_set_size(c, c->pending_resize_w, c->pending_resize_h);
+		}
 		c->pending_resize_w = c->pending_resize_h = -1;
 	}
 

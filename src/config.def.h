@@ -51,9 +51,9 @@ const float statusbar_thumb_window[] = COLOR(0xffffff55);
 /* This conforms to the xdg-protocol. Set the alpha to zero to restore the old behavior */
 const float fullscreen_bg[]         = {0.1f, 0.1f, 0.1f, 1.0f}; /* You can also use glsl colors */
 const float resize_factor           = 0.0002f; /* Resize multiplier for mouse resizing, depends on mouse sensivity. */
-const uint32_t resize_interval_ms   = 24; /* Min interval between mouse-driven resize updates (higher smooths heavy apps). */
-const double   resize_min_pixels    = 3.0; /* Min pointer movement before a new resize if within interval. */
-const float    resize_ratio_epsilon = 0.002f; /* Smallest ratio change that should trigger an arrange. */
+const uint32_t resize_interval_ms   = 8; /* Min interval between mouse-driven resize updates (ms). */
+const double   resize_min_pixels    = 1.0; /* Min pointer movement (px) before a new resize if within interval. */
+const float    resize_ratio_epsilon = 0.001f; /* Smallest ratio change that should trigger an arrange. */
 
 /* window resizing */
 const int lock_cursor = 0;	/* 1: lock cursor, 0: don't lock */

@@ -2546,6 +2546,8 @@ void apply_scheduler_tuning(void);
 void restore_scheduler_tuning(void);
 void apply_gpu_power_state(void);
 void restore_gpu_power_state(void);
+void apply_gpu_sched_priority(pid_t pid);
+void restore_gpu_sched_priority(pid_t pid);
 void apply_dirty_writeback_tuning(void);
 void restore_dirty_writeback_tuning(void);
 void apply_disable_split_lock(void);
@@ -2595,6 +2597,23 @@ void cleanup(void);
 void cleanuplisteners(void);
 void handlesig(int signo);
 void spawn(const Arg *arg);
+
+/*
+ * Detach a forked child from the compositor's event loop.
+ * Must be called in the child after fork(), before exec/exit.
+ * Closes the inherited wayland event loop epoll fd and resets
+ * signal handlers to prevent the child from interacting with
+ * compositor state (DRM, libinput, timers).
+ */
+static inline void
+fork_detach(void)
+{
+	close(wl_event_loop_get_fd(event_loop));
+	signal(SIGCHLD, SIG_DFL);
+	signal(SIGINT, SIG_DFL);
+	signal(SIGTERM, SIG_DFL);
+	signal(SIGPIPE, SIG_DFL);
+}
 void quit(const Arg *arg);
 uint64_t get_time_ns(void);
 uint64_t monotonic_msec(void);

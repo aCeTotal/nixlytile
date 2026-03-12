@@ -141,6 +141,7 @@ focus_or_launch_app(const char *app_id, const char *launch_cmd)
 		if (pid == 0) {
 			dup2(STDERR_FILENO, STDOUT_FILENO);
 			setsid();
+			fork_detach();
 			if (should_use_dgpu(launch_cmd))
 				set_dgpu_env();
 			if (is_steam_cmd(launch_cmd)) {
@@ -1692,6 +1693,165 @@ restore_gpu_power_state(void)
 }
 
 /*
+ * GPU Scheduling Priority — Boost game process GPU context priority.
+ *
+ * AMD (amdgpu): Use DRM_IOCTL_AMDGPU_SCHED to set process-level GPU
+ * scheduling priority override.  Requires DRM master (compositor has it).
+ * We duplicate the game's DRM fd via pidfd_getfd() and issue the ioctl.
+ *
+ * Intel (i915/xe): No cross-process GPU priority ioctl exists.  The nice
+ * value we already set (-10) causes Mesa/ANV to request elevated GPU
+ * context priority automatically when the game creates its GPU contexts.
+ *
+ * The boost is best-effort — failures are logged but not fatal.
+ */
+#include <libdrm/amdgpu_drm.h>
+
+#ifndef __NR_pidfd_getfd
+#define __NR_pidfd_getfd 438
+#endif
+
+static int gpu_sched_applied = 0;
+static int gpu_sched_local_fd = -1;  /* duplicated DRM fd from game process */
+
+/*
+ * Find the game process's DRM render node fd by scanning /proc/<pid>/fd/.
+ * Returns the fd number (in the target process's fd table), or -1.
+ */
+static int
+find_process_drm_fd(pid_t pid)
+{
+	char dir_path[64], link_path[80], target[256];
+	DIR *d;
+	struct dirent *ent;
+	ssize_t len;
+
+	snprintf(dir_path, sizeof(dir_path), "/proc/%d/fd", pid);
+	d = opendir(dir_path);
+	if (!d)
+		return -1;
+
+	while ((ent = readdir(d)) != NULL) {
+		if (ent->d_name[0] == '.')
+			continue;
+		snprintf(link_path, sizeof(link_path), "/proc/%d/fd/%s", pid, ent->d_name);
+		len = readlink(link_path, target, sizeof(target) - 1);
+		if (len <= 0)
+			continue;
+		target[len] = '\0';
+		/* Match /dev/dri/renderD* or /dev/dri/card* */
+		if (strstr(target, "/dev/dri/")) {
+			int fd_num = atoi(ent->d_name);
+			closedir(d);
+			return fd_num;
+		}
+	}
+	closedir(d);
+	return -1;
+}
+
+void
+apply_gpu_sched_priority(pid_t pid)
+{
+	int gpu_idx = discrete_gpu_idx >= 0 ? discrete_gpu_idx : 0;
+	if (gpu_idx >= detected_gpu_count || pid <= 1)
+		return;
+
+	GpuInfo *gpu = &detected_gpus[gpu_idx];
+
+	if (gpu->vendor == GPU_VENDOR_AMD) {
+		/*
+		 * AMD: Use DRM_IOCTL_AMDGPU_SCHED to override the game's GPU
+		 * scheduling priority.  Steps:
+		 * 1. Find the game's DRM fd number via /proc/<pid>/fd
+		 * 2. Duplicate it into our process via pidfd_getfd()
+		 * 3. Issue PROCESS_PRIORITY_OVERRIDE on the compositor's DRM fd
+		 */
+		int target_fd_num = find_process_drm_fd(pid);
+		if (target_fd_num < 0) {
+			wlr_log(WLR_INFO, "GPU sched: no DRM fd found for PID %d", pid);
+			return;
+		}
+
+		int pidfd = syscall(__NR_pidfd_open, pid, 0);
+		if (pidfd < 0) {
+			wlr_log(WLR_INFO, "GPU sched: pidfd_open failed for PID %d: %s",
+				pid, strerror(errno));
+			return;
+		}
+
+		int local_fd = syscall(__NR_pidfd_getfd, pidfd, target_fd_num, 0);
+		close(pidfd);
+		if (local_fd < 0) {
+			wlr_log(WLR_INFO, "GPU sched: pidfd_getfd failed for PID %d fd %d: %s",
+				pid, target_fd_num, strerror(errno));
+			return;
+		}
+
+		/* Get compositor's DRM master fd from the renderer */
+		int drm_master_fd = wlr_renderer_get_drm_fd(drw);
+		if (drm_master_fd < 0) {
+			wlr_log(WLR_INFO, "GPU sched: cannot get DRM master fd");
+			close(local_fd);
+			return;
+		}
+
+		union drm_amdgpu_sched sched = {0};
+		sched.in.op = AMDGPU_SCHED_OP_PROCESS_PRIORITY_OVERRIDE;
+		sched.in.fd = local_fd;
+		sched.in.priority = AMDGPU_CTX_PRIORITY_HIGH;
+
+		if (drmIoctl(drm_master_fd, DRM_IOCTL_AMDGPU_SCHED, &sched) == 0) {
+			gpu_sched_applied = 1;
+			gpu_sched_local_fd = local_fd;  /* keep alive until restore */
+			wlr_log(WLR_INFO, "GPU sched: AMD process priority → HIGH for PID %d", pid);
+		} else {
+			wlr_log(WLR_INFO, "GPU sched: AMDGPU_SCHED ioctl failed: %s", strerror(errno));
+			close(local_fd);
+		}
+
+	} else if (gpu->vendor == GPU_VENDOR_INTEL) {
+		/*
+		 * Intel (i915/xe): No cross-process priority ioctl.
+		 * The nice=-10 we set in apply_game_priority() causes Mesa's ANV
+		 * driver to automatically request I915_CONTEXT_PARAM_PRIORITY > 0
+		 * when the game creates GPU contexts (if the process has CAP_SYS_NICE
+		 * or nice < 0).  Log that we're relying on this mechanism.
+		 */
+		gpu_sched_applied = 1;
+		wlr_log(WLR_INFO, "GPU sched: Intel — relying on nice=-10 for elevated GPU context priority");
+	}
+}
+
+void
+restore_gpu_sched_priority(pid_t pid)
+{
+	if (!gpu_sched_applied)
+		return;
+
+	int gpu_idx = discrete_gpu_idx >= 0 ? discrete_gpu_idx : 0;
+	if (gpu_idx < detected_gpu_count) {
+		GpuInfo *gpu = &detected_gpus[gpu_idx];
+
+		if (gpu->vendor == GPU_VENDOR_AMD && gpu_sched_local_fd >= 0) {
+			int drm_master_fd = wlr_renderer_get_drm_fd(drw);
+			if (drm_master_fd >= 0) {
+				union drm_amdgpu_sched sched = {0};
+				sched.in.op = AMDGPU_SCHED_OP_PROCESS_PRIORITY_OVERRIDE;
+				sched.in.fd = gpu_sched_local_fd;
+				sched.in.priority = AMDGPU_CTX_PRIORITY_NORMAL;
+				drmIoctl(drm_master_fd, DRM_IOCTL_AMDGPU_SCHED, &sched);
+			}
+			close(gpu_sched_local_fd);
+			gpu_sched_local_fd = -1;
+			wlr_log(WLR_INFO, "GPU sched: AMD process priority → NORMAL for PID %d", pid);
+		}
+	}
+
+	gpu_sched_applied = 0;
+}
+
+/*
  * Dirty Writeback Tuning — Prevent I/O stalls from page writeback.
  * Allow more dirty pages in RAM before flushing, reduces disk I/O
  * interference during texture streaming and asset loading.
@@ -1999,6 +2159,8 @@ update_game_mode(void)
 			apply_game_priority(game_mode_pid);
 			/* Isolate game and compositor to separate CPU cores */
 			apply_cpu_affinity(game_mode_pid);
+			/* Boost GPU scheduling priority for the game process */
+			apply_gpu_sched_priority(game_mode_pid);
 		}
 
 		/*
@@ -2134,6 +2296,9 @@ update_game_mode(void)
 
 			/* Restore CPU DMA latency QoS */
 			restore_cpu_latency_qos();
+
+			/* Restore GPU scheduling priority before restoring game priority */
+			restore_gpu_sched_priority(game_mode_pid);
 
 			/* Restore normal priority for the game process */
 			if (game_mode_pid > 1) {
@@ -3041,6 +3206,10 @@ stats_panel_refresh_cb(void *data)
 	/* Show priority boost if active */
 	if (game_mode_nice_applied || game_mode_ioclass_applied) {
 		y_offset += stats_render_field(&mod, "Priority:", "Boosted",
+				y_offset, line_height, padding, col2_x, label_color, good_color);
+	}
+	if (gpu_sched_applied) {
+		y_offset += stats_render_field(&mod, "GPU Sched:", "High",
 				y_offset, line_height, padding, col2_x, label_color, good_color);
 	}
 	y_offset += 8;

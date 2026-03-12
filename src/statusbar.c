@@ -1025,70 +1025,189 @@ kill_processes_with_name(const char *name)
 	return killed;
 }
 
+/* Per-process CPU time snapshot for delta computation (avoids popen("top")) */
+struct proc_cpu_snap {
+	pid_t pid;
+	unsigned long long ticks; /* utime + stime */
+};
+
+static struct proc_cpu_snap prev_cpu_snaps[512];
+static int prev_cpu_snap_count;
+static unsigned long long prev_total_cpu;
+
 int
 read_top_cpu_processes(CpuPopup *p)
 {
+	DIR *d;
+	struct dirent *ent;
 	FILE *fp;
-	char line[256];
+	char path[64], line[512], name[64];
 	int count = 0;
-	int lines = 0;
+	int ncpus = cpu_core_count > 0 ? cpu_core_count : 1;
+
+	/* Current snapshot */
+	struct {
+		pid_t pid;
+		unsigned long long ticks;
+		char name[64];
+	} cur[512];
+	int cur_count = 0;
+
+	unsigned long long total_cpu = 0;
+	unsigned long long delta_total;
 
 	if (!p)
 		return 0;
 
-	/* Use top for real-time CPU usage (not cumulative like ps pcpu) */
-	fp = popen("top -bn1 -o %CPU 2>/dev/null | tail -n +8 | head -50", "r");
+	/* 1. Read total CPU time from /proc/stat */
+	fp = fopen("/proc/stat", "r");
 	if (!fp) {
 		p->proc_count = 0;
 		return 0;
 	}
+	if (fgets(line, sizeof(line), fp)) {
+		unsigned long long user, nice, sys, idle, iowait, irq, softirq, steal;
+		if (sscanf(line, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
+		           &user, &nice, &sys, &idle, &iowait, &irq, &softirq, &steal) >= 4)
+			total_cpu = user + nice + sys + idle + iowait + irq + softirq + steal;
+	}
+	fclose(fp);
 
-	while (fgets(line, sizeof(line), fp) && lines < 128) {
-		CpuProcEntry *e;
-		pid_t pid = 0;
-		char name[64] = {0};
-		double cpu = 0.0;
-		int existing = -1;
-		char user[32], pr[8], ni[8], virt[16], res[16], shr[16], s[4];
+	if (!total_cpu) {
+		p->proc_count = 0;
+		return 0;
+	}
 
-		lines++;
-		/* top format: PID USER PR NI VIRT RES SHR S %CPU %MEM TIME+ COMMAND */
-		if (sscanf(line, "%d %31s %7s %7s %15s %15s %15s %3s %lf %*f %*s %63s",
-		           &pid, user, pr, ni, virt, res, shr, s, &cpu, name) < 10)
+	delta_total = total_cpu - prev_total_cpu;
+
+	/* 2. Scan /proc for all PIDs */
+	d = opendir("/proc");
+	if (!d) {
+		p->proc_count = 0;
+		return 0;
+	}
+
+	while ((ent = readdir(d)) != NULL && cur_count < 512) {
+		pid_t pid;
+		unsigned long long utime, stime;
+		char *comm_start, *comm_end;
+
+		if (ent->d_name[0] < '0' || ent->d_name[0] > '9')
 			continue;
+		pid = (pid_t)atoi(ent->d_name);
+		if (pid <= 1 || pid == getpid())
+			continue;
+
+		/* Read /proc/[pid]/stat */
+		snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+		fp = fopen(path, "r");
+		if (!fp)
+			continue;
+		if (!fgets(line, sizeof(line), fp)) {
+			fclose(fp);
+			continue;
+		}
+		fclose(fp);
+
+		/* Extract comm from between parentheses, then utime/stime after ')' */
+		comm_start = strchr(line, '(');
+		comm_end = strrchr(line, ')');
+		if (!comm_start || !comm_end || comm_end <= comm_start)
+			continue;
+
+		{
+			size_t clen = (size_t)(comm_end - comm_start - 1);
+			if (clen >= sizeof(name))
+				clen = sizeof(name) - 1;
+			memcpy(name, comm_start + 1, clen);
+			name[clen] = '\0';
+		}
+
+		/* Fields after ')': state(3) ppid(4) ... utime(14) stime(15) */
+		{
+			char *s = comm_end + 2; /* skip ') ' */
+			int field = 3;
+			while (*s && field < 14) {
+				if (*s == ' ')
+					field++;
+				s++;
+			}
+			if (sscanf(s, "%llu %llu", &utime, &stime) != 2)
+				continue;
+		}
+
 		if (name[0] == '[')
 			continue;
 		if (cpu_proc_is_critical(pid, name))
 			continue;
 
-		for (int i = 0; i < count; i++) {
-			if (strcmp(p->procs[i].name, name) == 0) {
-				existing = i;
-				break;
-			}
-		}
+		cur[cur_count].pid = pid;
+		cur[cur_count].ticks = utime + stime;
+		snprintf(cur[cur_count].name, sizeof(cur[cur_count].name), "%s", name);
+		cur_count++;
+	}
+	closedir(d);
 
-		if (existing >= 0) {
-			e = &p->procs[existing];
-			e->cpu += cpu;
-			if (cpu > e->max_single_cpu) {
-				e->max_single_cpu = cpu;
-				e->pid = pid;
+	/* 3. Compute CPU% from delta (skip first call when no previous data) */
+	if (prev_total_cpu && delta_total > 0) {
+		for (int i = 0; i < cur_count; i++) {
+			unsigned long long prev_ticks = 0;
+			double cpu;
+			CpuProcEntry *e;
+			int existing = -1;
+
+			/* Find previous ticks for this PID */
+			for (int j = 0; j < prev_cpu_snap_count; j++) {
+				if (prev_cpu_snaps[j].pid == cur[i].pid) {
+					prev_ticks = prev_cpu_snaps[j].ticks;
+					break;
+				}
 			}
-		} else if (count < (int)LENGTH(p->procs)) {
-			e = &p->procs[count];
-			e->pid = pid;
-			snprintf(e->name, sizeof(e->name), "%s", name);
-			e->cpu = cpu;
-			e->max_single_cpu = cpu;
-			e->y = e->height = 0;
-			e->kill_x = e->kill_y = e->kill_w = e->kill_h = 0;
-			e->has_kill = 1;
-			count++;
+
+			if (cur[i].ticks <= prev_ticks)
+				continue;
+
+			cpu = 100.0 * (double)(cur[i].ticks - prev_ticks) / (double)delta_total * ncpus;
+			if (cpu < 0.5)
+				continue;
+
+			/* Merge by name (same as original) */
+			for (int k = 0; k < count; k++) {
+				if (strcmp(p->procs[k].name, cur[i].name) == 0) {
+					existing = k;
+					break;
+				}
+			}
+
+			if (existing >= 0) {
+				e = &p->procs[existing];
+				e->cpu += cpu;
+				if (cpu > e->max_single_cpu) {
+					e->max_single_cpu = cpu;
+					e->pid = cur[i].pid;
+				}
+			} else if (count < (int)LENGTH(p->procs)) {
+				e = &p->procs[count];
+				e->pid = cur[i].pid;
+				snprintf(e->name, sizeof(e->name), "%s", cur[i].name);
+				e->cpu = cpu;
+				e->max_single_cpu = cpu;
+				e->y = e->height = 0;
+				e->kill_x = e->kill_y = e->kill_w = e->kill_h = 0;
+				e->has_kill = 1;
+				count++;
+			}
 		}
 	}
 
-	pclose(fp);
+	/* 4. Store current snapshot for next call */
+	for (int i = 0; i < cur_count && i < 512; i++) {
+		prev_cpu_snaps[i].pid = cur[i].pid;
+		prev_cpu_snaps[i].ticks = cur[i].ticks;
+	}
+	prev_cpu_snap_count = cur_count;
+	prev_total_cpu = total_cpu;
+
 	if (count > 1)
 		qsort(p->procs, (size_t)count, sizeof(p->procs[0]), cpu_proc_cmp);
 	p->proc_count = count;
@@ -1401,35 +1520,67 @@ ram_proc_cmp(const void *a, const void *b)
 int
 read_top_ram_processes(RamPopup *p)
 {
+	DIR *d;
+	struct dirent *ent;
 	FILE *fp;
-	char line[256];
+	char path[64], name[64];
 	int count = 0;
-	int lines = 0;
 	const unsigned long min_kb = 50 * 1024; /* 50 MB minimum */
+	long page_size = sysconf(_SC_PAGESIZE);
 
 	if (!p)
 		return 0;
 
-	/* ps with RSS (resident set size) in KB, sorted by memory */
-	fp = popen("ps -eo pid,rss,comm --no-headers --sort=-rss", "r");
-	if (!fp) {
+	if (page_size <= 0)
+		page_size = 4096;
+
+	d = opendir("/proc");
+	if (!d) {
 		p->proc_count = 0;
 		return 0;
 	}
 
-	while (fgets(line, sizeof(line), fp) && lines < 200 && count < 15) {
+	while ((ent = readdir(d)) != NULL) {
+		pid_t pid;
+		unsigned long resident_pages = 0;
+		unsigned long rss;
 		RamProcEntry *e;
-		pid_t pid = 0;
-		unsigned long rss = 0;
-		char name[64] = {0};
 		int existing = -1;
 
-		lines++;
-		if (sscanf(line, "%d %lu %63s", &pid, &rss, name) != 3)
+		if (ent->d_name[0] < '0' || ent->d_name[0] > '9')
 			continue;
-		if (name[0] == '[')
+		pid = (pid_t)atoi(ent->d_name);
+		if (pid <= 1)
 			continue;
+
+		/* Read /proc/[pid]/statm: size resident shared text lib data dt */
+		snprintf(path, sizeof(path), "/proc/%d/statm", pid);
+		fp = fopen(path, "r");
+		if (!fp)
+			continue;
+		if (fscanf(fp, "%*lu %lu", &resident_pages) != 1) {
+			fclose(fp);
+			continue;
+		}
+		fclose(fp);
+
+		rss = resident_pages * (unsigned long)(page_size / 1024);
 		if (rss < min_kb)
+			continue;
+
+		/* Read /proc/[pid]/comm */
+		snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+		fp = fopen(path, "r");
+		if (!fp)
+			continue;
+		name[0] = '\0';
+		if (fscanf(fp, "%63s", name) != 1 || !name[0]) {
+			fclose(fp);
+			continue;
+		}
+		fclose(fp);
+
+		if (name[0] == '[')
 			continue;
 		/* Hide system processes from RAM popup */
 		if (strcmp(name, "nixlytile") == 0 ||
@@ -1450,7 +1601,7 @@ read_top_ram_processes(RamPopup *p)
 			e->mem_kb += rss;
 			if (rss > e->mem_kb / 2)
 				e->pid = pid;
-		} else {
+		} else if (count < (int)LENGTH(p->procs)) {
 			e = &p->procs[count];
 			e->pid = pid;
 			snprintf(e->name, sizeof(e->name), "%s", name);
@@ -1462,7 +1613,7 @@ read_top_ram_processes(RamPopup *p)
 		}
 	}
 
-	pclose(fp);
+	closedir(d);
 	if (count > 1)
 		qsort(p->procs, (size_t)count, sizeof(p->procs[0]), ram_proc_cmp);
 	p->proc_count = count;

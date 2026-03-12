@@ -1021,7 +1021,7 @@ void
 wifi_scan_plan_rescan(void)
 {
 	if (wifi_scan_timer)
-		wl_event_source_timer_update(wifi_scan_timer, 500);
+		wl_event_source_timer_update(wifi_scan_timer, 2000);
 }
 
 int

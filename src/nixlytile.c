@@ -1339,12 +1339,13 @@ cleanup(void)
 	/* Stop systemd target */
 	if (fork() == 0) {
 		setsid();
+		fork_detach();
 		if (has_nixlytile_session_target()) {
 			execvp("systemctl", (char *const[]) {
 				"systemctl", "--user", "stop", "nixlytile-session.target", NULL
 			});
 		}
-		exit(1);
+		_exit(1);
 	}
 
 	/* Send close to all clients and give them time to save state */
@@ -1598,11 +1599,12 @@ run(const char *startup_cmd)
 			die("startup: fork:");
 		if (child_pid == 0) {
 			setsid();
+			fork_detach();
 			dup2(piperw[0], STDIN_FILENO);
 			close(piperw[0]);
 			close(piperw[1]);
 			execl("/bin/sh", "/bin/sh", "-c", startup_cmd, NULL);
-			die("startup: execl:");
+			_exit(127);
 		}
 		dup2(piperw[1], STDOUT_FILENO);
 		close(piperw[1]);
@@ -1614,6 +1616,8 @@ run(const char *startup_cmd)
 		pid_t import_pid;
 		setsid();
 
+		fork_detach();
+
 		/* First: import environment variables */
 		import_pid = fork();
 		if (import_pid == 0) {
@@ -1621,11 +1625,12 @@ run(const char *startup_cmd)
 				"systemctl", "--user", "import-environment",
 				"DISPLAY", "WAYLAND_DISPLAY", NULL
 			});
-			exit(1);
+			_exit(1);
 		}
 
 		/* Wait for import to complete */
-		waitpid(import_pid, NULL, 0);
+		if (import_pid > 0)
+			waitpid(import_pid, NULL, 0);
 
 		/* Second: start target */
 		if (has_nixlytile_session_target()) {
@@ -1634,7 +1639,7 @@ run(const char *startup_cmd)
 			});
 		}
 
-		exit(1);
+		_exit(1);
 	}
 
 	/* Mark stdout as non-blocking to avoid the startup script
@@ -2506,6 +2511,7 @@ spawn(const Arg *arg)
 	if (fork() == 0) {
 		dup2(STDERR_FILENO, STDOUT_FILENO);
 		setsid();
+		fork_detach();
 
 		const char *cmd = (const char *)arg->v;
 		if (!cmd || !cmd[0]) {
@@ -2538,11 +2544,12 @@ spawn(const Arg *arg)
 					} else {
 						execlp("steam", "steam", "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
 					}
+					/* execlp failed — fall through to execvp below */
 				}
 				execvp(argv[0], argv);
-				/* If execvp fails, die */
-				die("nixlytile: execvp %s failed:", argv[0]);
+				_exit(127);
 			}
+			_exit(1);
 		}
 
 		/* Runtime config: arg->v is a string, execute via shell */
@@ -2558,10 +2565,11 @@ spawn(const Arg *arg)
 				} else {
 					execlp("steam", "steam", "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
 				}
+				/* execlp failed — fall through to execl below */
 			}
 		}
 		execl("/bin/sh", "sh", "-c", cmd, NULL);
-		die("nixlytile: execl %s failed:", cmd);
+		_exit(127);
 	}
 }
 
