@@ -3252,6 +3252,9 @@ detect_gpus(void)
 			 * user override (WLR_NO_HARDWARE_CURSORS=0). */
 			setenv("WLR_NO_HARDWARE_CURSORS", "1", 0);
 
+			/* Help libgbm find NVIDIA's GBM implementation */
+			setenv("GBM_BACKEND", "nvidia-drm", 0);
+
 			char dpm_val[16] = "";
 			int dpm_fd = open("/sys/module/nvidia/parameters/NVreg_DynamicPowerManagement", O_RDONLY);
 			if (dpm_fd >= 0) {
@@ -3408,16 +3411,34 @@ set_dgpu_env(void)
 
 	switch (dgpu->vendor) {
 	case GPU_VENDOR_NVIDIA:
-		/* PRIME render offload for NVIDIA proprietary driver */
-		setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 1);
-		setenv("__NV_PRIME_RENDER_OFFLOAD_PROVIDER", "NVIDIA-G0", 1);
+		/* GLX vendor — always needed so GLX uses NVIDIA */
 		setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 1);
 		setenv("__VK_LAYER_NV_optimus", "NVIDIA_only", 1);
-		/* Also set DRI_PRIME in case nouveau is used instead */
-		if (dgpu->pci_slot_underscore[0])
-			setenv("DRI_PRIME", dgpu->pci_slot_underscore, 1);
-		else
-			setenv("DRI_PRIME", "1", 1);
+
+		/* GBM backend — helps libgbm find NVIDIA's implementation */
+		setenv("GBM_BACKEND", "nvidia-drm", 0);
+
+		/* PRIME render offload — ONLY for hybrid (iGPU + dGPU) systems.
+		 * On NVIDIA-only, these cause Xwayland EGL init to fail. */
+		if (integrated_gpu_idx >= 0) {
+			setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 1);
+			setenv("__NV_PRIME_RENDER_OFFLOAD_PROVIDER", "NVIDIA-G0", 1);
+			if (dgpu->pci_slot_underscore[0])
+				setenv("DRI_PRIME", dgpu->pci_slot_underscore, 1);
+			else
+				setenv("DRI_PRIME", "1", 1);
+			wlr_log(WLR_INFO, "NVIDIA: hybrid mode (iGPU + dGPU), PRIME offload enabled");
+		} else {
+			wlr_log(WLR_INFO, "NVIDIA: single-GPU mode, PRIME offload skipped");
+		}
+
+		/* DRI_PRIME for nouveau (doesn't use PRIME offload vars) */
+		if (strcmp(dgpu->driver, "nouveau") == 0 && integrated_gpu_idx >= 0) {
+			if (dgpu->pci_slot_underscore[0])
+				setenv("DRI_PRIME", dgpu->pci_slot_underscore, 1);
+			else
+				setenv("DRI_PRIME", "1", 1);
+		}
 
 		/*
 		 * NVIDIA frame pacing & performance environment variables.
