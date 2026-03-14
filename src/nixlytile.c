@@ -1235,6 +1235,8 @@ int joystick_nav_repeat_started = 0;
 
 
 
+static void close_logging(void);
+
 void
 cleanup(void)
 {
@@ -1385,6 +1387,7 @@ cleanup(void)
 	/* Destroy after the wayland display (when the monitors are already destroyed)
 	   to avoid destroying them with an invalid scene output. */
 	wlr_scene_node_destroy(&scene->tree.node);
+	close_logging();
 }
 
 
@@ -2186,6 +2189,103 @@ ensure_shell_env(void)
 		setenv("SHELL", pw->pw_shell, 1);
 }
 
+static void
+log_callback(enum wlr_log_importance importance, const char *fmt, va_list args)
+{
+	if (!log_file)
+		return;
+
+	struct timespec ts;
+	struct tm tm;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	localtime_r(&ts.tv_sec, &tm);
+
+	const char *level = "???";
+	switch (importance) {
+	case WLR_ERROR: level = "ERROR"; break;
+	case WLR_INFO:  level = "INFO";  break;
+	case WLR_DEBUG: level = "DEBUG"; break;
+	default: break;
+	}
+
+	char prefix[64];
+	snprintf(prefix, sizeof(prefix), "[%02d:%02d:%02d.%03ld] [%s] ",
+		tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000, level);
+
+	/* Always write to log file */
+	va_list args_copy;
+	va_copy(args_copy, args);
+	fprintf(log_file, "%s", prefix);
+	vfprintf(log_file, fmt, args_copy);
+	fputc('\n', log_file);
+	fflush(log_file);
+	va_end(args_copy);
+
+	/* Also print to real terminal when -d flag is used */
+	if (log_level == WLR_DEBUG && log_stderr_fd >= 0) {
+		dprintf(log_stderr_fd, "%s", prefix);
+		va_copy(args_copy, args);
+		vdprintf(log_stderr_fd, fmt, args_copy);
+		va_end(args_copy);
+		dprintf(log_stderr_fd, "\n");
+	}
+}
+
+static void
+init_logging(void)
+{
+	#define NIXLY_LOG_DIR "/tmp/nixlylogging"
+	mkdir(NIXLY_LOG_DIR, 0755);
+
+	/* Save original stderr before redirect */
+	log_stderr_fd = dup(STDERR_FILENO);
+
+	/* Open wlroots log file */
+	log_file = fopen(NIXLY_LOG_DIR "/wlroots.log", "w");
+	if (log_file) {
+		struct timespec ts;
+		struct tm tm;
+		clock_gettime(CLOCK_REALTIME, &ts);
+		localtime_r(&ts.tv_sec, &tm);
+		fprintf(log_file, "=== nixlytile started %04d-%02d-%02d %02d:%02d:%02d ===\n",
+			tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+			tm.tm_hour, tm.tm_min, tm.tm_sec);
+		fflush(log_file);
+	}
+
+	/* Redirect stderr → file so XWayland crash output is captured.
+	 * XWayland is a child process that inherits our stderr. */
+	int stderr_log = open(NIXLY_LOG_DIR "/xwayland.log",
+		O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (stderr_log >= 0) {
+		/* Write header */
+		struct timespec ts;
+		struct tm tm;
+		clock_gettime(CLOCK_REALTIME, &ts);
+		localtime_r(&ts.tv_sec, &tm);
+		dprintf(stderr_log, "=== stderr/xwayland log started %04d-%02d-%02d %02d:%02d:%02d ===\n",
+			tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+			tm.tm_hour, tm.tm_min, tm.tm_sec);
+		dup2(stderr_log, STDERR_FILENO);
+		close(stderr_log);
+	}
+	#undef NIXLY_LOG_DIR
+}
+
+static void
+close_logging(void)
+{
+	if (log_file) {
+		fclose(log_file);
+		log_file = NULL;
+	}
+	if (log_stderr_fd >= 0) {
+		dup2(log_stderr_fd, STDERR_FILENO);
+		close(log_stderr_fd);
+		log_stderr_fd = -1;
+	}
+}
+
 void
 setup(void)
 {
@@ -2196,7 +2296,8 @@ setup(void)
 	for (i = 0; i < (int)LENGTH(sig); i++)
 		sigaction(sig[i], &sa, NULL);
 
-	wlr_log_init(log_level, NULL);
+	init_logging();
+	wlr_log_init(WLR_DEBUG, log_callback);
 
 	/* Make sure spawned terminals get the real login shell, not the minimal wrapper shell */
 	ensure_shell_env();

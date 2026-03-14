@@ -3,6 +3,8 @@
 #include "client.h"
 
 /* variables */
+FILE *log_file = NULL;
+int log_stderr_fd = -1; /* saved original stderr for die() */
 pid_t child_pid = -1;
 int locked;
 void *exclusive_focus;

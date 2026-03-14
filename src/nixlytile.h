@@ -1352,6 +1352,8 @@ extern float resize_ratio_epsilon;
 extern int modal_file_search_minlen;
 extern int lock_cursor;
 extern int log_level;
+extern FILE *log_file;
+extern int log_stderr_fd;
 extern int nixlytile_mode;
 extern char htpc_wallpaper_path[PATH_MAX];
 extern const Rule rules[];

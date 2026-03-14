@@ -9,9 +9,16 @@
 
 #include "util.h"
 
+/* When logging redirects stderr, die() must still print to the real terminal */
+extern int log_stderr_fd;
+
 void
 die(const char *fmt, ...) {
 	va_list ap;
+
+	/* Restore real stderr so the user sees fatal errors on the terminal */
+	if (log_stderr_fd >= 0)
+		dup2(log_stderr_fd, STDERR_FILENO);
 
 	va_start(ap, fmt);
 	vfprintf(stderr, fmt, ap);
