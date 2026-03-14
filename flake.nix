@@ -74,6 +74,7 @@
             swaybg
             brightnessctl
             xdg-utils          # xdg-open
+            xwayland           # X11 compatibility
 
             # File manager
             xfce.thunar
