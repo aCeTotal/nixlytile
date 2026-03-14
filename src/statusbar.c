@@ -3196,42 +3196,17 @@ backlight_percent(void)
 	unsigned long long cur, max;
 	double percent;
 
-	/* Prefer brightnessctl */
-	if (readulong_cmd("brightnessctl g", &cur) == 0 &&
-			readulong_cmd("brightnessctl m", &max) == 0 && max > 0) {
+	/* No backlight device = not a laptop, skip everything */
+	if (!backlight_available)
+		return -1.0;
+
+	/* Try direct sysfs read first (no process spawn) */
+	if (readulong(backlight_brightness_path, &cur) == 0 &&
+			readulong(backlight_max_path, &max) == 0 && max > 0) {
 		if (cur > max)
 			cur = max;
 		light_cached_percent = ((double)cur * 100.0) / (double)max;
 		return light_cached_percent;
-	}
-
-	/* Fallback to light -G */
-	{
-		FILE *fp = popen("light -G", "r");
-		if (fp) {
-			if (fscanf(fp, "%lf", &percent) == 1) {
-				pclose(fp);
-				if (percent < 0.0)
-					percent = -1.0;
-				if (percent > 100.0)
-					percent = 100.0;
-				if (percent >= 0.0)
-					light_cached_percent = percent;
-				return percent;
-			}
-			pclose(fp);
-		}
-	}
-
-	/* Fallback to sysfs if available */
-	if (backlight_available) {
-		if (readulong(backlight_brightness_path, &cur) == 0 &&
-				readulong(backlight_max_path, &max) == 0 && max > 0) {
-			if (cur > max)
-				cur = max;
-			light_cached_percent = ((double)cur * 100.0) / (double)max;
-			return light_cached_percent;
-		}
 	}
 
 	/* Fallback to brightnessctl */
@@ -3269,20 +3244,22 @@ set_backlight_percent(double percent)
 {
 	unsigned long long max, target;
 	FILE *fp;
-	int attempted __attribute__((unused)) = 0;
+
+	/* No backlight device = not a laptop, do nothing */
+	if (!backlight_available)
+		return -1;
 
 	if (percent < 0.0)
 		percent = 0.0;
 	if (percent > 100.0)
 		percent = 100.0;
 
-	if (backlight_available && readulong(backlight_max_path, &max) == 0 && max > 0) {
+	if (readulong(backlight_max_path, &max) == 0 && max > 0) {
 		target = (unsigned long long)lround((percent / 100.0) * (double)max);
 		if (target > max)
 			target = max;
 
 		if (backlight_writable && (fp = fopen(backlight_brightness_path, "w"))) {
-			attempted = 1;
 			if (fprintf(fp, "%llu", target) >= 0) {
 				fclose(fp);
 				light_cached_percent = percent;
@@ -3316,6 +3293,10 @@ set_backlight_relative(double delta_percent)
 	char arg[32];
 	char light_arg[32];
 	double cur;
+
+	/* No backlight device = not a laptop, do nothing */
+	if (!backlight_available)
+		return -1;
 
 	if (delta_percent == 0.0)
 		return 0;

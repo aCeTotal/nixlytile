@@ -12,12 +12,14 @@ apply_startup_defaults(void)
 	if (applied)
 		return;
 
-	/* Backlight */
-	if (set_backlight_percent(light_default) == 0) {
-		light_last_percent = light_default;
-		light_cached_percent = light_default;
-	} else if (light_cached_percent < 0.0) {
-		light_cached_percent = light_default;
+	/* Backlight - only on laptops with a backlight device */
+	if (backlight_available) {
+		if (set_backlight_percent(light_default) == 0) {
+			light_last_percent = light_default;
+			light_cached_percent = light_default;
+		} else if (light_cached_percent < 0.0) {
+			light_cached_percent = light_default;
+		}
 	}
 
 	/*

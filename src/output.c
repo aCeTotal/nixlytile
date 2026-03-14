@@ -1051,6 +1051,29 @@ rendermon(struct wl_listener *listener, void *data)
 	if (!state_built) {
 		wlr_output_state_init(&state);
 		needs_frame = wlr_scene_output_build_state(m->scene_output, &state, &opts);
+
+		/* If build_state failed and 10-bit is active, the backend may not
+		 * support the 10-bit render format at composition time (e.g. NVIDIA).
+		 * Fall back to 8-bit and retry. */
+		if (!needs_frame && m->render_10bit_active) {
+			struct wlr_output_state fb;
+			wlr_output_state_finish(&state);
+			wlr_log(WLR_INFO, "Scene build failed with 10-bit on %s, falling back to 8-bit",
+				m->wlr_output->name);
+			wlr_output_state_init(&fb);
+			wlr_output_state_set_render_format(&fb, DRM_FORMAT_XRGB8888);
+			if (m->wlr_output->current_mode)
+				wlr_output_state_set_mode(&fb, m->wlr_output->current_mode);
+			if (wlr_output_test_state(m->wlr_output, &fb) &&
+			    wlr_output_commit_state(m->wlr_output, &fb)) {
+				m->render_10bit_active = 0;
+				wlr_log(WLR_INFO, "Switched to 8-bit rendering on %s", m->wlr_output->name);
+			}
+			wlr_output_state_finish(&fb);
+			/* Retry scene build with new format */
+			wlr_output_state_init(&state);
+			needs_frame = wlr_scene_output_build_state(m->scene_output, &state, &opts);
+		}
 	}
 
 	/*
@@ -1793,14 +1816,29 @@ enable_10bit_rendering(Monitor *m)
 			/* Show notification */
 			toast_show(m, "10-bit color", 1500);
 		} else {
-			wlr_log(WLR_ERROR, "Failed to commit 10-bit state on %s", m->wlr_output->name);
+			wlr_log(WLR_ERROR, "Failed to commit 10-bit state on %s, falling back to 8-bit",
+				m->wlr_output->name);
 		}
 	} else {
-		wlr_log(WLR_DEBUG, "10-bit render format not supported by backend on %s",
+		wlr_log(WLR_INFO, "10-bit render format not supported by backend on %s, using 8-bit",
 			m->wlr_output->name);
 	}
 
 	wlr_output_state_finish(&state);
+
+	/* If 10-bit failed, explicitly ensure 8-bit format is active */
+	if (!success) {
+		struct wlr_output_state fallback;
+		wlr_output_state_init(&fallback);
+		wlr_output_state_set_render_format(&fallback, DRM_FORMAT_XRGB8888);
+		if (m->wlr_output->current_mode)
+			wlr_output_state_set_mode(&fallback, m->wlr_output->current_mode);
+		if (wlr_output_test_state(m->wlr_output, &fallback))
+			wlr_output_commit_state(m->wlr_output, &fallback);
+		wlr_output_state_finish(&fallback);
+		m->render_10bit_active = 0;
+	}
+
 	return success;
 }
 

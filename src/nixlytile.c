@@ -2534,6 +2534,8 @@ setup(void)
 		wl_signal_add(&xwayland->events.new_surface, &new_xwayland_surface);
 
 		setenv("DISPLAY", xwayland->display_name, 1);
+		wlr_log(WLR_INFO, "XWayland initialized (lazy mode), DISPLAY=%s",
+			xwayland->display_name);
 	} else {
 		wlr_log(WLR_ERROR, "failed to setup XWayland X server, continuing without it");
 	}
@@ -2834,6 +2836,8 @@ void
 xwaylandready(struct wl_listener *listener, void *data)
 {
 	struct wlr_xcursor *xcursor;
+
+	wlr_log(WLR_INFO, "XWayland server is ready (DISPLAY=%s)", xwayland->display_name);
 
 	/* assign the one and only seat */
 	wlr_xwayland_set_seat(xwayland, seat);

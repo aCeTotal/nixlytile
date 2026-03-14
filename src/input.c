@@ -130,9 +130,14 @@ adjust_backlight_by_steps(int steps)
 	if (steps == 0)
 		return 0;
 
+	/* Re-probe in case a dock/undock changed backlight availability */
 	backlight_available = findbacklightdevice(backlight_brightness_path,
 			sizeof(backlight_brightness_path),
 			backlight_max_path, sizeof(backlight_max_path));
+
+	/* No backlight device = not a laptop, nothing to adjust */
+	if (!backlight_available)
+		return 0;
 
 	percent = backlight_percent();
 	if (percent < 0.0)

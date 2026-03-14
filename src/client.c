@@ -493,6 +493,18 @@ mapnotify(struct wl_listener *listener, void *data)
 			}
 		}
 	}
+	/* Ensure client has a valid monitor. If selmon is NULL (all outputs
+	 * disconnected), the client can't be displayed - clean up and return. */
+	if (!c->mon) {
+		wlr_log(WLR_ERROR, "mapnotify: client '%s' has no monitor, assigning to selmon",
+			client_get_appid(c) ? client_get_appid(c) : "(unknown)");
+		if (selmon) {
+			setmon(c, selmon, 0);
+		} else {
+			wlr_log(WLR_ERROR, "mapnotify: no monitor available, client cannot be displayed");
+			return;
+		}
+	}
 	free(c->output);
 	c->output = strdup(c->mon->wlr_output->name);
 	if (c->output == NULL)
