@@ -3246,6 +3246,12 @@ detect_gpus(void)
 		 * This is a boot-time parameter and cannot be changed at runtime.
 		 */
 		if (dgpu->vendor == GPU_VENDOR_NVIDIA) {
+			/* Nvidia proprietary driver has known issues with hardware
+			 * cursors in wlroots compositors — force software cursors
+			 * to prevent Xwayland crashes.  The 0 flag preserves any
+			 * user override (WLR_NO_HARDWARE_CURSORS=0). */
+			setenv("WLR_NO_HARDWARE_CURSORS", "1", 0);
+
 			char dpm_val[16] = "";
 			int dpm_fd = open("/sys/module/nvidia/parameters/NVreg_DynamicPowerManagement", O_RDONLY);
 			if (dpm_fd >= 0) {

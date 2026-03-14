@@ -1,5 +1,6 @@
 #include "nixlytile.h"
 #include "client.h"
+#include <pthread.h>
 
 int
 is_process_running(const char *name)
@@ -1584,6 +1585,28 @@ restore_nvidia_gpu_power(void)
 	wlr_log(WLR_INFO, "NVIDIA: performance mode deactivated — defaults restored");
 }
 
+/* ── Nvidia power apply/restore in background thread ──────────────── */
+static volatile int nv_apply_thread_running = 0;
+static volatile int nv_restore_thread_running = 0;
+static GpuInfo nv_thread_gpu_copy;
+
+static void *
+nvidia_apply_power_thread(void *arg)
+{
+	apply_nvidia_gpu_power((GpuInfo *)arg);
+	nv_apply_thread_running = 0;
+	return NULL;
+}
+
+static void *
+nvidia_restore_power_thread(void *arg)
+{
+	(void)arg;
+	restore_nvidia_gpu_power();
+	nv_restore_thread_running = 0;
+	return NULL;
+}
+
 void
 apply_gpu_power_state(void)
 {
@@ -1641,7 +1664,18 @@ apply_gpu_power_state(void)
 		wlr_log(WLR_INFO, "GPU power: AMD card%d → high perf + 3D profile", gpu->card_index);
 
 	} else if (gpu->vendor == GPU_VENDOR_NVIDIA) {
-		apply_nvidia_gpu_power(gpu);
+		if (!nv_apply_thread_running) {
+			pthread_t t;
+			nv_thread_gpu_copy = *gpu;
+			nv_apply_thread_running = 1;
+			if (pthread_create(&t, NULL, nvidia_apply_power_thread, &nv_thread_gpu_copy) == 0) {
+				pthread_detach(t);
+				wlr_log(WLR_INFO, "NVIDIA: power apply dispatched to background thread");
+			} else {
+				nv_apply_thread_running = 0;
+				apply_nvidia_gpu_power(gpu); /* fallback: run synchronously */
+			}
+		}
 
 	} else if (gpu->vendor == GPU_VENDOR_INTEL) {
 		/* Intel: Set min frequency to max frequency */
@@ -1685,7 +1719,17 @@ restore_gpu_power_state(void)
 		gpu_saved_power_profile[0] = '\0';
 		wlr_log(WLR_INFO, "GPU power: AMD power profile restored");
 	}
-	restore_nvidia_gpu_power();
+	if (!nv_restore_thread_running) {
+		pthread_t t;
+		nv_restore_thread_running = 1;
+		if (pthread_create(&t, NULL, nvidia_restore_power_thread, NULL) == 0) {
+			pthread_detach(t);
+			wlr_log(WLR_INFO, "NVIDIA: power restore dispatched to background thread");
+		} else {
+			nv_restore_thread_running = 0;
+			restore_nvidia_gpu_power(); /* fallback: run synchronously */
+		}
+	}
 	if (gpu_saved_intel_min[0]) {
 		sched_restore(gpu_intel_min_path, gpu_saved_intel_min);
 		wlr_log(WLR_INFO, "GPU power: Intel min freq restored");
