@@ -18,8 +18,46 @@
 #include <spa/param/props.h>
 
 #include <time.h>
+#include <stdarg.h>
+#include <pthread.h>
 
 #include "videoplayer.h"
+
+/* Diagnostics log fds (defined in globals.c) */
+extern int audio_log_fd;
+extern int error_log_fd;
+
+static void audio_diag(const char *fmt, ...)
+{
+    if (audio_log_fd < 0) return;
+    struct timespec ts; struct tm tm;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    localtime_r(&ts.tv_sec, &tm);
+    char buf[1024];
+    int off = snprintf(buf, sizeof(buf), "[%02d:%02d:%02d.%03ld] ",
+        tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec/1000000);
+    va_list ap; va_start(ap, fmt);
+    off += vsnprintf(buf+off, sizeof(buf)-off, fmt, ap);
+    va_end(ap);
+    if (off < (int)sizeof(buf)-1) buf[off++] = '\n';
+    (void)!write(audio_log_fd, buf, off);
+}
+
+static void audio_diag_error(const char *fmt, ...)
+{
+    if (error_log_fd < 0) return;
+    struct timespec ts; struct tm tm;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    localtime_r(&ts.tv_sec, &tm);
+    char buf[1024];
+    int off = snprintf(buf, sizeof(buf), "[%02d:%02d:%02d.%03ld] [AUDIO] ",
+        tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec/1000000);
+    va_list ap; va_start(ap, fmt);
+    off += vsnprintf(buf+off, sizeof(buf)-off, fmt, ap);
+    va_end(ap);
+    if (off < (int)sizeof(buf)-1) buf[off++] = '\n';
+    (void)!write(error_log_fd, buf, off);
+}
 
 static uint64_t get_time_ns(void)
 {
@@ -213,6 +251,7 @@ static void on_process(void *userdata)
     if (bytes_read < bytes_needed) {
         memset((uint8_t *)dst + bytes_read, 0, bytes_needed - bytes_read);
         vp->debug_audio_underruns++;
+        audio_diag("underrun: got %zu/%zu bytes", bytes_read, bytes_needed);
     }
 
     /* Apply volume and mute */
@@ -255,8 +294,10 @@ static void on_process(void *userdata)
     /* Signal synchronized A/V start: PipeWire is actually consuming audio.
      * The render thread waits for this before presenting the first video frame,
      * ensuring audio hardware is outputting samples when video begins. */
-    if (bytes_read > 0 && !vp->audio.audio_preroll_done)
+    if (bytes_read > 0 && !vp->audio.audio_preroll_done) {
         vp->audio.audio_preroll_done = 1;
+        audio_diag("preroll complete");
+    }
 
     buf->datas[0].chunk->offset = 0;
     buf->datas[0].chunk->stride = stride;
@@ -277,8 +318,15 @@ static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
         fprintf(stderr, " (error: %s)", error);
     fprintf(stderr, "\n");
 
+    audio_diag("state: %s -> %s%s%s",
+        pw_stream_state_as_string(old),
+        pw_stream_state_as_string(state),
+        error ? " (error: " : "",
+        error ? error : "");
+
     if (state == PW_STREAM_STATE_ERROR) {
         fprintf(stderr, "[audio] Stream error: %s\n", error ? error : "unknown");
+        audio_diag_error("Stream error: %s", error ? error : "unknown");
         /* Mark as interrupted so video continues with timing-based playback */
         vp->audio.stream_interrupted = 1;
     }
@@ -299,6 +347,10 @@ static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
             fprintf(stderr, "[audio] User-initiated pause, keeping audio state\n");
         } else {
             fprintf(stderr, "[audio] Stream interrupted, flushing buffer - video will continue with timing-based playback\n");
+            audio_diag("interrupted, flushing ring buffer");
+            audio_diag_error("Stream interrupted: %s",
+                state == PW_STREAM_STATE_ERROR ? "error" :
+                state == PW_STREAM_STATE_UNCONNECTED ? "disconnected" : "device change");
 
             /* Signal render thread to use timing-based playback immediately */
             vp->audio.stream_interrupted = 1;
@@ -350,6 +402,7 @@ static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
         if (vp->audio.stream_interrupted) {
             /* Recovery from device interruption - full reset needed */
             fprintf(stderr, "[audio] Stream resumed after interruption, video will resync gradually\n");
+            audio_diag("state: resumed after interruption, resyncing");
             vp->audio.stream_interrupted = 0;
             vp->audio.needs_timing_reset = 1;
 
@@ -385,6 +438,7 @@ static void on_param_changed(void *userdata, uint32_t id, const struct spa_pod *
         if (vp->state == VP_STATE_PLAYING && !vp->audio.user_paused &&
             !vp->audio.stream_interrupted) {
             fprintf(stderr, "[audio] Format change during playback - device change detected\n");
+            audio_diag("format renegotiation during playback (device change)");
             vp->audio.stream_interrupted = 1;
             vp->audio.needs_timing_reset = 1;
         }
@@ -459,9 +513,11 @@ static void *audio_cmd_thread_func(void *arg)
 
         case AUDIO_CMD_RECREATE:
             fprintf(stderr, "[audio-cmd] Recreating audio stream\n");
+            audio_diag("recreating audio stream");
             videoplayer_audio_cleanup(vp);
             if (videoplayer_audio_init(vp) == 0) {
                 fprintf(stderr, "[audio-cmd] Stream recreated successfully\n");
+                audio_diag("stream recreated successfully");
                 if (vp->state == VP_STATE_PLAYING) {
                     /* Directly activate — we're already on the cmd thread */
                     if (vp->audio.stream && vp->audio.loop) {
@@ -472,6 +528,7 @@ static void *audio_cmd_thread_func(void *arg)
                 }
             } else {
                 fprintf(stderr, "[audio-cmd] Stream recreation failed\n");
+                audio_diag_error("Stream recreation failed");
             }
             vp->audio.audio_recreating = 0;
             break;
@@ -520,6 +577,7 @@ static int audio_cmd_pipe_init(VideoPlayer *vp)
         vp->audio.cmd_thread_running = 0;
         return -1;
     }
+    pthread_setname_np(vp->audio.cmd_thread, "nl-audio-cmd");
 
     fprintf(stderr, "[audio] Command pipe and thread initialized\n");
     return 0;
@@ -646,6 +704,7 @@ int videoplayer_audio_init(VideoPlayer *vp)
     vp->audio.core = pw_context_connect(vp->audio.context, NULL, 0);
     if (!vp->audio.core) {
         fprintf(stderr, "[audio] Failed to connect to PipeWire\n");
+        audio_diag_error("Failed to connect to PipeWire");
         pw_thread_loop_unlock(vp->audio.loop);
         pw_thread_loop_stop(vp->audio.loop);
         pw_context_destroy(vp->audio.context);
@@ -672,6 +731,7 @@ int videoplayer_audio_init(VideoPlayer *vp)
     vp->audio.stream = pw_stream_new(vp->audio.core, "nixlytile-audio-stream", props);
     if (!vp->audio.stream) {
         fprintf(stderr, "[audio] Failed to create stream\n");
+        audio_diag_error("Failed to create PipeWire stream");
         pw_core_disconnect(vp->audio.core);
         pw_thread_loop_unlock(vp->audio.loop);
         pw_thread_loop_stop(vp->audio.loop);
@@ -734,6 +794,7 @@ int videoplayer_audio_init(VideoPlayer *vp)
                           PW_STREAM_FLAG_RT_PROCESS,
                           params, 1) < 0) {
         fprintf(stderr, "[audio] Failed to connect stream\n");
+        audio_diag_error("Failed to connect PipeWire stream");
         pw_stream_destroy(vp->audio.stream);
         pw_core_disconnect(vp->audio.core);
         pw_thread_loop_unlock(vp->audio.loop);
@@ -756,6 +817,7 @@ int videoplayer_audio_init(VideoPlayer *vp)
     pw_thread_loop_unlock(vp->audio.loop);
 
     fprintf(stderr, "[audio] Initialized: %d channels @ %d Hz\n", channels, sample_rate);
+    audio_diag("init: %d ch @ %d Hz (ring=%zu)", channels, sample_rate, vp->audio.ring.size);
 
     /* Start command pipe + thread (skips if already running during RECREATE) */
     if (audio_cmd_pipe_init(vp) < 0) {
@@ -769,6 +831,8 @@ void videoplayer_audio_cleanup(VideoPlayer *vp)
 {
     if (!vp)
         return;
+
+    audio_diag("cleanup");
 
     if (vp->audio.loop) {
         pw_thread_loop_lock(vp->audio.loop);
@@ -858,6 +922,7 @@ int videoplayer_audio_check_recovery(VideoPlayer *vp)
         if (vp->audio_interrupted_ticks == 2 && vp->audio.reactivate_attempts < 2) {
             fprintf(stderr, "[audio] Trying stream reactivation (attempt %d)\n",
                     vp->audio.reactivate_attempts + 1);
+            audio_diag("recovery: reactivation attempt %d", vp->audio.reactivate_attempts + 1);
             vp->audio.reactivate_attempts++;
 
             AudioCmd cmd = { .type = AUDIO_CMD_PLAY };
@@ -869,6 +934,7 @@ int videoplayer_audio_check_recovery(VideoPlayer *vp)
         if (vp->audio_interrupted_ticks >= 4) {
             fprintf(stderr, "[audio] Stream interrupted for %d ticks, sending RECREATE command\n",
                     vp->audio_interrupted_ticks);
+            audio_diag("recovery: RECREATE after %d ticks", vp->audio_interrupted_ticks);
             vp->audio_interrupted_ticks = 0;
 
             if (!vp->audio.audio_recreating) {
@@ -999,6 +1065,7 @@ int videoplayer_audio_queue_frame(VideoPlayer *vp, AVFrame *frame)
             char errbuf[256];
             av_strerror(ret, errbuf, sizeof(errbuf));
             fprintf(stderr, "[audio] Failed to allocate resampler: %s\n", errbuf);
+            audio_diag_error("Failed to allocate resampler: %s", errbuf);
             return -1;
         }
 
@@ -1007,6 +1074,7 @@ int videoplayer_audio_queue_frame(VideoPlayer *vp, AVFrame *frame)
             char errbuf[256];
             av_strerror(ret, errbuf, sizeof(errbuf));
             fprintf(stderr, "[audio] Failed to init resampler: %s\n", errbuf);
+            audio_diag_error("Failed to init resampler: %s", errbuf);
             swr_free(&vp->audio.swr_ctx);
             return -1;
         }
@@ -1082,6 +1150,9 @@ int videoplayer_audio_queue_frame(VideoPlayer *vp, AVFrame *frame)
         if (vp->audio.write_stall_count >= 50) {
             fprintf(stderr, "[audio] Ring buffer stall detected (%d consecutive full writes)"
                     " - triggering early interruption for smooth video\n",
+                    vp->audio.write_stall_count);
+            audio_diag("ring buffer stall: %d consecutive full writes", vp->audio.write_stall_count);
+            audio_diag_error("Ring buffer stall (%d writes), triggering interruption",
                     vp->audio.write_stall_count);
             vp->audio.stream_interrupted = 1;
             vp->audio.write_stall_count = 0;

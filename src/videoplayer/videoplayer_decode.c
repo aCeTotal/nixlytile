@@ -768,6 +768,7 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
         vp->state = VP_STATE_ERROR;
         return -1;
     }
+    pthread_setname_np(vp->demux_thread, "nl-demux");
 
     /* Start decode thread */
     vp->decode_running = 1;
@@ -783,6 +784,7 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
         vp->state = VP_STATE_ERROR;
         return -1;
     }
+    pthread_setname_np(vp->decode_thread, "nl-decode");
 
     /* Set frame interval from actual video FPS now that it's known.
      * videoplayer_setup_display_mode() may have been called before open()

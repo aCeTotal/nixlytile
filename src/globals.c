@@ -508,6 +508,12 @@ DesktopEntry desktop_entries[DESKTOP_ENTRIES_MAX];
 int desktop_entry_count = 0;
 int desktop_entries_loaded = 0;
 
+/* Diagnostics logging */
+int diag_log_fd = -1;
+int audio_log_fd = -1;
+int error_log_fd = -1;
+struct wl_event_source *diag_timer = NULL;
+
 /* Nixpkgs package cache */
 NixpkgEntry nixpkg_entries[NIXPKGS_MAX_ENTRIES];
 int nixpkg_entry_count = 0;

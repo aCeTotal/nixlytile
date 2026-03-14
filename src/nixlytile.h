@@ -2665,6 +2665,45 @@ void sethints(struct wl_listener *listener, void *data);
 void xwaylandready(struct wl_listener *listener, void *data);
 #endif
 
+/* diagnostics logging */
+extern int diag_log_fd;
+extern int audio_log_fd;
+extern int error_log_fd;
+extern struct wl_event_source *diag_timer;
+
+#include <stdarg.h>
+static inline void diag_log_error(const char *module, const char *fmt, ...)
+{
+	if (error_log_fd < 0) return;
+	struct timespec ts; struct tm tm;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	localtime_r(&ts.tv_sec, &tm);
+	char buf[1024];
+	int off = snprintf(buf, sizeof(buf), "[%02d:%02d:%02d.%03ld] [%s] ",
+		tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec/1000000, module);
+	va_list ap; va_start(ap, fmt);
+	off += vsnprintf(buf+off, sizeof(buf)-off, fmt, ap);
+	va_end(ap);
+	if (off < (int)sizeof(buf)-1) buf[off++] = '\n';
+	(void)!write(error_log_fd, buf, off);
+}
+
+static inline void diag_log_audio(const char *fmt, ...)
+{
+	if (audio_log_fd < 0) return;
+	struct timespec ts; struct tm tm;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	localtime_r(&ts.tv_sec, &tm);
+	char buf[1024];
+	int off = snprintf(buf, sizeof(buf), "[%02d:%02d:%02d.%03ld] ",
+		tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec/1000000);
+	va_list ap; va_start(ap, fmt);
+	off += vsnprintf(buf+off, sizeof(buf)-off, fmt, ap);
+	va_end(ap);
+	if (off < (int)sizeof(buf)-1) buf[off++] = '\n';
+	(void)!write(audio_log_fd, buf, off);
+}
+
 /* client.h helpers (inline) */
 #include "client.h"
 

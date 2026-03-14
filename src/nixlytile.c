@@ -2231,6 +2231,393 @@ log_callback(enum wlr_log_importance importance, const char *fmt, va_list args)
 	}
 }
 
+/* ================================================================
+ *  Diagnostics Logging System
+ *  Periodic (5s) structured logging to /tmp/nixlylogging/
+ * ================================================================ */
+
+/* Per-thread CPU snapshot (file-static) */
+struct diag_thread_snap {
+	pid_t tid;
+	char name[32];
+	unsigned long long utime, stime;
+};
+static struct diag_thread_snap diag_prev_threads[64];
+static int diag_prev_thread_count;
+static unsigned long long diag_prev_total_cpu;
+
+/* Per-system-process CPU snapshot */
+static struct { pid_t pid; char name[64]; unsigned long long ticks; } diag_prev_procs[128];
+static int diag_prev_proc_count;
+
+/* I/O snapshot */
+static unsigned long long diag_prev_read_bytes, diag_prev_write_bytes;
+static uint64_t diag_prev_io_time_ms;
+
+static void
+diag_log_cpu_breakdown(void)
+{
+	if (diag_log_fd < 0) return;
+
+	struct timespec now_ts;
+	clock_gettime(CLOCK_REALTIME, &now_ts);
+	struct tm tm;
+	localtime_r(&now_ts.tv_sec, &tm);
+
+	/* Read total system CPU from /proc/stat */
+	unsigned long long total_cpu = 0;
+	{
+		FILE *f = fopen("/proc/stat", "r");
+		if (f) {
+			char line[256];
+			if (fgets(line, sizeof(line), f)) {
+				unsigned long long user, nice, system, idle, iowait, irq, softirq, steal;
+				if (sscanf(line, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
+					&user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal) >= 4) {
+					total_cpu = user + nice + system + idle + iowait + irq + softirq + steal;
+				}
+			}
+			fclose(f);
+		}
+	}
+
+	unsigned long long delta_total = total_cpu - diag_prev_total_cpu;
+	if (delta_total == 0) delta_total = 1;
+
+	/* Read per-thread CPU for our process */
+	struct diag_thread_snap cur_threads[64];
+	int cur_count = 0;
+	{
+		DIR *d = opendir("/proc/self/task");
+		if (d) {
+			struct dirent *de;
+			while ((de = readdir(d)) && cur_count < 64) {
+				if (de->d_name[0] == '.') continue;
+				pid_t tid = atoi(de->d_name);
+				char path[128], buf[512];
+				int n;
+
+				/* Read thread name */
+				snprintf(path, sizeof(path), "/proc/self/task/%s/comm", de->d_name);
+				FILE *f = fopen(path, "r");
+				if (f) {
+					if (fgets(cur_threads[cur_count].name, sizeof(cur_threads[cur_count].name), f)) {
+						char *nl = strchr(cur_threads[cur_count].name, '\n');
+						if (nl) *nl = '\0';
+					}
+					fclose(f);
+				} else {
+					snprintf(cur_threads[cur_count].name, sizeof(cur_threads[cur_count].name), "tid-%d", tid);
+				}
+
+				/* Read thread CPU times from stat */
+				snprintf(path, sizeof(path), "/proc/self/task/%s/stat", de->d_name);
+				f = fopen(path, "r");
+				if (f) {
+					n = fread(buf, 1, sizeof(buf)-1, f);
+					buf[n] = '\0';
+					fclose(f);
+					/* Skip past the comm field (second field in parentheses) */
+					char *p = strrchr(buf, ')');
+					if (p) {
+						unsigned long long utime = 0, stime = 0;
+						/* Fields after ')': state, ppid, pgrp, session, tty_nr, tpgid,
+						   flags, minflt, cminflt, majflt, cmajflt, utime, stime */
+						if (sscanf(p+2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu",
+							&utime, &stime) == 2) {
+							cur_threads[cur_count].tid = tid;
+							cur_threads[cur_count].utime = utime;
+							cur_threads[cur_count].stime = stime;
+							cur_count++;
+						}
+					}
+				}
+			}
+			closedir(d);
+		}
+	}
+
+	/* Write CPU header */
+	char out[4096];
+	int off = 0;
+	off += snprintf(out+off, sizeof(out)-off,
+		"\n[%02d:%02d:%02d] === CPU (5s) ===\n",
+		tm.tm_hour, tm.tm_min, tm.tm_sec);
+
+	/* Calculate process total */
+	unsigned long long proc_delta = 0;
+	for (int i = 0; i < cur_count; i++) {
+		for (int j = 0; j < diag_prev_thread_count; j++) {
+			if (cur_threads[i].tid == diag_prev_threads[j].tid) {
+				proc_delta += (cur_threads[i].utime + cur_threads[i].stime)
+					- (diag_prev_threads[j].utime + diag_prev_threads[j].stime);
+				break;
+			}
+		}
+	}
+	off += snprintf(out+off, sizeof(out)-off,
+		"  nixlytile total  : %5.1f%%\n",
+		100.0 * proc_delta / delta_total);
+
+	/* Per-thread breakdown */
+	for (int i = 0; i < cur_count && off < (int)sizeof(out)-100; i++) {
+		unsigned long long tdelta = 0;
+		for (int j = 0; j < diag_prev_thread_count; j++) {
+			if (cur_threads[i].tid == diag_prev_threads[j].tid) {
+				tdelta = (cur_threads[i].utime + cur_threads[i].stime)
+					- (diag_prev_threads[j].utime + diag_prev_threads[j].stime);
+				break;
+			}
+		}
+		double pct = 100.0 * tdelta / delta_total;
+		if (pct >= 0.1)
+			off += snprintf(out+off, sizeof(out)-off,
+				"    %-15s: %5.1f%%\n", cur_threads[i].name, pct);
+	}
+
+	/* System top 5 processes */
+	struct { pid_t pid; char name[64]; unsigned long long ticks; } cur_procs[128];
+	int cur_pcount = 0;
+	{
+		DIR *d = opendir("/proc");
+		if (d) {
+			struct dirent *de;
+			while ((de = readdir(d)) && cur_pcount < 128) {
+				if (de->d_name[0] < '1' || de->d_name[0] > '9') continue;
+				pid_t pid = atoi(de->d_name);
+				char path[128], buf[512];
+				int n;
+				snprintf(path, sizeof(path), "/proc/%s/stat", de->d_name);
+				FILE *f = fopen(path, "r");
+				if (!f) continue;
+				n = fread(buf, 1, sizeof(buf)-1, f);
+				buf[n] = '\0';
+				fclose(f);
+				/* Extract name from (comm) */
+				char *lp = strchr(buf, '(');
+				char *rp = strrchr(buf, ')');
+				if (!lp || !rp) continue;
+				int nlen = rp - lp - 1;
+				if (nlen >= 64) nlen = 63;
+				memcpy(cur_procs[cur_pcount].name, lp+1, nlen);
+				cur_procs[cur_pcount].name[nlen] = '\0';
+				unsigned long long utime = 0, stime = 0;
+				if (sscanf(rp+2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu",
+					&utime, &stime) == 2) {
+					cur_procs[cur_pcount].pid = pid;
+					cur_procs[cur_pcount].ticks = utime + stime;
+					cur_pcount++;
+				}
+			}
+			closedir(d);
+		}
+	}
+
+	/* Compute deltas and find top 5 */
+	struct { double pct; pid_t pid; const char *name; } top[5] = {{0}};
+	for (int i = 0; i < cur_pcount; i++) {
+		unsigned long long pdelta = 0;
+		for (int j = 0; j < diag_prev_proc_count; j++) {
+			if (cur_procs[i].pid == diag_prev_procs[j].pid) {
+				pdelta = cur_procs[i].ticks - diag_prev_procs[j].ticks;
+				break;
+			}
+		}
+		double pct = 100.0 * pdelta / delta_total;
+		/* Skip self (nixlytile) */
+		if (cur_procs[i].pid == getpid()) continue;
+		for (int t = 0; t < 5; t++) {
+			if (pct > top[t].pct) {
+				for (int s = 4; s > t; s--) top[s] = top[s-1];
+				top[t].pct = pct;
+				top[t].pid = cur_procs[i].pid;
+				top[t].name = cur_procs[i].name;
+				break;
+			}
+		}
+	}
+
+	off += snprintf(out+off, sizeof(out)-off, "  --- System Top 5 ---\n");
+	for (int i = 0; i < 5 && top[i].pct >= 0.5 && off < (int)sizeof(out)-80; i++) {
+		off += snprintf(out+off, sizeof(out)-off,
+			"    %-15s: %5.1f%%  (pid=%d)\n",
+			top[i].name, top[i].pct, top[i].pid);
+	}
+
+	(void)!write(diag_log_fd, out, off);
+
+	/* Save snapshots */
+	memcpy(diag_prev_threads, cur_threads, sizeof(cur_threads[0]) * cur_count);
+	diag_prev_thread_count = cur_count;
+	diag_prev_total_cpu = total_cpu;
+	memcpy(diag_prev_procs, cur_procs, sizeof(cur_procs[0]) * cur_pcount);
+	diag_prev_proc_count = cur_pcount;
+}
+
+static void
+diag_log_io_stats(void)
+{
+	if (diag_log_fd < 0) return;
+
+	struct timespec now_ts;
+	clock_gettime(CLOCK_REALTIME, &now_ts);
+	struct tm tm;
+	localtime_r(&now_ts.tv_sec, &tm);
+	uint64_t now_ms = now_ts.tv_sec * 1000ULL + now_ts.tv_nsec / 1000000ULL;
+
+	unsigned long long read_bytes = 0, write_bytes = 0;
+	FILE *f = fopen("/proc/self/io", "r");
+	if (f) {
+		char line[128];
+		while (fgets(line, sizeof(line), f)) {
+			if (strncmp(line, "read_bytes:", 11) == 0)
+				sscanf(line+11, "%llu", &read_bytes);
+			else if (strncmp(line, "write_bytes:", 12) == 0)
+				sscanf(line+12, "%llu", &write_bytes);
+		}
+		fclose(f);
+	}
+
+	uint64_t dt_ms = now_ms - diag_prev_io_time_ms;
+	if (dt_ms == 0) dt_ms = 1;
+	double read_mbs = (double)(read_bytes - diag_prev_read_bytes) / (dt_ms / 1000.0) / (1024*1024);
+	double write_mbs = (double)(write_bytes - diag_prev_write_bytes) / (dt_ms / 1000.0) / (1024*1024);
+
+	char out[256];
+	int off = snprintf(out, sizeof(out),
+		"[%02d:%02d:%02d] === I/O (5s) ===\n"
+		"  Disk: read=%.2f MB/s  write=%.2f MB/s\n"
+		"  Net:  down=%.1f Mbps  up=%.1f Mbps  (%s)\n",
+		tm.tm_hour, tm.tm_min, tm.tm_sec,
+		read_mbs, write_mbs,
+		net_last_down_bps > 0 ? net_last_down_bps / 1e6 : 0.0,
+		net_last_up_bps > 0 ? net_last_up_bps / 1e6 : 0.0,
+		net_iface[0] ? net_iface : "none");
+
+	(void)!write(diag_log_fd, out, off);
+
+	diag_prev_read_bytes = read_bytes;
+	diag_prev_write_bytes = write_bytes;
+	diag_prev_io_time_ms = now_ms;
+}
+
+static void
+diag_log_nvidia(void)
+{
+	if (diag_log_fd < 0) return;
+	if (discrete_gpu_idx < 0 || detected_gpus[discrete_gpu_idx].vendor != GPU_VENDOR_NVIDIA)
+		return;
+
+	struct timespec now_ts;
+	struct tm tm;
+	clock_gettime(CLOCK_REALTIME, &now_ts);
+	localtime_r(&now_ts.tv_sec, &tm);
+
+	/* Query multiple fields in one nvidia-smi call */
+	char buf[512] = "";
+	FILE *p = popen("nvidia-smi --query-gpu=utilization.gpu,utilization.memory,"
+		"temperature.gpu,clocks.current.graphics,clocks.current.memory,"
+		"power.draw,power.limit,pstate "
+		"--format=csv,noheader,nounits 2>/dev/null", "r");
+	if (!p) {
+		diag_log_error("NVIDIA", "nvidia-smi popen failed");
+		return;
+	}
+	if (!fgets(buf, sizeof(buf), p)) {
+		pclose(p);
+		diag_log_error("NVIDIA", "nvidia-smi query failed (no output)");
+		return;
+	}
+	pclose(p);
+
+	/* Parse CSV: gpu_util, mem_util, temp, gpu_clk, mem_clk, power, power_limit, pstate */
+	int gpu_util = 0, mem_util = 0, temp = 0, gpu_clk = 0, mem_clk = 0;
+	float power = 0, power_limit = 0;
+	char pstate[8] = "";
+	if (sscanf(buf, "%d, %d, %d, %d, %d, %f, %f, %7s",
+		&gpu_util, &mem_util, &temp, &gpu_clk, &mem_clk, &power, &power_limit, pstate) < 7) {
+		/* Remove trailing whitespace from pstate */
+		diag_log_error("NVIDIA", "nvidia-smi parse failed: %s", buf);
+		return;
+	}
+	/* Strip trailing whitespace from pstate */
+	for (int i = strlen(pstate)-1; i >= 0 && (pstate[i] == '\n' || pstate[i] == ' '); i--)
+		pstate[i] = '\0';
+
+	char out[256];
+	int off = snprintf(out, sizeof(out),
+		"[%02d:%02d:%02d] === NVIDIA GPU ===\n"
+		"  Util: %d%% GPU, %d%% VRAM | Temp: %d°C\n"
+		"  Clocks: %d/%d MHz | Power: %.0f/%.0f W | %s\n",
+		tm.tm_hour, tm.tm_min, tm.tm_sec,
+		gpu_util, mem_util, temp,
+		gpu_clk, mem_clk, power, power_limit, pstate);
+	(void)!write(diag_log_fd, out, off);
+
+	/* Error conditions */
+	if (temp >= 90)
+		diag_log_error("NVIDIA", "GPU temp critical: %d°C (threshold: 90°C)", temp);
+	if (game_mode_active && pstate[0] == 'P' && pstate[1] >= '5')
+		diag_log_error("NVIDIA", "Unexpected PState %s during game mode (expected P0-P2)", pstate);
+}
+
+static void
+diag_log_audio_summary(void)
+{
+	if (diag_log_fd < 0) return;
+
+	struct timespec now_ts;
+	struct tm tm;
+	clock_gettime(CLOCK_REALTIME, &now_ts);
+	localtime_r(&now_ts.tv_sec, &tm);
+
+	VideoPlayer *vp = active_videoplayer;
+	if (!vp || vp->state == VP_STATE_IDLE) {
+		char out[128];
+		int off = snprintf(out, sizeof(out),
+			"[%02d:%02d:%02d] === Audio ===\n  No active player\n",
+			tm.tm_hour, tm.tm_min, tm.tm_sec);
+		(void)!write(diag_log_fd, out, off);
+		return;
+	}
+
+	size_t ring_avail = 0;
+	size_t ring_size = vp->audio.ring.size;
+	pthread_mutex_lock(&vp->audio.ring.lock);
+	ring_avail = vp->audio.ring.available;
+	pthread_mutex_unlock(&vp->audio.ring.lock);
+
+	int ring_pct = ring_size ? (int)(100ULL * ring_avail / ring_size) : 0;
+	const char *state_str = vp->audio.stream_interrupted ? "INTERRUPTED" :
+		(vp->state == VP_STATE_PLAYING ? "STREAMING" : "PAUSED");
+
+	char out[256];
+	int off = snprintf(out, sizeof(out),
+		"[%02d:%02d:%02d] === Audio ===\n"
+		"  Ring: %zu/%zu (%d%%) | Underruns: %d | Stalls: %d\n"
+		"  State: %s | Rate: %d Hz | Ch: %d\n",
+		tm.tm_hour, tm.tm_min, tm.tm_sec,
+		ring_avail, ring_size, ring_pct,
+		vp->debug_audio_underruns, vp->audio.write_stall_count,
+		state_str, vp->audio.sample_rate, vp->audio.channels);
+	(void)!write(diag_log_fd, out, off);
+}
+
+static int
+diag_timer_cb(void *data)
+{
+	(void)data;
+	diag_log_cpu_breakdown();
+	diag_log_io_stats();
+	diag_log_nvidia();
+	diag_log_audio_summary();
+
+	/* Reschedule */
+	if (diag_timer && diag_log_fd >= 0)
+		wl_event_source_timer_update(diag_timer, 5000);
+	return 0;
+}
+
 static void
 init_logging(void)
 {
@@ -2269,12 +2656,70 @@ init_logging(void)
 		dup2(stderr_log, STDERR_FILENO);
 		close(stderr_log);
 	}
+	/* Open diagnostics log files */
+	{
+		struct timespec ts;
+		struct tm tm;
+		clock_gettime(CLOCK_REALTIME, &ts);
+		localtime_r(&ts.tv_sec, &tm);
+		char hdr[256];
+
+		diag_log_fd = open(NIXLY_LOG_DIR "/diagnostics.log",
+			O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		if (diag_log_fd >= 0) {
+			int n = snprintf(hdr, sizeof(hdr),
+				"=== nixlytile diagnostics %04d-%02d-%02d %02d:%02d:%02d (PID %d) ===\n",
+				tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+				tm.tm_hour, tm.tm_min, tm.tm_sec, getpid());
+			(void)!write(diag_log_fd, hdr, n);
+		}
+
+		audio_log_fd = open(NIXLY_LOG_DIR "/audio.log",
+			O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		if (audio_log_fd >= 0) {
+			int n = snprintf(hdr, sizeof(hdr),
+				"=== audio log %04d-%02d-%02d %02d:%02d:%02d ===\n",
+				tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+				tm.tm_hour, tm.tm_min, tm.tm_sec);
+			(void)!write(audio_log_fd, hdr, n);
+		}
+
+		error_log_fd = open(NIXLY_LOG_DIR "/errors.log",
+			O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		if (error_log_fd >= 0) {
+			int n = snprintf(hdr, sizeof(hdr),
+				"=== error log %04d-%02d-%02d %02d:%02d:%02d ===\n",
+				tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+				tm.tm_hour, tm.tm_min, tm.tm_sec);
+			(void)!write(error_log_fd, hdr, n);
+		}
+	}
+
 	#undef NIXLY_LOG_DIR
 }
 
 static void
 close_logging(void)
 {
+	if (diag_timer) {
+		wl_event_source_remove(diag_timer);
+		diag_timer = NULL;
+	}
+	if (diag_log_fd >= 0) {
+		dprintf(diag_log_fd, "\n=== diagnostics ended ===\n");
+		close(diag_log_fd);
+		diag_log_fd = -1;
+	}
+	if (audio_log_fd >= 0) {
+		dprintf(audio_log_fd, "\n=== audio log ended ===\n");
+		close(audio_log_fd);
+		audio_log_fd = -1;
+	}
+	if (error_log_fd >= 0) {
+		dprintf(error_log_fd, "\n=== error log ended ===\n");
+		close(error_log_fd);
+		error_log_fd = -1;
+	}
 	if (log_file) {
 		fclose(log_file);
 		log_file = NULL;
@@ -2297,6 +2742,7 @@ setup(void)
 		sigaction(sig[i], &sa, NULL);
 
 	init_logging();
+	pthread_setname_np(pthread_self(), "nl-main");
 	wlr_log_init(WLR_DEBUG, log_callback);
 
 	/* Make sure spawned terminals get the real login shell, not the minimal wrapper shell */
@@ -2313,6 +2759,7 @@ setup(void)
 	status_hover_timer = wl_event_loop_add_timer(event_loop, updatehoverfade, NULL);
 	cache_update_timer = wl_event_loop_add_timer(event_loop, cache_update_timer_cb, NULL);
 	nixpkgs_cache_timer = wl_event_loop_add_timer(event_loop, nixpkgs_cache_timer_cb, NULL);
+	diag_timer = wl_event_loop_add_timer(event_loop, diag_timer_cb, NULL);
 	fan_thermal_start();
 	dgpu_power_watchdog_start();
 	tray_init();
@@ -2552,6 +2999,8 @@ setup(void)
 		wifi_scan_timer = wl_event_loop_add_timer(event_loop, wifi_scan_timer_cb, NULL);
 	if (status_hover_timer)
 		wl_event_source_timer_update(status_hover_timer, 0);
+	if (diag_timer && diag_log_fd >= 0)
+		wl_event_source_timer_update(diag_timer, 5000);
 }
 
 /* Detect all GPUs in the system */
@@ -2649,7 +3098,32 @@ spawn(const Arg *arg)
 					}
 					/* execlp failed — fall through to execvp below */
 				}
+				/* Debug: log spawn attempt to /tmp/nixlylogging/ */
+				{
+					int dbg = open("/tmp/nixlylogging/spawn.log",
+						O_WRONLY | O_CREAT | O_APPEND, 0644);
+					if (dbg >= 0) {
+						dprintf(dbg, "spawn: execvp('%s') WAYLAND_DISPLAY=%s DISPLAY=%s PATH=%.200s\n",
+							argv[0],
+							getenv("WAYLAND_DISPLAY") ? getenv("WAYLAND_DISPLAY") : "(null)",
+							getenv("DISPLAY") ? getenv("DISPLAY") : "(null)",
+							getenv("PATH") ? getenv("PATH") : "(null)");
+						close(dbg);
+					}
+				}
 				execvp(argv[0], argv);
+				/* execvp failed — log the error */
+				{
+					int dbg = open("/tmp/nixlylogging/spawn.log",
+						O_WRONLY | O_CREAT | O_APPEND, 0644);
+					if (dbg >= 0) {
+						dprintf(dbg, "spawn: execvp('%s') FAILED: %s\n",
+							argv[0], strerror(errno));
+						close(dbg);
+					}
+				}
+				diag_log_error("SPAWN", "execvp('%s') FAILED: %s",
+					argv[0], strerror(errno));
 				_exit(127);
 			}
 			_exit(1);
