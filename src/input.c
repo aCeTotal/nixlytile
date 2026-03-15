@@ -1023,6 +1023,24 @@ keypress(struct wl_listener *listener, void *data)
 
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
+	/* VT switching using raw evdev keycodes — always works regardless of
+	 * XKB keymap, screen lock state, or active popups/overlays. */
+	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED && session &&
+	    (mods & (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT)) ==
+	    (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT)) {
+		unsigned int vt = 0;
+		if (event->keycode >= KEY_F1 && event->keycode <= KEY_F10)
+			vt = event->keycode - KEY_F1 + 1;
+		else if (event->keycode == KEY_F11)
+			vt = 11;
+		else if (event->keycode == KEY_F12)
+			vt = 12;
+		if (vt) {
+			wlr_session_change_vt(session, vt);
+			return;
+		}
+	}
+
 	/* On _press_ if there is no active screen locker,
 	 * attempt to process a compositor keybinding. */
 	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {

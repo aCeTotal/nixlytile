@@ -2,8 +2,10 @@
       description = "Nixlytile - a tiling Wayland compositor";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.nixlypkgs.url = "github:aCeTotal/nixlypkgs";
+  inputs.nixlypkgs.inputs.nixpkgs.follows = "nixpkgs";
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, nixlypkgs }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       lib = nixpkgs.lib;
@@ -11,7 +13,10 @@
 
       perSystem = system:
         let
-          pkgs = import nixpkgs { inherit system; };
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ nixlypkgs.overlays.default ];
+          };
           wlrootsPc = "wlroots-${lib.versions.majorMinor pkgs.wlroots.version}";
 
           iconDeps = with pkgs; [
@@ -142,6 +147,8 @@
             pkgs.xorg.libxcb
             pkgs.xorg.xcbutilwm
             pkgs.xwayland
+            pkgs.libepoxy       # nixlypkgs: nvidiaSupport=true, LIBGL_PATH→libglvnd
+            pkgs.libglvnd       # Nvidia GL dispatch (propagated by libepoxy)
             pkgs.systemd
             pkgs.brightnessctl
             # Video player dependencies
