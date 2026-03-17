@@ -210,6 +210,10 @@ GpuInfo detected_gpus[MAX_GPUS];
 int detected_gpu_count = 0;
 int discrete_gpu_idx = -1;   /* Index of preferred discrete GPU, -1 if none */
 int integrated_gpu_idx = -1; /* Index of integrated GPU, -1 if none */
+
+/* CPU cursor buffer for Nvidia HW cursor plane */
+struct CpuCursorBuffer *cpu_cursor_buf = NULL;
+int cpu_cursor_active = 0;
 int dgpu_render_fd = -1;     /* Held open to prevent dGPU D3cold/runtime suspend */
 struct wl_event_source *dgpu_power_watchdog = NULL;
 

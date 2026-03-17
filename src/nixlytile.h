@@ -699,6 +699,21 @@ struct PixmanBuffer {
 	int owns_data;
 };
 
+/* CPU-backed cursor buffer for Nvidia HW cursor plane.
+ * Wraps a dumb DRM buffer in a wlr_buffer so wlroots can
+ * place it on the cursor plane without GBM allocation. */
+struct CpuCursorBuffer {
+	struct wlr_buffer base;       /* wlr_buffer interface */
+	int drm_fd;                   /* DRM fd (not owned) */
+	uint32_t gem_handle;          /* GEM handle from dumb create */
+	int dmabuf_fd;                /* DMA-BUF fd for wlroots import */
+	uint32_t width;               /* Buffer width */
+	uint32_t height;              /* Buffer height */
+	uint32_t stride;              /* Row stride in bytes */
+	void *map;                    /* mmap'd CPU pointer */
+	size_t map_size;              /* mmap size */
+};
+
 struct CpuSample {
 	unsigned long long idle;
 	unsigned long long total;
@@ -1567,6 +1582,10 @@ extern int pc_gaming_cache_inotify_fd;
 extern int pc_gaming_cache_inotify_wd;
 extern struct wl_event_source *pc_gaming_cache_event;
 
+/* cpu cursor (Nvidia HW cursor plane) */
+extern struct CpuCursorBuffer *cpu_cursor_buf;
+extern int cpu_cursor_active;
+
 /* bluetooth */
 extern struct wl_event_source *bt_scan_timer;
 extern struct wl_event_source *bt_bus_event;
@@ -1918,6 +1937,10 @@ void add_icon_root_paths(const char *base, const char *themes[], size_t theme_co
 int loadstatusfont(void);
 void freestatusfont(void);
 int status_text_width(const char *text);
+struct CpuCursorBuffer *cpu_cursor_buffer_create(int drm_fd, uint32_t w, uint32_t h);
+void cpu_cursor_buffer_destroy(struct CpuCursorBuffer *buf);
+void nixly_cursor_set_xcursor(const char *name);
+void nixly_cursor_set_client_surface(struct wlr_surface *surface, int hx, int hy);
 int resolve_asset_path(const char *path, char *out, size_t len);
 void fix_tray_argb32(uint32_t *pixels, size_t count, int use_rgba_order);
 

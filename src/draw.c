@@ -1,5 +1,8 @@
 #include "nixlytile.h"
 #include "client.h"
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <wlr/render/dmabuf.h>
 
 void
 drawrect(struct wlr_scene_tree *parent, int x, int y,
@@ -1033,5 +1036,246 @@ freestatusfont(void)
 	if (statusfont.font)
 		fcft_destroy(statusfont.font);
 	statusfont.font = NULL;
+}
+
+/* ── CPU cursor buffer (Nvidia HW cursor plane) ──────────────────── */
+
+static void
+cpu_cursor_buffer_destroy_cb(struct wlr_buffer *wlr_buffer)
+{
+	struct CpuCursorBuffer *buf = wl_container_of(wlr_buffer, buf, base);
+
+	if (buf->map && buf->map_size > 0)
+		munmap(buf->map, buf->map_size);
+	if (buf->dmabuf_fd >= 0)
+		close(buf->dmabuf_fd);
+	if (buf->gem_handle && buf->drm_fd >= 0) {
+		struct drm_mode_destroy_dumb destroy = { .handle = buf->gem_handle };
+		ioctl(buf->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
+	}
+	free(buf);
+}
+
+static bool
+cpu_cursor_buffer_get_dmabuf(struct wlr_buffer *wlr_buffer,
+		struct wlr_dmabuf_attributes *attribs)
+{
+	struct CpuCursorBuffer *buf = wl_container_of(wlr_buffer, buf, base);
+
+	if (buf->dmabuf_fd < 0)
+		return false;
+
+	memset(attribs, 0, sizeof(*attribs));
+	attribs->width = (int32_t)buf->width;
+	attribs->height = (int32_t)buf->height;
+	attribs->format = DRM_FORMAT_ARGB8888;
+	attribs->modifier = DRM_FORMAT_MOD_LINEAR;
+	attribs->n_planes = 1;
+	attribs->offset[0] = 0;
+	attribs->stride[0] = buf->stride;
+	attribs->fd[0] = buf->dmabuf_fd;
+	return true;
+}
+
+static bool
+cpu_cursor_buffer_begin_data_ptr_access(struct wlr_buffer *wlr_buffer,
+		uint32_t flags, void **data, uint32_t *format, size_t *stride)
+{
+	struct CpuCursorBuffer *buf = wl_container_of(wlr_buffer, buf, base);
+	(void)flags;
+
+	if (!buf->map)
+		return false;
+
+	*data = buf->map;
+	*format = DRM_FORMAT_ARGB8888;
+	*stride = buf->stride;
+	return true;
+}
+
+static void
+cpu_cursor_buffer_end_data_ptr_access(struct wlr_buffer *wlr_buffer)
+{
+	(void)wlr_buffer;
+}
+
+static const struct wlr_buffer_impl cpu_cursor_buffer_impl = {
+	.destroy = cpu_cursor_buffer_destroy_cb,
+	.get_dmabuf = cpu_cursor_buffer_get_dmabuf,
+	.begin_data_ptr_access = cpu_cursor_buffer_begin_data_ptr_access,
+	.end_data_ptr_access = cpu_cursor_buffer_end_data_ptr_access,
+};
+
+struct CpuCursorBuffer *
+cpu_cursor_buffer_create(int drm_fd, uint32_t w, uint32_t h)
+{
+	struct CpuCursorBuffer *buf;
+	struct drm_mode_create_dumb create = {0};
+	struct drm_mode_map_dumb map_req = {0};
+	int prime_fd = -1;
+
+	buf = calloc(1, sizeof(*buf));
+	if (!buf)
+		return NULL;
+
+	buf->drm_fd = drm_fd;
+	buf->dmabuf_fd = -1;
+
+	/* Create dumb buffer */
+	create.width = w;
+	create.height = h;
+	create.bpp = 32;
+	if (ioctl(drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &create) < 0) {
+		wlr_log(WLR_ERROR, "CPU cursor: DRM_IOCTL_MODE_CREATE_DUMB failed: %s",
+			strerror(errno));
+		free(buf);
+		return NULL;
+	}
+	buf->gem_handle = create.handle;
+	buf->width = w;
+	buf->height = h;
+	buf->stride = create.pitch;
+	buf->map_size = (size_t)create.size;
+
+	/* Map for CPU access */
+	map_req.handle = buf->gem_handle;
+	if (ioctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &map_req) < 0) {
+		wlr_log(WLR_ERROR, "CPU cursor: DRM_IOCTL_MODE_MAP_DUMB failed: %s",
+			strerror(errno));
+		goto fail;
+	}
+
+	buf->map = mmap(NULL, buf->map_size, PROT_READ | PROT_WRITE, MAP_SHARED,
+			drm_fd, map_req.offset);
+	if (buf->map == MAP_FAILED) {
+		buf->map = NULL;
+		wlr_log(WLR_ERROR, "CPU cursor: mmap failed: %s", strerror(errno));
+		goto fail;
+	}
+
+	/* Export as DMA-BUF for wlroots */
+	if (drmPrimeHandleToFD(drm_fd, buf->gem_handle,
+			DRM_CLOEXEC | DRM_RDWR, &prime_fd) < 0) {
+		wlr_log(WLR_ERROR, "CPU cursor: drmPrimeHandleToFD failed: %s",
+			strerror(errno));
+		goto fail;
+	}
+	buf->dmabuf_fd = prime_fd;
+
+	/* Clear to transparent */
+	memset(buf->map, 0, buf->map_size);
+
+	wlr_buffer_init(&buf->base, &cpu_cursor_buffer_impl, (int)w, (int)h);
+
+	wlr_log(WLR_INFO, "CPU cursor buffer created: %ux%u stride=%u size=%zu",
+		w, h, buf->stride, buf->map_size);
+	return buf;
+
+fail:
+	if (buf->map)
+		munmap(buf->map, buf->map_size);
+	if (prime_fd >= 0)
+		close(prime_fd);
+	if (buf->gem_handle) {
+		struct drm_mode_destroy_dumb destroy = { .handle = buf->gem_handle };
+		ioctl(drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
+	}
+	free(buf);
+	return NULL;
+}
+
+void
+cpu_cursor_buffer_destroy(struct CpuCursorBuffer *buf)
+{
+	if (!buf)
+		return;
+	wlr_buffer_drop(&buf->base);
+}
+
+void
+nixly_cursor_set_xcursor(const char *name)
+{
+	struct wlr_xcursor *xcur;
+	struct wlr_xcursor_image *img;
+	uint32_t src_stride, copy_w, copy_h, y;
+	const uint8_t *src;
+	uint8_t *dst;
+
+	if (!cpu_cursor_active) {
+		wlr_cursor_set_xcursor(cursor, cursor_mgr, name);
+		return;
+	}
+
+	xcur = wlr_xcursor_manager_get_xcursor(cursor_mgr, name, 1);
+	if (!xcur || xcur->image_count == 0) {
+		wlr_cursor_set_xcursor(cursor, cursor_mgr, name);
+		return;
+	}
+
+	img = xcur->images[0];
+
+	/* Clear buffer to transparent */
+	memset(cpu_cursor_buf->map, 0, cpu_cursor_buf->map_size);
+
+	/* Copy xcursor pixels into dumb buffer (row by row, handle stride) */
+	copy_w = MIN(img->width, cpu_cursor_buf->width);
+	copy_h = MIN(img->height, cpu_cursor_buf->height);
+	src_stride = img->width * 4;
+
+	src = img->buffer;
+	dst = (uint8_t *)cpu_cursor_buf->map;
+
+	for (y = 0; y < copy_h; y++) {
+		memcpy(dst + y * cpu_cursor_buf->stride,
+			src + y * src_stride,
+			copy_w * 4);
+	}
+
+	wlr_cursor_set_buffer(cursor, &cpu_cursor_buf->base,
+		(int32_t)img->hotspot_x, (int32_t)img->hotspot_y, 1.0f);
+}
+
+void
+nixly_cursor_set_client_surface(struct wlr_surface *surface, int hx, int hy)
+{
+	void *src_data;
+	uint32_t src_format;
+	size_t src_stride;
+	uint32_t copy_w, copy_h, y;
+	uint8_t *dst;
+
+	if (!cpu_cursor_active || !surface || !surface->buffer) {
+		wlr_cursor_set_surface(cursor, surface, hx, hy);
+		return;
+	}
+
+	/* Try to get pixel data from client buffer */
+	if (!wlr_buffer_begin_data_ptr_access(&surface->buffer->base,
+			WLR_BUFFER_DATA_PTR_ACCESS_READ,
+			&src_data, &src_format, &src_stride)) {
+		/* DMA-BUF client cursor — can't CPU-copy, fall through */
+		wlr_cursor_set_surface(cursor, surface, hx, hy);
+		return;
+	}
+
+	/* Clear buffer to transparent */
+	memset(cpu_cursor_buf->map, 0, cpu_cursor_buf->map_size);
+
+	/* Copy client cursor pixels into dumb buffer */
+	copy_w = MIN((uint32_t)surface->current.width, cpu_cursor_buf->width);
+	copy_h = MIN((uint32_t)surface->current.height, cpu_cursor_buf->height);
+
+	dst = (uint8_t *)cpu_cursor_buf->map;
+
+	for (y = 0; y < copy_h; y++) {
+		memcpy(dst + y * cpu_cursor_buf->stride,
+			(uint8_t *)src_data + y * src_stride,
+			copy_w * 4);
+	}
+
+	wlr_buffer_end_data_ptr_access(&surface->buffer->base);
+
+	wlr_cursor_set_buffer(cursor, &cpu_cursor_buf->base,
+		(int32_t)hx, (int32_t)hy, 1.0f);
 }
 

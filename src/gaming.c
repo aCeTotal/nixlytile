@@ -2666,7 +2666,7 @@ retro_gaming_hide(Monitor *m)
 
 	/* Restore mouse cursor when leaving retro gaming browser */
 	if (!retro_gaming_visible_monitor())
-		wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
+		nixly_cursor_set_xcursor("default");
 }
 
 void
@@ -3246,14 +3246,53 @@ detect_gpus(void)
 		 * This is a boot-time parameter and cannot be changed at runtime.
 		 */
 		if (dgpu->vendor == GPU_VENDOR_NVIDIA) {
-			/* Nvidia proprietary driver has known issues with hardware
-			 * cursors in wlroots compositors — force software cursors
-			 * to prevent Xwayland crashes.  The 0 flag preserves any
-			 * user override (WLR_NO_HARDWARE_CURSORS=0). */
-			setenv("WLR_NO_HARDWARE_CURSORS", "1", 0);
+			/* CPU cursor buffer handles HW cursor plane via dumb DRM
+			 * buffers, bypassing broken GBM allocation.  No need to
+			 * force software cursors anymore. */
+
+			/* Nvidia's DRM format modifier implementation is incomplete —
+			 * many modifiers reported as "supported" actually cause buffer
+			 * allocation and import failures.  Disabling modifiers forces
+			 * the simpler linear/implicit allocation path that works
+			 * reliably.  This fixes the majority of Nvidia rendering
+			 * issues including Xwayland black windows and crashes. */
+			setenv("WLR_DRM_NO_MODIFIERS", "1", 0);
 
 			/* Help libgbm find NVIDIA's GBM implementation */
 			setenv("GBM_BACKEND", "nvidia-drm", 0);
+
+			/* Detect Nvidia driver version for explicit sync support.
+			 * Driver 555+ is required for DRM syncobj (explicit sync)
+			 * which eliminates Xwayland flickering.  Older drivers
+			 * also need legacy DRM modesetting as a fallback. */
+			{
+				char nv_ver[32] = "";
+				int ver_fd = open("/sys/module/nvidia/version", O_RDONLY);
+				if (ver_fd >= 0) {
+					ssize_t n = read(ver_fd, nv_ver, sizeof(nv_ver) - 1);
+					close(ver_fd);
+					if (n > 0) {
+						nv_ver[n] = '\0';
+						while (n > 0 && (nv_ver[n-1] == '\n' || nv_ver[n-1] == ' '))
+							nv_ver[--n] = '\0';
+						int major = atoi(nv_ver);
+						wlr_log(WLR_INFO, "NVIDIA: driver version %s (major=%d)", nv_ver, major);
+						if (major > 0 && major < 555) {
+							wlr_log(WLR_ERROR,
+								"NVIDIA: driver %s is too old for explicit sync. "
+								"Xwayland WILL flicker. Upgrade to 555+ for proper "
+								"Wayland/Xwayland support.", nv_ver);
+							/* Older Nvidia drivers have atomic modesetting bugs */
+							setenv("WLR_DRM_NO_ATOMIC", "1", 0);
+						}
+					}
+				} else if (strcmp(dgpu->driver, "nvidia") == 0) {
+					wlr_log(WLR_ERROR,
+						"NVIDIA: could not read driver version from "
+						"/sys/module/nvidia/version — ensure nvidia-drm.modeset=1 "
+						"kernel parameter is set");
+				}
+			}
 
 			char dpm_val[16] = "";
 			int dpm_fd = open("/sys/module/nvidia/parameters/NVreg_DynamicPowerManagement", O_RDONLY);
@@ -3474,6 +3513,20 @@ set_dgpu_env(void)
 
 		/* Use direct rendering for lowest latency (skip composition queue) */
 		setenv("__GL_ALLOW_UNOFFICIAL_PROTOCOL", "1", 0);
+
+		/* Xwayland / EGL session type — ensures X11 and Wayland clients
+		 * correctly identify the session as Wayland. */
+		setenv("XDG_SESSION_TYPE", "wayland", 0);
+
+		/* VA-API hardware video decode via Nvidia */
+		setenv("LIBVA_DRIVER_NAME", "nvidia", 0);
+		setenv("NVD_BACKEND", "direct", 0);
+		setenv("VDPAU_DRIVER", "nvidia", 0);
+
+		wlr_log(WLR_INFO,
+			"NVIDIA: compositor env set — GBM_BACKEND=nvidia-drm, "
+			"WLR_DRM_NO_MODIFIERS=1, "
+			"__GLX_VENDOR_LIBRARY_NAME=nvidia (CPU cursor buffer for HW cursor)");
 
 		break;
 

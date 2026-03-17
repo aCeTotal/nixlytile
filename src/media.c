@@ -411,7 +411,7 @@ stop_integrated_player(void)
 		playback_state = PLAYBACK_IDLE;
 
 		/* Restore mouse cursor */
-		wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
+		nixly_cursor_set_xcursor("default");
 
 		wlr_log(WLR_INFO, "Stopped integrated video player");
 	}
@@ -2113,7 +2113,7 @@ media_view_hide(Monitor *m, MediaViewType type)
 
 	/* Restore mouse cursor when leaving media browser */
 	if (!media_view_visible_monitor())
-		wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
+		nixly_cursor_set_xcursor("default");
 }
 
 void

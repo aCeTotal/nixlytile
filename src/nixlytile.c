@@ -1375,6 +1375,9 @@ cleanup(void)
 		fcft_fini();
 		fcft_initialized = 0;
 	}
+	cpu_cursor_buffer_destroy(cpu_cursor_buf);
+	cpu_cursor_buf = NULL;
+	cpu_cursor_active = 0;
 	wlr_xcursor_manager_destroy(cursor_mgr);
 
 	destroykeyboardgroup(&kb_group->destroy, NULL);
@@ -1663,7 +1666,7 @@ run(const char *startup_cmd)
 	 * initialized, as the image/coordinates are not transformed for the
 	 * monitor when displayed here */
 	wlr_cursor_warp_closest(cursor, NULL, cursor->x, cursor->y);
-	wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
+	nixly_cursor_set_xcursor("default");
 
 	/* Run the Wayland event loop. This does not return until you exit the
 	 * compositor. Starting the backend rigged up all of the necessary event
@@ -2799,6 +2802,21 @@ setup(void)
 		die("couldn't create renderer");
 	wl_signal_add(&drw->events.lost, &gpu_reset);
 
+	/* Log renderer and GPU state for diagnostics */
+	{
+		int is_nvidia = discrete_gpu_idx >= 0 &&
+			detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA;
+		drm_fd = wlr_renderer_get_drm_fd(drw);
+		if (is_nvidia) {
+			wlr_log(WLR_INFO,
+				"NVIDIA: renderer created (drm_fd=%d), "
+				"timeline=%d, backend_timeline=%d",
+				drm_fd,
+				drw->features.timeline,
+				backend->features.timeline);
+		}
+	}
+
 	/* Create shm, drm and linux_dmabuf interfaces by ourselves.
 	 * The simplest way is to call:
 	 *      wlr_renderer_init_wl_display(drw);
@@ -2810,11 +2828,27 @@ setup(void)
 		wlr_drm_create(dpy, drw);
 		wlr_scene_set_linux_dmabuf_v1(scene,
 				wlr_linux_dmabuf_v1_create_with_renderer(dpy, 5, drw));
+	} else if (discrete_gpu_idx >= 0 &&
+	           detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA) {
+		wlr_log(WLR_ERROR,
+			"NVIDIA: renderer has NO DMA-BUF support — "
+			"Xwayland will not work. Check that nvidia-drm.modeset=1 "
+			"is set and the Nvidia EGL/GBM stack is installed");
 	}
 
 	if ((drm_fd = wlr_renderer_get_drm_fd(drw)) >= 0 && drw->features.timeline
-			&& backend->features.timeline)
+			&& backend->features.timeline) {
 		wlr_linux_drm_syncobj_manager_v1_create(dpy, 1, drm_fd);
+		wlr_log(WLR_INFO, "Explicit sync (DRM syncobj) enabled — "
+			"Nvidia Xwayland flickering eliminated");
+	} else if (discrete_gpu_idx >= 0 &&
+	           detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA) {
+		wlr_log(WLR_ERROR,
+			"NVIDIA: explicit sync NOT available (drm_fd=%d, "
+			"renderer_timeline=%d, backend_timeline=%d). "
+			"Xwayland apps may flicker. Upgrade to Nvidia 555+ driver.",
+			drm_fd, drw->features.timeline, backend->features.timeline);
+	}
 
 	/* Autocreates an allocator for us.
 	 * The allocator is the bridge between the renderer and the backend. It
@@ -2918,6 +2952,37 @@ setup(void)
 	cursor_mgr = wlr_xcursor_manager_create(NULL, 24);
 	setenv("XCURSOR_SIZE", "24", 1);
 
+	/* Initialize CPU cursor buffer for Nvidia HW cursor plane */
+	if (discrete_gpu_idx >= 0 &&
+	    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA) {
+		int cdrm_fd = wlr_renderer_get_drm_fd(drw);
+		if (cdrm_fd >= 0) {
+			uint64_t cursor_w = 64, cursor_h = 64;
+			drmGetCap(cdrm_fd, DRM_CAP_CURSOR_WIDTH, &cursor_w);
+			drmGetCap(cdrm_fd, DRM_CAP_CURSOR_HEIGHT, &cursor_h);
+			if (cursor_w < 64) cursor_w = 64;
+			if (cursor_h < 64) cursor_h = 64;
+			cpu_cursor_buf = cpu_cursor_buffer_create(cdrm_fd,
+				(uint32_t)cursor_w, (uint32_t)cursor_h);
+			if (cpu_cursor_buf) {
+				cpu_cursor_active = 1;
+				wlr_log(WLR_INFO,
+					"NVIDIA: CPU cursor buffer enabled "
+					"(HW cursor plane with dumb buffer, %lux%lu)",
+					(unsigned long)cursor_w, (unsigned long)cursor_h);
+			} else {
+				wlr_log(WLR_ERROR,
+					"NVIDIA: CPU cursor buffer creation failed, "
+					"falling back to software cursor");
+				setenv("WLR_NO_HARDWARE_CURSORS", "1", 1);
+			}
+		} else {
+			wlr_log(WLR_ERROR,
+				"NVIDIA: no DRM fd, falling back to software cursor");
+			setenv("WLR_NO_HARDWARE_CURSORS", "1", 1);
+		}
+	}
+
 	/*
 	 * wlr_cursor *only* displays an image on screen. It does not move around
 	 * when the pointer moves. However, we can attach input devices to it, and
@@ -2983,8 +3048,31 @@ setup(void)
 		setenv("DISPLAY", xwayland->display_name, 1);
 		wlr_log(WLR_INFO, "XWayland initialized (lazy mode), DISPLAY=%s",
 			xwayland->display_name);
+
+		/* Log Nvidia-specific Xwayland environment for diagnostics */
+		if (discrete_gpu_idx >= 0 &&
+		    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA) {
+			const char *gbm = getenv("GBM_BACKEND");
+			const char *glx = getenv("__GLX_VENDOR_LIBRARY_NAME");
+			const char *nomod = getenv("WLR_DRM_NO_MODIFIERS");
+			wlr_log(WLR_INFO,
+				"XWayland+NVIDIA: GBM_BACKEND=%s, __GLX_VENDOR_LIBRARY_NAME=%s, "
+				"WLR_DRM_NO_MODIFIERS=%s, cpu_cursor=%s",
+				gbm ? gbm : "(unset)", glx ? glx : "(unset)",
+				nomod ? nomod : "(unset)",
+				cpu_cursor_active ? "active" : "inactive");
+		}
 	} else {
 		wlr_log(WLR_ERROR, "failed to setup XWayland X server, continuing without it");
+		/* Provide Nvidia-specific troubleshooting hints */
+		if (discrete_gpu_idx >= 0 &&
+		    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA) {
+			wlr_log(WLR_ERROR,
+				"NVIDIA: XWayland creation failed. Ensure: "
+				"(1) nvidia-drm.modeset=1 kernel parameter is set, "
+				"(2) nvidia-drm.fbdev=1 on kernel 6.11+, "
+				"(3) Nvidia driver >= 555 installed");
+		}
 	}
 #endif
 
@@ -3310,8 +3398,26 @@ void
 xwaylandready(struct wl_listener *listener, void *data)
 {
 	struct wlr_xcursor *xcursor;
+	xcb_connection_t *xc;
+	int err;
 
 	wlr_log(WLR_INFO, "XWayland server is ready (DISPLAY=%s)", xwayland->display_name);
+
+	/* Verify XCB connection to the Xwayland server */
+	xc = xcb_connect(xwayland->display_name, NULL);
+	err = xcb_connection_has_error(xc);
+	if (err) {
+		wlr_log(WLR_ERROR,
+			"XWayland: xcb_connect failed with code %d — "
+			"X11 apps will not work", err);
+		if (discrete_gpu_idx >= 0 &&
+		    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA)
+			wlr_log(WLR_ERROR,
+				"NVIDIA: XCB connection failure may indicate "
+				"missing nvidia-drm.modeset=1 or broken EGL/GBM setup");
+		return;
+	}
+	xcb_disconnect(xc);
 
 	/* assign the one and only seat */
 	wlr_xwayland_set_seat(xwayland, seat);
@@ -3322,6 +3428,11 @@ xwaylandready(struct wl_listener *listener, void *data)
 				xcursor->images[0]->buffer, xcursor->images[0]->width * 4,
 				xcursor->images[0]->width, xcursor->images[0]->height,
 				xcursor->images[0]->hotspot_x, xcursor->images[0]->hotspot_y);
+
+	if (discrete_gpu_idx >= 0 &&
+	    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA)
+		wlr_log(WLR_INFO,
+			"XWayland+NVIDIA: server ready, XCB connection verified");
 }
 #endif
 

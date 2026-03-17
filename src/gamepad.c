@@ -1368,7 +1368,7 @@ gamepad_update_cursor(void)
 		/* If a window has focus (e.g. Steam install dialog), allow mouse control */
 		if (popup_client && !popup_client->isfullscreen) {
 			/* Show cursor when controlling popup window */
-			wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
+			nixly_cursor_set_xcursor("default");
 			/* Fall through to normal mouse control code below */
 		} else {
 			/* No popup window - use grid navigation */

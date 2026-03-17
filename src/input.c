@@ -727,7 +727,7 @@ buttonpress(struct wl_listener *listener, void *data)
 				end_tile_drag();
 			}
 			/* Default behaviour */
-			wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
+			nixly_cursor_set_xcursor("default");
 			cursor_mode = CurNormal;
 			/* Drop the window off on its new monitor */
 			selmon = xytomon(cursor->x, cursor->y);
@@ -1719,7 +1719,7 @@ focus:
 	 * default. This is what makes the cursor image appear when you move it
 	 * off of a client or over its border. */
 	if (!surface && !seat->drag && playback_state != PLAYBACK_PLAYING)
-		wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
+		nixly_cursor_set_xcursor("default");
 
 	pointerfocus(c, surface, sx, sy, time);
 }
@@ -1765,7 +1765,7 @@ moveresize(const Arg *arg)
 				grabcy = (int)round(cursor->y) - start_geom.y;
 				/* Keep the window anchored under the cursor when leaving tiling. */
 				resize(grabc, start_geom, 1);
-				wlr_cursor_set_xcursor(cursor, cursor_mgr, "fleur");
+				nixly_cursor_set_xcursor("fleur");
 				break;
 			}
 		case CurResize:
@@ -1790,7 +1790,7 @@ moveresize(const Arg *arg)
 				resizing_from_mouse = 1;
 				/* Keep geometry unchanged as we switch to floating resize. */
 				resize(grabc, start_geom, 1);
-				wlr_cursor_set_xcursor(cursor, cursor_mgr, cursor_name);
+				nixly_cursor_set_xcursor(cursor_name);
 			}
 			break;
 		}
@@ -1802,7 +1802,7 @@ moveresize(const Arg *arg)
 		case CurMove:
 			grabcx = (int)round(cursor->x) - grabc->geom.x;
 			grabcy = (int)round(cursor->y) - grabc->geom.y;
-			wlr_cursor_set_xcursor(cursor, cursor_mgr, "fleur");
+			nixly_cursor_set_xcursor("fleur");
 			break;
 		case CurResize:
 			{
@@ -1823,7 +1823,7 @@ moveresize(const Arg *arg)
 				resize_last_x = start_x;
 				resize_last_y = start_y;
 				resizing_from_mouse = 1;
-				wlr_cursor_set_xcursor(cursor, cursor_mgr, cursor_name);
+				nixly_cursor_set_xcursor(cursor_name);
 			}
 			break;
 		}
@@ -1900,7 +1900,7 @@ setcursor(struct wl_listener *listener, void *data)
 	 * hardware cursor on the output that it's currently on and continue to
 	 * do so as the cursor moves between outputs. */
 	if (event->seat_client == seat->pointer_state.focused_client)
-		wlr_cursor_set_surface(cursor, event->surface,
+		nixly_cursor_set_client_surface(event->surface,
 				event->hotspot_x, event->hotspot_y);
 }
 
@@ -1919,7 +1919,7 @@ setcursorshape(struct wl_listener *listener, void *data)
 	 * actually has pointer focus first. If so, we can tell the cursor to
 	 * use the provided cursor shape. */
 	if (event->seat_client == seat->pointer_state.focused_client)
-		wlr_cursor_set_xcursor(cursor, cursor_mgr,
+		nixly_cursor_set_xcursor(
 				wlr_cursor_shape_v1_name(event->shape));
 }
 

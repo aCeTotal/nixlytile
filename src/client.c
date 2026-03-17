@@ -533,7 +533,7 @@ mapnotify(struct wl_listener *listener, void *data)
 			focusclient(c, 1);
 			wlr_log(WLR_INFO, "HTPC: Steam popup raised and focused");
 			/* Show cursor for popup interaction */
-			wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
+			nixly_cursor_set_xcursor("default");
 		}
 	}
 
