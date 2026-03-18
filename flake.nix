@@ -188,6 +188,7 @@
 
             buildPhase = ''
               runHook preBuild
+              make clean
               make \
                 WLR_INCS="$(${pkgs.pkg-config}/bin/pkg-config --cflags ${ps.wlrootsPc})" \
                 WLR_LIBS="$(${pkgs.pkg-config}/bin/pkg-config --libs ${ps.wlrootsPc})"
