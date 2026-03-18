@@ -7,6 +7,17 @@
  * that they will simply compile out if the chosen #defines leave them unused.
  */
 
+/* wlroots 0.20 no longer exposes server-header macros via its public headers */
+#ifndef XDG_TOPLEVEL_CONFIGURE_BOUNDS_SINCE_VERSION
+#define XDG_TOPLEVEL_CONFIGURE_BOUNDS_SINCE_VERSION 4
+#endif
+#ifndef XDG_TOPLEVEL_STATE_TILED_RIGHT_SINCE_VERSION
+#define XDG_TOPLEVEL_STATE_TILED_RIGHT_SINCE_VERSION 2
+#endif
+#ifndef XDG_TOPLEVEL_WM_CAPABILITIES_SINCE_VERSION
+#define XDG_TOPLEVEL_WM_CAPABILITIES_SINCE_VERSION 5
+#endif
+
 /* Leave these functions first; they're used in the others */
 static inline int
 client_is_x11(Client *c)

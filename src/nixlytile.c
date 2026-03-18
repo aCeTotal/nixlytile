@@ -3016,7 +3016,7 @@ setup(void)
     wl_signal_add(&virtual_pointer_mgr->events.new_virtual_pointer,
             &new_virtual_pointer);
 	text_input_mgr = wlr_text_input_manager_v3_create(dpy);
-	wl_signal_add(&text_input_mgr->events.text_input, &new_text_input);
+	wl_signal_add(&text_input_mgr->events.new_text_input, &new_text_input);
 
 	seat = wlr_seat_create(dpy, "seat0");
 	wl_signal_add(&seat->events.request_set_cursor, &request_cursor);
@@ -3425,8 +3425,7 @@ xwaylandready(struct wl_listener *listener, void *data)
 	/* Set the default XWayland cursor to match the rest of dwl. */
 	if ((xcursor = wlr_xcursor_manager_get_xcursor(cursor_mgr, "default", 1)))
 		wlr_xwayland_set_cursor(xwayland,
-				xcursor->images[0]->buffer, xcursor->images[0]->width * 4,
-				xcursor->images[0]->width, xcursor->images[0]->height,
+				wlr_xcursor_image_get_buffer(xcursor->images[0]),
 				xcursor->images[0]->hotspot_x, xcursor->images[0]->hotspot_y);
 
 	if (discrete_gpu_idx >= 0 &&

@@ -1,1 +1,22 @@
-result*
+# Build artifacts
+*.o
+nixlytile
+result
+result-*
+game_params.conf
+
+# Server build artifacts
+Server/*.o
+Server/nixly-server
+Server/nixly.db
+
+# Logs
+error*.log
+
+# Editor/IDE
+*.swp
+*.swo
+*~
+
+# Nix
+.direnv/
