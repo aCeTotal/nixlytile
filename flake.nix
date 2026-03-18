@@ -15,9 +15,31 @@
         let
           pkgs = import nixpkgs {
             inherit system;
-            overlays = [ nixlypkgs.overlays.default ];
+            overlays = [
+              nixlypkgs.overlays.default
+            ];
           };
-          wlrootsPc = "wlroots-${lib.versions.majorMinor pkgs.wlroots.version}";
+
+          wlrootsLocal = pkgs.stdenv.mkDerivation {
+            pname = "wlroots";
+            version = "0.20.0-rc4";
+            src = ./wlroots;
+            nativeBuildInputs = with pkgs; [ meson ninja pkg-config wayland-scanner ];
+            buildInputs = with pkgs; [
+              wayland wayland-protocols libdrm libxkbcommon pixman libinput
+              xwayland seatd libepoxy libglvnd libxcb libxcb-wm
+              libgbm hwdata libliftoff libdisplay-info lcms2 libxcb-errors
+            ];
+            mesonFlags = [
+              "-Dexamples=false"
+              "-Dxwayland=enabled"
+              "-Dbackends=drm,libinput"
+              "-Drenderers=gles2"
+              "-Dallocators=gbm"
+            ];
+          };
+
+          wlrootsPc = "wlroots-0.20";
 
           iconDeps = with pkgs; [
             cairo
@@ -37,18 +59,21 @@
               fcft
               wayland
               wayland-protocols
-              wlroots
+              wlrootsLocal
               libinput
               libxkbcommon
               tllist
               pixman
               libdrm
               systemd
-              xorg.libxcb
-              xorg.xcbutilwm
+              libxcb
+              libxcb-wm
               xwayland
               seatd
               swaybg
+              ffmpeg
+              pipewire
+              libass
             ]
             ++ iconDeps;
 
@@ -57,7 +82,7 @@
             runtimeInputs = buildTools;
             text = ''
               set -euo pipefail
-              echo "Using wlroots pkg-config name: ${wlrootsPc} (${pkgs.wlroots.version})"
+              echo "Using wlroots pkg-config name: ${wlrootsPc} (${wlrootsLocal.version})"
               make clean
               make \
                 PKG_CONFIG=pkg-config \
@@ -67,7 +92,7 @@
             '';
           };
         in {
-          inherit pkgs wlrootsPc buildTools buildScript iconDeps;
+          inherit pkgs wlrootsPc wlrootsLocal buildTools buildScript iconDeps;
         };
     in {
       packages = forAllSystems (system:
@@ -82,9 +107,9 @@
             xwayland           # X11 compatibility
 
             # File manager
-            xfce.thunar
-            xfce.thunar-volman
-            xfce.thunar-archive-plugin
+            thunar
+            thunar-volman
+            thunar-archive-plugin
 
             # Network management
             networkmanager     # nmcli
@@ -119,8 +144,8 @@
             slurp
             wl-clipboard
 
-            # Browser for streaming services (NRK, F1TV)
-            chromium
+            # Heavy packages (chromium, ffmpeg cli, etc.) are NOT included here.
+            # Add them to your NixOS configuration instead.
           ];
           defaultPackage = pkgs.stdenv.mkDerivation {
             pname = "nixlytile";
@@ -135,28 +160,28 @@
               pkgs.makeWrapper
             ];
 
-          buildInputs = [
-            pkgs.wayland
-            pkgs.wlroots
-            pkgs.libinput
-            pkgs.libxkbcommon
-            pkgs.fcft
+            buildInputs = [
+              pkgs.wayland
+              ps.wlrootsLocal
+              pkgs.libinput
+              pkgs.libxkbcommon
+              pkgs.fcft
               pkgs.tllist
               pkgs.pixman
               pkgs.libdrm
-            pkgs.xorg.libxcb
-            pkgs.xorg.xcbutilwm
-            pkgs.xwayland
-            pkgs.libepoxy       # nixlypkgs: nvidiaSupport=true, LIBGL_PATH→libglvnd
-            pkgs.libglvnd       # Nvidia GL dispatch (propagated by libepoxy)
-            pkgs.systemd
-            pkgs.brightnessctl
-            # Video player dependencies
-            pkgs.ffmpeg
-            pkgs.pipewire
-            pkgs.libass
-            pkgs.libva
-          ] ++ ps.iconDeps;
+              pkgs.libxcb
+              pkgs.libxcb-wm
+              pkgs.xwayland
+              pkgs.libepoxy
+              pkgs.libglvnd
+              pkgs.systemd
+              pkgs.brightnessctl
+              # Video player dependencies
+              pkgs.ffmpeg
+              pkgs.pipewire
+              pkgs.libass
+              pkgs.libva
+            ] ++ ps.iconDeps;
 
             makeFlags = [ "PKG_CONFIG=${pkgs.pkg-config}/bin/pkg-config" ];
             dontWrapQtApps = true;
@@ -242,7 +267,7 @@
             packages = ps.buildTools ++ [ ps.buildScript ];
             shellHook = ''
               export WLR_PKG=${ps.wlrootsPc}
-              echo "Helper: nixlytile-build (uses ${ps.wlrootsPc}); swaybg and seatd are available in PATH."
+              echo "nixlytile-build available (uses ${ps.wlrootsPc})"
             '';
           };
         });
