@@ -412,13 +412,47 @@ mapnotify(struct wl_listener *listener, void *data)
 	int i;
 
 	/* Create scene tree for this client and its border */
-	c->scene = client_surface(c)->data = wlr_scene_tree_create(layers[LyrTile]);
-	/* Enabled later by a call to arrange() */
-	wlr_scene_node_set_enabled(&c->scene->node, client_is_unmanaged(c));
-	c->scene_surface = c->type == XDGShell
-			? wlr_scene_xdg_surface_create(c->scene, c->surface.xdg)
-			: wlr_scene_subsurface_tree_create(c->scene, client_surface(c));
-	c->scene->node.data = c->scene_surface->node.data = c;
+	{
+		struct wlr_surface *surf = client_surface(c);
+		if (!surf) {
+			wlr_log(WLR_ERROR,
+				"mapnotify: client_surface() returned NULL — "
+				"surface may have been destroyed before mapping");
+#ifdef XWAYLAND
+			if (c->type == X11 && c->surface.xwayland)
+				wlr_log(WLR_ERROR,
+					"  X11 client class='%s' — check Xwayland log for errors",
+					c->surface.xwayland->class ? c->surface.xwayland->class : "(null)");
+#endif
+			return;
+		}
+
+		c->scene = wlr_scene_tree_create(layers[LyrTile]);
+		if (!c->scene) {
+			wlr_log(WLR_ERROR,
+				"mapnotify: wlr_scene_tree_create() failed — "
+				"out of memory or scene graph error");
+			return;
+		}
+		surf->data = c->scene;
+
+		/* Enabled later by a call to arrange() */
+		wlr_scene_node_set_enabled(&c->scene->node, client_is_unmanaged(c));
+
+		c->scene_surface = c->type == XDGShell
+				? wlr_scene_xdg_surface_create(c->scene, c->surface.xdg)
+				: wlr_scene_subsurface_tree_create(c->scene, client_surface(c));
+		if (!c->scene_surface) {
+			wlr_log(WLR_ERROR,
+				"mapnotify: scene surface creation failed — "
+				"DMA-BUF or buffer import error. Check GPU driver and "
+				"/dev/dri/ permissions");
+			wlr_scene_node_destroy(&c->scene->node);
+			c->scene = NULL;
+			return;
+		}
+		c->scene->node.data = c->scene_surface->node.data = c;
+	}
 
 	client_get_geometry(c, &c->geom);
 

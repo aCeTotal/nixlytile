@@ -1485,13 +1485,13 @@ handlesig(int signo)
 	if (signo == SIGCHLD) {
 		while (waitpid(-1, NULL, WNOHANG) > 0);
 	} else if (signo == SIGINT) {
-		write(STDERR_FILENO, "handlesig: SIGINT received, quitting\n", 37);
+		(void)write(STDERR_FILENO, "handlesig: SIGINT received, quitting\n", 37);
 		quit(NULL);
 	} else if (signo == SIGTERM) {
-		write(STDERR_FILENO, "handlesig: SIGTERM received, quitting\n", 38);
+		(void)write(STDERR_FILENO, "handlesig: SIGTERM received, quitting\n", 38);
 		quit(NULL);
 	} else if (signo == SIGPIPE) {
-		write(STDERR_FILENO, "handlesig: SIGPIPE received (ignored)\n", 38);
+		(void)write(STDERR_FILENO, "handlesig: SIGPIPE received (ignored)\n", 38);
 	}
 }
 
@@ -2828,26 +2828,53 @@ setup(void)
 		wlr_drm_create(dpy, drw);
 		wlr_scene_set_linux_dmabuf_v1(scene,
 				wlr_linux_dmabuf_v1_create_with_renderer(dpy, 5, drw));
-	} else if (discrete_gpu_idx >= 0 &&
-	           detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA) {
+	} else {
 		wlr_log(WLR_ERROR,
-			"NVIDIA: renderer has NO DMA-BUF support — "
-			"Xwayland will not work. Check that nvidia-drm.modeset=1 "
-			"is set and the Nvidia EGL/GBM stack is installed");
+			"Renderer has NO DMA-BUF support — "
+			"Xwayland zero-copy buffer sharing will not work");
+		if (discrete_gpu_idx >= 0) {
+			switch (detected_gpus[discrete_gpu_idx].vendor) {
+			case GPU_VENDOR_NVIDIA:
+				wlr_log(WLR_ERROR,
+					"NVIDIA: check that nvidia-drm.modeset=1 is set "
+					"and the Nvidia EGL/GBM stack is installed");
+				break;
+			case GPU_VENDOR_AMD:
+				wlr_log(WLR_ERROR,
+					"AMD: check that mesa is installed and "
+					"amdgpu kernel module is loaded");
+				break;
+			case GPU_VENDOR_INTEL:
+				wlr_log(WLR_ERROR,
+					"Intel: check that mesa is installed and "
+					"i915/xe kernel module is loaded");
+				break;
+			default:
+				break;
+			}
+		} else if (integrated_gpu_idx >= 0) {
+			wlr_log(WLR_ERROR,
+				"Using integrated GPU (%s) — ensure mesa/GL "
+				"libraries are installed",
+				detected_gpus[integrated_gpu_idx].driver);
+		}
 	}
 
 	if ((drm_fd = wlr_renderer_get_drm_fd(drw)) >= 0 && drw->features.timeline
 			&& backend->features.timeline) {
 		wlr_linux_drm_syncobj_manager_v1_create(dpy, 1, drm_fd);
-		wlr_log(WLR_INFO, "Explicit sync (DRM syncobj) enabled — "
-			"Nvidia Xwayland flickering eliminated");
-	} else if (discrete_gpu_idx >= 0 &&
-	           detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA) {
-		wlr_log(WLR_ERROR,
-			"NVIDIA: explicit sync NOT available (drm_fd=%d, "
-			"renderer_timeline=%d, backend_timeline=%d). "
-			"Xwayland apps may flicker. Upgrade to Nvidia 555+ driver.",
+		wlr_log(WLR_INFO, "Explicit sync (DRM syncobj) enabled");
+	} else {
+		wlr_log(WLR_INFO,
+			"Explicit sync NOT available (drm_fd=%d, "
+			"renderer_timeline=%d, backend_timeline=%d)",
 			drm_fd, drw->features.timeline, backend->features.timeline);
+		if (discrete_gpu_idx >= 0 &&
+		    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA) {
+			wlr_log(WLR_ERROR,
+				"NVIDIA: without explicit sync, Xwayland apps may flicker. "
+				"Upgrade to Nvidia 555+ driver for DRM syncobj support.");
+		}
 	}
 
 	/* Autocreates an allocator for us.
@@ -3038,6 +3065,86 @@ setup(void)
 	unsetenv("DISPLAY");
 #ifdef XWAYLAND
 	/*
+	 * Xwayland binary auto-selection.
+	 *
+	 * wlroots uses the WLR_XWAYLAND env var to locate the Xwayland binary
+	 * (xwayland/server.c).  If the user hasn't set it, find the best
+	 * available binary automatically — preferring NixOS system path which
+	 * is always the most up-to-date.
+	 */
+	if (!getenv("WLR_XWAYLAND")) {
+		const char *xwl_paths[] = {
+			"/run/current-system/sw/bin/Xwayland",
+			NULL  /* PATH search handled below */
+		};
+		const char *xwl_chosen = NULL;
+
+		/* Check fixed paths first (NixOS system path is most up-to-date) */
+		for (int pi = 0; xwl_paths[pi]; pi++) {
+			if (access(xwl_paths[pi], X_OK) == 0) {
+				xwl_chosen = xwl_paths[pi];
+				break;
+			}
+		}
+
+		/* Search PATH as fallback (finds nix-profile and distro binaries) */
+		static char xwl_path_buf[4200];
+		if (!xwl_chosen) {
+			const char *pathenv = getenv("PATH");
+			if (pathenv) {
+				char pathbuf[4096];
+				snprintf(pathbuf, sizeof(pathbuf), "%s", pathenv);
+				char *saveptr = NULL;
+				for (char *dir = strtok_r(pathbuf, ":", &saveptr); dir;
+				     dir = strtok_r(NULL, ":", &saveptr)) {
+					snprintf(xwl_path_buf, sizeof(xwl_path_buf), "%s/Xwayland", dir);
+					if (access(xwl_path_buf, X_OK) == 0) {
+						xwl_chosen = xwl_path_buf;
+						break;
+					}
+				}
+			}
+		}
+
+		/* Standard distro fallback paths */
+		if (!xwl_chosen) {
+			const char *fallbacks[] = {
+				"/usr/bin/Xwayland",
+				"/usr/lib/xorg/Xwayland",
+				NULL
+			};
+			for (int fi = 0; fallbacks[fi]; fi++) {
+				if (access(fallbacks[fi], X_OK) == 0) {
+					xwl_chosen = fallbacks[fi];
+					break;
+				}
+			}
+		}
+
+		if (xwl_chosen) {
+			setenv("WLR_XWAYLAND", xwl_chosen, 1);
+			wlr_log(WLR_INFO, "Xwayland binary selected: %s", xwl_chosen);
+		} else {
+			wlr_log(WLR_ERROR,
+				"Xwayland binary NOT FOUND — X11 apps will not work. "
+				"Install the xwayland package (NixOS: services.xserver.enable or "
+				"environment.systemPackages = [ pkgs.xwayland ])");
+		}
+	} else {
+		wlr_log(WLR_INFO, "Xwayland binary (user-set): %s", getenv("WLR_XWAYLAND"));
+	}
+
+	/* Nvidia Xwayland performance environment */
+	if (discrete_gpu_idx >= 0 &&
+	    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA) {
+		/* Ensure direct rendering (not indirect/software) */
+		setenv("LIBGL_ALWAYS_INDIRECT", "0", 0);
+
+		/* Nvidia experimental performance strategy */
+		setenv("__GL_ExperimentalPerfStrategy", "1", 0);
+	}
+
+	/*
 	 * Initialise the XWayland X server.
 	 * It will be started when the first X client is started.
 	 */
@@ -3049,7 +3156,7 @@ setup(void)
 		wlr_log(WLR_INFO, "XWayland initialized (lazy mode), DISPLAY=%s",
 			xwayland->display_name);
 
-		/* Log Nvidia-specific Xwayland environment for diagnostics */
+		/* Log GPU-specific Xwayland environment for diagnostics */
 		if (discrete_gpu_idx >= 0 &&
 		    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA) {
 			const char *gbm = getenv("GBM_BACKEND");
@@ -3064,15 +3171,81 @@ setup(void)
 		}
 	} else {
 		wlr_log(WLR_ERROR, "failed to setup XWayland X server, continuing without it");
-		/* Provide Nvidia-specific troubleshooting hints */
-		if (discrete_gpu_idx >= 0 &&
-		    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA) {
+		/* Vendor-specific troubleshooting hints */
+		if (discrete_gpu_idx >= 0) {
+			GpuInfo *dgpu = &detected_gpus[discrete_gpu_idx];
+			switch (dgpu->vendor) {
+			case GPU_VENDOR_NVIDIA:
+				wlr_log(WLR_ERROR,
+					"NVIDIA: XWayland creation failed. Ensure: "
+					"(1) nvidia-drm.modeset=1 kernel parameter is set, "
+					"(2) nvidia-drm.fbdev=1 on kernel 6.11+, "
+					"(3) Nvidia driver >= 555 installed");
+				break;
+			case GPU_VENDOR_AMD:
+				wlr_log(WLR_ERROR,
+					"AMD: XWayland creation failed. Check: "
+					"(1) amdgpu kernel module is loaded, "
+					"(2) /dev/dri/renderD* is accessible (user in 'render' group), "
+					"(3) mesa and xwayland packages are installed");
+				break;
+			case GPU_VENDOR_INTEL:
+				wlr_log(WLR_ERROR,
+					"Intel: XWayland creation failed. Check: "
+					"(1) i915/xe kernel module is loaded, "
+					"(2) /dev/dri/renderD* is accessible (user in 'render' group), "
+					"(3) mesa and xwayland packages are installed");
+				break;
+			default:
+				wlr_log(WLR_ERROR,
+					"XWayland creation failed with unknown GPU vendor. "
+					"Check /dev/dri/ devices exist and are accessible");
+				break;
+			}
+		} else if (integrated_gpu_idx >= 0) {
+			GpuInfo *igpu = &detected_gpus[integrated_gpu_idx];
+			switch (igpu->vendor) {
+			case GPU_VENDOR_INTEL:
+				wlr_log(WLR_ERROR,
+					"Intel iGPU only: XWayland creation failed. Check: "
+					"(1) i915/xe module loaded, (2) mesa/xwayland installed, "
+					"(3) /dev/dri/renderD* accessible");
+				break;
+			case GPU_VENDOR_AMD:
+				wlr_log(WLR_ERROR,
+					"AMD APU only: XWayland creation failed. Check: "
+					"(1) amdgpu module loaded, (2) mesa/xwayland installed, "
+					"(3) /dev/dri/renderD* accessible");
+				break;
+			default:
+				wlr_log(WLR_ERROR,
+					"XWayland creation failed. Check /dev/dri/ devices "
+					"and GPU driver modules");
+				break;
+			}
+		} else {
 			wlr_log(WLR_ERROR,
-				"NVIDIA: XWayland creation failed. Ensure: "
-				"(1) nvidia-drm.modeset=1 kernel parameter is set, "
-				"(2) nvidia-drm.fbdev=1 on kernel 6.11+, "
-				"(3) Nvidia driver >= 555 installed");
+				"No GPU detected — XWayland requires a functioning GPU. "
+				"Check that DRI kernel modules are loaded and /dev/dri/ "
+				"contains card and render nodes");
 		}
+	}
+
+	/* === Xwayland diagnostic summary === */
+	{
+		int has_dmabuf = wlr_renderer_get_texture_formats(drw, WLR_BUFFER_CAP_DMABUF) != NULL;
+		int has_sync = (drm_fd >= 0 && drw->features.timeline && backend->features.timeline);
+		wlr_log(WLR_INFO,
+			"=== Xwayland diagnostic summary === "
+			"GPUs=%d, discrete=%s, integrated=%s, "
+			"DMA-BUF=%s, explicit_sync=%s, "
+			"Xwayland=%s",
+			detected_gpu_count,
+			discrete_gpu_idx >= 0 ? detected_gpus[discrete_gpu_idx].driver : "none",
+			integrated_gpu_idx >= 0 ? detected_gpus[integrated_gpu_idx].driver : "none",
+			has_dmabuf ? "yes" : "NO",
+			has_sync ? "yes" : "no",
+			xwayland ? xwayland->display_name : "FAILED");
 	}
 #endif
 
@@ -3407,16 +3580,81 @@ xwaylandready(struct wl_listener *listener, void *data)
 	xc = xcb_connect(xwayland->display_name, NULL);
 	err = xcb_connection_has_error(xc);
 	if (err) {
+		/* Decode XCB error codes to human-readable descriptions */
+		const char *err_desc;
+		switch (err) {
+		case XCB_CONN_ERROR:
+			err_desc = "connection error (socket/pipe failure)";
+			break;
+		case XCB_CONN_CLOSED_EXT_NOTSUPPORTED:
+			err_desc = "unsupported extension";
+			break;
+		case XCB_CONN_CLOSED_MEM_INSUFFICIENT:
+			err_desc = "insufficient memory";
+			break;
+		case XCB_CONN_CLOSED_REQ_LEN_EXCEED:
+			err_desc = "request length exceeded";
+			break;
+		case XCB_CONN_CLOSED_PARSE_ERR:
+			err_desc = "display string parse error";
+			break;
+		case XCB_CONN_CLOSED_INVALID_SCREEN:
+			err_desc = "invalid screen";
+			break;
+		default:
+			err_desc = "unknown error";
+			break;
+		}
 		wlr_log(WLR_ERROR,
-			"XWayland: xcb_connect failed with code %d — "
-			"X11 apps will not work", err);
-		if (discrete_gpu_idx >= 0 &&
-		    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA)
-			wlr_log(WLR_ERROR,
-				"NVIDIA: XCB connection failure may indicate "
-				"missing nvidia-drm.modeset=1 or broken EGL/GBM setup");
+			"XWayland: xcb_connect failed with code %d (%s) — "
+			"X11 apps will not work", err, err_desc);
+
+		/* Vendor-specific XCB error tips */
+		if (discrete_gpu_idx >= 0) {
+			switch (detected_gpus[discrete_gpu_idx].vendor) {
+			case GPU_VENDOR_NVIDIA:
+				wlr_log(WLR_ERROR,
+					"NVIDIA: XCB connection failure may indicate "
+					"missing nvidia-drm.modeset=1 or broken EGL/GBM setup");
+				break;
+			case GPU_VENDOR_AMD:
+				wlr_log(WLR_ERROR,
+					"AMD: XCB connection failure — check that mesa "
+					"and xwayland packages are installed correctly");
+				break;
+			case GPU_VENDOR_INTEL:
+				wlr_log(WLR_ERROR,
+					"Intel: XCB connection failure — check that mesa "
+					"and xwayland packages are installed correctly");
+				break;
+			default:
+				break;
+			}
+		}
 		return;
 	}
+
+	/* GLX extension probe — check if OpenGL over X11 will work */
+	{
+		xcb_query_extension_cookie_t glx_cookie =
+			xcb_query_extension(xc, 3, "GLX");
+		xcb_query_extension_reply_t *glx_reply =
+			xcb_query_extension_reply(xc, glx_cookie, NULL);
+		if (glx_reply) {
+			if (glx_reply->present) {
+				wlr_log(WLR_INFO,
+					"XWayland: GLX extension is available — "
+					"OpenGL X11 apps (blender, freecad, etc.) should work");
+			} else {
+				wlr_log(WLR_ERROR,
+					"XWayland: GLX extension NOT available — "
+					"OpenGL X11 apps (blender, freecad, etc.) will fail. "
+					"Install GPU GL/EGL libraries (mesa, nvidia-libs)");
+			}
+			free(glx_reply);
+		}
+	}
+
 	xcb_disconnect(xc);
 
 	/* assign the one and only seat */
@@ -3428,10 +3666,15 @@ xwaylandready(struct wl_listener *listener, void *data)
 				wlr_xcursor_image_get_buffer(xcursor->images[0]),
 				xcursor->images[0]->hotspot_x, xcursor->images[0]->hotspot_y);
 
-	if (discrete_gpu_idx >= 0 &&
-	    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA)
+	/* Log successful ready with vendor info */
+	{
+		const char *gpu_info = "no discrete GPU";
+		if (discrete_gpu_idx >= 0)
+			gpu_info = detected_gpus[discrete_gpu_idx].driver;
 		wlr_log(WLR_INFO,
-			"XWayland+NVIDIA: server ready, XCB connection verified");
+			"XWayland ready: XCB verified, GPU=%s, DISPLAY=%s",
+			gpu_info, xwayland->display_name);
+	}
 }
 #endif
 

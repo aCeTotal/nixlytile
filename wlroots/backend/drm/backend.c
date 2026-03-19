@@ -199,6 +199,21 @@ static bool init_mgpu_renderer(struct wlr_drm_backend *drm) {
 	}
 
 	wlr_drm_format_set_copy(&drm->mgpu_formats, texture_formats);
+
+	/* Ensure LINEAR is available for every format before sanitizing.
+	 * Some proprietary drivers (notably Nvidia) only report
+	 * DRM_FORMAT_MOD_INVALID for DMA-BUF texture import — meaning
+	 * "any modifier is fine".  sanitize_mgpu_modifiers() strips
+	 * INVALID (which is not portable across GPUs), but without
+	 * an explicit LINEAR fallback the format set ends up empty,
+	 * making it impossible to create a swapchain for the secondary
+	 * GPU output (= permanent black screen). */
+	for (size_t idx = 0; idx < drm->mgpu_formats.len; idx++) {
+		wlr_drm_format_set_add(&drm->mgpu_formats,
+			drm->mgpu_formats.formats[idx].format,
+			DRM_FORMAT_MOD_LINEAR);
+	}
+
 	sanitize_mgpu_modifiers(&drm->mgpu_formats);
 	drm->backend.features.timeline = drm->backend.features.timeline &&
 		drm->mgpu_renderer.wlr_rend->features.timeline;

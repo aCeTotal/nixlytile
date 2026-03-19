@@ -183,8 +183,21 @@ createmon(struct wl_listener *listener, void *data)
 	Client *c;
 	int use_runtime_config = 0;
 
-	if (!wlr_output_init_render(wlr_output, alloc, drw))
+	/* Log multi-GPU topology for diagnostics */
+	if (wlr_output_is_drm(wlr_output)) {
+		struct wlr_backend *parent =
+			wlr_drm_backend_get_parent(wlr_output->backend);
+		if (parent) {
+			wlr_log(WLR_INFO, "Output %s is on secondary GPU (multi-GPU / mgpu)",
+				wlr_output->name);
+		}
+	}
+
+	if (!wlr_output_init_render(wlr_output, alloc, drw)) {
+		wlr_log(WLR_ERROR, "Failed to init render for output %s — "
+			"allocator/renderer buffer caps mismatch", wlr_output->name);
 		return;
+	}
 
 	m = wlr_output->data = ecalloc(1, sizeof(*m));
 	m->wlr_output = wlr_output;
@@ -940,7 +953,13 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 	if (!wlr_output_commit_state(m->wlr_output, state)) {
 		if (allow_tearing) {
 			state->tearing_page_flip = false;
-			wlr_output_commit_state(m->wlr_output, state);
+			if (!wlr_output_commit_state(m->wlr_output, state)) {
+				wlr_log(WLR_ERROR, "Output commit failed on %s (non-tearing retry)",
+					m->wlr_output->name);
+			}
+		} else {
+			wlr_log(WLR_ERROR, "Output commit failed on %s",
+				m->wlr_output->name);
 		}
 	}
 
@@ -1865,6 +1884,11 @@ init_monitor_color_settings(Monitor *m)
 	 * Automatically enable 10-bit rendering if supported.
 	 * This provides smoother gradients and better color accuracy.
 	 *
+	 * Skip on secondary GPU outputs (multi-GPU / mgpu): the render format
+	 * must survive cross-GPU format negotiation (mgpu_formats intersection).
+	 * XRGB2101010 modifiers rarely intersect between Intel and Nvidia,
+	 * causing swapchain creation to fail → permanent black screen.
+	 *
 	 * The old set_drm_color_properties() legacy DRM calls that used to
 	 * follow this have been removed: wlroots 0.20 manages "max bpc"
 	 * automatically via pick_max_bpc() in atomic commits.  The legacy
@@ -1872,7 +1896,19 @@ init_monitor_color_settings(Monitor *m)
 	 * on subsequent mode changes.
 	 */
 	if (m->supports_10bit) {
-		enable_10bit_rendering(m);
+		int is_secondary_gpu = 0;
+		if (wlr_output_is_drm(m->wlr_output)) {
+			struct wlr_backend *parent =
+				wlr_drm_backend_get_parent(m->wlr_output->backend);
+			if (parent) {
+				is_secondary_gpu = 1;
+				wlr_log(WLR_INFO, "Monitor %s is on secondary GPU, "
+					"skipping 10-bit to avoid cross-GPU format issues",
+					m->wlr_output->name);
+			}
+		}
+		if (!is_secondary_gpu)
+			enable_10bit_rendering(m);
 	}
 
 	/*

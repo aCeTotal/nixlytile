@@ -3025,6 +3025,34 @@ retro_gaming_visible_monitor(void)
 	return NULL;
 }
 
+/* Check if a kernel module is loaded via /sys/module/<name> */
+static int
+validate_kernel_module(const char *module_name)
+{
+	char path[128];
+	snprintf(path, sizeof(path), "/sys/module/%s", module_name);
+	return access(path, F_OK) == 0;
+}
+
+/* Check if a kernel module parameter has a specific value */
+static int
+check_module_param(const char *module_name, const char *param, const char *expected)
+{
+	char path[256], val[64];
+	snprintf(path, sizeof(path), "/sys/module/%s/parameters/%s", module_name, param);
+	int fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return 0;
+	ssize_t n = read(fd, val, sizeof(val) - 1);
+	close(fd);
+	if (n <= 0)
+		return 0;
+	val[n] = '\0';
+	while (n > 0 && (val[n-1] == '\n' || val[n-1] == ' '))
+		val[--n] = '\0';
+	return strcmp(val, expected) == 0;
+}
+
 void
 detect_gpus(void)
 {
@@ -3161,6 +3189,38 @@ detect_gpus(void)
 			detected_gpu_count, gpu->card_path, gpu->render_path,
 			gpu->driver, gpu->is_discrete, gpu->pci_slot);
 
+		/* Validate render node exists and is accessible */
+		if (gpu->render_path[0]) {
+			if (access(gpu->render_path, F_OK) != 0) {
+				wlr_log(WLR_ERROR,
+					"GPU %d: render node %s does NOT exist — "
+					"check that kernel module '%s' is loaded correctly",
+					detected_gpu_count, gpu->render_path, gpu->driver);
+			} else if (access(gpu->render_path, R_OK | W_OK) != 0) {
+				wlr_log(WLR_ERROR,
+					"GPU %d: render node %s is not accessible (permission denied) — "
+					"add your user to the 'render' and/or 'video' group: "
+					"sudo usermod -aG render,video $USER",
+					detected_gpu_count, gpu->render_path);
+			}
+		} else {
+			wlr_log(WLR_ERROR,
+				"GPU %d: no render node found for %s — "
+				"check that kernel module '%s' is loaded and "
+				"/dev/dri/renderD* devices exist",
+				detected_gpu_count, gpu->card_path, gpu->driver);
+		}
+
+		/* Validate card node accessibility */
+		if (access(gpu->card_path, F_OK) == 0 &&
+		    access(gpu->card_path, R_OK | W_OK) != 0) {
+			wlr_log(WLR_ERROR,
+				"GPU %d: card node %s is not accessible (permission denied) — "
+				"check that a session manager (logind/seatd) is running and "
+				"your user is in the 'video' group",
+				detected_gpu_count, gpu->card_path);
+		}
+
 		detected_gpu_count++;
 	}
 	closedir(dri_dir);
@@ -3276,6 +3336,7 @@ detect_gpus(void)
 						while (n > 0 && (nv_ver[n-1] == '\n' || nv_ver[n-1] == ' '))
 							nv_ver[--n] = '\0';
 						int major = atoi(nv_ver);
+						dgpu->driver_version = major;
 						wlr_log(WLR_INFO, "NVIDIA: driver version %s (major=%d)", nv_ver, major);
 						if (major > 0 && major < 555) {
 							wlr_log(WLR_ERROR,
@@ -3291,6 +3352,75 @@ detect_gpus(void)
 						"NVIDIA: could not read driver version from "
 						"/sys/module/nvidia/version — ensure nvidia-drm.modeset=1 "
 						"kernel parameter is set");
+				}
+			}
+
+			/* nvidia-drm.fbdev check — improves scanout performance.
+			 * Auto-enabled in driver 570+, needs manual set for 555-569. */
+			if (dgpu->driver_version >= 555 && dgpu->driver_version < 570) {
+				if (!check_module_param("nvidia_drm", "fbdev", "Y") &&
+				    !check_module_param("nvidia_drm", "fbdev", "1")) {
+					struct utsname uts;
+					if (uname(&uts) == 0) {
+						int kmaj = 0, kmin = 0;
+						sscanf(uts.release, "%d.%d", &kmaj, &kmin);
+						if (kmaj > 6 || (kmaj == 6 && kmin >= 11)) {
+							wlr_log(WLR_ERROR,
+								"NVIDIA: nvidia-drm.fbdev=1 recommended on kernel %d.%d "
+								"(driver %d). Add 'nvidia-drm.fbdev=1' to kernel parameters "
+								"for better scanout performance.",
+								kmaj, kmin, dgpu->driver_version);
+						}
+					}
+				}
+			}
+
+			/* GSP firmware status — informational for diagnostics */
+			{
+				char gsp_val[16] = "";
+				int gsp_fd = open("/sys/module/nvidia/parameters/NVreg_EnableGpuFirmware", O_RDONLY);
+				if (gsp_fd >= 0) {
+					ssize_t gn = read(gsp_fd, gsp_val, sizeof(gsp_val) - 1);
+					close(gsp_fd);
+					if (gn > 0) {
+						gsp_val[gn] = '\0';
+						while (gn > 0 && (gsp_val[gn-1] == '\n' || gsp_val[gn-1] == ' '))
+							gsp_val[--gn] = '\0';
+						if (strcmp(gsp_val, "1") == 0 || strcmp(gsp_val, "Y") == 0) {
+							wlr_log(WLR_INFO, "NVIDIA: GSP firmware enabled (good)");
+						} else if (dgpu->driver_version >= 560) {
+							wlr_log(WLR_INFO,
+								"NVIDIA: GSP firmware disabled (NVreg_EnableGpuFirmware=%s). "
+								"GSP is recommended for driver %d+ for improved performance "
+								"and power management.", gsp_val, dgpu->driver_version);
+						} else {
+							wlr_log(WLR_INFO, "NVIDIA: GSP firmware status: %s", gsp_val);
+						}
+					}
+				}
+			}
+
+			/* NVreg_PreserveVideoMemoryAllocations — suspend/resume support */
+			{
+				char pvm_val[16] = "";
+				int pvm_fd = open("/sys/module/nvidia/parameters/NVreg_PreserveVideoMemoryAllocations", O_RDONLY);
+				if (pvm_fd >= 0) {
+					ssize_t pn = read(pvm_fd, pvm_val, sizeof(pvm_val) - 1);
+					close(pvm_fd);
+					if (pn > 0) {
+						pvm_val[pn] = '\0';
+						while (pn > 0 && (pvm_val[pn-1] == '\n' || pvm_val[pn-1] == ' '))
+							pvm_val[--pn] = '\0';
+						if (strcmp(pvm_val, "1") == 0 || strcmp(pvm_val, "Y") == 0) {
+							wlr_log(WLR_INFO,
+								"NVIDIA: NVreg_PreserveVideoMemoryAllocations=1 (suspend/resume safe)");
+						} else {
+							wlr_log(WLR_INFO,
+								"NVIDIA: NVreg_PreserveVideoMemoryAllocations=%s — "
+								"set to 1 and enable nvidia-suspend/resume systemd services "
+								"for proper suspend/resume support.", pvm_val);
+						}
+					}
 				}
 			}
 
@@ -3317,6 +3447,49 @@ detect_gpus(void)
 		}
 
 		wlr_log(WLR_INFO, "dGPU: D3cold prevention active — power/control=on + render node held open");
+	}
+
+	/* Vendor-specific kernel module validation */
+	for (i = 0; i < detected_gpu_count; i++) {
+		GpuInfo *gpu = &detected_gpus[i];
+		switch (gpu->vendor) {
+		case GPU_VENDOR_NVIDIA:
+			if (!validate_kernel_module("nvidia_drm")) {
+				wlr_log(WLR_ERROR,
+					"GPU %d (NVIDIA): nvidia_drm kernel module is NOT loaded — "
+					"DRM/KMS will not work. Load it with: "
+					"modprobe nvidia_drm modeset=1",
+					gpu->card_index);
+			} else if (!check_module_param("nvidia_drm", "modeset", "Y") &&
+			           !check_module_param("nvidia_drm", "modeset", "1")) {
+				wlr_log(WLR_ERROR,
+					"GPU %d (NVIDIA): nvidia_drm.modeset is NOT enabled — "
+					"Wayland requires modesetting. Add "
+					"'nvidia-drm.modeset=1' to kernel parameters",
+					gpu->card_index);
+			}
+			break;
+		case GPU_VENDOR_INTEL:
+			if (!validate_kernel_module("i915") && !validate_kernel_module("xe")) {
+				wlr_log(WLR_ERROR,
+					"GPU %d (Intel): neither i915 nor xe kernel module is loaded — "
+					"Intel GPU will not function. Check kernel config or "
+					"load module: modprobe i915",
+					gpu->card_index);
+			}
+			break;
+		case GPU_VENDOR_AMD:
+			if (!validate_kernel_module("amdgpu")) {
+				wlr_log(WLR_ERROR,
+					"GPU %d (AMD): amdgpu kernel module is NOT loaded — "
+					"AMD GPU will not function. Load it with: "
+					"modprobe amdgpu",
+					gpu->card_index);
+			}
+			break;
+		default:
+			break;
+		}
 	}
 }
 
@@ -3522,6 +3695,33 @@ set_dgpu_env(void)
 		setenv("LIBVA_DRIVER_NAME", "nvidia", 0);
 		setenv("NVD_BACKEND", "direct", 0);
 		setenv("VDPAU_DRIVER", "nvidia", 0);
+
+		/* Ensure direct rendering (not indirect/software) */
+		setenv("LIBGL_ALWAYS_INDIRECT", "0", 0);
+
+		/* Nvidia experimental performance strategy */
+		setenv("__GL_ExperimentalPerfStrategy", "1", 0);
+
+		/* Allow FXAA if app requests it */
+		setenv("__GL_ALLOW_FXAA_USAGE", "1", 0);
+
+		/* Nvidia image sharpening — let apps control this */
+		setenv("__GL_SHARPEN_ENABLE", "0", 0);
+		setenv("__GL_SHARPEN_VALUE", "0", 0);
+		setenv("__GL_SHARPEN_IGNORE_FILM_GRAIN", "0", 0);
+
+		/* Version-based diagnostics */
+		if (dgpu->driver_version > 0 && dgpu->driver_version < 570) {
+			wlr_log(WLR_INFO,
+				"NVIDIA: driver %d < 570 — consider adding 'nvidia-drm.fbdev=1' "
+				"to kernel parameters for better scanout performance.",
+				dgpu->driver_version);
+		}
+		if (dgpu->driver_version >= 565) {
+			wlr_log(WLR_INFO,
+				"NVIDIA: driver %d — GLX_EXT_buffer_age re-enabled (good for compositors)",
+				dgpu->driver_version);
+		}
 
 		wlr_log(WLR_INFO,
 			"NVIDIA: compositor env set — GBM_BACKEND=nvidia-drm, "

@@ -45,6 +45,7 @@
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <sys/utsname.h>
 #include <sched.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -1071,6 +1072,7 @@ typedef struct {
 	int is_discrete;
 	int card_index;
 	int render_index;
+	int driver_version;   /* Major driver version (e.g. 570) */
 } GpuInfo;
 
 /* ── resume cache ──────────────────────────────────────────────────── */
