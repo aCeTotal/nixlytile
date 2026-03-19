@@ -3748,11 +3748,15 @@ main(int argc, char *argv[])
 	/* Detect available GPUs for PRIME offloading */
 	detect_gpus();
 
-	/* Always set dGPU environment so ALL child processes use the discrete GPU.
-	 * This prevents games from accidentally using the integrated GPU when
-	 * launched through Steam, launchers, or other indirect means. */
-	if (discrete_gpu_idx >= 0)
-		set_dgpu_env();
+	/* NOTE: Do NOT call set_dgpu_env() here in the compositor process.
+	 * It sets DRI_PRIME, __GLX_VENDOR_LIBRARY_NAME, etc. which are
+	 * inherited by Xwayland and all child processes. This forces
+	 * GPU-rendered apps (Alacritty, Kitty, etc.) to render on the
+	 * discrete GPU while the compositor renders on the integrated GPU,
+	 * causing cross-GPU DMA-BUF import failures (invisible windows).
+	 *
+	 * Instead, set_dgpu_env() is called per-process in fork paths:
+	 * spawn(), launcher.c, htpc.c — only for games/apps that need dGPU. */
 
 	/* Build autostart command with wallpaper path if not overridden */
 	{
