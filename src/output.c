@@ -1810,8 +1810,8 @@ enable_10bit_rendering(Monitor *m)
 			success = 1;
 			wlr_log(WLR_INFO, "Enabled 10-bit rendering on %s", m->wlr_output->name);
 
-			/* Also set max bpc to 10 via DRM */
-			set_drm_color_properties(m, 10);
+			/* wlroots 0.20 sets max_bpc automatically via atomic commits
+			 * based on the render format (pick_max_bpc in atomic.c) */
 
 			/* Show notification */
 			toast_show(m, "10-bit color", 1500);
@@ -1870,13 +1870,12 @@ init_monitor_color_settings(Monitor *m)
 	}
 
 	/*
-	 * Always try to set max bpc even if 10-bit rendering isn't available.
-	 * This ensures we're using the best color depth the display link supports.
+	 * wlroots 0.20 manages "max bpc" and "Colorspace" DRM connector
+	 * properties automatically via atomic commits (see atomic.c
+	 * pick_max_bpc / colorspace handling). Setting them behind its back
+	 * with legacy drmModeConnectorSetProperty corrupts the internal
+	 * state and causes subsequent mode changes to fail.
 	 */
-	if (wlr_output_is_drm(m->wlr_output)) {
-		int target_bpc = m->supports_10bit ? 10 : 8;
-		set_drm_color_properties(m, target_bpc);
-	}
 }
 
 void

@@ -648,6 +648,15 @@ buttonpress(struct wl_listener *listener, void *data)
 		if (selmon && selmon->showbar) {
 			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
 			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
+			wlr_log(WLR_INFO, "CLICK DEBUG: cursor=(%.0f,%.0f) area=(%d,%d %dx%d) lx=%d ly=%d "
+				"mic=(x=%d w=%d) vol=(x=%d w=%d) btn=0x%x",
+				cursor->x, cursor->y,
+				selmon->statusbar.area.x, selmon->statusbar.area.y,
+				selmon->statusbar.area.width, selmon->statusbar.area.height,
+				lx, ly,
+				selmon->statusbar.mic.x, selmon->statusbar.mic.width,
+				selmon->statusbar.volume.x, selmon->statusbar.volume.width,
+				event->button);
 			if (handle_statusbar_clicks(selmon, lx, ly, event->button))
 				return;
 		}

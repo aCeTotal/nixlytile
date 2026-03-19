@@ -2289,7 +2289,7 @@ update_game_mode(void)
 
 		/* Restore additional timers if we were in ultra mode */
 		if (was_ultra) {
-			/* Re-enable statusbar on all monitors */
+			/* Re-enable statusbar on all monitors and recalculate area */
 			wl_list_for_each(m, &mons, link) {
 				m->showbar = 1;
 				if (m->statusbar.tree)
@@ -2297,6 +2297,7 @@ update_game_mode(void)
 				/* Disable game VRR on all monitors when leaving game mode */
 				if (m->game_vrr_active)
 					disable_game_vrr(m);
+				arrangelayers(m);
 			}
 
 			/* Schedule deferred timer restarts for non-critical tasks */
@@ -2570,9 +2571,11 @@ htpc_mode_exit(void)
 		schedule_next_status_refresh();
 	}
 
-	/* Re-arrange all monitors to allocate statusbar space */
+	/* Re-arrange all monitors to allocate statusbar space.
+	 * arrangelayers() recalculates statusbar.area which is needed
+	 * for click handling; arrange() tiles clients into the new area. */
 	wl_list_for_each(m, &mons, link) {
-		arrange(m);
+		arrangelayers(m);
 	}
 
 	/* Release gamepad grab when leaving HTPC mode */
