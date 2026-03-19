@@ -29,6 +29,7 @@ cleanupmon(struct wl_listener *listener, void *data)
 
 	wl_list_remove(&m->destroy.link);
 	wl_list_remove(&m->frame.link);
+	wl_list_remove(&m->present.link);
 	wl_list_remove(&m->link);
 	wl_list_remove(&m->request_state.link);
 	if (m->lock_surface)
@@ -1863,10 +1864,23 @@ init_monitor_color_settings(Monitor *m)
 	/*
 	 * Automatically enable 10-bit rendering if supported.
 	 * This provides smoother gradients and better color accuracy.
+	 *
+	 * Skip on multi-GPU NVIDIA setups: outputs sit on the Intel iGPU
+	 * while the NVIDIA dGPU provides the EGL renderer.  The Intel DRM
+	 * backend reports XRGB2101010 in the primary-plane format set, so
+	 * the initial wlr_output_commit_state succeeds, but later atomic
+	 * commits fail with EPERM once additional connector properties are
+	 * included, which crashes the compositor.
 	 */
 	if (m->supports_10bit) {
-		/* Try to enable 10-bit - if it fails, we fall back to 8-bit automatically */
-		enable_10bit_rendering(m);
+		if (discrete_gpu_idx >= 0 &&
+		    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA) {
+			wlr_log(WLR_INFO,
+				"Skipping 10-bit on %s (multi-GPU NVIDIA setup)",
+				m->wlr_output->name);
+		} else {
+			enable_10bit_rendering(m);
+		}
 	}
 
 	/*
