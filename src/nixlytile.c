@@ -2535,26 +2535,49 @@ diag_log_nvidia(void)
 
 	/* Parse CSV: gpu_util, mem_util, temp, gpu_clk, mem_clk, power, power_limit, pstate */
 	int gpu_util = 0, mem_util = 0, temp = 0, gpu_clk = 0, mem_clk = 0;
-	float power = 0, power_limit = 0;
+	float power = 0, power_limit = -1;
 	char pstate[8] = "";
-	if (sscanf(buf, "%d, %d, %d, %d, %d, %f, %f, %7s",
-		&gpu_util, &mem_util, &temp, &gpu_clk, &mem_clk, &power, &power_limit, pstate) < 7) {
-		/* Remove trailing whitespace from pstate */
-		diag_log_error("NVIDIA", "nvidia-smi parse failed: %s", buf);
+
+	/* Use strtok to handle [N/A] fields from nvidia-smi */
+	char *fields[8];
+	int nfields = 0;
+	char *saveptr = NULL;
+	for (char *tok = strtok_r(buf, ",", &saveptr); tok && nfields < 8;
+	     tok = strtok_r(NULL, ",", &saveptr)) {
+		while (*tok == ' ') tok++;
+		fields[nfields++] = tok;
+	}
+	if (nfields < 8) {
+		diag_log_error("NVIDIA", "nvidia-smi parse failed (got %d fields): %s", nfields, buf);
 		return;
 	}
+	gpu_util = atoi(fields[0]);
+	mem_util = atoi(fields[1]);
+	temp     = atoi(fields[2]);
+	gpu_clk  = atoi(fields[3]);
+	mem_clk  = atoi(fields[4]);
+	power    = strtof(fields[5], NULL);
+	if (strstr(fields[6], "[N/A]") == NULL)
+		power_limit = strtof(fields[6], NULL);
+	snprintf(pstate, sizeof(pstate), "%s", fields[7]);
 	/* Strip trailing whitespace from pstate */
 	for (int i = strlen(pstate)-1; i >= 0 && (pstate[i] == '\n' || pstate[i] == ' '); i--)
 		pstate[i] = '\0';
+
+	char power_str[32];
+	if (power_limit < 0)
+		snprintf(power_str, sizeof(power_str), "%.0f/N/A W", power);
+	else
+		snprintf(power_str, sizeof(power_str), "%.0f/%.0f W", power, power_limit);
 
 	char out[256];
 	int off = snprintf(out, sizeof(out),
 		"[%02d:%02d:%02d] === NVIDIA GPU ===\n"
 		"  Util: %d%% GPU, %d%% VRAM | Temp: %d°C\n"
-		"  Clocks: %d/%d MHz | Power: %.0f/%.0f W | %s\n",
+		"  Clocks: %d/%d MHz | Power: %s | %s\n",
 		tm.tm_hour, tm.tm_min, tm.tm_sec,
 		gpu_util, mem_util, temp,
-		gpu_clk, mem_clk, power, power_limit, pstate);
+		gpu_clk, mem_clk, power_str, pstate);
 	(void)!write(diag_log_fd, out, off);
 
 	/* Error conditions */
@@ -3276,6 +3299,7 @@ const char *dgpu_programs[] = {
 	"vkcube", "vulkaninfo", "glxgears", "glxinfo",
 	"darktable", "rawtherapee", "gimp",
 	"prusa-slicer", "cura", "superslicer",
+	"alacritty", "kitty", "wezterm", "foot",
 	NULL
 };
 
