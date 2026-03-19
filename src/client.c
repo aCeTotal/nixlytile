@@ -163,6 +163,7 @@ destroynotify(struct wl_listener *listener, void *data)
 		wl_list_remove(&c->minimize.link);
 		wl_list_remove(&c->dissociate.link);
 		wl_list_remove(&c->set_hints.link);
+		wl_list_remove(&c->set_override_redirect.link);
 	} else
 #endif
 	{

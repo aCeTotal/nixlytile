@@ -3566,6 +3566,7 @@ createnotifyx11(struct wl_listener *listener, void *data)
 	LISTEN(&xsurface->events.request_fullscreen, &c->fullscreen, fullscreennotify);
 	LISTEN(&xsurface->events.set_hints, &c->set_hints, sethints);
 	LISTEN(&xsurface->events.set_title, &c->set_title, updatetitle);
+	LISTEN(&xsurface->events.set_override_redirect, &c->set_override_redirect, setoverrideredirect);
 }
 
 void
@@ -3589,6 +3590,25 @@ sethints(struct wl_listener *listener, void *data)
 
 	if (c->isurgent && surface && surface->mapped)
 		client_set_border_color(c, urgentcolor);
+}
+
+void
+setoverrideredirect(struct wl_listener *listener, void *data)
+{
+	Client *c = wl_container_of(listener, c, set_override_redirect);
+
+	/* When override_redirect changes on a mapped surface, we must
+	 * unmap and remap the client so it moves between managed/unmanaged
+	 * state (different layer, border, focus behavior). */
+	if (c->surface.xwayland->surface &&
+	    c->surface.xwayland->surface->mapped)
+		unmapnotify(&c->unmap, NULL);
+
+	c->bw = client_is_unmanaged(c) ? 0 : borderpx;
+
+	if (c->surface.xwayland->surface &&
+	    c->surface.xwayland->surface->mapped)
+		mapnotify(&c->map, NULL);
 }
 
 void

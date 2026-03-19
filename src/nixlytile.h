@@ -1116,6 +1116,7 @@ typedef struct {
 	struct wl_listener dissociate;
 	struct wl_listener configure;
 	struct wl_listener set_hints;
+	struct wl_listener set_override_redirect;
 #endif
 	unsigned int bw;
 	uint32_t tags;
@@ -2687,6 +2688,7 @@ void createnotifyx11(struct wl_listener *listener, void *data);
 void dissociatex11(struct wl_listener *listener, void *data);
 void minimizenotify(struct wl_listener *listener, void *data);
 void sethints(struct wl_listener *listener, void *data);
+void setoverrideredirect(struct wl_listener *listener, void *data);
 void xwaylandready(struct wl_listener *listener, void *data);
 #endif
 
