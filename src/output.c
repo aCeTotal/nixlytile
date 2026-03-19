@@ -1093,6 +1093,14 @@ rendermon(struct wl_listener *listener, void *data)
 			/* Retry scene build with new format */
 			wlr_output_state_init(&state);
 			needs_frame = wlr_scene_output_build_state(m->scene_output, &state, &opts);
+			if (!needs_frame) {
+				/* Both 10-bit and 8-bit scene builds failed.
+				 * Schedule another frame so the compositor retries
+				 * on the next vblank instead of stalling forever. */
+				wlr_output_state_finish(&state);
+				wlr_output_schedule_frame(m->wlr_output);
+				return;
+			}
 		}
 	}
 
@@ -1896,18 +1904,30 @@ init_monitor_color_settings(Monitor *m)
 	 * on subsequent mode changes.
 	 */
 	if (m->supports_10bit) {
-		int is_secondary_gpu = 0;
+		int skip_10bit = 0;
 		if (wlr_output_is_drm(m->wlr_output)) {
 			struct wlr_backend *parent =
 				wlr_drm_backend_get_parent(m->wlr_output->backend);
 			if (parent) {
-				is_secondary_gpu = 1;
+				skip_10bit = 1;
 				wlr_log(WLR_INFO, "Monitor %s is on secondary GPU, "
 					"skipping 10-bit to avoid cross-GPU format issues",
 					m->wlr_output->name);
 			}
 		}
-		if (!is_secondary_gpu)
+		/* Nvidia EGL/GBM may not properly handle XRGB2101010 render
+		 * targets, causing swapchain format failures and black screen.
+		 * Skip auto-enable on Nvidia-primary systems; users can still
+		 * enable 10-bit manually if their setup supports it. */
+		if (!skip_10bit && discrete_gpu_idx >= 0 &&
+		    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA &&
+		    integrated_gpu_idx < 0) {
+			skip_10bit = 1;
+			wlr_log(WLR_INFO, "Monitor %s: skipping auto 10-bit on "
+				"Nvidia-primary GPU to avoid format issues",
+				m->wlr_output->name);
+		}
+		if (!skip_10bit)
 			enable_10bit_rendering(m);
 	}
 

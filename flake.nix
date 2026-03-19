@@ -158,6 +158,7 @@
               pkgs.wayland-scanner
               pkgs.wayland-protocols
               pkgs.makeWrapper
+              pkgs.addDriverRunpath
             ];
 
             buildInputs = [
@@ -203,6 +204,10 @@
                 --prefix XDG_DATA_DIRS : "${pkgs.papirus-icon-theme}/share:${pkgs.adwaita-icon-theme}/share:${pkgs.hicolor-icon-theme}/share:${pkgs.shared-mime-info}/share"
 
               runHook postInstall
+            '';
+
+            postFixup = ''
+              addDriverRunpath $out/bin/nixlytile
             '';
 
             meta = with pkgs.lib; {
