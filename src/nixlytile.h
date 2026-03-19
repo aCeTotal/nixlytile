@@ -1292,6 +1292,7 @@ struct Monitor {
 	int memory_pressure;
 	int supports_10bit;
 	int render_10bit_active;
+	int scene_build_failures;
 	int max_bpc;
 	int hdr_capable;
 	int hdr_active;
@@ -2641,6 +2642,51 @@ fork_detach(void)
 	signal(SIGINT, SIG_DFL);
 	signal(SIGTERM, SIG_DFL);
 	signal(SIGPIPE, SIG_DFL);
+}
+
+/*
+ * Ensure NixOS per-user profile bin dirs are in PATH.
+ * Desktop files for per-user packages use relative binary names
+ * (e.g. "FreeCAD", "gimp-3.0") that need these dirs in PATH.
+ * Call in forked child before exec.
+ */
+static inline void
+ensure_nix_paths(void)
+{
+	const char *user = getenv("USER");
+	const char *home = getenv("HOME");
+	const char *path = getenv("PATH");
+	char extra[PATH_MAX];
+	char newpath[8192];
+	int need_update = 0;
+
+	if (!path)
+		path = "/run/current-system/sw/bin";
+
+	snprintf(newpath, sizeof(newpath), "%s", path);
+
+	if (user) {
+		snprintf(extra, sizeof(extra), "/etc/profiles/per-user/%s/bin", user);
+		if (!strstr(newpath, extra)) {
+			char tmp[8192];
+			snprintf(tmp, sizeof(tmp), "%s:%s", extra, newpath);
+			snprintf(newpath, sizeof(newpath), "%s", tmp);
+			need_update = 1;
+		}
+	}
+
+	if (home) {
+		snprintf(extra, sizeof(extra), "%s/.nix-profile/bin", home);
+		if (!strstr(newpath, extra)) {
+			char tmp[8192];
+			snprintf(tmp, sizeof(tmp), "%s:%s", extra, newpath);
+			snprintf(newpath, sizeof(newpath), "%s", tmp);
+			need_update = 1;
+		}
+	}
+
+	if (need_update)
+		setenv("PATH", newpath, 1);
 }
 void quit(const Arg *arg);
 uint64_t get_time_ns(void);

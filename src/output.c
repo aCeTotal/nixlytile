@@ -956,10 +956,16 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 			if (!wlr_output_commit_state(m->wlr_output, state)) {
 				wlr_log(WLR_ERROR, "Output commit failed on %s (non-tearing retry)",
 					m->wlr_output->name);
+				/* No page flip queued — schedule frame so
+				 * rendermon keeps firing and we can retry. */
+				wlr_output_schedule_frame(m->wlr_output);
 			}
 		} else {
 			wlr_log(WLR_ERROR, "Output commit failed on %s",
 				m->wlr_output->name);
+			/* No page flip queued — schedule frame to avoid
+			 * permanent stall (black screen on NVIDIA etc.) */
+			wlr_output_schedule_frame(m->wlr_output);
 		}
 	}
 
@@ -1093,15 +1099,48 @@ rendermon(struct wl_listener *listener, void *data)
 			/* Retry scene build with new format */
 			wlr_output_state_init(&state);
 			needs_frame = wlr_scene_output_build_state(m->scene_output, &state, &opts);
-			if (!needs_frame) {
-				/* Both 10-bit and 8-bit scene builds failed.
-				 * Schedule another frame so the compositor retries
-				 * on the next vblank instead of stalling forever. */
-				wlr_output_state_finish(&state);
-				wlr_output_schedule_frame(m->wlr_output);
-				return;
-			}
 		}
+
+		/*
+		 * Scene build failed (swapchain, EGL, or render pass error).
+		 * This happens on NVIDIA-only systems where the GBM/EGL stack
+		 * may fail buffer allocation or import.  Force XRGB8888 render
+		 * format (destroys the current swapchain so a fresh one is
+		 * negotiated) and retry.  Schedule a frame so we keep retrying
+		 * instead of stalling with a black screen.
+		 */
+		if (!needs_frame) {
+			wlr_output_state_finish(&state);
+
+			m->scene_build_failures++;
+			if (m->scene_build_failures <= 3) {
+				wlr_log(WLR_ERROR,
+					"Scene build failed on %s (attempt %d), "
+					"forcing XRGB8888 and retrying",
+					m->wlr_output->name, m->scene_build_failures);
+
+				/* Force a fresh swapchain with XRGB8888 */
+				struct wlr_output_state fb;
+				wlr_output_state_init(&fb);
+				wlr_output_state_set_render_format(&fb, DRM_FORMAT_XRGB8888);
+				if (m->wlr_output->current_mode)
+					wlr_output_state_set_mode(&fb, m->wlr_output->current_mode);
+				if (wlr_output_test_state(m->wlr_output, &fb))
+					wlr_output_commit_state(m->wlr_output, &fb);
+				wlr_output_state_finish(&fb);
+			} else if (m->scene_build_failures == 4) {
+				wlr_log(WLR_ERROR,
+					"Scene build persistently failing on %s — "
+					"check GPU driver and EGL/GBM libraries",
+					m->wlr_output->name);
+			}
+
+			wlr_output_schedule_frame(m->wlr_output);
+			return;
+		}
+
+		/* Scene build succeeded — reset failure counter */
+		m->scene_build_failures = 0;
 	}
 
 	/*

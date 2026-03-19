@@ -406,6 +406,8 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 				if (pid == 0) {
 					dup2(STDERR_FILENO, STDOUT_FILENO);
 					setsid();
+					fork_detach();
+					ensure_nix_paths();
 					if (desktop_entries[idx].prefers_dgpu || should_use_dgpu(cmd_str))
 						set_dgpu_env();
 					if (is_steam_cmd(cmd_str)) {
@@ -417,7 +419,26 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 							execlp("steam", "steam", "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
 						}
 					}
+					{
+						int dbg = open("/tmp/nixlylogging/spawn.log",
+							O_WRONLY | O_CREAT | O_APPEND, 0644);
+						if (dbg >= 0) {
+							dprintf(dbg, "modal launch: sh -c '%s' PATH=%.200s\n",
+								cmd_str,
+								getenv("PATH") ? getenv("PATH") : "(null)");
+							close(dbg);
+						}
+					}
 					execl("/bin/sh", "sh", "-c", cmd_str, NULL);
+					{
+						int dbg = open("/tmp/nixlylogging/spawn.log",
+							O_WRONLY | O_CREAT | O_APPEND, 0644);
+						if (dbg >= 0) {
+							dprintf(dbg, "modal launch FAILED: '%s': %s\n",
+								cmd_str, strerror(errno));
+							close(dbg);
+						}
+					}
 					_exit(127);
 				}
 				modal_hide_all();

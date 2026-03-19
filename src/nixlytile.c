@@ -3348,6 +3348,7 @@ spawn(const Arg *arg)
 		dup2(STDERR_FILENO, STDOUT_FILENO);
 		setsid();
 		fork_detach();
+		ensure_nix_paths();
 
 		const char *cmd = (const char *)arg->v;
 		if (!cmd || !cmd[0]) {

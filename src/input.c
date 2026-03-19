@@ -613,52 +613,55 @@ buttonpress(struct wl_listener *listener, void *data)
 				return;
 		}
 
-		if (selmon && selmon->statusbar.tray_menu.visible) {
-			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
-			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
-			TrayMenu *menu = &selmon->statusbar.tray_menu;
-			int relx = lx - menu->x;
-			int rely = ly - menu->y;
-			if (relx >= 0 && rely >= 0 &&
-					relx < menu->width && rely < menu->height) {
-				TrayMenuEntry *entry = tray_menu_entry_at(selmon, relx, rely);
-				if (entry)
-					tray_menu_send_event(menu, entry, event->time_msec);
-				tray_menu_hide_all();
-				return;
-			} else {
-				tray_menu_hide_all();
+		/*
+		 * Skip statusbar and popup click handling when a fullscreen
+		 * client covers the monitor.  The fullscreen surface is on
+		 * LyrFS which is above LyrTop (statusbar), so the bar is
+		 * invisible — clicks must go to the fullscreen client, not
+		 * pass through to the hidden statusbar.
+		 */
+		{
+			Client *fs = selmon ? focustop(selmon) : NULL;
+			if (!(fs && fs->isfullscreen)) {
+				if (selmon && selmon->statusbar.tray_menu.visible) {
+					int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
+					int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
+					TrayMenu *menu = &selmon->statusbar.tray_menu;
+					int relx = lx - menu->x;
+					int rely = ly - menu->y;
+					if (relx >= 0 && rely >= 0 &&
+							relx < menu->width && rely < menu->height) {
+						TrayMenuEntry *entry = tray_menu_entry_at(selmon, relx, rely);
+						if (entry)
+							tray_menu_send_event(menu, entry, event->time_msec);
+						tray_menu_hide_all();
+						return;
+					} else {
+						tray_menu_hide_all();
+					}
+				}
+
+				if (selmon && selmon->wifi_popup.visible) {
+					int lx = (int)lround(cursor->x);
+					int ly = (int)lround(cursor->y);
+					if (wifi_popup_handle_click(selmon, lx, ly, event->button))
+						return;
+				}
+
+				if (selmon && selmon->statusbar.net_menu.visible) {
+					int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
+					int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
+					if (net_menu_handle_click(selmon, lx, ly, event->button))
+						return;
+				}
+
+				if (selmon && selmon->showbar) {
+					int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
+					int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
+					if (handle_statusbar_clicks(selmon, lx, ly, event->button))
+						return;
+				}
 			}
-		}
-
-		if (selmon && selmon->wifi_popup.visible) {
-			int lx = (int)lround(cursor->x);
-			int ly = (int)lround(cursor->y);
-			if (wifi_popup_handle_click(selmon, lx, ly, event->button))
-				return;
-		}
-
-		if (selmon && selmon->statusbar.net_menu.visible) {
-			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
-			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
-			if (net_menu_handle_click(selmon, lx, ly, event->button))
-				return;
-		}
-
-		if (selmon && selmon->showbar) {
-			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
-			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
-			wlr_log(WLR_INFO, "CLICK DEBUG: cursor=(%.0f,%.0f) area=(%d,%d %dx%d) lx=%d ly=%d "
-				"mic=(x=%d w=%d) vol=(x=%d w=%d) btn=0x%x",
-				cursor->x, cursor->y,
-				selmon->statusbar.area.x, selmon->statusbar.area.y,
-				selmon->statusbar.area.width, selmon->statusbar.area.height,
-				lx, ly,
-				selmon->statusbar.mic.x, selmon->statusbar.mic.width,
-				selmon->statusbar.volume.x, selmon->statusbar.volume.width,
-				event->button);
-			if (handle_statusbar_clicks(selmon, lx, ly, event->button))
-				return;
 		}
 
 		/* Change focus if the button was _pressed_ over a client */
@@ -1588,19 +1591,22 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	/* Update drag icon's position */
 	wlr_scene_node_set_position(&drag_icon->node, (int)round(cursor->x), (int)round(cursor->y));
 
-	/* Hover feedback for tag boxes */
-		if (selmon && selmon->showbar) {
-			updatetaghover(selmon, cursor->x, cursor->y);
-			updatecpuhover(selmon, cursor->x, cursor->y);
-			updateramhover(selmon, cursor->x, cursor->y);
-			updatebatteryhover(selmon, cursor->x, cursor->y);
-			updatefanhover(selmon, cursor->x, cursor->y);
-			if (selmon->statusbar.fan_popup.dragging)
-				fan_popup_handle_drag(selmon, cursor->x, cursor->y);
-			updatenethover(selmon, cursor->x, cursor->y);
-			net_menu_update_hover(selmon, cursor->x, cursor->y);
-			if (!selmon->statusbar.net_menu.visible)
-				net_menu_hide_all();
+	/* Hover feedback for tag boxes — skip when fullscreen client covers bar */
+		{
+			Client *fs = selmon ? focustop(selmon) : NULL;
+			if (selmon && selmon->showbar && !(fs && fs->isfullscreen)) {
+				updatetaghover(selmon, cursor->x, cursor->y);
+				updatecpuhover(selmon, cursor->x, cursor->y);
+				updateramhover(selmon, cursor->x, cursor->y);
+				updatebatteryhover(selmon, cursor->x, cursor->y);
+				updatefanhover(selmon, cursor->x, cursor->y);
+				if (selmon->statusbar.fan_popup.dragging)
+					fan_popup_handle_drag(selmon, cursor->x, cursor->y);
+				updatenethover(selmon, cursor->x, cursor->y);
+				net_menu_update_hover(selmon, cursor->x, cursor->y);
+				if (!selmon->statusbar.net_menu.visible)
+					net_menu_hide_all();
+			}
 		}
 
 		/* Skip if internal call or already resizing */

@@ -2055,7 +2055,11 @@ update_game_mode(void)
 			/* Explicit video hint — not a game */
 			is_game = 0;
 		} else {
-			/* No hints — check app-id against known video players */
+			/* No hints — check app-id against known non-game apps.
+			 * Default to game because most games (XWayland/Steam/Wine)
+			 * don't set content-type or tearing hints.  But exclude
+			 * browsers, video players, file managers, terminals, and
+			 * other common desktop apps that users fullscreen. */
 			const char *app = client_get_appid(c);
 			static const char *video_apps[] = {
 				"mpv", "vlc", "celluloid", "totem", "kodi",
@@ -2065,13 +2069,46 @@ update_game_mode(void)
 				"org.gnome.Totem", "tv.kodi.Kodi",
 				NULL
 			};
+			static const char *desktop_apps[] = {
+				/* File managers */
+				"thunar", "nautilus", "dolphin", "nemo", "pcmanfm",
+				"org.gnome.Nautilus", "org.kde.dolphin",
+				/* Terminals */
+				"alacritty", "foot", "kitty", "wezterm",
+				"org.gnome.Terminal", "org.kde.konsole",
+				"gnome-terminal", "konsole", "xterm",
+				/* Document / image viewers */
+				"evince", "okular", "eog", "loupe", "feh",
+				"org.gnome.Evince", "org.kde.okular",
+				/* Office */
+				"libreoffice", "soffice",
+				/* Editors */
+				"code", "Code", "codium", "gedit", "kate",
+				/* Settings / system */
+				"pavucontrol", "nm-connection-editor",
+				"gnome-control-center", "systemsettings",
+				"blueman-manager",
+				NULL
+			};
 			is_game = 1; /* default: fullscreen = game */
-			if (app) {
+			/* Check browsers first (dedicated function) */
+			if (is_browser_client(c)) {
+				is_game = 0;
+			} else if (app) {
 				for (int i = 0; video_apps[i]; i++) {
 					if (strcasecmp(app, video_apps[i]) == 0 ||
 					    strcasestr(app, video_apps[i])) {
 						is_game = 0;
 						break;
+					}
+				}
+				if (is_game) {
+					for (int i = 0; desktop_apps[i]; i++) {
+						if (strcasecmp(app, desktop_apps[i]) == 0 ||
+						    strcasestr(app, desktop_apps[i])) {
+							is_game = 0;
+							break;
+						}
 					}
 				}
 			}
