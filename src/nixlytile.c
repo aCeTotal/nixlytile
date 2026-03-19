@@ -3299,7 +3299,6 @@ const char *dgpu_programs[] = {
 	"vkcube", "vulkaninfo", "glxgears", "glxinfo",
 	"darktable", "rawtherapee", "gimp",
 	"prusa-slicer", "cura", "superslicer",
-	"alacritty", "kitty", "wezterm", "foot",
 	NULL
 };
 

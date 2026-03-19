@@ -3318,8 +3318,17 @@ detect_gpus(void)
 			 * issues including Xwayland black windows and crashes. */
 			setenv("WLR_DRM_NO_MODIFIERS", "1", 0);
 
-			/* Help libgbm find NVIDIA's GBM implementation */
-			setenv("GBM_BACKEND", "nvidia-drm", 0);
+			/* GBM_BACKEND=nvidia-drm: only set when the compositor itself
+			 * renders on Nvidia (single-GPU mode).  In hybrid mode the
+			 * compositor renders on the Intel iGPU — setting GBM_BACKEND
+			 * here would be wrong (Intel FD + Nvidia GBM backend) AND
+			 * the var is inherited by ALL child processes, causing
+			 * non-dgpu clients to mis-allocate buffers on Nvidia →
+			 * cross-GPU DMA-BUF import failures (invisible windows).
+			 * For child processes that need the dGPU, set_dgpu_env()
+			 * already sets GBM_BACKEND=nvidia-drm per-process. */
+			if (integrated_gpu_idx < 0)
+				setenv("GBM_BACKEND", "nvidia-drm", 0);
 
 			/* Detect Nvidia driver version for explicit sync support.
 			 * Driver 555+ is required for DRM syncobj (explicit sync)
