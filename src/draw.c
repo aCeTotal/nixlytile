@@ -1195,6 +1195,15 @@ cpu_cursor_buffer_destroy(struct CpuCursorBuffer *buf)
 	wlr_buffer_drop(&buf->base);
 }
 
+/*
+ * Cursor image cache — avoids redundant image uploads when the
+ * cursor name hasn't actually changed.  The most common hot-path
+ * is repeated "default" while the pointer moves over the desktop
+ * background (no client surface underneath).
+ */
+static int    cursor_from_client;
+static char   cursor_cached_name[64];
+
 void
 nixly_cursor_set_xcursor(const char *name)
 {
@@ -1203,6 +1212,14 @@ nixly_cursor_set_xcursor(const char *name)
 	uint32_t src_stride, copy_w, copy_h, y;
 	const uint8_t *src;
 	uint8_t *dst;
+
+	/* Fast path: skip when the same xcursor is already active */
+	if (!cursor_from_client && cursor_cached_name[0] &&
+	    strcmp(cursor_cached_name, name) == 0)
+		return;
+
+	cursor_from_client = 0;
+	snprintf(cursor_cached_name, sizeof(cursor_cached_name), "%s", name);
 
 	if (!cpu_cursor_active) {
 		wlr_cursor_set_xcursor(cursor, cursor_mgr, name);
@@ -1246,6 +1263,11 @@ nixly_cursor_set_client_surface(struct wlr_surface *surface, int hx, int hy)
 	size_t src_stride;
 	uint32_t copy_w, copy_h, y;
 	uint8_t *dst;
+
+	/* Invalidate xcursor cache — next nixly_cursor_set_xcursor() must
+	 * actually upload the image even if the name matches. */
+	cursor_from_client = 1;
+	cursor_cached_name[0] = '\0';
 
 	if (!cpu_cursor_active || !surface || !surface->buffer) {
 		wlr_cursor_set_surface(cursor, surface, hx, hy);

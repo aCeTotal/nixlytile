@@ -4113,14 +4113,22 @@ refreshstatuslight(void)
 		snprintf(light_text, sizeof(light_text), "%d%%", (int)lround(display));
 	}
 
-	wl_list_for_each(m, &mons, link) {
-		if (!m->statusbar.light.tree || !m->showbar)
-			continue;
-		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		if (status_should_render(&m->statusbar.light, barh, light_text,
-					last_light_render, sizeof(last_light_render), &last_light_h)) {
-			renderlight(&m->statusbar.light, barh, light_text);
-			positionstatusmodules(m);
+	{
+		int need = (last_light_render[0] == '\0' ||
+			    strcmp(last_light_render, light_text) != 0);
+		if (need)
+			snprintf(last_light_render, sizeof(last_light_render),
+				 "%s", light_text);
+
+		wl_list_for_each(m, &mons, link) {
+			if (!m->statusbar.light.tree || !m->showbar)
+				continue;
+			barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+			if (need || barh != last_light_h) {
+				last_light_h = barh;
+				renderlight(&m->statusbar.light, barh, light_text);
+				positionstatusmodules(m);
+			}
 		}
 	}
 }
@@ -4248,19 +4256,26 @@ refreshstatusnet(void)
 	}
 	set_net_icon_path(icon_path);
 
-	wl_list_for_each(m, &mons, link) {
-		if (!m->statusbar.net.tree || !m->showbar)
-			continue;
-		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		if (status_should_render(&m->statusbar.net, barh, net_text,
-					last_net_render, sizeof(last_net_render), &last_net_h)
-				|| m->statusbar.net_popup.visible) {
-			rendernet(&m->statusbar.net, barh, net_text);
-			if (m->statusbar.net_popup.visible)
+	{
+		int need = (last_net_render[0] == '\0' ||
+			    strcmp(last_net_render, net_text) != 0);
+		if (need)
+			snprintf(last_net_render, sizeof(last_net_render),
+				 "%s", net_text);
+
+		wl_list_for_each(m, &mons, link) {
+			if (!m->statusbar.net.tree || !m->showbar)
+				continue;
+			barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+			if (need || barh != last_net_h || m->statusbar.net_popup.visible) {
+				last_net_h = barh;
+				rendernet(&m->statusbar.net, barh, net_text);
+				if (m->statusbar.net_popup.visible)
+					rendernetpopup(m);
+				positionstatusmodules(m);
+			} else if (m->statusbar.net_popup.visible) {
 				rendernetpopup(m);
-			positionstatusmodules(m);
-		} else if (m->statusbar.net_popup.visible) {
-			rendernetpopup(m);
+			}
 		}
 	}
 }
@@ -4337,14 +4352,22 @@ refreshstatusbattery(void)
 		snprintf(battery_icon_path, sizeof(battery_icon_path), "%s", icon);
 	}
 
-	wl_list_for_each(m, &mons, link) {
-		if (!m->statusbar.battery.tree || !m->showbar)
-			continue;
-		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		if (status_should_render(&m->statusbar.battery, barh, battery_text,
-					last_battery_render, sizeof(last_battery_render), &last_battery_h)) {
-			renderbattery(&m->statusbar.battery, barh, battery_text);
-			positionstatusmodules(m);
+	{
+		int need = (last_battery_render[0] == '\0' ||
+			    strcmp(last_battery_render, battery_text) != 0);
+		if (need)
+			snprintf(last_battery_render, sizeof(last_battery_render),
+				 "%s", battery_text);
+
+		wl_list_for_each(m, &mons, link) {
+			if (!m->statusbar.battery.tree || !m->showbar)
+				continue;
+			barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+			if (need || barh != last_battery_h) {
+				last_battery_h = barh;
+				renderbattery(&m->statusbar.battery, barh, battery_text);
+				positionstatusmodules(m);
+			}
 		}
 	}
 }
@@ -4366,17 +4389,24 @@ refreshstatuscpu(void)
 		snprintf(cpu_text, sizeof(cpu_text), "%d%%", avg_disp);
 	}
 
-	wl_list_for_each(m, &mons, link) {
-		if (!m->statusbar.cpu.tree || !m->showbar)
-			continue;
-		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		if (status_should_render(&m->statusbar.cpu, barh, cpu_text,
-					last_cpu_render, sizeof(last_cpu_render), &last_cpu_h)
-				|| m->statusbar.cpu_popup.visible) {
-			rendercpu(&m->statusbar.cpu, barh, cpu_text);
-			if (m->statusbar.cpu_popup.visible)
-				rendercpupopup(m);
-			positionstatusmodules(m);
+	{
+		int need = (last_cpu_render[0] == '\0' ||
+			    strcmp(last_cpu_render, cpu_text) != 0);
+		if (need)
+			snprintf(last_cpu_render, sizeof(last_cpu_render),
+				 "%s", cpu_text);
+
+		wl_list_for_each(m, &mons, link) {
+			if (!m->statusbar.cpu.tree || !m->showbar)
+				continue;
+			barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+			if (need || barh != last_cpu_h || m->statusbar.cpu_popup.visible) {
+				last_cpu_h = barh;
+				rendercpu(&m->statusbar.cpu, barh, cpu_text);
+				if (m->statusbar.cpu_popup.visible)
+					rendercpupopup(m);
+				positionstatusmodules(m);
+			}
 		}
 	}
 }
@@ -4400,14 +4430,22 @@ refreshstatusram(void)
 		snprintf(ram_text, sizeof(ram_text), "%dMB", (int)lround(ram_last_mb));
 	}
 
-	wl_list_for_each(m, &mons, link) {
-		if (!m->statusbar.ram.tree || !m->showbar)
-			continue;
-		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		if (status_should_render(&m->statusbar.ram, barh, ram_text,
-					last_ram_render, sizeof(last_ram_render), &last_ram_h)) {
-			renderram(&m->statusbar.ram, barh, ram_text);
-			positionstatusmodules(m);
+	{
+		int need = (last_ram_render[0] == '\0' ||
+			    strcmp(last_ram_render, ram_text) != 0);
+		if (need)
+			snprintf(last_ram_render, sizeof(last_ram_render),
+				 "%s", ram_text);
+
+		wl_list_for_each(m, &mons, link) {
+			if (!m->statusbar.ram.tree || !m->showbar)
+				continue;
+			barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+			if (need || barh != last_ram_h) {
+				last_ram_h = barh;
+				renderram(&m->statusbar.ram, barh, ram_text);
+				positionstatusmodules(m);
+			}
 		}
 	}
 }
@@ -4481,15 +4519,22 @@ refreshstatusvolume(void)
 	}
 	volume_last_color_is_muted = use_muted_color;
 
-	wl_list_for_each(m, &mons, link) {
-		if (!m->statusbar.volume.tree || !m->showbar)
-			continue;
-		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		if (status_should_render(&m->statusbar.volume, barh, volume_text,
-					last_volume_render, sizeof(last_volume_render), &last_volume_h)
-				|| force_render) {
-			rendervolume(&m->statusbar.volume, barh, volume_text);
-			positionstatusmodules(m);
+	{
+		int need = (last_volume_render[0] == '\0' ||
+			    strcmp(last_volume_render, volume_text) != 0);
+		if (need)
+			snprintf(last_volume_render, sizeof(last_volume_render),
+				 "%s", volume_text);
+
+		wl_list_for_each(m, &mons, link) {
+			if (!m->statusbar.volume.tree || !m->showbar)
+				continue;
+			barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+			if (need || force_render || barh != last_volume_h) {
+				last_volume_h = barh;
+				rendervolume(&m->statusbar.volume, barh, volume_text);
+				positionstatusmodules(m);
+			}
 		}
 	}
 }
@@ -4555,15 +4600,22 @@ refreshstatusmic(void)
 		mic_last_color_is_muted = use_muted_color;
 	}
 
-	wl_list_for_each(m, &mons, link) {
-		if (!m->statusbar.mic.tree || !m->showbar)
-			continue;
-		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		if (status_should_render(&m->statusbar.mic, barh, mic_text,
-					last_mic_render, sizeof(last_mic_render), &last_mic_h)
-				|| force_render) {
-			rendermic(&m->statusbar.mic, barh, mic_text);
-			positionstatusmodules(m);
+	{
+		int need = (last_mic_render[0] == '\0' ||
+			    strcmp(last_mic_render, mic_text) != 0);
+		if (need)
+			snprintf(last_mic_render, sizeof(last_mic_render),
+				 "%s", mic_text);
+
+		wl_list_for_each(m, &mons, link) {
+			if (!m->statusbar.mic.tree || !m->showbar)
+				continue;
+			barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+			if (need || force_render || barh != last_mic_h) {
+				last_mic_h = barh;
+				rendermic(&m->statusbar.mic, barh, mic_text);
+				positionstatusmodules(m);
+			}
 		}
 	}
 }
@@ -4596,8 +4648,9 @@ refreshstatusfan(void)
 	Monitor *m;
 	int barh;
 	int max_rpm = 0;
+	int any_fans = 0;
 
-	/* Read all fan data and find max RPM for bar display */
+	/* Pass 1: read all fan data and find max RPM */
 	wl_list_for_each(m, &mons, link) {
 		if (!m->showbar || !m->statusbar.fan.tree)
 			continue;
@@ -4619,26 +4672,44 @@ refreshstatusfan(void)
 			}
 		}
 
-		if (p->total_fans == 0) {
-			clearstatusmodule(&m->statusbar.fan);
-			m->statusbar.fan.width = 0;
-			wlr_scene_node_set_enabled(&m->statusbar.fan.tree->node, 0);
-			continue;
-		}
+		if (p->total_fans > 0)
+			any_fans = 1;
+	}
 
+	if (any_fans) {
 		if (max_rpm > 0)
 			snprintf(fan_text, sizeof(fan_text), "%d", max_rpm);
 		else
 			snprintf(fan_text, sizeof(fan_text), "--");
+	}
 
-		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		if (status_should_render(&m->statusbar.fan, barh, fan_text,
-					last_fan_render, sizeof(last_fan_render), &last_fan_h)
-				|| m->statusbar.fan_popup.visible) {
-			renderfan(&m->statusbar.fan, barh, fan_text);
-			if (m->statusbar.fan_popup.visible)
-				renderfanpopup(m);
-			positionstatusmodules(m);
+	/* Pass 2: render all monitors with the same data */
+	{
+		int need = any_fans && (last_fan_render[0] == '\0' ||
+			   strcmp(last_fan_render, fan_text) != 0);
+		if (need)
+			snprintf(last_fan_render, sizeof(last_fan_render),
+				 "%s", fan_text);
+
+		wl_list_for_each(m, &mons, link) {
+			if (!m->showbar || !m->statusbar.fan.tree)
+				continue;
+
+			if (m->statusbar.fan_popup.total_fans == 0) {
+				clearstatusmodule(&m->statusbar.fan);
+				m->statusbar.fan.width = 0;
+				wlr_scene_node_set_enabled(&m->statusbar.fan.tree->node, 0);
+				continue;
+			}
+
+			barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+			if (need || barh != last_fan_h || m->statusbar.fan_popup.visible) {
+				last_fan_h = barh;
+				renderfan(&m->statusbar.fan, barh, fan_text);
+				if (m->statusbar.fan_popup.visible)
+					renderfanpopup(m);
+				positionstatusmodules(m);
+			}
 		}
 	}
 }

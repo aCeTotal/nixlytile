@@ -1539,9 +1539,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 
 	/* time is 0 in internal calls meant to restore pointer focus. */
 	if (time) {
-		wlr_relative_pointer_manager_v1_send_relative_motion(
-				relative_pointer_mgr, seat, (uint64_t)time * 1000,
-				dx, dy, dx_unaccel, dy_unaccel);
+		double raw_dx = dx, raw_dy = dy;
 
 		wl_list_for_each(constraint, &pointer_constraints->constraints, link)
 			cursorconstrain(constraint);
@@ -1557,8 +1555,14 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 					dy = sy_confined - sy;
 				}
 
-				if (active_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED)
+				if (active_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED) {
+					wlr_relative_pointer_manager_v1_send_relative_motion(
+							relative_pointer_mgr, seat,
+							(uint64_t)time * 1000,
+							raw_dx, raw_dy,
+							dx_unaccel, dy_unaccel);
 					return;
+				}
 			}
 		}
 
@@ -1567,6 +1571,13 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		 * visible cursor latency. */
 		wlr_cursor_move(cursor, device, dx, dy);
 		wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
+
+		/* Relative pointer protocol — sent after the HW cursor plane
+		 * update so the visible cursor position changes before any
+		 * Wayland protocol I/O to clients. */
+		wlr_relative_pointer_manager_v1_send_relative_motion(
+				relative_pointer_mgr, seat, (uint64_t)time * 1000,
+				raw_dx, raw_dy, dx_unaccel, dy_unaccel);
 
 		/* Update selmon (even while dragging a window) */
 		if (sloppyfocus) {
@@ -1598,7 +1609,10 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 
 	/* Hover feedback for status bar modules.
 	 * Skip when: bar hidden, fullscreen covers bar, or cursor is far from
-	 * bar area (unless a popup is open that needs hover tracking). */
+	 * bar area (unless a popup is open that needs hover tracking).
+	 * Throttled to ~125 Hz — hover highlights don't need 1 kHz updates
+	 * and the saved cycles let motionnotify() return faster, keeping
+	 * the event loop responsive for the next HW cursor plane update. */
 	if (selmon && selmon->showbar && selmon->statusbar.area.height > 0) {
 		Client *fs = focustop(selmon);
 		int any_popup_open =
@@ -1613,17 +1627,23 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 				selmon->statusbar.area.height + 500);
 
 		if (!(fs && fs->isfullscreen) && (near_bar || any_popup_open)) {
-			updatetaghover(selmon, cursor->x, cursor->y);
-			updatecpuhover(selmon, cursor->x, cursor->y);
-			updateramhover(selmon, cursor->x, cursor->y);
-			updatebatteryhover(selmon, cursor->x, cursor->y);
-			updatefanhover(selmon, cursor->x, cursor->y);
+			/* Fan popup drag must respond at full input rate */
 			if (selmon->statusbar.fan_popup.dragging)
 				fan_popup_handle_drag(selmon, cursor->x, cursor->y);
-			updatenethover(selmon, cursor->x, cursor->y);
-			net_menu_update_hover(selmon, cursor->x, cursor->y);
-			if (!selmon->statusbar.net_menu.visible)
-				net_menu_hide_all();
+
+			static uint32_t last_hover_ms;
+			if (!time || time - last_hover_ms >= 8) {
+				if (time) last_hover_ms = time;
+				updatetaghover(selmon, cursor->x, cursor->y);
+				updatecpuhover(selmon, cursor->x, cursor->y);
+				updateramhover(selmon, cursor->x, cursor->y);
+				updatebatteryhover(selmon, cursor->x, cursor->y);
+				updatefanhover(selmon, cursor->x, cursor->y);
+				updatenethover(selmon, cursor->x, cursor->y);
+				net_menu_update_hover(selmon, cursor->x, cursor->y);
+				if (!selmon->statusbar.net_menu.visible)
+					net_menu_hide_all();
+			}
 		}
 	}
 

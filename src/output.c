@@ -50,6 +50,9 @@ cleanupmon(struct wl_listener *listener, void *data)
 	closemon(m);
 	wlr_scene_node_destroy(&m->fullscreen_bg->node);
 	free(m);
+
+	/* Re-arrange remaining monitors after removal */
+	auto_arrange_monitors();
 }
 
 void
@@ -166,6 +169,278 @@ restart_wallpaper(void)
 		execlp("swaybg", "swaybg", "-i", expanded_wp, "-m", "fill", (char *)NULL);
 		_exit(127);
 	}
+}
+
+/* ── auto-arrange helpers ──────────────────────────────────────────── */
+
+static double
+monitor_physical_diagonal(Monitor *m)
+{
+	int pw = m->wlr_output->phys_width;
+	int ph = m->wlr_output->phys_height;
+	if (pw <= 0 || ph <= 0)
+		return 0.0;
+	return sqrt((double)pw * pw + (double)ph * ph);
+}
+
+static void
+monitor_effective_size(Monitor *m, int *w, int *h)
+{
+	enum wl_output_transform t = m->wlr_output->transform;
+	int mw = m->wlr_output->width;
+	int mh = m->wlr_output->height;
+
+	if (t == WL_OUTPUT_TRANSFORM_90 || t == WL_OUTPUT_TRANSFORM_270 ||
+	    t == WL_OUTPUT_TRANSFORM_FLIPPED_90 || t == WL_OUTPUT_TRANSFORM_FLIPPED_270) {
+		*w = mh;
+		*h = mw;
+	} else {
+		*w = mw;
+		*h = mh;
+	}
+}
+
+typedef struct {
+	Monitor *mon;
+	int eff_w, eff_h;
+	double phys_diag;
+	int32_t phys_w, phys_h;
+	char edid_key[256];
+} MonitorProbe;
+
+static void
+build_edid_key(Monitor *m, char *buf, size_t len)
+{
+	const char *model = m->wlr_output->model ? m->wlr_output->model : "unknown";
+	const char *serial = m->wlr_output->serial ? m->wlr_output->serial : "none";
+	int w, h;
+	monitor_effective_size(m, &w, &h);
+	double diag = monitor_physical_diagonal(m);
+	snprintf(buf, len, "%s|%s|%dx%d|%.0f", model, serial, w, h, diag);
+}
+
+static int
+find_center_monitor(MonitorProbe *probes, int n)
+{
+	if (n < 2)
+		return 0;
+
+	int best = -1;
+	double best_diag = 0.0;
+	double sum = 0.0;
+	int cnt = 0;
+
+	for (int i = 0; i < n; i++) {
+		if (probes[i].phys_diag > 0.0) {
+			sum += probes[i].phys_diag;
+			cnt++;
+			if (probes[i].phys_diag > best_diag) {
+				best_diag = probes[i].phys_diag;
+				best = i;
+			}
+		}
+	}
+
+	if (best >= 0 && cnt >= 2) {
+		double avg_others = (sum - best_diag) / (cnt - 1);
+		if (best_diag > avg_others * 1.2)
+			return best;
+	}
+
+	return n / 2;
+}
+
+static int arranging_monitors; /* re-entrancy guard */
+
+void
+auto_arrange_monitors(void)
+{
+	Monitor *m;
+	MonitorProbe probes[MAX_MONITORS];
+	int n = 0;
+
+	if (arranging_monitors)
+		return;
+	arranging_monitors = 1;
+
+	/* Skip if user has explicit monitor configuration */
+	if (runtime_monitor_count > 0) {
+		arranging_monitors = 0;
+		return;
+	}
+
+	/* Phase 1: Collect enabled, non-mirror monitors */
+	wl_list_for_each(m, &mons, link) {
+		if (m->wlr_output->enabled && !m->is_mirror && n < MAX_MONITORS) {
+			MonitorProbe *p = &probes[n];
+			p->mon = m;
+			monitor_effective_size(m, &p->eff_w, &p->eff_h);
+			p->phys_diag = monitor_physical_diagonal(m);
+			p->phys_w = m->wlr_output->phys_width;
+			p->phys_h = m->wlr_output->phys_height;
+			build_edid_key(m, p->edid_key, sizeof(p->edid_key));
+			n++;
+		}
+	}
+
+	if (n == 0) {
+		arranging_monitors = 0;
+		return;
+	}
+
+	/* Single monitor: trivial case */
+	if (n == 1) {
+		wlr_output_layout_add(output_layout, probes[0].mon->wlr_output, 0, 0);
+		wlr_log(WLR_INFO, "Auto-arrange: %s (%s) at (0, 0) [%dx%d] [CENTER]",
+			probes[0].mon->wlr_output->name, probes[0].edid_key,
+			probes[0].eff_w, probes[0].eff_h);
+		selmon = probes[0].mon;
+		wlr_cursor_warp_closest(cursor, NULL,
+			probes[0].eff_w / 2, probes[0].eff_h / 2);
+		arranging_monitors = 0;
+		return;
+	}
+
+	/* Phase 2: Temporary auto-placement for probing */
+	for (int i = 0; i < n; i++)
+		wlr_output_layout_add_auto(output_layout, probes[i].mon->wlr_output);
+
+	/* Find start/center monitor: biggest EDID physical diagonal */
+	int start_idx = find_center_monitor(probes, n);
+
+	/* Phase 3: Invisible cursor sweep — chain-walk left and right
+	 * from center monitor to discover the spatial order.
+	 * The probe coordinate (x,y) acts as an invisible cursor that
+	 * sweeps across monitor edges without moving the real cursor. */
+	Monitor *left_chain[MAX_MONITORS];
+	int left_n = 0;
+	Monitor *right_chain[MAX_MONITORS];
+	int right_n = 0;
+
+	/* Walk LEFT from start monitor */
+	Monitor *cur = probes[start_idx].mon;
+	while (left_n < n - 1) {
+		struct wlr_box box;
+		wlr_output_layout_get_box(output_layout, cur->wlr_output, &box);
+		if (box.width <= 0)
+			break;
+		int mid_y = box.y + box.height / 2;
+		struct wlr_output *o = wlr_output_layout_output_at(
+			output_layout, box.x - 1, mid_y);
+		if (!o || !o->data)
+			break;
+		Monitor *found = o->data;
+		if (found == probes[start_idx].mon)
+			break;
+		int dup = 0;
+		for (int i = 0; i < left_n; i++) {
+			if (left_chain[i] == found) { dup = 1; break; }
+		}
+		if (dup)
+			break;
+		left_chain[left_n++] = found;
+		cur = found;
+	}
+
+	/* Walk RIGHT from start monitor */
+	cur = probes[start_idx].mon;
+	while (right_n < n - 1) {
+		struct wlr_box box;
+		wlr_output_layout_get_box(output_layout, cur->wlr_output, &box);
+		if (box.width <= 0)
+			break;
+		int mid_y = box.y + box.height / 2;
+		struct wlr_output *o = wlr_output_layout_output_at(
+			output_layout, box.x + box.width, mid_y);
+		if (!o || !o->data)
+			break;
+		Monitor *found = o->data;
+		if (found == probes[start_idx].mon)
+			break;
+		int dup = 0;
+		for (int i = 0; i < right_n; i++) {
+			if (right_chain[i] == found) { dup = 1; break; }
+		}
+		if (dup)
+			break;
+		right_chain[right_n++] = found;
+		cur = found;
+	}
+
+	/* Build ordered array: [...left(reversed)] [CENTER] [...right] */
+	Monitor *ordered[MAX_MONITORS];
+	int ordered_n = 0;
+	for (int i = left_n - 1; i >= 0; i--)
+		ordered[ordered_n++] = left_chain[i];
+	int center_pos = ordered_n;
+	ordered[ordered_n++] = probes[start_idx].mon;
+	for (int i = 0; i < right_n; i++)
+		ordered[ordered_n++] = right_chain[i];
+
+	/* Append any monitors the sweep missed (e.g. stacked vertically) */
+	for (int i = 0; i < n; i++) {
+		int found = 0;
+		for (int j = 0; j < ordered_n; j++) {
+			if (ordered[j] == probes[i].mon) { found = 1; break; }
+		}
+		if (!found && ordered_n < MAX_MONITORS)
+			ordered[ordered_n++] = probes[i].mon;
+	}
+
+	wlr_log(WLR_INFO, "Auto-arrange: probe sweep from %s: "
+		"%d left, %d right, %d total",
+		probes[start_idx].mon->wlr_output->name,
+		left_n, right_n, ordered_n);
+
+	/* Phase 4: Compute positions */
+	int eff_w[MAX_MONITORS], eff_h[MAX_MONITORS];
+	int max_height = 0;
+	for (int i = 0; i < ordered_n; i++) {
+		monitor_effective_size(ordered[i], &eff_w[i], &eff_h[i]);
+		if (eff_h[i] > max_height)
+			max_height = eff_h[i];
+	}
+
+	int pos_x[MAX_MONITORS], pos_y[MAX_MONITORS];
+	pos_x[center_pos] = 0;
+
+	/* Left of center */
+	int x = 0;
+	for (int i = center_pos - 1; i >= 0; i--) {
+		x -= eff_w[i];
+		pos_x[i] = x;
+	}
+
+	/* Right of center */
+	x = eff_w[center_pos];
+	for (int i = center_pos + 1; i < ordered_n; i++) {
+		pos_x[i] = x;
+		x += eff_w[i];
+	}
+
+	/* Vertical centering */
+	for (int i = 0; i < ordered_n; i++)
+		pos_y[i] = (max_height - eff_h[i]) / 2;
+
+	/* Phase 5: Apply positions */
+	for (int i = 0; i < ordered_n; i++) {
+		wlr_output_layout_add(output_layout, ordered[i]->wlr_output,
+			pos_x[i], pos_y[i]);
+		char key[256];
+		build_edid_key(ordered[i], key, sizeof(key));
+		wlr_log(WLR_INFO, "Auto-arrange: %s (%s) at (%d, %d) [%dx%d]%s",
+			ordered[i]->wlr_output->name, key,
+			pos_x[i], pos_y[i], eff_w[i], eff_h[i],
+			i == center_pos ? " [CENTER]" : "");
+	}
+
+	/* Phase 6: Cursor + selmon */
+	selmon = ordered[center_pos];
+	int cx = pos_x[center_pos] + eff_w[center_pos] / 2;
+	int cy = pos_y[center_pos] + eff_h[center_pos] / 2;
+	wlr_cursor_warp_closest(cursor, NULL, cx, cy);
+
+	arranging_monitors = 0;
 }
 
 void
@@ -292,16 +567,11 @@ createmon(struct wl_listener *listener, void *data)
 	LISTEN(&wlr_output->events.request_state, &m->request_state, requestmonstate);
 	LISTEN(&wlr_output->events.present, &m->present, outputpresent);
 
-	/* Detect mirror case early so we can test the mode before committing.
-	 * On some GPUs, committing max resolution on both eDP + HDMI simultaneously
-	 * exceeds bandwidth and causes a DRM hang. */
-	int will_mirror = 0;
+	/* Find laptop monitor for mode fallback: if the best mode on an external
+	 * display fails (bandwidth exceeded), try the laptop's resolution. */
 	Monitor *laptop = NULL;
-	if (!use_runtime_config && is_external_connector(wlr_output->name)) {
+	if (!use_runtime_config && is_external_connector(wlr_output->name))
 		laptop = find_laptop_monitor();
-		if (laptop)
-			will_mirror = 1;
-	}
 
 	wlr_output_state_set_enabled(&state, 1);
 
@@ -409,24 +679,12 @@ createmon(struct wl_listener *listener, void *data)
 		}
 	}
 
-	/* Auto-mirror: if this is an external output (HDMI/DP) and a laptop
-	 * display exists, and no explicit position was configured, place this
-	 * output at the laptop's coordinates so it mirrors the same content. */
-	if (will_mirror && m->m.x == -1 && m->m.y == -1) {
-		struct wlr_box laptop_box;
-		wlr_output_layout_get_box(output_layout, laptop->wlr_output, &laptop_box);
-		m->m.x = laptop_box.x;
-		m->m.y = laptop_box.y;
-		m->is_mirror = 1;
-		wlr_log(WLR_INFO, "Auto-mirroring %s at laptop %s position (%d,%d)",
-			wlr_output->name, laptop->wlr_output->name,
-			m->m.x, m->m.y);
-	}
-
-	if (m->m.x == -1 && m->m.y == -1)
-		wlr_output_layout_add_auto(output_layout, wlr_output);
-	else
+	/* If runtime config placed this monitor explicitly, use that position.
+	 * Otherwise auto_arrange_monitors() will position all monitors. */
+	if (m->m.x != -1 && m->m.y != -1)
 		wlr_output_layout_add(output_layout, wlr_output, m->m.x, m->m.y);
+	else
+		auto_arrange_monitors();
 
 	wl_list_for_each(c, &clients, link) {
 		if (c->output && strcmp(wlr_output->name, c->output) == 0)

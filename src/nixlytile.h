@@ -2098,6 +2098,7 @@ void powermgrsetmode(struct wl_listener *listener, void *data);
 void gpureset(struct wl_listener *listener, void *data);
 void requestmonstate(struct wl_listener *listener, void *data);
 void updatemons(struct wl_listener *listener, void *data);
+void auto_arrange_monitors(void);
 void set_adaptive_sync(Monitor *m, int enabled);
 void set_video_refresh_rate(Monitor *m, Client *c);
 void restore_max_refresh_rate(Monitor *m);

@@ -1269,8 +1269,8 @@ cleanup(void)
 	wifi_networks_clear();
 	last_clock_render[0] = last_cpu_render[0] = last_ram_render[0] = '\0';
 	last_light_render[0] = last_volume_render[0] = last_mic_render[0] = last_battery_render[0] = '\0';
-	last_net_render[0] = '\0';
-	last_clock_h = last_cpu_h = last_ram_h = last_light_h = last_volume_h = last_mic_h = last_battery_h = last_net_h = 0;
+	last_net_render[0] = last_fan_render[0] = '\0';
+	last_clock_h = last_cpu_h = last_ram_h = last_light_h = last_volume_h = last_mic_h = last_battery_h = last_net_h = last_fan_h = 0;
 	/* Stop thermal fan management and restore BIOS control */
 	fan_thermal_stop();
 	if (fan_thermal_timer) {
