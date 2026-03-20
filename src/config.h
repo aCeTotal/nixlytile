@@ -67,7 +67,7 @@ int lock_cursor = 0;	/* 1: lock cursor, 0: don't lock */
 #define TAGCOUNT (9)
 
 /* logging */
-int log_level = WLR_SILENCE;
+int log_level = WLR_DEBUG;
 
 /* nixlytile mode: 1 = desktop only, 2 = htpc only (starts in HTPC mode) */
 int nixlytile_mode = 1;

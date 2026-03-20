@@ -2224,8 +2224,18 @@ log_callback(enum wlr_log_importance importance, const char *fmt, va_list args)
 	fflush(log_file);
 	va_end(args_copy);
 
+	/* Always write to WLR_DEBUG.log (full debug capture) */
+	if (debug_log_file) {
+		va_copy(args_copy, args);
+		fprintf(debug_log_file, "%s", prefix);
+		vfprintf(debug_log_file, fmt, args_copy);
+		fputc('\n', debug_log_file);
+		fflush(debug_log_file);
+		va_end(args_copy);
+	}
+
 	/* Also print to real terminal when -d flag is used */
-	if (log_level == WLR_DEBUG && log_stderr_fd >= 0) {
+	if (log_stderr_fd >= 0) {
 		dprintf(log_stderr_fd, "%s", prefix);
 		va_copy(args_copy, args);
 		vdprintf(log_stderr_fd, fmt, args_copy);
@@ -2666,6 +2676,19 @@ init_logging(void)
 		fflush(log_file);
 	}
 
+	/* Open full debug log (always active, captures everything) */
+	debug_log_file = fopen(NIXLY_LOG_DIR "/WLR_DEBUG.log", "w");
+	if (debug_log_file) {
+		struct timespec ts;
+		struct tm tm;
+		clock_gettime(CLOCK_REALTIME, &ts);
+		localtime_r(&ts.tv_sec, &tm);
+		fprintf(debug_log_file, "=== WLR_DEBUG full log %04d-%02d-%02d %02d:%02d:%02d (PID %d) ===\n",
+			tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+			tm.tm_hour, tm.tm_min, tm.tm_sec, getpid());
+		fflush(debug_log_file);
+	}
+
 	/* Redirect stderr → file so XWayland crash output is captured.
 	 * XWayland is a child process that inherits our stderr. */
 	int stderr_log = open(NIXLY_LOG_DIR "/xwayland.log",
@@ -2745,6 +2768,11 @@ close_logging(void)
 		dprintf(error_log_fd, "\n=== error log ended ===\n");
 		close(error_log_fd);
 		error_log_fd = -1;
+	}
+	if (debug_log_file) {
+		fprintf(debug_log_file, "=== WLR_DEBUG log ended ===\n");
+		fclose(debug_log_file);
+		debug_log_file = NULL;
 	}
 	if (log_file) {
 		fclose(log_file);

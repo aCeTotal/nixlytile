@@ -64,7 +64,7 @@ enum Direction { DIR_LEFT, DIR_RIGHT, DIR_UP, DIR_DOWN };
 #define TAGCOUNT (9)
 
 /* logging */
-int log_level = WLR_SILENCE;
+int log_level = WLR_DEBUG;
 
 /* NOTE: ALWAYS keep a rule declared even if you don't use rules (e.g leave at least one example) */
 const Rule rules[] = {
