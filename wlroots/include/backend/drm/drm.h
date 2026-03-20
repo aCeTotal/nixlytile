@@ -91,6 +91,7 @@ struct wlr_drm_backend {
 	const struct wlr_drm_interface *iface;
 	bool addfb2_modifiers;
 	bool cap_addfb2_modifiers;
+	bool addfb2_modifiers_broken; /* set after first WithModifiers failure + fallback success */
 
 	int fd;
 	char *name;

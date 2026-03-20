@@ -45,26 +45,28 @@ static uint32_t get_fb_for_bo(struct wlr_drm_backend *drm,
 	}
 
 	uint32_t id = 0;
-	/* Try DRM_MODE_FB_MODIFIERS first when the kernel supports it.
-	 * If it fails for implicit/linear modifiers (e.g. NVIDIA 590+
-	 * rejects INVALID+MODIFIERS as contradictory), fall back to
-	 * drmModeAddFB2 without the flag. */
-	if (drm->cap_addfb2_modifiers) {
+	/* Try DRM_MODE_FB_MODIFIERS first when the kernel supports it and
+	 * we haven't already learned that this driver rejects it.
+	 *
+	 * NVIDIA 590+ rejects drmModeAddFB2WithModifiers with planePitch
+	 * errors for buffers allocated by its own GBM.  Once we detect
+	 * that the non-modifier path works where WithModifiers failed, we
+	 * remember it (addfb2_modifiers_broken) and skip straight to the
+	 * working path for all subsequent buffers — zero wasted IOCTLs. */
+	if (drm->cap_addfb2_modifiers && !drm->addfb2_modifiers_broken) {
 		if (drmModeAddFB2WithModifiers(drm->fd, dmabuf->width, dmabuf->height,
 				dmabuf->format, handles, dmabuf->stride, dmabuf->offset,
 				modifiers, &id, DRM_MODE_FB_MODIFIERS) != 0) {
 			wlr_log_errno(WLR_DEBUG, "drmModeAddFB2WithModifiers failed");
-			/* NVIDIA 590+ rejects DRM_MODE_FB_MODIFIERS combined with
-			 * DRM_FORMAT_MOD_INVALID as contradictory.  Fall back to
-			 * drmModeAddFB2 without the modifier flag for implicit /
-			 * linear modifiers. */
-			if (dmabuf->modifier == DRM_FORMAT_MOD_INVALID ||
-					dmabuf->modifier == DRM_FORMAT_MOD_LINEAR) {
-				if (drmModeAddFB2(drm->fd, dmabuf->width, dmabuf->height,
-						dmabuf->format, handles, dmabuf->stride,
-						dmabuf->offset, &id, 0) != 0) {
-					wlr_log_errno(WLR_DEBUG, "drmModeAddFB2 fallback failed");
-				}
+			if (drmModeAddFB2(drm->fd, dmabuf->width, dmabuf->height,
+					dmabuf->format, handles, dmabuf->stride,
+					dmabuf->offset, &id, 0) != 0) {
+				wlr_log_errno(WLR_DEBUG, "drmModeAddFB2 fallback failed");
+			} else if (!drm->addfb2_modifiers_broken) {
+				wlr_log(WLR_INFO,
+					"drmModeAddFB2WithModifiers broken on this driver, "
+					"using drmModeAddFB2 for all future buffers");
+				drm->addfb2_modifiers_broken = true;
 			}
 		}
 	} else {
