@@ -516,17 +516,6 @@ mapnotify(struct wl_listener *listener, void *data)
 		setmon(c, p->mon, p->tags);
 	} else {
 		applyrules(c);
-		if (tray_anchor_time_ms && monotonic_msec() - tray_anchor_time_ms <= 1000) {
-			Monitor *am = xytomon(tray_anchor_x, tray_anchor_y);
-			if (!am)
-				am = selmon;
-			if (am) {
-				c->isfloating = 1;
-				c->geom.x = tray_anchor_x - c->geom.width / 2;
-				c->geom.y = tray_anchor_y;
-				setmon(c, am, c->tags);
-			}
-		}
 	}
 	/* Ensure client has a valid monitor. If selmon is NULL (all outputs
 	 * disconnected), the client can't be displayed - clean up and return. */

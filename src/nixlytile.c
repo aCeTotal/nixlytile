@@ -3002,18 +3002,57 @@ setup(void)
 	cursor_mgr = wlr_xcursor_manager_create(NULL, 24);
 	setenv("XCURSOR_SIZE", "24", 1);
 
-	/* Initialize CPU cursor buffer for Nvidia HW cursor plane */
+	/* Initialize CPU cursor buffer for Nvidia HW cursor plane.
+	 * NVIDIA's proprietary driver doesn't support DRM_IOCTL_MODE_CREATE_DUMB
+	 * on its render node, so prefer the iGPU's render node for dumb buffer
+	 * allocation.  The DMA-BUF export works cross-GPU. */
 	if (discrete_gpu_idx >= 0 &&
 	    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA) {
-		int cdrm_fd = wlr_renderer_get_drm_fd(drw);
+		int cdrm_fd = -1;
+		int cdrm_owns = 0;
+		uint64_t cursor_w = 64, cursor_h = 64;
+
+		/* Try iGPU render node first (Intel/AMD always support dumb buffers) */
+		if (integrated_gpu_idx >= 0 &&
+		    detected_gpus[integrated_gpu_idx].render_path[0]) {
+			cdrm_fd = open(detected_gpus[integrated_gpu_idx].render_path,
+				O_RDWR | O_CLOEXEC);
+			if (cdrm_fd >= 0) {
+				cdrm_owns = 1;
+				wlr_log(WLR_INFO,
+					"NVIDIA: using iGPU render node %s for cursor dumb buffer",
+					detected_gpus[integrated_gpu_idx].render_path);
+			}
+		}
+
+		/* Fall back to NVIDIA primary node (card path) — newer NVIDIA
+		 * drivers (545+) support dumb buffers on the primary DRM node.
+		 * The render node never supports them with the proprietary driver. */
+		if (cdrm_fd < 0 && detected_gpus[discrete_gpu_idx].card_path[0]) {
+			cdrm_fd = open(detected_gpus[discrete_gpu_idx].card_path,
+				O_RDWR | O_CLOEXEC);
+			if (cdrm_fd >= 0) {
+				cdrm_owns = 1;
+				wlr_log(WLR_INFO,
+					"NVIDIA: trying primary node %s for cursor dumb buffer",
+					detected_gpus[discrete_gpu_idx].card_path);
+			}
+		}
+
+		/* Last resort: renderer FD (render node — unlikely to work for
+		 * dumb buffers on NVIDIA, but keeps backwards compatibility) */
+		if (cdrm_fd < 0) {
+			cdrm_fd = wlr_renderer_get_drm_fd(drw);
+			cdrm_owns = 0;
+		}
+
 		if (cdrm_fd >= 0) {
-			uint64_t cursor_w = 64, cursor_h = 64;
 			drmGetCap(cdrm_fd, DRM_CAP_CURSOR_WIDTH, &cursor_w);
 			drmGetCap(cdrm_fd, DRM_CAP_CURSOR_HEIGHT, &cursor_h);
 			if (cursor_w < 64) cursor_w = 64;
 			if (cursor_h < 64) cursor_h = 64;
 			cpu_cursor_buf = cpu_cursor_buffer_create(cdrm_fd,
-				(uint32_t)cursor_w, (uint32_t)cursor_h);
+				(uint32_t)cursor_w, (uint32_t)cursor_h, cdrm_owns);
 			if (cpu_cursor_buf) {
 				cpu_cursor_active = 1;
 				wlr_log(WLR_INFO,
@@ -3021,6 +3060,8 @@ setup(void)
 					"(HW cursor plane with dumb buffer, %lux%lu)",
 					(unsigned long)cursor_w, (unsigned long)cursor_h);
 			} else {
+				if (cdrm_owns)
+					close(cdrm_fd);
 				wlr_log(WLR_ERROR,
 					"NVIDIA: CPU cursor buffer creation failed, "
 					"falling back to software cursor");

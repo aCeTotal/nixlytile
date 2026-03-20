@@ -705,7 +705,8 @@ struct PixmanBuffer {
  * place it on the cursor plane without GBM allocation. */
 struct CpuCursorBuffer {
 	struct wlr_buffer base;       /* wlr_buffer interface */
-	int drm_fd;                   /* DRM fd (not owned) */
+	int drm_fd;                   /* DRM fd used for dumb buffer ops */
+	int owns_drm_fd;              /* 1 if we opened drm_fd ourselves */
 	uint32_t gem_handle;          /* GEM handle from dumb create */
 	int dmabuf_fd;                /* DMA-BUF fd for wlroots import */
 	uint32_t width;               /* Buffer width */
@@ -1941,7 +1942,7 @@ void add_icon_root_paths(const char *base, const char *themes[], size_t theme_co
 int loadstatusfont(void);
 void freestatusfont(void);
 int status_text_width(const char *text);
-struct CpuCursorBuffer *cpu_cursor_buffer_create(int drm_fd, uint32_t w, uint32_t h);
+struct CpuCursorBuffer *cpu_cursor_buffer_create(int drm_fd, uint32_t w, uint32_t h, int owns_fd);
 void cpu_cursor_buffer_destroy(struct CpuCursorBuffer *buf);
 void nixly_cursor_set_xcursor(const char *name);
 void nixly_cursor_set_client_surface(struct wlr_surface *surface, int hx, int hy);

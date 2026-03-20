@@ -61,24 +61,6 @@ count_tiles_on_tag(Monitor *m, uint32_t tag)
 	return count;
 }
 
-/* Find an available tag with space for more tiles */
-uint32_t
-find_available_tag(Monitor *m)
-{
-	unsigned int i;
-	uint32_t tag;
-	unsigned int desired_cols = target_columns(m);
-	unsigned int max_tiles = desired_cols * 4;
-
-	/* Start from tag 1, find first tag with space */
-	for (i = 0; i < TAGCOUNT; i++) {
-		tag = 1u << i;
-		if (count_tiles_on_tag(m, tag) < max_tiles)
-			return tag;
-	}
-	/* All tags full, return 0 */
-	return 0;
-}
 double resize_last_update_x __attribute__((unused)),
              resize_last_update_y __attribute__((unused));
 
@@ -235,15 +217,8 @@ btrtile(Monitor *m)
 			found = *root ? find_client_node(*root, c) : NULL;
 			if (!found) {
 				if (!insert_client(m, NULL, c)) {
-					/* Workspace is full - move client to next available tag */
-					uint32_t available_tag = find_available_tag(m);
-					if (available_tag && available_tag != (c->tags & m->tagset[m->seltags])) {
-						c->tags = available_tag;
-						/* Client is now on different tag, skip it */
-						continue;
-					}
-					/* No available tag - make floating as last resort */
-					c->isfloating = 1;
+					/* insert_client failed (OOM) — skip this cycle,
+					 * it will be retried next arrange(). */
 					continue;
 				}
 			}
@@ -413,20 +388,12 @@ insert_client(Monitor *m, Client *focused_client, Client *new_client)
 	LayoutNode **root, *old_root,
 	*focused_node, *new_client_node, *old_client_node;
 	int place_new_first;
-	unsigned int desired_cols, current_cols, total_tiles, max_tiles;
+	unsigned int desired_cols, current_cols;
 	Client *target_client;
 
 	root = get_current_root(m);
 	desired_cols = target_columns(m);
 	current_cols = count_columns(*root, m);
-
-	/* Check if workspace is full (max 4 tiles per column) */
-	total_tiles = visible_count(*root, m);
-	max_tiles = desired_cols * 4;
-	if (total_tiles >= max_tiles) {
-		/* Workspace is full - don't allow more tiles */
-		return 0;
-	}
 
 	/* If no root, new client becomes the root. */
 	if (!*root) {
@@ -468,17 +435,6 @@ insert_client(Monitor *m, Client *focused_client, Client *new_client)
 			new_client_node = create_client_node(new_client);
 			*root = create_split_node(1, old_root, new_client_node);
 			return 1;
-		}
-	}
-
-	/* Check column constraint (max 4 tiles per column) */
-	{
-		LayoutNode *col_root = find_column_root(focused_node, m);
-		unsigned int col_tiles = count_in_column(col_root, m);
-
-		if (col_tiles >= 4) {
-			/* Column is full - don't allow more tiles */
-			return 0;
 		}
 	}
 
@@ -552,18 +508,6 @@ insert_client_at(Monitor *m, Client *target, Client *new_client, double cx, doub
 		} else
 			*root = create_split_node(0, old_root, new_client_node);
 		return;
-	}
-
-	/* Check column constraint (max 4 tiles per column) */
-	{
-		LayoutNode *col_root = find_column_root(target_node, m);
-		unsigned int col_tiles = count_in_column(col_root, m);
-
-		if (col_tiles >= 4) {
-			/* Column is full - re-insert at original position */
-			insert_client(m, NULL, new_client);
-			return;
-		}
 	}
 
 	/* Turn target node from a client node into a horizontal split node */

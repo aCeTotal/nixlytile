@@ -1537,18 +1537,6 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		selmon->last_input_ns = get_time_ns();
 	}
 
-	/* Find the client under the pointer and send the event along. */
-	xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
-
-	if (cursor_mode == CurPressed && !seat->drag
-			&& surface != seat->pointer_state.focused_surface
-			&& toplevel_from_wlr_surface(seat->pointer_state.focused_surface, &w, &l) >= 0) {
-		c = w;
-		surface = seat->pointer_state.focused_surface;
-		sx = cursor->x - (l ? l->scene->node.x : w->geom.x);
-		sy = cursor->y - (l ? l->scene->node.y : w->geom.y);
-	}
-
 	/* time is 0 in internal calls meant to restore pointer focus. */
 	if (time) {
 		wlr_relative_pointer_manager_v1_send_relative_motion(
@@ -1574,6 +1562,9 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 			}
 		}
 
+		/* Move cursor as early as possible — the HW cursor plane updates
+		 * via DRM ioctl here, so every µs saved before this call reduces
+		 * visible cursor latency. */
 		wlr_cursor_move(cursor, device, dx, dy);
 		wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
@@ -1588,30 +1579,57 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		}
 	}
 
+	/* Find the client under the pointer at the NEW cursor position.
+	 * Doing this after wlr_cursor_move() (instead of before) means the
+	 * scene traversal doesn't block the HW cursor update. */
+	xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
+
+	if (cursor_mode == CurPressed && !seat->drag
+			&& surface != seat->pointer_state.focused_surface
+			&& toplevel_from_wlr_surface(seat->pointer_state.focused_surface, &w, &l) >= 0) {
+		c = w;
+		surface = seat->pointer_state.focused_surface;
+		sx = cursor->x - (l ? l->scene->node.x : w->geom.x);
+		sy = cursor->y - (l ? l->scene->node.y : w->geom.y);
+	}
+
 	/* Update drag icon's position */
 	wlr_scene_node_set_position(&drag_icon->node, (int)round(cursor->x), (int)round(cursor->y));
 
-	/* Hover feedback for tag boxes — skip when fullscreen client covers bar */
-		{
-			Client *fs = selmon ? focustop(selmon) : NULL;
-			if (selmon && selmon->showbar && !(fs && fs->isfullscreen)) {
-				updatetaghover(selmon, cursor->x, cursor->y);
-				updatecpuhover(selmon, cursor->x, cursor->y);
-				updateramhover(selmon, cursor->x, cursor->y);
-				updatebatteryhover(selmon, cursor->x, cursor->y);
-				updatefanhover(selmon, cursor->x, cursor->y);
-				if (selmon->statusbar.fan_popup.dragging)
-					fan_popup_handle_drag(selmon, cursor->x, cursor->y);
-				updatenethover(selmon, cursor->x, cursor->y);
-				net_menu_update_hover(selmon, cursor->x, cursor->y);
-				if (!selmon->statusbar.net_menu.visible)
-					net_menu_hide_all();
-			}
-		}
+	/* Hover feedback for status bar modules.
+	 * Skip when: bar hidden, fullscreen covers bar, or cursor is far from
+	 * bar area (unless a popup is open that needs hover tracking). */
+	if (selmon && selmon->showbar && selmon->statusbar.area.height > 0) {
+		Client *fs = focustop(selmon);
+		int any_popup_open =
+			selmon->statusbar.cpu_popup.visible ||
+			selmon->statusbar.ram_popup.visible ||
+			selmon->statusbar.battery_popup.visible ||
+			selmon->statusbar.fan_popup.visible ||
+			selmon->statusbar.net_menu.visible ||
+			selmon->statusbar.tray_menu.visible;
+		int near_bar = (cursor->y >= selmon->statusbar.area.y &&
+			cursor->y <= selmon->statusbar.area.y +
+				selmon->statusbar.area.height + 500);
 
-		/* Skip if internal call or already resizing */
-		if (time == 0 && resizing_from_mouse)
-			goto focus;
+		if (!(fs && fs->isfullscreen) && (near_bar || any_popup_open)) {
+			updatetaghover(selmon, cursor->x, cursor->y);
+			updatecpuhover(selmon, cursor->x, cursor->y);
+			updateramhover(selmon, cursor->x, cursor->y);
+			updatebatteryhover(selmon, cursor->x, cursor->y);
+			updatefanhover(selmon, cursor->x, cursor->y);
+			if (selmon->statusbar.fan_popup.dragging)
+				fan_popup_handle_drag(selmon, cursor->x, cursor->y);
+			updatenethover(selmon, cursor->x, cursor->y);
+			net_menu_update_hover(selmon, cursor->x, cursor->y);
+			if (!selmon->statusbar.net_menu.visible)
+				net_menu_hide_all();
+		}
+	}
+
+	/* Skip if internal call or already resizing */
+	if (time == 0 && resizing_from_mouse)
+		goto focus;
 
 	tiled = grabc && !grabc->isfloating && !grabc->isfullscreen;
 	last_pointer_motion_ms = monotonic_msec();

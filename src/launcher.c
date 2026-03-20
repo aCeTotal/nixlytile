@@ -1260,6 +1260,65 @@ strip_trailing_space(char *s)
 	}
 }
 
+/* Check if the binary from an Exec=/TryExec= line exists.
+ * Returns 1 if available (or relative command we can't check), 0 if
+ * the absolute path doesn't exist (e.g. garbage-collected nix store path). */
+static int
+exec_binary_available(const char *exec)
+{
+	char binary[PATH_MAX];
+	const char *p;
+	size_t len;
+
+	if (!exec || !*exec)
+		return 0;
+
+	p = exec;
+
+	/* Skip leading whitespace */
+	while (*p == ' ' || *p == '\t')
+		p++;
+
+	/* Skip 'env' command and any VAR=value assignments */
+	if (!strncmp(p, "env ", 4)) {
+		p += 4;
+		while (*p) {
+			while (*p == ' ' || *p == '\t')
+				p++;
+			if (!*p)
+				return 0;
+			/* Check if this token is a VAR=value assignment */
+			const char *tok_end = p;
+			int is_assignment = 0;
+			while (*tok_end && *tok_end != ' ' && *tok_end != '\t') {
+				if (*tok_end == '=')
+					is_assignment = 1;
+				tok_end++;
+			}
+			if (!is_assignment)
+				break; /* found the actual command */
+			p = tok_end;
+		}
+		while (*p == ' ' || *p == '\t')
+			p++;
+	}
+
+	/* Extract first token (the binary path/name) */
+	len = 0;
+	while (p[len] && p[len] != ' ' && p[len] != '\t' && len < sizeof(binary) - 1)
+		len++;
+	if (!len)
+		return 0;
+	memcpy(binary, p, len);
+	binary[len] = '\0';
+
+	/* Only validate absolute paths — relative commands depend on runtime PATH */
+	if (binary[0] == '/')
+		return access(binary, X_OK) == 0;
+
+	return 1;
+}
+
 int
 desktop_entry_exists(const char *name)
 {
@@ -1301,6 +1360,7 @@ load_desktop_dir_rec(const char *dir, int depth)
 		char line[512];
 		char name[256] = {0};
 		char exec[512] = {0};
+		char tryexec[512] = {0};
 		int nodisplay = 0;
 		int hidden = 0;
 		int isdir = 0;
@@ -1367,6 +1427,8 @@ load_desktop_dir_rec(const char *dir, int depth)
 				const char *val = line + 7;
 				if (!strncasecmp(val, "true", 4))
 					hidden = 1;
+			} else if (!strncmp(line, "TryExec=", 8)) {
+				snprintf(tryexec, sizeof(tryexec), "%s", line + 8);
 			} else if (!strncmp(line, "PrefersNonDefaultGPU=", 21)) {
 				const char *val = line + 21;
 				if (!strncasecmp(val, "true", 4))
@@ -1381,17 +1443,80 @@ load_desktop_dir_rec(const char *dir, int depth)
 
 		strip_trailing_space(name);
 		strip_trailing_space(exec);
+		strip_trailing_space(tryexec);
 
-		for (size_t k = 0; exec[k]; k++) {
-			if (exec[k] == '%') {
-				exec[k] = '\0';
-				break;
+		/* Strip desktop entry field codes (%f, %F, %u, %U, etc.)
+		 * and collapse resulting whitespace. %% becomes %. */
+		{
+			size_t r = 0, w = 0;
+			while (exec[r]) {
+				if (exec[r] == '%' && exec[r + 1]) {
+					char c = exec[r + 1];
+					if (c == '%') {
+						exec[w++] = '%';
+						r += 2;
+					} else if (c == 'f' || c == 'F' || c == 'u' ||
+						   c == 'U' || c == 'd' || c == 'D' ||
+						   c == 'n' || c == 'N' || c == 'i' ||
+						   c == 'c' || c == 'k' || c == 'v' ||
+						   c == 'm') {
+						r += 2;
+						/* skip trailing space after removed code */
+						while (exec[r] == ' ')
+							r++;
+					} else {
+						exec[w++] = exec[r++];
+					}
+				} else {
+					exec[w++] = exec[r++];
+				}
 			}
+			exec[w] = '\0';
 		}
 		strip_trailing_space(exec);
+		/* Strip bare '-' argument tokens that were file separators
+		 * before field codes (e.g. "FreeCAD - --single-instance"
+		 * after %F removal → "FreeCAD --single-instance").
+		 * Only strip standalone '-', not '--option' flags. */
+		{
+			size_t r = 0, w = 0;
+			int first_token = 1;
+			char tmp[512];
+			snprintf(tmp, sizeof(tmp), "%s", exec);
+			while (tmp[r]) {
+				/* find token boundaries */
+				size_t ts = r;
+				while (tmp[r] && tmp[r] != ' ' && tmp[r] != '\t')
+					r++;
+				size_t tlen = r - ts;
+				/* skip spaces between tokens */
+				while (tmp[r] == ' ' || tmp[r] == '\t')
+					r++;
+				/* keep the first token (binary name) always;
+				 * drop bare '-' from subsequent tokens */
+				if (first_token || !(tlen == 1 && tmp[ts] == '-')) {
+					if (w > 0 && !first_token)
+						exec[w++] = ' ';
+					memcpy(exec + w, tmp + ts, tlen);
+					w += tlen;
+				}
+				first_token = 0;
+			}
+			exec[w] = '\0';
+		}
 
 		if (nodisplay || hidden || !name[0] || !exec[0])
 			continue;
+
+		/* Validate binary exists (filters stale NixOS store paths) */
+		if (tryexec[0]) {
+			if (!exec_binary_available(tryexec))
+				continue;
+		} else {
+			if (!exec_binary_available(exec))
+				continue;
+		}
+
 		if (desktop_entry_exists(name))
 			continue;
 

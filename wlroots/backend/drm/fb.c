@@ -45,14 +45,27 @@ static uint32_t get_fb_for_bo(struct wlr_drm_backend *drm,
 	}
 
 	uint32_t id = 0;
-	/* Always pass DRM_MODE_FB_MODIFIERS when the kernel supports it.
-	 * Nvidia requires the flag even for DRM_FORMAT_MOD_INVALID (implicit
-	 * modifier from gbm_bo_create fallback). */
+	/* Try DRM_MODE_FB_MODIFIERS first when the kernel supports it.
+	 * If it fails for implicit/linear modifiers (e.g. NVIDIA 590+
+	 * rejects INVALID+MODIFIERS as contradictory), fall back to
+	 * drmModeAddFB2 without the flag. */
 	if (drm->cap_addfb2_modifiers) {
 		if (drmModeAddFB2WithModifiers(drm->fd, dmabuf->width, dmabuf->height,
 				dmabuf->format, handles, dmabuf->stride, dmabuf->offset,
 				modifiers, &id, DRM_MODE_FB_MODIFIERS) != 0) {
 			wlr_log_errno(WLR_DEBUG, "drmModeAddFB2WithModifiers failed");
+			/* NVIDIA 590+ rejects DRM_MODE_FB_MODIFIERS combined with
+			 * DRM_FORMAT_MOD_INVALID as contradictory.  Fall back to
+			 * drmModeAddFB2 without the modifier flag for implicit /
+			 * linear modifiers. */
+			if (dmabuf->modifier == DRM_FORMAT_MOD_INVALID ||
+					dmabuf->modifier == DRM_FORMAT_MOD_LINEAR) {
+				if (drmModeAddFB2(drm->fd, dmabuf->width, dmabuf->height,
+						dmabuf->format, handles, dmabuf->stride,
+						dmabuf->offset, &id, 0) != 0) {
+					wlr_log_errno(WLR_DEBUG, "drmModeAddFB2 fallback failed");
+				}
+			}
 		}
 	} else {
 		if (dmabuf->modifier != DRM_FORMAT_MOD_INVALID &&

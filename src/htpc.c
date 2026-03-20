@@ -2301,9 +2301,6 @@ update_game_mode(void)
 		 */
 		wlr_log(WLR_INFO, "Game mode activated (non-game fullscreen) - pausing background tasks");
 
-		/* Show fullscreen detection notification */
-		if (c && c->mon)
-			show_hz_osd(c->mon, "Fullscreen Active");
 
 		if (cache_update_timer)
 			wl_event_source_timer_update(cache_update_timer, 0);
@@ -2412,9 +2409,9 @@ update_game_mode(void)
 
 		}
 
-		/* Show exit notification (for both ultra and regular game mode) */
-		if (selmon)
-			show_hz_osd(selmon, was_ultra ? "Game Mode Off" : "Fullscreen Off");
+		/* Show exit notification for ultra game mode only */
+		if (was_ultra && selmon)
+			show_hz_osd(selmon, "Game Mode Off");
 
 		game_mode_ultra = 0;
 		game_mode_client = NULL;

@@ -247,9 +247,11 @@ client_is_float_type(Client *c)
 
 	toplevel = c->surface.xdg->toplevel;
 	state = toplevel->current;
-	return toplevel->parent || (state.min_width != 0 && state.min_height != 0
-		&& (state.min_width == state.max_width
-			|| state.min_height == state.max_height));
+	/* Parent windows are handled in mapnotify via client_get_parent().
+	 * Only auto-float if BOTH dimensions are fixed (truly non-resizable). */
+	return (state.min_width != 0 && state.min_height != 0
+		&& state.min_width == state.max_width
+		&& state.min_height == state.max_height);
 }
 
 static inline int

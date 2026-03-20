@@ -1053,6 +1053,8 @@ cpu_cursor_buffer_destroy_cb(struct wlr_buffer *wlr_buffer)
 		struct drm_mode_destroy_dumb destroy = { .handle = buf->gem_handle };
 		ioctl(buf->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
 	}
+	if (buf->owns_drm_fd && buf->drm_fd >= 0)
+		close(buf->drm_fd);
 	free(buf);
 }
 
@@ -1107,7 +1109,7 @@ static const struct wlr_buffer_impl cpu_cursor_buffer_impl = {
 };
 
 struct CpuCursorBuffer *
-cpu_cursor_buffer_create(int drm_fd, uint32_t w, uint32_t h)
+cpu_cursor_buffer_create(int drm_fd, uint32_t w, uint32_t h, int owns_fd)
 {
 	struct CpuCursorBuffer *buf;
 	struct drm_mode_create_dumb create = {0};
@@ -1119,6 +1121,7 @@ cpu_cursor_buffer_create(int drm_fd, uint32_t w, uint32_t h)
 		return NULL;
 
 	buf->drm_fd = drm_fd;
+	buf->owns_drm_fd = owns_fd;
 	buf->dmabuf_fd = -1;
 
 	/* Create dumb buffer */
