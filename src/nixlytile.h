@@ -2007,7 +2007,7 @@ int is_steam_game(Client *c);
 int is_browser_client(Client *c);
 int looks_like_game(Client *c);
 int is_steam_cmd(const char *cmd);
-int is_steam_child_process(pid_t pid);
+int is_game_launcher_child(pid_t pid);
 int client_wants_tearing(Client *c);
 void track_client_frame(Client *c);
 float detect_video_framerate(Client *c);

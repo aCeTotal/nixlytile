@@ -238,6 +238,14 @@ client_get_pid(Client *c)
 	if (!c)
 		return 0;
 
+#ifdef XWAYLAND
+	/* For X11 clients, use the real process PID from xwayland surface.
+	 * wl_client_get_credentials() returns the Xwayland server PID,
+	 * which makes process-based game detection fail for all XWayland apps. */
+	if (client_is_x11(c) && c->surface.xwayland && c->surface.xwayland->pid > 0)
+		return c->surface.xwayland->pid;
+#endif
+
 	surface = client_surface(c);
 	if (!surface || !surface->resource)
 		return 0;
@@ -2016,6 +2024,9 @@ restore_mglru_tuning(void)
 	wlr_log(WLR_INFO, "MGLRU: restored defaults");
 }
 
+static int is_wine_or_proton_process(pid_t pid);
+static int is_known_game_app(const char *app);
+
 void
 update_game_mode(void)
 {
@@ -2042,76 +2053,34 @@ update_game_mode(void)
 
 	/*
 	 * Determine if this is actually a game.
-	 * Most games (especially XWayland/Steam/Wine) don't set content-type
-	 * or tearing hints.  Flip the default: treat ANY fullscreen app as a
-	 * game UNLESS it explicitly identifies as video, or is a known video
-	 * player by app-id / class name.
+	 * Default: NOT a game.  Only activate ultra game mode when there's
+	 * positive evidence (protocol hints, known app-id, or process ancestry).
+	 * This prevents false positives from browsers, Spotify, Discord, GIMP,
+	 * OBS, and every other non-game fullscreen app.
 	 */
 	if (c) {
-		if (client_wants_tearing(c) || is_game_content(c)) {
+		if (is_video_content(c)) {
+			/* Explicit video hint — definitely not a game */
+			is_game = 0;
+		} else if (client_wants_tearing(c) || is_game_content(c)) {
 			/* Explicit game hints — definitely a game */
 			is_game = 1;
-		} else if (is_video_content(c)) {
-			/* Explicit video hint — not a game */
-			is_game = 0;
 		} else {
-			/* No hints — check app-id against known non-game apps.
-			 * Default to game because most games (XWayland/Steam/Wine)
-			 * don't set content-type or tearing hints.  But exclude
-			 * browsers, video players, file managers, terminals, and
-			 * other common desktop apps that users fullscreen. */
 			const char *app = client_get_appid(c);
-			static const char *video_apps[] = {
-				"mpv", "vlc", "celluloid", "totem", "kodi",
-				"haruna", "smplayer", "dragon", "parole",
-				"io.github.celluloid_player.Celluloid",
-				"org.videolan.VLC", "io.mpv.Mpv",
-				"org.gnome.Totem", "tv.kodi.Kodi",
-				NULL
-			};
-			static const char *desktop_apps[] = {
-				/* File managers */
-				"thunar", "nautilus", "dolphin", "nemo", "pcmanfm",
-				"org.gnome.Nautilus", "org.kde.dolphin",
-				/* Terminals */
-				"alacritty", "foot", "kitty", "wezterm",
-				"org.gnome.Terminal", "org.kde.konsole",
-				"gnome-terminal", "konsole", "xterm",
-				/* Document / image viewers */
-				"evince", "okular", "eog", "loupe", "feh",
-				"org.gnome.Evince", "org.kde.okular",
-				/* Office */
-				"libreoffice", "soffice",
-				/* Editors */
-				"code", "Code", "codium", "gedit", "kate",
-				/* Settings / system */
-				"pavucontrol", "nm-connection-editor",
-				"gnome-control-center", "systemsettings",
-				"blueman-manager",
-				NULL
-			};
-			is_game = 1; /* default: fullscreen = game */
-			/* Check browsers first (dedicated function) */
-			if (is_browser_client(c)) {
-				is_game = 0;
-			} else if (app) {
-				for (int i = 0; video_apps[i]; i++) {
-					if (strcasecmp(app, video_apps[i]) == 0 ||
-					    strcasestr(app, video_apps[i])) {
-						is_game = 0;
-						break;
-					}
-				}
-				if (is_game) {
-					for (int i = 0; desktop_apps[i]; i++) {
-						if (strcasecmp(app, desktop_apps[i]) == 0 ||
-						    strcasestr(app, desktop_apps[i])) {
-							is_game = 0;
-							break;
-						}
-					}
-				}
-			}
+			pid_t pid = client_get_pid(c);
+
+			/* App-ID whitelist: Steam/Proton games */
+			if (app && strncasecmp(app, "steam_app_", 10) == 0)
+				is_game = 1;
+			/* Known game apps / emulators */
+			else if (app && is_known_game_app(app))
+				is_game = 1;
+			/* Process-based: Wine/Proton executable */
+			else if (pid > 1 && is_wine_or_proton_process(pid))
+				is_game = 1;
+			/* Process-based: child of a game launcher */
+			else if (pid > 1 && is_game_launcher_child(pid))
+				is_game = 1;
 		}
 	}
 
@@ -2722,10 +2691,62 @@ is_steam_popup(Client *c)
 	return 0;
 }
 
-int
-is_steam_child_process(pid_t pid)
+static int
+is_wine_or_proton_process(pid_t pid)
 {
-	char path[64], buf[512], comm[64];
+	char path[64], target[512];
+	ssize_t len;
+
+	if (pid <= 1)
+		return 0;
+
+	snprintf(path, sizeof(path), "/proc/%d/exe", pid);
+	len = readlink(path, target, sizeof(target) - 1);
+	if (len <= 0)
+		return 0;
+	target[len] = '\0';
+
+	if (strstr(target, "wine-preloader") ||
+	    strstr(target, "wine64-preloader") ||
+	    strstr(target, "wineserver") ||
+	    strstr(target, "/proton") ||
+	    strstr(target, "/wine"))
+		return 1;
+
+	return 0;
+}
+
+static int
+is_known_game_app(const char *app)
+{
+	static const char *game_apps[] = {
+		/* Emulators */
+		"retroarch", "dolphin-emu", "pcsx2", "rpcs3", "cemu",
+		"yuzu", "desmume", "mgba", "ppsspp", "citra",
+		"org.libretro.RetroArch", "org.DolphinEmu.dolphin-emu",
+		/* Game launchers / wrappers */
+		"gamescope", "heroic", "lutris", "bottles",
+		"net.lutris.Lutris", "com.heroicgameslauncher.hgl",
+		/* Known games */
+		"minecraft", "Minecraft",
+		"com.mojang.minecraft",
+		NULL
+	};
+
+	if (!app)
+		return 0;
+
+	for (int i = 0; game_apps[i]; i++) {
+		if (strcasecmp(app, game_apps[i]) == 0)
+			return 1;
+	}
+	return 0;
+}
+
+int
+is_game_launcher_child(pid_t pid)
+{
+	char path[64], comm[64];
 	FILE *f;
 	pid_t ppid;
 	int depth = 0;
@@ -2744,8 +2765,12 @@ is_steam_child_process(pid_t pid)
 		}
 		fclose(f);
 
-		/* Check if parent is steam, steam.sh, or reaper (Steam's process manager) */
-		if (strcasestr(comm, "steam") || strcasestr(comm, "reaper"))
+		/* Check if parent is a known game launcher */
+		if (strcasestr(comm, "steam") ||
+		    strcasestr(comm, "reaper") ||
+		    strcasestr(comm, "lutris") ||
+		    strcasestr(comm, "heroic") ||
+		    strcasestr(comm, "bottles"))
 			return 1;
 
 		pid = ppid;
@@ -2776,7 +2801,7 @@ is_steam_game(Client *c)
 
 	/* Check if it's a child of Steam */
 	pid = client_get_pid(c);
-	if (pid > 1 && is_steam_child_process(pid)) {
+	if (pid > 1 && is_game_launcher_child(pid)) {
 		wlr_log(WLR_INFO, "Detected Steam game: app_id='%s', pid=%d",
 			app_id ? app_id : "(null)", pid);
 		return 1;
@@ -2810,19 +2835,34 @@ is_browser_client(Client *c)
 int
 looks_like_game(Client *c)
 {
+	const char *app;
+	pid_t pid;
+
 	if (!c)
 		return 0;
 
-	/* Check content-type protocol hint */
+	/* Protocol hints */
 	if (is_game_content(c))
 		return 1;
-
-	/* Check if it wants tearing (games often request this) */
 	if (client_wants_tearing(c))
 		return 1;
 
-	/* Check if it's a Steam game */
+	/* Check if it's a Steam game (app-id or process ancestry) */
 	if (is_steam_game(c))
+		return 1;
+
+	/* App-ID whitelist */
+	app = client_get_appid(c);
+	if (app && strncasecmp(app, "steam_app_", 10) == 0)
+		return 1;
+	if (app && is_known_game_app(app))
+		return 1;
+
+	/* Process-based detection */
+	pid = client_get_pid(c);
+	if (pid > 1 && is_wine_or_proton_process(pid))
+		return 1;
+	if (pid > 1 && is_game_launcher_child(pid))
 		return 1;
 
 	return 0;
