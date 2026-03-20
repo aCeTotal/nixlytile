@@ -3310,14 +3310,6 @@ detect_gpus(void)
 			 * buffers, bypassing broken GBM allocation.  No need to
 			 * force software cursors anymore. */
 
-			/* Nvidia's DRM format modifier implementation is incomplete —
-			 * many modifiers reported as "supported" actually cause buffer
-			 * allocation and import failures.  Disabling modifiers forces
-			 * the simpler linear/implicit allocation path that works
-			 * reliably.  This fixes the majority of Nvidia rendering
-			 * issues including Xwayland black windows and crashes. */
-			setenv("WLR_DRM_NO_MODIFIERS", "1", 0);
-
 			/* GBM_BACKEND=nvidia-drm: only set when the compositor itself
 			 * renders on Nvidia (single-GPU mode).  In hybrid mode the
 			 * compositor renders on the Intel iGPU — setting GBM_BACKEND
@@ -3354,6 +3346,14 @@ detect_gpus(void)
 								"Wayland/Xwayland support.", nv_ver);
 							/* Older Nvidia drivers have atomic modesetting bugs */
 							setenv("WLR_DRM_NO_ATOMIC", "1", 0);
+							/* Old drivers have incomplete modifier support —
+							 * many modifiers reported as "supported" cause
+							 * buffer allocation/import failures.  Driver 555+
+							 * handles modifiers correctly and NEEDS them:
+							 * without modifier negotiation GBM allocates tiled
+							 * buffers but reports modifier=INVALID, causing
+							 * KMS import to fail on all paths. */
+							setenv("WLR_DRM_NO_MODIFIERS", "1", 0);
 						}
 					}
 				} else if (strcmp(dgpu->driver, "nvidia") == 0) {
@@ -3734,8 +3734,10 @@ set_dgpu_env(void)
 
 		wlr_log(WLR_INFO,
 			"NVIDIA: compositor env set — GBM_BACKEND=nvidia-drm, "
-			"WLR_DRM_NO_MODIFIERS=1, "
-			"__GLX_VENDOR_LIBRARY_NAME=nvidia (CPU cursor buffer for HW cursor)");
+			"__GLX_VENDOR_LIBRARY_NAME=nvidia (CPU cursor buffer for HW cursor)"
+			"%s",
+			dgpu->driver_version > 0 && dgpu->driver_version < 555
+				? ", WLR_DRM_NO_MODIFIERS=1 (old driver)" : "");
 
 		break;
 
