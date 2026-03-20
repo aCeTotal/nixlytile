@@ -215,6 +215,29 @@ static bool init_mgpu_renderer(struct wlr_drm_backend *drm) {
 	}
 
 	sanitize_mgpu_modifiers(&drm->mgpu_formats);
+
+	/* Also ensure LINEAR is in the secondary GPU's plane format sets.
+	 * drm_plane_pick_render_format() intersects plane modifiers with
+	 * renderer (primary GPU) modifiers.  Nvidia planes report only
+	 * DRM_FORMAT_MOD_INVALID ("any modifier is fine") but the primary
+	 * GPU renderer advertises LINEAR and explicit modifiers — never
+	 * INVALID.  The strict intersection comes up empty without an
+	 * explicit LINEAR in the plane's modifier list → no swapchain
+	 * can be allocated → permanent black screen on the Nvidia output. */
+	for (uint32_t plane_idx = 0; plane_idx < drm->num_planes; plane_idx++) {
+		struct wlr_drm_plane *plane = &drm->planes[plane_idx];
+		for (size_t fmt_idx = 0; fmt_idx < plane->formats.len; fmt_idx++) {
+			struct wlr_drm_format *fmt = &plane->formats.formats[fmt_idx];
+			for (size_t m = 0; m < fmt->len; m++) {
+				if (fmt->modifiers[m] == DRM_FORMAT_MOD_INVALID) {
+					wlr_drm_format_set_add(&plane->formats,
+						fmt->format, DRM_FORMAT_MOD_LINEAR);
+					break;
+				}
+			}
+		}
+	}
+
 	drm->backend.features.timeline = drm->backend.features.timeline &&
 		drm->mgpu_renderer.wlr_rend->features.timeline;
 	return true;
