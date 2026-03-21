@@ -3032,43 +3032,59 @@ setup(void)
 
 	/* Initialize CPU cursor buffer for Nvidia HW cursor plane.
 	 * NVIDIA's proprietary driver doesn't support DRM_IOCTL_MODE_CREATE_DUMB
-	 * on its render node, so prefer the iGPU's render node for dumb buffer
-	 * allocation.  The DMA-BUF export works cross-GPU. */
+	 * on its render node, so prefer the iGPU for dumb buffer allocation.
+	 * The DMA-BUF export works cross-GPU.
+	 *
+	 * Prefer the iGPU card (primary) node over the render node —
+	 * DRM_IOCTL_MODE_CREATE_DUMB requires DRM_AUTH which the render
+	 * node may not grant (EPERM on Linux 6.x with some drivers). */
 	if (discrete_gpu_idx >= 0 &&
 	    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA) {
 		int cdrm_fd = -1;
 		int cdrm_owns = 0;
 		uint64_t cursor_w = 64, cursor_h = 64;
 
-		/* Try iGPU render node first (Intel/AMD always support dumb buffers) */
+		/* Try iGPU card (primary) node first — compositor has DRM
+		 * master for it, so CREATE_DUMB always succeeds. */
 		if (integrated_gpu_idx >= 0 &&
+		    detected_gpus[integrated_gpu_idx].card_path[0]) {
+			cdrm_fd = open(detected_gpus[integrated_gpu_idx].card_path,
+				O_RDWR | O_CLOEXEC);
+			if (cdrm_fd >= 0) {
+				cdrm_owns = 1;
+				wlr_log(WLR_INFO,
+					"NVIDIA: using iGPU card node %s for cursor dumb buffer",
+					detected_gpus[integrated_gpu_idx].card_path);
+			}
+		}
+
+		/* Try iGPU render node as fallback */
+		if (cdrm_fd < 0 && integrated_gpu_idx >= 0 &&
 		    detected_gpus[integrated_gpu_idx].render_path[0]) {
 			cdrm_fd = open(detected_gpus[integrated_gpu_idx].render_path,
 				O_RDWR | O_CLOEXEC);
 			if (cdrm_fd >= 0) {
 				cdrm_owns = 1;
 				wlr_log(WLR_INFO,
-					"NVIDIA: using iGPU render node %s for cursor dumb buffer",
+					"NVIDIA: trying iGPU render node %s for cursor dumb buffer",
 					detected_gpus[integrated_gpu_idx].render_path);
 			}
 		}
 
 		/* Fall back to NVIDIA primary node (card path) — newer NVIDIA
-		 * drivers (545+) support dumb buffers on the primary DRM node.
-		 * The render node never supports them with the proprietary driver. */
+		 * drivers (545+) support dumb buffers on the primary DRM node. */
 		if (cdrm_fd < 0 && detected_gpus[discrete_gpu_idx].card_path[0]) {
 			cdrm_fd = open(detected_gpus[discrete_gpu_idx].card_path,
 				O_RDWR | O_CLOEXEC);
 			if (cdrm_fd >= 0) {
 				cdrm_owns = 1;
 				wlr_log(WLR_INFO,
-					"NVIDIA: trying primary node %s for cursor dumb buffer",
+					"NVIDIA: trying dGPU primary node %s for cursor dumb buffer",
 					detected_gpus[discrete_gpu_idx].card_path);
 			}
 		}
 
-		/* Last resort: renderer FD (render node — unlikely to work for
-		 * dumb buffers on NVIDIA, but keeps backwards compatibility) */
+		/* Last resort: renderer FD (render node) */
 		if (cdrm_fd < 0) {
 			cdrm_fd = wlr_renderer_get_drm_fd(drw);
 			cdrm_owns = 0;
@@ -3090,15 +3106,17 @@ setup(void)
 			} else {
 				if (cdrm_owns)
 					close(cdrm_fd);
+				/* Don't set WLR_NO_HARDWARE_CURSORS globally —
+				 * wlroots handles per-output fallback.  Non-Nvidia
+				 * outputs (Intel/AMD) still get native HW cursor. */
 				wlr_log(WLR_ERROR,
-					"NVIDIA: CPU cursor buffer creation failed, "
-					"falling back to software cursor");
-				setenv("WLR_NO_HARDWARE_CURSORS", "1", 1);
+					"NVIDIA: CPU cursor buffer creation failed; "
+					"non-Nvidia outputs still use HW cursor");
 			}
 		} else {
 			wlr_log(WLR_ERROR,
-				"NVIDIA: no DRM fd, falling back to software cursor");
-			setenv("WLR_NO_HARDWARE_CURSORS", "1", 1);
+				"NVIDIA: no DRM fd for cursor buffer; "
+				"non-Nvidia outputs still use HW cursor");
 		}
 	}
 

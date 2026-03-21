@@ -430,6 +430,24 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 					 * with "Unexpected capabilities but not setuid". */
 					prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
 
+					/* Close all inherited compositor FDs (DRM, PipeWire,
+					 * epoll, logs, etc.) early — before any launch path.
+					 * The old fork_detach() only closed the event_loop FD;
+					 * this closes everything, preventing FD leaks to
+					 * sandboxed apps (bwrap/Steam, OnlyOffice, etc.).
+					 * All code below only needs env vars and filesystem
+					 * paths, not inherited FDs. */
+					syscall(SYS_close_range, 3, ~0U, 0);
+
+					/* Force the login shell (sh -lc) to re-source
+					 * /etc/set-environment, which provides the full
+					 * NixOS session env (QT_QPA_PLATFORM, XDG_DATA_DIRS,
+					 * LD_LIBRARY_PATH, etc.).  The compositor inherits
+					 * these from the display manager, but they may be
+					 * stale or incomplete — re-sourcing guarantees
+					 * launched apps see the same env as a login shell. */
+					unsetenv("__NIXOS_SET_ENVIRONMENT_DONE");
+
 					ensure_nix_paths();
 					if (desktop_entries[idx].prefers_dgpu || should_use_dgpu(cmd_str))
 						set_dgpu_env();
@@ -458,22 +476,32 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 						int dbg = open("/tmp/nixlylogging/spawn.log",
 							O_WRONLY | O_CREAT | O_APPEND, 0644);
 						if (dbg >= 0) {
-							dprintf(dbg, "modal launch: sh -lc '%s' PATH=%.200s\n",
+							dprintf(dbg, "modal launch: '%s'\n"
+								"  WAYLAND_DISPLAY=%s DISPLAY=%s\n"
+								"  XDG_RUNTIME_DIR=%s QT_QPA_PLATFORM=%s\n"
+								"  PATH=%.300s\n",
 								cmd_str,
+								getenv("WAYLAND_DISPLAY") ? getenv("WAYLAND_DISPLAY") : "(null)",
+								getenv("DISPLAY") ? getenv("DISPLAY") : "(null)",
+								getenv("XDG_RUNTIME_DIR") ? getenv("XDG_RUNTIME_DIR") : "(null)",
+								getenv("QT_QPA_PLATFORM") ? getenv("QT_QPA_PLATFORM") : "(null)",
 								getenv("PATH") ? getenv("PATH") : "(null)");
 							close(dbg);
 						}
 					}
 
-					/* Close all inherited compositor FDs (DRM, PipeWire, logs, etc.)
-					 * before exec — prevents FD leaks that confuse sandboxed apps
-					 * (e.g. bwrap-wrapped OnlyOffice, Electron apps). */
-					syscall(SYS_close_range, 3, ~0U, 0);
-
-					/* Use login shell so NixOS /etc/profile is sourced,
-					 * providing the full session environment (XDG_DATA_DIRS,
-					 * QT_PLUGIN_PATH, etc.) that apps need. */
-					execl("/bin/sh", "/bin/sh", "-lc", cmd_str, NULL);
+					/* Wrap command to capture stderr and exit code
+					 * for debugging launch failures. */
+					{
+						char wrapper[1024];
+						snprintf(wrapper, sizeof(wrapper),
+							"exec 2>>/tmp/nixlylogging/modal_child.log; "
+							"echo \"=== $(date +%%H:%%M:%%S) %s ===\" >&2; "
+							"%s; "
+							"echo \"--- exit=$? ---\" >&2",
+							cmd_str, cmd_str);
+						execl("/bin/sh", "/bin/sh", "-lc", wrapper, NULL);
+					}
 					{
 						int dbg = open("/tmp/nixlylogging/spawn.log",
 							O_WRONLY | O_CREAT | O_APPEND, 0644);
