@@ -1226,6 +1226,7 @@ nixly_cursor_set_xcursor(const char *name)
 		return;
 	}
 
+	wlr_xcursor_manager_load(cursor_mgr, 1);
 	xcur = wlr_xcursor_manager_get_xcursor(cursor_mgr, name, 1);
 	if (!xcur || xcur->image_count == 0) {
 		wlr_cursor_set_xcursor(cursor, cursor_mgr, name);
@@ -1278,9 +1279,33 @@ nixly_cursor_set_client_surface(struct wlr_surface *surface, int hx, int hy)
 	if (!wlr_buffer_begin_data_ptr_access(&surface->buffer->base,
 			WLR_BUFFER_DATA_PTR_ACCESS_READ,
 			&src_data, &src_format, &src_stride)) {
-		/* DMA-BUF client cursor — can't CPU-copy, fall through */
-		wlr_cursor_set_surface(cursor, surface, hx, hy);
-		return;
+		/* DMA-BUF client cursor — can't CPU-copy, try GPU readback */
+		struct wlr_texture *tex = wlr_texture_from_buffer(drw,
+			&surface->buffer->base);
+		if (!tex) {
+			wlr_cursor_set_surface(cursor, surface, hx, hy);
+			return;
+		}
+
+		copy_w = MIN((uint32_t)tex->width, cpu_cursor_buf->width);
+		copy_h = MIN((uint32_t)tex->height, cpu_cursor_buf->height);
+
+		memset(cpu_cursor_buf->map, 0, cpu_cursor_buf->map_size);
+
+		if (!wlr_texture_read_pixels(tex,
+				&(struct wlr_texture_read_pixels_options){
+			.data = cpu_cursor_buf->map,
+			.format = DRM_FORMAT_ARGB8888,
+			.stride = cpu_cursor_buf->stride,
+			.src_box = { .width = copy_w, .height = copy_h },
+		})) {
+			wlr_texture_destroy(tex);
+			wlr_cursor_set_surface(cursor, surface, hx, hy);
+			return;
+		}
+
+		wlr_texture_destroy(tex);
+		goto set_cursor;
 	}
 
 	/* Clear buffer to transparent */
@@ -1300,6 +1325,7 @@ nixly_cursor_set_client_surface(struct wlr_surface *surface, int hx, int hy)
 
 	wlr_buffer_end_data_ptr_access(&surface->buffer->base);
 
+set_cursor:
 	wlr_cursor_set_buffer(cursor, &cpu_cursor_buf->base,
 		(int32_t)hx, (int32_t)hy, 1.0f);
 }

@@ -229,8 +229,12 @@ static struct wlr_buffer *render_cursor_buffer(struct wlr_output_cursor *cursor)
 			output->cursor_swapchain->width != width ||
 			output->cursor_swapchain->height != height) {
 		struct wlr_drm_format format = {0};
+		if (output->cursor_format_failed) {
+			return NULL;
+		}
 		if (!output_pick_cursor_format(output, &format)) {
 			wlr_log(WLR_DEBUG, "Failed to pick cursor format");
+			output->cursor_format_failed = true;
 			return NULL;
 		}
 
@@ -314,7 +318,7 @@ static bool output_cursor_attempt_hardware(struct wlr_output_cursor *cursor) {
 			// (ARGB8888 LINEAR dumb buffer).
 			buffer = wlr_buffer_lock(cursor->source_buffer);
 			buffer_from_source = true;
-			wlr_log(WLR_INFO, "Cursor render failed, trying source "
+			wlr_log(WLR_DEBUG, "Cursor render failed, trying source "
 				"buffer directly (%dx%d)",
 				buffer->width, buffer->height);
 		}

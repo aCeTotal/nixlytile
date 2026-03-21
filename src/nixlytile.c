@@ -3816,6 +3816,7 @@ xwaylandready(struct wl_listener *listener, void *data)
 	wlr_xwayland_set_seat(xwayland, seat);
 
 	/* Set the default XWayland cursor to match the rest of dwl. */
+	wlr_xcursor_manager_load(cursor_mgr, 1);
 	if ((xcursor = wlr_xcursor_manager_get_xcursor(cursor_mgr, "default", 1)))
 		wlr_xwayland_set_cursor(xwayland,
 				wlr_xcursor_image_get_buffer(xcursor->images[0]),
