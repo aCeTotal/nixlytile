@@ -3473,24 +3473,23 @@ spawn(const Arg *arg)
 			/* Default keybindings: arg->v is char** array */
 			char **argv = (char **)arg->v;
 			if (argv[0] && argv[0][0] != '\0') {
-				if (should_use_dgpu(argv[0]))
-					set_dgpu_env();
 				if (is_steam_cmd(argv[0])) {
-					set_steam_env();
-					/* Prefer nixly_steam wrapper; fall back to plain steam */
+					/* Steam runs inside bwrap FHS sandbox; skip
+					 * dGPU env to avoid GL/EGL failures inside it. */
 					const char *steam_bin = "steam";
 					if (access("/etc/profiles/per-user/total/bin/nixly_steam", X_OK) == 0)
 						steam_bin = "nixly_steam";
 					else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
 						steam_bin = "nixly_steam";
-					/* Launch Steam - Big Picture in HTPC mode, normal otherwise */
 					if (htpc_mode_active) {
-						execlp(steam_bin, steam_bin, "-bigpicture", "-cef-force-gpu", "-cef-disable-sandbox", "steam://open/games", (char *)NULL);
+						execlp(steam_bin, steam_bin, "-bigpicture", "steam://open/games", (char *)NULL);
 					} else {
-						execlp(steam_bin, steam_bin, "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
+						execlp(steam_bin, steam_bin, (char *)NULL);
 					}
 					/* execlp failed — fall through to execvp below */
 				}
+				if (should_use_dgpu(argv[0]))
+					set_dgpu_env();
 				/* Debug: log spawn attempt to /tmp/nixlylogging/ */
 				{
 					int dbg = open("/tmp/nixlylogging/spawn.log",
@@ -3523,27 +3522,25 @@ spawn(const Arg *arg)
 		}
 
 		/* Runtime config: arg->v is a string, execute via shell */
-		if (should_use_dgpu(cmd))
-			set_dgpu_env();
 		if (is_steam_cmd(cmd)) {
-			set_steam_env();
-			/* Prefer nixly_steam wrapper; fall back to plain steam */
+			/* Steam runs inside bwrap FHS sandbox; skip
+			 * dGPU env to avoid GL/EGL failures inside it. */
 			const char *steam_bin = "steam";
 			if (access("/etc/profiles/per-user/total/bin/nixly_steam", X_OK) == 0)
 				steam_bin = "nixly_steam";
 			else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
 				steam_bin = "nixly_steam";
-			/* If cmd is just "steam" or starts with "steam ", launch with GPU flags */
 			if (strcmp(cmd, "steam") == 0 || strcmp(cmd, "nixly_steam") == 0) {
-				/* Launch Steam - Big Picture in HTPC mode, normal otherwise */
 				if (htpc_mode_active) {
-					execlp(steam_bin, steam_bin, "-bigpicture", "-cef-force-gpu", "-cef-disable-sandbox", "steam://open/games", (char *)NULL);
+					execlp(steam_bin, steam_bin, "-bigpicture", "steam://open/games", (char *)NULL);
 				} else {
-					execlp(steam_bin, steam_bin, "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
+					execlp(steam_bin, steam_bin, (char *)NULL);
 				}
 				/* execlp failed — fall through to execl below */
 			}
 		}
+		if (should_use_dgpu(cmd))
+			set_dgpu_env();
 		execl("/bin/sh", "sh", "-c", cmd, NULL);
 		_exit(127);
 	}

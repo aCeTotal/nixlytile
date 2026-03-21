@@ -143,24 +143,23 @@ focus_or_launch_app(const char *app_id, const char *launch_cmd)
 			dup2(STDERR_FILENO, STDOUT_FILENO);
 			setsid();
 			fork_detach();
-			if (should_use_dgpu(launch_cmd))
-				set_dgpu_env();
 			if (is_steam_cmd(launch_cmd)) {
-				set_steam_env();
-				/* Prefer nixly_steam wrapper; fall back to plain steam */
+				/* Steam runs inside bwrap FHS sandbox; skip
+				 * dGPU env to avoid GL/EGL failures inside it. */
 				const char *steam_bin = "steam";
 				if (access("/etc/profiles/per-user/total/bin/nixly_steam", X_OK) == 0)
 					steam_bin = "nixly_steam";
 				else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
 					steam_bin = "nixly_steam";
-				/* Launch Steam - Big Picture in HTPC mode, normal otherwise */
 				if (htpc_mode_active) {
-					execlp(steam_bin, steam_bin, "-bigpicture", "-cef-force-gpu", "-cef-disable-sandbox", "steam://open/games", (char *)NULL);
+					execlp(steam_bin, steam_bin, "-bigpicture", "steam://open/games", (char *)NULL);
 				} else {
-					execlp(steam_bin, steam_bin, "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
+					execlp(steam_bin, steam_bin, (char *)NULL);
 				}
 				_exit(1);
 			}
+			if (should_use_dgpu(launch_cmd))
+				set_dgpu_env();
 			execl("/bin/sh", "sh", "-c", launch_cmd, NULL);
 			_exit(127);
 		}
@@ -2622,17 +2621,16 @@ steam_launch_bigpicture(void)
 	if (pid == 0) {
 		setsid();
 		fork_detach();
-		set_dgpu_env();
-		set_steam_env();
-		/* Prefer nixly_steam wrapper; fall back to plain steam */
+		/* Steam runs inside bwrap FHS sandbox; skip dGPU env
+		 * to avoid GL/EGL failures inside the sandbox. */
 		{
 			const char *steam_bin = "steam";
 			if (access("/etc/profiles/per-user/total/bin/nixly_steam", X_OK) == 0)
 				steam_bin = "nixly_steam";
 			else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
 				steam_bin = "nixly_steam";
-			execlp(steam_bin, steam_bin, "-bigpicture", "-cef-force-gpu",
-				"-cef-disable-sandbox", "steam://open/games", (char *)NULL);
+			execlp(steam_bin, steam_bin, "-bigpicture",
+				"steam://open/games", (char *)NULL);
 		}
 		_exit(127);
 	}

@@ -449,28 +449,28 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 					unsetenv("__NIXOS_SET_ENVIRONMENT_DONE");
 
 					ensure_nix_paths();
-					if (desktop_entries[idx].prefers_dgpu || should_use_dgpu(cmd_str))
-						set_dgpu_env();
 					if (is_steam_cmd(cmd_str)) {
-						set_steam_env();
-						/* Prefer nixly_steam wrapper (sets PRESSURE_VESSEL_BWRAP,
-						 * auto-configures Nixly_Proton); fall back to plain steam. */
+						/* Steam runs inside a bwrap FHS sandbox;
+						 * NVIDIA PRIME offload vars (set_dgpu_env)
+						 * and CEF GPU-force flags can cause GL/EGL
+						 * failures inside the sandbox.  Skip them
+						 * to match plain "steam" from a terminal.
+						 * Games get dGPU env via Steam's own launch
+						 * path (gaming.c / set_steam_env there). */
 						const char *steam_bin = "steam";
 						if (access("/etc/profiles/per-user/total/bin/nixly_steam", X_OK) == 0)
 							steam_bin = "nixly_steam";
 						else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
 							steam_bin = "nixly_steam";
-						/* Build command string with args — falls through to
-						 * the general /bin/sh -lc launch path below, which
-						 * gives us stderr logging in modal_child.log. */
 						if (htpc_mode_active)
 							snprintf(cmd_str, sizeof(cmd_str),
-								"%s -bigpicture -cef-force-gpu -cef-disable-sandbox steam://open/games",
+								"%s -bigpicture steam://open/games",
 								steam_bin);
 						else
 							snprintf(cmd_str, sizeof(cmd_str),
-								"%s -cef-force-gpu -cef-disable-sandbox",
-								steam_bin);
+								"%s", steam_bin);
+					} else if (desktop_entries[idx].prefers_dgpu || should_use_dgpu(cmd_str)) {
+						set_dgpu_env();
 					}
 
 					/* NixOS: prefer per-user profile wrapper over raw
