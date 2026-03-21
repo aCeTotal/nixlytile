@@ -495,16 +495,43 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 						}
 					}
 
+					/* NixOS: sh -lc re-sources /etc/set-environment
+					 * which overrides QT_QPA_PLATFORM=wayland, clobbering
+					 * the xcb value that set_dgpu_env() set to prevent
+					 * Qt6 SIGSEGV with NVIDIA PRIME.  Build an export
+					 * prefix that re-applies critical overrides AFTER
+					 * the login profile has been sourced. */
+					char env_prefix[512] = {0};
+					{
+						int eoff = 0;
+						const char *qt_plat = getenv("QT_QPA_PLATFORM");
+						const char *gdk_be = getenv("GDK_BACKEND");
+						if (qt_plat && strcmp(qt_plat, "wayland") != 0) {
+							int n = snprintf(env_prefix + eoff,
+								sizeof(env_prefix) - eoff,
+								"export QT_QPA_PLATFORM=%s; ", qt_plat);
+							if (n > 0 && n < (int)(sizeof(env_prefix) - eoff))
+								eoff += n;
+						}
+						if (gdk_be) {
+							int n = snprintf(env_prefix + eoff,
+								sizeof(env_prefix) - eoff,
+								"export GDK_BACKEND=%s; ", gdk_be);
+							if (n > 0 && n < (int)(sizeof(env_prefix) - eoff))
+								eoff += n;
+						}
+					}
+
 					/* Wrap command to capture stderr and exit code
 					 * for debugging launch failures. */
 					{
-						char wrapper[1024];
+						char wrapper[2048];
 						snprintf(wrapper, sizeof(wrapper),
 							"exec 2>>/tmp/nixlylogging/modal_child.log; "
 							"echo \"=== $(date +%%H:%%M:%%S) %s ===\" >&2; "
-							"%s; "
+							"%s%s; "
 							"echo \"--- exit=$? ---\" >&2",
-							cmd_str, cmd_str);
+							cmd_str, env_prefix, cmd_str);
 						execl("/bin/sh", "/bin/sh", "-lc", wrapper, NULL);
 					}
 					{
