@@ -147,11 +147,17 @@ focus_or_launch_app(const char *app_id, const char *launch_cmd)
 				set_dgpu_env();
 			if (is_steam_cmd(launch_cmd)) {
 				set_steam_env();
+				/* Prefer nixly_steam wrapper; fall back to plain steam */
+				const char *steam_bin = "steam";
+				if (access("/etc/profiles/per-user/total/bin/nixly_steam", X_OK) == 0)
+					steam_bin = "nixly_steam";
+				else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
+					steam_bin = "nixly_steam";
 				/* Launch Steam - Big Picture in HTPC mode, normal otherwise */
 				if (htpc_mode_active) {
-					execlp("steam", "steam", "-bigpicture", "-cef-force-gpu", "-cef-disable-sandbox", "steam://open/games", (char *)NULL);
+					execlp(steam_bin, steam_bin, "-bigpicture", "-cef-force-gpu", "-cef-disable-sandbox", "steam://open/games", (char *)NULL);
 				} else {
-					execlp("steam", "steam", "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
+					execlp(steam_bin, steam_bin, "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
 				}
 				_exit(1);
 			}
@@ -2615,10 +2621,19 @@ steam_launch_bigpicture(void)
 	pid = fork();
 	if (pid == 0) {
 		setsid();
+		fork_detach();
 		set_dgpu_env();
 		set_steam_env();
-		execlp("steam", "steam", "-bigpicture", "-cef-force-gpu",
-			"-cef-disable-sandbox", "steam://open/games", (char *)NULL);
+		/* Prefer nixly_steam wrapper; fall back to plain steam */
+		{
+			const char *steam_bin = "steam";
+			if (access("/etc/profiles/per-user/total/bin/nixly_steam", X_OK) == 0)
+				steam_bin = "nixly_steam";
+			else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
+				steam_bin = "nixly_steam";
+			execlp(steam_bin, steam_bin, "-bigpicture", "-cef-force-gpu",
+				"-cef-disable-sandbox", "steam://open/games", (char *)NULL);
+		}
 		_exit(127);
 	}
 }

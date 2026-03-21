@@ -46,6 +46,7 @@ pc_gaming_cache_update_start(void)
 	pid = fork();
 	if (pid == 0) {
 		setsid();
+		fork_detach();
 		/* Update PC gaming cache in background with low priority - scans Steam and fetches game info */
 		execlp("nice", "nice", "-n", "19", "ionice", "-c", "3", "sh", "-c",
 			"home=\"$HOME\"\n"
@@ -1684,6 +1685,7 @@ pc_gaming_launch_game(Monitor *m)
 	pid = fork();
 	if (pid == 0) {
 		setsid();
+		fork_detach();
 		/* Set discrete GPU environment for gaming */
 		set_dgpu_env();
 
@@ -1980,6 +1982,7 @@ pc_gaming_install_popup_handle_button(Monitor *m, int button, int value)
 				pid_t pid = fork();
 				if (pid == 0) {
 					setsid();
+					fork_detach();
 					execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
 					_exit(127);
 				}
@@ -2572,6 +2575,7 @@ retro_gaming_launch_game(Monitor *m)
 	if (pid == 0) {
 		dup2(STDERR_FILENO, STDOUT_FILENO);
 		setsid();
+		fork_detach();
 		/* Use dGPU for N64/GameCube/Wii emulators */
 		if (console == RETRO_N64 || console == RETRO_GAMECUBE || console == RETRO_WII) {
 			if (should_use_dgpu(cmd))

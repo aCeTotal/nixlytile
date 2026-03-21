@@ -3444,11 +3444,17 @@ spawn(const Arg *arg)
 					set_dgpu_env();
 				if (is_steam_cmd(argv[0])) {
 					set_steam_env();
+					/* Prefer nixly_steam wrapper; fall back to plain steam */
+					const char *steam_bin = "steam";
+					if (access("/etc/profiles/per-user/total/bin/nixly_steam", X_OK) == 0)
+						steam_bin = "nixly_steam";
+					else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
+						steam_bin = "nixly_steam";
 					/* Launch Steam - Big Picture in HTPC mode, normal otherwise */
 					if (htpc_mode_active) {
-						execlp("steam", "steam", "-bigpicture", "-cef-force-gpu", "-cef-disable-sandbox", "steam://open/games", (char *)NULL);
+						execlp(steam_bin, steam_bin, "-bigpicture", "-cef-force-gpu", "-cef-disable-sandbox", "steam://open/games", (char *)NULL);
 					} else {
-						execlp("steam", "steam", "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
+						execlp(steam_bin, steam_bin, "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
 					}
 					/* execlp failed — fall through to execvp below */
 				}
@@ -3488,13 +3494,19 @@ spawn(const Arg *arg)
 			set_dgpu_env();
 		if (is_steam_cmd(cmd)) {
 			set_steam_env();
+			/* Prefer nixly_steam wrapper; fall back to plain steam */
+			const char *steam_bin = "steam";
+			if (access("/etc/profiles/per-user/total/bin/nixly_steam", X_OK) == 0)
+				steam_bin = "nixly_steam";
+			else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
+				steam_bin = "nixly_steam";
 			/* If cmd is just "steam" or starts with "steam ", launch with GPU flags */
-			if (strcmp(cmd, "steam") == 0) {
+			if (strcmp(cmd, "steam") == 0 || strcmp(cmd, "nixly_steam") == 0) {
 				/* Launch Steam - Big Picture in HTPC mode, normal otherwise */
 				if (htpc_mode_active) {
-					execlp("steam", "steam", "-bigpicture", "-cef-force-gpu", "-cef-disable-sandbox", "steam://open/games", (char *)NULL);
+					execlp(steam_bin, steam_bin, "-bigpicture", "-cef-force-gpu", "-cef-disable-sandbox", "steam://open/games", (char *)NULL);
 				} else {
-					execlp("steam", "steam", "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
+					execlp(steam_bin, steam_bin, "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
 				}
 				/* execlp failed — fall through to execl below */
 			}

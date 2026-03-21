@@ -265,6 +265,8 @@ modal_file_search_clear_results(Monitor *m)
 	mo->file_search_fallback = 0;
 }
 
+static void resolve_nix_store_exec(char *cmd, size_t cmd_size);
+
 int
 ci_contains(const char *hay, const char *needle)
 {
@@ -404,32 +406,74 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 				/* Launch with dGPU if desktop entry prefers it or command matches dgpu_programs */
 				pid_t pid = fork();
 				if (pid == 0) {
+					int devnull;
+
+					/* Set up standard FDs: stdout→stderr, stdin→/dev/null */
 					dup2(STDERR_FILENO, STDOUT_FILENO);
+					devnull = open("/dev/null", O_RDONLY);
+					if (devnull >= 0) {
+						dup2(devnull, STDIN_FILENO);
+						if (devnull > STDERR_FILENO)
+							close(devnull);
+					}
+
 					setsid();
-					fork_detach();
+
+					/* Reset signals (fork_detach without just the epoll close) */
+					signal(SIGCHLD, SIG_DFL);
+					signal(SIGINT, SIG_DFL);
+					signal(SIGTERM, SIG_DFL);
+					signal(SIGPIPE, SIG_DFL);
+
+					/* Drop ambient capabilities inherited from compositor
+					 * so bwrap-based apps (Steam, OnlyOffice) don't fail
+					 * with "Unexpected capabilities but not setuid". */
+					prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
+
 					ensure_nix_paths();
 					if (desktop_entries[idx].prefers_dgpu || should_use_dgpu(cmd_str))
 						set_dgpu_env();
 					if (is_steam_cmd(cmd_str)) {
 						set_steam_env();
+						/* Prefer nixly_steam wrapper (sets PRESSURE_VESSEL_BWRAP,
+						 * auto-configures Nixly_Proton); fall back to plain steam. */
+						const char *steam_bin = "steam";
+						if (access("/etc/profiles/per-user/total/bin/nixly_steam", X_OK) == 0)
+							steam_bin = "nixly_steam";
+						else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
+							steam_bin = "nixly_steam";
 						/* Launch Steam - Big Picture in HTPC mode, normal otherwise */
 						if (htpc_mode_active) {
-							execlp("steam", "steam", "-bigpicture", "-cef-force-gpu", "-cef-disable-sandbox", "steam://open/games", (char *)NULL);
+							execlp(steam_bin, steam_bin, "-bigpicture", "-cef-force-gpu", "-cef-disable-sandbox", "steam://open/games", (char *)NULL);
 						} else {
-							execlp("steam", "steam", "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
+							execlp(steam_bin, steam_bin, "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
 						}
 					}
+
+					/* NixOS: prefer per-user profile wrapper over raw
+					 * store binary (e.g. bwrap for OnlyOffice). */
+					resolve_nix_store_exec(cmd_str, sizeof(cmd_str));
+
 					{
 						int dbg = open("/tmp/nixlylogging/spawn.log",
 							O_WRONLY | O_CREAT | O_APPEND, 0644);
 						if (dbg >= 0) {
-							dprintf(dbg, "modal launch: sh -c '%s' PATH=%.200s\n",
+							dprintf(dbg, "modal launch: sh -lc '%s' PATH=%.200s\n",
 								cmd_str,
 								getenv("PATH") ? getenv("PATH") : "(null)");
 							close(dbg);
 						}
 					}
-					execl("/bin/sh", "sh", "-c", cmd_str, NULL);
+
+					/* Close all inherited compositor FDs (DRM, PipeWire, logs, etc.)
+					 * before exec — prevents FD leaks that confuse sandboxed apps
+					 * (e.g. bwrap-wrapped OnlyOffice, Electron apps). */
+					syscall(SYS_close_range, 3, ~0U, 0);
+
+					/* Use login shell so NixOS /etc/profile is sourced,
+					 * providing the full session environment (XDG_DATA_DIRS,
+					 * QT_PLUGIN_PATH, etc.) that apps need. */
+					execl("/bin/sh", "/bin/sh", "-lc", cmd_str, NULL);
 					{
 						int dbg = open("/tmp/nixlylogging/spawn.log",
 							O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -1260,9 +1304,77 @@ strip_trailing_space(char *s)
 	}
 }
 
+/* NixOS wrapper resolution: desktop files often reference the raw binary
+ * in /nix/store/, but the per-user profile may have a properly wrapped
+ * version (bwrap sandbox for OnlyOffice, makeWrapper for FreeCAD, etc.).
+ * Replace the store path with the basename so the shell resolves it
+ * through PATH to the wrapper. Modifies cmd in-place. */
+static void
+resolve_nix_store_exec(char *cmd, size_t cmd_size)
+{
+	char *nix_start, *path_end, *last_slash;
+	char basename[256];
+	size_t blen;
+	const char *path_env;
+	char pathbuf[4096];
+	char probe[PATH_MAX];
+	char *saveptr = NULL;
+
+	nix_start = strstr(cmd, "/nix/store/");
+	if (!nix_start)
+		return;
+
+	/* Find end of the binary path token (space/tab or end of string) */
+	path_end = nix_start;
+	while (*path_end && *path_end != ' ' && *path_end != '\t')
+		path_end++;
+
+	/* Find basename (last component after /) */
+	last_slash = path_end;
+	while (last_slash > nix_start && *(last_slash - 1) != '/')
+		last_slash--;
+
+	if (last_slash <= nix_start || last_slash >= path_end)
+		return;
+
+	blen = (size_t)(path_end - last_slash);
+	if (blen == 0 || blen >= sizeof(basename))
+		return;
+
+	memcpy(basename, last_slash, blen);
+	basename[blen] = '\0';
+
+	/* Search PATH for the basename, but only in non-store profile dirs
+	 * (e.g. /etc/profiles/per-user/.../bin, /run/current-system/sw/bin,
+	 * ~/.nix-profile/bin) — these have the properly wrapped binaries. */
+	path_env = getenv("PATH");
+	if (!path_env || !*path_env)
+		return;
+
+	snprintf(pathbuf, sizeof(pathbuf), "%s", path_env);
+	for (char *dir = strtok_r(pathbuf, ":", &saveptr); dir;
+			dir = strtok_r(NULL, ":", &saveptr)) {
+		/* Skip /nix/store/ dirs — we want profile/system wrapper dirs */
+		if (!strncmp(dir, "/nix/store/", 11))
+			continue;
+		if (snprintf(probe, sizeof(probe), "%s/%s", dir, basename) >= (int)sizeof(probe))
+			continue;
+		if (access(probe, X_OK) == 0) {
+			/* Found wrapper — replace absolute store path with basename.
+			 * The login shell will resolve it through PATH. */
+			char new_cmd[512];
+			size_t prefix_len = (size_t)(nix_start - cmd);
+			snprintf(new_cmd, sizeof(new_cmd), "%.*s%s%s",
+				(int)prefix_len, cmd, basename, path_end);
+			snprintf(cmd, cmd_size, "%s", new_cmd);
+			return;
+		}
+	}
+}
+
 /* Check if the binary from an Exec=/TryExec= line exists.
- * Returns 1 if available (or relative command we can't check), 0 if
- * the absolute path doesn't exist (e.g. garbage-collected nix store path). */
+ * Absolute paths are checked directly; relative commands are searched in PATH.
+ * Filters out apps not available in the current NixOS generation. */
 static int
 exec_binary_available(const char *exec)
 {
@@ -1312,11 +1424,29 @@ exec_binary_available(const char *exec)
 	memcpy(binary, p, len);
 	binary[len] = '\0';
 
-	/* Only validate absolute paths — relative commands depend on runtime PATH */
+	/* Absolute path — check directly */
 	if (binary[0] == '/')
 		return access(binary, X_OK) == 0;
 
-	return 1;
+	/* Relative command — search PATH */
+	{
+		const char *path_env = getenv("PATH");
+		char pathbuf[4096];
+		char probe[PATH_MAX];
+		char *saveptr = NULL;
+
+		if (!path_env || !*path_env)
+			return 0;
+		snprintf(pathbuf, sizeof(pathbuf), "%s", path_env);
+		for (char *dir = strtok_r(pathbuf, ":", &saveptr); dir;
+				dir = strtok_r(NULL, ":", &saveptr)) {
+			if (snprintf(probe, sizeof(probe), "%s/%s", dir, binary) >= (int)sizeof(probe))
+				continue;
+			if (access(probe, X_OK) == 0)
+				return 1;
+		}
+	}
+	return 0;
 }
 
 int
@@ -1569,8 +1699,40 @@ ensure_desktop_entries_loaded(void)
 	char *saveptr = NULL;
 	const char *xdg_data_dirs;
 
-	if (desktop_entries_loaded)
-		return;
+	/* Detect NixOS generation changes: if the system profile or
+	 * per-user profile symlink target has changed since we last
+	 * loaded desktop entries, force a full rescan so apps from
+	 * the active generation are picked up. */
+	{
+		static char last_sys[PATH_MAX];
+		static char last_user[PATH_MAX];
+		char cur_sys[PATH_MAX] = {0};
+		char cur_user[PATH_MAX] = {0};
+
+		if (readlink("/run/current-system", cur_sys, sizeof(cur_sys) - 1) < 0)
+			cur_sys[0] = '\0';
+		if (user) {
+			char profile[PATH_MAX];
+			snprintf(profile, sizeof(profile),
+				"/etc/profiles/per-user/%s", user);
+			if (readlink(profile, cur_user, sizeof(cur_user) - 1) < 0)
+				cur_user[0] = '\0';
+		}
+
+		if (desktop_entries_loaded) {
+			if (strcmp(cur_sys, last_sys) ||
+					strcmp(cur_user, last_user)) {
+				/* Generation changed — clear and reload */
+				desktop_entry_count = 0;
+				desktop_entries_loaded = 0;
+			} else {
+				return;
+			}
+		}
+
+		snprintf(last_sys, sizeof(last_sys), "%s", cur_sys);
+		snprintf(last_user, sizeof(last_user), "%s", cur_user);
+	}
 
 	memset(appdirs, 0, sizeof(appdirs));
 

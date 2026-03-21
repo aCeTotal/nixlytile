@@ -32,6 +32,7 @@
 #include <pixman.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <signal.h>
+#include <sys/prctl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2645,6 +2646,11 @@ fork_detach(void)
 	signal(SIGINT, SIG_DFL);
 	signal(SIGTERM, SIG_DFL);
 	signal(SIGPIPE, SIG_DFL);
+
+	/* Drop ambient capabilities inherited from the compositor
+	 * (cap_sys_nice, cap_sys_admin, etc.). Without this, bwrap
+	 * refuses to run: "Unexpected capabilities but not setuid". */
+	prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
 }
 
 /*
