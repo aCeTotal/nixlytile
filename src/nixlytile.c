@@ -3071,6 +3071,21 @@ setup(void)
 			}
 		}
 
+		/* Use the backend's DRM FD — it has DRM master, so
+		 * CREATE_DUMB always succeeds.  On Nvidia-only systems this
+		 * is the Nvidia card node; on hybrid it's the iGPU.  We do
+		 * NOT own this FD (backend does). */
+		if (cdrm_fd < 0) {
+			int bfd = wlr_backend_get_drm_fd(backend);
+			if (bfd >= 0) {
+				cdrm_fd = bfd;
+				cdrm_owns = 0;
+				wlr_log(WLR_INFO,
+					"NVIDIA: using backend DRM fd %d for cursor dumb buffer",
+					bfd);
+			}
+		}
+
 		/* Fall back to NVIDIA primary node (card path) — newer NVIDIA
 		 * drivers (545+) support dumb buffers on the primary DRM node. */
 		if (cdrm_fd < 0 && detected_gpus[discrete_gpu_idx].card_path[0]) {

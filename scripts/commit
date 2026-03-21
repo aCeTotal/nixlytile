@@ -1,0 +1,30 @@
+#!/bin/sh
+# Quick git commit helper — stages all changes and commits with user message
+
+# Check if we're in a git repo
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+	echo "Not a git repository."
+	exit 1
+fi
+
+# Check if there are any changes to commit
+if git diff --quiet HEAD 2>/dev/null && git diff --cached --quiet 2>/dev/null && [ -z "$(git ls-files --others --exclude-standard)" ]; then
+	echo "Nothing to commit."
+	exit 0
+fi
+
+# Stage all changes
+git add -A
+
+# Ask for commit description
+printf "Commit description: "
+read -r desc
+
+if [ -z "$desc" ]; then
+	echo "Aborted — empty description."
+	git reset HEAD >/dev/null 2>&1
+	exit 1
+fi
+
+# Commit
+git commit -m "$desc"

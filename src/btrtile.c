@@ -962,6 +962,63 @@ void focusdir(const Arg *arg) {
 		wlr_cursor_warp(cursor, NULL,
 			target->geom.x + target->geom.width / 2,
 			target->geom.y + target->geom.height / 2);
+	} else {
+		/* No tile found in this direction — jump to adjacent monitor */
+		static const enum wlr_direction dir_to_wlr[] = {
+			[DIR_LEFT]  = WLR_DIRECTION_LEFT,
+			[DIR_RIGHT] = WLR_DIRECTION_RIGHT,
+			[DIR_UP]    = WLR_DIRECTION_UP,
+			[DIR_DOWN]  = WLR_DIRECTION_DOWN,
+		};
+		enum wlr_direction wdir = dir_to_wlr[arg->ui];
+		Monitor *m = dirtomon(wdir);
+		if (m && m != selmon && m->wlr_output->enabled) {
+			/* Find the tile on the new monitor closest to where we came from */
+			Client *best = NULL;
+			int best_dist = INT_MAX;
+			int best_overlap = 0;
+			wl_list_for_each(c, &clients, link) {
+				if (!VISIBLEON(c, m) || c->isfloating || c->isfullscreen)
+					continue;
+				cand_center_x = c->geom.x + c->geom.width / 2;
+				cand_center_y = c->geom.y + c->geom.height / 2;
+
+				/* Overlap in perpendicular axis with original selection */
+				if (is_vertical)
+					overlaps = !(c->geom.x + c->geom.width <= sel->geom.x ||
+					             c->geom.x >= sel->geom.x + sel->geom.width);
+				else
+					overlaps = !(c->geom.y + c->geom.height <= sel->geom.y ||
+					             c->geom.y >= sel->geom.y + sel->geom.height);
+
+				/* Distance: pick tile nearest to the edge we crossed */
+				if (is_vertical)
+					dist = abs(sel_center_y - cand_center_y);
+				else
+					dist = abs(sel_center_x - cand_center_x);
+
+				if (overlaps > best_overlap ||
+				    (overlaps == best_overlap && dist < best_dist)) {
+					best_overlap = overlaps;
+					best_dist = dist;
+					best = c;
+				}
+			}
+
+			transfer_status_menus(selmon, m);
+			selmon = m;
+			if (best) {
+				focusclient(best, 1);
+				wlr_cursor_warp(cursor, NULL,
+					best->geom.x + best->geom.width / 2,
+					best->geom.y + best->geom.height / 2);
+			} else {
+				focusclient(focustop(m), 1);
+				wlr_cursor_warp(cursor, NULL,
+					m->m.x + m->m.width / 2,
+					m->m.y + m->m.height / 2);
+			}
+		}
 	}
 }
 

@@ -523,8 +523,13 @@ static void output_cursor_set_xcursor_image(struct wlr_cursor_output_cursor *out
 static void cursor_output_cursor_update(struct wlr_cursor_output_cursor *output_cursor) {
 	struct wlr_cursor *cur = output_cursor->cursor;
 	struct wlr_output *output = output_cursor->output_cursor->output;
+	struct wlr_output_cursor *oc = output_cursor->output_cursor;
 
 	cursor_output_cursor_reset_image(output_cursor);
+
+	/* Clear source_buffer — the buffer branch re-sets it below */
+	wlr_buffer_unlock(oc->source_buffer);
+	oc->source_buffer = NULL;
 
 	if (cur->state->buffer != NULL) {
 		struct wlr_renderer *renderer = output->renderer;
@@ -549,6 +554,9 @@ static void cursor_output_cursor_update(struct wlr_cursor_output_cursor *output_
 				dst_width = texture->width / scale;
 				dst_height = texture->height / scale;
 			}
+
+			/* Keep source buffer for direct HW cursor passthrough */
+			oc->source_buffer = wlr_buffer_lock(buffer);
 		}
 
 		output_cursor_set_texture(output_cursor->output_cursor, texture, true,

@@ -1572,6 +1572,32 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		wlr_cursor_move(cursor, device, dx, dy);
 		wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
+		/*
+		 * Force full damage on the monitor under the cursor.
+		 *
+		 * When the HW cursor plane isn't available (or fails silently),
+		 * wlroots falls back to software cursor — compositing the cursor
+		 * image into the framebuffer.  With multi-buffer swapchains
+		 * (double/triple buffering), each back buffer may still contain
+		 * the cursor from a previous position.  If the damage ring
+		 * doesn't cover those stale regions, old cursor images persist,
+		 * creating a visible trail of ghost copies.
+		 *
+		 * Atomic commit failures (EBUSY) make this worse: the failed
+		 * buffer is discarded, so the next buffer's age is off by one.
+		 *
+		 * Adding whole damage ensures every cursor-motion frame fully
+		 * repaints, eliminating ghost trails.  The GPU cost is negligible
+		 * for desktop rendering at 60 Hz.
+		 */
+		{
+			Monitor *cm = xytomon(cursor->x, cursor->y);
+			if (cm && cm->scene_output) {
+				wlr_damage_ring_add_whole(&cm->scene_output->damage_ring);
+				wlr_output_schedule_frame(cm->wlr_output);
+			}
+		}
+
 		/* Relative pointer protocol — sent after the HW cursor plane
 		 * update so the visible cursor position changes before any
 		 * Wayland protocol I/O to clients. */

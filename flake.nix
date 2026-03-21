@@ -203,6 +203,9 @@
                 --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps} \
                 --prefix XDG_DATA_DIRS : "${pkgs.papirus-icon-theme}/share:${pkgs.adwaita-icon-theme}/share:${pkgs.hicolor-icon-theme}/share:${pkgs.shared-mime-info}/share"
 
+              # Install helper scripts
+              install -Dm755 scripts/commit $out/bin/commit
+
               runHook postInstall
             '';
 

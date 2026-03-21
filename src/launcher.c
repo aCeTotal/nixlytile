@@ -460,12 +460,17 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 							steam_bin = "nixly_steam";
 						else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
 							steam_bin = "nixly_steam";
-						/* Launch Steam - Big Picture in HTPC mode, normal otherwise */
-						if (htpc_mode_active) {
-							execlp(steam_bin, steam_bin, "-bigpicture", "-cef-force-gpu", "-cef-disable-sandbox", "steam://open/games", (char *)NULL);
-						} else {
-							execlp(steam_bin, steam_bin, "-cef-force-gpu", "-cef-disable-sandbox", (char *)NULL);
-						}
+						/* Build command string with args — falls through to
+						 * the general /bin/sh -lc launch path below, which
+						 * gives us stderr logging in modal_child.log. */
+						if (htpc_mode_active)
+							snprintf(cmd_str, sizeof(cmd_str),
+								"%s -bigpicture -cef-force-gpu -cef-disable-sandbox steam://open/games",
+								steam_bin);
+						else
+							snprintf(cmd_str, sizeof(cmd_str),
+								"%s -cef-force-gpu -cef-disable-sandbox",
+								steam_bin);
 					}
 
 					/* NixOS: prefer per-user profile wrapper over raw

@@ -55,7 +55,8 @@ htpc_views_update_visibility(Monitor *m)
 void
 arrange(Monitor *m)
 {
-	Client *c;
+	Client *c, *fsc;
+	int covers_full_screen = 0;
 
 	if (!m->wlr_output->enabled)
 		return;
@@ -63,74 +64,65 @@ arrange(Monitor *m)
 	/* Update HTPC view visibility when tags change */
 	htpc_views_update_visibility(m);
 
+	/*
+	 * Find fullscreen client on this monitor BEFORE the per-client loop
+	 * so we can hide other clients on the same monitor for direct scanout.
+	 */
+	fsc = NULL;
+	wl_list_for_each(fsc, &clients, link) {
+		if (fsc->isfullscreen && VISIBLEON(fsc, m))
+			break;
+	}
+	if (&fsc->link == &clients)
+		fsc = NULL;
+
+	if (fsc) {
+		covers_full_screen =
+			fsc->geom.x <= m->m.x &&
+			fsc->geom.y <= m->m.y &&
+			fsc->geom.x + fsc->geom.width >= m->m.x + m->m.width &&
+			fsc->geom.y + fsc->geom.height >= m->m.y + m->m.height;
+	}
+
 	wl_list_for_each(c, &clients, link) {
 		if (c->mon == m) {
-			wlr_scene_node_set_enabled(&c->scene->node, VISIBLEON(c, m));
-			client_set_suspended(c, !VISIBLEON(c, m));
+			int vis = VISIBLEON(c, m);
+			/*
+			 * When a fullscreen client covers the entire monitor,
+			 * disable all OTHER clients on this monitor.  This is
+			 * needed for direct scanout — wlroots bypasses GPU
+			 * composition only when the fullscreen surface is the
+			 * single visible buffer on the output.
+			 *
+			 * We ONLY touch clients on THIS monitor — global layer
+			 * nodes are shared across all monitors and must not be
+			 * disabled here, or every other monitor goes black.
+			 */
+			if (fsc && c != fsc && covers_full_screen)
+				vis = 0;
+			wlr_scene_node_set_enabled(&c->scene->node, vis);
+			client_set_suspended(c, !vis);
 		}
 	}
 
 	/*
-	 * fullscreen_bg is used to hide content behind fullscreen windows that
-	 * don't fill the entire screen. However, for direct scanout to work
-	 * (bypassing composition entirely), the fullscreen window must be the
-	 * ONLY visible element. So we only show fullscreen_bg when the fullscreen
-	 * window doesn't cover the full monitor area.
-	 *
-	 * This allows games and videos to achieve direct scanout for best
-	 * frame pacing and lowest latency when they fill the screen.
+	 * fullscreen_bg is per-monitor: show it when a fullscreen window
+	 * doesn't fill the entire screen (letterboxed games, etc.).
 	 */
-	/* Find fullscreen client on this monitor's current tag */
-	c = NULL;
-	wl_list_for_each(c, &clients, link) {
-		if (c->isfullscreen && VISIBLEON(c, m))
-			break;
-	}
-	if (&c->link == &clients)
-		c = NULL;
+	wlr_scene_node_set_enabled(&m->fullscreen_bg->node,
+		fsc && !covers_full_screen);
 
-	if (c && c->isfullscreen) {
-		/* Check if window covers the full monitor */
-		int covers_full_screen =
-			c->geom.x <= m->m.x &&
-			c->geom.y <= m->m.y &&
-			c->geom.x + c->geom.width >= m->m.x + m->m.width &&
-			c->geom.y + c->geom.height >= m->m.y + m->m.height;
-
-		/* Only show bg if fullscreen window doesn't cover everything */
-		wlr_scene_node_set_enabled(&m->fullscreen_bg->node, !covers_full_screen);
-
-		/*
-		 * Hide ALL background elements when fullscreen covers the whole screen.
-		 * This is CRITICAL for direct scanout - wlroots can only do direct
-		 * scanout when there's exactly one visible surface covering the output.
-		 * Any other visible scene nodes (root_bg, swaybg, etc.) prevent this.
-		 */
-		wlr_scene_node_set_enabled(&layers[LyrBg]->node, !covers_full_screen);
-		wlr_scene_node_set_enabled(&root_bg->node, !covers_full_screen);
-		wlr_scene_node_set_enabled(&layers[LyrBottom]->node, !covers_full_screen);
-		wlr_scene_node_set_enabled(&layers[LyrTile]->node, !covers_full_screen);
-		wlr_scene_node_set_enabled(&layers[LyrFloat]->node, !covers_full_screen);
-		wlr_scene_node_set_enabled(&layers[LyrTop]->node, !covers_full_screen);
-
+	if (fsc) {
 		/*
 		 * AUTOMATIC FOCUS FOR FULLSCREEN CLIENTS
 		 * If there's a visible fullscreen client on the current tag, it MUST
 		 * have keyboard focus. This handles Steam games and other apps that
 		 * go fullscreen but don't receive focus automatically.
 		 */
-		if (m == selmon && seat->keyboard_state.focused_surface != client_surface(c)) {
+		if (m == selmon && seat->keyboard_state.focused_surface != client_surface(fsc)) {
 			exclusive_focus = NULL;
-			focusclient(c, 0);  /* Don't lift/warp, just give focus */
+			focusclient(fsc, 0);  /* Don't lift/warp, just give focus */
 		}
-	} else {
-		wlr_scene_node_set_enabled(&m->fullscreen_bg->node, 0);
-		wlr_scene_node_set_enabled(&layers[LyrBg]->node, 1);
-		wlr_scene_node_set_enabled(&root_bg->node, 1);
-		wlr_scene_node_set_enabled(&layers[LyrBottom]->node, 1);
-		wlr_scene_node_set_enabled(&layers[LyrTile]->node, 1);
-		wlr_scene_node_set_enabled(&layers[LyrFloat]->node, 1);
-		wlr_scene_node_set_enabled(&layers[LyrTop]->node, 1);
 	}
 
 	strncpy(m->ltsymbol, m->lt[m->sellt]->symbol, LENGTH(m->ltsymbol));

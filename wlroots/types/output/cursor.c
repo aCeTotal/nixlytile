@@ -303,8 +303,21 @@ static bool output_cursor_attempt_hardware(struct wlr_output_cursor *cursor) {
 	output_move_hardware_cursor(cursor->output, (int)cursor->x, (int)cursor->y);
 
 	struct wlr_buffer *buffer = NULL;
+	bool buffer_from_source = false;
 	if (texture != NULL) {
 		buffer = render_cursor_buffer(cursor);
+		if (buffer == NULL && cursor->source_buffer != NULL &&
+				output->transform == WL_OUTPUT_TRANSFORM_NORMAL) {
+			// render_cursor_buffer() failed (e.g. Nvidia GBM modifier
+			// mismatch). Try the original source buffer directly — it
+			// may already be in the right format for the cursor plane
+			// (ARGB8888 LINEAR dumb buffer).
+			buffer = wlr_buffer_lock(cursor->source_buffer);
+			buffer_from_source = true;
+			wlr_log(WLR_INFO, "Cursor render failed, trying source "
+				"buffer directly (%dx%d)",
+				buffer->width, buffer->height);
+		}
 		if (buffer == NULL) {
 			wlr_log(WLR_DEBUG, "Failed to render cursor buffer");
 			return false;
@@ -320,6 +333,9 @@ static bool output_cursor_attempt_hardware(struct wlr_output_cursor *cursor) {
 		buffer ? buffer->width : 0, buffer ? buffer->height : 0);
 
 	bool ok = output_set_hardware_cursor(output, buffer, hotspot.x, hotspot.y);
+	if (!ok && buffer_from_source) {
+		wlr_log(WLR_DEBUG, "Direct source buffer rejected by HW cursor");
+	}
 	wlr_buffer_unlock(buffer);
 	if (ok) {
 		output->hardware_cursor = cursor;
@@ -331,6 +347,13 @@ bool wlr_output_cursor_set_buffer(struct wlr_output_cursor *cursor,
 		struct wlr_buffer *buffer, int32_t hotspot_x, int32_t hotspot_y) {
 	struct wlr_renderer *renderer = cursor->output->renderer;
 	assert(renderer != NULL);
+
+	/* Track source buffer for direct HW cursor passthrough */
+	wlr_buffer_unlock(cursor->source_buffer);
+	cursor->source_buffer = NULL;
+	if (buffer != NULL) {
+		cursor->source_buffer = wlr_buffer_lock(buffer);
+	}
 
 	struct wlr_texture *texture = NULL;
 	struct wlr_fbox src_box = {0};
@@ -492,6 +515,7 @@ void wlr_output_cursor_destroy(struct wlr_output_cursor *cursor) {
 	if (cursor->own_texture) {
 		wlr_texture_destroy(cursor->texture);
 	}
+	wlr_buffer_unlock(cursor->source_buffer);
 	wlr_drm_syncobj_timeline_unref(cursor->wait_timeline);
 	wl_list_remove(&cursor->link);
 	wlr_color_transform_unref(cursor->color_transform);

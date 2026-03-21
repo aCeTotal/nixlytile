@@ -1214,15 +1214,19 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 			if (!wlr_output_commit_state(m->wlr_output, state)) {
 				wlr_log(WLR_ERROR, "Output commit failed on %s (non-tearing retry)",
 					m->wlr_output->name);
-				/* No page flip queued — schedule frame so
-				 * rendermon keeps firing and we can retry. */
+				/* Force full damage — the failed commit's buffer
+				 * was never displayed, so the swapchain's next
+				 * buffer has stale content from 2+ frames ago.
+				 * Without this, the damage ring assumes the old
+				 * buffer content is current, leaving ghost
+				 * artefacts (cursor copies, stale UI). */
+				wlr_damage_ring_add_whole(&m->scene_output->damage_ring);
 				wlr_output_schedule_frame(m->wlr_output);
 			}
 		} else {
 			wlr_log(WLR_ERROR, "Output commit failed on %s",
 				m->wlr_output->name);
-			/* No page flip queued — schedule frame to avoid
-			 * permanent stall (black screen on NVIDIA etc.) */
+			wlr_damage_ring_add_whole(&m->scene_output->damage_ring);
 			wlr_output_schedule_frame(m->wlr_output);
 		}
 	}

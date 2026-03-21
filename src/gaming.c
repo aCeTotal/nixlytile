@@ -3652,6 +3652,16 @@ set_dgpu_env(void)
 				setenv("DRI_PRIME", dgpu->pci_slot_underscore, 1);
 			else
 				setenv("DRI_PRIME", "1", 1);
+
+			/* Force Qt/GTK apps through Xwayland when PRIME offload
+			 * is active.  Qt6's wayland-egl plugin cannot create a
+			 * valid EGLConfig with the NVIDIA PRIME env vars, causing
+			 * a SIGSEGV in QEGLPlatformContext (FreeCAD, KiCad, etc.).
+			 * Games don't use QT_QPA_PLATFORM, so this is harmless
+			 * for them — they go via Xwayland/gamescope anyway. */
+			setenv("QT_QPA_PLATFORM", "xcb", 1);
+			setenv("GDK_BACKEND", "x11", 1);
+
 			wlr_log(WLR_INFO, "NVIDIA: hybrid mode (iGPU + dGPU), PRIME offload enabled");
 		} else {
 			wlr_log(WLR_INFO, "NVIDIA: single-GPU mode, PRIME offload skipped");
