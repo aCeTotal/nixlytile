@@ -1204,6 +1204,110 @@ cpu_cursor_buffer_destroy(struct CpuCursorBuffer *buf)
 static int    cursor_from_client;
 static char   cursor_cached_name[64];
 
+/*
+ * Cursor surface tracking for cpu_cursor_active mode.
+ *
+ * When cpu_cursor_active, we cannot use wlr_cursor_set_surface()
+ * because wlroots' surface path in cursor_output_cursor_update()
+ * never sets source_buffer.  Without source_buffer, the dumb-buffer
+ * HW cursor fallback in output_cursor_attempt_hardware() cannot
+ * engage, and cursor_format_failed (cached permanently) means
+ * render_cursor_buffer() always returns NULL → permanent SW cursor.
+ *
+ * Instead we track the client cursor surface ourselves, CPU-copy
+ * pixels on each commit, and always go through wlr_cursor_set_buffer()
+ * which takes the buffer path and correctly sets source_buffer.
+ */
+static struct wlr_surface *tracked_cursor_surface;
+static struct wl_listener  tracked_cursor_commit;
+static struct wl_listener  tracked_cursor_destroy;
+static int                 tracked_cursor_hx, tracked_cursor_hy;
+
+static void
+stop_tracking_cursor_surface(void)
+{
+	if (!tracked_cursor_surface)
+		return;
+	wl_list_remove(&tracked_cursor_commit.link);
+	wl_list_remove(&tracked_cursor_destroy.link);
+	tracked_cursor_surface = NULL;
+}
+
+static void
+upload_cursor_surface(struct wlr_surface *surface, int hx, int hy)
+{
+	void *src_data;
+	uint32_t src_format, copy_w, copy_h, y;
+	size_t src_stride;
+	uint8_t *dst;
+
+	if (!wlr_buffer_begin_data_ptr_access(&surface->buffer->base,
+			WLR_BUFFER_DATA_PTR_ACCESS_READ,
+			&src_data, &src_format, &src_stride)) {
+		/* DMA-BUF client cursor — can't CPU-copy, try GPU readback */
+		struct wlr_texture *tex = wlr_texture_from_buffer(drw,
+			&surface->buffer->base);
+		if (!tex)
+			return; /* keep last cursor image */
+
+		copy_w = MIN((uint32_t)tex->width, cpu_cursor_buf->width);
+		copy_h = MIN((uint32_t)tex->height, cpu_cursor_buf->height);
+
+		memset(cpu_cursor_buf->map, 0, cpu_cursor_buf->map_size);
+
+		if (!wlr_texture_read_pixels(tex,
+				&(struct wlr_texture_read_pixels_options){
+			.data = cpu_cursor_buf->map,
+			.format = DRM_FORMAT_ARGB8888,
+			.stride = cpu_cursor_buf->stride,
+			.src_box = { .width = copy_w, .height = copy_h },
+		})) {
+			wlr_texture_destroy(tex);
+			return; /* keep last cursor image */
+		}
+
+		wlr_texture_destroy(tex);
+	} else {
+		memset(cpu_cursor_buf->map, 0, cpu_cursor_buf->map_size);
+
+		copy_w = MIN((uint32_t)surface->current.width, cpu_cursor_buf->width);
+		copy_h = MIN((uint32_t)surface->current.height, cpu_cursor_buf->height);
+
+		dst = (uint8_t *)cpu_cursor_buf->map;
+
+		for (y = 0; y < copy_h; y++) {
+			memcpy(dst + y * cpu_cursor_buf->stride,
+				(uint8_t *)src_data + y * src_stride,
+				copy_w * 4);
+		}
+
+		wlr_buffer_end_data_ptr_access(&surface->buffer->base);
+	}
+
+	wlr_cursor_set_buffer(cursor, &cpu_cursor_buf->base,
+		(int32_t)hx, (int32_t)hy, 1.0f);
+}
+
+static void
+tracked_cursor_handle_destroy(struct wl_listener *listener, void *data)
+{
+	(void)listener; (void)data;
+	stop_tracking_cursor_surface();
+}
+
+static void
+tracked_cursor_handle_commit(struct wl_listener *listener, void *data)
+{
+	(void)listener; (void)data;
+	if (!tracked_cursor_surface || !tracked_cursor_surface->buffer)
+		return;
+	/* Adjust hotspot by surface offset, matching wlroots behavior */
+	tracked_cursor_hx -= tracked_cursor_surface->current.dx;
+	tracked_cursor_hy -= tracked_cursor_surface->current.dy;
+	upload_cursor_surface(tracked_cursor_surface,
+		tracked_cursor_hx, tracked_cursor_hy);
+}
+
 void
 nixly_cursor_set_xcursor(const char *name)
 {
@@ -1220,6 +1324,9 @@ nixly_cursor_set_xcursor(const char *name)
 
 	cursor_from_client = 0;
 	snprintf(cursor_cached_name, sizeof(cursor_cached_name), "%s", name);
+
+	/* Stop tracking any client cursor surface */
+	stop_tracking_cursor_surface();
 
 	if (!cpu_cursor_active) {
 		wlr_cursor_set_xcursor(cursor, cursor_mgr, name);
@@ -1259,74 +1366,39 @@ nixly_cursor_set_xcursor(const char *name)
 void
 nixly_cursor_set_client_surface(struct wlr_surface *surface, int hx, int hy)
 {
-	void *src_data;
-	uint32_t src_format;
-	size_t src_stride;
-	uint32_t copy_w, copy_h, y;
-	uint8_t *dst;
-
 	/* Invalidate xcursor cache — next nixly_cursor_set_xcursor() must
 	 * actually upload the image even if the name matches. */
 	cursor_from_client = 1;
 	cursor_cached_name[0] = '\0';
 
-	if (!cpu_cursor_active || !surface || !surface->buffer) {
+	/* Stop tracking previous cursor surface */
+	stop_tracking_cursor_surface();
+
+	if (!cpu_cursor_active) {
 		wlr_cursor_set_surface(cursor, surface, hx, hy);
 		return;
 	}
 
-	/* Try to get pixel data from client buffer */
-	if (!wlr_buffer_begin_data_ptr_access(&surface->buffer->base,
-			WLR_BUFFER_DATA_PTR_ACCESS_READ,
-			&src_data, &src_format, &src_stride)) {
-		/* DMA-BUF client cursor — can't CPU-copy, try GPU readback */
-		struct wlr_texture *tex = wlr_texture_from_buffer(drw,
-			&surface->buffer->base);
-		if (!tex) {
-			wlr_cursor_set_surface(cursor, surface, hx, hy);
-			return;
-		}
-
-		copy_w = MIN((uint32_t)tex->width, cpu_cursor_buf->width);
-		copy_h = MIN((uint32_t)tex->height, cpu_cursor_buf->height);
-
-		memset(cpu_cursor_buf->map, 0, cpu_cursor_buf->map_size);
-
-		if (!wlr_texture_read_pixels(tex,
-				&(struct wlr_texture_read_pixels_options){
-			.data = cpu_cursor_buf->map,
-			.format = DRM_FORMAT_ARGB8888,
-			.stride = cpu_cursor_buf->stride,
-			.src_box = { .width = copy_w, .height = copy_h },
-		})) {
-			wlr_texture_destroy(tex);
-			wlr_cursor_set_surface(cursor, surface, hx, hy);
-			return;
-		}
-
-		wlr_texture_destroy(tex);
-		goto set_cursor;
+	/* NULL surface = hide cursor */
+	if (!surface) {
+		wlr_cursor_set_buffer(cursor, NULL, 0, 0, 1.0f);
+		return;
 	}
 
-	/* Clear buffer to transparent */
-	memset(cpu_cursor_buf->map, 0, cpu_cursor_buf->map_size);
+	/* Track this surface for ongoing commit updates (animated cursors,
+	 * and also to catch the first buffer arrival from XWayland). */
+	tracked_cursor_surface = surface;
+	tracked_cursor_hx = hx;
+	tracked_cursor_hy = hy;
+	tracked_cursor_commit.notify = tracked_cursor_handle_commit;
+	tracked_cursor_destroy.notify = tracked_cursor_handle_destroy;
+	wl_signal_add(&surface->events.commit, &tracked_cursor_commit);
+	wl_signal_add(&surface->events.destroy, &tracked_cursor_destroy);
 
-	/* Copy client cursor pixels into dumb buffer */
-	copy_w = MIN((uint32_t)surface->current.width, cpu_cursor_buf->width);
-	copy_h = MIN((uint32_t)surface->current.height, cpu_cursor_buf->height);
-
-	dst = (uint8_t *)cpu_cursor_buf->map;
-
-	for (y = 0; y < copy_h; y++) {
-		memcpy(dst + y * cpu_cursor_buf->stride,
-			(uint8_t *)src_data + y * src_stride,
-			copy_w * 4);
+	/* If buffer already available, upload immediately */
+	if (surface->buffer) {
+		upload_cursor_surface(surface, hx, hy);
 	}
-
-	wlr_buffer_end_data_ptr_access(&surface->buffer->base);
-
-set_cursor:
-	wlr_cursor_set_buffer(cursor, &cpu_cursor_buf->base,
-		(int32_t)hx, (int32_t)hy, 1.0f);
+	/* Otherwise commit listener will fire when buffer arrives */
 }
 
