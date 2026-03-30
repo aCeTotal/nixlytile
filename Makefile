@@ -16,7 +16,8 @@ DEVCFLAGS = -g -Wpedantic -Wall -Wextra -Wdeclaration-after-statement \
 # CFLAGS / LDFLAGS
 PKGS      = wayland-server xkbcommon libinput libdrm $(XLIBS) fcft pixman-1 libsystemd gdk-pixbuf-2.0 cairo librsvg-2.0 \
             libavformat libavcodec libavutil libswscale libswresample libpipewire-0.3 libass
-NLCFLAGS = `$(PKG_CONFIG) --cflags $(PKGS)` $(WLR_INCS) $(CPPFLAGS_EXTRA) $(DEVCFLAGS) $(CFLAGS)
+WP_INCS = -I$(shell $(PKG_CONFIG) --variable=prefix wayland-protocols 2>/dev/null)/include
+NLCFLAGS = `$(PKG_CONFIG) --cflags $(PKGS)` $(WLR_INCS) $(WP_INCS) $(CPPFLAGS_EXTRA) $(DEVCFLAGS) $(CFLAGS)
 LDLIBS    = `$(PKG_CONFIG) --libs $(PKGS)` $(WLR_LIBS) -lm -lpthread $(LIBS)
 
 # Allow C99 style declarations in all modules
@@ -32,7 +33,8 @@ MOD_OBJS = globals.o client.o layout.o btrtile.o input.o gamepad.o output.o \
 
 PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstable-v1-protocol.h \
              $(SRC)/wlr-layer-shell-unstable-v1-protocol.h $(SRC)/wlr-output-power-management-unstable-v1-protocol.h \
-             $(SRC)/xdg-shell-protocol.h $(SRC)/content-type-v1-protocol.h $(SRC)/tearing-control-v1-protocol.h
+             $(SRC)/xdg-shell-protocol.h $(SRC)/content-type-v1-protocol.h $(SRC)/tearing-control-v1-protocol.h \
+             $(SRC)/tablet-v2-protocol.h
 
 all: nixlytile
 nixlytile: nixlytile.o util.o $(MOD_OBJS) $(VP_OBJS)
@@ -128,6 +130,9 @@ $(SRC)/content-type-v1-protocol.h:
 $(SRC)/tearing-control-v1-protocol.h:
 	$(WAYLAND_SCANNER) server-header \
 		$(WAYLAND_PROTOCOLS)/staging/tearing-control/tearing-control-v1.xml $@
+$(SRC)/tablet-v2-protocol.h:
+	$(WAYLAND_SCANNER) server-header \
+		$(WAYLAND_PROTOCOLS)/stable/tablet/tablet-v2.xml $@
 
 $(SRC)/config.h:
 	cp $(SRC)/config.def.h $@

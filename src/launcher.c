@@ -408,9 +408,15 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 				if (pid == 0) {
 					int devnull;
 
-					/* Set up standard FDs: stdout→stderr, stdin→/dev/null */
-					dup2(STDERR_FILENO, STDOUT_FILENO);
-					devnull = open("/dev/null", O_RDONLY);
+					/* Replicate a terminal session as closely as
+					 * possible so apps behave identically to being
+					 * typed in a shell prompt. */
+
+					/* stdin → /dev/null; leave stdout/stderr as
+					 * inherited (compositor journal) — do NOT
+					 * redirect stderr to a file, some apps
+					 * (Electron/Chromium) check FD type. */
+					devnull = open("/dev/null", O_RDWR);
 					if (devnull >= 0) {
 						dup2(devnull, STDIN_FILENO);
 						if (devnull > STDERR_FILENO)
@@ -418,45 +424,27 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 					}
 
 					setsid();
-
-					/* Reset signals (fork_detach without just the epoll close) */
 					signal(SIGCHLD, SIG_DFL);
 					signal(SIGINT, SIG_DFL);
 					signal(SIGTERM, SIG_DFL);
 					signal(SIGPIPE, SIG_DFL);
-
-					/* Drop ambient capabilities inherited from compositor
-					 * so bwrap-based apps (Steam, OnlyOffice) don't fail
-					 * with "Unexpected capabilities but not setuid". */
 					prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
 
-					/* Close all inherited compositor FDs (DRM, PipeWire,
-					 * epoll, logs, etc.) early — before any launch path.
-					 * The old fork_detach() only closed the event_loop FD;
-					 * this closes everything, preventing FD leaks to
-					 * sandboxed apps (bwrap/Steam, OnlyOffice, etc.).
-					 * All code below only needs env vars and filesystem
-					 * paths, not inherited FDs. */
+					/* Close all compositor FDs (DRM, PipeWire, epoll, etc.) */
 					syscall(SYS_close_range, 3, ~0U, 0);
 
-					/* Force the login shell (sh -lc) to re-source
-					 * /etc/set-environment, which provides the full
-					 * NixOS session env (QT_QPA_PLATFORM, XDG_DATA_DIRS,
-					 * LD_LIBRARY_PATH, etc.).  The compositor inherits
-					 * these from the display manager, but they may be
-					 * stale or incomplete — re-sourcing guarantees
-					 * launched apps see the same env as a login shell. */
-					unsetenv("__NIXOS_SET_ENVIRONMENT_DONE");
+					/* Match terminal: start in $HOME */
+					{
+						const char *home = getenv("HOME");
+						if (home && *home)
+							(void)chdir(home);
+					}
 
+					/* Fresh NixOS env for the login shell */
+					unsetenv("__NIXOS_SET_ENVIRONMENT_DONE");
 					ensure_nix_paths();
+
 					if (is_steam_cmd(cmd_str)) {
-						/* Steam runs inside a bwrap FHS sandbox;
-						 * NVIDIA PRIME offload vars (set_dgpu_env)
-						 * and CEF GPU-force flags can cause GL/EGL
-						 * failures inside the sandbox.  Skip them
-						 * to match plain "steam" from a terminal.
-						 * Games get dGPU env via Steam's own launch
-						 * path (gaming.c / set_steam_env there). */
 						const char *steam_bin = "steam";
 						if (access("/etc/profiles/per-user/total/bin/nixly_steam", X_OK) == 0)
 							steam_bin = "nixly_steam";
@@ -473,36 +461,19 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 						set_dgpu_env();
 					}
 
-					/* NixOS: prefer per-user profile wrapper over raw
-					 * store binary (e.g. bwrap for OnlyOffice). */
 					resolve_nix_store_exec(cmd_str, sizeof(cmd_str));
 
+					/* Use the user's login+interactive shell so the
+					 * program gets the exact same environment as
+					 * typing the command in a terminal. */
 					{
-						int dbg = open("/tmp/nixlylogging/spawn.log",
-							O_WRONLY | O_CREAT | O_APPEND, 0644);
-						if (dbg >= 0) {
-							dprintf(dbg, "modal launch: '%s'\n"
-								"  WAYLAND_DISPLAY=%s DISPLAY=%s\n"
-								"  XDG_RUNTIME_DIR=%s QT_QPA_PLATFORM=%s\n"
-								"  PATH=%.300s\n",
-								cmd_str,
-								getenv("WAYLAND_DISPLAY") ? getenv("WAYLAND_DISPLAY") : "(null)",
-								getenv("DISPLAY") ? getenv("DISPLAY") : "(null)",
-								getenv("XDG_RUNTIME_DIR") ? getenv("XDG_RUNTIME_DIR") : "(null)",
-								getenv("QT_QPA_PLATFORM") ? getenv("QT_QPA_PLATFORM") : "(null)",
-								getenv("PATH") ? getenv("PATH") : "(null)");
-							close(dbg);
-						}
-					}
+						const char *user_shell = getenv("SHELL");
+						if (!user_shell || !user_shell[0])
+							user_shell = "/bin/sh";
 
-					/* NixOS: sh -lc re-sources /etc/set-environment
-					 * which overrides QT_QPA_PLATFORM=wayland, clobbering
-					 * the xcb value that set_dgpu_env() set to prevent
-					 * Qt6 SIGSEGV with NVIDIA PRIME.  Build an export
-					 * prefix that re-applies critical overrides AFTER
-					 * the login profile has been sourced. */
-					char env_prefix[512] = {0};
-					{
+						/* Build env_prefix for dGPU overrides that
+						 * login profile re-sourcing would clobber */
+						char env_prefix[512] = {0};
 						int eoff = 0;
 						const char *qt_plat = getenv("QT_QPA_PLATFORM");
 						const char *gdk_be = getenv("GDK_BACKEND");
@@ -520,31 +491,24 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 							if (n > 0 && n < (int)(sizeof(env_prefix) - eoff))
 								eoff += n;
 						}
-					}
 
-					/* Wrap command to capture stderr and exit code
-					 * for debugging launch failures. */
-					{
-						char wrapper[2048];
+						/* Clean exec — identical to shell prompt.
+						 * No logging wrapper, no stderr redirect. */
+						char wrapper[4096];
 						snprintf(wrapper, sizeof(wrapper),
-							"exec 2>>/tmp/nixlylogging/modal_child.log; "
-							"echo \"=== $(date +%%H:%%M:%%S) %s ===\" >&2; "
-							"%s%s; "
-							"echo \"--- exit=$? ---\" >&2",
-							cmd_str, env_prefix, cmd_str);
-						execl("/bin/sh", "/bin/sh", "-lc", wrapper, NULL);
-					}
-					{
-						int dbg = open("/tmp/nixlylogging/spawn.log",
-							O_WRONLY | O_CREAT | O_APPEND, 0644);
-						if (dbg >= 0) {
-							dprintf(dbg, "modal launch FAILED: '%s': %s\n",
-								cmd_str, strerror(errno));
-							close(dbg);
-						}
+							"%sexec %s", env_prefix, cmd_str);
+						execl(user_shell, user_shell, "-lic",
+							wrapper, NULL);
 					}
 					_exit(127);
 				}
+				/* Record launch origin so the window lands on the
+				 * tag that was active when the user pressed Enter,
+				 * even if they switch tags before the app maps. */
+				if (pid > 0)
+					pending_launch_add(pid,
+						m->tagset[m->seltags],
+						m->wlr_output->name);
 				modal_hide_all();
 			}
 		} else if (mo->active_idx == 1 && sel >= 0 && sel < mo->result_count[1]) {

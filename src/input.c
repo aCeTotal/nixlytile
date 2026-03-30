@@ -811,6 +811,91 @@ createkeyboardgroup(void)
 	return group;
 }
 
+/* ── pointer gesture forwarding ─────────────────────────────────────── */
+
+typedef struct {
+	struct wl_listener swipe_begin;
+	struct wl_listener swipe_update;
+	struct wl_listener swipe_end;
+	struct wl_listener pinch_begin;
+	struct wl_listener pinch_update;
+	struct wl_listener pinch_end;
+	struct wl_listener hold_begin;
+	struct wl_listener hold_end;
+	struct wl_listener destroy;
+} GestureListeners;
+
+static void gesture_swipe_begin(struct wl_listener *listener, void *data)
+{
+	struct wlr_pointer_swipe_begin_event *event = data;
+	wlr_pointer_gestures_v1_send_swipe_begin(pointer_gestures, seat,
+		event->time_msec, event->fingers);
+}
+
+static void gesture_swipe_update(struct wl_listener *listener, void *data)
+{
+	struct wlr_pointer_swipe_update_event *event = data;
+	wlr_pointer_gestures_v1_send_swipe_update(pointer_gestures, seat,
+		event->time_msec, event->dx, event->dy);
+}
+
+static void gesture_swipe_end(struct wl_listener *listener, void *data)
+{
+	struct wlr_pointer_swipe_end_event *event = data;
+	wlr_pointer_gestures_v1_send_swipe_end(pointer_gestures, seat,
+		event->time_msec, event->cancelled);
+}
+
+static void gesture_pinch_begin(struct wl_listener *listener, void *data)
+{
+	struct wlr_pointer_pinch_begin_event *event = data;
+	wlr_pointer_gestures_v1_send_pinch_begin(pointer_gestures, seat,
+		event->time_msec, event->fingers);
+}
+
+static void gesture_pinch_update(struct wl_listener *listener, void *data)
+{
+	struct wlr_pointer_pinch_update_event *event = data;
+	wlr_pointer_gestures_v1_send_pinch_update(pointer_gestures, seat,
+		event->time_msec, event->dx, event->dy, event->scale, event->rotation);
+}
+
+static void gesture_pinch_end(struct wl_listener *listener, void *data)
+{
+	struct wlr_pointer_pinch_end_event *event = data;
+	wlr_pointer_gestures_v1_send_pinch_end(pointer_gestures, seat,
+		event->time_msec, event->cancelled);
+}
+
+static void gesture_hold_begin(struct wl_listener *listener, void *data)
+{
+	struct wlr_pointer_hold_begin_event *event = data;
+	wlr_pointer_gestures_v1_send_hold_begin(pointer_gestures, seat,
+		event->time_msec, event->fingers);
+}
+
+static void gesture_hold_end(struct wl_listener *listener, void *data)
+{
+	struct wlr_pointer_hold_end_event *event = data;
+	wlr_pointer_gestures_v1_send_hold_end(pointer_gestures, seat,
+		event->time_msec, event->cancelled);
+}
+
+static void gesture_listeners_destroy(struct wl_listener *listener, void *data)
+{
+	GestureListeners *gl = wl_container_of(listener, gl, destroy);
+	wl_list_remove(&gl->swipe_begin.link);
+	wl_list_remove(&gl->swipe_update.link);
+	wl_list_remove(&gl->swipe_end.link);
+	wl_list_remove(&gl->pinch_begin.link);
+	wl_list_remove(&gl->pinch_update.link);
+	wl_list_remove(&gl->pinch_end.link);
+	wl_list_remove(&gl->hold_begin.link);
+	wl_list_remove(&gl->hold_end.link);
+	wl_list_remove(&gl->destroy.link);
+	free(gl);
+}
+
 void
 createpointer(struct wlr_pointer *pointer)
 {
@@ -857,6 +942,40 @@ createpointer(struct wlr_pointer *pointer)
 	}
 
 	wlr_cursor_attach_input_device(cursor, &pointer->base);
+
+	/* Attach gesture listeners for touchpad swipe/pinch/hold forwarding */
+	{
+		GestureListeners *gl = ecalloc(1, sizeof(*gl));
+		gl->swipe_begin.notify = gesture_swipe_begin;
+		gl->swipe_update.notify = gesture_swipe_update;
+		gl->swipe_end.notify = gesture_swipe_end;
+		gl->pinch_begin.notify = gesture_pinch_begin;
+		gl->pinch_update.notify = gesture_pinch_update;
+		gl->pinch_end.notify = gesture_pinch_end;
+		gl->hold_begin.notify = gesture_hold_begin;
+		gl->hold_end.notify = gesture_hold_end;
+		gl->destroy.notify = gesture_listeners_destroy;
+		wl_signal_add(&pointer->events.swipe_begin, &gl->swipe_begin);
+		wl_signal_add(&pointer->events.swipe_update, &gl->swipe_update);
+		wl_signal_add(&pointer->events.swipe_end, &gl->swipe_end);
+		wl_signal_add(&pointer->events.pinch_begin, &gl->pinch_begin);
+		wl_signal_add(&pointer->events.pinch_update, &gl->pinch_update);
+		wl_signal_add(&pointer->events.pinch_end, &gl->pinch_end);
+		wl_signal_add(&pointer->events.hold_begin, &gl->hold_begin);
+		wl_signal_add(&pointer->events.hold_end, &gl->hold_end);
+		wl_signal_add(&pointer->base.events.destroy, &gl->destroy);
+	}
+}
+
+void
+newkbshortcutsinhibitor(struct wl_listener *listener, void *data)
+{
+	struct wlr_keyboard_shortcuts_inhibitor_v1 *inhibitor = data;
+
+	/* Always honor the inhibitor — fullscreen games, remote desktop, VMs
+	 * need to capture compositor shortcuts like Alt+Tab. The inhibitor is
+	 * only active while the requesting surface has keyboard focus. */
+	wlr_keyboard_shortcuts_inhibitor_v1_activate(inhibitor);
 }
 
 void
@@ -942,6 +1061,202 @@ destroykeyboardgroup(struct wl_listener *listener, void *data)
 	free(group);
 }
 
+/* ── tablet (pen / pad) ──────────────────────────────────────────── */
+
+static void
+tablettoolsetcursor(struct wl_listener *listener, void *data)
+{
+	struct wlr_tablet_v2_event_cursor *event = data;
+	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
+		return;
+	if (playback_state == PLAYBACK_PLAYING)
+		return;
+	if (media_view_visible_monitor() || retro_gaming_visible_monitor())
+		return;
+	if (event->seat_client == seat->pointer_state.focused_client)
+		nixly_cursor_set_client_surface(event->surface,
+				event->hotspot_x, event->hotspot_y);
+}
+
+static struct wlr_tablet_v2_tablet_tool *
+get_or_create_tool(struct wlr_tablet_tool *tool)
+{
+	struct wlr_tablet_v2_tablet_tool *v2 = tool->data;
+	if (v2)
+		return v2;
+	v2 = wlr_tablet_tool_create(tablet_v2_mgr, seat, tool);
+	if (!v2)
+		return NULL;
+	tool->data = v2;
+	LISTEN_STATIC(&v2->events.set_cursor, tablettoolsetcursor);
+	return v2;
+}
+
+static void
+tabletaxis(struct wl_listener *listener, void *data)
+{
+	struct wlr_tablet_tool_axis_event *ev = data;
+	struct wlr_tablet_v2_tablet *v2tab = ev->tablet->data;
+	struct wlr_tablet_v2_tablet_tool *v2tool = get_or_create_tool(ev->tool);
+	if (!v2tab || !v2tool)
+		return;
+
+	if (ev->updated_axes & (WLR_TABLET_TOOL_AXIS_X | WLR_TABLET_TOOL_AXIS_Y))
+		wlr_cursor_warp_absolute(cursor, &ev->tablet->base,
+				(ev->updated_axes & WLR_TABLET_TOOL_AXIS_X) ? ev->x : NAN,
+				(ev->updated_axes & WLR_TABLET_TOOL_AXIS_Y) ? ev->y : NAN);
+
+	struct wlr_surface *surface = NULL;
+	Client *c = NULL;
+	double sx, sy;
+	xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
+
+	if (surface && surface != v2tool->focused_surface) {
+		wlr_send_tablet_v2_tablet_tool_proximity_out(v2tool);
+		wlr_send_tablet_v2_tablet_tool_proximity_in(v2tool, v2tab, surface);
+	}
+
+	if (surface) {
+		wlr_send_tablet_v2_tablet_tool_motion(v2tool, sx, sy);
+
+		if (ev->updated_axes & WLR_TABLET_TOOL_AXIS_PRESSURE)
+			wlr_send_tablet_v2_tablet_tool_pressure(v2tool, ev->pressure);
+		if (ev->updated_axes & WLR_TABLET_TOOL_AXIS_DISTANCE)
+			wlr_send_tablet_v2_tablet_tool_distance(v2tool, ev->distance);
+		if (ev->updated_axes & (WLR_TABLET_TOOL_AXIS_TILT_X | WLR_TABLET_TOOL_AXIS_TILT_Y))
+			wlr_send_tablet_v2_tablet_tool_tilt(v2tool, ev->tilt_x, ev->tilt_y);
+		if (ev->updated_axes & WLR_TABLET_TOOL_AXIS_ROTATION)
+			wlr_send_tablet_v2_tablet_tool_rotation(v2tool, ev->rotation);
+		if (ev->updated_axes & WLR_TABLET_TOOL_AXIS_SLIDER)
+			wlr_send_tablet_v2_tablet_tool_slider(v2tool, ev->slider);
+		if (ev->updated_axes & WLR_TABLET_TOOL_AXIS_WHEEL)
+			wlr_send_tablet_v2_tablet_tool_wheel(v2tool, ev->wheel_delta, 0);
+	}
+}
+
+static void
+tabletproximity(struct wl_listener *listener, void *data)
+{
+	struct wlr_tablet_tool_proximity_event *ev = data;
+	struct wlr_tablet_v2_tablet *v2tab = ev->tablet->data;
+	struct wlr_tablet_v2_tablet_tool *v2tool = get_or_create_tool(ev->tool);
+	if (!v2tab || !v2tool)
+		return;
+
+	if (ev->state == WLR_TABLET_TOOL_PROXIMITY_IN) {
+		wlr_cursor_warp_absolute(cursor, &ev->tablet->base, ev->x, ev->y);
+
+		struct wlr_surface *surface = NULL;
+		double sx, sy;
+		xytonode(cursor->x, cursor->y, &surface, NULL, NULL, &sx, &sy);
+
+		if (surface)
+			wlr_send_tablet_v2_tablet_tool_proximity_in(v2tool, v2tab, surface);
+	} else {
+		wlr_send_tablet_v2_tablet_tool_proximity_out(v2tool);
+	}
+}
+
+static void
+tablettip(struct wl_listener *listener, void *data)
+{
+	struct wlr_tablet_tool_tip_event *ev = data;
+	struct wlr_tablet_v2_tablet_tool *v2tool = get_or_create_tool(ev->tool);
+	if (!v2tool)
+		return;
+
+	if (ev->state == WLR_TABLET_TOOL_TIP_DOWN) {
+		wlr_send_tablet_v2_tablet_tool_down(v2tool);
+		wlr_tablet_tool_v2_start_implicit_grab(v2tool);
+	} else {
+		wlr_send_tablet_v2_tablet_tool_up(v2tool);
+	}
+}
+
+static void
+tabletbutton(struct wl_listener *listener, void *data)
+{
+	struct wlr_tablet_tool_button_event *ev = data;
+	struct wlr_tablet_v2_tablet_tool *v2tool = get_or_create_tool(ev->tool);
+	if (!v2tool)
+		return;
+
+	wlr_send_tablet_v2_tablet_tool_button(v2tool, ev->button,
+			(enum zwp_tablet_pad_v2_button_state)ev->state);
+}
+
+static void
+tabletpadbutton(struct wl_listener *listener, void *data)
+{
+	struct wlr_tablet_pad_button_event *ev = data;
+	TabletPad *tp = wl_container_of(listener, tp, button);
+	wlr_send_tablet_v2_tablet_pad_button(tp->v2, ev->button,
+			ev->time_msec,
+			(enum zwp_tablet_pad_v2_button_state)ev->state);
+}
+
+static void
+tabletpadring(struct wl_listener *listener, void *data)
+{
+	struct wlr_tablet_pad_ring_event *ev = data;
+	TabletPad *tp = wl_container_of(listener, tp, ring);
+	wlr_send_tablet_v2_tablet_pad_ring(tp->v2, ev->ring, ev->position,
+			ev->source == WLR_TABLET_PAD_RING_SOURCE_FINGER,
+			ev->time_msec);
+}
+
+static void
+tabletpadstrip(struct wl_listener *listener, void *data)
+{
+	struct wlr_tablet_pad_strip_event *ev = data;
+	TabletPad *tp = wl_container_of(listener, tp, strip);
+	wlr_send_tablet_v2_tablet_pad_strip(tp->v2, ev->strip, ev->position,
+			ev->source == WLR_TABLET_PAD_STRIP_SOURCE_FINGER,
+			ev->time_msec);
+}
+
+static void
+tabletpaddestroy(struct wl_listener *listener, void *data)
+{
+	TabletPad *tp = wl_container_of(listener, tp, destroy);
+	wl_list_remove(&tp->button.link);
+	wl_list_remove(&tp->ring.link);
+	wl_list_remove(&tp->strip.link);
+	wl_list_remove(&tp->destroy.link);
+	free(tp);
+}
+
+static void
+createtablet(struct wlr_tablet *tablet)
+{
+	struct wlr_tablet_v2_tablet *v2 =
+		wlr_tablet_create(tablet_v2_mgr, seat, &tablet->base);
+	if (!v2)
+		return;
+	tablet->data = v2;
+	wlr_cursor_attach_input_device(cursor, &tablet->base);
+	LISTEN_STATIC(&tablet->events.axis, tabletaxis);
+	LISTEN_STATIC(&tablet->events.proximity, tabletproximity);
+	LISTEN_STATIC(&tablet->events.tip, tablettip);
+	LISTEN_STATIC(&tablet->events.button, tabletbutton);
+}
+
+static void
+createtabletpad(struct wlr_tablet_pad *pad)
+{
+	struct wlr_tablet_v2_tablet_pad *v2 =
+		wlr_tablet_pad_create(tablet_v2_mgr, seat, &pad->base);
+	if (!v2)
+		return;
+	TabletPad *tp = ecalloc(1, sizeof(*tp));
+	tp->pad = pad;
+	tp->v2 = v2;
+	LISTEN(&pad->events.button, &tp->button, tabletpadbutton);
+	LISTEN(&pad->events.ring, &tp->ring, tabletpadring);
+	LISTEN(&pad->events.strip, &tp->strip, tabletpadstrip);
+	LISTEN(&pad->base.events.destroy, &tp->destroy, tabletpaddestroy);
+}
+
 void
 inputdevice(struct wl_listener *listener, void *data)
 {
@@ -957,8 +1272,13 @@ inputdevice(struct wl_listener *listener, void *data)
 	case WLR_INPUT_DEVICE_POINTER:
 		createpointer(wlr_pointer_from_input_device(device));
 		break;
+	case WLR_INPUT_DEVICE_TABLET:
+		createtablet(wlr_tablet_from_input_device(device));
+		break;
+	case WLR_INPUT_DEVICE_TABLET_PAD:
+		createtabletpad(wlr_tablet_pad_from_input_device(device));
+		break;
 	default:
-		/* TODO handle other input device types */
 		break;
 	}
 
@@ -1181,14 +1501,38 @@ keypress(struct wl_listener *listener, void *data)
 			}
 		}
 		if (!handled) {
-			last_keybinding_func = NULL;
-			for (i = 0; i < nsyms; i++)
-				handled = keybinding(mods, syms[i]) || handled;
+			/* Check if keyboard shortcuts are inhibited for the focused surface
+			 * (remote desktop, VM guests, games requesting passthrough) */
+			int shortcuts_inhibited = 0;
+			struct wlr_keyboard_shortcuts_inhibitor_v1 *inhibitor;
+			wl_list_for_each(inhibitor, &kb_shortcuts_inhibit_mgr->inhibitors, link) {
+				if (inhibitor->active &&
+				    inhibitor->surface == seat->keyboard_state.focused_surface) {
+					shortcuts_inhibited = 1;
+					break;
+				}
+			}
+			if (!shortcuts_inhibited) {
+				last_keybinding_func = NULL;
+				for (i = 0; i < nsyms; i++)
+					handled = keybinding(mods, syms[i]) || handled;
+			}
 		}
 		/* If no binding matched, try with base keysyms (level 0) for shifted bindings */
 		if (!handled && nlevel0 > 0) {
-			for (i = 0; i < nlevel0; i++)
-				handled = keybinding(mods, level0_syms[i]) || handled;
+			int shortcuts_inhibited = 0;
+			struct wlr_keyboard_shortcuts_inhibitor_v1 *inhibitor;
+			wl_list_for_each(inhibitor, &kb_shortcuts_inhibit_mgr->inhibitors, link) {
+				if (inhibitor->active &&
+				    inhibitor->surface == seat->keyboard_state.focused_surface) {
+					shortcuts_inhibited = 1;
+					break;
+				}
+			}
+			if (!shortcuts_inhibited) {
+				for (i = 0; i < nlevel0; i++)
+					handled = keybinding(mods, level0_syms[i]) || handled;
+			}
 		}
 	}
 
@@ -1571,6 +1915,24 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		 * visible cursor latency. */
 		wlr_cursor_move(cursor, device, dx, dy);
 		wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
+
+		/* Low-latency cursor: update HW cursor plane immediately via
+		 * direct DRM atomic commit, bypassing wlroots' render loop.
+		 * This gives sub-millisecond cursor updates and is VRR-safe
+		 * (no page flip = no refresh rate spike). */
+		{
+			Monitor *cm = xytomon(cursor->x, cursor->y);
+			if (cm && cm->ll_cursor_active) {
+				int ox = (int)round(cursor->x) - cm->m.x;
+				int oy = (int)round(cursor->y) - cm->m.y;
+				struct wlr_output_cursor *hw = cm->wlr_output->hardware_cursor;
+				if (hw) {
+					ox = (int)(ox * cm->wlr_output->scale) - hw->hotspot_x;
+					oy = (int)(oy * cm->wlr_output->scale) - hw->hotspot_y;
+				}
+				ll_cursor_move(cm, ox, oy);
+			}
+		}
 
 		/*
 		 * Force full damage on the monitor under the cursor.

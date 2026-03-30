@@ -47,11 +47,25 @@ struct wlr_content_type_manager_v1 *content_type_mgr;
 struct wlr_tearing_control_manager_v1 *tearing_control_mgr;
 struct wlr_virtual_keyboard_manager_v1 *virtual_keyboard_mgr;
 struct wlr_virtual_pointer_manager_v1 *virtual_pointer_mgr;
+struct wlr_tablet_manager_v2 *tablet_v2_mgr;
 struct wlr_text_input_manager_v3 *text_input_mgr;
 struct wlr_text_input_v3 *active_text_input;
 struct wl_list text_inputs; /* TextInput.link */
 struct wlr_cursor_shape_manager_v1 *cursor_shape_mgr;
 struct wlr_output_power_manager_v1 *power_mgr;
+struct wlr_color_manager_v1 *color_mgr;
+struct wlr_color_representation_manager_v1 *color_repr_mgr;
+struct wlr_keyboard_shortcuts_inhibit_manager_v1 *kb_shortcuts_inhibit_mgr;
+struct wlr_pointer_gestures_v1 *pointer_gestures;
+struct wlr_xdg_foreign_registry *foreign_registry;
+struct wlr_xdg_foreign_v2 *xdg_foreign;
+struct wlr_xdg_wm_dialog_v1 *xdg_dialog_mgr;
+struct wlr_ext_image_copy_capture_manager_v1 *image_copy_capture_mgr;
+struct wlr_security_context_manager_v1 *security_ctx_mgr;
+struct wlr_xdg_system_bell_v1 *system_bell;
+struct wlr_ext_foreign_toplevel_list_v1 *foreign_toplevel_list;
+struct wlr_ext_data_control_manager_v1 *ext_data_control_mgr;
+struct wlr_fixes *protocol_fixes;
 
 struct wlr_pointer_constraints_v1 *pointer_constraints;
 struct wlr_relative_pointer_manager_v1 *relative_pointer_mgr;
@@ -559,6 +573,7 @@ struct wl_listener request_set_cursor_shape = {.notify = setcursorshape};
 struct wl_listener request_start_drag = {.notify = requeststartdrag};
 struct wl_listener start_drag = {.notify = startdrag};
 struct wl_listener new_session_lock = {.notify = locksession};
+struct wl_listener new_kb_shortcuts_inhibitor = {.notify = newkbshortcutsinhibitor};
 
 #ifdef XWAYLAND
 struct wl_listener new_xwayland_surface = {.notify = createnotifyx11};

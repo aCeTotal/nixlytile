@@ -102,11 +102,28 @@
 #include <wlr/types/wlr_viewporter.h>
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
 #include <wlr/types/wlr_virtual_pointer_v1.h>
+#include <wlr/types/wlr_tablet_tool.h>
+#include <wlr/types/wlr_tablet_pad.h>
+#include <wlr/types/wlr_tablet_v2.h>
+#include <wlr/types/wlr_color_management_v1.h>
+#include <wlr/types/wlr_color_representation_v1.h>
+#include <wlr/types/wlr_ext_data_control_v1.h>
+#include <wlr/types/wlr_ext_foreign_toplevel_list_v1.h>
+#include <wlr/types/wlr_ext_image_capture_source_v1.h>
+#include <wlr/types/wlr_ext_image_copy_capture_v1.h>
+#include <wlr/types/wlr_fixes.h>
+#include <wlr/types/wlr_keyboard_shortcuts_inhibit_v1.h>
+#include <wlr/types/wlr_pointer_gestures_v1.h>
+#include <wlr/types/wlr_security_context_v1.h>
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/types/wlr_xdg_activation_v1.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
+#include <wlr/types/wlr_xdg_dialog_v1.h>
+#include <wlr/types/wlr_xdg_foreign_registry.h>
+#include <wlr/types/wlr_xdg_foreign_v2.h>
 #include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/types/wlr_xdg_system_bell_v1.h>
 #include <wlr/util/log.h>
 #include <wlr/util/region.h>
 #include <xkbcommon/xkbcommon.h>
@@ -405,6 +422,15 @@ typedef struct {
 	struct wlr_pointer_constraint_v1 *constraint;
 	struct wl_listener destroy;
 } PointerConstraint;
+
+typedef struct {
+	struct wlr_tablet_pad *pad;
+	struct wlr_tablet_v2_tablet_pad *v2;
+	struct wl_listener button;
+	struct wl_listener ring;
+	struct wl_listener strip;
+	struct wl_listener destroy;
+} TabletPad;
 
 typedef struct {
 	struct wlr_scene_tree *scene;
@@ -1134,6 +1160,7 @@ typedef struct {
 	struct wlr_buffer *last_buffer;
 	int video_detect_retries;
 	int video_detect_phase;
+	struct wlr_ext_foreign_toplevel_handle_v1 *foreign_toplevel_handle;
 } Client;
 
 /* ── binary tree tiling layout node ───────────────────────────────── */
@@ -1295,6 +1322,13 @@ struct Monitor {
 	int supports_10bit;
 	int render_10bit_active;
 	int scene_build_failures;
+	/* Low-latency cursor plane (direct DRM atomic, bypasses wlroots) */
+	int ll_cursor_fd;            /* DRM fd for cursor commits (-1 = disabled) */
+	uint32_t ll_cursor_plane_id; /* DRM plane ID for cursor */
+	uint32_t ll_cursor_crtc_id;  /* DRM CRTC ID */
+	uint32_t ll_cursor_prop_x;   /* Property ID for CRTC_X */
+	uint32_t ll_cursor_prop_y;   /* Property ID for CRTC_Y */
+	int ll_cursor_active;        /* 1 if low-latency cursor is active */
 	int max_bpc;
 	int hdr_capable;
 	int hdr_active;
@@ -1454,11 +1488,25 @@ extern struct wlr_content_type_manager_v1 *content_type_mgr;
 extern struct wlr_tearing_control_manager_v1 *tearing_control_mgr;
 extern struct wlr_virtual_keyboard_manager_v1 *virtual_keyboard_mgr;
 extern struct wlr_virtual_pointer_manager_v1 *virtual_pointer_mgr;
+extern struct wlr_tablet_manager_v2 *tablet_v2_mgr;
 extern struct wlr_text_input_manager_v3 *text_input_mgr;
 extern struct wlr_text_input_v3 *active_text_input;
 extern struct wl_list text_inputs;
 extern struct wlr_cursor_shape_manager_v1 *cursor_shape_mgr;
 extern struct wlr_output_power_manager_v1 *power_mgr;
+extern struct wlr_color_manager_v1 *color_mgr;
+extern struct wlr_color_representation_manager_v1 *color_repr_mgr;
+extern struct wlr_keyboard_shortcuts_inhibit_manager_v1 *kb_shortcuts_inhibit_mgr;
+extern struct wlr_pointer_gestures_v1 *pointer_gestures;
+extern struct wlr_xdg_foreign_registry *foreign_registry;
+extern struct wlr_xdg_foreign_v2 *xdg_foreign;
+extern struct wlr_xdg_wm_dialog_v1 *xdg_dialog_mgr;
+extern struct wlr_ext_image_copy_capture_manager_v1 *image_copy_capture_mgr;
+extern struct wlr_security_context_manager_v1 *security_ctx_mgr;
+extern struct wlr_xdg_system_bell_v1 *system_bell;
+extern struct wlr_ext_foreign_toplevel_list_v1 *foreign_toplevel_list;
+extern struct wlr_ext_data_control_manager_v1 *ext_data_control_mgr;
+extern struct wlr_fixes *protocol_fixes;
 extern struct wlr_pointer_constraints_v1 *pointer_constraints;
 extern struct wlr_relative_pointer_manager_v1 *relative_pointer_mgr;
 extern struct wlr_pointer_constraint_v1 *active_constraint;
@@ -1902,6 +1950,7 @@ extern struct wl_listener request_set_cursor_shape;
 extern struct wl_listener request_start_drag;
 extern struct wl_listener start_drag;
 extern struct wl_listener new_session_lock;
+extern struct wl_listener new_kb_shortcuts_inhibitor;
 
 #ifdef XWAYLAND
 extern struct wl_listener new_xwayland_surface;
@@ -1950,6 +1999,19 @@ void nixly_cursor_set_xcursor(const char *name);
 void nixly_cursor_set_client_surface(struct wlr_surface *surface, int hx, int hy);
 int resolve_asset_path(const char *path, char *out, size_t len);
 void fix_tray_argb32(uint32_t *pixels, size_t count, int use_rgba_order);
+
+/* Pending launch tracking — remember tag/monitor at launch time so
+ * slow-starting apps land on the tag where they were launched, even
+ * if the user switches tags before the window maps. */
+#define MAX_PENDING_LAUNCHES 16
+#define PENDING_LAUNCH_TIMEOUT_MS 60000 /* 60s for very slow apps */
+
+void pending_launch_add(pid_t pid, uint32_t tags, const char *output_name);
+int pending_launch_find_and_remove(pid_t client_pid, uint32_t *out_tags,
+	char *out_output, size_t out_output_sz);
+
+/* htpc.c */
+pid_t client_get_pid(Client *c);
 
 /* client.c */
 void applybounds(Client *c, struct wlr_box *bbox);
@@ -2052,6 +2114,7 @@ void keypress(struct wl_listener *listener, void *data);
 void keypressmod(struct wl_listener *listener, void *data);
 int keyrepeat(void *data);
 void createpointer(struct wlr_pointer *pointer);
+void newkbshortcutsinhibitor(struct wl_listener *listener, void *data);
 void createpointerconstraint(struct wl_listener *listener, void *data);
 void destroypointerconstraint(struct wl_listener *listener, void *data);
 void cursorconstrain(struct wlr_pointer_constraint_v1 *constraint);
@@ -2104,6 +2167,9 @@ void set_adaptive_sync(Monitor *m, int enabled);
 void set_video_refresh_rate(Monitor *m, Client *c);
 void restore_max_refresh_rate(Monitor *m);
 int detect_10bit_support(Monitor *m);
+void ll_cursor_init(Monitor *m);
+void ll_cursor_move(Monitor *m, int x, int y);
+void ll_cursor_cleanup(Monitor *m);
 int set_drm_color_properties(Monitor *m, int max_bpc);
 int enable_10bit_rendering(Monitor *m);
 void init_monitor_color_settings(Monitor *m);

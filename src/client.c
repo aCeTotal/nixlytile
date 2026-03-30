@@ -1,6 +1,115 @@
 #include "nixlytile.h"
 #include "client.h"
 
+/* ── Pending launch tracking ──────────────────────────────────────────
+ * When the modal launcher or spawn() starts a program, we record the
+ * child PID and the tags/monitor active at that moment.  When the new
+ * window maps and applyrules() runs, we walk the client process's
+ * parent chain to match it against a recorded launch PID — if found,
+ * the window gets the launch-time tags instead of whatever tag the
+ * user is currently viewing. */
+
+typedef struct {
+	pid_t pid;
+	uint32_t tags;
+	char output[32];
+	uint64_t launch_ms;
+} PendingLaunchEntry;
+
+static PendingLaunchEntry pending_launches[MAX_PENDING_LAUNCHES];
+static int pending_launch_count;
+
+/* Walk /proc parent chain: return 1 if child is a descendant of ancestor */
+static int
+is_pid_descendant_of(pid_t child, pid_t ancestor)
+{
+	pid_t cur = child;
+	char path[64], line[256];
+	FILE *f;
+	pid_t ppid;
+
+	for (int depth = 0; depth < 32 && cur > 1; depth++) {
+		if (cur == ancestor)
+			return 1;
+		snprintf(path, sizeof(path), "/proc/%d/status", (int)cur);
+		f = fopen(path, "r");
+		if (!f)
+			return 0;
+		ppid = 0;
+		while (fgets(line, sizeof(line), f)) {
+			if (strncmp(line, "PPid:\t", 6) == 0) {
+				ppid = (pid_t)atoi(line + 6);
+				break;
+			}
+		}
+		fclose(f);
+		if (ppid <= 1)
+			return 0;
+		cur = ppid;
+	}
+	return 0;
+}
+
+void
+pending_launch_add(pid_t pid, uint32_t tags, const char *output_name)
+{
+	uint64_t now = monotonic_msec();
+	int j = 0;
+
+	/* Expire old entries */
+	for (int i = 0; i < pending_launch_count; i++) {
+		if (now - pending_launches[i].launch_ms < PENDING_LAUNCH_TIMEOUT_MS) {
+			if (j != i)
+				pending_launches[j] = pending_launches[i];
+			j++;
+		}
+	}
+	pending_launch_count = j;
+
+	/* Drop oldest if full */
+	if (pending_launch_count >= MAX_PENDING_LAUNCHES) {
+		memmove(&pending_launches[0], &pending_launches[1],
+			(MAX_PENDING_LAUNCHES - 1) * sizeof(PendingLaunchEntry));
+		pending_launch_count--;
+	}
+
+	PendingLaunchEntry *pl = &pending_launches[pending_launch_count++];
+	pl->pid = pid;
+	pl->tags = tags;
+	pl->launch_ms = now;
+	snprintf(pl->output, sizeof(pl->output), "%s",
+		output_name ? output_name : "");
+}
+
+int
+pending_launch_find_and_remove(pid_t client_pid, uint32_t *out_tags,
+	char *out_output, size_t out_output_sz)
+{
+	uint64_t now = monotonic_msec();
+
+	/* Search newest first — most likely match */
+	for (int i = pending_launch_count - 1; i >= 0; i--) {
+		PendingLaunchEntry *pl = &pending_launches[i];
+
+		if (now - pl->launch_ms >= PENDING_LAUNCH_TIMEOUT_MS)
+			continue;
+
+		if (client_pid == pl->pid ||
+		    is_pid_descendant_of(client_pid, pl->pid)) {
+			*out_tags = pl->tags;
+			if (out_output && out_output_sz > 0)
+				snprintf(out_output, out_output_sz, "%s", pl->output);
+
+			/* Remove entry */
+			memmove(&pending_launches[i], &pending_launches[i + 1],
+				(pending_launch_count - i - 1) * sizeof(PendingLaunchEntry));
+			pending_launch_count--;
+			return 1;
+		}
+	}
+	return 0;
+}
+
 void
 applybounds(Client *c, struct wlr_box *bbox)
 {
@@ -40,6 +149,34 @@ applyrules(Client *c)
 			wl_list_for_each(m, &mons, link) {
 				if (r->monitor == i++)
 					mon = m;
+			}
+		}
+	}
+
+	/* If no rule assigned specific tags, check if this window came
+	 * from a launcher/spawn launch and use the tags that were active
+	 * at launch time — so slow-starting apps land on the correct tag
+	 * even if the user switched tags while waiting. */
+	if (newtags == 0) {
+		pid_t cpid = client_get_pid(c);
+		if (cpid > 0) {
+			uint32_t launch_tags;
+			char launch_output[32] = {0};
+			if (pending_launch_find_and_remove(cpid, &launch_tags,
+					launch_output, sizeof(launch_output))) {
+				newtags = launch_tags;
+				if (launch_output[0]) {
+					wl_list_for_each(m, &mons, link) {
+						if (strcmp(m->wlr_output->name, launch_output) == 0) {
+							mon = m;
+							break;
+						}
+					}
+				}
+				wlr_log(WLR_INFO,
+					"applyrules: pending launch matched pid %d → "
+					"tags=0x%x output=%s",
+					(int)cpid, newtags, launch_output);
 			}
 		}
 	}
@@ -453,6 +590,16 @@ mapnotify(struct wl_listener *listener, void *data)
 			return;
 		}
 		c->scene->node.data = c->scene_surface->node.data = c;
+	}
+
+	/* Register with ext-foreign-toplevel-list for external tool visibility */
+	if (foreign_toplevel_list) {
+		struct wlr_ext_foreign_toplevel_handle_v1_state ftstate = {
+			.title = client_get_title(c),
+			.app_id = client_get_appid(c),
+		};
+		c->foreign_toplevel_handle = wlr_ext_foreign_toplevel_handle_v1_create(
+			foreign_toplevel_list, &ftstate);
 	}
 
 	client_get_geometry(c, &c->geom);
@@ -950,6 +1097,11 @@ unmapnotify(struct wl_listener *listener, void *data)
 	else if (selmon)
 		selmon->classify_cache_client = NULL;
 
+	if (c->foreign_toplevel_handle) {
+		wlr_ext_foreign_toplevel_handle_v1_destroy(c->foreign_toplevel_handle);
+		c->foreign_toplevel_handle = NULL;
+	}
+
 	wlr_scene_node_destroy(&c->scene->node);
 	printstatus();
 	motionnotify(0, NULL, 0, 0, 0, 0);
@@ -962,6 +1114,14 @@ updatetitle(struct wl_listener *listener, void *data)
 	Client *c = wl_container_of(listener, c, set_title);
 	if (c == focustop(c->mon))
 		printstatus();
+	if (c->foreign_toplevel_handle) {
+		struct wlr_ext_foreign_toplevel_handle_v1_state ftstate = {
+			.title = client_get_title(c),
+			.app_id = client_get_appid(c),
+		};
+		wlr_ext_foreign_toplevel_handle_v1_update_state(
+			c->foreign_toplevel_handle, &ftstate);
+	}
 }
 
 void

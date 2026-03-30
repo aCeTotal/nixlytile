@@ -184,14 +184,10 @@ static bool init_plane(struct wlr_drm_backend *drm,
 	p->initial_crtc_id = drm_plane->crtc_id;
 
 	for (size_t i = 0; i < drm_plane->count_formats; ++i) {
-		// Force a LINEAR layout for the cursor if the driver doesn't support
-		// modifiers
 		wlr_drm_format_set_add(&p->formats, drm_plane->formats[i],
 			DRM_FORMAT_MOD_LINEAR);
-		if (type != DRM_PLANE_TYPE_CURSOR) {
-			wlr_drm_format_set_add(&p->formats, drm_plane->formats[i],
-				DRM_FORMAT_MOD_INVALID);
-		}
+		wlr_drm_format_set_add(&p->formats, drm_plane->formats[i],
+			DRM_FORMAT_MOD_INVALID);
 	}
 
 	if (p->props.in_formats && drm->addfb2_modifiers) {

@@ -1821,7 +1821,7 @@ find_best_video_mode(Monitor *m, float video_hz)
 	width = m->wlr_output->current_mode->width;
 	height = m->wlr_output->current_mode->height;
 
-	wlr_log(WLR_INFO, "Evaluating video modes for %.3f Hz on %s:", video_hz, m->wlr_output->name);
+	wlr_log(WLR_DEBUG, "Evaluating video modes for %.3f Hz on %s:", video_hz, m->wlr_output->name);
 
 	/* Option 1: VRR (best quality if available) */
 	if (m->vrr_capable && fullscreen_adaptive_sync_enabled) {
@@ -1833,7 +1833,7 @@ find_best_video_mode(Monitor *m, float video_hz)
 		candidate.judder_ms = 0.0f;
 		candidate.score = score_video_mode(3, video_hz, video_hz, 1);
 
-		wlr_log(WLR_INFO, "  VRR: score=%.1f (judder=0ms)", candidate.score);
+		wlr_log(WLR_DEBUG, "  VRR: score=%.1f (judder=0ms)", candidate.score);
 
 		if (candidate.score > best.score) {
 			best = candidate;
@@ -1867,7 +1867,7 @@ find_best_video_mode(Monitor *m, float video_hz)
 		candidate.judder_ms = calculate_judder_ms(video_hz, mode_hz);
 		candidate.score = score_video_mode(1, video_hz, mode_hz, multiple);
 
-		wlr_log(WLR_INFO, "  Mode %d.%03dHz: %dx mult, score=%.1f, judder=%.2fms",
+		wlr_log(WLR_DEBUG, "  Mode %d.%03dHz: %dx mult, score=%.1f, judder=%.2fms",
 				mode->refresh / 1000, mode->refresh % 1000,
 				multiple, candidate.score, candidate.judder_ms);
 
@@ -1908,7 +1908,7 @@ find_best_video_mode(Monitor *m, float video_hz)
 			/* Slightly penalize CVT modes as they're less reliable */
 			candidate.score -= 5.0f;
 
-			wlr_log(WLR_INFO, "  CVT %.3fHz: %dx mult, score=%.1f (theoretical)",
+			wlr_log(WLR_DEBUG, "  CVT %.3fHz: %dx mult, score=%.1f (theoretical)",
 					target_display_hz, mult, candidate.score);
 
 			if (candidate.score > best.score) {
@@ -1924,7 +1924,7 @@ find_best_video_mode(Monitor *m, float video_hz)
 		case 2: method_str = "custom CVT"; break;
 		case 3: method_str = "VRR"; break;
 		}
-		wlr_log(WLR_INFO, "Best option: %s at %.3f Hz (%dx), score=%.1f, judder=%.2fms",
+		wlr_log(WLR_DEBUG, "Best option: %s at %.3f Hz (%dx), score=%.1f, judder=%.2fms",
 				method_str, best.actual_hz, best.multiplier, best.score, best.judder_ms);
 	}
 
@@ -2947,6 +2947,7 @@ setup(void)
 	wlr_export_dmabuf_manager_v1_create(dpy);
 	wlr_screencopy_manager_v1_create(dpy);
 	wlr_data_control_manager_v1_create(dpy);
+	ext_data_control_mgr = wlr_ext_data_control_manager_v1_create(dpy, 1);
 	wlr_primary_selection_v1_device_manager_create(dpy);
 	wlr_viewporter_create(dpy);
 	wlr_single_pixel_buffer_manager_v1_create(dpy);
@@ -2955,12 +2956,71 @@ setup(void)
 	wlr_alpha_modifier_v1_create(dpy);
 	content_type_mgr = wlr_content_type_manager_v1_create(dpy, 1);
 	tearing_control_mgr = wlr_tearing_control_manager_v1_create(dpy, 1);
+	protocol_fixes = wlr_fixes_create(dpy, 1);
+	security_ctx_mgr = wlr_security_context_manager_v1_create(dpy);
+	xdg_dialog_mgr = wlr_xdg_wm_dialog_v1_create(dpy, 1);
+	system_bell = wlr_xdg_system_bell_v1_create(dpy, 1);
+	pointer_gestures = wlr_pointer_gestures_v1_create(dpy);
+
+	/* xdg-foreign v2 — cross-process window parenting (Firefox file dialogs) */
+	foreign_registry = wlr_xdg_foreign_registry_create(dpy);
+	xdg_foreign = wlr_xdg_foreign_v2_create(dpy, foreign_registry);
+
+	/* Keyboard shortcuts inhibitor — let fullscreen games capture all keys */
+	kb_shortcuts_inhibit_mgr = wlr_keyboard_shortcuts_inhibit_v1_create(dpy);
+	wl_signal_add(&kb_shortcuts_inhibit_mgr->events.new_inhibitor,
+		&new_kb_shortcuts_inhibitor);
+
+	/* Foreign toplevel list — expose window list to external tools */
+	foreign_toplevel_list = wlr_ext_foreign_toplevel_list_v1_create(dpy, 1);
+
+	/* Modern screen capture (ext-image-copy-capture-v1) */
+	image_copy_capture_mgr = wlr_ext_image_copy_capture_manager_v1_create(dpy, 1);
+	wlr_ext_output_image_capture_source_manager_v1_create(dpy, 1);
 
 	/* Initializes the interface used to implement urgency hints */
 	activation = wlr_xdg_activation_v1_create(dpy);
 	wl_signal_add(&activation->events.request_activate, &request_activate);
 
 	wlr_scene_set_gamma_control_manager_v1(scene, wlr_gamma_control_manager_v1_create(dpy));
+
+	/* Color management v1 — let apps negotiate color spaces (sRGB, P3, BT.2020, HDR PQ) */
+	{
+		enum wp_color_manager_v1_render_intent intents[] = {
+			WP_COLOR_MANAGER_V1_RENDER_INTENT_PERCEPTUAL,
+			WP_COLOR_MANAGER_V1_RENDER_INTENT_RELATIVE,
+			WP_COLOR_MANAGER_V1_RENDER_INTENT_RELATIVE_BPC,
+		};
+		enum wp_color_manager_v1_transfer_function *tfs = NULL;
+		size_t tfs_len = 0;
+		enum wp_color_manager_v1_primaries *pris = NULL;
+		size_t pris_len = 0;
+		tfs = wlr_color_manager_v1_transfer_function_list_from_renderer(drw, &tfs_len);
+		pris = wlr_color_manager_v1_primaries_list_from_renderer(drw, &pris_len);
+		struct wlr_color_manager_v1_options opts = {
+			.features = {
+				.icc_v2_v4 = true,
+				.parametric = true,
+				.set_primaries = true,
+				.set_luminances = true,
+				.set_mastering_display_primaries = true,
+			},
+			.render_intents = intents,
+			.render_intents_len = sizeof(intents) / sizeof(intents[0]),
+			.transfer_functions = tfs,
+			.transfer_functions_len = tfs_len,
+			.primaries = pris,
+			.primaries_len = pris_len,
+		};
+		color_mgr = wlr_color_manager_v1_create(dpy, 1, &opts);
+		free(tfs);
+		free(pris);
+		wlr_scene_set_color_manager_v1(scene, color_mgr);
+	}
+
+	/* Color representation v1 — YCbCr coefficients, alpha modes */
+	color_repr_mgr = wlr_color_representation_manager_v1_create_with_renderer(
+		dpy, 1, drw);
 
 	power_mgr = wlr_output_power_manager_v1_create(dpy);
 	wl_signal_add(&power_mgr->events.set_mode, &output_power_mgr_set_mode);
@@ -3176,6 +3236,8 @@ setup(void)
 	wl_signal_add(&seat->events.request_set_primary_selection, &request_set_psel);
 	wl_signal_add(&seat->events.request_start_drag, &request_start_drag);
 	wl_signal_add(&seat->events.start_drag, &start_drag);
+
+	tablet_v2_mgr = wlr_tablet_v2_create(dpy);
 
 	kb_group = createkeyboardgroup();
 	wl_list_init(&kb_group->destroy.link);
@@ -3446,21 +3508,61 @@ const char *dgpu_programs[] = {
 void
 spawn(const Arg *arg)
 {
-	if (fork() == 0) {
-		dup2(STDERR_FILENO, STDOUT_FILENO);
-		setsid();
-		fork_detach();
-		ensure_nix_paths();
+	pid_t pid = fork();
+	if (pid > 0) {
+		/* Parent: record launch origin for tag assignment */
+		if (selmon)
+			pending_launch_add(pid,
+				selmon->tagset[selmon->seltags],
+				selmon->wlr_output->name);
+		return;
+	}
+	if (pid == 0) {
+		int devnull;
 
-		const char *cmd = (const char *)arg->v;
-		if (!cmd || !cmd[0]) {
-			_exit(1);
+		/* stdin → /dev/null; leave stdout/stderr inherited */
+		devnull = open("/dev/null", O_RDWR);
+		if (devnull >= 0) {
+			dup2(devnull, STDIN_FILENO);
+			if (devnull > STDERR_FILENO)
+				close(devnull);
 		}
 
-		/* Detect if arg->v is a char** array (default keys) or string (runtime config).
-		 * Runtime config strings are stored in runtime_spawn_cmds[] which are heap-allocated.
-		 * Default keys use static char* arrays.
-		 * We can check if the pointer is within runtime_spawn_cmds range. */
+		setsid();
+		signal(SIGCHLD, SIG_DFL);
+		signal(SIGINT, SIG_DFL);
+		signal(SIGTERM, SIG_DFL);
+		signal(SIGPIPE, SIG_DFL);
+		prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
+
+		/* Close all inherited compositor FDs (DRM, PipeWire, epoll, etc.) */
+		syscall(SYS_close_range, 3, ~0U, 0);
+
+		/* Match terminal: start in $HOME */
+		{
+			const char *home = getenv("HOME");
+			if (home && *home)
+				(void)chdir(home);
+		}
+
+		/* Force re-sourcing of /etc/set-environment for fresh NixOS env */
+		unsetenv("__NIXOS_SET_ENVIRONMENT_DONE");
+		ensure_nix_paths();
+
+		/* Use the user's login shell so programs get the same
+		 * environment as when launched from a terminal.
+		 * -l (login): sources /etc/profile, ~/.profile, ~/.bash_profile
+		 * -i (interactive): sources ~/.bashrc / ~/.zshrc
+		 * -c: executes the command string */
+		const char *user_shell = getenv("SHELL");
+		if (!user_shell || !user_shell[0])
+			user_shell = "/bin/sh";
+
+		const char *cmd = (const char *)arg->v;
+		if (!cmd || !cmd[0])
+			_exit(1);
+
+		/* Detect if arg->v is a char** array (default keys) or string (runtime config) */
 		int is_runtime_string = 0;
 		for (int i = 0; i < runtime_spawn_cmd_count; i++) {
 			if (arg->v == runtime_spawn_cmds[i]) {
@@ -3469,79 +3571,73 @@ spawn(const Arg *arg)
 			}
 		}
 
+		/* Build command string from argv array or use string directly */
+		char cmd_str[4096];
 		if (!is_runtime_string) {
-			/* Default keybindings: arg->v is char** array */
 			char **argv = (char **)arg->v;
-			if (argv[0] && argv[0][0] != '\0') {
-				if (is_steam_cmd(argv[0])) {
-					/* Steam runs inside bwrap FHS sandbox; skip
-					 * dGPU env to avoid GL/EGL failures inside it. */
-					const char *steam_bin = "steam";
-					if (access("/etc/profiles/per-user/total/bin/nixly_steam", X_OK) == 0)
-						steam_bin = "nixly_steam";
-					else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
-						steam_bin = "nixly_steam";
-					if (htpc_mode_active) {
-						execlp(steam_bin, steam_bin, "-bigpicture", "steam://open/games", (char *)NULL);
-					} else {
-						execlp(steam_bin, steam_bin, (char *)NULL);
-					}
-					/* execlp failed — fall through to execvp below */
-				}
-				if (should_use_dgpu(argv[0]))
-					set_dgpu_env();
-				/* Debug: log spawn attempt to /tmp/nixlylogging/ */
-				{
-					int dbg = open("/tmp/nixlylogging/spawn.log",
-						O_WRONLY | O_CREAT | O_APPEND, 0644);
-					if (dbg >= 0) {
-						dprintf(dbg, "spawn: execvp('%s') WAYLAND_DISPLAY=%s DISPLAY=%s PATH=%.200s\n",
-							argv[0],
-							getenv("WAYLAND_DISPLAY") ? getenv("WAYLAND_DISPLAY") : "(null)",
-							getenv("DISPLAY") ? getenv("DISPLAY") : "(null)",
-							getenv("PATH") ? getenv("PATH") : "(null)");
-						close(dbg);
-					}
-				}
-				execvp(argv[0], argv);
-				/* execvp failed — log the error */
-				{
-					int dbg = open("/tmp/nixlylogging/spawn.log",
-						O_WRONLY | O_CREAT | O_APPEND, 0644);
-					if (dbg >= 0) {
-						dprintf(dbg, "spawn: execvp('%s') FAILED: %s\n",
-							argv[0], strerror(errno));
-						close(dbg);
-					}
-				}
-				diag_log_error("SPAWN", "execvp('%s') FAILED: %s",
-					argv[0], strerror(errno));
-				_exit(127);
+			if (!argv[0] || !argv[0][0])
+				_exit(1);
+			int pos = 0;
+			for (int i = 0; argv[i] && pos < (int)sizeof(cmd_str) - 2; i++) {
+				if (i > 0 && pos < (int)sizeof(cmd_str) - 1)
+					cmd_str[pos++] = ' ';
+				int n = snprintf(cmd_str + pos, sizeof(cmd_str) - pos,
+					"%s", argv[i]);
+				if (n > 0)
+					pos += n;
 			}
-			_exit(1);
+			cmd_str[pos] = '\0';
+		} else {
+			snprintf(cmd_str, sizeof(cmd_str), "%s", cmd);
 		}
 
-		/* Runtime config: arg->v is a string, execute via shell */
-		if (is_steam_cmd(cmd)) {
-			/* Steam runs inside bwrap FHS sandbox; skip
-			 * dGPU env to avoid GL/EGL failures inside it. */
+		/* Steam special case: bwrap FHS sandbox, skip dGPU env */
+		if (is_steam_cmd(cmd_str)) {
 			const char *steam_bin = "steam";
 			if (access("/etc/profiles/per-user/total/bin/nixly_steam", X_OK) == 0)
 				steam_bin = "nixly_steam";
 			else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
 				steam_bin = "nixly_steam";
-			if (strcmp(cmd, "steam") == 0 || strcmp(cmd, "nixly_steam") == 0) {
-				if (htpc_mode_active) {
-					execlp(steam_bin, steam_bin, "-bigpicture", "steam://open/games", (char *)NULL);
-				} else {
-					execlp(steam_bin, steam_bin, (char *)NULL);
-				}
-				/* execlp failed — fall through to execl below */
+			if (htpc_mode_active)
+				snprintf(cmd_str, sizeof(cmd_str),
+					"%s -bigpicture steam://open/games", steam_bin);
+			else
+				snprintf(cmd_str, sizeof(cmd_str), "%s", steam_bin);
+		} else if (should_use_dgpu(cmd_str)) {
+			set_dgpu_env();
+		}
+
+		/* Build env_prefix for dGPU overrides that login shell
+		 * profile re-sourcing would clobber */
+		char env_prefix[512] = {0};
+		{
+			int eoff = 0;
+			const char *qt_plat = getenv("QT_QPA_PLATFORM");
+			const char *gdk_be = getenv("GDK_BACKEND");
+			if (qt_plat && strcmp(qt_plat, "wayland") != 0) {
+				int n = snprintf(env_prefix + eoff,
+					sizeof(env_prefix) - eoff,
+					"export QT_QPA_PLATFORM=%s; ", qt_plat);
+				if (n > 0 && n < (int)(sizeof(env_prefix) - eoff))
+					eoff += n;
+			}
+			if (gdk_be) {
+				int n = snprintf(env_prefix + eoff,
+					sizeof(env_prefix) - eoff,
+					"export GDK_BACKEND=%s; ", gdk_be);
+				if (n > 0 && n < (int)(sizeof(env_prefix) - eoff))
+					eoff += n;
 			}
 		}
-		if (should_use_dgpu(cmd))
-			set_dgpu_env();
-		execl("/bin/sh", "sh", "-c", cmd, NULL);
+
+		/* Execute through user's login+interactive shell —
+		 * identical to typing the command in a terminal */
+		{
+			char wrapper[8192];
+			snprintf(wrapper, sizeof(wrapper), "%sexec %s",
+				env_prefix, cmd_str);
+			execl(user_shell, user_shell, "-lic", wrapper, NULL);
+		}
 		_exit(127);
 	}
 }

@@ -48,6 +48,7 @@ cleanupmon(struct wl_listener *listener, void *data)
 		wlr_scene_node_destroy(&m->wifi_popup.tree->node);
 	destroy_tree(m);
 	closemon(m);
+	ll_cursor_cleanup(m);
 	wlr_scene_node_destroy(&m->fullscreen_bg->node);
 	free(m);
 
@@ -632,10 +633,13 @@ createmon(struct wl_listener *listener, void *data)
 		wlr_output_state_set_adaptive_sync_enabled(&vrr_test, 1);
 		if (wlr_output_test_state(wlr_output, &vrr_test)) {
 			m->vrr_capable = 1;
-			wlr_log(WLR_INFO, "Monitor %s supports VRR/Adaptive Sync", wlr_output->name);
+			wlr_log(WLR_DEBUG, "Monitor %s supports VRR/Adaptive Sync", wlr_output->name);
 		}
 		wlr_output_state_finish(&vrr_test);
 	}
+
+	/* Low-latency cursor: discover cursor DRM plane for direct atomic commits */
+	ll_cursor_init(m);
 
 	wl_list_insert(&mons, &m->link);
 	printstatus();
@@ -1171,7 +1175,7 @@ apply:
 			} else if (best_n == 1 && m->frame_repeat_enabled) {
 				m->frame_repeat_enabled = 0;
 			}
-			wlr_log(WLR_INFO, "Frame repeat %dx → %dx (%.1f FPS @ %.0f Hz)",
+			wlr_log(WLR_DEBUG, "Frame repeat %dx → %dx (%.1f FPS @ %.0f Hz)",
 				m->frame_repeat_count, best_n, game_fps, display_hz);
 			m->frame_repeat_count = best_n;
 			m->frame_repeat_current = 0;
@@ -1324,7 +1328,7 @@ rendermon(struct wl_listener *listener, void *data)
 		/* Video exited fullscreen - deactivate cadence */
 		m->video_cadence_active = 0;
 		m->video_cadence_counter = 0;
-		wlr_log(WLR_INFO, "Video cadence deactivated");
+		wlr_log(WLR_DEBUG, "Video cadence deactivated");
 	}
 
 	/*
@@ -1422,7 +1426,7 @@ rendermon(struct wl_listener *listener, void *data)
 	if (is_direct_scanout && !m->direct_scanout_active) {
 		m->direct_scanout_active = 1;
 		m->frame_pacing_active = 1; /* Enable frame pacing for direct scanout */
-		wlr_log(WLR_INFO, "Direct scanout activated on %s - frame pacing enabled",
+		wlr_log(WLR_DEBUG, "Direct scanout activated on %s - frame pacing enabled",
 			m->wlr_output->name);
 	} else if (!is_direct_scanout && m->direct_scanout_active) {
 		m->direct_scanout_active = 0;
@@ -1443,7 +1447,7 @@ rendermon(struct wl_listener *listener, void *data)
 	if (is_game && !allow_tearing) {
 		if (!m->frame_pacing_active) {
 			m->frame_pacing_active = 1;
-			wlr_log(WLR_INFO, "Frame pacing enabled for fullscreen game on %s",
+			wlr_log(WLR_DEBUG, "Frame pacing enabled for fullscreen game on %s",
 				m->wlr_output->name);
 		}
 		use_frame_pacing = 1;
@@ -1478,7 +1482,7 @@ rendermon(struct wl_listener *listener, void *data)
 		m->frame_repeat_candidate = 0;
 		m->frame_repeat_candidate_age = 0;
 		m->adaptive_pacing_enabled = 0;
-		wlr_log(WLR_INFO, "Frame repeat disabled - VRR active or tearing enabled");
+		wlr_log(WLR_DEBUG, "Frame repeat disabled - VRR active or tearing enabled");
 	}
 
 	if (needs_frame) {
@@ -1693,7 +1697,7 @@ enable_game_vrr(Monitor *m)
 		return;
 
 	if (!fullscreen_adaptive_sync_enabled) {
-		wlr_log(WLR_INFO, "Game VRR: disabled by user setting");
+		wlr_log(WLR_DEBUG, "Game VRR: disabled by user setting");
 		return;
 	}
 
@@ -1705,7 +1709,7 @@ enable_game_vrr(Monitor *m)
 		m->game_vrr_stable_frames = 0;
 
 		show_hz_osd(m, "Game VRR Enabled");
-		wlr_log(WLR_INFO, "Game VRR enabled on %s", m->wlr_output->name);
+		wlr_log(WLR_DEBUG, "Game VRR enabled on %s", m->wlr_output->name);
 	}
 }
 
@@ -1716,7 +1720,7 @@ disable_game_vrr(Monitor *m)
 		return;
 
 	if (commit_adaptive_sync(m, 0)) {
-		wlr_log(WLR_INFO, "Game VRR disabled on %s (was targeting %.1f FPS)",
+		wlr_log(WLR_DEBUG, "Game VRR disabled on %s (was targeting %.1f FPS)",
 			m->wlr_output->name, m->game_vrr_target_fps);
 	}
 
@@ -1758,7 +1762,7 @@ update_game_vrr(Monitor *m, float current_fps)
 			m->game_vrr_stable_frames = 0;
 			snprintf(osd_msg, sizeof(osd_msg), "VRR: %.0f Hz (full)", display_max_hz);
 			show_hz_osd(m, osd_msg);
-			wlr_log(WLR_INFO, "Game VRR: back to full refresh %.1f Hz", display_max_hz);
+			wlr_log(WLR_DEBUG, "Game VRR: back to full refresh %.1f Hz", display_max_hz);
 		}
 		return;
 	}
@@ -1810,7 +1814,7 @@ update_game_vrr(Monitor *m, float current_fps)
 
 	snprintf(osd_msg, sizeof(osd_msg), "VRR: %.0f Hz", current_fps);
 	show_hz_osd(m, osd_msg);
-	wlr_log(WLR_INFO, "Game VRR: adjusted to %.1f FPS on %s",
+	wlr_log(WLR_DEBUG, "Game VRR: adjusted to %.1f FPS on %s",
 		current_fps, m->wlr_output->name);
 }
 
@@ -1901,7 +1905,7 @@ set_video_refresh_rate(Monitor *m, Client *c)
 	c->frame_time_count = 0;
 	c->detected_video_hz = 0.0f;
 
-	wlr_log(WLR_INFO, "Video content detected on %s, starting frame rate detection",
+	wlr_log(WLR_DEBUG, "Video content detected on %s, starting frame rate detection",
 			m->wlr_output->name);
 
 	/* Schedule video check to detect fps and set appropriate mode */
@@ -1932,7 +1936,7 @@ restore_max_refresh_rate(Monitor *m)
 	if (!max_mode)
 		return;
 
-	wlr_log(WLR_INFO, "Restoring %s to max mode: %dx%d@%dmHz",
+	wlr_log(WLR_DEBUG, "Restoring %s to max mode: %dx%d@%dmHz",
 			m->wlr_output->name, max_mode->width, max_mode->height,
 			max_mode->refresh);
 
@@ -1998,6 +2002,183 @@ detect_10bit_support(Monitor *m)
 	}
 
 	return has_10bit;
+}
+
+/* ── Low-latency cursor plane ─────────────────────────────────────── */
+
+static uint32_t
+ll_find_plane_prop(int fd, uint32_t plane_id, const char *name)
+{
+	drmModeObjectPropertiesPtr props;
+	uint32_t prop_id = 0;
+	unsigned int i;
+
+	props = drmModeObjectGetProperties(fd, plane_id, DRM_MODE_OBJECT_PLANE);
+	if (!props)
+		return 0;
+
+	for (i = 0; i < props->count_props; i++) {
+		drmModePropertyPtr p = drmModeGetProperty(fd, props->props[i]);
+		if (!p)
+			continue;
+		if (strcmp(p->name, name) == 0)
+			prop_id = p->prop_id;
+		drmModeFreeProperty(p);
+		if (prop_id)
+			break;
+	}
+	drmModeFreeObjectProperties(props);
+	return prop_id;
+}
+
+void
+ll_cursor_init(Monitor *m)
+{
+	int drm_fd;
+	uint32_t conn_id, crtc_id = 0;
+	drmModeConnectorPtr conn;
+	drmModeEncoderPtr enc;
+	drmModePlaneResPtr planes;
+	unsigned int i;
+
+	m->ll_cursor_fd = -1;
+	m->ll_cursor_plane_id = 0;
+	m->ll_cursor_crtc_id = 0;
+	m->ll_cursor_prop_x = 0;
+	m->ll_cursor_prop_y = 0;
+	m->ll_cursor_active = 0;
+
+	if (!m->wlr_output || !wlr_output_is_drm(m->wlr_output))
+		return;
+
+	drm_fd = wlr_backend_get_drm_fd(m->wlr_output->backend);
+	if (drm_fd < 0)
+		return;
+
+	conn_id = wlr_drm_connector_get_id(m->wlr_output);
+	if (conn_id == 0)
+		return;
+
+	/* Connector → Encoder → CRTC */
+	conn = drmModeGetConnector(drm_fd, conn_id);
+	if (!conn)
+		return;
+	if (conn->encoder_id == 0) {
+		drmModeFreeConnector(conn);
+		return;
+	}
+	enc = drmModeGetEncoder(drm_fd, conn->encoder_id);
+	drmModeFreeConnector(conn);
+	if (!enc)
+		return;
+	crtc_id = enc->crtc_id;
+	drmModeFreeEncoder(enc);
+	if (crtc_id == 0)
+		return;
+
+	/* Find cursor plane for this CRTC */
+	planes = drmModeGetPlaneResources(drm_fd);
+	if (!planes)
+		return;
+
+	for (i = 0; i < planes->count_planes; i++) {
+		drmModePlanePtr plane = drmModeGetPlane(drm_fd, planes->planes[i]);
+		if (!plane)
+			continue;
+
+		/* Check if this plane can be used with our CRTC */
+		if (!(plane->possible_crtcs & (1u << 0))) {
+			/* Need CRTC index, not ID. Get it properly. */
+		}
+
+		/* Check plane type property */
+		uint32_t type_prop = ll_find_plane_prop(drm_fd, plane->plane_id, "type");
+		if (type_prop) {
+			drmModeObjectPropertiesPtr pprops;
+			pprops = drmModeObjectGetProperties(drm_fd, plane->plane_id,
+				DRM_MODE_OBJECT_PLANE);
+			if (pprops) {
+				unsigned int j;
+				for (j = 0; j < pprops->count_props; j++) {
+					if (pprops->props[j] == type_prop &&
+					    pprops->prop_values[j] == DRM_PLANE_TYPE_CURSOR) {
+						/* Verify this plane is attached to our CRTC */
+						if (plane->crtc_id == crtc_id ||
+						    plane->crtc_id == 0) {
+							m->ll_cursor_plane_id = plane->plane_id;
+						}
+					}
+				}
+				drmModeFreeObjectProperties(pprops);
+			}
+		}
+		drmModeFreePlane(plane);
+		if (m->ll_cursor_plane_id)
+			break;
+	}
+	drmModeFreePlaneResources(planes);
+
+	if (!m->ll_cursor_plane_id) {
+		wlr_log(WLR_DEBUG, "No cursor plane found for %s", m->wlr_output->name);
+		return;
+	}
+
+	/* Look up CRTC_X and CRTC_Y property IDs on the cursor plane */
+	m->ll_cursor_prop_x = ll_find_plane_prop(drm_fd, m->ll_cursor_plane_id, "CRTC_X");
+	m->ll_cursor_prop_y = ll_find_plane_prop(drm_fd, m->ll_cursor_plane_id, "CRTC_Y");
+
+	if (!m->ll_cursor_prop_x || !m->ll_cursor_prop_y) {
+		wlr_log(WLR_DEBUG, "Cursor plane %u missing CRTC_X/Y properties",
+			m->ll_cursor_plane_id);
+		m->ll_cursor_plane_id = 0;
+		return;
+	}
+
+	m->ll_cursor_fd = drm_fd;
+	m->ll_cursor_crtc_id = crtc_id;
+	m->ll_cursor_active = 1;
+
+	wlr_log(WLR_INFO, "Low-latency cursor enabled for %s (plane %u, crtc %u)",
+		m->wlr_output->name, m->ll_cursor_plane_id, m->ll_cursor_crtc_id);
+}
+
+void
+ll_cursor_move(Monitor *m, int x, int y)
+{
+	drmModeAtomicReqPtr req;
+
+	if (!m->ll_cursor_active || m->ll_cursor_fd < 0)
+		return;
+
+	/* Only update if HW cursor is actually engaged */
+	if (!m->wlr_output->hardware_cursor)
+		return;
+
+	req = drmModeAtomicAlloc();
+	if (!req)
+		return;
+
+	drmModeAtomicAddProperty(req, m->ll_cursor_plane_id,
+		m->ll_cursor_prop_x, (uint64_t)(int64_t)x);
+	drmModeAtomicAddProperty(req, m->ll_cursor_plane_id,
+		m->ll_cursor_prop_y, (uint64_t)(int64_t)y);
+
+	/* NONBLOCK, no PAGE_FLIP_EVENT = immediate cursor update, VRR-safe */
+	drmModeAtomicCommit(m->ll_cursor_fd, req,
+		DRM_MODE_ATOMIC_NONBLOCK, NULL);
+
+	drmModeAtomicFree(req);
+}
+
+void
+ll_cursor_cleanup(Monitor *m)
+{
+	m->ll_cursor_fd = -1;
+	m->ll_cursor_plane_id = 0;
+	m->ll_cursor_crtc_id = 0;
+	m->ll_cursor_prop_x = 0;
+	m->ll_cursor_prop_y = 0;
+	m->ll_cursor_active = 0;
 }
 
 int
@@ -2386,7 +2567,7 @@ detect_video_framerate(Client *c)
 
 	/* If not a standard rate but stable, return the exact measured value */
 	if (exact_hz >= 10.0 && exact_hz <= 240.0) {
-		wlr_log(WLR_INFO, "Non-standard framerate detected: %.3f Hz", exact_hz);
+		wlr_log(WLR_DEBUG, "Non-standard framerate detected: %.3f Hz", exact_hz);
 		return (float)exact_hz;
 	}
 
@@ -2508,7 +2689,7 @@ enable_vrr_video_mode(Monitor *m, float video_hz)
 	if (!m->video_mode_active && !m->vrr_active)
 		m->original_mode = m->wlr_output->current_mode;
 
-	wlr_log(WLR_INFO, "Enabling VRR for %.3f Hz video on %s",
+	wlr_log(WLR_DEBUG, "Enabling VRR for %.3f Hz video on %s",
 			video_hz, m->wlr_output->name);
 
 	/* Enable adaptive sync */
@@ -2526,7 +2707,7 @@ enable_vrr_video_mode(Monitor *m, float video_hz)
 			config_head->state.adaptive_sync_enabled = 1;
 			wlr_output_manager_v1_set_configuration(output_mgr, config);
 
-			wlr_log(WLR_INFO, "VRR enabled for %.3f Hz video - judder-free playback",
+			wlr_log(WLR_DEBUG, "VRR enabled for %.3f Hz video - judder-free playback",
 					video_hz);
 
 			/* Show OSD */
@@ -2553,7 +2734,7 @@ disable_vrr_video_mode(Monitor *m)
 	if (!m || !m->wlr_output || !m->wlr_output->enabled || !m->vrr_active)
 		return;
 
-	wlr_log(WLR_INFO, "Disabling VRR on %s", m->wlr_output->name);
+	wlr_log(WLR_DEBUG, "Disabling VRR on %s", m->wlr_output->name);
 
 	wlr_output_state_init(&state);
 	wlr_output_state_set_adaptive_sync_enabled(&state, 0);
@@ -2634,7 +2815,7 @@ apply_best_video_mode(Monitor *m, float video_hz)
 			}
 			show_hz_osd(m, osd_msg);
 
-			wlr_log(WLR_INFO, "Applied existing mode %d.%03d Hz for %.3f Hz video",
+			wlr_log(WLR_DEBUG, "Applied existing mode %d.%03d Hz for %.3f Hz video",
 					best.mode->refresh / 1000, best.mode->refresh % 1000, video_hz);
 		}
 		wlr_output_state_finish(&state);
@@ -2685,7 +2866,7 @@ apply_best_video_mode(Monitor *m, float video_hz)
 			}
 			show_hz_osd(m, osd_msg);
 
-			wlr_log(WLR_INFO, "Applied CVT mode %.3f Hz for %.3f Hz video",
+			wlr_log(WLR_DEBUG, "Applied CVT mode %.3f Hz for %.3f Hz video",
 					best.actual_hz, video_hz);
 		}
 		wlr_output_state_finish(&state);
@@ -2726,7 +2907,7 @@ set_custom_video_mode(Monitor *m, float exact_hz)
 	 * refresh rates at all. This is how high-end displays handle video.
 	 */
 	if (m->vrr_capable && enable_vrr_video_mode(m, exact_hz)) {
-		wlr_log(WLR_INFO, "Using VRR for %.3f Hz video - optimal solution", exact_hz);
+		wlr_log(WLR_DEBUG, "Using VRR for %.3f Hz video - optimal solution", exact_hz);
 		return 1;
 	}
 
@@ -2764,7 +2945,7 @@ set_custom_video_mode(Monitor *m, float exact_hz)
 				config_head->state.mode = friendly_mode;
 				wlr_output_manager_v1_set_configuration(output_mgr, config);
 
-				wlr_log(WLR_INFO, "Using existing mode %d.%03d Hz for %.3f Hz video (%dx)",
+				wlr_log(WLR_DEBUG, "Using existing mode %d.%03d Hz for %.3f Hz video (%dx)",
 						friendly_mode->refresh / 1000, friendly_mode->refresh % 1000,
 						exact_hz, multiplier);
 
@@ -2790,7 +2971,7 @@ set_custom_video_mode(Monitor *m, float exact_hz)
 		multiplier = (int)ceilf(48.0f / exact_hz);
 	}
 
-	wlr_log(WLR_INFO, "Video mode: no VRR, no friendly mode, trying CVT at %dx multiplier",
+	wlr_log(WLR_DEBUG, "Video mode: no VRR, no friendly mode, trying CVT at %dx multiplier",
 			multiplier);
 
 	for (; multiplier <= 8 && !success; multiplier++) {
@@ -2800,7 +2981,7 @@ set_custom_video_mode(Monitor *m, float exact_hz)
 		if (actual_hz > 300.0f)
 			break;
 
-		wlr_log(WLR_INFO, "Video mode: trying %.3f Hz -> %.3f Hz (%dx multiplier)",
+		wlr_log(WLR_DEBUG, "Video mode: trying %.3f Hz -> %.3f Hz (%dx multiplier)",
 				exact_hz, actual_hz, multiplier);
 
 		/* Generate CVT mode with exact timing parameters */
@@ -2813,7 +2994,7 @@ set_custom_video_mode(Monitor *m, float exact_hz)
 			continue;
 		}
 
-		wlr_log(WLR_INFO, "Added custom mode: %dx%d@%d mHz",
+		wlr_log(WLR_DEBUG, "Added custom mode: %dx%d@%d mHz",
 				new_mode->width, new_mode->height, new_mode->refresh);
 
 		/* Try to apply the new mode */
@@ -2830,7 +3011,7 @@ set_custom_video_mode(Monitor *m, float exact_hz)
 				config_head->state.mode = new_mode;
 				wlr_output_manager_v1_set_configuration(output_mgr, config);
 
-				wlr_log(WLR_INFO, "Custom mode %.3f Hz applied for %.3f Hz video (%dx)",
+				wlr_log(WLR_DEBUG, "Custom mode %.3f Hz applied for %.3f Hz video (%dx)",
 						actual_hz, exact_hz, multiplier);
 			} else {
 				wlr_log(WLR_DEBUG, "wlr_output_commit_state failed for %.3f Hz", actual_hz);
@@ -3385,7 +3566,7 @@ generate_cvt_mode(drmModeModeInfo *mode, int hdisplay, int vdisplay, float vrefr
 	snprintf(mode->name, sizeof(mode->name), "%dx%d@%.2f",
 			hdisplay, vdisplay, vrefresh);
 
-	wlr_log(WLR_INFO, "CVT-RB mode: %s clock=%d htotal=%d vtotal=%d",
+	wlr_log(WLR_DEBUG, "CVT-RB mode: %s clock=%d htotal=%d vtotal=%d",
 			mode->name, mode->clock, h_total, v_total);
 	(void)v_back_porch;
 }
@@ -3432,7 +3613,7 @@ setcustomhz(const Arg *arg)
 
 	/* Check if this is a DRM output - only DRM supports custom modes */
 	if (!wlr_output_is_drm(m->wlr_output)) {
-		wlr_log(WLR_INFO, "Output is not DRM, cannot add custom mode");
+		wlr_log(WLR_DEBUG, "Output is not DRM, cannot add custom mode");
 		snprintf(osd_msg, sizeof(osd_msg), "Not DRM output");
 		show_hz_osd(m, osd_msg);
 		return;
@@ -3487,7 +3668,7 @@ setcustomhz(const Arg *arg)
 	/* If no preferred mode found, generate CVT timings as base */
 	if (base_drm_mode.htotal == 0) {
 		generate_cvt_mode(&base_drm_mode, width, height, (float)base_drm_mode.vrefresh);
-		wlr_log(WLR_INFO, "Generated CVT base mode: %dx%d htotal=%d vtotal=%d",
+		wlr_log(WLR_DEBUG, "Generated CVT base mode: %dx%d htotal=%d vtotal=%d",
 				width, height, base_drm_mode.htotal, base_drm_mode.vtotal);
 	}
 
@@ -3511,13 +3692,13 @@ setcustomhz(const Arg *arg)
 		if (actual_hz > 300.0f)
 			break;
 
-		wlr_log(WLR_INFO, "Fixed mode: trying %.3f Hz -> %d Hz (%dx multiplier)",
+		wlr_log(WLR_DEBUG, "Fixed mode: trying %.3f Hz -> %d Hz (%dx multiplier)",
 				target_hz, target_vrefresh, multiplier);
 
 		/* Generate fixed mode - only changes clock, preserves all timings */
 		generate_fixed_mode(&drm_mode, &base_drm_mode, target_vrefresh);
 
-		wlr_log(WLR_INFO, "Fixed mode params: clock=%d htotal=%d vtotal=%d vrefresh=%d",
+		wlr_log(WLR_DEBUG, "Fixed mode params: clock=%d htotal=%d vtotal=%d vrefresh=%d",
 				drm_mode.clock, drm_mode.htotal, drm_mode.vtotal, drm_mode.vrefresh);
 
 		/* Add custom mode to DRM connector */
@@ -3527,7 +3708,7 @@ setcustomhz(const Arg *arg)
 			continue;
 		}
 
-		wlr_log(WLR_INFO, "Added fixed mode: %dx%d@%d mHz",
+		wlr_log(WLR_DEBUG, "Added fixed mode: %dx%d@%d mHz",
 				new_mode->width, new_mode->height, new_mode->refresh);
 
 		/* Try to apply the new mode */
@@ -3544,7 +3725,7 @@ setcustomhz(const Arg *arg)
 				config_head->state.mode = new_mode;
 				wlr_output_manager_v1_set_configuration(output_mgr, config);
 
-				wlr_log(WLR_INFO, "Fixed mode %d Hz applied (%dx %.3f fps)",
+				wlr_log(WLR_DEBUG, "Fixed mode %d Hz applied (%dx %.3f fps)",
 						target_vrefresh, multiplier, target_hz);
 			} else {
 				wlr_log(WLR_DEBUG, "wlr_output_commit_state failed for fixed %d Hz", target_vrefresh);
@@ -3570,7 +3751,7 @@ setcustomhz(const Arg *arg)
 			if (actual_hz > 300.0f)
 				break;
 
-			wlr_log(WLR_INFO, "CVT fallback: trying %.3f Hz -> %.3f Hz (%dx multiplier)",
+			wlr_log(WLR_DEBUG, "CVT fallback: trying %.3f Hz -> %.3f Hz (%dx multiplier)",
 					target_hz, actual_hz, multiplier);
 
 			generate_cvt_mode(&drm_mode, width, height, actual_hz);
@@ -3594,7 +3775,7 @@ setcustomhz(const Arg *arg)
 					config_head->state.mode = new_mode;
 					wlr_output_manager_v1_set_configuration(output_mgr, config);
 
-					wlr_log(WLR_INFO, "CVT mode %.3f Hz applied (%dx %.3f fps)",
+					wlr_log(WLR_DEBUG, "CVT mode %.3f Hz applied (%dx %.3f fps)",
 							actual_hz, multiplier, target_hz);
 				}
 			}
@@ -3621,7 +3802,7 @@ setcustomhz(const Arg *arg)
 				config_head->state.mode = video_mode;
 				wlr_output_manager_v1_set_configuration(output_mgr, config);
 
-				wlr_log(WLR_INFO, "Fallback mode %d.%03d Hz applied (%dx %.3f Hz)",
+				wlr_log(WLR_DEBUG, "Fallback mode %d.%03d Hz applied (%dx %.3f Hz)",
 						video_mode->refresh / 1000, video_mode->refresh % 1000,
 						multiplier, target_hz);
 			}
@@ -3670,9 +3851,6 @@ check_fullscreen_video(void)
 
 		any_fullscreen_active = 1;
 
-		/* Check if this is a game - video detection runs silently for games */
-		int is_game = is_game_content(c) || client_wants_tearing(c);
-
 		/* Check content-type hint from client */
 		int is_video = is_video_content(c);
 
@@ -3690,14 +3868,18 @@ check_fullscreen_video(void)
 
 		/* Already successfully detected */
 		if (c->video_detect_phase == 2 && (m->vrr_active || c->detected_video_hz > 0.0f)) {
-			/* Check if Hz changed significantly - video may have switched */
-			if (hz > 0.0f && fabsf(hz - c->detected_video_hz) > 0.5f) {
-				wlr_log(WLR_INFO, "Video Hz changed from %.3f to %.3f, re-evaluating",
+			/* Check if Hz changed significantly - video may have switched
+			 * Use 2.0 Hz threshold to avoid noise from frame timing jitter.
+			 * Normal video content doesn't fluctuate by < 2 Hz. */
+			if (hz > 0.0f && fabsf(hz - c->detected_video_hz) > 2.0f) {
+				wlr_log(WLR_DEBUG, "Video Hz changed from %.3f to %.3f, re-evaluating",
 						c->detected_video_hz, hz);
 				c->detected_video_hz = hz;
 				m->estimated_game_fps = hz;
 				if (m->vrr_active) {
-					enable_vrr_video_mode(m, hz);
+					/* VRR is already enabled - just update target,
+					 * no DRM commit needed */
+					m->vrr_target_hz = hz;
 				} else if (m->video_cadence_active) {
 					/* Recalculate Bresenham cadence for new fps */
 					float display_hz = 0.0f;
@@ -3714,7 +3896,7 @@ check_fullscreen_video(void)
 						m->video_cadence_accum = 0.0f;
 						m->video_cadence_current_n = m->video_cadence_base;
 						m->video_cadence_counter = 0;
-						wlr_log(WLR_INFO, "Video cadence recalculated: base=%d frac=%.3f",
+						wlr_log(WLR_DEBUG, "Video cadence recalculated: base=%d frac=%.3f",
 								m->video_cadence_base, m->video_cadence_frac);
 					}
 				}
@@ -3770,7 +3952,7 @@ check_fullscreen_video(void)
 						else
 							use_hz = (float)raw_hz;
 
-						wlr_log(WLR_INFO, "Estimated framerate %.3f Hz (raw ~%.1f Hz) on %s",
+						wlr_log(WLR_DEBUG, "Estimated framerate %.3f Hz (raw ~%.1f Hz) on %s",
 								use_hz, raw_hz, m->wlr_output->name);
 					} else {
 						wlr_log(WLR_DEBUG, "Measured Hz (~%.1f) outside video range", raw_hz);
@@ -3785,7 +3967,7 @@ check_fullscreen_video(void)
 
 				/* Try VRR first - best possible solution */
 				if (m->vrr_capable && enable_vrr_video_mode(m, use_hz)) {
-					wlr_log(WLR_INFO, "Video %.3f Hz on %s: using VRR",
+					wlr_log(WLR_DEBUG, "Video %.3f Hz on %s: using VRR",
 							use_hz, m->wlr_output->name);
 				} else {
 					/*
@@ -3837,7 +4019,7 @@ check_fullscreen_video(void)
 					}
 					show_hz_osd(m, osd_msg);
 
-					wlr_log(WLR_INFO, "Video %.3f Hz on %s: cadence base=%d frac=%.3f @ %.0f Hz",
+					wlr_log(WLR_DEBUG, "Video %.3f Hz on %s: cadence base=%d frac=%.3f @ %.0f Hz",
 							use_hz, m->wlr_output->name,
 							m->video_cadence_base, m->video_cadence_frac, display_hz);
 				}
@@ -3860,9 +4042,20 @@ check_fullscreen_video(void)
 		}
 	}
 
-	/* Continue checking while fullscreen clients exist (fast interval) */
-	if (any_fullscreen_active)
-		schedule_video_check(200);
+	/* Continue checking while fullscreen clients exist.
+	 * Use fast interval (200ms) during detection, slow interval (5s)
+	 * once stable to avoid unnecessary DRM commits and event loop stalls. */
+	if (any_fullscreen_active) {
+		int all_stable = 1;
+		wl_list_for_each(m, &mons, link) {
+			c = focustop(m);
+			if (c && c->isfullscreen && c->video_detect_phase < 2) {
+				all_stable = 0;
+				break;
+			}
+		}
+		schedule_video_check(all_stable ? 5000 : 200);
+	}
 }
 
 void
