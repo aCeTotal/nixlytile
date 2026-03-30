@@ -21,6 +21,12 @@ struct wlr_image_description_v1_data {
 	uint32_t tf_named; // enum wp_color_manager_v1_transfer_function, zero if unset
 	uint32_t primaries_named; // enum wp_color_manager_v1_primaries, zero if unset
 
+	bool has_primaries; // custom primaries via set_primaries
+	struct wlr_color_primaries primaries;
+
+	bool has_luminances; // custom luminances via set_luminances
+	struct wlr_color_luminances luminances; // min, max, reference cd/m²
+
 	bool has_mastering_display_primaries;
 	struct wlr_color_primaries mastering_display_primaries;
 

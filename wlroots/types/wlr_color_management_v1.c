@@ -1,16 +1,24 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_color_management_v1.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/util/addon.h>
+#include <wlr/util/log.h>
 
 #include "color-management-v1-protocol.h"
 #include "render/color.h"
 #include "util/mem.h"
+
+#ifdef WLR_HAS_LCMS2
+#include <lcms2.h>
+#endif
 
 #define COLOR_MANAGEMENT_V1_VERSION 2
 
@@ -107,14 +115,26 @@ static void image_desc_handle_get_information(struct wl_client *client,
 	}
 
 	struct wlr_color_primaries primaries;
-	wlr_color_primaries_from_named(&primaries,
-		wlr_color_manager_v1_primaries_to_wlr(image_desc->data.primaries_named));
+	if (image_desc->data.has_primaries) {
+		primaries = image_desc->data.primaries;
+	} else if (image_desc->data.primaries_named != 0) {
+		wlr_color_primaries_from_named(&primaries,
+			wlr_color_manager_v1_primaries_to_wlr(image_desc->data.primaries_named));
+	} else {
+		wlr_color_primaries_from_named(&primaries, WLR_COLOR_NAMED_PRIMARIES_SRGB);
+	}
 
 	struct wlr_color_luminances luminances;
-	wlr_color_transfer_function_get_default_luminance(
-		wlr_color_manager_v1_transfer_function_to_wlr(image_desc->data.tf_named), &luminances);
+	if (image_desc->data.has_luminances) {
+		luminances = image_desc->data.luminances;
+	} else {
+		wlr_color_transfer_function_get_default_luminance(
+			wlr_color_manager_v1_transfer_function_to_wlr(image_desc->data.tf_named), &luminances);
+	}
 
-	wp_image_description_info_v1_send_primaries_named(resource, image_desc->data.primaries_named);
+	if (image_desc->data.primaries_named != 0) {
+		wp_image_description_info_v1_send_primaries_named(resource, image_desc->data.primaries_named);
+	}
 	wp_image_description_info_v1_send_primaries(resource,
 		encode_cie1931_coord(primaries.red.x), encode_cie1931_coord(primaries.red.y),
 		encode_cie1931_coord(primaries.green.x), encode_cie1931_coord(primaries.green.y),
@@ -124,15 +144,28 @@ static void image_desc_handle_get_information(struct wl_client *client,
 	wp_image_description_info_v1_send_luminances(resource,
 		round(luminances.min * 10000), round(luminances.max),
 		round(luminances.reference));
-	// TODO: send mastering display primaries and luminances here when we add
-	// support for features.set_mastering_display_primaries
-	wp_image_description_info_v1_send_target_primaries(resource,
-		encode_cie1931_coord(primaries.red.x), encode_cie1931_coord(primaries.red.y),
-		encode_cie1931_coord(primaries.green.x), encode_cie1931_coord(primaries.green.y),
-		encode_cie1931_coord(primaries.blue.x), encode_cie1931_coord(primaries.blue.y),
-		encode_cie1931_coord(primaries.white.x), encode_cie1931_coord(primaries.white.y));
-	wp_image_description_info_v1_send_target_luminance(resource,
-		round(luminances.min * 10000), round(luminances.max));
+	if (image_desc->data.has_mastering_display_primaries) {
+		struct wlr_color_primaries *mp = &image_desc->data.mastering_display_primaries;
+		wp_image_description_info_v1_send_target_primaries(resource,
+			encode_cie1931_coord(mp->red.x), encode_cie1931_coord(mp->red.y),
+			encode_cie1931_coord(mp->green.x), encode_cie1931_coord(mp->green.y),
+			encode_cie1931_coord(mp->blue.x), encode_cie1931_coord(mp->blue.y),
+			encode_cie1931_coord(mp->white.x), encode_cie1931_coord(mp->white.y));
+	} else {
+		wp_image_description_info_v1_send_target_primaries(resource,
+			encode_cie1931_coord(primaries.red.x), encode_cie1931_coord(primaries.red.y),
+			encode_cie1931_coord(primaries.green.x), encode_cie1931_coord(primaries.green.y),
+			encode_cie1931_coord(primaries.blue.x), encode_cie1931_coord(primaries.blue.y),
+			encode_cie1931_coord(primaries.white.x), encode_cie1931_coord(primaries.white.y));
+	}
+	if (image_desc->data.has_mastering_luminance) {
+		wp_image_description_info_v1_send_target_luminance(resource,
+			round(image_desc->data.mastering_luminance.min * 10000),
+			round(image_desc->data.mastering_luminance.max));
+	} else {
+		wp_image_description_info_v1_send_target_luminance(resource,
+			round(luminances.min * 10000), round(luminances.max));
+	}
 	// TODO: send target_max_cll and target_max_fall
 	wp_image_description_info_v1_send_done(resource);
 	wl_resource_destroy(resource);
@@ -468,7 +501,7 @@ static void image_desc_creator_params_handle_create(struct wl_client *client,
 			"missing transfer function");
 		return;
 	}
-	if (params->data.primaries_named == 0) {
+	if (params->data.primaries_named == 0 && !params->data.has_primaries) {
 		wl_resource_post_error(params_resource,
 			WP_IMAGE_DESCRIPTION_CREATOR_PARAMS_V1_ERROR_INCOMPLETE_SET,
 			"missing primaries");
@@ -565,17 +598,67 @@ static void image_desc_creator_params_handle_set_primaries(struct wl_client *cli
 		struct wl_resource *params_resource, int32_t r_x, int32_t r_y,
 		int32_t g_x, int32_t g_y, int32_t b_x, int32_t b_y,
 		int32_t w_x, int32_t w_y) {
-	wl_resource_post_error(params_resource,
-		WP_IMAGE_DESCRIPTION_CREATOR_PARAMS_V1_ERROR_UNSUPPORTED_FEATURE,
-		"set_primaries is not supported");
+	struct wlr_image_description_creator_params_v1 *params =
+		image_desc_creator_params_from_resource(params_resource);
+	if (!params->manager->features.set_primaries) {
+		wl_resource_post_error(params_resource,
+			WP_IMAGE_DESCRIPTION_CREATOR_PARAMS_V1_ERROR_UNSUPPORTED_FEATURE,
+			"set_primaries is not supported");
+		return;
+	}
+
+	if (params->data.has_primaries || params->data.primaries_named != 0) {
+		wl_resource_post_error(params_resource,
+			WP_IMAGE_DESCRIPTION_CREATOR_PARAMS_V1_ERROR_ALREADY_SET,
+			"primaries already set");
+		return;
+	}
+
+	params->data.has_primaries = true;
+	params->data.primaries = (struct wlr_color_primaries){
+		.red = { decode_cie1931_coord(r_x), decode_cie1931_coord(r_y) },
+		.green = { decode_cie1931_coord(g_x), decode_cie1931_coord(g_y) },
+		.blue = { decode_cie1931_coord(b_x), decode_cie1931_coord(b_y) },
+		.white = { decode_cie1931_coord(w_x), decode_cie1931_coord(w_y) },
+	};
 }
 
 static void image_desc_creator_params_handle_set_luminances(struct wl_client *client,
 		struct wl_resource *params_resource, uint32_t min_lum,
 		uint32_t max_lum, uint32_t reference_lum) {
-	wl_resource_post_error(params_resource,
-		WP_IMAGE_DESCRIPTION_CREATOR_PARAMS_V1_ERROR_UNSUPPORTED_FEATURE,
-		"set_luminances is not supported");
+	struct wlr_image_description_creator_params_v1 *params =
+		image_desc_creator_params_from_resource(params_resource);
+	if (!params->manager->features.set_luminances) {
+		wl_resource_post_error(params_resource,
+			WP_IMAGE_DESCRIPTION_CREATOR_PARAMS_V1_ERROR_UNSUPPORTED_FEATURE,
+			"set_luminances is not supported");
+		return;
+	}
+
+	if (params->data.has_luminances) {
+		wl_resource_post_error(params_resource,
+			WP_IMAGE_DESCRIPTION_CREATOR_PARAMS_V1_ERROR_ALREADY_SET,
+			"luminances already set");
+		return;
+	}
+
+	float min = (float)min_lum / 10000.0f;
+	float max = (float)max_lum;
+	float ref = (float)reference_lum;
+
+	if (max <= min || ref <= min) {
+		wl_resource_post_error(params_resource,
+			WP_IMAGE_DESCRIPTION_CREATOR_PARAMS_V1_ERROR_INVALID_LUMINANCE,
+			"max and reference luminance must be greater than min luminance");
+		return;
+	}
+
+	params->data.has_luminances = true;
+	params->data.luminances = (struct wlr_color_luminances){
+		.min = min,
+		.max = max,
+		.reference = ref,
+	};
 }
 
 static void image_desc_creator_params_handle_set_mastering_display_primaries(
@@ -804,11 +887,328 @@ static void manager_handle_get_surface_feedback(struct wl_client *client,
 	wl_list_insert(&manager->surface_feedbacks, &surface_feedback->link);
 }
 
+/* ── ICC creator ──────────────────────────────────────────────────── */
+
+#define ICC_MAX_SIZE (32u * 1024 * 1024) /* 32 MB per protocol spec */
+
+struct wlr_image_description_creator_icc_v1 {
+	struct wl_resource *resource;
+	struct wlr_color_manager_v1 *manager;
+	void *icc_data;
+	size_t icc_len;
+	bool icc_set;
+};
+
+static const struct wp_image_description_creator_icc_v1_interface icc_creator_impl;
+
+static struct wlr_image_description_creator_icc_v1 *
+icc_creator_from_resource(struct wl_resource *resource) {
+	assert(wl_resource_instance_of(resource,
+		&wp_image_description_creator_icc_v1_interface,
+		&icc_creator_impl));
+	return wl_resource_get_user_data(resource);
+}
+
+#ifdef WLR_HAS_LCMS2
+/* Try to match ICC profile primaries against known named primaries.
+ * Returns 0 if no match. */
+static uint32_t icc_match_primaries(cmsHPROFILE profile) {
+	cmsCIEXYZ *rXYZ = cmsReadTag(profile, cmsSigRedColorantTag);
+	cmsCIEXYZ *gXYZ = cmsReadTag(profile, cmsSigGreenColorantTag);
+	cmsCIEXYZ *bXYZ = cmsReadTag(profile, cmsSigBlueColorantTag);
+	if (!rXYZ || !gXYZ || !bXYZ) {
+		return 0;
+	}
+
+	/* Convert XYZ to xy chromaticity */
+	struct { float x, y; } r, g, b;
+	float rS = rXYZ->X + rXYZ->Y + rXYZ->Z;
+	float gS = gXYZ->X + gXYZ->Y + gXYZ->Z;
+	float bS = bXYZ->X + bXYZ->Y + bXYZ->Z;
+	if (rS == 0 || gS == 0 || bS == 0) {
+		return 0;
+	}
+	r.x = rXYZ->X / rS; r.y = rXYZ->Y / rS;
+	g.x = gXYZ->X / gS; g.y = gXYZ->Y / gS;
+	b.x = bXYZ->X / bS; b.y = bXYZ->Y / bS;
+
+	/* sRGB / BT.709: R(0.64,0.33) G(0.30,0.60) B(0.15,0.06) */
+	const float tol = 0.005f;
+	if (fabsf(r.x - 0.64f) < tol && fabsf(r.y - 0.33f) < tol &&
+	    fabsf(g.x - 0.30f) < tol && fabsf(g.y - 0.60f) < tol &&
+	    fabsf(b.x - 0.15f) < tol && fabsf(b.y - 0.06f) < tol) {
+		return WP_COLOR_MANAGER_V1_PRIMARIES_SRGB;
+	}
+
+	/* BT.2020: R(0.708,0.292) G(0.170,0.797) B(0.131,0.046) */
+	if (fabsf(r.x - 0.708f) < tol && fabsf(r.y - 0.292f) < tol &&
+	    fabsf(g.x - 0.170f) < tol && fabsf(g.y - 0.797f) < tol &&
+	    fabsf(b.x - 0.131f) < tol && fabsf(b.y - 0.046f) < tol) {
+		return WP_COLOR_MANAGER_V1_PRIMARIES_BT2020;
+	}
+
+	return 0;
+}
+
+/* Check if an ICC TRC is close to a pure gamma curve */
+static bool icc_trc_is_gamma(cmsToneCurve *trc, float target, float tol) {
+	if (!trc) {
+		return false;
+	}
+	/* cmsToneCurve estimated gamma */
+	float est = cmsEstimateGamma(trc, 0.001);
+	if (est < 0) {
+		return false;
+	}
+	return fabsf(est - target) < tol;
+}
+
+/* Try to match ICC TRC against known transfer functions */
+static uint32_t icc_match_tf(cmsHPROFILE profile) {
+	cmsToneCurve *rTRC = cmsReadTag(profile, cmsSigRedTRCTag);
+	cmsToneCurve *gTRC = cmsReadTag(profile, cmsSigGreenTRCTag);
+	cmsToneCurve *bTRC = cmsReadTag(profile, cmsSigBlueTRCTag);
+	if (!rTRC || !gTRC || !bTRC) {
+		return 0;
+	}
+
+	/* Check for linear (gamma ~1.0) */
+	if (icc_trc_is_gamma(rTRC, 1.0f, 0.05f) &&
+	    icc_trc_is_gamma(gTRC, 1.0f, 0.05f) &&
+	    icc_trc_is_gamma(bTRC, 1.0f, 0.05f)) {
+		return WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_EXT_LINEAR;
+	}
+
+	/* Check for gamma 2.2 */
+	if (icc_trc_is_gamma(rTRC, 2.2f, 0.1f) &&
+	    icc_trc_is_gamma(gTRC, 2.2f, 0.1f) &&
+	    icc_trc_is_gamma(bTRC, 2.2f, 0.1f)) {
+		return WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_GAMMA22;
+	}
+
+	/* Check for sRGB compound curve (~2.4 with linear segment).
+	 * cmsEstimateGamma returns ~2.2 for sRGB compound curves */
+	float rg = cmsEstimateGamma(rTRC, 0.001);
+	if (rg >= 2.1f && rg <= 2.5f && cmsIsToneCurveMultisegment(rTRC)) {
+		return WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_COMPOUND_POWER_2_4;
+	}
+
+	/* BT.1886 is effectively gamma 2.4 pure power */
+	if (icc_trc_is_gamma(rTRC, 2.4f, 0.05f) &&
+	    icc_trc_is_gamma(gTRC, 2.4f, 0.05f) &&
+	    icc_trc_is_gamma(bTRC, 2.4f, 0.05f)) {
+		return WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_BT1886;
+	}
+
+	/* Default: treat as gamma 2.2 if we have a reasonable gamma */
+	if (rg >= 1.8f && rg <= 3.0f) {
+		return WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_GAMMA22;
+	}
+
+	return 0;
+}
+#endif /* WLR_HAS_LCMS2 */
+
+static void icc_creator_handle_create(struct wl_client *client,
+		struct wl_resource *creator_resource, uint32_t id) {
+	struct wlr_image_description_creator_icc_v1 *creator =
+		icc_creator_from_resource(creator_resource);
+
+	if (!creator->icc_set) {
+		wl_resource_post_error(creator_resource,
+			WP_IMAGE_DESCRIPTION_CREATOR_ICC_V1_ERROR_INCOMPLETE_SET,
+			"ICC file not set");
+		return;
+	}
+
+	void *icc_data = creator->icc_data;
+	size_t icc_len = creator->icc_len;
+	struct wlr_color_manager_v1 *manager = creator->manager;
+
+	/* Detach data from creator — we own it now */
+	creator->icc_data = NULL;
+	creator->icc_len = 0;
+
+#ifdef WLR_HAS_LCMS2
+	cmsHPROFILE profile = cmsOpenProfileFromMem(icc_data, icc_len);
+	if (!profile) {
+		wlr_log(WLR_DEBUG, "ICC creator: failed to open profile");
+		image_desc_create_failed(creator_resource, id,
+			WP_IMAGE_DESCRIPTION_V1_CAUSE_UNSUPPORTED,
+			"invalid ICC profile");
+		free(icc_data);
+		wl_resource_destroy(creator_resource);
+		return;
+	}
+
+	/* Validate: must be RGB, Display or ColorSpace class */
+	cmsColorSpaceSignature cs = cmsGetColorSpace(profile);
+	cmsProfileClassSignature cls = cmsGetDeviceClass(profile);
+	if (cs != cmsSigRgbData ||
+	    (cls != cmsSigDisplayClass && cls != cmsSigColorSpaceClass)) {
+		wlr_log(WLR_DEBUG, "ICC creator: profile is not 3-channel RGB Display/ColorSpace");
+		cmsCloseProfile(profile);
+		image_desc_create_failed(creator_resource, id,
+			WP_IMAGE_DESCRIPTION_V1_CAUSE_UNSUPPORTED,
+			"ICC profile must be 3-channel RGB Display or ColorSpace class");
+		free(icc_data);
+		wl_resource_destroy(creator_resource);
+		return;
+	}
+
+	/* Try to match to parametric representation */
+	uint32_t primaries_named = icc_match_primaries(profile);
+	uint32_t tf_named = icc_match_tf(profile);
+	cmsCloseProfile(profile);
+	free(icc_data);
+
+	if (tf_named == 0) {
+		/* Fall back to gamma 2.2 */
+		tf_named = WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_GAMMA22;
+	}
+	if (primaries_named == 0) {
+		/* Fall back to sRGB */
+		primaries_named = WP_COLOR_MANAGER_V1_PRIMARIES_SRGB;
+	}
+
+	struct wlr_image_description_v1_data data = {
+		.tf_named = tf_named,
+		.primaries_named = primaries_named,
+	};
+	/* ICC-created image descriptions do not allow get_information */
+	image_desc_create_ready(manager, creator_resource, id, &data, false);
+	wl_resource_destroy(creator_resource);
+#else
+	(void)icc_len;
+	(void)manager;
+	free(icc_data);
+	image_desc_create_failed(creator_resource, id,
+		WP_IMAGE_DESCRIPTION_V1_CAUSE_UNSUPPORTED,
+		"ICC profile support not compiled in (no lcms2)");
+	wl_resource_destroy(creator_resource);
+#endif
+}
+
+static void icc_creator_handle_set_icc_file(struct wl_client *client,
+		struct wl_resource *creator_resource, int32_t fd,
+		uint32_t offset, uint32_t length) {
+	struct wlr_image_description_creator_icc_v1 *creator =
+		icc_creator_from_resource(creator_resource);
+
+	if (creator->icc_set) {
+		close(fd);
+		wl_resource_post_error(creator_resource,
+			WP_IMAGE_DESCRIPTION_CREATOR_ICC_V1_ERROR_ALREADY_SET,
+			"ICC file already set");
+		return;
+	}
+
+	if (length == 0 || length > ICC_MAX_SIZE) {
+		close(fd);
+		wl_resource_post_error(creator_resource,
+			WP_IMAGE_DESCRIPTION_CREATOR_ICC_V1_ERROR_BAD_SIZE,
+			"ICC data length must be between 1 and 32MB");
+		return;
+	}
+
+	/* Verify seekable */
+	off_t cur = lseek(fd, 0, SEEK_CUR);
+	if (cur == (off_t)-1) {
+		close(fd);
+		wl_resource_post_error(creator_resource,
+			WP_IMAGE_DESCRIPTION_CREATOR_ICC_V1_ERROR_BAD_FD,
+			"fd is not seekable");
+		return;
+	}
+
+	/* Check file size */
+	struct stat st;
+	if (fstat(fd, &st) != 0 || (uint64_t)offset + length > (uint64_t)st.st_size) {
+		close(fd);
+		wl_resource_post_error(creator_resource,
+			WP_IMAGE_DESCRIPTION_CREATOR_ICC_V1_ERROR_OUT_OF_FILE,
+			"offset + length exceeds file size");
+		return;
+	}
+
+	/* Read ICC data */
+	void *data = malloc(length);
+	if (!data) {
+		close(fd);
+		wl_client_post_no_memory(client);
+		return;
+	}
+
+	if (lseek(fd, offset, SEEK_SET) == (off_t)-1) {
+		close(fd);
+		free(data);
+		wl_resource_post_error(creator_resource,
+			WP_IMAGE_DESCRIPTION_CREATOR_ICC_V1_ERROR_BAD_FD,
+			"failed to seek to offset");
+		return;
+	}
+
+	size_t total = 0;
+	while (total < length) {
+		ssize_t n = read(fd, (char *)data + total, length - total);
+		if (n <= 0) {
+			close(fd);
+			free(data);
+			wl_resource_post_error(creator_resource,
+				WP_IMAGE_DESCRIPTION_CREATOR_ICC_V1_ERROR_BAD_FD,
+				"failed to read ICC data");
+			return;
+		}
+		total += n;
+	}
+	close(fd);
+
+	creator->icc_data = data;
+	creator->icc_len = length;
+	creator->icc_set = true;
+}
+
+static const struct wp_image_description_creator_icc_v1_interface icc_creator_impl = {
+	.create = icc_creator_handle_create,
+	.set_icc_file = icc_creator_handle_set_icc_file,
+};
+
+static void icc_creator_handle_resource_destroy(struct wl_resource *resource) {
+	struct wlr_image_description_creator_icc_v1 *creator =
+		icc_creator_from_resource(resource);
+	free(creator->icc_data);
+	free(creator);
+}
+
 static void manager_handle_create_icc_creator(struct wl_client *client,
 		struct wl_resource *manager_resource, uint32_t id) {
-	wl_resource_post_error(manager_resource,
-		WP_COLOR_MANAGER_V1_ERROR_UNSUPPORTED_FEATURE,
-		"new_icc_creator is not supported");
+	struct wlr_color_manager_v1 *manager = manager_from_resource(manager_resource);
+	if (!manager->features.icc_v2_v4) {
+		wl_resource_post_error(manager_resource,
+			WP_COLOR_MANAGER_V1_ERROR_UNSUPPORTED_FEATURE,
+			"new_icc_creator is not supported");
+		return;
+	}
+
+	struct wlr_image_description_creator_icc_v1 *creator =
+		calloc(1, sizeof(*creator));
+	if (!creator) {
+		wl_client_post_no_memory(client);
+		return;
+	}
+
+	creator->manager = manager;
+
+	uint32_t version = wl_resource_get_version(manager_resource);
+	creator->resource = wl_resource_create(client,
+		&wp_image_description_creator_icc_v1_interface, version, id);
+	if (!creator->resource) {
+		wl_client_post_no_memory(client);
+		free(creator);
+		return;
+	}
+	wl_resource_set_implementation(creator->resource, &icc_creator_impl,
+		creator, icc_creator_handle_resource_destroy);
 }
 
 static void manager_handle_create_parametric_creator(struct wl_client *client,
@@ -934,10 +1334,7 @@ struct wlr_color_manager_v1 *wlr_color_manager_v1_create(struct wl_display *disp
 	}
 
 	// TODO: add support for all of these features
-	assert(!options->features.icc_v2_v4);
-	assert(!options->features.set_primaries);
 	assert(!options->features.set_tf_power);
-	assert(!options->features.set_luminances);
 	assert(!options->features.extended_target_volume);
 	assert(!options->features.windows_scrgb);
 
