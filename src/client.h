@@ -228,14 +228,27 @@ client_is_float_type(Client *c)
 		if (surface->modal)
 			return 1;
 
-		/* Only float for explicit non-app window types.
-		 * Size hints are NOT used — they cause false positives
-		 * where normal windows get placed floating. */
+		/* Float for explicit non-app window types */
 		if (wlr_xwayland_surface_has_window_type(surface, WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DIALOG)
 				|| wlr_xwayland_surface_has_window_type(surface, WLR_XWAYLAND_NET_WM_WINDOW_TYPE_SPLASH)
 				|| wlr_xwayland_surface_has_window_type(surface, WLR_XWAYLAND_NET_WM_WINDOW_TYPE_TOOLBAR)
 				|| wlr_xwayland_surface_has_window_type(surface, WLR_XWAYLAND_NET_WM_WINDOW_TYPE_UTILITY)) {
 			return 1;
+		}
+
+		/* Float non-resizable X11 windows (min == max size).
+		 * Catches splash screens, bootstrappers, login dialogs
+		 * (e.g. Steam startup) that use NORMAL type but have
+		 * fixed dimensions. */
+		{
+			xcb_size_hints_t *sh = surface->size_hints;
+			if (sh &&
+			    (sh->flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE) &&
+			    (sh->flags & XCB_ICCCM_SIZE_HINT_P_MAX_SIZE) &&
+			    sh->min_width > 0 && sh->min_height > 0 &&
+			    sh->max_width == sh->min_width &&
+			    sh->max_height == sh->min_height)
+				return 1;
 		}
 
 		return 0;

@@ -467,72 +467,23 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 
 					resolve_nix_store_exec(cmd_str, sizeof(cmd_str));
 
-					/* Try direct execvp() first — avoids
-					 * interactive shell issues (.bashrc side
-					 * effects, job control, signal changes).
-					 * Falls back to shell for commands with
-					 * shell metacharacters. */
+					/* Interactive shell — matches terminal
+					 * behavior: inherit session env, source
+					 * ~/.bashrc/~/.zshrc, then exec.  Apps
+					 * like FreeCAD need env vars that NixOS
+					 * home-manager sets in shell init. */
 					{
-						int has_meta = 0;
-						for (const char *p = cmd_str; *p; p++) {
-							if (*p == '|' || *p == '&' ||
-							    *p == ';' || *p == '$' ||
-							    *p == '`' || *p == '(' ||
-							    *p == ')' || *p == '>' ||
-							    *p == '<' || *p == '{' ||
-							    *p == '}' || *p == '~' ||
-							    *p == '*' || *p == '?' ||
-							    *p == '[' || *p == ']' ||
-							    *p == '\'' || *p == '"' ||
-							    *p == '\\') {
-								has_meta = 1;
-								break;
-							}
-						}
-
-						if (!has_meta) {
-							/* Simple command: tokenize and
-							 * execvp() directly. */
-							char buf[512];
-							char *argv[64];
-							int argc = 0;
-							char *s, *tok, *sv = NULL;
-
-							snprintf(buf, sizeof(buf), "%s",
-								cmd_str);
-							for (s = buf; argc < 63; s = NULL) {
-								tok = strtok_r(s, " \t",
-									&sv);
-								if (!tok)
-									break;
-								argv[argc++] = tok;
-							}
-							argv[argc] = NULL;
-
-							if (argc > 0)
-								execvp(argv[0], argv);
-							/* execvp failed — fall through
-							 * to shell fallback */
-						}
-
-						/* Fallback: non-interactive shell.
-						 * No -i flag to avoid .bashrc side
-						 * effects — the session environment
-						 * from the compositor (PATH, DBUS,
-						 * etc.) is already correct. */
-						{
-							const char *user_shell =
-								getenv("SHELL");
-							if (!user_shell ||
-							    !user_shell[0])
-								user_shell = "/bin/sh";
-							char wrapper[4096];
-							snprintf(wrapper,
-								sizeof(wrapper),
-								"exec %s", cmd_str);
-							execl(user_shell, user_shell,
-								"-c", wrapper, NULL);
-						}
+						const char *user_shell =
+							getenv("SHELL");
+						if (!user_shell ||
+						    !user_shell[0])
+							user_shell = "/bin/sh";
+						char wrapper[4096];
+						snprintf(wrapper,
+							sizeof(wrapper),
+							"exec %s", cmd_str);
+						execl(user_shell, user_shell,
+							"-ic", wrapper, NULL);
 					}
 					_exit(127);
 				}
