@@ -242,9 +242,20 @@ client_is_float_type(Client *c)
 	}
 #endif
 
-	/* XDG clients: never auto-float based on size hints.
-	 * Parent windows are handled in mapnotify via client_get_parent().
-	 * Use rules in config.h for app-specific floating. */
+	/* XDG clients: float windows with fixed size constraints
+	 * (min == max and both > 0).  This catches splash screens,
+	 * dialogs, and other non-resizable windows from apps like
+	 * Discord (Electron), Steam, FreeCAD, etc. that don't set
+	 * a parent but are clearly not meant to be tiled.
+	 * Parent windows are handled in mapnotify via client_get_parent(). */
+	if (c->type == XDGShell && c->surface.xdg && c->surface.xdg->toplevel) {
+		struct wlr_xdg_toplevel_state *st = &c->surface.xdg->toplevel->current;
+		if (st->min_width > 0 && st->min_height > 0 &&
+				st->max_width > 0 && st->max_height > 0 &&
+				st->max_width == st->min_width &&
+				st->max_height == st->min_height)
+			return 1;
+	}
 	return 0;
 }
 

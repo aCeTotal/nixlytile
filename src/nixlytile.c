@@ -3609,35 +3609,55 @@ spawn(const Arg *arg)
 			set_dgpu_env();
 		}
 
-		/* Build env_prefix for dGPU overrides */
-		char env_prefix[512] = {0};
+		/* Try direct execvp() first for simple commands —
+		 * avoids interactive shell issues (.bashrc side effects,
+		 * job control, signal changes). */
 		{
-			int eoff = 0;
-			const char *qt_plat = getenv("QT_QPA_PLATFORM");
-			const char *gdk_be = getenv("GDK_BACKEND");
-			if (qt_plat && strcmp(qt_plat, "wayland") != 0) {
-				int n = snprintf(env_prefix + eoff,
-					sizeof(env_prefix) - eoff,
-					"export QT_QPA_PLATFORM=%s; ", qt_plat);
-				if (n > 0 && n < (int)(sizeof(env_prefix) - eoff))
-					eoff += n;
+			int has_meta = 0;
+			for (const char *p = cmd_str; *p; p++) {
+				if (*p == '|' || *p == '&' ||
+				    *p == ';' || *p == '$' ||
+				    *p == '`' || *p == '(' ||
+				    *p == ')' || *p == '>' ||
+				    *p == '<' || *p == '{' ||
+				    *p == '}' || *p == '~' ||
+				    *p == '*' || *p == '?' ||
+				    *p == '[' || *p == ']' ||
+				    *p == '\'' || *p == '"' ||
+				    *p == '\\') {
+					has_meta = 1;
+					break;
+				}
 			}
-			if (gdk_be) {
-				int n = snprintf(env_prefix + eoff,
-					sizeof(env_prefix) - eoff,
-					"export GDK_BACKEND=%s; ", gdk_be);
-				if (n > 0 && n < (int)(sizeof(env_prefix) - eoff))
-					eoff += n;
-			}
-		}
 
-		/* Execute through user's interactive shell —
-		 * identical to typing the command in a terminal */
-		{
-			char wrapper[8192];
-			snprintf(wrapper, sizeof(wrapper), "%sexec %s",
-				env_prefix, cmd_str);
-			execl(user_shell, user_shell, "-ic", wrapper, NULL);
+			if (!has_meta) {
+				char buf[4096];
+				char *argv[64];
+				int argc = 0;
+				char *s, *tok, *sv = NULL;
+
+				snprintf(buf, sizeof(buf), "%s", cmd_str);
+				for (s = buf; argc < 63; s = NULL) {
+					tok = strtok_r(s, " \t", &sv);
+					if (!tok)
+						break;
+					argv[argc++] = tok;
+				}
+				argv[argc] = NULL;
+
+				if (argc > 0)
+					execvp(argv[0], argv);
+				/* execvp failed — fall through to shell */
+			}
+
+			/* Fallback: non-interactive shell */
+			{
+				char wrapper[8192];
+				snprintf(wrapper, sizeof(wrapper),
+					"exec %s", cmd_str);
+				execl(user_shell, user_shell, "-c",
+					wrapper, NULL);
+			}
 		}
 		_exit(127);
 	}

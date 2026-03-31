@@ -466,41 +466,72 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 
 					resolve_nix_store_exec(cmd_str, sizeof(cmd_str));
 
-					/* Interactive shell (no login) — matches what a
-					 * terminal does: inherit session env, source
-					 * ~/.bashrc/~/.zshrc, exec the command. */
+					/* Try direct execvp() first — avoids
+					 * interactive shell issues (.bashrc side
+					 * effects, job control, signal changes).
+					 * Falls back to shell for commands with
+					 * shell metacharacters. */
 					{
-						const char *user_shell = getenv("SHELL");
-						if (!user_shell || !user_shell[0])
-							user_shell = "/bin/sh";
-
-						/* Build env_prefix for dGPU overrides */
-						char env_prefix[512] = {0};
-						int eoff = 0;
-						const char *qt_plat = getenv("QT_QPA_PLATFORM");
-						const char *gdk_be = getenv("GDK_BACKEND");
-						if (qt_plat && strcmp(qt_plat, "wayland") != 0) {
-							int n = snprintf(env_prefix + eoff,
-								sizeof(env_prefix) - eoff,
-								"export QT_QPA_PLATFORM=%s; ", qt_plat);
-							if (n > 0 && n < (int)(sizeof(env_prefix) - eoff))
-								eoff += n;
-						}
-						if (gdk_be) {
-							int n = snprintf(env_prefix + eoff,
-								sizeof(env_prefix) - eoff,
-								"export GDK_BACKEND=%s; ", gdk_be);
-							if (n > 0 && n < (int)(sizeof(env_prefix) - eoff))
-								eoff += n;
+						int has_meta = 0;
+						for (const char *p = cmd_str; *p; p++) {
+							if (*p == '|' || *p == '&' ||
+							    *p == ';' || *p == '$' ||
+							    *p == '`' || *p == '(' ||
+							    *p == ')' || *p == '>' ||
+							    *p == '<' || *p == '{' ||
+							    *p == '}' || *p == '~' ||
+							    *p == '*' || *p == '?' ||
+							    *p == '[' || *p == ']' ||
+							    *p == '\'' || *p == '"' ||
+							    *p == '\\') {
+								has_meta = 1;
+								break;
+							}
 						}
 
-						/* Clean exec — identical to shell prompt.
-						 * No logging wrapper, no stderr redirect. */
-						char wrapper[4096];
-						snprintf(wrapper, sizeof(wrapper),
-							"%sexec %s", env_prefix, cmd_str);
-						execl(user_shell, user_shell, "-ic",
-							wrapper, NULL);
+						if (!has_meta) {
+							/* Simple command: tokenize and
+							 * execvp() directly. */
+							char buf[512];
+							char *argv[64];
+							int argc = 0;
+							char *s, *tok, *sv = NULL;
+
+							snprintf(buf, sizeof(buf), "%s",
+								cmd_str);
+							for (s = buf; argc < 63; s = NULL) {
+								tok = strtok_r(s, " \t",
+									&sv);
+								if (!tok)
+									break;
+								argv[argc++] = tok;
+							}
+							argv[argc] = NULL;
+
+							if (argc > 0)
+								execvp(argv[0], argv);
+							/* execvp failed — fall through
+							 * to shell fallback */
+						}
+
+						/* Fallback: non-interactive shell.
+						 * No -i flag to avoid .bashrc side
+						 * effects — the session environment
+						 * from the compositor (PATH, DBUS,
+						 * etc.) is already correct. */
+						{
+							const char *user_shell =
+								getenv("SHELL");
+							if (!user_shell ||
+							    !user_shell[0])
+								user_shell = "/bin/sh";
+							char wrapper[4096];
+							snprintf(wrapper,
+								sizeof(wrapper),
+								"exec %s", cmd_str);
+							execl(user_shell, user_shell,
+								"-c", wrapper, NULL);
+						}
 					}
 					_exit(127);
 				}
@@ -524,12 +555,10 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 		} else if (mo->active_idx == 2 && sel >= 0 && sel < mo->result_count[2]) {
 			const char *path = mo->git_results_path[sel];
 			if (path && *path) {
-				char cmd_str[PATH_MAX + 64];
-				char *cmd[4] = { "sh", "-c", cmd_str, NULL };
-				Arg arg;
-				/* Open terminal in the git project directory */
-				snprintf(cmd_str, sizeof(cmd_str), "cd '%s' && alacritty", path);
-				arg.v = cmd;
+				char *cmd[] = { "alacritty",
+					"--working-directory", (char *)path,
+					NULL };
+				Arg arg = { .v = cmd };
 				spawn(&arg);
 				modal_hide_all();
 			}

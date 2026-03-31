@@ -2763,6 +2763,14 @@ ensure_nix_paths(void)
 		}
 	}
 
+	/* System-wide NixOS binaries */
+	if (!strstr(newpath, "/run/current-system/sw/bin")) {
+		char tmp[8192];
+		snprintf(tmp, sizeof(tmp), "%s:/run/current-system/sw/bin", newpath);
+		snprintf(newpath, sizeof(newpath), "%s", tmp);
+		need_update = 1;
+	}
+
 	if (need_update)
 		setenv("PATH", newpath, 1);
 }
