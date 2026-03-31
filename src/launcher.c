@@ -460,7 +460,8 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 						else
 							snprintf(cmd_str, sizeof(cmd_str),
 								"%s", steam_bin);
-					} else if (desktop_entries[idx].prefers_dgpu || should_use_dgpu(cmd_str)) {
+					} else if ((desktop_entries[idx].prefers_dgpu || should_use_dgpu(cmd_str))
+						&& integrated_gpu_idx >= 0) {
 						set_dgpu_env();
 					}
 

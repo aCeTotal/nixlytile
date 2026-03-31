@@ -3605,7 +3605,7 @@ spawn(const Arg *arg)
 					"%s -bigpicture steam://open/games", steam_bin);
 			else
 				snprintf(cmd_str, sizeof(cmd_str), "%s", steam_bin);
-		} else if (should_use_dgpu(cmd_str)) {
+		} else if (should_use_dgpu(cmd_str) && integrated_gpu_idx >= 0) {
 			set_dgpu_env();
 		}
 
