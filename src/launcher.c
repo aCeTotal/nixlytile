@@ -440,8 +440,11 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 							(void)chdir(home);
 					}
 
-					/* Fresh NixOS env for the login shell */
-					unsetenv("__NIXOS_SET_ENVIRONMENT_DONE");
+					/* Keep full session environment intact (DBUS,
+					 * network config, proxies, etc.) — do NOT
+					 * re-source /etc/set-environment via login
+					 * shell, as that clobbers session vars.
+					 * ensure_nix_paths() is a PATH safety net. */
 					ensure_nix_paths();
 
 					if (is_steam_cmd(cmd_str)) {
@@ -463,16 +466,15 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 
 					resolve_nix_store_exec(cmd_str, sizeof(cmd_str));
 
-					/* Use the user's login+interactive shell so the
-					 * program gets the exact same environment as
-					 * typing the command in a terminal. */
+					/* Interactive shell (no login) — matches what a
+					 * terminal does: inherit session env, source
+					 * ~/.bashrc/~/.zshrc, exec the command. */
 					{
 						const char *user_shell = getenv("SHELL");
 						if (!user_shell || !user_shell[0])
 							user_shell = "/bin/sh";
 
-						/* Build env_prefix for dGPU overrides that
-						 * login profile re-sourcing would clobber */
+						/* Build env_prefix for dGPU overrides */
 						char env_prefix[512] = {0};
 						int eoff = 0;
 						const char *qt_plat = getenv("QT_QPA_PLATFORM");
@@ -497,7 +499,7 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 						char wrapper[4096];
 						snprintf(wrapper, sizeof(wrapper),
 							"%sexec %s", env_prefix, cmd_str);
-						execl(user_shell, user_shell, "-lic",
+						execl(user_shell, user_shell, "-ic",
 							wrapper, NULL);
 					}
 					_exit(127);
@@ -796,9 +798,13 @@ modal_file_search_start_mode(Monitor *m, int fallback)
 		close(pipefd[1]);
 		setsid();
 
-		/* Read file search from cache (cache updated at nixlytile startup) */
+		/* Read file search from cache; fall back to live fd scan if cache is empty */
 		execlp("sh", "sh", "-c",
-			"cat \"${XDG_CACHE_HOME:-$HOME/.cache}/nixlytile-file-search\" 2>/dev/null",
+			"cache=\"${XDG_CACHE_HOME:-$HOME/.cache}/nixlytile-file-search\"; "
+			"if [ -s \"$cache\" ]; then cat \"$cache\"; "
+			"else fd -t f . -E node_modules -E __pycache__ -E .git "
+			"\"$HOME\" /mnt /media /run/media 2>/dev/null | "
+			"head -10000 | awk -F/ '{print $NF\"\\t\"$0\"\\t0\"}'; fi",
 			(char *)NULL);
 		_exit(127);
 	} else if (pid < 0) {
@@ -933,8 +939,10 @@ modal_file_search_event(int fd, uint32_t mask, void *data)
 	if (mo->active_idx == 1 && mo->result_count[1] > 0)
 		modal_ensure_selection_visible(m);
 	/* Only render if user is not actively typing */
-	if (m->modal.visible && !mo->render_pending)
+	if (m->modal.visible && !mo->render_pending) {
 		modal_render(m);
+		wlr_output_schedule_frame(m->wlr_output);
+	}
 	return 0;
 }
 
@@ -1041,6 +1049,7 @@ modal_git_search_add_line(Monitor *m, const char *line)
 	snprintf(mo->results[2][idx], sizeof(mo->results[2][idx]), "%s", short_path);
 	mo->result_count[2]++;
 	mo->git_result_count++;
+	wlr_log(WLR_INFO, "modal git search add: [%d] '%s' -> '%s'", idx, name, short_path);
 
 	if (mo->selected[2] < 0)
 		mo->selected[2] = 0;
@@ -1091,8 +1100,11 @@ modal_git_search_event(int fd, uint32_t mask, void *data)
 	if (fd != mo->git_search_fd)
 		return 0;
 
+	wlr_log(WLR_INFO, "modal git search event: mask=0x%x fd=%d", mask, fd);
+
 	while ((n = read(fd, buf, sizeof(buf) - 1)) > 0) {
 		buf[n] = '\0';
+		wlr_log(WLR_INFO, "modal git search read %zd bytes (buf_len=%zu)", n, mo->git_search_len);
 		size_t space = sizeof(mo->git_search_buf) - mo->git_search_len - 1;
 		if ((size_t)n > space)
 			n = (ssize_t)space;
@@ -1108,6 +1120,8 @@ modal_git_search_event(int fd, uint32_t mask, void *data)
 
 	if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
 		mo->git_search_done = 1;
+		wlr_log(WLR_INFO, "modal git search done: %d results (result_count[2]=%d, active_idx=%d)",
+			mo->git_result_count, mo->result_count[2], mo->active_idx);
 		modal_git_search_stop(m);
 		if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
 			wlr_log(WLR_ERROR, "modal git search read error: %s", strerror(errno));
@@ -1118,8 +1132,12 @@ modal_git_search_event(int fd, uint32_t mask, void *data)
 	if (mo->active_idx == 2 && mo->result_count[2] > 0)
 		modal_ensure_selection_visible(m);
 	/* Render after receiving git search results */
-	if (mo->active_idx == 2)
+	if (mo->active_idx == 2) {
+		wlr_log(WLR_INFO, "modal git search render: result_count[2]=%d visible=%d",
+			mo->result_count[2], mo->visible);
 		modal_render(m);
+		wlr_output_schedule_frame(m->wlr_output);
+	}
 	return 0;
 }
 
@@ -1158,9 +1176,17 @@ modal_git_search_start(Monitor *m)
 		close(pipefd[1]);
 		setsid();
 
-		/* Read git projects from cache only (cache updated at nixlytile startup) */
+		/* Read git projects from cache; fall back to live fd scan if cache is empty */
 		execlp("sh", "sh", "-c",
-			"cat \"${XDG_CACHE_HOME:-$HOME/.cache}/nixlytile-git-projects\" 2>/dev/null",
+			"cache=\"${XDG_CACHE_HOME:-$HOME/.cache}/nixlytile-git-projects\"; "
+			"if [ -s \"$cache\" ]; then cat \"$cache\"; "
+			"else fd -H -t d '^\\.git$' -E '.local' -E '.config' -E '.cache' "
+			"-E '.npm' -E '.cargo' -E 'node_modules' -E '.Trash*' "
+			"\"$HOME\" /mnt /media /run/media 2>/dev/null | "
+			"sed 's|/\\.git/$||' | while IFS= read -r d; do "
+			"  mtime=$(stat -c %Y \"$d\" 2>/dev/null || echo 0); "
+			"  printf '%s\\t%s\\n' \"$mtime\" \"$d\"; "
+			"done | sort -rn | head -500; fi",
 			(char *)NULL);
 		_exit(127);
 	} else if (pid < 0) {

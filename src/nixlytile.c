@@ -3546,13 +3546,14 @@ spawn(const Arg *arg)
 				(void)chdir(home);
 		}
 
-		/* Force re-sourcing of /etc/set-environment for fresh NixOS env */
-		unsetenv("__NIXOS_SET_ENVIRONMENT_DONE");
+		/* Keep full session environment intact (DBUS, network config,
+		 * proxies, etc.) — do NOT re-source /etc/set-environment via
+		 * login shell, as that clobbers session-specific vars.
+		 * ensure_nix_paths() is a PATH safety net. */
 		ensure_nix_paths();
 
-		/* Use the user's login shell so programs get the same
-		 * environment as when launched from a terminal.
-		 * -l (login): sources /etc/profile, ~/.profile, ~/.bash_profile
+		/* Interactive shell (no login) — matches what a terminal does:
+		 * inherit session env, source ~/.bashrc/~/.zshrc, exec cmd.
 		 * -i (interactive): sources ~/.bashrc / ~/.zshrc
 		 * -c: executes the command string */
 		const char *user_shell = getenv("SHELL");
@@ -3608,8 +3609,7 @@ spawn(const Arg *arg)
 			set_dgpu_env();
 		}
 
-		/* Build env_prefix for dGPU overrides that login shell
-		 * profile re-sourcing would clobber */
+		/* Build env_prefix for dGPU overrides */
 		char env_prefix[512] = {0};
 		{
 			int eoff = 0;
@@ -3631,13 +3631,13 @@ spawn(const Arg *arg)
 			}
 		}
 
-		/* Execute through user's login+interactive shell —
+		/* Execute through user's interactive shell —
 		 * identical to typing the command in a terminal */
 		{
 			char wrapper[8192];
 			snprintf(wrapper, sizeof(wrapper), "%sexec %s",
 				env_prefix, cmd_str);
-			execl(user_shell, user_shell, "-lic", wrapper, NULL);
+			execl(user_shell, user_shell, "-ic", wrapper, NULL);
 		}
 		_exit(127);
 	}
@@ -4002,6 +4002,9 @@ main(int argc, char *argv[])
 	cache_update_phase = 0;
 	if (cache_update_timer)
 		wl_event_source_timer_update(cache_update_timer, 120000); /* 2 minutes */
+	/* Generate git and file caches immediately so search works right away */
+	git_cache_update_start();
+	file_cache_update_start();
 	/* Generate nixpkgs cache now if missing, then schedule weekly updates */
 	nixpkgs_cache_update_start();
 	schedule_nixpkgs_cache_timer();
