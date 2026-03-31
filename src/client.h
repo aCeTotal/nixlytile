@@ -222,16 +222,15 @@ client_get_title(Client *c)
 static inline int
 client_is_float_type(Client *c)
 {
-	struct wlr_xdg_toplevel *toplevel;
-	struct wlr_xdg_toplevel_state state;
-
 #ifdef XWAYLAND
 	if (client_is_x11(c)) {
 		struct wlr_xwayland_surface *surface = c->surface.xwayland;
-		xcb_size_hints_t *size_hints = surface->size_hints;
 		if (surface->modal)
 			return 1;
 
+		/* Only float for explicit non-app window types.
+		 * Size hints are NOT used — they cause false positives
+		 * where normal windows get placed floating. */
 		if (wlr_xwayland_surface_has_window_type(surface, WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DIALOG)
 				|| wlr_xwayland_surface_has_window_type(surface, WLR_XWAYLAND_NET_WM_WINDOW_TYPE_SPLASH)
 				|| wlr_xwayland_surface_has_window_type(surface, WLR_XWAYLAND_NET_WM_WINDOW_TYPE_TOOLBAR)
@@ -239,19 +238,14 @@ client_is_float_type(Client *c)
 			return 1;
 		}
 
-		return size_hints && size_hints->min_width > 0 && size_hints->min_height > 0
-			&& (size_hints->max_width == size_hints->min_width
-				|| size_hints->max_height == size_hints->min_height);
+		return 0;
 	}
 #endif
 
-	toplevel = c->surface.xdg->toplevel;
-	state = toplevel->current;
-	/* Parent windows are handled in mapnotify via client_get_parent().
-	 * Only auto-float if BOTH dimensions are fixed (truly non-resizable). */
-	return (state.min_width != 0 && state.min_height != 0
-		&& state.min_width == state.max_width
-		&& state.min_height == state.max_height);
+	/* XDG clients: never auto-float based on size hints.
+	 * Parent windows are handled in mapnotify via client_get_parent().
+	 * Use rules in config.h for app-specific floating. */
+	return 0;
 }
 
 static inline int

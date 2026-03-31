@@ -12,7 +12,17 @@ apply_startup_defaults(void)
 	if (applied)
 		return;
 
-	/* Backlight - only on laptops with a backlight device */
+	/* Backlight - only on laptops with a backlight device.
+	 * Ensure paths are initialized before checking availability,
+	 * since this runs before the first refreshstatuslight(). */
+	if (!backlight_paths_initialized) {
+		backlight_available = findbacklightdevice(backlight_brightness_path,
+				sizeof(backlight_brightness_path),
+				backlight_max_path, sizeof(backlight_max_path));
+		if (!backlight_available)
+			backlight_writable = 0;
+		backlight_paths_initialized = 1;
+	}
 	if (backlight_available) {
 		if (set_backlight_percent(light_default) == 0) {
 			light_last_percent = light_default;

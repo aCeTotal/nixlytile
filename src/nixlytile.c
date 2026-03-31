@@ -2815,6 +2815,7 @@ setup(void)
 	nixpkgs_cache_timer = wl_event_loop_add_timer(event_loop, nixpkgs_cache_timer_cb, NULL);
 	diag_timer = wl_event_loop_add_timer(event_loop, diag_timer_cb, NULL);
 	fan_thermal_start();
+	netlink_monitor_setup();
 	dgpu_power_watchdog_start();
 	tray_init();
 	fcft_initialized = fcft_init(FCFT_LOG_COLORIZE_NEVER, 0, FCFT_LOG_CLASS_ERROR);

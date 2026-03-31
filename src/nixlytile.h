@@ -1580,6 +1580,8 @@ extern struct wl_event_source *nixpkgs_cache_timer;
 extern int cache_update_phase;
 extern StatusRefreshTask status_tasks[STATUS_TASKS_COUNT];
 extern int status_rng_seeded;
+extern int netlink_fd;
+extern struct wl_event_source *netlink_event;
 
 /* gamepad */
 extern struct wl_list gamepads;
@@ -2251,6 +2253,7 @@ void initial_status_refresh(void);
 void schedule_status_timer(void);
 void schedule_next_status_refresh(void);
 int status_task_hover_active(void (*fn)(void));
+void netlink_monitor_setup(void);
 void trigger_status_task_now(void (*fn)(void));
 void set_status_task_due(void (*fn)(void), uint64_t due_ms);
 void schedule_hover_timer(void);

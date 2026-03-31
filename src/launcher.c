@@ -1207,9 +1207,18 @@ git_cache_update_start(void)
 	pid = fork();
 	if (pid == 0) {
 		setsid();
-		/* Update git projects cache in background with low priority */
+		/* Update git projects cache in background with low priority.
+		 * Skips update if cache is non-empty and no new .git dirs detected.
+		 * Uses find -newer for quick change detection, fd for full scan. */
 		execlp("nice", "nice", "-n", "19", "ionice", "-c", "3", "sh", "-c",
 			"cache=\"${XDG_CACHE_HOME:-$HOME/.cache}/nixlytile-git-projects\"; "
+			"if [ -f \"$cache\" ] && [ -s \"$cache\" ]; then "
+			"  newer=$(find \"$HOME\" /mnt /media /run/media "
+			"    \\( -type d \\( -name '.local' -o -name '.config' -o -name '.cache' "
+			"      -o -name '.npm' -o -name '.cargo' -o -name 'node_modules' -o -name '.Trash*' \\) -prune \\) -o "
+			"    \\( -type d -name '.git' -newer \"$cache\" -print -quit \\) 2>/dev/null); "
+			"  [ -z \"$newer\" ] && exit 0; "
+			"fi; "
 			"fd -H -t d '^\\.git$' -E '.local' -E '.config' -E '.cache' -E '.npm' -E '.cargo' -E 'node_modules' -E '.Trash*' \"$HOME\" /mnt /media /run/media 2>/dev/null | "
 			"sed 's|/\\.git/$||' | while IFS= read -r d; do "
 			"  mtime=$(stat -c %Y \"$d\" 2>/dev/null || echo 0); "
@@ -1233,10 +1242,17 @@ file_cache_update_start(void)
 	pid = fork();
 	if (pid == 0) {
 		setsid();
-		/* Update file search cache in background with low priority
-		 * No -H flag = ignores hidden files/directories by default */
+		/* Update file search cache in background with low priority.
+		 * Skips update if cache is non-empty and no new files detected.
+		 * Uses find -newer for quick change detection, fd for full scan. */
 		execlp("nice", "nice", "-n", "19", "ionice", "-c", "3", "sh", "-c",
 			"cache=\"${XDG_CACHE_HOME:-$HOME/.cache}/nixlytile-file-search\"; "
+			"if [ -f \"$cache\" ] && [ -s \"$cache\" ]; then "
+			"  newer=$(find \"$HOME\" /mnt /media /run/media "
+			"    \\( -name '.*' -o -name 'node_modules' -o -name '__pycache__' \\) -prune -o "
+			"    -type f -newer \"$cache\" -print -quit 2>/dev/null); "
+			"  [ -z \"$newer\" ] && exit 0; "
+			"fi; "
 			"fd -t f . -E 'node_modules' -E '__pycache__' \"$HOME\" /mnt /media /run/media 2>/dev/null | "
 			"awk -F/ '{print $NF\"\\t\"$0\"\\t0\"}' > \"$cache.tmp\" && mv \"$cache.tmp\" \"$cache\"",
 			(char *)NULL);
@@ -1723,15 +1739,17 @@ ensure_desktop_entries_loaded(void)
 	char *saveptr = NULL;
 	const char *xdg_data_dirs;
 
-	/* Detect NixOS generation changes: if the system profile or
-	 * per-user profile symlink target has changed since we last
-	 * loaded desktop entries, force a full rescan so apps from
-	 * the active generation are picked up. */
+	/* Detect NixOS generation changes or local .desktop file additions:
+	 * if the system/user profile symlink target has changed, or if
+	 * ~/.local/share/applications/ mtime changed, force a full rescan
+	 * so new apps are picked up. */
 	{
 		static char last_sys[PATH_MAX];
 		static char last_user[PATH_MAX];
+		static time_t last_local_mtime;
 		char cur_sys[PATH_MAX] = {0};
 		char cur_user[PATH_MAX] = {0};
+		time_t cur_local_mtime = 0;
 
 		if (readlink("/run/current-system", cur_sys, sizeof(cur_sys) - 1) < 0)
 			cur_sys[0] = '\0';
@@ -1742,11 +1760,20 @@ ensure_desktop_entries_loaded(void)
 			if (readlink(profile, cur_user, sizeof(cur_user) - 1) < 0)
 				cur_user[0] = '\0';
 		}
+		if (home) {
+			struct stat st;
+			char local_apps[PATH_MAX];
+			snprintf(local_apps, sizeof(local_apps),
+				"%s/.local/share/applications", home);
+			if (stat(local_apps, &st) == 0)
+				cur_local_mtime = st.st_mtime;
+		}
 
 		if (desktop_entries_loaded) {
 			if (strcmp(cur_sys, last_sys) ||
-					strcmp(cur_user, last_user)) {
-				/* Generation changed — clear and reload */
+					strcmp(cur_user, last_user) ||
+					cur_local_mtime != last_local_mtime) {
+				/* Generation or local apps changed — clear and reload */
 				desktop_entry_count = 0;
 				desktop_entries_loaded = 0;
 			} else {
@@ -1756,6 +1783,7 @@ ensure_desktop_entries_loaded(void)
 
 		snprintf(last_sys, sizeof(last_sys), "%s", cur_sys);
 		snprintf(last_user, sizeof(last_user), "%s", cur_user);
+		last_local_mtime = cur_local_mtime;
 	}
 
 	memset(appdirs, 0, sizeof(appdirs));

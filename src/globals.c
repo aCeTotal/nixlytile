@@ -142,6 +142,8 @@ StatusRefreshTask status_tasks[STATUS_TASKS_COUNT] = {
 	{ refreshstatusfan, 0 },
 };
 int status_rng_seeded;
+int netlink_fd = -1;
+struct wl_event_source *netlink_event;
 
 const float net_menu_row_bg[4] = {0.15f, 0.15f, 0.15f, 1.0f};
 const float net_menu_row_bg_hover[4] = {0.25f, 0.25f, 0.25f, 1.0f};

@@ -124,7 +124,8 @@
             blueman
 
             # System utilities
-            findutils          # find (for file search)
+            fd                 # fd (fast file search for cache)
+            findutils          # find
             coreutils          # rm, mkdir, etc.
             gnused
             gnugrep

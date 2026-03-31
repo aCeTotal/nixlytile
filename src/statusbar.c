@@ -1,5 +1,70 @@
 #include "nixlytile.h"
 #include "client.h"
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
+
+static int
+netlink_event_cb(int fd, uint32_t mask, void *data)
+{
+	char buf[4096];
+	struct nlmsghdr *nlh;
+	ssize_t len;
+
+	(void)data;
+	(void)mask;
+
+	/* Drain all pending netlink messages */
+	while ((len = recv(fd, buf, sizeof(buf), MSG_DONTWAIT)) > 0) {
+		for (nlh = (struct nlmsghdr *)buf;
+		     NLMSG_OK(nlh, (size_t)len);
+		     nlh = NLMSG_NEXT(nlh, len)) {
+			if (nlh->nlmsg_type == RTM_NEWLINK ||
+			    nlh->nlmsg_type == RTM_DELLINK ||
+			    nlh->nlmsg_type == RTM_NEWADDR ||
+			    nlh->nlmsg_type == RTM_DELADDR) {
+				/* Network state changed — refresh immediately */
+				trigger_status_task_now(refreshstatusnet);
+				return 0;
+			}
+		}
+	}
+	return 0;
+}
+
+void
+netlink_monitor_setup(void)
+{
+	struct sockaddr_nl addr;
+
+	netlink_fd = socket(AF_NETLINK, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
+			NETLINK_ROUTE);
+	if (netlink_fd < 0) {
+		wlr_log(WLR_ERROR, "netlink socket failed: %s", strerror(errno));
+		return;
+	}
+
+	memset(&addr, 0, sizeof(addr));
+	addr.nl_family = AF_NETLINK;
+	addr.nl_groups = RTMGRP_LINK | RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR;
+
+	if (bind(netlink_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		wlr_log(WLR_ERROR, "netlink bind failed: %s", strerror(errno));
+		close(netlink_fd);
+		netlink_fd = -1;
+		return;
+	}
+
+	netlink_event = wl_event_loop_add_fd(event_loop, netlink_fd,
+			WL_EVENT_READABLE, netlink_event_cb, NULL);
+	if (!netlink_event) {
+		wlr_log(WLR_ERROR, "netlink event loop add failed");
+		close(netlink_fd);
+		netlink_fd = -1;
+		return;
+	}
+
+	wlr_log(WLR_INFO, "netlink monitor started (link + addr events)");
+}
 
 void
 clearstatusmodule(StatusModule *module)
@@ -717,7 +782,7 @@ void
 rendersteam(Monitor *m, int bar_height)
 {
 	if (!m) return;
-	steam_running = is_process_running("steam");
+	/* steam_running set by refreshstatusicons() batch scan */
 	render_icon_module(&m->statusbar.steam, bar_height,
 			ensure_steam_icon_buffer, &steam_icon_buf,
 			&steam_icon_w, &steam_icon_h, steam_running);
@@ -727,7 +792,7 @@ void
 renderdiscord(Monitor *m, int bar_height)
 {
 	if (!m) return;
-	discord_running = is_process_running("Discord") || is_process_running(".Discord");
+	/* discord_running set by refreshstatusicons() batch scan */
 	render_icon_module(&m->statusbar.discord, bar_height,
 			ensure_discord_icon_buffer, &discord_icon_buf,
 			&discord_icon_w, &discord_icon_h, discord_running);
@@ -3471,6 +3536,8 @@ pipewire_mic_volume_percent(void)
 int
 pipewire_sink_is_headset(void)
 {
+	static int cached_result = -1;
+	static uint64_t cached_at_ms;
 	FILE *fp;
 	char line[512];
 	int headset = 0;
@@ -3480,10 +3547,15 @@ pipewire_sink_is_headset(void)
 		"hfp", "hsp", "head-unit"
 	};
 	size_t i;
+	uint64_t now = monotonic_msec();
+
+	/* Cache for 60 seconds — avoids 2x fork+exec every refresh */
+	if (cached_result >= 0 && cached_at_ms != 0 && now - cached_at_ms < 60000)
+		return cached_result;
 
 	fp = popen("wpctl inspect @DEFAULT_AUDIO_SINK@", "r");
 	if (!fp)
-		return 0;
+		return cached_result >= 0 ? cached_result : 0;
 
 	while (fgets(line, sizeof(line), fp)) {
 		for (i = 0; i < LENGTH(kw); i++) {
@@ -3497,12 +3569,18 @@ pipewire_sink_is_headset(void)
 	}
 
 	pclose(fp);
-	if (headset)
+	if (headset) {
+		cached_result = 1;
+		cached_at_ms = now;
 		return 1;
+	}
 
 	fp = popen("wpctl status", "r");
-	if (!fp)
+	if (!fp) {
+		cached_result = 0;
+		cached_at_ms = now;
 		return 0;
+	}
 
 	while (fgets(line, sizeof(line), fp)) {
 		if (!strchr(line, '*'))
@@ -3518,6 +3596,8 @@ pipewire_sink_is_headset(void)
 	}
 
 	pclose(fp);
+	cached_result = headset;
+	cached_at_ms = now;
 	return headset;
 }
 
@@ -4626,6 +4706,48 @@ refreshstatusicons(void)
 	Monitor *m;
 	int barh;
 
+	/* Single /proc scan for all process checks instead of 3 separate scans */
+	{
+		DIR *dir;
+		struct dirent *ent;
+		char path[PATH_MAX];
+		char comm[256];
+		FILE *fp;
+		int found_steam = 0, found_discord = 0;
+
+		dir = opendir("/proc");
+		if (dir) {
+			while ((ent = readdir(dir))) {
+				if (ent->d_name[0] < '0' || ent->d_name[0] > '9')
+					continue;
+				if (found_steam && found_discord)
+					break;
+				snprintf(path, sizeof(path), "/proc/%s/comm", ent->d_name);
+				fp = fopen(path, "r");
+				if (!fp)
+					continue;
+				if (fgets(comm, sizeof(comm), fp)) {
+					char *nl = strchr(comm, '\n');
+					if (nl)
+						*nl = '\0';
+					if (!found_steam &&
+					    (strcasecmp(comm, "steam") == 0 ||
+					     strcasestr(comm, "steam")))
+						found_steam = 1;
+					if (!found_discord &&
+					    (strcasecmp(comm, "Discord") == 0 ||
+					     strcasestr(comm, "Discord") ||
+					     strcasestr(comm, ".Discord")))
+						found_discord = 1;
+				}
+				fclose(fp);
+			}
+			closedir(dir);
+		}
+		steam_running = found_steam;
+		discord_running = found_discord;
+	}
+
 	wl_list_for_each(m, &mons, link) {
 		if (!m->showbar)
 			continue;
@@ -4946,6 +5068,9 @@ updatestatuscpu(void *data)
 			status_tasks[chosen].next_due_ms = now + delay_ms;
 		} else if (status_tasks[chosen].fn == refreshstatusfan) {
 			status_tasks[chosen].next_due_ms = now + 3000;
+		} else if (status_tasks[chosen].fn == refreshstatuscpu ||
+				status_tasks[chosen].fn == refreshstatusram) {
+			status_tasks[chosen].next_due_ms = now + 15000;
 		} else if (status_task_hover_active(status_tasks[chosen].fn)) {
 			status_tasks[chosen].next_due_ms = now + STATUS_FAST_MS;
 		} else {
