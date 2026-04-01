@@ -199,7 +199,7 @@ const char *bravecmd[] = { "brave",
 const char *menucmd[] __attribute__((unused)) = { "wmenu-run", NULL };
 const char *netcmd[] = { "nm-connection-editor", NULL };
 const char *pavucontrolcmd[] = { "pavucontrol", NULL };
-const char *screenshotcmd[] = { "/bin/sh", "-c", "slurp | grim -g - - | wl-copy", NULL };
+const char *screenshotcmd[] __attribute__((unused)) = { "/bin/sh", "-c", "slurp | grim -g - - | wl-copy", NULL };
 const char *thunarcmd[] = { "thunar", NULL };
 
 /* Wallpaper path - can be overridden by config file */
@@ -285,8 +285,8 @@ const Key default_keys[] = {
 	TAGKEYS(          XKB_KEY_9, XKB_KEY_parenleft,                  8),
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Q,          quit,           {0} },
 	{ MODKEY,                    XKB_KEY_F1,         togglemirror,   {0} },
-	{ MODKEY,                    XKB_KEY_s,          spawn,          {.v = screenshotcmd} },
-	{ 0,                         XKB_KEY_Print,      spawn,          {.v = screenshotcmd} },
+	{ MODKEY,                    XKB_KEY_s,          screenshot_begin, {0} },
+	{ 0,                         XKB_KEY_Print,      screenshot_begin, {0} },
 
 	/* Monitor navigation: CTRL + arrow keys to warp cursor to monitor */
 	{ MONITORKEY,                XKB_KEY_Up,         warptomonitor,  {.i = WLR_DIRECTION_UP} },

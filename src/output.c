@@ -1409,6 +1409,11 @@ rendermon(struct wl_listener *listener, void *data)
 		m->scene_build_failures = 0;
 	}
 
+	/* Screenshot frame capture — grab pixels before commit */
+	if (screenshot_mode == SCREENSHOT_PENDING && m == selmon && needs_frame && state.buffer) {
+		screenshot_capture_frame(m, state.buffer);
+	}
+
 	/*
 	 * Detect direct scanout: if the output buffer is a client buffer
 	 * (not from the compositor's swapchain), direct scanout is active.

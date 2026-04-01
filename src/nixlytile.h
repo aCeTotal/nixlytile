@@ -2824,6 +2824,19 @@ void setoverrideredirect(struct wl_listener *listener, void *data);
 void xwaylandready(struct wl_listener *listener, void *data);
 #endif
 
+/* screenshot.c */
+#define SCREENSHOT_NONE      0
+#define SCREENSHOT_PENDING   1
+#define SCREENSHOT_SELECTING 2
+#define SCREENSHOT_DRAGGING  3
+extern int screenshot_mode;
+void screenshot_begin(const Arg *arg);
+void screenshot_capture_frame(Monitor *m, struct wlr_buffer *buffer);
+void screenshot_handle_button(uint32_t button, uint32_t state, uint32_t time_msec);
+void screenshot_handle_motion(void);
+void screenshot_handle_key(xkb_keysym_t sym);
+void screenshot_cancel(void);
+
 /* diagnostics logging */
 extern int diag_log_fd;
 extern int audio_log_fd;

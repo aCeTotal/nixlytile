@@ -529,6 +529,9 @@ DesktopEntry desktop_entries[DESKTOP_ENTRIES_MAX];
 int desktop_entry_count = 0;
 int desktop_entries_loaded = 0;
 
+/* Screenshot */
+int screenshot_mode = 0;
+
 /* Diagnostics logging */
 int diag_log_fd = -1;
 int audio_log_fd = -1;

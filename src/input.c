@@ -592,6 +592,12 @@ buttonpress(struct wl_listener *listener, void *data)
 		if (locked)
 			break;
 
+		/* Screenshot selection intercepts all clicks */
+		if (screenshot_mode >= SCREENSHOT_SELECTING) {
+			screenshot_handle_button(event->button, event->state, event->time_msec);
+			return;
+		}
+
 		/* Modal overlay eats clicks; outside closes it */
 		{
 			Monitor *modal_mon = modal_visible_monitor();
@@ -680,6 +686,11 @@ buttonpress(struct wl_listener *listener, void *data)
 		}
 		break;
 	case WL_POINTER_BUTTON_STATE_RELEASED:
+		/* Screenshot selection intercepts release too */
+		if (screenshot_mode >= SCREENSHOT_SELECTING) {
+			screenshot_handle_button(event->button, event->state, event->time_msec);
+			return;
+		}
 		/* If you released any buttons, we exit interactive move/resize mode. */
 		/* TODO: should reset to the pointer focus's current setcursor */
 		if (!locked && cursor_mode != CurNormal && cursor_mode != CurPressed) {
@@ -1376,6 +1387,15 @@ keypress(struct wl_listener *listener, void *data)
 	/* On _press_ if there is no active screen locker,
 	 * attempt to process a compositor keybinding. */
 	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+		/* Screenshot mode — ESC cancels */
+		if (screenshot_mode) {
+			for (i = 0; i < nsyms; i++) {
+				if (syms[i] == XKB_KEY_Escape) {
+					screenshot_handle_key(syms[i]);
+					handled = 1;
+				}
+			}
+		}
 		/* Sudo password popup takes highest priority */
 		if (sudo_mon) {
 			for (i = 0; i < nsyms; i++) {
@@ -1976,6 +1996,12 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 				selmon = newmon;
 			}
 		}
+	}
+
+	/* Screenshot dragging — update selection overlay and skip client dispatch */
+	if (screenshot_mode == SCREENSHOT_DRAGGING) {
+		screenshot_handle_motion();
+		return;
 	}
 
 	/* Find the client under the pointer at the NEW cursor position.
