@@ -2980,19 +2980,39 @@ retro_gaming_handle_button(Monitor *m, int button, int value)
 				retro_gaming_render(m);
 			}
 			return 1;
-		case BTN_TL:  /* LB = page up */
-			rg->selected_game -= page_size;
-			if (rg->selected_game < 0) rg->selected_game = 0;
+		case BTN_TL: {  /* LB = jump to previous letter */
+			int cur = rg->selected_game;
+			char cur_letter = toupper(rg->games[cur].title[0]);
+			/* Find first game with a letter before current */
+			int j = cur - 1;
+			while (j >= 0 && toupper(rg->games[j].title[0]) == cur_letter)
+				j--;
+			if (j >= 0) {
+				/* Found a game with different letter, find first of that letter */
+				char prev_letter = toupper(rg->games[j].title[0]);
+				while (j > 0 && toupper(rg->games[j - 1].title[0]) == prev_letter)
+					j--;
+				rg->selected_game = j;
+			} else {
+				rg->selected_game = 0;
+			}
 			rg->cover_loaded = 0;
 			retro_gaming_render(m);
 			return 1;
-		case BTN_TR:  /* RB = page down */
-			rg->selected_game += page_size;
-			if (rg->selected_game >= rg->game_count)
-				rg->selected_game = rg->game_count - 1;
+		}
+		case BTN_TR: {  /* RB = jump to next letter */
+			int cur = rg->selected_game;
+			char cur_letter = toupper(rg->games[cur].title[0]);
+			/* Find first game with a letter after current */
+			int j = cur + 1;
+			while (j < rg->game_count && toupper(rg->games[j].title[0]) == cur_letter)
+				j++;
+			if (j < rg->game_count)
+				rg->selected_game = j;
 			rg->cover_loaded = 0;
 			retro_gaming_render(m);
 			return 1;
+		}
 		case BTN_SOUTH:  /* A button - launch game */
 			retro_gaming_launch_game(m);
 			return 1;
