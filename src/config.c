@@ -819,12 +819,12 @@ init_keybindings(void)
 			runtime_keys[runtime_keys_count].mod = modkey;
 			runtime_keys[runtime_keys_count].keysym = XKB_KEY_s;
 			runtime_keys[runtime_keys_count].func = screenshot_begin;
-			runtime_keys[runtime_keys_count].arg = (Arg){0};
+			memset((void *)&runtime_keys[runtime_keys_count].arg, 0, sizeof(Arg));
 			runtime_keys_count++;
 			runtime_keys[runtime_keys_count].mod = 0;
 			runtime_keys[runtime_keys_count].keysym = XKB_KEY_Print;
 			runtime_keys[runtime_keys_count].func = screenshot_begin;
-			runtime_keys[runtime_keys_count].arg = (Arg){0};
+			memset((void *)&runtime_keys[runtime_keys_count].arg, 0, sizeof(Arg));
 			runtime_keys_count++;
 		}
 		keys = runtime_keys;
@@ -865,7 +865,6 @@ void
 reload_config(void)
 {
 	Monitor *m;
-	int i;
 
 	wlr_log(WLR_INFO, "Hot-reloading config file...");
 
