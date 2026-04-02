@@ -555,14 +555,14 @@ static char *build_json_array(const char *sql) {
          * Priority: local (1000+rating) > remote (rating only) */
         buf_used += snprintf(json + buf_used, buf_size - buf_used,
             "{\"id\":%d,\"type\":%d,\"title\":%s,\"show_name\":%s,"
-            "\"season\":%d,\"episode\":%d,\"size\":%ld,\"duration\":%d,"
+            "\"season\":%d,\"episode\":%d,\"size\":%lld,\"duration\":%d,"
             "\"width\":%d,\"height\":%d,"
             "\"tmdb_id\":%d,\"tmdb_title\":%s,\"overview\":%s,"
             "\"poster\":%s,\"backdrop\":%s,\"year\":%d,\"rating\":%.1f,"
             "\"genres\":%s,"
             "\"server_id\":\"%s\",\"server_rating\":%d,\"server_priority\":%d}",
             id, type, title_esc, show_esc,
-            season, episode, size, duration, width, height,
+            season, episode, (long long)size, duration, width, height,
             tmdb_id, tmdb_title_esc, overview_esc,
             poster_esc, backdrop_esc, year, rating, genres_esc,
             server_config.server_id, config_get_server_rating(),
@@ -712,7 +712,7 @@ char *database_get_tvshows_json(void) {
 
         buf_used += snprintf(json + buf_used, buf_size - buf_used,
             "{\"id\":%d,\"type\":%d,\"title\":%s,\"show_name\":%s,"
-            "\"season\":%d,\"episode_count\":%d,\"seasons\":%s,\"size\":%ld,\"duration\":%d,"
+            "\"season\":%d,\"episode_count\":%d,\"seasons\":%s,\"size\":%lld,\"duration\":%d,"
             "\"width\":%d,\"height\":%d,"
             "\"tmdb_id\":%d,\"tmdb_title\":%s,\"overview\":%s,"
             "\"poster\":%s,\"backdrop\":%s,\"year\":%d,\"rating\":%.1f,"
@@ -721,7 +721,7 @@ char *database_get_tvshows_json(void) {
             "\"tmdb_status\":%s,\"tmdb_next_episode\":%s,"
             "\"server_id\":\"%s\",\"server_rating\":%d,\"server_priority\":%d}",
             id, type, title_esc, show_esc,
-            season, episode_count, seasons_esc, size, duration, width, height,
+            season, episode_count, seasons_esc, (long long)size, duration, width, height,
             tmdb_id, tmdb_title_esc, overview_esc,
             poster_esc, backdrop_esc, year, rating, genres_esc,
             tmdb_total_seasons, tmdb_total_episodes, tmdb_episode_runtime,
@@ -802,8 +802,8 @@ char *database_get_media_json(int id) {
         snprintf(json, 16384,
             "{\"id\":%d,\"type\":%d,\"title\":%s,\"filepath\":%s,"
             "\"show_name\":%s,\"season\":%d,\"episode\":%d,"
-            "\"size\":%ld,\"duration\":%d,\"width\":%d,\"height\":%d,"
-            "\"codec_video\":%s,\"codec_audio\":%s,\"bitrate\":%ld,"
+            "\"size\":%lld,\"duration\":%d,\"width\":%d,\"height\":%d,"
+            "\"codec_video\":%s,\"codec_audio\":%s,\"bitrate\":%lld,"
             "\"added_date\":%s,\"stream_url\":\"/stream/%d\","
             "\"tmdb_id\":%d,\"tmdb_title\":%s,\"overview\":%s,"
             "\"poster\":%s,\"backdrop\":%s,\"release_date\":%s,"
@@ -815,12 +815,12 @@ char *database_get_media_json(int id) {
             title_esc, path_esc, show_esc,
             sqlite3_column_int(stmt, 5),
             sqlite3_column_int(stmt, 6),
-            sqlite3_column_int64(stmt, 7),
+            (long long)sqlite3_column_int64(stmt, 7),
             sqlite3_column_int(stmt, 8),
             sqlite3_column_int(stmt, 9),
             sqlite3_column_int(stmt, 10),
             cv_esc, ca_esc,
-            sqlite3_column_int64(stmt, 13),
+            (long long)sqlite3_column_int64(stmt, 13),
             added_esc,
             sqlite3_column_int(stmt, 0),
             sqlite3_column_int(stmt, 15),
@@ -1079,10 +1079,10 @@ char *database_get_roms_json(void) {
 
         buf_used += snprintf(json + buf_used, buf_size - buf_used,
             "{\"id\":%d,\"console\":%d,\"console_name\":\"%s\","
-            "\"title\":%s,\"cover\":%s,\"size\":%ld,\"region\":%s,"
+            "\"title\":%s,\"cover\":%s,\"size\":%lld,\"region\":%s,"
             "\"filepath\":%s}",
             id, console, database_console_name(console),
-            title_esc, cover_esc, size, region_esc, path_esc);
+            title_esc, cover_esc, (long long)size, region_esc, path_esc);
 
         free(title_esc);
         free(cover_esc);
@@ -1139,10 +1139,10 @@ char *database_get_roms_by_console_json(ConsoleType console) {
 
         buf_used += snprintf(json + buf_used, buf_size - buf_used,
             "{\"id\":%d,\"console\":%d,\"console_name\":\"%s\","
-            "\"title\":%s,\"cover\":%s,\"size\":%ld,\"region\":%s,"
+            "\"title\":%s,\"cover\":%s,\"size\":%lld,\"region\":%s,"
             "\"filepath\":%s}",
             id, cons, database_console_name(cons),
-            title_esc, cover_esc, size, region_esc, path_esc);
+            title_esc, cover_esc, (long long)size, region_esc, path_esc);
 
         free(title_esc);
         free(cover_esc);
@@ -1352,14 +1352,14 @@ char *database_get_show_episodes_json(const char *show_name, int season) {
 
         buf_used += snprintf(json + buf_used, buf_size - buf_used,
             "{\"id\":%d,\"type\":%d,\"title\":%s,\"show_name\":%s,"
-            "\"season\":%d,\"episode\":%d,\"episode_display\":%s,\"size\":%ld,\"duration\":%d,"
+            "\"season\":%d,\"episode\":%d,\"episode_display\":%s,\"size\":%lld,\"duration\":%d,"
             "\"width\":%d,\"height\":%d,"
             "\"tmdb_id\":%d,\"tmdb_title\":%s,\"overview\":%s,"
             "\"poster\":%s,\"backdrop\":%s,\"year\":%d,\"rating\":%.1f,"
             "\"genres\":%s,\"episode_title\":%s,\"episode_overview\":%s,"
             "\"still\":%s,\"filepath\":%s}",
             id, type, title_esc, show_esc,
-            s, e, ep_display_esc, size, duration, width, height,
+            s, e, ep_display_esc, (long long)size, duration, width, height,
             tmdb_id, tmdb_esc, ov_esc,
             poster_esc, back_esc, year, rating,
             genres_esc, ept_esc, epo_esc, still_esc, path_esc);
