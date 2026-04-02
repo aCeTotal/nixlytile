@@ -62,6 +62,43 @@ struct screenshot_source {
 	size_t png_size;
 };
 
+/* Async write state for non-blocking clipboard send */
+struct screenshot_write_state {
+	void *data;
+	size_t size;
+	size_t written;
+	int fd;
+	struct wl_event_source *event_source;
+};
+
+static int
+screenshot_write_handler(int fd, uint32_t mask, void *data)
+{
+	struct screenshot_write_state *ws = data;
+
+	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR))
+		goto done;
+
+	while (ws->written < ws->size) {
+		ssize_t n = write(fd, (char *)ws->data + ws->written,
+			ws->size - ws->written);
+		if (n < 0) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK)
+				return 0; /* wait for next writable event */
+			goto done;
+		}
+		if (n == 0)
+			goto done;
+		ws->written += n;
+	}
+
+done:
+	wl_event_source_remove(ws->event_source);
+	close(fd);
+	free(ws);
+	return 0;
+}
+
 static void
 screenshot_source_send(struct wlr_data_source *source,
 	const char *mime_type, int fd)
@@ -69,17 +106,54 @@ screenshot_source_send(struct wlr_data_source *source,
 	struct screenshot_source *src =
 		wl_container_of(source, src, base);
 
-	if (strcmp(mime_type, "image/png") == 0) {
-		size_t written = 0;
-		while (written < src->png_size) {
-			ssize_t n = write(fd, (char *)src->png_data + written,
-				src->png_size - written);
-			if (n <= 0)
-				break;
-			written += n;
-		}
+	if (strcmp(mime_type, "image/png") != 0) {
+		close(fd);
+		return;
 	}
-	close(fd);
+
+	/* Set non-blocking so we never stall the compositor */
+	int flags = fcntl(fd, F_GETFL);
+	fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+	/* Try to write as much as possible immediately */
+	size_t written = 0;
+	while (written < src->png_size) {
+		ssize_t n = write(fd, (char *)src->png_data + written,
+			src->png_size - written);
+		if (n < 0) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK)
+				break;
+			close(fd);
+			return;
+		}
+		if (n == 0) {
+			close(fd);
+			return;
+		}
+		written += n;
+	}
+
+	if (written >= src->png_size) {
+		close(fd);
+		return;
+	}
+
+	/* Remaining data — hand off to event loop */
+	struct screenshot_write_state *ws = calloc(1, sizeof(*ws));
+	if (!ws) {
+		close(fd);
+		return;
+	}
+	ws->data = src->png_data;
+	ws->size = src->png_size;
+	ws->written = written;
+	ws->fd = fd;
+	ws->event_source = wl_event_loop_add_fd(event_loop, fd,
+		WL_EVENT_WRITABLE, screenshot_write_handler, ws);
+	if (!ws->event_source) {
+		close(fd);
+		free(ws);
+	}
 }
 
 static void
@@ -298,7 +372,12 @@ screenshot_begin(const Arg *arg)
 	screenshot_mon = selmon;
 	screenshot_mode = SCREENSHOT_PENDING;
 
-	/* Schedule a frame so rendermon() captures pixels */
+	/* Force full damage so wlr_scene_output_build_state() produces a
+	 * composited buffer we can read pixels from. Without damage the
+	 * scene graph may skip rendering (no new content) and build_state
+	 * returns false, which causes rendermon() to return before the
+	 * screenshot capture code is reached. */
+	wlr_damage_ring_add_whole(&screenshot_mon->scene_output->damage_ring);
 	wlr_output_schedule_frame(screenshot_mon->wlr_output);
 }
 

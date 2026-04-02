@@ -806,6 +806,27 @@ void
 init_keybindings(void)
 {
 	if (runtime_keys_count > 0) {
+		/* Inject screenshot bindings if not explicitly configured */
+		int has_screenshot = 0;
+		size_t i;
+		for (i = 0; i < runtime_keys_count; i++) {
+			if (runtime_keys[i].func == screenshot_begin) {
+				has_screenshot = 1;
+				break;
+			}
+		}
+		if (!has_screenshot && runtime_keys_count + 2 <= MAX_KEYS) {
+			runtime_keys[runtime_keys_count].mod = modkey;
+			runtime_keys[runtime_keys_count].keysym = XKB_KEY_s;
+			runtime_keys[runtime_keys_count].func = screenshot_begin;
+			runtime_keys[runtime_keys_count].arg = (Arg){0};
+			runtime_keys_count++;
+			runtime_keys[runtime_keys_count].mod = 0;
+			runtime_keys[runtime_keys_count].keysym = XKB_KEY_Print;
+			runtime_keys[runtime_keys_count].func = screenshot_begin;
+			runtime_keys[runtime_keys_count].arg = (Arg){0};
+			runtime_keys_count++;
+		}
 		keys = runtime_keys;
 		keys_count = runtime_keys_count;
 		wlr_log(WLR_INFO, "Using %zu custom keybindings from config", keys_count);
