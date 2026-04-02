@@ -29,6 +29,7 @@ void scanner_refresh_show_status(void);
 
 /* ROM scanning functions */
 int scanner_is_rom_file(const char *path);
+int scanner_detect_console(const char *path);
 int scanner_scan_rom_file(const char *filepath, int console);
 int scanner_scan_rom_directory(const char *path);
 void scanner_fetch_rom_covers(void);

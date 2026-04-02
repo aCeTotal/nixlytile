@@ -1005,6 +1005,14 @@ typedef struct {
 	float slide_offset;
 	uint64_t slide_start_ms;
 
+	/* Master ROM list (all consoles, fetched once) */
+	RomItem *all_roms;
+	int all_rom_count;
+
+	/* Dynamic console tab list */
+	int active_consoles[RETRO_CONSOLE_COUNT];  /* tab index → RetroConsole enum */
+	int active_console_count;
+
 	/* Game list state */
 	int in_game_list;           /* 1 = showing game list for selected console */
 	int game_count;
@@ -2540,7 +2548,7 @@ Monitor *retro_gaming_visible_monitor(void);
 void retro_gaming_render(Monitor *m);
 int retro_gaming_handle_button(Monitor *m, int button, int value);
 int retro_gaming_animate(void *data);
-void retro_gaming_fetch_games(Monitor *m);
+void retro_gaming_fetch_all_roms(Monitor *m);
 void retro_gaming_render_game_list(Monitor *m);
 void retro_gaming_launch_game(Monitor *m);
 void detect_gpus(void);

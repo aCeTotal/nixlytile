@@ -262,18 +262,28 @@ int database_get_id_by_path(const char *filepath) {
 }
 
 int database_delete_by_path(const char *filepath) {
-    const char *sql = "DELETE FROM media WHERE filepath = ?";
-    sqlite3_stmt *stmt;
+    int deleted = 0;
 
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
-        return -1;
+    /* Delete from media table */
+    const char *sql_media = "DELETE FROM media WHERE filepath = ?";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql_media, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, filepath, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) > 0)
+            deleted = 1;
+        sqlite3_finalize(stmt);
     }
 
-    sqlite3_bind_text(stmt, 1, filepath, -1, SQLITE_STATIC);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
+    /* Delete from roms table */
+    const char *sql_roms = "DELETE FROM roms WHERE filepath = ?";
+    if (sqlite3_prepare_v2(db, sql_roms, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, filepath, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) > 0)
+            deleted = 1;
+        sqlite3_finalize(stmt);
+    }
 
-    return (rc == SQLITE_DONE) ? 0 : -1;
+    return deleted ? 0 : -1;
 }
 
 int database_cleanup_missing(void) {
@@ -323,6 +333,45 @@ int database_cleanup_missing(void) {
     }
 
     free(missing_ids);
+
+    /* Also clean up missing ROM files */
+    const char *rom_sql = "SELECT id, filepath FROM roms";
+    if (sqlite3_prepare_v2(db, rom_sql, -1, &stmt, NULL) == SQLITE_OK) {
+        int *rom_missing = NULL;
+        int rom_count = 0;
+        int rom_cap = 0;
+
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            int id = sqlite3_column_int(stmt, 0);
+            const char *filepath = (const char *)sqlite3_column_text(stmt, 1);
+            struct stat st;
+            if (stat(filepath, &st) != 0) {
+                if (rom_count >= rom_cap) {
+                    rom_cap = rom_cap ? rom_cap * 2 : 64;
+                    rom_missing = realloc(rom_missing, rom_cap * sizeof(int));
+                }
+                rom_missing[rom_count++] = id;
+                printf("  Removing missing ROM: %s\n", filepath);
+            }
+        }
+        sqlite3_finalize(stmt);
+
+        if (rom_count > 0) {
+            const char *del = "DELETE FROM roms WHERE id = ?";
+            sqlite3_stmt *ds;
+            if (sqlite3_prepare_v2(db, del, -1, &ds, NULL) == SQLITE_OK) {
+                for (int i = 0; i < rom_count; i++) {
+                    sqlite3_bind_int(ds, 1, rom_missing[i]);
+                    sqlite3_step(ds);
+                    sqlite3_reset(ds);
+                }
+                sqlite3_finalize(ds);
+            }
+            missing_count += rom_count;
+        }
+        free(rom_missing);
+    }
+
     return missing_count;
 }
 
@@ -992,7 +1041,7 @@ char *database_get_rom_filepath(int id) {
 
 char *database_get_roms_json(void) {
     const char *sql =
-        "SELECT id, console, title, cover_path, size, region "
+        "SELECT id, console, title, cover_path, size, region, filepath "
         "FROM roms ORDER BY console, title";
 
     sqlite3_stmt *stmt;
@@ -1021,20 +1070,24 @@ char *database_get_roms_json(void) {
         const char *cover = (const char *)sqlite3_column_text(stmt, 3);
         int64_t size = sqlite3_column_int64(stmt, 4);
         const char *region = (const char *)sqlite3_column_text(stmt, 5);
+        const char *filepath = (const char *)sqlite3_column_text(stmt, 6);
 
         char *title_esc = json_escape(title);
         char *cover_esc = json_escape(cover);
         char *region_esc = json_escape(region);
+        char *path_esc = json_escape(filepath);
 
         buf_used += snprintf(json + buf_used, buf_size - buf_used,
             "{\"id\":%d,\"console\":%d,\"console_name\":\"%s\","
-            "\"title\":%s,\"cover\":%s,\"size\":%ld,\"region\":%s}",
+            "\"title\":%s,\"cover\":%s,\"size\":%ld,\"region\":%s,"
+            "\"filepath\":%s}",
             id, console, database_console_name(console),
-            title_esc, cover_esc, size, region_esc);
+            title_esc, cover_esc, size, region_esc, path_esc);
 
         free(title_esc);
         free(cover_esc);
         free(region_esc);
+        free(path_esc);
     }
 
     json[buf_used++] = ']';

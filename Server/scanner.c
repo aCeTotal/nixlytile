@@ -941,7 +941,7 @@ static int scanner_detect_disc_type(const char *path) {
 }
 
 /* Detect console type from file extension and metadata */
-static int scanner_detect_console(const char *path) {
+int scanner_detect_console(const char *path) {
     const char *ext = strrchr(path, '.');
     if (!ext) return -1;
 

@@ -94,6 +94,7 @@ int config_load(const char *path) {
 
     config_init_defaults();
 
+    int roms_default_cleared = 0;
     char line[4096];
     while (fgets(line, sizeof(line), f)) {
         char *l = trim(line);
@@ -158,6 +159,11 @@ int config_load(const char *path) {
                 (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
         }
         else if (strcmp(key, "roms_path") == 0) {
+            /* Clear default on first config-specified roms_path */
+            if (!roms_default_cleared) {
+                server_config.roms_path_count = 0;
+                roms_default_cleared = 1;
+            }
             if (server_config.roms_path_count < MAX_WATCH_PATHS) {
                 expand_path(value, server_config.roms_paths[server_config.roms_path_count],
                            MAX_PATH_LEN);

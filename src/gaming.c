@@ -2251,21 +2251,37 @@ retro_parse_roms_json(const char *buffer, const char *server_url,
 	return idx;
 }
 
-void
-retro_gaming_fetch_games(Monitor *m)
+static void
+retro_gaming_build_active_consoles(RetroGamingView *rg)
+{
+	int has_roms[RETRO_CONSOLE_COUNT] = {0};
+	int i;
+
+	for (i = 0; i < rg->all_rom_count; i++)
+		if (rg->all_roms[i].console >= 0 && rg->all_roms[i].console < RETRO_CONSOLE_COUNT)
+			has_roms[rg->all_roms[i].console] = 1;
+
+	rg->active_console_count = 0;
+	for (i = 0; i < RETRO_CONSOLE_COUNT; i++)
+		if (has_roms[i])
+			rg->active_consoles[rg->active_console_count++] = i;
+
+	rg->selected_console = 0;
+	rg->target_console = 0;
+}
+
+static void
+retro_gaming_filter_games(Monitor *m)
 {
 	RetroGamingView *rg;
-	FILE *fp;
-	char cmd[512];
-	char buffer[262144];
-	size_t bytes_read;
+	int real_console, i, count;
 
 	if (!m)
 		return;
 
 	rg = &m->retro_gaming;
 
-	/* Free old games */
+	/* Free old filtered list */
 	if (rg->games) {
 		free(rg->games);
 		rg->games = NULL;
@@ -2280,6 +2296,54 @@ retro_gaming_fetch_games(Monitor *m)
 	rg->cover_loaded = 0;
 	rg->cover_loading_idx = -1;
 
+	if (rg->active_console_count == 0 || rg->all_rom_count == 0)
+		return;
+
+	real_console = rg->active_consoles[rg->selected_console];
+
+	/* Count matching ROMs */
+	count = 0;
+	for (i = 0; i < rg->all_rom_count; i++)
+		if (rg->all_roms[i].console == real_console)
+			count++;
+
+	if (count == 0)
+		return;
+
+	rg->games = calloc(count, sizeof(RomItem));
+	if (!rg->games)
+		return;
+
+	rg->game_count = 0;
+	for (i = 0; i < rg->all_rom_count; i++) {
+		if (rg->all_roms[i].console == real_console) {
+			rg->games[rg->game_count] = rg->all_roms[i];
+			rg->game_count++;
+		}
+	}
+}
+
+void
+retro_gaming_fetch_all_roms(Monitor *m)
+{
+	RetroGamingView *rg;
+	FILE *fp;
+	char cmd[512];
+	char buffer[262144];
+	size_t bytes_read;
+
+	if (!m)
+		return;
+
+	rg = &m->retro_gaming;
+
+	/* Free old master list */
+	if (rg->all_roms) {
+		free(rg->all_roms);
+		rg->all_roms = NULL;
+	}
+	rg->all_rom_count = 0;
+
 	/* Temporary buffer for all ROMs from all servers */
 	#define MAX_TEMP_ROMS 2000
 	RomItem *temp_roms = calloc(MAX_TEMP_ROMS, sizeof(RomItem));
@@ -2293,8 +2357,7 @@ retro_gaming_fetch_games(Monitor *m)
 	if (server_count == 0) {
 		/* Fallback to localhost */
 		snprintf(cmd, sizeof(cmd),
-			"curl -s --connect-timeout 2 'http://localhost:8080/api/roms/console/%d' 2>/dev/null",
-			rg->selected_console);
+			"curl -s --connect-timeout 2 'http://localhost:8080/api/roms' 2>/dev/null");
 		fp = popen(cmd, "r");
 		if (fp) {
 			bytes_read = fread(buffer, 1, sizeof(buffer) - 1, fp);
@@ -2308,8 +2371,8 @@ retro_gaming_fetch_games(Monitor *m)
 	} else {
 		for (int s = 0; s < server_count && total_roms < MAX_TEMP_ROMS; s++) {
 			snprintf(cmd, sizeof(cmd),
-				"curl -s --connect-timeout 2 '%s/api/roms/console/%d' 2>/dev/null",
-				servers[s].url, rg->selected_console);
+				"curl -s --connect-timeout 2 '%s/api/roms' 2>/dev/null",
+				servers[s].url);
 			fp = popen(cmd, "r");
 			if (!fp) continue;
 
@@ -2330,14 +2393,18 @@ retro_gaming_fetch_games(Monitor *m)
 	}
 
 	/* Move to final allocation */
-	rg->games = calloc(total_roms, sizeof(RomItem));
-	if (!rg->games) {
+	rg->all_roms = calloc(total_roms, sizeof(RomItem));
+	if (!rg->all_roms) {
 		free(temp_roms);
 		return;
 	}
-	memcpy(rg->games, temp_roms, total_roms * sizeof(RomItem));
-	rg->game_count = total_roms;
+	memcpy(rg->all_roms, temp_roms, total_roms * sizeof(RomItem));
+	rg->all_rom_count = total_roms;
 	free(temp_roms);
+
+	/* Build active console tabs and filter for initial console */
+	retro_gaming_build_active_consoles(rg);
+	retro_gaming_filter_games(m);
 }
 
 static void
@@ -2557,7 +2624,7 @@ retro_gaming_launch_game(Monitor *m)
 		return;
 
 	RomItem *game = &rg->games[rg->selected_game];
-	int console = rg->selected_console;
+	int console = game->console;
 
 	if (console < 0 || console >= RETRO_CONSOLE_COUNT)
 		return;
@@ -2598,8 +2665,8 @@ retro_gaming_show(Monitor *m)
 	retro_gaming_hide_all();
 
 	rg = &m->retro_gaming;
-	rg->selected_console = RETRO_NES;
-	rg->target_console = RETRO_NES;
+	rg->selected_console = 0;
+	rg->target_console = 0;
 	rg->anim_direction = 0;
 	rg->slide_offset = 0.0f;
 	rg->width = m->m.width;
@@ -2614,9 +2681,9 @@ retro_gaming_show(Monitor *m)
 	rg->cover_loaded = 0;
 	rg->cover_loading_idx = -1;
 
-	/* Fetch games immediately for the initial console */
+	/* Fetch all ROMs once and build dynamic console tabs */
 	rg->in_game_list = 1;
-	retro_gaming_fetch_games(m);
+	retro_gaming_fetch_all_roms(m);
 
 	/* Create dim overlay */
 	if (!rg->dim)
@@ -2660,6 +2727,9 @@ retro_gaming_hide(Monitor *m)
 
 	if (rg->games) { free(rg->games); rg->games = NULL; }
 	rg->game_count = 0;
+	if (rg->all_roms) { free(rg->all_roms); rg->all_roms = NULL; }
+	rg->all_rom_count = 0;
+	rg->active_console_count = 0;
 	if (rg->cover_buf) { wlr_buffer_drop(rg->cover_buf); rg->cover_buf = NULL; }
 	rg->cover_loaded = 0;
 
@@ -2711,18 +2781,19 @@ retro_gaming_render(Monitor *m)
 	drawrect(rg->tree, 0, 0, rg->width, menu_bar_h, bg_color);
 
 	/* Calculate total width and positions of menu items */
+	int tab_count = rg->active_console_count > 0 ? rg->active_console_count : 0;
 	int item_positions[RETRO_CONSOLE_COUNT];
 	int item_widths[RETRO_CONSOLE_COUNT];
-	for (int i = 0; i < RETRO_CONSOLE_COUNT; i++) {
-		item_widths[i] = status_text_width(retro_console_names[i]);
+	for (int i = 0; i < tab_count; i++) {
+		item_widths[i] = status_text_width(retro_console_names[rg->active_consoles[i]]);
 		total_width += item_widths[i];
-		if (i < RETRO_CONSOLE_COUNT - 1)
+		if (i < tab_count - 1)
 			total_width += item_spacing;
 	}
 
 	/* Calculate item positions (menu items stay fixed) */
 	x_offset = (rg->width - total_width) / 2;
-	for (int i = 0; i < RETRO_CONSOLE_COUNT; i++) {
+	for (int i = 0; i < tab_count; i++) {
 		item_positions[i] = x_offset;
 		x_offset += item_widths[i] + item_spacing;
 	}
@@ -2759,8 +2830,8 @@ retro_gaming_render(Monitor *m)
 	drawrect(rg->tree, pill_x, pill_y, pill_w, pill_h, selected_color);
 
 	/* Draw menu items (fixed positions) */
-	for (int i = 0; i < RETRO_CONSOLE_COUNT; i++) {
-		const char *name = retro_console_names[i];
+	for (int i = 0; i < tab_count; i++) {
+		const char *name = retro_console_names[rg->active_consoles[i]];
 		int text_y = (menu_bar_h - 20) / 2;
 		int is_target = (i == rg->target_console);
 
@@ -2809,7 +2880,9 @@ retro_gaming_render(Monitor *m)
 		/* Show target console name in content area (shows destination immediately) */
 		struct wlr_scene_tree *content_tree = wlr_scene_tree_create(rg->tree);
 		if (content_tree) {
-			const char *console = retro_console_names[rg->target_console];
+			const char *console = tab_count > 0
+				? retro_console_names[rg->active_consoles[rg->target_console]]
+				: "No ROMs";
 			int cw = status_text_width(console);
 			int cx = (rg->width - cw) / 2;
 			int cy = menu_bar_h + (rg->height - menu_bar_h) / 2 - 20;
@@ -2846,9 +2919,9 @@ retro_gaming_animate(void *data)
 		rg->selected_console = rg->target_console;
 		rg->slide_offset = 0.0f;
 		rg->anim_direction = 0;
-		/* Auto-fetch and show games for the newly selected console */
+		/* Filter games locally for the newly selected console */
 		rg->in_game_list = 1;
-		retro_gaming_fetch_games(m);
+		retro_gaming_filter_games(m);
 		retro_gaming_render(m);
 		return 0;
 	}
@@ -2943,7 +3016,7 @@ retro_gaming_handle_button(Monitor *m, int button, int value)
 		}
 		case BTN_DPAD_RIGHT: {  /* Switch to next console */
 			int new_target = rg->target_console + 1;
-			if (new_target < RETRO_CONSOLE_COUNT) {
+			if (new_target < rg->active_console_count) {
 				if (rg->anim_direction != 0)
 					rg->selected_console = rg->target_console;
 				rg->target_console = new_target;
@@ -2987,14 +3060,14 @@ retro_gaming_handle_button(Monitor *m, int button, int value)
 	case BTN_SOUTH:  /* A button - enter game list and launch */
 		rg->selected_console = rg->target_console;
 		rg->in_game_list = 1;
-		retro_gaming_fetch_games(m);
+		retro_gaming_filter_games(m);
 		retro_gaming_render(m);
 		return 1;
 	}
 
 	if (direction != 0) {
 		int new_target = rg->target_console + direction;
-		if (new_target >= 0 && new_target < RETRO_CONSOLE_COUNT) {
+		if (new_target >= 0 && new_target < rg->active_console_count) {
 			/* If animation is in progress, update selected to current target first */
 			if (rg->anim_direction != 0) {
 				rg->selected_console = rg->target_console;

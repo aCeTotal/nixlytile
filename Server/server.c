@@ -98,6 +98,17 @@ static void *sync_thread(void *arg) {
             printf("Periodic sync: Media count changed %d -> %d\n", before, after);
         }
 
+        /* Periodic ROM rescan (backup to inotify) */
+        int rom_before = database_get_rom_count();
+        for (int i = 0; i < server_config.roms_path_count; i++) {
+            scanner_scan_rom_directory(server_config.roms_paths[i]);
+        }
+        int rom_after = database_get_rom_count();
+        if (rom_after != rom_before) {
+            printf("Periodic sync: ROM count changed %d -> %d\n", rom_before, rom_after);
+            scanner_fetch_rom_covers();
+        }
+
         /* Fetch any missing TMDB metadata */
         scanner_fetch_missing_tmdb();
 
@@ -205,16 +216,13 @@ static void on_file_change(const char *filepath, int is_delete, WatchType type) 
     } else if (type == WATCH_TYPE_ROMS) {
         /* ROM file detected */
         if (scanner_is_rom_file(filepath)) {
-            int console = -1;
-            /* Detect console from path */
-            const char *ext = strrchr(filepath, '.');
-            if (ext) {
-                /* Use scanner_scan_rom_file with auto-detection */
-                /* scanner_detect_console is static, so just call scan_rom_directory on parent */
-                scanner_scan_rom_directory(filepath);
-                scanner_fetch_rom_covers();
+            int console = scanner_detect_console(filepath);
+            if (console >= 0) {
+                if (scanner_scan_rom_file(filepath, console) == 0) {
+                    printf("DB: Added ROM %s\n", filepath);
+                    scanner_fetch_rom_covers();
+                }
             }
-            (void)console;
         }
     } else {
         /* Check if it's a media file that needs processing */
