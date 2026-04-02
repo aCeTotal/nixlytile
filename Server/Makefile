@@ -10,8 +10,12 @@ FFMPEG_LIBS = $(shell pkg-config --libs libavformat libavcodec libavutil 2>/dev/
 CJSON_CFLAGS = $(shell pkg-config --cflags libcjson 2>/dev/null)
 CJSON_LIBS = $(shell pkg-config --libs libcjson 2>/dev/null)
 
-CFLAGS += $(FFMPEG_CFLAGS) $(CJSON_CFLAGS)
-LDFLAGS += $(FFMPEG_LIBS) $(CJSON_LIBS)
+# libzip for scanning ROM archives
+LIBZIP_CFLAGS = $(shell pkg-config --cflags libzip 2>/dev/null)
+LIBZIP_LIBS = $(shell pkg-config --libs libzip 2>/dev/null)
+
+CFLAGS += $(FFMPEG_CFLAGS) $(CJSON_CFLAGS) $(LIBZIP_CFLAGS)
+LDFLAGS += $(FFMPEG_LIBS) $(CJSON_LIBS) $(LIBZIP_LIBS)
 
 SRC = server.c database.c scanner.c config.c tmdb.c watcher.c transcoder.c
 OBJ = $(SRC:.c=.o)

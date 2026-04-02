@@ -238,6 +238,7 @@
               pkgs.ffmpeg
               pkgs.curl
               pkgs.cjson
+              pkgs.libzip
             ];
 
             buildPhase = ''

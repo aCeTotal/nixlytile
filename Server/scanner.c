@@ -15,6 +15,7 @@
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/dict.h>
+#include <zip.h>
 
 #include "scanner.h"
 #include "database.h"
@@ -901,6 +902,9 @@ int scanner_is_rom_file(const char *path) {
     const char *ext = strrchr(path, '.');
     if (!ext) return 0;
 
+    if (strcasecmp(ext, ".zip") == 0)
+        return 1;
+
     for (int c = 0; c < CONSOLE_COUNT; c++) {
         for (int i = 0; rom_ext_table[c][i]; i++) {
             if (strcasecmp(ext, rom_ext_table[c][i]) == 0)
@@ -940,10 +944,49 @@ static int scanner_detect_disc_type(const char *path) {
     return -1;
 }
 
+/* Detect console type by inspecting filenames inside a .zip archive.
+ * Excludes GC/Wii since dolphin-emu doesn't support .zip input. */
+static int scanner_detect_console_from_zip(const char *path) {
+    int err;
+    zip_t *za = zip_open(path, ZIP_RDONLY, &err);
+    if (!za) return -1;
+
+    int result = -1;
+    zip_int64_t n = zip_get_num_entries(za, 0);
+
+    for (zip_int64_t i = 0; i < n; i++) {
+        const char *name = zip_get_name(za, i, 0);
+        if (!name) continue;
+
+        const char *ext = strrchr(name, '.');
+        if (!ext) continue;
+
+        for (int c = 0; c < CONSOLE_COUNT; c++) {
+            /* Skip GC/Wii — dolphin-emu doesn't support .zip */
+            if (c == CONSOLE_GAMECUBE || c == CONSOLE_WII)
+                continue;
+            for (int j = 0; rom_ext_table[c][j]; j++) {
+                if (strcasecmp(ext, rom_ext_table[c][j]) == 0) {
+                    result = c;
+                    goto done;
+                }
+            }
+        }
+    }
+
+done:
+    zip_close(za);
+    return result;
+}
+
 /* Detect console type from file extension and metadata */
 int scanner_detect_console(const char *path) {
     const char *ext = strrchr(path, '.');
     if (!ext) return -1;
+
+    /* .zip — inspect contents to determine console */
+    if (strcasecmp(ext, ".zip") == 0)
+        return scanner_detect_console_from_zip(path);
 
     /* Unique extensions — unambiguous console detection */
     if (strcasecmp(ext, ".nes") == 0 || strcasecmp(ext, ".fds") == 0) return CONSOLE_NES;
@@ -1137,10 +1180,8 @@ static char *download_rom_cover(const char *game_title, int console, const char 
     const char *system = libretro_system_names[console];
     if (!system) return NULL;
 
-    /* Build local path */
-    char covers_dir[4096];
-    snprintf(covers_dir, sizeof(covers_dir), "%s/covers", cache_dir);
-    mkdir(covers_dir, 0755);
+    /* Build local path — store directly in cache_dir (same as media images) */
+    mkdir(cache_dir, 0755);
 
     /* Sanitize filename: replace / and & with _ */
     char safe_title[256];
@@ -1151,7 +1192,7 @@ static char *download_rom_cover(const char *game_title, int console, const char 
     }
 
     char local_path[4096];
-    snprintf(local_path, sizeof(local_path), "%s/%d_%s.png", covers_dir, console, safe_title);
+    snprintf(local_path, sizeof(local_path), "%s/cover_%d_%s.png", cache_dir, console, safe_title);
 
     /* Check if already cached */
     struct stat st;
