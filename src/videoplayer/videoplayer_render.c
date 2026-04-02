@@ -967,7 +967,13 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
         /* Also check audio ring buffer has enough data for smooth start.
          * Without this, PipeWire starts consuming immediately on PLAY while
          * the decode thread can barely keep up, causing 75%+ underruns.
-         * Require ~0.5s of audio so the ring buffer can absorb decode jitter. */
+         * Require ~0.5s of audio so the ring buffer can absorb decode jitter.
+         *
+         * NOTE: This MUST be <= the video content duration in the frame queue
+         * (VP_FRAME_QUEUE_SIZE / fps ≈ 0.67s at 24fps).  If audio_min exceeds
+         * what can accumulate before the frame queue fills, the decode thread
+         * gets stuck discarding video frames and can't produce more audio,
+         * causing a permanent BUFFERING deadlock. */
         size_t audio_avail = 0;
         size_t audio_min = 0;
         if (vp->audio_track_count > 0 && vp->audio.sample_rate > 0) {
@@ -975,7 +981,17 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
             audio_avail = vp->audio.ring.available;
             pthread_mutex_unlock(&vp->audio.ring.lock);
             audio_min = (size_t)vp->audio.sample_rate *
-                        vp->audio.channels * sizeof(float);  /* 1.0 seconds */
+                        vp->audio.channels * sizeof(float) / 2;  /* 0.5 seconds */
+        }
+
+        /* Safety: track how long we've been stuck in BUFFERING with enough
+         * video frames.  If stuck for >3 seconds, start anyway — prevents
+         * permanent deadlock from unusual audio/video interleaving. */
+        if (queued >= VP_FRAME_QUEUE_SIZE * 3 / 4) {
+            if (vp->buffer_ready_since_ns == 0)
+                vp->buffer_ready_since_ns = vsync_time_ns;
+        } else {
+            vp->buffer_ready_since_ns = 0;
         }
 
         if (vp->debug_log) {
@@ -985,8 +1001,21 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
             fflush(vp->debug_log);
         }
 
-        if (queued >= VP_FRAME_QUEUE_SIZE * 3 / 4 &&
-            (audio_avail >= audio_min || vp->audio_track_count == 0)) {
+        int audio_ok = (audio_avail >= audio_min || vp->audio_track_count == 0);
+        int buffer_timeout = (vp->buffer_ready_since_ns > 0 &&
+                              vsync_time_ns > vp->buffer_ready_since_ns + 3000000000ULL);
+        if (buffer_timeout && !audio_ok) {
+            fprintf(stderr, "[videoplayer] BUFFERING timeout: audio=%zu/%zu, starting anyway\n",
+                    audio_avail, audio_min);
+            if (vp->debug_log) {
+                fprintf(vp->debug_log, "# BUFFER_TIMEOUT | audio=%zu/%zu, forcing play\n",
+                        audio_avail, audio_min);
+                fflush(vp->debug_log);
+            }
+            audio_ok = 1;
+        }
+
+        if (queued >= VP_FRAME_QUEUE_SIZE * 3 / 4 && audio_ok) {
             /* === Synchronized A/V start ===
              * Pre-activate PipeWire audio BEFORE starting video so that
              * audio hardware is actually outputting samples when the first
@@ -1108,6 +1137,7 @@ present_next:
          * a clean restart. Flush audio so it restarts in sync with video. */
         if (vp->state == VP_STATE_PLAYING && !vp->demux_eof) {
             vp->state = VP_STATE_BUFFERING;
+            vp->buffer_ready_since_ns = 0;
             vp->last_frame_ns = 0;
             vp->last_present_time_ns = 0;
             vp->current_repeat = 0;

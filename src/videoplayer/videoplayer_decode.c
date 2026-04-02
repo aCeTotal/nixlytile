@@ -1697,12 +1697,12 @@ static int transfer_hw_frame(VideoPlayer *vp, AVFrame *hw_frame, AVFrame *sw_fra
 }
 
 /* Helper: drain all available video frames from the decoder and queue them.
- * BLOCKING: waits for frame queue space (up to 50ms) when the queue is full.
- * This throttles the decode thread to the render thread's consumption rate,
- * preventing the VAAPI decoder from racing ahead and discarding frames.
- * The audio ring buffer has 0.5-4s of pre-buffered data, so the ~42ms wait
- * (one frame at 24fps) won't cause PipeWire underruns. */
-static void drain_video_frames(VideoPlayer *vp)
+ * When blocking=1 (normal playback): waits for frame queue space (up to 50ms)
+ * to throttle the decode thread to the render thread's consumption rate.
+ * When blocking=0 (retry loop / BUFFERING): discards immediately when full,
+ * preventing the decode thread from being stuck for seconds and starving
+ * audio decoding. */
+static void drain_video_frames_ex(VideoPlayer *vp, int blocking)
 {
     int ret;
 
@@ -1772,22 +1772,24 @@ static void drain_video_frames(VideoPlayer *vp)
          * decode thread to the video framerate, keeping the packet queue
          * buffered against I/O jitter. */
         pthread_mutex_lock(&vp->frame_mutex);
-        while (vp->frames_queued >= VP_FRAME_QUEUE_SIZE &&
-               vp->decode_running && !vp->seek_requested) {
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-            ts.tv_nsec += 50000000;  /* 50ms timeout */
-            if (ts.tv_nsec >= 1000000000) {
-                ts.tv_sec++;
-                ts.tv_nsec -= 1000000000;
+        if (blocking) {
+            while (vp->frames_queued >= VP_FRAME_QUEUE_SIZE &&
+                   vp->decode_running && !vp->seek_requested) {
+                struct timespec ts;
+                clock_gettime(CLOCK_REALTIME, &ts);
+                ts.tv_nsec += 50000000;  /* 50ms timeout */
+                if (ts.tv_nsec >= 1000000000) {
+                    ts.tv_sec++;
+                    ts.tv_nsec -= 1000000000;
+                }
+                pthread_cond_timedwait(&vp->frame_cond, &vp->frame_mutex, &ts);
             }
-            pthread_cond_timedwait(&vp->frame_cond, &vp->frame_mutex, &ts);
         }
         int has_space = vp->frames_queued < VP_FRAME_QUEUE_SIZE;
         pthread_mutex_unlock(&vp->frame_mutex);
 
         if (!has_space) {
-            /* Still full — shutting down or seeking, discard to unblock */
+            /* Full — discard immediately (non-blocking) or after timeout (blocking) */
             av_frame_unref(vp->decode_frame);
             av_frame_unref(vp->sw_frame);
             continue;
@@ -1838,6 +1840,12 @@ static void drain_video_frames(VideoPlayer *vp)
         av_frame_unref(vp->decode_frame);
         av_frame_unref(vp->sw_frame);
     }
+}
+
+/* Default blocking drain for normal playback */
+static void drain_video_frames(VideoPlayer *vp)
+{
+    drain_video_frames_ex(vp, 1);
 }
 
 /* Drain all immediately available audio packets from the packet queue.
@@ -2002,8 +2010,11 @@ static void *decode_thread_func(void *arg)
                     break;
                 }
                 if (ret == AVERROR(EAGAIN)) {
-                    /* Decoder output buffer full — drain frames and retry */
-                    drain_video_frames(vp);
+                    /* Decoder output buffer full — drain frames and retry.
+                     * Use non-blocking drain to avoid spending 50ms * N frames
+                     * per retry, which would starve audio decoding and cause
+                     * the BUFFERING deadlock (audio never reaches threshold). */
+                    drain_video_frames_ex(vp, 0);
                     continue;
                 }
                 /* Actual error — log and skip this packet */
@@ -2083,6 +2094,7 @@ void videoplayer_seek(VideoPlayer *vp, int64_t position_us)
      * waits for the buffer to refill after the seek completes.
      * The decode thread handles audio pause/flush safely in its seek handler. */
     vp->state = VP_STATE_BUFFERING;
+    vp->buffer_ready_since_ns = 0;
     vp->last_frame_ns = 0;
     vp->last_present_time_ns = 0;
     vp->current_repeat = 0;

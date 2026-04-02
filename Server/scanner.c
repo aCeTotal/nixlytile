@@ -915,6 +915,28 @@ int scanner_is_rom_file(const char *path) {
     return 0;
 }
 
+/* Detect GB vs GBC by reading the CGB flag at ROM header offset 0x143.
+ * 0x80 = GBC-compatible (dual mode, works on both GB and GBC)
+ * 0xC0 = GBC-only
+ * Anything else = original Game Boy */
+static int scanner_detect_gb_vs_gbc(const unsigned char *header, size_t len) {
+    if (len < 0x144) return CONSOLE_GB;
+    unsigned char cgb = header[0x143];
+    if (cgb == 0x80 || cgb == 0xC0)
+        return CONSOLE_GBC;
+    return CONSOLE_GB;
+}
+
+/* Read CGB flag from a loose .gb file */
+static int scanner_detect_gb_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return CONSOLE_GB;
+    unsigned char header[0x144];
+    size_t n = fread(header, 1, sizeof(header), f);
+    fclose(f);
+    return scanner_detect_gb_vs_gbc(header, n);
+}
+
 /* Detect if a disc image is GameCube or Wii by reading magic bytes.
  * GameCube: magic 0xC2339F3D at offset 0x1C
  * Wii:      magic 0x5D1C9EA3 at offset 0x18
@@ -946,13 +968,15 @@ static int scanner_detect_disc_type(const char *path) {
 }
 
 /* Detect console type by inspecting filenames inside a .zip archive.
- * Excludes GC/Wii since dolphin-emu doesn't support .zip input. */
+ * Excludes GC/Wii since dolphin-emu doesn't support .zip input.
+ * For .gb files, reads the ROM header to distinguish GB vs GBC. */
 static int scanner_detect_console_from_zip(const char *path) {
     int err;
     zip_t *za = zip_open(path, ZIP_RDONLY, &err);
     if (!za) return -1;
 
     int result = -1;
+    zip_int64_t match_idx = -1;
     zip_int64_t n = zip_get_num_entries(za, 0);
 
     for (zip_int64_t i = 0; i < n; i++) {
@@ -969,6 +993,7 @@ static int scanner_detect_console_from_zip(const char *path) {
             for (int j = 0; rom_ext_table[c][j]; j++) {
                 if (strcasecmp(ext, rom_ext_table[c][j]) == 0) {
                     result = c;
+                    match_idx = i;
                     goto done;
                 }
             }
@@ -976,8 +1001,51 @@ static int scanner_detect_console_from_zip(const char *path) {
     }
 
 done:
+    /* For .gb files inside zip, read ROM header to distinguish GB vs GBC */
+    if (result == CONSOLE_GB && match_idx >= 0) {
+        zip_file_t *zf = zip_fopen_index(za, match_idx, 0);
+        if (zf) {
+            unsigned char header[0x144];
+            zip_int64_t rd = zip_fread(zf, header, sizeof(header));
+            if (rd >= (zip_int64_t)sizeof(header))
+                result = scanner_detect_gb_vs_gbc(header, rd);
+            zip_fclose(zf);
+        }
+    }
+
     zip_close(za);
     return result;
+}
+
+/* Try to infer console type from parent directory name.
+ * Matches common directory names like "GBA", "Game Boy Advance", "SNES", etc. */
+static int scanner_detect_console_from_dir(const char *path) {
+    /* Find parent directory name */
+    const char *slash = strrchr(path, '/');
+    if (!slash || slash == path) return -1;
+
+    /* Walk back to find the start of the parent dir */
+    const char *end = slash;
+    const char *start = end - 1;
+    while (start > path && *start != '/') start--;
+    if (*start == '/') start++;
+
+    size_t len = end - start;
+    char dir[64];
+    if (len == 0 || len >= sizeof(dir)) return -1;
+    memcpy(dir, start, len);
+    dir[len] = '\0';
+
+    if (strcasecmp(dir, "NES") == 0) return CONSOLE_NES;
+    if (strcasecmp(dir, "SNES") == 0 || strcasecmp(dir, "Super Nintendo") == 0) return CONSOLE_SNES;
+    if (strcasecmp(dir, "N64") == 0 || strcasecmp(dir, "Nintendo 64") == 0) return CONSOLE_N64;
+    if (strcasecmp(dir, "GameCube") == 0 || strcasecmp(dir, "GC") == 0) return CONSOLE_GAMECUBE;
+    if (strcasecmp(dir, "Wii") == 0) return CONSOLE_WII;
+    if (strcasecmp(dir, "GBA") == 0 || strcasecmp(dir, "Game Boy Advance") == 0) return CONSOLE_GBA;
+    if (strcasecmp(dir, "GBC") == 0 || strcasecmp(dir, "Game Boy Color") == 0) return CONSOLE_GBC;
+    if (strcasecmp(dir, "GB") == 0 || strcasecmp(dir, "Game Boy") == 0) return CONSOLE_GB;
+
+    return -1;
 }
 
 /* Detect console type from file extension and metadata */
@@ -985,19 +1053,26 @@ int scanner_detect_console(const char *path) {
     const char *ext = strrchr(path, '.');
     if (!ext) return -1;
 
-    /* .zip — inspect contents to determine console */
-    if (strcasecmp(ext, ".zip") == 0)
-        return scanner_detect_console_from_zip(path);
+    /* .zip — inspect contents, fall back to directory name */
+    if (strcasecmp(ext, ".zip") == 0) {
+        int result = scanner_detect_console_from_zip(path);
+        if (result < 0)
+            result = scanner_detect_console_from_dir(path);
+        return result;
+    }
 
     /* Unique extensions — unambiguous console detection */
     if (strcasecmp(ext, ".nes") == 0 || strcasecmp(ext, ".fds") == 0) return CONSOLE_NES;
     if (strcasecmp(ext, ".sfc") == 0 || strcasecmp(ext, ".smc") == 0) return CONSOLE_SNES;
     if (strcasecmp(ext, ".z64") == 0 || strcasecmp(ext, ".n64") == 0 || strcasecmp(ext, ".v64") == 0) return CONSOLE_N64;
-    if (strcasecmp(ext, ".gb") == 0) return CONSOLE_GB;
     if (strcasecmp(ext, ".gbc") == 0) return CONSOLE_GBC;
     if (strcasecmp(ext, ".gba") == 0) return CONSOLE_GBA;
     if (strcasecmp(ext, ".wbfs") == 0) return CONSOLE_WII;
     if (strcasecmp(ext, ".gcm") == 0) return CONSOLE_GAMECUBE;
+
+    /* .gb — read ROM header to distinguish GB vs GBC */
+    if (strcasecmp(ext, ".gb") == 0)
+        return scanner_detect_gb_file(path);
 
     /* Shared extensions (.iso, .ciso, .gcz, .rvz) — read disc magic bytes */
     if (strcasecmp(ext, ".iso") == 0 || strcasecmp(ext, ".ciso") == 0 ||

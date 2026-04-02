@@ -395,6 +395,7 @@ typedef struct VideoPlayer {
     /* Frame pacing */
     uint64_t last_frame_ns;
     uint64_t last_present_time_ns;         /* Wall-clock time of last actual frame presentation */
+    uint64_t buffer_ready_since_ns;        /* When video frames first reached target during BUFFERING */
     uint64_t frame_interval_ns;
     uint64_t display_interval_ns;          /* Display refresh interval */
     int64_t av_sync_offset_us;
