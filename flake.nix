@@ -124,6 +124,7 @@
             blueman
 
             # System utilities
+            curl               # media server API calls (popen)
             fd                 # fd (fast file search for cache)
             findutils          # find
             coreutils          # rm, mkdir, etc.

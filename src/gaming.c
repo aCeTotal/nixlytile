@@ -2329,7 +2329,6 @@ retro_gaming_fetch_all_roms(Monitor *m)
 	RetroGamingView *rg;
 	FILE *fp;
 	char cmd[512];
-	char buffer[262144];
 	size_t bytes_read;
 
 	if (!m)
@@ -2344,10 +2343,15 @@ retro_gaming_fetch_all_roms(Monitor *m)
 	}
 	rg->all_rom_count = 0;
 
+	/* 2MB buffer for ROM JSON (collections can be 1MB+) */
+	#define ROM_BUFFER_SIZE (2 * 1024 * 1024)
+	char *buffer = malloc(ROM_BUFFER_SIZE);
+	if (!buffer) return;
+
 	/* Temporary buffer for all ROMs from all servers */
-	#define MAX_TEMP_ROMS 2000
+	#define MAX_TEMP_ROMS 8000
 	RomItem *temp_roms = calloc(MAX_TEMP_ROMS, sizeof(RomItem));
-	if (!temp_roms) return;
+	if (!temp_roms) { free(buffer); return; }
 	int total_roms = 0;
 
 	/* Fetch from all configured/discovered servers (same pattern as media) */
@@ -2360,7 +2364,7 @@ retro_gaming_fetch_all_roms(Monitor *m)
 			"curl -s --connect-timeout 2 'http://localhost:8080/api/roms' 2>/dev/null");
 		fp = popen(cmd, "r");
 		if (fp) {
-			bytes_read = fread(buffer, 1, sizeof(buffer) - 1, fp);
+			bytes_read = fread(buffer, 1, ROM_BUFFER_SIZE - 1, fp);
 			pclose(fp);
 			if (bytes_read > 0) {
 				buffer[bytes_read] = '\0';
@@ -2376,7 +2380,7 @@ retro_gaming_fetch_all_roms(Monitor *m)
 			fp = popen(cmd, "r");
 			if (!fp) continue;
 
-			bytes_read = fread(buffer, 1, sizeof(buffer) - 1, fp);
+			bytes_read = fread(buffer, 1, ROM_BUFFER_SIZE - 1, fp);
 			pclose(fp);
 			if (bytes_read == 0) continue;
 			buffer[bytes_read] = '\0';
@@ -2386,6 +2390,8 @@ retro_gaming_fetch_all_roms(Monitor *m)
 			total_roms += parsed;
 		}
 	}
+
+	free(buffer);
 
 	if (total_roms == 0) {
 		free(temp_roms);
