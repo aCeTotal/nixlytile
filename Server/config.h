@@ -24,6 +24,10 @@ typedef struct {
     char tmdb_api_key[128];
     char tmdb_language[8];          /* e.g., "en-US", "nb-NO" */
 
+    /* IGDB API (Twitch OAuth2) */
+    char igdb_client_id[128];
+    char igdb_client_secret[128];
+
     /* Source paths with raw media to be transcoded */
     char unprocessed_paths[MAX_WATCH_PATHS][MAX_PATH_LEN];
     int unprocessed_path_count;

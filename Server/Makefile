@@ -17,7 +17,7 @@ LIBZIP_LIBS = $(shell pkg-config --libs libzip 2>/dev/null)
 CFLAGS += $(FFMPEG_CFLAGS) $(CJSON_CFLAGS) $(LIBZIP_CFLAGS)
 LDFLAGS += $(FFMPEG_LIBS) $(CJSON_LIBS) $(LIBZIP_LIBS)
 
-SRC = server.c database.c scanner.c config.c tmdb.c watcher.c transcoder.c
+SRC = server.c database.c scanner.c config.c tmdb.c igdb.c watcher.c transcoder.c
 OBJ = $(SRC:.c=.o)
 TARGET = nixly-server
 

@@ -158,6 +158,12 @@ int config_load(const char *path) {
             server_config.delete_after_conversion =
                 (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
         }
+        else if (strcmp(key, "igdb_client_id") == 0) {
+            strncpy(server_config.igdb_client_id, value, sizeof(server_config.igdb_client_id) - 1);
+        }
+        else if (strcmp(key, "igdb_client_secret") == 0) {
+            strncpy(server_config.igdb_client_secret, value, sizeof(server_config.igdb_client_secret) - 1);
+        }
         else if (strcmp(key, "roms_path") == 0) {
             /* Clear default on first config-specified roms_path */
             if (!roms_default_cleared) {
@@ -205,6 +211,13 @@ int config_save(const char *path) {
 
     fprintf(f, "# TMDB language (en-US, nb-NO, etc.)\n");
     fprintf(f, "tmdb_language = %s\n\n", server_config.tmdb_language);
+
+    fprintf(f, "# IGDB API credentials (get from https://dev.twitch.tv/console/apps)\n");
+    if (server_config.igdb_client_id[0])
+        fprintf(f, "igdb_client_id = %s\n", server_config.igdb_client_id);
+    if (server_config.igdb_client_secret[0])
+        fprintf(f, "igdb_client_secret = %s\n", server_config.igdb_client_secret);
+    fprintf(f, "\n");
 
     fprintf(f, "# Cache directory for thumbnails\n");
     fprintf(f, "cache_dir = %s\n\n", server_config.cache_dir);

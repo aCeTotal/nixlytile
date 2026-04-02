@@ -20,6 +20,7 @@
 #include "scanner.h"
 #include "database.h"
 #include "tmdb.h"
+#include "igdb.h"
 #include "config.h"
 
 /* Supported video extensions */
@@ -1300,4 +1301,98 @@ void scanner_fetch_rom_covers(void) {
         free(json);
     }
     printf("ROM cover fetch complete\n");
+}
+
+/* Clean a ROM title for IGDB search: strip region tags, version tags, etc. */
+static void clean_rom_title(const char *raw, char *out, size_t out_size) {
+    strncpy(out, raw, out_size - 1);
+    out[out_size - 1] = '\0';
+
+    /* Strip anything in parentheses: (USA), (Europe), (Rev A), (V1.1), etc. */
+    char *p;
+    while ((p = strchr(out, '(')) != NULL) {
+        char *close = strchr(p, ')');
+        if (close) {
+            /* Remove from '(' to ')' inclusive, plus trailing space */
+            char *after = close + 1;
+            while (*after == ' ') after++;
+            memmove(p, after, strlen(after) + 1);
+        } else {
+            *p = '\0'; /* Unclosed paren, just truncate */
+            break;
+        }
+    }
+
+    /* Strip anything in brackets: [!], [b1], etc. */
+    while ((p = strchr(out, '[')) != NULL) {
+        char *close = strchr(p, ']');
+        if (close) {
+            char *after = close + 1;
+            while (*after == ' ') after++;
+            memmove(p, after, strlen(after) + 1);
+        } else {
+            *p = '\0';
+            break;
+        }
+    }
+
+    /* Trim trailing whitespace */
+    size_t len = strlen(out);
+    while (len > 0 && (out[len - 1] == ' ' || out[len - 1] == '\t')) {
+        out[--len] = '\0';
+    }
+}
+
+/* Fetch IGDB metadata for ROMs that don't have it */
+void scanner_fetch_rom_metadata(void) {
+    int total = 0;
+    int found = 0;
+
+    for (int c = 0; c < CONSOLE_COUNT; c++) {
+        int *ids = NULL;
+        char **titles = NULL;
+        int count = 0;
+
+        if (database_get_roms_without_igdb(c, &ids, &titles, &count) != 0)
+            continue;
+
+        if (count > 0) {
+            int platform_id = igdb_console_to_platform(c);
+            printf("IGDB: Fetching metadata for %d %s ROMs...\n",
+                count, database_console_name(c));
+
+            for (int i = 0; i < count; i++) {
+                char clean[256];
+                clean_rom_title(titles[i], clean, sizeof(clean));
+
+                IgdbGame *g = igdb_search_game(clean, platform_id);
+                if (g) {
+                    database_update_rom_metadata(ids[i], g->igdb_id,
+                        g->summary, g->developer, g->publisher,
+                        g->release_year, g->genres, NULL,
+                        g->rating, g->platforms);
+                    printf("  IGDB: %s -> %s (%d)\n", titles[i],
+                        g->name ? g->name : "?", g->release_year);
+                    igdb_free_game(g);
+                    found++;
+                } else {
+                    /* Mark as searched (igdb_id = -1) to avoid re-searching */
+                    database_update_rom_metadata(ids[i], -1,
+                        NULL, NULL, NULL, 0, NULL, NULL, 0, NULL);
+                }
+                total++;
+
+                /* Rate limit: IGDB allows 4 req/sec */
+                usleep(260000); /* ~260ms between requests */
+            }
+        }
+
+        for (int i = 0; i < count; i++)
+            free(titles[i]);
+        free(ids);
+        free(titles);
+    }
+
+    if (total > 0)
+        printf("IGDB: Metadata fetch complete (%d/%d found)\n", found, total);
 }

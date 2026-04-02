@@ -287,6 +287,15 @@ typedef struct RomItem {
 	char cover_path[512];
 	char filepath[1024];
 	char server_url[256];
+
+	/* IGDB metadata */
+	char description[1024];
+	char developer[128];
+	char publisher[128];
+	int release_year;
+	char genre[256];
+	char igdb_platforms[512];
+	float rating;
 } RomItem;
 
 typedef enum {

@@ -1,5 +1,43 @@
 #include "nixlytile.h"
 #include "client.h"
+#include <sys/eventfd.h>
+#include <pthread.h>
+
+/* ── Async media fetch infrastructure ──────────────────────────────── */
+/* Worker thread does curl + parse in background, signals main loop via eventfd */
+static int media_fetch_efd = -1;
+static struct wl_event_source *media_fetch_ev_source = NULL;
+static volatile int media_fetch_busy = 0;
+
+#define ASYNC_MAX_ITEMS 2000
+
+typedef struct {
+	MediaItem *head;
+	int count;
+	uint32_t hash;
+	int fetched;
+} AsyncViewResult;
+
+static pthread_mutex_t async_lock = PTHREAD_MUTEX_INITIALIZER;
+static AsyncViewResult async_movies;
+static AsyncViewResult async_tvshows;
+
+/* Request snapshot - filled by main thread before launching worker */
+static struct {
+	int do_movies;
+	int do_tvshows;
+	char server_urls[MAX_MEDIA_SERVERS][256];
+	int server_count;
+	/* Discovery: worker can also discover new servers */
+	int do_discovery;
+	char new_server_urls[MAX_MEDIA_SERVERS][256];
+	int new_server_count;
+} async_req;
+
+/* Forward declarations */
+static int media_fetch_done_cb(int fd, uint32_t mask, void *data);
+static void media_kick_async_fetch(int want_movies, int want_tvshows);
+static void async_free_result(AsyncViewResult *r);
 
 void
 add_media_server(const char *url, int is_local, int is_configured)
@@ -176,8 +214,9 @@ run_local_discovery(void)
 {
 	uint64_t now = monotonic_msec();
 
-	/* Don't retry too often (every 30 seconds) */
-	if (now - last_discovery_attempt_ms < 30000)
+	/* Retry faster when no servers found (3s vs 30s) */
+	uint64_t cooldown = (media_server_count > 0) ? 30000 : 3000;
+	if (now - last_discovery_attempt_ms < cooldown)
 		return;
 	last_discovery_attempt_ms = now;
 
@@ -548,6 +587,301 @@ media_view_free_items(MediaGridView *view)
 	view->item_count = 0;
 }
 
+static void
+async_free_result(AsyncViewResult *r)
+{
+	MediaItem *item = r->head, *next;
+	while (item) {
+		next = item->next;
+		free(item);
+		item = next;
+	}
+	r->head = NULL;
+	r->count = 0;
+	r->hash = 0;
+	r->fetched = 0;
+}
+
+/* Fetch + dedup for one view type, store result in *out */
+static void
+async_fetch_view(const char *endpoint, AsyncViewResult *out,
+		 const char (*urls)[256], int url_count)
+{
+	MediaItem **temp = calloc(ASYNC_MAX_ITEMS, sizeof(MediaItem *));
+	int total = 0;
+	uint32_t hash = 5381;
+	char cmd[512];
+	char *buffer;
+	FILE *fp;
+	size_t bytes;
+
+	if (!temp) return;
+
+	buffer = malloc(1024 * 1024);
+	if (!buffer) { free(temp); return; }
+
+	for (int s = 0; s < url_count && total < ASYNC_MAX_ITEMS; s++) {
+		snprintf(cmd, sizeof(cmd),
+			 "curl -s --connect-timeout 2 '%s%s' 2>/dev/null",
+			 urls[s], endpoint);
+		fp = popen(cmd, "r");
+		if (!fp) continue;
+		bytes = fread(buffer, 1, 1024 * 1024 - 1, fp);
+		pclose(fp);
+		if (!bytes) continue;
+		buffer[bytes] = '\0';
+
+		for (size_t i = 0; i < bytes; i++)
+			hash = ((hash << 5) + hash) + (unsigned char)buffer[i];
+
+		int parsed = parse_media_json(buffer, urls[s],
+					      &temp[total], ASYNC_MAX_ITEMS - total);
+		total += parsed;
+	}
+
+	free(buffer);
+
+	/* Dedup: keep item with highest server_priority per tmdb_id */
+	MediaItem *head = NULL, *last = NULL;
+	int count = 0;
+	for (int i = 0; i < total; i++) {
+		MediaItem *item = temp[i];
+		if (!item) continue;
+		int dominated = 0;
+		if (item->tmdb_id > 0) {
+			for (int j = 0; j < total; j++) {
+				if (i == j || !temp[j]) continue;
+				MediaItem *other = temp[j];
+				if (other->tmdb_id == item->tmdb_id &&
+				    other->type == item->type &&
+				    other->season == item->season &&
+				    other->episode == item->episode) {
+					if (other->server_priority > item->server_priority) {
+						dominated = 1;
+						break;
+					}
+					if (other->server_priority == item->server_priority && j < i) {
+						dominated = 1;
+						break;
+					}
+				}
+			}
+		}
+		if (dominated) {
+			free(item);
+			temp[i] = NULL;
+		} else {
+			if (!head) head = item;
+			else last->next = item;
+			last = item;
+			item->next = NULL;
+			count++;
+		}
+	}
+
+	free(temp);
+
+	out->head = head;
+	out->count = count;
+	out->hash = hash;
+	out->fetched = 1;
+}
+
+static void *
+media_fetch_worker(void *arg)
+{
+	(void)arg;
+
+	/* Try localhost discovery in worker (non-blocking for main thread) */
+	if (async_req.do_discovery) {
+		char cmd[256];
+		FILE *fp;
+		snprintf(cmd, sizeof(cmd),
+			 "curl -s --connect-timeout 1 http://localhost:%d/api/status 2>/dev/null",
+			 MEDIA_SERVER_PORT);
+		fp = popen(cmd, "r");
+		if (fp) {
+			char buf[64];
+			if (fgets(buf, sizeof(buf), fp) && strstr(buf, "ok")) {
+				/* localhost is up - add to our server list if not already there */
+				char url[256];
+				snprintf(url, sizeof(url), "http://localhost:%d", MEDIA_SERVER_PORT);
+				int found = 0;
+				for (int i = 0; i < async_req.server_count; i++) {
+					if (strcmp(async_req.server_urls[i], url) == 0) {
+						found = 1;
+						break;
+					}
+				}
+				if (!found && async_req.server_count < MAX_MEDIA_SERVERS) {
+					strncpy(async_req.server_urls[async_req.server_count],
+						url, 255);
+					async_req.server_count++;
+				}
+				/* Report back to main thread */
+				if (async_req.new_server_count < MAX_MEDIA_SERVERS) {
+					strncpy(async_req.new_server_urls[async_req.new_server_count],
+						url, 255);
+					async_req.new_server_count++;
+				}
+			}
+			pclose(fp);
+		}
+	}
+
+	/* Fetch movies */
+	if (async_req.do_movies && async_req.server_count > 0) {
+		AsyncViewResult res = {0};
+		async_fetch_view("/api/movies", &res,
+				 (const char (*)[256])async_req.server_urls,
+				 async_req.server_count);
+		pthread_mutex_lock(&async_lock);
+		async_free_result(&async_movies);
+		async_movies = res;
+		pthread_mutex_unlock(&async_lock);
+	}
+
+	/* Fetch tvshows */
+	if (async_req.do_tvshows && async_req.server_count > 0) {
+		AsyncViewResult res = {0};
+		async_fetch_view("/api/tvshows", &res,
+				 (const char (*)[256])async_req.server_urls,
+				 async_req.server_count);
+		pthread_mutex_lock(&async_lock);
+		async_free_result(&async_tvshows);
+		async_tvshows = res;
+		pthread_mutex_unlock(&async_lock);
+	}
+
+	/* Signal main thread */
+	uint64_t val = 1;
+	if (media_fetch_efd >= 0)
+		write(media_fetch_efd, &val, sizeof(val));
+
+	media_fetch_busy = 0;
+	return NULL;
+}
+
+/* Called on main thread when worker thread signals completion */
+static int
+media_fetch_done_cb(int fd, uint32_t mask, void *data)
+{
+	(void)mask;
+	(void)data;
+	uint64_t val;
+	read(fd, &val, sizeof(val));
+
+	Monitor *m;
+
+	/* Apply discovered servers to global list */
+	for (int i = 0; i < async_req.new_server_count; i++) {
+		add_media_server(async_req.new_server_urls[i], 1, 0);
+	}
+
+	pthread_mutex_lock(&async_lock);
+
+	wl_list_for_each(m, &mons, link) {
+		/* Apply movies result */
+		if (async_movies.fetched && m->movies_view.visible) {
+			if (async_movies.hash != m->movies_view.last_data_hash) {
+				int saved_idx = m->movies_view.selected_idx;
+				int saved_scroll = m->movies_view.scroll_offset;
+
+				media_view_free_items(&m->movies_view);
+				m->movies_view.items = async_movies.head;
+				m->movies_view.item_count = async_movies.count;
+				m->movies_view.last_data_hash = async_movies.hash;
+				/* Transferred ownership - don't free in async_movies */
+				async_movies.head = NULL;
+				async_movies.count = 0;
+				async_movies.fetched = 0;
+
+				if (saved_idx < m->movies_view.item_count)
+					m->movies_view.selected_idx = saved_idx;
+				else if (m->movies_view.item_count > 0)
+					m->movies_view.selected_idx = m->movies_view.item_count - 1;
+				m->movies_view.scroll_offset = saved_scroll;
+				media_view_render(m, MEDIA_VIEW_MOVIES);
+
+				wlr_log(WLR_INFO, "Async: loaded %d movies",
+					m->movies_view.item_count);
+			}
+		}
+
+		/* Apply tvshows result */
+		if (async_tvshows.fetched && m->tvshows_view.visible) {
+			if (async_tvshows.hash != m->tvshows_view.last_data_hash) {
+				int saved_idx = m->tvshows_view.selected_idx;
+				int saved_scroll = m->tvshows_view.scroll_offset;
+
+				media_view_free_items(&m->tvshows_view);
+				m->tvshows_view.items = async_tvshows.head;
+				m->tvshows_view.item_count = async_tvshows.count;
+				m->tvshows_view.last_data_hash = async_tvshows.hash;
+				async_tvshows.head = NULL;
+				async_tvshows.count = 0;
+				async_tvshows.fetched = 0;
+
+				if (saved_idx < m->tvshows_view.item_count)
+					m->tvshows_view.selected_idx = saved_idx;
+				else if (m->tvshows_view.item_count > 0)
+					m->tvshows_view.selected_idx = m->tvshows_view.item_count - 1;
+				m->tvshows_view.scroll_offset = saved_scroll;
+				media_view_render(m, MEDIA_VIEW_TVSHOWS);
+
+				wlr_log(WLR_INFO, "Async: loaded %d tvshows",
+					m->tvshows_view.item_count);
+			}
+		}
+	}
+
+	/* Clean up any unclaimed results */
+	async_free_result(&async_movies);
+	async_free_result(&async_tvshows);
+
+	pthread_mutex_unlock(&async_lock);
+
+	return 0;
+}
+
+static void
+media_kick_async_fetch(int want_movies, int want_tvshows)
+{
+	if (media_fetch_busy)
+		return;
+
+	/* Lazy-init eventfd */
+	if (media_fetch_efd < 0) {
+		media_fetch_efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+		if (media_fetch_efd < 0)
+			return;
+		media_fetch_ev_source = wl_event_loop_add_fd(event_loop,
+			media_fetch_efd, WL_EVENT_READABLE,
+			media_fetch_done_cb, NULL);
+	}
+
+	/* Snapshot server list for worker */
+	async_req.do_movies = want_movies;
+	async_req.do_tvshows = want_tvshows;
+	async_req.server_count = 0;
+	async_req.new_server_count = 0;
+	async_req.do_discovery = (media_server_count == 0);
+
+	for (int i = 0; i < media_server_count && i < MAX_MEDIA_SERVERS; i++) {
+		strncpy(async_req.server_urls[i], media_servers[i].url, 255);
+		async_req.server_count++;
+	}
+
+	media_fetch_busy = 1;
+
+	pthread_t tid;
+	if (pthread_create(&tid, NULL, media_fetch_worker, NULL) != 0) {
+		media_fetch_busy = 0;
+		return;
+	}
+	pthread_detach(tid);
+}
+
 static const char *
 json_find_value(const char *json, const char *key)
 {
@@ -622,52 +956,27 @@ media_view_poll_timer_cb(void *data)
 	(void)data;
 
 	if (!htpc_mode_active) {
-		/* Re-arm timer even when inactive */
 		if (media_view_poll_timer)
 			wl_event_source_timer_update(media_view_poll_timer, 3000);
 		return 0;
 	}
 
-	/* Skip view refresh while video player is active — the blocking popen(curl)
-	 * and UDP discovery calls stall the compositor main loop for ~250ms every
-	 * 30 seconds, causing visible video stutter. Views are hidden behind the
-	 * video overlay anyway. */
+	/* Skip during active video playback - views are hidden anyway */
 	if (active_videoplayer && playback_state == PLAYBACK_PLAYING) {
 		if (media_view_poll_timer)
 			wl_event_source_timer_update(media_view_poll_timer, 3000);
 		return 0;
 	}
 
-	wl_list_for_each(m, &mons, link) {
-		/* Update movies view if visible */
-		if (m->movies_view.visible) {
-			int saved_idx = m->movies_view.selected_idx;
-			int saved_scroll = m->movies_view.scroll_offset;
-			if (media_view_refresh(m, MEDIA_VIEW_MOVIES)) {
-				/* Data changed - restore navigation and re-render */
-				if (saved_idx < m->movies_view.item_count)
-					m->movies_view.selected_idx = saved_idx;
-				else if (m->movies_view.item_count > 0)
-					m->movies_view.selected_idx = m->movies_view.item_count - 1;
-				m->movies_view.scroll_offset = saved_scroll;
-				media_view_render(m, MEDIA_VIEW_MOVIES);
-			}
+	/* Kick off non-blocking async fetch for visible views */
+	{
+		int want_movies = 0, want_tvshows = 0;
+		wl_list_for_each(m, &mons, link) {
+			if (m->movies_view.visible) want_movies = 1;
+			if (m->tvshows_view.visible) want_tvshows = 1;
 		}
-
-		/* Update tvshows view if visible */
-		if (m->tvshows_view.visible) {
-			int saved_idx = m->tvshows_view.selected_idx;
-			int saved_scroll = m->tvshows_view.scroll_offset;
-			if (media_view_refresh(m, MEDIA_VIEW_TVSHOWS)) {
-				/* Data changed - restore navigation and re-render */
-				if (saved_idx < m->tvshows_view.item_count)
-					m->tvshows_view.selected_idx = saved_idx;
-				else if (m->tvshows_view.item_count > 0)
-					m->tvshows_view.selected_idx = m->tvshows_view.item_count - 1;
-				m->tvshows_view.scroll_offset = saved_scroll;
-				media_view_render(m, MEDIA_VIEW_TVSHOWS);
-			}
-		}
+		if (want_movies || want_tvshows)
+			media_kick_async_fetch(want_movies, want_tvshows);
 	}
 
 	/* Check buffering progress */
@@ -678,7 +987,6 @@ media_view_poll_timer_cb(void *data)
 
 		media_check_buffering();
 
-		/* Re-render if progress changed or state changed */
 		if (playback_buffer_progress != old_progress || playback_state != old_state) {
 			wl_list_for_each(bm, &mons, link) {
 				if (bm->movies_view.visible && bm->movies_view.in_detail_view)
@@ -689,7 +997,7 @@ media_view_poll_timer_cb(void *data)
 		}
 	}
 
-	/* Re-arm timer for next poll (1s during buffering, 3s otherwise) */
+	/* Re-arm timer (1s during buffering, 3s normally) */
 	{
 		int interval = (playback_state == PLAYBACK_BUFFERING) ? 1000 : 3000;
 		if (media_view_poll_timer)
@@ -1888,9 +2196,12 @@ media_view_render(Monitor *m, MediaViewType type)
 	int padding = (int)(MEDIA_GRID_PADDING * scale);
 	int gap = (int)(MEDIA_GRID_GAP * scale);
 
-	/* Refresh if needed */
+	/* Kick off async fetch if view needs data (non-blocking) */
 	if (view->needs_refresh || !view->items) {
-		media_view_refresh(m, type);
+		view->needs_refresh = 0;
+		media_kick_async_fetch(
+			type == MEDIA_VIEW_MOVIES,
+			type == MEDIA_VIEW_TVSHOWS);
 	}
 
 	/* Clear previous content */

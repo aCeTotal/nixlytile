@@ -131,6 +131,16 @@ int database_init(const char *db_path) {
         "ALTER TABLE media ADD COLUMN tmdb_episode_runtime INTEGER",
         "ALTER TABLE media ADD COLUMN tmdb_status TEXT",
         "ALTER TABLE media ADD COLUMN tmdb_next_episode TEXT",
+        /* ROM IGDB metadata columns */
+        "ALTER TABLE roms ADD COLUMN igdb_id INTEGER",
+        "ALTER TABLE roms ADD COLUMN description TEXT",
+        "ALTER TABLE roms ADD COLUMN developer TEXT",
+        "ALTER TABLE roms ADD COLUMN publisher TEXT",
+        "ALTER TABLE roms ADD COLUMN release_year INTEGER",
+        "ALTER TABLE roms ADD COLUMN genre TEXT",
+        "ALTER TABLE roms ADD COLUMN players TEXT",
+        "ALTER TABLE roms ADD COLUMN igdb_rating REAL",
+        "ALTER TABLE roms ADD COLUMN igdb_platforms TEXT",
         NULL
     };
 
@@ -1041,7 +1051,9 @@ char *database_get_rom_filepath(int id) {
 
 char *database_get_roms_json(void) {
     const char *sql =
-        "SELECT id, console, title, cover_path, size, region, filepath "
+        "SELECT id, console, title, cover_path, size, region, filepath, "
+        "igdb_id, description, developer, publisher, release_year, genre, "
+        "players, igdb_rating, igdb_platforms "
         "FROM roms ORDER BY console, title";
 
     sqlite3_stmt *stmt;
@@ -1049,14 +1061,14 @@ char *database_get_roms_json(void) {
         return NULL;
     }
 
-    size_t buf_size = 65536;
+    size_t buf_size = 131072;
     size_t buf_used = 0;
     char *json = malloc(buf_size);
     json[buf_used++] = '[';
 
     int first = 1;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (buf_used > buf_size - 2048) {
+        if (buf_used > buf_size - 4096) {
             buf_size *= 2;
             json = realloc(json, buf_size);
         }
@@ -1071,23 +1083,49 @@ char *database_get_roms_json(void) {
         int64_t size = sqlite3_column_int64(stmt, 4);
         const char *region = (const char *)sqlite3_column_text(stmt, 5);
         const char *filepath = (const char *)sqlite3_column_text(stmt, 6);
+        int igdb_id = sqlite3_column_int(stmt, 7);
+        const char *description = (const char *)sqlite3_column_text(stmt, 8);
+        const char *developer = (const char *)sqlite3_column_text(stmt, 9);
+        const char *publisher = (const char *)sqlite3_column_text(stmt, 10);
+        int release_year = sqlite3_column_int(stmt, 11);
+        const char *genre = (const char *)sqlite3_column_text(stmt, 12);
+        const char *players = (const char *)sqlite3_column_text(stmt, 13);
+        double igdb_rating = sqlite3_column_double(stmt, 14);
+        const char *igdb_platforms = (const char *)sqlite3_column_text(stmt, 15);
 
         char *title_esc = json_escape(title);
         char *cover_esc = json_escape(cover);
         char *region_esc = json_escape(region);
         char *path_esc = json_escape(filepath);
+        char *desc_esc = json_escape(description);
+        char *dev_esc = json_escape(developer);
+        char *pub_esc = json_escape(publisher);
+        char *genre_esc = json_escape(genre);
+        char *players_esc = json_escape(players);
+        char *plat_esc = json_escape(igdb_platforms);
 
         buf_used += snprintf(json + buf_used, buf_size - buf_used,
             "{\"id\":%d,\"console\":%d,\"console_name\":\"%s\","
             "\"title\":%s,\"cover\":%s,\"size\":%lld,\"region\":%s,"
-            "\"filepath\":%s}",
+            "\"filepath\":%s,\"igdb_id\":%d,\"description\":%s,"
+            "\"developer\":%s,\"publisher\":%s,\"release_year\":%d,"
+            "\"genre\":%s,\"players\":%s,\"igdb_rating\":%.1f,"
+            "\"igdb_platforms\":%s}",
             id, console, database_console_name(console),
-            title_esc, cover_esc, (long long)size, region_esc, path_esc);
+            title_esc, cover_esc, (long long)size, region_esc, path_esc,
+            igdb_id, desc_esc, dev_esc, pub_esc, release_year,
+            genre_esc, players_esc, igdb_rating, plat_esc);
 
         free(title_esc);
         free(cover_esc);
         free(region_esc);
         free(path_esc);
+        free(desc_esc);
+        free(dev_esc);
+        free(pub_esc);
+        free(genre_esc);
+        free(players_esc);
+        free(plat_esc);
     }
 
     json[buf_used++] = ']';
@@ -1099,7 +1137,9 @@ char *database_get_roms_json(void) {
 
 char *database_get_roms_by_console_json(ConsoleType console) {
     const char *sql =
-        "SELECT id, console, title, cover_path, size, region, filepath "
+        "SELECT id, console, title, cover_path, size, region, filepath, "
+        "igdb_id, description, developer, publisher, release_year, genre, "
+        "players, igdb_rating, igdb_platforms "
         "FROM roms WHERE console = ? ORDER BY title";
 
     sqlite3_stmt *stmt;
@@ -1109,14 +1149,14 @@ char *database_get_roms_by_console_json(ConsoleType console) {
 
     sqlite3_bind_int(stmt, 1, console);
 
-    size_t buf_size = 65536;
+    size_t buf_size = 131072;
     size_t buf_used = 0;
     char *json = malloc(buf_size);
     json[buf_used++] = '[';
 
     int first = 1;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (buf_used > buf_size - 2048) {
+        if (buf_used > buf_size - 4096) {
             buf_size *= 2;
             json = realloc(json, buf_size);
         }
@@ -1131,23 +1171,49 @@ char *database_get_roms_by_console_json(ConsoleType console) {
         int64_t size = sqlite3_column_int64(stmt, 4);
         const char *region = (const char *)sqlite3_column_text(stmt, 5);
         const char *filepath = (const char *)sqlite3_column_text(stmt, 6);
+        int igdb_id = sqlite3_column_int(stmt, 7);
+        const char *description = (const char *)sqlite3_column_text(stmt, 8);
+        const char *developer = (const char *)sqlite3_column_text(stmt, 9);
+        const char *publisher = (const char *)sqlite3_column_text(stmt, 10);
+        int release_year = sqlite3_column_int(stmt, 11);
+        const char *genre = (const char *)sqlite3_column_text(stmt, 12);
+        const char *players = (const char *)sqlite3_column_text(stmt, 13);
+        double igdb_rating = sqlite3_column_double(stmt, 14);
+        const char *igdb_platforms = (const char *)sqlite3_column_text(stmt, 15);
 
         char *title_esc = json_escape(title);
         char *cover_esc = json_escape(cover);
         char *region_esc = json_escape(region);
         char *path_esc = json_escape(filepath);
+        char *desc_esc = json_escape(description);
+        char *dev_esc = json_escape(developer);
+        char *pub_esc = json_escape(publisher);
+        char *genre_esc = json_escape(genre);
+        char *players_esc = json_escape(players);
+        char *plat_esc = json_escape(igdb_platforms);
 
         buf_used += snprintf(json + buf_used, buf_size - buf_used,
             "{\"id\":%d,\"console\":%d,\"console_name\":\"%s\","
             "\"title\":%s,\"cover\":%s,\"size\":%lld,\"region\":%s,"
-            "\"filepath\":%s}",
+            "\"filepath\":%s,\"igdb_id\":%d,\"description\":%s,"
+            "\"developer\":%s,\"publisher\":%s,\"release_year\":%d,"
+            "\"genre\":%s,\"players\":%s,\"igdb_rating\":%.1f,"
+            "\"igdb_platforms\":%s}",
             id, cons, database_console_name(cons),
-            title_esc, cover_esc, (long long)size, region_esc, path_esc);
+            title_esc, cover_esc, (long long)size, region_esc, path_esc,
+            igdb_id, desc_esc, dev_esc, pub_esc, release_year,
+            genre_esc, players_esc, igdb_rating, plat_esc);
 
         free(title_esc);
         free(cover_esc);
         free(region_esc);
         free(path_esc);
+        free(desc_esc);
+        free(dev_esc);
+        free(pub_esc);
+        free(genre_esc);
+        free(players_esc);
+        free(plat_esc);
     }
 
     json[buf_used++] = ']';
@@ -1159,7 +1225,9 @@ char *database_get_roms_by_console_json(ConsoleType console) {
 
 char *database_get_rom_json(int id) {
     const char *sql =
-        "SELECT id, console, title, filepath, cover_path, size, region, added_date "
+        "SELECT id, console, title, filepath, cover_path, size, region, added_date, "
+        "igdb_id, description, developer, publisher, release_year, genre, "
+        "players, igdb_rating, igdb_platforms "
         "FROM roms WHERE id = ?";
 
     sqlite3_stmt *stmt;
@@ -1177,27 +1245,54 @@ char *database_get_rom_json(int id) {
         const char *cover = (const char *)sqlite3_column_text(stmt, 4);
         const char *region = (const char *)sqlite3_column_text(stmt, 6);
         const char *added = (const char *)sqlite3_column_text(stmt, 7);
+        int igdb_id_val = sqlite3_column_int(stmt, 8);
+        const char *description = (const char *)sqlite3_column_text(stmt, 9);
+        const char *developer = (const char *)sqlite3_column_text(stmt, 10);
+        const char *publisher = (const char *)sqlite3_column_text(stmt, 11);
+        int release_year = sqlite3_column_int(stmt, 12);
+        const char *genre = (const char *)sqlite3_column_text(stmt, 13);
+        const char *players = (const char *)sqlite3_column_text(stmt, 14);
+        double igdb_rating = sqlite3_column_double(stmt, 15);
+        const char *igdb_platforms = (const char *)sqlite3_column_text(stmt, 16);
 
         char *title_esc = json_escape(title);
         char *path_esc = json_escape(filepath);
         char *cover_esc = json_escape(cover);
         char *region_esc = json_escape(region);
         char *added_esc = json_escape(added);
+        char *desc_esc = json_escape(description);
+        char *dev_esc = json_escape(developer);
+        char *pub_esc = json_escape(publisher);
+        char *genre_esc = json_escape(genre);
+        char *players_esc = json_escape(players);
+        char *plat_esc = json_escape(igdb_platforms);
 
-        json = malloc(4096);
-        snprintf(json, 4096,
+        json = malloc(8192);
+        snprintf(json, 8192,
             "{\"id\":%d,\"console\":%d,\"console_name\":\"%s\","
             "\"title\":%s,\"filepath\":%s,\"cover\":%s,"
-            "\"size\":%lld,\"region\":%s,\"added_date\":%s}",
+            "\"size\":%lld,\"region\":%s,\"added_date\":%s,"
+            "\"igdb_id\":%d,\"description\":%s,"
+            "\"developer\":%s,\"publisher\":%s,\"release_year\":%d,"
+            "\"genre\":%s,\"players\":%s,\"igdb_rating\":%.1f,"
+            "\"igdb_platforms\":%s}",
             sqlite3_column_int(stmt, 0), cons, database_console_name(cons),
             title_esc, path_esc, cover_esc,
-            sqlite3_column_int64(stmt, 5), region_esc, added_esc);
+            sqlite3_column_int64(stmt, 5), region_esc, added_esc,
+            igdb_id_val, desc_esc, dev_esc, pub_esc, release_year,
+            genre_esc, players_esc, igdb_rating, plat_esc);
 
         free(title_esc);
         free(path_esc);
         free(cover_esc);
         free(region_esc);
         free(added_esc);
+        free(desc_esc);
+        free(dev_esc);
+        free(pub_esc);
+        free(genre_esc);
+        free(players_esc);
+        free(plat_esc);
     }
 
     sqlite3_finalize(stmt);
@@ -1219,6 +1314,64 @@ int database_update_rom_cover(int id, const char *cover_path) {
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
+int database_update_rom_metadata(int id, int igdb_id, const char *description,
+    const char *developer, const char *publisher, int release_year,
+    const char *genre, const char *players, float igdb_rating,
+    const char *igdb_platforms)
+{
+    const char *sql =
+        "UPDATE roms SET igdb_id=?, description=?, developer=?, publisher=?, "
+        "release_year=?, genre=?, players=?, igdb_rating=?, igdb_platforms=? "
+        "WHERE id=?";
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return -1;
+
+    sqlite3_bind_int(stmt, 1, igdb_id);
+    sqlite3_bind_text(stmt, 2, description, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, developer, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, publisher, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 5, release_year);
+    sqlite3_bind_text(stmt, 6, genre, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 7, players, -1, SQLITE_STATIC);
+    sqlite3_bind_double(stmt, 8, igdb_rating);
+    sqlite3_bind_text(stmt, 9, igdb_platforms, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 10, id);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int database_get_roms_without_igdb(ConsoleType console, int **ids, char ***titles, int *count) {
+    const char *sql = "SELECT id, title FROM roms WHERE console = ? AND igdb_id IS NULL ORDER BY title";
+    sqlite3_stmt *stmt;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int(stmt, 1, console);
+
+    int cap = 256;
+    *ids = malloc(cap * sizeof(int));
+    *titles = malloc(cap * sizeof(char *));
+    *count = 0;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (*count >= cap) {
+            cap *= 2;
+            *ids = realloc(*ids, cap * sizeof(int));
+            *titles = realloc(*titles, cap * sizeof(char *));
+        }
+        (*ids)[*count] = sqlite3_column_int(stmt, 0);
+        const char *t = (const char *)sqlite3_column_text(stmt, 1);
+        (*titles)[*count] = t ? strdup(t) : strdup("");
+        (*count)++;
+    }
+
+    sqlite3_finalize(stmt);
+    return 0;
+}
+
 void database_free_rom(RomEntry *entry) {
     if (entry) {
         free(entry->title);
@@ -1226,6 +1379,12 @@ void database_free_rom(RomEntry *entry) {
         free(entry->cover_path);
         free(entry->region);
         free(entry->added_date);
+        free(entry->description);
+        free(entry->developer);
+        free(entry->publisher);
+        free(entry->genre);
+        free(entry->players);
+        free(entry->igdb_platforms);
     }
 }
 

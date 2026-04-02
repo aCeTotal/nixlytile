@@ -34,4 +34,7 @@ int scanner_scan_rom_file(const char *filepath, int console);
 int scanner_scan_rom_directory(const char *path);
 void scanner_fetch_rom_covers(void);
 
+/* Fetch IGDB metadata for ROMs that don't have it */
+void scanner_fetch_rom_metadata(void);
+
 #endif /* SCANNER_H */

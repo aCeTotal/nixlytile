@@ -28,6 +28,7 @@
 #include "scanner.h"
 #include "config.h"
 #include "tmdb.h"
+#include "igdb.h"
 #include "watcher.h"
 #include "transcoder.h"
 
@@ -44,6 +45,7 @@ static int server_fd = -1;
 static int discovery_fd = -1;
 static volatile int running = 1;
 static volatile int transcoder_restart_pending = 0;
+static volatile int startup_scanning = 0;  /* 1 while initial scan/TMDB fetch is running */
 
 /* Connection limiting based on bandwidth */
 #define STREAM_BITRATE_MBPS 70  /* Assumed bitrate per stream for lossless 4K */
@@ -54,6 +56,88 @@ static pthread_mutex_t stream_lock = PTHREAD_MUTEX_INITIALIZER;
 static int get_max_streams(void) {
     if (server_config.upload_mbps <= 0) return 1000;  /* Effectively unlimited */
     return server_config.upload_mbps / STREAM_BITRATE_MBPS;
+}
+
+/* Forward declaration - defined after startup_scan_thread */
+static void on_file_change(const char *filepath, int is_delete, WatchType type);
+
+/* Initial startup scan thread - runs heavy I/O and network work in background
+ * so the HTTP server can accept connections immediately */
+static void *startup_scan_thread(void *arg) {
+    (void)arg;
+    startup_scanning = 1;
+
+    /* Clean up entries for files that no longer exist */
+    printf("Startup scan: Checking for removed files...\n");
+    int removed = database_cleanup_missing();
+    if (removed > 0) {
+        printf("Startup scan: Removed %d entries for missing files\n", removed);
+    }
+
+    /* Initial scan of nixly_ready_media directories */
+    printf("Startup scan: Scanning converted media directories...\n");
+    for (int i = 0; i < server_config.converted_path_count && running; i++) {
+        char ready_path[MAX_PATH];
+        snprintf(ready_path, sizeof(ready_path), "%s/nixly_ready_media",
+                 server_config.converted_paths[i]);
+        printf("  Ready media: %s\n", ready_path);
+        scanner_scan_directory(ready_path);
+    }
+    printf("Startup scan: Found %d media files.\n", database_get_count());
+
+    /* Fetch TMDB metadata for any entries missing it */
+    if (running) scanner_fetch_missing_tmdb();
+
+    /* Refresh show status (next episode dates, ended status) */
+    if (running) scanner_refresh_show_status();
+
+    /* Scan ROM directories */
+    if (running) {
+        printf("Startup scan: Scanning ROM directories...\n");
+        for (int i = 0; i < server_config.roms_path_count && running; i++) {
+            printf("  ROMs: %s\n", server_config.roms_paths[i]);
+            scanner_scan_rom_directory(server_config.roms_paths[i]);
+        }
+        printf("Startup scan: Found %d ROMs.\n", database_get_rom_count());
+        scanner_fetch_rom_covers();
+        if (running) scanner_fetch_rom_metadata();
+    }
+
+    /* Initialize file watcher */
+    if (running && watcher_init() == 0) {
+        watcher_set_callback(on_file_change);
+
+        for (int i = 0; i < server_config.unprocessed_path_count; i++) {
+            watcher_add_path(server_config.unprocessed_paths[i], WATCH_TYPE_MEDIA);
+        }
+
+        for (int i = 0; i < server_config.converted_path_count; i++) {
+            char ready_path[MAX_PATH];
+            snprintf(ready_path, sizeof(ready_path), "%s/nixly_ready_media",
+                     server_config.converted_paths[i]);
+            mkdir(ready_path, 0755);
+            watcher_add_path(ready_path, WATCH_TYPE_MEDIA);
+        }
+
+        for (int i = 0; i < server_config.roms_path_count; i++) {
+            watcher_add_path(server_config.roms_paths[i], WATCH_TYPE_ROMS);
+        }
+
+        watcher_start();
+    }
+
+    /* Initialize and start transcoder */
+    if (running) {
+        transcoder_init();
+        transcoder_start();
+    }
+
+    startup_scanning = 0;
+    printf("Startup scan: Complete. Server fully ready.\n");
+    printf("  Media files: %d\n", database_get_count());
+    printf("  ROMs: %d\n", database_get_rom_count());
+    printf("  Watching %d directories\n", watcher_get_count());
+    return NULL;
 }
 
 /* Periodic sync thread - checks for changes every 5 minutes as backup to inotify */
@@ -107,6 +191,7 @@ static void *sync_thread(void *arg) {
         if (rom_after != rom_before) {
             printf("Periodic sync: ROM count changed %d -> %d\n", rom_before, rom_after);
             scanner_fetch_rom_covers();
+            scanner_fetch_rom_metadata();
         }
 
         /* Fetch any missing TMDB metadata */
@@ -462,14 +547,16 @@ static void handle_api(int fd, const char *path) {
             "\"priority\":%d,"
             "\"upload_mbps\":%d,"
             "\"active_streams\":%d,"
-            "\"max_streams\":%d}",
+            "\"max_streams\":%d,"
+            "\"scanning\":%s}",
             server_config.server_id,
             server_config.server_name,
             rating,
             is_local ? "true" : "false",
             priority,
             server_config.upload_mbps,
-            active_streams, max);
+            active_streams, max,
+            startup_scanning ? "true" : "false");
         send_response(fd, 200, "OK", "application/json", json, len);
     }
     else if (strcmp(path, "/api/library") == 0) {
@@ -1213,71 +1300,12 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    /* Clean up entries for files that no longer exist */
-    printf("Checking for removed files...\n");
-    int removed = database_cleanup_missing();
-    if (removed > 0) {
-        printf("Removed %d entries for missing files\n", removed);
+    /* Initialize IGDB */
+    if (server_config.igdb_client_id[0] && server_config.igdb_client_secret[0]) {
+        igdb_init(server_config.igdb_client_id, server_config.igdb_client_secret);
     }
 
-    /* Initial scan of nixly_ready_media directories */
-    printf("Scanning converted media directories...\n");
-    for (int i = 0; i < server_config.converted_path_count; i++) {
-        char ready_path[MAX_PATH];
-        snprintf(ready_path, sizeof(ready_path), "%s/nixly_ready_media",
-                 server_config.converted_paths[i]);
-        printf("  Ready media: %s\n", ready_path);
-        scanner_scan_directory(ready_path);
-    }
-    printf("Scan complete. Found %d media files.\n", database_get_count());
-
-    /* Fetch TMDB metadata for any entries missing it */
-    scanner_fetch_missing_tmdb();
-
-    /* Refresh show status (next episode dates, ended status) */
-    scanner_refresh_show_status();
-
-    /* Scan ROM directories */
-    printf("Scanning ROM directories...\n");
-    for (int i = 0; i < server_config.roms_path_count; i++) {
-        printf("  ROMs: %s\n", server_config.roms_paths[i]);
-        scanner_scan_rom_directory(server_config.roms_paths[i]);
-    }
-    printf("ROM scan complete. Found %d ROMs.\n", database_get_rom_count());
-    scanner_fetch_rom_covers();
-
-    /* Initialize file watcher */
-    if (watcher_init() == 0) {
-        watcher_set_callback(on_file_change);
-
-        /* Watch unprocessed paths for new source files -> trigger transcoder */
-        for (int i = 0; i < server_config.unprocessed_path_count; i++) {
-            watcher_add_path(server_config.unprocessed_paths[i], WATCH_TYPE_MEDIA);
-        }
-
-        /* Watch nixly_ready_media in converted paths -> scan to DB */
-        for (int i = 0; i < server_config.converted_path_count; i++) {
-            char ready_path[MAX_PATH];
-            snprintf(ready_path, sizeof(ready_path), "%s/nixly_ready_media",
-                     server_config.converted_paths[i]);
-            /* Create the directory if it doesn't exist yet */
-            mkdir(ready_path, 0755);
-            watcher_add_path(ready_path, WATCH_TYPE_MEDIA);
-        }
-
-        /* ROMs directories */
-        for (int i = 0; i < server_config.roms_path_count; i++) {
-            watcher_add_path(server_config.roms_paths[i], WATCH_TYPE_ROMS);
-        }
-
-        watcher_start();
-    }
-
-    /* Initialize and start transcoder */
-    transcoder_init();
-    transcoder_start();
-
-    /* Create server socket */
+    /* Create server socket FIRST - accept connections while scanning in background */
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
         perror("socket");
@@ -1320,6 +1348,16 @@ int main(int argc, char *argv[]) {
         pthread_detach(sync_tid);
     }
 
+    /* Start initial scan in background - server responds immediately with
+     * whatever is already in the database while scan populates new entries */
+    pthread_t startup_tid;
+    if (pthread_create(&startup_tid, NULL, startup_scan_thread, NULL) != 0) {
+        fprintf(stderr, "Warning: Failed to start startup scan thread, running synchronously\n");
+        startup_scan_thread(NULL);
+    } else {
+        pthread_detach(startup_tid);
+    }
+
     int max_streams = get_max_streams();
     int rating = config_get_server_rating();
     printf("\n");
@@ -1333,8 +1371,7 @@ int main(int argc, char *argv[]) {
     printf("  Rating: %d/10 (%d Mbps)\n", rating, server_config.upload_mbps);
     printf("  Max streams: %d\n", max_streams);
     printf("========================================\n");
-    printf("  Media files: %d\n", database_get_count());
-    printf("  Watching %d directories\n", watcher_get_count());
+    printf("  Scanning in background...\n");
     printf("========================================\n\n");
 
     /* Accept connections */
@@ -1366,6 +1403,7 @@ int main(int argc, char *argv[]) {
     }
     watcher_cleanup();
     tmdb_cleanup();
+    igdb_cleanup();
     database_close();
     printf("\nServer stopped.\n");
     return 0;

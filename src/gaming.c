@@ -2241,6 +2241,13 @@ retro_parse_roms_json(const char *buffer, const char *server_url,
 		json_extract_string(obj, "title", items[idx].title, sizeof(items[idx].title));
 		json_extract_string(obj, "cover", items[idx].cover_path, sizeof(items[idx].cover_path));
 		json_extract_string(obj, "filepath", items[idx].filepath, sizeof(items[idx].filepath));
+		json_extract_string(obj, "description", items[idx].description, sizeof(items[idx].description));
+		json_extract_string(obj, "developer", items[idx].developer, sizeof(items[idx].developer));
+		json_extract_string(obj, "publisher", items[idx].publisher, sizeof(items[idx].publisher));
+		items[idx].release_year = json_extract_int(obj, "release_year");
+		json_extract_string(obj, "genre", items[idx].genre, sizeof(items[idx].genre));
+		json_extract_string(obj, "igdb_platforms", items[idx].igdb_platforms, sizeof(items[idx].igdb_platforms));
+		items[idx].rating = json_extract_float(obj, "igdb_rating");
 		strncpy(items[idx].server_url, server_url, sizeof(items[idx].server_url) - 1);
 
 		free(obj);
@@ -2479,12 +2486,13 @@ retro_gaming_load_cover(Monitor *m)
 		return;
 	}
 
-	/* Scale to fit the cover area (right side, ~60% width) */
-	int target_h = rg->height - 80 - 40;  /* Below menu bar, with padding */
+	/* Scale to fit the cover area (right side, max 40% height for metadata below) */
+	int content_h = rg->height - 80;
+	int target_h = (content_h * 40) / 100;
 	int orig_w = gdk_pixbuf_get_width(pixbuf);
 	int orig_h = gdk_pixbuf_get_height(pixbuf);
 	double scale = (double)target_h / orig_h;
-	int max_w = (rg->width * 55) / 100;
+	int max_w = (rg->width * 40) / 100;
 	if ((int)(orig_w * scale) > max_w)
 		scale = (double)max_w / orig_w;
 
@@ -2584,34 +2592,171 @@ retro_gaming_render_game_list(Monitor *m)
 		drawrect(rg->tree, sb_x, thumb_y, 4, thumb_h, scrollbar_fg);
 	}
 
-	/* Cover art area */
+	/* Detail panel area (right side) */
 	float cover_bg[4] = {0.05f, 0.05f, 0.07f, 1.0f};
 	drawrect(rg->tree, cover_x, menu_bar_h, cover_w, content_h, cover_bg);
 
-	/* Load and render cover art */
+	if (rg->game_count <= 0)
+		return;
+
+	RomItem *game = &rg->games[rg->selected_game];
+	int detail_pad = 24;
+	int text_x = cover_x + detail_pad;
+	int text_w = cover_w - detail_pad * 2;
+	int cur_y = menu_bar_h + detail_pad;
+
+	/* Load and render cover art (top of panel, centered) */
 	retro_gaming_load_cover(m);
 
 	if (rg->cover_buf && rg->cover_w > 0 && rg->cover_h > 0) {
-		/* Center cover in the right panel */
 		int cx = cover_x + (cover_w - rg->cover_w) / 2;
-		int cy = menu_bar_h + (content_h - rg->cover_h) / 2;
-
 		struct wlr_scene_buffer *sbuf = wlr_scene_buffer_create(rg->tree, rg->cover_buf);
 		if (sbuf)
-			wlr_scene_node_set_position(&sbuf->node, cx, cy);
-	} else if (rg->game_count > 0) {
-		/* No cover - show game title as fallback */
-		struct wlr_scene_tree *fb_tree = wlr_scene_tree_create(rg->tree);
-		if (fb_tree) {
-			const char *title = rg->games[rg->selected_game].title;
-			int tw = status_text_width(title);
-			int tx = cover_x + (cover_w - tw) / 2;
-			int ty = menu_bar_h + content_h / 2 - 20;
-			wlr_scene_node_set_position(&fb_tree->node, tx, ty);
+			wlr_scene_node_set_position(&sbuf->node, cx, cur_y);
+		cur_y += rg->cover_h + detail_pad;
+	}
+
+	/* --- Metadata text below cover --- */
+	float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+	float grey[4] = {0.7f, 0.7f, 0.7f, 1.0f};
+	float accent[4] = {0.4f, 0.7f, 1.0f, 1.0f};
+	int line_h = 28;
+
+	/* Title + Year */
+	{
+		struct wlr_scene_tree *t = wlr_scene_tree_create(rg->tree);
+		if (t) {
+			wlr_scene_node_set_position(&t->node, text_x, cur_y);
 			StatusModule mod = {0};
-			mod.tree = fb_tree;
-			float grey[4] = {0.5f, 0.5f, 0.5f, 0.7f};
-			tray_render_label(&mod, title, 0, 40, grey);
+			mod.tree = t;
+			char title_line[320];
+			if (game->release_year > 0)
+				snprintf(title_line, sizeof(title_line), "%s  (%d)", game->title, game->release_year);
+			else
+				snprintf(title_line, sizeof(title_line), "%s", game->title);
+			/* Truncate to fit */
+			int max_chars = text_w / 11;
+			if (max_chars > 0 && max_chars < (int)sizeof(title_line))
+				title_line[max_chars] = '\0';
+			tray_render_label(&mod, title_line, 0, 24, white);
+		}
+		cur_y += line_h + 4;
+	}
+
+	/* Developer / Publisher */
+	if (game->developer[0] || game->publisher[0]) {
+		struct wlr_scene_tree *t = wlr_scene_tree_create(rg->tree);
+		if (t) {
+			wlr_scene_node_set_position(&t->node, text_x, cur_y);
+			StatusModule mod = {0};
+			mod.tree = t;
+			char company_line[320];
+			if (game->developer[0] && game->publisher[0] &&
+			    strcmp(game->developer, game->publisher) != 0)
+				snprintf(company_line, sizeof(company_line), "%s / %s",
+					game->developer, game->publisher);
+			else if (game->developer[0])
+				snprintf(company_line, sizeof(company_line), "%s", game->developer);
+			else
+				snprintf(company_line, sizeof(company_line), "%s", game->publisher);
+			tray_render_label(&mod, company_line, 0, 18, accent);
+		}
+		cur_y += line_h;
+	}
+
+	/* Genre */
+	if (game->genre[0]) {
+		struct wlr_scene_tree *t = wlr_scene_tree_create(rg->tree);
+		if (t) {
+			wlr_scene_node_set_position(&t->node, text_x, cur_y);
+			StatusModule mod = {0};
+			mod.tree = t;
+			tray_render_label(&mod, game->genre, 0, 18, grey);
+		}
+		cur_y += line_h;
+	}
+
+	/* Platforms */
+	if (game->igdb_platforms[0]) {
+		struct wlr_scene_tree *t = wlr_scene_tree_create(rg->tree);
+		if (t) {
+			wlr_scene_node_set_position(&t->node, text_x, cur_y);
+			StatusModule mod = {0};
+			mod.tree = t;
+			char plat_line[560];
+			snprintf(plat_line, sizeof(plat_line), "Platforms: %s", game->igdb_platforms);
+			int max_chars = text_w / 10;
+			if (max_chars > 0 && max_chars < (int)sizeof(plat_line))
+				plat_line[max_chars] = '\0';
+			tray_render_label(&mod, plat_line, 0, 18, grey);
+		}
+		cur_y += line_h;
+	}
+
+	/* Rating */
+	if (game->rating > 0) {
+		struct wlr_scene_tree *t = wlr_scene_tree_create(rg->tree);
+		if (t) {
+			wlr_scene_node_set_position(&t->node, text_x, cur_y);
+			StatusModule mod = {0};
+			mod.tree = t;
+			char rating_line[64];
+			snprintf(rating_line, sizeof(rating_line), "Rating: %.0f/100", game->rating);
+			tray_render_label(&mod, rating_line, 0, 18, accent);
+		}
+		cur_y += line_h + 8;
+	}
+
+	/* Description (multi-line, word-wrapped) */
+	if (game->description[0]) {
+		float desc_color[4] = {0.8f, 0.8f, 0.8f, 0.9f};
+		int desc_font = 16;
+		int char_w = desc_font * 6 / 10;  /* Approximate character width */
+		int chars_per_line = (char_w > 0) ? (text_w / char_w) : 60;
+		if (chars_per_line < 20) chars_per_line = 20;
+		if (chars_per_line > 120) chars_per_line = 120;
+		int max_lines = (menu_bar_h + content_h - cur_y - detail_pad) / (desc_font + 6);
+		if (max_lines < 1) max_lines = 1;
+		if (max_lines > 12) max_lines = 12;
+
+		const char *src = game->description;
+		for (int line = 0; line < max_lines && *src; line++) {
+			char line_buf[256];
+			int len = 0;
+			int last_space = -1;
+
+			/* Fill line, track last word boundary */
+			while (src[len] && len < chars_per_line && len < (int)sizeof(line_buf) - 1) {
+				if (src[len] == '\n') { len++; break; }
+				if (src[len] == ' ') last_space = len;
+				len++;
+			}
+
+			/* Word-wrap: break at last space if we hit the limit */
+			if (src[len] && src[len] != ' ' && src[len] != '\n' && last_space > 0) {
+				len = last_space + 1;
+			}
+
+			memcpy(line_buf, src, len);
+			line_buf[len] = '\0';
+
+			/* Trim trailing spaces/newlines */
+			while (len > 0 && (line_buf[len - 1] == ' ' || line_buf[len - 1] == '\n'))
+				line_buf[--len] = '\0';
+
+			if (line_buf[0]) {
+				struct wlr_scene_tree *t = wlr_scene_tree_create(rg->tree);
+				if (t) {
+					wlr_scene_node_set_position(&t->node, text_x, cur_y);
+					StatusModule mod = {0};
+					mod.tree = t;
+					tray_render_label(&mod, line_buf, 0, desc_font, desc_color);
+				}
+				cur_y += desc_font + 6;
+			}
+
+			src += len;
+			while (*src == ' ') src++;  /* Skip leading spaces on next line */
 		}
 	}
 }

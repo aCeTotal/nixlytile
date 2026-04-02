@@ -78,6 +78,17 @@ typedef struct {
     int64_t size;         /* File size in bytes */
     char *region;         /* USA, EUR, JPN, etc. */
     char *added_date;
+
+    /* IGDB metadata */
+    int igdb_id;
+    char *description;    /* Game summary from IGDB */
+    char *developer;
+    char *publisher;
+    int release_year;
+    char *genre;          /* Comma-separated */
+    char *players;        /* e.g., "1-2" */
+    float igdb_rating;    /* 0-100 from IGDB */
+    char *igdb_platforms; /* Comma-separated platform names */
 } RomEntry;
 
 /* Initialize database, create tables if needed */
@@ -134,6 +145,15 @@ char *database_get_roms_json(void);
 char *database_get_roms_by_console_json(ConsoleType console);
 char *database_get_rom_json(int id);
 int database_update_rom_cover(int id, const char *cover_path);
+
+/* Update ROM metadata from IGDB */
+int database_update_rom_metadata(int id, int igdb_id, const char *description,
+    const char *developer, const char *publisher, int release_year,
+    const char *genre, const char *players, float igdb_rating,
+    const char *igdb_platforms);
+
+/* Get ROMs without IGDB metadata for a given console */
+int database_get_roms_without_igdb(ConsoleType console, int **ids, char ***titles, int *count);
 
 /* Update show status and totals for all episodes of a show */
 int database_update_show_status(int tmdb_show_id, const char *status, const char *next_episode,
