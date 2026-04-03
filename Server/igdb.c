@@ -58,6 +58,8 @@ static int igdb_fetch_token(const char *id, const char *secret) {
     chunk.data = malloc(1);
     chunk.size = 0;
 
+    /* Reset all options so stale state from API calls doesn't bleed in */
+    curl_easy_reset(curl_handle);
     curl_easy_setopt(curl_handle, CURLOPT_URL, TWITCH_TOKEN_URL);
     curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, post_data);
     curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, write_callback);
@@ -178,6 +180,8 @@ static char *igdb_request(const char *endpoint, const char *body) {
     chunk.data = malloc(1);
     chunk.size = 0;
 
+    /* Reset all options so stale state from token fetch doesn't bleed in */
+    curl_easy_reset(curl_handle);
     curl_easy_setopt(curl_handle, CURLOPT_URL, url);
     curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, body);
     curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
@@ -190,6 +194,31 @@ static char *igdb_request(const char *endpoint, const char *body) {
 
     if (res != CURLE_OK) {
         fprintf(stderr, "IGDB: Request failed: %s\n", curl_easy_strerror(res));
+        free(chunk.data);
+        return NULL;
+    }
+
+    /* Check HTTP status code — IGDB returns errors as valid JSON with non-200 codes */
+    long http_code = 0;
+    curl_easy_getinfo(curl_handle, CURLINFO_RESPONSE_CODE, &http_code);
+
+    if (http_code != 200) {
+        /* Truncate body for logging */
+        char preview[256];
+        size_t plen = chunk.size < sizeof(preview) - 1 ? chunk.size : sizeof(preview) - 1;
+        memcpy(preview, chunk.data, plen);
+        preview[plen] = '\0';
+
+        fprintf(stderr, "IGDB: HTTP %ld from %s: %s\n", http_code, endpoint, preview);
+
+        if (http_code == 401) {
+            /* Token expired or invalid — force refresh on next call */
+            fprintf(stderr, "IGDB: 401 Unauthorized, invalidating token\n");
+            token_expires = 0;
+        } else if (http_code == 429) {
+            fprintf(stderr, "IGDB: Rate limited (429), back off\n");
+        }
+
         free(chunk.data);
         return NULL;
     }
@@ -483,6 +512,8 @@ IgdbGame *igdb_search_game(const char *title, int platform_id) {
             safe_title);
     }
 
+    printf("IGDB: Searching for \"%s\" (platform %d)\n", safe_title, platform_id);
+
     char *response = igdb_request("games", body);
     if (!response) return NULL;
 
@@ -493,6 +524,23 @@ IgdbGame *igdb_search_game(const char *title, int platform_id) {
     if (!cJSON_IsArray(json) || cJSON_GetArraySize(json) == 0) {
         cJSON_Delete(json);
         return NULL;
+    }
+
+    /* Check if IGDB returned an error response (array of error objects) */
+    cJSON *first = cJSON_GetArrayItem(json, 0);
+    if (first) {
+        cJSON *status = cJSON_GetObjectItem(first, "status");
+        if (status && cJSON_IsNumber(status)) {
+            cJSON *errtitle = cJSON_GetObjectItem(first, "title");
+            cJSON *errcause = cJSON_GetObjectItem(first, "cause");
+            fprintf(stderr, "IGDB: API error %d: %s%s%s\n",
+                status->valueint,
+                (errtitle && cJSON_IsString(errtitle)) ? errtitle->valuestring : "unknown",
+                (errcause && cJSON_IsString(errcause)) ? " — " : "",
+                (errcause && cJSON_IsString(errcause)) ? errcause->valuestring : "");
+            cJSON_Delete(json);
+            return NULL;
+        }
     }
 
     /* Score each result against the search title and pick the best */
@@ -516,6 +564,15 @@ IgdbGame *igdb_search_game(const char *title, int platform_id) {
 
     /* Require minimum score of 40 (lenient to handle title variations) */
     if (best_score < 40 || !best_game) {
+        if (best_game) {
+            cJSON *bn = cJSON_GetObjectItem(best_game, "name");
+            fprintf(stderr, "IGDB: No match for \"%s\" — best candidate \"%s\" score %d (< 40)\n",
+                title,
+                (bn && cJSON_IsString(bn)) ? bn->valuestring : "?",
+                best_score);
+        } else {
+            fprintf(stderr, "IGDB: No match for \"%s\" — no candidates with name field\n", title);
+        }
         cJSON_Delete(json);
         return NULL;
     }
