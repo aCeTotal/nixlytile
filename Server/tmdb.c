@@ -302,6 +302,34 @@ TmdbMovie *tmdb_search_movie(const char *title, int year) {
     return m;
 }
 
+TmdbMovie *tmdb_get_movie_by_id(int tmdb_id) {
+    char endpoint[128];
+    snprintf(endpoint, sizeof(endpoint), "/movie/%d", tmdb_id);
+    char *response = tmdb_request(endpoint);
+    if (!response) return NULL;
+
+    cJSON *json = cJSON_Parse(response);
+    free(response);
+    if (!json) return NULL;
+
+    TmdbMovie *m = calloc(1, sizeof(TmdbMovie));
+    m->tmdb_id = get_int(json, "id");
+    m->title = get_string(json, "title");
+    m->original_title = get_string(json, "original_title");
+    m->overview = get_overview_fallback(json, endpoint);
+    m->poster_path = get_string(json, "poster_path");
+    m->backdrop_path = get_string(json, "backdrop_path");
+    m->release_date = get_string(json, "release_date");
+    m->year = extract_year(m->release_date);
+    m->rating = get_float(json, "vote_average");
+    m->vote_count = get_int(json, "vote_count");
+    m->genres = get_genres(json);
+    m->runtime = get_int(json, "runtime");
+
+    cJSON_Delete(json);
+    return m;
+}
+
 TmdbTvShow *tmdb_search_tvshow_ex(const char *title, int api_filter_year, int wanted_year) {
     char *encoded = url_encode(title);
     char endpoint[512];
@@ -428,6 +456,48 @@ TmdbTvShow *tmdb_search_tvshow_ex(const char *title, int api_filter_year, int wa
     if (next_ep && cJSON_IsObject(next_ep)) {
         t->next_episode_date = get_string(next_ep, "air_date");
     }
+
+    cJSON_Delete(json);
+    return t;
+}
+
+TmdbTvShow *tmdb_get_tvshow_by_id(int tmdb_id) {
+    char endpoint[128];
+    snprintf(endpoint, sizeof(endpoint), "/tv/%d", tmdb_id);
+    char *response = tmdb_request(endpoint);
+    if (!response) return NULL;
+
+    cJSON *json = cJSON_Parse(response);
+    free(response);
+    if (!json) return NULL;
+
+    TmdbTvShow *t = calloc(1, sizeof(TmdbTvShow));
+    t->tmdb_id = get_int(json, "id");
+    t->name = get_string(json, "name");
+    t->original_name = get_string(json, "original_name");
+    t->overview = get_overview_fallback(json, endpoint);
+    t->poster_path = get_string(json, "poster_path");
+    t->backdrop_path = get_string(json, "backdrop_path");
+    t->first_air_date = get_string(json, "first_air_date");
+    t->year = extract_year(t->first_air_date);
+    t->rating = get_float(json, "vote_average");
+    t->vote_count = get_int(json, "vote_count");
+    t->genres = get_genres(json);
+    t->number_of_seasons = get_int(json, "number_of_seasons");
+    t->number_of_episodes = get_int(json, "number_of_episodes");
+
+    cJSON *runtimes = cJSON_GetObjectItem(json, "episode_run_time");
+    if (runtimes && cJSON_IsArray(runtimes) && cJSON_GetArraySize(runtimes) > 0) {
+        cJSON *first = cJSON_GetArrayItem(runtimes, 0);
+        if (first && cJSON_IsNumber(first)) t->episode_run_time = first->valueint;
+    }
+    if (t->episode_run_time == 0) {
+        cJSON *last_ep = cJSON_GetObjectItem(json, "last_episode_to_air");
+        if (last_ep && cJSON_IsObject(last_ep)) t->episode_run_time = get_int(last_ep, "runtime");
+    }
+    t->status = get_string(json, "status");
+    cJSON *next_ep = cJSON_GetObjectItem(json, "next_episode_to_air");
+    if (next_ep && cJSON_IsObject(next_ep)) t->next_episode_date = get_string(next_ep, "air_date");
 
     cJSON_Delete(json);
     return t;

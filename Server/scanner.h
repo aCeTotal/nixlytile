@@ -8,6 +8,7 @@
 
 #include <pthread.h>
 #include <time.h>
+#include "tmdb.h"
 
 /* Live scraping progress tracking — one per domain (TMDB / IGDB) */
 typedef struct {
@@ -48,6 +49,17 @@ void scanner_fetch_missing_tmdb(void);
 
 /* Re-fetch TMDB metadata for ALL entries (full rescan) */
 void scanner_rescan_all_tmdb(void);
+
+/* Search TMDB for a movie by raw title string.
+ * Returns TmdbMovie* on success (caller must tmdb_free_movie()), NULL on failure.
+ * Used by downloads.c for pre-validation before moving files. */
+TmdbMovie *scanner_search_movie_tmdb(const char *title);
+
+/* Extract clean title from filename (for external use by downloads.c) */
+void scanner_extract_title(const char *filepath, char *title, size_t title_size);
+
+/* Apply pre-fetched TMDB movie data to a database entry */
+void scanner_apply_movie_tmdb(int db_id, TmdbMovie *movie);
 
 /* Refresh show status (status + next_episode_date) for active shows */
 void scanner_refresh_show_status(void);

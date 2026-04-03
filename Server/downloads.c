@@ -23,6 +23,7 @@
 
 #include "downloads.h"
 #include "scanner.h"
+#include "tmdb.h"
 #include "config.h"
 
 #define DL_MAX_PATH 4096
@@ -100,6 +101,16 @@ static int move_file(const char *src, const char *dst) {
 	}
 
 	/* Cross-filesystem: copy + delete */
+	{
+		struct stat warn_st;
+		if (stat(src, &warn_st) == 0) {
+			double gb = warn_st.st_size / (1024.0 * 1024.0 * 1024.0);
+			const char *bsrc = strrchr(src, '/');
+			bsrc = bsrc ? bsrc + 1 : src;
+			printf("Downloads: Cross-filesystem move for %s (%.1f GB)"
+			       " — consider placing download_path on same disk\n", bsrc, gb);
+		}
+	}
 	int src_fd = open(src, O_RDONLY);
 	if (src_fd < 0) {
 		fprintf(stderr, "Downloads: open src %s: %s\n", src, strerror(errno));
@@ -285,6 +296,7 @@ static int process_download_file(const char *filepath) {
 	char show_name[256] = {0};
 	int season = 0, episode = 0, year = 0;
 	char dest[DL_MAX_PATH];
+	TmdbMovie *movie_result = NULL;  /* Non-NULL if movie pre-validated against TMDB */
 
 	if (scanner_parse_tv_info(filepath, show_name, &season, &episode, &year)) {
 		/* TV Episode — generate clean filename */
@@ -326,15 +338,38 @@ static int process_download_file(const char *filepath) {
 		printf("Downloads: TV [%s S%02dE%02d] -> %s\n",
 		       show_name, season, episode, dest);
 	} else {
-		/* Movie — keep original filename */
+		/* Movie — verify TMDB match before moving (if API key configured) */
+		TmdbMovie *movie = NULL;
+		if (server_config.tmdb_api_key[0]) {
+			char title_buf[256];
+			scanner_extract_title(filepath, title_buf, sizeof(title_buf));
+			movie = scanner_search_movie_tmdb(title_buf);
+			if (!movie) {
+				printf("Downloads: TMDB lookup failed for '%s', not moving\n", base);
+				return 0;
+			}
+		}
+
 		snprintf(dest, sizeof(dest), "%s/nixly_ready_media/Movies/%s",
 		         server_config.converted_paths[0], base);
 
 		printf("Downloads: Movie [%s] -> %s\n", base, dest);
+
+		/* Check if destination already exists */
+		if (access(dest, F_OK) == 0) {
+			printf("Downloads: Already exists at destination, skipping: %s\n", dest);
+			if (movie) tmdb_free_movie(movie);
+			return 0;
+		}
+
+		/* Will move + scan below (movie_result set for post-move TMDB apply) */
+		movie_result = movie;
 	}
 
-	/* Check if destination already exists */
-	if (access(dest, F_OK) == 0) {
+	/* Common path: create dirs, move, scan */
+
+	/* Check if destination already exists (TV path; movie checked above) */
+	if (!movie_result && access(dest, F_OK) == 0) {
 		printf("Downloads: Already exists at destination, skipping: %s\n", dest);
 		return 0;
 	}
@@ -348,19 +383,29 @@ static int process_download_file(const char *filepath) {
 	if (mkdirs(dest_dir) != 0 && errno != EEXIST) {
 		fprintf(stderr, "Downloads: Failed to create dir %s: %s\n",
 		        dest_dir, strerror(errno));
+		if (movie_result) tmdb_free_movie(movie_result);
 		return -1;
 	}
 
 	/* Move the video file */
 	if (move_file(filepath, dest) != 0) {
 		fprintf(stderr, "Downloads: Failed to move %s\n", filepath);
+		if (movie_result) tmdb_free_movie(movie_result);
 		return -1;
 	}
 
 	printf("Downloads: Moved %s\n", dest);
 
-	/* Scan into database and fetch TMDB metadata */
-	scanner_scan_file(dest, 1);
+	if (movie_result) {
+		/* Movie: scan without TMDB fetch, then apply pre-fetched result */
+		int db_id = scanner_scan_file(dest, 0);
+		if (db_id > 0)
+			scanner_apply_movie_tmdb(db_id, movie_result);
+		tmdb_free_movie(movie_result);
+	} else {
+		/* TV: scan and fetch TMDB metadata */
+		scanner_scan_file(dest, 1);
+	}
 
 	/* Move matching subtitle files */
 	char src_dir[DL_MAX_PATH];

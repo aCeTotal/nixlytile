@@ -425,8 +425,11 @@ char *database_get_filepath(int id) {
 }
 
 int database_get_entries_without_tmdb(MediaEntry **entries, int *count) {
-    const char *sql = "SELECT id, type, title, show_name, season, episode, filepath "
-                      "FROM media WHERE tmdb_id IS NULL OR tmdb_id = 0";
+    const char *sql = "SELECT id, type, title, show_name, season, episode, filepath, "
+                      "COALESCE(tmdb_id,0), COALESCE(tmdb_show_id,0), COALESCE(year,0) "
+                      "FROM media WHERE tmdb_id IS NULL OR tmdb_id = 0 "
+                      "OR poster_path IS NULL OR poster_path = '' "
+                      "OR overview IS NULL OR overview = ''";
     sqlite3_stmt *stmt;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
@@ -460,6 +463,9 @@ int database_get_entries_without_tmdb(MediaEntry **entries, int *count) {
         (*entries)[i].episode = sqlite3_column_int(stmt, 5);
         const char *f = (const char *)sqlite3_column_text(stmt, 6);
         (*entries)[i].filepath = f ? strdup(f) : NULL;
+        (*entries)[i].tmdb_id = sqlite3_column_int(stmt, 7);
+        (*entries)[i].tmdb_show_id = sqlite3_column_int(stmt, 8);
+        (*entries)[i].year = sqlite3_column_int(stmt, 9);
         i++;
     }
 
@@ -1353,7 +1359,8 @@ int database_update_rom_metadata(int id, int igdb_id, const char *description,
 }
 
 int database_get_roms_without_igdb(ConsoleType console, int **ids, char ***titles, int *count) {
-    const char *sql = "SELECT id, title FROM roms WHERE console = ? AND (igdb_id IS NULL OR igdb_id = -1) ORDER BY title";
+    const char *sql = "SELECT id, title FROM roms WHERE console = ? AND (igdb_id IS NULL OR igdb_id = -1 "
+                      "OR description IS NULL OR description = '') ORDER BY title";
     sqlite3_stmt *stmt;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;

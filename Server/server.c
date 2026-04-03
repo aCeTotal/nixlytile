@@ -62,6 +62,16 @@ static int get_max_streams(void) {
 /* Forward declaration - defined after startup_scan_thread */
 static void on_file_change(const char *filepath, int is_delete, WatchType type);
 
+/* Background thread for /api/tmdb/rescan — non-blocking endpoint */
+static void *tmdb_rescan_thread(void *arg) {
+    (void)arg;
+    scanner_scrape_session_begin(&tmdb_progress);
+    scanner_rescan_all_tmdb();
+    scanner_scrape_session_end(&tmdb_progress);
+    printf("API: Background TMDB rescan complete\n");
+    return NULL;
+}
+
 /* Parallel scrape threads — TMDB and IGDB use different APIs so can run concurrently */
 static void *scrape_tmdb_thread(void *arg) {
     (void)arg;
@@ -805,15 +815,17 @@ static void handle_api(int fd, const char *path) {
                      "{\"status\": \"tmdb refresh complete\"}", 35);
     }
     else if (strcmp(path, "/api/tmdb/rescan") == 0) {
-        /* Re-fetch TMDB metadata for ALL entries */
-        printf("API: Full TMDB rescan starting...\n");
-        int before = database_get_count();
-        scanner_rescan_all_tmdb();
-        char json[256];
-        int len = snprintf(json, sizeof(json),
-            "{\"status\":\"tmdb rescan complete\",\"entries_processed\":%d}",
-            before);
-        send_response(fd, 200, "OK", "application/json", json, len);
+        /* Re-fetch TMDB metadata for ALL entries — run in background thread */
+        printf("API: Full TMDB rescan starting (background)...\n");
+        pthread_t rescan_thread;
+        if (pthread_create(&rescan_thread, NULL, tmdb_rescan_thread, NULL) == 0) {
+            pthread_detach(rescan_thread);
+            send_response(fd, 200, "OK", "application/json",
+                         "{\"status\":\"started\"}", 20);
+        } else {
+            send_response(fd, 500, "Internal Server Error", "application/json",
+                         "{\"status\":\"failed to start rescan\"}", 35);
+        }
     }
     else if (strcmp(path, "/api/transcode/status") == 0) {
         const char *state_str = "idle";
@@ -1013,6 +1025,10 @@ static void handle_api(int fd, const char *path) {
         int i_elapsed = i_active ? (int)(time(NULL) - i_start) : 0;
         float t_percent = (t_total > 0) ? (100.0f * t_processed / t_total) : 0;
         float i_percent = (i_total > 0) ? (100.0f * i_processed / i_total) : 0;
+
+        /* Clamp to 99% while session is still active — true 100% only when done */
+        if (t_active && t_percent >= 100.0f) t_percent = 99.0f;
+        if (i_active && i_percent >= 100.0f) i_percent = 99.0f;
         int t_failed = t_processed - t_success; if (t_failed < 0) t_failed = 0;
         int i_failed = i_processed - i_success; if (i_failed < 0) i_failed = 0;
 
@@ -1273,6 +1289,19 @@ static void handle_request(int fd, const char *request) {
 "  max-height:80px;overflow-y:auto;line-height:1.4}\n"
 "@media(max-width:600px){.item-detail{flex-direction:column}\n"
 "  .detail-cover img,.detail-cover .ph{width:100px;height:auto}}\n"
+".modal-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;\n"
+"  background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center}\n"
+".modal-overlay.show{display:flex}\n"
+".modal-box{background:#161b22;border:1px solid #30363d;border-radius:12px;\n"
+"  padding:28px 32px;max-width:420px;width:90%;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.5)}\n"
+".modal-box h3{color:#f0883e;margin:0 0 12px;font-size:1.2em}\n"
+".modal-box p{color:#c9d1d9;margin:0 0 24px;line-height:1.5;font-size:.95em}\n"
+".modal-btns{display:flex;gap:12px;justify-content:center}\n"
+".modal-btns button{padding:10px 28px;border:none;border-radius:8px;font-weight:700;\n"
+"  font-size:.95em;cursor:pointer;transition:opacity .2s}\n"
+".modal-btns button:hover{opacity:.85}\n"
+".modal-yes{background:#da3633;color:#fff}\n"
+".modal-no{background:#238636;color:#fff}\n"
 "</style>\n"
 "</head>\n"
 "<body>\n"
@@ -1297,7 +1326,7 @@ static void handle_request(int fd, const char *request) {
 "  </div>\n"
 "  <div class=\"controls\">\n"
 "    <button class=\"btn blue\" id=\"btn-tmdb\" onclick=\"scrapeAction('/api/tmdb/refresh','btn-tmdb')\">Fetch Missing</button>\n"
-"    <button class=\"btn blue\" id=\"btn-tmdb-full\" onclick=\"scrapeAction('/api/tmdb/rescan','btn-tmdb-full')\">Full Rescan</button>\n"
+"    <button class=\"btn blue\" id=\"btn-tmdb-full\" onclick=\"confirmRescan('/api/tmdb/rescan','btn-tmdb-full')\">Full Rescan</button>\n"
 "  </div>\n"
 "</div>\n"
 "\n"
@@ -1320,7 +1349,7 @@ static void handle_request(int fd, const char *request) {
 "  </div>\n"
 "  <div class=\"controls\">\n"
 "    <button class=\"btn green\" id=\"btn-igdb\" onclick=\"scrapeAction('/api/roms/scan','btn-igdb')\">Fetch Missing</button>\n"
-"    <button class=\"btn green\" id=\"btn-igdb-full\" onclick=\"scrapeAction('/api/roms/rescan','btn-igdb-full')\">Full Rescan</button>\n"
+"    <button class=\"btn green\" id=\"btn-igdb-full\" onclick=\"confirmRescan('/api/roms/rescan','btn-igdb-full')\">Full Rescan</button>\n"
 "  </div>\n"
 "</div>\n"
 "\n"
@@ -1341,6 +1370,17 @@ static void handle_request(int fd, const char *request) {
 "  </select>\n"
 "</div>\n"
 "<div class=\"list\" id=\"list\"></div>\n"
+"\n"
+"<div class=\"modal-overlay\" id=\"rescan-modal\">\n"
+"  <div class=\"modal-box\">\n"
+"    <h3>Warning</h3>\n"
+"    <p>All existing metadata will be deleted and everything will be rescanned from scratch. This may take a while.</p>\n"
+"    <div class=\"modal-btns\">\n"
+"      <button class=\"modal-yes\" id=\"modal-yes\">Yes!</button>\n"
+"      <button class=\"modal-no\" id=\"modal-no\">Hell no!</button>\n"
+"    </div>\n"
+"  </div>\n"
+"</div>\n"
 "\n"
 "<script>\n"
 "var mediaData=[],romData=[];\n"
@@ -1487,6 +1527,21 @@ static void handle_request(int fd, const char *request) {
 "    .catch(function(){b.disabled=false});\n"
 "}\n"
 "\n"
+"var pendingRescan=null;\n"
+"function confirmRescan(url,btnId){\n"
+"  pendingRescan={url:url,btnId:btnId};\n"
+"  document.getElementById('rescan-modal').classList.add('show');\n"
+"}\n"
+"document.getElementById('modal-yes').onclick=function(){\n"
+"  document.getElementById('rescan-modal').classList.remove('show');\n"
+"  if(pendingRescan) scrapeAction(pendingRescan.url,pendingRescan.btnId);\n"
+"  pendingRescan=null;\n"
+"};\n"
+"document.getElementById('modal-no').onclick=function(){\n"
+"  document.getElementById('rescan-modal').classList.remove('show');\n"
+"  pendingRescan=null;\n"
+"};\n"
+"\n"
 "function updateTracker(prefix,d){\n"
 "  var s=document.getElementById(prefix+'-state');\n"
 "  s.textContent=d.active?'Active':'Idle';\n"
@@ -1504,6 +1559,7 @@ static void handle_request(int fd, const char *request) {
 "  document.getElementById(prefix+'-time').textContent=d.active?fmtTime(d.elapsed):'-';\n"
 "}\n"
 "\n"
+"var lastMediaCount=-1,lastRomCount=-1;\n"
 "function refreshStatus(){\n"
 "  fetch('/api/scrape/status').then(function(r){return r.json()}).then(function(d){\n"
 "    updateTracker('t',d.tmdb);\n"
@@ -1512,6 +1568,8 @@ static void handle_request(int fd, const char *request) {
 "    document.getElementById('m-roms').textContent=d.rom_count;\n"
 "    document.getElementById('m-tmdb').textContent=d.tmdb_pending;\n"
 "    document.getElementById('m-igdb').textContent=d.igdb_pending;\n"
+"    if(lastMediaCount>=0&&(d.media_count!==lastMediaCount||d.rom_count!==lastRomCount))loadLibrary();\n"
+"    lastMediaCount=d.media_count;lastRomCount=d.rom_count;\n"
 "  });\n"
 "}\n"
 "\n"

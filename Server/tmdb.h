@@ -80,6 +80,12 @@ TmdbTvShow *tmdb_get_show_status(int tv_id);
 /* Download image to local cache, returns local path */
 char *tmdb_download_image(const char *tmdb_path, const char *size, const char *cache_dir);
 
+/* Get movie details by TMDB ID (no search, direct lookup) */
+TmdbMovie *tmdb_get_movie_by_id(int tmdb_id);
+
+/* Get TV show details by TMDB ID (no search, direct lookup) */
+TmdbTvShow *tmdb_get_tvshow_by_id(int tmdb_id);
+
 /* Free result structures */
 void tmdb_free_movie(TmdbMovie *m);
 void tmdb_free_tvshow(TmdbTvShow *t);
