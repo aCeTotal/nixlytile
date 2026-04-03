@@ -1340,6 +1340,56 @@ static void clean_rom_title(const char *raw, char *out, size_t out_size) {
     }
 }
 
+/* Generate search variations for a ROM title.
+ * No-Intro naming uses " - " as subtitle separator, but actual game titles
+ * often use ": " (e.g., "1943 - The Battle of Midway" -> "1943: The Battle of Midway").
+ * Also tries without subtitle for short-named games (e.g., just "1943"). */
+static void generate_rom_variations(const char *clean, char variations[][256], int *count) {
+    *count = 0;
+
+    /* Variation 0: original cleaned title */
+    strncpy(variations[(*count)++], clean, 255);
+    variations[*count - 1][255] = '\0';
+
+    /* Variation 1: replace " - " with ": " (No-Intro -> real title) */
+    char *dash = strstr(variations[0], " - ");
+    if (dash && *count < 6) {
+        char temp[256];
+        size_t prefix_len = dash - variations[0];
+        memcpy(temp, variations[0], prefix_len);
+        temp[prefix_len] = ':';
+        temp[prefix_len + 1] = ' ';
+        strncpy(temp + prefix_len + 2, dash + 3, sizeof(temp) - prefix_len - 3);
+        temp[sizeof(temp) - 1] = '\0';
+        strncpy(variations[(*count)++], temp, 255);
+        variations[*count - 1][255] = '\0';
+    }
+
+    /* Variation 2: replace " - " with just " " */
+    if (dash && *count < 6) {
+        char temp[256];
+        size_t prefix_len = dash - variations[0];
+        memcpy(temp, variations[0], prefix_len);
+        temp[prefix_len] = ' ';
+        strncpy(temp + prefix_len + 1, dash + 3, sizeof(temp) - prefix_len - 2);
+        temp[sizeof(temp) - 1] = '\0';
+        strncpy(variations[(*count)++], temp, 255);
+        variations[*count - 1][255] = '\0';
+    }
+
+    /* Variation 3: just the part before " - " (subtitle stripped) */
+    if (dash && *count < 6) {
+        char temp[256];
+        size_t prefix_len = dash - variations[0];
+        if (prefix_len > 0 && prefix_len < sizeof(temp)) {
+            memcpy(temp, variations[0], prefix_len);
+            temp[prefix_len] = '\0';
+            strncpy(variations[(*count)++], temp, 255);
+            variations[*count - 1][255] = '\0';
+        }
+    }
+}
+
 /* Download a cover image from a URL (IGDB) to local cache */
 static char *download_igdb_cover(const char *url, const char *title, int console,
                                   const char *cache_dir)
@@ -1442,7 +1492,17 @@ void scanner_fetch_rom_metadata(void) {
                 char clean[256];
                 clean_rom_title(titles[i], clean, sizeof(clean));
 
-                IgdbGame *g = igdb_search_game(clean, platform_id);
+                /* Generate search variations and try each */
+                char variations[6][256];
+                int var_count = 0;
+                generate_rom_variations(clean, variations, &var_count);
+
+                IgdbGame *g = NULL;
+                for (int v = 0; v < var_count && !g; v++) {
+                    g = igdb_search_game(variations[v], platform_id);
+                    if (!g && v < var_count - 1)
+                        usleep(260000); /* rate limit between retries */
+                }
                 if (g) {
                     database_update_rom_metadata(ids[i], g->igdb_id,
                         g->summary, g->developer, g->publisher,
