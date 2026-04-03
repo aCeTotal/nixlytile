@@ -6,6 +6,8 @@
 #ifndef IGDB_H
 #define IGDB_H
 
+#include <stdio.h>
+
 typedef struct {
     int igdb_id;
     char *name;
@@ -31,6 +33,10 @@ int igdb_is_available(void);
 /* Search for a game by title, optionally filtered by IGDB platform ID
  * Returns NULL if not found or on error */
 IgdbGame *igdb_search_game(const char *title, int platform_id);
+
+/* Search by name pattern (case-insensitive contains) — fallback for when
+ * full-text search fails.  Uses: where name ~ *"title"*  */
+IgdbGame *igdb_search_game_by_name(const char *title, int platform_id);
 
 /* Fetch cover URL for a game by IGDB ID (targeted query, no search).
  * Returns cover URL string (caller frees) or NULL if not found */
@@ -72,5 +78,8 @@ void igdb_free_game(IgdbGame *g);
 
 /* Map ConsoleType enum to IGDB platform ID */
 int igdb_console_to_platform(int console_type);
+
+/* Set log file for API request/response tracking (NULL to disable) */
+void igdb_set_log(FILE *f);
 
 #endif /* IGDB_H */

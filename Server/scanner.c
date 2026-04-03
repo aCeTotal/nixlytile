@@ -1547,6 +1547,46 @@ static void clean_rom_title(const char *raw, char *out, size_t out_size) {
         out[--len] = '\0';
     }
 
+    /* Strip "Disc N" / "Disk N" / "CD N" suffix (multi-disc games) */
+    {
+        /* Match patterns like "Disc 1", "Disc1", "Disk 2", "CD2" at end */
+        char *disc = NULL;
+        for (int try = 0; try < 3 && !disc; try++) {
+            const char *patterns[] = {"Disc ", "Disk ", "CD "};
+            const char *patterns_no_space[] = {"Disc", "Disk", "CD"};
+            size_t plen[] = {5, 5, 3};
+            size_t plen_ns[] = {4, 4, 2};
+            len = strlen(out);
+            /* Try "Disc N" with space */
+            if (len > plen[try] + 1) {
+                char *candidate = out + len - plen[try] - 1;
+                if (strncasecmp(candidate, patterns[try], plen[try]) == 0 &&
+                    isdigit((unsigned char)candidate[plen[try]])) {
+                    disc = candidate;
+                }
+            }
+            /* Try "DiscN" without space */
+            if (!disc && len > plen_ns[try] + 1) {
+                char *candidate = out + len - plen_ns[try] - 1;
+                if (strncasecmp(candidate, patterns_no_space[try], plen_ns[try]) == 0 &&
+                    isdigit((unsigned char)candidate[plen_ns[try]])) {
+                    disc = candidate;
+                }
+            }
+        }
+        if (disc) {
+            /* Trim back trailing spaces/dashes before "Disc" */
+            while (disc > out && (*(disc - 1) == ' ' || *(disc - 1) == '-')) disc--;
+            *disc = '\0';
+        }
+    }
+
+    /* Trim trailing whitespace again after disc strip */
+    len = strlen(out);
+    while (len > 0 && (out[len - 1] == ' ' || out[len - 1] == '\t')) {
+        out[--len] = '\0';
+    }
+
     /* Strip "Disney's " or "Disney " prefix (IGDB rarely has these) */
     if (strncasecmp(out, "Disney's ", 9) == 0) {
         memmove(out, out + 9, strlen(out + 9) + 1);
@@ -1713,7 +1753,38 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
         }
     }
 
-    /* Variation 9: Roman numeral ↔ Arabic number at end of title
+    /* Variation 9: strip all punctuation (periods, apostrophes, colons, hyphens)
+     * "Dr. Mario" → "Dr Mario", "Kirby's Adventure" → "Kirbys Adventure" */
+    if (*count < 12) {
+        char temp[256];
+        const char *s = clean;
+        char *d = temp;
+        char *end = temp + sizeof(temp) - 2;
+        int last_space = 0;
+        while (*s && d < end) {
+            if ((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z') ||
+                (*s >= '0' && *s <= '9')) {
+                *d++ = *s;
+                last_space = 0;
+            } else {
+                /* Replace any punctuation/special char with space */
+                if (!last_space && d > temp) {
+                    *d++ = ' ';
+                    last_space = 1;
+                }
+            }
+            s++;
+        }
+        /* Trim trailing space */
+        if (d > temp && *(d - 1) == ' ') d--;
+        *d = '\0';
+        if (temp[0] && strcmp(temp, clean) != 0) {
+            strncpy(variations[(*count)++], temp, 255);
+            variations[*count - 1][255] = '\0';
+        }
+    }
+
+    /* Variation 10: Roman numeral ↔ Arabic number at end of title
      * "Final Fantasy III" → "Final Fantasy 3", "Mega Man 2" → "Mega Man II" */
     if (*count < 12) {
         static const struct { const char *roman; const char *arabic; } numerals[] = {
@@ -1936,10 +2007,12 @@ static int platform_matches_console(const char *platforms, int console) {
 }
 
 /* Fetch IGDB metadata for ROMs that don't have it.
- * Uses a 2-phase search strategy per ROM:
- *   Phase 1: Try original + colon variant (most likely matches) with platform filter
- *   Phase 2: Try remaining variations with platform filter
- *   Phase 3: Fallback without platform filter (1 extra API call) */
+ * Uses a 5-phase search strategy per ROM:
+ *   Phase 1: search (original + colon variant) with platform filter
+ *   Phase 2: search (remaining variations) with platform filter
+ *   Phase 3: name ~ (pattern match) with platform filter
+ *   Phase 4: search without platform filter + platform validation
+ *   Phase 5: name ~ without platform filter + platform validation */
 void scanner_fetch_rom_metadata(void) {
     if (!igdb_is_available()) {
         fprintf(stderr, "IGDB: Not initialized, skipping ROM metadata fetch\n");
@@ -1962,6 +2035,24 @@ void scanner_fetch_rom_metadata(void) {
 
     if (grand_total == 0) return;
 
+    /* Open scrape log file in the root Emulator directory (roms_paths[0]) */
+    FILE *logf = NULL;
+    if (server_config.roms_path_count > 0 && server_config.roms_paths[0][0]) {
+        char logpath[4096];
+        snprintf(logpath, sizeof(logpath), "%s/scrape_log.txt", server_config.roms_paths[0]);
+        logf = fopen(logpath, "a");
+        if (logf) {
+            time_t now = time(NULL);
+            struct tm *tm = localtime(&now);
+            char timebuf[64];
+            strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", tm);
+            fprintf(logf, "\n=== IGDB Scrape Log - %s (%d ROMs) ===\n", timebuf, grand_total);
+            fflush(logf);
+        }
+    }
+    /* Enable API-level logging in igdb.c so every request/response is captured */
+    igdb_set_log(logf);
+
     scrape_begin("igdb_fetch", grand_total);
     int found = 0;
 
@@ -1975,8 +2066,9 @@ void scanner_fetch_rom_metadata(void) {
 
         if (count > 0) {
             int platform_id = igdb_console_to_platform(c);
+            const char *console_name = database_console_name(c);
             printf("IGDB: Fetching metadata for %d %s ROMs...\n",
-                count, database_console_name(c));
+                count, console_name);
 
             for (int i = 0; i < count; i++) {
                 char clean[256];
@@ -1986,39 +2078,115 @@ void scanner_fetch_rom_metadata(void) {
                 int var_count = 0;
                 generate_rom_variations(clean, variations, &var_count);
 
-                IgdbGame *g = NULL;
-
-                /* Phase 1: Try original + colon variant (indices 0-1) — most likely matches.
-                 * With limit 10 + scoring, these two alone catch most games. */
-                int phase1_end = var_count < 2 ? var_count : 2;
-                for (int v = 0; v < phase1_end && !g; v++) {
-                    g = igdb_search_game(variations[v], platform_id);
-                    if (!g) usleep(260000);
+                if (logf) {
+                    fprintf(logf, "\nROM: \"%s\" [%s]\n", titles[i], console_name);
+                    fprintf(logf, "  Clean: \"%s\"\n", clean);
+                    fprintf(logf, "  Variations (%d):", var_count);
+                    for (int v = 0; v < var_count; v++)
+                        fprintf(logf, " \"%s\"", variations[v]);
+                    fprintf(logf, "\n");
                 }
 
-                /* Phase 2: Try remaining variations with platform filter */
+                IgdbGame *g = NULL;
+                const char *match_method = NULL;
+                int queries_tried = 0;
+
+                /* Phase 1: search original + colon variant (indices 0-1) with platform */
+                {
+                    int phase1_end = var_count < 2 ? var_count : 2;
+                    for (int v = 0; v < phase1_end && !g; v++) {
+                        g = igdb_search_game(variations[v], platform_id);
+                        queries_tried++;
+                        if (logf) {
+                            fprintf(logf, "  [%d] search \"%s\" plat=%d -> %s\n",
+                                queries_tried, variations[v], platform_id,
+                                g ? g->name : "MISS");
+                        }
+                        if (!g) usleep(260000);
+                    }
+                    if (g) match_method = "search+platform";
+                }
+
+                /* Phase 2: search remaining variations with platform */
                 if (!g && var_count > 2) {
                     for (int v = 2; v < var_count && !g; v++) {
                         g = igdb_search_game(variations[v], platform_id);
+                        queries_tried++;
+                        if (logf) {
+                            fprintf(logf, "  [%d] search \"%s\" plat=%d -> %s\n",
+                                queries_tried, variations[v], platform_id,
+                                g ? g->name : "MISS");
+                        }
                         if (!g) usleep(260000);
                     }
+                    if (g) match_method = "search+platform(var)";
                 }
 
-                /* Phase 3: Fallback without platform filter using original title.
-                 * Verify the result actually has the target platform to avoid
-                 * matching a game from the wrong console. */
+                /* Phase 3: name pattern match with platform filter.
+                 * Uses `where name ~ *"title"*` which is a case-insensitive
+                 * contains search — catches games the search endpoint misses. */
+                if (!g) {
+                    /* Try first 3 variations (original, colon, space) */
+                    int name_end = var_count < 3 ? var_count : 3;
+                    for (int v = 0; v < name_end && !g; v++) {
+                        g = igdb_search_game_by_name(variations[v], platform_id);
+                        queries_tried++;
+                        if (logf) {
+                            fprintf(logf, "  [%d] name~ \"%s\" plat=%d -> %s\n",
+                                queries_tried, variations[v], platform_id,
+                                g ? g->name : "MISS");
+                        }
+                        if (!g) usleep(260000);
+                    }
+                    if (g) match_method = "name+platform";
+                }
+
+                /* Phase 4: search without platform filter + validation */
                 if (!g) {
                     g = igdb_search_game(variations[0], 0);
+                    queries_tried++;
+                    if (logf) {
+                        fprintf(logf, "  [%d] search \"%s\" plat=ANY -> %s\n",
+                            queries_tried, variations[0],
+                            g ? g->name : "MISS");
+                    }
                     if (g && g->platforms && !platform_matches_console(g->platforms, c)) {
+                        if (logf) {
+                            fprintf(logf, "  [%d] REJECTED (wrong platform: %s)\n",
+                                queries_tried, g->platforms);
+                        }
                         printf("  IGDB: %s -> %s (wrong platform: %s)\n",
                             titles[i], g->name ? g->name : "?", g->platforms);
                         igdb_free_game(g);
                         g = NULL;
                     }
                     if (!g) usleep(260000);
+                    else match_method = "search-noplatform";
+                }
+
+                /* Phase 5: name pattern match without platform filter + validation */
+                if (!g) {
+                    g = igdb_search_game_by_name(variations[0], 0);
+                    queries_tried++;
+                    if (logf) {
+                        fprintf(logf, "  [%d] name~ \"%s\" plat=ANY -> %s\n",
+                            queries_tried, variations[0],
+                            g ? g->name : "MISS");
+                    }
+                    if (g && g->platforms && !platform_matches_console(g->platforms, c)) {
+                        if (logf) {
+                            fprintf(logf, "  [%d] REJECTED (wrong platform: %s)\n",
+                                queries_tried, g->platforms);
+                        }
+                        igdb_free_game(g);
+                        g = NULL;
+                    }
+                    if (!g) usleep(260000);
+                    else match_method = "name-noplatform";
                 }
 
                 if (g) {
+                    int has_cover = 0;
                     database_update_rom_metadata(ids[i], g->igdb_id,
                         g->summary, g->developer, g->publisher,
                         g->release_year, g->genres, NULL,
@@ -2029,25 +2197,31 @@ void scanner_fetch_rom_metadata(void) {
                             titles[i], c, server_config.cache_dir);
                         if (cover) {
                             database_update_rom_cover(ids[i], cover);
-                            printf("  IGDB: %s -> %s (%d) [cover OK]\n",
-                                titles[i], g->name ? g->name : "?",
-                                g->release_year);
                             free(cover);
-                        } else {
-                            printf("  IGDB: %s -> %s (%d) [no cover]\n",
-                                titles[i], g->name ? g->name : "?",
-                                g->release_year);
+                            has_cover = 1;
                         }
-                    } else {
-                        printf("  IGDB: %s -> %s (%d)\n", titles[i],
-                            g->name ? g->name : "?", g->release_year);
+                    }
+
+                    printf("  IGDB: %s -> %s (%d) [%s]%s\n",
+                        titles[i], g->name ? g->name : "?",
+                        g->release_year, match_method,
+                        has_cover ? " cover=OK" : "");
+
+                    if (logf) {
+                        fprintf(logf, "  RESULT: FOUND \"%s\" (%d) id=%d via %s cover=%s queries=%d\n",
+                            g->name ? g->name : "?", g->release_year,
+                            g->igdb_id, match_method,
+                            has_cover ? "YES" : "NO", queries_tried);
                     }
 
                     igdb_free_game(g);
                     found++;
                     scrape_update(titles[i], 1);
                 } else {
-                    printf("  IGDB: %s -> NOT FOUND\n", titles[i]);
+                    printf("  IGDB: %s -> NOT FOUND (%d queries)\n", titles[i], queries_tried);
+                    if (logf) {
+                        fprintf(logf, "  RESULT: NOT FOUND (queries=%d)\n", queries_tried);
+                    }
                     database_update_rom_metadata(ids[i], -1,
                         NULL, NULL, NULL, 0, NULL, NULL, 0, NULL);
                     scrape_update(titles[i], 0);
@@ -2055,6 +2229,9 @@ void scanner_fetch_rom_metadata(void) {
 
                 /* Rate limit between ROMs */
                 usleep(260000);
+
+                /* Flush log periodically */
+                if (logf && (i % 10 == 0)) fflush(logf);
             }
         }
 
@@ -2062,6 +2239,14 @@ void scanner_fetch_rom_metadata(void) {
             free(titles[i]);
         free(ids);
         free(titles);
+    }
+
+    igdb_set_log(NULL);
+    if (logf) {
+        fprintf(logf, "\n=== Summary: %d/%d found (%.1f%%) ===\n",
+            found, grand_total,
+            grand_total > 0 ? 100.0 * found / grand_total : 0.0);
+        fclose(logf);
     }
 
     scrape_end();

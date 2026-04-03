@@ -25,6 +25,12 @@ static char *access_token = NULL;
 static time_t token_expires = 0;
 static CURL *curl_handle = NULL;
 
+/* Optional log file for API-level request/response tracking.
+ * Set via igdb_set_log() before scraping. */
+static FILE *igdb_logfile = NULL;
+
+void igdb_set_log(FILE *f) { igdb_logfile = f; }
+
 typedef struct {
     char *data;
     size_t size;
@@ -189,11 +195,17 @@ static char *igdb_request(const char *endpoint, const char *body) {
     curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, &chunk);
     curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT, 10L);
 
+    /* Log the request body to API log if enabled */
+    if (igdb_logfile) {
+        fprintf(igdb_logfile, "    API %s: %s\n", endpoint, body);
+    }
+
     CURLcode res = curl_easy_perform(curl_handle);
     curl_slist_free_all(headers);
 
     if (res != CURLE_OK) {
         fprintf(stderr, "IGDB: Request failed: %s\n", curl_easy_strerror(res));
+        if (igdb_logfile) fprintf(igdb_logfile, "    -> CURL ERROR: %s\n", curl_easy_strerror(res));
         free(chunk.data);
         return NULL;
     }
@@ -210,6 +222,7 @@ static char *igdb_request(const char *endpoint, const char *body) {
         preview[plen] = '\0';
 
         fprintf(stderr, "IGDB: HTTP %ld from %s: %s\n", http_code, endpoint, preview);
+        if (igdb_logfile) fprintf(igdb_logfile, "    -> HTTP %ld: %s\n", http_code, preview);
 
         if (http_code == 401) {
             /* Token expired or invalid — force refresh on next call */
@@ -438,6 +451,41 @@ static int title_match_score(const char *search, const char *result) {
     return score;
 }
 
+/* Fetch cover image_id from the covers endpoint by cover table ID.
+ * Returns constructed cover URL (caller frees) or NULL. */
+static char *igdb_fetch_cover_url(int cover_id) {
+    if (cover_id <= 0) return NULL;
+
+    char body[128];
+    snprintf(body, sizeof(body), "fields image_id;\nwhere id = %d;\nlimit 1;", cover_id);
+
+    char *response = igdb_request("covers", body);
+    if (!response) return NULL;
+
+    cJSON *json = cJSON_Parse(response);
+    free(response);
+    if (!json || !cJSON_IsArray(json) || cJSON_GetArraySize(json) == 0) {
+        cJSON_Delete(json);
+        return NULL;
+    }
+
+    char *result = NULL;
+    cJSON *item = cJSON_GetArrayItem(json, 0);
+    if (item) {
+        cJSON *image_id = cJSON_GetObjectItem(item, "image_id");
+        if (image_id && cJSON_IsString(image_id)) {
+            char url[512];
+            snprintf(url, sizeof(url),
+                "https://images.igdb.com/igdb/image/upload/t_cover_big/%s.jpg",
+                image_id->valuestring);
+            result = strdup(url);
+        }
+    }
+
+    cJSON_Delete(json);
+    return result;
+}
+
 /* Parse a single game object from IGDB JSON into IgdbGame struct */
 static IgdbGame *parse_igdb_game(cJSON *game) {
     if (!game) return NULL;
@@ -461,16 +509,23 @@ static IgdbGame *parse_igdb_game(cJSON *game) {
     extract_companies(cJSON_GetObjectItem(game, "involved_companies"),
                       &g->developer, &g->publisher);
 
-    /* Extract cover URL from cover.image_id */
+    /* Extract cover URL from cover.image_id.
+     * IGDB may return cover as an expanded object {id, image_id} or as a
+     * bare integer (the cover-table row ID).  Handle both. */
     cJSON *cover = cJSON_GetObjectItem(game, "cover");
-    if (cover && cJSON_IsObject(cover)) {
-        cJSON *image_id = cJSON_GetObjectItem(cover, "image_id");
-        if (image_id && cJSON_IsString(image_id)) {
-            char url[512];
-            snprintf(url, sizeof(url),
-                "https://images.igdb.com/igdb/image/upload/t_cover_big/%s.jpg",
-                image_id->valuestring);
-            g->cover_url = strdup(url);
+    if (cover) {
+        if (cJSON_IsObject(cover)) {
+            cJSON *image_id = cJSON_GetObjectItem(cover, "image_id");
+            if (image_id && cJSON_IsString(image_id)) {
+                char url[512];
+                snprintf(url, sizeof(url),
+                    "https://images.igdb.com/igdb/image/upload/t_cover_big/%s.jpg",
+                    image_id->valuestring);
+                g->cover_url = strdup(url);
+            }
+        } else if (cJSON_IsNumber(cover)) {
+            /* cover is integer ID — query covers endpoint */
+            g->cover_url = igdb_fetch_cover_url(cover->valueint);
         }
     }
 
@@ -564,17 +619,129 @@ IgdbGame *igdb_search_game(const char *title, int platform_id) {
 
     /* Require minimum score of 40 (lenient to handle title variations) */
     if (best_score < 40 || !best_game) {
+        if (igdb_logfile) {
+            if (best_game) {
+                cJSON *bn = cJSON_GetObjectItem(best_game, "name");
+                fprintf(igdb_logfile, "    -> %d results, best: \"%s\" score=%d (< 40, rejected)\n",
+                    n, (bn && cJSON_IsString(bn)) ? bn->valuestring : "?", best_score);
+            } else {
+                fprintf(igdb_logfile, "    -> %d results, none matched\n", n);
+            }
+        }
         if (best_game) {
             cJSON *bn = cJSON_GetObjectItem(best_game, "name");
             fprintf(stderr, "IGDB: No match for \"%s\" — best candidate \"%s\" score %d (< 40)\n",
                 title,
                 (bn && cJSON_IsString(bn)) ? bn->valuestring : "?",
                 best_score);
-        } else {
-            fprintf(stderr, "IGDB: No match for \"%s\" — no candidates with name field\n", title);
         }
         cJSON_Delete(json);
         return NULL;
+    }
+
+    if (igdb_logfile) {
+        cJSON *bn = cJSON_GetObjectItem(best_game, "name");
+        fprintf(igdb_logfile, "    -> %d results, matched: \"%s\" score=%d\n",
+            n, (bn && cJSON_IsString(bn)) ? bn->valuestring : "?", best_score);
+    }
+
+    IgdbGame *g = parse_igdb_game(best_game);
+    cJSON_Delete(json);
+    return g;
+}
+
+IgdbGame *igdb_search_game_by_name(const char *title, int platform_id) {
+    if (!title || !title[0]) return NULL;
+
+    /* Build a safe query string: remove characters that break Apicalypse */
+    char safe[512];
+    const char *s = title;
+    char *d = safe;
+    char *end = safe + sizeof(safe) - 1;
+    while (*s && d < end) {
+        if (*s != '"' && *s != '\\' && *s != '*')
+            *d++ = *s;
+        s++;
+    }
+    *d = '\0';
+    if (safe[0] == '\0') return NULL;
+
+    char body[1024];
+    if (platform_id > 0) {
+        snprintf(body, sizeof(body),
+            "fields name,summary,first_release_date,genres.name,platforms.name,"
+            "involved_companies.company.name,involved_companies.developer,"
+            "involved_companies.publisher,total_rating,cover.image_id;\n"
+            "where name ~ *\"%s\"* & platforms = (%d);\n"
+            "limit 10;",
+            safe, platform_id);
+    } else {
+        snprintf(body, sizeof(body),
+            "fields name,summary,first_release_date,genres.name,platforms.name,"
+            "involved_companies.company.name,involved_companies.developer,"
+            "involved_companies.publisher,total_rating,cover.image_id;\n"
+            "where name ~ *\"%s\"*;\n"
+            "limit 10;",
+            safe);
+    }
+
+    printf("IGDB: Name search for \"%s\" (platform %d)\n", safe, platform_id);
+
+    char *response = igdb_request("games", body);
+    if (!response) return NULL;
+
+    cJSON *json = cJSON_Parse(response);
+    free(response);
+    if (!json) return NULL;
+
+    if (!cJSON_IsArray(json) || cJSON_GetArraySize(json) == 0) {
+        cJSON_Delete(json);
+        return NULL;
+    }
+
+    /* Check for error objects */
+    cJSON *first = cJSON_GetArrayItem(json, 0);
+    if (first && cJSON_GetObjectItem(first, "status")) {
+        cJSON_Delete(json);
+        return NULL;
+    }
+
+    /* Score each result same as igdb_search_game */
+    int best_score = 0;
+    cJSON *best_game = NULL;
+    int n = cJSON_GetArraySize(json);
+
+    for (int i = 0; i < n; i++) {
+        cJSON *game = cJSON_GetArrayItem(json, i);
+        if (!game) continue;
+        cJSON *name_item = cJSON_GetObjectItem(game, "name");
+        if (!name_item || !cJSON_IsString(name_item)) continue;
+
+        int score = title_match_score(title, name_item->valuestring);
+        if (score > best_score) {
+            best_score = score;
+            best_game = game;
+        }
+    }
+
+    if (best_score < 40 || !best_game) {
+        if (igdb_logfile) {
+            if (best_game) {
+                cJSON *bn = cJSON_GetObjectItem(best_game, "name");
+                fprintf(igdb_logfile, "    -> %d results, best: \"%s\" score=%d (< 40, rejected)\n",
+                    n, (bn && cJSON_IsString(bn)) ? bn->valuestring : "?", best_score);
+            } else {
+                fprintf(igdb_logfile, "    -> %d results, none scored\n", n);
+            }
+        }
+        cJSON_Delete(json);
+        return NULL;
+    }
+
+    if (igdb_logfile) {
+        cJSON *bn = cJSON_GetObjectItem(best_game, "name");
+        fprintf(igdb_logfile, "    -> %d results, matched: \"%s\" score=%d\n",
+            n, (bn && cJSON_IsString(bn)) ? bn->valuestring : "?", best_score);
     }
 
     IgdbGame *g = parse_igdb_game(best_game);
@@ -607,14 +774,18 @@ char *igdb_get_game_cover(int igdb_id) {
 
     if (game) {
         cJSON *cover = cJSON_GetObjectItem(game, "cover");
-        if (cover && cJSON_IsObject(cover)) {
-            cJSON *image_id = cJSON_GetObjectItem(cover, "image_id");
-            if (image_id && cJSON_IsString(image_id)) {
-                char url[512];
-                snprintf(url, sizeof(url),
-                    "https://images.igdb.com/igdb/image/upload/t_cover_big/%s.jpg",
-                    image_id->valuestring);
-                cover_url = strdup(url);
+        if (cover) {
+            if (cJSON_IsObject(cover)) {
+                cJSON *image_id = cJSON_GetObjectItem(cover, "image_id");
+                if (image_id && cJSON_IsString(image_id)) {
+                    char url[512];
+                    snprintf(url, sizeof(url),
+                        "https://images.igdb.com/igdb/image/upload/t_cover_big/%s.jpg",
+                        image_id->valuestring);
+                    cover_url = strdup(url);
+                }
+            } else if (cJSON_IsNumber(cover)) {
+                cover_url = igdb_fetch_cover_url(cover->valueint);
             }
         }
     }
