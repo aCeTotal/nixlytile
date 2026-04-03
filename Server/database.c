@@ -1372,6 +1372,22 @@ int database_get_roms_without_igdb(ConsoleType console, int **ids, char ***title
     return 0;
 }
 
+int database_reset_rom_igdb(void) {
+    const char *sql = "UPDATE roms SET igdb_id = NULL, description = NULL, "
+        "developer = NULL, publisher = NULL, release_year = 0, genre = NULL, "
+        "players = NULL, igdb_rating = 0, igdb_platforms = NULL, cover_path = NULL";
+    char *err = NULL;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, &err);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "database_reset_rom_igdb: %s\n", err ? err : "unknown error");
+        sqlite3_free(err);
+        return -1;
+    }
+    int changes = sqlite3_changes(db);
+    printf("Database: Reset IGDB metadata for %d ROMs\n", changes);
+    return changes;
+}
+
 void database_free_rom(RomEntry *entry) {
     if (entry) {
         free(entry->title);

@@ -99,7 +99,6 @@ static void *startup_scan_thread(void *arg) {
             scanner_scan_rom_directory(server_config.roms_paths[i]);
         }
         printf("Startup scan: Found %d ROMs.\n", database_get_rom_count());
-        scanner_fetch_rom_covers();
         if (running) scanner_fetch_rom_metadata();
     }
 
@@ -190,7 +189,6 @@ static void *sync_thread(void *arg) {
         int rom_after = database_get_rom_count();
         if (rom_after != rom_before) {
             printf("Periodic sync: ROM count changed %d -> %d\n", rom_before, rom_after);
-            scanner_fetch_rom_covers();
             scanner_fetch_rom_metadata();
         }
 
@@ -305,7 +303,7 @@ static void on_file_change(const char *filepath, int is_delete, WatchType type) 
             if (console >= 0) {
                 if (scanner_scan_rom_file(filepath, console) == 0) {
                     printf("DB: Added ROM %s\n", filepath);
-                    scanner_fetch_rom_covers();
+                    scanner_fetch_rom_metadata();
                 }
             }
         }
@@ -861,10 +859,88 @@ static void handle_api(int fd, const char *path) {
         printf("Manual ROM rescan triggered via API\n");
         for (int i = 0; i < server_config.roms_path_count; i++)
             scanner_scan_rom_directory(server_config.roms_paths[i]);
-        scanner_fetch_rom_covers();
+        scanner_fetch_rom_metadata();
         char json[128];
         int len = snprintf(json, sizeof(json),
             "{\"status\":\"ok\",\"total\":%d}", database_get_rom_count());
+        send_response(fd, 200, "OK", "application/json", json, len);
+    }
+    else if (strcmp(path, "/api/roms/rescan") == 0) {
+        printf("Full ROM IGDB rescan triggered via API\n");
+        scanner_rescan_all_rom_metadata();
+        char json[128];
+        int len = snprintf(json, sizeof(json),
+            "{\"status\":\"ok\",\"total\":%d}", database_get_rom_count());
+        send_response(fd, 200, "OK", "application/json", json, len);
+    }
+    else if (strcmp(path, "/api/scrape/status") == 0) {
+        int active, total, processed, success;
+        const char *operation;
+        char current_item[256];
+        time_t start_time;
+        scanner_get_scrape_status(&active, &operation, current_item,
+            sizeof(current_item), &total, &processed, &success, &start_time);
+
+        /* Escape current_item for JSON */
+        char escaped[512];
+        char *d = escaped;
+        for (const char *s = current_item; *s && d < escaped + sizeof(escaped) - 6; s++) {
+            if (*s == '"') { *d++ = '\\'; *d++ = '"'; }
+            else if (*s == '\\') { *d++ = '\\'; *d++ = '\\'; }
+            else *d++ = *s;
+        }
+        *d = '\0';
+
+        int elapsed = active ? (int)(time(NULL) - start_time) : 0;
+        float percent = (total > 0) ? (100.0f * processed / total) : 0;
+
+        /* Database summary counts */
+        int media_count = database_get_count();
+        int rom_count = database_get_rom_count();
+
+        /* Count items without metadata (pending scrape) */
+        MediaEntry *tmdb_entries = NULL;
+        int tmdb_pending = 0;
+        if (database_get_entries_without_tmdb(&tmdb_entries, &tmdb_pending) == 0) {
+            for (int i = 0; i < tmdb_pending; i++)
+                database_free_entry(&tmdb_entries[i]);
+            free(tmdb_entries);
+        }
+
+        int igdb_pending = 0;
+        for (int c = 0; c < CONSOLE_COUNT; c++) {
+            int *tmp_ids = NULL;
+            char **tmp_titles = NULL;
+            int cnt = 0;
+            if (database_get_roms_without_igdb(c, &tmp_ids, &tmp_titles, &cnt) == 0) {
+                igdb_pending += cnt;
+                for (int i = 0; i < cnt; i++) free(tmp_titles[i]);
+                free(tmp_ids);
+                free(tmp_titles);
+            }
+        }
+
+        char json[1024];
+        int len = snprintf(json, sizeof(json),
+            "{\"active\":%s,"
+            "\"operation\":\"%s\","
+            "\"current_item\":\"%s\","
+            "\"total\":%d,"
+            "\"processed\":%d,"
+            "\"success\":%d,"
+            "\"percent\":%.1f,"
+            "\"elapsed\":%d,"
+            "\"media_count\":%d,"
+            "\"rom_count\":%d,"
+            "\"tmdb_pending\":%d,"
+            "\"igdb_pending\":%d}",
+            active ? "true" : "false",
+            operation,
+            escaped,
+            total, processed, success,
+            percent, elapsed,
+            media_count, rom_count,
+            tmdb_pending, igdb_pending);
         send_response(fd, 200, "OK", "application/json", json, len);
     }
     else if (strcmp(path, "/api/counts") == 0) {
@@ -996,6 +1072,336 @@ static void handle_request(int fd, const char *request) {
         snprintf(filepath, sizeof(filepath), "%s/%s",
                  server_config.cache_dir, path + 7);
         serve_file(fd, filepath);
+    }
+    else if (strcmp(path, "/scrape") == 0) {
+        const char *html =
+"<!DOCTYPE html>\n"
+"<html lang=\"en\">\n"
+"<head>\n"
+"<meta charset=\"UTF-8\">\n"
+"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
+"<title>Nixly Scraper</title>\n"
+"<style>\n"
+"*{margin:0;padding:0;box-sizing:border-box}\n"
+"body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;\n"
+"  background:#0d1117;color:#c9d1d9;min-height:100vh;padding:20px;max-width:1200px;margin:0 auto}\n"
+"h1{color:#58a6ff;margin-bottom:8px;font-size:1.5em}\n"
+"h2{color:#8b949e;font-size:1em;margin:16px 0 8px}\n"
+".card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:16px}\n"
+".row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}\n"
+".state{font-size:1.1em;font-weight:600}\n"
+".state.active{color:#3fb950}.state.idle{color:#8b949e}\n"
+".progress-wrap{background:#21262d;border-radius:4px;height:20px;margin:8px 0;\n"
+"  overflow:hidden;position:relative}\n"
+".progress-bar{height:100%;transition:width .5s ease;border-radius:4px}\n"
+".progress-bar.tmdb{background:linear-gradient(90deg,#1f6feb,#58a6ff)}\n"
+".progress-bar.igdb{background:linear-gradient(90deg,#238636,#3fb950)}\n"
+".progress-bar.show{background:linear-gradient(90deg,#6e40c9,#a371f7)}\n"
+".progress-text{position:absolute;top:0;left:0;right:0;text-align:center;\n"
+"  line-height:20px;font-size:11px;color:#fff;font-weight:600}\n"
+".current{color:#8b949e;font-size:.85em;margin-top:2px;min-height:1.2em;\n"
+"  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\n"
+".mini-stats{display:flex;gap:16px;font-size:.85em;color:#8b949e;margin-top:6px}\n"
+".mini-stats b{color:#c9d1d9}\n"
+".controls{margin:10px 0;display:flex;gap:8px;flex-wrap:wrap}\n"
+".btn{padding:6px 14px;border:1px solid #30363d;border-radius:6px;\n"
+"  background:#21262d;color:#c9d1d9;cursor:pointer;font-size:12px;transition:background .15s}\n"
+".btn:hover{background:#30363d}\n"
+".btn.blue{border-color:#1f6feb;color:#58a6ff}\n"
+".btn.blue:hover{background:#1f6feb;color:#fff}\n"
+".btn.green{border-color:#238636;color:#3fb950}\n"
+".btn.green:hover{background:#238636;color:#fff}\n"
+".btn:disabled{opacity:.4;cursor:not-allowed}\n"
+".tabs{display:flex;gap:0;border-bottom:1px solid #30363d;margin-bottom:12px}\n"
+".tab{padding:8px 20px;cursor:pointer;color:#8b949e;font-size:.9em;border-bottom:2px solid transparent;\n"
+"  transition:color .15s}\n"
+".tab:hover{color:#c9d1d9}.tab.active{color:#58a6ff;border-bottom-color:#58a6ff}\n"
+".tab .cnt{font-size:.8em;color:#484f58;margin-left:4px}\n"
+".filter{margin-bottom:10px}\n"
+".filter input{background:#0d1117;border:1px solid #30363d;border-radius:6px;\n"
+"  padding:6px 12px;color:#c9d1d9;font-size:13px;width:100%;max-width:400px}\n"
+".filter select{background:#0d1117;border:1px solid #30363d;border-radius:6px;\n"
+"  padding:6px 8px;color:#c9d1d9;font-size:12px;margin-left:8px}\n"
+".list{display:flex;flex-direction:column;gap:2px}\n"
+".item{background:#161b22;border:1px solid #21262d;border-radius:6px;cursor:pointer;\n"
+"  transition:border-color .15s;overflow:hidden}\n"
+".item:hover{border-color:#30363d}\n"
+".item.has-data{border-left:3px solid #238636}\n"
+".item.no-data{border-left:3px solid #484f58}\n"
+".item-head{display:flex;align-items:center;padding:8px 12px;gap:10px}\n"
+".item-thumb{width:36px;height:50px;border-radius:4px;object-fit:cover;background:#21262d;flex-shrink:0}\n"
+".item-thumb-ph{width:36px;height:50px;border-radius:4px;background:#21262d;flex-shrink:0;\n"
+"  display:flex;align-items:center;justify-content:center;font-size:10px;color:#484f58}\n"
+".item-info{flex:1;min-width:0}\n"
+".item-title{font-weight:600;font-size:.9em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\n"
+".item-sub{font-size:.75em;color:#8b949e}\n"
+".tag{display:inline-block;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;margin-right:4px}\n"
+".tag.movie{background:#1f3d1f;color:#3fb950}\n"
+".tag.tv{background:#1f2d4f;color:#58a6ff}\n"
+".tag.rom{background:#2d1f4f;color:#a371f7}\n"
+".tag.miss{background:#3d1f1f;color:#f85149}\n"
+".item-detail{display:none;padding:0 12px 12px;border-top:1px solid #21262d}\n"
+".item.open .item-detail{display:flex;gap:16px;padding-top:12px}\n"
+".detail-cover{flex-shrink:0}\n"
+".detail-cover img{width:140px;border-radius:6px;display:block}\n"
+".detail-cover .ph{width:140px;height:200px;background:#21262d;border-radius:6px;\n"
+"  display:flex;align-items:center;justify-content:center;color:#484f58;font-size:12px}\n"
+".detail-fields{flex:1;min-width:0}\n"
+".detail-fields table{width:100%;border-collapse:collapse;font-size:.8em}\n"
+".detail-fields td{padding:3px 8px;vertical-align:top}\n"
+".detail-fields td:first-child{color:#8b949e;white-space:nowrap;width:100px}\n"
+".detail-fields td:last-child{color:#c9d1d9;word-break:break-word}\n"
+".detail-fields .overview{font-size:.8em;color:#8b949e;margin-top:8px;\n"
+"  max-height:80px;overflow-y:auto;line-height:1.4}\n"
+"@media(max-width:600px){.item-detail{flex-direction:column}\n"
+"  .detail-cover img,.detail-cover .ph{width:100px;height:auto}}\n"
+"</style>\n"
+"</head>\n"
+"<body>\n"
+"<h1>Nixly Scraper</h1>\n"
+"\n"
+"<div class=\"card\">\n"
+"  <div class=\"row\">\n"
+"    <span class=\"state\" id=\"state\">Loading...</span>\n"
+"    <span id=\"op\" style=\"color:#8b949e;font-size:.85em\"></span>\n"
+"  </div>\n"
+"  <div class=\"progress-wrap\"><div class=\"progress-bar\" id=\"pbar\"></div>\n"
+"    <div class=\"progress-text\" id=\"ptxt\"></div></div>\n"
+"  <div class=\"current\" id=\"current\"></div>\n"
+"  <div class=\"mini-stats\">\n"
+"    <span>Processed: <b id=\"s-proc\">-</b></span>\n"
+"    <span>Matched: <b id=\"s-ok\" style=\"color:#3fb950\">-</b></span>\n"
+"    <span>Failed: <b id=\"s-fail\" style=\"color:#d29922\">-</b></span>\n"
+"    <span>Time: <b id=\"s-time\">-</b></span>\n"
+"    <span>Media: <b id=\"m-media\">-</b></span>\n"
+"    <span>ROMs: <b id=\"m-roms\">-</b></span>\n"
+"    <span style=\"color:#d29922\">TMDB pending: <b id=\"m-tmdb\">-</b></span>\n"
+"    <span style=\"color:#a371f7\">IGDB pending: <b id=\"m-igdb\">-</b></span>\n"
+"  </div>\n"
+"  <div class=\"controls\">\n"
+"    <button class=\"btn blue\" id=\"btn-tmdb\" onclick=\"scrapeAction('/api/tmdb/refresh','btn-tmdb')\">TMDB: Fetch Missing</button>\n"
+"    <button class=\"btn blue\" id=\"btn-tmdb-full\" onclick=\"scrapeAction('/api/tmdb/rescan','btn-tmdb-full')\">TMDB: Full Rescan</button>\n"
+"    <button class=\"btn green\" id=\"btn-igdb\" onclick=\"scrapeAction('/api/roms/scan','btn-igdb')\">IGDB: Fetch Missing</button>\n"
+"    <button class=\"btn green\" id=\"btn-igdb-full\" onclick=\"scrapeAction('/api/roms/rescan','btn-igdb-full')\">IGDB: Full Rescan</button>\n"
+"  </div>\n"
+"</div>\n"
+"\n"
+"<div class=\"tabs\">\n"
+"  <div class=\"tab active\" data-tab=\"movies\" onclick=\"switchTab('movies')\">Movies<span class=\"cnt\" id=\"cnt-movies\"></span></div>\n"
+"  <div class=\"tab\" data-tab=\"tv\" onclick=\"switchTab('tv')\">TV Shows<span class=\"cnt\" id=\"cnt-tv\"></span></div>\n"
+"  <div class=\"tab\" data-tab=\"roms\" onclick=\"switchTab('roms')\">ROMs<span class=\"cnt\" id=\"cnt-roms\"></span></div>\n"
+"</div>\n"
+"<div class=\"filter\">\n"
+"  <input type=\"text\" id=\"search\" placeholder=\"Search...\" oninput=\"filterList()\">\n"
+"  <select id=\"scrape-filter\" onchange=\"filterList()\">\n"
+"    <option value=\"all\">All</option>\n"
+"    <option value=\"scraped\">Scraped</option>\n"
+"    <option value=\"missing\">Missing data</option>\n"
+"  </select>\n"
+"  <select id=\"console-filter\" onchange=\"filterList()\" style=\"display:none\">\n"
+"    <option value=\"all\">All Consoles</option>\n"
+"  </select>\n"
+"</div>\n"
+"<div class=\"list\" id=\"list\"></div>\n"
+"\n"
+"<script>\n"
+"var mediaData=[],romData=[];\n"
+"var activeTab='movies';\n"
+"var opLabels={'idle':'Idle','tmdb_fetch':'TMDB Fetch','tmdb_rescan':'TMDB Rescan',\n"
+"  'igdb_fetch':'IGDB Fetch','igdb_rescan':'IGDB Rescan','show_status':'Show Status'};\n"
+"var opColors={'tmdb_fetch':'tmdb','tmdb_rescan':'tmdb','igdb_fetch':'igdb',\n"
+"  'igdb_rescan':'igdb','show_status':'show'};\n"
+"\n"
+"function fmtTime(s){if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m '+s%60+'s';\n"
+"  return Math.floor(s/3600)+'h '+Math.floor(s%3600/60)+'m'}\n"
+"function fmtSize(b){if(b>1073741824)return(b/1073741824).toFixed(1)+' GB';\n"
+"  if(b>1048576)return(b/1048576).toFixed(1)+' MB';return(b/1024).toFixed(0)+' KB'}\n"
+"function fmtDur(s){if(!s)return'-';var h=Math.floor(s/3600),m=Math.floor(s%3600/60);\n"
+"  return h>0?h+'h '+m+'m':m+'m'}\n"
+"function esc(s){if(!s)return'';var d=document.createElement('div');d.textContent=s;return d.innerHTML}\n"
+"function imgUrl(p){if(!p)return'';return'/image/'+p.split('/').pop()}\n"
+"\n"
+"function switchTab(t){\n"
+"  activeTab=t;\n"
+"  document.querySelectorAll('.tab').forEach(function(el){\n"
+"    el.classList.toggle('active',el.getAttribute('data-tab')===t)});\n"
+"  document.getElementById('console-filter').style.display=t==='roms'?'':'none';\n"
+"  filterList();\n"
+"}\n"
+"\n"
+"function filterList(){\n"
+"  var q=document.getElementById('search').value.toLowerCase();\n"
+"  var sf=document.getElementById('scrape-filter').value;\n"
+"  var cf=document.getElementById('console-filter').value;\n"
+"  var items=[];\n"
+"  if(activeTab==='movies'){\n"
+"    items=mediaData.filter(function(m){return m.type===0});\n"
+"  }else if(activeTab==='tv'){\n"
+"    items=mediaData.filter(function(m){return m.type===2||m.type===1});\n"
+"  }else{\n"
+"    items=romData;\n"
+"    if(cf!=='all')items=items.filter(function(r){return r.console_name===cf});\n"
+"  }\n"
+"  if(q)items=items.filter(function(i){return(i.title||'').toLowerCase().indexOf(q)>=0\n"
+"    ||(i.tmdb_title||'').toLowerCase().indexOf(q)>=0\n"
+"    ||(i.show_name||'').toLowerCase().indexOf(q)>=0\n"
+"    ||(i.developer||'').toLowerCase().indexOf(q)>=0});\n"
+"  if(sf==='scraped')items=items.filter(function(i){\n"
+"    return activeTab==='roms'?i.igdb_id>0:i.tmdb_id>0});\n"
+"  if(sf==='missing')items=items.filter(function(i){\n"
+"    return activeTab==='roms'?i.igdb_id<=0:i.tmdb_id<=0});\n"
+"  renderList(items);\n"
+"}\n"
+"\n"
+"function renderList(items){\n"
+"  var el=document.getElementById('list');\n"
+"  if(items.length>500)items=items.slice(0,500);\n"
+"  var h='';\n"
+"  items.forEach(function(item,idx){\n"
+"    var isRom=activeTab==='roms';\n"
+"    var hasData=isRom?item.igdb_id>0:item.tmdb_id>0;\n"
+"    var thumb='',title='',sub='';\n"
+"    if(isRom){\n"
+"      var cv=item.cover?imgUrl(item.cover):'';\n"
+"      thumb=cv?'<img class=\"item-thumb\" src=\"'+esc(cv)+'\" loading=\"lazy\">'\n"
+"        :'<div class=\"item-thumb-ph\">?</div>';\n"
+"      title=esc(item.title);\n"
+"      sub='<span class=\"tag rom\">'+esc(item.console_name)+'</span> ';\n"
+"      if(item.developer)sub+=esc(item.developer)+' ';\n"
+"      if(item.release_year>0)sub+='('+item.release_year+') ';\n"
+"      if(item.igdb_rating>0)sub+=item.igdb_rating.toFixed(0)+'/100 ';\n"
+"      if(!hasData)sub+='<span class=\"tag miss\">No IGDB</span>';\n"
+"    }else{\n"
+"      var poster=item.poster?imgUrl(item.poster):'';\n"
+"      thumb=poster?'<img class=\"item-thumb\" src=\"'+esc(poster)+'\" loading=\"lazy\">'\n"
+"        :'<div class=\"item-thumb-ph\">?</div>';\n"
+"      var typTag=item.type===0?'<span class=\"tag movie\">Movie</span>':'<span class=\"tag tv\">TV</span>';\n"
+"      title=esc(item.tmdb_title||item.title);\n"
+"      sub=typTag+' ';\n"
+"      if(item.type===2&&item.show_name)sub+='S'+String(item.season).padStart(2,'0')+'E'+String(item.episode).padStart(2,'0')+' ';\n"
+"      if(item.year>0)sub+='('+item.year+') ';\n"
+"      if(item.rating>0)sub+=item.rating.toFixed(1)+'/10 ';\n"
+"      if(item.genres)sub+=esc(item.genres)+' ';\n"
+"      if(!hasData)sub+='<span class=\"tag miss\">No TMDB</span>';\n"
+"    }\n"
+"    h+='<div class=\"item '+(hasData?'has-data':'no-data')+'\" onclick=\"toggleItem(this)\">';\n"
+"    h+='<div class=\"item-head\">'+thumb;\n"
+"    h+='<div class=\"item-info\"><div class=\"item-title\">'+title+'</div>';\n"
+"    h+='<div class=\"item-sub\">'+sub+'</div></div></div>';\n"
+"    h+='<div class=\"item-detail\">'+buildDetail(item,isRom)+'</div></div>';\n"
+"  });\n"
+"  el.innerHTML=h||'<div style=\"color:#484f58;padding:20px;text-align:center\">No items</div>';\n"
+"}\n"
+"\n"
+"function buildDetail(item,isRom){\n"
+"  var cover='',fields='';\n"
+"  if(isRom){\n"
+"    var cv=item.cover?imgUrl(item.cover):'';\n"
+"    cover=cv?'<div class=\"detail-cover\"><a href=\"'+esc(cv)+'\" target=\"_blank\"><img src=\"'+esc(cv)+'\"></a></div>'\n"
+"      :'<div class=\"detail-cover\"><div class=\"ph\">No cover</div></div>';\n"
+"    fields='<table>'\n"
+"      +'<tr><td>Title</td><td>'+esc(item.title)+'</td></tr>'\n"
+"      +'<tr><td>Console</td><td>'+esc(item.console_name)+'</td></tr>'\n"
+"      +'<tr><td>IGDB ID</td><td>'+(item.igdb_id>0?item.igdb_id:'<span style=\"color:#f85149\">Not found</span>')+'</td></tr>'\n"
+"      +'<tr><td>Developer</td><td>'+(esc(item.developer)||'-')+'</td></tr>'\n"
+"      +'<tr><td>Publisher</td><td>'+(esc(item.publisher)||'-')+'</td></tr>'\n"
+"      +'<tr><td>Year</td><td>'+(item.release_year>0?item.release_year:'-')+'</td></tr>'\n"
+"      +'<tr><td>Genre</td><td>'+(esc(item.genre)||'-')+'</td></tr>'\n"
+"      +'<tr><td>Players</td><td>'+(esc(item.players)||'-')+'</td></tr>'\n"
+"      +'<tr><td>Rating</td><td>'+(item.igdb_rating>0?item.igdb_rating.toFixed(1)+'/100':'-')+'</td></tr>'\n"
+"      +'<tr><td>Platforms</td><td>'+(esc(item.igdb_platforms)||'-')+'</td></tr>'\n"
+"      +'<tr><td>Region</td><td>'+(esc(item.region)||'-')+'</td></tr>'\n"
+"      +'<tr><td>Size</td><td>'+fmtSize(item.size)+'</td></tr>'\n"
+"      +'<tr><td>Cover</td><td>'+(cv?'<a href=\"'+esc(cv)+'\" target=\"_blank\" style=\"color:#58a6ff\">'+esc(cv)+'</a>':'None')+'</td></tr>'\n"
+"      +'</table>';\n"
+"    if(item.description)fields+='<div class=\"overview\">'+esc(item.description)+'</div>';\n"
+"  }else{\n"
+"    var poster=item.poster?imgUrl(item.poster):'';\n"
+"    var backdrop=item.backdrop?imgUrl(item.backdrop):'';\n"
+"    cover=poster?'<div class=\"detail-cover\"><a href=\"'+esc(poster)+'\" target=\"_blank\"><img src=\"'+esc(poster)+'\"></a></div>'\n"
+"      :'<div class=\"detail-cover\"><div class=\"ph\">No poster</div></div>';\n"
+"    fields='<table>'\n"
+"      +'<tr><td>File Title</td><td>'+esc(item.title)+'</td></tr>'\n"
+"      +'<tr><td>TMDB Title</td><td>'+(esc(item.tmdb_title)||'<span style=\"color:#f85149\">Not found</span>')+'</td></tr>'\n"
+"      +'<tr><td>TMDB ID</td><td>'+(item.tmdb_id>0?item.tmdb_id:'-')+'</td></tr>';\n"
+"    if(item.type===2){\n"
+"      fields+='<tr><td>Show</td><td>'+(esc(item.show_name)||'-')+'</td></tr>'\n"
+"        +'<tr><td>Episode</td><td>S'+String(item.season).padStart(2,'0')+'E'+String(item.episode).padStart(2,'0')+'</td></tr>';\n"
+"    }\n"
+"    fields+='<tr><td>Year</td><td>'+(item.year>0?item.year:'-')+'</td></tr>'\n"
+"      +'<tr><td>Rating</td><td>'+(item.rating>0?item.rating.toFixed(1)+'/10':'-')+'</td></tr>'\n"
+"      +'<tr><td>Genres</td><td>'+(esc(item.genres)||'-')+'</td></tr>'\n"
+"      +'<tr><td>Resolution</td><td>'+(item.width?item.width+'x'+item.height:'-')+'</td></tr>'\n"
+"      +'<tr><td>Duration</td><td>'+fmtDur(item.duration)+'</td></tr>'\n"
+"      +'<tr><td>Size</td><td>'+fmtSize(item.size)+'</td></tr>'\n"
+"      +'<tr><td>Poster</td><td>'+(poster?'<a href=\"'+esc(poster)+'\" target=\"_blank\" style=\"color:#58a6ff\">'+esc(poster)+'</a>':'None')+'</td></tr>'\n"
+"      +'<tr><td>Backdrop</td><td>'+(backdrop?'<a href=\"'+esc(backdrop)+'\" target=\"_blank\" style=\"color:#58a6ff\">'+esc(backdrop)+'</a>':'None')+'</td></tr>'\n"
+"      +'</table>';\n"
+"    if(item.overview)fields+='<div class=\"overview\">'+esc(item.overview)+'</div>';\n"
+"  }\n"
+"  return cover+'<div class=\"detail-fields\">'+fields+'</div>';\n"
+"}\n"
+"\n"
+"function toggleItem(el){el.classList.toggle('open')}\n"
+"\n"
+"function scrapeAction(url,btnId){\n"
+"  var b=document.getElementById(btnId);b.disabled=true;\n"
+"  fetch(url).then(function(){setTimeout(function(){b.disabled=false;refreshStatus();loadLibrary()},500)})\n"
+"    .catch(function(){b.disabled=false});\n"
+"}\n"
+"\n"
+"function refreshStatus(){\n"
+"  fetch('/api/scrape/status').then(function(r){return r.json()}).then(function(d){\n"
+"    var s=document.getElementById('state');\n"
+"    s.textContent=d.active?'Active':'Idle';\n"
+"    s.className='state '+(d.active?'active':'idle');\n"
+"    document.getElementById('op').textContent=d.active?(opLabels[d.operation]||d.operation):'';\n"
+"    var bar=document.getElementById('pbar');\n"
+"    bar.style.width=d.percent+'%';\n"
+"    bar.className='progress-bar '+(opColors[d.operation]||'tmdb');\n"
+"    document.getElementById('ptxt').textContent=\n"
+"      d.active?d.processed+'/'+d.total+' ('+d.percent.toFixed(1)+'%)':'';\n"
+"    document.getElementById('current').textContent=\n"
+"      d.current_item?'Current: '+d.current_item:'';\n"
+"    document.getElementById('s-proc').textContent=d.active?d.processed:'-';\n"
+"    document.getElementById('s-ok').textContent=d.active?d.success:'-';\n"
+"    document.getElementById('s-fail').textContent=d.active?(d.processed-d.success):'-';\n"
+"    document.getElementById('s-time').textContent=d.active?fmtTime(d.elapsed):'-';\n"
+"    document.getElementById('m-media').textContent=d.media_count;\n"
+"    document.getElementById('m-roms').textContent=d.rom_count;\n"
+"    document.getElementById('m-tmdb').textContent=d.tmdb_pending;\n"
+"    document.getElementById('m-igdb').textContent=d.igdb_pending;\n"
+"  });\n"
+"}\n"
+"\n"
+"function loadLibrary(){\n"
+"  fetch('/api/library').then(function(r){return r.json()}).then(function(data){\n"
+"    mediaData=data;\n"
+"    var movies=data.filter(function(m){return m.type===0}).length;\n"
+"    var tv=data.filter(function(m){return m.type===2||m.type===1}).length;\n"
+"    document.getElementById('cnt-movies').textContent=' ('+movies+')';\n"
+"    document.getElementById('cnt-tv').textContent=' ('+tv+')';\n"
+"    if(activeTab!=='roms')filterList();\n"
+"  });\n"
+"  fetch('/api/roms').then(function(r){return r.json()}).then(function(data){\n"
+"    romData=data;\n"
+"    document.getElementById('cnt-roms').textContent=' ('+data.length+')';\n"
+"    var sel=document.getElementById('console-filter');\n"
+"    var consoles={};\n"
+"    data.forEach(function(r){if(r.console_name)consoles[r.console_name]=(consoles[r.console_name]||0)+1});\n"
+"    sel.innerHTML='<option value=\"all\">All Consoles</option>';\n"
+"    Object.keys(consoles).sort().forEach(function(c){\n"
+"      sel.innerHTML+='<option value=\"'+esc(c)+'\">'+esc(c)+' ('+consoles[c]+')</option>';\n"
+"    });\n"
+"    if(activeTab==='roms')filterList();\n"
+"  });\n"
+"}\n"
+"\n"
+"refreshStatus();setInterval(refreshStatus,2000);\n"
+"loadLibrary();\n"
+"</script>\n"
+"</body></html>\n";
+        send_response(fd, 200, "OK", "text/html", html, strlen(html));
     }
     else if (strcmp(path, "/status") == 0) {
         const char *html =
@@ -1135,8 +1541,13 @@ static void handle_request(int fd, const char *request) {
             "<li>/api/scan - Rescan library</li>"
             "<li>/api/tmdb/refresh - Fetch missing TMDB data</li>"
             "<li>/api/tmdb/rescan - Re-fetch ALL TMDB data</li>"
+            "<li><a href='/api/roms'>/api/roms</a> - All ROMs</li>"
+            "<li>/api/roms/console/{id} - ROMs by console (0-7)</li>"
+            "<li>/api/roms/scan - Rescan ROM directories</li>"
+            "<li>/api/roms/rescan - Re-fetch ALL IGDB ROM data</li>"
             "<li>/stream/{id} - Stream media file</li>"
             "<li>/image/{filename} - Cached poster/backdrop</li>"
+            "<li><a href='/scrape'>/scrape</a> - Live scraping status</li>"
             "<li><a href='/status'>/status</a> - Transcoder status &amp; queue</li>"
             "</ul></body></html>";
         send_response(fd, 200, "OK", "text/html", html, strlen(html));

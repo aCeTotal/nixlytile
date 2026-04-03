@@ -155,6 +155,9 @@ int database_update_rom_metadata(int id, int igdb_id, const char *description,
 /* Get ROMs without IGDB metadata for a given console */
 int database_get_roms_without_igdb(ConsoleType console, int **ids, char ***titles, int *count);
 
+/* Reset all ROM IGDB metadata (set igdb_id back to NULL for re-scraping) */
+int database_reset_rom_igdb(void);
+
 /* Update show status and totals for all episodes of a show */
 int database_update_show_status(int tmdb_show_id, const char *status, const char *next_episode,
                                 int total_seasons, int total_episodes, int episode_runtime);

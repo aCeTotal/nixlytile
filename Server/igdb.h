@@ -16,7 +16,7 @@ typedef struct {
     char *developer;
     char *publisher;
     float rating;           /* 0-100 scale from IGDB */
-    char *cover_url;        /* IGDB cover URL (unused for now, we use LibRetro) */
+    char *cover_url;        /* IGDB cover URL (t_cover_big size) */
 } IgdbGame;
 
 /* Initialize IGDB client with Twitch OAuth2 credentials */
@@ -24,6 +24,9 @@ int igdb_init(const char *client_id, const char *client_secret);
 
 /* Cleanup */
 void igdb_cleanup(void);
+
+/* Check if IGDB client is initialized and available */
+int igdb_is_available(void);
 
 /* Search for a game by title, optionally filtered by IGDB platform ID
  * Returns NULL if not found or on error */

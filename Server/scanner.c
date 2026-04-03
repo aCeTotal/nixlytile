@@ -23,6 +23,65 @@
 #include "igdb.h"
 #include "config.h"
 
+/* Global scrape progress state */
+ScrapeProgress scrape_progress = {
+    .active = 0,
+    .operation = "idle",
+    .current_item = "",
+    .total = 0,
+    .processed = 0,
+    .success = 0,
+    .start_time = 0,
+    .lock = PTHREAD_MUTEX_INITIALIZER,
+};
+
+static void scrape_begin(const char *op, int total) {
+    pthread_mutex_lock(&scrape_progress.lock);
+    scrape_progress.active = 1;
+    scrape_progress.operation = op;
+    scrape_progress.total = total;
+    scrape_progress.processed = 0;
+    scrape_progress.success = 0;
+    scrape_progress.current_item[0] = '\0';
+    scrape_progress.start_time = time(NULL);
+    pthread_mutex_unlock(&scrape_progress.lock);
+}
+
+static void scrape_update(const char *item, int ok) {
+    pthread_mutex_lock(&scrape_progress.lock);
+    scrape_progress.processed++;
+    if (ok) scrape_progress.success++;
+    if (item) {
+        strncpy(scrape_progress.current_item, item, sizeof(scrape_progress.current_item) - 1);
+        scrape_progress.current_item[sizeof(scrape_progress.current_item) - 1] = '\0';
+    }
+    pthread_mutex_unlock(&scrape_progress.lock);
+}
+
+static void scrape_end(void) {
+    pthread_mutex_lock(&scrape_progress.lock);
+    scrape_progress.active = 0;
+    scrape_progress.operation = "idle";
+    scrape_progress.current_item[0] = '\0';
+    pthread_mutex_unlock(&scrape_progress.lock);
+}
+
+void scanner_get_scrape_status(int *active, const char **operation,
+    char *current_item, int current_item_size,
+    int *total, int *processed, int *success, time_t *start_time)
+{
+    pthread_mutex_lock(&scrape_progress.lock);
+    *active = scrape_progress.active;
+    *operation = scrape_progress.operation;
+    *total = scrape_progress.total;
+    *processed = scrape_progress.processed;
+    *success = scrape_progress.success;
+    *start_time = scrape_progress.start_time;
+    strncpy(current_item, scrape_progress.current_item, current_item_size - 1);
+    current_item[current_item_size - 1] = '\0';
+    pthread_mutex_unlock(&scrape_progress.lock);
+}
+
 /* Supported video extensions */
 static const char *video_extensions[] = {
     ".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".ts", ".m2ts",
@@ -416,7 +475,7 @@ static void generate_movie_variations(const char *name, char variations[][256], 
 }
 
 /* Fetch TMDB metadata for a movie */
-static void fetch_movie_metadata(int db_id, const char *title) {
+static int fetch_movie_metadata(int db_id, const char *title) {
     char clean_title[256];
     int year = extract_year_from_title(title, clean_title, sizeof(clean_title));
 
@@ -470,8 +529,10 @@ static void fetch_movie_metadata(int db_id, const char *title) {
         free(tmdb_data.poster_path);
         free(tmdb_data.backdrop_path);
         tmdb_free_movie(movie);
+        return 1;
     } else {
         printf("  TMDB: No match found after %d attempts\n", var_count);
+        return 0;
     }
 }
 
@@ -554,7 +615,7 @@ static void generate_search_variations(const char *name, char variations[][256],
 }
 
 /* Fetch TMDB metadata for a TV episode */
-static void fetch_episode_metadata(int db_id, const char *show_name, int season, int episode, int year) {
+static int fetch_episode_metadata(int db_id, const char *show_name, int season, int episode, int year) {
     printf("  TMDB search: \"%s\" S%02dE%02d (year: %d)\n", show_name, season, episode, year);
 
     /* Generate search variations */
@@ -578,7 +639,7 @@ static void fetch_episode_metadata(int db_id, const char *show_name, int season,
 
     if (!show) {
         printf("  TMDB: Show not found after %d attempts\n", var_count);
-        return;
+        return 0;
     }
 
     MediaEntry tmdb_data = {0};
@@ -640,6 +701,7 @@ static void fetch_episode_metadata(int db_id, const char *show_name, int season,
     free(tmdb_data.backdrop_path);
     free(tmdb_data.still_path);
     tmdb_free_tvshow(show);
+    return 1;
 }
 
 /* Probe media file with FFmpeg and add to database */
@@ -791,20 +853,25 @@ void scanner_fetch_missing_tmdb(void) {
     }
 
     printf("Fetching TMDB metadata for %d entries...\n", count);
+    scrape_begin("tmdb_fetch", count);
 
     for (int i = 0; i < count; i++) {
         MediaEntry *e = &entries[i];
+        const char *name = e->show_name ? e->show_name : e->title;
+        int ok = 0;
 
         if (e->type == MEDIA_TYPE_MOVIE) {
-            fetch_movie_metadata(e->id, e->title);
+            ok = fetch_movie_metadata(e->id, e->title);
         } else if (e->type == MEDIA_TYPE_EPISODE && e->show_name) {
-            fetch_episode_metadata(e->id, e->show_name, e->season, e->episode, e->year);
+            ok = fetch_episode_metadata(e->id, e->show_name, e->season, e->episode, e->year);
         }
 
+        scrape_update(name ? name : "?", ok > 0);
         database_free_entry(e);
     }
 
     free(entries);
+    scrape_end();
     printf("TMDB metadata fetch complete\n");
 }
 
@@ -823,20 +890,25 @@ void scanner_rescan_all_tmdb(void) {
     }
 
     printf("Re-fetching TMDB metadata for %d entries...\n", count);
+    scrape_begin("tmdb_rescan", count);
 
     for (int i = 0; i < count; i++) {
         MediaEntry *e = &entries[i];
+        const char *name = e->show_name ? e->show_name : e->title;
+        int ok = 0;
 
         if (e->type == MEDIA_TYPE_MOVIE) {
-            fetch_movie_metadata(e->id, e->title);
+            ok = fetch_movie_metadata(e->id, e->title);
         } else if ((e->type == MEDIA_TYPE_EPISODE || e->type == MEDIA_TYPE_TVSHOW) && e->show_name) {
-            fetch_episode_metadata(e->id, e->show_name, e->season, e->episode, e->year);
+            ok = fetch_episode_metadata(e->id, e->show_name, e->season, e->episode, e->year);
         }
 
+        scrape_update(name ? name : "?", ok > 0);
         database_free_entry(e);
     }
 
     free(entries);
+    scrape_end();
     printf("TMDB full rescan complete\n");
 }
 
@@ -852,6 +924,7 @@ void scanner_refresh_show_status(void) {
     }
 
     printf("Refreshing status for %d active shows...\n", count);
+    scrape_begin("show_status", count);
 
     for (int i = 0; i < count; i++) {
         TmdbTvShow *show = tmdb_get_show_status(ids[i]);
@@ -859,6 +932,7 @@ void scanner_refresh_show_status(void) {
             database_update_show_status(ids[i], show->status, show->next_episode_date,
                                         show->number_of_seasons, show->number_of_episodes,
                                         show->episode_run_time);
+            scrape_update(show->status ? show->status : "?", 1);
             printf("  Show %d: %s (%d seasons, %d episodes, %d min/ep, next: %s)\n",
                    ids[i],
                    show->status ? show->status : "?",
@@ -866,10 +940,13 @@ void scanner_refresh_show_status(void) {
                    show->episode_run_time,
                    show->next_episode_date ? show->next_episode_date : "none");
             tmdb_free_tvshow(show);
+        } else {
+            scrape_update("?", 0);
         }
     }
 
     free(ids);
+    scrape_end();
     printf("Show status refresh complete\n");
 }
 
@@ -1217,165 +1294,10 @@ int scanner_scan_rom_directory(const char *path) {
     return count;
 }
 
-/* LibRetro Thumbnails system names */
-static const char *libretro_system_names[] = {
-    [CONSOLE_NES]      = "Nintendo - Nintendo Entertainment System",
-    [CONSOLE_SNES]     = "Nintendo - Super Nintendo Entertainment System",
-    [CONSOLE_N64]      = "Nintendo - Nintendo 64",
-    [CONSOLE_GAMECUBE] = "Nintendo - GameCube",
-    [CONSOLE_WII]      = "Nintendo - Wii",
-    [CONSOLE_GB]       = "Nintendo - Game Boy",
-    [CONSOLE_GBC]      = "Nintendo - Game Boy Color",
-    [CONSOLE_GBA]      = "Nintendo - Game Boy Advance",
-};
-
-/* URL-encode a string for LibRetro thumbnail URLs */
-static void url_encode(const char *src, char *dst, size_t dst_size) {
-    static const char *safe = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~ ";
-    char *p = dst;
-    char *end = dst + dst_size - 4;
-
-    while (*src && p < end) {
-        if (strchr(safe, *src)) {
-            if (*src == ' ')
-                *p++ = '%', *p++ = '2', *p++ = '0';
-            else
-                *p++ = *src;
-        } else {
-            snprintf(p, end - p, "%%%02X", (unsigned char)*src);
-            p += 3;
-        }
-        src++;
-    }
-    *p = '\0';
-}
-
-/* Download a single cover image from LibRetro thumbnails */
-static char *download_rom_cover(const char *game_title, int console, const char *cache_dir) {
-    if (console < 0 || console >= CONSOLE_COUNT) return NULL;
-    const char *system = libretro_system_names[console];
-    if (!system) return NULL;
-
-    /* Build local path — store directly in cache_dir (same as media images) */
-    mkdir(cache_dir, 0755);
-
-    /* Sanitize filename: replace / and & with _ */
-    char safe_title[256];
-    strncpy(safe_title, game_title, sizeof(safe_title) - 1);
-    safe_title[sizeof(safe_title) - 1] = '\0';
-    for (char *p = safe_title; *p; p++) {
-        if (*p == '/' || *p == '&' || *p == ':') *p = '_';
-    }
-
-    char local_path[4096];
-    snprintf(local_path, sizeof(local_path), "%s/cover_%d_%s.png", cache_dir, console, safe_title);
-
-    /* Check if already cached */
-    struct stat st;
-    if (stat(local_path, &st) == 0 && st.st_size > 0) {
-        return strdup(local_path);
-    }
-
-    /* Build URL: https://thumbnails.libretro.com/{System}/Named_Boxarts/{GameName}.png */
-    char encoded_system[512];
-    char encoded_title[512];
-    url_encode(system, encoded_system, sizeof(encoded_system));
-    url_encode(game_title, encoded_title, sizeof(encoded_title));
-
-    char url[2048];
-    snprintf(url, sizeof(url),
-        "https://thumbnails.libretro.com/%s/Named_Boxarts/%s.png",
-        encoded_system, encoded_title);
-
-    /* Download using curl */
-    CURL *dl = curl_easy_init();
-    if (!dl) return NULL;
-
-    FILE *f = fopen(local_path, "wb");
-    if (!f) {
-        curl_easy_cleanup(dl);
-        return NULL;
-    }
-
-    curl_easy_setopt(dl, CURLOPT_URL, url);
-    curl_easy_setopt(dl, CURLOPT_WRITEDATA, f);
-    curl_easy_setopt(dl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(dl, CURLOPT_TIMEOUT, 15L);
-    curl_easy_setopt(dl, CURLOPT_FAILONERROR, 1L);  /* Fail on 404 */
-
-    CURLcode res = curl_easy_perform(dl);
-    curl_easy_cleanup(dl);
-    fclose(f);
-
-    if (res != CURLE_OK) {
-        unlink(local_path);
-        return NULL;
-    }
-
-    /* Verify download */
-    if (stat(local_path, &st) == 0 && st.st_size > 100) {
-        return strdup(local_path);
-    }
-
-    unlink(local_path);
-    return NULL;
-}
-
-/* Fetch cover art for all ROMs missing covers */
+/* Covers are now downloaded from IGDB during scanner_fetch_rom_metadata().
+ * This function is kept as a no-op for callers that still reference it. */
 void scanner_fetch_rom_covers(void) {
-    /* Iterate through each console and fetch covers for ROMs missing them */
-    for (int c = 0; c < CONSOLE_COUNT; c++) {
-        char *json = database_get_roms_by_console_json(c);
-        if (!json) continue;
-
-        /* Simple JSON parsing - find entries without covers */
-        char *p = json;
-        while ((p = strstr(p, "\"id\":")) != NULL) {
-            int id = atoi(p + 5);
-
-            /* Find title */
-            char *tp = strstr(p, "\"title\":");
-            if (!tp) break;
-            tp += 8;
-            /* Skip null or extract quoted string */
-            char title[256] = {0};
-            if (*tp == '"') {
-                tp++;
-                char *te = strchr(tp, '"');
-                if (te) {
-                    size_t len = te - tp;
-                    if (len >= sizeof(title)) len = sizeof(title) - 1;
-                    strncpy(title, tp, len);
-                    title[len] = '\0';
-                }
-            }
-
-            /* Find cover */
-            char *cp = strstr(p, "\"cover\":");
-            int has_cover = 0;
-            if (cp && cp < strstr(p + 1, "\"id\":")) {
-                cp += 8;
-                if (*cp == '"') has_cover = 1;  /* Has a cover path */
-            } else if (cp) {
-                cp += 8;
-                if (*cp == '"') has_cover = 1;
-            }
-
-            if (!has_cover && title[0]) {
-                char *cover = download_rom_cover(title, c, server_config.cache_dir);
-                if (cover) {
-                    database_update_rom_cover(id, cover);
-                    printf("  Cover: %s -> %s\n", title, cover);
-                    free(cover);
-                }
-            }
-
-            /* Advance past this entry */
-            p += 5;
-        }
-        free(json);
-    }
-    printf("ROM cover fetch complete\n");
+    /* Covers are fetched together with IGDB metadata in scanner_fetch_rom_metadata() */
 }
 
 /* Clean a ROM title for IGDB search: strip region tags, version tags, etc. */
@@ -1418,9 +1340,89 @@ static void clean_rom_title(const char *raw, char *out, size_t out_size) {
     }
 }
 
+/* Download a cover image from a URL (IGDB) to local cache */
+static char *download_igdb_cover(const char *url, const char *title, int console,
+                                  const char *cache_dir)
+{
+    if (!url || !url[0]) return NULL;
+
+    mkdir(cache_dir, 0755);
+
+    /* Sanitize filename */
+    char safe_title[256];
+    strncpy(safe_title, title, sizeof(safe_title) - 1);
+    safe_title[sizeof(safe_title) - 1] = '\0';
+    for (char *p = safe_title; *p; p++) {
+        if (*p == '/' || *p == '&' || *p == ':' || *p == '\\') *p = '_';
+    }
+
+    char local_path[4096];
+    snprintf(local_path, sizeof(local_path), "%s/cover_%d_%s.jpg",
+             cache_dir, console, safe_title);
+
+    /* Check if already cached */
+    struct stat st;
+    if (stat(local_path, &st) == 0 && st.st_size > 100) {
+        return strdup(local_path);
+    }
+
+    CURL *dl = curl_easy_init();
+    if (!dl) return NULL;
+
+    FILE *f = fopen(local_path, "wb");
+    if (!f) {
+        curl_easy_cleanup(dl);
+        return NULL;
+    }
+
+    curl_easy_setopt(dl, CURLOPT_URL, url);
+    curl_easy_setopt(dl, CURLOPT_WRITEDATA, f);
+    curl_easy_setopt(dl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(dl, CURLOPT_TIMEOUT, 15L);
+    curl_easy_setopt(dl, CURLOPT_FAILONERROR, 1L);
+
+    CURLcode res = curl_easy_perform(dl);
+    curl_easy_cleanup(dl);
+    fclose(f);
+
+    if (res != CURLE_OK) {
+        unlink(local_path);
+        return NULL;
+    }
+
+    if (stat(local_path, &st) == 0 && st.st_size > 100) {
+        return strdup(local_path);
+    }
+
+    unlink(local_path);
+    return NULL;
+}
+
 /* Fetch IGDB metadata for ROMs that don't have it */
 void scanner_fetch_rom_metadata(void) {
-    int total = 0;
+    if (!igdb_is_available()) {
+        fprintf(stderr, "IGDB: Not initialized, skipping ROM metadata fetch\n");
+        return;
+    }
+
+    /* First pass: count total ROMs needing metadata */
+    int grand_total = 0;
+    for (int c = 0; c < CONSOLE_COUNT; c++) {
+        int *ids = NULL;
+        char **titles = NULL;
+        int count = 0;
+        if (database_get_roms_without_igdb(c, &ids, &titles, &count) == 0) {
+            grand_total += count;
+            for (int i = 0; i < count; i++) free(titles[i]);
+            free(ids);
+            free(titles);
+        }
+    }
+
+    if (grand_total == 0) return;
+
+    /* Use "igdb_fetch" by default; scanner_rescan_all_rom_metadata overrides to "igdb_rescan" */
+    scrape_begin("igdb_fetch", grand_total);
     int found = 0;
 
     for (int c = 0; c < CONSOLE_COUNT; c++) {
@@ -1446,16 +1448,36 @@ void scanner_fetch_rom_metadata(void) {
                         g->summary, g->developer, g->publisher,
                         g->release_year, g->genres, NULL,
                         g->rating, g->platforms);
-                    printf("  IGDB: %s -> %s (%d)\n", titles[i],
-                        g->name ? g->name : "?", g->release_year);
+
+                    /* Download IGDB cover art */
+                    if (g->cover_url) {
+                        char *cover = download_igdb_cover(g->cover_url,
+                            titles[i], c, server_config.cache_dir);
+                        if (cover) {
+                            database_update_rom_cover(ids[i], cover);
+                            printf("  IGDB: %s -> %s (%d) [cover OK]\n",
+                                titles[i], g->name ? g->name : "?",
+                                g->release_year);
+                            free(cover);
+                        } else {
+                            printf("  IGDB: %s -> %s (%d) [no cover]\n",
+                                titles[i], g->name ? g->name : "?",
+                                g->release_year);
+                        }
+                    } else {
+                        printf("  IGDB: %s -> %s (%d)\n", titles[i],
+                            g->name ? g->name : "?", g->release_year);
+                    }
+
                     igdb_free_game(g);
                     found++;
+                    scrape_update(titles[i], 1);
                 } else {
-                    /* Mark as searched (igdb_id = -1) to avoid re-searching */
+                    /* Mark as searched (igdb_id = -1) — game genuinely not found */
                     database_update_rom_metadata(ids[i], -1,
                         NULL, NULL, NULL, 0, NULL, NULL, 0, NULL);
+                    scrape_update(titles[i], 0);
                 }
-                total++;
 
                 /* Rate limit: IGDB allows 4 req/sec */
                 usleep(260000); /* ~260ms between requests */
@@ -1468,6 +1490,16 @@ void scanner_fetch_rom_metadata(void) {
         free(titles);
     }
 
-    if (total > 0)
-        printf("IGDB: Metadata fetch complete (%d/%d found)\n", found, total);
+    scrape_end();
+    if (grand_total > 0)
+        printf("IGDB: Metadata fetch complete (%d/%d found)\n", found, grand_total);
+}
+
+/* Re-fetch IGDB metadata for ALL ROMs (full rescan) */
+void scanner_rescan_all_rom_metadata(void) {
+    printf("IGDB: Resetting all ROM metadata for full rescan...\n");
+    database_reset_rom_igdb();
+    scanner_fetch_rom_metadata();
+    /* Note: scanner_fetch_rom_metadata sets "igdb_fetch" internally,
+     * but the operation is the same — full rescan after reset */
 }

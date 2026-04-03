@@ -20,6 +20,7 @@
 #define TWITCH_TOKEN_URL "https://id.twitch.tv/oauth2/token"
 
 static char *client_id = NULL;
+static char *client_secret_stored = NULL;
 static char *access_token = NULL;
 static time_t token_expires = 0;
 static CURL *curl_handle = NULL;
@@ -102,10 +103,13 @@ static int igdb_fetch_token(const char *id, const char *secret) {
 static int igdb_ensure_token(void) {
     if (access_token && time(NULL) < token_expires)
         return 0;
-    if (!client_id) return -1;
-    /* Re-fetch; client_secret was used at init, we stored token only */
-    fprintf(stderr, "IGDB: Token expired, need re-init\n");
-    return -1;
+    if (!client_id || !client_secret_stored) return -1;
+    printf("IGDB: Token expired, refreshing...\n");
+    return igdb_fetch_token(client_id, client_secret_stored);
+}
+
+int igdb_is_available(void) {
+    return curl_handle != NULL && client_id != NULL;
 }
 
 int igdb_init(const char *id, const char *secret) {
@@ -121,6 +125,7 @@ int igdb_init(const char *id, const char *secret) {
     }
 
     client_id = strdup(id);
+    client_secret_stored = strdup(secret);
 
     if (igdb_fetch_token(id, secret) != 0) {
         fprintf(stderr, "IGDB: Failed to get initial token\n");
@@ -128,6 +133,8 @@ int igdb_init(const char *id, const char *secret) {
         curl_handle = NULL;
         free(client_id);
         client_id = NULL;
+        free(client_secret_stored);
+        client_secret_stored = NULL;
         return -1;
     }
 
@@ -141,8 +148,10 @@ void igdb_cleanup(void) {
         curl_handle = NULL;
     }
     free(client_id);
+    free(client_secret_stored);
     free(access_token);
     client_id = NULL;
+    client_secret_stored = NULL;
     access_token = NULL;
 }
 
@@ -287,7 +296,7 @@ IgdbGame *igdb_search_game(const char *title, int platform_id) {
             "search \"%s\";\n"
             "fields name,summary,first_release_date,genres.name,platforms.name,"
             "involved_companies.company.name,involved_companies.developer,"
-            "involved_companies.publisher,total_rating;\n"
+            "involved_companies.publisher,total_rating,cover.image_id;\n"
             "where platforms = (%d);\n"
             "limit 1;",
             title, platform_id);
@@ -296,7 +305,7 @@ IgdbGame *igdb_search_game(const char *title, int platform_id) {
             "search \"%s\";\n"
             "fields name,summary,first_release_date,genres.name,platforms.name,"
             "involved_companies.company.name,involved_companies.developer,"
-            "involved_companies.publisher,total_rating;\n"
+            "involved_companies.publisher,total_rating,cover.image_id;\n"
             "limit 1;",
             title);
     }
@@ -338,6 +347,19 @@ IgdbGame *igdb_search_game(const char *title, int platform_id) {
     g->platforms = extract_names(cJSON_GetObjectItem(game, "platforms"));
     extract_companies(cJSON_GetObjectItem(game, "involved_companies"),
                       &g->developer, &g->publisher);
+
+    /* Extract cover URL from cover.image_id */
+    cJSON *cover = cJSON_GetObjectItem(game, "cover");
+    if (cover && cJSON_IsObject(cover)) {
+        cJSON *image_id = cJSON_GetObjectItem(cover, "image_id");
+        if (image_id && cJSON_IsString(image_id)) {
+            char url[512];
+            snprintf(url, sizeof(url),
+                "https://images.igdb.com/igdb/image/upload/t_cover_big/%s.jpg",
+                image_id->valuestring);
+            g->cover_url = strdup(url);
+        }
+    }
 
     cJSON_Delete(json);
     return g;
