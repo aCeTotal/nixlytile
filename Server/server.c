@@ -31,6 +31,7 @@
 #include "igdb.h"
 #include "watcher.h"
 #include "transcoder.h"
+#include "downloads.h"
 
 /* No connection limit - kernel handles backlog */
 #define BUFFER_SIZE 262144  /* 256KB for efficient streaming */
@@ -128,7 +129,18 @@ static void *startup_scan_thread(void *arg) {
             watcher_add_path(server_config.roms_paths[i], WATCH_TYPE_ROMS);
         }
 
+        /* Watch downloads directory */
+        if (server_config.download_path[0]) {
+            watcher_add_path(server_config.download_path, WATCH_TYPE_DOWNLOADS);
+        }
+
         watcher_start();
+    }
+
+    /* Initialize and start download monitor */
+    if (running && downloads_init() == 0) {
+        downloads_process_pending();
+        downloads_start();
     }
 
     /* Initialize and start transcoder */
@@ -211,6 +223,9 @@ static void *sync_thread(void *arg) {
         scanner_fetch_rom_covers();
 
         scanner_scrape_session_end();
+
+        /* Process pending downloads (backup to download monitor thread) */
+        downloads_process_pending();
 
         /* Start transcoder if idle (will pick up any unconverted files) */
         if (transcoder_get_state() == TRANSCODE_IDLE) {
@@ -321,6 +336,9 @@ static void on_file_change(const char *filepath, int is_delete, WatchType type) 
                 }
             }
         }
+    } else if (type == WATCH_TYPE_DOWNLOADS) {
+        /* File in downloads dir — just log, periodic thread handles it */
+        downloads_notify_file(filepath);
     } else {
         /* Check if it's a media file that needs processing */
         if (scanner_is_media_file(filepath)) {
@@ -1831,6 +1849,7 @@ int main(int argc, char *argv[]) {
     }
 
     /* Cleanup */
+    downloads_stop();
     transcoder_cleanup();
     if (discovery_fd >= 0) {
         close(discovery_fd);

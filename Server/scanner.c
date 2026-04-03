@@ -363,7 +363,7 @@ static int parse_tv_info_from_path(const char *filepath, char *show_name, int *s
  * Patterns: Show.Name.S01E02, Show Name - 1x02, Show.Name.1985.S01E02, etc.
  * Falls back to directory structure (e.g., /TV/ShowName/Season1/file.mkv)
  */
-static int parse_tv_info(const char *filename, char *show_name, int *season, int *episode, int *year) {
+int scanner_parse_tv_info(const char *filename, char *show_name, int *season, int *episode, int *year) {
     const char *base = strrchr(filename, '/');
     base = base ? base + 1 : filename;
 
@@ -802,7 +802,7 @@ int scanner_scan_file(const char *filepath, int fetch_tmdb) {
     char show_name[256] = {0};
     int season = 0, episode = 0, show_year = 0;
 
-    if (parse_tv_info(filepath, show_name, &season, &episode, &show_year)) {
+    if (scanner_parse_tv_info(filepath, show_name, &season, &episode, &show_year)) {
         entry.type = MEDIA_TYPE_EPISODE;
         entry.show_name = show_name;
         entry.season = season;
@@ -1628,7 +1628,7 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
 
     /* Variation 1: replace " - " with ": " (No-Intro -> real title) */
     char *dash = strstr(variations[0], " - ");
-    if (dash && *count < 12) {
+    if (dash && *count < 14) {
         char temp[256];
         size_t prefix_len = dash - variations[0];
         memcpy(temp, variations[0], prefix_len);
@@ -1641,7 +1641,7 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
     }
 
     /* Variation 2: replace " - " with just " " */
-    if (dash && *count < 12) {
+    if (dash && *count < 14) {
         char temp[256];
         size_t prefix_len = dash - variations[0];
         memcpy(temp, variations[0], prefix_len);
@@ -1653,7 +1653,7 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
     }
 
     /* Variation 3: just the part before " - " (subtitle stripped) */
-    if (dash && *count < 12) {
+    if (dash && *count < 14) {
         char temp[256];
         size_t prefix_len = dash - variations[0];
         if (prefix_len > 0 && prefix_len < sizeof(temp)) {
@@ -1665,7 +1665,7 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
     }
 
     /* Variation 4: swap & ↔ and */
-    if (*count < 12) {
+    if (*count < 14) {
         char temp[256];
         strncpy(temp, clean, sizeof(temp) - 1);
         temp[sizeof(temp) - 1] = '\0';
@@ -1711,7 +1711,7 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
     }
 
     /* Variation 5: strip leading "The " */
-    if (*count < 12 && strncasecmp(clean, "The ", 4) == 0 && clean[4] != '\0') {
+    if (*count < 14 && strncasecmp(clean, "The ", 4) == 0 && clean[4] != '\0') {
         strncpy(variations[(*count)++], clean + 4, 255);
         variations[*count - 1][255] = '\0';
     }
@@ -1719,7 +1719,7 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
     /* Variation 6: strip leading year-like number prefix if present
      * "1943 - The Battle of Midway" → "The Battle of Midway"
      * (clean_rom_title only strips non-year numbers; this catches year-range too) */
-    if (*count < 12) {
+    if (*count < 14) {
         const char *p = clean;
         int ndigits = 0;
         while (*p && isdigit((unsigned char)*p)) { p++; ndigits++; }
@@ -1730,7 +1730,7 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
     }
 
     /* Variation 7: strip " Version" suffix (e.g., "Fire Red Version" → "Fire Red") */
-    if (*count < 12) {
+    if (*count < 14) {
         size_t clen = strlen(clean);
         if (clen > 8 && strcasecmp(clean + clen - 8, " Version") == 0) {
             char temp[256];
@@ -1742,7 +1742,7 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
     }
 
     /* Variation 8: strip " Edition" suffix */
-    if (*count < 12) {
+    if (*count < 14) {
         size_t clen = strlen(clean);
         if (clen > 8 && strcasecmp(clean + clen - 8, " Edition") == 0) {
             char temp[256];
@@ -1755,7 +1755,7 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
 
     /* Variation 9: strip all punctuation (periods, apostrophes, colons, hyphens)
      * "Dr. Mario" → "Dr Mario", "Kirby's Adventure" → "Kirbys Adventure" */
-    if (*count < 12) {
+    if (*count < 14) {
         char temp[256];
         const char *s = clean;
         char *d = temp;
@@ -1784,9 +1784,27 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
         }
     }
 
-    /* Variation 10: Roman numeral ↔ Arabic number at end of title
+    /* Variation 10: merge words (remove all spaces) — catches
+     * "Duck Tales" → "DuckTales", "Burger Time" → "BurgerTime" */
+    if (*count < 14 && strchr(clean, ' ') != NULL) {
+        char temp[256];
+        char *d = temp;
+        char *end_t = temp + sizeof(temp) - 1;
+        const char *s = clean;
+        while (*s && d < end_t) {
+            if (*s != ' ') *d++ = *s;
+            s++;
+        }
+        *d = '\0';
+        if (temp[0] && strcmp(temp, clean) != 0) {
+            strncpy(variations[(*count)++], temp, 255);
+            variations[*count - 1][255] = '\0';
+        }
+    }
+
+    /* Variation 11: Roman numeral ↔ Arabic number at end of title
      * "Final Fantasy III" → "Final Fantasy 3", "Mega Man 2" → "Mega Man II" */
-    if (*count < 12) {
+    if (*count < 14) {
         static const struct { const char *roman; const char *arabic; } numerals[] = {
             {"II", "2"}, {"III", "3"}, {"IV", "4"}, {"V", "5"},
             {"VI", "6"}, {"VII", "7"}, {"VIII", "8"}, {"IX", "9"},
@@ -1852,35 +1870,39 @@ static char *download_igdb_cover(const char *url, const char *title, int console
         return strdup(local_path);
     }
 
-    CURL *dl = curl_easy_init();
-    if (!dl) return NULL;
+    /* Retry up to 3 times on transient failures */
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) usleep(500000); /* 500ms backoff between retries */
 
-    FILE *f = fopen(local_path, "wb");
-    if (!f) {
+        CURL *dl = curl_easy_init();
+        if (!dl) continue;
+
+        FILE *f = fopen(local_path, "wb");
+        if (!f) {
+            curl_easy_cleanup(dl);
+            return NULL;
+        }
+
+        curl_easy_setopt(dl, CURLOPT_URL, url);
+        curl_easy_setopt(dl, CURLOPT_WRITEDATA, f);
+        curl_easy_setopt(dl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(dl, CURLOPT_TIMEOUT, 15L);
+        curl_easy_setopt(dl, CURLOPT_FAILONERROR, 1L);
+
+        CURLcode res = curl_easy_perform(dl);
         curl_easy_cleanup(dl);
-        return NULL;
-    }
+        fclose(f);
 
-    curl_easy_setopt(dl, CURLOPT_URL, url);
-    curl_easy_setopt(dl, CURLOPT_WRITEDATA, f);
-    curl_easy_setopt(dl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(dl, CURLOPT_TIMEOUT, 15L);
-    curl_easy_setopt(dl, CURLOPT_FAILONERROR, 1L);
+        if (res == CURLE_OK && stat(local_path, &st) == 0 && st.st_size > 100) {
+            return strdup(local_path);
+        }
 
-    CURLcode res = curl_easy_perform(dl);
-    curl_easy_cleanup(dl);
-    fclose(f);
-
-    if (res != CURLE_OK) {
         unlink(local_path);
-        return NULL;
+
+        /* Only retry on transient errors */
+        if (res == CURLE_HTTP_RETURNED_ERROR) break; /* 4xx = not found, don't retry */
     }
 
-    if (stat(local_path, &st) == 0 && st.st_size > 100) {
-        return strdup(local_path);
-    }
-
-    unlink(local_path);
     return NULL;
 }
 
@@ -2074,7 +2096,7 @@ void scanner_fetch_rom_metadata(void) {
                 char clean[256];
                 clean_rom_title(titles[i], clean, sizeof(clean));
 
-                char variations[12][256];
+                char variations[14][256];
                 int var_count = 0;
                 generate_rom_variations(clean, variations, &var_count);
 
@@ -2141,6 +2163,22 @@ void scanner_fetch_rom_metadata(void) {
                     if (g) match_method = "name+platform";
                 }
 
+                /* Phase 3.5: word-split name match with platform filter.
+                 * Splits title into individual words and requires ALL to be
+                 * present in the name.  Catches compound word mismatches:
+                 * "Duck Tales" finds "DuckTales" (contains "Duck" + "Tales"). */
+                if (!g) {
+                    g = igdb_search_game_by_words(variations[0], platform_id);
+                    queries_tried++;
+                    if (logf) {
+                        fprintf(logf, "  [%d] words \"%s\" plat=%d -> %s\n",
+                            queries_tried, variations[0], platform_id,
+                            g ? g->name : "MISS");
+                    }
+                    if (!g) usleep(260000);
+                    else match_method = "words+platform";
+                }
+
                 /* Phase 4: search without platform filter + validation */
                 if (!g) {
                     g = igdb_search_game(variations[0], 0);
@@ -2185,6 +2223,27 @@ void scanner_fetch_rom_metadata(void) {
                     else match_method = "name-noplatform";
                 }
 
+                /* Phase 6: word-split search without platform + validation */
+                if (!g) {
+                    g = igdb_search_game_by_words(variations[0], 0);
+                    queries_tried++;
+                    if (logf) {
+                        fprintf(logf, "  [%d] words \"%s\" plat=ANY -> %s\n",
+                            queries_tried, variations[0],
+                            g ? g->name : "MISS");
+                    }
+                    if (g && g->platforms && !platform_matches_console(g->platforms, c)) {
+                        if (logf) {
+                            fprintf(logf, "  [%d] REJECTED (wrong platform: %s)\n",
+                                queries_tried, g->platforms);
+                        }
+                        igdb_free_game(g);
+                        g = NULL;
+                    }
+                    if (!g) usleep(260000);
+                    else match_method = "words-noplatform";
+                }
+
                 if (g) {
                     int has_cover = 0;
                     database_update_rom_metadata(ids[i], g->igdb_id,
@@ -2192,6 +2251,7 @@ void scanner_fetch_rom_metadata(void) {
                         g->release_year, g->genres, NULL,
                         g->rating, g->platforms);
 
+                    /* Try cover from search response first */
                     if (g->cover_url) {
                         char *cover = download_igdb_cover(g->cover_url,
                             titles[i], c, server_config.cache_dir);
@@ -2200,6 +2260,25 @@ void scanner_fetch_rom_metadata(void) {
                             free(cover);
                             has_cover = 1;
                         }
+                    }
+
+                    /* Fallback: targeted cover query if search didn't include it */
+                    if (!has_cover && g->igdb_id > 0) {
+                        usleep(260000); /* rate limit */
+                        char *cover_url = igdb_get_game_cover(g->igdb_id);
+                        if (cover_url) {
+                            char *cover = download_igdb_cover(cover_url,
+                                titles[i], c, server_config.cache_dir);
+                            if (cover) {
+                                database_update_rom_cover(ids[i], cover);
+                                free(cover);
+                                has_cover = 1;
+                            }
+                            free(cover_url);
+                        }
+                        if (logf && !has_cover)
+                            fprintf(logf, "  COVER FALLBACK: igdb_id=%d -> %s\n",
+                                g->igdb_id, has_cover ? "OK" : "FAILED");
                     }
 
                     printf("  IGDB: %s -> %s (%d) [%s]%s\n",

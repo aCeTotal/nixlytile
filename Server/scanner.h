@@ -50,6 +50,10 @@ void scanner_rescan_all_tmdb(void);
 /* Refresh show status (status + next_episode_date) for active shows */
 void scanner_refresh_show_status(void);
 
+/* Parse TV show info from filename (S01E02 patterns, directory structure, etc.)
+ * Returns 1 if TV episode detected, 0 if not */
+int scanner_parse_tv_info(const char *filename, char *show_name, int *season, int *episode, int *year);
+
 /* ROM scanning functions */
 int scanner_is_rom_file(const char *path);
 int scanner_detect_console(const char *path);

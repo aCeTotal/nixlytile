@@ -38,6 +38,11 @@ IgdbGame *igdb_search_game(const char *title, int platform_id);
  * full-text search fails.  Uses: where name ~ *"title"*  */
 IgdbGame *igdb_search_game_by_name(const char *title, int platform_id);
 
+/* Search by splitting title into individual words and requiring all to match.
+ * Uses: where name ~ *"word1"* & name ~ *"word2"* ...
+ * Catches compound word mismatches: "Duck Tales" finds "DuckTales" */
+IgdbGame *igdb_search_game_by_words(const char *title, int platform_id);
+
 /* Fetch cover URL for a game by IGDB ID (targeted query, no search).
  * Returns cover URL string (caller frees) or NULL if not found */
 char *igdb_get_game_cover(int igdb_id);

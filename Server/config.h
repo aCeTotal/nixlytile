@@ -45,6 +45,9 @@ typedef struct {
 
     /* Delete source files after successful conversion (default: false) */
     int delete_after_conversion;
+
+    /* Downloads directory to monitor for auto-classification */
+    char download_path[MAX_PATH_LEN];
 } ServerConfig;
 
 /* Global config */

@@ -11,6 +11,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <ctype.h>
+#include <pthread.h>
 #include <curl/curl.h>
 #include <cjson/cJSON.h>
 #include "igdb.h"
@@ -24,6 +26,9 @@ static char *client_secret_stored = NULL;
 static char *access_token = NULL;
 static time_t token_expires = 0;
 static CURL *curl_handle = NULL;
+
+/* Protect curl_handle from concurrent access (server is multi-threaded) */
+static pthread_mutex_t igdb_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Optional log file for API-level request/response tracking.
  * Set via igdb_set_log() before scraping. */
@@ -163,10 +168,15 @@ void igdb_cleanup(void) {
     access_token = NULL;
 }
 
-/* Make a POST request to IGDB API endpoint with Apicalypse body */
+/* Make a POST request to IGDB API endpoint with Apicalypse body.
+ * Thread-safe: serializes access to the shared curl_handle. */
 static char *igdb_request(const char *endpoint, const char *body) {
-    if (!curl_handle || igdb_ensure_token() != 0)
+    pthread_mutex_lock(&igdb_mutex);
+
+    if (!curl_handle || igdb_ensure_token() != 0) {
+        pthread_mutex_unlock(&igdb_mutex);
         return NULL;
+    }
 
     char url[256];
     snprintf(url, sizeof(url), "%s/%s", IGDB_API_BASE, endpoint);
@@ -207,6 +217,7 @@ static char *igdb_request(const char *endpoint, const char *body) {
         fprintf(stderr, "IGDB: Request failed: %s\n", curl_easy_strerror(res));
         if (igdb_logfile) fprintf(igdb_logfile, "    -> CURL ERROR: %s\n", curl_easy_strerror(res));
         free(chunk.data);
+        pthread_mutex_unlock(&igdb_mutex);
         return NULL;
     }
 
@@ -233,9 +244,11 @@ static char *igdb_request(const char *endpoint, const char *body) {
         }
 
         free(chunk.data);
+        pthread_mutex_unlock(&igdb_mutex);
         return NULL;
     }
 
+    pthread_mutex_unlock(&igdb_mutex);
     return chunk.data;
 }
 
@@ -371,7 +384,16 @@ static void normalize_title(const char *src, char *dst, size_t dst_size) {
                    (ch >= '0' && ch <= '9')) {
             *d++ = (ch >= 'A' && ch <= 'Z') ? ch + 32 : ch;
             last_space = 0;
-        } else if (ch == ' ' || ch == '\'' || ch == '.' || ch == '!' ||
+        } else if (ch == '\'') {
+            /* Possessive 's: drop both apostrophe and trailing s
+             * "Kirby's" → "kirby", not "kirby s" */
+            unsigned char next = (unsigned char)*(src + 1);
+            if ((next == 's' || next == 'S') &&
+                (!*(src + 2) || !isalnum((unsigned char)*(src + 2)))) {
+                src++; /* skip the 's' too */
+            }
+            if (!last_space && d > dst) { *d++ = ' '; last_space = 1; }
+        } else if (ch == ' ' || ch == '.' || ch == '!' ||
                    ch == ':' || ch == ',' || ch == '-' || ch == '_') {
             if (!last_space && d > dst) {
                 *d++ = ' ';
@@ -406,6 +428,21 @@ static int title_match_score(const char *search, const char *result) {
     /* Exact match */
     if (strcmp(sa, sb) == 0) return 100;
 
+    /* Compute space-stripped versions for fuzzy comparison.
+     * Catches "Mega Man" vs "MegaMan", "Q*bert" vs "Q-bert",
+     * "Duck Tales" vs "DuckTales", etc. */
+    char sa_ns[256], sb_ns[256];
+    {
+        char *da = sa_ns, *db = sb_ns;
+        for (const char *p = sa; *p; p++) if (*p != ' ') *da++ = *p;
+        *da = '\0';
+        for (const char *p = sb; *p; p++) if (*p != ' ') *db++ = *p;
+        *db = '\0';
+    }
+
+    /* Space-stripped exact match */
+    if (sa_ns[0] && sb_ns[0] && strcmp(sa_ns, sb_ns) == 0) return 95;
+
     size_t la = strlen(sa), lb = strlen(sb);
 
     /* One contains the other */
@@ -414,6 +451,17 @@ static int title_match_score(const char *search, const char *result) {
             size_t shorter = la < lb ? la : lb;
             size_t longer = la > lb ? la : lb;
             /* Score based on length ratio: identical lengths → 95, half → 75 */
+            int score = 75 + (int)(20 * shorter / longer);
+            return score;
+        }
+    }
+
+    /* Space-stripped substring check */
+    {
+        size_t la_ns = strlen(sa_ns), lb_ns = strlen(sb_ns);
+        if (la_ns > 0 && lb_ns > 0 && (strstr(sa_ns, sb_ns) || strstr(sb_ns, sa_ns))) {
+            size_t shorter = la_ns < lb_ns ? la_ns : lb_ns;
+            size_t longer = la_ns > lb_ns ? la_ns : lb_ns;
             int score = 75 + (int)(20 * shorter / longer);
             return score;
         }
@@ -747,6 +795,187 @@ IgdbGame *igdb_search_game_by_name(const char *title, int platform_id) {
     IgdbGame *g = parse_igdb_game(best_game);
     cJSON_Delete(json);
     return g;
+}
+
+/* Helper: build a word-AND query body, search IGDB, and score results.
+ * terms[] contains the search terms, nterms is the count.
+ * Returns best match or NULL. */
+static IgdbGame *igdb_words_query(const char *title, const char *terms[],
+                                   int nterms, int platform_id) {
+    if (nterms < 2) return NULL;
+
+    char body[1024];
+    int pos = 0;
+    pos += snprintf(body + pos, sizeof(body) - pos,
+        "fields name,summary,first_release_date,genres.name,platforms.name,"
+        "involved_companies.company.name,involved_companies.developer,"
+        "involved_companies.publisher,total_rating,cover.image_id;\n"
+        "where ");
+    for (int i = 0; i < nterms; i++) {
+        if (i > 0) pos += snprintf(body + pos, sizeof(body) - pos, " & ");
+        pos += snprintf(body + pos, sizeof(body) - pos, "name ~ *\"%s\"*", terms[i]);
+    }
+    if (platform_id > 0)
+        pos += snprintf(body + pos, sizeof(body) - pos, " & platforms = (%d)", platform_id);
+    pos += snprintf(body + pos, sizeof(body) - pos, ";\nlimit 10;");
+
+    char *response = igdb_request("games", body);
+    if (!response) return NULL;
+
+    cJSON *json = cJSON_Parse(response);
+    free(response);
+    if (!json || !cJSON_IsArray(json) || cJSON_GetArraySize(json) == 0) {
+        cJSON_Delete(json);
+        return NULL;
+    }
+    cJSON *first = cJSON_GetArrayItem(json, 0);
+    if (first && cJSON_GetObjectItem(first, "status")) {
+        cJSON_Delete(json);
+        return NULL;
+    }
+
+    int best_score = 0;
+    cJSON *best_game = NULL;
+    int n = cJSON_GetArraySize(json);
+
+    for (int i = 0; i < n; i++) {
+        cJSON *game = cJSON_GetArrayItem(json, i);
+        if (!game) continue;
+        cJSON *name_item = cJSON_GetObjectItem(game, "name");
+        if (!name_item || !cJSON_IsString(name_item)) continue;
+        int score = title_match_score(title, name_item->valuestring);
+        if (score > best_score) { best_score = score; best_game = game; }
+    }
+
+    if (best_score < 40 || !best_game) {
+        if (igdb_logfile) {
+            if (best_game) {
+                cJSON *bn = cJSON_GetObjectItem(best_game, "name");
+                fprintf(igdb_logfile, "    -> %d results, best: \"%s\" score=%d (< 40, rejected)\n",
+                    n, (bn && cJSON_IsString(bn)) ? bn->valuestring : "?", best_score);
+            } else {
+                fprintf(igdb_logfile, "    -> %d results, none scored\n", n);
+            }
+        }
+        cJSON_Delete(json);
+        return NULL;
+    }
+
+    if (igdb_logfile) {
+        cJSON *bn = cJSON_GetObjectItem(best_game, "name");
+        fprintf(igdb_logfile, "    -> %d results, matched: \"%s\" score=%d\n",
+            n, (bn && cJSON_IsString(bn)) ? bn->valuestring : "?", best_score);
+    }
+
+    IgdbGame *g = parse_igdb_game(best_game);
+    cJSON_Delete(json);
+    return g;
+}
+
+IgdbGame *igdb_search_game_by_words(const char *title, int platform_id) {
+    if (!title || !title[0]) return NULL;
+
+    /* Normalize: lowercase, strip punctuation, collapse spaces */
+    char norm[256];
+    normalize_title(title, norm, sizeof(norm));
+    if (norm[0] == '\0') return NULL;
+
+    /* Tokenize into ALL words (keep originals for sub-word splitting) */
+    char all_words[16][64];
+    int all_nwords = 0;
+    {
+        char buf[256];
+        strncpy(buf, norm, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+        for (char *tok = strtok(buf, " "); tok && all_nwords < 16; tok = strtok(NULL, " ")) {
+            strncpy(all_words[all_nwords], tok, 63);
+            all_words[all_nwords][63] = '\0';
+            all_nwords++;
+        }
+    }
+
+    /* Filter to words >= 3 chars for the primary query */
+    const char *long_words[8];
+    int nlong = 0;
+    for (int i = 0; i < all_nwords && nlong < 8; i++) {
+        if (strlen(all_words[i]) >= 3)
+            long_words[nlong++] = all_words[i];
+    }
+
+    /* --- Phase A: normal word-split (all individual words as substrings) --- */
+    if (nlong >= 2) {
+        /* Use up to 4 longest words */
+        const char *sorted[8];
+        int nsorted = nlong < 4 ? nlong : 4;
+        memcpy(sorted, long_words, sizeof(const char *) * nlong);
+        /* Simple sort by length descending */
+        for (int i = 0; i < nsorted - 1; i++) {
+            for (int j = i + 1; j < nlong; j++) {
+                if (strlen(sorted[j]) > strlen(sorted[i])) {
+                    const char *tmp = sorted[i];
+                    sorted[i] = sorted[j];
+                    sorted[j] = tmp;
+                }
+            }
+        }
+
+        printf("IGDB: Word search for \"%s\" (platform %d) [%d words]\n",
+               title, platform_id, nsorted);
+        IgdbGame *g = igdb_words_query(title, sorted, nsorted, platform_id);
+        if (g) return g;
+        usleep(260000);
+    }
+
+    /* --- Phase B: sub-word split for compound words --- */
+    /* Find the longest word >= 7 chars (likely a compound like "megaman") */
+    int longest_idx = -1;
+    size_t longest_len = 0;
+    for (int i = 0; i < all_nwords; i++) {
+        size_t wlen = strlen(all_words[i]);
+        if (wlen >= 7 && wlen > longest_len) {
+            longest_len = wlen;
+            longest_idx = i;
+        }
+    }
+    if (longest_idx < 0) return NULL;
+
+    /* Try splitting at positions around the middle.
+     * "megaman" (7) → try pos 4 ("mega"+"man"), 3 ("meg"+"aman")
+     * "ducktales" (9) → try pos 5, 4, 6
+     * Each split produces a new query with the sub-words replacing the
+     * compound word.  Only 2-3 extra API calls per ROM. */
+    int mid = (int)longest_len / 2;
+    int splits_to_try[] = { mid, mid + 1, mid - 1 };
+
+    for (int s = 0; s < 3; s++) {
+        int sp = splits_to_try[s];
+        if (sp < 3 || sp > (int)longest_len - 3) continue;
+
+        /* Build term list: sub-word halves + other words >= 2 chars */
+        char part1[64], part2[64];
+        strncpy(part1, all_words[longest_idx], sp);
+        part1[sp] = '\0';
+        strcpy(part2, all_words[longest_idx] + sp);
+
+        const char *terms[12];
+        int nterms = 0;
+        terms[nterms++] = part1;
+        terms[nterms++] = part2;
+        for (int i = 0; i < all_nwords && nterms < 12; i++) {
+            if (i == longest_idx) continue;
+            if (strlen(all_words[i]) >= 2)
+                terms[nterms++] = all_words[i];
+        }
+
+        printf("IGDB: Compound split \"%s\" → \"%s\"+\"%s\" (platform %d)\n",
+               all_words[longest_idx], part1, part2, platform_id);
+
+        IgdbGame *g = igdb_words_query(title, terms, nterms, platform_id);
+        if (g) return g;
+        usleep(260000);
+    }
+
+    return NULL;
 }
 
 char *igdb_get_game_cover(int igdb_id) {

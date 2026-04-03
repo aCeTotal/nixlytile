@@ -10,7 +10,8 @@ typedef enum {
     WATCH_TYPE_MOVIES,
     WATCH_TYPE_TVSHOWS,
     WATCH_TYPE_ROMS,
-    WATCH_TYPE_MEDIA     /* Generic - watches all media types */
+    WATCH_TYPE_MEDIA,     /* Generic - watches all media types */
+    WATCH_TYPE_DOWNLOADS  /* Downloads directory for auto-classification */
 } WatchType;
 
 typedef void (*WatchCallback)(const char *filepath, int is_delete, WatchType type);

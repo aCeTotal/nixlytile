@@ -79,6 +79,9 @@ void config_init_defaults(void) {
 
     /* Keep source files by default */
     server_config.delete_after_conversion = 0;
+
+    /* Default downloads path */
+    strcpy(server_config.download_path, "/mnt/bigdisk1/downloads");
 }
 
 int config_load(const char *path) {
@@ -164,6 +167,9 @@ int config_load(const char *path) {
         else if (strcmp(key, "igdb_client_secret") == 0) {
             strncpy(server_config.igdb_client_secret, value, sizeof(server_config.igdb_client_secret) - 1);
         }
+        else if (strcmp(key, "download_path") == 0) {
+            expand_path(value, server_config.download_path, sizeof(server_config.download_path));
+        }
         else if (strcmp(key, "roms_path") == 0) {
             /* Clear default on first config-specified roms_path */
             if (!roms_default_cleared) {
@@ -235,6 +241,10 @@ int config_save(const char *path) {
 
     fprintf(f, "\n# Delete source files after successful conversion (true/false)\n");
     fprintf(f, "delete_after_conversion = %s\n", server_config.delete_after_conversion ? "true" : "false");
+
+    fprintf(f, "\n# Downloads directory to monitor for auto-classification\n");
+    if (server_config.download_path[0])
+        fprintf(f, "download_path = %s\n", server_config.download_path);
 
     fprintf(f, "\n# ROMs directories (can have multiple)\n");
     for (int i = 0; i < server_config.roms_path_count; i++) {
