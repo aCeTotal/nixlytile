@@ -14,10 +14,11 @@ typedef struct {
     int active;             /* 1 if a scraping operation is running */
     const char *operation;  /* "tmdb_fetch", "tmdb_rescan", "igdb_fetch", "igdb_rescan", "show_status" */
     char current_item[256]; /* Title being scraped right now */
-    int total;              /* Total items to process in this operation */
+    int total;              /* Total items to process (accumulates in session mode) */
     int processed;          /* Items completed so far */
     int success;            /* Items successfully matched */
     time_t start_time;      /* When this operation started */
+    int session_active;     /* 1 if in multi-operation session (don't reset between ops) */
     pthread_mutex_t lock;
 } ScrapeProgress;
 
@@ -55,6 +56,10 @@ int scanner_detect_console(const char *path);
 int scanner_scan_rom_file(const char *filepath, int console);
 int scanner_scan_rom_directory(const char *path);
 void scanner_fetch_rom_covers(void);
+
+/* Session-based progress: accumulates totals across multiple operations */
+void scanner_scrape_session_begin(void);
+void scanner_scrape_session_end(void);
 
 /* Fetch IGDB metadata for ROMs that don't have it */
 void scanner_fetch_rom_metadata(void);

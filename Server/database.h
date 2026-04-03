@@ -23,7 +23,28 @@ typedef enum {
     CONSOLE_GB = 5,
     CONSOLE_GBC = 6,
     CONSOLE_GBA = 7,
-    CONSOLE_COUNT = 8
+    CONSOLE_PS2 = 8,
+    CONSOLE_SWITCH = 9,
+    CONSOLE_PS1 = 10,
+    CONSOLE_PS3 = 11,
+    CONSOLE_PS4 = 12,
+    CONSOLE_PSP = 13,
+    CONSOLE_VITA = 14,
+    CONSOLE_XBOX = 15,
+    CONSOLE_XBOX360 = 16,
+    CONSOLE_WIIU = 17,
+    CONSOLE_DS = 18,
+    CONSOLE_3DS = 19,
+    CONSOLE_GENESIS = 20,
+    CONSOLE_MASTER_SYSTEM = 21,
+    CONSOLE_SATURN = 22,
+    CONSOLE_DREAMCAST = 23,
+    CONSOLE_SEGACD = 24,
+    CONSOLE_ATARI2600 = 25,
+    CONSOLE_TGFX16 = 26,
+    CONSOLE_32X = 27,
+    CONSOLE_GAMEGEAR = 28,
+    CONSOLE_COUNT = 29
 } ConsoleType;
 
 typedef struct {
@@ -154,6 +175,9 @@ int database_update_rom_metadata(int id, int igdb_id, const char *description,
 
 /* Get ROMs without IGDB metadata for a given console */
 int database_get_roms_without_igdb(ConsoleType console, int **ids, char ***titles, int *count);
+
+/* Get ROMs that have IGDB metadata but no cover image */
+int database_get_roms_without_cover(int **ids, char ***titles, int **consoles, int **igdb_ids, int *count);
 
 /* Reset all ROM IGDB metadata (set igdb_id back to NULL for re-scraping) */
 int database_reset_rom_igdb(void);

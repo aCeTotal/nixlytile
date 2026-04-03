@@ -935,7 +935,15 @@ void database_free_entry(MediaEntry *entry) {
 /* Console name helper */
 static const char *console_names[] = {
     "NES", "SNES", "Nintendo 64", "GameCube", "Wii",
-    "Game Boy", "Game Boy Color", "Game Boy Advance"
+    "Game Boy", "Game Boy Color", "Game Boy Advance",
+    "PlayStation 2", "Nintendo Switch",
+    "PlayStation", "PlayStation 3", "PlayStation 4",
+    "PSP", "PlayStation Vita",
+    "Xbox", "Xbox 360", "Wii U",
+    "Nintendo DS", "Nintendo 3DS",
+    "Sega Genesis", "Sega Master System", "Sega Saturn",
+    "Dreamcast", "Sega CD",
+    "Atari 2600", "TurboGrafx-16", "Sega 32X", "Game Gear"
 };
 
 const char *database_console_name(ConsoleType console) {
@@ -1345,7 +1353,7 @@ int database_update_rom_metadata(int id, int igdb_id, const char *description,
 }
 
 int database_get_roms_without_igdb(ConsoleType console, int **ids, char ***titles, int *count) {
-    const char *sql = "SELECT id, title FROM roms WHERE console = ? AND igdb_id IS NULL ORDER BY title";
+    const char *sql = "SELECT id, title FROM roms WHERE console = ? AND (igdb_id IS NULL OR igdb_id = -1) ORDER BY title";
     sqlite3_stmt *stmt;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
@@ -1365,6 +1373,42 @@ int database_get_roms_without_igdb(ConsoleType console, int **ids, char ***title
         (*ids)[*count] = sqlite3_column_int(stmt, 0);
         const char *t = (const char *)sqlite3_column_text(stmt, 1);
         (*titles)[*count] = t ? strdup(t) : strdup("");
+        (*count)++;
+    }
+
+    sqlite3_finalize(stmt);
+    return 0;
+}
+
+int database_get_roms_without_cover(int **ids, char ***titles, int **consoles, int **igdb_ids, int *count) {
+    const char *sql =
+        "SELECT id, title, console, igdb_id FROM roms "
+        "WHERE igdb_id > 0 AND (cover_path IS NULL OR cover_path = '') "
+        "ORDER BY console, title";
+    sqlite3_stmt *stmt;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+
+    int cap = 256;
+    *ids = malloc(cap * sizeof(int));
+    *titles = malloc(cap * sizeof(char *));
+    *consoles = malloc(cap * sizeof(int));
+    *igdb_ids = malloc(cap * sizeof(int));
+    *count = 0;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (*count >= cap) {
+            cap *= 2;
+            *ids = realloc(*ids, cap * sizeof(int));
+            *titles = realloc(*titles, cap * sizeof(char *));
+            *consoles = realloc(*consoles, cap * sizeof(int));
+            *igdb_ids = realloc(*igdb_ids, cap * sizeof(int));
+        }
+        (*ids)[*count] = sqlite3_column_int(stmt, 0);
+        const char *t = (const char *)sqlite3_column_text(stmt, 1);
+        (*titles)[*count] = t ? strdup(t) : strdup("");
+        (*consoles)[*count] = sqlite3_column_int(stmt, 2);
+        (*igdb_ids)[*count] = sqlite3_column_int(stmt, 3);
         (*count)++;
     }
 

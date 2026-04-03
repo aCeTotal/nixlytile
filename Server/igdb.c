@@ -282,6 +282,27 @@ int igdb_console_to_platform(int console_type) {
     case CONSOLE_GB:       return IGDB_PLATFORM_GB;
     case CONSOLE_GBC:      return IGDB_PLATFORM_GBC;
     case CONSOLE_GBA:      return IGDB_PLATFORM_GBA;
+    case CONSOLE_PS2:      return IGDB_PLATFORM_PS2;
+    case CONSOLE_SWITCH:   return IGDB_PLATFORM_SWITCH;
+    case CONSOLE_PS1:      return IGDB_PLATFORM_PS1;
+    case CONSOLE_PS3:      return IGDB_PLATFORM_PS3;
+    case CONSOLE_PS4:      return IGDB_PLATFORM_PS4;
+    case CONSOLE_PSP:      return IGDB_PLATFORM_PSP;
+    case CONSOLE_VITA:     return IGDB_PLATFORM_VITA;
+    case CONSOLE_XBOX:     return IGDB_PLATFORM_XBOX;
+    case CONSOLE_XBOX360:  return IGDB_PLATFORM_XBOX360;
+    case CONSOLE_WIIU:     return IGDB_PLATFORM_WIIU;
+    case CONSOLE_DS:       return IGDB_PLATFORM_DS;
+    case CONSOLE_3DS:      return IGDB_PLATFORM_3DS;
+    case CONSOLE_GENESIS:  return IGDB_PLATFORM_GENESIS;
+    case CONSOLE_MASTER_SYSTEM: return IGDB_PLATFORM_SMS;
+    case CONSOLE_SATURN:   return IGDB_PLATFORM_SATURN;
+    case CONSOLE_DREAMCAST: return IGDB_PLATFORM_DREAMCAST;
+    case CONSOLE_SEGACD:   return IGDB_PLATFORM_SEGACD;
+    case CONSOLE_ATARI2600: return IGDB_PLATFORM_ATARI2600;
+    case CONSOLE_TGFX16:   return IGDB_PLATFORM_TGFX16;
+    case CONSOLE_32X:      return IGDB_PLATFORM_32X;
+    case CONSOLE_GAMEGEAR: return IGDB_PLATFORM_GAMEGEAR;
     default: return 0;
     }
 }
@@ -493,8 +514,8 @@ IgdbGame *igdb_search_game(const char *title, int platform_id) {
         }
     }
 
-    /* Require minimum score of 50 */
-    if (best_score < 50 || !best_game) {
+    /* Require minimum score of 40 (lenient to handle title variations) */
+    if (best_score < 40 || !best_game) {
         cJSON_Delete(json);
         return NULL;
     }
@@ -502,6 +523,47 @@ IgdbGame *igdb_search_game(const char *title, int platform_id) {
     IgdbGame *g = parse_igdb_game(best_game);
     cJSON_Delete(json);
     return g;
+}
+
+char *igdb_get_game_cover(int igdb_id) {
+    if (igdb_id <= 0) return NULL;
+
+    char body[256];
+    snprintf(body, sizeof(body),
+        "where id = %d;\n"
+        "fields cover.image_id;\n"
+        "limit 1;",
+        igdb_id);
+
+    char *response = igdb_request("games", body);
+    if (!response) return NULL;
+
+    cJSON *json = cJSON_Parse(response);
+    free(response);
+    if (!json || !cJSON_IsArray(json) || cJSON_GetArraySize(json) == 0) {
+        cJSON_Delete(json);
+        return NULL;
+    }
+
+    cJSON *game = cJSON_GetArrayItem(json, 0);
+    char *cover_url = NULL;
+
+    if (game) {
+        cJSON *cover = cJSON_GetObjectItem(game, "cover");
+        if (cover && cJSON_IsObject(cover)) {
+            cJSON *image_id = cJSON_GetObjectItem(cover, "image_id");
+            if (image_id && cJSON_IsString(image_id)) {
+                char url[512];
+                snprintf(url, sizeof(url),
+                    "https://images.igdb.com/igdb/image/upload/t_cover_big/%s.jpg",
+                    image_id->valuestring);
+                cover_url = strdup(url);
+            }
+        }
+    }
+
+    cJSON_Delete(json);
+    return cover_url;
 }
 
 void igdb_free_game(IgdbGame *g) {

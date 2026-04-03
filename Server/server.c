@@ -85,6 +85,9 @@ static void *startup_scan_thread(void *arg) {
     }
     printf("Startup scan: Found %d media files.\n", database_get_count());
 
+    /* Session-based progress: all scrape operations accumulate into one progress bar */
+    scanner_scrape_session_begin();
+
     /* Fetch TMDB metadata for any entries missing it */
     if (running) scanner_fetch_missing_tmdb();
 
@@ -100,7 +103,10 @@ static void *startup_scan_thread(void *arg) {
         }
         printf("Startup scan: Found %d ROMs.\n", database_get_rom_count());
         if (running) scanner_fetch_rom_metadata();
+        if (running) scanner_fetch_rom_covers();
     }
+
+    scanner_scrape_session_end();
 
     /* Initialize file watcher */
     if (running && watcher_init() == 0) {
@@ -181,6 +187,15 @@ static void *sync_thread(void *arg) {
             printf("Periodic sync: Media count changed %d -> %d\n", before, after);
         }
 
+        /* Periodic scrape session: retry all missing metadata */
+        scanner_scrape_session_begin();
+
+        /* Fetch any missing TMDB metadata */
+        scanner_fetch_missing_tmdb();
+
+        /* Refresh show status (next episode dates, ended status) */
+        scanner_refresh_show_status();
+
         /* Periodic ROM rescan (backup to inotify) */
         int rom_before = database_get_rom_count();
         for (int i = 0; i < server_config.roms_path_count; i++) {
@@ -189,14 +204,13 @@ static void *sync_thread(void *arg) {
         int rom_after = database_get_rom_count();
         if (rom_after != rom_before) {
             printf("Periodic sync: ROM count changed %d -> %d\n", rom_before, rom_after);
-            scanner_fetch_rom_metadata();
         }
 
-        /* Fetch any missing TMDB metadata */
-        scanner_fetch_missing_tmdb();
+        /* Always retry missing ROM metadata (including previously-failed) */
+        scanner_fetch_rom_metadata();
+        scanner_fetch_rom_covers();
 
-        /* Refresh show status (next episode dates, ended status) */
-        scanner_refresh_show_status();
+        scanner_scrape_session_end();
 
         /* Start transcoder if idle (will pick up any unconverted files) */
         if (transcoder_get_state() == TRANSCODE_IDLE) {
@@ -857,9 +871,12 @@ static void handle_api(int fd, const char *path) {
     }
     else if (strcmp(path, "/api/roms/scan") == 0) {
         printf("Manual ROM rescan triggered via API\n");
+        scanner_scrape_session_begin();
         for (int i = 0; i < server_config.roms_path_count; i++)
             scanner_scan_rom_directory(server_config.roms_paths[i]);
         scanner_fetch_rom_metadata();
+        scanner_fetch_rom_covers();
+        scanner_scrape_session_end();
         char json[128];
         int len = snprintf(json, sizeof(json),
             "{\"status\":\"ok\",\"total\":%d}", database_get_rom_count());
@@ -867,7 +884,10 @@ static void handle_api(int fd, const char *path) {
     }
     else if (strcmp(path, "/api/roms/rescan") == 0) {
         printf("Full ROM IGDB rescan triggered via API\n");
+        scanner_scrape_session_begin();
         scanner_rescan_all_rom_metadata();
+        scanner_fetch_rom_covers();
+        scanner_scrape_session_end();
         char json[128];
         int len = snprintf(json, sizeof(json),
             "{\"status\":\"ok\",\"total\":%d}", database_get_rom_count());
@@ -920,6 +940,9 @@ static void handle_api(int fd, const char *path) {
             }
         }
 
+        int failed = processed - success;
+        if (failed < 0) failed = 0;
+
         char json[1024];
         int len = snprintf(json, sizeof(json),
             "{\"active\":%s,"
@@ -928,6 +951,7 @@ static void handle_api(int fd, const char *path) {
             "\"total\":%d,"
             "\"processed\":%d,"
             "\"success\":%d,"
+            "\"failed\":%d,"
             "\"percent\":%.1f,"
             "\"elapsed\":%d,"
             "\"media_count\":%d,"
@@ -937,7 +961,7 @@ static void handle_api(int fd, const char *path) {
             active ? "true" : "false",
             operation,
             escaped,
-            total, processed, success,
+            total, processed, success, failed,
             percent, elapsed,
             media_count, rom_count,
             tmdb_pending, igdb_pending);
@@ -1365,7 +1389,7 @@ static void handle_request(int fd, const char *request) {
 "      d.current_item?'Current: '+d.current_item:'';\n"
 "    document.getElementById('s-proc').textContent=d.active?d.processed:'-';\n"
 "    document.getElementById('s-ok').textContent=d.active?d.success:'-';\n"
-"    document.getElementById('s-fail').textContent=d.active?(d.processed-d.success):'-';\n"
+"    document.getElementById('s-fail').textContent=d.active?d.failed:'-';\n"
 "    document.getElementById('s-time').textContent=d.active?fmtTime(d.elapsed):'-';\n"
 "    document.getElementById('m-media').textContent=d.media_count;\n"
 "    document.getElementById('m-roms').textContent=d.rom_count;\n"

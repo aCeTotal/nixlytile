@@ -32,18 +32,47 @@ ScrapeProgress scrape_progress = {
     .processed = 0,
     .success = 0,
     .start_time = 0,
+    .session_active = 0,
     .lock = PTHREAD_MUTEX_INITIALIZER,
 };
+
+void scanner_scrape_session_begin(void) {
+    pthread_mutex_lock(&scrape_progress.lock);
+    scrape_progress.session_active = 1;
+    scrape_progress.active = 1;
+    scrape_progress.operation = "starting";
+    scrape_progress.total = 0;
+    scrape_progress.processed = 0;
+    scrape_progress.success = 0;
+    scrape_progress.current_item[0] = '\0';
+    scrape_progress.start_time = time(NULL);
+    pthread_mutex_unlock(&scrape_progress.lock);
+}
+
+void scanner_scrape_session_end(void) {
+    pthread_mutex_lock(&scrape_progress.lock);
+    scrape_progress.session_active = 0;
+    scrape_progress.active = 0;
+    scrape_progress.operation = "idle";
+    scrape_progress.current_item[0] = '\0';
+    pthread_mutex_unlock(&scrape_progress.lock);
+}
 
 static void scrape_begin(const char *op, int total) {
     pthread_mutex_lock(&scrape_progress.lock);
     scrape_progress.active = 1;
     scrape_progress.operation = op;
-    scrape_progress.total = total;
-    scrape_progress.processed = 0;
-    scrape_progress.success = 0;
+    if (scrape_progress.session_active) {
+        /* Session mode: accumulate totals, don't reset counters */
+        scrape_progress.total += total;
+    } else {
+        /* Standalone mode: reset everything */
+        scrape_progress.total = total;
+        scrape_progress.processed = 0;
+        scrape_progress.success = 0;
+        scrape_progress.start_time = time(NULL);
+    }
     scrape_progress.current_item[0] = '\0';
-    scrape_progress.start_time = time(NULL);
     pthread_mutex_unlock(&scrape_progress.lock);
 }
 
@@ -60,9 +89,13 @@ static void scrape_update(const char *item, int ok) {
 
 static void scrape_end(void) {
     pthread_mutex_lock(&scrape_progress.lock);
-    scrape_progress.active = 0;
-    scrape_progress.operation = "idle";
-    scrape_progress.current_item[0] = '\0';
+    if (!scrape_progress.session_active) {
+        /* Standalone mode: set idle */
+        scrape_progress.active = 0;
+        scrape_progress.operation = "idle";
+        scrape_progress.current_item[0] = '\0';
+    }
+    /* Session mode: stay active, let session_end() handle idle */
     pthread_mutex_unlock(&scrape_progress.lock);
 }
 
@@ -963,16 +996,58 @@ static const char *rom_extensions_wii[] = {".iso", ".wbfs", ".ciso", ".gcz", ".r
 static const char *rom_extensions_gb[] = {".gb", NULL};
 static const char *rom_extensions_gbc[] = {".gbc", NULL};
 static const char *rom_extensions_gba[] = {".gba", NULL};
+static const char *rom_extensions_ps2[] = {".iso", ".bin", ".chd", ".img", NULL};
+static const char *rom_extensions_switch[] = {".nsp", ".xci", NULL};
+static const char *rom_extensions_ps1[] = {".bin", ".iso", ".chd", ".img", ".pbp", NULL};
+static const char *rom_extensions_ps3[] = {".iso", ".pkg", NULL};
+static const char *rom_extensions_ps4[] = {".pkg", NULL};
+static const char *rom_extensions_psp[] = {".iso", ".cso", ".chd", ".pbp", NULL};
+static const char *rom_extensions_vita[] = {".vpk", NULL};
+static const char *rom_extensions_xbox[] = {".iso", ".xiso", NULL};
+static const char *rom_extensions_xbox360[] = {".iso", ".xex", NULL};
+static const char *rom_extensions_wiiu[] = {".wud", ".wux", ".rpx", ".wua", NULL};
+static const char *rom_extensions_ds[] = {".nds", ".srl", NULL};
+static const char *rom_extensions_3ds[] = {".3ds", ".cia", ".cxi", NULL};
+static const char *rom_extensions_genesis[] = {".md", ".gen", ".smd", ".bin", NULL};
+static const char *rom_extensions_ms[] = {".sms", NULL};
+static const char *rom_extensions_saturn[] = {".iso", ".chd", ".bin", NULL};
+static const char *rom_extensions_dreamcast[] = {".gdi", ".cdi", ".chd", NULL};
+static const char *rom_extensions_segacd[] = {".chd", ".iso", ".bin", NULL};
+static const char *rom_extensions_atari2600[] = {".a26", ".bin", NULL};
+static const char *rom_extensions_tgfx16[] = {".pce", ".sgx", ".chd", NULL};
+static const char *rom_extensions_32x[] = {".32x", ".bin", NULL};
+static const char *rom_extensions_gamegear[] = {".gg", NULL};
 
 static const char **rom_ext_table[] = {
-    rom_extensions_nes,
-    rom_extensions_snes,
-    rom_extensions_n64,
-    rom_extensions_gc,
-    rom_extensions_wii,
-    rom_extensions_gb,
-    rom_extensions_gbc,
-    rom_extensions_gba,
+    rom_extensions_nes,        /* 0  NES */
+    rom_extensions_snes,       /* 1  SNES */
+    rom_extensions_n64,        /* 2  N64 */
+    rom_extensions_gc,         /* 3  GameCube */
+    rom_extensions_wii,        /* 4  Wii */
+    rom_extensions_gb,         /* 5  Game Boy */
+    rom_extensions_gbc,        /* 6  Game Boy Color */
+    rom_extensions_gba,        /* 7  Game Boy Advance */
+    rom_extensions_ps2,        /* 8  PS2 */
+    rom_extensions_switch,     /* 9  Switch */
+    rom_extensions_ps1,        /* 10 PS1 */
+    rom_extensions_ps3,        /* 11 PS3 */
+    rom_extensions_ps4,        /* 12 PS4 */
+    rom_extensions_psp,        /* 13 PSP */
+    rom_extensions_vita,       /* 14 Vita */
+    rom_extensions_xbox,       /* 15 Xbox */
+    rom_extensions_xbox360,    /* 16 Xbox 360 */
+    rom_extensions_wiiu,       /* 17 Wii U */
+    rom_extensions_ds,         /* 18 DS */
+    rom_extensions_3ds,        /* 19 3DS */
+    rom_extensions_genesis,    /* 20 Genesis */
+    rom_extensions_ms,         /* 21 Master System */
+    rom_extensions_saturn,     /* 22 Saturn */
+    rom_extensions_dreamcast,  /* 23 Dreamcast */
+    rom_extensions_segacd,     /* 24 Sega CD */
+    rom_extensions_atari2600,  /* 25 Atari 2600 */
+    rom_extensions_tgfx16,     /* 26 TurboGrafx-16 */
+    rom_extensions_32x,        /* 27 32X */
+    rom_extensions_gamegear,   /* 28 Game Gear */
 };
 
 /* All ROM extensions combined for quick check */
@@ -1064,8 +1139,12 @@ static int scanner_detect_console_from_zip(const char *path) {
         if (!ext) continue;
 
         for (int c = 0; c < CONSOLE_COUNT; c++) {
-            /* Skip GC/Wii — dolphin-emu doesn't support .zip */
-            if (c == CONSOLE_GAMECUBE || c == CONSOLE_WII)
+            /* Skip disc-based consoles — emulators don't support disc images in .zip */
+            if (c == CONSOLE_GAMECUBE || c == CONSOLE_WII || c == CONSOLE_WIIU ||
+                c == CONSOLE_PS1 || c == CONSOLE_PS2 || c == CONSOLE_PS3 || c == CONSOLE_PS4 ||
+                c == CONSOLE_PSP || c == CONSOLE_VITA ||
+                c == CONSOLE_XBOX || c == CONSOLE_XBOX360 ||
+                c == CONSOLE_SATURN || c == CONSOLE_DREAMCAST || c == CONSOLE_SEGACD)
                 continue;
             for (int j = 0; rom_ext_table[c][j]; j++) {
                 if (strcasecmp(ext, rom_ext_table[c][j]) == 0) {
@@ -1121,6 +1200,44 @@ static int scanner_detect_console_from_dir(const char *path) {
     if (strcasecmp(dir, "GBA") == 0 || strcasecmp(dir, "Game Boy Advance") == 0) return CONSOLE_GBA;
     if (strcasecmp(dir, "GBC") == 0 || strcasecmp(dir, "Game Boy Color") == 0) return CONSOLE_GBC;
     if (strcasecmp(dir, "GB") == 0 || strcasecmp(dir, "Game Boy") == 0) return CONSOLE_GB;
+    if (strcasecmp(dir, "PS2") == 0 || strcasecmp(dir, "PlayStation 2") == 0 ||
+        strcasecmp(dir, "PlayStation2") == 0) return CONSOLE_PS2;
+    if (strcasecmp(dir, "Switch") == 0 || strcasecmp(dir, "Nintendo Switch") == 0 ||
+        strcasecmp(dir, "NSP") == 0) return CONSOLE_SWITCH;
+    if (strcasecmp(dir, "PS1") == 0 || strcasecmp(dir, "PSX") == 0 ||
+        strcasecmp(dir, "PlayStation") == 0 || strcasecmp(dir, "PlayStation 1") == 0 ||
+        strcasecmp(dir, "PlayStation1") == 0) return CONSOLE_PS1;
+    if (strcasecmp(dir, "PS3") == 0 || strcasecmp(dir, "PlayStation 3") == 0 ||
+        strcasecmp(dir, "PlayStation3") == 0) return CONSOLE_PS3;
+    if (strcasecmp(dir, "PS4") == 0 || strcasecmp(dir, "PlayStation 4") == 0 ||
+        strcasecmp(dir, "PlayStation4") == 0) return CONSOLE_PS4;
+    if (strcasecmp(dir, "PSP") == 0 || strcasecmp(dir, "PlayStation Portable") == 0) return CONSOLE_PSP;
+    if (strcasecmp(dir, "Vita") == 0 || strcasecmp(dir, "PSVita") == 0 ||
+        strcasecmp(dir, "PS Vita") == 0) return CONSOLE_VITA;
+    if (strcasecmp(dir, "Xbox") == 0) return CONSOLE_XBOX;
+    if (strcasecmp(dir, "Xbox 360") == 0 || strcasecmp(dir, "Xbox360") == 0 ||
+        strcasecmp(dir, "X360") == 0) return CONSOLE_XBOX360;
+    if (strcasecmp(dir, "Wii U") == 0 || strcasecmp(dir, "WiiU") == 0) return CONSOLE_WIIU;
+    if (strcasecmp(dir, "DS") == 0 || strcasecmp(dir, "NDS") == 0 ||
+        strcasecmp(dir, "Nintendo DS") == 0) return CONSOLE_DS;
+    if (strcasecmp(dir, "3DS") == 0 || strcasecmp(dir, "Nintendo 3DS") == 0) return CONSOLE_3DS;
+    if (strcasecmp(dir, "Genesis") == 0 || strcasecmp(dir, "Mega Drive") == 0 ||
+        strcasecmp(dir, "MegaDrive") == 0 || strcasecmp(dir, "MD") == 0 ||
+        strcasecmp(dir, "Sega Genesis") == 0) return CONSOLE_GENESIS;
+    if (strcasecmp(dir, "Master System") == 0 || strcasecmp(dir, "SMS") == 0 ||
+        strcasecmp(dir, "Sega Master System") == 0) return CONSOLE_MASTER_SYSTEM;
+    if (strcasecmp(dir, "Saturn") == 0 || strcasecmp(dir, "Sega Saturn") == 0) return CONSOLE_SATURN;
+    if (strcasecmp(dir, "Dreamcast") == 0 || strcasecmp(dir, "DC") == 0) return CONSOLE_DREAMCAST;
+    if (strcasecmp(dir, "Sega CD") == 0 || strcasecmp(dir, "SegaCD") == 0 ||
+        strcasecmp(dir, "Mega CD") == 0 || strcasecmp(dir, "MegaCD") == 0) return CONSOLE_SEGACD;
+    if (strcasecmp(dir, "Atari 2600") == 0 || strcasecmp(dir, "Atari2600") == 0 ||
+        strcasecmp(dir, "2600") == 0) return CONSOLE_ATARI2600;
+    if (strcasecmp(dir, "TurboGrafx-16") == 0 || strcasecmp(dir, "TurboGrafx16") == 0 ||
+        strcasecmp(dir, "TG16") == 0 || strcasecmp(dir, "PC Engine") == 0 ||
+        strcasecmp(dir, "PCEngine") == 0) return CONSOLE_TGFX16;
+    if (strcasecmp(dir, "32X") == 0 || strcasecmp(dir, "Sega 32X") == 0) return CONSOLE_32X;
+    if (strcasecmp(dir, "Game Gear") == 0 || strcasecmp(dir, "GameGear") == 0 ||
+        strcasecmp(dir, "GG") == 0) return CONSOLE_GAMEGEAR;
 
     return -1;
 }
@@ -1146,15 +1263,40 @@ int scanner_detect_console(const char *path) {
     if (strcasecmp(ext, ".gba") == 0) return CONSOLE_GBA;
     if (strcasecmp(ext, ".wbfs") == 0) return CONSOLE_WII;
     if (strcasecmp(ext, ".gcm") == 0) return CONSOLE_GAMECUBE;
+    if (strcasecmp(ext, ".nsp") == 0 || strcasecmp(ext, ".xci") == 0) return CONSOLE_SWITCH;
+    if (strcasecmp(ext, ".nds") == 0 || strcasecmp(ext, ".srl") == 0) return CONSOLE_DS;
+    if (strcasecmp(ext, ".3ds") == 0 || strcasecmp(ext, ".cia") == 0 ||
+        strcasecmp(ext, ".cxi") == 0) return CONSOLE_3DS;
+    if (strcasecmp(ext, ".cso") == 0 || strcasecmp(ext, ".pbp") == 0) return CONSOLE_PSP;
+    if (strcasecmp(ext, ".vpk") == 0) return CONSOLE_VITA;
+    if (strcasecmp(ext, ".xiso") == 0) return CONSOLE_XBOX;
+    if (strcasecmp(ext, ".xex") == 0) return CONSOLE_XBOX360;
+    if (strcasecmp(ext, ".wud") == 0 || strcasecmp(ext, ".wux") == 0 ||
+        strcasecmp(ext, ".rpx") == 0 || strcasecmp(ext, ".wua") == 0) return CONSOLE_WIIU;
+    if (strcasecmp(ext, ".md") == 0 || strcasecmp(ext, ".gen") == 0 ||
+        strcasecmp(ext, ".smd") == 0) return CONSOLE_GENESIS;
+    if (strcasecmp(ext, ".sms") == 0) return CONSOLE_MASTER_SYSTEM;
+    if (strcasecmp(ext, ".gg") == 0) return CONSOLE_GAMEGEAR;
+    if (strcasecmp(ext, ".32x") == 0) return CONSOLE_32X;
+    if (strcasecmp(ext, ".gdi") == 0 || strcasecmp(ext, ".cdi") == 0) return CONSOLE_DREAMCAST;
+    if (strcasecmp(ext, ".a26") == 0) return CONSOLE_ATARI2600;
+    if (strcasecmp(ext, ".pce") == 0 || strcasecmp(ext, ".sgx") == 0) return CONSOLE_TGFX16;
 
     /* .gb — read ROM header to distinguish GB vs GBC */
     if (strcasecmp(ext, ".gb") == 0)
         return scanner_detect_gb_file(path);
 
-    /* Shared extensions (.iso, .ciso, .gcz, .rvz) — read disc magic bytes */
+    /* Shared extensions used by multiple disc-based consoles —
+     * try GC/Wii magic bytes first, fall back to parent directory name.
+     * Compressed formats (.rvz, .gcz, .chd) won't have raw disc headers
+     * at standard offsets, so directory fallback is essential. */
     if (strcasecmp(ext, ".iso") == 0 || strcasecmp(ext, ".ciso") == 0 ||
-        strcasecmp(ext, ".gcz") == 0 || strcasecmp(ext, ".rvz") == 0) {
-        return scanner_detect_disc_type(path);
+        strcasecmp(ext, ".gcz") == 0 || strcasecmp(ext, ".rvz") == 0 ||
+        strcasecmp(ext, ".chd") == 0 || strcasecmp(ext, ".bin") == 0 ||
+        strcasecmp(ext, ".img") == 0 || strcasecmp(ext, ".pkg") == 0) {
+        int result = scanner_detect_disc_type(path);
+        if (result >= 0) return result;
+        return scanner_detect_console_from_dir(path);
     }
 
     return -1;
@@ -1294,16 +1436,82 @@ int scanner_scan_rom_directory(const char *path) {
     return count;
 }
 
-/* Covers are now downloaded from IGDB during scanner_fetch_rom_metadata().
- * This function is kept as a no-op for callers that still reference it. */
+/* Forward declaration */
+static char *download_igdb_cover(const char *url, const char *title, int console,
+                                  const char *cache_dir);
+
+/* Fetch cover images for ROMs that have IGDB metadata but no cover.
+ * This retries cover downloads for ROMs where the initial search response
+ * didn't include cover data, using a targeted IGDB query by game ID. */
 void scanner_fetch_rom_covers(void) {
-    /* Covers are fetched together with IGDB metadata in scanner_fetch_rom_metadata() */
+    if (!igdb_is_available()) return;
+
+    int *ids = NULL, *consoles = NULL, *igdb_ids = NULL;
+    char **titles = NULL;
+    int count = 0;
+
+    if (database_get_roms_without_cover(&ids, &titles, &consoles, &igdb_ids, &count) != 0
+        || count == 0) {
+        free(ids); free(titles); free(consoles); free(igdb_ids);
+        return;
+    }
+
+    printf("IGDB: Fetching covers for %d ROMs...\n", count);
+    scrape_begin("igdb_covers", count);
+
+    int fetched = 0;
+    for (int i = 0; i < count; i++) {
+        char *cover_url = igdb_get_game_cover(igdb_ids[i]);
+        if (cover_url) {
+            char *local = download_igdb_cover(cover_url, titles[i],
+                                               consoles[i], server_config.cache_dir);
+            if (local) {
+                database_update_rom_cover(ids[i], local);
+                printf("  IGDB cover: %s [OK]\n", titles[i]);
+                free(local);
+                fetched++;
+                scrape_update(titles[i], 1);
+            } else {
+                printf("  IGDB cover: %s [download failed]\n", titles[i]);
+                scrape_update(titles[i], 0);
+            }
+            free(cover_url);
+        } else {
+            printf("  IGDB cover: %s [no cover on IGDB]\n", titles[i]);
+            scrape_update(titles[i], 0);
+        }
+        usleep(260000);
+    }
+
+    for (int i = 0; i < count; i++) free(titles[i]);
+    free(ids); free(titles); free(consoles); free(igdb_ids);
+
+    scrape_end();
+    printf("IGDB: Cover fetch complete (%d/%d downloaded)\n", fetched, count);
 }
 
 /* Clean a ROM title for IGDB search: strip region tags, version tags, etc. */
 static void clean_rom_title(const char *raw, char *out, size_t out_size) {
     strncpy(out, raw, out_size - 1);
     out[out_size - 1] = '\0';
+
+    /* Strip leading collection index number: "1865 - Game Name" → "Game Name"
+     * Pattern: 3+ digits followed by " - " at start of title.
+     * Skip if the number looks like a game year (1900-2100) AND
+     * what follows is a subtitle (these are real games like "1943 - The Battle of Midway") */
+    {
+        const char *p = out;
+        int ndigits = 0;
+        while (*p && isdigit((unsigned char)*p)) { p++; ndigits++; }
+        if (ndigits >= 3 && strncmp(p, " - ", 3) == 0) {
+            int num = atoi(out);
+            /* If it's NOT a plausible game year (1900-2100), always strip.
+             * If it IS a plausible year, don't strip — it might be a real game title. */
+            if (num < 1900 || num > 2100) {
+                memmove(out, p + 3, strlen(p + 3) + 1);
+            }
+        }
+    }
 
     /* Strip anything in parentheses: (USA), (Europe), (Rev A), (V1.1), etc. */
     char *p;
@@ -1355,6 +1563,16 @@ static void clean_rom_title(const char *raw, char *out, size_t out_size) {
         strncpy(out, temp, out_size - 1);
         out[out_size - 1] = '\0';
     }
+
+    /* Handle trailing ", A" → prepend "A " */
+    len = strlen(out);
+    if (len > 3 && strcasecmp(out + len - 3, ", A") == 0) {
+        char temp[256];
+        out[len - 3] = '\0';
+        snprintf(temp, sizeof(temp), "A %s", out);
+        strncpy(out, temp, out_size - 1);
+        out[out_size - 1] = '\0';
+    }
 }
 
 /* Generate search variations for a ROM title.
@@ -1370,7 +1588,7 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
 
     /* Variation 1: replace " - " with ": " (No-Intro -> real title) */
     char *dash = strstr(variations[0], " - ");
-    if (dash && *count < 8) {
+    if (dash && *count < 12) {
         char temp[256];
         size_t prefix_len = dash - variations[0];
         memcpy(temp, variations[0], prefix_len);
@@ -1383,7 +1601,7 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
     }
 
     /* Variation 2: replace " - " with just " " */
-    if (dash && *count < 8) {
+    if (dash && *count < 12) {
         char temp[256];
         size_t prefix_len = dash - variations[0];
         memcpy(temp, variations[0], prefix_len);
@@ -1395,7 +1613,7 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
     }
 
     /* Variation 3: just the part before " - " (subtitle stripped) */
-    if (dash && *count < 8) {
+    if (dash && *count < 12) {
         char temp[256];
         size_t prefix_len = dash - variations[0];
         if (prefix_len > 0 && prefix_len < sizeof(temp)) {
@@ -1407,7 +1625,7 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
     }
 
     /* Variation 4: swap & ↔ and */
-    if (*count < 8) {
+    if (*count < 12) {
         char temp[256];
         strncpy(temp, clean, sizeof(temp) - 1);
         temp[sizeof(temp) - 1] = '\0';
@@ -1453,9 +1671,87 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
     }
 
     /* Variation 5: strip leading "The " */
-    if (*count < 8 && strncasecmp(clean, "The ", 4) == 0 && clean[4] != '\0') {
+    if (*count < 12 && strncasecmp(clean, "The ", 4) == 0 && clean[4] != '\0') {
         strncpy(variations[(*count)++], clean + 4, 255);
         variations[*count - 1][255] = '\0';
+    }
+
+    /* Variation 6: strip leading year-like number prefix if present
+     * "1943 - The Battle of Midway" → "The Battle of Midway"
+     * (clean_rom_title only strips non-year numbers; this catches year-range too) */
+    if (*count < 12) {
+        const char *p = clean;
+        int ndigits = 0;
+        while (*p && isdigit((unsigned char)*p)) { p++; ndigits++; }
+        if (ndigits >= 3 && strncmp(p, " - ", 3) == 0 && p[3] != '\0') {
+            strncpy(variations[(*count)++], p + 3, 255);
+            variations[*count - 1][255] = '\0';
+        }
+    }
+
+    /* Variation 7: strip " Version" suffix (e.g., "Fire Red Version" → "Fire Red") */
+    if (*count < 12) {
+        size_t clen = strlen(clean);
+        if (clen > 8 && strcasecmp(clean + clen - 8, " Version") == 0) {
+            char temp[256];
+            strncpy(temp, clean, clen - 8);
+            temp[clen - 8] = '\0';
+            strncpy(variations[(*count)++], temp, 255);
+            variations[*count - 1][255] = '\0';
+        }
+    }
+
+    /* Variation 8: strip " Edition" suffix */
+    if (*count < 12) {
+        size_t clen = strlen(clean);
+        if (clen > 8 && strcasecmp(clean + clen - 8, " Edition") == 0) {
+            char temp[256];
+            strncpy(temp, clean, clen - 8);
+            temp[clen - 8] = '\0';
+            strncpy(variations[(*count)++], temp, 255);
+            variations[*count - 1][255] = '\0';
+        }
+    }
+
+    /* Variation 9: Roman numeral ↔ Arabic number at end of title
+     * "Final Fantasy III" → "Final Fantasy 3", "Mega Man 2" → "Mega Man II" */
+    if (*count < 12) {
+        static const struct { const char *roman; const char *arabic; } numerals[] = {
+            {"II", "2"}, {"III", "3"}, {"IV", "4"}, {"V", "5"},
+            {"VI", "6"}, {"VII", "7"}, {"VIII", "8"}, {"IX", "9"},
+            {"X", "10"}, {"XI", "11"}, {"XII", "12"}, {"XIII", "13"},
+            {NULL, NULL}
+        };
+        size_t clen = strlen(clean);
+        int done = 0;
+        /* Try Roman → Arabic */
+        for (int n = 0; numerals[n].roman && !done; n++) {
+            size_t rlen = strlen(numerals[n].roman);
+            if (clen > rlen + 1 && clean[clen - rlen - 1] == ' ' &&
+                strcmp(clean + clen - rlen, numerals[n].roman) == 0) {
+                char temp[256];
+                snprintf(temp, sizeof(temp), "%.*s%s",
+                    (int)(clen - rlen), clean, numerals[n].arabic);
+                strncpy(variations[(*count)++], temp, 255);
+                variations[*count - 1][255] = '\0';
+                done = 1;
+            }
+        }
+        /* Try Arabic → Roman */
+        if (!done) {
+            for (int n = 0; numerals[n].arabic && !done; n++) {
+                size_t alen = strlen(numerals[n].arabic);
+                if (clen > alen + 1 && clean[clen - alen - 1] == ' ' &&
+                    strcmp(clean + clen - alen, numerals[n].arabic) == 0) {
+                    char temp[256];
+                    snprintf(temp, sizeof(temp), "%.*s%s",
+                        (int)(clen - alen), clean, numerals[n].roman);
+                    strncpy(variations[(*count)++], temp, 255);
+                    variations[*count - 1][255] = '\0';
+                    done = 1;
+                }
+            }
+        }
     }
 }
 
@@ -1517,6 +1813,128 @@ static char *download_igdb_cover(const char *url, const char *title, int console
     return NULL;
 }
 
+/* Check if an IGDB platforms string contains a platform matching the target console.
+ * Used to verify Phase 3 (no platform filter) results aren't from a wrong console. */
+static int platform_matches_console(const char *platforms, int console) {
+    if (!platforms || !platforms[0]) return 0;
+
+    const char *keywords[] = {
+        [CONSOLE_NES]          = "NES",
+        [CONSOLE_SNES]         = "Super Nintendo",
+        [CONSOLE_N64]          = "Nintendo 64",
+        [CONSOLE_GAMECUBE]     = "GameCube",
+        [CONSOLE_WII]          = "Wii",
+        [CONSOLE_GB]           = "Game Boy",
+        [CONSOLE_GBC]          = "Game Boy Color",
+        [CONSOLE_GBA]          = "Game Boy Advance",
+        [CONSOLE_PS2]          = "PlayStation 2",
+        [CONSOLE_SWITCH]       = "Nintendo Switch",
+        [CONSOLE_PS1]          = "PlayStation",
+        [CONSOLE_PS3]          = "PlayStation 3",
+        [CONSOLE_PS4]          = "PlayStation 4",
+        [CONSOLE_PSP]          = "PlayStation Portable",
+        [CONSOLE_VITA]         = "PlayStation Vita",
+        [CONSOLE_XBOX]         = "Xbox",
+        [CONSOLE_XBOX360]      = "Xbox 360",
+        [CONSOLE_WIIU]         = "Wii U",
+        [CONSOLE_DS]           = "Nintendo DS",
+        [CONSOLE_3DS]          = "Nintendo 3DS",
+        [CONSOLE_GENESIS]      = "Genesis",
+        [CONSOLE_MASTER_SYSTEM]= "Master System",
+        [CONSOLE_SATURN]       = "Saturn",
+        [CONSOLE_DREAMCAST]    = "Dreamcast",
+        [CONSOLE_SEGACD]       = "Sega CD",
+        [CONSOLE_ATARI2600]    = "Atari 2600",
+        [CONSOLE_TGFX16]       = "TurboGrafx",
+        [CONSOLE_32X]          = "32X",
+        [CONSOLE_GAMEGEAR]     = "Game Gear",
+    };
+
+    if (console < 0 || console >= CONSOLE_COUNT) return 0;
+
+    const char *keyword = keywords[console];
+    if (!keyword) return 0;
+
+    /* Special case: "NES" must not match "SNES" or "Super NES" */
+    if (console == CONSOLE_NES) {
+        const char *p = platforms;
+        while ((p = strstr(p, "NES")) != NULL) {
+            if (p > platforms && *(p - 1) == 'S') { p += 3; continue; }
+            if (p >= platforms + 6 && strncmp(p - 6, "Super ", 6) == 0) { p += 3; continue; }
+            return 1;
+        }
+        return 0;
+    }
+
+    /* Special case: "Wii" must not match "Wii U" */
+    if (console == CONSOLE_WII) {
+        const char *p = platforms;
+        while ((p = strstr(p, "Wii")) != NULL) {
+            char after = *(p + 3);
+            if (after == '\0' || after == ',') return 1;
+            if (after == ' ' && *(p + 4) != 'U') return 1;
+            p += 3;
+        }
+        return 0;
+    }
+
+    /* Special case: "Game Boy" must not match "Game Boy Color" or "Game Boy Advance" */
+    if (console == CONSOLE_GB) {
+        const char *p = platforms;
+        while ((p = strstr(p, "Game Boy")) != NULL) {
+            const char *after = p + 8;
+            if (*after == '\0' || *after == ',') return 1;
+            if (*after == ' ' && (*(after + 1) == 'C' || *(after + 1) == 'A')) {
+                p = after; continue;
+            }
+            return 1;
+        }
+        return 0;
+    }
+
+    /* Special case: "PlayStation" (PS1) must not match "PlayStation 2/3/4/5/Portable/Vita" */
+    if (console == CONSOLE_PS1) {
+        const char *p = platforms;
+        while ((p = strstr(p, "PlayStation")) != NULL) {
+            const char *after = p + 11;
+            if (*after == '\0' || *after == ',') return 1;
+            p = after;
+        }
+        return 0;
+    }
+
+    /* Special case: "Xbox" must not match "Xbox 360", "Xbox One", "Xbox Series" */
+    if (console == CONSOLE_XBOX) {
+        const char *p = platforms;
+        while ((p = strstr(p, "Xbox")) != NULL) {
+            const char *after = p + 4;
+            if (*after == '\0' || *after == ',') return 1;
+            p = after;
+        }
+        return 0;
+    }
+
+    /* Also try "Mega Drive" for Genesis */
+    if (console == CONSOLE_GENESIS) {
+        return strstr(platforms, "Genesis") != NULL ||
+               strstr(platforms, "Mega Drive") != NULL;
+    }
+
+    /* Also try "Mega-CD" for Sega CD */
+    if (console == CONSOLE_SEGACD) {
+        return strstr(platforms, "Sega CD") != NULL ||
+               strstr(platforms, "Mega-CD") != NULL;
+    }
+
+    /* Also try "PC Engine" for TurboGrafx */
+    if (console == CONSOLE_TGFX16) {
+        return strstr(platforms, "TurboGrafx") != NULL ||
+               strstr(platforms, "PC Engine") != NULL;
+    }
+
+    return strstr(platforms, keyword) != NULL;
+}
+
 /* Fetch IGDB metadata for ROMs that don't have it.
  * Uses a 2-phase search strategy per ROM:
  *   Phase 1: Try original + colon variant (most likely matches) with platform filter
@@ -1564,7 +1982,7 @@ void scanner_fetch_rom_metadata(void) {
                 char clean[256];
                 clean_rom_title(titles[i], clean, sizeof(clean));
 
-                char variations[8][256];
+                char variations[12][256];
                 int var_count = 0;
                 generate_rom_variations(clean, variations, &var_count);
 
@@ -1586,9 +2004,17 @@ void scanner_fetch_rom_metadata(void) {
                     }
                 }
 
-                /* Phase 3: Fallback without platform filter using original title */
+                /* Phase 3: Fallback without platform filter using original title.
+                 * Verify the result actually has the target platform to avoid
+                 * matching a game from the wrong console. */
                 if (!g) {
                     g = igdb_search_game(variations[0], 0);
+                    if (g && g->platforms && !platform_matches_console(g->platforms, c)) {
+                        printf("  IGDB: %s -> %s (wrong platform: %s)\n",
+                            titles[i], g->name ? g->name : "?", g->platforms);
+                        igdb_free_game(g);
+                        g = NULL;
+                    }
                     if (!g) usleep(260000);
                 }
 
