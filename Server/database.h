@@ -179,6 +179,9 @@ int database_get_roms_without_igdb(ConsoleType console, int **ids, char ***title
 /* Get ROMs that have IGDB metadata but no cover image */
 int database_get_roms_without_cover(int **ids, char ***titles, int **consoles, int **igdb_ids, int *count);
 
+/* Get ALL ROMs without cover art (regardless of IGDB status) — for libretro-thumbnails fallback */
+int database_get_all_roms_without_cover(int **ids, char ***filepaths, int **consoles, int *count);
+
 /* Reset all ROM IGDB metadata (set igdb_id back to NULL for re-scraping) */
 int database_reset_rom_igdb(void);
 

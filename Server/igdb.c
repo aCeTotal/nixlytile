@@ -169,7 +169,8 @@ void igdb_cleanup(void) {
 }
 
 /* Make a POST request to IGDB API endpoint with Apicalypse body.
- * Thread-safe: serializes access to the shared curl_handle. */
+ * Thread-safe: serializes access to the shared curl_handle.
+ * Retries on 429 rate limiting with exponential backoff. */
 static char *igdb_request(const char *endpoint, const char *body) {
     pthread_mutex_lock(&igdb_mutex);
 
@@ -192,41 +193,78 @@ static char *igdb_request(const char *endpoint, const char *body) {
     headers = curl_slist_append(headers, client_header);
     headers = curl_slist_append(headers, "Content-Type: text/plain");
 
-    MemBuffer chunk = {0};
-    chunk.data = malloc(1);
-    chunk.size = 0;
-
-    /* Reset all options so stale state from token fetch doesn't bleed in */
-    curl_easy_reset(curl_handle);
-    curl_easy_setopt(curl_handle, CURLOPT_URL, url);
-    curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, body);
-    curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, write_callback);
-    curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, &chunk);
-    curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT, 10L);
-
     /* Log the request body to API log if enabled */
     if (igdb_logfile) {
         fprintf(igdb_logfile, "    API %s: %s\n", endpoint, body);
     }
 
-    CURLcode res = curl_easy_perform(curl_handle);
-    curl_slist_free_all(headers);
+    /* Retry loop for rate limiting (429) */
+    for (int attempt = 0; attempt < 4; attempt++) {
+        if (attempt > 0) {
+            /* Exponential backoff: 1s, 2s, 4s */
+            int backoff_ms = 1000 * (1 << (attempt - 1));
+            fprintf(stderr, "IGDB: Retry %d after %dms backoff\n", attempt, backoff_ms);
+            pthread_mutex_unlock(&igdb_mutex);
+            usleep(backoff_ms * 1000);
+            pthread_mutex_lock(&igdb_mutex);
+            if (igdb_ensure_token() != 0) {
+                pthread_mutex_unlock(&igdb_mutex);
+                curl_slist_free_all(headers);
+                return NULL;
+            }
+        }
 
-    if (res != CURLE_OK) {
-        fprintf(stderr, "IGDB: Request failed: %s\n", curl_easy_strerror(res));
-        if (igdb_logfile) fprintf(igdb_logfile, "    -> CURL ERROR: %s\n", curl_easy_strerror(res));
-        free(chunk.data);
-        pthread_mutex_unlock(&igdb_mutex);
-        return NULL;
-    }
+        MemBuffer chunk = {0};
+        chunk.data = malloc(1);
+        chunk.size = 0;
 
-    /* Check HTTP status code — IGDB returns errors as valid JSON with non-200 codes */
-    long http_code = 0;
-    curl_easy_getinfo(curl_handle, CURLINFO_RESPONSE_CODE, &http_code);
+        curl_easy_reset(curl_handle);
+        curl_easy_setopt(curl_handle, CURLOPT_URL, url);
+        curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, body);
+        curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, write_callback);
+        curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, &chunk);
+        curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT, 15L);
 
-    if (http_code != 200) {
-        /* Truncate body for logging */
+        CURLcode res = curl_easy_perform(curl_handle);
+
+        if (res != CURLE_OK) {
+            fprintf(stderr, "IGDB: Request failed: %s\n", curl_easy_strerror(res));
+            if (igdb_logfile) fprintf(igdb_logfile, "    -> CURL ERROR: %s\n", curl_easy_strerror(res));
+            free(chunk.data);
+
+            /* Recoverable CURL errors: recreate handle and retry */
+            if (res == CURLE_FAILED_INIT || res == CURLE_COULDNT_CONNECT ||
+                res == CURLE_OPERATION_TIMEDOUT) {
+                fprintf(stderr, "IGDB: Recreating curl handle after %s\n",
+                    curl_easy_strerror(res));
+                curl_easy_cleanup(curl_handle);
+                curl_handle = curl_easy_init();
+                if (curl_handle) {
+                    /* Rebuild headers (old slist still valid) */
+                    int backoff_ms = 500 * (1 << attempt);
+                    pthread_mutex_unlock(&igdb_mutex);
+                    usleep(backoff_ms * 1000);
+                    pthread_mutex_lock(&igdb_mutex);
+                    continue; /* retry with fresh handle */
+                }
+            }
+
+            curl_slist_free_all(headers);
+            pthread_mutex_unlock(&igdb_mutex);
+            return NULL;
+        }
+
+        long http_code = 0;
+        curl_easy_getinfo(curl_handle, CURLINFO_RESPONSE_CODE, &http_code);
+
+        if (http_code == 200) {
+            curl_slist_free_all(headers);
+            pthread_mutex_unlock(&igdb_mutex);
+            return chunk.data;
+        }
+
+        /* Non-200 response */
         char preview[256];
         size_t plen = chunk.size < sizeof(preview) - 1 ? chunk.size : sizeof(preview) - 1;
         memcpy(preview, chunk.data, plen);
@@ -234,22 +272,25 @@ static char *igdb_request(const char *endpoint, const char *body) {
 
         fprintf(stderr, "IGDB: HTTP %ld from %s: %s\n", http_code, endpoint, preview);
         if (igdb_logfile) fprintf(igdb_logfile, "    -> HTTP %ld: %s\n", http_code, preview);
+        free(chunk.data);
 
         if (http_code == 401) {
-            /* Token expired or invalid — force refresh on next call */
             fprintf(stderr, "IGDB: 401 Unauthorized, invalidating token\n");
             token_expires = 0;
+            /* Retry will re-fetch token */
+            continue;
         } else if (http_code == 429) {
-            fprintf(stderr, "IGDB: Rate limited (429), back off\n");
+            fprintf(stderr, "IGDB: Rate limited (429), backing off...\n");
+            continue; /* retry with backoff */
+        } else {
+            /* Other error (400, 500, etc.) — don't retry */
+            break;
         }
-
-        free(chunk.data);
-        pthread_mutex_unlock(&igdb_mutex);
-        return NULL;
     }
 
+    curl_slist_free_all(headers);
     pthread_mutex_unlock(&igdb_mutex);
-    return chunk.data;
+    return NULL;
 }
 
 static char *get_string(cJSON *obj, const char *key) {
@@ -872,6 +913,17 @@ static IgdbGame *igdb_words_query(const char *title, const char *terms[],
     return g;
 }
 
+static int is_stop_word(const char *word) {
+    static const char *stop_words[] = {
+        "the", "and", "for", "from", "with", "into", "over",
+        "its", "his", "her", "that", "this", "not", NULL
+    };
+    for (int i = 0; stop_words[i]; i++) {
+        if (strcmp(word, stop_words[i]) == 0) return 1;
+    }
+    return 0;
+}
+
 IgdbGame *igdb_search_game_by_words(const char *title, int platform_id) {
     if (!title || !title[0]) return NULL;
 
@@ -894,11 +946,11 @@ IgdbGame *igdb_search_game_by_words(const char *title, int platform_id) {
         }
     }
 
-    /* Filter to words >= 3 chars for the primary query */
+    /* Filter to words >= 3 chars AND not stop words */
     const char *long_words[8];
     int nlong = 0;
     for (int i = 0; i < all_nwords && nlong < 8; i++) {
-        if (strlen(all_words[i]) >= 3)
+        if (strlen(all_words[i]) >= 3 && !is_stop_word(all_words[i]))
             long_words[nlong++] = all_words[i];
     }
 
@@ -924,6 +976,15 @@ IgdbGame *igdb_search_game_by_words(const char *title, int platform_id) {
         IgdbGame *g = igdb_words_query(title, sorted, nsorted, platform_id);
         if (g) return g;
         usleep(260000);
+
+        /* Phase A.5: If 3+ words failed, try just the 2 longest */
+        if (nsorted > 2) {
+            printf("IGDB: Fallback 2-word search for \"%s\" [%s + %s]\n",
+                   title, sorted[0], sorted[1]);
+            g = igdb_words_query(title, sorted, 2, platform_id);
+            if (g) return g;
+            usleep(260000);
+        }
     }
 
     /* --- Phase B: sub-word split for compound words --- */
@@ -976,6 +1037,129 @@ IgdbGame *igdb_search_game_by_words(const char *title, int platform_id) {
     }
 
     return NULL;
+}
+
+IgdbGame *igdb_search_by_alt_name(const char *title, int platform_id) {
+    if (!title || !title[0]) return NULL;
+
+    /* Escape double quotes */
+    char escaped[256];
+    {
+        const char *s = title;
+        char *d = escaped;
+        char *end = escaped + sizeof(escaped) - 1;
+        while (*s && d < end) {
+            if (*s != '"') *d++ = *s;
+            s++;
+        }
+        *d = '\0';
+    }
+
+    /* Step 1: Search alternative_names for matching entries */
+    char body[512];
+    snprintf(body, sizeof(body),
+        "fields game;\n"
+        "where name ~ *\"%s\"*;\n"
+        "limit 10;",
+        escaped);
+
+    char *response = igdb_request("alternative_names", body);
+    if (!response) return NULL;
+
+    cJSON *json = cJSON_Parse(response);
+    free(response);
+    if (!json || !cJSON_IsArray(json) || cJSON_GetArraySize(json) == 0) {
+        cJSON_Delete(json);
+        return NULL;
+    }
+
+    /* Collect unique game IDs */
+    int game_ids[10];
+    int ngames = 0;
+    int n = cJSON_GetArraySize(json);
+    for (int i = 0; i < n && ngames < 10; i++) {
+        cJSON *item = cJSON_GetArrayItem(json, i);
+        if (!item) continue;
+        cJSON *gid = cJSON_GetObjectItem(item, "game");
+        if (!gid || !cJSON_IsNumber(gid)) continue;
+        int id = gid->valueint;
+        /* Deduplicate */
+        int dup = 0;
+        for (int j = 0; j < ngames; j++) {
+            if (game_ids[j] == id) { dup = 1; break; }
+        }
+        if (!dup) game_ids[ngames++] = id;
+    }
+    cJSON_Delete(json);
+
+    if (ngames == 0) return NULL;
+
+    /* Step 2: Fetch game details for matched IDs with platform filter */
+    char ids_str[256];
+    int pos = 0;
+    for (int i = 0; i < ngames; i++) {
+        if (i > 0) pos += snprintf(ids_str + pos, sizeof(ids_str) - pos, ",");
+        pos += snprintf(ids_str + pos, sizeof(ids_str) - pos, "%d", game_ids[i]);
+    }
+
+    char body2[1024];
+    pos = snprintf(body2, sizeof(body2),
+        "fields name,summary,first_release_date,genres.name,platforms.name,"
+        "involved_companies.company.name,involved_companies.developer,"
+        "involved_companies.publisher,total_rating,cover.image_id;\n"
+        "where id = (%s)", ids_str);
+    if (platform_id > 0)
+        pos += snprintf(body2 + pos, sizeof(body2) - pos,
+            " & platforms = (%d)", platform_id);
+    snprintf(body2 + pos, sizeof(body2) - pos, ";\nlimit 10;");
+
+    usleep(260000);
+    response = igdb_request("games", body2);
+    if (!response) return NULL;
+
+    json = cJSON_Parse(response);
+    free(response);
+    if (!json || !cJSON_IsArray(json) || cJSON_GetArraySize(json) == 0) {
+        cJSON_Delete(json);
+        return NULL;
+    }
+
+    /* Score results against the search title */
+    int best_score = 0;
+    cJSON *best_game = NULL;
+    n = cJSON_GetArraySize(json);
+    for (int i = 0; i < n; i++) {
+        cJSON *game = cJSON_GetArrayItem(json, i);
+        if (!game) continue;
+        cJSON *name_item = cJSON_GetObjectItem(game, "name");
+        if (!name_item || !cJSON_IsString(name_item)) continue;
+        int score = title_match_score(title, name_item->valuestring);
+        /* For alt-name matches, accept lower threshold since the name
+         * may be quite different from the search title */
+        if (score > best_score) { best_score = score; best_game = game; }
+    }
+
+    /* Accept any match found via alternative_names (threshold 20) since
+     * we know the alt name matched the search string */
+    if (best_score < 20 || !best_game) {
+        /* If scoring against game name fails, just take the first result
+         * since we found it via alternative_names match */
+        best_game = cJSON_GetArrayItem(json, 0);
+        if (!best_game) {
+            cJSON_Delete(json);
+            return NULL;
+        }
+    }
+
+    if (igdb_logfile) {
+        cJSON *bn = cJSON_GetObjectItem(best_game, "name");
+        fprintf(igdb_logfile, "    -> alt_name: %d results, matched: \"%s\" score=%d\n",
+            n, (bn && cJSON_IsString(bn)) ? bn->valuestring : "?", best_score);
+    }
+
+    IgdbGame *g = parse_igdb_game(best_game);
+    cJSON_Delete(json);
+    return g;
 }
 
 char *igdb_get_game_cover(int igdb_id) {

@@ -274,9 +274,28 @@ static int process_download_file(const char *filepath) {
 	base = base ? base + 1 : filepath;
 
 	if (scanner_parse_tv_info(filepath, show_name, &season, &episode, &year)) {
-		/* TV Episode */
+		/* TV Episode — generate clean filename */
 		char show_folder[512];
 		build_show_folder(show_name, year, show_folder, sizeof(show_folder));
+
+		/* Build clean filename: Show.Name.S01E02.ext */
+		const char *orig_ext = strrchr(base, '.');
+		if (!orig_ext) orig_ext = ".mkv";
+
+		char clean_name[512];
+		/* Replace spaces with dots in show name */
+		char dotted_name[256];
+		strncpy(dotted_name, show_name, sizeof(dotted_name) - 1);
+		dotted_name[sizeof(dotted_name) - 1] = '\0';
+		for (char *p = dotted_name; *p; p++) {
+			if (*p == ' ') *p = '.';
+		}
+		if (year > 0)
+			snprintf(clean_name, sizeof(clean_name), "%s.%d.S%02dE%02d%s",
+			         dotted_name, year, season, episode, orig_ext);
+		else
+			snprintf(clean_name, sizeof(clean_name), "%s.S%02dE%02d%s",
+			         dotted_name, season, episode, orig_ext);
 
 		/* Check if show folder already exists on any disk */
 		char existing_name[512];
@@ -286,13 +305,13 @@ static int process_download_file(const char *filepath) {
 			/* Use existing folder name (preserves original casing) */
 			snprintf(dest, sizeof(dest), "%s/nixly_ready_media/TV/%s/Season%d/%s",
 			         server_config.converted_paths[disk],
-			         existing_name, season, base);
+			         existing_name, season, clean_name);
 		} else {
 			/* New show — put on first disk */
 			disk = 0;
 			snprintf(dest, sizeof(dest), "%s/nixly_ready_media/TV/%s/Season%d/%s",
 			         server_config.converted_paths[disk],
-			         show_folder, season, base);
+			         show_folder, season, clean_name);
 		}
 
 		printf("Downloads: TV [%s S%02dE%02d] -> %s\n",
@@ -330,6 +349,9 @@ static int process_download_file(const char *filepath) {
 	}
 
 	printf("Downloads: Moved %s\n", dest);
+
+	/* Scan into database and fetch TMDB metadata */
+	scanner_scan_file(dest, 1);
 
 	/* Move matching subtitle files */
 	char src_dir[DL_MAX_PATH];

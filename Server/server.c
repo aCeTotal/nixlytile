@@ -62,6 +62,26 @@ static int get_max_streams(void) {
 /* Forward declaration - defined after startup_scan_thread */
 static void on_file_change(const char *filepath, int is_delete, WatchType type);
 
+/* Parallel scrape threads — TMDB and IGDB use different APIs so can run concurrently */
+static void *scrape_tmdb_thread(void *arg) {
+    (void)arg;
+    printf("Scrape: TMDB thread started\n");
+    scanner_fetch_missing_tmdb();
+    scanner_refresh_show_status();
+    printf("Scrape: TMDB thread done\n");
+    return NULL;
+}
+
+static void *scrape_rom_thread(void *arg) {
+    (void)arg;
+    printf("Scrape: ROM/IGDB thread started\n");
+    scanner_fetch_rom_metadata();
+    scanner_fetch_rom_covers();
+    scanner_fetch_libretro_covers();
+    printf("Scrape: ROM/IGDB thread done\n");
+    return NULL;
+}
+
 /* Initial startup scan thread - runs heavy I/O and network work in background
  * so the HTTP server can accept connections immediately */
 static void *startup_scan_thread(void *arg) {
@@ -86,16 +106,7 @@ static void *startup_scan_thread(void *arg) {
     }
     printf("Startup scan: Found %d media files.\n", database_get_count());
 
-    /* Session-based progress: all scrape operations accumulate into one progress bar */
-    scanner_scrape_session_begin();
-
-    /* Fetch TMDB metadata for any entries missing it */
-    if (running) scanner_fetch_missing_tmdb();
-
-    /* Refresh show status (next episode dates, ended status) */
-    if (running) scanner_refresh_show_status();
-
-    /* Scan ROM directories */
+    /* Scan ROM directories (must finish before IGDB metadata fetch) */
     if (running) {
         printf("Startup scan: Scanning ROM directories...\n");
         for (int i = 0; i < server_config.roms_path_count && running; i++) {
@@ -103,8 +114,36 @@ static void *startup_scan_thread(void *arg) {
             scanner_scan_rom_directory(server_config.roms_paths[i]);
         }
         printf("Startup scan: Found %d ROMs.\n", database_get_rom_count());
-        if (running) scanner_fetch_rom_metadata();
-        if (running) scanner_fetch_rom_covers();
+    }
+
+    /* Session-based progress: all scrape operations accumulate into one progress bar */
+    scanner_scrape_session_begin();
+
+    /* Run TMDB and IGDB/ROM scraping in parallel — they use different APIs */
+    {
+        pthread_t tmdb_thread, rom_thread;
+        int have_tmdb = 0, have_rom = 0;
+
+        if (running) {
+            have_tmdb = (pthread_create(&tmdb_thread, NULL, scrape_tmdb_thread, NULL) == 0);
+        }
+        if (running) {
+            have_rom = (pthread_create(&rom_thread, NULL, scrape_rom_thread, NULL) == 0);
+        }
+
+        /* If thread creation failed, run sequentially as fallback */
+        if (!have_tmdb && running) {
+            scanner_fetch_missing_tmdb();
+            scanner_refresh_show_status();
+        }
+        if (!have_rom && running) {
+            scanner_fetch_rom_metadata();
+            scanner_fetch_rom_covers();
+            scanner_fetch_libretro_covers();
+        }
+
+        if (have_tmdb) pthread_join(tmdb_thread, NULL);
+        if (have_rom) pthread_join(rom_thread, NULL);
     }
 
     scanner_scrape_session_end();
@@ -199,16 +238,7 @@ static void *sync_thread(void *arg) {
             printf("Periodic sync: Media count changed %d -> %d\n", before, after);
         }
 
-        /* Periodic scrape session: retry all missing metadata */
-        scanner_scrape_session_begin();
-
-        /* Fetch any missing TMDB metadata */
-        scanner_fetch_missing_tmdb();
-
-        /* Refresh show status (next episode dates, ended status) */
-        scanner_refresh_show_status();
-
-        /* Periodic ROM rescan (backup to inotify) */
+        /* Periodic ROM rescan (backup to inotify) — must finish before IGDB metadata */
         int rom_before = database_get_rom_count();
         for (int i = 0; i < server_config.roms_path_count; i++) {
             scanner_scan_rom_directory(server_config.roms_paths[i]);
@@ -218,9 +248,27 @@ static void *sync_thread(void *arg) {
             printf("Periodic sync: ROM count changed %d -> %d\n", rom_before, rom_after);
         }
 
-        /* Always retry missing ROM metadata (including previously-failed) */
-        scanner_fetch_rom_metadata();
-        scanner_fetch_rom_covers();
+        /* Periodic scrape session: retry all missing metadata in parallel */
+        scanner_scrape_session_begin();
+
+        {
+            pthread_t tmdb_t, rom_t;
+            int have_tmdb = (pthread_create(&tmdb_t, NULL, scrape_tmdb_thread, NULL) == 0);
+            int have_rom = (pthread_create(&rom_t, NULL, scrape_rom_thread, NULL) == 0);
+
+            if (!have_tmdb) {
+                scanner_fetch_missing_tmdb();
+                scanner_refresh_show_status();
+            }
+            if (!have_rom) {
+                scanner_fetch_rom_metadata();
+                scanner_fetch_rom_covers();
+                scanner_fetch_libretro_covers();
+            }
+
+            if (have_tmdb) pthread_join(tmdb_t, NULL);
+            if (have_rom) pthread_join(rom_t, NULL);
+        }
 
         scanner_scrape_session_end();
 
@@ -894,6 +942,7 @@ static void handle_api(int fd, const char *path) {
             scanner_scan_rom_directory(server_config.roms_paths[i]);
         scanner_fetch_rom_metadata();
         scanner_fetch_rom_covers();
+        scanner_fetch_libretro_covers();
         scanner_scrape_session_end();
         char json[128];
         int len = snprintf(json, sizeof(json),
@@ -905,6 +954,7 @@ static void handle_api(int fd, const char *path) {
         scanner_scrape_session_begin();
         scanner_rescan_all_rom_metadata();
         scanner_fetch_rom_covers();
+        scanner_fetch_libretro_covers();
         scanner_scrape_session_end();
         char json[128];
         int len = snprintf(json, sizeof(json),

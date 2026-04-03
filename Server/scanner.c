@@ -16,6 +16,8 @@
 #include <libavcodec/avcodec.h>
 #include <libavutil/dict.h>
 #include <zip.h>
+#include <archive.h>
+#include <archive_entry.h>
 
 #include "scanner.h"
 #include "database.h"
@@ -1050,12 +1052,161 @@ static const char **rom_ext_table[] = {
     rom_extensions_gamegear,   /* 28 Game Gear */
 };
 
+/* ========================================================================
+ * libretro-thumbnails cover art fallback
+ * Downloads box art from the libretro-thumbnails GitHub repos.
+ * Uses No-Intro naming convention to match ROM filenames.
+ * ======================================================================== */
+
+/* Map ConsoleType to libretro-thumbnails GitHub repo name */
+static const char *libretro_console_repo(int console) {
+    switch (console) {
+    case CONSOLE_NES:           return "Nintendo_-_Nintendo_Entertainment_System";
+    case CONSOLE_SNES:          return "Nintendo_-_Super_Nintendo_Entertainment_System";
+    case CONSOLE_N64:           return "Nintendo_-_Nintendo_64";
+    case CONSOLE_GAMECUBE:      return "Nintendo_-_GameCube";
+    case CONSOLE_WII:           return "Nintendo_-_Wii";
+    case CONSOLE_GB:            return "Nintendo_-_Game_Boy";
+    case CONSOLE_GBC:           return "Nintendo_-_Game_Boy_Color";
+    case CONSOLE_GBA:           return "Nintendo_-_Game_Boy_Advance";
+    case CONSOLE_PS2:           return "Sony_-_PlayStation_2";
+    case CONSOLE_SWITCH:        return "Nintendo_-_Switch";
+    case CONSOLE_PS1:           return "Sony_-_PlayStation";
+    case CONSOLE_PS3:           return "Sony_-_PlayStation_3";
+    case CONSOLE_PS4:           return "Sony_-_PlayStation_4";
+    case CONSOLE_PSP:           return "Sony_-_PlayStation_Portable";
+    case CONSOLE_VITA:          return "Sony_-_PlayStation_Vita";
+    case CONSOLE_XBOX:          return "Microsoft_-_Xbox";
+    case CONSOLE_XBOX360:       return "Microsoft_-_Xbox_360";
+    case CONSOLE_WIIU:          return "Nintendo_-_Wii_U";
+    case CONSOLE_DS:            return "Nintendo_-_Nintendo_DS";
+    case CONSOLE_3DS:           return "Nintendo_-_Nintendo_3DS";
+    case CONSOLE_GENESIS:       return "Sega_-_Mega_Drive_-_Genesis";
+    case CONSOLE_MASTER_SYSTEM: return "Sega_-_Master_System_-_Mark_III";
+    case CONSOLE_SATURN:        return "Sega_-_Saturn";
+    case CONSOLE_DREAMCAST:     return "Sega_-_Dreamcast";
+    case CONSOLE_SEGACD:        return "Sega_-_Mega-CD_-_Sega_CD";
+    case CONSOLE_ATARI2600:     return "Atari_-_2600";
+    case CONSOLE_TGFX16:       return "NEC_-_PC_Engine_-_TurboGrafx_16";
+    case CONSOLE_32X:           return "Sega_-_32X";
+    case CONSOLE_GAMEGEAR:      return "Sega_-_Game_Gear";
+    default: return NULL;
+    }
+}
+
+/* URL-encode a filename for use in a URL.
+ * Encodes spaces, parentheses, ampersands, and other special characters. */
+static void url_encode(const char *src, char *dst, size_t dst_size) {
+    static const char *safe = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~";
+    char *d = dst;
+    char *end = dst + dst_size - 4;
+    while (*src && d < end) {
+        if (strchr(safe, *src)) {
+            *d++ = *src;
+        } else {
+            snprintf(d, 4, "%%%02X", (unsigned char)*src);
+            d += 3;
+        }
+        src++;
+    }
+    *d = '\0';
+}
+
+/* Try downloading a cover from libretro-thumbnails GitHub.
+ * filepath: full path to the ROM file
+ * console: ConsoleType enum
+ * cache_dir: directory to save the cover image
+ * Returns allocated path to the cover file, or NULL on failure. */
+static char *try_libretro_cover(const char *filepath, int console, const char *cache_dir) {
+    const char *repo = libretro_console_repo(console);
+    if (!repo) return NULL;
+
+    /* Extract ROM filename without extension */
+    const char *base = strrchr(filepath, '/');
+    base = base ? base + 1 : filepath;
+
+    char rom_name[512];
+    strncpy(rom_name, base, sizeof(rom_name) - 1);
+    rom_name[sizeof(rom_name) - 1] = '\0';
+
+    /* Strip archive extension — for .7z/.zip/.rar, use inner filename concept
+     * but since we don't know the inner name, use the archive name itself */
+    char *ext = strrchr(rom_name, '.');
+    if (ext) *ext = '\0';
+
+    if (rom_name[0] == '\0') return NULL;
+
+    /* Sanitize filename for cache path */
+    char safe_name[256];
+    strncpy(safe_name, rom_name, sizeof(safe_name) - 1);
+    safe_name[sizeof(safe_name) - 1] = '\0';
+    for (char *p = safe_name; *p; p++) {
+        if (*p == '/' || *p == '\\') *p = '_';
+    }
+
+    /* Check if already cached */
+    char local_path[4096];
+    snprintf(local_path, sizeof(local_path), "%s/cover_%d_%s.png",
+             cache_dir, console, safe_name);
+
+    struct stat st;
+    if (stat(local_path, &st) == 0 && st.st_size > 100)
+        return strdup(local_path);
+
+    /* Also check .jpg variant (IGDB may have saved one) */
+    char jpg_path[4096];
+    snprintf(jpg_path, sizeof(jpg_path), "%s/cover_%d_%s.jpg",
+             cache_dir, console, safe_name);
+    if (stat(jpg_path, &st) == 0 && st.st_size > 100)
+        return strdup(jpg_path);
+
+    /* URL-encode the ROM name for the GitHub URL */
+    char encoded_name[2048];
+    url_encode(rom_name, encoded_name, sizeof(encoded_name));
+
+    /* Construct GitHub raw URL:
+     * https://raw.githubusercontent.com/libretro-thumbnails/{repo}/master/Named_Boxarts/{name}.png */
+    char url[4096];
+    snprintf(url, sizeof(url),
+        "https://raw.githubusercontent.com/libretro-thumbnails/%s/master/Named_Boxarts/%s.png",
+        repo, encoded_name);
+
+    mkdir(cache_dir, 0755);
+
+    CURL *dl = curl_easy_init();
+    if (!dl) return NULL;
+
+    FILE *f = fopen(local_path, "wb");
+    if (!f) {
+        curl_easy_cleanup(dl);
+        return NULL;
+    }
+
+    curl_easy_setopt(dl, CURLOPT_URL, url);
+    curl_easy_setopt(dl, CURLOPT_WRITEDATA, f);
+    curl_easy_setopt(dl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(dl, CURLOPT_TIMEOUT, 15L);
+    curl_easy_setopt(dl, CURLOPT_FAILONERROR, 1L);
+
+    CURLcode res = curl_easy_perform(dl);
+    curl_easy_cleanup(dl);
+    fclose(f);
+
+    if (res == CURLE_OK && stat(local_path, &st) == 0 && st.st_size > 100)
+        return strdup(local_path);
+
+    unlink(local_path);
+    return NULL;
+}
+
 /* All ROM extensions combined for quick check */
 int scanner_is_rom_file(const char *path) {
     const char *ext = strrchr(path, '.');
     if (!ext) return 0;
 
-    if (strcasecmp(ext, ".zip") == 0)
+    if (strcasecmp(ext, ".zip") == 0 ||
+        strcasecmp(ext, ".7z") == 0 ||
+        strcasecmp(ext, ".rar") == 0)
         return 1;
 
     for (int c = 0; c < CONSOLE_COUNT; c++) {
@@ -1173,6 +1324,64 @@ done:
     return result;
 }
 
+/* Detect console type by inspecting filenames inside a .7z/.rar archive via libarchive.
+ * Same logic as scanner_detect_console_from_zip but using libarchive API.
+ * For .gb files, reads the ROM header to distinguish GB vs GBC. */
+static int scanner_detect_console_from_archive(const char *path) {
+    struct archive *a = archive_read_new();
+    if (!a) return -1;
+
+    archive_read_support_filter_all(a);
+    archive_read_support_format_all(a);
+
+    if (archive_read_open_filename(a, path, 16384) != ARCHIVE_OK) {
+        archive_read_free(a);
+        return -1;
+    }
+
+    int result = -1;
+    int need_gb_header = 0;
+
+    struct archive_entry *entry;
+    while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+        const char *name = archive_entry_pathname(entry);
+        if (!name) { archive_read_data_skip(a); continue; }
+
+        const char *ext = strrchr(name, '.');
+        if (!ext) { archive_read_data_skip(a); continue; }
+
+        for (int c = 0; c < CONSOLE_COUNT; c++) {
+            /* Skip disc-based consoles — emulators don't support disc images in archives */
+            if (c == CONSOLE_GAMECUBE || c == CONSOLE_WII || c == CONSOLE_WIIU ||
+                c == CONSOLE_PS1 || c == CONSOLE_PS2 || c == CONSOLE_PS3 || c == CONSOLE_PS4 ||
+                c == CONSOLE_PSP || c == CONSOLE_VITA ||
+                c == CONSOLE_XBOX || c == CONSOLE_XBOX360 ||
+                c == CONSOLE_SATURN || c == CONSOLE_DREAMCAST || c == CONSOLE_SEGACD)
+                continue;
+            for (int j = 0; rom_ext_table[c][j]; j++) {
+                if (strcasecmp(ext, rom_ext_table[c][j]) == 0) {
+                    result = c;
+                    if (c == CONSOLE_GB) need_gb_header = 1;
+                    goto archive_done;
+                }
+            }
+        }
+        archive_read_data_skip(a);
+    }
+
+archive_done:
+    /* For .gb files inside archive, read ROM header to distinguish GB vs GBC */
+    if (need_gb_header && result == CONSOLE_GB) {
+        unsigned char header[0x144];
+        ssize_t rd = archive_read_data(a, header, sizeof(header));
+        if (rd >= (ssize_t)sizeof(header))
+            result = scanner_detect_gb_vs_gbc(header, rd);
+    }
+
+    archive_read_free(a);
+    return result;
+}
+
 /* Try to infer console type from parent directory name.
  * Matches common directory names like "GBA", "Game Boy Advance", "SNES", etc. */
 static int scanner_detect_console_from_dir(const char *path) {
@@ -1250,6 +1459,14 @@ int scanner_detect_console(const char *path) {
     /* .zip — inspect contents, fall back to directory name */
     if (strcasecmp(ext, ".zip") == 0) {
         int result = scanner_detect_console_from_zip(path);
+        if (result < 0)
+            result = scanner_detect_console_from_dir(path);
+        return result;
+    }
+
+    /* .7z / .rar — inspect contents via libarchive, fall back to directory name */
+    if (strcasecmp(ext, ".7z") == 0 || strcasecmp(ext, ".rar") == 0) {
+        int result = scanner_detect_console_from_archive(path);
         if (result < 0)
             result = scanner_detect_console_from_dir(path);
         return result;
@@ -1490,6 +1707,52 @@ void scanner_fetch_rom_covers(void) {
     printf("IGDB: Cover fetch complete (%d/%d downloaded)\n", fetched, count);
 }
 
+/* Fetch cover art from libretro-thumbnails GitHub for ALL ROMs without covers.
+ * This is a fallback that works even when IGDB didn't match the ROM.
+ * Uses the original ROM filename (No-Intro naming convention) to download. */
+void scanner_fetch_libretro_covers(void) {
+    int *ids = NULL, *consoles = NULL;
+    char **filepaths = NULL;
+    int count = 0;
+
+    if (database_get_all_roms_without_cover(&ids, &filepaths, &consoles, &count) != 0
+        || count == 0) {
+        free(ids); free(filepaths); free(consoles);
+        return;
+    }
+
+    printf("libretro-thumbnails: Fetching covers for %d ROMs...\n", count);
+    scrape_begin("libretro_covers", count);
+
+    int fetched = 0;
+    for (int i = 0; i < count; i++) {
+        char *cover = try_libretro_cover(filepaths[i], consoles[i],
+                                          server_config.cache_dir);
+        if (cover) {
+            database_update_rom_cover(ids[i], cover);
+            /* Extract basename for logging */
+            const char *base = strrchr(filepaths[i], '/');
+            base = base ? base + 1 : filepaths[i];
+            printf("  libretro cover: %s [OK]\n", base);
+            free(cover);
+            fetched++;
+            scrape_update(base, 1);
+        } else {
+            scrape_update("", 0);
+        }
+
+        /* Small delay to avoid hammering GitHub */
+        if (fetched > 0 && fetched % 50 == 0)
+            usleep(500000);
+    }
+
+    for (int i = 0; i < count; i++) free(filepaths[i]);
+    free(ids); free(filepaths); free(consoles);
+
+    scrape_end();
+    printf("libretro-thumbnails: Cover fetch complete (%d/%d downloaded)\n", fetched, count);
+}
+
 /* Clean a ROM title for IGDB search: strip region tags, version tags, etc. */
 static void clean_rom_title(const char *raw, char *out, size_t out_size) {
     strncpy(out, raw, out_size - 1);
@@ -1506,8 +1769,11 @@ static void clean_rom_title(const char *raw, char *out, size_t out_size) {
         if (ndigits >= 3 && strncmp(p, " - ", 3) == 0) {
             int num = atoi(out);
             /* If it's NOT a plausible game year (1900-2100), always strip.
-             * If it IS a plausible year, don't strip — it might be a real game title. */
-            if (num < 1900 || num > 2100) {
+             * If it IS a plausible year, don't strip — it might be a real game title.
+             * Exception: leading zeros (0006, 0150) are ALWAYS collection indices
+             * (real years never have leading zeros), and 5+ digit numbers too. */
+            int has_leading_zero = (ndigits >= 4 && out[0] == '0');
+            if (num < 1900 || num > 2100 || has_leading_zero || ndigits > 4) {
                 memmove(out, p + 3, strlen(p + 3) + 1);
             }
         }
@@ -2242,6 +2508,40 @@ void scanner_fetch_rom_metadata(void) {
                     }
                     if (!g) usleep(260000);
                     else match_method = "words-noplatform";
+                }
+
+                /* Phase 7: alternative_names search (different regional/marketing titles) */
+                if (!g) {
+                    g = igdb_search_by_alt_name(variations[0], platform_id);
+                    queries_tried++;
+                    if (logf) {
+                        fprintf(logf, "  [%d] alt_name \"%s\" plat=%d -> %s\n",
+                            queries_tried, variations[0], platform_id,
+                            g ? g->name : "MISS");
+                    }
+                    if (!g) usleep(260000);
+                    else match_method = "alt_name+platform";
+                }
+
+                /* Phase 7b: alternative_names without platform + validation */
+                if (!g) {
+                    g = igdb_search_by_alt_name(variations[0], 0);
+                    queries_tried++;
+                    if (logf) {
+                        fprintf(logf, "  [%d] alt_name \"%s\" plat=ANY -> %s\n",
+                            queries_tried, variations[0],
+                            g ? g->name : "MISS");
+                    }
+                    if (g && g->platforms && !platform_matches_console(g->platforms, c)) {
+                        if (logf) {
+                            fprintf(logf, "  [%d] REJECTED (wrong platform: %s)\n",
+                                queries_tried, g->platforms);
+                        }
+                        igdb_free_game(g);
+                        g = NULL;
+                    }
+                    if (!g) usleep(260000);
+                    else match_method = "alt_name-noplatform";
                 }
 
                 if (g) {

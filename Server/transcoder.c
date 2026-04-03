@@ -941,6 +941,13 @@ static void collect_from_dir(const char *path, JobList *list) {
     DIR *dir = opendir(path);
     if (!dir) return;
 
+    /* Skip the downloads directory — handled by downloads module */
+    if (server_config.download_path[0] &&
+        strncmp(path, server_config.download_path, strlen(server_config.download_path)) == 0) {
+        closedir(dir);
+        return;
+    }
+
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         if (entry->d_name[0] == '.') continue;

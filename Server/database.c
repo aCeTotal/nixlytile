@@ -1416,6 +1416,41 @@ int database_get_roms_without_cover(int **ids, char ***titles, int **consoles, i
     return 0;
 }
 
+/* Get ALL ROMs without cover art (regardless of IGDB match status).
+ * Used for libretro-thumbnails fallback cover fetching. */
+int database_get_all_roms_without_cover(int **ids, char ***filepaths, int **consoles, int *count) {
+    const char *sql =
+        "SELECT id, filepath, console FROM roms "
+        "WHERE cover_path IS NULL OR cover_path = '' "
+        "ORDER BY console, title";
+    sqlite3_stmt *stmt;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+
+    int cap = 256;
+    *ids = malloc(cap * sizeof(int));
+    *filepaths = malloc(cap * sizeof(char *));
+    *consoles = malloc(cap * sizeof(int));
+    *count = 0;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (*count >= cap) {
+            cap *= 2;
+            *ids = realloc(*ids, cap * sizeof(int));
+            *filepaths = realloc(*filepaths, cap * sizeof(char *));
+            *consoles = realloc(*consoles, cap * sizeof(int));
+        }
+        (*ids)[*count] = sqlite3_column_int(stmt, 0);
+        const char *f = (const char *)sqlite3_column_text(stmt, 1);
+        (*filepaths)[*count] = f ? strdup(f) : strdup("");
+        (*consoles)[*count] = sqlite3_column_int(stmt, 2);
+        (*count)++;
+    }
+
+    sqlite3_finalize(stmt);
+    return 0;
+}
+
 int database_reset_rom_igdb(void) {
     const char *sql = "UPDATE roms SET igdb_id = NULL, description = NULL, "
         "developer = NULL, publisher = NULL, release_year = 0, genre = NULL, "

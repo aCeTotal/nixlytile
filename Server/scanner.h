@@ -61,6 +61,9 @@ int scanner_scan_rom_file(const char *filepath, int console);
 int scanner_scan_rom_directory(const char *path);
 void scanner_fetch_rom_covers(void);
 
+/* Fetch covers from libretro-thumbnails GitHub for ROMs without covers */
+void scanner_fetch_libretro_covers(void);
+
 /* Session-based progress: accumulates totals across multiple operations */
 void scanner_scrape_session_begin(void);
 void scanner_scrape_session_end(void);

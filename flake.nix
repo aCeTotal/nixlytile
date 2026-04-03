@@ -240,6 +240,7 @@
               pkgs.curl
               pkgs.cjson
               pkgs.libzip
+              pkgs.libarchive
             ];
 
             buildPhase = ''

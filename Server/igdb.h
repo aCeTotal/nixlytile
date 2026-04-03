@@ -43,6 +43,10 @@ IgdbGame *igdb_search_game_by_name(const char *title, int platform_id);
  * Catches compound word mismatches: "Duck Tales" finds "DuckTales" */
 IgdbGame *igdb_search_game_by_words(const char *title, int platform_id);
 
+/* Search by alternative game names in IGDB (different regional/marketing titles).
+ * Uses alternative_names endpoint to find game IDs, then fetches game details. */
+IgdbGame *igdb_search_by_alt_name(const char *title, int platform_id);
+
 /* Fetch cover URL for a game by IGDB ID (targeted query, no search).
  * Returns cover URL string (caller frees) or NULL if not found */
 char *igdb_get_game_cover(int igdb_id);
