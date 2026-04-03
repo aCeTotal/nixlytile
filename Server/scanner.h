@@ -9,10 +9,10 @@
 #include <pthread.h>
 #include <time.h>
 
-/* Live scraping progress tracking */
+/* Live scraping progress tracking — one per domain (TMDB / IGDB) */
 typedef struct {
     int active;             /* 1 if a scraping operation is running */
-    const char *operation;  /* "tmdb_fetch", "tmdb_rescan", "igdb_fetch", "igdb_rescan", "show_status" */
+    const char *operation;  /* e.g. "tmdb_fetch", "igdb_fetch", "igdb_covers" */
     char current_item[256]; /* Title being scraped right now */
     int total;              /* Total items to process (accumulates in session mode) */
     int processed;          /* Items completed so far */
@@ -22,10 +22,12 @@ typedef struct {
     pthread_mutex_t lock;
 } ScrapeProgress;
 
-extern ScrapeProgress scrape_progress;
+/* Two independent progress trackers */
+extern ScrapeProgress tmdb_progress;
+extern ScrapeProgress igdb_progress;
 
 /* Get scrape progress snapshot (thread-safe) */
-void scanner_get_scrape_status(int *active, const char **operation,
+void scanner_get_progress(ScrapeProgress *p, int *active, const char **operation,
     char *current_item, int current_item_size,
     int *total, int *processed, int *success, time_t *start_time);
 
@@ -65,8 +67,8 @@ void scanner_fetch_rom_covers(void);
 void scanner_fetch_libretro_covers(void);
 
 /* Session-based progress: accumulates totals across multiple operations */
-void scanner_scrape_session_begin(void);
-void scanner_scrape_session_end(void);
+void scanner_scrape_session_begin(ScrapeProgress *p);
+void scanner_scrape_session_end(ScrapeProgress *p);
 
 /* Fetch IGDB metadata for ROMs that don't have it */
 void scanner_fetch_rom_metadata(void);

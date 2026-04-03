@@ -1,7 +1,10 @@
 /*
  * Nixly Media Server - Download Monitor
  * Scans a downloads directory for completed media files, classifies them
- * as Movie or TV, and moves them to the appropriate nixly_ready_media folder.
+ * as Movie or TV, renames cleanly, scrapes TMDB, and moves to
+ * converted_paths[]/nixly_ready_media/TV|Movies/.
+ *
+ * No transcoding — files are moved as-is.
  */
 
 #include <stdio.h>
@@ -66,7 +69,6 @@ static int is_sample_file(const char *path, off_t size) {
 	const char *base = strrchr(path, '/');
 	base = base ? base + 1 : path;
 
-	/* Case-insensitive search for "sample" in filename */
 	char lower[256];
 	size_t len = strlen(base);
 	if (len >= sizeof(lower)) len = sizeof(lower) - 1;
@@ -88,7 +90,6 @@ static int is_file_stable(const char *path) {
 
 /* Move a file, trying rename first, falling back to copy+delete for cross-fs */
 static int move_file(const char *src, const char *dst) {
-	/* Try rename first (same filesystem) */
 	if (rename(src, dst) == 0)
 		return 0;
 
@@ -135,7 +136,6 @@ static int move_file(const char *src, const char *dst) {
 	close(dst_fd);
 	close(src_fd);
 
-	/* Remove source after successful copy */
 	unlink(src);
 	return 0;
 }
@@ -169,7 +169,6 @@ static void cleanup_empty_dirs(const char *path, const char *stop_at) {
 		while ((ent = readdir(d)) != NULL) {
 			if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
 				continue;
-			/* Skip .nfo and .nzb files — leftover metadata from scene releases */
 			const char *ext = strrchr(ent->d_name, '.');
 			if (ext && (strcasecmp(ext, ".nfo") == 0 || strcasecmp(ext, ".nzb") == 0 ||
 			            strcasecmp(ext, ".txt") == 0 || strcasecmp(ext, ".jpg") == 0 ||
@@ -198,7 +197,6 @@ static void cleanup_empty_dirs(const char *path, const char *stop_at) {
 		if (rmdir(dir) != 0) break;
 		printf("Downloads: Removed empty dir %s\n", dir);
 
-		/* Go up one level */
 		char *slash = strrchr(dir, '/');
 		if (!slash || slash == dir) break;
 		*slash = '\0';
@@ -233,36 +231,53 @@ static int find_existing_show_folder(const char *show_folder, char *found_name, 
 
 /* Build show folder name from parsed show_name and year */
 static void build_show_folder(const char *show_name, int year, char *buf, size_t buf_size) {
-	/* Replace spaces with dots for folder name consistency */
+	char dotted[256];
+	strncpy(dotted, show_name, sizeof(dotted) - 1);
+	dotted[sizeof(dotted) - 1] = '\0';
+	for (char *p = dotted; *p; p++) {
+		if (*p == ' ') *p = '.';
+	}
 	if (year > 0)
-		snprintf(buf, buf_size, "%s.%d", show_name, year);
+		snprintf(buf, buf_size, "%s.%d", dotted, year);
 	else
-		snprintf(buf, buf_size, "%s", show_name);
+		snprintf(buf, buf_size, "%s", dotted);
 }
 
-/* Process a single media file: classify, build dest, move */
+/* Process a single media file: classify, rename, move, scrape TMDB */
 static int process_download_file(const char *filepath) {
 	struct stat st;
 	if (stat(filepath, &st) != 0) return -1;
 
+	const char *base = strrchr(filepath, '/');
+	base = base ? base + 1 : filepath;
+
 	/* Skip incomplete downloads */
-	if (is_incomplete_file(filepath)) return 0;
+	if (is_incomplete_file(filepath)) {
+		printf("Downloads: [skip] incomplete: %s\n", base);
+		return 0;
+	}
 
 	/* Skip non-media files */
 	if (!scanner_is_media_file(filepath)) return 0;
 
 	/* Skip sample files */
 	if (is_sample_file(filepath, st.st_size)) {
-		printf("Downloads: Skipping sample file %s\n", filepath);
+		printf("Downloads: [skip] sample: %s\n", base);
 		return 0;
 	}
 
 	/* Check file stability */
-	if (!is_file_stable(filepath)) return 0;
+	if (!is_file_stable(filepath)) {
+		printf("Downloads: [skip] still downloading (mtime < %ds): %s\n",
+		       DL_STABLE_AGE, base);
+		return 0;
+	}
 
 	/* Need at least one converted_path configured */
 	if (server_config.converted_path_count == 0) {
-		fprintf(stderr, "Downloads: No converted_paths configured\n");
+		fprintf(stderr, "Downloads: ERROR: No converted_path configured — cannot move files.\n"
+		        "  Add converted_path to your config, e.g.:\n"
+		        "  converted_path = /mnt/bigdisk1/www/aceclan\n");
 		return -1;
 	}
 
@@ -270,20 +285,16 @@ static int process_download_file(const char *filepath) {
 	char show_name[256] = {0};
 	int season = 0, episode = 0, year = 0;
 	char dest[DL_MAX_PATH];
-	const char *base = strrchr(filepath, '/');
-	base = base ? base + 1 : filepath;
 
 	if (scanner_parse_tv_info(filepath, show_name, &season, &episode, &year)) {
 		/* TV Episode — generate clean filename */
 		char show_folder[512];
 		build_show_folder(show_name, year, show_folder, sizeof(show_folder));
 
-		/* Build clean filename: Show.Name.S01E02.ext */
 		const char *orig_ext = strrchr(base, '.');
 		if (!orig_ext) orig_ext = ".mkv";
 
 		char clean_name[512];
-		/* Replace spaces with dots in show name */
 		char dotted_name[256];
 		strncpy(dotted_name, show_name, sizeof(dotted_name) - 1);
 		dotted_name[sizeof(dotted_name) - 1] = '\0';
@@ -302,12 +313,10 @@ static int process_download_file(const char *filepath) {
 		int disk = find_existing_show_folder(show_folder, existing_name, sizeof(existing_name));
 
 		if (disk >= 0) {
-			/* Use existing folder name (preserves original casing) */
 			snprintf(dest, sizeof(dest), "%s/nixly_ready_media/TV/%s/Season%d/%s",
 			         server_config.converted_paths[disk],
 			         existing_name, season, clean_name);
 		} else {
-			/* New show — put on first disk */
 			disk = 0;
 			snprintf(dest, sizeof(dest), "%s/nixly_ready_media/TV/%s/Season%d/%s",
 			         server_config.converted_paths[disk],
@@ -317,7 +326,7 @@ static int process_download_file(const char *filepath) {
 		printf("Downloads: TV [%s S%02dE%02d] -> %s\n",
 		       show_name, season, episode, dest);
 	} else {
-		/* Movie */
+		/* Movie — keep original filename */
 		snprintf(dest, sizeof(dest), "%s/nixly_ready_media/Movies/%s",
 		         server_config.converted_paths[0], base);
 
@@ -359,7 +368,6 @@ static int process_download_file(const char *filepath) {
 	char *src_slash = strrchr(src_dir, '/');
 	if (src_slash) *src_slash = '\0';
 
-	/* Get video stem (filename without extension) */
 	char stem[256];
 	snprintf(stem, sizeof(stem), "%s", base);
 	char *ext = strrchr(stem, '.');
@@ -371,8 +379,6 @@ static int process_download_file(const char *filepath) {
 		struct dirent *ent;
 		while ((ent = readdir(d)) != NULL) {
 			if (!is_subtitle_file(ent->d_name)) continue;
-
-			/* Check if subtitle matches video stem */
 			if (strncasecmp(ent->d_name, stem, stem_len) != 0) continue;
 
 			char sub_src[DL_MAX_PATH], sub_dst[DL_MAX_PATH];
@@ -399,13 +405,26 @@ static int scan_directory(const char *path) {
 
 	int processed = 0;
 	struct dirent *ent;
-	/* We need to collect entries first because processing may delete/move files */
-	char entries[256][256];
-	int entry_count = 0;
 
-	while ((ent = readdir(d)) != NULL && entry_count < 256) {
+	/* Collect entries first because processing may delete/move files.
+	 * Use heap allocation to handle large directories. */
+	int capacity = 512;
+	int entry_count = 0;
+	char (*entries)[256] = malloc(capacity * sizeof(*entries));
+	if (!entries) {
+		closedir(d);
+		return 0;
+	}
+
+	while ((ent = readdir(d)) != NULL) {
 		if (ent->d_name[0] == '.') continue;
-		snprintf(entries[entry_count], sizeof(entries[0]), "%s", ent->d_name);
+		if (entry_count >= capacity) {
+			capacity *= 2;
+			char (*tmp)[256] = realloc(entries, capacity * sizeof(*entries));
+			if (!tmp) break;
+			entries = tmp;
+		}
+		snprintf(entries[entry_count], 256, "%s", ent->d_name);
 		entry_count++;
 	}
 	closedir(d);
@@ -425,6 +444,7 @@ static int scan_directory(const char *path) {
 		}
 	}
 
+	free(entries);
 	return processed;
 }
 
@@ -455,7 +475,6 @@ static void *dl_thread_func(void *arg) {
 	(void)arg;
 
 	while (dl_running) {
-		/* Sleep in 1-second increments so we can exit promptly */
 		for (int i = 0; i < DL_SCAN_INTERVAL && dl_running; i++)
 			sleep(1);
 
@@ -475,12 +494,34 @@ int downloads_init(void) {
 
 	struct stat st;
 	if (stat(server_config.download_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
-		fprintf(stderr, "Downloads: Path does not exist: %s\n",
+		fprintf(stderr, "Downloads: Source path does not exist: %s\n",
 		        server_config.download_path);
 		return -1;
 	}
 
-	printf("Downloads: Monitoring %s\n", server_config.download_path);
+	if (server_config.converted_path_count == 0) {
+		fprintf(stderr, "Downloads: ERROR: No converted_path configured — cannot move files.\n"
+		        "  Add converted_path to your config, e.g.:\n"
+		        "  converted_path = /mnt/bigdisk1/www/aceclan\n");
+		return -1;
+	}
+
+	/* Create TV and Movies directories if they don't exist */
+	for (int i = 0; i < server_config.converted_path_count; i++) {
+		char tv_dir[DL_MAX_PATH], movies_dir[DL_MAX_PATH];
+		snprintf(tv_dir, sizeof(tv_dir), "%s/nixly_ready_media/TV",
+		         server_config.converted_paths[i]);
+		snprintf(movies_dir, sizeof(movies_dir), "%s/nixly_ready_media/Movies",
+		         server_config.converted_paths[i]);
+		mkdirs(tv_dir);
+		mkdirs(movies_dir);
+	}
+
+	printf("Downloads: Monitoring  %s\n", server_config.download_path);
+	printf("Downloads: TV dest     %s/nixly_ready_media/TV\n",
+	       server_config.converted_paths[0]);
+	printf("Downloads: Movies dest %s/nixly_ready_media/Movies\n",
+	       server_config.converted_paths[0]);
 	return 0;
 }
 

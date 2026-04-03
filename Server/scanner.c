@@ -25,96 +25,89 @@
 #include "igdb.h"
 #include "config.h"
 
-/* Global scrape progress state */
-ScrapeProgress scrape_progress = {
-    .active = 0,
-    .operation = "idle",
-    .current_item = "",
-    .total = 0,
-    .processed = 0,
-    .success = 0,
-    .start_time = 0,
-    .session_active = 0,
-    .lock = PTHREAD_MUTEX_INITIALIZER,
-};
+/* Two independent progress trackers — TMDB and IGDB run in parallel */
+#define SCRAPE_PROGRESS_INIT { \
+    .active = 0, .operation = "idle", .current_item = "", \
+    .total = 0, .processed = 0, .success = 0, \
+    .start_time = 0, .session_active = 0, \
+    .lock = PTHREAD_MUTEX_INITIALIZER }
 
-void scanner_scrape_session_begin(void) {
-    pthread_mutex_lock(&scrape_progress.lock);
-    scrape_progress.session_active = 1;
-    scrape_progress.active = 1;
-    scrape_progress.operation = "starting";
-    scrape_progress.total = 0;
-    scrape_progress.processed = 0;
-    scrape_progress.success = 0;
-    scrape_progress.current_item[0] = '\0';
-    scrape_progress.start_time = time(NULL);
-    pthread_mutex_unlock(&scrape_progress.lock);
+ScrapeProgress tmdb_progress = SCRAPE_PROGRESS_INIT;
+ScrapeProgress igdb_progress = SCRAPE_PROGRESS_INIT;
+
+void scanner_scrape_session_begin(ScrapeProgress *p) {
+    pthread_mutex_lock(&p->lock);
+    p->session_active = 1;
+    p->active = 1;
+    p->operation = "starting";
+    p->total = 0;
+    p->processed = 0;
+    p->success = 0;
+    p->current_item[0] = '\0';
+    p->start_time = time(NULL);
+    pthread_mutex_unlock(&p->lock);
 }
 
-void scanner_scrape_session_end(void) {
-    pthread_mutex_lock(&scrape_progress.lock);
-    scrape_progress.session_active = 0;
-    scrape_progress.active = 0;
-    scrape_progress.operation = "idle";
-    scrape_progress.current_item[0] = '\0';
-    pthread_mutex_unlock(&scrape_progress.lock);
+void scanner_scrape_session_end(ScrapeProgress *p) {
+    pthread_mutex_lock(&p->lock);
+    p->session_active = 0;
+    p->active = 0;
+    p->operation = "idle";
+    p->current_item[0] = '\0';
+    pthread_mutex_unlock(&p->lock);
 }
 
-static void scrape_begin(const char *op, int total) {
-    pthread_mutex_lock(&scrape_progress.lock);
-    scrape_progress.active = 1;
-    scrape_progress.operation = op;
-    if (scrape_progress.session_active) {
-        /* Session mode: accumulate totals, don't reset counters */
-        scrape_progress.total += total;
+static void scrape_begin(ScrapeProgress *p, const char *op, int total) {
+    pthread_mutex_lock(&p->lock);
+    p->active = 1;
+    p->operation = op;
+    if (p->session_active) {
+        p->total += total;
     } else {
-        /* Standalone mode: reset everything */
-        scrape_progress.total = total;
-        scrape_progress.processed = 0;
-        scrape_progress.success = 0;
-        scrape_progress.start_time = time(NULL);
+        p->total = total;
+        p->processed = 0;
+        p->success = 0;
+        p->start_time = time(NULL);
     }
-    scrape_progress.current_item[0] = '\0';
-    pthread_mutex_unlock(&scrape_progress.lock);
+    p->current_item[0] = '\0';
+    pthread_mutex_unlock(&p->lock);
 }
 
-static void scrape_update(const char *item, int ok) {
-    pthread_mutex_lock(&scrape_progress.lock);
-    scrape_progress.processed++;
-    if (ok) scrape_progress.success++;
+static void scrape_update(ScrapeProgress *p, const char *item, int ok) {
+    pthread_mutex_lock(&p->lock);
+    p->processed++;
+    if (ok) p->success++;
     if (item) {
-        strncpy(scrape_progress.current_item, item, sizeof(scrape_progress.current_item) - 1);
-        scrape_progress.current_item[sizeof(scrape_progress.current_item) - 1] = '\0';
+        strncpy(p->current_item, item, sizeof(p->current_item) - 1);
+        p->current_item[sizeof(p->current_item) - 1] = '\0';
     }
-    pthread_mutex_unlock(&scrape_progress.lock);
+    pthread_mutex_unlock(&p->lock);
 }
 
-static void scrape_end(void) {
-    pthread_mutex_lock(&scrape_progress.lock);
-    if (!scrape_progress.session_active) {
-        /* Standalone mode: set idle */
-        scrape_progress.active = 0;
-        scrape_progress.operation = "idle";
-        scrape_progress.current_item[0] = '\0';
+static void scrape_end(ScrapeProgress *p) {
+    pthread_mutex_lock(&p->lock);
+    if (!p->session_active) {
+        p->active = 0;
+        p->operation = "idle";
+        p->current_item[0] = '\0';
     }
-    /* Session mode: stay active, let session_end() handle idle */
-    pthread_mutex_unlock(&scrape_progress.lock);
+    pthread_mutex_unlock(&p->lock);
 }
 
-void scanner_get_scrape_status(int *active, const char **operation,
+void scanner_get_progress(ScrapeProgress *p, int *active, const char **operation,
     char *current_item, int current_item_size,
     int *total, int *processed, int *success, time_t *start_time)
 {
-    pthread_mutex_lock(&scrape_progress.lock);
-    *active = scrape_progress.active;
-    *operation = scrape_progress.operation;
-    *total = scrape_progress.total;
-    *processed = scrape_progress.processed;
-    *success = scrape_progress.success;
-    *start_time = scrape_progress.start_time;
-    strncpy(current_item, scrape_progress.current_item, current_item_size - 1);
+    pthread_mutex_lock(&p->lock);
+    *active = p->active;
+    *operation = p->operation;
+    *total = p->total;
+    *processed = p->processed;
+    *success = p->success;
+    *start_time = p->start_time;
+    strncpy(current_item, p->current_item, current_item_size - 1);
     current_item[current_item_size - 1] = '\0';
-    pthread_mutex_unlock(&scrape_progress.lock);
+    pthread_mutex_unlock(&p->lock);
 }
 
 /* Supported video extensions */
@@ -888,7 +881,7 @@ void scanner_fetch_missing_tmdb(void) {
     }
 
     printf("Fetching TMDB metadata for %d entries...\n", count);
-    scrape_begin("tmdb_fetch", count);
+    scrape_begin(&tmdb_progress, "tmdb_fetch", count);
 
     for (int i = 0; i < count; i++) {
         MediaEntry *e = &entries[i];
@@ -901,12 +894,12 @@ void scanner_fetch_missing_tmdb(void) {
             ok = fetch_episode_metadata(e->id, e->show_name, e->season, e->episode, e->year);
         }
 
-        scrape_update(name ? name : "?", ok > 0);
+        scrape_update(&tmdb_progress, name ? name : "?", ok > 0);
         database_free_entry(e);
     }
 
     free(entries);
-    scrape_end();
+    scrape_end(&tmdb_progress);
     printf("TMDB metadata fetch complete\n");
 }
 
@@ -925,7 +918,7 @@ void scanner_rescan_all_tmdb(void) {
     }
 
     printf("Re-fetching TMDB metadata for %d entries...\n", count);
-    scrape_begin("tmdb_rescan", count);
+    scrape_begin(&tmdb_progress, "tmdb_rescan", count);
 
     for (int i = 0; i < count; i++) {
         MediaEntry *e = &entries[i];
@@ -938,12 +931,12 @@ void scanner_rescan_all_tmdb(void) {
             ok = fetch_episode_metadata(e->id, e->show_name, e->season, e->episode, e->year);
         }
 
-        scrape_update(name ? name : "?", ok > 0);
+        scrape_update(&tmdb_progress, name ? name : "?", ok > 0);
         database_free_entry(e);
     }
 
     free(entries);
-    scrape_end();
+    scrape_end(&tmdb_progress);
     printf("TMDB full rescan complete\n");
 }
 
@@ -959,7 +952,7 @@ void scanner_refresh_show_status(void) {
     }
 
     printf("Refreshing status for %d active shows...\n", count);
-    scrape_begin("show_status", count);
+    scrape_begin(&tmdb_progress, "show_status", count);
 
     for (int i = 0; i < count; i++) {
         TmdbTvShow *show = tmdb_get_show_status(ids[i]);
@@ -967,7 +960,7 @@ void scanner_refresh_show_status(void) {
             database_update_show_status(ids[i], show->status, show->next_episode_date,
                                         show->number_of_seasons, show->number_of_episodes,
                                         show->episode_run_time);
-            scrape_update(show->status ? show->status : "?", 1);
+            scrape_update(&tmdb_progress, show->status ? show->status : "?", 1);
             printf("  Show %d: %s (%d seasons, %d episodes, %d min/ep, next: %s)\n",
                    ids[i],
                    show->status ? show->status : "?",
@@ -976,12 +969,12 @@ void scanner_refresh_show_status(void) {
                    show->next_episode_date ? show->next_episode_date : "none");
             tmdb_free_tvshow(show);
         } else {
-            scrape_update("?", 0);
+            scrape_update(&tmdb_progress, "?", 0);
         }
     }
 
     free(ids);
-    scrape_end();
+    scrape_end(&tmdb_progress);
     printf("Show status refresh complete\n");
 }
 
@@ -1115,9 +1108,12 @@ static void url_encode(const char *src, char *dst, size_t dst_size) {
 /* Try downloading a cover from libretro-thumbnails GitHub.
  * filepath: full path to the ROM file
  * console: ConsoleType enum
+ * igdb_id: IGDB game ID (0 if unknown)
+ * rom_id: ROM database ID (fallback for filename)
  * cache_dir: directory to save the cover image
  * Returns allocated path to the cover file, or NULL on failure. */
-static char *try_libretro_cover(const char *filepath, int console, const char *cache_dir) {
+static char *try_libretro_cover(const char *filepath, int console, int igdb_id,
+                                 int rom_id, const char *cache_dir) {
     const char *repo = libretro_console_repo(console);
     if (!repo) return NULL;
 
@@ -1136,18 +1132,14 @@ static char *try_libretro_cover(const char *filepath, int console, const char *c
 
     if (rom_name[0] == '\0') return NULL;
 
-    /* Sanitize filename for cache path */
-    char safe_name[256];
-    strncpy(safe_name, rom_name, sizeof(safe_name) - 1);
-    safe_name[sizeof(safe_name) - 1] = '\0';
-    for (char *p = safe_name; *p; p++) {
-        if (*p == '/' || *p == '\\') *p = '_';
-    }
-
-    /* Check if already cached */
+    /* Use igdb_id for filename if available, else ROM db id */
     char local_path[4096];
-    snprintf(local_path, sizeof(local_path), "%s/cover_%d_%s.png",
-             cache_dir, console, safe_name);
+    if (igdb_id > 0)
+        snprintf(local_path, sizeof(local_path), "%s/cover_%d.png",
+                 cache_dir, igdb_id);
+    else
+        snprintf(local_path, sizeof(local_path), "%s/cover_r%d.png",
+                 cache_dir, rom_id);
 
     struct stat st;
     if (stat(local_path, &st) == 0 && st.st_size > 100)
@@ -1155,8 +1147,12 @@ static char *try_libretro_cover(const char *filepath, int console, const char *c
 
     /* Also check .jpg variant (IGDB may have saved one) */
     char jpg_path[4096];
-    snprintf(jpg_path, sizeof(jpg_path), "%s/cover_%d_%s.jpg",
-             cache_dir, console, safe_name);
+    if (igdb_id > 0)
+        snprintf(jpg_path, sizeof(jpg_path), "%s/cover_%d.jpg",
+                 cache_dir, igdb_id);
+    else
+        snprintf(jpg_path, sizeof(jpg_path), "%s/cover_r%d.jpg",
+                 cache_dir, rom_id);
     if (stat(jpg_path, &st) == 0 && st.st_size > 100)
         return strdup(jpg_path);
 
@@ -1654,7 +1650,7 @@ int scanner_scan_rom_directory(const char *path) {
 }
 
 /* Forward declaration */
-static char *download_igdb_cover(const char *url, const char *title, int console,
+static char *download_igdb_cover(const char *url, int igdb_id,
                                   const char *cache_dir);
 
 /* Fetch cover images for ROMs that have IGDB metadata but no cover.
@@ -1674,28 +1670,28 @@ void scanner_fetch_rom_covers(void) {
     }
 
     printf("IGDB: Fetching covers for %d ROMs...\n", count);
-    scrape_begin("igdb_covers", count);
+    scrape_begin(&igdb_progress, "igdb_covers", count);
 
     int fetched = 0;
     for (int i = 0; i < count; i++) {
         char *cover_url = igdb_get_game_cover(igdb_ids[i]);
         if (cover_url) {
-            char *local = download_igdb_cover(cover_url, titles[i],
-                                               consoles[i], server_config.cache_dir);
+            char *local = download_igdb_cover(cover_url, igdb_ids[i],
+                                               server_config.cache_dir);
             if (local) {
                 database_update_rom_cover(ids[i], local);
                 printf("  IGDB cover: %s [OK]\n", titles[i]);
                 free(local);
                 fetched++;
-                scrape_update(titles[i], 1);
+                scrape_update(&igdb_progress, titles[i], 1);
             } else {
                 printf("  IGDB cover: %s [download failed]\n", titles[i]);
-                scrape_update(titles[i], 0);
+                scrape_update(&igdb_progress, titles[i], 0);
             }
             free(cover_url);
         } else {
             printf("  IGDB cover: %s [no cover on IGDB]\n", titles[i]);
-            scrape_update(titles[i], 0);
+            scrape_update(&igdb_progress, titles[i], 0);
         }
         usleep(260000);
     }
@@ -1703,7 +1699,7 @@ void scanner_fetch_rom_covers(void) {
     for (int i = 0; i < count; i++) free(titles[i]);
     free(ids); free(titles); free(consoles); free(igdb_ids);
 
-    scrape_end();
+    scrape_end(&igdb_progress);
     printf("IGDB: Cover fetch complete (%d/%d downloaded)\n", fetched, count);
 }
 
@@ -1711,22 +1707,23 @@ void scanner_fetch_rom_covers(void) {
  * This is a fallback that works even when IGDB didn't match the ROM.
  * Uses the original ROM filename (No-Intro naming convention) to download. */
 void scanner_fetch_libretro_covers(void) {
-    int *ids = NULL, *consoles = NULL;
+    int *ids = NULL, *consoles = NULL, *igdb_ids = NULL;
     char **filepaths = NULL;
     int count = 0;
 
-    if (database_get_all_roms_without_cover(&ids, &filepaths, &consoles, &count) != 0
+    if (database_get_all_roms_without_cover(&ids, &filepaths, &consoles, &igdb_ids, &count) != 0
         || count == 0) {
-        free(ids); free(filepaths); free(consoles);
+        free(ids); free(filepaths); free(consoles); free(igdb_ids);
         return;
     }
 
     printf("libretro-thumbnails: Fetching covers for %d ROMs...\n", count);
-    scrape_begin("libretro_covers", count);
+    scrape_begin(&igdb_progress, "libretro_covers", count);
 
     int fetched = 0;
     for (int i = 0; i < count; i++) {
         char *cover = try_libretro_cover(filepaths[i], consoles[i],
+                                          igdb_ids[i], ids[i],
                                           server_config.cache_dir);
         if (cover) {
             database_update_rom_cover(ids[i], cover);
@@ -1736,9 +1733,9 @@ void scanner_fetch_libretro_covers(void) {
             printf("  libretro cover: %s [OK]\n", base);
             free(cover);
             fetched++;
-            scrape_update(base, 1);
+            scrape_update(&igdb_progress, base, 1);
         } else {
-            scrape_update("", 0);
+            scrape_update(&igdb_progress, "", 0);
         }
 
         /* Small delay to avoid hammering GitHub */
@@ -1747,9 +1744,9 @@ void scanner_fetch_libretro_covers(void) {
     }
 
     for (int i = 0; i < count; i++) free(filepaths[i]);
-    free(ids); free(filepaths); free(consoles);
+    free(ids); free(filepaths); free(consoles); free(igdb_ids);
 
-    scrape_end();
+    scrape_end(&igdb_progress);
     printf("libretro-thumbnails: Cover fetch complete (%d/%d downloaded)\n", fetched, count);
 }
 
@@ -2111,24 +2108,16 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
 }
 
 /* Download a cover image from a URL (IGDB) to local cache */
-static char *download_igdb_cover(const char *url, const char *title, int console,
+static char *download_igdb_cover(const char *url, int igdb_id,
                                   const char *cache_dir)
 {
     if (!url || !url[0]) return NULL;
 
     mkdir(cache_dir, 0755);
 
-    /* Sanitize filename */
-    char safe_title[256];
-    strncpy(safe_title, title, sizeof(safe_title) - 1);
-    safe_title[sizeof(safe_title) - 1] = '\0';
-    for (char *p = safe_title; *p; p++) {
-        if (*p == '/' || *p == '&' || *p == ':' || *p == '\\') *p = '_';
-    }
-
     char local_path[4096];
-    snprintf(local_path, sizeof(local_path), "%s/cover_%d_%s.jpg",
-             cache_dir, console, safe_title);
+    snprintf(local_path, sizeof(local_path), "%s/cover_%d.jpg",
+             cache_dir, igdb_id);
 
     /* Check if already cached */
     struct stat st;
@@ -2341,7 +2330,7 @@ void scanner_fetch_rom_metadata(void) {
     /* Enable API-level logging in igdb.c so every request/response is captured */
     igdb_set_log(logf);
 
-    scrape_begin("igdb_fetch", grand_total);
+    scrape_begin(&igdb_progress, "igdb_fetch", grand_total);
     int found = 0;
 
     for (int c = 0; c < CONSOLE_COUNT; c++) {
@@ -2554,7 +2543,7 @@ void scanner_fetch_rom_metadata(void) {
                     /* Try cover from search response first */
                     if (g->cover_url) {
                         char *cover = download_igdb_cover(g->cover_url,
-                            titles[i], c, server_config.cache_dir);
+                            g->igdb_id, server_config.cache_dir);
                         if (cover) {
                             database_update_rom_cover(ids[i], cover);
                             free(cover);
@@ -2568,7 +2557,7 @@ void scanner_fetch_rom_metadata(void) {
                         char *cover_url = igdb_get_game_cover(g->igdb_id);
                         if (cover_url) {
                             char *cover = download_igdb_cover(cover_url,
-                                titles[i], c, server_config.cache_dir);
+                                g->igdb_id, server_config.cache_dir);
                             if (cover) {
                                 database_update_rom_cover(ids[i], cover);
                                 free(cover);
@@ -2595,7 +2584,7 @@ void scanner_fetch_rom_metadata(void) {
 
                     igdb_free_game(g);
                     found++;
-                    scrape_update(titles[i], 1);
+                    scrape_update(&igdb_progress, titles[i], 1);
                 } else {
                     printf("  IGDB: %s -> NOT FOUND (%d queries)\n", titles[i], queries_tried);
                     if (logf) {
@@ -2603,7 +2592,7 @@ void scanner_fetch_rom_metadata(void) {
                     }
                     database_update_rom_metadata(ids[i], -1,
                         NULL, NULL, NULL, 0, NULL, NULL, 0, NULL);
-                    scrape_update(titles[i], 0);
+                    scrape_update(&igdb_progress, titles[i], 0);
                 }
 
                 /* Rate limit between ROMs */
@@ -2628,7 +2617,7 @@ void scanner_fetch_rom_metadata(void) {
         fclose(logf);
     }
 
-    scrape_end();
+    scrape_end(&igdb_progress);
     if (grand_total > 0)
         printf("IGDB: Metadata fetch complete (%d/%d found)\n", found, grand_total);
 }

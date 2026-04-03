@@ -48,6 +48,9 @@ typedef struct {
 
     /* Downloads directory to monitor for auto-classification */
     char download_path[MAX_PATH_LEN];
+
+    /* Enable transcoding (default: true for backwards compat) */
+    int transcode_enabled;
 } ServerConfig;
 
 /* Global config */

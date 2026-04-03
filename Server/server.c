@@ -116,8 +116,44 @@ static void *startup_scan_thread(void *arg) {
         printf("Startup scan: Found %d ROMs.\n", database_get_rom_count());
     }
 
-    /* Session-based progress: all scrape operations accumulate into one progress bar */
-    scanner_scrape_session_begin();
+    /* Initialize file watcher early — so downloads and media changes
+     * are detected even while scraping is still running */
+    if (running && watcher_init() == 0) {
+        watcher_set_callback(on_file_change);
+
+        for (int i = 0; i < server_config.unprocessed_path_count; i++) {
+            watcher_add_path(server_config.unprocessed_paths[i], WATCH_TYPE_MEDIA);
+        }
+
+        for (int i = 0; i < server_config.converted_path_count; i++) {
+            char ready_path[MAX_PATH];
+            snprintf(ready_path, sizeof(ready_path), "%s/nixly_ready_media",
+                     server_config.converted_paths[i]);
+            mkdir(ready_path, 0755);
+            watcher_add_path(ready_path, WATCH_TYPE_MEDIA);
+        }
+
+        for (int i = 0; i < server_config.roms_path_count; i++) {
+            watcher_add_path(server_config.roms_paths[i], WATCH_TYPE_ROMS);
+        }
+
+        /* Watch downloads directory */
+        if (server_config.download_path[0]) {
+            watcher_add_path(server_config.download_path, WATCH_TYPE_DOWNLOADS);
+        }
+
+        watcher_start();
+    }
+
+    /* Start download monitor early — runs in parallel with scraping */
+    if (running && downloads_init() == 0) {
+        downloads_process_pending();
+        downloads_start();
+    }
+
+    /* Session-based progress: separate trackers for TMDB and IGDB */
+    scanner_scrape_session_begin(&tmdb_progress);
+    scanner_scrape_session_begin(&igdb_progress);
 
     /* Run TMDB and IGDB/ROM scraping in parallel — they use different APIs */
     {
@@ -146,46 +182,15 @@ static void *startup_scan_thread(void *arg) {
         if (have_rom) pthread_join(rom_thread, NULL);
     }
 
-    scanner_scrape_session_end();
+    scanner_scrape_session_end(&tmdb_progress);
+    scanner_scrape_session_end(&igdb_progress);
 
-    /* Initialize file watcher */
-    if (running && watcher_init() == 0) {
-        watcher_set_callback(on_file_change);
-
-        for (int i = 0; i < server_config.unprocessed_path_count; i++) {
-            watcher_add_path(server_config.unprocessed_paths[i], WATCH_TYPE_MEDIA);
-        }
-
-        for (int i = 0; i < server_config.converted_path_count; i++) {
-            char ready_path[MAX_PATH];
-            snprintf(ready_path, sizeof(ready_path), "%s/nixly_ready_media",
-                     server_config.converted_paths[i]);
-            mkdir(ready_path, 0755);
-            watcher_add_path(ready_path, WATCH_TYPE_MEDIA);
-        }
-
-        for (int i = 0; i < server_config.roms_path_count; i++) {
-            watcher_add_path(server_config.roms_paths[i], WATCH_TYPE_ROMS);
-        }
-
-        /* Watch downloads directory */
-        if (server_config.download_path[0]) {
-            watcher_add_path(server_config.download_path, WATCH_TYPE_DOWNLOADS);
-        }
-
-        watcher_start();
-    }
-
-    /* Initialize and start download monitor */
-    if (running && downloads_init() == 0) {
-        downloads_process_pending();
-        downloads_start();
-    }
-
-    /* Initialize and start transcoder */
-    if (running) {
+    /* Initialize and start transcoder (only if enabled) */
+    if (running && server_config.transcode_enabled) {
         transcoder_init();
         transcoder_start();
+    } else if (running) {
+        printf("Transcoder: Disabled by config\n");
     }
 
     startup_scanning = 0;
@@ -206,7 +211,7 @@ static void *sync_thread(void *arg) {
             sleep(1);
 
             /* Check if transcoder needs restart (new files arrived while running) */
-            if (transcoder_restart_pending &&
+            if (server_config.transcode_enabled && transcoder_restart_pending &&
                 transcoder_get_state() == TRANSCODE_IDLE) {
                 transcoder_restart_pending = 0;
                 printf("Restarting transcoder for newly detected files...\n");
@@ -249,7 +254,8 @@ static void *sync_thread(void *arg) {
         }
 
         /* Periodic scrape session: retry all missing metadata in parallel */
-        scanner_scrape_session_begin();
+        scanner_scrape_session_begin(&tmdb_progress);
+        scanner_scrape_session_begin(&igdb_progress);
 
         {
             pthread_t tmdb_t, rom_t;
@@ -270,13 +276,14 @@ static void *sync_thread(void *arg) {
             if (have_rom) pthread_join(rom_t, NULL);
         }
 
-        scanner_scrape_session_end();
+        scanner_scrape_session_end(&tmdb_progress);
+        scanner_scrape_session_end(&igdb_progress);
 
         /* Process pending downloads (backup to download monitor thread) */
         downloads_process_pending();
 
         /* Start transcoder if idle (will pick up any unconverted files) */
-        if (transcoder_get_state() == TRANSCODE_IDLE) {
+        if (server_config.transcode_enabled && transcoder_get_state() == TRANSCODE_IDLE) {
             transcoder_start();
         }
     }
@@ -402,7 +409,7 @@ static void on_file_change(const char *filepath, int is_delete, WatchType type) 
                 if (id > 0) {
                     printf("DB: Added ready media %s (id=%d)\n", filepath, id);
                 }
-            } else {
+            } else if (server_config.transcode_enabled) {
                 /* New source file detected - trigger transcoder if idle */
                 printf("New media file detected: %s\n", filepath);
                 if (transcoder_get_state() == TRANSCODE_IDLE) {
@@ -825,7 +832,10 @@ static void handle_api(int fd, const char *path) {
         send_response(fd, 200, "OK", "application/json", json, len);
     }
     else if (strcmp(path, "/api/transcode/start") == 0) {
-        if (transcoder_get_state() == TRANSCODE_RUNNING) {
+        if (!server_config.transcode_enabled) {
+            send_response(fd, 200, "OK", "application/json",
+                         "{\"status\":\"disabled\"}", 21);
+        } else if (transcoder_get_state() == TRANSCODE_RUNNING) {
             send_response(fd, 200, "OK", "application/json",
                          "{\"status\":\"already running\"}", 28);
         } else {
@@ -937,50 +947,74 @@ static void handle_api(int fd, const char *path) {
     }
     else if (strcmp(path, "/api/roms/scan") == 0) {
         printf("Manual ROM rescan triggered via API\n");
-        scanner_scrape_session_begin();
+        scanner_scrape_session_begin(&igdb_progress);
         for (int i = 0; i < server_config.roms_path_count; i++)
             scanner_scan_rom_directory(server_config.roms_paths[i]);
         scanner_fetch_rom_metadata();
         scanner_fetch_rom_covers();
         scanner_fetch_libretro_covers();
-        scanner_scrape_session_end();
+        scanner_scrape_session_end(&igdb_progress);
         char json[128];
         int len = snprintf(json, sizeof(json),
             "{\"status\":\"ok\",\"total\":%d}", database_get_rom_count());
         send_response(fd, 200, "OK", "application/json", json, len);
     }
     else if (strcmp(path, "/api/roms/rescan") == 0) {
-        printf("Full ROM IGDB rescan triggered via API\n");
-        scanner_scrape_session_begin();
-        scanner_rescan_all_rom_metadata();
+        printf("Full ROM rescan triggered via API — clearing all ROM data\n");
+        database_delete_all_roms();
+        scanner_scrape_session_begin(&igdb_progress);
+        for (int i = 0; i < server_config.roms_path_count; i++)
+            scanner_scan_rom_directory(server_config.roms_paths[i]);
+        scanner_fetch_rom_metadata();
         scanner_fetch_rom_covers();
         scanner_fetch_libretro_covers();
-        scanner_scrape_session_end();
+        scanner_scrape_session_end(&igdb_progress);
         char json[128];
         int len = snprintf(json, sizeof(json),
             "{\"status\":\"ok\",\"total\":%d}", database_get_rom_count());
         send_response(fd, 200, "OK", "application/json", json, len);
     }
     else if (strcmp(path, "/api/scrape/status") == 0) {
-        int active, total, processed, success;
-        const char *operation;
-        char current_item[256];
-        time_t start_time;
-        scanner_get_scrape_status(&active, &operation, current_item,
-            sizeof(current_item), &total, &processed, &success, &start_time);
+        /* TMDB progress */
+        int t_active, t_total, t_processed, t_success;
+        const char *t_operation;
+        char t_item[256];
+        time_t t_start;
+        scanner_get_progress(&tmdb_progress, &t_active, &t_operation, t_item,
+            sizeof(t_item), &t_total, &t_processed, &t_success, &t_start);
 
-        /* Escape current_item for JSON */
-        char escaped[512];
-        char *d = escaped;
-        for (const char *s = current_item; *s && d < escaped + sizeof(escaped) - 6; s++) {
+        /* IGDB progress */
+        int i_active, i_total, i_processed, i_success;
+        const char *i_operation;
+        char i_item[256];
+        time_t i_start;
+        scanner_get_progress(&igdb_progress, &i_active, &i_operation, i_item,
+            sizeof(i_item), &i_total, &i_processed, &i_success, &i_start);
+
+        /* Escape current items for JSON */
+        char t_esc[512], i_esc[512];
+        char *d;
+        d = t_esc;
+        for (const char *s = t_item; *s && d < t_esc + sizeof(t_esc) - 6; s++) {
+            if (*s == '"') { *d++ = '\\'; *d++ = '"'; }
+            else if (*s == '\\') { *d++ = '\\'; *d++ = '\\'; }
+            else *d++ = *s;
+        }
+        *d = '\0';
+        d = i_esc;
+        for (const char *s = i_item; *s && d < i_esc + sizeof(i_esc) - 6; s++) {
             if (*s == '"') { *d++ = '\\'; *d++ = '"'; }
             else if (*s == '\\') { *d++ = '\\'; *d++ = '\\'; }
             else *d++ = *s;
         }
         *d = '\0';
 
-        int elapsed = active ? (int)(time(NULL) - start_time) : 0;
-        float percent = (total > 0) ? (100.0f * processed / total) : 0;
+        int t_elapsed = t_active ? (int)(time(NULL) - t_start) : 0;
+        int i_elapsed = i_active ? (int)(time(NULL) - i_start) : 0;
+        float t_percent = (t_total > 0) ? (100.0f * t_processed / t_total) : 0;
+        float i_percent = (i_total > 0) ? (100.0f * i_processed / i_total) : 0;
+        int t_failed = t_processed - t_success; if (t_failed < 0) t_failed = 0;
+        int i_failed = i_processed - i_success; if (i_failed < 0) i_failed = 0;
 
         /* Database summary counts */
         int media_count = database_get_count();
@@ -1008,31 +1042,21 @@ static void handle_api(int fd, const char *path) {
             }
         }
 
-        int failed = processed - success;
-        if (failed < 0) failed = 0;
-
-        char json[1024];
+        char json[2048];
         int len = snprintf(json, sizeof(json),
-            "{\"active\":%s,"
-            "\"operation\":\"%s\","
-            "\"current_item\":\"%s\","
-            "\"total\":%d,"
-            "\"processed\":%d,"
-            "\"success\":%d,"
-            "\"failed\":%d,"
-            "\"percent\":%.1f,"
-            "\"elapsed\":%d,"
-            "\"media_count\":%d,"
-            "\"rom_count\":%d,"
-            "\"tmdb_pending\":%d,"
-            "\"igdb_pending\":%d}",
-            active ? "true" : "false",
-            operation,
-            escaped,
-            total, processed, success, failed,
-            percent, elapsed,
-            media_count, rom_count,
-            tmdb_pending, igdb_pending);
+            "{\"tmdb\":{\"active\":%s,\"operation\":\"%s\",\"current_item\":\"%s\","
+            "\"total\":%d,\"processed\":%d,\"success\":%d,\"failed\":%d,"
+            "\"percent\":%.1f,\"elapsed\":%d},"
+            "\"igdb\":{\"active\":%s,\"operation\":\"%s\",\"current_item\":\"%s\","
+            "\"total\":%d,\"processed\":%d,\"success\":%d,\"failed\":%d,"
+            "\"percent\":%.1f,\"elapsed\":%d},"
+            "\"media_count\":%d,\"rom_count\":%d,"
+            "\"tmdb_pending\":%d,\"igdb_pending\":%d}",
+            t_active ? "true" : "false", t_operation, t_esc,
+            t_total, t_processed, t_success, t_failed, t_percent, t_elapsed,
+            i_active ? "true" : "false", i_operation, i_esc,
+            i_total, i_processed, i_success, i_failed, i_percent, i_elapsed,
+            media_count, rom_count, tmdb_pending, igdb_pending);
         send_response(fd, 200, "OK", "application/json", json, len);
     }
     else if (strcmp(path, "/api/counts") == 0) {
@@ -1159,10 +1183,12 @@ static void handle_request(int fd, const char *request) {
         }
     }
     else if (strncmp(path, "/image/", 7) == 0) {
-        /* Serve cached image */
+        /* Serve cached image — URL-decode filename (e.g. %20 → space) */
+        char decoded[MAX_PATH];
+        url_decode(path + 7, decoded, sizeof(decoded));
         char filepath[MAX_PATH];
         snprintf(filepath, sizeof(filepath), "%s/%s",
-                 server_config.cache_dir, path + 7);
+                 server_config.cache_dir, decoded);
         serve_file(fd, filepath);
     }
     else if (strcmp(path, "/scrape") == 0) {
@@ -1253,28 +1279,48 @@ static void handle_request(int fd, const char *request) {
 "<h1>Nixly Scraper</h1>\n"
 "\n"
 "<div class=\"card\">\n"
+"  <h2 style=\"color:#58a6ff;margin-bottom:8px\">TMDB — Movies &amp; TV</h2>\n"
 "  <div class=\"row\">\n"
-"    <span class=\"state\" id=\"state\">Loading...</span>\n"
-"    <span id=\"op\" style=\"color:#8b949e;font-size:.85em\"></span>\n"
+"    <span class=\"state\" id=\"t-state\">Loading...</span>\n"
+"    <span id=\"t-op\" style=\"color:#8b949e;font-size:.85em\"></span>\n"
 "  </div>\n"
-"  <div class=\"progress-wrap\"><div class=\"progress-bar\" id=\"pbar\"></div>\n"
-"    <div class=\"progress-text\" id=\"ptxt\"></div></div>\n"
-"  <div class=\"current\" id=\"current\"></div>\n"
+"  <div class=\"progress-wrap\"><div class=\"progress-bar tmdb\" id=\"t-pbar\"></div>\n"
+"    <div class=\"progress-text\" id=\"t-ptxt\"></div></div>\n"
+"  <div class=\"current\" id=\"t-current\"></div>\n"
 "  <div class=\"mini-stats\">\n"
-"    <span>Processed: <b id=\"s-proc\">-</b></span>\n"
-"    <span>Matched: <b id=\"s-ok\" style=\"color:#3fb950\">-</b></span>\n"
-"    <span>Failed: <b id=\"s-fail\" style=\"color:#d29922\">-</b></span>\n"
-"    <span>Time: <b id=\"s-time\">-</b></span>\n"
+"    <span>Processed: <b id=\"t-proc\">-</b></span>\n"
+"    <span>Matched: <b id=\"t-ok\" style=\"color:#3fb950\">-</b></span>\n"
+"    <span>Failed: <b id=\"t-fail\" style=\"color:#d29922\">-</b></span>\n"
+"    <span>Time: <b id=\"t-time\">-</b></span>\n"
 "    <span>Media: <b id=\"m-media\">-</b></span>\n"
-"    <span>ROMs: <b id=\"m-roms\">-</b></span>\n"
-"    <span style=\"color:#d29922\">TMDB pending: <b id=\"m-tmdb\">-</b></span>\n"
-"    <span style=\"color:#a371f7\">IGDB pending: <b id=\"m-igdb\">-</b></span>\n"
+"    <span style=\"color:#d29922\">Pending: <b id=\"m-tmdb\">-</b></span>\n"
 "  </div>\n"
 "  <div class=\"controls\">\n"
-"    <button class=\"btn blue\" id=\"btn-tmdb\" onclick=\"scrapeAction('/api/tmdb/refresh','btn-tmdb')\">TMDB: Fetch Missing</button>\n"
-"    <button class=\"btn blue\" id=\"btn-tmdb-full\" onclick=\"scrapeAction('/api/tmdb/rescan','btn-tmdb-full')\">TMDB: Full Rescan</button>\n"
-"    <button class=\"btn green\" id=\"btn-igdb\" onclick=\"scrapeAction('/api/roms/scan','btn-igdb')\">IGDB: Fetch Missing</button>\n"
-"    <button class=\"btn green\" id=\"btn-igdb-full\" onclick=\"scrapeAction('/api/roms/rescan','btn-igdb-full')\">IGDB: Full Rescan</button>\n"
+"    <button class=\"btn blue\" id=\"btn-tmdb\" onclick=\"scrapeAction('/api/tmdb/refresh','btn-tmdb')\">Fetch Missing</button>\n"
+"    <button class=\"btn blue\" id=\"btn-tmdb-full\" onclick=\"scrapeAction('/api/tmdb/rescan','btn-tmdb-full')\">Full Rescan</button>\n"
+"  </div>\n"
+"</div>\n"
+"\n"
+"<div class=\"card\">\n"
+"  <h2 style=\"color:#3fb950;margin-bottom:8px\">IGDB — ROMs</h2>\n"
+"  <div class=\"row\">\n"
+"    <span class=\"state\" id=\"i-state\">Loading...</span>\n"
+"    <span id=\"i-op\" style=\"color:#8b949e;font-size:.85em\"></span>\n"
+"  </div>\n"
+"  <div class=\"progress-wrap\"><div class=\"progress-bar igdb\" id=\"i-pbar\"></div>\n"
+"    <div class=\"progress-text\" id=\"i-ptxt\"></div></div>\n"
+"  <div class=\"current\" id=\"i-current\"></div>\n"
+"  <div class=\"mini-stats\">\n"
+"    <span>Processed: <b id=\"i-proc\">-</b></span>\n"
+"    <span>Matched: <b id=\"i-ok\" style=\"color:#3fb950\">-</b></span>\n"
+"    <span>Failed: <b id=\"i-fail\" style=\"color:#d29922\">-</b></span>\n"
+"    <span>Time: <b id=\"i-time\">-</b></span>\n"
+"    <span>ROMs: <b id=\"m-roms\">-</b></span>\n"
+"    <span style=\"color:#a371f7\">Pending: <b id=\"m-igdb\">-</b></span>\n"
+"  </div>\n"
+"  <div class=\"controls\">\n"
+"    <button class=\"btn green\" id=\"btn-igdb\" onclick=\"scrapeAction('/api/roms/scan','btn-igdb')\">Fetch Missing</button>\n"
+"    <button class=\"btn green\" id=\"btn-igdb-full\" onclick=\"scrapeAction('/api/roms/rescan','btn-igdb-full')\">Full Rescan</button>\n"
 "  </div>\n"
 "</div>\n"
 "\n"
@@ -1299,10 +1345,9 @@ static void handle_request(int fd, const char *request) {
 "<script>\n"
 "var mediaData=[],romData=[];\n"
 "var activeTab='movies';\n"
-"var opLabels={'idle':'Idle','tmdb_fetch':'TMDB Fetch','tmdb_rescan':'TMDB Rescan',\n"
-"  'igdb_fetch':'IGDB Fetch','igdb_rescan':'IGDB Rescan','show_status':'Show Status'};\n"
-"var opColors={'tmdb_fetch':'tmdb','tmdb_rescan':'tmdb','igdb_fetch':'igdb',\n"
-"  'igdb_rescan':'igdb','show_status':'show'};\n"
+"var opLabels={'idle':'Idle','starting':'Starting...','tmdb_fetch':'Fetch','tmdb_rescan':'Rescan',\n"
+"  'igdb_fetch':'Fetch','igdb_rescan':'Rescan','show_status':'Show Status',\n"
+"  'igdb_covers':'Covers','libretro_covers':'Libretro Covers'};\n"
 "\n"
 "function fmtTime(s){if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m '+s%60+'s';\n"
 "  return Math.floor(s/3600)+'h '+Math.floor(s%3600/60)+'m'}\n"
@@ -1442,23 +1487,27 @@ static void handle_request(int fd, const char *request) {
 "    .catch(function(){b.disabled=false});\n"
 "}\n"
 "\n"
+"function updateTracker(prefix,d){\n"
+"  var s=document.getElementById(prefix+'-state');\n"
+"  s.textContent=d.active?'Active':'Idle';\n"
+"  s.className='state '+(d.active?'active':'idle');\n"
+"  document.getElementById(prefix+'-op').textContent=d.active?(opLabels[d.operation]||d.operation):'';\n"
+"  var bar=document.getElementById(prefix+'-pbar');\n"
+"  bar.style.width=d.percent+'%';\n"
+"  document.getElementById(prefix+'-ptxt').textContent=\n"
+"    d.active?d.processed+'/'+d.total+' ('+d.percent.toFixed(1)+'%)':'';\n"
+"  document.getElementById(prefix+'-current').textContent=\n"
+"    d.current_item?'Current: '+d.current_item:'';\n"
+"  document.getElementById(prefix+'-proc').textContent=d.active?d.processed:'-';\n"
+"  document.getElementById(prefix+'-ok').textContent=d.active?d.success:'-';\n"
+"  document.getElementById(prefix+'-fail').textContent=d.active?d.failed:'-';\n"
+"  document.getElementById(prefix+'-time').textContent=d.active?fmtTime(d.elapsed):'-';\n"
+"}\n"
+"\n"
 "function refreshStatus(){\n"
 "  fetch('/api/scrape/status').then(function(r){return r.json()}).then(function(d){\n"
-"    var s=document.getElementById('state');\n"
-"    s.textContent=d.active?'Active':'Idle';\n"
-"    s.className='state '+(d.active?'active':'idle');\n"
-"    document.getElementById('op').textContent=d.active?(opLabels[d.operation]||d.operation):'';\n"
-"    var bar=document.getElementById('pbar');\n"
-"    bar.style.width=d.percent+'%';\n"
-"    bar.className='progress-bar '+(opColors[d.operation]||'tmdb');\n"
-"    document.getElementById('ptxt').textContent=\n"
-"      d.active?d.processed+'/'+d.total+' ('+d.percent.toFixed(1)+'%)':'';\n"
-"    document.getElementById('current').textContent=\n"
-"      d.current_item?'Current: '+d.current_item:'';\n"
-"    document.getElementById('s-proc').textContent=d.active?d.processed:'-';\n"
-"    document.getElementById('s-ok').textContent=d.active?d.success:'-';\n"
-"    document.getElementById('s-fail').textContent=d.active?d.failed:'-';\n"
-"    document.getElementById('s-time').textContent=d.active?fmtTime(d.elapsed):'-';\n"
+"    updateTracker('t',d.tmdb);\n"
+"    updateTracker('i',d.igdb);\n"
 "    document.getElementById('m-media').textContent=d.media_count;\n"
 "    document.getElementById('m-roms').textContent=d.rom_count;\n"
 "    document.getElementById('m-tmdb').textContent=d.tmdb_pending;\n"

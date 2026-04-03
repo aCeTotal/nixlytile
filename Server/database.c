@@ -1418,9 +1418,10 @@ int database_get_roms_without_cover(int **ids, char ***titles, int **consoles, i
 
 /* Get ALL ROMs without cover art (regardless of IGDB match status).
  * Used for libretro-thumbnails fallback cover fetching. */
-int database_get_all_roms_without_cover(int **ids, char ***filepaths, int **consoles, int *count) {
+int database_get_all_roms_without_cover(int **ids, char ***filepaths, int **consoles,
+                                        int **igdb_ids, int *count) {
     const char *sql =
-        "SELECT id, filepath, console FROM roms "
+        "SELECT id, filepath, console, COALESCE(igdb_id, 0) FROM roms "
         "WHERE cover_path IS NULL OR cover_path = '' "
         "ORDER BY console, title";
     sqlite3_stmt *stmt;
@@ -1431,6 +1432,7 @@ int database_get_all_roms_without_cover(int **ids, char ***filepaths, int **cons
     *ids = malloc(cap * sizeof(int));
     *filepaths = malloc(cap * sizeof(char *));
     *consoles = malloc(cap * sizeof(int));
+    *igdb_ids = malloc(cap * sizeof(int));
     *count = 0;
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -1439,11 +1441,13 @@ int database_get_all_roms_without_cover(int **ids, char ***filepaths, int **cons
             *ids = realloc(*ids, cap * sizeof(int));
             *filepaths = realloc(*filepaths, cap * sizeof(char *));
             *consoles = realloc(*consoles, cap * sizeof(int));
+            *igdb_ids = realloc(*igdb_ids, cap * sizeof(int));
         }
         (*ids)[*count] = sqlite3_column_int(stmt, 0);
         const char *f = (const char *)sqlite3_column_text(stmt, 1);
         (*filepaths)[*count] = f ? strdup(f) : strdup("");
         (*consoles)[*count] = sqlite3_column_int(stmt, 2);
+        (*igdb_ids)[*count] = sqlite3_column_int(stmt, 3);
         (*count)++;
     }
 
@@ -1464,6 +1468,19 @@ int database_reset_rom_igdb(void) {
     }
     int changes = sqlite3_changes(db);
     printf("Database: Reset IGDB metadata for %d ROMs\n", changes);
+    return changes;
+}
+
+int database_delete_all_roms(void) {
+    char *err = NULL;
+    int rc = sqlite3_exec(db, "DELETE FROM roms", NULL, NULL, &err);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "database_delete_all_roms: %s\n", err ? err : "unknown error");
+        sqlite3_free(err);
+        return -1;
+    }
+    int changes = sqlite3_changes(db);
+    printf("Database: Deleted all %d ROMs\n", changes);
     return changes;
 }
 

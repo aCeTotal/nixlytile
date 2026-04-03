@@ -82,6 +82,9 @@ void config_init_defaults(void) {
 
     /* Default downloads path */
     strcpy(server_config.download_path, "/mnt/bigdisk1/downloads");
+
+    /* Transcoding enabled by default */
+    server_config.transcode_enabled = 1;
 }
 
 int config_load(const char *path) {
@@ -169,6 +172,10 @@ int config_load(const char *path) {
         }
         else if (strcmp(key, "download_path") == 0) {
             expand_path(value, server_config.download_path, sizeof(server_config.download_path));
+        }
+        else if (strcmp(key, "transcode_enabled") == 0) {
+            server_config.transcode_enabled =
+                (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
         }
         else if (strcmp(key, "roms_path") == 0) {
             /* Clear default on first config-specified roms_path */

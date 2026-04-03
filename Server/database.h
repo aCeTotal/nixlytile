@@ -180,10 +180,14 @@ int database_get_roms_without_igdb(ConsoleType console, int **ids, char ***title
 int database_get_roms_without_cover(int **ids, char ***titles, int **consoles, int **igdb_ids, int *count);
 
 /* Get ALL ROMs without cover art (regardless of IGDB status) — for libretro-thumbnails fallback */
-int database_get_all_roms_without_cover(int **ids, char ***filepaths, int **consoles, int *count);
+int database_get_all_roms_without_cover(int **ids, char ***filepaths, int **consoles,
+                                        int **igdb_ids, int *count);
 
 /* Reset all ROM IGDB metadata (set igdb_id back to NULL for re-scraping) */
 int database_reset_rom_igdb(void);
+
+/* Delete all ROM entries from database (full wipe for fresh start) */
+int database_delete_all_roms(void);
 
 /* Update show status and totals for all episodes of a show */
 int database_update_show_status(int tmdb_show_id, const char *status, const char *next_episode,
