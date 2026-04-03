@@ -286,48 +286,111 @@ int igdb_console_to_platform(int console_type) {
     }
 }
 
-IgdbGame *igdb_search_game(const char *title, int platform_id) {
-    if (!title || !title[0]) return NULL;
+/* Normalize a title for comparison: lowercase, &→and, strip punctuation, collapse spaces */
+static void normalize_title(const char *src, char *dst, size_t dst_size) {
+    if (!src || !dst || dst_size == 0) return;
 
-    /* Build Apicalypse query */
-    char body[1024];
-    if (platform_id > 0) {
-        snprintf(body, sizeof(body),
-            "search \"%s\";\n"
-            "fields name,summary,first_release_date,genres.name,platforms.name,"
-            "involved_companies.company.name,involved_companies.developer,"
-            "involved_companies.publisher,total_rating,cover.image_id;\n"
-            "where platforms = (%d);\n"
-            "limit 1;",
-            title, platform_id);
-    } else {
-        snprintf(body, sizeof(body),
-            "search \"%s\";\n"
-            "fields name,summary,first_release_date,genres.name,platforms.name,"
-            "involved_companies.company.name,involved_companies.developer,"
-            "involved_companies.publisher,total_rating,cover.image_id;\n"
-            "limit 1;",
-            title);
+    char *d = dst;
+    char *end = dst + dst_size - 1;
+    int last_space = 1; /* suppress leading spaces */
+
+    while (*src && d < end) {
+        unsigned char ch = (unsigned char)*src;
+
+        if (ch == '&') {
+            /* & → and */
+            if (d + 3 < end) {
+                if (!last_space && d > dst) *d++ = ' ';
+                *d++ = 'a'; *d++ = 'n'; *d++ = 'd';
+                last_space = 0;
+            }
+        } else if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                   (ch >= '0' && ch <= '9')) {
+            *d++ = (ch >= 'A' && ch <= 'Z') ? ch + 32 : ch;
+            last_space = 0;
+        } else if (ch == ' ' || ch == '\'' || ch == '.' || ch == '!' ||
+                   ch == ':' || ch == ',' || ch == '-' || ch == '_') {
+            if (!last_space && d > dst) {
+                *d++ = ' ';
+                last_space = 1;
+            }
+        }
+        /* Other punctuation is silently dropped */
+        src++;
     }
 
-    char *response = igdb_request("games", body);
-    if (!response) return NULL;
+    /* Trim trailing space */
+    if (d > dst && *(d - 1) == ' ') d--;
+    *d = '\0';
+}
 
-    cJSON *json = cJSON_Parse(response);
-    free(response);
-    if (!json) return NULL;
+/* Score how well an IGDB result name matches the ROM search title.
+ * Returns 0-100; caller should use threshold ~50. */
+static int title_match_score(const char *search, const char *result) {
+    if (!search || !result) return 0;
 
-    /* Response is an array */
-    if (!cJSON_IsArray(json) || cJSON_GetArraySize(json) == 0) {
-        cJSON_Delete(json);
-        return NULL;
+    char a[256], b[256];
+    normalize_title(search, a, sizeof(a));
+    normalize_title(result, b, sizeof(b));
+
+    if (a[0] == '\0' || b[0] == '\0') return 0;
+
+    /* Strip leading "the " from both */
+    const char *sa = a, *sb = b;
+    if (strncmp(sa, "the ", 4) == 0) sa += 4;
+    if (strncmp(sb, "the ", 4) == 0) sb += 4;
+
+    /* Exact match */
+    if (strcmp(sa, sb) == 0) return 100;
+
+    size_t la = strlen(sa), lb = strlen(sb);
+
+    /* One contains the other */
+    if (la > 0 && lb > 0) {
+        if (strstr(sa, sb) || strstr(sb, sa)) {
+            size_t shorter = la < lb ? la : lb;
+            size_t longer = la > lb ? la : lb;
+            /* Score based on length ratio: identical lengths → 95, half → 75 */
+            int score = 75 + (int)(20 * shorter / longer);
+            return score;
+        }
     }
 
-    cJSON *game = cJSON_GetArrayItem(json, 0);
-    if (!game) {
-        cJSON_Delete(json);
-        return NULL;
+    /* Word overlap scoring */
+    /* Tokenize a copy of sa */
+    char wa[256], wb[256];
+    strncpy(wa, sa, sizeof(wa) - 1); wa[sizeof(wa) - 1] = '\0';
+    strncpy(wb, sb, sizeof(wb) - 1); wb[sizeof(wb) - 1] = '\0';
+
+    char *words_a[32], *words_b[32];
+    int na = 0, nb = 0;
+
+    for (char *tok = strtok(wa, " "); tok && na < 32; tok = strtok(NULL, " "))
+        words_a[na++] = tok;
+    for (char *tok = strtok(wb, " "); tok && nb < 32; tok = strtok(NULL, " "))
+        words_b[nb++] = tok;
+
+    if (na == 0 || nb == 0) return 0;
+
+    int common = 0;
+    for (int i = 0; i < na; i++) {
+        for (int j = 0; j < nb; j++) {
+            if (strcmp(words_a[i], words_b[j]) == 0) {
+                common++;
+                break;
+            }
+        }
     }
+
+    /* Dice coefficient: (2 * common) / (na + nb) scaled to 0-90 */
+    int total = na + nb;
+    int score = (int)(90.0 * 2.0 * common / total);
+    return score;
+}
+
+/* Parse a single game object from IGDB JSON into IgdbGame struct */
+static IgdbGame *parse_igdb_game(cJSON *game) {
+    if (!game) return NULL;
 
     IgdbGame *g = calloc(1, sizeof(IgdbGame));
     g->igdb_id = get_int(game, "id");
@@ -361,6 +424,82 @@ IgdbGame *igdb_search_game(const char *title, int platform_id) {
         }
     }
 
+    return g;
+}
+
+IgdbGame *igdb_search_game(const char *title, int platform_id) {
+    if (!title || !title[0]) return NULL;
+
+    /* Escape double quotes by removing them (they break Apicalypse syntax) */
+    char safe_title[512];
+    const char *s = title;
+    char *d = safe_title;
+    char *end = safe_title + sizeof(safe_title) - 1;
+    while (*s && d < end) {
+        if (*s != '"') *d++ = *s;
+        s++;
+    }
+    *d = '\0';
+
+    /* Build Apicalypse query — fetch up to 10 results for scoring */
+    char body[1024];
+    if (platform_id > 0) {
+        snprintf(body, sizeof(body),
+            "search \"%s\";\n"
+            "fields name,summary,first_release_date,genres.name,platforms.name,"
+            "involved_companies.company.name,involved_companies.developer,"
+            "involved_companies.publisher,total_rating,cover.image_id;\n"
+            "where platforms = (%d);\n"
+            "limit 10;",
+            safe_title, platform_id);
+    } else {
+        snprintf(body, sizeof(body),
+            "search \"%s\";\n"
+            "fields name,summary,first_release_date,genres.name,platforms.name,"
+            "involved_companies.company.name,involved_companies.developer,"
+            "involved_companies.publisher,total_rating,cover.image_id;\n"
+            "limit 10;",
+            safe_title);
+    }
+
+    char *response = igdb_request("games", body);
+    if (!response) return NULL;
+
+    cJSON *json = cJSON_Parse(response);
+    free(response);
+    if (!json) return NULL;
+
+    if (!cJSON_IsArray(json) || cJSON_GetArraySize(json) == 0) {
+        cJSON_Delete(json);
+        return NULL;
+    }
+
+    /* Score each result against the search title and pick the best */
+    int best_score = 0;
+    cJSON *best_game = NULL;
+    int n = cJSON_GetArraySize(json);
+
+    for (int i = 0; i < n; i++) {
+        cJSON *game = cJSON_GetArrayItem(json, i);
+        if (!game) continue;
+
+        cJSON *name_item = cJSON_GetObjectItem(game, "name");
+        if (!name_item || !cJSON_IsString(name_item)) continue;
+
+        int score = title_match_score(title, name_item->valuestring);
+        if (score > best_score) {
+            best_score = score;
+            best_game = game;
+        }
+    }
+
+    /* Require minimum score of 50 */
+    if (best_score < 50 || !best_game) {
+        cJSON_Delete(json);
+        return NULL;
+    }
+
+    IgdbGame *g = parse_igdb_game(best_game);
     cJSON_Delete(json);
     return g;
 }

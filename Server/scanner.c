@@ -1338,6 +1338,23 @@ static void clean_rom_title(const char *raw, char *out, size_t out_size) {
     while (len > 0 && (out[len - 1] == ' ' || out[len - 1] == '\t')) {
         out[--len] = '\0';
     }
+
+    /* Strip "Disney's " or "Disney " prefix (IGDB rarely has these) */
+    if (strncasecmp(out, "Disney's ", 9) == 0) {
+        memmove(out, out + 9, strlen(out + 9) + 1);
+    } else if (strncasecmp(out, "Disney ", 7) == 0) {
+        memmove(out, out + 7, strlen(out + 7) + 1);
+    }
+
+    /* Handle trailing ", The" → prepend "The " (some No-Intro dumps) */
+    len = strlen(out);
+    if (len > 5 && strcasecmp(out + len - 5, ", The") == 0) {
+        char temp[256];
+        out[len - 5] = '\0'; /* Remove ", The" */
+        snprintf(temp, sizeof(temp), "The %s", out);
+        strncpy(out, temp, out_size - 1);
+        out[out_size - 1] = '\0';
+    }
 }
 
 /* Generate search variations for a ROM title.
@@ -1353,7 +1370,7 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
 
     /* Variation 1: replace " - " with ": " (No-Intro -> real title) */
     char *dash = strstr(variations[0], " - ");
-    if (dash && *count < 6) {
+    if (dash && *count < 8) {
         char temp[256];
         size_t prefix_len = dash - variations[0];
         memcpy(temp, variations[0], prefix_len);
@@ -1366,7 +1383,7 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
     }
 
     /* Variation 2: replace " - " with just " " */
-    if (dash && *count < 6) {
+    if (dash && *count < 8) {
         char temp[256];
         size_t prefix_len = dash - variations[0];
         memcpy(temp, variations[0], prefix_len);
@@ -1378,7 +1395,7 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
     }
 
     /* Variation 3: just the part before " - " (subtitle stripped) */
-    if (dash && *count < 6) {
+    if (dash && *count < 8) {
         char temp[256];
         size_t prefix_len = dash - variations[0];
         if (prefix_len > 0 && prefix_len < sizeof(temp)) {
@@ -1387,6 +1404,58 @@ static void generate_rom_variations(const char *clean, char variations[][256], i
             strncpy(variations[(*count)++], temp, 255);
             variations[*count - 1][255] = '\0';
         }
+    }
+
+    /* Variation 4: swap & ↔ and */
+    if (*count < 8) {
+        char temp[256];
+        strncpy(temp, clean, sizeof(temp) - 1);
+        temp[sizeof(temp) - 1] = '\0';
+        int changed = 0;
+
+        /* Try replacing " & " with " and " */
+        char *amp = strstr(temp, " & ");
+        if (amp) {
+            char buf[256];
+            size_t pre = amp - temp;
+            memcpy(buf, temp, pre);
+            memcpy(buf + pre, " and ", 5);
+            strncpy(buf + pre + 5, amp + 3, sizeof(buf) - pre - 6);
+            buf[sizeof(buf) - 1] = '\0';
+            strncpy(variations[(*count)++], buf, 255);
+            variations[*count - 1][255] = '\0';
+            changed = 1;
+        }
+
+        /* Try replacing " and " with " & " */
+        if (!changed) {
+            char *lower = temp;
+            /* Case-insensitive search for " and " */
+            while (*lower) {
+                if ((lower[0] == ' ') &&
+                    (lower[1] == 'a' || lower[1] == 'A') &&
+                    (lower[2] == 'n' || lower[2] == 'N') &&
+                    (lower[3] == 'd' || lower[3] == 'D') &&
+                    (lower[4] == ' ')) {
+                    char buf[256];
+                    size_t pre = lower - temp;
+                    memcpy(buf, temp, pre);
+                    memcpy(buf + pre, " & ", 3);
+                    strncpy(buf + pre + 3, lower + 5, sizeof(buf) - pre - 4);
+                    buf[sizeof(buf) - 1] = '\0';
+                    strncpy(variations[(*count)++], buf, 255);
+                    variations[*count - 1][255] = '\0';
+                    break;
+                }
+                lower++;
+            }
+        }
+    }
+
+    /* Variation 5: strip leading "The " */
+    if (*count < 8 && strncasecmp(clean, "The ", 4) == 0 && clean[4] != '\0') {
+        strncpy(variations[(*count)++], clean + 4, 255);
+        variations[*count - 1][255] = '\0';
     }
 }
 
@@ -1448,7 +1517,11 @@ static char *download_igdb_cover(const char *url, const char *title, int console
     return NULL;
 }
 
-/* Fetch IGDB metadata for ROMs that don't have it */
+/* Fetch IGDB metadata for ROMs that don't have it.
+ * Uses a 2-phase search strategy per ROM:
+ *   Phase 1: Try original + colon variant (most likely matches) with platform filter
+ *   Phase 2: Try remaining variations with platform filter
+ *   Phase 3: Fallback without platform filter (1 extra API call) */
 void scanner_fetch_rom_metadata(void) {
     if (!igdb_is_available()) {
         fprintf(stderr, "IGDB: Not initialized, skipping ROM metadata fetch\n");
@@ -1471,7 +1544,6 @@ void scanner_fetch_rom_metadata(void) {
 
     if (grand_total == 0) return;
 
-    /* Use "igdb_fetch" by default; scanner_rescan_all_rom_metadata overrides to "igdb_rescan" */
     scrape_begin("igdb_fetch", grand_total);
     int found = 0;
 
@@ -1492,24 +1564,40 @@ void scanner_fetch_rom_metadata(void) {
                 char clean[256];
                 clean_rom_title(titles[i], clean, sizeof(clean));
 
-                /* Generate search variations and try each */
-                char variations[6][256];
+                char variations[8][256];
                 int var_count = 0;
                 generate_rom_variations(clean, variations, &var_count);
 
                 IgdbGame *g = NULL;
-                for (int v = 0; v < var_count && !g; v++) {
+
+                /* Phase 1: Try original + colon variant (indices 0-1) — most likely matches.
+                 * With limit 10 + scoring, these two alone catch most games. */
+                int phase1_end = var_count < 2 ? var_count : 2;
+                for (int v = 0; v < phase1_end && !g; v++) {
                     g = igdb_search_game(variations[v], platform_id);
-                    if (!g && v < var_count - 1)
-                        usleep(260000); /* rate limit between retries */
+                    if (!g) usleep(260000);
                 }
+
+                /* Phase 2: Try remaining variations with platform filter */
+                if (!g && var_count > 2) {
+                    for (int v = 2; v < var_count && !g; v++) {
+                        g = igdb_search_game(variations[v], platform_id);
+                        if (!g) usleep(260000);
+                    }
+                }
+
+                /* Phase 3: Fallback without platform filter using original title */
+                if (!g) {
+                    g = igdb_search_game(variations[0], 0);
+                    if (!g) usleep(260000);
+                }
+
                 if (g) {
                     database_update_rom_metadata(ids[i], g->igdb_id,
                         g->summary, g->developer, g->publisher,
                         g->release_year, g->genres, NULL,
                         g->rating, g->platforms);
 
-                    /* Download IGDB cover art */
                     if (g->cover_url) {
                         char *cover = download_igdb_cover(g->cover_url,
                             titles[i], c, server_config.cache_dir);
@@ -1533,14 +1621,14 @@ void scanner_fetch_rom_metadata(void) {
                     found++;
                     scrape_update(titles[i], 1);
                 } else {
-                    /* Mark as searched (igdb_id = -1) — game genuinely not found */
+                    printf("  IGDB: %s -> NOT FOUND\n", titles[i]);
                     database_update_rom_metadata(ids[i], -1,
                         NULL, NULL, NULL, 0, NULL, NULL, 0, NULL);
                     scrape_update(titles[i], 0);
                 }
 
-                /* Rate limit: IGDB allows 4 req/sec */
-                usleep(260000); /* ~260ms between requests */
+                /* Rate limit between ROMs */
+                usleep(260000);
             }
         }
 

@@ -45,6 +45,7 @@ extern void videoplayer_audio_pause(VideoPlayer *vp);
 extern void videoplayer_audio_flush(VideoPlayer *vp);
 extern void videoplayer_hide_control_bar(VideoPlayer *vp);
 extern void videoplayer_show_seek_osd(VideoPlayer *vp);
+extern void videoplayer_subtitle_cleanup(VideoPlayer *vp);
 
 /* Subtitle processing */
 static int subtitle_pkt_count = 0;
@@ -942,6 +943,11 @@ void videoplayer_close(VideoPlayer *vp)
     pthread_cond_destroy(&vp->pkt_not_empty);
     pthread_cond_destroy(&vp->pkt_not_full);
 
+    /* Clean up subtitle state (libass library/renderer/track, bitmap, buffers).
+     * Must happen before freeing subtitle_codec_ctx. */
+    videoplayer_subtitle_cleanup(vp);
+    pthread_mutex_destroy(&vp->subtitle_mutex);
+
     /* Cleanup audio output (PipeWire, ring buffer, resampler).
      * Must shut down cmd thread first — it holds PipeWire locks. */
     videoplayer_audio_cmd_shutdown(vp);
@@ -998,7 +1004,24 @@ void videoplayer_close(VideoPlayer *vp)
     vp->hw_verified = 0;
     vp->demux_eof = 0;
     vp->seek_flush_done = 0;
+    vp->seek_requested = 0;
+    vp->seek_target_us = 0;
+    vp->io_abort_requested = 0;
     memset(&vp->video, 0, sizeof(vp->video));
+
+    /* Reset frame pacing and A/V sync state so the next open starts clean */
+    vp->last_frame_ns = 0;
+    vp->last_present_time_ns = 0;
+    vp->buffer_ready_since_ns = 0;
+    vp->av_sync_offset_us = 0;
+    vp->current_repeat = 0;
+    vp->cadence_accum = 0.0f;
+    vp->video_fps = 0;
+    vp->av_sync_video_base_us = 0;
+    vp->av_sync_audio_base_us = 0;
+    vp->av_sync_established = 0;
+    vp->recovery_check_counter = 0;
+    vp->audio_interrupted_ticks = 0;
 }
 
 /* ================================================================
@@ -1341,6 +1364,9 @@ static int init_subtitle_decoder(VideoPlayer *vp)
     }
 
     fprintf(stderr, "[subtitle] init_decoder: ffmpeg codec opened OK\n");
+
+    /* Reset subtitle packet counter for this new playback session */
+    subtitle_pkt_count = 0;
 
     /* Initialize libass */
     if (videoplayer_subtitle_init(vp) < 0) {
