@@ -77,7 +77,7 @@ static char *tmdb_request_lang(const char *endpoint, const char *lang) {
 }
 
 static char *tmdb_request(const char *endpoint) {
-    return tmdb_request_lang(endpoint, language ? language : "en-US");
+    return tmdb_request_lang(endpoint, "en-US");
 }
 
 static char *get_string(cJSON *obj, const char *key);

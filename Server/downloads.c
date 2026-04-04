@@ -15,6 +15,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/sendfile.h>
+#include <sys/wait.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <time.h>
@@ -30,6 +31,49 @@
 #define DL_SCAN_INTERVAL 30   /* seconds between scans */
 #define DL_STABLE_AGE    30   /* file must be this old (seconds) before processing */
 #define DL_SAMPLE_MAX_MB 200  /* max size in MB for a file to be considered a "sample" */
+#define DL_MAX_PARTS     20  /* max parts in a multi-part movie */
+
+/* Growable list of file paths */
+typedef struct {
+	char **paths;
+	int    count;
+	int    capacity;
+} FileList;
+
+static void filelist_init(FileList *fl) {
+	fl->paths = NULL;
+	fl->count = 0;
+	fl->capacity = 0;
+}
+
+static void filelist_add(FileList *fl, const char *path) {
+	if (fl->count >= fl->capacity) {
+		int newcap = fl->capacity ? fl->capacity * 2 : 64;
+		char **tmp = realloc(fl->paths, newcap * sizeof(char *));
+		if (!tmp) return;
+		fl->paths = tmp;
+		fl->capacity = newcap;
+	}
+	fl->paths[fl->count] = strdup(path);
+	if (fl->paths[fl->count])
+		fl->count++;
+}
+
+static void filelist_remove(FileList *fl, int idx) {
+	if (idx < 0 || idx >= fl->count) return;
+	free(fl->paths[idx]);
+	fl->paths[idx] = fl->paths[fl->count - 1];
+	fl->count--;
+}
+
+static void filelist_free(FileList *fl) {
+	for (int i = 0; i < fl->count; i++)
+		free(fl->paths[i]);
+	free(fl->paths);
+	fl->paths = NULL;
+	fl->count = 0;
+	fl->capacity = 0;
+}
 
 static pthread_t dl_thread;
 static volatile int dl_running = 0;
@@ -274,6 +318,413 @@ static int extract_part_number(const char *name) {
 	return 0;
 }
 
+/* Strip part indicator from filename to produce a grouping key.
+ * E.g. "The.Movie.Part1.mkv" and "The.Movie.Part2.mkv" both → "the movie"
+ * Returns 1 if a part indicator was found and stripped, 0 otherwise. */
+static int strip_part_for_grouping(const char *filepath, char *out, size_t out_size) {
+	const char *base = strrchr(filepath, '/');
+	base = base ? base + 1 : filepath;
+
+	/* Copy basename without extension */
+	char buf[512];
+	snprintf(buf, sizeof(buf), "%s", base);
+	char *dot = strrchr(buf, '.');
+	if (dot) *dot = '\0';
+
+	/* Normalize dots/underscores/hyphens → spaces, lowercase */
+	for (char *p = buf; *p; p++) {
+		if (*p == '.' || *p == '_' || *p == '-')
+			*p = ' ';
+		*p = tolower((unsigned char)*p);
+	}
+
+	/* Find and remove part indicator */
+	char *found = NULL;
+	for (char *p = buf; *p; p++) {
+		if (p != buf && isalpha((unsigned char)*(p - 1))) continue;
+
+		if (strncasecmp(p, "part", 4) == 0 && !isalpha((unsigned char)p[4])) {
+			found = p;
+			break;
+		}
+		if (strncasecmp(p, "pt", 2) == 0 && !isalpha((unsigned char)p[2])) {
+			found = p;
+			break;
+		}
+	}
+
+	if (!found) return 0;
+
+	/* Remove from the part indicator to the end of the number */
+	char *end = found;
+	/* Skip "part" or "pt" */
+	if (strncasecmp(end, "part", 4) == 0) end += 4;
+	else end += 2;
+	/* Skip separators */
+	while (*end == ' ' || *end == '.' || *end == '_') end++;
+	/* Skip digits */
+	while (isdigit((unsigned char)*end)) end++;
+
+	/* Shift remainder over the part indicator */
+	memmove(found, end, strlen(end) + 1);
+
+	/* Trim trailing spaces */
+	size_t len = strlen(buf);
+	while (len > 0 && buf[len - 1] == ' ') buf[--len] = '\0';
+	/* Trim leading spaces */
+	char *start = buf;
+	while (*start == ' ') start++;
+
+	snprintf(out, out_size, "%s", start);
+	return 1;
+}
+
+/* Merge N part files into a single MKV using ffmpeg concat demuxer.
+ * paths[] must be sorted by part number. Returns 0 on success, -1 on failure. */
+static int merge_parts(char *paths[], int count, const char *output) {
+	if (count < 2) return -1;
+
+	/* Write concat list file */
+	char list_path[DL_MAX_PATH];
+	snprintf(list_path, sizeof(list_path), "%s.concat_list.txt", paths[0]);
+
+	FILE *f = fopen(list_path, "w");
+	if (!f) {
+		fprintf(stderr, "Downloads: merge_parts: cannot create list file %s\n",
+		        list_path);
+		return -1;
+	}
+	for (int i = 0; i < count; i++)
+		fprintf(f, "file '%s'\n", paths[i]);
+	fclose(f);
+
+	printf("Downloads: Merging %d parts → %s\n", count, output);
+
+	pid_t pid = fork();
+	if (pid < 0) {
+		unlink(list_path);
+		return -1;
+	}
+
+	if (pid == 0) {
+		/* Redirect stderr to /dev/null */
+		int devnull = open("/dev/null", O_WRONLY);
+		if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
+		execlp("ffmpeg", "ffmpeg",
+		       "-y", "-nostdin",
+		       "-f", "concat", "-safe", "0",
+		       "-i", list_path,
+		       "-c", "copy",
+		       "-f", "matroska",
+		       "-reserve_index_space", "524288",
+		       "-cluster_size_limit", "2097152",
+		       "-cluster_time_limit", "2000",
+		       output, (char *)NULL);
+		_exit(127);
+	}
+
+	int status;
+	while (waitpid(pid, &status, 0) < 0) {
+		if (errno != EINTR) { unlink(list_path); return -1; }
+	}
+
+	unlink(list_path);
+
+	if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+		/* Delete source parts */
+		for (int i = 0; i < count; i++)
+			unlink(paths[i]);
+		printf("Downloads: Merge complete: %s\n", output);
+		return 0;
+	}
+
+	fprintf(stderr, "Downloads: merge_parts: ffmpeg exited with status %d\n",
+	        WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+	/* Remove failed output */
+	unlink(output);
+	return -1;
+}
+
+/* Build merged output path from Part 1's path by removing part indicator.
+ * E.g. "The.Movie.Part1.mkv" → "The.Movie.mkv" */
+static void build_merged_path(const char *part1_path, char *out, size_t out_size) {
+	char dir[DL_MAX_PATH], base[512];
+	snprintf(dir, sizeof(dir), "%s", part1_path);
+	char *slash = strrchr(dir, '/');
+	if (slash) {
+		*slash = '\0';
+		snprintf(base, sizeof(base), "%s", slash + 1);
+	} else {
+		dir[0] = '.'; dir[1] = '\0';
+		snprintf(base, sizeof(base), "%s", part1_path);
+	}
+
+	/* Get extension */
+	const char *ext = strrchr(base, '.');
+	if (!ext) ext = ".mkv";
+
+	/* Remove extension from base for processing */
+	char stem[512];
+	snprintf(stem, sizeof(stem), "%s", base);
+	char *dot = strrchr(stem, '.');
+	if (dot) *dot = '\0';
+
+	/* Find and remove part indicator from stem */
+	for (char *p = stem; *p; p++) {
+		if (p != stem && isalpha((unsigned char)*(p - 1))) continue;
+
+		char *match = NULL;
+		int skip_len = 0;
+		if (strncasecmp(p, "part", 4) == 0 && !isalpha((unsigned char)p[4])) {
+			match = p;
+			skip_len = 4;
+		} else if (strncasecmp(p, "pt", 2) == 0 && !isalpha((unsigned char)p[2])) {
+			match = p;
+			skip_len = 2;
+		}
+
+		if (match) {
+			char *end = match + skip_len;
+			while (*end == ' ' || *end == '.' || *end == '_' || *end == '-') end++;
+			while (isdigit((unsigned char)*end)) end++;
+			/* Also consume one trailing separator if present */
+			if (*end == '.' || *end == '_' || *end == '-' || *end == ' ') end++;
+			memmove(match, end, strlen(end) + 1);
+			/* Trim trailing separators */
+			size_t slen = strlen(stem);
+			while (slen > 0 && (stem[slen-1] == '.' || stem[slen-1] == '_' ||
+			       stem[slen-1] == '-' || stem[slen-1] == ' '))
+				stem[--slen] = '\0';
+			break;
+		}
+	}
+
+	snprintf(out, out_size, "%s/%s%s", dir, stem, ext);
+}
+
+/* Delete external subtitles associated with a video file */
+static void delete_external_subs(const char *video_path) {
+	char dir[DL_MAX_PATH];
+	snprintf(dir, sizeof(dir), "%s", video_path);
+	char *slash = strrchr(dir, '/');
+	if (!slash) return;
+	*slash = '\0';
+
+	const char *base = slash + 1;
+	char stem[256];
+	snprintf(stem, sizeof(stem), "%s", base);
+	char *dot = strrchr(stem, '.');
+	if (dot) *dot = '\0';
+	size_t stem_len = strlen(stem);
+
+	DIR *d = opendir(dir);
+	if (!d) return;
+
+	struct dirent *ent;
+	while ((ent = readdir(d)) != NULL) {
+		if (!is_subtitle_file(ent->d_name)) continue;
+		if (strncasecmp(ent->d_name, stem, stem_len) != 0) continue;
+		char sub_path[DL_MAX_PATH];
+		snprintf(sub_path, sizeof(sub_path), "%s/%s", dir, ent->d_name);
+		unlink(sub_path);
+		printf("Downloads: Deleted subtitle from merged part: %s\n", ent->d_name);
+	}
+	closedir(d);
+}
+
+/* Group info for multi-part merge */
+typedef struct {
+	char  key[512];            /* grouping key from strip_part_for_grouping */
+	char *paths[DL_MAX_PARTS]; /* file paths, indexed by part_number-1 */
+	int   part_nums[DL_MAX_PARTS];
+	int   count;               /* number of parts found */
+	int   max_part;            /* highest part number */
+	int   all_stable;          /* all files stable? */
+} PartGroup;
+
+/* Scan FileList for multi-part movies, merge complete groups, defer incomplete.
+ * Modifies the list in-place: merged/deferred files are removed. */
+static void merge_multipart_movies(FileList *fl) {
+	PartGroup groups[32];
+	int ngroups = 0;
+
+	/* Phase 1: identify multi-part files and group them */
+	for (int i = 0; i < fl->count; i++) {
+		const char *path = fl->paths[i];
+		const char *base = strrchr(path, '/');
+		base = base ? base + 1 : path;
+
+		int partnum = extract_part_number(base);
+		if (partnum <= 0) continue;
+		if (partnum > DL_MAX_PARTS) continue;
+
+		if (!scanner_is_media_file(path)) continue;
+
+		char key[512];
+		if (!strip_part_for_grouping(path, key, sizeof(key))) continue;
+
+		/* Find or create group */
+		PartGroup *grp = NULL;
+		for (int g = 0; g < ngroups; g++) {
+			if (strcasecmp(groups[g].key, key) == 0) {
+				grp = &groups[g];
+				break;
+			}
+		}
+		if (!grp) {
+			if (ngroups >= 32) continue;
+			grp = &groups[ngroups++];
+			memset(grp, 0, sizeof(*grp));
+			snprintf(grp->key, sizeof(grp->key), "%s", key);
+			grp->all_stable = 1;
+		}
+
+		if (grp->count < DL_MAX_PARTS) {
+			grp->paths[grp->count] = fl->paths[i];
+			grp->part_nums[grp->count] = partnum;
+			grp->count++;
+			if (partnum > grp->max_part)
+				grp->max_part = partnum;
+			if (!is_file_stable(path))
+				grp->all_stable = 0;
+		}
+	}
+
+	if (ngroups == 0) return;
+
+	/* Phase 2: process each group */
+	for (int g = 0; g < ngroups; g++) {
+		PartGroup *grp = &groups[g];
+		if (grp->count < 2) {
+			/* Single part found — defer (don't process individually).
+			 * Remove from list so it won't be processed this scan. */
+			printf("Downloads: [wait] Waiting for remaining parts of '%s' "
+			       "(have part %d)\n", grp->key, grp->part_nums[0]);
+			for (int p = 0; p < grp->count; p++) {
+				for (int i = 0; i < fl->count; i++) {
+					if (fl->paths[i] == grp->paths[p]) {
+						filelist_remove(fl, i);
+						break;
+					}
+				}
+			}
+			continue;
+		}
+
+		/* Check for contiguous parts 1..N */
+		int has_part[DL_MAX_PARTS + 1] = {0};
+		for (int p = 0; p < grp->count; p++)
+			has_part[grp->part_nums[p]] = 1;
+
+		int contiguous = 1;
+		for (int n = 1; n <= grp->max_part; n++) {
+			if (!has_part[n]) {
+				printf("Downloads: [warn] '%s' missing Part %d (have %d parts, max %d) — skipping\n",
+				       grp->key, n, grp->count, grp->max_part);
+				contiguous = 0;
+				break;
+			}
+		}
+
+		if (!contiguous) {
+			/* Remove from list so parts aren't processed individually */
+			for (int p = 0; p < grp->count; p++) {
+				for (int i = 0; i < fl->count; i++) {
+					if (fl->paths[i] == grp->paths[p]) {
+						filelist_remove(fl, i);
+						break;
+					}
+				}
+			}
+			continue;
+		}
+
+		if (!grp->all_stable) {
+			printf("Downloads: [wait] Parts of '%s' still downloading\n", grp->key);
+			for (int p = 0; p < grp->count; p++) {
+				for (int i = 0; i < fl->count; i++) {
+					if (fl->paths[i] == grp->paths[p]) {
+						filelist_remove(fl, i);
+						break;
+					}
+				}
+			}
+			continue;
+		}
+
+		/* Sort paths by part number */
+		char *sorted[DL_MAX_PARTS];
+		for (int n = 1; n <= grp->max_part; n++) {
+			for (int p = 0; p < grp->count; p++) {
+				if (grp->part_nums[p] == n) {
+					sorted[n - 1] = grp->paths[p];
+					break;
+				}
+			}
+		}
+
+		/* Build output path from Part 1 */
+		char merged_path[DL_MAX_PATH];
+		build_merged_path(sorted[0], merged_path, sizeof(merged_path));
+
+		/* Merge */
+		if (merge_parts(sorted, grp->max_part, merged_path) == 0) {
+			/* Delete external subs for Part 2+ (Part 1's subs will be
+			 * renamed by process_download_file to match merged name) */
+			for (int n = 1; n < grp->max_part; n++)
+				delete_external_subs(sorted[n]);
+
+			/* Remove part entries from list, add merged file */
+			for (int p = 0; p < grp->count; p++) {
+				for (int i = 0; i < fl->count; i++) {
+					if (fl->paths[i] == grp->paths[p]) {
+						filelist_remove(fl, i);
+						break;
+					}
+				}
+			}
+			filelist_add(fl, merged_path);
+			printf("Downloads: Merged '%s' (%d parts)\n",
+			       grp->key, grp->max_part);
+		} else {
+			fprintf(stderr, "Downloads: Merge failed for '%s', leaving parts for retry\n",
+			        grp->key);
+			/* Remove from list so they aren't processed individually this scan */
+			for (int p = 0; p < grp->count; p++) {
+				for (int i = 0; i < fl->count; i++) {
+					if (fl->paths[i] == grp->paths[p]) {
+						filelist_remove(fl, i);
+						break;
+					}
+				}
+			}
+		}
+	}
+}
+
+/* Recursively collect all regular files from a directory into a FileList */
+static void collect_files(const char *path, FileList *fl) {
+	DIR *d = opendir(path);
+	if (!d) return;
+
+	struct dirent *ent;
+	while ((ent = readdir(d)) != NULL) {
+		if (ent->d_name[0] == '.') continue;
+
+		char fullpath[DL_MAX_PATH];
+		snprintf(fullpath, sizeof(fullpath), "%s/%s", path, ent->d_name);
+
+		struct stat st;
+		if (stat(fullpath, &st) != 0) continue;
+
+		if (S_ISDIR(st.st_mode))
+			collect_files(fullpath, fl);
+		else if (S_ISREG(st.st_mode))
+			filelist_add(fl, fullpath);
+	}
+	closedir(d);
+}
+
 /* Process a single media file: classify, rename, move, scrape TMDB */
 static int process_download_file(const char *filepath) {
 	struct stat st;
@@ -516,53 +967,30 @@ static int process_download_file(const char *filepath) {
 	return 1;
 }
 
-/* Collect and process all media files in a directory (recursive) */
+/* Collect files, merge multi-part movies, then process remaining files */
 static int scan_directory(const char *path) {
-	DIR *d = opendir(path);
-	if (!d) return 0;
+	FileList fl;
+	filelist_init(&fl);
 
-	int processed = 0;
-	struct dirent *ent;
+	/* Phase 1: recursively collect all files */
+	collect_files(path, &fl);
 
-	/* Collect entries first because processing may delete/move files.
-	 * Use heap allocation to handle large directories. */
-	int capacity = 512;
-	int entry_count = 0;
-	char (*entries)[256] = malloc(capacity * sizeof(*entries));
-	if (!entries) {
-		closedir(d);
+	if (fl.count == 0) {
+		filelist_free(&fl);
 		return 0;
 	}
 
-	while ((ent = readdir(d)) != NULL) {
-		if (ent->d_name[0] == '.') continue;
-		if (entry_count >= capacity) {
-			capacity *= 2;
-			char (*tmp)[256] = realloc(entries, capacity * sizeof(*entries));
-			if (!tmp) break;
-			entries = tmp;
-		}
-		snprintf(entries[entry_count], 256, "%s", ent->d_name);
-		entry_count++;
-	}
-	closedir(d);
+	/* Phase 2: group and merge multi-part movies */
+	merge_multipart_movies(&fl);
 
-	for (int i = 0; i < entry_count && dl_running; i++) {
-		char fullpath[DL_MAX_PATH];
-		snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entries[i]);
-
-		struct stat st;
-		if (stat(fullpath, &st) != 0) continue;
-
-		if (S_ISDIR(st.st_mode)) {
-			processed += scan_directory(fullpath);
-		} else if (S_ISREG(st.st_mode)) {
-			int ret = process_download_file(fullpath);
-			if (ret > 0) processed++;
-		}
+	/* Phase 3: process remaining files individually */
+	int processed = 0;
+	for (int i = 0; i < fl.count && dl_running; i++) {
+		int ret = process_download_file(fl.paths[i]);
+		if (ret > 0) processed++;
 	}
 
-	free(entries);
+	filelist_free(&fl);
 	return processed;
 }
 
