@@ -926,6 +926,16 @@ static void handle_api(int fd, const char *path) {
             send_error(fd, 400, "Invalid console ID");
         }
     }
+    else if (strncmp(path, "/api/roms/", 10) == 0 && strstr(path + 10, "/download")) {
+        int id = atoi(path + 10);
+        char *filepath = database_get_rom_filepath(id);
+        if (filepath) {
+            serve_file(fd, filepath);
+            free(filepath);
+        } else {
+            send_error(fd, 404, "ROM not found");
+        }
+    }
     else if (strncmp(path, "/api/rom/", 9) == 0) {
         int id = atoi(path + 9);
         char *json = database_get_rom_json(id);

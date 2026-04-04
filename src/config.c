@@ -287,6 +287,8 @@ static const ConfigEntry config_entries[] = {
 	/* Streaming */
 	{"client_download_mbps",     CFG_CUSTOM, NULL, 0, config_set_client_download},
 	{"media_server",             CFG_CUSTOM, NULL, 0, config_set_media_server},
+	/* Retro gaming emulators */
+	{"emulator",                 CFG_CUSTOM, NULL, 0, config_set_emulator},
 	/* PC Gaming services */
 	{"gaming_steam_enabled",     CFG_INT,    &gaming_service_enabled[GAMING_SERVICE_STEAM],   0, NULL},
 	{"gaming_heroic_enabled",    CFG_INT,    &gaming_service_enabled[GAMING_SERVICE_HEROIC],  0, NULL},

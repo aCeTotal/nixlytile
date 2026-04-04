@@ -872,6 +872,7 @@ gamepad_event_cb(int fd, uint32_t mask, void *data)
 						Monitor *rg_mon = retro_gaming_visible_monitor();
 						if (rg_mon && htpc_view_is_active(rg_mon, rg_mon->retro_gaming.view_tag, rg_mon->retro_gaming.visible)) {
 							handled = retro_gaming_handle_button(rg_mon, button, 1);
+							retro_dpad_repeat_start(rg_mon, button);
 						}
 					}
 
@@ -910,6 +911,8 @@ gamepad_event_cb(int fd, uint32_t mask, void *data)
 					/* D-pad released - stop OSK repeat if active */
 					if (osk_dpad_held_button == BTN_DPAD_UP || osk_dpad_held_button == BTN_DPAD_DOWN)
 						osk_dpad_repeat_stop();
+					/* Stop retro gaming repeat */
+					retro_dpad_repeat_stop();
 				}
 				break;
 			}
@@ -1350,11 +1353,16 @@ gamepad_update_cursor(void)
 
 	/* Handle Retro gaming view joystick navigation */
 	if (selmon && htpc_view_is_active(selmon, selmon->retro_gaming.view_tag, selmon->retro_gaming.visible)) {
-		int nav_x = 0, nav_y_unused = 0;
-		gamepad_read_nav_xy(&nav_x, &nav_y_unused);
+		int nav_x = 0, nav_y = 0;
+		gamepad_read_nav_xy(&nav_x, &nav_y);
 
-		if (gamepad_nav_should_step(nav_x != 0, now))
-			retro_gaming_handle_button(selmon, nav_x < 0 ? BTN_DPAD_LEFT : BTN_DPAD_RIGHT, 1);
+		int active = (nav_x != 0 || nav_y != 0);
+		if (gamepad_nav_should_step(active, now)) {
+			if (nav_y != 0)
+				retro_gaming_handle_button(selmon, nav_y < 0 ? BTN_DPAD_UP : BTN_DPAD_DOWN, 1);
+			else if (nav_x != 0)
+				retro_gaming_handle_button(selmon, nav_x < 0 ? BTN_DPAD_LEFT : BTN_DPAD_RIGHT, 1);
+		}
 
 		gamepad_send_right_stick_scroll();
 		return;

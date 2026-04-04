@@ -959,6 +959,20 @@ const char *database_console_name(ConsoleType console) {
     return "Unknown";
 }
 
+/* Emulator tag per console (used by client to map to emulator command) */
+static const char *emulator_tags[] = {
+    "nes", "snes", "n64", "gamecube", "wii",
+    "gb", "gbc", "gba",
+    "ps2", "switch", "ps1", "ps3", "ps4", "psp", "vita",
+    "xbox", "xbox360", "wiiu", "ds", "3ds",
+    "genesis", "mastersystem", "saturn", "dreamcast", "segacd",
+    "atari2600", "tgfx16", "32x", "gamegear"
+};
+
+const char *database_emulator_tag(ConsoleType c) {
+    return (c >= 0 && c < CONSOLE_COUNT) ? emulator_tags[c] : "unknown";
+}
+
 /* Retro gaming ROM functions */
 int database_add_rom(RomEntry *entry) {
     const char *sql =
@@ -1120,12 +1134,14 @@ char *database_get_roms_json(void) {
 
         buf_used += snprintf(json + buf_used, buf_size - buf_used,
             "{\"id\":%d,\"console\":%d,\"console_name\":\"%s\","
+            "\"emulator\":\"%s\","
             "\"title\":%s,\"cover\":%s,\"size\":%lld,\"region\":%s,"
             "\"filepath\":%s,\"igdb_id\":%d,\"description\":%s,"
             "\"developer\":%s,\"publisher\":%s,\"release_year\":%d,"
             "\"genre\":%s,\"players\":%s,\"igdb_rating\":%.1f,"
             "\"igdb_platforms\":%s}",
             id, console, database_console_name(console),
+            database_emulator_tag(console),
             title_esc, cover_esc, (long long)size, region_esc, path_esc,
             igdb_id, desc_esc, dev_esc, pub_esc, release_year,
             genre_esc, players_esc, igdb_rating, plat_esc);
@@ -1208,12 +1224,14 @@ char *database_get_roms_by_console_json(ConsoleType console) {
 
         buf_used += snprintf(json + buf_used, buf_size - buf_used,
             "{\"id\":%d,\"console\":%d,\"console_name\":\"%s\","
+            "\"emulator\":\"%s\","
             "\"title\":%s,\"cover\":%s,\"size\":%lld,\"region\":%s,"
             "\"filepath\":%s,\"igdb_id\":%d,\"description\":%s,"
             "\"developer\":%s,\"publisher\":%s,\"release_year\":%d,"
             "\"genre\":%s,\"players\":%s,\"igdb_rating\":%.1f,"
             "\"igdb_platforms\":%s}",
             id, cons, database_console_name(cons),
+            database_emulator_tag(cons),
             title_esc, cover_esc, (long long)size, region_esc, path_esc,
             igdb_id, desc_esc, dev_esc, pub_esc, release_year,
             genre_esc, players_esc, igdb_rating, plat_esc);
@@ -1284,6 +1302,7 @@ char *database_get_rom_json(int id) {
         json = malloc(8192);
         snprintf(json, 8192,
             "{\"id\":%d,\"console\":%d,\"console_name\":\"%s\","
+            "\"emulator\":\"%s\","
             "\"title\":%s,\"filepath\":%s,\"cover\":%s,"
             "\"size\":%lld,\"region\":%s,\"added_date\":%s,"
             "\"igdb_id\":%d,\"description\":%s,"
@@ -1291,6 +1310,7 @@ char *database_get_rom_json(int id) {
             "\"genre\":%s,\"players\":%s,\"igdb_rating\":%.1f,"
             "\"igdb_platforms\":%s}",
             sqlite3_column_int(stmt, 0), cons, database_console_name(cons),
+            database_emulator_tag(cons),
             title_esc, path_esc, cover_esc,
             sqlite3_column_int64(stmt, 5), region_esc, added_esc,
             igdb_id_val, desc_esc, dev_esc, pub_esc, release_year,

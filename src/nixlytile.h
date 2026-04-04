@@ -211,6 +211,8 @@
 
 /* ── retro gaming constants ────────────────────────────────────────── */
 #define RETRO_SLIDE_DURATION_MS 200  /* Smooth slide animation duration */
+#define RETRO_DPAD_INITIAL_DELAY 350
+#define RETRO_DPAD_REPEAT_RATE 80
 
 /* ── media grid constants ─────────────────────────────────────────── */
 #define MEDIA_GRID_PADDING 40
@@ -287,6 +289,8 @@ typedef struct RomItem {
 	char cover_path[512];
 	char filepath[1024];
 	char server_url[256];
+	char emulator[32];    /* emulator tag from server: "nes", "snes", etc. */
+	int64_t size;         /* file size in bytes for download progress */
 
 	/* IGDB metadata */
 	char description[1024];
@@ -296,6 +300,7 @@ typedef struct RomItem {
 	char genre[256];
 	char igdb_platforms[512];
 	float rating;
+	int igdb_id;
 } RomItem;
 
 typedef enum {
@@ -1032,6 +1037,22 @@ typedef struct {
 	int cover_w, cover_h;
 	int cover_loaded;
 	int cover_loading_idx;      /* Which game index the cover is for */
+	int sort_mode;              /* 0=rating, 1=alphabetical */
+
+	/* ROM download state */
+	int download_active;
+	pid_t download_pid;
+	struct wl_event_source *download_timer;
+	int64_t download_total;          /* expected size */
+	char download_path[512];         /* local destination */
+	char download_title[256];        /* game title for overlay */
+	char download_emulator[32];      /* emulator tag to launch after */
+	int download_console;            /* console enum for dGPU check */
+	int download_rom_id;             /* ROM id for re-launch */
+	uint64_t download_last_check_ms;
+	int64_t download_last_bytes;
+	float download_speed_mbps;       /* current speed for display */
+	struct wlr_scene_tree *download_overlay;
 } RetroGamingView;
 
 /* ── media types ───────────────────────────────────────────────────── */
@@ -2560,6 +2581,10 @@ int retro_gaming_animate(void *data);
 void retro_gaming_fetch_all_roms(Monitor *m);
 void retro_gaming_render_game_list(Monitor *m);
 void retro_gaming_launch_game(Monitor *m);
+void retro_download_cancel(Monitor *m);
+void config_set_emulator(const char *value);
+void retro_dpad_repeat_start(Monitor *m, int button);
+void retro_dpad_repeat_stop(void);
 void detect_gpus(void);
 void dgpu_assert_power_on(GpuInfo *gpu);
 void dgpu_power_watchdog_start(void);
@@ -2585,6 +2610,7 @@ void media_view_free_episodes(MediaGridView *view);
 void media_view_fetch_seasons(MediaGridView *view, const char *show_name);
 void media_view_fetch_episodes(MediaGridView *view, const char *show_name, int season);
 int json_extract_int(const char *json, const char *key);
+int64_t json_extract_int64(const char *json, const char *key);
 int json_extract_string(const char *json, const char *key, char *out, size_t out_size);
 float json_extract_float(const char *json, const char *key);
 int media_view_handle_button(Monitor *m, MediaViewType type, int button, int value);

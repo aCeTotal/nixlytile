@@ -21,17 +21,64 @@ const char *retro_console_names[] = {
 	"Game Boy", "Game Boy Color", "Game Boy Advance"
 };
 
-/* Emulator launch commands per console */
+/* Emulator launch commands per console (hardcoded fallback) */
 static const char *retro_emulator_cmds[] = {
-	[RETRO_NES]      = "mesen \"%s\"",
-	[RETRO_SNES]     = "mesen \"%s\"",
-	[RETRO_N64]      = "mupen64plus --fullscreen \"%s\"",
+	[RETRO_NES]      = "Mesen \"%s\"",
+	[RETRO_SNES]     = "Mesen \"%s\"",
+	[RETRO_N64]      = "RMG \"%s\" -f",
 	[RETRO_GAMECUBE] = "dolphin-emu -e \"%s\" -b",
 	[RETRO_WII]      = "dolphin-emu -e \"%s\" -b",
-	[RETRO_GB]       = "mgba-qt -f \"%s\"",
-	[RETRO_GBC]      = "mgba-qt -f \"%s\"",
-	[RETRO_GBA]      = "mgba-qt -f \"%s\"",
+	[RETRO_GB]       = "mgba -f \"%s\"",
+	[RETRO_GBC]      = "mgba -f \"%s\"",
+	[RETRO_GBA]      = "mgba -f \"%s\"",
 };
+
+/* User-configured emulator overrides from config.conf */
+#define MAX_EMULATORS 32
+static struct {
+	char tag[32];     /* "nes", "snes", etc. */
+	char cmd[512];    /* command template with %s for ROM path */
+} retro_emu_config[MAX_EMULATORS];
+static int retro_emu_config_count;
+
+void
+config_set_emulator(const char *value)
+{
+	char tag[32];
+	const char *p = value;
+	int i = 0;
+
+	/* Parse: "nes mesen \"%s\"" → tag="nes", cmd="mesen \"%s\"" */
+	while (*p && *p != ' ' && *p != '\t' && i < (int)sizeof(tag) - 1)
+		tag[i++] = *p++;
+	tag[i] = '\0';
+	while (*p == ' ' || *p == '\t')
+		p++;
+	if (!tag[0] || !*p)
+		return;
+
+	/* Check if tag already exists → overwrite */
+	for (i = 0; i < retro_emu_config_count; i++) {
+		if (strcmp(retro_emu_config[i].tag, tag) == 0) {
+			snprintf(retro_emu_config[i].cmd, sizeof(retro_emu_config[i].cmd), "%s", p);
+			return;
+		}
+	}
+	if (retro_emu_config_count >= MAX_EMULATORS)
+		return;
+	snprintf(retro_emu_config[retro_emu_config_count].tag, sizeof(retro_emu_config[0].tag), "%s", tag);
+	snprintf(retro_emu_config[retro_emu_config_count].cmd, sizeof(retro_emu_config[0].cmd), "%s", p);
+	retro_emu_config_count++;
+}
+
+static const char *
+retro_get_emulator_cmd(const char *tag)
+{
+	for (int i = 0; i < retro_emu_config_count; i++)
+		if (strcmp(retro_emu_config[i].tag, tag) == 0)
+			return retro_emu_config[i].cmd;
+	return NULL;
+}
 
 void
 pc_gaming_cache_update_start(void)
@@ -2248,6 +2295,9 @@ retro_parse_roms_json(const char *buffer, const char *server_url,
 		json_extract_string(obj, "genre", items[idx].genre, sizeof(items[idx].genre));
 		json_extract_string(obj, "igdb_platforms", items[idx].igdb_platforms, sizeof(items[idx].igdb_platforms));
 		items[idx].rating = json_extract_float(obj, "igdb_rating");
+		items[idx].igdb_id = json_extract_int(obj, "igdb_id");
+		json_extract_string(obj, "emulator", items[idx].emulator, sizeof(items[idx].emulator));
+		items[idx].size = json_extract_int64(obj, "size");
 		strncpy(items[idx].server_url, server_url, sizeof(items[idx].server_url) - 1);
 
 		free(obj);
@@ -2265,7 +2315,8 @@ retro_gaming_build_active_consoles(RetroGamingView *rg)
 	int i;
 
 	for (i = 0; i < rg->all_rom_count; i++)
-		if (rg->all_roms[i].console >= 0 && rg->all_roms[i].console < RETRO_CONSOLE_COUNT)
+		if (rg->all_roms[i].console >= 0 && rg->all_roms[i].console < RETRO_CONSOLE_COUNT
+		    && rg->all_roms[i].igdb_id > 0)
 			has_roms[rg->all_roms[i].console] = 1;
 
 	rg->active_console_count = 0;
@@ -2275,6 +2326,23 @@ retro_gaming_build_active_consoles(RetroGamingView *rg)
 
 	rg->selected_console = 0;
 	rg->target_console = 0;
+}
+
+static int
+rom_cmp_rating(const void *a, const void *b)
+{
+	const RomItem *ra = a, *rb = b;
+	/* Descending by rating */
+	if (rb->rating > ra->rating) return 1;
+	if (rb->rating < ra->rating) return -1;
+	return strcasecmp(ra->title, rb->title);
+}
+
+static int
+rom_cmp_alpha(const void *a, const void *b)
+{
+	const RomItem *ra = a, *rb = b;
+	return strcasecmp(ra->title, rb->title);
 }
 
 static void
@@ -2308,10 +2376,10 @@ retro_gaming_filter_games(Monitor *m)
 
 	real_console = rg->active_consoles[rg->selected_console];
 
-	/* Count matching ROMs */
+	/* Count matching scraped ROMs */
 	count = 0;
 	for (i = 0; i < rg->all_rom_count; i++)
-		if (rg->all_roms[i].console == real_console)
+		if (rg->all_roms[i].console == real_console && rg->all_roms[i].igdb_id > 0)
 			count++;
 
 	if (count == 0)
@@ -2323,10 +2391,18 @@ retro_gaming_filter_games(Monitor *m)
 
 	rg->game_count = 0;
 	for (i = 0; i < rg->all_rom_count; i++) {
-		if (rg->all_roms[i].console == real_console) {
+		if (rg->all_roms[i].console == real_console && rg->all_roms[i].igdb_id > 0) {
 			rg->games[rg->game_count] = rg->all_roms[i];
 			rg->game_count++;
 		}
+	}
+
+	/* Sort by current mode */
+	if (rg->game_count > 1) {
+		if (rg->sort_mode == 1)
+			qsort(rg->games, rg->game_count, sizeof(RomItem), rom_cmp_alpha);
+		else
+			qsort(rg->games, rg->game_count, sizeof(RomItem), rom_cmp_rating);
 	}
 }
 
@@ -2486,13 +2562,13 @@ retro_gaming_load_cover(Monitor *m)
 		return;
 	}
 
-	/* Scale to fit the cover area (right side, max 40% height for metadata below) */
+	/* Scale to fit the cover area (right side, max 55% height for metadata below) */
 	int content_h = rg->height - 80;
-	int target_h = (content_h * 40) / 100;
+	int target_h = (content_h * 55) / 100;
 	int orig_w = gdk_pixbuf_get_width(pixbuf);
 	int orig_h = gdk_pixbuf_get_height(pixbuf);
 	double scale = (double)target_h / orig_h;
-	int max_w = (rg->width * 40) / 100;
+	int max_w = (rg->width * 80) / 100;  /* Up to 80% of right panel */
 	if ((int)(orig_w * scale) > max_w)
 		scale = (double)max_w / orig_w;
 
@@ -2516,12 +2592,14 @@ retro_gaming_render_game_list(Monitor *m)
 	int menu_bar_h = 80;
 	int padding = 20;
 	int item_h = 50;
+	int accent_bar_w = 3;
 	int list_w, list_x, cover_x, cover_w;
 	int content_h;
 	int visible_items;
 	float list_bg[4] = {0.08f, 0.08f, 0.10f, 1.0f};
-	float item_selected[4] = {0.20f, 0.45f, 0.85f, 1.0f};
-	float item_hover[4] = {0.12f, 0.12f, 0.15f, 1.0f};
+	float sel_bg[4] = {0.14f, 0.18f, 0.26f, 1.0f};
+	float sel_accent[4] = {0.30f, 0.55f, 0.95f, 1.0f};
+	float alt_bg[4] = {0.10f, 0.10f, 0.12f, 1.0f};
 	float scrollbar_bg[4] = {0.15f, 0.15f, 0.18f, 1.0f};
 	float scrollbar_fg[4] = {0.35f, 0.35f, 0.40f, 1.0f};
 
@@ -2547,31 +2625,52 @@ retro_gaming_render_game_list(Monitor *m)
 	/* List background */
 	drawrect(rg->tree, list_x, menu_bar_h, list_w, content_h, list_bg);
 
+	/* Game count label (top-right of list area) */
+	if (rg->game_count > 0) {
+		struct wlr_scene_tree *cnt_tree = wlr_scene_tree_create(rg->tree);
+		if (cnt_tree) {
+			char count_str[32];
+			snprintf(count_str, sizeof(count_str), "%d games", rg->game_count);
+			float count_color[4] = {0.5f, 0.5f, 0.5f, 0.7f};
+			/* Position at top-right of list, inside menu bar area */
+			int cnt_x = list_w - padding - (int)strlen(count_str) * 8;
+			if (cnt_x < padding) cnt_x = padding;
+			wlr_scene_node_set_position(&cnt_tree->node, cnt_x, menu_bar_h - 24);
+			StatusModule mod = {0};
+			mod.tree = cnt_tree;
+			tray_render_label(&mod, count_str, 0, 14, count_color);
+		}
+	}
+
 	/* Render visible game items */
 	for (int i = 0; i < visible_items && (i + rg->game_scroll_offset) < rg->game_count; i++) {
 		int game_idx = i + rg->game_scroll_offset;
 		int y = menu_bar_h + i * item_h;
 		int is_selected = (game_idx == rg->selected_game);
 
-		/* Background for selected item */
 		if (is_selected) {
-			drawrect(rg->tree, list_x, y, list_w - 8, item_h, item_selected);
+			/* Selected: dark blue-tinted background + accent bar */
+			drawrect(rg->tree, list_x, y, list_w - 8, item_h, sel_bg);
+			drawrect(rg->tree, list_x, y, accent_bar_w, item_h, sel_accent);
 		} else if (game_idx % 2 == 1) {
-			drawrect(rg->tree, list_x, y, list_w - 8, item_h, item_hover);
+			/* Alternating subtle tint for odd rows */
+			drawrect(rg->tree, list_x, y, list_w - 8, item_h, alt_bg);
 		}
 
 		/* Game title text */
 		struct wlr_scene_tree *text_tree = wlr_scene_tree_create(rg->tree);
 		if (text_tree) {
-			wlr_scene_node_set_position(&text_tree->node, list_x + padding, y + (item_h - 20) / 2);
+			int text_indent = is_selected ? (accent_bar_w + 8 + padding) : padding;
+			wlr_scene_node_set_position(&text_tree->node, list_x + text_indent, y + (item_h - 20) / 2);
 			StatusModule mod = {0};
 			mod.tree = text_tree;
-			float text_color[4] = {1.0f, 1.0f, 1.0f, is_selected ? 1.0f : 0.8f};
+			float text_color[4] = {1.0f, 1.0f, 1.0f, is_selected ? 1.0f : 0.6f};
 			/* Truncate title to fit */
 			char display_title[64];
-			int max_chars = (list_w - padding * 2 - 8) / 10;  /* Approximate char width */
+			int max_chars = (list_w - text_indent - padding - 8) / 10;
 			if (max_chars > (int)sizeof(display_title) - 1)
 				max_chars = sizeof(display_title) - 1;
+			if (max_chars < 1) max_chars = 1;
 			strncpy(display_title, rg->games[game_idx].title, max_chars);
 			display_title[max_chars] = '\0';
 			tray_render_label(&mod, display_title, 0, 20, text_color);
@@ -2614,6 +2713,11 @@ retro_gaming_render_game_list(Monitor *m)
 		if (sbuf)
 			wlr_scene_node_set_position(&sbuf->node, cx, cur_y);
 		cur_y += rg->cover_h + detail_pad;
+
+		/* Thin separator line between cover art and metadata */
+		float sep_color[4] = {0.25f, 0.25f, 0.30f, 0.6f};
+		drawrect(rg->tree, text_x, cur_y, text_w, 1, sep_color);
+		cur_y += detail_pad / 2;
 	}
 
 	/* --- Metadata text below cover --- */
@@ -2622,7 +2726,7 @@ retro_gaming_render_game_list(Monitor *m)
 	float accent[4] = {0.4f, 0.7f, 1.0f, 1.0f};
 	int line_h = 28;
 
-	/* Title + Year */
+	/* Title + Year (larger 28px) */
 	{
 		struct wlr_scene_tree *t = wlr_scene_tree_create(rg->tree);
 		if (t) {
@@ -2634,13 +2738,12 @@ retro_gaming_render_game_list(Monitor *m)
 				snprintf(title_line, sizeof(title_line), "%s  (%d)", game->title, game->release_year);
 			else
 				snprintf(title_line, sizeof(title_line), "%s", game->title);
-			/* Truncate to fit */
-			int max_chars = text_w / 11;
+			int max_chars = text_w / 13;
 			if (max_chars > 0 && max_chars < (int)sizeof(title_line))
 				title_line[max_chars] = '\0';
-			tray_render_label(&mod, title_line, 0, 24, white);
+			tray_render_label(&mod, title_line, 0, 28, white);
 		}
-		cur_y += line_h + 4;
+		cur_y += line_h + 8;
 	}
 
 	/* Developer / Publisher */
@@ -2693,31 +2796,44 @@ retro_gaming_render_game_list(Monitor *m)
 		cur_y += line_h;
 	}
 
-	/* Rating */
+	/* Rating: filled bar + numeric value */
 	if (game->rating > 0) {
+		int bar_w = 100;
+		int bar_h = 8;
+		int bar_y_offset = 6;
+		/* Rating bar background (dark) */
+		float bar_bg[4] = {0.20f, 0.20f, 0.25f, 1.0f};
+		drawrect(rg->tree, text_x, cur_y + bar_y_offset, bar_w, bar_h, bar_bg);
+		/* Rating bar fill */
+		int fill_w = (int)(bar_w * game->rating / 100.0f);
+		if (fill_w > bar_w) fill_w = bar_w;
+		float bar_fill[4] = {0.30f, 0.55f, 0.95f, 1.0f};
+		if (fill_w > 0)
+			drawrect(rg->tree, text_x, cur_y + bar_y_offset, fill_w, bar_h, bar_fill);
+		/* Numeric value next to bar */
 		struct wlr_scene_tree *t = wlr_scene_tree_create(rg->tree);
 		if (t) {
-			wlr_scene_node_set_position(&t->node, text_x, cur_y);
+			wlr_scene_node_set_position(&t->node, text_x + bar_w + 10, cur_y);
 			StatusModule mod = {0};
 			mod.tree = t;
-			char rating_line[64];
-			snprintf(rating_line, sizeof(rating_line), "Rating: %.0f/100", game->rating);
-			tray_render_label(&mod, rating_line, 0, 18, accent);
+			char rating_str[16];
+			snprintf(rating_str, sizeof(rating_str), "%.0f", game->rating);
+			tray_render_label(&mod, rating_str, 0, 18, accent);
 		}
 		cur_y += line_h + 8;
 	}
 
-	/* Description (multi-line, word-wrapped) */
+	/* Description (multi-line, word-wrapped, max 10 lines) */
 	if (game->description[0]) {
 		float desc_color[4] = {0.8f, 0.8f, 0.8f, 0.9f};
 		int desc_font = 16;
-		int char_w = desc_font * 6 / 10;  /* Approximate character width */
+		int char_w = desc_font * 6 / 10;
 		int chars_per_line = (char_w > 0) ? (text_w / char_w) : 60;
 		if (chars_per_line < 20) chars_per_line = 20;
 		if (chars_per_line > 120) chars_per_line = 120;
 		int max_lines = (menu_bar_h + content_h - cur_y - detail_pad) / (desc_font + 6);
 		if (max_lines < 1) max_lines = 1;
-		if (max_lines > 12) max_lines = 12;
+		if (max_lines > 10) max_lines = 10;
 
 		const char *src = game->description;
 		for (int line = 0; line < max_lines && *src; line++) {
@@ -2725,14 +2841,12 @@ retro_gaming_render_game_list(Monitor *m)
 			int len = 0;
 			int last_space = -1;
 
-			/* Fill line, track last word boundary */
 			while (src[len] && len < chars_per_line && len < (int)sizeof(line_buf) - 1) {
 				if (src[len] == '\n') { len++; break; }
 				if (src[len] == ' ') last_space = len;
 				len++;
 			}
 
-			/* Word-wrap: break at last space if we hit the limit */
 			if (src[len] && src[len] != ' ' && src[len] != '\n' && last_space > 0) {
 				len = last_space + 1;
 			}
@@ -2740,7 +2854,6 @@ retro_gaming_render_game_list(Monitor *m)
 			memcpy(line_buf, src, len);
 			line_buf[len] = '\0';
 
-			/* Trim trailing spaces/newlines */
 			while (len > 0 && (line_buf[len - 1] == ' ' || line_buf[len - 1] == '\n'))
 				line_buf[--len] = '\0';
 
@@ -2756,37 +2869,29 @@ retro_gaming_render_game_list(Monitor *m)
 			}
 
 			src += len;
-			while (*src == ' ') src++;  /* Skip leading spaces on next line */
+			while (*src == ' ') src++;
 		}
 	}
 }
 
-void
-retro_gaming_launch_game(Monitor *m)
+static void
+retro_launch_rom_local(Monitor *m, const char *local_path, const char *emulator_tag,
+                       int console)
 {
-	RetroGamingView *rg;
+	const char *cmd_fmt;
+	char cmd[2048];
 	pid_t pid;
 
-	if (!m)
+	/* Try user-configured emulator first, fall back to hardcoded */
+	cmd_fmt = retro_get_emulator_cmd(emulator_tag);
+	if (!cmd_fmt && console >= 0 && console < RETRO_CONSOLE_COUNT)
+		cmd_fmt = retro_emulator_cmds[console];
+	if (!cmd_fmt) {
+		wlr_log(WLR_ERROR, "No emulator configured for tag '%s'", emulator_tag);
 		return;
+	}
 
-	rg = &m->retro_gaming;
-	if (rg->selected_game >= rg->game_count || !rg->games)
-		return;
-
-	RomItem *game = &rg->games[rg->selected_game];
-	int console = game->console;
-
-	if (console < 0 || console >= RETRO_CONSOLE_COUNT)
-		return;
-
-	const char *cmd_fmt = retro_emulator_cmds[console];
-	if (!cmd_fmt)
-		return;
-
-	char cmd[2048];
-	snprintf(cmd, sizeof(cmd), cmd_fmt, game->filepath);
-
+	snprintf(cmd, sizeof(cmd), cmd_fmt, local_path);
 	wlr_log(WLR_INFO, "Launching ROM: %s", cmd);
 
 	pid = fork();
@@ -2794,7 +2899,6 @@ retro_gaming_launch_game(Monitor *m)
 		dup2(STDERR_FILENO, STDOUT_FILENO);
 		setsid();
 		fork_detach();
-		/* Use dGPU for N64/GameCube/Wii emulators */
 		if (console == RETRO_N64 || console == RETRO_GAMECUBE || console == RETRO_WII) {
 			if (should_use_dgpu(cmd))
 				set_dgpu_env();
@@ -2802,6 +2906,326 @@ retro_gaming_launch_game(Monitor *m)
 		execl("/bin/sh", "sh", "-c", cmd, NULL);
 		_exit(127);
 	}
+}
+
+static void
+retro_download_render_overlay(Monitor *m)
+{
+	RetroGamingView *rg = &m->retro_gaming;
+	struct wlr_scene_node *node, *tmp;
+	int popup_w = 400, popup_h = 160;
+	int x, y;
+	float bg_color[4] = {0.12f, 0.12f, 0.14f, 0.98f};
+	float border_color[4] = {0.35f, 0.35f, 0.4f, 1.0f};
+	float bar_bg[4] = {0.2f, 0.2f, 0.25f, 1.0f};
+	float bar_fill[4] = {0.30f, 0.55f, 0.95f, 1.0f};
+	float text_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+	float gray[4] = {0.7f, 0.7f, 0.7f, 1.0f};
+
+	if (!rg->download_overlay || !statusfont.font)
+		return;
+
+	/* Clear previous content */
+	wl_list_for_each_safe(node, tmp, &rg->download_overlay->children, link)
+		wlr_scene_node_destroy(node);
+
+	/* Center popup on screen */
+	x = m->m.x + (m->m.width - popup_w) / 2;
+	y = m->m.y + (m->m.height - popup_h) / 2;
+	wlr_scene_node_set_position(&rg->download_overlay->node, x, y);
+
+	/* Background + border */
+	drawrect(rg->download_overlay, 0, 0, popup_w, popup_h, bg_color);
+	draw_border(rg->download_overlay, 0, 0, popup_w, popup_h, 2, border_color);
+
+	/* Title (game name, centered) */
+	if (rg->download_title[0]) {
+		char truncated[64];
+		snprintf(truncated, sizeof(truncated), "%s", rg->download_title);
+		int title_w = status_text_width(truncated);
+		int title_x = (popup_w - title_w) / 2;
+		if (title_x < 10) title_x = 10;
+		struct wlr_scene_tree *t = wlr_scene_tree_create(rg->download_overlay);
+		if (t) {
+			wlr_scene_node_set_position(&t->node, title_x, 15);
+			StatusModule mod = {0};
+			mod.tree = t;
+			tray_render_label(&mod, truncated, 0, 30, text_color);
+		}
+	}
+
+	/* "Downloading..." label */
+	{
+		struct wlr_scene_tree *t = wlr_scene_tree_create(rg->download_overlay);
+		if (t) {
+			const char *msg = "Downloading...";
+			int msg_w = status_text_width(msg);
+			int msg_x = (popup_w - msg_w) / 2;
+			wlr_scene_node_set_position(&t->node, msg_x, 50);
+			StatusModule mod = {0};
+			mod.tree = t;
+			tray_render_label(&mod, msg, 0, 25, gray);
+		}
+	}
+
+	/* Progress bar */
+	int bar_x = 50, bar_y = 85, bar_w = 300, bar_h = 12;
+	float progress = 0.0f;
+	if (rg->download_total > 0) {
+		struct stat st;
+		if (stat(rg->download_path, &st) == 0)
+			progress = (float)st.st_size / (float)rg->download_total;
+	}
+	if (progress > 1.0f) progress = 1.0f;
+
+	drawrect(rg->download_overlay, bar_x, bar_y, bar_w, bar_h, bar_bg);
+	if (progress > 0.0f)
+		drawrect(rg->download_overlay, bar_x, bar_y,
+			(int)(bar_w * progress), bar_h, bar_fill);
+
+	/* Percentage + speed text */
+	{
+		char info[64];
+		int pct = (int)(progress * 100.0f);
+		if (rg->download_speed_mbps > 0.1f)
+			snprintf(info, sizeof(info), "%d%% — %.1f MB/s", pct, rg->download_speed_mbps);
+		else
+			snprintf(info, sizeof(info), "%d%%", pct);
+		int info_w = status_text_width(info);
+		int info_x = (popup_w - info_w) / 2;
+		struct wlr_scene_tree *t = wlr_scene_tree_create(rg->download_overlay);
+		if (t) {
+			wlr_scene_node_set_position(&t->node, info_x, bar_y + bar_h + 10);
+			StatusModule mod = {0};
+			mod.tree = t;
+			tray_render_label(&mod, info, 0, 25, gray);
+		}
+	}
+
+	/* Cancel hint */
+	{
+		struct wlr_scene_tree *t = wlr_scene_tree_create(rg->download_overlay);
+		if (t) {
+			const char *hint = "Press B to cancel";
+			int hw = status_text_width(hint);
+			wlr_scene_node_set_position(&t->node, (popup_w - hw) / 2, popup_h - 28);
+			StatusModule mod = {0};
+			mod.tree = t;
+			float dim[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+			tray_render_label(&mod, hint, 0, 20, dim);
+		}
+	}
+
+	wlr_scene_node_set_enabled(&rg->download_overlay->node, 1);
+}
+
+static int
+retro_download_progress_cb(void *data)
+{
+	Monitor *m = data;
+	RetroGamingView *rg = &m->retro_gaming;
+
+	if (!rg->download_active)
+		return 0;
+
+	struct stat st;
+	int64_t current_bytes = 0;
+	if (stat(rg->download_path, &st) == 0)
+		current_bytes = st.st_size;
+
+	/* Calculate speed */
+	uint64_t now = monotonic_msec();
+	uint64_t elapsed = now - rg->download_last_check_ms;
+	if (elapsed > 0 && rg->download_last_check_ms > 0) {
+		int64_t delta = current_bytes - rg->download_last_bytes;
+		rg->download_speed_mbps = (float)delta / (float)elapsed * 1000.0f / (1024.0f * 1024.0f);
+	}
+	rg->download_last_check_ms = now;
+	rg->download_last_bytes = current_bytes;
+
+	/* Check if curl child finished */
+	int status;
+	pid_t ret = waitpid(rg->download_pid, &status, WNOHANG);
+	if (ret > 0) {
+		/* Child finished */
+		rg->download_active = 0;
+		rg->download_pid = 0;
+
+		if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+			/* Download complete — hide overlay and launch */
+			if (rg->download_overlay)
+				wlr_scene_node_set_enabled(&rg->download_overlay->node, 0);
+			wlr_log(WLR_INFO, "ROM download complete: %s", rg->download_path);
+			retro_launch_rom_local(m, rg->download_path,
+				rg->download_emulator, rg->download_console);
+		} else {
+			/* Download failed — hide overlay, delete partial */
+			wlr_log(WLR_ERROR, "ROM download failed (exit %d)",
+				WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+			unlink(rg->download_path);
+			if (rg->download_overlay)
+				wlr_scene_node_set_enabled(&rg->download_overlay->node, 0);
+		}
+		return 0;
+	}
+
+	/* Still downloading — re-render overlay and reschedule */
+	retro_download_render_overlay(m);
+	if (rg->download_timer)
+		wl_event_source_timer_update(rg->download_timer, 200);
+	return 0;
+}
+
+void
+retro_download_cancel(Monitor *m)
+{
+	RetroGamingView *rg;
+
+	if (!m)
+		return;
+	rg = &m->retro_gaming;
+	if (!rg->download_active)
+		return;
+
+	if (rg->download_pid > 0) {
+		kill(rg->download_pid, SIGTERM);
+		waitpid(rg->download_pid, NULL, 0);
+		rg->download_pid = 0;
+	}
+	rg->download_active = 0;
+	unlink(rg->download_path);
+	if (rg->download_overlay)
+		wlr_scene_node_set_enabled(&rg->download_overlay->node, 0);
+}
+
+void
+retro_gaming_launch_game(Monitor *m)
+{
+	RetroGamingView *rg;
+
+	if (!m)
+		return;
+
+	rg = &m->retro_gaming;
+	if (rg->selected_game >= rg->game_count || !rg->games)
+		return;
+	if (rg->download_active)
+		return;
+
+	RomItem *game = &rg->games[rg->selected_game];
+	int console = game->console;
+	const char *emu_tag = game->emulator;
+
+	/* Build local path: ~/.local/nixly/roms/{emulator}/{filename} */
+	char *home = getenv("HOME");
+	if (!home) home = "/tmp";
+
+	/* Sanitize emulator tag — alphanumeric only, no path traversal */
+	char safe_tag[32];
+	{
+		const char *s = emu_tag;
+		int i = 0;
+		while (*s && i < (int)sizeof(safe_tag) - 1) {
+			if ((*s >= 'a' && *s <= 'z') || (*s >= '0' && *s <= '9'))
+				safe_tag[i++] = *s;
+			s++;
+		}
+		safe_tag[i] = '\0';
+		if (!safe_tag[0])
+			snprintf(safe_tag, sizeof(safe_tag), "unknown");
+	}
+
+	/* Extract filename from server filepath (basename only) */
+	const char *filename = strrchr(game->filepath, '/');
+	filename = filename ? filename + 1 : game->filepath;
+	if (!filename[0] || strchr(filename, '/')) {
+		wlr_log(WLR_ERROR, "Invalid ROM filename");
+		return;
+	}
+
+	char local_dir[512];
+	char local_path[512];
+	snprintf(local_dir, sizeof(local_dir), "%s/.local/nixly/roms/%s", home, safe_tag);
+	snprintf(local_path, sizeof(local_path), "%s/%s", local_dir, filename);
+
+	/* Check if already cached locally (require exact size match) */
+	struct stat st;
+	if (game->size > 0 && stat(local_path, &st) == 0 &&
+	    st.st_size == game->size) {
+		wlr_log(WLR_INFO, "ROM cached locally: %s", local_path);
+		retro_launch_rom_local(m, local_path, emu_tag, console);
+		return;
+	}
+
+	/* Need to download — build URL */
+	const char *srv = game->server_url[0] ? game->server_url : get_media_server_url();
+	if (!srv || !srv[0]) {
+		wlr_log(WLR_ERROR, "No server URL for ROM download");
+		return;
+	}
+
+	char url[1024];
+	snprintf(url, sizeof(url), "%s/api/roms/%d/download", srv, game->id);
+
+	/* Create directory (recursive, no shell) */
+	{
+		char tmp[512];
+		snprintf(tmp, sizeof(tmp), "%s", local_dir);
+		for (char *p = tmp + 1; *p; p++) {
+			if (*p == '/') {
+				*p = '\0';
+				mkdir(tmp, 0755);
+				*p = '/';
+			}
+		}
+		mkdir(tmp, 0755);
+	}
+
+	/* Store download state */
+	snprintf(rg->download_path, sizeof(rg->download_path), "%s", local_path);
+	snprintf(rg->download_title, sizeof(rg->download_title), "%s", game->title);
+	snprintf(rg->download_emulator, sizeof(rg->download_emulator), "%s", emu_tag);
+	rg->download_console = console;
+	rg->download_rom_id = game->id;
+	rg->download_total = game->size;
+	rg->download_last_check_ms = monotonic_msec();
+	rg->download_last_bytes = 0;
+	rg->download_speed_mbps = 0.0f;
+
+	/* Fork curl to download — delete any partial leftover first */
+	unlink(local_path);
+
+	pid_t pid = fork();
+	if (pid == 0) {
+		setsid();
+		fork_detach();
+		execlp("curl", "curl", "-s", "-f", "-o", local_path, url, NULL);
+		_exit(127);
+	}
+	if (pid < 0) {
+		wlr_log(WLR_ERROR, "Failed to fork curl for ROM download");
+		return;
+	}
+
+	rg->download_pid = pid;
+	rg->download_active = 1;
+
+	/* Create overlay tree if needed */
+	if (!rg->download_overlay && rg->tree)
+		rg->download_overlay = wlr_scene_tree_create(rg->tree);
+
+	/* Render initial overlay */
+	retro_download_render_overlay(m);
+
+	/* Start progress timer (200ms interval) */
+	if (!rg->download_timer)
+		rg->download_timer = wl_event_loop_add_timer(
+			wl_display_get_event_loop(dpy),
+			retro_download_progress_cb, m);
+	if (rg->download_timer)
+		wl_event_source_timer_update(rg->download_timer, 200);
+
+	wlr_log(WLR_INFO, "Downloading ROM: %s → %s", url, local_path);
 }
 
 void
@@ -2831,6 +3255,7 @@ retro_gaming_show(Monitor *m)
 	if (rg->cover_buf) { wlr_buffer_drop(rg->cover_buf); rg->cover_buf = NULL; }
 	rg->cover_loaded = 0;
 	rg->cover_loading_idx = -1;
+	rg->sort_mode = 0;  /* Default: sort by rating */
 
 	/* Fetch all ROMs once and build dynamic console tabs */
 	rg->in_game_list = 1;
@@ -2873,8 +3298,13 @@ retro_gaming_hide(Monitor *m)
 		return;
 
 	rg = &m->retro_gaming;
+
+	/* Cancel any active download */
+	retro_download_cancel(m);
+
 	rg->visible = 0;
 	rg->in_game_list = 0;
+	retro_dpad_repeat_stop();
 
 	if (rg->games) { free(rg->games); rg->games = NULL; }
 	rg->game_count = 0;
@@ -3090,6 +3520,66 @@ retro_gaming_animate(void *data)
 	return 0;
 }
 
+/* ── D-pad hold-to-repeat for retro gaming list ─────────────────── */
+static struct wl_event_source *retro_dpad_repeat_timer;
+static int retro_dpad_held_button;
+static Monitor *retro_dpad_held_mon;
+
+static int
+retro_dpad_repeat_cb(void *data)
+{
+	(void)data;
+
+	if (!retro_dpad_held_button || !retro_dpad_held_mon ||
+	    !retro_dpad_held_mon->retro_gaming.visible) {
+		retro_dpad_held_button = 0;
+		retro_dpad_held_mon = NULL;
+		return 0;
+	}
+
+	RetroGamingView *rg = &retro_dpad_held_mon->retro_gaming;
+	int old_sel = rg->selected_game;
+
+	retro_gaming_handle_button(retro_dpad_held_mon, retro_dpad_held_button, 1);
+
+	if (rg->selected_game != old_sel) {
+		if (retro_dpad_repeat_timer)
+			wl_event_source_timer_update(retro_dpad_repeat_timer, RETRO_DPAD_REPEAT_RATE);
+	} else {
+		retro_dpad_held_button = 0;
+		retro_dpad_held_mon = NULL;
+	}
+
+	return 0;
+}
+
+void
+retro_dpad_repeat_start(Monitor *m, int button)
+{
+	if (!m || !m->retro_gaming.visible)
+		return;
+
+	retro_dpad_held_button = button;
+	retro_dpad_held_mon = m;
+
+	if (!retro_dpad_repeat_timer) {
+		retro_dpad_repeat_timer = wl_event_loop_add_timer(
+			wl_display_get_event_loop(dpy), retro_dpad_repeat_cb, NULL);
+	}
+
+	if (retro_dpad_repeat_timer)
+		wl_event_source_timer_update(retro_dpad_repeat_timer, RETRO_DPAD_INITIAL_DELAY);
+}
+
+void
+retro_dpad_repeat_stop(void)
+{
+	retro_dpad_held_button = 0;
+	retro_dpad_held_mon = NULL;
+	if (retro_dpad_repeat_timer)
+		wl_event_source_timer_update(retro_dpad_repeat_timer, 0);
+}
+
 int
 retro_gaming_handle_button(Monitor *m, int button, int value)
 {
@@ -3132,6 +3622,21 @@ retro_gaming_handle_button(Monitor *m, int button, int value)
 			}
 			return 1;
 		case BTN_TL: {  /* LB = jump to previous letter */
+			/* Switch to alphabetical sort if needed */
+			if (rg->sort_mode != 1) {
+				char prev_title[256];
+				strncpy(prev_title, rg->games[rg->selected_game].title, sizeof(prev_title) - 1);
+				prev_title[sizeof(prev_title) - 1] = '\0';
+				rg->sort_mode = 1;
+				qsort(rg->games, rg->game_count, sizeof(RomItem), rom_cmp_alpha);
+				/* Find closest match to previously selected game */
+				for (int k = 0; k < rg->game_count; k++) {
+					if (strcasecmp(rg->games[k].title, prev_title) >= 0) {
+						rg->selected_game = k;
+						break;
+					}
+				}
+			}
 			int cur = rg->selected_game;
 			char cur_letter = toupper(rg->games[cur].title[0]);
 			/* Find first game with a letter before current */
@@ -3152,6 +3657,20 @@ retro_gaming_handle_button(Monitor *m, int button, int value)
 			return 1;
 		}
 		case BTN_TR: {  /* RB = jump to next letter */
+			/* Switch to alphabetical sort if needed */
+			if (rg->sort_mode != 1) {
+				char prev_title[256];
+				strncpy(prev_title, rg->games[rg->selected_game].title, sizeof(prev_title) - 1);
+				prev_title[sizeof(prev_title) - 1] = '\0';
+				rg->sort_mode = 1;
+				qsort(rg->games, rg->game_count, sizeof(RomItem), rom_cmp_alpha);
+				for (int k = 0; k < rg->game_count; k++) {
+					if (strcasecmp(rg->games[k].title, prev_title) >= 0) {
+						rg->selected_game = k;
+						break;
+					}
+				}
+			}
 			int cur = rg->selected_game;
 			char cur_letter = toupper(rg->games[cur].title[0]);
 			/* Find first game with a letter after current */
@@ -3203,7 +3722,11 @@ retro_gaming_handle_button(Monitor *m, int button, int value)
 			}
 			return 1;
 		}
-		case BTN_EAST:  /* B button - exit retro gaming */
+		case BTN_EAST:  /* B button - cancel download or exit */
+			if (rg->download_active) {
+				retro_download_cancel(m);
+				return 1;
+			}
 			retro_gaming_hide(m);
 			return 1;
 		case BTN_MODE:  /* Guide button - let main handler show menu overlay */

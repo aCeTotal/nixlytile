@@ -942,6 +942,13 @@ json_extract_int(const char *json, const char *key)
 	return pos ? atoi(pos) : 0;
 }
 
+int64_t
+json_extract_int64(const char *json, const char *key)
+{
+	const char *pos = json_find_value(json, key);
+	return pos ? atoll(pos) : 0;
+}
+
 float
 json_extract_float(const char *json, const char *key)
 {
