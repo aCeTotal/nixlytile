@@ -186,6 +186,9 @@ int database_get_all_roms_without_cover(int **ids, char ***filepaths, int **cons
 /* Reset all ROM IGDB metadata (set igdb_id back to NULL for re-scraping) */
 int database_reset_rom_igdb(void);
 
+/* Delete all media entries from database (full wipe for fresh start) */
+int database_delete_all_media(void);
+
 /* Delete all ROM entries from database (full wipe for fresh start) */
 int database_delete_all_roms(void);
 

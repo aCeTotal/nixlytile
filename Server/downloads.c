@@ -254,6 +254,26 @@ static void build_show_folder(const char *show_name, int year, char *buf, size_t
 		snprintf(buf, buf_size, "%s", dotted);
 }
 
+/* Extract part number from filename (PT1, Part 1, pt.2, etc.)
+ * Returns part number (1, 2, ...) or 0 if none found */
+static int extract_part_number(const char *name) {
+	for (const char *p = name; *p; p++) {
+		if (p != name && isalpha((unsigned char)*(p - 1))) continue;
+
+		const char *after = NULL;
+		if (strncasecmp(p, "part", 4) == 0 && !isalpha((unsigned char)p[4]))
+			after = p + 4;
+		else if (strncasecmp(p, "pt", 2) == 0 && !isalpha((unsigned char)p[2]))
+			after = p + 2;
+
+		if (after) {
+			while (*after == ' ' || *after == '.' || *after == '_') after++;
+			if (isdigit((unsigned char)*after)) return atoi(after);
+		}
+	}
+	return 0;
+}
+
 /* Process a single media file: classify, rename, move, scrape TMDB */
 static int process_download_file(const char *filepath) {
 	struct stat st;
@@ -296,6 +316,7 @@ static int process_download_file(const char *filepath) {
 	char show_name[256] = {0};
 	int season = 0, episode = 0, year = 0;
 	char dest[DL_MAX_PATH];
+	char movie_clean_stem[256] = {0};  /* Clean movie name stem for subtitle renaming */
 	TmdbMovie *movie_result = NULL;  /* Non-NULL if movie pre-validated against TMDB */
 
 	if (scanner_parse_tv_info(filepath, show_name, &season, &episode, &year)) {
@@ -350,8 +371,51 @@ static int process_download_file(const char *filepath) {
 			}
 		}
 
+		/* Build clean filename from TMDB title, or fall back to original */
+		const char *orig_ext = strrchr(base, '.');
+		if (!orig_ext) orig_ext = ".mkv";
+		int part = extract_part_number(base);
+
+		char clean_movie[512];
+		if (movie) {
+			char dotted[256];
+			size_t j = 0;
+			for (size_t i = 0; movie->title[i] && j < sizeof(dotted) - 1; i++) {
+				char c = movie->title[i];
+				if (c == ' ' || c == '_' || c == '.' || c == '-') {
+					if (j > 0 && dotted[j - 1] != '.')
+						dotted[j++] = '.';
+				} else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+				           (c >= '0' && c <= '9')) {
+					dotted[j++] = c;
+				}
+				/* other chars (colons, quotes, etc.) stripped */
+			}
+			while (j > 0 && dotted[j - 1] == '.') j--;
+			dotted[j] = '\0';
+
+			/* Build: Title.Year[.PartN].ext */
+			char stem[384];
+			if (movie->year > 0 && part > 0)
+				snprintf(stem, sizeof(stem), "%s.%d.Part%d",
+				         dotted, movie->year, part);
+			else if (movie->year > 0)
+				snprintf(stem, sizeof(stem), "%s.%d", dotted, movie->year);
+			else if (part > 0)
+				snprintf(stem, sizeof(stem), "%s.Part%d", dotted, part);
+			else
+				snprintf(stem, sizeof(stem), "%s", dotted);
+
+			snprintf(clean_movie, sizeof(clean_movie), "%s%s", stem, orig_ext);
+
+			/* Store clean stem for subtitle renaming */
+			snprintf(movie_clean_stem, sizeof(movie_clean_stem), "%s", stem);
+		} else {
+			snprintf(clean_movie, sizeof(clean_movie), "%s", base);
+		}
+
 		snprintf(dest, sizeof(dest), "%s/nixly_ready_media/Movies/%s",
-		         server_config.converted_paths[0], base);
+		         server_config.converted_paths[0], clean_movie);
 
 		printf("Downloads: Movie [%s] -> %s\n", base, dest);
 
@@ -428,10 +492,19 @@ static int process_download_file(const char *filepath) {
 
 			char sub_src[DL_MAX_PATH], sub_dst[DL_MAX_PATH];
 			snprintf(sub_src, sizeof(sub_src), "%s/%s", src_dir, ent->d_name);
-			snprintf(sub_dst, sizeof(sub_dst), "%s/%s", dest_dir, ent->d_name);
+
+			/* Rename subtitle to match clean movie name */
+			if (movie_clean_stem[0]) {
+				const char *suffix = ent->d_name + stem_len;
+				snprintf(sub_dst, sizeof(sub_dst), "%s/%s%s",
+				         dest_dir, movie_clean_stem, suffix);
+			} else {
+				snprintf(sub_dst, sizeof(sub_dst), "%s/%s",
+				         dest_dir, ent->d_name);
+			}
 
 			if (move_file(sub_src, sub_dst) == 0) {
-				printf("Downloads: Moved subtitle %s\n", ent->d_name);
+				printf("Downloads: Moved subtitle %s\n", sub_dst);
 			}
 		}
 		closedir(d);

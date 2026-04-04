@@ -1478,6 +1478,19 @@ int database_reset_rom_igdb(void) {
     return changes;
 }
 
+int database_delete_all_media(void) {
+    char *err = NULL;
+    int rc = sqlite3_exec(db, "DELETE FROM media", NULL, NULL, &err);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "database_delete_all_media: %s\n", err ? err : "unknown error");
+        sqlite3_free(err);
+        return -1;
+    }
+    int changes = sqlite3_changes(db);
+    printf("Database: Deleted all %d media entries\n", changes);
+    return changes;
+}
+
 int database_delete_all_roms(void) {
     char *err = NULL;
     int rc = sqlite3_exec(db, "DELETE FROM roms", NULL, NULL, &err);

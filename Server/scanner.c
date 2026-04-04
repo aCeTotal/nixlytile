@@ -453,6 +453,97 @@ void scanner_extract_title(const char *filepath, char *title, size_t title_size)
     clean_title(title);
 }
 
+/* Strip common noise from movie title before TMDB search:
+ * - Parenthesized non-year content: (EXT), (DC), (Extended Cut), etc.
+ * - Trailing part/track/disc indicators: PT N, Part N, tNN, dNN, EXT
+ */
+static void strip_title_noise(char *title) {
+    /* Phase 1: Remove parenthesized non-year content */
+    char *search_from = title;
+    char *open;
+    while ((open = strchr(search_from, '(')) != NULL) {
+        char *close = strchr(open, ')');
+        if (!close) break;
+
+        /* Check if content contains a year (4-digit 1900-2100) */
+        int has_year = 0;
+        for (char *d = open + 1; d + 3 <= close; d++) {
+            if (isdigit(d[0]) && isdigit(d[1]) && isdigit(d[2]) && isdigit(d[3])) {
+                int y = atoi(d);
+                if (y >= 1900 && y <= 2100) { has_year = 1; break; }
+            }
+        }
+
+        if (!has_year) {
+            char *start = open;
+            if (start > title && *(start - 1) == ' ') start--;
+            memmove(start, close + 1, strlen(close + 1) + 1);
+            search_from = start;
+        } else {
+            search_from = close + 1;
+        }
+    }
+
+    /* Phase 2: Strip trailing noise tokens (right-to-left) */
+    int stripped = 1;
+    while (stripped) {
+        stripped = 0;
+
+        /* Trim trailing whitespace/separators */
+        size_t len = strlen(title);
+        while (len > 0 && (title[len - 1] == ' ' || title[len - 1] == '.' ||
+                           title[len - 1] == '-'))
+            title[--len] = '\0';
+        if (len < 2) break;
+
+        /* Find start of last token */
+        size_t i = len;
+        while (i > 0 && title[i - 1] != ' ' && title[i - 1] != '.') i--;
+        char *token = title + i;
+        size_t tlen = len - i;
+
+        /* tNN / dNN (track/disc indicator) */
+        if (tlen >= 2 && tlen <= 4 &&
+            (token[0] == 't' || token[0] == 'T' || token[0] == 'd' || token[0] == 'D')) {
+            int ok = 1;
+            for (size_t k = 1; k < tlen; k++)
+                if (!isdigit(token[k])) { ok = 0; break; }
+            if (ok) {
+                if (i > 0) title[i - 1] = '\0'; else title[0] = '\0';
+                stripped = 1; continue;
+            }
+        }
+
+        /* EXT alone at end */
+        if (tlen == 3 && strncasecmp(token, "EXT", 3) == 0) {
+            if (i > 0) title[i - 1] = '\0'; else title[0] = '\0';
+            stripped = 1; continue;
+        }
+
+        /* "PT N" / "Part N" / "Disc N" pattern: number at end preceded by keyword */
+        if (tlen >= 1 && tlen <= 3 && i > 1) {
+            int all_digit = 1;
+            for (size_t k = 0; k < tlen; k++)
+                if (!isdigit(token[k])) { all_digit = 0; break; }
+            if (all_digit) {
+                size_t j = i - 1; /* separator before number */
+                while (j > 0 && title[j - 1] != ' ' && title[j - 1] != '.') j--;
+                char *prev = title + j;
+                size_t plen = (i - 1) - j;
+
+                if ((plen == 2 && strncasecmp(prev, "PT", 2) == 0) ||
+                    (plen == 4 && strncasecmp(prev, "Part", 4) == 0) ||
+                    (plen == 4 && strncasecmp(prev, "Disc", 4) == 0)) {
+                    if (j > 0) title[j - 1] = '\0'; else title[0] = '\0';
+                    stripped = 1; continue;
+                }
+            }
+        }
+
+        break;
+    }
+}
+
 /* Generate search variations for a movie title */
 static void generate_movie_variations(const char *name, char variations[][256], int *count, int year) {
     *count = 0;
@@ -553,6 +644,9 @@ static void generate_movie_variations(const char *name, char variations[][256], 
 TmdbMovie *scanner_search_movie_tmdb(const char *title) {
     char clean[256];
     int year = extract_year_from_title(title, clean, sizeof(clean));
+
+    /* Strip noise: (EXT), PT N, tNN, etc. */
+    strip_title_noise(clean);
 
     printf("  TMDB search: \"%s\" (year: %d)\n", clean, year);
 
@@ -971,8 +1065,12 @@ void scanner_rescan_all_tmdb(void) {
         return;
     }
 
-    /* Phase 1: Re-scan filesystem for new files */
-    printf("TMDB rescan: Phase 1 — scanning filesystem for new files...\n");
+    /* Phase 1: Clear all media entries for a true fresh start */
+    printf("TMDB rescan: Phase 1 — clearing media database...\n");
+    database_delete_all_media();
+
+    /* Phase 2: Re-scan filesystem from scratch */
+    printf("TMDB rescan: Phase 2 — scanning filesystem...\n");
     scrape_begin(&tmdb_progress, "filesystem_scan", server_config.converted_path_count);
     for (int i = 0; i < server_config.converted_path_count; i++) {
         char path[4096];
@@ -982,10 +1080,10 @@ void scanner_rescan_all_tmdb(void) {
         scrape_update(&tmdb_progress, server_config.converted_paths[i], 1);
     }
     scrape_end(&tmdb_progress);
-    printf("TMDB rescan: Filesystem scan complete (%d media files total)\n",
+    printf("TMDB rescan: Filesystem scan complete (%d media files found)\n",
            database_get_count());
 
-    /* Phase 2: Re-fetch TMDB for ALL entries */
+    /* Phase 3: Fetch TMDB metadata for ALL entries */
     MediaEntry *entries = NULL;
     int count = 0;
 
@@ -994,7 +1092,7 @@ void scanner_rescan_all_tmdb(void) {
         return;
     }
 
-    printf("TMDB rescan: Phase 2 — re-fetching metadata for %d entries...\n", count);
+    printf("TMDB rescan: Phase 3 — fetching metadata for %d entries...\n", count);
     scrape_begin(&tmdb_progress, "tmdb_rescan", count);
 
     for (int i = 0; i < count; i++) {
@@ -1003,7 +1101,6 @@ void scanner_rescan_all_tmdb(void) {
         int ok = 0;
 
         if (e->type == MEDIA_TYPE_MOVIE) {
-            /* Re-extract title from filepath for improved parsing */
             char fresh_title[256];
             if (e->filepath) {
                 scanner_extract_title(e->filepath, fresh_title, sizeof(fresh_title));
