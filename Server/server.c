@@ -161,20 +161,16 @@ static void *startup_scan_thread(void *arg) {
         downloads_start();
     }
 
-    /* Session-based progress: separate trackers for TMDB and IGDB */
+    /* Session-based progress: TMDB scraping at startup (ROM scraping is manual-only) */
     scanner_scrape_session_begin(&tmdb_progress);
-    scanner_scrape_session_begin(&igdb_progress);
 
-    /* Run TMDB and IGDB/ROM scraping in parallel — they use different APIs */
+    /* Run TMDB scraping at startup — ROM/IGDB scraping deferred to manual trigger */
     {
-        pthread_t tmdb_thread, rom_thread;
-        int have_tmdb = 0, have_rom = 0;
+        pthread_t tmdb_thread;
+        int have_tmdb = 0;
 
         if (running) {
             have_tmdb = (pthread_create(&tmdb_thread, NULL, scrape_tmdb_thread, NULL) == 0);
-        }
-        if (running) {
-            have_rom = (pthread_create(&rom_thread, NULL, scrape_rom_thread, NULL) == 0);
         }
 
         /* If thread creation failed, run sequentially as fallback */
@@ -182,18 +178,11 @@ static void *startup_scan_thread(void *arg) {
             scanner_fetch_missing_tmdb();
             scanner_refresh_show_status();
         }
-        if (!have_rom && running) {
-            scanner_fetch_rom_metadata();
-            scanner_fetch_rom_covers();
-            scanner_fetch_libretro_covers();
-        }
 
         if (have_tmdb) pthread_join(tmdb_thread, NULL);
-        if (have_rom) pthread_join(rom_thread, NULL);
     }
 
     scanner_scrape_session_end(&tmdb_progress);
-    scanner_scrape_session_end(&igdb_progress);
 
     /* Initialize and start transcoder (only if enabled) */
     if (running && server_config.transcode_enabled) {
