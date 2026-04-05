@@ -1027,6 +1027,23 @@ int videoplayer_audio_queue_frame(VideoPlayer *vp, AVFrame *frame)
     if (vp->audio.stream_interrupted)
         return 0;
 
+    /* After seeking, discard audio frames from well before the seek target.
+     * av_seek_frame(BACKWARD) positions the file to the cluster containing
+     * the video keyframe, but that cluster may also contain audio packets
+     * from seconds earlier.  Without this filter, those early audio packets
+     * fill the ring buffer with content that doesn't match the visible video,
+     * causing audible A/V desync (user hears wrong scene's audio).
+     * Allow 500ms before target so audio roughly matches the keyframe. */
+    if (vp->seek_target_us > 0 && !vp->audio_seek_trim_done &&
+        frame->pts != AV_NOPTS_VALUE) {
+        AVRational tb = vp->fmt_ctx->streams[
+            vp->audio_tracks[vp->current_audio_track].stream_index]->time_base;
+        int64_t pts = av_rescale_q(frame->pts, tb, AV_TIME_BASE_Q);
+        if (pts < vp->seek_target_us - 500000) {
+            return 0;  /* Silently discard pre-keyframe audio */
+        }
+    }
+
     /* During user-initiated pause, PipeWire isn't consuming the ring buffer,
      * so writes would fill it up and trigger the stall detector.  Drop audio.
      * But during initial buffering (open → play transition, user_paused=0),

@@ -129,9 +129,9 @@ static void videoplayer_process_subtitle_packet(VideoPlayer *vp, AVPacket *pkt)
     int64_t start_ms = av_rescale_q(pts, tb, (AVRational){1, 1000});
     int64_t duration_ms = sub.end_display_time - sub.start_display_time;
     if (duration_ms <= 0)
-        duration_ms = 5000;  /* Default 5 seconds */
-    if (duration_ms > 5500)
-        duration_ms = 5500;  /* Cap at 5.5 seconds */
+        duration_ms = 2000;  /* Default 2 seconds */
+    if (duration_ms > 2000)
+        duration_ms = 2000;  /* Cap at 2 seconds — next subtitle replaces earlier */
 
     fprintf(stderr, "[subtitle] pkt #%d: start=%ldms duration=%ldms rects=%u "
             "track=%p pos=%ldms\n",
@@ -2068,6 +2068,7 @@ static void *decode_thread_func(void *arg)
             vp->av_sync_established = 0;
             vp->av_sync_video_base_us = 0;
             vp->av_sync_audio_base_us = 0;
+            vp->audio_seek_trim_done = 0;
 
             vp->position_us = vp->seek_target_us;
             vp->seek_requested = 0;

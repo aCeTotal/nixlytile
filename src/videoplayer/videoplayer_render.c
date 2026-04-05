@@ -1296,6 +1296,99 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
             fflush(vp->debug_log);
         }
 
+        /* After seeking, the audio ring buffer may contain samples from
+         * before the video keyframe (they share the same container cluster).
+         * Trim audio to start at the first video frame's PTS so audio and
+         * video content match.  Done once before the threshold check so that
+         * if the trim drops audio below audio_min, the normal fill loop
+         * simply waits for the decode thread to produce more audio. */
+        if (!vp->audio_seek_trim_done && queued > 0 &&
+            vp->audio_track_count > 0 && vp->audio.base_pts_us > 0 &&
+            vp->audio.sample_rate > 0) {
+            int64_t first_video_pts = vp->frame_queue[vp->frame_read_idx].pts_us;
+            if (first_video_pts > 0 &&
+                first_video_pts > vp->audio.base_pts_us &&
+                first_video_pts - vp->audio.base_pts_us < 30000000) {
+                int64_t skip_us = first_video_pts - vp->audio.base_pts_us;
+                size_t skip_samples = (size_t)((int64_t)vp->audio.sample_rate * skip_us / 1000000);
+                size_t skip_bytes = skip_samples * vp->audio.channels * sizeof(float);
+
+                pthread_mutex_lock(&vp->audio.ring.lock);
+                if (skip_bytes > vp->audio.ring.available)
+                    skip_bytes = vp->audio.ring.available;
+                /* Advance read pointer past the pre-keyframe audio */
+                vp->audio.ring.read_pos = (vp->audio.ring.read_pos + skip_bytes)
+                                         % vp->audio.ring.size;
+                vp->audio.ring.available -= skip_bytes;
+                pthread_mutex_unlock(&vp->audio.ring.lock);
+
+                size_t actual_skip = skip_bytes / (vp->audio.channels * sizeof(float));
+                pthread_mutex_lock(&vp->audio.lock);
+                vp->audio.base_pts_us = first_video_pts;
+                if (actual_skip <= vp->audio.audio_written_samples)
+                    vp->audio.audio_written_samples -= actual_skip;
+                else
+                    vp->audio.audio_written_samples = 0;
+                pthread_mutex_unlock(&vp->audio.lock);
+
+                /* Recompute audio_avail after trim */
+                pthread_mutex_lock(&vp->audio.ring.lock);
+                audio_avail = vp->audio.ring.available;
+                pthread_mutex_unlock(&vp->audio.ring.lock);
+
+                if (vp->debug_log) {
+                    fprintf(vp->debug_log,
+                            "# AUDIO_TRIM | skipped %.1fms audio (base %.2fs -> %.2fs)\n",
+                            skip_us / 1000.0,
+                            (first_video_pts - skip_us) / 1000000.0,
+                            first_video_pts / 1000000.0);
+                    fflush(vp->debug_log);
+                }
+                fprintf(stderr, "[videoplayer] Audio trim: skipped %.1fms to align with video at %.2fs\n",
+                        skip_us / 1000.0, first_video_pts / 1000000.0);
+            }
+            /* Reverse case: audio starts AFTER video keyframe.
+             * After seeking, the video keyframe can be seconds before the
+             * seek target while audio starts at/near the target.  If we
+             * play these pre-target video frames, the user sees old content
+             * while hearing the correct position — a jarring mismatch.
+             * Skip video frames until they match the audio start position. */
+            else if (first_video_pts > 0 &&
+                     vp->audio.base_pts_us > first_video_pts + 50000 &&
+                     vp->audio.base_pts_us - first_video_pts < 30000000) {
+                int skipped = 0;
+                pthread_mutex_lock(&vp->frame_mutex);
+                while (vp->frames_queued > 1) {
+                    VideoPlayerFrame *sf = &vp->frame_queue[vp->frame_read_idx];
+                    if (sf->pts_us >= vp->audio.base_pts_us - 50000)
+                        break;  /* Close enough to audio start */
+                    if (sf->buffer) {
+                        wlr_buffer_drop(sf->buffer);
+                        sf->buffer = NULL;
+                    }
+                    sf->ready = 0;
+                    vp->frame_read_idx = (vp->frame_read_idx + 1) % VP_FRAME_QUEUE_SIZE;
+                    vp->frames_queued--;
+                    skipped++;
+                }
+                queued = vp->frames_queued;
+                pthread_mutex_unlock(&vp->frame_mutex);
+
+                if (skipped > 0) {
+                    if (vp->debug_log) {
+                        fprintf(vp->debug_log,
+                                "# VIDEO_TRIM | skipped %d video frames (video %.2fs -> audio %.2fs)\n",
+                                skipped, first_video_pts / 1000000.0,
+                                vp->audio.base_pts_us / 1000000.0);
+                        fflush(vp->debug_log);
+                    }
+                    fprintf(stderr, "[videoplayer] Video trim: skipped %d frames to align with audio at %.2fs\n",
+                            skipped, vp->audio.base_pts_us / 1000000.0);
+                }
+            }
+            vp->audio_seek_trim_done = 1;
+        }
+
         int audio_ok = (audio_avail >= audio_min || vp->audio_track_count == 0);
         int buffer_timeout = (vp->buffer_ready_since_ns > 0 &&
                               vsync_time_ns > vp->buffer_ready_since_ns + 3000000000ULL);
@@ -1345,7 +1438,21 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
                 fprintf(stderr, "[videoplayer] Audio preroll timeout (%lu ms), starting video anyway\n",
                         (unsigned long)elapsed_ms);
             }
-            /* Audio is flowing (or no audio / timeout) — start playback */
+            /* Audio is flowing (or no audio / timeout) — start playback.
+             * Reset audio clock snapshot so preroll consumption doesn't
+             * skew the initial A/V sync establishment.  During preroll,
+             * PipeWire consumed some samples, advancing audio_played_samples.
+             * Recapture the clock now so get_av_diff_us() sees the true
+             * audio position at the moment video starts. */
+            if (vp->audio_track_count > 0 && vp->audio.audio_prestart_sent) {
+                pthread_mutex_lock(&vp->audio.lock);
+                int64_t samples_to_us = ((int64_t)vp->audio.audio_played_samples * 1000000LL)
+                                        / (vp->audio.sample_rate > 0 ? vp->audio.sample_rate : 48000);
+                vp->audio.audio_pts_us = vp->audio.base_pts_us + samples_to_us;
+                vp->audio.clock_snapshot_us = vp->audio.audio_pts_us;
+                vp->audio.clock_update_ns = get_time_ns();
+                pthread_mutex_unlock(&vp->audio.lock);
+            }
             videoplayer_play(vp);
         } else {
             return;
@@ -1579,9 +1686,14 @@ update_blend:
         buffer = NULL;  /* Ownership transferred to blend system */
         vp->last_present_time_ns = vsync_time_ns;
 
-        /* Render subtitles for current position */
-        if (vp->current_subtitle_track >= 0)
-            videoplayer_render_subtitles(vp, vp->position_us);
+        /* Render subtitles synced to audio clock so text matches what the
+         * user hears, not the video frame PTS (which may lag slightly). */
+        if (vp->current_subtitle_track >= 0) {
+            int64_t sub_pts = videoplayer_audio_get_clock(vp);
+            if (sub_pts <= 0)
+                sub_pts = vp->position_us;
+            videoplayer_render_subtitles(vp, sub_pts);
+        }
     }
 
     /* Ramp blend_node opacity each vsync for smooth cross-fade.

@@ -396,6 +396,7 @@ typedef struct VideoPlayer {
     volatile int decode_running;
     volatile int seek_requested;
     int64_t seek_target_us;
+    int audio_seek_trim_done;          /* Set after audio ring buffer trimmed to match video */
 
     /* Demux thread (I/O separated from decode) */
     pthread_t demux_thread;

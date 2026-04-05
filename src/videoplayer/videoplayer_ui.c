@@ -178,6 +178,13 @@ static int control_bar_hide_timer_cb(void *data)
     /* Don't hide if paused, hovered, or dragging */
     if (vp->state != VP_STATE_PLAYING || bar->hovered || bar->dragging_progress) {
         bar->last_activity_ms = get_time_ms();
+        /* Re-arm during buffering/seeking so bar hides after playback resumes.
+         * Without this, the one-shot timer is consumed during BUFFERING and
+         * never fires again, leaving the control bar visible forever. */
+        if (bar->visible && bar->hide_timer &&
+            (vp->state == VP_STATE_BUFFERING || vp->state == VP_STATE_SEEKING)) {
+            wl_event_source_timer_update(bar->hide_timer, SEEK_HOLD_HIDE_MS);
+        }
         return 0;
     }
 
