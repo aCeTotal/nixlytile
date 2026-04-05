@@ -222,6 +222,10 @@ static void build_pq_lut(VideoPlayer *vp)
         vp->hdr_lut[i] = (uint16_t)(val < 0 ? 0 : (val > 65535 ? 65535 : val));
     }
 
+    /* Build 8-bit fast LUT for 4K path (256 bytes, L1-resident) */
+    for (int i = 0; i < 256; i++)
+        vp->hdr_lut_8bit[i] = vp->hdr_lut[i * 257] >> 8;
+
     fprintf(stderr, "[videoplayer] Built PQ tonemap LUT (peak=%.0f nits, Hable)\n", peak_nits);
 }
 
@@ -264,6 +268,10 @@ static void build_hlg_lut(VideoPlayer *vp)
         int val = (int)(srgb * 65535.0f + 0.5f);
         vp->hdr_lut[i] = (uint16_t)(val < 0 ? 0 : (val > 65535 ? 65535 : val));
     }
+
+    /* Build 8-bit fast LUT for 4K path (256 bytes, L1-resident) */
+    for (int i = 0; i < 256; i++)
+        vp->hdr_lut_8bit[i] = vp->hdr_lut[i * 257] >> 8;
 
     fprintf(stderr, "[videoplayer] Built HLG tonemap LUT\n");
 }
@@ -374,6 +382,50 @@ static void pack_bgra_to_argb2101010_inplace(void *buf, int stride,
 	}
 }
 
+/*
+ * In-place PQ/HLG → sRGB tonemap on 8-bit BGRA data using a 256-byte LUT.
+ * Used for 4K HDR: avoids the 66MB RGBA64LE intermediate that takes ~100ms.
+ * The 256-byte LUT fits in L1 cache → ~25ms for 4K vs ~100ms with RGBA64LE.
+ * Quality trade-off: 8-bit PQ precision (~6.7 bits visible) is acceptable
+ * at 4K pixel density where banding is masked by high pixel count.
+ */
+static void tonemap_bgra_inplace(void *buf, int stride,
+                                   int width, int height,
+                                   const uint8_t *lut)
+{
+	for (int y = 0; y < height; y++) {
+		uint8_t *row = (uint8_t *)buf + y * stride;
+		for (int x = 0; x < width; x++) {
+			row[0] = lut[row[0]];  /* B */
+			row[1] = lut[row[1]];  /* G */
+			row[2] = lut[row[2]];  /* R */
+			/* row[3] = A — keep opaque */
+			row += 4;
+		}
+	}
+}
+
+/*
+ * Combined PQ/HLG → sRGB tonemap + BGRA → ARGB2101010 pack in a single pass.
+ * Saves one full 33MB read+write over doing tonemap then pack separately.
+ * Used for 4K HDR on 10-bit displays.
+ */
+static void tonemap_bgra_to_argb2101010_inplace(void *buf, int stride,
+                                                   int width, int height,
+                                                   const uint8_t *lut)
+{
+	for (int y = 0; y < height; y++) {
+		uint32_t *row = (uint32_t *)((uint8_t *)buf + y * stride);
+		for (int x = 0; x < width; x++) {
+			uint32_t p = row[x];
+			uint32_t b = lut[p & 0xFF];
+			uint32_t g = lut[(p >> 8) & 0xFF];
+			uint32_t r = lut[(p >> 16) & 0xFF];
+			row[x] = (3u << 30) | (r << 22) | (g << 12) | (b << 2);
+		}
+	}
+}
+
 /* ================================================================
  *  Frame Conversion
  * ================================================================ */
@@ -425,13 +477,14 @@ struct wlr_buffer *videoplayer_create_frame_buffer(VideoPlayer *vp, AVFrame *fra
     if (src_fmt == AV_PIX_FMT_NONE)
         src_fmt = AV_PIX_FMT_YUV420P;
 
-    if (is_hdr) {
-        /* ── HDR path: YUV → RGBA64LE → tonemap → output ──
-         * Needs 16-bit intermediate for accurate PQ/HLG tonemapping. */
+    if (is_hdr && (width < 3840 && height < 2160)) {
+        /* ── HD HDR path: YUV → RGBA64LE → tonemap → output ──
+         * Needs 16-bit intermediate for accurate PQ/HLG tonemapping.
+         * At HD resolution the RGBA64LE intermediate is only ~16MB,
+         * and the full-precision LUT tonemap takes ~30ms — fast enough. */
         int rgba64_stride = width * 8;
         size_t rgba64_size = (size_t)height * rgba64_stride;
 
-        /* Allocate/reuse temporary RGBA64 buffer */
         if (!vp->hdr_tmp_buffer || vp->hdr_tmp_size < rgba64_size) {
             free(vp->hdr_tmp_buffer);
             vp->hdr_tmp_buffer = malloc(rgba64_size);
@@ -441,18 +494,10 @@ struct wlr_buffer *videoplayer_create_frame_buffer(VideoPlayer *vp, AVFrame *fra
             free(data); free(buf); return NULL;
         }
 
-        /* Resolution-adaptive SWS flags: at 4K the RGBA64LE intermediate
-         * is 63MB/frame; Lanczos + full chroma upsampling takes ~230ms.
-         * Bilinear reduces this to ~15-20ms with negligible quality loss
-         * at high pixel density. HD and below keep Lanczos for quality. */
-        int sws_flags = (width >= 3840 || height >= 2160)
-            ? (SWS_BILINEAR | SWS_ACCURATE_RND)
-            : SWS_QUALITY_FLAGS;
-
         vp->sws_ctx = sws_getCachedContext(vp->sws_ctx,
             width, height, src_fmt,
             width, height, AV_PIX_FMT_RGBA64LE,
-            sws_flags, NULL, NULL, NULL);
+            SWS_QUALITY_FLAGS, NULL, NULL, NULL);
         if (!vp->sws_ctx) {
             free(data); free(buf); return NULL;
         }
@@ -466,15 +511,15 @@ struct wlr_buffer *videoplayer_create_frame_buffer(VideoPlayer *vp, AVFrame *fra
                   (const uint8_t *const *)frame->data, frame->linesize,
                   0, height, tmp_data, tmp_stride);
 
-        /* Apply tonemapping LUT and pack to output format */
         tonemap_and_pack(vp->hdr_tmp_buffer, rgba64_stride,
                          data, stride, width, height,
                          vp->hdr_lut, output_10bit);
     } else {
-        /* ── SDR path: direct BGRA conversion ──
-         * For 10-bit displays, convert to 8-bit BGRA first then pack
-         * in-place to ARGB2101010.  This avoids the RGBA64LE intermediate
-         * which costs ~200ms/frame at 4K (63MB per frame). */
+        /* ── Fast BGRA path (SDR + 4K HDR) ──
+         * Converts directly to 8-bit BGRA (~15-20ms at 4K).
+         * For 4K HDR: apply 8-bit tonemap LUT in-place (~25ms).
+         * For SDR: BGRA is the final format (no tonemap needed).
+         * Combined: ~40ms total vs ~100ms with RGBA64LE intermediate. */
         vp->sws_ctx = sws_getCachedContext(vp->sws_ctx,
             width, height, src_fmt,
             width, height, AV_PIX_FMT_BGRA,
@@ -492,9 +537,18 @@ struct wlr_buffer *videoplayer_create_frame_buffer(VideoPlayer *vp, AVFrame *fra
                   (const uint8_t *const *)frame->data, frame->linesize,
                   0, height, dst_data, dst_linesize);
 
-        /* Pack BGRA → ARGB2101010 in-place for 10-bit output */
-        if (output_10bit)
+        if (is_hdr) {
+            /* 4K HDR: tonemap PQ/HLG→sRGB using 8-bit LUT.
+             * Combined tonemap+pack saves one full data pass. */
+            if (output_10bit)
+                tonemap_bgra_to_argb2101010_inplace(data, stride, width, height,
+                                                      vp->hdr_lut_8bit);
+            else
+                tonemap_bgra_inplace(data, stride, width, height,
+                                       vp->hdr_lut_8bit);
+        } else if (output_10bit) {
             pack_bgra_to_argb2101010_inplace(data, stride, width, height);
+        }
     }
 
     /* Create pixman image */
@@ -999,25 +1053,17 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
                         vp->audio.channels * sizeof(float) / 2;  /* 0.5 seconds */
         }
 
-        /* Adaptive buffer threshold — balance startup speed vs smoothness.
-         * At 4K the BGRA path takes ~30-40ms/frame, so filling 12 frames
-         * would delay start by ~400ms.  Use 50% (8 frames ≈ 333ms of video
-         * at 24fps) which gives enough runway for decode to keep ahead.
-         * At HD, sws_scale is fast (~5ms/frame) so we can afford 75%. */
+        /* Aggressive buffer threshold — fill a large runway before starting.
+         * With a 64-frame queue, we have 2.67s of video at 24fps.
+         * Always require at least 50% fill (32 frames ≈ 1.3s runway)
+         * so the decode thread stays well ahead of consumption. */
         int target_frames;
-        int is_uhd = (vp->video.width >= 3840 || vp->video.height >= 2160);
-        if (vp->position_us == 0) {
-            target_frames = is_uhd
-                ? VP_FRAME_QUEUE_SIZE / 2              /* 4K initial: 50% (8 frames) */
-                : VP_FRAME_QUEUE_SIZE * 3 / 4;         /* HD initial: 75% (12 frames) */
-        } else if (vp->server_slow) {
-            target_frames = is_uhd
-                ? VP_FRAME_QUEUE_SIZE * 3 / 4          /* 4K slow: 75% (12 frames) */
-                : VP_FRAME_QUEUE_SIZE;                 /* HD slow: fill completely */
+        if (vp->server_slow) {
+            target_frames = VP_FRAME_QUEUE_SIZE * 3 / 4;   /* slow: 75% (48 frames) */
+        } else if (vp->position_us == 0) {
+            target_frames = VP_FRAME_QUEUE_SIZE * 3 / 4;   /* initial: 75% (48 frames) */
         } else {
-            target_frames = is_uhd
-                ? VP_FRAME_QUEUE_SIZE / 4              /* 4K rebuffer: 25% (4 frames) */
-                : VP_FRAME_QUEUE_SIZE / 2;             /* HD rebuffer: 50% */
+            target_frames = VP_FRAME_QUEUE_SIZE / 2;       /* rebuffer: 50% (32 frames) */
         }
 
         /* Safety: track how long we've been stuck in BUFFERING with enough

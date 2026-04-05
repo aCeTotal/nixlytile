@@ -1760,7 +1760,10 @@ static int transfer_hw_frame(VideoPlayer *vp, AVFrame *hw_frame, AVFrame *sw_fra
 {
     int ret;
 
-    sw_frame->format = vp->video.sw_pix_fmt;
+    /* Let the HW driver choose the output format — avoids format mismatches
+     * where sw_pix_fmt doesn't match what the driver actually produces.
+     * After transfer, sw_frame->format reflects the true data format. */
+    sw_frame->format = AV_PIX_FMT_NONE;
     ret = av_hwframe_transfer_data(sw_frame, hw_frame, 0);
     if (ret < 0) {
         char errbuf[256];

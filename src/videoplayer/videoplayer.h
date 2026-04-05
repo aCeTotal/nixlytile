@@ -116,9 +116,9 @@ typedef struct SubtitleTrack {
  *  Frame Queue
  * ================================================================ */
 
-#define VP_FRAME_QUEUE_SIZE 16     /* Pre-converted BGRA buffers for smooth playback */
-#define VP_BUFFER_POOL_SIZE 20     /* Recycled pixel data buffers to avoid mmap/munmap */
-#define VP_PACKET_QUEUE_SIZE 2048  /* Demuxed packets buffered between I/O and decode threads */
+#define VP_FRAME_QUEUE_SIZE 64     /* Pre-converted BGRA buffers — large for 4K headroom */
+#define VP_BUFFER_POOL_SIZE 72     /* Recycled pixel data buffers to avoid mmap/munmap */
+#define VP_PACKET_QUEUE_SIZE 4096  /* Demuxed packets buffered between I/O and decode threads */
 
 typedef struct PacketQueueEntry {
     AVPacket *pkt;
@@ -446,6 +446,7 @@ typedef struct VideoPlayer {
 
     /* Color management / HDR tonemapping */
     uint16_t *hdr_lut;             /* 65536-entry PQ/HLG → sRGB LUT (NULL for SDR) */
+    uint8_t hdr_lut_8bit[256];     /* 8-bit PQ/HLG → sRGB LUT for fast 4K tonemap */
     uint8_t *hdr_tmp_buffer;       /* Reusable RGBA64 intermediate buffer */
     size_t hdr_tmp_size;
     int output_10bit;              /* Display supports 10-bit (set by compositor) */
