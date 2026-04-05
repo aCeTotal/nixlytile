@@ -253,6 +253,7 @@ typedef struct VideoPlayerAudio {
     /* Clock interpolation for smooth A/V sync */
     uint64_t clock_update_ns;      /* Wallclock time of last on_process update */
     int64_t  clock_snapshot_us;    /* audio_pts_us at that moment */
+    int64_t  output_delay_us;     /* PipeWire pipeline delay to speakers */
 
     /* Sync tracking (per-instance, not static) */
     int64_t last_audio_pts;        /* Last audio PTS for stall detection */
@@ -501,6 +502,11 @@ typedef struct VideoPlayer {
     int debug_total_empty;                 /* Total queue-empty events since open */
     int debug_total_snaps;                 /* Total timing snap-forwards since open */
     volatile int debug_audio_underruns;    /* Audio buffer underruns in PipeWire on_process */
+
+    /* Continuous A/V/subtitle sync verification (hidden, runs every ~5s) */
+    int sync_check_counter;                /* Frames since last sync check */
+    int64_t sync_check_sub_drift_sum;      /* Accumulated subtitle-vs-audio drift */
+    int sync_check_sub_drift_count;        /* Number of subtitle drift samples */
 
     /* Server throughput detection */
     volatile int server_slow;              /* 1 = server delivering data slowly */

@@ -288,6 +288,29 @@ static void on_process(void *userdata)
          * between on_process calls to avoid discrete stepping artifacts */
         vp->audio.clock_snapshot_us = vp->audio.audio_pts_us;
         vp->audio.clock_update_ns = get_time_ns();
+
+        /* Capture PipeWire output pipeline delay so the audio clock
+         * reflects when samples actually leave the speakers, not when
+         * they left our ring buffer.  Without this, video and subtitles
+         * appear ~30-60ms before the matching dialog is audible. */
+        struct pw_time pwt;
+        if (pw_stream_get_time(vp->audio.stream, &pwt) == 0 &&
+            pwt.rate.denom > 0) {
+            int64_t delay_us = 0;
+            /* Pipeline delay (graph latency to DAC) */
+            delay_us += (int64_t)pwt.delay * 1000000LL *
+                        pwt.rate.num / pwt.rate.denom;
+            /* Queued data in PipeWire buffers (bytes → frames → us) */
+            uint32_t frame_size = sizeof(float) * vp->audio.channels;
+            if (frame_size > 0 && vp->audio.sample_rate > 0) {
+                delay_us += ((int64_t)pwt.queued / frame_size) *
+                            1000000LL / vp->audio.sample_rate;
+                delay_us += (int64_t)pwt.buffered * 1000000LL /
+                            vp->audio.sample_rate;
+            }
+            vp->audio.output_delay_us = delay_us;
+        }
+
         pthread_mutex_unlock(&vp->audio.lock);
     }
 
@@ -369,6 +392,7 @@ static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
             vp->audio.audio_played_samples = 0;
             vp->audio.clock_update_ns = 0;
             vp->audio.clock_snapshot_us = 0;
+            vp->audio.output_delay_us = 0;
             vp->audio.last_audio_pts = 0;
             vp->audio.stall_count = 0;
             vp->audio.recovery_frames = 15;
@@ -415,6 +439,7 @@ static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
             vp->audio.audio_played_samples = 0;
             vp->audio.clock_update_ns = 0;
             vp->audio.clock_snapshot_us = 0;
+            vp->audio.output_delay_us = 0;
             vp->audio.recovery_frames = 15;
             pthread_mutex_unlock(&vp->audio.lock);
         } else {
@@ -589,8 +614,20 @@ void videoplayer_audio_cmd_shutdown(VideoPlayer *vp)
         return;
 
     if (vp->audio.cmd_thread_running) {
+        /* Send QUIT command.  If the pipe write fails (e.g., full pipe),
+         * closing the write end below will cause the read() in the cmd
+         * thread to return 0/error, breaking it out of its blocking wait. */
         AudioCmd cmd = { .type = AUDIO_CMD_QUIT };
         audio_cmd_send(vp, &cmd);
+
+        /* Close write end BEFORE join — if the QUIT command didn't
+         * make it through (pipe full, race), this ensures the cmd
+         * thread's blocking read() returns with error/EOF. */
+        if (vp->audio.cmd_pipe[1] >= 0) {
+            close(vp->audio.cmd_pipe[1]);
+            vp->audio.cmd_pipe[1] = -1;
+        }
+
         pthread_join(vp->audio.cmd_thread, NULL);
         vp->audio.cmd_thread_running = 0;
     }
@@ -645,6 +682,7 @@ int videoplayer_audio_init(VideoPlayer *vp)
     vp->audio.audio_played_samples = 0;
     vp->audio.clock_update_ns = 0;
     vp->audio.clock_snapshot_us = 0;
+    vp->audio.output_delay_us = 0;
     vp->audio.last_audio_pts = 0;
     vp->audio.stall_count = 0;
     vp->audio.recovery_frames = 0;
@@ -837,8 +875,17 @@ void videoplayer_audio_cleanup(VideoPlayer *vp)
     int had_pipewire = (vp->audio.loop != NULL);
 
     if (vp->audio.loop) {
-        pw_thread_loop_lock(vp->audio.loop);
+        /* CRITICAL: Stop the PipeWire thread loop FIRST.  This guarantees
+         * that on_process() and all other PipeWire callbacks have finished
+         * and will never fire again.  The previous order (lock → destroy →
+         * unlock → stop) had a race: on_process could fire between unlock
+         * and stop, accessing the already-destroyed stream → crash.
+         *
+         * pw_thread_loop_stop() blocks until the PipeWire thread exits,
+         * so after this returns, no callbacks can be running. */
+        pw_thread_loop_stop(vp->audio.loop);
 
+        /* Now safe to destroy — no callbacks can fire */
         if (vp->audio.stream) {
             spa_hook_remove(&vp->audio.stream_listener);
             pw_stream_destroy(vp->audio.stream);
@@ -849,9 +896,6 @@ void videoplayer_audio_cleanup(VideoPlayer *vp)
             pw_core_disconnect(vp->audio.core);
             vp->audio.core = NULL;
         }
-
-        pw_thread_loop_unlock(vp->audio.loop);
-        pw_thread_loop_stop(vp->audio.loop);
 
         if (vp->audio.context) {
             pw_context_destroy(vp->audio.context);
@@ -1222,6 +1266,7 @@ void videoplayer_audio_flush(VideoPlayer *vp)
     vp->audio.audio_played_samples = 0;
     vp->audio.clock_update_ns = 0;
     vp->audio.clock_snapshot_us = 0;
+    vp->audio.output_delay_us = 0;
     vp->audio.last_audio_pts = 0;
     vp->audio.stall_count = 0;
     vp->audio.recovery_frames = 0;
@@ -1258,11 +1303,13 @@ int64_t videoplayer_audio_get_clock(VideoPlayer *vp)
     pthread_mutex_lock(&vp->audio.lock);
     int64_t  base_us = vp->audio.clock_snapshot_us;
     uint64_t base_ns = vp->audio.clock_update_ns;
+    int64_t  delay_us = vp->audio.output_delay_us;
     pthread_mutex_unlock(&vp->audio.lock);
 
     if (base_us <= 0 || base_ns == 0)
         return 0;
 
+    int64_t result;
     uint64_t now_ns = get_time_ns();
     if (now_ns > base_ns) {
         int64_t elapsed_us = (int64_t)(now_ns - base_ns) / 1000;
@@ -1270,9 +1317,18 @@ int64_t videoplayer_audio_get_clock(VideoPlayer *vp)
          * runaway extrapolation if on_process stops calling */
         if (elapsed_us > 50000)
             elapsed_us = 50000;
-        return base_us + elapsed_us;
+        result = base_us + elapsed_us;
+    } else {
+        result = base_us;
     }
-    return base_us;
+
+    /* Subtract PipeWire output pipeline delay so the clock reflects
+     * what is audible NOW, not what was just consumed from our buffer.
+     * This keeps video, subtitles, and heard audio in sync. */
+    if (delay_us > 0)
+        result -= delay_us;
+
+    return result > 0 ? result : 0;
 }
 
 void videoplayer_audio_set_clock(VideoPlayer *vp, int64_t pts_us)

@@ -1720,12 +1720,60 @@ update_blend:
         vp->last_present_time_ns = vsync_time_ns;
 
         /* Render subtitles synced to audio clock so text matches what the
-         * user hears, not the video frame PTS (which may lag slightly). */
+         * user hears, not the video frame PTS (which may lag slightly).
+         * The audio clock already has PipeWire output delay subtracted,
+         * so it reflects the actual audible position at the speakers. */
         if (vp->current_subtitle_track >= 0) {
             int64_t sub_pts = videoplayer_audio_get_clock(vp);
             if (sub_pts <= 0)
                 sub_pts = vp->position_us;
             videoplayer_render_subtitles(vp, sub_pts);
+
+            /* Hidden continuous sync verification: every ~120 frames
+             * (~5s at 24fps), check that subtitle clock stays close to
+             * the video position.  Large divergence means something is
+             * wrong with the audio clock or subtitle timing. */
+            vp->sync_check_counter++;
+            if (sub_pts > 0 && vp->position_us > 0) {
+                int64_t sub_video_diff = sub_pts - vp->position_us;
+                vp->sync_check_sub_drift_sum += sub_video_diff;
+                vp->sync_check_sub_drift_count++;
+            }
+            if (vp->sync_check_counter >= 120) {
+                int64_t audio_pts = videoplayer_audio_get_clock(vp);
+                int64_t video_pts = vp->position_us;
+
+                if (audio_pts > 0 && video_pts > 0) {
+                    int64_t av_diff = video_pts - audio_pts;
+                    /* If A/V diff exceeds 100ms, force re-establishment
+                     * of sync so the drift correction can converge */
+                    if (av_diff > 100000 || av_diff < -100000) {
+                        vp->av_sync_established = 0;
+                        vp->av_sync_drift_sum = 0;
+                        vp->av_sync_drift_count = 0;
+                        if (vp->debug_log) {
+                            fprintf(vp->debug_log,
+                                "# SYNC_CHECK | av_diff=%+ldus — re-establishing sync\n",
+                                (long)av_diff);
+                            fflush(vp->debug_log);
+                        }
+                    }
+                }
+                /* Check subtitle-vs-video drift average */
+                if (vp->sync_check_sub_drift_count > 0) {
+                    int64_t avg_sub_drift = vp->sync_check_sub_drift_sum /
+                                            vp->sync_check_sub_drift_count;
+                    if (vp->debug_log && (avg_sub_drift > 50000 || avg_sub_drift < -50000)) {
+                        fprintf(vp->debug_log,
+                            "# SYNC_CHECK | sub_drift=%+ldus (sub-video avg over %d samples)\n",
+                            (long)avg_sub_drift, vp->sync_check_sub_drift_count);
+                        fflush(vp->debug_log);
+                    }
+                }
+                vp->sync_check_counter = 0;
+                vp->sync_check_sub_drift_sum = 0;
+                vp->sync_check_sub_drift_count = 0;
+            }
         }
     }
 
@@ -1767,14 +1815,19 @@ update_blend:
                 actual_us = (vsync_time_ns - vp->debug_last_present_ns) / 1000;
             uint64_t expected_us = vp->frame_interval_ns / 1000;
 
+            pthread_mutex_lock(&vp->audio.lock);
+            int64_t pw_delay = vp->audio.output_delay_us;
+            pthread_mutex_unlock(&vp->audio.lock);
+
             fprintf(vp->debug_log,
-                    "%6d | PLAY   | q=%2d | avsync=%+7ld | pos=%7ld | v=%2d | dt=%5lu/%5lu us",
+                    "%6d | PLAY   | q=%2d | avsync=%+7ld | pos=%7ld | v=%2d | dt=%5lu/%5lu us | pw=%ldus",
                     vp->debug_frame_count, q,
                     (long)vp->av_sync_offset_us,
                     (long)(vp->position_us / 1000),
                     vp->debug_vsync_count,
                     (unsigned long)actual_us,
-                    (unsigned long)expected_us);
+                    (unsigned long)expected_us,
+                    (long)pw_delay);
 
             if (frames_consumed > 1) {
                 vp->debug_total_skips += frames_consumed - 1;

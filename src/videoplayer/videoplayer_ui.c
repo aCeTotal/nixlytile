@@ -1472,5 +1472,13 @@ void videoplayer_subtitle_cleanup(VideoPlayer *vp)
     vp->subtitle.bitmap_data = NULL;
     vp->subtitle.bitmap_valid = 0;
 
+    /* Reset static render counters so log doesn't carry over between files */
+    sub_render_log_count = 0;
+    sub_render_shown_count = 0;
+
+    /* Reset subtitle display tracking */
+    vp->subtitle.current_pts_us = 0;
+    vp->subtitle.current_end_us = 0;
+
     fprintf(stderr, "[subtitle] Cleanup complete\n");
 }

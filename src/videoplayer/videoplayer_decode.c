@@ -159,7 +159,8 @@ static void videoplayer_process_subtitle_packet(VideoPlayer *vp, AVPacket *pkt)
                 subtitle_pkt_count, (long)pts);
     }
 
-    int64_t start_ms = av_rescale_q(pts, tb, (AVRational){1, 1000});
+    int64_t start_ms = av_rescale_q(pts, tb, (AVRational){1, 1000})
+                       + sub.start_display_time;
     /* Use the actual duration from the container (FFmpeg's end_display_time
      * is relative to start_display_time within the subtitle event).
      * SRT/ASS/PGS all provide correct durations here — trust them.
@@ -938,8 +939,11 @@ void videoplayer_close(VideoPlayer *vp)
     if (vp->state == VP_STATE_IDLE)
         return;
 
-    /* Set state to IDLE immediately — this prevents present_frame() from
-     * accessing any resources during the close process.  Must be first. */
+    fprintf(stderr, "[videoplayer] === CLOSE BEGIN ===\n");
+
+    /* ── Phase 1: Signal everything to stop ──
+     * Set state to IDLE first — this prevents present_frame() from
+     * accessing any resources during the close process. */
     vp->state = VP_STATE_IDLE;
 
     /* Trigger the FFmpeg interrupt callback to abort any blocking I/O
@@ -948,24 +952,40 @@ void videoplayer_close(VideoPlayer *vp)
      * rw_timeout seconds, which can crash the compositor. */
     vp->io_abort_requested = 1;
 
-    /* Stop both threads. We check the flags before clearing to know
-     * which threads were actually started and need joining. */
-    {
-        int had_demux = vp->demux_running;
-        int had_decode = vp->decode_running;
-        vp->demux_running = 0;
-        vp->decode_running = 0;
+    /* Signal decode/demux threads to exit their loops */
+    int had_demux = vp->demux_running;
+    int had_decode = vp->decode_running;
+    vp->demux_running = 0;
+    vp->decode_running = 0;
 
-        /* Wake up all waiting threads */
-        pthread_cond_broadcast(&vp->frame_cond);
-        pthread_cond_broadcast(&vp->pkt_not_empty);
-        pthread_cond_broadcast(&vp->pkt_not_full);
+    /* Wake up all waiting threads — they'll see running=0 and exit */
+    pthread_cond_broadcast(&vp->frame_cond);
+    pthread_cond_broadcast(&vp->pkt_not_empty);
+    pthread_cond_broadcast(&vp->pkt_not_full);
 
-        if (had_demux)
-            pthread_join(vp->demux_thread, NULL);
-        if (had_decode)
-            pthread_join(vp->decode_thread, NULL);
+    /* ── Phase 2: Join decode/demux threads ──
+     * Decode thread: frame_cond timedwait (10ms) checks decode_running.
+     * Demux thread: FFmpeg interrupt callback checks io_abort_requested.
+     * Neither thread blocks on PipeWire — ring_buffer_write is non-blocking.
+     * Must join BEFORE destroying ring buffer / PipeWire to avoid UAF. */
+    if (had_demux) {
+        fprintf(stderr, "[videoplayer] Joining demux thread...\n");
+        pthread_join(vp->demux_thread, NULL);
     }
+    if (had_decode) {
+        fprintf(stderr, "[videoplayer] Joining decode thread...\n");
+        pthread_join(vp->decode_thread, NULL);
+    }
+
+    /* ── Phase 3: Shut down audio (PipeWire + ring buffer) ──
+     * All threads stopped — safe to tear down.  Audio cleanup uses
+     * fixed order: pw_thread_loop_stop() first (drains all callbacks
+     * including on_process), then pw_stream_destroy — no race. */
+    videoplayer_audio_cmd_shutdown(vp);
+    videoplayer_audio_cleanup(vp);
+
+    /* ── Phase 4: Tear down remaining resources ──
+     * No concurrent access possible after this point. */
 
     /* Release blend buffer refs before scene/pool cleanup.
      * These hold separate wlr_buffer refs that must be dropped. */
@@ -1005,7 +1025,7 @@ void videoplayer_close(VideoPlayer *vp)
     vp->buffer_pool.alloc_size = 0;
     pthread_mutex_unlock(&vp->buffer_pool.lock);
 
-    /* Clean up frame queue */
+    /* Clean up frame queue synchronization */
     pthread_mutex_destroy(&vp->frame_mutex);
     pthread_cond_destroy(&vp->frame_cond);
 
@@ -1037,11 +1057,6 @@ void videoplayer_close(VideoPlayer *vp)
      * Must happen before freeing subtitle_codec_ctx. */
     videoplayer_subtitle_cleanup(vp);
     pthread_mutex_destroy(&vp->subtitle_mutex);
-
-    /* Cleanup audio output (PipeWire, ring buffer, resampler).
-     * Must shut down cmd thread first — it holds PipeWire locks. */
-    videoplayer_audio_cmd_shutdown(vp);
-    videoplayer_audio_cleanup(vp);
 
     /* Free frames */
     av_frame_free(&vp->decode_frame);
@@ -1078,7 +1093,9 @@ void videoplayer_close(VideoPlayer *vp)
         vp->debug_log = NULL;
     }
 
-    /* Reset state */
+    /* ── Phase 5: Reset ALL state for clean re-open ──
+     * Every field that is set during open/playback must be reset here
+     * so that the next videoplayer_open() starts from a clean slate. */
     vp->state = VP_STATE_IDLE;
     vp->filepath[0] = '\0';
     vp->duration_us = 0;
@@ -1099,7 +1116,7 @@ void videoplayer_close(VideoPlayer *vp)
     vp->io_abort_requested = 0;
     memset(&vp->video, 0, sizeof(vp->video));
 
-    /* Reset frame pacing and A/V sync state so the next open starts clean */
+    /* Reset frame pacing and A/V sync state */
     vp->last_frame_ns = 0;
     vp->last_present_time_ns = 0;
     vp->buffer_ready_since_ns = 0;
@@ -1112,11 +1129,26 @@ void videoplayer_close(VideoPlayer *vp)
     vp->av_sync_established = 0;
     vp->av_sync_drift_sum = 0;
     vp->av_sync_drift_count = 0;
+    vp->sync_check_counter = 0;
+    vp->sync_check_sub_drift_sum = 0;
+    vp->sync_check_sub_drift_count = 0;
     vp->recovery_check_counter = 0;
     vp->audio_interrupted_ticks = 0;
     vp->audio_seek_trim_done = 0;
     vp->empty_queue_count = 0;
     vp->server_slow = 0;
+    vp->demux_bytes_per_sec = 0;
+
+    /* Reset debug counters for next session */
+    vp->debug_frame_count = 0;
+    vp->debug_vsync_count = 0;
+    vp->debug_last_present_ns = 0;
+    vp->debug_total_skips = 0;
+    vp->debug_total_empty = 0;
+    vp->debug_total_snaps = 0;
+    vp->debug_audio_underruns = 0;
+
+    fprintf(stderr, "[videoplayer] === CLOSE COMPLETE ===\n");
 }
 
 /* ================================================================
@@ -2180,6 +2212,9 @@ static void *decode_thread_func(void *arg)
             vp->av_sync_audio_base_us = 0;
             vp->av_sync_drift_sum = 0;
             vp->av_sync_drift_count = 0;
+            vp->sync_check_counter = 0;
+            vp->sync_check_sub_drift_sum = 0;
+            vp->sync_check_sub_drift_count = 0;
             vp->audio_seek_trim_done = 0;
 
             vp->position_us = vp->seek_target_us;
