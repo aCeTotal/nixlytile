@@ -102,23 +102,9 @@ static const struct wlr_buffer_impl video_pixman_buffer_impl = {
  *  Color Management
  * ================================================================ */
 
-/* Chroma quality upsampling — adaptive to resolution.
- * At 4K (3840×2160) Lanczos + full chroma costs ~230ms/frame (only 4fps!).
- * Bilinear at 4K is ~10× faster and visually indistinguishable on TVs.
- * Keep Lanczos for 1080p and below where the cost is manageable. */
+/* Chroma 4:4:4 quality upsampling + accurate rounding (for HDR path) */
 #define SWS_QUALITY_FLAGS \
     (SWS_LANCZOS | SWS_FULL_CHR_H_INT | SWS_FULL_CHR_H_INP | SWS_ACCURATE_RND)
-
-#define SWS_FAST_QUALITY_FLAGS \
-    (SWS_BILINEAR | SWS_ACCURATE_RND)
-
-/* Choose SWS flags based on resolution — 4K uses fast path */
-static inline int sws_flags_for_resolution(int width, int height)
-{
-    if (width >= 3840 || height >= 2160)
-        return SWS_FAST_QUALITY_FLAGS;
-    return SWS_QUALITY_FLAGS;
-}
 
 /* Map FFmpeg color space to swscale coefficient table index */
 static int get_sws_colorspace(enum AVColorSpace cs, int height)
@@ -367,6 +353,27 @@ static void pack_rgba64_to_10bit(const uint8_t *src, int src_stride,
     }
 }
 
+/*
+ * In-place pack BGRA (8-bit) → ARGB2101010 (10-bit).
+ * Both formats are 4 bytes/pixel so the buffer can be reused.
+ * Used for SDR content on 10-bit displays — avoids the slow
+ * RGBA64LE intermediate that costs ~200ms/frame at 4K.
+ */
+static void pack_bgra_to_argb2101010_inplace(void *buf, int stride,
+                                               int width, int height)
+{
+	for (int y = 0; y < height; y++) {
+		uint32_t *row = (uint32_t *)((uint8_t *)buf + y * stride);
+		for (int x = 0; x < width; x++) {
+			uint32_t p = row[x];
+			uint32_t b = p & 0xFF;
+			uint32_t g = (p >> 8) & 0xFF;
+			uint32_t r = (p >> 16) & 0xFF;
+			row[x] = (3u << 30) | (r << 22) | (g << 12) | (b << 2);
+		}
+	}
+}
+
 /* ================================================================
  *  Frame Conversion
  * ================================================================ */
@@ -378,8 +385,6 @@ struct wlr_buffer *videoplayer_create_frame_buffer(VideoPlayer *vp, AVFrame *fra
     int height = frame->height;
     int is_hdr = vp->video.is_hdr && vp->hdr_lut;
     int output_10bit = vp->output_10bit;
-    int need_rgba64 = is_hdr || output_10bit;
-
     /* Output is always 32-bit packed (both ARGB8888 and ARGB2101010 are 4 bytes) */
     int stride = width * 4;
     size_t alloc_size = (size_t)height * stride;
@@ -420,8 +425,9 @@ struct wlr_buffer *videoplayer_create_frame_buffer(VideoPlayer *vp, AVFrame *fra
     if (src_fmt == AV_PIX_FMT_NONE)
         src_fmt = AV_PIX_FMT_YUV420P;
 
-    if (need_rgba64) {
-        /* ── High-precision path: YUV → RGBA64LE → pack to output ── */
+    if (is_hdr) {
+        /* ── HDR path: YUV → RGBA64LE → tonemap → output ──
+         * Needs 16-bit intermediate for accurate PQ/HLG tonemapping. */
         int rgba64_stride = width * 8;
         size_t rgba64_size = (size_t)height * rgba64_stride;
 
@@ -435,11 +441,11 @@ struct wlr_buffer *videoplayer_create_frame_buffer(VideoPlayer *vp, AVFrame *fra
             free(data); free(buf); return NULL;
         }
 
-        /* swscale to RGBA64LE — use fast flags for 4K+ resolution */
+        /* swscale to RGBA64LE with full-quality chroma upsampling */
         vp->sws_ctx = sws_getCachedContext(vp->sws_ctx,
             width, height, src_fmt,
             width, height, AV_PIX_FMT_RGBA64LE,
-            sws_flags_for_resolution(width, height), NULL, NULL, NULL);
+            SWS_QUALITY_FLAGS, NULL, NULL, NULL);
         if (!vp->sws_ctx) {
             free(data); free(buf); return NULL;
         }
@@ -453,23 +459,19 @@ struct wlr_buffer *videoplayer_create_frame_buffer(VideoPlayer *vp, AVFrame *fra
                   (const uint8_t *const *)frame->data, frame->linesize,
                   0, height, tmp_data, tmp_stride);
 
-        /* Apply tonemapping LUT and/or pack to output format */
-        if (is_hdr) {
-            tonemap_and_pack(vp->hdr_tmp_buffer, rgba64_stride,
-                             data, stride, width, height,
-                             vp->hdr_lut, output_10bit);
-        } else {
-            /* SDR on 10-bit display: just pack to 10-bit */
-            pack_rgba64_to_10bit(vp->hdr_tmp_buffer, rgba64_stride,
-                                  data, stride, width, height);
-        }
+        /* Apply tonemapping LUT and pack to output format */
+        tonemap_and_pack(vp->hdr_tmp_buffer, rgba64_stride,
+                         data, stride, width, height,
+                         vp->hdr_lut, output_10bit);
     } else {
-        /* ── Fast path: SDR → direct BGRA ── */
+        /* ── SDR path: direct BGRA conversion ──
+         * For 10-bit displays, convert to 8-bit BGRA first then pack
+         * in-place to ARGB2101010.  This avoids the RGBA64LE intermediate
+         * which costs ~200ms/frame at 4K (63MB per frame). */
         vp->sws_ctx = sws_getCachedContext(vp->sws_ctx,
             width, height, src_fmt,
             width, height, AV_PIX_FMT_BGRA,
-            (width >= 3840) ? SWS_FAST_BILINEAR : SWS_BILINEAR,
-            NULL, NULL, NULL);
+            SWS_BILINEAR, NULL, NULL, NULL);
         if (!vp->sws_ctx) {
             free(data); free(buf); return NULL;
         }
@@ -482,6 +484,10 @@ struct wlr_buffer *videoplayer_create_frame_buffer(VideoPlayer *vp, AVFrame *fra
         sws_scale(vp->sws_ctx,
                   (const uint8_t *const *)frame->data, frame->linesize,
                   0, height, dst_data, dst_linesize);
+
+        /* Pack BGRA → ARGB2101010 in-place for 10-bit output */
+        if (output_10bit)
+            pack_bgra_to_argb2101010_inplace(data, stride, width, height);
     }
 
     /* Create pixman image */
@@ -999,23 +1005,24 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
                         vp->audio.channels * sizeof(float) / 2;  /* 0.5 seconds */
         }
 
-        /* Adaptive buffer threshold: scale with resolution and server speed.
-         * At 4K, sws_scale takes ~20-40ms/frame (bilinear) so filling 12 frames
-         * would still take 240-480ms.  Use a smaller target for high-res to
-         * get playback started faster while decode fills the rest. */
+        /* Adaptive buffer threshold — balance startup speed vs smoothness.
+         * At 4K the BGRA path takes ~30-40ms/frame, so filling 12 frames
+         * would delay start by ~400ms.  Use 50% (8 frames ≈ 333ms of video
+         * at 24fps) which gives enough runway for decode to keep ahead.
+         * At HD, sws_scale is fast (~5ms/frame) so we can afford 75%. */
         int target_frames;
-        int is_4k = (vp->video.width >= 3840 || vp->video.height >= 2160);
+        int is_uhd = (vp->video.width >= 3840 || vp->video.height >= 2160);
         if (vp->position_us == 0) {
-            target_frames = is_4k
-                ? VP_FRAME_QUEUE_SIZE / 4              /* 4K initial: 25% (4 frames) */
+            target_frames = is_uhd
+                ? VP_FRAME_QUEUE_SIZE / 2              /* 4K initial: 50% (8 frames) */
                 : VP_FRAME_QUEUE_SIZE * 3 / 4;         /* HD initial: 75% (12 frames) */
         } else if (vp->server_slow) {
-            target_frames = is_4k
-                ? VP_FRAME_QUEUE_SIZE / 2              /* 4K slow: 50% */
+            target_frames = is_uhd
+                ? VP_FRAME_QUEUE_SIZE * 3 / 4          /* 4K slow: 75% (12 frames) */
                 : VP_FRAME_QUEUE_SIZE;                 /* HD slow: fill completely */
         } else {
-            target_frames = is_4k
-                ? VP_FRAME_QUEUE_SIZE / 4              /* 4K rebuffer: 25% */
+            target_frames = is_uhd
+                ? VP_FRAME_QUEUE_SIZE / 4              /* 4K rebuffer: 25% (4 frames) */
                 : VP_FRAME_QUEUE_SIZE / 2;             /* HD rebuffer: 50% */
         }
 
