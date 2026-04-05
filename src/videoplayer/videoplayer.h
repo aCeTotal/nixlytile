@@ -118,7 +118,7 @@ typedef struct SubtitleTrack {
 
 #define VP_FRAME_QUEUE_SIZE 16     /* Pre-converted BGRA buffers for smooth playback */
 #define VP_BUFFER_POOL_SIZE 20     /* Recycled pixel data buffers to avoid mmap/munmap */
-#define VP_PACKET_QUEUE_SIZE 512   /* Demuxed packets buffered between I/O and decode threads */
+#define VP_PACKET_QUEUE_SIZE 2048  /* Demuxed packets buffered between I/O and decode threads */
 
 typedef struct PacketQueueEntry {
     AVPacket *pkt;
@@ -459,6 +459,11 @@ typedef struct VideoPlayer {
     int debug_total_empty;                 /* Total queue-empty events since open */
     int debug_total_snaps;                 /* Total timing snap-forwards since open */
     volatile int debug_audio_underruns;    /* Audio buffer underruns in PipeWire on_process */
+
+    /* Server throughput detection */
+    volatile int server_slow;              /* 1 = server delivering data slowly */
+    volatile int64_t demux_bytes_per_sec;  /* Measured throughput from server (bytes/s) */
+    int empty_queue_count;                 /* Grace period counter for rebuffering */
 } VideoPlayer;
 
 /* ================================================================

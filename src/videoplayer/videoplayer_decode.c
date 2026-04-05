@@ -543,6 +543,9 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
          strstr(filepath, "://127.0.0.1") != NULL ||
          strstr(filepath, "://[::1]") != NULL);
     vp->is_local_file = !is_http;
+    vp->server_slow = 0;
+    vp->demux_bytes_per_sec = 0;
+    vp->empty_queue_count = 0;
 
     /* Open file - all HTTP streams (including localhost) get reconnect and
      * buffering options.  Localhost media servers (Jellyfin, Plex) can stall
@@ -553,7 +556,8 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
         av_dict_set(&opts, "reconnect", "1", 0);
         av_dict_set(&opts, "reconnect_streamed", "1", 0);
         av_dict_set(&opts, "reconnect_delay_max", "2", 0);
-        av_dict_set(&opts, "rw_timeout", "10000000", 0);  /* 10s I/O timeout */
+        av_dict_set(&opts, "rw_timeout", "30000000", 0);  /* 30s I/O timeout (slow/busy disks) */
+        av_dict_set(&opts, "buffer_size", "16777216", 0); /* 16MB I/O buffer */
         av_dict_set(&opts, "multiple_requests", "1", 0);  /* Reuse HTTP connection */
         fprintf(stderr, "[videoplayer] %s HTTP stream: enabling reconnect + buffering options\n",
                 is_localhost ? "Localhost" : "Remote");
@@ -1580,12 +1584,25 @@ static void packet_queue_flush_locked(VideoPlayer *vp)
  *  Demux Thread (I/O)
  * ================================================================ */
 
+static uint64_t demux_get_time_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
 static void *demux_thread_func(void *arg)
 {
     VideoPlayer *vp = arg;
     AVPacket *pkt = av_packet_alloc();
     int ret;
     int read_error_count = 0;
+
+    /* Throughput measurement state */
+    int64_t throughput_bytes = 0;
+    uint64_t throughput_window_start = demux_get_time_ns();
+    int slow_count = 0;
+    int fast_count = 0;
 
     if (!pkt) {
         fprintf(stderr, "[videoplayer] Demux: failed to allocate packet\n");
@@ -1680,6 +1697,37 @@ static void *demux_thread_func(void *arg)
         }
 
         read_error_count = 0;
+
+        /* Throughput measurement (HTTP streams only) */
+        if (!vp->is_local_file) {
+            throughput_bytes += pkt->size;
+            uint64_t now = demux_get_time_ns();
+            if (now - throughput_window_start > 2000000000ULL) {  /* 2s window */
+                int64_t bps = throughput_bytes * 1000000000LL / (int64_t)(now - throughput_window_start);
+                vp->demux_bytes_per_sec = bps;
+                int64_t needed_bps = vp->fmt_ctx->bit_rate > 0
+                    ? vp->fmt_ctx->bit_rate / 8 : 20000000; /* fallback 160Mbps */
+                if (bps < needed_bps * 3 / 2) {
+                    slow_count++;
+                    fast_count = 0;
+                    if (slow_count >= 3 && !vp->server_slow) {
+                        vp->server_slow = 1;
+                        fprintf(stderr, "[videoplayer] Server slow detected: %lld KB/s (need %lld KB/s)\n",
+                                (long long)bps/1024, (long long)needed_bps/1024);
+                    }
+                } else if (bps > needed_bps * 2) {
+                    fast_count++;
+                    slow_count = 0;
+                    if (fast_count >= 2 && vp->server_slow) {
+                        vp->server_slow = 0;
+                        fprintf(stderr, "[videoplayer] Server recovered: %lld KB/s\n",
+                                (long long)bps/1024);
+                    }
+                }
+                throughput_bytes = 0;
+                throughput_window_start = now;
+            }
+        }
 
         /* Put packet into queue for decode thread.
          * Returns -1 on shutdown OR seek request (to unblock the demux

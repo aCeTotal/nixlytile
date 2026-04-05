@@ -28,6 +28,7 @@
 #include "scanner.h"
 #include "config.h"
 #include "tmdb.h"
+#include <sys/syscall.h>
 #include "igdb.h"
 #include "watcher.h"
 #include "transcoder.h"
@@ -522,6 +523,17 @@ static void stream_file(int fd, const char *filepath, const char *range_header) 
         send_error(fd, 500, "Cannot open file");
         return;
     }
+
+    /* Aggressive sequential readahead — tells kernel to prefetch ~2MB+ ahead
+     * instead of default ~128KB.  Huge win for streaming large files from
+     * busy HDDs where seek latency dominates. */
+    posix_fadvise(file_fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+
+    /* Elevate this thread's I/O scheduling priority to best-effort class,
+     * highest priority (0).  Transcoding threads run at IOPRIO_CLASS_IDLE,
+     * so direct streaming always wins disk access. */
+    syscall(SYS_ioprio_set, 1 /*IOPRIO_WHO_PROCESS*/, 0 /*self*/,
+            (2 << 13) | 0 /*IOPRIO_CLASS_BE, prio 0*/);
 
     off_t start = 0;
     off_t end = st.st_size - 1;

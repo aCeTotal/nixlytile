@@ -1,291 +1,1139 @@
 # Nixlytile Video Player Debug Log
-# File: http://aceclan.no:8080/stream/9
+# File: http://aceclan.no:8080/stream/194
 # Video: 1920x1080 @ 23.976 fps, HW=1
 # Display: 300.18 Hz, frame_interval=41708332 ns, pacing_mode=3
-# Subtitles: 0 track(s), selected=-1, codec_ctx=(nil), ass_track=0x559770b0abc0, ass_renderer=0x559770e18d40
+# Subtitles: 9 track(s), selected=0, codec_ctx=0x5600493b1400, ass_track=0x5600493c2f80, ass_renderer=0x5600493b5f20
+#   sub[0]: stream=2 codec=hdmv_pgs_subtitle text=0 "English (SDH)" [eng] <-- ACTIVE
+#   sub[1]: stream=3 codec=hdmv_pgs_subtitle text=0 "German (SDH)" [ger]
+#   sub[2]: stream=4 codec=hdmv_pgs_subtitle text=0 "Spanish (Castilian)" [spa]
+#   sub[3]: stream=5 codec=hdmv_pgs_subtitle text=0 "Spanish (Latin American)" [spa]
+#   sub[4]: stream=6 codec=hdmv_pgs_subtitle text=0 "Portuguese (Brazilian)" [por]
+#   sub[5]: stream=7 codec=hdmv_pgs_subtitle text=0 "Danish" [dan]
+#   sub[6]: stream=8 codec=hdmv_pgs_subtitle text=0 "Finnish" [fin]
+#   sub[7]: stream=9 codec=hdmv_pgs_subtitle text=0 "Norwegian" [nor]
+#   sub[8]: stream=10 codec=hdmv_pgs_subtitle text=0 "Swedish" [swe]
 # frame | state  | q=queued | avsync | pos_ms | v=vsyncs | dt=actual/expected us
 # Display updated: 300.18 Hz, frame_interval=41708332 ns, pacing_mode=3
-     0 | BUFFER |  0/12 | audio=0/576000
-     1 | BUFFER |  0/12 | audio=0/576000
-     2 | BUFFER |  0/12 | audio=0/576000
-     3 | BUFFER |  0/12 | audio=0/576000
-     4 | BUFFER |  0/12 | audio=0/576000
-     5 | BUFFER |  0/12 | audio=0/576000
-     6 | BUFFER |  0/12 | audio=0/576000
-     7 | BUFFER |  0/12 | audio=0/576000
-     8 | BUFFER |  0/12 | audio=0/576000
-     9 | BUFFER |  0/12 | audio=0/576000
-    10 | BUFFER |  0/12 | audio=0/576000
-    11 | BUFFER |  0/12 | audio=0/576000
-    12 | BUFFER |  1/12 | audio=110592/576000
-    13 | BUFFER |  1/12 | audio=110592/576000
-    14 | BUFFER |  1/12 | audio=110592/576000
-    15 | BUFFER |  1/12 | audio=110592/576000
-    16 | BUFFER |  1/12 | audio=110592/576000
-    17 | BUFFER |  2/12 | audio=110592/576000
-    18 | BUFFER |  2/12 | audio=110592/576000
-    19 | BUFFER |  2/12 | audio=110592/576000
-    20 | BUFFER |  2/12 | audio=110592/576000
-    21 | BUFFER |  3/12 | audio=221184/576000
-    22 | BUFFER |  3/12 | audio=221184/576000
-    23 | BUFFER |  3/12 | audio=221184/576000
-    24 | BUFFER |  3/12 | audio=221184/576000
-    25 | BUFFER |  4/12 | audio=221184/576000
-    26 | BUFFER |  4/12 | audio=221184/576000
-    27 | BUFFER |  4/12 | audio=221184/576000
-    28 | BUFFER |  4/12 | audio=221184/576000
-    29 | BUFFER |  5/12 | audio=331776/576000
-    30 | BUFFER |  5/12 | audio=331776/576000
-    31 | BUFFER |  5/12 | audio=331776/576000
-    32 | BUFFER |  6/12 | audio=331776/576000
-    33 | BUFFER |  6/12 | audio=331776/576000
-    34 | BUFFER |  6/12 | audio=331776/576000
-    35 | BUFFER |  6/12 | audio=331776/576000
-    36 | BUFFER |  7/12 | audio=442368/576000
-    37 | BUFFER |  7/12 | audio=442368/576000
-    38 | BUFFER |  7/12 | audio=442368/576000
-    39 | BUFFER |  8/12 | audio=442368/576000
-    40 | BUFFER |  8/12 | audio=442368/576000
-    41 | BUFFER |  8/12 | audio=442368/576000
-    42 | BUFFER |  9/12 | audio=442368/576000
-    43 | BUFFER |  9/12 | audio=442368/576000
-    44 | BUFFER |  9/12 | audio=442368/576000
-    45 | BUFFER |  9/12 | audio=442368/576000
-    46 | BUFFER | 10/12 | audio=552960/576000
-    47 | BUFFER | 10/12 | audio=552960/576000
-    48 | BUFFER | 10/12 | audio=552960/576000
-    49 | BUFFER | 11/12 | audio=552960/576000
-    50 | BUFFER | 11/12 | audio=552960/576000
-    51 | BUFFER | 11/12 | audio=552960/576000
-    52 | BUFFER | 11/12 | audio=552960/576000
-    53 | BUFFER | 12/12 | audio=663552/576000
+     0 | BUFFER |  0/12 | audio=0/768000
+     1 | BUFFER |  0/12 | audio=0/768000
+     2 | BUFFER |  0/12 | audio=0/768000
+     3 | BUFFER |  0/12 | audio=131072/768000
+     4 | BUFFER |  0/12 | audio=131072/768000
+     5 | BUFFER |  0/12 | audio=131072/768000
+     6 | BUFFER |  0/12 | audio=131072/768000
+     7 | BUFFER |  1/12 | audio=131072/768000
+     8 | BUFFER |  1/12 | audio=131072/768000
+     9 | BUFFER |  1/12 | audio=131072/768000
+    10 | BUFFER |  1/12 | audio=131072/768000
+    11 | BUFFER |  2/12 | audio=245760/768000
+    12 | BUFFER |  2/12 | audio=262144/768000
+    13 | BUFFER |  2/12 | audio=262144/768000
+    14 | BUFFER |  2/12 | audio=262144/768000
+    15 | BUFFER |  3/12 | audio=262144/768000
+    16 | BUFFER |  3/12 | audio=262144/768000
+    17 | BUFFER |  3/12 | audio=262144/768000
+    18 | BUFFER |  3/12 | audio=262144/768000
+    19 | BUFFER |  4/12 | audio=393216/768000
+    20 | BUFFER |  4/12 | audio=393216/768000
+    21 | BUFFER |  4/12 | audio=393216/768000
+    22 | BUFFER |  5/12 | audio=393216/768000
+    23 | BUFFER |  5/12 | audio=393216/768000
+    24 | BUFFER |  5/12 | audio=393216/768000
+    25 | BUFFER |  5/12 | audio=393216/768000
+    26 | BUFFER |  6/12 | audio=475136/768000
+    27 | BUFFER |  6/12 | audio=524288/768000
+    28 | BUFFER |  6/12 | audio=524288/768000
+    29 | BUFFER |  6/12 | audio=524288/768000
+    30 | BUFFER |  7/12 | audio=524288/768000
+    31 | BUFFER |  7/12 | audio=524288/768000
+    32 | BUFFER |  7/12 | audio=524288/768000
+    33 | BUFFER |  7/12 | audio=524288/768000
+    34 | BUFFER |  8/12 | audio=655360/768000
+    35 | BUFFER |  8/12 | audio=655360/768000
+    36 | BUFFER |  8/12 | audio=655360/768000
+    37 | BUFFER |  9/12 | audio=655360/768000
+    38 | BUFFER |  9/12 | audio=655360/768000
+    39 | BUFFER |  9/12 | audio=655360/768000
+    40 | BUFFER |  9/12 | audio=655360/768000
+    41 | BUFFER | 10/12 | audio=786432/768000
+    42 | BUFFER | 10/12 | audio=786432/768000
+    43 | BUFFER | 10/12 | audio=786432/768000
+    44 | BUFFER | 10/12 | audio=786432/768000
+    45 | BUFFER | 11/12 | audio=786432/768000
+    46 | BUFFER | 11/12 | audio=786432/768000
+    47 | BUFFER | 11/12 | audio=786432/768000
+    48 | BUFFER | 12/12 | audio=917504/768000
 # PRESTART | audio pre-activated, waiting for PipeWire on_process
-    54 | BUFFER | 12/12 | audio=663552/576000
-    55 | BUFFER | 12/12 | audio=657408/576000
-    56 | PLAY   | q=11 | avsync=     +0 | pos=      0 | v= 1 | dt=    0/41708 us
-    64 | PLAY   | q=13 | avsync=     +0 | pos=     42 | v= 8 | dt=39937/41708 us
-    69 | PLAY   | q=15 | avsync=     +0 | pos=     83 | v= 5 | dt=46633/41708 us
-    73 | PLAY   | q=15 | avsync=  +5329 | pos=    125 | v= 4 | dt=36592/41708 us
-    79 | PLAY   | q=15 | avsync=   +679 | pos=    167 | v= 6 | dt=46601/41708 us
-    84 | PLAY   | q=15 | avsync=  +2674 | pos=    209 | v= 5 | dt=39960/41708 us
-    89 | PLAY   | q=15 | avsync=  +3715 | pos=    250 | v= 5 | dt=39922/41708 us
-    95 | PLAY   | q=15 | avsync=  +2463 | pos=    292 | v= 6 | dt=43208/41708 us
-   100 | PLAY   | q=15 | avsync=  +4485 | pos=    334 | v= 5 | dt=39939/41708 us
-   105 | PLAY   | q=15 | avsync=  +5533 | pos=    375 | v= 5 | dt=39934/41708 us
-   110 | PLAY   | q=15 | avsync=  +4152 | pos=    417 | v= 5 | dt=43302/41708 us
-   115 | PLAY   | q=15 | avsync=  +6202 | pos=    459 | v= 5 | dt=39913/41708 us
-   121 | PLAY   | q=15 | avsync=  +1656 | pos=    501 | v= 6 | dt=46589/41708 us
-   125 | PLAY   | q=15 | avsync=  +5964 | pos=    542 | v= 4 | dt=36596/41708 us
-   131 | PLAY   | q=15 | avsync=  +1336 | pos=    584 | v= 6 | dt=46583/41708 us
-   136 | PLAY   | q=15 | avsync=  +6670 | pos=    626 | v= 5 | dt=36623/41708 us
-   142 | PLAY   | q=15 | avsync=  +1071 | pos=    667 | v= 6 | dt=46570/41708 us
-   147 | PLAY   | q=15 | avsync=  +6395 | pos=    709 | v= 5 | dt=36607/41708 us
-   152 | PLAY   | q=15 | avsync=  +1747 | pos=    751 | v= 5 | dt=46588/41708 us
-   156 | PLAY   | q=15 | avsync=  +2759 | pos=    792 | v= 4 | dt=39945/41708 us
-   161 | PLAY   | q=15 | avsync=  +4810 | pos=    834 | v= 5 | dt=39908/41708 us
-   167 | PLAY   | q=15 | avsync=  +3420 | pos=    876 | v= 6 | dt=43358/41708 us
-   173 | PLAY   | q=15 | avsync=  +2208 | pos=    918 | v= 6 | dt=43176/41708 us
-   178 | PLAY   | q=15 | avsync=  +3258 | pos=    959 | v= 5 | dt=39940/41708 us
-   184 | PLAY   | q=15 | avsync=  +1893 | pos=   1001 | v= 6 | dt=43315/41708 us
-   190 | PLAY   | q=15 | avsync=   +564 | pos=   1043 | v= 6 | dt=43257/41708 us
-   195 | PLAY   | q=15 | avsync=  +1585 | pos=   1084 | v= 5 | dt=39937/41708 us
-   200 | PLAY   | q=15 | avsync=  +3603 | pos=   1126 | v= 5 | dt=39937/41708 us
-   205 | PLAY   | q=15 | avsync=  +2378 | pos=   1168 | v= 5 | dt=43224/41708 us
-   210 | PLAY   | q=15 | avsync=  +1066 | pos=   1210 | v= 5 | dt=43282/41708 us
-   215 | PLAY   | q=15 | avsync=  -1273 | pos=   1251 | v= 5 | dt=43289/41708 us
-   220 | PLAY   | q=15 | avsync=  -2558 | pos=   1293 | v= 5 | dt=43231/41708 us
-   224 | PLAY   | q=15 | avsync=  +2814 | pos=   1335 | v= 4 | dt=36621/41708 us
-   230 | PLAY   | q=15 | avsync=  -2793 | pos=   1376 | v= 6 | dt=46593/41708 us
-   235 | PLAY   | q=15 | avsync=  +2433 | pos=   1418 | v= 5 | dt=36646/41708 us
-   241 | PLAY   | q=15 | avsync=  -2154 | pos=   1460 | v= 6 | dt=46635/41708 us
-   246 | PLAY   | q=15 | avsync=   -113 | pos=   1502 | v= 5 | dt=39870/41708 us
-   252 | PLAY   | q=15 | avsync=  -2467 | pos=   1543 | v= 6 | dt=43267/41708 us
-   257 | PLAY   | q=15 | avsync=   -408 | pos=   1585 | v= 5 | dt=39907/41708 us
-   263 | PLAY   | q=15 | avsync=  -1682 | pos=   1627 | v= 6 | dt=43258/41708 us
-   268 | PLAY   | q=15 | avsync=  +2598 | pos=   1668 | v= 5 | dt=36655/41708 us
-   274 | PLAY   | q=15 | avsync=  -1996 | pos=   1710 | v= 6 | dt=46587/41708 us
-   279 | PLAY   | q=15 | avsync=  +3375 | pos=   1752 | v= 5 | dt=36583/41708 us
-   285 | PLAY   | q=15 | avsync=  +1035 | pos=   1793 | v= 6 | dt=43307/41708 us
-   290 | PLAY   | q=15 | avsync=  +3085 | pos=   1835 | v= 5 | dt=39876/41708 us
-   296 | PLAY   | q=15 | avsync=  +1757 | pos=   1877 | v= 6 | dt=43316/41708 us
-   301 | PLAY   | q=15 | avsync=   +433 | pos=   1919 | v= 5 | dt=43279/41708 us
-   306 | PLAY   | q=15 | avsync=  +1464 | pos=   1960 | v= 5 | dt=39905/41708 us
-   311 | PLAY   | q=15 | avsync=  +3501 | pos=   2002 | v= 5 | dt=39966/41708 us
-   317 | PLAY   | q=14 | avsync=  +2158 | pos=   2044 | v= 6 | dt=43283/41708 us
-   323 | PLAY   | q=13 | avsync=   -129 | pos=   2085 | v= 6 | dt=43216/41708 us
-   328 | PLAY   | q=12 | avsync=  -1445 | pos=   2127 | v= 5 | dt=43278/41708 us
-   333 | PLAY   | q=11 | avsync=  -2759 | pos=   2169 | v= 5 | dt=43269/41708 us
-   337 | PLAY   | q=10 | avsync=   -736 | pos=   2211 | v= 4 | dt=39938/41708 us
-   341 | PLAY   | q=10 | avsync=  -2987 | pos=   2252 | v= 4 | dt=43213/41708 us
-   345 | PLAY   | q=14 | avsync=   -996 | pos=   2294 | v= 4 | dt=39972/41708 us
-   351 | PLAY   | q=15 | avsync=  -5654 | pos=   2336 | v= 6 | dt=46645/41708 us
-   356 | PLAY   | q=15 | avsync=  -1309 | pos=   2377 | v= 5 | dt=36616/41708 us
-   361 | PLAY   | q=15 | avsync=  -2636 | pos=   2419 | v= 5 | dt=43263/41708 us
-   365 | PLAY   | q=15 | avsync=   -632 | pos=   2461 | v= 4 | dt=39961/41708 us
-   370 | PLAY   | q=15 | avsync=  -1845 | pos=   2503 | v= 5 | dt=43201/41708 us
-   374 | PLAY   | q=15 | avsync=  +2469 | pos=   2544 | v= 4 | dt=36678/41708 us
-   380 | PLAY   | q=15 | avsync=  -2172 | pos=   2586 | v= 6 | dt=46575/41708 us
-   385 | PLAY   | q=15 | avsync=   -141 | pos=   2628 | v= 5 | dt=39932/41708 us
-   390 | PLAY   | q=14 | avsync=   +894 | pos=   2669 | v= 5 | dt=39891/41708 us
-   395 | PLAY   | q=13 | avsync=  +2932 | pos=   2711 | v= 5 | dt=39961/41708 us
-   400 | PLAY   | q=12 | avsync=  +1518 | pos=   2753 | v= 5 | dt=43343/41708 us
-   405 | PLAY   | q=11 | avsync=  +2603 | pos=   2794 | v= 5 | dt=39878/41708 us
-   410 | PLAY   | q=10 | avsync=  +1302 | pos=   2836 | v= 5 | dt=43259/41708 us
-   415 | PLAY   | q= 9 | avsync=  +3377 | pos=   2878 | v= 5 | dt=39957/41708 us
-   417 | PLAY   | q= 8 | avsync=  -4637 | pos=   2920 | v= 2 | dt=49933/41708 us
-   421 | PLAY   | q= 7 | avsync=  +3029 | pos=   2961 | v= 4 | dt=33282/41708 us
-   427 | PLAY   | q= 6 | avsync=  -1611 | pos=   3003 | v= 6 | dt=46589/41708 us
-   432 | PLAY   | q= 5 | avsync=   +427 | pos=   3045 | v= 5 | dt=39926/41708 us
-   436 | PLAY   | q= 6 | avsync=  +1517 | pos=   3086 | v= 4 | dt=39907/41708 us
-   442 | PLAY   | q=10 | avsync=  -3131 | pos=   3128 | v= 6 | dt=46684/41708 us
-   447 | PLAY   | q=11 | avsync=  -1152 | pos=   3170 | v= 5 | dt=39913/41708 us
-   453 | PLAY   | q=10 | avsync=  -2464 | pos=   3212 | v= 6 | dt=43242/41708 us
-   458 | PLAY   | q=10 | avsync=  -1411 | pos=   3253 | v= 5 | dt=39908/41708 us
-   464 | PLAY   | q=11 | avsync=  -2763 | pos=   3295 | v= 6 | dt=43313/41708 us
-   468 | PLAY   | q=10 | avsync=  +2609 | pos=   3337 | v= 4 | dt=36594/41708 us
-   474 | PLAY   | q=10 | avsync=  -3029 | pos=   3378 | v= 6 | dt=46603/41708 us
-   478 | PLAY   | q=11 | avsync=  -1067 | pos=   3420 | v= 4 | dt=40029/41708 us
-   483 | PLAY   | q=10 | avsync=  +1045 | pos=   3462 | v= 5 | dt=39886/41708 us
-   487 | PLAY   | q= 9 | avsync=  +2965 | pos=   3504 | v= 4 | dt=39978/41708 us
-   491 | PLAY   | q= 8 | avsync=   +686 | pos=   3545 | v= 4 | dt=43271/41708 us
-   496 | PLAY   | q= 7 | avsync=  +2775 | pos=   3587 | v= 5 | dt=39865/41708 us
-   502 | PLAY   | q= 6 | avsync=  -1865 | pos=   3629 | v= 6 | dt=46616/41708 us
-   506 | PLAY   | q= 5 | avsync=   -839 | pos=   3670 | v= 4 | dt=39954/41708 us
-   510 | PLAY   | q= 4 | avsync=  -2239 | pos=   3712 | v= 4 | dt=43313/41708 us
-   514 | PLAY   | q= 3 | avsync=  +3179 | pos=   3754 | v= 4 | dt=36550/41708 us
-   519 | PLAY   | q= 4 | avsync=  -2470 | pos=   3795 | v= 5 | dt=46639/41708 us
-   523 | PLAY   | q= 3 | avsync=  +2949 | pos=   3837 | v= 4 | dt=36561/41708 us
-   529 | PLAY   | q= 2 | avsync=  +1607 | pos=   3879 | v= 6 | dt=43300/41708 us
-   534 | PLAY   | q= 1 | avsync=  +3601 | pos=   3921 | v= 5 | dt=39974/41708 us
-   540 | PLAY   | q= 0 | avsync=  -2042 | pos=   3962 | v= 6 | dt=46583/41708 us
-# REBUFFER | queue empty, transitioning to BUFFERING
-   541 | BUFFER |  0/12 | audio=0/576000
-   542 | BUFFER |  0/12 | audio=0/576000
-   543 | BUFFER |  0/12 | audio=0/576000
-   544 | BUFFER |  0/12 | audio=0/576000
-   545 | BUFFER |  0/12 | audio=0/576000
-   546 | BUFFER |  0/12 | audio=0/576000
-   547 | BUFFER |  0/12 | audio=0/576000
-   548 | BUFFER |  0/12 | audio=0/576000
-   549 | BUFFER |  0/12 | audio=0/576000
-   550 | BUFFER |  0/12 | audio=0/576000
-   551 | BUFFER |  0/12 | audio=0/576000
-   552 | BUFFER |  0/12 | audio=0/576000
-   553 | BUFFER |  0/12 | audio=0/576000
-   554 | BUFFER |  0/12 | audio=0/576000
-   555 | BUFFER |  0/12 | audio=0/576000
-   556 | BUFFER |  0/12 | audio=0/576000
-   557 | BUFFER |  0/12 | audio=0/576000
-   558 | BUFFER |  0/12 | audio=0/576000
-   559 | BUFFER |  0/12 | audio=0/576000
-   560 | BUFFER |  0/12 | audio=0/576000
-   561 | BUFFER |  0/12 | audio=0/576000
-   562 | BUFFER |  0/12 | audio=0/576000
-   563 | BUFFER |  0/12 | audio=0/576000
-   564 | BUFFER |  0/12 | audio=0/576000
-   565 | BUFFER |  0/12 | audio=0/576000
-   566 | BUFFER |  0/12 | audio=0/576000
-   567 | BUFFER |  0/12 | audio=0/576000
-   568 | BUFFER |  0/12 | audio=0/576000
-   569 | BUFFER |  0/12 | audio=0/576000
-   570 | BUFFER |  0/12 | audio=0/576000
-   571 | BUFFER |  0/12 | audio=0/576000
-   572 | BUFFER |  0/12 | audio=0/576000
-   573 | BUFFER |  0/12 | audio=0/576000
-   574 | BUFFER |  0/12 | audio=0/576000
-   575 | BUFFER |  0/12 | audio=0/576000
-   576 | BUFFER |  0/12 | audio=0/576000
-   577 | BUFFER |  0/12 | audio=0/576000
-   578 | BUFFER |  0/12 | audio=0/576000
-   579 | BUFFER |  0/12 | audio=0/576000
-   580 | BUFFER |  0/12 | audio=0/576000
-   581 | BUFFER |  0/12 | audio=0/576000
-   582 | BUFFER |  0/12 | audio=0/576000
-   583 | BUFFER |  0/12 | audio=0/576000
-   584 | BUFFER |  0/12 | audio=0/576000
-   585 | BUFFER |  0/12 | audio=0/576000
-   586 | BUFFER |  0/12 | audio=0/576000
-   587 | BUFFER |  0/12 | audio=0/576000
-   588 | BUFFER |  0/12 | audio=0/576000
-   589 | BUFFER |  0/12 | audio=0/576000
-   590 | BUFFER |  0/12 | audio=0/576000
-   591 | BUFFER |  0/12 | audio=0/576000
-   592 | BUFFER |  0/12 | audio=0/576000
-   593 | BUFFER |  0/12 | audio=0/576000
-   594 | BUFFER |  0/12 | audio=0/576000
-   595 | BUFFER |  0/12 | audio=0/576000
-   596 | BUFFER |  0/12 | audio=0/576000
-   597 | BUFFER |  0/12 | audio=0/576000
-   598 | BUFFER |  0/12 | audio=0/576000
-   599 | BUFFER |  0/12 | audio=0/576000
-   600 | BUFFER |  0/12 | audio=0/576000
-   601 | BUFFER |  0/12 | audio=0/576000
-   602 | BUFFER |  0/12 | audio=0/576000
-   603 | BUFFER |  0/12 | audio=0/576000
-   604 | BUFFER |  0/12 | audio=0/576000
-   605 | BUFFER |  0/12 | audio=0/576000
-   606 | BUFFER |  0/12 | audio=0/576000
-   607 | BUFFER |  0/12 | audio=0/576000
-   608 | BUFFER |  0/12 | audio=0/576000
-   609 | BUFFER |  0/12 | audio=0/576000
-   610 | BUFFER |  0/12 | audio=0/576000
-   611 | BUFFER |  0/12 | audio=0/576000
-   612 | BUFFER |  0/12 | audio=0/576000
-   613 | BUFFER |  0/12 | audio=0/576000
-   614 | BUFFER |  0/12 | audio=0/576000
-   615 | BUFFER |  0/12 | audio=0/576000
-   616 | BUFFER |  0/12 | audio=0/576000
-   617 | BUFFER |  0/12 | audio=0/576000
-   618 | BUFFER |  0/12 | audio=0/576000
-   619 | BUFFER |  0/12 | audio=0/576000
-   620 | BUFFER |  0/12 | audio=0/576000
-   621 | BUFFER |  0/12 | audio=0/576000
-   622 | BUFFER |  0/12 | audio=0/576000
-   623 | BUFFER |  0/12 | audio=0/576000
-   624 | BUFFER |  0/12 | audio=0/576000
-   625 | BUFFER |  0/12 | audio=0/576000
-   626 | BUFFER |  0/12 | audio=0/576000
-   627 | BUFFER |  0/12 | audio=0/576000
-   628 | BUFFER |  0/12 | audio=0/576000
-   629 | BUFFER |  0/12 | audio=0/576000
-   630 | BUFFER |  0/12 | audio=0/576000
-   631 | BUFFER |  0/12 | audio=0/576000
-   632 | BUFFER |  0/12 | audio=0/576000
-   633 | BUFFER |  0/12 | audio=0/576000
-   634 | BUFFER |  0/12 | audio=0/576000
-   635 | BUFFER |  0/12 | audio=0/576000
-   636 | BUFFER |  0/12 | audio=0/576000
-   637 | BUFFER |  0/12 | audio=0/576000
-   638 | BUFFER |  0/12 | audio=0/576000
-   639 | BUFFER |  0/12 | audio=0/576000
-   640 | BUFFER |  0/12 | audio=0/576000
-   641 | BUFFER |  0/12 | audio=0/576000
-   642 | BUFFER |  0/12 | audio=0/576000
-   643 | BUFFER |  0/12 | audio=0/576000
-   644 | BUFFER |  0/12 | audio=0/576000
-   645 | BUFFER |  0/12 | audio=0/576000
-   646 | BUFFER |  0/12 | audio=0/576000
-   647 | BUFFER |  0/12 | audio=0/576000
-   648 | BUFFER |  0/12 | audio=0/576000
-   649 | BUFFER |  0/12 | audio=0/576000
-   650 | BUFFER |  0/12 | audio=0/576000
-   651 | BUFFER |  0/12 | audio=0/576000
-   652 | BUFFER |  0/12 | audio=0/576000
-   653 | BUFFER |  0/12 | audio=0/576000
-   654 | BUFFER |  0/12 | audio=0/576000
-   655 | BUFFER |  0/12 | audio=0/576000
-   656 | BUFFER |  0/12 | audio=0/576000
-   657 | BUFFER |  0/12 | audio=0/576000
-   658 | BUFFER |  0/12 | audio=0/576000
-   659 | BUFFER |  0/12 | audio=0/576000
-   660 | BUFFER |  0/12 | audio=0/576000
-   661 | BUFFER |  0/12 | audio=0/576000
-   662 | BUFFER |  0/12 | audio=0/576000
-   663 | BUFFER |  0/12 | audio=0/576000
-   664 | BUFFER |  0/12 | audio=0/576000
-   665 | BUFFER |  0/12 | audio=0/576000
-   666 | BUFFER |  0/12 | audio=0/576000
-   667 | BUFFER |  0/12 | audio=0/576000
-   668 | BUFFER |  0/12 | audio=0/576000
-   669 | BUFFER |  0/12 | audio=0/576000
-# Closed after 670 frames | skips=0 empty=0 snaps=0 underruns=0
+    49 | BUFFER | 12/12 | audio=917504/768000
+    50 | BUFFER | 12/12 | audio=917504/768000
+    51 | BUFFER | 12/12 | audio=917504/768000
+    52 | BUFFER | 13/12 | audio=917504/768000
+    53 | BUFFER | 13/12 | audio=917504/768000
+    54 | BUFFER | 13/12 | audio=917504/768000
+    55 | BUFFER | 13/12 | audio=917504/768000
+    56 | BUFFER | 14/12 | audio=1048576/768000
+    57 | BUFFER | 14/12 | audio=1048576/768000
+    58 | BUFFER | 14/12 | audio=1048576/768000
+    59 | BUFFER | 14/12 | audio=1048576/768000
+    60 | BUFFER | 15/12 | audio=1048576/768000
+    61 | BUFFER | 15/12 | audio=1048576/768000
+    62 | BUFFER | 15/12 | audio=1048576/768000
+    63 | BUFFER | 15/12 | audio=1048576/768000
+    64 | BUFFER | 16/12 | audio=1179648/768000
+    65 | BUFFER | 16/12 | audio=1179648/768000
+    66 | BUFFER | 16/12 | audio=1179648/768000
+    67 | BUFFER | 16/12 | audio=1179648/768000
+    68 | BUFFER | 16/12 | audio=1179648/768000
+    69 | BUFFER | 16/12 | audio=1175552/768000
+    70 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 1 | dt=    0/41708 us
+    80 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v=10 | dt=39976/41708 us
+    86 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 6 | dt=43263/41708 us
+    92 | PLAY   | q=15 | avsync= -43239 | pos=      0 | v= 6 | dt=43264/41708 us
+    98 | PLAY   | q=15 | avsync= -86565 | pos=      0 | v= 6 | dt=43276/41708 us
+   103 | PLAY   | q=15 | avsync=-123113 | pos=      0 | v= 5 | dt=36542/41708 us
+   112 | PLAY   | q=15 | avsync=-163086 | pos=      0 | v= 9 | dt=39985/41708 us
+   124 | PLAY   | q=15 | avsync=-203083 | pos=      0 | v=12 | dt=39969/41708 us
+   136 | PLAY   | q=15 | avsync=-243006 | pos=      0 | v=12 | dt=39881/41708 us
+   148 | PLAY   | q=15 | avsync=-282957 | pos=      0 | v=12 | dt=39933/41708 us
+   160 | PLAY   | q=15 | avsync=-322896 | pos=      0 | v=12 | dt=39946/41708 us
+   172 | PLAY   | q=15 | avsync=-362899 | pos=      0 | v=12 | dt=39951/41708 us
+   184 | PLAY   | q=15 | avsync=-402853 | pos=      0 | v=12 | dt=39899/41708 us
+   196 | PLAY   | q=15 | avsync=-442755 | pos=      0 | v=12 | dt=39899/41708 us
+   208 | PLAY   | q=15 | avsync=-482789 | pos=      0 | v=12 | dt=39983/41708 us
+   220 | PLAY   | q=15 | avsync=-522756 | pos=      0 | v=12 | dt=39942/41708 us
+   232 | PLAY   | q=15 | avsync=-562747 | pos=      0 | v=12 | dt=39962/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+   240 | PLAY   | q=15 | avsync=-562747 | pos=      0 | v= 8 | dt=26586/41708 us
+   249 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39945/41708 us
+   256 | PLAY   | q=15 | avsync= -46691 | pos=      0 | v= 7 | dt=46621/41708 us
+   261 | PLAY   | q=15 | avsync= -83276 | pos=      0 | v= 5 | dt=36552/41708 us
+   267 | PLAY   | q=15 | avsync=-126666 | pos=      0 | v= 6 | dt=43358/41708 us
+   278 | PLAY   | q=15 | avsync=-169887 | pos=      0 | v=11 | dt=43218/41708 us
+   291 | PLAY   | q=15 | avsync=-213204 | pos=      0 | v=13 | dt=43248/41708 us
+   304 | PLAY   | q=15 | avsync=-256505 | pos=      0 | v=13 | dt=43293/41708 us
+   317 | PLAY   | q=15 | avsync=-299842 | pos=      0 | v=13 | dt=43269/41708 us
+   330 | PLAY   | q=15 | avsync=-343094 | pos=      0 | v=13 | dt=43230/41708 us
+   343 | PLAY   | q=15 | avsync=-386385 | pos=      0 | v=13 | dt=43265/41708 us
+   356 | PLAY   | q=15 | avsync=-429697 | pos=      0 | v=13 | dt=43244/41708 us
+   369 | PLAY   | q=15 | avsync=-473001 | pos=      0 | v=13 | dt=43285/41708 us
+   382 | PLAY   | q=15 | avsync=-516286 | pos=      0 | v=13 | dt=43260/41708 us
+   395 | PLAY   | q=15 | avsync=-559554 | pos=      0 | v=13 | dt=43238/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+   403 | PLAY   | q=15 | avsync=-559554 | pos=      0 | v= 8 | dt=26623/41708 us
+   413 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v=10 | dt=39950/41708 us
+   420 | PLAY   | q=15 | avsync= -46663 | pos=      0 | v= 7 | dt=46635/41708 us
+   425 | PLAY   | q=15 | avsync= -83308 | pos=      0 | v= 5 | dt=36597/41708 us
+   431 | PLAY   | q=15 | avsync=-126584 | pos=      0 | v= 6 | dt=43223/41708 us
+   442 | PLAY   | q=15 | avsync=-169858 | pos=      0 | v=11 | dt=43253/41708 us
+   455 | PLAY   | q=15 | avsync=-213205 | pos=      0 | v=13 | dt=43287/41708 us
+   468 | PLAY   | q=15 | avsync=-256576 | pos=      0 | v=13 | dt=43286/41708 us
+   481 | PLAY   | q=15 | avsync=-299951 | pos=      0 | v=13 | dt=43323/41708 us
+   494 | PLAY   | q=15 | avsync=-343208 | pos=      0 | v=13 | dt=43228/41708 us
+   507 | PLAY   | q=15 | avsync=-386487 | pos=      0 | v=13 | dt=43242/41708 us
+   520 | PLAY   | q=15 | avsync=-429829 | pos=      0 | v=13 | dt=43267/41708 us
+   533 | PLAY   | q=15 | avsync=-473159 | pos=      0 | v=13 | dt=43278/41708 us
+   546 | PLAY   | q=15 | avsync=-516465 | pos=      0 | v=13 | dt=43258/41708 us
+   559 | PLAY   | q=15 | avsync=-559754 | pos=      0 | v=13 | dt=43266/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+   567 | PLAY   | q=15 | avsync=-559754 | pos=      0 | v= 8 | dt=26671/41708 us
+   576 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39847/41708 us
+   582 | PLAY   | q=15 | avsync= -46654 | pos=      0 | v= 6 | dt=46606/41708 us
+   587 | PLAY   | q=15 | avsync= -83292 | pos=      0 | v= 5 | dt=36659/41708 us
+   593 | PLAY   | q=15 | avsync=-126743 | pos=      0 | v= 6 | dt=43347/41708 us
+   604 | PLAY   | q=15 | avsync=-170028 | pos=      0 | v=11 | dt=43174/41708 us
+   617 | PLAY   | q=15 | avsync=-213319 | pos=      0 | v=13 | dt=43258/41708 us
+   630 | PLAY   | q=15 | avsync=-256607 | pos=      0 | v=13 | dt=43256/41708 us
+   643 | PLAY   | q=15 | avsync=-299963 | pos=      0 | v=13 | dt=43308/41708 us
+   656 | PLAY   | q=15 | avsync=-343242 | pos=      0 | v=13 | dt=43230/41708 us
+   669 | PLAY   | q=15 | avsync=-386585 | pos=      0 | v=13 | dt=43274/41708 us
+   682 | PLAY   | q=15 | avsync=-429912 | pos=      0 | v=13 | dt=43269/41708 us
+   695 | PLAY   | q=15 | avsync=-473229 | pos=      0 | v=13 | dt=43269/41708 us
+   708 | PLAY   | q=15 | avsync=-516513 | pos=      0 | v=13 | dt=43230/41708 us
+   721 | PLAY   | q=15 | avsync=-559924 | pos=      0 | v=13 | dt=43348/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+   729 | PLAY   | q=15 | avsync=-559924 | pos=      0 | v= 8 | dt=26547/41708 us
+   738 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39953/41708 us
+   745 | PLAY   | q=15 | avsync= -46618 | pos=      0 | v= 7 | dt=46596/41708 us
+   750 | PLAY   | q=15 | avsync= -83299 | pos=      0 | v= 5 | dt=36629/41708 us
+   756 | PLAY   | q=15 | avsync=-126651 | pos=      0 | v= 6 | dt=43288/41708 us
+   767 | PLAY   | q=15 | avsync=-169962 | pos=      0 | v=11 | dt=43262/41708 us
+   780 | PLAY   | q=15 | avsync=-213269 | pos=      0 | v=13 | dt=43230/41708 us
+   793 | PLAY   | q=15 | avsync=-256518 | pos=      0 | v=13 | dt=43254/41708 us
+   806 | PLAY   | q=15 | avsync=-299940 | pos=      0 | v=13 | dt=43318/41708 us
+   819 | PLAY   | q=15 | avsync=-343202 | pos=      0 | v=13 | dt=43252/41708 us
+   832 | PLAY   | q=15 | avsync=-386509 | pos=      0 | v=13 | dt=43246/41708 us
+   845 | PLAY   | q=15 | avsync=-429883 | pos=      0 | v=13 | dt=43283/41708 us
+   858 | PLAY   | q=15 | avsync=-473127 | pos=      0 | v=13 | dt=43258/41708 us
+   871 | PLAY   | q=15 | avsync=-516441 | pos=      0 | v=13 | dt=43254/41708 us
+   884 | PLAY   | q=15 | avsync=-559768 | pos=      0 | v=13 | dt=43255/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+   892 | PLAY   | q=15 | avsync=-559768 | pos=      0 | v= 8 | dt=26640/41708 us
+   902 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v=10 | dt=39940/41708 us
+   909 | PLAY   | q=15 | avsync= -46714 | pos=      0 | v= 7 | dt=46629/41708 us
+   914 | PLAY   | q=15 | avsync= -83330 | pos=      0 | v= 5 | dt=36598/41708 us
+   917 | PLAY   | q=15 | avsync=-126605 | pos=      0 | v= 3 | dt=43254/41708 us
+   928 | PLAY   | q=15 | avsync=-169931 | pos=      0 | v=11 | dt=43308/41708 us
+   941 | PLAY   | q=15 | avsync=-213283 | pos=      0 | v=13 | dt=43222/41708 us
+   954 | PLAY   | q=15 | avsync=-256524 | pos=      0 | v=13 | dt=43265/41708 us
+   967 | PLAY   | q=15 | avsync=-299874 | pos=      0 | v=13 | dt=43263/41708 us
+   980 | PLAY   | q=15 | avsync=-343144 | pos=      0 | v=13 | dt=43268/41708 us
+   993 | PLAY   | q=15 | avsync=-386449 | pos=      0 | v=13 | dt=43237/41708 us
+  1006 | PLAY   | q=15 | avsync=-429825 | pos=      0 | v=13 | dt=43317/41708 us
+  1019 | PLAY   | q=15 | avsync=-473095 | pos=      0 | v=13 | dt=43244/41708 us
+  1032 | PLAY   | q=15 | avsync=-516426 | pos=      0 | v=13 | dt=43278/41708 us
+  1045 | PLAY   | q=15 | avsync=-559727 | pos=      0 | v=13 | dt=43292/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  1052 | PLAY   | q=15 | avsync=-559727 | pos=      0 | v= 7 | dt=26604/41708 us
+  1062 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v=10 | dt=39947/41708 us
+  1069 | PLAY   | q=15 | avsync= -46628 | pos=      0 | v= 7 | dt=46588/41708 us
+  1074 | PLAY   | q=15 | avsync= -83246 | pos=      0 | v= 5 | dt=36601/41708 us
+  1080 | PLAY   | q=15 | avsync=-126632 | pos=      0 | v= 6 | dt=43303/41708 us
+  1091 | PLAY   | q=15 | avsync=-169895 | pos=      0 | v=11 | dt=43257/41708 us
+  1104 | PLAY   | q=15 | avsync=-213215 | pos=      0 | v=13 | dt=43256/41708 us
+  1117 | PLAY   | q=15 | avsync=-256493 | pos=      0 | v=13 | dt=43246/41708 us
+  1130 | PLAY   | q=15 | avsync=-299837 | pos=      0 | v=13 | dt=43268/41708 us
+  1143 | PLAY   | q=15 | avsync=-343125 | pos=      0 | v=13 | dt=43255/41708 us
+  1156 | PLAY   | q=15 | avsync=-386373 | pos=      0 | v=13 | dt=43278/41708 us
+  1169 | PLAY   | q=15 | avsync=-429723 | pos=      0 | v=13 | dt=43265/41708 us
+  1182 | PLAY   | q=15 | avsync=-473014 | pos=      0 | v=13 | dt=43281/41708 us
+  1195 | PLAY   | q=15 | avsync=-516322 | pos=      0 | v=13 | dt=43247/41708 us
+  1208 | PLAY   | q=15 | avsync=-559651 | pos=      0 | v=13 | dt=43271/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  1216 | PLAY   | q=15 | avsync=-559651 | pos=      0 | v= 8 | dt=26612/41708 us
+  1225 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39939/41708 us
+  1231 | PLAY   | q=15 | avsync= -43268 | pos=      0 | v= 6 | dt=43284/41708 us
+  1237 | PLAY   | q=15 | avsync= -86647 | pos=      0 | v= 6 | dt=43289/41708 us
+  1242 | PLAY   | q=15 | avsync=-126591 | pos=      0 | v= 5 | dt=39909/41708 us
+  1252 | PLAY   | q=15 | avsync=-169924 | pos=      0 | v=10 | dt=43288/41708 us
+  1265 | PLAY   | q=15 | avsync=-213184 | pos=      0 | v=13 | dt=43212/41708 us
+  1278 | PLAY   | q=15 | avsync=-256597 | pos=      0 | v=13 | dt=43349/41708 us
+  1291 | PLAY   | q=15 | avsync=-299902 | pos=      0 | v=13 | dt=43295/41708 us
+  1304 | PLAY   | q=15 | avsync=-343187 | pos=      0 | v=13 | dt=43244/41708 us
+  1317 | PLAY   | q=15 | avsync=-386489 | pos=      0 | v=13 | dt=43299/41708 us
+  1330 | PLAY   | q=15 | avsync=-429789 | pos=      0 | v=13 | dt=43223/41708 us
+  1343 | PLAY   | q=15 | avsync=-473086 | pos=      0 | v=13 | dt=43261/41708 us
+  1356 | PLAY   | q=15 | avsync=-516421 | pos=      0 | v=13 | dt=43269/41708 us
+  1369 | PLAY   | q=15 | avsync=-559767 | pos=      0 | v=13 | dt=43308/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  1378 | PLAY   | q=15 | avsync=-559767 | pos=      0 | v= 9 | dt=29959/41708 us
+  1387 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39901/41708 us
+  1393 | PLAY   | q=15 | avsync= -43320 | pos=      0 | v= 6 | dt=43312/41708 us
+  1399 | PLAY   | q=15 | avsync= -86630 | pos=      0 | v= 6 | dt=43280/41708 us
+  1405 | PLAY   | q=15 | avsync=-129890 | pos=      0 | v= 6 | dt=43267/41708 us
+  1415 | PLAY   | q=15 | avsync=-169880 | pos=      0 | v=10 | dt=39921/41708 us
+  1428 | PLAY   | q=15 | avsync=-213199 | pos=      0 | v=13 | dt=43261/41708 us
+  1441 | PLAY   | q=15 | avsync=-256495 | pos=      0 | v=13 | dt=43283/41708 us
+  1454 | PLAY   | q=15 | avsync=-299816 | pos=      0 | v=13 | dt=43255/41708 us
+  1467 | PLAY   | q=15 | avsync=-343111 | pos=      0 | v=13 | dt=43262/41708 us
+  1480 | PLAY   | q=15 | avsync=-386438 | pos=      0 | v=13 | dt=43281/41708 us
+  1493 | PLAY   | q=15 | avsync=-429745 | pos=      0 | v=13 | dt=43259/41708 us
+  1506 | PLAY   | q=15 | avsync=-473006 | pos=      0 | v=13 | dt=43276/41708 us
+  1519 | PLAY   | q=15 | avsync=-516350 | pos=      0 | v=13 | dt=43267/41708 us
+  1532 | PLAY   | q=15 | avsync=-559699 | pos=      0 | v=13 | dt=43276/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  1541 | PLAY   | q=15 | avsync=-559699 | pos=      0 | v= 9 | dt=29944/41708 us
+  1551 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v=10 | dt=39932/41708 us
+  1558 | PLAY   | q=15 | avsync= -46695 | pos=      0 | v= 7 | dt=46649/41708 us
+  1563 | PLAY   | q=15 | avsync= -83282 | pos=      0 | v= 5 | dt=36536/41708 us
+  1569 | PLAY   | q=15 | avsync=-126654 | pos=      0 | v= 6 | dt=43309/41708 us
+  1580 | PLAY   | q=15 | avsync=-169971 | pos=      0 | v=11 | dt=43283/41708 us
+  1593 | PLAY   | q=15 | avsync=-213156 | pos=      0 | v=13 | dt=43193/41708 us
+  1606 | PLAY   | q=15 | avsync=-256532 | pos=      0 | v=13 | dt=43312/41708 us
+  1619 | PLAY   | q=15 | avsync=-299863 | pos=      0 | v=13 | dt=43300/41708 us
+  1632 | PLAY   | q=15 | avsync=-343172 | pos=      0 | v=13 | dt=43291/41708 us
+  1645 | PLAY   | q=15 | avsync=-386521 | pos=      0 | v=13 | dt=43282/41708 us
+  1658 | PLAY   | q=15 | avsync=-429798 | pos=      0 | v=13 | dt=43235/41708 us
+  1671 | PLAY   | q=15 | avsync=-473073 | pos=      0 | v=13 | dt=43217/41708 us
+  1684 | PLAY   | q=15 | avsync=-516353 | pos=      0 | v=13 | dt=43313/41708 us
+  1697 | PLAY   | q=15 | avsync=-559695 | pos=      0 | v=13 | dt=43255/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  1705 | PLAY   | q=15 | avsync=-559695 | pos=      0 | v= 8 | dt=26627/41708 us
+  1714 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39929/41708 us
+  1720 | PLAY   | q=15 | avsync= -43303 | pos=      0 | v= 6 | dt=43322/41708 us
+  1726 | PLAY   | q=15 | avsync= -86614 | pos=      0 | v= 6 | dt=43243/41708 us
+  1732 | PLAY   | q=15 | avsync=-129958 | pos=      0 | v= 6 | dt=43288/41708 us
+  1742 | PLAY   | q=15 | avsync=-169889 | pos=      0 | v=10 | dt=39888/41708 us
+  1755 | PLAY   | q=15 | avsync=-213199 | pos=      0 | v=13 | dt=43297/41708 us
+  1768 | PLAY   | q=15 | avsync=-256512 | pos=      0 | v=13 | dt=43273/41708 us
+  1781 | PLAY   | q=15 | avsync=-299840 | pos=      0 | v=13 | dt=43264/41708 us
+  1794 | PLAY   | q=15 | avsync=-343121 | pos=      0 | v=13 | dt=43249/41708 us
+  1807 | PLAY   | q=15 | avsync=-386446 | pos=      0 | v=13 | dt=43280/41708 us
+  1820 | PLAY   | q=15 | avsync=-429678 | pos=      0 | v=13 | dt=43262/41708 us
+  1833 | PLAY   | q=15 | avsync=-473032 | pos=      0 | v=13 | dt=43276/41708 us
+  1846 | PLAY   | q=15 | avsync=-516340 | pos=      0 | v=13 | dt=43262/41708 us
+  1859 | PLAY   | q=15 | avsync=-559660 | pos=      0 | v=13 | dt=43259/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  1868 | PLAY   | q=15 | avsync=-559660 | pos=      0 | v= 9 | dt=29988/41708 us
+  1877 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39897/41708 us
+  1883 | PLAY   | q=15 | avsync= -43371 | pos=      0 | v= 6 | dt=43344/41708 us
+  1888 | PLAY   | q=15 | avsync= -83335 | pos=      0 | v= 5 | dt=39955/41708 us
+  1894 | PLAY   | q=15 | avsync=-129971 | pos=      0 | v= 6 | dt=46594/41708 us
+  1904 | PLAY   | q=15 | avsync=-169924 | pos=      0 | v=10 | dt=39910/41708 us
+  1917 | PLAY   | q=15 | avsync=-213231 | pos=      0 | v=13 | dt=43304/41708 us
+  1930 | PLAY   | q=15 | avsync=-256596 | pos=      0 | v=13 | dt=43294/41708 us
+  1943 | PLAY   | q=15 | avsync=-299837 | pos=      0 | v=13 | dt=43225/41708 us
+  1956 | PLAY   | q=15 | avsync=-343195 | pos=      0 | v=13 | dt=43296/41708 us
+  1969 | PLAY   | q=15 | avsync=-386472 | pos=      0 | v=13 | dt=43247/41708 us
+  1982 | PLAY   | q=15 | avsync=-429781 | pos=      0 | v=13 | dt=43300/41708 us
+  1995 | PLAY   | q=15 | avsync=-473065 | pos=      0 | v=13 | dt=43213/41708 us
+  2008 | PLAY   | q=15 | avsync=-516367 | pos=      0 | v=13 | dt=43297/41708 us
+  2021 | PLAY   | q=15 | avsync=-559726 | pos=      0 | v=13 | dt=43282/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  2029 | PLAY   | q=15 | avsync=-559726 | pos=      0 | v= 8 | dt=26616/41708 us
+  2038 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39951/41708 us
+  2044 | PLAY   | q=15 | avsync= -43285 | pos=      0 | v= 6 | dt=43276/41708 us
+  2050 | PLAY   | q=15 | avsync= -86551 | pos=      0 | v= 6 | dt=43252/41708 us
+  2056 | PLAY   | q=15 | avsync=-129800 | pos=      0 | v= 6 | dt=43333/41708 us
+  2066 | PLAY   | q=15 | avsync=-169862 | pos=      0 | v=10 | dt=39940/41708 us
+  2079 | PLAY   | q=15 | avsync=-213176 | pos=      0 | v=13 | dt=43218/41708 us
+  2092 | PLAY   | q=15 | avsync=-256515 | pos=      0 | v=13 | dt=43259/41708 us
+  2105 | PLAY   | q=15 | avsync=-299878 | pos=      0 | v=13 | dt=43343/41708 us
+  2118 | PLAY   | q=15 | avsync=-343143 | pos=      0 | v=13 | dt=43268/41708 us
+  2131 | PLAY   | q=15 | avsync=-386478 | pos=      0 | v=13 | dt=43271/41708 us
+  2144 | PLAY   | q=15 | avsync=-429646 | pos=      0 | v=13 | dt=43196/41708 us
+  2157 | PLAY   | q=15 | avsync=-473010 | pos=      0 | v=13 | dt=43262/41708 us
+  2170 | PLAY   | q=15 | avsync=-516314 | pos=      0 | v=13 | dt=43274/41708 us
+  2183 | PLAY   | q=15 | avsync=-559622 | pos=      0 | v=13 | dt=43269/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  2192 | PLAY   | q=15 | avsync=-559622 | pos=      0 | v= 9 | dt=29940/41708 us
+  2201 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39995/41708 us
+  2207 | PLAY   | q=15 | avsync= -43306 | pos=      0 | v= 6 | dt=43310/41708 us
+  2212 | PLAY   | q=15 | avsync= -83265 | pos=      0 | v= 5 | dt=39910/41708 us
+  2214 | PLAY   | q=15 | avsync=-125535 | pos=      0 | v= 2 | dt=42313/41708 us
+  2225 | PLAY   | q=15 | avsync=-169843 | pos=      0 | v=11 | dt=44196/41708 us
+  2238 | PLAY   | q=15 | avsync=-213232 | pos=      0 | v=13 | dt=43349/41708 us
+  2251 | PLAY   | q=15 | avsync=-256502 | pos=      0 | v=13 | dt=43247/41708 us
+  2264 | PLAY   | q=15 | avsync=-299798 | pos=      0 | v=13 | dt=43254/41708 us
+  2277 | PLAY   | q=15 | avsync=-343111 | pos=      0 | v=13 | dt=43261/41708 us
+  2290 | PLAY   | q=15 | avsync=-386426 | pos=      0 | v=13 | dt=43291/41708 us
+  2303 | PLAY   | q=15 | avsync=-429716 | pos=      0 | v=13 | dt=43271/41708 us
+  2316 | PLAY   | q=15 | avsync=-473044 | pos=      0 | v=13 | dt=43268/41708 us
+  2329 | PLAY   | q=15 | avsync=-516367 | pos=      0 | v=13 | dt=43303/41708 us
+  2342 | PLAY   | q=15 | avsync=-559693 | pos=      0 | v=13 | dt=43274/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  2350 | PLAY   | q=15 | avsync=-559693 | pos=      0 | v= 8 | dt=26604/41708 us
+  2360 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v=10 | dt=39948/41708 us
+  2367 | PLAY   | q=15 | avsync= -46695 | pos=      0 | v= 7 | dt=46612/41708 us
+  2372 | PLAY   | q=15 | avsync= -83305 | pos=      0 | v= 5 | dt=36599/41708 us
+  2378 | PLAY   | q=15 | avsync=-126663 | pos=      0 | v= 6 | dt=43295/41708 us
+  2389 | PLAY   | q=15 | avsync=-169923 | pos=      0 | v=11 | dt=43280/41708 us
+  2402 | PLAY   | q=15 | avsync=-213236 | pos=      0 | v=13 | dt=43249/41708 us
+  2415 | PLAY   | q=15 | avsync=-256536 | pos=      0 | v=13 | dt=43275/41708 us
+  2428 | PLAY   | q=15 | avsync=-299905 | pos=      0 | v=13 | dt=43287/41708 us
+  2441 | PLAY   | q=15 | avsync=-343193 | pos=      0 | v=13 | dt=43275/41708 us
+  2454 | PLAY   | q=15 | avsync=-386509 | pos=      0 | v=13 | dt=43261/41708 us
+  2467 | PLAY   | q=15 | avsync=-429747 | pos=      0 | v=13 | dt=43238/41708 us
+  2480 | PLAY   | q=15 | avsync=-473097 | pos=      0 | v=13 | dt=43300/41708 us
+  2493 | PLAY   | q=15 | avsync=-516393 | pos=      0 | v=13 | dt=43275/41708 us
+  2506 | PLAY   | q=15 | avsync=-559755 | pos=      0 | v=13 | dt=43273/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  2514 | PLAY   | q=15 | avsync=-559755 | pos=      0 | v= 8 | dt=26602/41708 us
+  2523 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39976/41708 us
+  2529 | PLAY   | q=15 | avsync= -43414 | pos=      0 | v= 6 | dt=43285/41708 us
+  2534 | PLAY   | q=15 | avsync= -83415 | pos=      0 | v= 5 | dt=39964/41708 us
+  2540 | PLAY   | q=15 | avsync=-126701 | pos=      0 | v= 6 | dt=43304/41708 us
+  2551 | PLAY   | q=15 | avsync=-169967 | pos=      0 | v=11 | dt=43205/41708 us
+  2564 | PLAY   | q=15 | avsync=-213334 | pos=      0 | v=13 | dt=43339/41708 us
+  2577 | PLAY   | q=15 | avsync=-256619 | pos=      0 | v=13 | dt=43237/41708 us
+  2590 | PLAY   | q=15 | avsync=-299934 | pos=      0 | v=13 | dt=43250/41708 us
+  2603 | PLAY   | q=15 | avsync=-343201 | pos=      0 | v=13 | dt=43280/41708 us
+  2616 | PLAY   | q=15 | avsync=-386600 | pos=      0 | v=13 | dt=43323/41708 us
+  2629 | PLAY   | q=15 | avsync=-429934 | pos=      0 | v=13 | dt=43277/41708 us
+  2642 | PLAY   | q=15 | avsync=-473238 | pos=      0 | v=13 | dt=43242/41708 us
+  2655 | PLAY   | q=15 | avsync=-516497 | pos=      0 | v=13 | dt=43249/41708 us
+  2668 | PLAY   | q=15 | avsync=-559775 | pos=      0 | v=13 | dt=43263/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  2676 | PLAY   | q=15 | avsync=-559775 | pos=      0 | v= 8 | dt=26700/41708 us
+  2685 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39936/41708 us
+  2691 | PLAY   | q=15 | avsync= -43337 | pos=      0 | v= 6 | dt=43229/41708 us
+  2696 | PLAY   | q=15 | avsync= -83324 | pos=      0 | v= 5 | dt=40009/41708 us
+  2702 | PLAY   | q=15 | avsync=-126629 | pos=      0 | v= 6 | dt=43187/41708 us
+  2714 | PLAY   | q=15 | avsync=-169877 | pos=      0 | v=12 | dt=43325/41708 us
+  2727 | PLAY   | q=15 | avsync=-213201 | pos=      0 | v=13 | dt=43235/41708 us
+  2740 | PLAY   | q=15 | avsync=-256461 | pos=      0 | v=13 | dt=43278/41708 us
+  2753 | PLAY   | q=15 | avsync=-299831 | pos=      0 | v=13 | dt=43274/41708 us
+  2766 | PLAY   | q=15 | avsync=-343205 | pos=      0 | v=13 | dt=43311/41708 us
+  2779 | PLAY   | q=15 | avsync=-386542 | pos=      0 | v=13 | dt=43327/41708 us
+  2792 | PLAY   | q=15 | avsync=-429798 | pos=      0 | v=13 | dt=43210/41708 us
+  2805 | PLAY   | q=15 | avsync=-473084 | pos=      0 | v=13 | dt=43205/41708 us
+  2818 | PLAY   | q=15 | avsync=-516441 | pos=      0 | v=13 | dt=43315/41708 us
+  2831 | PLAY   | q=15 | avsync=-559756 | pos=      0 | v=13 | dt=43302/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  2839 | PLAY   | q=15 | avsync=-559756 | pos=      0 | v= 8 | dt=26625/41708 us
+  2848 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39904/41708 us
+  2854 | PLAY   | q=15 | avsync= -43406 | pos=      0 | v= 6 | dt=43352/41708 us
+  2859 | PLAY   | q=15 | avsync= -83330 | pos=      0 | v= 5 | dt=39938/41708 us
+  2865 | PLAY   | q=15 | avsync=-130023 | pos=      0 | v= 6 | dt=46642/41708 us
+  2876 | PLAY   | q=15 | avsync=-170067 | pos=      0 | v=11 | dt=39950/41708 us
+  2889 | PLAY   | q=15 | avsync=-213374 | pos=      0 | v=13 | dt=43270/41708 us
+  2902 | PLAY   | q=15 | avsync=-256637 | pos=      0 | v=13 | dt=43224/41708 us
+  2915 | PLAY   | q=15 | avsync=-299995 | pos=      0 | v=13 | dt=43310/41708 us
+  2928 | PLAY   | q=15 | avsync=-343264 | pos=      0 | v=13 | dt=43282/41708 us
+  2941 | PLAY   | q=15 | avsync=-386556 | pos=      0 | v=13 | dt=43235/41708 us
+  2954 | PLAY   | q=15 | avsync=-429888 | pos=      0 | v=13 | dt=43293/41708 us
+  2967 | PLAY   | q=15 | avsync=-473121 | pos=      0 | v=13 | dt=43196/41708 us
+  2980 | PLAY   | q=15 | avsync=-516487 | pos=      0 | v=13 | dt=43348/41708 us
+  2993 | PLAY   | q=15 | avsync=-559760 | pos=      0 | v=13 | dt=43262/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  3001 | PLAY   | q=15 | avsync=-559760 | pos=      0 | v= 8 | dt=26621/41708 us
+  3010 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39924/41708 us
+  3016 | PLAY   | q=15 | avsync= -43320 | pos=      0 | v= 6 | dt=43291/41708 us
+  3022 | PLAY   | q=15 | avsync= -86726 | pos=      0 | v= 6 | dt=43319/41708 us
+  3028 | PLAY   | q=15 | avsync=-130009 | pos=      0 | v= 6 | dt=43254/41708 us
+  3038 | PLAY   | q=15 | avsync=-169990 | pos=      0 | v=10 | dt=39939/41708 us
+  3051 | PLAY   | q=15 | avsync=-213189 | pos=      0 | v=13 | dt=43213/41708 us
+  3064 | PLAY   | q=15 | avsync=-256569 | pos=      0 | v=13 | dt=43293/41708 us
+  3077 | PLAY   | q=15 | avsync=-299846 | pos=      0 | v=13 | dt=43286/41708 us
+  3090 | PLAY   | q=15 | avsync=-343220 | pos=      0 | v=13 | dt=43267/41708 us
+  3103 | PLAY   | q=15 | avsync=-386502 | pos=      0 | v=13 | dt=43239/41708 us
+  3116 | PLAY   | q=15 | avsync=-429778 | pos=      0 | v=13 | dt=43273/41708 us
+  3129 | PLAY   | q=15 | avsync=-473161 | pos=      0 | v=13 | dt=43309/41708 us
+  3142 | PLAY   | q=15 | avsync=-516435 | pos=      0 | v=13 | dt=43272/41708 us
+  3155 | PLAY   | q=15 | avsync=-559730 | pos=      0 | v=13 | dt=43284/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  3164 | PLAY   | q=15 | avsync=-559730 | pos=      0 | v= 9 | dt=29952/41708 us
+  3173 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39915/41708 us
+  3179 | PLAY   | q=15 | avsync= -43360 | pos=      0 | v= 6 | dt=43316/41708 us
+  3184 | PLAY   | q=15 | avsync= -83332 | pos=      0 | v= 5 | dt=39947/41708 us
+  3190 | PLAY   | q=15 | avsync=-129981 | pos=      0 | v= 6 | dt=46606/41708 us
+  3201 | PLAY   | q=15 | avsync=-169937 | pos=      0 | v=11 | dt=39970/41708 us
+  3214 | PLAY   | q=15 | avsync=-213267 | pos=      0 | v=13 | dt=43243/41708 us
+  3227 | PLAY   | q=15 | avsync=-256640 | pos=      0 | v=13 | dt=43332/41708 us
+  3240 | PLAY   | q=15 | avsync=-299900 | pos=      0 | v=13 | dt=43232/41708 us
+  3253 | PLAY   | q=15 | avsync=-343221 | pos=      0 | v=13 | dt=43315/41708 us
+  3272 | PLAY   | q=15 | avsync=-385820 | pos=      0 | v=19 | dt=42613/41708 us
+  3286 | PLAY   | q=15 | avsync=-439805 | pos=      0 | v=14 | dt=53886/41708 us
+  3296 | PLAY   | q=15 | avsync=-473103 | pos=      0 | v=10 | dt=33242/41708 us
+  3309 | PLAY   | q=15 | avsync=-516408 | pos=      0 | v=13 | dt=43274/41708 us
+  3322 | PLAY   | q=15 | avsync=-559751 | pos=      0 | v=13 | dt=43313/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  3330 | PLAY   | q=15 | avsync=-559751 | pos=      0 | v= 8 | dt=26634/41708 us
+  3339 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39941/41708 us
+  3345 | PLAY   | q=15 | avsync= -43291 | pos=      0 | v= 6 | dt=43257/41708 us
+  3350 | PLAY   | q=15 | avsync= -83306 | pos=      0 | v= 5 | dt=39981/41708 us
+  3356 | PLAY   | q=15 | avsync=-129937 | pos=      0 | v= 6 | dt=46602/41708 us
+  3366 | PLAY   | q=15 | avsync=-169842 | pos=      0 | v=10 | dt=39906/41708 us
+  3379 | PLAY   | q=15 | avsync=-213151 | pos=      0 | v=13 | dt=43278/41708 us
+  3392 | PLAY   | q=15 | avsync=-256503 | pos=      0 | v=13 | dt=43341/41708 us
+  3405 | PLAY   | q=15 | avsync=-299854 | pos=      0 | v=13 | dt=43261/41708 us
+  3418 | PLAY   | q=15 | avsync=-343149 | pos=      0 | v=13 | dt=43263/41708 us
+  3431 | PLAY   | q=15 | avsync=-386371 | pos=      0 | v=13 | dt=43280/41708 us
+  3444 | PLAY   | q=15 | avsync=-429694 | pos=      0 | v=13 | dt=43234/41708 us
+  3457 | PLAY   | q=15 | avsync=-473042 | pos=      0 | v=13 | dt=43281/41708 us
+  3470 | PLAY   | q=15 | avsync=-516345 | pos=      0 | v=13 | dt=43282/41708 us
+  3483 | PLAY   | q=15 | avsync=-559633 | pos=      0 | v=13 | dt=43272/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  3491 | PLAY   | q=15 | avsync=-559633 | pos=      0 | v= 8 | dt=26635/41708 us
+  3500 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39962/41708 us
+  3506 | PLAY   | q=15 | avsync= -43287 | pos=      0 | v= 6 | dt=43261/41708 us
+  3511 | PLAY   | q=15 | avsync= -83274 | pos=      0 | v= 5 | dt=39956/41708 us
+  3515 | PLAY   | q=15 | avsync=-148686 | pos=      0 | v= 4 | dt=65361/41708 us
+  3519 | PLAY   | q=15 | avsync=-169887 | pos=      0 | v= 4 | dt=21184/41708 us
+  3532 | PLAY   | q=15 | avsync=-213223 | pos=      0 | v=13 | dt=43334/41708 us
+  3545 | PLAY   | q=15 | avsync=-256535 | pos=      0 | v=13 | dt=43253/41708 us
+  3558 | PLAY   | q=15 | avsync=-299835 | pos=      0 | v=13 | dt=43261/41708 us
+  3571 | PLAY   | q=15 | avsync=-343091 | pos=      0 | v=13 | dt=43264/41708 us
+  3584 | PLAY   | q=15 | avsync=-386418 | pos=      0 | v=13 | dt=43302/41708 us
+  3597 | PLAY   | q=15 | avsync=-429772 | pos=      0 | v=13 | dt=43286/41708 us
+  3610 | PLAY   | q=15 | avsync=-473064 | pos=      0 | v=13 | dt=43288/41708 us
+  3623 | PLAY   | q=15 | avsync=-516383 | pos=      0 | v=13 | dt=43259/41708 us
+  3636 | PLAY   | q=15 | avsync=-559664 | pos=      0 | v=13 | dt=43246/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  3644 | PLAY   | q=15 | avsync=-559664 | pos=      0 | v= 8 | dt=26633/41708 us
+  3653 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39983/41708 us
+  3659 | PLAY   | q=15 | avsync= -43285 | pos=      0 | v= 6 | dt=43252/41708 us
+  3664 | PLAY   | q=15 | avsync= -83286 | pos=      0 | v= 5 | dt=39973/41708 us
+  3670 | PLAY   | q=15 | avsync=-129899 | pos=      0 | v= 6 | dt=46580/41708 us
+  3680 | PLAY   | q=15 | avsync=-169892 | pos=      0 | v=10 | dt=39969/41708 us
+  3693 | PLAY   | q=15 | avsync=-213209 | pos=      0 | v=13 | dt=43281/41708 us
+  3706 | PLAY   | q=15 | avsync=-256522 | pos=      0 | v=13 | dt=43284/41708 us
+  3719 | PLAY   | q=15 | avsync=-299849 | pos=      0 | v=13 | dt=43305/41708 us
+  3732 | PLAY   | q=15 | avsync=-343100 | pos=      0 | v=13 | dt=43206/41708 us
+  3745 | PLAY   | q=15 | avsync=-386427 | pos=      0 | v=13 | dt=43323/41708 us
+  3758 | PLAY   | q=15 | avsync=-429713 | pos=      0 | v=13 | dt=43235/41708 us
+  3771 | PLAY   | q=15 | avsync=-473059 | pos=      0 | v=13 | dt=43313/41708 us
+  3784 | PLAY   | q=15 | avsync=-516328 | pos=      0 | v=13 | dt=43262/41708 us
+  3797 | PLAY   | q=15 | avsync=-559642 | pos=      0 | v=13 | dt=43258/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  3805 | PLAY   | q=15 | avsync=-559642 | pos=      0 | v= 8 | dt=26628/41708 us
+  3814 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39948/41708 us
+  3820 | PLAY   | q=15 | avsync= -43282 | pos=      0 | v= 6 | dt=43291/41708 us
+  3825 | PLAY   | q=15 | avsync= -83302 | pos=      0 | v= 5 | dt=39947/41708 us
+  3831 | PLAY   | q=15 | avsync=-129947 | pos=      0 | v= 6 | dt=46617/41708 us
+  3841 | PLAY   | q=15 | avsync=-169908 | pos=      0 | v=10 | dt=39934/41708 us
+  3854 | PLAY   | q=15 | avsync=-213261 | pos=      0 | v=13 | dt=43315/41708 us
+  3867 | PLAY   | q=15 | avsync=-256579 | pos=      0 | v=13 | dt=43287/41708 us
+  3880 | PLAY   | q=15 | avsync=-299835 | pos=      0 | v=13 | dt=43227/41708 us
+  3893 | PLAY   | q=15 | avsync=-343142 | pos=      0 | v=13 | dt=43283/41708 us
+  3906 | PLAY   | q=15 | avsync=-386460 | pos=      0 | v=13 | dt=43312/41708 us
+  3919 | PLAY   | q=15 | avsync=-429745 | pos=      0 | v=13 | dt=43241/41708 us
+  3932 | PLAY   | q=15 | avsync=-473087 | pos=      0 | v=13 | dt=43289/41708 us
+  3945 | PLAY   | q=15 | avsync=-516371 | pos=      0 | v=13 | dt=43282/41708 us
+  3958 | PLAY   | q=15 | avsync=-559743 | pos=      0 | v=13 | dt=43307/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  3966 | PLAY   | q=15 | avsync=-559743 | pos=      0 | v= 8 | dt=26604/41708 us
+  3975 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39941/41708 us
+  3981 | PLAY   | q=15 | avsync= -43324 | pos=      0 | v= 6 | dt=43291/41708 us
+  3986 | PLAY   | q=15 | avsync= -83258 | pos=      0 | v= 5 | dt=39946/41708 us
+  3992 | PLAY   | q=15 | avsync=-129934 | pos=      0 | v= 6 | dt=46604/41708 us
+  4002 | PLAY   | q=15 | avsync=-169945 | pos=      0 | v=10 | dt=39979/41708 us
+  4015 | PLAY   | q=15 | avsync=-213213 | pos=      0 | v=13 | dt=43237/41708 us
+  4028 | PLAY   | q=15 | avsync=-256522 | pos=      0 | v=13 | dt=43286/41708 us
+  4041 | PLAY   | q=15 | avsync=-299871 | pos=      0 | v=13 | dt=43315/41708 us
+  4054 | PLAY   | q=15 | avsync=-343166 | pos=      0 | v=13 | dt=43270/41708 us
+  4067 | PLAY   | q=15 | avsync=-386474 | pos=      0 | v=13 | dt=43282/41708 us
+  4080 | PLAY   | q=15 | avsync=-429737 | pos=      0 | v=13 | dt=43270/41708 us
+  4093 | PLAY   | q=15 | avsync=-473043 | pos=      0 | v=13 | dt=43280/41708 us
+  4106 | PLAY   | q=15 | avsync=-516343 | pos=      0 | v=13 | dt=43252/41708 us
+  4119 | PLAY   | q=15 | avsync=-559665 | pos=      0 | v=13 | dt=43280/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  4127 | PLAY   | q=15 | avsync=-559665 | pos=      0 | v= 8 | dt=26625/41708 us
+  4136 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39999/41708 us
+  4142 | PLAY   | q=15 | avsync= -43267 | pos=      0 | v= 6 | dt=43275/41708 us
+  4147 | PLAY   | q=15 | avsync= -83228 | pos=      0 | v= 5 | dt=39917/41708 us
+  4153 | PLAY   | q=15 | avsync=-129905 | pos=      0 | v= 6 | dt=46648/41708 us
+  4164 | PLAY   | q=15 | avsync=-169825 | pos=      0 | v=11 | dt=39898/41708 us
+  4177 | PLAY   | q=15 | avsync=-213140 | pos=      0 | v=13 | dt=43287/41708 us
+  4190 | PLAY   | q=15 | avsync=-256427 | pos=      0 | v=13 | dt=43276/41708 us
+  4203 | PLAY   | q=15 | avsync=-299777 | pos=      0 | v=13 | dt=43310/41708 us
+  4216 | PLAY   | q=15 | avsync=-343042 | pos=      0 | v=13 | dt=43249/41708 us
+  4229 | PLAY   | q=15 | avsync=-386384 | pos=      0 | v=13 | dt=43329/41708 us
+  4242 | PLAY   | q=15 | avsync=-429649 | pos=      0 | v=13 | dt=43224/41708 us
+  4255 | PLAY   | q=15 | avsync=-472959 | pos=      0 | v=13 | dt=43282/41708 us
+  4268 | PLAY   | q=15 | avsync=-516293 | pos=      0 | v=13 | dt=43310/41708 us
+  4281 | PLAY   | q=15 | avsync=-559588 | pos=      0 | v=13 | dt=43284/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  4289 | PLAY   | q=15 | avsync=-559588 | pos=      0 | v= 8 | dt=26597/41708 us
+  4298 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39954/41708 us
+  4304 | PLAY   | q=15 | avsync= -43302 | pos=      0 | v= 6 | dt=43280/41708 us
+  4309 | PLAY   | q=15 | avsync= -83282 | pos=      0 | v= 5 | dt=39950/41708 us
+  4315 | PLAY   | q=15 | avsync=-129939 | pos=      0 | v= 6 | dt=46629/41708 us
+  4326 | PLAY   | q=15 | avsync=-169890 | pos=      0 | v=11 | dt=39924/41708 us
+  4339 | PLAY   | q=15 | avsync=-213211 | pos=      0 | v=13 | dt=43309/41708 us
+  4352 | PLAY   | q=15 | avsync=-256522 | pos=      0 | v=13 | dt=43270/41708 us
+  4365 | PLAY   | q=15 | avsync=-299823 | pos=      0 | v=13 | dt=43267/41708 us
+  4378 | PLAY   | q=15 | avsync=-343124 | pos=      0 | v=13 | dt=43275/41708 us
+  4391 | PLAY   | q=15 | avsync=-386457 | pos=      0 | v=13 | dt=43298/41708 us
+  4404 | PLAY   | q=15 | avsync=-429725 | pos=      0 | v=13 | dt=43259/41708 us
+  4417 | PLAY   | q=15 | avsync=-473082 | pos=      0 | v=13 | dt=43301/41708 us
+  4430 | PLAY   | q=15 | avsync=-516377 | pos=      0 | v=13 | dt=43275/41708 us
+  4443 | PLAY   | q=15 | avsync=-559684 | pos=      0 | v=13 | dt=43276/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  4451 | PLAY   | q=15 | avsync=-559684 | pos=      0 | v= 8 | dt=26624/41708 us
+  4460 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39965/41708 us
+  4466 | PLAY   | q=15 | avsync= -43299 | pos=      0 | v= 6 | dt=43264/41708 us
+  4471 | PLAY   | q=15 | avsync= -83299 | pos=      0 | v= 5 | dt=39986/41708 us
+  4477 | PLAY   | q=15 | avsync=-129840 | pos=      0 | v= 6 | dt=46583/41708 us
+  4487 | PLAY   | q=15 | avsync=-169883 | pos=      0 | v=10 | dt=39934/41708 us
+  4500 | PLAY   | q=15 | avsync=-213194 | pos=      0 | v=13 | dt=43284/41708 us
+  4513 | PLAY   | q=15 | avsync=-256505 | pos=      0 | v=13 | dt=43303/41708 us
+  4526 | PLAY   | q=15 | avsync=-299844 | pos=      0 | v=13 | dt=43290/41708 us
+  4539 | PLAY   | q=15 | avsync=-343187 | pos=      0 | v=13 | dt=43316/41708 us
+  4552 | PLAY   | q=15 | avsync=-386418 | pos=      0 | v=13 | dt=43212/41708 us
+  4565 | PLAY   | q=15 | avsync=-429716 | pos=      0 | v=13 | dt=43279/41708 us
+  4578 | PLAY   | q=15 | avsync=-473068 | pos=      0 | v=13 | dt=43316/41708 us
+  4591 | PLAY   | q=15 | avsync=-516348 | pos=      0 | v=13 | dt=43242/41708 us
+  4604 | PLAY   | q=15 | avsync=-559642 | pos=      0 | v=13 | dt=43281/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  4612 | PLAY   | q=15 | avsync=-559642 | pos=      0 | v= 8 | dt=26712/41708 us
+  4621 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39910/41708 us
+  4627 | PLAY   | q=15 | avsync= -43303 | pos=      0 | v= 6 | dt=43285/41708 us
+  4632 | PLAY   | q=15 | avsync= -83299 | pos=      0 | v= 5 | dt=39970/41708 us
+  4638 | PLAY   | q=15 | avsync=-129870 | pos=      0 | v= 6 | dt=46559/41708 us
+  4648 | PLAY   | q=15 | avsync=-169849 | pos=      0 | v=10 | dt=39946/41708 us
+  4661 | PLAY   | q=15 | avsync=-213160 | pos=      0 | v=13 | dt=43282/41708 us
+  4674 | PLAY   | q=15 | avsync=-256464 | pos=      0 | v=13 | dt=43274/41708 us
+  4687 | PLAY   | q=15 | avsync=-299779 | pos=      0 | v=13 | dt=43298/41708 us
+  4700 | PLAY   | q=15 | avsync=-343104 | pos=      0 | v=13 | dt=43299/41708 us
+  4713 | PLAY   | q=15 | avsync=-386398 | pos=      0 | v=13 | dt=43279/41708 us
+  4726 | PLAY   | q=15 | avsync=-429704 | pos=      0 | v=13 | dt=43282/41708 us
+  4739 | PLAY   | q=15 | avsync=-473023 | pos=      0 | v=13 | dt=43280/41708 us
+  4752 | PLAY   | q=15 | avsync=-516289 | pos=      0 | v=13 | dt=43246/41708 us
+  4765 | PLAY   | q=15 | avsync=-559581 | pos=      0 | v=13 | dt=43275/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  4773 | PLAY   | q=15 | avsync=-559581 | pos=      0 | v= 8 | dt=26669/41708 us
+  4782 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39919/41708 us
+  4788 | PLAY   | q=15 | avsync= -43369 | pos=      0 | v= 6 | dt=43351/41708 us
+  4793 | PLAY   | q=15 | avsync= -83313 | pos=      0 | v= 5 | dt=39889/41708 us
+  4799 | PLAY   | q=15 | avsync=-129943 | pos=      0 | v= 6 | dt=46611/41708 us
+  4801 | PLAY   | q=15 | avsync=-174123 | pos=      0 | v= 2 | dt=44137/41708 us
+  4813 | PLAY   | q=15 | avsync=-213228 | pos=      0 | v=12 | dt=39081/41708 us
+  4826 | PLAY   | q=15 | avsync=-256521 | pos=      0 | v=13 | dt=43284/41708 us
+  4839 | PLAY   | q=15 | avsync=-299851 | pos=      0 | v=13 | dt=43284/41708 us
+  4852 | PLAY   | q=15 | avsync=-343204 | pos=      0 | v=13 | dt=43316/41708 us
+  4865 | PLAY   | q=15 | avsync=-386459 | pos=      0 | v=13 | dt=43242/41708 us
+  4878 | PLAY   | q=15 | avsync=-429809 | pos=      0 | v=13 | dt=43316/41708 us
+  4891 | PLAY   | q=15 | avsync=-473114 | pos=      0 | v=13 | dt=43278/41708 us
+  4904 | PLAY   | q=15 | avsync=-516428 | pos=      0 | v=13 | dt=43281/41708 us
+  4917 | PLAY   | q=15 | avsync=-559673 | pos=      0 | v=13 | dt=43248/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  4925 | PLAY   | q=15 | avsync=-559673 | pos=      0 | v= 8 | dt=26649/41708 us
+  4934 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39980/41708 us
+  4940 | PLAY   | q=15 | avsync= -43271 | pos=      0 | v= 6 | dt=43251/41708 us
+  4945 | PLAY   | q=15 | avsync= -83242 | pos=      0 | v= 5 | dt=39948/41708 us
+  4951 | PLAY   | q=15 | avsync=-129888 | pos=      0 | v= 6 | dt=46608/41708 us
+  4961 | PLAY   | q=15 | avsync=-169922 | pos=      0 | v=10 | dt=40009/41708 us
+  4974 | PLAY   | q=15 | avsync=-213177 | pos=      0 | v=13 | dt=43235/41708 us
+  4987 | PLAY   | q=15 | avsync=-256469 | pos=      0 | v=13 | dt=43298/41708 us
+  5000 | PLAY   | q=15 | avsync=-299769 | pos=      0 | v=13 | dt=43251/41708 us
+  5013 | PLAY   | q=15 | avsync=-343142 | pos=      0 | v=13 | dt=43342/41708 us
+  5026 | PLAY   | q=15 | avsync=-386377 | pos=      0 | v=13 | dt=43217/41708 us
+  5039 | PLAY   | q=15 | avsync=-429720 | pos=      0 | v=13 | dt=43315/41708 us
+  5052 | PLAY   | q=15 | avsync=-473020 | pos=      0 | v=13 | dt=43280/41708 us
+  5065 | PLAY   | q=15 | avsync=-516345 | pos=      0 | v=13 | dt=43306/41708 us
+  5078 | PLAY   | q=15 | avsync=-559649 | pos=      0 | v=13 | dt=43284/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  5086 | PLAY   | q=15 | avsync=-559649 | pos=      0 | v= 8 | dt=26608/41708 us
+  5095 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39920/41708 us
+  5101 | PLAY   | q=15 | avsync= -43316 | pos=      0 | v= 6 | dt=43296/41708 us
+  5106 | PLAY   | q=15 | avsync= -83287 | pos=      0 | v= 5 | dt=39947/41708 us
+  5112 | PLAY   | q=15 | avsync=-129917 | pos=      0 | v= 6 | dt=46608/41708 us
+  5122 | PLAY   | q=15 | avsync=-169905 | pos=      0 | v=10 | dt=39960/41708 us
+  5135 | PLAY   | q=15 | avsync=-213199 | pos=      0 | v=13 | dt=43268/41708 us
+  5148 | PLAY   | q=15 | avsync=-256491 | pos=      0 | v=13 | dt=43288/41708 us
+  5151 | PLAY   | q=15 | avsync=-256491 | pos=      0 | v= 3 | dt=2108687/41708 us
+  5155 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 4 | dt=42139/41708 us
+  5160 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 5 | dt=43315/41708 us
+  5165 | PLAY   | q=15 | avsync= -39998 | pos=      0 | v= 5 | dt=39984/41708 us
+  5171 | PLAY   | q=15 | avsync= -86621 | pos=      0 | v= 6 | dt=46597/41708 us
+  5176 | PLAY   | q=15 | avsync=-126552 | pos=      0 | v= 5 | dt=39989/41708 us
+  5185 | PLAY   | q=15 | avsync=-163255 | pos=      0 | v= 9 | dt=36602/41708 us
+  5197 | PLAY   | q=15 | avsync=-203211 | pos=      0 | v=12 | dt=39930/41708 us
+  5209 | PLAY   | q=15 | avsync=-243217 | pos=      0 | v=12 | dt=39985/41708 us
+  5221 | PLAY   | q=15 | avsync=-283193 | pos=      0 | v=12 | dt=39949/41708 us
+  5233 | PLAY   | q=15 | avsync=-323107 | pos=      0 | v=12 | dt=39886/41708 us
+  5245 | PLAY   | q=15 | avsync=-363082 | pos=      0 | v=12 | dt=39951/41708 us
+  5257 | PLAY   | q=15 | avsync=-403046 | pos=      0 | v=12 | dt=39973/41708 us
+  5269 | PLAY   | q=15 | avsync=-443032 | pos=      0 | v=12 | dt=39929/41708 us
+  5281 | PLAY   | q=15 | avsync=-483040 | pos=      0 | v=12 | dt=39991/41708 us
+  5293 | PLAY   | q=15 | avsync=-523029 | pos=      0 | v=12 | dt=39956/41708 us
+  5305 | PLAY   | q=15 | avsync=-562964 | pos=      0 | v=12 | dt=39926/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  5313 | PLAY   | q=15 | avsync=-562964 | pos=      0 | v= 8 | dt=26668/41708 us
+  5321 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 8 | dt=39972/41708 us
+  5327 | PLAY   | q=15 | avsync= -43309 | pos=      0 | v= 6 | dt=43302/41708 us
+  5332 | PLAY   | q=15 | avsync= -86679 | pos=      0 | v= 5 | dt=43290/41708 us
+  5337 | PLAY   | q=15 | avsync=-126618 | pos=      0 | v= 5 | dt=39918/41708 us
+  5347 | PLAY   | q=15 | avsync=-169919 | pos=      0 | v=10 | dt=43277/41708 us
+  5360 | PLAY   | q=15 | avsync=-213279 | pos=      0 | v=13 | dt=43334/41708 us
+  5373 | PLAY   | q=15 | avsync=-256546 | pos=      0 | v=13 | dt=43249/41708 us
+  5386 | PLAY   | q=15 | avsync=-299761 | pos=      0 | v=13 | dt=43230/41708 us
+  5399 | PLAY   | q=15 | avsync=-343087 | pos=      0 | v=13 | dt=43281/41708 us
+  5412 | PLAY   | q=15 | avsync=-386441 | pos=      0 | v=13 | dt=43320/41708 us
+  5425 | PLAY   | q=15 | avsync=-429704 | pos=      0 | v=13 | dt=43248/41708 us
+  5438 | PLAY   | q=15 | avsync=-473009 | pos=      0 | v=13 | dt=43283/41708 us
+  5451 | PLAY   | q=15 | avsync=-516305 | pos=      0 | v=13 | dt=43285/41708 us
+  5464 | PLAY   | q=15 | avsync=-559648 | pos=      0 | v=13 | dt=43319/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  5473 | PLAY   | q=15 | avsync=-559648 | pos=      0 | v= 9 | dt=29968/41708 us
+  5482 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39918/41708 us
+  5488 | PLAY   | q=15 | avsync= -43324 | pos=      0 | v= 6 | dt=43290/41708 us
+  5493 | PLAY   | q=15 | avsync= -83298 | pos=      0 | v= 5 | dt=39961/41708 us
+  5499 | PLAY   | q=15 | avsync=-129935 | pos=      0 | v= 6 | dt=46611/41708 us
+  5509 | PLAY   | q=15 | avsync=-169900 | pos=      0 | v=10 | dt=39941/41708 us
+  5522 | PLAY   | q=15 | avsync=-213205 | pos=      0 | v=13 | dt=43285/41708 us
+  5526 | PLAY   | q=15 | avsync=-256472 | pos=      0 | v= 4 | dt=43290/41708 us
+  5539 | PLAY   | q=15 | avsync=-299780 | pos=      0 | v=13 | dt=43277/41708 us
+  5552 | PLAY   | q=15 | avsync=-343142 | pos=      0 | v=13 | dt=43317/41708 us
+  5565 | PLAY   | q=15 | avsync=-386429 | pos=      0 | v=13 | dt=43252/41708 us
+  5578 | PLAY   | q=15 | avsync=-429754 | pos=      0 | v=13 | dt=43340/41708 us
+  5591 | PLAY   | q=15 | avsync=-473053 | pos=      0 | v=13 | dt=43230/41708 us
+  5604 | PLAY   | q=15 | avsync=-516360 | pos=      0 | v=13 | dt=43291/41708 us
+  5617 | PLAY   | q=15 | avsync=-559627 | pos=      0 | v=13 | dt=43274/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  5625 | PLAY   | q=15 | avsync=-559627 | pos=      0 | v= 8 | dt=26684/41708 us
+  5634 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39932/41708 us
+  5639 | PLAY   | q=15 | avsync= -43292 | pos=      0 | v= 5 | dt=43272/41708 us
+  5644 | PLAY   | q=15 | avsync= -83268 | pos=      0 | v= 5 | dt=39957/41708 us
+  5650 | PLAY   | q=15 | avsync=-129908 | pos=      0 | v= 6 | dt=46613/41708 us
+  5660 | PLAY   | q=15 | avsync=-169866 | pos=      0 | v=10 | dt=39941/41708 us
+  5673 | PLAY   | q=15 | avsync=-213188 | pos=      0 | v=13 | dt=43288/41708 us
+  5686 | PLAY   | q=15 | avsync=-256534 | pos=      0 | v=13 | dt=43315/41708 us
+  5699 | PLAY   | q=15 | avsync=-299788 | pos=      0 | v=13 | dt=43259/41708 us
+  5712 | PLAY   | q=15 | avsync=-343113 | pos=      0 | v=13 | dt=43276/41708 us
+  5725 | PLAY   | q=15 | avsync=-386408 | pos=      0 | v=13 | dt=43287/41708 us
+  5738 | PLAY   | q=15 | avsync=-429760 | pos=      0 | v=13 | dt=43315/41708 us
+  5751 | PLAY   | q=15 | avsync=-473074 | pos=      0 | v=13 | dt=43288/41708 us
+  5764 | PLAY   | q=15 | avsync=-516352 | pos=      0 | v=13 | dt=43250/41708 us
+  5777 | PLAY   | q=15 | avsync=-559678 | pos=      0 | v=13 | dt=43299/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  5785 | PLAY   | q=15 | avsync=-559678 | pos=      0 | v= 8 | dt=26618/41708 us
+  5794 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39960/41708 us
+  5800 | PLAY   | q=15 | avsync= -43346 | pos=      0 | v= 6 | dt=43324/41708 us
+  5805 | PLAY   | q=15 | avsync= -83292 | pos=      0 | v= 5 | dt=39928/41708 us
+  5811 | PLAY   | q=15 | avsync=-129898 | pos=      0 | v= 6 | dt=46615/41708 us
+  5821 | PLAY   | q=15 | avsync=-169903 | pos=      0 | v=10 | dt=39938/41708 us
+  5834 | PLAY   | q=15 | avsync=-213215 | pos=      0 | v=13 | dt=43287/41708 us
+  5847 | PLAY   | q=15 | avsync=-256510 | pos=      0 | v=13 | dt=43284/41708 us
+  5860 | PLAY   | q=15 | avsync=-299834 | pos=      0 | v=13 | dt=43287/41708 us
+  5873 | PLAY   | q=15 | avsync=-343127 | pos=      0 | v=13 | dt=43282/41708 us
+  5886 | PLAY   | q=15 | avsync=-386464 | pos=      0 | v=13 | dt=43310/41708 us
+  5899 | PLAY   | q=15 | avsync=-429740 | pos=      0 | v=13 | dt=43261/41708 us
+  5912 | PLAY   | q=15 | avsync=-473047 | pos=      0 | v=13 | dt=43285/41708 us
+  5925 | PLAY   | q=15 | avsync=-516371 | pos=      0 | v=13 | dt=43293/41708 us
+  5938 | PLAY   | q=15 | avsync=-559679 | pos=      0 | v=13 | dt=43279/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  5946 | PLAY   | q=15 | avsync=-559679 | pos=      0 | v= 8 | dt=26659/41708 us
+  5955 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39992/41708 us
+  5961 | PLAY   | q=15 | avsync= -43354 | pos=      0 | v= 6 | dt=43335/41708 us
+  5966 | PLAY   | q=15 | avsync= -83285 | pos=      0 | v= 5 | dt=39918/41708 us
+  5972 | PLAY   | q=15 | avsync=-129901 | pos=      0 | v= 6 | dt=46586/41708 us
+  5982 | PLAY   | q=15 | avsync=-169832 | pos=      0 | v=10 | dt=39910/41708 us
+  5995 | PLAY   | q=15 | avsync=-213152 | pos=      0 | v=13 | dt=43309/41708 us
+  6008 | PLAY   | q=15 | avsync=-256447 | pos=      0 | v=13 | dt=43263/41708 us
+  6021 | PLAY   | q=15 | avsync=-299809 | pos=      0 | v=13 | dt=43334/41708 us
+  6034 | PLAY   | q=15 | avsync=-343024 | pos=      0 | v=13 | dt=43234/41708 us
+  6047 | PLAY   | q=15 | avsync=-386369 | pos=      0 | v=13 | dt=43285/41708 us
+  6060 | PLAY   | q=15 | avsync=-429707 | pos=      0 | v=13 | dt=43315/41708 us
+  6073 | PLAY   | q=15 | avsync=-472976 | pos=      0 | v=13 | dt=43268/41708 us
+  6086 | PLAY   | q=15 | avsync=-516330 | pos=      0 | v=13 | dt=43312/41708 us
+  6099 | PLAY   | q=15 | avsync=-559595 | pos=      0 | v=13 | dt=43246/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  6107 | PLAY   | q=15 | avsync=-559595 | pos=      0 | v= 8 | dt=26690/41708 us
+  6116 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39950/41708 us
+  6122 | PLAY   | q=15 | avsync= -43310 | pos=      0 | v= 6 | dt=43290/41708 us
+  6127 | PLAY   | q=15 | avsync= -83233 | pos=      0 | v= 5 | dt=39938/41708 us
+  6133 | PLAY   | q=15 | avsync=-129875 | pos=      0 | v= 6 | dt=46596/41708 us
+  6143 | PLAY   | q=15 | avsync=-169851 | pos=      0 | v=10 | dt=39945/41708 us
+  6156 | PLAY   | q=15 | avsync=-213152 | pos=      0 | v=13 | dt=43285/41708 us
+  6169 | PLAY   | q=15 | avsync=-256458 | pos=      0 | v=13 | dt=43283/41708 us
+  6182 | PLAY   | q=15 | avsync=-299765 | pos=      0 | v=13 | dt=43286/41708 us
+  6195 | PLAY   | q=15 | avsync=-343063 | pos=      0 | v=13 | dt=43282/41708 us
+  6208 | PLAY   | q=15 | avsync=-386375 | pos=      0 | v=13 | dt=43291/41708 us
+  6221 | PLAY   | q=15 | avsync=-429714 | pos=      0 | v=13 | dt=43311/41708 us
+  6234 | PLAY   | q=15 | avsync=-473038 | pos=      0 | v=13 | dt=43307/41708 us
+  6247 | PLAY   | q=15 | avsync=-516319 | pos=      0 | v=13 | dt=43274/41708 us
+  6260 | PLAY   | q=15 | avsync=-559602 | pos=      0 | v=13 | dt=43245/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  6268 | PLAY   | q=15 | avsync=-559602 | pos=      0 | v= 8 | dt=26641/41708 us
+  6277 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39953/41708 us
+  6283 | PLAY   | q=15 | avsync= -43362 | pos=      0 | v= 6 | dt=43403/41708 us
+  6288 | PLAY   | q=15 | avsync= -83386 | pos=      0 | v= 5 | dt=39947/41708 us
+  6294 | PLAY   | q=15 | avsync=-130039 | pos=      0 | v= 6 | dt=46631/41708 us
+  6304 | PLAY   | q=15 | avsync=-169957 | pos=      0 | v=10 | dt=39901/41708 us
+  6317 | PLAY   | q=15 | avsync=-213235 | pos=      0 | v=13 | dt=43254/41708 us
+  6330 | PLAY   | q=15 | avsync=-256472 | pos=      0 | v=13 | dt=43255/41708 us
+  6343 | PLAY   | q=15 | avsync=-299812 | pos=      0 | v=13 | dt=43319/41708 us
+  6356 | PLAY   | q=15 | avsync=-343120 | pos=      0 | v=13 | dt=43253/41708 us
+  6369 | PLAY   | q=15 | avsync=-386420 | pos=      0 | v=13 | dt=43279/41708 us
+  6382 | PLAY   | q=15 | avsync=-429728 | pos=      0 | v=13 | dt=43287/41708 us
+  6395 | PLAY   | q=15 | avsync=-473028 | pos=      0 | v=13 | dt=43286/41708 us
+  6408 | PLAY   | q=15 | avsync=-516350 | pos=      0 | v=13 | dt=43306/41708 us
+  6421 | PLAY   | q=15 | avsync=-559686 | pos=      0 | v=13 | dt=43307/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  6429 | PLAY   | q=15 | avsync=-559686 | pos=      0 | v= 8 | dt=26600/41708 us
+  6438 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=40014/41708 us
+  6444 | PLAY   | q=15 | avsync= -43248 | pos=      0 | v= 6 | dt=43231/41708 us
+  6449 | PLAY   | q=15 | avsync= -83225 | pos=      0 | v= 5 | dt=39980/41708 us
+  6455 | PLAY   | q=15 | avsync=-129853 | pos=      0 | v= 6 | dt=46595/41708 us
+  6465 | PLAY   | q=15 | avsync=-169831 | pos=      0 | v=10 | dt=39949/41708 us
+  6478 | PLAY   | q=15 | avsync=-213137 | pos=      0 | v=13 | dt=43293/41708 us
+  6491 | PLAY   | q=15 | avsync=-256442 | pos=      0 | v=13 | dt=43290/41708 us
+  6504 | PLAY   | q=15 | avsync=-299734 | pos=      0 | v=13 | dt=43277/41708 us
+  6517 | PLAY   | q=15 | avsync=-343104 | pos=      0 | v=13 | dt=43342/41708 us
+  6530 | PLAY   | q=15 | avsync=-386349 | pos=      0 | v=13 | dt=43226/41708 us
+  6543 | PLAY   | q=15 | avsync=-429692 | pos=      0 | v=13 | dt=43326/41708 us
+  6556 | PLAY   | q=15 | avsync=-472890 | pos=      0 | v=13 | dt=43247/41708 us
+  6569 | PLAY   | q=15 | avsync=-516275 | pos=      0 | v=13 | dt=43312/41708 us
+  6582 | PLAY   | q=15 | avsync=-559550 | pos=      0 | v=13 | dt=43265/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  6590 | PLAY   | q=15 | avsync=-559550 | pos=      0 | v= 8 | dt=26633/41708 us
+  6599 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39956/41708 us
+  6605 | PLAY   | q=15 | avsync= -43314 | pos=      0 | v= 6 | dt=43297/41708 us
+  6610 | PLAY   | q=15 | avsync= -83288 | pos=      0 | v= 5 | dt=39961/41708 us
+  6616 | PLAY   | q=15 | avsync=-129946 | pos=      0 | v= 6 | dt=46632/41708 us
+  6626 | PLAY   | q=15 | avsync=-169883 | pos=      0 | v=10 | dt=39924/41708 us
+  6639 | PLAY   | q=15 | avsync=-213197 | pos=      0 | v=13 | dt=43326/41708 us
+  6652 | PLAY   | q=15 | avsync=-256500 | pos=      0 | v=13 | dt=43251/41708 us
+  6665 | PLAY   | q=15 | avsync=-299844 | pos=      0 | v=13 | dt=43361/41708 us
+  6678 | PLAY   | q=15 | avsync=-343084 | pos=      0 | v=13 | dt=43211/41708 us
+  6691 | PLAY   | q=15 | avsync=-386412 | pos=      0 | v=13 | dt=43292/41708 us
+  6704 | PLAY   | q=15 | avsync=-429710 | pos=      0 | v=13 | dt=43282/41708 us
+  6717 | PLAY   | q=15 | avsync=-473020 | pos=      0 | v=13 | dt=43287/41708 us
+  6730 | PLAY   | q=15 | avsync=-516318 | pos=      0 | v=13 | dt=43284/41708 us
+  6743 | PLAY   | q=15 | avsync=-559609 | pos=      0 | v=13 | dt=43284/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  6751 | PLAY   | q=15 | avsync=-559609 | pos=      0 | v= 8 | dt=26644/41708 us
+  6760 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39957/41708 us
+  6766 | PLAY   | q=15 | avsync= -43313 | pos=      0 | v= 6 | dt=43296/41708 us
+  6771 | PLAY   | q=15 | avsync= -83319 | pos=      0 | v= 5 | dt=39983/41708 us
+  6777 | PLAY   | q=15 | avsync=-129914 | pos=      0 | v= 6 | dt=46585/41708 us
+  6787 | PLAY   | q=15 | avsync=-169881 | pos=      0 | v=10 | dt=39958/41708 us
+  6800 | PLAY   | q=15 | avsync=-213192 | pos=      0 | v=13 | dt=43294/41708 us
+  6808 | PLAY   | q=15 | avsync=-272459 | pos=      0 | v= 8 | dt=59242/41708 us
+  6817 | PLAY   | q=15 | avsync=-299776 | pos=      0 | v= 9 | dt=27313/41708 us
+  6830 | PLAY   | q=15 | avsync=-343085 | pos=      0 | v=13 | dt=43291/41708 us
+  6843 | PLAY   | q=15 | avsync=-386378 | pos=      0 | v=13 | dt=43284/41708 us
+  6856 | PLAY   | q=15 | avsync=-429678 | pos=      0 | v=13 | dt=43289/41708 us
+  6869 | PLAY   | q=15 | avsync=-473021 | pos=      0 | v=13 | dt=43325/41708 us
+  6882 | PLAY   | q=15 | avsync=-516319 | pos=      0 | v=13 | dt=43281/41708 us
+  6895 | PLAY   | q=15 | avsync=-559658 | pos=      0 | v=13 | dt=43325/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  6903 | PLAY   | q=15 | avsync=-559658 | pos=      0 | v= 8 | dt=26644/41708 us
+  6912 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39911/41708 us
+  6918 | PLAY   | q=15 | avsync= -43271 | pos=      0 | v= 6 | dt=43276/41708 us
+  6923 | PLAY   | q=15 | avsync= -83271 | pos=      0 | v= 5 | dt=39987/41708 us
+  6929 | PLAY   | q=15 | avsync=-129937 | pos=      0 | v= 6 | dt=46624/41708 us
+  6939 | PLAY   | q=15 | avsync=-169885 | pos=      0 | v=10 | dt=39942/41708 us
+  6952 | PLAY   | q=15 | avsync=-213146 | pos=      0 | v=13 | dt=43248/41708 us
+  6965 | PLAY   | q=15 | avsync=-256469 | pos=      0 | v=13 | dt=43305/41708 us
+  6978 | PLAY   | q=15 | avsync=-299738 | pos=      0 | v=13 | dt=43302/41708 us
+  6991 | PLAY   | q=15 | avsync=-343060 | pos=      0 | v=13 | dt=43256/41708 us
+  7004 | PLAY   | q=15 | avsync=-386393 | pos=      0 | v=13 | dt=43313/41708 us
+  7017 | PLAY   | q=15 | avsync=-429680 | pos=      0 | v=13 | dt=43274/41708 us
+  7030 | PLAY   | q=15 | avsync=-472973 | pos=      0 | v=13 | dt=43270/41708 us
+  7043 | PLAY   | q=15 | avsync=-516321 | pos=      0 | v=13 | dt=43324/41708 us
+  7056 | PLAY   | q=15 | avsync=-559583 | pos=      0 | v=13 | dt=43248/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  7064 | PLAY   | q=15 | avsync=-559583 | pos=      0 | v= 8 | dt=26680/41708 us
+  7073 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=40022/41708 us
+  7079 | PLAY   | q=15 | avsync= -43249 | pos=      0 | v= 6 | dt=43254/41708 us
+  7084 | PLAY   | q=15 | avsync= -83249 | pos=      0 | v= 5 | dt=39954/41708 us
+  7090 | PLAY   | q=15 | avsync=-129887 | pos=      0 | v= 6 | dt=46603/41708 us
+  7100 | PLAY   | q=15 | avsync=-169856 | pos=      0 | v=10 | dt=39952/41708 us
+  7113 | PLAY   | q=15 | avsync=-213184 | pos=      0 | v=13 | dt=43317/41708 us
+  7126 | PLAY   | q=15 | avsync=-256465 | pos=      0 | v=13 | dt=43260/41708 us
+  7139 | PLAY   | q=15 | avsync=-299788 | pos=      0 | v=13 | dt=43305/41708 us
+  7152 | PLAY   | q=15 | avsync=-343043 | pos=      0 | v=13 | dt=43243/41708 us
+  7165 | PLAY   | q=15 | avsync=-386324 | pos=      0 | v=13 | dt=43288/41708 us
+  7178 | PLAY   | q=15 | avsync=-429628 | pos=      0 | v=13 | dt=43261/41708 us
+  7191 | PLAY   | q=15 | avsync=-472935 | pos=      0 | v=13 | dt=43295/41708 us
+  7204 | PLAY   | q=15 | avsync=-516230 | pos=      0 | v=13 | dt=43318/41708 us
+  7217 | PLAY   | q=15 | avsync=-559570 | pos=      0 | v=13 | dt=43321/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  7225 | PLAY   | q=15 | avsync=-559570 | pos=      0 | v= 8 | dt=26591/41708 us
+  7234 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39935/41708 us
+  7240 | PLAY   | q=15 | avsync= -43318 | pos=      0 | v= 6 | dt=43307/41708 us
+  7245 | PLAY   | q=15 | avsync= -83306 | pos=      0 | v= 5 | dt=40007/41708 us
+  7251 | PLAY   | q=15 | avsync=-129920 | pos=      0 | v= 6 | dt=46558/41708 us
+  7261 | PLAY   | q=15 | avsync=-169895 | pos=      0 | v=10 | dt=39968/41708 us
+  7274 | PLAY   | q=15 | avsync=-213187 | pos=      0 | v=13 | dt=43265/41708 us
+  7287 | PLAY   | q=15 | avsync=-256481 | pos=      0 | v=13 | dt=43291/41708 us
+  7300 | PLAY   | q=15 | avsync=-299795 | pos=      0 | v=13 | dt=43294/41708 us
+  7313 | PLAY   | q=15 | avsync=-343090 | pos=      0 | v=13 | dt=43279/41708 us
+  7326 | PLAY   | q=15 | avsync=-386392 | pos=      0 | v=13 | dt=43289/41708 us
+  7339 | PLAY   | q=15 | avsync=-429701 | pos=      0 | v=13 | dt=43294/41708 us
+  7352 | PLAY   | q=15 | avsync=-473023 | pos=      0 | v=13 | dt=43303/41708 us
+  7365 | PLAY   | q=15 | avsync=-516320 | pos=      0 | v=13 | dt=43293/41708 us
+  7378 | PLAY   | q=15 | avsync=-559640 | pos=      0 | v=13 | dt=43295/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  7386 | PLAY   | q=15 | avsync=-559640 | pos=      0 | v= 8 | dt=26607/41708 us
+  7395 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39960/41708 us
+  7401 | PLAY   | q=15 | avsync= -43301 | pos=      0 | v= 6 | dt=43291/41708 us
+  7406 | PLAY   | q=15 | avsync= -83262 | pos=      0 | v= 5 | dt=39962/41708 us
+  7412 | PLAY   | q=15 | avsync=-129917 | pos=      0 | v= 6 | dt=46617/41708 us
+  7422 | PLAY   | q=15 | avsync=-169885 | pos=      0 | v=10 | dt=39949/41708 us
+  7435 | PLAY   | q=15 | avsync=-213185 | pos=      0 | v=13 | dt=43299/41708 us
+  7448 | PLAY   | q=15 | avsync=-256486 | pos=      0 | v=13 | dt=43278/41708 us
+  7461 | PLAY   | q=15 | avsync=-299817 | pos=      0 | v=13 | dt=43326/41708 us
+  7474 | PLAY   | q=15 | avsync=-343096 | pos=      0 | v=13 | dt=43251/41708 us
+  7487 | PLAY   | q=15 | avsync=-386424 | pos=      0 | v=13 | dt=43322/41708 us
+  7500 | PLAY   | q=15 | avsync=-427080 | pos=      0 | v=13 | dt=43286/41708 us
+  7513 | PLAY   | q=15 | avsync=-470349 | pos=      0 | v=13 | dt=43287/41708 us
+  7526 | PLAY   | q=15 | avsync=-513680 | pos=      0 | v=13 | dt=43312/41708 us
+  7539 | PLAY   | q=15 | avsync=-556985 | pos=      0 | v=13 | dt=43260/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  7547 | PLAY   | q=15 | avsync=-556985 | pos=      0 | v= 8 | dt=26636/41708 us
+  7556 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39986/41708 us
+  7562 | PLAY   | q=15 | avsync= -43364 | pos=      0 | v= 6 | dt=43318/41708 us
+  7567 | PLAY   | q=15 | avsync= -83258 | pos=      0 | v= 5 | dt=39962/41708 us
+  7572 | PLAY   | q=15 | avsync=-126601 | pos=      0 | v= 5 | dt=43317/41708 us
+  7583 | PLAY   | q=15 | avsync=-169998 | pos=      0 | v=11 | dt=43303/41708 us
+  7596 | PLAY   | q=15 | avsync=-213238 | pos=      0 | v=13 | dt=43218/41708 us
+  7609 | PLAY   | q=15 | avsync=-256510 | pos=      0 | v=13 | dt=43286/41708 us
+  7622 | PLAY   | q=15 | avsync=-299814 | pos=      0 | v=13 | dt=43287/41708 us
+  7635 | PLAY   | q=15 | avsync=-343005 | pos=      0 | v=13 | dt=43245/41708 us
+  7648 | PLAY   | q=15 | avsync=-386416 | pos=      0 | v=13 | dt=43321/41708 us
+  7661 | PLAY   | q=15 | avsync=-429730 | pos=      0 | v=13 | dt=43308/41708 us
+  7674 | PLAY   | q=15 | avsync=-473033 | pos=      0 | v=13 | dt=43277/41708 us
+  7687 | PLAY   | q=15 | avsync=-516318 | pos=      0 | v=13 | dt=43259/41708 us
+  7700 | PLAY   | q=15 | avsync=-559658 | pos=      0 | v=13 | dt=43320/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  7708 | PLAY   | q=15 | avsync=-559658 | pos=      0 | v= 8 | dt=26638/41708 us
+  7717 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39955/41708 us
+  7723 | PLAY   | q=15 | avsync= -43304 | pos=      0 | v= 6 | dt=43290/41708 us
+  7728 | PLAY   | q=15 | avsync= -83286 | pos=      0 | v= 5 | dt=39959/41708 us
+  7734 | PLAY   | q=15 | avsync=-129910 | pos=      0 | v= 6 | dt=46600/41708 us
+  7744 | PLAY   | q=15 | avsync=-169901 | pos=      0 | v=10 | dt=39975/41708 us
+  7757 | PLAY   | q=15 | avsync=-213275 | pos=      0 | v=13 | dt=43338/41708 us
+  7770 | PLAY   | q=15 | avsync=-256624 | pos=      0 | v=13 | dt=43298/41708 us
+  7783 | PLAY   | q=15 | avsync=-299831 | pos=      0 | v=13 | dt=43216/41708 us
+  7796 | PLAY   | q=15 | avsync=-343196 | pos=      0 | v=13 | dt=43354/41708 us
+  7809 | PLAY   | q=15 | avsync=-386486 | pos=      0 | v=13 | dt=43278/41708 us
+  7822 | PLAY   | q=15 | avsync=-429797 | pos=      0 | v=13 | dt=43280/41708 us
+  7835 | PLAY   | q=15 | avsync=-473080 | pos=      0 | v=13 | dt=43284/41708 us
+  7848 | PLAY   | q=15 | avsync=-516435 | pos=      0 | v=13 | dt=43310/41708 us
+  7861 | PLAY   | q=15 | avsync=-559755 | pos=      0 | v=13 | dt=43317/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  7869 | PLAY   | q=15 | avsync=-559755 | pos=      0 | v= 8 | dt=26612/41708 us
+  7878 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39899/41708 us
+  7884 | PLAY   | q=15 | avsync= -43287 | pos=      0 | v= 6 | dt=43264/41708 us
+  7889 | PLAY   | q=15 | avsync= -83308 | pos=      0 | v= 5 | dt=40004/41708 us
+  7895 | PLAY   | q=15 | avsync=-129909 | pos=      0 | v= 6 | dt=46603/41708 us
+  7905 | PLAY   | q=15 | avsync=-169921 | pos=      0 | v=10 | dt=39942/41708 us
+  7918 | PLAY   | q=15 | avsync=-213243 | pos=      0 | v=13 | dt=43296/41708 us
+  7931 | PLAY   | q=15 | avsync=-256567 | pos=      0 | v=13 | dt=43304/41708 us
+  7944 | PLAY   | q=15 | avsync=-299855 | pos=      0 | v=13 | dt=43270/41708 us
+  7957 | PLAY   | q=15 | avsync=-343127 | pos=      0 | v=13 | dt=43288/41708 us
+  7970 | PLAY   | q=15 | avsync=-386454 | pos=      0 | v=13 | dt=43310/41708 us
+  7983 | PLAY   | q=15 | avsync=-429747 | pos=      0 | v=13 | dt=43276/41708 us
+  7996 | PLAY   | q=15 | avsync=-473056 | pos=      0 | v=13 | dt=43300/41708 us
+  8009 | PLAY   | q=15 | avsync=-516337 | pos=      0 | v=13 | dt=43286/41708 us
+  8022 | PLAY   | q=15 | avsync=-559657 | pos=      0 | v=13 | dt=43290/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  8030 | PLAY   | q=15 | avsync=-559657 | pos=      0 | v= 8 | dt=26632/41708 us
+  8038 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 8 | dt=39994/41708 us
+  8044 | PLAY   | q=15 | avsync= -43162 | pos=      0 | v= 6 | dt=43233/41708 us
+  8049 | PLAY   | q=15 | avsync= -83211 | pos=      0 | v= 5 | dt=39992/41708 us
+  8055 | PLAY   | q=15 | avsync=-129892 | pos=      0 | v= 6 | dt=46620/41708 us
+  8065 | PLAY   | q=15 | avsync=-169949 | pos=      0 | v=10 | dt=40009/41708 us
+  8078 | PLAY   | q=15 | avsync=-213167 | pos=      0 | v=13 | dt=43198/41708 us
+  8091 | PLAY   | q=15 | avsync=-256469 | pos=      0 | v=13 | dt=43289/41708 us
+  8096 | PLAY   | q=15 | avsync=-299813 | pos=      0 | v= 5 | dt=43330/41708 us
+  8109 | PLAY   | q=15 | avsync=-343068 | pos=      0 | v=13 | dt=43263/41708 us
+  8122 | PLAY   | q=15 | avsync=-386369 | pos=      0 | v=13 | dt=43289/41708 us
+  8135 | PLAY   | q=15 | avsync=-429666 | pos=      0 | v=13 | dt=43289/41708 us
+  8148 | PLAY   | q=15 | avsync=-473027 | pos=      0 | v=13 | dt=43334/41708 us
+  8161 | PLAY   | q=15 | avsync=-516254 | pos=      0 | v=13 | dt=43211/41708 us
+  8174 | PLAY   | q=15 | avsync=-559580 | pos=      0 | v=13 | dt=43288/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  8182 | PLAY   | q=15 | avsync=-559580 | pos=      0 | v= 8 | dt=26660/41708 us
+  8191 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39984/41708 us
+  8197 | PLAY   | q=15 | avsync= -43298 | pos=      0 | v= 6 | dt=43271/41708 us
+  8202 | PLAY   | q=15 | avsync= -83337 | pos=      0 | v= 5 | dt=40060/41708 us
+  8208 | PLAY   | q=15 | avsync=-129951 | pos=      0 | v= 6 | dt=46614/41708 us
+  8218 | PLAY   | q=15 | avsync=-169921 | pos=      0 | v=10 | dt=39935/41708 us
+  8231 | PLAY   | q=15 | avsync=-213239 | pos=      0 | v=13 | dt=43308/41708 us
+  8244 | PLAY   | q=15 | avsync=-256583 | pos=      0 | v=13 | dt=43316/41708 us
+  8257 | PLAY   | q=15 | avsync=-299852 | pos=      0 | v=13 | dt=43259/41708 us
+  8270 | PLAY   | q=15 | avsync=-343096 | pos=      0 | v=13 | dt=43255/41708 us
+  8283 | PLAY   | q=15 | avsync=-386390 | pos=      0 | v=13 | dt=43300/41708 us
+  8296 | PLAY   | q=15 | avsync=-429758 | pos=      0 | v=13 | dt=43309/41708 us
+  8309 | PLAY   | q=15 | avsync=-473036 | pos=      0 | v=13 | dt=43289/41708 us
+  8322 | PLAY   | q=15 | avsync=-516377 | pos=      0 | v=13 | dt=43292/41708 us
+  8335 | PLAY   | q=15 | avsync=-559688 | pos=      0 | v=13 | dt=43289/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  8343 | PLAY   | q=15 | avsync=-559688 | pos=      0 | v= 8 | dt=26645/41708 us
+  8352 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39906/41708 us
+  8358 | PLAY   | q=15 | avsync= -43307 | pos=      0 | v= 6 | dt=43329/41708 us
+  8363 | PLAY   | q=15 | avsync= -83361 | pos=      0 | v= 5 | dt=40001/41708 us
+  8369 | PLAY   | q=15 | avsync=-129937 | pos=      0 | v= 6 | dt=46571/41708 us
+  8379 | PLAY   | q=15 | avsync=-169923 | pos=      0 | v=10 | dt=39980/41708 us
+  8392 | PLAY   | q=15 | avsync=-213226 | pos=      0 | v=13 | dt=43262/41708 us
+  8404 | PLAY   | q=15 | avsync=-256569 | pos=      0 | v=12 | dt=43300/41708 us
+  8417 | PLAY   | q=15 | avsync=-299781 | pos=      0 | v=13 | dt=43265/41708 us
+  8430 | PLAY   | q=15 | avsync=-354618 | pos=      0 | v=13 | dt=54731/41708 us
+  8440 | PLAY   | q=15 | avsync=-386442 | pos=      0 | v=10 | dt=31829/41708 us
+  8453 | PLAY   | q=15 | avsync=-429781 | pos=      0 | v=13 | dt=43301/41708 us
+  8466 | PLAY   | q=15 | avsync=-473007 | pos=      0 | v=13 | dt=43290/41708 us
+  8479 | PLAY   | q=15 | avsync=-516391 | pos=      0 | v=13 | dt=43286/41708 us
+  8492 | PLAY   | q=15 | avsync=-559708 | pos=      0 | v=13 | dt=43329/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  8500 | PLAY   | q=15 | avsync=-559708 | pos=      0 | v= 8 | dt=26637/41708 us
+  8509 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39937/41708 us
+  8515 | PLAY   | q=15 | avsync= -43320 | pos=      0 | v= 6 | dt=43289/41708 us
+  8520 | PLAY   | q=15 | avsync= -83267 | pos=      0 | v= 5 | dt=39930/41708 us
+  8526 | PLAY   | q=15 | avsync=-129921 | pos=      0 | v= 6 | dt=46635/41708 us
+  8537 | PLAY   | q=15 | avsync=-169888 | pos=      0 | v=11 | dt=39942/41708 us
+  8550 | PLAY   | q=15 | avsync=-213190 | pos=      0 | v=13 | dt=43289/41708 us
+  8563 | PLAY   | q=15 | avsync=-256511 | pos=      0 | v=13 | dt=43300/41708 us
+  8576 | PLAY   | q=15 | avsync=-299824 | pos=      0 | v=13 | dt=43294/41708 us
+  8589 | PLAY   | q=15 | avsync=-343081 | pos=      0 | v=13 | dt=43277/41708 us
+  8602 | PLAY   | q=15 | avsync=-386451 | pos=      0 | v=13 | dt=43317/41708 us
+  8615 | PLAY   | q=15 | avsync=-429745 | pos=      0 | v=13 | dt=43277/41708 us
+  8628 | PLAY   | q=15 | avsync=-473034 | pos=      0 | v=13 | dt=43299/41708 us
+  8641 | PLAY   | q=15 | avsync=-516404 | pos=      0 | v=13 | dt=43337/41708 us
+  8653 | PLAY   | q=15 | avsync=-559677 | pos=      0 | v=12 | dt=43269/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  8661 | PLAY   | q=15 | avsync=-559677 | pos=      0 | v= 8 | dt=26587/41708 us
+  8670 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=40011/41708 us
+  8676 | PLAY   | q=15 | avsync= -43285 | pos=      0 | v= 6 | dt=43271/41708 us
+  8681 | PLAY   | q=15 | avsync= -83172 | pos=      0 | v= 5 | dt=39970/41708 us
+  8687 | PLAY   | q=15 | avsync=-126569 | pos=      0 | v= 6 | dt=43283/41708 us
+  8698 | PLAY   | q=15 | avsync=-169824 | pos=      0 | v=11 | dt=43287/41708 us
+  8711 | PLAY   | q=15 | avsync=-213181 | pos=      0 | v=13 | dt=43287/41708 us
+  8724 | PLAY   | q=15 | avsync=-256472 | pos=      0 | v=13 | dt=43276/41708 us
+  8737 | PLAY   | q=15 | avsync=-299771 | pos=      0 | v=13 | dt=43290/41708 us
+  8750 | PLAY   | q=15 | avsync=-343108 | pos=      0 | v=13 | dt=43312/41708 us
+  8763 | PLAY   | q=15 | avsync=-386401 | pos=      0 | v=13 | dt=43284/41708 us
+  8776 | PLAY   | q=15 | avsync=-429721 | pos=      0 | v=13 | dt=43329/41708 us
+  8789 | PLAY   | q=15 | avsync=-473091 | pos=      0 | v=13 | dt=43298/41708 us
+  8802 | PLAY   | q=15 | avsync=-516335 | pos=      0 | v=13 | dt=43258/41708 us
+  8815 | PLAY   | q=15 | avsync=-559631 | pos=      0 | v=13 | dt=43280/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  8823 | PLAY   | q=15 | avsync=-559631 | pos=      0 | v= 8 | dt=26668/41708 us
+  8832 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39948/41708 us
+  8838 | PLAY   | q=15 | avsync= -43331 | pos=      0 | v= 6 | dt=43318/41708 us
+  8843 | PLAY   | q=15 | avsync= -83216 | pos=      0 | v= 5 | dt=39871/41708 us
+  8849 | PLAY   | q=15 | avsync=-129936 | pos=      0 | v= 6 | dt=46710/41708 us
+  8860 | PLAY   | q=15 | avsync=-169863 | pos=      0 | v=11 | dt=39907/41708 us
+  8873 | PLAY   | q=15 | avsync=-213169 | pos=      0 | v=13 | dt=43290/41708 us
+  8886 | PLAY   | q=15 | avsync=-256446 | pos=      0 | v=13 | dt=43296/41708 us
+  8899 | PLAY   | q=15 | avsync=-299759 | pos=      0 | v=13 | dt=43288/41708 us
+  8912 | PLAY   | q=15 | avsync=-343049 | pos=      0 | v=13 | dt=43290/41708 us
+  8925 | PLAY   | q=15 | avsync=-386473 | pos=      0 | v=13 | dt=43362/41708 us
+  8938 | PLAY   | q=15 | avsync=-429752 | pos=      0 | v=13 | dt=43257/41708 us
+  8951 | PLAY   | q=15 | avsync=-473033 | pos=      0 | v=13 | dt=43286/41708 us
+  8964 | PLAY   | q=15 | avsync=-516387 | pos=      0 | v=13 | dt=43315/41708 us
+  8977 | PLAY   | q=15 | avsync=-559672 | pos=      0 | v=13 | dt=43251/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  8985 | PLAY   | q=15 | avsync=-559672 | pos=      0 | v= 8 | dt=26625/41708 us
+  8994 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=40010/41708 us
+  9000 | PLAY   | q=15 | avsync= -43298 | pos=      0 | v= 6 | dt=43305/41708 us
+  9005 | PLAY   | q=15 | avsync= -83259 | pos=      0 | v= 5 | dt=39947/41708 us
+  9011 | PLAY   | q=15 | avsync=-129921 | pos=      0 | v= 6 | dt=46626/41708 us
+  9021 | PLAY   | q=15 | avsync=-169838 | pos=      0 | v=10 | dt=39901/41708 us
+  9034 | PLAY   | q=15 | avsync=-213121 | pos=      0 | v=13 | dt=43324/41708 us
+  9047 | PLAY   | q=15 | avsync=-256452 | pos=      0 | v=13 | dt=43258/41708 us
+  9060 | PLAY   | q=15 | avsync=-299745 | pos=      0 | v=13 | dt=43320/41708 us
+  9073 | PLAY   | q=15 | avsync=-343104 | pos=      0 | v=13 | dt=43292/41708 us
+  9086 | PLAY   | q=15 | avsync=-386431 | pos=      0 | v=13 | dt=43312/41708 us
+  9099 | PLAY   | q=15 | avsync=-429682 | pos=      0 | v=13 | dt=43240/41708 us
+  9112 | PLAY   | q=15 | avsync=-473015 | pos=      0 | v=13 | dt=43318/41708 us
+  9125 | PLAY   | q=15 | avsync=-516331 | pos=      0 | v=13 | dt=43291/41708 us
+  9138 | PLAY   | q=15 | avsync=-559580 | pos=      0 | v=13 | dt=43288/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  9146 | PLAY   | q=15 | avsync=-559580 | pos=      0 | v= 8 | dt=26680/41708 us
+  9155 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39951/41708 us
+  9161 | PLAY   | q=15 | avsync= -43330 | pos=      0 | v= 6 | dt=43334/41708 us
+  9166 | PLAY   | q=15 | avsync= -83302 | pos=      0 | v= 5 | dt=39915/41708 us
+  9172 | PLAY   | q=15 | avsync=-129904 | pos=      0 | v= 6 | dt=46568/41708 us
+  9182 | PLAY   | q=15 | avsync=-169852 | pos=      0 | v=10 | dt=39944/41708 us
+  9195 | PLAY   | q=15 | avsync=-213183 | pos=      0 | v=13 | dt=43303/41708 us
+  9208 | PLAY   | q=15 | avsync=-256490 | pos=      0 | v=13 | dt=43290/41708 us
+  9221 | PLAY   | q=15 | avsync=-299786 | pos=      0 | v=13 | dt=43291/41708 us
+  9234 | PLAY   | q=15 | avsync=-343128 | pos=      0 | v=13 | dt=43309/41708 us
+  9247 | PLAY   | q=15 | avsync=-386411 | pos=      0 | v=13 | dt=43273/41708 us
+  9260 | PLAY   | q=15 | avsync=-429775 | pos=      0 | v=13 | dt=43330/41708 us
+  9273 | PLAY   | q=15 | avsync=-473082 | pos=      0 | v=13 | dt=43307/41708 us
+  9286 | PLAY   | q=15 | avsync=-516365 | pos=      0 | v=13 | dt=43268/41708 us
+  9299 | PLAY   | q=15 | avsync=-559671 | pos=      0 | v=13 | dt=43314/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  9307 | PLAY   | q=15 | avsync=-559671 | pos=      0 | v= 8 | dt=26670/41708 us
+  9316 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39911/41708 us
+  9322 | PLAY   | q=15 | avsync= -43338 | pos=      0 | v= 6 | dt=43303/41708 us
+  9327 | PLAY   | q=15 | avsync= -83305 | pos=      0 | v= 5 | dt=39992/41708 us
+  9333 | PLAY   | q=15 | avsync=-129934 | pos=      0 | v= 6 | dt=46621/41708 us
+  9343 | PLAY   | q=15 | avsync=-169851 | pos=      0 | v=10 | dt=39943/41708 us
+  9356 | PLAY   | q=15 | avsync=-213228 | pos=      0 | v=13 | dt=43296/41708 us
+  9369 | PLAY   | q=15 | avsync=-256499 | pos=      0 | v=13 | dt=43258/41708 us
+  9379 | PLAY   | q=15 | avsync=-316331 | pos=      0 | v=10 | dt=59871/41708 us
+  9387 | PLAY   | q=15 | avsync=-343061 | pos=      0 | v= 8 | dt=26666/41708 us
+  9400 | PLAY   | q=15 | avsync=-386386 | pos=      0 | v=13 | dt=43305/41708 us
+  9413 | PLAY   | q=15 | avsync=-429752 | pos=      0 | v=13 | dt=43352/41708 us
+  9426 | PLAY   | q=15 | avsync=-473011 | pos=      0 | v=13 | dt=43230/41708 us
+  9439 | PLAY   | q=15 | avsync=-516357 | pos=      0 | v=13 | dt=43348/41708 us
+  9452 | PLAY   | q=15 | avsync=-559640 | pos=      0 | v=13 | dt=43270/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  9460 | PLAY   | q=15 | avsync=-559640 | pos=      0 | v= 8 | dt=26655/41708 us
+  9469 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39917/41708 us
+  9475 | PLAY   | q=15 | avsync= -43258 | pos=      0 | v= 6 | dt=43289/41708 us
+  9480 | PLAY   | q=15 | avsync= -83291 | pos=      0 | v= 5 | dt=39989/41708 us
+  9486 | PLAY   | q=15 | avsync=-129973 | pos=      0 | v= 6 | dt=46632/41708 us
+  9497 | PLAY   | q=15 | avsync=-169888 | pos=      0 | v=11 | dt=39925/41708 us
+  9509 | PLAY   | q=15 | avsync=-213283 | pos=      0 | v=12 | dt=43384/41708 us
+  9521 | PLAY   | q=15 | avsync=-256537 | pos=      0 | v=12 | dt=43230/41708 us
+  9545 | PLAY   | q=15 | avsync=-326570 | pos=      0 | v=24 | dt=70032/41708 us
+  9550 | PLAY   | q=15 | avsync=-343052 | pos=      0 | v= 5 | dt=16525/41708 us
+  9563 | PLAY   | q=15 | avsync=-386445 | pos=      0 | v=13 | dt=43311/41708 us
+  9576 | PLAY   | q=15 | avsync=-429701 | pos=      0 | v=13 | dt=43242/41708 us
+  9589 | PLAY   | q=15 | avsync=-473028 | pos=      0 | v=13 | dt=43313/41708 us
+  9602 | PLAY   | q=15 | avsync=-516313 | pos=      0 | v=13 | dt=43269/41708 us
+  9615 | PLAY   | q=15 | avsync=-559683 | pos=      0 | v=13 | dt=43369/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  9623 | PLAY   | q=15 | avsync=-559683 | pos=      0 | v= 8 | dt=26644/41708 us
+  9632 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39920/41708 us
+  9638 | PLAY   | q=15 | avsync= -43276 | pos=      0 | v= 6 | dt=43260/41708 us
+  9643 | PLAY   | q=15 | avsync= -83253 | pos=      0 | v= 5 | dt=39964/41708 us
+  9649 | PLAY   | q=15 | avsync=-129897 | pos=      0 | v= 6 | dt=46631/41708 us
+  9660 | PLAY   | q=15 | avsync=-169882 | pos=      0 | v=11 | dt=39966/41708 us
+  9673 | PLAY   | q=15 | avsync=-213198 | pos=      0 | v=13 | dt=43291/41708 us
+  9686 | PLAY   | q=15 | avsync=-256505 | pos=      0 | v=13 | dt=43296/41708 us
+  9699 | PLAY   | q=15 | avsync=-299796 | pos=      0 | v=13 | dt=43271/41708 us
+  9712 | PLAY   | q=15 | avsync=-343136 | pos=      0 | v=13 | dt=43331/41708 us
+  9725 | PLAY   | q=15 | avsync=-386406 | pos=      0 | v=13 | dt=43251/41708 us
+  9738 | PLAY   | q=15 | avsync=-429702 | pos=      0 | v=13 | dt=43292/41708 us
+  9751 | PLAY   | q=15 | avsync=-473054 | pos=      0 | v=13 | dt=43315/41708 us
+  9764 | PLAY   | q=15 | avsync=-516348 | pos=      0 | v=13 | dt=43288/41708 us
+  9777 | PLAY   | q=15 | avsync=-559654 | pos=      0 | v=13 | dt=43292/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  9785 | PLAY   | q=15 | avsync=-559654 | pos=      0 | v= 8 | dt=26627/41708 us
+  9794 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39975/41708 us
+  9800 | PLAY   | q=15 | avsync= -43235 | pos=      0 | v= 6 | dt=43248/41708 us
+  9805 | PLAY   | q=15 | avsync= -83282 | pos=      0 | v= 5 | dt=40015/41708 us
+  9811 | PLAY   | q=15 | avsync=-129931 | pos=      0 | v= 6 | dt=46624/41708 us
+  9821 | PLAY   | q=15 | avsync=-169866 | pos=      0 | v=10 | dt=39913/41708 us
+  9834 | PLAY   | q=15 | avsync=-213181 | pos=      0 | v=13 | dt=43301/41708 us
+  9846 | PLAY   | q=15 | avsync=-256503 | pos=      0 | v=12 | dt=43311/41708 us
+  9858 | PLAY   | q=15 | avsync=-299878 | pos=      0 | v=12 | dt=43350/41708 us
+  9871 | PLAY   | q=15 | avsync=-343156 | pos=      0 | v=13 | dt=43263/41708 us
+  9884 | PLAY   | q=15 | avsync=-386463 | pos=      0 | v=13 | dt=43303/41708 us
+  9897 | PLAY   | q=15 | avsync=-429796 | pos=      0 | v=13 | dt=43339/41708 us
+  9910 | PLAY   | q=15 | avsync=-473083 | pos=      0 | v=13 | dt=43246/41708 us
+  9923 | PLAY   | q=15 | avsync=-516345 | pos=      0 | v=13 | dt=43285/41708 us
+  9936 | PLAY   | q=15 | avsync=-559669 | pos=      0 | v=13 | dt=43270/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+  9944 | PLAY   | q=15 | avsync=-559669 | pos=      0 | v= 8 | dt=26635/41708 us
+  9953 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=40018/41708 us
+  9959 | PLAY   | q=15 | avsync= -43292 | pos=      0 | v= 6 | dt=43292/41708 us
+  9964 | PLAY   | q=15 | avsync= -83233 | pos=      0 | v= 5 | dt=39961/41708 us
+  9970 | PLAY   | q=15 | avsync=-129900 | pos=      0 | v= 6 | dt=46597/41708 us
+  9981 | PLAY   | q=15 | avsync=-169753 | pos=      0 | v=11 | dt=39938/41708 us
+  9994 | PLAY   | q=15 | avsync=-213179 | pos=      0 | v=13 | dt=43299/41708 us
+ 10007 | PLAY   | q=15 | avsync=-256539 | pos=      0 | v=13 | dt=43333/41708 us
+ 10020 | PLAY   | q=15 | avsync=-299833 | pos=      0 | v=13 | dt=43315/41708 us
+ 10033 | PLAY   | q=15 | avsync=-343064 | pos=      0 | v=13 | dt=43249/41708 us
+ 10046 | PLAY   | q=15 | avsync=-386403 | pos=      0 | v=13 | dt=43289/41708 us
+ 10059 | PLAY   | q=15 | avsync=-429716 | pos=      0 | v=13 | dt=43302/41708 us
+ 10072 | PLAY   | q=15 | avsync=-473027 | pos=      0 | v=13 | dt=43303/41708 us
+ 10085 | PLAY   | q=15 | avsync=-516292 | pos=      0 | v=13 | dt=43218/41708 us
+ 10098 | PLAY   | q=15 | avsync=-559668 | pos=      0 | v=13 | dt=43366/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+ 10106 | PLAY   | q=15 | avsync=-559668 | pos=      0 | v= 8 | dt=26606/41708 us
+ 10115 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39955/41708 us
+ 10121 | PLAY   | q=15 | avsync= -43322 | pos=      0 | v= 6 | dt=43275/41708 us
+ 10126 | PLAY   | q=15 | avsync= -83268 | pos=      0 | v= 5 | dt=40015/41708 us
+ 10132 | PLAY   | q=15 | avsync=-129969 | pos=      0 | v= 6 | dt=46620/41708 us
+ 10142 | PLAY   | q=15 | avsync=-169958 | pos=      0 | v=10 | dt=39985/41708 us
+ 10155 | PLAY   | q=15 | avsync=-213261 | pos=      0 | v=13 | dt=43282/41708 us
+ 10168 | PLAY   | q=15 | avsync=-256538 | pos=      0 | v=13 | dt=43264/41708 us
+ 10181 | PLAY   | q=15 | avsync=-299834 | pos=      0 | v=13 | dt=43291/41708 us
+ 10194 | PLAY   | q=15 | avsync=-343157 | pos=      0 | v=13 | dt=43301/41708 us
+ 10207 | PLAY   | q=15 | avsync=-386454 | pos=      0 | v=13 | dt=43310/41708 us
+ 10220 | PLAY   | q=15 | avsync=-429731 | pos=      0 | v=13 | dt=43295/41708 us
+ 10233 | PLAY   | q=15 | avsync=-473042 | pos=      0 | v=13 | dt=43247/41708 us
+ 10246 | PLAY   | q=15 | avsync=-516330 | pos=      0 | v=13 | dt=43277/41708 us
+ 10259 | PLAY   | q=15 | avsync=-559611 | pos=      0 | v=13 | dt=43266/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+ 10267 | PLAY   | q=15 | avsync=-559611 | pos=      0 | v= 8 | dt=26656/41708 us
+ 10276 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 9 | dt=39984/41708 us
+ 10282 | PLAY   | q=15 | avsync= -43317 | pos=      0 | v= 6 | dt=43321/41708 us
+ 10287 | PLAY   | q=15 | avsync= -83302 | pos=      0 | v= 5 | dt=39939/41708 us
+ 10293 | PLAY   | q=15 | avsync=-129822 | pos=      0 | v= 6 | dt=46618/41708 us
+ 10304 | PLAY   | q=15 | avsync=-169848 | pos=      0 | v=11 | dt=39956/41708 us
+ 10317 | PLAY   | q=15 | avsync=-213184 | pos=      0 | v=13 | dt=43292/41708 us
+ 10330 | PLAY   | q=15 | avsync=-256532 | pos=      0 | v=13 | dt=43276/41708 us
+ 10343 | PLAY   | q=15 | avsync=-299808 | pos=      0 | v=13 | dt=43313/41708 us
+ 10356 | PLAY   | q=15 | avsync=-343094 | pos=      0 | v=13 | dt=43272/41708 us
+ 10369 | PLAY   | q=15 | avsync=-386413 | pos=      0 | v=13 | dt=43310/41708 us
+ 10382 | PLAY   | q=15 | avsync=-429725 | pos=      0 | v=13 | dt=43296/41708 us
+ 10395 | PLAY   | q=15 | avsync=-473002 | pos=      0 | v=13 | dt=43277/41708 us
+ 10408 | PLAY   | q=15 | avsync=-516289 | pos=      0 | v=13 | dt=43257/41708 us
+ 10421 | PLAY   | q=15 | avsync=-559630 | pos=      0 | v=13 | dt=43298/41708 us
+# STALL | >500ms without presentation, forcing timing reset
+ 10429 | PLAY   | q=15 | avsync=-559630 | pos=      0 | v= 8 | dt=26706/41708 us
+ 10437 | PLAY   | q=15 | avsync=     +0 | pos=      0 | v= 8 | dt=39974/41708 us
+ 10443 | PLAY   | q=15 | avsync= -43312 | pos=      0 | v= 6 | dt=43307/41708 us
+ 10448 | PLAY   | q=15 | avsync= -83189 | pos=      0 | v= 5 | dt=39896/41708 us
+ 10454 | PLAY   | q=15 | avsync=-126510 | pos=      0 | v= 6 | dt=43318/41708 us
+ 10465 | PLAY   | q=15 | avsync=-169763 | pos=      0 | v=11 | dt=43273/41708 us
+ 10478 | PLAY   | q=15 | avsync=-213107 | pos=      0 | v=13 | dt=43317/41708 us
+ 10491 | PLAY   | q=15 | avsync=-256427 | pos=      0 | v=13 | dt=43291/41708 us
+ 10504 | PLAY   | q=15 | avsync=-299754 | pos=      0 | v=13 | dt=43291/41708 us
+ 10517 | PLAY   | q=15 | avsync=-343032 | pos=      0 | v=13 | dt=43266/41708 us
+ 10530 | PLAY   | q=15 | avsync=-386370 | pos=      0 | v=13 | dt=43321/41708 us
+ 10543 | PLAY   | q=15 | avsync=-429670 | pos=      0 | v=13 | dt=43292/41708 us
+ 10556 | PLAY   | q=15 | avsync=-472984 | pos=      0 | v=13 | dt=43267/41708 us
+ 10568 | PLAY   | q=15 | avsync=-545874 | pos=      0 | v=12 | dt=72877/41708 us
+ 10572 | PLAY   | q=15 | avsync=-559629 | pos=      0 | v= 4 | dt=13721/41708 us
+# Closed after 10573 frames | skips=0 empty=0 snaps=0 underruns=0

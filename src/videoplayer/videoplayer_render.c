@@ -984,10 +984,22 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
                         vp->audio.channels * sizeof(float) / 2;  /* 0.5 seconds */
         }
 
+        /* Adaptive buffer threshold: fill more when server is slow,
+         * resume faster when server is healthy. Initial startup always
+         * uses 75% to ensure smooth first frames. */
+        int target_frames;
+        if (vp->position_us == 0) {
+            target_frames = VP_FRAME_QUEUE_SIZE * 3 / 4;  /* initial: 75% */
+        } else if (vp->server_slow) {
+            target_frames = VP_FRAME_QUEUE_SIZE;           /* slow server: fill completely */
+        } else {
+            target_frames = VP_FRAME_QUEUE_SIZE / 2;       /* normal rebuffer: 50% */
+        }
+
         /* Safety: track how long we've been stuck in BUFFERING with enough
          * video frames.  If stuck for >3 seconds, start anyway — prevents
          * permanent deadlock from unusual audio/video interleaving. */
-        if (queued >= VP_FRAME_QUEUE_SIZE * 3 / 4) {
+        if (queued >= target_frames) {
             if (vp->buffer_ready_since_ns == 0)
                 vp->buffer_ready_since_ns = vsync_time_ns;
         } else {
@@ -995,9 +1007,9 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
         }
 
         if (vp->debug_log) {
-            fprintf(vp->debug_log, "%6d | BUFFER | %2d/%2d | audio=%zu/%zu\n",
-                    vp->debug_frame_count++, queued, VP_FRAME_QUEUE_SIZE * 3 / 4,
-                    audio_avail, audio_min);
+            fprintf(vp->debug_log, "%6d | BUFFER | %2d/%2d | audio=%zu/%zu | slow=%d\n",
+                    vp->debug_frame_count++, queued, target_frames,
+                    audio_avail, audio_min, vp->server_slow);
             fflush(vp->debug_log);
         }
 
@@ -1015,7 +1027,7 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
             audio_ok = 1;
         }
 
-        if (queued >= VP_FRAME_QUEUE_SIZE * 3 / 4 && audio_ok) {
+        if (queued >= target_frames && audio_ok) {
             /* === Synchronized A/V start ===
              * Pre-activate PipeWire audio BEFORE starting video so that
              * audio hardware is actually outputting samples when the first
@@ -1130,12 +1142,33 @@ present_next:
         pthread_mutex_unlock(&vp->frame_mutex);
 
         /* If we're in PLAYING state and the queue is empty (HTTP buffering stall),
-         * transition back to BUFFERING so the decode thread can refill the queue
-         * before playback resumes.  This prevents the video from appearing frozen
-         * for 25+ seconds while the queue stays at 0.  videoplayer_play() is called
-         * again once enough frames are queued, which resets A/V sync bases for
-         * a clean restart. Flush audio so it restarts in sync with video. */
+         * use a grace period before transitioning to BUFFERING.  Short stalls from
+         * busy server disks often resolve within a few hundred milliseconds — holding
+         * the last frame is invisible to the user, while a full rebuffer cycle
+         * causes a visible pause.  The grace period is longer when the server is
+         * known to be slow (throughput < 1.5× bitrate for 6+ seconds). */
         if (vp->state == VP_STATE_PLAYING && !vp->demux_eof) {
+            vp->empty_queue_count++;
+
+            /* Calculate grace period in vsyncs */
+            int grace_ms = vp->server_slow ? 500 : 250;
+            int grace_vsyncs = vp->display_interval_ns > 0
+                ? (int)((uint64_t)grace_ms * 1000000ULL / vp->display_interval_ns) : 15;
+            if (vp->server_slow) {
+                if (grace_vsyncs < 10) grace_vsyncs = 10;
+                if (grace_vsyncs > 150) grace_vsyncs = 150;
+            } else {
+                if (grace_vsyncs < 5) grace_vsyncs = 5;
+                if (grace_vsyncs > 75) grace_vsyncs = 75;
+            }
+
+            if (vp->empty_queue_count < grace_vsyncs) {
+                /* Hold last frame — stall may resolve on its own */
+                goto update_blend;
+            }
+
+            /* Grace period expired — full rebuffer */
+            vp->empty_queue_count = 0;
             vp->state = VP_STATE_BUFFERING;
             vp->buffer_ready_since_ns = 0;
             vp->last_frame_ns = 0;
@@ -1152,15 +1185,20 @@ present_next:
             videoplayer_audio_pause(vp);
             videoplayer_audio_flush(vp);
 
-            fprintf(stderr, "[videoplayer] Queue empty during playback, rebuffering\n");
+            fprintf(stderr, "[videoplayer] Queue empty for %dms (grace=%dms, slow=%d), rebuffering\n",
+                    grace_ms, grace_ms, vp->server_slow);
             if (vp->debug_log) {
-                fprintf(vp->debug_log, "# REBUFFER | queue empty, transitioning to BUFFERING\n");
+                fprintf(vp->debug_log, "# REBUFFER | queue empty after %dms grace (slow=%d)\n",
+                        grace_ms, vp->server_slow);
                 fflush(vp->debug_log);
             }
         }
 
         goto update_blend;
     }
+
+    /* Queue has frames — reset grace period counter */
+    vp->empty_queue_count = 0;
 
     VideoPlayerFrame *qf = &vp->frame_queue[vp->frame_read_idx];
 

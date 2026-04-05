@@ -2373,6 +2373,8 @@ retro_gaming_filter_games(Monitor *m)
 
 	if (rg->active_console_count == 0 || rg->all_rom_count == 0)
 		return;
+	if (rg->selected_console >= rg->active_console_count)
+		rg->selected_console = 0;
 
 	real_console = rg->active_consoles[rg->selected_console];
 
@@ -3383,54 +3385,62 @@ retro_gaming_render(Monitor *m)
 	int pill_pad = 15;
 	int pill_h = 40;
 	int pill_y = (menu_bar_h - pill_h) / 2;
+	int pill_x = 0, pill_w = 0;
 
-	/* Interpolate pill position during animation */
-	int from_console = rg->selected_console;
-	int to_console = rg->target_console;
-	float anim_progress = 1.0f - fabsf(rg->slide_offset);  /* slide_offset goes from +-1 to 0 */
+	if (tab_count > 0) {
+		/* Clamp console indices to valid range */
+		int from_console = rg->selected_console;
+		int to_console = rg->target_console;
+		if (from_console >= tab_count) from_console = 0;
+		if (to_console >= tab_count) to_console = 0;
 
-	int pill_x, pill_w;
-	if (from_console == to_console || anim_progress >= 1.0f) {
-		/* No animation or animation complete */
-		pill_x = item_positions[rg->selected_console] - pill_pad;
-		pill_w = item_widths[rg->selected_console] + pill_pad * 2;
-	} else {
-		/* Animate pill between positions */
-		int from_x = item_positions[from_console] - pill_pad;
-		int from_w = item_widths[from_console] + pill_pad * 2;
-		int to_x = item_positions[to_console] - pill_pad;
-		int to_w = item_widths[to_console] + pill_pad * 2;
+		/* Interpolate pill position during animation */
+		float anim_progress = 1.0f - fabsf(rg->slide_offset);
 
-		/* Ease-out interpolation */
-		float ease = 1.0f - (1.0f - anim_progress) * (1.0f - anim_progress);
-		pill_x = from_x + (int)((to_x - from_x) * ease);
-		pill_w = from_w + (int)((to_w - from_w) * ease);
-	}
+		if (from_console == to_console || anim_progress >= 1.0f) {
+			/* No animation or animation complete */
+			pill_x = item_positions[from_console] - pill_pad;
+			pill_w = item_widths[from_console] + pill_pad * 2;
+		} else {
+			/* Animate pill between positions */
+			int from_x = item_positions[from_console] - pill_pad;
+			int from_w = item_widths[from_console] + pill_pad * 2;
+			int to_x = item_positions[to_console] - pill_pad;
+			int to_w = item_widths[to_console] + pill_pad * 2;
 
-	/* Draw selection pill (animated) */
-	drawrect(rg->tree, pill_x, pill_y, pill_w, pill_h, selected_color);
-
-	/* Draw menu items (fixed positions) */
-	for (int i = 0; i < tab_count; i++) {
-		const char *name = retro_console_names[rg->active_consoles[i]];
-		int text_y = (menu_bar_h - 20) / 2;
-		int is_target = (i == rg->target_console);
-
-		/* Draw text */
-		struct wlr_scene_tree *text_tree = wlr_scene_tree_create(rg->tree);
-		if (text_tree) {
-			wlr_scene_node_set_position(&text_tree->node, item_positions[i], text_y);
-			StatusModule mod = {0};
-			mod.tree = text_tree;
-			float text_color[4] = {1.0f, 1.0f, 1.0f, is_target ? 1.0f : 0.7f};
-			tray_render_label(&mod, name, 0, 20, text_color);
+			/* Ease-out interpolation */
+			float ease = 1.0f - (1.0f - anim_progress) * (1.0f - anim_progress);
+			pill_x = from_x + (int)((to_x - from_x) * ease);
+			pill_w = from_w + (int)((to_w - from_w) * ease);
 		}
-	}
 
-	/* Draw underline (animated with pill) */
-	int underline_x = pill_x + pill_pad;
-	int underline_w = pill_w - pill_pad * 2;
-	drawrect(rg->tree, underline_x, menu_bar_h - 4, underline_w, 3, hover_underline);
+		/* Draw selection pill (animated) */
+		drawrect(rg->tree, pill_x, pill_y, pill_w, pill_h, selected_color);
+
+		/* Draw menu items (fixed positions) */
+		for (int i = 0; i < tab_count; i++) {
+			int ci = rg->active_consoles[i];
+			if (ci < 0 || ci >= RETRO_CONSOLE_COUNT) continue;
+			const char *name = retro_console_names[ci];
+			int text_y = (menu_bar_h - 20) / 2;
+			int is_target = (i == to_console);
+
+			/* Draw text */
+			struct wlr_scene_tree *text_tree = wlr_scene_tree_create(rg->tree);
+			if (text_tree) {
+				wlr_scene_node_set_position(&text_tree->node, item_positions[i], text_y);
+				StatusModule mod = {0};
+				mod.tree = text_tree;
+				float text_color[4] = {1.0f, 1.0f, 1.0f, is_target ? 1.0f : 0.7f};
+				tray_render_label(&mod, name, 0, 20, text_color);
+			}
+		}
+
+		/* Draw underline (animated with pill) */
+		int underline_x = pill_x + pill_pad;
+		int underline_w = pill_w - pill_pad * 2;
+		drawrect(rg->tree, underline_x, menu_bar_h - 4, underline_w, 3, hover_underline);
+	}
 
 	/* Draw separator line */
 	float sep_color[4] = {0.3f, 0.3f, 0.35f, 1.0f};
@@ -3461,9 +3471,12 @@ retro_gaming_render(Monitor *m)
 		/* Show target console name in content area (shows destination immediately) */
 		struct wlr_scene_tree *content_tree = wlr_scene_tree_create(rg->tree);
 		if (content_tree) {
-			const char *console = tab_count > 0
-				? retro_console_names[rg->active_consoles[rg->target_console]]
-				: "No ROMs";
+			const char *console = "No ROMs";
+			if (tab_count > 0 && rg->target_console < tab_count) {
+				int ci = rg->active_consoles[rg->target_console];
+				if (ci >= 0 && ci < RETRO_CONSOLE_COUNT)
+					console = retro_console_names[ci];
+			}
 			int cw = status_text_width(console);
 			int cx = (rg->width - cw) / 2;
 			int cy = menu_bar_h + (rg->height - menu_bar_h) / 2 - 20;
@@ -3622,6 +3635,8 @@ retro_gaming_handle_button(Monitor *m, int button, int value)
 			}
 			return 1;
 		case BTN_TL: {  /* LB = jump to previous letter */
+			if (!rg->games || rg->game_count == 0)
+				return 1;
 			/* Switch to alphabetical sort if needed */
 			if (rg->sort_mode != 1) {
 				char prev_title[256];
@@ -3657,6 +3672,8 @@ retro_gaming_handle_button(Monitor *m, int button, int value)
 			return 1;
 		}
 		case BTN_TR: {  /* RB = jump to next letter */
+			if (!rg->games || rg->game_count == 0)
+				return 1;
 			/* Switch to alphabetical sort if needed */
 			if (rg->sort_mode != 1) {
 				char prev_title[256];
