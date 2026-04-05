@@ -1,667 +1,726 @@
 # Nixlytile Video Player Debug Log
-# File: http://aceclan.no:8080/stream/885
-# Video: 1920x1080 @ 23.976 fps, HW=1
+# File: http://aceclan.no:8080/stream/565
+# Video: 3840x2160 @ 23.976 fps, HW=1
 # Display: 0.00 Hz, frame_interval=41708332 ns, pacing_mode=0
-# Subtitles: 1 track(s), selected=0, codec_ctx=0x55859057ee40, ass_track=0x558591d61240, ass_renderer=0x558590583900
-#   sub[0]: stream=2 codec=hdmv_pgs_subtitle text=0 "eng (Bitmap)" [eng] <-- ACTIVE
+# Subtitles: 16 track(s), selected=14, codec_ctx=0x5589d9c8c380, ass_track=0x5589d9ca1090, ass_renderer=0x5589d9c90ca0
+#   sub[0]: stream=4 codec=hdmv_pgs_subtitle text=0 "English (SDH)" [eng]
+#   sub[1]: stream=5 codec=hdmv_pgs_subtitle text=0 "Chinese (Traditional)" [chi]
+#   sub[2]: stream=6 codec=hdmv_pgs_subtitle text=0 "Croatian" [hrv]
+#   sub[3]: stream=7 codec=hdmv_pgs_subtitle text=0 "Czech" [cze]
+#   sub[4]: stream=8 codec=hdmv_pgs_subtitle text=0 "Danish" [dan]
+#   sub[5]: stream=9 codec=hdmv_pgs_subtitle text=0 "Dutch" [dut]
+#   sub[6]: stream=10 codec=hdmv_pgs_subtitle text=0 "Finnish" [fin]
+#   sub[7]: stream=11 codec=hdmv_pgs_subtitle text=0 "French" [fre]
+#   sub[8]: stream=12 codec=hdmv_pgs_subtitle text=0 "German" [ger]
+#   sub[9]: stream=13 codec=hdmv_pgs_subtitle text=0 "Greek" [gre]
+#   sub[10]: stream=14 codec=hdmv_pgs_subtitle text=0 "Hebrew" [heb]
+#   sub[11]: stream=15 codec=hdmv_pgs_subtitle text=0 "Hungarian" [hun]
+#   sub[12]: stream=16 codec=hdmv_pgs_subtitle text=0 "Italian" [ita]
+#   sub[13]: stream=17 codec=hdmv_pgs_subtitle text=0 "Korean" [kor]
+#   sub[14]: stream=18 codec=hdmv_pgs_subtitle text=0 "Norwegian" [nor] <-- ACTIVE
+#   sub[15]: stream=19 codec=hdmv_pgs_subtitle text=0 "Polish" [pol]
 # frame | state  | q=queued | avsync | pos_ms | v=vsyncs | dt=actual/expected us
 # Display updated: 300.18 Hz, frame_interval=41708332 ns, pacing_mode=3
-     0 | BUFFER |  0/48 | audio=0/192000 | slow=0
-     1 | BUFFER |  0/48 | audio=0/192000 | slow=0
-     2 | BUFFER |  1/48 | audio=98304/192000 | slow=0
-     3 | BUFFER |  1/48 | audio=98304/192000 | slow=0
-     4 | BUFFER |  1/48 | audio=98304/192000 | slow=0
-     5 | BUFFER |  2/48 | audio=98304/192000 | slow=0
-     6 | BUFFER |  2/48 | audio=98304/192000 | slow=0
-     7 | BUFFER |  2/48 | audio=98304/192000 | slow=0
-     8 | BUFFER |  3/48 | audio=98304/192000 | slow=0
-     9 | BUFFER |  3/48 | audio=98304/192000 | slow=0
-    10 | BUFFER |  3/48 | audio=98304/192000 | slow=0
-    11 | BUFFER |  4/48 | audio=98304/192000 | slow=0
-    12 | BUFFER |  4/48 | audio=98304/192000 | slow=0
-    13 | BUFFER |  4/48 | audio=98304/192000 | slow=0
-    14 | BUFFER |  5/48 | audio=98304/192000 | slow=0
-    15 | BUFFER |  5/48 | audio=98304/192000 | slow=0
-    16 | BUFFER |  5/48 | audio=98304/192000 | slow=0
-    17 | BUFFER |  6/48 | audio=98304/192000 | slow=0
-    18 | BUFFER |  6/48 | audio=98304/192000 | slow=0
-    19 | BUFFER |  6/48 | audio=98304/192000 | slow=0
-    20 | BUFFER |  7/48 | audio=196608/192000 | slow=0
-    21 | BUFFER |  7/48 | audio=196608/192000 | slow=0
-    22 | BUFFER |  7/48 | audio=196608/192000 | slow=0
-    23 | BUFFER |  8/48 | audio=196608/192000 | slow=0
-    24 | BUFFER |  8/48 | audio=196608/192000 | slow=0
-    25 | BUFFER |  8/48 | audio=196608/192000 | slow=0
-    26 | BUFFER |  9/48 | audio=196608/192000 | slow=0
-    27 | BUFFER |  9/48 | audio=196608/192000 | slow=0
-    28 | BUFFER |  9/48 | audio=196608/192000 | slow=0
-    29 | BUFFER | 10/48 | audio=196608/192000 | slow=0
-    30 | BUFFER | 10/48 | audio=196608/192000 | slow=0
-    31 | BUFFER | 10/48 | audio=196608/192000 | slow=0
-    32 | BUFFER | 11/48 | audio=196608/192000 | slow=0
-    33 | BUFFER | 11/48 | audio=196608/192000 | slow=0
-    34 | BUFFER | 11/48 | audio=196608/192000 | slow=0
-    35 | BUFFER | 12/48 | audio=196608/192000 | slow=0
-    36 | BUFFER | 12/48 | audio=196608/192000 | slow=0
-    37 | BUFFER | 12/48 | audio=196608/192000 | slow=0
-    38 | BUFFER | 13/48 | audio=294912/192000 | slow=0
-    39 | BUFFER | 13/48 | audio=294912/192000 | slow=0
-    40 | BUFFER | 13/48 | audio=294912/192000 | slow=0
-    41 | BUFFER | 14/48 | audio=294912/192000 | slow=0
-    42 | BUFFER | 14/48 | audio=294912/192000 | slow=0
-    43 | BUFFER | 14/48 | audio=294912/192000 | slow=0
-    44 | BUFFER | 15/48 | audio=294912/192000 | slow=0
-    45 | BUFFER | 15/48 | audio=294912/192000 | slow=0
-    46 | BUFFER | 15/48 | audio=294912/192000 | slow=0
-    47 | BUFFER | 16/48 | audio=294912/192000 | slow=0
-    48 | BUFFER | 16/48 | audio=294912/192000 | slow=0
-    49 | BUFFER | 16/48 | audio=294912/192000 | slow=0
-    50 | BUFFER | 17/48 | audio=294912/192000 | slow=0
-    51 | BUFFER | 17/48 | audio=294912/192000 | slow=0
-    52 | BUFFER | 17/48 | audio=294912/192000 | slow=0
-    53 | BUFFER | 18/48 | audio=294912/192000 | slow=0
-    54 | BUFFER | 18/48 | audio=294912/192000 | slow=0
-    55 | BUFFER | 18/48 | audio=294912/192000 | slow=0
-    56 | BUFFER | 19/48 | audio=393216/192000 | slow=0
-    57 | BUFFER | 19/48 | audio=393216/192000 | slow=0
-    58 | BUFFER | 19/48 | audio=393216/192000 | slow=0
-    59 | BUFFER | 20/48 | audio=393216/192000 | slow=0
-    60 | BUFFER | 20/48 | audio=393216/192000 | slow=0
-    61 | BUFFER | 20/48 | audio=393216/192000 | slow=0
-    62 | BUFFER | 21/48 | audio=393216/192000 | slow=0
-    63 | BUFFER | 21/48 | audio=393216/192000 | slow=0
-    64 | BUFFER | 21/48 | audio=393216/192000 | slow=0
-    65 | BUFFER | 22/48 | audio=393216/192000 | slow=0
-    66 | BUFFER | 22/48 | audio=393216/192000 | slow=0
-    67 | BUFFER | 22/48 | audio=393216/192000 | slow=0
-    68 | BUFFER | 23/48 | audio=393216/192000 | slow=0
-    69 | BUFFER | 23/48 | audio=393216/192000 | slow=0
-    70 | BUFFER | 23/48 | audio=393216/192000 | slow=0
-    71 | BUFFER | 24/48 | audio=393216/192000 | slow=0
-    72 | BUFFER | 24/48 | audio=393216/192000 | slow=0
-    73 | BUFFER | 24/48 | audio=393216/192000 | slow=0
-    74 | BUFFER | 25/48 | audio=491520/192000 | slow=0
-    75 | BUFFER | 25/48 | audio=491520/192000 | slow=0
-    76 | BUFFER | 25/48 | audio=491520/192000 | slow=0
-    77 | BUFFER | 26/48 | audio=491520/192000 | slow=0
-    78 | BUFFER | 26/48 | audio=491520/192000 | slow=0
-    79 | BUFFER | 26/48 | audio=491520/192000 | slow=0
-    80 | BUFFER | 27/48 | audio=491520/192000 | slow=0
-    81 | BUFFER | 27/48 | audio=491520/192000 | slow=0
-    82 | BUFFER | 27/48 | audio=491520/192000 | slow=0
-    83 | BUFFER | 28/48 | audio=491520/192000 | slow=0
-    84 | BUFFER | 28/48 | audio=491520/192000 | slow=0
-    85 | BUFFER | 28/48 | audio=491520/192000 | slow=0
-    86 | BUFFER | 29/48 | audio=491520/192000 | slow=0
-    87 | BUFFER | 29/48 | audio=491520/192000 | slow=0
-    88 | BUFFER | 29/48 | audio=491520/192000 | slow=0
-    89 | BUFFER | 30/48 | audio=491520/192000 | slow=0
-    90 | BUFFER | 30/48 | audio=491520/192000 | slow=0
-    91 | BUFFER | 30/48 | audio=491520/192000 | slow=0
-    92 | BUFFER | 31/48 | audio=589824/192000 | slow=0
-    93 | BUFFER | 31/48 | audio=589824/192000 | slow=0
-    94 | BUFFER | 31/48 | audio=589824/192000 | slow=0
-    95 | BUFFER | 32/48 | audio=589824/192000 | slow=0
-    96 | BUFFER | 32/48 | audio=589824/192000 | slow=0
-    97 | BUFFER | 32/48 | audio=589824/192000 | slow=0
-    98 | BUFFER | 33/48 | audio=589824/192000 | slow=0
-    99 | BUFFER | 33/48 | audio=589824/192000 | slow=0
-   100 | BUFFER | 33/48 | audio=589824/192000 | slow=0
-   101 | BUFFER | 34/48 | audio=589824/192000 | slow=0
-   102 | BUFFER | 34/48 | audio=589824/192000 | slow=0
-   103 | BUFFER | 34/48 | audio=589824/192000 | slow=0
-   104 | BUFFER | 35/48 | audio=589824/192000 | slow=0
-   105 | BUFFER | 35/48 | audio=589824/192000 | slow=0
-   106 | BUFFER | 35/48 | audio=589824/192000 | slow=0
-   107 | BUFFER | 36/48 | audio=589824/192000 | slow=0
-   108 | BUFFER | 36/48 | audio=589824/192000 | slow=0
-   109 | BUFFER | 36/48 | audio=589824/192000 | slow=0
-   110 | BUFFER | 37/48 | audio=688128/192000 | slow=0
-   111 | BUFFER | 37/48 | audio=688128/192000 | slow=0
-   112 | BUFFER | 37/48 | audio=688128/192000 | slow=0
-   113 | BUFFER | 38/48 | audio=688128/192000 | slow=0
-   114 | BUFFER | 38/48 | audio=688128/192000 | slow=0
-   115 | BUFFER | 38/48 | audio=688128/192000 | slow=0
-   116 | BUFFER | 39/48 | audio=688128/192000 | slow=0
-   117 | BUFFER | 39/48 | audio=688128/192000 | slow=0
-   118 | BUFFER | 39/48 | audio=688128/192000 | slow=0
-   119 | BUFFER | 40/48 | audio=688128/192000 | slow=0
-   120 | BUFFER | 40/48 | audio=688128/192000 | slow=0
-   121 | BUFFER | 40/48 | audio=688128/192000 | slow=0
-   122 | BUFFER | 41/48 | audio=688128/192000 | slow=0
-   123 | BUFFER | 41/48 | audio=688128/192000 | slow=0
-   124 | BUFFER | 41/48 | audio=688128/192000 | slow=0
-   125 | BUFFER | 42/48 | audio=688128/192000 | slow=0
-   126 | BUFFER | 42/48 | audio=688128/192000 | slow=0
-   127 | BUFFER | 42/48 | audio=688128/192000 | slow=0
-   128 | BUFFER | 43/48 | audio=774144/192000 | slow=0
-   129 | BUFFER | 43/48 | audio=774144/192000 | slow=0
-   130 | BUFFER | 43/48 | audio=774144/192000 | slow=0
-   131 | BUFFER | 44/48 | audio=774144/192000 | slow=0
-   132 | BUFFER | 44/48 | audio=774144/192000 | slow=0
-   133 | BUFFER | 44/48 | audio=774144/192000 | slow=0
-   134 | BUFFER | 45/48 | audio=774144/192000 | slow=0
-   135 | BUFFER | 45/48 | audio=774144/192000 | slow=0
-   136 | BUFFER | 45/48 | audio=774144/192000 | slow=0
-   137 | BUFFER | 46/48 | audio=774144/192000 | slow=0
-   138 | BUFFER | 46/48 | audio=774144/192000 | slow=0
-   139 | BUFFER | 46/48 | audio=774144/192000 | slow=0
-   140 | BUFFER | 47/48 | audio=774144/192000 | slow=0
-   141 | BUFFER | 47/48 | audio=774144/192000 | slow=0
-   142 | BUFFER | 47/48 | audio=774144/192000 | slow=0
-   143 | BUFFER | 48/48 | audio=774144/192000 | slow=0
+     0 | BUFFER |  0/48 | audio=0/768000 | slow=0
+     1 | BUFFER |  0/48 | audio=0/768000 | slow=0
+     2 | BUFFER |  0/48 | audio=0/768000 | slow=0
+     3 | BUFFER |  0/48 | audio=0/768000 | slow=0
+     4 | BUFFER |  0/48 | audio=0/768000 | slow=0
+     5 | BUFFER |  0/48 | audio=513280/768000 | slow=0
+     6 | BUFFER |  0/48 | audio=513280/768000 | slow=0
+     7 | BUFFER |  0/48 | audio=513280/768000 | slow=0
+     8 | BUFFER |  0/48 | audio=513280/768000 | slow=0
+     9 | BUFFER |  0/48 | audio=513280/768000 | slow=0
+    10 | BUFFER |  0/48 | audio=513280/768000 | slow=0
+    11 | BUFFER |  0/48 | audio=513280/768000 | slow=0
+    12 | BUFFER |  0/48 | audio=513280/768000 | slow=0
+    13 | BUFFER |  0/48 | audio=513280/768000 | slow=0
+    14 | BUFFER |  0/48 | audio=513280/768000 | slow=0
+    15 | BUFFER |  1/48 | audio=513280/768000 | slow=0
+    16 | BUFFER |  1/48 | audio=513280/768000 | slow=0
+    17 | BUFFER |  1/48 | audio=513280/768000 | slow=0
+    18 | BUFFER |  1/48 | audio=513280/768000 | slow=0
+    19 | BUFFER |  1/48 | audio=513280/768000 | slow=0
+    20 | BUFFER |  1/48 | audio=513280/768000 | slow=0
+    21 | BUFFER |  1/48 | audio=513280/768000 | slow=0
+    22 | BUFFER |  1/48 | audio=513280/768000 | slow=0
+    23 | BUFFER |  1/48 | audio=513280/768000 | slow=0
+    24 | BUFFER |  2/48 | audio=513280/768000 | slow=0
+    25 | BUFFER |  2/48 | audio=513280/768000 | slow=0
+    26 | BUFFER |  2/48 | audio=513280/768000 | slow=0
+    27 | BUFFER |  2/48 | audio=513280/768000 | slow=0
+    28 | BUFFER |  2/48 | audio=513280/768000 | slow=0
+    29 | BUFFER |  2/48 | audio=513280/768000 | slow=0
+    30 | BUFFER |  2/48 | audio=513280/768000 | slow=0
+    31 | BUFFER |  2/48 | audio=513280/768000 | slow=0
+    32 | BUFFER |  3/48 | audio=513280/768000 | slow=0
+    33 | BUFFER |  3/48 | audio=513280/768000 | slow=0
+    34 | BUFFER |  3/48 | audio=513280/768000 | slow=0
+    35 | BUFFER |  3/48 | audio=513280/768000 | slow=0
+    36 | BUFFER |  3/48 | audio=513280/768000 | slow=0
+    37 | BUFFER |  3/48 | audio=513280/768000 | slow=0
+    38 | BUFFER |  3/48 | audio=513280/768000 | slow=0
+    39 | BUFFER |  4/48 | audio=513280/768000 | slow=0
+    40 | BUFFER |  4/48 | audio=513280/768000 | slow=0
+    41 | BUFFER |  4/48 | audio=513280/768000 | slow=0
+    42 | BUFFER |  4/48 | audio=513280/768000 | slow=0
+    43 | BUFFER |  4/48 | audio=513280/768000 | slow=0
+    44 | BUFFER |  4/48 | audio=513280/768000 | slow=0
+    45 | BUFFER |  5/48 | audio=513280/768000 | slow=0
+    46 | BUFFER |  5/48 | audio=513280/768000 | slow=0
+    47 | BUFFER |  5/48 | audio=513280/768000 | slow=0
+    48 | BUFFER |  5/48 | audio=513280/768000 | slow=0
+    49 | BUFFER |  5/48 | audio=513280/768000 | slow=0
+    50 | BUFFER |  5/48 | audio=513280/768000 | slow=0
+    51 | BUFFER |  5/48 | audio=513280/768000 | slow=0
+    52 | BUFFER |  6/48 | audio=812800/768000 | slow=0
+    53 | BUFFER |  6/48 | audio=1025280/768000 | slow=0
+    54 | BUFFER |  6/48 | audio=1025280/768000 | slow=0
+    55 | BUFFER |  6/48 | audio=1025280/768000 | slow=0
+    56 | BUFFER |  6/48 | audio=1025280/768000 | slow=0
+    57 | BUFFER |  6/48 | audio=1025280/768000 | slow=0
+    58 | BUFFER |  6/48 | audio=1025280/768000 | slow=0
+    59 | BUFFER |  7/48 | audio=1025280/768000 | slow=0
+    60 | BUFFER |  7/48 | audio=1025280/768000 | slow=0
+    61 | BUFFER |  7/48 | audio=1025280/768000 | slow=0
+    62 | BUFFER |  7/48 | audio=1025280/768000 | slow=0
+    63 | BUFFER |  7/48 | audio=1025280/768000 | slow=0
+    64 | BUFFER |  7/48 | audio=1025280/768000 | slow=0
+    65 | BUFFER |  7/48 | audio=1025280/768000 | slow=0
+    66 | BUFFER |  8/48 | audio=1025280/768000 | slow=0
+    67 | BUFFER |  8/48 | audio=1025280/768000 | slow=0
+    68 | BUFFER |  8/48 | audio=1025280/768000 | slow=0
+    69 | BUFFER |  8/48 | audio=1025280/768000 | slow=0
+    70 | BUFFER |  8/48 | audio=1025280/768000 | slow=0
+    71 | BUFFER |  8/48 | audio=1025280/768000 | slow=0
+    72 | BUFFER |  8/48 | audio=1025280/768000 | slow=0
+    73 | BUFFER |  9/48 | audio=1025280/768000 | slow=0
+    74 | BUFFER |  9/48 | audio=1025280/768000 | slow=0
+    75 | BUFFER |  9/48 | audio=1025280/768000 | slow=0
+    76 | BUFFER |  9/48 | audio=1025280/768000 | slow=0
+    77 | BUFFER |  9/48 | audio=1025280/768000 | slow=0
+    78 | BUFFER |  9/48 | audio=1025280/768000 | slow=0
+    79 | BUFFER |  9/48 | audio=1025280/768000 | slow=0
+    80 | BUFFER |  9/48 | audio=1025280/768000 | slow=0
+    81 | BUFFER | 10/48 | audio=1025280/768000 | slow=0
+    82 | BUFFER | 10/48 | audio=1025280/768000 | slow=0
+    83 | BUFFER | 10/48 | audio=1025280/768000 | slow=0
+    84 | BUFFER | 10/48 | audio=1025280/768000 | slow=0
+    85 | BUFFER | 10/48 | audio=1025280/768000 | slow=0
+    86 | BUFFER | 10/48 | audio=1025280/768000 | slow=0
+    87 | BUFFER | 10/48 | audio=1025280/768000 | slow=0
+    88 | BUFFER | 11/48 | audio=1025280/768000 | slow=0
+    89 | BUFFER | 11/48 | audio=1025280/768000 | slow=0
+    90 | BUFFER | 11/48 | audio=1025280/768000 | slow=0
+    91 | BUFFER | 11/48 | audio=1025280/768000 | slow=0
+    92 | BUFFER | 11/48 | audio=1025280/768000 | slow=0
+    93 | BUFFER | 11/48 | audio=1025280/768000 | slow=0
+    94 | BUFFER | 11/48 | audio=1025280/768000 | slow=0
+    95 | BUFFER | 12/48 | audio=1025280/768000 | slow=0
+    96 | BUFFER | 12/48 | audio=1025280/768000 | slow=0
+    97 | BUFFER | 12/48 | audio=1025280/768000 | slow=0
+    98 | BUFFER | 12/48 | audio=1025280/768000 | slow=0
+    99 | BUFFER | 12/48 | audio=1025280/768000 | slow=0
+   100 | BUFFER | 12/48 | audio=1025280/768000 | slow=0
+   101 | BUFFER | 12/48 | audio=1025280/768000 | slow=0
+   102 | BUFFER | 13/48 | audio=1025280/768000 | slow=0
+   103 | BUFFER | 13/48 | audio=1025280/768000 | slow=0
+   104 | BUFFER | 13/48 | audio=1025280/768000 | slow=0
+   105 | BUFFER | 13/48 | audio=1025280/768000 | slow=0
+   106 | BUFFER | 13/48 | audio=1025280/768000 | slow=0
+   107 | BUFFER | 13/48 | audio=1025280/768000 | slow=0
+   108 | BUFFER | 14/48 | audio=1158400/768000 | slow=0
+   109 | BUFFER | 14/48 | audio=1473280/768000 | slow=0
+   110 | BUFFER | 14/48 | audio=1473280/768000 | slow=0
+   111 | BUFFER | 14/48 | audio=1473280/768000 | slow=0
+   112 | BUFFER | 14/48 | audio=1473280/768000 | slow=0
+   113 | BUFFER | 14/48 | audio=1473280/768000 | slow=0
+   114 | BUFFER | 14/48 | audio=1473280/768000 | slow=0
+   115 | BUFFER | 14/48 | audio=1473280/768000 | slow=0
+   116 | BUFFER | 15/48 | audio=1473280/768000 | slow=0
+   117 | BUFFER | 15/48 | audio=1473280/768000 | slow=0
+   118 | BUFFER | 15/48 | audio=1473280/768000 | slow=0
+   119 | BUFFER | 15/48 | audio=1473280/768000 | slow=0
+   120 | BUFFER | 15/48 | audio=1473280/768000 | slow=0
+   121 | BUFFER | 15/48 | audio=1473280/768000 | slow=0
+   122 | BUFFER | 15/48 | audio=1473280/768000 | slow=0
+   123 | BUFFER | 16/48 | audio=1473280/768000 | slow=0
+   124 | BUFFER | 16/48 | audio=1473280/768000 | slow=0
+   125 | BUFFER | 16/48 | audio=1473280/768000 | slow=0
+   126 | BUFFER | 16/48 | audio=1473280/768000 | slow=0
+   127 | BUFFER | 16/48 | audio=1473280/768000 | slow=0
+   128 | BUFFER | 16/48 | audio=1473280/768000 | slow=0
+   129 | BUFFER | 16/48 | audio=1473280/768000 | slow=0
+   130 | BUFFER | 17/48 | audio=1473280/768000 | slow=0
+   131 | BUFFER | 17/48 | audio=1473280/768000 | slow=0
+   132 | BUFFER | 17/48 | audio=1473280/768000 | slow=0
+   133 | BUFFER | 17/48 | audio=1473280/768000 | slow=0
+   134 | BUFFER | 17/48 | audio=1473280/768000 | slow=0
+   135 | BUFFER | 17/48 | audio=1473280/768000 | slow=0
+   136 | BUFFER | 17/48 | audio=1473280/768000 | slow=0
+   137 | BUFFER | 17/48 | audio=1473280/768000 | slow=0
+   138 | BUFFER | 18/48 | audio=1473280/768000 | slow=0
+   139 | BUFFER | 18/48 | audio=1473280/768000 | slow=0
+   140 | BUFFER | 18/48 | audio=1473280/768000 | slow=0
+   141 | BUFFER | 18/48 | audio=1473280/768000 | slow=0
+   142 | BUFFER | 18/48 | audio=1473280/768000 | slow=0
+   143 | BUFFER | 18/48 | audio=1473280/768000 | slow=0
+   144 | BUFFER | 18/48 | audio=1473280/768000 | slow=0
+   145 | BUFFER | 19/48 | audio=1473280/768000 | slow=0
+   146 | BUFFER | 19/48 | audio=1473280/768000 | slow=0
+   147 | BUFFER | 19/48 | audio=1473280/768000 | slow=0
+   148 | BUFFER | 19/48 | audio=1473280/768000 | slow=0
+   149 | BUFFER | 19/48 | audio=1473280/768000 | slow=0
+   150 | BUFFER | 19/48 | audio=1473280/768000 | slow=0
+   151 | BUFFER | 19/48 | audio=1473280/768000 | slow=0
+   152 | BUFFER | 20/48 | audio=1473280/768000 | slow=0
+   153 | BUFFER | 20/48 | audio=1473280/768000 | slow=0
+   154 | BUFFER | 20/48 | audio=1473280/768000 | slow=0
+   155 | BUFFER | 20/48 | audio=1473280/768000 | slow=0
+   156 | BUFFER | 20/48 | audio=1473280/768000 | slow=0
+   157 | BUFFER | 20/48 | audio=1473280/768000 | slow=0
+   158 | BUFFER | 20/48 | audio=1473280/768000 | slow=0
+   159 | BUFFER | 21/48 | audio=1505280/768000 | slow=0
+   160 | BUFFER | 21/48 | audio=1538560/768000 | slow=0
+   161 | BUFFER | 21/48 | audio=1538560/768000 | slow=0
+   162 | BUFFER | 21/48 | audio=1538560/768000 | slow=0
+   163 | BUFFER | 21/48 | audio=1538560/768000 | slow=0
+   164 | BUFFER | 21/48 | audio=1538560/768000 | slow=0
+   165 | BUFFER | 21/48 | audio=1538560/768000 | slow=0
+   166 | BUFFER | 22/48 | audio=1538560/768000 | slow=0
+   167 | BUFFER | 22/48 | audio=1538560/768000 | slow=0
+   168 | BUFFER | 22/48 | audio=1538560/768000 | slow=0
+   169 | BUFFER | 22/48 | audio=1538560/768000 | slow=0
+   170 | BUFFER | 22/48 | audio=1538560/768000 | slow=0
+   171 | BUFFER | 22/48 | audio=1538560/768000 | slow=0
+   172 | BUFFER | 22/48 | audio=1538560/768000 | slow=0
+   173 | BUFFER | 22/48 | audio=1538560/768000 | slow=0
+   174 | BUFFER | 23/48 | audio=1538560/768000 | slow=0
+   175 | BUFFER | 23/48 | audio=1538560/768000 | slow=0
+   176 | BUFFER | 23/48 | audio=1538560/768000 | slow=0
+   177 | BUFFER | 23/48 | audio=1538560/768000 | slow=0
+   178 | BUFFER | 23/48 | audio=1538560/768000 | slow=0
+   179 | BUFFER | 23/48 | audio=1538560/768000 | slow=0
+   180 | BUFFER | 23/48 | audio=1538560/768000 | slow=0
+   181 | BUFFER | 24/48 | audio=2050560/768000 | slow=0
+   182 | BUFFER | 24/48 | audio=2050560/768000 | slow=0
+   183 | BUFFER | 24/48 | audio=2050560/768000 | slow=0
+   184 | BUFFER | 24/48 | audio=2050560/768000 | slow=0
+   185 | BUFFER | 24/48 | audio=2050560/768000 | slow=0
+   186 | BUFFER | 24/48 | audio=2050560/768000 | slow=0
+   187 | BUFFER | 24/48 | audio=2050560/768000 | slow=0
+   188 | BUFFER | 25/48 | audio=2050560/768000 | slow=0
+   189 | BUFFER | 25/48 | audio=2050560/768000 | slow=0
+   190 | BUFFER | 25/48 | audio=2050560/768000 | slow=0
+   191 | BUFFER | 25/48 | audio=2050560/768000 | slow=0
+   192 | BUFFER | 25/48 | audio=2050560/768000 | slow=0
+   193 | BUFFER | 25/48 | audio=2050560/768000 | slow=0
+   194 | BUFFER | 25/48 | audio=2050560/768000 | slow=0
+   195 | BUFFER | 25/48 | audio=2050560/768000 | slow=0
+   196 | BUFFER | 26/48 | audio=2050560/768000 | slow=0
+   197 | BUFFER | 26/48 | audio=2050560/768000 | slow=0
+   198 | BUFFER | 26/48 | audio=2050560/768000 | slow=0
+   199 | BUFFER | 26/48 | audio=2050560/768000 | slow=0
+   200 | BUFFER | 26/48 | audio=2050560/768000 | slow=0
+   201 | BUFFER | 26/48 | audio=2050560/768000 | slow=0
+   202 | BUFFER | 26/48 | audio=2050560/768000 | slow=0
+   203 | BUFFER | 26/48 | audio=2050560/768000 | slow=0
+   204 | BUFFER | 27/48 | audio=2050560/768000 | slow=0
+   205 | BUFFER | 27/48 | audio=2050560/768000 | slow=0
+   206 | BUFFER | 27/48 | audio=2050560/768000 | slow=0
+   207 | BUFFER | 27/48 | audio=2050560/768000 | slow=0
+   208 | BUFFER | 27/48 | audio=2050560/768000 | slow=0
+   209 | BUFFER | 27/48 | audio=2050560/768000 | slow=0
+   210 | BUFFER | 27/48 | audio=2050560/768000 | slow=0
+   211 | BUFFER | 28/48 | audio=2050560/768000 | slow=0
+   212 | BUFFER | 28/48 | audio=2050560/768000 | slow=0
+   213 | BUFFER | 28/48 | audio=2050560/768000 | slow=0
+   214 | BUFFER | 28/48 | audio=2050560/768000 | slow=0
+   215 | BUFFER | 28/48 | audio=2050560/768000 | slow=0
+   216 | BUFFER | 28/48 | audio=2050560/768000 | slow=0
+   217 | BUFFER | 28/48 | audio=2050560/768000 | slow=0
+   218 | BUFFER | 29/48 | audio=2050560/768000 | slow=0
+   219 | BUFFER | 29/48 | audio=2050560/768000 | slow=0
+   220 | BUFFER | 29/48 | audio=2050560/768000 | slow=0
+   221 | BUFFER | 29/48 | audio=2050560/768000 | slow=0
+   222 | BUFFER | 29/48 | audio=2050560/768000 | slow=0
+   223 | BUFFER | 29/48 | audio=2050560/768000 | slow=0
+   224 | BUFFER | 29/48 | audio=2050560/768000 | slow=0
+   225 | BUFFER | 30/48 | audio=2562560/768000 | slow=0
+   226 | BUFFER | 30/48 | audio=2562560/768000 | slow=0
+   227 | BUFFER | 30/48 | audio=2562560/768000 | slow=0
+   228 | BUFFER | 30/48 | audio=2562560/768000 | slow=0
+   229 | BUFFER | 30/48 | audio=2562560/768000 | slow=0
+   230 | BUFFER | 30/48 | audio=2562560/768000 | slow=0
+   231 | BUFFER | 30/48 | audio=2562560/768000 | slow=0
+   232 | BUFFER | 31/48 | audio=2562560/768000 | slow=0
+   233 | BUFFER | 31/48 | audio=2562560/768000 | slow=0
+   234 | BUFFER | 31/48 | audio=2562560/768000 | slow=0
+   235 | BUFFER | 31/48 | audio=2562560/768000 | slow=0
+   236 | BUFFER | 31/48 | audio=2562560/768000 | slow=0
+   237 | BUFFER | 31/48 | audio=2562560/768000 | slow=0
+   238 | BUFFER | 31/48 | audio=2562560/768000 | slow=0
+   239 | BUFFER | 32/48 | audio=2562560/768000 | slow=0
+   240 | BUFFER | 32/48 | audio=2562560/768000 | slow=0
+   241 | BUFFER | 32/48 | audio=2562560/768000 | slow=0
+   242 | BUFFER | 32/48 | audio=2562560/768000 | slow=0
+   243 | BUFFER | 32/48 | audio=2562560/768000 | slow=0
+   244 | BUFFER | 32/48 | audio=2562560/768000 | slow=0
+   245 | BUFFER | 32/48 | audio=2562560/768000 | slow=0
+   246 | BUFFER | 33/48 | audio=2562560/768000 | slow=0
+   247 | BUFFER | 33/48 | audio=2562560/768000 | slow=0
+   248 | BUFFER | 33/48 | audio=2562560/768000 | slow=0
+   249 | BUFFER | 33/48 | audio=2562560/768000 | slow=0
+   250 | BUFFER | 33/48 | audio=2562560/768000 | slow=0
+   251 | BUFFER | 33/48 | audio=2562560/768000 | slow=0
+   252 | BUFFER | 33/48 | audio=2562560/768000 | slow=0
+   253 | BUFFER | 33/48 | audio=2562560/768000 | slow=0
+   254 | BUFFER | 34/48 | audio=2562560/768000 | slow=0
+   255 | BUFFER | 34/48 | audio=2562560/768000 | slow=0
+   256 | BUFFER | 34/48 | audio=2562560/768000 | slow=0
+   257 | BUFFER | 34/48 | audio=2562560/768000 | slow=0
+   258 | BUFFER | 34/48 | audio=2562560/768000 | slow=0
+   259 | BUFFER | 34/48 | audio=2562560/768000 | slow=0
+   260 | BUFFER | 34/48 | audio=2562560/768000 | slow=0
+   261 | BUFFER | 35/48 | audio=2562560/768000 | slow=0
+   262 | BUFFER | 35/48 | audio=2562560/768000 | slow=0
+   263 | BUFFER | 35/48 | audio=2562560/768000 | slow=0
+   264 | BUFFER | 35/48 | audio=2562560/768000 | slow=0
+   265 | BUFFER | 35/48 | audio=2562560/768000 | slow=0
+   266 | BUFFER | 35/48 | audio=2562560/768000 | slow=0
+   267 | BUFFER | 35/48 | audio=2562560/768000 | slow=0
+   268 | BUFFER | 36/48 | audio=2562560/768000 | slow=0
+   269 | BUFFER | 36/48 | audio=2562560/768000 | slow=0
+   270 | BUFFER | 36/48 | audio=2562560/768000 | slow=0
+   271 | BUFFER | 36/48 | audio=2562560/768000 | slow=0
+   272 | BUFFER | 36/48 | audio=2562560/768000 | slow=0
+   273 | BUFFER | 36/48 | audio=2562560/768000 | slow=0
+   274 | BUFFER | 36/48 | audio=2562560/768000 | slow=0
+   275 | BUFFER | 37/48 | audio=2562560/768000 | slow=0
+   276 | BUFFER | 37/48 | audio=2562560/768000 | slow=0
+   277 | BUFFER | 37/48 | audio=2562560/768000 | slow=0
+   278 | BUFFER | 37/48 | audio=2562560/768000 | slow=0
+   279 | BUFFER | 37/48 | audio=2562560/768000 | slow=0
+   280 | BUFFER | 37/48 | audio=2562560/768000 | slow=0
+   281 | BUFFER | 37/48 | audio=2562560/768000 | slow=0
+   282 | BUFFER | 38/48 | audio=2997760/768000 | slow=0
+   283 | BUFFER | 38/48 | audio=3010560/768000 | slow=0
+   284 | BUFFER | 38/48 | audio=3010560/768000 | slow=0
+   285 | BUFFER | 38/48 | audio=3010560/768000 | slow=0
+   286 | BUFFER | 38/48 | audio=3010560/768000 | slow=0
+   287 | BUFFER | 38/48 | audio=3010560/768000 | slow=0
+   288 | BUFFER | 38/48 | audio=3010560/768000 | slow=0
+   289 | BUFFER | 39/48 | audio=3010560/768000 | slow=0
+   290 | BUFFER | 39/48 | audio=3010560/768000 | slow=0
+   291 | BUFFER | 39/48 | audio=3010560/768000 | slow=0
+   292 | BUFFER | 39/48 | audio=3010560/768000 | slow=0
+   293 | BUFFER | 39/48 | audio=3010560/768000 | slow=0
+   294 | BUFFER | 39/48 | audio=3010560/768000 | slow=0
+   295 | BUFFER | 39/48 | audio=3010560/768000 | slow=0
+   296 | BUFFER | 40/48 | audio=3010560/768000 | slow=0
+   297 | BUFFER | 40/48 | audio=3010560/768000 | slow=0
+   298 | BUFFER | 40/48 | audio=3010560/768000 | slow=0
+   299 | BUFFER | 40/48 | audio=3010560/768000 | slow=0
+   300 | BUFFER | 40/48 | audio=3010560/768000 | slow=0
+   301 | BUFFER | 40/48 | audio=3010560/768000 | slow=0
+   302 | BUFFER | 40/48 | audio=3010560/768000 | slow=0
+   303 | BUFFER | 40/48 | audio=3010560/768000 | slow=0
+   304 | BUFFER | 41/48 | audio=3010560/768000 | slow=0
+   305 | BUFFER | 41/48 | audio=3010560/768000 | slow=0
+   306 | BUFFER | 41/48 | audio=3010560/768000 | slow=0
+   307 | BUFFER | 41/48 | audio=3010560/768000 | slow=0
+   308 | BUFFER | 41/48 | audio=3010560/768000 | slow=0
+   309 | BUFFER | 41/48 | audio=3010560/768000 | slow=0
+   310 | BUFFER | 41/48 | audio=3010560/768000 | slow=0
+   311 | BUFFER | 41/48 | audio=3010560/768000 | slow=0
+   312 | BUFFER | 42/48 | audio=3010560/768000 | slow=0
+   313 | BUFFER | 42/48 | audio=3010560/768000 | slow=0
+   314 | BUFFER | 42/48 | audio=3010560/768000 | slow=0
+   315 | BUFFER | 42/48 | audio=3010560/768000 | slow=0
+   316 | BUFFER | 42/48 | audio=3010560/768000 | slow=0
+   317 | BUFFER | 42/48 | audio=3010560/768000 | slow=0
+   318 | BUFFER | 42/48 | audio=3010560/768000 | slow=0
+   319 | BUFFER | 43/48 | audio=3010560/768000 | slow=0
+   320 | BUFFER | 43/48 | audio=3010560/768000 | slow=0
+   321 | BUFFER | 43/48 | audio=3010560/768000 | slow=0
+   322 | BUFFER | 43/48 | audio=3010560/768000 | slow=0
+   323 | BUFFER | 43/48 | audio=3010560/768000 | slow=0
+   324 | BUFFER | 43/48 | audio=3010560/768000 | slow=0
+   325 | BUFFER | 43/48 | audio=3010560/768000 | slow=0
+   326 | BUFFER | 44/48 | audio=3010560/768000 | slow=0
+   327 | BUFFER | 44/48 | audio=3010560/768000 | slow=0
+   328 | BUFFER | 44/48 | audio=3010560/768000 | slow=0
+   329 | BUFFER | 44/48 | audio=3010560/768000 | slow=0
+   330 | BUFFER | 44/48 | audio=3010560/768000 | slow=0
+   331 | BUFFER | 44/48 | audio=3010560/768000 | slow=0
+   332 | BUFFER | 44/48 | audio=3010560/768000 | slow=0
+   333 | BUFFER | 45/48 | audio=3075840/768000 | slow=0
+   334 | BUFFER | 45/48 | audio=3075840/768000 | slow=0
+   335 | BUFFER | 45/48 | audio=3075840/768000 | slow=0
+   336 | BUFFER | 45/48 | audio=3075840/768000 | slow=0
+   337 | BUFFER | 45/48 | audio=3075840/768000 | slow=0
+   338 | BUFFER | 45/48 | audio=3075840/768000 | slow=0
+   339 | BUFFER | 45/48 | audio=3075840/768000 | slow=0
+   340 | BUFFER | 46/48 | audio=3075840/768000 | slow=0
+   341 | BUFFER | 46/48 | audio=3075840/768000 | slow=0
+   342 | BUFFER | 46/48 | audio=3075840/768000 | slow=0
+   343 | BUFFER | 46/48 | audio=3075840/768000 | slow=0
+   344 | BUFFER | 46/48 | audio=3075840/768000 | slow=0
+   345 | BUFFER | 46/48 | audio=3075840/768000 | slow=0
+   346 | BUFFER | 46/48 | audio=3075840/768000 | slow=0
+   347 | BUFFER | 46/48 | audio=3075840/768000 | slow=0
+   348 | BUFFER | 47/48 | audio=3075840/768000 | slow=0
+   349 | BUFFER | 47/48 | audio=3075840/768000 | slow=0
+   350 | BUFFER | 47/48 | audio=3075840/768000 | slow=0
+   351 | BUFFER | 47/48 | audio=3075840/768000 | slow=0
+   352 | BUFFER | 47/48 | audio=3075840/768000 | slow=0
+   353 | BUFFER | 47/48 | audio=3075840/768000 | slow=0
+   354 | BUFFER | 47/48 | audio=3075840/768000 | slow=0
+   355 | BUFFER | 48/48 | audio=3340800/768000 | slow=0
 # PRESTART | audio pre-activated, waiting for PipeWire on_process
-   144 | BUFFER | 48/48 | audio=774144/192000 | slow=0
-   145 | BUFFER | 48/48 | audio=774144/192000 | slow=0
-   146 | BUFFER | 48/48 | audio=774144/192000 | slow=0
-   147 | BUFFER | 49/48 | audio=872448/192000 | slow=0
-   148 | BUFFER | 49/48 | audio=872448/192000 | slow=0
-   149 | BUFFER | 49/48 | audio=872448/192000 | slow=0
-   150 | BUFFER | 50/48 | audio=872448/192000 | slow=0
-   151 | BUFFER | 50/48 | audio=872448/192000 | slow=0
-   152 | BUFFER | 50/48 | audio=872448/192000 | slow=0
-   153 | BUFFER | 51/48 | audio=872448/192000 | slow=0
-   154 | BUFFER | 51/48 | audio=872448/192000 | slow=0
-   155 | BUFFER | 51/48 | audio=872448/192000 | slow=0
-   156 | BUFFER | 52/48 | audio=872448/192000 | slow=0
-   157 | BUFFER | 52/48 | audio=872448/192000 | slow=0
-   158 | BUFFER | 52/48 | audio=872448/192000 | slow=0
-   159 | BUFFER | 53/48 | audio=872448/192000 | slow=0
-   160 | BUFFER | 53/48 | audio=872448/192000 | slow=0
-   161 | BUFFER | 53/48 | audio=872448/192000 | slow=0
-   162 | BUFFER | 53/48 | audio=872448/192000 | slow=0
-   163 | BUFFER | 54/48 | audio=872448/192000 | slow=0
-   164 | BUFFER | 54/48 | audio=871424/192000 | slow=0
-   165 | PLAY   | q=53 | avsync=     +0 | pos=      0 | v= 1 | dt=    0/41708 us
-   174 | PLAY   | q=55 | avsync=     +0 | pos=     42 | v= 9 | dt=39949/41708 us
-   180 | PLAY   | q=58 | avsync=     +0 | pos=     83 | v= 6 | dt=43290/41708 us
-   183 | PLAY   | q=62 | avsync=  -9616 | pos=    125 | v= 3 | dt=51611/41708 us
-   187 | PLAY   | q=63 | avsync=   +752 | pos=    167 | v= 4 | dt=31680/41708 us
-   193 | PLAY   | q=63 | avsync=   -623 | pos=    209 | v= 6 | dt=43280/41708 us
-   199 | PLAY   | q=63 | avsync=  -2897 | pos=    250 | v= 6 | dt=43322/41708 us
-   204 | PLAY   | q=63 | avsync=  +2433 | pos=    292 | v= 5 | dt=36646/41708 us
-   210 | PLAY   | q=63 | avsync=  +1051 | pos=    334 | v= 6 | dt=43323/41708 us
-   215 | PLAY   | q=63 | avsync=  +2081 | pos=    375 | v= 5 | dt=39958/41708 us
-   221 | PLAY   | q=63 | avsync=  -2548 | pos=    417 | v= 6 | dt=46662/41708 us
-   226 | PLAY   | q=63 | avsync=  +2825 | pos=    459 | v= 5 | dt=36616/41708 us
-   232 | PLAY   | q=63 | avsync=   +505 | pos=    500 | v= 6 | dt=43317/41708 us
-   238 | PLAY   | q=62 | avsync=   -870 | pos=    542 | v= 6 | dt=43309/41708 us
-   244 | PLAY   | q=61 | avsync=  -2217 | pos=    584 | v= 6 | dt=43330/41708 us
-   249 | PLAY   | q=60 | avsync=  +3145 | pos=    626 | v= 5 | dt=36620/41708 us
-   255 | PLAY   | q=59 | avsync=   +844 | pos=    667 | v= 6 | dt=43288/41708 us
-   261 | PLAY   | q=58 | avsync=   -429 | pos=    709 | v= 6 | dt=43289/41708 us
-   267 | PLAY   | q=57 | avsync=  -1760 | pos=    751 | v= 6 | dt=43336/41708 us
-   272 | PLAY   | q=56 | avsync=  +2602 | pos=    792 | v= 5 | dt=36613/41708 us
-   278 | PLAY   | q=55 | avsync=  +1237 | pos=    834 | v= 6 | dt=43334/41708 us
-   284 | PLAY   | q=54 | avsync=    -26 | pos=    876 | v= 6 | dt=43284/41708 us
-   290 | PLAY   | q=53 | avsync=  -1414 | pos=    918 | v= 6 | dt=43353/41708 us
-   295 | PLAY   | q=52 | avsync=  +3006 | pos=    959 | v= 5 | dt=36620/41708 us
-   301 | PLAY   | q=51 | avsync=  +1657 | pos=   1001 | v= 6 | dt=43299/41708 us
-   307 | PLAY   | q=50 | avsync=   +311 | pos=   1043 | v= 6 | dt=43343/41708 us
-   313 | PLAY   | q=49 | avsync=  -1916 | pos=   1084 | v= 6 | dt=43263/41708 us
-   319 | PLAY   | q=48 | avsync=  -3248 | pos=   1126 | v= 6 | dt=43332/41708 us
-   324 | PLAY   | q=47 | avsync=  +2127 | pos=   1168 | v= 5 | dt=36619/41708 us
-   330 | PLAY   | q=46 | avsync=   +749 | pos=   1210 | v= 6 | dt=43336/41708 us
-   336 | PLAY   | q=45 | avsync=  -1549 | pos=   1251 | v= 6 | dt=43318/41708 us
-   342 | PLAY   | q=44 | avsync=  -2859 | pos=   1293 | v= 6 | dt=43278/41708 us
-   347 | PLAY   | q=43 | avsync=  +2577 | pos=   1335 | v= 5 | dt=36597/41708 us
-   353 | PLAY   | q=42 | avsync=   +200 | pos=   1376 | v= 6 | dt=43338/41708 us
-   359 | PLAY   | q=41 | avsync=  -1109 | pos=   1418 | v= 6 | dt=43310/41708 us
-   365 | PLAY   | q=40 | avsync=  -2419 | pos=   1460 | v= 6 | dt=43327/41708 us
-   370 | PLAY   | q=39 | avsync=  +1927 | pos=   1501 | v= 5 | dt=36633/41708 us
-   376 | PLAY   | q=38 | avsync=   +599 | pos=   1543 | v= 6 | dt=43356/41708 us
-   382 | PLAY   | q=37 | avsync=   -697 | pos=   1585 | v= 6 | dt=43258/41708 us
-   388 | PLAY   | q=36 | avsync=  -2006 | pos=   1627 | v= 6 | dt=43291/41708 us
-   393 | PLAY   | q=35 | avsync=  +2339 | pos=   1668 | v= 5 | dt=36650/41708 us
-   399 | PLAY   | q=34 | avsync=  +1010 | pos=   1710 | v= 6 | dt=43316/41708 us
-   405 | PLAY   | q=33 | avsync=   -360 | pos=   1752 | v= 6 | dt=43329/41708 us
-   411 | PLAY   | q=32 | avsync=  -2616 | pos=   1793 | v= 6 | dt=43315/41708 us
-   416 | PLAY   | q=31 | avsync=  +2691 | pos=   1835 | v= 5 | dt=36628/41708 us
-   422 | PLAY   | q=30 | avsync=  +1467 | pos=   1877 | v= 6 | dt=43262/41708 us
-   428 | PLAY   | q=29 | avsync=   +112 | pos=   1919 | v= 6 | dt=43332/41708 us
-   434 | PLAY   | q=28 | avsync=  -2174 | pos=   1960 | v= 6 | dt=43296/41708 us
-   439 | PLAY   | q=27 | avsync=  +3146 | pos=   2002 | v= 5 | dt=36657/41708 us
-   445 | PLAY   | q=26 | avsync=  +1920 | pos=   2044 | v= 6 | dt=43270/41708 us
-   451 | PLAY   | q=25 | avsync=   -463 | pos=   2085 | v= 6 | dt=43374/41708 us
-   457 | PLAY   | q=24 | avsync=  -1757 | pos=   2127 | v= 6 | dt=43271/41708 us
-   463 | PLAY   | q=23 | avsync=  -3056 | pos=   2169 | v= 6 | dt=43298/41708 us
-   468 | PLAY   | q=22 | avsync=  +2312 | pos=   2211 | v= 5 | dt=36641/41708 us
-   474 | PLAY   | q=21 | avsync=    +81 | pos=   2252 | v= 6 | dt=43342/41708 us
-   480 | PLAY   | q=20 | avsync=  -1326 | pos=   2294 | v= 6 | dt=43296/41708 us
-   486 | PLAY   | q=19 | avsync=  -2639 | pos=   2336 | v= 6 | dt=43337/41708 us
-   491 | PLAY   | q=18 | avsync=  +1713 | pos=   2377 | v= 5 | dt=36619/41708 us
-   497 | PLAY   | q=17 | avsync=   +484 | pos=   2419 | v= 6 | dt=43254/41708 us
-   503 | PLAY   | q=16 | avsync=   -834 | pos=   2461 | v= 6 | dt=43325/41708 us
-   509 | PLAY   | q=15 | avsync=  -3113 | pos=   2502 | v= 6 | dt=43296/41708 us
-   514 | PLAY   | q=14 | avsync=  +2225 | pos=   2544 | v= 5 | dt=36636/41708 us
-   520 | PLAY   | q=13 | avsync=   +887 | pos=   2586 | v= 6 | dt=43342/41708 us
-   526 | PLAY   | q=12 | avsync=   -428 | pos=   2628 | v= 6 | dt=43304/41708 us
-   532 | PLAY   | q=11 | avsync=  -2716 | pos=   2669 | v= 6 | dt=43293/41708 us
-   537 | PLAY   | q=10 | avsync=  +2667 | pos=   2711 | v= 5 | dt=36619/41708 us
-   543 | PLAY   | q= 9 | avsync=  +1304 | pos=   2753 | v= 6 | dt=43371/41708 us
-   549 | PLAY   | q= 8 | avsync=   -972 | pos=   2794 | v= 6 | dt=43281/41708 us
-   555 | PLAY   | q= 7 | avsync=  -2233 | pos=   2836 | v= 6 | dt=43283/41708 us
-   560 | PLAY   | q= 6 | avsync=  +3093 | pos=   2878 | v= 5 | dt=36663/41708 us
-   566 | PLAY   | q= 5 | avsync=  +1816 | pos=   2920 | v= 6 | dt=43291/41708 us
-   572 | PLAY   | q= 4 | avsync=   -515 | pos=   2961 | v= 6 | dt=43321/41708 us
-   578 | PLAY   | q= 3 | avsync=  -1796 | pos=   3003 | v= 6 | dt=43289/41708 us
-   583 | PLAY   | q= 2 | avsync=  +3538 | pos=   3045 | v= 5 | dt=36663/41708 us
-   589 | PLAY   | q= 1 | avsync=  +1270 | pos=   3086 | v= 6 | dt=43282/41708 us
-   595 | PLAY   | q= 0 | avsync=    -59 | pos=   3128 | v= 6 | dt=43331/41708 us
+   356 | BUFFER | 48/48 | audio=3589120/768000 | slow=0
+   357 | BUFFER | 48/48 | audio=3585024/768000 | slow=0
+   358 | PLAY   | q=47 | avsync=     +0 | pos=      0 | v= 1 | dt=    0/41708 us
+   364 | PLAY   | q=47 | avsync=     +0 | pos=     42 | v= 6 | dt=39954/41708 us
+   368 | PLAY   | q=48 | avsync=     +0 | pos=     83 | v= 4 | dt=46634/41708 us
+   370 | PLAY   | q=48 | avsync=  +2028 | pos=    125 | v= 2 | dt=39978/41708 us
+   374 | PLAY   | q=49 | avsync=   +735 | pos=    167 | v= 4 | dt=43280/41708 us
+   377 | PLAY   | q=49 | avsync=  +6064 | pos=    209 | v= 3 | dt=36637/41708 us
+   381 | PLAY   | q=50 | avsync=   +298 | pos=    250 | v= 4 | dt=46805/41708 us
+   384 | PLAY   | q=50 | avsync=  +5730 | pos=    292 | v= 3 | dt=36574/41708 us
+   388 | PLAY   | q=50 | avsync=  +4463 | pos=    334 | v= 4 | dt=43293/41708 us
+   392 | PLAY   | q=51 | avsync=  +5476 | pos=    375 | v= 4 | dt=39948/41708 us
+   397 | PLAY   | q=51 | avsync=  -2497 | pos=    417 | v= 5 | dt=49930/41708 us
+   400 | PLAY   | q=51 | avsync=  +2866 | pos=    459 | v= 3 | dt=36688/41708 us
+   405 | PLAY   | q=52 | avsync=  +1546 | pos=    501 | v= 5 | dt=43289/41708 us
+   409 | PLAY   | q=52 | avsync=   -722 | pos=    542 | v= 4 | dt=43243/41708 us
+   412 | PLAY   | q=52 | avsync=  +4560 | pos=    584 | v= 3 | dt=36711/41708 us
+   417 | PLAY   | q=53 | avsync=  +3319 | pos=    626 | v= 5 | dt=43257/41708 us
+   420 | PLAY   | q=53 | avsync=  +4361 | pos=    667 | v= 3 | dt=39948/41708 us
+   423 | PLAY   | q=54 | avsync=  +3172 | pos=    709 | v= 3 | dt=43329/41708 us
+   428 | PLAY   | q=53 | avsync=  +1635 | pos=    751 | v= 5 | dt=43418/41708 us
+   432 | PLAY   | q=52 | avsync=  +2768 | pos=    792 | v= 4 | dt=39930/41708 us
+   435 | PLAY   | q=51 | avsync=  +1490 | pos=    834 | v= 3 | dt=43402/41708 us
+   437 | PLAY   | q=50 | avsync=  +6830 | pos=    876 | v= 2 | dt=36546/41708 us
+   441 | PLAY   | q=49 | avsync=  +2154 | pos=    918 | v= 4 | dt=46735/41708 us
+   443 | PLAY   | q=48 | avsync=  +6619 | pos=    959 | v= 2 | dt=36586/41708 us
+   447 | PLAY   | q=47 | avsync=  +5209 | pos=   1001 | v= 4 | dt=43324/41708 us
+   451 | PLAY   | q=46 | avsync=   +526 | pos=   1043 | v= 4 | dt=46655/41708 us
+   453 | PLAY   | q=45 | avsync=  +4856 | pos=   1084 | v= 2 | dt=36659/41708 us
+   457 | PLAY   | q=44 | avsync=  +3637 | pos=   1126 | v= 4 | dt=43190/41708 us
+   461 | PLAY   | q=43 | avsync=  +5722 | pos=   1168 | v= 4 | dt=39990/41708 us
+   464 | PLAY   | q=42 | avsync=  +4308 | pos=   1210 | v= 3 | dt=43375/41708 us
+   466 | PLAY   | q=41 | avsync=  +5306 | pos=   1251 | v= 2 | dt=39996/41708 us
+   469 | PLAY   | q=40 | avsync=  +4158 | pos=   1293 | v= 3 | dt=43254/41708 us
+   473 | PLAY   | q=39 | avsync=  +2678 | pos=   1335 | v= 4 | dt=43338/41708 us
+   477 | PLAY   | q=38 | avsync=  +3844 | pos=   1376 | v= 4 | dt=39936/41708 us
+   480 | PLAY   | q=37 | avsync=  +2509 | pos=   1418 | v= 3 | dt=43264/41708 us
+   483 | PLAY   | q=36 | avsync=  +4420 | pos=   1460 | v= 3 | dt=39991/41708 us
+   487 | PLAY   | q=35 | avsync=  +6472 | pos=   1502 | v= 4 | dt=40043/41708 us
+   490 | PLAY   | q=34 | avsync=  +4178 | pos=   1543 | v= 3 | dt=43287/41708 us
+   493 | PLAY   | q=33 | avsync=  +2871 | pos=   1585 | v= 3 | dt=43296/41708 us
+   496 | PLAY   | q=32 | avsync=  +4877 | pos=   1627 | v= 3 | dt=39983/41708 us
+   499 | PLAY   | q=31 | avsync=  +5879 | pos=   1668 | v= 3 | dt=39978/41708 us
+   503 | PLAY   | q=30 | avsync=  +1345 | pos=   1710 | v= 4 | dt=46564/41708 us
+   506 | PLAY   | q=29 | avsync=  +3301 | pos=   1752 | v= 3 | dt=40035/41708 us
+   509 | PLAY   | q=28 | avsync=  +1097 | pos=   1793 | v= 3 | dt=43305/41708 us
+   511 | PLAY   | q=27 | avsync=  +6282 | pos=   1835 | v= 2 | dt=36716/41708 us
+   514 | PLAY   | q=26 | avsync=  +5164 | pos=   1877 | v= 3 | dt=43194/41708 us
+   517 | PLAY   | q=25 | avsync=  +3696 | pos=   1919 | v= 3 | dt=43389/41708 us
+   520 | PLAY   | q=24 | avsync=  +1412 | pos=   1960 | v= 3 | dt=43268/41708 us
+   522 | PLAY   | q=23 | avsync=  +6730 | pos=   2002 | v= 2 | dt=36679/41708 us
+   526 | PLAY   | q=22 | avsync=  +2205 | pos=   2044 | v= 4 | dt=46598/41708 us
+   529 | PLAY   | q=21 | avsync=   -134 | pos=   2085 | v= 3 | dt=43271/41708 us
+   532 | PLAY   | q=20 | avsync=  +1844 | pos=   2127 | v= 3 | dt=40010/41708 us
+   535 | PLAY   | q=19 | avsync=  +3878 | pos=   2169 | v= 3 | dt=39973/41708 us
+   539 | PLAY   | q=18 | avsync=  +2521 | pos=   2211 | v= 4 | dt=43332/41708 us
+   543 | PLAY   | q=17 | avsync=  +3622 | pos=   2252 | v= 4 | dt=39989/41708 us
+   546 | PLAY   | q=16 | avsync=  +2240 | pos=   2294 | v= 3 | dt=43281/41708 us
+   549 | PLAY   | q=15 | avsync=   +986 | pos=   2336 | v= 3 | dt=43283/41708 us
+   552 | PLAY   | q=14 | avsync=  +5246 | pos=   2377 | v= 3 | dt=36624/41708 us
+   557 | PLAY   | q=13 | avsync=   +719 | pos=   2419 | v= 5 | dt=46611/41708 us
+   559 | PLAY   | q=12 | avsync=  +6060 | pos=   2461 | v= 2 | dt=36661/41708 us
+   562 | PLAY   | q=11 | avsync=  +4738 | pos=   2503 | v= 3 | dt=43342/41708 us
+   565 | PLAY   | q=10 | avsync=  +2430 | pos=   2544 | v= 3 | dt=43296/41708 us
+# SNAP  | gap=61016 us (>1 step behind wall clock)
+   568 | PLAY   | q= 9 | avsync= -56617 | pos=   2586 | v= 3 | dt=100963/41708 us
+   573 | PLAY   | q= 8 | avsync= -56834 | pos=   2628 | v= 5 | dt=42223/41708 us
+   577 | PLAY   | q= 7 | avsync= -59003 | pos=   2669 | v= 4 | dt=43375/41708 us
+   579 | PLAY   | q= 6 | avsync= -53867 | pos=   2711 | v= 2 | dt=36715/41708 us
+   583 | PLAY   | q= 5 | avsync= -58481 | pos=   2753 | v= 4 | dt=46597/41708 us
+   585 | PLAY   | q= 4 | avsync= -54004 | pos=   2794 | v= 2 | dt=36626/41708 us
+   588 | PLAY   | q= 3 | avsync= -55413 | pos=   2836 | v= 3 | dt=43317/41708 us
+   591 | PLAY   | q= 2 | avsync= -56761 | pos=   2878 | v= 3 | dt=43345/41708 us
+   594 | PLAY   | q= 1 | avsync= -57936 | pos=   2920 | v= 3 | dt=43229/41708 us
+   596 | PLAY   | q= 0 | avsync= -53631 | pos=   2961 | v= 2 | dt=36645/41708 us
 # REBUFFER | queue empty after 250ms grace (slow=0)
-   670 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   671 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   672 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   673 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   674 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   675 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   676 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   677 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   678 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   679 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   680 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   681 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   682 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   683 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   684 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   685 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   686 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   687 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   688 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   689 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   690 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   691 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   692 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   693 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   694 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   695 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   696 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   697 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   698 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   699 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   700 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   701 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   702 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   703 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   704 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   705 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   706 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   707 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   708 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   709 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   710 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   711 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   712 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   713 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   714 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   715 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   716 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   717 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   718 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   719 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   720 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   721 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   722 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   723 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   724 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   725 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   726 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   727 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   728 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   729 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   730 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   731 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   732 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   733 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   734 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   735 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   736 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   737 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   738 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   739 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   740 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   741 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   742 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   743 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   744 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   745 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   746 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   747 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   748 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   749 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   750 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   751 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   752 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   753 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   754 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   755 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   756 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   757 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   758 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   759 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   760 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   761 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   762 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   763 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   764 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   765 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   766 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   767 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   768 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   769 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   770 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   771 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   772 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   773 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   774 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   775 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   776 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   777 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   778 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   779 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   780 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   781 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   782 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   783 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   784 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   785 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   786 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   787 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   788 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   789 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   790 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   791 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   792 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   793 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   794 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   795 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   796 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   797 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   798 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   799 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   800 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   801 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   802 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   803 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   804 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   805 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   806 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   807 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   808 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   809 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   810 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   811 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   812 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   813 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   814 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   815 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   816 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   817 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   818 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   819 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   820 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   821 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   822 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   823 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   824 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   825 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   826 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   827 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   828 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   829 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   830 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   831 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   832 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   833 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   834 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   835 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   836 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   837 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   838 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   839 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   840 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   841 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   842 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   843 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   844 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   845 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   846 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   847 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   848 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   849 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   850 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   851 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   852 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   853 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   854 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   855 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   856 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   857 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   858 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   859 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   860 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   861 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   862 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   863 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   864 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   865 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   866 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   867 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   868 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   869 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   870 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   871 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   872 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   873 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   874 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   875 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   876 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   877 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   878 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   879 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   880 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   881 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   882 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   883 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   884 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   885 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   886 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   887 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   888 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   889 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   890 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   891 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   892 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   893 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   894 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   895 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   896 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   897 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   898 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   899 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   900 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   901 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   902 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   903 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   904 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   905 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   906 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   907 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   908 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   909 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   910 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   911 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   912 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   913 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   914 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   915 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   916 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   917 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   918 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   919 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   920 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   921 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   922 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   923 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   924 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   925 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   926 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   927 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   928 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   929 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   930 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   931 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   932 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   933 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   934 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   935 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   936 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   937 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   938 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   939 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   940 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   941 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   942 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   943 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   944 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   945 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   946 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   947 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   948 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   949 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   950 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   951 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   952 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   953 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   954 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   955 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   956 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   957 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   958 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   959 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   960 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   961 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   962 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   963 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   964 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   965 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   966 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   967 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   968 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   969 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   970 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   971 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   972 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   973 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   974 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   975 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   976 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   977 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   978 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   979 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   980 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   981 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   982 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   983 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   984 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   985 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   986 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   987 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   988 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   989 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   990 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   991 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   992 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   993 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   994 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   995 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   996 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   997 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   998 | BUFFER |  0/32 | audio=0/192000 | slow=0
-   999 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1000 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1001 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1002 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1003 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1004 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1005 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1006 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1007 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1008 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1009 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1010 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1011 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1012 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1013 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1014 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1015 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1016 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1017 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1018 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1019 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1020 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1021 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1022 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1023 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1024 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1025 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1026 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1027 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1028 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1029 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1030 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1031 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1032 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1033 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1034 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1035 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1036 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1037 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1038 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1039 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1040 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1041 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1042 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1043 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1044 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1045 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1046 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1047 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1048 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1049 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1050 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1051 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1052 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1053 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1054 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1055 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1056 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1057 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1058 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1059 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1060 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1061 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1062 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1063 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1064 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1065 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1066 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1067 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1068 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1069 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1070 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1071 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1072 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1073 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1074 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1075 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1076 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1077 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1078 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1079 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1080 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1081 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1082 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1083 | BUFFER |  0/32 | audio=0/192000 | slow=0
-  1084 | BUFFER |  0/32 | audio=0/192000 | slow=0
-# Closed after 1085 frames | skips=0 empty=0 snaps=0 underruns=55
+   671 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   672 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   673 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   674 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   675 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   676 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   677 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   678 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   679 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   680 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   681 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   682 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   683 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   684 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   685 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   686 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   687 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   688 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   689 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   690 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   691 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   692 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   693 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   694 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   695 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   696 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   697 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   698 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   699 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   700 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   701 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   702 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   703 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   704 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   705 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   706 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   707 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   708 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   709 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   710 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   711 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   712 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   713 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   714 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   715 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   716 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   717 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   718 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   719 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   720 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   721 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   722 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   723 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   724 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   725 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   726 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   727 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   728 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   729 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   730 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   731 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   732 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   733 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   734 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   735 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   736 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   737 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   738 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   739 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   740 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   741 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   742 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   743 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   744 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   745 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   746 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   747 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   748 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   749 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   750 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   751 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   752 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   753 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   754 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   755 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   756 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   757 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   758 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   759 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   760 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   761 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   762 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   763 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   764 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   765 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   766 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   767 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   768 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   769 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   770 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   771 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   772 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   773 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   774 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   775 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   776 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   777 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   778 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   779 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   780 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   781 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   782 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   783 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   784 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   785 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   786 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   787 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   788 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   789 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   790 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   791 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   792 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   793 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   794 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   795 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   796 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   797 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   798 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   799 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   800 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   801 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   802 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   803 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   804 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   805 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   806 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   807 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   808 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   809 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   810 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   811 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   812 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   813 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   814 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   815 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   816 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   817 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   818 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   819 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   820 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   821 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   822 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   823 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   824 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   825 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   826 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   827 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   828 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   829 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   830 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   831 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   832 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   833 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   834 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   835 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   836 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   837 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   838 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   839 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   840 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   841 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   842 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   843 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   844 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   845 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   846 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   847 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   848 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   849 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   850 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   851 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   852 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   853 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   854 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   855 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   856 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   857 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   858 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   859 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   860 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   861 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   862 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   863 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   864 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   865 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   866 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   867 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   868 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   869 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   870 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   871 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   872 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   873 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   874 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   875 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   876 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   877 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   878 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   879 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   880 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   881 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   882 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   883 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   884 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   885 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   886 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   887 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   888 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   889 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   890 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   891 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   892 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   893 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   894 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   895 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   896 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   897 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   898 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   899 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   900 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   901 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   902 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   903 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   904 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   905 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   906 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   907 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   908 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   909 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   910 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   911 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   912 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   913 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   914 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   915 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   916 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   917 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   918 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   919 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   920 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   921 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   922 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   923 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   924 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   925 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   926 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   927 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   928 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   929 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   930 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   931 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   932 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   933 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   934 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   935 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   936 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   937 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   938 | BUFFER |  0/32 | audio=0/768000 | slow=0
+   939 | BUFFER |  0/32 | audio=0/768000 | slow=0
+# Closed after 940 frames | skips=0 empty=0 snaps=1 underruns=0

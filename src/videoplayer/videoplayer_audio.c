@@ -834,6 +834,8 @@ void videoplayer_audio_cleanup(VideoPlayer *vp)
 
     audio_diag("cleanup");
 
+    int had_pipewire = (vp->audio.loop != NULL);
+
     if (vp->audio.loop) {
         pw_thread_loop_lock(vp->audio.loop);
 
@@ -881,10 +883,11 @@ void videoplayer_audio_cleanup(VideoPlayer *vp)
     }
 
     /* Balance pw_init() from videoplayer_audio_init().
-     * Without this, pw_init refcount grows on each open/close cycle,
-     * accumulating PipeWire internal state that eventually prevents
-     * new connections from succeeding. */
-    pw_deinit();
+     * Only call pw_deinit() if PipeWire was actually initialized —
+     * calling pw_deinit() without a matching pw_init() corrupts the
+     * internal refcount and can prevent future PipeWire connections. */
+    if (had_pipewire)
+        pw_deinit();
 
     fprintf(stderr, "[audio] Cleanup complete\n");
 }

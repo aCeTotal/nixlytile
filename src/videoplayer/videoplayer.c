@@ -91,17 +91,11 @@ void videoplayer_destroy(VideoPlayer *vp)
     if (!vp)
         return;
 
-    /* Stop playback and close file */
+    /* Stop playback and close file.  videoplayer_stop() → videoplayer_close()
+     * handles all per-file cleanup including audio cmd thread, PipeWire,
+     * subtitles, and FFmpeg contexts.  Do NOT call those again here —
+     * double cleanup causes unbalanced pw_init/pw_deinit and double-frees. */
     videoplayer_stop(vp);
-
-    /* Shut down audio command thread before cleaning up PipeWire */
-    videoplayer_audio_cmd_shutdown(vp);
-
-    /* Cleanup audio */
-    videoplayer_audio_cleanup(vp);
-
-    /* Cleanup subtitles */
-    videoplayer_subtitle_cleanup(vp);
 
     /* Cleanup control bar (removes hide timer) */
     videoplayer_cleanup_control_bar(vp);
@@ -109,7 +103,7 @@ void videoplayer_destroy(VideoPlayer *vp)
     /* Cleanup scene */
     videoplayer_cleanup_scene(vp);
 
-    /* Cleanup audio mutex */
+    /* Cleanup audio mutex (persistent across open/close, only freed here) */
     pthread_mutex_destroy(&vp->audio.lock);
 
     /* Shut down parallel conversion pool */

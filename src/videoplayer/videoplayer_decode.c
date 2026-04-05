@@ -160,11 +160,13 @@ static void videoplayer_process_subtitle_packet(VideoPlayer *vp, AVPacket *pkt)
     }
 
     int64_t start_ms = av_rescale_q(pts, tb, (AVRational){1, 1000});
+    /* Use the actual duration from the container (FFmpeg's end_display_time
+     * is relative to start_display_time within the subtitle event).
+     * SRT/ASS/PGS all provide correct durations here — trust them.
+     * Only fall back to a default for truly missing metadata (duration <= 0). */
     int64_t duration_ms = sub.end_display_time - sub.start_display_time;
     if (duration_ms <= 0)
-        duration_ms = 2000;  /* Default 2 seconds for missing duration */
-    if (duration_ms > 2000)
-        duration_ms = 2000;  /* Cap all subtitles at 2 seconds */
+        duration_ms = 5000;  /* Default 5 seconds for missing duration */
 
     fprintf(stderr, "[subtitle] pkt #%d: start=%ldms duration=%ldms rects=%u "
             "track=%p pos=%ldms\n",
@@ -929,6 +931,13 @@ void videoplayer_close(VideoPlayer *vp)
     if (!vp)
         return;
 
+    /* Guard: if already idle, nothing to clean up.  Without this,
+     * videoplayer_open() → videoplayer_close() on the first call (or after
+     * a previous close) would destroy uninitialized mutexes and call
+     * pw_deinit() without a matching pw_init(), corrupting state. */
+    if (vp->state == VP_STATE_IDLE)
+        return;
+
     /* Set state to IDLE immediately — this prevents present_frame() from
      * accessing any resources during the close process.  Must be first. */
     vp->state = VP_STATE_IDLE;
@@ -1014,6 +1023,16 @@ void videoplayer_close(VideoPlayer *vp)
     pthread_cond_destroy(&vp->pkt_not_empty);
     pthread_cond_destroy(&vp->pkt_not_full);
 
+    /* Clean up subtitle scene tree children — these are wlr_scene_buffer nodes
+     * holding refs to subtitle buffers.  Without this, old subtitle overlays
+     * leak across file opens, accumulating scene nodes and memory. */
+    if (vp->subtitle_tree) {
+        struct wlr_scene_node *node, *tmp;
+        wl_list_for_each_safe(node, tmp, &vp->subtitle_tree->children, link) {
+            wlr_scene_node_destroy(node);
+        }
+    }
+
     /* Clean up subtitle state (libass library/renderer/track, bitmap, buffers).
      * Must happen before freeing subtitle_codec_ctx. */
     videoplayer_subtitle_cleanup(vp);
@@ -1091,8 +1110,13 @@ void videoplayer_close(VideoPlayer *vp)
     vp->av_sync_video_base_us = 0;
     vp->av_sync_audio_base_us = 0;
     vp->av_sync_established = 0;
+    vp->av_sync_drift_sum = 0;
+    vp->av_sync_drift_count = 0;
     vp->recovery_check_counter = 0;
     vp->audio_interrupted_ticks = 0;
+    vp->audio_seek_trim_done = 0;
+    vp->empty_queue_count = 0;
+    vp->server_slow = 0;
 }
 
 /* ================================================================
