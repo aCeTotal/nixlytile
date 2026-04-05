@@ -441,11 +441,18 @@ struct wlr_buffer *videoplayer_create_frame_buffer(VideoPlayer *vp, AVFrame *fra
             free(data); free(buf); return NULL;
         }
 
-        /* swscale to RGBA64LE with full-quality chroma upsampling */
+        /* Resolution-adaptive SWS flags: at 4K the RGBA64LE intermediate
+         * is 63MB/frame; Lanczos + full chroma upsampling takes ~230ms.
+         * Bilinear reduces this to ~15-20ms with negligible quality loss
+         * at high pixel density. HD and below keep Lanczos for quality. */
+        int sws_flags = (width >= 3840 || height >= 2160)
+            ? (SWS_BILINEAR | SWS_ACCURATE_RND)
+            : SWS_QUALITY_FLAGS;
+
         vp->sws_ctx = sws_getCachedContext(vp->sws_ctx,
             width, height, src_fmt,
             width, height, AV_PIX_FMT_RGBA64LE,
-            SWS_QUALITY_FLAGS, NULL, NULL, NULL);
+            sws_flags, NULL, NULL, NULL);
         if (!vp->sws_ctx) {
             free(data); free(buf); return NULL;
         }
@@ -783,17 +790,18 @@ static int64_t get_av_diff_us(VideoPlayer *vp, int64_t video_pts_us)
 
 /*
  * Determine frame presentation action based on A/V sync.
- * Returns: 0 = show frame, 1 = skip frame (video behind), -1 = hold (video ahead)
+ * Returns: 0 = show frame, 1 = skip frame (video behind)
  *
- * Bidirectional correction:
+ * Skip-only correction:
  *   - Skip when video is far behind audio (>100ms) to catch up
- *   - Hold when video is ahead of audio (>20ms) to let audio catch up
- *   - Dead zone (-100ms to +20ms): present normally
+ *   - Otherwise always present — cadence clock drives timing
  *
- * The 20ms hold threshold is above PipeWire's quantum jitter (~3-5ms)
- * so jitter alone never triggers a hold.  Hold only delays presentation
- * by one vsync — it does NOT block frame queue consumption, so the
- * decode thread and audio ring buffer continue normally.
+ * Hold (pausing presentation when video is ahead) was removed because
+ * it creates a cascading deadlock: hold prevents frame consumption →
+ * frame queue stays full → decode thread blocks → no audio produced →
+ * PipeWire underruns → audio clock stalls → video appears even more
+ * ahead → more holds.  Both clocks are wall-clock based so any small
+ * lead self-corrects naturally within 1-2 PipeWire quanta (~20ms).
  */
 static int get_frame_action(VideoPlayer *vp, int64_t video_pts_us)
 {
@@ -811,11 +819,6 @@ static int get_frame_action(VideoPlayer *vp, int64_t video_pts_us)
     /* Video far behind audio — skip frame to catch up */
     if (av_diff < -AV_SYNC_FRAMESKIP_THRESH) {
         return 1;
-    }
-
-    /* Video ahead of audio — hold (don't present yet, re-evaluate next vsync) */
-    if (av_diff > 20000) {
-        return -1;
     }
 
     return 0;
@@ -925,15 +928,6 @@ static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, 
         vp->last_frame_ns += step;
         return 2;  /* Skip and get next frame immediately */
     }
-    if (action == -1) {
-        /* Video is ahead of audio — hold current frame for one vsync.
-         * Do NOT advance last_frame_ns or cadence state so the next
-         * vsync re-evaluates from the same timing position.  Audio
-         * catches up within 1-2 vsyncs, then cadence snap-forward
-         * logic re-synchronizes timing. */
-        return 0;
-    }
-
     /* Present the frame */
     if (vp->frame_repeat_mode == 2) {
         vp->current_repeat++;

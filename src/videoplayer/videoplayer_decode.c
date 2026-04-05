@@ -1776,13 +1776,18 @@ static int transfer_hw_frame(VideoPlayer *vp, AVFrame *hw_frame, AVFrame *sw_fra
     return 0;
 }
 
+/* Forward declaration — defined below drain_video_frames_ex */
+static void drain_pending_audio(VideoPlayer *vp, AVPacket *scratch_pkt);
+
 /* Helper: drain all available video frames from the decoder and queue them.
- * When blocking=1 (normal playback): waits for frame queue space (up to 50ms)
- * to throttle the decode thread to the render thread's consumption rate.
+ * When blocking=1 (normal playback): waits for frame queue space while
+ * periodically draining audio packets to keep PipeWire fed.
  * When blocking=0 (retry loop / BUFFERING): discards immediately when full,
  * preventing the decode thread from being stuck for seconds and starving
- * audio decoding. */
-static void drain_video_frames_ex(VideoPlayer *vp, int blocking)
+ * audio decoding.
+ * audio_scratch: if non-NULL, drain audio packets during blocking waits
+ * to prevent PipeWire underruns from full-queue stalls. */
+static void drain_video_frames_ex(VideoPlayer *vp, int blocking, AVPacket *audio_scratch)
 {
     int ret;
 
@@ -1846,23 +1851,32 @@ static void drain_video_frames_ex(VideoPlayer *vp, int blocking)
          * discarding ~23 of every 24 decoded frames. This causes ~1-second
          * PTS gaps in the frame queue, making video play at ~24x speed.
          *
-         * The wait is typically <42ms (one render frame at 24fps). The audio
-         * ring buffer has 0.5-4s of pre-buffered data, so a brief wait here
-         * won't cause PipeWire underruns. This also naturally throttles the
-         * decode thread to the video framerate, keeping the packet queue
-         * buffered against I/O jitter. */
+         * The wait is typically <42ms (one render frame at 24fps).
+         * While waiting, we periodically unlock and drain audio packets
+         * so PipeWire's ring buffer stays fed.  Without this, the decode
+         * thread blocks for the entire wait (~40ms) with no audio production,
+         * causing 70%+ underruns and cascading A/V sync stalls. */
         pthread_mutex_lock(&vp->frame_mutex);
         if (blocking) {
             while (vp->frames_queued >= VP_FRAME_QUEUE_SIZE &&
                    vp->decode_running && !vp->seek_requested) {
                 struct timespec ts;
                 clock_gettime(CLOCK_REALTIME, &ts);
-                ts.tv_nsec += 50000000;  /* 50ms timeout */
+                ts.tv_nsec += 10000000;  /* 10ms timeout (short for audio responsiveness) */
                 if (ts.tv_nsec >= 1000000000) {
                     ts.tv_sec++;
                     ts.tv_nsec -= 1000000000;
                 }
                 pthread_cond_timedwait(&vp->frame_cond, &vp->frame_mutex, &ts);
+
+                /* Keep audio ring buffer fed while waiting for video queue space.
+                 * Must unlock frame_mutex first to avoid lock ordering issues
+                 * (frame_mutex → pkt_mutex would deadlock with render thread). */
+                if (audio_scratch && vp->frames_queued >= VP_FRAME_QUEUE_SIZE) {
+                    pthread_mutex_unlock(&vp->frame_mutex);
+                    drain_pending_audio(vp, audio_scratch);
+                    pthread_mutex_lock(&vp->frame_mutex);
+                }
             }
         }
         int has_space = vp->frames_queued < VP_FRAME_QUEUE_SIZE;
@@ -1936,10 +1950,10 @@ static void drain_video_frames_ex(VideoPlayer *vp, int blocking)
     }
 }
 
-/* Default blocking drain for normal playback */
+/* Default blocking drain (no audio feed — used only for EOF drain) */
 static void drain_video_frames(VideoPlayer *vp)
 {
-    drain_video_frames_ex(vp, 1);
+    drain_video_frames_ex(vp, 1, NULL);
 }
 
 /* Drain all immediately available audio packets from the packet queue.
@@ -2108,7 +2122,7 @@ static void *decode_thread_func(void *arg)
                      * Use non-blocking drain to avoid spending 50ms * N frames
                      * per retry, which would starve audio decoding and cause
                      * the BUFFERING deadlock (audio never reaches threshold). */
-                    drain_video_frames_ex(vp, 0);
+                    drain_video_frames_ex(vp, 0, NULL);
                     continue;
                 }
                 /* Actual error — log and skip this packet */
@@ -2130,8 +2144,10 @@ static void *decode_thread_func(void *arg)
              * caused a deadlock where audio was stuck at ~50% of its threshold
              * while the frame queue was already full, requiring a 3-second
              * timeout before playback could start (with under-buffered audio
-             * that then caused A/V sync stutter for the first ~10 seconds). */
-            drain_video_frames_ex(vp, vp->state != VP_STATE_BUFFERING);
+             * that then caused A/V sync stutter for the first ~10 seconds).
+             * In PLAY mode, pass audio_scratch so the blocking wait drains
+             * audio packets to keep PipeWire fed during the ~40ms stall. */
+            drain_video_frames_ex(vp, vp->state != VP_STATE_BUFFERING, audio_scratch);
 
             /* After the CPU-intensive sws_scale, immediately drain any queued
              * audio packets so the ring buffer stays fed.  This is critical:
