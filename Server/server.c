@@ -35,8 +35,8 @@
 #include "downloads.h"
 
 /* No connection limit - kernel handles backlog */
-#define BUFFER_SIZE 262144  /* 256KB for efficient streaming */
-#define STREAM_CHUNK_SIZE 1048576  /* 1MB sendfile chunks */
+#define BUFFER_SIZE 1048576  /* 1MB for efficient streaming */
+#define STREAM_CHUNK_SIZE 4194304  /* 4MB sendfile chunks — fewer syscalls for large UHD files */
 #define MAX_PATH 4096
 #define MAX_HEADER 8192
 #define DISCOVERY_PORT 8081

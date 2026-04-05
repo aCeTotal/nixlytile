@@ -102,9 +102,23 @@ static const struct wlr_buffer_impl video_pixman_buffer_impl = {
  *  Color Management
  * ================================================================ */
 
-/* Chroma 4:4:4 quality upsampling + accurate rounding */
+/* Chroma quality upsampling — adaptive to resolution.
+ * At 4K (3840×2160) Lanczos + full chroma costs ~230ms/frame (only 4fps!).
+ * Bilinear at 4K is ~10× faster and visually indistinguishable on TVs.
+ * Keep Lanczos for 1080p and below where the cost is manageable. */
 #define SWS_QUALITY_FLAGS \
     (SWS_LANCZOS | SWS_FULL_CHR_H_INT | SWS_FULL_CHR_H_INP | SWS_ACCURATE_RND)
+
+#define SWS_FAST_QUALITY_FLAGS \
+    (SWS_BILINEAR | SWS_ACCURATE_RND)
+
+/* Choose SWS flags based on resolution — 4K uses fast path */
+static inline int sws_flags_for_resolution(int width, int height)
+{
+    if (width >= 3840 || height >= 2160)
+        return SWS_FAST_QUALITY_FLAGS;
+    return SWS_QUALITY_FLAGS;
+}
 
 /* Map FFmpeg color space to swscale coefficient table index */
 static int get_sws_colorspace(enum AVColorSpace cs, int height)
@@ -421,11 +435,11 @@ struct wlr_buffer *videoplayer_create_frame_buffer(VideoPlayer *vp, AVFrame *fra
             free(data); free(buf); return NULL;
         }
 
-        /* swscale to RGBA64LE with Lanczos chroma upsampling */
+        /* swscale to RGBA64LE — use fast flags for 4K+ resolution */
         vp->sws_ctx = sws_getCachedContext(vp->sws_ctx,
             width, height, src_fmt,
             width, height, AV_PIX_FMT_RGBA64LE,
-            SWS_QUALITY_FLAGS, NULL, NULL, NULL);
+            sws_flags_for_resolution(width, height), NULL, NULL, NULL);
         if (!vp->sws_ctx) {
             free(data); free(buf); return NULL;
         }
@@ -454,7 +468,8 @@ struct wlr_buffer *videoplayer_create_frame_buffer(VideoPlayer *vp, AVFrame *fra
         vp->sws_ctx = sws_getCachedContext(vp->sws_ctx,
             width, height, src_fmt,
             width, height, AV_PIX_FMT_BGRA,
-            SWS_BILINEAR, NULL, NULL, NULL);
+            (width >= 3840) ? SWS_FAST_BILINEAR : SWS_BILINEAR,
+            NULL, NULL, NULL);
         if (!vp->sws_ctx) {
             free(data); free(buf); return NULL;
         }
@@ -984,16 +999,24 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
                         vp->audio.channels * sizeof(float) / 2;  /* 0.5 seconds */
         }
 
-        /* Adaptive buffer threshold: fill more when server is slow,
-         * resume faster when server is healthy. Initial startup always
-         * uses 75% to ensure smooth first frames. */
+        /* Adaptive buffer threshold: scale with resolution and server speed.
+         * At 4K, sws_scale takes ~20-40ms/frame (bilinear) so filling 12 frames
+         * would still take 240-480ms.  Use a smaller target for high-res to
+         * get playback started faster while decode fills the rest. */
         int target_frames;
+        int is_4k = (vp->video.width >= 3840 || vp->video.height >= 2160);
         if (vp->position_us == 0) {
-            target_frames = VP_FRAME_QUEUE_SIZE * 3 / 4;  /* initial: 75% */
+            target_frames = is_4k
+                ? VP_FRAME_QUEUE_SIZE / 4              /* 4K initial: 25% (4 frames) */
+                : VP_FRAME_QUEUE_SIZE * 3 / 4;         /* HD initial: 75% (12 frames) */
         } else if (vp->server_slow) {
-            target_frames = VP_FRAME_QUEUE_SIZE;           /* slow server: fill completely */
+            target_frames = is_4k
+                ? VP_FRAME_QUEUE_SIZE / 2              /* 4K slow: 50% */
+                : VP_FRAME_QUEUE_SIZE;                 /* HD slow: fill completely */
         } else {
-            target_frames = VP_FRAME_QUEUE_SIZE / 2;       /* normal rebuffer: 50% */
+            target_frames = is_4k
+                ? VP_FRAME_QUEUE_SIZE / 4              /* 4K rebuffer: 25% */
+                : VP_FRAME_QUEUE_SIZE / 2;             /* HD rebuffer: 50% */
         }
 
         /* Safety: track how long we've been stuck in BUFFERING with enough

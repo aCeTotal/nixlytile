@@ -559,6 +559,8 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
         av_dict_set(&opts, "rw_timeout", "30000000", 0);  /* 30s I/O timeout (slow/busy disks) */
         av_dict_set(&opts, "buffer_size", "67108864", 0); /* 64MB I/O buffer */
         av_dict_set(&opts, "multiple_requests", "1", 0);  /* Reuse HTTP connection */
+        av_dict_set(&opts, "seekable", "1", 0);           /* Enable HTTP range requests */
+        av_dict_set(&opts, "http_persistent", "1", 0);    /* Keep-alive connections */
         fprintf(stderr, "[videoplayer] %s HTTP stream: enabling reconnect + buffering options\n",
                 is_localhost ? "Localhost" : "Remote");
     }
@@ -589,16 +591,17 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
         return -1;
     }
 
-    /* For local files and localhost, reduce probe time. The default
-     * analyzeduration (5s) is designed for unreliable network streams.
-     * Local files and localhost servers have data available instantly,
-     * so 500ms is plenty for format/codec detection. */
+    /* Reduce probe time for local/localhost (data available instantly).
+     * For remote HTTP, use larger probesize to handle UHD remuxes with
+     * many streams (16+ subtitle tracks + multiple audio tracks).
+     * The default 5s analyzeduration is wasteful for most files but
+     * the 2MB probesize was too small for complex Blu-ray remuxes. */
     if (vp->is_local_file || is_localhost) {
         vp->fmt_ctx->max_analyze_duration = 500000;  /* 0.5s */
         vp->fmt_ctx->probesize = 500000;              /* 500KB */
     } else if (is_http) {
-        vp->fmt_ctx->max_analyze_duration = 2000000;  /* 2s for remote HTTP */
-        vp->fmt_ctx->probesize = 2097152;              /* 2MB for remote HTTP */
+        vp->fmt_ctx->max_analyze_duration = 3000000;  /* 3s for remote HTTP */
+        vp->fmt_ctx->probesize = 5242880;              /* 5MB — handles complex UHD remuxes */
     }
 
     /* Find stream info */
