@@ -182,6 +182,19 @@ static void videoplayer_process_subtitle_packet(VideoPlayer *vp, AVPacket *pkt)
      * full ASS file format with "Dialogue:" prefix and embedded timing. */
     int processed = 0;
     pthread_mutex_lock(&vp->subtitle_mutex);
+
+    /* PGS clear event: got_sub=1 with num_rects=0 means "hide subtitle".
+     * Without this, the old bitmap persists on screen with stale timing. */
+    if (sub.num_rects == 0) {
+        int is_bitmap_trk = (vp->current_subtitle_track >= 0 &&
+                             !vp->subtitle_tracks[vp->current_subtitle_track].is_text_based);
+        if (is_bitmap_trk && vp->subtitle.bitmap_valid) {
+            fprintf(stderr, "[subtitle] pkt #%d: clear event (num_rects=0), hiding bitmap\n",
+                    subtitle_pkt_count);
+            vp->subtitle.bitmap_valid = 0;
+        }
+    }
+
     for (unsigned i = 0; i < sub.num_rects; i++) {
         AVSubtitleRect *rect = sub.rects[i];
 
@@ -2183,11 +2196,16 @@ static void *decode_thread_func(void *arg)
             vp->frame_write_idx = 0;
             pthread_mutex_unlock(&vp->frame_mutex);
 
-            /* Clear subtitle bitmap so stale PGS data doesn't persist */
+            /* Clear subtitle state so stale data doesn't persist after seek.
+             * Flush ASS events to prevent unbounded accumulation — without this,
+             * each seek adds events but never removes them, growing memory and
+             * causing libass to process thousands of expired events per frame. */
             pthread_mutex_lock(&vp->subtitle_mutex);
             free(vp->subtitle.bitmap_data);
             vp->subtitle.bitmap_data = NULL;
             vp->subtitle.bitmap_valid = 0;
+            if (vp->subtitle.track)
+                ass_flush_events(vp->subtitle.track);
             pthread_mutex_unlock(&vp->subtitle_mutex);
 
             /* Return excess buffer pool entries to the OS.

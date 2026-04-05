@@ -1275,11 +1275,15 @@ void videoplayer_render_subtitles(VideoPlayer *vp, int64_t pts_us)
         ass_set_frame_size(vp->subtitle.renderer,
                            vp->fullscreen_width, vp->fullscreen_height);
 
-        /* Render subtitles for current PTS */
+        /* Render subtitles for current PTS.
+         * Hold subtitle_mutex during both ass_render_frame() and
+         * create_subtitle_buffer() — the ASS_Image list returned by
+         * ass_render_frame() is owned by libass and becomes invalid when
+         * the decode thread calls ass_process_chunk().  Without holding
+         * the lock through compositing, we get corrupted/missing glyphs. */
         pthread_mutex_lock(&vp->subtitle_mutex);
         images = ass_render_frame(vp->subtitle.renderer, vp->subtitle.track,
                                    render_ms, &changed);
-        pthread_mutex_unlock(&vp->subtitle_mutex);
 
         if (changed || (sub_render_log_count < 20) ||
             (sub_render_log_count % 500 == 0)) {
@@ -1311,12 +1315,15 @@ void videoplayer_render_subtitles(VideoPlayer *vp, int64_t pts_us)
         }
 
         /* No active subtitle at this time — screen is cleared */
-        if (!images)
+        if (!images) {
+            pthread_mutex_unlock(&vp->subtitle_mutex);
             return;
+        }
 
         sub_buffer = create_subtitle_buffer(images,
                                              vp->fullscreen_width,
                                              vp->fullscreen_height);
+        pthread_mutex_unlock(&vp->subtitle_mutex);
         if (!sub_buffer) {
             fprintf(stderr, "[subtitle] render: create_subtitle_buffer FAILED (%dx%d)\n",
                     vp->fullscreen_width, vp->fullscreen_height);

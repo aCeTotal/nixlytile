@@ -711,6 +711,7 @@ int videoplayer_audio_init(VideoPlayer *vp)
     if (!vp->audio.loop) {
         fprintf(stderr, "[audio] Failed to create thread loop\n");
         ring_buffer_free(&vp->audio.ring);
+        pw_deinit();
         return -1;
     }
 
@@ -722,6 +723,7 @@ int videoplayer_audio_init(VideoPlayer *vp)
         pw_thread_loop_destroy(vp->audio.loop);
         vp->audio.loop = NULL;
         ring_buffer_free(&vp->audio.ring);
+        pw_deinit();
         return -1;
     }
 
@@ -733,6 +735,7 @@ int videoplayer_audio_init(VideoPlayer *vp)
         vp->audio.context = NULL;
         vp->audio.loop = NULL;
         ring_buffer_free(&vp->audio.ring);
+        pw_deinit();
         return -1;
     }
 
@@ -750,6 +753,7 @@ int videoplayer_audio_init(VideoPlayer *vp)
         vp->audio.context = NULL;
         vp->audio.loop = NULL;
         ring_buffer_free(&vp->audio.ring);
+        pw_deinit();
         return -1;
     }
 
@@ -779,6 +783,7 @@ int videoplayer_audio_init(VideoPlayer *vp)
         vp->audio.context = NULL;
         vp->audio.loop = NULL;
         ring_buffer_free(&vp->audio.ring);
+        pw_deinit();
         return -1;
     }
 
@@ -843,6 +848,8 @@ int videoplayer_audio_init(VideoPlayer *vp)
         vp->audio.core = NULL;
         vp->audio.context = NULL;
         vp->audio.loop = NULL;
+        ring_buffer_free(&vp->audio.ring);
+        pw_deinit();
         return -1;
     }
 

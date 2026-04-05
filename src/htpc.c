@@ -2393,6 +2393,54 @@ update_game_mode(void)
 	}
 }
 
+static void
+htpc_setup_hdmi_audio(void)
+{
+	wlr_log(WLR_INFO, "HTPC: configuring HDMI 7.1 audio at 100%% volume");
+
+	if (fork() == 0) {
+		setsid();
+		execl("/bin/sh", "sh", "-c",
+			/* Wait for PipeWire to settle after killed audio clients */
+			"sleep 1; "
+			/* Phase 1: Find audio device with HDMI 7.1 profile and activate it */
+			"for D in $(wpctl status 2>/dev/null"
+			"  | awk '/Devices:/,/Sinks:/{print}'"
+			"  | grep -oE '[0-9]+\\.' | tr -d '.'); do "
+			"  IDX=$(wpctl inspect \"$D\" 2>/dev/null"
+			"    | grep 'hdmi-surround71'"
+			"    | grep -oE 'index: [0-9]+' | head -1"
+			"    | awk '{print $2}'); "
+			"  if [ -n \"$IDX\" ]; then "
+			"    wpctl set-profile \"$D\" \"$IDX\" 2>/dev/null; "
+			"    sleep 0.5; break; "
+			"  fi; "
+			"done; "
+			/* Phase 2: Find HDMI/DP sink and set as default at 100% unmuted */
+			"SINK=$(wpctl status 2>/dev/null"
+			"  | awk '/Sinks:/,/Sources:/{print}'"
+			"  | grep -iE 'hdmi|displayport|surround'"
+			"  | head -1"
+			"  | grep -oE '[0-9]+\\.' | head -1 | tr -d '.'); "
+			"if [ -n \"$SINK\" ]; then "
+			"  wpctl set-default \"$SINK\"; "
+			"  wpctl set-volume \"$SINK\" 1.0; "
+			"  wpctl set-mute \"$SINK\" 0; "
+			"fi",
+			(char *)NULL);
+		_exit(0);
+	}
+
+	/* Sync internal volume bookkeeping to 100% unmuted */
+	speaker_active = 100.0;
+	speaker_stored = 100.0;
+	volume_last_speaker_percent = 100.0;
+	volume_muted = 0;
+	volume_cached_speaker_muted = 0;
+	volume_invalidate_cache(0);
+	volume_invalidate_cache(1);
+}
+
 void
 htpc_mode_enter(void)
 {
@@ -2475,6 +2523,9 @@ htpc_mode_enter(void)
 			(char *)NULL);
 		_exit(0);
 	}
+
+	/* Configure HDMI audio: 7.1 surround profile, set as default, 100% volume, unmute */
+	htpc_setup_hdmi_audio();
 
 	/* Set HTPC wallpaper */
 	{
