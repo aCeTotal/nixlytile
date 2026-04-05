@@ -159,21 +159,27 @@ void videoplayer_play(VideoPlayer *vp)
     vp->audio.stream_interrupted = 0;
     vp->audio.write_stall_count = 0;
 
-    /* If the frame queue is low (e.g., just opened, or after a seek while
-     * paused), enter BUFFERING state to let the decode thread fill the queue
-     * before starting playback.  present_frame() will call play() again once
-     * VP_FRAME_QUEUE_SIZE*3/4 frames are ready.  This ensures the buffer is
-     * nearly full before playback begins, giving maximum runway to absorb
-     * HTTP streaming jitter or decode variance without ever running empty. */
-    pthread_mutex_lock(&vp->frame_mutex);
-    int queued = vp->frames_queued;
-    pthread_mutex_unlock(&vp->frame_mutex);
+    /* If the frame queue is low and we're NOT already in the BUFFERING path,
+     * enter BUFFERING to let the decode thread fill the queue.
+     *
+     * When state is already VP_STATE_BUFFERING, present_frame()'s BUFFERING
+     * block already validated its own threshold (50% for rebuffer, 75% for
+     * initial) before calling play().  Re-checking at 75% here created a
+     * deadlock: the BUFFERING block triggered at 32 frames, play() rejected
+     * at < 48, code fell through to frame presentation, frames were consumed
+     * as fast as added, and the queue never grew past 32. */
+    if (vp->state != VP_STATE_BUFFERING) {
+        pthread_mutex_lock(&vp->frame_mutex);
+        int queued = vp->frames_queued;
+        pthread_mutex_unlock(&vp->frame_mutex);
 
-    if (queued < VP_FRAME_QUEUE_SIZE * 3 / 4) {
-        vp->state = VP_STATE_BUFFERING;
-        fprintf(stderr, "[videoplayer] Play -> Buffering first (%d/%d frames)\n",
-                queued, VP_FRAME_QUEUE_SIZE * 3 / 4);
-        return;
+        if (queued < VP_FRAME_QUEUE_SIZE * 3 / 4) {
+            vp->state = VP_STATE_BUFFERING;
+            vp->buffer_ready_since_ns = 0;
+            fprintf(stderr, "[videoplayer] Play -> Buffering first (%d/%d frames)\n",
+                    queued, VP_FRAME_QUEUE_SIZE * 3 / 4);
+            return;
+        }
     }
 
     /* Reset relative A/V sync so bases are recaptured after play/resume.
@@ -193,6 +199,14 @@ void videoplayer_play(VideoPlayer *vp)
 
     /* Start audio playback (non-blocking, sends via pipe) */
     videoplayer_audio_play(vp);
+
+    /* Ensure the control bar auto-hide timer fires after playback resumes.
+     * During BUFFERING the timer re-arms repeatedly.  If the last re-arm
+     * happened to fire just before state changed, there would be no pending
+     * timer.  Showing the bar here resets the timer to CONTROL_BAR_AUTO_HIDE_MS
+     * so it always hides a few seconds after playback starts. */
+    if (vp->control_bar.visible)
+        videoplayer_show_control_bar(vp);
 
     fprintf(stderr, "[videoplayer] Play (buffered %d frames)\n", vp->frames_queued);
 }

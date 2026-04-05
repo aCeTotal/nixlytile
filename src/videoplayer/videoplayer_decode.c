@@ -129,9 +129,9 @@ static void videoplayer_process_subtitle_packet(VideoPlayer *vp, AVPacket *pkt)
     int64_t start_ms = av_rescale_q(pts, tb, (AVRational){1, 1000});
     int64_t duration_ms = sub.end_display_time - sub.start_display_time;
     if (duration_ms <= 0)
-        duration_ms = 2000;  /* Default 2 seconds */
-    if (duration_ms > 2000)
-        duration_ms = 2000;  /* Cap at 2 seconds — next subtitle replaces earlier */
+        duration_ms = 5000;  /* Default 5 seconds for missing duration */
+    if (duration_ms > 30000)
+        duration_ms = 30000; /* Safety cap at 30 seconds */
 
     fprintf(stderr, "[subtitle] pkt #%d: start=%ldms duration=%ldms rects=%u "
             "track=%p pos=%ldms\n",
@@ -678,24 +678,52 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
     }
 
     /* Select default subtitle track (-1 = off).
-     * Priority: forced > default > first available text-based track */
+     * Priority: Norwegian > English (non-forced) > forced > default > first.
+     * Norwegian includes ISO 639-2 codes: nor, nob (Bokmål), nno (Nynorsk).
+     * Prefer non-forced English over forced English (forced tracks only
+     * contain sparse foreign-dialogue subs, not full subtitles).
+     * Always select a subtitle track if any are available. */
     vp->current_subtitle_track = -1;
-    for (int i = 0; i < vp->subtitle_track_count; i++) {
-        if (vp->subtitle_tracks[i].is_forced) {
-            vp->current_subtitle_track = i;
-            break;
-        }
-    }
-    if (vp->current_subtitle_track < 0) {
+    {
+        int nor_idx = -1, eng_idx = -1, forced_idx = -1, default_idx = -1;
+
         for (int i = 0; i < vp->subtitle_track_count; i++) {
-            if (vp->subtitle_tracks[i].is_default) {
-                vp->current_subtitle_track = i;
-                break;
+            const char *lang = vp->subtitle_tracks[i].language;
+
+            /* Norwegian: nor, nob, nno */
+            if (nor_idx < 0 &&
+                (strcmp(lang, "nor") == 0 || strcmp(lang, "nob") == 0 ||
+                 strcmp(lang, "nno") == 0)) {
+                nor_idx = i;
+            }
+            /* English: prefer non-forced (full subs) over forced (sparse) */
+            if (strcmp(lang, "eng") == 0) {
+                if (!vp->subtitle_tracks[i].is_forced) {
+                    eng_idx = i;  /* Always prefer non-forced English */
+                } else if (eng_idx < 0) {
+                    eng_idx = i;  /* Forced English as fallback if no regular found yet */
+                }
+            }
+            /* Forced (any language) */
+            if (forced_idx < 0 && vp->subtitle_tracks[i].is_forced) {
+                forced_idx = i;
+            }
+            /* Default */
+            if (default_idx < 0 && vp->subtitle_tracks[i].is_default) {
+                default_idx = i;
             }
         }
-    }
-    if (vp->current_subtitle_track < 0 && vp->subtitle_track_count > 0) {
-        vp->current_subtitle_track = 0;
+
+        if (nor_idx >= 0)
+            vp->current_subtitle_track = nor_idx;
+        else if (eng_idx >= 0)
+            vp->current_subtitle_track = eng_idx;
+        else if (forced_idx >= 0)
+            vp->current_subtitle_track = forced_idx;
+        else if (default_idx >= 0)
+            vp->current_subtitle_track = default_idx;
+        else if (vp->subtitle_track_count > 0)
+            vp->current_subtitle_track = 0;
     }
 
     /* Build HDR tonemapping LUT if content is HDR */
@@ -2068,6 +2096,8 @@ static void *decode_thread_func(void *arg)
             vp->av_sync_established = 0;
             vp->av_sync_video_base_us = 0;
             vp->av_sync_audio_base_us = 0;
+            vp->av_sync_drift_sum = 0;
+            vp->av_sync_drift_count = 0;
             vp->audio_seek_trim_done = 0;
 
             vp->position_us = vp->seek_target_us;

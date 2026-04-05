@@ -1038,6 +1038,8 @@ static int64_t get_av_diff_us(VideoPlayer *vp, int64_t video_pts_us)
          * av_sync_video_base_us stores the fixed offset between streams. */
         vp->av_sync_video_base_us = video_pts_us - audio_pts_us;
         vp->av_sync_established = 1;
+        vp->av_sync_drift_sum = 0;
+        vp->av_sync_drift_count = 0;
         return 0;  /* First frame after sync establishment — show it */
     }
 
@@ -1049,7 +1051,33 @@ static int64_t get_av_diff_us(VideoPlayer *vp, int64_t video_pts_us)
      * positions instead of trying to correct a multi-second gap. */
     if (diff > 5000000 || diff < -5000000) {
         vp->av_sync_video_base_us = video_pts_us - audio_pts_us;
+        vp->av_sync_drift_sum = 0;
+        vp->av_sync_drift_count = 0;
         return 0;
+    }
+
+    /* Invisible drift correction: accumulate diff over a 10-second window
+     * (~240 frames at 24fps). When the average drift exceeds 15ms,
+     * adjust the sync offset by half the drift. This convergence is
+     * gradual enough to be invisible but prevents long-term drift
+     * from ever reaching perceptible levels. */
+    vp->av_sync_drift_sum += diff;
+    vp->av_sync_drift_count++;
+
+    if (vp->av_sync_drift_count >= 240) {
+        int64_t avg_drift = vp->av_sync_drift_sum / vp->av_sync_drift_count;
+        if (avg_drift > 15000 || avg_drift < -15000) {
+            int64_t correction = avg_drift / 2;
+            vp->av_sync_video_base_us += correction;
+            if (vp->debug_log) {
+                fprintf(vp->debug_log,
+                        "# DRIFT_CORRECT | avg=%+ldus correction=%+ldus\n",
+                        (long)avg_drift, (long)correction);
+                fflush(vp->debug_log);
+            }
+        }
+        vp->av_sync_drift_sum = 0;
+        vp->av_sync_drift_count = 0;
     }
 
     return diff;
@@ -1454,6 +1482,11 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
                 pthread_mutex_unlock(&vp->audio.lock);
             }
             videoplayer_play(vp);
+            /* Safety: if play() didn't transition to PLAYING (e.g., unexpected
+             * state), don't fall through to frame presentation — consuming
+             * frames during BUFFERING prevents the queue from filling. */
+            if (vp->state != VP_STATE_PLAYING)
+                return;
         } else {
             return;
         }

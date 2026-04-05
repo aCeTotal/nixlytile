@@ -455,6 +455,11 @@ typedef struct VideoPlayer {
     int64_t av_sync_audio_base_us;
     int av_sync_established;
 
+    /* Invisible drift correction: accumulate A/V diff over a window and
+     * slowly adjust the sync offset so drift never becomes perceptible. */
+    int64_t av_sync_drift_sum;
+    int av_sync_drift_count;
+
     /* Buffer pool - reuse pixel data buffers to avoid per-frame mmap/munmap.
      * Without this, each frame triggers mmap+munmap system calls (8-33MB per frame),
      * causing page faults, TLB flushes, and significant stutter. */
