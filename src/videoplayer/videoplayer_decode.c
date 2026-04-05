@@ -2103,8 +2103,15 @@ static void *decode_thread_func(void *arg)
                 continue;
             }
 
-            /* Drain all available output frames */
-            drain_video_frames(vp);
+            /* Drain all available output frames.
+             * Use non-blocking drain during BUFFERING: the render thread isn't
+             * consuming frames yet, so blocking here when the queue is full
+             * prevents the decode thread from reaching audio packets.  This
+             * caused a deadlock where audio was stuck at ~50% of its threshold
+             * while the frame queue was already full, requiring a 3-second
+             * timeout before playback could start (with under-buffered audio
+             * that then caused A/V sync stutter for the first ~10 seconds). */
+            drain_video_frames_ex(vp, vp->state != VP_STATE_BUFFERING);
 
             /* After the CPU-intensive sws_scale, immediately drain any queued
              * audio packets so the ring buffer stays fed.  This is critical:
