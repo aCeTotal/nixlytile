@@ -557,7 +557,7 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
         av_dict_set(&opts, "reconnect_streamed", "1", 0);
         av_dict_set(&opts, "reconnect_delay_max", "2", 0);
         av_dict_set(&opts, "rw_timeout", "30000000", 0);  /* 30s I/O timeout (slow/busy disks) */
-        av_dict_set(&opts, "buffer_size", "16777216", 0); /* 16MB I/O buffer */
+        av_dict_set(&opts, "buffer_size", "67108864", 0); /* 64MB I/O buffer */
         av_dict_set(&opts, "multiple_requests", "1", 0);  /* Reuse HTTP connection */
         fprintf(stderr, "[videoplayer] %s HTTP stream: enabling reconnect + buffering options\n",
                 is_localhost ? "Localhost" : "Remote");
@@ -596,6 +596,9 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
     if (vp->is_local_file || is_localhost) {
         vp->fmt_ctx->max_analyze_duration = 500000;  /* 0.5s */
         vp->fmt_ctx->probesize = 500000;              /* 500KB */
+    } else if (is_http) {
+        vp->fmt_ctx->max_analyze_duration = 2000000;  /* 2s for remote HTTP */
+        vp->fmt_ctx->probesize = 2097152;              /* 2MB for remote HTTP */
     }
 
     /* Find stream info */
@@ -1869,11 +1872,18 @@ static void drain_video_frames_ex(VideoPlayer *vp, int blocking)
             continue;
         }
 
-        /* Calculate PTS in microseconds */
+        /* Calculate PTS in microseconds.  Prefer best_effort_timestamp
+         * (handles containers with sparse/missing PTS like MPEG-TS),
+         * fall back to raw pts, then pkt_dts. */
         int64_t pts_us = 0;
-        if (frame_to_use->pts != AV_NOPTS_VALUE) {
+        int64_t pts = frame_to_use->best_effort_timestamp;
+        if (pts == AV_NOPTS_VALUE)
+            pts = frame_to_use->pts;
+        if (pts == AV_NOPTS_VALUE)
+            pts = frame_to_use->pkt_dts;
+        if (pts != AV_NOPTS_VALUE) {
             AVRational tb = vp->fmt_ctx->streams[vp->video.stream_index]->time_base;
-            pts_us = av_rescale_q(frame_to_use->pts, tb, AV_TIME_BASE_Q);
+            pts_us = av_rescale_q(pts, tb, AV_TIME_BASE_Q);
         }
 
         /* Convert YUV→BGRA on the decode thread */
@@ -1895,6 +1905,13 @@ static void drain_video_frames_ex(VideoPlayer *vp, int blocking)
 
             qf->buffer = buffer;
             qf->pts_us = pts_us;
+            qf->duration_us = 0;
+            if (frame_to_use->duration > 0) {
+                AVRational tb = vp->fmt_ctx->streams[vp->video.stream_index]->time_base;
+                qf->duration_us = av_rescale_q(frame_to_use->duration, tb, AV_TIME_BASE_Q);
+            } else if (vp->video_fps > 0) {
+                qf->duration_us = (int64_t)(1000000.0 / vp->video_fps);
+            }
             qf->width = frame_to_use->width;
             qf->height = frame_to_use->height;
             qf->ready = 1;
