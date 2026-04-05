@@ -427,6 +427,215 @@ static void tonemap_bgra_to_argb2101010_inplace(void *buf, int stride,
 }
 
 /* ================================================================
+ *  Parallel Slice Conversion Pool (4K)
+ * ================================================================ */
+
+/*
+ * Worker thread: waits for a slice dispatch, runs sws_scale + tonemap
+ * for its horizontal band, then signals completion.
+ */
+static void *slice_worker_func(void *arg)
+{
+	SliceWorker *w = arg;
+
+	while (1) {
+		pthread_mutex_lock(&w->mutex);
+		while (!w->has_work && !w->shutdown)
+			pthread_cond_wait(&w->wake, &w->mutex);
+		if (w->shutdown) {
+			pthread_mutex_unlock(&w->mutex);
+			break;
+		}
+		w->has_work = 0;
+		pthread_mutex_unlock(&w->mutex);
+
+		/* Create/reuse sws context for this slice dimensions.
+		 * Each worker has its own context — sws is not thread-safe. */
+		w->sws_ctx = sws_getCachedContext(w->sws_ctx,
+			w->width, w->slice_h, w->src_fmt,
+			w->width, w->slice_h, AV_PIX_FMT_BGRA,
+			SWS_POINT, NULL, NULL, NULL);
+
+		if (w->sws_ctx) {
+			configure_sws_colorspace(w->sws_ctx, (VideoPlayer *)w->vp);
+
+			uint8_t *dst_data[4] = { w->dst, NULL, NULL, NULL };
+			int dst_stride[4] = { w->dst_stride, 0, 0, 0 };
+
+			sws_scale(w->sws_ctx,
+				  w->src_data, w->src_linesize,
+				  0, w->slice_h,
+				  dst_data, dst_stride);
+
+			/* Tonemap/pack in-place for this slice */
+			if (w->is_hdr) {
+				if (w->output_10bit)
+					tonemap_bgra_to_argb2101010_inplace(
+						w->dst, w->dst_stride,
+						w->width, w->slice_h, w->lut_8bit);
+				else
+					tonemap_bgra_inplace(
+						w->dst, w->dst_stride,
+						w->width, w->slice_h, w->lut_8bit);
+			} else if (w->output_10bit) {
+				pack_bgra_to_argb2101010_inplace(
+					w->dst, w->dst_stride,
+					w->width, w->slice_h);
+			}
+		}
+
+		/* Signal completion */
+		pthread_mutex_lock(&w->mutex);
+		w->work_done = 1;
+		pthread_cond_signal(&w->done);
+		pthread_mutex_unlock(&w->mutex);
+	}
+
+	return NULL;
+}
+
+void videoplayer_init_slice_pool(VideoPlayer *vp)
+{
+	for (int i = 0; i < VP_SLICE_WORKERS; i++) {
+		SliceWorker *w = &vp->slice_workers[i];
+		memset(w, 0, sizeof(*w));
+		pthread_mutex_init(&w->mutex, NULL);
+		pthread_cond_init(&w->wake, NULL);
+		pthread_cond_init(&w->done, NULL);
+		w->vp = vp;
+		pthread_create(&w->thread, NULL, slice_worker_func, w);
+	}
+	vp->slice_pool_ready = 1;
+	fprintf(stderr, "[videoplayer] Slice pool: %d workers + caller = %d parallel slices\n",
+		VP_SLICE_WORKERS, VP_SLICE_WORKERS + 1);
+}
+
+void videoplayer_cleanup_slice_pool(VideoPlayer *vp)
+{
+	if (!vp->slice_pool_ready)
+		return;
+	for (int i = 0; i < VP_SLICE_WORKERS; i++) {
+		SliceWorker *w = &vp->slice_workers[i];
+		pthread_mutex_lock(&w->mutex);
+		w->shutdown = 1;
+		pthread_cond_signal(&w->wake);
+		pthread_mutex_unlock(&w->mutex);
+		pthread_join(w->thread, NULL);
+		sws_freeContext(w->sws_ctx);
+		pthread_mutex_destroy(&w->mutex);
+		pthread_cond_destroy(&w->wake);
+		pthread_cond_destroy(&w->done);
+	}
+	vp->slice_pool_ready = 0;
+}
+
+/*
+ * Convert a 4K frame using 4 parallel slices (3 workers + caller).
+ * Each slice runs sws_scale (SWS_POINT for speed) + tonemap independently.
+ * Reduces 4K conversion from ~40ms to ~10-12ms.
+ */
+static void parallel_convert_frame(VideoPlayer *vp, AVFrame *frame,
+                                     void *data, int stride,
+                                     int width, int height,
+                                     int is_hdr, int output_10bit)
+{
+	int n_slices = VP_SLICE_WORKERS + 1;
+	int slice_h = (height / n_slices) & ~1;  /* Even for 4:2:0 chroma */
+	enum AVPixelFormat src_fmt = frame->format;
+
+	if (src_fmt == AV_PIX_FMT_NONE)
+		src_fmt = AV_PIX_FMT_YUV420P;
+
+	/* Determine chroma vertical subsampling for correct plane offsets.
+	 * 4:2:0 → shift=1 (chroma_h = luma_h/2)
+	 * 4:2:2 → shift=0 (chroma_h = luma_h)
+	 * 4:4:4 → shift=0 */
+	const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(src_fmt);
+	int chroma_y_shift = desc ? desc->log2_chroma_h : 1;
+
+	/* Dispatch slices 1..N-1 to worker threads */
+	for (int i = 0; i < VP_SLICE_WORKERS; i++) {
+		SliceWorker *w = &vp->slice_workers[i];
+		int y0 = (i + 1) * slice_h;
+		int h = (i == VP_SLICE_WORKERS - 1) ? (height - y0) : slice_h;
+		int chroma_y = y0 >> chroma_y_shift;
+
+		w->src_fmt = src_fmt;
+		w->width = width;
+		w->slice_h = h;
+		w->dst = (uint8_t *)data + y0 * stride;
+		w->dst_stride = stride;
+		w->is_hdr = is_hdr;
+		w->output_10bit = output_10bit;
+		w->lut_8bit = vp->hdr_lut_8bit;
+
+		/* Adjust source plane pointers to this slice's start */
+		w->src_data[0] = frame->data[0] + y0 * frame->linesize[0];
+		w->src_data[1] = frame->data[1] ? frame->data[1] + chroma_y * frame->linesize[1] : NULL;
+		w->src_data[2] = frame->data[2] ? frame->data[2] + chroma_y * frame->linesize[2] : NULL;
+		w->src_data[3] = NULL;
+		w->src_linesize[0] = frame->linesize[0];
+		w->src_linesize[1] = frame->linesize[1];
+		w->src_linesize[2] = frame->linesize[2];
+		w->src_linesize[3] = 0;
+
+		pthread_mutex_lock(&w->mutex);
+		w->work_done = 0;
+		w->has_work = 1;
+		pthread_cond_signal(&w->wake);
+		pthread_mutex_unlock(&w->mutex);
+	}
+
+	/* Process slice 0 on caller thread.
+	 * Use a local sws_ctx separate from vp->sws_ctx to avoid
+	 * conflicts with non-4K path (vp->sws_ctx has full-frame dims). */
+	{
+		static __thread struct SwsContext *caller_sws = NULL;
+
+		caller_sws = sws_getCachedContext(caller_sws,
+			width, slice_h, src_fmt,
+			width, slice_h, AV_PIX_FMT_BGRA,
+			SWS_POINT, NULL, NULL, NULL);
+
+		if (caller_sws) {
+			configure_sws_colorspace(caller_sws, vp);
+
+			uint8_t *dst_data[4] = { data, NULL, NULL, NULL };
+			int dst_stride_arr[4] = { stride, 0, 0, 0 };
+
+			sws_scale(caller_sws,
+				  (const uint8_t *const *)frame->data,
+				  frame->linesize,
+				  0, slice_h,
+				  dst_data, dst_stride_arr);
+
+			if (is_hdr) {
+				if (output_10bit)
+					tonemap_bgra_to_argb2101010_inplace(
+						data, stride,
+						width, slice_h, vp->hdr_lut_8bit);
+				else
+					tonemap_bgra_inplace(
+						data, stride,
+						width, slice_h, vp->hdr_lut_8bit);
+			} else if (output_10bit) {
+				pack_bgra_to_argb2101010_inplace(
+					data, stride, width, slice_h);
+			}
+		}
+	}
+
+	/* Wait for all workers to complete */
+	for (int i = 0; i < VP_SLICE_WORKERS; i++) {
+		SliceWorker *w = &vp->slice_workers[i];
+		pthread_mutex_lock(&w->mutex);
+		while (!w->work_done)
+			pthread_cond_wait(&w->done, &w->mutex);
+		pthread_mutex_unlock(&w->mutex);
+	}
+}
+
+/* ================================================================
  *  Frame Conversion
  * ================================================================ */
 
@@ -514,12 +723,18 @@ struct wlr_buffer *videoplayer_create_frame_buffer(VideoPlayer *vp, AVFrame *fra
         tonemap_and_pack(vp->hdr_tmp_buffer, rgba64_stride,
                          data, stride, width, height,
                          vp->hdr_lut, output_10bit);
+    } else if ((width >= 3840 || height >= 2160) && vp->slice_pool_ready) {
+        /* ── 4K parallel path: split into 4 slices across worker pool ──
+         * Single-threaded sws_scale+tonemap takes ~40ms at 4K, barely under
+         * the 41.67ms budget at 24fps.  4 parallel slices bring it to ~10-12ms.
+         * Uses SWS_POINT (no chroma interpolation) — invisible at 4K density. */
+        parallel_convert_frame(vp, frame, data, stride,
+                               width, height, is_hdr, output_10bit);
     } else {
-        /* ── Fast BGRA path (SDR + 4K HDR) ──
-         * Converts directly to 8-bit BGRA (~15-20ms at 4K).
-         * For 4K HDR: apply 8-bit tonemap LUT in-place (~25ms).
-         * For SDR: BGRA is the final format (no tonemap needed).
-         * Combined: ~40ms total vs ~100ms with RGBA64LE intermediate. */
+        /* ── Standard BGRA path (HD SDR/HDR, or 4K without pool) ──
+         * Converts directly to 8-bit BGRA.
+         * For HDR: apply 8-bit tonemap LUT in-place.
+         * For SDR: BGRA is the final format (no tonemap needed). */
         vp->sws_ctx = sws_getCachedContext(vp->sws_ctx,
             width, height, src_fmt,
             width, height, AV_PIX_FMT_BGRA,
@@ -538,8 +753,6 @@ struct wlr_buffer *videoplayer_create_frame_buffer(VideoPlayer *vp, AVFrame *fra
                   0, height, dst_data, dst_linesize);
 
         if (is_hdr) {
-            /* 4K HDR: tonemap PQ/HLG→sRGB using 8-bit LUT.
-             * Combined tonemap+pack saves one full data pass. */
             if (output_10bit)
                 tonemap_bgra_to_argb2101010_inplace(data, stride, width, height,
                                                       vp->hdr_lut_8bit);

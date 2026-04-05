@@ -119,6 +119,37 @@ typedef struct SubtitleTrack {
 #define VP_FRAME_QUEUE_SIZE 64     /* Pre-converted BGRA buffers — large for 4K headroom */
 #define VP_BUFFER_POOL_SIZE 72     /* Recycled pixel data buffers to avoid mmap/munmap */
 #define VP_PACKET_QUEUE_SIZE 4096  /* Demuxed packets buffered between I/O and decode threads */
+#define VP_SLICE_WORKERS    3      /* Parallel conversion threads (+ caller = 4 slices) */
+
+/* Persistent worker thread for parallel 4K frame conversion.
+ * Each worker processes a horizontal slice of the frame:
+ * sws_scale (YUV→BGRA) + tonemap + optional 10-bit pack.
+ * At 4K, single-threaded conversion takes ~40ms vs 41.67ms budget;
+ * 4 parallel slices bring it down to ~10-12ms. */
+typedef struct SliceWorker {
+    pthread_t thread;
+    pthread_mutex_t mutex;
+    pthread_cond_t wake;
+    pthread_cond_t done;
+    volatile int has_work;
+    volatile int work_done;
+    volatile int shutdown;
+
+    /* Cached sws context (one per worker, avoids thread-safety issues) */
+    struct SwsContext *sws_ctx;
+
+    /* Per-dispatch work parameters (set by caller before signaling) */
+    const uint8_t *src_data[4];
+    int src_linesize[4];
+    enum AVPixelFormat src_fmt;
+    int width, slice_h;
+    uint8_t *dst;
+    int dst_stride;
+    int is_hdr;
+    int output_10bit;
+    const uint8_t *lut_8bit;
+    void *vp;                      /* VideoPlayer* (void to avoid circular ref) */
+} SliceWorker;
 
 typedef struct PacketQueueEntry {
     AVPacket *pkt;
@@ -433,6 +464,10 @@ typedef struct VideoPlayer {
         pthread_mutex_t lock;
     } buffer_pool;
 
+    /* Parallel frame conversion pool (4K) — 3 workers + caller = 4 slices */
+    SliceWorker slice_workers[VP_SLICE_WORKERS];
+    int slice_pool_ready;
+
     /* Per-instance counters (not static - avoids stale state across open/close cycles) */
     int recovery_check_counter;            /* Periodic audio recovery check */
     int audio_interrupted_ticks;           /* Ticks since audio was interrupted */
@@ -528,6 +563,10 @@ void videoplayer_render_subtitles(VideoPlayer *vp, int64_t pts_us);
 /* Color management */
 void videoplayer_build_hdr_lut(VideoPlayer *vp);
 void videoplayer_cleanup_hdr_lut(VideoPlayer *vp);
+
+/* Parallel conversion pool */
+void videoplayer_init_slice_pool(VideoPlayer *vp);
+void videoplayer_cleanup_slice_pool(VideoPlayer *vp);
 
 /* Utility */
 const char *videoplayer_state_str(VideoPlayerState state);

@@ -29,6 +29,10 @@ extern void videoplayer_cleanup_control_bar(VideoPlayer *vp);
 extern void videoplayer_show_control_bar(VideoPlayer *vp);
 extern void videoplayer_hide_control_bar(VideoPlayer *vp);
 
+/* Forward declarations for slice pool */
+extern void videoplayer_init_slice_pool(VideoPlayer *vp);
+extern void videoplayer_cleanup_slice_pool(VideoPlayer *vp);
+
 /* Forward declarations for audio */
 extern int videoplayer_audio_init(VideoPlayer *vp);
 extern void videoplayer_audio_cleanup(VideoPlayer *vp);
@@ -74,6 +78,9 @@ VideoPlayer *videoplayer_create(struct Monitor *mon)
     /* Initialize buffer pool mutex */
     pthread_mutex_init(&vp->buffer_pool.lock, NULL);
 
+    /* Start parallel conversion thread pool for 4K */
+    videoplayer_init_slice_pool(vp);
+
     fprintf(stderr, "[videoplayer] Created video player instance\n");
 
     return vp;
@@ -104,6 +111,9 @@ void videoplayer_destroy(VideoPlayer *vp)
 
     /* Cleanup audio mutex */
     pthread_mutex_destroy(&vp->audio.lock);
+
+    /* Shut down parallel conversion pool */
+    videoplayer_cleanup_slice_pool(vp);
 
     /* Free buffer pool */
     pthread_mutex_lock(&vp->buffer_pool.lock);
