@@ -51,32 +51,65 @@ extern void videoplayer_subtitle_cleanup(VideoPlayer *vp);
 static int subtitle_pkt_count = 0;
 
 /* Strip inline ASS override tags that control outline/back colors.
- * ASS event text can contain tags like {\4c&H00FF00&} (green back color)
- * or {\3c&H00FF00&} (green outline) that override our style-level settings.
- * This function removes \3c, \4c, \3a, \4a tags in-place so the style
- * defaults (transparent back, black outline) take effect. */
-static void strip_ass_inline_back_tags(char *text)
+ * ASS event text can contain inline tags that override our style settings.
+ * This function strips:
+ *   - \3c, \4c, \3a, \4a: color/alpha tags (green boxes, colored outlines)
+ *   - \pos(x,y): absolute positioning (subs next to characters)
+ *   - \move(x1,y1,x2,y2,...): animated positioning
+ *   - \an1-\an9: alignment overrides (top/middle placement)
+ *   - \a1-\a11: legacy alignment overrides
+ * After stripping, our style-level Alignment=2 (bottom-center) takes effect. */
+static void strip_ass_inline_tags(char *text)
 {
     char *r = text, *w = text;
 
     while (*r) {
-        /* Match \3c, \4c, \3a, \4a */
-        if (*r == '\\' && (r[1] == '3' || r[1] == '4') &&
-            (r[2] == 'c' || r[2] == 'a')) {
-            r += 3;  /* skip \Xc or \Xa */
-            /* Skip &H prefix */
-            if (*r == '&') {
-                r++;
-                if (*r == 'H' || *r == 'h') r++;
+        if (*r == '\\') {
+            /* Match \3c, \4c, \3a, \4a — color/alpha tags */
+            if ((r[1] == '3' || r[1] == '4') &&
+                (r[2] == 'c' || r[2] == 'a')) {
+                r += 3;
+                if (*r == '&') { r++; if (*r == 'H' || *r == 'h') r++; }
+                while ((*r >= '0' && *r <= '9') ||
+                       (*r >= 'A' && *r <= 'F') ||
+                       (*r >= 'a' && *r <= 'f'))
+                    r++;
+                if (*r == '&') r++;
+                continue;
             }
-            /* Skip hex digits */
-            while ((*r >= '0' && *r <= '9') ||
-                   (*r >= 'A' && *r <= 'F') ||
-                   (*r >= 'a' && *r <= 'f'))
-                r++;
-            /* Skip trailing & */
-            if (*r == '&') r++;
-            continue;
+            /* Match \pos(...) — absolute positioning */
+            if (r[1] == 'p' && r[2] == 'o' && r[3] == 's' && r[4] == '(') {
+                r += 5;
+                int depth = 1;
+                while (*r && depth > 0) {
+                    if (*r == '(') depth++;
+                    else if (*r == ')') depth--;
+                    r++;
+                }
+                continue;
+            }
+            /* Match \move(...) — animated positioning */
+            if (r[1] == 'm' && r[2] == 'o' && r[3] == 'v' && r[4] == 'e' && r[5] == '(') {
+                r += 6;
+                int depth = 1;
+                while (*r && depth > 0) {
+                    if (*r == '(') depth++;
+                    else if (*r == ')') depth--;
+                    r++;
+                }
+                continue;
+            }
+            /* Match \an[0-9] — alignment override */
+            if (r[1] == 'a' && r[2] == 'n' && r[3] >= '0' && r[3] <= '9') {
+                r += 4;
+                continue;
+            }
+            /* Match \a[0-9]+ — legacy alignment override */
+            if (r[1] == 'a' && r[2] >= '0' && r[2] <= '9') {
+                r += 3;
+                while (*r >= '0' && *r <= '9') r++;
+                continue;
+            }
         }
         *w++ = *r++;
     }
@@ -129,9 +162,9 @@ static void videoplayer_process_subtitle_packet(VideoPlayer *vp, AVPacket *pkt)
     int64_t start_ms = av_rescale_q(pts, tb, (AVRational){1, 1000});
     int64_t duration_ms = sub.end_display_time - sub.start_display_time;
     if (duration_ms <= 0)
-        duration_ms = 5000;  /* Default 5 seconds for missing duration */
-    if (duration_ms > 30000)
-        duration_ms = 30000; /* Safety cap at 30 seconds */
+        duration_ms = 2000;  /* Default 2 seconds for missing duration */
+    if (duration_ms > 2000)
+        duration_ms = 2000;  /* Cap all subtitles at 2 seconds */
 
     fprintf(stderr, "[subtitle] pkt #%d: start=%ldms duration=%ldms rects=%u "
             "track=%p pos=%ldms\n",
@@ -161,7 +194,7 @@ static void videoplayer_process_subtitle_packet(VideoPlayer *vp, AVPacket *pkt)
             char *cleaned = malloc(alen + 1);
             if (cleaned) {
                 memcpy(cleaned, rect->ass, alen + 1);
-                strip_ass_inline_back_tags(cleaned);
+                strip_ass_inline_tags(cleaned);
                 fprintf(stderr, "[subtitle]   rect[%u] ASS cleaned: \"%.*s\"\n",
                         i, 120, cleaned);
                 ass_process_chunk(vp->subtitle.track, cleaned, strlen(cleaned),
@@ -2066,6 +2099,13 @@ static void *decode_thread_func(void *arg)
             if (!vp->decode_running)
                 break;
 
+            /* Release any frame data held by decode/sw frames BEFORE flushing.
+             * These may hold VAAPI/NVDEC surface references.  Without unreffing,
+             * avcodec_flush_buffers() can't reclaim the surfaces, and after many
+             * seeks the HW surface pool exhausts → decode fails → no video. */
+            av_frame_unref(vp->decode_frame);
+            av_frame_unref(vp->sw_frame);
+
             /* Flush codecs */
             avcodec_flush_buffers(vp->video_codec_ctx);
             if (vp->audio_codec_ctx)
@@ -2086,6 +2126,24 @@ static void *decode_thread_func(void *arg)
             vp->frame_read_idx = 0;
             vp->frame_write_idx = 0;
             pthread_mutex_unlock(&vp->frame_mutex);
+
+            /* Clear subtitle bitmap so stale PGS data doesn't persist */
+            pthread_mutex_lock(&vp->subtitle_mutex);
+            free(vp->subtitle.bitmap_data);
+            vp->subtitle.bitmap_data = NULL;
+            vp->subtitle.bitmap_valid = 0;
+            pthread_mutex_unlock(&vp->subtitle_mutex);
+
+            /* Return excess buffer pool entries to the OS.
+             * Keep a few buffers for fast restart, but release the rest
+             * to prevent memory from growing unbounded across many seeks
+             * (each buffered position holds up to 72 × 8-33MB). */
+            pthread_mutex_lock(&vp->buffer_pool.lock);
+            int keep = 8;  /* Keep 8 buffers for fast restart (~64-264MB) */
+            while (vp->buffer_pool.count > keep) {
+                free(vp->buffer_pool.data[--vp->buffer_pool.count]);
+            }
+            pthread_mutex_unlock(&vp->buffer_pool.lock);
 
             /* Pause audio and flush buffer for clean restart from new position.
              * audio_flush must come first to clear stream_interrupted, otherwise
@@ -2252,6 +2310,35 @@ void videoplayer_seek(VideoPlayer *vp, int64_t position_us)
     vp->last_present_time_ns = 0;
     vp->current_repeat = 0;
     vp->cadence_accum = 0.0f;
+
+    /* Release blend buffers immediately — these hold wlr_buffer refs from
+     * the old position.  Without this, blend_current_buf and blend_next_buf
+     * keep 2 frame buffers alive across every seek, which accumulates scene
+     * node references and prevents buffer pool recycling. */
+    if (vp->blend_current_buf) { wlr_buffer_drop(vp->blend_current_buf); vp->blend_current_buf = NULL; }
+    if (vp->blend_next_buf) { wlr_buffer_drop(vp->blend_next_buf); vp->blend_next_buf = NULL; }
+    vp->blend_base_ns = 0;
+
+    /* Clear scene node buffer references — the displayed frame and blend
+     * overlay hold refs to old-position buffers.  Without clearing, these
+     * refs prevent the buffer's destroy callback from recycling pixel data
+     * to the pool, leaking ~8-33MB per frame per seek. */
+    if (vp->frame_node)
+        wlr_scene_buffer_set_buffer(vp->frame_node, NULL);
+    if (vp->blend_node)
+        wlr_scene_buffer_set_buffer(vp->blend_node, NULL);
+
+    /* Clear subtitle display */
+    if (vp->subtitle.current_buffer) {
+        wlr_buffer_drop(vp->subtitle.current_buffer);
+        vp->subtitle.current_buffer = NULL;
+    }
+    if (vp->subtitle_tree) {
+        struct wlr_scene_node *node, *tmp;
+        wl_list_for_each_safe(node, tmp, &vp->subtitle_tree->children, link) {
+            wlr_scene_node_destroy(node);
+        }
+    }
 
     vp->seek_target_us = position_us;
     vp->seek_flush_done = 0;

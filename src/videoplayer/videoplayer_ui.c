@@ -1128,12 +1128,11 @@ static struct wlr_buffer *create_bitmap_subtitle_buffer(VideoPlayer *vp)
         return NULL;
     }
 
-    /* Scale bitmap from video coordinates to fullscreen display.
-     * PGS subtitle positions are relative to the video frame dimensions.
-     * Apply 0.75 downscale since PGS bitmaps are typically designed for
-     * cinema-scale viewing and appear oversized on desktop displays.
-     * Anchor the bottom-center of the subtitle to its mapped screen position
-     * so dialogue subs stay at the bottom while becoming smaller. */
+    /* Scale bitmap and force bottom-center positioning.
+     * PGS subtitle bitmaps often have arbitrary positions (next to speakers,
+     * top of screen, etc.).  We ignore the source x,y and always place the
+     * bitmap at bottom-center with a small margin, matching ASS/SRT behavior.
+     * Apply 0.75 downscale since PGS bitmaps are designed for cinema scale. */
     int vid_w = vp->subtitle.bitmap_video_w;
     int vid_h = vp->subtitle.bitmap_video_h;
     if (vid_w <= 0) vid_w = bw;
@@ -1145,10 +1144,12 @@ static struct wlr_buffer *create_bitmap_subtitle_buffer(VideoPlayer *vp)
     double scale_x = base_scale_x * pgs_scale;
     double scale_y = base_scale_y * pgs_scale;
 
-    double bottom_center_x = (vp->subtitle.bitmap_x + bw / 2.0) * base_scale_x;
-    double bottom_y = (vp->subtitle.bitmap_y + bh) * base_scale_y;
-    double dst_x = bottom_center_x - (bw * scale_x) / 2.0;
-    double dst_y = bottom_y - (bh * scale_y);
+    /* Center horizontally, anchor to bottom with margin */
+    double scaled_w = bw * scale_x;
+    double scaled_h = bh * scale_y;
+    double dst_x = (fw - scaled_w) / 2.0;
+    double margin_bottom = 50.0 * base_scale_y;
+    double dst_y = fh - scaled_h - margin_bottom;
 
 
     cairo_save(cr);
