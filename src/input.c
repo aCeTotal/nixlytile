@@ -1425,8 +1425,12 @@ keypress(struct wl_listener *listener, void *data)
 					/* Check if player was stopped (Escape/Q) */
 					if (active_videoplayer->state == VP_STATE_IDLE) {
 						videoplayer_set_visible(active_videoplayer, 0);
+						/* Fully destroy for clean state on next play */
+						videoplayer_destroy(active_videoplayer);
+						active_videoplayer = NULL;
 						hide_playback_osd();
 						playback_state = PLAYBACK_IDLE;
+						break;
 					} else {
 						/* Show OSD on any key during playback */
 						render_playback_osd();

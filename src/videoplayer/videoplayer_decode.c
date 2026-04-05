@@ -2066,6 +2066,8 @@ static void *decode_thread_func(void *arg)
             videoplayer_audio_flush(vp);
             videoplayer_audio_pause(vp);
             vp->av_sync_established = 0;
+            vp->av_sync_video_base_us = 0;
+            vp->av_sync_audio_base_us = 0;
 
             vp->position_us = vp->seek_target_us;
             vp->seek_requested = 0;
@@ -2223,6 +2225,7 @@ void videoplayer_seek(VideoPlayer *vp, int64_t position_us)
     vp->seek_target_us = position_us;
     vp->seek_flush_done = 0;
     vp->seek_requested = 1;
+    vp->empty_queue_count = 0;  /* Prevent stale rebuffer grace from old position */
 
     /* Show control bar with seek position (time display uses seek_target_us) */
     videoplayer_show_control_bar(vp);

@@ -441,9 +441,18 @@ launch_integrated_player(const char *filepath)
 void
 stop_integrated_player(void)
 {
-	if (active_videoplayer && active_videoplayer->state != VP_STATE_IDLE) {
-		videoplayer_stop(active_videoplayer);
+	if (active_videoplayer) {
+		if (active_videoplayer->state != VP_STATE_IDLE)
+			videoplayer_stop(active_videoplayer);
 		videoplayer_set_visible(active_videoplayer, 0);
+
+		/* Fully destroy the video player to guarantee a clean slate for next
+		 * playback.  Reusing across open/close cycles accumulates PipeWire
+		 * state (pw_init refcount, fd leaks) that eventually prevents new
+		 * videos from starting after 5-6 stop/start cycles. */
+		videoplayer_destroy(active_videoplayer);
+		active_videoplayer = NULL;
+
 		hide_playback_osd();
 		audio_track_count = 0;
 		subtitle_track_count = 0;

@@ -880,6 +880,12 @@ void videoplayer_audio_cleanup(VideoPlayer *vp)
         vp->audio.iec_buffer_size = 0;
     }
 
+    /* Balance pw_init() from videoplayer_audio_init().
+     * Without this, pw_init refcount grows on each open/close cycle,
+     * accumulating PipeWire internal state that eventually prevents
+     * new connections from succeeding. */
+    pw_deinit();
+
     fprintf(stderr, "[audio] Cleanup complete\n");
 }
 
@@ -1145,18 +1151,28 @@ int videoplayer_audio_queue_frame(VideoPlayer *vp, AVFrame *frame)
         /* Buffer full - check if this is a sustained stall (e.g., Bluetooth device
          * reconnecting). PipeWire may stop consuming audio before firing
          * on_stream_state_changed. Detect this early to prevent the decode thread
-         * from stalling on audio retries and starving video frame production. */
-        vp->audio.write_stall_count++;
-        if (vp->audio.write_stall_count >= 50) {
-            fprintf(stderr, "[audio] Ring buffer stall detected (%d consecutive full writes)"
-                    " - triggering early interruption for smooth video\n",
-                    vp->audio.write_stall_count);
-            audio_diag("ring buffer stall: %d consecutive full writes", vp->audio.write_stall_count);
-            audio_diag_error("Ring buffer stall (%d writes), triggering interruption",
-                    vp->audio.write_stall_count);
-            vp->audio.stream_interrupted = 1;
-            vp->audio.write_stall_count = 0;
-            return 0;  /* Drop frame immediately - video continues smoothly */
+         * from stalling on audio retries and starving video frame production.
+         *
+         * EXCEPTION: During BUFFERING (after open/seek), PipeWire is paused while
+         * the decode thread fills both video and audio queues.  The ring buffer
+         * filling up is expected and normal — NOT a device stall.  Setting
+         * stream_interrupted here would (a) drop audio frames creating gaps,
+         * (b) race with the BUFFERING→PLAYING transition that clears the flag,
+         * and (c) prevent audio_play() from activating PipeWire.  This was the
+         * root cause of broken A/V sync after seeking. */
+        if (vp->state != VP_STATE_BUFFERING) {
+            vp->audio.write_stall_count++;
+            if (vp->audio.write_stall_count >= 50) {
+                fprintf(stderr, "[audio] Ring buffer stall detected (%d consecutive full writes)"
+                        " - triggering early interruption for smooth video\n",
+                        vp->audio.write_stall_count);
+                audio_diag("ring buffer stall: %d consecutive full writes", vp->audio.write_stall_count);
+                audio_diag_error("Ring buffer stall (%d writes), triggering interruption",
+                        vp->audio.write_stall_count);
+                vp->audio.stream_interrupted = 1;
+                vp->audio.write_stall_count = 0;
+                return 0;  /* Drop frame immediately - video continues smoothly */
+            }
         }
         return 1;
     }
