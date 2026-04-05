@@ -1190,17 +1190,61 @@ void videoplayer_render_subtitles(VideoPlayer *vp, int64_t pts_us)
                            !vp->subtitle_tracks[vp->current_subtitle_track].is_text_based);
 
     if (is_bitmap_track) {
-        /* ── Bitmap subtitle path (PGS/VOBSUB) ── */
+        /* ── Bitmap subtitle path (PGS/VOBSUB) ──
+         * The decode thread runs ~2-3s ahead and overwrites bitmap_data /
+         * bitmap_start_ms / bitmap_end_ms when the next subtitle arrives.
+         * To prevent the current display from being disrupted, the render
+         * thread caches timing in render_start_ms / render_end_ms when it
+         * first creates a bitmap buffer.  Subsequent calls use the cached
+         * timing for show/hide decisions.  The decode thread's end-time
+         * updates (PGS clear events) are picked up when the start time
+         * still matches (same subtitle). */
+
+        /* Read decode thread's current bitmap state (brief lock) */
         pthread_mutex_lock(&vp->subtitle_mutex);
         int valid = vp->subtitle.bitmap_valid;
         int64_t bstart = vp->subtitle.bitmap_start_ms;
         int64_t bend = vp->subtitle.bitmap_end_ms;
         pthread_mutex_unlock(&vp->subtitle_mutex);
 
-        /* Check if bitmap is active at current PTS */
+        /* Case 1: Currently displaying a bitmap (render owns its buffer) */
+        if (vp->subtitle.current_buffer && vp->subtitle.render_start_ms > 0) {
+            /* If decode thread still has the same subtitle, pick up
+             * end-time updates (PGS clear events narrow the end time) */
+            if (valid && bstart == vp->subtitle.render_start_ms)
+                vp->subtitle.render_end_ms = bend;
+
+            /* Still in display range? Keep showing. */
+            if (render_ms < vp->subtitle.render_end_ms)
+                return;
+
+            /* Expired — clear display */
+            if (sub_render_log_count < 20 || sub_render_log_count % 500 == 0) {
+                fprintf(stderr, "[subtitle] render #%d: bitmap EXPIRED at pts=%lldms "
+                        "range=[%ld,%ld]\n", sub_render_log_count, render_ms,
+                        (long)vp->subtitle.render_start_ms,
+                        (long)vp->subtitle.render_end_ms);
+            }
+
+            wlr_buffer_drop(vp->subtitle.current_buffer);
+            vp->subtitle.current_buffer = NULL;
+            vp->subtitle.current_pts_us = 0;
+            vp->subtitle.current_end_us = 0;
+            vp->subtitle.render_start_ms = 0;
+            vp->subtitle.render_end_ms = 0;
+
+            if (vp->subtitle_tree) {
+                struct wlr_scene_node *node, *tmp;
+                wl_list_for_each_safe(node, tmp, &vp->subtitle_tree->children, link) {
+                    wlr_scene_node_destroy(node);
+                }
+            }
+            /* Fall through to check if decode has a new subtitle to show */
+        }
+
+        /* Case 2: No current display — check decode thread for a bitmap */
         int show = valid && render_ms >= bstart && render_ms < bend;
 
-        /* Log periodically */
         if (sub_render_log_count < 20 || sub_render_log_count % 500 == 0) {
             fprintf(stderr, "[subtitle] render #%d: BITMAP pts=%lldms valid=%d "
                     "range=[%ld,%ld] show=%d shown=%d\n",
@@ -1208,27 +1252,6 @@ void videoplayer_render_subtitles(VideoPlayer *vp, int64_t pts_us)
                     (long)bstart, (long)bend, show, sub_render_shown_count);
         }
         sub_render_log_count++;
-
-        /* Check if we can reuse existing display */
-        if (show && vp->subtitle.current_buffer &&
-            pts_us >= vp->subtitle.current_pts_us &&
-            pts_us < vp->subtitle.current_end_us) {
-            return;
-        }
-
-        /* Clear old subtitle */
-        if (vp->subtitle.current_buffer) {
-            wlr_buffer_drop(vp->subtitle.current_buffer);
-            vp->subtitle.current_buffer = NULL;
-        }
-
-        /* Clear subtitle tree */
-        if (vp->subtitle_tree) {
-            struct wlr_scene_node *node, *tmp;
-            wl_list_for_each_safe(node, tmp, &vp->subtitle_tree->children, link) {
-                wlr_scene_node_destroy(node);
-            }
-        }
 
         if (!show)
             return;
@@ -1243,22 +1266,29 @@ void videoplayer_render_subtitles(VideoPlayer *vp, int64_t pts_us)
             return;
         }
 
-        /* Display */
+        /* Clear any stale scene nodes before adding new one */
         if (vp->subtitle_tree) {
+            struct wlr_scene_node *node, *tmp;
+            wl_list_for_each_safe(node, tmp, &vp->subtitle_tree->children, link) {
+                wlr_scene_node_destroy(node);
+            }
             struct wlr_scene_buffer *sub_node = wlr_scene_buffer_create(
                 vp->subtitle_tree, sub_buffer);
             if (sub_node) {
                 wlr_scene_node_set_position(&sub_node->node, 0, 0);
                 sub_render_shown_count++;
                 fprintf(stderr, "[subtitle] render: DISPLAYED bitmap subtitle "
-                        "at pts=%lldms (%dx%d)\n",
-                        render_ms, vp->fullscreen_width, vp->fullscreen_height);
+                        "at pts=%lldms (%dx%d) range=[%ld,%ld]\n",
+                        render_ms, vp->fullscreen_width, vp->fullscreen_height,
+                        (long)bstart, (long)bend);
             }
         }
 
         vp->subtitle.current_buffer = sub_buffer;
         vp->subtitle.current_pts_us = pts_us;
         vp->subtitle.current_end_us = (int64_t)bend * 1000;
+        vp->subtitle.render_start_ms = bstart;
+        vp->subtitle.render_end_ms = bend;
     } else {
         /* ── Text subtitle path (ASS/SRT via libass) ── */
         ASS_Image *images;
@@ -1295,11 +1325,15 @@ void videoplayer_render_subtitles(VideoPlayer *vp, int64_t pts_us)
         }
         sub_render_log_count++;
 
-        /* Always clear and re-render subtitles.  The libass `changed`
-         * flag is unreliable for detecting subtitle expiry — some versions
-         * return changed=0 when transitioning from visible→empty, causing
-         * expired text to persist on screen.  Re-rendering every frame is
-         * cheap (just cairo compositing a few glyphs at video framerate). */
+        /* At vsync rate (60-300Hz), only re-render when libass reports a
+         * change.  This avoids creating 300 cairo buffers per second for
+         * the same subtitle.  Guard: if images went NULL but we still
+         * have a display buffer, force a clear (handles edge-case where
+         * libass reports changed=0 on visible→empty transition). */
+        if (!changed && !(images == NULL && vp->subtitle.current_buffer)) {
+            pthread_mutex_unlock(&vp->subtitle_mutex);
+            return;
+        }
 
         /* Clear old subtitle display */
         if (vp->subtitle.current_buffer) {
@@ -1486,6 +1520,8 @@ void videoplayer_subtitle_cleanup(VideoPlayer *vp)
     /* Reset subtitle display tracking */
     vp->subtitle.current_pts_us = 0;
     vp->subtitle.current_end_us = 0;
+    vp->subtitle.render_start_ms = 0;
+    vp->subtitle.render_end_ms = 0;
 
     fprintf(stderr, "[subtitle] Cleanup complete\n");
 }

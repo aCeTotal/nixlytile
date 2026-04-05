@@ -329,44 +329,56 @@ launch_integrated_player_with_resume(const char *url, double resume_pos)
 	strncpy(playback_url, url, sizeof(playback_url) - 1);
 	playback_url[sizeof(playback_url) - 1] = '\0';
 
-	/* Create video player if it doesn't exist */
+	/* Always destroy and recreate the video player for a clean slate.
+	 * Reusing across open/close cycles accumulates PipeWire state, HW decoder
+	 * surfaces, and stale FFmpeg contexts that eventually prevent new videos
+	 * from starting.  The overhead of recreate (~1ms) is negligible. */
+	if (active_videoplayer) {
+		if (active_videoplayer->state != VP_STATE_IDLE)
+			videoplayer_stop(active_videoplayer);
+		videoplayer_set_visible(active_videoplayer, 0);
+		videoplayer_destroy(active_videoplayer);
+		active_videoplayer = NULL;
+	}
+
+	active_videoplayer = videoplayer_create(selmon);
 	if (!active_videoplayer) {
-		active_videoplayer = videoplayer_create(selmon);
-		if (!active_videoplayer) {
-			wlr_log(WLR_ERROR, "Failed to create video player");
-			return;
-		}
+		wlr_log(WLR_ERROR, "Failed to create video player");
+		return;
+	}
 
-		/* Pass display color capabilities to video player.
-		 * Only enable 10-bit video output if the renderer can actually
-		 * texture ARGB2101010 buffers (via data_ptr access).  The output
-		 * being 10-bit (XRGB2101010) doesn't guarantee the renderer can
-		 * import that format as an input texture. */
-		active_videoplayer->output_10bit = 0;
-		if (selmon->render_10bit_active) {
-			const struct wlr_drm_format_set *tex_fmts =
-				wlr_renderer_get_texture_formats(drw, WLR_BUFFER_CAP_DATA_PTR);
-			if (tex_fmts && wlr_drm_format_set_get(tex_fmts, DRM_FORMAT_ARGB2101010)) {
-				active_videoplayer->output_10bit = 1;
-				wlr_log(WLR_INFO, "Video player: 10-bit output enabled (renderer supports ARGB2101010)");
-			} else {
-				wlr_log(WLR_INFO, "Video player: 10-bit output disabled (renderer lacks ARGB2101010 texture support)");
-			}
+	/* Pass display color capabilities to video player.
+	 * Only enable 10-bit video output if the renderer can actually
+	 * texture ARGB2101010 buffers (via data_ptr access).  The output
+	 * being 10-bit (XRGB2101010) doesn't guarantee the renderer can
+	 * import that format as an input texture. */
+	active_videoplayer->output_10bit = 0;
+	if (selmon->render_10bit_active) {
+		const struct wlr_drm_format_set *tex_fmts =
+			wlr_renderer_get_texture_formats(drw, WLR_BUFFER_CAP_DATA_PTR);
+		if (tex_fmts && wlr_drm_format_set_get(tex_fmts, DRM_FORMAT_ARGB2101010)) {
+			active_videoplayer->output_10bit = 1;
+			wlr_log(WLR_INFO, "Video player: 10-bit output enabled (renderer supports ARGB2101010)");
+		} else {
+			wlr_log(WLR_INFO, "Video player: 10-bit output disabled (renderer lacks ARGB2101010 texture support)");
 		}
+	}
 
-		/* Initialize scene on block layer (topmost) so player is always above HTPC UI */
-		if (videoplayer_init_scene(active_videoplayer, layers[LyrBlock]) < 0) {
-			wlr_log(WLR_ERROR, "Failed to initialize video player scene");
-			videoplayer_destroy(active_videoplayer);
-			active_videoplayer = NULL;
-			return;
-		}
+	/* Initialize scene on block layer (topmost) so player is always above HTPC UI */
+	if (videoplayer_init_scene(active_videoplayer, layers[LyrBlock]) < 0) {
+		wlr_log(WLR_ERROR, "Failed to initialize video player scene");
+		videoplayer_destroy(active_videoplayer);
+		active_videoplayer = NULL;
+		return;
 	}
 
 	/* Open the file/URL */
 	if (videoplayer_open(active_videoplayer, url) < 0) {
 		wlr_log(WLR_ERROR, "Failed to open video: %s - %s",
 			url, active_videoplayer->error_msg);
+		/* Destroy the broken instance so next attempt starts clean */
+		videoplayer_destroy(active_videoplayer);
+		active_videoplayer = NULL;
 		return;
 	}
 

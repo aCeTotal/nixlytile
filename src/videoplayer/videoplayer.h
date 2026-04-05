@@ -306,10 +306,18 @@ typedef struct VideoPlayerSubtitle {
     ASS_Renderer *renderer;
     ASS_Track *track;
 
-    /* Current subtitle image */
+    /* Current subtitle image (render thread owns) */
     struct wlr_buffer *current_buffer;
     int64_t current_pts_us;
     int64_t current_end_us;
+
+    /* Cached timing for currently-rendered bitmap subtitle.
+     * The decode thread runs 2-3s ahead and overwrites bitmap_start_ms /
+     * bitmap_end_ms when the next subtitle arrives.  These cached fields
+     * let the render thread keep displaying the current subtitle using
+     * its own timing copy, independent of the decode thread's state. */
+    int64_t render_start_ms;       /* Start time when bitmap was first rendered */
+    int64_t render_end_ms;         /* End time (updated by clear events if same sub) */
 
     /* For bitmap subtitles (PGS/VOBSUB) */
     struct SwsContext *sws_ctx;

@@ -1719,15 +1719,11 @@ update_blend:
         buffer = NULL;  /* Ownership transferred to blend system */
         vp->last_present_time_ns = vsync_time_ns;
 
-        /* Render subtitles synced to audio clock so text matches what the
-         * user hears, not the video frame PTS (which may lag slightly).
-         * The audio clock already has PipeWire output delay subtracted,
-         * so it reflects the actual audible position at the speakers. */
+        /* A/V sync monitoring (stays at video frame rate for stable sampling) */
         if (vp->current_subtitle_track >= 0) {
             int64_t sub_pts = videoplayer_audio_get_clock(vp);
             if (sub_pts <= 0)
                 sub_pts = vp->position_us;
-            videoplayer_render_subtitles(vp, sub_pts);
 
             /* Hidden continuous sync verification: every ~120 frames
              * (~5s at 24fps), check that subtitle clock stays close to
@@ -1799,6 +1795,17 @@ update_blend:
             if (t > 1.0f) t = 1.0f;
             wlr_scene_buffer_set_opacity(vp->blend_node, t);
         }
+    }
+
+    /* Subtitle rendering — runs every vsync for precise audio-sync timing.
+     * At vsync rate (60-300Hz) instead of video frame rate (~24Hz),
+     * subtitles appear/disappear at the exact audio timestamp rather than
+     * waiting up to ~42ms for the next video frame dequeue. */
+    if (vp->current_subtitle_track >= 0 && vp->state == VP_STATE_PLAYING) {
+        int64_t sub_pts = videoplayer_audio_get_clock(vp);
+        if (sub_pts <= 0)
+            sub_pts = vp->position_us;
+        videoplayer_render_subtitles(vp, sub_pts);
     }
 
     /* Debug log: comprehensive per-frame metrics */

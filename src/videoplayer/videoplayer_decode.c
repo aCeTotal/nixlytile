@@ -164,10 +164,18 @@ static void videoplayer_process_subtitle_packet(VideoPlayer *vp, AVPacket *pkt)
     /* Use the actual duration from the container (FFmpeg's end_display_time
      * is relative to start_display_time within the subtitle event).
      * SRT/ASS/PGS all provide correct durations here — trust them.
-     * Only fall back to a default for truly missing metadata (duration <= 0). */
+     * Only fall back to a default for truly missing metadata (duration <= 0).
+     *
+     * For PGS bitmap subtitles, the decoder often sets end_display_time to
+     * UINT32_MAX because the actual end time is signaled by a separate
+     * "clear" display set.  When duration_ms is unknown (<=0), use a very
+     * long fallback for bitmap tracks — the clear event will update
+     * bitmap_end_ms to the correct value when it arrives. */
+    int is_bitmap_trk = (vp->current_subtitle_track >= 0 &&
+                         !vp->subtitle_tracks[vp->current_subtitle_track].is_text_based);
     int64_t duration_ms = sub.end_display_time - sub.start_display_time;
     if (duration_ms <= 0)
-        duration_ms = 5000;  /* Default 5 seconds for missing duration */
+        duration_ms = is_bitmap_trk ? 300000 : 5000;  /* 5min bitmap / 5s text */
 
     fprintf(stderr, "[subtitle] pkt #%d: start=%ldms duration=%ldms rects=%u "
             "track=%p pos=%ldms\n",
@@ -184,14 +192,28 @@ static void videoplayer_process_subtitle_packet(VideoPlayer *vp, AVPacket *pkt)
     pthread_mutex_lock(&vp->subtitle_mutex);
 
     /* PGS clear event: got_sub=1 with num_rects=0 means "hide subtitle".
-     * Without this, the old bitmap persists on screen with stale timing. */
+     *
+     * CRITICAL: Do NOT set bitmap_valid=0 here.  The decode thread runs
+     * ~2-3 seconds ahead of the render thread (frame queue depth).  If we
+     * clear bitmap_valid immediately, the render thread never gets to
+     * display the subtitle — it was hidden before the render PTS reached
+     * the subtitle's display range.  This caused the "blink" symptom:
+     * short subtitles (<3s) appeared for one frame or not at all.
+     *
+     * Instead, update bitmap_end_ms to the clear event's PTS.  The render
+     * thread's existing timing check (render_ms < bend) will hide the
+     * subtitle at the correct time. */
     if (sub.num_rects == 0) {
-        int is_bitmap_trk = (vp->current_subtitle_track >= 0 &&
-                             !vp->subtitle_tracks[vp->current_subtitle_track].is_text_based);
         if (is_bitmap_trk && vp->subtitle.bitmap_valid) {
-            fprintf(stderr, "[subtitle] pkt #%d: clear event (num_rects=0), hiding bitmap\n",
-                    subtitle_pkt_count);
-            vp->subtitle.bitmap_valid = 0;
+            fprintf(stderr, "[subtitle] pkt #%d: clear event (num_rects=0), "
+                    "end_ms=%ld→%ld\n",
+                    subtitle_pkt_count,
+                    (long)vp->subtitle.bitmap_end_ms, (long)start_ms);
+            /* Set end time to clear event's PTS so timing check handles it */
+            if (start_ms > vp->subtitle.bitmap_start_ms)
+                vp->subtitle.bitmap_end_ms = start_ms;
+            else
+                vp->subtitle.bitmap_valid = 0;  /* Nonsensical timing — clear now */
         }
     }
 
@@ -623,7 +645,10 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
     if (!vp->fmt_ctx) {
         av_dict_free(&opts);
         snprintf(vp->error_msg, sizeof(vp->error_msg), "Failed to allocate format context");
-        vp->state = VP_STATE_ERROR;
+        /* IDLE not ERROR — close() skips IDLE, and mutexes/condvars aren't
+         * initialized yet.  Setting ERROR here + later destroy→close would
+         * broadcast uninitialized condvars / destroy uninitialized mutexes. */
+        vp->state = VP_STATE_IDLE;
         return -1;
     }
     vp->fmt_ctx->interrupt_callback.callback = ffmpeg_interrupt_cb;
@@ -636,7 +661,9 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
         av_strerror(ret, errbuf, sizeof(errbuf));
         snprintf(vp->error_msg, sizeof(vp->error_msg),
                  "Failed to open file: %s", errbuf);
-        vp->state = VP_STATE_ERROR;
+        /* avformat_open_input frees fmt_ctx on failure */
+        vp->fmt_ctx = NULL;
+        vp->state = VP_STATE_IDLE;
         return -1;
     }
 
@@ -661,7 +688,7 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
         snprintf(vp->error_msg, sizeof(vp->error_msg),
                  "Failed to find stream info: %s", errbuf);
         avformat_close_input(&vp->fmt_ctx);
-        vp->state = VP_STATE_ERROR;
+        vp->state = VP_STATE_IDLE;
         return -1;
     }
 
@@ -709,7 +736,7 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
     if (video_stream < 0) {
         snprintf(vp->error_msg, sizeof(vp->error_msg), "No video stream found");
         avformat_close_input(&vp->fmt_ctx);
-        vp->state = VP_STATE_ERROR;
+        vp->state = VP_STATE_IDLE;
         return -1;
     }
 
@@ -787,7 +814,8 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
     ret = init_video_decoder(vp);
     if (ret < 0) {
         avformat_close_input(&vp->fmt_ctx);
-        vp->state = VP_STATE_ERROR;
+        videoplayer_cleanup_hdr_lut(vp);
+        vp->state = VP_STATE_IDLE;
         return -1;
     }
 
@@ -2405,11 +2433,15 @@ void videoplayer_seek(VideoPlayer *vp, int64_t position_us)
     if (vp->blend_node)
         wlr_scene_buffer_set_buffer(vp->blend_node, NULL);
 
-    /* Clear subtitle display */
+    /* Clear subtitle display and cached render timing */
     if (vp->subtitle.current_buffer) {
         wlr_buffer_drop(vp->subtitle.current_buffer);
         vp->subtitle.current_buffer = NULL;
     }
+    vp->subtitle.current_pts_us = 0;
+    vp->subtitle.current_end_us = 0;
+    vp->subtitle.render_start_ms = 0;
+    vp->subtitle.render_end_ms = 0;
     if (vp->subtitle_tree) {
         struct wlr_scene_node *node, *tmp;
         wl_list_for_each_safe(node, tmp, &vp->subtitle_tree->children, link) {

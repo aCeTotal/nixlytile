@@ -254,11 +254,14 @@ static void on_process(void *userdata)
         audio_diag("underrun: got %zu/%zu bytes", bytes_read, bytes_needed);
     }
 
-    /* Apply volume and mute */
+    /* Apply volume and mute.
+     * Volume is applied ONLY here in software — PipeWire channelVolumes are
+     * NOT used (removed to prevent double application that caused crackling
+     * through HDMI and extreme over-attenuation at non-unity volumes). */
     if (vp->audio.muted || vp->muted) {
         memset(dst, 0, bytes_needed);
     } else {
-        float vol = vp->audio.volume * vp->volume;
+        float vol = vp->volume;
         if (vol < 0.999f) {
             float *samples = dst;
             uint32_t total_samples = n_frames * vp->audio.channels;
@@ -274,29 +277,22 @@ static void on_process(void *userdata)
      * ring_buffer_available) had a TOCTOU race: the decode thread could
      * increment audio_written_samples between the ring_buffer_available
      * read and the audio.lock acquisition, inflating the clock and
-     * causing periodic A/V sync jumps. */
+     * causing periodic A/V sync jumps.
+     *
+     * IMPORTANT: Minimize lock hold time in this RT callback — long
+     * critical sections cause priority inversion with the decode thread,
+     * leading to xruns → audible crackling on HDMI.  Pre-compute
+     * everything outside the lock, then write under lock briefly. */
     if (bytes_read > 0) {
         uint32_t frames_played = bytes_read / stride;
+        uint64_t now_ns = get_time_ns();
 
-        pthread_mutex_lock(&vp->audio.lock);
-        vp->audio.audio_played_samples += frames_played;
-
-        int64_t samples_to_us = ((int64_t)vp->audio.audio_played_samples * 1000000LL) / vp->audio.sample_rate;
-        vp->audio.audio_pts_us = vp->audio.base_pts_us + samples_to_us;
-
-        /* Snapshot for clock interpolation — render thread extrapolates
-         * between on_process calls to avoid discrete stepping artifacts */
-        vp->audio.clock_snapshot_us = vp->audio.audio_pts_us;
-        vp->audio.clock_update_ns = get_time_ns();
-
-        /* Capture PipeWire output pipeline delay so the audio clock
-         * reflects when samples actually leave the speakers, not when
-         * they left our ring buffer.  Without this, video and subtitles
-         * appear ~30-60ms before the matching dialog is audible. */
+        /* Capture PipeWire output pipeline delay OUTSIDE the lock.
+         * pw_stream_get_time is lock-free in PipeWire's RT context. */
+        int64_t delay_us = 0;
         struct pw_time pwt;
         if (pw_stream_get_time(vp->audio.stream, &pwt) == 0 &&
             pwt.rate.denom > 0) {
-            int64_t delay_us = 0;
             /* Pipeline delay (graph latency to DAC) */
             delay_us += (int64_t)pwt.delay * 1000000LL *
                         pwt.rate.num / pwt.rate.denom;
@@ -308,9 +304,18 @@ static void on_process(void *userdata)
                 delay_us += (int64_t)pwt.buffered * 1000000LL /
                             vp->audio.sample_rate;
             }
-            vp->audio.output_delay_us = delay_us;
         }
 
+        /* Brief lock: only counter increment + store precomputed values */
+        pthread_mutex_lock(&vp->audio.lock);
+        vp->audio.audio_played_samples += frames_played;
+
+        int64_t samples_to_us = ((int64_t)vp->audio.audio_played_samples * 1000000LL) / vp->audio.sample_rate;
+        vp->audio.audio_pts_us = vp->audio.base_pts_us + samples_to_us;
+
+        vp->audio.clock_snapshot_us = vp->audio.audio_pts_us;
+        vp->audio.clock_update_ns = now_ns;
+        vp->audio.output_delay_us = delay_us;
         pthread_mutex_unlock(&vp->audio.lock);
     }
 
@@ -529,11 +534,13 @@ static void *audio_cmd_thread_func(void *arg)
             break;
 
         case AUDIO_CMD_VOLUME:
-            audio_cmd_apply_volume(vp, cmd.volume);
+            /* Volume is now applied exclusively in software mixing (on_process).
+             * PipeWire channelVolumes are no longer used — prevents double
+             * application that caused HDMI crackling. */
             break;
 
         case AUDIO_CMD_MUTE:
-            audio_cmd_apply_mute(vp, cmd.mute);
+            /* Mute is now applied exclusively in software mixing (on_process). */
             break;
 
         case AUDIO_CMD_RECREATE:
@@ -759,7 +766,15 @@ int videoplayer_audio_init(VideoPlayer *vp)
 
     /* Create stream properties
      * Allow PipeWire to move our stream when devices change (e.g., Bluetooth connect).
-     * The on_stream_state_changed callback handles interruptions gracefully. */
+     * The on_stream_state_changed callback handles interruptions gracefully.
+     *
+     * NODE_LATENCY: Request a comfortable buffer size for HDMI outputs.
+     * HDMI audio typically requires larger buffers than analog — without this
+     * hint PipeWire may use a tiny quantum (256-512 frames) that the HDMI
+     * controller can't service in time, causing xruns → audible crackling.
+     * 2048/48000 ≈ 42.7ms — low enough for acceptable lip-sync, high enough
+     * to prevent HDMI xruns.  PipeWire may negotiate a different size, this
+     * is just a preference hint. */
     props = pw_properties_new(
         PW_KEY_MEDIA_TYPE, "Audio",
         PW_KEY_MEDIA_CATEGORY, "Playback",
@@ -767,6 +782,7 @@ int videoplayer_audio_init(VideoPlayer *vp)
         PW_KEY_APP_NAME, "nixlytile",
         PW_KEY_NODE_NAME, "nixlytile-player",
         PW_KEY_NODE_DESCRIPTION, "Nixlytile Video Player",
+        PW_KEY_NODE_LATENCY, "2048/48000",
         NULL);
 
     /* Create stream */
@@ -1363,15 +1379,10 @@ void videoplayer_audio_set_volume(VideoPlayer *vp, float volume)
     if (volume > 1.0f)
         volume = 1.0f;
 
-    /* Store volume immediately for software mixing (on_process uses this) */
-    vp->audio.volume = volume;
-
-    if (!vp->audio.stream || !vp->audio.loop)
-        return;
-
-    /* Send to cmd thread for PipeWire param update */
-    AudioCmd cmd = { .type = AUDIO_CMD_VOLUME, .volume = volume };
-    audio_cmd_send(vp, &cmd);
+    /* Volume is applied exclusively in software mixing (on_process reads
+     * vp->volume directly).  PipeWire channelVolumes are NOT used — setting
+     * both caused double application: software * PipeWire, producing
+     * extreme over-attenuation and crackling artifacts on HDMI outputs. */
 
     fprintf(stderr, "[audio] Volume set to %.0f%%\n", volume * 100);
 }
@@ -1412,15 +1423,10 @@ void videoplayer_audio_set_mute(VideoPlayer *vp, int mute)
     if (!vp)
         return;
 
-    /* Store mute state immediately for software mixing (on_process uses this) */
+    /* Mute is applied in software mixing (on_process checks vp->muted
+     * and vp->audio.muted).  No PipeWire param needed — keeps it simple
+     * and avoids the PipeWire mute param race with on_process. */
     vp->audio.muted = mute;
-
-    if (!vp->audio.stream || !vp->audio.loop)
-        return;
-
-    /* Send to cmd thread for PipeWire param update */
-    AudioCmd cmd = { .type = AUDIO_CMD_MUTE, .mute = mute };
-    audio_cmd_send(vp, &cmd);
 
     fprintf(stderr, "[audio] Mute %s\n", mute ? "on" : "off");
 }
@@ -1528,7 +1534,8 @@ static int init_passthrough_stream(VideoPlayer *vp)
     pw_thread_loop_lock(vp->audio.loop);
 
     /* Create stream properties for passthrough
-     * Allow PipeWire to move stream on device changes (e.g., Bluetooth). */
+     * Allow PipeWire to move stream on device changes (e.g., Bluetooth).
+     * Latency hint prevents HDMI xruns (crackling). */
     props = pw_properties_new(
         PW_KEY_MEDIA_TYPE, "Audio",
         PW_KEY_MEDIA_CATEGORY, "Playback",
@@ -1536,6 +1543,7 @@ static int init_passthrough_stream(VideoPlayer *vp)
         PW_KEY_APP_NAME, "nixlytile",
         PW_KEY_NODE_NAME, "nixlytile-player-passthrough",
         PW_KEY_NODE_DESCRIPTION, "Nixlytile Video Player (Passthrough)",
+        PW_KEY_NODE_LATENCY, "2048/192000",
         "audio.format", "S32LE",  /* IEC61937 uses S32LE stereo */
         NULL);
 
