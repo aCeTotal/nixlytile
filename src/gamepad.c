@@ -589,11 +589,19 @@ gamepad_menu_handle_button(Monitor *m, int button, int value)
 	return 0;
 }
 
+/* Helper to check if a bit is set in a bitfield */
+#define BITFIELD_TEST(bits, bit) \
+	((bits)[(bit) / (8 * sizeof(unsigned long))] & (1UL << ((bit) % (8 * sizeof(unsigned long)))))
+
 int
 gamepad_is_gamepad_device(int fd)
 {
 	unsigned long evbit[((EV_MAX) / (8 * sizeof(unsigned long))) + 1] = {0};
 	unsigned long keybit[((KEY_MAX) / (8 * sizeof(unsigned long))) + 1] = {0};
+	unsigned long absbit[((ABS_MAX) / (8 * sizeof(unsigned long))) + 1] = {0};
+	char name[128] = "?";
+
+	ioctl(fd, EVIOCGNAME(sizeof(name)), name);
 
 	/* Get event types */
 	if (ioctl(fd, EVIOCGBIT(0, sizeof(evbit)), evbit) < 0)
@@ -607,26 +615,45 @@ gamepad_is_gamepad_device(int fd)
 	if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybit)), keybit) < 0)
 		return 0;
 
-	/* Check for gamepad-specific buttons */
-	/* BTN_GAMEPAD is 0x130, BTN_SOUTH is 0x130, BTN_MODE is 0x13c */
-	int has_gamepad_btn = 0;
-
-	/* Check for BTN_SOUTH (A button) - 0x130 = 304 */
-	if (keybit[BTN_SOUTH / (8 * sizeof(unsigned long))] & (1UL << (BTN_SOUTH % (8 * sizeof(unsigned long)))))
-		has_gamepad_btn = 1;
-
-	/* Check for BTN_MODE (guide button) - 0x13c = 316 */
-	if (keybit[BTN_MODE / (8 * sizeof(unsigned long))] & (1UL << (BTN_MODE % (8 * sizeof(unsigned long)))))
-		has_gamepad_btn = 1;
-
 	/* Reject if it has typical keyboard keys (KEY_A through KEY_Z) */
-	/* KEY_A = 30 */
-	if (keybit[KEY_A / (8 * sizeof(unsigned long))] & (1UL << (KEY_A % (8 * sizeof(unsigned long)))))
+	if (BITFIELD_TEST(keybit, KEY_A))
 		return 0;
 
-	/* Reject if it has BTN_LEFT (mouse) - 0x110 = 272 */
-	if (keybit[BTN_LEFT / (8 * sizeof(unsigned long))] & (1UL << (BTN_LEFT % (8 * sizeof(unsigned long)))))
+	/* Reject if it has BTN_LEFT (mouse) */
+	if (BITFIELD_TEST(keybit, BTN_LEFT))
 		return 0;
+
+	/* Check for any gamepad-specific buttons:
+	 * BTN_SOUTH/BTN_A (0x130), BTN_EAST/BTN_B (0x131),
+	 * BTN_NORTH/BTN_X (0x133), BTN_WEST/BTN_Y (0x134),
+	 * BTN_TL (0x136), BTN_TR (0x137),
+	 * BTN_SELECT (0x13a), BTN_START (0x13b),
+	 * BTN_MODE (0x13c), BTN_THUMBL (0x13d), BTN_THUMBR (0x13e) */
+	int has_gamepad_btn = 0;
+	static const int gamepad_btns[] = {
+		BTN_SOUTH, BTN_EAST, BTN_NORTH, BTN_WEST,
+		BTN_TL, BTN_TR, BTN_SELECT, BTN_START,
+		BTN_MODE, BTN_THUMBL, BTN_THUMBR,
+	};
+	for (size_t i = 0; i < sizeof(gamepad_btns) / sizeof(gamepad_btns[0]); i++) {
+		if (BITFIELD_TEST(keybit, gamepad_btns[i])) {
+			has_gamepad_btn = 1;
+			break;
+		}
+	}
+
+	/* Also accept devices with BTN_TRIGGER (joystick) + analog sticks */
+	if (!has_gamepad_btn && BITFIELD_TEST(keybit, BTN_TRIGGER)) {
+		if (evbit[0] & (1 << EV_ABS)) {
+			ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbit)), absbit);
+			if (BITFIELD_TEST(absbit, ABS_X) && BITFIELD_TEST(absbit, ABS_Y))
+				has_gamepad_btn = 1;
+		}
+	}
+
+	if (!has_gamepad_btn) {
+		wlr_log(WLR_DEBUG, "Not a gamepad (no gamepad buttons): %s", name);
+	}
 
 	return has_gamepad_btn;
 }
@@ -955,8 +982,13 @@ gamepad_device_add(const char *path)
 	}
 
 	fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-	if (fd < 0)
+	if (fd < 0) {
+		wlr_log(WLR_INFO, "Gamepad: cannot open %s: %s", path, strerror(errno));
 		return;
+	}
+
+	/* Get device name early for logging */
+	ioctl(fd, EVIOCGNAME(sizeof(name)), name);
 
 	/* Check if it's a gamepad */
 	if (!gamepad_is_gamepad_device(fd)) {
@@ -964,8 +996,7 @@ gamepad_device_add(const char *path)
 		return;
 	}
 
-	/* Get device name */
-	ioctl(fd, EVIOCGNAME(sizeof(name)), name);
+	wlr_log(WLR_INFO, "Gamepad: detected %s at %s", name, path);
 
 	gp = ecalloc(1, sizeof(*gp));
 	gp->fd = fd;
@@ -1031,7 +1062,17 @@ gamepad_device_add(const char *path)
 	 * synthetic events Bluetooth controllers send on reconnect */
 	gp->connect_time_ms = monotonic_msec();
 
-	/* Don't grab gamepad - let Steam and other apps receive input normally */
+	/* Try exclusive grab - if another process (e.g. libinput) already has the
+	 * device grabbed, we can read the fd but won't receive events.  Re-open
+	 * with write access for EVIOCGRAB compatibility. */
+	{
+		int rwfd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+		if (rwfd >= 0) {
+			close(fd);
+			fd = rwfd;
+			gp->fd = fd;
+		}
+	}
 
 	/* Add to event loop */
 	gp->event_source = wl_event_loop_add_fd(event_loop, fd,
@@ -1155,6 +1196,8 @@ gamepad_update_grab_state(void)
 	}
 }
 
+static int gamepad_rescan_pending = 0;
+
 int
 gamepad_pending_timer_cb(void *data)
 {
@@ -1162,10 +1205,32 @@ gamepad_pending_timer_cb(void *data)
 
 	(void)data;
 
-	for (i = 0; i < gamepad_pending_count; i++) {
-		gamepad_device_add(gamepad_pending_paths[i]);
+	if (gamepad_pending_count > 0) {
+		int added_before = 0;
+		GamepadDevice *gp;
+		wl_list_for_each(gp, &gamepads, link)
+			added_before++;
+
+		for (i = 0; i < gamepad_pending_count; i++) {
+			gamepad_device_add(gamepad_pending_paths[i]);
+		}
+		gamepad_pending_count = 0;
+
+		/* If no new gamepad was found, schedule a full rescan in 1s
+		 * to catch USB controllers that initialize slowly */
+		int added_after = 0;
+		wl_list_for_each(gp, &gamepads, link)
+			added_after++;
+
+		if (added_after == added_before) {
+			gamepad_rescan_pending = 1;
+			wl_event_source_timer_update(gamepad_pending_timer, 1000);
+		}
+	} else if (gamepad_rescan_pending) {
+		gamepad_rescan_pending = 0;
+		wlr_log(WLR_INFO, "Gamepad: late rescan for slow-init USB controllers");
+		gamepad_scan_devices();
 	}
-	gamepad_pending_count = 0;
 
 	return 0;
 }
@@ -1208,9 +1273,11 @@ gamepad_inotify_cb(int fd, uint32_t mask, void *data)
 		}
 	}
 
-	/* Schedule timer to add pending devices after delay */
+	/* Schedule timer to add pending devices after delay.
+	 * USB controllers (especially Xbox via xpad/hid) may need extra time
+	 * for the kernel driver to fully initialize capabilities. */
 	if (schedule_pending && gamepad_pending_timer) {
-		wl_event_source_timer_update(gamepad_pending_timer, 100); /* 100ms */
+		wl_event_source_timer_update(gamepad_pending_timer, 300); /* 300ms */
 	}
 
 	return 0;

@@ -1417,23 +1417,71 @@ keypress(struct wl_listener *listener, void *data)
 					handled = 1;
 			}
 		}
+		/* Guide menu (gamepad menu) - keyboard support in HTPC mode */
+		if (htpc_mode_active && !handled) {
+			Monitor *gm_mon = gamepad_menu_visible_monitor();
+			if (gm_mon) {
+				for (i = 0; i < nsyms; i++) {
+					xkb_keysym_t s = syms[i];
+					if (s == XKB_KEY_Escape) {
+						gamepad_menu_hide(gm_mon);
+						handled = 1;
+					} else if (s == XKB_KEY_Up) {
+						if (gm_mon->gamepad_menu.selected > 0) {
+							gm_mon->gamepad_menu.selected--;
+							gamepad_menu_render(gm_mon);
+						}
+						handled = 1;
+					} else if (s == XKB_KEY_Down) {
+						if (gm_mon->gamepad_menu.selected < gm_mon->gamepad_menu.item_count - 1) {
+							gm_mon->gamepad_menu.selected++;
+							gamepad_menu_render(gm_mon);
+						}
+						handled = 1;
+					} else if (s == XKB_KEY_Return || s == XKB_KEY_KP_Enter) {
+						gamepad_menu_select(gm_mon);
+						handled = 1;
+					}
+				}
+			}
+		}
 		/* Video player - handle before other views */
 		if (active_videoplayer && active_videoplayer->state != VP_STATE_IDLE && !handled) {
-			for (i = 0; i < nsyms; i++) {
-				if (videoplayer_handle_key(active_videoplayer, mods, syms[i])) {
-					handled = 1;
-					/* Check if player was stopped (Escape/Q) */
-					if (active_videoplayer->state == VP_STATE_IDLE) {
-						videoplayer_set_visible(active_videoplayer, 0);
-						/* Fully destroy for clean state on next play */
-						videoplayer_destroy(active_videoplayer);
-						active_videoplayer = NULL;
-						hide_playback_osd();
-						playback_state = PLAYBACK_IDLE;
-						break;
-					} else {
-						/* Show OSD on any key during playback */
-						render_playback_osd();
+			/* In HTPC mode, route through media playback handler first
+			 * for OSD menu navigation (arrows/enter/escape) */
+			if (htpc_mode_active && playback_state == PLAYBACK_PLAYING) {
+				for (i = 0; i < nsyms; i++) {
+					if (handle_playback_key(syms[i])) {
+						handled = 1;
+						if (!active_videoplayer ||
+						    active_videoplayer->state == VP_STATE_IDLE) {
+							videoplayer_set_visible(active_videoplayer, 0);
+							videoplayer_destroy(active_videoplayer);
+							active_videoplayer = NULL;
+							hide_playback_osd();
+							playback_state = PLAYBACK_IDLE;
+							break;
+						}
+					}
+				}
+			}
+			if (!handled) {
+				for (i = 0; i < nsyms; i++) {
+					if (videoplayer_handle_key(active_videoplayer, mods, syms[i])) {
+						handled = 1;
+						/* Check if player was stopped (Escape/Q) */
+						if (active_videoplayer->state == VP_STATE_IDLE) {
+							videoplayer_set_visible(active_videoplayer, 0);
+							/* Fully destroy for clean state on next play */
+							videoplayer_destroy(active_videoplayer);
+							active_videoplayer = NULL;
+							hide_playback_osd();
+							playback_state = PLAYBACK_IDLE;
+							break;
+						} else {
+							/* Show OSD on any key during playback */
+							render_playback_osd();
+						}
 					}
 				}
 			}

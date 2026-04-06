@@ -1085,18 +1085,21 @@ static int64_t get_av_diff_us(VideoPlayer *vp, int64_t video_pts_us)
 
 /*
  * Determine frame presentation action based on A/V sync.
- * Returns: 0 = show frame, 1 = skip frame (video behind)
+ * Returns: 0 = show frame, 1 = skip frame (video behind), 3 = hold (video ahead)
  *
- * Skip-only correction:
+ * Bidirectional correction:
  *   - Skip when video is far behind audio (>100ms) to catch up
- *   - Otherwise always present — cadence clock drives timing
+ *   - Hold when video is moderately ahead of audio (>20ms) to slow down
  *
- * Hold (pausing presentation when video is ahead) was removed because
- * it creates a cascading deadlock: hold prevents frame consumption →
- * frame queue stays full → decode thread blocks → no audio produced →
- * PipeWire underruns → audio clock stalls → video appears even more
- * ahead → more holds.  Both clocks are wall-clock based so any small
- * lead self-corrects naturally within 1-2 PipeWire quanta (~20ms).
+ * Hold is safe from the old cascading deadlock because the decode thread
+ * now drains audio packets during frame queue waits (10ms timed wait +
+ * drain_pending_audio in drain_video_frames_ex).  This keeps PipeWire's
+ * ring buffer fed even when the frame queue is full, preventing the
+ * underrun cascade that was the root cause of the original hold deadlock.
+ *
+ * The hold range is capped at AV_SYNC_FRAMESKIP_THRESH (100ms) to limit
+ * maximum consecutive holds to ~6 at 60Hz.  Larger offsets are handled
+ * by the periodic sync re-establishment check (~5 seconds).
  */
 static int get_frame_action(VideoPlayer *vp, int64_t video_pts_us)
 {
@@ -1114,6 +1117,14 @@ static int get_frame_action(VideoPlayer *vp, int64_t video_pts_us)
     /* Video far behind audio — skip frame to catch up */
     if (av_diff < -AV_SYNC_FRAMESKIP_THRESH) {
         return 1;
+    }
+
+    /* Video moderately ahead of audio — hold frame for one vsync.
+     * Each hold delays video by one display interval (~16.7ms at 60Hz),
+     * converging towards audio in a few vsyncs.  Only hold within the
+     * correctable range; larger offsets are left to re-establishment. */
+    if (av_diff > AV_SYNC_THRESHOLD_MIN && av_diff < AV_SYNC_FRAMESKIP_THRESH) {
+        return 3;
     }
 
     return 0;
@@ -1222,6 +1233,17 @@ static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, 
          * elapsed time covers multiple steps (e.g., after a stall). */
         vp->last_frame_ns += step;
         return 2;  /* Skip and get next frame immediately */
+    }
+    if (action == 3) {
+        /* Video is ahead of audio — hold this frame for one vsync.
+         * Don't advance last_frame_ns: the timing check will pass again
+         * on the next vsync (elapsed grows by one display_interval), and
+         * get_frame_action re-evaluates.  Each hold delays video by one
+         * display refresh (~16.7ms at 60Hz), converging towards audio.
+         * The hold range is capped at 100ms, limiting consecutive holds
+         * to ~6 at 60Hz — well within the decode thread's ability to
+         * keep audio fed via drain_pending_audio. */
+        return 0;
     }
     /* Present the frame */
     if (vp->frame_repeat_mode == 2) {
@@ -1466,7 +1488,37 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
                 fprintf(stderr, "[videoplayer] Audio preroll timeout (%lu ms), starting video anyway\n",
                         (unsigned long)elapsed_ms);
             }
-            /* Audio is flowing (or no audio / timeout) — start playback.
+            /* Phase 3: Wait for audio clock to become valid.
+             * HDMI/surround outputs have large pipeline delays (100-300ms).
+             * Until enough audio has been consumed to overcome this delay,
+             * videoplayer_audio_get_clock() returns 0 (clamped from negative).
+             * Starting video while the clock is invalid causes timing-based
+             * presentation to run ahead of audio by the pipeline delay amount,
+             * and the A/V sync establishment then locks in this offset
+             * permanently — the skip-only correction cannot fix "video ahead
+             * of audio".  Wait for the clock to go positive so the initial
+             * sync establishment captures the correct relationship. */
+            if (vp->audio_track_count > 0 && vp->audio.stream &&
+                vp->audio.audio_prestart_sent) {
+                int64_t test_clock = videoplayer_audio_get_clock(vp);
+                if (test_clock <= 0) {
+                    uint64_t prestart_elapsed_ms =
+                        (get_time_ns() - vp->audio.audio_prestart_ns) / 1000000;
+                    if (prestart_elapsed_ms < 500) {
+                        return;  /* Wait for audio pipeline to fill */
+                    }
+                    fprintf(stderr, "[videoplayer] Audio clock still invalid after "
+                            "%lu ms (delay > consumed), starting video anyway\n",
+                            (unsigned long)prestart_elapsed_ms);
+                    if (vp->debug_log) {
+                        fprintf(vp->debug_log,
+                                "# CLOCK_WAIT_TIMEOUT | clock=%ld after %lums\n",
+                                (long)test_clock, (unsigned long)prestart_elapsed_ms);
+                        fflush(vp->debug_log);
+                    }
+                }
+            }
+            /* Audio is flowing and clock is valid — start playback.
              * Reset audio clock snapshot so preroll consumption doesn't
              * skew the initial A/V sync establishment.  During preroll,
              * PipeWire consumed some samples, advancing audio_played_samples.

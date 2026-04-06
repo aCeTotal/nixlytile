@@ -2799,10 +2799,6 @@ handle_playback_key(xkb_keysym_t sym)
 {
 	int handled = 0;
 
-	/* Any input shows OSD */
-	osd_visible = 1;
-	osd_show_time = monotonic_msec();
-
 	switch (sym) {
 	case XKB_KEY_space:
 	case XKB_KEY_Return:
@@ -2827,6 +2823,16 @@ handle_playback_key(xkb_keysym_t sym)
 		break;
 
 	case XKB_KEY_Escape:
+		if (osd_menu_open != OSD_MENU_NONE) {
+			osd_menu_open = OSD_MENU_NONE;
+		} else {
+			/* Open guide menu instead of stopping playback */
+			if (selmon)
+				gamepad_menu_show(selmon);
+		}
+		handled = 1;
+		break;
+
 	case XKB_KEY_q:
 		if (osd_menu_open != OSD_MENU_NONE) {
 			osd_menu_open = OSD_MENU_NONE;
@@ -2840,39 +2846,44 @@ handle_playback_key(xkb_keysym_t sym)
 
 	case XKB_KEY_Up:
 	case XKB_KEY_k:
-		if (osd_menu_open != OSD_MENU_NONE && osd_menu_selection > 0)
-			osd_menu_selection--;
-		handled = 1;
+		if (osd_menu_open != OSD_MENU_NONE) {
+			if (osd_menu_selection > 0)
+				osd_menu_selection--;
+			handled = 1;
+		}
 		break;
 
 	case XKB_KEY_Down:
 	case XKB_KEY_j:
-		if (osd_menu_open == OSD_MENU_SOUND && osd_menu_selection < audio_track_count - 1)
-			osd_menu_selection++;
-		else if (osd_menu_open == OSD_MENU_SUBTITLES && osd_menu_selection < subtitle_track_count)
-			osd_menu_selection++;
-		handled = 1;
+		if (osd_menu_open != OSD_MENU_NONE) {
+			if (osd_menu_open == OSD_MENU_SOUND && osd_menu_selection < audio_track_count - 1)
+				osd_menu_selection++;
+			else if (osd_menu_open == OSD_MENU_SUBTITLES && osd_menu_selection < subtitle_track_count)
+				osd_menu_selection++;
+			handled = 1;
+		}
 		break;
 
 	case XKB_KEY_Left:
 	case XKB_KEY_h:
-		if (osd_menu_open == OSD_MENU_SUBTITLES) {
-			osd_menu_open = OSD_MENU_SOUND;
-			osd_menu_selection = active_videoplayer ? active_videoplayer->current_audio_track : 0;
+		if (osd_menu_open != OSD_MENU_NONE) {
+			if (osd_menu_open == OSD_MENU_SUBTITLES) {
+				osd_menu_open = OSD_MENU_SOUND;
+				osd_menu_selection = active_videoplayer ? active_videoplayer->current_audio_track : 0;
+			}
+			handled = 1;
 		}
-		handled = 1;
 		break;
 
 	case XKB_KEY_Right:
 	case XKB_KEY_l:
-		if (osd_menu_open == OSD_MENU_NONE) {
-			osd_menu_open = OSD_MENU_SOUND;
-			osd_menu_selection = active_videoplayer ? active_videoplayer->current_audio_track : 0;
-		} else if (osd_menu_open == OSD_MENU_SOUND) {
-			osd_menu_open = OSD_MENU_SUBTITLES;
-			osd_menu_selection = active_videoplayer ? active_videoplayer->current_subtitle_track + 1 : 0;
+		if (osd_menu_open != OSD_MENU_NONE) {
+			if (osd_menu_open == OSD_MENU_SOUND) {
+				osd_menu_open = OSD_MENU_SUBTITLES;
+				osd_menu_selection = active_videoplayer ? active_videoplayer->current_subtitle_track + 1 : 0;
+			}
+			handled = 1;
 		}
-		handled = 1;
 		break;
 
 	case XKB_KEY_a:  /* Audio shortcut */
@@ -2888,9 +2899,12 @@ handle_playback_key(xkb_keysym_t sym)
 		break;
 	}
 
-	/* Re-render OSD after input */
-	if (handled)
+	/* Show and re-render OSD after handling input */
+	if (handled) {
+		osd_visible = 1;
+		osd_show_time = monotonic_msec();
 		render_playback_osd();
+	}
 
 	return handled;
 }
@@ -3056,7 +3070,9 @@ media_view_handle_key(Monitor *m, MediaViewType type, xkb_keysym_t sym)
 
 	switch (sym) {
 	case XKB_KEY_Escape:
-		/* Do nothing in grid view - main views can't be closed */
+		/* Open guide menu in grid view */
+		if (selmon)
+			gamepad_menu_show(selmon);
 		return 1;
 	case XKB_KEY_Return:
 	case XKB_KEY_KP_Enter:
