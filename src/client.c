@@ -922,6 +922,9 @@ setfullscreen(Client *c, int fullscreen)
 	}
 	arrange(c->mon);
 	printstatus();
+	/* Clear PID guard so game mode deactivates immediately */
+	if (!fullscreen && c == game_mode_client)
+		game_mode_pid = 0;
 	update_game_mode();
 
 	/* Ensure fullscreen client gets keyboard focus immediately */
@@ -1105,6 +1108,9 @@ unmapnotify(struct wl_listener *listener, void *data)
 	wlr_scene_node_destroy(&c->scene->node);
 	printstatus();
 	motionnotify(0, NULL, 0, 0, 0, 0);
+	/* Clear PID guard so game mode deactivates immediately */
+	if (c == game_mode_client)
+		game_mode_pid = 0;
 	update_game_mode();
 }
 

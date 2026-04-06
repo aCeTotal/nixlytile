@@ -2150,9 +2150,6 @@ update_game_mode(void)
 		/* Boost GPU fans to prevent thermal throttling */
 		fan_boost_activate();
 
-		/* Kill browsers — they eat GB of RAM even when frozen */
-		kill_browsers();
-
 		/* Freeze remaining background processes to free CPU/memory */
 		freeze_background_processes();
 
