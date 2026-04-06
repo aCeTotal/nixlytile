@@ -254,6 +254,12 @@ typedef struct VideoPlayerAudio {
     uint64_t clock_update_ns;      /* Wallclock time of last on_process update */
     int64_t  clock_snapshot_us;    /* audio_pts_us at that moment */
     int64_t  output_delay_us;     /* PipeWire pipeline delay to speakers */
+    int64_t  last_returned_clock_us; /* Monotonic clamp: prevents backward clock jumps
+                                      * after PipeWire scheduling gaps.  Without this,
+                                      * a delayed on_process causes the interpolated clock
+                                      * to overshoot, then snap backward when the new
+                                      * snapshot arrives — creating a ~20ms diff spike that
+                                      * triggers frame holds and accumulates as drift. */
 
     /* Sync tracking (per-instance, not static) */
     int64_t last_audio_pts;        /* Last audio PTS for stall detection */

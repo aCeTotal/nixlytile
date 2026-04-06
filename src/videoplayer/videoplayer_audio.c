@@ -407,6 +407,7 @@ static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
             vp->audio.clock_update_ns = 0;
             vp->audio.clock_snapshot_us = 0;
             vp->audio.output_delay_us = 0;
+            vp->audio.last_returned_clock_us = 0;
             vp->audio.last_audio_pts = 0;
             vp->audio.stall_count = 0;
             vp->audio.recovery_frames = 15;
@@ -454,6 +455,7 @@ static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
             vp->audio.clock_update_ns = 0;
             vp->audio.clock_snapshot_us = 0;
             vp->audio.output_delay_us = 0;
+            vp->audio.last_returned_clock_us = 0;
             vp->audio.recovery_frames = 15;
             pthread_mutex_unlock(&vp->audio.lock);
         } else {
@@ -699,6 +701,7 @@ int videoplayer_audio_init(VideoPlayer *vp)
     vp->audio.clock_update_ns = 0;
     vp->audio.clock_snapshot_us = 0;
     vp->audio.output_delay_us = 0;
+    vp->audio.last_returned_clock_us = 0;
     vp->audio.last_audio_pts = 0;
     vp->audio.stall_count = 0;
     vp->audio.recovery_frames = 0;
@@ -1308,6 +1311,7 @@ void videoplayer_audio_flush(VideoPlayer *vp)
     vp->audio.clock_update_ns = 0;
     vp->audio.clock_snapshot_us = 0;
     vp->audio.output_delay_us = 0;
+    vp->audio.last_returned_clock_us = 0;
     vp->audio.last_audio_pts = 0;
     vp->audio.stall_count = 0;
     vp->audio.recovery_frames = 0;
@@ -1369,7 +1373,32 @@ int64_t videoplayer_audio_get_clock(VideoPlayer *vp)
     if (delay_us > 0)
         result -= delay_us;
 
-    return result > 0 ? result : 0;
+    if (result <= 0)
+        return 0;
+
+    /* Monotonic clamp: prevent backward clock jumps.
+     *
+     * When PipeWire's on_process is delayed (scheduling jitter, power
+     * management, graph reconfiguration), the wallclock interpolation
+     * above extrapolates the clock forward.  When on_process finally
+     * fires, the new snapshot reflects fewer samples than the
+     * extrapolation predicted, causing a backward jump of ~20ms.
+     *
+     * This backward jump spikes the A/V diff past the 20ms hold
+     * threshold, creating a visible stutter.  Worse, each gap causes
+     * PipeWire to output silence for the missed quantum, so the audio
+     * content falls behind — and these offsets accumulate over time,
+     * producing growing A/V desync.
+     *
+     * The clamp freezes the clock at its peak until the real value
+     * catches up (typically within one quantum, ~21ms).  This smooths
+     * the transition and prevents the diff spike. */
+    if (result > vp->audio.last_returned_clock_us)
+        vp->audio.last_returned_clock_us = result;
+    else
+        result = vp->audio.last_returned_clock_us;
+
+    return result;
 }
 
 void videoplayer_audio_set_clock(VideoPlayer *vp, int64_t pts_us)

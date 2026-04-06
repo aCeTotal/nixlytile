@@ -1056,18 +1056,26 @@ static int64_t get_av_diff_us(VideoPlayer *vp, int64_t video_pts_us)
         return 0;
     }
 
-    /* Invisible drift correction: accumulate diff over a 10-second window
-     * (~240 frames at 24fps). When the average drift exceeds 15ms,
-     * adjust the sync offset by half the drift. This convergence is
-     * gradual enough to be invisible but prevents long-term drift
-     * from ever reaching perceptible levels. */
+    /* Invisible drift correction: accumulate diff over a ~6-second window
+     * (~150 frames at 24fps). When the average drift exceeds 8ms,
+     * adjust the sync offset by 3/4 of the drift.
+     *
+     * The threshold (8ms) is above typical PipeWire quantum jitter
+     * (±3-5ms) so normal jitter averages to zero over the window.
+     * But it's low enough to catch hardware clock drift (typically
+     * 1-3ms per minute) before it reaches perceptible levels (~15ms).
+     *
+     * The 3/4 correction factor converges faster than the previous 1/2,
+     * reducing a 20ms offset to ~5ms in one window instead of two.
+     * This is critical for recovering from PipeWire scheduling gaps
+     * that cause ~20ms audio content offsets. */
     vp->av_sync_drift_sum += diff;
     vp->av_sync_drift_count++;
 
-    if (vp->av_sync_drift_count >= 240) {
+    if (vp->av_sync_drift_count >= 150) {
         int64_t avg_drift = vp->av_sync_drift_sum / vp->av_sync_drift_count;
-        if (avg_drift > 15000 || avg_drift < -15000) {
-            int64_t correction = avg_drift / 2;
+        if (avg_drift > 8000 || avg_drift < -8000) {
+            int64_t correction = avg_drift * 3 / 4;
             vp->av_sync_video_base_us += correction;
             if (vp->debug_log) {
                 fprintf(vp->debug_log,
@@ -1791,9 +1799,17 @@ update_blend:
                 int64_t audio_pts = videoplayer_audio_get_clock(vp);
                 int64_t video_pts = vp->position_us;
 
-                if (audio_pts > 0 && video_pts > 0) {
-                    int64_t av_diff = video_pts - audio_pts;
-                    /* If A/V diff exceeds 100ms, force re-establishment
+                if (vp->av_sync_established && audio_pts > 0 && video_pts > 0) {
+                    /* Use RELATIVE diff (subtracting the captured PTS offset),
+                     * not raw video_pts - audio_pts.  The raw diff includes
+                     * PipeWire's output pipeline delay (100-300ms on HDMI),
+                     * which would always exceed 100ms and trigger spurious
+                     * re-establishment every 5 seconds.  That prevented the
+                     * drift correction from ever completing its accumulation
+                     * window, causing growing A/V desync. */
+                    int64_t av_diff = (video_pts - audio_pts)
+                                     - vp->av_sync_video_base_us;
+                    /* If relative A/V diff exceeds 100ms, force re-establishment
                      * of sync so the drift correction can converge */
                     if (av_diff > 100000 || av_diff < -100000) {
                         vp->av_sync_established = 0;
@@ -1801,7 +1817,7 @@ update_blend:
                         vp->av_sync_drift_count = 0;
                         if (vp->debug_log) {
                             fprintf(vp->debug_log,
-                                "# SYNC_CHECK | av_diff=%+ldus — re-establishing sync\n",
+                                "# SYNC_CHECK | rel_diff=%+ldus �� re-establishing sync\n",
                                 (long)av_diff);
                             fflush(vp->debug_log);
                         }
