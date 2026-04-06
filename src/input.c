@@ -1940,6 +1940,30 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		wlr_cursor_move(cursor, device, dx, dy);
 		wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
+		/* Confine cursor to monitor when a fullscreen client is present.
+		 * This prevents accidental mouse drift to other monitors during
+		 * fullscreen games. Keybind-based warping (focusmon/warptomonitor)
+		 * bypasses this because they use wlr_cursor_warp() directly and
+		 * change selmon before subsequent motionnotify calls. */
+		{
+			Client *fsc = NULL;
+			wl_list_for_each(fsc, &clients, link) {
+				if (fsc->isfullscreen && VISIBLEON(fsc, selmon))
+					break;
+			}
+			if (&fsc->link != &clients && fsc) {
+				struct wlr_box *mb = &selmon->m;
+				double cx = cursor->x, cy = cursor->y;
+				int clamped = 0;
+				if (cx < mb->x) { cx = mb->x; clamped = 1; }
+				if (cy < mb->y) { cy = mb->y; clamped = 1; }
+				if (cx >= mb->x + mb->width) { cx = mb->x + mb->width - 1; clamped = 1; }
+				if (cy >= mb->y + mb->height) { cy = mb->y + mb->height - 1; clamped = 1; }
+				if (clamped)
+					wlr_cursor_warp(cursor, NULL, cx, cy);
+			}
+		}
+
 		/* Low-latency cursor: update HW cursor plane immediately via
 		 * direct DRM atomic commit, bypassing wlroots' render loop.
 		 * This gives sub-millisecond cursor updates and is VRR-safe

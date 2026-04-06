@@ -2105,6 +2105,7 @@ void rotate_clients(const Arg *arg);
 void moveresize(const Arg *arg);
 int is_video_content(Client *c);
 int is_game_content(Client *c);
+int client_has_fullscreen_ancestor(Client *c);
 int is_steam_client(Client *c);
 int is_steam_popup(Client *c);
 int is_steam_game(Client *c);

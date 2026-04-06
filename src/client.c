@@ -110,6 +110,23 @@ pending_launch_find_and_remove(pid_t client_pid, uint32_t *out_tags,
 	return 0;
 }
 
+int
+client_has_fullscreen_ancestor(Client *c)
+{
+	Client *p;
+	int depth = 0;
+	if (!c)
+		return 0;
+	p = client_get_parent(c);
+	while (p && depth < 10) {
+		if (p->isfullscreen)
+			return 1;
+		p = client_get_parent(p);
+		depth++;
+	}
+	return 0;
+}
+
 void
 applybounds(Client *c, struct wlr_box *bbox)
 {
@@ -309,6 +326,12 @@ destroynotify(struct wl_listener *listener, void *data)
 		wl_list_remove(&c->unmap.link);
 		wl_list_remove(&c->maximize.link);
 	}
+	/* Safety net: if unmapnotify didn't clear game mode (e.g. rapid
+	 * client destruction), catch it here before freeing */
+	if (c == game_mode_client) {
+		game_mode_pid = 0;
+		game_mode_client = NULL;
+	}
 	free(c);
 }
 
@@ -369,9 +392,12 @@ focusclient(Client *c, int lift)
 		/* Don't deactivate old client if the new one wants focus, as this causes issues with winecfg
 		 * and probably other clients */
 		} else if (old_c && !client_is_unmanaged(old_c) && (!c || !client_wants_focus(c))) {
-			client_set_border_color(old_c, bordercolor);
-
-			client_activate_surface(old, 0);
+			/* Don't deactivate a fullscreen client on another monitor —
+			 * games may stop rendering when told they're inactive */
+			if (!(old_c->isfullscreen && c && c->mon != old_c->mon)) {
+				client_set_border_color(old_c, bordercolor);
+				client_activate_surface(old, 0);
+			}
 		}
 	}
 	printstatus();
@@ -607,7 +633,8 @@ mapnotify(struct wl_listener *listener, void *data)
 	/* Handle unmanaged clients first so we can return prior create borders */
 	if (client_is_unmanaged(c)) {
 		/* Unmanaged clients always are floating */
-		wlr_scene_node_reparent(&c->scene->node, layers[LyrFloat]);
+		wlr_scene_node_reparent(&c->scene->node,
+			layers[client_has_fullscreen_ancestor(c) ? LyrFS : LyrFloat]);
 		wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
 		client_set_size(c, c->geom.width, c->geom.height);
 		if (client_wants_focus(c)) {
@@ -826,13 +853,12 @@ resize(Client *c, struct wlr_box geo, int interact)
 void
 setfloating(Client *c, int floating)
 {
-	Client *p = client_get_parent(c);
 	c->isfloating = floating;
 	/* If in floating layout do not change the client's layer */
 	if (!c->mon || !client_surface(c)->mapped || !c->mon->lt[c->mon->sellt]->arrange)
 		return;
 	wlr_scene_node_reparent(&c->scene->node, layers[c->isfullscreen ||
-			(p && p->isfullscreen) ? LyrFS
+			client_has_fullscreen_ancestor(c) ? LyrFS
 			: c->isfloating ? LyrFloat : LyrTile]);
 	arrange(c->mon);
 	printstatus();
@@ -869,6 +895,19 @@ setfullscreen(Client *c, int fullscreen)
 	}
 	wlr_scene_node_reparent(&c->scene->node, layers[c->isfullscreen
 			? LyrFS : c->isfloating ? LyrFloat : LyrTile]);
+
+	/* Reparent floating children to match parent's layer */
+	{
+		Client *child;
+		struct wlr_scene_tree *target = layers[fullscreen ? LyrFS : LyrFloat];
+		wl_list_for_each(child, &clients, link) {
+			if (child != c && child->isfloating && !child->isfullscreen
+					&& client_get_parent(child) == c
+					&& child->scene->node.parent != target) {
+				wlr_scene_node_reparent(&child->scene->node, target);
+			}
+		}
+	}
 
 	if (fullscreen) {
 		c->prev = c->geom;
@@ -1108,9 +1147,13 @@ unmapnotify(struct wl_listener *listener, void *data)
 	wlr_scene_node_destroy(&c->scene->node);
 	printstatus();
 	motionnotify(0, NULL, 0, 0, 0, 0);
-	/* Clear PID guard so game mode deactivates immediately */
-	if (c == game_mode_client)
+	/* Clear PID guard so game mode deactivates immediately.
+	 * Also match by PID in case game_mode_client was reassigned. */
+	if (c == game_mode_client ||
+	    (game_mode_pid > 1 && client_get_pid(c) == game_mode_pid)) {
 		game_mode_pid = 0;
+		game_mode_client = NULL;
+	}
 	update_game_mode();
 }
 

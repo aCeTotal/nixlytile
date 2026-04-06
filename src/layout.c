@@ -98,8 +98,20 @@ arrange(Monitor *m)
 			 * nodes are shared across all monitors and must not be
 			 * disabled here, or every other monitor goes black.
 			 */
-			if (fsc && c != fsc && covers_full_screen)
-				vis = 0;
+			if (fsc && c != fsc && covers_full_screen) {
+				/* Keep children/descendants of the fullscreen client visible
+				 * so dialogs, settings windows, and popups appear on top */
+				Client *p = client_get_parent(c);
+				int is_child = 0;
+				int depth = 0;
+				while (p && depth < 10) {
+					if (p == fsc) { is_child = 1; break; }
+					p = client_get_parent(p);
+					depth++;
+				}
+				if (!is_child)
+					vis = 0;
+			}
 			wlr_scene_node_set_enabled(&c->scene->node, vis);
 			client_set_suspended(c, !vis);
 		}
