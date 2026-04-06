@@ -206,6 +206,15 @@ static size_t ring_buffer_available(AudioRingBuffer *ring)
     return avail;
 }
 
+static size_t ring_buffer_available_space(AudioRingBuffer *ring)
+{
+    size_t space;
+    pthread_mutex_lock(&ring->lock);
+    space = ring->size - ring->available;
+    pthread_mutex_unlock(&ring->lock);
+    return space;
+}
+
 /* ================================================================
  *  PipeWire Stream Callbacks
  * ================================================================ */
@@ -1197,6 +1206,36 @@ int videoplayer_audio_queue_frame(VideoPlayer *vp, AVFrame *frame)
 
     out_buffer = vp->audio.resample_buffer;
 
+    /* Check ring buffer space BEFORE resampling to prevent double-conversion.
+     * If the ring buffer can't hold the output, return 1 immediately WITHOUT
+     * calling swr_convert.  This prevents:
+     * - Double-processing through the resampler on retry (corrupts delay buffer)
+     * - Partial writes that lose resampled data
+     * - Over-counting of audio_written_samples → audio clock runs fast
+     * The caller retries with the same AVFrame, which is safe because
+     * swr_convert hasn't consumed it yet. */
+    {
+        size_t estimated_size = (size_t)dst_nb_samples * vp->audio.channels * sizeof(float);
+        size_t ring_space = ring_buffer_available_space(&vp->audio.ring);
+        if (ring_space < estimated_size) {
+            if (vp->state != VP_STATE_BUFFERING) {
+                vp->audio.write_stall_count++;
+                if (vp->audio.write_stall_count >= 50) {
+                    fprintf(stderr, "[audio] Ring buffer stall detected (%d consecutive full writes)"
+                            " - triggering early interruption for smooth video\n",
+                            vp->audio.write_stall_count);
+                    audio_diag("ring buffer stall: %d consecutive full writes", vp->audio.write_stall_count);
+                    audio_diag_error("Ring buffer stall (%d writes), triggering interruption",
+                            vp->audio.write_stall_count);
+                    vp->audio.stream_interrupted = 1;
+                    vp->audio.write_stall_count = 0;
+                    return 0;  /* Drop frame - video continues smoothly */
+                }
+            }
+            return 1;  /* Ring buffer full, retry later without resampling */
+        }
+    }
+
     /* Resample */
     out_samples = swr_convert(vp->audio.swr_ctx,
                                &out_buffer, dst_nb_samples,
@@ -1235,33 +1274,12 @@ int videoplayer_audio_queue_frame(VideoPlayer *vp, AVFrame *frame)
     }
 
     if (written < (size_t)out_size) {
-        /* Buffer full - check if this is a sustained stall (e.g., Bluetooth device
-         * reconnecting). PipeWire may stop consuming audio before firing
-         * on_stream_state_changed. Detect this early to prevent the decode thread
-         * from stalling on audio retries and starving video frame production.
-         *
-         * EXCEPTION: During BUFFERING (after open/seek), PipeWire is paused while
-         * the decode thread fills both video and audio queues.  The ring buffer
-         * filling up is expected and normal — NOT a device stall.  Setting
-         * stream_interrupted here would (a) drop audio frames creating gaps,
-         * (b) race with the BUFFERING→PLAYING transition that clears the flag,
-         * and (c) prevent audio_play() from activating PipeWire.  This was the
-         * root cause of broken A/V sync after seeking. */
-        if (vp->state != VP_STATE_BUFFERING) {
-            vp->audio.write_stall_count++;
-            if (vp->audio.write_stall_count >= 50) {
-                fprintf(stderr, "[audio] Ring buffer stall detected (%d consecutive full writes)"
-                        " - triggering early interruption for smooth video\n",
-                        vp->audio.write_stall_count);
-                audio_diag("ring buffer stall: %d consecutive full writes", vp->audio.write_stall_count);
-                audio_diag_error("Ring buffer stall (%d writes), triggering interruption",
-                        vp->audio.write_stall_count);
-                vp->audio.stream_interrupted = 1;
-                vp->audio.write_stall_count = 0;
-                return 0;  /* Drop frame immediately - video continues smoothly */
-            }
-        }
-        return 1;
+        /* Partial write after swr_convert — rare since we check space before
+         * resampling, but possible if PipeWire consumption raced with our
+         * space check.  The data was already resampled so we accept the
+         * partial write (counted above) rather than retrying swr_convert.
+         * The lost tail samples (~a few ms) are inaudible. */
+        audio_diag("partial write after resample: %zu/%d bytes", written, out_size);
     }
 
     /* Successful write - reset stall counter */

@@ -2158,11 +2158,14 @@ static void drain_pending_audio(VideoPlayer *vp, AVPacket *scratch_pkt)
         int ret = avcodec_send_packet(vp->audio_codec_ctx, scratch_pkt);
         if (ret >= 0) {
             while (avcodec_receive_frame(vp->audio_codec_ctx, vp->audio_frame) >= 0) {
-                int qr = videoplayer_audio_queue_frame(vp, vp->audio_frame);
-                if (qr == 1 && vp->decode_running) {
-                    usleep(1000);
-                    videoplayer_audio_queue_frame(vp, vp->audio_frame);
-                }
+                int qr;
+                int retries = 0;
+                do {
+                    qr = videoplayer_audio_queue_frame(vp, vp->audio_frame);
+                    if (qr == 1 && vp->decode_running) {
+                        usleep(2000);  /* 2ms backoff */
+                    }
+                } while (qr == 1 && vp->decode_running && ++retries < 50);
                 av_frame_unref(vp->audio_frame);
             }
         }
@@ -2360,11 +2363,14 @@ static void *decode_thread_func(void *arg)
             ret = avcodec_send_packet(vp->audio_codec_ctx, pkt);
             if (ret >= 0) {
                 while (avcodec_receive_frame(vp->audio_codec_ctx, vp->audio_frame) >= 0) {
-                    int queue_ret = videoplayer_audio_queue_frame(vp, vp->audio_frame);
-                    if (queue_ret == 1 && vp->decode_running) {
-                        usleep(1000);
-                        videoplayer_audio_queue_frame(vp, vp->audio_frame);
-                    }
+                    int qr;
+                    int retries = 0;
+                    do {
+                        qr = videoplayer_audio_queue_frame(vp, vp->audio_frame);
+                        if (qr == 1 && vp->decode_running) {
+                            usleep(2000);  /* 2ms backoff */
+                        }
+                    } while (qr == 1 && vp->decode_running && ++retries < 50);
                     av_frame_unref(vp->audio_frame);
                 }
             }

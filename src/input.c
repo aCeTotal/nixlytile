@@ -1618,6 +1618,15 @@ keypress(struct wl_listener *listener, void *data)
 		}
 	}
 
+	/* Handle ESC release for hold-to-exit playback */
+	if (event->state == WL_KEYBOARD_KEY_STATE_RELEASED &&
+	    htpc_mode_active && playback_state == PLAYBACK_PLAYING) {
+		for (i = 0; i < nsyms; i++) {
+			if (syms[i] == XKB_KEY_Escape)
+				handle_playback_key_release(syms[i]);
+		}
+	}
+
 	/* Don't enable key repeat for modal/nixpkgs text input to avoid double characters.
 	 * Only allow repeat for navigation keys (arrows, backspace) in modal/nixpkgs.
 	 * Also suppress repeat for toggle actions (e.g. togglestatusbar). */

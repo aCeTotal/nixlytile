@@ -7,6 +7,8 @@
 /* Worker thread does curl + parse in background, signals main loop via eventfd */
 static int media_fetch_efd = -1;
 static struct wl_event_source *media_fetch_ev_source = NULL;
+static struct wl_event_source *esc_hold_timer;
+static int esc_held;
 static volatile int media_fetch_busy = 0;
 
 #define ASYNC_MAX_ITEMS 2000
@@ -2794,6 +2796,28 @@ media_view_handle_button(Monitor *m, MediaViewType type, int button, int value)
 	return 1;
 }
 
+static int
+esc_hold_timeout(void *data)
+{
+	esc_held = 0;
+	stop_integrated_player();
+	hide_playback_osd();
+	return 0;
+}
+
+int
+handle_playback_key_release(xkb_keysym_t sym)
+{
+	if (sym != XKB_KEY_Escape || !esc_held)
+		return 0;
+	esc_held = 0;
+	if (esc_hold_timer)
+		wl_event_source_timer_update(esc_hold_timer, 0);
+	if (selmon)
+		gamepad_menu_show(selmon);
+	return 1;
+}
+
 int
 handle_playback_key(xkb_keysym_t sym)
 {
@@ -2826,9 +2850,12 @@ handle_playback_key(xkb_keysym_t sym)
 		if (osd_menu_open != OSD_MENU_NONE) {
 			osd_menu_open = OSD_MENU_NONE;
 		} else {
-			/* Open guide menu instead of stopping playback */
-			if (selmon)
-				gamepad_menu_show(selmon);
+			esc_held = 1;
+			if (!esc_hold_timer)
+				esc_hold_timer = wl_event_loop_add_timer(
+					wl_display_get_event_loop(dpy), esc_hold_timeout, NULL);
+			if (esc_hold_timer)
+				wl_event_source_timer_update(esc_hold_timer, 500);
 		}
 		handled = 1;
 		break;

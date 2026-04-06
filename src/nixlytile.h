@@ -2617,6 +2617,7 @@ float json_extract_float(const char *json, const char *key);
 int media_view_handle_button(Monitor *m, MediaViewType type, int button, int value);
 int media_view_handle_key(Monitor *m, MediaViewType type, xkb_keysym_t sym);
 int handle_playback_key(xkb_keysym_t sym);
+int handle_playback_key_release(xkb_keysym_t sym);
 void media_view_scroll(Monitor *m, MediaViewType type, int delta);
 void media_view_load_poster(MediaItem *item, int target_w, int target_h);
 Monitor *media_view_visible_monitor(void);
