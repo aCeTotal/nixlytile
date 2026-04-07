@@ -2797,7 +2797,7 @@ setup(void)
 		sigaction(sig[i], &sa, NULL);
 
 	init_logging();
-	pthread_setname_np(pthread_self(), "nl-main");
+	pthread_setname_np(pthread_self(), "nixlyOS");
 	wlr_log_init(WLR_DEBUG, log_callback);
 
 	/* Make sure spawned terminals get the real login shell, not the minimal wrapper shell */
@@ -3972,6 +3972,7 @@ main(int argc, char *argv[])
 		goto usage;
 
 	/* Load runtime config before applying defaults */
+	load_monitors_conf(); /* Load monitor layout from dedicated config first */
 	load_config();
 	init_keybindings();
 
@@ -4008,6 +4009,7 @@ main(int argc, char *argv[])
 		die("XDG_RUNTIME_DIR must be set");
 	setup();
 	setup_config_watch();
+	setup_monitors_conf_watch();
 	gamepad_setup();
 	bt_controller_setup();
 	pc_gaming_cache_watch_setup();

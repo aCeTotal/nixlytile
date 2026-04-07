@@ -1103,6 +1103,11 @@ toggleview(const Arg *arg)
 	update_game_mode();
 }
 
+/* Forward declarations for auto-kill */
+static void read_proc_comm(pid_t pid, char *buf, size_t sz);
+static int proc_autokill_eligible(const char *name);
+static void schedule_autokill(const char *name);
+
 void
 unmapnotify(struct wl_listener *listener, void *data)
 {
@@ -1147,6 +1152,18 @@ unmapnotify(struct wl_listener *listener, void *data)
 	wlr_scene_node_destroy(&c->scene->node);
 	printstatus();
 	motionnotify(0, NULL, 0, 0, 0, 0);
+
+	/* Auto-kill: schedule background process cleanup */
+	{
+		pid_t akpid = client_get_pid(c);
+		if (akpid > 1) {
+			char akcomm[64];
+			read_proc_comm(akpid, akcomm, sizeof(akcomm));
+			normalize_proc_name(akcomm);
+			if (akcomm[0] && proc_autokill_eligible(akcomm))
+				schedule_autokill(akcomm);
+		}
+	}
 	/* Clear PID guard so game mode deactivates immediately.
 	 * Also match by PID in case game_mode_client was reassigned. */
 	if (c == game_mode_client ||
@@ -1302,4 +1319,180 @@ togglesticky(const Arg *arg)
 		return;
 
 	setsticky(c, !c->issticky);
+}
+
+/* ── Auto-kill background processes ────────────────────────────────── */
+
+typedef struct {
+	char name[64];
+	struct wl_event_source *timer;
+} PendingAutoKill;
+
+#define MAX_PENDING_AUTOKILLS 8
+static PendingAutoKill pending_autokills[MAX_PENDING_AUTOKILLS];
+
+static void
+read_proc_comm(pid_t pid, char *buf, size_t sz)
+{
+	char path[64];
+	FILE *f;
+	size_t len;
+
+	buf[0] = '\0';
+	snprintf(path, sizeof(path), "/proc/%d/comm", (int)pid);
+	f = fopen(path, "r");
+	if (!f)
+		return;
+	if (fgets(buf, (int)sz, f)) {
+		len = strlen(buf);
+		if (len > 0 && buf[len - 1] == '\n')
+			buf[len - 1] = '\0';
+	}
+	fclose(f);
+}
+
+static int
+proc_autokill_eligible(const char *name)
+{
+	/* Apps that legitimately run without windows */
+	static const char *bg_allowed[] = {
+		/* Communication */
+		"discord", "slack", "teams", "zoom", "skype", "telegram",
+		"signal", "element", "fractal", "nheko", "thunderbird",
+		"geary", "evolution",
+		/* Audio players */
+		"spotify", "rhythmbox", "clementine", "strawberry", "elisa",
+		/* Game launchers */
+		"steam", "lutris", "heroic", "bottles",
+		/* Background services */
+		"syncthing", "transmission", "qbittorrent", "deluge",
+		"fragments",
+		/* VMs */
+		"virt-manager", "virtualbox", "vmware",
+		/* Password managers */
+		"keepassxc", "bitwarden", "1password",
+	};
+
+	/* User apps that SHOULD be killed (browsers, file managers, etc.) */
+	static const char *kill_apps[] = {
+		/* Browsers */
+		"firefox", "chromium", "chrome", "brave", "vivaldi", "opera",
+		"epiphany", "midori", "qutebrowser", "nyxt", "librewolf",
+		"waterfox", "zen", "floorp", "thorium",
+		/* File managers */
+		"thunar", "nautilus", "dolphin", "nemo", "pcmanfm", "caja",
+		"spacefm",
+		/* Editors/IDEs */
+		"code", "codium", "vscodium", "gedit", "kate", "sublime",
+		"zed",
+		/* Creative */
+		"blender", "gimp", "inkscape", "krita", "darktable",
+		"rawtherapee", "kdenlive", "shotcut", "openshot", "obs",
+		"audacity", "ardour", "lmms", "bitwig", "reaper", "godot",
+		/* Office */
+		"libreoffice", "soffice", "writer", "calc", "impress",
+		"draw", "onlyoffice", "wps", "evince", "okular", "zathura",
+		"mupdf",
+		/* Media players */
+		"vlc", "celluloid", "totem", "parole", "smplayer",
+		/* Misc */
+		"calibre", "anki", "logseq", "obsidian", "joplin", "drawio",
+		"postman", "insomnia", "dbeaver", "pgadmin",
+	};
+	size_t i;
+
+	if (!name || !*name)
+		return 0;
+
+	/* Check bg_allowed first — these should NOT be killed */
+	for (i = 0; i < LENGTH(bg_allowed); i++) {
+		if (strcasestr(name, bg_allowed[i]))
+			return 0;
+	}
+
+	/* Check if it's a user app that should be killed */
+	for (i = 0; i < LENGTH(kill_apps); i++) {
+		if (strcasestr(name, kill_apps[i]))
+			return 1;
+	}
+
+	return 0;
+}
+
+static int
+autokill_timer_cb(void *data)
+{
+	PendingAutoKill *ak = data;
+	Client *c;
+	char comm[64];
+	DIR *d;
+	struct dirent *de;
+
+	/* Check if any client still has this process name */
+	wl_list_for_each(c, &clients, link) {
+		pid_t pid = client_get_pid(c);
+		if (pid <= 1)
+			continue;
+		read_proc_comm(pid, comm, sizeof(comm));
+		normalize_proc_name(comm);
+		if (strcasecmp(comm, ak->name) == 0) {
+			/* Process still has windows — cancel */
+			goto cleanup;
+		}
+	}
+
+	/* No windows remain — SIGTERM all processes with this name */
+	d = opendir("/proc");
+	if (d) {
+		while ((de = readdir(d)) != NULL) {
+			pid_t pid;
+			if (de->d_name[0] < '1' || de->d_name[0] > '9')
+				continue;
+			pid = (pid_t)atoi(de->d_name);
+			if (pid <= 1)
+				continue;
+			read_proc_comm(pid, comm, sizeof(comm));
+			normalize_proc_name(comm);
+			if (strcasecmp(comm, ak->name) == 0)
+				kill(pid, SIGTERM);
+		}
+		closedir(d);
+	}
+
+cleanup:
+	wl_event_source_remove(ak->timer);
+	ak->timer = NULL;
+	ak->name[0] = '\0';
+	return 0;
+}
+
+static void
+schedule_autokill(const char *name)
+{
+	int i;
+	PendingAutoKill *slot = NULL;
+
+	/* Check for duplicate pending */
+	for (i = 0; i < MAX_PENDING_AUTOKILLS; i++) {
+		if (pending_autokills[i].timer &&
+		    strcasecmp(pending_autokills[i].name, name) == 0)
+			return; /* already pending */
+	}
+
+	/* Find free slot */
+	for (i = 0; i < MAX_PENDING_AUTOKILLS; i++) {
+		if (!pending_autokills[i].timer) {
+			slot = &pending_autokills[i];
+			break;
+		}
+	}
+	if (!slot)
+		return; /* all slots busy */
+
+	snprintf(slot->name, sizeof(slot->name), "%s", name);
+	slot->timer = wl_event_loop_add_timer(event_loop, autokill_timer_cb, slot);
+	if (slot->timer)
+		wl_event_source_timer_update(slot->timer, 2000); /* 2 seconds */
+	else
+		slot->name[0] = '\0';
 }

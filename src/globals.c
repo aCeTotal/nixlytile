@@ -17,6 +17,11 @@ char config_path_cached[PATH_MAX] = {0};
 struct wl_event_source *config_watch_source = NULL;
 struct wl_event_source *config_rewatch_timer = NULL;
 int config_needs_rewatch = 0;
+int monconf_inotify_fd = -1;
+int monconf_watch_wd = -1;
+char monconf_path_cached[PATH_MAX] = {0};
+struct wl_event_source *monconf_watch_source = NULL;
+struct wl_event_source *monitor_setup_timer = NULL;
 struct wl_display *dpy;
 struct wl_event_loop *event_loop;  /* Non-static: accessed by videoplayer */
 VideoPlayer *active_videoplayer = NULL;

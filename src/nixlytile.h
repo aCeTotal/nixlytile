@@ -916,6 +916,49 @@ typedef struct {
 	struct wlr_surface *target_surface;
 } OnScreenKeyboard;
 
+/* ── monitor setup popup ──────────────────────────────────────────── */
+#define MAX_SETUP_MONITORS 8
+
+typedef struct {
+	char name[64];          /* connector name: DP-1, HDMI-A-1 */
+	int width, height;      /* native resolution */
+	float refresh;          /* refresh rate Hz */
+	int transform;          /* WL_OUTPUT_TRANSFORM_NORMAL or _90 */
+	int order;              /* left-to-right position (0-based) */
+	/* Animation state */
+	float anim_x, anim_y;  /* current animated position */
+	float target_x, target_y; /* target position */
+	float anim_w, anim_h;  /* current animated box size */
+	float target_w, target_h; /* target box size */
+	float anim_rot;         /* current rotation angle (0 or 90) */
+	float target_rot;       /* target rotation (0 or 90) */
+	/* Box geometry in popup (computed) */
+	int box_x, box_y, box_w, box_h;
+} SetupMonitorEntry;
+
+typedef struct {
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_tree *bg;
+	struct wlr_scene_tree *label_trees[MAX_SETUP_MONITORS]; /* on-screen labels */
+	int visible;
+	int x, y, width, height;
+	SetupMonitorEntry entries[MAX_SETUP_MONITORS];
+	int entry_count;
+	/* Drag state */
+	int dragging;           /* index of dragged entry, or -1 */
+	int drag_offset_x, drag_offset_y;
+	/* Animation timer */
+	struct wl_event_source *anim_timer;
+	int animating;
+	/* Apply/cancel button geometry */
+	int apply_x, apply_y, apply_w, apply_h;
+	int cancel_x, cancel_y, cancel_w, cancel_h;
+	/* Right-click context menu */
+	int ctx_visible;
+	int ctx_x, ctx_y, ctx_w, ctx_h;
+	int ctx_entry_idx;      /* which entry the context menu is for */
+} MonitorSetup;
+
 /* ── gamepad types ─────────────────────────────────────────────────── */
 typedef struct {
 	const char *label;
@@ -1271,6 +1314,7 @@ struct Monitor {
 	WifiPasswordPopup wifi_popup;
 	SudoPopup sudo_popup;
 	OnScreenKeyboard osk;
+	MonitorSetup monitor_setup;
 	GamepadMenu gamepad_menu;
 	PcGamingView pc_gaming;
 	RetroGamingView retro_gaming;
@@ -1608,6 +1652,13 @@ extern char config_path_cached[PATH_MAX];
 extern struct wl_event_source *config_watch_source;
 extern struct wl_event_source *config_rewatch_timer;
 extern int config_needs_rewatch;
+
+/* monitors.conf hot-reload */
+extern int monconf_inotify_fd;
+extern int monconf_watch_wd;
+extern char monconf_path_cached[PATH_MAX];
+extern struct wl_event_source *monconf_watch_source;
+extern struct wl_event_source *monitor_setup_timer;
 
 /* status timers */
 extern struct wl_event_source *status_timer;
@@ -2050,6 +2101,9 @@ void pending_launch_add(pid_t pid, uint32_t tags, const char *output_name);
 int pending_launch_find_and_remove(pid_t client_pid, uint32_t *out_tags,
 	char *out_output, size_t out_output_sz);
 
+/* statusbar.c */
+void normalize_proc_name(char *name);
+
 /* htpc.c */
 pid_t client_get_pid(Client *c);
 
@@ -2158,7 +2212,7 @@ void createpointer(struct wlr_pointer *pointer);
 void newkbshortcutsinhibitor(struct wl_listener *listener, void *data);
 void createpointerconstraint(struct wl_listener *listener, void *data);
 void destroypointerconstraint(struct wl_listener *listener, void *data);
-void cursorconstrain(struct wlr_pointer_constraint_v1 *constraint);
+void checkconstraint(void);
 void cursorframe(struct wl_listener *listener, void *data);
 void cursorwarptohint(void);
 void motionabsolute(struct wl_listener *listener, void *data);
@@ -2233,6 +2287,7 @@ typedef struct {
 	float judder_ms;
 } VideoModeCandidate;
 VideoModeCandidate find_best_video_mode(Monitor *m, float video_hz);
+struct wlr_output_mode *find_mode(struct wlr_output *output, int width, int height, float refresh);
 float score_video_mode(int method, float video_hz, float display_hz, int multiplier);
 float calculate_judder_ms(float video_hz, float display_hz);
 void generate_cvt_mode(drmModeModeInfo *mode, int hdisplay, int vdisplay, float vrefresh);
@@ -2247,6 +2302,7 @@ int playback_osd_timeout(void *data);
 struct wlr_output_mode *bestmode(struct wlr_output *output);
 RuntimeMonitorConfig *find_monitor_config(const char *name);
 void calculate_monitor_position(Monitor *m, RuntimeMonitorConfig *cfg, int *out_x, int *out_y);
+void monitor_effective_size(Monitor *m, int *w, int *h);
 
 /* statusbar.c */
 void initstatusbar(Monitor *m);
@@ -2489,6 +2545,24 @@ void osk_send_backspace(Monitor *m);
 void osk_send_text(const char *text);
 int toast_hide_timer(void *data);
 void toast_show(Monitor *m, const char *message, int duration_ms);
+
+/* monitor_setup.c */
+void monitor_setup_show(Monitor *m);
+void monitor_setup_hide(Monitor *m);
+void monitor_setup_render(Monitor *m);
+int monitor_setup_handle_button(Monitor *m, int lx, int ly, uint32_t button, uint32_t state);
+void monitor_setup_handle_motion(Monitor *m, int lx, int ly);
+int monitor_setup_handle_key(Monitor *m, xkb_keysym_t sym);
+void monitor_setup_apply(Monitor *m);
+void write_monitors_conf(SetupMonitorEntry *entries, int count);
+Monitor *monitor_setup_visible_monitor(void);
+
+/* config.c — monitors.conf */
+int load_monitors_conf(void);
+int monitors_conf_exists(void);
+void setup_monitors_conf_watch(void);
+void reload_monitors_conf(void);
+int schedule_monitor_setup_popup(void);
 
 /* launcher.c */
 void modal_show(const Arg *arg);

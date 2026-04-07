@@ -30,7 +30,7 @@ VP_OBJS = videoplayer.o videoplayer_decode.o videoplayer_render.o videoplayer_au
 MOD_OBJS = globals.o client.o layout.o btrtile.o input.o gamepad.o output.o \
            statusbar.o tray.o network.o launcher.o nixpkgs.o gaming.o media.o \
            popup.o bluetooth.o config.o htpc.o draw.o layer.o fancontrol.o \
-           screenshot.o
+           screenshot.o monitor_setup.o
 
 PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstable-v1-protocol.h \
              $(SRC)/wlr-layer-shell-unstable-v1-protocol.h $(SRC)/wlr-output-power-management-unstable-v1-protocol.h \
@@ -91,6 +91,8 @@ layer.o: $(SRC)/layer.c $(SRC)/nixlytile.h $(SRC)/client.h
 fancontrol.o: $(SRC)/fancontrol.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 screenshot.o: $(SRC)/screenshot.c $(SRC)/nixlytile.h $(SRC)/client.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+monitor_setup.o: $(SRC)/monitor_setup.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 
 # Video player modules

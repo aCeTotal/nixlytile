@@ -398,6 +398,13 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 		int sel = mo->selected[mo->active_idx];
 		if (mo->active_idx == 0 && sel >= 0 && sel < mo->result_count[0]) {
 			int idx = mo->result_entry_idx[0][sel];
+			/* Built-in: Monitor Setup */
+			if (idx == -2) {
+				modal_hide_all();
+				if (selmon)
+					monitor_setup_show(selmon);
+				return 1;
+			}
 			if (idx >= 0 && idx < desktop_entry_count) {
 				char cmd_str[512];
 				desktop_entries[idx].used++;
@@ -2029,6 +2036,18 @@ modal_update_results(Monitor *m)
 							sizeof(mo->results[0][mo->result_count[0]]),
 							"%s", desktop_entries[idx].name);
 					mo->result_entry_idx[0][mo->result_count[0]] = idx;
+					mo->result_count[0]++;
+				}
+			}
+
+			/* Built-in: Monitor Setup (matches "monitor", "monitors", "monitor setup") */
+			if (mo->result_count[0] < (int)LENGTH(mo->results[0])) {
+				const char *builtin_name = "monitor setup";
+				if (strstr(builtin_name, needle) || strstr("monitors", needle)) {
+					snprintf(mo->results[0][mo->result_count[0]],
+							sizeof(mo->results[0][mo->result_count[0]]),
+							"Monitor Setup");
+					mo->result_entry_idx[0][mo->result_count[0]] = -2;
 					mo->result_count[0]++;
 				}
 			}

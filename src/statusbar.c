@@ -849,6 +849,31 @@ rendertrayicons(Monitor *m, int bar_height)
 	wlr_scene_node_set_enabled(&module->tree->node, module->width > 0);
 }
 
+void
+normalize_proc_name(char *name)
+{
+	size_t len;
+	if (!name || !*name)
+		return;
+	len = strlen(name);
+
+	/* .foo-wrapped → Foo (NixOS wrapper pattern) */
+	if (name[0] == '.' && len > 9 &&
+	    strcmp(name + len - 8, "-wrapped") == 0) {
+		memmove(name, name + 1, len - 9);
+		name[len - 9] = '\0';
+		if (name[0] >= 'a' && name[0] <= 'z')
+			name[0] -= 32;
+		return;
+	}
+
+	/* steamwebhelper → steam (will merge with existing steam entry) */
+	if (strcmp(name, "steamwebhelper") == 0) {
+		strcpy(name, "steam");
+		return;
+	}
+}
+
 int
 cpu_proc_is_critical(pid_t pid, const char *name)
 {
@@ -901,6 +926,10 @@ cpu_proc_is_critical(pid_t pid, const char *name)
 
 	/* Block kernel threads */
 	if (name[0] == '[')
+		return 1;
+
+	/* Block specific system processes */
+	if (!strcmp(name, "scx_lavd"))
 		return 1;
 
 	/* Block common kernel/system process prefixes */
@@ -1201,6 +1230,7 @@ read_top_cpu_processes(CpuPopup *p)
 				continue;
 		}
 
+		normalize_proc_name(name);
 		if (name[0] == '[')
 			continue;
 		if (cpu_proc_is_critical(pid, name))

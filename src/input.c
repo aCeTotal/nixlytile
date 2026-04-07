@@ -598,6 +598,18 @@ buttonpress(struct wl_listener *listener, void *data)
 			return;
 		}
 
+		/* Monitor setup popup intercepts all clicks */
+		{
+			Monitor *ms_mon = monitor_setup_visible_monitor();
+			if (ms_mon) {
+				int cx = (int)lround(cursor->x);
+				int cy = (int)lround(cursor->y);
+				monitor_setup_handle_button(ms_mon, cx, cy,
+					event->button, event->state);
+				return;
+			}
+		}
+
 		/* Modal overlay eats clicks; outside closes it */
 		{
 			Monitor *modal_mon = modal_visible_monitor();
@@ -690,6 +702,17 @@ buttonpress(struct wl_listener *listener, void *data)
 		if (screenshot_mode >= SCREENSHOT_SELECTING) {
 			screenshot_handle_button(event->button, event->state, event->time_msec);
 			return;
+		}
+		/* Monitor setup popup release (drag drop) */
+		{
+			Monitor *ms_mon = monitor_setup_visible_monitor();
+			if (ms_mon) {
+				int cx = (int)lround(cursor->x);
+				int cy = (int)lround(cursor->y);
+				monitor_setup_handle_button(ms_mon, cx, cy,
+					event->button, event->state);
+				return;
+			}
 		}
 		/* If you released any buttons, we exit interactive move/resize mode. */
 		/* TODO: should reset to the pointer focus's current setcursor */
@@ -990,39 +1013,6 @@ newkbshortcutsinhibitor(struct wl_listener *listener, void *data)
 }
 
 void
-createpointerconstraint(struct wl_listener *listener, void *data)
-{
-	PointerConstraint *pointer_constraint = ecalloc(1, sizeof(*pointer_constraint));
-	pointer_constraint->constraint = data;
-	LISTEN(&pointer_constraint->constraint->events.destroy,
-			&pointer_constraint->destroy, destroypointerconstraint);
-}
-
-void
-cursorconstrain(struct wlr_pointer_constraint_v1 *constraint)
-{
-	if (active_constraint == constraint)
-		return;
-
-	if (active_constraint)
-		wlr_pointer_constraint_v1_send_deactivated(active_constraint);
-
-	active_constraint = constraint;
-	wlr_pointer_constraint_v1_send_activated(constraint);
-}
-
-void
-cursorframe(struct wl_listener *listener, void *data)
-{
-	/* This event is forwarded by the cursor when a pointer emits a frame
-	 * event. Frame events are sent after regular pointer events to group
-	 * multiple events together. For instance, two axis events may happen at the
-	 * same time, in which case a frame event won't be sent in between. */
-	/* Notify the client with pointer focus of the frame event. */
-	wlr_seat_pointer_notify_frame(seat);
-}
-
-void
 cursorwarptohint(void)
 {
 	Client *c = NULL;
@@ -1034,6 +1024,58 @@ cursorwarptohint(void)
 		wlr_cursor_warp(cursor, NULL, sx + c->geom.x + c->bw, sy + c->geom.y + c->bw);
 		wlr_seat_pointer_warp(active_constraint->seat, sx, sy);
 	}
+}
+
+void
+checkconstraint(void)
+{
+	struct wlr_pointer_constraint_v1 *constraint;
+	struct wlr_surface *focused = seat->pointer_state.focused_surface;
+
+	/* Already tracking the right constraint */
+	if (active_constraint && active_constraint->surface == focused)
+		return;
+
+	/* Deactivate stale constraint (surface lost focus) */
+	if (active_constraint) {
+		cursorwarptohint();
+		wlr_pointer_constraint_v1_send_deactivated(active_constraint);
+		active_constraint = NULL;
+	}
+
+	/* Find and activate constraint for the focused surface */
+	if (focused) {
+		wl_list_for_each(constraint, &pointer_constraints->constraints, link) {
+			if (constraint->surface == focused) {
+				active_constraint = constraint;
+				wlr_pointer_constraint_v1_send_activated(constraint);
+				return;
+			}
+		}
+	}
+}
+
+void
+createpointerconstraint(struct wl_listener *listener, void *data)
+{
+	PointerConstraint *pointer_constraint = ecalloc(1, sizeof(*pointer_constraint));
+	pointer_constraint->constraint = data;
+	LISTEN(&pointer_constraint->constraint->events.destroy,
+			&pointer_constraint->destroy, destroypointerconstraint);
+
+	/* Activate immediately if the requesting surface already has focus */
+	checkconstraint();
+}
+
+void
+cursorframe(struct wl_listener *listener, void *data)
+{
+	/* This event is forwarded by the cursor when a pointer emits a frame
+	 * event. Frame events are sent after regular pointer events to group
+	 * multiple events together. For instance, two axis events may happen at the
+	 * same time, in which case a frame event won't be sent in between. */
+	/* Notify the client with pointer focus of the frame event. */
+	wlr_seat_pointer_notify_frame(seat);
 }
 
 void
@@ -1393,6 +1435,16 @@ keypress(struct wl_listener *listener, void *data)
 				if (syms[i] == XKB_KEY_Escape) {
 					screenshot_handle_key(syms[i]);
 					handled = 1;
+				}
+			}
+		}
+		/* Monitor setup popup */
+		if (!handled) {
+			Monitor *ms_mon = monitor_setup_visible_monitor();
+			if (ms_mon) {
+				for (i = 0; i < nsyms; i++) {
+					if (monitor_setup_handle_key(ms_mon, syms[i]))
+						handled = 1;
 				}
 			}
 		}
@@ -1952,8 +2004,6 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	Client *c = NULL, *w = NULL;
 	LayerSurface *l = NULL;
 	struct wlr_surface *surface = NULL;
-	struct wlr_pointer_constraint_v1 *constraint;
-
 	/*
 	 * Track input timestamp for mouse motion latency measurement.
 	 * Mouse input is most critical for competitive gaming.
@@ -1966,8 +2016,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	if (time) {
 		double raw_dx = dx, raw_dy = dy;
 
-		wl_list_for_each(constraint, &pointer_constraints->constraints, link)
-			cursorconstrain(constraint);
+		checkconstraint();
 
 		if (active_constraint && cursor_mode != CurResize && cursor_mode != CurMove) {
 			toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
@@ -2087,6 +2136,16 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	if (screenshot_mode == SCREENSHOT_DRAGGING) {
 		screenshot_handle_motion();
 		return;
+	}
+
+	/* Monitor setup popup drag tracking */
+	{
+		Monitor *ms_mon = monitor_setup_visible_monitor();
+		if (ms_mon && ms_mon->monitor_setup.dragging >= 0) {
+			monitor_setup_handle_motion(ms_mon,
+				(int)lround(cursor->x), (int)lround(cursor->y));
+			return;
+		}
 	}
 
 	/* Find the client under the pointer at the NEW cursor position.
@@ -2417,6 +2476,11 @@ pointerfocus(Client *c, struct wlr_surface *surface, double sx, double sy,
 	 * wlroots makes this a no-op if surface is already focused */
 	wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
 	wlr_seat_pointer_notify_motion(seat, time, sx, sy);
+
+	/* (Re-)activate pointer constraint if the newly focused surface has one.
+	 * This ensures games get their pointer lock/confine as soon as focus
+	 * returns, without waiting for a motion event. */
+	checkconstraint();
 }
 
 void

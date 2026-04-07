@@ -1038,3 +1038,328 @@ setup_config_watch(void)
 	}
 }
 
+/* ── monitors.conf ─────────────────────────────────────────────────── */
+
+static void
+monconf_build_path(char *out, size_t len)
+{
+	const char *home = getenv("HOME");
+
+	if (home && *home)
+		snprintf(out, len, "%s/.local/nixlyos/monitors.conf", home);
+	else
+		out[0] = '\0';
+}
+
+int
+monitors_conf_exists(void)
+{
+	char path[PATH_MAX];
+
+	monconf_build_path(path, sizeof(path));
+	if (!path[0])
+		return 0;
+	return access(path, R_OK) == 0;
+}
+
+int
+load_monitors_conf(void)
+{
+	char path[PATH_MAX];
+	FILE *f;
+	char line[1024];
+	int loaded = 0;
+
+	monconf_build_path(path, sizeof(path));
+	if (!path[0])
+		return 0;
+
+	/* Cache path for inotify */
+	strncpy(monconf_path_cached, path, sizeof(monconf_path_cached) - 1);
+
+	f = fopen(path, "r");
+	if (!f)
+		return 0;
+
+	wlr_log(WLR_INFO, "Loading monitors.conf from %s", path);
+
+	while (fgets(line, sizeof(line), f)) {
+		char *p = line;
+		char *key, *value, *eq;
+
+		while (*p && isspace((unsigned char)*p)) p++;
+		if (!*p || *p == '#' || *p == ';') continue;
+
+		/* Remove trailing newline */
+		{
+			char *nl = strchr(p, '\n');
+			if (nl) *nl = '\0';
+			nl = strchr(p, '\r');
+			if (nl) *nl = '\0';
+		}
+
+		/* Parse "monitor = ..." lines */
+		eq = strchr(p, '=');
+		if (!eq) continue;
+
+		*eq = '\0';
+		key = p;
+		value = eq + 1;
+
+		/* Trim */
+		while (*key && isspace((unsigned char)*key)) key++;
+		{
+			char *end = key + strlen(key) - 1;
+			while (end > key && isspace((unsigned char)*end)) *end-- = '\0';
+		}
+		while (*value && isspace((unsigned char)*value)) value++;
+
+		if (strcmp(key, "monitor") == 0 && *value) {
+			config_parse_monitor(value);
+			loaded++;
+		}
+	}
+
+	fclose(f);
+	wlr_log(WLR_INFO, "Loaded %d monitor configs from monitors.conf", loaded);
+	return loaded;
+}
+
+static int
+monconf_watch_handler(int fd, uint32_t mask, void *data)
+{
+	char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+	const struct inotify_event *event;
+	ssize_t len;
+	char *ptr;
+	int should_reload = 0;
+
+	(void)mask;
+	(void)data;
+
+	while ((len = read(fd, buf, sizeof(buf))) > 0) {
+		for (ptr = buf; ptr < buf + len;
+		     ptr += sizeof(struct inotify_event) + event->len) {
+			event = (const struct inotify_event *)ptr;
+			if (event->mask & (IN_MODIFY | IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE))
+				should_reload = 1;
+		}
+	}
+
+	if (should_reload)
+		reload_monitors_conf();
+
+	return 0;
+}
+
+void
+reload_monitors_conf(void)
+{
+	Monitor *m;
+
+	wlr_log(WLR_INFO, "Hot-reloading monitors.conf...");
+
+	/* Clear monitor configs and reload both files */
+	runtime_monitor_count = 0;
+	monitor_master_set = 0;
+	memset(runtime_monitors, 0, sizeof(runtime_monitors));
+
+	load_monitors_conf();
+	/* Main config.conf may also have monitor= lines */
+	{
+		char path[PATH_MAX];
+		FILE *f;
+		char line[1024];
+
+		if (config_path_cached[0])
+			snprintf(path, sizeof(path), "%s", config_path_cached);
+		else
+			path[0] = '\0';
+
+		if (path[0] && (f = fopen(path, "r"))) {
+			while (fgets(line, sizeof(line), f)) {
+				char *p = line;
+				char *key, *value, *eq;
+
+				while (*p && isspace((unsigned char)*p)) p++;
+				if (!*p || *p == '#' || *p == ';') continue;
+
+				{
+					char *nl = strchr(p, '\n');
+					if (nl) *nl = '\0';
+				}
+
+				eq = strchr(p, '=');
+				if (!eq) continue;
+				*eq = '\0';
+				key = p;
+				value = eq + 1;
+				while (*key && isspace((unsigned char)*key)) key++;
+				{
+					char *end = key + strlen(key) - 1;
+					while (end > key && isspace((unsigned char)*end)) *end-- = '\0';
+				}
+				while (*value && isspace((unsigned char)*value)) value++;
+
+				if (strcmp(key, "monitor") == 0 && *value)
+					config_parse_monitor(value);
+			}
+			fclose(f);
+		}
+	}
+
+	/* Apply: reconfigure all connected monitors */
+	wl_list_for_each(m, &mons, link) {
+		RuntimeMonitorConfig *cfg;
+
+		if (!m->wlr_output->enabled)
+			continue;
+		cfg = find_monitor_config(m->wlr_output->name);
+		if (!cfg)
+			continue;
+
+		/* Apply transform if changed */
+		if ((int)m->wlr_output->transform != cfg->transform) {
+			struct wlr_output_state st;
+			wlr_output_state_init(&st);
+			wlr_output_state_set_transform(&st, cfg->transform);
+			wlr_output_commit_state(m->wlr_output, &st);
+			wlr_output_state_finish(&st);
+		}
+	}
+
+	/* Recalculate positions and re-layout */
+	{
+		int pos_x = 0;
+		/* Sort monitors by config position: master first, then right */
+		Monitor *master_mon = NULL;
+		wl_list_for_each(m, &mons, link) {
+			RuntimeMonitorConfig *cfg = find_monitor_config(m->wlr_output->name);
+			if (cfg && cfg->position == MON_POS_MASTER) {
+				master_mon = m;
+				break;
+			}
+		}
+
+		/* Place master at 0,0 */
+		if (master_mon) {
+			int ew, eh;
+			monitor_effective_size(master_mon, &ew, &eh);
+			wlr_output_layout_add(output_layout, master_mon->wlr_output, 0, 0);
+			pos_x = ew;
+		}
+
+		/* Place right monitors */
+		wl_list_for_each(m, &mons, link) {
+			RuntimeMonitorConfig *cfg;
+			int ew, eh;
+
+			if (m == master_mon || !m->wlr_output->enabled || m->is_mirror)
+				continue;
+			cfg = find_monitor_config(m->wlr_output->name);
+			if (!cfg)
+				continue;
+
+			monitor_effective_size(m, &ew, &eh);
+			if (cfg->position == MON_POS_LEFT) {
+				wlr_output_layout_add(output_layout, m->wlr_output, -ew, 0);
+			} else {
+				wlr_output_layout_add(output_layout, m->wlr_output, pos_x, 0);
+				pos_x += ew;
+			}
+		}
+	}
+
+	updatemons(NULL, NULL);
+	wlr_log(WLR_INFO, "monitors.conf reload complete");
+}
+
+void
+setup_monitors_conf_watch(void)
+{
+	char path[PATH_MAX], dir[PATH_MAX];
+	char *slash;
+
+	monconf_build_path(path, sizeof(path));
+	if (!path[0])
+		return;
+
+	strncpy(monconf_path_cached, path, sizeof(monconf_path_cached) - 1);
+
+	monconf_inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+	if (monconf_inotify_fd < 0)
+		return;
+
+	/* Try watching the file directly */
+	monconf_watch_wd = inotify_add_watch(monconf_inotify_fd, path,
+		IN_MODIFY | IN_CLOSE_WRITE | IN_MOVED_TO);
+
+	if (monconf_watch_wd < 0) {
+		/* File doesn't exist yet — watch the directory */
+		strncpy(dir, path, sizeof(dir) - 1);
+		dir[sizeof(dir) - 1] = '\0';
+		slash = strrchr(dir, '/');
+		if (slash) {
+			*slash = '\0';
+			mkdir(dir, 0755);
+			monconf_watch_wd = inotify_add_watch(monconf_inotify_fd, dir,
+				IN_CREATE | IN_MOVED_TO);
+		}
+		if (monconf_watch_wd < 0) {
+			close(monconf_inotify_fd);
+			monconf_inotify_fd = -1;
+			return;
+		}
+		wlr_log(WLR_INFO, "Watching monitors.conf directory for creation: %s", dir);
+	} else {
+		wlr_log(WLR_INFO, "Watching monitors.conf for changes: %s", path);
+	}
+
+	monconf_watch_source = wl_event_loop_add_fd(event_loop, monconf_inotify_fd,
+		WL_EVENT_READABLE, monconf_watch_handler, NULL);
+	if (!monconf_watch_source) {
+		close(monconf_inotify_fd);
+		monconf_inotify_fd = -1;
+	}
+}
+
+static int
+monitor_setup_popup_timer_cb(void *data)
+{
+	(void)data;
+
+	if (!selmon)
+		return 0;
+
+	/* Only show if multiple monitors and no config file */
+	{
+		int count = 0;
+		Monitor *m;
+		wl_list_for_each(m, &mons, link) {
+			if (m->wlr_output->enabled && !m->is_mirror)
+				count++;
+		}
+		if (count <= 1)
+			return 0;
+	}
+
+	if (monitors_conf_exists())
+		return 0;
+
+	monitor_setup_show(selmon);
+	return 0;
+}
+
+int
+schedule_monitor_setup_popup(void)
+{
+	if (!monitor_setup_timer)
+		monitor_setup_timer = wl_event_loop_add_timer(event_loop,
+			monitor_setup_popup_timer_cb, NULL);
+	if (monitor_setup_timer) {
+		wl_event_source_timer_update(monitor_setup_timer, 500);
+		return 1;
+	}
+	return 0;
+}
+

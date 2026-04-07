@@ -184,7 +184,7 @@ monitor_physical_diagonal(Monitor *m)
 	return sqrt((double)pw * pw + (double)ph * ph);
 }
 
-static void
+void
 monitor_effective_size(Monitor *m, int *w, int *h)
 {
 	enum wl_output_transform t = m->wlr_output->transform;
@@ -708,6 +708,18 @@ createmon(struct wl_listener *listener, void *data)
 	 * outputs that appear after it has already started. */
 	if (is_external_connector(wlr_output->name))
 		restart_wallpaper();
+
+	/* Auto-show monitor setup popup if multiple monitors and no config file */
+	{
+		int mon_count = 0;
+		Monitor *om;
+		wl_list_for_each(om, &mons, link) {
+			if (om->wlr_output->enabled && !om->is_mirror)
+				mon_count++;
+		}
+		if (mon_count > 1 && !monitors_conf_exists())
+			schedule_monitor_setup_popup();
+	}
 }
 
 struct wlr_box
