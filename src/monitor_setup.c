@@ -278,6 +278,24 @@ compact_grid(MonitorSetup *ms)
 	if (n <= 0)
 		return;
 
+	/* Normalize: ensure minimum col and row are 0 */
+	{
+		int min_col = ms->entries[0].grid_col;
+		int min_row = ms->entries[0].grid_row;
+		for (int i = 1; i < n; i++) {
+			if (ms->entries[i].grid_col < min_col)
+				min_col = ms->entries[i].grid_col;
+			if (ms->entries[i].grid_row < min_row)
+				min_row = ms->entries[i].grid_row;
+		}
+		if (min_col != 0 || min_row != 0) {
+			for (int i = 0; i < n; i++) {
+				ms->entries[i].grid_col -= min_col;
+				ms->entries[i].grid_row -= min_row;
+			}
+		}
+	}
+
 	/* Find grid extents */
 	for (int i = 0; i < n; i++) {
 		if (ms->entries[i].grid_col > max_col)
@@ -731,9 +749,10 @@ monitor_setup_render(Monitor *m)
 	if (!statusfont.font)
 		return;
 
-	/* Null out box_tree pointers — clear_tree_children will destroy them */
+	/* Null out pointers — clear_tree_children will destroy them */
 	for (int i = 0; i < ms->entry_count; i++)
 		ms->entries[i].box_tree = NULL;
+	ms->drop_indicator = NULL;
 
 	/* Clear previous */
 	clear_tree_children(ms->tree, ms->bg);
@@ -1057,6 +1076,78 @@ cell_adjacent_to_occupied(MonitorSetup *ms, int col, int row)
 	return 0;
 }
 
+/* ── helpers excluding dragged entry ──────────────────────────────── */
+
+static int
+entry_at_grid_excl(MonitorSetup *ms, int col, int row, int excl_idx)
+{
+	for (int i = 0; i < ms->entry_count; i++) {
+		if (i == excl_idx)
+			continue;
+		if (ms->entries[i].grid_col == col && ms->entries[i].grid_row == row)
+			return i;
+	}
+	return -1;
+}
+
+static int
+cell_adjacent_to_occupied_excl(MonitorSetup *ms, int col, int row, int excl_idx)
+{
+	static const int dx[] = {-1, 1, 0, 0};
+	static const int dy[] = {0, 0, -1, 1};
+
+	for (int d = 0; d < 4; d++) {
+		if (entry_at_grid_excl(ms, col + dx[d], row + dy[d], excl_idx) >= 0)
+			return 1;
+	}
+	return 0;
+}
+
+/* ── drop indicator ───────────────────────────────────────────────── */
+
+static void
+update_drop_indicator(MonitorSetup *ms)
+{
+	int spacing = 20;
+	int cell_step_x = ms->cell_w + spacing;
+	int cell_step_y = ms->cell_h + spacing;
+	float ind_color[4] = {0.3f, 0.5f, 0.8f, 0.25f};
+	float ind_between[4] = {0.4f, 0.7f, 1.0f, 0.5f};
+
+	if (!ms->drop_indicator || ms->dragging < 0)
+		return;
+
+	clear_tree_children(ms->drop_indicator, NULL);
+
+	if (ms->drag_insert_dir >= 0) {
+		/* Between insertion: thin bar in the gap */
+		if (ms->drag_insert_dir == 1) {
+			/* Vertical gap between rows */
+			wlr_scene_node_set_position(&ms->drop_indicator->node,
+				ms->grid_origin_x + ms->drag_target_col * cell_step_x,
+				ms->grid_origin_y + ms->drag_insert_after * cell_step_y + ms->cell_h);
+			drawroundedrect(ms->drop_indicator, 0, 0,
+				ms->cell_w, spacing, ind_between);
+		} else {
+			/* Horizontal gap between columns */
+			wlr_scene_node_set_position(&ms->drop_indicator->node,
+				ms->grid_origin_x + ms->drag_insert_after * cell_step_x + ms->cell_w,
+				ms->grid_origin_y + ms->drag_target_row * cell_step_y);
+			drawroundedrect(ms->drop_indicator, 0, 0,
+				spacing, ms->cell_h, ind_between);
+		}
+	} else {
+		/* Regular cell indicator */
+		wlr_scene_node_set_position(&ms->drop_indicator->node,
+			ms->grid_origin_x + ms->drag_target_col * cell_step_x,
+			ms->grid_origin_y + ms->drag_target_row * cell_step_y);
+		drawroundedrect(ms->drop_indicator, 0, 0,
+			ms->cell_w, ms->cell_h, ind_color);
+	}
+
+	wlr_scene_node_set_enabled(&ms->drop_indicator->node, 1);
+}
+
 void
 monitor_setup_handle_motion(Monitor *m, int gx, int gy)
 {
@@ -1074,8 +1165,8 @@ monitor_setup_handle_motion(Monitor *m, int gx, int gy)
 	lx = gx - ms->x;
 	ly = gy - ms->y;
 
-	/* Update context menu hover */
-	if (ms->ctx_visible) {
+	/* Update context menu hover (only when not dragging) */
+	if (ms->ctx_visible && ms->dragging < 0) {
 		int item_h = statusfont.height + (ms->ctx_submenu == 0 ? 12 : 10);
 		int old_hover = ms->ctx_hover_item;
 		if (lx >= ms->ctx_x && lx < ms->ctx_x + ms->ctx_w &&
@@ -1088,79 +1179,187 @@ monitor_setup_handle_motion(Monitor *m, int gx, int gy)
 			monitor_setup_render(m);
 	}
 
-	if (ms->dragging >= 0 && ms->dragging < ms->entry_count) {
+	if (ms->dragging < 0 || ms->dragging >= ms->entry_count)
+		return;
+
+	{
 		SetupMonitorEntry *e = &ms->entries[ms->dragging];
-		int grid_changed = 0;
+		int di = ms->dragging;
+		int spacing = 20;
+		int cell_step_x = ms->cell_w + spacing;
+		int cell_step_y = ms->cell_h + spacing;
+		float drag_cx, drag_cy, rel_x, rel_y, in_cell_x, in_cell_y;
+		int slot_col, slot_row;
+		int new_target_col, new_target_row, new_insert_dir, new_insert_after;
+		int found, in_v_gap, in_h_gap;
 
 		/* Follow cursor — instant, no scene rebuild */
 		e->anim_x = (float)(lx - ms->drag_offset_x);
 		e->anim_y = (float)(ly - ms->drag_offset_y);
 		e->target_x = e->anim_x;
 		e->target_y = e->anim_y;
-
-		/* Just reposition the dragged box — this is the fast path */
 		if (e->box_tree)
 			wlr_scene_node_set_position(&e->box_tree->node,
 				(int)e->anim_x, (int)e->anim_y);
 
-		/* Determine which grid cell the drag center is over */
-		float drag_cx = e->anim_x + e->anim_w / 2.0f;
-		float drag_cy = e->anim_y + e->anim_h / 2.0f;
+		/* Cursor center in popup-local coords */
+		drag_cx = e->anim_x + e->anim_w / 2.0f;
+		drag_cy = e->anim_y + e->anim_h / 2.0f;
 
-		int cell_step_x = ms->cell_w + 20; /* spacing = 20 */
-		int cell_step_y = ms->cell_h + 20;
+		/* Grid-relative position */
+		rel_x = drag_cx - (float)ms->grid_origin_x;
+		rel_y = drag_cy - (float)ms->grid_origin_y;
 
-		int hover_col = (int)(drag_cx - ms->grid_origin_x + cell_step_x / 2) / cell_step_x;
-		int hover_row = (int)(drag_cy - ms->grid_origin_y + cell_step_y / 2) / cell_step_y;
+		/* Which cell step are we in? */
+		slot_col = (int)floorf(rel_x / (float)cell_step_x);
+		slot_row = (int)floorf(rel_y / (float)cell_step_y);
+		in_cell_x = rel_x - slot_col * (float)cell_step_x;
+		in_cell_y = rel_y - slot_row * (float)cell_step_y;
 
-		if (hover_col < 0) hover_col = 0;
-		if (hover_row < 0) hover_row = 0;
+		/* Are we in the spacing gap area? */
+		in_v_gap = (in_cell_y > (float)ms->cell_h &&
+			    in_cell_y < (float)cell_step_y);
+		in_h_gap = (in_cell_x > (float)ms->cell_w &&
+			    in_cell_x < (float)cell_step_x);
 
-		/* Only swap/move if we're over a different cell */
-		if (hover_col != e->grid_col || hover_row != e->grid_row) {
-			int target_idx = entry_at_grid(ms, hover_col, hover_row);
-			if (target_idx >= 0 && target_idx != ms->dragging) {
-				/* Swap grid positions */
-				SetupMonitorEntry *other = &ms->entries[target_idx];
-				int tmp_col = e->grid_col, tmp_row = e->grid_row;
-				e->grid_col = other->grid_col;
-				e->grid_row = other->grid_row;
-				other->grid_col = tmp_col;
-				other->grid_row = tmp_row;
-				grid_changed = 1;
-			} else if (target_idx < 0) {
-				/* Empty cell — move there if adjacent to existing monitors */
-				if (cell_adjacent_to_occupied(ms, hover_col, hover_row) ||
-				    ms->entry_count == 1) {
-					e->grid_col = hover_col;
-					e->grid_row = hover_row;
-					grid_changed = 1;
+		new_target_col = ms->drag_target_col;
+		new_target_row = ms->drag_target_row;
+		new_insert_dir = -1;
+		new_insert_after = -1;
+		found = 0;
+
+		/* --- 1. Between insertion (cursor in gap between two occupied cells) --- */
+
+		/* Vertical gap only (not corner) */
+		if (in_v_gap && !in_h_gap) {
+			int check_col = slot_col;
+			int top_idx = entry_at_grid_excl(ms, check_col, slot_row, di);
+			int bot_idx = entry_at_grid_excl(ms, check_col, slot_row + 1, di);
+			if (top_idx >= 0 && bot_idx >= 0) {
+				new_target_col = check_col;
+				new_target_row = slot_row + 1;
+				new_insert_dir = 1; /* vertical */
+				new_insert_after = slot_row;
+				found = 1;
+			}
+		}
+
+		/* Horizontal gap only (not corner) */
+		if (!found && in_h_gap && !in_v_gap) {
+			int check_row = slot_row;
+			int left_idx = entry_at_grid_excl(ms, slot_col, check_row, di);
+			int right_idx = entry_at_grid_excl(ms, slot_col + 1, check_row, di);
+			if (left_idx >= 0 && right_idx >= 0) {
+				new_target_col = slot_col + 1;
+				new_target_row = check_row;
+				new_insert_dir = 0; /* horizontal */
+				new_insert_after = slot_col;
+				found = 1;
+			}
+		}
+
+		/* --- 2. Snap to nearest valid empty adjacent cell --- */
+		if (!found) {
+			int hover_col = (int)roundf(rel_x / (float)cell_step_x);
+			int hover_row = (int)roundf(rel_y / (float)cell_step_y);
+			int occ = entry_at_grid_excl(ms, hover_col, hover_row, di);
+
+			if (occ >= 0) {
+				/* Over an occupied cell: snap to adjacent empty cell
+				 * Priority based on approach direction */
+				float cell_cx = (float)ms->grid_origin_x +
+					hover_col * cell_step_x + ms->cell_w / 2.0f;
+				float cell_cy = (float)ms->grid_origin_y +
+					hover_row * cell_step_y + ms->cell_h / 2.0f;
+				float ddx = drag_cx - cell_cx;
+				float ddy = drag_cy - cell_cy;
+				int dc[4], dr[4];
+
+				if (fabsf(ddy) >= fabsf(ddx)) {
+					if (ddy <= 0) {
+						/* Approach from above */
+						dc[0]=0;  dr[0]=-1;
+						dc[1]=-1; dr[1]=0;
+						dc[2]=1;  dr[2]=0;
+						dc[3]=0;  dr[3]=1;
+					} else {
+						/* Approach from below */
+						dc[0]=0;  dr[0]=1;
+						dc[1]=-1; dr[1]=0;
+						dc[2]=1;  dr[2]=0;
+						dc[3]=0;  dr[3]=-1;
+					}
+				} else {
+					if (ddx <= 0) {
+						/* Approach from left */
+						dc[0]=-1; dr[0]=0;
+						dc[1]=0;  dr[1]=-1;
+						dc[2]=0;  dr[2]=1;
+						dc[3]=1;  dr[3]=0;
+					} else {
+						/* Approach from right */
+						dc[0]=1;  dr[0]=0;
+						dc[1]=0;  dr[1]=-1;
+						dc[2]=0;  dr[2]=1;
+						dc[3]=-1; dr[3]=0;
+					}
+				}
+
+				for (int d = 0; d < 4; d++) {
+					int tc = hover_col + dc[d];
+					int tr = hover_row + dr[d];
+					if (entry_at_grid_excl(ms, tc, tr, di) < 0) {
+						new_target_col = tc;
+						new_target_row = tr;
+						found = 1;
+						break;
+					}
+				}
+			} else if (cell_adjacent_to_occupied_excl(ms, hover_col,
+					hover_row, di)) {
+				/* Empty cell adjacent to occupied: valid target */
+				new_target_col = hover_col;
+				new_target_row = hover_row;
+				found = 1;
+			}
+		}
+
+		/* --- 3. Fallback: nearest valid cell by distance --- */
+		if (!found) {
+			float best_dist = 1e18f;
+			for (int r = -1; r <= ms->grid_rows; r++) {
+				for (int c = -1; c <= ms->grid_cols; c++) {
+					float cx, cy, dx, dy, dist;
+					if (entry_at_grid_excl(ms, c, r, di) >= 0)
+						continue;
+					if (!cell_adjacent_to_occupied_excl(ms, c, r, di))
+						continue;
+					cx = (float)ms->grid_origin_x +
+						c * cell_step_x + ms->cell_w / 2.0f;
+					cy = (float)ms->grid_origin_y +
+						r * cell_step_y + ms->cell_h / 2.0f;
+					dx = drag_cx - cx;
+					dy = drag_cy - cy;
+					dist = dx * dx + dy * dy;
+					if (dist < best_dist) {
+						best_dist = dist;
+						new_target_col = c;
+						new_target_row = r;
+						found = 1;
+					}
 				}
 			}
 		}
 
-		/* Only rebuild on grid change (swap/move) — not every motion pixel */
-		if (grid_changed) {
-			compute_box_layout(ms, ms->width, ms->height);
-			e->target_x = e->anim_x;
-			e->target_y = e->anim_y;
-
-			/* Re-render box content for all (labels may change) */
-			for (int i = 0; i < ms->entry_count; i++) {
-				render_box_content(ms, i);
-				if (ms->entries[i].box_tree)
-					wlr_scene_node_set_position(&ms->entries[i].box_tree->node,
-						(int)ms->entries[i].anim_x, (int)ms->entries[i].anim_y);
-			}
-
-			/* Raise dragged box to top after re-render */
-			if (e->box_tree)
-				wlr_scene_node_raise_to_top(&e->box_tree->node);
-
-			/* Update on-screen labels */
-			update_onscreen_labels(ms);
-
-			start_animation(m);
+		/* Update state if target changed */
+		if (found && (new_target_col != ms->drag_target_col ||
+			      new_target_row != ms->drag_target_row ||
+			      new_insert_dir != ms->drag_insert_dir)) {
+			ms->drag_target_col = new_target_col;
+			ms->drag_target_row = new_target_row;
+			ms->drag_insert_dir = new_insert_dir;
+			ms->drag_insert_after = new_insert_after;
+			update_drop_indicator(ms);
 		}
 	}
 }
@@ -1198,10 +1397,56 @@ monitor_setup_handle_button(Monitor *m, int gx, int gy, uint32_t button, uint32_
 	if (state == WL_POINTER_BUTTON_STATE_RELEASED) {
 		/* Mouse up — drop dragged entry */
 		if (ms->dragging >= 0) {
+			int di = ms->dragging;
+			SetupMonitorEntry *de = &ms->entries[di];
+
+			/* Restore all non-dragged entries to saved positions */
+			for (int i = 0; i < ms->entry_count; i++) {
+				if (i == di)
+					continue;
+				ms->entries[i].grid_col = ms->drag_saved_col[i];
+				ms->entries[i].grid_row = ms->drag_saved_row[i];
+			}
+
+			/* Handle between insertion (shift boxes to make room) */
+			if (ms->drag_insert_dir >= 0) {
+				if (ms->drag_insert_dir == 1) {
+					/* Vertical: shift rows > insert_after */
+					for (int i = 0; i < ms->entry_count; i++) {
+						if (i == di)
+							continue;
+						if (ms->entries[i].grid_row > ms->drag_insert_after)
+							ms->entries[i].grid_row++;
+					}
+				} else {
+					/* Horizontal: shift cols > insert_after */
+					for (int i = 0; i < ms->entry_count; i++) {
+						if (i == di)
+							continue;
+						if (ms->entries[i].grid_col > ms->drag_insert_after)
+							ms->entries[i].grid_col++;
+					}
+				}
+			}
+
+			/* Set dragged entry to target position */
+			de->grid_col = ms->drag_target_col;
+			de->grid_row = ms->drag_target_row;
+
+			/* Clean up drag state */
 			ms->dragging = -1;
+			ms->drag_insert_dir = -1;
+
+			/* Hide drop indicator */
+			if (ms->drop_indicator) {
+				wlr_scene_node_set_enabled(&ms->drop_indicator->node, 0);
+			}
+
+			/* Compact grid and recompute layout */
 			compact_grid(ms);
 			compute_box_layout(ms, ms->width, ms->height);
-			/* Re-render all box content (drag border removed, labels may change) */
+
+			/* Re-render all box content and animate */
 			for (int i = 0; i < ms->entry_count; i++) {
 				render_box_content(ms, i);
 				if (ms->entries[i].box_tree)
@@ -1369,6 +1614,26 @@ monitor_setup_handle_button(Monitor *m, int gx, int gy, uint32_t button, uint32_
 			ms->dragging = idx;
 			ms->drag_offset_x = lx - (int)ms->entries[idx].anim_x;
 			ms->drag_offset_y = ly - (int)ms->entries[idx].anim_y;
+			ms->drag_orig_col = ms->entries[idx].grid_col;
+			ms->drag_orig_row = ms->entries[idx].grid_row;
+			ms->drag_target_col = ms->entries[idx].grid_col;
+			ms->drag_target_row = ms->entries[idx].grid_row;
+			ms->drag_insert_dir = -1;
+			ms->drag_insert_after = -1;
+			/* Save all grid positions at drag start */
+			for (int k = 0; k < ms->entry_count; k++) {
+				ms->drag_saved_col[k] = ms->entries[k].grid_col;
+				ms->drag_saved_row[k] = ms->entries[k].grid_row;
+			}
+			/* Create drop indicator */
+			if (!ms->drop_indicator)
+				ms->drop_indicator = wlr_scene_tree_create(ms->tree);
+			if (ms->drop_indicator) {
+				wlr_scene_node_set_enabled(&ms->drop_indicator->node, 1);
+				update_drop_indicator(ms);
+			}
+			/* Close context menu if open */
+			ms->ctx_visible = 0;
 			/* Re-render with drag border color and raise to top */
 			render_box_content(ms, idx);
 			if (ms->entries[idx].box_tree)

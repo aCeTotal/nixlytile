@@ -963,6 +963,13 @@ typedef struct {
 	/* Drag state */
 	int dragging;           /* index of dragged entry, or -1 */
 	int drag_offset_x, drag_offset_y;
+	int drag_orig_col, drag_orig_row;     /* original grid pos of dragged box */
+	int drag_target_col, drag_target_row; /* current snap target */
+	int drag_insert_dir;    /* -1=no insert, 0=horiz gap, 1=vert gap */
+	int drag_insert_after;  /* row/col after which to insert */
+	int drag_saved_col[MAX_SETUP_MONITORS]; /* grid cols at drag start */
+	int drag_saved_row[MAX_SETUP_MONITORS]; /* grid rows at drag start */
+	struct wlr_scene_tree *drop_indicator;
 	/* Animation timer */
 	struct wl_event_source *anim_timer;
 	int animating;
@@ -2680,6 +2687,7 @@ void config_set_emulator(const char *value);
 void retro_dpad_repeat_start(Monitor *m, int button);
 void retro_dpad_repeat_stop(void);
 void detect_gpus(void);
+void filter_igpu_without_display(void);
 void dgpu_assert_power_on(GpuInfo *gpu);
 void dgpu_power_watchdog_start(void);
 int should_use_dgpu(const char *cmd);

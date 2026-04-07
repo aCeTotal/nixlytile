@@ -3841,6 +3841,8 @@ check_module_param(const char *module_name, const char *param, const char *expec
 	return strcmp(val, expected) == 0;
 }
 
+static int gpu_has_connected_display(int card_index);
+
 void
 detect_gpus(void)
 {
@@ -4132,16 +4134,18 @@ detect_gpus(void)
 								"NVIDIA: driver %s is too old for explicit sync. "
 								"Xwayland WILL flicker. Upgrade to 555+ for proper "
 								"Wayland/Xwayland support.", nv_ver);
-							/* Older Nvidia drivers have atomic modesetting bugs */
-							setenv("WLR_DRM_NO_ATOMIC", "1", 0);
-							/* Old drivers have incomplete modifier support —
-							 * many modifiers reported as "supported" cause
-							 * buffer allocation/import failures.  Driver 555+
-							 * handles modifiers correctly and NEEDS them:
-							 * without modifier negotiation GBM allocates tiled
-							 * buffers but reports modifier=INVALID, causing
-							 * KMS import to fail on all paths. */
-							setenv("WLR_DRM_NO_MODIFIERS", "1", 0);
+							/* Only force legacy DRM when NVIDIA actually
+							 * serves displays.  When iGPU handles all
+							 * displays these would degrade the iGPU path. */
+							if (gpu_has_connected_display(dgpu->card_index) ||
+							    integrated_gpu_idx < 0) {
+								setenv("WLR_DRM_NO_ATOMIC", "1", 0);
+								setenv("WLR_DRM_NO_MODIFIERS", "1", 0);
+							} else {
+								wlr_log(WLR_INFO,
+									"NVIDIA: skipping WLR_DRM_NO_ATOMIC/NO_MODIFIERS — "
+									"iGPU handles displays, no NVIDIA DRM involvement");
+							}
 						}
 					}
 				} else if (strcmp(dgpu->driver, "nvidia") == 0) {
@@ -4287,6 +4291,115 @@ detect_gpus(void)
 		default:
 			break;
 		}
+	}
+}
+
+/*
+ * Check if a DRM card has any connected display (connector status).
+ * Scans /sys/class/drm/cardX-* entries for "connected" status.
+ */
+static int
+gpu_has_connected_display(int card_index)
+{
+	DIR *drm_dir;
+	struct dirent *ent;
+	char prefix[16];
+
+	snprintf(prefix, sizeof(prefix), "card%d-", card_index);
+
+	drm_dir = opendir("/sys/class/drm");
+	if (!drm_dir)
+		return 0;
+
+	while ((ent = readdir(drm_dir)) != NULL) {
+		char status_path[300], status[32];
+		FILE *f;
+
+		if (strncmp(ent->d_name, prefix, strlen(prefix)) != 0)
+			continue;
+
+		snprintf(status_path, sizeof(status_path),
+			"/sys/class/drm/%s/status", ent->d_name);
+		f = fopen(status_path, "r");
+		if (!f)
+			continue;
+		if (fgets(status, sizeof(status), f)) {
+			char *nl = strchr(status, '\n');
+			if (nl) *nl = '\0';
+			if (strcmp(status, "connected") == 0) {
+				fclose(f);
+				closedir(drm_dir);
+				return 1;
+			}
+		}
+		fclose(f);
+	}
+	closedir(drm_dir);
+	return 0;
+}
+
+/*
+ * Exclude integrated GPUs from wlroots when they have no connected display.
+ *
+ * Sets WLR_DRM_DEVICES to include only GPUs that either:
+ *   - are discrete (dGPU), or
+ *   - have at least one connected display
+ *
+ * Must be called after detect_gpus() and before wlr_backend_autocreate().
+ * When iGPU has a display connected (e.g. motherboard output), it is kept
+ * and gets full control — no conflicts with dGPU.
+ */
+void
+filter_igpu_without_display(void)
+{
+	int i;
+	int gpus_with_display = 0;
+
+	if (detected_gpu_count <= 1)
+		return;
+
+	/* Don't override explicit user setting */
+	if (getenv("WLR_DRM_DEVICES"))
+		return;
+
+	/* Count GPUs that have at least one connected display */
+	for (i = 0; i < detected_gpu_count; i++) {
+		if (gpu_has_connected_display(detected_gpus[i].card_index))
+			gpus_with_display++;
+	}
+
+	/* If all or none have displays, don't filter */
+	if (gpus_with_display == 0 || gpus_with_display == detected_gpu_count)
+		return;
+
+	/* Build WLR_DRM_DEVICES including only GPUs with connected displays.
+	 * This ensures:
+	 *   - iGPU without display → excluded (dGPU handles all screens)
+	 *   - dGPU without display → excluded (iGPU has full control, no conflicts)
+	 *   - Both with displays   → no filtering (handled above) */
+	char devices[512];
+	devices[0] = '\0';
+
+	for (i = 0; i < detected_gpu_count; i++) {
+		if (!gpu_has_connected_display(detected_gpus[i].card_index)) {
+			wlr_log(WLR_INFO,
+				"GPU card%d (%s, %s) has no connected display — "
+				"excluding from wlroots backend",
+				detected_gpus[i].card_index, detected_gpus[i].driver,
+				detected_gpus[i].is_discrete ? "dGPU" : "iGPU");
+			continue;
+		}
+
+		if (devices[0] != '\0')
+			strncat(devices, ":", sizeof(devices) - strlen(devices) - 1);
+		strncat(devices, detected_gpus[i].card_path,
+			sizeof(devices) - strlen(devices) - 1);
+	}
+
+	if (devices[0] != '\0') {
+		setenv("WLR_DRM_DEVICES", devices, 1);
+		wlr_log(WLR_INFO, "WLR_DRM_DEVICES=%s (GPUs without display excluded)",
+			devices);
 	}
 }
 

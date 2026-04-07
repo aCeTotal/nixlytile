@@ -2817,7 +2817,6 @@ setup(void)
 	diag_timer = wl_event_loop_add_timer(event_loop, diag_timer_cb, NULL);
 	fan_thermal_start();
 	netlink_monitor_setup();
-	dgpu_power_watchdog_start();
 	tray_init();
 	fcft_initialized = fcft_init(FCFT_LOG_COLORIZE_NEVER, 0, FCFT_LOG_CLASS_ERROR);
 	if (!fcft_initialized)
@@ -2831,6 +2830,13 @@ setup(void)
 			sizeof(backlight_brightness_path),
 			backlight_max_path, sizeof(backlight_max_path));
 	bluetooth_available = findbluetoothdevice();
+
+	/* Detect GPUs early — env vars (WLR_DRM_NO_ATOMIC, GBM_BACKEND etc.)
+	 * and WLR_DRM_DEVICES filtering must happen before backend creation.
+	 * Also sets up dGPU power management (D3cold prevention). */
+	detect_gpus();
+	filter_igpu_without_display();
+	dgpu_power_watchdog_start();
 
 	/* The backend is a wlroots feature which abstracts the underlying input and
 	 * output hardware. The autocreate option will choose the most suitable
@@ -3975,9 +3981,6 @@ main(int argc, char *argv[])
 	load_monitors_conf(); /* Load monitor layout from dedicated config first */
 	load_config();
 	init_keybindings();
-
-	/* Detect available GPUs for PRIME offloading */
-	detect_gpus();
 
 	/* NOTE: Do NOT call set_dgpu_env() here in the compositor process.
 	 * It sets DRI_PRIME, __GLX_VENDOR_LIBRARY_NAME, etc. which are
