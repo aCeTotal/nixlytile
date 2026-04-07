@@ -86,6 +86,10 @@ clear_tree_children(struct wlr_scene_tree *tree, struct wlr_scene_tree *keep)
 	}
 }
 
+/* ── forward declarations ──────────────────────────────────────────── */
+static void render_box_content(MonitorSetup *ms, int idx);
+static int  grid_label_number(MonitorSetup *ms, int entry_idx);
+
 /* ── animation ─────────────────────────────────────────────────────── */
 
 static int
@@ -107,6 +111,7 @@ monitor_setup_animate_cb(void *data)
 
 	for (int i = 0; i < ms->entry_count; i++) {
 		SetupMonitorEntry *e = &ms->entries[i];
+		int size_changed = 0;
 
 		/* Skip dragged entry — it follows cursor directly */
 		if (ms->dragging == i)
@@ -114,9 +119,6 @@ monitor_setup_animate_cb(void *data)
 
 		float dx = e->target_x - e->anim_x;
 		float dy = e->target_y - e->anim_y;
-		float dw = e->target_w - e->anim_w;
-		float dh = e->target_h - e->anim_h;
-		float dr = e->target_rot - e->anim_rot;
 
 		if (fabsf(dx) > 0.5f) { e->anim_x += dx * ease; still_moving = 1; }
 		else e->anim_x = e->target_x;
@@ -124,17 +126,23 @@ monitor_setup_animate_cb(void *data)
 		if (fabsf(dy) > 0.5f) { e->anim_y += dy * ease; still_moving = 1; }
 		else e->anim_y = e->target_y;
 
-		if (fabsf(dw) > 0.5f) { e->anim_w += dw * ease; still_moving = 1; }
-		else e->anim_w = e->target_w;
+		/* Snap size and rotation immediately */
+		if (fabsf(e->anim_w - e->target_w) > 0.5f ||
+		    fabsf(e->anim_h - e->target_h) > 0.5f)
+			size_changed = 1;
+		e->anim_w = e->target_w;
+		e->anim_h = e->target_h;
+		e->anim_rot = e->target_rot;
 
-		if (fabsf(dh) > 0.5f) { e->anim_h += dh * ease; still_moving = 1; }
-		else e->anim_h = e->target_h;
+		/* Re-render content if size changed (rotation) */
+		if (size_changed)
+			render_box_content(ms, i);
 
-		if (fabsf(dr) > 0.5f) { e->anim_rot += dr * ease; still_moving = 1; }
-		else e->anim_rot = e->target_rot;
+		/* Just reposition — no full scene rebuild */
+		if (e->box_tree)
+			wlr_scene_node_set_position(&e->box_tree->node,
+				(int)e->anim_x, (int)e->anim_y);
 	}
-
-	monitor_setup_render(m);
 
 	if (still_moving) {
 		wl_event_source_timer_update(ms->anim_timer, 16);
@@ -159,6 +167,104 @@ start_animation(Monitor *m)
 			monitor_setup_animate_cb, m);
 	if (ms->anim_timer)
 		wl_event_source_timer_update(ms->anim_timer, 16);
+}
+
+/* ── per-box rendering ─────────────────────────────────────────────── */
+
+static void
+render_box_content(MonitorSetup *ms, int idx)
+{
+	SetupMonitorEntry *e = &ms->entries[idx];
+	int bw, bh, tw1, tw2, rw, num;
+	char line1[128], line2[64], res[64];
+	float box_bg[4] = {0.18f, 0.20f, 0.22f, 1.0f};
+	float box_border[4] = {0.4f, 0.5f, 0.7f, 1.0f};
+	float box_drag_border[4] = {0.5f, 0.7f, 1.0f, 1.0f};
+	float text_col[4] = {0.9f, 0.9f, 0.9f, 1.0f};
+	float sub_col[4] = {0.6f, 0.6f, 0.65f, 1.0f};
+	float dim_col[4] = {0.5f, 0.5f, 0.55f, 1.0f};
+	float *bord;
+
+	if (!e->box_tree)
+		return;
+
+	clear_tree_children(e->box_tree, NULL);
+
+	bw = (int)e->target_w;
+	bh = (int)e->target_h;
+	if (bw <= 0 || bh <= 0)
+		return;
+
+	bord = (ms->dragging == idx) ? box_drag_border : box_border;
+
+	/* Box background + border (all at 0,0 relative to box_tree) */
+	drawroundedrect(e->box_tree, 0, 0, bw, bh, box_bg);
+	draw_border(e->box_tree, 0, 0, bw, bh, 2, bord);
+
+	/* Screen N (XXHz) */
+	num = grid_label_number(ms, idx);
+	snprintf(line1, sizeof(line1), "Screen %d (%.0fHz)", num, e->refresh);
+	tw1 = text_width(line1);
+	if (tw1 < bw - 10) {
+		render_text_at(e->box_tree, line1,
+			(bw - tw1) / 2,
+			bh / 2 - statusfont.height / 2 + statusfont.ascent - statusfont.height / 2,
+			text_col);
+	}
+
+	/* Connector name */
+	snprintf(line2, sizeof(line2), "%s", e->name);
+	tw2 = text_width(line2);
+	if (tw2 < bw - 10) {
+		render_text_at(e->box_tree, line2,
+			(bw - tw2) / 2,
+			bh / 2 + statusfont.height / 2 + statusfont.ascent - statusfont.height / 2 + 4,
+			sub_col);
+	}
+
+	/* Resolution/transform indicator */
+	if (e->transform == WL_OUTPUT_TRANSFORM_90 ||
+	    e->transform == WL_OUTPUT_TRANSFORM_270)
+		snprintf(res, sizeof(res), "%dx%d (R)", e->height, e->width);
+	else
+		snprintf(res, sizeof(res), "%dx%d", e->width, e->height);
+	rw = text_width(res);
+	if (rw < bw - 10) {
+		render_text_at(e->box_tree, res,
+			(bw - rw) / 2,
+			bh - 8 - statusfont.descent,
+			dim_col);
+	}
+}
+
+static void
+update_onscreen_labels(MonitorSetup *ms)
+{
+	for (int i = 0; i < ms->entry_count; i++) {
+		Monitor *om;
+		wl_list_for_each(om, &mons, link) {
+			if (strcmp(om->wlr_output->name, ms->entries[i].name) == 0 &&
+			    ms->label_trees[i]) {
+				clear_tree_children(ms->label_trees[i], NULL);
+				char label[128];
+				int num = grid_label_number(ms, i);
+				snprintf(label, sizeof(label), "Screen %d (%.0fHz)",
+					num, ms->entries[i].refresh);
+				float label_bg[4] = {1.0f, 1.0f, 1.0f, 0.95f};
+				float label_fg[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+				int tw = text_width(label);
+				int tw2 = text_width(ms->entries[i].name);
+				int lw = (tw > tw2 ? tw : tw2) + 24;
+				int lh = statusfont.height * 2 + 20;
+				drawroundedrect(ms->label_trees[i], 0, 0, lw, lh, label_bg);
+				render_text_at(ms->label_trees[i], label,
+					12, 8 + statusfont.ascent, label_fg);
+				render_text_at(ms->label_trees[i], ms->entries[i].name,
+					12, 8 + statusfont.height + 4 + statusfont.ascent, label_fg);
+				break;
+			}
+		}
+	}
 }
 
 /* ── grid compaction ───────────────────────────────────────────────── */
@@ -464,6 +570,22 @@ monitor_setup_show(Monitor *m)
 		}
 	}
 
+	/* Ensure no two entries share the same grid cell */
+	for (int i = 0; i < ms->entry_count; i++) {
+		for (int j = i + 1; j < ms->entry_count; j++) {
+			if (ms->entries[i].grid_col == ms->entries[j].grid_col &&
+			    ms->entries[i].grid_row == ms->entries[j].grid_row) {
+				/* Duplicate — move j to next available column */
+				int mc = 0;
+				for (int k = 0; k < ms->entry_count; k++) {
+					if (ms->entries[k].grid_col > mc)
+						mc = ms->entries[k].grid_col;
+				}
+				ms->entries[j].grid_col = mc + 1;
+			}
+		}
+	}
+
 	compact_grid(ms);
 
 	/* Popup size: ~50% width, 70% height */
@@ -554,6 +676,10 @@ monitor_setup_hide(Monitor *m)
 		ms->animating = 0;
 	}
 
+	/* Null out box_tree pointers (they're children of ms->tree) */
+	for (int i = 0; i < MAX_SETUP_MONITORS; i++)
+		ms->entries[i].box_tree = NULL;
+
 	if (ms->tree)
 		wlr_scene_node_set_enabled(&ms->tree->node, 0);
 
@@ -583,15 +709,10 @@ monitor_setup_render(Monitor *m)
 {
 	MonitorSetup *ms;
 	int padding = 20;
-	int title_h = statusfont.height + 20;
 	float bg_col[4] = {0.12f, 0.12f, 0.14f, 0.95f};
 	float border_col[4] = {0.3f, 0.3f, 0.35f, 1.0f};
-	float box_bg[4] = {0.18f, 0.20f, 0.22f, 1.0f};
-	float box_border[4] = {0.4f, 0.5f, 0.7f, 1.0f};
-	float box_drag_border[4] = {0.5f, 0.7f, 1.0f, 1.0f};
 	float title_col[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 	float text_col[4] = {0.9f, 0.9f, 0.9f, 1.0f};
-	float sub_col[4] = {0.6f, 0.6f, 0.65f, 1.0f};
 	float apply_bg[4] = {0.2f, 0.5f, 0.3f, 1.0f};
 	float cancel_bg[4] = {0.4f, 0.2f, 0.2f, 1.0f};
 	float btn_text[4] = {1.0f, 1.0f, 1.0f, 1.0f};
@@ -609,6 +730,10 @@ monitor_setup_render(Monitor *m)
 		loadstatusfont();
 	if (!statusfont.font)
 		return;
+
+	/* Null out box_tree pointers — clear_tree_children will destroy them */
+	for (int i = 0; i < ms->entry_count; i++)
+		ms->entries[i].box_tree = NULL;
 
 	/* Clear previous */
 	clear_tree_children(ms->tree, ms->bg);
@@ -633,64 +758,21 @@ monitor_setup_render(Monitor *m)
 			(ms->width - tw) / 2, padding + statusfont.ascent, title_col);
 	}
 
-	/* Monitor boxes */
+	/* Monitor boxes — use persistent per-box subtrees */
 	for (int i = 0; i < ms->entry_count; i++) {
 		SetupMonitorEntry *e = &ms->entries[i];
-		int bx = (int)e->anim_x;
-		int by = (int)e->anim_y;
-		int bw = (int)e->anim_w;
-		int bh = (int)e->anim_h;
-		float *bord = (ms->dragging == i) ? box_drag_border : box_border;
-		char line1[128], line2[64];
-		int tw1, tw2;
-
-		if (bw <= 0 || bh <= 0)
-			continue;
-
-		/* Box background */
-		drawroundedrect(ms->tree, bx, by, bw, bh, box_bg);
-		draw_border(ms->tree, bx, by, bw, bh, 2, bord);
-
-		/* Screen N (XXHz) */
-		int num = grid_label_number(ms, i);
-		snprintf(line1, sizeof(line1), "Screen %d (%.0fHz)",
-			num, e->refresh);
-		tw1 = text_width(line1);
-		if (tw1 < bw - 10) {
-			render_text_at(ms->tree, line1,
-				bx + (bw - tw1) / 2,
-				by + bh / 2 - statusfont.height / 2 + statusfont.ascent - statusfont.height / 2,
-				text_col);
-		}
-
-		/* Connector name */
-		snprintf(line2, sizeof(line2), "%s", e->name);
-		tw2 = text_width(line2);
-		if (tw2 < bw - 10) {
-			render_text_at(ms->tree, line2,
-				bx + (bw - tw2) / 2,
-				by + bh / 2 + statusfont.height / 2 + statusfont.ascent - statusfont.height / 2 + 4,
-				sub_col);
-		}
-
-		/* Resolution/transform indicator */
-		{
-			char res[64];
-			if (e->transform == WL_OUTPUT_TRANSFORM_90 ||
-			    e->transform == WL_OUTPUT_TRANSFORM_270)
-				snprintf(res, sizeof(res), "%dx%d (R)", e->height, e->width);
-			else
-				snprintf(res, sizeof(res), "%dx%d", e->width, e->height);
-			int rw = text_width(res);
-			if (rw < bw - 10) {
-				float dim_col[4] = {0.5f, 0.5f, 0.55f, 1.0f};
-				render_text_at(ms->tree, res,
-					bx + (bw - rw) / 2,
-					by + bh - 8 - statusfont.descent,
-					dim_col);
-			}
+		e->box_tree = wlr_scene_tree_create(ms->tree);
+		if (e->box_tree) {
+			render_box_content(ms, i);
+			wlr_scene_node_set_position(&e->box_tree->node,
+				(int)e->anim_x, (int)e->anim_y);
 		}
 	}
+
+	/* Raise dragged box to top */
+	if (ms->dragging >= 0 && ms->dragging < ms->entry_count &&
+	    ms->entries[ms->dragging].box_tree)
+		wlr_scene_node_raise_to_top(&ms->entries[ms->dragging].box_tree->node);
 
 	/* Apply button */
 	{
@@ -1008,12 +1090,18 @@ monitor_setup_handle_motion(Monitor *m, int gx, int gy)
 
 	if (ms->dragging >= 0 && ms->dragging < ms->entry_count) {
 		SetupMonitorEntry *e = &ms->entries[ms->dragging];
+		int grid_changed = 0;
 
-		/* Follow cursor */
+		/* Follow cursor — instant, no scene rebuild */
 		e->anim_x = (float)(lx - ms->drag_offset_x);
 		e->anim_y = (float)(ly - ms->drag_offset_y);
 		e->target_x = e->anim_x;
 		e->target_y = e->anim_y;
+
+		/* Just reposition the dragged box — this is the fast path */
+		if (e->box_tree)
+			wlr_scene_node_set_position(&e->box_tree->node,
+				(int)e->anim_x, (int)e->anim_y);
 
 		/* Determine which grid cell the drag center is over */
 		float drag_cx = e->anim_x + e->anim_w / 2.0f;
@@ -1039,52 +1127,41 @@ monitor_setup_handle_motion(Monitor *m, int gx, int gy)
 				e->grid_row = other->grid_row;
 				other->grid_col = tmp_col;
 				other->grid_row = tmp_row;
-				compute_box_layout(ms, ms->width, ms->height);
-				e->target_x = e->anim_x;
-				e->target_y = e->anim_y;
-				start_animation(m);
+				grid_changed = 1;
 			} else if (target_idx < 0) {
 				/* Empty cell — move there if adjacent to existing monitors */
 				if (cell_adjacent_to_occupied(ms, hover_col, hover_row) ||
 				    ms->entry_count == 1) {
 					e->grid_col = hover_col;
 					e->grid_row = hover_row;
-					compute_box_layout(ms, ms->width, ms->height);
-					e->target_x = e->anim_x;
-					e->target_y = e->anim_y;
-					start_animation(m);
+					grid_changed = 1;
 				}
 			}
 		}
 
-		/* Update on-screen labels */
-		for (int i = 0; i < ms->entry_count; i++) {
-			Monitor *om;
-			wl_list_for_each(om, &mons, link) {
-				if (strcmp(om->wlr_output->name, ms->entries[i].name) == 0 &&
-				    ms->label_trees[i]) {
-					clear_tree_children(ms->label_trees[i], NULL);
-					char label[128];
-					int num = grid_label_number(ms, i);
-					snprintf(label, sizeof(label), "Screen %d (%.0fHz)",
-						num, ms->entries[i].refresh);
-					float label_bg[4] = {1.0f, 1.0f, 1.0f, 0.95f};
-					float label_fg[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-					int tw = text_width(label);
-					int tw2 = text_width(ms->entries[i].name);
-					int lw = (tw > tw2 ? tw : tw2) + 24;
-					int lh = statusfont.height * 2 + 20;
-					drawroundedrect(ms->label_trees[i], 0, 0, lw, lh, label_bg);
-					render_text_at(ms->label_trees[i], label,
-						12, 8 + statusfont.ascent, label_fg);
-					render_text_at(ms->label_trees[i], ms->entries[i].name,
-						12, 8 + statusfont.height + 4 + statusfont.ascent, label_fg);
-					break;
-				}
-			}
-		}
+		/* Only rebuild on grid change (swap/move) — not every motion pixel */
+		if (grid_changed) {
+			compute_box_layout(ms, ms->width, ms->height);
+			e->target_x = e->anim_x;
+			e->target_y = e->anim_y;
 
-		monitor_setup_render(m);
+			/* Re-render box content for all (labels may change) */
+			for (int i = 0; i < ms->entry_count; i++) {
+				render_box_content(ms, i);
+				if (ms->entries[i].box_tree)
+					wlr_scene_node_set_position(&ms->entries[i].box_tree->node,
+						(int)ms->entries[i].anim_x, (int)ms->entries[i].anim_y);
+			}
+
+			/* Raise dragged box to top after re-render */
+			if (e->box_tree)
+				wlr_scene_node_raise_to_top(&e->box_tree->node);
+
+			/* Update on-screen labels */
+			update_onscreen_labels(ms);
+
+			start_animation(m);
+		}
 	}
 }
 
@@ -1124,6 +1201,14 @@ monitor_setup_handle_button(Monitor *m, int gx, int gy, uint32_t button, uint32_
 			ms->dragging = -1;
 			compact_grid(ms);
 			compute_box_layout(ms, ms->width, ms->height);
+			/* Re-render all box content (drag border removed, labels may change) */
+			for (int i = 0; i < ms->entry_count; i++) {
+				render_box_content(ms, i);
+				if (ms->entries[i].box_tree)
+					wlr_scene_node_set_position(&ms->entries[i].box_tree->node,
+						(int)ms->entries[i].anim_x, (int)ms->entries[i].anim_y);
+			}
+			update_onscreen_labels(ms);
 			start_animation(m);
 		}
 		return 1;
@@ -1284,6 +1369,10 @@ monitor_setup_handle_button(Monitor *m, int gx, int gy, uint32_t button, uint32_
 			ms->dragging = idx;
 			ms->drag_offset_x = lx - (int)ms->entries[idx].anim_x;
 			ms->drag_offset_y = ly - (int)ms->entries[idx].anim_y;
+			/* Re-render with drag border color and raise to top */
+			render_box_content(ms, idx);
+			if (ms->entries[idx].box_tree)
+				wlr_scene_node_raise_to_top(&ms->entries[idx].box_tree->node);
 			return 1;
 		}
 	} else if (button == BTN_RIGHT) {

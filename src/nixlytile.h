@@ -944,6 +944,8 @@ typedef struct {
 	float target_rot;       /* target rotation (0 or 90) */
 	/* Box geometry in popup (computed) */
 	int box_x, box_y, box_w, box_h;
+	/* Persistent scene subtree for this box (used for instant drag) */
+	struct wlr_scene_tree *box_tree;
 } SetupMonitorEntry;
 
 typedef struct {
