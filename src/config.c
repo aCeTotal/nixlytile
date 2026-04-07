@@ -557,7 +557,8 @@ int config_parse_monitor(const char *line)
 	mon = &runtime_monitors[runtime_monitor_count];
 	memset(mon, 0, sizeof(*mon));
 	strncpy(mon->name, name, sizeof(mon->name) - 1);
-	mon->position = config_parse_monitor_position(pos_str);
+	mon->grid_col = -1;
+	mon->grid_row = -1;
 	mon->width = 0;      /* 0 = auto */
 	mon->height = 0;
 	mon->refresh = 0;    /* 0 = auto */
@@ -566,6 +567,18 @@ int config_parse_monitor(const char *line)
 	mon->nmaster = 1;
 	mon->enabled = 1;
 	mon->transform = WL_OUTPUT_TRANSFORM_NORMAL;
+
+	/* Check if position string is grid=X,Y format */
+	{
+		int gc, gr;
+		if (sscanf(pos_str, "grid=%d,%d", &gc, &gr) == 2) {
+			mon->grid_col = gc;
+			mon->grid_row = gr;
+			mon->position = MON_POS_AUTO;
+		} else {
+			mon->position = config_parse_monitor_position(pos_str);
+		}
+	}
 
 	if (mon->position == MON_POS_MASTER)
 		monitor_master_set = 1;
@@ -1208,7 +1221,16 @@ reload_monitors_conf(void)
 		}
 	}
 
-	/* Apply: reconfigure all connected monitors */
+	/* Check if any config uses grid format */
+	int has_grid = 0;
+	for (int i = 0; i < runtime_monitor_count; i++) {
+		if (runtime_monitors[i].grid_col >= 0) {
+			has_grid = 1;
+			break;
+		}
+	}
+
+	/* Apply mode + transform to all configured monitors */
 	wl_list_for_each(m, &mons, link) {
 		RuntimeMonitorConfig *cfg;
 
@@ -1218,20 +1240,81 @@ reload_monitors_conf(void)
 		if (!cfg)
 			continue;
 
-		/* Apply transform if changed */
-		if ((int)m->wlr_output->transform != cfg->transform) {
-			struct wlr_output_state st;
-			wlr_output_state_init(&st);
-			wlr_output_state_set_transform(&st, cfg->transform);
-			wlr_output_commit_state(m->wlr_output, &st);
-			wlr_output_state_finish(&st);
+		struct wlr_output_state st;
+		wlr_output_state_init(&st);
+
+		/* Apply resolution/refresh if specified */
+		if (cfg->width > 0 && cfg->height > 0) {
+			struct wlr_output_mode *mode = find_mode(
+				m->wlr_output, cfg->width, cfg->height, cfg->refresh);
+			if (mode)
+				wlr_output_state_set_mode(&st, mode);
 		}
+
+		/* Apply transform */
+		if ((int)m->wlr_output->transform != cfg->transform)
+			wlr_output_state_set_transform(&st, cfg->transform);
+
+		wlr_output_commit_state(m->wlr_output, &st);
+		wlr_output_state_finish(&st);
 	}
 
 	/* Recalculate positions and re-layout */
-	{
+	if (has_grid) {
+		/* Grid-based layout: convert grid to pixel coordinates */
+		int max_col = 0, max_row = 0;
+		for (int i = 0; i < runtime_monitor_count; i++) {
+			if (runtime_monitors[i].grid_col > max_col)
+				max_col = runtime_monitors[i].grid_col;
+			if (runtime_monitors[i].grid_row > max_row)
+				max_row = runtime_monitors[i].grid_row;
+		}
+		int grid_cols = max_col + 1;
+		int grid_rows = max_row + 1;
+
+		int col_width[MAX_MONITORS] = {0};
+		int row_height[MAX_MONITORS] = {0};
+
+		/* Determine column widths and row heights */
+		wl_list_for_each(m, &mons, link) {
+			RuntimeMonitorConfig *cfg;
+			int ew, eh;
+
+			if (!m->wlr_output->enabled || m->is_mirror)
+				continue;
+			cfg = find_monitor_config(m->wlr_output->name);
+			if (!cfg || cfg->grid_col < 0)
+				continue;
+
+			monitor_effective_size(m, &ew, &eh);
+			if (ew > col_width[cfg->grid_col])
+				col_width[cfg->grid_col] = ew;
+			if (eh > row_height[cfg->grid_row])
+				row_height[cfg->grid_row] = eh;
+		}
+
+		int pixel_x[MAX_MONITORS] = {0};
+		int pixel_y[MAX_MONITORS] = {0};
+		for (int c = 1; c < grid_cols; c++)
+			pixel_x[c] = pixel_x[c - 1] + col_width[c - 1];
+		for (int r = 1; r < grid_rows; r++)
+			pixel_y[r] = pixel_y[r - 1] + row_height[r - 1];
+
+		wl_list_for_each(m, &mons, link) {
+			RuntimeMonitorConfig *cfg;
+
+			if (!m->wlr_output->enabled || m->is_mirror)
+				continue;
+			cfg = find_monitor_config(m->wlr_output->name);
+			if (!cfg || cfg->grid_col < 0)
+				continue;
+
+			wlr_output_layout_add(output_layout, m->wlr_output,
+				pixel_x[cfg->grid_col], pixel_y[cfg->grid_row]);
+		}
+	} else {
+		/* Legacy position-based layout */
 		int pos_x = 0;
-		/* Sort monitors by config position: master first, then right */
 		Monitor *master_mon = NULL;
 		wl_list_for_each(m, &mons, link) {
 			RuntimeMonitorConfig *cfg = find_monitor_config(m->wlr_output->name);
@@ -1241,7 +1324,6 @@ reload_monitors_conf(void)
 			}
 		}
 
-		/* Place master at 0,0 */
 		if (master_mon) {
 			int ew, eh;
 			monitor_effective_size(master_mon, &ew, &eh);
@@ -1249,7 +1331,6 @@ reload_monitors_conf(void)
 			pos_x = ew;
 		}
 
-		/* Place right monitors */
 		wl_list_for_each(m, &mons, link) {
 			RuntimeMonitorConfig *cfg;
 			int ew, eh;

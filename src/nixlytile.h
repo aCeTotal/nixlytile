@@ -414,6 +414,7 @@ typedef struct {
 	int nmaster;
 	int enabled;
 	int transform;
+	int grid_col, grid_row; /* 2D grid pos (-1 = use position enum) */
 } RuntimeMonitorConfig;
 
 extern RuntimeMonitorConfig runtime_monitors[MAX_MONITORS];
@@ -918,13 +919,22 @@ typedef struct {
 
 /* ── monitor setup popup ──────────────────────────────────────────── */
 #define MAX_SETUP_MONITORS 8
+#define MAX_SETUP_MODES 64
+
+typedef struct {
+	int width, height, refresh_mhz; /* refresh in millihertz */
+} SetupMode;
 
 typedef struct {
 	char name[64];          /* connector name: DP-1, HDMI-A-1 */
-	int width, height;      /* native resolution */
-	float refresh;          /* refresh rate Hz */
+	int width, height;      /* selected resolution */
+	float refresh;          /* selected refresh rate Hz */
 	int transform;          /* WL_OUTPUT_TRANSFORM_NORMAL or _90 */
-	int order;              /* left-to-right position (0-based) */
+	int grid_col, grid_row; /* 2D grid position */
+	/* Available modes */
+	SetupMode modes[MAX_SETUP_MODES];
+	int mode_count;
+	int selected_mode;      /* index into modes[] */
 	/* Animation state */
 	float anim_x, anim_y;  /* current animated position */
 	float target_x, target_y; /* target position */
@@ -944,6 +954,10 @@ typedef struct {
 	int x, y, width, height;
 	SetupMonitorEntry entries[MAX_SETUP_MONITORS];
 	int entry_count;
+	/* Grid info */
+	int grid_cols, grid_rows;
+	int cell_w, cell_h;
+	int grid_origin_x, grid_origin_y;
 	/* Drag state */
 	int dragging;           /* index of dragged entry, or -1 */
 	int drag_offset_x, drag_offset_y;
@@ -957,6 +971,9 @@ typedef struct {
 	int ctx_visible;
 	int ctx_x, ctx_y, ctx_w, ctx_h;
 	int ctx_entry_idx;      /* which entry the context menu is for */
+	int ctx_submenu;        /* 0=main, 1=resolution, 2=refresh rate */
+	int ctx_scroll_offset;  /* for long mode lists */
+	int ctx_hover_item;     /* hovered item index */
 } MonitorSetup;
 
 /* ── gamepad types ─────────────────────────────────────────────────── */
