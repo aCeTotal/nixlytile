@@ -2089,7 +2089,8 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		}
 
 		/*
-		 * Force full damage on the monitor under the cursor.
+		 * Force full damage on the monitor under the cursor when using
+		 * software cursor (no HW cursor plane).
 		 *
 		 * When the HW cursor plane isn't available (or fails silently),
 		 * wlroots falls back to software cursor — compositing the cursor
@@ -2102,13 +2103,18 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		 * Atomic commit failures (EBUSY) make this worse: the failed
 		 * buffer is discarded, so the next buffer's age is off by one.
 		 *
-		 * Adding whole damage ensures every cursor-motion frame fully
-		 * repaints, eliminating ghost trails.  The GPU cost is negligible
-		 * for desktop rendering at 60 Hz.
+		 * When the HW cursor plane IS active, the cursor is on a
+		 * separate DRM plane and never composited into the framebuffer,
+		 * so no ghost trails or full damage are needed.  Forcing full
+		 * damage with HW cursor causes tearing-flip-triggered black
+		 * horizontal stripes in fullscreen games — each cursor motion
+		 * event forces a composited frame committed with tearing page
+		 * flip, and hundreds of those per second create multiple tear
+		 * lines within a single display refresh.
 		 */
 		{
 			Monitor *cm = xytomon(cursor->x, cursor->y);
-			if (cm && cm->scene_output) {
+			if (cm && cm->scene_output && !cm->wlr_output->hardware_cursor) {
 				wlr_damage_ring_add_whole(&cm->scene_output->damage_ring);
 				wlr_output_schedule_frame(cm->wlr_output);
 			}

@@ -1596,6 +1596,19 @@ run(const char *startup_cmd)
 	if (!wlr_backend_start(backend))
 		die("startup: backend_start");
 
+	/* Apply monitors.conf grid positions now that all monitors exist.
+	 *
+	 * load_monitors_conf() (called earlier) parsed the config into
+	 * runtime_monitors[], and createmon() applied mode/transform/scale
+	 * for each output.  However, grid-based positioning (grid=X,Y)
+	 * requires ALL monitors to be present so column widths and row
+	 * heights can be computed.  createmon() can't do this because
+	 * monitors are created one at a time.  The grid→pixel conversion
+	 * lives in reload_monitors_conf(), which was previously only called
+	 * on hot-reload (inotify), not at startup. */
+	if (runtime_monitor_count > 0)
+		reload_monitors_conf();
+
 	/* Now that the socket exists and the backend is started, run the startup command */
 	if (startup_cmd) {
 		int piperw[2];

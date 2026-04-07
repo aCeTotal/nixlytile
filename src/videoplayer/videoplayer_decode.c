@@ -1301,18 +1301,61 @@ static enum AVPixelFormat get_nvdec_format(AVCodecContext *ctx,
     return AV_PIX_FMT_NONE;
 }
 
-static int init_vaapi(VideoPlayer *vp)
+/* GPU info from compositor for dGPU-preferred VA-API init */
+typedef struct {
+    char card_path[64];
+    char render_path[64];
+    char driver[32];
+    char pci_slot[16];
+    char pci_slot_underscore[20];
+    int vendor; /* GpuVendor enum */
+    int is_discrete;
+    int card_index;
+    int render_index;
+    int driver_version;
+} GpuInfoCompat;
+extern GpuInfoCompat detected_gpus[];
+extern int discrete_gpu_idx;
+
+static int try_vaapi_device(VideoPlayer *vp, const char *device_path)
 {
     int ret;
+
+    fprintf(stderr, "[videoplayer] Trying VA-API on %s\n", device_path);
+    ret = av_hwdevice_ctx_create(&vp->hw_device_ctx, AV_HWDEVICE_TYPE_VAAPI,
+                                  device_path, NULL, 0);
+    if (ret == 0) {
+        vp->video_codec_ctx->hw_device_ctx = av_buffer_ref(vp->hw_device_ctx);
+        vp->video_codec_ctx->get_format = get_vaapi_format;
+        vp->hw_accel = VP_HW_VAAPI;
+        fprintf(stderr, "[videoplayer] VA-API initialized on %s\n", device_path);
+        return 0;
+    }
+
+    char errbuf[256];
+    av_strerror(ret, errbuf, sizeof(errbuf));
+    fprintf(stderr, "[videoplayer] VA-API failed on %s: %s\n", device_path, errbuf);
+    return -1;
+}
+
+static int init_vaapi(VideoPlayer *vp)
+{
     char device_path[64];
+    const char *dgpu_render = NULL;
 
     /* Set opaque for get_vaapi_format callback communication */
     vp->video_codec_ctx->opaque = vp;
     vp->vaapi_format_rejected = 0;
     vp->hw_verified = 0;
 
-    /* Scan /dev/dri/ for render nodes instead of hardcoding renderD128/129.
-     * This handles multi-GPU systems and unusual device numbering. */
+    /* Try dGPU render node first (matches HDMI output GPU) */
+    if (discrete_gpu_idx >= 0 && detected_gpus[discrete_gpu_idx].render_path[0]) {
+        dgpu_render = detected_gpus[discrete_gpu_idx].render_path;
+        if (try_vaapi_device(vp, dgpu_render) == 0)
+            return 0;
+    }
+
+    /* Scan /dev/dri/ for render nodes as fallback */
     DIR *dir = opendir("/dev/dri");
     if (!dir) {
         fprintf(stderr, "[videoplayer] VA-API: cannot open /dev/dri\n");
@@ -1325,22 +1368,15 @@ static int init_vaapi(VideoPlayer *vp)
             continue;
 
         snprintf(device_path, sizeof(device_path), "/dev/dri/%s", ent->d_name);
-        fprintf(stderr, "[videoplayer] Trying VA-API on %s\n", device_path);
 
-        ret = av_hwdevice_ctx_create(&vp->hw_device_ctx, AV_HWDEVICE_TYPE_VAAPI,
-                                      device_path, NULL, 0);
-        if (ret == 0) {
+        /* Skip dGPU render node if already tried */
+        if (dgpu_render && strcmp(device_path, dgpu_render) == 0)
+            continue;
+
+        if (try_vaapi_device(vp, device_path) == 0) {
             closedir(dir);
-            vp->video_codec_ctx->hw_device_ctx = av_buffer_ref(vp->hw_device_ctx);
-            vp->video_codec_ctx->get_format = get_vaapi_format;
-            vp->hw_accel = VP_HW_VAAPI;
-            fprintf(stderr, "[videoplayer] VA-API initialized on %s\n", device_path);
             return 0;
         }
-
-        char errbuf[256];
-        av_strerror(ret, errbuf, sizeof(errbuf));
-        fprintf(stderr, "[videoplayer] VA-API failed on %s: %s\n", device_path, errbuf);
     }
 
     closedir(dir);

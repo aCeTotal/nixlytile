@@ -397,18 +397,7 @@ compute_box_layout(MonitorSetup *ms, int popup_w, int popup_h)
 		SetupMonitorEntry *e = &ms->entries[i];
 		int cx = origin_x + e->grid_col * (cell_w + spacing);
 		int cy = origin_y + e->grid_row * (cell_h + spacing);
-		int bw, bh;
-
-		/* Rotated monitors: swap w/h to visually indicate portrait */
-		if (e->transform == WL_OUTPUT_TRANSFORM_90 ||
-		    e->transform == WL_OUTPUT_TRANSFORM_270) {
-			bw = box_h * 2 / 3;   /* narrower */
-			bh = box_h;           /* taller (use full cell height) */
-			if (bw > box_w) bw = box_w;
-		} else {
-			bw = box_w;
-			bh = box_h;
-		}
+		int bw = box_w, bh = box_h;
 
 		e->target_w = (float)bw;
 		e->target_h = (float)bh;

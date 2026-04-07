@@ -2393,14 +2393,15 @@ update_game_mode(void)
 static void
 htpc_setup_hdmi_audio(void)
 {
-	wlr_log(WLR_INFO, "HTPC: configuring HDMI 7.1 audio at 100%% volume");
+	wlr_log(WLR_INFO, "HTPC: configuring HDMI surround audio at 100%% volume");
 
 	if (fork() == 0) {
 		setsid();
 		execl("/bin/sh", "sh", "-c",
 			/* Wait for PipeWire to settle after killed audio clients */
 			"sleep 1; "
-			/* Phase 1: Find audio device with HDMI 7.1 profile and activate it */
+			/* Phase 1: Try hdmi-surround71 (7.1) on all audio devices */
+			"FOUND=0; "
 			"for D in $(wpctl status 2>/dev/null"
 			"  | awk '/Devices:/,/Sinks:/{print}'"
 			"  | grep -oE '[0-9]+\\.' | tr -d '.'); do "
@@ -2410,9 +2411,24 @@ htpc_setup_hdmi_audio(void)
 			"    | awk '{print $2}'); "
 			"  if [ -n \"$IDX\" ]; then "
 			"    wpctl set-profile \"$D\" \"$IDX\" 2>/dev/null; "
-			"    sleep 0.5; break; "
+			"    FOUND=1; sleep 0.5; break; "
 			"  fi; "
 			"done; "
+			/* Phase 1b: Fall back to hdmi-surround (5.1) if 7.1 not available */
+			"if [ \"$FOUND\" = \"0\" ]; then "
+			"  for D in $(wpctl status 2>/dev/null"
+			"    | awk '/Devices:/,/Sinks:/{print}'"
+			"    | grep -oE '[0-9]+\\.' | tr -d '.'); do "
+			"    IDX=$(wpctl inspect \"$D\" 2>/dev/null"
+			"      | grep 'hdmi-surround[^0-9]'"
+			"      | grep -oE 'index: [0-9]+' | head -1"
+			"      | awk '{print $2}'); "
+			"    if [ -n \"$IDX\" ]; then "
+			"      wpctl set-profile \"$D\" \"$IDX\" 2>/dev/null; "
+			"      sleep 0.5; break; "
+			"    fi; "
+			"  done; "
+			"fi; "
 			/* Phase 2: Find HDMI/DP sink and set as default at 100% unmuted */
 			"SINK=$(wpctl status 2>/dev/null"
 			"  | awk '/Sinks:/,/Sources:/{print}'"

@@ -1677,7 +1677,8 @@ set_adaptive_sync(Monitor *m, int enable)
 	struct wlr_output_configuration_head_v1 *config_head;
 
 	if (!m || !m->wlr_output || !m->wlr_output->enabled
-			|| !fullscreen_adaptive_sync_enabled)
+			|| !fullscreen_adaptive_sync_enabled
+			|| !m->vrr_capable)
 		return;
 
 	config = wlr_output_configuration_v1_create();

@@ -1782,8 +1782,19 @@ update_blend:
      * the alpha blend in its compositing pass — essentially free. */
 
     if (buffer) {
-        /* New video frame dequeued — advance blend layers */
-        if (!vp->blend_current_buf) {
+        if (vp->frame_repeat_mode == 2) {
+            /* 3:2 pulldown: display directly on frame_node.
+             * At 60Hz, each frame shows for only 2-3 vsyncs — too few for
+             * the cross-fade to be perceptible. The blend opacity ramp would
+             * cause scene damage every vsync, forcing 60 compositor commits/sec
+             * instead of 24, leading to GPU contention and DRM EBUSY errors. */
+            videoplayer_update_frame_buffer(vp, buffer);
+            if (vp->blend_current_buf)
+                wlr_buffer_drop(vp->blend_current_buf);
+            vp->blend_current_buf = buffer;
+            buffer = NULL;
+            vp->last_present_time_ns = vsync_time_ns;
+        } else if (!vp->blend_current_buf) {
             /* First frame ever — display directly, no blend target yet */
             videoplayer_update_frame_buffer(vp, buffer);
             vp->blend_current_buf = buffer;
@@ -1892,6 +1903,7 @@ update_blend:
      * Only active when frames repeat across multiple display refreshes. */
     if (vp->blend_node && vp->blend_current_buf && vp->blend_next_buf &&
         vp->blend_base_ns > 0 && vp->frame_repeat_mode > 0 &&
+        vp->frame_repeat_mode != 2 &&  /* No ramp for 3:2 pulldown — see mode 2 fast path above */
         vsync_time_ns > vp->blend_base_ns) {
         uint64_t step_ns;
         if (vp->frame_repeat_mode == 1) {
@@ -2216,6 +2228,9 @@ void videoplayer_setup_display_mode(VideoPlayer *vp, float display_hz, int vrr_c
     if (vp->blend_current_buf) { wlr_buffer_drop(vp->blend_current_buf); vp->blend_current_buf = NULL; }
     if (vp->blend_next_buf) { wlr_buffer_drop(vp->blend_next_buf); vp->blend_next_buf = NULL; }
     vp->blend_base_ns = 0;
+    /* Clear blend overlay so it doesn't cause scene damage during hold vsyncs */
+    if (vp->blend_node)
+        wlr_scene_buffer_set_buffer(vp->blend_node, NULL);
 
     /* Update debug log with actual display parameters (header was written
      * before setup_display_mode was called, showing 0.00 Hz). */

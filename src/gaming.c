@@ -3969,7 +3969,17 @@ detect_gpus(void)
 			}
 		} else if (strcmp(gpu->driver, "i915") == 0 || strcmp(gpu->driver, "xe") == 0) {
 			gpu->vendor = GPU_VENDOR_INTEL;
-			gpu->is_discrete = 0; /* Intel iGPU */
+			/* Check boot_vga to distinguish Intel iGPU (HD 630, UHD 770)
+			 * from discrete Intel Arc (A770, A750, etc.).
+			 * boot_vga=1 → primary/integrated, boot_vga=0 → discrete */
+			snprintf(path, sizeof(path), "/sys/class/drm/card%d/device/boot_vga", card_num);
+			f = fopen(path, "r");
+			if (f) {
+				int boot_vga = 0;
+				if (fscanf(f, "%d", &boot_vga) == 1)
+					gpu->is_discrete = !boot_vga;
+				fclose(f);
+			}
 		} else {
 			gpu->vendor = GPU_VENDOR_UNKNOWN;
 			gpu->is_discrete = 0;
