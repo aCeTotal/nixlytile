@@ -71,6 +71,7 @@ VideoPlayer *videoplayer_create(struct Monitor *mon)
     vp->muted = 0;
     vp->speed = 1.0f;
     vp->current_subtitle_track = -1;
+    vp->sync_log_fd = -1;
 
     /* Initialize audio mutex */
     pthread_mutex_init(&vp->audio.lock, NULL);
@@ -109,6 +110,12 @@ void videoplayer_destroy(VideoPlayer *vp)
     /* Shut down parallel conversion pool */
     videoplayer_cleanup_slice_pool(vp);
 
+    /* Close sync log */
+    if (vp->sync_log_fd >= 0) {
+        close(vp->sync_log_fd);
+        vp->sync_log_fd = -1;
+    }
+
     /* Free buffer pool */
     pthread_mutex_lock(&vp->buffer_pool.lock);
     for (int i = 0; i < vp->buffer_pool.count; i++) {
@@ -140,6 +147,9 @@ void videoplayer_play(VideoPlayer *vp)
      * the cadence-locked timing to either skip ahead or wait.
      * No busy-wait: present_frame() handles empty queue gracefully. */
     vp->last_frame_ns = 0;
+    vp->prev_vsync_ns = 0;
+    vp->vsyncs_since_present = 0;
+    vp->consecutive_holds = 0;
     vp->last_present_time_ns = 0;
     vp->current_repeat = 0;
     vp->cadence_accum = 0.0f;

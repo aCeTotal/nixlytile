@@ -455,6 +455,14 @@ typedef struct VideoPlayer {
     float video_fps;
     float display_hz;                      /* Current display refresh rate */
 
+    /* Discrete vsync counting — immune to accumulated clock drift.
+     * Counts actual vsync events instead of accumulating computed intervals,
+     * preventing the ~3-4 second periodic microfreeze caused by mismatch
+     * between the reported display_hz and the actual refresh period. */
+    uint64_t prev_vsync_ns;               /* Previous vsync timestamp for gap measurement */
+    int vsyncs_since_present;              /* Vsyncs counted since last frame presentation */
+    int consecutive_holds;                 /* Consecutive A/V sync holds (prevents oscillation) */
+
     /* Frame blending — cross-fade between consecutive video frames for
      * smooth motion on high-refresh displays (e.g., 30fps on 300Hz) */
     struct wlr_scene_buffer *blend_node;   /* Next frame overlay (ramps 0→1 opacity) */
@@ -516,6 +524,19 @@ typedef struct VideoPlayer {
     int debug_total_empty;                 /* Total queue-empty events since open */
     int debug_total_snaps;                 /* Total timing snap-forwards since open */
     volatile int debug_audio_underruns;    /* Audio buffer underruns in PipeWire on_process */
+    int debug_total_holds;                 /* Total A/V sync holds since open */
+
+    /* Sync log — detailed per-second summary to ~/nixlytile/sync.log */
+    int sync_log_fd;                       /* File descriptor (-1 if not open) */
+    int sync_log_frames;                   /* Frames presented in current second */
+    int sync_log_holds;                    /* Holds in current second */
+    int sync_log_skips;                    /* Skips in current second */
+    int64_t sync_log_diff_sum;             /* Accumulated A/V diff for averaging */
+    int sync_log_diff_count;               /* Samples in current averaging window */
+    int64_t sync_log_diff_min;             /* Min A/V diff in current second */
+    int64_t sync_log_diff_max;             /* Max A/V diff in current second */
+    uint64_t sync_log_last_sec_ns;         /* Wall-clock of last summary write */
+    int sync_log_underruns_snapshot;       /* Audio underruns at last summary */
 
     /* Continuous A/V/subtitle sync verification (hidden, runs every ~5s) */
     int sync_check_counter;                /* Frames since last sync check */

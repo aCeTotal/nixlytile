@@ -10,6 +10,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <sys/stat.h>
 #include <dirent.h>
@@ -929,6 +930,7 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
     vp->debug_total_skips = 0;
     vp->debug_total_empty = 0;
     vp->debug_total_snaps = 0;
+    vp->debug_total_holds = 0;
     vp->debug_audio_underruns = 0;
     if (!vp->debug_log) {
         const char *home = getenv("HOME");
@@ -964,6 +966,49 @@ int videoplayer_open(VideoPlayer *vp, const char *filepath)
             }
         }
     }
+
+    /* Open sync log — detailed per-second A/V sync summary */
+    if (vp->sync_log_fd < 0) {
+        const char *home = getenv("HOME");
+        if (home) {
+            char logpath[PATH_MAX];
+            snprintf(logpath, sizeof(logpath), "%s/nixlytile/sync.log", home);
+            vp->sync_log_fd = open(logpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (vp->sync_log_fd >= 0) {
+                char hdr[512];
+                int n = snprintf(hdr, sizeof(hdr),
+                    "# Nixlytile Sync Log\n"
+                    "# File: %s\n"
+                    "# Video: %dx%d @ %.3f fps (%s), pacing_mode=%d\n"
+                    "# Audio: %d track(s), %d channels, %d Hz\n"
+                    "# Subtitles: %d track(s), active=%d\n"
+                    "# Display: %.2f Hz, frame_interval=%lu ns\n"
+                    "# Format: [time] pos | video: fps q | audio: pts delay ring uruns | avsync: avg min max | holds skips | sub\n"
+                    "#\n",
+                    filepath,
+                    vp->video.width, vp->video.height, vp->video_fps,
+                    vp->hw_accel == VP_HW_VAAPI ? "vaapi" :
+                    vp->hw_accel == VP_HW_NVDEC ? "nvdec" : "sw",
+                    vp->frame_repeat_mode,
+                    vp->audio_track_count,
+                    vp->audio_track_count > 0 ? vp->audio_tracks[0].channels : 0,
+                    vp->audio_track_count > 0 ? vp->audio_tracks[0].sample_rate : 0,
+                    vp->subtitle_track_count, vp->current_subtitle_track,
+                    vp->display_hz, (unsigned long)vp->frame_interval_ns);
+                (void)!write(vp->sync_log_fd, hdr, n);
+                fprintf(stderr, "[videoplayer] Sync log: %s\n", logpath);
+            }
+        }
+    }
+    vp->sync_log_frames = 0;
+    vp->sync_log_holds = 0;
+    vp->sync_log_skips = 0;
+    vp->sync_log_diff_sum = 0;
+    vp->sync_log_diff_count = 0;
+    vp->sync_log_diff_min = INT64_MAX;
+    vp->sync_log_diff_max = INT64_MIN;
+    vp->sync_log_last_sec_ns = 0;
+    vp->sync_log_underruns_snapshot = 0;
 
     return 0;
 }
@@ -1127,11 +1172,24 @@ void videoplayer_close(VideoPlayer *vp)
 
     /* Close debug log */
     if (vp->debug_log) {
-        fprintf(vp->debug_log, "# Closed after %d frames | skips=%d empty=%d snaps=%d underruns=%d\n",
+        fprintf(vp->debug_log, "# Closed after %d frames | skips=%d empty=%d snaps=%d holds=%d underruns=%d\n",
                 vp->debug_frame_count, vp->debug_total_skips, vp->debug_total_empty,
-                vp->debug_total_snaps, vp->debug_audio_underruns);
+                vp->debug_total_snaps, vp->debug_total_holds, vp->debug_audio_underruns);
         fclose(vp->debug_log);
         vp->debug_log = NULL;
+    }
+
+    /* Close sync log */
+    if (vp->sync_log_fd >= 0) {
+        char buf[256];
+        int n = snprintf(buf, sizeof(buf),
+            "# Closed after %d frames | total: skips=%d holds=%d snaps=%d underruns=%d\n",
+            vp->debug_frame_count, vp->debug_total_skips,
+            vp->debug_total_holds, vp->debug_total_snaps,
+            vp->debug_audio_underruns);
+        (void)!write(vp->sync_log_fd, buf, n);
+        close(vp->sync_log_fd);
+        vp->sync_log_fd = -1;
     }
 
     /* ── Phase 5: Reset ALL state for clean re-open ──

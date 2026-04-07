@@ -17,6 +17,8 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+#include <unistd.h>
+#include <stdint.h>
 
 #include <pixman.h>
 #include <drm_fourcc.h>
@@ -1040,6 +1042,14 @@ static int64_t get_av_diff_us(VideoPlayer *vp, int64_t video_pts_us)
         vp->av_sync_established = 1;
         vp->av_sync_drift_sum = 0;
         vp->av_sync_drift_count = 0;
+        if (vp->sync_log_fd >= 0) {
+            char buf[128];
+            int n = snprintf(buf, sizeof(buf),
+                "# SYNC_ESTABLISHED offset=%+.1fms (video=%.1fs audio=%.1fs)\n",
+                vp->av_sync_video_base_us / 1000.0,
+                video_pts_us / 1000000.0, audio_pts_us / 1000000.0);
+            (void)!write(vp->sync_log_fd, buf, n);
+        }
         return 0;  /* First frame after sync establishment — show it */
     }
 
@@ -1082,6 +1092,13 @@ static int64_t get_av_diff_us(VideoPlayer *vp, int64_t video_pts_us)
                         "# DRIFT_CORRECT | avg=%+ldus correction=%+ldus\n",
                         (long)avg_drift, (long)correction);
                 fflush(vp->debug_log);
+            }
+            if (vp->sync_log_fd >= 0) {
+                char buf[128];
+                int n = snprintf(buf, sizeof(buf),
+                    "# DRIFT_CORRECT avg=%+.1fms correction=%+.1fms\n",
+                    avg_drift / 1000.0, correction / 1000.0);
+                (void)!write(vp->sync_log_fd, buf, n);
             }
         }
         vp->av_sync_drift_sum = 0;
@@ -1132,6 +1149,8 @@ static int get_frame_action(VideoPlayer *vp, int64_t video_pts_us)
      * converging towards audio in a few vsyncs.  Only hold within the
      * correctable range; larger offsets are left to re-establishment. */
     if (av_diff > AV_SYNC_THRESHOLD_MIN && av_diff < AV_SYNC_FRAMESKIP_THRESH) {
+        vp->debug_total_holds++;
+        vp->sync_log_holds++;
         return 3;
     }
 
@@ -1139,142 +1158,145 @@ static int get_frame_action(VideoPlayer *vp, int64_t video_pts_us)
 }
 
 /*
- * Check if we should present a frame at this vsync
+ * Check if we should present a frame at this vsync.
  *
- * SIMPLIFIED: Always use timing-based presentation for rock-solid playback.
- * Audio sync only affects whether we skip frames when very far behind.
+ * Uses discrete vsync counting instead of accumulated time intervals.
+ * This is immune to clock drift between the computed display_interval_ns
+ * and the actual display refresh period, which previously caused a
+ * microfreeze every ~3-4 seconds as the accumulated error exceeded
+ * one display interval.
+ *
+ * For fixed-refresh modes (1, 2, 3): count actual vsync events and
+ * present when the count reaches the cadence target.
+ * For VRR mode (0): use elapsed-time with tolerance (VRR adapts to content).
  */
 static int should_present_frame_synced(VideoPlayer *vp, uint64_t vsync_time_ns, int64_t next_frame_pts_us)
 {
     if (vp->last_frame_ns == 0) {
         /* First frame - always present */
         vp->last_frame_ns = vsync_time_ns;
+        vp->prev_vsync_ns = vsync_time_ns;
+        vp->vsyncs_since_present = 0;
+        vp->consecutive_holds = 0;
         vp->current_repeat = 0;
         vp->cadence_accum = 0.0f;
         return 1;
     }
 
-    /* Guard against unsigned underflow: for non-integer fps/refresh ratios
-     * (e.g., 23.976@120Hz), last_frame_ns advances by the exact frame interval
-     * which can drift slightly ahead of vsync_time_ns. Without this check,
-     * uint64_t subtraction wraps to a huge value, causing a frame to present
-     * early followed by a long gap — visible as micro-stutter every ~4 seconds. */
-    if (vsync_time_ns < vp->last_frame_ns)
-        return 0;
+    /* Count vsyncs since last call using actual timestamps.
+     * Rounds the gap to the nearest integer number of display intervals
+     * to handle missed vsync callbacks (compositor hiccup, power management).
+     * Single-gap rounding is immune to display_interval_ns inaccuracy
+     * because the error never accumulates across frames. */
+    if (vp->prev_vsync_ns > 0 && vsync_time_ns > vp->prev_vsync_ns) {
+        uint64_t gap = vsync_time_ns - vp->prev_vsync_ns;
+        uint64_t di = vp->display_interval_ns > 0 ? vp->display_interval_ns : 16666666;
+        int n = (int)((gap + di / 2) / di);
+        if (n < 1) n = 1;
+        vp->vsyncs_since_present += n;
+    } else if (vsync_time_ns != vp->prev_vsync_ns) {
+        vp->vsyncs_since_present++;
+    }
+    vp->prev_vsync_ns = vsync_time_ns;
 
-    uint64_t elapsed_ns = vsync_time_ns - vp->last_frame_ns;
+    /* VRR mode: use elapsed-time approach (display adapts to content rate) */
+    if (vp->frame_repeat_mode == 0) {
+        uint64_t frame_interval = vp->frame_interval_ns;
+        if (frame_interval == 0 || frame_interval > 1000000000)
+            frame_interval = 41666666;
 
-    /* Safety: if frame_interval_ns is invalid, use 24fps default */
-    uint64_t frame_interval = vp->frame_interval_ns;
-    if (frame_interval == 0 || frame_interval > 1000000000) {
-        frame_interval = 41666666;  /* ~24fps */
+        if (vsync_time_ns < vp->last_frame_ns)
+            return 0;
+
+        uint64_t elapsed_ns = vsync_time_ns - vp->last_frame_ns;
+        uint64_t di = vp->display_interval_ns > 0 ? vp->display_interval_ns : frame_interval / 5;
+
+        if (elapsed_ns + di / 2 < frame_interval)
+            return 0;
+
+        int action = get_frame_action(vp, next_frame_pts_us);
+        if (action == 1) {
+            vp->last_frame_ns += frame_interval;
+            vp->vsyncs_since_present = 0;
+            return 2;
+        }
+        if (action == 3) {
+            vp->consecutive_holds++;
+            if (vp->consecutive_holds <= 6)
+                return 0;
+            /* Too many consecutive holds — present to prevent visible stall */
+            vp->consecutive_holds = 0;
+        } else {
+            vp->consecutive_holds = 0;
+        }
+        vp->last_frame_ns += frame_interval;
+        if (vsync_time_ns > vp->last_frame_ns + frame_interval)
+            vp->last_frame_ns = vsync_time_ns;
+        vp->vsyncs_since_present = 0;
+        return 1;
     }
 
-    /*
-     * Cadence-locked frame timing: advance last_frame_ns by the ideal step
-     * instead of anchoring to vsync_time_ns. This prevents drift accumulation
-     * and produces correct patterns for all refresh rate / fps combinations.
-     *
-     * After advancing, if the ideal time is too far behind wall clock
-     * (pause/resume/seek), snap to present to avoid rapid catch-up.
-     */
+    /* Fixed-refresh modes: use discrete vsync counting */
 
-    uint64_t step;
-    uint64_t display_interval_ns = vp->display_interval_ns > 0
-        ? vp->display_interval_ns : frame_interval / 5;
-    int time_to_present = 0;
-
+    /* Calculate target vsyncs for the current frame */
+    int target;
     if (vp->frame_repeat_mode == 2) {
         /* 3:2 pulldown for 24fps on 60Hz */
-        int target_repeats = (vp->current_repeat % 2 == 0) ? 2 : 3;
-        step = vp->display_interval_ns * target_repeats;
-
-        if (elapsed_ns >= step - vp->display_interval_ns / 4) {
-            time_to_present = 1;
-        }
-    } else if (vp->frame_repeat_mode == 1 && vp->frame_repeat_count > 0 &&
-               vp->display_interval_ns > 0) {
-        /* Fixed repeat mode for exact integer ratios (24.000@120Hz, 30.000@60Hz).
-         * Uses display_interval-aligned step for perfect vsync cadence. */
-        step = (uint64_t)vp->frame_repeat_count * vp->display_interval_ns;
-
-        if (elapsed_ns >= step - vp->display_interval_ns / 3) {
-            time_to_present = 1;
-        }
-    } else if (vp->frame_repeat_mode == 3 && vp->display_interval_ns > 0) {
-        /* Bresenham cadence for non-integer ratios on fixed-refresh.
-         * Peek at what the repeat count would be if we present now. */
-        int repeats = vp->cadence_base;
-        float test_accum = vp->cadence_accum + vp->cadence_frac;
-        if (test_accum >= 1.0f) {
-            repeats++;
-        }
-        step = (uint64_t)repeats * vp->display_interval_ns;
-
-        if (elapsed_ns >= step - vp->display_interval_ns / 3) {
-            time_to_present = 1;
-        }
+        target = (vp->current_repeat % 2 == 0) ? 2 : 3;
+    } else if (vp->frame_repeat_mode == 1 && vp->frame_repeat_count > 0) {
+        /* Fixed integer multiple (24@120Hz=5x, 30@60Hz=2x) */
+        target = vp->frame_repeat_count;
     } else {
-        /* Frame-interval mode (VRR).
-         * Uses video's exact frame interval as step. half-display-interval
-         * tolerance finds nearest vsync. */
-        step = frame_interval;
-        uint64_t tolerance = display_interval_ns / 2;
-
-        if (elapsed_ns + tolerance >= step) {
-            time_to_present = 1;
-        }
+        /* Bresenham cadence for non-integer ratios (23.976@300Hz) */
+        target = vp->cadence_base;
+        float test_accum = vp->cadence_accum + vp->cadence_frac;
+        if (test_accum >= 1.0f)
+            target++;
     }
 
-    if (!time_to_present) {
+    if (vp->vsyncs_since_present < target)
         return 0;
-    }
 
-    /* Timing says it's time for a new frame.
-     * Check A/V sync for frame skipping/holding (only at video framerate,
-     * not every vsync, so recovery_frames countdown is properly paced). */
+    /* Target reached — check A/V sync before presenting */
     int action = get_frame_action(vp, next_frame_pts_us);
+
     if (action == 1) {
-        /* Video is far behind audio — skip this frame.
-         * Advance last_frame_ns by one step so timing stays accurate.
-         * Multiple skips per vsync are still possible if the original
-         * elapsed time covers multiple steps (e.g., after a stall). */
-        vp->last_frame_ns += step;
-        return 2;  /* Skip and get next frame immediately */
+        /* Video far behind audio — skip frame */
+        vp->vsyncs_since_present = 0;
+        vp->consecutive_holds = 0;
+        if (vp->frame_repeat_mode == 2) {
+            vp->current_repeat++;
+        } else if (vp->frame_repeat_mode == 3) {
+            vp->cadence_accum += vp->cadence_frac;
+            if (vp->cadence_accum >= 1.0f)
+                vp->cadence_accum -= 1.0f;
+        }
+        return 2;
     }
+
     if (action == 3) {
-        /* Video is ahead of audio — hold this frame for one vsync.
-         * Don't advance last_frame_ns: the timing check will pass again
-         * on the next vsync (elapsed grows by one display_interval), and
-         * get_frame_action re-evaluates.  Each hold delays video by one
-         * display refresh (~16.7ms at 60Hz), converging towards audio.
-         * The hold range is capped at 100ms, limiting consecutive holds
-         * to ~6 at 60Hz — well within the decode thread's ability to
-         * keep audio fed via drain_pending_audio. */
-        return 0;
+        /* Video ahead of audio — hold for one more vsync.
+         * Cap consecutive holds to prevent visible stall.
+         * At 300Hz each hold is ~3.3ms, 6 holds = ~20ms max delay. */
+        vp->consecutive_holds++;
+        if (vp->consecutive_holds <= 6)
+            return 0;
+        /* Fall through to present — too many holds */
+        vp->consecutive_holds = 0;
+    } else {
+        vp->consecutive_holds = 0;
     }
-    /* Present the frame */
+
+    /* Present the frame — reset vsync counter and advance cadence */
+    vp->vsyncs_since_present = 0;
     if (vp->frame_repeat_mode == 2) {
         vp->current_repeat++;
     } else if (vp->frame_repeat_mode == 3) {
         vp->cadence_accum += vp->cadence_frac;
-        if (vp->cadence_accum >= 1.0f) {
+        if (vp->cadence_accum >= 1.0f)
             vp->cadence_accum -= 1.0f;
-        }
     }
-    vp->last_frame_ns += step;
-    /* If we've fallen more than one step behind wall clock (e.g., after brief
-     * queue exhaustion or a compositor hiccup), snap forward to avoid rapid
-     * catch-up where multiple frames would be presented at consecutive vsyncs.
-     * One step of slack allows the normal cadence to absorb minor jitter. */
-    if (vsync_time_ns > vp->last_frame_ns + step) {
-        if (vp->debug_log) {
-            fprintf(vp->debug_log, "# SNAP  | gap=%lu us (>1 step behind wall clock)\n",
-                    (unsigned long)((vsync_time_ns - vp->last_frame_ns) / 1000));
-        }
-        vp->debug_total_snaps++;
-        vp->last_frame_ns = vsync_time_ns;
-    }
+    vp->last_frame_ns = vsync_time_ns;  /* Anchor for stall detection */
     return 1;
 }
 
@@ -1558,6 +1580,9 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
     if (vp->audio.needs_timing_reset) {
         vp->audio.needs_timing_reset = 0;
         vp->last_frame_ns = 0;
+        vp->prev_vsync_ns = 0;
+        vp->vsyncs_since_present = 0;
+        vp->consecutive_holds = 0;
         vp->current_repeat = 0;
         vp->cadence_accum = 0.0f;
         if (vp->blend_current_buf) { wlr_buffer_drop(vp->blend_current_buf); vp->blend_current_buf = NULL; }
@@ -1602,6 +1627,9 @@ void videoplayer_present_frame(VideoPlayer *vp, uint64_t vsync_time_ns)
                 fflush(vp->debug_log);
             }
             vp->last_frame_ns = 0;
+            vp->prev_vsync_ns = 0;
+            vp->vsyncs_since_present = 0;
+            vp->consecutive_holds = 0;
             vp->current_repeat = 0;
             vp->cadence_accum = 0.0f;
             if (vp->blend_current_buf) { wlr_buffer_drop(vp->blend_current_buf); vp->blend_current_buf = NULL; }
@@ -1655,6 +1683,9 @@ present_next:
             vp->state = VP_STATE_BUFFERING;
             vp->buffer_ready_since_ns = 0;
             vp->last_frame_ns = 0;
+            vp->prev_vsync_ns = 0;
+            vp->vsyncs_since_present = 0;
+            vp->consecutive_holds = 0;
             vp->last_present_time_ns = 0;
             vp->current_repeat = 0;
             vp->cadence_accum = 0.0f;
@@ -1817,9 +1848,16 @@ update_blend:
                         vp->av_sync_drift_count = 0;
                         if (vp->debug_log) {
                             fprintf(vp->debug_log,
-                                "# SYNC_CHECK | rel_diff=%+ldus �� re-establishing sync\n",
+                                "# SYNC_CHECK | rel_diff=%+ldus — re-establishing sync\n",
                                 (long)av_diff);
                             fflush(vp->debug_log);
+                        }
+                        if (vp->sync_log_fd >= 0) {
+                            char buf[128];
+                            int n = snprintf(buf, sizeof(buf),
+                                "# SYNC_RESET rel_diff=%+.1fms (>100ms, re-establishing)\n",
+                                av_diff / 1000.0);
+                            (void)!write(vp->sync_log_fd, buf, n);
                         }
                     }
                 }
@@ -1827,11 +1865,20 @@ update_blend:
                 if (vp->sync_check_sub_drift_count > 0) {
                     int64_t avg_sub_drift = vp->sync_check_sub_drift_sum /
                                             vp->sync_check_sub_drift_count;
-                    if (vp->debug_log && (avg_sub_drift > 50000 || avg_sub_drift < -50000)) {
-                        fprintf(vp->debug_log,
-                            "# SYNC_CHECK | sub_drift=%+ldus (sub-video avg over %d samples)\n",
-                            (long)avg_sub_drift, vp->sync_check_sub_drift_count);
-                        fflush(vp->debug_log);
+                    if (avg_sub_drift > 50000 || avg_sub_drift < -50000) {
+                        if (vp->debug_log) {
+                            fprintf(vp->debug_log,
+                                "# SYNC_CHECK | sub_drift=%+ldus (sub-video avg over %d samples)\n",
+                                (long)avg_sub_drift, vp->sync_check_sub_drift_count);
+                            fflush(vp->debug_log);
+                        }
+                        if (vp->sync_log_fd >= 0) {
+                            char buf[128];
+                            int n = snprintf(buf, sizeof(buf),
+                                "# SUB_DRIFT avg=%+.1fms over %d samples\n",
+                                avg_sub_drift / 1000.0, vp->sync_check_sub_drift_count);
+                            (void)!write(vp->sync_log_fd, buf, n);
+                        }
                     }
                 }
                 vp->sync_check_counter = 0;
@@ -1930,6 +1977,89 @@ update_blend:
         /* Flush on events and periodically (~1 sec at 24fps) */
         if (frames_consumed > 0 || vp->debug_frame_count % 60 == 0)
             fflush(vp->debug_log);
+    }
+
+    /* ── Sync log: per-second summary to ~/nixlytile/sync.log ──
+     * Accumulates stats every vsync, writes a one-line summary each second.
+     * Fields: position, A/V diff (avg/min/max), queue depth, frames presented,
+     * holds, skips, audio underruns, subtitle track info. */
+    if (vp->sync_log_fd >= 0 && vp->state == VP_STATE_PLAYING) {
+        /* Accumulate per-vsync stats */
+        int64_t cur_diff = vp->av_sync_offset_us;
+        vp->sync_log_diff_sum += cur_diff;
+        vp->sync_log_diff_count++;
+        if (cur_diff < vp->sync_log_diff_min) vp->sync_log_diff_min = cur_diff;
+        if (cur_diff > vp->sync_log_diff_max) vp->sync_log_diff_max = cur_diff;
+        if (frames_consumed > 0)
+            vp->sync_log_frames++;
+        if (frames_consumed > 1)
+            vp->sync_log_skips += frames_consumed - 1;
+
+        /* Write summary every ~1 second */
+        if (vp->sync_log_last_sec_ns == 0)
+            vp->sync_log_last_sec_ns = vsync_time_ns;
+
+        if (vsync_time_ns >= vp->sync_log_last_sec_ns + 1000000000ULL) {
+            int q;
+            pthread_mutex_lock(&vp->frame_mutex);
+            q = vp->frames_queued;
+            pthread_mutex_unlock(&vp->frame_mutex);
+
+            int64_t avg_diff = vp->sync_log_diff_count > 0
+                ? vp->sync_log_diff_sum / vp->sync_log_diff_count : 0;
+
+            pthread_mutex_lock(&vp->audio.lock);
+            int64_t pw_delay = vp->audio.output_delay_us;
+            int64_t audio_pts = vp->audio.audio_pts_us;
+            pthread_mutex_unlock(&vp->audio.lock);
+
+            int new_underruns = vp->debug_audio_underruns - vp->sync_log_underruns_snapshot;
+            vp->sync_log_underruns_snapshot = vp->debug_audio_underruns;
+
+            size_t audio_avail = 0;
+            if (vp->audio.ring.data) {
+                pthread_mutex_lock(&vp->audio.ring.lock);
+                audio_avail = vp->audio.ring.available;
+                pthread_mutex_unlock(&vp->audio.ring.lock);
+            }
+
+            /* Format: [HH:MM:SS.mmm] pos=X.Xs | video: Xfps q=XX | audio: pts=X.Xs delay=Xms ring=XKB uruns=X | avsync: avg=+Xms min=+Xms max=+Xms | holds=X skips=X | sub=X */
+            struct timespec ts; struct tm tm;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            localtime_r(&ts.tv_sec, &tm);
+
+            char buf[512];
+            int off = snprintf(buf, sizeof(buf),
+                "[%02d:%02d:%02d.%03ld] pos=%.1fs | video: %dfps q=%d | "
+                "audio: pts=%.1fs delay=%ldms ring=%zuKB uruns=%d | "
+                "avsync: avg=%+.1fms min=%+.1fms max=%+.1fms | "
+                "holds=%d skips=%d | sub=%d\n",
+                tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000,
+                vp->position_us / 1000000.0,
+                vp->sync_log_frames, q,
+                audio_pts / 1000000.0,
+                (long)(pw_delay / 1000),
+                audio_avail / 1024,
+                new_underruns,
+                avg_diff / 1000.0,
+                vp->sync_log_diff_min / 1000.0,
+                vp->sync_log_diff_max / 1000.0,
+                vp->sync_log_holds,
+                vp->sync_log_skips,
+                vp->current_subtitle_track);
+
+            (void)!write(vp->sync_log_fd, buf, off);
+
+            /* Reset accumulators */
+            vp->sync_log_frames = 0;
+            vp->sync_log_holds = 0;
+            vp->sync_log_skips = 0;
+            vp->sync_log_diff_sum = 0;
+            vp->sync_log_diff_count = 0;
+            vp->sync_log_diff_min = INT64_MAX;
+            vp->sync_log_diff_max = INT64_MIN;
+            vp->sync_log_last_sec_ns = vsync_time_ns;
+        }
     }
 }
 
@@ -2076,6 +2206,9 @@ void videoplayer_setup_display_mode(VideoPlayer *vp, float display_hz, int vrr_c
 
     /* Reset timing state for clean start */
     vp->last_frame_ns = 0;
+    vp->prev_vsync_ns = 0;
+    vp->vsyncs_since_present = 0;
+    vp->consecutive_holds = 0;
     vp->last_present_time_ns = 0;
     vp->current_repeat = 0;
     vp->cadence_accum = 0.0f;
