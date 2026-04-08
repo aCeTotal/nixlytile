@@ -112,6 +112,7 @@ monitor_setup_animate_cb(void *data)
 	for (int i = 0; i < ms->entry_count; i++) {
 		SetupMonitorEntry *e = &ms->entries[i];
 		int size_changed = 0;
+		int rot_changed = 0;
 
 		/* Skip dragged entry — it follows cursor directly */
 		if (ms->dragging == i)
@@ -145,12 +146,14 @@ monitor_setup_animate_cb(void *data)
 
 		if (fabsf(dr) > 0.5f) {
 			e->anim_rot += dr * ease; still_moving = 1;
-		} else {
+			rot_changed = 1;
+		} else if (e->anim_rot != e->target_rot) {
 			e->anim_rot = e->target_rot;
+			rot_changed = 1;
 		}
 
-		/* Re-render content if size changed (rotation) */
-		if (size_changed)
+		/* Re-render content if size or rotation changed */
+		if (size_changed || rot_changed)
 			render_box_content(ms, i);
 
 		/* Just reposition — no full scene rebuild */
@@ -210,19 +213,28 @@ render_box_content(MonitorSetup *ms, int idx)
 	if (bw <= 0 || bh <= 0)
 		return;
 
+	/* Rotation flip effect: squeeze width at midpoint of rotation */
+	float rot_rad = e->anim_rot * (float)M_PI / 90.0f;
+	float rot_scale = fabsf(cosf(rot_rad));
+	if (rot_scale < 0.05f)
+		rot_scale = 0.05f;
+	int vw = (int)(bw * rot_scale);
+	if (vw < 4) vw = 4;
+	int xoff = (bw - vw) / 2;
+
 	bord = (ms->dragging == idx) ? box_drag_border : box_border;
 
-	/* Box background + border (all at 0,0 relative to box_tree) */
-	drawroundedrect(e->box_tree, 0, 0, bw, bh, box_bg);
-	draw_border(e->box_tree, 0, 0, bw, bh, 2, bord);
+	/* Box background + border */
+	drawroundedrect(e->box_tree, xoff, 0, vw, bh, box_bg);
+	draw_border(e->box_tree, xoff, 0, vw, bh, 2, bord);
 
 	/* Screen N (XXHz) */
 	num = grid_label_number(ms, idx);
 	snprintf(line1, sizeof(line1), "Screen %d (%.0fHz)", num, e->refresh);
 	tw1 = text_width(line1);
-	if (tw1 < bw - 10) {
+	if (tw1 < vw - 10) {
 		render_text_at(e->box_tree, line1,
-			(bw - tw1) / 2,
+			xoff + (vw - tw1) / 2,
 			bh / 2 - statusfont.height / 2 + statusfont.ascent - statusfont.height / 2,
 			text_col);
 	}
@@ -230,9 +242,9 @@ render_box_content(MonitorSetup *ms, int idx)
 	/* Connector name */
 	snprintf(line2, sizeof(line2), "%s", e->name);
 	tw2 = text_width(line2);
-	if (tw2 < bw - 10) {
+	if (tw2 < vw - 10) {
 		render_text_at(e->box_tree, line2,
-			(bw - tw2) / 2,
+			xoff + (vw - tw2) / 2,
 			bh / 2 + statusfont.height / 2 + statusfont.ascent - statusfont.height / 2 + 4,
 			sub_col);
 	}
@@ -244,9 +256,9 @@ render_box_content(MonitorSetup *ms, int idx)
 	else
 		snprintf(res, sizeof(res), "%dx%d", e->width, e->height);
 	rw = text_width(res);
-	if (rw < bw - 10) {
+	if (rw < vw - 10) {
 		render_text_at(e->box_tree, res,
-			(bw - rw) / 2,
+			xoff + (vw - rw) / 2,
 			bh - 8 - statusfont.descent,
 			dim_col);
 	}
@@ -412,32 +424,16 @@ compute_box_layout(MonitorSetup *ms, int popup_w, int popup_h)
 		SetupMonitorEntry *e = &ms->entries[i];
 		int cx = origin_x + e->grid_col * (cell_w + spacing);
 		int cy = origin_y + e->grid_row * (cell_h + spacing);
-		int bw, bh;
-		int is_portrait = (e->transform == WL_OUTPUT_TRANSFORM_90 ||
-				   e->transform == WL_OUTPUT_TRANSFORM_270);
-		float disp_w = is_portrait ? (float)e->height : (float)e->width;
-		float disp_h = is_portrait ? (float)e->width  : (float)e->height;
-		float aspect = (disp_h > 0) ? disp_w / disp_h : 1.0f;
 
-		if (aspect >= (float)box_w / (float)box_h) {
-			bw = box_w;
-			bh = (int)((float)box_w / aspect);
-		} else {
-			bh = box_h;
-			bw = (int)((float)box_h * aspect);
-		}
-		if (bw < 40) bw = 40;
-		if (bh < 40) bh = 40;
-
-		e->target_w = (float)bw;
-		e->target_h = (float)bh;
+		e->target_w = (float)box_w;
+		e->target_h = (float)box_h;
 		/* Center box within cell */
-		e->target_x = (float)(cx + (cell_w - bw) / 2);
-		e->target_y = (float)(cy + (cell_h - bh) / 2);
+		e->target_x = (float)(cx + (cell_w - box_w) / 2);
+		e->target_y = (float)(cy + (cell_h - box_h) / 2);
 		e->box_x = (int)e->target_x;
 		e->box_y = (int)e->target_y;
-		e->box_w = bw;
-		e->box_h = bh;
+		e->box_w = box_w;
+		e->box_h = box_h;
 	}
 }
 
