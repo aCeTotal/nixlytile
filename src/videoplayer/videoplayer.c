@@ -228,6 +228,14 @@ void videoplayer_pause(VideoPlayer *vp)
     /* Pause audio */
     videoplayer_audio_pause(vp);
 
+    /* Shrink buffer pool to free RAM while paused.
+     * Keep 4 buffers for fast resume — the rest will be reallocated on demand. */
+    pthread_mutex_lock(&vp->buffer_pool.lock);
+    while (vp->buffer_pool.count > 4) {
+        free(vp->buffer_pool.data[--vp->buffer_pool.count]);
+    }
+    pthread_mutex_unlock(&vp->buffer_pool.lock);
+
     /* Show control bar when paused */
     videoplayer_show_control_bar(vp);
 

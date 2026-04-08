@@ -1898,3 +1898,200 @@ monitor_setup_apply(Monitor *m)
 	updatemons(NULL, NULL);
 	monitor_setup_hide(m);
 }
+
+/* ── External monitor overlay (nixlycc IPC via file) ───────────────── */
+
+static struct wlr_scene_tree *monovl_trees[MAX_SETUP_MONITORS];
+static int monovl_count;
+
+static void
+monovl_build_path(char *buf, size_t len)
+{
+	const char *home = getenv("HOME");
+	if (home)
+		snprintf(buf, len, "%s/.local/nixlyos/monitor_overlay", home);
+	else
+		buf[0] = '\0';
+}
+
+void
+monitor_overlay_update(void)
+{
+	char path[PATH_MAX];
+	FILE *f;
+	char line[256];
+	Monitor *om;
+	char highlight_name[64] = {0};
+
+	/* Destroy existing overlays */
+	for (int i = 0; i < monovl_count; i++) {
+		if (monovl_trees[i]) {
+			wlr_scene_node_destroy(&monovl_trees[i]->node);
+			monovl_trees[i] = NULL;
+		}
+	}
+	monovl_count = 0;
+
+	monovl_build_path(path, sizeof(path));
+	if (!path[0])
+		return;
+
+	f = fopen(path, "r");
+	if (!f)
+		return;
+
+	/* File format:
+	 *   CONNECTOR_NAME Screen N (XXHz)
+	 *   highlight=CONNECTOR_NAME
+	 */
+	struct {
+		char connector[64];
+		char label[128];
+	} labels[MAX_SETUP_MONITORS];
+	int label_count = 0;
+
+	while (fgets(line, sizeof(line), f) && label_count < MAX_SETUP_MONITORS) {
+		/* Strip newline */
+		char *nl = strchr(line, '\n');
+		if (nl) *nl = '\0';
+		if (!line[0])
+			continue;
+
+		if (strncmp(line, "highlight=", 10) == 0) {
+			snprintf(highlight_name, sizeof(highlight_name), "%s", line + 10);
+			continue;
+		}
+
+		/* First space-separated token is connector name, rest is label */
+		char *sp = strchr(line, ' ');
+		if (!sp)
+			continue;
+		*sp = '\0';
+		snprintf(labels[label_count].connector, sizeof(labels[label_count].connector),
+			"%s", line);
+		snprintf(labels[label_count].label, sizeof(labels[label_count].label),
+			"%s", sp + 1);
+		label_count++;
+	}
+	fclose(f);
+
+	if (label_count == 0)
+		return;
+
+	/* Create scene overlays on each matching output */
+	for (int i = 0; i < label_count; i++) {
+		wl_list_for_each(om, &mons, link) {
+			if (strcmp(om->wlr_output->name, labels[i].connector) != 0)
+				continue;
+
+			struct wlr_scene_tree *tree = wlr_scene_tree_create(layers[LyrOverlay]);
+			if (!tree)
+				break;
+
+			monovl_trees[monovl_count] = tree;
+			monovl_count++;
+
+			/* Position at top-left of this output */
+			wlr_scene_node_set_position(&tree->node, om->m.x + 20, om->m.y + 20);
+
+			/* Red highlight fullscreen rect behind the label */
+			int is_highlight = (highlight_name[0] &&
+				strcmp(labels[i].connector, highlight_name) == 0);
+			if (is_highlight) {
+				/* Create a highlight tree covering the entire output */
+				struct wlr_scene_tree *hl = wlr_scene_tree_create(layers[LyrOverlay]);
+				if (hl) {
+					monovl_trees[monovl_count] = hl;
+					monovl_count++;
+					wlr_scene_node_set_position(&hl->node, om->m.x, om->m.y);
+					float red[4] = {1.0f, 0.1f, 0.1f, 0.12f};
+					drawrect(hl, 0, 0, om->m.width, om->m.height, red);
+				}
+			}
+
+			/* White label background */
+			int tw1 = text_width(labels[i].label);
+			int tw2 = text_width(labels[i].connector);
+			int lw = (tw1 > tw2 ? tw1 : tw2) + 24;
+			int lh = statusfont.height * 2 + 20;
+
+			float label_bg[4] = {1.0f, 1.0f, 1.0f, 0.95f};
+			float label_fg[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+
+			drawroundedrect(tree, 0, 0, lw, lh, label_bg);
+			render_text_at(tree, labels[i].label,
+				12, 8 + statusfont.ascent, label_fg);
+			render_text_at(tree, labels[i].connector,
+				12, 8 + statusfont.height + 4 + statusfont.ascent, label_fg);
+
+			break;
+		}
+	}
+}
+
+static int
+monovl_watch_handler(int fd, uint32_t mask, void *data)
+{
+	char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+	const struct inotify_event *event;
+	ssize_t len;
+	char *ptr;
+	int should_update = 0;
+
+	(void)mask;
+	(void)data;
+
+	while ((len = read(fd, buf, sizeof(buf))) > 0) {
+		for (ptr = buf; ptr < buf + len;
+		     ptr += sizeof(struct inotify_event) + event->len) {
+			event = (const struct inotify_event *)ptr;
+			if (event->mask & (IN_MODIFY | IN_CLOSE_WRITE | IN_MOVED_TO |
+					   IN_CREATE | IN_DELETE | IN_DELETE_SELF))
+				should_update = 1;
+		}
+	}
+
+	if (should_update)
+		monitor_overlay_update();
+
+	return 0;
+}
+
+void
+setup_monitor_overlay_watch(void)
+{
+	char path[PATH_MAX], dir[PATH_MAX];
+	char *slash;
+
+	monovl_build_path(path, sizeof(path));
+	if (!path[0])
+		return;
+
+	monovl_inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+	if (monovl_inotify_fd < 0)
+		return;
+
+	/* Watch the directory (file may not exist yet) */
+	strncpy(dir, path, sizeof(dir) - 1);
+	dir[sizeof(dir) - 1] = '\0';
+	slash = strrchr(dir, '/');
+	if (slash)
+		*slash = '\0';
+
+	mkdir(dir, 0755);
+	monovl_watch_wd = inotify_add_watch(monovl_inotify_fd, dir,
+		IN_CREATE | IN_MODIFY | IN_CLOSE_WRITE | IN_MOVED_TO | IN_DELETE);
+
+	if (monovl_watch_wd < 0) {
+		close(monovl_inotify_fd);
+		monovl_inotify_fd = -1;
+		return;
+	}
+
+	monovl_watch_source = wl_event_loop_add_fd(event_loop, monovl_inotify_fd,
+		WL_EVENT_READABLE, monovl_watch_handler, NULL);
+	if (!monovl_watch_source) {
+		close(monovl_inotify_fd);
+		monovl_inotify_fd = -1;
+	}
+}

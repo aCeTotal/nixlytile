@@ -640,7 +640,8 @@ async_fetch_view(const char *endpoint, AsyncViewResult *out,
 
 	if (!temp) return;
 
-	buffer = malloc(1024 * 1024);
+	size_t buf_cap = 16384;  /* Start at 16KB, grow as needed */
+	buffer = malloc(buf_cap);
 	if (!buffer) { free(temp); return; }
 
 	for (int s = 0; s < url_count && total < ASYNC_MAX_ITEMS; s++) {
@@ -649,7 +650,21 @@ async_fetch_view(const char *endpoint, AsyncViewResult *out,
 			 urls[s], endpoint);
 		fp = popen(cmd, "r");
 		if (!fp) continue;
-		bytes = fread(buffer, 1, 1024 * 1024 - 1, fp);
+		/* Read in chunks, growing buffer as needed */
+		bytes = 0;
+		for (;;) {
+			if (bytes + 4096 >= buf_cap) {
+				size_t new_cap = buf_cap * 2;
+				if (new_cap > 1024 * 1024) new_cap = 1024 * 1024;
+				char *nb = realloc(buffer, new_cap);
+				if (!nb) break;
+				buffer = nb;
+				buf_cap = new_cap;
+			}
+			size_t n = fread(buffer + bytes, 1, buf_cap - bytes - 1, fp);
+			if (n == 0) break;
+			bytes += n;
+		}
 		pclose(fp);
 		if (!bytes) continue;
 		buffer[bytes] = '\0';

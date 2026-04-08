@@ -4826,30 +4826,51 @@ refreshstatusfan(void)
 	int max_rpm = 0;
 	int any_fans = 0;
 
-	/* Pass 1: read all fan data and find max RPM */
-	wl_list_for_each(m, &mons, link) {
-		if (!m->showbar || !m->statusbar.fan.tree)
-			continue;
+	/* Pass 1: read fan data once and find max RPM.
+	 * All monitors share the same hardware — only read sysfs on the first
+	 * monitor that has a fan popup, then copy data to the rest. */
+	{
+		FanPopup *src = NULL;
+		wl_list_for_each(m, &mons, link) {
+			if (!m->showbar || !m->statusbar.fan.tree)
+				continue;
 
-		FanPopup *p = &m->statusbar.fan_popup;
+			FanPopup *p = &m->statusbar.fan_popup;
 
-		/* Scan on first call */
-		if (p->device_count == 0)
-			fan_scan_hwmon(p);
+			/* Scan on first call */
+			if (p->device_count == 0)
+				fan_scan_hwmon(p);
 
-		fan_read_all(p);
-		p->last_fetch_ms = monotonic_msec();
-
-		/* Find highest RPM */
-		for (int d = 0; d < p->device_count; d++) {
-			for (int f = 0; f < p->devices[d].fan_count; f++) {
-				if (p->devices[d].fans[f].rpm > max_rpm)
-					max_rpm = p->devices[d].fans[f].rpm;
+			if (!src) {
+				fan_read_all(p);
+				p->last_fetch_ms = monotonic_msec();
+				src = p;
+			} else {
+				/* Copy fan data from first monitor instead of re-reading sysfs */
+				for (int d = 0; d < p->device_count && d < src->device_count; d++) {
+					FanDevice *dd = &p->devices[d];
+					FanDevice *sd = &src->devices[d];
+					for (int f = 0; f < dd->fan_count && f < sd->fan_count; f++) {
+						dd->fans[f].rpm = sd->fans[f].rpm;
+						dd->fans[f].temp_mc = sd->fans[f].temp_mc;
+						dd->fans[f].pwm = sd->fans[f].pwm;
+						dd->fans[f].pwm_enable = sd->fans[f].pwm_enable;
+					}
+				}
+				p->last_fetch_ms = src->last_fetch_ms;
 			}
-		}
 
-		if (p->total_fans > 0)
-			any_fans = 1;
+			/* Find highest RPM */
+			for (int d = 0; d < p->device_count; d++) {
+				for (int f = 0; f < p->devices[d].fan_count; f++) {
+					if (p->devices[d].fans[f].rpm > max_rpm)
+						max_rpm = p->devices[d].fans[f].rpm;
+				}
+			}
+
+			if (p->total_fans > 0)
+				any_fans = 1;
+		}
 	}
 
 	if (any_fans) {
@@ -5121,7 +5142,7 @@ updatestatuscpu(void *data)
 			}
 			status_tasks[chosen].next_due_ms = now + delay_ms;
 		} else if (status_tasks[chosen].fn == refreshstatusfan) {
-			status_tasks[chosen].next_due_ms = now + 3000;
+			status_tasks[chosen].next_due_ms = now + 10000;
 		} else if (status_tasks[chosen].fn == refreshstatuscpu ||
 				status_tasks[chosen].fn == refreshstatusram) {
 			status_tasks[chosen].next_due_ms = now + 15000;

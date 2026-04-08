@@ -165,7 +165,7 @@
 #define STATUS_FAST_MS          3000
 #define LISTEN(E, L, H)         wl_signal_add((E), ((L)->notify = (H), (L)))
 #define LISTEN_STATIC(E, H)     do { struct wl_listener *_l = ecalloc(1, sizeof(*_l)); _l->notify = (H); wl_signal_add((E), _l); } while (0)
-#define MODAL_MAX_RESULTS 512
+#define MODAL_MAX_RESULTS 200
 #define MODAL_RESULT_LEN 256
 #define MAX_TRACKS 32
 #define RESUME_CACHE_FILE "/tmp/nixly-resume-cache"
@@ -1686,6 +1686,11 @@ extern char monconf_path_cached[PATH_MAX];
 extern struct wl_event_source *monconf_watch_source;
 extern struct wl_event_source *monitor_setup_timer;
 
+/* External monitor overlay (controlled by nixlycc) */
+extern int monovl_inotify_fd;
+extern int monovl_watch_wd;
+extern struct wl_event_source *monovl_watch_source;
+
 /* status timers */
 extern struct wl_event_source *status_timer;
 extern struct wl_event_source *status_cpu_timer;
@@ -2589,6 +2594,10 @@ int monitors_conf_exists(void);
 void setup_monitors_conf_watch(void);
 void reload_monitors_conf(void);
 int schedule_monitor_setup_popup(void);
+
+/* monitor_setup.c — external overlay (nixlycc IPC) */
+void setup_monitor_overlay_watch(void);
+void monitor_overlay_update(void);
 
 /* launcher.c */
 void modal_show(const Arg *arg);

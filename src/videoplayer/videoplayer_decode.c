@@ -230,15 +230,21 @@ static void videoplayer_process_subtitle_packet(VideoPlayer *vp, AVPacket *pkt)
             /* Strip inline \3c/\4c/\3a/\4a tags to prevent ASS files
              * from overriding our transparent-back/black-outline style */
             size_t alen = strlen(rect->ass);
-            char *cleaned = malloc(alen + 1);
-            if (cleaned) {
-                memcpy(cleaned, rect->ass, alen + 1);
-                strip_ass_inline_tags(cleaned);
+            /* Reuse thread-local buffer to avoid malloc/free per subtitle */
+            static __thread char *sub_buf = NULL;
+            static __thread size_t sub_buf_cap = 0;
+            if (alen + 1 > sub_buf_cap) {
+                sub_buf_cap = alen + 1 < 1024 ? 1024 : alen + 1;
+                free(sub_buf);
+                sub_buf = malloc(sub_buf_cap);
+            }
+            if (sub_buf) {
+                memcpy(sub_buf, rect->ass, alen + 1);
+                strip_ass_inline_tags(sub_buf);
                 fprintf(stderr, "[subtitle]   rect[%u] ASS cleaned: \"%.*s\"\n",
-                        i, 120, cleaned);
-                ass_process_chunk(vp->subtitle.track, cleaned, strlen(cleaned),
+                        i, 120, sub_buf);
+                ass_process_chunk(vp->subtitle.track, sub_buf, strlen(sub_buf),
                                   start_ms, duration_ms);
-                free(cleaned);
             } else {
                 ass_process_chunk(vp->subtitle.track, rect->ass, alen,
                                   start_ms, duration_ms);
@@ -1910,9 +1916,9 @@ static void *demux_thread_func(void *arg)
             continue;
         }
 
-        /* If at EOF, wait for seek or shutdown */
+        /* If at EOF, wait for seek or shutdown (longer sleep — nothing to do) */
         if (vp->demux_eof) {
-            usleep(50000);
+            usleep(200000);
             continue;
         }
 
@@ -2387,9 +2393,9 @@ static void *decode_thread_func(void *arg)
             }
             vp->state = VP_STATE_PAUSED;
             fprintf(stderr, "[videoplayer] Playback finished, state -> paused\n");
-            /* Wait for seek or shutdown at EOF */
+            /* Wait for seek or shutdown at EOF (200ms sleep — no work to do) */
             while (vp->decode_running && !vp->seek_requested)
-                usleep(50000);
+                usleep(200000);
             continue;
         }
         if (pkt->size == 0) {

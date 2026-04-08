@@ -640,47 +640,50 @@ buttonpress(struct wl_listener *listener, void *data)
 		 */
 		{
 			Client *fs = selmon ? focustop(selmon) : NULL;
-			if (!(fs && fs->isfullscreen)) {
-				if (selmon && selmon->statusbar.tray_menu.visible) {
-					int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
-					int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
-					TrayMenu *menu = &selmon->statusbar.tray_menu;
-					int relx = lx - menu->x;
-					int rely = ly - menu->y;
-					if (relx >= 0 && rely >= 0 &&
-							relx < menu->width && rely < menu->height) {
-						TrayMenuEntry *entry = tray_menu_entry_at(selmon, relx, rely);
-						if (entry)
-							tray_menu_send_event(menu, entry, event->time_msec);
-						tray_menu_hide_all();
-						return;
-					} else {
-						tray_menu_hide_all();
-					}
-				}
+			if (fs && fs->isfullscreen)
+				goto skip_statusbar;
+		}
 
-				if (selmon && selmon->wifi_popup.visible) {
-					int lx = (int)lround(cursor->x);
-					int ly = (int)lround(cursor->y);
-					if (wifi_popup_handle_click(selmon, lx, ly, event->button))
-						return;
-				}
-
-				if (selmon && selmon->statusbar.net_menu.visible) {
-					int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
-					int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
-					if (net_menu_handle_click(selmon, lx, ly, event->button))
-						return;
-				}
-
-				if (selmon && selmon->showbar) {
-					int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
-					int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
-					if (handle_statusbar_clicks(selmon, lx, ly, event->button))
-						return;
-				}
+		if (selmon && selmon->statusbar.tray_menu.visible) {
+			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
+			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
+			TrayMenu *menu = &selmon->statusbar.tray_menu;
+			int relx = lx - menu->x;
+			int rely = ly - menu->y;
+			if (relx >= 0 && rely >= 0 &&
+					relx < menu->width && rely < menu->height) {
+				TrayMenuEntry *entry = tray_menu_entry_at(selmon, relx, rely);
+				if (entry)
+					tray_menu_send_event(menu, entry, event->time_msec);
+				tray_menu_hide_all();
+				return;
+			} else {
+				tray_menu_hide_all();
 			}
 		}
+
+		if (selmon && selmon->wifi_popup.visible) {
+			int lx = (int)lround(cursor->x);
+			int ly = (int)lround(cursor->y);
+			if (wifi_popup_handle_click(selmon, lx, ly, event->button))
+				return;
+		}
+
+		if (selmon && selmon->statusbar.net_menu.visible) {
+			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
+			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
+			if (net_menu_handle_click(selmon, lx, ly, event->button))
+				return;
+		}
+
+		if (selmon && selmon->showbar) {
+			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
+			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
+			if (handle_statusbar_clicks(selmon, lx, ly, event->button))
+				return;
+		}
+
+skip_statusbar:
 
 		/* Change focus if the button was _pressed_ over a client */
 		xytonode(cursor->x, cursor->y, NULL, &c, NULL, NULL, NULL);
@@ -1366,6 +1369,255 @@ keybinding(uint32_t mods, xkb_keysym_t sym)
 	return 0;
 }
 
+static int
+shortcuts_are_inhibited(void)
+{
+	struct wlr_keyboard_shortcuts_inhibitor_v1 *inhibitor;
+	wl_list_for_each(inhibitor, &kb_shortcuts_inhibit_mgr->inhibitors, link) {
+		if (inhibitor->active &&
+		    inhibitor->surface == seat->keyboard_state.focused_surface)
+			return 1;
+	}
+	return 0;
+}
+
+static int
+try_screenshot_key(const xkb_keysym_t *syms, int nsyms)
+{
+	if (!screenshot_mode)
+		return 0;
+	for (int i = 0; i < nsyms; i++) {
+		if (syms[i] == XKB_KEY_Escape) {
+			screenshot_handle_key(syms[i]);
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static int
+try_monitor_setup_key(const xkb_keysym_t *syms, int nsyms)
+{
+	Monitor *ms_mon = monitor_setup_visible_monitor();
+	if (!ms_mon)
+		return 0;
+	for (int i = 0; i < nsyms; i++) {
+		if (monitor_setup_handle_key(ms_mon, syms[i]))
+			return 1;
+	}
+	return 0;
+}
+
+static int
+try_sudo_popup_key(Monitor *sudo_mon, const xkb_keysym_t *syms, int nsyms, uint32_t mods)
+{
+	if (!sudo_mon)
+		return 0;
+	for (int i = 0; i < nsyms; i++) {
+		if (sudo_popup_handle_key(sudo_mon, mods, syms[i]))
+			return 1;
+	}
+	return 0;
+}
+
+static int
+try_wifi_popup_key(Monitor *wifi_mon, const xkb_keysym_t *syms, int nsyms, uint32_t mods)
+{
+	if (!wifi_mon)
+		return 0;
+	for (int i = 0; i < nsyms; i++) {
+		if (wifi_popup_handle_key(wifi_mon, mods, syms[i]))
+			return 1;
+	}
+	return 0;
+}
+
+static int
+try_stats_panel_key(Monitor *stats_mon, const xkb_keysym_t *syms, int nsyms)
+{
+	if (!stats_mon)
+		return 0;
+	for (int i = 0; i < nsyms; i++) {
+		if (stats_panel_handle_key(stats_mon, syms[i]))
+			return 1;
+	}
+	return 0;
+}
+
+static int
+try_gamepad_menu_key(const xkb_keysym_t *syms, int nsyms)
+{
+	Monitor *gm_mon;
+
+	if (!htpc_mode_active)
+		return 0;
+	gm_mon = gamepad_menu_visible_monitor();
+	if (!gm_mon)
+		return 0;
+	for (int i = 0; i < nsyms; i++) {
+		xkb_keysym_t s = syms[i];
+		if (s == XKB_KEY_Escape) {
+			gamepad_menu_hide(gm_mon);
+			return 1;
+		} else if (s == XKB_KEY_Up) {
+			if (gm_mon->gamepad_menu.selected > 0) {
+				gm_mon->gamepad_menu.selected--;
+				gamepad_menu_render(gm_mon);
+			}
+			return 1;
+		} else if (s == XKB_KEY_Down) {
+			if (gm_mon->gamepad_menu.selected < gm_mon->gamepad_menu.item_count - 1) {
+				gm_mon->gamepad_menu.selected++;
+				gamepad_menu_render(gm_mon);
+			}
+			return 1;
+		} else if (s == XKB_KEY_Return || s == XKB_KEY_KP_Enter) {
+			gamepad_menu_select(gm_mon);
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static int
+try_videoplayer_key(const xkb_keysym_t *syms, int nsyms, uint32_t mods)
+{
+	int handled = 0;
+
+	if (!active_videoplayer || active_videoplayer->state == VP_STATE_IDLE)
+		return 0;
+
+	/* In HTPC mode, route through media playback handler first */
+	if (htpc_mode_active && playback_state == PLAYBACK_PLAYING) {
+		for (int i = 0; i < nsyms; i++) {
+			if (handle_playback_key(syms[i])) {
+				handled = 1;
+				if (!active_videoplayer ||
+				    active_videoplayer->state == VP_STATE_IDLE) {
+					videoplayer_set_visible(active_videoplayer, 0);
+					videoplayer_destroy(active_videoplayer);
+					active_videoplayer = NULL;
+					hide_playback_osd();
+					playback_state = PLAYBACK_IDLE;
+					return 1;
+				}
+			}
+		}
+	}
+	if (!handled) {
+		for (int i = 0; i < nsyms; i++) {
+			if (videoplayer_handle_key(active_videoplayer, mods, syms[i])) {
+				handled = 1;
+				if (active_videoplayer->state == VP_STATE_IDLE) {
+					videoplayer_set_visible(active_videoplayer, 0);
+					videoplayer_destroy(active_videoplayer);
+					active_videoplayer = NULL;
+					hide_playback_osd();
+					playback_state = PLAYBACK_IDLE;
+					return 1;
+				}
+				render_playback_osd();
+			}
+		}
+	}
+	return handled;
+}
+
+static int
+try_pc_gaming_key(Monitor *pc_gaming_mon, const xkb_keysym_t *syms, int nsyms, uint32_t mods)
+{
+	if (!pc_gaming_mon)
+		return 0;
+	for (int i = 0; i < nsyms; i++) {
+		if (pc_gaming_handle_key(pc_gaming_mon, mods, syms[i]))
+			return 1;
+	}
+	return 0;
+}
+
+static int
+try_media_view_key(const xkb_keysym_t *syms, int nsyms)
+{
+	Monitor *media_mon = media_view_visible_monitor();
+	if (!media_mon)
+		return 0;
+	for (int i = 0; i < nsyms; i++) {
+		if (htpc_view_is_active(media_mon, media_mon->movies_view.view_tag, media_mon->movies_view.visible)) {
+			if (media_view_handle_key(media_mon, MEDIA_VIEW_MOVIES, syms[i]))
+				return 1;
+		} else if (htpc_view_is_active(media_mon, media_mon->tvshows_view.view_tag, media_mon->tvshows_view.visible)) {
+			if (media_view_handle_key(media_mon, MEDIA_VIEW_TVSHOWS, syms[i]))
+				return 1;
+		}
+	}
+	return 0;
+}
+
+static int
+try_nixpkgs_key(Monitor *nixpkgs_mon, const xkb_keysym_t *syms, int nsyms, uint32_t mods)
+{
+	int consumed = 0, is_navigation = 0;
+
+	if (!nixpkgs_mon)
+		return 0;
+	for (int i = 0; i < nsyms; i++) {
+		xkb_keysym_t s = syms[i];
+		if (nixpkgs_handle_key(nixpkgs_mon, mods, s))
+			consumed = 1;
+		if (s == XKB_KEY_Up || s == XKB_KEY_Down)
+			is_navigation = 1;
+	}
+	if (consumed) {
+		if (is_navigation)
+			nixpkgs_update_selection(nixpkgs_mon);
+		else {
+			nixpkgs_update_results(nixpkgs_mon);
+			nixpkgs_render(nixpkgs_mon);
+		}
+	}
+	return consumed;
+}
+
+static int
+try_modal_key(Monitor *modal_mon, const xkb_keysym_t *syms, int nsyms, uint32_t mods)
+{
+	int consumed = 0, is_text_input = 0;
+
+	if (!modal_mon)
+		return 0;
+	for (int i = 0; i < nsyms; i++) {
+		xkb_keysym_t s = syms[i];
+		if ((s >= 0x20 && s <= 0x7e) || s == XKB_KEY_BackSpace)
+			is_text_input = 1;
+		if (modal_handle_key(modal_mon, mods, s))
+			consumed = 1;
+	}
+	if (consumed) {
+		int is_file_search = (modal_mon->modal.active_idx == 1);
+		int is_navigation = 0;
+		for (int i = 0; i < nsyms; i++) {
+			if (syms[i] == XKB_KEY_Up || syms[i] == XKB_KEY_Down) {
+				is_navigation = 1;
+				break;
+			}
+		}
+		if (is_navigation) {
+			modal_update_selection(modal_mon);
+		} else if (is_text_input && is_file_search) {
+			modal_render_search_field(modal_mon);
+			if (!modal_mon->modal.render_timer)
+				modal_mon->modal.render_timer = wl_event_loop_add_timer(
+					event_loop, modal_render_timer_cb, modal_mon);
+			modal_mon->modal.render_pending = 1;
+			wl_event_source_timer_update(modal_mon->modal.render_timer, 300);
+		} else {
+			modal_update_results(modal_mon);
+			modal_render(modal_mon);
+		}
+	}
+	return consumed;
+}
+
 void
 keypress(struct wl_listener *listener, void *data)
 {
@@ -1389,8 +1641,6 @@ keypress(struct wl_listener *listener, void *data)
 	int nsyms = xkb_state_key_get_syms(
 			group->wlr_group->keyboard.xkb_state, keycode, &syms);
 	/* Also get the base keysym (level 0, no modifiers applied) for shifted bindings */
-	xkb_keysym_t base_sym = xkb_state_key_get_one_sym(
-			group->wlr_group->keyboard.xkb_state, keycode);
 	struct xkb_keymap *keymap = group->wlr_group->keyboard.keymap;
 	xkb_layout_index_t layout = xkb_state_key_get_layout(
 			group->wlr_group->keyboard.xkb_state, keycode);
@@ -1429,234 +1679,25 @@ keypress(struct wl_listener *listener, void *data)
 	/* On _press_ if there is no active screen locker,
 	 * attempt to process a compositor keybinding. */
 	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-		/* Screenshot mode — ESC cancels */
-		if (screenshot_mode) {
-			for (i = 0; i < nsyms; i++) {
-				if (syms[i] == XKB_KEY_Escape) {
-					screenshot_handle_key(syms[i]);
-					handled = 1;
-				}
-			}
+		handled = try_screenshot_key(syms, nsyms)
+		       || try_monitor_setup_key(syms, nsyms)
+		       || try_sudo_popup_key(sudo_mon, syms, nsyms, mods)
+		       || try_wifi_popup_key(wifi_mon, syms, nsyms, mods)
+		       || try_stats_panel_key(stats_mon, syms, nsyms)
+		       || try_gamepad_menu_key(syms, nsyms)
+		       || try_videoplayer_key(syms, nsyms, mods)
+		       || try_pc_gaming_key(pc_gaming_mon, syms, nsyms, mods)
+		       || try_media_view_key(syms, nsyms)
+		       || try_nixpkgs_key(nixpkgs_mon, syms, nsyms, mods)
+		       || try_modal_key(modal_mon, syms, nsyms, mods);
+		if (!handled && !shortcuts_are_inhibited()) {
+			last_keybinding_func = NULL;
+			for (i = 0; i < nsyms; i++)
+				handled = keybinding(mods, syms[i]) || handled;
 		}
-		/* Monitor setup popup */
-		if (!handled) {
-			Monitor *ms_mon = monitor_setup_visible_monitor();
-			if (ms_mon) {
-				for (i = 0; i < nsyms; i++) {
-					if (monitor_setup_handle_key(ms_mon, syms[i]))
-						handled = 1;
-				}
-			}
-		}
-		/* Sudo password popup takes highest priority */
-		if (sudo_mon) {
-			for (i = 0; i < nsyms; i++) {
-				if (sudo_popup_handle_key(sudo_mon, mods, syms[i]))
-					handled = 1;
-			}
-		}
-		/* WiFi password popup */
-		if (wifi_mon && !handled) {
-			for (i = 0; i < nsyms; i++) {
-				if (wifi_popup_handle_key(wifi_mon, mods, syms[i]))
-					handled = 1;
-			}
-		}
-		/* Stats panel - handle before PC gaming so it can be used in-game */
-		if (stats_mon && !handled) {
-			for (i = 0; i < nsyms; i++) {
-				if (stats_panel_handle_key(stats_mon, syms[i]))
-					handled = 1;
-			}
-		}
-		/* Guide menu (gamepad menu) - keyboard support in HTPC mode */
-		if (htpc_mode_active && !handled) {
-			Monitor *gm_mon = gamepad_menu_visible_monitor();
-			if (gm_mon) {
-				for (i = 0; i < nsyms; i++) {
-					xkb_keysym_t s = syms[i];
-					if (s == XKB_KEY_Escape) {
-						gamepad_menu_hide(gm_mon);
-						handled = 1;
-					} else if (s == XKB_KEY_Up) {
-						if (gm_mon->gamepad_menu.selected > 0) {
-							gm_mon->gamepad_menu.selected--;
-							gamepad_menu_render(gm_mon);
-						}
-						handled = 1;
-					} else if (s == XKB_KEY_Down) {
-						if (gm_mon->gamepad_menu.selected < gm_mon->gamepad_menu.item_count - 1) {
-							gm_mon->gamepad_menu.selected++;
-							gamepad_menu_render(gm_mon);
-						}
-						handled = 1;
-					} else if (s == XKB_KEY_Return || s == XKB_KEY_KP_Enter) {
-						gamepad_menu_select(gm_mon);
-						handled = 1;
-					}
-				}
-			}
-		}
-		/* Video player - handle before other views */
-		if (active_videoplayer && active_videoplayer->state != VP_STATE_IDLE && !handled) {
-			/* In HTPC mode, route through media playback handler first
-			 * for OSD menu navigation (arrows/enter/escape) */
-			if (htpc_mode_active && playback_state == PLAYBACK_PLAYING) {
-				for (i = 0; i < nsyms; i++) {
-					if (handle_playback_key(syms[i])) {
-						handled = 1;
-						if (!active_videoplayer ||
-						    active_videoplayer->state == VP_STATE_IDLE) {
-							videoplayer_set_visible(active_videoplayer, 0);
-							videoplayer_destroy(active_videoplayer);
-							active_videoplayer = NULL;
-							hide_playback_osd();
-							playback_state = PLAYBACK_IDLE;
-							break;
-						}
-					}
-				}
-			}
-			if (!handled) {
-				for (i = 0; i < nsyms; i++) {
-					if (videoplayer_handle_key(active_videoplayer, mods, syms[i])) {
-						handled = 1;
-						/* Check if player was stopped (Escape/Q) */
-						if (active_videoplayer->state == VP_STATE_IDLE) {
-							videoplayer_set_visible(active_videoplayer, 0);
-							/* Fully destroy for clean state on next play */
-							videoplayer_destroy(active_videoplayer);
-							active_videoplayer = NULL;
-							hide_playback_osd();
-							playback_state = PLAYBACK_IDLE;
-							break;
-						} else {
-							/* Show OSD on any key during playback */
-							render_playback_osd();
-						}
-					}
-				}
-			}
-		}
-		/* PC Gaming view */
-		if (pc_gaming_mon && !handled) {
-			for (i = 0; i < nsyms; i++) {
-				if (pc_gaming_handle_key(pc_gaming_mon, mods, syms[i]))
-					handled = 1;
-			}
-		}
-		/* Media views (Movies/TV-shows) */
-		if (!handled) {
-			Monitor *media_mon = media_view_visible_monitor();
-			if (media_mon) {
-				for (i = 0; i < nsyms; i++) {
-					/* Check which view is active */
-					if (htpc_view_is_active(media_mon, media_mon->movies_view.view_tag, media_mon->movies_view.visible)) {
-						if (media_view_handle_key(media_mon, MEDIA_VIEW_MOVIES, syms[i]))
-							handled = 1;
-					} else if (htpc_view_is_active(media_mon, media_mon->tvshows_view.view_tag, media_mon->tvshows_view.visible)) {
-						if (media_view_handle_key(media_mon, MEDIA_VIEW_TVSHOWS, syms[i]))
-							handled = 1;
-					}
-				}
-			}
-		}
-		/* Nixpkgs popup */
-		if (nixpkgs_mon && !handled) {
-			int consumed = 0;
-			int is_navigation = 0;
-			for (i = 0; i < nsyms; i++) {
-				xkb_keysym_t s = syms[i];
-				if (nixpkgs_handle_key(nixpkgs_mon, mods, s)) {
-					handled = 1;
-					consumed = 1;
-				}
-				if (s == XKB_KEY_Up || s == XKB_KEY_Down)
-					is_navigation = 1;
-			}
-			if (consumed) {
-				if (is_navigation) {
-					nixpkgs_update_selection(nixpkgs_mon);
-				} else {
-					nixpkgs_update_results(nixpkgs_mon);
-					nixpkgs_render(nixpkgs_mon);
-				}
-			}
-		}
-		if (modal_mon) {
-			int consumed = 0;
-			int is_text_input = 0;
-			for (i = 0; i < nsyms; i++) {
-				xkb_keysym_t s = syms[i];
-				/* Check if this is a text input key (printable or backspace) */
-				if ((s >= 0x20 && s <= 0x7e) || s == XKB_KEY_BackSpace)
-					is_text_input = 1;
-				if (modal_handle_key(modal_mon, mods, s)) {
-					handled = 1;
-					consumed = 1;
-				}
-			}
-			if (consumed) {
-				int is_file_search = (modal_mon->modal.active_idx == 1);
-				int is_navigation = 0;
-				for (i = 0; i < nsyms; i++) {
-					if (syms[i] == XKB_KEY_Up || syms[i] == XKB_KEY_Down) {
-						is_navigation = 1;
-						break;
-					}
-				}
-				if (is_navigation) {
-					/* Navigation keys: ultra-fast highlight toggle only */
-					modal_update_selection(modal_mon);
-				} else if (is_text_input && is_file_search) {
-					/* File search: show text immediately, delay search 300ms */
-					modal_render_search_field(modal_mon);
-					/* Schedule search + full render after 300ms */
-					if (!modal_mon->modal.render_timer)
-						modal_mon->modal.render_timer = wl_event_loop_add_timer(
-							event_loop, modal_render_timer_cb, modal_mon);
-					modal_mon->modal.render_pending = 1;
-					wl_event_source_timer_update(modal_mon->modal.render_timer, 300);
-				} else {
-					/* App launcher, git-projects, text input: full update */
-					modal_update_results(modal_mon);
-					modal_render(modal_mon);
-				}
-			}
-		}
-		if (!handled) {
-			/* Check if keyboard shortcuts are inhibited for the focused surface
-			 * (remote desktop, VM guests, games requesting passthrough) */
-			int shortcuts_inhibited = 0;
-			struct wlr_keyboard_shortcuts_inhibitor_v1 *inhibitor;
-			wl_list_for_each(inhibitor, &kb_shortcuts_inhibit_mgr->inhibitors, link) {
-				if (inhibitor->active &&
-				    inhibitor->surface == seat->keyboard_state.focused_surface) {
-					shortcuts_inhibited = 1;
-					break;
-				}
-			}
-			if (!shortcuts_inhibited) {
-				last_keybinding_func = NULL;
-				for (i = 0; i < nsyms; i++)
-					handled = keybinding(mods, syms[i]) || handled;
-			}
-		}
-		/* If no binding matched, try with base keysyms (level 0) for shifted bindings */
-		if (!handled && nlevel0 > 0) {
-			int shortcuts_inhibited = 0;
-			struct wlr_keyboard_shortcuts_inhibitor_v1 *inhibitor;
-			wl_list_for_each(inhibitor, &kb_shortcuts_inhibit_mgr->inhibitors, link) {
-				if (inhibitor->active &&
-				    inhibitor->surface == seat->keyboard_state.focused_surface) {
-					shortcuts_inhibited = 1;
-					break;
-				}
-			}
-			if (!shortcuts_inhibited) {
-				for (i = 0; i < nlevel0; i++)
-					handled = keybinding(mods, level0_syms[i]) || handled;
-			}
+		if (!handled && nlevel0 > 0 && !shortcuts_are_inhibited()) {
+			for (i = 0; i < nlevel0; i++)
+				handled = keybinding(mods, level0_syms[i]) || handled;
 		}
 	}
 

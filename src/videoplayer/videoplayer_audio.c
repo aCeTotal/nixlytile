@@ -199,20 +199,12 @@ static size_t ring_buffer_read(AudioRingBuffer *ring, uint8_t *data, size_t len)
 
 static size_t ring_buffer_available(AudioRingBuffer *ring)
 {
-    size_t avail;
-    pthread_mutex_lock(&ring->lock);
-    avail = ring->available;
-    pthread_mutex_unlock(&ring->lock);
-    return avail;
+    return __atomic_load_n(&ring->available, __ATOMIC_ACQUIRE);
 }
 
 static size_t ring_buffer_available_space(AudioRingBuffer *ring)
 {
-    size_t space;
-    pthread_mutex_lock(&ring->lock);
-    space = ring->size - ring->available;
-    pthread_mutex_unlock(&ring->lock);
-    return space;
+    return ring->size - __atomic_load_n(&ring->available, __ATOMIC_ACQUIRE);
 }
 
 /* ================================================================

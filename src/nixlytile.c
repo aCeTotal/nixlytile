@@ -378,8 +378,9 @@ wifi_network_at_index(int idx)
 uint32_t
 random_status_delay_ms(void)
 {
-	seed_status_rng();
-	return 30000u + (uint32_t)(rand() % 30001);
+	/* Fixed 45s interval — consolidates wakeups for better CPU sleep.
+	 * Previously random 30-60s, which spread wakeups preventing deep idle. */
+	return 45000u;
 }
 
 
@@ -2269,12 +2270,13 @@ struct diag_thread_snap {
 	char name[32];
 	unsigned long long utime, stime;
 };
-static struct diag_thread_snap diag_prev_threads[64];
+static struct diag_thread_snap *diag_prev_threads = NULL;  /* Lazy: allocated on first use */
 static int diag_prev_thread_count;
 static unsigned long long diag_prev_total_cpu;
 
 /* Per-system-process CPU snapshot */
-static struct { pid_t pid; char name[64]; unsigned long long ticks; } diag_prev_procs[128];
+struct diag_proc_snap { pid_t pid; char name[64]; unsigned long long ticks; };
+static struct diag_proc_snap *diag_prev_procs = NULL;  /* Lazy: allocated on first use */
 static int diag_prev_proc_count;
 
 /* I/O snapshot */
@@ -2285,6 +2287,16 @@ static void
 diag_log_cpu_breakdown(void)
 {
 	if (diag_log_fd < 0) return;
+
+	/* Lazy-allocate diagnostic snapshot arrays on first use */
+	if (!diag_prev_threads) {
+		diag_prev_threads = calloc(64, sizeof(*diag_prev_threads));
+		if (!diag_prev_threads) return;
+	}
+	if (!diag_prev_procs) {
+		diag_prev_procs = calloc(128, sizeof(*diag_prev_procs));
+		if (!diag_prev_procs) return;
+	}
 
 	struct timespec now_ts;
 	clock_gettime(CLOCK_REALTIME, &now_ts);
@@ -2657,14 +2669,19 @@ static int
 diag_timer_cb(void *data)
 {
 	(void)data;
+
+	/* Stop diagnostics timer if logging is no longer active */
+	if (diag_log_fd < 0)
+		return 0;
+
 	diag_log_cpu_breakdown();
 	diag_log_io_stats();
 	diag_log_nvidia();
 	diag_log_audio_summary();
 
-	/* Reschedule */
-	if (diag_timer && diag_log_fd >= 0)
-		wl_event_source_timer_update(diag_timer, 5000);
+	/* Reschedule at 10s instead of 5s — halves wakeups while still useful */
+	if (diag_timer)
+		wl_event_source_timer_update(diag_timer, 10000);
 	return 0;
 }
 
@@ -4026,6 +4043,7 @@ main(int argc, char *argv[])
 	setup();
 	setup_config_watch();
 	setup_monitors_conf_watch();
+	setup_monitor_overlay_watch();
 	gamepad_setup();
 	bt_controller_setup();
 	pc_gaming_cache_watch_setup();

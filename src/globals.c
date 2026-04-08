@@ -22,6 +22,9 @@ int monconf_watch_wd = -1;
 char monconf_path_cached[PATH_MAX] = {0};
 struct wl_event_source *monconf_watch_source = NULL;
 struct wl_event_source *monitor_setup_timer = NULL;
+int monovl_inotify_fd = -1;
+int monovl_watch_wd = -1;
+struct wl_event_source *monovl_watch_source = NULL;
 struct wl_display *dpy;
 struct wl_event_loop *event_loop;  /* Non-static: accessed by videoplayer */
 VideoPlayer *active_videoplayer = NULL;
@@ -238,9 +241,6 @@ struct CpuCursorBuffer *cpu_cursor_buf = NULL;
 int cpu_cursor_active = 0;
 int dgpu_render_fd = -1;     /* Held open to prevent dGPU D3cold/runtime suspend */
 struct wl_event_source *dgpu_power_watchdog = NULL;
-
-/* GPU-specific game launch parameters */
-#include "game_launch_params.h"
 
 /* PC gaming cache file watcher for realtime updates */
 int pc_gaming_cache_inotify_fd = -1;

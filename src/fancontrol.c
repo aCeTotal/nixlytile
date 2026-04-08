@@ -640,7 +640,7 @@ fan_curve_pwm(int temp_c)
 }
 
 #define FAN_THERMAL_MAX      16
-#define FAN_THERMAL_INTERVAL 5000   /* ms between thermal ticks */
+#define FAN_THERMAL_INTERVAL 15000  /* ms between thermal ticks (15s — adequate for thermal mass) */
 #define FAN_THERMAL_RAMP_UP  30     /* max PWM increase per tick */
 #define FAN_THERMAL_RAMP_DN  10     /* max PWM decrease per tick (quieter) */
 
@@ -753,16 +753,22 @@ fan_thermal_tick(void *data)
 		fan_thermal_scan();
 
 	for (int i = 0; i < fan_thermal_slot_count; i++) {
+		static int pwm_enable_check_counter;
 		int temp_mc, temp_c, target, diff, new_pwm;
 
 		if (!fan_thermal_slots[i].active)
 			continue;
 
-		/* Re-assert manual mode if something else reset it */
-		{
+		/* Re-assert manual mode if something else reset it.
+		 * Only check every 4th tick (~60s) to reduce sysfs reads. */
+		if (i == 0)
+			pwm_enable_check_counter++;
+		if (pwm_enable_check_counter >= 4) {
 			int en = sysfs_read_int(fan_thermal_slots[i].pwm_enable_path);
 			if (en >= 0 && en != 1)
 				sysfs_write_int(fan_thermal_slots[i].pwm_enable_path, 1);
+			if (i == fan_thermal_slot_count - 1)
+				pwm_enable_check_counter = 0;
 		}
 
 		temp_mc = sysfs_read_int(fan_thermal_slots[i].temp_path);
