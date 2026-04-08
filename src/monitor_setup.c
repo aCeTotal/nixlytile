@@ -228,9 +228,12 @@ render_box_content(MonitorSetup *ms, int idx)
 	drawroundedrect(e->box_tree, xoff, 0, vw, bh, box_bg);
 	draw_border(e->box_tree, xoff, 0, vw, bh, 2, bord);
 
-	/* Screen N (XXHz) */
-	num = grid_label_number(ms, idx);
-	snprintf(line1, sizeof(line1), "Screen %d (%.0fHz)", num, e->refresh);
+	/* Make #N (XXHz) */
+	{
+		char mlabel[128];
+		grid_make_label(ms, idx, mlabel, sizeof(mlabel));
+		snprintf(line1, sizeof(line1), "%s (%.0fHz)", mlabel, e->refresh);
+	}
 	tw1 = text_width(line1);
 	if (tw1 < vw - 10) {
 		render_text_at(e->box_tree, line1,
@@ -274,9 +277,10 @@ update_onscreen_labels(MonitorSetup *ms)
 			    ms->label_trees[i]) {
 				clear_tree_children(ms->label_trees[i], NULL);
 				char label[128];
-				int num = grid_label_number(ms, i);
-				snprintf(label, sizeof(label), "Screen %d (%.0fHz)",
-					num, ms->entries[i].refresh);
+				char mlabel[128];
+				grid_make_label(ms, i, mlabel, sizeof(mlabel));
+				snprintf(label, sizeof(label), "%s (%.0fHz)",
+					mlabel, ms->entries[i].refresh);
 				float label_bg[4] = {1.0f, 1.0f, 1.0f, 0.95f};
 				float label_fg[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 				int tw = text_width(label);
@@ -456,6 +460,25 @@ grid_label_number(MonitorSetup *ms, int entry_idx)
 	return num;
 }
 
+/* Build a label like "Samsung #1" for the given entry, numbered per-make */
+static void
+grid_make_label(MonitorSetup *ms, int entry_idx, char *buf, size_t len)
+{
+	SetupMonitorEntry *target = &ms->entries[entry_idx];
+	const char *make = target->make[0] ? target->make : "Screen";
+	int num = 1;
+
+	for (int i = 0; i < ms->entry_count; i++) {
+		SetupMonitorEntry *e = &ms->entries[i];
+		if (strcmp(e->make, target->make) != 0)
+			continue;
+		if (e->grid_row < target->grid_row ||
+		    (e->grid_row == target->grid_row && e->grid_col < target->grid_col))
+			num++;
+	}
+	snprintf(buf, len, "%s #%d", make, num);
+}
+
 void
 monitor_setup_show(Monitor *m)
 {
@@ -488,6 +511,8 @@ monitor_setup_show(Monitor *m)
 		SetupMonitorEntry *e = &ms->entries[idx];
 		memset(e, 0, sizeof(*e));
 		snprintf(e->name, sizeof(e->name), "%s", other->wlr_output->name);
+		if (other->wlr_output->make)
+			snprintf(e->make, sizeof(e->make), "%s", other->wlr_output->make);
 
 		if (other->wlr_output->current_mode) {
 			e->width = other->wlr_output->current_mode->width;
@@ -660,9 +685,10 @@ monitor_setup_show(Monitor *m)
 				if (ms->label_trees[i]) {
 					clear_tree_children(ms->label_trees[i], NULL);
 					char label[128];
-					int num = grid_label_number(ms, i);
-					snprintf(label, sizeof(label), "Screen %d (%.0fHz)",
-						num, ms->entries[i].refresh);
+					char mlabel[128];
+					grid_make_label(ms, i, mlabel, sizeof(mlabel));
+					snprintf(label, sizeof(label), "%s (%.0fHz)",
+						mlabel, ms->entries[i].refresh);
 
 					float label_bg[4] = {1.0f, 1.0f, 1.0f, 0.95f};
 					float label_fg[4] = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -1994,18 +2020,54 @@ monitor_overlay_update(void)
 			/* Position at top-left of this output */
 			wlr_scene_node_set_position(&tree->node, om->m.x + 20, om->m.y + 20);
 
-			/* Red highlight fullscreen rect behind the label */
+			/* Red highlight — cover entire output except nixlycc window */
 			int is_highlight = (highlight_name[0] &&
 				strcmp(labels[i].connector, highlight_name) == 0);
 			if (is_highlight) {
-				/* Create a highlight tree covering the entire output */
+				float red[4] = {1.0f, 0.1f, 0.1f, 0.12f};
+				int mx = om->m.x, my = om->m.y;
+				int mw = om->m.width, mh = om->m.height;
+
+				/* Find nixlycc window on this output */
+				struct wlr_box excl = {0};
+				int has_excl = 0;
+				Client *c;
+				wl_list_for_each(c, &clients, link) {
+					if (c->mon == om &&
+					    strcmp(client_get_appid(c), "nixlycc") == 0) {
+						excl = c->geom;
+						/* Convert to output-local coords */
+						excl.x -= mx;
+						excl.y -= my;
+						has_excl = 1;
+						break;
+					}
+				}
+
 				struct wlr_scene_tree *hl = wlr_scene_tree_create(layers[LyrOverlay]);
 				if (hl) {
 					monovl_trees[monovl_count] = hl;
 					monovl_count++;
-					wlr_scene_node_set_position(&hl->node, om->m.x, om->m.y);
-					float red[4] = {1.0f, 0.1f, 0.1f, 0.12f};
-					drawrect(hl, 0, 0, om->m.width, om->m.height, red);
+					wlr_scene_node_set_position(&hl->node, mx, my);
+
+					if (has_excl) {
+						/* Top strip */
+						if (excl.y > 0)
+							drawrect(hl, 0, 0, mw, excl.y, red);
+						/* Bottom strip */
+						int bot_y = excl.y + excl.height;
+						if (bot_y < mh)
+							drawrect(hl, 0, bot_y, mw, mh - bot_y, red);
+						/* Left strip (between top and bottom) */
+						if (excl.x > 0)
+							drawrect(hl, 0, excl.y, excl.x, excl.height, red);
+						/* Right strip (between top and bottom) */
+						int right_x = excl.x + excl.width;
+						if (right_x < mw)
+							drawrect(hl, right_x, excl.y, mw - right_x, excl.height, red);
+					} else {
+						drawrect(hl, 0, 0, mw, mh, red);
+					}
 				}
 			}
 

@@ -927,6 +927,7 @@ typedef struct {
 
 typedef struct {
 	char name[64];          /* connector name: DP-1, HDMI-A-1 */
+	char make[64];          /* brand name: Samsung, HP, etc. */
 	int width, height;      /* selected resolution */
 	float refresh;          /* selected refresh rate Hz */
 	int transform;          /* WL_OUTPUT_TRANSFORM_NORMAL or _90 */
