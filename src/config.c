@@ -71,7 +71,8 @@ apply_startup_defaults(void)
 
 	/*
 	 * Microphone volume - read actual state from PipeWire first,
-	 * then unmute and set to default.
+	 * then unmute and set to default.  Skip if no mic source exists
+	 * (e.g. desktop without a microphone connected).
 	 */
 	{
 		double actual_mic;
@@ -81,23 +82,24 @@ apply_startup_defaults(void)
 
 		/* Read actual current state from PipeWire */
 		actual_mic = pipewire_mic_volume_percent();
-		(void)actual_mic;
 
-		/* Now unmute and set volume */
-		set_pipewire_mic_mute(0);
+		if (actual_mic >= 0.0) {
+			/* Mic source exists - unmute and set volume */
+			set_pipewire_mic_mute(0);
 
-		/* Update all mic mute state variables to match */
-		mic_muted = 0;
-		mic_cached_muted = 0;
+			mic_muted = 0;
+			mic_cached_muted = 0;
 
-		/* Invalidate cache again */
-		mic_last_read_ms = 0;
-	}
+			/* Invalidate cache again */
+			mic_last_read_ms = 0;
 
-	if (set_pipewire_mic_volume(mic_default) == 0) {
-		microphone_active = mic_default;
-		microphone_stored = mic_default;
-		mic_last_percent = mic_default;
+			if (set_pipewire_mic_volume(mic_default) == 0) {
+				microphone_active = mic_default;
+				microphone_stored = mic_default;
+				mic_last_percent = mic_default;
+			}
+		}
+		/* else: no mic source, leave microphone_active = -1.0 */
 	}
 
 	applied = 1;

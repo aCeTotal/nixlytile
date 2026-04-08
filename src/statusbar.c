@@ -3533,11 +3533,16 @@ pipewire_mic_volume_percent(void)
 	int muted = 0;
 	uint64_t now = monotonic_msec();
 
-	if (mic_last_read_ms != 0 && now - mic_last_read_ms < 60000) {
-		if (mic_cached >= 0.0) {
+	if (mic_last_read_ms != 0) {
+		uint64_t age = now - mic_last_read_ms;
+		if (mic_cached >= 0.0 && age < 60000) {
 			mic_muted = mic_cached_muted;
 			return mic_cached;
 		}
+		/* Negative results cached for 10s to avoid excessive fork/exec
+		 * while still detecting newly-connected mics promptly */
+		if (mic_cached < 0.0 && age < 10000)
+			return -1.0;
 	}
 
 	fp = popen("wpctl get-volume @DEFAULT_AUDIO_SOURCE@", "r");
@@ -3553,12 +3558,14 @@ pipewire_mic_volume_percent(void)
 	}
 
 	pclose(fp);
+	mic_last_read_ms = now;
 	mic_muted = muted;
 	if (level >= 0.0) {
 		mic_cached = level;
 		mic_cached_muted = muted;
-		mic_last_read_ms = now;
 		microphone_active = level;
+	} else {
+		mic_cached = -1.0;
 	}
 	return level;
 }
@@ -4652,25 +4659,41 @@ refreshstatusvolume(void)
 void
 refreshstatusmic(void)
 {
-	double vol = microphone_active;
+	double vol;
+	double read;
 	Monitor *m;
 	int barh;
-	double display = vol;
+	double display;
 	int force_render = 0;
 	int use_muted_color = 0;
 	const char *icon = mic_icon_unmuted;
 
-	if (vol < 0.0) {
-		double read = pipewire_mic_volume_percent();
-		if (read >= 0.0) {
-			vol = read;
-			microphone_active = read;
-			mic_last_percent = read;
-		}
+	/* Always check PipeWire so we detect mic appearing/disappearing */
+	read = pipewire_mic_volume_percent();
+	if (read >= 0.0) {
+		vol = read;
+		microphone_active = read;
+		mic_last_percent = read;
+	} else {
+		vol = microphone_active;
 	}
-	if (vol >= 0.0)
-		mic_last_percent = vol;
-	display = vol >= 0.0 ? vol : mic_last_percent;
+
+	if (vol < 0.0) {
+		/* No mic source available - hide the module */
+		wl_list_for_each(m, &mons, link) {
+			if (!m->statusbar.mic.tree)
+				continue;
+			if (m->statusbar.mic.width > 0) {
+				clearstatusmodule(&m->statusbar.mic);
+				m->statusbar.mic.width = 0;
+				positionstatusmodules(m);
+			}
+		}
+		return;
+	}
+
+	mic_last_percent = vol;
+	display = vol;
 
 	if (display > mic_max_percent)
 		display = mic_max_percent;
@@ -4721,7 +4744,8 @@ refreshstatusmic(void)
 			if (!m->statusbar.mic.tree || !m->showbar)
 				continue;
 			barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-			if (need || force_render || barh != last_mic_h) {
+			if (need || force_render || barh != last_mic_h
+					|| m->statusbar.mic.width == 0) {
 				last_mic_h = barh;
 				rendermic(&m->statusbar.mic, barh, mic_text);
 				positionstatusmodules(m);
