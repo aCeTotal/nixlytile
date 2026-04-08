@@ -126,13 +126,28 @@ monitor_setup_animate_cb(void *data)
 		if (fabsf(dy) > 0.5f) { e->anim_y += dy * ease; still_moving = 1; }
 		else e->anim_y = e->target_y;
 
-		/* Snap size and rotation immediately */
-		if (fabsf(e->anim_w - e->target_w) > 0.5f ||
-		    fabsf(e->anim_h - e->target_h) > 0.5f)
-			size_changed = 1;
-		e->anim_w = e->target_w;
-		e->anim_h = e->target_h;
-		e->anim_rot = e->target_rot;
+		/* Animate size smoothly */
+		float dw = e->target_w - e->anim_w;
+		float dh = e->target_h - e->anim_h;
+		float dr = e->target_rot - e->anim_rot;
+
+		if (fabsf(dw) > 0.5f) {
+			e->anim_w += dw * ease; still_moving = 1; size_changed = 1;
+		} else if (e->anim_w != e->target_w) {
+			e->anim_w = e->target_w; size_changed = 1;
+		}
+
+		if (fabsf(dh) > 0.5f) {
+			e->anim_h += dh * ease; still_moving = 1; size_changed = 1;
+		} else if (e->anim_h != e->target_h) {
+			e->anim_h = e->target_h; size_changed = 1;
+		}
+
+		if (fabsf(dr) > 0.5f) {
+			e->anim_rot += dr * ease; still_moving = 1;
+		} else {
+			e->anim_rot = e->target_rot;
+		}
 
 		/* Re-render content if size changed (rotation) */
 		if (size_changed)
@@ -190,8 +205,8 @@ render_box_content(MonitorSetup *ms, int idx)
 
 	clear_tree_children(e->box_tree, NULL);
 
-	bw = (int)e->target_w;
-	bh = (int)e->target_h;
+	bw = (int)e->anim_w;
+	bh = (int)e->anim_h;
 	if (bw <= 0 || bh <= 0)
 		return;
 
@@ -397,7 +412,22 @@ compute_box_layout(MonitorSetup *ms, int popup_w, int popup_h)
 		SetupMonitorEntry *e = &ms->entries[i];
 		int cx = origin_x + e->grid_col * (cell_w + spacing);
 		int cy = origin_y + e->grid_row * (cell_h + spacing);
-		int bw = box_w, bh = box_h;
+		int bw, bh;
+		int is_portrait = (e->transform == WL_OUTPUT_TRANSFORM_90 ||
+				   e->transform == WL_OUTPUT_TRANSFORM_270);
+		float disp_w = is_portrait ? (float)e->height : (float)e->width;
+		float disp_h = is_portrait ? (float)e->width  : (float)e->height;
+		float aspect = (disp_h > 0) ? disp_w / disp_h : 1.0f;
+
+		if (aspect >= (float)box_w / (float)box_h) {
+			bw = box_w;
+			bh = (int)((float)box_w / aspect);
+		} else {
+			bh = box_h;
+			bw = (int)((float)box_h * aspect);
+		}
+		if (bw < 40) bw = 40;
+		if (bh < 40) bh = 40;
 
 		e->target_w = (float)bw;
 		e->target_h = (float)bh;
@@ -1180,7 +1210,7 @@ monitor_setup_handle_motion(Monitor *m, int gx, int gy)
 		float drag_cx, drag_cy, rel_x, rel_y, in_cell_x, in_cell_y;
 		int slot_col, slot_row;
 		int new_target_col, new_target_row, new_insert_dir, new_insert_after;
-		int found, in_v_gap, in_h_gap;
+		int found;
 
 		/* Follow cursor — instant, no scene rebuild */
 		e->anim_x = (float)(lx - ms->drag_offset_x);
@@ -1205,45 +1235,91 @@ monitor_setup_handle_motion(Monitor *m, int gx, int gy)
 		in_cell_x = rel_x - slot_col * (float)cell_step_x;
 		in_cell_y = rel_y - slot_row * (float)cell_step_y;
 
-		/* Are we in the spacing gap area? */
-		in_v_gap = (in_cell_y > (float)ms->cell_h &&
-			    in_cell_y < (float)cell_step_y);
-		in_h_gap = (in_cell_x > (float)ms->cell_w &&
-			    in_cell_x < (float)cell_step_x);
-
 		new_target_col = ms->drag_target_col;
 		new_target_row = ms->drag_target_row;
 		new_insert_dir = -1;
 		new_insert_after = -1;
 		found = 0;
 
-		/* --- 1. Between insertion (cursor in gap between two occupied cells) --- */
+		/* --- 1. Between insertion (expanded detection zone) --- */
+		{
+			/* Extend gap hit zone into adjacent cells by 18% of cell size */
+			float extend_y = ms->cell_h * 0.18f;
+			float extend_x = ms->cell_w * 0.18f;
+			float v_thresh = (float)spacing * 0.5f + extend_y;
+			float h_thresh = (float)spacing * 0.5f + extend_x;
 
-		/* Vertical gap only (not corner) */
-		if (in_v_gap && !in_h_gap) {
-			int check_col = slot_col;
-			int top_idx = entry_at_grid_excl(ms, check_col, slot_row, di);
-			int bot_idx = entry_at_grid_excl(ms, check_col, slot_row + 1, di);
-			if (top_idx >= 0 && bot_idx >= 0) {
-				new_target_col = check_col;
-				new_target_row = slot_row + 1;
-				new_insert_dir = 1; /* vertical */
-				new_insert_after = slot_row;
-				found = 1;
+			/* Distance from cursor to each adjacent gap midline */
+			float dv_below = fabsf(in_cell_y -
+				((float)ms->cell_h + (float)spacing * 0.5f));
+			float dv_above = in_cell_y + (float)spacing * 0.5f;
+			float dh_right = fabsf(in_cell_x -
+				((float)ms->cell_w + (float)spacing * 0.5f));
+			float dh_left  = in_cell_x + (float)spacing * 0.5f;
+
+			int near_any_v = (dv_below < v_thresh) ||
+					 (dv_above < v_thresh);
+			int near_any_h = (dh_right < h_thresh) ||
+					 (dh_left < h_thresh);
+
+			/* Vertical gap below: between slot_row and slot_row+1 */
+			if (dv_below < v_thresh && !near_any_h) {
+				int top = entry_at_grid_excl(ms, slot_col,
+						slot_row, di);
+				int bot = entry_at_grid_excl(ms, slot_col,
+						slot_row + 1, di);
+				if (top >= 0 && bot >= 0) {
+					new_target_col = slot_col;
+					new_target_row = slot_row + 1;
+					new_insert_dir = 1;
+					new_insert_after = slot_row;
+					found = 1;
+				}
 			}
-		}
 
-		/* Horizontal gap only (not corner) */
-		if (!found && in_h_gap && !in_v_gap) {
-			int check_row = slot_row;
-			int left_idx = entry_at_grid_excl(ms, slot_col, check_row, di);
-			int right_idx = entry_at_grid_excl(ms, slot_col + 1, check_row, di);
-			if (left_idx >= 0 && right_idx >= 0) {
-				new_target_col = slot_col + 1;
-				new_target_row = check_row;
-				new_insert_dir = 0; /* horizontal */
-				new_insert_after = slot_col;
-				found = 1;
+			/* Vertical gap above: between slot_row-1 and slot_row */
+			if (!found && dv_above < v_thresh && !near_any_h) {
+				int top = entry_at_grid_excl(ms, slot_col,
+						slot_row - 1, di);
+				int bot = entry_at_grid_excl(ms, slot_col,
+						slot_row, di);
+				if (top >= 0 && bot >= 0) {
+					new_target_col = slot_col;
+					new_target_row = slot_row;
+					new_insert_dir = 1;
+					new_insert_after = slot_row - 1;
+					found = 1;
+				}
+			}
+
+			/* Horizontal gap right: between slot_col and slot_col+1 */
+			if (!found && dh_right < h_thresh && !near_any_v) {
+				int left = entry_at_grid_excl(ms, slot_col,
+						slot_row, di);
+				int right = entry_at_grid_excl(ms, slot_col + 1,
+						slot_row, di);
+				if (left >= 0 && right >= 0) {
+					new_target_col = slot_col + 1;
+					new_target_row = slot_row;
+					new_insert_dir = 0;
+					new_insert_after = slot_col;
+					found = 1;
+				}
+			}
+
+			/* Horizontal gap left: between slot_col-1 and slot_col */
+			if (!found && dh_left < h_thresh && !near_any_v) {
+				int left = entry_at_grid_excl(ms, slot_col - 1,
+						slot_row, di);
+				int right = entry_at_grid_excl(ms, slot_col,
+						slot_row, di);
+				if (left >= 0 && right >= 0) {
+					new_target_col = slot_col;
+					new_target_row = slot_row;
+					new_insert_dir = 0;
+					new_insert_after = slot_col - 1;
+					found = 1;
+				}
 			}
 		}
 
