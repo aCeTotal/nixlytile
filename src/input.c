@@ -2175,6 +2175,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 				/* Transfer any open status menus to new monitor */
 				transfer_status_menus(selmon, newmon);
 				selmon = newmon;
+				monitor_wake(newmon);
 			}
 		}
 	}

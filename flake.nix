@@ -24,17 +24,18 @@
             pname = "wlroots";
             version = "0.20.0-rc4";
             src = ./wlroots;
-            nativeBuildInputs = with pkgs; [ meson ninja pkg-config wayland-scanner ];
+            nativeBuildInputs = with pkgs; [ meson ninja pkg-config wayland-scanner glslang ];
             buildInputs = with pkgs; [
               wayland wayland-protocols libdrm libxkbcommon pixman libinput
               xwayland seatd libepoxy libglvnd libxcb libxcb-wm
               libgbm hwdata libliftoff libdisplay-info lcms2 libxcb-errors
+              vulkan-loader vulkan-headers
             ];
             mesonFlags = [
               "-Dexamples=false"
               "-Dxwayland=enabled"
               "-Dbackends=drm,libinput"
-              "-Drenderers=gles2"
+              "-Drenderers=gles2,vulkan"
               "-Dallocators=gbm"
             ];
           };
@@ -184,6 +185,8 @@
               pkgs.pipewire
               pkgs.libass
               pkgs.libva
+              pkgs.vulkan-loader
+              pkgs.vulkan-headers
             ] ++ ps.iconDeps;
 
             makeFlags = [ "PKG_CONFIG=${pkgs.pkg-config}/bin/pkg-config" ];
@@ -202,6 +205,7 @@
               runHook preInstall
               make PREFIX=$out MANDIR=$out/share/man DATADIR=$out/share install
               wrapProgram $out/bin/nixlytile \
+                --set WLR_RENDERER vulkan \
                 --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps} \
                 --prefix XDG_DATA_DIRS : "${pkgs.papirus-icon-theme}/share:${pkgs.adwaita-icon-theme}/share:${pkgs.hicolor-icon-theme}/share:${pkgs.shared-mime-info}/share"
 

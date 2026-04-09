@@ -526,8 +526,25 @@ static void atomic_connector_add(struct atomic *atom,
 			DRM_MODE_LINK_STATUS_GOOD);
 	}
 	if (active && conn->props.content_type != 0) {
-		atomic_add(atom, conn->id, conn->props.content_type,
-			DRM_MODE_CONTENT_TYPE_GRAPHICS);
+		uint32_t drm_content_type = DRM_MODE_CONTENT_TYPE_GRAPHICS;
+		if (state->base->committed & WLR_OUTPUT_STATE_CONTENT_TYPE) {
+			// wp_content_type_v1_type: 0=none, 1=photo, 2=video, 3=game
+			switch (state->base->content_type) {
+			case 3: // WP_CONTENT_TYPE_V1_TYPE_GAME
+				drm_content_type = DRM_MODE_CONTENT_TYPE_GAME;
+				break;
+			case 2: // WP_CONTENT_TYPE_V1_TYPE_VIDEO
+				drm_content_type = DRM_MODE_CONTENT_TYPE_CINEMA;
+				break;
+			case 1: // WP_CONTENT_TYPE_V1_TYPE_PHOTO
+				drm_content_type = DRM_MODE_CONTENT_TYPE_PHOTO;
+				break;
+			default:
+				drm_content_type = DRM_MODE_CONTENT_TYPE_GRAPHICS;
+				break;
+			}
+		}
+		atomic_add(atom, conn->id, conn->props.content_type, drm_content_type);
 	}
 	if (modeset && active && conn->props.max_bpc != 0 && conn->max_bpc_bounds[1] != 0) {
 		atomic_add(atom, conn->id, conn->props.max_bpc, pick_max_bpc(conn, state->primary_fb));

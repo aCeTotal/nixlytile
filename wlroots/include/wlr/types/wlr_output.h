@@ -78,6 +78,7 @@ enum wlr_output_state_field {
 	WLR_OUTPUT_STATE_SIGNAL_TIMELINE = 1 << 11,
 	WLR_OUTPUT_STATE_COLOR_TRANSFORM = 1 << 12,
 	WLR_OUTPUT_STATE_IMAGE_DESCRIPTION = 1 << 13,
+	WLR_OUTPUT_STATE_CONTENT_TYPE = 1 << 14,
 };
 
 enum wlr_output_state_mode_type {
@@ -161,6 +162,10 @@ struct wlr_output_state {
 	struct wlr_color_transform *color_transform;
 
 	struct wlr_output_image_description *image_description;
+
+	// Content type hint for the display (matches wp_content_type_v1_type values)
+	// 0 = none, 1 = photo, 2 = video, 3 = game
+	uint32_t content_type;
 };
 
 struct wlr_output_impl;
@@ -626,6 +631,16 @@ void wlr_output_state_set_color_transform(struct wlr_output_state *state,
  */
 bool wlr_output_state_set_image_description(struct wlr_output_state *state,
 	const struct wlr_output_image_description *image_desc);
+
+/**
+ * Sets the content type hint for the display.
+ *
+ * Values match wp_content_type_v1_type: 0=none, 1=photo, 2=video, 3=game.
+ * The backend may use this to enable features like Auto Low Latency Mode
+ * (ALLM) on HDMI displays.
+ */
+void wlr_output_state_set_content_type(struct wlr_output_state *state,
+	uint32_t content_type);
 
 /**
  * Copies the output state from src to dst. It is safe to then

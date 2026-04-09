@@ -1,6 +1,8 @@
 #include "nixlytile.h"
 #include "client.h"
 
+static int idle_heartbeat_cb(void *data);
+
 void
 cleanupmon(struct wl_listener *listener, void *data)
 {
@@ -49,6 +51,7 @@ cleanupmon(struct wl_listener *listener, void *data)
 	destroy_tree(m);
 	closemon(m);
 	ll_cursor_cleanup(m);
+	wl_event_source_remove(m->idle_heartbeat);
 	wlr_scene_node_destroy(&m->fullscreen_bg->node);
 	free(m);
 
@@ -646,6 +649,11 @@ createmon(struct wl_listener *listener, void *data)
 	init_tree(m);
 	modal_prewarm(m);
 
+	/* Idle monitor render throttle */
+	m->idle_heartbeat = wl_event_loop_add_timer(event_loop, idle_heartbeat_cb, m);
+	m->render_idle = 0;
+	m->idle_frames = 0;
+
 	/* The xdg-protocol specifies:
 	 *
 	 * If the fullscreened surface is not opaque, the compositor must make
@@ -961,10 +969,38 @@ powermgrsetmode(struct wl_listener *listener, void *data)
 	updatemons(NULL, NULL);
 }
 
+/* ── Idle monitor render throttle ─────────────────────────────────── */
+
+static int
+idle_heartbeat_cb(void *data)
+{
+	Monitor *m = data;
+	if (m->render_idle)
+		wlr_output_schedule_frame(m->wlr_output);
+	return 0; /* one-shot; re-armed from rendermon */
+}
+
+static void
+monitor_wake_internal(Monitor *m)
+{
+	m->render_idle = 0;
+	m->idle_frames = 0;
+	wl_event_source_timer_update(m->idle_heartbeat, 0); /* disarm */
+	wlr_output_schedule_frame(m->wlr_output);
+}
+
+void
+monitor_wake(Monitor *m)
+{
+	if (m && m->render_idle)
+		monitor_wake_internal(m);
+}
+
 static void
 present_videoplayer_frame(Monitor *m, uint64_t frame_start_ns)
 {
 	if (active_videoplayer &&
+	    active_videoplayer->mon == m &&
 	    (active_videoplayer->state == VP_STATE_PLAYING ||
 	     active_videoplayer->state == VP_STATE_BUFFERING)) {
 		videoplayer_present_frame(active_videoplayer, frame_start_ns);
@@ -1502,6 +1538,11 @@ rendermon(struct wl_listener *listener, void *data)
 		wlr_log(WLR_DEBUG, "Frame repeat disabled - VRR active or tearing enabled");
 	}
 
+	if (is_game)
+		wlr_output_state_set_content_type(&state, WP_CONTENT_TYPE_V1_TYPE_GAME);
+	else if (is_video)
+		wlr_output_state_set_content_type(&state, WP_CONTENT_TYPE_V1_TYPE_VIDEO);
+
 	if (needs_frame) {
 		commit_output_frame(m, &state, allow_tearing, use_frame_pacing, frame_start_ns);
 	} else {
@@ -1589,6 +1630,33 @@ rendermon(struct wl_listener *listener, void *data)
 
 		/* Time for new frame - reset counter and continue to frame_done */
 		m->frame_repeat_current = 0;
+	}
+
+	/* --- Idle monitor throttle --- */
+	{
+		Monitor *cursor_mon = xytomon(cursor->x, cursor->y);
+		int cursor_here = (cursor_mon == m);
+		int video_here = (active_videoplayer && active_videoplayer->mon == m &&
+		                  (active_videoplayer->state == VP_STATE_PLAYING ||
+		                   active_videoplayer->state == VP_STATE_BUFFERING));
+
+		if (cursor_here || is_game || is_video || video_here) {
+			if (m->render_idle)
+				monitor_wake_internal(m);
+			m->idle_frames = 0;
+		} else {
+			m->idle_frames++;
+			if (m->idle_frames > 120) {
+				if (!m->render_idle) {
+					m->render_idle = 1;
+					wl_event_source_timer_update(m->idle_heartbeat, 1000);
+				}
+				/* Send frame_done for this heartbeat cycle but don't
+				 * schedule another frame — heartbeat fires in ~1s */
+				wlr_scene_output_send_frame_done(m->scene_output, &now);
+				return;
+			}
+		}
 	}
 
 	/*

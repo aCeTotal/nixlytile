@@ -497,6 +497,8 @@ static void release_command_buffer_resources(struct wlr_vk_command_buffer *cb,
 	}
 }
 
+static void do_destroy_render_buffer(struct wlr_vk_render_buffer *buffer);
+
 static struct wlr_vk_command_buffer *get_command_buffer(
 		struct wlr_vk_renderer *renderer) {
 	VkResult res;
@@ -525,6 +527,16 @@ static struct wlr_vk_command_buffer *get_command_buffer(
 		if (cb->vk != VK_NULL_HANDLE && !cb->recording &&
 				cb->timeline_point <= current_point) {
 			release_command_buffer_resources(cb, renderer, now);
+		}
+	}
+
+	// Destroy deferred render buffers whose GPU work has completed
+	struct wlr_vk_render_buffer *rbuf, *rbuf_tmp;
+	wl_list_for_each_safe(rbuf, rbuf_tmp,
+			&renderer->pending_destroy_render_buffers, pending_destroy_link) {
+		if (rbuf->last_timeline_point <= current_point) {
+			wl_list_remove(&rbuf->pending_destroy_link);
+			do_destroy_render_buffer(rbuf);
 		}
 	}
 
@@ -612,18 +624,8 @@ static void finish_render_buffer_out(struct wlr_vk_render_buffer_out *out,
 	vkDestroyImageView(dev, out->image_view, NULL);
 }
 
-static void destroy_render_buffer(struct wlr_vk_render_buffer *buffer) {
-	wl_list_remove(&buffer->link);
-	wlr_addon_finish(&buffer->addon);
-
+static void do_destroy_render_buffer(struct wlr_vk_render_buffer *buffer) {
 	VkDevice dev = buffer->renderer->dev->dev;
-
-	// TODO: asynchronously wait for the command buffers using this render
-	// buffer to complete (just like we do for textures)
-	VkResult res = vkQueueWaitIdle(buffer->renderer->dev->queue);
-	if (res != VK_SUCCESS) {
-		wlr_vk_error("vkQueueWaitIdle", res);
-	}
 
 	finish_render_buffer_out(&buffer->linear.out, dev);
 	finish_render_buffer_out(&buffer->srgb.out, dev);
@@ -643,6 +645,28 @@ static void destroy_render_buffer(struct wlr_vk_render_buffer *buffer) {
 	}
 
 	free(buffer);
+}
+
+static void destroy_render_buffer(struct wlr_vk_render_buffer *buffer) {
+	wl_list_remove(&buffer->link);
+	wlr_addon_finish(&buffer->addon);
+
+	struct wlr_vk_renderer *renderer = buffer->renderer;
+
+	// Check if the GPU has finished using this buffer via timeline semaphore
+	if (buffer->last_timeline_point > 0) {
+		uint64_t current_point;
+		VkResult res = renderer->dev->api.vkGetSemaphoreCounterValueKHR(
+			renderer->dev->dev, renderer->timeline_semaphore, &current_point);
+		if (res == VK_SUCCESS && current_point < buffer->last_timeline_point) {
+			// GPU still in progress - defer destruction
+			wl_list_insert(&renderer->pending_destroy_render_buffers,
+				&buffer->pending_destroy_link);
+			return;
+		}
+	}
+
+	do_destroy_render_buffer(buffer);
 }
 
 static void handle_render_buffer_destroy(struct wlr_addon *addon) {
@@ -907,6 +931,7 @@ static struct wlr_vk_render_buffer *create_render_buffer(
 	}
 	buffer->wlr_buffer = wlr_buffer;
 	buffer->renderer = renderer;
+	wl_list_init(&buffer->pending_destroy_link);
 	wlr_addon_init(&buffer->addon, &wlr_buffer->addons, renderer,
 		&render_buffer_addon_impl);
 	wl_list_insert(&renderer->render_buffers, &buffer->link);
@@ -1155,6 +1180,13 @@ static void vulkan_destroy(struct wlr_renderer *wlr_renderer) {
 		destroy_render_buffer(render_buffer);
 	}
 
+	// Destroy any deferred render buffers (GPU is idle after vkDeviceWaitIdle)
+	wl_list_for_each_safe(render_buffer, render_buffer_tmp,
+			&renderer->pending_destroy_render_buffers, pending_destroy_link) {
+		wl_list_remove(&render_buffer->pending_destroy_link);
+		do_destroy_render_buffer(render_buffer);
+	}
+
 	struct wlr_vk_color_transform *color_transform, *color_transform_tmp;
 	wl_list_for_each_safe(color_transform, color_transform_tmp,
 			&renderer->color_transforms, link) {
@@ -1196,6 +1228,7 @@ static void vulkan_destroy(struct wlr_renderer *wlr_renderer) {
 	vkDestroyImage(dev->dev, renderer->dummy3d_image, NULL);
 	vkFreeMemory(dev->dev, renderer->dummy3d_mem, NULL);
 
+	vkDestroyPipelineCache(dev->dev, renderer->pipeline_cache, NULL);
 	vkDestroySemaphore(dev->dev, renderer->timeline_semaphore, NULL);
 	vkDestroyPipelineLayout(dev->dev, renderer->output_pipe_layout, NULL);
 	vkDestroyDescriptorSetLayout(dev->dev, renderer->output_ds_srgb_layout, NULL);
@@ -1460,6 +1493,80 @@ destroy_image:
 	return false;
 }
 
+static const struct wlr_render_timer_impl vk_render_timer_impl;
+
+static struct wlr_render_timer *vk_render_timer_create(
+		struct wlr_renderer *wlr_renderer) {
+	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
+
+	VkPhysicalDeviceProperties phdev_props;
+	vkGetPhysicalDeviceProperties(renderer->dev->phdev, &phdev_props);
+	if (phdev_props.limits.timestampComputeAndGraphics == VK_FALSE) {
+		wlr_log(WLR_ERROR, "GPU does not support timestamp queries");
+		return NULL;
+	}
+
+	struct wlr_vk_render_timer *timer = calloc(1, sizeof(*timer));
+	if (!timer) {
+		return NULL;
+	}
+	timer->base.impl = &vk_render_timer_impl;
+	timer->renderer = renderer;
+
+	VkQueryPoolCreateInfo pool_info = {
+		.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+		.queryType = VK_QUERY_TYPE_TIMESTAMP,
+		.queryCount = 2, // begin + end
+	};
+	VkResult res = vkCreateQueryPool(renderer->dev->dev, &pool_info, NULL,
+		&timer->query_pool);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkCreateQueryPool", res);
+		free(timer);
+		return NULL;
+	}
+
+	return &timer->base;
+}
+
+static int vk_render_timer_get_duration_ns(struct wlr_render_timer *wlr_timer) {
+	struct wlr_vk_render_timer *timer = wl_container_of(wlr_timer, timer, base);
+	struct wlr_vk_renderer *renderer = timer->renderer;
+
+	if (!timer->pending) {
+		return -1;
+	}
+
+	uint64_t timestamps[2];
+	VkResult res = vkGetQueryPoolResults(renderer->dev->dev, timer->query_pool,
+		0, 2, sizeof(timestamps), timestamps, sizeof(uint64_t),
+		VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkGetQueryPoolResults", res);
+		return -1;
+	}
+
+	timer->pending = false;
+
+	VkPhysicalDeviceProperties phdev_props;
+	vkGetPhysicalDeviceProperties(renderer->dev->phdev, &phdev_props);
+	float period = phdev_props.limits.timestampPeriod; // nanoseconds per tick
+
+	uint64_t delta = timestamps[1] - timestamps[0];
+	return (int)(delta * period);
+}
+
+static void vk_render_timer_destroy(struct wlr_render_timer *wlr_timer) {
+	struct wlr_vk_render_timer *timer = wl_container_of(wlr_timer, timer, base);
+	vkDestroyQueryPool(timer->renderer->dev->dev, timer->query_pool, NULL);
+	free(timer);
+}
+
+static const struct wlr_render_timer_impl vk_render_timer_impl = {
+	.get_duration_ns = vk_render_timer_get_duration_ns,
+	.destroy = vk_render_timer_destroy,
+};
+
 static int vulkan_get_drm_fd(struct wlr_renderer *wlr_renderer) {
 	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
 	return renderer->dev->drm_fd;
@@ -1492,6 +1599,7 @@ static const struct wlr_renderer_impl renderer_impl = {
 	.get_drm_fd = vulkan_get_drm_fd,
 	.texture_from_buffer = vulkan_texture_from_buffer,
 	.begin_buffer_pass = vulkan_begin_buffer_pass,
+	.render_timer_create = vk_render_timer_create,
 };
 
 // Initializes the VkDescriptorSetLayout and VkPipelineLayout needed
@@ -1844,8 +1952,7 @@ struct wlr_vk_pipeline *setup_get_or_create_pipeline(
 		.pVertexInputState = &vertex,
 	};
 
-	VkPipelineCache cache = VK_NULL_HANDLE;
-	res = vkCreateGraphicsPipelines(dev, cache, 1, &pinfo, NULL, &pipeline->vk);
+	res = vkCreateGraphicsPipelines(dev, renderer->pipeline_cache, 1, &pinfo, NULL, &pipeline->vk);
 	if (res != VK_SUCCESS) {
 		wlr_vk_error("failed to create vulkan pipelines:", res);
 		free(pipeline);
@@ -1858,7 +1965,8 @@ struct wlr_vk_pipeline *setup_get_or_create_pipeline(
 
 static bool init_blend_to_output_pipeline(struct wlr_vk_renderer *renderer,
 		VkRenderPass rp, VkPipelineLayout pipe_layout, VkPipeline *pipe,
-		enum wlr_vk_output_transform transform) {
+		enum wlr_vk_output_transform transform,
+		VkPipeline base_pipeline) {
 	VkResult res;
 	VkDevice dev = renderer->dev->dev;
 
@@ -1944,9 +2052,17 @@ static bool init_blend_to_output_pipeline(struct wlr_vk_renderer *renderer,
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
 	};
 
+	VkPipelineCreateFlags flags = 0;
+	if (base_pipeline == VK_NULL_HANDLE) {
+		flags = VK_PIPELINE_CREATE_ALLOW_DERIVATIVES_BIT;
+	} else {
+		flags = VK_PIPELINE_CREATE_DERIVATIVE_BIT;
+	}
+
 	VkGraphicsPipelineCreateInfo pinfo = {
 		.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
 		.pNext = NULL,
+		.flags = flags,
 		.layout = pipe_layout,
 		.renderPass = rp,
 		.subpass = 1, // second subpass!
@@ -1959,10 +2075,11 @@ static bool init_blend_to_output_pipeline(struct wlr_vk_renderer *renderer,
 		.pViewportState = &viewport,
 		.pDynamicState = &dynamic,
 		.pVertexInputState = &vertex,
+		.basePipelineHandle = base_pipeline,
+		.basePipelineIndex = -1,
 	};
 
-	VkPipelineCache cache = VK_NULL_HANDLE;
-	res = vkCreateGraphicsPipelines(dev, cache, 1, &pinfo, NULL, pipe);
+	res = vkCreateGraphicsPipelines(dev, renderer->pipeline_cache, 1, &pinfo, NULL, pipe);
 	if (res != VK_SUCCESS) {
 		wlr_vk_error("failed to create vulkan pipelines:", res);
 		return false;
@@ -2385,34 +2502,41 @@ static struct wlr_vk_render_format_setup *find_or_create_render_setup(
 		}
 
 		// this is only well defined if render pass has a 2nd subpass
+		// First pipeline allows derivatives, rest derive from it
 		if (!init_blend_to_output_pipeline(
 				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_identity, WLR_VK_OUTPUT_TRANSFORM_IDENTITY)) {
+				&setup->output_pipe_identity, WLR_VK_OUTPUT_TRANSFORM_IDENTITY,
+				VK_NULL_HANDLE)) {
 			goto error;
 		}
 		if (!init_blend_to_output_pipeline(
 				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_lut3d, WLR_VK_OUTPUT_TRANSFORM_LUT3D)) {
+				&setup->output_pipe_lut3d, WLR_VK_OUTPUT_TRANSFORM_LUT3D,
+				setup->output_pipe_identity)) {
 			goto error;
 		}
 		if (!init_blend_to_output_pipeline(
 				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_srgb, WLR_VK_OUTPUT_TRANSFORM_INVERSE_SRGB)) {
+				&setup->output_pipe_srgb, WLR_VK_OUTPUT_TRANSFORM_INVERSE_SRGB,
+				setup->output_pipe_identity)) {
 			goto error;
 		}
 		if (!init_blend_to_output_pipeline(
 				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_pq, WLR_VK_OUTPUT_TRANSFORM_INVERSE_ST2084_PQ)) {
+				&setup->output_pipe_pq, WLR_VK_OUTPUT_TRANSFORM_INVERSE_ST2084_PQ,
+				setup->output_pipe_identity)) {
 			goto error;
 		}
 		if (!init_blend_to_output_pipeline(
 				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_gamma22, WLR_VK_OUTPUT_TRANSFORM_INVERSE_GAMMA22)) {
+				&setup->output_pipe_gamma22, WLR_VK_OUTPUT_TRANSFORM_INVERSE_GAMMA22,
+				setup->output_pipe_identity)) {
 			goto error;
 		}
 		if (!init_blend_to_output_pipeline(
 			renderer, setup->render_pass, renderer->output_pipe_layout,
-			&setup->output_pipe_bt1886, WLR_VK_OUTPUT_TRANSFORM_INVERSE_BT1886)) {
+			&setup->output_pipe_bt1886, WLR_VK_OUTPUT_TRANSFORM_INVERSE_BT1886,
+			setup->output_pipe_identity)) {
 			goto error;
 		}
 	} else {
@@ -2538,6 +2662,7 @@ struct wlr_renderer *vulkan_renderer_create_for_device(struct wlr_vk_device *dev
 	wl_list_init(&renderer->output_descriptor_pools);
 	wl_list_init(&renderer->render_format_setups);
 	wl_list_init(&renderer->render_buffers);
+	wl_list_init(&renderer->pending_destroy_render_buffers);
 	wl_list_init(&renderer->color_transforms);
 	wl_list_init(&renderer->pipeline_layouts);
 
@@ -2567,6 +2692,16 @@ struct wlr_renderer *vulkan_renderer_create_for_device(struct wlr_vk_device *dev
 		goto error;
 	}
 
+	VkPipelineCacheCreateInfo cache_info = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+	};
+	res = vkCreatePipelineCache(dev->dev, &cache_info, NULL,
+		&renderer->pipeline_cache);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkCreatePipelineCache", res);
+		goto error;
+	}
+
 	VkSemaphoreTypeCreateInfoKHR semaphore_type_info = {
 		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO_KHR,
 		.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE_KHR,
@@ -2591,11 +2726,6 @@ error:
 }
 
 struct wlr_renderer *wlr_vk_renderer_create_with_drm_fd(int drm_fd) {
-	wlr_log(WLR_INFO, "The vulkan renderer is only experimental and "
-		"not expected to be ready for daily use");
-	wlr_log(WLR_INFO, "Run with VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation "
-		"to enable the validation layer");
-
 	struct wlr_vk_instance *ini = vulkan_instance_create(default_debug);
 	if (!ini) {
 		wlr_log(WLR_ERROR, "creating vulkan instance for renderer failed");

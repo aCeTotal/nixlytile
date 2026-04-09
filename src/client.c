@@ -369,6 +369,7 @@ focusclient(Client *c, int lift)
 		wl_list_insert(&fstack, &c->flink);
 		selmon = c->mon;
 		c->isurgent = 0;
+		monitor_wake(c->mon);
 		/* Invalidate fullscreen classification cache */
 		c->mon->classify_cache_client = NULL;
 

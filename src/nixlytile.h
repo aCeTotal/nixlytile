@@ -1431,6 +1431,10 @@ struct Monitor {
 	int supports_10bit;
 	int render_10bit_active;
 	int scene_build_failures;
+	/* Idle monitor render throttle */
+	int render_idle;                    /* 1 = idle mode, throttled to heartbeat */
+	int idle_frames;                    /* consecutive frames without cursor + no active content */
+	struct wl_event_source *idle_heartbeat; /* 1s periodic timer for idle monitors */
 	/* Low-latency cursor plane (direct DRM atomic, bypasses wlroots) */
 	int ll_cursor_fd;            /* DRM fd for cursor commits (-1 = disabled) */
 	uint32_t ll_cursor_plane_id; /* DRM plane ID for cursor */
@@ -2294,6 +2298,7 @@ void set_adaptive_sync(Monitor *m, int enabled);
 void set_video_refresh_rate(Monitor *m, Client *c);
 void restore_max_refresh_rate(Monitor *m);
 int detect_10bit_support(Monitor *m);
+void monitor_wake(Monitor *m);
 void ll_cursor_init(Monitor *m);
 void ll_cursor_move(Monitor *m, int x, int y);
 void ll_cursor_cleanup(Monitor *m);

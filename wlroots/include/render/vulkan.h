@@ -231,6 +231,9 @@ struct wlr_vk_render_buffer {
 	struct wlr_vk_renderer *renderer;
 	struct wl_list link; // wlr_vk_renderer.buffers
 
+	uint64_t last_timeline_point; // timeline point when last used for rendering
+	struct wl_list pending_destroy_link; // wlr_vk_renderer.pending_destroy_render_buffers
+
 	VkDeviceMemory memories[WLR_DMABUF_MAX_PLANES];
 	uint32_t mem_count;
 	VkImage image;
@@ -288,7 +291,7 @@ struct wlr_vk_command_buffer {
 	struct wl_array wait_semaphores; // VkSemaphore
 };
 
-#define VULKAN_COMMAND_BUFFERS_CAP 64
+#define VULKAN_COMMAND_BUFFERS_CAP 16
 
 // Vulkan wlr_renderer implementation on top of a wlr_vk_device.
 struct wlr_vk_renderer {
@@ -323,6 +326,8 @@ struct wlr_vk_renderer {
 	VkImageView dummy3d_image_view;
 	bool dummy3d_image_transitioned;
 
+	VkPipelineCache pipeline_cache;
+
 	VkSemaphore timeline_semaphore;
 	uint64_t timeline_point;
 
@@ -336,6 +341,7 @@ struct wlr_vk_renderer {
 	struct wl_list foreign_textures; // wlr_vk_texture.foreign_link
 
 	struct wl_list render_buffers; // wlr_vk_render_buffer.link
+	struct wl_list pending_destroy_render_buffers; // wlr_vk_render_buffer.pending_destroy_link
 
 	struct wl_list color_transforms; // wlr_vk_color_transform.link
 
@@ -431,6 +437,8 @@ struct wlr_vk_render_pass {
 
 	struct wlr_drm_syncobj_timeline *signal_timeline;
 	uint64_t signal_point;
+
+	struct wlr_vk_render_timer *timer;
 
 	struct wl_array textures; // struct wlr_vk_render_pass_texture
 };
@@ -569,6 +577,13 @@ struct wlr_vk_color_transform {
 	enum wlr_color_transfer_function inverse_eotf;
 };
 void vk_color_transform_destroy(struct wlr_addon *addon);
+
+struct wlr_vk_render_timer {
+	struct wlr_render_timer base;
+	struct wlr_vk_renderer *renderer;
+	VkQueryPool query_pool; // 2 slots: begin + end
+	bool pending;
+};
 
 // util
 const char *vulkan_strerror(VkResult err);

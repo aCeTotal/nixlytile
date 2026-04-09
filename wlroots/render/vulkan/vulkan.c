@@ -537,10 +537,11 @@ struct wlr_vk_device *vulkan_device_create(struct wlr_vk_instance *ini,
 	dev->implicit_sync_interop =
 		exportable_semaphore && importable_semaphore && dmabuf_sync_file_import_export;
 	if (dev->implicit_sync_interop) {
-		wlr_log(WLR_DEBUG, "Implicit sync interop supported");
+		wlr_log(WLR_INFO, "Implicit sync interop supported");
 	} else {
-		wlr_log(WLR_INFO, "Implicit sync interop not supported, "
-			"falling back to blocking");
+		wlr_log(WLR_ERROR, "Vulkan: implicit_sync_interop not available — "
+			"DMA-BUF sync will use blocking poll() fallback. "
+			"Check kernel version and Vulkan driver.");
 	}
 
 	VkPhysicalDeviceSamplerYcbcrConversionFeatures phdev_sampler_ycbcr_features = {

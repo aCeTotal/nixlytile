@@ -141,6 +141,12 @@ bool wlr_output_state_set_image_description(struct wlr_output_state *state,
 	return true;
 }
 
+void wlr_output_state_set_content_type(struct wlr_output_state *state,
+		uint32_t content_type) {
+	state->committed |= WLR_OUTPUT_STATE_CONTENT_TYPE;
+	state->content_type = content_type;
+}
+
 bool wlr_output_state_copy(struct wlr_output_state *dst,
 		const struct wlr_output_state *src) {
 	struct wlr_output_state copy = *src;

@@ -187,6 +187,8 @@ start_animation(Monitor *m)
 		wl_event_source_timer_update(ms->anim_timer, 16);
 }
 
+static void grid_make_label(MonitorSetup *ms, int entry_idx, char *buf, size_t len);
+
 /* ── per-box rendering ─────────────────────────────────────────────── */
 
 static void
