@@ -87,7 +87,7 @@ statusbar_mic_muted_fg = #FF4C4CFF
 statusbar_tag_bg = #00000033
 
 # Active workspace tag background
-statusbar_tag_active_bg = #3399FF44
+statusbar_tag_active_bg = #1565C0FF
 
 # Hovered workspace tag background
 statusbar_tag_hover_bg = #66B3FFAA
