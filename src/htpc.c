@@ -166,90 +166,6 @@ focus_or_launch_app(const char *app_id, const char *launch_cmd)
 	}
 }
 
-int
-game_refocus_timer_cb(void *data)
-{
-	Client *c = game_refocus_client;
-	(void)data;
-
-	game_refocus_client = NULL;
-
-	if (!c || !client_surface(c) || !client_surface(c)->mapped)
-		return 0;
-
-	/* Only refocus if this client is still the focused client */
-	if (seat->keyboard_state.focused_surface != client_surface(c))
-		return 0;
-
-	wlr_log(WLR_INFO, "game_refocus: re-focusing game '%s' after delay",
-		client_get_appid(c) ? client_get_appid(c) : "(unknown)");
-
-	/* Re-send keyboard enter to ensure the client has focus */
-	struct wlr_keyboard *kb = wlr_seat_get_keyboard(seat);
-	client_notify_enter(client_surface(c), kb);
-	client_activate_surface(client_surface(c), 1);
-
-#ifdef XWAYLAND
-	/* For XWayland clients, also re-activate the X11 surface */
-	if (c->type == X11 && c->surface.xwayland) {
-		wlr_xwayland_surface_activate(c->surface.xwayland, 1);
-		wlr_xwayland_surface_restack(c->surface.xwayland, NULL, XCB_STACK_MODE_ABOVE);
-	}
-#endif
-
-	return 0;
-}
-
-void
-schedule_game_refocus(Client *c, uint32_t ms)
-{
-	if (!event_loop || !c)
-		return;
-	if (!game_refocus_timer)
-		game_refocus_timer = wl_event_loop_add_timer(event_loop,
-				game_refocus_timer_cb, NULL);
-	if (game_refocus_timer) {
-		game_refocus_client = c;
-		wl_event_source_timer_update(game_refocus_timer, ms);
-	}
-}
-
-int
-game_fullscreen_timer_cb(void *data)
-{
-	Client *c = game_fullscreen_pending_client;
-	(void)data;
-	game_fullscreen_pending_client = NULL;
-
-	if (!c || !client_surface(c) || !client_surface(c)->mapped)
-		return 0;
-	if (c->isfullscreen || c->isfloating)
-		return 0;  /* already fullscreen or state changed */
-
-	wlr_log(WLR_INFO, "Delayed fullscreen: activating for '%s'",
-		client_get_appid(c) ? client_get_appid(c) : "(unknown)");
-	setfullscreen(c, 1);
-#ifdef XWAYLAND
-	if (c->type == X11)
-		schedule_game_refocus(c, 150);
-#endif
-	return 0;
-}
-
-void
-schedule_delayed_game_fullscreen(Client *c, uint32_t ms)
-{
-	if (!event_loop || !c)
-		return;
-	if (!game_fullscreen_timer)
-		game_fullscreen_timer = wl_event_loop_add_timer(event_loop,
-				game_fullscreen_timer_cb, NULL);
-	if (game_fullscreen_timer) {
-		game_fullscreen_pending_client = c;
-		wl_event_source_timer_update(game_fullscreen_timer, ms);
-	}
-}
-
 Client *
 get_fullscreen_client(void)
 {
@@ -2100,7 +2016,11 @@ update_game_mode(void)
 	 * OBS, and every other non-game fullscreen app.
 	 */
 	if (c) {
-		if (is_video_content(c)) {
+		/* Steam main window / popups are never games, even in fullscreen.
+		 * Must be checked before process-ancestry detection. */
+		if (is_steam_client(c) || is_steam_popup(c)) {
+			is_game = 0;
+		} else if (is_video_content(c)) {
 			/* Explicit video hint — definitely not a game */
 			is_game = 0;
 		} else if (client_wants_tearing(c) || is_game_content(c)) {
@@ -2865,6 +2785,22 @@ is_game_launcher_child(pid_t pid)
 	int depth = 0;
 	const int max_depth = 10; /* Prevent infinite loops */
 
+	if (pid <= 1)
+		return 0;
+
+	/* Read the initial process's ppid, but do NOT test its own comm.
+	 * Otherwise the Steam main window (comm="steam") matches itself. */
+	snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+	f = fopen(path, "r");
+	if (!f)
+		return 0;
+	if (fscanf(f, "%*d (%63[^)]) %*c %d", comm, &ppid) != 2) {
+		fclose(f);
+		return 0;
+	}
+	fclose(f);
+
+	pid = ppid;
 	while (pid > 1 && depth < max_depth) {
 		snprintf(path, sizeof(path), "/proc/%d/stat", pid);
 		f = fopen(path, "r");
@@ -2952,6 +2888,12 @@ looks_like_game(Client *c)
 	pid_t pid;
 
 	if (!c)
+		return 0;
+
+	/* Steam main window / popups are never games. Must be checked before
+	 * process-ancestry detection, which otherwise matches the Steam
+	 * launcher itself via its own comm. */
+	if (is_steam_client(c) || is_steam_popup(c))
 		return 0;
 
 	/* Protocol hints */

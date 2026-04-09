@@ -332,12 +332,6 @@ destroynotify(struct wl_listener *listener, void *data)
 		game_mode_pid = 0;
 		game_mode_client = NULL;
 	}
-	/* Avoid use-after-free if the delayed-fullscreen timer still points
-	 * at this client */
-	if (c == game_fullscreen_pending_client)
-		game_fullscreen_pending_client = NULL;
-	if (c == game_refocus_client)
-		game_refocus_client = NULL;
 	free(c);
 }
 
@@ -735,28 +729,23 @@ mapnotify(struct wl_listener *listener, void *data)
 	}
 
 	/*
-	 * AUTO REAL-FULLSCREEN FOR GAMES
+	 * AUTO-FULLSCREEN FOR GAMES
 	 *
-	 * Games are detected at map time. Small game windows (splash / logo /
-	 * launcher) are treated as floating and centered on the full monitor.
-	 * Full-size game windows get delayed real fullscreen, which gives them
-	 * the full monitor resolution, VRR, game mode ultra, and hides the
-	 * statusbar — but only after the game has finished initial renderer
-	 * setup (~800ms), so it responds correctly to the size configure.
+	 * Decision is taken at map time based on the window's initial size:
+	 *   - Small (< 3/4 of monitor in both dims) → centered-floating splash
+	 *   - Otherwise → immediate true fullscreen at monitor's native resolution
 	 *
-	 * Detection criteria for looks_like_game():
-	 * - Client is a child process of Steam (game launcher)
-	 * - Client uses content-type=game protocol hint
-	 * - Client requests tearing (low-latency mode used by games)
+	 * No 800 ms timer, no pending-client slot, no tiled intermediate phase.
+	 * The game's first buffer is already drawn at the monitor's native
+	 * resolution, which eliminates the Nvidia green flicker caused by the
+	 * tiled→fullscreen buffer-size transition. The compositor still honours
+	 * any later set_fullscreen request from the client via fullscreennotify.
 	 */
 	if (!c->isfloating && !c->isfullscreen && looks_like_game(c)) {
-		/*
-		 * SPLASH / LOGO DETECTION
-		 * Small game windows (launchers, splash screens, logos) should be
-		 * centered floating on the full monitor, never fullscreened.
-		 */
-		int small_w = initial_w > 0 && initial_w < c->mon->m.width / 2;
-		int small_h = initial_h > 0 && initial_h < c->mon->m.height / 2;
+		int mon_w = c->mon->m.width;
+		int mon_h = c->mon->m.height;
+		int small_w = initial_w > 0 && initial_w < (mon_w * 3) / 4;
+		int small_h = initial_h > 0 && initial_h < (mon_h * 3) / 4;
 
 		if (small_w && small_h) {
 			wlr_log(WLR_INFO, "Game splash/logo detected: '%s' %dx%d, centering",
@@ -765,8 +754,8 @@ mapnotify(struct wl_listener *listener, void *data)
 			c->isfloating = 1;
 			c->geom.width = initial_w;
 			c->geom.height = initial_h;
-			c->geom.x = (c->mon->m.width - initial_w) / 2 + c->mon->m.x;
-			c->geom.y = (c->mon->m.height - initial_h) / 2 + c->mon->m.y;
+			c->geom.x = (mon_w - initial_w) / 2 + c->mon->m.x;
+			c->geom.y = (mon_h - initial_h) / 2 + c->mon->m.y;
 			wlr_scene_node_reparent(&c->scene->node, layers[LyrFloat]);
 			resize(c, c->geom, 1);
 			focusclient(c, 1);
@@ -774,15 +763,11 @@ mapnotify(struct wl_listener *listener, void *data)
 			return;
 		}
 
-		/*
-		 * DELAYED REAL FULLSCREEN FOR GAMES
-		 * Don't trigger setfullscreen at map time — the game is still
-		 * setting up its renderer and may ignore the size configure. Give
-		 * it ~800ms to finish initialization, then activate real fullscreen.
-		 */
-		wlr_log(WLR_INFO, "Game detected: '%s' — scheduling delayed fullscreen",
-			client_get_appid(c) ? client_get_appid(c) : "(unknown)");
-		schedule_delayed_game_fullscreen(c, 800);
+		/* Main game window → direct true fullscreen, no delay. */
+		wlr_log(WLR_INFO, "Game main window detected: '%s' %dx%d — true fullscreen",
+			client_get_appid(c) ? client_get_appid(c) : "(unknown)",
+			initial_w, initial_h);
+		setfullscreen(c, 1);
 		focusclient(c, 1);
 		printstatus();
 		return;
@@ -1135,11 +1120,6 @@ unmapnotify(struct wl_listener *listener, void *data)
 		cursor_mode = CurNormal;
 		grabc = NULL;
 	}
-
-	/* If a game unmaps before its delayed-fullscreen timer fires, cancel it
-	 * so the timer callback doesn't touch a stale surface */
-	if (c == game_fullscreen_pending_client)
-		game_fullscreen_pending_client = NULL;
 
 	if (client_is_unmanaged(c)) {
 		if (c == exclusive_focus) {
