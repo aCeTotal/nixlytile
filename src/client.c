@@ -542,20 +542,6 @@ void
 fullscreennotify(struct wl_listener *listener, void *data)
 {
 	Client *c = wl_container_of(listener, c, fullscreen);
-	if (c->fakefullscreen) {
-		/* Game already in fake fullscreen — ack any request, stay tiled */
-		client_set_fullscreen(c, 1);
-		return;
-	}
-	/* Game requesting fullscreen for the first time → fake it */
-	if (client_wants_fullscreen(c) && looks_like_game(c)) {
-		c->fakefullscreen = 1;
-		c->bw = 0;
-		client_set_fullscreen(c, 1);
-		arrange(c->mon);
-		return;
-	}
-	/* Non-game clients: normal fullscreen behavior */
 	setfullscreen(c, client_wants_fullscreen(c));
 }
 
@@ -737,13 +723,11 @@ mapnotify(struct wl_listener *listener, void *data)
 	}
 
 	/*
-	 * FAKE FULLSCREEN FOR GAMES
+	 * AUTO REAL-FULLSCREEN FOR GAMES
 	 *
-	 * Games are detected at map time and placed in "fake fullscreen":
-	 * the client is told it's fullscreen (protocol lie), but it stays
-	 * tiled with bw=0 so it fills the tile completely. Real fullscreen
-	 * (with game mode, VRR, etc.) only activates when the user manually
-	 * presses modkey+f.
+	 * Games are detected at map time and immediately placed in real
+	 * fullscreen via setfullscreen(). This gives them the full monitor
+	 * resolution, VRR, game mode, and correct pointer-constraint flow.
 	 *
 	 * Detection criteria:
 	 * - Client is a child process of Steam (game launcher)
@@ -751,18 +735,15 @@ mapnotify(struct wl_listener *listener, void *data)
 	 * - Client requests tearing (low-latency mode used by games)
 	 */
 	if (!c->isfloating && !c->isfullscreen && looks_like_game(c)) {
-		wlr_log(WLR_INFO, "Fake fullscreen: detected game '%s', tiling with no borders",
+		wlr_log(WLR_INFO, "Auto-fullscreen: detected game '%s'",
 			client_get_appid(c) ? client_get_appid(c) : "(unknown)");
-		c->fakefullscreen = 1;
-		c->bw = 0;
-		client_set_fullscreen(c, 1);  /* Tell client it's fullscreen (protocol lie) */
-		focusclient(c, 1);
+		setfullscreen(c, 1);
 #ifdef XWAYLAND
 		if (c->type == X11)
 			schedule_game_refocus(c, 150);
 #endif
 		printstatus();
-		return; /* Skip unset_fullscreen logic - game is fake fullscreen */
+		return;
 	}
 
 	printstatus();
@@ -886,14 +867,8 @@ setfullscreen(Client *c, int fullscreen)
 	if (!c->mon || !client_surface(c)->mapped)
 		return;
 
-	if (c->fakefullscreen && !fullscreen) {
-		/* Returning from real → fake fullscreen: stay borderless, keep protocol lie */
-		c->bw = 0;
-		client_set_fullscreen(c, 1);
-	} else {
-		c->bw = fullscreen ? 0 : borderpx;
-		client_set_fullscreen(c, fullscreen);
-	}
+	c->bw = fullscreen ? 0 : borderpx;
+	client_set_fullscreen(c, fullscreen);
 	wlr_scene_node_reparent(&c->scene->node, layers[c->isfullscreen
 			? LyrFS : c->isfloating ? LyrFloat : LyrTile]);
 

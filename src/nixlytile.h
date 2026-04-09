@@ -1269,7 +1269,7 @@ typedef struct {
 #endif
 	unsigned int bw;
 	uint32_t tags;
-	int isfloating, isurgent, isfullscreen, issticky, was_tiled, fakefullscreen;
+	int isfloating, isurgent, isfullscreen, issticky, was_tiled;
 	uint32_t resize;
 	int pending_resize_w, pending_resize_h;
 	struct wlr_box old_geom;

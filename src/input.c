@@ -1061,12 +1061,30 @@ checkconstraint(void)
 void
 createpointerconstraint(struct wl_listener *listener, void *data)
 {
+	struct wlr_pointer_constraint_v1 *wlr_constraint = data;
 	PointerConstraint *pointer_constraint = ecalloc(1, sizeof(*pointer_constraint));
-	pointer_constraint->constraint = data;
-	LISTEN(&pointer_constraint->constraint->events.destroy,
+	pointer_constraint->constraint = wlr_constraint;
+	LISTEN(&wlr_constraint->events.destroy,
 			&pointer_constraint->destroy, destroypointerconstraint);
 
-	/* Activate immediately if the requesting surface already has focus */
+	/*
+	 * If the constraint's surface belongs to a mapped, fullscreen client on
+	 * the monitor where the cursor currently is, force pointer-focus to that
+	 * client so checkconstraint() can activate. This handles the late-creation
+	 * race for XWayland games where the constraint is registered after
+	 * focusclient/motionnotify already ran.
+	 */
+	Client *c = NULL;
+	toplevel_from_wlr_surface(wlr_constraint->surface, &c, NULL);
+	if (c && c->mon && client_surface(c) && client_surface(c)->mapped) {
+		Monitor *cm = xytomon(cursor->x, cursor->y);
+		if (cm == c->mon && c->isfullscreen) {
+			/* Re-run pointer focus at current cursor position so
+			 * focused_surface becomes the game's surface. */
+			motionnotify(0, NULL, 0, 0, 0, 0);
+		}
+	}
+
 	checkconstraint();
 }
 
