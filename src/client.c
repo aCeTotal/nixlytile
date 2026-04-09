@@ -82,7 +82,7 @@ pending_launch_add(pid_t pid, uint32_t tags, const char *output_name)
 }
 
 int
-pending_launch_find_and_remove(pid_t client_pid, uint32_t *out_tags,
+pending_launch_find(pid_t client_pid, uint32_t *out_tags,
 	char *out_output, size_t out_output_sz)
 {
 	uint64_t now = monotonic_msec();
@@ -99,11 +99,12 @@ pending_launch_find_and_remove(pid_t client_pid, uint32_t *out_tags,
 			*out_tags = pl->tags;
 			if (out_output && out_output_sz > 0)
 				snprintf(out_output, out_output_sz, "%s", pl->output);
-
-			/* Remove entry */
-			memmove(&pending_launches[i], &pending_launches[i + 1],
-				(pending_launch_count - i - 1) * sizeof(PendingLaunchEntry));
-			pending_launch_count--;
+			/* Do NOT remove the entry.  A single launch (e.g. Steam
+			 * starting a game) can spawn several windows in quick
+			 * succession — launcher overlay, the game itself,
+			 * Proton/Wine dialogs — and all of them should land on
+			 * the monitor that was active at launch time.  Entries
+			 * expire naturally after PENDING_LAUNCH_TIMEOUT_MS. */
 			return 1;
 		}
 	}
@@ -153,6 +154,7 @@ applyrules(Client *c)
 	int i;
 	const Rule *r;
 	Monitor *mon = selmon, *m;
+	int mon_explicit = 0;
 
 	appid = client_get_appid(c);
 	title = client_get_title(c);
@@ -173,8 +175,10 @@ applyrules(Client *c)
 			newtags |= r->tags;
 			i = 0;
 			wl_list_for_each(m, &mons, link) {
-				if (r->monitor == i++)
+				if (r->monitor == i++) {
 					mon = m;
+					mon_explicit = 1;
+				}
 			}
 		}
 	}
@@ -188,13 +192,14 @@ applyrules(Client *c)
 		if (cpid > 0) {
 			uint32_t launch_tags;
 			char launch_output[32] = {0};
-			if (pending_launch_find_and_remove(cpid, &launch_tags,
+			if (pending_launch_find(cpid, &launch_tags,
 					launch_output, sizeof(launch_output))) {
 				newtags = launch_tags;
 				if (launch_output[0]) {
 					wl_list_for_each(m, &mons, link) {
 						if (strcmp(m->wlr_output->name, launch_output) == 0) {
 							mon = m;
+							mon_explicit = 1;
 							break;
 						}
 					}
@@ -203,6 +208,31 @@ applyrules(Client *c)
 					"applyrules: pending launch matched pid %d → "
 					"tags=0x%x output=%s",
 					(int)cpid, newtags, launch_output);
+			}
+		}
+	}
+
+	/* Steam-game fallback.  A Proton/Wine game launched from Steam
+	 * typically maps with no useful rule match and no pending-launch
+	 * entry (Steam launches the game process itself, not via our
+	 * spawn() path).  If we leave it on selmon and selmon happens to
+	 * be a different monitor than Steam is running on, the game
+	 * initialises its swap chain at the wrong output's resolution —
+	 * then updatemons() moves the window later, leaving the user with
+	 * a mis-sized, mouse-clipped game.  Pin the game to Steam's
+	 * monitor as a final fallback. */
+	if (!mon_explicit && is_steam_game(c)) {
+		Client *sc;
+		wl_list_for_each(sc, &clients, link) {
+			if (sc != c && sc->mon && is_steam_client(sc)) {
+				mon = sc->mon;
+				mon_explicit = 1;
+				wlr_log(WLR_INFO,
+					"applyrules: Steam-game fallback → "
+					"placing pid=%d on Steam's monitor '%s'",
+					(int)client_get_pid(c),
+					mon->wlr_output ? mon->wlr_output->name : "(null)");
+				break;
 			}
 		}
 	}

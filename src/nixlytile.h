@@ -2157,7 +2157,7 @@ void fix_tray_argb32(uint32_t *pixels, size_t count, int use_rgba_order);
 #define PENDING_LAUNCH_TIMEOUT_MS 60000 /* 60s for very slow apps */
 
 void pending_launch_add(pid_t pid, uint32_t tags, const char *output_name);
-int pending_launch_find_and_remove(pid_t client_pid, uint32_t *out_tags,
+int pending_launch_find(pid_t client_pid, uint32_t *out_tags,
 	char *out_output, size_t out_output_sz);
 
 /* statusbar.c */
