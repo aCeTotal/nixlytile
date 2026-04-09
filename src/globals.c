@@ -342,11 +342,13 @@ struct wl_event_source *playback_osd_timer = NULL;
 struct wlr_scene_tree *playback_osd_tree = NULL;
 struct wl_event_source *pc_gaming_install_timer = NULL;
 struct wl_event_source *game_refocus_timer = NULL;
+struct wl_event_source *game_fullscreen_timer = NULL;
 struct wl_event_source *media_view_poll_timer = NULL;
 struct wl_event_source *osk_dpad_repeat_timer = NULL;
 int osk_dpad_held_button = 0;  /* BTN_DPAD_UP/DOWN/LEFT/RIGHT or 0 if none */
 Monitor *osk_dpad_held_mon = NULL;
 Client *game_refocus_client = NULL;
+Client *game_fullscreen_pending_client = NULL;
 char wifi_scan_buf[8192];
 size_t wifi_scan_len = 0;
 int wifi_scan_inflight;

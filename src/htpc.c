@@ -214,6 +214,42 @@ schedule_game_refocus(Client *c, uint32_t ms)
 	}
 }
 
+int
+game_fullscreen_timer_cb(void *data)
+{
+	Client *c = game_fullscreen_pending_client;
+	(void)data;
+	game_fullscreen_pending_client = NULL;
+
+	if (!c || !client_surface(c) || !client_surface(c)->mapped)
+		return 0;
+	if (c->isfullscreen || c->isfloating)
+		return 0;  /* already fullscreen or state changed */
+
+	wlr_log(WLR_INFO, "Delayed fullscreen: activating for '%s'",
+		client_get_appid(c) ? client_get_appid(c) : "(unknown)");
+	setfullscreen(c, 1);
+#ifdef XWAYLAND
+	if (c->type == X11)
+		schedule_game_refocus(c, 150);
+#endif
+	return 0;
+}
+
+void
+schedule_delayed_game_fullscreen(Client *c, uint32_t ms)
+{
+	if (!event_loop || !c)
+		return;
+	if (!game_fullscreen_timer)
+		game_fullscreen_timer = wl_event_loop_add_timer(event_loop,
+				game_fullscreen_timer_cb, NULL);
+	if (game_fullscreen_timer) {
+		game_fullscreen_pending_client = c;
+		wl_event_source_timer_update(game_fullscreen_timer, ms);
+	}
+}
+
 Client *
 get_fullscreen_client(void)
 {
