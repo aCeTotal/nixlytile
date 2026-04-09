@@ -1,9 +1,14 @@
 #include <assert.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <math.h>
 #include <poll.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <drm_fourcc.h>
@@ -45,6 +50,111 @@ static const size_t start_descriptor_pool_size = 256u;
 static bool default_debug = true;
 
 static const struct wlr_renderer_impl renderer_impl;
+
+/*
+ * Nixlytile customization: persist the Vulkan pipeline cache across
+ * sessions so pipeline compilation cost (50–200 ms on first frame) is
+ * amortised. Stdlib-only I/O; failures are logged but non-fatal.
+ */
+#define NIXLY_VK_CACHE_SUBDIR   "nixlytile"
+#define NIXLY_VK_CACHE_FILENAME "vk_pipeline_cache.bin"
+#define NIXLY_VK_CACHE_MAX_SIZE (64 * 1024 * 1024)  /* 64 MB sanity cap */
+
+static bool nixly_vk_cache_dir(char *out, size_t out_size) {
+	const char *xdg = getenv("XDG_CACHE_HOME");
+	const char *home = getenv("HOME");
+	int n;
+	if (xdg && xdg[0] == '/')
+		n = snprintf(out, out_size, "%s/%s", xdg, NIXLY_VK_CACHE_SUBDIR);
+	else if (home && home[0] == '/')
+		n = snprintf(out, out_size, "%s/.cache/%s", home, NIXLY_VK_CACHE_SUBDIR);
+	else
+		return false;
+	return n > 0 && (size_t)n < out_size;
+}
+
+static bool nixly_vk_cache_full_path(char *out, size_t out_size) {
+	char dir[PATH_MAX];
+	if (!nixly_vk_cache_dir(dir, sizeof(dir)))
+		return false;
+	int n = snprintf(out, out_size, "%s/%s", dir, NIXLY_VK_CACHE_FILENAME);
+	return n > 0 && (size_t)n < out_size;
+}
+
+static void *nixly_vk_cache_load(size_t *out_size) {
+	*out_size = 0;
+	char path[PATH_MAX];
+	if (!nixly_vk_cache_full_path(path, sizeof(path)))
+		return NULL;
+	FILE *f = fopen(path, "rb");
+	if (!f) return NULL;
+	if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+	long len = ftell(f);
+	if (len <= 0 || len > NIXLY_VK_CACHE_MAX_SIZE) { fclose(f); return NULL; }
+	rewind(f);
+	void *buf = malloc((size_t)len);
+	if (!buf) { fclose(f); return NULL; }
+	size_t got = fread(buf, 1, (size_t)len, f);
+	fclose(f);
+	if (got != (size_t)len) { free(buf); return NULL; }
+	*out_size = (size_t)len;
+	return buf;
+}
+
+static void nixly_vk_cache_save(const void *data, size_t size) {
+	if (!data || size == 0) return;
+	char dir[PATH_MAX];
+	if (!nixly_vk_cache_dir(dir, sizeof(dir))) return;
+
+	/* mkdir -p: create parent (~/.cache or $XDG_CACHE_HOME) then leaf. */
+	if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+		char parent[PATH_MAX];
+		strncpy(parent, dir, sizeof(parent));
+		parent[sizeof(parent) - 1] = '\0';
+		char *slash = strrchr(parent, '/');
+		if (slash && slash != parent) {
+			*slash = '\0';
+			if (mkdir(parent, 0755) != 0 && errno != EEXIST) {
+				wlr_log(WLR_ERROR, "vulkan pipeline cache: mkdir %s failed: %s",
+					parent, strerror(errno));
+				return;
+			}
+		}
+		if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+			wlr_log(WLR_ERROR, "vulkan pipeline cache: mkdir %s failed: %s",
+				dir, strerror(errno));
+			return;
+		}
+	}
+
+	char path[PATH_MAX], tmp[PATH_MAX];
+	if (!nixly_vk_cache_full_path(path, sizeof(path))) return;
+	int n = snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	if (n <= 0 || (size_t)n >= sizeof(tmp)) return;
+
+	FILE *f = fopen(tmp, "wb");
+	if (!f) {
+		wlr_log(WLR_ERROR, "vulkan pipeline cache: open %s failed: %s",
+			tmp, strerror(errno));
+		return;
+	}
+	size_t put = fwrite(data, 1, size, f);
+	int flush_err = fflush(f);
+	int fsync_err = (fsync(fileno(f)) != 0) ? errno : 0;
+	fclose(f);
+	if (put != size || flush_err != 0 || fsync_err != 0) {
+		wlr_log(WLR_ERROR, "vulkan pipeline cache: incomplete write to %s", tmp);
+		unlink(tmp);
+		return;
+	}
+	if (rename(tmp, path) != 0) {
+		wlr_log(WLR_ERROR, "vulkan pipeline cache: rename %s -> %s failed: %s",
+			tmp, path, strerror(errno));
+		unlink(tmp);
+		return;
+	}
+	wlr_log(WLR_INFO, "vulkan pipeline cache: saved %zu bytes to %s", size, path);
+}
 
 bool wlr_renderer_is_vk(struct wlr_renderer *wlr_renderer) {
 	return wlr_renderer->impl == &renderer_impl;
@@ -1228,6 +1338,23 @@ static void vulkan_destroy(struct wlr_renderer *wlr_renderer) {
 	vkDestroyImage(dev->dev, renderer->dummy3d_image, NULL);
 	vkFreeMemory(dev->dev, renderer->dummy3d_mem, NULL);
 
+	if (renderer->pipeline_cache != VK_NULL_HANDLE) {
+		size_t cache_size = 0;
+		VkResult save_res = vkGetPipelineCacheData(dev->dev,
+			renderer->pipeline_cache, &cache_size, NULL);
+		if (save_res == VK_SUCCESS && cache_size > 0) {
+			void *cache_data = malloc(cache_size);
+			if (cache_data) {
+				save_res = vkGetPipelineCacheData(dev->dev,
+					renderer->pipeline_cache, &cache_size, cache_data);
+				if (save_res == VK_SUCCESS)
+					nixly_vk_cache_save(cache_data, cache_size);
+				else
+					wlr_vk_error("vkGetPipelineCacheData", save_res);
+				free(cache_data);
+			}
+		}
+	}
 	vkDestroyPipelineCache(dev->dev, renderer->pipeline_cache, NULL);
 	vkDestroySemaphore(dev->dev, renderer->timeline_semaphore, NULL);
 	vkDestroyPipelineLayout(dev->dev, renderer->output_pipe_layout, NULL);
@@ -2692,14 +2819,23 @@ struct wlr_renderer *vulkan_renderer_create_for_device(struct wlr_vk_device *dev
 		goto error;
 	}
 
+	size_t cache_init_size = 0;
+	void *cache_init_data = nixly_vk_cache_load(&cache_init_size);
+
 	VkPipelineCacheCreateInfo cache_info = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+		.initialDataSize = cache_init_size,
+		.pInitialData = cache_init_data,
 	};
 	res = vkCreatePipelineCache(dev->dev, &cache_info, NULL,
 		&renderer->pipeline_cache);
+	free(cache_init_data);    /* Vulkan copies the data during create */
 	if (res != VK_SUCCESS) {
 		wlr_vk_error("vkCreatePipelineCache", res);
 		goto error;
+	}
+	if (cache_init_size > 0) {
+		wlr_log(WLR_INFO, "vulkan pipeline cache: loaded %zu bytes", cache_init_size);
 	}
 
 	VkSemaphoreTypeCreateInfoKHR semaphore_type_info = {

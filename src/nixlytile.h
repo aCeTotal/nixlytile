@@ -57,6 +57,7 @@
 #include <wlr/backend/libinput.h>
 #include <wlr/render/allocator.h>
 #include <wlr/render/wlr_renderer.h>
+#include <wlr/render/vulkan.h>
 #include <wlr/render/drm_format_set.h>
 #include <wlr/interfaces/wlr_buffer.h>
 #include <wlr/types/wlr_buffer.h>
@@ -81,6 +82,7 @@
 #include <wlr/types/wlr_linux_dmabuf_v1.h>
 #include <wlr/types/wlr_linux_drm_syncobj_v1.h>
 #include <wlr/types/wlr_output.h>
+#include <wlr/types/wlr_output_layer.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_output_management_v1.h>
 #include <wlr/types/wlr_output_power_management_v1.h>
@@ -332,6 +334,17 @@ typedef enum {
 	GPU_VENDOR_AMD,
 	GPU_VENDOR_NVIDIA
 } GpuVendor;
+
+/* Per-monitor gaming capability profile. Populated once during createmon
+ * after the initial output commit, and used to select vendor-aware code
+ * paths at runtime (overlay plane promotion, LFC, explicit sync hints). */
+typedef struct {
+	GpuVendor vendor;          /* GPU vendor backing this output */
+	int overlay_planes_supported; /* KMS exposes additional plane(s) we can use */
+	int explicit_sync_ready;   /* Global DRM syncobj timeline manager is active */
+	int has_hw_lfc;            /* Driver provides Low Framerate Compensation */
+	int prefers_vulkan;        /* Vendor gives best gaming perf on Vulkan renderer */
+} GamingCaps;
 
 typedef enum {
 	PLAYBACK_IDLE = 0,
@@ -1370,6 +1383,8 @@ struct Monitor {
 	float game_vrr_last_fps;
 	uint64_t game_vrr_last_change_ns;
 	int game_vrr_stable_frames;
+	uint64_t game_vrr_lfc_warn_ns;   /* last LFC-range warning timestamp */
+	uint64_t scanout_diag_warn_ns;   /* last direct-scanout failure diagnostic timestamp */
 	struct wlr_scene_tree *hz_osd_tree;
 	struct wlr_scene_tree *hz_osd_bg;
 	int hz_osd_visible;
@@ -1382,6 +1397,13 @@ struct Monitor {
 	struct wlr_scene_tree *toast_tree;
 	struct wl_event_source *toast_timer;
 	int toast_visible;
+	/* Toast overlay-plane promotion (used when gcaps.overlay_planes_supported
+	 * and a fullscreen game is direct-scanning out). The dumb-buffer path
+	 * coexists with scanout by riding on a dedicated overlay plane. */
+	struct CpuCursorBuffer *toast_overlay_buf;
+	struct wlr_output_layer *toast_overlay_layer;
+	int toast_overlay_active;
+	struct wlr_box toast_overlay_dst;
 	struct wl_listener present;
 	uint64_t last_present_ns;
 	uint64_t present_interval_ns;
@@ -1435,6 +1457,8 @@ struct Monitor {
 	int render_idle;                    /* 1 = idle mode, throttled to heartbeat */
 	int idle_frames;                    /* consecutive frames without cursor + no active content */
 	struct wl_event_source *idle_heartbeat; /* 1s periodic timer for idle monitors */
+	int frame_scheduled;                /* 1 = schedule_frame already called this cycle */
+	GamingCaps gcaps;                   /* vendor/capability profile for this output */
 	/* Low-latency cursor plane (direct DRM atomic, bypasses wlroots) */
 	int ll_cursor_fd;            /* DRM fd for cursor commits (-1 = disabled) */
 	uint32_t ll_cursor_plane_id; /* DRM plane ID for cursor */
@@ -1759,6 +1783,7 @@ extern int detected_gpu_count;
 extern int discrete_gpu_idx;
 extern int integrated_gpu_idx;
 extern int dgpu_render_fd;
+extern int g_explicit_sync_ok; /* 1 = DRM syncobj timeline manager active */
 extern struct wl_event_source *dgpu_power_watchdog;
 extern int pc_gaming_cache_inotify_fd;
 extern int pc_gaming_cache_inotify_wd;

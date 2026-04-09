@@ -3795,10 +3795,19 @@ stats_panel_handle_key(Monitor *m, xkb_keysym_t sym)
 		if (fullscreen_adaptive_sync_enabled) {
 			show_hz_osd(m, "VRR: ENABLED");
 		} else {
+			Monitor *mon;
 			show_hz_osd(m, "VRR: DISABLED");
-			/* Disable active VRR if it was on */
-			if (m->game_vrr_active)
-				disable_game_vrr(m);
+			/* Disable ALL active VRR modes across all monitors.
+			 * Previously only the current monitor's game VRR was
+			 * disabled — video VRR remained active even after the
+			 * user explicitly turned VRR off, and other monitors
+			 * running game/video VRR were ignored. */
+			wl_list_for_each(mon, &mons, link) {
+				if (mon->game_vrr_active)
+					disable_game_vrr(mon);
+				if (mon->vrr_active)
+					disable_vrr_video_mode(mon);
+			}
 		}
 		stats_panel_refresh_cb(m);
 		return 1;

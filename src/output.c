@@ -48,6 +48,14 @@ cleanupmon(struct wl_listener *listener, void *data)
 		wlr_scene_node_destroy(&m->nixpkgs.tree->node);
 	if (m->wifi_popup.tree)
 		wlr_scene_node_destroy(&m->wifi_popup.tree->node);
+	if (m->toast_overlay_buf) {
+		cpu_cursor_buffer_destroy(m->toast_overlay_buf);
+		m->toast_overlay_buf = NULL;
+	}
+	if (m->toast_overlay_layer) {
+		wlr_output_layer_destroy(m->toast_overlay_layer);
+		m->toast_overlay_layer = NULL;
+	}
 	destroy_tree(m);
 	closemon(m);
 	ll_cursor_cleanup(m);
@@ -644,6 +652,81 @@ createmon(struct wl_listener *listener, void *data)
 	/* Low-latency cursor: discover cursor DRM plane for direct atomic commits */
 	ll_cursor_init(m);
 
+	/* Gaming capability profile: vendor, overlay planes, LFC, explicit sync.
+	 * Populated once here; consumed by update_game_vrr (LFC warning),
+	 * toast/OSD overlay promotion, and various diagnostic logs. */
+	memset(&m->gcaps, 0, sizeof(m->gcaps));
+	m->gcaps.explicit_sync_ready = g_explicit_sync_ok;
+	if (discrete_gpu_idx >= 0) {
+		m->gcaps.vendor = detected_gpus[discrete_gpu_idx].vendor;
+	} else if (integrated_gpu_idx >= 0) {
+		m->gcaps.vendor = detected_gpus[integrated_gpu_idx].vendor;
+	} else {
+		m->gcaps.vendor = GPU_VENDOR_UNKNOWN;
+	}
+	m->gcaps.has_hw_lfc = (m->gcaps.vendor == GPU_VENDOR_AMD ||
+	                       m->gcaps.vendor == GPU_VENDOR_INTEL);
+	m->gcaps.prefers_vulkan = (m->gcaps.vendor == GPU_VENDOR_NVIDIA);
+
+	/* Overlay-plane probe: try to attach a dummy layer to a test state.
+	 * NVIDIA's proprietary driver exposes only primary+cursor planes today,
+	 * so this will reject; AMD/Intel typically accept the probe.
+	 * Failure here is expected and non-fatal. */
+	m->gcaps.overlay_planes_supported = 0;
+	if (wlr_output_is_drm(wlr_output)) {
+		const struct wlr_drm_format_set *primary_formats =
+			wlr_output_get_primary_formats(wlr_output, WLR_BUFFER_CAP_DMABUF);
+		const struct wlr_drm_format *probe_fmt = NULL;
+		if (primary_formats) {
+			probe_fmt = wlr_drm_format_set_get(primary_formats, DRM_FORMAT_ARGB8888);
+			if (!probe_fmt)
+				probe_fmt = wlr_drm_format_set_get(primary_formats, DRM_FORMAT_XRGB8888);
+			if (!probe_fmt && primary_formats->len > 0)
+				probe_fmt = &primary_formats->formats[0];
+		}
+		if (probe_fmt) {
+			struct wlr_buffer *probe_buf =
+				wlr_allocator_create_buffer(alloc, 64, 64, probe_fmt);
+			if (probe_buf) {
+				struct wlr_output_layer *probe_layer =
+					wlr_output_layer_create(wlr_output);
+				if (probe_layer) {
+					struct wlr_output_state probe_state;
+					struct wlr_output_layer_state layer_state = {
+						.layer = probe_layer,
+						.buffer = probe_buf,
+						.src_box = { .x = 0, .y = 0, .width = 64, .height = 64 },
+						.dst_box = { .x = 0, .y = 0, .width = 64, .height = 64 },
+					};
+					wlr_output_state_init(&probe_state);
+					wlr_output_state_set_layers(&probe_state, &layer_state, 1);
+					if (wlr_output_test_state(wlr_output, &probe_state) &&
+					    layer_state.accepted) {
+						m->gcaps.overlay_planes_supported = 1;
+					}
+					wlr_output_state_finish(&probe_state);
+					wlr_output_layer_destroy(probe_layer);
+				}
+				wlr_buffer_drop(probe_buf);
+			}
+		}
+	}
+
+	{
+		const char *vendor_str =
+			m->gcaps.vendor == GPU_VENDOR_NVIDIA ? "NVIDIA" :
+			m->gcaps.vendor == GPU_VENDOR_AMD ? "AMD" :
+			m->gcaps.vendor == GPU_VENDOR_INTEL ? "Intel" : "unknown";
+		wlr_log(WLR_INFO,
+			"Monitor %s gaming caps: vendor=%s overlay_planes=%s "
+			"esync=%s vulkan_pref=%s lfc=%s",
+			wlr_output->name, vendor_str,
+			m->gcaps.overlay_planes_supported ? "YES" : "NO",
+			m->gcaps.explicit_sync_ready ? "YES" : "NO",
+			m->gcaps.prefers_vulkan ? "YES" : "NO",
+			m->gcaps.has_hw_lfc ? "HW" : "none");
+	}
+
 	wl_list_insert(&mons, &m->link);
 	printstatus();
 	init_tree(m);
@@ -971,12 +1054,23 @@ powermgrsetmode(struct wl_listener *listener, void *data)
 
 /* ── Idle monitor render throttle ─────────────────────────────────── */
 
+/* Schedule a frame on this monitor, skipping redundant calls within a
+ * single render cycle. Cleared at the top of rendermon(). */
+static inline void
+request_frame(Monitor *m)
+{
+	if (!m || !m->wlr_output || m->frame_scheduled)
+		return;
+	m->frame_scheduled = 1;
+	wlr_output_schedule_frame(m->wlr_output);
+}
+
 static int
 idle_heartbeat_cb(void *data)
 {
 	Monitor *m = data;
 	if (m->render_idle)
-		wlr_output_schedule_frame(m->wlr_output);
+		request_frame(m);
 	return 0; /* one-shot; re-armed from rendermon */
 }
 
@@ -986,7 +1080,7 @@ monitor_wake_internal(Monitor *m)
 	m->render_idle = 0;
 	m->idle_frames = 0;
 	wl_event_source_timer_update(m->idle_heartbeat, 0); /* disarm */
-	wlr_output_schedule_frame(m->wlr_output);
+	request_frame(m);
 }
 
 void
@@ -1004,7 +1098,7 @@ present_videoplayer_frame(Monitor *m, uint64_t frame_start_ns)
 	    (active_videoplayer->state == VP_STATE_PLAYING ||
 	     active_videoplayer->state == VP_STATE_BUFFERING)) {
 		videoplayer_present_frame(active_videoplayer, frame_start_ns);
-		wlr_output_schedule_frame(m->wlr_output);
+		request_frame(m);
 	}
 }
 
@@ -1254,8 +1348,47 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 	int use_frame_pacing, uint64_t frame_start_ns)
 {
 	uint64_t commit_end_ns;
+	/* Overlay plane layer states — kept on the stack for the entire
+	 * commit lifetime because wlr_output_state_set_layers stores a
+	 * pointer into state->layers and the array must stay valid across
+	 * the possible commit retry below. */
+	struct wlr_output_layer_state overlay_layer_states[1];
+	size_t overlay_layer_count = 0;
 
 	m->frames_since_content_change = 0;
+
+	/* Toast overlay-plane promotion.
+	 *
+	 * If the toast is flagged active on an overlay plane, build a
+	 * layer state for it and attach to the commit. This runs on every
+	 * frame the toast is alive; the buffer contents are static, so we
+	 * just keep handing the backend the same buffer pointer. */
+	if (m->toast_overlay_active && m->toast_overlay_layer &&
+	    m->toast_overlay_buf) {
+		overlay_layer_states[0] = (struct wlr_output_layer_state){
+			.layer = m->toast_overlay_layer,
+			.buffer = &m->toast_overlay_buf->base,
+			.src_box = {
+				.x = 0, .y = 0,
+				.width = m->toast_overlay_dst.width,
+				.height = m->toast_overlay_dst.height,
+			},
+			.dst_box = m->toast_overlay_dst,
+		};
+		overlay_layer_count = 1;
+	} else if (m->toast_overlay_layer && !m->toast_overlay_active) {
+		/* Toast was active but has been hidden — send a disable
+		 * layer state (buffer = NULL) so the plane is torn down. */
+		overlay_layer_states[0] = (struct wlr_output_layer_state){
+			.layer = m->toast_overlay_layer,
+			.buffer = NULL,
+		};
+		overlay_layer_count = 1;
+	}
+	if (overlay_layer_count > 0) {
+		wlr_output_state_set_layers(state, overlay_layer_states,
+			overlay_layer_count);
+	}
 
 	if (allow_tearing && wlr_output_is_drm(m->wlr_output))
 		state->tearing_page_flip = true;
@@ -1273,13 +1406,13 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 				 * buffer content is current, leaving ghost
 				 * artefacts (cursor copies, stale UI). */
 				wlr_damage_ring_add_whole(&m->scene_output->damage_ring);
-				wlr_output_schedule_frame(m->wlr_output);
+				request_frame(m);
 			}
 		} else {
 			wlr_log(WLR_ERROR, "Output commit failed on %s",
 				m->wlr_output->name);
 			wlr_damage_ring_add_whole(&m->scene_output->damage_ring);
-			wlr_output_schedule_frame(m->wlr_output);
+			request_frame(m);
 		}
 	}
 
@@ -1325,6 +1458,8 @@ rendermon(struct wl_listener *listener, void *data)
 	int use_frame_pacing = 0;
 	int state_built = 0;
 
+	m->frame_scheduled = 0;
+
 	frame_start_ns = get_time_ns();
 	now.tv_sec = frame_start_ns / 1000000000ULL;
 	now.tv_nsec = frame_start_ns % 1000000000ULL;
@@ -1366,7 +1501,7 @@ rendermon(struct wl_listener *listener, void *data)
 		if (!needs_frame) {
 			/* No new video frame - hold */
 			wlr_output_state_finish(&state);
-			wlr_output_schedule_frame(m->wlr_output);
+			request_frame(m);
 			wlr_scene_output_send_frame_done(m->scene_output, &now);
 			return;
 		}
@@ -1449,7 +1584,7 @@ rendermon(struct wl_listener *listener, void *data)
 					m->wlr_output->name);
 			}
 
-			wlr_output_schedule_frame(m->wlr_output);
+			request_frame(m);
 			return;
 		}
 
@@ -1490,6 +1625,54 @@ rendermon(struct wl_listener *listener, void *data)
 			m->frame_pacing_active = 0;
 			m->pending_game_frame = 0;
 			m->estimated_game_fps = 0.0f;
+		}
+	}
+
+	/* Scanout failure diagnostic.
+	 *
+	 * When a fullscreen game is visible but direct scanout isn't
+	 * activating, enumerate the most common blockers so the user/dev
+	 * can correlate the failure with visible UI elements. Only fires
+	 * when we're confident the game wants scanout (fullscreen, not
+	 * tearing — tearing goes through a different path).
+	 *
+	 * Rate-limited to once per 5s per monitor. */
+	if (is_game && !is_direct_scanout && !allow_tearing && needs_frame) {
+		if (frame_start_ns - m->scanout_diag_warn_ns > 5ULL * 1000000000ULL) {
+			int blocker_count = 0;
+			char blockers[256] = {0};
+			size_t off = 0;
+
+			#define ADD_BLOCKER(name) do { \
+				blocker_count++; \
+				off += snprintf(blockers + off, sizeof(blockers) - off, \
+					"%s%s", off > 0 ? ", " : "", name); \
+			} while (0)
+
+			if (m->statusbar.tree && m->statusbar.tree->node.enabled)
+				ADD_BLOCKER("statusbar");
+			if (m->toast_tree && m->toast_visible)
+				ADD_BLOCKER("toast");
+			if (m->hz_osd_tree && m->hz_osd_visible)
+				ADD_BLOCKER("hz_osd");
+			if (m->render_10bit_active)
+				ADD_BLOCKER("10bit_render");
+
+			#undef ADD_BLOCKER
+
+			if (blocker_count > 0) {
+				wlr_log(WLR_INFO,
+					"Direct scanout blocked on %s by: %s "
+					"(fullscreen game detected — expect GPU composition cost)",
+					m->wlr_output->name, blockers);
+			} else {
+				wlr_log(WLR_INFO,
+					"Direct scanout blocked on %s — no nixlytile-owned blockers. "
+					"Possible cause: buffer format/size mismatch, color transform, "
+					"or hardware rejection. Check client buffer parameters.",
+					m->wlr_output->name);
+			}
+			m->scanout_diag_warn_ns = frame_start_ns;
 		}
 	}
 
@@ -1581,7 +1764,7 @@ rendermon(struct wl_listener *listener, void *data)
 		if (elapsed_ns < target_interval_ns) {
 			/* Don't send frame_done yet - limiter is active.
 			 * Schedule next vblank so rendermon keeps firing. */
-			wlr_output_schedule_frame(m->wlr_output);
+			request_frame(m);
 			return;
 		}
 
@@ -1624,7 +1807,7 @@ rendermon(struct wl_listener *listener, void *data)
 			 * its own timer, producing uncontrolled frame cadence.
 			 */
 			m->frames_repeated++;
-			wlr_output_schedule_frame(m->wlr_output);
+			request_frame(m);
 			return;
 		}
 
@@ -1721,11 +1904,20 @@ outputpresent(struct wl_listener *listener, void *data)
 
 	/*
 	 * Calculate target time for next frame presentation.
-	 * We want to present at the next vblank, minus a small margin
-	 * for compositor overhead (1ms).
+	 * We want to present at the next vblank, minus an adaptive margin
+	 * derived from the rolling (max-biased) commit-time EMA so slow
+	 * commits don't overshoot vblank, while fast commits don't waste
+	 * headroom.
 	 */
 	if (m->present_interval_ns > 0) {
-		m->target_present_ns = present_ns + m->present_interval_ns - 1000000;
+		uint64_t margin = m->rolling_commit_time_ns + 500000ULL; /* +0.5ms headroom */
+		if (margin < 1000000ULL)        /* floor: 1.0ms — matches old behaviour */
+			margin = 1000000ULL;
+		if (margin > 2500000ULL)        /* ceiling: 2.5ms */
+			margin = 2500000ULL;
+		if (margin >= m->present_interval_ns) /* defensive: never exceed interval */
+			margin = m->present_interval_ns / 2;
+		m->target_present_ns = present_ns + m->present_interval_ns - margin;
 	}
 }
 
@@ -1737,10 +1929,84 @@ requestmonstate(struct wl_listener *listener, void *data)
 	updatemons(NULL, NULL);
 }
 
+/*
+ * Commit an adaptive-sync state change on the given output.
+ *
+ * Performs the full verification chain:
+ *   1. test_state() — backend reports whether the state would commit
+ *   2. commit_state() — backend applies the state to the kernel
+ *   3. post-commit check — wlr_output->adaptive_sync_status reflects reality
+ *
+ * Returns 1 iff all three steps succeeded AND the hardware now reports the
+ * requested state. Failure at any stage is logged with the specific reason.
+ *
+ * This is the foundation for all VRR enable/disable operations. Callers
+ * should update their internal state (m->vrr_active etc.) ONLY when this
+ * returns 1.
+ */
+static int
+commit_adaptive_sync(Monitor *m, int enable)
+{
+	struct wlr_output_state state;
+	enum wlr_output_adaptive_sync_status expected;
+	int ok;
+
+	if (!m || !m->wlr_output || !m->wlr_output->enabled) {
+		wlr_log(WLR_ERROR, "VRR: commit refused — invalid monitor state");
+		return 0;
+	}
+
+	wlr_output_state_init(&state);
+	wlr_output_state_set_adaptive_sync_enabled(&state, enable ? true : false);
+
+	/* Phase 1: test before commit to catch capability mismatch early. */
+	if (!wlr_output_test_state(m->wlr_output, &state)) {
+		wlr_log(WLR_ERROR,
+			"VRR: test_state rejected adaptive_sync=%d on %s "
+			"(hardware or mode incompatible)",
+			enable, m->wlr_output->name);
+		wlr_output_state_finish(&state);
+		return 0;
+	}
+
+	/* Phase 2: commit. Can still fail on race (display hot-unplug,
+	 * kernel rejection after test passed, etc.) */
+	ok = wlr_output_commit_state(m->wlr_output, &state);
+	wlr_output_state_finish(&state);
+	if (!ok) {
+		wlr_log(WLR_ERROR,
+			"VRR: commit_state failed adaptive_sync=%d on %s "
+			"(test passed but kernel rejected — possible race)",
+			enable, m->wlr_output->name);
+		return 0;
+	}
+
+	/* Phase 3: post-commit verification. wlroots updates
+	 * adaptive_sync_status after successful commit, so this confirms
+	 * the kernel-level property change actually took effect.
+	 * Guards against silent "commit succeeded but hardware didn't
+	 * apply the property" failure mode. */
+	expected = enable
+		? WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED
+		: WLR_OUTPUT_ADAPTIVE_SYNC_DISABLED;
+	if (m->wlr_output->adaptive_sync_status != expected) {
+		wlr_log(WLR_ERROR,
+			"VRR: commit succeeded on %s but adaptive_sync_status=%d "
+			"(expected %d) — backend silently dropped the property",
+			m->wlr_output->name,
+			(int)m->wlr_output->adaptive_sync_status,
+			(int)expected);
+		return 0;
+	}
+
+	wlr_log(WLR_INFO, "VRR: adaptive_sync=%d verified active on %s",
+		enable, m->wlr_output->name);
+	return 1;
+}
+
 void
 set_adaptive_sync(Monitor *m, int enable)
 {
-	struct wlr_output_state state;
 	struct wlr_output_configuration_v1 *config;
 	struct wlr_output_configuration_head_v1 *config_head;
 
@@ -1749,31 +2015,18 @@ set_adaptive_sync(Monitor *m, int enable)
 			|| !m->vrr_capable)
 		return;
 
+	/* Use the verified commit helper. If it fails, we do NOT broadcast
+	 * the state change — output_mgr would otherwise advertise VRR as
+	 * active to clients while the hardware silently ignored the request. */
+	if (!commit_adaptive_sync(m, enable))
+		return;
+
+	/* Broadcast the adaptive sync state change to output_mgr only after
+	 * verified success. */
 	config = wlr_output_configuration_v1_create();
 	config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
-
-	/* Set and commit the adaptive sync state change */
-	wlr_output_state_init(&state);
-	wlr_output_state_set_adaptive_sync_enabled(&state, enable);
-	wlr_output_commit_state(m->wlr_output, &state);
-	wlr_output_state_finish(&state);
-
-	/* Broadcast the adaptive sync state change to output_mgr */
 	config_head->state.adaptive_sync_enabled = enable;
 	wlr_output_manager_v1_set_configuration(output_mgr, config);
-}
-
-static int
-commit_adaptive_sync(Monitor *m, int enable)
-{
-	struct wlr_output_state state;
-	int ok;
-
-	wlr_output_state_init(&state);
-	wlr_output_state_set_adaptive_sync_enabled(&state, enable);
-	ok = wlr_output_commit_state(m->wlr_output, &state);
-	wlr_output_state_finish(&state);
-	return ok;
 }
 
 void
@@ -1827,11 +2080,34 @@ update_game_vrr(Monitor *m, float current_fps)
 	if (!m || !m->game_vrr_active)
 		return;
 
+	now_ns = get_time_ns();
+
+	/* LFC (Low Framerate Compensation) diagnostic.
+	 *
+	 * Most VRR displays have a minimum refresh rate of 48 Hz (some 40,
+	 * some 30). Below that the display needs LFC: the driver doubles
+	 * or triples frames to stay within the VRR range. AMD and Intel
+	 * implement LFC in their kernel/mesa stacks — gcaps.has_hw_lfc is
+	 * set for those, and we skip the warning entirely there. NVIDIA's
+	 * proprietary driver does NOT implement userspace-visible LFC on
+	 * Wayland (as of 555+), so the warning is meaningful only on
+	 * NVIDIA and unknown-vendor paths.
+	 *
+	 * Rate-limited to once per 10s per monitor. */
+	if (!m->gcaps.has_hw_lfc && current_fps > 0.0f && current_fps < 40.0f) {
+		if (now_ns - m->game_vrr_lfc_warn_ns > 10ULL * 1000000000ULL) {
+			wlr_log(WLR_INFO,
+				"VRR/LFC: game FPS %.1f on %s is below typical VRR "
+				"minimum (~48 Hz) and vendor has no hardware LFC. "
+				"Display may flicker or fall out of VRR range.",
+				current_fps, m->wlr_output->name);
+			m->game_vrr_lfc_warn_ns = now_ns;
+		}
+	}
+
 	/* Sanity check FPS range */
 	if (current_fps < GAME_VRR_MIN_FPS || current_fps > GAME_VRR_MAX_FPS)
 		return;
-
-	now_ns = get_time_ns();
 
 	/* Get display's maximum refresh rate */
 	if (m->wlr_output->current_mode) {
@@ -2753,7 +3029,6 @@ find_video_friendly_mode(Monitor *m, float target_hz)
 int
 enable_vrr_video_mode(Monitor *m, float video_hz)
 {
-	struct wlr_output_state state;
 	struct wlr_output_configuration_v1 *config;
 	struct wlr_output_configuration_head_v1 *config_head;
 	char osd_msg[64];
@@ -2771,49 +3046,47 @@ enable_vrr_video_mode(Monitor *m, float video_hz)
 		return 0;
 	}
 
-	/* Save original mode before first switch */
+	/* Save original mode before first switch. Done before the commit
+	 * attempt so restore works even if the caller later changes modes
+	 * between now and a failed disable. */
 	if (!m->video_mode_active && !m->vrr_active)
 		m->original_mode = m->wlr_output->current_mode;
 
 	wlr_log(WLR_DEBUG, "Enabling VRR for %.3f Hz video on %s",
 			video_hz, m->wlr_output->name);
 
-	/* Enable adaptive sync */
-	wlr_output_state_init(&state);
-	wlr_output_state_set_adaptive_sync_enabled(&state, 1);
-
-	if (wlr_output_test_state(m->wlr_output, &state)) {
-		if (wlr_output_commit_state(m->wlr_output, &state)) {
-			m->vrr_active = 1;
-			m->vrr_target_hz = video_hz;
-
-			/* Broadcast state change */
-			config = wlr_output_configuration_v1_create();
-			config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
-			config_head->state.adaptive_sync_enabled = 1;
-			wlr_output_manager_v1_set_configuration(output_mgr, config);
-
-			wlr_log(WLR_DEBUG, "VRR enabled for %.3f Hz video - judder-free playback",
-					video_hz);
-
-			/* Show OSD */
-			snprintf(osd_msg, sizeof(osd_msg), "VRR %.3f Hz", video_hz);
-			show_hz_osd(m, osd_msg);
-
-			wlr_output_state_finish(&state);
-			return 1;
-		}
+	/* Use the verified commit helper. State fields are ONLY updated
+	 * after verified success — this fixes the previous race where
+	 * m->vrr_active was set after a passing test_state() but before
+	 * confirming the commit actually took effect at the kernel level. */
+	if (!commit_adaptive_sync(m, 1)) {
+		wlr_log(WLR_ERROR, "Failed to enable VRR on %s for %.3f Hz video",
+			m->wlr_output->name, video_hz);
+		return 0;
 	}
 
-	wlr_output_state_finish(&state);
-	wlr_log(WLR_DEBUG, "Failed to enable VRR on %s", m->wlr_output->name);
-	return 0;
+	m->vrr_active = 1;
+	m->vrr_target_hz = video_hz;
+
+	/* Broadcast state change */
+	config = wlr_output_configuration_v1_create();
+	config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+	config_head->state.adaptive_sync_enabled = 1;
+	wlr_output_manager_v1_set_configuration(output_mgr, config);
+
+	wlr_log(WLR_DEBUG, "VRR enabled for %.3f Hz video - judder-free playback",
+			video_hz);
+
+	/* Show OSD */
+	snprintf(osd_msg, sizeof(osd_msg), "VRR %.3f Hz", video_hz);
+	show_hz_osd(m, osd_msg);
+
+	return 1;
 }
 
 void
 disable_vrr_video_mode(Monitor *m)
 {
-	struct wlr_output_state state;
 	struct wlr_output_configuration_v1 *config;
 	struct wlr_output_configuration_head_v1 *config_head;
 
@@ -2822,20 +3095,21 @@ disable_vrr_video_mode(Monitor *m)
 
 	wlr_log(WLR_DEBUG, "Disabling VRR on %s", m->wlr_output->name);
 
-	wlr_output_state_init(&state);
-	wlr_output_state_set_adaptive_sync_enabled(&state, 0);
-
-	if (wlr_output_commit_state(m->wlr_output, &state)) {
-		m->vrr_active = 0;
-		m->vrr_target_hz = 0.0f;
-
-		config = wlr_output_configuration_v1_create();
-		config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
-		config_head->state.adaptive_sync_enabled = 0;
-		wlr_output_manager_v1_set_configuration(output_mgr, config);
+	/* Use verified commit helper. Only clear internal state on success,
+	 * otherwise m->vrr_active would diverge from the actual hardware state. */
+	if (!commit_adaptive_sync(m, 0)) {
+		wlr_log(WLR_ERROR, "Failed to disable VRR on %s — hardware state unknown",
+			m->wlr_output->name);
+		return;
 	}
 
-	wlr_output_state_finish(&state);
+	m->vrr_active = 0;
+	m->vrr_target_hz = 0.0f;
+
+	config = wlr_output_configuration_v1_create();
+	config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+	config_head->state.adaptive_sync_enabled = 0;
+	wlr_output_manager_v1_set_configuration(output_mgr, config);
 }
 
 int

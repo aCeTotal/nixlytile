@@ -240,6 +240,7 @@ int integrated_gpu_idx = -1; /* Index of integrated GPU, -1 if none */
 struct CpuCursorBuffer *cpu_cursor_buf = NULL;
 int cpu_cursor_active = 0;
 int dgpu_render_fd = -1;     /* Held open to prevent dGPU D3cold/runtime suspend */
+int g_explicit_sync_ok = 0;  /* 1 = DRM syncobj timeline manager active */
 struct wl_event_source *dgpu_power_watchdog = NULL;
 
 /* PC gaming cache file watcher for realtime updates */

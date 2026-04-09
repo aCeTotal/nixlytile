@@ -2949,10 +2949,12 @@ setup(void)
 		}
 	}
 
+	g_explicit_sync_ok = 0;
 	if ((drm_fd = wlr_renderer_get_drm_fd(drw)) >= 0 && drw->features.timeline
 			&& backend->features.timeline) {
 		wlr_linux_drm_syncobj_manager_v1_create(dpy, 1, drm_fd);
 		wlr_log(WLR_INFO, "Explicit sync (DRM syncobj) enabled");
+		g_explicit_sync_ok = 1;
 	} else {
 		wlr_log(WLR_INFO,
 			"Explicit sync NOT available (drm_fd=%d, "
@@ -2963,6 +2965,71 @@ setup(void)
 			wlr_log(WLR_ERROR,
 				"NVIDIA: without explicit sync, Xwayland apps may flicker. "
 				"Upgrade to Nvidia 555+ driver for DRM syncobj support.");
+		}
+	}
+
+	/*
+	 * Gaming capability summary.
+	 *
+	 * Consolidated single-line status for diagnosing Vulkan game
+	 * performance issues. This is the first place to look when games
+	 * are stuttering — tells you at a glance whether the low-level
+	 * stack is in a known-good state.
+	 *
+	 * Key flags:
+	 *   ESYNC   — DRM syncobj explicit sync. Required for tear-free
+	 *             NVIDIA Xwayland and modern Wayland explicit-sync clients.
+	 *             NVIDIA needs driver 555+.
+	 *   DMABUF  — DMA-BUF texture import. Required for zero-copy
+	 *             client buffer sharing.
+	 *   VULKAN  — Renderer is Vulkan-based (not GLES2). Gives access
+	 *             to the persistent pipeline cache added in this tree.
+	 *   10BIT   — HDR/10-bit render format supported by the renderer.
+	 */
+	{
+		const char *renderer_name =
+			wlr_renderer_is_vk(drw) ? "Vulkan" :
+			/* wlr_renderer_is_gles2 requires include; use fallback */
+			"GLES2/other";
+		int has_dmabuf =
+			wlr_renderer_get_texture_formats(drw, WLR_BUFFER_CAP_DMABUF) != NULL;
+		const char *gpu_label = "unknown";
+		if (discrete_gpu_idx >= 0) {
+			switch (detected_gpus[discrete_gpu_idx].vendor) {
+			case GPU_VENDOR_NVIDIA: gpu_label = "NVIDIA"; break;
+			case GPU_VENDOR_AMD:    gpu_label = "AMD";    break;
+			case GPU_VENDOR_INTEL:  gpu_label = "Intel";  break;
+			default: gpu_label = "other"; break;
+			}
+		} else if (integrated_gpu_idx >= 0) {
+			switch (detected_gpus[integrated_gpu_idx].vendor) {
+			case GPU_VENDOR_AMD:    gpu_label = "AMD (iGPU)";    break;
+			case GPU_VENDOR_INTEL:  gpu_label = "Intel (iGPU)";  break;
+			default: gpu_label = "iGPU other"; break;
+			}
+		}
+
+		wlr_log(WLR_INFO,
+			"Gaming stack ready: gpu=%s renderer=%s esync=%s dmabuf=%s",
+			gpu_label,
+			renderer_name,
+			g_explicit_sync_ok ? "YES" : "NO",
+			has_dmabuf ? "YES" : "NO");
+
+		/* Per-vendor hints */
+		if (discrete_gpu_idx >= 0 &&
+		    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA) {
+			if (!g_explicit_sync_ok) {
+				wlr_log(WLR_ERROR,
+					"NVIDIA: game performance will be degraded without "
+					"explicit sync. Check: 1) driver >= 555, "
+					"2) nvidia-drm.modeset=1, 3) nvidia-drm.fbdev=1");
+			}
+			if (!wlr_renderer_is_vk(drw)) {
+				wlr_log(WLR_ERROR,
+					"NVIDIA: using GLES2 renderer instead of Vulkan. "
+					"Set WLR_RENDERER=vulkan for best game performance.");
+			}
 		}
 	}
 

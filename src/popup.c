@@ -1575,14 +1575,167 @@ osk_dpad_repeat_stop(void)
 		wl_event_source_timer_update(osk_dpad_repeat_timer, 0);
 }
 
+/*
+ * Toast overlay-plane path.
+ *
+ * When a fullscreen game is direct-scanning out on an output whose backend
+ * exposes overlay planes (AMD/Intel today; NVIDIA proprietary rejects this
+ * as of driver 580), we avoid breaking scanout by rendering the toast to
+ * a dedicated dumb DRM buffer and attaching it to the commit as an
+ * wlr_output_layer. The primary plane keeps scanning the game buffer,
+ * and the hardware compositor alpha-blends our toast on top. Zero
+ * GPU cost, no scene-tree visible node, no scanout break.
+ *
+ * On failure (layer allocation refused, rendering problem, probe was a
+ * false positive) we fall back to the classic "suppress during scanout"
+ * behaviour — the toast is logged and dropped, never any worse than
+ * before this path existed.
+ */
+static void
+render_toast_overlay_destroy(Monitor *m)
+{
+	if (!m)
+		return;
+	if (m->toast_overlay_buf) {
+		cpu_cursor_buffer_destroy(m->toast_overlay_buf);
+		m->toast_overlay_buf = NULL;
+	}
+	m->toast_overlay_active = 0;
+}
+
+static int
+render_toast_overlay(Monitor *m, const char *message, int w, int h)
+{
+	struct CpuCursorBuffer *buf;
+	pixman_image_t *dst;
+	pixman_color_t bg_col, border_col;
+	int drm_fd;
+	int pen_x, baseline_y;
+	uint32_t prev_cp = 0;
+	const int border_thick = 1;
+
+	if (!m || !m->wlr_output || !message || w <= 0 || h <= 0 || !statusfont.font)
+		return 0;
+
+	drm_fd = wlr_renderer_get_drm_fd(drw);
+	if (drm_fd < 0)
+		return 0;
+
+	buf = cpu_cursor_buffer_create(drm_fd, (uint32_t)w, (uint32_t)h, 0);
+	if (!buf || !buf->map)
+		return 0;
+
+	/* Wrap the mapped bytes in a pixman image for compositing. The
+	 * dumb buffer is linear ARGB8888, which matches PIXMAN_a8r8g8b8
+	 * on little-endian. Size checks: buf->stride is in bytes. */
+	dst = pixman_image_create_bits(PIXMAN_a8r8g8b8, w, h,
+			(uint32_t *)buf->map, (int)buf->stride);
+	if (!dst) {
+		cpu_cursor_buffer_destroy(buf);
+		return 0;
+	}
+
+	/* Fill background (0.15,0.15,0.15, 0.95) pre-multiplied. */
+	bg_col.alpha = (uint16_t)lroundf(0.95f * 65535.0f);
+	bg_col.red   = (uint16_t)lroundf(0.15f * 0.95f * 65535.0f);
+	bg_col.green = (uint16_t)lroundf(0.15f * 0.95f * 65535.0f);
+	bg_col.blue  = (uint16_t)lroundf(0.15f * 0.95f * 65535.0f);
+	pixman_image_fill_boxes(PIXMAN_OP_SRC, dst, &bg_col, 1,
+			&(pixman_box32_t){ .x1 = 0, .y1 = 0, .x2 = w, .y2 = h });
+
+	/* Border (0.3,0.3,0.3, 1.0). */
+	border_col.alpha = 0xffff;
+	border_col.red = border_col.green = border_col.blue =
+		(uint16_t)lroundf(0.3f * 65535.0f);
+	pixman_box32_t border_rects[4] = {
+		{ 0, 0, w, border_thick },
+		{ 0, h - border_thick, w, h },
+		{ 0, 0, border_thick, h },
+		{ w - border_thick, 0, w, h },
+	};
+	pixman_image_fill_boxes(PIXMAN_OP_SRC, dst, &border_col, 4, border_rects);
+
+	/* Render glyphs. Pen positioning mirrors tray_render_label. */
+	pen_x = 12; /* pad */
+	baseline_y = h - 8; /* bottom-aligned baseline, tuned to match scene path */
+	for (size_t i = 0; message[i]; i++) {
+		long kern_x = 0, kern_y = 0;
+		uint32_t cp = (unsigned char)message[i];
+		const struct fcft_glyph *glyph;
+
+		if (prev_cp)
+			fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
+		pen_x += (int)kern_x;
+
+		glyph = fcft_rasterize_char_utf32(statusfont.font, cp,
+				statusbar_font_subpixel);
+		if (glyph && glyph->pix) {
+			int gx = pen_x + glyph->x;
+			int gy = baseline_y - glyph->y;
+			int gw = glyph->width;
+			int gh = glyph->height;
+			if (pixman_image_get_format(glyph->pix) == PIXMAN_a8) {
+				/* Mask-only glyph: blend foreground colour through it. */
+				pixman_color_t fg = {
+					.alpha = 0xffff,
+					.red   = (uint16_t)lroundf(statusbar_fg[0] * 65535.0f),
+					.green = (uint16_t)lroundf(statusbar_fg[1] * 65535.0f),
+					.blue  = (uint16_t)lroundf(statusbar_fg[2] * 65535.0f),
+				};
+				pixman_image_t *solid = pixman_image_create_solid_fill(&fg);
+				if (solid) {
+					pixman_image_composite32(PIXMAN_OP_OVER, solid,
+							glyph->pix, dst,
+							0, 0, 0, 0, gx, gy, gw, gh);
+					pixman_image_unref(solid);
+				}
+			} else {
+				/* Colour emoji glyph: composite as-is. */
+				pixman_image_composite32(PIXMAN_OP_OVER, glyph->pix, NULL, dst,
+						0, 0, 0, 0, gx, gy, gw, gh);
+			}
+			pen_x += glyph->advance.x;
+			if (message[i + 1])
+				pen_x += statusbar_font_spacing;
+		}
+		prev_cp = cp;
+	}
+
+	pixman_image_unref(dst);
+
+	/* Swap in the new buffer, drop any previous one. */
+	if (m->toast_overlay_buf)
+		cpu_cursor_buffer_destroy(m->toast_overlay_buf);
+	m->toast_overlay_buf = buf;
+
+	/* Create the output layer once per monitor; reuse across toasts. */
+	if (!m->toast_overlay_layer) {
+		m->toast_overlay_layer = wlr_output_layer_create(m->wlr_output);
+		if (!m->toast_overlay_layer) {
+			render_toast_overlay_destroy(m);
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
 int
 toast_hide_timer(void *data)
 {
 	Monitor *m = data;
-	if (m && m->toast_tree) {
+	if (!m)
+		return 0;
+	if (m->toast_tree) {
 		wlr_scene_node_set_enabled(&m->toast_tree->node, 0);
-		m->toast_visible = 0;
 	}
+	if (m->toast_overlay_active) {
+		/* Request a frame so the commit without the layer actually lands. */
+		m->toast_overlay_active = 0;
+		if (m->wlr_output)
+			wlr_output_schedule_frame(m->wlr_output);
+	}
+	m->toast_visible = 0;
 	return 0;
 }
 
@@ -1600,6 +1753,53 @@ toast_show(Monitor *m, const char *message, int duration_ms)
 		m = selmon;
 	if (!m)
 		return;
+
+	/* Direct-scanout coexistence.
+	 *
+	 * Any visible node in LyrOverlay adds a second render list entry,
+	 * which forces wlroots to fall back from direct scanout to full GPU
+	 * composition for the entire toast duration. Two strategies:
+	 *
+	 * 1. Overlay-plane promotion (AMD/Intel with hardware overlay
+	 *    planes): render toast to a dumb DRM buffer, attach as a
+	 *    wlr_output_layer on commit. Primary plane keeps scanning out
+	 *    the game, display controller composites our toast on top.
+	 *
+	 * 2. Suppression fallback (NVIDIA, or any backend that refuses the
+	 *    overlay plane probe): log and drop. This is the pre-existing
+	 *    behaviour and protects scanout at the cost of the toast. */
+	if (m->direct_scanout_active) {
+		if (m->gcaps.overlay_planes_supported) {
+			int text_w = status_text_width(message);
+			int ov_pad = 12, ov_h = 28;
+			int ov_w = text_w + ov_pad * 2;
+			int ov_x = m->m.x + m->m.width - ov_w - 20;
+			int ov_y = m->m.y + 50;
+			if (render_toast_overlay(m, message, ov_w, ov_h)) {
+				m->toast_overlay_dst.x = ov_x;
+				m->toast_overlay_dst.y = ov_y;
+				m->toast_overlay_dst.width = ov_w;
+				m->toast_overlay_dst.height = ov_h;
+				m->toast_overlay_active = 1;
+				m->toast_visible = 1;
+				if (m->wlr_output)
+					wlr_output_schedule_frame(m->wlr_output);
+				if (!m->toast_timer)
+					m->toast_timer = wl_event_loop_add_timer(
+						event_loop, toast_hide_timer, m);
+				wl_event_source_timer_update(m->toast_timer, duration_ms);
+				wlr_log(WLR_INFO,
+					"Toast on overlay plane (%s): %s",
+					m->wlr_output ? m->wlr_output->name : "?", message);
+				return;
+			}
+			/* Overlay render failed — fall through to suppression. */
+		}
+		wlr_log(WLR_INFO,
+			"Toast suppressed (scanout active on %s): %s",
+			m->wlr_output ? m->wlr_output->name : "?", message);
+		return;
+	}
 
 	/* Create toast tree if needed - use LyrOverlay to show above fullscreen */
 	if (!m->toast_tree) {
