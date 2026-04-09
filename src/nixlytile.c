@@ -3852,6 +3852,21 @@ configurex11(struct wl_listener *listener, void *data)
 				event->x, event->y, event->width, event->height);
 		return;
 	}
+	/*
+	 * Don't honour client-requested configures while the window is in
+	 * fullscreen. A Proton game that just asked for _NET_WM_STATE_FULLSCREEN
+	 * will often follow up with a ConfigureRequest at its preferred
+	 * (smaller) swapchain resolution; honouring it would shrink c->geom
+	 * back to a sub-monitor size, making arrange() draw fullscreen_bg
+	 * around a tiny centred game surface. Re-assert the fullscreen
+	 * geometry so the X client reconciles its own state.
+	 */
+	if (c->isfullscreen) {
+		wlr_xwayland_surface_configure(c->surface.xwayland,
+				c->geom.x + c->bw, c->geom.y + c->bw,
+				c->geom.width - 2 * c->bw, c->geom.height - 2 * c->bw);
+		return;
+	}
 	if ((c->isfloating && c != grabc) || !c->mon->lt[c->mon->sellt]->arrange) {
 		resize(c, (struct wlr_box){.x = event->x - c->bw,
 				.y = event->y - c->bw, .width = event->width + c->bw * 2,
