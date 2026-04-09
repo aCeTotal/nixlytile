@@ -157,6 +157,15 @@ applyrules(Client *c)
 	appid = client_get_appid(c);
 	title = client_get_title(c);
 
+	wlr_log(WLR_INFO,
+		"GAME_TRACE: applyrules enter appid='%s' title='%s' pid=%d "
+		"geom=%dx%d selmon='%s'",
+		appid ? appid : "(null)",
+		title ? title : "(null)",
+		(int)client_get_pid(c),
+		c->geom.width, c->geom.height,
+		selmon && selmon->wlr_output ? selmon->wlr_output->name : "(null)");
+
 	for (r = rules; r < rules + nrules; r++) {
 		if ((!r->title || strstr(title, r->title))
 				&& (!r->id || strstr(appid, r->id))) {
@@ -204,6 +213,10 @@ applyrules(Client *c)
 	}
 
 	c->isfloating |= client_is_float_type(c);
+	wlr_log(WLR_INFO,
+		"GAME_TRACE: applyrules exit → mon='%s' newtags=0x%x isfloating=%d",
+		mon && mon->wlr_output ? mon->wlr_output->name : "(null)",
+		newtags, c->isfloating);
 	setmon(c, mon, newtags);
 }
 
@@ -542,7 +555,15 @@ void
 fullscreennotify(struct wl_listener *listener, void *data)
 {
 	Client *c = wl_container_of(listener, c, fullscreen);
-	setfullscreen(c, client_wants_fullscreen(c));
+	int want = client_wants_fullscreen(c);
+	wlr_log(WLR_INFO,
+		"GAME_TRACE: fullscreennotify appid='%s' type=%s want=%d was=%d "
+		"c->mon='%s'",
+		client_get_appid(c) ? client_get_appid(c) : "(null)",
+		c->type == X11 ? "X11" : "XDG",
+		want, c->isfullscreen,
+		c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)");
+	setfullscreen(c, want);
 }
 
 void
@@ -667,11 +688,25 @@ mapnotify(struct wl_listener *listener, void *data)
 	}
 #endif
 
+	wlr_log(WLR_INFO,
+		"GAME_TRACE: mapnotify enter appid='%s' pid=%d type=%s initial=%dx%d "
+		"isfloating=%d isfullscreen=%d selmon='%s'",
+		client_get_appid(c) ? client_get_appid(c) : "(null)",
+		(int)client_get_pid(c),
+		c->type == X11 ? "X11" : "XDG",
+		initial_w, initial_h,
+		c->isfloating, c->isfullscreen,
+		selmon && selmon->wlr_output ? selmon->wlr_output->name : "(null)");
+
 	/* Set initial monitor, tags, floating status, and focus:
 	 * we always consider floating, clients that have parent and thus
 	 * we set the same tags and monitor as its parent.
 	 * If there is no parent, apply rules */
 	if ((p = client_get_parent(c))) {
+		wlr_log(WLR_INFO,
+			"GAME_TRACE: mapnotify parent-path parent_appid='%s' parent_mon='%s'",
+			client_get_appid(p) ? client_get_appid(p) : "(null)",
+			p->mon && p->mon->wlr_output ? p->mon->wlr_output->name : "(null)");
 		c->isfloating = 1;
 		if (tray_anchor_time_ms && monotonic_msec() - tray_anchor_time_ms <= 1000) {
 			c->geom.x = tray_anchor_x - c->geom.width / 2;
@@ -682,6 +717,7 @@ mapnotify(struct wl_listener *listener, void *data)
 		}
 		setmon(c, p->mon, p->tags);
 	} else {
+		wlr_log(WLR_INFO, "GAME_TRACE: mapnotify applyrules-path (no parent)");
 		applyrules(c);
 	}
 	/* Ensure client has a valid monitor. If selmon is NULL (all outputs
@@ -747,6 +783,14 @@ mapnotify(struct wl_listener *listener, void *data)
 		int small_w = initial_w > 0 && initial_w < (mon_w * 3) / 4;
 		int small_h = initial_h > 0 && initial_h < (mon_h * 3) / 4;
 
+		wlr_log(WLR_INFO,
+			"GAME_TRACE: game detected appid='%s' c->mon='%s' mon=%dx%d@%d,%d "
+			"initial=%dx%d small=%d,%d",
+			client_get_appid(c) ? client_get_appid(c) : "(null)",
+			c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)",
+			mon_w, mon_h, c->mon->m.x, c->mon->m.y,
+			initial_w, initial_h, small_w, small_h);
+
 		if (small_w && small_h) {
 			wlr_log(WLR_INFO, "Game splash/logo detected: '%s' %dx%d, centering",
 				client_get_appid(c) ? client_get_appid(c) : "(unknown)",
@@ -768,6 +812,10 @@ mapnotify(struct wl_listener *listener, void *data)
 			client_get_appid(c) ? client_get_appid(c) : "(unknown)",
 			initial_w, initial_h);
 		setfullscreen(c, 1);
+		wlr_log(WLR_INFO,
+			"GAME_TRACE: after setfullscreen c->mon='%s' geom=%dx%d@%d,%d",
+			c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)",
+			c->geom.width, c->geom.height, c->geom.x, c->geom.y);
 		focusclient(c, 1);
 		printstatus();
 		return;
@@ -876,6 +924,14 @@ setfloating(Client *c, int floating)
 void
 setfullscreen(Client *c, int fullscreen)
 {
+	wlr_log(WLR_INFO,
+		"GAME_TRACE: setfullscreen enter appid='%s' want=%d was=%d "
+		"c->mon='%s' geom=%dx%d@%d,%d",
+		client_get_appid(c) ? client_get_appid(c) : "(null)",
+		fullscreen, c->isfullscreen,
+		c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)",
+		c->geom.width, c->geom.height, c->geom.x, c->geom.y);
+
 	/*
 	 * In HTPC mode, games and Steam Big Picture are locked to fullscreen
 	 * and cannot exit fullscreen. This prevents accidental unfullscreen
@@ -891,8 +947,13 @@ setfullscreen(Client *c, int fullscreen)
 	}
 
 	c->isfullscreen = fullscreen;
-	if (!c->mon || !client_surface(c)->mapped)
+	if (!c->mon || !client_surface(c)->mapped) {
+		wlr_log(WLR_INFO,
+			"GAME_TRACE: setfullscreen early-return mon=%p mapped=%d",
+			(void*)c->mon,
+			client_surface(c) ? client_surface(c)->mapped : -1);
 		return;
+	}
 
 	c->bw = fullscreen ? 0 : borderpx;
 	client_set_fullscreen(c, fullscreen);
@@ -913,8 +974,15 @@ setfullscreen(Client *c, int fullscreen)
 	}
 
 	if (fullscreen) {
+		struct wlr_box fsgeom = fullscreen_mirror_geom(c->mon);
+		wlr_log(WLR_INFO,
+			"GAME_TRACE: setfullscreen resize mon='%s' target=%dx%d@%d,%d "
+			"(c->mon->m=%dx%d@%d,%d)",
+			c->mon->wlr_output->name,
+			fsgeom.width, fsgeom.height, fsgeom.x, fsgeom.y,
+			c->mon->m.width, c->mon->m.height, c->mon->m.x, c->mon->m.y);
 		c->prev = c->geom;
-		resize(c, fullscreen_mirror_geom(c->mon), 0);
+		resize(c, fsgeom, 0);
 		set_adaptive_sync(c->mon, 1);
 		/* Reset frame tracking and video detection state */
 		c->frame_time_idx = 0;
@@ -983,6 +1051,15 @@ setmon(Client *c, Monitor *m, uint32_t newtags)
 
 	if (oldmon == m)
 		return;
+	wlr_log(WLR_INFO,
+		"GAME_TRACE: setmon appid='%s' old='%s' → new='%s' "
+		"isfullscreen=%d isfloating=%d geom=%dx%d@%d,%d newtags=0x%x",
+		client_get_appid(c) ? client_get_appid(c) : "(null)",
+		oldmon && oldmon->wlr_output ? oldmon->wlr_output->name : "(null)",
+		m && m->wlr_output ? m->wlr_output->name : "(null)",
+		c->isfullscreen, c->isfloating,
+		c->geom.width, c->geom.height, c->geom.x, c->geom.y,
+		newtags);
 	c->mon = m;
 	c->prev = c->geom;
 

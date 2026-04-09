@@ -4465,6 +4465,16 @@ updatemons(struct wl_listener *listener, void *data)
 		wl_list_for_each(c, &clients, link) {
 			if (c->output && c->mon != m
 					&& strcmp(m->wlr_output->name, c->output) == 0) {
+				wlr_log(WLR_INFO,
+					"GAME_TRACE: updatemons direct c->mon reassign "
+					"appid='%s' old='%s' → new='%s' isfullscreen=%d "
+					"geom=%dx%d@%d,%d c->output='%s'",
+					client_get_appid(c) ? client_get_appid(c) : "(null)",
+					c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)",
+					m->wlr_output->name,
+					c->isfullscreen,
+					c->geom.width, c->geom.height, c->geom.x, c->geom.y,
+					c->output);
 				c->mon = m;
 			}
 		}
@@ -4503,9 +4513,38 @@ updatemons(struct wl_listener *listener, void *data)
 		arrangelayers(m);
 		/* Don't move clients to the left output when plugging monitors */
 		arrange(m);
-		/* make sure fullscreen clients have the right size */
-		if ((c = focustop(m)) && c->isfullscreen)
-			resize(c, fullscreen_mirror_geom(m), 0);
+		/*
+		 * Make sure fullscreen clients have the right size.
+		 *
+		 * We iterate over ALL fullscreen clients on this monitor, not just
+		 * focustop(m), because the direct c->mon reassignment higher up in
+		 * this function (based on c->output match) can move a fullscreen
+		 * client onto m without it being the top of the focus stack. If we
+		 * only resized focustop, the moved client would keep its old
+		 * geometry — causing arrange() to draw fullscreen_bg around a
+		 * smaller rectangle on the new monitor. This was the "game shown
+		 * in a small box with black around it after the game moved to the
+		 * correct screen" symptom observed when Proton/Vulkan games enable
+		 * VRR shortly after map.
+		 */
+		wl_list_for_each(c, &clients, link) {
+			if (c->mon == m && c->isfullscreen) {
+				struct wlr_box fsgeom = fullscreen_mirror_geom(m);
+				if (c->geom.width != fsgeom.width ||
+				    c->geom.height != fsgeom.height ||
+				    c->geom.x != fsgeom.x ||
+				    c->geom.y != fsgeom.y) {
+					wlr_log(WLR_INFO,
+						"GAME_TRACE: updatemons fullscreen resize "
+						"appid='%s' mon='%s' %dx%d@%d,%d → %dx%d@%d,%d",
+						client_get_appid(c) ? client_get_appid(c) : "(null)",
+						m->wlr_output->name,
+						c->geom.width, c->geom.height, c->geom.x, c->geom.y,
+						fsgeom.width, fsgeom.height, fsgeom.x, fsgeom.y);
+					resize(c, fsgeom, 0);
+				}
+			}
+		}
 
 		/* Try to re-set the gamma LUT when updating monitors,
 		 * it's only really needed when enabling a disabled output, but meh. */

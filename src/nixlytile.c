@@ -3862,6 +3862,13 @@ configurex11(struct wl_listener *listener, void *data)
 	 * geometry so the X client reconciles its own state.
 	 */
 	if (c->isfullscreen) {
+		wlr_log(WLR_INFO,
+			"GAME_TRACE: configurex11 rejecting shrink appid='%s' "
+			"requested=%dx%d@%d,%d fullscreen_geom=%dx%d@%d,%d c->mon='%s'",
+			client_get_appid(c) ? client_get_appid(c) : "(null)",
+			event->width, event->height, event->x, event->y,
+			c->geom.width, c->geom.height, c->geom.x, c->geom.y,
+			c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)");
 		wlr_xwayland_surface_configure(c->surface.xwayland,
 				c->geom.x + c->bw, c->geom.y + c->bw,
 				c->geom.width - 2 * c->bw, c->geom.height - 2 * c->bw);
