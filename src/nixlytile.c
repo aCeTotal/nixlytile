@@ -543,23 +543,45 @@ steam_set_ge_proton_default(void)
 	config_content[config_size] = '\0';
 	fclose(fp);
 
-	/* Check if CompatToolMapping already exists with our GE-Proton */
-	if (strstr(config_content, ge_proton_name)) {
-		wlr_log(WLR_INFO, "%s already configured in Steam", ge_proton_name);
-		free(config_content);
-		return;
-	}
-
-	/* Find CompatToolMapping section or create it */
+	/* Find CompatToolMapping section */
 	char *compat_section = strstr(config_content, "\"CompatToolMapping\"");
 	if (compat_section) {
 		/* Find the "0" entry (global default) within CompatToolMapping */
 		char *zero_entry = strstr(compat_section, "\"0\"");
 		if (zero_entry && zero_entry < compat_section + 500) {
-			/* Replace existing "0" entry - find its closing brace */
-			char *entry_start = zero_entry;
-			char *brace_open = strchr(entry_start, '{');
+			/*
+			 * Check if the "0" entry already has a compatibility tool
+			 * configured.  If the user has chosen ANY tool (GE-Proton,
+			 * Proton Experimental, etc.), respect that choice and don't
+			 * overwrite it.  Only set GE-Proton when nothing is set.
+			 */
+			char *brace_open = strchr(zero_entry, '{');
 			if (brace_open) {
+				char *name_key = strstr(brace_open, "\"name\"");
+				if (name_key) {
+					/* Find the value: skip "name", whitespace, opening quote */
+					char *p = name_key + 6; /* past "name" */
+					while (*p && (*p == ' ' || *p == '\t')) p++;
+					if (*p == '"') {
+						p++; /* skip opening quote */
+						if (*p != '"' && *p != '\0') {
+							/* Non-empty name → user already has a tool set */
+							char existing[128] = {0};
+							int i = 0;
+							while (*p && *p != '"' && i < (int)sizeof(existing) - 1)
+								existing[i++] = *p++;
+							existing[i] = '\0';
+							wlr_log(WLR_INFO,
+								"Steam already has compatibility tool '%s' "
+								"configured — preserving user choice",
+								existing);
+							free(config_content);
+							return;
+						}
+					}
+				}
+
+				/* No tool set — write GE-Proton as default */
 				int depth = 1;
 				char *brace_close = brace_open + 1;
 				while (*brace_close && depth > 0) {
@@ -567,29 +589,27 @@ steam_set_ge_proton_default(void)
 					else if (*brace_close == '}') depth--;
 					brace_close++;
 				}
-				/* Replace content between braces */
 				char new_entry[512];
 				snprintf(new_entry, sizeof(new_entry),
 					"{\n\t\t\t\t\t\t\"name\"\t\t\"%s\"\n"
 					"\t\t\t\t\t\t\"config\"\t\t\"\"\n"
-					"\t\t\t\t\t\t\"priority\"\t\t\"75\"\n"
+					"\t\t\t\t\t\t\"priority\"\t\t\"250\"\n"
 					"\t\t\t\t\t}",
 					ge_proton_name);
 
-				/* Build new config */
 				size_t prefix_len = brace_open - config_content + 1;
 				size_t suffix_start = brace_close - config_content;
 				char *new_config = malloc(config_size + 4096);
 				if (new_config) {
 					memcpy(new_config, config_content, prefix_len);
-					strcpy(new_config + prefix_len, new_entry + 1); /* Skip first { */
+					strcpy(new_config + prefix_len, new_entry + 1);
 					strcat(new_config, config_content + suffix_start);
 
 					fp = fopen(config_path, "w");
 					if (fp) {
 						fputs(new_config, fp);
 						fclose(fp);
-						wlr_log(WLR_INFO, "Updated Steam config with %s as default", ge_proton_name);
+						wlr_log(WLR_INFO, "Set %s as default Steam compatibility tool", ge_proton_name);
 					}
 					free(new_config);
 				}
@@ -3851,53 +3871,74 @@ configurex11(struct wl_listener *listener, void *data)
 	/*
 	 * Fullscreen game resize handling.
 	 *
-	 * Games that can't render at the monitor's native resolution (e.g.
-	 * 1920x1080 game on a 3440x1440 ultrawide) send a ConfigureRequest
-	 * at their preferred swap-chain resolution.  Accept the resize and
-	 * centre the window on the monitor — fullscreen_bg provides black
-	 * bars around the game surface.
+	 * Wine/Proton games often request their internal resolution (e.g.
+	 * 1920x1080) rather than the monitor's native resolution.  Unlike
+	 * native Vulkan games, whose GPU swapchain handles scaling, Wine
+	 * games render at the X11 window size.  If we force the monitor
+	 * resolution the game's buffer appears in a corner with broken
+	 * mouse coordinates.
 	 *
-	 * If the requested size matches or exceeds the current fullscreen
-	 * geometry in both dimensions, re-assert the fullscreen geometry to
-	 * avoid Proton oscillation loops.
+	 * When the game requests a size smaller than the monitor we accept
+	 * it, center the X11 window, and offset the scene surface so the
+	 * buffer is visually centered.  c->geom stays at full monitor
+	 * geometry so input routing and scene bounds remain correct.
 	 */
 	if (c->isfullscreen && c->mon) {
-		int rw = event->width;
-		int rh = event->height;
-		int fw = c->geom.width;
-		int fh = c->geom.height;
+		struct wlr_box fsgeom = fullscreen_mirror_geom(c->mon);
+		int gw = event->width;
+		int gh = event->height;
 
-		if (rw >= fw && rh >= fh) {
-			/* Same or larger — re-assert fullscreen geometry */
+		wlr_log(WLR_INFO,
+			"GAME_TRACE: configurex11 fullscreen "
+			"appid='%s' requested=%dx%d monitor=%dx%d mon='%s'",
+			client_get_appid(c) ? client_get_appid(c) : "(null)",
+			gw, gh,
+			fsgeom.width, fsgeom.height,
+			c->mon->wlr_output ? c->mon->wlr_output->name : "(null)");
+
+		/* Game requests smaller than monitor → accept and center */
+		if (gw < fsgeom.width || gh < fsgeom.height) {
+			if (gw > fsgeom.width)  gw = fsgeom.width;
+			if (gh > fsgeom.height) gh = fsgeom.height;
+
+			int cx = fsgeom.x + (fsgeom.width  - gw) / 2;
+			int cy = fsgeom.y + (fsgeom.height - gh) / 2;
+			int dx = (fsgeom.width  - gw) / 2;
+			int dy = (fsgeom.height - gh) / 2;
+
+			wlr_log(WLR_INFO,
+				"GAME_TRACE: configurex11 fullscreen centered "
+				"size=%dx%d offset=%d,%d xpos=%d,%d",
+				gw, gh, dx, dy, cx, cy);
+
+			/* Tell XWayland the game's actual size, centered */
 			wlr_xwayland_surface_configure(c->surface.xwayland,
-				c->geom.x + c->bw, c->geom.y + c->bw,
-				fw - 2 * c->bw, fh - 2 * c->bw);
+				cx, cy, gw, gh);
+			/* Offset scene_surface to center the buffer visually */
+			wlr_scene_node_set_position(&c->scene_surface->node,
+				dx, dy);
+
+			/* Ensure c->geom covers full monitor for input */
+			if (c->geom.width != fsgeom.width
+					|| c->geom.height != fsgeom.height
+					|| c->geom.x != fsgeom.x
+					|| c->geom.y != fsgeom.y) {
+				c->geom = fsgeom;
+				wlr_scene_node_set_position(&c->scene->node,
+					fsgeom.x, fsgeom.y);
+			}
 			return;
 		}
 
-		/* Accept the game's preferred resolution, centred */
-		int mx = c->mon->m.x;
-		int my = c->mon->m.y;
-		int mw = c->mon->m.width;
-		int mh = c->mon->m.height;
-
-		if (rw > mw) rw = mw;
-		if (rh > mh) rh = mh;
-
-		struct wlr_box newgeom = {
-			.x = mx + (mw - rw) / 2,
-			.y = my + (mh - rh) / 2,
-			.width = rw,
-			.height = rh,
-		};
-		wlr_log(WLR_INFO,
-			"GAME_TRACE: configurex11 fullscreen resize appid='%s' "
-			"requested=%dx%d → centred=%dx%d@%d,%d mon='%s'",
-			client_get_appid(c) ? client_get_appid(c) : "(null)",
-			event->width, event->height,
-			newgeom.width, newgeom.height, newgeom.x, newgeom.y,
-			c->mon->wlr_output ? c->mon->wlr_output->name : "(null)");
-		resize(c, newgeom, 0);
+		/* Game requests >= monitor size → standard fullscreen */
+		wlr_scene_node_set_position(&c->scene_surface->node, 0, 0);
+		if (c->geom.width != fsgeom.width || c->geom.height != fsgeom.height
+				|| c->geom.x != fsgeom.x || c->geom.y != fsgeom.y) {
+			resize(c, fsgeom, 0);
+		} else {
+			wlr_xwayland_surface_configure(c->surface.xwayland,
+				fsgeom.x, fsgeom.y, fsgeom.width, fsgeom.height);
+		}
 		return;
 	}
 	if ((c->isfloating && c != grabc) || !c->mon->lt[c->mon->sellt]->arrange) {

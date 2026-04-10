@@ -606,9 +606,32 @@ fullscreennotify(struct wl_listener *listener, void *data)
 	if (!want && c->isfullscreen && (is_game_content(c) || looks_like_game(c))) {
 		wlr_log(WLR_INFO,
 			"GAME_TRACE: fullscreennotify ignoring client unfullscreen "
-			"for game '%s' — re-asserting fullscreen",
+			"for game '%s' — silently ignoring (no re-assert)",
 			client_get_appid(c) ? client_get_appid(c) : "(null)");
-		/* Re-assert fullscreen state so the X11 client reconciles. */
+		/*
+		 * Silently ignore — don't re-assert fullscreen.  Wine/Proton
+		 * games send unfullscreen as part of their resolution-change
+		 * sequence.  Re-asserting fullscreen here confuses Wine into
+		 * thinking its mode change failed, causing it to cycle through
+		 * resolutions endlessly.  By doing nothing, Wine believes the
+		 * unfullscreen succeeded and proceeds with its mode change.
+		 */
+		return;
+	}
+
+	/*
+	 * Games already fullscreen requesting fullscreen again: confirm
+	 * without resizing.  After Wine's unfullscreen→re-fullscreen
+	 * sequence (mode change), the game is already fullscreen at its
+	 * preferred rendering size (centered on monitor).  Calling
+	 * setfullscreen() would resize back to full monitor geometry,
+	 * undoing the centered layout and restarting the cycle.
+	 */
+	if (want && c->isfullscreen && (is_game_content(c) || looks_like_game(c))) {
+		wlr_log(WLR_INFO,
+			"GAME_TRACE: fullscreennotify already fullscreen for "
+			"game '%s' — confirming without resize",
+			client_get_appid(c) ? client_get_appid(c) : "(null)");
 		client_set_fullscreen(c, 1);
 		return;
 	}
