@@ -688,6 +688,11 @@ mapnotify(struct wl_listener *listener, void *data)
 
 	client_get_geometry(c, &c->geom);
 
+	/* Read Steam X11 atoms (STEAM_GAME, STEAM_OVERLAY, STEAM_BIGPICTURE)
+	 * before any game-detection logic runs.  These are the authoritative
+	 * signals from Steam — see gamescope for the canonical consumer. */
+	read_steam_properties(c);
+
 	/* Save the game's preferred initial size BEFORE applyrules. The applyrules
 	 * → setmon → arrange chain resizes c->geom to the tile geometry, losing
 	 * the client's original preferred size. Used later for splash detection. */
@@ -762,6 +767,7 @@ mapnotify(struct wl_listener *listener, void *data)
 	 * float-type X11 hints on their main window.
 	 */
 	int pre_fullscreen_game = 0;
+	int pre_steam_splash = 0;   /* Steam game splash → float centered */
 	Monitor *pre_target_mon = NULL;
 	if (!c->isfloating && !c->isfullscreen && !client_is_unmanaged(c)
 			&& client_get_parent(c) == NULL
@@ -778,19 +784,118 @@ mapnotify(struct wl_listener *listener, void *data)
 			}
 		}
 		if (pre_target_mon) {
+			const char *aid = client_get_appid(c);
 			int mon_w = pre_target_mon->m.width;
 			int mon_h = pre_target_mon->m.height;
-			int small_w = initial_w > 0 && initial_w < (mon_w * 3) / 4;
-			int small_h = initial_h > 0 && initial_h < (mon_h * 3) / 4;
-			if (initial_w > 0 && initial_h > 0 && !(small_w && small_h)) {
+			/*
+			 * Detect confirmed Steam games via two signals:
+			 *   1. STEAM_GAME X11 atom (set by Steam, read
+			 *      into c->steam_game_id) — authoritative
+			 *   2. steam_app_XXXXX WM_CLASS (set by Proton)
+			 *      — fallback when atoms aren't set yet
+			 */
+			int is_confirmed_steam_game = 0;
+#ifdef XWAYLAND
+			if (c->steam_game_id > 0 && c->steam_game_id != 769
+					&& !c->is_steam_overlay)
+				is_confirmed_steam_game = 1;
+#endif
+			if (!is_confirmed_steam_game && aid
+					&& strncasecmp(aid, "steam_app_", 10) == 0)
+				is_confirmed_steam_game = 1;
+			/* Native Wayland games won't have X11 atoms or
+			 * steam_app_ class — check process ancestry */
+			if (!is_confirmed_steam_game) {
+				pid_t pid = client_get_pid(c);
+				if (pid > 1 && is_game_launcher_child(pid))
+					is_confirmed_steam_game = 1;
+			}
+
+			/*
+			 * Splash threshold: for confirmed Steam games use
+			 * 1/3 of monitor (conservative — only tiny splash
+			 * logos).  For non-Steam, use 3/4 (original).
+			 *
+			 * On 3440x1440 ultrawide:
+			 *   Steam: 1147x480 — 800x450 splash ✓, 1374x800 game ✗
+			 *   Other: 2580x1080
+			 */
+			int thresh_w, thresh_h;
+			if (is_confirmed_steam_game) {
+				thresh_w = mon_w / 3;
+				thresh_h = mon_h / 3;
+			} else {
+				thresh_w = (mon_w * 3) / 4;
+				thresh_h = (mon_h * 3) / 4;
+			}
+			int small_w = initial_w > 0
+				&& initial_w < thresh_w;
+			int small_h = initial_h > 0
+				&& initial_h < thresh_h;
+			int is_small = small_w && small_h;
+
+			if (is_confirmed_steam_game && is_small) {
+				/*
+				 * Steam game splash / bootstrap window.
+				 * Show at its natural size, centered on the
+				 * game's monitor — like KDE does.  No black
+				 * fullscreen background; the desktop stays
+				 * visible behind it.
+				 *
+				 * If the game later requests fullscreen via
+				 * the X11 protocol, fullscreennotify() will
+				 * honour that request normally.
+				 */
+				pre_steam_splash = 1;
+				c->isfloating = 1;
+				c->geom.width = initial_w;
+				c->geom.height = initial_h;
+				c->geom.x = (mon_w - initial_w) / 2
+					+ pre_target_mon->m.x;
+				c->geom.y = (mon_h - initial_h) / 2
+					+ pre_target_mon->m.y;
+				wlr_log(WLR_INFO,
+					"GAME_TRACE: steam splash appid='%s' "
+					"steam_game_id=%u mon='%s' %dx%d "
+					"centered@%d,%d",
+					aid ? aid : "(null)",
+#ifdef XWAYLAND
+					c->steam_game_id,
+#else
+					0u,
+#endif
+					pre_target_mon->wlr_output
+						? pre_target_mon->wlr_output->name
+						: "(null)",
+					initial_w, initial_h,
+					c->geom.x, c->geom.y);
+			} else if (is_confirmed_steam_game || !is_small) {
+				/*
+				 * Confirmed Steam game main window, or a
+				 * non-Steam game with a large enough initial
+				 * window.  Immediate true fullscreen — the
+				 * game will init its swap chain at the
+				 * monitor's native resolution.
+				 */
 				pre_fullscreen_game = 1;
 				c->isfullscreen = 1;
 				c->isfloating = 0;
 				wlr_log(WLR_INFO,
-					"GAME_TRACE: pre-fullscreen main game appid='%s' "
+					"GAME_TRACE: pre-fullscreen %s "
+					"appid='%s' steam_game_id=%u "
 					"mon='%s' initial=%dx%d",
-					client_get_appid(c) ? client_get_appid(c) : "(null)",
-					pre_target_mon->wlr_output ? pre_target_mon->wlr_output->name : "(null)",
+					is_confirmed_steam_game
+						? "steam game"
+						: "main game",
+					aid ? aid : "(null)",
+#ifdef XWAYLAND
+					c->steam_game_id,
+#else
+					0u,
+#endif
+					pre_target_mon->wlr_output
+						? pre_target_mon->wlr_output->name
+						: "(null)",
 					initial_w, initial_h);
 			}
 		}
@@ -800,7 +905,7 @@ mapnotify(struct wl_listener *listener, void *data)
 	 * we always consider floating, clients that have parent and thus
 	 * we set the same tags and monitor as its parent.
 	 * If there is no parent, apply rules */
-	if (pre_fullscreen_game && pre_target_mon) {
+	if ((pre_fullscreen_game || pre_steam_splash) && pre_target_mon) {
 		/* Skip applyrules so rule-based isfloating doesn't override our
 		 * pre-set state, and so client_is_float_type() hints don't force
 		 * the game into a floating state. */
@@ -890,6 +995,19 @@ mapnotify(struct wl_listener *listener, void *data)
 			"GAME_TRACE: pre-fullscreen game ready c->mon='%s' geom=%dx%d@%d,%d",
 			c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)",
 			c->geom.width, c->geom.height, c->geom.x, c->geom.y);
+		focusclient(c, 1);
+		printstatus();
+		goto unset_fullscreen;
+	}
+
+	if (pre_steam_splash) {
+		/* Steam game splash/bootstrap: show at natural size, centered
+		 * on the game's monitor.  Desktop stays visible behind it
+		 * (no fullscreen_bg).  If the game later requests fullscreen
+		 * via the X11 _NET_WM_STATE_FULLSCREEN protocol, the
+		 * fullscreennotify handler will honour it. */
+		wlr_scene_node_reparent(&c->scene->node, layers[LyrFloat]);
+		resize(c, c->geom, 1);
 		focusclient(c, 1);
 		printstatus();
 		goto unset_fullscreen;

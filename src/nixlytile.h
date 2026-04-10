@@ -1282,6 +1282,11 @@ typedef struct {
 	int video_detect_retries;
 	int video_detect_phase;
 	struct wlr_ext_foreign_toplevel_handle_v1 *foreign_toplevel_handle;
+#ifdef XWAYLAND
+	uint32_t steam_game_id;     /* STEAM_GAME AppID (0 = not a Steam game) */
+	int is_steam_overlay;       /* STEAM_OVERLAY == 1 */
+	int is_steam_bigpicture;    /* STEAM_BIGPICTURE == 1 */
+#endif
 } Client;
 
 /* ── binary tree tiling layout node ───────────────────────────────── */
@@ -2106,6 +2111,11 @@ extern struct wl_listener new_kb_shortcuts_inhibitor;
 extern struct wl_listener new_xwayland_surface;
 extern struct wl_listener xwayland_ready;
 extern struct wlr_xwayland *xwayland;
+
+/* Steam X11 atoms — interned in xwaylandready() */
+extern xcb_atom_t atom_steam_game;       /* STEAM_GAME (Cardinal: AppID) */
+extern xcb_atom_t atom_steam_overlay;    /* STEAM_OVERLAY (Cardinal: 0/1) */
+extern xcb_atom_t atom_steam_bigpicture; /* STEAM_BIGPICTURE (Cardinal: 0/1) */
 #endif
 
 /* layermap */
@@ -2224,6 +2234,7 @@ int is_steam_popup(Client *c);
 int is_steam_game(Client *c);
 int is_browser_client(Client *c);
 int looks_like_game(Client *c);
+void read_steam_properties(Client *c);
 int is_steam_cmd(const char *cmd);
 int is_game_launcher_child(pid_t pid);
 int client_wants_tearing(Client *c);
@@ -2317,6 +2328,7 @@ void gpureset(struct wl_listener *listener, void *data);
 void requestmonstate(struct wl_listener *listener, void *data);
 void updatemons(struct wl_listener *listener, void *data);
 void auto_arrange_monitors(void);
+void warp_cursor_to_startup_monitor(void);
 void set_adaptive_sync(Monitor *m, int enabled);
 void set_video_refresh_rate(Monitor *m, Client *c);
 void restore_max_refresh_rate(Monitor *m);

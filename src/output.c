@@ -456,6 +456,67 @@ auto_arrange_monitors(void)
 }
 
 void
+warp_cursor_to_startup_monitor(void)
+{
+	/*
+	 * Choose the best monitor for initial cursor placement:
+	 *   - Odd monitor count → physically center monitor (by x position)
+	 *   - Even count / 2 monitors → highest resolution (pixel count)
+	 * Called once at startup after all monitors are positioned.
+	 */
+	Monitor *m, *best = NULL;
+	Monitor *list[MAX_MONITORS];
+	int n = 0;
+
+	wl_list_for_each(m, &mons, link) {
+		if (m->wlr_output->enabled && !m->is_mirror && n < MAX_MONITORS)
+			list[n++] = m;
+	}
+
+	if (n == 0)
+		return;
+
+	if (n == 1) {
+		best = list[0];
+	} else {
+		/* Sort by x position (bubble sort, n is small) */
+		for (int i = 0; i < n - 1; i++) {
+			for (int j = i + 1; j < n; j++) {
+				if (list[j]->m.x < list[i]->m.x) {
+					Monitor *tmp = list[i];
+					list[i] = list[j];
+					list[j] = tmp;
+				}
+			}
+		}
+
+		if (n % 2 == 1) {
+			/* Odd: pick the physically center monitor */
+			best = list[n / 2];
+		} else {
+			/* Even: pick highest resolution */
+			best = list[0];
+			int best_px = best->m.width * best->m.height;
+			for (int i = 1; i < n; i++) {
+				int px = list[i]->m.width * list[i]->m.height;
+				if (px > best_px) {
+					best_px = px;
+					best = list[i];
+				}
+			}
+		}
+	}
+
+	selmon = best;
+	wlr_cursor_warp_closest(cursor, NULL,
+		best->m.x + best->m.width / 2,
+		best->m.y + best->m.height / 2);
+	wlr_log(WLR_INFO, "Startup cursor → monitor '%s' (%dx%d @ %d,%d)",
+		best->wlr_output->name,
+		best->m.width, best->m.height, best->m.x, best->m.y);
+}
+
+void
 createmon(struct wl_listener *listener, void *data)
 {
 	/* This event is raised by the backend when a new output (aka a display or

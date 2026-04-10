@@ -1671,15 +1671,11 @@ run(const char *startup_cmd)
 
 	printstatus();
 
-	/* At this point the outputs are initialized, choose initial selmon based on
-	 * cursor position, and set default cursor image */
-	selmon = xytomon(cursor->x, cursor->y);
-
-	/* TODO hack to get cursor to display in its initial location (100, 100)
-	 * instead of (0, 0) and then jumping. Still may not be fully
-	 * initialized, as the image/coordinates are not transformed for the
-	 * monitor when displayed here */
-	wlr_cursor_warp_closest(cursor, NULL, cursor->x, cursor->y);
+	/* At this point the outputs are initialized.  Place the cursor on the
+	 * center monitor (odd count) or the highest-resolution monitor (even
+	 * count / 2 monitors) so that the user always starts on the most
+	 * useful screen. */
+	warp_cursor_to_startup_monitor();
 	nixly_cursor_set_xcursor("default");
 
 	/* Run the Wayland event loop. This does not return until you exit the
@@ -4084,6 +4080,34 @@ xwaylandready(struct wl_listener *listener, void *data)
 			}
 			free(glx_reply);
 		}
+	}
+
+	/* Intern Steam atoms on this temporary connection so we can read
+	 * STEAM_GAME / STEAM_OVERLAY / STEAM_BIGPICTURE later via the
+	 * wlr_xwayland XWM connection.  The atom IDs are server-global,
+	 * so they're valid on any connection to the same X server. */
+	{
+		xcb_intern_atom_cookie_t sg = xcb_intern_atom(xc, 0, 10, "STEAM_GAME");
+		xcb_intern_atom_cookie_t so = xcb_intern_atom(xc, 0, 13, "STEAM_OVERLAY");
+		xcb_intern_atom_cookie_t sb = xcb_intern_atom(xc, 0, 16, "STEAM_BIGPICTURE");
+		xcb_intern_atom_reply_t *r;
+
+		if ((r = xcb_intern_atom_reply(xc, sg, NULL))) {
+			atom_steam_game = r->atom;
+			free(r);
+		}
+		if ((r = xcb_intern_atom_reply(xc, so, NULL))) {
+			atom_steam_overlay = r->atom;
+			free(r);
+		}
+		if ((r = xcb_intern_atom_reply(xc, sb, NULL))) {
+			atom_steam_bigpicture = r->atom;
+			free(r);
+		}
+		wlr_log(WLR_INFO,
+			"XWayland: interned Steam atoms — "
+			"STEAM_GAME=%u STEAM_OVERLAY=%u STEAM_BIGPICTURE=%u",
+			atom_steam_game, atom_steam_overlay, atom_steam_bigpicture);
 	}
 
 	xcb_disconnect(xc);

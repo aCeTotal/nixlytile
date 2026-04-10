@@ -588,6 +588,10 @@ struct wl_listener new_kb_shortcuts_inhibitor = {.notify = newkbshortcutsinhibit
 struct wl_listener new_xwayland_surface = {.notify = createnotifyx11};
 struct wl_listener xwayland_ready = {.notify = xwaylandready};
 struct wlr_xwayland *xwayland;
+
+xcb_atom_t atom_steam_game;
+xcb_atom_t atom_steam_overlay;
+xcb_atom_t atom_steam_bigpicture;
 #endif
 
 #ifndef WLR_SILENCE

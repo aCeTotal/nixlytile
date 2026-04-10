@@ -2693,12 +2693,108 @@ live_tv_kill(void)
 		waitpid(pid, &status, 0);
 }
 
+/*
+ * Read Steam-specific X11 properties from an XWayland surface.
+ * Steam sets these atoms on game windows:
+ *   STEAM_GAME       — Cardinal, value = game AppID (e.g. 393380)
+ *   STEAM_OVERLAY    — Cardinal, 1 = Steam in-game overlay
+ *   STEAM_BIGPICTURE — Cardinal, 1 = Steam client / Big Picture
+ *
+ * These are the authoritative signals from Steam.  Gamescope uses
+ * the same properties for window classification.
+ */
+void
+read_steam_properties(Client *c)
+{
+#ifdef XWAYLAND
+	xcb_connection_t *xc;
+	xcb_get_property_cookie_t cookie;
+	xcb_get_property_reply_t *reply;
+	xcb_window_t win;
+
+	if (!c || c->type != X11 || !c->surface.xwayland)
+		return;
+
+	xc = wlr_xwayland_get_xwm_connection(xwayland);
+	if (!xc)
+		return;
+
+	win = c->surface.xwayland->window_id;
+	if (!win)
+		return;
+
+	/* Batch all three requests (async) before fetching replies */
+	xcb_get_property_cookie_t csg = {0}, cso = {0}, csb = {0};
+	if (atom_steam_game)
+		csg = xcb_get_property(xc, 0, win, atom_steam_game,
+			XCB_ATOM_CARDINAL, 0, 1);
+	if (atom_steam_overlay)
+		cso = xcb_get_property(xc, 0, win, atom_steam_overlay,
+			XCB_ATOM_CARDINAL, 0, 1);
+	if (atom_steam_bigpicture)
+		csb = xcb_get_property(xc, 0, win, atom_steam_bigpicture,
+			XCB_ATOM_CARDINAL, 0, 1);
+
+	/* STEAM_GAME → steam_game_id */
+	if (atom_steam_game) {
+		reply = xcb_get_property_reply(xc, csg, NULL);
+		if (reply) {
+			if (reply->type == XCB_ATOM_CARDINAL
+					&& xcb_get_property_value_length(reply) >= 4) {
+				c->steam_game_id =
+					*(uint32_t *)xcb_get_property_value(reply);
+			}
+			free(reply);
+		}
+	}
+
+	/* STEAM_OVERLAY */
+	if (atom_steam_overlay) {
+		reply = xcb_get_property_reply(xc, cso, NULL);
+		if (reply) {
+			if (reply->type == XCB_ATOM_CARDINAL
+					&& xcb_get_property_value_length(reply) >= 4) {
+				c->is_steam_overlay =
+					*(uint32_t *)xcb_get_property_value(reply) != 0;
+			}
+			free(reply);
+		}
+	}
+
+	/* STEAM_BIGPICTURE */
+	if (atom_steam_bigpicture) {
+		reply = xcb_get_property_reply(xc, csb, NULL);
+		if (reply) {
+			if (reply->type == XCB_ATOM_CARDINAL
+					&& xcb_get_property_value_length(reply) >= 4) {
+				c->is_steam_bigpicture =
+					*(uint32_t *)xcb_get_property_value(reply) != 0;
+			}
+			free(reply);
+		}
+	}
+
+	if (c->steam_game_id || c->is_steam_overlay || c->is_steam_bigpicture) {
+		wlr_log(WLR_INFO,
+			"Steam X11 props: appid='%s' STEAM_GAME=%u "
+			"OVERLAY=%d BIGPICTURE=%d",
+			client_get_appid(c) ? client_get_appid(c) : "(null)",
+			c->steam_game_id, c->is_steam_overlay,
+			c->is_steam_bigpicture);
+	}
+#endif
+}
+
 int
 is_steam_client(Client *c)
 {
 	const char *app_id;
 	if (!c)
 		return 0;
+#ifdef XWAYLAND
+	if (c->is_steam_bigpicture)
+		return 1;
+#endif
 	app_id = client_get_appid(c);
 	if (!app_id)
 		return 0;
@@ -2712,6 +2808,14 @@ is_steam_popup(Client *c)
 	const char *app_id;
 	if (!c)
 		return 0;
+#ifdef XWAYLAND
+	/* STEAM_OVERLAY is a definitive "not a game" signal */
+	if (c->is_steam_overlay)
+		return 1;
+	/* STEAM_GAME with a game AppID → not a popup */
+	if (c->steam_game_id > 0 && c->steam_game_id != 769)
+		return 0;
+#endif
 	app_id = client_get_appid(c);
 	if (!app_id)
 		return 0;
@@ -2837,6 +2941,13 @@ is_steam_game(Client *c)
 	if (!c)
 		return 0;
 
+#ifdef XWAYLAND
+	/* Authoritative: STEAM_GAME atom set by Steam (non-zero, not 769=Steam) */
+	if (c->steam_game_id > 0 && c->steam_game_id != 769
+			&& !c->is_steam_overlay)
+		return 1;
+#endif
+
 	/* Exclude Steam itself and its popups, but NOT games with steam_app_XXXX class */
 	app_id = client_get_appid(c);
 	if (app_id && (strcasecmp(app_id, "steam") == 0 ||
@@ -2889,6 +3000,16 @@ looks_like_game(Client *c)
 
 	if (!c)
 		return 0;
+
+#ifdef XWAYLAND
+	/* Authoritative: Steam overlay windows are never games */
+	if (c->is_steam_overlay)
+		return 0;
+
+	/* Authoritative: STEAM_GAME atom set by Steam (non-zero, not 769) */
+	if (c->steam_game_id > 0 && c->steam_game_id != 769)
+		return 1;
+#endif
 
 	/* Steam main window / popups are never games. Must be checked before
 	 * process-ancestry detection, which otherwise matches the Steam
