@@ -1,1 +1,0 @@
-00:00:00.000 [ERROR] [src/gaming.c:3465] GPU 1 (NVIDIA): nvidia_drm.modeset is NOT enabled — Wayland requires modesetting. Add 'nvidia-drm.modeset=1' to kernel parameters
