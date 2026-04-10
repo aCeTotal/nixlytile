@@ -109,6 +109,15 @@ arrange(Monitor *m)
 					p = client_get_parent(p);
 					depth++;
 				}
+				/* Keep same-app floating windows visible — game
+				 * splashes and launchers that appear while the
+				 * game is fullscreen should stay on screen. */
+				if (!is_child && c->isfloating) {
+					const char *fa = client_get_appid(fsc);
+					const char *ca = client_get_appid(c);
+					if (fa && ca && strcmp(fa, ca) == 0)
+						is_child = 1;
+				}
 				if (!is_child)
 					vis = 0;
 			}

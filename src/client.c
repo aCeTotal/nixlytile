@@ -613,6 +613,31 @@ fullscreennotify(struct wl_listener *listener, void *data)
 		return;
 	}
 
+	/*
+	 * Block fullscreen requests from splash/bootstrap game windows.
+	 * Steam game launchers (EasyAntiCheat, Proton bootstrappers) set
+	 * _NET_WM_STATE_FULLSCREEN on tiny windows.  Honouring the request
+	 * would fullscreen a 600x200 surface inside a 3440x1440 frame —
+	 * the content renders in a corner and the rest is white X11 bg.
+	 * The game's real main window will request fullscreen later with a
+	 * proper size.
+	 */
+	if (want && !c->isfullscreen && c->mon && looks_like_game(c)) {
+		int cw = c->geom.width - 2 * c->bw;
+		int ch = c->geom.height - 2 * c->bw;
+		int mw = c->mon->m.width;
+		int mh = c->mon->m.height;
+		if (cw > 0 && ch > 0 && cw < mw / 3 && ch < mh / 3) {
+			wlr_log(WLR_INFO,
+				"GAME_TRACE: fullscreennotify blocking splash "
+				"fullscreen for '%s' %dx%d (< %dx%d)",
+				client_get_appid(c) ? client_get_appid(c) : "(null)",
+				cw, ch, mw / 3, mh / 3);
+			client_set_fullscreen(c, 0);
+			return;
+		}
+	}
+
 	setfullscreen(c, want);
 }
 
@@ -1002,15 +1027,20 @@ mapnotify(struct wl_listener *listener, void *data)
 
 	if (pre_steam_splash) {
 		/* Steam game splash/bootstrap: show at natural size, centered
-		 * on the game's monitor.  Desktop stays visible behind it
-		 * (no fullscreen_bg).  If the game later requests fullscreen
-		 * via the X11 _NET_WM_STATE_FULLSCREEN protocol, the
-		 * fullscreennotify handler will honour it. */
-		wlr_scene_node_reparent(&c->scene->node, layers[LyrFloat]);
+		 * on the game's monitor.  Use LyrOverlay so the splash is
+		 * visible above any existing fullscreen game window from the
+		 * same app — arrange() would otherwise disable it behind the
+		 * fullscreen client.  The node is destroyed automatically
+		 * when the splash unmaps.
+		 *
+		 * Return instead of goto unset_fullscreen: we don't want
+		 * a splash to unfullscreen any running game. */
+		wlr_scene_node_set_enabled(&c->scene->node, 1);
+		wlr_scene_node_reparent(&c->scene->node, layers[LyrOverlay]);
 		resize(c, c->geom, 1);
 		focusclient(c, 1);
 		printstatus();
-		goto unset_fullscreen;
+		return;
 	}
 
 	if (!c->isfloating && !c->isfullscreen && looks_like_game(c)) {

@@ -3849,25 +3849,55 @@ configurex11(struct wl_listener *listener, void *data)
 		return;
 	}
 	/*
-	 * Don't honour client-requested configures while the window is in
-	 * fullscreen. A Proton game that just asked for _NET_WM_STATE_FULLSCREEN
-	 * will often follow up with a ConfigureRequest at its preferred
-	 * (smaller) swapchain resolution; honouring it would shrink c->geom
-	 * back to a sub-monitor size, making arrange() draw fullscreen_bg
-	 * around a tiny centred game surface. Re-assert the fullscreen
-	 * geometry so the X client reconciles its own state.
+	 * Fullscreen game resize handling.
+	 *
+	 * Games that can't render at the monitor's native resolution (e.g.
+	 * 1920x1080 game on a 3440x1440 ultrawide) send a ConfigureRequest
+	 * at their preferred swap-chain resolution.  Accept the resize and
+	 * centre the window on the monitor — fullscreen_bg provides black
+	 * bars around the game surface.
+	 *
+	 * If the requested size matches or exceeds the current fullscreen
+	 * geometry in both dimensions, re-assert the fullscreen geometry to
+	 * avoid Proton oscillation loops.
 	 */
-	if (c->isfullscreen) {
-		wlr_log(WLR_INFO,
-			"GAME_TRACE: configurex11 rejecting shrink appid='%s' "
-			"requested=%dx%d@%d,%d fullscreen_geom=%dx%d@%d,%d c->mon='%s'",
-			client_get_appid(c) ? client_get_appid(c) : "(null)",
-			event->width, event->height, event->x, event->y,
-			c->geom.width, c->geom.height, c->geom.x, c->geom.y,
-			c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)");
-		wlr_xwayland_surface_configure(c->surface.xwayland,
+	if (c->isfullscreen && c->mon) {
+		int rw = event->width;
+		int rh = event->height;
+		int fw = c->geom.width;
+		int fh = c->geom.height;
+
+		if (rw >= fw && rh >= fh) {
+			/* Same or larger — re-assert fullscreen geometry */
+			wlr_xwayland_surface_configure(c->surface.xwayland,
 				c->geom.x + c->bw, c->geom.y + c->bw,
-				c->geom.width - 2 * c->bw, c->geom.height - 2 * c->bw);
+				fw - 2 * c->bw, fh - 2 * c->bw);
+			return;
+		}
+
+		/* Accept the game's preferred resolution, centred */
+		int mx = c->mon->m.x;
+		int my = c->mon->m.y;
+		int mw = c->mon->m.width;
+		int mh = c->mon->m.height;
+
+		if (rw > mw) rw = mw;
+		if (rh > mh) rh = mh;
+
+		struct wlr_box newgeom = {
+			.x = mx + (mw - rw) / 2,
+			.y = my + (mh - rh) / 2,
+			.width = rw,
+			.height = rh,
+		};
+		wlr_log(WLR_INFO,
+			"GAME_TRACE: configurex11 fullscreen resize appid='%s' "
+			"requested=%dx%d → centred=%dx%d@%d,%d mon='%s'",
+			client_get_appid(c) ? client_get_appid(c) : "(null)",
+			event->width, event->height,
+			newgeom.width, newgeom.height, newgeom.x, newgeom.y,
+			c->mon->wlr_output ? c->mon->wlr_output->name : "(null)");
+		resize(c, newgeom, 0);
 		return;
 	}
 	if ((c->isfloating && c != grabc) || !c->mon->lt[c->mon->sellt]->arrange) {
