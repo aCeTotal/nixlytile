@@ -20,3 +20,10 @@ error*.log
 
 # Nix
 .direnv/
+.cache/
+
+# Generated
+compile_commands.json
+
+# Misc
+-
