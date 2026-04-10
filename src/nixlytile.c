@@ -3875,9 +3875,42 @@ configurex11(struct wl_listener *listener, void *data)
 		return;
 	}
 	if ((c->isfloating && c != grabc) || !c->mon->lt[c->mon->sellt]->arrange) {
-		resize(c, (struct wlr_box){.x = event->x - c->bw,
-				.y = event->y - c->bw, .width = event->width + c->bw * 2,
-				.height = event->height + c->bw * 2}, 0);
+		int bx = event->x - c->bw;
+		int by = event->y - c->bw;
+		int bw = event->width + c->bw * 2;
+		int bh = event->height + c->bw * 2;
+
+		/*
+		 * Game clients occasionally request X11 positions at root
+		 * coordinates that lie outside their assigned monitor (Squad
+		 * asks for @-1,-1 or @0,0 which is on DP-2 when the game was
+		 * assigned to DP-1). Honouring those positions makes the
+		 * window appear on the wrong monitor briefly. Clamp the
+		 * requested position into the assigned monitor for any client
+		 * that looks like a game.
+		 */
+		if (c->mon && looks_like_game(c)) {
+			int mx = c->mon->m.x;
+			int my = c->mon->m.y;
+			int mw = c->mon->m.width;
+			int mh = c->mon->m.height;
+			int old_bx = bx, old_by = by;
+			if (bw > mw) bw = mw;
+			if (bh > mh) bh = mh;
+			if (bx < mx) bx = mx;
+			if (by < my) by = my;
+			if (bx + bw > mx + mw) bx = mx + mw - bw;
+			if (by + bh > my + mh) by = my + mh - bh;
+			if (bx != old_bx || by != old_by)
+				wlr_log(WLR_INFO,
+					"GAME_TRACE: configurex11 clamp appid='%s' "
+					"req=@%d,%d → @%d,%d (mon='%s' %dx%d@%d,%d)",
+					client_get_appid(c) ? client_get_appid(c) : "(null)",
+					old_bx, old_by, bx, by,
+					c->mon->wlr_output ? c->mon->wlr_output->name : "(null)",
+					mw, mh, mx, my);
+		}
+		resize(c, (struct wlr_box){.x = bx, .y = by, .width = bw, .height = bh}, 0);
 	} else {
 		arrange(c->mon);
 	}

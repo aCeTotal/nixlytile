@@ -593,6 +593,26 @@ fullscreennotify(struct wl_listener *listener, void *data)
 		c->type == X11 ? "X11" : "XDG",
 		want, c->isfullscreen,
 		c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)");
+
+	/*
+	 * Games: ignore client-initiated unfullscreen requests. Proton/Wine
+	 * games frequently request unfullscreen spuriously when losing focus
+	 * or when the launcher spawns helper windows. Allowing the unfullscreen
+	 * causes an oscillation cycle (unfullscreen → window loses pointer
+	 * constraint → user's mouse breaks → client re-requests fullscreen).
+	 * The user can still toggle fullscreen via keybinding (togglefullscreen
+	 * calls setfullscreen directly, bypassing this handler).
+	 */
+	if (!want && c->isfullscreen && (is_game_content(c) || looks_like_game(c))) {
+		wlr_log(WLR_INFO,
+			"GAME_TRACE: fullscreennotify ignoring client unfullscreen "
+			"for game '%s' — re-asserting fullscreen",
+			client_get_appid(c) ? client_get_appid(c) : "(null)");
+		/* Re-assert fullscreen state so the X11 client reconciles. */
+		client_set_fullscreen(c, 1);
+		return;
+	}
+
 	setfullscreen(c, want);
 }
 
@@ -728,11 +748,64 @@ mapnotify(struct wl_listener *listener, void *data)
 		c->isfloating, c->isfullscreen,
 		selmon && selmon->wlr_output ? selmon->wlr_output->name : "(null)");
 
+	/*
+	 * Pre-detect main game windows BEFORE applyrules/setmon. This avoids
+	 * the tile-flash race where applyrules→setmon→arrange() places the
+	 * window at a tile position, followed by a later setfullscreen() that
+	 * moves it to the fullscreen geometry. By pre-setting c->isfullscreen
+	 * and bypassing applyrules for these windows, setmon's internal
+	 * setfullscreen(c, 1) call applies the fullscreen geometry directly
+	 * so only one frame is rendered — at the correct fullscreen size.
+	 *
+	 * We also force c->isfloating = 0 here, overriding applyrules and
+	 * client_is_float_type() hints, because some games (Squad) expose
+	 * float-type X11 hints on their main window.
+	 */
+	int pre_fullscreen_game = 0;
+	Monitor *pre_target_mon = NULL;
+	if (!c->isfloating && !c->isfullscreen && !client_is_unmanaged(c)
+			&& client_get_parent(c) == NULL
+			&& looks_like_game(c)) {
+		pre_target_mon = selmon;
+		/* Steam-game fallback: place on Steam's monitor */
+		if (is_steam_game(c)) {
+			Client *sc;
+			wl_list_for_each(sc, &clients, link) {
+				if (sc != c && sc->mon && is_steam_client(sc)) {
+					pre_target_mon = sc->mon;
+					break;
+				}
+			}
+		}
+		if (pre_target_mon) {
+			int mon_w = pre_target_mon->m.width;
+			int mon_h = pre_target_mon->m.height;
+			int small_w = initial_w > 0 && initial_w < (mon_w * 3) / 4;
+			int small_h = initial_h > 0 && initial_h < (mon_h * 3) / 4;
+			if (initial_w > 0 && initial_h > 0 && !(small_w && small_h)) {
+				pre_fullscreen_game = 1;
+				c->isfullscreen = 1;
+				c->isfloating = 0;
+				wlr_log(WLR_INFO,
+					"GAME_TRACE: pre-fullscreen main game appid='%s' "
+					"mon='%s' initial=%dx%d",
+					client_get_appid(c) ? client_get_appid(c) : "(null)",
+					pre_target_mon->wlr_output ? pre_target_mon->wlr_output->name : "(null)",
+					initial_w, initial_h);
+			}
+		}
+	}
+
 	/* Set initial monitor, tags, floating status, and focus:
 	 * we always consider floating, clients that have parent and thus
 	 * we set the same tags and monitor as its parent.
 	 * If there is no parent, apply rules */
-	if ((p = client_get_parent(c))) {
+	if (pre_fullscreen_game && pre_target_mon) {
+		/* Skip applyrules so rule-based isfloating doesn't override our
+		 * pre-set state, and so client_is_float_type() hints don't force
+		 * the game into a floating state. */
+		setmon(c, pre_target_mon, pre_target_mon->tagset[pre_target_mon->seltags]);
+	} else if ((p = client_get_parent(c))) {
 		wlr_log(WLR_INFO,
 			"GAME_TRACE: mapnotify parent-path parent_appid='%s' parent_mon='%s'",
 			client_get_appid(p) ? client_get_appid(p) : "(null)",
@@ -807,6 +880,21 @@ mapnotify(struct wl_listener *listener, void *data)
 	 * tiled→fullscreen buffer-size transition. The compositor still honours
 	 * any later set_fullscreen request from the client via fullscreennotify.
 	 */
+	if (pre_fullscreen_game) {
+		/* Already fullscreened via setmon → setfullscreen(c, 1).
+		 * Focus and fall through to unset_fullscreen which will
+		 * unfullscreen any OTHER app's fullscreen window on this
+		 * monitor (same-app fullscreen windows are skipped to avoid
+		 * oscillation). */
+		wlr_log(WLR_INFO,
+			"GAME_TRACE: pre-fullscreen game ready c->mon='%s' geom=%dx%d@%d,%d",
+			c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)",
+			c->geom.width, c->geom.height, c->geom.x, c->geom.y);
+		focusclient(c, 1);
+		printstatus();
+		goto unset_fullscreen;
+	}
+
 	if (!c->isfloating && !c->isfullscreen && looks_like_game(c)) {
 		int mon_w = c->mon->m.width;
 		int mon_h = c->mon->m.height;
@@ -858,9 +946,25 @@ unset_fullscreen:
 	/* In HTPC mode, don't unset fullscreen for Steam popups appearing */
 	if (htpc_mode_active && (is_steam_popup(c) || (p && is_steam_client(p))))
 		return;
-	wl_list_for_each(w, &clients, link) {
-		if (w != c && w != p && w->isfullscreen && m == w->mon && (w->tags & c->tags))
+	{
+		/* Don't unfullscreen another window of the SAME app — a game
+		 * launcher spawning splashes/children would otherwise cause the
+		 * main fullscreen window to flip in and out of fullscreen,
+		 * destroying pointer constraints and breaking mouse input. */
+		const char *new_appid = client_get_appid(c);
+		wl_list_for_each(w, &clients, link) {
+			if (w == c || w == p || !w->isfullscreen || m != w->mon
+					|| !(w->tags & c->tags))
+				continue;
+			const char *old_appid = client_get_appid(w);
+			if (new_appid && old_appid && strcmp(new_appid, old_appid) == 0) {
+				wlr_log(WLR_INFO,
+					"GAME_TRACE: unset_fullscreen skip same-app '%s'",
+					new_appid);
+				continue;
+			}
 			setfullscreen(w, 0);
+		}
 	}
 }
 
