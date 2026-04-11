@@ -2499,6 +2499,21 @@ ll_cursor_init(Monitor *m)
 	if (crtc_id == 0)
 		return;
 
+	/* Get CRTC index from resources to check possible_crtcs bitmask */
+	int crtc_index = -1;
+	drmModeResPtr res = drmModeGetResources(drm_fd);
+	if (res) {
+		for (int k = 0; k < res->count_crtcs; k++) {
+			if (res->crtcs[k] == crtc_id) {
+				crtc_index = k;
+				break;
+			}
+		}
+		drmModeFreeResources(res);
+	}
+	if (crtc_index < 0)
+		return;
+
 	/* Find cursor plane for this CRTC */
 	planes = drmModeGetPlaneResources(drm_fd);
 	if (!planes)
@@ -2509,9 +2524,10 @@ ll_cursor_init(Monitor *m)
 		if (!plane)
 			continue;
 
-		/* Check if this plane can be used with our CRTC */
-		if (!(plane->possible_crtcs & (1u << 0))) {
-			/* Need CRTC index, not ID. Get it properly. */
+		/* Skip planes that can't drive our CRTC */
+		if (!(plane->possible_crtcs & (1u << crtc_index))) {
+			drmModeFreePlane(plane);
+			continue;
 		}
 
 		/* Check plane type property */

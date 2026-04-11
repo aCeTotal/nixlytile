@@ -3316,6 +3316,29 @@ setup(void)
 		}
 	}
 
+	/* Vulkan renderer: enable CPU cursor for all GPUs.
+	 * The Vulkan renderer's texture path may not produce buffers
+	 * compatible with all HW cursor planes on multi-monitor.
+	 * A dumb DRM buffer works universally. */
+	if (!cpu_cursor_active && wlr_renderer_is_vk(drw)) {
+		int bfd = wlr_backend_get_drm_fd(backend);
+		if (bfd >= 0) {
+			uint64_t cursor_w = 64, cursor_h = 64;
+			drmGetCap(bfd, DRM_CAP_CURSOR_WIDTH, &cursor_w);
+			drmGetCap(bfd, DRM_CAP_CURSOR_HEIGHT, &cursor_h);
+			if (cursor_w < 64) cursor_w = 64;
+			if (cursor_h < 64) cursor_h = 64;
+			cpu_cursor_buf = cpu_cursor_buffer_create(bfd,
+				(uint32_t)cursor_w, (uint32_t)cursor_h, 0);
+			if (cpu_cursor_buf) {
+				cpu_cursor_active = 1;
+				wlr_log(WLR_INFO,
+					"Vulkan: CPU cursor buffer enabled (%lux%lu)",
+					(unsigned long)cursor_w, (unsigned long)cursor_h);
+			}
+		}
+	}
+
 	/*
 	 * wlr_cursor *only* displays an image on screen. It does not move around
 	 * when the pointer moves. However, we can attach input devices to it, and

@@ -815,7 +815,7 @@ mapnotify(struct wl_listener *listener, void *data)
 	 * float-type X11 hints on their main window.
 	 */
 	int pre_fullscreen_game = 0;
-	int pre_steam_splash = 0;   /* Steam game splash → float centered */
+	int pre_game_splash = 0;    /* Game splash → float centered */
 	Monitor *pre_target_mon = NULL;
 	if (!c->isfloating && !c->isfullscreen && !client_is_unmanaged(c)
 			&& client_get_parent(c) == NULL
@@ -882,19 +882,19 @@ mapnotify(struct wl_listener *listener, void *data)
 				&& initial_h < thresh_h;
 			int is_small = small_w && small_h;
 
-			if (is_confirmed_steam_game && is_small) {
+			if (is_small) {
 				/*
-				 * Steam game splash / bootstrap window.
+				 * Game splash / bootstrap window.
 				 * Show at its natural size, centered on the
-				 * game's monitor — like KDE does.  No black
-				 * fullscreen background; the desktop stays
-				 * visible behind it.
+				 * game's monitor.  No black fullscreen
+				 * background; the desktop stays visible
+				 * behind it.
 				 *
 				 * If the game later requests fullscreen via
 				 * the X11 protocol, fullscreennotify() will
 				 * honour that request normally.
 				 */
-				pre_steam_splash = 1;
+				pre_game_splash = 1;
 				c->isfloating = 1;
 				c->geom.width = initial_w;
 				c->geom.height = initial_h;
@@ -903,44 +903,28 @@ mapnotify(struct wl_listener *listener, void *data)
 				c->geom.y = (mon_h - initial_h) / 2
 					+ pre_target_mon->m.y;
 				wlr_log(WLR_INFO,
-					"GAME_TRACE: steam splash appid='%s' "
-					"steam_game_id=%u mon='%s' %dx%d "
-					"centered@%d,%d",
+					"GAME_TRACE: game splash appid='%s' "
+					"mon='%s' %dx%d centered@%d,%d",
 					aid ? aid : "(null)",
-#ifdef XWAYLAND
-					c->steam_game_id,
-#else
-					0u,
-#endif
 					pre_target_mon->wlr_output
 						? pre_target_mon->wlr_output->name
 						: "(null)",
 					initial_w, initial_h,
 					c->geom.x, c->geom.y);
-			} else if (is_confirmed_steam_game || !is_small) {
+			} else {
 				/*
-				 * Confirmed Steam game main window, or a
-				 * non-Steam game with a large enough initial
-				 * window.  Immediate true fullscreen — the
-				 * game will init its swap chain at the
+				 * Game main window — large enough to be the
+				 * actual game.  Immediate true fullscreen —
+				 * the game will init its swap chain at the
 				 * monitor's native resolution.
 				 */
 				pre_fullscreen_game = 1;
 				c->isfullscreen = 1;
 				c->isfloating = 0;
 				wlr_log(WLR_INFO,
-					"GAME_TRACE: pre-fullscreen %s "
-					"appid='%s' steam_game_id=%u "
-					"mon='%s' initial=%dx%d",
-					is_confirmed_steam_game
-						? "steam game"
-						: "main game",
+					"GAME_TRACE: pre-fullscreen "
+					"appid='%s' mon='%s' initial=%dx%d",
 					aid ? aid : "(null)",
-#ifdef XWAYLAND
-					c->steam_game_id,
-#else
-					0u,
-#endif
 					pre_target_mon->wlr_output
 						? pre_target_mon->wlr_output->name
 						: "(null)",
@@ -953,7 +937,7 @@ mapnotify(struct wl_listener *listener, void *data)
 	 * we always consider floating, clients that have parent and thus
 	 * we set the same tags and monitor as its parent.
 	 * If there is no parent, apply rules */
-	if ((pre_fullscreen_game || pre_steam_splash) && pre_target_mon) {
+	if ((pre_fullscreen_game || pre_game_splash) && pre_target_mon) {
 		/* Skip applyrules so rule-based isfloating doesn't override our
 		 * pre-set state, and so client_is_float_type() hints don't force
 		 * the game into a floating state. */
@@ -1048,8 +1032,8 @@ mapnotify(struct wl_listener *listener, void *data)
 		goto unset_fullscreen;
 	}
 
-	if (pre_steam_splash) {
-		/* Steam game splash/bootstrap: show at natural size, centered
+	if (pre_game_splash) {
+		/* Game splash/bootstrap: show at natural size, centered
 		 * on the game's monitor.  Use LyrOverlay so the splash is
 		 * visible above any existing fullscreen game window from the
 		 * same app — arrange() would otherwise disable it behind the
