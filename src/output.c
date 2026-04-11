@@ -1612,9 +1612,9 @@ rendermon(struct wl_listener *listener, void *data)
 		}
 
 		/*
-		 * Scene build failed (swapchain, EGL, or render pass error).
-		 * This happens on NVIDIA-only systems where the GBM/EGL stack
-		 * may fail buffer allocation or import.  Force XRGB8888 render
+		 * Scene build failed (swapchain or render pass error).
+		 * This happens on NVIDIA-only systems where buffer allocation
+		 * may fail.  Force XRGB8888 render
 		 * format (destroys the current swapchain so a fresh one is
 		 * negotiated) and retry.  Schedule a frame so we keep retrying
 		 * instead of stalling with a black screen.
@@ -1641,7 +1641,7 @@ rendermon(struct wl_listener *listener, void *data)
 			} else if (m->scene_build_failures == 4) {
 				wlr_log(WLR_ERROR,
 					"Scene build persistently failing on %s — "
-					"check GPU driver and EGL/GBM libraries",
+					"check GPU driver and Vulkan/GPU libraries",
 					m->wlr_output->name);
 			}
 

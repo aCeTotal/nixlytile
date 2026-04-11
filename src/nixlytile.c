@@ -2899,7 +2899,7 @@ setup(void)
 	drag_icon = wlr_scene_tree_create(&scene->tree);
 	wlr_scene_node_place_below(&drag_icon->node, &layers[LyrBlock]->node);
 
-	/* Autocreates a renderer, either Pixman, GLES2 or Vulkan for us. The user
+	/* Autocreates a renderer, either Pixman or Vulkan for us. The user
 	 * can also specify a renderer using the WLR_RENDERER env var.
 	 * The renderer is responsible for defining the various pixel formats it
 	 * supports for shared memory, this configures that for clients. */
@@ -2998,15 +2998,13 @@ setup(void)
 	 *             NVIDIA needs driver 555+.
 	 *   DMABUF  — DMA-BUF texture import. Required for zero-copy
 	 *             client buffer sharing.
-	 *   VULKAN  — Renderer is Vulkan-based (not GLES2). Gives access
-	 *             to the persistent pipeline cache added in this tree.
+	 *   VULKAN  — Renderer is Vulkan-based. Gives access to the
+	 *             persistent pipeline cache added in this tree.
 	 *   10BIT   — HDR/10-bit render format supported by the renderer.
 	 */
 	{
 		const char *renderer_name =
-			wlr_renderer_is_vk(drw) ? "Vulkan" :
-			/* wlr_renderer_is_gles2 requires include; use fallback */
-			"GLES2/other";
+			wlr_renderer_is_vk(drw) ? "Vulkan" : "other";
 		int has_dmabuf =
 			wlr_renderer_get_texture_formats(drw, WLR_BUFFER_CAP_DMABUF) != NULL;
 		const char *gpu_label = "unknown";
@@ -3040,11 +3038,6 @@ setup(void)
 					"NVIDIA: game performance will be degraded without "
 					"explicit sync. Check: 1) driver >= 555, "
 					"2) nvidia-drm.modeset=1, 3) nvidia-drm.fbdev=1");
-			}
-			if (!wlr_renderer_is_vk(drw)) {
-				wlr_log(WLR_ERROR,
-					"NVIDIA: using GLES2 renderer instead of Vulkan. "
-					"Set WLR_RENDERER=vulkan for best game performance.");
 			}
 		}
 	}

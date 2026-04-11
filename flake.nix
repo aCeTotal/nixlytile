@@ -27,7 +27,7 @@
             nativeBuildInputs = with pkgs; [ meson ninja pkg-config wayland-scanner glslang ];
             buildInputs = with pkgs; [
               wayland wayland-protocols libdrm libxkbcommon pixman libinput
-              xwayland seatd libepoxy libglvnd libxcb libxcb-wm
+              xwayland seatd libxcb libxcb-wm
               libgbm hwdata libliftoff libdisplay-info lcms2 libxcb-errors
               vulkan-loader vulkan-headers
             ];
@@ -35,7 +35,7 @@
               "-Dexamples=false"
               "-Dxwayland=enabled"
               "-Dbackends=drm,libinput"
-              "-Drenderers=gles2,vulkan"
+              "-Drenderers=vulkan"
               "-Dallocators=gbm"
             ];
           };
@@ -176,8 +176,6 @@
               pkgs.libxcb
               pkgs.libxcb-wm
               pkgs.xwayland
-              pkgs.libepoxy
-              pkgs.libglvnd
               pkgs.systemd
               pkgs.brightnessctl
               # Video player dependencies

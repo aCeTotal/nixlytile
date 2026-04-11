@@ -57,8 +57,8 @@
 #include <wlr/backend/libinput.h>
 #include <wlr/render/allocator.h>
 #include <wlr/render/wlr_renderer.h>
-#include <wlr/render/vulkan.h>
 #include <wlr/render/drm_format_set.h>
+#include <wlr/render/vulkan.h>
 #include <wlr/interfaces/wlr_buffer.h>
 #include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_alpha_modifier_v1.h>
