@@ -634,7 +634,8 @@ fullscreennotify(struct wl_listener *listener, void *data)
 
 	/*
 	 * Games already fullscreen requesting fullscreen again.
-	 * Confirm without resize — the game is already at native resolution.
+	 * Confirm without resize — the game is already centered at its
+	 * chosen resolution via configurex11.
 	 */
 	if (want && c->isfullscreen && (is_game_content(c) || looks_like_game(c))) {
 		wlr_log(WLR_INFO,
@@ -1064,24 +1065,43 @@ mapnotify(struct wl_listener *listener, void *data)
 	 *
 	 * Decision is taken at map time based on the window's initial size:
 	 *   - Small (< 3/4 of monitor in both dims) → centered-floating splash
-	 *   - Otherwise → immediate true fullscreen at monitor's native resolution
+	 *   - Otherwise → immediate true fullscreen
 	 *
-	 * No 800 ms timer, no pending-client slot, no tiled intermediate phase.
-	 * The game's first buffer is already drawn at the monitor's native
-	 * resolution, which eliminates the Nvidia green flicker caused by the
-	 * tiled→fullscreen buffer-size transition. The compositor still honours
-	 * any later set_fullscreen request from the client via fullscreennotify.
+	 * setmon → setfullscreen sent a configure at native monitor resolution,
+	 * but the game hasn't rendered at that size yet.  Override the configure
+	 * to the game's initial size so Wine/DXVK can initialize its swapchain
+	 * at the resolution it chose instead of fighting the compositor.
+	 * Center the surface so the initial buffer appears in the middle of the
+	 * monitor rather than in the top-left corner.
+	 *
+	 * The game will later send its own configure request at its desired
+	 * resolution — configurex11 accepts it and re-centers.
 	 */
 	if (pre_fullscreen_game) {
-		/* Already fullscreened via setmon → setfullscreen(c, 1).
-		 * Focus and fall through to unset_fullscreen which will
-		 * unfullscreen any OTHER app's fullscreen window on this
-		 * monitor (same-app fullscreen windows are skipped to avoid
-		 * oscillation). */
 		wlr_log(WLR_INFO,
 			"GAME_TRACE: pre-fullscreen game ready c->mon='%s' geom=%dx%d@%d,%d",
 			c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)",
 			c->geom.width, c->geom.height, c->geom.x, c->geom.y);
+
+		/* Center the initial buffer and override the native-resolution
+		 * configure that setfullscreen sent — let the game keep its
+		 * own size so it doesn't cycle through resolutions. */
+		if (client_is_x11(c) && c->mon) {
+			struct wlr_box fsgeom = fullscreen_mirror_geom(c->mon);
+			int dx = (fsgeom.width  - initial_w) / 2;
+			int dy = (fsgeom.height - initial_h) / 2;
+			int cx = fsgeom.x + dx;
+			int cy = fsgeom.y + dy;
+			wlr_scene_node_set_position(&c->scene_surface->node,
+				dx, dy);
+			wlr_xwayland_surface_configure(c->surface.xwayland,
+				cx, cy, initial_w, initial_h);
+			wlr_log(WLR_INFO,
+				"GAME_TRACE: pre-fullscreen override configure "
+				"to initial %dx%d centered@%d,%d",
+				initial_w, initial_h, cx, cy);
+		}
+
 		focusclient(c, 1);
 		printstatus();
 		goto unset_fullscreen;

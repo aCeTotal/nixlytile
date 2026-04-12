@@ -3940,13 +3940,17 @@ configurex11(struct wl_listener *listener, void *data)
 	/*
 	 * Fullscreen resize handling.
 	 *
-	 * Games: always force native monitor resolution.  Vulkan/DXVK
-	 * handles internal scaling via the swapchain.  Accepting smaller
-	 * sizes causes resolution cycling and broken mouse coordinates.
+	 * Accept the client's requested size and center the surface
+	 * visually within the monitor.  c->geom stays at full monitor
+	 * geometry so input routing and scene bounds remain correct.
 	 *
-	 * Non-games (video players, etc.): accept smaller sizes and center
-	 * the surface visually.  c->geom stays at full monitor geometry so
-	 * input routing and scene bounds remain correct.
+	 * Games must keep their own resolution — forcing native causes
+	 * resolution cycling (the game fights the compositor) and breaks
+	 * mouse coordinates because the X11 window size no longer matches
+	 * the game's internal rendering resolution.
+	 *
+	 * The black-bar pointer fallback in motionnotify() routes pointer
+	 * events from the letterbox area to the game's surface.
 	 */
 	if (c->isfullscreen && c->mon) {
 		struct wlr_box fsgeom = fullscreen_mirror_geom(c->mon);
@@ -3961,23 +3965,7 @@ configurex11(struct wl_listener *listener, void *data)
 			fsgeom.width, fsgeom.height,
 			c->mon->wlr_output ? c->mon->wlr_output->name : "(null)");
 
-		/* Games: force native resolution regardless of request */
-		if (is_game_content(c) || looks_like_game(c)) {
-			wlr_scene_node_set_position(&c->scene_surface->node, 0, 0);
-			wlr_xwayland_surface_configure(c->surface.xwayland,
-				fsgeom.x, fsgeom.y, fsgeom.width, fsgeom.height);
-			if (c->geom.width != fsgeom.width
-					|| c->geom.height != fsgeom.height
-					|| c->geom.x != fsgeom.x
-					|| c->geom.y != fsgeom.y) {
-				c->geom = fsgeom;
-				wlr_scene_node_set_position(&c->scene->node,
-					fsgeom.x, fsgeom.y);
-			}
-			return;
-		}
-
-		/* Non-games: accept smaller sizes and center */
+		/* Requested smaller than monitor → accept and center */
 		if (gw < fsgeom.width || gh < fsgeom.height) {
 			if (gw > fsgeom.width)  gw = fsgeom.width;
 			if (gh > fsgeom.height) gh = fsgeom.height;
@@ -3989,7 +3977,8 @@ configurex11(struct wl_listener *listener, void *data)
 
 			wlr_log(WLR_INFO,
 				"GAME_TRACE: configurex11 fullscreen centered "
-				"size=%dx%d offset=%d,%d xpos=%d,%d",
+				"appid='%s' size=%dx%d offset=%d,%d xpos=%d,%d",
+				client_get_appid(c) ? client_get_appid(c) : "(null)",
 				gw, gh, dx, dy, cx, cy);
 
 			wlr_xwayland_surface_configure(c->surface.xwayland,
@@ -4005,6 +3994,10 @@ configurex11(struct wl_listener *listener, void *data)
 				wlr_scene_node_set_position(&c->scene->node,
 					fsgeom.x, fsgeom.y);
 			}
+
+			/* Refresh pointer focus so the cursor stays on the
+			 * game surface after centering at a new resolution */
+			motionnotify(0, NULL, 0, 0, 0, 0);
 			return;
 		}
 
@@ -4017,6 +4010,9 @@ configurex11(struct wl_listener *listener, void *data)
 			wlr_xwayland_surface_configure(c->surface.xwayland,
 				fsgeom.x, fsgeom.y, fsgeom.width, fsgeom.height);
 		}
+
+		/* Refresh pointer focus after resolution change */
+		motionnotify(0, NULL, 0, 0, 0, 0);
 		return;
 	}
 	if ((c->isfloating && c != grabc) || !c->mon->lt[c->mon->sellt]->arrange) {
