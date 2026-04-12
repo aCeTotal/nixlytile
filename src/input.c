@@ -2259,6 +2259,40 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	 * scene traversal doesn't block the HW cursor update. */
 	xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
 
+	/* Fullscreen game black-bar fallback.
+	 * configurex11 offsets scene_surface to center games that render at
+	 * a smaller resolution than the monitor.  xytonode returns surface=NULL
+	 * when the cursor is in the resulting black bar area (fullscreen_bg is
+	 * a rect, not a wlr_surface).  Without this fallback, pointerfocus()
+	 * clears pointer focus and XWayland can't maintain pointer grab/lock,
+	 * breaking mouse input for the game.
+	 *
+	 * Route all pointer events on the fullscreen monitor to the game's
+	 * surface, clamping coordinates to the rendered area. */
+	if (!surface && !c) {
+		Client *fsc = NULL;
+		wl_list_for_each(fsc, &clients, link) {
+			if (fsc->isfullscreen && VISIBLEON(fsc, selmon))
+				break;
+		}
+		if (&fsc->link != &clients && fsc && client_surface(fsc)) {
+			c = fsc;
+			surface = client_surface(fsc);
+			/* scene_surface offset = game's visual position within c->scene */
+			double surf_x = fsc->geom.x + fsc->scene_surface->node.x;
+			double surf_y = fsc->geom.y + fsc->scene_surface->node.y;
+			sx = cursor->x - surf_x;
+			sy = cursor->y - surf_y;
+			/* Clamp to rendered surface bounds */
+			int sw = surface->current.width;
+			int sh = surface->current.height;
+			if (sx < 0) sx = 0;
+			if (sy < 0) sy = 0;
+			if (sx >= sw) sx = sw - 1;
+			if (sy >= sh) sy = sh - 1;
+		}
+	}
+
 	if (cursor_mode == CurPressed && !seat->drag
 			&& surface != seat->pointer_state.focused_surface
 			&& toplevel_from_wlr_surface(seat->pointer_state.focused_surface, &w, &l) >= 0) {
