@@ -598,11 +598,10 @@ fullscreennotify(struct wl_listener *listener, void *data)
 	 * Games: handle client-initiated unfullscreen requests.
 	 *
 	 * compositor_fs == 1: Game was pre-fullscreened by the compositor at
-	 *   map time.  Wine/Proton games need to complete their own fullscreen
-	 *   init sequence (unfullscreen → resize → refullscreen) before pointer
-	 *   lock and proper rendering activate.  Send the unfullscreen state to
-	 *   the client so its state machine progresses, but keep the compositor's
-	 *   fullscreen layout to avoid visual flicker.
+	 *   map time.  Silently ignore the unfullscreen and clear compositor_fs
+	 *   so subsequent requests are handled normally.  Telling Wine it's
+	 *   unfullscreened (SOFT_UNFS) caused resolution cycling and broke
+	 *   pointer grab setup.
 	 *
 	 * compositor_fs == 0: Game completed its own fullscreen init.  Block
 	 *   further unfullscreen requests — Proton/Wine games frequently request
@@ -612,18 +611,14 @@ fullscreennotify(struct wl_listener *listener, void *data)
 	if (!want && c->isfullscreen && (is_game_content(c) || looks_like_game(c))) {
 		if (c->compositor_fs == 1) {
 			wlr_log(WLR_INFO,
-				"GAME_TRACE: fullscreennotify soft-unfullscreen "
-				"for pre-fullscreened game '%s'",
+				"GAME_TRACE: fullscreennotify ignoring unfullscreen "
+				"for pre-fullscreened game '%s' — clearing compositor_fs",
 				client_get_appid(c) ? client_get_appid(c) : "(null)");
-			game_log("GAME_FS: SOFT_UNFS appid='%s' title='%s' "
-				"reason=compositor_pre_fs_init",
+			game_log("GAME_FS: IGNORE_UNFS appid='%s' title='%s' "
+				"reason=compositor_pre_fs_ignore",
 				client_get_appid(c) ? client_get_appid(c) : "(null)",
 				client_get_title(c) ? client_get_title(c) : "(null)");
-			/* Tell client it's unfullscreened so Wine's state machine
-			 * can progress.  Keep compositor fullscreen state and
-			 * geometry — no visual change. */
-			client_set_fullscreen(c, 0);
-			c->compositor_fs = 2;
+			c->compositor_fs = 0;
 			return;
 		}
 		wlr_log(WLR_INFO,
@@ -639,30 +634,9 @@ fullscreennotify(struct wl_listener *listener, void *data)
 
 	/*
 	 * Games already fullscreen requesting fullscreen again.
-	 *
-	 * compositor_fs == 2: Game completing its init after soft-unfullscreen.
-	 *   Process the fullscreen request fully (with resize) so the game gets
-	 *   configured at the monitor's native resolution and pointer constraints
-	 *   activate.
-	 *
-	 * compositor_fs == 0: Game already properly fullscreen, just reconfirming
-	 *   (e.g. after mode change).  Confirm without resize to avoid undoing
-	 *   the centered layout from configurex11.
+	 * Confirm without resize — the game is already at native resolution.
 	 */
 	if (want && c->isfullscreen && (is_game_content(c) || looks_like_game(c))) {
-		if (c->compositor_fs == 2) {
-			wlr_log(WLR_INFO,
-				"GAME_TRACE: fullscreennotify completing game "
-				"fullscreen init for '%s'",
-				client_get_appid(c) ? client_get_appid(c) : "(null)");
-			game_log("GAME_FS: INIT_COMPLETE appid='%s' title='%s' "
-				"reason=game_self_fullscreen",
-				client_get_appid(c) ? client_get_appid(c) : "(null)",
-				client_get_title(c) ? client_get_title(c) : "(null)");
-			c->compositor_fs = 0;
-			setfullscreen(c, 1);
-			return;
-		}
 		wlr_log(WLR_INFO,
 			"GAME_TRACE: fullscreennotify already fullscreen for "
 			"game '%s' — confirming without resize",

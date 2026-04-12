@@ -3938,19 +3938,15 @@ configurex11(struct wl_listener *listener, void *data)
 		return;
 	}
 	/*
-	 * Fullscreen game resize handling.
+	 * Fullscreen resize handling.
 	 *
-	 * Wine/Proton games often request their internal resolution (e.g.
-	 * 1920x1080) rather than the monitor's native resolution.  Unlike
-	 * native Vulkan games, whose GPU swapchain handles scaling, Wine
-	 * games render at the X11 window size.  If we force the monitor
-	 * resolution the game's buffer appears in a corner with broken
-	 * mouse coordinates.
+	 * Games: always force native monitor resolution.  Vulkan/DXVK
+	 * handles internal scaling via the swapchain.  Accepting smaller
+	 * sizes causes resolution cycling and broken mouse coordinates.
 	 *
-	 * When the game requests a size smaller than the monitor we accept
-	 * it, center the X11 window, and offset the scene surface so the
-	 * buffer is visually centered.  c->geom stays at full monitor
-	 * geometry so input routing and scene bounds remain correct.
+	 * Non-games (video players, etc.): accept smaller sizes and center
+	 * the surface visually.  c->geom stays at full monitor geometry so
+	 * input routing and scene bounds remain correct.
 	 */
 	if (c->isfullscreen && c->mon) {
 		struct wlr_box fsgeom = fullscreen_mirror_geom(c->mon);
@@ -3965,7 +3961,23 @@ configurex11(struct wl_listener *listener, void *data)
 			fsgeom.width, fsgeom.height,
 			c->mon->wlr_output ? c->mon->wlr_output->name : "(null)");
 
-		/* Game requests smaller than monitor → accept and center */
+		/* Games: force native resolution regardless of request */
+		if (is_game_content(c) || looks_like_game(c)) {
+			wlr_scene_node_set_position(&c->scene_surface->node, 0, 0);
+			wlr_xwayland_surface_configure(c->surface.xwayland,
+				fsgeom.x, fsgeom.y, fsgeom.width, fsgeom.height);
+			if (c->geom.width != fsgeom.width
+					|| c->geom.height != fsgeom.height
+					|| c->geom.x != fsgeom.x
+					|| c->geom.y != fsgeom.y) {
+				c->geom = fsgeom;
+				wlr_scene_node_set_position(&c->scene->node,
+					fsgeom.x, fsgeom.y);
+			}
+			return;
+		}
+
+		/* Non-games: accept smaller sizes and center */
 		if (gw < fsgeom.width || gh < fsgeom.height) {
 			if (gw > fsgeom.width)  gw = fsgeom.width;
 			if (gh > fsgeom.height) gh = fsgeom.height;
@@ -3980,14 +3992,11 @@ configurex11(struct wl_listener *listener, void *data)
 				"size=%dx%d offset=%d,%d xpos=%d,%d",
 				gw, gh, dx, dy, cx, cy);
 
-			/* Tell XWayland the game's actual size, centered */
 			wlr_xwayland_surface_configure(c->surface.xwayland,
 				cx, cy, gw, gh);
-			/* Offset scene_surface to center the buffer visually */
 			wlr_scene_node_set_position(&c->scene_surface->node,
 				dx, dy);
 
-			/* Ensure c->geom covers full monitor for input */
 			if (c->geom.width != fsgeom.width
 					|| c->geom.height != fsgeom.height
 					|| c->geom.x != fsgeom.x
@@ -3999,7 +4008,7 @@ configurex11(struct wl_listener *listener, void *data)
 			return;
 		}
 
-		/* Game requests >= monitor size → standard fullscreen */
+		/* Requested >= monitor size → standard fullscreen */
 		wlr_scene_node_set_position(&c->scene_surface->node, 0, 0);
 		if (c->geom.width != fsgeom.width || c->geom.height != fsgeom.height
 				|| c->geom.x != fsgeom.x || c->geom.y != fsgeom.y) {
