@@ -789,6 +789,20 @@ skip_statusbar:
 	}
 	/* If the event wasn't handled by the compositor, notify the client with
 	 * pointer focus that a button press has occurred */
+	{
+		Client *fc = NULL;
+		struct wlr_surface *fs = seat->pointer_state.focused_surface;
+		if (fs)
+			toplevel_from_wlr_surface(fs, &fc, NULL);
+		if (fc && event->state == WL_POINTER_BUTTON_STATE_PRESSED &&
+				(looks_like_game(fc) || is_game_content(fc)))
+			game_log("CURSOR_BUTTON: btn=%u appid='%s' pos=%.0f,%.0f "
+				"constraint=%s",
+				event->button,
+				client_get_appid(fc) ? client_get_appid(fc) : "(null)",
+				cursor->x, cursor->y,
+				active_constraint ? "active" : "none");
+	}
 	wlr_seat_pointer_notify_button(seat,
 			event->time_msec, event->button, event->state);
 }
@@ -1041,6 +1055,13 @@ checkconstraint(void)
 
 	/* Deactivate stale constraint (surface lost focus) */
 	if (active_constraint) {
+		Client *dc = NULL;
+		toplevel_from_wlr_surface(active_constraint->surface, &dc, NULL);
+		if (dc && (looks_like_game(dc) || is_game_content(dc)))
+			game_log("CURSOR_CONSTRAINT: DEACTIVATE type=%s appid='%s'",
+				active_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED
+					? "lock" : "confine",
+				client_get_appid(dc) ? client_get_appid(dc) : "(null)");
 		cursorwarptohint();
 		wlr_pointer_constraint_v1_send_deactivated(active_constraint);
 		active_constraint = NULL;
@@ -1052,6 +1073,13 @@ checkconstraint(void)
 			if (constraint->surface == focused) {
 				active_constraint = constraint;
 				wlr_pointer_constraint_v1_send_activated(constraint);
+				Client *ac = NULL;
+				toplevel_from_wlr_surface(focused, &ac, NULL);
+				if (ac && (looks_like_game(ac) || is_game_content(ac)))
+					game_log("CURSOR_CONSTRAINT: ACTIVATE type=%s appid='%s'",
+						constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED
+							? "lock" : "confine",
+						client_get_appid(ac) ? client_get_appid(ac) : "(null)");
 				return;
 			}
 		}
@@ -1076,6 +1104,18 @@ createpointerconstraint(struct wl_listener *listener, void *data)
 	 */
 	Client *c = NULL;
 	toplevel_from_wlr_surface(wlr_constraint->surface, &c, NULL);
+
+	if (c && (looks_like_game(c) || is_game_content(c)))
+		game_log("CURSOR_CONSTRAINT: CREATE type=%s appid='%s' "
+			"fullscreen=%d late_activate=%d",
+			wlr_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED
+				? "lock" : "confine",
+			client_get_appid(c) ? client_get_appid(c) : "(null)",
+			c->isfullscreen,
+			(c->mon && client_surface(c) && client_surface(c)->mapped
+				&& xytomon(cursor->x, cursor->y) == c->mon
+				&& c->isfullscreen) ? 1 : 0);
+
 	if (c && c->mon && client_surface(c) && client_surface(c)->mapped) {
 		Monitor *cm = xytomon(cursor->x, cursor->y);
 		if (cm == c->mon && c->isfullscreen) {
@@ -2536,6 +2576,16 @@ pointerfocus(Client *c, struct wlr_surface *surface, double sx, double sy,
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		time = now.tv_sec * 1000 + now.tv_nsec / 1000000;
 	}
+
+	/* Log pointer focus changes to/from game windows */
+	if (surface != seat->pointer_state.focused_surface && c &&
+			(looks_like_game(c) || is_game_content(c)))
+		game_log("CURSOR_FOCUS: appid='%s' title='%s' "
+			"pos=%.0f,%.0f constraint=%s",
+			client_get_appid(c) ? client_get_appid(c) : "(null)",
+			client_get_title(c) ? client_get_title(c) : "(null)",
+			cursor->x, cursor->y,
+			active_constraint ? "active" : "none");
 
 	/* Let the client know that the mouse cursor has entered one
 	 * of its surfaces, and make keyboard focus follow if desired.

@@ -1698,6 +1698,25 @@ run(const char *startup_cmd)
 	warp_cursor_to_startup_monitor();
 	nixly_cursor_set_xcursor("default");
 
+	/* Per-monitor summary to game debug log */
+	{
+		Monitor *m;
+		wl_list_for_each(m, &mons, link) {
+			if (!m->wlr_output)
+				continue;
+			game_log("MONITOR: name='%s' %dx%d@%.2fHz "
+				"vrr=%s ll_cursor=%s cpu_cursor=%s",
+				m->wlr_output->name,
+				m->m.width, m->m.height,
+				m->wlr_output->current_mode
+					? m->wlr_output->current_mode->refresh / 1000.0
+					: 0.0,
+				m->vrr_capable ? "capable" : "no",
+				m->ll_cursor_active ? "active" : "no",
+				cpu_cursor_active ? "yes" : "no");
+		}
+	}
+
 	/* Run the Wayland event loop. This does not return until you exit the
 	 * compositor. Starting the backend rigged up all of the necessary event
 	 * loop configuration to listen to libinput events, DRM events, generate
@@ -2789,6 +2808,16 @@ init_logging(void)
 				tm.tm_hour, tm.tm_min, tm.tm_sec);
 			(void)!write(error_log_fd, hdr, n);
 		}
+
+		game_log_fd = open(NIXLY_LOG_DIR "/game_debug.log",
+			O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		if (game_log_fd >= 0) {
+			int n = snprintf(hdr, sizeof(hdr),
+				"=== game debug log %04d-%02d-%02d %02d:%02d:%02d (PID %d) ===\n",
+				tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+				tm.tm_hour, tm.tm_min, tm.tm_sec, getpid());
+			(void)!write(game_log_fd, hdr, n);
+		}
 	}
 
 	#undef NIXLY_LOG_DIR
@@ -2815,6 +2844,11 @@ close_logging(void)
 		dprintf(error_log_fd, "\n=== error log ended ===\n");
 		close(error_log_fd);
 		error_log_fd = -1;
+	}
+	if (game_log_fd >= 0) {
+		dprintf(game_log_fd, "\n=== game debug log ended ===\n");
+		close(game_log_fd);
+		game_log_fd = -1;
 	}
 	if (debug_log_file) {
 		fprintf(debug_log_file, "=== WLR_DEBUG log ended ===\n");
@@ -2899,12 +2933,14 @@ setup(void)
 	drag_icon = wlr_scene_tree_create(&scene->tree);
 	wlr_scene_node_place_below(&drag_icon->node, &layers[LyrBlock]->node);
 
-	/* Autocreates a renderer, either Pixman or Vulkan for us. The user
-	 * can also specify a renderer using the WLR_RENDERER env var.
-	 * The renderer is responsible for defining the various pixel formats it
-	 * supports for shared memory, this configures that for clients. */
+	/* Autocreates a Vulkan renderer. The build only links the Vulkan
+	 * backend — Pixman/GL are not available. The renderer is responsible
+	 * for defining the various pixel formats it supports for shared
+	 * memory, this configures that for clients. */
 	if (!(drw = wlr_renderer_autocreate(backend)))
 		die("couldn't create renderer");
+	if (!wlr_renderer_is_vk(drw))
+		die("renderer is not Vulkan — only Vulkan is supported");
 	wl_signal_add(&drw->events.lost, &gpu_reset);
 
 	/* Log renderer and GPU state for diagnostics */
@@ -3330,6 +3366,23 @@ setup(void)
 					(unsigned long)cursor_w, (unsigned long)cursor_h);
 			}
 		}
+	}
+
+	/* Renderer summary to game debug log */
+	{
+		const char *gpu = "unknown";
+		if (discrete_gpu_idx >= 0)
+			gpu = detected_gpus[discrete_gpu_idx].driver;
+		else if (integrated_gpu_idx >= 0)
+			gpu = detected_gpus[integrated_gpu_idx].driver;
+		int has_dmabuf =
+			wlr_renderer_get_texture_formats(drw, WLR_BUFFER_CAP_DMABUF) != NULL;
+		game_log("RENDERER: gpu=%s renderer=Vulkan esync=%s dmabuf=%s "
+			"drm_fd=%d cpu_cursor=%s",
+			gpu,
+			g_explicit_sync_ok ? "YES" : "NO",
+			has_dmabuf ? "YES" : "NO",
+			drm_fd, cpu_cursor_active ? "YES" : "NO");
 	}
 
 	/*

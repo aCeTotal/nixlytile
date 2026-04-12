@@ -540,6 +540,7 @@ int screenshot_mode = 0;
 int diag_log_fd = -1;
 int audio_log_fd = -1;
 int error_log_fd = -1;
+int game_log_fd = -1;
 struct wl_event_source *diag_timer = NULL;
 
 /* Nixpkgs package cache */

@@ -3036,6 +3036,7 @@ void screenshot_cancel(void);
 extern int diag_log_fd;
 extern int audio_log_fd;
 extern int error_log_fd;
+extern int game_log_fd;
 extern struct wl_event_source *diag_timer;
 
 #include <stdarg.h>
@@ -3069,6 +3070,22 @@ static inline void diag_log_audio(const char *fmt, ...)
 	va_end(ap);
 	if (off < (int)sizeof(buf)-1) buf[off++] = '\n';
 	(void)!write(audio_log_fd, buf, off);
+}
+
+static inline void game_log(const char *fmt, ...)
+{
+	if (game_log_fd < 0) return;
+	struct timespec ts; struct tm tm;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	localtime_r(&ts.tv_sec, &tm);
+	char buf[2048];
+	int off = snprintf(buf, sizeof(buf), "[%02d:%02d:%02d.%03ld] ",
+		tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec/1000000);
+	va_list ap; va_start(ap, fmt);
+	off += vsnprintf(buf+off, sizeof(buf)-off, fmt, ap);
+	va_end(ap);
+	if (off < (int)sizeof(buf)-1) buf[off++] = '\n';
+	(void)!write(game_log_fd, buf, off);
 }
 
 /* client.h helpers (inline) */

@@ -608,14 +608,10 @@ fullscreennotify(struct wl_listener *listener, void *data)
 			"GAME_TRACE: fullscreennotify ignoring client unfullscreen "
 			"for game '%s' — silently ignoring (no re-assert)",
 			client_get_appid(c) ? client_get_appid(c) : "(null)");
-		/*
-		 * Silently ignore — don't re-assert fullscreen.  Wine/Proton
-		 * games send unfullscreen as part of their resolution-change
-		 * sequence.  Re-asserting fullscreen here confuses Wine into
-		 * thinking its mode change failed, causing it to cycle through
-		 * resolutions endlessly.  By doing nothing, Wine believes the
-		 * unfullscreen succeeded and proceeds with its mode change.
-		 */
+		game_log("GAME_FS: IGNORE_UNFS appid='%s' title='%s' "
+			"reason=game_unfullscreen_blocked",
+			client_get_appid(c) ? client_get_appid(c) : "(null)",
+			client_get_title(c) ? client_get_title(c) : "(null)");
 		return;
 	}
 
@@ -632,6 +628,10 @@ fullscreennotify(struct wl_listener *listener, void *data)
 			"GAME_TRACE: fullscreennotify already fullscreen for "
 			"game '%s' — confirming without resize",
 			client_get_appid(c) ? client_get_appid(c) : "(null)");
+		game_log("GAME_FS: CONFIRM appid='%s' title='%s' "
+			"reason=already_fullscreen_reconfirm",
+			client_get_appid(c) ? client_get_appid(c) : "(null)",
+			client_get_title(c) ? client_get_title(c) : "(null)");
 		client_set_fullscreen(c, 1);
 		return;
 	}
@@ -656,11 +656,25 @@ fullscreennotify(struct wl_listener *listener, void *data)
 				"fullscreen for '%s' %dx%d (< %dx%d)",
 				client_get_appid(c) ? client_get_appid(c) : "(null)",
 				cw, ch, mw / 3, mh / 3);
+			game_log("GAME_FS: BLOCK_SPLASH appid='%s' title='%s' "
+				"size=%dx%d thresh=%dx%d reason=splash_too_small",
+				client_get_appid(c) ? client_get_appid(c) : "(null)",
+				client_get_title(c) ? client_get_title(c) : "(null)",
+				cw, ch, mw / 3, mh / 3);
 			client_set_fullscreen(c, 0);
 			return;
 		}
 	}
 
+	if (looks_like_game(c) || is_game_content(c))
+		game_log("GAME_FS: %s appid='%s' title='%s' "
+			"size=%dx%d mon='%s'",
+			want ? "GRANT" : "REVOKE",
+			client_get_appid(c) ? client_get_appid(c) : "(null)",
+			client_get_title(c) ? client_get_title(c) : "(null)",
+			c->geom.width, c->geom.height,
+			c->mon && c->mon->wlr_output
+				? c->mon->wlr_output->name : "(null)");
 	setfullscreen(c, want);
 }
 
@@ -911,6 +925,20 @@ mapnotify(struct wl_listener *listener, void *data)
 						: "(null)",
 					initial_w, initial_h,
 					c->geom.x, c->geom.y);
+				game_log("GAME_SPLASH: appid='%s' title='%s' "
+					"type=%s size=%dx%d centered@%d,%d "
+					"mon='%s' steam_id=%d confirmed=%d "
+					"thresh=%dx%d pid=%d",
+					aid ? aid : "(null)",
+					client_get_title(c) ? client_get_title(c) : "(null)",
+					client_is_x11(c) ? "X11" : "XDG",
+					initial_w, initial_h,
+					c->geom.x, c->geom.y,
+					pre_target_mon->wlr_output
+						? pre_target_mon->wlr_output->name : "(null)",
+					c->steam_game_id, is_confirmed_steam_game,
+					thresh_w, thresh_h,
+					(int)client_get_pid(c));
 			} else {
 				/*
 				 * Game main window — large enough to be the
@@ -929,6 +957,19 @@ mapnotify(struct wl_listener *listener, void *data)
 						? pre_target_mon->wlr_output->name
 						: "(null)",
 					initial_w, initial_h);
+				game_log("GAME_MAP: appid='%s' title='%s' "
+					"type=%s size=%dx%d fullscreen=1 "
+					"mon='%s' steam_id=%d confirmed=%d "
+					"thresh=%dx%d pid=%d",
+					aid ? aid : "(null)",
+					client_get_title(c) ? client_get_title(c) : "(null)",
+					client_is_x11(c) ? "X11" : "XDG",
+					initial_w, initial_h,
+					pre_target_mon->wlr_output
+						? pre_target_mon->wlr_output->name : "(null)",
+					c->steam_game_id, is_confirmed_steam_game,
+					thresh_w, thresh_h,
+					(int)client_get_pid(c));
 			}
 		}
 	}
@@ -1482,6 +1523,16 @@ unmapnotify(struct wl_listener *listener, void *data)
 {
 	/* Called when the surface is unmapped, and should no longer be shown. */
 	Client *c = wl_container_of(listener, c, unmap);
+
+	if (looks_like_game(c) || is_game_content(c))
+		game_log("GAME_UNMAP: appid='%s' title='%s' type=%s "
+			"was_fullscreen=%d steam_id=%d pid=%d",
+			client_get_appid(c) ? client_get_appid(c) : "(null)",
+			client_get_title(c) ? client_get_title(c) : "(null)",
+			client_is_x11(c) ? "X11" : "XDG",
+			c->isfullscreen, c->steam_game_id,
+			(int)client_get_pid(c));
+
 	if (c == grabc) {
 		cursor_mode = CurNormal;
 		grabc = NULL;
