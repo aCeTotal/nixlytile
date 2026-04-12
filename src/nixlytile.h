@@ -1282,6 +1282,7 @@ typedef struct {
 	int video_detect_retries;
 	int video_detect_phase;
 	struct wlr_ext_foreign_toplevel_handle_v1 *foreign_toplevel_handle;
+	int compositor_fs;          /* 1=pre-fullscreened by compositor, 2=soft-unfullscreened (awaiting game re-fs) */
 #ifdef XWAYLAND
 	uint32_t steam_game_id;     /* STEAM_GAME AppID (0 = not a Steam game) */
 	int is_steam_overlay;       /* STEAM_OVERLAY == 1 */
