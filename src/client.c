@@ -595,40 +595,16 @@ fullscreennotify(struct wl_listener *listener, void *data)
 		c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)");
 
 	/*
-	 * Games: handle client-initiated unfullscreen requests.
-	 *
-	 * compositor_fs == 1: Game was pre-fullscreened by the compositor at
-	 *   map time.  Silently ignore the unfullscreen and clear compositor_fs
-	 *   so subsequent requests are handled normally.  Telling Wine it's
-	 *   unfullscreened (SOFT_UNFS) caused resolution cycling and broke
-	 *   pointer grab setup.
-	 *
-	 * compositor_fs == 0: Game completed its own fullscreen init.  Block
-	 *   further unfullscreen requests — Proton/Wine games frequently request
-	 *   unfullscreen spuriously when losing focus or when the launcher spawns
-	 *   helper windows.  The user can still toggle fullscreen via keybinding.
+	 * Games: block client-initiated unfullscreen.
+	 * Proton/Wine games frequently request unfullscreen spuriously when
+	 * losing focus or when the launcher spawns helper windows.
+	 * The user can still toggle fullscreen via keybinding.
 	 */
 	if (!want && c->isfullscreen && (is_game_content(c) || looks_like_game(c))) {
-		if (c->compositor_fs == 1) {
-			wlr_log(WLR_INFO,
-				"GAME_TRACE: fullscreennotify ignoring unfullscreen "
-				"for pre-fullscreened game '%s' — clearing compositor_fs",
-				client_get_appid(c) ? client_get_appid(c) : "(null)");
-			game_log("GAME_FS: IGNORE_UNFS appid='%s' title='%s' "
-				"reason=compositor_pre_fs_ignore",
-				client_get_appid(c) ? client_get_appid(c) : "(null)",
-				client_get_title(c) ? client_get_title(c) : "(null)");
-			c->compositor_fs = 0;
-			return;
-		}
 		wlr_log(WLR_INFO,
 			"GAME_TRACE: fullscreennotify ignoring client unfullscreen "
-			"for game '%s' — silently ignoring (no re-assert)",
+			"for game '%s'",
 			client_get_appid(c) ? client_get_appid(c) : "(null)");
-		game_log("GAME_FS: IGNORE_UNFS appid='%s' title='%s' "
-			"reason=game_unfullscreen_blocked",
-			client_get_appid(c) ? client_get_appid(c) : "(null)",
-			client_get_title(c) ? client_get_title(c) : "(null)");
 		return;
 	}
 
@@ -963,7 +939,6 @@ mapnotify(struct wl_listener *listener, void *data)
 				pre_fullscreen_game = 1;
 				c->isfullscreen = 1;
 				c->isfloating = 0;
-				c->compositor_fs = 1;
 				wlr_log(WLR_INFO,
 					"GAME_TRACE: pre-fullscreen "
 					"appid='%s' mon='%s' initial=%dx%d",
@@ -1134,7 +1109,6 @@ mapnotify(struct wl_listener *listener, void *data)
 		wlr_log(WLR_INFO, "Game main window detected: '%s' %dx%d — true fullscreen",
 			client_get_appid(c) ? client_get_appid(c) : "(unknown)",
 			initial_w, initial_h);
-		c->compositor_fs = 1;
 		setfullscreen(c, 1);
 		wlr_log(WLR_INFO,
 			"GAME_TRACE: after setfullscreen c->mon='%s' geom=%dx%d@%d,%d",
@@ -1261,10 +1235,6 @@ setfloating(Client *c, int floating)
 	printstatus();
 }
 
-/* Set by togglefullscreen() to distinguish user-initiated unfullscreen
- * from Wine/Proton-initiated unfullscreen that should be blocked. */
-static int user_toggled_fullscreen;
-
 void
 setfullscreen(Client *c, int fullscreen)
 {
@@ -1286,21 +1256,6 @@ setfullscreen(Client *c, int fullscreen)
 		wlr_log(WLR_INFO, "HTPC: Blocking unfullscreen for '%s'",
 			client_get_appid(c) ? client_get_appid(c) : "(unknown)");
 		/* Re-assert fullscreen state to the client */
-		client_set_fullscreen(c, 1);
-		return;
-	}
-
-	/* Block Wine/Proton-initiated unfullscreen for game clients.
-	 * Wine interprets the Super/Windows key as a toggle and sends
-	 * unfullscreen requests that bypass fullscreennotify.  This causes
-	 * fullscreen cycling, game mode toggling, and mouse input loss.
-	 * User-initiated unfullscreen (Mod+f) sets user_toggled_fullscreen
-	 * to bypass this guard. */
-	if (!fullscreen && c->isfullscreen && !user_toggled_fullscreen &&
-	    (is_game_content(c) || looks_like_game(c))) {
-		wlr_log(WLR_INFO,
-			"GAME_TRACE: setfullscreen blocking unfullscreen for game '%s'",
-			client_get_appid(c) ? client_get_appid(c) : "(unknown)");
 		client_set_fullscreen(c, 1);
 		return;
 	}
@@ -1394,7 +1349,7 @@ setfullscreen(Client *c, int fullscreen)
 	/* Clear PID guard so game mode deactivates immediately */
 	if (!fullscreen && c == game_mode_client)
 		game_mode_pid = 0;
-	update_game_mode();
+	schedule_game_mode_update();
 
 	/* Ensure fullscreen client gets keyboard focus immediately */
 	if (fullscreen) {
@@ -1473,7 +1428,7 @@ tag(const Arg *arg)
 	arrange(selmon);
 	printstatus();
 	/* Update game mode - fullscreen client visibility may have changed */
-	update_game_mode();
+	schedule_game_mode_update();
 }
 
 void
@@ -1501,11 +1456,8 @@ void
 togglefullscreen(const Arg *arg)
 {
 	Client *sel = focustop(selmon);
-	if (sel) {
-		user_toggled_fullscreen = 1;
+	if (sel)
 		setfullscreen(sel, !sel->isfullscreen);
-		user_toggled_fullscreen = 0;
-	}
 }
 
 void
@@ -1527,7 +1479,7 @@ toggletag(const Arg *arg)
 	arrange(selmon);
 	printstatus();
 	/* Update game mode - fullscreen client visibility may have changed */
-	update_game_mode();
+	schedule_game_mode_update();
 }
 
 void
@@ -1542,7 +1494,7 @@ toggleview(const Arg *arg)
 	arrange(selmon);
 	printstatus();
 	/* Update game mode when toggling tag visibility */
-	update_game_mode();
+	schedule_game_mode_update();
 }
 
 /* Forward declarations for auto-kill */
@@ -1623,7 +1575,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 		game_mode_pid = 0;
 		game_mode_client = NULL;
 	}
-	update_game_mode();
+	schedule_game_mode_update();
 }
 
 void
@@ -1692,7 +1644,7 @@ view(const Arg *arg)
 	arrange(selmon);
 	printstatus();
 	/* Update game mode when switching tags - a fullscreen game may become visible/hidden */
-	update_game_mode();
+	schedule_game_mode_update();
 	/* Update gamepad grab state - grab for HTPC views, release for Steam */
 	gamepad_update_grab_state();
 }

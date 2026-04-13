@@ -1984,6 +1984,150 @@ restore_mglru_tuning(void)
 static int is_wine_or_proton_process(pid_t pid);
 static int is_known_game_app(const char *app);
 
+/*
+ * Background worker thread for game mode system operations.
+ * All blocking I/O (process freeze/unfreeze, sysfs writes, DRM ioctls,
+ * memory reclaim, fan control) runs here instead of on the compositor
+ * event loop, preventing compositor freezes during tag switches.
+ */
+static pthread_t gm_bg_thread;
+static pthread_mutex_t gm_bg_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t gm_bg_cond = PTHREAD_COND_INITIALIZER;
+static int gm_bg_alive;
+static int gm_bg_desired_ultra;
+static int gm_bg_applied_ultra;
+static pid_t gm_bg_pid;
+static int gm_bg_wake;
+
+static void *
+gm_bg_worker_func(void *arg)
+{
+	(void)arg;
+	pthread_mutex_lock(&gm_bg_mutex);
+	while (gm_bg_alive) {
+		while (!gm_bg_wake && gm_bg_alive)
+			pthread_cond_wait(&gm_bg_cond, &gm_bg_mutex);
+		if (!gm_bg_alive)
+			break;
+
+		gm_bg_wake = 0;
+		int want = gm_bg_desired_ultra;
+		int have = gm_bg_applied_ultra;
+		pid_t pid = gm_bg_pid;
+		pthread_mutex_unlock(&gm_bg_mutex);
+
+		if (want && !have) {
+			/* Entering ultra — heavy system tuning */
+			wlr_log(WLR_INFO, "gm-bg: entering ultra (pid=%d)", pid);
+			fan_boost_activate();
+			freeze_background_processes();
+			apply_memory_optimization();
+			apply_cpu_latency_qos();
+			apply_transparent_hugepages();
+			apply_io_scheduler();
+			apply_disable_watchdog();
+			apply_raw_input();
+			apply_irq_affinity();
+			apply_scheduler_tuning();
+			apply_gpu_power_state();
+			apply_dirty_writeback_tuning();
+			apply_disable_split_lock();
+			apply_mglru_tuning();
+			if (pid > 1) {
+				apply_game_priority(pid);
+				apply_cpu_affinity(pid);
+				apply_gpu_sched_priority(pid);
+			}
+			wlr_log(WLR_INFO, "gm-bg: ultra enter complete");
+		} else if (!want && have) {
+			/* Exiting ultra — restore everything */
+			wlr_log(WLR_INFO, "gm-bg: exiting ultra (pid=%d)", pid);
+			restore_mglru_tuning();
+			restore_split_lock();
+			restore_dirty_writeback_tuning();
+			restore_gpu_power_state();
+			restore_scheduler_tuning();
+			restore_irq_affinity();
+			restore_raw_input();
+			restore_watchdog();
+			restore_io_scheduler();
+			restore_transparent_hugepages();
+			if (pid > 1) {
+				restore_cpu_affinity(pid);
+				restore_gpu_sched_priority(pid);
+				restore_game_priority(pid);
+			}
+			restore_cpu_latency_qos();
+			unfreeze_background_processes();
+			restore_memory_optimization();
+			fan_boost_deactivate();
+			wlr_log(WLR_INFO, "gm-bg: ultra exit complete");
+		}
+
+		pthread_mutex_lock(&gm_bg_mutex);
+		gm_bg_applied_ultra = want;
+
+		/* Re-check: desired may have changed while we worked */
+		if (gm_bg_desired_ultra != want)
+			gm_bg_wake = 1;
+	}
+	pthread_mutex_unlock(&gm_bg_mutex);
+	return NULL;
+}
+
+static void
+gm_bg_post(int ultra, pid_t pid)
+{
+	pthread_mutex_lock(&gm_bg_mutex);
+	gm_bg_desired_ultra = ultra;
+	gm_bg_pid = pid;
+	gm_bg_wake = 1;
+	pthread_cond_signal(&gm_bg_cond);
+	pthread_mutex_unlock(&gm_bg_mutex);
+}
+
+void
+gm_bg_init(void)
+{
+	gm_bg_alive = 1;
+	pthread_create(&gm_bg_thread, NULL, gm_bg_worker_func, NULL);
+	pthread_setname_np(gm_bg_thread, "gm-bg-worker");
+}
+
+void
+gm_bg_cleanup(void)
+{
+	pthread_mutex_lock(&gm_bg_mutex);
+	gm_bg_alive = 0;
+	pthread_cond_signal(&gm_bg_cond);
+	pthread_mutex_unlock(&gm_bg_mutex);
+	pthread_join(gm_bg_thread, NULL);
+
+	/* Ensure processes are unfrozen on compositor exit */
+	if (gm_bg_applied_ultra)
+		unfreeze_background_processes();
+}
+
+static struct wl_event_source *game_mode_debounce_timer;
+
+static int
+game_mode_debounce_cb(void *data)
+{
+	(void)data;
+	update_game_mode();
+	return 0;
+}
+
+void
+schedule_game_mode_update(void)
+{
+	if (!game_mode_debounce_timer)
+		game_mode_debounce_timer = wl_event_loop_add_timer(event_loop,
+			game_mode_debounce_cb, NULL);
+	if (game_mode_debounce_timer)
+		wl_event_source_timer_update(game_mode_debounce_timer, 50);
+}
+
 void
 update_game_mode(void)
 {
@@ -2103,47 +2247,13 @@ update_game_mode(void)
 		/* NOTE: Keep bt_scan_timer - needed for controller reconnection */
 		/* NOTE: Keep gamepad_pending_timer - needed for controller input */
 
-		/* Boost GPU fans to prevent thermal throttling */
-		fan_boost_activate();
-
-		/* Freeze remaining background processes to free CPU/memory */
-		freeze_background_processes();
-
-		/* Apply memory optimizations (drop caches, lower swappiness) */
-		apply_memory_optimization();
-
-		/* Prevent deep CPU C-states for lowest wakeup latency */
-		apply_cpu_latency_qos();
-
-		/* Enable transparent huge pages for reduced TLB misses */
-		apply_transparent_hugepages();
-
-		/* Switch I/O schedulers to lowest-latency mode */
-		apply_io_scheduler();
-
-		/* Disable kernel watchdog to eliminate NMI jitter */
-		apply_disable_watchdog();
-
-		/* Disable pointer acceleration for raw 1:1 input */
-		apply_raw_input();
-
-		/* Pin all hardware IRQs to core 0 (compositor core) */
-		apply_irq_affinity();
-
-		/* Tune CFS scheduler for low-latency gaming */
-		apply_scheduler_tuning();
-
-		/* Force GPU to maximum performance state */
-		apply_gpu_power_state();
-
-		/* Optimize dirty page writeback to prevent I/O stalls */
-		apply_dirty_writeback_tuning();
-
-		/* Disable split lock mitigation overhead */
-		apply_disable_split_lock();
-
-		/* Enable full MGLRU for efficient page reclaim */
-		apply_mglru_tuning();
+		/*
+		 * Dispatch blocking system operations to background thread.
+		 * Process freeze, sysfs tuning, GPU priority, fan boost — all
+		 * performed off the compositor event loop to prevent input/render
+		 * freezes during tag switches.
+		 */
+		gm_bg_post(1, game_mode_pid);
 
 		/* Hide statusbar on ALL monitors to save GPU compositing time */
 		wl_list_for_each(m, &mons, link) {
@@ -2158,18 +2268,6 @@ update_game_mode(void)
 		sudo_popup_hide_all();
 		tray_menu_hide_all();
 		/* Don't hide modal/nixpkgs - user might be searching while game loads */
-
-		/*
-		 * Apply high-priority scheduling to the game process.
-		 * This gives the game more CPU time and faster I/O access.
-		 */
-		if (game_mode_pid > 1) {
-			apply_game_priority(game_mode_pid);
-			/* Isolate game and compositor to separate CPU cores */
-			apply_cpu_affinity(game_mode_pid);
-			/* Boost GPU scheduling priority for the game process */
-			apply_gpu_sched_priority(game_mode_pid);
-		}
 
 		/*
 		 * Boost compositor thread to real-time scheduling for lower
@@ -2267,51 +2365,7 @@ update_game_mode(void)
 			if (config_rewatch_timer)
 				wl_event_source_timer_update(config_rewatch_timer, 2000);
 
-			/* Restore MGLRU settings */
-			restore_mglru_tuning();
-
-			/* Restore split lock mitigation */
-			restore_split_lock();
-
-			/* Restore dirty writeback parameters */
-			restore_dirty_writeback_tuning();
-
-			/* Restore GPU power state */
-			restore_gpu_power_state();
-
-			/* Restore CFS scheduler parameters */
-			restore_scheduler_tuning();
-
-			/* Restore IRQ affinity to original cores */
-			restore_irq_affinity();
-
-			/* Restore raw input (pointer acceleration) */
-			restore_raw_input();
-
-			/* Restore kernel watchdog */
-			restore_watchdog();
-
-			/* Restore I/O schedulers */
-			restore_io_scheduler();
-
-			/* Restore transparent huge pages */
-			restore_transparent_hugepages();
-
-			/* Restore CPU affinity before restoring game priority */
-			restore_cpu_affinity(game_mode_pid);
-
-			/* Restore CPU DMA latency QoS */
-			restore_cpu_latency_qos();
-
-			/* Restore GPU scheduling priority before restoring game priority */
-			restore_gpu_sched_priority(game_mode_pid);
-
-			/* Restore normal priority for the game process */
-			if (game_mode_pid > 1) {
-				restore_game_priority(game_mode_pid);
-			}
-
-			/* Restore compositor to normal scheduling */
+			/* Restore compositor to normal scheduling (needs main thread: pid=0) */
 			if (compositor_rt_applied) {
 				struct sched_param sp = { .sched_priority = 0 };
 				sched_setscheduler(0, SCHED_OTHER, &sp);
@@ -2319,14 +2373,12 @@ update_game_mode(void)
 				wlr_log(WLR_INFO, "Compositor scheduling restored to SCHED_OTHER");
 			}
 
-			/* Unfreeze background processes */
-			unfreeze_background_processes();
-
-			/* Restore memory settings */
-			restore_memory_optimization();
-
-			/* Restore GPU fans — thermal management will re-take control */
-			fan_boost_deactivate();
+			/*
+			 * Dispatch blocking restore operations to background thread.
+			 * Sysfs writes, process unfreeze, memory restore, fan —
+			 * all off the compositor event loop.
+			 */
+			gm_bg_post(0, game_mode_pid);
 
 			/* Restart thermal fan management timer */
 			if (fan_thermal_timer)
@@ -2334,6 +2386,21 @@ update_game_mode(void)
 
 			wlr_log(WLR_INFO, "Ultra game mode deactivated - full system restored");
 
+		} else {
+			/*
+			 * Non-ultra exit (video/browser fullscreen).
+			 * Clean up orphaned video VRR that was enabled
+			 * during fullscreen but never disabled on tag switch.
+			 */
+			wl_list_for_each(m, &mons, link) {
+				if (m->vrr_active)
+					disable_vrr_video_mode(m);
+				if (m->video_cadence_active) {
+					m->video_cadence_active = 0;
+					m->video_cadence_accum = 0.0f;
+					m->video_cadence_counter = 0;
+				}
+			}
 		}
 
 		/* Show exit notification for ultra game mode only */

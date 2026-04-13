@@ -1282,7 +1282,6 @@ typedef struct {
 	int video_detect_retries;
 	int video_detect_phase;
 	struct wlr_ext_foreign_toplevel_handle_v1 *foreign_toplevel_handle;
-	int compositor_fs;          /* 1=pre-fullscreened by compositor (cleared on first game unfullscreen request) */
 #ifdef XWAYLAND
 	uint32_t steam_game_id;     /* STEAM_GAME AppID (0 = not a Steam game) */
 	int is_steam_overlay;       /* STEAM_OVERLAY == 1 */
@@ -2824,6 +2823,9 @@ void htpc_mode_exit(void);
 void htpc_mode_toggle(const Arg *arg);
 void htpc_menu_build(void);
 void update_game_mode(void);
+void schedule_game_mode_update(void);
+void gm_bg_init(void);
+void gm_bg_cleanup(void);
 void freeze_background_processes(void);
 void unfreeze_background_processes(void);
 void apply_memory_optimization(void);
