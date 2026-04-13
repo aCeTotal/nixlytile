@@ -1813,6 +1813,20 @@ keypress(struct wl_listener *listener, void *data)
 	if (handled)
 		return;
 
+	/* Don't forward Super/Logo key to fullscreen games.
+	 * Wine interprets it as the Windows key and unfullscreens the
+	 * game, causing fullscreen cycling and mouse input loss.
+	 * Block both press and release to avoid unpaired events. */
+	for (i = 0; i < nsyms; i++) {
+		if (syms[i] == XKB_KEY_Super_L || syms[i] == XKB_KEY_Super_R) {
+			Client *fc = focustop(selmon);
+			if (fc && fc->isfullscreen &&
+			    (looks_like_game(fc) || is_game_content(fc)))
+				return;
+			break;
+		}
+	}
+
 	wlr_seat_set_keyboard(seat, &group->wlr_group->keyboard);
 	/* Pass unhandled keycodes along to the client. */
 	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {

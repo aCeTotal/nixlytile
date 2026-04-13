@@ -3965,7 +3965,37 @@ configurex11(struct wl_listener *listener, void *data)
 			fsgeom.width, fsgeom.height,
 			c->mon->wlr_output ? c->mon->wlr_output->name : "(null)");
 
-		/* Requested smaller than monitor → accept and center */
+		/* Games: force native resolution regardless of request.
+		 * The game cycles through 2-3 resolution requests during
+		 * startup, then settles at native.  Always responding with
+		 * native resolution avoids green artifacts from buffer size
+		 * transitions on Nvidia. */
+		if (is_game_content(c) || looks_like_game(c)) {
+			wlr_log(WLR_INFO,
+				"GAME_TRACE: configurex11 game force native "
+				"appid='%s' requested=%dx%d → native=%dx%d",
+				client_get_appid(c) ? client_get_appid(c) : "(null)",
+				gw, gh, fsgeom.width, fsgeom.height);
+
+			wlr_scene_node_set_position(&c->scene_surface->node,
+				0, 0);
+			wlr_xwayland_surface_configure(c->surface.xwayland,
+				fsgeom.x, fsgeom.y, fsgeom.width, fsgeom.height);
+
+			if (c->geom.width != fsgeom.width
+					|| c->geom.height != fsgeom.height
+					|| c->geom.x != fsgeom.x
+					|| c->geom.y != fsgeom.y) {
+				c->geom = fsgeom;
+				wlr_scene_node_set_position(&c->scene->node,
+					fsgeom.x, fsgeom.y);
+			}
+
+			motionnotify(0, NULL, 0, 0, 0, 0);
+			return;
+		}
+
+		/* Non-game: requested smaller than monitor → accept and center */
 		if (gw < fsgeom.width || gh < fsgeom.height) {
 			if (gw > fsgeom.width)  gw = fsgeom.width;
 			if (gh > fsgeom.height) gh = fsgeom.height;

@@ -1067,41 +1067,16 @@ mapnotify(struct wl_listener *listener, void *data)
 	 *   - Small (< 3/4 of monitor in both dims) → centered-floating splash
 	 *   - Otherwise → immediate true fullscreen
 	 *
-	 * setmon → setfullscreen sent a configure at native monitor resolution,
-	 * but the game hasn't rendered at that size yet.  Override the configure
-	 * to the game's initial size so Wine/DXVK can initialize its swapchain
-	 * at the resolution it chose instead of fighting the compositor.
-	 * Center the surface so the initial buffer appears in the middle of the
-	 * monitor rather than in the top-left corner.
-	 *
-	 * The game will later send its own configure request at its desired
-	 * resolution — configurex11 accepts it and re-centers.
+	 * setmon → setfullscreen already sent a configure at native monitor
+	 * resolution.  Let it stand — DXVK/Wine handles internal resolution
+	 * scaling via the Vulkan swapchain.  configurex11 will force native
+	 * resolution for any subsequent configure requests from the game.
 	 */
 	if (pre_fullscreen_game) {
 		wlr_log(WLR_INFO,
 			"GAME_TRACE: pre-fullscreen game ready c->mon='%s' geom=%dx%d@%d,%d",
 			c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)",
 			c->geom.width, c->geom.height, c->geom.x, c->geom.y);
-
-		/* Center the initial buffer and override the native-resolution
-		 * configure that setfullscreen sent — let the game keep its
-		 * own size so it doesn't cycle through resolutions. */
-		if (client_is_x11(c) && c->mon) {
-			struct wlr_box fsgeom = fullscreen_mirror_geom(c->mon);
-			int dx = (fsgeom.width  - initial_w) / 2;
-			int dy = (fsgeom.height - initial_h) / 2;
-			int cx = fsgeom.x + dx;
-			int cy = fsgeom.y + dy;
-			wlr_scene_node_set_position(&c->scene_surface->node,
-				dx, dy);
-			wlr_xwayland_surface_configure(c->surface.xwayland,
-				cx, cy, initial_w, initial_h);
-			wlr_log(WLR_INFO,
-				"GAME_TRACE: pre-fullscreen override configure "
-				"to initial %dx%d centered@%d,%d",
-				initial_w, initial_h, cx, cy);
-		}
-
 		focusclient(c, 1);
 		printstatus();
 		goto unset_fullscreen;
@@ -1286,6 +1261,10 @@ setfloating(Client *c, int floating)
 	printstatus();
 }
 
+/* Set by togglefullscreen() to distinguish user-initiated unfullscreen
+ * from Wine/Proton-initiated unfullscreen that should be blocked. */
+static int user_toggled_fullscreen;
+
 void
 setfullscreen(Client *c, int fullscreen)
 {
@@ -1307,6 +1286,21 @@ setfullscreen(Client *c, int fullscreen)
 		wlr_log(WLR_INFO, "HTPC: Blocking unfullscreen for '%s'",
 			client_get_appid(c) ? client_get_appid(c) : "(unknown)");
 		/* Re-assert fullscreen state to the client */
+		client_set_fullscreen(c, 1);
+		return;
+	}
+
+	/* Block Wine/Proton-initiated unfullscreen for game clients.
+	 * Wine interprets the Super/Windows key as a toggle and sends
+	 * unfullscreen requests that bypass fullscreennotify.  This causes
+	 * fullscreen cycling, game mode toggling, and mouse input loss.
+	 * User-initiated unfullscreen (Mod+f) sets user_toggled_fullscreen
+	 * to bypass this guard. */
+	if (!fullscreen && c->isfullscreen && !user_toggled_fullscreen &&
+	    (is_game_content(c) || looks_like_game(c))) {
+		wlr_log(WLR_INFO,
+			"GAME_TRACE: setfullscreen blocking unfullscreen for game '%s'",
+			client_get_appid(c) ? client_get_appid(c) : "(unknown)");
 		client_set_fullscreen(c, 1);
 		return;
 	}
@@ -1507,8 +1501,11 @@ void
 togglefullscreen(const Arg *arg)
 {
 	Client *sel = focustop(selmon);
-	if (sel)
+	if (sel) {
+		user_toggled_fullscreen = 1;
 		setfullscreen(sel, !sel->isfullscreen);
+		user_toggled_fullscreen = 0;
+	}
 }
 
 void

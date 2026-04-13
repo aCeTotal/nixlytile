@@ -155,7 +155,7 @@
 #define MIN(A, B)               ((A) < (B) ? (A) : (B))
 #endif
 #define UNUSED __attribute__((unused))
-#define CLEANMASK(mask)         (mask & ~WLR_MODIFIER_CAPS)
+#define CLEANMASK(mask)         (mask & ~(WLR_MODIFIER_CAPS | WLR_MODIFIER_MOD2))
 #define VISIBLEON(C, M)         ((M) && (C)->mon == (M) && (((C)->tags & (M)->tagset[(M)->seltags]) || (C)->issticky))
 #define LENGTH(X)               (sizeof X / sizeof X[0])
 #define END(A)                  ((A) + LENGTH(A))
