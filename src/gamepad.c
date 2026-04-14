@@ -270,6 +270,7 @@ gamepad_menu_select(Monitor *m)
 
 		/* Switch to tag 3 */
 		if (selmon) {
+			invalidate_video_pacing(selmon);
 			selmon->seltags ^= 1;
 			selmon->tagset[selmon->seltags] = 1 << 2; /* Tag 3 = bit 2 */
 			focusclient(focustop(selmon), 1);
@@ -289,6 +290,7 @@ gamepad_menu_select(Monitor *m)
 		wlr_log(WLR_INFO, "Switching to Movies (tag 2)");
 
 		/* Switch to tag 2 - use m consistently (same monitor as menu) */
+		invalidate_video_pacing(m);
 		m->seltags ^= 1;
 		m->tagset[m->seltags] = 1 << 1; /* Tag 2 = bit 1 */
 
@@ -309,6 +311,7 @@ gamepad_menu_select(Monitor *m)
 		wlr_log(WLR_INFO, "Switching to TV-shows (tag 1)");
 
 		/* Switch to tag 1 - use m consistently (same monitor as menu) */
+		invalidate_video_pacing(m);
 		m->seltags ^= 1;
 		m->tagset[m->seltags] = 1 << 0; /* Tag 1 = bit 0 */
 

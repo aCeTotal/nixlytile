@@ -1569,10 +1569,24 @@ rendermon(struct wl_listener *listener, void *data)
 		state_built = 1;
 		/* New frame available - fall through to commit */
 	} else if (!is_video && m->video_cadence_active) {
-		/* Video exited fullscreen - deactivate cadence */
+		/* Video exited fullscreen - deactivate cadence.
+		 * Clear all cadence state so rendermon doesn't enter the
+		 * cadence hold path on subsequent vblanks. */
 		m->video_cadence_active = 0;
 		m->video_cadence_counter = 0;
+		m->video_cadence_accum = 0.0f;
+		if (!is_game) {
+			m->frame_pacing_active = 0;
+			m->estimated_game_fps = 0.0f;
+		}
+		/* Force full damage so the desktop renders immediately
+		 * instead of potentially getting an empty build_state */
+		wlr_damage_ring_add_whole(&m->scene_output->damage_ring);
 		wlr_log(WLR_DEBUG, "Video cadence deactivated");
+		/* VRR (if active for video) will be disabled by the
+		 * game-mode debounce timer — we don't call
+		 * disable_vrr_video_mode() here because the DRM modeset
+		 * would block the compositor event loop. */
 	}
 
 	/*
@@ -3487,6 +3501,50 @@ video_check_timeout(void *data)
 	(void)data;
 	check_fullscreen_video();
 	return 0;
+}
+
+/*
+ * Immediately invalidate all video pacing state on a monitor.
+ * Called from tag-switch functions (view, toggleview, tag, toggletag)
+ * so that rendermon never sees stale cadence/VRR state from the
+ * previous tag's fullscreen video.  Without this, the first rendermon
+ * after a tag switch can enter the cadence hold path or keep VRR at
+ * video Hz, freezing the display until the 50ms game-mode debounce
+ * fires.
+ */
+void
+invalidate_video_pacing(Monitor *m)
+{
+	if (!m)
+		return;
+
+	/* Force classify_fullscreen_content() to re-evaluate */
+	m->classify_cache_client = NULL;
+
+	/* Deactivate Bresenham video cadence immediately */
+	if (m->video_cadence_active) {
+		m->video_cadence_active = 0;
+		m->video_cadence_counter = 0;
+		m->video_cadence_accum = 0.0f;
+		wlr_log(WLR_DEBUG, "Video cadence invalidated (tag switch)");
+	}
+
+	/* Clear video-specific frame pacing (but not game pacing) */
+	if (m->frame_pacing_active && !m->game_vrr_active) {
+		m->frame_pacing_active = 0;
+		m->estimated_game_fps = 0.0f;
+	}
+
+	/* Force full damage so the first rendermon after tag switch
+	 * builds a complete frame (desktop content) instead of
+	 * potentially finding no damage and skipping the commit. */
+	if (m->scene_output)
+		wlr_damage_ring_add_whole(&m->scene_output->damage_ring);
+
+	/* Schedule VRR disable via game mode update (non-blocking).
+	 * We don't call disable_vrr_video_mode() here because it does
+	 * a DRM atomic modeset that can block the compositor for seconds
+	 * on HDMI displays.  The debounce timer handles it safely. */
 }
 
 void

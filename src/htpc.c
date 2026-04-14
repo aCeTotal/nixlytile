@@ -129,6 +129,7 @@ focus_or_launch_app(const char *app_id, const char *launch_cmd)
 			/* Switch to the tag where this client is */
 			unsigned int newtags = found->tags & TAGMASK;
 			if (newtags && newtags != m->tagset[m->seltags]) {
+				invalidate_video_pacing(m);
 				m->tagset[m->seltags] = newtags;
 				focusclient(found, 1);
 				arrange(m);
@@ -2581,6 +2582,7 @@ htpc_mode_enter(void)
 
 	/* Ensure we start on tag 1 (TV-shows) */
 	if (selmon) {
+		invalidate_video_pacing(selmon);
 		selmon->seltags ^= 1;
 		selmon->tagset[selmon->seltags] = 1 << 0; /* Tag 1 = bit 0 */
 		/* Show TV-shows view as default */
@@ -2632,6 +2634,7 @@ htpc_mode_exit(void)
 
 	/* Switch to tag 1 on all monitors */
 	wl_list_for_each(m, &mons, link) {
+		invalidate_video_pacing(m);
 		m->seltags ^= 1;
 		m->tagset[m->seltags] = 1 << 0; /* Tag 1 = bit 0 */
 	}

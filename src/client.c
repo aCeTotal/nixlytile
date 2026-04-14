@@ -1421,6 +1421,7 @@ tag(const Arg *arg)
 	if (!sel || (arg->ui & TAGMASK) == 0)
 		return;
 
+	invalidate_video_pacing(selmon);
 	sel->tags = arg->ui & TAGMASK;
 	/* Switch to the new tag so we follow the window */
 	selmon->tagset[selmon->seltags] = arg->ui & TAGMASK;
@@ -1474,6 +1475,7 @@ toggletag(const Arg *arg)
 	if (!sel || !(newtags = sel->tags ^ (arg->ui & TAGMASK)))
 		return;
 
+	invalidate_video_pacing(selmon);
 	sel->tags = newtags;
 	focusclient(focustop(selmon), 1);
 	arrange(selmon);
@@ -1489,6 +1491,7 @@ toggleview(const Arg *arg)
 	if (!(newtagset = selmon ? selmon->tagset[selmon->seltags] ^ (arg->ui & TAGMASK) : 0))
 		return;
 
+	invalidate_video_pacing(selmon);
 	selmon->tagset[selmon->seltags] = newtagset;
 	focusclient(focustop(selmon), 1);
 	arrange(selmon);
@@ -1617,6 +1620,10 @@ view(const Arg *arg)
 
 	if (!selmon || (arg->ui & TAGMASK) == selmon->tagset[selmon->seltags])
 		return;
+	/* Invalidate video pacing BEFORE changing tags so rendermon never
+	 * sees stale cadence/VRR state from the old tag's fullscreen video. */
+	invalidate_video_pacing(selmon);
+
 	selmon->seltags ^= 1; /* toggle sel tagset */
 	if (arg->ui & TAGMASK)
 		selmon->tagset[selmon->seltags] = arg->ui & TAGMASK;
