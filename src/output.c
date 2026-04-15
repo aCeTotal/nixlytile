@@ -1467,23 +1467,36 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 	}
 
 	if (!wlr_output_commit_state(m->wlr_output, state)) {
-		if (allow_tearing) {
+		int committed = 0;
+
+		/* If VRR was piggybacked and commit failed, the driver may
+		 * have rejected the adaptive_sync property.  Strip VRR and
+		 * retry buffer-only so the frame isn't lost. */
+		if (m->vrr_pending && (state->committed & WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED)) {
+			state->committed &= ~WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED;
+			wlr_log(WLR_DEBUG, "VRR commit rejected on %s, retrying buffer-only",
+				m->wlr_output->name);
+			m->vrr_pending = 0;
+			committed = wlr_output_commit_state(m->wlr_output, state);
+		}
+
+		if (!committed && allow_tearing) {
 			state->tearing_page_flip = false;
-			if (!wlr_output_commit_state(m->wlr_output, state)) {
+			committed = wlr_output_commit_state(m->wlr_output, state);
+			if (!committed)
 				wlr_log(WLR_ERROR, "Output commit failed on %s (non-tearing retry)",
 					m->wlr_output->name);
-				/* Force full damage — the failed commit's buffer
-				 * was never displayed, so the swapchain's next
-				 * buffer has stale content from 2+ frames ago.
-				 * Without this, the damage ring assumes the old
-				 * buffer content is current, leaving ghost
-				 * artefacts (cursor copies, stale UI). */
-				wlr_damage_ring_add_whole(&m->scene_output->damage_ring);
-				request_frame(m);
-			}
-		} else {
+		}
+
+		if (!committed) {
 			wlr_log(WLR_ERROR, "Output commit failed on %s",
 				m->wlr_output->name);
+			/* Force full damage — the failed commit's buffer
+			 * was never displayed, so the swapchain's next
+			 * buffer has stale content from 2+ frames ago.
+			 * Without this, the damage ring assumes the old
+			 * buffer content is current, leaving ghost
+			 * artefacts (cursor copies, stale UI). */
 			wlr_damage_ring_add_whole(&m->scene_output->damage_ring);
 			request_frame(m);
 		}
@@ -1615,12 +1628,18 @@ rendermon(struct wl_listener *listener, void *data)
 		 * the new frame to the display.
 		 */
 		wlr_output_state_init(&state);
+		if (m->tag_switch_debug > 0)
+			write(STDERR_FILENO, "TS:cadence-build>\n", 18);
 		needs_frame = wlr_scene_output_build_state(m->scene_output, &state, &opts);
+		if (m->tag_switch_debug > 0)
+			write(STDERR_FILENO, "TS:cadence-build<\n", 18);
 		if (!needs_frame) {
 			/* No new video frame - hold */
 			wlr_output_state_finish(&state);
 			request_frame(m);
 			wlr_scene_output_send_frame_done(m->scene_output, &now);
+			if (m->tag_switch_debug > 0)
+				m->tag_switch_debug--;
 			return;
 		}
 		state_built = 1;
@@ -1655,7 +1674,11 @@ rendermon(struct wl_listener *listener, void *data)
 	 */
 	if (!state_built) {
 		wlr_output_state_init(&state);
+		if (m->tag_switch_debug > 0)
+			write(STDERR_FILENO, "TS:scene-build>\n", 16);
 		needs_frame = wlr_scene_output_build_state(m->scene_output, &state, &opts);
+		if (m->tag_switch_debug > 0)
+			write(STDERR_FILENO, "TS:scene-build<\n", 16);
 
 		/* If build_state failed and 10-bit is active, the backend may not
 		 * support the 10-bit render format at composition time (e.g. NVIDIA).
@@ -1704,8 +1727,12 @@ rendermon(struct wl_listener *listener, void *data)
 				wlr_output_state_set_render_format(&fb, DRM_FORMAT_XRGB8888);
 				if (m->wlr_output->current_mode)
 					wlr_output_state_set_mode(&fb, m->wlr_output->current_mode);
+				if (m->tag_switch_debug > 0)
+					write(STDERR_FILENO, "TS:recovery-modeset>\n", 21);
 				if (wlr_output_test_state(m->wlr_output, &fb))
 					wlr_output_commit_state(m->wlr_output, &fb);
+				if (m->tag_switch_debug > 0)
+					write(STDERR_FILENO, "TS:recovery-modeset<\n", 21);
 				wlr_output_state_finish(&fb);
 			} else if (m->scene_build_failures == 4) {
 				wlr_log(WLR_ERROR,
@@ -1715,6 +1742,8 @@ rendermon(struct wl_listener *listener, void *data)
 			}
 
 			request_frame(m);
+			if (m->tag_switch_debug > 0)
+				m->tag_switch_debug--;
 			return;
 		}
 
@@ -1857,7 +1886,11 @@ rendermon(struct wl_listener *listener, void *data)
 		wlr_output_state_set_content_type(&state, WP_CONTENT_TYPE_V1_TYPE_VIDEO);
 
 	if (needs_frame) {
+		if (m->tag_switch_debug > 0)
+			write(STDERR_FILENO, "TS:commit>\n", 11);
 		commit_output_frame(m, &state, allow_tearing, use_frame_pacing, frame_start_ns);
+		if (m->tag_switch_debug > 0)
+			write(STDERR_FILENO, "TS:commit<\n", 11);
 	} else {
 		m->frames_since_content_change++;
 		if (use_frame_pacing && m->pending_game_frame) {
@@ -1868,6 +1901,9 @@ rendermon(struct wl_listener *listener, void *data)
 
 	wlr_output_state_finish(&state);
 	m->last_frame_ns = frame_start_ns;
+
+	if (m->tag_switch_debug > 0)
+		m->tag_switch_debug--;
 
 	/*
 	 * FPS Limiter - controls when we send frame_done to clients.
@@ -3541,6 +3577,11 @@ invalidate_video_pacing(Monitor *m)
 	if (!m)
 		return;
 
+	/* Enable diagnostic output for first 5 frames after tag switch.
+	 * Uses write(STDERR_FILENO) for unbuffered, immediate output
+	 * that survives compositor freezes. */
+	m->tag_switch_debug = 5;
+
 	/* Fully invalidate the classify cache — clear BOTH the client
 	 * pointer AND the cached result flags.  Setting only the pointer
 	 * to NULL is not enough: if the new tag has no fullscreen client,
@@ -3591,6 +3632,10 @@ invalidate_video_pacing(Monitor *m)
 	 * returned without committing). */
 	request_frame(m);
 
+	/* Schedule a video check so cadence/VRR is re-established
+	 * when switching back to a tag with a fullscreen video.
+	 * check_fullscreen_video handles phase==2 re-establishment. */
+	schedule_video_check(200);
 }
 
 void

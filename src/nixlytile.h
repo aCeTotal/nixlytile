@@ -1481,6 +1481,7 @@ struct Monitor {
 	int classify_cache_game;
 	int classify_cache_video;
 	int classify_cache_tearing;
+	int tag_switch_debug;
 	/* Cached FPS for frame repeat hysteresis */
 	float frame_repeat_last_fps;
 	/* Stats panel persistent nodes */
