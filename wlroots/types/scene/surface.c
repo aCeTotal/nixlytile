@@ -14,6 +14,8 @@
 #include <wlr/util/transform.h>
 #include "types/wlr_scene.h"
 
+static void surface_reconfigure(struct wlr_scene_surface *scene_surface);
+
 static double get_surface_preferred_buffer_scale(struct wlr_surface *surface) {
 	double scale = 1;
 	struct wlr_surface_output *surface_output;

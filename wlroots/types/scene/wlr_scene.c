@@ -95,6 +95,8 @@ static void scene_buffer_set_buffer(struct wlr_scene_buffer *scene_buffer,
 	struct wlr_buffer *buffer);
 static void scene_buffer_set_texture(struct wlr_scene_buffer *scene_buffer,
 	struct wlr_texture *texture);
+static void scene_buffer_set_wait_timeline(struct wlr_scene_buffer *scene_buffer,
+	struct wlr_drm_syncobj_timeline *timeline, uint64_t point);
 
 void wlr_scene_node_destroy(struct wlr_scene_node *node) {
 	if (node == NULL) {
