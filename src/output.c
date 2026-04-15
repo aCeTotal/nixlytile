@@ -1168,8 +1168,11 @@ classify_fullscreen_content(Monitor *m, int *out_game, int *out_video, int *out_
 {
 	Client *c = focustop(m);
 
-	/* Return cached result if the top client hasn't changed */
-	if (c == m->classify_cache_client) {
+	/* Return cached result if the top client hasn't changed.
+	 * Guard against NULL == NULL: after invalidate_video_pacing()
+	 * clears the cache to NULL, a tag with no fullscreen client
+	 * would match and return stale flags from the old tag. */
+	if (c && c == m->classify_cache_client) {
 		*out_game = m->classify_cache_game;
 		*out_video = m->classify_cache_video;
 		*out_tearing = m->classify_cache_tearing;
@@ -3518,8 +3521,17 @@ invalidate_video_pacing(Monitor *m)
 	if (!m)
 		return;
 
-	/* Force classify_fullscreen_content() to re-evaluate */
+	/* Fully invalidate the classify cache — clear BOTH the client
+	 * pointer AND the cached result flags.  Setting only the pointer
+	 * to NULL is not enough: if the new tag has no fullscreen client,
+	 * focustop() returns NULL which matches the NULL cache key,
+	 * returning stale is_video=1 / is_game values from the old tag.
+	 * That stale is_video poisons idle-throttle, content-type hints,
+	 * and can keep the monitor spinning at full refresh forever. */
 	m->classify_cache_client = NULL;
+	m->classify_cache_video = 0;
+	m->classify_cache_game = 0;
+	m->classify_cache_tearing = 0;
 
 	/* Deactivate Bresenham video cadence immediately */
 	if (m->video_cadence_active) {
@@ -3540,6 +3552,11 @@ invalidate_video_pacing(Monitor *m)
 	 * potentially finding no damage and skipping the commit. */
 	if (m->scene_output)
 		wlr_damage_ring_add_whole(&m->scene_output->damage_ring);
+
+	/* Ensure rendermon fires promptly even if no pageflip is
+	 * pending (e.g. last rendermon was a cadence hold that
+	 * returned without committing). */
+	request_frame(m);
 
 	/* Schedule VRR disable via game mode update (non-blocking).
 	 * We don't call disable_vrr_video_mode() here because it does
@@ -4363,6 +4380,38 @@ check_fullscreen_video(void)
 
 		/* Already successfully detected */
 		if (c->video_detect_phase == 2 && (m->vrr_active || c->detected_video_hz > 0.0f)) {
+			/* Re-establish cadence if it was cleared (tag switch
+			 * calls invalidate_video_pacing which zeroes cadence
+			 * and VRR state).  Without this, switching away and
+			 * back to a video tag loses frame pacing forever
+			 * because phase=2 skips re-detection. */
+			if (!m->vrr_active && !m->video_cadence_active &&
+			    c->detected_video_hz > 0.0f) {
+				float display_hz = 0.0f;
+				if (m->present_interval_ns > 0)
+					display_hz = 1000000000.0f / (float)m->present_interval_ns;
+				else if (m->wlr_output->current_mode)
+					display_hz = m->wlr_output->current_mode->refresh / 1000.0f;
+				if (display_hz > 0.0f) {
+					float ratio = display_hz / c->detected_video_hz;
+					if (ratio >= 1.5f) {
+						m->estimated_game_fps = c->detected_video_hz;
+						m->frame_pacing_active = 1;
+						m->video_cadence_base = (int)ratio;
+						if (m->video_cadence_base < 1)
+							m->video_cadence_base = 1;
+						m->video_cadence_frac = ratio - (float)m->video_cadence_base;
+						m->video_cadence_accum = 0.0f;
+						m->video_cadence_current_n = m->video_cadence_base;
+						m->video_cadence_counter = 0;
+						m->video_cadence_active = 1;
+						wlr_log(WLR_DEBUG,
+							"Video cadence re-established: %.0f fps base=%d frac=%.3f @ %.0f Hz",
+							c->detected_video_hz, m->video_cadence_base,
+							m->video_cadence_frac, display_hz);
+					}
+				}
+			}
 			/* Check if Hz changed significantly - video may have switched
 			 * Use 2.0 Hz threshold to avoid noise from frame timing jitter.
 			 * Normal video content doesn't fluctuate by < 2 Hz. */
