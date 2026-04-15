@@ -1457,6 +1457,15 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 	if (allow_tearing && wlr_output_is_drm(m->wlr_output))
 		state->tearing_page_flip = true;
 
+	/* Apply deferred VRR state change.  Piggybacking on the buffer
+	 * commit keeps it non-blocking (the DRM backend sets NONBLOCK when
+	 * WLR_OUTPUT_STATE_BUFFER is present). */
+	if (m->vrr_pending == 1) {
+		wlr_output_state_set_adaptive_sync_enabled(state, true);
+	} else if (m->vrr_pending == -1) {
+		wlr_output_state_set_adaptive_sync_enabled(state, false);
+	}
+
 	if (!wlr_output_commit_state(m->wlr_output, state)) {
 		if (allow_tearing) {
 			state->tearing_page_flip = false;
@@ -1477,6 +1486,51 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 				m->wlr_output->name);
 			wlr_damage_ring_add_whole(&m->scene_output->damage_ring);
 			request_frame(m);
+		}
+	}
+
+	/* Finalize deferred VRR state after commit.  Check actual hardware
+	 * status to confirm the change took effect. */
+	if (m->vrr_pending == 1) {
+		if (m->wlr_output->adaptive_sync_status == WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED) {
+			struct wlr_output_configuration_v1 *vrr_config;
+			struct wlr_output_configuration_head_v1 *vrr_head;
+
+			m->vrr_active = 1;
+			m->vrr_target_hz = m->vrr_pending_hz;
+			m->vrr_pending = 0;
+
+			vrr_config = wlr_output_configuration_v1_create();
+			vrr_head = wlr_output_configuration_head_v1_create(vrr_config, m->wlr_output);
+			vrr_head->state.adaptive_sync_enabled = 1;
+			wlr_output_manager_v1_set_configuration(output_mgr, vrr_config);
+
+			wlr_log(WLR_DEBUG, "VRR enabled for %.3f Hz video on %s",
+					m->vrr_pending_hz, m->wlr_output->name);
+		} else {
+			wlr_log(WLR_ERROR, "VRR enable failed on %s (hw rejected)",
+					m->wlr_output->name);
+			m->vrr_pending = 0;
+		}
+	} else if (m->vrr_pending == -1) {
+		if (m->wlr_output->adaptive_sync_status == WLR_OUTPUT_ADAPTIVE_SYNC_DISABLED) {
+			struct wlr_output_configuration_v1 *vrr_config;
+			struct wlr_output_configuration_head_v1 *vrr_head;
+
+			m->vrr_active = 0;
+			m->vrr_target_hz = 0.0f;
+			m->vrr_pending = 0;
+
+			vrr_config = wlr_output_configuration_v1_create();
+			vrr_head = wlr_output_configuration_head_v1_create(vrr_config, m->wlr_output);
+			vrr_head->state.adaptive_sync_enabled = 0;
+			wlr_output_manager_v1_set_configuration(output_mgr, vrr_config);
+
+			wlr_log(WLR_DEBUG, "VRR disabled on %s", m->wlr_output->name);
+		} else {
+			wlr_log(WLR_ERROR, "VRR disable failed on %s (hw rejected)",
+					m->wlr_output->name);
+			m->vrr_pending = 0;
 		}
 	}
 
@@ -1586,10 +1640,8 @@ rendermon(struct wl_listener *listener, void *data)
 		 * instead of potentially getting an empty build_state */
 		wlr_damage_ring_add_whole(&m->scene_output->damage_ring);
 		wlr_log(WLR_DEBUG, "Video cadence deactivated");
-		/* VRR (if active for video) will be disabled by the
-		 * game-mode debounce timer — we don't call
-		 * disable_vrr_video_mode() here because the DRM modeset
-		 * would block the compositor event loop. */
+		/* VRR disable is deferred via vrr_pending — it will
+		 * piggyback on the next frame commit (non-blocking). */
 	}
 
 	/*
@@ -3123,10 +3175,6 @@ find_video_friendly_mode(Monitor *m, float target_hz)
 int
 enable_vrr_video_mode(Monitor *m, float video_hz)
 {
-	struct wlr_output_configuration_v1 *config;
-	struct wlr_output_configuration_head_v1 *config_head;
-	char osd_msg[64];
-
 	if (!m || !m->wlr_output || !m->wlr_output->enabled)
 		return 0;
 
@@ -3140,70 +3188,42 @@ enable_vrr_video_mode(Monitor *m, float video_hz)
 		return 0;
 	}
 
-	/* Save original mode before first switch. Done before the commit
-	 * attempt so restore works even if the caller later changes modes
-	 * between now and a failed disable. */
+	/* Save original mode before first switch. */
 	if (!m->video_mode_active && !m->vrr_active)
 		m->original_mode = m->wlr_output->current_mode;
 
-	wlr_log(WLR_DEBUG, "Enabling VRR for %.3f Hz video on %s",
+	/* Defer the actual DRM commit to the next rendermon() frame commit.
+	 * A standalone adaptive_sync commit (no buffer) is BLOCKING in the
+	 * DRM backend, freezing the compositor for up to seconds on HDMI.
+	 * By piggybacking on the next buffer commit, the change becomes
+	 * non-blocking (DRM_MODE_ATOMIC_NONBLOCK). */
+	m->vrr_pending = 1;
+	m->vrr_pending_hz = video_hz;
+	request_frame(m);
+
+	wlr_log(WLR_DEBUG, "VRR enable deferred for %.3f Hz video on %s",
 			video_hz, m->wlr_output->name);
-
-	/* Use the verified commit helper. State fields are ONLY updated
-	 * after verified success — this fixes the previous race where
-	 * m->vrr_active was set after a passing test_state() but before
-	 * confirming the commit actually took effect at the kernel level. */
-	if (!commit_adaptive_sync(m, 1)) {
-		wlr_log(WLR_ERROR, "Failed to enable VRR on %s for %.3f Hz video",
-			m->wlr_output->name, video_hz);
-		return 0;
-	}
-
-	m->vrr_active = 1;
-	m->vrr_target_hz = video_hz;
-
-	/* Broadcast state change */
-	config = wlr_output_configuration_v1_create();
-	config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
-	config_head->state.adaptive_sync_enabled = 1;
-	wlr_output_manager_v1_set_configuration(output_mgr, config);
-
-	wlr_log(WLR_DEBUG, "VRR enabled for %.3f Hz video - judder-free playback",
-			video_hz);
-
-	/* Show OSD */
-	snprintf(osd_msg, sizeof(osd_msg), "VRR %.3f Hz", video_hz);
-	show_hz_osd(m, osd_msg);
-
 	return 1;
 }
 
 void
 disable_vrr_video_mode(Monitor *m)
 {
-	struct wlr_output_configuration_v1 *config;
-	struct wlr_output_configuration_head_v1 *config_head;
-
-	if (!m || !m->wlr_output || !m->wlr_output->enabled || !m->vrr_active)
+	if (!m || !m->wlr_output || !m->wlr_output->enabled)
 		return;
 
-	wlr_log(WLR_DEBUG, "Disabling VRR on %s", m->wlr_output->name);
-
-	/* Use verified commit helper. Only clear internal state on success,
-	 * otherwise m->vrr_active would diverge from the actual hardware state. */
-	if (!commit_adaptive_sync(m, 0)) {
-		wlr_log(WLR_ERROR, "Failed to disable VRR on %s — hardware state unknown",
-			m->wlr_output->name);
+	if (!m->vrr_active && m->vrr_pending != 1) {
+		/* Nothing to disable — neither active nor pending enable */
 		return;
 	}
 
-	m->vrr_active = 0;
-	m->vrr_target_hz = 0.0f;
+	/* Defer the actual DRM commit to the next rendermon() frame commit.
+	 * Same rationale as enable: standalone VRR commit is blocking. */
+	m->vrr_pending = -1;
+	m->vrr_pending_hz = 0.0f;
+	request_frame(m);
 
-	config = wlr_output_configuration_v1_create();
-	config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
-	config_head->state.adaptive_sync_enabled = 0;
-	wlr_output_manager_v1_set_configuration(output_mgr, config);
+	wlr_log(WLR_DEBUG, "VRR disable deferred on %s", m->wlr_output->name);
 }
 
 int
@@ -3533,6 +3553,19 @@ invalidate_video_pacing(Monitor *m)
 	m->classify_cache_game = 0;
 	m->classify_cache_tearing = 0;
 
+	/* Cancel any pending VRR enable — tag switch means the video that
+	 * requested VRR is no longer visible.  If VRR is already active,
+	 * schedule a deferred disable so it piggybacks on the next frame
+	 * commit (non-blocking). */
+	if (m->vrr_pending == 1) {
+		m->vrr_pending = 0;
+		wlr_log(WLR_DEBUG, "Pending VRR enable cancelled (tag switch)");
+	}
+	if (m->vrr_active) {
+		m->vrr_pending = -1;
+		wlr_log(WLR_DEBUG, "VRR disable scheduled (tag switch)");
+	}
+
 	/* Deactivate Bresenham video cadence immediately */
 	if (m->video_cadence_active) {
 		m->video_cadence_active = 0;
@@ -3558,10 +3591,6 @@ invalidate_video_pacing(Monitor *m)
 	 * returned without committing). */
 	request_frame(m);
 
-	/* Schedule VRR disable via game mode update (non-blocking).
-	 * We don't call disable_vrr_video_mode() here because it does
-	 * a DRM atomic modeset that can block the compositor for seconds
-	 * on HDMI displays.  The debounce timer handles it safely. */
 }
 
 void
@@ -4412,39 +4441,6 @@ check_fullscreen_video(void)
 					}
 				}
 			}
-			/* Check if Hz changed significantly - video may have switched
-			 * Use 2.0 Hz threshold to avoid noise from frame timing jitter.
-			 * Normal video content doesn't fluctuate by < 2 Hz. */
-			if (hz > 0.0f && fabsf(hz - c->detected_video_hz) > 2.0f) {
-				wlr_log(WLR_DEBUG, "Video Hz changed from %.3f to %.3f, re-evaluating",
-						c->detected_video_hz, hz);
-				c->detected_video_hz = hz;
-				m->estimated_game_fps = hz;
-				if (m->vrr_active) {
-					/* VRR is already enabled - just update target,
-					 * no DRM commit needed */
-					m->vrr_target_hz = hz;
-				} else if (m->video_cadence_active) {
-					/* Recalculate Bresenham cadence for new fps */
-					float display_hz = 0.0f;
-					if (m->present_interval_ns > 0)
-						display_hz = 1000000000.0f / (float)m->present_interval_ns;
-					else if (m->wlr_output->current_mode)
-						display_hz = m->wlr_output->current_mode->refresh / 1000.0f;
-					if (display_hz > 0.0f) {
-						float ratio = display_hz / hz;
-						m->video_cadence_base = (int)ratio;
-						if (m->video_cadence_base < 1)
-							m->video_cadence_base = 1;
-						m->video_cadence_frac = ratio - (float)m->video_cadence_base;
-						m->video_cadence_accum = 0.0f;
-						m->video_cadence_current_n = m->video_cadence_base;
-						m->video_cadence_counter = 0;
-						wlr_log(WLR_DEBUG, "Video cadence recalculated: base=%d frac=%.3f",
-								m->video_cadence_base, m->video_cadence_frac);
-					}
-				}
-			}
 			continue;
 		}
 
@@ -4533,7 +4529,6 @@ check_fullscreen_video(void)
 					else if (m->wlr_output->current_mode)
 						display_hz = m->wlr_output->current_mode->refresh / 1000.0f;
 
-					char osd_msg[64];
 					if (display_hz > 0.0f && use_hz > 0.0f) {
 						float ratio = display_hz / use_hz;
 
@@ -4547,21 +4542,7 @@ check_fullscreen_video(void)
 							m->video_cadence_counter = 0;
 							m->video_cadence_active = 1;
 						}
-
-						if (m->video_cadence_active && m->video_cadence_frac > 0.01f)
-							snprintf(osd_msg, sizeof(osd_msg), "%.0f fps %d:%d @ %.0f Hz",
-									use_hz, m->video_cadence_base,
-									m->video_cadence_base + 1, display_hz);
-						else if (m->video_cadence_active)
-							snprintf(osd_msg, sizeof(osd_msg), "%.0f fps %dx @ %.0f Hz",
-									use_hz, m->video_cadence_base, display_hz);
-						else
-							snprintf(osd_msg, sizeof(osd_msg), "%.0f fps @ %.0f Hz",
-									use_hz, display_hz);
-					} else {
-						snprintf(osd_msg, sizeof(osd_msg), "%.0f fps", use_hz);
 					}
-					show_hz_osd(m, osd_msg);
 
 					wlr_log(WLR_DEBUG, "Video %.3f Hz on %s: cadence base=%d frac=%.3f @ %.0f Hz",
 							use_hz, m->wlr_output->name,
@@ -4586,9 +4567,9 @@ check_fullscreen_video(void)
 		}
 	}
 
-	/* Continue checking while fullscreen clients exist.
-	 * Use fast interval (200ms) during detection, slow interval (5s)
-	 * once stable to avoid unnecessary DRM commits and event loop stalls. */
+	/* Continue checking only while detection is still in progress.
+	 * Once all fullscreen clients reach phase 2 (detected or gave up),
+	 * stop the timer — pacing is set up once and not re-adjusted. */
 	if (any_fullscreen_active) {
 		int all_stable = 1;
 		wl_list_for_each(m, &mons, link) {
@@ -4598,7 +4579,8 @@ check_fullscreen_video(void)
 				break;
 			}
 		}
-		schedule_video_check(all_stable ? 5000 : 200);
+		if (!all_stable)
+			schedule_video_check(200);
 	}
 }
 

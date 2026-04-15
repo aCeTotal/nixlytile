@@ -1383,6 +1383,8 @@ struct Monitor {
 	int vrr_capable;
 	int vrr_active;
 	float vrr_target_hz;
+	int vrr_pending;        /* 0=none, 1=enable, -1=disable (deferred to next frame commit) */
+	float vrr_pending_hz;   /* target Hz when vrr_pending==1 */
 	int game_vrr_active;
 	float game_vrr_target_fps;
 	float game_vrr_last_fps;
