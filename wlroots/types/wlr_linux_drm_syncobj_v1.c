@@ -162,7 +162,13 @@ static void surface_synced_finish_state(void *_state) {
 
 static void surface_synced_move_state(void *_dst, void *_src) {
 	struct wlr_linux_drm_syncobj_surface_v1_state *dst = _dst, *src = _src;
-	// TODO: immediately signal dst.release_timeline if necessary
+	// Signal the old release fence before discarding it, so the client
+	// doesn't block forever waiting for a fence that will never fire.
+	if (dst->release_timeline != NULL) {
+		drmSyncobjTimelineSignal(dst->release_timeline->drm_fd,
+			&dst->release_timeline->handle,
+			&dst->release_point, 1);
+	}
 	surface_synced_finish_state(dst);
 	*dst = *src;
 	*src = (struct wlr_linux_drm_syncobj_surface_v1_state){0};

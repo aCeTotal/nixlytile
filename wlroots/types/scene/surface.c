@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdlib.h>
+#include <xf86drm.h>
 #include <wlr/types/wlr_alpha_modifier_v1.h>
 #include <wlr/types/wlr_color_management_v1.h>
 #include <wlr/types/wlr_color_representation_v1.h>
@@ -102,6 +103,13 @@ static void handle_scene_buffer_outputs_update(
 		return;
 	}
 
+	// When a surface regains output visibility (e.g. tag switch back) and
+	// its scene_buffer was cleared (by scene_node_cleanup_when_disabled),
+	// restore it from the underlying wlr_surface buffer.
+	if (surface->buffer->buffer == NULL && surface->surface->buffer != NULL) {
+		surface_reconfigure(surface);
+	}
+
 	double scale = get_surface_preferred_buffer_scale(surface->surface);
 	wlr_fractional_scale_v1_notify_scale(surface->surface, scale);
 	wlr_surface_set_preferred_buffer_scale(surface->surface, ceil(scale));
@@ -130,6 +138,21 @@ static void handle_scene_buffer_output_leave(
 	struct wlr_scene_output *output = data;
 
 	wlr_surface_send_leave(surface->surface, output->output);
+
+	// When the surface leaves all outputs (e.g. tag switch), directly signal
+	// the explicit sync release fence so the client can submit new buffers.
+	// Without this, nvidia clients deadlock: compositor holds buffer waiting
+	// for GPU, client blocks waiting for release fence signal.
+	// drmSyncobjTimelineSignal is idempotent — double-signal is a no-op.
+	if (surface->buffer->active_outputs == 0) {
+		struct wlr_linux_drm_syncobj_surface_v1_state *syncobj =
+			wlr_linux_drm_syncobj_v1_get_surface_state(surface->surface);
+		if (syncobj != NULL && syncobj->release_timeline != NULL) {
+			drmSyncobjTimelineSignal(syncobj->release_timeline->drm_fd,
+				&syncobj->release_timeline->handle,
+				&syncobj->release_point, 1);
+		}
+	}
 }
 
 static void handle_scene_buffer_output_sample(

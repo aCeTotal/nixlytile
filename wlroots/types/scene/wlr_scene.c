@@ -684,6 +684,16 @@ static void scene_node_cleanup_when_disabled(struct wlr_scene_node *node,
 	pixman_region32_clear(&node->visible);
 	update_node_update_outputs(node, outputs, NULL, NULL);
 
+	// Release buffer, texture, and wait_timeline from disabled buffer nodes.
+	// Prevents stale GPU fence state (wait_timeline) from blocking renders,
+	// and matches the cleanup done in wlr_scene_node_destroy().
+	if (node->type == WLR_SCENE_NODE_BUFFER) {
+		struct wlr_scene_buffer *scene_buffer = wlr_scene_buffer_from_node(node);
+		scene_buffer_set_buffer(scene_buffer, NULL);
+		scene_buffer_set_texture(scene_buffer, NULL);
+		scene_buffer_set_wait_timeline(scene_buffer, NULL, 0);
+	}
+
 #if WLR_HAS_XWAYLAND
 	if (xwayland_restack) {
 		struct wlr_xwayland_surface *xwayland_surface =
