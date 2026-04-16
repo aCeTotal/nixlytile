@@ -2094,6 +2094,96 @@ pick_resize_handle(const Client *c, double cx, double cy)
 	return resize_cursor_from_dirs(resize_dir_x, resize_dir_y);
 }
 
+/*
+ * Smooth cursor handoff across "dead zones" between misaligned monitors.
+ *
+ * When monitors of different heights/widths are arranged side-by-side and
+ * vertically (or horizontally) centered, the layout has empty regions above
+ * and below the shorter monitors. wlr_cursor_move() clips motion to the
+ * union of all output regions, so a cursor moving along the bottom of a
+ * tall monitor stops at the corner instead of crossing onto the shorter
+ * monitor next to it.
+ *
+ * This helper detects such crossings and warps the cursor onto the nearest
+ * valid edge of the adjacent monitor in the dominant direction of motion.
+ * Returns 1 if a snap warp was performed (caller should skip wlr_cursor_move),
+ * 0 to fall through to normal motion handling.
+ */
+static int
+cursor_snap_across_dead_zone(double dx, double dy)
+{
+	if (dx == 0 && dy == 0)
+		return 0;
+
+	double tx = cursor->x + dx;
+	double ty = cursor->y + dy;
+
+	/* Target already lands on a valid output -> nothing to fix */
+	if (wlr_output_layout_output_at(output_layout, tx, ty))
+		return 0;
+	/* Current position not on any output -> bail (shouldn't normally happen) */
+	if (!wlr_output_layout_output_at(output_layout, cursor->x, cursor->y))
+		return 0;
+
+	int prefer_horiz = fabs(dx) >= fabs(dy);
+	Monitor *m;
+	Monitor *best = NULL;
+	double best_dist = 1e30;
+	double snap_x = tx, snap_y = ty;
+
+	wl_list_for_each(m, &mons, link) {
+		if (!m->wlr_output->enabled || m->is_mirror)
+			continue;
+		struct wlr_box *b = &m->m;
+		if (b->width <= 0 || b->height <= 0)
+			continue;
+
+		if (prefer_horiz) {
+			/* Need a monitor whose horizontal range contains the
+			 * target X and that lies in the direction of motion. */
+			if (tx < b->x || tx >= b->x + b->width)
+				continue;
+			if (dx > 0 && b->x + b->width <= cursor->x)
+				continue;
+			if (dx < 0 && b->x >= cursor->x)
+				continue;
+			double cy = ty;
+			if (cy < b->y) cy = b->y;
+			if (cy >= b->y + b->height) cy = b->y + b->height - 1;
+			double d = fabs(ty - cy);
+			if (d < best_dist) {
+				best_dist = d;
+				snap_x = tx;
+				snap_y = cy;
+				best = m;
+			}
+		} else {
+			if (ty < b->y || ty >= b->y + b->height)
+				continue;
+			if (dy > 0 && b->y + b->height <= cursor->y)
+				continue;
+			if (dy < 0 && b->y >= cursor->y)
+				continue;
+			double cx = tx;
+			if (cx < b->x) cx = b->x;
+			if (cx >= b->x + b->width) cx = b->x + b->width - 1;
+			double d = fabs(tx - cx);
+			if (d < best_dist) {
+				best_dist = d;
+				snap_x = cx;
+				snap_y = ty;
+				best = m;
+			}
+		}
+	}
+
+	if (!best)
+		return 0;
+
+	wlr_cursor_warp(cursor, NULL, snap_x, snap_y);
+	return 1;
+}
+
 void
 motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double dy,
 		double dx_unaccel, double dy_unaccel)
@@ -2139,10 +2229,31 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 			}
 		}
 
+		/* Smoothly cross dead zones between misaligned monitors so the
+		 * cursor doesn't get stuck at the corner of a tall monitor when
+		 * the neighbouring monitor is shorter (or vice versa). Skip when
+		 * a pointer constraint or interactive move/resize is in effect,
+		 * or when a fullscreen client is on the current monitor (existing
+		 * fullscreen confinement below would yank it back anyway). */
+		int snapped = 0;
+		if (!active_constraint && cursor_mode == CurNormal) {
+			int has_fs = 0;
+			Client *fsc;
+			wl_list_for_each(fsc, &clients, link) {
+				if (fsc->isfullscreen && VISIBLEON(fsc, selmon)) {
+					has_fs = 1;
+					break;
+				}
+			}
+			if (!has_fs)
+				snapped = cursor_snap_across_dead_zone(dx, dy);
+		}
+
 		/* Move cursor as early as possible — the HW cursor plane updates
 		 * via DRM ioctl here, so every µs saved before this call reduces
 		 * visible cursor latency. */
-		wlr_cursor_move(cursor, device, dx, dy);
+		if (!snapped)
+			wlr_cursor_move(cursor, device, dx, dy);
 		wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
 		/* Confine cursor to monitor when a fullscreen client is present.
