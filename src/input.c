@@ -2095,19 +2095,34 @@ pick_resize_handle(const Client *c, double cx, double cy)
 }
 
 /*
- * Smooth cursor handoff across "dead zones" between misaligned monitors.
+ * Handle cursor motion that crosses between monitors of different geometries.
  *
- * When monitors of different heights/widths are arranged side-by-side and
- * vertically (or horizontally) centered, the layout has empty regions above
- * and below the shorter monitors. wlr_cursor_move() clips motion to the
- * union of all output regions, so a cursor moving along the bottom of a
- * tall monitor stops at the corner instead of crossing onto the shorter
- * monitor next to it.
+ * Three situations are addressed:
  *
- * This helper detects such crossings and warps the cursor onto the nearest
- * valid edge of the adjacent monitor in the dominant direction of motion.
- * Returns 1 if a snap warp was performed (caller should skip wlr_cursor_move),
- * 0 to fall through to normal motion handling.
+ *   1. Horizontal crossing between monitors of different heights.
+ *      Y is remapped proportionally so the cursor enters the destination
+ *      monitor at the same relative vertical position — top of source maps
+ *      to top of destination, bottom of source maps to bottom of destination.
+ *      This makes side-by-side monitors of unequal height feel as if they
+ *      share the same height ("virtual equal-height" behaviour).
+ *
+ *   2. Vertical crossing between monitors of different widths, or off an
+ *      edge with no monitor in that direction.
+ *      When a monitor exists in the vertical direction, X is remapped
+ *      proportionally (symmetric to case 1).
+ *      When no monitor exists above/below the current one at the cursor's
+ *      X position, the cursor is clamped to the current monitor's top or
+ *      bottom edge — i.e. the bottom blocks the cursor the same way the
+ *      top does, unless a monitor is placed below in the config.
+ *
+ *   3. Diagonal motion that leaves the current monitor into a dead zone
+ *      (a corner gap between misaligned monitors).
+ *      Fallback: snap to the nearest valid edge of a neighbouring monitor
+ *      in the dominant direction of motion. Preserves the previous
+ *      behaviour for corner diagonals.
+ *
+ * Returns 1 when the cursor was warped directly — caller must skip
+ * wlr_cursor_move(). Returns 0 to let the default motion path handle it.
  */
 static int
 cursor_snap_across_dead_zone(double dx, double dy)
@@ -2118,11 +2133,135 @@ cursor_snap_across_dead_zone(double dx, double dy)
 	double tx = cursor->x + dx;
 	double ty = cursor->y + dy;
 
-	/* Target already lands on a valid output -> nothing to fix */
-	if (wlr_output_layout_output_at(output_layout, tx, ty))
+	Monitor *cur_mon = xytomon(cursor->x, cursor->y);
+	if (!cur_mon)
 		return 0;
-	/* Current position not on any output -> bail (shouldn't normally happen) */
-	if (!wlr_output_layout_output_at(output_layout, cursor->x, cursor->y))
+	struct wlr_box *sb = &cur_mon->m;
+	if (sb->width <= 0 || sb->height <= 0)
+		return 0;
+
+	int crosses_h = (dx > 0 && tx >= sb->x + sb->width) ||
+			(dx < 0 && tx < sb->x);
+	int crosses_v = (dy > 0 && ty >= sb->y + sb->height) ||
+			(dy < 0 && ty < sb->y);
+
+	/* When both axes cross simultaneously (diagonal past a corner), decide
+	 * which axis wins by the dominant motion component. */
+	int prefer_h = crosses_h && (!crosses_v || fabs(dx) >= fabs(dy));
+
+	/* CASE 1: horizontal-dominant crossing between monitors.
+	 * Find the nearest monitor in the horizontal direction of motion and
+	 * warp with proportional Y remapping. */
+	if (prefer_h) {
+		Monitor *best = NULL;
+		double best_gap = 1e30;
+		Monitor *m;
+		wl_list_for_each(m, &mons, link) {
+			if (!m->wlr_output->enabled || m->is_mirror || m == cur_mon)
+				continue;
+			struct wlr_box *db = &m->m;
+			if (db->width <= 0 || db->height <= 0)
+				continue;
+			double gap;
+			if (dx > 0) {
+				if (db->x < sb->x + sb->width) continue;
+				gap = db->x - (sb->x + sb->width);
+			} else {
+				if (db->x + db->width > sb->x) continue;
+				gap = sb->x - (db->x + db->width);
+			}
+			if (gap < best_gap) {
+				best_gap = gap;
+				best = m;
+			}
+		}
+
+		if (best) {
+			double ry = (cursor->y - sb->y) / (double)sb->height;
+			if (ry < 0) ry = 0;
+			if (ry > 1) ry = 1;
+			double new_y = best->m.y + ry * best->m.height;
+			if (new_y < best->m.y) new_y = best->m.y;
+			if (new_y >= best->m.y + best->m.height)
+				new_y = best->m.y + best->m.height - 1;
+
+			double new_x = tx;
+			if (new_x < best->m.x) new_x = best->m.x;
+			if (new_x >= best->m.x + best->m.width)
+				new_x = best->m.x + best->m.width - 1;
+
+			wlr_cursor_warp(cursor, NULL, new_x, new_y);
+			return 1;
+		}
+		/* No monitor in horizontal direction — fall through. */
+	}
+
+	/* CASE 2: vertical-dominant crossing. Look for a monitor directly
+	 * above/below the current one whose horizontal range covers the
+	 * cursor's current X. If found, remap X proportionally. If not,
+	 * block motion at the current monitor's top/bottom edge. */
+	if (crosses_v && !prefer_h) {
+		Monitor *best = NULL;
+		double best_gap = 1e30;
+		Monitor *m;
+		wl_list_for_each(m, &mons, link) {
+			if (!m->wlr_output->enabled || m->is_mirror || m == cur_mon)
+				continue;
+			struct wlr_box *db = &m->m;
+			if (db->width <= 0 || db->height <= 0)
+				continue;
+			double gap;
+			if (dy > 0) {
+				if (db->y < sb->y + sb->height) continue;
+				gap = db->y - (sb->y + sb->height);
+			} else {
+				if (db->y + db->height > sb->y) continue;
+				gap = sb->y - (db->y + db->height);
+			}
+			/* The neighbour must sit (at least partially) under or
+			 * over the cursor's current X. */
+			if (cursor->x < db->x || cursor->x >= db->x + db->width)
+				continue;
+			if (gap < best_gap) {
+				best_gap = gap;
+				best = m;
+			}
+		}
+
+		if (!best) {
+			/* No monitor in the vertical direction of motion — BLOCK
+			 * the cursor at the current monitor's edge (mirror of the
+			 * top-edge block for the bottom). */
+			double cy = (dy > 0) ? sb->y + sb->height - 1 : sb->y;
+			double cx = tx;
+			if (cx < sb->x) cx = sb->x;
+			if (cx >= sb->x + sb->width) cx = sb->x + sb->width - 1;
+			wlr_cursor_warp(cursor, NULL, cx, cy);
+			return 1;
+		}
+
+		/* Vertical neighbour exists — proportional X remapping. */
+		double rx = (cursor->x - sb->x) / (double)sb->width;
+		if (rx < 0) rx = 0;
+		if (rx > 1) rx = 1;
+		double new_x = best->m.x + rx * best->m.width;
+		if (new_x < best->m.x) new_x = best->m.x;
+		if (new_x >= best->m.x + best->m.width)
+			new_x = best->m.x + best->m.width - 1;
+
+		double new_y = ty;
+		if (new_y < best->m.y) new_y = best->m.y;
+		if (new_y >= best->m.y + best->m.height)
+			new_y = best->m.y + best->m.height - 1;
+
+		wlr_cursor_warp(cursor, NULL, new_x, new_y);
+		return 1;
+	}
+
+	/* CASE 3: dead-zone fallback. Target doesn't land on any output (corner
+	 * diagonal past a gap). Snap to the nearest valid edge of a neighbouring
+	 * monitor in the dominant direction of motion. */
+	if (wlr_output_layout_output_at(output_layout, tx, ty))
 		return 0;
 
 	int prefer_horiz = fabs(dx) >= fabs(dy);
@@ -2139,8 +2278,6 @@ cursor_snap_across_dead_zone(double dx, double dy)
 			continue;
 
 		if (prefer_horiz) {
-			/* Need a monitor whose horizontal range contains the
-			 * target X and that lies in the direction of motion. */
 			if (tx < b->x || tx >= b->x + b->width)
 				continue;
 			if (dx > 0 && b->x + b->width <= cursor->x)
