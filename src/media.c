@@ -1,5 +1,6 @@
 #include "nixlytile.h"
 #include "client.h"
+#include "mpv_launcher.h"
 #include <sys/eventfd.h>
 #include <pthread.h>
 
@@ -327,123 +328,24 @@ launch_integrated_player_with_resume(const char *url, double resume_pos)
 	if (!url || !selmon)
 		return;
 
-	/* Copy URL to playback_url for tracking */
 	strncpy(playback_url, url, sizeof(playback_url) - 1);
 	playback_url[sizeof(playback_url) - 1] = '\0';
 
-	/* Always destroy and recreate the video player for a clean slate.
-	 * Reusing across open/close cycles accumulates PipeWire state, HW decoder
-	 * surfaces, and stale FFmpeg contexts that eventually prevent new videos
-	 * from starting.  The overhead of recreate (~1ms) is negligible. */
-	if (active_videoplayer) {
-		if (active_videoplayer->state != VP_STATE_IDLE)
-			videoplayer_stop(active_videoplayer);
-		videoplayer_set_visible(active_videoplayer, 0);
-		videoplayer_destroy(active_videoplayer);
-		active_videoplayer = NULL;
-	}
+	if (mpv_launcher_active())
+		mpv_launcher_stop();
 
-	active_videoplayer = videoplayer_create(selmon);
-	if (!active_videoplayer) {
-		wlr_log(WLR_ERROR, "Failed to create video player");
-		return;
-	}
-
-	/* Pass display color capabilities to video player.
-	 * Only enable 10-bit video output if the renderer can actually
-	 * texture ARGB2101010 buffers (via data_ptr access).  The output
-	 * being 10-bit (XRGB2101010) doesn't guarantee the renderer can
-	 * import that format as an input texture. */
-	active_videoplayer->output_10bit = 0;
-	if (selmon->render_10bit_active) {
-		const struct wlr_drm_format_set *tex_fmts =
-			wlr_renderer_get_texture_formats(drw, WLR_BUFFER_CAP_DATA_PTR);
-		if (tex_fmts && wlr_drm_format_set_get(tex_fmts, DRM_FORMAT_ARGB2101010)) {
-			active_videoplayer->output_10bit = 1;
-			wlr_log(WLR_INFO, "Video player: 10-bit output enabled (renderer supports ARGB2101010)");
-		} else {
-			wlr_log(WLR_INFO, "Video player: 10-bit output disabled (renderer lacks ARGB2101010 texture support)");
-		}
-	}
-
-	/* Initialize scene on block layer (topmost) so player is always above HTPC UI */
-	if (videoplayer_init_scene(active_videoplayer, layers[LyrBlock]) < 0) {
-		wlr_log(WLR_ERROR, "Failed to initialize video player scene");
-		videoplayer_destroy(active_videoplayer);
-		active_videoplayer = NULL;
-		return;
-	}
-
-	/* Open the file/URL */
-	if (videoplayer_open(active_videoplayer, url) < 0) {
-		wlr_log(WLR_ERROR, "Failed to open video: %s - %s",
-			url, active_videoplayer->error_msg);
-		/* Destroy the broken instance so next attempt starts clean */
-		videoplayer_destroy(active_videoplayer);
-		active_videoplayer = NULL;
-		return;
-	}
-
-	/* Sync video player track info to global OSD arrays */
 	audio_track_count = 0;
 	subtitle_track_count = 0;
-	for (int i = 0; i < active_videoplayer->audio_track_count && i < MAX_TRACKS; i++) {
-		audio_tracks[i].id = i;
-		snprintf(audio_tracks[i].title, sizeof(audio_tracks[i].title), "%s",
-			active_videoplayer->audio_tracks[i].title);
-		snprintf(audio_tracks[i].lang, sizeof(audio_tracks[i].lang), "%s",
-			active_videoplayer->audio_tracks[i].language);
-		audio_tracks[i].selected = (i == active_videoplayer->current_audio_track);
-		audio_track_count++;
+
+	if (mpv_launcher_start(url, resume_pos, playback_media_id) < 0) {
+		wlr_log(WLR_ERROR, "Failed to launch mpv for %s", url);
+		playback_state = PLAYBACK_IDLE;
+		return;
 	}
-	for (int i = 0; i < active_videoplayer->subtitle_track_count && i < MAX_TRACKS; i++) {
-		subtitle_tracks[i].id = i;
-		snprintf(subtitle_tracks[i].title, sizeof(subtitle_tracks[i].title), "%s",
-			active_videoplayer->subtitle_tracks[i].title);
-		snprintf(subtitle_tracks[i].lang, sizeof(subtitle_tracks[i].lang), "%s",
-			active_videoplayer->subtitle_tracks[i].language);
-		subtitle_tracks[i].selected = (i == active_videoplayer->current_subtitle_track);
-		subtitle_track_count++;
-	}
-
-	/* Setup display mode based on monitor capabilities */
-	float display_hz = selmon->wlr_output->current_mode ?
-		selmon->wlr_output->current_mode->refresh / 1000.0f : 60.0f;
-	videoplayer_setup_display_mode(active_videoplayer, display_hz, selmon->vrr_capable);
-
-	/* Set fullscreen size to cover entire monitor */
-	videoplayer_set_fullscreen_size(active_videoplayer, selmon->m.width, selmon->m.height);
-
-	/* Position at monitor origin */
-	videoplayer_set_position(active_videoplayer, selmon->m.x, selmon->m.y);
-
-	/* Make visible */
-	videoplayer_set_visible(active_videoplayer, 1);
-
-	/* Seek to resume position if provided */
-	if (resume_pos > 0.0) {
-		int64_t resume_us = (int64_t)(resume_pos * 1000000.0);
-		videoplayer_seek(active_videoplayer, resume_us);
-	}
-
-	/* Don't call videoplayer_play() here — videoplayer_open() sets state to
-	 * VP_STATE_BUFFERING.  The present_frame() callback will wait for the
-	 * decode thread to fill the frame queue to VP_FRAME_QUEUE_SIZE/2, then
-	 * call videoplayer_play() automatically.  This prevents stutter from
-	 * consuming frames as fast as they're produced (queue stays at 0-1). */
-
-	/* Kick-start the rendering loop. The output may not have pending damage
-	 * after the scene node was enabled, so schedule a frame explicitly to
-	 * ensure present_videoplayer_frame() runs and the BUFFERING→PLAYING
-	 * transition happens without user input. */
-	wlr_output_schedule_frame(selmon->wlr_output);
 
 	playback_state = PLAYBACK_PLAYING;
-
-	/* Hide mouse cursor during video playback */
 	wlr_cursor_unset_image(cursor);
-
-	wlr_log(WLR_INFO, "Started integrated video player: %s (resume at %.1fs)", url, resume_pos);
+	wlr_log(WLR_INFO, "Started mpv: %s (resume at %.1fs)", url, resume_pos);
 }
 
 void
@@ -455,27 +357,33 @@ launch_integrated_player(const char *filepath)
 void
 stop_integrated_player(void)
 {
-	if (active_videoplayer) {
-		if (active_videoplayer->state != VP_STATE_IDLE)
-			videoplayer_stop(active_videoplayer);
-		videoplayer_set_visible(active_videoplayer, 0);
+	if (!mpv_launcher_active())
+		return;
 
-		/* Fully destroy the video player to guarantee a clean slate for next
-		 * playback.  Reusing across open/close cycles accumulates PipeWire
-		 * state (pw_init refcount, fd leaks) that eventually prevents new
-		 * videos from starting after 5-6 stop/start cycles. */
-		videoplayer_destroy(active_videoplayer);
-		active_videoplayer = NULL;
+	mpv_launcher_stop();
 
-		hide_playback_osd();
-		audio_track_count = 0;
-		subtitle_track_count = 0;
-		playback_state = PLAYBACK_IDLE;
+	hide_playback_osd();
+	audio_track_count = 0;
+	subtitle_track_count = 0;
+	playback_state = PLAYBACK_IDLE;
 
-		/* Restore mouse cursor */
-		nixly_cursor_set_xcursor("default");
+	nixly_cursor_set_xcursor("default");
+	media_playback_ended();
+	wlr_log(WLR_INFO, "Stopped mpv playback");
+}
 
-		wlr_log(WLR_INFO, "Stopped integrated video player");
+/* Called when playback ends (mpv exit or user stop). Re-renders the movie
+ * detail / TV-show detail page on every monitor where it was showing, so
+ * the user lands back on the page they launched from. */
+void
+media_playback_ended(void)
+{
+	Monitor *m;
+	wl_list_for_each(m, &mons, link) {
+		if (m->movies_view.visible && m->movies_view.in_detail_view)
+			media_view_render_detail(m, MEDIA_VIEW_MOVIES);
+		if (m->tvshows_view.visible && m->tvshows_view.in_detail_view)
+			media_view_render_detail(m, MEDIA_VIEW_TVSHOWS);
 	}
 }
 
@@ -1007,7 +915,7 @@ media_view_poll_timer_cb(void *data)
 	}
 
 	/* Skip during active video playback - views are hidden anyway */
-	if (active_videoplayer && playback_state == PLAYBACK_PLAYING) {
+	if (mpv_launcher_active() && playback_state == PLAYBACK_PLAYING) {
 		if (media_view_poll_timer)
 			wl_event_source_timer_update(media_view_poll_timer, 3000);
 		return 0;
@@ -2509,100 +2417,44 @@ media_view_scroll(Monitor *m, MediaViewType type, int delta)
 int
 handle_playback_osd_input(int button)
 {
-	int handled = 0;
-
-	/* Any input shows OSD */
-	osd_visible = 1;
-	osd_show_time = monotonic_msec();
+	if (!mpv_launcher_active())
+		return 0;
 
 	switch (button) {
-	case BTN_SOUTH:  /* A button - pause/play or select menu item */
-		if (osd_menu_open == OSD_MENU_NONE) {
-			if (active_videoplayer)
-				videoplayer_toggle_pause(active_videoplayer);
-		} else if (osd_menu_open == OSD_MENU_SOUND) {
-			if (active_videoplayer && osd_menu_selection < audio_track_count)
-				videoplayer_set_audio_track(active_videoplayer, osd_menu_selection);
-			osd_menu_open = OSD_MENU_NONE;
-		} else if (osd_menu_open == OSD_MENU_SUBTITLES) {
-			if (active_videoplayer) {
-				if (osd_menu_selection == 0)
-					videoplayer_set_subtitle_track(active_videoplayer, -1);  /* Off */
-				else if (osd_menu_selection <= subtitle_track_count)
-					videoplayer_set_subtitle_track(active_videoplayer, osd_menu_selection - 1);
-			}
-			osd_menu_open = OSD_MENU_NONE;
-		}
-		handled = 1;
-		break;
-
-	case BTN_EAST:   /* B button - close menu or stop playback */
-		if (osd_menu_open != OSD_MENU_NONE) {
-			osd_menu_open = OSD_MENU_NONE;
-		} else {
-			stop_integrated_player();
-			hide_playback_osd();
-			return 1;  /* Don't render OSD after stopping */
-		}
-		handled = 1;
-		break;
-
-	case BTN_DPAD_UP:
-		if (osd_menu_open != OSD_MENU_NONE && osd_menu_selection > 0)
-			osd_menu_selection--;
-		handled = 1;
-		break;
-
+	case BTN_SOUTH:      /* A — pause/play */
+		mpv_launcher_toggle_pause();
+		return 1;
+	case BTN_EAST:       /* B — stop, back to browse */
+		stop_integrated_player();
+		return 1;
+	case BTN_NORTH:      /* Y — cycle subtitle track */
 	case BTN_DPAD_DOWN:
-		if (osd_menu_open == OSD_MENU_SOUND && osd_menu_selection < audio_track_count - 1)
-			osd_menu_selection++;
-		else if (osd_menu_open == OSD_MENU_SUBTITLES && osd_menu_selection < subtitle_track_count)
-			osd_menu_selection++;
-		handled = 1;
-		break;
-
+		mpv_launcher_cycle_sub();
+		return 1;
+	case BTN_WEST:       /* X — cycle audio track */
+	case BTN_DPAD_UP:
+		mpv_launcher_cycle_audio();
+		return 1;
 	case BTN_DPAD_LEFT:
-		if (osd_menu_open == OSD_MENU_SUBTITLES) {
-			osd_menu_open = OSD_MENU_SOUND;
-			osd_menu_selection = active_videoplayer ? active_videoplayer->current_audio_track : 0;
-		} else if (osd_menu_open == OSD_MENU_NONE) {
-			osd_menu_open = OSD_MENU_SOUND;
-			osd_menu_selection = active_videoplayer ? active_videoplayer->current_audio_track : 0;
-		}
-		handled = 1;
-		break;
-
+		mpv_launcher_seek_relative(-5.0);
+		return 1;
 	case BTN_DPAD_RIGHT:
-		if (osd_menu_open == OSD_MENU_SOUND) {
-			osd_menu_open = OSD_MENU_SUBTITLES;
-			osd_menu_selection = active_videoplayer ? active_videoplayer->current_subtitle_track + 1 : 0;
-		} else if (osd_menu_open == OSD_MENU_NONE) {
-			osd_menu_open = OSD_MENU_SUBTITLES;
-			osd_menu_selection = active_videoplayer ? active_videoplayer->current_subtitle_track + 1 : 0;
-		}
-		handled = 1;
-		break;
-
-	case BTN_TL:  /* Left shoulder - seek backward */
-		if (active_videoplayer) {
-			videoplayer_seek_hold_start(active_videoplayer, -1);
-		}
-		handled = 1;
-		break;
-
-	case BTN_TR:  /* Right shoulder - seek forward */
-		if (active_videoplayer) {
-			videoplayer_seek_hold_start(active_videoplayer, 1);
-		}
-		handled = 1;
-		break;
+		mpv_launcher_seek_relative(5.0);
+		return 1;
+	case BTN_TL:         /* LB — jump back 30s */
+		mpv_launcher_seek_relative(-30.0);
+		return 1;
+	case BTN_TR:         /* RB — jump forward 30s */
+		mpv_launcher_seek_relative(30.0);
+		return 1;
+	case BTN_SELECT:     /* Back — toggle OSC visibility */
+		mpv_launcher_send_cmd("{\"command\":[\"script-binding\",\"osc/visibility\"]}");
+		return 1;
+	case BTN_START:      /* Start — show mpv stats */
+		mpv_launcher_send_cmd("{\"command\":[\"script-binding\",\"stats/display-stats-toggle\"]}");
+		return 1;
 	}
-
-	/* Re-render OSD after input */
-	if (handled)
-		render_playback_osd();
-
-	return handled;
+	return 0;
 }
 
 int
@@ -2836,119 +2688,17 @@ handle_playback_key_release(xkb_keysym_t sym)
 int
 handle_playback_key(xkb_keysym_t sym)
 {
-	int handled = 0;
+	/* mpv is the keyboard-focused Wayland client during playback —
+	 * it handles its own keybindings (space/arrows/q/m/f/etc) directly.
+	 * We only intercept XKB_KEY_q as a convenience to force our cleanup. */
+	if (!mpv_launcher_active())
+		return 0;
 
-	switch (sym) {
-	case XKB_KEY_space:
-	case XKB_KEY_Return:
-	case XKB_KEY_KP_Enter:
-		if (osd_menu_open == OSD_MENU_NONE) {
-			if (active_videoplayer)
-				videoplayer_toggle_pause(active_videoplayer);
-		} else if (osd_menu_open == OSD_MENU_SOUND) {
-			if (active_videoplayer && osd_menu_selection < audio_track_count)
-				videoplayer_set_audio_track(active_videoplayer, osd_menu_selection);
-			osd_menu_open = OSD_MENU_NONE;
-		} else if (osd_menu_open == OSD_MENU_SUBTITLES) {
-			if (active_videoplayer) {
-				if (osd_menu_selection == 0)
-					videoplayer_set_subtitle_track(active_videoplayer, -1);  /* Off */
-				else if (osd_menu_selection <= subtitle_track_count)
-					videoplayer_set_subtitle_track(active_videoplayer, osd_menu_selection - 1);
-			}
-			osd_menu_open = OSD_MENU_NONE;
-		}
-		handled = 1;
-		break;
-
-	case XKB_KEY_Escape:
-		if (osd_menu_open != OSD_MENU_NONE) {
-			osd_menu_open = OSD_MENU_NONE;
-		} else {
-			esc_held = 1;
-			if (!esc_hold_timer)
-				esc_hold_timer = wl_event_loop_add_timer(
-					wl_display_get_event_loop(dpy), esc_hold_timeout, NULL);
-			if (esc_hold_timer)
-				wl_event_source_timer_update(esc_hold_timer, 500);
-		}
-		handled = 1;
-		break;
-
-	case XKB_KEY_q:
-		if (osd_menu_open != OSD_MENU_NONE) {
-			osd_menu_open = OSD_MENU_NONE;
-		} else {
-			stop_integrated_player();
-			hide_playback_osd();
-			return 1;  /* Don't render OSD after stopping */
-		}
-		handled = 1;
-		break;
-
-	case XKB_KEY_Up:
-	case XKB_KEY_k:
-		if (osd_menu_open != OSD_MENU_NONE) {
-			if (osd_menu_selection > 0)
-				osd_menu_selection--;
-			handled = 1;
-		}
-		break;
-
-	case XKB_KEY_Down:
-	case XKB_KEY_j:
-		if (osd_menu_open != OSD_MENU_NONE) {
-			if (osd_menu_open == OSD_MENU_SOUND && osd_menu_selection < audio_track_count - 1)
-				osd_menu_selection++;
-			else if (osd_menu_open == OSD_MENU_SUBTITLES && osd_menu_selection < subtitle_track_count)
-				osd_menu_selection++;
-			handled = 1;
-		}
-		break;
-
-	case XKB_KEY_Left:
-	case XKB_KEY_h:
-		if (osd_menu_open != OSD_MENU_NONE) {
-			if (osd_menu_open == OSD_MENU_SUBTITLES) {
-				osd_menu_open = OSD_MENU_SOUND;
-				osd_menu_selection = active_videoplayer ? active_videoplayer->current_audio_track : 0;
-			}
-			handled = 1;
-		}
-		break;
-
-	case XKB_KEY_Right:
-	case XKB_KEY_l:
-		if (osd_menu_open != OSD_MENU_NONE) {
-			if (osd_menu_open == OSD_MENU_SOUND) {
-				osd_menu_open = OSD_MENU_SUBTITLES;
-				osd_menu_selection = active_videoplayer ? active_videoplayer->current_subtitle_track + 1 : 0;
-			}
-			handled = 1;
-		}
-		break;
-
-	case XKB_KEY_a:  /* Audio shortcut */
-		osd_menu_open = OSD_MENU_SOUND;
-		osd_menu_selection = active_videoplayer ? active_videoplayer->current_audio_track : 0;
-		handled = 1;
-		break;
-
-	case XKB_KEY_s:  /* Subtitle shortcut */
-		osd_menu_open = OSD_MENU_SUBTITLES;
-		osd_menu_selection = active_videoplayer ? active_videoplayer->current_subtitle_track + 1 : 0;
-		handled = 1;
-		break;
+	if (sym == XKB_KEY_q || sym == XKB_KEY_Q) {
+		stop_integrated_player();
+		return 1;
 	}
-
-	/* Show and re-render OSD after handling input */
-	if (handled) {
-		osd_visible = 1;
-		osd_show_time = monotonic_msec();
-		render_playback_osd();
-	}
-
-	return handled;
+	return 0;
 }
 
 int

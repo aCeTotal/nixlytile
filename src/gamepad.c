@@ -1,5 +1,6 @@
 #include "nixlytile.h"
 #include "client.h"
+#include "mpv_launcher.h"
 
 void
 gamepad_menu_show(Monitor *m)
@@ -262,23 +263,17 @@ gamepad_menu_select(Monitor *m)
 		return;
 	}
 
-	/* Handle Retro-gaming - switch to tag 3 and show retro console selection */
+	/* Handle Retro-gaming - launch RetroArch directly (gamepad autoconfig
+	 * handles controller mapping; user manages ROMs inside RetroArch). */
 	if (strcmp(label, "Retro-gaming") == 0) {
 		gamepad_menu_hide_all();
 		steam_kill();
-		wlr_log(WLR_INFO, "Switching to Retro Gaming (tag 3)");
-
-		/* Switch to tag 3 */
-		if (selmon) {
-			invalidate_video_pacing(selmon);
-			selmon->seltags ^= 1;
-			selmon->tagset[selmon->seltags] = 1 << 2; /* Tag 3 = bit 2 */
-			focusclient(focustop(selmon), 1);
-			arrange(selmon);
-			printstatus();
-		}
-
-		retro_gaming_show(m);
+		live_tv_kill();
+		media_view_hide_all();
+		retro_gaming_hide_all();
+		pc_gaming_hide_all();
+		wlr_log(WLR_INFO, "Launching RetroArch");
+		focus_or_launch_app("retroarch", "retroarch");
 		return;
 	}
 
@@ -499,19 +494,11 @@ gamepad_menu_handle_button(Monitor *m, int button, int value)
 		}
 	}
 
-	/* Handle integrated video player controls first (highest priority when playing) */
-	if (active_videoplayer && playback_state == PLAYBACK_PLAYING) {
+	/* Playback controls (highest priority when mpv is running) */
+	if (mpv_launcher_active() && playback_state == PLAYBACK_PLAYING) {
 		if (value == 1) {
 			if (handle_playback_osd_input(button))
 				return 1;
-		} else if (value == 0) {
-			/* Button release - stop hold-to-seek for shoulder buttons */
-			if ((button == BTN_TL || button == BTN_TR) &&
-			    active_videoplayer->control_bar.seek_hold_active) {
-				videoplayer_seek_hold_stop(active_videoplayer);
-				render_playback_osd();
-				return 1;
-			}
 		}
 	}
 
