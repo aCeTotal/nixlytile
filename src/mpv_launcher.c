@@ -112,10 +112,15 @@ void mpv_launcher_volume_delta(double delta)
 
 /* ── Parse time-pos from mpv property-change events ────────────────── */
 
+static void mpv_handle_event_line(const char *line);
+
 static void
 mpv_handle_line(const char *line)
 {
-	if (!strstr(line, "\"event\":\"property-change\"")) return;
+	if (!strstr(line, "\"event\":\"property-change\"")) {
+		mpv_handle_event_line(line);
+		return;
+	}
 
 	const char *d = strstr(line, "\"data\":");
 	if (!d) return;
@@ -131,11 +136,38 @@ mpv_handle_line(const char *line)
 		return;
 	}
 
+	if (strstr(line, "\"name\":\"pause\"")) {
+		const char *p = d + 7;
+		while (*p == ' ') p++;
+		/* Any pause=true that wasn't user-initiated — force resume.
+		 * mpv can self-pause on first frame / cache-idle with some
+		 * profile+cache combos; the user never requested it. */
+		if (strncmp(p, "true", 4) == 0) {
+			mpv_launcher_send_cmd(
+				"{\"command\":[\"set_property\",\"pause\",false]}");
+		}
+		return;
+	}
+
 	if (strstr(line, "\"name\":\"eof-reached\"")) {
 		const char *p = d + 7;
 		while (*p == ' ') p++;
 		if (strncmp(p, "true", 4) == 0)
 			mpv_eof_reached = 1;
+		return;
+	}
+}
+
+static void
+mpv_handle_event_line(const char *line)
+{
+	/* playback-restart fires after load and after every seek — the point
+	 * where mpv might silently sit paused on first frame. Force unpause
+	 * here too, on top of the pause-property observer. */
+	if (strstr(line, "\"event\":\"playback-restart\"") ||
+	    strstr(line, "\"event\":\"file-loaded\"")) {
+		mpv_launcher_send_cmd(
+			"{\"command\":[\"set_property\",\"pause\",false]}");
 	}
 }
 
@@ -413,14 +445,18 @@ mpv_launcher_start(const char *url, double resume_pos, int media_id)
 	}
 
 	/* Subscribe to time-pos updates for resume saving, eof-reached for
-	 * natural-end detection so we can clear the resume marker. */
+	 * natural-end detection, and pause so we can force-resume if mpv
+	 * self-pauses on first frame / cache-idle transitions. */
 	mpv_launcher_send_cmd(
 		"{\"command\":[\"observe_property\",1,\"time-pos\"]}");
 	mpv_launcher_send_cmd(
 		"{\"command\":[\"observe_property\",2,\"eof-reached\"]}");
+	mpv_launcher_send_cmd(
+		"{\"command\":[\"observe_property\",3,\"pause\"]}");
 
-	/* Belt-and-suspenders: force unpause after load in case mpv came up
-	 * paused on first frame (some profiles/cache states trigger this). */
+	/* Belt-and-suspenders: force unpause after load. The property observer
+	 * handles later transitions; this covers the initial state where mpv
+	 * may come up paused on first frame (some profile/cache states). */
 	mpv_launcher_send_cmd(
 		"{\"command\":[\"set_property\",\"pause\",false]}");
 

@@ -2001,34 +2001,101 @@ static const char *retro_emulator_apps[] = {
 };
 
 static int
-is_retro_emulator_pid(pid_t pid)
+retro_match_string(const char *s)
 {
-	char path[64], comm[128];
-	FILE *fp;
-	size_t len;
 	int i;
+	if (!s || !*s)
+		return 0;
+	for (i = 0; retro_emulator_apps[i]; i++) {
+		if (strcasestr(s, retro_emulator_apps[i]))
+			return 1;
+	}
+	return 0;
+}
+
+static int
+retro_check_single_pid(pid_t pid)
+{
+	char path[64], buf[512];
+	FILE *fp;
+	ssize_t n;
+	int fd;
+	size_t len;
 
 	if (pid <= 1)
 		return 0;
 
+	/* /proc/PID/comm — kernel task name (max 15 chars) */
 	snprintf(path, sizeof(path), "/proc/%d/comm", pid);
 	fp = fopen(path, "r");
-	if (!fp)
-		return 0;
-	if (!fgets(comm, sizeof(comm), fp)) {
+	if (fp) {
+		if (fgets(buf, sizeof(buf), fp)) {
+			len = strlen(buf);
+			if (len > 0 && buf[len - 1] == '\n')
+				buf[len - 1] = '\0';
+			if (retro_match_string(buf)) {
+				fclose(fp);
+				return 1;
+			}
+		}
 		fclose(fp);
-		return 0;
 	}
-	fclose(fp);
 
-	len = strlen(comm);
-	if (len > 0 && comm[len - 1] == '\n')
-		comm[len - 1] = '\0';
-
-	for (i = 0; retro_emulator_apps[i]; i++) {
-		if (strcasecmp(comm, retro_emulator_apps[i]) == 0 ||
-		    strcasestr(comm, retro_emulator_apps[i]))
+	/* /proc/PID/exe — real executable path (catches wrappers w/ short comm) */
+	snprintf(path, sizeof(path), "/proc/%d/exe", pid);
+	n = readlink(path, buf, sizeof(buf) - 1);
+	if (n > 0) {
+		buf[n] = '\0';
+		if (retro_match_string(buf))
 			return 1;
+	}
+
+	/* /proc/PID/cmdline — full argv, NUL-separated */
+	snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+	fd = open(path, O_RDONLY);
+	if (fd >= 0) {
+		n = read(fd, buf, sizeof(buf) - 1);
+		close(fd);
+		if (n > 0) {
+			ssize_t i;
+			buf[n] = '\0';
+			for (i = 0; i < n; i++)
+				if (buf[i] == '\0')
+					buf[i] = ' ';
+			if (retro_match_string(buf))
+				return 1;
+		}
+	}
+
+	return 0;
+}
+
+static int
+is_retro_emulator_pid(pid_t pid)
+{
+	char path[64], stat_comm[64];
+	FILE *fp;
+	pid_t cur = pid;
+	int depth = 0;
+
+	/* Walk up to 10 ancestors — catches emulator cores / shell wrappers
+	 * whose own PID no longer advertises retroarch but whose parent does. */
+	while (cur > 1 && depth < 10) {
+		if (retro_check_single_pid(cur))
+			return 1;
+
+		snprintf(path, sizeof(path), "/proc/%d/stat", cur);
+		fp = fopen(path, "r");
+		if (!fp)
+			return 0;
+		pid_t ppid = 0;
+		if (fscanf(fp, "%*d (%63[^)]) %*c %d", stat_comm, &ppid) != 2) {
+			fclose(fp);
+			return 0;
+		}
+		fclose(fp);
+		cur = ppid;
+		depth++;
 	}
 	return 0;
 }
