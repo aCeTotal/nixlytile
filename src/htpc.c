@@ -1986,6 +1986,80 @@ static int is_wine_or_proton_process(pid_t pid);
 static int is_known_game_app(const char *app);
 
 /*
+ * Retro emulators must NEVER trigger game mode — no statusbar hide,
+ * no process freeze, no GPU clock lock, no focus override, no "Game
+ * Mode Active" OSD. Match on both the Wayland app_id (if set) and
+ * /proc/PID/comm so we catch clients that haven't announced their
+ * app_id yet.
+ */
+static const char *retro_emulator_apps[] = {
+	"retroarch", "org.libretro.RetroArch",
+	"dolphin-emu", "org.DolphinEmu.dolphin-emu",
+	"pcsx2", "rpcs3", "cemu", "yuzu",
+	"desmume", "mgba", "ppsspp", "citra",
+	NULL,
+};
+
+static int
+is_retro_emulator_pid(pid_t pid)
+{
+	char path[64], comm[128];
+	FILE *fp;
+	size_t len;
+	int i;
+
+	if (pid <= 1)
+		return 0;
+
+	snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+	fp = fopen(path, "r");
+	if (!fp)
+		return 0;
+	if (!fgets(comm, sizeof(comm), fp)) {
+		fclose(fp);
+		return 0;
+	}
+	fclose(fp);
+
+	len = strlen(comm);
+	if (len > 0 && comm[len - 1] == '\n')
+		comm[len - 1] = '\0';
+
+	for (i = 0; retro_emulator_apps[i]; i++) {
+		if (strcasecmp(comm, retro_emulator_apps[i]) == 0 ||
+		    strcasestr(comm, retro_emulator_apps[i]))
+			return 1;
+	}
+	return 0;
+}
+
+static int
+is_retro_emulator_client(Client *c)
+{
+	const char *app;
+	pid_t pid;
+	int i;
+
+	if (!c)
+		return 0;
+
+	app = client_get_appid(c);
+	if (app && *app) {
+		for (i = 0; retro_emulator_apps[i]; i++) {
+			if (strcasecmp(app, retro_emulator_apps[i]) == 0 ||
+			    strcasestr(app, retro_emulator_apps[i]))
+				return 1;
+		}
+	}
+
+	pid = client_get_pid(c);
+	if (pid > 1 && is_retro_emulator_pid(pid))
+		return 1;
+
+	return 0;
+}
+
+/*
  * Background worker thread for game mode system operations.
  * All blocking I/O (process freeze/unfreeze, sysfs writes, DRM ioctls,
  * memory reclaim, fan control) runs here instead of on the compositor
@@ -2140,28 +2214,12 @@ update_game_mode(void)
 
 	/*
 	 * Emulators launched from the retro-gaming page must never engage
-	 * game mode (no process freeze, no GPU clock lock, no statusbar
-	 * hide).  Treat them as if no fullscreen client existed.
+	 * game mode. Match on Wayland app_id AND /proc/PID/comm — app_id
+	 * may be unset on the first mapnotify, but the process name is
+	 * always available. Treat as if no fullscreen client existed.
 	 */
-	if (c) {
-		const char *app = client_get_appid(c);
-		static const char *retro_apps[] = {
-			"retroarch", "org.libretro.RetroArch",
-			"dolphin-emu", "org.DolphinEmu.dolphin-emu",
-			"pcsx2", "rpcs3", "cemu", "yuzu",
-			"desmume", "mgba", "ppsspp", "citra",
-			NULL
-		};
-		if (app) {
-			for (int i = 0; retro_apps[i]; i++) {
-				if (strcasecmp(app, retro_apps[i]) == 0 ||
-				    strcasestr(app, retro_apps[i])) {
-					c = NULL;
-					break;
-				}
-			}
-		}
-	}
+	if (c && is_retro_emulator_client(c))
+		c = NULL;
 
 	/*
 	 * Guard: if ultra game mode is active and the game process is still
@@ -3105,6 +3163,12 @@ looks_like_game(Client *c)
 	if (c->steam_game_id > 0 && c->steam_game_id != 769)
 		return 1;
 #endif
+
+	/* Retro emulators are explicitly excluded from game-mode treatment.
+	 * Must be checked before the protocol-hint branches because RetroArch
+	 * announces content-type=game on its Wayland surface. */
+	if (is_retro_emulator_client(c))
+		return 0;
 
 	/* Steam main window / popups are never games. Must be checked before
 	 * process-ancestry detection, which otherwise matches the Steam

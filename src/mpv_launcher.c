@@ -266,10 +266,15 @@ mpv_ipc_connect(const char *path)
 		}
 
 		/* Pump the compositor event loop so mpv's Wayland init can
-		 * make progress. 20ms timeout = same pacing as the old sleep. */
-		if (event_loop)
+		 * make progress. wl_event_loop_dispatch only reads requests —
+		 * without flush_clients(), our replies (wl_registry globals,
+		 * xdg_surface.configure etc) never leave the compositor and
+		 * mpv hangs on wl_display_roundtrip until we kill it. */
+		if (event_loop) {
 			wl_event_loop_dispatch(event_loop, 20);
-		else {
+			if (dpy)
+				wl_display_flush_clients(dpy);
+		} else {
 			struct timespec ts = { .tv_sec = 0, .tv_nsec = 20 * 1000 * 1000 };
 			nanosleep(&ts, NULL);
 		}
