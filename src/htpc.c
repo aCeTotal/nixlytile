@@ -1108,6 +1108,49 @@ static struct {
 } saved_irq_affinities[MAX_IRQS];
 static int saved_irq_affinity_count = 0;
 
+/*
+ * Return 1 if this IRQ is safe to pin to core 0.
+ *
+ * Pinning display/GPU/input/audio IRQs to a single saturated core was the
+ * root cause of "Atomic commit failed: Device or resource busy" storms —
+ * page-flip completion events couldn't be delivered in time, wlroots
+ * retried commits indefinitely, and the compositor appeared frozen.
+ * Each IRQ dir contains a subdirectory named after the driver/device;
+ * we skip anything display-, GPU-, input-, or audio-related.
+ */
+static int
+irq_is_safe_to_pin(const char *irq_num)
+{
+	char path[256];
+	DIR *d;
+	struct dirent *e;
+	int safe = 1;
+
+	snprintf(path, sizeof(path), "/proc/irq/%s", irq_num);
+	d = opendir(path);
+	if (!d) return 0;
+
+	while ((e = readdir(d))) {
+		if (e->d_name[0] == '.') continue;
+		/* Subdir name = device/driver label */
+		if (strcasestr(e->d_name, "nvidia") ||
+		    strcasestr(e->d_name, "i915")   ||
+		    strcasestr(e->d_name, "amdgpu") ||
+		    strcasestr(e->d_name, "radeon") ||
+		    strcasestr(e->d_name, "drm")    ||
+		    strcasestr(e->d_name, "xhci")   ||  /* USB — gamepad/kbd/mouse */
+		    strcasestr(e->d_name, "ehci")   ||
+		    strcasestr(e->d_name, "ohci")   ||
+		    strcasestr(e->d_name, "snd")    ||  /* ALSA sound card */
+		    strcasestr(e->d_name, "hda")) {     /* HD Audio */
+			safe = 0;
+			break;
+		}
+	}
+	closedir(d);
+	return safe;
+}
+
 void
 apply_irq_affinity(void)
 {
@@ -1116,6 +1159,7 @@ apply_irq_affinity(void)
 	char path[256], buf[64];
 	int fd;
 	ssize_t n;
+	int skipped = 0;
 
 	saved_irq_affinity_count = 0;
 	dir = opendir("/proc/irq");
@@ -1125,6 +1169,12 @@ apply_irq_affinity(void)
 		/* Only numeric entries (IRQ numbers) */
 		if (ent->d_name[0] < '0' || ent->d_name[0] > '9')
 			continue;
+
+		/* Skip display/GPU/input/audio IRQs — see irq_is_safe_to_pin() */
+		if (!irq_is_safe_to_pin(ent->d_name)) {
+			skipped++;
+			continue;
+		}
 
 		snprintf(path, sizeof(path), "/proc/irq/%s/smp_affinity_list", ent->d_name);
 
@@ -1154,7 +1204,8 @@ apply_irq_affinity(void)
 		}
 	}
 	closedir(dir);
-	wlr_log(WLR_INFO, "IRQ affinity: pinned %d IRQs to core 0", saved_irq_affinity_count);
+	wlr_log(WLR_INFO, "IRQ affinity: pinned %d IRQs to core 0 (skipped %d display/GPU/input/audio)",
+		saved_irq_affinity_count, skipped);
 }
 
 void
@@ -2301,48 +2352,28 @@ update_game_mode(void)
 		return;
 	}
 
-	game_mode_active = (c != NULL);
-	game_mode_client = c;
-
 	/*
-	 * Determine if this is actually a game.
-	 * Default: NOT a game.  Only activate ultra game mode when there's
-	 * positive evidence (protocol hints, known app-id, or process ancestry).
-	 * This prevents false positives from browsers, Spotify, Discord, GIMP,
-	 * OBS, and every other non-game fullscreen app.
+	 * Positive Steam-only detection.
+	 * Game mode activates ONLY for Steam-launched games. Every other
+	 * fullscreen surface — RetroArch, browsers, video, Lutris, Heroic,
+	 * Bottles, bare Wine, gamescope, minecraft — is left alone.
+	 * This prevents false positives (freeze storms when non-games trip
+	 * the aggressive system tuning path).
 	 */
-	if (c) {
-		/* Steam main window / popups are never games, even in fullscreen.
-		 * Must be checked before process-ancestry detection. */
-		if (is_steam_client(c) || is_steam_popup(c)) {
-			is_game = 0;
-		} else if (is_video_content(c)) {
-			/* Explicit video hint — definitely not a game */
-			is_game = 0;
-		} else if (client_wants_tearing(c) || is_game_content(c)) {
-			/* Explicit game hints — definitely a game */
-			is_game = 1;
-		} else {
-			const char *app = client_get_appid(c);
-			pid_t pid = client_get_pid(c);
+	if (c && !is_steam_client(c) && !is_steam_popup(c)) {
+		const char *app = client_get_appid(c);
 
-			/* App-ID whitelist: Steam/Proton games */
-			if (app && strncasecmp(app, "steam_app_", 10) == 0)
-				is_game = 1;
-			/* Known game apps / emulators */
-			else if (app && is_known_game_app(app))
-				is_game = 1;
-			/* Process-based: Wine/Proton executable */
-			else if (pid > 1 && is_wine_or_proton_process(pid))
-				is_game = 1;
-			/* Process-based: child of a game launcher */
-			else if (pid > 1 && is_game_launcher_child(pid))
-				is_game = 1;
-		}
+		/* 1. Wayland-native Steam game (app_id=steam_app_NNNN) */
+		if (app && strncasecmp(app, "steam_app_", 10) == 0)
+			is_game = 1;
+		/* 2. XWayland STEAM_GAME atom or Steam/reaper process ancestry */
+		else if (is_steam_game(c))
+			is_game = 1;
 	}
 
-	/* Ultra mode activates for games, regular game mode for other fullscreen content */
-	game_mode_ultra = (game_mode_active && is_game);
+	game_mode_active = is_game;
+	game_mode_client = is_game ? c : NULL;
+	game_mode_ultra  = is_game;
 
 	if (game_mode_ultra && !was_ultra) {
 		/*
@@ -3144,12 +3175,11 @@ is_game_launcher_child(pid_t pid)
 		}
 		fclose(f);
 
-		/* Check if parent is a known game launcher */
+		/* Steam-only ancestry: steam client itself or reaper (Steam's
+		 * per-game wrapper). Lutris/Heroic/Bottles deliberately excluded —
+		 * gamemode must ONLY engage for Steam-launched games. */
 		if (strcasestr(comm, "steam") ||
-		    strcasestr(comm, "reaper") ||
-		    strcasestr(comm, "lutris") ||
-		    strcasestr(comm, "heroic") ||
-		    strcasestr(comm, "bottles"))
+		    strcasestr(comm, "reaper"))
 			return 1;
 
 		pid = ppid;
