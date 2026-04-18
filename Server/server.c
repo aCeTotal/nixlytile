@@ -29,9 +29,7 @@
 #include "config.h"
 #include "tmdb.h"
 #include <sys/syscall.h>
-#include "igdb.h"
 #include "watcher.h"
-#include "transcoder.h"
 #include "downloads.h"
 
 /* No connection limit - kernel handles backlog */
@@ -46,7 +44,6 @@
 static int server_fd = -1;
 static int discovery_fd = -1;
 static volatile int running = 1;
-static volatile int transcoder_restart_pending = 0;
 static volatile int startup_scanning = 0;  /* 1 while initial scan/TMDB fetch is running */
 
 /* Connection limiting based on bandwidth */
@@ -73,23 +70,12 @@ static void *tmdb_rescan_thread(void *arg) {
     return NULL;
 }
 
-/* Parallel scrape threads — TMDB and IGDB use different APIs so can run concurrently */
 static void *scrape_tmdb_thread(void *arg) {
     (void)arg;
     printf("Scrape: TMDB thread started\n");
     scanner_fetch_missing_tmdb();
     scanner_refresh_show_status();
     printf("Scrape: TMDB thread done\n");
-    return NULL;
-}
-
-static void *scrape_rom_thread(void *arg) {
-    (void)arg;
-    printf("Scrape: ROM/IGDB thread started\n");
-    scanner_fetch_rom_metadata();
-    scanner_fetch_rom_covers();
-    scanner_fetch_libretro_covers();
-    printf("Scrape: ROM/IGDB thread done\n");
     return NULL;
 }
 
@@ -117,23 +103,13 @@ static void *startup_scan_thread(void *arg) {
     }
     printf("Startup scan: Found %d media files.\n", database_get_count());
 
-    /* Scan ROM directories (must finish before IGDB metadata fetch) */
-    if (running) {
-        printf("Startup scan: Scanning ROM directories...\n");
-        for (int i = 0; i < server_config.roms_path_count && running; i++) {
-            printf("  ROMs: %s\n", server_config.roms_paths[i]);
-            scanner_scan_rom_directory(server_config.roms_paths[i]);
-        }
-        printf("Startup scan: Found %d ROMs.\n", database_get_rom_count());
-    }
-
-    /* Initialize file watcher early — so downloads and media changes
+    /* Initialize file watcher early — so unprocessed and ready media changes
      * are detected even while scraping is still running */
     if (running && watcher_init() == 0) {
         watcher_set_callback(on_file_change);
 
         for (int i = 0; i < server_config.unprocessed_path_count; i++) {
-            watcher_add_path(server_config.unprocessed_paths[i], WATCH_TYPE_MEDIA);
+            watcher_add_path(server_config.unprocessed_paths[i], WATCH_TYPE_DOWNLOADS);
         }
 
         for (int i = 0; i < server_config.converted_path_count; i++) {
@@ -144,28 +120,17 @@ static void *startup_scan_thread(void *arg) {
             watcher_add_path(ready_path, WATCH_TYPE_MEDIA);
         }
 
-        for (int i = 0; i < server_config.roms_path_count; i++) {
-            watcher_add_path(server_config.roms_paths[i], WATCH_TYPE_ROMS);
-        }
-
-        /* Watch downloads directory */
-        if (server_config.download_path[0]) {
-            watcher_add_path(server_config.download_path, WATCH_TYPE_DOWNLOADS);
-        }
-
         watcher_start();
     }
 
-    /* Start download monitor early — runs in parallel with scraping */
+    /* Start unprocessed file monitor — scrape, rename, move */
     if (running && downloads_init() == 0) {
         downloads_process_pending();
         downloads_start();
     }
 
-    /* Session-based progress: TMDB scraping at startup (ROM scraping is manual-only) */
     scanner_scrape_session_begin(&tmdb_progress);
 
-    /* Run TMDB scraping at startup — ROM/IGDB scraping deferred to manual trigger */
     {
         pthread_t tmdb_thread;
         int have_tmdb = 0;
@@ -174,7 +139,6 @@ static void *startup_scan_thread(void *arg) {
             have_tmdb = (pthread_create(&tmdb_thread, NULL, scrape_tmdb_thread, NULL) == 0);
         }
 
-        /* If thread creation failed, run sequentially as fallback */
         if (!have_tmdb && running) {
             scanner_fetch_missing_tmdb();
             scanner_refresh_show_status();
@@ -185,18 +149,9 @@ static void *startup_scan_thread(void *arg) {
 
     scanner_scrape_session_end(&tmdb_progress);
 
-    /* Initialize and start transcoder (only if enabled) */
-    if (running && server_config.transcode_enabled) {
-        transcoder_init();
-        transcoder_start();
-    } else if (running) {
-        printf("Transcoder: Disabled by config\n");
-    }
-
     startup_scanning = 0;
     printf("Startup scan: Complete. Server fully ready.\n");
     printf("  Media files: %d\n", database_get_count());
-    printf("  ROMs: %d\n", database_get_rom_count());
     printf("  Watching %d directories\n", watcher_get_count());
     return NULL;
 }
@@ -206,24 +161,11 @@ static void *sync_thread(void *arg) {
     (void)arg;
 
     while (running) {
-        /* Sleep for 5 minutes, but check transcoder restart flag every second */
-        for (int i = 0; i < 300 && running; i++) {
-            sleep(1);
-
-            /* Check if transcoder needs restart (new files arrived while running) */
-            if (server_config.transcode_enabled && transcoder_restart_pending &&
-                transcoder_get_state() == TRANSCODE_IDLE) {
-                transcoder_restart_pending = 0;
-                printf("Restarting transcoder for newly detected files...\n");
-                transcoder_start();
-            }
-        }
-
+        for (int i = 0; i < 300 && running; i++) sleep(1);
         if (!running) break;
 
         printf("Periodic sync: Checking for changes...\n");
 
-        /* Remove entries for deleted files */
         int removed = database_cleanup_missing();
         if (removed > 0) {
             printf("Periodic sync: Removed %d missing entries\n", removed);
@@ -243,49 +185,22 @@ static void *sync_thread(void *arg) {
             printf("Periodic sync: Media count changed %d -> %d\n", before, after);
         }
 
-        /* Periodic ROM rescan (backup to inotify) — must finish before IGDB metadata */
-        int rom_before = database_get_rom_count();
-        for (int i = 0; i < server_config.roms_path_count; i++) {
-            scanner_scan_rom_directory(server_config.roms_paths[i]);
-        }
-        int rom_after = database_get_rom_count();
-        if (rom_after != rom_before) {
-            printf("Periodic sync: ROM count changed %d -> %d\n", rom_before, rom_after);
-        }
-
-        /* Periodic scrape session: retry all missing metadata in parallel */
         scanner_scrape_session_begin(&tmdb_progress);
-        scanner_scrape_session_begin(&igdb_progress);
 
         {
-            pthread_t tmdb_t, rom_t;
+            pthread_t tmdb_t;
             int have_tmdb = (pthread_create(&tmdb_t, NULL, scrape_tmdb_thread, NULL) == 0);
-            int have_rom = (pthread_create(&rom_t, NULL, scrape_rom_thread, NULL) == 0);
-
             if (!have_tmdb) {
                 scanner_fetch_missing_tmdb();
                 scanner_refresh_show_status();
             }
-            if (!have_rom) {
-                scanner_fetch_rom_metadata();
-                scanner_fetch_rom_covers();
-                scanner_fetch_libretro_covers();
-            }
-
             if (have_tmdb) pthread_join(tmdb_t, NULL);
-            if (have_rom) pthread_join(rom_t, NULL);
         }
 
         scanner_scrape_session_end(&tmdb_progress);
-        scanner_scrape_session_end(&igdb_progress);
 
-        /* Process pending downloads (backup to download monitor thread) */
+        /* Process pending unprocessed files (backup to inotify thread) */
         downloads_process_pending();
-
-        /* Start transcoder if idle (will pick up any unconverted files) */
-        if (server_config.transcode_enabled && transcoder_get_state() == TRANSCODE_IDLE) {
-            transcoder_start();
-        }
     }
 
     return NULL;
@@ -380,46 +295,16 @@ static void on_file_change(const char *filepath, int is_delete, WatchType type) 
         if (database_delete_by_path(filepath) == 0) {
             printf("DB: Removed %s\n", filepath);
         }
-    } else if (type == WATCH_TYPE_ROMS) {
-        /* ROM file detected */
-        if (scanner_is_rom_file(filepath)) {
-            int console = scanner_detect_console(filepath);
-            if (console >= 0) {
-                if (scanner_scan_rom_file(filepath, console) == 0) {
-                    printf("DB: Added ROM %s\n", filepath);
-                    scanner_fetch_rom_metadata();
-                }
-            }
-        }
     } else if (type == WATCH_TYPE_DOWNLOADS) {
-        /* File in downloads dir — just log, periodic thread handles it */
+        /* Unprocessed file — downloads.c handles classify+move */
         downloads_notify_file(filepath);
     } else {
-        /* Check if it's a media file that needs processing */
-        if (scanner_is_media_file(filepath)) {
-            /* Check if this file is in a nixly_ready_media directory.
-             * Files here are ready for serving - always add to DB and scrape,
-             * regardless of whether they came from the transcoder or were
-             * placed manually. */
-            int is_ready_media = (strstr(filepath, "/nixly_ready_media/") != NULL);
-
-            if (is_ready_media) {
-                /* Ready media file - add to DB and fetch TMDB metadata */
-                int id = scanner_scan_file(filepath, 1);
-                if (id > 0) {
-                    printf("DB: Added ready media %s (id=%d)\n", filepath, id);
-                }
-            } else if (server_config.transcode_enabled) {
-                /* New source file detected - trigger transcoder if idle */
-                printf("New media file detected: %s\n", filepath);
-                if (transcoder_get_state() == TRANSCODE_IDLE) {
-                    printf("Starting transcoder for new files...\n");
-                    transcoder_start();
-                } else {
-                    /* Mark for restart when current run finishes */
-                    transcoder_restart_pending = 1;
-                    printf("Transcoder running, will restart when done\n");
-                }
+        /* Ready media under nixly_ready_media/ — add to DB, scrape TMDB */
+        if (scanner_is_media_file(filepath) &&
+            strstr(filepath, "/nixly_ready_media/") != NULL) {
+            int id = scanner_scan_file(filepath, 1);
+            if (id > 0) {
+                printf("DB: Added ready media %s (id=%d)\n", filepath, id);
             }
         }
     }
@@ -828,70 +713,6 @@ static void handle_api(int fd, const char *path) {
                          "{\"status\":\"failed to start rescan\"}", 35);
         }
     }
-    else if (strcmp(path, "/api/transcode/status") == 0) {
-        const char *state_str = "idle";
-        TranscodeState ts = transcoder_get_state();
-        if (ts == TRANSCODE_RUNNING) state_str = "running";
-        else if (ts == TRANSCODE_STOPPED) state_str = "stopped";
-
-        char json[512];
-        int len = snprintf(json, sizeof(json),
-            "{\"state\":\"%s\",\"current\":\"%s\",\"completed\":%d,\"total\":%d,\"percent\":%.1f}",
-            state_str,
-            transcoder_get_current_file(),
-            transcoder_get_completed_jobs(),
-            transcoder_get_total_jobs(),
-            transcoder_get_progress());
-        send_response(fd, 200, "OK", "application/json", json, len);
-    }
-    else if (strcmp(path, "/api/transcode/start") == 0) {
-        if (!server_config.transcode_enabled) {
-            send_response(fd, 200, "OK", "application/json",
-                         "{\"status\":\"disabled\"}", 21);
-        } else if (transcoder_get_state() == TRANSCODE_RUNNING) {
-            send_response(fd, 200, "OK", "application/json",
-                         "{\"status\":\"already running\"}", 28);
-        } else {
-            transcoder_start();
-            send_response(fd, 200, "OK", "application/json",
-                         "{\"status\":\"started\"}", 20);
-        }
-    }
-    else if (strcmp(path, "/api/transcode/stop") == 0) {
-        transcoder_stop();
-        send_response(fd, 200, "OK", "application/json",
-                     "{\"status\":\"stopped\"}", 20);
-    }
-    else if (strcmp(path, "/api/transcode/queue") == 0) {
-        char *json = transcoder_get_queue_json();
-        if (json) {
-            send_response(fd, 200, "OK", "application/json", json, strlen(json));
-            free(json);
-        } else {
-            send_error(fd, 500, "Queue error");
-        }
-    }
-    else if (strncmp(path, "/api/transcode/skip?title=", 26) == 0) {
-        char title[256];
-        url_decode(path + 26, title, sizeof(title));
-        transcoder_skip_title(title);
-        send_response(fd, 200, "OK", "application/json",
-                     "{\"status\":\"skipped\"}", 20);
-    }
-    else if (strncmp(path, "/api/transcode/unskip?title=", 28) == 0) {
-        char title[256];
-        url_decode(path + 28, title, sizeof(title));
-        transcoder_unskip_title(title);
-        send_response(fd, 200, "OK", "application/json",
-                     "{\"status\":\"unskipped\"}", 22);
-    }
-    else if (strncmp(path, "/api/transcode/prioritize?title=", 32) == 0) {
-        char title[256];
-        url_decode(path + 32, title, sizeof(title));
-        transcoder_prioritize_title(title);
-        send_response(fd, 200, "OK", "application/json",
-                     "{\"status\":\"prioritized\"}", 24);
-    }
     else if (strncmp(path, "/api/media/", 11) == 0) {
         /* Get media info by ID */
         int id = atoi(path + 11);
@@ -903,102 +724,7 @@ static void handle_api(int fd, const char *path) {
             send_error(fd, 404, "Media not found");
         }
     }
-    /* Retro gaming API endpoints */
-    else if (strcmp(path, "/api/roms") == 0) {
-        char *json = database_get_roms_json();
-        if (json) {
-            send_response(fd, 200, "OK", "application/json", json, strlen(json));
-            free(json);
-        } else {
-            send_error(fd, 500, "Database error");
-        }
-    }
-    else if (strncmp(path, "/api/roms/console/", 18) == 0) {
-        int console = atoi(path + 18);
-        if (console >= 0 && console < CONSOLE_COUNT) {
-            char *json = database_get_roms_by_console_json((ConsoleType)console);
-            if (json) {
-                send_response(fd, 200, "OK", "application/json", json, strlen(json));
-                free(json);
-            } else {
-                send_error(fd, 500, "Database error");
-            }
-        } else {
-            send_error(fd, 400, "Invalid console ID");
-        }
-    }
-    else if (strncmp(path, "/api/roms/", 10) == 0 && strstr(path + 10, "/download")) {
-        int id = atoi(path + 10);
-        char *filepath = database_get_rom_filepath(id);
-        if (filepath) {
-            serve_file(fd, filepath);
-            free(filepath);
-        } else {
-            send_error(fd, 404, "ROM not found");
-        }
-    }
-    else if (strncmp(path, "/api/rom/", 9) == 0) {
-        int id = atoi(path + 9);
-        char *json = database_get_rom_json(id);
-        if (json) {
-            send_response(fd, 200, "OK", "application/json", json, strlen(json));
-            free(json);
-        } else {
-            send_error(fd, 404, "ROM not found");
-        }
-    }
-    else if (strcmp(path, "/api/consoles") == 0) {
-        char json[2048];
-        int len = snprintf(json, sizeof(json),
-            "[{\"id\":0,\"name\":\"NES\",\"count\":%d},"
-            "{\"id\":1,\"name\":\"SNES\",\"count\":%d},"
-            "{\"id\":2,\"name\":\"Nintendo 64\",\"count\":%d},"
-            "{\"id\":3,\"name\":\"GameCube\",\"count\":%d},"
-            "{\"id\":4,\"name\":\"Wii\",\"count\":%d},"
-            "{\"id\":5,\"name\":\"Game Boy\",\"count\":%d},"
-            "{\"id\":6,\"name\":\"Game Boy Color\",\"count\":%d},"
-            "{\"id\":7,\"name\":\"Game Boy Advance\",\"count\":%d}]",
-            database_get_rom_count_by_console(CONSOLE_NES),
-            database_get_rom_count_by_console(CONSOLE_SNES),
-            database_get_rom_count_by_console(CONSOLE_N64),
-            database_get_rom_count_by_console(CONSOLE_GAMECUBE),
-            database_get_rom_count_by_console(CONSOLE_WII),
-            database_get_rom_count_by_console(CONSOLE_GB),
-            database_get_rom_count_by_console(CONSOLE_GBC),
-            database_get_rom_count_by_console(CONSOLE_GBA));
-        send_response(fd, 200, "OK", "application/json", json, len);
-    }
-    else if (strcmp(path, "/api/roms/scan") == 0) {
-        printf("Manual ROM rescan triggered via API\n");
-        scanner_scrape_session_begin(&igdb_progress);
-        for (int i = 0; i < server_config.roms_path_count; i++)
-            scanner_scan_rom_directory(server_config.roms_paths[i]);
-        scanner_fetch_rom_metadata();
-        scanner_fetch_rom_covers();
-        scanner_fetch_libretro_covers();
-        scanner_scrape_session_end(&igdb_progress);
-        char json[128];
-        int len = snprintf(json, sizeof(json),
-            "{\"status\":\"ok\",\"total\":%d}", database_get_rom_count());
-        send_response(fd, 200, "OK", "application/json", json, len);
-    }
-    else if (strcmp(path, "/api/roms/rescan") == 0) {
-        printf("Full ROM rescan triggered via API — clearing all ROM data\n");
-        database_delete_all_roms();
-        scanner_scrape_session_begin(&igdb_progress);
-        for (int i = 0; i < server_config.roms_path_count; i++)
-            scanner_scan_rom_directory(server_config.roms_paths[i]);
-        scanner_fetch_rom_metadata();
-        scanner_fetch_rom_covers();
-        scanner_fetch_libretro_covers();
-        scanner_scrape_session_end(&igdb_progress);
-        char json[128];
-        int len = snprintf(json, sizeof(json),
-            "{\"status\":\"ok\",\"total\":%d}", database_get_rom_count());
-        send_response(fd, 200, "OK", "application/json", json, len);
-    }
     else if (strcmp(path, "/api/scrape/status") == 0) {
-        /* TMDB progress */
         int t_active, t_total, t_processed, t_success;
         const char *t_operation;
         char t_item[256];
@@ -1006,26 +732,9 @@ static void handle_api(int fd, const char *path) {
         scanner_get_progress(&tmdb_progress, &t_active, &t_operation, t_item,
             sizeof(t_item), &t_total, &t_processed, &t_success, &t_start);
 
-        /* IGDB progress */
-        int i_active, i_total, i_processed, i_success;
-        const char *i_operation;
-        char i_item[256];
-        time_t i_start;
-        scanner_get_progress(&igdb_progress, &i_active, &i_operation, i_item,
-            sizeof(i_item), &i_total, &i_processed, &i_success, &i_start);
-
-        /* Escape current items for JSON */
-        char t_esc[512], i_esc[512];
-        char *d;
-        d = t_esc;
+        char t_esc[512];
+        char *d = t_esc;
         for (const char *s = t_item; *s && d < t_esc + sizeof(t_esc) - 6; s++) {
-            if (*s == '"') { *d++ = '\\'; *d++ = '"'; }
-            else if (*s == '\\') { *d++ = '\\'; *d++ = '\\'; }
-            else *d++ = *s;
-        }
-        *d = '\0';
-        d = i_esc;
-        for (const char *s = i_item; *s && d < i_esc + sizeof(i_esc) - 6; s++) {
             if (*s == '"') { *d++ = '\\'; *d++ = '"'; }
             else if (*s == '\\') { *d++ = '\\'; *d++ = '\\'; }
             else *d++ = *s;
@@ -1033,21 +742,12 @@ static void handle_api(int fd, const char *path) {
         *d = '\0';
 
         int t_elapsed = t_active ? (int)(time(NULL) - t_start) : 0;
-        int i_elapsed = i_active ? (int)(time(NULL) - i_start) : 0;
         float t_percent = (t_total > 0) ? (100.0f * t_processed / t_total) : 0;
-        float i_percent = (i_total > 0) ? (100.0f * i_processed / i_total) : 0;
-
-        /* Clamp to 99% while session is still active — true 100% only when done */
         if (t_active && t_percent >= 100.0f) t_percent = 99.0f;
-        if (i_active && i_percent >= 100.0f) i_percent = 99.0f;
         int t_failed = t_processed - t_success; if (t_failed < 0) t_failed = 0;
-        int i_failed = i_processed - i_success; if (i_failed < 0) i_failed = 0;
 
-        /* Database summary counts */
         int media_count = database_get_count();
-        int rom_count = database_get_rom_count();
 
-        /* Count items without metadata (pending scrape) */
         MediaEntry *tmdb_entries = NULL;
         int tmdb_pending = 0;
         if (database_get_entries_without_tmdb(&tmdb_entries, &tmdb_pending) == 0) {
@@ -1056,41 +756,21 @@ static void handle_api(int fd, const char *path) {
             free(tmdb_entries);
         }
 
-        int igdb_pending = 0;
-        for (int c = 0; c < CONSOLE_COUNT; c++) {
-            int *tmp_ids = NULL;
-            char **tmp_titles = NULL;
-            int cnt = 0;
-            if (database_get_roms_without_igdb(c, &tmp_ids, &tmp_titles, &cnt) == 0) {
-                igdb_pending += cnt;
-                for (int i = 0; i < cnt; i++) free(tmp_titles[i]);
-                free(tmp_ids);
-                free(tmp_titles);
-            }
-        }
-
         char json[2048];
         int len = snprintf(json, sizeof(json),
             "{\"tmdb\":{\"active\":%s,\"operation\":\"%s\",\"current_item\":\"%s\","
             "\"total\":%d,\"processed\":%d,\"success\":%d,\"failed\":%d,"
             "\"percent\":%.1f,\"elapsed\":%d},"
-            "\"igdb\":{\"active\":%s,\"operation\":\"%s\",\"current_item\":\"%s\","
-            "\"total\":%d,\"processed\":%d,\"success\":%d,\"failed\":%d,"
-            "\"percent\":%.1f,\"elapsed\":%d},"
-            "\"media_count\":%d,\"rom_count\":%d,"
-            "\"tmdb_pending\":%d,\"igdb_pending\":%d}",
+            "\"media_count\":%d,\"tmdb_pending\":%d}",
             t_active ? "true" : "false", t_operation, t_esc,
             t_total, t_processed, t_success, t_failed, t_percent, t_elapsed,
-            i_active ? "true" : "false", i_operation, i_esc,
-            i_total, i_processed, i_success, i_failed, i_percent, i_elapsed,
-            media_count, rom_count, tmdb_pending, igdb_pending);
+            media_count, tmdb_pending);
         send_response(fd, 200, "OK", "application/json", json, len);
     }
     else if (strcmp(path, "/api/counts") == 0) {
-        char json[512];
+        char json[256];
         int len = snprintf(json, sizeof(json),
-            "{\"movies\":%d,\"tvshows\":%d,\"roms\":%d,\"total\":%d}",
-            0, 0, database_get_rom_count(), database_get_count());
+            "{\"total\":%d}", database_get_count());
         send_response(fd, 200, "OK", "application/json", json, len);
     }
     else if (strcmp(path, "/api/debug/ls") == 0) {
@@ -1218,526 +898,6 @@ static void handle_request(int fd, const char *request) {
                  server_config.cache_dir, decoded);
         serve_file(fd, filepath);
     }
-    else if (strcmp(path, "/scrape") == 0) {
-        const char *html =
-"<!DOCTYPE html>\n"
-"<html lang=\"en\">\n"
-"<head>\n"
-"<meta charset=\"UTF-8\">\n"
-"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
-"<title>Nixly Scraper</title>\n"
-"<style>\n"
-"*{margin:0;padding:0;box-sizing:border-box}\n"
-"body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;\n"
-"  background:#0d1117;color:#c9d1d9;min-height:100vh;padding:20px;max-width:1200px;margin:0 auto}\n"
-"h1{color:#58a6ff;margin-bottom:8px;font-size:1.5em}\n"
-"h2{color:#8b949e;font-size:1em;margin:16px 0 8px}\n"
-".card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:16px}\n"
-".row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}\n"
-".state{font-size:1.1em;font-weight:600}\n"
-".state.active{color:#3fb950}.state.idle{color:#8b949e}\n"
-".progress-wrap{background:#21262d;border-radius:4px;height:20px;margin:8px 0;\n"
-"  overflow:hidden;position:relative}\n"
-".progress-bar{height:100%;transition:width .5s ease;border-radius:4px}\n"
-".progress-bar.tmdb{background:linear-gradient(90deg,#1f6feb,#58a6ff)}\n"
-".progress-bar.igdb{background:linear-gradient(90deg,#238636,#3fb950)}\n"
-".progress-bar.show{background:linear-gradient(90deg,#6e40c9,#a371f7)}\n"
-".progress-text{position:absolute;top:0;left:0;right:0;text-align:center;\n"
-"  line-height:20px;font-size:11px;color:#fff;font-weight:600}\n"
-".current{color:#8b949e;font-size:.85em;margin-top:2px;min-height:1.2em;\n"
-"  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\n"
-".mini-stats{display:flex;gap:16px;font-size:.85em;color:#8b949e;margin-top:6px}\n"
-".mini-stats b{color:#c9d1d9}\n"
-".controls{margin:10px 0;display:flex;gap:8px;flex-wrap:wrap}\n"
-".btn{padding:6px 14px;border:1px solid #30363d;border-radius:6px;\n"
-"  background:#21262d;color:#c9d1d9;cursor:pointer;font-size:12px;transition:background .15s}\n"
-".btn:hover{background:#30363d}\n"
-".btn.blue{border-color:#1f6feb;color:#58a6ff}\n"
-".btn.blue:hover{background:#1f6feb;color:#fff}\n"
-".btn.green{border-color:#238636;color:#3fb950}\n"
-".btn.green:hover{background:#238636;color:#fff}\n"
-".btn:disabled{opacity:.4;cursor:not-allowed}\n"
-".tabs{display:flex;gap:0;border-bottom:1px solid #30363d;margin-bottom:12px}\n"
-".tab{padding:8px 20px;cursor:pointer;color:#8b949e;font-size:.9em;border-bottom:2px solid transparent;\n"
-"  transition:color .15s}\n"
-".tab:hover{color:#c9d1d9}.tab.active{color:#58a6ff;border-bottom-color:#58a6ff}\n"
-".tab .cnt{font-size:.8em;color:#484f58;margin-left:4px}\n"
-".filter{margin-bottom:10px}\n"
-".filter input{background:#0d1117;border:1px solid #30363d;border-radius:6px;\n"
-"  padding:6px 12px;color:#c9d1d9;font-size:13px;width:100%;max-width:400px}\n"
-".filter select{background:#0d1117;border:1px solid #30363d;border-radius:6px;\n"
-"  padding:6px 8px;color:#c9d1d9;font-size:12px;margin-left:8px}\n"
-".list{display:flex;flex-direction:column;gap:2px}\n"
-".item{background:#161b22;border:1px solid #21262d;border-radius:6px;cursor:pointer;\n"
-"  transition:border-color .15s;overflow:hidden}\n"
-".item:hover{border-color:#30363d}\n"
-".item.has-data{border-left:3px solid #238636}\n"
-".item.no-data{border-left:3px solid #484f58}\n"
-".item-head{display:flex;align-items:center;padding:8px 12px;gap:10px}\n"
-".item-thumb{width:36px;height:50px;border-radius:4px;object-fit:cover;background:#21262d;flex-shrink:0}\n"
-".item-thumb-ph{width:36px;height:50px;border-radius:4px;background:#21262d;flex-shrink:0;\n"
-"  display:flex;align-items:center;justify-content:center;font-size:10px;color:#484f58}\n"
-".item-info{flex:1;min-width:0}\n"
-".item-title{font-weight:600;font-size:.9em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\n"
-".item-sub{font-size:.75em;color:#8b949e}\n"
-".tag{display:inline-block;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;margin-right:4px}\n"
-".tag.movie{background:#1f3d1f;color:#3fb950}\n"
-".tag.tv{background:#1f2d4f;color:#58a6ff}\n"
-".tag.rom{background:#2d1f4f;color:#a371f7}\n"
-".tag.miss{background:#3d1f1f;color:#f85149}\n"
-".item-detail{display:none;padding:0 12px 12px;border-top:1px solid #21262d}\n"
-".item.open .item-detail{display:flex;gap:16px;padding-top:12px}\n"
-".detail-cover{flex-shrink:0}\n"
-".detail-cover img{width:140px;border-radius:6px;display:block}\n"
-".detail-cover .ph{width:140px;height:200px;background:#21262d;border-radius:6px;\n"
-"  display:flex;align-items:center;justify-content:center;color:#484f58;font-size:12px}\n"
-".detail-fields{flex:1;min-width:0}\n"
-".detail-fields table{width:100%;border-collapse:collapse;font-size:.8em}\n"
-".detail-fields td{padding:3px 8px;vertical-align:top}\n"
-".detail-fields td:first-child{color:#8b949e;white-space:nowrap;width:100px}\n"
-".detail-fields td:last-child{color:#c9d1d9;word-break:break-word}\n"
-".detail-fields .overview{font-size:.8em;color:#8b949e;margin-top:8px;\n"
-"  max-height:80px;overflow-y:auto;line-height:1.4}\n"
-"@media(max-width:600px){.item-detail{flex-direction:column}\n"
-"  .detail-cover img,.detail-cover .ph{width:100px;height:auto}}\n"
-".modal-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;\n"
-"  background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center}\n"
-".modal-overlay.show{display:flex}\n"
-".modal-box{background:#161b22;border:1px solid #30363d;border-radius:12px;\n"
-"  padding:28px 32px;max-width:420px;width:90%;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.5)}\n"
-".modal-box h3{color:#f0883e;margin:0 0 12px;font-size:1.2em}\n"
-".modal-box p{color:#c9d1d9;margin:0 0 24px;line-height:1.5;font-size:.95em}\n"
-".modal-btns{display:flex;gap:12px;justify-content:center}\n"
-".modal-btns button{padding:10px 28px;border:none;border-radius:8px;font-weight:700;\n"
-"  font-size:.95em;cursor:pointer;transition:opacity .2s}\n"
-".modal-btns button:hover{opacity:.85}\n"
-".modal-yes{background:#da3633;color:#fff}\n"
-".modal-no{background:#238636;color:#fff}\n"
-"</style>\n"
-"</head>\n"
-"<body>\n"
-"<h1>Nixly Scraper</h1>\n"
-"\n"
-"<div class=\"card\">\n"
-"  <h2 style=\"color:#58a6ff;margin-bottom:8px\">TMDB — Movies &amp; TV</h2>\n"
-"  <div class=\"row\">\n"
-"    <span class=\"state\" id=\"t-state\">Loading...</span>\n"
-"    <span id=\"t-op\" style=\"color:#8b949e;font-size:.85em\"></span>\n"
-"  </div>\n"
-"  <div class=\"progress-wrap\"><div class=\"progress-bar tmdb\" id=\"t-pbar\"></div>\n"
-"    <div class=\"progress-text\" id=\"t-ptxt\"></div></div>\n"
-"  <div class=\"current\" id=\"t-current\"></div>\n"
-"  <div class=\"mini-stats\">\n"
-"    <span>Processed: <b id=\"t-proc\">-</b></span>\n"
-"    <span>Matched: <b id=\"t-ok\" style=\"color:#3fb950\">-</b></span>\n"
-"    <span>Failed: <b id=\"t-fail\" style=\"color:#d29922\">-</b></span>\n"
-"    <span>Time: <b id=\"t-time\">-</b></span>\n"
-"    <span>Media: <b id=\"m-media\">-</b></span>\n"
-"    <span style=\"color:#d29922\">Pending: <b id=\"m-tmdb\">-</b></span>\n"
-"  </div>\n"
-"  <div class=\"controls\">\n"
-"    <button class=\"btn blue\" id=\"btn-tmdb\" onclick=\"scrapeAction('/api/tmdb/refresh','btn-tmdb')\">Fetch Missing</button>\n"
-"    <button class=\"btn blue\" id=\"btn-tmdb-full\" onclick=\"confirmRescan('/api/tmdb/rescan','btn-tmdb-full')\">Full Rescan</button>\n"
-"  </div>\n"
-"</div>\n"
-"\n"
-"<div class=\"card\">\n"
-"  <h2 style=\"color:#3fb950;margin-bottom:8px\">IGDB — ROMs</h2>\n"
-"  <div class=\"row\">\n"
-"    <span class=\"state\" id=\"i-state\">Loading...</span>\n"
-"    <span id=\"i-op\" style=\"color:#8b949e;font-size:.85em\"></span>\n"
-"  </div>\n"
-"  <div class=\"progress-wrap\"><div class=\"progress-bar igdb\" id=\"i-pbar\"></div>\n"
-"    <div class=\"progress-text\" id=\"i-ptxt\"></div></div>\n"
-"  <div class=\"current\" id=\"i-current\"></div>\n"
-"  <div class=\"mini-stats\">\n"
-"    <span>Processed: <b id=\"i-proc\">-</b></span>\n"
-"    <span>Matched: <b id=\"i-ok\" style=\"color:#3fb950\">-</b></span>\n"
-"    <span>Failed: <b id=\"i-fail\" style=\"color:#d29922\">-</b></span>\n"
-"    <span>Time: <b id=\"i-time\">-</b></span>\n"
-"    <span>ROMs: <b id=\"m-roms\">-</b></span>\n"
-"    <span style=\"color:#a371f7\">Pending: <b id=\"m-igdb\">-</b></span>\n"
-"  </div>\n"
-"  <div class=\"controls\">\n"
-"    <button class=\"btn green\" id=\"btn-igdb\" onclick=\"scrapeAction('/api/roms/scan','btn-igdb')\">Fetch Missing</button>\n"
-"    <button class=\"btn green\" id=\"btn-igdb-full\" onclick=\"confirmRescan('/api/roms/rescan','btn-igdb-full')\">Full Rescan</button>\n"
-"  </div>\n"
-"</div>\n"
-"\n"
-"<div class=\"tabs\">\n"
-"  <div class=\"tab active\" data-tab=\"movies\" onclick=\"switchTab('movies')\">Movies<span class=\"cnt\" id=\"cnt-movies\"></span></div>\n"
-"  <div class=\"tab\" data-tab=\"tv\" onclick=\"switchTab('tv')\">TV Shows<span class=\"cnt\" id=\"cnt-tv\"></span></div>\n"
-"  <div class=\"tab\" data-tab=\"roms\" onclick=\"switchTab('roms')\">ROMs<span class=\"cnt\" id=\"cnt-roms\"></span></div>\n"
-"</div>\n"
-"<div class=\"filter\">\n"
-"  <input type=\"text\" id=\"search\" placeholder=\"Search...\" oninput=\"filterList()\">\n"
-"  <select id=\"scrape-filter\" onchange=\"filterList()\">\n"
-"    <option value=\"all\">All</option>\n"
-"    <option value=\"scraped\">Scraped</option>\n"
-"    <option value=\"missing\">Missing data</option>\n"
-"  </select>\n"
-"  <select id=\"console-filter\" onchange=\"filterList()\" style=\"display:none\">\n"
-"    <option value=\"all\">All Consoles</option>\n"
-"  </select>\n"
-"</div>\n"
-"<div class=\"list\" id=\"list\"></div>\n"
-"\n"
-"<div class=\"modal-overlay\" id=\"rescan-modal\">\n"
-"  <div class=\"modal-box\">\n"
-"    <h3>Warning</h3>\n"
-"    <p>All existing metadata will be deleted and everything will be rescanned from scratch. This may take a while.</p>\n"
-"    <div class=\"modal-btns\">\n"
-"      <button class=\"modal-yes\" id=\"modal-yes\">Yes!</button>\n"
-"      <button class=\"modal-no\" id=\"modal-no\">Hell no!</button>\n"
-"    </div>\n"
-"  </div>\n"
-"</div>\n"
-"\n"
-"<script>\n"
-"var mediaData=[],romData=[];\n"
-"var activeTab='movies';\n"
-"var opLabels={'idle':'Idle','starting':'Starting...','tmdb_fetch':'Fetch','tmdb_rescan':'Rescan',\n"
-"  'igdb_fetch':'Fetch','igdb_rescan':'Rescan','show_status':'Show Status',\n"
-"  'igdb_covers':'Covers','libretro_covers':'Libretro Covers'};\n"
-"\n"
-"function fmtTime(s){if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m '+s%60+'s';\n"
-"  return Math.floor(s/3600)+'h '+Math.floor(s%3600/60)+'m'}\n"
-"function fmtSize(b){if(b>1073741824)return(b/1073741824).toFixed(1)+' GB';\n"
-"  if(b>1048576)return(b/1048576).toFixed(1)+' MB';return(b/1024).toFixed(0)+' KB'}\n"
-"function fmtDur(s){if(!s)return'-';var h=Math.floor(s/3600),m=Math.floor(s%3600/60);\n"
-"  return h>0?h+'h '+m+'m':m+'m'}\n"
-"function esc(s){if(!s)return'';var d=document.createElement('div');d.textContent=s;return d.innerHTML}\n"
-"function imgUrl(p){if(!p)return'';return'/image/'+p.split('/').pop()}\n"
-"\n"
-"function switchTab(t){\n"
-"  activeTab=t;\n"
-"  document.querySelectorAll('.tab').forEach(function(el){\n"
-"    el.classList.toggle('active',el.getAttribute('data-tab')===t)});\n"
-"  document.getElementById('console-filter').style.display=t==='roms'?'':'none';\n"
-"  filterList();\n"
-"}\n"
-"\n"
-"function filterList(){\n"
-"  var q=document.getElementById('search').value.toLowerCase();\n"
-"  var sf=document.getElementById('scrape-filter').value;\n"
-"  var cf=document.getElementById('console-filter').value;\n"
-"  var items=[];\n"
-"  if(activeTab==='movies'){\n"
-"    items=mediaData.filter(function(m){return m.type===0});\n"
-"  }else if(activeTab==='tv'){\n"
-"    items=mediaData.filter(function(m){return m.type===2||m.type===1});\n"
-"  }else{\n"
-"    items=romData;\n"
-"    if(cf!=='all')items=items.filter(function(r){return r.console_name===cf});\n"
-"  }\n"
-"  if(q)items=items.filter(function(i){return(i.title||'').toLowerCase().indexOf(q)>=0\n"
-"    ||(i.tmdb_title||'').toLowerCase().indexOf(q)>=0\n"
-"    ||(i.show_name||'').toLowerCase().indexOf(q)>=0\n"
-"    ||(i.developer||'').toLowerCase().indexOf(q)>=0});\n"
-"  if(sf==='scraped')items=items.filter(function(i){\n"
-"    return activeTab==='roms'?i.igdb_id>0:i.tmdb_id>0});\n"
-"  if(sf==='missing')items=items.filter(function(i){\n"
-"    return activeTab==='roms'?i.igdb_id<=0:i.tmdb_id<=0});\n"
-"  renderList(items);\n"
-"}\n"
-"\n"
-"function renderList(items){\n"
-"  var el=document.getElementById('list');\n"
-"  if(items.length>500)items=items.slice(0,500);\n"
-"  var h='';\n"
-"  items.forEach(function(item,idx){\n"
-"    var isRom=activeTab==='roms';\n"
-"    var hasData=isRom?item.igdb_id>0:item.tmdb_id>0;\n"
-"    var thumb='',title='',sub='';\n"
-"    if(isRom){\n"
-"      var cv=item.cover?imgUrl(item.cover):'';\n"
-"      thumb=cv?'<img class=\"item-thumb\" src=\"'+esc(cv)+'\" loading=\"lazy\">'\n"
-"        :'<div class=\"item-thumb-ph\">?</div>';\n"
-"      title=esc(item.title);\n"
-"      sub='<span class=\"tag rom\">'+esc(item.console_name)+'</span> ';\n"
-"      if(item.developer)sub+=esc(item.developer)+' ';\n"
-"      if(item.release_year>0)sub+='('+item.release_year+') ';\n"
-"      if(item.igdb_rating>0)sub+=item.igdb_rating.toFixed(0)+'/100 ';\n"
-"      if(!hasData)sub+='<span class=\"tag miss\">No IGDB</span>';\n"
-"    }else{\n"
-"      var poster=item.poster?imgUrl(item.poster):'';\n"
-"      thumb=poster?'<img class=\"item-thumb\" src=\"'+esc(poster)+'\" loading=\"lazy\">'\n"
-"        :'<div class=\"item-thumb-ph\">?</div>';\n"
-"      var typTag=item.type===0?'<span class=\"tag movie\">Movie</span>':'<span class=\"tag tv\">TV</span>';\n"
-"      title=esc(item.tmdb_title||item.title);\n"
-"      sub=typTag+' ';\n"
-"      if(item.type===2&&item.show_name)sub+='S'+String(item.season).padStart(2,'0')+'E'+String(item.episode).padStart(2,'0')+' ';\n"
-"      if(item.year>0)sub+='('+item.year+') ';\n"
-"      if(item.rating>0)sub+=item.rating.toFixed(1)+'/10 ';\n"
-"      if(item.genres)sub+=esc(item.genres)+' ';\n"
-"      if(!hasData)sub+='<span class=\"tag miss\">No TMDB</span>';\n"
-"    }\n"
-"    h+='<div class=\"item '+(hasData?'has-data':'no-data')+'\" onclick=\"toggleItem(this)\">';\n"
-"    h+='<div class=\"item-head\">'+thumb;\n"
-"    h+='<div class=\"item-info\"><div class=\"item-title\">'+title+'</div>';\n"
-"    h+='<div class=\"item-sub\">'+sub+'</div></div></div>';\n"
-"    h+='<div class=\"item-detail\">'+buildDetail(item,isRom)+'</div></div>';\n"
-"  });\n"
-"  el.innerHTML=h||'<div style=\"color:#484f58;padding:20px;text-align:center\">No items</div>';\n"
-"}\n"
-"\n"
-"function buildDetail(item,isRom){\n"
-"  var cover='',fields='';\n"
-"  if(isRom){\n"
-"    var cv=item.cover?imgUrl(item.cover):'';\n"
-"    cover=cv?'<div class=\"detail-cover\"><a href=\"'+esc(cv)+'\" target=\"_blank\"><img src=\"'+esc(cv)+'\"></a></div>'\n"
-"      :'<div class=\"detail-cover\"><div class=\"ph\">No cover</div></div>';\n"
-"    fields='<table>'\n"
-"      +'<tr><td>Title</td><td>'+esc(item.title)+'</td></tr>'\n"
-"      +'<tr><td>Console</td><td>'+esc(item.console_name)+'</td></tr>'\n"
-"      +'<tr><td>IGDB ID</td><td>'+(item.igdb_id>0?item.igdb_id:'<span style=\"color:#f85149\">Not found</span>')+'</td></tr>'\n"
-"      +'<tr><td>Developer</td><td>'+(esc(item.developer)||'-')+'</td></tr>'\n"
-"      +'<tr><td>Publisher</td><td>'+(esc(item.publisher)||'-')+'</td></tr>'\n"
-"      +'<tr><td>Year</td><td>'+(item.release_year>0?item.release_year:'-')+'</td></tr>'\n"
-"      +'<tr><td>Genre</td><td>'+(esc(item.genre)||'-')+'</td></tr>'\n"
-"      +'<tr><td>Players</td><td>'+(esc(item.players)||'-')+'</td></tr>'\n"
-"      +'<tr><td>Rating</td><td>'+(item.igdb_rating>0?item.igdb_rating.toFixed(1)+'/100':'-')+'</td></tr>'\n"
-"      +'<tr><td>Platforms</td><td>'+(esc(item.igdb_platforms)||'-')+'</td></tr>'\n"
-"      +'<tr><td>Region</td><td>'+(esc(item.region)||'-')+'</td></tr>'\n"
-"      +'<tr><td>Size</td><td>'+fmtSize(item.size)+'</td></tr>'\n"
-"      +'<tr><td>Cover</td><td>'+(cv?'<a href=\"'+esc(cv)+'\" target=\"_blank\" style=\"color:#58a6ff\">'+esc(cv)+'</a>':'None')+'</td></tr>'\n"
-"      +'</table>';\n"
-"    if(item.description)fields+='<div class=\"overview\">'+esc(item.description)+'</div>';\n"
-"  }else{\n"
-"    var poster=item.poster?imgUrl(item.poster):'';\n"
-"    var backdrop=item.backdrop?imgUrl(item.backdrop):'';\n"
-"    cover=poster?'<div class=\"detail-cover\"><a href=\"'+esc(poster)+'\" target=\"_blank\"><img src=\"'+esc(poster)+'\"></a></div>'\n"
-"      :'<div class=\"detail-cover\"><div class=\"ph\">No poster</div></div>';\n"
-"    fields='<table>'\n"
-"      +'<tr><td>File Title</td><td>'+esc(item.title)+'</td></tr>'\n"
-"      +'<tr><td>TMDB Title</td><td>'+(esc(item.tmdb_title)||'<span style=\"color:#f85149\">Not found</span>')+'</td></tr>'\n"
-"      +'<tr><td>TMDB ID</td><td>'+(item.tmdb_id>0?item.tmdb_id:'-')+'</td></tr>';\n"
-"    if(item.type===2){\n"
-"      fields+='<tr><td>Show</td><td>'+(esc(item.show_name)||'-')+'</td></tr>'\n"
-"        +'<tr><td>Episode</td><td>S'+String(item.season).padStart(2,'0')+'E'+String(item.episode).padStart(2,'0')+'</td></tr>';\n"
-"    }\n"
-"    fields+='<tr><td>Year</td><td>'+(item.year>0?item.year:'-')+'</td></tr>'\n"
-"      +'<tr><td>Rating</td><td>'+(item.rating>0?item.rating.toFixed(1)+'/10':'-')+'</td></tr>'\n"
-"      +'<tr><td>Genres</td><td>'+(esc(item.genres)||'-')+'</td></tr>'\n"
-"      +'<tr><td>Resolution</td><td>'+(item.width?item.width+'x'+item.height:'-')+'</td></tr>'\n"
-"      +'<tr><td>Duration</td><td>'+fmtDur(item.duration)+'</td></tr>'\n"
-"      +'<tr><td>Size</td><td>'+fmtSize(item.size)+'</td></tr>'\n"
-"      +'<tr><td>Poster</td><td>'+(poster?'<a href=\"'+esc(poster)+'\" target=\"_blank\" style=\"color:#58a6ff\">'+esc(poster)+'</a>':'None')+'</td></tr>'\n"
-"      +'<tr><td>Backdrop</td><td>'+(backdrop?'<a href=\"'+esc(backdrop)+'\" target=\"_blank\" style=\"color:#58a6ff\">'+esc(backdrop)+'</a>':'None')+'</td></tr>'\n"
-"      +'</table>';\n"
-"    if(item.overview)fields+='<div class=\"overview\">'+esc(item.overview)+'</div>';\n"
-"  }\n"
-"  return cover+'<div class=\"detail-fields\">'+fields+'</div>';\n"
-"}\n"
-"\n"
-"function toggleItem(el){el.classList.toggle('open')}\n"
-"\n"
-"function scrapeAction(url,btnId){\n"
-"  var b=document.getElementById(btnId);b.disabled=true;\n"
-"  fetch(url).then(function(){setTimeout(function(){b.disabled=false;refreshStatus();loadLibrary()},500)})\n"
-"    .catch(function(){b.disabled=false});\n"
-"}\n"
-"\n"
-"var pendingRescan=null;\n"
-"function confirmRescan(url,btnId){\n"
-"  pendingRescan={url:url,btnId:btnId};\n"
-"  document.getElementById('rescan-modal').classList.add('show');\n"
-"}\n"
-"document.getElementById('modal-yes').onclick=function(){\n"
-"  document.getElementById('rescan-modal').classList.remove('show');\n"
-"  if(pendingRescan) scrapeAction(pendingRescan.url,pendingRescan.btnId);\n"
-"  pendingRescan=null;\n"
-"};\n"
-"document.getElementById('modal-no').onclick=function(){\n"
-"  document.getElementById('rescan-modal').classList.remove('show');\n"
-"  pendingRescan=null;\n"
-"};\n"
-"\n"
-"function updateTracker(prefix,d){\n"
-"  var s=document.getElementById(prefix+'-state');\n"
-"  s.textContent=d.active?'Active':'Idle';\n"
-"  s.className='state '+(d.active?'active':'idle');\n"
-"  document.getElementById(prefix+'-op').textContent=d.active?(opLabels[d.operation]||d.operation):'';\n"
-"  var bar=document.getElementById(prefix+'-pbar');\n"
-"  bar.style.width=d.percent+'%';\n"
-"  document.getElementById(prefix+'-ptxt').textContent=\n"
-"    d.active?d.processed+'/'+d.total+' ('+d.percent.toFixed(1)+'%)':'';\n"
-"  document.getElementById(prefix+'-current').textContent=\n"
-"    d.current_item?'Current: '+d.current_item:'';\n"
-"  document.getElementById(prefix+'-proc').textContent=d.active?d.processed:'-';\n"
-"  document.getElementById(prefix+'-ok').textContent=d.active?d.success:'-';\n"
-"  document.getElementById(prefix+'-fail').textContent=d.active?d.failed:'-';\n"
-"  document.getElementById(prefix+'-time').textContent=d.active?fmtTime(d.elapsed):'-';\n"
-"}\n"
-"\n"
-"var lastMediaCount=-1,lastRomCount=-1;\n"
-"function refreshStatus(){\n"
-"  fetch('/api/scrape/status').then(function(r){return r.json()}).then(function(d){\n"
-"    updateTracker('t',d.tmdb);\n"
-"    updateTracker('i',d.igdb);\n"
-"    document.getElementById('m-media').textContent=d.media_count;\n"
-"    document.getElementById('m-roms').textContent=d.rom_count;\n"
-"    document.getElementById('m-tmdb').textContent=d.tmdb_pending;\n"
-"    document.getElementById('m-igdb').textContent=d.igdb_pending;\n"
-"    if(lastMediaCount>=0&&(d.media_count!==lastMediaCount||d.rom_count!==lastRomCount))loadLibrary();\n"
-"    lastMediaCount=d.media_count;lastRomCount=d.rom_count;\n"
-"  });\n"
-"}\n"
-"\n"
-"function loadLibrary(){\n"
-"  fetch('/api/library').then(function(r){return r.json()}).then(function(data){\n"
-"    mediaData=data;\n"
-"    var movies=data.filter(function(m){return m.type===0}).length;\n"
-"    var tv=data.filter(function(m){return m.type===2||m.type===1}).length;\n"
-"    document.getElementById('cnt-movies').textContent=' ('+movies+')';\n"
-"    document.getElementById('cnt-tv').textContent=' ('+tv+')';\n"
-"    if(activeTab!=='roms')filterList();\n"
-"  });\n"
-"  fetch('/api/roms').then(function(r){return r.json()}).then(function(data){\n"
-"    romData=data;\n"
-"    document.getElementById('cnt-roms').textContent=' ('+data.length+')';\n"
-"    var sel=document.getElementById('console-filter');\n"
-"    var consoles={};\n"
-"    data.forEach(function(r){if(r.console_name)consoles[r.console_name]=(consoles[r.console_name]||0)+1});\n"
-"    sel.innerHTML='<option value=\"all\">All Consoles</option>';\n"
-"    Object.keys(consoles).sort().forEach(function(c){\n"
-"      sel.innerHTML+='<option value=\"'+esc(c)+'\">'+esc(c)+' ('+consoles[c]+')</option>';\n"
-"    });\n"
-"    if(activeTab==='roms')filterList();\n"
-"  });\n"
-"}\n"
-"\n"
-"refreshStatus();setInterval(refreshStatus,2000);\n"
-"loadLibrary();\n"
-"</script>\n"
-"</body></html>\n";
-        send_response(fd, 200, "OK", "text/html", html, strlen(html));
-    }
-    else if (strcmp(path, "/status") == 0) {
-        const char *html =
-"<!DOCTYPE html>\n"
-"<html lang=\"en\">\n"
-"<head>\n"
-"<meta charset=\"UTF-8\">\n"
-"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
-"<title>Nixly Transcoder</title>\n"
-"<style>\n"
-"*{margin:0;padding:0;box-sizing:border-box}\n"
-"body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;\n"
-"  background:#0d1117;color:#c9d1d9;min-height:100vh;padding:20px}\n"
-"h1{color:#58a6ff;margin-bottom:8px;font-size:1.5em}\n"
-".status-bar{background:#161b22;border:1px solid #30363d;border-radius:8px;\n"
-"  padding:16px;margin-bottom:20px}\n"
-".status-bar .state{font-size:1.1em;font-weight:600}\n"
-".state.running{color:#3fb950}.state.idle{color:#8b949e}.state.stopped{color:#f85149}\n"
-".progress-wrap{background:#21262d;border-radius:4px;height:24px;margin:10px 0;\n"
-"  overflow:hidden;position:relative}\n"
-".progress-bar{background:linear-gradient(90deg,#1f6feb,#58a6ff);height:100%;\n"
-"  transition:width .5s ease;border-radius:4px}\n"
-".progress-text{position:absolute;top:0;left:0;right:0;text-align:center;\n"
-"  line-height:24px;font-size:12px;color:#fff;font-weight:600}\n"
-".current{color:#8b949e;font-size:0.9em;margin-top:4px}\n"
-".controls{margin:12px 0;display:flex;gap:8px;flex-wrap:wrap}\n"
-".btn{padding:8px 16px;border:1px solid #30363d;border-radius:6px;\n"
-"  background:#21262d;color:#c9d1d9;cursor:pointer;font-size:13px;\n"
-"  transition:background .15s}\n"
-".btn:hover{background:#30363d}\n"
-".btn.green{border-color:#238636;color:#3fb950}\n"
-".btn.green:hover{background:#238636;color:#fff}\n"
-".btn.red{border-color:#da3633;color:#f85149}\n"
-".btn.red:hover{background:#da3633;color:#fff}\n"
-".btn.blue{border-color:#1f6feb;color:#58a6ff}\n"
-".btn.blue:hover{background:#1f6feb;color:#fff}\n"
-".queue{list-style:none}\n"
-".queue li{display:flex;align-items:center;gap:10px;padding:10px 12px;\n"
-"  background:#161b22;border:1px solid #30363d;border-radius:6px;\n"
-"  margin-bottom:6px;transition:opacity .2s}\n"
-".queue li.skipped{opacity:.4;text-decoration:line-through}\n"
-".queue li.active{border-color:#1f6feb;background:#161b22}\n"
-".queue li .info{flex:1;min-width:0}\n"
-".queue li .title{font-weight:600;color:#c9d1d9;white-space:nowrap;\n"
-"  overflow:hidden;text-overflow:ellipsis}\n"
-".queue li .meta{font-size:0.8em;color:#8b949e}\n"
-".queue li .actions{display:flex;gap:6px;flex-shrink:0}\n"
-".queue li .actions .btn{padding:4px 10px;font-size:12px}\n"
-".tag{display:inline-block;padding:2px 6px;border-radius:3px;font-size:11px;\n"
-"  font-weight:600;margin-right:4px}\n"
-".tag.movie{background:#1f3d1f;color:#3fb950}\n"
-".tag.tv{background:#1f2d4f;color:#58a6ff}\n"
-".counter{color:#8b949e;font-size:0.9em;margin-bottom:10px}\n"
-"</style>\n"
-"</head>\n"
-"<body>\n"
-"<h1>Nixly Transcoder</h1>\n"
-"\n"
-"<div class=\"status-bar\">\n"
-"  <div><span class=\"state\" id=\"state\">Loading...</span></div>\n"
-"  <div class=\"progress-wrap\"><div class=\"progress-bar\" id=\"pbar\"></div>\n"
-"    <div class=\"progress-text\" id=\"ptxt\"></div></div>\n"
-"  <div class=\"current\" id=\"current\"></div>\n"
-"  <div class=\"controls\">\n"
-"    <button class=\"btn green\" onclick=\"apiCall('/api/transcode/start')\">Start</button>\n"
-"    <button class=\"btn red\" onclick=\"apiCall('/api/transcode/stop')\">Stop</button>\n"
-"  </div>\n"
-"</div>\n"
-"\n"
-"<div class=\"counter\" id=\"counter\"></div>\n"
-"<ul class=\"queue\" id=\"queue\"></ul>\n"
-"\n"
-"<script>\n"
-"function apiCall(url){fetch(url).then(()=>setTimeout(refresh,300))}\n"
-"function esc(s){var d=document.createElement('div');d.textContent=s;\n"
-"  return d.innerHTML.replace(/\"/g,'&quot;')}\n"
-"\n"
-"document.getElementById('queue').addEventListener('click',function(e){\n"
-"  var btn=e.target.closest('button[data-action]');\n"
-"  if(!btn)return;\n"
-"  var t=btn.getAttribute('data-title');\n"
-"  var a=btn.getAttribute('data-action');\n"
-"  apiCall('/api/transcode/'+a+'?title='+encodeURIComponent(t));\n"
-"});\n"
-"\n"
-"function refresh(){\n"
-"  fetch('/api/transcode/status').then(function(r){return r.json()}).then(function(d){\n"
-"    var s=document.getElementById('state');\n"
-"    s.textContent=d.state.charAt(0).toUpperCase()+d.state.slice(1);\n"
-"    s.className='state '+d.state;\n"
-"    document.getElementById('pbar').style.width=d.percent+'%';\n"
-"    document.getElementById('ptxt').textContent=\n"
-"      d.state==='running'?d.percent.toFixed(1)+'%':'';\n"
-"    document.getElementById('current').textContent=\n"
-"      d.current?'Encoding: '+d.current:'';\n"
-"  });\n"
-"  fetch('/api/transcode/queue').then(function(r){return r.json()}).then(function(jobs){\n"
-"    var ul=document.getElementById('queue');\n"
-"    document.getElementById('counter').textContent=jobs.length+' files in queue';\n"
-"    ul.innerHTML='';\n"
-"    jobs.forEach(function(j){\n"
-"      var li=document.createElement('li');\n"
-"      if(j.skipped)li.className='skipped';\n"
-"      if(j.current)li.className='active';\n"
-"      var type=j.type===2?'tv':'movie';\n"
-"      var tag='<span class=\"tag '+type+'\">'+(j.type===2?'TV':'Movie')+'</span>';\n"
-"      var meta=j.type===2?'S'+String(j.season).padStart(2,'0')+'E'+\n"
-"        String(j.episode).padStart(2,'0'):'';if(j.year)meta+=' ('+j.year+')';\n"
-"      var t=esc(j.title);\n"
-"      var skipBtn=j.skipped?\n"
-"        '<button class=\"btn\" data-action=\"unskip\" data-title=\"'+t+'\">Unskip</button>':\n"
-"        '<button class=\"btn red\" data-action=\"skip\" data-title=\"'+t+'\">Skip</button>';\n"
-"      li.innerHTML='<div class=\"info\"><div class=\"title\">'+tag+' '+t+\n"
-"        '</div><div class=\"meta\">'+meta+'</div></div>'+\n"
-"        '<div class=\"actions\">'+skipBtn+\n"
-"        '<button class=\"btn blue\" data-action=\"prioritize\" data-title=\"'+t+\n"
-"        '\">Prioritize!</button></div>';\n"
-"      ul.appendChild(li);\n"
-"    });\n"
-"  });\n"
-"}\n"
-"refresh();setInterval(refresh,3000);\n"
-"</script>\n"
-"</body></html>\n";
-        send_response(fd, 200, "OK", "text/html", html, strlen(html));
-    }
     else if (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0) {
         const char *html =
             "<!DOCTYPE html><html><head><title>Nixly Media Server</title></head>"
@@ -1751,14 +911,9 @@ static void handle_request(int fd, const char *request) {
             "<li>/api/scan - Rescan library</li>"
             "<li>/api/tmdb/refresh - Fetch missing TMDB data</li>"
             "<li>/api/tmdb/rescan - Re-fetch ALL TMDB data</li>"
-            "<li><a href='/api/roms'>/api/roms</a> - All ROMs</li>"
-            "<li>/api/roms/console/{id} - ROMs by console (0-7)</li>"
-            "<li>/api/roms/scan - Rescan ROM directories</li>"
-            "<li>/api/roms/rescan - Re-fetch ALL IGDB ROM data</li>"
+            "<li>/api/scrape/status - Current scrape progress</li>"
             "<li>/stream/{id} - Stream media file</li>"
             "<li>/image/{filename} - Cached poster/backdrop</li>"
-            "<li><a href='/scrape'>/scrape</a> - Live scraping status</li>"
-            "<li><a href='/status'>/status</a> - Transcoder status &amp; queue</li>"
             "</ul></body></html>";
         send_response(fd, 200, "OK", "text/html", html, strlen(html));
     }
@@ -1921,11 +1076,6 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    /* Initialize IGDB */
-    if (server_config.igdb_client_id[0] && server_config.igdb_client_secret[0]) {
-        igdb_init(server_config.igdb_client_id, server_config.igdb_client_secret);
-    }
-
     /* Create server socket FIRST - accept connections while scanning in background */
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
@@ -2018,14 +1168,12 @@ int main(int argc, char *argv[]) {
 
     /* Cleanup */
     downloads_stop();
-    transcoder_cleanup();
     if (discovery_fd >= 0) {
         close(discovery_fd);
         discovery_fd = -1;
     }
     watcher_cleanup();
     tmdb_cleanup();
-    igdb_cleanup();
     database_close();
     printf("\nServer stopped.\n");
     return 0;

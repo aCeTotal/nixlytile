@@ -14,39 +14,6 @@ typedef enum {
     MEDIA_TYPE_EPISODE = 2
 } MediaType;
 
-typedef enum {
-    CONSOLE_NES = 0,
-    CONSOLE_SNES = 1,
-    CONSOLE_N64 = 2,
-    CONSOLE_GAMECUBE = 3,
-    CONSOLE_WII = 4,
-    CONSOLE_GB = 5,
-    CONSOLE_GBC = 6,
-    CONSOLE_GBA = 7,
-    CONSOLE_PS2 = 8,
-    CONSOLE_SWITCH = 9,
-    CONSOLE_PS1 = 10,
-    CONSOLE_PS3 = 11,
-    CONSOLE_PS4 = 12,
-    CONSOLE_PSP = 13,
-    CONSOLE_VITA = 14,
-    CONSOLE_XBOX = 15,
-    CONSOLE_XBOX360 = 16,
-    CONSOLE_WIIU = 17,
-    CONSOLE_DS = 18,
-    CONSOLE_3DS = 19,
-    CONSOLE_GENESIS = 20,
-    CONSOLE_MASTER_SYSTEM = 21,
-    CONSOLE_SATURN = 22,
-    CONSOLE_DREAMCAST = 23,
-    CONSOLE_SEGACD = 24,
-    CONSOLE_ATARI2600 = 25,
-    CONSOLE_TGFX16 = 26,
-    CONSOLE_32X = 27,
-    CONSOLE_GAMEGEAR = 28,
-    CONSOLE_COUNT = 29
-} ConsoleType;
-
 typedef struct {
     int id;
     MediaType type;
@@ -89,28 +56,6 @@ typedef struct {
     char *tmdb_status;         /* "Returning Series", "Ended", "Canceled", etc. */
     char *tmdb_next_episode;   /* YYYY-MM-DD of next episode air date */
 } MediaEntry;
-
-typedef struct {
-    int id;
-    ConsoleType console;
-    char *title;
-    char *filepath;
-    char *cover_path;     /* Path to cover art */
-    int64_t size;         /* File size in bytes */
-    char *region;         /* USA, EUR, JPN, etc. */
-    char *added_date;
-
-    /* IGDB metadata */
-    int igdb_id;
-    char *description;    /* Game summary from IGDB */
-    char *developer;
-    char *publisher;
-    int release_year;
-    char *genre;          /* Comma-separated */
-    char *players;        /* e.g., "1-2" */
-    float igdb_rating;    /* 0-100 from IGDB */
-    char *igdb_platforms; /* Comma-separated platform names */
-} RomEntry;
 
 /* Initialize database, create tables if needed */
 int database_init(const char *db_path);
@@ -156,41 +101,8 @@ char *database_get_media_json(int id);
 char *database_get_show_seasons_json(const char *show_name);
 char *database_get_show_episodes_json(const char *show_name, int season);
 
-/* Retro gaming functions */
-int database_add_rom(RomEntry *entry);
-int database_rom_exists(const char *filepath);
-int database_get_rom_count(void);
-int database_get_rom_count_by_console(ConsoleType console);
-char *database_get_rom_filepath(int id);
-char *database_get_roms_json(void);
-char *database_get_roms_by_console_json(ConsoleType console);
-char *database_get_rom_json(int id);
-int database_update_rom_cover(int id, const char *cover_path);
-
-/* Update ROM metadata from IGDB */
-int database_update_rom_metadata(int id, int igdb_id, const char *description,
-    const char *developer, const char *publisher, int release_year,
-    const char *genre, const char *players, float igdb_rating,
-    const char *igdb_platforms);
-
-/* Get ROMs without IGDB metadata for a given console */
-int database_get_roms_without_igdb(ConsoleType console, int **ids, char ***titles, int *count);
-
-/* Get ROMs that have IGDB metadata but no cover image */
-int database_get_roms_without_cover(int **ids, char ***titles, int **consoles, int **igdb_ids, int *count);
-
-/* Get ALL ROMs without cover art (regardless of IGDB status) — for libretro-thumbnails fallback */
-int database_get_all_roms_without_cover(int **ids, char ***filepaths, int **consoles,
-                                        int **igdb_ids, int *count);
-
-/* Reset all ROM IGDB metadata (set igdb_id back to NULL for re-scraping) */
-int database_reset_rom_igdb(void);
-
 /* Delete all media entries from database (full wipe for fresh start) */
 int database_delete_all_media(void);
-
-/* Delete all ROM entries from database (full wipe for fresh start) */
-int database_delete_all_roms(void);
 
 /* Update show status and totals for all episodes of a show */
 int database_update_show_status(int tmdb_show_id, const char *status, const char *next_episode,
@@ -201,9 +113,5 @@ int database_get_active_show_ids(int **ids, int *count);
 
 /* Free entries */
 void database_free_entry(MediaEntry *entry);
-void database_free_rom(RomEntry *entry);
-
-/* Console name helper */
-const char *database_console_name(ConsoleType console);
 
 #endif /* DATABASE_H */

@@ -10,22 +10,20 @@
 #include <time.h>
 #include "tmdb.h"
 
-/* Live scraping progress tracking — one per domain (TMDB / IGDB) */
+/* Live scraping progress tracking */
 typedef struct {
-    int active;             /* 1 if a scraping operation is running */
-    const char *operation;  /* e.g. "tmdb_fetch", "igdb_fetch", "igdb_covers" */
-    char current_item[256]; /* Title being scraped right now */
-    int total;              /* Total items to process (accumulates in session mode) */
-    int processed;          /* Items completed so far */
-    int success;            /* Items successfully matched */
-    time_t start_time;      /* When this operation started */
-    int session_active;     /* 1 if in multi-operation session (don't reset between ops) */
+    int active;
+    const char *operation;  /* e.g. "tmdb_fetch" */
+    char current_item[256];
+    int total;
+    int processed;
+    int success;
+    time_t start_time;
+    int session_active;
     pthread_mutex_t lock;
 } ScrapeProgress;
 
-/* Two independent progress trackers */
 extern ScrapeProgress tmdb_progress;
-extern ScrapeProgress igdb_progress;
 
 /* Get scrape progress snapshot (thread-safe) */
 void scanner_get_progress(ScrapeProgress *p, int *active, const char **operation,
@@ -68,24 +66,8 @@ void scanner_refresh_show_status(void);
  * Returns 1 if TV episode detected, 0 if not */
 int scanner_parse_tv_info(const char *filename, char *show_name, int *season, int *episode, int *year);
 
-/* ROM scanning functions */
-int scanner_is_rom_file(const char *path);
-int scanner_detect_console(const char *path);
-int scanner_scan_rom_file(const char *filepath, int console);
-int scanner_scan_rom_directory(const char *path);
-void scanner_fetch_rom_covers(void);
-
-/* Fetch covers from libretro-thumbnails GitHub for ROMs without covers */
-void scanner_fetch_libretro_covers(void);
-
 /* Session-based progress: accumulates totals across multiple operations */
 void scanner_scrape_session_begin(ScrapeProgress *p);
 void scanner_scrape_session_end(ScrapeProgress *p);
-
-/* Fetch IGDB metadata for ROMs that don't have it */
-void scanner_fetch_rom_metadata(void);
-
-/* Re-fetch IGDB metadata for ALL ROMs (full rescan) */
-void scanner_rescan_all_rom_metadata(void);
 
 #endif /* SCANNER_H */

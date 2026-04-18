@@ -24,33 +24,16 @@ typedef struct {
     char tmdb_api_key[128];
     char tmdb_language[8];          /* e.g., "en-US", "nb-NO" */
 
-    /* IGDB API (Twitch OAuth2) */
-    char igdb_client_id[128];
-    char igdb_client_secret[128];
-
-    /* Source paths with raw media to be transcoded */
+    /* Source paths with raw media to be scraped, renamed and moved */
     char unprocessed_paths[MAX_WATCH_PATHS][MAX_PATH_LEN];
     int unprocessed_path_count;
 
-    /* Destination disks for converted media (output goes to <path>/nixly_ready_media/) */
+    /* Destination disks for ready media (files land in <path>/nixly_ready_media/) */
     char converted_paths[MAX_WATCH_PATHS][MAX_PATH_LEN];
     int converted_path_count;
 
-    /* ROMs directories */
-    char roms_paths[MAX_WATCH_PATHS][MAX_PATH_LEN];
-    int roms_path_count;
-
     /* Cache directory for thumbnails */
     char cache_dir[MAX_PATH_LEN];
-
-    /* Delete source files after successful conversion (default: false) */
-    int delete_after_conversion;
-
-    /* Downloads directory to monitor for auto-classification */
-    char download_path[MAX_PATH_LEN];
-
-    /* Enable transcoding (default: true for backwards compat) */
-    int transcode_enabled;
 } ServerConfig;
 
 /* Global config */

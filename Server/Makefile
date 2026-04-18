@@ -10,18 +10,10 @@ FFMPEG_LIBS = $(shell pkg-config --libs libavformat libavcodec libavutil 2>/dev/
 CJSON_CFLAGS = $(shell pkg-config --cflags libcjson 2>/dev/null)
 CJSON_LIBS = $(shell pkg-config --libs libcjson 2>/dev/null)
 
-# libzip for scanning ROM archives
-LIBZIP_CFLAGS = $(shell pkg-config --cflags libzip 2>/dev/null)
-LIBZIP_LIBS = $(shell pkg-config --libs libzip 2>/dev/null)
+CFLAGS += $(FFMPEG_CFLAGS) $(CJSON_CFLAGS)
+LDFLAGS += $(FFMPEG_LIBS) $(CJSON_LIBS)
 
-# libarchive for .7z, .rar and other archive formats
-LIBARCHIVE_CFLAGS = $(shell pkg-config --cflags libarchive 2>/dev/null)
-LIBARCHIVE_LIBS = $(shell pkg-config --libs libarchive 2>/dev/null)
-
-CFLAGS += $(FFMPEG_CFLAGS) $(CJSON_CFLAGS) $(LIBZIP_CFLAGS) $(LIBARCHIVE_CFLAGS)
-LDFLAGS += $(FFMPEG_LIBS) $(CJSON_LIBS) $(LIBZIP_LIBS) $(LIBARCHIVE_LIBS)
-
-SRC = server.c database.c scanner.c config.c tmdb.c igdb.c watcher.c transcoder.c downloads.c
+SRC = server.c database.c scanner.c config.c tmdb.c watcher.c downloads.c
 OBJ = $(SRC:.c=.o)
 TARGET = nixly-server
 

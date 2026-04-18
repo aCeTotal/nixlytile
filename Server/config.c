@@ -18,7 +18,6 @@ static void generate_server_id(char *buf, size_t len) {
     gethostname(hostname, sizeof(hostname) - 1);
     hostname[sizeof(hostname) - 1] = '\0';
 
-    /* Simple random suffix */
     srand(time(NULL) ^ getpid());
     unsigned int r = rand();
 
@@ -69,22 +68,8 @@ void config_init_defaults(void) {
     strcpy(server_config.tmdb_language, "en-US");
     strcpy(server_config.cache_dir, "~/.cache/nixly-server");
 
-    /* Default ROMs path */
-    strcpy(server_config.roms_paths[0], "/mnt/bigdisk1/Emulator");
-    server_config.roms_path_count = 1;
-
-    /* Unprocessed/converted paths empty by default */
     server_config.unprocessed_path_count = 0;
     server_config.converted_path_count = 0;
-
-    /* Keep source files by default */
-    server_config.delete_after_conversion = 0;
-
-    /* Default downloads path */
-    strcpy(server_config.download_path, "/mnt/bigdisk1/downloads");
-
-    /* Transcoding enabled by default */
-    server_config.transcode_enabled = 1;
 }
 
 int config_load(const char *path) {
@@ -100,12 +85,10 @@ int config_load(const char *path) {
 
     config_init_defaults();
 
-    int roms_default_cleared = 0;
     char line[4096];
     while (fgets(line, sizeof(line), f)) {
         char *l = trim(line);
 
-        /* Skip comments and empty lines */
         if (*l == '#' || *l == '\0') continue;
 
         char *eq = strchr(l, '=');
@@ -115,7 +98,6 @@ int config_load(const char *path) {
         char *key = trim(l);
         char *value = trim(eq + 1);
 
-        /* Remove quotes from value */
         size_t vlen = strlen(value);
         if (vlen >= 2 && value[0] == '"' && value[vlen - 1] == '"') {
             value[vlen - 1] = '\0';
@@ -160,35 +142,6 @@ int config_load(const char *path) {
                 server_config.converted_path_count++;
             }
         }
-        else if (strcmp(key, "delete_after_conversion") == 0) {
-            server_config.delete_after_conversion =
-                (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
-        }
-        else if (strcmp(key, "igdb_client_id") == 0) {
-            strncpy(server_config.igdb_client_id, value, sizeof(server_config.igdb_client_id) - 1);
-        }
-        else if (strcmp(key, "igdb_client_secret") == 0) {
-            strncpy(server_config.igdb_client_secret, value, sizeof(server_config.igdb_client_secret) - 1);
-        }
-        else if (strcmp(key, "download_path") == 0) {
-            expand_path(value, server_config.download_path, sizeof(server_config.download_path));
-        }
-        else if (strcmp(key, "transcode_enabled") == 0) {
-            server_config.transcode_enabled =
-                (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
-        }
-        else if (strcmp(key, "roms_path") == 0) {
-            /* Clear default on first config-specified roms_path */
-            if (!roms_default_cleared) {
-                server_config.roms_path_count = 0;
-                roms_default_cleared = 1;
-            }
-            if (server_config.roms_path_count < MAX_WATCH_PATHS) {
-                expand_path(value, server_config.roms_paths[server_config.roms_path_count],
-                           MAX_PATH_LEN);
-                server_config.roms_path_count++;
-            }
-        }
     }
 
     fclose(f);
@@ -205,57 +158,23 @@ int config_save(const char *path) {
 
     fprintf(f, "# Nixly Media Server Configuration\n\n");
 
-    fprintf(f, "# Server port\n");
-    fprintf(f, "port = %d\n\n", server_config.port);
-
-    fprintf(f, "# Database path\n");
-    fprintf(f, "db_path = %s\n\n", server_config.db_path);
-
-    fprintf(f, "# Upload speed in Mbps (max streams = upload_mbps / 70)\n");
-    fprintf(f, "# Server rating = upload_mbps / 100 (1-10 scale)\n");
-    fprintf(f, "upload_mbps = %d\n\n", server_config.upload_mbps);
-
-    fprintf(f, "# Server identity (for multi-server deduplication)\n");
+    fprintf(f, "port = %d\n", server_config.port);
+    fprintf(f, "db_path = %s\n", server_config.db_path);
+    fprintf(f, "upload_mbps = %d\n", server_config.upload_mbps);
     fprintf(f, "server_id = %s\n", server_config.server_id);
-    fprintf(f, "server_name = %s\n\n", server_config.server_name);
+    fprintf(f, "server_name = %s\n", server_config.server_name);
+    fprintf(f, "tmdb_api_key = %s\n", server_config.tmdb_api_key);
+    fprintf(f, "tmdb_language = %s\n", server_config.tmdb_language);
+    fprintf(f, "cache_dir = %s\n", server_config.cache_dir);
 
-    fprintf(f, "# TMDB API key (get from https://www.themoviedb.org/settings/api)\n");
-    fprintf(f, "tmdb_api_key = %s\n\n", server_config.tmdb_api_key);
-
-    fprintf(f, "# TMDB language (en-US, nb-NO, etc.)\n");
-    fprintf(f, "tmdb_language = %s\n\n", server_config.tmdb_language);
-
-    fprintf(f, "# IGDB API credentials (get from https://dev.twitch.tv/console/apps)\n");
-    if (server_config.igdb_client_id[0])
-        fprintf(f, "igdb_client_id = %s\n", server_config.igdb_client_id);
-    if (server_config.igdb_client_secret[0])
-        fprintf(f, "igdb_client_secret = %s\n", server_config.igdb_client_secret);
-    fprintf(f, "\n");
-
-    fprintf(f, "# Cache directory for thumbnails\n");
-    fprintf(f, "cache_dir = %s\n\n", server_config.cache_dir);
-
-    fprintf(f, "# Source directories with raw media to be transcoded (can have multiple)\n");
+    fprintf(f, "\n# Source directories with raw media to scrape and move\n");
     for (int i = 0; i < server_config.unprocessed_path_count; i++) {
         fprintf(f, "unprocessed_path = %s\n", server_config.unprocessed_paths[i]);
     }
 
-    fprintf(f, "\n# Destination disks for converted media (can have multiple)\n");
-    fprintf(f, "# Transcoded files go to <path>/nixly_ready_media/TV|Movies/\n");
+    fprintf(f, "\n# Destination disks (files land in <path>/nixly_ready_media/{Movies,TV}/)\n");
     for (int i = 0; i < server_config.converted_path_count; i++) {
         fprintf(f, "converted_path = %s\n", server_config.converted_paths[i]);
-    }
-
-    fprintf(f, "\n# Delete source files after successful conversion (true/false)\n");
-    fprintf(f, "delete_after_conversion = %s\n", server_config.delete_after_conversion ? "true" : "false");
-
-    fprintf(f, "\n# Downloads directory to monitor for auto-classification\n");
-    if (server_config.download_path[0])
-        fprintf(f, "download_path = %s\n", server_config.download_path);
-
-    fprintf(f, "\n# ROMs directories (can have multiple)\n");
-    for (int i = 0; i < server_config.roms_path_count; i++) {
-        fprintf(f, "roms_path = %s\n", server_config.roms_paths[i]);
     }
 
     fclose(f);

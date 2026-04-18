@@ -152,7 +152,7 @@ static int move_file(const char *src, const char *dst) {
 			const char *bsrc = strrchr(src, '/');
 			bsrc = bsrc ? bsrc + 1 : src;
 			printf("Downloads: Cross-filesystem move for %s (%.1f GB)"
-			       " — consider placing download_path on same disk\n", bsrc, gb);
+			       " — consider placing unprocessed_path on same disk\n", bsrc, gb);
 		}
 	}
 	int src_fd = open(src, O_RDONLY);
@@ -961,8 +961,18 @@ static int process_download_file(const char *filepath) {
 		closedir(d);
 	}
 
-	/* Clean up empty source directories */
-	cleanup_empty_dirs(src_dir, server_config.download_path);
+	/* Clean up empty source directories. Stop at the unprocessed_path root
+	 * that contains this src_dir so we don't ascend outside it. */
+	const char *stop_at = NULL;
+	for (int i = 0; i < server_config.unprocessed_path_count; i++) {
+		const char *root = server_config.unprocessed_paths[i];
+		size_t rlen = strlen(root);
+		if (strncmp(src_dir, root, rlen) == 0) {
+			stop_at = root;
+			break;
+		}
+	}
+	if (stop_at) cleanup_empty_dirs(src_dir, stop_at);
 
 	return 1;
 }
@@ -997,19 +1007,20 @@ static int scan_directory(const char *path) {
 /* ---- Public API ---- */
 
 void downloads_process_pending(void) {
-	if (server_config.download_path[0] == '\0') return;
+	if (server_config.unprocessed_path_count == 0) return;
 
-	struct stat st;
-	if (stat(server_config.download_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
-		return;
-	}
-
+	int total = 0;
 	pthread_mutex_lock(&dl_lock);
-	int n = scan_directory(server_config.download_path);
+	for (int i = 0; i < server_config.unprocessed_path_count; i++) {
+		const char *src = server_config.unprocessed_paths[i];
+		struct stat st;
+		if (stat(src, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+		total += scan_directory(src);
+	}
 	pthread_mutex_unlock(&dl_lock);
 
-	if (n > 0) {
-		printf("Downloads: Processed %d file(s)\n", n);
+	if (total > 0) {
+		printf("Downloads: Processed %d file(s)\n", total);
 	}
 }
 
@@ -1033,22 +1044,13 @@ static void *dl_thread_func(void *arg) {
 }
 
 int downloads_init(void) {
-	if (server_config.download_path[0] == '\0') {
-		printf("Downloads: No download_path configured, monitor disabled\n");
-		return -1;
-	}
-
-	struct stat st;
-	if (stat(server_config.download_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
-		fprintf(stderr, "Downloads: Source path does not exist: %s\n",
-		        server_config.download_path);
+	if (server_config.unprocessed_path_count == 0) {
+		printf("Downloads: No unprocessed_path configured, monitor disabled\n");
 		return -1;
 	}
 
 	if (server_config.converted_path_count == 0) {
-		fprintf(stderr, "Downloads: ERROR: No converted_path configured — cannot move files.\n"
-		        "  Add converted_path to your config, e.g.:\n"
-		        "  converted_path = /mnt/bigdisk1/www/aceclan\n");
+		fprintf(stderr, "Downloads: ERROR: No converted_path configured — cannot move files.\n");
 		return -1;
 	}
 
@@ -1063,7 +1065,9 @@ int downloads_init(void) {
 		mkdirs(movies_dir);
 	}
 
-	printf("Downloads: Monitoring  %s\n", server_config.download_path);
+	for (int i = 0; i < server_config.unprocessed_path_count; i++) {
+		printf("Downloads: Monitoring  %s\n", server_config.unprocessed_paths[i]);
+	}
 	printf("Downloads: TV dest     %s/nixly_ready_media/TV\n",
 	       server_config.converted_paths[0]);
 	printf("Downloads: Movies dest %s/nixly_ready_media/Movies\n",
@@ -1072,7 +1076,7 @@ int downloads_init(void) {
 }
 
 int downloads_start(void) {
-	if (server_config.download_path[0] == '\0') return -1;
+	if (server_config.unprocessed_path_count == 0) return -1;
 
 	dl_running = 1;
 	if (pthread_create(&dl_thread, NULL, dl_thread_func, NULL) != 0) {
