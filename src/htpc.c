@@ -2269,6 +2269,18 @@ update_game_mode(void)
 	int is_game = 0;
 
 	/*
+	 * HTPC mode owns the foreground (media, RetroArch, Steam Big Picture).
+	 * Game mode must NEVER engage while HTPC mode is active — it freezes
+	 * background processes, hides statusbar, reshuffles focus, and boosts
+	 * compositor RT priority, all of which cause RetroArch to appear
+	 * frozen/invisible. Force full deactivation path.
+	 */
+	if (htpc_mode_active) {
+		c = NULL;
+		game_mode_pid = 0;  /* bypass the "keep ultra alive" guard below */
+	}
+
+	/*
 	 * Emulators launched from the retro-gaming page must never engage
 	 * game mode. Match on Wayland app_id AND /proc/PID/comm — app_id
 	 * may be unset on the first mapnotify, but the process name is
@@ -2738,6 +2750,11 @@ htpc_mode_enter(void)
 
 	/* Clear focus since all clients are being closed */
 	focusclient(NULL, 0);
+
+	/* Force any in-flight game mode off immediately. HTPC mode is
+	 * incompatible with game mode's process freeze / statusbar hide /
+	 * RT-priority compositor. */
+	update_game_mode();
 
 	/* Grab gamepads for HTPC UI navigation (unless on Steam tag) */
 	gamepad_update_grab_state();
