@@ -23,6 +23,8 @@ static int    mpv_pidfd        = -1;
 static int    mpv_ipc_fd       = -1;
 static int    mpv_media_id     = -1;
 static double mpv_last_pos     = 0.0;
+static double mpv_resume_target = 0.0;  /* seek target to apply after file-loaded */
+static int    mpv_resume_applied = 0;
 static int    mpv_eof_reached  = 0;
 static char   mpv_sock_path[160];
 static char   mpv_rx_buf[4096];
@@ -161,11 +163,31 @@ mpv_handle_line(const char *line)
 static void
 mpv_handle_event_line(const char *line)
 {
-	/* playback-restart fires after load and after every seek — the point
-	 * where mpv might silently sit paused on first frame. Force unpause
-	 * here too, on top of the pause-property observer. */
-	if (strstr(line, "\"event\":\"playback-restart\"") ||
-	    strstr(line, "\"event\":\"file-loaded\"")) {
+	/* file-loaded: apply resume seek (if any) via IPC rather than --start.
+	 * Passing --start=N to the mpv CLI puts it in a "seek on load" state
+	 * that stalls on first frame until the user seeks manually — the
+	 * whole reason this function exists. An IPC seek after file-loaded
+	 * avoids that stall path.
+	 *
+	 * playback-restart: fires after load and after every seek. Force
+	 * unpause in case mpv self-paused on first frame (cache states,
+	 * profile quirks). Also do a tiny frame-step nudge so the decoder
+	 * emits the first frame immediately instead of waiting for the
+	 * cache-pause-wait threshold. */
+	if (strstr(line, "\"event\":\"file-loaded\"")) {
+		if (!mpv_resume_applied && mpv_resume_target > 0.5) {
+			char j[128];
+			snprintf(j, sizeof(j),
+				"{\"command\":[\"seek\",%.3f,\"absolute\",\"exact\"]}",
+				mpv_resume_target);
+			mpv_launcher_send_cmd(j);
+		}
+		mpv_resume_applied = 1;
+		mpv_launcher_send_cmd(
+			"{\"command\":[\"set_property\",\"pause\",false]}");
+		return;
+	}
+	if (strstr(line, "\"event\":\"playback-restart\"")) {
 		mpv_launcher_send_cmd(
 			"{\"command\":[\"set_property\",\"pause\",false]}");
 	}
@@ -255,11 +277,13 @@ mpv_cleanup(void)
 	if (mpv_ipc_fd >= 0) { close(mpv_ipc_fd); mpv_ipc_fd = -1; }
 	if (mpv_pidfd >= 0)  { close(mpv_pidfd);  mpv_pidfd  = -1; }
 	if (mpv_sock_path[0]) { unlink(mpv_sock_path); mpv_sock_path[0] = '\0'; }
-	mpv_pid         = -1;
-	mpv_media_id    = -1;
-	mpv_last_pos    = 0.0;
-	mpv_eof_reached = 0;
-	mpv_rx_len      = 0;
+	mpv_pid            = -1;
+	mpv_media_id       = -1;
+	mpv_last_pos       = 0.0;
+	mpv_resume_target  = 0.0;
+	mpv_resume_applied = 0;
+	mpv_eof_reached    = 0;
+	mpv_rx_len         = 0;
 }
 
 /* ── IPC socket connect (retry loop, mpv creates it on startup) ──────
@@ -326,23 +350,17 @@ mpv_launcher_start(const char *url, double resume_pos, int media_id)
 	         "/tmp/nixlytile-mpv-%d.sock", (int)getpid());
 	unlink(mpv_sock_path);
 
-	mpv_media_id    = media_id;
-	mpv_last_pos    = resume_pos;
-	mpv_eof_reached = 0;
-
-	char start_arg[64];
-	start_arg[0] = '\0';
-	/* Only pass --start when resuming. Passing --start=0 put mpv into a
-	 * "seek to 0 on load" state that stalled on first frame until the
-	 * user seeked manually. */
-	if (resume_pos > 0.0)
-		snprintf(start_arg, sizeof(start_arg), "--start=%.3f", resume_pos);
+	mpv_media_id       = media_id;
+	mpv_last_pos       = resume_pos;
+	mpv_resume_target  = resume_pos;
+	mpv_resume_applied = 0;
+	mpv_eof_reached    = 0;
 
 	char sock_arg[200];
 	snprintf(sock_arg, sizeof(sock_arg), "--input-ipc-server=%s", mpv_sock_path);
 
 	/* Max-performance + full mpv UI args */
-	const char *argv[32];
+	const char *argv[40];
 	int ai = 0;
 	argv[ai++] = "mpv";
 	argv[ai++] = "--fullscreen";
@@ -354,6 +372,14 @@ mpv_launcher_start(const char *url, double resume_pos, int media_id)
 	argv[ai++] = "--keep-open=no";
 	argv[ai++] = "--save-position-on-quit=no";
 	argv[ai++] = "--pause=no";
+
+	/* Never let mpv self-pause waiting on cache. Initial: stream cache
+	 * may fill slower than cache-pause-wait, leaving mpv stuck on the
+	 * first frame until the user seeks. Runtime: brief cache underruns
+	 * should stutter, not pause, to match normal player UX. */
+	argv[ai++] = "--cache-pause=no";
+	argv[ai++] = "--cache-pause-initial=no";
+	argv[ai++] = "--cache-pause-wait=0";
 
 	/* Video output — libplacebo path with auto API/context. */
 	argv[ai++] = "--vo=gpu-next";
@@ -380,8 +406,10 @@ mpv_launcher_start(const char *url, double resume_pos, int media_id)
 	argv[ai++] = "--slang=nor,nob,nno,en,eng";
 	argv[ai++] = "--alang=nor,nob,nno,en,eng";
 
-	if (start_arg[0])
-		argv[ai++] = start_arg;
+	/* Note: no --start flag. Resume seek is applied via IPC on
+	 * file-loaded (see mpv_handle_event_line) because --start=N causes
+	 * mpv to stall on the first frame until a manual seek. */
+
 	argv[ai++] = sock_arg;
 	argv[ai++] = url;
 	argv[ai++] = NULL;
@@ -453,6 +481,20 @@ mpv_launcher_start(const char *url, double resume_pos, int media_id)
 		"{\"command\":[\"observe_property\",2,\"eof-reached\"]}");
 	mpv_launcher_send_cmd(
 		"{\"command\":[\"observe_property\",3,\"pause\"]}");
+
+	/* Proactively apply the resume seek as soon as IPC is up. mpv queues
+	 * seeks until the file is loaded, so this works regardless of
+	 * whether file-loaded has already fired (and we may have missed
+	 * that event if IPC connected after it). The file-loaded handler
+	 * still runs as a fallback but won't double-seek. */
+	if (mpv_resume_target > 0.5) {
+		char j[128];
+		snprintf(j, sizeof(j),
+			"{\"command\":[\"seek\",%.3f,\"absolute\",\"exact\"]}",
+			mpv_resume_target);
+		mpv_launcher_send_cmd(j);
+		mpv_resume_applied = 1;
+	}
 
 	/* Belt-and-suspenders: force unpause after load. The property observer
 	 * handles later transitions; this covers the initial state where mpv

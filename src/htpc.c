@@ -138,32 +138,10 @@ focus_or_launch_app(const char *app_id, const char *launch_cmd)
 			}
 		}
 	} else if (launch_cmd && launch_cmd[0]) {
-		/* No window found - launch the app (same as launcher) */
-		pid_t pid = fork();
-		if (pid == 0) {
-			dup2(STDERR_FILENO, STDOUT_FILENO);
-			setsid();
-			fork_detach();
-			if (is_steam_cmd(launch_cmd)) {
-				/* Steam runs inside bwrap FHS sandbox; skip
-				 * dGPU env to avoid GL/EGL failures inside it. */
-				const char *steam_bin = "steam";
-				if (access("/etc/profiles/per-user/total/bin/nixly_steam", X_OK) == 0)
-					steam_bin = "nixly_steam";
-				else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
-					steam_bin = "nixly_steam";
-				if (htpc_mode_active) {
-					execlp(steam_bin, steam_bin, "-bigpicture", "steam://open/games", (char *)NULL);
-				} else {
-					execlp(steam_bin, steam_bin, (char *)NULL);
-				}
-				_exit(1);
-			}
-			if (should_use_dgpu(launch_cmd))
-				set_dgpu_env();
-			execl("/bin/sh", "sh", "-c", launch_cmd, NULL);
-			_exit(127);
-		}
+		/* No window found — launch same way spawn() does: full child
+		 * cleanup (stdin, signals, ambient caps, inherited FDs), steam
+		 * and dGPU env handled inside spawn_cmd. */
+		spawn_cmd(launch_cmd);
 	}
 }
 

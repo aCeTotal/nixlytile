@@ -2907,6 +2907,7 @@ void cleanup(void);
 void cleanuplisteners(void);
 void handlesig(int signo);
 void spawn(const Arg *arg);
+pid_t spawn_cmd(const char *cmd);
 
 /*
  * Detach a forked child from the compositor's event loop.

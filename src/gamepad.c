@@ -289,12 +289,7 @@ gamepad_menu_select(Monitor *m)
 			if (existing) {
 				focus_or_launch_app("retroarch", "retroarch -f");
 			} else {
-				pid_t pid = fork();
-				if (pid == 0) {
-					setsid();
-					execl("/bin/sh", "sh", "-c", "exec retroarch -f", NULL);
-					_exit(127);
-				}
+				pid_t pid = spawn_cmd("retroarch -f");
 				if (pid > 0) {
 					retro_session_pid = pid;
 					wlr_log(WLR_INFO, "RetroArch pid=%d tracked for game-mode exemption", pid);
@@ -365,31 +360,24 @@ gamepad_menu_select(Monitor *m)
 				retro_gaming_hide_all();
 				pc_gaming_hide_all();
 				wlr_log(WLR_INFO, "Launching %s in Chrome kiosk", kiosk_services[i].label);
-				pid_t pid = fork();
-				if (pid == 0) {
-					setsid();
-					/* Try google-chrome-stable first, then chromium as fallback */
-					execlp("google-chrome-stable", "google-chrome-stable",
-						"--ozone-platform=wayland",
-						"--kiosk", "--start-fullscreen",
-						"--autoplay-policy=no-user-gesture-required",
-						"--enable-features=VaapiVideoDecoder,PlatformHEVCDecoderSupport",
-						"--disable-gpu-vsync",
-						"--disable-frame-rate-limit",
-						"--force-device-scale-factor=1",
-						"--disable-translate",
-						kiosk_services[i].url, (char *)NULL);
-					execlp("chromium", "chromium",
-						"--ozone-platform=wayland",
-						"--kiosk", "--start-fullscreen",
-						"--autoplay-policy=no-user-gesture-required",
-						"--enable-features=VaapiVideoDecoder,PlatformHEVCDecoderSupport",
-						"--disable-gpu-vsync",
-						"--disable-frame-rate-limit",
-						"--force-device-scale-factor=1",
-						"--disable-translate",
-						kiosk_services[i].url, (char *)NULL);
-					_exit(127);
+				{
+					static const char *const flags =
+						" --ozone-platform=wayland"
+						" --kiosk --start-fullscreen"
+						" --autoplay-policy=no-user-gesture-required"
+						" --enable-features=VaapiVideoDecoder,PlatformHEVCDecoderSupport"
+						" --disable-gpu-vsync"
+						" --disable-frame-rate-limit"
+						" --force-device-scale-factor=1"
+						" --disable-translate";
+					const char *browser =
+						access("/run/current-system/sw/bin/google-chrome-stable", X_OK) == 0
+							? "google-chrome-stable"
+							: "chromium";
+					char kiosk_cmd[1024];
+					snprintf(kiosk_cmd, sizeof(kiosk_cmd), "%s%s %s",
+						browser, flags, kiosk_services[i].url);
+					spawn_cmd(kiosk_cmd);
 				}
 				return;
 			}

@@ -3698,161 +3698,162 @@ const char *dgpu_programs[] = {
  * - Requests tearing (for low latency)
  */
 
-void
-spawn(const Arg *arg)
+/*
+ * Fork and exec a shell command string with full child cleanup.
+ * Used by spawn() and every HTPC launch path so every child gets the
+ * same treatment as a desktop-mode spawn: stdin → /dev/null, fresh
+ * session, default signal handlers, ambient caps dropped, all
+ * inherited compositor FDs (DRM master, PipeWire, epoll) closed,
+ * $HOME as CWD, session env preserved. Returns child pid (parent)
+ * or -1 on fork failure. Never returns in the child.
+ */
+pid_t
+spawn_cmd(const char *cmd)
 {
-	pid_t pid = fork();
+	pid_t pid;
+
+	if (!cmd || !cmd[0])
+		return -1;
+
+	pid = fork();
 	if (pid > 0) {
-		/* Parent: record launch origin for tag assignment */
 		if (selmon)
 			pending_launch_add(pid,
 				selmon->tagset[selmon->seltags],
 				selmon->wlr_output->name);
-		return;
+		return pid;
 	}
-	if (pid == 0) {
-		int devnull;
+	if (pid < 0)
+		return -1;
 
-		/* stdin → /dev/null; leave stdout/stderr inherited */
-		devnull = open("/dev/null", O_RDWR);
+	/* Child */
+	{
+		int devnull = open("/dev/null", O_RDWR);
 		if (devnull >= 0) {
 			dup2(devnull, STDIN_FILENO);
 			if (devnull > STDERR_FILENO)
 				close(devnull);
 		}
+	}
 
-		setsid();
-		signal(SIGCHLD, SIG_DFL);
-		signal(SIGINT, SIG_DFL);
-		signal(SIGTERM, SIG_DFL);
-		signal(SIGPIPE, SIG_DFL);
-		prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
+	setsid();
+	signal(SIGCHLD, SIG_DFL);
+	signal(SIGINT, SIG_DFL);
+	signal(SIGTERM, SIG_DFL);
+	signal(SIGPIPE, SIG_DFL);
+	prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
 
-		/* Close all inherited compositor FDs (DRM, PipeWire, epoll, etc.) */
-		syscall(SYS_close_range, 3, ~0U, 0);
+	syscall(SYS_close_range, 3, ~0U, 0);
 
-		/* Match terminal: start in $HOME */
-		{
-			const char *home = getenv("HOME");
-			if (home && *home)
-				(void)chdir(home);
-		}
+	{
+		const char *home = getenv("HOME");
+		if (home && *home)
+			(void)chdir(home);
+	}
 
-		/* Keep full session environment intact (DBUS, network config,
-		 * proxies, etc.) — do NOT re-source /etc/set-environment via
-		 * login shell, as that clobbers session-specific vars.
-		 * ensure_nix_paths() is a PATH safety net. */
-		ensure_nix_paths();
+	ensure_nix_paths();
 
-		/* Interactive shell (no login) — matches what a terminal does:
-		 * inherit session env, source ~/.bashrc/~/.zshrc, exec cmd.
-		 * -i (interactive): sources ~/.bashrc / ~/.zshrc
-		 * -c: executes the command string */
-		const char *user_shell = getenv("SHELL");
-		if (!user_shell || !user_shell[0])
-			user_shell = "/bin/sh";
+	const char *user_shell = getenv("SHELL");
+	if (!user_shell || !user_shell[0])
+		user_shell = "/bin/sh";
 
-		const char *cmd = (const char *)arg->v;
-		if (!cmd || !cmd[0])
-			_exit(1);
+	char cmd_str[4096];
+	snprintf(cmd_str, sizeof(cmd_str), "%s", cmd);
 
-		/* Detect if arg->v is a char** array (default keys) or string (runtime config) */
-		int is_runtime_string = 0;
-		for (int i = 0; i < runtime_spawn_cmd_count; i++) {
-			if (arg->v == runtime_spawn_cmds[i]) {
-				is_runtime_string = 1;
+	if (is_steam_cmd(cmd_str)) {
+		const char *steam_bin = "steam";
+		if (access("/etc/profiles/per-user/total/bin/nixly_steam", X_OK) == 0)
+			steam_bin = "nixly_steam";
+		else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
+			steam_bin = "nixly_steam";
+		if (htpc_mode_active)
+			snprintf(cmd_str, sizeof(cmd_str),
+				"%s -bigpicture steam://open/games", steam_bin);
+		else
+			snprintf(cmd_str, sizeof(cmd_str), "%s", steam_bin);
+	} else if (should_use_dgpu(cmd_str) && integrated_gpu_idx >= 0) {
+		set_dgpu_env();
+	}
+
+	{
+		int has_meta = 0;
+		for (const char *p = cmd_str; *p; p++) {
+			if (*p == '|' || *p == '&' ||
+			    *p == ';' || *p == '$' ||
+			    *p == '`' || *p == '(' ||
+			    *p == ')' || *p == '>' ||
+			    *p == '<' || *p == '{' ||
+			    *p == '}' || *p == '~' ||
+			    *p == '*' || *p == '?' ||
+			    *p == '[' || *p == ']' ||
+			    *p == '\'' || *p == '"' ||
+			    *p == '\\') {
+				has_meta = 1;
 				break;
 			}
 		}
 
-		/* Build command string from argv array or use string directly */
-		char cmd_str[4096];
-		if (!is_runtime_string) {
-			char **argv = (char **)arg->v;
-			if (!argv[0] || !argv[0][0])
-				_exit(1);
-			int pos = 0;
-			for (int i = 0; argv[i] && pos < (int)sizeof(cmd_str) - 2; i++) {
-				if (i > 0 && pos < (int)sizeof(cmd_str) - 1)
-					cmd_str[pos++] = ' ';
-				int n = snprintf(cmd_str + pos, sizeof(cmd_str) - pos,
-					"%s", argv[i]);
-				if (n > 0)
-					pos += n;
-			}
-			cmd_str[pos] = '\0';
-		} else {
-			snprintf(cmd_str, sizeof(cmd_str), "%s", cmd);
-		}
+		if (!has_meta) {
+			char buf[4096];
+			char *argv[64];
+			int argc = 0;
+			char *s, *tok, *sv = NULL;
 
-		/* Steam special case: bwrap FHS sandbox, skip dGPU env */
-		if (is_steam_cmd(cmd_str)) {
-			const char *steam_bin = "steam";
-			if (access("/etc/profiles/per-user/total/bin/nixly_steam", X_OK) == 0)
-				steam_bin = "nixly_steam";
-			else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
-				steam_bin = "nixly_steam";
-			if (htpc_mode_active)
-				snprintf(cmd_str, sizeof(cmd_str),
-					"%s -bigpicture steam://open/games", steam_bin);
-			else
-				snprintf(cmd_str, sizeof(cmd_str), "%s", steam_bin);
-		} else if (should_use_dgpu(cmd_str) && integrated_gpu_idx >= 0) {
-			set_dgpu_env();
-		}
-
-		/* Try direct execvp() first for simple commands —
-		 * avoids interactive shell issues (.bashrc side effects,
-		 * job control, signal changes). */
-		{
-			int has_meta = 0;
-			for (const char *p = cmd_str; *p; p++) {
-				if (*p == '|' || *p == '&' ||
-				    *p == ';' || *p == '$' ||
-				    *p == '`' || *p == '(' ||
-				    *p == ')' || *p == '>' ||
-				    *p == '<' || *p == '{' ||
-				    *p == '}' || *p == '~' ||
-				    *p == '*' || *p == '?' ||
-				    *p == '[' || *p == ']' ||
-				    *p == '\'' || *p == '"' ||
-				    *p == '\\') {
-					has_meta = 1;
+			snprintf(buf, sizeof(buf), "%s", cmd_str);
+			for (s = buf; argc < 63; s = NULL) {
+				tok = strtok_r(s, " \t", &sv);
+				if (!tok)
 					break;
-				}
+				argv[argc++] = tok;
 			}
+			argv[argc] = NULL;
 
-			if (!has_meta) {
-				char buf[4096];
-				char *argv[64];
-				int argc = 0;
-				char *s, *tok, *sv = NULL;
-
-				snprintf(buf, sizeof(buf), "%s", cmd_str);
-				for (s = buf; argc < 63; s = NULL) {
-					tok = strtok_r(s, " \t", &sv);
-					if (!tok)
-						break;
-					argv[argc++] = tok;
-				}
-				argv[argc] = NULL;
-
-				if (argc > 0)
-					execvp(argv[0], argv);
-				/* execvp failed — fall through to shell */
-			}
-
-			/* Fallback: non-interactive shell */
-			{
-				char wrapper[8192];
-				snprintf(wrapper, sizeof(wrapper),
-					"exec %s", cmd_str);
-				execl(user_shell, user_shell, "-c",
-					wrapper, NULL);
-			}
+			if (argc > 0)
+				execvp(argv[0], argv);
 		}
-		_exit(127);
+
+		char wrapper[8192];
+		snprintf(wrapper, sizeof(wrapper), "exec %s", cmd_str);
+		execl(user_shell, user_shell, "-c", wrapper, NULL);
 	}
+	_exit(127);
+}
+
+void
+spawn(const Arg *arg)
+{
+	const char *cmd = (const char *)arg->v;
+	if (!cmd || !cmd[0])
+		return;
+
+	int is_runtime_string = 0;
+	for (int i = 0; i < runtime_spawn_cmd_count; i++) {
+		if (arg->v == runtime_spawn_cmds[i]) {
+			is_runtime_string = 1;
+			break;
+		}
+	}
+
+	char cmd_str[4096];
+	if (!is_runtime_string) {
+		char **argv = (char **)arg->v;
+		if (!argv[0] || !argv[0][0])
+			return;
+		int pos = 0;
+		for (int i = 0; argv[i] && pos < (int)sizeof(cmd_str) - 2; i++) {
+			if (i > 0 && pos < (int)sizeof(cmd_str) - 1)
+				cmd_str[pos++] = ' ';
+			int n = snprintf(cmd_str + pos, sizeof(cmd_str) - pos,
+				"%s", argv[i]);
+			if (n > 0)
+				pos += n;
+		}
+		cmd_str[pos] = '\0';
+	} else {
+		snprintf(cmd_str, sizeof(cmd_str), "%s", cmd);
+	}
+
+	spawn_cmd(cmd_str);
 }
 
 
