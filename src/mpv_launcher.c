@@ -175,13 +175,20 @@ mpv_handle_event_line(const char *line)
 	 * emits the first frame immediately instead of waiting for the
 	 * cache-pause-wait threshold. */
 	if (strstr(line, "\"event\":\"file-loaded\"")) {
-		if (!mpv_resume_applied && mpv_resume_target > 0.5) {
-			char j[128];
-			snprintf(j, sizeof(j),
-				"{\"command\":[\"seek\",%.3f,\"absolute\",\"exact\"]}",
-				mpv_resume_target);
-			mpv_launcher_send_cmd(j);
-		}
+		/*
+		 * Always seek on file-loaded, even for fresh playback (target=0).
+		 * A zero-position exact seek forces the decoder to emit the first
+		 * frame AND starts mpv's playback clock — without it mpv sits on
+		 * the first frame with a stopped clock until the user manually
+		 * seeks forward.
+		 */
+		char j[128];
+		double target = (!mpv_resume_applied && mpv_resume_target > 0.5)
+			? mpv_resume_target : 0.0;
+		snprintf(j, sizeof(j),
+			"{\"command\":[\"seek\",%.3f,\"absolute\",\"exact\"]}",
+			target);
+		mpv_launcher_send_cmd(j);
 		mpv_resume_applied = 1;
 		mpv_launcher_send_cmd(
 			"{\"command\":[\"set_property\",\"pause\",false]}");
@@ -367,11 +374,17 @@ mpv_launcher_start(const char *url, double resume_pos, int media_id)
 	argv[ai++] = "--force-window=immediate";
 	argv[ai++] = "--osc=yes";
 	argv[ai++] = "--no-terminal";
-	argv[ai++] = "--msg-level=all=warn";
+	/* Verbose log level: -v equivalent (msg-level=all=v) + dump stats.
+	 * Writes every decoder/demuxer/renderer event to mpv.log for
+	 * post-mortem. --log-file= duplicates the terminal output to a
+	 * persistent file that survives even if stdout is broken. */
+	argv[ai++] = "--msg-level=all=v";
+	argv[ai++] = "--log-file=/tmp/nixlytile/mpv.log";
 	argv[ai++] = "--idle=no";
 	argv[ai++] = "--keep-open=no";
 	argv[ai++] = "--save-position-on-quit=no";
 	argv[ai++] = "--pause=no";
+	argv[ai++] = "--hr-seek=yes";
 
 	/* Never let mpv self-pause waiting on cache. Initial: stream cache
 	 * may fill slower than cache-pause-wait, leaving mpv stuck on the
@@ -387,10 +400,21 @@ mpv_launcher_start(const char *url, double resume_pos, int media_id)
 	argv[ai++] = "--gpu-context=auto";
 	argv[ai++] = "--hwdec=auto-safe";
 
-	/* Performance profile + display-synced pacing */
-	argv[ai++] = "--profile=fast";
-	argv[ai++] = "--video-sync=display-resample";
-	argv[ai++] = "--interpolation=no";
+	/*
+	 * Clock source = AUDIO, NOT display-resample.
+	 *
+	 * display-resample tells mpv to resample audio to match the wl_surface
+	 * frame-callback rate.  The compositor runs a fullscreen-video cadence
+	 * that paces frame-done delivery to mpv; mpv's vsync estimator reads
+	 * that paced rate, not the panel's real refresh rate, so the resampler
+	 * calibrates against a moving target.  After a few minutes the audio
+	 * speed has ramped to compensate for the mismatch and playback starts
+	 * running fast.  With video-sync=audio, audio is the master clock at
+	 * 1.0x and video is dropped/duplicated to match — robust, never
+	 * accelerates.  profile=fast is dropped because it enables aggressive
+	 * frame-drop behavior that assumed display-resample pacing.
+	 */
+	argv[ai++] = "--video-sync=audio";
 
 	/* HTTP streaming cache (server delivers chunks) */
 	argv[ai++] = "--cache=yes";
@@ -422,18 +446,29 @@ mpv_launcher_start(const char *url, double resume_pos, int media_id)
 	if (pid == 0) {
 		/* Child */
 		setsid();
-		/* stdin → /dev/null; stdout/stderr → /tmp log so silent failures
-		 * (vulkan init, missing codec, bad URL) are diagnosable. */
+		/* Ensure log dir exists (init_logging also does this, but be
+		 * defensive in case mpv is launched before full init) */
+		mkdir("/tmp/nixlytile", 0755);
+		/* stdin → /dev/null; stdout/stderr → stable log path. This
+		 * captures EARLY output (vulkan init, missing codec, bad URL)
+		 * that fires before --log-file= is opened by mpv. */
 		int devnull = open("/dev/null", O_RDWR);
 		if (devnull >= 0) {
 			dup2(devnull, STDIN_FILENO);
 			if (devnull > 2) close(devnull);
 		}
-		char logpath[64];
-		snprintf(logpath, sizeof(logpath),
-		         "/tmp/nixlytile-mpv-%d.log", (int)getpid());
-		int logfd = open(logpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		int logfd = open("/tmp/nixlytile/mpv-stdio.log",
+		                 O_WRONLY | O_CREAT | O_TRUNC, 0644);
 		if (logfd >= 0) {
+			struct timespec ts;
+			struct tm tm;
+			clock_gettime(CLOCK_REALTIME, &ts);
+			localtime_r(&ts.tv_sec, &tm);
+			dprintf(logfd,
+				"=== mpv stdio %04d-%02d-%02d %02d:%02d:%02d pid=%d ===\n",
+				tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+				tm.tm_hour, tm.tm_min, tm.tm_sec, (int)getpid());
+			fsync(logfd);
 			dup2(logfd, STDOUT_FILENO);
 			dup2(logfd, STDERR_FILENO);
 			if (logfd > 2) close(logfd);

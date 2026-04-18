@@ -2725,7 +2725,7 @@ diag_timer_cb(void *data)
 static void
 init_logging(void)
 {
-	#define NIXLY_LOG_DIR "/tmp/nixlylogging"
+	#define NIXLY_LOG_DIR "/tmp/nixlytile"
 	mkdir(NIXLY_LOG_DIR, 0755);
 
 	/* Save original stderr before redirect */

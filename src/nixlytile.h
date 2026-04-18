@@ -2792,6 +2792,7 @@ void gamepad_menu_render(Monitor *m);
 int gamepad_menu_handle_button(Monitor *m, int button, int value);
 int gamepad_menu_handle_click(Monitor *m, int cx, int cy, uint32_t button);
 void gamepad_menu_select(Monitor *m);
+pid_t retro_spawn_retroarch(void);
 void gamepad_device_add(const char *path);
 void gamepad_device_remove(const char *path);
 int gamepad_event_cb(int fd, uint32_t mask, void *data);
