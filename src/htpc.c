@@ -2056,6 +2056,17 @@ is_retro_emulator_client(Client *c)
 	if (pid > 1 && is_retro_emulator_pid(pid))
 		return 1;
 
+	/* Ancestry check: clients launched under the retroarch session we
+	 * started via the gamepad menu — covers subprocesses whose comm or
+	 * app_id doesn't advertise themselves as retroarch yet. */
+	if (pid > 1 && retro_session_pid > 1) {
+		if (kill(retro_session_pid, 0) != 0 && errno == ESRCH) {
+			retro_session_pid = 0;
+		} else if (is_child_of(pid, retro_session_pid)) {
+			return 1;
+		}
+	}
+
 	return 0;
 }
 

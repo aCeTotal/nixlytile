@@ -284,7 +284,23 @@ gamepad_menu_select(Monitor *m)
 		printstatus();
 
 		wlr_log(WLR_INFO, "Launching RetroArch fullscreen");
-		focus_or_launch_app("retroarch", "retroarch -f");
+		{
+			Client *existing = find_client_by_app_id("retroarch");
+			if (existing) {
+				focus_or_launch_app("retroarch", "retroarch -f");
+			} else {
+				pid_t pid = fork();
+				if (pid == 0) {
+					setsid();
+					execl("/bin/sh", "sh", "-c", "exec retroarch -f", NULL);
+					_exit(127);
+				}
+				if (pid > 0) {
+					retro_session_pid = pid;
+					wlr_log(WLR_INFO, "RetroArch pid=%d tracked for game-mode exemption", pid);
+				}
+			}
+		}
 		return;
 	}
 

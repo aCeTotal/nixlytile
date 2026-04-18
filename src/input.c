@@ -1,5 +1,6 @@
 #include "nixlytile.h"
 #include "client.h"
+#include "mpv_launcher.h"
 
 static void (*last_keybinding_func)(const Arg *);
 
@@ -1538,6 +1539,18 @@ try_gamepad_menu_key(const xkb_keysym_t *syms, int nsyms)
 }
 
 static int
+try_mpv_playback_key(const xkb_keysym_t *syms, int nsyms)
+{
+	if (!mpv_launcher_active() || playback_state != PLAYBACK_PLAYING)
+		return 0;
+	for (int i = 0; i < nsyms; i++) {
+		if (handle_playback_key(syms[i]))
+			return 1;
+	}
+	return 0;
+}
+
+static int
 try_videoplayer_key(const xkb_keysym_t *syms, int nsyms, uint32_t mods)
 {
 	int handled = 0;
@@ -1743,6 +1756,7 @@ keypress(struct wl_listener *listener, void *data)
 		       || try_wifi_popup_key(wifi_mon, syms, nsyms, mods)
 		       || try_stats_panel_key(stats_mon, syms, nsyms)
 		       || try_gamepad_menu_key(syms, nsyms)
+		       || try_mpv_playback_key(syms, nsyms)
 		       || try_videoplayer_key(syms, nsyms, mods)
 		       || try_pc_gaming_key(pc_gaming_mon, syms, nsyms, mods)
 		       || try_media_view_key(syms, nsyms)

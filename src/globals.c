@@ -116,6 +116,7 @@ int game_mode_active = 0; /* Set when any client is fullscreen - pauses backgrou
 int game_mode_ultra = 0;  /* Ultra game mode - maximum performance, minimal latency */
 Client *game_mode_client = NULL;  /* The fullscreen game client */
 pid_t game_mode_pid = 0;  /* PID of fullscreen game process */
+pid_t retro_session_pid = 0;  /* PID of retroarch (or other retro emulator) we launched; tree excluded from game mode */
 int game_mode_nice_applied = 0;  /* 1 if we changed nice value */
 int game_mode_ioclass_applied = 0;  /* 1 if we changed IO priority */
 int game_mode_oom_applied = 0;  /* 1 if we changed OOM score */

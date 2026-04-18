@@ -1690,6 +1690,7 @@ extern int game_mode_active;
 extern int game_mode_ultra;
 extern Client *game_mode_client;
 extern pid_t game_mode_pid;
+extern pid_t retro_session_pid;
 extern int game_mode_nice_applied;
 extern int game_mode_ioclass_applied;
 extern int game_mode_oom_applied;

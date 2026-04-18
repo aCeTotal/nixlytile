@@ -299,57 +299,60 @@ mpv_launcher_start(const char *url, double resume_pos, int media_id)
 	mpv_eof_reached = 0;
 
 	char start_arg[64];
-	snprintf(start_arg, sizeof(start_arg), "--start=%.3f",
-	         resume_pos > 0.0 ? resume_pos : 0.0);
+	start_arg[0] = '\0';
+	/* Only pass --start when resuming. Passing --start=0 put mpv into a
+	 * "seek to 0 on load" state that stalled on first frame until the
+	 * user seeked manually. */
+	if (resume_pos > 0.0)
+		snprintf(start_arg, sizeof(start_arg), "--start=%.3f", resume_pos);
 
 	char sock_arg[200];
 	snprintf(sock_arg, sizeof(sock_arg), "--input-ipc-server=%s", mpv_sock_path);
 
 	/* Max-performance + full mpv UI args */
-	const char *argv[] = {
-		"mpv",
-		"--fullscreen",
-		"--force-window=immediate",
-		"--osc=yes",
-		"--no-terminal",
-		"--msg-level=all=warn",  /* keep stderr useful for debugging */
-		"--idle=no",
-		"--keep-open=no",
-		"--save-position-on-quit=no",
+	const char *argv[32];
+	int ai = 0;
+	argv[ai++] = "mpv";
+	argv[ai++] = "--fullscreen";
+	argv[ai++] = "--force-window=immediate";
+	argv[ai++] = "--osc=yes";
+	argv[ai++] = "--no-terminal";
+	argv[ai++] = "--msg-level=all=warn";
+	argv[ai++] = "--idle=no";
+	argv[ai++] = "--keep-open=no";
+	argv[ai++] = "--save-position-on-quit=no";
+	argv[ai++] = "--pause=no";
 
-		/* Video output — libplacebo path with auto API/context.
-		 * Forcing vulkan+waylandvk was causing silent exits on boxes
-		 * without the Vulkan WSI path mpv expects; `auto` falls back
-		 * to OpenGL-wayland cleanly. */
-		"--vo=gpu-next",
-		"--gpu-api=auto",
-		"--gpu-context=auto",
-		"--hwdec=auto-safe",
+	/* Video output — libplacebo path with auto API/context. */
+	argv[ai++] = "--vo=gpu-next";
+	argv[ai++] = "--gpu-api=auto";
+	argv[ai++] = "--gpu-context=auto";
+	argv[ai++] = "--hwdec=auto-safe";
 
-		/* Performance profile + display-synced pacing */
-		"--profile=fast",
-		"--video-sync=display-resample",
-		"--interpolation=no",
+	/* Performance profile + display-synced pacing */
+	argv[ai++] = "--profile=fast";
+	argv[ai++] = "--video-sync=display-resample";
+	argv[ai++] = "--interpolation=no";
 
-		/* HTTP streaming cache (server delivers chunks) */
-		"--cache=yes",
-		"--cache-secs=60",
-		"--demuxer-max-bytes=500MiB",
-		"--demuxer-max-back-bytes=100MiB",
-		"--demuxer-readahead-secs=20",
+	/* HTTP streaming cache (server delivers chunks) */
+	argv[ai++] = "--cache=yes";
+	argv[ai++] = "--cache-secs=60";
+	argv[ai++] = "--demuxer-max-bytes=500MiB";
+	argv[ai++] = "--demuxer-max-back-bytes=100MiB";
+	argv[ai++] = "--demuxer-readahead-secs=20";
 
-		/* Audio */
-		"--ao=pipewire",
+	/* Audio */
+	argv[ai++] = "--ao=pipewire";
 
-		/* Subtitle defaults — prefer Norwegian then English */
-		"--slang=nor,nob,nno,en,eng",
-		"--alang=nor,nob,nno,en,eng",
+	/* Subtitle defaults — prefer Norwegian then English */
+	argv[ai++] = "--slang=nor,nob,nno,en,eng";
+	argv[ai++] = "--alang=nor,nob,nno,en,eng";
 
-		start_arg,
-		sock_arg,
-		url,
-		NULL
-	};
+	if (start_arg[0])
+		argv[ai++] = start_arg;
+	argv[ai++] = sock_arg;
+	argv[ai++] = url;
+	argv[ai++] = NULL;
 
 	pid_t pid = fork();
 	if (pid < 0) {
@@ -415,6 +418,11 @@ mpv_launcher_start(const char *url, double resume_pos, int media_id)
 		"{\"command\":[\"observe_property\",1,\"time-pos\"]}");
 	mpv_launcher_send_cmd(
 		"{\"command\":[\"observe_property\",2,\"eof-reached\"]}");
+
+	/* Belt-and-suspenders: force unpause after load in case mpv came up
+	 * paused on first frame (some profiles/cache states trigger this). */
+	mpv_launcher_send_cmd(
+		"{\"command\":[\"set_property\",\"pause\",false]}");
 
 	return 0;
 }

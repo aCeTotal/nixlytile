@@ -2732,11 +2732,11 @@ handle_playback_key(xkb_keysym_t sym)
 {
 	/* mpv is the keyboard-focused Wayland client during playback —
 	 * it handles its own keybindings (space/arrows/q/m/f/etc) directly.
-	 * We only intercept XKB_KEY_q as a convenience to force our cleanup. */
+	 * We intercept Escape and q/Q to force our cleanup. */
 	if (!mpv_launcher_active())
 		return 0;
 
-	if (sym == XKB_KEY_q || sym == XKB_KEY_Q) {
+	if (sym == XKB_KEY_q || sym == XKB_KEY_Q || sym == XKB_KEY_Escape) {
 		stop_integrated_player();
 		return 1;
 	}
