@@ -263,8 +263,11 @@ gamepad_menu_select(Monitor *m)
 		return;
 	}
 
-	/* Handle Retro-gaming - launch RetroArch directly (gamepad autoconfig
-	 * handles controller mapping; user manages ROMs inside RetroArch). */
+	/* Handle Retro-gaming - launch RetroArch directly in fullscreen on
+	 * tag 3.  `-f` forces fullscreen regardless of retroarch.cfg; the tag
+	 * switch ensures any tiled clients on the current tag don't fight for
+	 * the viewport while RetroArch starts. Gamepad autoconfig handles
+	 * controller mapping; user manages ROMs inside RetroArch. */
 	if (strcmp(label, "Retro-gaming") == 0) {
 		gamepad_menu_hide_all();
 		steam_kill();
@@ -272,8 +275,16 @@ gamepad_menu_select(Monitor *m)
 		media_view_hide_all();
 		retro_gaming_hide_all();
 		pc_gaming_hide_all();
-		wlr_log(WLR_INFO, "Launching RetroArch");
-		focus_or_launch_app("retroarch", "retroarch");
+
+		/* Switch to dedicated retro-gaming tag (tag 3 = bit 2). */
+		invalidate_video_pacing(m);
+		m->seltags ^= 1;
+		m->tagset[m->seltags] = 1 << 2;
+		arrange(m);
+		printstatus();
+
+		wlr_log(WLR_INFO, "Launching RetroArch fullscreen");
+		focus_or_launch_app("retroarch", "retroarch -f");
 		return;
 	}
 

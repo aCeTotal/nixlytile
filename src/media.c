@@ -322,6 +322,35 @@ save_resume_position(int media_id, double position)
 	}
 }
 
+/* Suspend/resume media browser overlays so mpv (on LyrFS) is visible.
+ * Media views live on LyrBlock, which sits ABOVE LyrFS — without disabling
+ * them, the mpv client surface is fully occluded by the browser. We only
+ * toggle the scene node enable flag; `visible` stays true so state (detail
+ * view, selection, poll refresh) is preserved for when playback ends. */
+void
+media_views_suspend_for_playback(void)
+{
+	Monitor *m;
+	wl_list_for_each(m, &mons, link) {
+		if (m->movies_view.tree)
+			wlr_scene_node_set_enabled(&m->movies_view.tree->node, false);
+		if (m->tvshows_view.tree)
+			wlr_scene_node_set_enabled(&m->tvshows_view.tree->node, false);
+	}
+}
+
+void
+media_views_resume_after_playback(void)
+{
+	Monitor *m;
+	wl_list_for_each(m, &mons, link) {
+		if (m->movies_view.visible && m->movies_view.tree)
+			wlr_scene_node_set_enabled(&m->movies_view.tree->node, true);
+		if (m->tvshows_view.visible && m->tvshows_view.tree)
+			wlr_scene_node_set_enabled(&m->tvshows_view.tree->node, true);
+	}
+}
+
 void
 launch_integrated_player_with_resume(const char *url, double resume_pos)
 {
@@ -342,6 +371,8 @@ launch_integrated_player_with_resume(const char *url, double resume_pos)
 		playback_state = PLAYBACK_IDLE;
 		return;
 	}
+
+	media_views_suspend_for_playback();
 
 	playback_state = PLAYBACK_PLAYING;
 	wlr_cursor_unset_image(cursor);
@@ -379,6 +410,7 @@ void
 media_playback_ended(void)
 {
 	Monitor *m;
+	media_views_resume_after_playback();
 	wl_list_for_each(m, &mons, link) {
 		if (m->movies_view.visible && m->movies_view.in_detail_view)
 			media_view_render_detail(m, MEDIA_VIEW_MOVIES);

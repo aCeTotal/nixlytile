@@ -2759,6 +2759,8 @@ int parse_media_json(const char *buffer, const char *server_url, MediaItem **out
 void media_view_show(Monitor *m, MediaViewType type);
 void media_view_hide(Monitor *m, MediaViewType type);
 void media_view_hide_all(void);
+void media_views_suspend_for_playback(void);
+void media_views_resume_after_playback(void);
 void media_view_render(Monitor *m, MediaViewType type);
 void media_view_render_detail(Monitor *m, MediaViewType type);
 int media_view_refresh(Monitor *m, MediaViewType type);
