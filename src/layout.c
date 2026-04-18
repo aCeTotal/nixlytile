@@ -1,5 +1,6 @@
 #include "nixlytile.h"
 #include "client.h"
+#include "mpv_launcher.h"
 
 void
 hidetagthumbnail(Monitor *m)
@@ -19,21 +20,27 @@ void
 htpc_views_update_visibility(Monitor *m)
 {
 	unsigned int tagset;
+	int mpv_active;
 
 	if (!m || !htpc_mode_active)
 		return;
 
 	tagset = m->tagset[m->seltags];
+	/* mpv fullscreen lives on LyrFS, but every htpc overlay below lives on
+	 * LyrBlock which sits ABOVE LyrFS. Force them disabled while mpv runs
+	 * so the player is never occluded, regardless of which tag is active
+	 * or which tag mpv ends up on. */
+	mpv_active = mpv_launcher_active();
 
 	/* PC Gaming view - visible on tag 4 (bit 3) */
 	if (m->pc_gaming.tree) {
-		int vis = m->pc_gaming.visible && (m->pc_gaming.view_tag & tagset);
+		int vis = !mpv_active && m->pc_gaming.visible && (m->pc_gaming.view_tag & tagset);
 		wlr_scene_node_set_enabled(&m->pc_gaming.tree->node, vis);
 	}
 
 	/* Retro Gaming view - visible on tag 3 (bit 2) */
 	if (m->retro_gaming.tree) {
-		int vis = m->retro_gaming.visible && (m->retro_gaming.view_tag & tagset);
+		int vis = !mpv_active && m->retro_gaming.visible && (m->retro_gaming.view_tag & tagset);
 		wlr_scene_node_set_enabled(&m->retro_gaming.tree->node, vis);
 		if (m->retro_gaming.dim)
 			wlr_scene_node_set_enabled(&m->retro_gaming.dim->node, vis);
@@ -41,13 +48,13 @@ htpc_views_update_visibility(Monitor *m)
 
 	/* Movies view - visible on tag 2 (bit 1) */
 	if (m->movies_view.tree) {
-		int vis = m->movies_view.visible && (m->movies_view.view_tag & tagset);
+		int vis = !mpv_active && m->movies_view.visible && (m->movies_view.view_tag & tagset);
 		wlr_scene_node_set_enabled(&m->movies_view.tree->node, vis);
 	}
 
 	/* TV-shows view - visible on tag 1 (bit 0) */
 	if (m->tvshows_view.tree) {
-		int vis = m->tvshows_view.visible && (m->tvshows_view.view_tag & tagset);
+		int vis = !mpv_active && m->tvshows_view.visible && (m->tvshows_view.view_tag & tagset);
 		wlr_scene_node_set_enabled(&m->tvshows_view.tree->node, vis);
 	}
 }

@@ -2139,6 +2139,31 @@ update_game_mode(void)
 	int is_game = 0;
 
 	/*
+	 * Emulators launched from the retro-gaming page must never engage
+	 * game mode (no process freeze, no GPU clock lock, no statusbar
+	 * hide).  Treat them as if no fullscreen client existed.
+	 */
+	if (c) {
+		const char *app = client_get_appid(c);
+		static const char *retro_apps[] = {
+			"retroarch", "org.libretro.RetroArch",
+			"dolphin-emu", "org.DolphinEmu.dolphin-emu",
+			"pcsx2", "rpcs3", "cemu", "yuzu",
+			"desmume", "mgba", "ppsspp", "citra",
+			NULL
+		};
+		if (app) {
+			for (int i = 0; retro_apps[i]; i++) {
+				if (strcasecmp(app, retro_apps[i]) == 0 ||
+				    strcasestr(app, retro_apps[i])) {
+					c = NULL;
+					break;
+				}
+			}
+		}
+	}
+
+	/*
 	 * Guard: if ultra game mode is active and the game process is still
 	 * running, NEVER deactivate game mode even if the fullscreen client
 	 * is temporarily not found (e.g., surface unmap during loading,
@@ -2927,10 +2952,10 @@ static int
 is_known_game_app(const char *app)
 {
 	static const char *game_apps[] = {
-		/* Emulators */
-		"retroarch", "dolphin-emu", "pcsx2", "rpcs3", "cemu",
-		"yuzu", "desmume", "mgba", "ppsspp", "citra",
-		"org.libretro.RetroArch", "org.DolphinEmu.dolphin-emu",
+		/* Emulators are intentionally NOT listed — the retro-gaming
+		 * page handles them explicitly and the user does not want
+		 * game mode to engage for them (no process freeze, no GPU
+		 * clock lock, no statusbar hide). */
 		/* Game launchers / wrappers */
 		"gamescope", "heroic", "lutris", "bottles",
 		"net.lutris.Lutris", "com.heroicgameslauncher.hgl",

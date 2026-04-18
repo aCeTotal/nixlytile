@@ -366,13 +366,19 @@ launch_integrated_player_with_resume(const char *url, double resume_pos)
 	audio_track_count = 0;
 	subtitle_track_count = 0;
 
+	/* Suspend BEFORE launch: mpv_launcher_start() pumps the event loop for
+	 * up to 5s waiting for the IPC socket. During that gap mpv maps its
+	 * fullscreen surface on LyrFS, but the media browser on LyrBlock sits
+	 * above and would occlude the first frames of playback. */
+	media_views_suspend_for_playback();
+	hide_playback_osd();
+
 	if (mpv_launcher_start(url, resume_pos, playback_media_id) < 0) {
 		wlr_log(WLR_ERROR, "Failed to launch mpv for %s", url);
+		media_views_resume_after_playback();
 		playback_state = PLAYBACK_IDLE;
 		return;
 	}
-
-	media_views_suspend_for_playback();
 
 	playback_state = PLAYBACK_PLAYING;
 	wlr_cursor_unset_image(cursor);
@@ -416,6 +422,10 @@ media_playback_ended(void)
 			media_view_render_detail(m, MEDIA_VIEW_MOVIES);
 		if (m->tvshows_view.visible && m->tvshows_view.in_detail_view)
 			media_view_render_detail(m, MEDIA_VIEW_TVSHOWS);
+		/* Re-run per-monitor view visibility now that mpv is gone, so
+		 * pc_gaming / retro_gaming trees (suppressed while mpv ran) come
+		 * back on the tags where they belong. */
+		htpc_views_update_visibility(m);
 	}
 }
 

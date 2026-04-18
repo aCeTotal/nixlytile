@@ -230,8 +230,16 @@ mpv_cleanup(void)
 	mpv_rx_len      = 0;
 }
 
-/* ── IPC socket connect (retry loop, mpv creates it on startup) ────── */
-
+/* ── IPC socket connect (retry loop, mpv creates it on startup) ──────
+ *
+ * mpv can't initialize its Wayland surface until the compositor processes
+ * its Wayland requests.  A plain sleep loop would block the compositor
+ * thread for up to 5s → mpv's `wl_display_roundtrip()` hangs → mpv never
+ * opens the IPC socket → we time out and kill it → user sees nothing.
+ *
+ * Instead we drive `wl_event_loop_dispatch()` during each wait slice so
+ * mpv's Wayland traffic gets serviced while we poll for the socket.
+ */
 static int
 mpv_ipc_connect(const char *path)
 {
@@ -240,7 +248,7 @@ mpv_ipc_connect(const char *path)
 	addr.sun_family = AF_UNIX;
 	strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
 
-	for (int tries = 0; tries < 100; tries++) {  /* ~2s total */
+	for (int tries = 0; tries < 250; tries++) {  /* up to ~5s */
 		int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
 		if (fd < 0) return -1;
 
@@ -257,8 +265,14 @@ mpv_ipc_connect(const char *path)
 			return -1;
 		}
 
-		struct timespec ts = { .tv_sec = 0, .tv_nsec = 20 * 1000 * 1000 };
-		nanosleep(&ts, NULL);
+		/* Pump the compositor event loop so mpv's Wayland init can
+		 * make progress. 20ms timeout = same pacing as the old sleep. */
+		if (event_loop)
+			wl_event_loop_dispatch(event_loop, 20);
+		else {
+			struct timespec ts = { .tv_sec = 0, .tv_nsec = 20 * 1000 * 1000 };
+			nanosleep(&ts, NULL);
+		}
 	}
 	wlr_log(WLR_ERROR, "mpv IPC connect timeout: %s", path);
 	return -1;
@@ -293,15 +307,18 @@ mpv_launcher_start(const char *url, double resume_pos, int media_id)
 		"--force-window=immediate",
 		"--osc=yes",
 		"--no-terminal",
-		"--really-quiet",
+		"--msg-level=all=warn",  /* keep stderr useful for debugging */
 		"--idle=no",
 		"--keep-open=no",
 		"--save-position-on-quit=no",
 
-		/* Video output — best modern path (libplacebo) */
+		/* Video output — libplacebo path with auto API/context.
+		 * Forcing vulkan+waylandvk was causing silent exits on boxes
+		 * without the Vulkan WSI path mpv expects; `auto` falls back
+		 * to OpenGL-wayland cleanly. */
 		"--vo=gpu-next",
-		"--gpu-api=vulkan",
-		"--gpu-context=waylandvk",
+		"--gpu-api=auto",
+		"--gpu-context=auto",
 		"--hwdec=auto-safe",
 
 		/* Performance profile + display-synced pacing */
@@ -337,13 +354,21 @@ mpv_launcher_start(const char *url, double resume_pos, int media_id)
 	if (pid == 0) {
 		/* Child */
 		setsid();
-		/* Redirect stdio to /dev/null so mpv doesn't spam compositor log */
+		/* stdin → /dev/null; stdout/stderr → /tmp log so silent failures
+		 * (vulkan init, missing codec, bad URL) are diagnosable. */
 		int devnull = open("/dev/null", O_RDWR);
 		if (devnull >= 0) {
 			dup2(devnull, STDIN_FILENO);
-			dup2(devnull, STDOUT_FILENO);
-			dup2(devnull, STDERR_FILENO);
 			if (devnull > 2) close(devnull);
+		}
+		char logpath[64];
+		snprintf(logpath, sizeof(logpath),
+		         "/tmp/nixlytile-mpv-%d.log", (int)getpid());
+		int logfd = open(logpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		if (logfd >= 0) {
+			dup2(logfd, STDOUT_FILENO);
+			dup2(logfd, STDERR_FILENO);
+			if (logfd > 2) close(logfd);
 		}
 		execvp("mpv", (char *const *)argv);
 		_exit(127);
