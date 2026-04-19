@@ -1,86 +1,6 @@
 #include "nixlytile.h"
 #include "client.h"
 #include "mpv_launcher.h"
-#include <sys/prctl.h>
-#include <sys/syscall.h>
-
-/*
- * Spawn retroarch with stdout/stderr captured to /tmp/nixlytile/retroarch.log.
- * The dedicated log survives even if the compositor deadlocks — retroarch
- * writes to the file directly via kernel, so it's readable after reboot
- * (path already exists from init_logging()).
- */
-pid_t
-retro_spawn_retroarch(void)
-{
-	pid_t pid;
-	const char *logdir = "/tmp/nixlytile";
-	const char *logpath = "/tmp/nixlytile/retroarch.log";
-
-	mkdir(logdir, 0755);
-
-	pid = fork();
-	if (pid > 0) {
-		if (selmon)
-			pending_launch_add(pid,
-				selmon->tagset[selmon->seltags],
-				selmon->wlr_output->name);
-		return pid;
-	}
-	if (pid < 0)
-		return -1;
-
-	/* Child: redirect stdin → /dev/null, stdout+stderr → retroarch.log */
-	{
-		int devnull = open("/dev/null", O_RDWR);
-		if (devnull >= 0) {
-			dup2(devnull, STDIN_FILENO);
-			if (devnull > STDERR_FILENO)
-				close(devnull);
-		}
-	}
-
-	int logfd = open(logpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-	if (logfd >= 0) {
-		struct timespec ts;
-		struct tm tm;
-		clock_gettime(CLOCK_REALTIME, &ts);
-		localtime_r(&ts.tv_sec, &tm);
-		dprintf(logfd,
-			"=== retroarch launch %04d-%02d-%02d %02d:%02d:%02d (compositor pid=%d) ===\n",
-			tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-			tm.tm_hour, tm.tm_min, tm.tm_sec, getppid());
-		fsync(logfd);
-		dup2(logfd, STDOUT_FILENO);
-		dup2(logfd, STDERR_FILENO);
-		if (logfd > STDERR_FILENO)
-			close(logfd);
-	}
-
-	setsid();
-	signal(SIGCHLD, SIG_DFL);
-	signal(SIGINT, SIG_DFL);
-	signal(SIGTERM, SIG_DFL);
-	signal(SIGPIPE, SIG_DFL);
-	prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
-
-	/* Keep fds 0,1,2 and logfd (already dup'd); close the rest */
-	syscall(SYS_close_range, 3, ~0U, 0);
-
-	const char *home = getenv("HOME");
-	if (home && *home)
-		(void)chdir(home);
-
-	/* Unbuffered output so the log reflects retroarch's latest line
-	 * even if retroarch crashes or the compositor freezes mid-launch. */
-	setenv("LIBGL_DEBUG", "verbose", 0);
-
-	execlp("retroarch", "retroarch", "-v", "-f", (char *)NULL);
-	dprintf(STDERR_FILENO,
-		"retro_spawn_retroarch: execlp(retroarch) failed: %s\n",
-		strerror(errno));
-	_exit(127);
-}
 
 void
 gamepad_menu_show(Monitor *m)
@@ -363,22 +283,14 @@ gamepad_menu_select(Monitor *m)
 		arrange(m);
 		printstatus();
 
-		wlr_log(WLR_INFO, "RETRO_TRACE: Launching RetroArch fullscreen (htpc=%d, tag=0x%x)",
-			htpc_mode_active, m->tagset[m->seltags]);
 		{
 			Client *existing = find_client_by_app_id("retroarch");
 			if (existing) {
-				wlr_log(WLR_INFO, "RETRO_TRACE: existing retroarch client — focusing");
 				focus_or_launch_app("retroarch", "retroarch -f");
 			} else {
-				pid_t pid = retro_spawn_retroarch();
-				if (pid > 0) {
+				pid_t pid = spawn_cmd("retroarch -f");
+				if (pid > 0)
 					retro_session_pid = pid;
-					wlr_log(WLR_INFO, "RETRO_TRACE: RetroArch pid=%d log=/tmp/nixlytile/retroarch.log",
-						pid);
-				} else {
-					wlr_log(WLR_ERROR, "RETRO_TRACE: retro_spawn_retroarch() failed");
-				}
 			}
 		}
 		return;

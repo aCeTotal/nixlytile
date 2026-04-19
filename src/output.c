@@ -96,6 +96,25 @@ closemon(Monitor *m)
 	printstatus();
 }
 
+static int
+mode_is_dci_4k(const struct wlr_output_mode *mode)
+{
+	return mode && mode->width > 3840 && mode->height == 2160;
+}
+
+static struct wlr_output_mode *
+find_uhd_mode(struct wlr_output *output)
+{
+	struct wlr_output_mode *mode, *best = NULL;
+	wl_list_for_each(mode, &output->modes, link) {
+		if (mode->width != 3840 || mode->height != 2160)
+			continue;
+		if (!best || mode->refresh > best->refresh)
+			best = mode;
+	}
+	return best;
+}
+
 struct wlr_output_mode *
 bestmode(struct wlr_output *output)
 {
@@ -103,8 +122,11 @@ bestmode(struct wlr_output *output)
 	int best_area = 0, best_refresh = 0;
 
 	wl_list_for_each(mode, &output->modes, link) {
-		/* Skip DCI 4K (4096x2160) - only use UHD (3840x2160) */
-		if (mode->width > 3840 && mode->height == 2160)
+		/* Skip DCI 4K (4096x2160) - only use UHD (3840x2160).
+		 * Some 4K TVs report DCI 4K as preferred, which forces the
+		 * HDMI driver into Limited quantization range (gray blacks)
+		 * and causes aspect issues on 16:9 panels. */
+		if (mode_is_dci_4k(mode))
 			continue;
 		int area = mode->width * mode->height;
 		if (!best || area > best_area || (area == best_area && mode->refresh > best_refresh)) {
@@ -114,8 +136,14 @@ bestmode(struct wlr_output *output)
 		}
 	}
 
-	if (!best)
+	if (!best) {
 		best = wlr_output_preferred_mode(output);
+		if (mode_is_dci_4k(best)) {
+			struct wlr_output_mode *uhd = find_uhd_mode(output);
+			if (uhd)
+				best = uhd;
+		}
+	}
 
 	return best;
 }
@@ -668,6 +696,11 @@ createmon(struct wl_listener *listener, void *data)
 
 		if (!wlr_output_test_state(wlr_output, &state)) {
 			mode = wlr_output_preferred_mode(wlr_output);
+			if (mode_is_dci_4k(mode)) {
+				struct wlr_output_mode *uhd = find_uhd_mode(wlr_output);
+				if (uhd)
+					mode = uhd;
+			}
 			if (mode) {
 				wlr_output_state_set_mode(&state, mode);
 				wlr_log(WLR_INFO, "Trying preferred mode for %s", wlr_output->name);
@@ -2892,6 +2925,109 @@ set_drm_color_properties(Monitor *m, int max_bpc)
 	return success;
 }
 
+/*
+ * Force HDMI output to full-range RGB.
+ *
+ * 4K TVs frequently default to HDMI Limited Range (16-235) quantization,
+ * which crushes black to ~16/255 gray. Setting the Intel/AMD "Broadcast
+ * RGB" connector property to "Full" forces the driver to emit an AVI
+ * InfoFrame with Q=1 (Full Range) and map framebuffer 0..255 directly to
+ * the HDMI signal — so compositor-drawn black reaches the TV as real 0.
+ *
+ * Safe alongside wlroots 0.20 atomic state: wlroots does not touch this
+ * property, unlike "max bpc" / "Colorspace". No-op on non-HDMI outputs
+ * or drivers that don't expose the property.
+ *
+ * Also probes "output format" (Intel) / "HDMI Output Colorimetry" to
+ * force RGB over YCbCr where the driver would otherwise downgrade to
+ * YCbCr 4:2:0 on high-bandwidth HDMI modes (another source of crushed
+ * blacks since YCbCr has its own limited range).
+ */
+void
+force_hdmi_full_range(Monitor *m)
+{
+	int drm_fd;
+	uint32_t conn_id;
+	drmModeConnector *conn;
+	int i;
+
+	if (!m || !m->wlr_output || !wlr_output_is_drm(m->wlr_output))
+		return;
+
+	/* Only HDMI outputs need this — DP and eDP use native RGB full range */
+	if (strncmp(m->wlr_output->name, "HDMI", 4) != 0)
+		return;
+
+	/* Skip secondary-GPU outputs: renderer fd belongs to primary GPU */
+	if (wlr_drm_backend_get_parent(m->wlr_output->backend))
+		return;
+
+	drm_fd = wlr_renderer_get_drm_fd(drw);
+	if (drm_fd < 0)
+		return;
+
+	conn_id = wlr_drm_connector_get_id(m->wlr_output);
+	if (conn_id == 0)
+		return;
+
+	conn = drmModeGetConnector(drm_fd, conn_id);
+	if (!conn)
+		return;
+
+	for (i = 0; i < conn->count_props; i++) {
+		drmModePropertyRes *prop = drmModeGetProperty(drm_fd, conn->props[i]);
+		if (!prop)
+			continue;
+
+		/* "Broadcast RGB" (Intel, AMD): Automatic / Full / Limited 16:235 */
+		if (strcmp(prop->name, "Broadcast RGB") == 0 &&
+		    (prop->flags & DRM_MODE_PROP_ENUM)) {
+			uint64_t full_value = (uint64_t)-1;
+			int j;
+			for (j = 0; j < prop->count_enums; j++) {
+				if (strcmp(prop->enums[j].name, "Full") == 0) {
+					full_value = prop->enums[j].value;
+					break;
+				}
+			}
+			if (full_value != (uint64_t)-1) {
+				if (drmModeConnectorSetProperty(drm_fd, conn_id,
+						conn->props[i], full_value) == 0)
+					wlr_log(WLR_INFO,
+						"HDMI: forced full-range RGB on %s",
+						m->wlr_output->name);
+				else
+					wlr_log(WLR_DEBUG,
+						"HDMI: failed to set Broadcast RGB=Full on %s",
+						m->wlr_output->name);
+			}
+		}
+		/* "output format" (Intel TGL+): RGB / YCbCr 4:4:4 / 4:2:2 / 4:2:0 */
+		else if (strcmp(prop->name, "output format") == 0 &&
+		         (prop->flags & DRM_MODE_PROP_ENUM)) {
+			uint64_t rgb_value = (uint64_t)-1;
+			int j;
+			for (j = 0; j < prop->count_enums; j++) {
+				if (strcmp(prop->enums[j].name, "RGB") == 0) {
+					rgb_value = prop->enums[j].value;
+					break;
+				}
+			}
+			if (rgb_value != (uint64_t)-1) {
+				if (drmModeConnectorSetProperty(drm_fd, conn_id,
+						conn->props[i], rgb_value) == 0)
+					wlr_log(WLR_INFO,
+						"HDMI: forced RGB output format on %s",
+						m->wlr_output->name);
+			}
+		}
+
+		drmModeFreeProperty(prop);
+	}
+
+	drmModeFreeConnector(conn);
+}
+
 int
 enable_10bit_rendering(Monitor *m)
 {
@@ -2973,6 +3109,9 @@ init_monitor_color_settings(Monitor *m)
 		m->wlr_output->name,
 		m->supports_10bit ? "yes" : "no",
 		m->hdr_capable ? "yes" : "no");
+
+	/* Force HDMI full-range RGB so black stays black on 4K TVs */
+	force_hdmi_full_range(m);
 
 	/*
 	 * Automatically enable 10-bit rendering if supported.
