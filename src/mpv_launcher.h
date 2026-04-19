@@ -22,4 +22,9 @@ void mpv_launcher_cycle_audio(void);
 void mpv_launcher_cycle_sub(void);
 void mpv_launcher_volume_delta(double delta);
 
+/* Briefly show the OSC control bar (force visible, auto-hide after ~3s).
+ * Called on every gamepad input so the control bar appears without mouse
+ * activity. Resets timer on repeated calls. */
+void mpv_launcher_flash_osc(void);
+
 #endif

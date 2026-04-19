@@ -32,6 +32,7 @@ static size_t mpv_rx_len       = 0;
 
 static struct wl_event_source *mpv_pidfd_src = NULL;
 static struct wl_event_source *mpv_ipc_src   = NULL;
+static struct wl_event_source *mpv_osc_timer = NULL;
 
 /* ── Forward decls ─────────────────────────────────────────────────── */
 
@@ -110,6 +111,30 @@ void mpv_launcher_volume_delta(double delta)
 	char j[128];
 	snprintf(j, sizeof(j), "{\"command\":[\"add\",\"volume\",%.1f]}", delta);
 	mpv_launcher_send_cmd(j);
+}
+
+/* Return OSC to auto-hide state. Fired by mpv_osc_timer. */
+static int
+mpv_osc_timer_cb(void *data)
+{
+	(void)data;
+	mpv_launcher_send_cmd(
+		"{\"command\":[\"script-message\",\"osc-visibility\",\"auto\",\"no-osd\"]}");
+	return 0;
+}
+
+void
+mpv_launcher_flash_osc(void)
+{
+	if (mpv_ipc_fd < 0) return;
+
+	mpv_launcher_send_cmd(
+		"{\"command\":[\"script-message\",\"osc-visibility\",\"always\",\"no-osd\"]}");
+
+	if (!mpv_osc_timer)
+		mpv_osc_timer = wl_event_loop_add_timer(event_loop, mpv_osc_timer_cb, NULL);
+	if (mpv_osc_timer)
+		wl_event_source_timer_update(mpv_osc_timer, 3500);
 }
 
 /* ── Parse time-pos from mpv property-change events ────────────────── */
@@ -281,6 +306,7 @@ mpv_cleanup(void)
 {
 	if (mpv_ipc_src) { wl_event_source_remove(mpv_ipc_src); mpv_ipc_src = NULL; }
 	if (mpv_pidfd_src) { wl_event_source_remove(mpv_pidfd_src); mpv_pidfd_src = NULL; }
+	if (mpv_osc_timer) { wl_event_source_remove(mpv_osc_timer); mpv_osc_timer = NULL; }
 	if (mpv_ipc_fd >= 0) { close(mpv_ipc_fd); mpv_ipc_fd = -1; }
 	if (mpv_pidfd >= 0)  { close(mpv_pidfd);  mpv_pidfd  = -1; }
 	if (mpv_sock_path[0]) { unlink(mpv_sock_path); mpv_sock_path[0] = '\0'; }

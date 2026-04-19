@@ -2462,6 +2462,11 @@ handle_playback_osd_input(int button)
 	if (!mpv_launcher_active())
 		return 0;
 
+	/* Any gamepad press: flash the OSC control bar (auto-hide after ~3s).
+	 * mpv's OSC otherwise only shows on mouse motion, so gamepad-only use
+	 * would leave it hidden. */
+	mpv_launcher_flash_osc();
+
 	switch (button) {
 	case BTN_SOUTH:      /* A — pause/play */
 		mpv_launcher_toggle_pause();
@@ -2469,13 +2474,17 @@ handle_playback_osd_input(int button)
 	case BTN_EAST:       /* B — stop, back to browse */
 		stop_integrated_player();
 		return 1;
-	case BTN_NORTH:      /* Y — cycle subtitle track */
+	case BTN_NORTH:      /* Y — cycle subtitle track (show track name) */
 	case BTN_DPAD_DOWN:
 		mpv_launcher_cycle_sub();
+		mpv_launcher_send_cmd(
+			"{\"command\":[\"show-text\",\"Subtitle: ${?sid==no:off}${!sid==no:${sid} ${track-list/sid/title:}${track-list/sid/lang:}}\",3000]}");
 		return 1;
-	case BTN_WEST:       /* X — cycle audio track */
+	case BTN_WEST:       /* X — cycle audio track (show track name) */
 	case BTN_DPAD_UP:
 		mpv_launcher_cycle_audio();
+		mpv_launcher_send_cmd(
+			"{\"command\":[\"show-text\",\"Audio: ${?aid==no:off}${!aid==no:${aid} ${track-list/aid/title:}${track-list/aid/lang:}}\",3000]}");
 		return 1;
 	case BTN_DPAD_LEFT:
 		mpv_launcher_seek_relative(-5.0);
@@ -2489,7 +2498,7 @@ handle_playback_osd_input(int button)
 	case BTN_TR:         /* RB — jump forward 30s */
 		mpv_launcher_seek_relative(30.0);
 		return 1;
-	case BTN_SELECT:     /* Back — toggle OSC visibility */
+	case BTN_SELECT:     /* Back — toggle OSC visibility (manual override) */
 		mpv_launcher_send_cmd("{\"command\":[\"script-binding\",\"osc/visibility\"]}");
 		return 1;
 	case BTN_START:      /* Start — show mpv stats */

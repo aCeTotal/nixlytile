@@ -1056,6 +1056,15 @@ gamepad_device_add(const char *path)
 		gp->cal_lx.min, gp->cal_lx.max, gp->cal_lx.center,
 		gp->cal_ly.min, gp->cal_ly.max, gp->cal_ly.center);
 
+	/* Detect bus type (USB vs Bluetooth) */
+	{
+		struct input_id id;
+		gp->is_bluetooth = 0;
+		if (ioctl(fd, EVIOCGID, &id) == 0 && id.bustype == BUS_BLUETOOTH)
+			gp->is_bluetooth = 1;
+		wlr_log(WLR_INFO, "Gamepad transport: %s", gp->is_bluetooth ? "bluetooth" : "usb");
+	}
+
 	/* Initialize activity tracking */
 	gp->last_activity_ms = monotonic_msec();
 	gp->suspended = 0;
@@ -1992,9 +2001,13 @@ gamepad_inactivity_timer_cb(void *data)
 
 		any_active = 1;
 
-		/* Suspend if monitors are off or inactive for too long */
+		/* USB gamepads: never auto-suspend — keep alive regardless of activity */
+		if (!gp->is_bluetooth)
+			continue;
+
+		/* Bluetooth gamepads: disconnect after 4 min inactivity or monitors off */
 		if (!monitors_active ||
-		    (now - gp->last_activity_ms) >= GAMEPAD_INACTIVITY_TIMEOUT_MS) {
+		    (now - gp->last_activity_ms) >= GAMEPAD_BT_INACTIVITY_TIMEOUT_MS) {
 			gamepad_suspend(gp);
 		}
 	}

@@ -182,6 +182,7 @@
 #define GAMEPAD_CURSOR_SPEED 15.0
 #define GAMEPAD_CURSOR_ACCEL 2.5
 #define GAMEPAD_INACTIVITY_TIMEOUT_MS 10000
+#define GAMEPAD_BT_INACTIVITY_TIMEOUT_MS 240000
 #define GAMEPAD_INACTIVITY_CHECK_MS 5000
 #define GAMEPAD_PENDING_MAX 8
 #define BT_SCAN_INTERVAL_MS 300000
@@ -1035,6 +1036,7 @@ struct GamepadDevice {
 	int64_t last_activity_ms;
 	int suspended;
 	int grabbed;
+	int is_bluetooth;
 	uint64_t connect_time_ms;
 };
 
