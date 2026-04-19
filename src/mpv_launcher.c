@@ -366,74 +366,23 @@ mpv_launcher_start(const char *url, double resume_pos, int media_id)
 	char sock_arg[200];
 	snprintf(sock_arg, sizeof(sock_arg), "--input-ipc-server=%s", mpv_sock_path);
 
-	/* Max-performance + full mpv UI args */
-	const char *argv[40];
+	/*
+	 * Minimal argv — operational only.  Every configuration flag
+	 * (vo, hwdec, cache, video-sync, subtitles, fullscreen, osc, log
+	 * level/file, idle, terminal, force-window, etc.) lives in the
+	 * user's mpv.conf so htpc.nix has full control.  CLI flags would
+	 * silently override mpv.conf — don't add them here.
+	 *
+	 * The only args required for nixlytile↔mpv wiring are:
+	 *   --input-ipc-server=<sock>   our IPC control channel
+	 *   <url>                       the media URL to open
+	 *
+	 * Resume seek is applied via IPC on file-loaded (not --start=N),
+	 * see mpv_handle_event_line.
+	 */
+	const char *argv[8];
 	int ai = 0;
 	argv[ai++] = "mpv";
-	argv[ai++] = "--fullscreen";
-	argv[ai++] = "--force-window=immediate";
-	argv[ai++] = "--osc=yes";
-	argv[ai++] = "--no-terminal";
-	/* Verbose log level: -v equivalent (msg-level=all=v) + dump stats.
-	 * Writes every decoder/demuxer/renderer event to mpv.log for
-	 * post-mortem. --log-file= duplicates the terminal output to a
-	 * persistent file that survives even if stdout is broken. */
-	argv[ai++] = "--msg-level=all=v";
-	argv[ai++] = "--log-file=/tmp/nixlytile/mpv.log";
-	argv[ai++] = "--idle=no";
-	argv[ai++] = "--keep-open=no";
-	argv[ai++] = "--save-position-on-quit=no";
-	argv[ai++] = "--pause=no";
-	argv[ai++] = "--hr-seek=yes";
-
-	/* Never let mpv self-pause waiting on cache. Initial: stream cache
-	 * may fill slower than cache-pause-wait, leaving mpv stuck on the
-	 * first frame until the user seeks. Runtime: brief cache underruns
-	 * should stutter, not pause, to match normal player UX. */
-	argv[ai++] = "--cache-pause=no";
-	argv[ai++] = "--cache-pause-initial=no";
-	argv[ai++] = "--cache-pause-wait=0";
-
-	/* Video output — libplacebo path with auto API/context. */
-	argv[ai++] = "--vo=gpu-next";
-	argv[ai++] = "--gpu-api=auto";
-	argv[ai++] = "--gpu-context=auto";
-	argv[ai++] = "--hwdec=auto-safe";
-
-	/*
-	 * Clock source = AUDIO, NOT display-resample.
-	 *
-	 * display-resample tells mpv to resample audio to match the wl_surface
-	 * frame-callback rate.  The compositor runs a fullscreen-video cadence
-	 * that paces frame-done delivery to mpv; mpv's vsync estimator reads
-	 * that paced rate, not the panel's real refresh rate, so the resampler
-	 * calibrates against a moving target.  After a few minutes the audio
-	 * speed has ramped to compensate for the mismatch and playback starts
-	 * running fast.  With video-sync=audio, audio is the master clock at
-	 * 1.0x and video is dropped/duplicated to match — robust, never
-	 * accelerates.  profile=fast is dropped because it enables aggressive
-	 * frame-drop behavior that assumed display-resample pacing.
-	 */
-	argv[ai++] = "--video-sync=audio";
-
-	/* HTTP streaming cache (server delivers chunks) */
-	argv[ai++] = "--cache=yes";
-	argv[ai++] = "--cache-secs=60";
-	argv[ai++] = "--demuxer-max-bytes=500MiB";
-	argv[ai++] = "--demuxer-max-back-bytes=100MiB";
-	argv[ai++] = "--demuxer-readahead-secs=20";
-
-	/* Audio */
-	argv[ai++] = "--ao=pipewire";
-
-	/* Subtitle defaults — prefer Norwegian then English */
-	argv[ai++] = "--slang=nor,nob,nno,en,eng";
-	argv[ai++] = "--alang=nor,nob,nno,en,eng";
-
-	/* Note: no --start flag. Resume seek is applied via IPC on
-	 * file-loaded (see mpv_handle_event_line) because --start=N causes
-	 * mpv to stall on the first frame until a manual seek. */
-
 	argv[ai++] = sock_arg;
 	argv[ai++] = url;
 	argv[ai++] = NULL;

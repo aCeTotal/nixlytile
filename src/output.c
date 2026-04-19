@@ -2480,6 +2480,12 @@ is_game_content(Client *c)
 	if (!c || !content_type_mgr)
 		return 0;
 
+	/* Retro emulators announce content-type=game but must never be
+	 * treated as games anywhere (no VRR modeset, no direct scanout,
+	 * no splash-block, no fullscreen-lock, no input override). */
+	if (is_retro_emulator_client(c))
+		return 0;
+
 	surface = client_surface(c);
 	if (!surface)
 		return 0;
@@ -2495,6 +2501,11 @@ client_wants_tearing(Client *c)
 	enum wp_tearing_control_v1_presentation_hint hint;
 
 	if (!c || !tearing_control_mgr)
+		return 0;
+
+	/* Retro emulators: ignore tearing hint too — same rationale as
+	 * is_game_content. No game-path treatment at all. */
+	if (is_retro_emulator_client(c))
 		return 0;
 
 	surface = client_surface(c);

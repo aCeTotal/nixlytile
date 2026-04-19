@@ -2244,6 +2244,7 @@ int is_steam_popup(Client *c);
 int is_steam_game(Client *c);
 int is_browser_client(Client *c);
 int looks_like_game(Client *c);
+int is_retro_emulator_client(Client *c);
 void read_steam_properties(Client *c);
 int is_steam_cmd(const char *cmd);
 int is_game_launcher_child(pid_t pid);

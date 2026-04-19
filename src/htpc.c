@@ -2137,7 +2137,7 @@ is_retro_emulator_pid(pid_t pid)
 	return 0;
 }
 
-static int
+int
 is_retro_emulator_client(Client *c)
 {
 	const char *app;
