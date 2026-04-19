@@ -3287,8 +3287,8 @@ retro_gaming_show(Monitor *m)
 
 	retro_gaming_render(m);
 
-	/* Hide mouse cursor in retro gaming browser */
-	wlr_cursor_unset_image(cursor);
+	/* Keep mouse cursor visible in HTPC mode */
+	nixly_cursor_set_xcursor("default");
 }
 
 void

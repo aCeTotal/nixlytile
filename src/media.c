@@ -381,7 +381,7 @@ launch_integrated_player_with_resume(const char *url, double resume_pos)
 	}
 
 	playback_state = PLAYBACK_PLAYING;
-	wlr_cursor_unset_image(cursor);
+	nixly_cursor_set_xcursor("default");
 	wlr_log(WLR_INFO, "Started mpv: %s (resume at %.1fs)", url, resume_pos);
 }
 
@@ -2397,8 +2397,8 @@ media_view_show(Monitor *m, MediaViewType type)
 
 	media_view_render(m, type);
 
-	/* Hide mouse cursor in media browser */
-	wlr_cursor_unset_image(cursor);
+	/* Keep mouse cursor visible in HTPC mode */
+	nixly_cursor_set_xcursor("default");
 }
 
 void
