@@ -2800,6 +2800,9 @@ htpc_mode_enter(void)
 
 	/* Grab gamepads for HTPC UI navigation (unless on Steam tag) */
 	gamepad_update_grab_state();
+
+	/* Hide mouse cursor everywhere in HTPC mode. */
+	nixly_cursor_set_xcursor("default");
 }
 
 void
@@ -2876,6 +2879,10 @@ htpc_mode_exit(void)
 
 	/* Release gamepad grab when leaving HTPC mode */
 	gamepad_update_grab_state();
+
+	/* Restore cursor now that the HTPC guard in nixly_cursor_set_xcursor
+	 * no longer hides. */
+	nixly_cursor_set_xcursor("default");
 }
 
 void
