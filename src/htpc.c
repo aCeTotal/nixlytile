@@ -825,22 +825,30 @@ apply_cpu_affinity(pid_t game_pid)
 	int ncores = sysconf(_SC_NPROCESSORS_ONLN);
 	if (ncores < 4 || game_pid <= 1) return;
 
-	/* Pin compositor to core 0 */
+	/* Pin compositor to cores 0-1.  A single-core pin combined with
+	 * apply_irq_affinity() (all IRQ → core 0) and SCHED_RR made the
+	 * compositor un-preemptable when it hit a tight retry-loop, which
+	 * is what froze the whole box on the retroarch 10-bit scanout bug.
+	 * Two cores give the kernel somewhere to schedule IRQ-handlers
+	 * while the compositor still has a dedicated fast path. */
 	cpu_set_t compositor_set;
 	CPU_ZERO(&compositor_set);
 	CPU_SET(0, &compositor_set);
+	if (ncores >= 2)
+		CPU_SET(1, &compositor_set);
 	sched_setaffinity(0, sizeof(compositor_set), &compositor_set);
 
-	/* Pin game to cores 1..N-1 (all except core 0) */
+	/* Pin game to cores 2..N-1 (leave cores 0-1 for compositor+IRQ) */
 	cpu_set_t game_set;
 	CPU_ZERO(&game_set);
-	for (int i = 1; i < ncores; i++)
+	int game_first = (ncores >= 4) ? 2 : 1;
+	for (int i = game_first; i < ncores; i++)
 		CPU_SET(i, &game_set);
 	sched_setaffinity(game_pid, sizeof(game_set), &game_set);
 
 	game_mode_affinity_applied = 1;
-	wlr_log(WLR_INFO, "CPU affinity: compositor→core0, game PID %d→cores 1-%d",
-		game_pid, ncores - 1);
+	wlr_log(WLR_INFO, "CPU affinity: compositor→cores 0-1, game PID %d→cores %d-%d",
+		game_pid, game_first, ncores - 1);
 }
 
 void
@@ -2207,7 +2215,9 @@ gm_bg_worker_func(void *arg)
 			apply_cpu_latency_qos();
 			apply_transparent_hugepages();
 			apply_io_scheduler();
-			apply_disable_watchdog();
+			/* apply_disable_watchdog() intentionally not called —
+			 * hardware watchdog is our last line of defence if the
+			 * compositor locks up (e.g. scanout retry-loop). */
 			apply_raw_input();
 			apply_irq_affinity();
 			apply_scheduler_tuning();
@@ -2231,7 +2241,8 @@ gm_bg_worker_func(void *arg)
 			restore_scheduler_tuning();
 			restore_irq_affinity();
 			restore_raw_input();
-			restore_watchdog();
+			/* restore_watchdog() paired with the disabled
+			 * apply_disable_watchdog() above — no-op now. */
 			restore_io_scheduler();
 			restore_transparent_hugepages();
 			if (pid > 1) {

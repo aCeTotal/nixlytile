@@ -1489,17 +1489,76 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 		}
 
 		if (!committed) {
-			wlr_log(WLR_ERROR, "Output commit failed on %s",
-				m->wlr_output->name);
-			/* Force full damage — the failed commit's buffer
-			 * was never displayed, so the swapchain's next
-			 * buffer has stale content from 2+ frames ago.
-			 * Without this, the damage ring assumes the old
-			 * buffer content is current, leaving ghost
-			 * artefacts (cursor copies, stale UI). */
+			/* Force full damage — the failed commit's buffer was
+			 * never displayed, so the swapchain's next buffer has
+			 * stale content from 2+ frames ago. */
 			wlr_damage_ring_add_whole(&m->scene_output->damage_ring);
-			request_frame(m);
+
+			m->commit_failures++;
+
+			if (m->commit_failures <= 3) {
+				wlr_log(WLR_ERROR, "Output commit failed on %s (n=%u)",
+					m->wlr_output->name, m->commit_failures);
+				request_frame(m);
+			} else if (m->commit_failures == 4) {
+				/* Kernel is refusing this buffer format/modifier
+				 * persistently (e.g. 10-bit Y-tiled CCS on i915
+				 * without Resizable BAR). Blacklist direct
+				 * scanout so the next frame goes through GPU
+				 * composition, force XRGB8888 render format to
+				 * get a fresh swapchain, and drop compositor
+				 * RT-priority so user-space can still preempt. */
+				wlr_log(WLR_ERROR,
+					"%s: %u consecutive commit failures — "
+					"disabling direct scanout, falling back "
+					"to GPU composition + XRGB8888",
+					m->wlr_output->name, m->commit_failures);
+				m->scanout_blacklist = 1;
+
+				struct wlr_output_state fb;
+				wlr_output_state_init(&fb);
+				wlr_output_state_set_render_format(&fb, DRM_FORMAT_XRGB8888);
+				if (m->wlr_output->current_mode)
+					wlr_output_state_set_mode(&fb, m->wlr_output->current_mode);
+				if (wlr_output_test_state(m->wlr_output, &fb))
+					wlr_output_commit_state(m->wlr_output, &fb);
+				wlr_output_state_finish(&fb);
+
+				if (compositor_rt_applied) {
+					struct sched_param sp = { .sched_priority = 0 };
+					sched_setscheduler(0, SCHED_OTHER, &sp);
+					compositor_rt_applied = 0;
+					wlr_log(WLR_ERROR,
+						"RT scheduling dropped after %u commit failures",
+						m->commit_failures);
+				}
+
+				struct timespec ts = { .tv_sec = 0, .tv_nsec = 100000000L };
+				nanosleep(&ts, NULL);
+				m->last_commit_fail_ns = get_time_ns();
+				request_frame(m);
+			} else {
+				/* Still failing after fallback — rate-limit
+				 * frame scheduling to ~60 Hz and log once per
+				 * second so we don't melt the event loop. */
+				uint64_t now = get_time_ns();
+				if (m->commit_failures % 60 == 0) {
+					wlr_log(WLR_ERROR,
+						"%s: %u commit failures (still retrying)",
+						m->wlr_output->name, m->commit_failures);
+				}
+				if (now - m->last_commit_fail_ns > 16000000ULL) {
+					m->last_commit_fail_ns = now;
+					request_frame(m);
+				}
+			}
+		} else {
+			m->commit_failures = 0;
+			m->scanout_blacklist = 0;
 		}
+	} else {
+		m->commit_failures = 0;
+		m->scanout_blacklist = 0;
 	}
 
 	/* Finalize deferred VRR state after commit.  Check actual hardware
@@ -1761,7 +1820,8 @@ rendermon(struct wl_listener *listener, void *data)
 	 * (not from the compositor's swapchain), direct scanout is active.
 	 * wlr_client_buffer_get() returns non-NULL only for client buffers.
 	 */
-	if (needs_frame && state.buffer && wlr_client_buffer_get(state.buffer)) {
+	if (needs_frame && state.buffer && wlr_client_buffer_get(state.buffer) &&
+	    !m->scanout_blacklist) {
 		is_direct_scanout = 1;
 	}
 

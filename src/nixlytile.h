@@ -1460,6 +1460,12 @@ struct Monitor {
 	int supports_10bit;
 	int render_10bit_active;
 	int scene_build_failures;
+	/* Commit failure throttle — break infinite retry-loops when the
+	 * kernel refuses a buffer format/modifier (e.g. 10-bit Y-tiled CCS
+	 * that i915 cannot scan out). See fix for retroarch-freeze. */
+	uint32_t commit_failures;
+	uint64_t last_commit_fail_ns;
+	int scanout_blacklist;
 	/* Idle monitor render throttle */
 	int render_idle;                    /* 1 = idle mode, throttled to heartbeat */
 	int idle_frames;                    /* consecutive frames without cursor + no active content */
