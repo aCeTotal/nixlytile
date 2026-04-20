@@ -2356,6 +2356,21 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	if (time) {
 		double raw_dx = dx, raw_dy = dy;
 
+		/* DEBUG: one-shot trace of cursor/HW-plane state at first real motion */
+		static int dbg_first_motion = 1;
+		if (dbg_first_motion) {
+			dbg_first_motion = 0;
+			Monitor *dm = xytomon(cursor->x, cursor->y);
+			wlr_log(WLR_INFO, "DBG first-motion: cursor=(%.1f,%.1f) mon=%s "
+				"hw_cursor=%s ll_cursor=%s cpu_cursor=%s scale=%.2f",
+				cursor->x, cursor->y,
+				dm && dm->wlr_output ? dm->wlr_output->name : "(none)",
+				dm && dm->wlr_output && dm->wlr_output->hardware_cursor ? "YES" : "NO",
+				dm && dm->ll_cursor_active ? "YES" : "NO",
+				cpu_cursor_active ? "YES" : "NO",
+				dm && dm->wlr_output ? dm->wlr_output->scale : 0.0);
+		}
+
 		checkconstraint();
 
 		if (active_constraint && cursor_mode != CurResize && cursor_mode != CurMove) {
@@ -2428,24 +2443,6 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 				if (cy >= mb->y + mb->height) { cy = mb->y + mb->height - 1; clamped = 1; }
 				if (clamped)
 					wlr_cursor_warp(cursor, NULL, cx, cy);
-			}
-		}
-
-		/* Low-latency cursor: update HW cursor plane immediately via
-		 * direct DRM atomic commit, bypassing wlroots' render loop.
-		 * This gives sub-millisecond cursor updates and is VRR-safe
-		 * (no page flip = no refresh rate spike). */
-		{
-			Monitor *cm = xytomon(cursor->x, cursor->y);
-			if (cm && cm->ll_cursor_active) {
-				int ox = (int)round(cursor->x) - cm->m.x;
-				int oy = (int)round(cursor->y) - cm->m.y;
-				struct wlr_output_cursor *hw = cm->wlr_output->hardware_cursor;
-				if (hw) {
-					ox = (int)(ox * cm->wlr_output->scale) - hw->hotspot_x;
-					oy = (int)(oy * cm->wlr_output->scale) - hw->hotspot_y;
-				}
-				ll_cursor_move(cm, ox, oy);
 			}
 		}
 
