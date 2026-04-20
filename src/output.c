@@ -1548,11 +1548,12 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 					m->wlr_output->name, m->commit_failures);
 				m->scanout_blacklist = 1;
 
+				/* Force fresh XRGB8888 swapchain without re-modesetting.
+				 * Mode is unchanged — set_mode on NVIDIA triggers a full
+				 * modeset that blocks the compositor for ~100ms. */
 				struct wlr_output_state fb;
 				wlr_output_state_init(&fb);
 				wlr_output_state_set_render_format(&fb, DRM_FORMAT_XRGB8888);
-				if (m->wlr_output->current_mode)
-					wlr_output_state_set_mode(&fb, m->wlr_output->current_mode);
 				if (wlr_output_test_state(m->wlr_output, &fb))
 					wlr_output_commit_state(m->wlr_output, &fb);
 				wlr_output_state_finish(&fb);
@@ -1566,8 +1567,8 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 						m->commit_failures);
 				}
 
-				struct timespec ts = { .tv_sec = 0, .tv_nsec = 100000000L };
-				nanosleep(&ts, NULL);
+				/* Defer next frame instead of nanosleep — sleeping in
+				 * the main thread freezes cursor/input for 100ms. */
 				m->last_commit_fail_ns = get_time_ns();
 				request_frame(m);
 			} else {
@@ -4849,15 +4850,24 @@ updatemons(struct wl_listener *listener, void *data)
 	 * positions, focus, and the stored configuration in wlroots'
 	 * output-manager implementation.
 	 */
-	struct wlr_output_configuration_v1 *config
-			= wlr_output_configuration_v1_create();
+	static int in_updatemons;
+	struct wlr_output_configuration_v1 *config;
 	Client *c;
 	struct wlr_output_configuration_head_v1 *config_head;
-	Monitor *m;
+	Monitor *m, *mtmp;
+
+	/* Recursion guard: wlr_output_layout_remove / _add_auto below fires
+	 * output_layout.events.change, which re-enters this listener. Outer
+	 * iteration would then observe mutations from the nested call. */
+	if (in_updatemons)
+		return;
+	in_updatemons = 1;
+
+	config = wlr_output_configuration_v1_create();
 
 	/* First remove from the layout the disabled monitors */
-	wl_list_for_each(m, &mons, link) {
-		if (m->wlr_output->enabled || m->asleep)
+	wl_list_for_each_safe(m, mtmp, &mons, link) {
+		if (!m->wlr_output || m->wlr_output->enabled || m->asleep)
 			continue;
 		config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
 		config_head->state.enabled = 0;
@@ -4867,8 +4877,8 @@ updatemons(struct wl_listener *listener, void *data)
 		m->m = m->w = (struct wlr_box){0};
 	}
 	/* Insert outputs that need to */
-	wl_list_for_each(m, &mons, link) {
-		if (m->wlr_output->enabled
+	wl_list_for_each_safe(m, mtmp, &mons, link) {
+		if (m->wlr_output && m->wlr_output->enabled
 				&& !wlr_output_layout_get(output_layout, m->wlr_output))
 			wlr_output_layout_add_auto(output_layout, m->wlr_output);
 	}
@@ -5004,6 +5014,8 @@ updatemons(struct wl_listener *listener, void *data)
 		htpc_mode_enter();
 
 	wlr_output_manager_v1_set_configuration(output_mgr, config);
+
+	in_updatemons = 0;
 }
 
 Monitor *
