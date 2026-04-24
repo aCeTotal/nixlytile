@@ -460,13 +460,8 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 							steam_bin = "nixly_steam";
 						else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
 							steam_bin = "nixly_steam";
-						if (htpc_mode_active)
-							snprintf(cmd_str, sizeof(cmd_str),
-								"%s -bigpicture steam://open/games",
-								steam_bin);
-						else
-							snprintf(cmd_str, sizeof(cmd_str),
-								"%s", steam_bin);
+						snprintf(cmd_str, sizeof(cmd_str),
+							"%s", steam_bin);
 					} else if ((desktop_entries[idx].prefers_dgpu || should_use_dgpu(cmd_str))
 						&& integrated_gpu_idx >= 0) {
 						set_dgpu_env();
@@ -1215,7 +1210,7 @@ git_cache_update_start(void)
 {
 	pid_t pid;
 
-	if (game_mode_active || htpc_mode_active)
+	if (game_mode_active)
 		return;
 
 	pid = fork();
@@ -1250,7 +1245,7 @@ file_cache_update_start(void)
 {
 	pid_t pid;
 
-	if (game_mode_active || htpc_mode_active)
+	if (game_mode_active)
 		return;
 
 	pid = fork();

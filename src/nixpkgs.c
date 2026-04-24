@@ -5,7 +5,7 @@ int
 cache_update_timer_cb(void *data)
 {
 	(void)data;
-	if (!game_mode_active && !htpc_mode_active) {
+	if (!game_mode_active) {
 		/* Run only one cache update at a time, cycling through phases */
 		switch (cache_update_phase) {
 		case 0:
@@ -15,7 +15,6 @@ cache_update_timer_cb(void *data)
 			file_cache_update_start();
 			break;
 		case 2:
-			pc_gaming_cache_update_start();
 			break;
 		}
 		cache_update_phase = (cache_update_phase + 1) % 3;
@@ -27,7 +26,7 @@ cache_update_timer_cb(void *data)
 void
 schedule_cache_update_timer(void)
 {
-	if (!cache_update_timer || game_mode_active || htpc_mode_active)
+	if (!cache_update_timer || game_mode_active)
 		return;
 	/* 30 minutes between each cache type = 90 min full cycle
 	 * 30 minutes = 30 * 60 * 1000 ms = 1800000 ms */
@@ -41,7 +40,7 @@ nixpkgs_cache_update_start(void)
 	char *home;
 	char cache_path[PATH_MAX];
 
-	if (game_mode_active || htpc_mode_active)
+	if (game_mode_active)
 		return;
 
 	home = getenv("HOME");
@@ -76,7 +75,7 @@ int
 nixpkgs_cache_timer_cb(void *data)
 {
 	(void)data;
-	if (!game_mode_active && !htpc_mode_active) {
+	if (!game_mode_active) {
 		/* Weekly refresh: remove old cache so update_start regenerates it */
 		char *home = getenv("HOME");
 		if (home) {

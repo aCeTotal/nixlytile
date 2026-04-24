@@ -28,9 +28,9 @@ VP_OBJS = videoplayer.o videoplayer_decode.o videoplayer_render.o videoplayer_au
 
 # Compositor module object files
 MOD_OBJS = globals.o client.o layout.o btrtile.o input.o gamepad.o output.o \
-           statusbar.o tray.o network.o launcher.o nixpkgs.o gaming.o media.o \
-           popup.o bluetooth.o config.o htpc.o draw.o layer.o fancontrol.o \
-           screenshot.o monitor_setup.o mpv_launcher.o
+           statusbar.o tray.o network.o launcher.o nixpkgs.o \
+           popup.o bluetooth.o config.o gamemode.o client_utils.o gpu.o draw.o layer.o fancontrol.o \
+           screenshot.o monitor_setup.o
 
 PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstable-v1-protocol.h \
              $(SRC)/wlr-layer-shell-unstable-v1-protocol.h $(SRC)/wlr-output-power-management-unstable-v1-protocol.h \
@@ -72,17 +72,17 @@ launcher.o: $(SRC)/launcher.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 nixpkgs.o: $(SRC)/nixpkgs.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-gaming.o: $(SRC)/gaming.c $(SRC)/nixlytile.h $(SRC)/client.h
+gamemode.o: $(SRC)/gamemode.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-media.o: $(SRC)/media.c $(SRC)/nixlytile.h $(SRC)/client.h
+client_utils.o: $(SRC)/client_utils.c $(SRC)/nixlytile.h $(SRC)/client.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+gpu.o: $(SRC)/gpu.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 popup.o: $(SRC)/popup.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 bluetooth.o: $(SRC)/bluetooth.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 config.o: $(SRC)/config.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-htpc.o: $(SRC)/htpc.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 draw.o: $(SRC)/draw.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
@@ -93,8 +93,6 @@ fancontrol.o: $(SRC)/fancontrol.c $(SRC)/nixlytile.h $(SRC)/client.h
 screenshot.o: $(SRC)/screenshot.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 monitor_setup.o: $(SRC)/monitor_setup.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-mpv_launcher.o: $(SRC)/mpv_launcher.c $(SRC)/mpv_launcher.h $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 
 # Video player modules

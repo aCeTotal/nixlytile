@@ -1317,15 +1317,6 @@ nixly_cursor_set_xcursor(const char *name)
 	const uint8_t *src;
 	uint8_t *dst;
 
-	/* HTPC mode: cursor stays hidden regardless of caller. */
-	if (htpc_mode_active) {
-		cursor_from_client = 0;
-		cursor_cached_name[0] = '\0';
-		stop_tracking_cursor_surface();
-		wlr_cursor_set_buffer(cursor, NULL, 0, 0, 1.0f);
-		return;
-	}
-
 	/* Fast path: skip when the same xcursor is already active */
 	if (!cursor_from_client && cursor_cached_name[0] &&
 	    strcmp(cursor_cached_name, name) == 0)
@@ -1375,15 +1366,6 @@ nixly_cursor_set_xcursor(const char *name)
 void
 nixly_cursor_set_client_surface(struct wlr_surface *surface, int hx, int hy)
 {
-	/* HTPC mode: ignore client-provided cursor, keep hidden. */
-	if (htpc_mode_active) {
-		cursor_from_client = 0;
-		cursor_cached_name[0] = '\0';
-		stop_tracking_cursor_surface();
-		wlr_cursor_set_buffer(cursor, NULL, 0, 0, 1.0f);
-		return;
-	}
-
 	/* Invalidate xcursor cache — next nixly_cursor_set_xcursor() must
 	 * actually upload the image even if the name matches. */
 	cursor_from_client = 1;

@@ -107,9 +107,6 @@
             xdg-utils          # xdg-open
             xwayland           # X11 compatibility
 
-            # External video player (HTPC playback)
-            mpv
-
             # File manager
             thunar
             thunar-volman

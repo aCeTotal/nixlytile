@@ -170,13 +170,7 @@
 #define MODAL_MAX_RESULTS 200
 #define MODAL_RESULT_LEN 256
 #define MAX_TRACKS 32
-#define RESUME_CACHE_FILE "/tmp/nixly-resume-cache"
-#define HTPC_MENU_MAX_ITEMS 12
 #define MAX_GPUS 8
-#define PC_GAMING_TILE_HEIGHT 180
-#define PC_GAMING_TILE_GAP 15
-#define PC_GAMING_PADDING 40
-#define PC_GAMING_CACHE_FILE "/.cache/nixlytile/games.cache"
 #define GAMEPAD_CURSOR_INTERVAL_MS 16
 #define GAMEPAD_DEADZONE 4000
 #define GAMEPAD_CURSOR_SPEED 15.0
@@ -194,12 +188,6 @@
 #define OSK_DPAD_INITIAL_DELAY 400
 #define OSK_DPAD_REPEAT_RATE 50
 
-/* Streaming service URLs */
-#define NRK_URL "https://nrk.no/direkte/nrk1"
-#define NETFLIX_URL "https://www.netflix.com/browse"
-#define VIAPLAY_URL "https://viaplay.no"
-#define TV2PLAY_URL "https://play.tv2.no"
-#define F1TV_URL "https://f1tv.formula1.com/detail/1000005614/f1-live"
 #ifndef WLR_SILENCE
 #define WLR_SILENCE (WLR_ERROR - 1)
 #endif
@@ -212,42 +200,10 @@
 #define MAX_SPAWN_CMD 512
 #endif
 
-/* ── retro gaming constants ────────────────────────────────────────── */
-#define RETRO_SLIDE_DURATION_MS 200  /* Smooth slide animation duration */
-#define RETRO_DPAD_INITIAL_DELAY 350
-#define RETRO_DPAD_REPEAT_RATE 80
-
-/* ── media grid constants ─────────────────────────────────────────── */
-#define MEDIA_GRID_PADDING 40
-#define MEDIA_GRID_GAP 20
-#define MEDIA_SERVER_PORT 8080
-#define MEDIA_DISCOVERY_PORT 8081
-#define MEDIA_DISCOVERY_MAGIC "NIXLY_DISCOVER"
-#define MEDIA_DISCOVERY_RESPONSE "NIXLY_SERVER"
-#define MAX_MEDIA_SERVERS 16
-
-typedef struct {
-	char url[256];
-	char server_id[64];
-	char server_name[128];
-	int priority;
-	int is_local;
-	int is_configured;
-} MediaServer;
-
-extern MediaServer media_servers[MAX_MEDIA_SERVERS];
-extern int media_server_count;
-extern uint64_t last_discovery_attempt_ms;
-extern char discovered_server_url[256];
-extern int server_discovered;
 extern const char *osk_layout_lower[OSK_ROWS][OSK_COLS];
 extern const char *osk_layout_upper[OSK_ROWS][OSK_COLS];
 
 #define MAX_MONITORS 16
-
-/* ── joystick navigation constants ────────────────────────────────── */
-#define JOYSTICK_NAV_INITIAL_DELAY 300  /* ms before repeat starts */
-#define JOYSTICK_NAV_REPEAT_RATE 150    /* ms between repeats */
 
 /* ── stats panel constants ────────────────────────────────────────── */
 #define STATS_PANEL_ANIM_DURATION 250
@@ -265,57 +221,6 @@ enum { XDGShell, LayerShell, X11 };
 enum { LyrBg, LyrBottom, LyrTile, LyrFloat, LyrTop, LyrFS, LyrOverlay, LyrBlock, NUM_LAYERS };
 enum Direction { DIR_LEFT, DIR_RIGHT, DIR_UP, DIR_DOWN };
 
-typedef enum {
-	GAMING_SERVICE_STEAM = 0,
-	GAMING_SERVICE_HEROIC,
-	GAMING_SERVICE_LUTRIS,
-	GAMING_SERVICE_BOTTLES,
-	GAMING_SERVICE_COUNT
-} GamingServiceType;
-
-typedef enum {
-	RETRO_NES = 0,
-	RETRO_SNES,
-	RETRO_N64,
-	RETRO_GAMECUBE,
-	RETRO_WII,
-	RETRO_GB,
-	RETRO_GBC,
-	RETRO_GBA,
-	RETRO_CONSOLE_COUNT
-} RetroConsole;
-
-typedef struct RomItem {
-	int id;
-	int console;
-	char title[256];
-	char cover_path[512];
-	char filepath[1024];
-	char server_url[256];
-	char emulator[32];    /* emulator tag from server: "nes", "snes", etc. */
-	int64_t size;         /* file size in bytes for download progress */
-
-	/* IGDB metadata */
-	char description[1024];
-	char developer[128];
-	char publisher[128];
-	int release_year;
-	char genre[256];
-	char igdb_platforms[512];
-	float rating;
-	int igdb_id;
-} RomItem;
-
-typedef enum {
-	MEDIA_VIEW_MOVIES = 0,
-	MEDIA_VIEW_TVSHOWS = 1
-} MediaViewType;
-
-typedef enum {
-	DETAIL_FOCUS_INFO = 0,
-	DETAIL_FOCUS_SEASONS,
-	DETAIL_FOCUS_EPISODES
-} DetailFocusArea;
 
 typedef enum {
 	MON_POS_MASTER = 0,
@@ -348,13 +253,6 @@ typedef struct {
 } GamingCaps;
 
 typedef enum {
-	PLAYBACK_IDLE = 0,
-	PLAYBACK_BUFFERING,
-	PLAYBACK_PLAYING,
-	PLAYBACK_ACTIVE
-} PlaybackState;
-
-typedef enum {
 	OSD_MENU_NONE = 0,
 	OSD_MENU_SOUND,
 	OSD_MENU_SUBTITLES
@@ -365,9 +263,6 @@ typedef struct LayoutNode LayoutNode;
 typedef struct Monitor Monitor;
 typedef struct StatusBar StatusBar;
 typedef struct StatusModule StatusModule;
-typedef struct GameEntry GameEntry;
-typedef struct MediaItem MediaItem;
-typedef struct MediaSeason MediaSeason;
 typedef struct GamepadDevice GamepadDevice;
 typedef struct TrayMenuEntry TrayMenuEntry;
 typedef struct TrayItem TrayItem;
@@ -444,7 +339,6 @@ typedef struct {
 extern const FuncEntry func_table[];
 MonitorPosition config_parse_monitor_position(const char *pos);
 xkb_keysym_t config_parse_keysym(const char *name);
-void add_media_server(const char *url, int is_local, int is_configured);
 extern const struct wlr_buffer_impl pixman_buffer_impl;
 
 typedef struct {
@@ -1002,11 +896,6 @@ typedef struct {
 
 /* ── gamepad types ─────────────────────────────────────────────────── */
 typedef struct {
-	const char *label;
-	const char *command;
-} GamepadMenuItem;
-
-typedef struct {
 	struct wlr_scene_tree *tree;
 	struct wlr_scene_tree *bg;
 	struct wlr_scene_tree *dim;
@@ -1040,177 +929,6 @@ struct GamepadDevice {
 	uint64_t connect_time_ms;
 };
 
-/* ── gaming types ──────────────────────────────────────────────────── */
-struct GameEntry {
-	char id[64];
-	char name[256];
-	char icon_path[512];
-	char launch_cmd[1024];
-	GamingServiceType service;
-	int installed;
-	int playtime_minutes;
-	int is_game;
-	time_t acquired_time;
-	int controller_support;
-	int deck_verified;
-	int is_installing;
-	int install_progress;
-	struct wlr_buffer *icon_buf;
-	int icon_w, icon_h;
-	int icon_loaded;
-	char launch_params_nvidia[512];
-	char launch_params_amd[512];
-	char launch_params_intel[512];
-	int has_custom_params;
-	struct GameEntry *next;
-};
-
-typedef struct {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *bg;
-	struct wlr_scene_tree *grid;
-	struct wlr_scene_tree *sidebar;
-	int visible;
-	unsigned int view_tag;
-	int width, height;
-	int scroll_offset;
-	int selected_idx;
-	int hover_idx;
-	int game_count;
-	int cols;
-	int service_filter;
-	GameEntry *games;
-	int needs_refresh;
-	uint64_t last_refresh_ms;
-	struct wlr_scene_tree *install_popup;
-	struct wlr_scene_tree *install_dim;
-	int install_popup_visible;
-	int install_popup_selected;
-	char install_game_id[64];
-	char install_game_name[256];
-	GamingServiceType install_game_service;
-} PcGamingView;
-
-typedef struct {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *dim;
-	struct wlr_scene_tree *menu_bar;
-	int visible;
-	unsigned int view_tag;
-	int width, height;
-	int selected_console;
-	int target_console;
-	int anim_direction;
-	float slide_offset;
-	uint64_t slide_start_ms;
-
-	/* Master ROM list (all consoles, fetched once) */
-	RomItem *all_roms;
-	int all_rom_count;
-
-	/* Dynamic console tab list */
-	int active_consoles[RETRO_CONSOLE_COUNT];  /* tab index → RetroConsole enum */
-	int active_console_count;
-
-	/* Game list state */
-	int in_game_list;           /* 1 = showing game list for selected console */
-	int game_count;
-	int selected_game;
-	int game_scroll_offset;
-	RomItem *games;             /* Array of games for current console */
-	struct wlr_buffer *cover_buf;  /* Cover art buffer for selected game */
-	int cover_w, cover_h;
-	int cover_loaded;
-	int cover_loading_idx;      /* Which game index the cover is for */
-	int sort_mode;              /* 0=rating, 1=alphabetical */
-
-	/* ROM download state */
-	int download_active;
-	pid_t download_pid;
-	struct wl_event_source *download_timer;
-	int64_t download_total;          /* expected size */
-	char download_path[512];         /* local destination */
-	char download_title[256];        /* game title for overlay */
-	char download_emulator[32];      /* emulator tag to launch after */
-	int download_console;            /* console enum for dGPU check */
-	int download_rom_id;             /* ROM id for re-launch */
-	uint64_t download_last_check_ms;
-	int64_t download_last_bytes;
-	float download_speed_mbps;       /* current speed for display */
-	struct wlr_scene_tree *download_overlay;
-} RetroGamingView;
-
-/* ── media types ───────────────────────────────────────────────────── */
-struct MediaItem {
-	int id;
-	int type;
-	char title[256];
-	char show_name[256];
-	int season;
-	int episode;
-	int duration;
-	int year;
-	float rating;
-	char poster_path[512];
-	char backdrop_path[512];
-	char overview[2048];
-	char genres[256];
-	char episode_title[256];
-	char filepath[1024];
-	int tmdb_total_seasons;
-	int tmdb_total_episodes;
-	int tmdb_episode_runtime;
-	char tmdb_status[64];
-	char tmdb_next_episode[16];
-	int tmdb_id;
-	char server_id[64];
-	char server_url[256];
-	int server_priority;
-	struct wlr_buffer *poster_buf;
-	struct wlr_buffer *backdrop_buf;
-	int poster_w, poster_h;
-	int backdrop_w, backdrop_h;
-	int poster_loaded;
-	int backdrop_loaded;
-	struct MediaItem *next;
-};
-
-struct MediaSeason {
-	int season;
-	int episode_count;
-	struct MediaSeason *next;
-};
-
-typedef struct {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *grid;
-	struct wlr_scene_tree *detail_panel;
-	int visible;
-	unsigned int view_tag;
-	int width, height;
-	int scroll_offset;
-	int selected_idx;
-	int item_count;
-	int cols;
-	MediaItem *items;
-	MediaViewType view_type;
-	int needs_refresh;
-	uint64_t last_refresh_ms;
-	char server_url[256];
-	uint32_t last_data_hash;
-	int in_detail_view;
-	MediaItem *detail_item;
-	DetailFocusArea detail_focus;
-	MediaSeason *seasons;
-	int season_count;
-	int selected_season_idx;
-	int selected_season;
-	MediaItem *episodes;
-	int episode_count;
-	int selected_episode_idx;
-	int season_scroll_offset;
-	int episode_scroll_offset;
-} MediaGridView;
 
 /* ── GPU info ──────────────────────────────────────────────────────── */
 typedef struct {
@@ -1226,11 +944,6 @@ typedef struct {
 	int driver_version;   /* Major driver version (e.g. 570) */
 } GpuInfo;
 
-/* ── resume cache ──────────────────────────────────────────────────── */
-typedef struct {
-	int media_id;
-	double position;
-} ResumeEntry;
 
 /* ── client ────────────────────────────────────────────────────────── */
 typedef struct {
@@ -1363,10 +1076,6 @@ struct Monitor {
 	OnScreenKeyboard osk;
 	MonitorSetup monitor_setup;
 	GamepadMenu gamepad_menu;
-	PcGamingView pc_gaming;
-	RetroGamingView retro_gaming;
-	MediaGridView movies_view;
-	MediaGridView tvshows_view;
 	const Layout *lt[2];
 	int gaps;
 	int showbar;
@@ -1564,7 +1273,6 @@ extern FILE *log_file;
 extern FILE *debug_log_file;
 extern int log_stderr_fd;
 extern int nixlytile_mode;
-extern char htpc_wallpaper_path[PATH_MAX];
 extern const Rule rules[];
 extern const size_t nrules;
 extern const Layout layouts[];
@@ -1689,8 +1397,6 @@ extern struct wlr_box resize_start_box_f;
 extern double resize_start_x, resize_start_y;
 extern LayoutNode *resize_split_node;
 extern LayoutNode *resize_split_node_h;
-extern uint64_t joystick_nav_last_move;
-extern int joystick_nav_repeat_started;
 extern int fullscreen_adaptive_sync_enabled;
 extern int fps_limit_enabled;
 extern int fps_limit_value;
@@ -1715,7 +1421,6 @@ extern int game_mode_raw_input_applied;
 #define MAX_POINTER_DEVICES 32
 extern struct libinput_device *pointer_devices[MAX_POINTER_DEVICES];
 extern int pointer_device_count;
-extern int htpc_mode_active;
 
 /* config hot-reload */
 extern int config_inotify_fd;
@@ -1760,41 +1465,14 @@ extern int gamepad_pending_count;
 extern struct wl_event_source *gamepad_pending_timer;
 extern struct wl_event_source *gamepad_cursor_timer;
 
-/* HTPC */
-extern int htpc_page_pcgaming;
-extern int htpc_page_retrogaming;
-extern struct wl_event_source *retro_anim_timer;
+/* dgpu */
 extern const char *dgpu_programs[];
-extern int htpc_page_movies;
-extern int htpc_page_tvshows;
-extern int htpc_page_nrk;
-extern int htpc_page_netflix;
-extern int htpc_page_viaplay;
-extern int htpc_page_tv2play;
-extern int htpc_page_f1tv;
-extern int htpc_page_quit;
-extern int client_download_mbps;
-
-/* playback */
-extern PlaybackState playback_state;
-extern int playback_buffer_seconds;
-extern int playback_buffer_progress;
-extern char playback_message[512];
-extern char playback_url[512];
-extern int64_t playback_file_size;
-extern int playback_duration;
-extern int playback_is_movie;
-extern uint64_t playback_start_time;
-extern int playback_media_id;
 extern int osd_visible;
 extern uint64_t osd_show_time;
 extern OsdMenuType osd_menu_open;
 extern int osd_menu_selection;
 
-/* gaming */
-extern int gaming_service_enabled[];
-extern const char *gaming_service_names[];
-extern const char *retro_console_names[];
+/* gaming/GPU */
 extern GpuInfo detected_gpus[];
 extern int detected_gpu_count;
 extern int discrete_gpu_idx;
@@ -1802,9 +1480,6 @@ extern int integrated_gpu_idx;
 extern int dgpu_render_fd;
 extern int g_explicit_sync_ok; /* 1 = DRM syncobj timeline manager active */
 extern struct wl_event_source *dgpu_power_watchdog;
-extern int pc_gaming_cache_inotify_fd;
-extern int pc_gaming_cache_inotify_wd;
-extern struct wl_event_source *pc_gaming_cache_event;
 
 /* cpu cursor (Nvidia HW cursor plane) */
 extern struct CpuCursorBuffer *cpu_cursor_buf;
@@ -1918,8 +1593,6 @@ extern struct wl_event_source *video_check_timer;
 extern struct wl_event_source *hz_osd_timer;
 extern struct wl_event_source *playback_osd_timer;
 extern struct wlr_scene_tree *playback_osd_tree;
-extern struct wl_event_source *pc_gaming_install_timer;
-extern struct wl_event_source *media_view_poll_timer;
 extern struct wl_event_source *osk_dpad_repeat_timer;
 extern int osk_dpad_held_button;
 extern Monitor *osk_dpad_held_mon;
@@ -2074,18 +1747,11 @@ extern const double status_icon_scale;
 extern char *runtime_fonts[];
 extern int runtime_fonts_set;
 
-/* HTPC menu */
-struct HtpcMenuItem { char label[64]; char command[256]; };
-extern struct HtpcMenuItem htpc_menu_items[];
-extern int htpc_menu_item_count;
-
 /* Audio/subtitle tracks for OSD */
 struct TrackInfo { int id; char title[128]; char lang[16]; int selected; };
 extern struct TrackInfo audio_tracks[], subtitle_tracks[];
 extern int audio_track_count;
 extern int subtitle_track_count;
-extern ResumeEntry resume_cache[];
-extern int resume_cache_count;
 
 /* Global event handlers */
 extern struct wl_listener cursor_axis;
@@ -2185,7 +1851,7 @@ int pending_launch_find(pid_t client_pid, uint32_t *out_tags,
 /* statusbar.c */
 void normalize_proc_name(char *name);
 
-/* htpc.c */
+/* client_utils.c */
 pid_t client_get_pid(Client *c);
 
 /* client.c */
@@ -2259,8 +1925,6 @@ int is_process_running(const char *name);
 
 /* layout.c */
 void arrange(Monitor *m);
-int htpc_view_is_active(Monitor *m, unsigned int view_tag, int visible);
-void htpc_views_update_visibility(Monitor *m);
 void arrangelayer(Monitor *m, struct wl_list *list,
 		struct wlr_box *usable_area, int exclusive);
 void arrangelayers(Monitor *m);
@@ -2386,9 +2050,6 @@ void setcustomhz(const Arg *arg);
 void render_playback_osd(void);
 void hide_playback_osd(void);
 int playback_osd_timeout(void *data);
-void save_resume_position(int media_id, double position);
-double load_resume_position(int media_id);
-void media_playback_ended(void);
 struct wlr_output_mode *bestmode(struct wlr_output *output);
 RuntimeMonitorConfig *find_monitor_config(const char *name);
 void calculate_monitor_position(Monitor *m, RuntimeMonitorConfig *cfg, int *out_x, int *out_y);
@@ -2717,43 +2378,7 @@ void schedule_nixpkgs_cache_timer(void);
 int cache_update_timer_cb(void *data);
 void schedule_cache_update_timer(void);
 
-/* gaming.c */
-GameEntry *pc_gaming_merge_sorted(GameEntry *a, GameEntry *b);
-void pc_gaming_show(Monitor *m);
-void pc_gaming_hide(Monitor *m);
-void pc_gaming_hide_all(void);
-Monitor *pc_gaming_visible_monitor(void);
-void pc_gaming_render(Monitor *m);
-void pc_gaming_refresh_games(Monitor *m);
-void pc_gaming_free_games(Monitor *m);
-void pc_gaming_scan_steam(Monitor *m);
-void pc_gaming_scan_heroic(Monitor *m);
-int pc_gaming_handle_button(Monitor *m, int button, int value);
-int pc_gaming_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym);
-void pc_gaming_launch_game(Monitor *m);
-void pc_gaming_scroll(Monitor *m, int delta);
-void pc_gaming_install_popup_show(Monitor *m, GameEntry *g);
-void pc_gaming_install_popup_hide(Monitor *m);
-void pc_gaming_install_popup_render(Monitor *m);
-int pc_gaming_install_popup_handle_button(Monitor *m, int button, int value);
-void pc_gaming_load_game_icon(GameEntry *g, int target_w, int target_h);
-void pc_gaming_cache_update_start(void);
-int pc_gaming_cache_inotify_cb(int fd, uint32_t mask, void *data);
-void pc_gaming_cache_watch_setup(void);
-void retro_gaming_show(Monitor *m);
-void retro_gaming_hide(Monitor *m);
-void retro_gaming_hide_all(void);
-Monitor *retro_gaming_visible_monitor(void);
-void retro_gaming_render(Monitor *m);
-int retro_gaming_handle_button(Monitor *m, int button, int value);
-int retro_gaming_animate(void *data);
-void retro_gaming_fetch_all_roms(Monitor *m);
-void retro_gaming_render_game_list(Monitor *m);
-void retro_gaming_launch_game(Monitor *m);
-void retro_download_cancel(Monitor *m);
-void config_set_emulator(const char *value);
-void retro_dpad_repeat_start(Monitor *m, int button);
-void retro_dpad_repeat_stop(void);
+/* gpu.c */
 void detect_gpus(void);
 void filter_igpu_without_display(void);
 void dgpu_assert_power_on(GpuInfo *gpu);
@@ -2762,36 +2387,6 @@ int should_use_dgpu(const char *cmd);
 void set_dgpu_env(void);
 void set_steam_env(void);
 
-/* media.c */
-MediaGridView *media_get_view(Monitor *m, MediaViewType type);
-const char *get_media_server_url(void);
-int get_all_media_servers(MediaServer **servers);
-int parse_media_json(const char *buffer, const char *server_url, MediaItem **out_items, int max_items);
-void media_view_show(Monitor *m, MediaViewType type);
-void media_view_hide(Monitor *m, MediaViewType type);
-void media_view_hide_all(void);
-void media_views_suspend_for_playback(void);
-void media_views_resume_after_playback(void);
-void media_view_render(Monitor *m, MediaViewType type);
-void media_view_render_detail(Monitor *m, MediaViewType type);
-int media_view_refresh(Monitor *m, MediaViewType type);
-int media_view_poll_timer_cb(void *data);
-void media_view_free_items(MediaGridView *view);
-void media_view_free_seasons(MediaGridView *view);
-void media_view_free_episodes(MediaGridView *view);
-void media_view_fetch_seasons(MediaGridView *view, const char *show_name);
-void media_view_fetch_episodes(MediaGridView *view, const char *show_name, int season);
-int json_extract_int(const char *json, const char *key);
-int64_t json_extract_int64(const char *json, const char *key);
-int json_extract_string(const char *json, const char *key, char *out, size_t out_size);
-float json_extract_float(const char *json, const char *key);
-int media_view_handle_button(Monitor *m, MediaViewType type, int button, int value);
-int media_view_handle_key(Monitor *m, MediaViewType type, xkb_keysym_t sym);
-int handle_playback_key(xkb_keysym_t sym);
-int handle_playback_key_release(xkb_keysym_t sym);
-void media_view_scroll(Monitor *m, MediaViewType type, int delta);
-void media_view_load_poster(MediaItem *item, int target_w, int target_h);
-Monitor *media_view_visible_monitor(void);
 
 /* gamepad.c */
 void gamepad_menu_show(Monitor *m);
@@ -2811,7 +2406,6 @@ void gamepad_setup(void);
 void gamepad_cleanup(void);
 int gamepad_cursor_timer_cb(void *data);
 int gamepad_pending_timer_cb(void *data);
-int handle_playback_osd_input(int button);
 void gamepad_update_cursor(void);
 int gamepad_inactivity_timer_cb(void *data);
 void gamepad_turn_off_led_sysfs(GamepadDevice *gp);
@@ -2820,8 +2414,6 @@ void gamepad_resume(GamepadDevice *gp);
 int gamepad_any_monitor_active(void);
 void gamepad_grab(GamepadDevice *gp);
 void gamepad_ungrab(GamepadDevice *gp);
-void gamepad_update_grab_state(void);
-int gamepad_should_grab(void);
 
 /* bluetooth.c */
 int bt_bus_event_cb(int fd, uint32_t mask, void *data);
@@ -2837,11 +2429,7 @@ void bt_connect_device(const char *path);
 void bt_trust_device(const char *path);
 int bt_device_signal_cb(sd_bus_message *m, void *userdata, sd_bus_error *error);
 
-/* htpc.c */
-void htpc_mode_enter(void);
-void htpc_mode_exit(void);
-void htpc_mode_toggle(const Arg *arg);
-void htpc_menu_build(void);
+/* gamemode.c */
 void update_game_mode(void);
 void schedule_game_mode_update(void);
 void gm_bg_init(void);
@@ -2876,11 +2464,17 @@ void apply_disable_split_lock(void);
 void restore_split_lock(void);
 void apply_mglru_tuning(void);
 void restore_mglru_tuning(void);
-void steam_set_ge_proton_default(void);
-void cec_switch_to_active_source(void);
+/* client_utils.c */
 void steam_launch_bigpicture(void);
 void steam_kill(void);
 void live_tv_kill(void);
+float ease_out_cubic(float t);
+
+/* nixlytile.c */
+void steam_set_ge_proton_default(void);
+
+/* bluetooth.c */
+void cec_switch_to_active_source(void);
 void gamepanel(const Arg *arg);
 Monitor *stats_panel_visible_monitor(void);
 int stats_panel_handle_key(Monitor *m, xkb_keysym_t sym);

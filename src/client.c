@@ -469,8 +469,6 @@ focusclient(Client *c, int lift)
 	/* Activate the new client */
 	client_activate_surface(client_surface(c), 1);
 
-	/* Update gamepad grab state - release for Steam/games, grab for HTPC views */
-	gamepad_update_grab_state();
 }
 
 void
@@ -1009,33 +1007,6 @@ mapnotify(struct wl_listener *listener, void *data)
 		die("oom");
 
 	/*
-	 * HTPC mode Steam handling:
-	 * - Force Steam main window to fullscreen on tag 4
-	 * - Steam popups/dialogs stay floating but get focus and raised to top
-	 */
-	if (htpc_mode_active) {
-		if (is_steam_client(c) && !c->isfloating) {
-			/* Steam main window - place on tag 4 and fullscreen */
-			wlr_log(WLR_INFO, "HTPC: Placing Steam on tag 4 and fullscreen");
-			c->tags = 1 << 3; /* Tag 4 = bit 3 */
-			setfullscreen(c, 1);
-		} else if (is_steam_popup(c) || (p && is_steam_popup(p))) {
-			/* Steam popup/dialog - ensure it's floating, centered, and focused */
-			c->isfloating = 1;
-			if (c->mon) {
-				c->geom.x = (c->mon->w.width - c->geom.width) / 2 + c->mon->m.x;
-				c->geom.y = (c->mon->w.height - c->geom.height) / 2 + c->mon->m.y;
-			}
-			/* Raise to top and focus */
-			wlr_scene_node_raise_to_top(&c->scene->node);
-			focusclient(c, 1);
-			wlr_log(WLR_INFO, "HTPC: Steam popup raised and focused");
-			/* Show cursor for popup interaction */
-			nixly_cursor_set_xcursor("default");
-		}
-	}
-
-	/*
 	 * AUTO-FULLSCREEN FOR GAMES
 	 *
 	 * Decision is taken at map time based on the window's initial size:
@@ -1123,9 +1094,6 @@ mapnotify(struct wl_listener *listener, void *data)
 
 unset_fullscreen:
 	m = c->mon ? c->mon : xytomon(c->geom.x, c->geom.y);
-	/* In HTPC mode, don't unset fullscreen for Steam popups appearing */
-	if (htpc_mode_active && (is_steam_popup(c) || (p && is_steam_client(p))))
-		return;
 	{
 		/* Don't unfullscreen another window of the SAME app — a game
 		 * launcher spawning splashes/children would otherwise cause the
@@ -1245,20 +1213,6 @@ setfullscreen(Client *c, int fullscreen)
 		fullscreen, c->isfullscreen,
 		c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)",
 		c->geom.width, c->geom.height, c->geom.x, c->geom.y);
-
-	/*
-	 * In HTPC mode, games and Steam Big Picture are locked to fullscreen
-	 * and cannot exit fullscreen. This prevents accidental unfullscreen
-	 * from game menus or escape keys. The app must be closed to exit fullscreen.
-	 */
-	if (htpc_mode_active && !fullscreen && c->isfullscreen &&
-	    (is_game_content(c) || is_steam_client(c))) {
-		wlr_log(WLR_INFO, "HTPC: Blocking unfullscreen for '%s'",
-			client_get_appid(c) ? client_get_appid(c) : "(unknown)");
-		/* Re-assert fullscreen state to the client */
-		client_set_fullscreen(c, 1);
-		return;
-	}
 
 	c->isfullscreen = fullscreen;
 	if (!c->mon || !client_surface(c)->mapped) {
@@ -1652,8 +1606,6 @@ view(const Arg *arg)
 	printstatus();
 	/* Update game mode when switching tags - a fullscreen game may become visible/hidden */
 	schedule_game_mode_update();
-	/* Update gamepad grab state - grab for HTPC views, release for Steam */
-	gamepad_update_grab_state();
 }
 
 void

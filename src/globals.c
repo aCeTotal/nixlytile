@@ -132,7 +132,6 @@ int game_mode_affinity_applied = 0;  /* 1 if CPU affinity was changed */
 int game_mode_raw_input_applied = 0; /* 1 if pointer accel was disabled */
 struct libinput_device *pointer_devices[MAX_POINTER_DEVICES];
 int pointer_device_count = 0;
-int htpc_mode_active = 0; /* HTPC mode - hides statusbar, stops background tasks */
 struct wl_event_source *status_timer;
 struct wl_event_source *status_cpu_timer;
 struct wl_event_source *status_hover_timer;
@@ -170,64 +169,6 @@ char gamepad_pending_paths[GAMEPAD_PENDING_MAX][128];
 int gamepad_pending_count = 0;
 struct wl_event_source *gamepad_pending_timer = NULL;
 
-/* HTPC menu page toggles (0=disabled, 1=enabled) */
-int htpc_page_pcgaming = 1;
-int htpc_page_retrogaming = 1;
-int htpc_page_movies = 1;
-int htpc_page_tvshows = 1;
-int htpc_page_nrk = 1;
-int htpc_page_netflix = 1;
-int htpc_page_viaplay = 1;
-int htpc_page_tv2play = 1;
-int htpc_page_f1tv = 1;
-int htpc_page_quit = 1;
-
-/* Client network bandwidth for media streaming (Mbps) */
-int client_download_mbps = 100;  /* Default 100 Mbps */
-
-/* Media playback state */
-
-/* OSD bar menu selection */
-
-PlaybackState playback_state = PLAYBACK_IDLE;
-int playback_buffer_seconds = 0;    /* Seconds to buffer before playback */
-int playback_buffer_progress = 0;   /* Current buffer progress (0-100) */
-char playback_message[512] = "";    /* Message to display during buffering */
-char playback_url[512] = "";        /* URL to play */
-int64_t playback_file_size = 0;     /* File size in bytes */
-int playback_duration = 0;          /* Duration in seconds */
-int playback_is_movie = 0;          /* 1 for movie, 0 for episode */
-uint64_t playback_start_time = 0;   /* When buffering started */
-
-/* Media playback state */
-int playback_media_id = 0;          /* Current media ID for resume */
-
-/* OSD control bar */
-int osd_visible = 0;                /* 1 if OSD bar is visible */
-uint64_t osd_show_time = 0;         /* When OSD was last shown */
-OsdMenuType osd_menu_open = OSD_MENU_NONE;
-int osd_menu_selection = 0;         /* Selected item in open menu */
-
-/* Audio/subtitle tracks for OSD display */
-struct TrackInfo audio_tracks[MAX_TRACKS], subtitle_tracks[MAX_TRACKS];
-int audio_track_count = 0;
-int subtitle_track_count = 0;
-
-/* Resume positions cache */
-ResumeEntry resume_cache[256];
-int resume_cache_count = 0;
-
-/* Streaming service URLs */
-
-/* Built HTPC menu based on enabled pages */
-struct HtpcMenuItem htpc_menu_items[HTPC_MENU_MAX_ITEMS];
-int htpc_menu_item_count = 0;
-
-
-/* PC Gaming service configuration */
-int gaming_service_enabled[GAMING_SERVICE_COUNT] = {1, 1, 1, 1}; /* All enabled by default */
-const char *gaming_service_names[] = {"Steam", "Heroic", "Lutris", "Bottles"};
-/* Game tile size - aspect ratio based on Steam headers (460x215) */
 
 /* GPU detection and management */
 
@@ -244,10 +185,6 @@ int dgpu_render_fd = -1;     /* Held open to prevent dGPU D3cold/runtime suspend
 int g_explicit_sync_ok = 0;  /* 1 = DRM syncobj timeline manager active */
 struct wl_event_source *dgpu_power_watchdog = NULL;
 
-/* PC gaming cache file watcher for realtime updates */
-int pc_gaming_cache_inotify_fd = -1;
-int pc_gaming_cache_inotify_wd = -1;
-struct wl_event_source *pc_gaming_cache_event = NULL;
 
 /* Gamepad joystick cursor control */
 struct wl_event_source *gamepad_cursor_timer = NULL;
@@ -341,8 +278,16 @@ struct wl_event_source *video_check_timer = NULL;
 struct wl_event_source *hz_osd_timer = NULL;
 struct wl_event_source *playback_osd_timer = NULL;
 struct wlr_scene_tree *playback_osd_tree = NULL;
-struct wl_event_source *pc_gaming_install_timer = NULL;
-struct wl_event_source *media_view_poll_timer = NULL;
+
+/* OSD control bar (used by integrated video player) */
+int osd_visible = 0;
+uint64_t osd_show_time = 0;
+OsdMenuType osd_menu_open = OSD_MENU_NONE;
+int osd_menu_selection = 0;
+struct TrackInfo audio_tracks[MAX_TRACKS], subtitle_tracks[MAX_TRACKS];
+int audio_track_count = 0;
+int subtitle_track_count = 0;
+
 struct wl_event_source *osk_dpad_repeat_timer = NULL;
 int osk_dpad_held_button = 0;  /* BTN_DPAD_UP/DOWN/LEFT/RIGHT or 0 if none */
 Monitor *osk_dpad_held_mon = NULL;

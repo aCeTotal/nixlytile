@@ -1,65 +1,12 @@
 #include "nixlytile.h"
 #include "client.h"
-#include "mpv_launcher.h"
 
 void
 gamepad_menu_show(Monitor *m)
 {
-	GamepadMenu *gm;
-	int w, h, x, y;
-	/* Near-opaque dark overlay to obscure background (simulates heavy blur) */
-	float dim_color[4] = {0.08f, 0.08f, 0.10f, 0.97f};
-
-	if (!m)
-		return;
-
-	gamepad_menu_hide_all();
-
-	gm = &m->gamepad_menu;
-	gm->selected = 0;
-	htpc_menu_build();  /* Build menu based on enabled pages */
-	gm->item_count = htpc_menu_item_count;
-
-	/* Calculate popup size - just buttons, no title/hints */
-	w = 300;
-	/* Add extra separator space between gaming and streaming sections */
-	int separator_gap = 20;
-	h = 20 + htpc_menu_item_count * 55 + separator_gap + 20;
-
-	/* Center on monitor */
-	x = m->m.x + (m->m.width - w) / 2;
-	y = m->m.y + (m->m.height - h) / 2;
-
-	gm->x = x;
-	gm->y = y;
-	gm->width = w;
-	gm->height = h;
-	gm->visible = 1;
-
-	/* Create dim overlay to obscure background */
-	if (!gm->dim)
-		gm->dim = wlr_scene_tree_create(layers[LyrBlock]);
-	if (gm->dim) {
-		struct wlr_scene_node *node, *tmp;
-		wl_list_for_each_safe(node, tmp, &gm->dim->children, link)
-			wlr_scene_node_destroy(node);
-		wlr_scene_node_set_position(&gm->dim->node, m->m.x, m->m.y);
-		drawrect(gm->dim, 0, 0, m->m.width, m->m.height, dim_color);
-		wlr_scene_node_set_enabled(&gm->dim->node, 1);
-		wlr_scene_node_raise_to_top(&gm->dim->node);
-	}
-
-	if (!gm->tree)
-		gm->tree = wlr_scene_tree_create(layers[LyrBlock]);
-	if (!gm->tree)
-		return;
-
-	wlr_scene_node_set_position(&gm->tree->node, x, y);
-	wlr_scene_node_set_enabled(&gm->tree->node, 1);
-	wlr_scene_node_raise_to_top(&gm->tree->node);
-
-	gamepad_menu_render(m);
+	(void)m;
 }
+
 
 void
 gamepad_menu_hide(Monitor *m)
@@ -105,300 +52,30 @@ gamepad_menu_visible_monitor(void)
 void
 gamepad_menu_render(Monitor *m)
 {
-	GamepadMenu *gm;
-	struct wlr_scene_node *node, *tmp;
-	int padding = 15;
-	int item_height = 55;
-	int button_margin = 10;
-	int y_offset;
-	float bg_color[4] = {0.12f, 0.12f, 0.14f, 0.95f};
-	float button_color[4] = {0.18f, 0.18f, 0.22f, 1.0f};
-	float selected_color[4] = {0.25f, 0.5f, 0.9f, 1.0f};
-	float border_color[4] = {0.35f, 0.35f, 0.4f, 1.0f};
-
-	if (!m || !statusfont.font)
-		return;
-
-	gm = &m->gamepad_menu;
-	if (!gm->visible || !gm->tree)
-		return;
-
-	/* Clear previous content */
-	wl_list_for_each_safe(node, tmp, &gm->tree->children, link) {
-		if (gm->bg && node == &gm->bg->node)
-			continue;
-		wlr_scene_node_destroy(node);
-	}
-
-	/* Create/update background */
-	if (!gm->bg)
-		gm->bg = wlr_scene_tree_create(gm->tree);
-	if (gm->bg) {
-		wl_list_for_each_safe(node, tmp, &gm->bg->children, link)
-			wlr_scene_node_destroy(node);
-		wlr_scene_node_set_position(&gm->bg->node, 0, 0);
-		drawrect(gm->bg, 0, 0, gm->width, gm->height, bg_color);
-		/* Outer border */
-		draw_border(gm->bg, 0, 0, gm->width, gm->height, 2, border_color);
-	}
-
-	/* Draw menu items as buttons with equal spacing */
-	int current_y = padding;
-	for (int i = 0; i < gm->item_count; i++) {
-		const char *label = htpc_menu_items[i].label;
-		int button_x = padding;
-		int button_w = gm->width - 2 * padding;
-		int button_h = item_height - button_margin;
-		int label_w = status_text_width(label);
-		/* Center label horizontally within button */
-		int label_x = (button_w - label_w) / 2;
-		int button_y = current_y;
-
-		/* Draw button background */
-		if (i == gm->selected) {
-			drawrect(gm->tree, button_x, button_y, button_w, button_h, selected_color);
-		} else {
-			drawrect(gm->tree, button_x, button_y, button_w, button_h, button_color);
-		}
-
-		/* Button border */
-		float btn_border[4] = {0.4f, 0.4f, 0.45f, 1.0f};
-		draw_border(gm->tree, button_x, button_y, button_w, button_h, 1, btn_border);
-
-		/* Button label - create subtree positioned at button location */
-		struct wlr_scene_tree *label_tree = wlr_scene_tree_create(gm->tree);
-		if (label_tree) {
-			wlr_scene_node_set_position(&label_tree->node, button_x, button_y);
-			StatusModule mod = {0};
-			mod.tree = label_tree;
-			/* tray_render_label centers text vertically within bar_height */
-			tray_render_label(&mod, label, label_x, button_h, statusbar_fg);
-		}
-
-		current_y += item_height;
-
-		/* Add extra separator gap after PC-gaming (before streaming services) */
-		if (strcmp(label, "PC-gaming") == 0)
-			current_y += 20;
-	}
+	(void)m;
 }
 
 int
 gamepad_menu_handle_click(Monitor *m, int cx, int cy, uint32_t button)
 {
-	GamepadMenu *gm;
-	int padding = 15;
-	int item_height = 55;
-	int relx, rely;
-	int clicked_item;
+	(void)cx;
+	(void)cy;
+	(void)button;
 
 	if (!m)
 		return 0;
 
-	gm = &m->gamepad_menu;
-	if (!gm->visible)
+	if (!m->gamepad_menu.visible)
 		return 0;
 
-	/* Check if click is inside menu bounds */
-	relx = cx - gm->x;
-	rely = cy - gm->y;
-
-	if (relx < 0 || rely < 0 || relx >= gm->width || rely >= gm->height) {
-		/* Click outside menu - close it */
-		gamepad_menu_hide(m);
-		return 1;
-	}
-
-	/* Only handle left click for selection */
-	if (button != BTN_LEFT)
-		return 1;
-
-	/* Calculate which item was clicked - account for separator gap */
-	clicked_item = -1;
-	int current_y = padding;
-	for (int i = 0; i < gm->item_count; i++) {
-		int button_h = item_height - 10; /* button_margin */
-		if (rely >= current_y && rely < current_y + button_h) {
-			clicked_item = i;
-			break;
-		}
-		current_y += item_height;
-		/* Account for separator after PC-gaming */
-		if (strcmp(htpc_menu_items[i].label, "PC-gaming") == 0)
-			current_y += 20;
-	}
-
-	if (clicked_item >= 0 && clicked_item < gm->item_count) {
-		gm->selected = clicked_item;
-		gamepad_menu_select(m);
-	}
-
+	gamepad_menu_hide(m);
 	return 1;
 }
 
 void
 gamepad_menu_select(Monitor *m)
 {
-	GamepadMenu *gm;
-	const char *cmd;
-	const char *label;
-
-	if (!m)
-		return;
-
-	gm = &m->gamepad_menu;
-	if (!gm->visible || gm->selected < 0 || gm->selected >= gm->item_count)
-		return;
-
-	label = htpc_menu_items[gm->selected].label;
-	cmd = htpc_menu_items[gm->selected].command;
-
-	/* Handle PC-gaming - launch Steam Big Picture only */
-	if (strcmp(label, "PC-gaming") == 0) {
-		gamepad_menu_hide_all();
-		wlr_log(WLR_INFO, "Launching Steam Big Picture");
-
-		/* Launch Steam Big Picture if not already running */
-		steam_launch_bigpicture();
-		return;
-	}
-
-	/* Handle Retro-gaming - launch RetroArch directly in fullscreen on
-	 * tag 3.  `-f` forces fullscreen regardless of retroarch.cfg; the tag
-	 * switch ensures any tiled clients on the current tag don't fight for
-	 * the viewport while RetroArch starts. Gamepad autoconfig handles
-	 * controller mapping; user manages ROMs inside RetroArch. */
-	if (strcmp(label, "Retro-gaming") == 0) {
-		gamepad_menu_hide_all();
-		steam_kill();
-		live_tv_kill();
-		media_view_hide_all();
-		retro_gaming_hide_all();
-		pc_gaming_hide_all();
-
-		/* Switch to dedicated retro-gaming tag (tag 3 = bit 2). */
-		invalidate_video_pacing(m);
-		m->seltags ^= 1;
-		m->tagset[m->seltags] = 1 << 2;
-		arrange(m);
-		printstatus();
-
-		{
-			Client *existing = find_client_by_app_id("retroarch");
-			if (existing) {
-				focus_or_launch_app("retroarch", "retroarch -f");
-			} else {
-				pid_t pid = spawn_cmd("retroarch -f");
-				if (pid > 0)
-					retro_session_pid = pid;
-			}
-		}
-		return;
-	}
-
-	/* Handle Movies - switch to tag 2 and show movies grid view */
-	if (strcmp(label, "Movies") == 0) {
-		gamepad_menu_hide_all();
-		steam_kill();
-		live_tv_kill();
-		wlr_log(WLR_INFO, "Switching to Movies (tag 2)");
-
-		/* Switch to tag 2 - use m consistently (same monitor as menu) */
-		invalidate_video_pacing(m);
-		m->seltags ^= 1;
-		m->tagset[m->seltags] = 1 << 1; /* Tag 2 = bit 1 */
-
-		/* Show view BEFORE arrange so htpc_views_update_visibility sees correct state */
-		media_view_show(m, MEDIA_VIEW_MOVIES);
-
-		focusclient(focustop(m), 1);
-		arrange(m);
-		printstatus();
-		return;
-	}
-
-	/* Handle TV-shows - switch to tag 1 and show tvshows grid view */
-	if (strcmp(label, "TV-shows") == 0) {
-		gamepad_menu_hide_all();
-		steam_kill();
-		live_tv_kill();
-		wlr_log(WLR_INFO, "Switching to TV-shows (tag 1)");
-
-		/* Switch to tag 1 - use m consistently (same monitor as menu) */
-		invalidate_video_pacing(m);
-		m->seltags ^= 1;
-		m->tagset[m->seltags] = 1 << 0; /* Tag 1 = bit 0 */
-
-		/* Show view BEFORE arrange so htpc_views_update_visibility sees correct state */
-		media_view_show(m, MEDIA_VIEW_TVSHOWS);
-
-		focusclient(focustop(m), 1);
-		arrange(m);
-		printstatus();
-		return;
-	}
-
-	/* Handle streaming services via Chromium kiosk */
-	{
-		static const struct { const char *label; const char *url; } kiosk_services[] = {
-			{"NRK",      NRK_URL},
-			{"Netflix",  NETFLIX_URL},
-			{"Viaplay",  VIAPLAY_URL},
-			{"TV2 Play", TV2PLAY_URL},
-			{"F1TV",     F1TV_URL},
-		};
-
-		for (size_t i = 0; i < LENGTH(kiosk_services); i++) {
-			if (strcmp(label, kiosk_services[i].label) == 0) {
-				gamepad_menu_hide_all();
-				steam_kill();
-				live_tv_kill();
-				media_view_hide_all();
-				retro_gaming_hide_all();
-				pc_gaming_hide_all();
-				wlr_log(WLR_INFO, "Launching %s in Chrome kiosk", kiosk_services[i].label);
-				{
-					static const char *const flags =
-						" --ozone-platform=wayland"
-						" --kiosk --start-fullscreen"
-						" --autoplay-policy=no-user-gesture-required"
-						" --enable-features=VaapiVideoDecoder,PlatformHEVCDecoderSupport"
-						" --disable-gpu-vsync"
-						" --disable-frame-rate-limit"
-						" --force-device-scale-factor=1"
-						" --disable-translate";
-					const char *browser =
-						access("/run/current-system/sw/bin/google-chrome-stable", X_OK) == 0
-							? "google-chrome-stable"
-							: "chromium";
-					char kiosk_cmd[1024];
-					snprintf(kiosk_cmd, sizeof(kiosk_cmd), "%s%s %s",
-						browser, flags, kiosk_services[i].url);
-					spawn_cmd(kiosk_cmd);
-				}
-				return;
-			}
-		}
-	}
-
-	/* Handle Quit HTPC - shutdown system (htpc-only has no desktop to return to) */
-	if (strcmp(label, "Quit HTPC") == 0) {
-		gamepad_menu_hide_all();
-		steam_kill();
-		wlr_log(WLR_INFO, "Quit HTPC: shutting down");
-		quit(NULL);
-		return;
-	}
-
-	/* Execute command if set, otherwise just log the selection */
-	if (cmd && cmd[0]) {
-		Arg arg = {.v = cmd};
-		spawn(&arg);
-	} else {
-		wlr_log(WLR_INFO, "Gamepad menu selected: %s", label);
-	}
-
-	gamepad_menu_hide_all();
+	(void)m;
 }
 
 int
@@ -482,85 +159,12 @@ gamepad_menu_handle_button(Monitor *m, int button, int value)
 		}
 	}
 
-	/* Check if PC gaming view is active on ANY monitor
-	 * Use pc_gaming_visible_monitor() to find the correct monitor since
-	 * selmon may have changed due to mouse movement */
-	{
-		Monitor *pg_mon = pc_gaming_visible_monitor();
-		if (pg_mon && htpc_view_is_active(pg_mon, pg_mon->pc_gaming.view_tag, pg_mon->pc_gaming.visible)) {
-			if (pc_gaming_handle_button(pg_mon, button, value))
-				return 1;
-			/* Block guide button when install popup is visible */
-			if (pg_mon->pc_gaming.install_popup_visible && button == BTN_MODE)
-				return 0;  /* Let Steam handle it */
-			/* Fall through to mouse click emulation if a popup client has focus */
-		}
-	}
-
-	/* Check if Retro gaming view is active on ANY monitor */
-	{
-		Monitor *rg_mon = retro_gaming_visible_monitor();
-		if (rg_mon && htpc_view_is_active(rg_mon, rg_mon->retro_gaming.view_tag, rg_mon->retro_gaming.visible)) {
-			if (retro_gaming_handle_button(rg_mon, button, value))
-				return 1;
-		}
-	}
-
-	/* Playback controls (highest priority when mpv is running) */
-	if (mpv_launcher_active() && playback_state == PLAYBACK_PLAYING) {
-		if (value == 1) {
-			if (handle_playback_osd_input(button))
-				return 1;
-		}
-	}
-
-	/* Check if Movies or TV-shows view is active on ANY monitor
-	 * Use media_view_visible_monitor() to find the correct monitor since
-	 * selmon may have changed due to mouse movement */
-	{
-		Monitor *media_mon = media_view_visible_monitor();
-		if (media_mon) {
-			if (htpc_view_is_active(media_mon, media_mon->movies_view.view_tag, media_mon->movies_view.visible)) {
-				if (media_view_handle_button(media_mon, MEDIA_VIEW_MOVIES, button, value))
-					return 1;
-			}
-			if (htpc_view_is_active(media_mon, media_mon->tvshows_view.view_tag, media_mon->tvshows_view.visible)) {
-				if (media_view_handle_button(media_mon, MEDIA_VIEW_TVSHOWS, button, value))
-					return 1;
-			}
-		}
-	}
-
 	/* Mouse click emulation with shoulder buttons (when menu is not visible) */
 	if (!gm->visible) {
-		/* Skip click emulation if a fullscreen client has focus (let game handle it)
-		 * Exception: In HTPC mode, allow click emulation for browsers */
+		/* Skip click emulation if a fullscreen client has focus (let game handle it) */
 		Client *focused = focustop(selmon);
-		if (focused && focused->isfullscreen &&
-		    !(htpc_mode_active && is_browser_client(focused)))
+		if (focused && focused->isfullscreen)
 			return 0;
-
-		/* Y button (BTN_NORTH) - toggle on-screen keyboard in HTPC mode */
-		if (button == BTN_NORTH && value == 1 && htpc_mode_active) {
-			Monitor *osk_mon = osk_visible_monitor();
-			if (osk_mon) {
-				osk_hide(osk_mon);
-			} else if (selmon) {
-				osk_show(selmon, NULL);
-			}
-			return 1;
-		}
-
-		/* X button (BTN_WEST) - show OSK when in browser (for text input) */
-		if (button == BTN_WEST && value == 1 && htpc_mode_active) {
-			if (focused && is_browser_client(focused)) {
-				Monitor *osk_mon = osk_visible_monitor();
-				if (!osk_mon && selmon) {
-					osk_show(selmon, NULL);
-				}
-				return 1;
-			}
-		}
 
 		uint32_t time_msec = (uint32_t)(monotonic_msec() & 0xFFFFFFFF);
 		uint32_t mapped_button = 0;
@@ -766,182 +370,41 @@ gamepad_event_cb(int fd, uint32_t mask, void *data)
 			    gamepad_cursor_timer)
 				wl_event_source_timer_update(gamepad_cursor_timer, GAMEPAD_CURSOR_INTERVAL_MS);
 
-			/* Show playback OSD on stick movement during video playback */
-			if (active_videoplayer && playback_state == PLAYBACK_PLAYING &&
-			    (ev.code == ABS_X || ev.code == ABS_Y ||
-			     ev.code == ABS_RX || ev.code == ABS_RY)) {
-				int offset = 0, range = 32767;
-				switch (ev.code) {
-				case ABS_X:
-					offset = gp->left_x - gp->cal_lx.center;
-					range = (gp->cal_lx.max - gp->cal_lx.min) / 2;
-					break;
-				case ABS_Y:
-					offset = gp->left_y - gp->cal_ly.center;
-					range = (gp->cal_ly.max - gp->cal_ly.min) / 2;
-					break;
-				case ABS_RX:
-					offset = gp->right_x - gp->cal_rx.center;
-					range = (gp->cal_rx.max - gp->cal_rx.min) / 2;
-					break;
-				case ABS_RY:
-					offset = gp->right_y - gp->cal_ry.center;
-					range = (gp->cal_ry.max - gp->cal_ry.min) / 2;
-					break;
-				}
-				if (range == 0) range = 32767;
-				int deadzone = range * GAMEPAD_DEADZONE / 32767;
-				if (abs(offset) > deadzone)
-					render_playback_osd();
-			}
-
 			switch (ev.code) {
 			case ABS_HAT0X:
 				/* D-pad left/right for navigation */
 				if (ev.value != 0) {
-					int handled = 0;
 					int button = ev.value < 0 ? BTN_DPAD_LEFT : BTN_DPAD_RIGHT;
 
 					/* Check OSK first - highest priority */
 					Monitor *osk_mon = osk_visible_monitor();
 					if (osk_mon) {
-						handled = osk_handle_button(osk_mon, button, 1);
+						osk_handle_button(osk_mon, button, 1);
 						/* Start repeat timer for hold-to-slide */
 						osk_dpad_repeat_start(osk_mon, button);
-					}
-
-					/* Check Retro gaming on any monitor (must be active on current tag) */
-					Monitor *rg_mon = retro_gaming_visible_monitor();
-					if (rg_mon && htpc_view_is_active(rg_mon, rg_mon->retro_gaming.view_tag, rg_mon->retro_gaming.visible)) {
-						handled = retro_gaming_handle_button(rg_mon, button, 1);
-					}
-
-					/* Check PC gaming on any monitor */
-					if (!handled) {
-						Monitor *pg_mon = pc_gaming_visible_monitor();
-						if (pg_mon && htpc_view_is_active(pg_mon, pg_mon->pc_gaming.view_tag, pg_mon->pc_gaming.visible)) {
-							PcGamingView *pg = &pg_mon->pc_gaming;
-							/* Handle install popup if visible */
-							if (pg->install_popup_visible) {
-								if (ev.value == -1 && pg->install_popup_selected > 0) {
-									pg->install_popup_selected--;
-									pc_gaming_install_popup_render(pg_mon);
-									handled = 1;
-								} else if (ev.value == 1 && pg->install_popup_selected < 1) {
-									pg->install_popup_selected++;
-									pc_gaming_install_popup_render(pg_mon);
-									handled = 1;
-								}
-							} else {
-								if (ev.value == -1 && pg->selected_idx > 0) {
-									pg->selected_idx--;
-									pc_gaming_render(pg_mon);
-									handled = 1;
-								} else if (ev.value == 1 && pg->selected_idx < pg->game_count - 1) {
-									pg->selected_idx++;
-									pc_gaming_render(pg_mon);
-									handled = 1;
-								}
-							}
-						}
-					}
-
-					/* Check Media views on any monitor */
-					if (!handled) {
-						Monitor *media_mon = media_view_visible_monitor();
-						if (media_mon) {
-							if (htpc_view_is_active(media_mon, media_mon->movies_view.view_tag, media_mon->movies_view.visible)) {
-								media_view_handle_button(media_mon, MEDIA_VIEW_MOVIES, button, 1);
-							} else if (htpc_view_is_active(media_mon, media_mon->tvshows_view.view_tag, media_mon->tvshows_view.visible)) {
-								media_view_handle_button(media_mon, MEDIA_VIEW_TVSHOWS, button, 1);
-							}
-						}
 					}
 				} else {
 					/* D-pad released - stop OSK repeat if active */
 					if (osk_dpad_held_button == BTN_DPAD_LEFT || osk_dpad_held_button == BTN_DPAD_RIGHT)
 						osk_dpad_repeat_stop();
-					/* Stop video player hold-to-seek on D-pad release */
-					if (active_videoplayer && active_videoplayer->control_bar.seek_hold_active) {
-						videoplayer_seek_hold_stop(active_videoplayer);
-						render_playback_osd();
-					}
 				}
 				break;
 			case ABS_HAT0Y:
-				/* D-pad up/down for menu/grid navigation */
+				/* D-pad up/down for navigation */
 				if (ev.value != 0) {
-					int handled = 0;
 					int button = ev.value < 0 ? BTN_DPAD_UP : BTN_DPAD_DOWN;
 
 					/* Check OSK first - highest priority */
 					Monitor *osk_mon_y = osk_visible_monitor();
 					if (osk_mon_y) {
-						handled = osk_handle_button(osk_mon_y, button, 1);
+						osk_handle_button(osk_mon_y, button, 1);
 						/* Start repeat timer for hold-to-slide */
 						osk_dpad_repeat_start(osk_mon_y, button);
-					}
-
-					/* Check gamepad menu on selmon first (uses m) */
-					if (m && m->gamepad_menu.visible) {
-						GamepadMenu *gm = &m->gamepad_menu;
-						if (ev.value == -1 && gm->selected > 0) {
-							gm->selected--;
-							gamepad_menu_render(m);
-							handled = 1;
-						} else if (ev.value == 1 && gm->selected < gm->item_count - 1) {
-							gm->selected++;
-							gamepad_menu_render(m);
-							handled = 1;
-						}
-					}
-
-					/* Check Retro gaming on any monitor (must be active on current tag) */
-					if (!handled) {
-						Monitor *rg_mon = retro_gaming_visible_monitor();
-						if (rg_mon && htpc_view_is_active(rg_mon, rg_mon->retro_gaming.view_tag, rg_mon->retro_gaming.visible)) {
-							handled = retro_gaming_handle_button(rg_mon, button, 1);
-							retro_dpad_repeat_start(rg_mon, button);
-						}
-					}
-
-					/* Check PC gaming on any monitor */
-					if (!handled) {
-						Monitor *pg_mon = pc_gaming_visible_monitor();
-						if (pg_mon && htpc_view_is_active(pg_mon, pg_mon->pc_gaming.view_tag, pg_mon->pc_gaming.visible)) {
-							PcGamingView *pg = &pg_mon->pc_gaming;
-							/* Skip if install popup is visible */
-							if (!pg->install_popup_visible) {
-								if (ev.value == -1 && pg->selected_idx >= pg->cols) {
-									pg->selected_idx -= pg->cols;
-									pc_gaming_render(pg_mon);
-									handled = 1;
-								} else if (ev.value == 1 && pg->selected_idx + pg->cols < pg->game_count) {
-									pg->selected_idx += pg->cols;
-									pc_gaming_render(pg_mon);
-									handled = 1;
-								}
-							}
-						}
-					}
-
-					/* Check Media views on any monitor */
-					if (!handled) {
-						Monitor *media_mon = media_view_visible_monitor();
-						if (media_mon) {
-							if (htpc_view_is_active(media_mon, media_mon->movies_view.view_tag, media_mon->movies_view.visible)) {
-								media_view_handle_button(media_mon, MEDIA_VIEW_MOVIES, button, 1);
-							} else if (htpc_view_is_active(media_mon, media_mon->tvshows_view.view_tag, media_mon->tvshows_view.visible)) {
-								media_view_handle_button(media_mon, MEDIA_VIEW_TVSHOWS, button, 1);
-							}
-						}
 					}
 				} else {
 					/* D-pad released - stop OSK repeat if active */
 					if (osk_dpad_held_button == BTN_DPAD_UP || osk_dpad_held_button == BTN_DPAD_DOWN)
 						osk_dpad_repeat_stop();
-					/* Stop retro gaming repeat */
-					retro_dpad_repeat_stop();
 				}
 				break;
 			}
@@ -1101,19 +564,8 @@ gamepad_device_add(const char *path)
 
 	wlr_log(WLR_INFO, "Gamepad connected: %s (%s)", name, path);
 
-	/* Pause video playback on controller connect to prevent A/V desync.
-	 * Bluetooth connection causes PipeWire audio rerouting which breaks sync.
-	 * User can resume with play button for clean resync. */
-	if (active_videoplayer && playback_state == PLAYBACK_PLAYING) {
-		videoplayer_pause(active_videoplayer);
-		render_playback_osd();
-	}
-
 	/* Switch TV/Monitor to this HDMI input via CEC */
 	cec_switch_to_active_source();
-
-	/* Update grab state for new gamepad (grab if in HTPC mode on non-Steam tag) */
-	gamepad_update_grab_state();
 }
 
 void
@@ -1159,51 +611,6 @@ gamepad_ungrab(GamepadDevice *gp)
 	if (ioctl(gp->fd, EVIOCGRAB, 0) == 0) {
 		gp->grabbed = 0;
 		wlr_log(WLR_INFO, "Gamepad ungrabbed: %s", gp->name);
-	}
-}
-
-int
-gamepad_should_grab(void)
-{
-	Client *focused;
-	unsigned int steam_tag;
-
-	/* Only grab in HTPC mode */
-	if (!htpc_mode_active)
-		return 0;
-
-	/* Steam is on tag 4 (index 3) */
-	steam_tag = 1 << 3;
-
-	/* If we're on the Steam tag, let Steam have the gamepad */
-	if (selmon && (selmon->tagset[selmon->seltags] & steam_tag))
-		return 0;
-
-	/* If Steam or a Steam game is focused, let it have the gamepad */
-	focused = focustop(selmon);
-	if (focused && (is_steam_client(focused) || is_steam_game(focused)))
-		return 0;
-
-	/* We're on a non-Steam tag in HTPC mode - grab for our UI */
-	return 1;
-}
-
-void
-gamepad_update_grab_state(void)
-{
-	GamepadDevice *gp;
-	int should_grab;
-
-	should_grab = gamepad_should_grab();
-
-	wl_list_for_each(gp, &gamepads, link) {
-		if (gp->suspended)
-			continue;
-		if (should_grab && !gp->grabbed) {
-			gamepad_grab(gp);
-		} else if (!should_grab && gp->grabbed) {
-			gamepad_ungrab(gp);
-		}
 	}
 }
 
@@ -1316,91 +723,6 @@ gamepad_scan_devices(void)
 	closedir(dir);
 }
 
-/* Read left stick X/Y nav direction from all gamepads (-1/0/1 per axis) */
-static void
-gamepad_read_nav_xy(int *out_x, int *out_y)
-{
-	GamepadDevice *gp;
-
-	*out_x = 0;
-	*out_y = 0;
-	wl_list_for_each(gp, &gamepads, link) {
-		if (gp->suspended)
-			continue;
-
-		int lx_offset = gp->left_x - gp->cal_lx.center;
-		int ly_offset = gp->left_y - gp->cal_ly.center;
-		int lx_range = (gp->cal_lx.max - gp->cal_lx.min) / 2;
-		int ly_range = (gp->cal_ly.max - gp->cal_ly.min) / 2;
-		if (lx_range == 0) lx_range = 32767;
-		if (ly_range == 0) ly_range = 32767;
-
-		/* Threshold at 50% deflection for navigation */
-		int nav_threshold_x = lx_range / 2;
-		int nav_threshold_y = ly_range / 2;
-
-		if (lx_offset < -nav_threshold_x) *out_x = -1;
-		else if (lx_offset > nav_threshold_x) *out_x = 1;
-		if (out_y) {
-			if (ly_offset < -nav_threshold_y) *out_y = -1;
-			else if (ly_offset > nav_threshold_y) *out_y = 1;
-		}
-	}
-}
-
-/* Check nav repeat timing, returns 1 if a step should fire */
-static int
-gamepad_nav_should_step(int active, uint64_t now)
-{
-	if (active) {
-		uint64_t delay = joystick_nav_repeat_started ?
-				JOYSTICK_NAV_REPEAT_RATE : JOYSTICK_NAV_INITIAL_DELAY;
-		if (joystick_nav_last_move == 0 || (now - joystick_nav_last_move) >= delay) {
-			joystick_nav_last_move = now;
-			joystick_nav_repeat_started = 1;
-			return 1;
-		}
-		return 0;
-	}
-	/* Reset repeat state when joystick returns to center */
-	joystick_nav_last_move = 0;
-	joystick_nav_repeat_started = 0;
-	return 0;
-}
-
-/* Send right stick scroll from all gamepads */
-static void
-gamepad_send_right_stick_scroll(void)
-{
-	GamepadDevice *gp;
-
-	wl_list_for_each(gp, &gamepads, link) {
-		if (gp->suspended)
-			continue;
-
-		int ry_offset = gp->right_y - gp->cal_ry.center;
-		int ry_range = (gp->cal_ry.max - gp->cal_ry.min) / 2;
-		if (ry_range == 0) ry_range = 32767;
-		int ry_deadzone = gp->cal_ry.flat > 0 ? gp->cal_ry.flat :
-				(ry_range * GAMEPAD_DEADZONE / 32767);
-
-		if (abs(ry_offset) > ry_deadzone) {
-			double ny = (double)ry_offset / (double)ry_range;
-			if (ny > 1.0) ny = 1.0;
-			if (ny < -1.0) ny = -1.0;
-
-			double scroll_amount = ny * 3.0;
-			uint32_t time_msec = (uint32_t)(monotonic_msec() & 0xFFFFFFFF);
-
-			wlr_seat_pointer_notify_axis(seat, time_msec,
-				WL_POINTER_AXIS_VERTICAL_SCROLL,
-				scroll_amount, (int32_t)(scroll_amount * 120),
-				WL_POINTER_AXIS_SOURCE_CONTINUOUS,
-				WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
-		}
-	}
-}
-
 void
 gamepad_update_cursor(void)
 {
@@ -1412,219 +734,13 @@ gamepad_update_cursor(void)
 	if (wl_list_empty(&gamepads))
 		return;
 
-	/* Handle video player joystick navigation (left stick = sound/subtitle menu) */
-	if (active_videoplayer && playback_state == PLAYBACK_PLAYING) {
-		int nav_x = 0, nav_y = 0;
-		gamepad_read_nav_xy(&nav_x, &nav_y);
-
-		if (gamepad_nav_should_step(nav_x != 0 || nav_y != 0, now)) {
-			int btn = 0;
-			if (nav_x == -1) btn = BTN_DPAD_LEFT;
-			else if (nav_x == 1) btn = BTN_DPAD_RIGHT;
-			else if (nav_y == -1) btn = BTN_DPAD_UP;
-			else if (nav_y == 1) btn = BTN_DPAD_DOWN;
-			if (btn)
-				handle_playback_osd_input(btn);
-		}
-		return;
-	}
-
-	/* Handle Retro gaming view joystick navigation */
-	if (selmon && htpc_view_is_active(selmon, selmon->retro_gaming.view_tag, selmon->retro_gaming.visible)) {
-		int nav_x = 0, nav_y = 0;
-		gamepad_read_nav_xy(&nav_x, &nav_y);
-
-		int active = (nav_x != 0 || nav_y != 0);
-		if (gamepad_nav_should_step(active, now)) {
-			if (nav_y != 0)
-				retro_gaming_handle_button(selmon, nav_y < 0 ? BTN_DPAD_UP : BTN_DPAD_DOWN, 1);
-			else if (nav_x != 0)
-				retro_gaming_handle_button(selmon, nav_x < 0 ? BTN_DPAD_LEFT : BTN_DPAD_RIGHT, 1);
-		}
-
-		gamepad_send_right_stick_scroll();
-		return;
-	}
-
-	/* Handle PC gaming view joystick navigation */
-	if (selmon && htpc_view_is_active(selmon, selmon->pc_gaming.view_tag, selmon->pc_gaming.visible)) {
-		PcGamingView *pg = &selmon->pc_gaming;
-		Client *popup_client = focustop(selmon);
-
-		/* If a window has focus (e.g. Steam install dialog), allow mouse control */
-		if (popup_client && !popup_client->isfullscreen) {
-			/* Show cursor when controlling popup window */
-			nixly_cursor_set_xcursor("default");
-			/* Fall through to normal mouse control code below */
-		} else {
-			/* No popup window - use grid navigation */
-			int nav_x = 0, nav_y = 0;
-			gamepad_read_nav_xy(&nav_x, &nav_y);
-
-			if (gamepad_nav_should_step(nav_x != 0 || nav_y != 0, now)) {
-				if (pg->install_popup_visible) {
-					/* Navigate install popup */
-					if (nav_x == -1 && pg->install_popup_selected > 0) {
-						pg->install_popup_selected--;
-						pc_gaming_install_popup_render(selmon);
-					} else if (nav_x == 1 && pg->install_popup_selected < 1) {
-						pg->install_popup_selected++;
-						pc_gaming_install_popup_render(selmon);
-					}
-				} else {
-					/* Navigate game grid */
-					int new_idx = pg->selected_idx;
-					if (nav_x == -1 && new_idx > 0)
-						new_idx--;
-					else if (nav_x == 1 && new_idx < pg->game_count - 1)
-						new_idx++;
-					if (nav_y == -1 && new_idx >= pg->cols)
-						new_idx -= pg->cols;
-					else if (nav_y == 1 && new_idx + pg->cols < pg->game_count)
-						new_idx += pg->cols;
-
-					if (new_idx != pg->selected_idx) {
-						pg->selected_idx = new_idx;
-						pc_gaming_render(selmon);
-					}
-				}
-			}
-
-			gamepad_send_right_stick_scroll();
-
-			/* Don't move mouse cursor while in PC gaming view without popup */
-			return;
-		}
-	}
-
-	/* Handle Media views (Movies/TV-shows) joystick navigation */
-	{
-		Monitor *media_mon = media_view_visible_monitor();
-		if (media_mon) {
-			MediaGridView *view = NULL;
-			MediaViewType view_type = MEDIA_VIEW_MOVIES;
-
-			if (htpc_view_is_active(media_mon, media_mon->movies_view.view_tag, media_mon->movies_view.visible)) {
-				view = &media_mon->movies_view;
-				view_type = MEDIA_VIEW_MOVIES;
-			} else if (htpc_view_is_active(media_mon, media_mon->tvshows_view.view_tag, media_mon->tvshows_view.visible)) {
-				view = &media_mon->tvshows_view;
-				view_type = MEDIA_VIEW_TVSHOWS;
-			}
-
-			if (view) {
-				int nav_x = 0, nav_y = 0;
-				gamepad_read_nav_xy(&nav_x, &nav_y);
-
-				if (gamepad_nav_should_step(nav_x != 0 || nav_y != 0, now)) {
-					/* Handle detail view navigation for TV shows */
-					if (view->in_detail_view && view_type == MEDIA_VIEW_TVSHOWS) {
-						int needs_render = 0;
-
-						/* Left/Right switches between seasons and episodes */
-						if (nav_x == -1 && view->detail_focus == DETAIL_FOCUS_EPISODES) {
-							view->detail_focus = DETAIL_FOCUS_SEASONS;
-							needs_render = 1;
-						} else if (nav_x == 1 && view->detail_focus == DETAIL_FOCUS_SEASONS && view->episode_count > 0) {
-							view->detail_focus = DETAIL_FOCUS_EPISODES;
-							needs_render = 1;
-						}
-
-						/* Up/Down navigates within the current column */
-						if (view->detail_focus == DETAIL_FOCUS_SEASONS) {
-							if (nav_y == -1 && view->selected_season_idx > 0) {
-								view->selected_season_idx--;
-								MediaSeason *s = view->seasons;
-								for (int i = 0; i < view->selected_season_idx && s; i++)
-									s = s->next;
-								if (s) {
-									view->selected_season = s->season;
-									const char *show = view->detail_item->title[0] ?
-									                   view->detail_item->title : view->detail_item->show_name;
-									media_view_fetch_episodes(view, show, s->season);
-									view->selected_episode_idx = 0;
-									view->episode_scroll_offset = 0;
-								}
-								needs_render = 1;
-							} else if (nav_y == 1 && view->selected_season_idx < view->season_count - 1) {
-								view->selected_season_idx++;
-								MediaSeason *s = view->seasons;
-								for (int i = 0; i < view->selected_season_idx && s; i++)
-									s = s->next;
-								if (s) {
-									view->selected_season = s->season;
-									const char *show = view->detail_item->title[0] ?
-									                   view->detail_item->title : view->detail_item->show_name;
-									media_view_fetch_episodes(view, show, s->season);
-									view->selected_episode_idx = 0;
-									view->episode_scroll_offset = 0;
-								}
-								needs_render = 1;
-							}
-						} else if (view->detail_focus == DETAIL_FOCUS_EPISODES) {
-							if (nav_y == -1 && view->selected_episode_idx > 0) {
-								view->selected_episode_idx--;
-								needs_render = 1;
-							} else if (nav_y == 1 && view->selected_episode_idx < view->episode_count - 1) {
-								view->selected_episode_idx++;
-								needs_render = 1;
-							}
-						}
-
-						if (needs_render)
-							media_view_render_detail(media_mon, view_type);
-					} else {
-						/* Grid view navigation */
-						int cols = view->cols > 0 ? view->cols : 5;
-						int old_idx = view->selected_idx;
-
-						if (nav_x == -1 && view->selected_idx > 0)
-							view->selected_idx--;
-						else if (nav_x == 1 && view->selected_idx < view->item_count - 1)
-							view->selected_idx++;
-						if (nav_y == -1 && view->selected_idx >= cols)
-							view->selected_idx -= cols;
-						else if (nav_y == 1 && view->selected_idx + cols < view->item_count)
-							view->selected_idx += cols;
-
-						if (view->selected_idx != old_idx)
-							media_view_render(media_mon, view_type);
-					}
-				}
-
-				gamepad_send_right_stick_scroll();
-
-				/* Don't move mouse cursor while in media view */
-				return;
-			}
-		}
-	}
-
 	/* Check if we should skip cursor movement for fullscreen clients
 	 * (let game handle joystick input), but always allow right stick scrolling */
 	int skip_cursor_move = 0;
 	Client *focused = focustop(selmon);
 	if (focused && focused->isfullscreen) {
-		/* In HTPC mode, allow cursor control for browsers (kiosk mode) */
-		if (htpc_mode_active && is_browser_client(focused)) {
-			/* Browser in fullscreen - allow gamepad cursor control and scroll */
-		} else if (htpc_mode_active) {
-			/* Check for Steam popup that needs mouse control */
-			Client *popup = NULL;
-			Client *c;
-			wl_list_for_each(c, &clients, link) {
-				if (c->isfloating && !c->isfullscreen && is_steam_popup(c)) {
-					popup = c;
-					break;
-				}
-			}
-			if (!popup) {
-				/* No popup - skip cursor but still allow scroll for focused client */
-				skip_cursor_move = 1;
-			}
-			/* There's a Steam popup - allow mouse control below */
-		} else if (is_browser_client(focused)) {
-			/* Browser fullscreen outside HTPC mode - still allow scroll */
+		if (is_browser_client(focused)) {
+			/* Browser fullscreen - still allow scroll */
 		} else {
 			/* Fullscreen game - skip cursor but allow scroll to pass through */
 			skip_cursor_move = 1;

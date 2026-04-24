@@ -5044,7 +5044,7 @@ schedule_next_status_refresh(void)
 	uint64_t now = monotonic_msec();
 	uint64_t next = UINT64_MAX;
 
-	if (!status_cpu_timer || game_mode_active || htpc_mode_active)
+	if (!status_cpu_timer || game_mode_active)
 		return;
 
 	for (size_t i = 0; i < STATUS_TASKS_COUNT; i++) {
@@ -5068,7 +5068,7 @@ schedule_status_timer(void)
 	int ms;
 	time_t next_min;
 
-	if (!status_timer || game_mode_active || htpc_mode_active)
+	if (!status_timer || game_mode_active)
 		return;
 
 	clock_gettime(CLOCK_REALTIME, &ts);
@@ -5787,8 +5787,7 @@ initstatusbar(Monitor *m)
 			m->gamepad_menu.bg = NULL;
 			m->gamepad_menu.visible = 0;
 			m->gamepad_menu.selected = 0;
-			htpc_menu_build();
-		m->gamepad_menu.item_count = htpc_menu_item_count;
+			m->gamepad_menu.item_count = 0;
 			wlr_scene_node_set_enabled(&m->gamepad_menu.tree->node, 0);
 		}
 	}

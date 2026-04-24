@@ -620,7 +620,6 @@ steam_set_ge_proton_default(void)
 	free(config_content);
 }
 
-/* HTPC mode - optimized for controller/TV usage */
 
 
 
@@ -670,504 +669,6 @@ steam_set_ge_proton_default(void)
 
 
 
-
-
-/* ============================================================================
- * Gamepad Controller Menu Implementation
- * ============================================================================ */
-
-
-
-
-
-
-/* Handle mouse click on gamepad menu - returns 1 if click was inside menu */
-
-
-/* Handle gamepad button press - returns 1 if handled */
-
-/* ==================== PC GAMING VIEW ==================== */
-
-
-
-/* Save games cache to file for fast loading */
-
-/* Load games from cache file */
-
-/* Fetch Steam game names using parallel API requests */
-
-/* Load Steam playtime from localconfig.vdf */
-
-/* Sort games by acquisition date (newest first) using merge sort */
-GameEntry *
-pc_gaming_merge_sorted(GameEntry *a, GameEntry *b)
-{
-	if (!a) return b;
-	if (!b) return a;
-
-	GameEntry *result = NULL;
-	int a_played = (a->acquired_time > 0);
-	int b_played = (b->acquired_time > 0);
-
-	/* Played games come first */
-	if (a_played && !b_played) {
-		result = a;
-		result->next = pc_gaming_merge_sorted(a->next, b);
-	} else if (!a_played && b_played) {
-		result = b;
-		result->next = pc_gaming_merge_sorted(a, b->next);
-	} else if (a_played && b_played) {
-		/* Both played - sort by most recently played first */
-		if (a->acquired_time >= b->acquired_time) {
-			result = a;
-			result->next = pc_gaming_merge_sorted(a->next, b);
-		} else {
-			result = b;
-			result->next = pc_gaming_merge_sorted(a, b->next);
-		}
-	} else {
-		/* Neither played - sort by app ID (lower ID = older game, comes first) */
-		if (atoi(a->id) <= atoi(b->id)) {
-			result = a;
-			result->next = pc_gaming_merge_sorted(a->next, b);
-		} else {
-			result = b;
-			result->next = pc_gaming_merge_sorted(a, b->next);
-		}
-	}
-	return result;
-}
-
-
-
-
-/* Known Proton, runtime, and tool app IDs to always filter */
-
-/* Filter out non-games (DLC, tools, servers, etc.) */
-
-/* Update installation status for games (check download progress) */
-
-/* Load and scale game icon to tile dimensions */
-
-
-
-
-/* Callback when games cache file changes - triggers realtime UI update */
-
-/* Set up inotify watch on games cache file */
-
-/* Ensure selected tile is visible by adjusting scroll */
-
-
-/* Timer callback for updating installation progress every 2 seconds */
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-/* ============================================================================
- * Retro Gaming View Implementation
- * ============================================================================ */
-
-struct wl_event_source *retro_anim_timer = NULL;
-
-
-
-
-
-
-
-/* =========================================================== */
-/* Media Grid View (Movies & TV-shows) */
-/* =========================================================== */
-
-
-/* Server info with priority for multi-server deduplication */
-MediaServer media_servers[MAX_MEDIA_SERVERS];
-int media_server_count = 0;
-
-/* Discovered server URL (auto-discovered or fallback to localhost) */
-char discovered_server_url[256] = "";
-int server_discovered = 0;
-uint64_t last_discovery_attempt_ms = 0;
-
-/* Add server to list (avoiding duplicates) */
-
-/* Try to discover nixly-server on local network via UDP broadcast
- * Returns number of servers discovered */
-
-/* Try localhost as fallback */
-
-/* Run discovery for local servers (always runs, even with configured servers) */
-
-/* Get best server URL (highest priority) */
-
-/* Get all servers (for fetching from multiple sources) */
-
-/* Calculate if buffering is needed and how long
- * Returns buffer time in seconds, 0 if direct playback is possible */
-
-/* Load resume position for media ID */
-
-/* Save resume position for media ID */
-
-/* Launch integrated video player for local files or streaming URLs
- * Uses FFmpeg + PipeWire for HDR, lossless video/audio, and proper frame timing */
-
-/* Launch integrated video player (no resume) */
-
-/* Stop integrated video player */
-
-/* Start media playback (with buffering check) */
-
-/* Check buffering progress and start playback when ready */
-
-/* Cancel buffering */
-
-MediaGridView *
-media_get_view(Monitor *m, MediaViewType type)
-{
-	if (!m) return NULL;
-	return (type == MEDIA_VIEW_MOVIES) ? &m->movies_view : &m->tvshows_view;
-}
-
-
-/* Simple JSON string extraction helper with escape sequence handling */
-
-
-
-/* Poll timer callback - refresh media views every 3 seconds */
-
-/* Parse media items from JSON buffer into temp array for deduplication */
-int
-parse_media_json(const char *buffer, const char *server_url, MediaItem **out_items, int max_items)
-{
-	const char *pos = strchr(buffer, '[');
-	if (!pos) return 0;
-	pos++;
-
-	int count = 0;
-	while (*pos && count < max_items) {
-		const char *obj_start = strchr(pos, '{');
-		if (!obj_start) break;
-
-		int depth = 1;
-		const char *obj_end = obj_start + 1;
-		while (*obj_end && depth > 0) {
-			if (*obj_end == '{') depth++;
-			else if (*obj_end == '}') depth--;
-			obj_end++;
-		}
-		if (depth != 0) break;
-
-		size_t obj_len = obj_end - obj_start;
-		char *obj_json = malloc(obj_len + 1);
-		if (!obj_json) break;
-		strncpy(obj_json, obj_start, obj_len);
-		obj_json[obj_len] = '\0';
-
-		MediaItem *item = calloc(1, sizeof(MediaItem));
-		if (item) {
-			item->id = json_extract_int(obj_json, "id");
-			item->type = json_extract_int(obj_json, "type");
-			json_extract_string(obj_json, "show_name", item->show_name, sizeof(item->show_name));
-			if (!json_extract_string(obj_json, "tmdb_title", item->title, sizeof(item->title)) ||
-			    item->title[0] == '\0') {
-				if (item->show_name[0])
-					snprintf(item->title, sizeof(item->title), "%s", item->show_name);
-				else
-					json_extract_string(obj_json, "title", item->title, sizeof(item->title));
-			}
-			item->season = json_extract_int(obj_json, "season");
-			item->episode = json_extract_int(obj_json, "episode");
-			item->duration = json_extract_int(obj_json, "duration");
-			item->year = json_extract_int(obj_json, "year");
-			item->rating = json_extract_float(obj_json, "rating");
-			json_extract_string(obj_json, "poster", item->poster_path, sizeof(item->poster_path));
-			json_extract_string(obj_json, "backdrop", item->backdrop_path, sizeof(item->backdrop_path));
-			json_extract_string(obj_json, "overview", item->overview, sizeof(item->overview));
-			json_extract_string(obj_json, "genres", item->genres, sizeof(item->genres));
-			item->tmdb_total_seasons = json_extract_int(obj_json, "tmdb_total_seasons");
-			item->tmdb_total_episodes = json_extract_int(obj_json, "tmdb_total_episodes");
-			item->tmdb_episode_runtime = json_extract_int(obj_json, "tmdb_episode_runtime");
-			json_extract_string(obj_json, "tmdb_status", item->tmdb_status, sizeof(item->tmdb_status));
-			json_extract_string(obj_json, "tmdb_next_episode", item->tmdb_next_episode, sizeof(item->tmdb_next_episode));
-			item->tmdb_id = json_extract_int(obj_json, "tmdb_id");
-			json_extract_string(obj_json, "server_id", item->server_id, sizeof(item->server_id));
-			item->server_priority = json_extract_int(obj_json, "server_priority");
-			strncpy(item->server_url, server_url, sizeof(item->server_url) - 1);
-
-			out_items[count++] = item;
-		}
-		free(obj_json);
-		pos = obj_end;
-	}
-	return count;
-}
-
-/* Fetch media list from ALL servers, deduplicate by tmdb_id keeping highest priority */
-
-/* Load poster image for a media item - scale-to-fill (cover) the target area */
-
-/* Load backdrop image for detail view - scale-to-fill */
-
-/* Free seasons list */
-
-/* Free episodes list */
-
-/* Fetch seasons for a TV show */
-void
-media_view_fetch_seasons(MediaGridView *view, const char *show_name)
-{
-	FILE *fp;
-	char cmd[1024];
-	char buffer[8192];
-	size_t bytes_read;
-
-	media_view_free_seasons(view);
-
-	/* URL-encode spaces in show name */
-	char encoded_name[512];
-	char *dst = encoded_name;
-	for (const char *src = show_name; *src && dst < encoded_name + sizeof(encoded_name) - 4; src++) {
-		if (*src == ' ') {
-			*dst++ = '%';
-			*dst++ = '2';
-			*dst++ = '0';
-		} else {
-			*dst++ = *src;
-		}
-	}
-	*dst = '\0';
-
-	snprintf(cmd, sizeof(cmd), "curl -s '%s/api/show/%s/seasons' 2>/dev/null",
-	         view->server_url, encoded_name);
-
-	fp = popen(cmd, "r");
-	if (!fp) return;
-
-	bytes_read = fread(buffer, 1, sizeof(buffer) - 1, fp);
-	pclose(fp);
-
-	if (bytes_read == 0) return;
-	buffer[bytes_read] = '\0';
-
-	/* Parse JSON array */
-	const char *pos = strchr(buffer, '[');
-	if (!pos) return;
-	pos++;
-
-	MediaSeason *last = NULL;
-	int count = 0;
-
-	while (*pos) {
-		const char *obj_start = strchr(pos, '{');
-		if (!obj_start) break;
-
-		int depth = 1;
-		const char *obj_end = obj_start + 1;
-		while (*obj_end && depth > 0) {
-			if (*obj_end == '{') depth++;
-			else if (*obj_end == '}') depth--;
-			obj_end++;
-		}
-
-		if (depth != 0) break;
-
-		size_t obj_len = obj_end - obj_start;
-		char *obj_json = malloc(obj_len + 1);
-		if (!obj_json) break;
-		strncpy(obj_json, obj_start, obj_len);
-		obj_json[obj_len] = '\0';
-
-		MediaSeason *season = calloc(1, sizeof(MediaSeason));
-		if (season) {
-			season->season = json_extract_int(obj_json, "season");
-			season->episode_count = json_extract_int(obj_json, "episode_count");
-
-			if (!view->seasons) {
-				view->seasons = season;
-			} else {
-				last->next = season;
-			}
-			last = season;
-			count++;
-		}
-
-		free(obj_json);
-		pos = obj_end;
-	}
-
-	view->season_count = count;
-}
-
-/* Fetch episodes for a specific season */
-void
-media_view_fetch_episodes(MediaGridView *view, const char *show_name, int season)
-{
-	FILE *fp;
-	char cmd[1024];
-	char buffer[1024 * 256];
-	size_t bytes_read;
-
-	media_view_free_episodes(view);
-
-	/* URL-encode spaces in show name */
-	char encoded_name[512];
-	char *dst = encoded_name;
-	for (const char *src = show_name; *src && dst < encoded_name + sizeof(encoded_name) - 4; src++) {
-		if (*src == ' ') {
-			*dst++ = '%';
-			*dst++ = '2';
-			*dst++ = '0';
-		} else {
-			*dst++ = *src;
-		}
-	}
-	*dst = '\0';
-
-	snprintf(cmd, sizeof(cmd), "curl -s '%s/api/show/%s/episodes/%d' 2>/dev/null",
-	         view->server_url, encoded_name, season);
-
-	fp = popen(cmd, "r");
-	if (!fp) return;
-
-	bytes_read = fread(buffer, 1, sizeof(buffer) - 1, fp);
-	pclose(fp);
-
-	if (bytes_read == 0) return;
-	buffer[bytes_read] = '\0';
-
-	/* Parse JSON array */
-	const char *pos = strchr(buffer, '[');
-	if (!pos) return;
-	pos++;
-
-	MediaItem *last = NULL;
-	int count = 0;
-
-	while (*pos) {
-		const char *obj_start = strchr(pos, '{');
-		if (!obj_start) break;
-
-		int depth = 1;
-		const char *obj_end = obj_start + 1;
-		while (*obj_end && depth > 0) {
-			if (*obj_end == '{') depth++;
-			else if (*obj_end == '}') depth--;
-			obj_end++;
-		}
-
-		if (depth != 0) break;
-
-		size_t obj_len = obj_end - obj_start;
-		char *obj_json = malloc(obj_len + 1);
-		if (!obj_json) break;
-		strncpy(obj_json, obj_start, obj_len);
-		obj_json[obj_len] = '\0';
-
-		MediaItem *item = calloc(1, sizeof(MediaItem));
-		if (item) {
-			item->id = json_extract_int(obj_json, "id");
-			item->type = json_extract_int(obj_json, "type");
-			json_extract_string(obj_json, "title", item->title, sizeof(item->title));
-			json_extract_string(obj_json, "show_name", item->show_name, sizeof(item->show_name));
-			item->season = json_extract_int(obj_json, "season");
-			item->episode = json_extract_int(obj_json, "episode");
-			item->duration = json_extract_int(obj_json, "duration");
-			item->year = json_extract_int(obj_json, "year");
-			item->rating = json_extract_float(obj_json, "rating");
-			json_extract_string(obj_json, "poster", item->poster_path, sizeof(item->poster_path));
-			json_extract_string(obj_json, "backdrop", item->backdrop_path, sizeof(item->backdrop_path));
-			json_extract_string(obj_json, "overview", item->overview, sizeof(item->overview));
-			json_extract_string(obj_json, "episode_title", item->episode_title, sizeof(item->episode_title));
-			json_extract_string(obj_json, "filepath", item->filepath, sizeof(item->filepath));
-
-			if (!view->episodes) {
-				view->episodes = item;
-			} else {
-				last->next = item;
-			}
-			last = item;
-			count++;
-		}
-
-		free(obj_json);
-		pos = obj_end;
-	}
-
-	view->episode_count = count;
-}
-
-/* Render buffering overlay */
-
-/* Render detail view for a movie or TV show */
-
-/* Enter detail view for selected item */
-
-/* Exit detail view back to grid */
-
-/* Ensure selected item is visible (scroll if needed) */
-
-/* Render the media grid view */
-
-
-
-
-
-/* Find monitor with visible Retro Gaming view */
-
-
-/* Handle playback OSD menu navigation */
-
-/* Handle detail view button input */
-
-
-/* Handle playback keyboard input */
-
-/* Handle detail view keyboard input */
-
-
-/* =========================================================== */
-/* End Media Grid View */
-/* =========================================================== */
-
-/* Check if device is a gamepad (not keyboard/mouse) */
-
-
-
-
-/* Grab exclusive access to gamepad (prevents Steam from receiving input) */
-
-/* Release exclusive access to gamepad (allows Steam to receive input) */
-
-/*
- * Determine if nixlytile should grab gamepads.
- * We grab when we need the input (HTPC views on non-Steam tags).
- * We release when Steam/games need it (Steam focused or on Steam tag).
- */
-
-/* Update grab state for all gamepads based on current context */
-
-/* Timer callback to process pending gamepad devices */
-
-
-
-/* Joystick navigation state for PC gaming view */
-uint64_t joystick_nav_last_move = 0;
-int joystick_nav_repeat_started = 0;
-
-/* Update cursor position based on joystick input from all gamepads */
 
 
 /* Switch TV/Monitor to this device via HDMI-CEC */
@@ -1238,9 +739,6 @@ int joystick_nav_repeat_started = 0;
 
 
 
-/* Check if a view is active (visible and on current tag) */
-
-/* Update HTPC view visibility based on current tag */
 
 
 
@@ -1327,10 +825,6 @@ cleanup(void)
 	if (popup_delay_timer) {
 		wl_event_source_remove(popup_delay_timer);
 		popup_delay_timer = NULL;
-	}
-	if (pc_gaming_install_timer) {
-		wl_event_source_remove(pc_gaming_install_timer);
-		pc_gaming_install_timer = NULL;
 	}
 	/* Clean up config rewatch timer */
 	if (config_rewatch_timer) {
@@ -2128,7 +1622,6 @@ const FuncEntry func_table[] = {
 	{ "togglefullscreen",  togglefullscreen,  0 },
 	{ "togglegaps",        togglegaps,        0 },
 	{ "togglestatusbar",   togglestatusbar,   0 },
-	{ "htpc_mode_toggle",  htpc_mode_toggle,  0 },
 	{ "focusmon",          focusmon,          1 },
 	{ "tagmon",            tagmon,            1 },
 	{ "setlayout",         setlayout,         0 },
@@ -3700,8 +3193,8 @@ const char *dgpu_programs[] = {
 
 /*
  * Fork and exec a shell command string with full child cleanup.
- * Used by spawn() and every HTPC launch path so every child gets the
- * same treatment as a desktop-mode spawn: stdin → /dev/null, fresh
+ * Used by spawn() so every child gets the
+ * same treatment: stdin → /dev/null, fresh
  * session, default signal handlers, ambient caps dropped, all
  * inherited compositor FDs (DRM master, PipeWire, epoll) closed,
  * $HOME as CWD, session env preserved. Returns child pid (parent)
@@ -3766,11 +3259,7 @@ spawn_cmd(const char *cmd)
 			steam_bin = "nixly_steam";
 		else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
 			steam_bin = "nixly_steam";
-		if (htpc_mode_active)
-			snprintf(cmd_str, sizeof(cmd_str),
-				"%s -bigpicture steam://open/games", steam_bin);
-		else
-			snprintf(cmd_str, sizeof(cmd_str), "%s", steam_bin);
+		snprintf(cmd_str, sizeof(cmd_str), "%s", steam_bin);
 	} else if (should_use_dgpu(cmd_str) && integrated_gpu_idx >= 0) {
 		set_dgpu_env();
 	}
@@ -4315,7 +3804,7 @@ main(int argc, char *argv[])
 	 * causing cross-GPU DMA-BUF import failures (invisible windows).
 	 *
 	 * Instead, set_dgpu_env() is called per-process in fork paths:
-	 * spawn(), launcher.c, htpc.c — only for games/apps that need dGPU. */
+	 * spawn(), launcher.c — only for games/apps that need dGPU. */
 
 	/* Build autostart command with wallpaper path if not overridden */
 	{
@@ -4341,13 +3830,8 @@ main(int argc, char *argv[])
 	setup_monitor_overlay_watch();
 	gamepad_setup();
 	bt_controller_setup();
-	pc_gaming_cache_watch_setup();
-
 	/* Set GE-Proton as default Steam compatibility tool */
 	steam_set_ge_proton_default();
-
-	/* HTPC mode (nixlytile_mode == 2) is entered from updatemons()
-	 * once the first monitor is ready and selmon is set */
 
 	/* Defer all cache updates — let the compositor settle first.
 	 * Phase 0=git, 1=file, 2=gaming; each fires 30 min apart. */

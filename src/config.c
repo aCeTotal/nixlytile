@@ -216,31 +216,6 @@ static void config_set_monitorkey(const char *value)
 	if (m) monitorkey = m;
 }
 
-static void config_set_htpc_wallpaper(const char *value)
-{
-	config_expand_path(value, htpc_wallpaper_path, sizeof(htpc_wallpaper_path));
-}
-
-static void config_set_client_download(const char *value)
-{
-	client_download_mbps = atoi(value);
-	if (client_download_mbps < 1) client_download_mbps = 1;
-	wlr_log(WLR_INFO, "Client download bandwidth: %d Mbps", client_download_mbps);
-}
-
-static void config_set_media_server(const char *value)
-{
-	if (*value) {
-		char url[256];
-		if (strncmp(value, "http://", 7) != 0 && strncmp(value, "https://", 8) != 0) {
-			snprintf(url, sizeof(url), "http://%s", value);
-		} else {
-			strncpy(url, value, sizeof(url) - 1);
-			url[sizeof(url) - 1] = '\0';
-		}
-		add_media_server(url, 0, 1);
-	}
-}
 
 static void config_set_accel_profile(const char *value)
 {
@@ -280,22 +255,6 @@ static const ConfigEntry config_entries[] = {
 	{"lock_cursor",              CFG_INT,    &lock_cursor,              0, NULL},
 	/* nixlytile mode */
 	{"nixlytile_mode",           CFG_INT,    &nixlytile_mode,          0, NULL},
-	{"htpc_wallpaper",           CFG_CUSTOM, NULL, 0, config_set_htpc_wallpaper},
-	{"htpc_page_pcgaming",       CFG_INT,    &htpc_page_pcgaming,      0, NULL},
-	{"htpc_page_retrogaming",    CFG_INT,    &htpc_page_retrogaming,   0, NULL},
-	{"htpc_page_movies",         CFG_INT,    &htpc_page_movies,        0, NULL},
-	{"htpc_page_tvshows",        CFG_INT,    &htpc_page_tvshows,       0, NULL},
-	{"htpc_page_quit",           CFG_INT,    &htpc_page_quit,          0, NULL},
-	/* Streaming */
-	{"client_download_mbps",     CFG_CUSTOM, NULL, 0, config_set_client_download},
-	{"media_server",             CFG_CUSTOM, NULL, 0, config_set_media_server},
-	/* Retro gaming emulators */
-	{"emulator",                 CFG_CUSTOM, NULL, 0, config_set_emulator},
-	/* PC Gaming services */
-	{"gaming_steam_enabled",     CFG_INT,    &gaming_service_enabled[GAMING_SERVICE_STEAM],   0, NULL},
-	{"gaming_heroic_enabled",    CFG_INT,    &gaming_service_enabled[GAMING_SERVICE_HEROIC],  0, NULL},
-	{"gaming_lutris_enabled",    CFG_INT,    &gaming_service_enabled[GAMING_SERVICE_LUTRIS],  0, NULL},
-	{"gaming_bottles_enabled",   CFG_INT,    &gaming_service_enabled[GAMING_SERVICE_BOTTLES], 0, NULL},
 	/* Colors */
 	{"rootcolor",                CFG_COLOR,  rootcolor,                 0, NULL},
 	{"bordercolor",              CFG_COLOR,  bordercolor,               0, NULL},

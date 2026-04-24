@@ -318,10 +318,6 @@ wifi_popup_show(Monitor *m, const char *ssid)
 	m->wifi_popup.visible = 1;
 
 	wifi_popup_render(m);
-
-	/* Show on-screen keyboard in HTPC mode when controller is connected */
-	if (htpc_mode_active && !wl_list_empty(&gamepads))
-		osk_show(m, NULL);
 }
 
 void
@@ -1067,10 +1063,6 @@ sudo_popup_show(Monitor *m, const char *title, const char *cmd, const char *pkg_
 	m->sudo_popup.visible = 1;
 
 	sudo_popup_render(m);
-
-	/* Show on-screen keyboard in HTPC mode when controller is connected */
-	if (htpc_mode_active && !wl_list_empty(&gamepads))
-		osk_show(m, NULL);
 }
 
 Monitor *

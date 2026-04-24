@@ -4029,8 +4029,7 @@ int
 playback_osd_timeout(void *data)
 {
 	(void)data;
-	if (playback_state == PLAYBACK_PLAYING &&
-	    active_videoplayer && active_videoplayer->state == VP_STATE_PLAYING) {
+	if (active_videoplayer && active_videoplayer->state == VP_STATE_PLAYING) {
 		hide_playback_osd();
 	}
 	return 0;
@@ -4066,7 +4065,8 @@ render_playback_osd(void)
 	float menu_bg[4] = {0.1f, 0.1f, 0.15f, 0.98f};
 	float menu_selected[4] = {0.2f, 0.45f, 0.85f, 0.95f};
 
-	if (!m || !statusfont.font || playback_state != PLAYBACK_PLAYING)
+	if (!m || !statusfont.font || !active_videoplayer ||
+	    active_videoplayer->state != VP_STATE_PLAYING)
 		return;
 
 	bar_w = m->m.width;
@@ -5008,10 +5008,6 @@ updatemons(struct wl_listener *listener, void *data)
 	 * wl_pointer.motion event for the clients, it's only the image what it's
 	 * at the wrong position after all. */
 	wlr_cursor_move(cursor, NULL, 0, 0);
-
-	/* Enter HTPC mode once selmon is available (deferred from startup) */
-	if (nixlytile_mode == 2 && !htpc_mode_active && selmon)
-		htpc_mode_enter();
 
 	wlr_output_manager_v1_set_configuration(output_mgr, config);
 

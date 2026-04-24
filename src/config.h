@@ -69,9 +69,8 @@ int lock_cursor = 0;	/* 1: lock cursor, 0: don't lock */
 /* logging */
 int log_level = WLR_DEBUG;
 
-/* nixlytile mode: 1 = desktop only, 2 = htpc only (starts in HTPC mode) */
+/* nixlytile mode */
 int nixlytile_mode = 1;
-char htpc_wallpaper_path[PATH_MAX] = "$HOME/.nixlyos/wallpapers/htpc.jpg";
 
 /* NOTE: ALWAYS keep a rule declared even if you don't use rules (e.g leave at least one example) */
 const Rule rules[] = {

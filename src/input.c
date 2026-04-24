@@ -1,6 +1,5 @@
 #include "nixlytile.h"
 #include "client.h"
-#include "mpv_launcher.h"
 
 static void (*last_keybinding_func)(const Arg *);
 
@@ -1184,10 +1183,6 @@ tablettoolsetcursor(struct wl_listener *listener, void *data)
 	struct wlr_tablet_v2_event_cursor *event = data;
 	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
 		return;
-	if (playback_state == PLAYBACK_PLAYING)
-		return;
-	if (media_view_visible_monitor() || retro_gaming_visible_monitor())
-		return;
 	if (event->seat_client == seat->pointer_state.focused_client)
 		nixly_cursor_set_client_surface(event->surface,
 				event->hotspot_x, event->hotspot_y);
@@ -1503,52 +1498,6 @@ try_stats_panel_key(Monitor *stats_mon, const xkb_keysym_t *syms, int nsyms)
 	return 0;
 }
 
-static int
-try_gamepad_menu_key(const xkb_keysym_t *syms, int nsyms)
-{
-	Monitor *gm_mon;
-
-	if (!htpc_mode_active)
-		return 0;
-	gm_mon = gamepad_menu_visible_monitor();
-	if (!gm_mon)
-		return 0;
-	for (int i = 0; i < nsyms; i++) {
-		xkb_keysym_t s = syms[i];
-		if (s == XKB_KEY_Escape) {
-			gamepad_menu_hide(gm_mon);
-			return 1;
-		} else if (s == XKB_KEY_Up) {
-			if (gm_mon->gamepad_menu.selected > 0) {
-				gm_mon->gamepad_menu.selected--;
-				gamepad_menu_render(gm_mon);
-			}
-			return 1;
-		} else if (s == XKB_KEY_Down) {
-			if (gm_mon->gamepad_menu.selected < gm_mon->gamepad_menu.item_count - 1) {
-				gm_mon->gamepad_menu.selected++;
-				gamepad_menu_render(gm_mon);
-			}
-			return 1;
-		} else if (s == XKB_KEY_Return || s == XKB_KEY_KP_Enter) {
-			gamepad_menu_select(gm_mon);
-			return 1;
-		}
-	}
-	return 0;
-}
-
-static int
-try_mpv_playback_key(const xkb_keysym_t *syms, int nsyms)
-{
-	if (!mpv_launcher_active() || playback_state != PLAYBACK_PLAYING)
-		return 0;
-	for (int i = 0; i < nsyms; i++) {
-		if (handle_playback_key(syms[i]))
-			return 1;
-	}
-	return 0;
-}
 
 static int
 try_videoplayer_key(const xkb_keysym_t *syms, int nsyms, uint32_t mods)
@@ -1558,71 +1507,22 @@ try_videoplayer_key(const xkb_keysym_t *syms, int nsyms, uint32_t mods)
 	if (!active_videoplayer || active_videoplayer->state == VP_STATE_IDLE)
 		return 0;
 
-	/* In HTPC mode, route through media playback handler first */
-	if (htpc_mode_active && playback_state == PLAYBACK_PLAYING) {
-		for (int i = 0; i < nsyms; i++) {
-			if (handle_playback_key(syms[i])) {
-				handled = 1;
-				if (!active_videoplayer ||
-				    active_videoplayer->state == VP_STATE_IDLE) {
-					videoplayer_set_visible(active_videoplayer, 0);
-					videoplayer_destroy(active_videoplayer);
-					active_videoplayer = NULL;
-					hide_playback_osd();
-					playback_state = PLAYBACK_IDLE;
-					return 1;
-				}
+	for (int i = 0; i < nsyms; i++) {
+		if (videoplayer_handle_key(active_videoplayer, mods, syms[i])) {
+			handled = 1;
+			if (active_videoplayer->state == VP_STATE_IDLE) {
+				videoplayer_set_visible(active_videoplayer, 0);
+				videoplayer_destroy(active_videoplayer);
+				active_videoplayer = NULL;
+				hide_playback_osd();
+				return 1;
 			}
-		}
-	}
-	if (!handled) {
-		for (int i = 0; i < nsyms; i++) {
-			if (videoplayer_handle_key(active_videoplayer, mods, syms[i])) {
-				handled = 1;
-				if (active_videoplayer->state == VP_STATE_IDLE) {
-					videoplayer_set_visible(active_videoplayer, 0);
-					videoplayer_destroy(active_videoplayer);
-					active_videoplayer = NULL;
-					hide_playback_osd();
-					playback_state = PLAYBACK_IDLE;
-					return 1;
-				}
-				render_playback_osd();
-			}
+			render_playback_osd();
 		}
 	}
 	return handled;
 }
 
-static int
-try_pc_gaming_key(Monitor *pc_gaming_mon, const xkb_keysym_t *syms, int nsyms, uint32_t mods)
-{
-	if (!pc_gaming_mon)
-		return 0;
-	for (int i = 0; i < nsyms; i++) {
-		if (pc_gaming_handle_key(pc_gaming_mon, mods, syms[i]))
-			return 1;
-	}
-	return 0;
-}
-
-static int
-try_media_view_key(const xkb_keysym_t *syms, int nsyms)
-{
-	Monitor *media_mon = media_view_visible_monitor();
-	if (!media_mon)
-		return 0;
-	for (int i = 0; i < nsyms; i++) {
-		if (htpc_view_is_active(media_mon, media_mon->movies_view.view_tag, media_mon->movies_view.visible)) {
-			if (media_view_handle_key(media_mon, MEDIA_VIEW_MOVIES, syms[i]))
-				return 1;
-		} else if (htpc_view_is_active(media_mon, media_mon->tvshows_view.view_tag, media_mon->tvshows_view.visible)) {
-			if (media_view_handle_key(media_mon, MEDIA_VIEW_TVSHOWS, syms[i]))
-				return 1;
-		}
-	}
-	return 0;
-}
 
 static int
 try_nixpkgs_key(Monitor *nixpkgs_mon, const xkb_keysym_t *syms, int nsyms, uint32_t mods)
@@ -1724,7 +1624,6 @@ keypress(struct wl_listener *listener, void *data)
 	Monitor *nixpkgs_mon = nixpkgs_visible_monitor();
 	Monitor *wifi_mon = wifi_popup_visible_monitor();
 	Monitor *sudo_mon = sudo_popup_visible_monitor();
-	Monitor *pc_gaming_mon = pc_gaming_visible_monitor();
 	Monitor *stats_mon = stats_panel_visible_monitor();
 
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
@@ -1755,11 +1654,7 @@ keypress(struct wl_listener *listener, void *data)
 		       || try_sudo_popup_key(sudo_mon, syms, nsyms, mods)
 		       || try_wifi_popup_key(wifi_mon, syms, nsyms, mods)
 		       || try_stats_panel_key(stats_mon, syms, nsyms)
-		       || try_gamepad_menu_key(syms, nsyms)
-		       || try_mpv_playback_key(syms, nsyms)
 		       || try_videoplayer_key(syms, nsyms, mods)
-		       || try_pc_gaming_key(pc_gaming_mon, syms, nsyms, mods)
-		       || try_media_view_key(syms, nsyms)
 		       || try_nixpkgs_key(nixpkgs_mon, syms, nsyms, mods)
 		       || try_modal_key(modal_mon, syms, nsyms, mods);
 		if (!handled && !shortcuts_are_inhibited()) {
@@ -1780,15 +1675,6 @@ keypress(struct wl_listener *listener, void *data)
 			if (videoplayer_handle_key_release(active_videoplayer, syms[i])) {
 				render_playback_osd();
 			}
-		}
-	}
-
-	/* Handle ESC release for hold-to-exit playback */
-	if (event->state == WL_KEYBOARD_KEY_STATE_RELEASED &&
-	    htpc_mode_active && playback_state == PLAYBACK_PLAYING) {
-		for (i = 0; i < nsyms; i++) {
-			if (syms[i] == XKB_KEY_Escape)
-				handle_playback_key_release(syms[i]);
 		}
 	}
 
@@ -2728,7 +2614,7 @@ focus:
 	/* If there's no client surface under the cursor, set the cursor image to a
 	 * default. This is what makes the cursor image appear when you move it
 	 * off of a client or over its border. */
-	if (!surface && !seat->drag && playback_state != PLAYBACK_PLAYING)
+	if (!surface && !seat->drag)
 		nixly_cursor_set_xcursor("default");
 
 	pointerfocus(c, surface, sx, sy, time);
@@ -2914,11 +2800,6 @@ setcursor(struct wl_listener *listener, void *data)
 	 * event, which will result in the client requesting set the cursor surface */
 	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
 		return;
-	/* Hide cursor during video playback and HTPC views */
-	if (playback_state == PLAYBACK_PLAYING)
-		return;
-	if (media_view_visible_monitor() || retro_gaming_visible_monitor())
-		return;
 	/* This can be sent by any client, so we check to make sure this one
 	 * actually has pointer focus first. If so, we can tell the cursor to
 	 * use the provided surface as the cursor image. It will set the
@@ -2934,11 +2815,6 @@ setcursorshape(struct wl_listener *listener, void *data)
 {
 	struct wlr_cursor_shape_manager_v1_request_set_shape_event *event = data;
 	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
-		return;
-	/* Hide cursor during video playback and HTPC views */
-	if (playback_state == PLAYBACK_PLAYING)
-		return;
-	if (media_view_visible_monitor() || retro_gaming_visible_monitor())
 		return;
 	/* This can be sent by any client, so we check to make sure this one
 	 * actually has pointer focus first. If so, we can tell the cursor to
@@ -2989,10 +2865,6 @@ textinput_enable(struct wl_listener *listener, void *data)
 	wlr_log(WLR_INFO, "Text input enabled for surface %p", (void*)ti->focused_surface);
 	active_text_input = ti;
 
-	/* Show OSK in HTPC mode when text input is enabled and controller is connected */
-	if (htpc_mode_active && selmon && !wl_list_empty(&gamepads)) {
-		osk_show(selmon, ti->focused_surface);
-	}
 }
 
 void
@@ -3003,13 +2875,8 @@ textinput_disable(struct wl_listener *listener, void *data)
 	(void)data;
 
 	wlr_log(WLR_INFO, "Text input disabled");
-	if (active_text_input == ti) {
+	if (active_text_input == ti)
 		active_text_input = NULL;
-		/* Hide OSK when text input is disabled */
-		if (htpc_mode_active) {
-			osk_hide_all();
-		}
-	}
 }
 
 void
@@ -3028,12 +2895,8 @@ textinput_destroy(struct wl_listener *listener, void *data)
 	(void)data;
 
 	wlr_log(WLR_INFO, "Text input destroyed");
-	if (active_text_input == ti) {
+	if (active_text_input == ti)
 		active_text_input = NULL;
-		if (htpc_mode_active) {
-			osk_hide_all();
-		}
-	}
 
 	/* Remove listeners and free */
 	wl_list_remove(&ti_wrap->enable.link);
