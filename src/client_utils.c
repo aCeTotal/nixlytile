@@ -218,8 +218,13 @@ steam_launch_bigpicture(void)
 	if (pid == 0) {
 		setsid();
 		fork_detach();
-		/* Steam runs inside bwrap FHS sandbox; skip dGPU env
-		 * to avoid GL/EGL failures inside the sandbox. */
+		/* Hybrid systems (iGPU + dGPU): apply dGPU env so Proton
+		 * games launched by Steam inherit PRIME / Vulkan device
+		 * selection vars and run on the discrete GPU. Skip on
+		 * single-GPU systems (would force Steam UI through PRIME
+		 * offload unnecessarily and can break bwrap runtime). */
+		if (integrated_gpu_idx >= 0 && discrete_gpu_idx >= 0)
+			set_steam_env();
 		{
 			const char *steam_bin = "steam";
 			if (access("/etc/profiles/per-user/total/bin/nixly_steam", X_OK) == 0)

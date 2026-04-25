@@ -462,6 +462,10 @@ modal_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym)
 							steam_bin = "nixly_steam";
 						snprintf(cmd_str, sizeof(cmd_str),
 							"%s", steam_bin);
+						/* Hybrid: propagate dGPU env to Steam's
+						 * Proton children so games run on dGPU. */
+						if (integrated_gpu_idx >= 0 && discrete_gpu_idx >= 0)
+							set_steam_env();
 					} else if ((desktop_entries[idx].prefers_dgpu || should_use_dgpu(cmd_str))
 						&& integrated_gpu_idx >= 0) {
 						set_dgpu_env();

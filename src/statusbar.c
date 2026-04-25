@@ -4152,6 +4152,10 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 		renderbattery(&m->statusbar.battery, bar_area.height, battery_text);
 	if (m->statusbar.volume.tree)
 		rendervolume(&m->statusbar.volume, bar_area.height, volume_text);
+	if (m->statusbar.mic.tree && mic_last_percent >= 0.0)
+		rendermic(&m->statusbar.mic, bar_area.height, mic_text);
+	if (m->statusbar.fan.tree && m->statusbar.fan_popup.total_fans > 0)
+		renderfan(&m->statusbar.fan, bar_area.height, fan_text);
 	if (m->statusbar.ram.tree)
 		renderram(&m->statusbar.ram, bar_area.height, ram_text);
 	if (m->statusbar.cpu_popup.tree && m->statusbar.cpu_popup.visible)
