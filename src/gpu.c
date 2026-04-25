@@ -929,54 +929,78 @@ set_steam_env(void)
 	GpuInfo *dgpu;
 
 	/*
-	 * AUDIO: Ensure Steam and games use PipeWire for audio
+	 * Steam runs inside a bwrap FHS sandbox.  set_dgpu_env() sets vars
+	 * that BREAK Steam's CEF/runtime in the sandbox:
+	 *   - GBM_BACKEND=nvidia-drm   → Steam runtime libgbm can't load it
+	 *   - __GLX_VENDOR_LIBRARY_NAME=nvidia → wrong libGLX in sandbox
+	 *   - LIBVA_DRIVER_NAME / VDPAU_DRIVER / NVD_BACKEND → media decode
+	 *   - QT_QPA_PLATFORM=xcb / GDK_BACKEND=x11 → not needed
 	 *
-	 * SDL_AUDIODRIVER=pipewire: Tell SDL (used by many games) to use PipeWire directly
-	 * PULSE_SERVER: Point PulseAudio clients to PipeWire's pulse socket
-	 * PIPEWIRE_RUNTIME_DIR: Ensure PipeWire socket is found
+	 * Goal: set ONLY vars that are inert for Steam UI but propagate to
+	 * Proton/Wine game children, so games run on the dGPU while Steam
+	 * itself starts cleanly.
 	 *
-	 * Note: Modern PipeWire provides PulseAudio compatibility, so most games
-	 * will work via the pulse socket even without explicit PipeWire support.
+	 * Safe vars below activate when *games* (not Steam UI) request them:
+	 *   - __NV_PRIME_RENDER_OFFLOAD: only triggers if app explicitly
+	 *     uses Nvidia GLX; Steam UI ignores it.
+	 *   - VK_LOADER_DRIVERS_SELECT / MESA_VK_DEVICE_SELECT: filter
+	 *     Vulkan ICDs/devices; Steam UI doesn't use Vulkan.
+	 *   - DXVK_* / PROTON_*: Proton/Wine-only; ignored by Steam.
+	 *   - DRI_PRIME: harmless on Nvidia proprietary (Mesa-only).
 	 */
-	setenv("SDL_AUDIODRIVER", "pipewire,pulseaudio,alsa", 0); /* Don't override if already set */
 
-	/* Ensure XDG_RUNTIME_DIR is set (needed for PipeWire socket) */
+	/* Audio: ensure games use PipeWire */
+	setenv("SDL_AUDIODRIVER", "pipewire,pulseaudio,alsa", 0);
 	if (!getenv("XDG_RUNTIME_DIR")) {
 		char runtime_dir[256];
 		snprintf(runtime_dir, sizeof(runtime_dir), "/run/user/%d", getuid());
 		setenv("XDG_RUNTIME_DIR", runtime_dir, 1);
 	}
+	setenv("PULSE_LATENCY_MSEC", "60", 0);
 
-	/* For Proton/Wine games: use PipeWire via the PulseAudio interface */
-	setenv("PULSE_LATENCY_MSEC", "60", 0); /* Reasonable latency for games */
+	if (discrete_gpu_idx < 0 || discrete_gpu_idx >= detected_gpu_count)
+		return;
 
-	/* UI scaling fix for better Big Picture performance on hybrid systems */
-	setenv("STEAM_FORCE_DESKTOPUI_SCALING", "1", 1);
+	dgpu = &detected_gpus[discrete_gpu_idx];
 
-	/* Tell Steam to prefer host libraries over runtime for better driver compat */
-	setenv("STEAM_RUNTIME_PREFER_HOST_LIBRARIES", "1", 1);
-
-	/* CEF/Chromium GPU override flags - force hardware acceleration
-	 * These help bypass Steam's internal GPU blocklist on hybrid systems */
-	setenv("STEAM_DISABLE_GPU_BLOCKLIST", "1", 1);
-	setenv("STEAM_CEF_ARGS", "--ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy --enable-native-gpu-memory-buffers --disable-gpu-driver-bug-workarounds", 1);
-
-	/* Override CEF webhelper flags - Steam internally adds --disable-gpu which kills performance
-	 * STEAM_WEBHELPER_CEF_FLAGS can override/append to steamwebhelper arguments */
-	setenv("STEAM_WEBHELPER_CEF_FLAGS", "--enable-gpu --enable-gpu-compositing --enable-accelerated-video-decode --ignore-gpu-blocklist", 1);
-
-	/* Set dGPU env for Steam — this calls set_dgpu_env() which handles
-	 * ALL GPU vendor-specific vars including Vulkan device selection.
-	 * Redundant with the compositor-level call, but ensures the vars
-	 * are present even if Steam was started before GPU detection. */
-	set_dgpu_env();
-
-	if (discrete_gpu_idx >= 0 && discrete_gpu_idx < detected_gpu_count) {
-		dgpu = &detected_gpus[discrete_gpu_idx];
-		if (dgpu->vendor == GPU_VENDOR_NVIDIA) {
-			/* NVIDIA-specific CEF args for better ANGLE/Vulkan support */
-			setenv("STEAM_CEF_GPU_ARGS", "--use-angle=vulkan --enable-features=Vulkan,UseSkiaRenderer", 1);
-		}
+	switch (dgpu->vendor) {
+	case GPU_VENDOR_NVIDIA:
+		/* PRIME offload — only kicks in for apps that explicitly
+		 * request Nvidia GLX. Steam UI uses default (iGPU) GLX. */
+		setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 1);
+		setenv("__NV_PRIME_RENDER_OFFLOAD_PROVIDER", "NVIDIA-G0", 1);
+		/* Vulkan device selection — Steam UI doesn't use Vulkan */
+		setenv("VK_LOADER_DRIVERS_SELECT", "nvidia*", 1);
+		setenv("MESA_VK_DEVICE_SELECT", "10de:", 1);
+		setenv("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", "1", 1);
+		setenv("DXVK_FILTER_DEVICE_NAME", "NVIDIA", 1);
+		/* Proton/DXVK — inert for Steam, used by games */
+		setenv("PROTON_HIDE_NVIDIA_GPU", "0", 1);
+		setenv("PROTON_ENABLE_NVAPI", "1", 1);
+		setenv("DXVK_ENABLE_NVAPI", "1", 1);
+		/* CUDA/NVENC routing for game children */
+		setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID", 0);
+		setenv("CUDA_VISIBLE_DEVICES", "0", 0);
+		break;
+	case GPU_VENDOR_AMD:
+		if (dgpu->pci_slot_underscore[0])
+			setenv("DRI_PRIME", dgpu->pci_slot_underscore, 1);
+		else
+			setenv("DRI_PRIME", "1", 1);
+		setenv("AMD_VULKAN_ICD", "RADV", 1);
+		setenv("VK_LOADER_DRIVERS_SELECT", "radeon*,amd*", 1);
+		setenv("MESA_VK_DEVICE_SELECT", "1002:", 1);
+		setenv("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", "1", 1);
+		setenv("DXVK_FILTER_DEVICE_NAME", "AMD", 1);
+		setenv("HIP_VISIBLE_DEVICES", "0", 0);
+		setenv("ROCR_VISIBLE_DEVICES", "0", 0);
+		break;
+	default:
+		if (dgpu->pci_slot_underscore[0])
+			setenv("DRI_PRIME", dgpu->pci_slot_underscore, 1);
+		else
+			setenv("DRI_PRIME", "1", 1);
+		break;
 	}
 }
 

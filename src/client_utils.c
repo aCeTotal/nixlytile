@@ -218,11 +218,10 @@ steam_launch_bigpicture(void)
 	if (pid == 0) {
 		setsid();
 		fork_detach();
-		/* Hybrid systems (iGPU + dGPU): apply dGPU env so Proton
-		 * games launched by Steam inherit PRIME / Vulkan device
-		 * selection vars and run on the discrete GPU. Skip on
-		 * single-GPU systems (would force Steam UI through PRIME
-		 * offload unnecessarily and can break bwrap runtime). */
+		/* Hybrid: propagate dGPU env to Steam's Proton children.
+		 * set_steam_env() sets only bwrap-safe vars (Vulkan device
+		 * selection + Proton flags). Skips GBM_BACKEND / GLX vendor
+		 * / VA-API which break Steam CEF in bwrap FHS sandbox. */
 		if (integrated_gpu_idx >= 0 && discrete_gpu_idx >= 0)
 			set_steam_env();
 		{
