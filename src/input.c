@@ -1038,7 +1038,9 @@ cursorwarptohint(void)
 
 	toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
 	if (c && active_constraint->current.cursor_hint.enabled) {
-		wlr_cursor_warp(cursor, NULL, sx + c->geom.x + c->bw, sy + c->geom.y + c->bw);
+		double off_x = c->scene_surface ? c->scene_surface->node.x : c->bw;
+		double off_y = c->scene_surface ? c->scene_surface->node.y : c->bw;
+		wlr_cursor_warp(cursor, NULL, sx + c->geom.x + off_x, sy + c->geom.y + off_y);
 		wlr_seat_pointer_warp(active_constraint->seat, sx, sy);
 	}
 }
@@ -2226,8 +2228,20 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		if (active_constraint && cursor_mode != CurResize && cursor_mode != CurMove) {
 			toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
 			if (c && active_constraint->surface == seat->pointer_state.focused_surface) {
-				sx = cursor->x - c->geom.x - c->bw;
-				sy = cursor->y - c->geom.y - c->bw;
+				/*
+				 * Convert cursor (layout coords) → surface-local coords.
+				 * scene_surface->node.x/y already accounts for c->bw
+				 * AND the letterbox offset configurex11 applies when a
+				 * fullscreen X11 game renders smaller than the monitor
+				 * (common on ultrawide). Using c->bw alone breaks the
+				 * conversion for letterboxed games — the cursor lands
+				 * outside the constraint region and gets clamped to
+				 * the rendered surface edge. Same fix needed across
+				 * Intel/AMD/Nvidia — the bug only manifested on setups
+				 * where the game's render size != monitor size.
+				 */
+				sx = cursor->x - c->geom.x - c->scene_surface->node.x;
+				sy = cursor->y - c->geom.y - c->scene_surface->node.y;
 				if (wlr_region_confine(&active_constraint->region, sx, sy,
 						sx + dx, sy + dy, &sx_confined, &sy_confined)) {
 					dx = sx_confined - sx;

@@ -638,17 +638,22 @@ fullscreennotify(struct wl_listener *listener, void *data)
 		int ch = c->geom.height - 2 * c->bw;
 		int mw = c->mon->m.width;
 		int mh = c->mon->m.height;
-		if (cw > 0 && ch > 0 && cw < mw / 3 && ch < mh / 3) {
+		/* Absolute splash cap (1280x800) — see map() comment.
+		 * Fraction-only (mw/3 × mh/3) under-detected on ultrawide. */
+		if (cw > 0 && ch > 0
+				&& ((cw <= 1280 && ch <= 800)
+					|| (cw < mw / 3 && ch < mh / 3))) {
 			wlr_log(WLR_INFO,
 				"GAME_TRACE: fullscreennotify blocking splash "
-				"fullscreen for '%s' %dx%d (< %dx%d)",
+				"fullscreen for '%s' %dx%d (cap 1280x800)",
 				client_get_appid(c) ? client_get_appid(c) : "(null)",
-				cw, ch, mw / 3, mh / 3);
+				cw, ch);
 			game_log("GAME_FS: BLOCK_SPLASH appid='%s' title='%s' "
-				"size=%dx%d thresh=%dx%d reason=splash_too_small",
+				"size=%dx%d thresh=1280x800 reason=splash_too_small",
 				client_get_appid(c) ? client_get_appid(c) : "(null)",
 				client_get_title(c) ? client_get_title(c) : "(null)",
-				cw, ch, mw / 3, mh / 3);
+				cw, ch);
+			c->is_game_splash = 1;
 			client_set_fullscreen(c, 0);
 			return;
 		}
@@ -862,27 +867,30 @@ mapnotify(struct wl_listener *listener, void *data)
 			}
 
 			/*
-			 * Splash threshold: for confirmed Steam games use
-			 * 1/3 of monitor (conservative — only tiny splash
-			 * logos).  For non-Steam, use 3/4 (original).
+			 * Splash threshold: absolute pixel cap (1280x800)
+			 * combined with fraction-of-monitor fallback. The
+			 * pure fraction approach broke on ultrawide — Steam's
+			 * mh/3 = 480 on 3440x1440 wrongly classified a normal
+			 * 800x600 splash as a game (small_h false at 600>480),
+			 * sending it to fullscreen instead of centered float.
 			 *
-			 * On 3440x1440 ultrawide:
-			 *   Steam: 1147x480 — 800x450 splash ✓, 1374x800 game ✗
-			 *   Other: 2580x1080
+			 * Splashes/EAC launchers are absolute-sized (rarely
+			 * exceed 1024x768), so cap at 1280x800 catches them
+			 * regardless of monitor size. Non-Steam also keeps the
+			 * 3/4 fraction fallback for legacy behavior.
 			 */
-			int thresh_w, thresh_h;
-			if (is_confirmed_steam_game) {
-				thresh_w = mon_w / 3;
-				thresh_h = mon_h / 3;
-			} else {
-				thresh_w = (mon_w * 3) / 4;
-				thresh_h = (mon_h * 3) / 4;
+			int abs_w = initial_w > 0 && initial_w <= 1280;
+			int abs_h = initial_h > 0 && initial_h <= 800;
+			int is_small = abs_w && abs_h;
+			if (!is_small && !is_confirmed_steam_game) {
+				int thresh_w = (mon_w * 3) / 4;
+				int thresh_h = (mon_h * 3) / 4;
+				is_small = (initial_w > 0 && initial_w < thresh_w)
+					&& (initial_h > 0 && initial_h < thresh_h);
 			}
-			int small_w = initial_w > 0
-				&& initial_w < thresh_w;
-			int small_h = initial_h > 0
-				&& initial_h < thresh_h;
-			int is_small = small_w && small_h;
+			/* Logging vars (kept for game_log compat) */
+			int thresh_w = is_confirmed_steam_game ? 1280 : (mon_w * 3) / 4;
+			int thresh_h = is_confirmed_steam_game ? 800  : (mon_h * 3) / 4;
 
 			/* Game window with fullscreen state already requested
 			 * (e.g. _NET_WM_STATE_FULLSCREEN set on map) goes straight
@@ -906,6 +914,7 @@ mapnotify(struct wl_listener *listener, void *data)
 				 * honour that request normally.
 				 */
 				pre_game_splash = 1;
+				c->is_game_splash = 1;
 				c->isfloating = 1;
 				c->geom.width = initial_w;
 				c->geom.height = initial_h;

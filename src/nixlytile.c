@@ -3486,6 +3486,29 @@ configurex11(struct wl_listener *listener, void *data)
 		int bh = event->height + c->bw * 2;
 
 		/*
+		 * Game splash / EAC launcher: ignore client-requested position
+		 * and re-center on the assigned monitor every time. X11 splash
+		 * windows often send configure_request with x,y=(0,0) or some
+		 * stale position derived from a single-monitor assumption,
+		 * which moves the splash off-center on multi-monitor or
+		 * ultrawide setups. Honour the size but force position to the
+		 * monitor center.
+		 */
+		if (c->mon && c->is_game_splash) {
+			int mx = c->mon->m.x;
+			int my = c->mon->m.y;
+			int mw = c->mon->m.width;
+			int mh = c->mon->m.height;
+			if (bw > mw) bw = mw;
+			if (bh > mh) bh = mh;
+			bx = mx + (mw - bw) / 2;
+			by = my + (mh - bh) / 2;
+			resize(c, (struct wlr_box){.x = bx, .y = by,
+				.width = bw, .height = bh}, 0);
+			return;
+		}
+
+		/*
 		 * Game clients occasionally request X11 positions at root
 		 * coordinates that lie outside their assigned monitor (Squad
 		 * asks for @-1,-1 or @0,0 which is on DP-2 when the game was
