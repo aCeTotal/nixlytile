@@ -884,6 +884,15 @@ mapnotify(struct wl_listener *listener, void *data)
 				&& initial_h < thresh_h;
 			int is_small = small_w && small_h;
 
+			/* Game window with fullscreen state already requested
+			 * (e.g. _NET_WM_STATE_FULLSCREEN set on map) goes straight
+			 * to fullscreen regardless of initial size.  Splashes and
+			 * EAC launchers don't request fullscreen — they keep the
+			 * small-centered path below. */
+			if (client_wants_fullscreen(c)) {
+				is_small = 0;
+			}
+
 			if (is_small) {
 				/*
 				 * Game splash / bootstrap window.

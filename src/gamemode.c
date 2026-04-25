@@ -12,6 +12,10 @@
 #define IOPRIO_PRIO_VALUE(class, data)	(((class) << 13) | (data))
 #endif
 
+/* Forward declarations for helpers defined later in the file */
+static int has_protected_ancestor(pid_t pid);
+static int is_child_of(pid_t pid, pid_t ancestor);
+
 static void
 set_cpu_governor(const char *governor)
 {
@@ -142,6 +146,216 @@ restore_game_priority(pid_t pid)
 		set_cpu_governor("schedutil");
 		game_mode_governor_applied = 0;
 	}
+}
+
+/*
+ * power-profiles-daemon integration (CachyOS game-performance equivalent).
+ * Switches the system platform power profile to "performance" — affects ACPI
+ * platform_profile (laptop firmware) AND CPU EPP/governor hints AND
+ * vendor-agnostic GPU power hints. Restored on game-mode exit.
+ */
+static char ppd_saved_profile[64] = "";
+static int  ppd_applied = 0;
+
+static int
+ppd_available(void)
+{
+	return system("command -v powerprofilesctl >/dev/null 2>&1") == 0;
+}
+
+void
+apply_power_profile_performance(void)
+{
+	FILE *fp;
+	char buf[128];
+
+	if (ppd_applied)
+		return;
+	if (!ppd_available()) {
+		wlr_log(WLR_INFO, "PPD: powerprofilesctl not available, skipping");
+		return;
+	}
+
+	/* Save current profile */
+	ppd_saved_profile[0] = '\0';
+	fp = popen("powerprofilesctl get 2>/dev/null", "r");
+	if (fp) {
+		if (fgets(buf, sizeof(buf), fp)) {
+			char *nl = strchr(buf, '\n');
+			if (nl) *nl = '\0';
+			snprintf(ppd_saved_profile, sizeof(ppd_saved_profile), "%s", buf);
+		}
+		pclose(fp);
+	}
+
+	/* Switch to performance — only if not already there */
+	if (strcmp(ppd_saved_profile, "performance") == 0) {
+		wlr_log(WLR_INFO, "PPD: already on performance, no change");
+		ppd_applied = 1;
+		return;
+	}
+
+	if (system("powerprofilesctl set performance 2>/dev/null") == 0) {
+		ppd_applied = 1;
+		wlr_log(WLR_INFO, "PPD: profile %s → performance",
+			ppd_saved_profile[0] ? ppd_saved_profile : "?");
+	} else {
+		wlr_log(WLR_INFO, "PPD: set performance failed");
+	}
+}
+
+void
+restore_power_profile(void)
+{
+	char cmd[128];
+
+	if (!ppd_applied)
+		return;
+
+	if (ppd_saved_profile[0] && strcmp(ppd_saved_profile, "performance") != 0) {
+		snprintf(cmd, sizeof(cmd),
+			"powerprofilesctl set %s 2>/dev/null",
+			ppd_saved_profile);
+		if (system(cmd) == 0)
+			wlr_log(WLR_INFO, "PPD: restored profile → %s", ppd_saved_profile);
+	}
+	ppd_applied = 0;
+	ppd_saved_profile[0] = '\0';
+}
+
+/*
+ * Push every other user process down to SCHED_IDLE while game runs.
+ * SCHED_IDLE = lowest CPU class, only runs when no SCHED_OTHER/RR/FIFO
+ * task wants the core.  Game stays on SCHED_OTHER nice=-10 → effectively
+ * monopolises CPU under contention.  Compositor + audio + dbus + shells
+ * remain on SCHED_OTHER (whitelist) so input/audio/system-bus stays
+ * responsive.
+ *
+ * No deadlock risk: SCHED_IDLE is preempted by anything, including
+ * the compositor's own RT loops if it ever needs them.
+ */
+#ifndef SCHED_IDLE
+#define SCHED_IDLE 5
+#endif
+
+#define MAX_LOWERED_PIDS 4096
+static pid_t lowered_pids[MAX_LOWERED_PIDS];
+static int   lowered_pid_count = 0;
+
+void
+lower_competing_processes(pid_t game_pid)
+{
+	DIR *dir;
+	struct dirent *ent;
+	char path[128];
+	char comm[64];
+	char uid_line[256];
+	FILE *fp;
+	uid_t our_uid = getuid();
+	pid_t our_pid = getpid();
+	pid_t pid;
+	int i;
+
+	static const char *whitelist[] = {
+		"nixlytile", "Xwayland", "xwayland",
+		"pipewire", "pipewire-pulse", "wireplumber", "pulseaudio",
+		"dbus-daemon", "dbus-broker",
+		"systemd", "systemd-logind", "systemd-userdbd",
+		"sshd",
+		"bash", "zsh", "fish", "sh", "dash",
+		"gnome-keyring", "gcr-ssh-agent", "ssh-agent",
+		NULL
+	};
+
+	lowered_pid_count = 0;
+
+	dir = opendir("/proc");
+	if (!dir)
+		return;
+
+	while ((ent = readdir(dir))) {
+		if (ent->d_name[0] < '0' || ent->d_name[0] > '9')
+			continue;
+
+		pid = (pid_t)atoi(ent->d_name);
+		if (pid <= 1 || pid == our_pid || pid == game_pid)
+			continue;
+
+		/* User-owned only */
+		snprintf(path, sizeof(path), "/proc/%d/status", pid);
+		fp = fopen(path, "r");
+		if (!fp)
+			continue;
+
+		int is_our_uid = 0;
+		while (fgets(uid_line, sizeof(uid_line), fp)) {
+			if (strncmp(uid_line, "Uid:", 4) == 0) {
+				uid_t real_uid;
+				if (sscanf(uid_line + 4, "%u", &real_uid) == 1
+				    && real_uid == our_uid)
+					is_our_uid = 1;
+				break;
+			}
+		}
+		fclose(fp);
+		if (!is_our_uid)
+			continue;
+
+		/* Comm whitelist */
+		snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+		fp = fopen(path, "r");
+		if (!fp)
+			continue;
+		comm[0] = '\0';
+		if (fgets(comm, sizeof(comm), fp)) {
+			char *nl = strchr(comm, '\n');
+			if (nl) *nl = '\0';
+		}
+		fclose(fp);
+
+		int whitelisted = 0;
+		for (i = 0; whitelist[i]; i++) {
+			if (strcmp(comm, whitelist[i]) == 0) {
+				whitelisted = 1;
+				break;
+			}
+		}
+		if (whitelisted)
+			continue;
+
+		/* Don't touch protected ancestry (Steam tree) or game subtree */
+		if (has_protected_ancestor(pid))
+			continue;
+		if (game_pid > 1 && is_child_of(pid, game_pid))
+			continue;
+
+		struct sched_param sp = {0};
+		if (sched_setscheduler(pid, SCHED_IDLE, &sp) == 0) {
+			if (lowered_pid_count < MAX_LOWERED_PIDS)
+				lowered_pids[lowered_pid_count++] = pid;
+		}
+	}
+	closedir(dir);
+
+	wlr_log(WLR_INFO, "CPU isolate: SCHED_IDLE applied to %d processes",
+		lowered_pid_count);
+}
+
+void
+restore_competing_processes(void)
+{
+	struct sched_param sp = {0};
+	int i;
+
+	if (lowered_pid_count == 0)
+		return;
+
+	for (i = 0; i < lowered_pid_count; i++)
+		sched_setscheduler(lowered_pids[i], SCHED_OTHER, &sp);
+
+	wlr_log(WLR_INFO, "CPU isolate: restored %d processes to SCHED_OTHER",
+		lowered_pid_count);
+	lowered_pid_count = 0;
 }
 
 int
@@ -1565,18 +1779,29 @@ apply_gpu_sched_priority(pid_t pid)
 			return;
 		}
 
+		/* VERY_HIGH gives the game queue precedence AND VRAM eviction
+		 * priority — kernel evicts other clients' BOs to GTT/system RAM
+		 * before the game's, mirroring SteamOS gamescope behavior. */
 		union drm_amdgpu_sched sched = {0};
 		sched.in.op = AMDGPU_SCHED_OP_PROCESS_PRIORITY_OVERRIDE;
 		sched.in.fd = local_fd;
-		sched.in.priority = AMDGPU_CTX_PRIORITY_HIGH;
+		sched.in.priority = AMDGPU_CTX_PRIORITY_VERY_HIGH;
 
 		if (drmIoctl(drm_master_fd, DRM_IOCTL_AMDGPU_SCHED, &sched) == 0) {
 			gpu_sched_applied = 1;
 			gpu_sched_local_fd = local_fd;  /* keep alive until restore */
-			wlr_log(WLR_INFO, "GPU sched: AMD process priority → HIGH for PID %d", pid);
+			wlr_log(WLR_INFO, "GPU sched: AMD process priority → VERY_HIGH (VRAM prio) for PID %d", pid);
 		} else {
-			wlr_log(WLR_INFO, "GPU sched: AMDGPU_SCHED ioctl failed: %s", strerror(errno));
-			close(local_fd);
+			/* VERY_HIGH may require CAP_SYS_NICE; fall back to HIGH */
+			sched.in.priority = AMDGPU_CTX_PRIORITY_HIGH;
+			if (drmIoctl(drm_master_fd, DRM_IOCTL_AMDGPU_SCHED, &sched) == 0) {
+				gpu_sched_applied = 1;
+				gpu_sched_local_fd = local_fd;
+				wlr_log(WLR_INFO, "GPU sched: AMD process priority → HIGH (VERY_HIGH denied) for PID %d", pid);
+			} else {
+				wlr_log(WLR_INFO, "GPU sched: AMDGPU_SCHED ioctl failed: %s", strerror(errno));
+				close(local_fd);
+			}
 		}
 
 	} else if (gpu->vendor == GPU_VENDOR_INTEL) {
@@ -1932,6 +2157,7 @@ gm_bg_worker_func(void *arg)
 			/* Entering ultra — heavy system tuning */
 			wlr_log(WLR_INFO, "gm-bg: entering ultra (pid=%d)", pid);
 			fan_boost_activate();
+			apply_power_profile_performance();
 			freeze_background_processes();
 			apply_memory_optimization();
 			apply_cpu_latency_qos();
@@ -1951,11 +2177,13 @@ gm_bg_worker_func(void *arg)
 				apply_game_priority(pid);
 				apply_cpu_affinity(pid);
 				apply_gpu_sched_priority(pid);
+				lower_competing_processes(pid);
 			}
 			wlr_log(WLR_INFO, "gm-bg: ultra enter complete");
 		} else if (!want && have) {
 			/* Exiting ultra — restore everything */
 			wlr_log(WLR_INFO, "gm-bg: exiting ultra (pid=%d)", pid);
+			restore_competing_processes();
 			restore_mglru_tuning();
 			restore_split_lock();
 			restore_dirty_writeback_tuning();
@@ -1975,6 +2203,7 @@ gm_bg_worker_func(void *arg)
 			restore_cpu_latency_qos();
 			unfreeze_background_processes();
 			restore_memory_optimization();
+			restore_power_profile();
 			fan_boost_deactivate();
 			wlr_log(WLR_INFO, "gm-bg: ultra exit complete");
 		}
@@ -2018,9 +2247,12 @@ gm_bg_cleanup(void)
 	pthread_mutex_unlock(&gm_bg_mutex);
 	pthread_join(gm_bg_thread, NULL);
 
-	/* Ensure processes are unfrozen on compositor exit */
-	if (gm_bg_applied_ultra)
+	/* Ensure processes are unfrozen and PPD restored on compositor exit */
+	if (gm_bg_applied_ultra) {
+		restore_competing_processes();
 		unfreeze_background_processes();
+		restore_power_profile();
+	}
 }
 
 static struct wl_event_source *game_mode_debounce_timer;
@@ -2138,8 +2370,6 @@ update_game_mode(void)
 			wl_event_source_timer_update(gamepad_cursor_timer, 0);
 		if (hz_osd_timer)
 			wl_event_source_timer_update(hz_osd_timer, 0);
-		if (playback_osd_timer)
-			wl_event_source_timer_update(playback_osd_timer, 0);
 		if (osk_dpad_repeat_timer)
 			wl_event_source_timer_update(osk_dpad_repeat_timer, 0);
 		if (fan_thermal_timer)

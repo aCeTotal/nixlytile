@@ -6,7 +6,7 @@ include config.mk
 SRC = src
 
 # flags for compiling
-CPPFLAGS_EXTRA = -I$(SRC) -I$(SRC)/videoplayer -I. -DWLR_USE_UNSTABLE -D_POSIX_C_SOURCE=200809L \
+CPPFLAGS_EXTRA = -I$(SRC) -I. -DWLR_USE_UNSTABLE -D_POSIX_C_SOURCE=200809L \
 	-DVERSION=\"$(VERSION)\" $(XWAYLAND)
 DEVCFLAGS = -g -Wpedantic -Wall -Wextra -Wdeclaration-after-statement \
 	-Wno-unused-parameter -Wshadow -Wunused-macros -Werror=strict-prototypes \
@@ -14,17 +14,13 @@ DEVCFLAGS = -g -Wpedantic -Wall -Wextra -Wdeclaration-after-statement \
 	-Wfloat-conversion
 
 # CFLAGS / LDFLAGS
-PKGS      = wayland-server xkbcommon libinput libdrm $(XLIBS) fcft pixman-1 libsystemd gdk-pixbuf-2.0 cairo librsvg-2.0 \
-            libavformat libavcodec libavutil libswscale libswresample libpipewire-0.3 libass
+PKGS      = wayland-server xkbcommon libinput libdrm $(XLIBS) fcft pixman-1 libsystemd gdk-pixbuf-2.0 cairo librsvg-2.0
 WP_INCS = -I$(shell $(PKG_CONFIG) --variable=prefix wayland-protocols 2>/dev/null)/include
 NLCFLAGS = `$(PKG_CONFIG) --cflags $(PKGS)` $(WLR_INCS) $(WP_INCS) $(CPPFLAGS_EXTRA) $(DEVCFLAGS) $(CFLAGS)
 LDLIBS    = `$(PKG_CONFIG) --libs $(PKGS)` $(WLR_LIBS) -lm -lpthread $(LIBS)
 
 # Allow C99 style declarations in all modules
 MOD_CFLAGS = $(NLCFLAGS) -Wno-declaration-after-statement
-
-# Video player object files
-VP_OBJS = videoplayer.o videoplayer_decode.o videoplayer_render.o videoplayer_audio.o videoplayer_ui.o
 
 # Compositor module object files
 MOD_OBJS = globals.o client.o layout.o btrtile.o input.o gamepad.o output.o \
@@ -38,8 +34,8 @@ PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstab
              $(SRC)/tablet-v2-protocol.h
 
 all: nixlytile
-nixlytile: nixlytile.o util.o $(MOD_OBJS) $(VP_OBJS)
-	$(CC) nixlytile.o util.o $(MOD_OBJS) $(VP_OBJS) $(MOD_CFLAGS) $(LDFLAGS) $(LDLIBS) -o $@
+nixlytile: nixlytile.o util.o $(MOD_OBJS)
+	$(CC) nixlytile.o util.o $(MOD_OBJS) $(MOD_CFLAGS) $(LDFLAGS) $(LDLIBS) -o $@
 
 # Core compositor
 nixlytile.o: $(SRC)/nixlytile.c $(SRC)/nixlytile.h $(SRC)/client.h config.mk $(PROTO_HDRS)
@@ -94,21 +90,6 @@ screenshot.o: $(SRC)/screenshot.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 monitor_setup.o: $(SRC)/monitor_setup.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-
-# Video player modules
-VP_DIR = $(SRC)/videoplayer
-VP_CFLAGS = $(NLCFLAGS) -Wno-declaration-after-statement
-
-videoplayer.o: $(VP_DIR)/videoplayer.c $(VP_DIR)/videoplayer.h
-	$(CC) $(CPPFLAGS) $(VP_CFLAGS) -o $@ -c $<
-videoplayer_decode.o: $(VP_DIR)/videoplayer_decode.c $(VP_DIR)/videoplayer.h
-	$(CC) $(CPPFLAGS) $(VP_CFLAGS) -o $@ -c $<
-videoplayer_render.o: $(VP_DIR)/videoplayer_render.c $(VP_DIR)/videoplayer.h
-	$(CC) $(CPPFLAGS) $(VP_CFLAGS) -o $@ -c $<
-videoplayer_audio.o: $(VP_DIR)/videoplayer_audio.c $(VP_DIR)/videoplayer.h
-	$(CC) $(CPPFLAGS) $(VP_CFLAGS) -o $@ -c $<
-videoplayer_ui.o: $(VP_DIR)/videoplayer_ui.c $(VP_DIR)/videoplayer.h
-	$(CC) $(CPPFLAGS) $(VP_CFLAGS) -o $@ -c $<
 
 # wayland-scanner generated protocol headers (output into src/)
 WAYLAND_SCANNER   = `$(PKG_CONFIG) --variable=wayland_scanner wayland-scanner`

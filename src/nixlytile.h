@@ -145,7 +145,6 @@
 #endif
 
 #include "util.h"
-#include "videoplayer/videoplayer.h"
 
 /* ── macros ────────────────────────────────────────────────────────── */
 #ifndef MAX
@@ -169,7 +168,6 @@
 #define LISTEN_STATIC(E, H)     do { struct wl_listener *_l = ecalloc(1, sizeof(*_l)); _l->notify = (H); wl_signal_add((E), _l); } while (0)
 #define MODAL_MAX_RESULTS 200
 #define MODAL_RESULT_LEN 256
-#define MAX_TRACKS 32
 #define MAX_GPUS 8
 #define GAMEPAD_CURSOR_INTERVAL_MS 16
 #define GAMEPAD_DEADZONE 4000
@@ -251,12 +249,6 @@ typedef struct {
 	int has_hw_lfc;            /* Driver provides Low Framerate Compensation */
 	int prefers_vulkan;        /* Vendor gives best gaming perf on Vulkan renderer */
 } GamingCaps;
-
-typedef enum {
-	OSD_MENU_NONE = 0,
-	OSD_MENU_SOUND,
-	OSD_MENU_SUBTITLES
-} OsdMenuType;
 
 /* ── forward declarations ──────────────────────────────────────────── */
 typedef struct LayoutNode LayoutNode;
@@ -1324,7 +1316,6 @@ extern int locked;
 extern void *exclusive_focus;
 extern struct wl_display *dpy;
 extern struct wl_event_loop *event_loop;
-extern VideoPlayer *active_videoplayer;
 extern struct wlr_backend *backend;
 extern struct wlr_scene *scene;
 extern struct wlr_scene_tree *layers[];
@@ -1467,10 +1458,6 @@ extern struct wl_event_source *gamepad_cursor_timer;
 
 /* dgpu */
 extern const char *dgpu_programs[];
-extern int osd_visible;
-extern uint64_t osd_show_time;
-extern OsdMenuType osd_menu_open;
-extern int osd_menu_selection;
 
 /* gaming/GPU */
 extern GpuInfo detected_gpus[];
@@ -1591,8 +1578,6 @@ extern struct wl_event_source *ram_popup_refresh_timer;
 extern struct wl_event_source *popup_delay_timer;
 extern struct wl_event_source *video_check_timer;
 extern struct wl_event_source *hz_osd_timer;
-extern struct wl_event_source *playback_osd_timer;
-extern struct wlr_scene_tree *playback_osd_tree;
 extern struct wl_event_source *osk_dpad_repeat_timer;
 extern int osk_dpad_held_button;
 extern Monitor *osk_dpad_held_mon;
@@ -1746,12 +1731,6 @@ extern const double status_icon_scale;
 /* runtime fonts */
 extern char *runtime_fonts[];
 extern int runtime_fonts_set;
-
-/* Audio/subtitle tracks for OSD */
-struct TrackInfo { int id; char title[128]; char lang[16]; int selected; };
-extern struct TrackInfo audio_tracks[], subtitle_tracks[];
-extern int audio_track_count;
-extern int subtitle_track_count;
 
 /* Global event handlers */
 extern struct wl_listener cursor_axis;
@@ -2047,9 +2026,6 @@ void hide_hz_osd(Monitor *m);
 int hz_osd_timeout(void *data);
 void testhzosd(const Arg *arg);
 void setcustomhz(const Arg *arg);
-void render_playback_osd(void);
-void hide_playback_osd(void);
-int playback_osd_timeout(void *data);
 struct wlr_output_mode *bestmode(struct wlr_output *output);
 RuntimeMonitorConfig *find_monitor_config(const char *name);
 void calculate_monitor_position(Monitor *m, RuntimeMonitorConfig *cfg, int *out_x, int *out_y);
@@ -2464,6 +2440,10 @@ void apply_disable_split_lock(void);
 void restore_split_lock(void);
 void apply_mglru_tuning(void);
 void restore_mglru_tuning(void);
+void apply_power_profile_performance(void);
+void restore_power_profile(void);
+void lower_competing_processes(pid_t game_pid);
+void restore_competing_processes(void);
 /* client_utils.c */
 void steam_launch_bigpicture(void);
 void steam_kill(void);

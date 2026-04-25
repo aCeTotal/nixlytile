@@ -26,8 +26,7 @@ int monovl_inotify_fd = -1;
 int monovl_watch_wd = -1;
 struct wl_event_source *monovl_watch_source = NULL;
 struct wl_display *dpy;
-struct wl_event_loop *event_loop;  /* Non-static: accessed by videoplayer */
-VideoPlayer *active_videoplayer = NULL;
+struct wl_event_loop *event_loop;
 struct wlr_backend *backend;
 struct wlr_scene *scene;
 struct wlr_scene_tree *layers[NUM_LAYERS];
@@ -276,17 +275,6 @@ struct wl_event_source *ram_popup_refresh_timer = NULL;
 struct wl_event_source *popup_delay_timer = NULL;
 struct wl_event_source *video_check_timer = NULL;
 struct wl_event_source *hz_osd_timer = NULL;
-struct wl_event_source *playback_osd_timer = NULL;
-struct wlr_scene_tree *playback_osd_tree = NULL;
-
-/* OSD control bar (used by integrated video player) */
-int osd_visible = 0;
-uint64_t osd_show_time = 0;
-OsdMenuType osd_menu_open = OSD_MENU_NONE;
-int osd_menu_selection = 0;
-struct TrackInfo audio_tracks[MAX_TRACKS], subtitle_tracks[MAX_TRACKS];
-int audio_track_count = 0;
-int subtitle_track_count = 0;
 
 struct wl_event_source *osk_dpad_repeat_timer = NULL;
 int osk_dpad_held_button = 0;  /* BTN_DPAD_UP/DOWN/LEFT/RIGHT or 0 if none */

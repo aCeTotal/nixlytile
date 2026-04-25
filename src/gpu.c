@@ -895,6 +895,14 @@ set_dgpu_env(void)
 		setenv("PROTON_HIDE_NVIDIA_GPU", "0", 1);
 		setenv("PROTON_ENABLE_NVAPI", "1", 1);
 		setenv("DXVK_ENABLE_NVAPI", "1", 1);
+
+		/* CUDA / NVENC / NVDEC routing — Blender, PyTorch, ffmpeg
+		 * with -hwaccel cuda, OBS NVENC, etc. PCI_BUS_ID order makes
+		 * device 0 deterministic on multi-GPU systems. */
+		setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID", 0);
+		setenv("CUDA_VISIBLE_DEVICES", "0", 0);
+		setenv("NVIDIA_VISIBLE_DEVICES", "all", 0);
+		setenv("NVIDIA_DRIVER_CAPABILITIES", "all", 0);
 		break;
 	case GPU_VENDOR_AMD:
 		setenv("VK_LOADER_DRIVERS_SELECT", "radeon*,amd*", 1);
@@ -902,6 +910,12 @@ set_dgpu_env(void)
 		setenv("MESA_VK_DEVICE_SELECT", "1002:", 1);
 		setenv("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", "1", 1);
 		setenv("DXVK_FILTER_DEVICE_NAME", "AMD", 1);
+
+		/* ROCm / HIP routing — Blender HIP backend, PyTorch ROCm,
+		 * llama.cpp HIP build, etc. Index 0 = first ROCm-capable
+		 * device, which the kernel orders dGPU before iGPU. */
+		setenv("HIP_VISIBLE_DEVICES", "0", 0);
+		setenv("ROCR_VISIBLE_DEVICES", "0", 0);
 		break;
 	default:
 		setenv("VK_LOADER_DRIVERS_SELECT", "nvidia*,radeon*,amd*", 1);

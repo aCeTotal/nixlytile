@@ -72,9 +72,6 @@
               xwayland
               seatd
               swaybg
-              ffmpeg
-              pipewire
-              libass
             ]
             ++ iconDeps;
 
@@ -178,11 +175,6 @@
               pkgs.xwayland
               pkgs.systemd
               pkgs.brightnessctl
-              # Video player dependencies
-              pkgs.ffmpeg
-              pkgs.pipewire
-              pkgs.libass
-              pkgs.libva
               pkgs.vulkan-loader
               pkgs.vulkan-headers
             ] ++ ps.iconDeps;

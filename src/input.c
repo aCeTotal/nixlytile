@@ -1500,31 +1500,6 @@ try_stats_panel_key(Monitor *stats_mon, const xkb_keysym_t *syms, int nsyms)
 
 
 static int
-try_videoplayer_key(const xkb_keysym_t *syms, int nsyms, uint32_t mods)
-{
-	int handled = 0;
-
-	if (!active_videoplayer || active_videoplayer->state == VP_STATE_IDLE)
-		return 0;
-
-	for (int i = 0; i < nsyms; i++) {
-		if (videoplayer_handle_key(active_videoplayer, mods, syms[i])) {
-			handled = 1;
-			if (active_videoplayer->state == VP_STATE_IDLE) {
-				videoplayer_set_visible(active_videoplayer, 0);
-				videoplayer_destroy(active_videoplayer);
-				active_videoplayer = NULL;
-				hide_playback_osd();
-				return 1;
-			}
-			render_playback_osd();
-		}
-	}
-	return handled;
-}
-
-
-static int
 try_nixpkgs_key(Monitor *nixpkgs_mon, const xkb_keysym_t *syms, int nsyms, uint32_t mods)
 {
 	int consumed = 0, is_navigation = 0;
@@ -1654,7 +1629,6 @@ keypress(struct wl_listener *listener, void *data)
 		       || try_sudo_popup_key(sudo_mon, syms, nsyms, mods)
 		       || try_wifi_popup_key(wifi_mon, syms, nsyms, mods)
 		       || try_stats_panel_key(stats_mon, syms, nsyms)
-		       || try_videoplayer_key(syms, nsyms, mods)
 		       || try_nixpkgs_key(nixpkgs_mon, syms, nsyms, mods)
 		       || try_modal_key(modal_mon, syms, nsyms, mods);
 		if (!handled && !shortcuts_are_inhibited()) {
@@ -1665,16 +1639,6 @@ keypress(struct wl_listener *listener, void *data)
 		if (!handled && nlevel0 > 0 && !shortcuts_are_inhibited()) {
 			for (i = 0; i < nlevel0; i++)
 				handled = keybinding(mods, level0_syms[i]) || handled;
-		}
-	}
-
-	/* Handle key release for video player hold-to-seek */
-	if (event->state == WL_KEYBOARD_KEY_STATE_RELEASED &&
-	    active_videoplayer && active_videoplayer->control_bar.seek_hold_active) {
-		for (i = 0; i < nsyms; i++) {
-			if (videoplayer_handle_key_release(active_videoplayer, syms[i])) {
-				render_playback_osd();
-			}
 		}
 	}
 

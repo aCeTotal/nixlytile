@@ -764,11 +764,6 @@ cleanup(void)
 	wlr_log(WLR_ERROR, "cleanup() called - starting cleanup sequence");
 	/* Shut down game mode background worker (unfreezes processes if needed) */
 	gm_bg_cleanup();
-	/* Cleanup video player */
-	if (active_videoplayer) {
-		videoplayer_destroy(active_videoplayer);
-		active_videoplayer = NULL;
-	}
 	cleanuplisteners();
 	gamepad_cleanup();
 	bt_controller_cleanup();
@@ -2153,48 +2148,6 @@ diag_log_nvidia(void)
 		diag_log_error("NVIDIA", "Unexpected PState %s during game mode (expected P0-P2)", pstate);
 }
 
-static void
-diag_log_audio_summary(void)
-{
-	if (diag_log_fd < 0) return;
-
-	struct timespec now_ts;
-	struct tm tm;
-	clock_gettime(CLOCK_REALTIME, &now_ts);
-	localtime_r(&now_ts.tv_sec, &tm);
-
-	VideoPlayer *vp = active_videoplayer;
-	if (!vp || vp->state == VP_STATE_IDLE) {
-		char out[128];
-		int off = snprintf(out, sizeof(out),
-			"[%02d:%02d:%02d] === Audio ===\n  No active player\n",
-			tm.tm_hour, tm.tm_min, tm.tm_sec);
-		(void)!write(diag_log_fd, out, off);
-		return;
-	}
-
-	size_t ring_avail = 0;
-	size_t ring_size = vp->audio.ring.size;
-	pthread_mutex_lock(&vp->audio.ring.lock);
-	ring_avail = vp->audio.ring.available;
-	pthread_mutex_unlock(&vp->audio.ring.lock);
-
-	int ring_pct = ring_size ? (int)(100ULL * ring_avail / ring_size) : 0;
-	const char *state_str = vp->audio.stream_interrupted ? "INTERRUPTED" :
-		(vp->state == VP_STATE_PLAYING ? "STREAMING" : "PAUSED");
-
-	char out[256];
-	int off = snprintf(out, sizeof(out),
-		"[%02d:%02d:%02d] === Audio ===\n"
-		"  Ring: %zu/%zu (%d%%) | Underruns: %d | Stalls: %d\n"
-		"  State: %s | Rate: %d Hz | Ch: %d\n",
-		tm.tm_hour, tm.tm_min, tm.tm_sec,
-		ring_avail, ring_size, ring_pct,
-		vp->debug_audio_underruns, vp->audio.write_stall_count,
-		state_str, vp->audio.sample_rate, vp->audio.channels);
-	(void)!write(diag_log_fd, out, off);
-}
-
 static int
 diag_timer_cb(void *data)
 {
@@ -2207,7 +2160,6 @@ diag_timer_cb(void *data)
 	diag_log_cpu_breakdown();
 	diag_log_io_stats();
 	diag_log_nvidia();
-	diag_log_audio_summary();
 
 	/* Reschedule at 10s instead of 5s — halves wakeups while still useful */
 	if (diag_timer)
@@ -3141,14 +3093,33 @@ setup(void)
 
 /* Programs that should use dedicated GPU */
 const char *dgpu_programs[] = {
+	/* Game launchers + runtimes */
 	"steam", "gamescope", "mangohud",
-	"blender", "freecad", "openscad", "kicad",
-	"obs", "obs-studio", "kdenlive", "davinci-resolve",
-	"godot", "unity", "unreal",
 	"wine", "wine64", "proton",
+	"lutris", "heroic", "bottles",
 	"vkcube", "vulkaninfo", "glxgears", "glxinfo",
-	"darktable", "rawtherapee", "gimp",
-	"prusa-slicer", "cura", "superslicer",
+
+	/* 3D / DCC */
+	"blender", "freecad", "openscad", "kicad",
+	"godot", "unity", "unreal", "ue4editor", "ue5editor",
+	"houdini", "maya", "modo", "c4d", "cinema4d", "fusion", "fusion360",
+
+	/* Video / streaming */
+	"obs", "obs-studio", "kdenlive", "davinci-resolve",
+	"handbrake", "handbrakecli",
+
+	/* AI / ML / CUDA workloads */
+	"ollama", "llama-server", "llama-cli", "llamacpp", "llama.cpp",
+	"koboldcpp", "comfyui", "automatic1111", "sd-webui",
+	"stable-diffusion-webui", "fooocus", "oobabooga", "text-generation-webui",
+	"invokeai", "diffusers", "whisper", "whisper-cpp",
+
+	/* Photo */
+	"darktable", "rawtherapee", "gimp", "krita",
+
+	/* CAD / slicing */
+	"prusa-slicer", "cura", "superslicer", "orcaslicer",
+
 	NULL
 };
 
