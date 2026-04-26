@@ -1073,10 +1073,40 @@ checkconstraint(void)
 	if (focused) {
 		wl_list_for_each(constraint, &pointer_constraints->constraints, link) {
 			if (constraint->surface == focused) {
-				active_constraint = constraint;
-				wlr_pointer_constraint_v1_send_activated(constraint);
 				Client *ac = NULL;
 				toplevel_from_wlr_surface(focused, &ac, NULL);
+
+				/*
+				 * Letterboxed fullscreen games (e.g. 1920x1080 on a
+				 * 3440x1440 ultrawide) center their surface inside the
+				 * monitor — see configurex11(). If the cursor sits in
+				 * the black bar when a LOCKED constraint activates,
+				 * surface-local coords are negative and the game
+				 * receives no usable pointer events ("mouse dead").
+				 * Warp the cursor into the rendered surface before
+				 * notifying the client.
+				 */
+				if (ac && ac->isfullscreen && ac->scene_surface
+						&& client_surface(ac)
+						&& (ac->scene_surface->node.x > 0
+							|| ac->scene_surface->node.y > 0)) {
+					double sx_l = ac->geom.x + ac->scene_surface->node.x;
+					double sy_l = ac->geom.y + ac->scene_surface->node.y;
+					int sw = client_surface(ac)->current.width;
+					int sh = client_surface(ac)->current.height;
+					if (sw > 0 && sh > 0
+							&& (cursor->x < sx_l
+								|| cursor->x >= sx_l + sw
+								|| cursor->y < sy_l
+								|| cursor->y >= sy_l + sh)) {
+						wlr_cursor_warp(cursor, NULL,
+							sx_l + sw / 2.0,
+							sy_l + sh / 2.0);
+					}
+				}
+
+				active_constraint = constraint;
+				wlr_pointer_constraint_v1_send_activated(constraint);
 				if (ac && (looks_like_game(ac) || is_game_content(ac)))
 					game_log("CURSOR_CONSTRAINT: ACTIVATE type=%s appid='%s'",
 						constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED

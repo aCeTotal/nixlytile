@@ -1,10 +1,63 @@
 #include "nixlytile.h"
 #include "client.h"
 
+enum gamepad_menu_action {
+	GMA_RETROARCH,
+	GMA_STEAM_BIGPICTURE,
+};
+
+struct gamepad_menu_item {
+	const char *label;
+	enum gamepad_menu_action action;
+};
+
+static const struct gamepad_menu_item gamepad_menu_items[] = {
+	{ "Retroarch",            GMA_RETROARCH },
+	{ "Steam (Big Picture)",  GMA_STEAM_BIGPICTURE },
+};
+
+#define GAMEPAD_MENU_ITEM_COUNT \
+	((int)(sizeof(gamepad_menu_items) / sizeof(gamepad_menu_items[0])))
+
+#define GAMEPAD_MENU_TITLE_H   56
+#define GAMEPAD_MENU_ROW_H     56
+#define GAMEPAD_MENU_PADDING   24
+#define GAMEPAD_MENU_WIDTH    480
+
 void
 gamepad_menu_show(Monitor *m)
 {
-	(void)m;
+	GamepadMenu *gm;
+	int mw, mh, w, h;
+
+	if (!m || !m->gamepad_menu.tree)
+		return;
+
+	gm = &m->gamepad_menu;
+	mw = m->m.width;
+	mh = m->m.height;
+
+	w = GAMEPAD_MENU_WIDTH;
+	h = GAMEPAD_MENU_TITLE_H + GAMEPAD_MENU_ITEM_COUNT * GAMEPAD_MENU_ROW_H
+		+ GAMEPAD_MENU_PADDING;
+	if (mw > 0 && w > mw - 40) w = mw - 40;
+	if (mh > 0 && h > mh - 40) h = mh - 40;
+	if (w < 200) w = 200;
+	if (h < 100) h = 100;
+
+	gm->width = w;
+	gm->height = h;
+	gm->x = m->m.x + (mw - w) / 2;
+	gm->y = m->m.y + (mh - h) / 2;
+	gm->item_count = GAMEPAD_MENU_ITEM_COUNT;
+	if (gm->selected < 0 || gm->selected >= gm->item_count)
+		gm->selected = 0;
+
+	wlr_scene_node_set_position(&gm->tree->node, gm->x, gm->y);
+	wlr_scene_node_set_enabled(&gm->tree->node, 1);
+	gm->visible = 1;
+
+	gamepad_menu_render(m);
 }
 
 
@@ -52,7 +105,36 @@ gamepad_menu_visible_monitor(void)
 void
 gamepad_menu_render(Monitor *m)
 {
-	(void)m;
+	GamepadMenu *gm;
+	struct wlr_scene_node *node, *tmp;
+	static const float select_bg[4] = { 0.10f, 0.45f, 0.85f, 0.85f };
+	int i;
+
+	if (!m || !m->gamepad_menu.tree || !m->gamepad_menu.visible)
+		return;
+
+	gm = &m->gamepad_menu;
+
+	if (!gm->bg)
+		gm->bg = wlr_scene_tree_create(gm->tree);
+	if (!gm->bg)
+		return;
+
+	wl_list_for_each_safe(node, tmp, &gm->bg->children, link)
+		wlr_scene_node_destroy(node);
+
+	drawrect(gm->bg, 0, 0, gm->width, gm->height, statusbar_popup_bg);
+	tray_menu_draw_text(gm->bg, "Controller",
+		GAMEPAD_MENU_PADDING, 0, GAMEPAD_MENU_TITLE_H);
+
+	for (i = 0; i < gm->item_count; i++) {
+		int row_y = GAMEPAD_MENU_TITLE_H + i * GAMEPAD_MENU_ROW_H;
+		if (i == gm->selected)
+			drawrect(gm->bg, 8, row_y, gm->width - 16,
+				GAMEPAD_MENU_ROW_H, select_bg);
+		tray_menu_draw_text(gm->bg, gamepad_menu_items[i].label,
+			GAMEPAD_MENU_PADDING, row_y, GAMEPAD_MENU_ROW_H);
+	}
 }
 
 int
@@ -75,7 +157,27 @@ gamepad_menu_handle_click(Monitor *m, int cx, int cy, uint32_t button)
 void
 gamepad_menu_select(Monitor *m)
 {
-	(void)m;
+	GamepadMenu *gm;
+	enum gamepad_menu_action action;
+
+	if (!m || !m->gamepad_menu.visible)
+		return;
+
+	gm = &m->gamepad_menu;
+	if (gm->selected < 0 || gm->selected >= gm->item_count)
+		return;
+
+	action = gamepad_menu_items[gm->selected].action;
+	gamepad_menu_hide(m);
+
+	switch (action) {
+	case GMA_RETROARCH:
+		spawn_cmd("retroarch");
+		break;
+	case GMA_STEAM_BIGPICTURE:
+		steam_launch_bigpicture();
+		break;
+	}
 }
 
 int
@@ -1121,7 +1223,8 @@ gamepad_inactivity_timer_cb(void *data)
 		if (!gp->is_bluetooth)
 			continue;
 
-		/* Bluetooth gamepads: disconnect after 4 min inactivity or monitors off */
+		/* Bluetooth gamepads: disconnect after 10 min inactivity or monitors off.
+		 * USB-cable gamepads never auto-suspend (early-continue above). */
 		if (!monitors_active ||
 		    (now - gp->last_activity_ms) >= GAMEPAD_BT_INACTIVITY_TIMEOUT_MS) {
 			gamepad_suspend(gp);
