@@ -1020,6 +1020,22 @@ run(const char *startup_cmd)
 		die("startup: display_add_socket_auto");
 	setenv("WAYLAND_DISPLAY", socket, 1);
 
+	/* Pre-launch the nixly_launcher daemon (appd) directly — bypasses
+	 * the autostart shell so the daemon's heavy startup (icon scan, app
+	 * indexing) overlaps with backend bring-up instead of running
+	 * serialised after waybar etc.  appd will block on
+	 * Connection::connect_to_env until the socket accepts clients,
+	 * which happens once the wl_display dispatch loop runs in run(). */
+	{
+		pid_t appd_pid = fork();
+		if (appd_pid == 0) {
+			setsid();
+			fork_detach();
+			execlp("appd", "appd", (char *)NULL);
+			_exit(127);
+		}
+	}
+
 	/* Start the backend. This will enumerate outputs and inputs, become the DRM
 	 * master, etc */
 	if (!wlr_backend_start(backend))

@@ -210,7 +210,7 @@ extern const char *osk_layout_upper[OSK_ROWS][OSK_COLS];
 #define GAME_VRR_MAX_FPS 165.0f
 
 /* ── enums ─────────────────────────────────────────────────────────── */
-enum { CurNormal, CurPressed, CurMove, CurResize };
+enum { CurNormal, CurPressed, CurMove, CurResize, CurColResize };
 enum { XDGShell, LayerShell, X11 };
 enum { LyrBg, LyrBottom, LyrTile, LyrFloat, LyrTop, LyrFS, LyrOverlay, LyrBlock, NUM_LAYERS };
 enum Direction { DIR_LEFT, DIR_RIGHT, DIR_UP, DIR_DOWN };
@@ -1135,6 +1135,11 @@ struct Column {
 	 * browsers, office suites) default to 2.  Mod+R cycling sets
 	 * width_idx >= 0 and bypasses this. */
 	int wide_tiles;
+	/* Explicit pixel-width override set by Mod+Shift+arrow resize.
+	 * 0 = unused (fall back to preset / wide_tiles).  Wins over both
+	 * when > 0.  Lets neighbour columns slide their shared edge by the
+	 * same delta so total row width is preserved. */
+	int width_px_override;
 	/* Spring state for col->x and col->width — when a column is
 	 * inserted, removed, resized (fullscreen toggle / preset cycle)
 	 * or a sibling changes width, the column must SLIDE/SCALE to
@@ -2058,6 +2063,7 @@ void column_add_client(Column *col, Client *c);
 void column_remove_client(Client *c);
 void monitor_init_workspaces(Monitor *m);
 void monitor_cleanup_workspaces(Monitor *m);
+void monitor_compact_workspaces(Monitor *m);
 void workspace_attach_client(Workspace *ws, Client *c);
 void workspace_detach_client(Client *c);
 void workspace_drop_tile(Workspace *ws, Client *c, double screen_x);

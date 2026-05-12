@@ -1725,6 +1725,26 @@ unmapnotify(struct wl_listener *listener, void *data)
 		wl_list_remove(&c->link);
 		setmon(c, NULL, 0);
 		wl_list_remove(&c->flink);
+		/* Re-init flink so any defensive wl_list_remove() later in
+		 * the focus path (e.g. focusclient re-entering with this
+		 * same client picked up by pointerfocus before its scene
+		 * tree is destroyed below) is a self-loop no-op rather than
+		 * a use-after-free on poisoned pointers. */
+		wl_list_init(&c->flink);
+		/* Hide the still-alive scene node so sloppy-focus (motionnotify
+		 * → xytonode → pointerfocus) can't re-pick this client during
+		 * the focusclient call that follows. */
+		if (c->scene)
+			wlr_scene_node_set_enabled(&c->scene->node, 0);
+
+		/* Close any gap left by an emptied workspace: if active_ws (or
+		 * any other ws on this monitor) is now empty but still has
+		 * filled workspaces after it, slide everything up so the user
+		 * is never stranded on an unreachable empty slot.  Run BEFORE
+		 * focusclient so the focus target lives on a workspace that
+		 * survives the compaction. */
+		if (unmap_mon)
+			monitor_compact_workspaces(unmap_mon);
 
 		/* After tile is removed, focus moves to the LEFT neighbor of
 		 * the deleted column (column_destroy sets focused_col to the
@@ -1736,7 +1756,13 @@ unmapnotify(struct wl_listener *listener, void *data)
 			Column *fc = unmap_mon->active_ws->focused_col;
 			Client *next = wl_container_of(fc->clients.next, next, column_link);
 			focusclient(next, 1);
+		} else if (unmap_mon && unmap_mon->active_ws) {
+			/* Empty active workspace post-compaction (e.g. only one
+			 * workspace remained): refocus selmon's top client. */
+			focusclient(focustop(selmon), 1);
 		}
+		if (unmap_mon)
+			arrange(unmap_mon);
 	}
 	/* Toggle adaptive sync off and restore refresh rate when fullscreen client is unmapped */
 	if (c->isfullscreen) {

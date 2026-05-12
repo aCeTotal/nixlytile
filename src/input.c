@@ -7,6 +7,15 @@ static void (*last_keybinding_func)(const Arg *);
 static int resizing_from_mouse = 0;
 static int drag_was_alone_in_column = 0;
 static uint64_t last_pointer_motion_ms = 0;
+
+/* Mouse-drag column resize state (Mod+Left near an edge). */
+#define COL_RESIZE_EDGE_PX 50
+static Column *grab_resize_col = NULL;
+static Column *grab_resize_nbr = NULL;
+static int     grab_resize_sign = 0;   /* +1 = dragging col's right edge, -1 = left */
+static int     grab_resize_col_w0 = 0;
+static int     grab_resize_nbr_w0 = 0;
+static double  grab_resize_start_x = 0.0;
 static inline LayoutNode **get_current_root(Monitor *m) { (void)m; return NULL; }
 static inline LayoutNode *find_client_node(LayoutNode *node, Client *c) { (void)node; (void)c; return NULL; }
 static inline void start_tile_drag(Monitor *m, Client *c) { (void)m; (void)c; }
@@ -590,8 +599,36 @@ buttonpress(struct wl_listener *listener, void *data)
 				return;
 			}
 		}
+
+		/* Windows-style edge resize: left-click on any edge or corner of
+		 * a floating window starts a resize without needing a modifier.
+		 * Move (no resize) is still triggered by clicking the interior
+		 * via Mod+LeftClick — direct interior click here goes to the
+		 * client so widgets/scrollbars remain usable. */
+		if (event->button == BTN_LEFT && CLEANMASK(mods) == 0 && c &&
+				c->isfloating && !c->isfullscreen &&
+				!client_is_unmanaged(c)) {
+			const double EDGE = 8.0;
+			double left = cursor->x - (double)c->geom.x;
+			double right = (double)(c->geom.x + c->geom.width) - cursor->x;
+			double top = cursor->y - (double)c->geom.y;
+			double bottom = (double)(c->geom.y + c->geom.height) - cursor->y;
+			if (left <= EDGE || right <= EDGE ||
+					top <= EDGE || bottom <= EDGE) {
+				Arg a = { .ui = CurResize };
+				moveresize(&a);
+				return;
+			}
+		}
 		break;
 	case WL_POINTER_BUTTON_STATE_RELEASED:
+		if (!locked && cursor_mode == CurColResize) {
+			cursor_mode = CurNormal;
+			grab_resize_col = grab_resize_nbr = NULL;
+			grab_resize_sign = 0;
+			nixly_cursor_set_xcursor("default");
+			return;
+		}
 		if (!locked && cursor_mode != CurNormal && cursor_mode != CurPressed) {
 			int was_move = (cursor_mode == CurMove);
 			nixly_cursor_set_xcursor("default");
@@ -2054,6 +2091,40 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 
 	tiled = grabc && !grabc->isfloating && !grabc->isfullscreen;
 	last_pointer_motion_ms = monotonic_msec();
+	if (cursor_mode == CurColResize) {
+		if (grab_resize_col) {
+			const int min_w = 100;
+			double dx = cursor->x - grab_resize_start_x;
+			int delta = (int)(grab_resize_sign * dx);
+			int new_w = grab_resize_col_w0 + delta;
+			if (grab_resize_nbr) {
+				int new_nbr_w = grab_resize_nbr_w0 - delta;
+				if (new_w >= min_w && new_nbr_w >= min_w) {
+					grab_resize_col->fullscreen = 0;
+					grab_resize_nbr->fullscreen = 0;
+					grab_resize_col->width_px_override = new_w;
+					grab_resize_nbr->width_px_override = new_nbr_w;
+					grab_resize_col->just_created = 1;
+					grab_resize_nbr->just_created = 1;
+					if (selmon)
+						arrange(selmon);
+				}
+			} else if (selmon) {
+				/* Alone on workspace — just clamp to monitor width. */
+				int mon_w = selmon->w_initialized
+						? selmon->w_target.width
+						: selmon->w.width;
+				if (mon_w < 1) mon_w = selmon->w.width;
+				if (new_w < min_w) new_w = min_w;
+				if (new_w > mon_w) new_w = mon_w;
+				grab_resize_col->fullscreen = 0;
+				grab_resize_col->width_px_override = new_w;
+				grab_resize_col->just_created = 1;
+				arrange(selmon);
+			}
+		}
+		return;
+	}
 	if (cursor_mode == CurMove) {
 		/* Move the grabbed client to the new position. */
 		if (grabc && grabc->isfloating) {
@@ -2175,6 +2246,25 @@ focus:
 	if (!surface && !seat->drag)
 		nixly_cursor_set_xcursor("default");
 
+	/* Hover hint: when idle over the edge of a floating window, show the
+	 * resize cursor so the user knows the edge is grabbable
+	 * (Windows-style direct edge resize). */
+	if (cursor_mode == CurNormal && c && c->isfloating &&
+			!c->isfullscreen && !client_is_unmanaged(c)) {
+		const double EDGE = 8.0;
+		double left = cursor->x - (double)c->geom.x;
+		double right = (double)(c->geom.x + c->geom.width) - cursor->x;
+		double top = cursor->y - (double)c->geom.y;
+		double bottom = (double)(c->geom.y + c->geom.height) - cursor->y;
+		int hx = 0, hy = 0;
+		if (left <= EDGE) hx = -1;
+		else if (right <= EDGE) hx = 1;
+		if (top <= EDGE) hy = -1;
+		else if (bottom <= EDGE) hy = 1;
+		if (hx || hy)
+			nixly_cursor_set_xcursor(resize_cursor_from_dirs(hx, hy));
+	}
+
 	pointerfocus(c, surface, sx, sy, time);
 }
 
@@ -2205,6 +2295,62 @@ moveresize(const Arg *arg)
 
 	cursor_mode = arg->ui;
 	grabc->was_tiled = (!grabc->isfloating && !grabc->isfullscreen);
+
+	/* Mod+Left on a tiled client near an inner edge → column resize
+	 * instead of move.  Generous 50 px grab zone so the user doesn't
+	 * have to land precisely on the boundary.  Falls through to the
+	 * regular CurMove path if no resizable edge is near. */
+	if (grabc->was_tiled && cursor_mode == CurMove && grabc->column) {
+		Column *col = grabc->column;
+		Column *left_nbr = NULL, *right_nbr = NULL;
+		double left_dist = cursor->x - (double)grabc->geom.x;
+		double right_dist = (double)(grabc->geom.x + grabc->geom.width) - cursor->x;
+
+		if (col->ws && col->link.prev != &col->ws->columns)
+			left_nbr = wl_container_of(col->link.prev, left_nbr, link);
+		if (col->ws && col->link.next != &col->ws->columns)
+			right_nbr = wl_container_of(col->link.next, right_nbr, link);
+
+		if (left_nbr && left_dist <= COL_RESIZE_EDGE_PX && left_dist <= right_dist) {
+			grab_resize_col = col;
+			grab_resize_nbr = left_nbr;
+			grab_resize_sign = -1;
+			grab_resize_col_w0 = col->target_width;
+			grab_resize_nbr_w0 = left_nbr->target_width;
+			grab_resize_start_x = cursor->x;
+			cursor_mode = CurColResize;
+			nixly_cursor_set_xcursor("col-resize");
+			return;
+		}
+		if (right_nbr && right_dist <= COL_RESIZE_EDGE_PX) {
+			grab_resize_col = col;
+			grab_resize_nbr = right_nbr;
+			grab_resize_sign = +1;
+			grab_resize_col_w0 = col->target_width;
+			grab_resize_nbr_w0 = right_nbr->target_width;
+			grab_resize_start_x = cursor->x;
+			cursor_mode = CurColResize;
+			nixly_cursor_set_xcursor("col-resize");
+			return;
+		}
+		/* Alone on the workspace: no neighbours, but the right edge is
+		 * still draggable.  Width grows/shrinks; left edge stays at
+		 * x=0.  Pick whichever edge the cursor is closer to. */
+		if (!left_nbr && !right_nbr
+				&& (left_dist <= COL_RESIZE_EDGE_PX
+					|| right_dist <= COL_RESIZE_EDGE_PX)) {
+			grab_resize_col = col;
+			grab_resize_nbr = NULL;
+			grab_resize_sign = (right_dist <= left_dist) ? +1 : -1;
+			grab_resize_col_w0 = col->target_width;
+			grab_resize_nbr_w0 = 0;
+			grab_resize_start_x = cursor->x;
+			cursor_mode = CurColResize;
+			nixly_cursor_set_xcursor("col-resize");
+			return;
+		}
+		/* No edge in range — fall through to move. */
+	}
 
 	if (grabc->was_tiled) {
 		switch (cursor_mode) {
@@ -2306,6 +2452,20 @@ pointerfocus(Client *c, struct wlr_surface *surface, double sx, double sy,
 		anim_in_progress = 1;
 	if (selmon && fabs(selmon->ws_y_offset) > 0.5)
 		anim_in_progress = 1;
+	/* Column slide (Mod+Shift+arrow swap): neighbour glides under a
+	 * stationary cursor and would steal sloppy-focus, so the next key
+	 * repeat moves the wrong column — visible as the moved tile
+	 * bouncing back a step before continuing. */
+	if (selmon && selmon->active_ws) {
+		Column *col;
+		wl_list_for_each(col, &selmon->active_ws->columns, link) {
+			if ((int)col->x_f != col->target_x ||
+					fabs(col->x_vel) > 0.5) {
+				anim_in_progress = 1;
+				break;
+			}
+		}
+	}
 
 	if (!in_pointerfocus && surface != seat->pointer_state.focused_surface &&
 			sloppyfocus && c && !client_is_unmanaged(c) && !anim_in_progress) {

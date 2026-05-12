@@ -184,8 +184,25 @@ unsigned int monitorkey = WLR_MODIFIER_CTRL;
 const char *termcmd[] = { "foot", NULL };
 const char *alacrittycmd[] = { "alacritty", NULL };
 const char *btopcmd[] = { "alacritty", "-e", "btop", NULL };
-const char *bravecmd[] __attribute__((unused)) = { "brave", NULL };
-const char *chromecmd[] = { "google-chrome-stable", NULL };
+/* Chromium-family browsers: force native Wayland (Ozone) instead of
+ * XWayland.  XWayland-managed Chrome triggers a buffer rebuild + jumpy
+ * geometry update every time the compositor commits a new configure
+ * (tile resize, neighbour move, workspace switch) because XWayland
+ * proxies all configures through XSetWMNormalHints and Chrome reflows.
+ * Native Wayland surfaces accept configures directly and only reflow
+ * when their own renderer is ready. */
+const char *bravecmd[] __attribute__((unused)) = {
+	"brave",
+	"--ozone-platform-hint=auto",
+	"--enable-features=UseOzonePlatform,WaylandWindowDecorations",
+	NULL
+};
+const char *chromecmd[] = {
+	"google-chrome-stable",
+	"--ozone-platform-hint=auto",
+	"--enable-features=UseOzonePlatform,WaylandWindowDecorations",
+	NULL
+};
 const char *nixlylaunchercmd[] = { "apptoggle", NULL };
 const char *menucmd[] __attribute__((unused)) = { "wmenu-run", NULL };
 const char *netcmd[] = { "nm-connection-editor", NULL };
@@ -203,7 +220,6 @@ char wallpaper_path[PATH_MAX] = "$HOME/.nixlyos/wallpapers/beach.jpg";
  * inherits the pipe — that's how its dwl/tags module receives our
  * printstatus() workspace events. */
 char autostart_cmd[4096] =
-	"appd & "
 	"eval $(gnome-keyring-daemon --start --components=secrets,ssh,pkcs11) & "
 	"thunar --daemon & "
 	"swaybg -i \"$HOME/.nixlyos/wallpapers/beach.jpg\" -m fill & "
@@ -260,14 +276,19 @@ const Key default_keys[] = {
 	/* Move column left/right */
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_H,          move_column_dir,     {.i = -1} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_L,          move_column_dir,     {.i = +1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Left,       resize_column_dir,   {.i = -1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Right,      resize_column_dir,   {.i = +1} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Left,       move_column_dir,     {.i = -1} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Right,      move_column_dir,     {.i = +1} },
 
-	/* Move client to workspace above/below */
+	/* Resize focused tile.  Up = grow, Down = shrink.  Both edges that
+	 * touch a neighbour move outward (grow) or inward (shrink); edges
+	 * at the screen border stay locked. */
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Up,         resize_column_dir,   {.i = +1} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Down,       resize_column_dir,   {.i = -1} },
+
+	/* Move client to workspace above/below (vim-style keys retained;
+	 * arrows are taken over by resize above) */
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_K,          move_client_to_ws_dir, {.i = -1} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_J,          move_client_to_ws_dir, {.i = +1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Up,         move_client_to_ws_dir, {.i = -1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Down,       move_client_to_ws_dir, {.i = +1} },
 
 	/* Window state */
 	{ MODKEY,                    XKB_KEY_q,          killclient,        {0} },
@@ -277,6 +298,7 @@ const Key default_keys[] = {
 	{ MODKEY,                    XKB_KEY_f,          toggle_column_fullscreen, {0} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_F,          togglefullscreen,  {0} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_space,      togglefloating,    {0} },
+	{ MODKEY,                    XKB_KEY_c,          togglefloating,    {0} },
 	{ MODKEY,                    XKB_KEY_b,          togglewaybar,      {0} },
 
 	/* Multi-monitor */

@@ -164,6 +164,7 @@ column_create(Workspace *ws)
 	col->target_width = col->target_height = 0;
 	col->width_idx = -1;
 	col->wide_tiles = 1;
+	col->width_px_override = 0;
 	col->fullscreen = 0;
 	col->x_f = 0.0;
 	col->x_vel = 0.0;
@@ -301,6 +302,7 @@ workspace_attach_client(Workspace *ws, Client *c)
 	col->n_clients = 0;
 	col->width_idx = -1;
 	col->wide_tiles = client_wide_tile_count(c);
+	col->width_px_override = 0;
 	col->fullscreen = 0;
 	col->x_f = 0.0;
 	col->x_vel = 0.0;
@@ -375,6 +377,7 @@ workspace_drop_tile(Workspace *ws, Client *c, double screen_x)
 	col->n_clients = 0;
 	col->width_idx = -1;
 	col->wide_tiles = client_wide_tile_count(c);
+	col->width_px_override = 0;
 	col->fullscreen = 0;
 	col->x_f = 0.0;
 	col->x_vel = 0.0;
@@ -439,6 +442,102 @@ max_nonempty_ws_idx(Monitor *m)
 	return max_idx;
 }
 
+/* Close index gaps left by emptied workspaces.  When a workspace
+ * becomes empty but there's still a populated workspace below it,
+ * destroy the empty one and shift everything below it up by one slot.
+ * Always leaves at most one trailing empty workspace (Niri convention).
+ *
+ * If the empty workspace was the active one, the next workspace takes
+ * its place — the user is never stranded on a workspace they can't
+ * leave to reach tiles. */
+void
+monitor_compact_workspaces(Monitor *m)
+{
+	int changed = 1;
+
+	if (!m)
+		return;
+
+	while (changed) {
+		Workspace *ws, *other, *target;
+		int gap_idx, was_active;
+
+		changed = 0;
+		wl_list_for_each(ws, &m->workspaces, link) {
+			int has_filled_after = 0;
+
+			if (ws->n_columns > 0)
+				continue;
+			wl_list_for_each(other, &m->workspaces, link) {
+				if (other != ws && other->idx > ws->idx
+						&& other->n_columns > 0) {
+					has_filled_after = 1;
+					break;
+				}
+			}
+			if (!has_filled_after)
+				continue;
+
+			gap_idx = ws->idx;
+			was_active = (m->active_ws == ws);
+			target = NULL;
+			if (was_active) {
+				wl_list_for_each(other, &m->workspaces, link) {
+					if (other != ws && other->idx > gap_idx) {
+						if (!target || other->idx < target->idx)
+							target = other;
+					}
+				}
+			}
+			if (m->prev_ws == ws)
+				m->prev_ws = NULL;
+			if (was_active)
+				m->active_ws = target;
+
+			workspace_destroy(ws);
+
+			wl_list_for_each(other, &m->workspaces, link) {
+				if (other->idx > gap_idx)
+					other->idx--;
+			}
+			if (m->next_ws_id > 0)
+				m->next_ws_id--;
+
+			changed = 1;
+			break;
+		}
+	}
+
+	/* Trim extra trailing empties: Niri keeps at most ONE empty
+	 * workspace after the last populated one.  When the last tile is
+	 * removed from ws N, both ws N and the previously-synthesized
+	 * trailing empty ws N+1 are now empty — collapse to a single
+	 * trailing slot so waybar's dwl/tags doesn't keep showing the
+	 * stale extra. */
+	for (;;) {
+		Workspace *ws, *last = NULL, *prev = NULL;
+		wl_list_for_each(ws, &m->workspaces, link) {
+			if (!last || ws->idx > last->idx) {
+				prev = last;
+				last = ws;
+			} else if (!prev || ws->idx > prev->idx) {
+				prev = ws;
+			}
+		}
+		if (!last || !prev)
+			break;
+		if (last->n_columns != 0 || prev->n_columns != 0)
+			break;
+		if (m->active_ws == last)
+			m->active_ws = prev;
+		if (m->prev_ws == last)
+			m->prev_ws = NULL;
+		workspace_destroy(last);
+		if (m->next_ws_id > 0)
+			m->next_ws_id--;
+	}
+}
+
 /* Niri preset_column_widths (proportional).  Matches user's Niri config:
  *   0.25, 0.333, 0.5, 0.667, 0.75, 1.0
  * Column.width_idx indexes this array.  -1 = aspect-based default (see
@@ -482,6 +581,12 @@ column_target_width_px(Column *col, int mon_w, int gap, int n_default)
 		return mon_w / 2;
 	if (col->fullscreen)
 		return mon_w;
+	if (col->width_px_override > 0) {
+		int w = col->width_px_override;
+		if (w > mon_w) w = mon_w;
+		if (w < 50) w = 50;
+		return w;
+	}
 	if (col->width_idx >= 0 && col->width_idx < n_preset_column_widths)
 		return (int)((double)mon_w *
 				preset_column_widths[col->width_idx]);
@@ -740,29 +845,138 @@ switch_preset_column_width(const Arg *arg)
 	arrange(selmon);
 }
 
-/* Directional column resize.  arg->i < 0 = shrink (prev preset),
- * arg->i > 0 = grow (next preset).  Clamps at the ends instead of
- * wrapping so repeated taps don't jump from widest back to narrowest. */
+/* Resize focused column.  arg->i > 0 = grow, arg->i < 0 = shrink.
+ *
+ * Edge rules:
+ *   • Edges that border a neighbour column move outward (grow) or
+ *     inward (shrink) by `step`.
+ *   • Edges at the screen border are LOCKED — they never move.
+ *
+ * Side-effects on neighbours:
+ *   • Each neighbour adjacent to a moving edge gains or loses `step`
+ *     so the row's total width is preserved.
+ *
+ * Examples:
+ *   • Tile alone or fully maximised (no neighbours)      → no-op.
+ *   • Tile bordering one neighbour and one screen edge  → inner edge
+ *     moves; that single neighbour shrinks (grow) or grows (shrink)
+ *     by `step`.  Focused width changes by ±step.
+ *   • Tile with neighbours on both sides (middle column) → BOTH edges
+ *     move outward (grow) or inward (shrink); each neighbour changes
+ *     by ∓step.  Focused width changes by ±2·step.
+ *
+ * Minimum column width: 100 px.  If any participant would drop below
+ * that, the whole resize is skipped (atomic). */
 void
 resize_column_dir(const Arg *arg)
 {
-	Column *col;
+	Column *col, *left_nbr = NULL, *right_nbr = NULL;
 	int dir;
-	if (!selmon || !selmon->active_ws || !arg)
+	int mon_w, gap, n_default, step;
+	const int min_w = 100;
+	int cur_w, new_w;
+	int left_cur = 0, left_new = 0;
+	int right_cur = 0, right_new = 0;
+	int delta_total;
+
+	if (!arg || !selmon || !selmon->active_ws)
 		return;
 	col = selmon->active_ws->focused_col;
-	if (!col)
+	if (!col || !selmon->wlr_output->enabled)
 		return;
+
 	dir = arg->i >= 0 ? 1 : -1;
+
+	mon_w = selmon->w_initialized ? selmon->w_target.width : selmon->w.width;
+	if (mon_w < 1)
+		mon_w = selmon->w.width;
+	gap = selmon->gaps ? (int)gappx : 0;
+	n_default = 2;
+	if (selmon->m.height > 0) {
+		double a = (double)selmon->m.width / (double)selmon->m.height;
+		if (a >= 3.0) n_default = 4;
+		else if (a >= 2.0) n_default = 3;
+	}
+	step = mon_w / 20;
+	if (step < 40) step = 40;
+
+	if (col->link.prev != &col->ws->columns)
+		left_nbr = wl_container_of(col->link.prev, left_nbr, link);
+	if (col->link.next != &col->ws->columns)
+		right_nbr = wl_container_of(col->link.next, right_nbr, link);
+
+	cur_w = column_target_width_px(col, mon_w, gap, n_default);
+
+	/* Alone on the workspace: no neighbours to share with — just
+	 * resize own width.  Right edge moves (column is left-anchored at
+	 * x=0); grow adds `step`, shrink subtracts. */
+	if (!left_nbr && !right_nbr) {
+		int new_w_alone = cur_w + dir * step;
+		if (new_w_alone < min_w)
+			return;
+		if (new_w_alone > mon_w)
+			new_w_alone = mon_w;
+		if (new_w_alone == cur_w)
+			return;
+		col->fullscreen = 0;
+		col->width_px_override = new_w_alone;
+		col->just_created = 1;
+		arrange(selmon);
+		if (!wl_list_empty(&col->clients)) {
+			Client *fc = wl_container_of(col->clients.next, fc, column_link);
+			warpcursor(fc);
+		}
+		return;
+	}
+
+	delta_total = 0;
+	if (left_nbr) {
+		left_cur = column_target_width_px(left_nbr, mon_w, gap, n_default);
+		left_new = left_cur - dir * step;
+		if (left_new < min_w)
+			return;
+		delta_total += step;
+	}
+	if (right_nbr) {
+		right_cur = column_target_width_px(right_nbr, mon_w, gap, n_default);
+		right_new = right_cur - dir * step;
+		if (right_new < min_w)
+			return;
+		delta_total += step;
+	}
+
+	new_w = cur_w + dir * delta_total;
+	if (new_w < min_w)
+		return;
+	if (new_w > mon_w)
+		new_w = mon_w;
+
 	col->fullscreen = 0;
-	if (col->width_idx < 0)
-		col->width_idx = default_column_width_idx;
-	col->width_idx += dir;
-	if (col->width_idx < 0)
-		col->width_idx = 0;
-	if (col->width_idx >= n_preset_column_widths)
-		col->width_idx = n_preset_column_widths - 1;
+	col->width_px_override = new_w;
+	col->just_created = 1;
+	if (left_nbr) {
+		left_nbr->fullscreen = 0;
+		left_nbr->width_px_override = left_new;
+		left_nbr->just_created = 1;
+	}
+	if (right_nbr) {
+		right_nbr->fullscreen = 0;
+		right_nbr->width_px_override = right_new;
+		right_nbr->just_created = 1;
+	}
+
 	arrange(selmon);
+
+	/* Keep the cursor centred on the focused tile.  Without this, a
+	 * sustained resize (held Mod+Shift+arrow) slides the tile boundary
+	 * past the cursor, sloppy-focus on the next motion event flips
+	 * focus to the neighbour, and the following key repeat resizes
+	 * the WRONG column — the boundary bounces back.  Warping with the
+	 * focused tile pins the pointer inside it for the whole repeat. */
+	if (!wl_list_empty(&col->clients)) {
+		Client *fc = wl_container_of(col->clients.next, fc, column_link);
+		warpcursor(fc);
+	}
 }
 
 /* Niri: maximize-column — focused column expands to full monitor width.
@@ -962,28 +1176,91 @@ void
 focus_column_dir(const Arg *arg)
 {
 	Column *col;
+	Monitor *m_next;
+	struct wlr_output *next_out;
+	enum wlr_direction wdir;
 
 	if (!arg || !selmon || !selmon->active_ws)
 		return;
+
 	col = workspace_focus_col_dir(selmon->active_ws, arg->i);
-	if (!col || wl_list_empty(&col->clients))
+	if (col && !wl_list_empty(&col->clients)) {
+		/* Arrange FIRST so target_scroll_x / target_x reflect the new
+		 * focus.  focusclient → warpcursor reads target_* — stale
+		 * values would land the cursor on the OLD focused tile's
+		 * projected position. */
+		arrange(selmon);
+		{
+			Client *c = wl_container_of(col->clients.next, c, column_link);
+			focusclient(c, 1);
+		}
 		return;
-	/* Arrange FIRST so target_scroll_x / target_x reflect the new focus.
-	 * focusclient → warpcursor reads target_* — stale values would land
-	 * the cursor on the OLD focused tile's projected position. */
-	arrange(selmon);
-	{
-		Client *c = wl_container_of(col->clients.next, c, column_link);
-		focusclient(c, 1);
 	}
+
+	/* At edge of current workspace — try crossing to adjacent monitor. */
+	wdir = (arg->i > 0) ? WLR_DIRECTION_RIGHT : WLR_DIRECTION_LEFT;
+	next_out = wlr_output_layout_adjacent_output(output_layout, wdir,
+			selmon->wlr_output,
+			selmon->m.x + selmon->m.width / 2.0,
+			selmon->m.y + selmon->m.height / 2.0);
+	if (!next_out)
+		return;
+	m_next = next_out->data;
+	if (!m_next || !m_next->wlr_output->enabled)
+		return;
+
+	selmon = m_next;
+
+	/* Pick a tile on the new monitor — entering from the LEFT (we moved
+	 * right) lands on the leftmost tile; entering from the right lands
+	 * on the rightmost.  If empty, warp the cursor to the monitor centre
+	 * so the user has a clear visual landing point. */
+	if (m_next->active_ws && !wl_list_empty(&m_next->active_ws->columns)) {
+		Column *target;
+		struct wl_list *node = (arg->i > 0)
+				? m_next->active_ws->columns.next
+				: m_next->active_ws->columns.prev;
+		target = wl_container_of(node, target, link);
+		if (target && !wl_list_empty(&target->clients)) {
+			m_next->active_ws->focused_col = target;
+			arrange(m_next);
+			{
+				Client *c = wl_container_of(target->clients.next,
+						c, column_link);
+				focusclient(c, 1);
+			}
+			printstatus();
+			return;
+		}
+	}
+
+	/* No tiles on the destination monitor — warp cursor to its centre
+	 * and drop keyboard focus so the user sees they've landed on an
+	 * empty screen. */
+	wlr_cursor_warp(cursor, NULL,
+			m_next->m.x + m_next->m.width / 2.0,
+			m_next->m.y + m_next->m.height / 2.0);
+	focusclient(NULL, 0);
+	printstatus();
 }
 
-/* Move focused column left/right by swapping list order. */
+/* Move focused column left/right by swapping list order.  At the workspace
+ * edge, cross to the adjacent monitor (treats the whole multi-monitor row
+ * as one continuous tile strip).  Multi-client columns are preserved
+ * across the hop. */
 void
 move_column_dir(const Arg *arg)
 {
 	Workspace *ws;
 	Column *cur, *neighbor;
+	Monitor *src_mon, *m_next;
+	Workspace *dst_ws;
+	struct wlr_output *next_out;
+	enum wlr_direction wdir;
+	Client *clients[64];
+	Client *focus_target = NULL;
+	int n = 0, i;
+	Column *new_col = NULL;
 
 	if (!arg || !selmon || !selmon->active_ws)
 		return;
@@ -992,20 +1269,83 @@ move_column_dir(const Arg *arg)
 	if (!cur)
 		return;
 
-	if (arg->i > 0) {
-		if (cur->link.next == &ws->columns)
-			return;
+	if (arg->i > 0 && cur->link.next != &ws->columns) {
 		neighbor = wl_container_of(cur->link.next, neighbor, link);
 		wl_list_remove(&cur->link);
 		wl_list_insert(&neighbor->link, &cur->link);
-	} else if (arg->i < 0) {
-		if (cur->link.prev == &ws->columns)
-			return;
+		arrange(selmon);
+		return;
+	}
+	if (arg->i < 0 && cur->link.prev != &ws->columns) {
 		neighbor = wl_container_of(cur->link.prev, neighbor, link);
 		wl_list_remove(&cur->link);
 		wl_list_insert(neighbor->link.prev, &cur->link);
+		arrange(selmon);
+		return;
 	}
-	arrange(selmon);
+	if (arg->i == 0)
+		return;
+
+	/* At edge — try crossing to adjacent monitor. */
+	wdir = (arg->i > 0) ? WLR_DIRECTION_RIGHT : WLR_DIRECTION_LEFT;
+	next_out = wlr_output_layout_adjacent_output(output_layout, wdir,
+			selmon->wlr_output,
+			selmon->m.x + selmon->m.width / 2.0,
+			selmon->m.y + selmon->m.height / 2.0);
+	if (!next_out)
+		return;
+	m_next = next_out->data;
+	if (!m_next || !m_next->wlr_output->enabled || !m_next->active_ws)
+		return;
+	src_mon = selmon;
+	dst_ws = m_next->active_ws;
+
+	{
+		Client *c;
+		wl_list_for_each(c, &cur->clients, column_link) {
+			if (n >= (int)(sizeof(clients) / sizeof(clients[0])))
+				break;
+			clients[n++] = c;
+		}
+	}
+	if (n == 0)
+		return;
+	focus_target = focustop(src_mon);
+	if (!focus_target || focus_target->column != cur)
+		focus_target = clients[0];
+
+	/* setmon detaches from old column (auto-destroying it when empty)
+	 * and attaches to dst_ws as a fresh column.  We migrate every
+	 * client, then merge them back into a single column so multi-client
+	 * groupings survive the hop. */
+	for (i = 0; i < n; i++) {
+		Client *cc = clients[i];
+		setmon(cc, m_next, 0);
+		if (!new_col) {
+			new_col = cc->column;
+		} else if (cc->column && cc->column != new_col) {
+			Column *stray = cc->column;
+			column_remove_client(cc);
+			column_add_client(new_col, cc);
+			(void)stray; /* column_remove_client auto-destroys when empty */
+		}
+	}
+
+	if (new_col) {
+		wl_list_remove(&new_col->link);
+		if (arg->i > 0)
+			wl_list_insert(&dst_ws->columns, &new_col->link);
+		else
+			wl_list_insert(dst_ws->columns.prev, &new_col->link);
+		dst_ws->focused_col = new_col;
+	}
+
+	selmon = m_next;
+	arrange(src_mon);
+	arrange(m_next);
+	if (focus_target)
+		focusclient(focus_target, 1);
+	printstatus();
 }
 
 /* Mod+Tab style: toggle between the two most recently used workspaces.
@@ -1106,6 +1446,7 @@ move_client_to_ws_n(const Arg *arg)
 	workspace_detach_client(c);
 	workspace_attach_client(target, c);
 	workspace_switch(selmon, target);
+	monitor_compact_workspaces(selmon);
 	arrange(selmon);
 	focusclient(c, 1);
 }
@@ -1141,6 +1482,7 @@ move_client_to_ws_dir(const Arg *arg)
 	workspace_detach_client(c);
 	workspace_attach_client(target, c);
 	workspace_switch(selmon, target);
+	monitor_compact_workspaces(selmon);
 	arrange(selmon);
 	focusclient(c, 1);
 }
