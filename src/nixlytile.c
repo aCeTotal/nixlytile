@@ -276,6 +276,7 @@ const char *osk_layout_upper[OSK_ROWS][OSK_COLS] = {
 
 
 
+#if 0
 VpnConnection *
 vpn_connection_at_index(int idx)
 {
@@ -288,6 +289,7 @@ vpn_connection_at_index(int idx)
 	}
 	return NULL;
 }
+#endif
 
 
 
@@ -343,6 +345,7 @@ vpn_connection_at_index(int idx)
 
 
 
+#if 0
 WifiNetwork *
 wifi_network_at_index(int idx)
 {
@@ -355,6 +358,7 @@ wifi_network_at_index(int idx)
 	}
 	return NULL;
 }
+#endif
 
 
 
@@ -759,93 +763,10 @@ static void close_logging(void);
 void
 cleanup(void)
 {
-	TrayItem *it, *tmp;
-
 	wlr_log(WLR_ERROR, "cleanup() called - starting cleanup sequence");
 	/* Shut down game mode background worker (unfreezes processes if needed) */
 	gm_bg_cleanup();
 	cleanuplisteners();
-	gamepad_cleanup();
-	bt_controller_cleanup();
-	drop_net_icon_buffer();
-	drop_cpu_icon_buffer();
-	drop_clock_icon_buffer();
-	drop_light_icon_buffer();
-	drop_ram_icon_buffer();
-	drop_battery_icon_buffer();
-	drop_mic_icon_buffer();
-	drop_volume_icon_buffer();
-	drop_bluetooth_icon_buffer();
-	drop_steam_icon_buffer();
-	drop_discord_icon_buffer();
-	stop_public_ip_fetch();
-	stop_ssid_fetch();
-	wifi_scan_finish();
-	net_menu_hide_all();
-	wifi_networks_clear();
-	last_clock_render[0] = last_cpu_render[0] = last_ram_render[0] = '\0';
-	last_light_render[0] = last_volume_render[0] = last_mic_render[0] = last_battery_render[0] = '\0';
-	last_net_render[0] = last_fan_render[0] = '\0';
-	last_clock_h = last_cpu_h = last_ram_h = last_light_h = last_volume_h = last_mic_h = last_battery_h = last_net_h = last_fan_h = 0;
-	/* Stop thermal fan management and restore BIOS control */
-	fan_thermal_stop();
-	if (fan_thermal_timer) {
-		wl_event_source_remove(fan_thermal_timer);
-		fan_thermal_timer = NULL;
-	}
-	if (wifi_scan_timer) {
-		wl_event_source_remove(wifi_scan_timer);
-		wifi_scan_timer = NULL;
-	}
-	if (status_timer) {
-		wl_event_source_remove(status_timer);
-		status_timer = NULL;
-	}
-	if (status_cpu_timer) {
-		wl_event_source_remove(status_cpu_timer);
-		status_cpu_timer = NULL;
-	}
-	if (status_hover_timer) {
-		wl_event_source_remove(status_hover_timer);
-		status_hover_timer = NULL;
-	}
-	if (cpu_popup_refresh_timer) {
-		wl_event_source_remove(cpu_popup_refresh_timer);
-		cpu_popup_refresh_timer = NULL;
-	}
-	if (ram_popup_refresh_timer) {
-		wl_event_source_remove(ram_popup_refresh_timer);
-		ram_popup_refresh_timer = NULL;
-	}
-	if (popup_delay_timer) {
-		wl_event_source_remove(popup_delay_timer);
-		popup_delay_timer = NULL;
-	}
-	/* Clean up config rewatch timer */
-	if (config_rewatch_timer) {
-		wl_event_source_remove(config_rewatch_timer);
-		config_rewatch_timer = NULL;
-	}
-	config_needs_rewatch = 0;
-	tray_menu_hide_all();
-	if (tray_event) {
-		wl_event_source_remove(tray_event);
-		tray_event = NULL;
-	}
-	if (tray_vtable_slot)
-		sd_bus_slot_unref(tray_vtable_slot);
-	if (tray_fdo_vtable_slot)
-		sd_bus_slot_unref(tray_fdo_vtable_slot);
-	if (tray_name_slot)
-		sd_bus_slot_unref(tray_name_slot);
-	if (tray_bus)
-		sd_bus_unref(tray_bus);
-	wl_list_for_each_safe(it, tmp, &tray_items, link) {
-		if (it->icon_buf)
-			wlr_buffer_drop(it->icon_buf);
-		wl_list_remove(&it->link);
-		free(it);
-	}
 #ifdef XWAYLAND
 	wlr_xwayland_destroy(xwayland);
 	xwayland = NULL;
@@ -881,11 +802,6 @@ cleanup(void)
 	if (child_pid > 0) {
 		kill(-child_pid, SIGTERM);
 		waitpid(child_pid, NULL, 0);
-	}
-	freestatusfont();
-	if (fcft_initialized) {
-		fcft_fini();
-		fcft_initialized = 0;
 	}
 	cpu_cursor_buffer_destroy(cpu_cursor_buf);
 	cpu_cursor_buf = NULL;
@@ -1118,8 +1034,7 @@ run(const char *startup_cmd)
 	 * monitors are created one at a time.  The grid→pixel conversion
 	 * lives in reload_monitors_conf(), which was previously only called
 	 * on hot-reload (inotify), not at startup. */
-	if (runtime_monitor_count > 0)
-		reload_monitors_conf();
+	/* runtime monitor reload removed (config.c gone) */
 
 	/* Now that the socket exists and the backend is started, run the startup command */
 	if (startup_cmd) {
@@ -1602,6 +1517,7 @@ int runtime_monitor_count = 0;
 int monitor_master_set = 0;  /* Track if master was explicitly configured */
 
 /* Function lookup for keybindings */
+#if 0
 const FuncEntry func_table[] = {
 	{ "quit",              quit,              0 },
 	{ "killclient",        killclient,        0 },
@@ -1616,7 +1532,7 @@ const FuncEntry func_table[] = {
 	{ "togglefloating",    togglefloating,    0 },
 	{ "togglefullscreen",  togglefullscreen,  0 },
 	{ "togglegaps",        togglegaps,        0 },
-	{ "togglestatusbar",   togglestatusbar,   0 },
+	{ "togglewaybar",      togglewaybar,      0 },
 	{ "focusmon",          focusmon,          1 },
 	{ "tagmon",            tagmon,            1 },
 	{ "setlayout",         setlayout,         0 },
@@ -1637,6 +1553,7 @@ const FuncEntry func_table[] = {
 	{ "screenshot_begin", screenshot_begin, 0 },
 	{ NULL, NULL, 0 }
 };
+#endif
 
 /* Parse a single keybinding line: bind = mod+key action [arg] */
 
@@ -2050,13 +1967,9 @@ diag_log_io_stats(void)
 	char out[256];
 	int off = snprintf(out, sizeof(out),
 		"[%02d:%02d:%02d] === I/O (5s) ===\n"
-		"  Disk: read=%.2f MB/s  write=%.2f MB/s\n"
-		"  Net:  down=%.1f Mbps  up=%.1f Mbps  (%s)\n",
+		"  Disk: read=%.2f MB/s  write=%.2f MB/s\n",
 		tm.tm_hour, tm.tm_min, tm.tm_sec,
-		read_mbs, write_mbs,
-		net_last_down_bps > 0 ? net_last_down_bps / 1e6 : 0.0,
-		net_last_up_bps > 0 ? net_last_up_bps / 1e6 : 0.0,
-		net_iface[0] ? net_iface : "none");
+		read_mbs, write_mbs);
 
 	(void)!write(diag_log_fd, out, off);
 
@@ -2171,6 +2084,13 @@ static void
 init_logging(void)
 {
 	#define NIXLY_LOG_DIR "/tmp/nixlytile"
+
+	/* Production mode: skip all log file creation + diag timer when NIXLY_DEBUG
+	 * unset. Eliminates 7 fopen()s, stderr dup, periodic nvidia-smi popen,
+	 * and per-event log writes. Set NIXLY_DEBUG=1 to enable diagnostics. */
+	if (!getenv("NIXLY_DEBUG"))
+		return;
+
 	mkdir(NIXLY_LOG_DIR, 0755);
 
 	/* Save original stderr before redirect */
@@ -2335,29 +2255,8 @@ setup(void)
 	dpy = wl_display_create();
 	event_loop = wl_display_get_event_loop(dpy);
 	wl_list_init(&mons);
-	wl_list_init(&tray_items);
-	status_timer = wl_event_loop_add_timer(event_loop, updatestatusclock, NULL);
-	status_cpu_timer = wl_event_loop_add_timer(event_loop, updatestatuscpu, NULL);
-	status_hover_timer = wl_event_loop_add_timer(event_loop, updatehoverfade, NULL);
-	cache_update_timer = wl_event_loop_add_timer(event_loop, cache_update_timer_cb, NULL);
-	nixpkgs_cache_timer = wl_event_loop_add_timer(event_loop, nixpkgs_cache_timer_cb, NULL);
 	diag_timer = wl_event_loop_add_timer(event_loop, diag_timer_cb, NULL);
-	fan_thermal_start();
 	gm_bg_init();
-	netlink_monitor_setup();
-	tray_init();
-	fcft_initialized = fcft_init(FCFT_LOG_COLORIZE_NEVER, 0, FCFT_LOG_CLASS_ERROR);
-	if (!fcft_initialized)
-		die("couldn't initialize fcft");
-	init_net_icon_paths();
-	if (!loadstatusfont())
-		die("couldn't load statusbar font");
-	tray_update_icons_text();
-	ensure_desktop_entries_loaded();
-	backlight_available = findbacklightdevice(backlight_brightness_path,
-			sizeof(backlight_brightness_path),
-			backlight_max_path, sizeof(backlight_max_path));
-	bluetooth_available = findbluetoothdevice();
 
 	/* Detect GPUs early — env vars (WLR_DRM_NO_ATOMIC, GBM_BACKEND etc.)
 	 * and WLR_DRM_DEVICES filtering must happen before backend creation.
@@ -2642,7 +2541,13 @@ setup(void)
 	 */
 	wl_list_init(&clients);
 	wl_list_init(&fstack);
+	wl_list_init(&closing_anims);
 	wl_list_init(&text_inputs);
+
+	/* Niri-style waybar support: expose zdwl_ipc_manager_v2 so the
+	 * dwl/tags + dwl/window modules can attach.  Replaces the
+	 * outdated stdin status-pipe approach. */
+	dwl_ipc_init(dpy);
 
 	xdg_shell = wlr_xdg_shell_create(dpy, 6);
 	wl_signal_add(&xdg_shell->events.new_toplevel, &new_xdg_toplevel);
@@ -3074,17 +2979,6 @@ setup(void)
 	}
 #endif
 
-	initial_status_refresh();
-	if (status_timer)
-		schedule_status_timer();
-	if (status_cpu_timer) {
-		init_status_refresh_tasks();
-		schedule_next_status_refresh();
-	}
-	if (!wifi_scan_timer)
-		wifi_scan_timer = wl_event_loop_add_timer(event_loop, wifi_scan_timer_cb, NULL);
-	if (status_hover_timer)
-		wl_event_source_timer_update(status_hover_timer, 0);
 	if (diag_timer && diag_log_fd >= 0)
 		wl_event_source_timer_update(diag_timer, 5000);
 }
@@ -3786,9 +3680,7 @@ main(int argc, char *argv[])
 		goto usage;
 
 	/* Load runtime config before applying defaults */
-	load_monitors_conf(); /* Load monitor layout from dedicated config first */
-	load_config();
-	init_keybindings();
+	/* config.c removed; using compiled-in defaults from config.h */
 
 	/* NOTE: Do NOT call set_dgpu_env() here in the compositor process.
 	 * It sets DRI_PRIME, __GLX_VENDOR_LIBRARY_NAME, etc. which are
@@ -3800,44 +3692,15 @@ main(int argc, char *argv[])
 	 * Instead, set_dgpu_env() is called per-process in fork paths:
 	 * spawn(), launcher.c — only for games/apps that need dGPU. */
 
-	/* Build autostart command with wallpaper path if not overridden */
-	{
-		char expanded_wp[PATH_MAX];
-		config_expand_path(wallpaper_path, expanded_wp, sizeof(expanded_wp));
-		/* Only rebuild if autostart_cmd still has the default wallpaper reference */
-		if (strstr(autostart_cmd, ".nixlyos/wallpapers/beach.jpg")) {
-			snprintf(autostart_cmd, sizeof(autostart_cmd),
-				"eval $(gnome-keyring-daemon --start --components=secrets,ssh,pkcs11) & "
-				"thunar --daemon & swaybg -i \"%s\" -m fill <&-", expanded_wp);
-		}
-	}
-
-	if (!startup_cmd)
+	/* If no -s startup command was passed, use the compiled-in
+	 * autostart_cmd (wallpaper, waybar, etc.). */
+	if (!startup_cmd && autostart_cmd[0])
 		startup_cmd = autostart_cmd;
 
 	/* Wayland requires XDG_RUNTIME_DIR for creating its communications socket */
 	if (!getenv("XDG_RUNTIME_DIR"))
 		die("XDG_RUNTIME_DIR must be set");
 	setup();
-	setup_config_watch();
-	setup_monitors_conf_watch();
-	setup_monitor_overlay_watch();
-	gamepad_setup();
-	bt_controller_setup();
-	/* Set GE-Proton as default Steam compatibility tool */
-	steam_set_ge_proton_default();
-
-	/* Defer all cache updates — let the compositor settle first.
-	 * Phase 0=git, 1=file, 2=gaming; each fires 30 min apart. */
-	cache_update_phase = 0;
-	if (cache_update_timer)
-		wl_event_source_timer_update(cache_update_timer, 120000); /* 2 minutes */
-	/* Generate git and file caches immediately so search works right away */
-	git_cache_update_start();
-	file_cache_update_start();
-	/* Generate nixpkgs cache now if missing, then schedule weekly updates */
-	nixpkgs_cache_update_start();
-	schedule_nixpkgs_cache_timer();
 	run(startup_cmd);
 	cleanup();
 	return EXIT_SUCCESS;

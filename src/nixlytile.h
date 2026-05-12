@@ -19,18 +19,14 @@
 #include <limits.h>
 #include <getopt.h>
 #include <libinput.h>
-#include <cairo/cairo.h>
-#include <librsvg/rsvg.h>
 #include <linux/input-event-codes.h>
 #include <linux/input.h>
 #include <math.h>
-#include <glib.h>
 #include <drm_fourcc.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <fcft/fcft.h>
 #include <pixman.h>
-#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <signal.h>
 #include <sys/prctl.h>
 #include <stdio.h>
@@ -174,7 +170,7 @@
 #define GAMEPAD_CURSOR_SPEED 15.0
 #define GAMEPAD_CURSOR_ACCEL 2.5
 #define GAMEPAD_INACTIVITY_TIMEOUT_MS 10000
-#define GAMEPAD_BT_INACTIVITY_TIMEOUT_MS 600000
+#define GAMEPAD_BT_INACTIVITY_TIMEOUT_MS 240000
 #define GAMEPAD_INACTIVITY_CHECK_MS 5000
 #define GAMEPAD_PENDING_MAX 8
 #define BT_SCAN_INTERVAL_MS 300000
@@ -253,6 +249,8 @@ typedef struct {
 /* ── forward declarations ──────────────────────────────────────────── */
 typedef struct LayoutNode LayoutNode;
 typedef struct Monitor Monitor;
+typedef struct Workspace Workspace;
+typedef struct Column Column;
 typedef struct StatusBar StatusBar;
 typedef struct StatusModule StatusModule;
 typedef struct GamepadDevice GamepadDevice;
@@ -369,7 +367,9 @@ struct StatusFont {
 	int height;
 };
 
-/* ── status bar types ──────────────────────────────────────────────── */
+/* status bar / tray / network / popup / nixpkgs / launcher / monitor-popup
+ * / gamepad types removed — those modules are gone. */
+#if 0
 struct StatusModule {
 	struct wlr_scene_tree *tree;
 	struct wlr_scene_tree *bg;
@@ -632,6 +632,8 @@ struct TrayItem {
 	struct wl_list link;
 };
 
+#endif /* status bar types disabled */
+
 /* ── buffer types ──────────────────────────────────────────────────── */
 struct PixmanBuffer {
 	struct wlr_buffer base;
@@ -663,7 +665,7 @@ struct CpuSample {
 	unsigned long long total;
 };
 
-/* ── modal overlay ─────────────────────────────────────────────────── */
+#if 0 /* deleted module types — modal overlay, nixpkgs, network, monitor-popup, gamepad */
 typedef struct {
 	struct wlr_scene_tree *tree;
 	struct wlr_scene_tree *bg;
@@ -922,6 +924,8 @@ struct GamepadDevice {
 };
 
 
+#endif /* status bar / tray / etc types disabled */
+
 /* ── GPU info ──────────────────────────────────────────────────────── */
 typedef struct {
 	char card_path[64];
@@ -995,7 +999,64 @@ typedef struct {
 	int is_steam_overlay;       /* STEAM_OVERLAY == 1 */
 	int is_steam_bigpicture;    /* STEAM_BIGPICTURE == 1 */
 #endif
+
+	/* ── Niri-style placement (phase 2) ───────────────────────────── */
+	Column *column;               /* owning column; NULL = floating/unmapped */
+	struct wl_list column_link;   /* link in Column.clients (top→bottom) */
+
+	/* ── Per-client geometry animation (phase 4) ──────────────────
+	 * target_geom is what the layout wants; geom is what's currently
+	 * shown (moves toward target each anim tick).  When unset
+	 * (anim_active = 0) the client snaps directly via resize(). */
+	struct wlr_box target_geom;
+	int anim_active;              /* 1 = geom is animating toward target */
+	/* Spring state for geom animation (column-fullscreen toggle,
+	 * preset-width switch).  Live position is double-precision so
+	 * small spring steps accumulate cleanly without truncation. */
+	double geom_fx, geom_fy, geom_fw, geom_fh;
+	double geom_vx, geom_vy, geom_vw, geom_vh;
+	/* Cached size from last expensive resize() pass — used to skip
+	 * clip + scale recomputation when only position changed
+	 * (camera scroll), avoiding per-frame surface-tree walks for
+	 * heavy clients (Blender, Chrome). */
+	int last_size_w, last_size_h;
+	/* Cached last-configured size — used to dedupe ConfigureNotify
+	 * events to X11 clients.  Without this, every camera-scroll
+	 * frame sends Blender a ConfigureNotify with new x/y (same w/h)
+	 * which it interprets as a window-move and may trigger reflow
+	 * / redraw per frame → choppiness + "doesn't adjust until
+	 * refocus" symptom. */
+	int last_configured_w, last_configured_h;
+	/* Anim-time snapshot: while a workspace anim is running we
+	 * replace the live surface tree with a static scene_buffer
+	 * holding the current buffer.  Heavy clients (Blender, Chrome,
+	 * games) can't disturb us with mid-anim commits or render
+	 * stalls — we just blit the cached texture at each new
+	 * position.  Restored at anim end. */
+	struct wlr_scene_buffer *frozen_buffer;
+	/* ── Niri-style open anim (scale + fade) ───────────────────────
+	 * open_progress: 0.0 at map → animates to 1.0.  Scale lerps
+	 * 0.5→1.0, opacity 0→1.  Active when open_progress < 1.0. */
+	double open_progress;
+	double open_progress_vel;
+	int open_anim_active;
 } Client;
+
+/* ── Standalone close anim ───────────────────────────────────────────
+ * When a client unmaps, we snapshot its last buffer into an independent
+ * scene_buffer (parented under layers[LyrFloat]), then animate
+ * scale 1→0.5 + opacity 1→0 over ~200ms.  Decoupled from Client so the
+ * underlying surface/Client lifecycle can complete normally. */
+typedef struct ClosingAnim {
+	struct wl_list link;
+	Monitor *mon;
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_buffer *buffer;
+	struct wlr_box geom;
+	int natural_w, natural_h;
+	double progress;
+	double vel;
+} ClosingAnim;
 
 /* ── binary tree tiling layout node ───────────────────────────────── */
 struct LayoutNode {
@@ -1047,6 +1108,62 @@ typedef struct {
 	struct wl_listener surface_commit;
 } LayerSurface;
 
+/* ── workspace + column (Niri-style) ──────────────────────────────────
+ * Per-monitor stack of workspaces (vertical). Each workspace contains an
+ * ordered list of columns laid out horizontally. Each column stacks 1+
+ * clients vertically. Animations: workspace.scroll_x is camera offset
+ * within the row; ws.scene_y is animation offset for vertical switches.
+ *
+ * NOTE (phase 2): structs + per-monitor list are added; legacy dwl tags
+ * remain authoritative until phase 3 swaps layout/view to use these.
+ */
+struct Column {
+	struct wl_list link;          /* link in Workspace.columns (head→tail = left→right) */
+	struct wl_list clients;       /* Client.column_link, top→bottom stack */
+	int n_clients;
+	int x, y;                     /* current rendered position (integer snapshot of x_f) */
+	int width, height;
+	int target_x, target_y;       /* spring targets */
+	int target_width, target_height;
+	int fullscreen;               /* Niri-style: column expanded to full screen width */
+	/* Niri-style preset width index.  -1 = use default (preset 2 = 0.5).
+	 * Mod+R cycles forward through preset_column_widths[].  When fullscreen
+	 * is set, width is forced to monitor width regardless of width_idx. */
+	int width_idx;
+	/* Spring state for col->x and col->width — when a column is
+	 * inserted, removed, resized (fullscreen toggle / preset cycle)
+	 * or a sibling changes width, the column must SLIDE/SCALE to
+	 * its new target rather than teleport. */
+	double x_f, x_vel;
+	double width_f, width_vel;
+	int just_created;             /* 1 = snap *_f to targets on first layout */
+	Workspace *ws;
+};
+
+struct Workspace {
+	struct wl_list link;          /* link in Monitor.workspaces (head→tail = top→bottom) */
+	struct wl_list columns;       /* Column.link */
+	struct wlr_scene_tree *scene; /* parent for all columns/clients in this ws */
+	int idx;                      /* stable id per monitor (auto-increment) */
+	int scroll_x;                 /* camera offset within row (int snapshot of _f) */
+	int target_scroll_x;          /* spring target */
+	double scroll_x_f;            /* spring live position */
+	double scroll_x_vel;          /* spring velocity */
+	int n_columns;
+	Monitor *mon;
+	Column *focused_col;          /* last-focused column for view-restore */
+};
+
+/* Niri-style spring parameters.  Mass=1, damping=damping ratio
+ * (1.0 = critically damped, no overshoot; <1 = under-damped, bounce;
+ * >1 = over-damped, slow), stiffness = spring constant.  Used by
+ * spring_tick() in anim.c. */
+typedef struct {
+	double mass;
+	double damping;
+	double stiffness;
+} SpringParams;
+
 /* ── monitor ───────────────────────────────────────────────────────── */
 struct Monitor {
 	struct wl_list link;
@@ -1061,14 +1178,6 @@ struct Monitor {
 	struct wlr_box m;
 	struct wlr_box w;
 	struct wl_list layers[4];
-	StatusBar statusbar;
-	ModalOverlay modal;
-	NixpkgsOverlay nixpkgs;
-	WifiPasswordPopup wifi_popup;
-	SudoPopup sudo_popup;
-	OnScreenKeyboard osk;
-	MonitorSetup monitor_setup;
-	GamepadMenu gamepad_menu;
 	const Layout *lt[2];
 	int gaps;
 	int showbar;
@@ -1207,6 +1316,26 @@ struct Monitor {
 	int stats_panel_width;
 	uint64_t stats_panel_anim_start;
 	int stats_panel_animating;
+
+	/* ── Niri-style workspaces (phase 2 — parallel to legacy tagset[]) ── */
+	struct wl_list workspaces;    /* Workspace.link, ordered top→bottom */
+	Workspace *active_ws;         /* currently visible workspace */
+	Workspace *prev_ws;           /* previously-active workspace (Mod+Tab toggle) */
+	int next_ws_id;               /* auto-increment for Workspace.idx */
+	int n_workspaces;
+	double ws_y_offset;           /* live vertical-switch animation offset */
+	double ws_y_vel;              /* spring velocity for ws_y_offset */
+	uint64_t last_anim_ns;        /* last anim tick timestamp */
+	int anim_was_active;          /* edge-detection for freeze/unfreeze */
+	/* Spring state for the tile area (m->w).  When a layer-shell
+	 * surface like waybar (de)appears, m->w changes — but stepping
+	 * m->w directly snaps every tile.  Spring it so the edge facing
+	 * the toggling layer slides smoothly while the opposite edge
+	 * stays locked. */
+	struct wlr_box w_target;
+	double w_x_f, w_y_f, w_w_f, w_h_f;
+	double w_x_vel, w_y_vel, w_w_vel, w_h_vel;
+	int w_initialized;
 };
 
 /* ── extern globals ────────────────────────────────────────────────── */
@@ -1333,6 +1462,7 @@ extern struct wlr_xdg_activation_v1 *activation;
 extern struct wlr_xdg_decoration_manager_v1 *xdg_decoration_mgr;
 extern struct wl_list clients;
 extern struct wl_list fstack;
+extern struct wl_list closing_anims; /* ClosingAnim.link */
 extern struct wlr_idle_notifier_v1 *idle_notifier;
 extern struct wlr_idle_inhibit_manager_v1 *idle_inhibit_mgr;
 extern struct wlr_layer_shell_v1 *layer_shell;
@@ -1435,6 +1565,7 @@ extern int monovl_watch_wd;
 extern struct wl_event_source *monovl_watch_source;
 
 /* status timers */
+#if 0 /* status / launcher / network / tray / gamepad / bt globals removed */
 extern struct wl_event_source *status_timer;
 extern struct wl_event_source *status_cpu_timer;
 extern struct wl_event_source *status_hover_timer;
@@ -1456,6 +1587,7 @@ extern char gamepad_pending_paths[][128];
 extern int gamepad_pending_count;
 extern struct wl_event_source *gamepad_pending_timer;
 extern struct wl_event_source *gamepad_cursor_timer;
+#endif /* status etc */
 
 /* dgpu */
 extern const char *dgpu_programs[];
@@ -1473,7 +1605,7 @@ extern struct wl_event_source *dgpu_power_watchdog;
 extern struct CpuCursorBuffer *cpu_cursor_buf;
 extern int cpu_cursor_active;
 
-/* bluetooth */
+#if 0 /* bluetooth removed */
 extern struct wl_event_source *bt_scan_timer;
 extern struct wl_event_source *bt_bus_event;
 extern sd_bus *bt_bus;
@@ -1705,8 +1837,9 @@ extern char net_icon_wifi_50_resolved[PATH_MAX];
 extern char net_icon_wifi_25_resolved[PATH_MAX];
 extern char net_icon_eth_resolved[PATH_MAX];
 extern char net_icon_no_conn_resolved[PATH_MAX];
+#endif /* status etc globals */
 
-/* misc */
+#if 0 /* misc statusbar / launcher / nixpkgs globals removed */
 extern const double light_step;
 extern const double volume_step;
 extern const double volume_max_percent;
@@ -1728,6 +1861,7 @@ extern const uint32_t ram_popup_refresh_interval_ms;
 extern const float net_menu_row_bg[];
 extern const float net_menu_row_bg_hover[];
 extern const double status_icon_scale;
+#endif
 
 /* runtime fonts */
 extern char *runtime_fonts[];
@@ -1790,6 +1924,7 @@ void draw_border(struct wlr_scene_tree *parent, int x, int y,
 		int w, int h, int thickness, const float color[static 4]);
 void drawroundedrect(struct wlr_scene_tree *parent, int x, int y,
 		int width, int height, const float color[static 4]);
+#if 0 /* statusbar / tray helpers removed */
 struct wlr_buffer *statusbar_buffer_from_argb32(const uint32_t *data, int width, int height);
 struct wlr_buffer *statusbar_buffer_from_argb32_raw(const uint32_t *data, int width, int height);
 struct wlr_buffer *statusbar_scaled_buffer_from_argb32(const uint32_t *data,
@@ -1811,12 +1946,14 @@ void add_icon_root_paths(const char *base, const char *themes[], size_t theme_co
 int loadstatusfont(void);
 void freestatusfont(void);
 int status_text_width(const char *text);
+void fix_tray_argb32(uint32_t *pixels, size_t count, int use_rgba_order);
+#endif
+
 struct CpuCursorBuffer *cpu_cursor_buffer_create(int drm_fd, uint32_t w, uint32_t h, int owns_fd);
 void cpu_cursor_buffer_destroy(struct CpuCursorBuffer *buf);
 void nixly_cursor_set_xcursor(const char *name);
 void nixly_cursor_set_client_surface(struct wlr_surface *surface, int hx, int hy);
 int resolve_asset_path(const char *path, char *out, size_t len);
-void fix_tray_argb32(uint32_t *pixels, size_t count, int use_rgba_order);
 
 /* Pending launch tracking — remember tag/monitor at launch time so
  * slow-starting apps land on the tag where they were launched, even
@@ -1828,8 +1965,9 @@ void pending_launch_add(pid_t pid, uint32_t tags, const char *output_name);
 int pending_launch_find(pid_t client_pid, uint32_t *out_tags,
 	char *out_output, size_t out_output_sz);
 
-/* statusbar.c */
+#if 0 /* statusbar.c removed */
 void normalize_proc_name(char *name);
+#endif
 
 /* client_utils.c */
 pid_t client_get_pid(Client *c);
@@ -1876,6 +2014,8 @@ void fullscreennotify(struct wl_listener *listener, void *data);
 void setpsel(struct wl_listener *listener, void *data);
 void setsel(struct wl_listener *listener, void *data);
 void resize(Client *c, struct wlr_box geo, int interact);
+void client_apply_scene_geom(Client *c, struct wlr_box geo);
+void client_send_configure_only(Client *c, int w, int h);
 void tag(const Arg *arg);
 void tagmon(const Arg *arg);
 void toggletag(const Arg *arg);
@@ -1902,6 +2042,60 @@ float detect_video_framerate(Client *c);
 int any_client_fullscreen(void);
 Client *get_fullscreen_client(void);
 int is_process_running(const char *name);
+
+/* workspace.c (Niri-style) */
+Workspace *workspace_create(Monitor *m);
+void workspace_destroy(Workspace *ws);
+Column *column_create(Workspace *ws);
+void column_destroy(Column *col);
+void column_add_client(Column *col, Client *c);
+void column_remove_client(Client *c);
+void monitor_init_workspaces(Monitor *m);
+void monitor_cleanup_workspaces(Monitor *m);
+void workspace_attach_client(Workspace *ws, Client *c);
+void workspace_detach_client(Client *c);
+void workspace_focus_client(Client *c);
+void workspace_layout(Workspace *ws);
+void monitor_apply_positions(Monitor *m);
+void workspace_switch(Monitor *m, Workspace *target);
+void workspace_focus_dir(Monitor *m, int dir);
+Column *workspace_focus_col_dir(Workspace *ws, int dir);
+void focus_workspace_dir(const Arg *arg);
+void focus_column_dir(const Arg *arg);
+void move_column_dir(const Arg *arg);
+void move_client_to_ws_dir(const Arg *arg);
+void focus_workspace_n(const Arg *arg);
+void move_client_to_ws_n(const Arg *arg);
+void focus_last_workspace(const Arg *arg);
+void toggle_column_fullscreen(const Arg *arg);
+void switch_preset_column_width(const Arg *arg);
+void maximize_column(const Arg *arg);
+void center_column(const Arg *arg);
+void swap_window_dir(const Arg *arg);
+void expel_window_from_column(const Arg *arg);
+void move_window_in_column_dir(const Arg *arg);
+void focus_window_in_column_dir(const Arg *arg);
+extern const double preset_column_widths[];
+extern const int n_preset_column_widths;
+extern const int default_column_width_idx;
+
+/* dwl_ipc.c — zdwl_ipc_manager_v2 server (waybar dwl/tags/window) */
+void dwl_ipc_init(struct wl_display *display);
+void dwl_ipc_finish(void);
+void dwl_ipc_publish(void);
+
+/* anim.c */
+int anim_tick(double *current, double target, double rate, double dt);
+int spring_tick(double *pos, double *vel, double target, SpringParams sp, double dt);
+int monitor_anim_tick(Monitor *m, double dt);
+void client_set_target_geom(Client *c, struct wlr_box g);
+void client_scale_to_box(Client *c, int box_w, int box_h);
+void client_scale_reset(Client *c);
+void client_unfreeze(Client *c);
+void client_start_open_anim(Client *c);
+void anim_spawn_close(Monitor *m, struct wlr_buffer *buffer, struct wlr_box geom);
+void closing_anims_tick(Monitor *m, double dt, int *still);
+void client_apply_open_anim(Client *c);
 
 /* layout.c */
 void arrange(Monitor *m);
@@ -2032,7 +2226,14 @@ RuntimeMonitorConfig *find_monitor_config(const char *name);
 void calculate_monitor_position(Monitor *m, RuntimeMonitorConfig *cfg, int *out_x, int *out_y);
 void monitor_effective_size(Monitor *m, int *w, int *h);
 
-/* statusbar.c */
+/* dwl-style status broadcast on stdout — waybar's dwl/tags module
+ * reads this from its stdin to render workspace selectors. */
+void printstatus(void);
+
+/* Toggle waybar via SIGUSR1 (in workspace.c) */
+void togglewaybar(const Arg *arg);
+
+#if 0 /* statusbar.c / fancontrol.c / tray.c / network.c / popup.c removed */
 void initstatusbar(Monitor *m);
 void layoutstatusbar(Monitor *m, const struct wlr_box *area,
 		struct wlr_box *client_area);
@@ -2075,12 +2276,12 @@ int status_should_render(StatusModule *module, int barh, const char *text,
 void initial_status_refresh(void);
 void schedule_status_timer(void);
 void schedule_next_status_refresh(void);
+int any_bar_visible(void);
 int status_task_hover_active(void (*fn)(void));
 void netlink_monitor_setup(void);
 void trigger_status_task_now(void (*fn)(void));
 void set_status_task_due(void (*fn)(void), uint64_t due_ms);
 void schedule_hover_timer(void);
-void togglestatusbar(const Arg *arg);
 int ensure_cpu_icon_buffer(int target_h);
 void drop_cpu_icon_buffer(void);
 int ensure_light_icon_buffer(int target_h);
@@ -2273,8 +2474,9 @@ void osk_send_backspace(Monitor *m);
 void osk_send_text(const char *text);
 int toast_hide_timer(void *data);
 void toast_show(Monitor *m, const char *message, int duration_ms);
+#endif /* statusbar / fan / tray / network / popup */
 
-/* monitor_setup.c */
+#if 0 /* monitor_setup.c — partly broken, types missing */
 void monitor_setup_show(Monitor *m);
 void monitor_setup_hide(Monitor *m);
 void monitor_setup_render(Monitor *m);
@@ -2295,8 +2497,9 @@ int schedule_monitor_setup_popup(void);
 /* monitor_setup.c — external overlay (nixlycc IPC) */
 void setup_monitor_overlay_watch(void);
 void monitor_overlay_update(void);
+#endif /* monitor_setup.c */
 
-/* launcher.c */
+#if 0 /* launcher.c / nixpkgs.c removed */
 void modal_show(const Arg *arg);
 void modal_show_files(const Arg *arg);
 void modal_show_git(const Arg *arg);
@@ -2354,6 +2557,7 @@ int nixpkgs_cache_timer_cb(void *data);
 void schedule_nixpkgs_cache_timer(void);
 int cache_update_timer_cb(void *data);
 void schedule_cache_update_timer(void);
+#endif /* launcher / nixpkgs */
 
 /* gpu.c */
 void detect_gpus(void);
@@ -2365,7 +2569,7 @@ void set_dgpu_env(void);
 void set_steam_env(void);
 
 
-/* gamepad.c */
+#if 0 /* gamepad.c / bluetooth.c removed */
 void gamepad_menu_show(Monitor *m);
 void gamepad_menu_hide(Monitor *m);
 void gamepad_menu_hide_all(void);
@@ -2405,6 +2609,7 @@ void bt_pair_device(const char *path);
 void bt_connect_device(const char *path);
 void bt_trust_device(const char *path);
 int bt_device_signal_cb(sd_bus_message *m, void *userdata, sd_bus_error *error);
+#endif /* gamepad / bluetooth */
 
 /* gamemode.c */
 void update_game_mode(void);
@@ -2454,7 +2659,7 @@ float ease_out_cubic(float t);
 /* nixlytile.c */
 void steam_set_ge_proton_default(void);
 
-/* bluetooth.c */
+#if 0 /* bluetooth.c / config.c removed */
 void cec_switch_to_active_source(void);
 void gamepanel(const Arg *arg);
 Monitor *stats_panel_visible_monitor(void);
@@ -2467,6 +2672,7 @@ int config_watch_handler(int fd, uint32_t mask, void *data);
 void setup_config_watch(void);
 void init_keybindings(void);
 void config_expand_path(const char *src, char *dst, size_t dstlen);
+#endif
 
 /* layer.c */
 void createlayersurface(struct wl_listener *listener, void *data);
@@ -2578,7 +2784,7 @@ int node_contains_client(LayoutNode *node, Client *c);
 int subtree_bounds(LayoutNode *node, Monitor *m, struct wlr_box *out);
 LayoutNode *ancestor_split(LayoutNode *node, int want_vert);
 
-/* btrtile.c */
+#if 0 /* btrtile.c removed */
 void btrtile_insert(LayoutNode **root, Client *c, Monitor *m);
 void btrtile_remove(LayoutNode **root, Client *c);
 void remove_client(Monitor *m, Client *c);
@@ -2604,6 +2810,7 @@ int can_move_tile(Monitor *m, Client *source, Client *target);
 void swap_tiles_in_tree(Monitor *m, Client *c1, Client *c2);
 extern int resizing_from_mouse;
 extern int drag_was_alone_in_column;
+#endif /* btrtile.c */
 
 /* XWayland */
 #ifdef XWAYLAND
@@ -2618,7 +2825,7 @@ void setoverrideredirect(struct wl_listener *listener, void *data);
 void xwaylandready(struct wl_listener *listener, void *data);
 #endif
 
-/* screenshot.c */
+#if 0 /* screenshot.c removed */
 #define SCREENSHOT_NONE      0
 #define SCREENSHOT_PENDING   1
 #define SCREENSHOT_SELECTING 2
@@ -2630,6 +2837,7 @@ void screenshot_handle_button(uint32_t button, uint32_t state, uint32_t time_mse
 void screenshot_handle_motion(void);
 void screenshot_handle_key(xkb_keysym_t sym);
 void screenshot_cancel(void);
+#endif
 
 /* diagnostics logging */
 extern int diag_log_fd;

@@ -100,28 +100,40 @@ arrange(Monitor *m)
 
 	strncpy(m->ltsymbol, m->lt[m->sellt]->symbol, LENGTH(m->ltsymbol));
 
-	/* We move all clients (except fullscreen and unmanaged) to LyrTile while
-	 * in floating layout to avoid "real" floating clients be always on top */
+	/* Niri-style: floating clients live on LyrFloat, tiled on LyrTile,
+	 * fullscreen on LyrFS.  Reparent if a layer transition happened. */
 	wl_list_for_each(c, &clients, link) {
 		if (c->mon != m || c->scene->node.parent == layers[LyrFS])
 			continue;
 
-		struct wlr_scene_tree *target =
-				(!m->lt[m->sellt]->arrange && c->isfloating)
-						? layers[LyrTile]
-						: (m->lt[m->sellt]->arrange && c->isfloating)
-								? layers[LyrFloat]
-								: NULL;
+		struct wlr_scene_tree *target = c->isfloating
+				? layers[LyrFloat]
+				: layers[LyrTile];
 		if (target && c->scene->node.parent != target)
 			wlr_scene_node_reparent(&c->scene->node, target);
 	}
 
-	if (m->lt[m->sellt]->arrange)
-		m->lt[m->sellt]->arrange(m);
+	/* Workspace layout (replaces tile/monocle/btrtile) */
+	if (m->active_ws)
+		workspace_layout(m->active_ws);
+
+	monitor_apply_positions(m);
+
 	motionnotify(0, NULL, 0, 0, 0, 0);
 	checkidleinhibitor(NULL);
-	refreshstatustags();
-	warpcursor(focustop(selmon));
+	/* Cursor warp deliberately omitted — hover-driven sloppy-focus
+	 * would otherwise snap the pointer to tile-center on every move.
+	 * Keyboard-driven focus changes warp via focusclient(lift=1). */
+
+	/* Kick off a frame so the anim tick fires.  Without this, a
+	 * pure target-only change (e.g. ws->target_scroll_x updated
+	 * but ws->scroll_x not yet moved) produces no scene damage →
+	 * rendermon never runs → animation never starts → user perceives
+	 * "stiff" instant snaps instead of smooth motion. */
+	if (m->wlr_output && !m->frame_scheduled) {
+		wlr_output_schedule_frame(m->wlr_output);
+		m->frame_scheduled = 1;
+	}
 }
 
 void
@@ -130,6 +142,10 @@ arrangelayer(Monitor *m, struct wl_list *list, struct wlr_box *usable_area, int 
 	LayerSurface *l;
 	struct wlr_box full_area = m->m;
 
+	/* Niri parity: layer-shell surfaces (waybar) get the FULL monitor
+	 * rect.  Visual gap around waybar is done by waybar's CSS margin,
+	 * not by compositor inset (Niri behavior).  Doing inset here makes
+	 * waybar narrower than its Niri counterpart. */
 	wl_list_for_each(l, list, link) {
 		struct wlr_layer_surface_v1 *layer_surface = l->layer_surface;
 
@@ -152,6 +168,7 @@ arrangelayers(Monitor *m)
 	struct wlr_box client_area;
 	struct wlr_box old_w = m->w;
 	LayerSurface *l;
+	int gap = (m->gaps && gappx > 0) ? (int)gappx : 0;
 	uint32_t layers_above_shell[] = {
 		ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY,
 		ZWLR_LAYER_SHELL_V1_LAYER_TOP,
@@ -163,21 +180,42 @@ arrangelayers(Monitor *m)
 	for (i = 3; i >= 0; i--)
 		arrangelayer(m, &m->layers[i], &usable_area, 1);
 
+	/* Add gap-px around tile area: gap below waybar, gap above bottom
+	 * edge, gap on left + right.  This guarantees tiles are inset by
+	 * exactly gappx from the waybar AND from screen edges, matching
+	 * the inter-tile spacing.  m->w is then the bbox tiles render in
+	 * directly (no further inset needed in workspace_layout). */
+	if (gap > 0 && usable_area.width > 2 * gap && usable_area.height > 2 * gap) {
+		usable_area.x += gap;
+		usable_area.y += gap;
+		usable_area.width -= 2 * gap;
+		usable_area.height -= 2 * gap;
+	}
+
 	client_area = usable_area;
-	layoutstatusbar(m, &usable_area, &client_area);
 
 	if (!wlr_box_equal(&client_area, &old_w)) {
-		m->w = client_area;
+		/* Set the target tile-area.  m->w springs toward this each
+		 * frame in monitor_anim_tick so a waybar toggle slides the
+		 * top edge of every tile smoothly while the bottom stays
+		 * locked (mathematically: m->w.y springs DOWN by 32, m->w.height
+		 * springs UP by 32, so y+height stays constant). */
+		m->w_target = client_area;
+		if (!m->w_initialized) {
+			/* First arrangelayers call — snap, don't animate. */
+			m->w = client_area;
+			m->w_x_f = client_area.x;
+			m->w_y_f = client_area.y;
+			m->w_w_f = client_area.width;
+			m->w_h_f = client_area.height;
+			m->w_initialized = 1;
+		}
 		arrange(m);
-	} else {
-		positionstatusmodules(m);
 	}
 
 	/* Arrange non-exlusive surfaces from top->bottom */
 	for (i = 3; i >= 0; i--)
 		arrangelayer(m, &m->layers[i], &usable_area, 0);
-
-	refreshstatusclock();
 
 	/* Find topmost keyboard interactive layer, if such a layer exists */
 	for (i = 0; i < (int)LENGTH(layers_above_shell); i++) {

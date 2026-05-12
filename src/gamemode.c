@@ -2,6 +2,10 @@
 #include "client.h"
 #include <pthread.h>
 
+/* fancontrol.c removed; fan_boost_*_ stubs */
+static inline void fan_boost_activate(void) { }
+static inline void fan_boost_deactivate(void) { }
+
 /*
  * ioprio constants (not always available in headers)
  */
@@ -2341,41 +2345,7 @@ update_game_mode(void)
 		 */
 		game_mode_pid = client_get_pid(c);
 
-		/* Stop ALL background timers to eliminate compositor interrupts */
-		if (cache_update_timer)
-			wl_event_source_timer_update(cache_update_timer, 0);
-		if (nixpkgs_cache_timer)
-			wl_event_source_timer_update(nixpkgs_cache_timer, 0);
-		if (status_cpu_timer)
-			wl_event_source_timer_update(status_cpu_timer, 0);
-		if (status_timer)
-			wl_event_source_timer_update(status_timer, 0);
-		if (status_hover_timer)
-			wl_event_source_timer_update(status_hover_timer, 0);
-		if (cpu_popup_refresh_timer)
-			wl_event_source_timer_update(cpu_popup_refresh_timer, 0);
-		if (ram_popup_refresh_timer)
-			wl_event_source_timer_update(ram_popup_refresh_timer, 0);
-		if (wifi_scan_timer)
-			wl_event_source_timer_update(wifi_scan_timer, 0);
-		if (video_check_timer)
-			wl_event_source_timer_update(video_check_timer, 0);
-		if (popup_delay_timer)
-			wl_event_source_timer_update(popup_delay_timer, 0);
-		if (config_rewatch_timer)
-			wl_event_source_timer_update(config_rewatch_timer, 0);
-		if (gamepad_inactivity_timer)
-			wl_event_source_timer_update(gamepad_inactivity_timer, 0);
-		if (gamepad_cursor_timer)
-			wl_event_source_timer_update(gamepad_cursor_timer, 0);
-		if (hz_osd_timer)
-			wl_event_source_timer_update(hz_osd_timer, 0);
-		if (osk_dpad_repeat_timer)
-			wl_event_source_timer_update(osk_dpad_repeat_timer, 0);
-		if (fan_thermal_timer)
-			wl_event_source_timer_update(fan_thermal_timer, 0);
-		/* NOTE: Keep bt_scan_timer - needed for controller reconnection */
-		/* NOTE: Keep gamepad_pending_timer - needed for controller input */
+		/* statusbar / network / launcher / gamepad timers removed */
 
 		/*
 		 * Dispatch blocking system operations to background thread.
@@ -2388,16 +2358,7 @@ update_game_mode(void)
 		/* Hide statusbar on ALL monitors to save GPU compositing time */
 		wl_list_for_each(m, &mons, link) {
 			m->showbar = 0;
-			if (m->statusbar.tree)
-				wlr_scene_node_set_enabled(&m->statusbar.tree->node, 0);
 		}
-
-		/* Hide all popups and menus - they would just be occluded anyway */
-		net_menu_hide_all();
-		wifi_popup_hide_all();
-		sudo_popup_hide_all();
-		tray_menu_hide_all();
-		/* Don't hide modal/nixpkgs - user might be searching while game loads */
 
 		/*
 		 * Boost compositor thread to real-time scheduling for lower
@@ -2457,41 +2418,23 @@ update_game_mode(void)
 		wlr_log(WLR_INFO, "Game mode activated (non-game fullscreen) - pausing background tasks");
 
 
-		if (cache_update_timer)
-			wl_event_source_timer_update(cache_update_timer, 0);
-		if (nixpkgs_cache_timer)
-			wl_event_source_timer_update(nixpkgs_cache_timer, 0);
-		if (status_cpu_timer)
-			wl_event_source_timer_update(status_cpu_timer, 0);
-
 	} else if (!game_mode_active && was_active) {
 		/*
 		 * EXITING GAME MODE - restore everything
 		 */
 		wlr_log(WLR_INFO, "Game mode deactivated - restoring normal operation");
 
-		/* Resume all background timers */
-		schedule_cache_update_timer();
-		schedule_nixpkgs_cache_timer();
-		schedule_status_timer();
-		schedule_next_status_refresh();
-
 		/* Restore additional timers if we were in ultra mode */
 		if (was_ultra) {
-			/* Re-enable statusbar on all monitors and recalculate area */
+			/* Re-enable showbar on all monitors */
 			wl_list_for_each(m, &mons, link) {
 				m->showbar = 1;
-				if (m->statusbar.tree)
-					wlr_scene_node_set_enabled(&m->statusbar.tree->node, 1);
 				/* Disable game VRR on all monitors when leaving game mode */
 				if (m->game_vrr_active)
 					disable_game_vrr(m);
 				arrangelayers(m);
 			}
 
-			/* Schedule deferred timer restarts for non-critical tasks */
-			if (wifi_scan_timer)
-				wl_event_source_timer_update(wifi_scan_timer, 5000);  /* 5s delay */
 			if (config_rewatch_timer)
 				wl_event_source_timer_update(config_rewatch_timer, 2000);
 
@@ -2543,6 +2486,7 @@ update_game_mode(void)
 	}
 }
 
+#if 0 /* stats panel removed */
 int
 stats_panel_anim_cb(void *data)
 {
@@ -3411,3 +3355,4 @@ stats_panel_handle_key(Monitor *m, xkb_keysym_t sym)
 
 	return 0;
 }
+#endif /* stats panel */

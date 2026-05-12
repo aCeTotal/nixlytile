@@ -256,23 +256,47 @@ commitnotify(struct wl_listener *listener, void *data)
 	Client *c = wl_container_of(listener, c, commit);
 
 	if (c->surface.xdg->initial_commit) {
-		/*
-		 * Get the monitor this client will be rendered on
-		 * Note that if the user set a rule in which the client is placed on
-		 * a different monitor based on its title, this will likely select
-		 * a wrong monitor.
-		 */
 		applyrules(c);
 		if (c->mon) {
 			client_set_scale(client_surface(c), c->mon->wlr_output->scale);
 		}
-		setmon(c, NULL, 0); /* Make sure to reapply rules in mapnotify() */
+		setmon(c, NULL, 0);
 
 		wlr_xdg_toplevel_set_wm_capabilities(c->surface.xdg->toplevel,
 				WLR_XDG_TOPLEVEL_WM_CAPABILITIES_FULLSCREEN);
 		if (c->decoration)
 			requestdecorationmode(&c->set_decoration_mode, c->decoration);
-		wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel, 0, 0);
+
+		/* Niri parity: pre-configure at the default-column tile size
+		 * so the client commits its initial buffer at the target
+		 * dimensions, not its natural preferred size.  Eliminates the
+		 * "small box → full tile" pop-in on spawn. */
+		{
+			Monitor *m = c->mon ? c->mon : selmon;
+			int avail_w = 0, avail_h = 0, w, h;
+			double prop;
+			if (m) {
+				avail_w = m->w.width;
+				avail_h = m->w.height;
+				if (avail_w <= 0 || avail_h <= 0) {
+					int gap = (m->gaps && gappx > 0) ? (int)gappx : 0;
+					avail_w = m->m.width - 2 * gap;
+					avail_h = m->m.height - 2 * gap;
+				}
+			}
+			if (avail_w > 200 && avail_h > 200) {
+				prop = preset_column_widths[default_column_width_idx];
+				w = (int)((double)avail_w * prop) - 2 * c->bw;
+				h = avail_h - 2 * c->bw;
+				if (w < 100) w = 100;
+				if (h < 100) h = 100;
+				wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel,
+						w, h);
+			} else {
+				wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel,
+						0, 0);
+			}
+		}
 		return;
 	}
 
@@ -349,9 +373,8 @@ destroynotify(struct wl_listener *listener, void *data)
 	wl_list_remove(&c->destroy.link);
 	wl_list_remove(&c->set_title.link);
 	wl_list_remove(&c->fullscreen.link);
-	/* Remove client from all monitors' layout trees and rebalance */
-	wl_list_for_each(m, &mons, link)
-		remove_client(m, c);
+	/* btrtile removed; arrange will reflow remaining clients */
+	(void)m;
 #ifdef XWAYLAND
 	if (c->type != XDGShell) {
 		wl_list_remove(&c->activate.link);
@@ -413,6 +436,8 @@ focusclient(Client *c, int lift)
 		selmon = c->mon;
 		c->isurgent = 0;
 		monitor_wake(c->mon);
+		/* Tell workspace which column to camera-follow */
+		workspace_focus_client(c);
 		/* Invalidate fullscreen classification cache */
 		c->mon->classify_cache_client = NULL;
 
@@ -498,8 +523,6 @@ warptomonitor(const Arg *arg)
 	while (!m->wlr_output->enabled && i++ < nmons);
 
 	if (m && m->wlr_output->enabled) {
-		/* Transfer any open status menus to new monitor */
-		transfer_status_menus(selmon, m);
 		selmon = m;
 		/* Warp cursor to center of monitor */
 		wlr_cursor_warp(cursor, NULL,
@@ -674,9 +697,18 @@ fullscreennotify(struct wl_listener *listener, void *data)
 void
 killclient(const Arg *arg)
 {
+	(void)arg;
 	Client *sel = focustop(selmon);
-	if (sel)
-		client_send_close(sel);
+	if (!sel)
+		return;
+	/* Only kill if the focused client lives in the currently-active
+	 * workspace.  Without this guard, a floating window or a stale
+	 * focus-stack entry from another workspace could be killed
+	 * unexpectedly when the user just wants to close "this tile". */
+	if (selmon && selmon->active_ws && sel->column &&
+			sel->column->ws != selmon->active_ws)
+		return;
+	client_send_close(sel);
 }
 
 void
@@ -995,10 +1027,7 @@ mapnotify(struct wl_listener *listener, void *data)
 			client_get_appid(p) ? client_get_appid(p) : "(null)",
 			p->mon && p->mon->wlr_output ? p->mon->wlr_output->name : "(null)");
 		c->isfloating = 1;
-		if (tray_anchor_time_ms && monotonic_msec() - tray_anchor_time_ms <= 1000) {
-			c->geom.x = tray_anchor_x - c->geom.width / 2;
-			c->geom.y = tray_anchor_y;
-		} else if (p->mon) {
+		if (p->mon) {
 			c->geom.x = (p->mon->w.width - c->geom.width) / 2 + p->mon->m.x;
 			c->geom.y = (p->mon->w.height - c->geom.height) / 2 + p->mon->m.y;
 		}
@@ -1132,6 +1161,11 @@ unset_fullscreen:
 			setfullscreen(w, 0);
 		}
 	}
+
+	/* Niri-style open anim: scale 0.5→1.0 + fade 0→1.  Skip for
+	 * fullscreen / unmanaged / floating (Niri only animates tiles). */
+	if (!client_is_unmanaged(c) && !c->isfullscreen && !c->isfloating)
+		client_start_open_anim(c);
 }
 
 void
@@ -1163,23 +1197,54 @@ setsticky(Client *c, int sticky)
 	}
 }
 
+/*
+ * Send a single size configure to the client and update bounds, but
+ * do NOT touch the scene graph or c->geom.  Used to pre-commit the
+ * target dimensions at the start of a transition animation so the
+ * client renders exactly one new buffer at the final size.
+ */
 void
-resize(Client *c, struct wlr_box geo, int interact)
+client_send_configure_only(Client *c, int w, int h)
 {
-	struct wlr_box *bbox;
-	struct wlr_box clip;
 	int reqw, reqh;
 
-	if (!c->mon || !client_surface(c)->mapped)
+	if (!c || !client_surface(c) || !client_surface(c)->mapped)
 		return;
 
-	bbox = interact ? &sgeom : &c->mon->w;
+	client_set_bounds(c, w, h);
+	reqw = w - 2 * (int)c->bw;
+	reqh = h - 2 * (int)c->bw;
+	if (reqw < 1) reqw = 1;
+	if (reqh < 1) reqh = 1;
+	if (!c->resize)
+		c->resize = client_set_size(c, (uint32_t)reqw, (uint32_t)reqh);
+	c->pending_resize_w = reqw;
+	c->pending_resize_h = reqh;
+}
 
-	client_set_bounds(c, geo.width, geo.height);
+/*
+ * Visual-only scene update: position the client's scene tree + border
+ * rects + buffer dest_size to the given geometry, but do NOT send any
+ * configure to the client.  Used during animations so we can move /
+ * resize the visual representation every frame without flooding
+ * heavy clients (Blender, browsers, games) with re-render requests
+ * at intermediate sizes — which would cause black flickers as the
+ * client briefly clears its surface for redraw.
+ *
+ * Buffer scaling via dest_size means: regardless of what natural
+ * size the client's current buffer is at (old or new), it's stretched
+ * to fit the geo box visually.  When the client eventually commits
+ * a buffer at our target size (after the SINGLE configure sent at
+ * anim end), natural matches geo and scale becomes 1.0 → crisp.
+ */
+void
+client_apply_scene_geom(Client *c, struct wlr_box geo)
+{
+	if (!c || !c->scene || !client_surface(c) || !client_surface(c)->mapped)
+		return;
+
 	c->geom = geo;
-	applybounds(c, bbox);
 
-	/* Update scene-graph, including borders */
 	wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
 	wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
 	wlr_scene_rect_set_size(c->border[0], c->geom.width, c->bw);
@@ -1190,26 +1255,119 @@ resize(Client *c, struct wlr_box geo, int interact)
 	wlr_scene_node_set_position(&c->border[2]->node, 0, c->bw);
 	wlr_scene_node_set_position(&c->border[3]->node, c->geom.width - c->bw, c->bw);
 
+	/* Visual scale: stretch the current surface buffer to the new
+	 * geo box.  Done unconditionally — for static clients geo == the
+	 * buffer's natural size, dest_size == natural, no actual scaling
+	 * happens.  Only matters during transitions when natural lags
+	 * behind geo (or vice versa). */
+	{
+		struct wlr_box natural;
+		client_get_geometry(c, &natural);
+		if (natural.width > 0 && natural.height > 0 &&
+				geo.width > 0 && geo.height > 0)
+			client_scale_to_box(c, geo.width, geo.height);
+	}
+}
+
+void
+resize(Client *c, struct wlr_box geo, int interact)
+{
+	struct wlr_box *bbox;
+	struct wlr_box clip;
+	int reqw, reqh;
+	int size_changed, pos_changed;
+
+	if (!c->mon || !client_surface(c)->mapped)
+		return;
+
+	/* Hard fast-path: nothing whatsoever changed → no work, no
+	 * scene damage, no wlroots call.  Critical for keeping heavy
+	 * clients (Blender) smooth — every wasted call costs frame time
+	 * at 4K @ 60Hz. */
+	if (!interact &&
+			geo.x == c->geom.x && geo.y == c->geom.y &&
+			geo.width == c->geom.width && geo.height == c->geom.height &&
+			geo.width == c->last_size_w &&
+			geo.height == c->last_size_h)
+		return;
+
+	bbox = interact ? &sgeom : &c->mon->w;
+
+	client_set_bounds(c, geo.width, geo.height);
+	pos_changed = (c->geom.x != geo.x || c->geom.y != geo.y);
+	c->geom = geo;
+	if (!c->column)
+		applybounds(c, bbox);
+
+	size_changed = (c->geom.width != c->last_size_w ||
+			c->geom.height != c->last_size_h);
+
+	if (pos_changed)
+		wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
+
+	/* Border rects + surface offsets only need rewriting on actual
+	 * size change.  For pure camera scroll (size unchanged) this
+	 * skips 7 wlroots calls per client per frame — a meaningful
+	 * win for heavy clients (Blender, Chrome) where every saved µs
+	 * helps GPU keep up at 4K @ 60Hz. */
+	if (size_changed) {
+		wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
+		wlr_scene_rect_set_size(c->border[0], c->geom.width, c->bw);
+		wlr_scene_rect_set_size(c->border[1], c->geom.width, c->bw);
+		wlr_scene_rect_set_size(c->border[2], c->bw, c->geom.height - 2 * c->bw);
+		wlr_scene_rect_set_size(c->border[3], c->bw, c->geom.height - 2 * c->bw);
+		wlr_scene_node_set_position(&c->border[1]->node, 0, c->geom.height - c->bw);
+		wlr_scene_node_set_position(&c->border[2]->node, 0, c->bw);
+		wlr_scene_node_set_position(&c->border[3]->node, c->geom.width - c->bw, c->bw);
+	}
+
 	reqw = c->geom.width - 2 * c->bw;
 	reqh = c->geom.height - 2 * c->bw;
 
 	/*
-	 * Avoid flooding heavy clients: only send a new configure when there isn't
-	 * already one pending. While waiting for an ack we just remember the
-	 * latest requested size.
-	 */
-	if (!c->resize)
-		c->resize = client_set_size(c, reqw, reqh);
-	c->pending_resize_w = reqw;
-	c->pending_resize_h = reqh;
+	 * Avoid flooding heavy clients with ConfigureNotify on every
+	 * camera-scroll frame.  For X11 (Blender, Chrome, games),
+	 * wlr_xwayland_surface_configure has no dedup — every position
+	 * change spawns an event that the client treats as a window
+	 * resize hint.  Result: Blender re-evaluates layout 60×/sec
+	 * during a 70ms scroll → choppy + "doesn't redraw until
+	 * refocus" behaviour.  Skip when the SIZE we'd configure
+	 * matches the last sent. */
+	if (reqw != c->last_configured_w || reqh != c->last_configured_h) {
+		if (!c->resize)
+			c->resize = client_set_size(c, reqw, reqh);
+		c->pending_resize_w = reqw;
+		c->pending_resize_h = reqh;
+		c->last_configured_w = reqw;
+		c->last_configured_h = reqh;
+	}
+
+	/* Fast-path: when only POSITION changed (camera scroll / ws
+	 * switch), skip the expensive clip + scale tree walks.  These
+	 * walk the entire surface tree and for heavy clients (Blender,
+	 * Chrome) they cost real time per frame. */
+	if (c->geom.width == c->last_size_w &&
+			c->geom.height == c->last_size_h) {
+		return;
+	}
+	c->last_size_w = c->geom.width;
+	c->last_size_h = c->geom.height;
 
 	client_get_clip(c, &clip);
 	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+
+	{
+		struct wlr_box natural;
+		client_get_geometry(c, &natural);
+		if (natural.width > 0 && natural.height > 0)
+			client_scale_to_box(c, c->geom.width, c->geom.height);
+	}
 }
 
 void
 setfloating(Client *c, int floating)
 {
+	int was = c->isfloating;
 	c->isfloating = floating;
 	/* If in floating layout do not change the client's layer */
 	if (!c->mon || !client_surface(c)->mapped || !c->mon->lt[c->mon->sellt]->arrange)
@@ -1217,6 +1375,13 @@ setfloating(Client *c, int floating)
 	wlr_scene_node_reparent(&c->scene->node, layers[c->isfullscreen ||
 			client_has_fullscreen_ancestor(c) ? LyrFS
 			: c->isfloating ? LyrFloat : LyrTile]);
+	/* Workspace attachment follows tileable state */
+	if (!was && floating) {
+		workspace_detach_client(c);
+	} else if (was && !floating && !c->isfullscreen
+			&& !client_is_unmanaged(c) && c->mon->active_ws) {
+		workspace_attach_client(c->mon->active_ws, c);
+	}
 	arrange(c->mon);
 	printstatus();
 }
@@ -1224,6 +1389,8 @@ setfloating(Client *c, int floating)
 void
 setfullscreen(Client *c, int fullscreen)
 {
+	int was = c->isfullscreen;
+
 	wlr_log(WLR_INFO,
 		"GAME_TRACE: setfullscreen enter appid='%s' want=%d was=%d "
 		"c->mon='%s' geom=%dx%d@%d,%d",
@@ -1233,6 +1400,16 @@ setfullscreen(Client *c, int fullscreen)
 		c->geom.width, c->geom.height, c->geom.x, c->geom.y);
 
 	c->isfullscreen = fullscreen;
+
+	/* Detach from column when entering fullscreen so the row reflows.
+	 * Reattach when leaving (if still tile-able).  Do this early so the
+	 * arrange() at the bottom sees the right column state. */
+	if (!was && fullscreen) {
+		workspace_detach_client(c);
+	} else if (was && !fullscreen && !c->isfloating
+			&& !client_is_unmanaged(c) && c->mon && c->mon->active_ws) {
+		workspace_attach_client(c->mon->active_ws, c);
+	}
 	if (!c->mon || !client_surface(c)->mapped) {
 		wlr_log(WLR_INFO,
 			"GAME_TRACE: setfullscreen early-return mon=%p mapped=%d",
@@ -1268,7 +1445,19 @@ setfullscreen(Client *c, int fullscreen)
 			fsgeom.width, fsgeom.height, fsgeom.x, fsgeom.y,
 			c->mon->m.width, c->mon->m.height, c->mon->m.x, c->mon->m.y);
 		c->prev = c->geom;
-		resize(c, fsgeom, 0);
+		/* Game / video fullscreen takes the full output rect (m->m,
+		 * via fsgeom) for direct scanout / mirror behavior; covers
+		 * waybar deliberately for performance.
+		 *
+		 * Regular apps go fullscreen within the usable area (m->w),
+		 * leaving the waybar visible.  Tile-fullscreen UX. */
+		if (looks_like_game(c) || is_video_content(c)
+				|| client_wants_tearing(c)) {
+			resize(c, fsgeom, 0);
+		} else {
+			struct wlr_box ufs = c->mon->w;
+			client_set_target_geom(c, ufs);
+		}
 		set_adaptive_sync(c->mon, 1);
 		/* Reset frame tracking and video detection state */
 		c->frame_time_idx = 0;
@@ -1295,7 +1484,7 @@ setfullscreen(Client *c, int fullscreen)
 		 * positions are set by the user. Tiled windows will be positioned
 		 * by the layout system in arrange(). */
 		if (c->isfloating)
-			resize(c, c->prev, 0);
+			client_set_target_geom(c, c->prev);
 		set_adaptive_sync(c->mon, 0);
 		/* Disable game VRR when exiting fullscreen */
 		disable_game_vrr(c->mon);
@@ -1349,6 +1538,11 @@ setmon(Client *c, Monitor *m, uint32_t newtags)
 	c->mon = m;
 	c->prev = c->geom;
 
+	/* Workspace bookkeeping: detach from old monitor's column (if any),
+	 * attach to new monitor's active workspace if tile-able. */
+	if (c->column)
+		workspace_detach_client(c);
+
 	/* Scene graph sends surface leave/enter events on move and resize */
 	if (oldmon)
 		arrange(oldmon);
@@ -1358,6 +1552,9 @@ setmon(Client *c, Monitor *m, uint32_t newtags)
 		if (c->isfloating)
 			resize(c, c->geom, 0);
 		c->tags = newtags ? newtags : m->tagset[m->seltags]; /* assign tags of target monitor */
+		if (!c->isfloating && !c->isfullscreen && !client_is_unmanaged(c)
+				&& m->active_ws)
+			workspace_attach_client(m->active_ws, c);
 		setfullscreen(c, c->isfullscreen); /* This will call arrange(c->mon) */
 		setfloating(c, c->isfloating);
 	}
@@ -1474,6 +1671,9 @@ toggleview(const Arg *arg)
 
 /* Forward declarations for auto-kill */
 static void read_proc_comm(pid_t pid, char *buf, size_t sz);
+static inline void normalize_proc_name(char *s) {
+	(void)s;
+}
 static int proc_autokill_eligible(const char *name);
 static void schedule_autokill(const char *name);
 
@@ -1503,12 +1703,37 @@ unmapnotify(struct wl_listener *listener, void *data)
 			focusclient(focustop(selmon), 1);
 		}
 	} else {
+		Monitor *unmap_mon = c->mon;
+		/* Niri-style close anim: snapshot the surface's last buffer
+		 * into an independent scene tree that survives Client teardown,
+		 * then animate scale 1→0.5 + opacity 1→0.  Skip for floating /
+		 * fullscreen (Niri only animates tiles closing). */
+		if (!c->isfullscreen && !c->isfloating && unmap_mon) {
+			struct wlr_surface *surf = client_surface(c);
+			if (surf && surf->buffer)
+				anim_spawn_close(unmap_mon, &surf->buffer->base,
+						c->geom);
+		}
+		/* Critical: unfreeze BEFORE destroying the scene tree, else
+		 * the snapshot scene_buffer's parent vanishes and we leak
+		 * a wlr_buffer lock. */
+		client_unfreeze(c);
+		workspace_detach_client(c);
 		wl_list_remove(&c->link);
-		/* Remove from layout tree and rebalance BEFORE setmon calls arrange() */
-		if (c->mon)
-			remove_client(c->mon, c);
 		setmon(c, NULL, 0);
 		wl_list_remove(&c->flink);
+
+		/* After tile is removed, focus moves to the LEFT neighbor of
+		 * the deleted column (column_destroy sets focused_col to the
+		 * left neighbor for us — we just need to give that column's
+		 * top client keyboard focus). */
+		if (unmap_mon && unmap_mon->active_ws &&
+				unmap_mon->active_ws->focused_col &&
+				!wl_list_empty(&unmap_mon->active_ws->focused_col->clients)) {
+			Column *fc = unmap_mon->active_ws->focused_col;
+			Client *next = wl_container_of(fc->clients.next, next, column_link);
+			focusclient(next, 1);
+		}
 	}
 	/* Toggle adaptive sync off and restore refresh rate when fullscreen client is unmapped */
 	if (c->isfullscreen) {
@@ -1533,16 +1758,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 	motionnotify(0, NULL, 0, 0, 0, 0);
 
 	/* Auto-kill: schedule background process cleanup */
-	{
-		pid_t akpid = client_get_pid(c);
-		if (akpid > 1) {
-			char akcomm[64];
-			read_proc_comm(akpid, akcomm, sizeof(akcomm));
-			normalize_proc_name(akcomm);
-			if (akcomm[0] && proc_autokill_eligible(akcomm))
-				schedule_autokill(akcomm);
-		}
-	}
+	/* autokill helpers removed (statusbar.c gone) */
 	/* Clear PID guard so game mode deactivates immediately.
 	 * Also match by PID in case game_mode_client was reassigned. */
 	if (c == game_mode_client ||
@@ -1629,8 +1845,63 @@ view(const Arg *arg)
 void
 warpcursor(const Client *c)
 {
-	(void)c;
-	/* Intentionally do not warp the cursor; keep it exactly where the user left it. */
+	double target_x, target_y;
+	int box_x, box_y, box_w, box_h;
+
+	if (!c || !cursor || !c->mon)
+		return;
+
+	/* Compute warp target from the SETTLED layout position, not the
+	 * currently-rendered (mid-anim) geometry.  During camera scroll
+	 * c->geom is at the live scroll_x, which can be far off-screen
+	 * for newly-focused columns past the visible area.  Warping to
+	 * that off-screen pos clamps to monitor edge, then sloppy-focus
+	 * picks up a different tile → camera bounces back.  Using the
+	 * target avoids the bounce. */
+	if (c->column && c->column->ws) {
+		Workspace *ws = c->column->ws;
+		Column *col = c->column;
+		Client *cc;
+		int j = 0, nc = col->n_clients;
+		int gap = c->mon->gaps ? (int)gappx : 0;
+		int per_h;
+
+		box_x = c->mon->w.x + col->target_x - ws->target_scroll_x;
+		box_y = c->mon->w.y;
+		box_w = col->target_width;
+		box_h = col->target_height;
+		if (nc > 0)
+			per_h = (col->target_height - gap * (nc - 1)) / nc;
+		else
+			per_h = col->target_height;
+
+		wl_list_for_each(cc, &col->clients, column_link) {
+			if (cc == c) {
+				box_y = c->mon->w.y + j * (per_h + gap);
+				box_h = (j == nc - 1)
+					? (col->target_height - j * (per_h + gap))
+					: per_h;
+				break;
+			}
+			j++;
+		}
+	} else {
+		/* Floating / fullscreen: c->geom is already authoritative. */
+		if (c->geom.width <= 0 || c->geom.height <= 0)
+			return;
+		box_x = c->geom.x;
+		box_y = c->geom.y;
+		box_w = c->geom.width;
+		box_h = c->geom.height;
+	}
+
+	target_x = (double)box_x + (double)box_w / 2.0;
+	target_y = (double)box_y + (double)box_h / 2.0;
+
+	/* Always warp to the exact center of the selected tile, even if
+	 * the cursor is already inside it.  Niri-style: every focus
+	 * change re-centers the pointer on the new tile. */
+	wlr_cursor_warp_closest(cursor, NULL, target_x, target_y);
 }
 
 void

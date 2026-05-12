@@ -3,6 +3,17 @@
 
 static void (*last_keybinding_func)(const Arg *);
 
+/* btrtile.c removed — local stubs to keep input.c compiling */
+static int resizing_from_mouse = 0;
+static int drag_was_alone_in_column = 0;
+static uint64_t last_pointer_motion_ms = 0;
+static inline LayoutNode **get_current_root(Monitor *m) { (void)m; return NULL; }
+static inline LayoutNode *find_client_node(LayoutNode *node, Client *c) { (void)node; (void)c; return NULL; }
+static inline void start_tile_drag(Monitor *m, Client *c) { (void)m; (void)c; }
+static inline void end_tile_drag(void) { }
+static inline void insert_client(Monitor *m, Client *focused, Client *new_client) { (void)m; (void)focused; (void)new_client; }
+static inline void insert_client_at(Monitor *m, Client *target, Client *new_client, double cx, double cy) { (void)m; (void)target; (void)new_client; (void)cx; (void)cy; }
+
 void
 applyxkbdefaultsfromsystem(struct xkb_rule_names *names)
 {
@@ -121,6 +132,7 @@ scrollsteps(const struct wlr_pointer_axis_event *event)
 	return steps;
 }
 
+#if 0 /* statusbar / pipewire helpers removed */
 int
 adjust_backlight_by_steps(int steps)
 {
@@ -318,22 +330,39 @@ handlestatusscroll(struct wlr_pointer_axis_event *event)
 
 	return 0;
 }
+#endif /* statusbar scroll helpers */
 
 void
 axisnotify(struct wl_listener *listener, void *data)
 {
-	/* This event is forwarded by the cursor when a pointer emits an axis event,
-	 * for example when you move the scroll wheel. */
 	struct wlr_pointer_axis_event *event = data;
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
-	if (!handlestatusscroll(event)) {
-		/* Notify the client with pointer focus of the axis event. */
-		wlr_seat_pointer_notify_axis(seat,
-				event->time_msec, event->orientation, event->delta,
-				event->delta_discrete, event->source, event->relative_direction);
+
+	/* Mod+vertical scroll → cycle through columns in the current
+	 * workspace.  Scroll down → next column right; scroll up → prev
+	 * column left.  Only fires on actual notch transitions
+	 * (scrollsteps debounces high-resolution wheel data). */
+	{
+		struct wlr_keyboard *kb = wlr_seat_get_keyboard(seat);
+		if (kb && event->orientation == WL_POINTER_AXIS_VERTICAL_SCROLL) {
+			uint32_t mods = wlr_keyboard_get_modifiers(kb);
+			if (mods & modkey) {
+				int steps = scrollsteps(event);
+				if (steps != 0) {
+					Arg a = { .i = steps > 0 ? +1 : -1 };
+					focus_column_dir(&a);
+				}
+				return;  /* swallow event — don't forward to client */
+			}
+		}
 	}
+
+	wlr_seat_pointer_notify_axis(seat,
+			event->time_msec, event->orientation, event->delta,
+			event->delta_discrete, event->source, event->relative_direction);
 }
 
+#if 0 /* statusbar click helpers removed */
 /* Returns 1 if click was handled by a statusbar module */
 static int
 handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
@@ -475,6 +504,7 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 	}
 	return 0;
 }
+#endif /* statusbar / pipewire / fan helpers */
 
 void
 handle_pointer_button_internal(uint32_t button, uint32_t state, uint32_t time_msec)
@@ -492,62 +522,13 @@ handle_pointer_button_internal(uint32_t button, uint32_t state, uint32_t time_ms
 		if (locked)
 			goto notify_client;
 
-		/* Modal overlay eats clicks; outside closes it */
-		{
-			Monitor *modal_mon = modal_visible_monitor();
-			if (modal_mon) {
-				ModalOverlay *mo = &modal_mon->modal;
-				int inside = cursor->x >= mo->x && cursor->x < mo->x + mo->width &&
-						cursor->y >= mo->y && cursor->y < mo->y + mo->height;
-				if (!inside)
-					modal_hide(modal_mon);
-				return;
-			}
-		}
-
-		if (selmon && selmon->statusbar.tray_menu.visible) {
-			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
-			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
-			TrayMenu *menu = &selmon->statusbar.tray_menu;
-			int relx = lx - menu->x;
-			int rely = ly - menu->y;
-			if (relx >= 0 && rely >= 0 &&
-					relx < menu->width && rely < menu->height) {
-				TrayMenuEntry *entry = tray_menu_entry_at(selmon, relx, rely);
-				if (entry)
-					tray_menu_send_event(menu, entry, time_msec);
-				tray_menu_hide_all();
-				return;
-			} else {
-				tray_menu_hide_all();
-			}
-		}
-
-		if (selmon && selmon->wifi_popup.visible) {
-			int lx = (int)lround(cursor->x);
-			int ly = (int)lround(cursor->y);
-			if (wifi_popup_handle_click(selmon, lx, ly, button))
-				return;
-		}
-
-		if (selmon && selmon->statusbar.net_menu.visible) {
-			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
-			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
-			if (net_menu_handle_click(selmon, lx, ly, button))
-				return;
-		}
-
-		if (selmon && selmon->showbar) {
-			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
-			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
-			if (handle_statusbar_clicks(selmon, lx, ly, button))
-				return;
-		}
-
-		/* Change focus if the button was _pressed_ over a client */
+		/* Change focus if the button was _pressed_ over a client.
+		 * lift=0 → focus but DO NOT warp cursor.  The user clicked
+		 * AT a specific location — we must not yank the pointer
+		 * away to tile-center, that would lose the click target. */
 		xytonode(cursor->x, cursor->y, NULL, &c, NULL, NULL, NULL);
 		if (c && (!client_is_unmanaged(c) || client_wants_focus(c)))
-			focusclient(c, 1);
+			focusclient(c, 0);
 
 		keyboard = wlr_seat_get_keyboard(seat);
 		mods = keyboard ? wlr_keyboard_get_modifiers(keyboard) : 0;
@@ -559,12 +540,6 @@ handle_pointer_button_internal(uint32_t button, uint32_t state, uint32_t time_ms
 			}
 		}
 	} else if (state == WL_POINTER_BUTTON_STATE_RELEASED) {
-		/* Clear fan slider drag on button release */
-		if (selmon && selmon->statusbar.fan_popup.dragging) {
-			selmon->statusbar.fan_popup.dragging = 0;
-			renderfanpopup(selmon);
-		}
-		/* Reset cursor mode on release */
 		if (cursor_mode == CurPressed)
 			cursor_mode = CurNormal;
 	}
@@ -585,6 +560,12 @@ buttonpress(struct wl_listener *listener, void *data)
 
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
+	(void)target;
+	(void)b;
+	(void)c;
+	(void)keyboard;
+	(void)mods;
+
 	switch (event->state) {
 	case WL_POINTER_BUTTON_STATE_PRESSED:
 		cursor_mode = CurPressed;
@@ -592,103 +573,13 @@ buttonpress(struct wl_listener *listener, void *data)
 		if (locked)
 			break;
 
-		/* Screenshot selection intercepts all clicks */
-		if (screenshot_mode >= SCREENSHOT_SELECTING) {
-			screenshot_handle_button(event->button, event->state, event->time_msec);
-			return;
-		}
-
-		/* Monitor setup popup intercepts all clicks */
-		{
-			Monitor *ms_mon = monitor_setup_visible_monitor();
-			if (ms_mon) {
-				int cx = (int)lround(cursor->x);
-				int cy = (int)lround(cursor->y);
-				monitor_setup_handle_button(ms_mon, cx, cy,
-					event->button, event->state);
-				return;
-			}
-		}
-
-		/* Modal overlay eats clicks; outside closes it */
-		{
-			Monitor *modal_mon = modal_visible_monitor();
-			if (modal_mon) {
-				ModalOverlay *mo = &modal_mon->modal;
-				int inside = cursor->x >= mo->x && cursor->x < mo->x + mo->width &&
-						cursor->y >= mo->y && cursor->y < mo->y + mo->height;
-				if (!inside)
-					modal_hide(modal_mon);
-				return;
-			}
-		}
-
-		/* Handle gamepad/HTPC menu clicks */
-		if (selmon && selmon->gamepad_menu.visible) {
-			int cx = (int)lround(cursor->x);
-			int cy = (int)lround(cursor->y);
-			if (gamepad_menu_handle_click(selmon, cx, cy, event->button))
-				return;
-		}
-
-		/*
-		 * Skip statusbar and popup click handling when a fullscreen
-		 * client covers the monitor.  The fullscreen surface is on
-		 * LyrFS which is above LyrTop (statusbar), so the bar is
-		 * invisible — clicks must go to the fullscreen client, not
-		 * pass through to the hidden statusbar.
-		 */
-		{
-			Client *fs = selmon ? focustop(selmon) : NULL;
-			if (fs && fs->isfullscreen)
-				goto skip_statusbar;
-		}
-
-		if (selmon && selmon->statusbar.tray_menu.visible) {
-			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
-			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
-			TrayMenu *menu = &selmon->statusbar.tray_menu;
-			int relx = lx - menu->x;
-			int rely = ly - menu->y;
-			if (relx >= 0 && rely >= 0 &&
-					relx < menu->width && rely < menu->height) {
-				TrayMenuEntry *entry = tray_menu_entry_at(selmon, relx, rely);
-				if (entry)
-					tray_menu_send_event(menu, entry, event->time_msec);
-				tray_menu_hide_all();
-				return;
-			} else {
-				tray_menu_hide_all();
-			}
-		}
-
-		if (selmon && selmon->wifi_popup.visible) {
-			int lx = (int)lround(cursor->x);
-			int ly = (int)lround(cursor->y);
-			if (wifi_popup_handle_click(selmon, lx, ly, event->button))
-				return;
-		}
-
-		if (selmon && selmon->statusbar.net_menu.visible) {
-			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
-			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
-			if (net_menu_handle_click(selmon, lx, ly, event->button))
-				return;
-		}
-
-		if (selmon && selmon->showbar) {
-			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
-			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
-			if (handle_statusbar_clicks(selmon, lx, ly, event->button))
-				return;
-		}
-
-skip_statusbar:
-
-		/* Change focus if the button was _pressed_ over a client */
+		/* Change focus if the button was _pressed_ over a client.
+		 * lift=0 → focus but DO NOT warp cursor.  The user clicked
+		 * AT a specific location — we must not yank the pointer
+		 * away to tile-center, that would lose the click target. */
 		xytonode(cursor->x, cursor->y, NULL, &c, NULL, NULL, NULL);
 		if (c && (!client_is_unmanaged(c) || client_wants_focus(c)))
-			focusclient(c, 1);
+			focusclient(c, 0);
 
 		keyboard = wlr_seat_get_keyboard(seat);
 		mods = keyboard ? wlr_keyboard_get_modifiers(keyboard) : 0;
@@ -701,86 +592,13 @@ skip_statusbar:
 		}
 		break;
 	case WL_POINTER_BUTTON_STATE_RELEASED:
-		/* Screenshot selection intercepts release too */
-		if (screenshot_mode >= SCREENSHOT_SELECTING) {
-			screenshot_handle_button(event->button, event->state, event->time_msec);
-			return;
-		}
-		/* Monitor setup popup release (drag drop) */
-		{
-			Monitor *ms_mon = monitor_setup_visible_monitor();
-			if (ms_mon) {
-				int cx = (int)lround(cursor->x);
-				int cy = (int)lround(cursor->y);
-				monitor_setup_handle_button(ms_mon, cx, cy,
-					event->button, event->state);
-				return;
-			}
-		}
-		/* If you released any buttons, we exit interactive move/resize mode. */
-		/* TODO: should reset to the pointer focus's current setcursor */
 		if (!locked && cursor_mode != CurNormal && cursor_mode != CurPressed) {
-			c = grabc;
-			if (c && c->was_tiled && !strcmp(selmon->ltsymbol, "|w|")) {
-				if (cursor_mode == CurMove && c->isfloating) {
-					target = xytoclient(cursor->x, cursor->y);
-					int was_alone = drag_was_alone_in_column;
-					int move_allowed;
-
-					/* Clear drag state before modifying tree */
-					end_tile_drag();
-
-					/* Restore tiled state */
-					c->isfloating = 0;
-
-					/* Column swap takes priority - check if source was alone and target is in different column */
-					if (was_alone && target && target != c &&
-					    !target->isfloating && !target->isfullscreen &&
-					    !same_column(selmon, c, target)) {
-						/* Swap columns if dragged tile was alone in its column */
-						swap_columns(selmon, c, target);
-						arrange(selmon);
-					} else {
-						/* Check if movement is allowed before modifying anything */
-						if (target && target != c && !target->isfloating && !target->isfullscreen)
-							move_allowed = can_move_tile(selmon, c, target);
-						else
-							move_allowed = can_move_tile(selmon, c, NULL);
-
-						if (move_allowed == 0) {
-							/* Movement blocked (4 tiles in source or target column) */
-							/* Just restore to original position, no change */
-							arrange(selmon);
-						} else if (move_allowed == 2 && target && target != c) {
-							/* Same column swap */
-							swap_tiles_in_tree(selmon, c, target);
-							arrange(selmon);
-						} else {
-							/* Remove from old position and insert at new */
-							remove_client(selmon, c);
-							if (target && target != c && !target->isfloating && !target->isfullscreen)
-								insert_client_at(selmon, target, c, cursor->x, cursor->y);
-							else
-								insert_client(selmon, NULL, c);
-							arrange(selmon);
-						}
-					}
-
-				} else if (cursor_mode == CurResize && !c->isfloating) {
-					resizing_from_mouse = 0;
-				}
-			} else {
-				if (cursor_mode == CurResize && resizing_from_mouse)
-					resizing_from_mouse = 0;
-				resize_last_time = 0;
-				end_tile_drag();
-			}
-			/* Default behaviour */
 			nixly_cursor_set_xcursor("default");
 			cursor_mode = CurNormal;
 			/* Drop the window off on its new monitor */
 			selmon = xytomon(cursor->x, cursor->y);
-			setmon(grabc, selmon, 0);
+			if (grabc)
+				setmon(grabc, selmon, 0);
 			grabc = NULL;
 			return;
 		}
@@ -1073,40 +891,10 @@ checkconstraint(void)
 	if (focused) {
 		wl_list_for_each(constraint, &pointer_constraints->constraints, link) {
 			if (constraint->surface == focused) {
-				Client *ac = NULL;
-				toplevel_from_wlr_surface(focused, &ac, NULL);
-
-				/*
-				 * Letterboxed fullscreen games (e.g. 1920x1080 on a
-				 * 3440x1440 ultrawide) center their surface inside the
-				 * monitor — see configurex11(). If the cursor sits in
-				 * the black bar when a LOCKED constraint activates,
-				 * surface-local coords are negative and the game
-				 * receives no usable pointer events ("mouse dead").
-				 * Warp the cursor into the rendered surface before
-				 * notifying the client.
-				 */
-				if (ac && ac->isfullscreen && ac->scene_surface
-						&& client_surface(ac)
-						&& (ac->scene_surface->node.x > 0
-							|| ac->scene_surface->node.y > 0)) {
-					double sx_l = ac->geom.x + ac->scene_surface->node.x;
-					double sy_l = ac->geom.y + ac->scene_surface->node.y;
-					int sw = client_surface(ac)->current.width;
-					int sh = client_surface(ac)->current.height;
-					if (sw > 0 && sh > 0
-							&& (cursor->x < sx_l
-								|| cursor->x >= sx_l + sw
-								|| cursor->y < sy_l
-								|| cursor->y >= sy_l + sh)) {
-						wlr_cursor_warp(cursor, NULL,
-							sx_l + sw / 2.0,
-							sy_l + sh / 2.0);
-					}
-				}
-
 				active_constraint = constraint;
 				wlr_pointer_constraint_v1_send_activated(constraint);
+				Client *ac = NULL;
+				toplevel_from_wlr_surface(focused, &ac, NULL);
 				if (ac && (looks_like_game(ac) || is_game_content(ac)))
 					game_log("CURSOR_CONSTRAINT: ACTIVATE type=%s appid='%s'",
 						constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED
@@ -1467,134 +1255,7 @@ shortcuts_are_inhibited(void)
 	return 0;
 }
 
-static int
-try_screenshot_key(const xkb_keysym_t *syms, int nsyms)
-{
-	if (!screenshot_mode)
-		return 0;
-	for (int i = 0; i < nsyms; i++) {
-		if (syms[i] == XKB_KEY_Escape) {
-			screenshot_handle_key(syms[i]);
-			return 1;
-		}
-	}
-	return 0;
-}
-
-static int
-try_monitor_setup_key(const xkb_keysym_t *syms, int nsyms)
-{
-	Monitor *ms_mon = monitor_setup_visible_monitor();
-	if (!ms_mon)
-		return 0;
-	for (int i = 0; i < nsyms; i++) {
-		if (monitor_setup_handle_key(ms_mon, syms[i]))
-			return 1;
-	}
-	return 0;
-}
-
-static int
-try_sudo_popup_key(Monitor *sudo_mon, const xkb_keysym_t *syms, int nsyms, uint32_t mods)
-{
-	if (!sudo_mon)
-		return 0;
-	for (int i = 0; i < nsyms; i++) {
-		if (sudo_popup_handle_key(sudo_mon, mods, syms[i]))
-			return 1;
-	}
-	return 0;
-}
-
-static int
-try_wifi_popup_key(Monitor *wifi_mon, const xkb_keysym_t *syms, int nsyms, uint32_t mods)
-{
-	if (!wifi_mon)
-		return 0;
-	for (int i = 0; i < nsyms; i++) {
-		if (wifi_popup_handle_key(wifi_mon, mods, syms[i]))
-			return 1;
-	}
-	return 0;
-}
-
-static int
-try_stats_panel_key(Monitor *stats_mon, const xkb_keysym_t *syms, int nsyms)
-{
-	if (!stats_mon)
-		return 0;
-	for (int i = 0; i < nsyms; i++) {
-		if (stats_panel_handle_key(stats_mon, syms[i]))
-			return 1;
-	}
-	return 0;
-}
-
-
-static int
-try_nixpkgs_key(Monitor *nixpkgs_mon, const xkb_keysym_t *syms, int nsyms, uint32_t mods)
-{
-	int consumed = 0, is_navigation = 0;
-
-	if (!nixpkgs_mon)
-		return 0;
-	for (int i = 0; i < nsyms; i++) {
-		xkb_keysym_t s = syms[i];
-		if (nixpkgs_handle_key(nixpkgs_mon, mods, s))
-			consumed = 1;
-		if (s == XKB_KEY_Up || s == XKB_KEY_Down)
-			is_navigation = 1;
-	}
-	if (consumed) {
-		if (is_navigation)
-			nixpkgs_update_selection(nixpkgs_mon);
-		else {
-			nixpkgs_update_results(nixpkgs_mon);
-			nixpkgs_render(nixpkgs_mon);
-		}
-	}
-	return consumed;
-}
-
-static int
-try_modal_key(Monitor *modal_mon, const xkb_keysym_t *syms, int nsyms, uint32_t mods)
-{
-	int consumed = 0, is_text_input = 0;
-
-	if (!modal_mon)
-		return 0;
-	for (int i = 0; i < nsyms; i++) {
-		xkb_keysym_t s = syms[i];
-		if ((s >= 0x20 && s <= 0x7e) || s == XKB_KEY_BackSpace)
-			is_text_input = 1;
-		if (modal_handle_key(modal_mon, mods, s))
-			consumed = 1;
-	}
-	if (consumed) {
-		int is_file_search = (modal_mon->modal.active_idx == 1);
-		int is_navigation = 0;
-		for (int i = 0; i < nsyms; i++) {
-			if (syms[i] == XKB_KEY_Up || syms[i] == XKB_KEY_Down) {
-				is_navigation = 1;
-				break;
-			}
-		}
-		if (is_navigation) {
-			modal_update_selection(modal_mon);
-		} else if (is_text_input && is_file_search) {
-			modal_render_search_field(modal_mon);
-			if (!modal_mon->modal.render_timer)
-				modal_mon->modal.render_timer = wl_event_loop_add_timer(
-					event_loop, modal_render_timer_cb, modal_mon);
-			modal_mon->modal.render_pending = 1;
-			wl_event_source_timer_update(modal_mon->modal.render_timer, 300);
-		} else {
-			modal_update_results(modal_mon);
-			modal_render(modal_mon);
-		}
-	}
-	return consumed;
-}
+/* try_*_key handlers removed (overlays gone) */
 
 void
 keypress(struct wl_listener *listener, void *data)
@@ -1627,13 +1288,11 @@ keypress(struct wl_listener *listener, void *data)
 
 	int handled = 0;
 	uint32_t mods = wlr_keyboard_get_modifiers(&group->wlr_group->keyboard);
-	Monitor *modal_mon = modal_visible_monitor();
-	Monitor *nixpkgs_mon = nixpkgs_visible_monitor();
-	Monitor *wifi_mon = wifi_popup_visible_monitor();
-	Monitor *sudo_mon = sudo_popup_visible_monitor();
-	Monitor *stats_mon = stats_panel_visible_monitor();
 
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
+
+	(void)nlevel0;
+	(void)level0_syms;
 
 	/* VT switching using raw evdev keycodes — always works regardless of
 	 * XKB keymap, screen lock state, or active popups/overlays. */
@@ -1656,44 +1315,17 @@ keypress(struct wl_listener *listener, void *data)
 	/* On _press_ if there is no active screen locker,
 	 * attempt to process a compositor keybinding. */
 	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-		handled = try_screenshot_key(syms, nsyms)
-		       || try_monitor_setup_key(syms, nsyms)
-		       || try_sudo_popup_key(sudo_mon, syms, nsyms, mods)
-		       || try_wifi_popup_key(wifi_mon, syms, nsyms, mods)
-		       || try_stats_panel_key(stats_mon, syms, nsyms)
-		       || try_nixpkgs_key(nixpkgs_mon, syms, nsyms, mods)
-		       || try_modal_key(modal_mon, syms, nsyms, mods);
-		if (!handled && !shortcuts_are_inhibited()) {
+		if (!shortcuts_are_inhibited()) {
 			last_keybinding_func = NULL;
 			for (i = 0; i < nsyms; i++)
 				handled = keybinding(mods, syms[i]) || handled;
 		}
-		if (!handled && nlevel0 > 0 && !shortcuts_are_inhibited()) {
-			for (i = 0; i < nlevel0; i++)
-				handled = keybinding(mods, level0_syms[i]) || handled;
-		}
 	}
 
-	/* Don't enable key repeat for modal/nixpkgs text input to avoid double characters.
-	 * Only allow repeat for navigation keys (arrows, backspace) in modal/nixpkgs.
-	 * Also suppress repeat for toggle actions (e.g. togglestatusbar). */
 	{
 		int allow_repeat = 0;
-		if (handled && group->wlr_group->keyboard.repeat_info.delay > 0) {
-			if (!modal_mon && !nixpkgs_mon) {
-				allow_repeat = (last_keybinding_func != togglestatusbar);
-			} else {
-				/* In modal/nixpkgs: only allow repeat for navigation keys */
-				for (i = 0; i < nsyms; i++) {
-					xkb_keysym_t s = syms[i];
-					if (s == XKB_KEY_Up || s == XKB_KEY_Down ||
-					    s == XKB_KEY_BackSpace) {
-						allow_repeat = 1;
-						break;
-					}
-				}
-			}
-		}
+		if (handled && group->wlr_group->keyboard.repeat_info.delay > 0)
+			allow_repeat = 1;
 		if (allow_repeat) {
 			group->mods = mods;
 			group->keysyms = syms;
@@ -1737,10 +1369,6 @@ int
 keyrepeat(void *data)
 {
 	KeyboardGroup *group = data;
-	Monitor *modal_mon = modal_visible_monitor();
-	Monitor *nixpkgs_mon = nixpkgs_visible_monitor();
-	int modal_consumed = 0;
-	int nixpkgs_consumed = 0;
 	int i;
 	if (!group->nsyms || group->wlr_group->keyboard.repeat_info.rate <= 0)
 		return 0;
@@ -1748,52 +1376,8 @@ keyrepeat(void *data)
 	wl_event_source_timer_update(group->key_repeat_source,
 			1000 / group->wlr_group->keyboard.repeat_info.rate);
 
-	for (i = 0; i < group->nsyms; i++) {
-		if (nixpkgs_mon && nixpkgs_handle_key(nixpkgs_mon, group->mods, group->keysyms[i]))
-			nixpkgs_consumed = 1;
-		else if (modal_mon && modal_handle_key(modal_mon, group->mods, group->keysyms[i]))
-			modal_consumed = 1;
-		else
-			keybinding(group->mods, group->keysyms[i]);
-	}
-
-	if (nixpkgs_consumed && nixpkgs_mon) {
-		/* Check if this is navigation - use fast path */
-		int is_nav = 0;
-		for (i = 0; i < group->nsyms; i++) {
-			if (group->keysyms[i] == XKB_KEY_Up || group->keysyms[i] == XKB_KEY_Down) {
-				is_nav = 1;
-				break;
-			}
-		}
-		if (is_nav) {
-			/* Ultra-fast: just toggle highlights */
-			nixpkgs_update_selection(nixpkgs_mon);
-		} else {
-			/* Other keys (backspace): full update */
-			nixpkgs_update_results(nixpkgs_mon);
-			nixpkgs_render(nixpkgs_mon);
-		}
-	}
-
-	if (modal_consumed && modal_mon) {
-		/* Check if this is navigation - use fast path */
-		int is_nav = 0;
-		for (i = 0; i < group->nsyms; i++) {
-			if (group->keysyms[i] == XKB_KEY_Up || group->keysyms[i] == XKB_KEY_Down) {
-				is_nav = 1;
-				break;
-			}
-		}
-		if (is_nav) {
-			/* Ultra-fast: just toggle highlights */
-			modal_update_selection(modal_mon);
-		} else {
-			/* Other keys (backspace): full update */
-			modal_update_results(modal_mon);
-			modal_render(modal_mon);
-		}
-	}
+	for (i = 0; i < group->nsyms; i++)
+		keybinding(group->mods, group->keysyms[i]);
 
 	return 0;
 }
@@ -2383,27 +1967,9 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		if (sloppyfocus) {
 			Monitor *newmon = xytomon(cursor->x, cursor->y);
 			if (newmon && newmon != selmon) {
-				/* Transfer any open status menus to new monitor */
-				transfer_status_menus(selmon, newmon);
 				selmon = newmon;
 				monitor_wake(newmon);
 			}
-		}
-	}
-
-	/* Screenshot dragging — update selection overlay and skip client dispatch */
-	if (screenshot_mode == SCREENSHOT_DRAGGING) {
-		screenshot_handle_motion();
-		return;
-	}
-
-	/* Monitor setup popup drag tracking */
-	{
-		Monitor *ms_mon = monitor_setup_visible_monitor();
-		if (ms_mon && ms_mon->monitor_setup.dragging >= 0) {
-			monitor_setup_handle_motion(ms_mon,
-				(int)lround(cursor->x), (int)lround(cursor->y));
-			return;
 		}
 	}
 
@@ -2458,45 +2024,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	/* Update drag icon's position */
 	wlr_scene_node_set_position(&drag_icon->node, (int)round(cursor->x), (int)round(cursor->y));
 
-	/* Hover feedback for status bar modules.
-	 * Skip when: bar hidden, fullscreen covers bar, or cursor is far from
-	 * bar area (unless a popup is open that needs hover tracking).
-	 * Throttled to ~125 Hz — hover highlights don't need 1 kHz updates
-	 * and the saved cycles let motionnotify() return faster, keeping
-	 * the event loop responsive for the next HW cursor plane update. */
-	if (selmon && selmon->showbar && selmon->statusbar.area.height > 0) {
-		Client *fs = focustop(selmon);
-		int any_popup_open =
-			selmon->statusbar.cpu_popup.visible ||
-			selmon->statusbar.ram_popup.visible ||
-			selmon->statusbar.battery_popup.visible ||
-			selmon->statusbar.fan_popup.visible ||
-			selmon->statusbar.net_menu.visible ||
-			selmon->statusbar.tray_menu.visible;
-		int near_bar = (cursor->y >= selmon->statusbar.area.y &&
-			cursor->y <= selmon->statusbar.area.y +
-				selmon->statusbar.area.height + 500);
-
-		if (!(fs && fs->isfullscreen) && (near_bar || any_popup_open)) {
-			/* Fan popup drag must respond at full input rate */
-			if (selmon->statusbar.fan_popup.dragging)
-				fan_popup_handle_drag(selmon, cursor->x, cursor->y);
-
-			static uint32_t last_hover_ms;
-			if (!time || time - last_hover_ms >= 8) {
-				if (time) last_hover_ms = time;
-				updatetaghover(selmon, cursor->x, cursor->y);
-				updatecpuhover(selmon, cursor->x, cursor->y);
-				updateramhover(selmon, cursor->x, cursor->y);
-				updatebatteryhover(selmon, cursor->x, cursor->y);
-				updatefanhover(selmon, cursor->x, cursor->y);
-				updatenethover(selmon, cursor->x, cursor->y);
-				net_menu_update_hover(selmon, cursor->x, cursor->y);
-				if (!selmon->statusbar.net_menu.visible)
-					net_menu_hide_all();
-			}
-		}
-	}
+	/* statusbar hover feedback removed (statusbar.c gone) */
 
 	/* Skip if internal call or already resizing */
 	if (time == 0 && resizing_from_mouse)
@@ -2557,7 +2085,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 						if (fabs(ratio - current) >= resize_ratio_epsilon) {
 							float old_r = resize_split_node->split_ratio;
 							resize_split_node->split_ratio = (float)ratio;
-							compensate_column_resize(resize_split_node, old_r, (float)ratio, grabc);
+							(void)old_r;
 							changed = 1;
 						}
 					}
@@ -2742,12 +2270,23 @@ pointerfocus(Client *c, struct wlr_surface *surface, double sx, double sy,
 	static int in_pointerfocus = 0;
 
 	/* Focus follows mouse: focus client under cursor.
-	 * Also update focus on internal calls (time==0) after layout changes
-	 * so the tile under the cursor gets focus after rebalancing.
 	 * Use re-entry guard to prevent infinite recursion since focusclient
-	 * can trigger motionnotify which calls pointerfocus again. */
+	 * can trigger motionnotify which calls pointerfocus again.
+	 *
+	 * Suppress sloppy refocus while a workspace camera scroll or
+	 * vertical switch is animating.  During the transition the cursor
+	 * may temporarily sit over a tile that's about to slide off-screen
+	 * — letting sloppy-focus pick that up causes the camera to bounce
+	 * back to the wrong target. */
+	int anim_in_progress = 0;
+	if (selmon && selmon->active_ws &&
+			selmon->active_ws->scroll_x != selmon->active_ws->target_scroll_x)
+		anim_in_progress = 1;
+	if (selmon && fabs(selmon->ws_y_offset) > 0.5)
+		anim_in_progress = 1;
+
 	if (!in_pointerfocus && surface != seat->pointer_state.focused_surface &&
-			sloppyfocus && c && !client_is_unmanaged(c)) {
+			sloppyfocus && c && !client_is_unmanaged(c) && !anim_in_progress) {
 		in_pointerfocus = 1;
 		focusclient(c, 0);
 		in_pointerfocus = 0;

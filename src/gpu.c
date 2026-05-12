@@ -958,6 +958,25 @@ set_steam_env(void)
 	}
 	setenv("PULSE_LATENCY_MSEC", "60", 0);
 
+	/* Steam CEF/webhelper rescue flags — without these, the Chromium GPU
+	 * process inside Steam's bwrap FHS sandbox crashes on Nvidia (exit
+	 * code 1002) and after 9 retries Steam disables GPU AND sandbox in
+	 * Local State, then later sessions fail to load UI files at all
+	 * ("bIsLocalFileRequest || bIsLocalFileRequestAllowed" check).
+	 *
+	 * These vars do NOT touch GBM_BACKEND/GLX vendor/VA-API (kept
+	 * skipped above) — they only adjust Steam's internal CEF wiring. */
+	setenv("STEAM_FORCE_DESKTOPUI_SCALING", "1", 1);
+	setenv("STEAM_RUNTIME_PREFER_HOST_LIBRARIES", "1", 1);
+	setenv("STEAM_DISABLE_GPU_BLOCKLIST", "1", 1);
+	setenv("STEAM_CEF_ARGS",
+		"--ignore-gpu-blocklist --enable-gpu-rasterization "
+		"--enable-zero-copy --enable-native-gpu-memory-buffers "
+		"--disable-gpu-driver-bug-workarounds", 1);
+	setenv("STEAM_WEBHELPER_CEF_FLAGS",
+		"--enable-gpu --enable-gpu-compositing "
+		"--enable-accelerated-video-decode --ignore-gpu-blocklist", 1);
+
 	if (discrete_gpu_idx < 0 || discrete_gpu_idx >= detected_gpu_count)
 		return;
 
@@ -981,6 +1000,11 @@ set_steam_env(void)
 		/* CUDA/NVENC routing for game children */
 		setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID", 0);
 		setenv("CUDA_VISIBLE_DEVICES", "0", 0);
+		/* CEF on Nvidia: ANGLE+Vulkan path is more stable than GLX
+		 * inside bwrap. Without this, GPU process aborts on init. */
+		setenv("STEAM_CEF_GPU_ARGS",
+			"--use-angle=vulkan "
+			"--enable-features=Vulkan,UseSkiaRenderer", 1);
 		break;
 	case GPU_VENDOR_AMD:
 		if (dgpu->pci_slot_underscore[0])

@@ -14,7 +14,7 @@ DEVCFLAGS = -g -Wpedantic -Wall -Wextra -Wdeclaration-after-statement \
 	-Wfloat-conversion
 
 # CFLAGS / LDFLAGS
-PKGS      = wayland-server xkbcommon libinput libdrm $(XLIBS) fcft pixman-1 libsystemd gdk-pixbuf-2.0 cairo librsvg-2.0
+PKGS      = wayland-server xkbcommon libinput libdrm $(XLIBS) fcft pixman-1 libsystemd
 WP_INCS = -I$(shell $(PKG_CONFIG) --variable=prefix wayland-protocols 2>/dev/null)/include
 NLCFLAGS = `$(PKG_CONFIG) --cflags $(PKGS)` $(WLR_INCS) $(WP_INCS) $(CPPFLAGS_EXTRA) $(DEVCFLAGS) $(CFLAGS)
 LDLIBS    = `$(PKG_CONFIG) --libs $(PKGS)` $(WLR_LIBS) -lm -lpthread $(LIBS)
@@ -23,15 +23,14 @@ LDLIBS    = `$(PKG_CONFIG) --libs $(PKGS)` $(WLR_LIBS) -lm -lpthread $(LIBS)
 MOD_CFLAGS = $(NLCFLAGS) -Wno-declaration-after-statement
 
 # Compositor module object files
-MOD_OBJS = globals.o client.o layout.o btrtile.o input.o gamepad.o output.o \
-           statusbar.o tray.o network.o launcher.o nixpkgs.o \
-           popup.o bluetooth.o config.o gamemode.o client_utils.o gpu.o draw.o layer.o fancontrol.o \
-           screenshot.o monitor_setup.o
+MOD_OBJS = globals.o client.o layout.o input.o output.o \
+           gamemode.o client_utils.o gpu.o draw.o layer.o workspace.o anim.o \
+           dwl_ipc.o dwl-ipc-unstable-v2-protocol.o
 
 PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstable-v1-protocol.h \
              $(SRC)/wlr-layer-shell-unstable-v1-protocol.h $(SRC)/wlr-output-power-management-unstable-v1-protocol.h \
              $(SRC)/xdg-shell-protocol.h $(SRC)/content-type-v1-protocol.h $(SRC)/tearing-control-v1-protocol.h \
-             $(SRC)/tablet-v2-protocol.h
+             $(SRC)/tablet-v2-protocol.h $(SRC)/dwl-ipc-unstable-v2-protocol.h
 
 all: nixlytile
 nixlytile: nixlytile.o util.o $(MOD_OBJS)
@@ -50,23 +49,9 @@ client.o: $(SRC)/client.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 layout.o: $(SRC)/layout.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-btrtile.o: $(SRC)/btrtile.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 input.o: $(SRC)/input.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-gamepad.o: $(SRC)/gamepad.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 output.o: $(SRC)/output.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-statusbar.o: $(SRC)/statusbar.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-tray.o: $(SRC)/tray.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-network.o: $(SRC)/network.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-launcher.o: $(SRC)/launcher.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-nixpkgs.o: $(SRC)/nixpkgs.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 gamemode.o: $(SRC)/gamemode.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
@@ -74,23 +59,18 @@ client_utils.o: $(SRC)/client_utils.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 gpu.o: $(SRC)/gpu.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-popup.o: $(SRC)/popup.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-bluetooth.o: $(SRC)/bluetooth.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-config.o: $(SRC)/config.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 draw.o: $(SRC)/draw.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 layer.o: $(SRC)/layer.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-fancontrol.o: $(SRC)/fancontrol.c $(SRC)/nixlytile.h $(SRC)/client.h
+workspace.o: $(SRC)/workspace.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-screenshot.o: $(SRC)/screenshot.c $(SRC)/nixlytile.h $(SRC)/client.h
+anim.o: $(SRC)/anim.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-monitor_setup.o: $(SRC)/monitor_setup.c $(SRC)/nixlytile.h $(SRC)/client.h
+dwl_ipc.o: $(SRC)/dwl_ipc.c $(SRC)/nixlytile.h $(SRC)/dwl-ipc-unstable-v2-protocol.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-
+dwl-ipc-unstable-v2-protocol.o: $(SRC)/dwl-ipc-unstable-v2-protocol.c
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 # wayland-scanner generated protocol headers (output into src/)
 WAYLAND_SCANNER   = `$(PKG_CONFIG) --variable=wayland_scanner wayland-scanner`
 WAYLAND_PROTOCOLS = `$(PKG_CONFIG) --variable=pkgdatadir wayland-protocols`
@@ -119,69 +99,31 @@ $(SRC)/tearing-control-v1-protocol.h:
 $(SRC)/tablet-v2-protocol.h:
 	$(WAYLAND_SCANNER) server-header \
 		$(WAYLAND_PROTOCOLS)/stable/tablet/tablet-v2.xml $@
+$(SRC)/dwl-ipc-unstable-v2-protocol.h:
+	$(WAYLAND_SCANNER) server-header \
+		protocols/dwl-ipc-unstable-v2.xml $@
+$(SRC)/dwl-ipc-unstable-v2-protocol.c: $(SRC)/dwl-ipc-unstable-v2-protocol.h
+	$(WAYLAND_SCANNER) private-code \
+		protocols/dwl-ipc-unstable-v2.xml $@
 
 $(SRC)/config.h:
 	cp $(SRC)/config.def.h $@
 clean:
-	rm -f nixlytile *.o $(SRC)/*-protocol.h game_params.conf
+	rm -f nixlytile *.o $(SRC)/*-protocol.h $(SRC)/*-protocol.c
 
 dist: clean
 	mkdir -p nixlytile-$(VERSION)
 	cp -R Makefile config.mk protocols \
-		nixlytile.1 nixlytile.desktop images src \
+		nixlytile.1 nixlytile.desktop src \
 		nixlytile-$(VERSION)
 	tar -caf nixlytile-$(VERSION).tar.gz nixlytile-$(VERSION)
 	rm -rf nixlytile-$(VERSION)
 
-# Generate game_params.conf from game_launch_params.h
-# Format: APPID|nvidia_params|amd_params|amd_amdvlk_params|intel_params
-game_params.conf: $(SRC)/game_launch_params.h
-	@echo "Generating game_params.conf from game_launch_params.h..."
-	@echo "# Auto-generated from game_launch_params.h" > $@
-	@echo "# Format: APPID|nvidia_params|amd_params|amd_amdvlk_params|intel_params" >> $@
-	@echo "# Generated: $$(date)" >> $@
-	@echo "" >> $@
-	@awk ' \
-		/\.game_id *= *"/ { \
-			match($$0, /"[^"]+"/); \
-			game_id = substr($$0, RSTART+1, RLENGTH-2) \
-		} \
-		/\.nvidia *= *"/ { \
-			match($$0, /"[^"]*"/); \
-			nvidia = substr($$0, RSTART+1, RLENGTH-2) \
-		} \
-		/\.amd *= *"/ && !/\.amd_amdvlk/ { \
-			match($$0, /"[^"]*"/); \
-			amd = substr($$0, RSTART+1, RLENGTH-2) \
-		} \
-		/\.amd_amdvlk *= *"/ { \
-			match($$0, /"[^"]*"/); \
-			amdvlk = substr($$0, RSTART+1, RLENGTH-2) \
-		} \
-		/\.intel *= *"/ { \
-			match($$0, /"[^"]*"/); \
-			intel = substr($$0, RSTART+1, RLENGTH-2) \
-		} \
-		/^\t\},$$/ || /^\t\}$$/ { \
-			if (game_id != "" && game_id !~ /NULL/) { \
-				print game_id "|" nvidia "|" amd "|" amdvlk "|" intel \
-			} \
-			game_id = ""; nvidia = ""; amd = ""; amdvlk = ""; intel = "" \
-		} \
-	' $(SRC)/game_launch_params.h >> $@
-
-install: nixlytile game_params.conf
+install: nixlytile
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
 	rm -f $(DESTDIR)$(PREFIX)/bin/nixlytile
 	cp -f nixlytile $(DESTDIR)$(PREFIX)/bin
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/nixlytile
-	mkdir -p $(DESTDIR)$(DATADIR)/nixlytile/images
-	cp -r images/svg $(DESTDIR)$(DATADIR)/nixlytile/images/
-	mkdir -p $(DESTDIR)$(DATADIR)/nixlytile
-	cp -f config.conf.example $(DESTDIR)$(DATADIR)/nixlytile/config.conf.example
-	chmod 644 $(DESTDIR)$(DATADIR)/nixlytile/config.conf.example
-	cp -f game_params.conf $(DESTDIR)$(DATADIR)/nixlytile/game_params.conf
-	chmod 644 $(DESTDIR)$(DATADIR)/nixlytile/game_params.conf
 	mkdir -p $(DESTDIR)$(MANDIR)/man1
 	cp -f nixlytile.1 $(DESTDIR)$(MANDIR)/man1
 	chmod 644 $(DESTDIR)$(MANDIR)/man1/nixlytile.1

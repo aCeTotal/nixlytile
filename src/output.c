@@ -10,8 +10,6 @@ cleanupmon(struct wl_listener *listener, void *data)
 	LayerSurface *l, *tmp;
 	size_t i;
 
-	modal_file_search_stop(m);
-
 	/* If a laptop display is being removed, clear is_mirror on any output
 	 * that was mirroring it so it becomes an independent display. */
 	if (strncmp(m->wlr_output->name, "eDP", 3) == 0 ||
@@ -40,14 +38,6 @@ cleanupmon(struct wl_listener *listener, void *data)
 	wlr_output_layout_remove(output_layout, m->wlr_output);
 	wlr_scene_output_destroy(m->scene_output);
 
-	if (m->statusbar.tree)
-		wlr_scene_node_destroy(&m->statusbar.tree->node);
-	if (m->modal.tree)
-		wlr_scene_node_destroy(&m->modal.tree->node);
-	if (m->nixpkgs.tree)
-		wlr_scene_node_destroy(&m->nixpkgs.tree->node);
-	if (m->wifi_popup.tree)
-		wlr_scene_node_destroy(&m->wifi_popup.tree->node);
 	if (m->toast_overlay_buf) {
 		cpu_cursor_buffer_destroy(m->toast_overlay_buf);
 		m->toast_overlay_buf = NULL;
@@ -56,9 +46,9 @@ cleanupmon(struct wl_listener *listener, void *data)
 		wlr_output_layer_destroy(m->toast_overlay_layer);
 		m->toast_overlay_layer = NULL;
 	}
-	destroy_tree(m);
 	closemon(m);
 	ll_cursor_cleanup(m);
+	monitor_cleanup_workspaces(m);
 	wl_event_source_remove(m->idle_heartbeat);
 	wlr_scene_node_destroy(&m->fullscreen_bg->node);
 	free(m);
@@ -122,11 +112,13 @@ bestmode(struct wlr_output *output)
 	int best_area = 0, best_refresh = 0;
 
 	wl_list_for_each(mode, &output->modes, link) {
-		/* Skip DCI 4K (4096x2160) - only use UHD (3840x2160).
-		 * Some 4K TVs report DCI 4K as preferred, which forces the
-		 * HDMI driver into Limited quantization range (gray blacks)
-		 * and causes aspect issues on 16:9 panels. */
+		/* Cap at 4K UHD (3840x2160).  Skips DCI 4K (4096x2160) which
+		 * on some TVs forces Limited quantization range (gray blacks),
+		 * and any 5K/8K panels — picking those would mostly tank
+		 * performance for negligible visual gain. */
 		if (mode_is_dci_4k(mode))
+			continue;
+		if (mode->width > 3840 || mode->height > 2160)
 			continue;
 		int area = mode->width * mode->height;
 		if (!best || area > best_area || (area == best_area && mode->refresh > best_refresh)) {
@@ -195,21 +187,7 @@ is_external_connector(const char *name)
 	       strncmp(name, "DP", 2) == 0;
 }
 
-static void
-restart_wallpaper(void)
-{
-	char expanded_wp[PATH_MAX];
-	config_expand_path(wallpaper_path, expanded_wp, sizeof(expanded_wp));
-	wlr_log(WLR_INFO, "Restarting wallpaper: %s", expanded_wp);
-
-	pid_t pid = fork();
-	if (pid == 0) {
-		setsid();
-		(void)system("pkill -9 swaybg 2>/dev/null; sleep 0.3");
-		execlp("swaybg", "swaybg", "-i", expanded_wp, "-m", "fill", (char *)NULL);
-		_exit(127);
-	}
-}
+static void restart_wallpaper(void) { /* wallpaper removed */ }
 
 /* ── auto-arrange helpers ──────────────────────────────────────────── */
 
@@ -580,7 +558,8 @@ createmon(struct wl_listener *listener, void *data)
 
 	for (i = 0; i < LENGTH(m->layers); i++)
 	wl_list_init(&m->layers[i]);
-	initstatusbar(m);
+
+	monitor_init_workspaces(m);
 
 	wlr_output_state_init(&state);
 	/* Initialize monitor state using configured rules */
@@ -649,17 +628,29 @@ createmon(struct wl_listener *listener, void *data)
 				m->lt[0] = r->lt;
 				m->lt[1] = &layouts[nlayouts > 1 && r->lt != &layouts[1]];
 				strncpy(m->ltsymbol, m->lt[m->sellt]->symbol, LENGTH(m->ltsymbol));
-				wlr_output_state_set_scale(&state, r->scale);
 				wlr_output_state_set_transform(&state, r->rr);
 				break;
 			}
 		}
 
-		/* The mode is a tuple of (width, height, refresh rate), and each
-		 * monitor supports only a specific set of modes. Pick the highest
-		 * resolution and refresh rate available. */
+		/* Pick best mode (highest area, highest refresh, ≤4K UHD). */
 		if ((mode = bestmode(wlr_output)))
 			wlr_output_state_set_mode(&state, mode);
+
+		/* Niri-style: scale = 1.0 by default (no auto-scaling).
+		 * User overrides per-output by setting `scale` in the
+		 * matching MonitorRule in config.h. */
+		{
+			float scale = 1.0f;
+			for (r = monrules; r < monrules + nmonrules; r++) {
+				if (!r->name || strstr(wlr_output->name, r->name)) {
+					if (r->scale > 0.0f)
+						scale = r->scale;
+					break;
+				}
+			}
+			wlr_output_state_set_scale(&state, scale);
+		}
 	}
 
 	/* Set up event listeners */
@@ -823,8 +814,6 @@ createmon(struct wl_listener *listener, void *data)
 
 	wl_list_insert(&mons, &m->link);
 	printstatus();
-	init_tree(m);
-	modal_prewarm(m);
 
 	/* Idle monitor render throttle */
 	m->idle_heartbeat = wl_event_loop_add_timer(event_loop, idle_heartbeat_cb, m);
@@ -851,22 +840,7 @@ createmon(struct wl_listener *listener, void *data)
 	 */
 	m->scene_output = wlr_scene_output_create(scene, wlr_output);
 
-	/* Calculate position for runtime-configured monitors */
-	if (use_runtime_config && rtcfg && rtcfg->position != MON_POS_AUTO) {
-		int pos_x, pos_y;
-		/* Get monitor dimensions from the committed mode */
-		if (wlr_output->current_mode) {
-			m->m.width = wlr_output->current_mode->width;
-			m->m.height = wlr_output->current_mode->height;
-		}
-		calculate_monitor_position(m, rtcfg, &pos_x, &pos_y);
-		if (pos_x != -1 && pos_y != -1) {
-			m->m.x = pos_x;
-			m->m.y = pos_y;
-			wlr_log(WLR_INFO, "Positioning monitor %s at %d,%d (slot: %d)",
-				wlr_output->name, pos_x, pos_y, rtcfg->position);
-		}
-	}
+	/* runtime monitor position calculation removed (config.c gone) */
 
 	/* If runtime config placed this monitor explicitly, use that position.
 	 * Otherwise auto_arrange_monitors() will position all monitors. */
@@ -894,17 +868,6 @@ createmon(struct wl_listener *listener, void *data)
 	if (is_external_connector(wlr_output->name))
 		restart_wallpaper();
 
-	/* Auto-show monitor setup popup if multiple monitors and no config file */
-	{
-		int mon_count = 0;
-		Monitor *om;
-		wl_list_for_each(om, &mons, link) {
-			if (om->wlr_output->enabled && !om->is_mirror)
-				mon_count++;
-		}
-		if (mon_count > 1 && !monitors_conf_exists())
-			schedule_monitor_setup_popup();
-	}
 }
 
 struct wlr_box
@@ -1676,6 +1639,26 @@ rendermon(struct wl_listener *listener, void *data)
 	now.tv_sec = frame_start_ns / 1000000000ULL;
 	now.tv_nsec = frame_start_ns % 1000000000ULL;
 
+	/* ── Niri-style workspace animation tick ─────────────────────── */
+	{
+		double dt;
+		int still;
+		if (m->last_anim_ns == 0)
+			m->last_anim_ns = frame_start_ns;
+		dt = (double)(frame_start_ns - m->last_anim_ns) / 1e9;
+		m->last_anim_ns = frame_start_ns;
+		if (dt < 0.0) dt = 0.0;
+		if (dt > 0.1) dt = 0.1;
+
+		still = monitor_anim_tick(m, dt);
+		/* monitor_anim_tick already called monitor_apply_positions
+		 * internally to keep target_geom in lock-step with the
+		 * just-ticked scroll/col springs.  Here we only need to
+		 * schedule the next vblank when something is still moving. */
+		if (still && m->wlr_output)
+			wlr_output_schedule_frame(m->wlr_output);
+	}
+
 	classify_fullscreen_content(m, &is_game, &is_video, &allow_tearing);
 
 	/*
@@ -1830,10 +1813,7 @@ rendermon(struct wl_listener *listener, void *data)
 		m->scene_build_failures = 0;
 	}
 
-	/* Screenshot frame capture — grab pixels before commit */
-	if (screenshot_mode == SCREENSHOT_PENDING && m == selmon && needs_frame && state.buffer) {
-		screenshot_capture_frame(m, state.buffer);
-	}
+	/* screenshot capture removed */
 
 	/*
 	 * Detect direct scanout: if the output buffer is a client buffer
@@ -1888,8 +1868,6 @@ rendermon(struct wl_listener *listener, void *data)
 					"%s%s", off > 0 ? ", " : "", name); \
 			} while (0)
 
-			if (m->statusbar.tree && m->statusbar.tree->node.enabled)
-				ADD_BLOCKER("statusbar");
 			if (m->toast_tree && m->toast_visible)
 				ADD_BLOCKER("toast");
 			if (m->hz_osd_tree && m->hz_osd_visible)
@@ -3058,8 +3036,7 @@ enable_10bit_rendering(Monitor *m)
 			/* wlroots 0.20 sets max_bpc automatically via atomic commits
 			 * based on the render format (pick_max_bpc in atomic.c) */
 
-			/* Show notification */
-			toast_show(m, "10-bit color", 1500);
+			/* toast removed */
 		} else {
 			wlr_log(WLR_ERROR, "Failed to commit 10-bit state on %s, falling back to 8-bit",
 				m->wlr_output->name);
@@ -3835,13 +3812,7 @@ invalidate_video_pacing(Monitor *m)
 void
 schedule_video_check(uint32_t ms)
 {
-	if (!event_loop)
-		return;
-	if (!video_check_timer)
-		video_check_timer = wl_event_loop_add_timer(event_loop,
-				video_check_timeout, NULL);
-	if (video_check_timer)
-		wl_event_source_timer_update(video_check_timer, ms);
+	(void)ms;
 }
 
 int
@@ -3869,6 +3840,13 @@ hide_hz_osd(Monitor *m)
 
 void
 show_hz_osd(Monitor *m, const char *msg)
+{
+	(void)m;
+	(void)msg;
+}
+#if 0
+void
+show_hz_osd_orig(Monitor *m, const char *msg)
 {
 	tll(struct GlyphRun) glyphs = tll_init();
 	const struct fcft_glyph *glyph;
@@ -3986,6 +3964,7 @@ show_hz_osd(Monitor *m, const char *msg)
 	if (hz_osd_timer)
 		wl_event_source_timer_update(hz_osd_timer, 3000);
 }
+#endif
 
 void
 testhzosd(const Arg *arg)
