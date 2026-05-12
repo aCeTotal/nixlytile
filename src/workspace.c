@@ -1,5 +1,75 @@
+#include <ctype.h>
+#include <string.h>
+
 #include "nixlytile.h"
 #include "client.h"
+
+/* Apps that default to occupying 2 default-tile slots when first
+ * attached to a workspace.  Matched case-insensitively as substrings
+ * against client appid+title.  Override with explicit Mod+R preset. */
+static const char *const wide_app_tokens[] = {
+	"blender",
+	"firefox",
+	"librewolf",
+	"chromium",
+	"chrome",
+	"google-chrome",
+	"brave",
+	"vivaldi",
+	"opera",
+	"libreoffice",
+	"soffice",
+	"onlyoffice",
+	"wpsoffice",
+	"wps-office",
+	"freeoffice",
+	"writer",
+	"calc",
+	"impress",
+	"draw",
+};
+
+static int
+ci_substr(const char *hay, const char *needle)
+{
+	size_t nlen, i;
+	if (!hay || !needle)
+		return 0;
+	nlen = strlen(needle);
+	if (nlen == 0)
+		return 1;
+	for (i = 0; hay[i]; i++) {
+		size_t j;
+		for (j = 0; j < nlen; j++) {
+			if (!hay[i + j])
+				return 0;
+			if (tolower((unsigned char)hay[i + j])
+					!= tolower((unsigned char)needle[j]))
+				break;
+		}
+		if (j == nlen)
+			return 1;
+	}
+	return 0;
+}
+
+static int
+client_wide_tile_count(Client *c)
+{
+	const char *appid, *title;
+	size_t i;
+
+	if (!c)
+		return 1;
+	appid = client_get_appid(c);
+	title = client_get_title(c);
+	for (i = 0; i < sizeof(wide_app_tokens) / sizeof(wide_app_tokens[0]); i++) {
+		const char *tok = wide_app_tokens[i];
+		if (ci_substr(appid, tok) || ci_substr(title, tok))
+			return 2;
+	}
+	return 1;
+}
 
 /*
  * Niri-style workspace + column primitives.
@@ -27,6 +97,10 @@ workspace_create(Monitor *m)
 	if (!ws)
 		return NULL;
 
+	{
+		static uint64_t next_window_id = 1;
+		ws->window_id = next_window_id++;
+	}
 	ws->mon = m;
 	ws->idx = m->next_ws_id++;
 	wl_list_init(&ws->columns);
@@ -89,6 +163,7 @@ column_create(Workspace *ws)
 	col->target_x = col->target_y = 0;
 	col->target_width = col->target_height = 0;
 	col->width_idx = -1;
+	col->wide_tiles = 1;
 	col->fullscreen = 0;
 	col->x_f = 0.0;
 	col->x_vel = 0.0;
@@ -225,6 +300,7 @@ workspace_attach_client(Workspace *ws, Client *c)
 	wl_list_init(&col->clients);
 	col->n_clients = 0;
 	col->width_idx = -1;
+	col->wide_tiles = client_wide_tile_count(c);
 	col->fullscreen = 0;
 	col->x_f = 0.0;
 	col->x_vel = 0.0;
@@ -252,6 +328,70 @@ void
 workspace_detach_client(Client *c)
 {
 	column_remove_client(c);
+}
+
+/* Re-insert a (previously detached) client into the workspace as a new
+ * column placed at the drop position.  Used by mouse drag-to-tile: the
+ * client floated during drag; on release we slot it into the column row
+ * at the cursor's horizontal position. */
+void
+workspace_drop_tile(Workspace *ws, Client *c, double screen_x)
+{
+	Monitor *m;
+	Column *iter, *target = NULL, *col;
+	double local_x;
+	int insert_after = 1; /* default: append at end */
+
+	if (!ws || !c || !ws->mon)
+		return;
+	m = ws->mon;
+
+	local_x = screen_x - m->w.x + ws->target_scroll_x;
+
+	wl_list_for_each(iter, &ws->columns, link) {
+		if (iter == c->column)
+			continue;
+		if (local_x < iter->target_x) {
+			target = iter;
+			insert_after = 0;
+			break;
+		}
+		if (local_x < iter->target_x + iter->target_width) {
+			int mid = iter->target_x + iter->target_width / 2;
+			target = iter;
+			insert_after = (local_x >= mid) ? 1 : 0;
+			break;
+		}
+	}
+
+	if (c->column)
+		column_remove_client(c);
+
+	col = ecalloc(1, sizeof(*col));
+	if (!col)
+		return;
+	col->ws = ws;
+	wl_list_init(&col->clients);
+	col->n_clients = 0;
+	col->width_idx = -1;
+	col->wide_tiles = client_wide_tile_count(c);
+	col->fullscreen = 0;
+	col->x_f = 0.0;
+	col->x_vel = 0.0;
+	col->width_f = 0.0;
+	col->width_vel = 0.0;
+	col->just_created = 1;
+
+	if (target && !insert_after)
+		wl_list_insert(target->link.prev, &col->link);
+	else if (target && insert_after)
+		wl_list_insert(&target->link, &col->link);
+	else
+		wl_list_insert(ws->columns.prev, &col->link);
+	ws->n_columns++;
+
+	column_add_client(col, c);
+	ws->focused_col = col;
 }
 
 /* When a client gains focus, point ws.focused_col to its owning column
@@ -336,6 +476,8 @@ default_tiles_per_row(Monitor *m)
 static int
 column_target_width_px(Column *col, int mon_w, int gap, int n_default)
 {
+	int tile_w, tiles;
+
 	if (!col)
 		return mon_w / 2;
 	if (col->fullscreen)
@@ -344,7 +486,10 @@ column_target_width_px(Column *col, int mon_w, int gap, int n_default)
 		return (int)((double)mon_w *
 				preset_column_widths[col->width_idx]);
 	if (n_default < 1) n_default = 1;
-	return (mon_w - (n_default - 1) * gap) / n_default;
+	tile_w = (mon_w - (n_default - 1) * gap) / n_default;
+	tiles = col->wide_tiles >= 1 ? col->wide_tiles : 1;
+	if (tiles > n_default) tiles = n_default;
+	return tiles * tile_w + (tiles - 1) * gap;
 }
 
 void
@@ -519,6 +664,10 @@ printstatus(void)
 
 	/* Niri waybar parity: emit zdwl_ipc events to bound clients. */
 	dwl_ipc_publish();
+
+	/* Niri-IPC subscribers (waybar niri/workspaces). */
+	window_ipc_publish_workspaces();
+	window_ipc_publish_workspace_activated();
 }
 
 /* Niri-style column-expand fullscreen: focused column takes the full
@@ -588,6 +737,31 @@ switch_preset_column_width(const Arg *arg)
 	if (col->width_idx < 0)
 		col->width_idx = default_column_width_idx;
 	col->width_idx = (col->width_idx + 1) % n_preset_column_widths;
+	arrange(selmon);
+}
+
+/* Directional column resize.  arg->i < 0 = shrink (prev preset),
+ * arg->i > 0 = grow (next preset).  Clamps at the ends instead of
+ * wrapping so repeated taps don't jump from widest back to narrowest. */
+void
+resize_column_dir(const Arg *arg)
+{
+	Column *col;
+	int dir;
+	if (!selmon || !selmon->active_ws || !arg)
+		return;
+	col = selmon->active_ws->focused_col;
+	if (!col)
+		return;
+	dir = arg->i >= 0 ? 1 : -1;
+	col->fullscreen = 0;
+	if (col->width_idx < 0)
+		col->width_idx = default_column_width_idx;
+	col->width_idx += dir;
+	if (col->width_idx < 0)
+		col->width_idx = 0;
+	if (col->width_idx >= n_preset_column_widths)
+		col->width_idx = n_preset_column_widths - 1;
 	arrange(selmon);
 }
 

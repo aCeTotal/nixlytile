@@ -172,8 +172,7 @@ const char *screenshotcmd[] = { "grimshot", "copy", "area", NULL };
 const char *const autostart_cmd =
 	"swaybg -i \"$HOME/.nixlyos/wallpapers/beach.jpg\" -m fill & "
 	"\"$HOME/.local/bin/niri-set-max-mode.sh\" --watch & "
-	"waybar -c \"$HOME/.config/waybar/nixlytile.jsonc\" "
-	"       -s \"$HOME/.config/waybar/nixlytile-style.css\" <&- & "
+	"waybar <&- & "
 	"nm-applet --indicator & "
 	"blueman-applet & "
 	"xwayland-satellite & "
@@ -246,16 +245,26 @@ const Key keys[] = {
 	{ MODKEY,                    XKB_KEY_9,          focus_workspace_n, {.i = 8} },
 	{ MODKEY,                    XKB_KEY_0,          focus_workspace_n, {.i = 9} },
 
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_exclam,     move_client_to_ws_n, {.i = 0} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_at,         move_client_to_ws_n, {.i = 1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_numbersign, move_client_to_ws_n, {.i = 2} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_dollar,     move_client_to_ws_n, {.i = 3} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_percent,    move_client_to_ws_n, {.i = 4} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_asciicircum,move_client_to_ws_n, {.i = 5} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_ampersand,  move_client_to_ws_n, {.i = 6} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_asterisk,   move_client_to_ws_n, {.i = 7} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_parenleft,  move_client_to_ws_n, {.i = 8} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_parenright, move_client_to_ws_n, {.i = 9} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_1,          move_client_to_ws_n, {.i = 0} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_2,          move_client_to_ws_n, {.i = 1} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_3,          move_client_to_ws_n, {.i = 2} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_4,          move_client_to_ws_n, {.i = 3} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_5,          move_client_to_ws_n, {.i = 4} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_6,          move_client_to_ws_n, {.i = 5} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_7,          move_client_to_ws_n, {.i = 6} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_8,          move_client_to_ws_n, {.i = 7} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_9,          move_client_to_ws_n, {.i = 8} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_0,          move_client_to_ws_n, {.i = 9} },
+
+	/* Alt + H/J/K/L or arrows: move tile within current workspace. */
+	{ WLR_MODIFIER_ALT,          XKB_KEY_h,          move_column_dir,            {.i = -1} },
+	{ WLR_MODIFIER_ALT,          XKB_KEY_l,          move_column_dir,            {.i = +1} },
+	{ WLR_MODIFIER_ALT,          XKB_KEY_Left,       move_column_dir,            {.i = -1} },
+	{ WLR_MODIFIER_ALT,          XKB_KEY_Right,      move_column_dir,            {.i = +1} },
+	{ WLR_MODIFIER_ALT,          XKB_KEY_k,          move_window_in_column_dir,  {.i = -1} },
+	{ WLR_MODIFIER_ALT,          XKB_KEY_j,          move_window_in_column_dir,  {.i = +1} },
+	{ WLR_MODIFIER_ALT,          XKB_KEY_Up,         move_window_in_column_dir,  {.i = -1} },
+	{ WLR_MODIFIER_ALT,          XKB_KEY_Down,       move_window_in_column_dir,  {.i = +1} },
 
 	{ MODKEY,                    XKB_KEY_Tab,        focus_last_workspace, {0} },
 

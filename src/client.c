@@ -242,7 +242,10 @@ applyrules(Client *c)
 		c->geom.y = (mon->w.height - c->geom.height) / 2 + mon->m.y;
 	}
 
-	c->isfloating |= client_is_float_type(c);
+	/* Niri parity: tile by default.  The client_is_float_type() heuristic
+	 * (fixed min==max size, splash/utility window types) is intentionally
+	 * NOT applied — only explicit rules + transient-child handling in
+	 * mapnotify can force a client floating. */
 	wlr_log(WLR_INFO,
 		"GAME_TRACE: applyrules exit → mon='%s' newtags=0x%x isfloating=%d",
 		mon && mon->wlr_output ? mon->wlr_output->name : "(null)",

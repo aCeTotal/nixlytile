@@ -186,7 +186,7 @@ const char *alacrittycmd[] = { "alacritty", NULL };
 const char *btopcmd[] = { "alacritty", "-e", "btop", NULL };
 const char *bravecmd[] __attribute__((unused)) = { "brave", NULL };
 const char *chromecmd[] = { "google-chrome-stable", NULL };
-const char *nixlylaunchercmd[] = { "nixly_launcher", NULL };
+const char *nixlylaunchercmd[] = { "apptoggle", NULL };
 const char *menucmd[] __attribute__((unused)) = { "wmenu-run", NULL };
 const char *netcmd[] = { "nm-connection-editor", NULL };
 const char *pavucontrolcmd[] = { "pavucontrol", NULL };
@@ -203,6 +203,7 @@ char wallpaper_path[PATH_MAX] = "$HOME/.nixlyos/wallpapers/beach.jpg";
  * inherits the pipe — that's how its dwl/tags module receives our
  * printstatus() workspace events. */
 char autostart_cmd[4096] =
+	"appd & "
 	"eval $(gnome-keyring-daemon --start --components=secrets,ssh,pkcs11) & "
 	"thunar --daemon & "
 	"swaybg -i \"$HOME/.nixlyos/wallpapers/beach.jpg\" -m fill & "
@@ -259,8 +260,8 @@ const Key default_keys[] = {
 	/* Move column left/right */
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_H,          move_column_dir,     {.i = -1} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_L,          move_column_dir,     {.i = +1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Left,       move_column_dir,     {.i = -1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Right,      move_column_dir,     {.i = +1} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Left,       resize_column_dir,   {.i = -1} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Right,      resize_column_dir,   {.i = +1} },
 
 	/* Move client to workspace above/below */
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_K,          move_client_to_ws_dir, {.i = -1} },
@@ -296,15 +297,27 @@ const Key default_keys[] = {
 	{ MODKEY,                    XKB_KEY_8,          focus_workspace_n,    {.i = 7} },
 	{ MODKEY,                    XKB_KEY_9,          focus_workspace_n,    {.i = 8} },
 
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_exclam,     move_client_to_ws_n,  {.i = 0} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_at,         move_client_to_ws_n,  {.i = 1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_numbersign, move_client_to_ws_n,  {.i = 2} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_dollar,     move_client_to_ws_n,  {.i = 3} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_percent,    move_client_to_ws_n,  {.i = 4} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_asciicircum,move_client_to_ws_n,  {.i = 5} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_ampersand,  move_client_to_ws_n,  {.i = 6} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_asterisk,   move_client_to_ws_n,  {.i = 7} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_parenleft,  move_client_to_ws_n,  {.i = 8} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_1,          move_client_to_ws_n,  {.i = 0} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_2,          move_client_to_ws_n,  {.i = 1} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_3,          move_client_to_ws_n,  {.i = 2} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_4,          move_client_to_ws_n,  {.i = 3} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_5,          move_client_to_ws_n,  {.i = 4} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_6,          move_client_to_ws_n,  {.i = 5} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_7,          move_client_to_ws_n,  {.i = 6} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_8,          move_client_to_ws_n,  {.i = 7} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_9,          move_client_to_ws_n,  {.i = 8} },
+
+	/* Alt + H/J/K/L or arrows: move tile within current workspace.
+	 * Alt+H/Left, Alt+L/Right shift the focused column horizontally.
+	 * Alt+K/Up,   Alt+J/Down move the focused window within its column. */
+	{ WLR_MODIFIER_ALT,          XKB_KEY_h,          move_column_dir,            {.i = -1} },
+	{ WLR_MODIFIER_ALT,          XKB_KEY_l,          move_column_dir,            {.i = +1} },
+	{ WLR_MODIFIER_ALT,          XKB_KEY_Left,       move_column_dir,            {.i = -1} },
+	{ WLR_MODIFIER_ALT,          XKB_KEY_Right,      move_column_dir,            {.i = +1} },
+	{ WLR_MODIFIER_ALT,          XKB_KEY_k,          move_window_in_column_dir,  {.i = -1} },
+	{ WLR_MODIFIER_ALT,          XKB_KEY_j,          move_window_in_column_dir,  {.i = +1} },
+	{ WLR_MODIFIER_ALT,          XKB_KEY_Up,         move_window_in_column_dir,  {.i = -1} },
+	{ WLR_MODIFIER_ALT,          XKB_KEY_Down,       move_window_in_column_dir,  {.i = +1} },
 
 	/* Quit compositor */
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Q,          quit,           {0} },

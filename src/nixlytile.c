@@ -766,6 +766,7 @@ cleanup(void)
 	wlr_log(WLR_ERROR, "cleanup() called - starting cleanup sequence");
 	/* Shut down game mode background worker (unfreezes processes if needed) */
 	gm_bg_cleanup();
+	window_ipc_finish();
 	cleanuplisteners();
 #ifdef XWAYLAND
 	wlr_xwayland_destroy(xwayland);
@@ -2548,6 +2549,11 @@ setup(void)
 	 * dwl/tags + dwl/window modules can attach.  Replaces the
 	 * outdated stdin status-pipe approach. */
 	dwl_ipc_init(dpy);
+
+	/* Niri-IPC subset on a Unix socket: lets waybar's niri/workspaces
+	 * module talk to nixlytile using the same wire protocol as Niri.
+	 * Sets NIRI_SOCKET so children inherit the path. */
+	window_ipc_init(event_loop);
 
 	xdg_shell = wlr_xdg_shell_create(dpy, 6);
 	wl_signal_add(&xdg_shell->events.new_toplevel, &new_xdg_toplevel);

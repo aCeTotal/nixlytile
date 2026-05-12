@@ -593,12 +593,29 @@ buttonpress(struct wl_listener *listener, void *data)
 		break;
 	case WL_POINTER_BUTTON_STATE_RELEASED:
 		if (!locked && cursor_mode != CurNormal && cursor_mode != CurPressed) {
+			int was_move = (cursor_mode == CurMove);
 			nixly_cursor_set_xcursor("default");
 			cursor_mode = CurNormal;
 			/* Drop the window off on its new monitor */
 			selmon = xytomon(cursor->x, cursor->y);
-			if (grabc)
-				setmon(grabc, selmon, 0);
+			if (grabc) {
+				if (was_move && grabc->was_tiled && selmon
+						&& selmon->active_ws) {
+					/* Snap back into the column row at the
+					 * cursor's horizontal position. */
+					if (selmon != grabc->mon)
+						setmon(grabc, selmon, 0);
+					grabc->isfloating = 0;
+					wlr_scene_node_reparent(&grabc->scene->node,
+							layers[LyrTile]);
+					workspace_drop_tile(selmon->active_ws,
+							grabc, cursor->x);
+					arrange(selmon);
+					printstatus();
+				} else {
+					setmon(grabc, selmon, 0);
+				}
+			}
 			grabc = NULL;
 			return;
 		}
@@ -1291,8 +1308,6 @@ keypress(struct wl_listener *listener, void *data)
 
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
-	(void)nlevel0;
-	(void)level0_syms;
 
 	/* VT switching using raw evdev keycodes — always works regardless of
 	 * XKB keymap, screen lock state, or active popups/overlays. */
@@ -1319,6 +1334,13 @@ keypress(struct wl_listener *listener, void *data)
 			last_keybinding_func = NULL;
 			for (i = 0; i < nsyms; i++)
 				handled = keybinding(mods, syms[i]) || handled;
+			/* Layout-agnostic match: also try unshifted (level-0) keysyms so
+			 * bindings like Mod+Shift+XKB_KEY_2 fire on Nordic layouts where
+			 * shift+2 produces " instead of @. */
+			if (!handled) {
+				for (i = 0; i < nlevel0; i++)
+					handled = keybinding(mods, level0_syms[i]) || handled;
+			}
 		}
 	}
 

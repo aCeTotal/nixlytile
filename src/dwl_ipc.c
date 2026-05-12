@@ -260,6 +260,26 @@ dwl_ipc_publish(void)
 		zdwl_ipc_output_v2_send_active(out->resource,
 				m == selmon ? 1 : 0);
 
+		/* Find the first empty tag idx — Niri shows occupied workspaces
+		 * plus exactly one trailing empty slot.  We forge clients_count=1
+		 * for that idx so waybar tags its button .occupied (visible);
+		 * everything past it stays .empty and is hidden by CSS. */
+		int next_empty_idx = -1;
+		for (i = 0; i < IPC_TAG_COUNT; i++) {
+			Workspace *probe = NULL;
+			int has_clients = 0;
+			wl_list_for_each(ws, &m->workspaces, link) {
+				if (ws->idx == i) { probe = ws; break; }
+			}
+			if (probe) {
+				Column *col;
+				wl_list_for_each(col, &probe->columns, link) {
+					if (col->n_clients > 0) { has_clients = 1; break; }
+				}
+			}
+			if (!has_clients) { next_empty_idx = i; break; }
+		}
+
 		/* Build per-tag events.  For each tag idx 0..IPC_TAG_COUNT-1,
 		 * compute state, client count and focused flag from the
 		 * matching workspace on this monitor. */
@@ -294,6 +314,26 @@ dwl_ipc_publish(void)
 				if (m->active_ws == match && match->focused_col &&
 						!wl_list_empty(&match->focused_col->clients))
 					focused = 1;
+			}
+
+			/* Mark the trailing "next-empty" tag as occupied so waybar
+			 * keeps it visible; real-occupied tags keep their count.
+			 * Only forge when the previous idx has clients — otherwise
+			 * empty workspaces would chain visually without anchors. */
+			if (i == next_empty_idx && clients_count == 0 && i > 0) {
+				Workspace *prev_ws = NULL;
+				int prev_has_clients = 0;
+				wl_list_for_each(ws, &m->workspaces, link) {
+					if (ws->idx == i - 1) { prev_ws = ws; break; }
+				}
+				if (prev_ws) {
+					Column *col;
+					wl_list_for_each(col, &prev_ws->columns, link) {
+						if (col->n_clients > 0) { prev_has_clients = 1; break; }
+					}
+				}
+				if (prev_has_clients)
+					clients_count = 1;
 			}
 
 			zdwl_ipc_output_v2_send_tag(out->resource, i,

@@ -1130,6 +1130,11 @@ struct Column {
 	 * Mod+R cycles forward through preset_column_widths[].  When fullscreen
 	 * is set, width is forced to monitor width regardless of width_idx. */
 	int width_idx;
+	/* How many default-tile slots this column occupies when width_idx
+	 * == -1 (no user preset).  Most clients = 1.  Wide apps (Blender,
+	 * browsers, office suites) default to 2.  Mod+R cycling sets
+	 * width_idx >= 0 and bypasses this. */
+	int wide_tiles;
 	/* Spring state for col->x and col->width — when a column is
 	 * inserted, removed, resized (fullscreen toggle / preset cycle)
 	 * or a sibling changes width, the column must SLIDE/SCALE to
@@ -1144,6 +1149,7 @@ struct Workspace {
 	struct wl_list link;          /* link in Monitor.workspaces (head→tail = top→bottom) */
 	struct wl_list columns;       /* Column.link */
 	struct wlr_scene_tree *scene; /* parent for all columns/clients in this ws */
+	uint64_t window_id;             /* globally-unique id for Niri-IPC clients */
 	int idx;                      /* stable id per monitor (auto-increment) */
 	int scroll_x;                 /* camera offset within row (int snapshot of _f) */
 	int target_scroll_x;          /* spring target */
@@ -2054,6 +2060,7 @@ void monitor_init_workspaces(Monitor *m);
 void monitor_cleanup_workspaces(Monitor *m);
 void workspace_attach_client(Workspace *ws, Client *c);
 void workspace_detach_client(Client *c);
+void workspace_drop_tile(Workspace *ws, Client *c, double screen_x);
 void workspace_focus_client(Client *c);
 void workspace_layout(Workspace *ws);
 void monitor_apply_positions(Monitor *m);
@@ -2069,6 +2076,7 @@ void move_client_to_ws_n(const Arg *arg);
 void focus_last_workspace(const Arg *arg);
 void toggle_column_fullscreen(const Arg *arg);
 void switch_preset_column_width(const Arg *arg);
+void resize_column_dir(const Arg *arg);
 void maximize_column(const Arg *arg);
 void center_column(const Arg *arg);
 void swap_window_dir(const Arg *arg);
@@ -2083,6 +2091,12 @@ extern const int default_column_width_idx;
 void dwl_ipc_init(struct wl_display *display);
 void dwl_ipc_finish(void);
 void dwl_ipc_publish(void);
+
+/* window_ipc.c — Niri-compatible Unix-socket IPC subset (waybar niri/workspaces) */
+void window_ipc_init(struct wl_event_loop *loop);
+void window_ipc_finish(void);
+void window_ipc_publish_workspaces(void);
+void window_ipc_publish_workspace_activated(void);
 
 /* anim.c */
 int anim_tick(double *current, double target, double rate, double dt);
