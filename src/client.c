@@ -807,6 +807,39 @@ mapnotify(struct wl_listener *listener, void *data)
 
 	/* Handle unmanaged clients first so we can return prior create borders */
 	if (client_is_unmanaged(c)) {
+		/* Center splash-like override-redirect windows.  Discord and other
+		 * Electron apps map their startup splash as override-redirect at
+		 * (0,0) without ever setting an explicit position, so without
+		 * this they land in the top-left corner.  Menus, tooltips and
+		 * popups always carry an explicit non-zero position, so the
+		 * origin check leaves them alone. */
+		{
+			int center = 0;
+#ifdef XWAYLAND
+			if (c->surface.xwayland &&
+					wlr_xwayland_surface_has_window_type(c->surface.xwayland,
+						WLR_XWAYLAND_NET_WM_WINDOW_TYPE_SPLASH))
+				center = 1;
+#endif
+			if (!center && c->geom.x == 0 && c->geom.y == 0 &&
+					c->geom.width > 0 && c->geom.height > 0)
+				center = 1;
+
+			if (center) {
+				Monitor *tm = selmon;
+				if (!(c->geom.x == 0 && c->geom.y == 0)) {
+					Monitor *xm = xytomon(c->geom.x + c->geom.width / 2,
+						c->geom.y + c->geom.height / 2);
+					if (xm) tm = xm;
+				}
+				if (tm && c->geom.width < tm->m.width &&
+						c->geom.height < tm->m.height) {
+					c->geom.x = tm->m.x + (tm->m.width - c->geom.width) / 2;
+					c->geom.y = tm->m.y + (tm->m.height - c->geom.height) / 2;
+				}
+			}
+		}
+
 		/* Unmanaged clients always are floating */
 		wlr_scene_node_reparent(&c->scene->node,
 			layers[client_has_fullscreen_ancestor(c) ? LyrFS : LyrFloat]);
@@ -1053,11 +1086,16 @@ mapnotify(struct wl_listener *listener, void *data)
 		 * modal dialogs via client_is_float_type() (X11 DIALOG/MODAL
 		 * type, fixed min==max size hints). */
 		c->isfloating = client_is_float_type(c);
-		if (c->isfloating && p->mon) {
-			c->geom.x = (p->mon->w.width - c->geom.width) / 2 + p->mon->m.x;
-			c->geom.y = (p->mon->w.height - c->geom.height) / 2 + p->mon->m.y;
+		if (c->isfloating) {
+			Monitor *cm = p->mon ? p->mon : selmon;
+			if (cm && c->geom.width > 0 && c->geom.height > 0 &&
+					c->geom.width < cm->m.width &&
+					c->geom.height < cm->m.height) {
+				c->geom.x = cm->m.x + (cm->m.width - c->geom.width) / 2;
+				c->geom.y = cm->m.y + (cm->m.height - c->geom.height) / 2;
+			}
 		}
-		setmon(c, p->mon, p->tags);
+		setmon(c, p->mon ? p->mon : selmon, p->tags);
 	} else {
 		wlr_log(WLR_INFO, "GAME_TRACE: mapnotify applyrules-path (no parent)");
 		applyrules(c);
@@ -1163,13 +1201,14 @@ mapnotify(struct wl_listener *listener, void *data)
 		return;
 	}
 
-	/* Generic parentless floating client — splash/dialog/utility,
-	 * or rule-floated.  applyrules ran at initial_commit when c->geom
-	 * was zero, so any centering it attempted is moot.  Now that
-	 * client_get_geometry has filled c->geom, center on the monitor
-	 * and reparent into the float layer. */
-	if (c->isfloating && !c->isfullscreen && c->mon &&
-			client_get_parent(c) == NULL) {
+	/* Generic floating client — splash/dialog/utility, or rule-floated.
+	 * applyrules ran at initial_commit when c->geom was zero, so any
+	 * centering it attempted is moot.  Now that client_get_geometry has
+	 * filled c->geom, center on the monitor and reparent into the float
+	 * layer.  Applies to parented floats too (e.g. Discord/Steam splashes
+	 * that are transients of an unmapped parent) so they don't end up at
+	 * (0,0) when the parent path couldn't determine a monitor. */
+	if (c->isfloating && !c->isfullscreen && c->mon) {
 		int mw = c->mon->m.width;
 		int mh = c->mon->m.height;
 		int gw = c->geom.width;
@@ -1339,7 +1378,6 @@ resize(Client *c, struct wlr_box geo, int interact)
 	bbox = interact ? &sgeom : &c->mon->w;
 
 	client_set_bounds(c, geo.width, geo.height);
-	pos_changed = (c->geom.x != geo.x || c->geom.y != geo.y);
 	c->geom = geo;
 	if (!c->column)
 		applybounds(c, bbox);
@@ -1347,8 +1385,15 @@ resize(Client *c, struct wlr_box geo, int interact)
 	size_changed = (c->geom.width != c->last_size_w ||
 			c->geom.height != c->last_size_h);
 
-	if (pos_changed)
+	/* Compare against the last position actually pushed to wlroots,
+	 * not c->geom (callers may have pre-set c->geom to the new value
+	 * before invoking resize, which would defeat a c->geom comparison). */
+	pos_changed = (c->last_pos_x != c->geom.x || c->last_pos_y != c->geom.y);
+	if (pos_changed) {
 		wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
+		c->last_pos_x = c->geom.x;
+		c->last_pos_y = c->geom.y;
+	}
 
 	/* Border rects + surface offsets only need rewriting on actual
 	 * size change.  For pure camera scroll (size unchanged) this

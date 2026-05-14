@@ -1028,6 +1028,12 @@ typedef struct {
 	 * / redraw per frame → choppiness + "doesn't adjust until
 	 * refocus" symptom. */
 	int last_configured_w, last_configured_h;
+	/* Last scene-node position pushed to wlroots.  Tracked separately
+	 * from c->geom because callers sometimes pre-modify c->geom and
+	 * then invoke resize() with the same value — pos_changed would
+	 * miss the update and leave the scene node at its previous
+	 * position (notably the (0,0) default for newly mapped windows). */
+	int last_pos_x, last_pos_y;
 	/* Anim-time snapshot: while a workspace anim is running we
 	 * replace the live surface tree with a static scene_buffer
 	 * holding the current buffer.  Heavy clients (Blender, Chrome,

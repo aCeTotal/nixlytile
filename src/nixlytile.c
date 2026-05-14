@@ -3342,6 +3342,38 @@ configurex11(struct wl_listener *listener, void *data)
 		return;
 	}
 	if (client_is_unmanaged(c)) {
+		/* Splash-like override-redirect (Discord/Electron launchers,
+		 * X11 SPLASH window types): ignore stale (0,0) or
+		 * single-monitor-assumed positions and re-center on the
+		 * monitor the splash currently sits on.  Mirrors the
+		 * centering done in mapnotify so subsequent configure
+		 * requests don't snap the splash to the top-left. */
+		int recenter = 0;
+		if (wlr_xwayland_surface_has_window_type(c->surface.xwayland,
+					WLR_XWAYLAND_NET_WM_WINDOW_TYPE_SPLASH))
+			recenter = 1;
+		else if (event->x == 0 && event->y == 0
+				&& event->width > 0 && event->height > 0)
+			recenter = 1;
+
+		if (recenter) {
+			int sx, sy;
+			Monitor *tm = NULL;
+			if (wlr_scene_node_coords(&c->scene->node, &sx, &sy))
+				tm = xytomon(sx + event->width / 2,
+						sy + event->height / 2);
+			if (!tm)
+				tm = selmon;
+			if (tm && event->width < tm->m.width
+					&& event->height < tm->m.height) {
+				int cx = tm->m.x + (tm->m.width - event->width) / 2;
+				int cy = tm->m.y + (tm->m.height - event->height) / 2;
+				wlr_scene_node_set_position(&c->scene->node, cx, cy);
+				wlr_xwayland_surface_configure(c->surface.xwayland,
+						cx, cy, event->width, event->height);
+				return;
+			}
+		}
 		wlr_scene_node_set_position(&c->scene->node, event->x, event->y);
 		wlr_xwayland_surface_configure(c->surface.xwayland,
 				event->x, event->y, event->width, event->height);
@@ -3441,6 +3473,29 @@ configurex11(struct wl_listener *listener, void *data)
 		 * monitor center.
 		 */
 		if (c->mon && c->is_game_splash) {
+			int mx = c->mon->m.x;
+			int my = c->mon->m.y;
+			int mw = c->mon->m.width;
+			int mh = c->mon->m.height;
+			if (bw > mw) bw = mw;
+			if (bh > mh) bh = mh;
+			bx = mx + (mw - bw) / 2;
+			by = my + (mh - bh) / 2;
+			resize(c, (struct wlr_box){.x = bx, .y = by,
+				.width = bw, .height = bh}, 0);
+			return;
+		}
+
+		/*
+		 * Generic floating non-game window (Blender/GIMP/Discord
+		 * splash, app dialogs, settings windows): X11 apps routinely
+		 * send configure_request with x,y=(0,0) or stale
+		 * single-monitor coords.  Honour the requested size but force
+		 * the position back to the monitor center so floating windows
+		 * never drift to the top-left after mapnotify centers them.
+		 */
+		if (c->mon && c->isfloating && !c->is_game_splash
+				&& !looks_like_game(c)) {
 			int mx = c->mon->m.x;
 			int my = c->mon->m.y;
 			int mw = c->mon->m.width;
