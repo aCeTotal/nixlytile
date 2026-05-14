@@ -606,7 +606,7 @@ buttonpress(struct wl_listener *listener, void *data)
 		 * via Mod+LeftClick — direct interior click here goes to the
 		 * client so widgets/scrollbars remain usable. */
 		if (event->button == BTN_LEFT && CLEANMASK(mods) == 0 && c &&
-				c->isfloating && !c->isfullscreen &&
+				c->isfloating && !c->isfixed && !c->isfullscreen &&
 				!client_is_unmanaged(c)) {
 			const double EDGE = 8.0;
 			double left = cursor->x - (double)c->geom.x;
@@ -2249,7 +2249,7 @@ focus:
 	/* Hover hint: when idle over the edge of a floating window, show the
 	 * resize cursor so the user knows the edge is grabbable
 	 * (Windows-style direct edge resize). */
-	if (cursor_mode == CurNormal && c && c->isfloating &&
+	if (cursor_mode == CurNormal && c && c->isfloating && !c->isfixed &&
 			!c->isfullscreen && !client_is_unmanaged(c)) {
 		const double EDGE = 8.0;
 		double left = cursor->x - (double)c->geom.x;
@@ -2291,6 +2291,10 @@ moveresize(const Arg *arg)
 		return;
 	xytonode(cursor->x, cursor->y, NULL, &grabc, NULL, NULL, NULL);
 	if (!grabc || client_is_unmanaged(grabc) || grabc->isfullscreen)
+		return;
+	/* Fixed-size floating clients (splash/dialog/utility) reject
+	 * interactive resize.  Move is fine. */
+	if (grabc->isfixed && arg->ui == CurResize)
 		return;
 
 	cursor_mode = arg->ui;

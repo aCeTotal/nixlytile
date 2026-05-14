@@ -981,6 +981,7 @@ typedef struct {
 	unsigned int bw;
 	uint32_t tags;
 	int isfloating, isurgent, isfullscreen, issticky, was_tiled;
+	int isfixed;                  /* float-type with fixed size — reject interactive resize */
 	int is_game_splash;         /* Game splash/EAC launcher → keep centered */
 	uint32_t resize;
 	int pending_resize_w, pending_resize_h;

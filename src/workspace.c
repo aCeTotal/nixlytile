@@ -1,5 +1,11 @@
 #include <ctype.h>
+#include <dirent.h>
+#include <errno.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 
 #include "nixlytile.h"
 #include "client.h"
@@ -806,23 +812,65 @@ toggle_column_fullscreen(const Arg *arg)
 	arrange(selmon);
 }
 
-/* Toggle waybar visibility via SIGUSR1.  Waybar's default config
- * handles SIGUSR1 → toggle.  Done as a fork+exec of pkill since we
- * don't link against libsystemd's signal helpers in this trimmed build.
+/* Toggle waybar by process kill/spawn.
  *
- * After the signal, waybar will show/hide; its layer-shell exclusive
- * zone changes, arrangelayers() picks that up at the next layer
- * surface commit and resizes m->w accordingly — so tile heights
- * auto-adjust without any extra plumbing here.
+ * Scan /proc for any waybar process.  If found → SIGKILL all
+ * (compositor-side toggle off).  If none → fork+execlp waybar
+ * (toggle on).  We match by substring on /proc/<pid>/comm so the
+ * NixOS launcher name ".waybar-wrapped" is caught too.
+ *
+ * Layer-shell teardown on waybar exit reclaims its exclusive zone;
+ * arrangelayers() updates m->w_target on the next layer event, and
+ * the m->w_x_f / w_y_f / w_w_f / w_h_f springs animate tiles into
+ * the freed area at SPRING_WINDOW stiffness (smooth reflow).
+ *
+ * Compositor inherits a full user PATH from SDDM/login, so execlp
+ * resolves "waybar" via /etc/profiles/per-user/<u>/bin.
  */
 void
 togglewaybar(const Arg *arg)
 {
+	DIR *d;
+	struct dirent *de;
+	char path[64];
+	char comm[64];
+	FILE *f;
+	size_t len;
+	int killed = 0;
+
 	(void)arg;
+	d = opendir("/proc");
+	if (!d)
+		return;
+	while ((de = readdir(d))) {
+		if (de->d_name[0] < '0' || de->d_name[0] > '9')
+			continue;
+		snprintf(path, sizeof(path), "/proc/%s/comm", de->d_name);
+		f = fopen(path, "r");
+		if (!f)
+			continue;
+		if (fgets(comm, sizeof(comm), f)) {
+			len = strlen(comm);
+			if (len && comm[len - 1] == '\n')
+				comm[len - 1] = '\0';
+			if (strstr(comm, "waybar")) {
+				pid_t pid = (pid_t)atoi(de->d_name);
+				if (pid > 0 && kill(pid, SIGKILL) == 0)
+					killed = 1;
+			}
+		}
+		fclose(f);
+	}
+	closedir(d);
+
+	if (killed)
+		return;
+
+	/* No running waybar — spawn a new one detached. */
 	if (fork() == 0) {
 		setsid();
-		execlp("pkill", "pkill", "-SIGUSR1", "waybar", (char *)NULL);
-		_exit(1);
+		execlp("waybar", "waybar", (char *)NULL);
+		_exit(127);
 	}
 }
 

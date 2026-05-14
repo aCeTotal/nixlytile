@@ -195,8 +195,10 @@ applyrules(Client *c)
 	 *   - X11: WM_WINDOW_TYPE_{DIALOG,SPLASH,TOOLBAR,UTILITY}, modal,
 	 *     or fixed min==max size hint.
 	 *   - XDG: fixed min==max size constraints. */
-	if (!rule_matched && client_is_float_type(c))
+	if (!rule_matched && client_is_float_type(c)) {
 		c->isfloating = 1;
+		c->isfixed = 1;
+	}
 
 	/* If no rule assigned specific tags, check if this window came
 	 * from a launcher/spawn launch and use the tags that were active
@@ -1161,6 +1163,25 @@ mapnotify(struct wl_listener *listener, void *data)
 		return;
 	}
 
+	/* Generic parentless floating client — splash/dialog/utility,
+	 * or rule-floated.  applyrules ran at initial_commit when c->geom
+	 * was zero, so any centering it attempted is moot.  Now that
+	 * client_get_geometry has filled c->geom, center on the monitor
+	 * and reparent into the float layer. */
+	if (c->isfloating && !c->isfullscreen && c->mon &&
+			client_get_parent(c) == NULL) {
+		int mw = c->mon->m.width;
+		int mh = c->mon->m.height;
+		int gw = c->geom.width;
+		int gh = c->geom.height;
+		if (gw > 0 && gw < mw && gh > 0 && gh < mh) {
+			c->geom.x = c->mon->m.x + (mw - gw) / 2;
+			c->geom.y = c->mon->m.y + (mh - gh) / 2;
+		}
+		wlr_scene_node_reparent(&c->scene->node, layers[LyrFloat]);
+		resize(c, c->geom, 1);
+	}
+
 	printstatus();
 
 unset_fullscreen:
@@ -1849,6 +1870,22 @@ urgent(struct wl_listener *listener, void *data)
 
 	if (client_surface(c)->mapped)
 		client_set_border_color(c, urgentcolor);
+
+	/* Tray-icon / dock-style activation: jump to the client's
+	 * workspace and focus it.  xdg-activation is the protocol used
+	 * by SNI tray menus and app launchers when re-activating an
+	 * already-running app. */
+	if (c->mon && c->column && c->column->ws &&
+			client_surface(c)->mapped) {
+		Monitor *target_mon = c->mon;
+		Workspace *target_ws = c->column->ws;
+		if (target_mon->active_ws != target_ws)
+			workspace_switch(target_mon, target_ws);
+		selmon = target_mon;
+		focusclient(c, 1);
+		c->isurgent = 0;
+		client_set_border_color(c, focuscolor);
+	}
 }
 
 void
