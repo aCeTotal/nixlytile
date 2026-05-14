@@ -1132,9 +1132,13 @@ focus_window_in_column_dir(const Arg *arg)
  * These match the (const Arg *) signature used by the keybind table.
  * Direction sign: +1 = down/right, −1 = up/left.
  */
-/* After landing on a workspace, restore focus to its remembered
- * column (workspace.focused_col) so jumping away and back returns
- * the user to the same tile they left. */
+/* After landing on a workspace, restore keyboard focus to its
+ * remembered column (workspace.focused_col).  lift=0: do NOT warp
+ * cursor — the workspace slide animation is still in flight, warping
+ * to the new ws's tile mid-anim makes the cursor jump ahead of the
+ * visible workspace, creating a visible glitch.  Cursor stays put;
+ * once the slide settles, sloppy-focus picks up whatever tile is
+ * under the cursor at its current screen position. */
 static void
 focus_first_in_workspace(Workspace *ws)
 {
@@ -1155,7 +1159,7 @@ focus_first_in_workspace(Workspace *ws)
 		return;
 
 	c = wl_container_of(col->clients.next, c, column_link);
-	focusclient(c, 1);
+	focusclient(c, 0);
 }
 
 void
@@ -1509,10 +1513,20 @@ workspace_switch(Monitor *m, Workspace *target)
 	new_idx = target->idx;
 	mon_h = m->m.height;
 
+	/* Snap outgoing ws's camera fully to its target so its slide-out
+	 * renders at the same position the user just left.  Sync the float
+	 * spring state too — monitor_apply_positions now reads ws->scroll_x
+	 * for every workspace (not just active), and we don't want a
+	 * leftover scroll_x_f from a previous incomplete spring carrying
+	 * the outgoing ws to a wrong position during slide. */
 	if (m->active_ws) {
 		m->active_ws->scroll_x = m->active_ws->target_scroll_x;
+		m->active_ws->scroll_x_f = (double)m->active_ws->target_scroll_x;
+		m->active_ws->scroll_x_vel = 0.0;
 	}
 	target->scroll_x = target->target_scroll_x;
+	target->scroll_x_f = (double)target->target_scroll_x;
+	target->scroll_x_vel = 0.0;
 
 	/* Remember previous active for Mod+Tab toggle. */
 	m->prev_ws = m->active_ws;
@@ -1621,7 +1635,14 @@ monitor_apply_positions(Monitor *m)
 			(m->active_ws ? m->active_ws->idx : 0)) * ws_stride
 			+ (int)m->ws_y_offset;
 
-		row_scroll = (ws == m->active_ws) ? ws->scroll_x : 0;
+		/* Each ws keeps its own saved horizontal scroll position so
+		 * during a vertical workspace slide the OUTGOING ws still
+		 * renders at the camera-x it was last left at.  Without this,
+		 * non-active ws fell back to row_scroll=0 which yanked the
+		 * leftmost column into view for the duration of the slide —
+		 * visible as the leftmost tile briefly overlapping the
+		 * current view at switch start. */
+		row_scroll = ws->scroll_x;
 
 		/* col->x is driven by the spring tick in monitor_anim_tick
 		 * — do NOT snap it here.  col->y stays 0 (no per-col vert

@@ -1,6 +1,16 @@
 /* nixlytile.c - Core compositor: setup, run, cleanup, main */
 #include "nixlytile.h"
 #include "client.h"
+#include "config_loader.h"
+
+static int
+sigusr1_reload(int signo, void *data)
+{
+	(void)signo;
+	(void)data;
+	reload_config();
+	return 1;
+}
 
 
 int
@@ -1053,8 +1063,24 @@ run(const char *startup_cmd)
 	 * on hot-reload (inotify), not at startup. */
 	/* runtime monitor reload removed (config.c gone) */
 
-	/* Now that the socket exists and the backend is started, run the startup command */
-	if (startup_cmd) {
+	/* Now that the socket exists and the backend is started, run the
+	 * startup commands.  If KDL config provided an autostart list, each
+	 * entry gets its own pid (for diff-based hot-reload).  Otherwise
+	 * fall back to the legacy single startup_cmd shell pipeline. */
+	if (runtime_config_loaded) {
+		for (size_t ai = 0; ai < runtime_autostart_count; ai++) {
+			pid_t pid = fork();
+			if (pid == 0) {
+				setsid();
+				fork_detach();
+				execl("/bin/sh", "/bin/sh", "-c",
+				      runtime_autostart[ai], (char *)NULL);
+				_exit(127);
+			}
+			if (pid > 0)
+				runtime_autostart_pids[ai] = pid;
+		}
+	} else if (startup_cmd) {
 		int piperw[2];
 		if (pipe(piperw) < 0)
 			die("startup: pipe:");
@@ -2274,6 +2300,10 @@ setup(void)
 	wl_list_init(&mons);
 	diag_timer = wl_event_loop_add_timer(event_loop, diag_timer_cb, NULL);
 	gm_bg_init();
+
+	/* SIGUSR1 → reload ~/.config/nixlytile/config.kdl.  Handled on the
+	 * wl event loop (no async-signal concerns). */
+	wl_event_loop_add_signal(event_loop, SIGUSR1, sigusr1_reload, NULL);
 
 	/* Detect GPUs early — env vars (WLR_DRM_NO_ATOMIC, GBM_BACKEND etc.)
 	 * and WLR_DRM_DEVICES filtering must happen before backend creation.
@@ -3701,8 +3731,10 @@ main(int argc, char *argv[])
 	if (optind < argc)
 		goto usage;
 
-	/* Load runtime config before applying defaults */
-	/* config.c removed; using compiled-in defaults from config.h */
+	/* Load runtime config from ~/.config/nixlytile/config.kdl.  Must
+	 * happen before setup() so the xkb keymap / repeat rate / colors /
+	 * monitor rules / keybindings are visible to wlroots init. */
+	load_config();
 
 	/* NOTE: Do NOT call set_dgpu_env() here in the compositor process.
 	 * It sets DRI_PRIME, __GLX_VENDOR_LIBRARY_NAME, etc. which are

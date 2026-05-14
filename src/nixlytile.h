@@ -1337,7 +1337,8 @@ struct Monitor {
 	double ws_y_offset;           /* live vertical-switch animation offset */
 	double ws_y_vel;              /* spring velocity for ws_y_offset */
 	uint64_t last_anim_ns;        /* last anim tick timestamp */
-	int anim_was_active;          /* edge-detection for freeze/unfreeze */
+	int anim_was_active;          /* edge-detection: any anim active */
+	int size_anim_was_active;     /* edge-detection: freeze only on SIZE anims */
 	/* Spring state for the tile area (m->w).  When a layer-shell
 	 * surface like waybar (de)appears, m->w changes — but stepping
 	 * m->w directly snaps every tile.  Spring it so the edge facing
@@ -2684,15 +2685,33 @@ void cec_switch_to_active_source(void);
 void gamepanel(const Arg *arg);
 Monitor *stats_panel_visible_monitor(void);
 int stats_panel_handle_key(Monitor *m, xkb_keysym_t sym);
-
-/* config.c */
-void load_config(void);
-void reload_config(void);
-int config_watch_handler(int fd, uint32_t mask, void *data);
-void setup_config_watch(void);
-void init_keybindings(void);
-void config_expand_path(const char *src, char *dst, size_t dstlen);
 #endif
+
+/* config_loader.c */
+int load_config(void);
+int reload_config(void);
+extern char nixlytile_config_path[];
+
+/* Runtime window rules (loaded from KDL) — used in client.c applyrules()
+ * in preference to the compile-time rules[] when count > 0. */
+extern Rule  *runtime_rules;
+extern size_t runtime_rules_count;
+
+/* Runtime xkb_rule_names (loaded from KDL).  getxkbrules() uses this in
+ * preference to the compile-time xkb_rules when runtime_xkb_rules_set. */
+extern struct xkb_rule_names runtime_xkb_rules;
+extern int                   runtime_xkb_rules_set;
+
+/* Runtime autostart list — populated by load_config(); spawned in run().
+ * Diff-applied on reload. */
+extern char **runtime_autostart;
+extern size_t runtime_autostart_count;
+extern pid_t *runtime_autostart_pids;
+
+/* 1 if load_config() found and parsed config.kdl successfully.  When set,
+ * the legacy compile-time autostart_cmd is NOT run; runtime_autostart is
+ * authoritative (including an empty list). */
+extern int runtime_config_loaded;
 
 /* layer.c */
 void createlayersurface(struct wl_listener *listener, void *data);

@@ -95,7 +95,7 @@ applyxkbdefaultsfromsystem(struct xkb_rule_names *names)
 struct xkb_rule_names
 getxkbrules(void)
 {
-	struct xkb_rule_names names = xkb_rules;
+	struct xkb_rule_names names = runtime_xkb_rules_set ? runtime_xkb_rules : xkb_rules;
 	const char *env;
 
 	if (!names.rules && (env = getenv("XKB_DEFAULT_RULES")))

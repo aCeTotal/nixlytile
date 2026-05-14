@@ -91,11 +91,17 @@ client_scale_reset(Client *c)
 #define ANIM_SETTLED_POS    0.5
 #define ANIM_SETTLED_VEL    2.0
 
-static const SpringParams SPRING_HORIZONTAL = { 1.0, 1.0,  800.0 };
-/* Workspace switch: slightly faster than Niri default (1000) but
- * smoother than full 2× (4000).  2500 → omega ≈ 50 → settle ≈ 100ms
- * with a soft critically-damped approach. */
-static const SpringParams SPRING_WS_SWITCH  = { 1.0, 1.0, 2500.0 };
+/* Horizontal scroll: same stiffness as workspace switch (1800) so
+ * tile-select feels identical to ws-switch — user reported ws-switch
+ * smooth but scroll slow at 1500; matching the curves removes that
+ * perceived asymmetry. */
+static const SpringParams SPRING_HORIZONTAL = { 1.0, 1.0, 1800.0 };
+/* Workspace switch: 1800 → omega ≈ 42 → settle ≈ 120ms with a soft
+ * critically-damped approach.  Slightly less stiff than 2500 →
+ * gentler initial velocity → perceived as smoother while still
+ * arriving fast.  Critical damping preserves "no overshoot" — no
+ * oscillation past the target ws position. */
+static const SpringParams SPRING_WS_SWITCH  = { 1.0, 1.0, 1800.0 };
 static const SpringParams SPRING_WINDOW     = { 1.0, 1.0,  800.0 };
 static const SpringParams SPRING_OPEN       = { 1.0, 0.9,  900.0 }; /* slight overshoot for life */
 static const SpringParams SPRING_CLOSE      = { 1.0, 1.0,  900.0 };
@@ -383,15 +389,16 @@ clients_anim_tick(Monitor *m, double dt)
 }
 
 /*
- * Freeze: snapshot the current buffer of a client and render that
- * static snapshot during anims, hiding the live surface.  This means
- * the GPU just blits a cached texture at each new position — heavy
- * clients (Blender, Chrome, games) can't disrupt frame pacing with
- * their own commits or render stalls.
+ * Freeze: snapshot the current root buffer and disable scene_surface
+ * so ONLY the snapshot renders during the anim.  This is critical for
+ * surfaces with alpha (Alacritty, transparent terminals): if both
+ * scene_surface and frozen_buffer rendered, the two transparent
+ * layers would composite together → visible darkening during the
+ * anim, "lightening" again on unfreeze.  Disabling scene_surface
+ * keeps the visible result identical pre- and post-anim.
  *
- * Lock/unlock is handled INTERNALLY by wlr_scene_buffer_create /
- * scene_node_destroy.  No manual buffer_lock here — that was the
- * double-unlock bug that left scene_surface permanently disabled.
+ * Lock/unlock is handled internally by wlr_scene_buffer_create /
+ * scene_node_destroy — no manual buffer_lock needed.
  */
 static void
 client_freeze(Client *c)
@@ -430,8 +437,14 @@ client_unfreeze(Client *c)
 		wlr_scene_node_set_enabled(&c->scene_surface->node, 1);
 }
 
+/* freeze_filter: 0 = X11 only (Blender, games — heavy & no subsurfaces).
+ *                1 = X11 + Wayland (full freeze for size anims).
+ * Wayland clients are skipped during pure pos anims because
+ * wlr_scene_buffer_create captures only the root surface buffer, so
+ * subsurfaces / popups drop — visible on Firefox / Chrome as "shape
+ * jumping" during scroll. */
 static void
-monitor_freeze_clients(Monitor *m)
+monitor_freeze_clients(Monitor *m, int include_wayland)
 {
 	Client *c;
 	wl_list_for_each(c, &clients, link) {
@@ -444,17 +457,31 @@ monitor_freeze_clients(Monitor *m)
 		 * pre-anim state and the fade-in wouldn't render. */
 		if (c->open_anim_active)
 			continue;
+#ifdef XWAYLAND
+		if (!include_wayland && !client_is_x11(c))
+			continue;
+#else
+		if (!include_wayland)
+			continue;
+#endif
 		client_freeze(c);
 	}
 }
 
+/* unfreeze_filter: 0 = Wayland only (size anim ended but pos still
+ *                     in flight — X11 stays frozen until pos settles).
+ *                  1 = all (final settle). */
 static void
-monitor_unfreeze_clients(Monitor *m)
+monitor_unfreeze_clients(Monitor *m, int include_x11)
 {
 	Client *c;
 	wl_list_for_each(c, &clients, link) {
 		if (c->mon != m || !c->frozen_buffer)
 			continue;
+#ifdef XWAYLAND
+		if (!include_x11 && client_is_x11(c))
+			continue;
+#endif
 		int inner_w = c->geom.width  - 2 * c->bw;
 		int inner_h = c->geom.height - 2 * c->bw;
 		if (inner_w < 1) inner_w = 1;
@@ -486,6 +513,7 @@ int
 monitor_anim_tick(Monitor *m, double dt)
 {
 	int active = 0;
+	int size_anim = 0;            /* freeze only when REAL size change in flight */
 	Workspace *ws;
 	int close_still = 0;
 	int vertical_anim;
@@ -523,22 +551,24 @@ monitor_anim_tick(Monitor *m, double dt)
 	 * locked because the corresponding (y, height) springs use
 	 * IDENTICAL parameters so their sum stays constant. */
 	if (m->w_initialized) {
-		int moved = 0;
-		moved |= spring_tick(&m->w_x_f, &m->w_x_vel,
+		int moved_pos = 0, moved_size = 0;
+		moved_pos  |= spring_tick(&m->w_x_f, &m->w_x_vel,
 				(double)m->w_target.x, SPRING_WINDOW, dt);
-		moved |= spring_tick(&m->w_y_f, &m->w_y_vel,
+		moved_pos  |= spring_tick(&m->w_y_f, &m->w_y_vel,
 				(double)m->w_target.y, SPRING_WINDOW, dt);
-		moved |= spring_tick(&m->w_w_f, &m->w_w_vel,
+		moved_size |= spring_tick(&m->w_w_f, &m->w_w_vel,
 				(double)m->w_target.width, SPRING_WINDOW, dt);
-		moved |= spring_tick(&m->w_h_f, &m->w_h_vel,
+		moved_size |= spring_tick(&m->w_h_f, &m->w_h_vel,
 				(double)m->w_target.height, SPRING_WINDOW, dt);
-		if (moved) {
+		if (moved_pos || moved_size) {
 			active = 1;
 			m->w.x = (int)m->w_x_f;
 			m->w.y = (int)m->w_y_f;
 			m->w.width = (int)m->w_w_f;
 			m->w.height = (int)m->w_h_f;
 		}
+		if (moved_size)
+			size_anim = 1;
 	}
 
 	vertical_anim = (fabs(m->ws_y_offset) > 0.5 ||
@@ -558,8 +588,10 @@ monitor_anim_tick(Monitor *m, double dt)
 				if (spring_tick(&col->width_f,
 						&col->width_vel,
 						(double)col->target_width,
-						SPRING_WINDOW, dt))
+						SPRING_WINDOW, dt)) {
 					active = 1;
+					size_anim = 1;
+				}
 				col->width = (int)col->width_f;
 			}
 		}
@@ -574,8 +606,10 @@ monitor_anim_tick(Monitor *m, double dt)
 
 	/* ── Step 3: per-client spring (size anim only) reads the fresh
 	 *   target_geom written by step 2. */
-	if (clients_anim_tick(m, dt))
+	if (clients_anim_tick(m, dt)) {
 		active = 1;
+		size_anim = 1;
+	}
 
 	/* Close anim tick — runs independent of clients list. */
 	closing_anims_tick(m, dt, &close_still);
@@ -601,18 +635,18 @@ monitor_anim_tick(Monitor *m, double dt)
 		}
 	}
 
-	/* Freeze all mapped clients on edge-up.  The snapshot covers
-	 * heavy apps (Blender, Chrome, games) so they don't have to
-	 * repaint during the anim — the cached buffer just gets
-	 * positioned/scaled to the lerping box.  This is critical for
-	 * making scroll smooth past heavy windows AND for keeping a
-	 * Blender fullscreen toggle artifact-free (the snapshot
-	 * stretches via client_anim_apply's frozen_buffer resize). */
+	/* Single freeze policy: any anim → full freeze (X11 + Wayland).
+	 * scene_surface is disabled inside client_freeze so the snapshot
+	 * is the SOLE renderer during the anim — guarantees zero visual
+	 * change on every client until the anim settles, regardless of
+	 * transparency or live commits.  Matches user's "no change in
+	 * any program during anim" requirement. */
 	if (active && !m->anim_was_active)
-		monitor_freeze_clients(m);
+		monitor_freeze_clients(m, /*include_wayland=*/1);
 	else if (!active && m->anim_was_active)
-		monitor_unfreeze_clients(m);
+		monitor_unfreeze_clients(m, /*include_x11=*/1);
 	m->anim_was_active = active;
+	m->size_anim_was_active = active;
 	return active;
 }
 

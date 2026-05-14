@@ -1,0 +1,240 @@
+// nixlytile default config.
+// Location loaded at startup: $XDG_CONFIG_HOME/nixlytile/config.kdl
+// (falls back to ~/.config/nixlytile/config.kdl).
+// Send SIGUSR1 to nixlytile to hot-reload: pkill -USR1 nixlytile
+//
+// This file ships every setting currently exposed as runtime config.
+// Anything omitted falls back to the compile-time default baked into
+// the binary.  Comments here document each option.
+
+appearance {
+    gaps 4
+    border-px 1
+    smartgaps           false
+    sloppy-focus        true
+    bypass-surface-visibility false
+    gaps-enabled        true
+    root-color          "#222222ff"
+    border-color        "#595959ff"   // unfocused tile border
+    focus-color         "#00beffff"   // focused tile border
+    urgent-color        "#ff0000ff"
+    fullscreen-bg       "#1a1a1aff"
+    resize-factor       0.0002
+    resize-interval-ms  8
+    resize-min-pixels   1.0
+    resize-ratio-epsilon 0.001
+    lock-cursor         false
+}
+
+input {
+    keyboard {
+        layout       "no"
+        // model     ""
+        // variant   ""
+        // options   "ctrl:nocaps"
+        // rules     ""
+        repeat-delay 300
+        repeat-rate  100
+    }
+    touchpad {
+        tap                     true
+        tap-and-drag            true
+        drag-lock               true
+        natural-scroll          true
+        disable-while-typing    true
+        left-handed             false
+        middle-button-emulation false
+        scroll-method   "2fg"           // no-scroll | 2fg | edge | button
+        click-method    "button-areas"  // none | button-areas | clickfinger
+        send-events     "enabled"       // enabled | disabled | disabled-on-external-mouse
+        accel-profile   "adaptive"      // flat | adaptive
+        accel-speed     0.0
+        button-map      "lrm"           // lrm | lmr
+    }
+}
+
+// Modifier keys.  Super = Windows/Logo.  Used in keybindings as
+// "Mod+..." and "MonitorMod+..." respectively.
+modkey      "Super"
+monitorkey  "Ctrl"
+
+// Per-monitor settings.  Connectors not listed get the highest-refresh
+// best mode auto-picked at hotplug; scale 1.0; default mfact/nmaster.
+// Wildcards: "*" matches any output, "DP-*" matches all DP connectors.
+//
+// Example:
+//   monitor "DP-1" {
+//       enabled    true
+//       mode       "2560x1440@165"   // omit for auto-best
+//       scale      1.0
+//       transform  "normal"          // normal|90|180|270|flipped|flipped-90|...
+//       position   "auto"            // auto|master|left|right|top-left|...
+//       mfact      0.55
+//       nmaster    1
+//   }
+
+// Window placement rules.  Matched on substring of app-id and title.
+// Add as many `window-rule` blocks as you need.
+window-rule {
+    app-id   "Gimp_EXAMPLE"
+    tags     0x0
+    floating true
+    monitor  -1
+}
+window-rule {
+    app-id   "firefox_EXAMPLE"
+    tags     0x100   // tag 9
+    floating false
+    monitor  -1
+}
+
+// Wallpaper path.  Used by the default autostart's swaybg invocation.
+wallpaper "~/.nixlyos/wallpapers/beach.jpg"
+
+// Log verbosity for wlroots logs.  error | info | debug
+log-level "debug"
+
+// Autostart — one process per entry.  Each gets its own pid so
+// hot-reload can SIGTERM removed entries and spawn newly added ones.
+autostart "swaybg -i \"$HOME/.nixlyos/wallpapers/beach.jpg\" -m fill"
+autostart "$HOME/.local/bin/niri-set-max-mode.sh --watch"
+autostart "waybar"
+autostart "nm-applet --indicator"
+autostart "blueman-applet"
+autostart "xwayland-satellite"
+autostart "sh -c 'wl-paste --type text --watch clipman store --no-persist'"
+autostart "sh -c 'wl-paste --primary --type text --watch clipman store --no-persist'"
+autostart "appd"
+autostart "nixly_steam -silent"
+
+// ───────── keybindings ─────────
+// Syntax: bind "Mod+Shift+Key" "action-name" [arg]
+//   • Modifier tokens: Mod, Super, MonitorMod, Ctrl, Alt, Shift
+//   • Key tokens: any XKB keysym name (case-insensitive), plus aliases
+//     enter/esc/space/tab/up/down/left/right/backspace/...
+//   • Numeric arg for directional/numeric actions
+//   • String arg for spawn (`/bin/sh -c` is implicit)
+//
+// Action list:
+//   quit  killclient  spawn  togglefloating  togglefullscreen
+//   togglewaybar  togglegaps  focus-column-dir  focus-workspace-dir
+//   focus-workspace-n  focus-window-in-column-dir  focus-last-workspace
+//   move-column-dir  move-window-in-column-dir  move-client-to-ws-dir
+//   move-client-to-ws-n  swap-window-dir  expel-window-from-column
+//   switch-preset-column-width  resize-column-dir  maximize-column
+//   center-column  toggle-column-fullscreen  focusmon  tagmon
+//   warptomonitor  tagtomonitornum  view  tag  toggleview  toggletag
+//   setlayout  chvt
+
+// Applications
+bind "Mod+Return"       "spawn" "alacritty"
+bind "Mod+Shift+Return" "spawn" "foot"
+bind "Mod+p"            "spawn" "apptoggle"
+bind "Mod+g"            "spawn" "fuzzel"
+bind "Mod+i"            "spawn" "fuzzel"
+bind "Mod+e"            "spawn" "dolphin"
+bind "Mod+Escape"       "spawn" "nixly-lockscreen"
+bind "Mod+F12"          "spawn" "nixly-lockscreen"
+bind "Mod+BackSpace"    "spawn" "google-chrome-stable --ozone-platform-hint=auto --enable-features=UseOzonePlatform,WaylandWindowDecorations"
+bind "Mod+s"            "spawn" "grimshot copy area"
+
+// Window management
+bind "Mod+q"            "killclient"
+bind "Mod+Shift+Q"      "quit"
+bind "Mod+Shift+space"  "togglefloating"
+bind "Mod+c"            "togglefloating"
+bind "Mod+f"            "maximize-column"
+bind "Mod+Shift+F"      "togglefullscreen"
+bind "Mod+b"            "togglewaybar"
+
+// Focus navigation
+bind "Mod+h"            "focus-column-dir"             -1
+bind "Mod+l"            "focus-column-dir"             1
+bind "Mod+Left"         "focus-column-dir"             -1
+bind "Mod+Right"        "focus-column-dir"             1
+bind "Mod+j"            "focus-window-in-column-dir"   1
+bind "Mod+k"            "focus-window-in-column-dir"   -1
+bind "Mod+Up"           "focus-workspace-dir"          -1
+bind "Mod+Down"         "focus-workspace-dir"          1
+
+// Window movement
+bind "Mod+Shift+H"      "move-column-dir"              -1
+bind "Mod+Shift+L"      "move-column-dir"              1
+bind "Mod+Shift+J"      "move-window-in-column-dir"    1
+bind "Mod+Shift+K"      "move-window-in-column-dir"    -1
+bind "Mod+Shift+Left"   "move-column-dir"              -1
+bind "Mod+Shift+Right"  "move-column-dir"              1
+bind "Mod+Shift+Up"     "move-window-in-column-dir"    -1
+bind "Mod+Shift+Down"   "move-window-in-column-dir"    1
+
+// Alt-direction: move tile within current workspace
+bind "Alt+h"            "move-column-dir"              -1
+bind "Alt+l"            "move-column-dir"              1
+bind "Alt+Left"         "move-column-dir"              -1
+bind "Alt+Right"        "move-column-dir"              1
+bind "Alt+k"            "move-window-in-column-dir"    -1
+bind "Alt+j"            "move-window-in-column-dir"    1
+bind "Alt+Up"           "move-window-in-column-dir"    -1
+bind "Alt+Down"         "move-window-in-column-dir"    1
+
+// Column width / consume / expel
+bind "Mod+r"            "switch-preset-column-width"
+bind "Mod+a"            "swap-window-dir"              -1
+bind "Mod+d"            "swap-window-dir"              1
+bind "Mod+x"            "expel-window-from-column"
+bind "Mod+Ctrl+Left"    "switch-preset-column-width"
+bind "Mod+Ctrl+Right"   "switch-preset-column-width"
+bind "Mod+Ctrl+Up"      "center-column"
+bind "Mod+Ctrl+Down"    "maximize-column"
+
+// Workspaces 1..9
+bind "Mod+1" "focus-workspace-n" 0
+bind "Mod+2" "focus-workspace-n" 1
+bind "Mod+3" "focus-workspace-n" 2
+bind "Mod+4" "focus-workspace-n" 3
+bind "Mod+5" "focus-workspace-n" 4
+bind "Mod+6" "focus-workspace-n" 5
+bind "Mod+7" "focus-workspace-n" 6
+bind "Mod+8" "focus-workspace-n" 7
+bind "Mod+9" "focus-workspace-n" 8
+bind "Mod+0" "focus-workspace-n" 9
+bind "Mod+Shift+1" "move-client-to-ws-n" 0
+bind "Mod+Shift+2" "move-client-to-ws-n" 1
+bind "Mod+Shift+3" "move-client-to-ws-n" 2
+bind "Mod+Shift+4" "move-client-to-ws-n" 3
+bind "Mod+Shift+5" "move-client-to-ws-n" 4
+bind "Mod+Shift+6" "move-client-to-ws-n" 5
+bind "Mod+Shift+7" "move-client-to-ws-n" 6
+bind "Mod+Shift+8" "move-client-to-ws-n" 7
+bind "Mod+Shift+9" "move-client-to-ws-n" 8
+bind "Mod+Shift+0" "move-client-to-ws-n" 9
+bind "Mod+Tab"     "focus-last-workspace"
+
+// Multi-monitor
+bind "Mod+comma"           "focusmon"        "left"
+bind "Mod+period"          "focusmon"        "right"
+bind "Mod+Shift+less"      "tagmon"          "left"
+bind "Mod+Shift+greater"   "tagmon"          "right"
+bind "MonitorMod+Up"       "warptomonitor"   "up"
+bind "MonitorMod+Down"     "warptomonitor"   "down"
+bind "MonitorMod+Left"     "warptomonitor"   "left"
+bind "MonitorMod+Right"    "warptomonitor"   "right"
+bind "MonitorMod+Shift+exclam"     "tagtomonitornum" 0
+bind "MonitorMod+Shift+at"         "tagtomonitornum" 1
+bind "MonitorMod+Shift+numbersign" "tagtomonitornum" 2
+bind "MonitorMod+Shift+dollar"     "tagtomonitornum" 3
+
+// VT switch (Ctrl+Alt+F1..F12)
+bind "Ctrl+Alt+XF86Switch_VT_1"  "chvt" 1
+bind "Ctrl+Alt+XF86Switch_VT_2"  "chvt" 2
+bind "Ctrl+Alt+XF86Switch_VT_3"  "chvt" 3
+bind "Ctrl+Alt+XF86Switch_VT_4"  "chvt" 4
+bind "Ctrl+Alt+XF86Switch_VT_5"  "chvt" 5
+bind "Ctrl+Alt+XF86Switch_VT_6"  "chvt" 6
+bind "Ctrl+Alt+XF86Switch_VT_7"  "chvt" 7
+bind "Ctrl+Alt+XF86Switch_VT_8"  "chvt" 8
+bind "Ctrl+Alt+XF86Switch_VT_9"  "chvt" 9
+bind "Ctrl+Alt+XF86Switch_VT_10" "chvt" 10
+bind "Ctrl+Alt+XF86Switch_VT_11" "chvt" 11
+bind "Ctrl+Alt+XF86Switch_VT_12" "chvt" 12
+bind "Ctrl+Alt+Terminate_Server" "quit"

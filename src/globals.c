@@ -225,3 +225,15 @@ const size_t nrules = LENGTH(rules);
 const size_t nlayouts = LENGTH(layouts);
 const size_t nmonrules = LENGTH(monrules);
 const size_t nbuttons = LENGTH(buttons);
+
+/* Runtime overrides loaded from ~/.config/nixlytile/config.kdl */
+Rule  *runtime_rules = NULL;
+size_t runtime_rules_count = 0;
+
+struct xkb_rule_names runtime_xkb_rules = {0};
+int                   runtime_xkb_rules_set = 0;
+
+char **runtime_autostart = NULL;
+size_t runtime_autostart_count = 0;
+pid_t *runtime_autostart_pids = NULL;
+int    runtime_config_loaded = 0;

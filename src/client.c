@@ -168,11 +168,15 @@ applyrules(Client *c)
 		c->geom.width, c->geom.height,
 		selmon && selmon->wlr_output ? selmon->wlr_output->name : "(null)");
 
-	for (r = rules; r < rules + nrules; r++) {
+	int rule_matched = 0;
+	const Rule *rule_list = runtime_rules_count > 0 ? runtime_rules : rules;
+	size_t rule_count = runtime_rules_count > 0 ? runtime_rules_count : nrules;
+	for (r = rule_list; r < rule_list + rule_count; r++) {
 		if ((!r->title || strstr(title, r->title))
 				&& (!r->id || strstr(appid, r->id))) {
 			c->isfloating = r->isfloating;
 			newtags |= r->tags;
+			rule_matched = 1;
 			i = 0;
 			wl_list_for_each(m, &mons, link) {
 				if (r->monitor == i++) {
@@ -182,6 +186,17 @@ applyrules(Client *c)
 			}
 		}
 	}
+
+	/* Auto-float small / non-resizable windows when no explicit rule
+	 * matched.  Catches Steam startup splash, Discord launcher splash,
+	 * dialogs and other tiny utility windows that look out of place
+	 * tiled at full column width.  Main app windows (which are
+	 * resizable) stay tiled.  client_is_float_type() inspects:
+	 *   - X11: WM_WINDOW_TYPE_{DIALOG,SPLASH,TOOLBAR,UTILITY}, modal,
+	 *     or fixed min==max size hint.
+	 *   - XDG: fixed min==max size constraints. */
+	if (!rule_matched && client_is_float_type(c))
+		c->isfloating = 1;
 
 	/* If no rule assigned specific tags, check if this window came
 	 * from a launcher/spawn launch and use the tags that were active
@@ -242,10 +257,9 @@ applyrules(Client *c)
 		c->geom.y = (mon->w.height - c->geom.height) / 2 + mon->m.y;
 	}
 
-	/* Niri parity: tile by default.  The client_is_float_type() heuristic
-	 * (fixed min==max size, splash/utility window types) is intentionally
-	 * NOT applied — only explicit rules + transient-child handling in
-	 * mapnotify can force a client floating. */
+	/* Default tiling: main app windows tile (resizable XDG / X11
+	 * NORMAL).  Splash, dialog, utility, fixed-size etc. auto-float
+	 * via the rule-match check above. */
 	wlr_log(WLR_INFO,
 		"GAME_TRACE: applyrules exit → mon='%s' newtags=0x%x isfloating=%d",
 		mon && mon->wlr_output ? mon->wlr_output->name : "(null)",
@@ -1029,8 +1043,15 @@ mapnotify(struct wl_listener *listener, void *data)
 			"GAME_TRACE: mapnotify parent-path parent_appid='%s' parent_mon='%s'",
 			client_get_appid(p) ? client_get_appid(p) : "(null)",
 			p->mon && p->mon->wlr_output ? p->mon->wlr_output->name : "(null)");
-		c->isfloating = 1;
-		if (p->mon) {
+		/* Default: tile transient children alongside the parent.
+		 * Browser file-pickers / "open" dialogs / Electron sub-windows
+		 * are large interactive windows that need full tile space — a
+		 * forced-floating placement leaves them unclickable or hidden
+		 * behind the parent.  Float ONLY genuinely small/fixed-size
+		 * modal dialogs via client_is_float_type() (X11 DIALOG/MODAL
+		 * type, fixed min==max size hints). */
+		c->isfloating = client_is_float_type(c);
+		if (c->isfloating && p->mon) {
 			c->geom.x = (p->mon->w.width - c->geom.width) / 2 + p->mon->m.x;
 			c->geom.y = (p->mon->w.height - c->geom.height) / 2 + p->mon->m.y;
 		}
