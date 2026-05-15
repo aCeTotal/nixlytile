@@ -437,17 +437,17 @@ client_unfreeze(Client *c)
 		wlr_scene_node_set_enabled(&c->scene_surface->node, 1);
 }
 
-/* freeze_filter: 0 = X11 only (Blender, games — heavy & no subsurfaces).
- *                1 = X11 + Wayland (full freeze for size anims).
- * Wayland clients are skipped during pure pos anims because
- * wlr_scene_buffer_create captures only the root surface buffer, so
- * subsurfaces / popups drop — visible on Firefox / Chrome as "shape
- * jumping" during scroll. */
+/* Two-tier freeze: X11 frozen on any anim (heavy, no subsurfaces).
+ * Wayland frozen only on size anim — root buffer snapshot drops
+ * subsurfaces / popups, so freezing during pure pos anims (ws switch,
+ * tile select) makes Firefox / Chrome lose their shape and the CSD
+ * edge appear to leak into adjacent workspaces. */
 static void
-monitor_freeze_clients(Monitor *m, int include_wayland)
+monitor_freeze_clients(Monitor *m, int include_x11, int include_wayland)
 {
 	Client *c;
 	wl_list_for_each(c, &clients, link) {
+		int is_x11;
 		if (c->mon != m || !client_surface(c) ||
 				!client_surface(c)->mapped ||
 				c->frozen_buffer)
@@ -458,30 +458,31 @@ monitor_freeze_clients(Monitor *m, int include_wayland)
 		if (c->open_anim_active)
 			continue;
 #ifdef XWAYLAND
-		if (!include_wayland && !client_is_x11(c))
-			continue;
+		is_x11 = client_is_x11(c);
 #else
-		if (!include_wayland)
-			continue;
+		is_x11 = 0;
 #endif
+		if (is_x11 ? !include_x11 : !include_wayland)
+			continue;
 		client_freeze(c);
 	}
 }
 
-/* unfreeze_filter: 0 = Wayland only (size anim ended but pos still
- *                     in flight — X11 stays frozen until pos settles).
- *                  1 = all (final settle). */
 static void
-monitor_unfreeze_clients(Monitor *m, int include_x11)
+monitor_unfreeze_clients(Monitor *m, int include_x11, int include_wayland)
 {
 	Client *c;
 	wl_list_for_each(c, &clients, link) {
+		int is_x11;
 		if (c->mon != m || !c->frozen_buffer)
 			continue;
 #ifdef XWAYLAND
-		if (!include_x11 && client_is_x11(c))
-			continue;
+		is_x11 = client_is_x11(c);
+#else
+		is_x11 = 0;
 #endif
+		if (is_x11 ? !include_x11 : !include_wayland)
+			continue;
 		int inner_w = c->geom.width  - 2 * c->bw;
 		int inner_h = c->geom.height - 2 * c->bw;
 		if (inner_w < 1) inner_w = 1;
@@ -635,18 +636,25 @@ monitor_anim_tick(Monitor *m, double dt)
 		}
 	}
 
-	/* Single freeze policy: any anim → full freeze (X11 + Wayland).
-	 * scene_surface is disabled inside client_freeze so the snapshot
-	 * is the SOLE renderer during the anim — guarantees zero visual
-	 * change on every client until the anim settles, regardless of
-	 * transparency or live commits.  Matches user's "no change in
-	 * any program during anim" requirement. */
+	/* Two-tier freeze:
+	 *   X11 → freeze on ANY anim.  X11 doesn't use Wayland
+	 *     subsurfaces, so root-buffer snapshot is complete.
+	 *   Wayland → freeze ONLY on size anim.  Browsers (Firefox,
+	 *     Chrome) render content in subsurfaces; root-buffer
+	 *     snapshot drops them and the visible window becomes the
+	 *     bare CSD frame, leaking into adjacent workspaces during
+	 *     a ws-switch slide.  Pure pos anims keep the live surface.
+	 */
 	if (active && !m->anim_was_active)
-		monitor_freeze_clients(m, /*include_wayland=*/1);
-	else if (!active && m->anim_was_active)
-		monitor_unfreeze_clients(m, /*include_x11=*/1);
+		monitor_freeze_clients(m, /*x11=*/1, /*wl=*/0);
+	if (size_anim && !m->size_anim_was_active)
+		monitor_freeze_clients(m, /*x11=*/0, /*wl=*/1);
+	if (!size_anim && m->size_anim_was_active)
+		monitor_unfreeze_clients(m, /*x11=*/0, /*wl=*/1);
+	if (!active && m->anim_was_active)
+		monitor_unfreeze_clients(m, /*x11=*/1, /*wl=*/1);
 	m->anim_was_active = active;
-	m->size_anim_was_active = active;
+	m->size_anim_was_active = size_anim;
 	return active;
 }
 
