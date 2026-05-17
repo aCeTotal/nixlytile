@@ -1669,15 +1669,39 @@ monitor_apply_positions(Monitor *m)
 	wl_list_for_each(ws, &m->workspaces, link) {
 		int ws_y_base;
 		int row_scroll;
+		int ws_visible = (ws == m->active_ws) || vertical_anim;
 
-		/* Heavy optimization: when the vertical-switch animation is
-		 * settled, only the ACTIVE workspace's clients are visible.
-		 * Inactive ones are rooted way off-screen at fixed offsets
-		 * (no animation moving them).  Re-snapping their positions
-		 * every frame just wastes CPU + creates scene damage events
-		 * for nothing.  Skip them. */
-		if (!vertical_anim && ws != m->active_ws)
+		/* Settled state: inactive ws clients live off-screen, but
+		 * leaving their scene nodes ENABLED lets sub-pixel rounding,
+		 * CSD shadows, or stale m->w shifts (waybar toggle after a
+		 * settle) bleed a 1-px strip into the visible area.  Disable
+		 * the scene tree of every tiled client on an inactive ws when
+		 * no vertical anim is in flight — re-enabled below as soon as
+		 * the next switch animation starts. */
+		if (!ws_visible) {
+			wl_list_for_each(col, &ws->columns, link) {
+				wl_list_for_each(c, &col->clients, column_link) {
+					if (c->scene && c->scene->node.enabled
+							&& !c->isfullscreen
+							&& !c->isfloating)
+						wlr_scene_node_set_enabled(
+							&c->scene->node, 0);
+				}
+			}
 			continue;
+		}
+
+		/* ws is active or mid-slide: ensure its tile scenes are
+		 * enabled so the slide-in and steady state both render. */
+		wl_list_for_each(col, &ws->columns, link) {
+			wl_list_for_each(c, &col->clients, column_link) {
+				if (c->scene && !c->scene->node.enabled
+						&& !c->isfullscreen
+						&& !c->isfloating)
+					wlr_scene_node_set_enabled(
+						&c->scene->node, 1);
+			}
+		}
 
 		ws_y_base = (ws->idx -
 			(m->active_ws ? m->active_ws->idx : 0)) * ws_stride

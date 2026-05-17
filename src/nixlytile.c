@@ -3053,6 +3053,7 @@ const char *dgpu_programs[] = {
 	/* Video / streaming */
 	"obs", "obs-studio", "kdenlive", "davinci-resolve",
 	"handbrake", "handbrakecli",
+	"nixlymedia",
 
 	/* AI / ML / CUDA workloads */
 	"ollama", "llama-server", "llama-cli", "llamacpp", "llama.cpp",

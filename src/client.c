@@ -908,7 +908,23 @@ mapnotify(struct wl_listener *listener, void *data)
 	int pre_fullscreen_game = 0;
 	int pre_game_splash = 0;    /* Game splash → float centered */
 	Monitor *pre_target_mon = NULL;
-	if (!c->isfloating && !c->isfullscreen && !client_is_unmanaged(c)
+
+	/* nixlymedia: always map fullscreen over waybar. Pin to selmon,
+	 * bypass applyrules, force tiled+fullscreen so the row reflows. */
+	{
+		const char *_naid = client_get_appid(c);
+		if (_naid && strcmp(_naid, "nixlymedia") == 0
+				&& !c->isfullscreen && !client_is_unmanaged(c)
+				&& client_get_parent(c) == NULL) {
+			pre_target_mon = selmon;
+			pre_fullscreen_game = 1;
+			c->isfullscreen = 1;
+			c->isfloating = 0;
+		}
+	}
+
+	if (!pre_fullscreen_game && !c->isfloating && !c->isfullscreen
+			&& !client_is_unmanaged(c)
 			&& client_get_parent(c) == NULL
 			&& looks_like_game(c)) {
 		pre_target_mon = selmon;
@@ -1541,8 +1557,10 @@ setfullscreen(Client *c, int fullscreen)
 		 *
 		 * Regular apps go fullscreen within the usable area (m->w),
 		 * leaving the waybar visible.  Tile-fullscreen UX. */
+		const char *_fsaid = client_get_appid(c);
+		int _is_nixlymedia = _fsaid && strcmp(_fsaid, "nixlymedia") == 0;
 		if (looks_like_game(c) || is_video_content(c)
-				|| client_wants_tearing(c)) {
+				|| client_wants_tearing(c) || _is_nixlymedia) {
 			resize(c, fsgeom, 0);
 		} else {
 			struct wlr_box ufs = c->mon->w;
