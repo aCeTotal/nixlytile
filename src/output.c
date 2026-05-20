@@ -2,6 +2,9 @@
 #include "client.h"
 
 static int idle_heartbeat_cb(void *data);
+static int edid_reprobe_cb(void *data);
+static void try_reapply_bestmode(Monitor *m);
+static void schedule_edid_reprobe(Monitor *m);
 
 void
 cleanupmon(struct wl_listener *listener, void *data)
@@ -50,6 +53,10 @@ cleanupmon(struct wl_listener *listener, void *data)
 	ll_cursor_cleanup(m);
 	monitor_cleanup_workspaces(m);
 	wl_event_source_remove(m->idle_heartbeat);
+	if (m->edid_reprobe_timer) {
+		wl_event_source_remove(m->edid_reprobe_timer);
+		m->edid_reprobe_timer = NULL;
+	}
 	wlr_scene_node_destroy(&m->fullscreen_bg->node);
 	free(m);
 
@@ -166,6 +173,96 @@ find_mode(struct wlr_output *output, int width, int height, float refresh)
 		}
 	}
 	return best;
+}
+
+/* Re-evaluate bestmode for an existing monitor and commit if it differs from
+ * current_mode. No-op if the user pinned a fixed resolution via
+ * `monitor = NAME ... WxH[@Hz]` (runtime config). Returns 1 if a new mode was
+ * applied, 0 otherwise. */
+static void
+try_reapply_bestmode(Monitor *m)
+{
+	struct wlr_output *o;
+	struct wlr_output_mode *best;
+	struct wlr_output_state st;
+	RuntimeMonitorConfig *rtcfg;
+
+	if (!m || !m->wlr_output)
+		return;
+	o = m->wlr_output;
+
+	/* Respect user-pinned resolution. */
+	rtcfg = find_monitor_config(o->name);
+	if (rtcfg && rtcfg->width > 0 && rtcfg->height > 0)
+		return;
+
+	best = bestmode(o);
+	if (!best)
+		return;
+	if (o->current_mode == best)
+		return;
+
+	wlr_output_state_init(&st);
+	wlr_output_state_set_enabled(&st, 1);
+	wlr_output_state_set_mode(&st, best);
+	if (wlr_output_test_state(o, &st)) {
+		if (wlr_output_commit_state(o, &st)) {
+			wlr_log(WLR_INFO,
+				"EDID re-probe: %s switched to %dx%d@%d (was %dx%d@%d)",
+				o->name,
+				best->width, best->height, best->refresh / 1000,
+				o->current_mode ? o->current_mode->width : 0,
+				o->current_mode ? o->current_mode->height : 0,
+				o->current_mode ? o->current_mode->refresh / 1000 : 0);
+			updatemons(NULL, NULL);
+		}
+	}
+	wlr_output_state_finish(&st);
+}
+
+/* Escalating EDID re-probe schedule: 2s → 5s → 15s. Stops after 3 attempts
+ * with no mode change, or as soon as bestmode has stabilised for two rounds
+ * in a row. Disarms automatically if monitor is destroyed (cleanupmon). */
+static const int edid_reprobe_delays_ms[] = { 2000, 5000, 15000 };
+
+static void
+schedule_edid_reprobe(Monitor *m)
+{
+	int delay;
+	if (!m || !m->edid_reprobe_timer)
+		return;
+	if (m->edid_reprobe_attempt >= (int)LENGTH(edid_reprobe_delays_ms))
+		return;
+	delay = edid_reprobe_delays_ms[m->edid_reprobe_attempt];
+	wl_event_source_timer_update(m->edid_reprobe_timer, delay);
+}
+
+static int
+edid_reprobe_cb(void *data)
+{
+	Monitor *m = data;
+	struct wlr_output_mode *before;
+
+	if (!m || !m->wlr_output)
+		return 0;
+
+	before = m->wlr_output->current_mode;
+	try_reapply_bestmode(m);
+
+	if (m->wlr_output->current_mode == before) {
+		m->edid_reprobe_stable_rounds++;
+	} else {
+		m->edid_reprobe_stable_rounds = 0;
+	}
+
+	m->edid_reprobe_attempt++;
+
+	/* Two consecutive stable rounds → EDID has settled, stop re-probing. */
+	if (m->edid_reprobe_stable_rounds >= 2)
+		return 0;
+
+	schedule_edid_reprobe(m);
+	return 0;
 }
 
 static Monitor *
@@ -819,6 +916,14 @@ createmon(struct wl_listener *listener, void *data)
 	m->idle_heartbeat = wl_event_loop_add_timer(event_loop, idle_heartbeat_cb, m);
 	m->render_idle = 0;
 	m->idle_frames = 0;
+
+	/* EDID re-probe: arm the escalating retry chain so TVs that publish
+	 * their full mode list only after HDMI handshake completes still end
+	 * up at bestmode. First shot at 2s. */
+	m->edid_reprobe_timer = wl_event_loop_add_timer(event_loop, edid_reprobe_cb, m);
+	m->edid_reprobe_attempt = 0;
+	m->edid_reprobe_stable_rounds = 0;
+	schedule_edid_reprobe(m);
 
 	/* The xdg-protocol specifies:
 	 *
@@ -2146,7 +2251,18 @@ void
 requestmonstate(struct wl_listener *listener, void *data)
 {
 	struct wlr_output_event_request_state *event = data;
+	Monitor *m;
+
 	wlr_output_commit_state(event->output, event->state);
+
+	/* A request_state event commonly fires when the backend learns of new
+	 * modes (EDID arrived after createmon, e.g. TV woke up from standby).
+	 * The event itself only carries what the backend wants applied — it
+	 * does not re-pick our preferred mode. Do that explicitly here so a
+	 * late EDID promotes us from a fallback mode to the real bestmode. */
+	m = wl_container_of(listener, m, request_state);
+	try_reapply_bestmode(m);
+
 	updatemons(NULL, NULL);
 }
 

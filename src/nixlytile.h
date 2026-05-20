@@ -1301,6 +1301,13 @@ struct Monitor {
 	int render_idle;                    /* 1 = idle mode, throttled to heartbeat */
 	int idle_frames;                    /* consecutive frames without cursor + no active content */
 	struct wl_event_source *idle_heartbeat; /* 1s periodic timer for idle monitors */
+	/* EDID re-probe: TVs (esp. over HDMI from sleep) often expose no/limited
+	 * modes at createmon time, then publish full mode list once the HDMI
+	 * handshake completes. We retry bestmode at 2s/5s/15s after createmon,
+	 * and also on every request_state event. */
+	struct wl_event_source *edid_reprobe_timer;
+	int edid_reprobe_attempt;           /* 0,1,2 — escalating delays */
+	int edid_reprobe_stable_rounds;     /* consecutive rounds where bestmode == current */
 	int frame_scheduled;                /* 1 = schedule_frame already called this cycle */
 	GamingCaps gcaps;                   /* vendor/capability profile for this output */
 	/* Low-latency cursor plane (direct DRM atomic, bypasses wlroots) */
