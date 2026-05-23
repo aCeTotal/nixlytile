@@ -1207,6 +1207,23 @@ powermgrsetmode(struct wl_listener *listener, void *data)
 		return;
 
 	m->gamma_lut_changed = 1; /* Reapply gamma LUT when re-enabling the ouput */
+
+	/* If the output is going to sleep while HDR is active, clear HDR
+	 * state synchronously so the next wake re-evaluates from scratch
+	 * rather than coming back with stale hdr_active=1. */
+	if (!event->mode && m->hdr_active) {
+		wlr_output_state_set_render_format(&state,
+			m->render_10bit_active ?
+			DRM_FORMAT_XRGB2101010 : DRM_FORMAT_XRGB8888);
+		wlr_output_state_set_image_description(&state, NULL);
+		wlr_output_lock_software_cursors(m->wlr_output, false);
+		m->hdr_active = 0;
+		m->hdr_render_format = 0;
+		m->hdr_driver_client = NULL;
+		m->hdr_entry_pending = 0;
+		m->hdr_exit_pending = 0;
+	}
+
 	wlr_output_state_set_enabled(&state, event->mode);
 	wlr_output_commit_state(m->wlr_output, &state);
 
@@ -1250,6 +1267,225 @@ monitor_wake(Monitor *m)
 {
 	if (m && m->render_idle)
 		monitor_wake_internal(m);
+}
+
+/*
+ * Re-entry/exit throttle: the TV needs ~1.5s to re-train HDMI on HDR
+ * transitions; bouncing on every pause/seek would be unwatchable. 500ms
+ * dwell is a conservative floor that still feels instant for genuine
+ * user-driven transitions.
+ */
+#define HDR_THROTTLE_NS 500000000ULL
+
+/*
+ * Iterator state for hdr_surface_walk(). We can't return early from the
+ * wlroots surface-tree walker, so we accumulate the first PQ+BT2020 hit
+ * here and let the walker run to completion.
+ */
+struct hdr_surface_walk_ctx {
+	struct wlr_surface *found;  /* first surface with PQ+BT2020, or NULL */
+};
+
+static void
+hdr_surface_walk(struct wlr_surface *surface, int sx, int sy, void *data)
+{
+	struct hdr_surface_walk_ctx *ctx = data;
+	const struct wlr_image_description_v1_data *desc;
+
+	(void)sx;
+	(void)sy;
+
+	if (ctx->found)
+		return;
+	desc = wlr_surface_get_image_description_v1_data(surface);
+	if (!desc)
+		return;
+	if (desc->tf_named != WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ)
+		return;
+	if (desc->primaries_named != WP_COLOR_MANAGER_V1_PRIMARIES_BT2020)
+		return;
+	ctx->found = surface;
+}
+
+/*
+ * HDR driver-client selection.
+ *
+ * Returns the focused top client iff it should drive the output into HDR
+ * passthrough mode. Conditions (all required):
+ *   1. Output has EDID HDR capability (PQ + BT2020 advertised).
+ *   2. Client is fullscreen on this monitor.
+ *   3. SOMEWHERE in the client's surface tree (toplevel OR any subsurface)
+ *      a surface carries a wp_color_management_v1 image description with
+ *      PQ transfer function AND BT2020 primaries.
+ *   4. No SDR overlay is currently visible on the monitor.
+ *
+ * The subsurface walk matters for the common "video-in-subsurface, UI in
+ * toplevel" pattern (e.g. nixlymedia: mpv P010 dmabuf in subsurface, egui
+ * controls in parent). The HDR-tagged surface lives only on the video
+ * subsurface; the parent stays sRGB.
+ */
+static Client *
+hdr_driver_for(Monitor *m, struct wlr_surface **out_pq_surface)
+{
+	Client *c;
+	struct wlr_surface *surface;
+	struct hdr_surface_walk_ctx ctx = { .found = NULL };
+
+	if (out_pq_surface)
+		*out_pq_surface = NULL;
+
+	if (!m || !m->hdr_capable)
+		return NULL;
+
+	if (m->toast_visible || m->hz_osd_visible || m->stats_panel_visible)
+		return NULL;
+
+	c = focustop(m);
+	if (!c || !c->isfullscreen)
+		return NULL;
+
+	surface = client_surface(c);
+	if (!surface)
+		return NULL;
+
+	wlr_surface_for_each_surface(surface, hdr_surface_walk, &ctx);
+	if (!ctx.found)
+		return NULL;
+
+	if (out_pq_surface)
+		*out_pq_surface = ctx.found;
+	return c;
+}
+
+/*
+ * Compute target HDR state for this monitor and set entry/exit pending
+ * flags. Called once per rendermon iteration before commit. The actual
+ * wlr_output_state mutation happens later inside commit_output_frame so
+ * the change rides on a single atomic commit with the buffer.
+ *
+ * Throttle: any transition is suppressed if a transition in the other
+ * direction happened less than HDR_THROTTLE_NS ago. Avoids HDMI re-train
+ * flicker on pause/seek bounces.
+ */
+static void
+update_hdr_target(Monitor *m, uint64_t now_ns)
+{
+	Client *driver;
+	struct wlr_surface *pq_surface = NULL;
+	const struct wlr_image_description_v1_data *cm;
+
+	if (!m || !m->hdr_capable)
+		return;
+
+	/* If a transition is already queued for this frame, don't reconsider. */
+	if (m->hdr_entry_pending || m->hdr_exit_pending)
+		return;
+
+	driver = hdr_driver_for(m, &pq_surface);
+
+	if (driver && !m->hdr_active) {
+		if (now_ns - m->hdr_last_exit_ns < HDR_THROTTLE_NS)
+			return;
+
+		/* pq_surface may be a subsurface; pull mastering metadata from
+		 * the actual PQ-tagged surface, not the toplevel. */
+		cm = wlr_surface_get_image_description_v1_data(pq_surface);
+		if (!cm)
+			return;
+
+		memset(&m->hdr_pending_desc, 0, sizeof(m->hdr_pending_desc));
+		m->hdr_pending_desc.transfer_function =
+			WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ;
+		m->hdr_pending_desc.primaries =
+			WLR_COLOR_NAMED_PRIMARIES_BT2020;
+		if (cm->has_mastering_display_primaries)
+			m->hdr_pending_desc.mastering_display_primaries =
+				cm->mastering_display_primaries;
+		if (cm->has_mastering_luminance) {
+			m->hdr_pending_desc.mastering_luminance.min =
+				cm->mastering_luminance.min;
+			m->hdr_pending_desc.mastering_luminance.max =
+				cm->mastering_luminance.max;
+		}
+		m->hdr_pending_desc.max_cll = cm->max_cll;
+		m->hdr_pending_desc.max_fall = cm->max_fall;
+
+		m->hdr_driver_client = driver;
+		m->hdr_entry_pending = 1;
+	} else if (!driver && m->hdr_active) {
+		if (now_ns - m->hdr_last_enter_ns < HDR_THROTTLE_NS)
+			return;
+		m->hdr_exit_pending = 1;
+	}
+}
+
+/*
+ * Mutate wlr_output_state to carry an HDR enter or exit transition.
+ * Called from inside commit_output_frame so the format swap + image
+ * description ride on a single atomic commit with the rendered buffer.
+ * On enter we prefer XBGR2101010 (10-bit RGB, fits HDR10 with no
+ * bandwidth penalty over FP16); FP16 is left as a future fallback if
+ * XBGR2101010 commits start failing on a given driver.
+ */
+static void
+apply_pending_hdr_state(Monitor *m, struct wlr_output_state *state)
+{
+	if (m->hdr_entry_pending) {
+		m->hdr_render_format = DRM_FORMAT_XBGR2101010;
+		wlr_output_state_set_render_format(state, m->hdr_render_format);
+		wlr_output_state_set_image_description(state,
+			&m->hdr_pending_desc);
+	} else if (m->hdr_exit_pending) {
+		/* Restore prior render format. If 10-bit was active before
+		 * HDR took over we keep 10-bit; otherwise default to 8-bit. */
+		uint32_t restore_fmt = m->render_10bit_active ?
+			DRM_FORMAT_XRGB2101010 : DRM_FORMAT_XRGB8888;
+		wlr_output_state_set_render_format(state, restore_fmt);
+		wlr_output_state_set_image_description(state, NULL);
+	}
+}
+
+/*
+ * Post-commit HDR state finalization. Called from commit_output_frame
+ * after the atomic commit succeeded (or definitively failed). On commit
+ * failure we cancel the pending transition so the next vblank gets a
+ * chance to retry with current state.
+ */
+static void
+finalize_hdr_transition(Monitor *m, int commit_ok, uint64_t now_ns)
+{
+	if (m->hdr_entry_pending) {
+		m->hdr_entry_pending = 0;
+		if (commit_ok) {
+			m->hdr_active = 1;
+			m->hdr_last_enter_ns = now_ns;
+			/* HW cursor plane lacks colorspace conversion — an sRGB
+			 * cursor buffer scanned out on a PQ display becomes a
+			 * blinding white blob. Force SW cursor so the cursor
+			 * goes through scene composition with the configured
+			 * sRGB→PQ transform. */
+			wlr_output_lock_software_cursors(m->wlr_output, true);
+			wlr_log(WLR_INFO,
+				"HDR enabled on %s: PQ+BT2020, render_format=0x%x",
+				m->wlr_output->name, m->hdr_render_format);
+		} else {
+			wlr_log(WLR_ERROR,
+				"HDR enter commit failed on %s — staying SDR",
+				m->wlr_output->name);
+			m->hdr_render_format = 0;
+			m->hdr_driver_client = NULL;
+		}
+	} else if (m->hdr_exit_pending) {
+		m->hdr_exit_pending = 0;
+		if (commit_ok) {
+			m->hdr_active = 0;
+			m->hdr_last_exit_ns = now_ns;
+			m->hdr_render_format = 0;
+			m->hdr_driver_client = NULL;
+			wlr_output_lock_software_cursors(m->wlr_output, false);
+			wlr_log(WLR_INFO, "HDR disabled on %s", m->wlr_output->name);
+		}
+	}
 }
 
 static void
@@ -1515,9 +1751,15 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 	 * If the toast is flagged active on an overlay plane, build a
 	 * layer state for it and attach to the commit. This runs on every
 	 * frame the toast is alive; the buffer contents are static, so we
-	 * just keep handing the backend the same buffer pointer. */
+	 * just keep handing the backend the same buffer pointer.
+	 *
+	 * Skip overlay-plane promotion while HDR is active — the overlay
+	 * plane has no per-plane colorspace conversion, so an sRGB toast
+	 * shown on a PQ-configured display would be blindingly bright.
+	 * hdr_driver_for() also already gates HDR-on when toast_visible,
+	 * but the overlay-plane buffer can outlive the visibility flag. */
 	if (m->toast_overlay_active && m->toast_overlay_layer &&
-	    m->toast_overlay_buf) {
+	    m->toast_overlay_buf && !m->hdr_active) {
 		overlay_layer_states[0] = (struct wlr_output_layer_state){
 			.layer = m->toast_overlay_layer,
 			.buffer = &m->toast_overlay_buf->base,
@@ -1555,6 +1797,15 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 		wlr_output_state_set_adaptive_sync_enabled(state, false);
 	}
 
+	/* HDR enter/exit: apply render_format + image_description on the same
+	 * atomic commit as the buffer. The DRM backend then writes the
+	 * HDR_OUTPUT_METADATA blob and the Colorspace=BT2020_RGB property in
+	 * one transaction. */
+	int hdr_transition = m->hdr_entry_pending || m->hdr_exit_pending;
+	if (hdr_transition)
+		apply_pending_hdr_state(m, state);
+
+	int hdr_commit_ok = 0;
 	if (!wlr_output_commit_state(m->wlr_output, state)) {
 		int committed = 0;
 
@@ -1645,11 +1896,16 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 		} else {
 			m->commit_failures = 0;
 			m->scanout_blacklist = 0;
+			hdr_commit_ok = 1;
 		}
 	} else {
 		m->commit_failures = 0;
 		m->scanout_blacklist = 0;
+		hdr_commit_ok = 1;
 	}
+
+	if (hdr_transition)
+		finalize_hdr_transition(m, hdr_commit_ok, get_time_ns());
 
 	/* Finalize deferred VRR state after commit.  Check actual hardware
 	 * status to confirm the change took effect. */
@@ -1765,6 +2021,11 @@ rendermon(struct wl_listener *listener, void *data)
 	}
 
 	classify_fullscreen_content(m, &is_game, &is_video, &allow_tearing);
+
+	/* Decide if this monitor should enter/exit HDR this frame. The actual
+	 * wlr_output_state mutation happens inside commit_output_frame so the
+	 * transition rides on the same atomic commit as the rendered buffer. */
+	update_hdr_target(m, frame_start_ns);
 
 	/*
 	 * Video frame pacing for external video players (VLC, mpv, etc).
@@ -2045,7 +2306,7 @@ rendermon(struct wl_listener *listener, void *data)
 
 	if (is_game)
 		wlr_output_state_set_content_type(&state, WP_CONTENT_TYPE_V1_TYPE_GAME);
-	else if (is_video)
+	else if (is_video || m->hdr_active)
 		wlr_output_state_set_content_type(&state, WP_CONTENT_TYPE_V1_TYPE_VIDEO);
 
 	if (needs_frame) {
@@ -2261,6 +2522,14 @@ requestmonstate(struct wl_listener *listener, void *data)
 	 * does not re-pick our preferred mode. Do that explicitly here so a
 	 * late EDID promotes us from a fallback mode to the real bestmode. */
 	m = wl_container_of(listener, m, request_state);
+
+	/* Mode/EDID changes invalidate the current HDR commit (max_bpc bounds
+	 * and supported_transfer_functions may have changed). Queue a deferred
+	 * exit; rendermon will re-enter on the next vblank if hdr_driver_for
+	 * still returns the same client. */
+	if (m->hdr_active && !m->hdr_exit_pending)
+		m->hdr_exit_pending = 1;
+
 	try_reapply_bestmode(m);
 
 	updatemons(NULL, NULL);
@@ -3043,13 +3312,17 @@ force_hdmi_full_range(Monitor *m)
 	if (!m || !m->wlr_output || !wlr_output_is_drm(m->wlr_output))
 		return;
 
-	/* Only HDMI outputs need this — DP and eDP use native RGB full range */
-	if (strncmp(m->wlr_output->name, "HDMI", 4) != 0)
-		return;
-
 	/* Skip secondary-GPU outputs: renderer fd belongs to primary GPU */
 	if (wlr_drm_backend_get_parent(m->wlr_output->backend))
 		return;
+
+	/*
+	 * Probe property on ALL DRM connectors. Pure DP/eDP sinks don't expose
+	 * "Broadcast RGB" so the loop is a no-op there. DP→HDMI adapters
+	 * (subconnector=HDMI on a DP-N connector) DO expose it — and the kernel
+	 * defaults to "Automatic" which selects Limited 16-235 on 4K CEA modes,
+	 * crushing black to grey. Name-based gate ("HDMI*") missed that case.
+	 */
 
 	drm_fd = wlr_renderer_get_drm_fd(drw);
 	if (drm_fd < 0)
@@ -3136,6 +3409,16 @@ enable_10bit_rendering(Monitor *m)
 		return 1;
 	}
 
+	/* HDR pipeline owns the render format while active; commiting
+	 * XRGB2101010 here would clobber the XBGR2101010+image_description
+	 * state and tear the TV out of HDR mode. */
+	if (m->hdr_active || m->hdr_entry_pending) {
+		wlr_log(WLR_DEBUG,
+			"10-bit auto-enable skipped on %s — HDR owns render format",
+			m->wlr_output->name);
+		return 0;
+	}
+
 	wlr_output_state_init(&state);
 	wlr_output_state_set_render_format(&state, DRM_FORMAT_XRGB2101010);
 
@@ -3190,13 +3473,80 @@ init_monitor_color_settings(Monitor *m)
 	m->supports_10bit = detect_10bit_support(m);
 	m->render_10bit_active = 0;
 	m->max_bpc = 8;  /* Default */
-	m->hdr_capable = 0;  /* Will be set when wlroots gets HDR support */
-	m->hdr_active = 0;
 
-	wlr_log(WLR_INFO, "Monitor %s: 10-bit=%s, HDR=%s",
+	/* HDR capability: wlroots 0.20 advertises PQ + BT2020 in
+	 * supported_transfer_functions / supported_primaries after parsing the
+	 * EDID HDR static metadata block. We require BOTH for HDR10 — PQ alone
+	 * with sRGB primaries is meaningless. Skip secondary-GPU outputs because
+	 * the swapchain format must survive cross-GPU mgpu_formats intersection
+	 * (same reason 10-bit is skipped on secondary GPUs below). */
+	int secondary_gpu = 0;
+	if (wlr_output_is_drm(m->wlr_output) &&
+	    wlr_drm_backend_get_parent(m->wlr_output->backend))
+		secondary_gpu = 1;
+
+	m->hdr_capable = (!secondary_gpu &&
+		(m->wlr_output->supported_transfer_functions &
+			WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ) &&
+		(m->wlr_output->supported_primaries &
+			WLR_COLOR_NAMED_PRIMARIES_BT2020)) ? 1 : 0;
+	m->hdr_active = 0;
+	m->hdr_driver_client = NULL;
+	m->hdr_render_format = 0;
+	m->hdr_last_enter_ns = 0;
+	m->hdr_last_exit_ns = 0;
+	m->hdr_entry_pending = 0;
+	m->hdr_exit_pending = 0;
+	memset(&m->hdr_pending_desc, 0, sizeof(m->hdr_pending_desc));
+
+	wlr_log(WLR_INFO,
+		"Monitor %s: 10-bit=%s, HDR=%s (tf=0x%x primaries=0x%x)%s",
 		m->wlr_output->name,
 		m->supports_10bit ? "yes" : "no",
-		m->hdr_capable ? "yes" : "no");
+		m->hdr_capable ? "yes" : "no",
+		m->wlr_output->supported_transfer_functions,
+		m->wlr_output->supported_primaries,
+		secondary_gpu ? " [secondary GPU, HDR skipped]" : "");
+
+	/* Diagnostic: when EDID claims HDR but the kernel/driver doesn't expose
+	 * the DRM connector properties we need (HDR_OUTPUT_METADATA blob,
+	 * Colorspace enum), HDR mode commits will silently produce a 10-bit
+	 * framebuffer with no PQ infoframe — the TV stays in SDR and the
+	 * picture looks wrong. Log a clear warning so the user can correlate
+	 * "HDR=yes but TV badge never lights up" with a driver gap rather than
+	 * a compositor bug. */
+	if (m->hdr_capable && wlr_output_is_drm(m->wlr_output)) {
+		int drm_fd = wlr_renderer_get_drm_fd(drw);
+		uint32_t conn_id = wlr_drm_connector_get_id(m->wlr_output);
+		if (drm_fd >= 0 && conn_id != 0) {
+			drmModeConnector *conn = drmModeGetConnector(drm_fd, conn_id);
+			if (conn) {
+				int has_hdr_meta = 0, has_colorspace = 0;
+				for (int i = 0; i < conn->count_props; i++) {
+					drmModePropertyRes *p =
+						drmModeGetProperty(drm_fd, conn->props[i]);
+					if (!p)
+						continue;
+					if (strcmp(p->name, "HDR_OUTPUT_METADATA") == 0)
+						has_hdr_meta = 1;
+					else if (strcmp(p->name, "Colorspace") == 0)
+						has_colorspace = 1;
+					drmModeFreeProperty(p);
+				}
+				drmModeFreeConnector(conn);
+				if (!has_hdr_meta || !has_colorspace) {
+					wlr_log(WLR_ERROR,
+						"HDR EDID present on %s but DRM connector "
+						"lacks %s%s%s — kernel/driver gap. HDR mode "
+						"will commit but TV won't switch to HDR.",
+						m->wlr_output->name,
+						!has_hdr_meta ? "HDR_OUTPUT_METADATA" : "",
+						(!has_hdr_meta && !has_colorspace) ? " and " : "",
+						!has_colorspace ? "Colorspace" : "");
+				}
+			}
+		}
+	}
 
 	/* Force HDMI full-range RGB so black stays black on 4K TVs */
 	force_hdmi_full_range(m);
@@ -3907,6 +4257,12 @@ invalidate_video_pacing(Monitor *m)
 		m->frame_pacing_active = 0;
 		m->estimated_game_fps = 0.0f;
 	}
+
+	/* Tag switch / fullscreen change means the HDR driver client is
+	 * very likely gone. Schedule a deferred exit; rendermon will pick
+	 * up the new hdr_driver_for(m) result on the next vblank. */
+	if (m->hdr_active && !m->hdr_exit_pending)
+		m->hdr_exit_pending = 1;
 
 	/* Force full damage so the first rendermon after tag switch
 	 * builds a complete frame (desktop content) instead of

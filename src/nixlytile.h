@@ -1320,6 +1320,18 @@ struct Monitor {
 	int max_bpc;
 	int hdr_capable;
 	int hdr_active;
+	/* HDR runtime state — see plan Phase 2.
+	 * driver_client = whose surface image_description currently drives output.
+	 * Pending flags are processed in rendermon build_state on next vblank to
+	 * piggyback on the existing commit; throttle stamps prevent HDMI re-train
+	 * thrashing on rapid pause/seek. */
+	Client *hdr_driver_client;
+	uint32_t hdr_render_format;
+	uint64_t hdr_last_enter_ns;
+	uint64_t hdr_last_exit_ns;
+	int hdr_entry_pending;
+	int hdr_exit_pending;
+	struct wlr_output_image_description hdr_pending_desc;
 	/* Cached fullscreen content classification (avoid per-vblank protocol lookups) */
 	Client *classify_cache_client;
 	int classify_cache_game;

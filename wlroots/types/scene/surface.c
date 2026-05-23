@@ -75,8 +75,31 @@ static void get_surface_preferred_image_description(struct wlr_surface *surface,
 
 	struct wlr_surface_output *surface_output;
 	wl_list_for_each(surface_output, &surface->current_outputs, link) {
+		struct wlr_output *output = surface_output->output;
 		const struct wlr_output_image_description *img_desc =
-			surface_output->output->image_description;
+			output->image_description;
+
+		/* nixlytile patch: if output is HDR-capable (EDID advertises PQ +
+		 * BT2020) but has no committed image_description yet, advertise
+		 * PQ+BT2020 as preferred anyway. Otherwise clients (mpv with
+		 * target-trc=auto, etc.) would see preferred=sRGB on first
+		 * connect, tonemap to SDR, and the compositor would never see
+		 * a PQ surface to trigger HDR mode. Chicken-and-egg fix. */
+		struct wlr_output_image_description synth;
+		if (img_desc == NULL &&
+		    (output->supported_transfer_functions &
+				WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ) &&
+		    (output->supported_primaries &
+				WLR_COLOR_NAMED_PRIMARIES_BT2020)) {
+			synth = (struct wlr_output_image_description){
+				.transfer_function =
+					WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ,
+				.primaries =
+					WLR_COLOR_NAMED_PRIMARIES_BT2020,
+			};
+			img_desc = &synth;
+		}
+
 		if (img_desc == NULL) {
 			continue;
 		}
