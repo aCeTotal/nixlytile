@@ -392,8 +392,6 @@ destroynotify(struct wl_listener *listener, void *data)
 	wl_list_remove(&c->destroy.link);
 	wl_list_remove(&c->set_title.link);
 	wl_list_remove(&c->fullscreen.link);
-	/* btrtile removed; arrange will reflow remaining clients */
-	(void)m;
 #ifdef XWAYLAND
 	if (c->type != XDGShell) {
 		wl_list_remove(&c->activate.link);
@@ -416,6 +414,18 @@ destroynotify(struct wl_listener *listener, void *data)
 	if (c == game_mode_client) {
 		game_mode_pid = 0;
 		game_mode_client = NULL;
+	}
+	/* Safety net: classify_cache_client stores a raw Client* used only
+	 * for pointer-equality cache invalidation. Unmap normally clears it
+	 * (see unmapnotify), but rapid xdg_toplevel destroy without an unmap
+	 * leaves a dangling pointer. If that address is later reused for a
+	 * new client allocation, classify_fullscreen_content would spuriously
+	 * hit the cache and return stale game/video/tearing flags. */
+	wl_list_for_each(m, &mons, link) {
+		if (m->classify_cache_client == c)
+			m->classify_cache_client = NULL;
+		if (m->hdr_driver_client == c)
+			m->hdr_driver_client = NULL;
 	}
 	free(c);
 }

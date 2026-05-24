@@ -1094,12 +1094,28 @@ dirtomon(enum wlr_direction dir)
 	return selmon;
 }
 
+struct gpu_reset_cleanup {
+	struct wlr_renderer *renderer;
+	struct wlr_allocator *allocator;
+};
+
+static void
+gpu_reset_idle_destroy(void *data)
+{
+	struct gpu_reset_cleanup *c = data;
+	wlr_allocator_destroy(c->allocator);
+	wlr_renderer_destroy(c->renderer);
+	free(c);
+}
+
 void
 gpureset(struct wl_listener *listener, void *data)
 {
 	struct wlr_renderer *old_drw = drw;
 	struct wlr_allocator *old_alloc = alloc;
-	struct Monitor *m;
+	struct gpu_reset_cleanup *cleanup;
+	Monitor *m;
+
 	if (!(drw = wlr_renderer_autocreate(backend)))
 		die("couldn't recreate renderer");
 
@@ -1113,10 +1129,27 @@ gpureset(struct wl_listener *listener, void *data)
 
 	wl_list_for_each(m, &mons, link) {
 		wlr_output_init_render(m->wlr_output, alloc, drw);
+		wlr_output_schedule_frame(m->wlr_output);
 	}
 
-	wlr_allocator_destroy(old_alloc);
-	wlr_renderer_destroy(old_drw);
+	/* Defer destroy of old renderer/allocator. We are called synchronously
+	 * from wl_signal_emit_mutable inside render_pass_submit (Vulkan
+	 * VK_ERROR_DEVICE_LOST path). The caller still holds a locked buffer
+	 * from the old swapchain, and the in-flight wlr_output_test_state /
+	 * output_ensure_buffer frame has not unwound yet. Destroying old_drw
+	 * synchronously trips the wl_list_empty(events.destroy.listener_list)
+	 * assertion in wlr_renderer_destroy (wlroots 0.20). The idle callback
+	 * runs after the event loop unwinds the current dispatch, by which
+	 * point those references are released. */
+	cleanup = calloc(1, sizeof(*cleanup));
+	if (!cleanup) {
+		wlr_allocator_destroy(old_alloc);
+		wlr_renderer_destroy(old_drw);
+		return;
+	}
+	cleanup->renderer = old_drw;
+	cleanup->allocator = old_alloc;
+	wl_event_loop_add_idle(event_loop, gpu_reset_idle_destroy, cleanup);
 }
 
 void
