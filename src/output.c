@@ -1127,20 +1127,36 @@ gpureset(struct wl_listener *listener, void *data)
 
 	wlr_compositor_set_renderer(compositor, drw);
 
+	/* Fire destroy signal on old_drw NOW (without freeing it). This drops
+	 * all stale texture references held by client_buffer/scene_buffer/
+	 * cursor (their renderer_destroy listeners null their texture
+	 * pointers). Otherwise the next rendermon -> wlr_scene_output_build_state
+	 * walks scene_buffers that still cache wlr_vk_texture pointers whose
+	 * ->renderer field is old_drw; render_pass_add_texture then trips
+	 *     assert(texture->renderer == renderer)
+	 * because the pass uses the new renderer. This is the Intel Arc / ANV
+	 * VK_ERROR_DEVICE_LOST crash path — Arc is the only GPU that reaches
+	 * gpureset under nixlymedia's 4K dmabuf workload.
+	 *
+	 * Safe: listeners self-detach in their callbacks, leaving
+	 * events.destroy.listener_list empty before the idle callback runs
+	 * wlr_renderer_destroy (which re-emits on an empty list and then
+	 * asserts emptiness — both fine). */
+	wl_signal_emit_mutable(&old_drw->events.destroy, old_drw);
+
 	wl_list_for_each(m, &mons, link) {
 		wlr_output_init_render(m->wlr_output, alloc, drw);
 		wlr_output_schedule_frame(m->wlr_output);
 	}
 
-	/* Defer destroy of old renderer/allocator. We are called synchronously
+	/* Defer free of old renderer/allocator. We are called synchronously
 	 * from wl_signal_emit_mutable inside render_pass_submit (Vulkan
 	 * VK_ERROR_DEVICE_LOST path). The caller still holds a locked buffer
 	 * from the old swapchain, and the in-flight wlr_output_test_state /
-	 * output_ensure_buffer frame has not unwound yet. Destroying old_drw
-	 * synchronously trips the wl_list_empty(events.destroy.listener_list)
-	 * assertion in wlr_renderer_destroy (wlroots 0.20). The idle callback
-	 * runs after the event loop unwinds the current dispatch, by which
-	 * point those references are released. */
+	 * output_ensure_buffer frame has not unwound yet. Freeing old_drw
+	 * synchronously would tear down vk objects still referenced by that
+	 * locked buffer. The idle callback runs after the event loop unwinds
+	 * the current dispatch, by which point those references are released. */
 	cleanup = calloc(1, sizeof(*cleanup));
 	if (!cleanup) {
 		wlr_allocator_destroy(old_alloc);
