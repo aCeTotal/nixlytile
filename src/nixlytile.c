@@ -774,6 +774,7 @@ void
 cleanup(void)
 {
 	wlr_log(WLR_ERROR, "cleanup() called - starting cleanup sequence");
+	apptoggle_cleanup();
 	/* Shut down game mode background worker (unfreezes processes if needed) */
 	gm_bg_cleanup();
 	window_ipc_finish();
@@ -1165,6 +1166,10 @@ run(const char *startup_cmd)
 				cpu_cursor_active ? "yes" : "no");
 		}
 	}
+
+	/* Gamepad L1+R1 toggle between nixlymedia and retroarch.
+	 * Set up after autostart so it can adopt the spawned nixlymedia pid. */
+	apptoggle_setup();
 
 	/* Run the Wayland event loop. This does not return until you exit the
 	 * compositor. Starting the backend rigged up all of the necessary event

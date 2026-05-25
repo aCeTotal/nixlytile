@@ -106,6 +106,7 @@ autostart "sh -c 'wl-paste --type text --watch clipman store --no-persist'"
 autostart "sh -c 'wl-paste --primary --type text --watch clipman store --no-persist'"
 autostart "appd"
 autostart "nixly_steam -silent"
+autostart "nixlymedia"
 
 // ───────── keybindings ─────────
 // Syntax: bind "Mod+Shift+Key" "action-name" [arg]

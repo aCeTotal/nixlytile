@@ -26,7 +26,7 @@ MOD_CFLAGS = $(NLCFLAGS) -Wno-declaration-after-statement
 MOD_OBJS = globals.o client.o layout.o input.o output.o \
            gamemode.o client_utils.o gpu.o draw.o layer.o workspace.o anim.o \
            dwl_ipc.o dwl-ipc-unstable-v2-protocol.o window_ipc.o \
-           config_parser.o config_loader.o
+           config_parser.o config_loader.o apptoggle.o
 
 PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstable-v1-protocol.h \
              $(SRC)/wlr-layer-shell-unstable-v1-protocol.h $(SRC)/wlr-output-power-management-unstable-v1-protocol.h \
@@ -75,6 +75,8 @@ window_ipc.o: $(SRC)/window_ipc.c $(SRC)/nixlytile.h
 config_parser.o: $(SRC)/config_parser.c $(SRC)/config_parser.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 config_loader.o: $(SRC)/config_loader.c $(SRC)/config_loader.h $(SRC)/config_parser.h $(SRC)/nixlytile.h $(SRC)/client.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+apptoggle.o: $(SRC)/apptoggle.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 dwl-ipc-unstable-v2-protocol.o: $(SRC)/dwl-ipc-unstable-v2-protocol.c
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<

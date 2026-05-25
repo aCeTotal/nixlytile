@@ -2703,6 +2703,10 @@ void steam_kill(void);
 void live_tv_kill(void);
 float ease_out_cubic(float t);
 
+/* apptoggle.c — gamepad L1+R1 toggle between nixlymedia and retroarch */
+void apptoggle_setup(void);
+void apptoggle_cleanup(void);
+
 /* nixlytile.c */
 void steam_set_ge_proton_default(void);
 
