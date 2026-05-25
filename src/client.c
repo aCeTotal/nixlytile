@@ -111,6 +111,22 @@ pending_launch_find(pid_t client_pid, uint32_t *out_tags,
 	return 0;
 }
 
+/* Apps hardcoded to map fullscreen-over-waybar regardless of game/video
+ * heuristics. Match is case-insensitive substring on the xdg/x11 app-id.
+ * Currently: nixlymedia + retroarch. Keeps workspace switching intact —
+ * just forces geometry to full output rect and parents to LyrFS. */
+int
+client_is_forced_fullscreen_appid(const char *appid)
+{
+	if (!appid)
+		return 0;
+	if (strcasestr(appid, "nixlymedia"))
+		return 1;
+	if (strcasestr(appid, "retroarch"))
+		return 1;
+	return 0;
+}
+
 int
 client_has_fullscreen_ancestor(Client *c)
 {
@@ -919,11 +935,13 @@ mapnotify(struct wl_listener *listener, void *data)
 	int pre_game_splash = 0;    /* Game splash → float centered */
 	Monitor *pre_target_mon = NULL;
 
-	/* nixlymedia: always map fullscreen over waybar. Pin to selmon,
-	 * bypass applyrules, force tiled+fullscreen so the row reflows. */
+	/* nixlymedia / retroarch: always map fullscreen over waybar.
+	 * Pin to selmon, bypass applyrules, force tiled+fullscreen so
+	 * the row reflows. Workspace switching keeps working because
+	 * the client is still attached to a workspace via setmon below. */
 	{
 		const char *_naid = client_get_appid(c);
-		if (_naid && strcmp(_naid, "nixlymedia") == 0
+		if (client_is_forced_fullscreen_appid(_naid)
 				&& !c->isfullscreen && !client_is_unmanaged(c)
 				&& client_get_parent(c) == NULL) {
 			pre_target_mon = selmon;
@@ -1568,9 +1586,9 @@ setfullscreen(Client *c, int fullscreen)
 		 * Regular apps go fullscreen within the usable area (m->w),
 		 * leaving the waybar visible.  Tile-fullscreen UX. */
 		const char *_fsaid = client_get_appid(c);
-		int _is_nixlymedia = _fsaid && strcmp(_fsaid, "nixlymedia") == 0;
+		int _is_forced = client_is_forced_fullscreen_appid(_fsaid);
 		if (looks_like_game(c) || is_video_content(c)
-				|| client_wants_tearing(c) || _is_nixlymedia) {
+				|| client_wants_tearing(c) || _is_forced) {
 			resize(c, fsgeom, 0);
 		} else {
 			struct wlr_box ufs = c->mon->w;
