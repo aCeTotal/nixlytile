@@ -2332,14 +2332,11 @@ setup(void)
 	drag_icon = wlr_scene_tree_create(&scene->tree);
 	wlr_scene_node_place_below(&drag_icon->node, &layers[LyrBlock]->node);
 
-	/* Autocreates a Vulkan renderer. The build only links the Vulkan
-	 * backend — Pixman/GL are not available. The renderer is responsible
-	 * for defining the various pixel formats it supports for shared
-	 * memory, this configures that for clients. */
+	/* Autocreates a GLES2 renderer. The renderer is responsible for
+	 * defining the various pixel formats it supports for shared memory,
+	 * this configures that for clients. */
 	if (!(drw = wlr_renderer_autocreate(backend)))
 		die("couldn't create renderer");
-	if (!wlr_renderer_is_vk(drw))
-		die("renderer is not Vulkan — only Vulkan is supported");
 	wl_signal_add(&drw->events.lost, &gpu_reset);
 
 	/* Log renderer and GPU state for diagnostics */
@@ -2438,8 +2435,7 @@ setup(void)
 	 *   10BIT   — HDR/10-bit render format supported by the renderer.
 	 */
 	{
-		const char *renderer_name =
-			wlr_renderer_is_vk(drw) ? "Vulkan" : "other";
+		const char *renderer_name = "GLES2";
 		int has_dmabuf =
 			wlr_renderer_get_texture_formats(drw, WLR_BUFFER_CAP_DMABUF) != NULL;
 		const char *gpu_label = "unknown";
@@ -2755,29 +2751,6 @@ setup(void)
 		}
 	}
 
-	/* Vulkan renderer: enable CPU cursor for all GPUs.
-	 * The Vulkan renderer's texture path may not produce buffers
-	 * compatible with all HW cursor planes on multi-monitor.
-	 * A dumb DRM buffer works universally. */
-	if (!cpu_cursor_active && wlr_renderer_is_vk(drw)) {
-		int bfd = wlr_backend_get_drm_fd(backend);
-		if (bfd >= 0) {
-			uint64_t cursor_w = 64, cursor_h = 64;
-			drmGetCap(bfd, DRM_CAP_CURSOR_WIDTH, &cursor_w);
-			drmGetCap(bfd, DRM_CAP_CURSOR_HEIGHT, &cursor_h);
-			if (cursor_w < 64) cursor_w = 64;
-			if (cursor_h < 64) cursor_h = 64;
-			cpu_cursor_buf = cpu_cursor_buffer_create(bfd,
-				(uint32_t)cursor_w, (uint32_t)cursor_h, 0);
-			if (cpu_cursor_buf) {
-				cpu_cursor_active = 1;
-				wlr_log(WLR_INFO,
-					"Vulkan: CPU cursor buffer enabled (%lux%lu)",
-					(unsigned long)cursor_w, (unsigned long)cursor_h);
-			}
-		}
-	}
-
 	/* Renderer summary to game debug log */
 	{
 		const char *gpu = "unknown";
@@ -2787,7 +2760,7 @@ setup(void)
 			gpu = detected_gpus[integrated_gpu_idx].driver;
 		int has_dmabuf =
 			wlr_renderer_get_texture_formats(drw, WLR_BUFFER_CAP_DMABUF) != NULL;
-		game_log("RENDERER: gpu=%s renderer=Vulkan esync=%s dmabuf=%s "
+		game_log("RENDERER: gpu=%s renderer=GLES2 esync=%s dmabuf=%s "
 			"drm_fd=%d cpu_cursor=%s",
 			gpu,
 			g_explicit_sync_ok ? "YES" : "NO",
