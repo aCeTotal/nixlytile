@@ -2992,6 +2992,144 @@ restore_max_refresh_rate(Monitor *m)
 	wlr_output_state_finish(&state);
 }
 
+/* Console-mode auto-resolution: when Steam Big Picture or a retro emulator
+ * goes fullscreen, drop a sub-4K@60 display to 1080p best-refresh so the
+ * couch UX is smooth. Restore bestmode on fullscreen exit. */
+static int
+output_has_4k_60hz(struct wlr_output *output)
+{
+	struct wlr_output_mode *mode;
+	wl_list_for_each(mode, &output->modes, link) {
+		if (mode->width == 3840 && mode->height == 2160
+		    && mode->refresh >= 60000)
+			return 1;
+	}
+	return 0;
+}
+
+int
+client_wants_console_mode(Client *c)
+{
+	if (!c)
+		return 0;
+	if (is_retro_emulator_client(c))
+		return 1;
+#ifdef XWAYLAND
+	if (c->is_steam_bigpicture)
+		return 1;
+#endif
+	return 0;
+}
+
+void
+apply_console_mode(Monitor *m, Client *c)
+{
+	struct wlr_output_mode *target;
+	struct wlr_output_state state;
+	struct wlr_output_configuration_v1 *config;
+	struct wlr_output_configuration_head_v1 *config_head;
+	RuntimeMonitorConfig *rtcfg;
+
+	if (!m || !m->wlr_output || !m->wlr_output->enabled || !c)
+		return;
+	if (m->console_mode_active)
+		return;
+	if (!client_wants_console_mode(c))
+		return;
+
+	/* Respect user-pinned resolution. */
+	rtcfg = find_monitor_config(m->wlr_output->name);
+	if (rtcfg && rtcfg->width > 0 && rtcfg->height > 0)
+		return;
+
+	/* Monitor already does 4K@60+ — leave native mode. */
+	if (output_has_4k_60hz(m->wlr_output))
+		return;
+
+	target = find_mode(m->wlr_output, 1920, 1080, 0);
+	if (!target)
+		return;
+	if (m->wlr_output->current_mode == target)
+		return;
+
+	m->console_mode_original = m->wlr_output->current_mode;
+
+	wlr_output_state_init(&state);
+	wlr_output_state_set_mode(&state, target);
+	if (wlr_output_test_state(m->wlr_output, &state)
+	    && wlr_output_commit_state(m->wlr_output, &state)) {
+		m->console_mode_active = 1;
+		wlr_log(WLR_INFO,
+			"Console mode: %s switched to %dx%d@%dmHz for '%s'",
+			m->wlr_output->name, target->width, target->height,
+			target->refresh,
+			client_get_appid(c) ? client_get_appid(c) : "(null)");
+		config = wlr_output_configuration_v1_create();
+		config_head = wlr_output_configuration_head_v1_create(
+				config, m->wlr_output);
+		config_head->state.mode = target;
+		wlr_output_manager_v1_set_configuration(output_mgr, config);
+		{
+			char osd_msg[64];
+			snprintf(osd_msg, sizeof(osd_msg), "%dx%d @ %d Hz",
+				target->width, target->height,
+				target->refresh / 1000);
+			show_hz_osd(m, osd_msg);
+		}
+		updatemons(NULL, NULL);
+	} else {
+		m->console_mode_original = NULL;
+	}
+	wlr_output_state_finish(&state);
+}
+
+void
+restore_console_mode(Monitor *m)
+{
+	struct wlr_output_mode *target;
+	struct wlr_output_state state;
+	struct wlr_output_configuration_v1 *config;
+	struct wlr_output_configuration_head_v1 *config_head;
+
+	if (!m || !m->wlr_output || !m->wlr_output->enabled)
+		return;
+	if (!m->console_mode_active)
+		return;
+
+	target = bestmode(m->wlr_output);
+	if (!target) {
+		m->console_mode_active = 0;
+		m->console_mode_original = NULL;
+		return;
+	}
+
+	wlr_output_state_init(&state);
+	wlr_output_state_set_mode(&state, target);
+	if (wlr_output_test_state(m->wlr_output, &state)
+	    && wlr_output_commit_state(m->wlr_output, &state)) {
+		wlr_log(WLR_INFO,
+			"Console mode restored: %s → %dx%d@%dmHz",
+			m->wlr_output->name, target->width, target->height,
+			target->refresh);
+		config = wlr_output_configuration_v1_create();
+		config_head = wlr_output_configuration_head_v1_create(
+				config, m->wlr_output);
+		config_head->state.mode = target;
+		wlr_output_manager_v1_set_configuration(output_mgr, config);
+		{
+			char osd_msg[64];
+			snprintf(osd_msg, sizeof(osd_msg), "%dx%d @ %d Hz",
+				target->width, target->height,
+				target->refresh / 1000);
+			show_hz_osd(m, osd_msg);
+		}
+		updatemons(NULL, NULL);
+	}
+	m->console_mode_active = 0;
+	m->console_mode_original = NULL;
+	wlr_output_state_finish(&state);
+}
+
 int
 detect_10bit_support(Monitor *m)
 {

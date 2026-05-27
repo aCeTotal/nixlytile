@@ -1210,6 +1210,8 @@ struct Monitor {
 	LayoutNode *root[MAX_TAGS];
 	struct wlr_output_mode *original_mode;
 	int video_mode_active;
+	int console_mode_active;
+	struct wlr_output_mode *console_mode_original;
 	int vrr_capable;
 	int vrr_active;
 	float vrr_target_hz;
@@ -2229,6 +2231,9 @@ void warp_cursor_to_startup_monitor(void);
 void set_adaptive_sync(Monitor *m, int enabled);
 void set_video_refresh_rate(Monitor *m, Client *c);
 void restore_max_refresh_rate(Monitor *m);
+void apply_console_mode(Monitor *m, Client *c);
+void restore_console_mode(Monitor *m);
+int client_wants_console_mode(Client *c);
 int detect_10bit_support(Monitor *m);
 void monitor_wake(Monitor *m);
 void ll_cursor_init(Monitor *m);

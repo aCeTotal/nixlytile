@@ -1613,6 +1613,10 @@ setfullscreen(Client *c, int fullscreen)
 			/* Try to match video refresh rate if content is video */
 			set_video_refresh_rate(c->mon, c);
 		}
+		/* Steam Big Picture / RetroArch: drop to 1080p best-refresh
+		 * if the output cannot do 4K@60+. */
+		if (client_wants_console_mode(c))
+			apply_console_mode(c->mon, c);
 		/* Always run silent video detection - catches cutscenes in games */
 		schedule_video_check(200);
 	} else {
@@ -1626,6 +1630,8 @@ setfullscreen(Client *c, int fullscreen)
 		disable_game_vrr(c->mon);
 		/* Restore max refresh rate when exiting fullscreen */
 		restore_max_refresh_rate(c->mon);
+		/* Restore native mode if console-mode was applied */
+		restore_console_mode(c->mon);
 		c->detected_video_hz = 0.0f;
 		c->video_detect_phase = 0;
 		c->video_detect_retries = 0;
@@ -1902,6 +1908,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 		Monitor *m = c->mon ? c->mon : selmon;
 		set_adaptive_sync(m, 0);
 		restore_max_refresh_rate(m);
+		restore_console_mode(m);
 	}
 
 	/* Invalidate fullscreen classification cache */
