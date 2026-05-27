@@ -1271,6 +1271,8 @@ powermgrsetmode(struct wl_listener *listener, void *data)
 		m->hdr_driver_client = NULL;
 		m->hdr_entry_pending = 0;
 		m->hdr_exit_pending = 0;
+		m->hdr_last_commit_ok_ns = 0;
+		m->hdr_commit_fail_count = 0;
 	}
 
 	wlr_output_state_set_enabled(&state, event->mode);
@@ -1416,6 +1418,27 @@ hdr_driver_for(Monitor *m, struct wlr_surface **out_pq_surface)
  * direction happened less than HDR_THROTTLE_NS ago. Avoids HDMI re-train
  * flicker on pause/seek bounces.
  */
+/* HDR watchdog: if hdr_active but no successful commit in this long, the
+ * client/driver pipeline is wedged. Force exit so the TV releases HDR mode. */
+#define HDR_WATCHDOG_NS (2ULL * 1000000000ULL)
+/* Consecutive commit failures while hdr_active before we give up and exit. */
+#define HDR_COMMIT_FAIL_THRESHOLD 8
+
+/* Hard kill-switch via NIXLY_DISABLE_HDR=1. Cached at first call. */
+static int
+hdr_globally_disabled(void)
+{
+	static int cached = -1;
+	if (cached < 0) {
+		const char *v = getenv("NIXLY_DISABLE_HDR");
+		cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+		if (cached)
+			wlr_log(WLR_INFO,
+				"NIXLY_DISABLE_HDR set — HDR pipeline disabled");
+	}
+	return cached;
+}
+
 static void
 update_hdr_target(Monitor *m, uint64_t now_ns)
 {
@@ -1426,9 +1449,30 @@ update_hdr_target(Monitor *m, uint64_t now_ns)
 	if (!m || !m->hdr_capable)
 		return;
 
+	/* Hard disable: never enter HDR, force exit if somehow active. */
+	if (hdr_globally_disabled()) {
+		if (m->hdr_active && !m->hdr_exit_pending)
+			m->hdr_exit_pending = 1;
+		return;
+	}
+
 	/* If a transition is already queued for this frame, don't reconsider. */
 	if (m->hdr_entry_pending || m->hdr_exit_pending)
 		return;
+
+	/* Watchdog: hdr_active but pipeline appears wedged. Force exit so the
+	 * TV releases HDR_OUTPUT_METADATA and SDR fallback gets a chance. */
+	if (m->hdr_active && m->hdr_last_commit_ok_ns > 0 &&
+	    now_ns - m->hdr_last_commit_ok_ns > HDR_WATCHDOG_NS) {
+		wlr_log(WLR_ERROR,
+			"HDR watchdog: %s no successful commit in %llu ms — "
+			"forcing HDR exit",
+			m->wlr_output->name,
+			(unsigned long long)((now_ns - m->hdr_last_commit_ok_ns)
+				/ 1000000ULL));
+		m->hdr_exit_pending = 1;
+		return;
+	}
 
 	driver = hdr_driver_for(m, &pq_surface);
 
@@ -1508,6 +1552,8 @@ finalize_hdr_transition(Monitor *m, int commit_ok, uint64_t now_ns)
 		if (commit_ok) {
 			m->hdr_active = 1;
 			m->hdr_last_enter_ns = now_ns;
+			m->hdr_last_commit_ok_ns = now_ns;
+			m->hdr_commit_fail_count = 0;
 			/* HW cursor plane lacks colorspace conversion — an sRGB
 			 * cursor buffer scanned out on a PQ display becomes a
 			 * blinding white blob. Force SW cursor so the cursor
@@ -1531,6 +1577,8 @@ finalize_hdr_transition(Monitor *m, int commit_ok, uint64_t now_ns)
 			m->hdr_last_exit_ns = now_ns;
 			m->hdr_render_format = 0;
 			m->hdr_driver_client = NULL;
+			m->hdr_last_commit_ok_ns = 0;
+			m->hdr_commit_fail_count = 0;
 			wlr_output_lock_software_cursors(m->wlr_output, false);
 			wlr_log(WLR_INFO, "HDR disabled on %s", m->wlr_output->name);
 		}
@@ -1885,6 +1933,24 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 
 			m->commit_failures++;
 
+			/* HDR fail-counter: if hdr_active and commits keep
+			 * failing, escalate to a forced HDR exit before the
+			 * general scanout_blacklist fallback even kicks in.
+			 * Catches the "TV in UHD Color, driver wedged" case
+			 * where the SDR fallback path may still succeed. */
+			if (m->hdr_active && !m->hdr_exit_pending) {
+				m->hdr_commit_fail_count++;
+				if (m->hdr_commit_fail_count >= HDR_COMMIT_FAIL_THRESHOLD) {
+					wlr_log(WLR_ERROR,
+						"%s: %u consecutive HDR commit failures — "
+						"forcing HDR exit",
+						m->wlr_output->name,
+						m->hdr_commit_fail_count);
+					m->hdr_exit_pending = 1;
+					request_frame(m);
+				}
+			}
+
 			if (m->commit_failures <= 3) {
 				wlr_log(WLR_ERROR, "Output commit failed on %s (n=%u)",
 					m->wlr_output->name, m->commit_failures);
@@ -1951,6 +2017,13 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 		m->commit_failures = 0;
 		m->scanout_blacklist = 0;
 		hdr_commit_ok = 1;
+	}
+
+	/* HDR liveness: any successful commit while hdr_active resets the
+	 * watchdog clock and the fail counter. */
+	if (hdr_commit_ok && m->hdr_active) {
+		m->hdr_last_commit_ok_ns = get_time_ns();
+		m->hdr_commit_fail_count = 0;
 	}
 
 	if (hdr_transition)
@@ -3684,6 +3757,8 @@ init_monitor_color_settings(Monitor *m)
 	m->hdr_last_exit_ns = 0;
 	m->hdr_entry_pending = 0;
 	m->hdr_exit_pending = 0;
+	m->hdr_last_commit_ok_ns = 0;
+	m->hdr_commit_fail_count = 0;
 	memset(&m->hdr_pending_desc, 0, sizeof(m->hdr_pending_desc));
 
 	wlr_log(WLR_INFO,

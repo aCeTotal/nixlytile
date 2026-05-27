@@ -1298,6 +1298,12 @@ struct Monitor {
 	uint32_t commit_failures;
 	uint64_t last_commit_fail_ns;
 	int scanout_blacklist;
+	/* Retro emulator fullscreen on this monitor holds an
+	 * attach_render lock to force GPU composition. Kernel may reject
+	 * retroarch buffer modifiers (10-bit Y-tiled CCS on i915 etc.),
+	 * causing visible black frames before the commit_failures fallback
+	 * kicks in. Locked at setfullscreen-enter, released at exit. */
+	int retro_scanout_lock;
 	/* Idle monitor render throttle */
 	int render_idle;                    /* 1 = idle mode, throttled to heartbeat */
 	int idle_frames;                    /* consecutive frames without cursor + no active content */
@@ -1333,6 +1339,16 @@ struct Monitor {
 	int hdr_entry_pending;
 	int hdr_exit_pending;
 	struct wlr_output_image_description hdr_pending_desc;
+	/* HDR runtime safety nets:
+	 *   hdr_last_commit_ok_ns: last successful commit while hdr_active.
+	 *     If too long without a successful commit, the driver/client is
+	 *     stuck (e.g. mpv EGL interop wedged after HDR entry). Force
+	 *     exit so the TV releases HDR_OUTPUT_METADATA and can recover.
+	 *   hdr_commit_fail_count: consecutive commit failures while
+	 *     hdr_active. Escalates to forced exit before commit_failures
+	 *     fallback would even kick in. */
+	uint64_t hdr_last_commit_ok_ns;
+	uint32_t hdr_commit_fail_count;
 	/* Cached fullscreen content classification (avoid per-vblank protocol lookups) */
 	Client *classify_cache_client;
 	int classify_cache_game;

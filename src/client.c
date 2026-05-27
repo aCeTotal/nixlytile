@@ -1594,7 +1594,22 @@ setfullscreen(Client *c, int fullscreen)
 			struct wlr_box ufs = c->mon->w;
 			client_set_target_geom(c, ufs);
 		}
-		set_adaptive_sync(c->mon, 1);
+		/* Retro emulators: native presentation only. No VRR, no
+		 * refresh-rate matching, no video-classify cadence — those cause
+		 * black flicker/artifacts on HDMI TVs. Resolution drop via
+		 * apply_console_mode stays (user-intentional). */
+		int _is_retro = is_retro_emulator_client(c);
+		if (!_is_retro) {
+			set_adaptive_sync(c->mon, 1);
+		} else if (c->mon && c->mon->wlr_output && !c->mon->retro_scanout_lock) {
+			/* Lock attach_render so wlroots picks GPU composition
+			 * instead of direct scanout. Retroarch buffer modifiers
+			 * (e.g. 10-bit Y-tiled CCS) can be rejected by the kernel
+			 * on commit, producing visible black frames before the
+			 * commit_failures fallback kicks in. */
+			wlr_output_lock_attach_render(c->mon->wlr_output, true);
+			c->mon->retro_scanout_lock = 1;
+		}
 		/* Reset frame tracking and video detection state */
 		c->frame_time_idx = 0;
 		c->frame_time_count = 0;
@@ -1602,29 +1617,29 @@ setfullscreen(Client *c, int fullscreen)
 		c->last_buffer = NULL;
 		c->video_detect_retries = 0;
 		c->video_detect_phase = 0;
-		/*
-		 * Enable dynamic game VRR if this is a game.
-		 * Game VRR will automatically adjust the display refresh rate
-		 * to match the game's actual framerate for judder-free gaming.
-		 */
-		if (is_game_content(c) || client_wants_tearing(c)) {
-			enable_game_vrr(c->mon);
-		} else {
-			/* Try to match video refresh rate if content is video */
-			set_video_refresh_rate(c->mon, c);
+		if (!_is_retro) {
+			if (is_game_content(c) || client_wants_tearing(c)) {
+				enable_game_vrr(c->mon);
+			} else {
+				set_video_refresh_rate(c->mon, c);
+			}
 		}
 		/* Steam Big Picture / RetroArch: drop to 1080p best-refresh
 		 * if the output cannot do 4K@60+. */
 		if (client_wants_console_mode(c))
 			apply_console_mode(c->mon, c);
-		/* Always run silent video detection - catches cutscenes in games */
-		schedule_video_check(200);
+		if (!_is_retro)
+			schedule_video_check(200);
 	} else {
 		/* restore previous size only for floating windows since their
 		 * positions are set by the user. Tiled windows will be positioned
 		 * by the layout system in arrange(). */
 		if (c->isfloating)
 			client_set_target_geom(c, c->prev);
+		if (c->mon && c->mon->wlr_output && c->mon->retro_scanout_lock) {
+			wlr_output_lock_attach_render(c->mon->wlr_output, false);
+			c->mon->retro_scanout_lock = 0;
+		}
 		set_adaptive_sync(c->mon, 0);
 		/* Disable game VRR when exiting fullscreen */
 		disable_game_vrr(c->mon);
