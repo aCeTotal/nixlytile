@@ -2247,6 +2247,7 @@ void invalidate_video_pacing(Monitor *m);
 int enable_vrr_video_mode(Monitor *m, float video_hz);
 void disable_vrr_video_mode(Monitor *m);
 int set_custom_video_mode(Monitor *m, float exact_hz);
+int apply_best_video_mode(Monitor *m, float video_hz);
 
 typedef struct {
 	int method;

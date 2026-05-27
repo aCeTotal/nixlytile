@@ -368,6 +368,50 @@ handle_request_line(NiriIpcClient *cl, char *line)
 		return;
 	}
 
+	/* Action::VideoPlaying / Action::VideoStopped — nixlymedia tells us
+	 * what output its fullscreen video is on and what container-fps the
+	 * stream has. We delegate to apply_best_video_mode (which picks VRR
+	 * if capable, else exact mode, else integer multiple). On stop we
+	 * call restore_max_refresh_rate. Surface-scoped: payload carries the
+	 * wl_output name so we never guess a monitor. */
+	if (strstr(line, "\"VideoPlaying\"") || strstr(line, "\"VideoStopped\"")) {
+		int is_stop = strstr(line, "\"VideoStopped\"") != NULL;
+		const char *p = strstr(line, "\"output\":");
+		if (!p) { send_err(cl, "missing output"); return; }
+		p = strchr(p + 9, '"');
+		if (!p) { send_err(cl, "bad output"); return; }
+		const char *s = p + 1;
+		const char *e = strchr(s, '"');
+		if (!e || e == s) { send_err(cl, "bad output"); return; }
+		char name[64];
+		size_t nlen = (size_t)(e - s);
+		if (nlen >= sizeof name) nlen = sizeof name - 1;
+		memcpy(name, s, nlen);
+		name[nlen] = 0;
+
+		Monitor *m = NULL, *it;
+		wl_list_for_each(it, &mons, link) {
+			if (it->wlr_output && it->wlr_output->name &&
+			    strcmp(it->wlr_output->name, name) == 0) {
+				m = it;
+				break;
+			}
+		}
+		if (!m) { send_err(cl, "output not found"); return; }
+
+		if (is_stop) {
+			restore_max_refresh_rate(m);
+		} else {
+			const char *fp = strstr(line, "\"fps\":");
+			if (!fp) { send_err(cl, "missing fps"); return; }
+			float fps = strtof(fp + 6, NULL);
+			if (fps <= 0.0f) { send_err(cl, "bad fps"); return; }
+			apply_best_video_mode(m, fps);
+		}
+		send_handled(cl);
+		return;
+	}
+
 	/* Action::FocusWorkspace — accept by Id or Index. */
 	if (strstr(line, "\"FocusWorkspace\"")) {
 		const char *p;
