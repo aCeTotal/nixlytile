@@ -1682,7 +1682,6 @@ monitor_apply_positions(Monitor *m)
 			wl_list_for_each(col, &ws->columns, link) {
 				wl_list_for_each(c, &col->clients, column_link) {
 					if (c->scene && c->scene->node.enabled
-							&& !c->isfullscreen
 							&& !c->isfloating)
 						wlr_scene_node_set_enabled(
 							&c->scene->node, 0);
@@ -1696,7 +1695,6 @@ monitor_apply_positions(Monitor *m)
 		wl_list_for_each(col, &ws->columns, link) {
 			wl_list_for_each(c, &col->clients, column_link) {
 				if (c->scene && !c->scene->node.enabled
-						&& !c->isfullscreen
 						&& !c->isfloating)
 					wlr_scene_node_set_enabled(
 						&c->scene->node, 1);

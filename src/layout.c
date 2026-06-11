@@ -22,8 +22,15 @@ arrange(Monitor *m)
 	 */
 	fsc = NULL;
 	wl_list_for_each(fsc, &clients, link) {
-		if (fsc->isfullscreen && VISIBLEON(fsc, m))
-			break;
+		if (!fsc->isfullscreen || !VISIBLEON(fsc, m))
+			continue;
+		/* Tiled fullscreen on an inactive workspace must not
+		 * hide the active workspace's tiles.  Floating
+		 * fullscreen (no column) isn't workspace-bound. */
+		if (fsc->column && fsc->column->ws &&
+				fsc->column->ws != m->active_ws)
+			continue;
+		break;
 	}
 	if (&fsc->link == &clients)
 		fsc = NULL;

@@ -481,8 +481,19 @@ focusclient(Client *c, int lift)
 		selmon = c->mon;
 		c->isurgent = 0;
 		monitor_wake(c->mon);
-		/* Tell workspace which column to camera-follow */
-		workspace_focus_client(c);
+		/* Tell workspace which column to camera-follow.  If the
+		 * focused column changes, re-arrange so the camera snaps
+		 * the (possibly partially-visible) new column fully into
+		 * view — handles sloppy-focus over a tile that's only
+		 * half on-screen next to a wide neighbour. */
+		{
+			Column *prev_focused = (c->column && c->column->ws)
+					? c->column->ws->focused_col : NULL;
+			workspace_focus_client(c);
+			if (c->column && c->column->ws &&
+					prev_focused != c->column->ws->focused_col)
+				arrange(c->mon);
+		}
 		/* Invalidate fullscreen classification cache */
 		c->mon->classify_cache_client = NULL;
 
