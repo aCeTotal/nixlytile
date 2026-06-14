@@ -87,6 +87,14 @@ window-rule {
     floating false
     monitor  -1
 }
+// Milsync test clients: tiled (not floating/maximized) so the two windows
+// share the master/stack layout side by side. Both use app-id "milsync".
+window-rule {
+    app-id   "milsync"
+    tags     0x0
+    floating false
+    monitor  -1
+}
 
 // Wallpaper path.  Used by the default autostart's swaybg invocation.
 wallpaper "~/.nixlyos/wallpapers/beach.jpg"

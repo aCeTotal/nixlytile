@@ -149,10 +149,54 @@ get_fullscreen_client(void)
 {
 	Client *c;
 	wl_list_for_each(c, &clients, link) {
-		if (c->isfullscreen && client_surface(c)->mapped && VISIBLEON(c, c->mon))
+		if (c->isfullscreen && client_surface(c)->mapped && VISIBLEON(c, c->mon)
+				&& (!c->fs_ws || c->fs_ws == c->mon->active_ws))
 			return c;
 	}
 	return NULL;
+}
+
+/* The fullscreen client currently visible on monitor m: mapped, on m, and
+ * — if bound to a workspace — on m's active workspace.  NULL if none. */
+Client *
+fullscreen_visible_on(Monitor *m)
+{
+	Client *c;
+	if (!m)
+		return NULL;
+	wl_list_for_each(c, &clients, link) {
+		if (!c->isfullscreen || c->mon != m)
+			continue;
+		if (!client_surface(c) || !client_surface(c)->mapped)
+			continue;
+		if (c->fs_ws && c->fs_ws != m->active_ws)
+			continue;
+		return c;
+	}
+	return NULL;
+}
+
+/* True if c is a descendant of fsc, or a same-app helper window (launcher,
+ * splash, dialog) that should stay usable while fsc is fullscreen. */
+int
+client_is_fs_companion(Client *c, Client *fsc)
+{
+	Client *p;
+	int depth = 0;
+
+	if (!c || !fsc || c == fsc)
+		return 0;
+	for (p = client_get_parent(c); p && depth < 10;
+			p = client_get_parent(p), depth++)
+		if (p == fsc)
+			return 1;
+	if (c->isfloating) {
+		const char *fa = client_get_appid(fsc);
+		const char *ca = client_get_appid(c);
+		if (fa && ca && strcmp(fa, ca) == 0)
+			return 1;
+	}
+	return 0;
 }
 
 int

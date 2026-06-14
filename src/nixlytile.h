@@ -1003,6 +1003,7 @@ typedef struct {
 	/* ── Niri-style placement (phase 2) ───────────────────────────── */
 	Column *column;               /* owning column; NULL = floating/unmapped */
 	struct wl_list column_link;   /* link in Column.clients (top→bottom) */
+	Workspace *fs_ws;             /* workspace fullscreened on; NULL = not fs / unbound (always visible) */
 
 	/* ── Per-client geometry animation (phase 4) ──────────────────
 	 * target_geom is what the layout wants; geom is what's currently
@@ -2096,6 +2097,8 @@ void track_client_frame(Client *c);
 float detect_video_framerate(Client *c);
 int any_client_fullscreen(void);
 Client *get_fullscreen_client(void);
+Client *fullscreen_visible_on(Monitor *m);
+int client_is_fs_companion(Client *c, Client *fsc);
 int is_process_running(const char *name);
 
 /* workspace.c (Niri-style) */

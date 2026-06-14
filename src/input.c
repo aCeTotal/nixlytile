@@ -536,6 +536,13 @@ handle_pointer_button_internal(uint32_t button, uint32_t state, uint32_t time_ms
 		 * AT a specific location — we must not yank the pointer
 		 * away to tile-center, that would lose the click target. */
 		xytonode(cursor->x, cursor->y, NULL, &c, NULL, NULL, NULL);
+		/* A visible fullscreen client owns input exclusively — a click
+		 * on a tile beside a letterboxed game keeps focus on the game. */
+		{
+			Client *fso = fullscreen_visible_on(selmon);
+			if (fso && c && c != fso && !client_is_fs_companion(c, fso))
+				c = fso;
+		}
 		if (c && (!client_is_unmanaged(c) || client_wants_focus(c)))
 			focusclient(c, 0);
 
@@ -587,6 +594,13 @@ buttonpress(struct wl_listener *listener, void *data)
 		 * AT a specific location — we must not yank the pointer
 		 * away to tile-center, that would lose the click target. */
 		xytonode(cursor->x, cursor->y, NULL, &c, NULL, NULL, NULL);
+		/* A visible fullscreen client owns input exclusively — a click
+		 * on a tile beside a letterboxed game keeps focus on the game. */
+		{
+			Client *fso = fullscreen_visible_on(selmon);
+			if (fso && c && c != fso && !client_is_fs_companion(c, fso))
+				c = fso;
+		}
 		if (c && (!client_is_unmanaged(c) || client_wants_focus(c)))
 			focusclient(c, 0);
 
@@ -1940,15 +1954,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		 * fullscreen confinement below would yank it back anyway). */
 		int snapped = 0;
 		if (!active_constraint && cursor_mode == CurNormal) {
-			int has_fs = 0;
-			Client *fsc;
-			wl_list_for_each(fsc, &clients, link) {
-				if (fsc->isfullscreen && VISIBLEON(fsc, selmon)) {
-					has_fs = 1;
-					break;
-				}
-			}
-			if (!has_fs)
+			if (!fullscreen_visible_on(selmon))
 				snapped = cursor_snap_across_dead_zone(dx, dy);
 		}
 
@@ -1965,12 +1971,8 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		 * bypasses this because they use wlr_cursor_warp() directly and
 		 * change selmon before subsequent motionnotify calls. */
 		{
-			Client *fsc = NULL;
-			wl_list_for_each(fsc, &clients, link) {
-				if (fsc->isfullscreen && VISIBLEON(fsc, selmon))
-					break;
-			}
-			if (&fsc->link != &clients && fsc) {
+			Client *fsc = fullscreen_visible_on(selmon);
+			if (fsc) {
 				struct wlr_box *mb = &selmon->m;
 				double cx = cursor->x, cy = cursor->y;
 				int clamped = 0;
@@ -2471,8 +2473,17 @@ pointerfocus(Client *c, struct wlr_surface *surface, double sx, double sy,
 		}
 	}
 
+	/* Exclusive focus for a visible fullscreen client: while a fullscreen
+	 * window owns the active workspace, sloppy-focus must not hand the
+	 * keyboard to anything else (only the game, its dialogs/popups, or its
+	 * same-app helpers). */
+	Client *fs_owner = sloppyfocus ? fullscreen_visible_on(selmon) : NULL;
+	int fs_blocks = fs_owner && c && c != fs_owner
+			&& !client_is_fs_companion(c, fs_owner);
+
 	if (!in_pointerfocus && surface != seat->pointer_state.focused_surface &&
-			sloppyfocus && c && !client_is_unmanaged(c) && !anim_in_progress) {
+			sloppyfocus && c && !client_is_unmanaged(c) && !anim_in_progress
+			&& !fs_blocks) {
 		in_pointerfocus = 1;
 		focusclient(c, 0);
 		in_pointerfocus = 0;

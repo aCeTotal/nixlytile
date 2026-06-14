@@ -24,11 +24,10 @@ arrange(Monitor *m)
 	wl_list_for_each(fsc, &clients, link) {
 		if (!fsc->isfullscreen || !VISIBLEON(fsc, m))
 			continue;
-		/* Tiled fullscreen on an inactive workspace must not
-		 * hide the active workspace's tiles.  Floating
-		 * fullscreen (no column) isn't workspace-bound. */
-		if (fsc->column && fsc->column->ws &&
-				fsc->column->ws != m->active_ws)
+		/* Fullscreen is bound to the workspace it was entered on;
+		 * skip it while another workspace is active so it doesn't
+		 * hide that workspace's tiles or grab scanout/focus. */
+		if (fsc->fs_ws && fsc->fs_ws != m->active_ws)
 			continue;
 		break;
 	}
@@ -47,6 +46,16 @@ arrange(Monitor *m)
 		if (c->mon == m) {
 			int vis = VISIBLEON(c, m);
 			/*
+			 * Fullscreen windows are bound to the workspace they
+			 * were fullscreened on.  Hide when that workspace isn't
+			 * active so switching away from a fullscreen game
+			 * reveals the workspace underneath (tags don't change
+			 * on a Niri-style ws switch, so VISIBLEON alone keeps
+			 * the game node enabled).
+			 */
+			if (c->isfullscreen && c->fs_ws && c->fs_ws != m->active_ws)
+				vis = 0;
+			/*
 			 * When a fullscreen client covers the entire monitor,
 			 * disable all OTHER clients on this monitor.  This is
 			 * needed for direct scanout — wlroots bypasses GPU
@@ -58,26 +67,10 @@ arrange(Monitor *m)
 			 * disabled here, or every other monitor goes black.
 			 */
 			if (fsc && c != fsc && covers_full_screen) {
-				/* Keep children/descendants of the fullscreen client visible
-				 * so dialogs, settings windows, and popups appear on top */
-				Client *p = client_get_parent(c);
-				int is_child = 0;
-				int depth = 0;
-				while (p && depth < 10) {
-					if (p == fsc) { is_child = 1; break; }
-					p = client_get_parent(p);
-					depth++;
-				}
-				/* Keep same-app floating windows visible — game
-				 * splashes and launchers that appear while the
-				 * game is fullscreen should stay on screen. */
-				if (!is_child && c->isfloating) {
-					const char *fa = client_get_appid(fsc);
-					const char *ca = client_get_appid(c);
-					if (fa && ca && strcmp(fa, ca) == 0)
-						is_child = 1;
-				}
-				if (!is_child)
+				/* Keep descendants (dialogs, popups) and same-app
+				 * helpers (game splashes, launchers) visible on top;
+				 * hide everything else for direct scanout. */
+				if (!client_is_fs_companion(c, fsc))
 					vis = 0;
 			}
 			wlr_scene_node_set_enabled(&c->scene->node, vis);

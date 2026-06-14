@@ -128,9 +128,17 @@ void
 workspace_destroy(Workspace *ws)
 {
 	Column *col, *coltmp;
+	Client *c;
 
 	if (!ws)
 		return;
+
+	/* A fullscreen client detached from its column still references this
+	 * workspace via fs_ws — clear it so the dangling pointer can't be
+	 * compared after free (it reverts to always-visible/unbound). */
+	wl_list_for_each(c, &clients, link)
+		if (c->fs_ws == ws)
+			c->fs_ws = NULL;
 
 	wl_list_for_each_safe(col, coltmp, &ws->columns, link)
 		column_destroy(col);
@@ -1195,6 +1203,16 @@ focus_first_in_workspace(Workspace *ws)
 
 	if (!ws)
 		return;
+
+	/* A fullscreen client bound to this workspace owns focus
+	 * exclusively — don't hand it to a tile behind it. */
+	if (ws->mon) {
+		Client *fsc = fullscreen_visible_on(ws->mon);
+		if (fsc && fsc->fs_ws == ws) {
+			focusclient(fsc, 0);
+			return;
+		}
+	}
 
 	col = ws->focused_col;
 	if (!col || wl_list_empty(&col->clients)) {

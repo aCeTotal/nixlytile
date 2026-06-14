@@ -1546,6 +1546,12 @@ setfullscreen(Client *c, int fullscreen)
 
 	c->isfullscreen = fullscreen;
 
+	/* Bind the fullscreen window to the workspace it was fullscreened on.
+	 * Visibility, cursor confinement and exclusive focus key off this so
+	 * switching to another workspace hides the game instead of leaving it
+	 * stuck on screen (tags don't change on a Niri-style ws switch). */
+	c->fs_ws = (fullscreen && c->mon) ? c->mon->active_ws : NULL;
+
 	/* Detach from column when entering fullscreen so the row reflows.
 	 * Reattach when leaving (if still tile-able).  Do this early so the
 	 * arrange() at the bottom sees the right column state. */
