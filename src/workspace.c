@@ -439,6 +439,27 @@ workspace_focus_client(Client *c)
  *   and writes them to client geometry / scene positions.  Called
  *   every frame from the rendermon path.
  */
+/* A workspace is "occupied" if it has tiled columns OR hosts a
+ * fullscreen client.  Fullscreen clients are detached from columns
+ * (n_columns stays 0) and bound to the workspace only via fs_ws, so the
+ * raw n_columns check would treat a fullscreen-only workspace as empty —
+ * making it unreachable by navigation and a target for compaction.  Every
+ * fullscreen client lives alone on its own dedicated workspace, so this
+ * is the check that keeps those workspaces live. */
+int
+workspace_has_clients(Workspace *ws)
+{
+	Client *c;
+	if (!ws)
+		return 0;
+	if (ws->n_columns > 0)
+		return 1;
+	wl_list_for_each(c, &clients, link)
+		if (c->isfullscreen && c->fs_ws == ws)
+			return 1;
+	return 0;
+}
+
 /* Highest workspace index that currently holds at least one tile.
  * Used to cap forward navigation: the user can move into AT MOST one
  * trailing empty workspace, never two consecutive empties. */
@@ -450,7 +471,7 @@ max_nonempty_ws_idx(Monitor *m)
 	if (!m)
 		return -1;
 	wl_list_for_each(ws, &m->workspaces, link) {
-		if (ws->n_columns > 0 && ws->idx > max_idx)
+		if (workspace_has_clients(ws) && ws->idx > max_idx)
 			max_idx = ws->idx;
 	}
 	return max_idx;
@@ -480,11 +501,11 @@ monitor_compact_workspaces(Monitor *m)
 		wl_list_for_each(ws, &m->workspaces, link) {
 			int has_filled_after = 0;
 
-			if (ws->n_columns > 0)
+			if (workspace_has_clients(ws))
 				continue;
 			wl_list_for_each(other, &m->workspaces, link) {
 				if (other != ws && other->idx > ws->idx
-						&& other->n_columns > 0) {
+						&& workspace_has_clients(other)) {
 					has_filled_after = 1;
 					break;
 				}
@@ -540,7 +561,7 @@ monitor_compact_workspaces(Monitor *m)
 		}
 		if (!last || !prev)
 			break;
-		if (last->n_columns != 0 || prev->n_columns != 0)
+		if (workspace_has_clients(last) || workspace_has_clients(prev))
 			break;
 		if (m->active_ws == last)
 			m->active_ws = prev;
@@ -1205,11 +1226,14 @@ focus_first_in_workspace(Workspace *ws)
 		return;
 
 	/* A fullscreen client bound to this workspace owns focus
-	 * exclusively — don't hand it to a tile behind it. */
+	 * exclusively — don't hand it to a tile behind it.  Lift so the
+	 * cursor warps onto it: selecting this tag gives the fullscreen
+	 * client mouse + keyboard focus (gamepads feed it via evdev). */
 	if (ws->mon) {
 		Client *fsc = fullscreen_visible_on(ws->mon);
 		if (fsc && fsc->fs_ws == ws) {
-			focusclient(fsc, 0);
+			exclusive_focus = NULL;
+			focusclient(fsc, 1);
 			return;
 		}
 	}
@@ -1615,18 +1639,21 @@ workspace_focus_dir(Monitor *m, int dir)
 
 	cur = m->active_ws;
 	if (dir > 0) {
-		/* Forward: only allow advance if the current ws has tiles
-		 * OR we're moving into an existing ws.  This prevents
-		 * creating a chain of empty workspaces. */
+		/* Forward: only allow advance if the current ws is occupied
+		 * (tiles or a fullscreen client) OR we're moving into an
+		 * existing ws.  This prevents creating a chain of empty
+		 * workspaces while still letting the user leave a
+		 * fullscreen-only workspace. */
 		if (cur->link.next != &m->workspaces) {
 			target = wl_container_of(cur->link.next, target, link);
 			/* Even when target exists, block jumping into an
 			 * empty target if current is also empty (no two
 			 * consecutive empties allowed). */
-			if (target->n_columns == 0 && cur->n_columns == 0)
+			if (!workspace_has_clients(target)
+					&& !workspace_has_clients(cur))
 				return;
 		} else {
-			if (cur->n_columns == 0)
+			if (!workspace_has_clients(cur))
 				return;  /* current empty → don't make another */
 			target = workspace_create(m);
 		}

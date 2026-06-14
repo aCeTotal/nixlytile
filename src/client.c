@@ -1531,6 +1531,55 @@ setfloating(Client *c, int floating)
 	printstatus();
 }
 
+/* True if workspace ws holds any client other than `self`: a tiled
+ * column, or another fullscreen client bound via fs_ws.  `self` is a
+ * fullscreen client already detached from the column row, so n_columns
+ * counts only the others. */
+static int
+ws_has_other_clients(Workspace *ws, Client *self)
+{
+	Client *o;
+	if (!ws)
+		return 0;
+	if (ws->n_columns > 0)
+		return 1;
+	wl_list_for_each(o, &clients, link)
+		if (o != self && o->isfullscreen && o->fs_ws == ws)
+			return 1;
+	return 0;
+}
+
+/* Give a fullscreen client its OWN dedicated workspace.  If the
+ * workspace it's currently bound to also holds other clients, move it to
+ * a fresh workspace and switch the view there; otherwise just make sure
+ * its bound workspace is the active one.  Idempotent — safe to call on
+ * every setfullscreen(c, 1), including setmon's re-apply. */
+static void
+fullscreen_assign_ws(Client *c)
+{
+	Monitor *m = c->mon;
+	Workspace *home;
+
+	if (!m || !m->active_ws)
+		return;
+	home = c->fs_ws ? c->fs_ws : m->active_ws;
+	if (ws_has_other_clients(home, c)) {
+		Workspace *nw = workspace_create(m);
+		if (!nw) {
+			c->fs_ws = home;
+			return;
+		}
+		c->fs_ws = nw;
+		workspace_switch(m, nw);
+		/* Collapse the workspace c just vacated if it's now empty. */
+		monitor_compact_workspaces(m);
+	} else {
+		c->fs_ws = home;
+		if (m->active_ws != home)
+			workspace_switch(m, home);
+	}
+}
+
 void
 setfullscreen(Client *c, int fullscreen)
 {
@@ -1568,6 +1617,11 @@ setfullscreen(Client *c, int fullscreen)
 			client_surface(c) ? client_surface(c)->mapped : -1);
 		return;
 	}
+
+	/* Each fullscreen client lives alone on its own dedicated
+	 * workspace, so switching tags moves cleanly between them. */
+	if (fullscreen)
+		fullscreen_assign_ws(c);
 
 	c->bw = fullscreen ? 0 : borderpx;
 	client_set_fullscreen(c, fullscreen);

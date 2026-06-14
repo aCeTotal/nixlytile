@@ -2111,6 +2111,7 @@ void column_remove_client(Client *c);
 void monitor_init_workspaces(Monitor *m);
 void monitor_cleanup_workspaces(Monitor *m);
 void monitor_compact_workspaces(Monitor *m);
+int workspace_has_clients(Workspace *ws);
 void workspace_attach_client(Workspace *ws, Client *c);
 void workspace_detach_client(Client *c);
 void workspace_drop_tile(Workspace *ws, Client *c, double screen_x);
