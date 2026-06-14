@@ -87,11 +87,21 @@ window-rule {
     floating false
     monitor  -1
 }
-// Milsync test clients: tiled (not floating/maximized) so the two windows
-// share the master/stack layout side by side. Both use app-id "milsync".
+// Milsync test clients: both use app-id "milsync" but have distinct window
+// titles ("Milsync — klient-1 …" / "klient-2 …"). Pin each to its own tag so
+// `nix run .#dev` clients are reachable (tags 0x0 fell back to launch-origin
+// tagging, which process-compose-launched clients never match → invisible).
 window-rule {
     app-id   "milsync"
-    tags     0x0
+    title    "klient-1"
+    tags     0x2   // tag 2
+    floating false
+    monitor  -1
+}
+window-rule {
+    app-id   "milsync"
+    title    "klient-2"
+    tags     0x4   // tag 3
     floating false
     monitor  -1
 }
