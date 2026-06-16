@@ -1928,7 +1928,12 @@ unmapnotify(struct wl_listener *listener, void *data)
 	if (client_is_unmanaged(c)) {
 		if (c == exclusive_focus) {
 			exclusive_focus = NULL;
-			focusclient(focustop(selmon), 1);
+			/* lift=0: a closing override-redirect popup/menu (UE/Slate
+			 * dropdowns, X11 combo boxes) must NOT re-center the cursor
+			 * on the parent tile.  warpcursor() always yanks the pointer
+			 * to tile center, so lift=1 here made the cursor jump to
+			 * screen center every time a menu item was clicked. */
+			focusclient(focustop(selmon), 0);
 		}
 	} else {
 		Monitor *unmap_mon = c->mon;

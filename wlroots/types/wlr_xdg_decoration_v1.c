@@ -172,11 +172,15 @@ static void decoration_manager_handle_get_toplevel_decoration(
 	struct wlr_xdg_toplevel *toplevel =
 		wlr_xdg_toplevel_from_resource(toplevel_resource);
 
+	/* nixlytile leniency: the xdg-decoration spec requires the toplevel to be
+	 * unconfigured (no buffer) when the decoration is created. Some clients
+	 * (e.g. SDL3's Wayland backend) attach a buffer before requesting the
+	 * decoration, which strictly would be a fatal UNCONFIGURED_BUFFER protocol
+	 * error and kill the connection. We tolerate it instead of posting the
+	 * error: the decoration is created normally and a configure is sent below. */
 	if (wlr_surface_has_buffer(toplevel->base->surface)) {
-		wl_resource_post_error(manager_resource,
-			ZXDG_TOPLEVEL_DECORATION_V1_ERROR_UNCONFIGURED_BUFFER,
-			"xdg_toplevel_decoration must not have a buffer at creation");
-		return;
+		wlr_log(WLR_DEBUG, "xdg_toplevel_decoration created on a toplevel "
+			"that already has a buffer; tolerating (spec violation by client)");
 	}
 
 	struct wlr_xdg_toplevel_decoration_v1 *existing;

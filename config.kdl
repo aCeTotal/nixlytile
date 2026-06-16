@@ -87,21 +87,14 @@ window-rule {
     floating false
     monitor  -1
 }
-// Milsync test clients: both use app-id "milsync" but have distinct window
-// titles ("Milsync — klient-1 …" / "klient-2 …"). Pin each to its own tag so
-// `nix run .#dev` clients are reachable (tags 0x0 fell back to launch-origin
-// tagging, which process-compose-launched clients never match → invisible).
+// Milsync test clients: both use app-id "milsync". Pin both to tag 1 (the
+// monitor's default view, tagset=1 at startup) so the two `nix run .#dev`
+// clients tile side by side on the tag you're already looking at. (tags 0x0
+// fell back to launch-origin tagging, which process-compose-launched clients
+// never match → invisible; separate tags 0x2/0x4 hid them off the start view.)
 window-rule {
     app-id   "milsync"
-    title    "klient-1"
-    tags     0x2   // tag 2
-    floating false
-    monitor  -1
-}
-window-rule {
-    app-id   "milsync"
-    title    "klient-2"
-    tags     0x4   // tag 3
+    tags     0x1   // tag 1 (default view)
     floating false
     monitor  -1
 }
