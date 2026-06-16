@@ -272,18 +272,21 @@ static void surface_handle_client_commit(struct wl_listener *listener,
 		return;
 	}
 
-	if (surface->pending.acquire_timeline == NULL &&
+	/* SDL3 (3.2.10) Vulkan WSI bug: commits a buffer on a syncobj surface
+	 * without setting acquire/release timeline points. Per spec this is
+	 * NO_ACQUIRE_POINT / NO_RELEASE_POINT and the client must be killed.
+	 * Instead, tolerate it: drop the (incomplete) explicit-sync state for
+	 * this commit and fall back to implicit sync, exactly as if the client
+	 * had no syncobj surface. Other clients are unaffected. */
+	if ((surface->pending.acquire_timeline == NULL ||
+			surface->pending.release_timeline == NULL) &&
 			surface->surface->pending.buffer != NULL) {
-		wlr_surface_reject_pending(surface->surface, surface->resource,
-			WP_LINUX_DRM_SYNCOBJ_SURFACE_V1_ERROR_NO_ACQUIRE_POINT,
-			"Buffer attached but no acquire point set");
-		return;
-	}
-	if (surface->pending.release_timeline == NULL &&
-			surface->surface->pending.buffer != NULL) {
-		wlr_surface_reject_pending(surface->surface, surface->resource,
-			WP_LINUX_DRM_SYNCOBJ_SURFACE_V1_ERROR_NO_RELEASE_POINT,
-			"Buffer attached but no release point set");
+		wlr_drm_syncobj_timeline_unref(surface->pending.acquire_timeline);
+		wlr_drm_syncobj_timeline_unref(surface->pending.release_timeline);
+		surface->pending.acquire_timeline = NULL;
+		surface->pending.release_timeline = NULL;
+		surface->pending.acquire_point = 0;
+		surface->pending.release_point = 0;
 		return;
 	}
 
