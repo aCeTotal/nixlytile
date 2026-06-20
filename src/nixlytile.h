@@ -1653,6 +1653,7 @@ extern GpuInfo detected_gpus[];
 extern int detected_gpu_count;
 extern int discrete_gpu_idx;
 extern int integrated_gpu_idx;
+extern int nvidia_render_primary;
 extern int dgpu_render_fd;
 extern int g_explicit_sync_ok; /* 1 = DRM syncobj timeline manager active */
 extern struct wl_event_source *dgpu_power_watchdog;

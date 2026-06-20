@@ -3846,7 +3846,7 @@ init_monitor_color_settings(Monitor *m)
 		 * enable 10-bit manually if their setup supports it. */
 		if (!skip_10bit && discrete_gpu_idx >= 0 &&
 		    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA &&
-		    integrated_gpu_idx < 0) {
+		    (integrated_gpu_idx < 0 || nvidia_render_primary)) {
 			skip_10bit = 1;
 			wlr_log(WLR_INFO, "Monitor %s: skipping auto 10-bit on "
 				"Nvidia-primary GPU to avoid format issues",

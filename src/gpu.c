@@ -43,6 +43,14 @@ detect_gpus(void)
 	discrete_gpu_idx = -1;
 	integrated_gpu_idx = -1;
 
+	/* reverseSync opt-in: NIXLY_NVIDIA_PRIMARY=1 makes the dGPU render the
+	 * whole session (iGPU only scans out).  Read here so the Nvidia-primary
+	 * quirks below (GBM_BACKEND) fire even though an iGPU is present. */
+	{
+		const char *np = getenv("NIXLY_NVIDIA_PRIMARY");
+		nvidia_render_primary = (np && strcmp(np, "1") == 0);
+	}
+
 	dri_dir = opendir("/sys/class/drm");
 	if (!dri_dir) {
 		wlr_log(WLR_ERROR, "Failed to open /sys/class/drm for GPU detection");
@@ -305,8 +313,13 @@ detect_gpus(void)
 			 * non-dgpu clients to mis-allocate buffers on Nvidia →
 			 * cross-GPU DMA-BUF import failures (invisible windows).
 			 * For child processes that need the dGPU, set_dgpu_env()
-			 * already sets GBM_BACKEND=nvidia-drm per-process. */
-			if (integrated_gpu_idx < 0)
+			 * already sets GBM_BACKEND=nvidia-drm per-process.
+			 *
+			 * In reverseSync mode (nvidia_render_primary) the compositor
+			 * itself renders on Nvidia, so GBM_BACKEND=nvidia-drm IS the
+			 * correct global default — clients allocate on the same GPU
+			 * the compositor imports from. */
+			if (integrated_gpu_idx < 0 || nvidia_render_primary)
 				setenv("GBM_BACKEND", "nvidia-drm", 0);
 
 			/* Detect Nvidia driver version for explicit sync support.
@@ -558,6 +571,32 @@ filter_igpu_without_display(void)
 	/* Don't override explicit user setting */
 	if (getenv("WLR_DRM_DEVICES"))
 		return;
+
+	/* reverseSync: force the Nvidia dGPU first in WLR_DRM_DEVICES so wlroots
+	 * uses it as the primary renderer; remaining GPUs (the iGPU driving the
+	 * panel) stay as secondary output sinks.  wlroots renders the whole
+	 * session on Nvidia and copies the final framebuffer to the iGPU output —
+	 * no per-game cross-GPU buffer copy like the offload path. */
+	if (nvidia_render_primary &&
+	    discrete_gpu_idx >= 0 &&
+	    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA &&
+	    detected_gpus[discrete_gpu_idx].card_path[0]) {
+		char devices[512];
+		snprintf(devices, sizeof(devices), "%s",
+			detected_gpus[discrete_gpu_idx].card_path);
+		for (i = 0; i < detected_gpu_count; i++) {
+			if (i == discrete_gpu_idx || !detected_gpus[i].card_path[0])
+				continue;
+			strncat(devices, ":", sizeof(devices) - strlen(devices) - 1);
+			strncat(devices, detected_gpus[i].card_path,
+				sizeof(devices) - strlen(devices) - 1);
+		}
+		setenv("WLR_DRM_DEVICES", devices, 1);
+		wlr_log(WLR_INFO,
+			"reverseSync: Nvidia-primary render, WLR_DRM_DEVICES=%s",
+			devices);
+		return;
+	}
 
 	/* Count GPUs that have at least one connected display */
 	for (i = 0; i < detected_gpu_count; i++) {

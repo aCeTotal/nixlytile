@@ -141,6 +141,7 @@ GpuInfo detected_gpus[MAX_GPUS];
 int detected_gpu_count = 0;
 int discrete_gpu_idx = -1;   /* Index of preferred discrete GPU, -1 if none */
 int integrated_gpu_idx = -1; /* Index of integrated GPU, -1 if none */
+int nvidia_render_primary = 0; /* reverseSync: dGPU renders session, iGPU outputs */
 
 /* CPU cursor buffer for Nvidia HW cursor plane */
 struct CpuCursorBuffer *cpu_cursor_buf = NULL;
