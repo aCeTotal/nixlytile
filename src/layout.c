@@ -56,20 +56,27 @@ arrange(Monitor *m)
 			if (c->isfullscreen && c->fs_ws && c->fs_ws != m->active_ws)
 				vis = 0;
 			/*
-			 * When a fullscreen client covers the entire monitor,
-			 * disable all OTHER clients on this monitor.  This is
-			 * needed for direct scanout — wlroots bypasses GPU
-			 * composition only when the fullscreen surface is the
-			 * single visible buffer on the output.
+			 * A fullscreen client owns the active workspace
+			 * exclusively: disable every OTHER client on this
+			 * monitor so nothing of a neighbour tile can show and
+			 * nothing else is hit-testable by the pointer.  This
+			 * holds for BOTH Wayland and XWayland and does NOT
+			 * depend on the fullscreen surface geometrically
+			 * covering the whole output — a regular app fullscreened
+			 * to the usable area (m->w, waybar kept) still hides its
+			 * neighbours; fullscreen_bg (below) paints the rest
+			 * black.  When the surface DOES cover the output
+			 * (covers_full_screen), this also gives wlroots the
+			 * single-buffer scene it needs for direct scanout.
 			 *
 			 * We ONLY touch clients on THIS monitor — global layer
 			 * nodes are shared across all monitors and must not be
 			 * disabled here, or every other monitor goes black.
 			 */
-			if (fsc && c != fsc && covers_full_screen) {
+			if (fsc && c != fsc) {
 				/* Keep descendants (dialogs, popups) and same-app
 				 * helpers (game splashes, launchers) visible on top;
-				 * hide everything else for direct scanout. */
+				 * hide everything else. */
 				if (!client_is_fs_companion(c, fsc))
 					vis = 0;
 			}

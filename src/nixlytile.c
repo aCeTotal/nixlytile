@@ -2,6 +2,7 @@
 #include "nixlytile.h"
 #include "client.h"
 #include "config_loader.h"
+#include <execinfo.h>
 
 static int
 sigusr1_reload(int signo, void *data)
@@ -2128,6 +2129,146 @@ diag_timer_cb(void *data)
 	return 0;
 }
 
+/* ================================================================
+ *  Main-loop stall detector + backtrace watchdog (opt-in:
+ *  NIXLY_STALL_WATCH=1)
+ *
+ *  Two cooperating pieces:
+ *
+ *  1) A self-rescheduling 200ms timer on the compositor thread bumps a
+ *     heartbeat and logs the measured gap whenever it fires late — the
+ *     gap is the stall length, with a wall-clock timestamp.
+ *
+ *  2) A separate watchdog thread polls that heartbeat every 100ms.  When
+ *     the compositor thread has not bumped it for >THRESHOLD, the loop is
+ *     wedged in a synchronous call (a DRM modeset on HDMI, a /proc sweep,
+ *     a blocking ioctl/read, a runaway loop…).  The watchdog sends SIGPROF
+ *     to the stuck thread; the handler runs there and dumps a backtrace of
+ *     the exact stuck call — naming the freeze in a single reproduction.
+ *
+ *  Zero cost unless the env var is set. */
+static struct wl_event_source *stall_watch_timer;
+static uint64_t stall_watch_last_ns;
+static volatile uint64_t stall_watch_heartbeat_ns;  /* bumped by main thread */
+static pid_t stall_watch_main_tid;
+static pthread_t stall_watch_thread;
+static volatile int stall_watch_run;
+static volatile int stall_watch_signaled;           /* one SIGPROF per stall */
+#define STALL_WATCH_INTERVAL_MS 200
+#define STALL_WATCH_THRESHOLD_NS (700ULL * 1000000ULL) /* 0.7s */
+
+/* SIGPROF handler — runs ON the stuck compositor thread, so backtrace()
+ * captures exactly where it is blocked.  backtrace_symbols_fd is
+ * async-signal-safe; backtrace() is warmed up at start to avoid its
+ * first-call dlopen here. */
+static void
+stall_watch_sigprof(int sig)
+{
+	(void)sig;
+	void *frames[48];
+	int n = backtrace(frames, 48);
+	int fd = error_log_fd >= 0 ? error_log_fd : STDERR_FILENO;
+	static const char hdr[] =
+		"\n=== STALL_WATCH: compositor thread stuck — backtrace ===\n";
+	if (write(fd, hdr, sizeof(hdr) - 1) < 0) { /* best effort */ }
+	backtrace_symbols_fd(frames, n, fd);
+}
+
+static void *
+stall_watch_watchdog(void *data)
+{
+	(void)data;
+	pthread_setname_np(pthread_self(), "nixly-stallwd");
+	while (stall_watch_run) {
+		struct timespec ts = { 0, 100 * 1000000 }; /* 100ms */
+		nanosleep(&ts, NULL);
+		uint64_t hb = stall_watch_heartbeat_ns;
+		if (!hb)
+			continue;
+		if (get_time_ns() - hb > STALL_WATCH_THRESHOLD_NS) {
+			if (!stall_watch_signaled) {
+				stall_watch_signaled = 1;
+				/* Poke the stuck thread for its stack. */
+				syscall(SYS_tgkill, getpid(),
+					stall_watch_main_tid, SIGPROF);
+			}
+		} else {
+			stall_watch_signaled = 0;
+		}
+	}
+	return NULL;
+}
+
+static int
+stall_watch_tick(void *data)
+{
+	(void)data;
+	uint64_t now = get_time_ns();
+	stall_watch_heartbeat_ns = now;
+	if (stall_watch_last_ns) {
+		uint64_t gap = now - stall_watch_last_ns;
+		if (gap > STALL_WATCH_THRESHOLD_NS) {
+			time_t t = time(NULL);
+			struct tm tm;
+			localtime_r(&t, &tm);
+			wlr_log(WLR_ERROR,
+				"STALL_WATCH: compositor thread blocked %llu ms "
+				"(ended %02d:%02d:%02d) — backtrace in errors.log, and "
+				"see the log lines just above for what ran",
+				(unsigned long long)(gap / 1000000ULL),
+				tm.tm_hour, tm.tm_min, tm.tm_sec);
+		}
+	}
+	stall_watch_last_ns = now;
+	if (stall_watch_timer)
+		wl_event_source_timer_update(stall_watch_timer,
+			STALL_WATCH_INTERVAL_MS);
+	return 0;
+}
+
+static void
+stall_watch_start(void)
+{
+	if (!getenv("NIXLY_STALL_WATCH"))
+		return;
+
+	/* Warm up backtrace() so its first-call dlopen doesn't happen inside
+	 * the async-signal handler. */
+	{
+		void *f[4];
+		backtrace(f, 4);
+	}
+
+	/* SA_RESTART so interrupting a blocked syscall (e.g. a DRM ioctl) with
+	 * SIGPROF restarts it instead of failing with EINTR. */
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = stall_watch_sigprof;
+	sa.sa_flags = SA_RESTART;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGPROF, &sa, NULL);
+
+	stall_watch_main_tid = (pid_t)syscall(SYS_gettid);
+	stall_watch_heartbeat_ns = get_time_ns();
+
+	stall_watch_timer = wl_event_loop_add_timer(event_loop,
+		stall_watch_tick, NULL);
+	if (stall_watch_timer) {
+		stall_watch_last_ns = get_time_ns();
+		wl_event_source_timer_update(stall_watch_timer,
+			STALL_WATCH_INTERVAL_MS);
+	}
+
+	stall_watch_run = 1;
+	if (pthread_create(&stall_watch_thread, NULL,
+			stall_watch_watchdog, NULL) != 0)
+		stall_watch_run = 0;
+
+	wlr_log(WLR_INFO,
+		"STALL_WATCH enabled: >%llums stall → log + backtrace (errors.log)",
+		(unsigned long long)(STALL_WATCH_THRESHOLD_NS / 1000000ULL));
+}
+
 static void
 init_logging(void)
 {
@@ -2304,6 +2445,7 @@ setup(void)
 	event_loop = wl_display_get_event_loop(dpy);
 	wl_list_init(&mons);
 	diag_timer = wl_event_loop_add_timer(event_loop, diag_timer_cb, NULL);
+	stall_watch_start();
 	gm_bg_init();
 
 	/* SIGUSR1 → reload ~/.config/nixlytile/config.kdl.  Handled on the
