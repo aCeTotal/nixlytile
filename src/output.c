@@ -656,6 +656,9 @@ createmon(struct wl_listener *listener, void *data)
 	for (i = 0; i < LENGTH(m->layers); i++)
 	wl_list_init(&m->layers[i]);
 
+	m->showbar = 1;
+	initstatusbar(m);
+
 	monitor_init_workspaces(m);
 
 	wlr_output_state_init(&state);

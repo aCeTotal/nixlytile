@@ -61,6 +61,10 @@
             libxcb-wm
             xwayland
             seatd
+            cairo
+            librsvg
+            gdk-pixbuf
+            glib
           ];
 
           buildScript = pkgs.writeShellApplication {
@@ -117,6 +121,10 @@
               pkgs.xwayland
               pkgs.systemd
               pkgs.libglvnd
+              pkgs.cairo
+              pkgs.librsvg
+              pkgs.gdk-pixbuf
+              pkgs.glib
             ];
 
             makeFlags = [ "PKG_CONFIG=${pkgs.pkg-config}/bin/pkg-config" ];

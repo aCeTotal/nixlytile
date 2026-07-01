@@ -5,7 +5,6 @@
 #ifndef NIXLYTILE_H
 #define NIXLYTILE_H
 
-#define _GNU_SOURCE
 #define _DEFAULT_SOURCE
 
 #include <arpa/inet.h>
@@ -19,20 +18,19 @@
 #include <limits.h>
 #include <getopt.h>
 #include <libinput.h>
+#include <cairo/cairo.h>
+#include <librsvg/rsvg.h>
 #include <linux/input-event-codes.h>
 #include <linux/input.h>
 #include <math.h>
+#include <glib.h>
 #include <drm_fourcc.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <fcft/fcft.h>
 #include <pixman.h>
-#include <cairo/cairo.h>
-#include <librsvg/rsvg.h>
-#include <glib.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <signal.h>
-#include <sys/prctl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,11 +41,6 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/inotify.h>
-#include <sys/resource.h>
-#include <sys/syscall.h>
-#include <sys/uio.h>
-#include <sys/utsname.h>
-#include <sched.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <time.h>
@@ -81,7 +74,6 @@
 #include <wlr/types/wlr_linux_dmabuf_v1.h>
 #include <wlr/types/wlr_linux_drm_syncobj_v1.h>
 #include <wlr/types/wlr_output.h>
-#include <wlr/types/wlr_output_layer.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_output_management_v1.h>
 #include <wlr/types/wlr_output_power_management_v1.h>
@@ -103,28 +95,11 @@
 #include <wlr/types/wlr_viewporter.h>
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
 #include <wlr/types/wlr_virtual_pointer_v1.h>
-#include <wlr/types/wlr_tablet_tool.h>
-#include <wlr/types/wlr_tablet_pad.h>
-#include <wlr/types/wlr_tablet_v2.h>
-#include <wlr/types/wlr_color_management_v1.h>
-#include <wlr/types/wlr_color_representation_v1.h>
-#include <wlr/types/wlr_ext_data_control_v1.h>
-#include <wlr/types/wlr_ext_foreign_toplevel_list_v1.h>
-#include <wlr/types/wlr_ext_image_capture_source_v1.h>
-#include <wlr/types/wlr_ext_image_copy_capture_v1.h>
-#include <wlr/types/wlr_fixes.h>
-#include <wlr/types/wlr_keyboard_shortcuts_inhibit_v1.h>
-#include <wlr/types/wlr_pointer_gestures_v1.h>
-#include <wlr/types/wlr_security_context_v1.h>
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/types/wlr_xdg_activation_v1.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
-#include <wlr/types/wlr_xdg_dialog_v1.h>
-#include <wlr/types/wlr_xdg_foreign_registry.h>
-#include <wlr/types/wlr_xdg_foreign_v2.h>
 #include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
-#include <wlr/types/wlr_xdg_system_bell_v1.h>
 #include <wlr/util/log.h>
 #include <wlr/util/region.h>
 #include <xkbcommon/xkbcommon.h>
@@ -144,6 +119,7 @@
 #endif
 
 #include "util.h"
+#include "videoplayer.h"
 
 /* ── macros ────────────────────────────────────────────────────────── */
 #ifndef MAX
@@ -153,31 +129,34 @@
 #define MIN(A, B)               ((A) < (B) ? (A) : (B))
 #endif
 #define UNUSED __attribute__((unused))
-#define CLEANMASK(mask)         (mask & ~(WLR_MODIFIER_CAPS | WLR_MODIFIER_MOD2))
+#define CLEANMASK(mask)         (mask & ~WLR_MODIFIER_CAPS)
 #define VISIBLEON(C, M)         ((M) && (C)->mon == (M) && (((C)->tags & (M)->tagset[(M)->seltags]) || (C)->issticky))
 #define LENGTH(X)               (sizeof X / sizeof X[0])
 #define END(A)                  ((A) + LENGTH(A))
-#ifndef TAGCOUNT
-#define TAGCOUNT (9)
-#endif
 #define TAGMASK                 ((1u << TAGCOUNT) - 1)
 #define MAX_TAGS                32
 #define STATUS_FAST_MS          3000
 #define LISTEN(E, L, H)         wl_signal_add((E), ((L)->notify = (H), (L)))
 #define LISTEN_STATIC(E, H)     do { struct wl_listener *_l = ecalloc(1, sizeof(*_l)); _l->notify = (H); wl_signal_add((E), _l); } while (0)
-#define MODAL_MAX_RESULTS 200
+#define MODAL_MAX_RESULTS 512
 #define MODAL_RESULT_LEN 256
+#define MAX_TRACKS 32
+#define RESUME_CACHE_FILE "/tmp/nixly-resume-cache"
+#define HTPC_MENU_MAX_ITEMS 12
 #define MAX_GPUS 8
+#define PC_GAMING_TILE_HEIGHT 180
+#define PC_GAMING_TILE_GAP 15
+#define PC_GAMING_PADDING 40
+#define PC_GAMING_CACHE_FILE "/.cache/nixlytile/games.cache"
 #define GAMEPAD_CURSOR_INTERVAL_MS 16
 #define GAMEPAD_DEADZONE 4000
 #define GAMEPAD_CURSOR_SPEED 15.0
 #define GAMEPAD_CURSOR_ACCEL 2.5
 #define GAMEPAD_INACTIVITY_TIMEOUT_MS 10000
-#define GAMEPAD_BT_INACTIVITY_TIMEOUT_MS 240000
-#define GAMEPAD_INACTIVITY_CHECK_MS 5000
+#define GAMEPAD_INACTIVITY_CHECK_MS 1000
 #define GAMEPAD_PENDING_MAX 8
-#define BT_SCAN_INTERVAL_MS 300000
-#define BT_SCAN_DURATION_MS 5000
+#define BT_SCAN_INTERVAL_MS 30000
+#define BT_SCAN_DURATION_MS 10000
 #define MAX_CPU_CORES 256
 #define NIXPKGS_MAX_ENTRIES 32768
 #define OSK_ROWS 5
@@ -185,39 +164,50 @@
 #define OSK_DPAD_INITIAL_DELAY 400
 #define OSK_DPAD_REPEAT_RATE 50
 
+/* Streaming service URLs */
+#define NRK_URL "https://nrk.no/direkte/nrk1"
+#define NETFLIX_URL "https://www.netflix.com/browse"
+#define VIAPLAY_URL "https://viaplay.no"
+#define TV2PLAY_URL "https://play.tv2.no"
+#define F1TV_URL "https://f1tv.formula1.com/detail/1000005614/f1-live"
 #ifndef WLR_SILENCE
 #define WLR_SILENCE (WLR_ERROR - 1)
 #endif
 
-/* ── runtime config constants ─────────────────────────────────────── */
-#ifndef MAX_KEYS
-#define MAX_KEYS 256
-#endif
-#ifndef MAX_SPAWN_CMD
-#define MAX_SPAWN_CMD 512
-#endif
-
-extern const char *osk_layout_lower[OSK_ROWS][OSK_COLS];
-extern const char *osk_layout_upper[OSK_ROWS][OSK_COLS];
-
-#define MAX_MONITORS 16
-
-/* ── stats panel constants ────────────────────────────────────────── */
-#define STATS_PANEL_ANIM_DURATION 250
-
-/* ── game VRR constants ───────────────────────────────────────────── */
-#define GAME_VRR_MIN_INTERVAL_NS (500ULL * 1000000ULL)
-#define GAME_VRR_STABLE_FRAMES 30
-#define GAME_VRR_FPS_DEADBAND 3.0f
-#define GAME_VRR_MIN_FPS 20.0f
-#define GAME_VRR_MAX_FPS 165.0f
-
 /* ── enums ─────────────────────────────────────────────────────────── */
-enum { CurNormal, CurPressed, CurMove, CurResize, CurColResize };
+enum { CurNormal, CurPressed, CurMove, CurResize };
 enum { XDGShell, LayerShell, X11 };
 enum { LyrBg, LyrBottom, LyrTile, LyrFloat, LyrTop, LyrFS, LyrOverlay, LyrBlock, NUM_LAYERS };
 enum Direction { DIR_LEFT, DIR_RIGHT, DIR_UP, DIR_DOWN };
 
+typedef enum {
+	GAMING_SERVICE_STEAM = 0,
+	GAMING_SERVICE_HEROIC,
+	GAMING_SERVICE_LUTRIS,
+	GAMING_SERVICE_BOTTLES,
+	GAMING_SERVICE_COUNT
+} GamingServiceType;
+
+typedef enum {
+	RETRO_NES = 0,
+	RETRO_SNES,
+	RETRO_N64,
+	RETRO_GAMECUBE,
+	RETRO_WII,
+	RETRO_SWITCH,
+	RETRO_CONSOLE_COUNT
+} RetroConsole;
+
+typedef enum {
+	MEDIA_VIEW_MOVIES = 0,
+	MEDIA_VIEW_TVSHOWS = 1
+} MediaViewType;
+
+typedef enum {
+	DETAIL_FOCUS_INFO = 0,
+	DETAIL_FOCUS_SEASONS,
+	DETAIL_FOCUS_EPISODES
+} DetailFocusArea;
 
 typedef enum {
 	MON_POS_MASTER = 0,
@@ -238,24 +228,27 @@ typedef enum {
 	GPU_VENDOR_NVIDIA
 } GpuVendor;
 
-/* Per-monitor gaming capability profile. Populated once during createmon
- * after the initial output commit, and used to select vendor-aware code
- * paths at runtime (overlay plane promotion, LFC, explicit sync hints). */
-typedef struct {
-	GpuVendor vendor;          /* GPU vendor backing this output */
-	int overlay_planes_supported; /* KMS exposes additional plane(s) we can use */
-	int explicit_sync_ready;   /* Global DRM syncobj timeline manager is active */
-	int has_hw_lfc;            /* Driver provides Low Framerate Compensation */
-	int prefers_vulkan;        /* Vendor gives best gaming perf on Vulkan renderer */
-} GamingCaps;
+typedef enum {
+	PLAYBACK_IDLE = 0,
+	PLAYBACK_BUFFERING,
+	PLAYBACK_PLAYING,
+	PLAYBACK_ACTIVE
+} PlaybackState;
+
+typedef enum {
+	OSD_MENU_NONE = 0,
+	OSD_MENU_SOUND,
+	OSD_MENU_SUBTITLES
+} OsdMenuType;
 
 /* ── forward declarations ──────────────────────────────────────────── */
 typedef struct LayoutNode LayoutNode;
 typedef struct Monitor Monitor;
-typedef struct Workspace Workspace;
-typedef struct Column Column;
 typedef struct StatusBar StatusBar;
 typedef struct StatusModule StatusModule;
+typedef struct GameEntry GameEntry;
+typedef struct MediaItem MediaItem;
+typedef struct MediaSeason MediaSeason;
 typedef struct GamepadDevice GamepadDevice;
 typedef struct TrayMenuEntry TrayMenuEntry;
 typedef struct TrayItem TrayItem;
@@ -316,37 +309,12 @@ typedef struct {
 	int nmaster;
 	int enabled;
 	int transform;
-	int grid_col, grid_row; /* 2D grid pos (-1 = use position enum) */
 } RuntimeMonitorConfig;
-
-extern RuntimeMonitorConfig runtime_monitors[MAX_MONITORS];
-extern int runtime_monitor_count;
-extern int monitor_master_set;
-
-typedef struct {
-	const char *name;
-	void (*func)(const Arg *);
-	int arg_type;
-} FuncEntry;
-
-extern const FuncEntry func_table[];
-MonitorPosition config_parse_monitor_position(const char *pos);
-xkb_keysym_t config_parse_keysym(const char *name);
-extern const struct wlr_buffer_impl pixman_buffer_impl;
 
 typedef struct {
 	struct wlr_pointer_constraint_v1 *constraint;
 	struct wl_listener destroy;
 } PointerConstraint;
-
-typedef struct {
-	struct wlr_tablet_pad *pad;
-	struct wlr_tablet_v2_tablet_pad *v2;
-	struct wl_listener button;
-	struct wl_listener ring;
-	struct wl_listener strip;
-	struct wl_listener destroy;
-} TabletPad;
 
 typedef struct {
 	struct wlr_scene_tree *scene;
@@ -370,9 +338,7 @@ struct StatusFont {
 	int height;
 };
 
-/* status bar / tray / network / popup / nixpkgs / launcher / monitor-popup
- * / gamepad types removed — those modules are gone. */
-#if 1
+/* ── status bar types ──────────────────────────────────────────────── */
 struct StatusModule {
 	struct wlr_scene_tree *tree;
 	struct wlr_scene_tree *bg;
@@ -451,8 +417,7 @@ typedef struct {
 	uint64_t last_render_ms;
 	uint64_t suppress_refresh_until_ms;
 	uint64_t hover_start_ms;
-	int charging;           /* on AC power (Charging/Full/Not charging) */
-	int actively_charging;  /* actually charging (not Full/Not charging) */
+	int charging;
 	double percent;
 	double voltage_v;
 	double power_w;
@@ -477,77 +442,7 @@ typedef struct {
 	uint64_t next_due_ms;
 } StatusRefreshTask;
 
-#define STATUS_TASKS_COUNT 9
-
-#define FAN_MAX_DEVICES   8
-#define FAN_MAX_PER_DEV   6
-#define FAN_MAX_TOTAL    (FAN_MAX_DEVICES * FAN_MAX_PER_DEV)
-
-typedef enum {
-	FAN_DEV_CPU,
-	FAN_DEV_CASE,
-	FAN_DEV_GPU_AMD,
-	FAN_DEV_GPU_NVIDIA,
-	FAN_DEV_GPU_INTEL,
-	FAN_DEV_MSI_EC,
-	FAN_DEV_UNKNOWN,
-} FanDevType;
-
 typedef struct {
-	char label[64];
-	char hwmon_path[128];
-	int fan_index;
-	int pwm_index;
-	int has_pwm;
-	int rpm;
-	int pwm;
-	int pwm_enable;
-	int temp_mc;
-	uint8_t ec_reg_rpm;
-	uint8_t ec_reg_rpm_h;  /* 16-bit RPM tachometer high byte */
-	uint8_t ec_reg_rpm_l;  /* 16-bit RPM tachometer low byte */
-	uint8_t ec_reg_temp;
-	int msi_sysfs; /* uses /sys/devices/platform/msi-ec/ */
-	char msi_sysfs_dir[16]; /* "cpu" or "gpu" */
-	int slider_x, slider_y;
-	int slider_w, slider_h;
-	int row_y, row_h;
-} FanEntry;
-
-typedef struct {
-	char name[64];
-	char hwmon_path[128];
-	FanDevType type;
-	int fan_count;
-	FanEntry fans[FAN_MAX_PER_DEV];
-} FanDevice;
-
-typedef struct {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *bg;
-	int width;
-	int height;
-	int visible;
-	uint64_t last_fetch_ms;
-	uint64_t last_render_ms;
-	uint64_t hover_start_ms;
-	int dragging;
-	int drag_fan_idx;
-	int device_count;
-	FanDevice devices[FAN_MAX_DEVICES];
-	int total_fans;
-	/* msi-ec system-wide controls */
-	int msi_ec;
-	int fan_mode;           /* 0=auto, 1=silent, 2=advanced */
-	int shift_mode;         /* 0=eco, 1=comfort, 2=sport, 3=turbo */
-	int cooler_boost;       /* 0=off, 1=on */
-	/* hit areas for msi-ec controls */
-	int fanmode_y, fanmode_h;
-	int shiftmode_y, shiftmode_h;
-	int boost_y, boost_h;
-} FanPopup;
-
-typedef struct TrayMenuEntry {
 	int id;
 	int enabled;
 	int is_separator;
@@ -574,24 +469,6 @@ typedef struct {
 	struct wl_list entries;
 } TrayMenu;
 
-typedef struct {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *bg;
-	struct wlr_scene_tree *submenu_tree;
-	struct wlr_scene_tree *submenu_bg;
-	int width, height;
-	int submenu_width, submenu_height;
-	int x, y;
-	int submenu_x, submenu_y;
-	int visible;
-	int submenu_visible;
-	int hover;
-	int submenu_hover;
-	int submenu_type;
-	struct wl_list entries;
-	struct wl_list networks;
-} NetMenu;
-
 struct StatusBar {
 	struct wlr_scene_tree *tree;
 	struct wlr_box area;
@@ -612,11 +489,25 @@ struct StatusBar {
 	RamPopup ram_popup;
 	BatteryPopup battery_popup;
 	NetPopup net_popup;
-	FanPopup fan_popup;
 	TrayMenu tray_menu;
-	NetMenu net_menu;
+	struct {
+		struct wlr_scene_tree *tree;
+		struct wlr_scene_tree *bg;
+		struct wlr_scene_tree *submenu_tree;
+		struct wlr_scene_tree *submenu_bg;
+		int width, height;
+		int submenu_width, submenu_height;
+		int x, y;
+		int submenu_x, submenu_y;
+		int visible;
+		int submenu_visible;
+		int hover;
+		int submenu_hover;
+		int submenu_type;
+		struct wl_list entries;
+		struct wl_list networks;
+	} net_menu;
 	StatusModule sysicons;
-	StatusModule fan;
 };
 
 struct TrayItem {
@@ -635,8 +526,6 @@ struct TrayItem {
 	struct wl_list link;
 };
 
-#endif /* status bar types disabled */
-
 /* ── buffer types ──────────────────────────────────────────────────── */
 struct PixmanBuffer {
 	struct wlr_buffer base;
@@ -647,28 +536,12 @@ struct PixmanBuffer {
 	int owns_data;
 };
 
-/* CPU-backed cursor buffer for Nvidia HW cursor plane.
- * Wraps a dumb DRM buffer in a wlr_buffer so wlroots can
- * place it on the cursor plane without GBM allocation. */
-struct CpuCursorBuffer {
-	struct wlr_buffer base;       /* wlr_buffer interface */
-	int drm_fd;                   /* DRM fd used for dumb buffer ops */
-	int owns_drm_fd;              /* 1 if we opened drm_fd ourselves */
-	uint32_t gem_handle;          /* GEM handle from dumb create */
-	int dmabuf_fd;                /* DMA-BUF fd for wlroots import */
-	uint32_t width;               /* Buffer width */
-	uint32_t height;              /* Buffer height */
-	uint32_t stride;              /* Row stride in bytes */
-	void *map;                    /* mmap'd CPU pointer */
-	size_t map_size;              /* mmap size */
-};
-
 struct CpuSample {
 	unsigned long long idle;
 	unsigned long long total;
 };
 
-#if 1
+/* ── modal overlay ─────────────────────────────────────────────────── */
 typedef struct {
 	struct wlr_scene_tree *tree;
 	struct wlr_scene_tree *bg;
@@ -822,76 +695,12 @@ typedef struct {
 	struct wlr_surface *target_surface;
 } OnScreenKeyboard;
 
-/* ── monitor setup popup ──────────────────────────────────────────── */
-#define MAX_SETUP_MONITORS 8
-#define MAX_SETUP_MODES 64
-
-typedef struct {
-	int width, height, refresh_mhz; /* refresh in millihertz */
-} SetupMode;
-
-typedef struct {
-	char name[64];          /* connector name: DP-1, HDMI-A-1 */
-	char make[64];          /* brand name: Samsung, HP, etc. */
-	int width, height;      /* selected resolution */
-	float refresh;          /* selected refresh rate Hz */
-	int transform;          /* WL_OUTPUT_TRANSFORM_NORMAL or _90 */
-	int grid_col, grid_row; /* 2D grid position */
-	/* Available modes */
-	SetupMode modes[MAX_SETUP_MODES];
-	int mode_count;
-	int selected_mode;      /* index into modes[] */
-	/* Animation state */
-	float anim_x, anim_y;  /* current animated position */
-	float target_x, target_y; /* target position */
-	float anim_w, anim_h;  /* current animated box size */
-	float target_w, target_h; /* target box size */
-	float anim_rot;         /* current rotation angle (0 or 90) */
-	float target_rot;       /* target rotation (0 or 90) */
-	/* Box geometry in popup (computed) */
-	int box_x, box_y, box_w, box_h;
-	/* Persistent scene subtree for this box (used for instant drag) */
-	struct wlr_scene_tree *box_tree;
-} SetupMonitorEntry;
-
-typedef struct {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *bg;
-	struct wlr_scene_tree *label_trees[MAX_SETUP_MONITORS]; /* on-screen labels */
-	int visible;
-	int x, y, width, height;
-	SetupMonitorEntry entries[MAX_SETUP_MONITORS];
-	int entry_count;
-	/* Grid info */
-	int grid_cols, grid_rows;
-	int cell_w, cell_h;
-	int grid_origin_x, grid_origin_y;
-	/* Drag state */
-	int dragging;           /* index of dragged entry, or -1 */
-	int drag_offset_x, drag_offset_y;
-	int drag_orig_col, drag_orig_row;     /* original grid pos of dragged box */
-	int drag_target_col, drag_target_row; /* current snap target */
-	int drag_insert_dir;    /* -1=no insert, 0=horiz gap, 1=vert gap */
-	int drag_insert_after;  /* row/col after which to insert */
-	int drag_saved_col[MAX_SETUP_MONITORS]; /* grid cols at drag start */
-	int drag_saved_row[MAX_SETUP_MONITORS]; /* grid rows at drag start */
-	struct wlr_scene_tree *drop_indicator;
-	/* Animation timer */
-	struct wl_event_source *anim_timer;
-	int animating;
-	/* Apply/cancel button geometry */
-	int apply_x, apply_y, apply_w, apply_h;
-	int cancel_x, cancel_y, cancel_w, cancel_h;
-	/* Right-click context menu */
-	int ctx_visible;
-	int ctx_x, ctx_y, ctx_w, ctx_h;
-	int ctx_entry_idx;      /* which entry the context menu is for */
-	int ctx_submenu;        /* 0=main, 1=resolution, 2=refresh rate */
-	int ctx_scroll_offset;  /* for long mode lists */
-	int ctx_hover_item;     /* hovered item index */
-} MonitorSetup;
-
 /* ── gamepad types ─────────────────────────────────────────────────── */
+typedef struct {
+	const char *label;
+	const char *command;
+} GamepadMenuItem;
+
 typedef struct {
 	struct wlr_scene_tree *tree;
 	struct wlr_scene_tree *bg;
@@ -922,12 +731,145 @@ struct GamepadDevice {
 	int64_t last_activity_ms;
 	int suspended;
 	int grabbed;
-	int is_bluetooth;
 	uint64_t connect_time_ms;
 };
 
+/* ── gaming types ──────────────────────────────────────────────────── */
+struct GameEntry {
+	char id[64];
+	char name[256];
+	char icon_path[512];
+	char launch_cmd[1024];
+	GamingServiceType service;
+	int installed;
+	int playtime_minutes;
+	int is_game;
+	time_t acquired_time;
+	int controller_support;
+	int deck_verified;
+	int is_installing;
+	int install_progress;
+	struct wlr_buffer *icon_buf;
+	int icon_w, icon_h;
+	int icon_loaded;
+	char launch_params_nvidia[512];
+	char launch_params_amd[512];
+	char launch_params_intel[512];
+	int has_custom_params;
+	struct GameEntry *next;
+};
 
-#endif /* status bar / tray / etc types disabled */
+typedef struct {
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_tree *bg;
+	struct wlr_scene_tree *grid;
+	struct wlr_scene_tree *sidebar;
+	int visible;
+	unsigned int view_tag;
+	int width, height;
+	int scroll_offset;
+	int selected_idx;
+	int hover_idx;
+	int game_count;
+	int cols;
+	int service_filter;
+	GameEntry *games;
+	int needs_refresh;
+	uint64_t last_refresh_ms;
+	struct wlr_scene_tree *install_popup;
+	struct wlr_scene_tree *install_dim;
+	int install_popup_visible;
+	int install_popup_selected;
+	char install_game_id[64];
+	char install_game_name[256];
+	GamingServiceType install_game_service;
+} PcGamingView;
+
+typedef struct {
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_tree *dim;
+	struct wlr_scene_tree *menu_bar;
+	int visible;
+	unsigned int view_tag;
+	int width, height;
+	int selected_console;
+	int target_console;
+	int anim_direction;
+	float slide_offset;
+	uint64_t slide_start_ms;
+} RetroGamingView;
+
+/* ── media types ───────────────────────────────────────────────────── */
+struct MediaItem {
+	int id;
+	int type;
+	char title[256];
+	char show_name[256];
+	int season;
+	int episode;
+	int duration;
+	int year;
+	float rating;
+	char poster_path[512];
+	char backdrop_path[512];
+	char overview[2048];
+	char genres[256];
+	char episode_title[256];
+	char filepath[1024];
+	int tmdb_total_seasons;
+	int tmdb_total_episodes;
+	int tmdb_episode_runtime;
+	char tmdb_status[64];
+	char tmdb_next_episode[16];
+	int tmdb_id;
+	char server_id[64];
+	char server_url[256];
+	int server_priority;
+	struct wlr_buffer *poster_buf;
+	struct wlr_buffer *backdrop_buf;
+	int poster_w, poster_h;
+	int backdrop_w, backdrop_h;
+	int poster_loaded;
+	int backdrop_loaded;
+	struct MediaItem *next;
+};
+
+struct MediaSeason {
+	int season;
+	int episode_count;
+	struct MediaSeason *next;
+};
+
+typedef struct {
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_tree *grid;
+	struct wlr_scene_tree *detail_panel;
+	int visible;
+	unsigned int view_tag;
+	int width, height;
+	int scroll_offset;
+	int selected_idx;
+	int item_count;
+	int cols;
+	MediaItem *items;
+	MediaViewType view_type;
+	int needs_refresh;
+	uint64_t last_refresh_ms;
+	char server_url[256];
+	uint32_t last_data_hash;
+	int in_detail_view;
+	MediaItem *detail_item;
+	DetailFocusArea detail_focus;
+	MediaSeason *seasons;
+	int season_count;
+	int selected_season_idx;
+	int selected_season;
+	MediaItem *episodes;
+	int episode_count;
+	int selected_episode_idx;
+	int season_scroll_offset;
+	int episode_scroll_offset;
+} MediaGridView;
 
 /* ── GPU info ──────────────────────────────────────────────────────── */
 typedef struct {
@@ -940,9 +882,13 @@ typedef struct {
 	int is_discrete;
 	int card_index;
 	int render_index;
-	int driver_version;   /* Major driver version (e.g. 570) */
 } GpuInfo;
 
+/* ── resume cache ──────────────────────────────────────────────────── */
+typedef struct {
+	int media_id;
+	double position;
+} ResumeEntry;
 
 /* ── client ────────────────────────────────────────────────────────── */
 typedef struct {
@@ -979,13 +925,10 @@ typedef struct {
 	struct wl_listener dissociate;
 	struct wl_listener configure;
 	struct wl_listener set_hints;
-	struct wl_listener set_override_redirect;
 #endif
 	unsigned int bw;
 	uint32_t tags;
 	int isfloating, isurgent, isfullscreen, issticky, was_tiled;
-	int isfixed;                  /* float-type with fixed size — reject interactive resize */
-	int is_game_splash;         /* Game splash/EAC launcher → keep centered */
 	uint32_t resize;
 	int pending_resize_w, pending_resize_h;
 	struct wlr_box old_geom;
@@ -997,88 +940,7 @@ typedef struct {
 	struct wlr_buffer *last_buffer;
 	int video_detect_retries;
 	int video_detect_phase;
-	struct wlr_ext_foreign_toplevel_handle_v1 *foreign_toplevel_handle;
-#ifdef XWAYLAND
-	uint32_t steam_game_id;     /* STEAM_GAME AppID (0 = not a Steam game) */
-	int is_steam_overlay;       /* STEAM_OVERLAY == 1 */
-	int is_steam_bigpicture;    /* STEAM_BIGPICTURE == 1 */
-#endif
-
-	/* ── Niri-style placement (phase 2) ───────────────────────────── */
-	Column *column;               /* owning column; NULL = floating/unmapped */
-	struct wl_list column_link;   /* link in Column.clients (top→bottom) */
-	Workspace *fs_ws;             /* workspace fullscreened on; NULL = not fs / unbound (always visible) */
-
-	/* ── Per-client geometry animation (phase 4) ──────────────────
-	 * target_geom is what the layout wants; geom is what's currently
-	 * shown (moves toward target each anim tick).  When unset
-	 * (anim_active = 0) the client snaps directly via resize(). */
-	struct wlr_box target_geom;
-	int anim_active;              /* 1 = geom is animating toward target */
-	/* Spring state for geom animation (column-fullscreen toggle,
-	 * preset-width switch).  Live position is double-precision so
-	 * small spring steps accumulate cleanly without truncation. */
-	double geom_fx, geom_fy, geom_fw, geom_fh;
-	double geom_vx, geom_vy, geom_vw, geom_vh;
-	/* Cached size from last expensive resize() pass — used to skip
-	 * clip + scale recomputation when only position changed
-	 * (camera scroll), avoiding per-frame surface-tree walks for
-	 * heavy clients (Blender, Chrome). */
-	int last_size_w, last_size_h;
-	/* Cached last-configured size — used to dedupe ConfigureNotify
-	 * events to X11 clients.  Without this, every camera-scroll
-	 * frame sends Blender a ConfigureNotify with new x/y (same w/h)
-	 * which it interprets as a window-move and may trigger reflow
-	 * / redraw per frame → choppiness + "doesn't adjust until
-	 * refocus" symptom. */
-	int last_configured_w, last_configured_h;
-	/* Last scene-node position pushed to wlroots.  Tracked separately
-	 * from c->geom because callers sometimes pre-modify c->geom and
-	 * then invoke resize() with the same value — pos_changed would
-	 * miss the update and leave the scene node at its previous
-	 * position (notably the (0,0) default for newly mapped windows). */
-	int last_pos_x, last_pos_y;
-	/* Anim-time snapshot: while a workspace anim is running we
-	 * replace the live surface tree with a static scene_buffer
-	 * holding the current buffer.  Heavy clients (Blender, Chrome,
-	 * games) can't disturb us with mid-anim commits or render
-	 * stalls — we just blit the cached texture at each new
-	 * position.  Restored at anim end. */
-	struct wlr_scene_buffer *frozen_buffer;
-	/* ── Niri-style open anim (scale + fade) ───────────────────────
-	 * open_progress: 0.0 at map → animates to 1.0.  Scale lerps
-	 * 0.5→1.0, opacity 0→1.  Active when open_progress < 1.0. */
-	double open_progress;
-	double open_progress_vel;
-	int open_anim_active;
 } Client;
-
-/* ── Standalone close anim ───────────────────────────────────────────
- * When a client unmaps, we snapshot its last buffer into an independent
- * scene_buffer (parented under layers[LyrFloat]), then animate
- * scale 1→0.5 + opacity 1→0 over ~200ms.  Decoupled from Client so the
- * underlying surface/Client lifecycle can complete normally. */
-typedef struct ClosingAnim {
-	struct wl_list link;
-	Monitor *mon;
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_buffer *buffer;
-	struct wlr_box geom;
-	int natural_w, natural_h;
-	double progress;
-	double vel;
-} ClosingAnim;
-
-/* ── binary tree tiling layout node ───────────────────────────────── */
-struct LayoutNode {
-	int is_client_node;
-	float split_ratio;
-	unsigned int is_split_vertically;
-	Client *client;
-	LayoutNode *left;
-	LayoutNode *right;
-	LayoutNode *split_node;
-};
 
 /* ── keyboard / text input ─────────────────────────────────────────── */
 typedef struct {
@@ -1119,73 +981,6 @@ typedef struct {
 	struct wl_listener surface_commit;
 } LayerSurface;
 
-/* ── workspace + column (Niri-style) ──────────────────────────────────
- * Per-monitor stack of workspaces (vertical). Each workspace contains an
- * ordered list of columns laid out horizontally. Each column stacks 1+
- * clients vertically. Animations: workspace.scroll_x is camera offset
- * within the row; ws.scene_y is animation offset for vertical switches.
- *
- * NOTE (phase 2): structs + per-monitor list are added; legacy dwl tags
- * remain authoritative until phase 3 swaps layout/view to use these.
- */
-struct Column {
-	struct wl_list link;          /* link in Workspace.columns (head→tail = left→right) */
-	struct wl_list clients;       /* Client.column_link, top→bottom stack */
-	int n_clients;
-	int x, y;                     /* current rendered position (integer snapshot of x_f) */
-	int width, height;
-	int target_x, target_y;       /* spring targets */
-	int target_width, target_height;
-	int fullscreen;               /* Niri-style: column expanded to full screen width */
-	/* Niri-style preset width index.  -1 = use default (preset 2 = 0.5).
-	 * Mod+R cycles forward through preset_column_widths[].  When fullscreen
-	 * is set, width is forced to monitor width regardless of width_idx. */
-	int width_idx;
-	/* How many default-tile slots this column occupies when width_idx
-	 * == -1 (no user preset).  Most clients = 1.  Wide apps (Blender,
-	 * browsers, office suites) default to 2.  Mod+R cycling sets
-	 * width_idx >= 0 and bypasses this. */
-	int wide_tiles;
-	/* Explicit pixel-width override set by Mod+Shift+arrow resize.
-	 * 0 = unused (fall back to preset / wide_tiles).  Wins over both
-	 * when > 0.  Lets neighbour columns slide their shared edge by the
-	 * same delta so total row width is preserved. */
-	int width_px_override;
-	/* Spring state for col->x and col->width — when a column is
-	 * inserted, removed, resized (fullscreen toggle / preset cycle)
-	 * or a sibling changes width, the column must SLIDE/SCALE to
-	 * its new target rather than teleport. */
-	double x_f, x_vel;
-	double width_f, width_vel;
-	int just_created;             /* 1 = snap *_f to targets on first layout */
-	Workspace *ws;
-};
-
-struct Workspace {
-	struct wl_list link;          /* link in Monitor.workspaces (head→tail = top→bottom) */
-	struct wl_list columns;       /* Column.link */
-	struct wlr_scene_tree *scene; /* parent for all columns/clients in this ws */
-	uint64_t window_id;             /* globally-unique id for Niri-IPC clients */
-	int idx;                      /* stable id per monitor (auto-increment) */
-	int scroll_x;                 /* camera offset within row (int snapshot of _f) */
-	int target_scroll_x;          /* spring target */
-	double scroll_x_f;            /* spring live position */
-	double scroll_x_vel;          /* spring velocity */
-	int n_columns;
-	Monitor *mon;
-	Column *focused_col;          /* last-focused column for view-restore */
-};
-
-/* Niri-style spring parameters.  Mass=1, damping=damping ratio
- * (1.0 = critically damped, no overshoot; <1 = under-damped, bounce;
- * >1 = over-damped, slow), stiffness = spring constant.  Used by
- * spring_tick() in anim.c. */
-typedef struct {
-	double mass;
-	double damping;
-	double stiffness;
-} SpringParams;
-
 /* ── monitor ───────────────────────────────────────────────────────── */
 struct Monitor {
 	struct wl_list link;
@@ -1200,6 +995,17 @@ struct Monitor {
 	struct wlr_box m;
 	struct wlr_box w;
 	struct wl_list layers[4];
+	StatusBar statusbar;
+	ModalOverlay modal;
+	NixpkgsOverlay nixpkgs;
+	WifiPasswordPopup wifi_popup;
+	SudoPopup sudo_popup;
+	OnScreenKeyboard osk;
+	GamepadMenu gamepad_menu;
+	PcGamingView pc_gaming;
+	RetroGamingView retro_gaming;
+	MediaGridView movies_view;
+	MediaGridView tvshows_view;
 	const Layout *lt[2];
 	int gaps;
 	int showbar;
@@ -1211,24 +1017,17 @@ struct Monitor {
 	int nmaster;
 	char ltsymbol[16];
 	int asleep;
-	int is_mirror;  /* This output mirrors the laptop display */
 	LayoutNode *root[MAX_TAGS];
 	struct wlr_output_mode *original_mode;
 	int video_mode_active;
-	int console_mode_active;
-	struct wlr_output_mode *console_mode_original;
 	int vrr_capable;
 	int vrr_active;
 	float vrr_target_hz;
-	int vrr_pending;        /* 0=none, 1=enable, -1=disable (deferred to next frame commit) */
-	float vrr_pending_hz;   /* target Hz when vrr_pending==1 */
 	int game_vrr_active;
 	float game_vrr_target_fps;
 	float game_vrr_last_fps;
 	uint64_t game_vrr_last_change_ns;
 	int game_vrr_stable_frames;
-	uint64_t game_vrr_lfc_warn_ns;   /* last LFC-range warning timestamp */
-	uint64_t scanout_diag_warn_ns;   /* last direct-scanout failure diagnostic timestamp */
 	struct wlr_scene_tree *hz_osd_tree;
 	struct wlr_scene_tree *hz_osd_bg;
 	int hz_osd_visible;
@@ -1241,20 +1040,13 @@ struct Monitor {
 	struct wlr_scene_tree *toast_tree;
 	struct wl_event_source *toast_timer;
 	int toast_visible;
-	/* Toast overlay-plane promotion (used when gcaps.overlay_planes_supported
-	 * and a fullscreen game is direct-scanning out). The dumb-buffer path
-	 * coexists with scanout by riding on a dedicated overlay plane. */
-	struct CpuCursorBuffer *toast_overlay_buf;
-	struct wlr_output_layer *toast_overlay_layer;
-	int toast_overlay_active;
-	struct wlr_box toast_overlay_dst;
 	struct wl_listener present;
 	uint64_t last_present_ns;
 	uint64_t present_interval_ns;
 	uint64_t target_present_ns;
 	int pending_game_frame;
 	uint64_t game_frame_submit_ns;
-	uint64_t game_frame_intervals[16];
+	uint64_t game_frame_intervals[8];
 	int game_frame_interval_idx;
 	int game_frame_interval_count;
 	float estimated_game_fps;
@@ -1268,8 +1060,6 @@ struct Monitor {
 	int frame_repeat_enabled;
 	int frame_repeat_count;
 	int frame_repeat_current;
-	int frame_repeat_candidate;     /* pending repeat count (hysteresis) */
-	int frame_repeat_candidate_age; /* vblanks candidate has been stable */
 	uint64_t frame_repeat_interval_ns;
 	uint64_t last_game_buffer_id;
 	uint64_t frames_repeated;
@@ -1277,13 +1067,6 @@ struct Monitor {
 	float target_frame_time_ms;
 	uint64_t pacing_adjustment_ns;
 	int judder_score;
-	/* Video cadence (Bresenham) - compositor-side pacing for external video */
-	int video_cadence_active;
-	int video_cadence_base;         /* floor(display_hz / video_fps) */
-	float video_cadence_frac;       /* fractional part of ratio */
-	float video_cadence_accum;      /* Bresenham accumulator (0.0 to 1.0) */
-	int video_cadence_current_n;    /* hold count for current video frame */
-	int video_cadence_counter;      /* vblank counter within current cycle */
 	uint64_t predicted_next_frame_ns;
 	uint64_t frame_variance_ns;
 	int frames_early;
@@ -1296,76 +1079,9 @@ struct Monitor {
 	int memory_pressure;
 	int supports_10bit;
 	int render_10bit_active;
-	int scene_build_failures;
-	/* Commit failure throttle — break infinite retry-loops when the
-	 * kernel refuses a buffer format/modifier (e.g. 10-bit Y-tiled CCS
-	 * that i915 cannot scan out). See fix for retroarch-freeze. */
-	uint32_t commit_failures;
-	uint64_t last_commit_fail_ns;
-	int scanout_blacklist;
-	/* Retro emulator fullscreen on this monitor holds an
-	 * attach_render lock to force GPU composition. Kernel may reject
-	 * retroarch buffer modifiers (10-bit Y-tiled CCS on i915 etc.),
-	 * causing visible black frames before the commit_failures fallback
-	 * kicks in. Locked at setfullscreen-enter, released at exit. */
-	int retro_scanout_lock;
-	/* Idle monitor render throttle */
-	int render_idle;                    /* 1 = idle mode, throttled to heartbeat */
-	int idle_frames;                    /* consecutive frames without cursor + no active content */
-	struct wl_event_source *idle_heartbeat; /* 1s periodic timer for idle monitors */
-	/* EDID re-probe: TVs (esp. over HDMI from sleep) often expose no/limited
-	 * modes at createmon time, then publish full mode list once the HDMI
-	 * handshake completes. We retry bestmode at 2s/5s/15s after createmon,
-	 * and also on every request_state event. */
-	struct wl_event_source *edid_reprobe_timer;
-	int edid_reprobe_attempt;           /* 0,1,2 — escalating delays */
-	int edid_reprobe_stable_rounds;     /* consecutive rounds where bestmode == current */
-	int frame_scheduled;                /* 1 = schedule_frame already called this cycle */
-	GamingCaps gcaps;                   /* vendor/capability profile for this output */
-	/* Low-latency cursor plane (direct DRM atomic, bypasses wlroots) */
-	int ll_cursor_fd;            /* DRM fd for cursor commits (-1 = disabled) */
-	uint32_t ll_cursor_plane_id; /* DRM plane ID for cursor */
-	uint32_t ll_cursor_crtc_id;  /* DRM CRTC ID */
-	uint32_t ll_cursor_prop_x;   /* Property ID for CRTC_X */
-	uint32_t ll_cursor_prop_y;   /* Property ID for CRTC_Y */
-	int ll_cursor_active;        /* 1 if low-latency cursor is active */
 	int max_bpc;
 	int hdr_capable;
 	int hdr_active;
-	/* HDR runtime state — see plan Phase 2.
-	 * driver_client = whose surface image_description currently drives output.
-	 * Pending flags are processed in rendermon build_state on next vblank to
-	 * piggyback on the existing commit; throttle stamps prevent HDMI re-train
-	 * thrashing on rapid pause/seek. */
-	Client *hdr_driver_client;
-	uint32_t hdr_render_format;
-	uint64_t hdr_last_enter_ns;
-	uint64_t hdr_last_exit_ns;
-	int hdr_entry_pending;
-	int hdr_exit_pending;
-	struct wlr_output_image_description hdr_pending_desc;
-	/* HDR runtime safety nets:
-	 *   hdr_last_commit_ok_ns: last successful commit while hdr_active.
-	 *     If too long without a successful commit, the driver/client is
-	 *     stuck (e.g. mpv EGL interop wedged after HDR entry). Force
-	 *     exit so the TV releases HDR_OUTPUT_METADATA and can recover.
-	 *   hdr_commit_fail_count: consecutive commit failures while
-	 *     hdr_active. Escalates to forced exit before commit_failures
-	 *     fallback would even kick in. */
-	uint64_t hdr_last_commit_ok_ns;
-	uint32_t hdr_commit_fail_count;
-	/* Cached fullscreen content classification (avoid per-vblank protocol lookups) */
-	Client *classify_cache_client;
-	int classify_cache_game;
-	int classify_cache_video;
-	int classify_cache_tearing;
-	int tag_switch_debug;
-	/* Cached FPS for frame repeat hysteresis */
-	float frame_repeat_last_fps;
-	/* Stats panel persistent nodes */
-	struct wlr_scene_rect *stats_panel_bg;
-	struct wlr_scene_rect *stats_panel_border;
-	struct wlr_scene_tree *stats_panel_content;
 	struct wlr_scene_tree *stats_panel_tree;
 	struct wl_event_source *stats_panel_timer;
 	struct wl_event_source *stats_panel_anim_timer;
@@ -1375,35 +1091,6 @@ struct Monitor {
 	int stats_panel_width;
 	uint64_t stats_panel_anim_start;
 	int stats_panel_animating;
-
-	/* ── Niri-style workspaces (phase 2 — parallel to legacy tagset[]) ── */
-	struct wl_list workspaces;    /* Workspace.link, ordered top→bottom */
-	Workspace *active_ws;         /* currently visible workspace */
-	Workspace *prev_ws;           /* previously-active workspace (Mod+Tab toggle) */
-	int next_ws_id;               /* auto-increment for Workspace.idx */
-	int n_workspaces;
-	double ws_y_offset;           /* live vertical-switch animation offset */
-	double ws_y_vel;              /* spring velocity for ws_y_offset */
-	uint64_t last_anim_ns;        /* last anim tick timestamp */
-	int anim_was_active;          /* edge-detection: any anim active */
-	int size_anim_was_active;     /* edge-detection: freeze only on SIZE anims */
-	/* Spring state for the tile area (m->w).  When a layer-shell
-	 * surface like waybar (de)appears, m->w changes — but stepping
-	 * m->w directly snaps every tile.  Spring it so the edge facing
-	 * the toggling layer slides smoothly while the opposite edge
-	 * stays locked. */
-	struct wlr_box w_target;
-	double w_x_f, w_y_f, w_w_f, w_h_f;
-	double w_x_vel, w_y_vel, w_w_vel, w_h_vel;
-	int w_initialized;
-
-	/* embedded status bar (replaces waybar) */
-	StatusBar statusbar;
-	ModalOverlay modal;
-	SudoPopup sudo_popup;
-	NixpkgsOverlay nixpkgs;
-	WifiPasswordPopup wifi_popup;
-	GamepadMenu gamepad_menu;
 };
 
 /* ── extern globals ────────────────────────────────────────────────── */
@@ -1459,16 +1146,11 @@ extern float resize_ratio_epsilon;
 extern int modal_file_search_minlen;
 extern int lock_cursor;
 extern int log_level;
-extern FILE *log_file;
-extern FILE *debug_log_file;
-extern int log_stderr_fd;
 extern int nixlytile_mode;
+extern char htpc_wallpaper_path[];
 extern const Rule rules[];
-extern const size_t nrules;
 extern const Layout layouts[];
-extern const size_t nlayouts;
 extern const MonitorRule monrules[];
-extern const size_t nmonrules;
 extern const struct xkb_rule_names xkb_rules;
 extern int repeat_delay;
 extern int repeat_rate;
@@ -1488,25 +1170,18 @@ extern enum libinput_config_tap_button_map button_map;
 extern unsigned int modkey;
 extern unsigned int monitorkey;
 extern const Key default_keys[];
-extern const size_t default_keys_count;
 extern const Key *keys;
 extern size_t keys_count;
 extern const Button buttons[];
-extern const size_t nbuttons;
-extern char spawn_cmd_terminal[MAX_SPAWN_CMD];
-extern char spawn_cmd_terminal_alt[MAX_SPAWN_CMD];
-extern char spawn_cmd_browser[MAX_SPAWN_CMD];
-extern char spawn_cmd_filemanager[MAX_SPAWN_CMD];
-extern char spawn_cmd_launcher[MAX_SPAWN_CMD];
-extern const char *netcmd[];
-extern const char *pavucontrolcmd[];
-extern const char *btopcmd[];
-extern Key runtime_keys[MAX_KEYS];
-extern char *runtime_spawn_cmds[MAX_KEYS];
-extern int runtime_spawn_cmd_count;
+extern char spawn_cmd_terminal[];
+extern char spawn_cmd_terminal_alt[];
+extern char spawn_cmd_browser[];
+extern char spawn_cmd_filemanager[];
+extern char spawn_cmd_launcher[];
+extern Key runtime_keys[];
 extern size_t runtime_keys_count;
-extern char wallpaper_path[PATH_MAX];
-extern char autostart_cmd[4096];
+extern char wallpaper_path[];
+extern char autostart_cmd[];
 
 /* core compositor */
 extern pid_t child_pid;
@@ -1514,6 +1189,7 @@ extern int locked;
 extern void *exclusive_focus;
 extern struct wl_display *dpy;
 extern struct wl_event_loop *event_loop;
+extern VideoPlayer *active_videoplayer;
 extern struct wlr_backend *backend;
 extern struct wlr_scene *scene;
 extern struct wlr_scene_tree *layers[];
@@ -1530,7 +1206,6 @@ extern struct wlr_xdg_activation_v1 *activation;
 extern struct wlr_xdg_decoration_manager_v1 *xdg_decoration_mgr;
 extern struct wl_list clients;
 extern struct wl_list fstack;
-extern struct wl_list closing_anims; /* ClosingAnim.link */
 extern struct wlr_idle_notifier_v1 *idle_notifier;
 extern struct wlr_idle_inhibit_manager_v1 *idle_inhibit_mgr;
 extern struct wlr_layer_shell_v1 *layer_shell;
@@ -1539,25 +1214,11 @@ extern struct wlr_content_type_manager_v1 *content_type_mgr;
 extern struct wlr_tearing_control_manager_v1 *tearing_control_mgr;
 extern struct wlr_virtual_keyboard_manager_v1 *virtual_keyboard_mgr;
 extern struct wlr_virtual_pointer_manager_v1 *virtual_pointer_mgr;
-extern struct wlr_tablet_manager_v2 *tablet_v2_mgr;
 extern struct wlr_text_input_manager_v3 *text_input_mgr;
 extern struct wlr_text_input_v3 *active_text_input;
 extern struct wl_list text_inputs;
 extern struct wlr_cursor_shape_manager_v1 *cursor_shape_mgr;
 extern struct wlr_output_power_manager_v1 *power_mgr;
-extern struct wlr_color_manager_v1 *color_mgr;
-extern struct wlr_color_representation_manager_v1 *color_repr_mgr;
-extern struct wlr_keyboard_shortcuts_inhibit_manager_v1 *kb_shortcuts_inhibit_mgr;
-extern struct wlr_pointer_gestures_v1 *pointer_gestures;
-extern struct wlr_xdg_foreign_registry *foreign_registry;
-extern struct wlr_xdg_foreign_v2 *xdg_foreign;
-extern struct wlr_xdg_wm_dialog_v1 *xdg_dialog_mgr;
-extern struct wlr_ext_image_copy_capture_manager_v1 *image_copy_capture_mgr;
-extern struct wlr_security_context_manager_v1 *security_ctx_mgr;
-extern struct wlr_xdg_system_bell_v1 *system_bell;
-extern struct wlr_ext_foreign_toplevel_list_v1 *foreign_toplevel_list;
-extern struct wlr_ext_data_control_manager_v1 *ext_data_control_mgr;
-extern struct wlr_fixes *protocol_fixes;
 extern struct wlr_pointer_constraints_v1 *pointer_constraints;
 extern struct wlr_relative_pointer_manager_v1 *relative_pointer_mgr;
 extern struct wlr_pointer_constraint_v1 *active_constraint;
@@ -1591,60 +1252,30 @@ extern int fullscreen_adaptive_sync_enabled;
 extern int fps_limit_enabled;
 extern int fps_limit_value;
 extern int game_mode_active;
-extern int htpc_mode_active;
 extern int game_mode_ultra;
 extern Client *game_mode_client;
 extern pid_t game_mode_pid;
-extern pid_t retro_session_pid;
 extern int game_mode_nice_applied;
 extern int game_mode_ioclass_applied;
-extern int game_mode_oom_applied;
-extern int game_mode_governor_applied;
-extern int compositor_rt_applied;
-extern int fan_boost_active;
-extern int fan_thermal_active;
-extern struct wl_event_source *fan_thermal_timer;
-extern pid_t frozen_pids[4096];
-extern int frozen_pid_count;
-extern int game_mode_swappiness_applied;
-extern int game_mode_affinity_applied;
-extern int game_mode_raw_input_applied;
-#define MAX_POINTER_DEVICES 32
-extern struct libinput_device *pointer_devices[MAX_POINTER_DEVICES];
-extern int pointer_device_count;
+extern int htpc_mode_active;
 
 /* config hot-reload */
 extern int config_inotify_fd;
 extern int config_watch_wd;
-extern char config_path_cached[PATH_MAX];
+extern char config_path_cached[];
 extern struct wl_event_source *config_watch_source;
 extern struct wl_event_source *config_rewatch_timer;
 extern int config_needs_rewatch;
 
-/* monitors.conf hot-reload */
-extern int monconf_inotify_fd;
-extern int monconf_watch_wd;
-extern char monconf_path_cached[PATH_MAX];
-extern struct wl_event_source *monconf_watch_source;
-extern struct wl_event_source *monitor_setup_timer;
-
-/* External monitor overlay (controlled by nixlycc) */
-extern int monovl_inotify_fd;
-extern int monovl_watch_wd;
-extern struct wl_event_source *monovl_watch_source;
-
 /* status timers */
-#if 1
 extern struct wl_event_source *status_timer;
 extern struct wl_event_source *status_cpu_timer;
 extern struct wl_event_source *status_hover_timer;
 extern struct wl_event_source *cache_update_timer;
 extern struct wl_event_source *nixpkgs_cache_timer;
 extern int cache_update_phase;
-extern StatusRefreshTask status_tasks[STATUS_TASKS_COUNT];
+extern StatusRefreshTask status_tasks[];
 extern int status_rng_seeded;
-extern int netlink_fd;
-extern struct wl_event_source *netlink_event;
 
 /* gamepad */
 extern struct wl_list gamepads;
@@ -1656,26 +1287,49 @@ extern char gamepad_pending_paths[][128];
 extern int gamepad_pending_count;
 extern struct wl_event_source *gamepad_pending_timer;
 extern struct wl_event_source *gamepad_cursor_timer;
-#endif /* status etc */
 
-/* dgpu */
-extern const char *dgpu_programs[];
+/* HTPC */
+extern int htpc_page_pcgaming;
+extern int htpc_page_retrogaming;
+extern int htpc_page_movies;
+extern int htpc_page_tvshows;
+extern int htpc_page_nrk;
+extern int htpc_page_netflix;
+extern int htpc_page_viaplay;
+extern int htpc_page_tv2play;
+extern int htpc_page_f1tv;
+extern int htpc_page_quit;
+extern int client_download_mbps;
 
-/* gaming/GPU */
+/* playback */
+extern PlaybackState playback_state;
+extern int playback_buffer_seconds;
+extern int playback_buffer_progress;
+extern char playback_message[];
+extern char playback_url[];
+extern int64_t playback_file_size;
+extern int playback_duration;
+extern int playback_is_movie;
+extern uint64_t playback_start_time;
+extern int playback_media_id;
+extern int osd_visible;
+extern uint64_t osd_show_time;
+extern OsdMenuType osd_menu_open;
+extern int osd_menu_selection;
+
+/* gaming */
+extern int gaming_service_enabled[];
+extern const char *gaming_service_names[];
+extern const char *retro_console_names[];
 extern GpuInfo detected_gpus[];
 extern int detected_gpu_count;
 extern int discrete_gpu_idx;
 extern int integrated_gpu_idx;
-extern int nvidia_render_primary;
-extern int dgpu_render_fd;
-extern int g_explicit_sync_ok; /* 1 = DRM syncobj timeline manager active */
-extern struct wl_event_source *dgpu_power_watchdog;
+extern int pc_gaming_cache_inotify_fd;
+extern int pc_gaming_cache_inotify_wd;
+extern struct wl_event_source *pc_gaming_cache_event;
 
-/* cpu cursor (Nvidia HW cursor plane) */
-extern struct CpuCursorBuffer *cpu_cursor_buf;
-extern int cpu_cursor_active;
-
-#if 1
+/* bluetooth */
 extern struct wl_event_source *bt_scan_timer;
 extern struct wl_event_source *bt_bus_event;
 extern sd_bus *bt_bus;
@@ -1686,12 +1340,12 @@ extern const char *bt_gamepad_patterns[];
 extern pid_t public_ip_pid;
 extern int public_ip_fd;
 extern struct wl_event_source *public_ip_event;
-extern char public_ip_buf[128];
+extern char public_ip_buf[];
 extern size_t public_ip_len;
 extern pid_t ssid_pid;
 extern int ssid_fd;
 extern struct wl_event_source *ssid_event;
-extern char ssid_buf[256];
+extern char ssid_buf[];
 extern size_t ssid_len;
 extern time_t ssid_last_time;
 
@@ -1711,21 +1365,21 @@ extern struct wl_list tray_items;
 extern struct CpuSample cpu_prev[];
 extern int cpu_prev_count;
 extern double cpu_last_percent;
-extern char cpu_text[32];
+extern char cpu_text[];
 extern double ram_last_mb;
-extern char ram_text[32];
+extern char ram_text[];
 extern double battery_last_percent;
-extern char battery_text[32];
+extern char battery_text[];
 extern double net_last_down_bps;
 extern double net_last_up_bps;
-extern char last_clock_render[32];
-extern char last_cpu_render[32];
-extern char last_ram_render[32];
-extern char last_light_render[32];
-extern char last_volume_render[32];
-extern char last_mic_render[32];
-extern char last_battery_render[32];
-extern char last_net_render[64];
+extern char last_clock_render[];
+extern char last_cpu_render[];
+extern char last_ram_render[];
+extern char last_light_render[];
+extern char last_volume_render[];
+extern char last_mic_render[];
+extern char last_battery_render[];
+extern char last_net_render[];
 extern int last_clock_h, last_cpu_h, last_ram_h;
 extern int last_light_h, last_volume_h, last_mic_h;
 extern int last_battery_h, last_net_h;
@@ -1746,28 +1400,27 @@ extern const float *mic_text_color;
 extern const float *statusbar_fg_override;
 extern double light_last_percent;
 extern double light_cached_percent;
-extern char light_text[32];
+extern char light_text[];
 extern double mic_last_percent;
-extern char mic_text[32];
+extern char mic_text[];
 extern double volume_last_speaker_percent;
 extern double volume_last_headset_percent;
 extern double speaker_active;
 extern double speaker_stored;
 extern double microphone_active;
 extern double microphone_stored;
-extern char volume_text[32];
+extern char volume_text[];
 extern int volume_muted;
 extern int mic_muted;
 extern int mic_last_color_is_muted;
 extern int volume_last_color_is_muted;
-extern char backlight_brightness_path[PATH_MAX];
-extern char backlight_max_path[PATH_MAX];
+extern char backlight_brightness_path[];
+extern char backlight_max_path[];
 extern int backlight_available;
 extern int backlight_writable;
-extern char battery_capacity_path[PATH_MAX];
-extern char battery_device_dir[PATH_MAX];
+extern char battery_capacity_path[];
+extern char battery_device_dir[];
 extern int battery_available;
-extern int battery_is_charging;
 extern double cpu_last_core_percent[];
 extern int cpu_core_count;
 
@@ -1781,10 +1434,16 @@ extern struct wl_event_source *ram_popup_refresh_timer;
 extern struct wl_event_source *popup_delay_timer;
 extern struct wl_event_source *video_check_timer;
 extern struct wl_event_source *hz_osd_timer;
+extern struct wl_event_source *playback_osd_timer;
+extern struct wlr_scene_tree *playback_osd_tree;
+extern struct wl_event_source *pc_gaming_install_timer;
+extern struct wl_event_source *game_refocus_timer;
+extern struct wl_event_source *media_view_poll_timer;
 extern struct wl_event_source *osk_dpad_repeat_timer;
 extern int osk_dpad_held_button;
 extern Monitor *osk_dpad_held_mon;
-extern char wifi_scan_buf[8192];
+extern Client *game_refocus_client;
+extern char wifi_scan_buf[];
 extern size_t wifi_scan_len;
 extern int wifi_scan_inflight;
 extern unsigned int wifi_networks_generation;
@@ -1798,51 +1457,51 @@ extern int vpn_list_initialized;
 extern pid_t vpn_scan_pid;
 extern int vpn_scan_fd;
 extern struct wl_event_source *vpn_scan_event;
-extern char vpn_scan_buf[8192];
+extern char vpn_scan_buf[];
 extern size_t vpn_scan_len;
 extern int vpn_scan_inflight;
 extern pid_t vpn_connect_pid;
 extern int vpn_connect_fd;
 extern struct wl_event_source *vpn_connect_event;
-extern char vpn_connect_buf[4096];
+extern char vpn_connect_buf[];
 extern size_t vpn_connect_len;
-extern char vpn_pending_name[128];
-extern char net_text[64];
-extern char net_local_ip[64];
-extern char net_public_ip[64];
-extern char net_down_text[32];
-extern char net_up_text[32];
-extern char net_ssid[64];
+extern char vpn_pending_name[];
+extern char net_text[];
+extern char net_local_ip[];
+extern char net_public_ip[];
+extern char net_down_text[];
+extern char net_up_text[];
+extern char net_ssid[];
 extern double net_last_wifi_quality;
 extern int net_link_speed_mbps;
-extern char net_iface[64];
-extern char net_prev_iface[64];
+extern char net_iface[];
+extern char net_prev_iface[];
 extern int net_is_wireless;
 extern int net_available;
 
 /* icon paths + buffers */
-extern char net_icon_path[PATH_MAX];
-extern char net_icon_loaded_path[PATH_MAX];
-extern char cpu_icon_path[PATH_MAX];
-extern char cpu_icon_loaded_path[PATH_MAX];
-extern char light_icon_path[PATH_MAX];
-extern char light_icon_loaded_path[PATH_MAX];
-extern char ram_icon_path[PATH_MAX];
-extern char ram_icon_loaded_path[PATH_MAX];
-extern char battery_icon_path[PATH_MAX];
-extern char battery_icon_loaded_path[PATH_MAX];
-extern char mic_icon_path[PATH_MAX];
-extern char mic_icon_loaded_path[PATH_MAX];
-extern char volume_icon_path[PATH_MAX];
-extern char volume_icon_loaded_path[PATH_MAX];
-extern char clock_icon_path[PATH_MAX];
-extern char clock_icon_loaded_path[PATH_MAX];
-extern char bluetooth_icon_path[PATH_MAX];
-extern char bluetooth_icon_loaded_path[PATH_MAX];
-extern char steam_icon_path[PATH_MAX];
-extern char steam_icon_loaded_path[PATH_MAX];
-extern char discord_icon_path[PATH_MAX];
-extern char discord_icon_loaded_path[PATH_MAX];
+extern char net_icon_path[];
+extern char net_icon_loaded_path[];
+extern char cpu_icon_path[];
+extern char cpu_icon_loaded_path[];
+extern char light_icon_path[];
+extern char light_icon_loaded_path[];
+extern char ram_icon_path[];
+extern char ram_icon_loaded_path[];
+extern char battery_icon_path[];
+extern char battery_icon_loaded_path[];
+extern char mic_icon_path[];
+extern char mic_icon_loaded_path[];
+extern char volume_icon_path[];
+extern char volume_icon_loaded_path[];
+extern char clock_icon_path[];
+extern char clock_icon_loaded_path[];
+extern char bluetooth_icon_path[];
+extern char bluetooth_icon_loaded_path[];
+extern char steam_icon_path[];
+extern char steam_icon_loaded_path[];
+extern char discord_icon_path[];
+extern char discord_icon_loaded_path[];
 extern int net_icon_loaded_h, net_icon_w, net_icon_h;
 extern struct wlr_buffer *net_icon_buf;
 extern int clock_icon_loaded_h, clock_icon_w, clock_icon_h;
@@ -1868,13 +1527,6 @@ extern int steam_running;
 extern int discord_icon_loaded_h, discord_icon_w, discord_icon_h;
 extern struct wlr_buffer *discord_icon_buf;
 extern int discord_running;
-extern char fan_icon_path[PATH_MAX];
-extern char fan_icon_loaded_path[PATH_MAX];
-extern int fan_icon_loaded_h, fan_icon_w, fan_icon_h;
-extern struct wlr_buffer *fan_icon_buf;
-extern char fan_text[32];
-extern char last_fan_render[32];
-extern int last_fan_h;
 extern unsigned long long net_prev_rx;
 extern unsigned long long net_prev_tx;
 extern struct timespec net_prev_ts;
@@ -1892,7 +1544,6 @@ extern const char battery_icon_25[];
 extern const char battery_icon_50[];
 extern const char battery_icon_75[];
 extern const char battery_icon_100[];
-extern const char battery_icon_charging[];
 extern const char volume_icon_speaker_25[];
 extern const char volume_icon_speaker_50[];
 extern const char volume_icon_speaker_100[];
@@ -1901,29 +1552,27 @@ extern const char volume_icon_headset[];
 extern const char volume_icon_headset_muted[];
 extern const char mic_icon_unmuted[];
 extern const char mic_icon_muted[];
-extern char net_icon_wifi_100_resolved[PATH_MAX];
-extern char net_icon_wifi_75_resolved[PATH_MAX];
-extern char net_icon_wifi_50_resolved[PATH_MAX];
-extern char net_icon_wifi_25_resolved[PATH_MAX];
-extern char net_icon_eth_resolved[PATH_MAX];
-extern char net_icon_no_conn_resolved[PATH_MAX];
-#endif /* status etc globals */
+extern char net_icon_wifi_100_resolved[];
+extern char net_icon_wifi_75_resolved[];
+extern char net_icon_wifi_50_resolved[];
+extern char net_icon_wifi_25_resolved[];
+extern char net_icon_eth_resolved[];
+extern char net_icon_no_conn_resolved[];
 
-#if 1
+/* misc */
 extern const double light_step;
 extern const double volume_step;
 extern const double volume_max_percent;
 extern const double mic_step;
 extern const double mic_max_percent;
-extern char sysicons_text[64];
-#define DESKTOP_ENTRIES_MAX 4096
-extern DesktopEntry desktop_entries[DESKTOP_ENTRIES_MAX];
+extern char sysicons_text[];
+extern DesktopEntry desktop_entries[];
 extern int desktop_entry_count;
 extern int desktop_entries_loaded;
 extern NixpkgEntry nixpkg_entries[];
 extern int nixpkg_entry_count;
 extern int nixpkg_entries_loaded;
-extern char nixpkgs_cache_path[PATH_MAX];
+extern char nixpkgs_cache_path[];
 extern struct wlr_buffer *nixpkg_ok_icon_buf;
 extern int nixpkg_ok_icon_height;
 extern const uint32_t cpu_popup_refresh_interval_ms;
@@ -1931,11 +1580,21 @@ extern const uint32_t ram_popup_refresh_interval_ms;
 extern const float net_menu_row_bg[];
 extern const float net_menu_row_bg_hover[];
 extern const double status_icon_scale;
-#endif
 
 /* runtime fonts */
 extern char *runtime_fonts[];
 extern int runtime_fonts_set;
+
+/* HTPC menu */
+extern struct { char label[64]; char command[256]; } htpc_menu_items[];
+extern int htpc_menu_item_count;
+
+/* Audio/subtitle tracks for OSD */
+extern struct { int id; char title[128]; char lang[16]; int selected; } audio_tracks[], subtitle_tracks[];
+extern int audio_track_count;
+extern int subtitle_track_count;
+extern ResumeEntry resume_cache[];
+extern int resume_cache_count;
 
 /* Global event handlers */
 extern struct wl_listener cursor_axis;
@@ -1967,17 +1626,11 @@ extern struct wl_listener request_set_cursor_shape;
 extern struct wl_listener request_start_drag;
 extern struct wl_listener start_drag;
 extern struct wl_listener new_session_lock;
-extern struct wl_listener new_kb_shortcuts_inhibitor;
 
 #ifdef XWAYLAND
 extern struct wl_listener new_xwayland_surface;
 extern struct wl_listener xwayland_ready;
 extern struct wlr_xwayland *xwayland;
-
-/* Steam X11 atoms — interned in xwaylandready() */
-extern xcb_atom_t atom_steam_game;       /* STEAM_GAME (Cardinal: AppID) */
-extern xcb_atom_t atom_steam_overlay;    /* STEAM_OVERLAY (Cardinal: 0/1) */
-extern xcb_atom_t atom_steam_bigpicture; /* STEAM_BIGPICTURE (Cardinal: 0/1) */
 #endif
 
 /* layermap */
@@ -1990,11 +1643,8 @@ void drawrect(struct wlr_scene_tree *parent, int x, int y,
 		int width, int height, const float color[static 4]);
 void drawhoverrect(struct wlr_scene_tree *parent, int x, int y,
 		int width, int height, const float color[static 4], float fade);
-void draw_border(struct wlr_scene_tree *parent, int x, int y,
-		int w, int h, int thickness, const float color[static 4]);
 void drawroundedrect(struct wlr_scene_tree *parent, int x, int y,
 		int width, int height, const float color[static 4]);
-#if 1
 struct wlr_buffer *statusbar_buffer_from_argb32(const uint32_t *data, int width, int height);
 struct wlr_buffer *statusbar_buffer_from_argb32_raw(const uint32_t *data, int width, int height);
 struct wlr_buffer *statusbar_scaled_buffer_from_argb32(const uint32_t *data,
@@ -2002,45 +1652,11 @@ struct wlr_buffer *statusbar_scaled_buffer_from_argb32(const uint32_t *data,
 struct wlr_buffer *statusbar_scaled_buffer_from_argb32_raw(const uint32_t *data,
 		int width, int height, int target_h);
 struct wlr_buffer *statusbar_buffer_from_glyph(const struct fcft_glyph *glyph);
-struct wlr_buffer *statusbar_buffer_from_pixbuf(GdkPixbuf *pixbuf, int target_h, int *out_w, int *out_h);
-struct wlr_buffer *statusbar_buffer_from_wifi100(int target_h, int *out_w, int *out_h);
-void recolor_wifi100_pixbuf(GdkPixbuf *pixbuf);
-int tray_load_svg_pixbuf(const char *path, int desired_h, GdkPixbuf **out_pixbuf);
-int has_svg_extension(const char *path);
-int pathisdir(const char *path);
-int strip_symbolic_suffix(const char *name, char *out, size_t outlen);
-void tray_consider_icon(const char *path, int size_hint, int desired_h,
-	char *best_path, int *best_diff, int *found);
-void add_icon_root_paths(const char *base, const char *themes[], size_t theme_count,
-	char pathbufs[][PATH_MAX], size_t *pathcount, size_t max_paths);
 int loadstatusfont(void);
 void freestatusfont(void);
 int status_text_width(const char *text);
-void fix_tray_argb32(uint32_t *pixels, size_t count, int use_rgba_order);
-#endif
-
-struct CpuCursorBuffer *cpu_cursor_buffer_create(int drm_fd, uint32_t w, uint32_t h, int owns_fd);
-void cpu_cursor_buffer_destroy(struct CpuCursorBuffer *buf);
-void nixly_cursor_set_xcursor(const char *name);
-void nixly_cursor_set_client_surface(struct wlr_surface *surface, int hx, int hy);
 int resolve_asset_path(const char *path, char *out, size_t len);
-
-/* Pending launch tracking — remember tag/monitor at launch time so
- * slow-starting apps land on the tag where they were launched, even
- * if the user switches tags before the window maps. */
-#define MAX_PENDING_LAUNCHES 16
-#define PENDING_LAUNCH_TIMEOUT_MS 60000 /* 60s for very slow apps */
-
-void pending_launch_add(pid_t pid, uint32_t tags, const char *output_name);
-int pending_launch_find(pid_t client_pid, uint32_t *out_tags,
-	char *out_output, size_t out_output_sz);
-
-#if 0
-void normalize_proc_name(char *name);
-#endif
-
-/* client_utils.c */
-pid_t client_get_pid(Client *c);
+void fix_tray_argb32(uint32_t *pixels, size_t count, int use_rgba_order);
 
 /* client.c */
 void applybounds(Client *c, struct wlr_box *bbox);
@@ -2064,8 +1680,6 @@ void setsticky(Client *c, int sticky);
 void togglefloating(const Arg *arg);
 void togglefullscreen(const Arg *arg);
 void togglefullscreenadaptivesync(const Arg *arg);
-struct wlr_box fullscreen_mirror_geom(Monitor *m);
-void togglemirror(const Arg *arg);
 void togglesticky(const Arg *arg);
 void updatetitle(struct wl_listener *listener, void *data);
 void urgent(struct wl_listener *listener, void *data);
@@ -2084,8 +1698,6 @@ void fullscreennotify(struct wl_listener *listener, void *data);
 void setpsel(struct wl_listener *listener, void *data);
 void setsel(struct wl_listener *listener, void *data);
 void resize(Client *c, struct wlr_box geo, int interact);
-void client_apply_scene_geom(Client *c, struct wlr_box geo);
-void client_send_configure_only(Client *c, int w, int h);
 void tag(const Arg *arg);
 void tagmon(const Arg *arg);
 void toggletag(const Arg *arg);
@@ -2096,91 +1708,24 @@ void rotate_clients(const Arg *arg);
 void moveresize(const Arg *arg);
 int is_video_content(Client *c);
 int is_game_content(Client *c);
-int client_has_fullscreen_ancestor(Client *c);
 int is_steam_client(Client *c);
 int is_steam_popup(Client *c);
 int is_steam_game(Client *c);
 int is_browser_client(Client *c);
 int looks_like_game(Client *c);
-int is_retro_emulator_client(Client *c);
-void read_steam_properties(Client *c);
 int is_steam_cmd(const char *cmd);
-int is_game_launcher_child(pid_t pid);
+int is_steam_child_process(pid_t pid);
 int client_wants_tearing(Client *c);
 void track_client_frame(Client *c);
 float detect_video_framerate(Client *c);
 int any_client_fullscreen(void);
 Client *get_fullscreen_client(void);
-Client *fullscreen_visible_on(Monitor *m);
-int client_is_fs_companion(Client *c, Client *fsc);
 int is_process_running(const char *name);
-
-/* workspace.c (Niri-style) */
-Workspace *workspace_create(Monitor *m);
-void workspace_destroy(Workspace *ws);
-Column *column_create(Workspace *ws);
-void column_destroy(Column *col);
-void column_add_client(Column *col, Client *c);
-void column_remove_client(Client *c);
-void monitor_init_workspaces(Monitor *m);
-void monitor_cleanup_workspaces(Monitor *m);
-void monitor_compact_workspaces(Monitor *m);
-int workspace_has_clients(Workspace *ws);
-void workspace_attach_client(Workspace *ws, Client *c);
-void workspace_detach_client(Client *c);
-void workspace_drop_tile(Workspace *ws, Client *c, double screen_x);
-void workspace_focus_client(Client *c);
-void workspace_layout(Workspace *ws);
-void monitor_apply_positions(Monitor *m);
-void workspace_switch(Monitor *m, Workspace *target);
-void workspace_focus_dir(Monitor *m, int dir);
-Column *workspace_focus_col_dir(Workspace *ws, int dir);
-void focus_workspace_dir(const Arg *arg);
-void focus_column_dir(const Arg *arg);
-void move_column_dir(const Arg *arg);
-void move_client_to_ws_dir(const Arg *arg);
-void focus_workspace_n(const Arg *arg);
-void move_client_to_ws_n(const Arg *arg);
-void focus_last_workspace(const Arg *arg);
-void toggle_column_fullscreen(const Arg *arg);
-void switch_preset_column_width(const Arg *arg);
-void resize_column_dir(const Arg *arg);
-void maximize_column(const Arg *arg);
-void center_column(const Arg *arg);
-void swap_window_dir(const Arg *arg);
-void expel_window_from_column(const Arg *arg);
-void move_window_in_column_dir(const Arg *arg);
-void focus_window_in_column_dir(const Arg *arg);
-extern const double preset_column_widths[];
-extern const int n_preset_column_widths;
-extern const int default_column_width_idx;
-
-/* dwl_ipc.c — zdwl_ipc_manager_v2 server (waybar dwl/tags/window) */
-void dwl_ipc_init(struct wl_display *display);
-void dwl_ipc_finish(void);
-void dwl_ipc_publish(void);
-
-/* window_ipc.c — Niri-compatible Unix-socket IPC subset (waybar niri/workspaces) */
-void window_ipc_init(struct wl_event_loop *loop);
-void window_ipc_finish(void);
-void window_ipc_publish_workspaces(void);
-void window_ipc_publish_workspace_activated(void);
-
-/* anim.c */
-int anim_tick(double *current, double target, double rate, double dt);
-int spring_tick(double *pos, double *vel, double target, SpringParams sp, double dt);
-int monitor_anim_tick(Monitor *m, double dt);
-void client_set_target_geom(Client *c, struct wlr_box g);
-void client_scale_to_box(Client *c, int box_w, int box_h);
-void client_scale_reset(Client *c);
-void client_unfreeze(Client *c);
-void client_start_open_anim(Client *c);
-void anim_spawn_close(Monitor *m, struct wlr_buffer *buffer, struct wlr_box geom);
-void closing_anims_tick(Monitor *m, double dt, int *still);
-void client_apply_open_anim(Client *c);
 
 /* layout.c */
 void arrange(Monitor *m);
+int htpc_view_is_active(Monitor *m, unsigned int view_tag, int visible);
+void htpc_views_update_visibility(Monitor *m);
 void arrangelayer(Monitor *m, struct wl_list *list,
 		struct wlr_box *usable_area, int exclusive);
 void arrangelayers(Monitor *m);
@@ -2190,8 +1735,6 @@ void btrtile(Monitor *m);
 void setlayout(const Arg *arg);
 void setmfact(const Arg *arg);
 void incnmaster(const Arg *arg);
-void compensate_column_resize(LayoutNode *split_node, float old_ratio,
-		float new_ratio, Client *focused);
 void setratio_h(const Arg *arg);
 void setratio_v(const Arg *arg);
 void swapclients(const Arg *arg);
@@ -2212,10 +1755,9 @@ void keypress(struct wl_listener *listener, void *data);
 void keypressmod(struct wl_listener *listener, void *data);
 int keyrepeat(void *data);
 void createpointer(struct wlr_pointer *pointer);
-void newkbshortcutsinhibitor(struct wl_listener *listener, void *data);
 void createpointerconstraint(struct wl_listener *listener, void *data);
 void destroypointerconstraint(struct wl_listener *listener, void *data);
-void checkconstraint(void);
+void cursorconstrain(struct wlr_pointer_constraint_v1 *constraint);
 void cursorframe(struct wl_listener *listener, void *data);
 void cursorwarptohint(void);
 void motionabsolute(struct wl_listener *listener, void *data);
@@ -2260,67 +1802,35 @@ void powermgrsetmode(struct wl_listener *listener, void *data);
 void gpureset(struct wl_listener *listener, void *data);
 void requestmonstate(struct wl_listener *listener, void *data);
 void updatemons(struct wl_listener *listener, void *data);
-void auto_arrange_monitors(void);
-void warp_cursor_to_startup_monitor(void);
 void set_adaptive_sync(Monitor *m, int enabled);
 void set_video_refresh_rate(Monitor *m, Client *c);
 void restore_max_refresh_rate(Monitor *m);
-void apply_console_mode(Monitor *m, Client *c);
-void restore_console_mode(Monitor *m);
-int client_wants_console_mode(Client *c);
 int detect_10bit_support(Monitor *m);
-void monitor_wake(Monitor *m);
-void ll_cursor_init(Monitor *m);
-void ll_cursor_move(Monitor *m, int x, int y);
-void ll_cursor_cleanup(Monitor *m);
 int set_drm_color_properties(Monitor *m, int max_bpc);
 int enable_10bit_rendering(Monitor *m);
-void force_hdmi_full_range(Monitor *m);
 void init_monitor_color_settings(Monitor *m);
 void update_game_vrr(Monitor *m, float current_fps);
 void enable_game_vrr(Monitor *m);
 void disable_game_vrr(Monitor *m);
 void check_fullscreen_video(void);
 void schedule_video_check(uint32_t ms);
-void invalidate_video_pacing(Monitor *m);
 int enable_vrr_video_mode(Monitor *m, float video_hz);
 void disable_vrr_video_mode(Monitor *m);
 int set_custom_video_mode(Monitor *m, float exact_hz);
-int apply_best_video_mode(Monitor *m, float video_hz);
-
-typedef struct {
-	int method;
-	struct wlr_output_mode *mode;
-	int multiplier;
-	float target_hz;
-	float actual_hz;
-	float score;
-	float judder_ms;
-} VideoModeCandidate;
-VideoModeCandidate find_best_video_mode(Monitor *m, float video_hz);
-struct wlr_output_mode *find_mode(struct wlr_output *output, int width, int height, float refresh);
-float score_video_mode(int method, float video_hz, float display_hz, int multiplier);
-float calculate_judder_ms(float video_hz, float display_hz);
 void generate_cvt_mode(drmModeModeInfo *mode, int hdisplay, int vdisplay, float vrefresh);
 void show_hz_osd(Monitor *m, const char *msg);
 void hide_hz_osd(Monitor *m);
 int hz_osd_timeout(void *data);
 void testhzosd(const Arg *arg);
 void setcustomhz(const Arg *arg);
+void render_playback_osd(void);
+void hide_playback_osd(void);
+int playback_osd_timeout(void *data);
 struct wlr_output_mode *bestmode(struct wlr_output *output);
 RuntimeMonitorConfig *find_monitor_config(const char *name);
 void calculate_monitor_position(Monitor *m, RuntimeMonitorConfig *cfg, int *out_x, int *out_y);
-void monitor_effective_size(Monitor *m, int *w, int *h);
 
-/* dwl-style status broadcast on stdout — waybar's dwl/tags module
- * reads this from its stdin to render workspace selectors. */
-void printstatus(void);
-
-/* Toggle waybar via SIGUSR1 (in workspace.c) */
-void togglewaybar(const Arg *arg);
-void togglestatusbar(const Arg *arg);
-
-#if 1
+/* statusbar.c */
 void initstatusbar(Monitor *m);
 void layoutstatusbar(Monitor *m, const struct wlr_box *area,
 		struct wlr_box *client_area);
@@ -2342,7 +1852,6 @@ void renderworkspaces(Monitor *m, StatusModule *module, int bar_height);
 int tray_render_label(StatusModule *module, const char *text, int x, int bar_height,
 		const float color[static 4]);
 void rendertrayicons(Monitor *m, int bar_height);
-void rendertray(Monitor *m, int bar_height);
 void refreshstatusclock(void);
 void refreshstatuslight(void);
 void refreshstatusvolume(void);
@@ -2352,24 +1861,18 @@ void refreshstatusnet(void);
 void refreshstatuscpu(void);
 void refreshstatusram(void);
 void refreshstatusicons(void);
-void refreshstatusfan(void);
 void refreshstatustags(void);
 void init_status_refresh_tasks(void);
-void seed_status_rng(void);
-uint32_t random_status_delay_ms(void);
-double volume_last_for_type(int is_headset);
-void volume_cache_store(int is_headset, double level, int muted, uint64_t now);
 int status_should_render(StatusModule *module, int barh, const char *text,
 		char *last_text, size_t last_len, int *last_h);
 void initial_status_refresh(void);
 void schedule_status_timer(void);
 void schedule_next_status_refresh(void);
-int any_bar_visible(void);
 int status_task_hover_active(void (*fn)(void));
-void netlink_monitor_setup(void);
 void trigger_status_task_now(void (*fn)(void));
 void set_status_task_due(void (*fn)(void), uint64_t due_ms);
 void schedule_hover_timer(void);
+void togglestatusbar(const Arg *arg);
 int ensure_cpu_icon_buffer(int target_h);
 void drop_cpu_icon_buffer(void);
 int ensure_light_icon_buffer(int target_h);
@@ -2382,11 +1885,6 @@ int ensure_clock_icon_buffer(int target_h);
 void drop_clock_icon_buffer(void);
 int ensure_mic_icon_buffer(int target_h);
 void drop_mic_icon_buffer(void);
-void drop_net_icon_buffer(void);
-void drop_bluetooth_icon_buffer(void);
-void drop_steam_icon_buffer(void);
-void drop_discord_icon_buffer(void);
-void init_net_icon_paths(void);
 int ensure_volume_icon_buffer(int target_h);
 void drop_volume_icon_buffer(void);
 void rendercpupopup(Monitor *m);
@@ -2404,30 +1902,13 @@ int ram_popup_hover_index(Monitor *m, RamPopup *p);
 int ram_proc_cmp(const void *a, const void *b);
 int read_top_ram_processes(RamPopup *p);
 int ram_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
-/* read_battery_info is file-local to statusbar.c (static) */
+void read_battery_info(BatteryPopup *p);
 int battery_popup_clamped_x(Monitor *m, BatteryPopup *p);
 void updatetaghover(Monitor *m, double cx, double cy);
 void updatenethover(Monitor *m, double cx, double cy);
 void updatecpuhover(Monitor *m, double cx, double cy);
 void updateramhover(Monitor *m, double cx, double cy);
 void updatebatteryhover(Monitor *m, double cx, double cy);
-
-/* fancontrol.c */
-void fan_scan_hwmon(FanPopup *p);
-void fan_read_all(FanPopup *p);
-void fan_write_pwm(FanEntry *f, int pwm);
-void fan_set_manual(FanEntry *f);
-void fan_set_auto(FanEntry *f);
-void renderfanpopup(Monitor *m);
-int fan_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
-void fan_popup_handle_drag(Monitor *m, double cx, double cy);
-void updatefanhover(Monitor *m, double cx, double cy);
-void renderfan(StatusModule *module, int bar_height, const char *text);
-int ensure_fan_icon_buffer(int target_h);
-void drop_fan_icon_buffer(void);
-/* fan_boost_activate/deactivate are file-local (static) in gamemode.c */
-void fan_thermal_start(void);
-void fan_thermal_stop(void);
 int updatestatuscpu(void *data);
 int updatestatusclock(void *data);
 int updatehoverfade(void *data);
@@ -2480,7 +1961,6 @@ void tray_menu_hide_all(void);
 int tray_item_get_menu_path(TrayItem *it);
 int tray_menu_open_at(Monitor *m, TrayItem *it, int icon_x);
 void tray_menu_render(Monitor *m);
-void tray_menu_draw_text(struct wlr_scene_tree *tree, const char *text, int x, int y, int row_h);
 TrayMenuEntry *tray_menu_entry_at(Monitor *m, int lx, int ly);
 int tray_menu_send_event(TrayMenu *menu, TrayMenuEntry *entry, uint32_t time_msec);
 int tray_menu_parse_node(sd_bus_message *msg, TrayMenu *menu, int depth, int max_depth);
@@ -2508,14 +1988,8 @@ void wifi_networks_clear(void);
 void request_wifi_scan(void);
 void wifi_scan_plan_rescan(void);
 int wifi_scan_event_cb(int fd, uint32_t mask, void *data);
-int wifi_scan_timer_cb(void *data);
-void wifi_scan_finish(void);
 void connect_wifi_ssid(const char *ssid);
-void transfer_status_menus(Monitor *from, Monitor *to);
-int net_menu_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 void vpn_connections_clear(void);
-VpnConnection *vpn_connection_at_index(int idx);
-WifiNetwork *wifi_network_at_index(int idx);
 int vpn_scan_event_cb(int fd, uint32_t mask, void *data);
 void vpn_connect(const char *name);
 int vpn_connect_event_cb(int fd, uint32_t mask, void *data);
@@ -2553,40 +2027,14 @@ void osk_hide(Monitor *m);
 void osk_hide_all(void);
 void osk_render(Monitor *m);
 int osk_handle_button(Monitor *m, int button, int value);
-void osk_dpad_repeat_start(Monitor *m, int button);
-void osk_dpad_repeat_stop(void);
 Monitor *osk_visible_monitor(void);
 void osk_send_key(Monitor *m);
 void osk_send_backspace(Monitor *m);
 void osk_send_text(const char *text);
 int toast_hide_timer(void *data);
 void toast_show(Monitor *m, const char *message, int duration_ms);
-#endif /* statusbar / fan / tray / network / popup */
 
-#if 0 /* monitor_setup.c — partly broken, types missing */
-void monitor_setup_show(Monitor *m);
-void monitor_setup_hide(Monitor *m);
-void monitor_setup_render(Monitor *m);
-int monitor_setup_handle_button(Monitor *m, int lx, int ly, uint32_t button, uint32_t state);
-void monitor_setup_handle_motion(Monitor *m, int lx, int ly);
-int monitor_setup_handle_key(Monitor *m, xkb_keysym_t sym);
-void monitor_setup_apply(Monitor *m);
-void write_monitors_conf(SetupMonitorEntry *entries, int count);
-Monitor *monitor_setup_visible_monitor(void);
-
-/* config.c — monitors.conf */
-int load_monitors_conf(void);
-int monitors_conf_exists(void);
-void setup_monitors_conf_watch(void);
-void reload_monitors_conf(void);
-int schedule_monitor_setup_popup(void);
-
-/* monitor_setup.c — external overlay (nixlycc IPC) */
-void setup_monitor_overlay_watch(void);
-void monitor_overlay_update(void);
-#endif /* monitor_setup.c */
-
-#if 0 /* launcher.c / nixpkgs.c removed */
+/* launcher.c */
 void modal_show(const Arg *arg);
 void modal_show_files(const Arg *arg);
 void modal_show_git(const Arg *arg);
@@ -2644,19 +2092,57 @@ int nixpkgs_cache_timer_cb(void *data);
 void schedule_nixpkgs_cache_timer(void);
 int cache_update_timer_cb(void *data);
 void schedule_cache_update_timer(void);
-#endif /* launcher / nixpkgs */
 
-/* gpu.c */
+/* gaming.c */
+void pc_gaming_show(Monitor *m);
+void pc_gaming_hide(Monitor *m);
+void pc_gaming_hide_all(void);
+Monitor *pc_gaming_visible_monitor(void);
+void pc_gaming_render(Monitor *m);
+void pc_gaming_refresh_games(Monitor *m);
+void pc_gaming_free_games(Monitor *m);
+void pc_gaming_scan_steam(Monitor *m);
+void pc_gaming_scan_heroic(Monitor *m);
+int pc_gaming_handle_button(Monitor *m, int button, int value);
+int pc_gaming_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym);
+void pc_gaming_launch_game(Monitor *m);
+void pc_gaming_scroll(Monitor *m, int delta);
+void pc_gaming_install_popup_show(Monitor *m, GameEntry *g);
+void pc_gaming_install_popup_hide(Monitor *m);
+void pc_gaming_install_popup_render(Monitor *m);
+int pc_gaming_install_popup_handle_button(Monitor *m, int button, int value);
+void pc_gaming_load_game_icon(GameEntry *g, int target_w, int target_h);
+void pc_gaming_cache_update_start(void);
+int pc_gaming_cache_inotify_cb(int fd, uint32_t mask, void *data);
+void pc_gaming_cache_watch_setup(void);
+void retro_gaming_show(Monitor *m);
+void retro_gaming_hide(Monitor *m);
+void retro_gaming_hide_all(void);
+Monitor *retro_gaming_visible_monitor(void);
+void retro_gaming_render(Monitor *m);
+int retro_gaming_handle_button(Monitor *m, int button, int value);
+int retro_gaming_animate(void *data);
 void detect_gpus(void);
-void filter_igpu_without_display(void);
-void dgpu_assert_power_on(GpuInfo *gpu);
-void dgpu_power_watchdog_start(void);
 int should_use_dgpu(const char *cmd);
 void set_dgpu_env(void);
 void set_steam_env(void);
 
+/* media.c */
+void media_view_show(Monitor *m, MediaViewType type);
+void media_view_hide(Monitor *m, MediaViewType type);
+void media_view_hide_all(void);
+void media_view_render(Monitor *m, MediaViewType type);
+void media_view_render_detail(Monitor *m, MediaViewType type);
+int media_view_refresh(Monitor *m, MediaViewType type);
+int media_view_poll_timer_cb(void *data);
+void media_view_free_items(MediaGridView *view);
+int media_view_handle_button(Monitor *m, MediaViewType type, int button, int value);
+int media_view_handle_key(Monitor *m, MediaViewType type, xkb_keysym_t sym);
+void media_view_scroll(Monitor *m, MediaViewType type, int delta);
+void media_view_load_poster(MediaItem *item, int target_w, int target_h);
+Monitor *media_view_visible_monitor(void);
 
-#if 0 /* gamepad.c / bluetooth.c removed */
+/* gamepad.c */
 void gamepad_menu_show(Monitor *m);
 void gamepad_menu_hide(Monitor *m);
 void gamepad_menu_hide_all(void);
@@ -2674,6 +2160,7 @@ void gamepad_setup(void);
 void gamepad_cleanup(void);
 int gamepad_cursor_timer_cb(void *data);
 int gamepad_pending_timer_cb(void *data);
+int handle_playback_osd_input(int button);
 void gamepad_update_cursor(void);
 int gamepad_inactivity_timer_cb(void *data);
 void gamepad_turn_off_led_sysfs(GamepadDevice *gp);
@@ -2682,6 +2169,8 @@ void gamepad_resume(GamepadDevice *gp);
 int gamepad_any_monitor_active(void);
 void gamepad_grab(GamepadDevice *gp);
 void gamepad_ungrab(GamepadDevice *gp);
+void gamepad_update_grab_state(void);
+int gamepad_should_grab(void);
 
 /* bluetooth.c */
 int bt_bus_event_cb(int fd, uint32_t mask, void *data);
@@ -2689,99 +2178,37 @@ void bt_controller_setup(void);
 void bt_controller_cleanup(void);
 int bt_scan_timer_cb(void *data);
 void bt_start_discovery(void);
-int bt_get_objects_disconnect_cb(sd_bus_message *reply, void *userdata, sd_bus_error *error);
 void bt_stop_discovery(void);
 int bt_is_gamepad_name(const char *name);
 void bt_pair_device(const char *path);
 void bt_connect_device(const char *path);
 void bt_trust_device(const char *path);
 int bt_device_signal_cb(sd_bus_message *m, void *userdata, sd_bus_error *error);
-#endif /* gamepad / bluetooth */
 
-/* gamemode.c */
+/* htpc.c */
+void htpc_mode_enter(void);
+void htpc_mode_exit(void);
+void htpc_mode_toggle(const Arg *arg);
+void htpc_menu_build(void);
 void update_game_mode(void);
-void schedule_game_mode_update(void);
-void gm_bg_init(void);
-void gm_bg_cleanup(void);
-void freeze_background_processes(void);
-void unfreeze_background_processes(void);
-void apply_memory_optimization(void);
-void restore_memory_optimization(void);
-void apply_cpu_latency_qos(void);
-void restore_cpu_latency_qos(void);
-void apply_cpu_affinity(pid_t game_pid);
-void restore_cpu_affinity(pid_t game_pid);
-void apply_transparent_hugepages(void);
-void restore_transparent_hugepages(void);
-void apply_io_scheduler(void);
-void restore_io_scheduler(void);
-void apply_disable_watchdog(void);
-void restore_watchdog(void);
-void apply_raw_input(void);
-void restore_raw_input(void);
-void apply_irq_affinity(void);
-void restore_irq_affinity(void);
-void apply_scheduler_tuning(void);
-void restore_scheduler_tuning(void);
-void apply_gpu_power_state(void);
-void restore_gpu_power_state(void);
-void apply_gpu_sched_priority(pid_t pid);
-void restore_gpu_sched_priority(pid_t pid);
-void apply_dirty_writeback_tuning(void);
-void restore_dirty_writeback_tuning(void);
-void apply_disable_split_lock(void);
-void restore_split_lock(void);
-void apply_mglru_tuning(void);
-void restore_mglru_tuning(void);
-void apply_power_profile_performance(void);
-void restore_power_profile(void);
-void lower_competing_processes(pid_t game_pid);
-void restore_competing_processes(void);
-/* client_utils.c */
+void steam_set_ge_proton_default(void);
+void cec_switch_to_active_source(void);
 void steam_launch_bigpicture(void);
 void steam_kill(void);
 void live_tv_kill(void);
-float ease_out_cubic(float t);
-
-/* apptoggle.c — gamepad L1+R1 toggle between nixlymedia and retroarch */
-void apptoggle_setup(void);
-void apptoggle_cleanup(void);
-
-/* nixlytile.c */
-void steam_set_ge_proton_default(void);
-
-#if 0 /* bluetooth.c / config.c removed */
-void cec_switch_to_active_source(void);
+int game_refocus_timer_cb(void *data);
+void schedule_game_refocus(Client *c, uint32_t ms);
 void gamepanel(const Arg *arg);
 Monitor *stats_panel_visible_monitor(void);
 int stats_panel_handle_key(Monitor *m, xkb_keysym_t sym);
-#endif
 
-/* config_loader.c */
-int load_config(void);
-int reload_config(void);
-extern char nixlytile_config_path[];
-
-/* Runtime window rules (loaded from KDL) — used in client.c applyrules()
- * in preference to the compile-time rules[] when count > 0. */
-extern Rule  *runtime_rules;
-extern size_t runtime_rules_count;
-
-/* Runtime xkb_rule_names (loaded from KDL).  getxkbrules() uses this in
- * preference to the compile-time xkb_rules when runtime_xkb_rules_set. */
-extern struct xkb_rule_names runtime_xkb_rules;
-extern int                   runtime_xkb_rules_set;
-
-/* Runtime autostart list — populated by load_config(); spawned in run().
- * Diff-applied on reload. */
-extern char **runtime_autostart;
-extern size_t runtime_autostart_count;
-extern pid_t *runtime_autostart_pids;
-
-/* 1 if load_config() found and parsed config.kdl successfully.  When set,
- * the legacy compile-time autostart_cmd is NOT run; runtime_autostart is
- * authoritative (including an empty list). */
-extern int runtime_config_loaded;
+/* config.c */
+void load_config(void);
+void reload_config(void);
+int config_watch_handler(int fd, uint32_t mask, void *data);
+void setup_config_watch(void);
+void init_keybindings(void);
+void config_expand_path(const char *src, char *dst, size_t dstlen);
 
 /* layer.c */
 void createlayersurface(struct wl_listener *listener, void *data);
@@ -2807,82 +2234,6 @@ void cleanup(void);
 void cleanuplisteners(void);
 void handlesig(int signo);
 void spawn(const Arg *arg);
-pid_t spawn_cmd(const char *cmd);
-
-/*
- * Detach a forked child from the compositor's event loop.
- * Must be called in the child after fork(), before exec/exit.
- * Closes the inherited wayland event loop epoll fd and resets
- * signal handlers to prevent the child from interacting with
- * compositor state (DRM, libinput, timers).
- */
-static inline void
-fork_detach(void)
-{
-	close(wl_event_loop_get_fd(event_loop));
-	signal(SIGCHLD, SIG_DFL);
-	signal(SIGINT, SIG_DFL);
-	signal(SIGTERM, SIG_DFL);
-	signal(SIGPIPE, SIG_DFL);
-
-	/* Drop ambient capabilities inherited from the compositor
-	 * (cap_sys_nice, cap_sys_admin, etc.). Without this, bwrap
-	 * refuses to run: "Unexpected capabilities but not setuid". */
-	prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
-}
-
-/*
- * Ensure NixOS per-user profile bin dirs are in PATH.
- * Desktop files for per-user packages use relative binary names
- * (e.g. "FreeCAD", "gimp-3.0") that need these dirs in PATH.
- * Call in forked child before exec.
- */
-static inline void
-ensure_nix_paths(void)
-{
-	const char *user = getenv("USER");
-	const char *home = getenv("HOME");
-	const char *path = getenv("PATH");
-	char extra[PATH_MAX];
-	char newpath[8192];
-	int need_update = 0;
-
-	if (!path)
-		path = "/run/current-system/sw/bin";
-
-	snprintf(newpath, sizeof(newpath), "%s", path);
-
-	if (user) {
-		snprintf(extra, sizeof(extra), "/etc/profiles/per-user/%s/bin", user);
-		if (!strstr(newpath, extra)) {
-			char tmp[8192];
-			snprintf(tmp, sizeof(tmp), "%s:%s", extra, newpath);
-			snprintf(newpath, sizeof(newpath), "%s", tmp);
-			need_update = 1;
-		}
-	}
-
-	if (home) {
-		snprintf(extra, sizeof(extra), "%s/.nix-profile/bin", home);
-		if (!strstr(newpath, extra)) {
-			char tmp[8192];
-			snprintf(tmp, sizeof(tmp), "%s:%s", extra, newpath);
-			snprintf(newpath, sizeof(newpath), "%s", tmp);
-			need_update = 1;
-		}
-	}
-
-	/* System-wide NixOS binaries */
-	if (!strstr(newpath, "/run/current-system/sw/bin")) {
-		char tmp[8192];
-		snprintf(tmp, sizeof(tmp), "%s:/run/current-system/sw/bin", newpath);
-		snprintf(newpath, sizeof(newpath), "%s", tmp);
-		need_update = 1;
-	}
-
-	if (need_update)
-		setenv("PATH", newpath, 1);
-}
 void quit(const Arg *arg);
 uint64_t get_time_ns(void);
 uint64_t monotonic_msec(void);
@@ -2893,12 +2244,9 @@ int node_contains_client(LayoutNode *node, Client *c);
 int subtree_bounds(LayoutNode *node, Monitor *m, struct wlr_box *out);
 LayoutNode *ancestor_split(LayoutNode *node, int want_vert);
 
-#if 0 /* btrtile.c removed */
+/* btrtile.c */
 void btrtile_insert(LayoutNode **root, Client *c, Monitor *m);
 void btrtile_remove(LayoutNode **root, Client *c);
-void remove_client(Monitor *m, Client *c);
-void destroy_tree(Monitor *m);
-void init_tree(Monitor *m);
 void btrtile_apply(LayoutNode *root, struct wlr_box area, Monitor *m);
 LayoutNode *btrtile_find(LayoutNode *root, Client *c);
 LayoutNode *btrtile_focus_dir(LayoutNode *root, Client *current, int dir);
@@ -2906,20 +2254,6 @@ void btrtile_swap(LayoutNode *a, LayoutNode *b);
 void btrtile_free(LayoutNode *root);
 int btrtile_count(LayoutNode *root);
 void btrtile_set_ratio(LayoutNode *node, float ratio);
-LayoutNode **get_current_root(Monitor *m);
-LayoutNode *find_client_node(LayoutNode *node, Client *c);
-int insert_client(Monitor *m, Client *focused_client, Client *new_client);
-void insert_client_at(Monitor *m, Client *target, Client *new_client, double cx, double cy);
-Client *xytoclient(double x, double y);
-void start_tile_drag(Monitor *m, Client *c);
-void end_tile_drag(void);
-int same_column(Monitor *m, Client *c1, Client *c2);
-void swap_columns(Monitor *m, Client *c1, Client *c2);
-int can_move_tile(Monitor *m, Client *source, Client *target);
-void swap_tiles_in_tree(Monitor *m, Client *c1, Client *c2);
-extern int resizing_from_mouse;
-extern int drag_was_alone_in_column;
-#endif /* btrtile.c */
 
 /* XWayland */
 #ifdef XWAYLAND
@@ -2930,79 +2264,8 @@ void createnotifyx11(struct wl_listener *listener, void *data);
 void dissociatex11(struct wl_listener *listener, void *data);
 void minimizenotify(struct wl_listener *listener, void *data);
 void sethints(struct wl_listener *listener, void *data);
-void setoverrideredirect(struct wl_listener *listener, void *data);
 void xwaylandready(struct wl_listener *listener, void *data);
 #endif
-
-#if 0 /* screenshot.c removed */
-#define SCREENSHOT_NONE      0
-#define SCREENSHOT_PENDING   1
-#define SCREENSHOT_SELECTING 2
-#define SCREENSHOT_DRAGGING  3
-extern int screenshot_mode;
-void screenshot_begin(const Arg *arg);
-void screenshot_capture_frame(Monitor *m, struct wlr_buffer *buffer);
-void screenshot_handle_button(uint32_t button, uint32_t state, uint32_t time_msec);
-void screenshot_handle_motion(void);
-void screenshot_handle_key(xkb_keysym_t sym);
-void screenshot_cancel(void);
-#endif
-
-/* diagnostics logging */
-extern int diag_log_fd;
-extern int audio_log_fd;
-extern int error_log_fd;
-extern int game_log_fd;
-extern struct wl_event_source *diag_timer;
-
-#include <stdarg.h>
-static inline void diag_log_error(const char *module, const char *fmt, ...)
-{
-	if (error_log_fd < 0) return;
-	struct timespec ts; struct tm tm;
-	clock_gettime(CLOCK_REALTIME, &ts);
-	localtime_r(&ts.tv_sec, &tm);
-	char buf[1024];
-	int off = snprintf(buf, sizeof(buf), "[%02d:%02d:%02d.%03ld] [%s] ",
-		tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec/1000000, module);
-	va_list ap; va_start(ap, fmt);
-	off += vsnprintf(buf+off, sizeof(buf)-off, fmt, ap);
-	va_end(ap);
-	if (off < (int)sizeof(buf)-1) buf[off++] = '\n';
-	(void)!write(error_log_fd, buf, off);
-}
-
-static inline void diag_log_audio(const char *fmt, ...)
-{
-	if (audio_log_fd < 0) return;
-	struct timespec ts; struct tm tm;
-	clock_gettime(CLOCK_REALTIME, &ts);
-	localtime_r(&ts.tv_sec, &tm);
-	char buf[1024];
-	int off = snprintf(buf, sizeof(buf), "[%02d:%02d:%02d.%03ld] ",
-		tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec/1000000);
-	va_list ap; va_start(ap, fmt);
-	off += vsnprintf(buf+off, sizeof(buf)-off, fmt, ap);
-	va_end(ap);
-	if (off < (int)sizeof(buf)-1) buf[off++] = '\n';
-	(void)!write(audio_log_fd, buf, off);
-}
-
-static inline void game_log(const char *fmt, ...)
-{
-	if (game_log_fd < 0) return;
-	struct timespec ts; struct tm tm;
-	clock_gettime(CLOCK_REALTIME, &ts);
-	localtime_r(&ts.tv_sec, &tm);
-	char buf[2048];
-	int off = snprintf(buf, sizeof(buf), "[%02d:%02d:%02d.%03ld] ",
-		tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec/1000000);
-	va_list ap; va_start(ap, fmt);
-	off += vsnprintf(buf+off, sizeof(buf)-off, fmt, ap);
-	va_end(ap);
-	if (off < (int)sizeof(buf)-1) buf[off++] = '\n';
-	(void)!write(game_log_fd, buf, off);
-}
 
 /* client.h helpers (inline) */
 #include "client.h"

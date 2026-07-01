@@ -166,6 +166,7 @@ const char *fuzzelcmd[] = { "fuzzel", NULL };
 const char *apptogglecmd[] = { "apptoggle", NULL };
 const char *lockcmd[] = { "nixly-lockscreen", NULL };
 const char *screenshotcmd[] = { "grimshot", "copy", "area", NULL };
+const char *screenshotscreencmd[] = { "grimshot", "copy", "output", NULL };
 
 /* Startup matches Niri spawn-at-startup list.  Waybar uses the
  * nixlytile-specific config (dwl/tags + matching style.css). */
@@ -232,6 +233,8 @@ const Key keys[] = {
 	{ MODKEY,                    XKB_KEY_F12,        spawn,          {.v = lockcmd} },
 	{ MODKEY,                    XKB_KEY_BackSpace,  spawn,          {.v = chromecmd} },
 	{ MODKEY,                    XKB_KEY_s,          spawn,          {.v = screenshotcmd} },
+	{ 0,                         XKB_KEY_Print,      spawn,          {.v = screenshotcmd} },
+	{ WLR_MODIFIER_SHIFT,        XKB_KEY_Print,      spawn,          {.v = screenshotscreencmd} },
 
 	/* Workspaces */
 	{ MODKEY,                    XKB_KEY_1,          focus_workspace_n, {.i = 0} },

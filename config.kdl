@@ -109,7 +109,8 @@ log-level "debug"
 // hot-reload can SIGTERM removed entries and spawn newly added ones.
 autostart "swaybg -i \"$HOME/.nixlyos/wallpapers/beach.jpg\" -m fill"
 autostart "$HOME/.local/bin/niri-set-max-mode.sh --watch"
-autostart "waybar"
+// waybar replaced by the built-in embedded status bar + tray
+// autostart "waybar"
 autostart "nm-applet --indicator"
 autostart "blueman-applet"
 autostart "xwayland-satellite"
@@ -149,6 +150,8 @@ bind "Mod+Escape"       "spawn" "nixly-lockscreen"
 bind "Mod+F12"          "spawn" "nixly-lockscreen"
 bind "Mod+BackSpace"    "spawn" "google-chrome-stable --ozone-platform-hint=auto --enable-features=UseOzonePlatform,WaylandWindowDecorations"
 bind "Mod+s"            "spawn" "grimshot copy area"
+bind "Print"            "spawn" "grimshot copy area"
+bind "Shift+Print"      "spawn" "grimshot copy output"
 
 // Window management
 bind "Mod+q"            "killclient"

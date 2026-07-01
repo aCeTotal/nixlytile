@@ -113,6 +113,7 @@ int fullscreen_adaptive_sync_enabled = 1;
 int fps_limit_enabled = 0;        /* 1 if FPS limiter is active */
 int fps_limit_value = 60;         /* FPS limit value (default 60) */
 int game_mode_active = 0; /* Set when any client is fullscreen - pauses background tasks */
+int htpc_mode_active = 0; /* HTPC mode (media center); statusbar throttles refresh when set */
 int game_mode_ultra = 0;  /* Ultra game mode - maximum performance, minimal latency */
 Client *game_mode_client = NULL;  /* The fullscreen game client */
 pid_t game_mode_pid = 0;  /* PID of fullscreen game process */

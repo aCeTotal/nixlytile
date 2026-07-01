@@ -187,6 +187,14 @@ arrangelayers(Monitor *m)
 	for (i = 3; i >= 0; i--)
 		arrangelayer(m, &m->layers[i], &usable_area, 1);
 
+	/* Reserve space for the embedded status bar at the top, then let
+	 * tiles fill what remains below it. */
+	{
+		struct wlr_box below_bar = usable_area;
+		layoutstatusbar(m, &usable_area, &below_bar);
+		usable_area = below_bar;
+	}
+
 	/* Add gap-px around tile area: gap below waybar, gap above bottom
 	 * edge, gap on left + right.  This guarantees tiles are inset by
 	 * exactly gappx from the waybar AND from screen edges, matching

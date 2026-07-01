@@ -207,23 +207,21 @@ const char *nixlylaunchercmd[] = { "apptoggle", NULL };
 const char *menucmd[] __attribute__((unused)) = { "wmenu-run", NULL };
 const char *netcmd[] = { "nm-connection-editor", NULL };
 const char *pavucontrolcmd[] = { "pavucontrol", NULL };
-const char *screenshotcmd[] __attribute__((unused)) = { "/bin/sh", "-c", "slurp | grim -g - - | wl-copy", NULL };
+const char *screenshotcmd[] = { "grimshot", "copy", "area", NULL };
+const char *screenshotscreencmd[] = { "grimshot", "copy", "output", NULL };
 const char *thunarcmd[] = { "thunar", NULL };
 
 /* Wallpaper path - can be overridden by config file */
 char wallpaper_path[PATH_MAX] = "$HOME/.nixlyos/wallpapers/beach.jpg";
 
-/* Startup command run when no -s is provided; closes stdin to avoid status pipe */
-/* The shell that runs this command inherits its stdin from a pipe
- * fed by the compositor's stdout (see run() in nixlytile.c).  We
- * background everything except waybar, then `exec waybar` so waybar
- * inherits the pipe — that's how its dwl/tags module receives our
- * printstatus() workspace events. */
+/* Startup command run when no -s is provided.  waybar is replaced by the
+ * built-in embedded status bar + system tray, so it is no longer spawned. */
 char autostart_cmd[4096] =
 	"eval $(gnome-keyring-daemon --start --components=secrets,ssh,pkcs11) & "
 	"thunar --daemon & "
-	"swaybg -i \"$HOME/.nixlyos/wallpapers/beach.jpg\" -m fill & "
-	"exec waybar";
+	"nm-applet --indicator & "
+	"blueman-applet & "
+	"swaybg -i \"$HOME/.nixlyos/wallpapers/beach.jpg\" -m fill";
 
 /* Maximum number of runtime keybindings */
 #define MAX_KEYS 256
@@ -257,6 +255,11 @@ const Key default_keys[] = {
 	{ MODKEY,                    XKB_KEY_e,          spawn,          {.v = thunarcmd} },
 	{ MODKEY,                    XKB_KEY_BackSpace,  spawn,          {.v = chromecmd} },
 	{ MODKEY,                    XKB_KEY_p,          spawn,          {.v = nixlylaunchercmd} },
+
+	/* Screenshot — mark & copy region (Mod+s / Print), full screen (Shift+Print) */
+	{ MODKEY,                    XKB_KEY_s,          spawn,          {.v = screenshotcmd} },
+	{ 0,                         XKB_KEY_Print,      spawn,          {.v = screenshotcmd} },
+	{ WLR_MODIFIER_SHIFT,        XKB_KEY_Print,      spawn,          {.v = screenshotscreencmd} },
 
 	/* Column focus (horizontal scroll within workspace) */
 	{ MODKEY,                    XKB_KEY_h,          focus_column_dir,    {.i = -1} },
@@ -299,7 +302,7 @@ const Key default_keys[] = {
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_F,          togglefullscreen,  {0} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_space,      togglefloating,    {0} },
 	{ MODKEY,                    XKB_KEY_c,          togglefloating,    {0} },
-	{ MODKEY,                    XKB_KEY_b,          togglewaybar,      {0} },
+	{ MODKEY,                    XKB_KEY_b,          togglestatusbar,   {0} },
 
 	/* Multi-monitor */
 	{ MODKEY,                    XKB_KEY_comma,      focusmon,       {.i = WLR_DIRECTION_LEFT} },

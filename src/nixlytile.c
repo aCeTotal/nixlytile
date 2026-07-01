@@ -2448,6 +2448,20 @@ setup(void)
 	stall_watch_start();
 	gm_bg_init();
 
+	/* ── embedded status bar + system tray (replaces waybar) ────────── */
+	wl_list_init(&tray_items);
+	status_timer = wl_event_loop_add_timer(event_loop, updatestatusclock, NULL);
+	status_cpu_timer = wl_event_loop_add_timer(event_loop, updatestatuscpu, NULL);
+	status_hover_timer = wl_event_loop_add_timer(event_loop, updatehoverfade, NULL);
+	tray_init();
+	fcft_initialized = fcft_init(FCFT_LOG_COLORIZE_NEVER, 0, FCFT_LOG_CLASS_ERROR);
+	if (!fcft_initialized)
+		die("couldn't initialize fcft");
+	init_net_icon_paths();
+	if (!loadstatusfont())
+		die("couldn't load statusbar font");
+	tray_update_icons_text();
+
 	/* SIGUSR1 → reload ~/.config/nixlytile/config.kdl.  Handled on the
 	 * wl event loop (no async-signal concerns). */
 	wl_event_loop_add_signal(event_loop, SIGUSR1, sigusr1_reload, NULL);
@@ -3153,6 +3167,17 @@ setup(void)
 
 	if (diag_timer && diag_log_fd >= 0)
 		wl_event_source_timer_update(diag_timer, 5000);
+
+	/* ── kick off status bar refresh loops ──────────────────────────── */
+	initial_status_refresh();
+	if (status_timer)
+		schedule_status_timer();
+	if (status_cpu_timer) {
+		init_status_refresh_tasks();
+		schedule_next_status_refresh();
+	}
+	if (status_hover_timer)
+		wl_event_source_timer_update(status_hover_timer, 0);
 }
 
 /* Detect all GPUs in the system */

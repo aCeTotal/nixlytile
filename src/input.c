@@ -6,7 +6,7 @@ static void (*last_keybinding_func)(const Arg *);
 /* btrtile.c removed — local stubs to keep input.c compiling */
 static int resizing_from_mouse = 0;
 static int drag_was_alone_in_column = 0;
-static uint64_t last_pointer_motion_ms = 0;
+uint64_t last_pointer_motion_ms = 0;
 
 /* Mouse-drag column resize state (Mod+Left near an edge). */
 #define COL_RESIZE_EDGE_PX 50
@@ -371,7 +371,6 @@ axisnotify(struct wl_listener *listener, void *data)
 			event->delta_discrete, event->source, event->relative_direction);
 }
 
-#if 0 /* statusbar click helpers removed */
 /* Returns 1 if click was handled by a statusbar module */
 static int
 handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
@@ -380,8 +379,8 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 	StatusModule *mic = &m->statusbar.mic;
 	StatusModule *vol = &m->statusbar.volume;
 	StatusModule *cpu = &m->statusbar.cpu;
-	StatusModule *fan = &m->statusbar.fan;
 	StatusModule *sys = &m->statusbar.sysicons;
+	StatusModule *tray = &m->statusbar.traylabel;
 	StatusModule *bt = &m->statusbar.bluetooth;
 	StatusModule *stm = &m->statusbar.steam;
 	StatusModule *dsc = &m->statusbar.discord;
@@ -396,21 +395,23 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 			return 1;
 	}
 
-	if (m->statusbar.fan_popup.visible) {
-		if (fan_popup_handle_click(m, lx, ly, button))
-			return 1;
-	}
-
 	if (lx < 0 || ly < 0 ||
 			lx >= m->statusbar.area.width ||
 			ly >= m->statusbar.area.height)
 		return 0;
 
-	if (button == BTN_RIGHT &&
-			sys->width > 0 &&
-			lx >= sys->x && lx < sys->x + sys->width) {
-		net_menu_hide_all();
-		net_menu_open(m);
+	/* System-tray (SNI) item click → activate / context menu */
+	if (tray->width > 0 && lx >= tray->x && lx < tray->x + tray->width) {
+		TrayItem *it;
+		int local = lx - tray->x;
+		wl_list_for_each(it, &tray_items, link) {
+			if (it->w > 0 && local >= it->x && local < it->x + it->w) {
+				int sx = m->statusbar.area.x + tray->x + it->x;
+				int sy = m->statusbar.area.y + m->statusbar.area.height;
+				tray_item_activate(it, button, button == BTN_RIGHT, sx, sy);
+				return 1;
+			}
+		}
 		return 1;
 	}
 
@@ -425,29 +426,6 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 	if (cpu->width > 0 && lx >= cpu->x && lx < cpu->x + cpu->width) {
 		Arg arg = { .v = btopcmd };
 		spawn(&arg);
-		return 1;
-	}
-
-	/* Fan module click - toggle fan popup */
-	if (button == BTN_LEFT &&
-			fan->width > 0 &&
-			lx >= fan->x && lx < fan->x + fan->width) {
-		FanPopup *fp = &m->statusbar.fan_popup;
-		if (fp->visible) {
-			fp->visible = 0;
-			fp->dragging = 0;
-			if (fp->tree)
-				wlr_scene_node_set_enabled(&fp->tree->node, 0);
-		} else {
-			if (fp->device_count == 0)
-				fan_scan_hwmon(fp);
-			fp->visible = 1;
-			if (fp->tree) {
-				wlr_scene_node_set_enabled(&fp->tree->node, 1);
-				renderfanpopup(m);
-				positionstatusmodules(m);
-			}
-		}
 		return 1;
 	}
 
@@ -513,7 +491,6 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 	}
 	return 0;
 }
-#endif /* statusbar / pipewire / fan helpers */
 
 void
 handle_pointer_button_internal(uint32_t button, uint32_t state, uint32_t time_msec)
@@ -530,6 +507,32 @@ handle_pointer_button_internal(uint32_t button, uint32_t state, uint32_t time_ms
 		selmon = xytomon(cursor->x, cursor->y);
 		if (locked)
 			goto notify_client;
+
+		/* An open tray context-menu eats the next click. */
+		if (selmon && selmon->statusbar.tray_menu.visible) {
+			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
+			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
+			TrayMenu *menu = &selmon->statusbar.tray_menu;
+			int relx = lx - menu->x;
+			int rely = ly - menu->y;
+			if (relx >= 0 && rely >= 0 &&
+					relx < menu->width && rely < menu->height) {
+				TrayMenuEntry *entry = tray_menu_entry_at(selmon, relx, rely);
+				if (entry)
+					tray_menu_send_event(menu, entry, time_msec);
+				tray_menu_hide_all();
+				return;
+			}
+			tray_menu_hide_all();
+		}
+
+		/* Clicks on the embedded status bar (tags, tray, modules). */
+		if (selmon && selmon->showbar) {
+			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
+			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
+			if (handle_statusbar_clicks(selmon, lx, ly, button))
+				return;
+		}
 
 		/* Change focus if the button was _pressed_ over a client.
 		 * lift=0 → focus but DO NOT warp cursor.  The user clicked
