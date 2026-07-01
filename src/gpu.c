@@ -605,7 +605,14 @@ filter_igpu_without_display(void)
 	 * laptops the Nvidia dGPU (no usable CRTC) sometimes wins → black screen
 	 * at boot (intermittent).  Keep the remaining GPUs (dGPU for offload)
 	 * after the iGPU.  card_path is resolved per-boot by detect_gpus(), so
-	 * this stays correct even if card numbers swap across boots. */
+	 * this stays correct even if card numbers swap across boots.
+	 *
+	 * Only include extra GPUs that actually have a connected display:
+	 * a display-less dGPU as a secondary DRM device gives wlroots a
+	 * backend with zero connectors to init a renderer/allocator on
+	 * (broken on Nvidia proprietary) → black screen.  Offload clients
+	 * reach the dGPU via render nodes; it doesn't need to be a wlroots
+	 * backend for that. */
 	if (integrated_gpu_idx >= 0 &&
 	    detected_gpus[integrated_gpu_idx].card_path[0]) {
 		char devices[512];
@@ -614,6 +621,14 @@ filter_igpu_without_display(void)
 		for (i = 0; i < detected_gpu_count; i++) {
 			if (i == integrated_gpu_idx || !detected_gpus[i].card_path[0])
 				continue;
+			if (!gpu_has_connected_display(detected_gpus[i].card_index)) {
+				wlr_log(WLR_INFO,
+					"Hybrid: card%d (%s) has no connected display — "
+					"excluding from wlroots backend",
+					detected_gpus[i].card_index,
+					detected_gpus[i].driver);
+				continue;
+			}
 			strncat(devices, ":", sizeof(devices) - strlen(devices) - 1);
 			strncat(devices, detected_gpus[i].card_path,
 				sizeof(devices) - strlen(devices) - 1);

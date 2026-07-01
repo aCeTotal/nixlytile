@@ -3403,7 +3403,10 @@ spawn(const Arg *arg)
 		}
 		cmd_str[pos] = '\0';
 	} else {
-		snprintf(cmd_str, sizeof(cmd_str), "%s", cmd);
+		/* arg->v is the {"/bin/sh","-c",cmd,NULL} vector from
+		 * make_spawn_vec(); the command string lives in slot 2. */
+		const char **vec = (const char **)arg->v;
+		snprintf(cmd_str, sizeof(cmd_str), "%s", vec[2]);
 	}
 
 	spawn_cmd(cmd_str);
