@@ -845,6 +845,7 @@ cleanuplisteners(void)
 	wl_list_remove(&cursor_motion_absolute.link);
 	wl_list_remove(&gpu_reset.link);
 	wl_list_remove(&new_idle_inhibitor.link);
+	wl_list_remove(&new_kb_shortcuts_inhibitor.link);
 	wl_list_remove(&layout_change.link);
 	wl_list_remove(&new_input_device.link);
 	wl_list_remove(&new_virtual_keyboard.link);
