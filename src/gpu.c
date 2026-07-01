@@ -598,6 +598,32 @@ filter_igpu_without_display(void)
 		return;
 	}
 
+	/* Default (offload) mode on a hybrid system with an integrated GPU:
+	 * force the iGPU first in WLR_DRM_DEVICES so wlroots uses it as the
+	 * primary renderer/display.  Without an explicit order wlroots picks
+	 * the primary from non-deterministic udev order; on muxless Intel+Nvidia
+	 * laptops the Nvidia dGPU (no usable CRTC) sometimes wins → black screen
+	 * at boot (intermittent).  Keep the remaining GPUs (dGPU for offload)
+	 * after the iGPU.  card_path is resolved per-boot by detect_gpus(), so
+	 * this stays correct even if card numbers swap across boots. */
+	if (integrated_gpu_idx >= 0 &&
+	    detected_gpus[integrated_gpu_idx].card_path[0]) {
+		char devices[512];
+		snprintf(devices, sizeof(devices), "%s",
+			detected_gpus[integrated_gpu_idx].card_path);
+		for (i = 0; i < detected_gpu_count; i++) {
+			if (i == integrated_gpu_idx || !detected_gpus[i].card_path[0])
+				continue;
+			strncat(devices, ":", sizeof(devices) - strlen(devices) - 1);
+			strncat(devices, detected_gpus[i].card_path,
+				sizeof(devices) - strlen(devices) - 1);
+		}
+		setenv("WLR_DRM_DEVICES", devices, 1);
+		wlr_log(WLR_INFO,
+			"Hybrid: iGPU-primary, WLR_DRM_DEVICES=%s", devices);
+		return;
+	}
+
 	/* Count GPUs that have at least one connected display */
 	for (i = 0; i < detected_gpu_count; i++) {
 		if (gpu_has_connected_display(detected_gpus[i].card_index))
