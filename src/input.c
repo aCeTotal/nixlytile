@@ -141,7 +141,6 @@ scrollsteps(const struct wlr_pointer_axis_event *event)
 	return steps;
 }
 
-#if 0 /* statusbar / pipewire helpers removed */
 int
 adjust_backlight_by_steps(int steps)
 {
@@ -339,13 +338,16 @@ handlestatusscroll(struct wlr_pointer_axis_event *event)
 
 	return 0;
 }
-#endif /* statusbar scroll helpers */
 
 void
 axisnotify(struct wl_listener *listener, void *data)
 {
 	struct wlr_pointer_axis_event *event = data;
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
+
+	/* Scroll on a statusbar module adjusts brightness/mic/volume. */
+	if (handlestatusscroll(event))
+		return;
 
 	/* Mod+vertical scroll → cycle through columns in the current
 	 * workspace.  Scroll down → next column right; scroll up → prev
@@ -591,6 +593,32 @@ buttonpress(struct wl_listener *listener, void *data)
 		selmon = xytomon(cursor->x, cursor->y);
 		if (locked)
 			break;
+
+		/* An open tray context-menu eats the next click. */
+		if (selmon && selmon->statusbar.tray_menu.visible) {
+			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
+			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
+			TrayMenu *menu = &selmon->statusbar.tray_menu;
+			int relx = lx - menu->x;
+			int rely = ly - menu->y;
+			if (relx >= 0 && rely >= 0 &&
+					relx < menu->width && rely < menu->height) {
+				TrayMenuEntry *entry = tray_menu_entry_at(selmon, relx, rely);
+				if (entry)
+					tray_menu_send_event(menu, entry, event->time_msec);
+				tray_menu_hide_all();
+				return;
+			}
+			tray_menu_hide_all();
+		}
+
+		/* Clicks on the embedded status bar (tags, tray, modules). */
+		if (selmon && selmon->showbar) {
+			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
+			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
+			if (handle_statusbar_clicks(selmon, lx, ly, event->button))
+				return;
+		}
 
 		/* Change focus if the button was _pressed_ over a client.
 		 * lift=0 → focus but DO NOT warp cursor.  The user clicked

@@ -356,20 +356,6 @@ vpn_connection_at_index(int idx)
 
 
 
-#if 0
-WifiNetwork *
-wifi_network_at_index(int idx)
-{
-	WifiNetwork *n;
-	int i = 0;
-	wl_list_for_each(n, &wifi_networks, link) {
-		if (i == idx)
-			return n;
-		i++;
-	}
-	return NULL;
-}
-#endif
 
 
 
@@ -1582,7 +1568,7 @@ const FuncEntry func_table[] = {
 	{ "togglefloating",    togglefloating,    0 },
 	{ "togglefullscreen",  togglefullscreen,  0 },
 	{ "togglegaps",        togglegaps,        0 },
-	{ "togglewaybar",      togglewaybar,      0 },
+	{ "togglestatusbar",   togglestatusbar,   0 },
 	{ "focusmon",          focusmon,          1 },
 	{ "tagmon",            tagmon,            1 },
 	{ "setlayout",         setlayout,         0 },

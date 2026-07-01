@@ -190,7 +190,7 @@ const Key keys[] = {
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_space,      togglefloating,    {0} },
 	{ MODKEY,                    XKB_KEY_c,          togglefloating,    {0} },
 	{ MODKEY,                    XKB_KEY_f,          maximize_column,   {0} },
-	{ MODKEY,                    XKB_KEY_b,          togglewaybar,      {0} },
+	{ MODKEY,                    XKB_KEY_b,          togglestatusbar,   {0} },
 
 	/* Focus navigation */
 	{ MODKEY,                    XKB_KEY_h,          focus_column_dir,            {.i = -1} },

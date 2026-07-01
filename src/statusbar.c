@@ -5677,8 +5677,7 @@ updatenethover(Monitor *m, double cx, double cy)
 	NetPopup *p;
 	uint64_t now = monotonic_msec();
 
-	if (!m || !m->showbar || !m->statusbar.net_popup.tree
-			|| (m->statusbar.net_menu.visible)) {
+	if (!m || !m->showbar || !m->statusbar.net_popup.tree) {
 		if (m && m->statusbar.net_popup.tree) {
 			wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
 			m->statusbar.net_popup.visible = 0;
@@ -5775,16 +5774,10 @@ initstatusbar(Monitor *m)
 		return;
 
 	wl_list_init(&m->statusbar.tray_menu.entries);
-	if (!wifi_networks_initialized) {
-		wl_list_init(&wifi_networks);
-		wifi_networks_initialized = 1;
-	}
 	if (!vpn_list_initialized) {
 		wl_list_init(&vpn_connections);
 		vpn_list_initialized = 1;
 	}
-	wl_list_init(&m->statusbar.net_menu.entries);
-	wl_list_init(&m->statusbar.net_menu.networks);
 	m->showbar = 1;
 	m->statusbar.area = (struct wlr_box){0};
 	m->statusbar.tree = wlr_scene_tree_create(layers[LyrTop]);
@@ -5816,18 +5809,6 @@ initstatusbar(Monitor *m)
 			m->statusbar.tray_menu.bg = wlr_scene_tree_create(m->statusbar.tray_menu.tree);
 			m->statusbar.tray_menu.visible = 0;
 			wlr_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 0);
-		}
-		m->statusbar.net_menu.tree = wlr_scene_tree_create(m->statusbar.tree);
-		if (m->statusbar.net_menu.tree) {
-			m->statusbar.net_menu.bg = wlr_scene_tree_create(m->statusbar.net_menu.tree);
-			m->statusbar.net_menu.submenu_tree = wlr_scene_tree_create(m->statusbar.tree);
-			if (m->statusbar.net_menu.submenu_tree)
-				m->statusbar.net_menu.submenu_bg = wlr_scene_tree_create(m->statusbar.net_menu.submenu_tree);
-			m->statusbar.net_menu.visible = 0;
-			m->statusbar.net_menu.submenu_visible = 0;
-			wlr_scene_node_set_enabled(&m->statusbar.net_menu.tree->node, 0);
-			if (m->statusbar.net_menu.submenu_tree)
-				wlr_scene_node_set_enabled(&m->statusbar.net_menu.submenu_tree->node, 0);
 		}
 		m->statusbar.cpu.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.cpu.tree)
@@ -5962,25 +5943,6 @@ initstatusbar(Monitor *m)
 			for (int i = 0; i < MODAL_MAX_RESULTS; i++)
 				m->nixpkgs.row_highlights[i] = NULL;
 			wlr_scene_node_set_enabled(&m->nixpkgs.tree->node, 0);
-		}
-	}
-	if (!m->wifi_popup.tree) {
-		m->wifi_popup.tree = wlr_scene_tree_create(layers[LyrTop]);
-		if (m->wifi_popup.tree) {
-			m->wifi_popup.bg = NULL;
-			m->wifi_popup.visible = 0;
-			m->wifi_popup.ssid[0] = '\0';
-			m->wifi_popup.password[0] = '\0';
-			m->wifi_popup.password_len = 0;
-			m->wifi_popup.cursor_pos = 0;
-			m->wifi_popup.button_hover = 0;
-			m->wifi_popup.connecting = 0;
-			m->wifi_popup.error = 0;
-			m->wifi_popup.try_saved = 0;
-			m->wifi_popup.connect_pid = -1;
-			m->wifi_popup.connect_fd = -1;
-			m->wifi_popup.connect_event = NULL;
-			wlr_scene_node_set_enabled(&m->wifi_popup.tree->node, 0);
 		}
 	}
 	if (!m->sudo_popup.tree) {

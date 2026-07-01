@@ -220,7 +220,7 @@ static const ActionEntry actions[] = {
 	{ "spawn",                        spawn,                        A_SPAWN },
 	{ "togglefloating",               togglefloating,               A_NONE },
 	{ "togglefullscreen",             togglefullscreen,             A_NONE },
-	{ "togglewaybar",                 togglewaybar,                 A_NONE },
+	{ "togglestatusbar",              togglestatusbar,              A_NONE },
 	{ "togglegaps",                   togglegaps,                   A_NONE },
 
 	{ "focus-column-dir",             focus_column_dir,             A_INT },

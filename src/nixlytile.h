@@ -574,24 +574,6 @@ typedef struct {
 	struct wl_list entries;
 } TrayMenu;
 
-typedef struct {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *bg;
-	struct wlr_scene_tree *submenu_tree;
-	struct wlr_scene_tree *submenu_bg;
-	int width, height;
-	int submenu_width, submenu_height;
-	int x, y;
-	int submenu_x, submenu_y;
-	int visible;
-	int submenu_visible;
-	int hover;
-	int submenu_hover;
-	int submenu_type;
-	struct wl_list entries;
-	struct wl_list networks;
-} NetMenu;
-
 struct StatusBar {
 	struct wlr_scene_tree *tree;
 	struct wlr_box area;
@@ -614,7 +596,6 @@ struct StatusBar {
 	NetPopup net_popup;
 	FanPopup fan_popup;
 	TrayMenu tray_menu;
-	NetMenu net_menu;
 	StatusModule sysicons;
 	StatusModule fan;
 };
@@ -752,39 +733,12 @@ typedef struct {
 } DesktopEntry;
 
 /* ── network types ─────────────────────────────────────────────────── */
-typedef struct WifiNetwork {
-	char ssid[128];
-	int strength;
-	int secure;
-	struct wl_list link;
-} WifiNetwork;
-
 typedef struct VpnConnection {
 	char name[128];
 	char uuid[64];
 	int active;
 	struct wl_list link;
 } VpnConnection;
-
-/* NetMenu is embedded in StatusBar as anonymous struct */
-
-typedef struct {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *bg;
-	int visible;
-	int width, height;
-	char ssid[128];
-	char password[256];
-	int password_len;
-	int cursor_pos;
-	int button_hover;
-	int connecting;
-	int error;
-	int try_saved;
-	pid_t connect_pid;
-	int connect_fd;
-	struct wl_event_source *connect_event;
-} WifiPasswordPopup;
 
 typedef struct {
 	struct wlr_scene_tree *tree;
@@ -1402,7 +1356,6 @@ struct Monitor {
 	ModalOverlay modal;
 	SudoPopup sudo_popup;
 	NixpkgsOverlay nixpkgs;
-	WifiPasswordPopup wifi_popup;
 	GamepadMenu gamepad_menu;
 };
 
@@ -1772,10 +1725,6 @@ extern double cpu_last_core_percent[];
 extern int cpu_core_count;
 
 /* net */
-extern pid_t wifi_scan_pid;
-extern int wifi_scan_fd;
-extern struct wl_event_source *wifi_scan_event;
-extern struct wl_event_source *wifi_scan_timer;
 extern struct wl_event_source *cpu_popup_refresh_timer;
 extern struct wl_event_source *ram_popup_refresh_timer;
 extern struct wl_event_source *popup_delay_timer;
@@ -1784,15 +1733,6 @@ extern struct wl_event_source *hz_osd_timer;
 extern struct wl_event_source *osk_dpad_repeat_timer;
 extern int osk_dpad_held_button;
 extern Monitor *osk_dpad_held_mon;
-extern char wifi_scan_buf[8192];
-extern size_t wifi_scan_len;
-extern int wifi_scan_inflight;
-extern unsigned int wifi_networks_generation;
-extern unsigned int wifi_scan_generation;
-extern int wifi_networks_accept_updates;
-extern int wifi_networks_freeze_existing;
-extern struct wl_list wifi_networks;
-extern int wifi_networks_initialized;
 extern struct wl_list vpn_connections;
 extern int vpn_list_initialized;
 extern pid_t vpn_scan_pid;
@@ -1928,8 +1868,6 @@ extern struct wlr_buffer *nixpkg_ok_icon_buf;
 extern int nixpkg_ok_icon_height;
 extern const uint32_t cpu_popup_refresh_interval_ms;
 extern const uint32_t ram_popup_refresh_interval_ms;
-extern const float net_menu_row_bg[];
-extern const float net_menu_row_bg_hover[];
 extern const double status_icon_scale;
 #endif
 
@@ -2316,8 +2254,6 @@ void monitor_effective_size(Monitor *m, int *w, int *h);
  * reads this from its stdin to render workspace selectors. */
 void printstatus(void);
 
-/* Toggle waybar via SIGUSR1 (in workspace.c) */
-void togglewaybar(const Arg *arg);
 void togglestatusbar(const Arg *arg);
 
 #if 1
@@ -2499,27 +2435,11 @@ TrayItem *tray_first_item(void);
 void tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y);
 
 /* network.c */
-void net_menu_hide_all(void);
-void net_menu_open(Monitor *m);
-void net_menu_render(Monitor *m);
-void net_menu_submenu_render(Monitor *m);
-void net_menu_update_hover(Monitor *m, double cx, double cy);
-void wifi_networks_clear(void);
-void request_wifi_scan(void);
-void wifi_scan_plan_rescan(void);
-int wifi_scan_event_cb(int fd, uint32_t mask, void *data);
-int wifi_scan_timer_cb(void *data);
-void wifi_scan_finish(void);
-void connect_wifi_ssid(const char *ssid);
-void transfer_status_menus(Monitor *from, Monitor *to);
-int net_menu_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 void vpn_connections_clear(void);
 VpnConnection *vpn_connection_at_index(int idx);
-WifiNetwork *wifi_network_at_index(int idx);
 int vpn_scan_event_cb(int fd, uint32_t mask, void *data);
 void vpn_connect(const char *name);
 int vpn_connect_event_cb(int fd, uint32_t mask, void *data);
-void connect_wifi_with_prompt(const char *ssid, int secure);
 void request_public_ip_async_ex(int force);
 void request_public_ip_async(void);
 void stop_public_ip_fetch(void);
@@ -2529,16 +2449,6 @@ int public_ip_event_cb(int fd, uint32_t mask, void *data);
 int ssid_event_cb(int fd, uint32_t mask, void *data);
 
 /* popup.c */
-void wifi_popup_show(Monitor *m, const char *ssid);
-void wifi_popup_hide(Monitor *m);
-void wifi_popup_hide_all(void);
-void wifi_popup_render(Monitor *m);
-int wifi_popup_handle_key(Monitor *m, uint32_t mods, xkb_keysym_t sym);
-int wifi_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
-Monitor *wifi_popup_visible_monitor(void);
-void wifi_popup_connect(Monitor *m);
-void wifi_try_saved_connect(Monitor *m, const char *ssid);
-int wifi_popup_connect_cb(int fd, uint32_t mask, void *data);
 void sudo_popup_show(Monitor *m, const char *title, const char *cmd, const char *pkg_name);
 void sudo_popup_hide(Monitor *m);
 void sudo_popup_hide_all(void);

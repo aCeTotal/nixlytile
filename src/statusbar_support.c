@@ -70,8 +70,6 @@ const float *statusbar_fg_override = NULL;
 struct wl_event_source *cpu_popup_refresh_timer = NULL;
 struct wl_event_source *ram_popup_refresh_timer = NULL;
 struct wl_event_source *popup_delay_timer = NULL;
-struct wl_list wifi_networks; /* WifiNetwork */
-int wifi_networks_initialized;
 struct wl_list vpn_connections; /* VpnConnection */
 int vpn_list_initialized;
 char net_text[64] = "Net: --";
@@ -217,6 +215,9 @@ char battery_device_dir[PATH_MAX];  /* e.g. /sys/class/power_supply/BAT0 */
 int battery_available;
 const double volume_max_percent = 150.0;
 const double mic_max_percent = 150.0;
+const double light_step = 5.0;   /* % per scroll notch */
+const double volume_step = 5.0;
+const double mic_step = 5.0;
 double cpu_last_core_percent[MAX_CPU_CORES];
 int cpu_core_count;
 char sysicons_text[64] = "Tray";

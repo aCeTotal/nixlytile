@@ -841,68 +841,6 @@ toggle_column_fullscreen(const Arg *arg)
 	arrange(selmon);
 }
 
-/* Toggle waybar by process kill/spawn.
- *
- * Scan /proc for any waybar process.  If found → SIGKILL all
- * (compositor-side toggle off).  If none → fork+execlp waybar
- * (toggle on).  We match by substring on /proc/<pid>/comm so the
- * NixOS launcher name ".waybar-wrapped" is caught too.
- *
- * Layer-shell teardown on waybar exit reclaims its exclusive zone;
- * arrangelayers() updates m->w_target on the next layer event, and
- * the m->w_x_f / w_y_f / w_w_f / w_h_f springs animate tiles into
- * the freed area at SPRING_WINDOW stiffness (smooth reflow).
- *
- * Compositor inherits a full user PATH from SDDM/login, so execlp
- * resolves "waybar" via /etc/profiles/per-user/<u>/bin.
- */
-void
-togglewaybar(const Arg *arg)
-{
-	DIR *d;
-	struct dirent *de;
-	char path[64];
-	char comm[64];
-	FILE *f;
-	size_t len;
-	int killed = 0;
-
-	(void)arg;
-	d = opendir("/proc");
-	if (!d)
-		return;
-	while ((de = readdir(d))) {
-		if (de->d_name[0] < '0' || de->d_name[0] > '9')
-			continue;
-		snprintf(path, sizeof(path), "/proc/%s/comm", de->d_name);
-		f = fopen(path, "r");
-		if (!f)
-			continue;
-		if (fgets(comm, sizeof(comm), f)) {
-			len = strlen(comm);
-			if (len && comm[len - 1] == '\n')
-				comm[len - 1] = '\0';
-			if (strstr(comm, "waybar")) {
-				pid_t pid = (pid_t)atoi(de->d_name);
-				if (pid > 0 && kill(pid, SIGKILL) == 0)
-					killed = 1;
-			}
-		}
-		fclose(f);
-	}
-	closedir(d);
-
-	if (killed)
-		return;
-
-	/* No running waybar — spawn a new one detached. */
-	if (fork() == 0) {
-		setsid();
-		execlp("waybar", "waybar", (char *)NULL);
-		_exit(127);
-	}
-}
-
 /* Niri: switch-preset-column-width — cycle the focused column through
  * the preset_column_widths array.  Wraps at the end. */
 void
