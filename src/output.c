@@ -948,10 +948,9 @@ createmon(struct wl_listener *listener, void *data)
 	wl_list_insert(&mons, &m->link);
 	printstatus();
 
-	/* Idle monitor render throttle */
+	/* Frame-done watchdog */
 	m->idle_heartbeat = wl_event_loop_add_timer(event_loop, idle_heartbeat_cb, m);
-	m->render_idle = 0;
-	m->idle_frames = 0;
+	m->hidden_done_ns = 0;
 
 	/* EDID re-probe: arm the escalating retry chain so TVs that publish
 	 * their full mode list only after HDMI handshake completes still end
@@ -1339,25 +1338,22 @@ static int
 idle_heartbeat_cb(void *data)
 {
 	Monitor *m = data;
-	if (m->render_idle)
-		request_frame(m);
-	return 0; /* one-shot; re-armed from rendermon */
+	request_frame(m);
+	return 0; /* one-shot; re-armed at the end of every rendermon pass */
 }
 
 static void
-monitor_wake_internal(Monitor *m)
+hidden_frame_done_iter(struct wlr_surface *surface, int sx, int sy, void *data)
 {
-	m->render_idle = 0;
-	m->idle_frames = 0;
-	wl_event_source_timer_update(m->idle_heartbeat, 0); /* disarm */
-	request_frame(m);
+	(void)sx; (void)sy;
+	wlr_surface_send_frame_done(surface, data);
 }
 
 void
 monitor_wake(Monitor *m)
 {
-	if (m && m->render_idle)
-		monitor_wake_internal(m);
+	if (m)
+		request_frame(m);
 }
 
 /*
@@ -2641,36 +2637,38 @@ frame_done:
 		m->frame_repeat_current = 0;
 	}
 
-	/* --- Idle monitor throttle --- */
-	{
-		/* Simple box test instead of xytomon() — same answer, no
-		 * output-layout list walk once per vblank per monitor. */
-		int cursor_here = wlr_box_contains_point(&m->m,
-				cursor->x, cursor->y);
+	/* --- Frame-done watchdog --- */
+	/* Re-armed on every pass; fires 1 s after the last vblank-driven
+	 * pass and schedules a new one, so an otherwise idle output
+	 * self-sustains a ~1 Hz rendermon loop and every visible surface
+	 * gets a steady frame_done drip no matter why the damage chain
+	 * stopped (idle desktop, client that stopped committing, race
+	 * between last commit and heartbeat arming).  The old idle gate
+	 * armed the heartbeat only after 120 consecutive idle passes —
+	 * on a static scene rendermon stops firing long before that, so
+	 * the gate never armed and a client waiting on frame_done
+	 * starved forever (nixlymedia's startup freeze). */
+	wl_event_source_timer_update(m->idle_heartbeat, 1000);
 
-		/* A visible fullscreen client is active content even when it
-		 * isn't (yet) classified as game/video — never idle-gate it,
-		 * or its buffer releases stall and the client's swapchain
-		 * blocks (e.g. video-in-subsurface before classification). */
-		if (cursor_here || is_game || is_video
-				|| fullscreen_visible_on(m)) {
-			if (m->render_idle)
-				monitor_wake_internal(m);
-			m->idle_frames = 0;
-		} else {
-			m->idle_frames++;
-			if (m->idle_frames > 120) {
-				m->render_idle = 1;
-				/* Re-arm every pass — the timer is one-shot, and
-				 * without this the heartbeat dies after its first
-				 * fire, leaving the monitor purely damage-driven. */
-				wl_event_source_timer_update(m->idle_heartbeat, 1000);
-				/* Send frame_done for this heartbeat cycle but don't
-				 * schedule another frame — heartbeat fires in ~1s */
-				wlr_scene_output_send_frame_done(m->scene_output, &now);
-				return;
-			}
+	/* Mapped-but-hidden surfaces (fullscreen client bound to an
+	 * inactive workspace, tiles behind a fullscreen client) are
+	 * skipped by wlr_scene_output_send_frame_done below — drip
+	 * frame_done to them at ~1 Hz so a render thread blocked on a
+	 * frame callback drains no matter how long it stays hidden.
+	 * Only surfaces that actually requested a callback get one. */
+	if (frame_start_ns - m->hidden_done_ns >= 1000000000ULL) {
+		Client *hc;
+		wl_list_for_each(hc, &clients, link) {
+			struct wlr_surface *hs;
+			if (hc->mon != m || !hc->scene || hc->scene->node.enabled)
+				continue;
+			hs = client_surface(hc);
+			if (!hs || !hs->mapped)
+				continue;
+			wlr_surface_for_each_surface(hs, hidden_frame_done_iter,
+					&now);
 		}
+		m->hidden_done_ns = frame_start_ns;
 	}
 
 	/*

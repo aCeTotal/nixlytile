@@ -1283,10 +1283,9 @@ struct Monitor {
 	 * causing visible black frames before the commit_failures fallback
 	 * kicks in. Locked at setfullscreen-enter, released at exit. */
 	int retro_scanout_lock;
-	/* Idle monitor render throttle */
-	int render_idle;                    /* 1 = idle mode, throttled to heartbeat */
-	int idle_frames;                    /* consecutive frames without cursor + no active content */
-	struct wl_event_source *idle_heartbeat; /* 1s periodic timer for idle monitors */
+	/* Frame-done watchdog */
+	uint64_t hidden_done_ns;            /* last 1 Hz frame_done drip to hidden mapped surfaces */
+	struct wl_event_source *idle_heartbeat; /* one-shot 1s watchdog, re-armed every rendermon pass */
 	/* EDID re-probe: TVs (esp. over HDMI from sleep) often expose no/limited
 	 * modes at createmon time, then publish full mode list once the HDMI
 	 * handshake completes. We retry bestmode at 2s/5s/15s after createmon,
