@@ -30,6 +30,22 @@ cleanupmon(struct wl_listener *listener, void *data)
 			wlr_layer_surface_v1_destroy(l->layer_surface);
 	}
 
+	/* Purge in-flight close animations on the dying monitor —
+	 * closing_anims_tick only processes entries for live monitors,
+	 * so orphans would keep their snapshot buffer locked and their
+	 * scene node visible forever. */
+	{
+		ClosingAnim *ca, *ca_tmp;
+		wl_list_for_each_safe(ca, ca_tmp, &closing_anims, link) {
+			if (ca->mon != m)
+				continue;
+			wl_list_remove(&ca->link);
+			if (ca->tree)
+				wlr_scene_node_destroy(&ca->tree->node);
+			free(ca);
+		}
+	}
+
 	wl_list_remove(&m->destroy.link);
 	wl_list_remove(&m->frame.link);
 	wl_list_remove(&m->present.link);
@@ -657,9 +673,9 @@ createmon(struct wl_listener *listener, void *data)
 	wl_list_init(&m->layers[i]);
 
 	m->showbar = 1;
-	initstatusbar(m);
-
-	monitor_init_workspaces(m);
+	/* Statusbar + workspace allocation happens after the first
+	 * successful commit below — the two bail-out paths (config-
+	 * disabled output, commit failure) free(m) and would leak them. */
 
 	wlr_output_state_init(&state);
 	/* Initialize monitor state using configured rules */
@@ -812,6 +828,9 @@ createmon(struct wl_listener *listener, void *data)
 		return;
 	}
 	wlr_output_state_finish(&state);
+
+	initstatusbar(m);
+	monitor_init_workspaces(m);
 
 	/* Check VRR capability - try to enable adaptive sync to test support */
 	m->vrr_capable = 0;
@@ -1871,14 +1890,21 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 			.dst_box = m->toast_overlay_dst,
 		};
 		overlay_layer_count = 1;
-	} else if (m->toast_overlay_layer && !m->toast_overlay_active) {
+		m->toast_overlay_disabled_sent = 0;
+	} else if (m->toast_overlay_layer && !m->toast_overlay_active &&
+	           !m->toast_overlay_disabled_sent) {
 		/* Toast was active but has been hidden — send a disable
-		 * layer state (buffer = NULL) so the plane is torn down. */
+		 * layer state (buffer = NULL) so the plane is torn down.
+		 * One-shot: without the latch this state is attached to
+		 * every commit forever, paying the backend's per-layer
+		 * test/assign cost each vblank. Cleared on commit failure
+		 * below so the teardown retries. */
 		overlay_layer_states[0] = (struct wlr_output_layer_state){
 			.layer = m->toast_overlay_layer,
 			.buffer = NULL,
 		};
 		overlay_layer_count = 1;
+		m->toast_overlay_disabled_sent = 1;
 	}
 	if (overlay_layer_count > 0) {
 		wlr_output_state_set_layers(state, overlay_layer_states,
@@ -1916,7 +1942,19 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 			state->committed &= ~WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED;
 			wlr_log(WLR_DEBUG, "VRR commit rejected on %s, retrying buffer-only",
 				m->wlr_output->name);
-			m->vrr_pending = 0;
+			/* The failure may have been caused by something else in
+			 * this commit (e.g. the tearing flip) — keep vrr_pending
+			 * so the change retries on the next frame instead of
+			 * silently dropping a deferred enable/disable.  Bounded:
+			 * give up after 3 strips so a hard driver rejection
+			 * doesn't cost a failed commit every frame. */
+			if (++m->vrr_pending_tries >= 3) {
+				wlr_log(WLR_ERROR,
+					"VRR change rejected %d times on %s — giving up",
+					m->vrr_pending_tries, m->wlr_output->name);
+				m->vrr_pending = 0;
+				m->vrr_pending_tries = 0;
+			}
 			committed = wlr_output_commit_state(m->wlr_output, state);
 		}
 
@@ -1933,6 +1971,10 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 			 * never displayed, so the swapchain's next buffer has
 			 * stale content from 2+ frames ago. */
 			wlr_damage_ring_add_whole(&m->scene_output->damage_ring);
+
+			/* Toast-plane teardown rode on this commit and was
+			 * lost — retry it on the next one. */
+			m->toast_overlay_disabled_sent = 0;
 
 			m->commit_failures++;
 
@@ -2117,7 +2159,6 @@ rendermon(struct wl_listener *listener, void *data)
 	int is_game = 0;
 	int is_direct_scanout = 0;
 	int use_frame_pacing = 0;
-	int state_built = 0;
 
 	m->frame_scheduled = 0;
 
@@ -2180,23 +2221,26 @@ rendermon(struct wl_listener *listener, void *data)
 		 * On present vblanks (new content): render normally, commit
 		 * the new frame to the display.
 		 */
-		wlr_output_state_init(&state);
-		if (m->tag_switch_debug > 0)
-			write(STDERR_FILENO, "TS:cadence-build>\n", 18);
-		needs_frame = wlr_scene_output_build_state(m->scene_output, &state, &opts);
-		if (m->tag_switch_debug > 0)
-			write(STDERR_FILENO, "TS:cadence-build<\n", 18);
-		if (!needs_frame) {
+		/* Hold decision: "did the player submit new content" is
+		 * exactly wlr_scene_output_needs_frame() (pending damage).
+		 * The old code built the scene state and misread its return
+		 * value as "new frame" — build succeeds even with zero new
+		 * content, so the hold path never held, and a real build
+		 * error was misread as a hold with no recovery.  Deferred
+		 * VRR/HDR transitions still need a commit, so don't hold
+		 * while one is pending. */
+		if (!wlr_scene_output_needs_frame(m->scene_output) &&
+		    !m->vrr_pending &&
+		    !m->hdr_entry_pending && !m->hdr_exit_pending) {
 			/* No new video frame - hold */
-			wlr_output_state_finish(&state);
 			request_frame(m);
 			wlr_scene_output_send_frame_done(m->scene_output, &now);
 			if (m->tag_switch_debug > 0)
 				m->tag_switch_debug--;
 			return;
 		}
-		state_built = 1;
-		/* New frame available - fall through to commit */
+		/* New content — fall through to the normal build path,
+		 * which has the 10-bit / XRGB8888 failure recovery. */
 	} else if (!is_video && m->video_cadence_active) {
 		/* Video exited fullscreen - deactivate cadence.
 		 * Clear all cadence state so rendermon doesn't enter the
@@ -2225,7 +2269,25 @@ rendermon(struct wl_listener *listener, void *data)
 	 * automatically use direct scanout - bypassing GPU composition entirely.
 	 * This gives optimal frame pacing for games and video.
 	 */
-	if (!state_built) {
+	{
+		/* Idle gate: nothing changed and no deferred output state
+		 * (VRR/HDR/toast-plane teardown) is waiting for a commit —
+		 * skip render + commit entirely.  Without this gate every
+		 * commit's pageflip fires the next frame event and the
+		 * compositor composites at full refresh forever, even on a
+		 * completely idle desktop. */
+		if (!wlr_scene_output_needs_frame(m->scene_output) &&
+		    !m->vrr_pending &&
+		    !m->hdr_entry_pending && !m->hdr_exit_pending &&
+		    !(m->toast_overlay_layer && !m->toast_overlay_active &&
+		      !m->toast_overlay_disabled_sent)) {
+			m->frames_since_content_change++;
+			m->last_frame_ns = frame_start_ns;
+			if (m->tag_switch_debug > 0)
+				m->tag_switch_debug--;
+			goto frame_done;
+		}
+
 		wlr_output_state_init(&state);
 		if (m->tag_switch_debug > 0)
 			write(STDERR_FILENO, "TS:scene-build>\n", 16);
@@ -2454,6 +2516,7 @@ rendermon(struct wl_listener *listener, void *data)
 	if (m->tag_switch_debug > 0)
 		m->tag_switch_debug--;
 
+frame_done:
 	/*
 	 * FPS Limiter - controls when we send frame_done to clients.
 	 *
@@ -2532,8 +2595,10 @@ rendermon(struct wl_listener *listener, void *data)
 
 	/* --- Idle monitor throttle --- */
 	{
-		Monitor *cursor_mon = xytomon(cursor->x, cursor->y);
-		int cursor_here = (cursor_mon == m);
+		/* Simple box test instead of xytomon() — same answer, no
+		 * output-layout list walk once per vblank per monitor. */
+		int cursor_here = wlr_box_contains_point(&m->m,
+				cursor->x, cursor->y);
 
 		if (cursor_here || is_game || is_video) {
 			if (m->render_idle)
@@ -4481,8 +4546,17 @@ invalidate_video_pacing(Monitor *m)
 
 	/* Enable diagnostic output for first 5 frames after tag switch.
 	 * Uses write(STDERR_FILENO) for unbuffered, immediate output
-	 * that survives compositor freezes. */
-	m->tag_switch_debug = 5;
+	 * that survives compositor freezes.  Debug-only: the write()
+	 * syscalls run inside rendermon, so don't pay them in normal use. */
+	{
+		static int dbg = -1;
+		if (dbg < 0) {
+			const char *v = getenv("NIXLY_DEBUG");
+			dbg = (v && v[0] && v[0] != '0') ? 1 : 0;
+		}
+		if (dbg)
+			m->tag_switch_debug = 5;
+	}
 
 	/* Fully invalidate the classify cache — clear BOTH the client
 	 * pointer AND the cached result flags.  Setting only the pointer
@@ -4546,10 +4620,18 @@ invalidate_video_pacing(Monitor *m)
 	schedule_video_check(200);
 }
 
+static struct wl_event_source *video_check_timer_src;
+
 void
 schedule_video_check(uint32_t ms)
 {
-	(void)ms;
+	if (!event_loop)
+		return;
+	if (!video_check_timer_src)
+		video_check_timer_src = wl_event_loop_add_timer(event_loop,
+				video_check_timeout, NULL);
+	if (video_check_timer_src)
+		wl_event_source_timer_update(video_check_timer_src, ms);
 }
 
 int

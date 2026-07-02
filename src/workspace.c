@@ -199,6 +199,10 @@ column_destroy(Column *col)
 	if (!col)
 		return;
 
+	/* Clear any in-flight mouse column-resize referencing this column
+	 * — the next motion event would write into freed memory. */
+	input_column_gone(col);
+
 	/* Detach any remaining clients (shouldn't normally happen — caller
 	 * should remove clients before destroying the column). */
 	wl_list_for_each_safe(c, ctmp, &col->clients, column_link) {
@@ -755,6 +759,12 @@ printstatus(void)
 	Workspace *ws;
 	uint32_t occ, sel, urg;
 
+	/* Text protocol on stdout only when something consumes it —
+	 * otherwise this is printf+fflush per monitor on every state
+	 * change (including every title change) for nothing. */
+	if (!status_stdout_enabled)
+		goto publish;
+
 	wl_list_for_each(m, &mons, link) {
 		if (!m->wlr_output)
 			continue;
@@ -765,7 +775,11 @@ printstatus(void)
 			if (ws->idx >= 31)
 				continue;
 			bit = 1u << ws->idx;
-			if (ws->n_columns > 0)
+			/* workspace_has_clients also counts fullscreen
+			 * clients bound via fs_ws (detached from columns) —
+			 * a workspace holding only a fullscreen game must
+			 * not show as empty. */
+			if (workspace_has_clients(ws))
 				occ |= bit;
 		}
 		if (m->active_ws && m->active_ws->idx < 31)
@@ -802,6 +816,7 @@ printstatus(void)
 	}
 	fflush(stdout);
 
+publish:
 	/* Niri waybar parity: emit zdwl_ipc events to bound clients. */
 	dwl_ipc_publish();
 
@@ -1074,6 +1089,10 @@ expel_window_from_column(const Arg *arg)
 	wl_list_init(&dst->clients);
 	dst->n_clients = 0;
 	dst->width_idx = -1;
+	dst->wide_tiles = client_wide_tile_count(c);
+	/* Snap into place on first layout instead of springing the
+	 * column in from x=0 with width 0. */
+	dst->just_created = 1;
 	wl_list_insert(&src->link, &dst->link);
 	ws->n_columns++;
 

@@ -39,20 +39,6 @@ double battery_last_percent = -1.0;
 char battery_text[32] = "--%";
 double net_last_down_bps = -1.0;
 double net_last_up_bps = -1.0;
-char last_cpu_render[32];
-char last_ram_render[32];
-char last_light_render[32];
-char last_volume_render[32];
-char last_mic_render[32];
-char last_battery_render[32];
-char last_net_render[64];
-int last_cpu_h;
-int last_ram_h;
-int last_light_h;
-int last_volume_h;
-int last_mic_h;
-int last_battery_h;
-int last_net_h;
 int battery_path_initialized;
 int backlight_paths_initialized;
 uint64_t volume_last_read_speaker_ms;
@@ -1212,8 +1198,12 @@ request_public_ip_async_ex(int force)
 	if (now == (time_t)-1)
 		return;
 
-	/* Skip rate limit if force is set (real-time update when hovering) */
-	if (!force && net_public_ip_last != 0 && (now - net_public_ip_last) < 300)
+	/* force (popup open) shortens the rate limit but never removes
+	 * it — the popup refresh ticks every second, and 1 curl/s against
+	 * an external service is pure waste (a public IP doesn't change
+	 * that fast). */
+	if (net_public_ip_last != 0 &&
+			(now - net_public_ip_last) < (force ? 30 : 300))
 		return;
 
 	if (public_ip_pid > 0 || public_ip_event)

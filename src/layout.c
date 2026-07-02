@@ -173,7 +173,7 @@ arrangelayers(Monitor *m)
 	int i;
 	struct wlr_box usable_area = m->m;
 	struct wlr_box client_area;
-	struct wlr_box old_w = m->w;
+	struct wlr_box old_w;
 	LayerSurface *l;
 	int gap = (m->gaps && gappx > 0) ? (int)gappx : 0;
 	uint32_t layers_above_shell[] = {
@@ -182,6 +182,19 @@ arrangelayers(Monitor *m)
 	};
 	if (!m->wlr_output->enabled)
 		return;
+
+	/* m->w must always mirror the tile-area springs.  updatemons
+	 * clobbers m->w with the full monitor box; if the springs are
+	 * already converged the anim tick never rewrites m->w, so tiles
+	 * would keep the full box and render under the status bar.
+	 * Restore the invariant before comparing against old_w below. */
+	if (m->w_initialized) {
+		m->w.x = (int)m->w_x_f;
+		m->w.y = (int)m->w_y_f;
+		m->w.width = (int)m->w_w_f;
+		m->w.height = (int)m->w_h_f;
+	}
+	old_w = m->w;
 
 	/* Arrange exclusive surfaces from top->bottom */
 	for (i = 3; i >= 0; i--)
@@ -362,8 +375,9 @@ togglegaps(const Arg *arg)
 	if (!selmon)
 		return;
 	selmon->gaps = !selmon->gaps;
+	/* arrangelayers arranges internally when the tile box changes
+	 * (it always does on a gap toggle) — no second arrange needed. */
 	arrangelayers(selmon);
-	arrange(selmon);
 }
 
 

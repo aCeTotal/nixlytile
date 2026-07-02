@@ -51,7 +51,10 @@ parse_color(const char *s, float out[4])
 	while (n && (s[n-1] == ' ' || s[n-1] == '\t')) n--;
 	int r, g, b, a = 255;
 	if (n == 3 || n == 4) {
-		int v[4] = {0, 0, 0, 15};
+		/* default alpha must be the EXPANDED value (0xff, not 15) —
+		 * the nibble expansion below only runs for parsed digits,
+		 * so "#fff" otherwise ends up 94% transparent. */
+		int v[4] = {0, 0, 0, 0xff};
 		for (size_t i = 0; i < n; i++) {
 			int h = hex_nibble(s[i]);
 			if (h < 0) return 0;
@@ -588,6 +591,11 @@ apply_bind(const KdlNode *n)
 	}
 	case A_TAGN: {
 		long li = 0; kdl_arg_int(n, 2, &li);
+		if (li < 0 || li > 31) {
+			wlr_log(WLR_ERROR,
+				"config: tag index %ld out of range (0-31), bind skipped", li);
+			return;
+		}
 		Arg a = { .ui = (unsigned int)(1u << li) };
 		memcpy((void *)&k->arg, &a, sizeof(a));
 		break;
@@ -745,14 +753,19 @@ apply_autostart_diff(char **new_cmds, size_t new_count, int initial)
 		return;
 	}
 
-	/* Mark kept entries. */
+	/* Mark kept entries; remember WHICH old slot matched so its pid
+	 * transfers to the new table.  Losing the pid meant a later
+	 * reload that removes the entry couldn't kill the process. */
 	int *keep_old = calloc(runtime_autostart_count, sizeof(int));
-	int *keep_new = calloc(new_count, sizeof(int));
+	long *match_old = calloc(new_count, sizeof(long));
+	pid_t *old_pids = runtime_autostart_pids;
+	for (size_t j = 0; j < new_count; j++)
+		match_old[j] = -1;
 	for (size_t i = 0; i < runtime_autostart_count; i++)
 		for (size_t j = 0; j < new_count; j++)
-			if (!keep_new[j] && !strcmp(runtime_autostart[i], new_cmds[j])) {
+			if (match_old[j] < 0 && !strcmp(runtime_autostart[i], new_cmds[j])) {
 				keep_old[i] = 1;
-				keep_new[j] = 1;
+				match_old[j] = (long)i;
 				break;
 			}
 
@@ -763,7 +776,6 @@ apply_autostart_diff(char **new_cmds, size_t new_count, int initial)
 		free(runtime_autostart[i]);
 	}
 	free(runtime_autostart);
-	free(runtime_autostart_pids);
 
 	runtime_autostart = calloc(new_count, sizeof(char *));
 	runtime_autostart_pids = calloc(new_count, sizeof(pid_t));
@@ -772,7 +784,10 @@ apply_autostart_diff(char **new_cmds, size_t new_count, int initial)
 	for (size_t j = 0; j < new_count; j++) {
 		runtime_autostart[j] = new_cmds[j];
 		runtime_autostart_pids[j] = -1;
-		if (keep_new[j]) continue;
+		if (match_old[j] >= 0) {
+			runtime_autostart_pids[j] = old_pids[match_old[j]];
+			continue;
+		}
 		/* Spawn newly added command via shell. */
 		pid_t pid = fork();
 		if (pid == 0) {
@@ -783,8 +798,9 @@ apply_autostart_diff(char **new_cmds, size_t new_count, int initial)
 			runtime_autostart_pids[j] = pid;
 		}
 	}
+	free(old_pids);
 	free(keep_old);
-	free(keep_new);
+	free(match_old);
 }
 
 /* ── file loader ──────────────────────────────────────────────────── */
@@ -838,6 +854,19 @@ apply_doc(const KdlDoc *doc, int initial)
 	size_t autostart_n = 0;
 	size_t autostart_cap = 0;
 
+	/* Pre-scan modifier nodes: "Mod" in a bind resolves through the
+	 * modkey global at bind-parse time, so a modkey node placed after
+	 * the binds would otherwise silently not apply to them. */
+	for (size_t i = 0; i < doc->n_roots; i++) {
+		const KdlNode *n = &doc->roots[i];
+		const char *s;
+		if (!strcmp(n->name, "modkey")) {
+			if (kdl_arg_string(n, 0, &s)) modkey = parse_modkey_name(s);
+		} else if (!strcmp(n->name, "monitorkey")) {
+			if (kdl_arg_string(n, 0, &s)) monitorkey = parse_modkey_name(s);
+		}
+	}
+
 	for (size_t i = 0; i < doc->n_roots; i++) {
 		const KdlNode *n = &doc->roots[i];
 		const char *s;
@@ -848,10 +877,9 @@ apply_doc(const KdlDoc *doc, int initial)
 		else if (!strcmp(n->name, "monitor"))       apply_monitor(n);
 		else if (!strcmp(n->name, "window-rule"))   apply_window_rule(n);
 		else if (!strcmp(n->name, "bind"))          apply_bind(n);
-		else if (!strcmp(n->name, "modkey")) {
-			if (kdl_arg_string(n, 0, &s)) modkey = parse_modkey_name(s);
-		} else if (!strcmp(n->name, "monitorkey")) {
-			if (kdl_arg_string(n, 0, &s)) monitorkey = parse_modkey_name(s);
+		else if (!strcmp(n->name, "modkey") ||
+				!strcmp(n->name, "monitorkey")) {
+			/* handled in the pre-scan above */
 		} else if (!strcmp(n->name, "wallpaper")) {
 			if (kdl_arg_string(n, 0, &s)) {
 				char *exp = expand_path(s);

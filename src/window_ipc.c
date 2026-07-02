@@ -257,11 +257,16 @@ build_workspaces_changed(char **out_buf, size_t *out_len)
 		if (!emitted_any || last_has_clients) {
 			if (!first)
 				APPEND(",");
-			/* Synthesized trailing empty has a unique negative-style id
-			 * derived from output name hash + max_idx so successive runs
-			 * stay stable for waybar's "is this the same workspace?". */
+			/* Synthesized trailing empty has a unique id derived
+			 * from an FNV-1a hash of the output name so successive
+			 * runs stay stable for waybar's "is this the same
+			 * workspace?" — a heap pointer here both leaked ASLR
+			 * layout to IPC clients and changed across restarts. */
+			uint32_t name_hash = 2166136261u;
+			for (const char *p = m->wlr_output->name; *p; p++)
+				name_hash = (name_hash ^ (unsigned char)*p) * 16777619u;
 			uint64_t synth_id = (uint64_t)0xFFFFFFFF00000000ULL
-				| (uint64_t)((uintptr_t)m & 0xFFFFFFFF);
+				| (uint64_t)name_hash;
 			APPEND("{\"id\":%llu,\"idx\":%d,\"name\":null,\"output\":%s,"
 				"\"is_urgent\":false,\"is_active\":false,\"is_focused\":false,"
 				"\"active_window_id\":null}",
@@ -641,7 +646,22 @@ window_ipc_finish(void)
 void
 window_ipc_publish_workspaces(void)
 {
-	if (wl_list_empty(&ipc_clients))
+	/* Cache the last emitted doc — printstatus() calls this on every
+	 * state change including title updates, which don't alter
+	 * workspace state at all.  Skip both the O(n²) rebuild and the
+	 * subscriber wakeups when nothing changed. */
+	static char *last_doc;
+	static size_t last_len;
+
+	int have_subscriber = 0;
+	NiriIpcClient *cl;
+	wl_list_for_each(cl, &ipc_clients, link) {
+		if (cl->subscribed) {
+			have_subscriber = 1;
+			break;
+		}
+	}
+	if (!have_subscriber)
 		return;
 
 	char *buf = NULL;
@@ -650,21 +670,35 @@ window_ipc_publish_workspaces(void)
 	if (!buf)
 		return;
 
-	NiriIpcClient *cl;
+	if (last_doc && len == last_len && memcmp(last_doc, buf, len) == 0) {
+		free(buf);
+		return;
+	}
+	free(last_doc);
+	last_doc = buf;
+	last_len = len;
+
 	wl_list_for_each(cl, &ipc_clients, link) {
 		if (cl->subscribed)
 			client_enqueue(cl, buf, len);
 	}
-	free(buf);
 }
 
 void
 window_ipc_publish_workspace_activated(void)
 {
+	static unsigned long long last_id;
+
 	if (wl_list_empty(&ipc_clients))
 		return;
 	if (!selmon || !selmon->active_ws)
 		return;
+
+	/* Re-announcing the same workspace on every printstatus (e.g.
+	 * per title change) makes subscribers re-render for nothing. */
+	if (selmon->active_ws->window_id == last_id)
+		return;
+	last_id = selmon->active_ws->window_id;
 
 	char buf[256];
 	int n = snprintf(buf, sizeof buf,

@@ -385,6 +385,11 @@ struct StatusModule {
 	uint32_t tagmask;
 	int hover_tag;
 	float hover_alpha[MAX_TAGS];
+	/* render dedup — per monitor, NOT global: a shared cache is
+	 * consumed by the first monitor in the loop and leaves modules
+	 * on monitors 2..N stale forever. */
+	char last_render_text[64];
+	int last_render_h;
 };
 
 typedef struct {
@@ -577,6 +582,7 @@ typedef struct {
 struct StatusBar {
 	struct wlr_scene_tree *tree;
 	struct wlr_box area;
+	int last_layout_h; /* bar height at last full module render; 0 = force */
 	StatusModule clock;
 	StatusModule cpu;
 	StatusModule battery;
@@ -608,6 +614,7 @@ struct TrayItem {
 	int has_menu;
 	int icon_tried;
 	int icon_failed;
+	uint64_t icon_retry_not_before_ms;
 	int x;
 	int w;
 	int icon_w;
@@ -940,6 +947,12 @@ typedef struct {
 	int isfloating, isurgent, isfullscreen, issticky, was_tiled;
 	int isfixed;                  /* float-type with fixed size — reject interactive resize */
 	int is_game_splash;         /* Game splash/EAC launcher → keep centered */
+	/* Memoized pid-based probes (0=unknown, 1=yes, -1=no).  The pid
+	 * never changes for a client, and the uncached versions walk
+	 * /proc on every call — from per-event hot paths like
+	 * configurex11 and buttonpress. */
+	int wine_verdict;
+	int launcher_child_verdict;
 	uint32_t resize;
 	int pending_resize_w, pending_resize_h;
 	struct wlr_box old_geom;
@@ -1175,6 +1188,7 @@ struct Monitor {
 	int vrr_active;
 	float vrr_target_hz;
 	int vrr_pending;        /* 0=none, 1=enable, -1=disable (deferred to next frame commit) */
+	int vrr_pending_tries;  /* strip-retries before giving up on a pending VRR change */
 	float vrr_pending_hz;   /* target Hz when vrr_pending==1 */
 	int game_vrr_active;
 	float game_vrr_target_fps;
@@ -1201,6 +1215,7 @@ struct Monitor {
 	struct CpuCursorBuffer *toast_overlay_buf;
 	struct wlr_output_layer *toast_overlay_layer;
 	int toast_overlay_active;
+	int toast_overlay_disabled_sent;
 	struct wlr_box toast_overlay_dst;
 	struct wl_listener present;
 	uint64_t last_present_ns;
@@ -1464,6 +1479,7 @@ extern char autostart_cmd[4096];
 /* core compositor */
 extern pid_t child_pid;
 extern int locked;
+extern int status_stdout_enabled;
 extern void *exclusive_focus;
 extern struct wl_display *dpy;
 extern struct wl_event_loop *event_loop;
@@ -1554,6 +1570,7 @@ extern int game_mode_ioclass_applied;
 extern int game_mode_oom_applied;
 extern int game_mode_governor_applied;
 extern int compositor_rt_applied;
+extern int compositor_pin_applied;
 extern int fan_boost_active;
 extern int fan_thermal_active;
 extern struct wl_event_source *fan_thermal_timer;
@@ -1672,16 +1689,7 @@ extern char battery_text[32];
 extern double net_last_down_bps;
 extern double net_last_up_bps;
 extern char last_clock_render[32];
-extern char last_cpu_render[32];
-extern char last_ram_render[32];
-extern char last_light_render[32];
-extern char last_volume_render[32];
-extern char last_mic_render[32];
-extern char last_battery_render[32];
-extern char last_net_render[64];
-extern int last_clock_h, last_cpu_h, last_ram_h;
-extern int last_light_h, last_volume_h, last_mic_h;
-extern int last_battery_h, last_net_h;
+/* render dedup state lives in StatusModule (per monitor) */
 extern int battery_path_initialized;
 extern int backlight_paths_initialized;
 extern uint64_t volume_last_read_speaker_ms;
@@ -1728,7 +1736,6 @@ extern int cpu_core_count;
 extern struct wl_event_source *cpu_popup_refresh_timer;
 extern struct wl_event_source *ram_popup_refresh_timer;
 extern struct wl_event_source *popup_delay_timer;
-extern struct wl_event_source *video_check_timer;
 extern struct wl_event_source *hz_osd_timer;
 extern struct wl_event_source *osk_dpad_repeat_timer;
 extern int osk_dpad_held_button;
@@ -2139,7 +2146,7 @@ void hidetagthumbnail(Monitor *m);
 /* input.c */
 void axisnotify(struct wl_listener *listener, void *data);
 void buttonpress(struct wl_listener *listener, void *data);
-void handle_pointer_button_internal(uint32_t button, uint32_t state, uint32_t time_msec);
+void input_column_gone(Column *col);
 void chvt(const Arg *arg);
 void createkeyboard(struct wlr_keyboard *keyboard);
 KeyboardGroup *createkeyboardgroup(void);
@@ -2295,8 +2302,7 @@ void seed_status_rng(void);
 uint32_t random_status_delay_ms(void);
 double volume_last_for_type(int is_headset);
 void volume_cache_store(int is_headset, double level, int muted, uint64_t now);
-int status_should_render(StatusModule *module, int barh, const char *text,
-		char *last_text, size_t last_len, int *last_h);
+int status_should_render(StatusModule *module, int barh, const char *text);
 void initial_status_refresh(void);
 void schedule_status_timer(void);
 void schedule_next_status_refresh(void);

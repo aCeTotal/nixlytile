@@ -318,7 +318,10 @@ tray_render_label(StatusModule *module, const char *text, int x, int bar_height,
 		return 0;
 	}
 
-	text_width = status_text_width(text);
+	/* pen_x already holds the exact advance from the glyph loop —
+	 * status_text_width() would re-walk the string and redo kerning
+	 * and glyph-cache lookups for the same value. */
+	text_width = pen_x;
 	text_height = max_y - min_y;
 	origin_y = (bar_height - text_height) / 2 - min_y;
 
@@ -1129,6 +1132,16 @@ renderbluetooth(Monitor *m, int bar_height)
 	module->width = 0;
 	module->x = 0;
 
+	/* Lazy one-time probe — findbluetoothdevice() had no caller, so
+	 * bluetooth_available stayed 0 and the icon could never appear. */
+	{
+		static int bt_probed;
+		if (!bt_probed) {
+			bt_probed = 1;
+			bluetooth_available = findbluetoothdevice();
+		}
+	}
+
 	/* Only show if bluetooth is available */
 	if (!bluetooth_available) {
 		wlr_scene_node_set_enabled(&module->tree->node, 0);
@@ -1370,10 +1383,23 @@ rendertray(Monitor *m, int bar_height)
 		if (!it->icon_buf) {
 			/* Retry: the item may have registered before its icon
 			 * properties were ready (SNI startup race).  NewIcon
-			 * signals also clear these, but retry is the safety net. */
-			it->icon_tried = 0;
-			it->icon_failed = 0;
-			tray_item_load_icon(it);
+			 * signals clear the failed-latch when the app publishes
+			 * an icon; this timed retry is only the safety net.
+			 * Unconditional retry here would re-run the full icon
+			 * theme scan (potentially 1e5 stat() calls) plus D-Bus
+			 * round-trips on EVERY layout pass for a permanently
+			 * icon-less item. */
+			uint64_t now_ms = monotonic_msec();
+			if (!it->icon_tried ||
+			    (it->icon_failed &&
+			     now_ms >= it->icon_retry_not_before_ms)) {
+				it->icon_tried = 0;
+				it->icon_failed = 0;
+				tray_item_load_icon(it);
+				if (it->icon_failed)
+					it->icon_retry_not_before_ms =
+						now_ms + 10000;
+			}
 		}
 		if (!it->icon_buf || it->icon_w <= 0 || it->icon_h <= 0) {
 			it->x = x;
@@ -1605,8 +1631,6 @@ kill_processes_with_name(const char *name)
 		if (pid <= 1 || pid == getpid())
 			continue;
 
-		found = 1;
-
 		snprintf(comm_path, sizeof(comm_path), "/proc/%s/comm", ent->d_name);
 		fp = fopen(comm_path, "r");
 		if (!fp)
@@ -1621,6 +1645,10 @@ kill_processes_with_name(const char *name)
 			comm[len - 1] = '\0';
 
 		if (strcmp(comm, name) == 0) {
+			/* found means "a process with this comm exists" —
+			 * setting it for every numeric /proc entry made the
+			 * pkill fallback fork for names that never existed. */
+			found = 1;
 			if (kill(pid, SIGKILL) == 0) {
 				killed++;
 			} else {
@@ -2118,11 +2146,14 @@ ram_popup_hover_index(Monitor *m, RamPopup *p)
 	if (!m || !p || !p->visible || !cursor)
 		return -1;
 
+	/* Statusbar-area coordinates, like cpu_popup_hover_index — the
+	 * kill-button rects are relative to the bar area, and monitor-
+	 * origin math is off by gappx + statusbar_top_gap. */
 	popup_x = ram_popup_clamped_x(m, p);
 	cx = cursor->x;
 	cy = cursor->y;
-	lx = (int)round(cx) - m->m.x;
-	ly = (int)round(cy) - m->m.y;
+	lx = (int)round(cx) - m->statusbar.area.x;
+	ly = (int)round(cy) - m->statusbar.area.y;
 	rel_x = lx - popup_x;
 	rel_y = ly - m->statusbar.area.height;
 
@@ -2743,8 +2774,10 @@ updatebatteryhover(Monitor *m, double cx, double cy)
 		if (need_refresh)
 			p->refresh_data = 1;
 
-		if (!was_visible || need_refresh ||
-				(p->last_render_ms == 0 || (now - p->last_render_ms) >= 100)) {
+		/* Render only when the data changed or the popup just
+		 * appeared — the old 100 ms clause re-rasterized identical
+		 * content 10x per second for the whole hover. */
+		if (!was_visible || need_refresh || p->last_render_ms == 0) {
 			renderbatterypopup(m);
 			p->last_render_ms = now;
 		}
@@ -3696,34 +3729,9 @@ backlight_percent(void)
 	unsigned long long cur, max;
 	double percent;
 
-	/* Prefer brightnessctl */
-	if (readulong_cmd("brightnessctl g", &cur) == 0 &&
-			readulong_cmd("brightnessctl m", &max) == 0 && max > 0) {
-		if (cur > max)
-			cur = max;
-		light_cached_percent = ((double)cur * 100.0) / (double)max;
-		return light_cached_percent;
-	}
-
-	/* Fallback to light -G */
-	{
-		FILE *fp = popen("light -G", "r");
-		if (fp) {
-			if (fscanf(fp, "%lf", &percent) == 1) {
-				pclose(fp);
-				if (percent < 0.0)
-					percent = -1.0;
-				if (percent > 100.0)
-					percent = 100.0;
-				if (percent >= 0.0)
-					light_cached_percent = percent;
-				return percent;
-			}
-			pclose(fp);
-		}
-	}
-
-	/* Fallback to sysfs if available */
+	/* sysfs first — two file reads, no fork.  The brightnessctl /
+	 * light fallbacks each cost a fork+exec and this runs on every
+	 * brightness scroll notch and 45 s refresh tick. */
 	if (backlight_available) {
 		if (readulong(backlight_brightness_path, &cur) == 0 &&
 				readulong(backlight_max_path, &max) == 0 && max > 0) {
@@ -3892,6 +3900,12 @@ volume_cache_store(int is_headset, double level, int muted, uint64_t now)
 	speaker_active = level;
 }
 
+/* Cached result of the sink-type probe — each probe costs 1-2
+ * popen(wpctl) fork/execs and it's called from every scroll notch
+ * and volume refresh. */
+static int headset_probe_cached = -1;
+static uint64_t headset_probe_ms;
+
 void
 volume_invalidate_cache(int is_headset)
 {
@@ -3899,6 +3913,7 @@ volume_invalidate_cache(int is_headset)
 		volume_last_read_headset_ms = 0;
 	else
 		volume_last_read_speaker_ms = 0;
+	headset_probe_cached = -1;
 }
 
 double
@@ -3999,6 +4014,10 @@ pipewire_sink_is_headset(void)
 		"hfp", "hsp", "head-unit"
 	};
 	size_t i;
+	uint64_t now = monotonic_msec();
+
+	if (headset_probe_cached >= 0 && now - headset_probe_ms < 8000)
+		return headset_probe_cached;
 
 	fp = popen("wpctl inspect @DEFAULT_AUDIO_SINK@", "r");
 	if (!fp)
@@ -4016,8 +4035,11 @@ pipewire_sink_is_headset(void)
 	}
 
 	pclose(fp);
-	if (headset)
+	if (headset) {
+		headset_probe_cached = 1;
+		headset_probe_ms = now;
 		return 1;
+	}
 
 	fp = popen("wpctl status", "r");
 	if (!fp)
@@ -4037,6 +4059,8 @@ pipewire_sink_is_headset(void)
 	}
 
 	pclose(fp);
+	headset_probe_cached = headset;
+	headset_probe_ms = now;
 	return headset;
 }
 
@@ -4587,6 +4611,7 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 		hidetagthumbnail(m);
 		*client_area = *area;
 		m->statusbar.area = (struct wlr_box){0};
+		m->statusbar.last_layout_h = 0; /* force full render on re-show */
 		return;
 	}
 
@@ -4607,29 +4632,40 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 	wlr_scene_node_set_position(&m->statusbar.tree->node, bar_area.x, bar_area.y);
 	m->statusbar.area = bar_area;
 
+	/* Tags reflect occupancy/focus which changes with every arrange —
+	 * always re-render.  The other modules only depend on bar height
+	 * and their own text; their refresh paths (2 s cpu tick, 45 s icon
+	 * tick, volume/net events) re-render on content change, so a full
+	 * re-rasterization here on EVERY arrangelayers (each layer-surface
+	 * commit!) — including the is_process_running() /proc walks in
+	 * rendersteam/renderdiscord — is wasted work unless the height
+	 * changed or the bar was just re-shown. */
 	renderworkspaces(m, &m->statusbar.tags, bar_area.height);
-	if (m->statusbar.traylabel.tree)
-		rendertray(m, bar_area.height);
-	if (m->statusbar.sysicons.tree)
-		rendertrayicons(m, bar_area.height);
-	if (m->statusbar.bluetooth.tree)
-		renderbluetooth(m, bar_area.height);
-	if (m->statusbar.steam.tree)
-		rendersteam(m, bar_area.height);
-	if (m->statusbar.discord.tree)
-		renderdiscord(m, bar_area.height);
-	if (m->statusbar.cpu.tree)
-		rendercpu(&m->statusbar.cpu, bar_area.height, cpu_text);
-	if (m->statusbar.net.tree)
-		rendernet(&m->statusbar.net, bar_area.height, net_text);
-	if (m->statusbar.light.tree)
-		renderlight(&m->statusbar.light, bar_area.height, light_text);
-	if (m->statusbar.battery.tree)
-		renderbattery(&m->statusbar.battery, bar_area.height, battery_text);
-	if (m->statusbar.volume.tree)
-		rendervolume(&m->statusbar.volume, bar_area.height, volume_text);
-	if (m->statusbar.ram.tree)
-		renderram(&m->statusbar.ram, bar_area.height, ram_text);
+	if (m->statusbar.last_layout_h != bar_area.height) {
+		m->statusbar.last_layout_h = bar_area.height;
+		if (m->statusbar.traylabel.tree)
+			rendertray(m, bar_area.height);
+		if (m->statusbar.sysicons.tree)
+			rendertrayicons(m, bar_area.height);
+		if (m->statusbar.bluetooth.tree)
+			renderbluetooth(m, bar_area.height);
+		if (m->statusbar.steam.tree)
+			rendersteam(m, bar_area.height);
+		if (m->statusbar.discord.tree)
+			renderdiscord(m, bar_area.height);
+		if (m->statusbar.cpu.tree)
+			rendercpu(&m->statusbar.cpu, bar_area.height, cpu_text);
+		if (m->statusbar.net.tree)
+			rendernet(&m->statusbar.net, bar_area.height, net_text);
+		if (m->statusbar.light.tree)
+			renderlight(&m->statusbar.light, bar_area.height, light_text);
+		if (m->statusbar.battery.tree)
+			renderbattery(&m->statusbar.battery, bar_area.height, battery_text);
+		if (m->statusbar.volume.tree)
+			rendervolume(&m->statusbar.volume, bar_area.height, volume_text);
+		if (m->statusbar.ram.tree)
+			renderram(&m->statusbar.ram, bar_area.height, ram_text);
+	}
 	if (m->statusbar.cpu_popup.tree && m->statusbar.cpu_popup.visible)
 		rendercpupopup(m);
 	if (m->statusbar.net_popup.tree && m->statusbar.net_popup.visible)
@@ -4709,8 +4745,7 @@ refreshstatuslight(void)
 		if (!m->statusbar.light.tree || !m->showbar)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		if (status_should_render(&m->statusbar.light, barh, light_text,
-					last_light_render, sizeof(last_light_render), &last_light_h)) {
+		if (status_should_render(&m->statusbar.light, barh, light_text)) {
 			renderlight(&m->statusbar.light, barh, light_text);
 			positionstatusmodules(m);
 		}
@@ -4844,8 +4879,7 @@ refreshstatusnet(void)
 		if (!m->statusbar.net.tree || !m->showbar)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		if (status_should_render(&m->statusbar.net, barh, net_text,
-					last_net_render, sizeof(last_net_render), &last_net_h)
+		if (status_should_render(&m->statusbar.net, barh, net_text)
 				|| m->statusbar.net_popup.visible) {
 			rendernet(&m->statusbar.net, barh, net_text);
 			if (m->statusbar.net_popup.visible)
@@ -4909,8 +4943,7 @@ refreshstatusbattery(void)
 		if (!m->statusbar.battery.tree || !m->showbar)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		if (status_should_render(&m->statusbar.battery, barh, battery_text,
-					last_battery_render, sizeof(last_battery_render), &last_battery_h)) {
+		if (status_should_render(&m->statusbar.battery, barh, battery_text)) {
 			renderbattery(&m->statusbar.battery, barh, battery_text);
 			positionstatusmodules(m);
 		}
@@ -4938,8 +4971,7 @@ refreshstatuscpu(void)
 		if (!m->statusbar.cpu.tree || !m->showbar)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		if (status_should_render(&m->statusbar.cpu, barh, cpu_text,
-					last_cpu_render, sizeof(last_cpu_render), &last_cpu_h)
+		if (status_should_render(&m->statusbar.cpu, barh, cpu_text)
 				|| m->statusbar.cpu_popup.visible) {
 			rendercpu(&m->statusbar.cpu, barh, cpu_text);
 			if (m->statusbar.cpu_popup.visible)
@@ -4972,8 +5004,7 @@ refreshstatusram(void)
 		if (!m->statusbar.ram.tree || !m->showbar)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		if (status_should_render(&m->statusbar.ram, barh, ram_text,
-					last_ram_render, sizeof(last_ram_render), &last_ram_h)) {
+		if (status_should_render(&m->statusbar.ram, barh, ram_text)) {
 			renderram(&m->statusbar.ram, barh, ram_text);
 			positionstatusmodules(m);
 		}
@@ -5053,8 +5084,7 @@ refreshstatusvolume(void)
 		if (!m->statusbar.volume.tree || !m->showbar)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		if (status_should_render(&m->statusbar.volume, barh, volume_text,
-					last_volume_render, sizeof(last_volume_render), &last_volume_h)
+		if (status_should_render(&m->statusbar.volume, barh, volume_text)
 				|| force_render) {
 			rendervolume(&m->statusbar.volume, barh, volume_text);
 			positionstatusmodules(m);
@@ -5127,8 +5157,7 @@ refreshstatusmic(void)
 		if (!m->statusbar.mic.tree || !m->showbar)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		if (status_should_render(&m->statusbar.mic, barh, mic_text,
-					last_mic_render, sizeof(last_mic_render), &last_mic_h)
+		if (status_should_render(&m->statusbar.mic, barh, mic_text)
 				|| force_render) {
 			rendermic(&m->statusbar.mic, barh, mic_text);
 			positionstatusmodules(m);
@@ -5198,17 +5227,17 @@ seed_status_rng(void)
 }
 
 int
-status_should_render(StatusModule *module, int barh, const char *text,
-		char *last_text, size_t last_len, int *last_h)
+status_should_render(StatusModule *module, int barh, const char *text)
 {
-	if (!module || !text || !last_text || last_len == 0)
+	if (!module || !text)
 		return 1;
 
-	if ((last_h && *last_h != barh) || last_text[0] == '\0'
-			|| strncmp(last_text, text, last_len) != 0) {
-		snprintf(last_text, last_len, "%s", text);
-		if (last_h)
-			*last_h = barh;
+	if (module->last_render_h != barh || module->last_render_text[0] == '\0'
+			|| strncmp(module->last_render_text, text,
+				sizeof(module->last_render_text)) != 0) {
+		snprintf(module->last_render_text,
+				sizeof(module->last_render_text), "%s", text);
+		module->last_render_h = barh;
 		return 1;
 	}
 	return 0;

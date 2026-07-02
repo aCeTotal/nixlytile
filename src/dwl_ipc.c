@@ -183,7 +183,10 @@ ipc_manager_get_output(struct wl_client *client, struct wl_resource *mgr_res,
 	struct wlr_output *wlr_out;
 	(void)mgr_res;
 
-	out = ecalloc(1, sizeof(*out));
+	/* plain calloc — ecalloc() die()s the whole compositor on OOM,
+	 * turning a client-triggered request into a session kill and
+	 * making the NULL branch below dead code. */
+	out = calloc(1, sizeof(*out));
 	if (!out) {
 		wl_client_post_no_memory(client);
 		return;

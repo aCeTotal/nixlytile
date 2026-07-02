@@ -16,6 +16,20 @@ static int     grab_resize_sign = 0;   /* +1 = dragging col's right edge, -1 = l
 static int     grab_resize_col_w0 = 0;
 static int     grab_resize_nbr_w0 = 0;
 static double  grab_resize_start_x = 0.0;
+
+/* Called from column_destroy() — a column can die mid-drag (client in
+ * it closes), and the next motion event would write into freed memory
+ * through these pointers. */
+void
+input_column_gone(Column *col)
+{
+	if (col != grab_resize_col && col != grab_resize_nbr)
+		return;
+	grab_resize_col = grab_resize_nbr = NULL;
+	grab_resize_sign = 0;
+	if (cursor_mode == CurColResize)
+		cursor_mode = CurNormal;
+}
 static inline LayoutNode **get_current_root(Monitor *m) { (void)m; return NULL; }
 static inline LayoutNode *find_client_node(LayoutNode *node, Client *c) { (void)node; (void)c; return NULL; }
 static inline void start_tile_drag(Monitor *m, Client *c) { (void)m; (void)c; }
@@ -150,10 +164,21 @@ adjust_backlight_by_steps(int steps)
 	if (steps == 0)
 		return 0;
 
-	/* Re-probe in case a dock/undock changed backlight availability */
-	backlight_available = findbacklightdevice(backlight_brightness_path,
-			sizeof(backlight_brightness_path),
-			backlight_max_path, sizeof(backlight_max_path));
+	/* Re-probe in case a dock/undock changed backlight availability.
+	 * Rate-limited: a scroll gesture delivers dozens of notches/sec
+	 * and each probe is a /sys/class/backlight directory scan. */
+	{
+		static uint64_t last_probe_ms;
+		uint64_t now_ms = monotonic_msec();
+		if (!backlight_available || now_ms - last_probe_ms > 2000) {
+			last_probe_ms = now_ms;
+			backlight_available = findbacklightdevice(
+					backlight_brightness_path,
+					sizeof(backlight_brightness_path),
+					backlight_max_path,
+					sizeof(backlight_max_path));
+		}
+	}
 
 	/* No backlight device = not a laptop, nothing to adjust */
 	if (!backlight_available)
@@ -495,82 +520,6 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 }
 
 void
-handle_pointer_button_internal(uint32_t button, uint32_t state, uint32_t time_msec)
-{
-	struct wlr_keyboard *keyboard;
-	uint32_t mods;
-	Client *c;
-	const Button *b;
-
-	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
-
-	if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
-		cursor_mode = CurPressed;
-		selmon = xytomon(cursor->x, cursor->y);
-		if (locked)
-			goto notify_client;
-
-		/* An open tray context-menu eats the next click. */
-		if (selmon && selmon->statusbar.tray_menu.visible) {
-			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
-			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
-			TrayMenu *menu = &selmon->statusbar.tray_menu;
-			int relx = lx - menu->x;
-			int rely = ly - menu->y;
-			if (relx >= 0 && rely >= 0 &&
-					relx < menu->width && rely < menu->height) {
-				TrayMenuEntry *entry = tray_menu_entry_at(selmon, relx, rely);
-				if (entry)
-					tray_menu_send_event(menu, entry, time_msec);
-				tray_menu_hide_all();
-				return;
-			}
-			tray_menu_hide_all();
-		}
-
-		/* Clicks on the embedded status bar (tags, tray, modules). */
-		if (selmon && selmon->showbar) {
-			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
-			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
-			if (handle_statusbar_clicks(selmon, lx, ly, button))
-				return;
-		}
-
-		/* Change focus if the button was _pressed_ over a client.
-		 * lift=0 → focus but DO NOT warp cursor.  The user clicked
-		 * AT a specific location — we must not yank the pointer
-		 * away to tile-center, that would lose the click target. */
-		xytonode(cursor->x, cursor->y, NULL, &c, NULL, NULL, NULL);
-		/* A visible fullscreen client owns input exclusively — a click
-		 * on a tile beside a letterboxed game keeps focus on the game. */
-		{
-			Client *fso = fullscreen_visible_on(selmon);
-			if (fso && c && c != fso && !client_is_fs_companion(c, fso))
-				c = fso;
-		}
-		if (c && (!client_is_unmanaged(c) || client_wants_focus(c)))
-			focusclient(c, 0);
-
-		keyboard = wlr_seat_get_keyboard(seat);
-		mods = keyboard ? wlr_keyboard_get_modifiers(keyboard) : 0;
-		for (b = buttons; b < buttons + nbuttons; b++) {
-			if (CLEANMASK(mods) == CLEANMASK(b->mod) &&
-					button == b->button && b->func) {
-				b->func(&b->arg);
-				return;
-			}
-		}
-	} else if (state == WL_POINTER_BUTTON_STATE_RELEASED) {
-		if (cursor_mode == CurPressed)
-			cursor_mode = CurNormal;
-	}
-
-notify_client:
-	/* Notify the client with pointer focus */
-	wlr_seat_pointer_notify_button(seat, time_msec, button, state);
-}
-
-void
 buttonpress(struct wl_listener *listener, void *data)
 {
 	struct wlr_pointer_button_event *event = data;
@@ -667,6 +616,10 @@ buttonpress(struct wl_listener *listener, void *data)
 		}
 		break;
 	case WL_POINTER_BUTTON_STATE_RELEASED:
+		/* Without this reset the internal-call guard in motionnotify
+		 * (time == 0 && resizing_from_mouse) stays armed forever
+		 * after the first mouse resize. */
+		resizing_from_mouse = 0;
 		if (!locked && cursor_mode == CurColResize) {
 			cursor_mode = CurNormal;
 			grab_resize_col = grab_resize_nbr = NULL;
@@ -1983,9 +1936,13 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		 * a pointer constraint or interactive move/resize is in effect,
 		 * or when a fullscreen client is on the current monitor (existing
 		 * fullscreen confinement below would yank it back anyway). */
+		/* One clients-list walk instead of two — reused by the
+		 * fullscreen confinement block below (same selmon). */
+		Client *fsc_cur = fullscreen_visible_on(selmon);
+
 		int snapped = 0;
 		if (!active_constraint && cursor_mode == CurNormal) {
-			if (!fullscreen_visible_on(selmon))
+			if (!fsc_cur)
 				snapped = cursor_snap_across_dead_zone(dx, dy);
 		}
 
@@ -2002,7 +1959,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		 * bypasses this because they use wlr_cursor_warp() directly and
 		 * change selmon before subsequent motionnotify calls. */
 		{
-			Client *fsc = fullscreen_visible_on(selmon);
+			Client *fsc = fsc_cur;
 			if (fsc) {
 				struct wlr_box *mb = &selmon->m;
 				double cx = cursor->x, cy = cursor->y;
@@ -2040,12 +1997,10 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		 * flip, and hundreds of those per second create multiple tear
 		 * lines within a single display refresh.
 		 */
-		{
-			Monitor *cm = xytomon(cursor->x, cursor->y);
-			if (cm && cm->scene_output && !cm->wlr_output->hardware_cursor) {
-				wlr_damage_ring_add_whole(&cm->scene_output->damage_ring);
-				wlr_output_schedule_frame(cm->wlr_output);
-			}
+		Monitor *cm = xytomon(cursor->x, cursor->y);
+		if (cm && cm->scene_output && !cm->wlr_output->hardware_cursor) {
+			wlr_damage_ring_add_whole(&cm->scene_output->damage_ring);
+			wlr_output_schedule_frame(cm->wlr_output);
 		}
 
 		/* Relative pointer protocol — sent after the HW cursor plane
@@ -2055,13 +2010,11 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 				relative_pointer_mgr, seat, (uint64_t)time * 1000,
 				raw_dx, raw_dy, dx_unaccel, dy_unaccel);
 
-		/* Update selmon (even while dragging a window) */
-		if (sloppyfocus) {
-			Monitor *newmon = xytomon(cursor->x, cursor->y);
-			if (newmon && newmon != selmon) {
-				selmon = newmon;
-				monitor_wake(newmon);
-			}
+		/* Update selmon (even while dragging a window) —
+		 * cm was already looked up above, same coordinates. */
+		if (sloppyfocus && cm && cm != selmon) {
+			selmon = cm;
+			monitor_wake(cm);
 		}
 	}
 
@@ -2081,12 +2034,11 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	 * Route all pointer events on the fullscreen monitor to the game's
 	 * surface, clamping coordinates to the rendered area. */
 	if (!surface && !c) {
-		Client *fsc = NULL;
-		wl_list_for_each(fsc, &clients, link) {
-			if (fsc->isfullscreen && VISIBLEON(fsc, selmon))
-				break;
-		}
-		if (&fsc->link != &clients && fsc && client_surface(fsc)) {
+		/* fullscreen_visible_on checks fs_ws + mapped state too —
+		 * a fullscreen client bound to a non-active workspace is
+		 * scene-disabled and must not receive pointer focus. */
+		Client *fsc = fullscreen_visible_on(selmon);
+		if (fsc && client_surface(fsc)) {
 			c = fsc;
 			surface = client_surface(fsc);
 			/* scene_surface offset = game's visual position within c->scene */
@@ -2116,10 +2068,40 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	/* Update drag icon's position */
 	wlr_scene_node_set_position(&drag_icon->node, (int)round(cursor->x), (int)round(cursor->y));
 
-	/* statusbar hover feedback removed (statusbar.c gone) */
+	/* Statusbar hover feedback (tag highlight, module popups).
+	 * Skip when far from the bar and no popup is open (popups need
+	 * hover tracking to close).  Throttled to ~125 Hz — highlights
+	 * don't need 1 kHz updates. */
+	if (selmon && selmon->showbar && selmon->statusbar.area.height > 0) {
+		Client *fs = focustop(selmon);
+		int any_popup_open =
+			selmon->statusbar.cpu_popup.visible ||
+			selmon->statusbar.ram_popup.visible ||
+			selmon->statusbar.battery_popup.visible ||
+			selmon->statusbar.net_popup.visible ||
+			selmon->statusbar.tray_menu.visible;
+		int near_bar = (cursor->y >= selmon->statusbar.area.y &&
+			cursor->y <= selmon->statusbar.area.y +
+				selmon->statusbar.area.height + 500);
 
-	/* Skip if internal call or already resizing */
-	if (time == 0 && resizing_from_mouse)
+		if (!(fs && fs->isfullscreen) && (near_bar || any_popup_open)) {
+			static uint32_t last_hover_ms;
+			if (!time || time - last_hover_ms >= 8) {
+				if (time) last_hover_ms = time;
+				updatetaghover(selmon, cursor->x, cursor->y);
+				updatecpuhover(selmon, cursor->x, cursor->y);
+				updateramhover(selmon, cursor->x, cursor->y);
+				updatebatteryhover(selmon, cursor->x, cursor->y);
+				updatenethover(selmon, cursor->x, cursor->y);
+			}
+		}
+	}
+
+	/* Skip if internal call or already resizing.  The CurColResize
+	 * check is load-bearing: arrange() ends with motionnotify(0, ...),
+	 * so re-entering the col-resize branch below (which calls arrange)
+	 * would recurse mutually until stack overflow. */
+	if (time == 0 && (resizing_from_mouse || cursor_mode == CurColResize))
 		goto focus;
 
 	tiled = grabc && !grabc->isfloating && !grabc->isfullscreen;
@@ -2132,7 +2114,8 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 			int new_w = grab_resize_col_w0 + delta;
 			if (grab_resize_nbr) {
 				int new_nbr_w = grab_resize_nbr_w0 - delta;
-				if (new_w >= min_w && new_nbr_w >= min_w) {
+				if (new_w >= min_w && new_nbr_w >= min_w &&
+						new_w != grab_resize_col->width_px_override) {
 					grab_resize_col->fullscreen = 0;
 					grab_resize_nbr->fullscreen = 0;
 					grab_resize_col->width_px_override = new_w;
@@ -2150,10 +2133,12 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 				if (mon_w < 1) mon_w = selmon->w.width;
 				if (new_w < min_w) new_w = min_w;
 				if (new_w > mon_w) new_w = mon_w;
-				grab_resize_col->fullscreen = 0;
-				grab_resize_col->width_px_override = new_w;
-				grab_resize_col->just_created = 1;
-				arrange(selmon);
+				if (new_w != grab_resize_col->width_px_override) {
+					grab_resize_col->fullscreen = 0;
+					grab_resize_col->width_px_override = new_w;
+					grab_resize_col->just_created = 1;
+					arrange(selmon);
+				}
 			}
 		}
 		return;

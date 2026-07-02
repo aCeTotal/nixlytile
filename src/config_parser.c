@@ -78,8 +78,12 @@ skip_ws(Parser *p, int nl_significant)
 			if (nl_significant) return;
 			advance(p);
 		} else if (c == ';') {
-			advance(p); /* semicolon = node terminator, treat like newline */
+			/* semicolon = node terminator, treat exactly like
+			 * newline: leave it for the caller when significant,
+			 * else parse_node never sees the terminator and
+			 * "a; b" folds b into a's arguments. */
 			if (nl_significant) return;
+			advance(p);
 		} else if (c == '/' && peek_at(p, 1) == '/') {
 			while ((c = peek(p)) >= 0 && c != '\n') advance(p);
 		} else if (c == '/' && peek_at(p, 1) == '*') {
@@ -323,7 +327,11 @@ parse_node(Parser *p, KdlNode *out)
 				advance(p);
 				KdlValue v = {0};
 				if (!parse_value(p, &v)) { free(maybe); return 0; }
-				out->props = realloc(out->props, (out->n_props + 1) * sizeof(*out->props));
+				{
+					void *np = realloc(out->props, (out->n_props + 1) * sizeof(*out->props));
+					if (!np) { free(maybe); return 0; }
+					out->props = np;
+				}
 				out->props[out->n_props].key = maybe;
 				out->props[out->n_props].val = v;
 				out->n_props++;
@@ -331,7 +339,11 @@ parse_node(Parser *p, KdlNode *out)
 			}
 			/* Not a prop; rewind and re-parse as value. We can shortcut: a
 			 * bare identifier becomes a string arg. */
-			out->args = realloc(out->args, (out->n_args + 1) * sizeof(*out->args));
+			{
+				void *na2 = realloc(out->args, (out->n_args + 1) * sizeof(*out->args));
+				if (!na2) { free(maybe); return 0; }
+				out->args = na2;
+			}
 			if (ch == '"') {
 				out->args[out->n_args].kind = KDL_VAL_STRING;
 				out->args[out->n_args].u.s = maybe;
@@ -359,7 +371,11 @@ parse_node(Parser *p, KdlNode *out)
 		/* Numeric / signed value. */
 		KdlValue v = {0};
 		if (!parse_value(p, &v)) return 0;
-		out->args = realloc(out->args, (out->n_args + 1) * sizeof(*out->args));
+		{
+			void *na3 = realloc(out->args, (out->n_args + 1) * sizeof(*out->args));
+			if (!na3) return 0;
+			out->args = na3;
+		}
 		out->args[out->n_args++] = v;
 	}
 }

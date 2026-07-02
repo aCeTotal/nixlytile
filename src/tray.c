@@ -1503,8 +1503,18 @@ tray_bus_event(int fd, uint32_t mask, void *data)
 	if (!bus)
 		return 0;
 
-	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR))
+	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR)) {
+		/* Session bus died (dbus restart).  epoll reports HUP
+		 * regardless of the requested mask, so returning without
+		 * removing the source would re-fire this callback forever
+		 * at 100% CPU. */
+		wlr_log(WLR_ERROR, "tray: session bus hangup — disabling tray");
+		if (tray_event) {
+			wl_event_source_remove(tray_event);
+			tray_event = NULL;
+		}
 		return 0;
+	}
 
 	while ((r = sd_bus_process(bus, NULL)) > 0)
 		;

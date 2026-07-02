@@ -443,6 +443,7 @@ destroynotify(struct wl_listener *listener, void *data)
 		if (m->hdr_driver_client == c)
 			m->hdr_driver_client = NULL;
 	}
+	free(c->output); /* strdup'd in mapnotify/tagmon/tagtomonitornum */
 	free(c);
 }
 
@@ -1937,6 +1938,13 @@ unmapnotify(struct wl_listener *listener, void *data)
 		}
 	} else {
 		Monitor *unmap_mon = c->mon;
+		/* mapnotify has early failure paths (NULL surface, scene
+		 * tree / scene surface creation failure) that return before
+		 * inserting into the clients/flink lists.  c->scene == NULL
+		 * identifies that state — running the full teardown here
+		 * would wl_list_remove() zeroed links and crash. */
+		if (!c->scene)
+			return;
 		/* Niri-style close anim: snapshot the surface's last buffer
 		 * into an independent scene tree that survives Client teardown,
 		 * then animate scale 1→0.5 + opacity 1→0.  Skip for floating /

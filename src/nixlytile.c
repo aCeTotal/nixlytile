@@ -790,9 +790,13 @@ cleanup(void)
 			client_send_close(c);
 			has_clients = 1;
 		}
-		/* Wait for clients to close gracefully */
+		/* Wait for clients to close gracefully.  The event loop has
+		 * already exited, so the close events sit in libwayland's
+		 * send buffers — without a flush the clients never receive
+		 * them and the sleep is pure added shutdown latency. */
 		if (has_clients) {
 			struct timespec ts = {0, 500000000}; /* 500ms */
+			wl_display_flush_clients(dpy);
 			nanosleep(&ts, NULL);
 		}
 	}
@@ -854,8 +858,12 @@ cleanuplisteners(void)
 	wl_list_remove(&start_drag.link);
 	wl_list_remove(&new_session_lock.link);
 #ifdef XWAYLAND
-	wl_list_remove(&new_xwayland_surface.link);
-	wl_list_remove(&xwayland_ready.link);
+	/* Only added when wlr_xwayland_create() succeeded — the links are
+	 * zeroed otherwise and wl_list_remove would crash the shutdown. */
+	if (xwayland) {
+		wl_list_remove(&new_xwayland_surface.link);
+		wl_list_remove(&xwayland_ready.link);
+	}
 #endif
 }
 
@@ -913,11 +921,16 @@ handlesig(int signo)
 	if (signo == SIGCHLD) {
 		while (waitpid(-1, NULL, WNOHANG) > 0);
 	} else if (signo == SIGINT) {
+		/* No quit()/wlr_log here — stdio locking inside a signal
+		 * handler can self-deadlock if the signal lands mid-log.
+		 * write() + wl_display_terminate only. */
 		(void)write(STDERR_FILENO, "handlesig: SIGINT received, quitting\n", 37);
-		quit(NULL);
+		if (dpy)
+			wl_display_terminate(dpy);
 	} else if (signo == SIGTERM) {
 		(void)write(STDERR_FILENO, "handlesig: SIGTERM received, quitting\n", 38);
-		quit(NULL);
+		if (dpy)
+			wl_display_terminate(dpy);
 	} else if (signo == SIGPIPE) {
 		(void)write(STDERR_FILENO, "handlesig: SIGPIPE received (ignored)\n", 38);
 	}
@@ -1122,10 +1135,31 @@ run(const char *startup_cmd)
 
 	/* Mark stdout as non-blocking to avoid the startup script
 	 * causing dwl to freeze when a user neither closes stdin
-	 * nor consumes standard input in his startup script */
-
-	if (fd_set_nonblock(STDOUT_FILENO) < 0)
-		close(STDOUT_FILENO);
+	 * nor consumes standard input in his startup script.
+	 *
+	 * On failure, REDIRECT fd 1 to /dev/null instead of closing it:
+	 * a closed fd 1 gets reused by the next open()/accept() (config
+	 * inotify, IPC sockets, gamepad fds) and printstatus would then
+	 * write status text into that stranger fd.
+	 *
+	 * Also decide whether printstatus should emit at all: the text
+	 * protocol only matters when something consumes stdout (a pipe,
+	 * e.g. someone running nixlytile | consumer).  On a tty or with
+	 * no consumer it's ~8 printf lines + an fflush write() syscall
+	 * per state change (every title change!) for nothing. */
+	if (fd_set_nonblock(STDOUT_FILENO) < 0) {
+		int devnull = open("/dev/null", O_WRONLY | O_CLOEXEC);
+		if (devnull >= 0) {
+			dup2(devnull, STDOUT_FILENO);
+			if (devnull != STDOUT_FILENO)
+				close(devnull);
+		}
+		status_stdout_enabled = 0;
+	} else {
+		struct stat st;
+		status_stdout_enabled = fstat(STDOUT_FILENO, &st) == 0 &&
+			(S_ISFIFO(st.st_mode) || S_ISSOCK(st.st_mode));
+	}
 
 	printstatus();
 
@@ -3384,8 +3418,16 @@ spawn(const Arg *arg)
 				cmd_str[pos++] = ' ';
 			int n = snprintf(cmd_str + pos, sizeof(cmd_str) - pos,
 				"%s", argv[i]);
-			if (n > 0)
-				pos += n;
+			if (n < 0)
+				break;
+			if (n >= (int)sizeof(cmd_str) - pos) {
+				/* snprintf returns the untruncated length —
+				 * clamping prevents pos from running past the
+				 * buffer and the final NUL write going OOB. */
+				pos = (int)sizeof(cmd_str) - 1;
+				break;
+			}
+			pos += n;
 		}
 		cmd_str[pos] = '\0';
 	} else {
@@ -3591,6 +3633,13 @@ configurex11(struct wl_listener *listener, void *data)
 
 		/* Refresh pointer focus after resolution change */
 		motionnotify(0, NULL, 0, 0, 0, 0);
+		return;
+	}
+	if (!c->mon) {
+		/* mapnotify can leave a mapped client with no monitor when
+		 * none is available — honour the request without layout. */
+		wlr_xwayland_surface_configure(c->surface.xwayland,
+				event->x, event->y, event->width, event->height);
 		return;
 	}
 	if ((c->isfloating && c != grabc) || !c->mon->lt[c->mon->sellt]->arrange) {
@@ -3827,6 +3876,9 @@ xwaylandready(struct wl_listener *listener, void *data)
 				break;
 			}
 		}
+		/* xcb_connect returns an allocated connection object even
+		 * on failure — must still be disconnected. */
+		xcb_disconnect(xc);
 		return;
 	}
 

@@ -7,6 +7,7 @@ FILE *log_file = NULL;
 FILE *debug_log_file = NULL;
 int log_stderr_fd = -1; /* saved original stderr for die() */
 pid_t child_pid = -1;
+int status_stdout_enabled; /* printstatus text protocol only when stdout is consumed */
 int locked;
 void *exclusive_focus;
 
@@ -123,6 +124,7 @@ int game_mode_ioclass_applied = 0;  /* 1 if we changed IO priority */
 int game_mode_oom_applied = 0;  /* 1 if we changed OOM score */
 int game_mode_governor_applied = 0;  /* 1 if we changed CPU governor */
 int compositor_rt_applied = 0;  /* 1 if compositor has RT scheduling */
+int compositor_pin_applied = 0; /* 1 if compositor pinned to cores 0-1 */
 int fan_boost_active = 0; /* 1 if GPU fan boost is active during gaming */
 int fan_thermal_active = 0; /* 1 if thermal fan management controls fans */
 struct wl_event_source *fan_thermal_timer = NULL;

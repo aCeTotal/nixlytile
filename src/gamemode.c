@@ -1,6 +1,10 @@
 #include "nixlytile.h"
 #include "client.h"
 #include <pthread.h>
+#include <poll.h>
+
+/* pidfd for the ultra-mode keepalive check (PID-reuse safe) */
+static int game_keepalive_pidfd = -1;
 
 /* fancontrol.c removed; fan_boost_*_ stubs */
 static inline void fan_boost_activate(void) { }
@@ -164,7 +168,11 @@ static int  ppd_applied = 0;
 static int
 ppd_available(void)
 {
-	return system("command -v powerprofilesctl >/dev/null 2>&1") == 0;
+	/* Availability can't change mid-session; probe once. */
+	static int avail = -1;
+	if (avail < 0)
+		avail = system("command -v powerprofilesctl >/dev/null 2>&1") == 0;
+	return avail;
 }
 
 void
@@ -555,11 +563,19 @@ freeze_background_processes(void)
 	int i;
 
 	/* Whitelist of process comm names that should never be frozen.
-	 * Steam/Discord subtrees are protected by has_protected_ancestor(). */
+	 * Steam/Discord subtrees are protected by has_protected_ancestor().
+	 * Must match lower_competing_processes(): SIGSTOPping the user
+	 * systemd manager, sshd session processes or interactive shells
+	 * freezes SSH sessions and stalls user-unit management for the
+	 * whole game. */
 	static const char *whitelist[] = {
 		"nixlytile", "Xwayland", "xwayland",
 		"pipewire", "wireplumber", "pulseaudio", "pipewire-pulse",
 		"dbus-daemon", "dbus-broker",
+		"systemd", "systemd-logind", "systemd-userdbd",
+		"sshd",
+		"bash", "zsh", "fish", "sh", "dash",
+		"gnome-keyring", "gcr-ssh-agent", "ssh-agent",
 		NULL
 	};
 
@@ -679,13 +695,10 @@ apply_memory_optimization(void)
 {
 	int fd;
 
-	/* Sync and drop page cache */
-	sync();
-	fd = open("/proc/sys/vm/drop_caches", O_WRONLY);
-	if (fd >= 0) {
-		write(fd, "3\n", 2);
-		close(fd);
-	}
+	/* NOTE: no drop_caches here — evicting the page cache right before
+	 * a game streams gigabytes of assets forces everything back from
+	 * disk and causes the load-time I/O it was meant to avoid.
+	 * reclaim_frozen_memory() already frees the RAM that matters. */
 
 	/* Lower swappiness to minimize swap thrashing during gaming */
 	fd = open("/proc/sys/vm/swappiness", O_WRONLY);
@@ -761,24 +774,40 @@ restore_cpu_latency_qos(void)
  * Pin the compositor to core 0 and the game to cores 1..N-1 to prevent
  * them from competing for the same CPU cache lines and scheduler slots.
  */
+/* Apply a cpu mask to every thread of a process — sched_setaffinity on
+ * the pid alone only moves the thread-group leader, leaving a game's
+ * render/audio threads unpinned. */
+static void
+set_process_affinity_all_threads(pid_t pid, const cpu_set_t *set)
+{
+	char task_dir[64];
+	DIR *d;
+	struct dirent *ent;
+
+	sched_setaffinity(pid, sizeof(*set), set);
+
+	snprintf(task_dir, sizeof(task_dir), "/proc/%d/task", pid);
+	d = opendir(task_dir);
+	if (!d)
+		return;
+	while ((ent = readdir(d))) {
+		if (ent->d_name[0] < '0' || ent->d_name[0] > '9')
+			continue;
+		sched_setaffinity((pid_t)atoi(ent->d_name), sizeof(*set), set);
+	}
+	closedir(d);
+}
+
 void
 apply_cpu_affinity(pid_t game_pid)
 {
 	int ncores = sysconf(_SC_NPROCESSORS_ONLN);
 	if (ncores < 4 || game_pid <= 1) return;
 
-	/* Pin compositor to cores 0-1.  A single-core pin combined with
-	 * apply_irq_affinity() (all IRQ → core 0) and SCHED_RR made the
-	 * compositor un-preemptable when it hit a tight retry-loop, which
-	 * is what froze the whole box on the retroarch 10-bit scanout bug.
-	 * Two cores give the kernel somewhere to schedule IRQ-handlers
-	 * while the compositor still has a dedicated fast path. */
-	cpu_set_t compositor_set;
-	CPU_ZERO(&compositor_set);
-	CPU_SET(0, &compositor_set);
-	if (ncores >= 2)
-		CPU_SET(1, &compositor_set);
-	sched_setaffinity(0, sizeof(compositor_set), &compositor_set);
+	/* NOTE: the compositor pin happens on the MAIN thread in
+	 * update_game_mode() (next to the SCHED_RR boost) —
+	 * sched_setaffinity(0, ...) here would pin the gm-bg worker
+	 * thread this function runs on, not the compositor. */
 
 	/* Pin game to cores 2..N-1 (leave cores 0-1 for compositor+IRQ) */
 	cpu_set_t game_set;
@@ -786,10 +815,10 @@ apply_cpu_affinity(pid_t game_pid)
 	int game_first = (ncores >= 4) ? 2 : 1;
 	for (int i = game_first; i < ncores; i++)
 		CPU_SET(i, &game_set);
-	sched_setaffinity(game_pid, sizeof(game_set), &game_set);
+	set_process_affinity_all_threads(game_pid, &game_set);
 
 	game_mode_affinity_applied = 1;
-	wlr_log(WLR_INFO, "CPU affinity: compositor→cores 0-1, game PID %d→cores %d-%d",
+	wlr_log(WLR_INFO, "CPU affinity: game PID %d→cores %d-%d",
 		game_pid, game_first, ncores - 1);
 }
 
@@ -799,14 +828,12 @@ restore_cpu_affinity(pid_t game_pid)
 	if (!game_mode_affinity_applied) return;
 	int ncores = sysconf(_SC_NPROCESSORS_ONLN);
 
-	/* Restore both to all cores */
 	cpu_set_t all_set;
 	CPU_ZERO(&all_set);
 	for (int i = 0; i < ncores; i++)
 		CPU_SET(i, &all_set);
-	sched_setaffinity(0, sizeof(all_set), &all_set);
 	if (game_pid > 1)
-		sched_setaffinity(game_pid, sizeof(all_set), &all_set);
+		set_process_affinity_all_threads(game_pid, &all_set);
 
 	game_mode_affinity_applied = 0;
 	wlr_log(WLR_INFO, "CPU affinity: restored to all cores");
@@ -1326,6 +1353,13 @@ nvidia_detect_smi_index(GpuInfo *gpu)
 {
 	char buf[256], args[256];
 	int i;
+	/* PCI slot → smi index mapping can't change while running; the
+	 * probe costs up to 8 popen(nvidia-smi) calls, so do it once. */
+	static int detected = 0;
+
+	if (detected)
+		return;
+	detected = 1;
 
 	/* Query PCI bus ID for each nvidia-smi GPU and match against our PCI slot */
 	for (i = 0; i < 8; i++) {
@@ -1435,7 +1469,7 @@ apply_nvidia_gpu_power(GpuInfo *gpu)
 			" -a '[gpu:%d]/GPUPowerMizerMode=1'"
 			" -a '[gpu:%d]/GpuPowerMizerDefaultMode=1'"
 			" 2>/dev/null",
-			gpu->card_index, gpu->card_index);
+			nv_gpu_index, nv_gpu_index);
 		FILE *fp = popen(nv_settings_cmd, "r");
 		if (fp) {
 			if (pclose(fp) == 0)
@@ -1519,7 +1553,8 @@ restore_nvidia_gpu_power(void)
 	{
 		char nv_settings_cmd[256];
 		snprintf(nv_settings_cmd, sizeof(nv_settings_cmd),
-			"nvidia-settings -a '[gpu:0]/GPUPowerMizerMode=0' 2>/dev/null");
+			"nvidia-settings -a '[gpu:%d]/GPUPowerMizerMode=0' 2>/dev/null",
+			nv_gpu_index);
 		FILE *fp = popen(nv_settings_cmd, "r");
 		if (fp) pclose(fp);
 	}
@@ -1528,27 +1563,11 @@ restore_nvidia_gpu_power(void)
 	wlr_log(WLR_INFO, "NVIDIA: performance mode deactivated — defaults restored");
 }
 
-/* ── Nvidia power apply/restore in background thread ──────────────── */
-static volatile int nv_apply_thread_running = 0;
-static volatile int nv_restore_thread_running = 0;
-static GpuInfo nv_thread_gpu_copy;
-
-static void *
-nvidia_apply_power_thread(void *arg)
-{
-	apply_nvidia_gpu_power((GpuInfo *)arg);
-	nv_apply_thread_running = 0;
-	return NULL;
-}
-
-static void *
-nvidia_restore_power_thread(void *arg)
-{
-	(void)arg;
-	restore_nvidia_gpu_power();
-	nv_restore_thread_running = 0;
-	return NULL;
-}
+/* Nvidia apply/restore run synchronously on the gm-bg worker thread.
+ * They used to spawn extra detached threads, but apply/restore_gpu_power_state
+ * are only ever called from the worker — the extra threads just created a
+ * race where restore saw nv_power_applied==0 while apply was still running,
+ * leaving clocks locked at max permanently. */
 
 void
 apply_gpu_power_state(void)
@@ -1607,18 +1626,7 @@ apply_gpu_power_state(void)
 		wlr_log(WLR_INFO, "GPU power: AMD card%d → high perf + 3D profile", gpu->card_index);
 
 	} else if (gpu->vendor == GPU_VENDOR_NVIDIA) {
-		if (!nv_apply_thread_running) {
-			pthread_t t;
-			nv_thread_gpu_copy = *gpu;
-			nv_apply_thread_running = 1;
-			if (pthread_create(&t, NULL, nvidia_apply_power_thread, &nv_thread_gpu_copy) == 0) {
-				pthread_detach(t);
-				wlr_log(WLR_INFO, "NVIDIA: power apply dispatched to background thread");
-			} else {
-				nv_apply_thread_running = 0;
-				apply_nvidia_gpu_power(gpu); /* fallback: run synchronously */
-			}
-		}
+		apply_nvidia_gpu_power(gpu);
 
 	} else if (gpu->vendor == GPU_VENDOR_INTEL) {
 		/* Intel: Set min frequency to max frequency */
@@ -1662,17 +1670,7 @@ restore_gpu_power_state(void)
 		gpu_saved_power_profile[0] = '\0';
 		wlr_log(WLR_INFO, "GPU power: AMD power profile restored");
 	}
-	if (!nv_restore_thread_running) {
-		pthread_t t;
-		nv_restore_thread_running = 1;
-		if (pthread_create(&t, NULL, nvidia_restore_power_thread, NULL) == 0) {
-			pthread_detach(t);
-			wlr_log(WLR_INFO, "NVIDIA: power restore dispatched to background thread");
-		} else {
-			nv_restore_thread_running = 0;
-			restore_nvidia_gpu_power(); /* fallback: run synchronously */
-		}
-	}
+	restore_nvidia_gpu_power(); /* no-op unless nv_power_applied */
 	if (gpu_saved_intel_min[0]) {
 		sched_restore(gpu_intel_min_path, gpu_saved_intel_min);
 		wlr_log(WLR_INFO, "GPU power: Intel min freq restored");
@@ -2140,6 +2138,39 @@ static int gm_bg_applied_ultra;
 static pid_t gm_bg_pid;
 static int gm_bg_wake;
 
+/* Full ultra-mode teardown.  Called from the worker's exit branch and
+ * from gm_bg_cleanup() on compositor shutdown — without the latter,
+ * IRQ affinity, I/O scheduler, THP, swappiness, sched tuning and GPU
+ * clock locks would persist system-wide until reboot. */
+static void
+gm_ultra_exit(pid_t pid)
+{
+	wlr_log(WLR_INFO, "gm-bg: exiting ultra (pid=%d)", pid);
+	restore_competing_processes();
+	restore_mglru_tuning();
+	restore_split_lock();
+	restore_dirty_writeback_tuning();
+	restore_gpu_power_state();
+	restore_scheduler_tuning();
+	restore_irq_affinity();
+	restore_raw_input();
+	/* restore_watchdog() paired with the disabled
+	 * apply_disable_watchdog() — no-op now. */
+	restore_io_scheduler();
+	restore_transparent_hugepages();
+	if (pid > 1) {
+		restore_cpu_affinity(pid);
+		restore_gpu_sched_priority(pid);
+		restore_game_priority(pid);
+	}
+	restore_cpu_latency_qos();
+	unfreeze_background_processes();
+	restore_memory_optimization();
+	restore_power_profile();
+	fan_boost_deactivate();
+	wlr_log(WLR_INFO, "gm-bg: ultra exit complete");
+}
+
 static void *
 gm_bg_worker_func(void *arg)
 {
@@ -2185,31 +2216,7 @@ gm_bg_worker_func(void *arg)
 			}
 			wlr_log(WLR_INFO, "gm-bg: ultra enter complete");
 		} else if (!want && have) {
-			/* Exiting ultra — restore everything */
-			wlr_log(WLR_INFO, "gm-bg: exiting ultra (pid=%d)", pid);
-			restore_competing_processes();
-			restore_mglru_tuning();
-			restore_split_lock();
-			restore_dirty_writeback_tuning();
-			restore_gpu_power_state();
-			restore_scheduler_tuning();
-			restore_irq_affinity();
-			restore_raw_input();
-			/* restore_watchdog() paired with the disabled
-			 * apply_disable_watchdog() above — no-op now. */
-			restore_io_scheduler();
-			restore_transparent_hugepages();
-			if (pid > 1) {
-				restore_cpu_affinity(pid);
-				restore_gpu_sched_priority(pid);
-				restore_game_priority(pid);
-			}
-			restore_cpu_latency_qos();
-			unfreeze_background_processes();
-			restore_memory_optimization();
-			restore_power_profile();
-			fan_boost_deactivate();
-			wlr_log(WLR_INFO, "gm-bg: ultra exit complete");
+			gm_ultra_exit(pid);
 		}
 
 		pthread_mutex_lock(&gm_bg_mutex);
@@ -2251,12 +2258,10 @@ gm_bg_cleanup(void)
 	pthread_mutex_unlock(&gm_bg_mutex);
 	pthread_join(gm_bg_thread, NULL);
 
-	/* Ensure processes are unfrozen and PPD restored on compositor exit */
-	if (gm_bg_applied_ultra) {
-		restore_competing_processes();
-		unfreeze_background_processes();
-		restore_power_profile();
-	}
+	/* Full system-tuning restore on compositor exit — the worker has
+	 * been joined, so this runs race-free. */
+	if (gm_bg_applied_ultra)
+		gm_ultra_exit(gm_bg_pid);
 }
 
 static struct wl_event_source *game_mode_debounce_timer;
@@ -2304,9 +2309,19 @@ update_game_mode(void)
 	 * brief focus loss, or tag switch).  Deactivating would reset GPU
 	 * power state, clock locks, and fan boost — causing severe FPS drops.
 	 */
-	if (was_ultra && !c && game_mode_pid > 1 && kill(game_mode_pid, 0) == 0) {
-		/* Game process is still alive — keep ultra mode active */
-		return;
+	if (was_ultra && !c && game_mode_pid > 1) {
+		int alive;
+		if (game_keepalive_pidfd >= 0) {
+			/* pidfd: POLLIN = process exited.  Immune to PID reuse
+			 * and unreaped zombies, unlike kill(pid, 0). */
+			struct pollfd pfd = { .fd = game_keepalive_pidfd,
+					.events = POLLIN };
+			alive = poll(&pfd, 1, 0) == 0;
+		} else {
+			alive = kill(game_mode_pid, 0) == 0;
+		}
+		if (alive)
+			return; /* game still running — keep ultra mode */
 	}
 
 	/*
@@ -2345,6 +2360,14 @@ update_game_mode(void)
 		 */
 		game_mode_pid = client_get_pid(c);
 
+		/* pidfd for the keepalive check: kill(pid, 0) succeeds for
+		 * recycled PIDs and unreaped zombies, which kept ultra mode
+		 * (frozen background, locked clocks) stuck after game exit. */
+		if (game_keepalive_pidfd >= 0)
+			close(game_keepalive_pidfd);
+		game_keepalive_pidfd = game_mode_pid > 1
+			? (int)syscall(__NR_pidfd_open, game_mode_pid, 0) : -1;
+
 		/* statusbar / network / launcher / gamepad timers removed */
 
 		/*
@@ -2372,6 +2395,26 @@ update_game_mode(void)
 				wlr_log(WLR_INFO, "Compositor RT priority set (SCHED_RR, prio=2)");
 			} else {
 				wlr_log(WLR_INFO, "Compositor RT priority failed: %s", strerror(errno));
+			}
+		}
+
+		/* Pin the compositor thread to cores 0-1.  Runs HERE (main
+		 * thread) because sched_setaffinity(0, ...) affects the
+		 * calling thread — on the gm-bg worker it pinned the worker.
+		 * Two cores, not one: a single-core pin + all-IRQ→core-0 +
+		 * SCHED_RR made the compositor un-preemptable in tight
+		 * retry-loops (retroarch 10-bit scanout freeze). */
+		{
+			int ncores = sysconf(_SC_NPROCESSORS_ONLN);
+			if (ncores >= 4) {
+				cpu_set_t cset;
+				CPU_ZERO(&cset);
+				CPU_SET(0, &cset);
+				CPU_SET(1, &cset);
+				if (sched_setaffinity(0, sizeof(cset), &cset) == 0) {
+					compositor_pin_applied = 1;
+					wlr_log(WLR_INFO, "Compositor pinned to cores 0-1");
+				}
 			}
 		}
 
@@ -2446,6 +2489,17 @@ update_game_mode(void)
 				wlr_log(WLR_INFO, "Compositor scheduling restored to SCHED_OTHER");
 			}
 
+			/* Un-pin compositor (main thread, like the pin) */
+			if (compositor_pin_applied) {
+				int ncores = sysconf(_SC_NPROCESSORS_ONLN);
+				cpu_set_t all_set;
+				CPU_ZERO(&all_set);
+				for (int i = 0; i < ncores; i++)
+					CPU_SET(i, &all_set);
+				sched_setaffinity(0, sizeof(all_set), &all_set);
+				compositor_pin_applied = 0;
+			}
+
 			/*
 			 * Dispatch blocking restore operations to background thread.
 			 * Sysfs writes, process unfreeze, memory restore, fan —
@@ -2483,6 +2537,10 @@ update_game_mode(void)
 		game_mode_ultra = 0;
 		game_mode_client = NULL;
 		game_mode_pid = 0;
+		if (game_keepalive_pidfd >= 0) {
+			close(game_keepalive_pidfd);
+			game_keepalive_pidfd = -1;
+		}
 	}
 }
 

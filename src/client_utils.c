@@ -583,12 +583,18 @@ is_steam_game(Client *c)
 	if (c->isfloating)
 		return 0;
 
-	/* Check if it's a child of Steam */
+	/* Check if it's a child of Steam.  Memoized: the ancestry walk
+	 * opens up to ~20 /proc files and the pid never changes. */
 	pid = client_get_pid(c);
-	if (pid > 1 && is_game_launcher_child(pid)) {
-		wlr_log(WLR_INFO, "Detected Steam game: app_id='%s', pid=%d",
-			app_id ? app_id : "(null)", pid);
-		return 1;
+	if (pid > 1) {
+		if (c->launcher_child_verdict == 0)
+			c->launcher_child_verdict =
+				is_game_launcher_child(pid) ? 1 : -1;
+		if (c->launcher_child_verdict > 0) {
+			wlr_log(WLR_INFO, "Detected Steam game: app_id='%s', pid=%d",
+				app_id ? app_id : "(null)", pid);
+			return 1;
+		}
 	}
 
 	return 0;
@@ -664,12 +670,20 @@ looks_like_game(Client *c)
 	if (app && is_known_game_app(app))
 		return 1;
 
-	/* Process-based detection */
+	/* Process-based detection — memoized, pid can't change */
 	pid = client_get_pid(c);
-	if (pid > 1 && is_wine_or_proton_process(pid))
-		return 1;
-	if (pid > 1 && is_game_launcher_child(pid))
-		return 1;
+	if (pid > 1) {
+		if (c->wine_verdict == 0)
+			c->wine_verdict =
+				is_wine_or_proton_process(pid) ? 1 : -1;
+		if (c->wine_verdict > 0)
+			return 1;
+		if (c->launcher_child_verdict == 0)
+			c->launcher_child_verdict =
+				is_game_launcher_child(pid) ? 1 : -1;
+		if (c->launcher_child_verdict > 0)
+			return 1;
+	}
 
 	return 0;
 }
