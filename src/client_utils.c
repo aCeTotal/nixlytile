@@ -71,41 +71,6 @@ find_client_by_app_id(const char *app_id)
 	return NULL;
 }
 
-Client *
-find_discord_client(void)
-{
-	Client *c;
-	const char *discord_ids[] = {
-		"discord", "Discord", ".Discord", ".Discord-wrapped",
-		"vesktop", "Vesktop", "webcord", "WebCord",
-		"armcord", "ArmCord", "legcord", "Legcord",
-		NULL
-	};
-
-	wl_list_for_each(c, &clients, link) {
-		const char *cid = NULL;
-
-		if (c->type == XDGShell && c->surface.xdg && c->surface.xdg->toplevel) {
-			cid = c->surface.xdg->toplevel->app_id;
-		}
-#ifdef XWAYLAND
-		if (c->type == X11 && c->surface.xwayland) {
-			cid = c->surface.xwayland->class;
-		}
-#endif
-		if (!cid)
-			continue;
-
-		/* Check exact matches and substring matches */
-		for (int i = 0; discord_ids[i]; i++) {
-			if (strcasecmp(cid, discord_ids[i]) == 0 ||
-			    strcasestr(cid, discord_ids[i]))
-				return c;
-		}
-	}
-	return NULL;
-}
-
 void
 focus_or_launch_app(const char *app_id, const char *launch_cmd)
 {
@@ -114,12 +79,7 @@ focus_or_launch_app(const char *app_id, const char *launch_cmd)
 	if (!app_id || !app_id[0])
 		return;
 
-	/* Find the client with matching app_id.
-	 * For Discord, use specialized search that checks multiple app_id variants */
-	if (strcasecmp(app_id, "discord") == 0)
-		found = find_discord_client();
-	else
-		found = find_client_by_app_id(app_id);
+	found = find_client_by_app_id(app_id);
 
 	if (found) {
 		/* Focus the client and switch to its tag/workspace */

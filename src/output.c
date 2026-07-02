@@ -1635,6 +1635,19 @@ classify_fullscreen_content(Monitor *m, int *out_game, int *out_video, int *out_
 	 * clears the cache to NULL, a tag with no fullscreen client
 	 * would match and return stale flags from the old tag. */
 	if (c && c == m->classify_cache_client) {
+		/* Content-type can change while the same client stays on top:
+		 * players tag their surface VIDEO only when playback starts
+		 * (e.g. nixlymedia), long after this cache was filled.
+		 * Re-read the cheap protocol hint instead of trusting it. */
+		if (c->isfullscreen) {
+			int video_now = is_video_content(c)
+					|| c->detected_video_hz > 0.0f;
+			if (video_now != m->classify_cache_video) {
+				m->classify_cache_video = video_now;
+				m->classify_cache_tearing =
+					m->classify_cache_game && !video_now;
+			}
+		}
 		*out_game = m->classify_cache_game;
 		*out_video = m->classify_cache_video;
 		*out_tearing = m->classify_cache_tearing;
@@ -2635,17 +2648,23 @@ frame_done:
 		int cursor_here = wlr_box_contains_point(&m->m,
 				cursor->x, cursor->y);
 
-		if (cursor_here || is_game || is_video) {
+		/* A visible fullscreen client is active content even when it
+		 * isn't (yet) classified as game/video — never idle-gate it,
+		 * or its buffer releases stall and the client's swapchain
+		 * blocks (e.g. video-in-subsurface before classification). */
+		if (cursor_here || is_game || is_video
+				|| fullscreen_visible_on(m)) {
 			if (m->render_idle)
 				monitor_wake_internal(m);
 			m->idle_frames = 0;
 		} else {
 			m->idle_frames++;
 			if (m->idle_frames > 120) {
-				if (!m->render_idle) {
-					m->render_idle = 1;
-					wl_event_source_timer_update(m->idle_heartbeat, 1000);
-				}
+				m->render_idle = 1;
+				/* Re-arm every pass — the timer is one-shot, and
+				 * without this the heartbeat dies after its first
+				 * fire, leaving the monitor purely damage-driven. */
+				wl_event_source_timer_update(m->idle_heartbeat, 1000);
 				/* Send frame_done for this heartbeat cycle but don't
 				 * schedule another frame — heartbeat fires in ~1s */
 				wlr_scene_output_send_frame_done(m->scene_output, &now);
@@ -3011,11 +3030,28 @@ update_game_vrr(Monitor *m, float current_fps)
 		current_fps, m->wlr_output->name);
 }
 
+/* Walker for is_video_content(): stop at the first surface in the tree
+ * tagged wp_content_type_v1 VIDEO. */
+static void
+video_content_walk(struct wlr_surface *surface, int sx, int sy, void *data)
+{
+	int *found = data;
+
+	(void)sx;
+	(void)sy;
+
+	if (*found)
+		return;
+	if (wlr_surface_get_content_type_v1(content_type_mgr, surface)
+			== WP_CONTENT_TYPE_V1_TYPE_VIDEO)
+		*found = 1;
+}
+
 int
 is_video_content(Client *c)
 {
 	struct wlr_surface *surface;
-	enum wp_content_type_v1_type content_type;
+	int found = 0;
 
 	if (!c || !content_type_mgr)
 		return 0;
@@ -3024,23 +3060,12 @@ is_video_content(Client *c)
 	if (!surface)
 		return 0;
 
-	content_type = wlr_surface_get_content_type_v1(content_type_mgr, surface);
+	/* Players commonly tag only the video subsurface (mpv-in-subsurface,
+	 * UI in the parent — e.g. nixlymedia), so walk the whole tree
+	 * instead of just the toplevel. */
+	wlr_surface_for_each_surface(surface, video_content_walk, &found);
 
-	/* Debug: log content type for fullscreen clients */
-	static int last_logged_type = -1;
-	if (c->isfullscreen && (int)content_type != last_logged_type) {
-		const char *type_str = "unknown";
-		switch (content_type) {
-		case WP_CONTENT_TYPE_V1_TYPE_NONE: type_str = "none"; break;
-		case WP_CONTENT_TYPE_V1_TYPE_PHOTO: type_str = "photo"; break;
-		case WP_CONTENT_TYPE_V1_TYPE_VIDEO: type_str = "video"; break;
-		case WP_CONTENT_TYPE_V1_TYPE_GAME: type_str = "game"; break;
-		}
-		wlr_log(WLR_DEBUG, "Fullscreen client content-type: %s", type_str);
-		last_logged_type = (int)content_type;
-	}
-
-	return content_type == WP_CONTENT_TYPE_V1_TYPE_VIDEO;
+	return found;
 }
 
 int

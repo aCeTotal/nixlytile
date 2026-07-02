@@ -1295,6 +1295,11 @@ unset_fullscreen:
 			if (w == c || w == p || !w->isfullscreen || m != w->mon
 					|| !(w->tags & c->tags))
 				continue;
+			/* Fullscreen stays on its origin workspace; one hidden
+			 * on an inactive workspace isn't in conflict with the
+			 * newly-mapped client. */
+			if (w->fs_ws && w->mon && w->fs_ws != w->mon->active_ws)
+				continue;
 			const char *old_appid = client_get_appid(w);
 			if (new_appid && old_appid && strcmp(new_appid, old_appid) == 0) {
 				wlr_log(WLR_INFO,
@@ -1536,59 +1541,11 @@ setfloating(Client *c, int floating)
 	printstatus();
 }
 
-/* True if workspace ws holds any client other than `self`: a tiled
- * column, or another fullscreen client bound via fs_ws.  `self` is a
- * fullscreen client already detached from the column row, so n_columns
- * counts only the others. */
-static int
-ws_has_other_clients(Workspace *ws, Client *self)
-{
-	Client *o;
-	if (!ws)
-		return 0;
-	if (ws->n_columns > 0)
-		return 1;
-	wl_list_for_each(o, &clients, link)
-		if (o != self && o->isfullscreen && o->fs_ws == ws)
-			return 1;
-	return 0;
-}
-
-/* Give a fullscreen client its OWN dedicated workspace.  If the
- * workspace it's currently bound to also holds other clients, move it to
- * a fresh workspace and switch the view there; otherwise just make sure
- * its bound workspace is the active one.  Idempotent — safe to call on
- * every setfullscreen(c, 1), including setmon's re-apply. */
-static void
-fullscreen_assign_ws(Client *c)
-{
-	Monitor *m = c->mon;
-	Workspace *home;
-
-	if (!m || !m->active_ws)
-		return;
-	home = c->fs_ws ? c->fs_ws : m->active_ws;
-	if (ws_has_other_clients(home, c)) {
-		Workspace *nw = workspace_create(m);
-		if (!nw) {
-			c->fs_ws = home;
-			return;
-		}
-		c->fs_ws = nw;
-		workspace_switch(m, nw);
-		/* Collapse the workspace c just vacated if it's now empty. */
-		monitor_compact_workspaces(m);
-	} else {
-		c->fs_ws = home;
-		if (m->active_ws != home)
-			workspace_switch(m, home);
-	}
-}
-
 void
 setfullscreen(Client *c, int fullscreen)
 {
 	int was = c->isfullscreen;
+	Workspace *prev_fs_ws = c->fs_ws;
 
 	wlr_log(WLR_INFO,
 		"GAME_TRACE: setfullscreen enter appid='%s' want=%d was=%d "
@@ -1613,7 +1570,10 @@ setfullscreen(Client *c, int fullscreen)
 		workspace_detach_client(c);
 	} else if (was && !fullscreen && !c->isfloating
 			&& !client_is_unmanaged(c) && c->mon && c->mon->active_ws) {
-		workspace_attach_client(c->mon->active_ws, c);
+		/* Reattach to the workspace it was fullscreened on, not
+		 * whichever workspace happens to be active. */
+		workspace_attach_client(prev_fs_ws && prev_fs_ws->mon == c->mon
+				? prev_fs_ws : c->mon->active_ws, c);
 	}
 	if (!c->mon || !client_surface(c)->mapped) {
 		wlr_log(WLR_INFO,
@@ -1622,11 +1582,6 @@ setfullscreen(Client *c, int fullscreen)
 			client_surface(c) ? client_surface(c)->mapped : -1);
 		return;
 	}
-
-	/* Each fullscreen client lives alone on its own dedicated
-	 * workspace, so switching tags moves cleanly between them. */
-	if (fullscreen)
-		fullscreen_assign_ws(c);
 
 	c->bw = fullscreen ? 0 : borderpx;
 	client_set_fullscreen(c, fullscreen);
@@ -1655,21 +1610,10 @@ setfullscreen(Client *c, int fullscreen)
 			fsgeom.width, fsgeom.height, fsgeom.x, fsgeom.y,
 			c->mon->m.width, c->mon->m.height, c->mon->m.x, c->mon->m.y);
 		c->prev = c->geom;
-		/* Game / video fullscreen takes the full output rect (m->m,
-		 * via fsgeom) for direct scanout / mirror behavior; covers
-		 * waybar deliberately for performance.
-		 *
-		 * Regular apps go fullscreen within the usable area (m->w),
-		 * leaving the waybar visible.  Tile-fullscreen UX. */
-		const char *_fsaid = client_get_appid(c);
-		int _is_forced = client_is_forced_fullscreen_appid(_fsaid);
-		if (looks_like_game(c) || is_video_content(c)
-				|| client_wants_tearing(c) || _is_forced) {
-			resize(c, fsgeom, 0);
-		} else {
-			struct wlr_box ufs = c->mon->w;
-			client_set_target_geom(c, ufs);
-		}
+		/* Every fullscreen client takes the full output rect (m->m,
+		 * via fsgeom): no border, covers the statusbar, and gives
+		 * wlroots the geometry it needs for direct scanout. */
+		resize(c, fsgeom, 0);
 		/* Retro emulators: native presentation only. No VRR, no
 		 * refresh-rate matching, no video-classify cadence — those cause
 		 * black flicker/artifacts on HDMI TVs. Resolution drop via

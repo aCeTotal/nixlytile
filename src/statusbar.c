@@ -944,72 +944,6 @@ ensure_net_icon_buffer(int target_h)
 }
 
 void
-drop_bluetooth_icon_buffer(void)
-{
-	if (bluetooth_icon_buf) {
-		wlr_buffer_drop(bluetooth_icon_buf);
-		bluetooth_icon_buf = NULL;
-	}
-	bluetooth_icon_loaded_h = 0;
-	bluetooth_icon_loaded_path[0] = '\0';
-	bluetooth_icon_w = 0;
-	bluetooth_icon_h = 0;
-}
-
-int
-load_bluetooth_icon_buffer(const char *path, int target_h)
-{
-	GError *gerr = NULL;
-	struct wlr_buffer *buf;
-	int w = 0, h = 0;
-	GdkPixbuf *pixbuf = NULL;
-	char resolved[PATH_MAX];
-	const char *load_path = path;
-
-	if (!path || !*path || target_h <= 0)
-		return -1;
-
-	if (resolve_asset_path(path, resolved, sizeof(resolved)) == 0)
-		load_path = resolved;
-
-	if (tray_load_svg_pixbuf(load_path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(load_path, &gerr);
-		if (!pixbuf) {
-			if (gerr) {
-				wlr_log(WLR_ERROR, "bluetooth icon: failed to load '%s': %s", load_path, gerr->message);
-				g_error_free(gerr);
-			}
-			return -1;
-		}
-	}
-
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-
-	drop_bluetooth_icon_buffer();
-	bluetooth_icon_buf = buf;
-	bluetooth_icon_w = w;
-	bluetooth_icon_h = h;
-	bluetooth_icon_loaded_h = target_h;
-	snprintf(bluetooth_icon_loaded_path, sizeof(bluetooth_icon_loaded_path), "%s", load_path);
-	return 0;
-}
-
-int
-ensure_bluetooth_icon_buffer(int target_h)
-{
-	if (target_h <= 0)
-		return -1;
-
-	if (bluetooth_icon_buf && bluetooth_icon_loaded_h == target_h &&
-			strncmp(bluetooth_icon_loaded_path, bluetooth_icon_path, sizeof(bluetooth_icon_loaded_path)) == 0)
-		return 0;
-
-	return load_bluetooth_icon_buffer(bluetooth_icon_path, target_h);
-}
-
-void
 drop_steam_icon_buffer(void)
 {
 	if (steam_icon_buf) {
@@ -1076,89 +1010,6 @@ ensure_steam_icon_buffer(int target_h)
 }
 
 void
-drop_discord_icon_buffer(void)
-{
-	if (discord_icon_buf) {
-		wlr_buffer_drop(discord_icon_buf);
-		discord_icon_buf = NULL;
-	}
-	discord_icon_loaded_h = 0;
-	discord_icon_loaded_path[0] = '\0';
-	discord_icon_w = 0;
-	discord_icon_h = 0;
-}
-
-int
-load_discord_icon_buffer(const char *path, int target_h)
-{
-	GError *gerr = NULL;
-	struct wlr_buffer *buf;
-	int w = 0, h = 0;
-	GdkPixbuf *pixbuf = NULL;
-	char resolved[PATH_MAX];
-	const char *load_path = path;
-
-	if (!path || !*path || target_h <= 0)
-		return -1;
-
-	if (resolve_asset_path(path, resolved, sizeof(resolved)) == 0)
-		load_path = resolved;
-
-	if (tray_load_svg_pixbuf(load_path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(load_path, &gerr);
-		if (!pixbuf) {
-			if (gerr) {
-				wlr_log(WLR_ERROR, "discord icon: failed to load '%s': %s", load_path, gerr->message);
-				g_error_free(gerr);
-			}
-			return -1;
-		}
-	}
-
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-
-	drop_discord_icon_buffer();
-	discord_icon_buf = buf;
-	discord_icon_w = w;
-	discord_icon_h = h;
-	discord_icon_loaded_h = target_h;
-	snprintf(discord_icon_loaded_path, sizeof(discord_icon_loaded_path), "%s", load_path);
-	return 0;
-}
-
-int
-ensure_discord_icon_buffer(int target_h)
-{
-	if (target_h <= 0)
-		return -1;
-
-	if (discord_icon_buf && discord_icon_loaded_h == target_h &&
-			strncmp(discord_icon_loaded_path, discord_icon_path, sizeof(discord_icon_loaded_path)) == 0)
-		return 0;
-
-	return load_discord_icon_buffer(discord_icon_path, target_h);
-}
-
-void
-renderbluetooth(Monitor *m, int bar_height)
-{
-	/* Bluetooth module is disabled — the SNI tray covers it */
-	StatusModule *module;
-
-	(void)bar_height;
-	if (!m || !m->statusbar.bluetooth.tree)
-		return;
-
-	module = &m->statusbar.bluetooth;
-	clearstatusmodule(module);
-	module->width = 0;
-	module->x = 0;
-	wlr_scene_node_set_enabled(&module->tree->node, 0);
-}
-
-void
 rendersteam(Monitor *m, int bar_height)
 {
 	StatusModule *module;
@@ -1214,82 +1065,6 @@ rendersteam(Monitor *m, int bar_height)
 	}
 
 	wlr_scene_node_set_enabled(&module->tree->node, module->width > 0);
-}
-
-void
-renderdiscord(Monitor *m, int bar_height)
-{
-	StatusModule *module;
-	int padding, target_h, icon_x, icon_y, base_h;
-	struct wlr_scene_buffer *scene_buf;
-
-	if (!m || !m->statusbar.discord.tree)
-		return;
-
-	module = &m->statusbar.discord;
-	clearstatusmodule(module);
-	module->width = 0;
-	module->x = 0;
-
-	/* Only show if Discord process is running.
-	 * Check both "Discord" and ".Discord" for NixOS wrapped version */
-	discord_running = is_process_running("Discord") || is_process_running(".Discord");
-	if (!discord_running) {
-		wlr_scene_node_set_enabled(&module->tree->node, 0);
-		return;
-	}
-
-	padding = statusbar_module_padding / 2;
-	if (padding < 1)
-		padding = 1;
-	base_h = bar_height - 2 * padding;
-	target_h = (int)lround(base_h * 1.5);
-	if (target_h > bar_height)
-		target_h = bar_height;
-	if (target_h <= 0)
-		target_h = bar_height - padding;
-	if (target_h <= 0)
-		target_h = 1;
-
-	if (ensure_discord_icon_buffer(target_h) != 0 || !discord_icon_buf ||
-			discord_icon_w <= 0 || discord_icon_h <= 0) {
-		wlr_scene_node_set_enabled(&module->tree->node, 0);
-		return;
-	}
-
-	module->width = discord_icon_w + 2 * padding;
-	if (module->width < discord_icon_w)
-		module->width = discord_icon_w;
-
-	updatemodulebg(module, module->width, bar_height, statusbar_bg);
-
-	scene_buf = wlr_scene_buffer_create(module->tree, NULL);
-	if (scene_buf) {
-		int usable_w = module->width - 2 * padding;
-		icon_x = padding + MAX(0, (usable_w - discord_icon_w) / 2);
-		icon_y = MAX(0, (bar_height - discord_icon_h) / 2);
-		wlr_scene_buffer_set_buffer(scene_buf, discord_icon_buf);
-		wlr_scene_node_set_position(&scene_buf->node, icon_x, icon_y);
-	}
-
-	wlr_scene_node_set_enabled(&module->tree->node, module->width > 0);
-}
-
-void
-rendertrayicons(Monitor *m, int bar_height)
-{
-	/* Wifi/network icon module is disabled — the SNI tray covers it */
-	StatusModule *module;
-
-	(void)bar_height;
-	if (!m || !m->statusbar.sysicons.tree)
-		return;
-
-	module = &m->statusbar.sysicons;
-	clearstatusmodule(module);
-	module->width = 0;
-	module->x = 0;
-	wlr_scene_node_set_enabled(&module->tree->node, 0);
 }
 
 /* Render the SNI system-tray items (real icons) into the traylabel module.
@@ -2905,12 +2680,6 @@ rendernetpopup(Monitor *m)
 
 	if (p->width <= 0 || p->height <= 0)
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
-	else {
-		/* keep anchor so hover detection survives brief relayouts */
-		p->anchor_x = m->statusbar.sysicons.x;
-		p->anchor_y = m->statusbar.area.height;
-		p->anchor_w = m->statusbar.sysicons.width;
-	}
 }
 
 void
@@ -4228,21 +3997,9 @@ positionstatusmodules(Monitor *m)
 			wlr_scene_node_set_enabled(&m->statusbar.traylabel.tree->node, 0);
 			m->statusbar.traylabel.x = 0;
 		}
-		if (m->statusbar.sysicons.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.sysicons.tree->node, 0);
-			m->statusbar.sysicons.x = 0;
-		}
-		if (m->statusbar.bluetooth.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.bluetooth.tree->node, 0);
-			m->statusbar.bluetooth.x = 0;
-		}
 		if (m->statusbar.steam.tree) {
 			wlr_scene_node_set_enabled(&m->statusbar.steam.tree->node, 0);
 			m->statusbar.steam.x = 0;
-		}
-		if (m->statusbar.discord.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.discord.tree->node, 0);
-			m->statusbar.discord.x = 0;
 		}
 		if (m->statusbar.tray_menu.tree) {
 			wlr_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 0);
@@ -4298,18 +4055,9 @@ positionstatusmodules(Monitor *m)
 	if (m->statusbar.traylabel.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.traylabel.tree->node,
 				m->statusbar.traylabel.width > 0);
-	if (m->statusbar.sysicons.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.sysicons.tree->node,
-				m->statusbar.sysicons.width > 0);
-	if (m->statusbar.bluetooth.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.bluetooth.tree->node,
-				m->statusbar.bluetooth.width > 0);
 	if (m->statusbar.steam.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.steam.tree->node,
 				m->statusbar.steam.width > 0);
-	if (m->statusbar.discord.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.discord.tree->node,
-				m->statusbar.discord.width > 0);
 	if (m->statusbar.cpu.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.cpu.tree->node,
 				m->statusbar.cpu.width > 0);
@@ -4347,25 +4095,10 @@ positionstatusmodules(Monitor *m)
 		x += m->statusbar.tags.width + spacing;
 	}
 	/* Group connection-related icons together with minimal spacing */
-	if (m->statusbar.sysicons.width > 0) {
-		wlr_scene_node_set_position(&m->statusbar.sysicons.tree->node, x, 0);
-		m->statusbar.sysicons.x = x;
-		x += m->statusbar.sysicons.width + 2;
-	}
-	if (m->statusbar.bluetooth.width > 0) {
-		wlr_scene_node_set_position(&m->statusbar.bluetooth.tree->node, x, 0);
-		m->statusbar.bluetooth.x = x;
-		x += m->statusbar.bluetooth.width + 2;
-	}
 	if (m->statusbar.steam.width > 0) {
 		wlr_scene_node_set_position(&m->statusbar.steam.tree->node, x, 0);
 		m->statusbar.steam.x = x;
 		x += m->statusbar.steam.width + 2;
-	}
-	if (m->statusbar.discord.width > 0) {
-		wlr_scene_node_set_position(&m->statusbar.discord.tree->node, x, 0);
-		m->statusbar.discord.x = x;
-		x += m->statusbar.discord.width + spacing;
 	}
 	if (m->statusbar.net.width > 0) {
 		wlr_scene_node_set_position(&m->statusbar.net.tree->node, x, 0);
@@ -4443,17 +4176,11 @@ positionstatusmodules(Monitor *m)
 		}
 	}
 	if (m->statusbar.net_popup.tree) {
-		int icon_w = m->statusbar.sysicons.width;
-		int pos_x = icon_w > 0 ? m->statusbar.sysicons.x : m->statusbar.net_popup.anchor_x;
+		int pos_x = m->statusbar.net_popup.anchor_x;
 
 		if (m->statusbar.area.height > 0) {
 			wlr_scene_node_set_position(&m->statusbar.net_popup.tree->node,
 					pos_x, m->statusbar.area.height);
-			if (icon_w > 0) {
-				m->statusbar.net_popup.anchor_x = pos_x;
-				m->statusbar.net_popup.anchor_y = m->statusbar.area.height;
-				m->statusbar.net_popup.anchor_w = icon_w;
-			}
 			if (!m->statusbar.net_popup.visible)
 				wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
 		} else {
@@ -4594,21 +4321,15 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 	 * tick, volume/net events) re-render on content change, so a full
 	 * re-rasterization here on EVERY arrangelayers (each layer-surface
 	 * commit!) — including the is_process_running() /proc walks in
-	 * rendersteam/renderdiscord — is wasted work unless the height
+	 * rendersteam — is wasted work unless the height
 	 * changed or the bar was just re-shown. */
 	renderworkspaces(m, &m->statusbar.tags, bar_area.height);
 	if (m->statusbar.last_layout_h != bar_area.height) {
 		m->statusbar.last_layout_h = bar_area.height;
 		if (m->statusbar.traylabel.tree)
 			rendertray(m, bar_area.height);
-		if (m->statusbar.sysicons.tree)
-			rendertrayicons(m, bar_area.height);
-		if (m->statusbar.bluetooth.tree)
-			renderbluetooth(m, bar_area.height);
 		if (m->statusbar.steam.tree)
 			rendersteam(m, bar_area.height);
-		if (m->statusbar.discord.tree)
-			renderdiscord(m, bar_area.height);
 		if (m->statusbar.cpu.tree)
 			rendercpu(&m->statusbar.cpu, bar_area.height, cpu_text);
 		if (m->statusbar.net.tree)
@@ -5143,14 +4864,8 @@ refreshstatusicons(void)
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
 		if (m->statusbar.traylabel.tree)
 			rendertray(m, barh);
-		if (m->statusbar.sysicons.tree)
-			rendertrayicons(m, barh);
-		if (m->statusbar.bluetooth.tree)
-			renderbluetooth(m, barh);
 		if (m->statusbar.steam.tree)
 			rendersteam(m, barh);
-		if (m->statusbar.discord.tree)
-			renderdiscord(m, barh);
 		positionstatusmodules(m);
 	}
 }
@@ -5679,10 +5394,8 @@ updateramhover(Monitor *m, double cx, double cy)
 void
 updatenethover(Monitor *m, double cx, double cy)
 {
-	int lx, ly;
 	int inside = 0;
 	int was_visible;
-	StatusModule *icon_mod;
 	NetPopup *p;
 	uint64_t now = monotonic_msec();
 
@@ -5695,17 +5408,7 @@ updatenethover(Monitor *m, double cx, double cy)
 	}
 
 	p = &m->statusbar.net_popup;
-	icon_mod = &m->statusbar.sysicons;
-	lx = (int)floor(cx) - m->statusbar.area.x;
-	ly = (int)floor(cy) - m->statusbar.area.y;
 
-	if (icon_mod->width > 0 &&
-		lx >= icon_mod->x &&
-		lx < icon_mod->x + icon_mod->width &&
-		ly >= 0 && ly < m->statusbar.area.height) {
-		inside = 1;
-	}
-	/* Allow anchor data when icon is temporarily zero-sized */
 	if (!inside && p->anchor_w > 0) {
 		int lx_abs = (int)floor(cx);
 		int ly_abs = (int)floor(cy);
@@ -5718,7 +5421,7 @@ updatenethover(Monitor *m, double cx, double cy)
 
 	/* Keep visible while hovering popup itself */
 	if (!inside && p->visible && p->width > 0 && p->height > 0) {
-		int px0 = m->statusbar.area.x + (icon_mod->width > 0 ? icon_mod->x : p->anchor_x);
+		int px0 = m->statusbar.area.x + p->anchor_x;
 		int py0 = m->statusbar.area.y + m->statusbar.area.height;
 		int px1 = px0 + p->width;
 		int py1 = py0 + p->height;
@@ -5750,12 +5453,9 @@ updatenethover(Monitor *m, double cx, double cy)
 		p->visible = 1;
 		wlr_scene_node_set_enabled(&p->tree->node, 1);
 		wlr_scene_node_set_position(&p->tree->node,
-				icon_mod->width > 0 ? icon_mod->x : p->anchor_x,
-				m->statusbar.area.height);
+				p->anchor_x, m->statusbar.area.height);
 		if (!was_visible) {
-			p->anchor_x = icon_mod->width > 0 ? icon_mod->x : p->anchor_x;
 			p->anchor_y = m->statusbar.area.height;
-			p->anchor_w = icon_mod->width > 0 ? icon_mod->width : p->anchor_w;
 			rendernetpopup(m);
 		}
 	} else if (p->visible || p->hover_start_ms != 0) {
@@ -5801,18 +5501,9 @@ initstatusbar(Monitor *m)
 		m->statusbar.traylabel.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.traylabel.tree)
 			m->statusbar.traylabel.bg = wlr_scene_tree_create(m->statusbar.traylabel.tree);
-		m->statusbar.sysicons.tree = wlr_scene_tree_create(m->statusbar.tree);
-		if (m->statusbar.sysicons.tree)
-			m->statusbar.sysicons.bg = wlr_scene_tree_create(m->statusbar.sysicons.tree);
-		m->statusbar.bluetooth.tree = wlr_scene_tree_create(m->statusbar.tree);
-		if (m->statusbar.bluetooth.tree)
-			m->statusbar.bluetooth.bg = wlr_scene_tree_create(m->statusbar.bluetooth.tree);
 		m->statusbar.steam.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.steam.tree)
 			m->statusbar.steam.bg = wlr_scene_tree_create(m->statusbar.steam.tree);
-		m->statusbar.discord.tree = wlr_scene_tree_create(m->statusbar.tree);
-		if (m->statusbar.discord.tree)
-			m->statusbar.discord.bg = wlr_scene_tree_create(m->statusbar.discord.tree);
 		m->statusbar.tray_menu.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.tray_menu.tree) {
 			m->statusbar.tray_menu.bg = wlr_scene_tree_create(m->statusbar.tray_menu.tree);

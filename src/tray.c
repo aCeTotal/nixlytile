@@ -962,7 +962,8 @@ tray_menu_parse_node_body(sd_bus_message *msg, TrayMenu *menu, int depth, int ma
 }
 
 void
-tray_menu_draw_text(struct wlr_scene_tree *tree, const char *text, int x, int y, int row_h)
+tray_menu_draw_text(struct wlr_scene_tree *tree, const char *text, int x, int y, int row_h,
+		int max_w)
 {
 	tll(struct GlyphRun) glyphs = tll_init();
 	const struct fcft_glyph *glyph;
@@ -987,6 +988,10 @@ tray_menu_draw_text(struct wlr_scene_tree *tree, const char *text, int x, int y,
 
 		glyph = fcft_rasterize_char_utf32(statusfont.font, cp, statusbar_font_subpixel);
 		if (glyph && glyph->pix) {
+			/* Clip to the menu's max width — drop glyphs that would
+			 * overflow the popup panel. */
+			if (max_w > 0 && pen_x + glyph->advance.x > max_w)
+				break;
 			tll_push_back(glyphs, ((struct GlyphRun){
 				.glyph = glyph,
 				.pen_x = pen_x,
@@ -1083,6 +1088,9 @@ tray_menu_render(Monitor *m)
 
 	if (max_width <= 0)
 		max_width = 80;
+	/* Cap the popup at 150px; longer labels get clipped. */
+	if (max_width > 150)
+		max_width = 150;
 
 	menu->width = max_width;
 	menu->height = total_height;
@@ -1135,13 +1143,18 @@ tray_menu_render(Monitor *m)
 						entry->has_submenu ? "  >" : "");
 			}
 
-			if (entry->enabled) {
-				tray_menu_draw_text(menu->tree, text, x, y, row);
-			} else {
-				const float *prev_fg = statusbar_fg_override;
-				statusbar_fg_override = tray_menu_fg_disabled;
-				tray_menu_draw_text(menu->tree, text, x, y, row);
-				statusbar_fg_override = prev_fg;
+			{
+				int text_max_w = menu->width - x - padding;
+				if (entry->enabled) {
+					tray_menu_draw_text(menu->tree, text, x, y, row,
+							text_max_w);
+				} else {
+					const float *prev_fg = statusbar_fg_override;
+					statusbar_fg_override = tray_menu_fg_disabled;
+					tray_menu_draw_text(menu->tree, text, x, y, row,
+							text_max_w);
+					statusbar_fg_override = prev_fg;
+				}
 			}
 			y += row;
 		}
@@ -1775,40 +1788,9 @@ tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y)
 void
 tray_update_icons_text(void)
 {
-	TrayItem *it;
-	size_t off = 0;
-	int running_width;
-	char segment[256];
-
-	snprintf(sysicons_text, sizeof(sysicons_text), "Tray");
-	off = strlen(sysicons_text);
-	if (off >= sizeof(sysicons_text))
-		off = sizeof(sysicons_text) - 1;
-	running_width = status_text_width(sysicons_text);
-
-	wl_list_for_each(it, &tray_items, link) {
-		const char *label = it->label[0] ? it->label : it->service;
-		int n;
-		it->x = running_width;
-		if (off ? snprintf(segment, sizeof(segment), " %s", label)
-				: snprintf(segment, sizeof(segment), "%s", label))
-			it->w = status_text_width(segment);
-		else
-			it->w = status_text_width(label);
-		if (it->w <= 0)
-			it->w = statusbar_font_spacing;
-		n = snprintf(sysicons_text + off, sizeof(sysicons_text) - off,
-				off ? " %s" : "%s", label);
-		if (n < 0)
-			break;
-		if ((size_t)n >= sizeof(sysicons_text) - off) {
-			sysicons_text[sizeof(sysicons_text) - 1] = '\0';
-			break;
-		}
-		off += (size_t)n;
-		running_width += it->w;
-	}
-
+	/* it->x / it->w hit boxes are owned by rendertray() (icon layout);
+	 * writing text-based widths here left stale boxes whenever the
+	 * re-render was skipped, making clicks land between icons. */
 	refreshstatusicons();
 }
 

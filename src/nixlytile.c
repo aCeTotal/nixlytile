@@ -168,9 +168,6 @@ const struct wlr_buffer_impl pixman_buffer_impl = {
 
 
 
-/* Find Discord client - checks multiple possible app_id variations.
- * Discord on NixOS/Linux can have various app_ids like:
- * "discord", "Discord", ".Discord-wrapped", "vesktop", etc. */
 
 
 

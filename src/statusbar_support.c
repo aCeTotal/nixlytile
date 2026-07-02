@@ -144,13 +144,6 @@ int volume_icon_loaded_h;
 int volume_icon_w;
 int volume_icon_h;
 struct wlr_buffer *volume_icon_buf;
-char bluetooth_icon_path[PATH_MAX] = "images/svg/bluetooth.svg";
-char bluetooth_icon_loaded_path[PATH_MAX];
-int bluetooth_icon_loaded_h;
-int bluetooth_icon_w;
-int bluetooth_icon_h;
-struct wlr_buffer *bluetooth_icon_buf;
-int bluetooth_available;
 char steam_icon_path[PATH_MAX] = "images/svg/steam.svg";
 char steam_icon_loaded_path[PATH_MAX];
 int steam_icon_loaded_h;
@@ -158,13 +151,6 @@ int steam_icon_w;
 int steam_icon_h;
 struct wlr_buffer *steam_icon_buf;
 int steam_running;
-char discord_icon_path[PATH_MAX] = "images/svg/discord.svg";
-char discord_icon_loaded_path[PATH_MAX];
-int discord_icon_loaded_h;
-int discord_icon_w;
-int discord_icon_h;
-struct wlr_buffer *discord_icon_buf;
-int discord_running;
 unsigned long long net_prev_rx;
 unsigned long long net_prev_tx;
 struct timespec net_prev_ts;
@@ -206,7 +192,6 @@ const double volume_step = 5.0;
 const double mic_step = 5.0;
 double cpu_last_core_percent[MAX_CPU_CORES];
 int cpu_core_count;
-char sysicons_text[64] = "Tray";
 
 /* ── draw helpers (drawhoverrect / drawroundedrect) ──────────────── */
 void

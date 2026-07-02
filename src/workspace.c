@@ -452,9 +452,7 @@ workspace_focus_client(Client *c)
  * fullscreen client.  Fullscreen clients are detached from columns
  * (n_columns stays 0) and bound to the workspace only via fs_ws, so the
  * raw n_columns check would treat a fullscreen-only workspace as empty —
- * making it unreachable by navigation and a target for compaction.  Every
- * fullscreen client lives alone on its own dedicated workspace, so this
- * is the check that keeps those workspaces live. */
+ * making it unreachable by navigation and a target for compaction. */
 int
 workspace_has_clients(Workspace *ws)
 {
@@ -1677,6 +1675,20 @@ monitor_apply_positions(Monitor *m)
 	ws_stride = m->m.height;
 	vertical_anim = (fabs(m->ws_y_offset) > 0.5);
 
+	/* Fullscreen client owning the active workspace: it shares the ws
+	 * with its tiles, and while settled those tiles must stay disabled
+	 * (arrange() hid them for exclusivity / direct scanout) — the
+	 * enable-loop below would otherwise resurrect them every frame. */
+	Client *active_fsc = NULL;
+	wl_list_for_each(c, &clients, link) {
+		if (c->mon == m && c->isfullscreen
+				&& c->fs_ws == m->active_ws
+				&& client_surface(c) && client_surface(c)->mapped) {
+			active_fsc = c;
+			break;
+		}
+	}
+
 	wl_list_for_each(ws, &m->workspaces, link) {
 		int ws_y_base;
 		int row_scroll;
@@ -1702,13 +1714,20 @@ monitor_apply_positions(Monitor *m)
 		}
 
 		/* ws is active or mid-slide: ensure its tile scenes are
-		 * enabled so the slide-in and steady state both render. */
+		 * enabled so the slide-in and steady state both render.
+		 * Exception: tiles under a settled fullscreen client stay
+		 * disabled (fullscreen exclusivity). */
 		wl_list_for_each(col, &ws->columns, link) {
 			wl_list_for_each(c, &col->clients, column_link) {
-				if (c->scene && !c->scene->node.enabled
-						&& !c->isfloating)
+				int want = 1;
+				if (ws == m->active_ws && active_fsc
+						&& !vertical_anim
+						&& !client_is_fs_companion(c, active_fsc))
+					want = 0;
+				if (c->scene && !c->isfloating
+						&& c->scene->node.enabled != want)
 					wlr_scene_node_set_enabled(
-						&c->scene->node, 1);
+						&c->scene->node, want);
 			}
 		}
 

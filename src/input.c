@@ -334,6 +334,10 @@ handlestatusscroll(struct wlr_pointer_axis_event *event)
 	if (!m->showbar || !m->statusbar.area.width || !m->statusbar.area.height)
 		return 0;
 
+	/* Fullscreen covers the bar — scrolls there belong to the client. */
+	if (fullscreen_visible_on(m))
+		return 0;
+
 	lx = (int)floor(cursor->x) - m->statusbar.area.x;
 	ly = (int)floor(cursor->y) - m->statusbar.area.y;
 	if (lx < 0 || ly < 0 || lx >= m->statusbar.area.width || ly >= m->statusbar.area.height)
@@ -408,7 +412,6 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 	StatusModule *cpu = &m->statusbar.cpu;
 	StatusModule *tray = &m->statusbar.traylabel;
 	StatusModule *stm = &m->statusbar.steam;
-	StatusModule *dsc = &m->statusbar.discord;
 
 	if (m->statusbar.cpu_popup.visible) {
 		if (cpu_popup_handle_click(m, lx, ly, button))
@@ -433,10 +436,10 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 			if (it->w > 0 && local >= it->x && local < it->x + it->w) {
 				int sx = m->statusbar.area.x + tray->x + it->x;
 				int sy = m->statusbar.area.y + m->statusbar.area.height;
-				/* Right click → compositor-rendered dbusmenu dropdown;
-				 * fall back to the item's own ContextMenu if the app
-				 * exposes no dbusmenu. */
-				if (button == BTN_RIGHT &&
+				/* Left or right click → compositor-rendered dbusmenu
+				 * dropdown under the icon; fall back to the item's own
+				 * Activate/ContextMenu if the app exposes no dbusmenu. */
+				if ((button == BTN_LEFT || button == BTN_RIGHT) &&
 						tray_menu_open_at(m, it, tray->x + it->x + it->w / 2))
 					return 1;
 				tray_item_activate(it, button, button == BTN_RIGHT, sx, sy);
@@ -477,14 +480,6 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 			stm->width > 0 &&
 			lx >= stm->x && lx < stm->x + stm->width) {
 		focus_or_launch_app("steam", "steam");
-		return 1;
-	}
-
-	/* Discord module click - focus or launch Discord */
-	if (button == BTN_LEFT &&
-			dsc->width > 0 &&
-			lx >= dsc->x && lx < dsc->x + dsc->width) {
-		focus_or_launch_app("discord", "discord");
 		return 1;
 	}
 
@@ -554,8 +549,10 @@ buttonpress(struct wl_listener *listener, void *data)
 			tray_menu_hide_all();
 		}
 
-		/* Clicks on the embedded status bar (tags, tray, modules). */
-		if (selmon && selmon->showbar) {
+		/* Clicks on the embedded status bar (tags, tray, modules).
+		 * A fullscreen client covers the bar area — clicks there
+		 * belong to the client, not the bar. */
+		if (selmon && selmon->showbar && !fullscreen_visible_on(selmon)) {
 			int lx = (int)lround(cursor->x - selmon->statusbar.area.x);
 			int ly = (int)lround(cursor->y - selmon->statusbar.area.y);
 			if (handle_statusbar_clicks(selmon, lx, ly, event->button))
