@@ -857,6 +857,11 @@ cleanuplisteners(void)
 	wl_list_remove(&request_start_drag.link);
 	wl_list_remove(&start_drag.link);
 	wl_list_remove(&new_session_lock.link);
+	/* Registrert på text_input_mgr->events.new_text_input i setup().
+	 * Manglet her → wlr_text_input_v3 sin handle_display_destroy
+	 * asserter på ikke-tom listener_list → SIGABRT ved shutdown
+	 * (observert i coredumps). */
+	wl_list_remove(&new_text_input.link);
 #ifdef XWAYLAND
 	/* Only added when wlr_xwayland_create() succeeded — the links are
 	 * zeroed otherwise and wl_list_remove would crash the shutdown. */

@@ -557,10 +557,12 @@ void
 focusmon(const Arg *arg)
 {
 	int i = 0, nmons = wl_list_length(&mons);
-	if (nmons) {
+	/* selmon kan være NULL (alle skjermer disabled) — dirtomon returnerer
+	 * da NULL og loopen under ville deref'e den. */
+	if (nmons && selmon) {
 		do /* don't switch to disabled mons */
 			selmon = dirtomon(arg->i);
-		while (!selmon->wlr_output->enabled && i++ < nmons);
+		while (selmon && !selmon->wlr_output->enabled && i++ < nmons);
 	}
 	focusclient(focustop(selmon), 1);
 }
@@ -571,13 +573,15 @@ warptomonitor(const Arg *arg)
 	Monitor *m;
 	int i = 0, nmons = wl_list_length(&mons);
 
-	if (!nmons)
+	if (!nmons || !selmon)
 		return;
 
 	m = selmon;
 	do
 		m = dirtomon(arg->i);
-	while (!m->wlr_output->enabled && i++ < nmons);
+	while (m && !m->wlr_output->enabled && i++ < nmons);
+	if (!m)
+		return;
 
 	if (m && m->wlr_output->enabled) {
 		selmon = m;
@@ -1926,7 +1930,16 @@ unmapnotify(struct wl_listener *listener, void *data)
 		grabc = NULL;
 	}
 
-	if (client_is_unmanaged(c)) {
+	/* Velg managed/unmanaged-gren ut fra FAKTISK listemedlemskap, ikke
+	 * client_is_unmanaged(): ved override_redirect-toggle har wlroots
+	 * allerede flippet flagget når setoverrideredirect kaller oss
+	 * manuelt — flagget beskriver NY tilstand mens listemedlemskapet
+	 * ble bestemt av GAMMEL. Feil gren ga enten wl_list_remove på
+	 * aldri-innsatt link (NULL-deref) eller klient frigjort mens den
+	 * fortsatt sto i clients/fstack (UAF). wl_list_remove NULLer
+	 * next/prev og ecalloc starter NULL, så next != NULL er presist
+	 * "står i clients-lista". */
+	if (c->link.next == NULL) {
 		if (c == exclusive_focus) {
 			exclusive_focus = NULL;
 			/* lift=0: a closing override-redirect popup/menu (UE/Slate
@@ -1960,6 +1973,12 @@ unmapnotify(struct wl_listener *listener, void *data)
 		 * a wlr_buffer lock. */
 		client_unfreeze(c);
 		workspace_detach_client(c);
+		/* fs_ws-workspacen destroyes av kompaksjonen under, og
+		 * workspace_destroy sin fs_ws-nullstilling itererer bare
+		 * clients-lista — som vi fjernes fra her. Uten NULL her
+		 * dereferer fullscreen_assign_ws freed workspace ved
+		 * X11 unmap→remap (DXVK alt-tab o.l.) → UAF. */
+		c->fs_ws = NULL;
 		wl_list_remove(&c->link);
 		setmon(c, NULL, 0);
 		wl_list_remove(&c->flink);

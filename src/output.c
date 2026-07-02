@@ -73,6 +73,17 @@ cleanupmon(struct wl_listener *listener, void *data)
 		wl_event_source_remove(m->edid_reprobe_timer);
 		m->edid_reprobe_timer = NULL;
 	}
+	/* Gamemode-timerne har m som callback-data. Uten remove her fyrer
+	 * de etter free(m) under → use-after-free-krasj ved hotplug/unplug
+	 * mens stats-panelet er aktivt. */
+	if (m->stats_panel_timer) {
+		wl_event_source_remove(m->stats_panel_timer);
+		m->stats_panel_timer = NULL;
+	}
+	if (m->stats_panel_anim_timer) {
+		wl_event_source_remove(m->stats_panel_anim_timer);
+		m->stats_panel_anim_timer = NULL;
+	}
 	wlr_scene_node_destroy(&m->fullscreen_bg->node);
 	free(m);
 
@@ -86,16 +97,19 @@ closemon(Monitor *m)
 	/* update selmon if needed and
 	 * move closed monitor's clients to the focused one */
 	Client *c;
-	int i = 0, nmons = wl_list_length(&mons);
-	if (!nmons) {
+	if (m == selmon) {
+		/* Gamle do/while leste alltid mons.next (samme element) og
+		 * avanserte aldri i lista — med disabled førstemonitor ble
+		 * selmon NULL selv når en enabled fantes lenger bak. Gå
+		 * faktisk gjennom lista. Tom liste → selmon = NULL. */
+		Monitor *iter;
 		selmon = NULL;
-	} else if (m == selmon) {
-		do /* don't switch to disabled or mirror mons */
-			selmon = wl_container_of(mons.next, selmon, link);
-		while ((!selmon->wlr_output->enabled || selmon->is_mirror) && i++ < nmons);
-
-		if (!selmon->wlr_output->enabled || selmon->is_mirror)
-			selmon = NULL;
+		wl_list_for_each(iter, &mons, link) {
+			if (iter->wlr_output->enabled && !iter->is_mirror) {
+				selmon = iter;
+				break;
+			}
+		}
 	}
 
 	wl_list_for_each(c, &clients, link) {
@@ -1104,6 +1118,10 @@ Monitor *
 dirtomon(enum wlr_direction dir)
 {
 	struct wlr_output *next;
+	/* Alle skjermer disabled/frakoblet (TV avslått) → selmon NULL.
+	 * Gamepad/tastatur-navigasjon må ikke deref'e den. */
+	if (!selmon || !selmon->wlr_output)
+		return selmon;
 	if (!wlr_output_layout_get(output_layout, selmon->wlr_output))
 		return selmon;
 	if ((next = wlr_output_layout_adjacent_output(output_layout,
@@ -4318,6 +4336,13 @@ apply_best_video_mode(Monitor *m, float video_hz)
 	case 2: /* Custom CVT mode */
 		if (!wlr_output_is_drm(m->wlr_output)) {
 			wlr_log(WLR_ERROR, "CVT mode requires DRM output");
+			break;
+		}
+		/* current_mode kan være NULL (custom mode / output i limbo
+		 * under hotplug) — CVT trenger bredde/høyde derfra. */
+		if (!m->wlr_output->current_mode) {
+			wlr_log(WLR_ERROR, "CVT mode: no current mode on %s",
+					m->wlr_output->name);
 			break;
 		}
 

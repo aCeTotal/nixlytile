@@ -1,4 +1,5 @@
 /* globals.c - Global variable definitions */
+#include <pthread.h>
 #include "nixlytile.h"
 #include "client.h"
 
@@ -135,6 +136,9 @@ int game_mode_affinity_applied = 0;  /* 1 if CPU affinity was changed */
 int game_mode_raw_input_applied = 0; /* 1 if pointer accel was disabled */
 struct libinput_device *pointer_devices[MAX_POINTER_DEVICES];
 int pointer_device_count = 0;
+/* Beskytter pointer_devices[]/count: main-tråden legger til/pruner ved
+ * hotplug, gamemode-bg-worker leser under raw-input-toggle. */
+pthread_mutex_t pointer_devices_lock = PTHREAD_MUTEX_INITIALIZER;
 /* statusbar / launcher / nixpkgs / gamepad globals removed */
 
 /* GPU detection and management */

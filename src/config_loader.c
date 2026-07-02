@@ -628,6 +628,9 @@ apply_autostart(const KdlNode *n, char **collected, size_t *pn)
 static void
 hotapply_libinput(void)
 {
+	/* Lås mot hotplug-prune — ellers freed device-pekere ved
+	 * config-reload rett etter mus/dongle-unplug. */
+	pthread_mutex_lock(&pointer_devices_lock);
 	for (int i = 0; i < pointer_device_count; i++) {
 		struct libinput_device *d = pointer_devices[i];
 		if (!d) continue;
@@ -656,6 +659,7 @@ hotapply_libinput(void)
 			libinput_device_config_accel_set_speed(d, accel_speed);
 		}
 	}
+	pthread_mutex_unlock(&pointer_devices_lock);
 }
 
 static void

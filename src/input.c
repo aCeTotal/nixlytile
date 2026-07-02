@@ -699,10 +699,22 @@ createkeyboardgroup(void)
 
 	/* Prepare an XKB keymap and assign it to the keyboard group. */
 	context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	if (!context)
+		die("failed to create xkb context");
 	names = getxkbrules();
 	if (!(keymap = xkb_keymap_new_from_names(context, &names,
-				XKB_KEYMAP_COMPILE_NO_FLAGS)))
-		die("failed to compile keymap");
+				XKB_KEYMAP_COMPILE_NO_FLAGS))) {
+		/* Config-oppgitte XKB-regler kan være ugyldige, og denne
+		 * funksjonen kjører også i drift (virtuelt tastatur kobler
+		 * til) — die() ville drept hele sesjonen. Fall tilbake til
+		 * default-keymap; die kun hvis selv den feiler. */
+		struct xkb_rule_names def = {0};
+		wlr_log(WLR_ERROR, "failed to compile configured keymap, "
+				"falling back to defaults");
+		if (!(keymap = xkb_keymap_new_from_names(context, &def,
+					XKB_KEYMAP_COMPILE_NO_FLAGS)))
+			die("failed to compile fallback keymap");
+	}
 
 	wlr_keyboard_set_keymap(&group->wlr_group->keyboard, keymap);
 	xkb_keymap_unref(keymap);
@@ -737,7 +749,33 @@ typedef struct {
 	struct wl_listener hold_begin;
 	struct wl_listener hold_end;
 	struct wl_listener destroy;
+	/* libinput-handle for pruning av pointer_devices[] ved destroy.
+	 * NULL for ikke-libinput-devices. */
+	struct libinput_device *libinput_dev;
 } GestureListeners;
+
+/* Fjern device fra pointer_devices[] når den unplugges. Uten dette
+ * beholder gamemode (apply_raw_input/restore_raw_input, kjører på
+ * bg-worker-TRÅDEN) freed libinput-pekere → use-after-free ved neste
+ * gamemode-toggle etter mus/dongle-unplug. Mutex fordi worker-tråden
+ * leser arrayet samtidig som main-tråden muterer det. */
+static void
+pointer_devices_prune(struct libinput_device *dev)
+{
+	int i;
+	if (!dev)
+		return;
+	pthread_mutex_lock(&pointer_devices_lock);
+	for (i = 0; i < pointer_device_count; i++) {
+		if (pointer_devices[i] == dev) {
+			pointer_devices[i] =
+				pointer_devices[pointer_device_count - 1];
+			pointer_devices[--pointer_device_count] = NULL;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&pointer_devices_lock);
+}
 
 static void gesture_swipe_begin(struct wl_listener *listener, void *data)
 {
@@ -798,6 +836,7 @@ static void gesture_hold_end(struct wl_listener *listener, void *data)
 static void gesture_listeners_destroy(struct wl_listener *listener, void *data)
 {
 	GestureListeners *gl = wl_container_of(listener, gl, destroy);
+	pointer_devices_prune(gl->libinput_dev);
 	wl_list_remove(&gl->swipe_begin.link);
 	wl_list_remove(&gl->swipe_update.link);
 	wl_list_remove(&gl->swipe_end.link);
@@ -813,7 +852,7 @@ static void gesture_listeners_destroy(struct wl_listener *listener, void *data)
 void
 createpointer(struct wlr_pointer *pointer)
 {
-	struct libinput_device *device;
+	struct libinput_device *device = NULL;
 	if (wlr_input_device_is_libinput(&pointer->base)
 			&& (device = wlr_libinput_get_device_handle(&pointer->base))) {
 
@@ -851,8 +890,12 @@ createpointer(struct wlr_pointer *pointer)
 		}
 
 		/* Track device for raw input toggle in game mode */
-		if (device && pointer_device_count < MAX_POINTER_DEVICES)
-			pointer_devices[pointer_device_count++] = device;
+		if (device) {
+			pthread_mutex_lock(&pointer_devices_lock);
+			if (pointer_device_count < MAX_POINTER_DEVICES)
+				pointer_devices[pointer_device_count++] = device;
+			pthread_mutex_unlock(&pointer_devices_lock);
+		}
 	}
 
 	wlr_cursor_attach_input_device(cursor, &pointer->base);
@@ -860,6 +903,7 @@ createpointer(struct wlr_pointer *pointer)
 	/* Attach gesture listeners for touchpad swipe/pinch/hold forwarding */
 	{
 		GestureListeners *gl = ecalloc(1, sizeof(*gl));
+		gl->libinput_dev = device;
 		gl->swipe_begin.notify = gesture_swipe_begin;
 		gl->swipe_update.notify = gesture_swipe_update;
 		gl->swipe_end.notify = gesture_swipe_end;

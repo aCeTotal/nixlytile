@@ -1048,12 +1048,16 @@ restore_watchdog(void)
 void
 apply_raw_input(void)
 {
+	/* Kjører på bg-worker-tråden; lås mot hotplug-prune på main-tråden
+	 * (unplugget device = freed libinput-peker uten prune+lås). */
+	pthread_mutex_lock(&pointer_devices_lock);
 	for (int i = 0; i < pointer_device_count; i++) {
 		if (libinput_device_config_accel_is_available(pointer_devices[i])) {
 			libinput_device_config_accel_set_profile(pointer_devices[i],
 				LIBINPUT_CONFIG_ACCEL_PROFILE_FLAT);
 		}
 	}
+	pthread_mutex_unlock(&pointer_devices_lock);
 	game_mode_raw_input_applied = 1;
 	wlr_log(WLR_INFO, "Raw input: disabled pointer acceleration (%d devices)", pointer_device_count);
 }
@@ -1062,12 +1066,14 @@ void
 restore_raw_input(void)
 {
 	if (!game_mode_raw_input_applied) return;
+	pthread_mutex_lock(&pointer_devices_lock);
 	for (int i = 0; i < pointer_device_count; i++) {
 		if (libinput_device_config_accel_is_available(pointer_devices[i])) {
 			libinput_device_config_accel_set_profile(pointer_devices[i], accel_profile);
 			libinput_device_config_accel_set_speed(pointer_devices[i], accel_speed);
 		}
 	}
+	pthread_mutex_unlock(&pointer_devices_lock);
 	game_mode_raw_input_applied = 0;
 	wlr_log(WLR_INFO, "Raw input: restored pointer acceleration profile");
 }

@@ -173,30 +173,43 @@ status_text_width(const char *text)
 		if ((c & 0x80) == 0) {
 			cp = c;
 			i += 1;
+		/* Trunkert multibyte-sekvens (labels kuttes byte-vis av
+		 * snprintf/sanitering): rykk kun forbi bytes som faktisk
+		 * finnes, aldri forbi NUL — ellers leser løkka videre i
+		 * tilstøtende minne (OOB). */
 		} else if ((c & 0xE0) == 0xC0) {
 			cp = (c & 0x1F) << 6;
-			if (text[i + 1])
-				cp |= ((unsigned char)text[i + 1] & 0x3F);
-			i += 2;
+			i += 1;
+			if (text[i]) {
+				cp |= ((unsigned char)text[i] & 0x3F);
+				i += 1;
+			}
 		} else if ((c & 0xF0) == 0xE0) {
 			cp = (c & 0x0F) << 12;
-			if (text[i + 1]) {
-				cp |= ((unsigned char)text[i + 1] & 0x3F) << 6;
-				if (text[i + 2])
-					cp |= ((unsigned char)text[i + 2] & 0x3F);
-			}
-			i += 3;
-		} else if ((c & 0xF8) == 0xF0) {
-			cp = (c & 0x07) << 18;
-			if (text[i + 1]) {
-				cp |= ((unsigned char)text[i + 1] & 0x3F) << 12;
-				if (text[i + 2]) {
-					cp |= ((unsigned char)text[i + 2] & 0x3F) << 6;
-					if (text[i + 3])
-						cp |= ((unsigned char)text[i + 3] & 0x3F);
+			i += 1;
+			if (text[i]) {
+				cp |= ((unsigned char)text[i] & 0x3F) << 6;
+				i += 1;
+				if (text[i]) {
+					cp |= ((unsigned char)text[i] & 0x3F);
+					i += 1;
 				}
 			}
-			i += 4;
+		} else if ((c & 0xF8) == 0xF0) {
+			cp = (c & 0x07) << 18;
+			i += 1;
+			if (text[i]) {
+				cp |= ((unsigned char)text[i] & 0x3F) << 12;
+				i += 1;
+				if (text[i]) {
+					cp |= ((unsigned char)text[i] & 0x3F) << 6;
+					i += 1;
+					if (text[i]) {
+						cp |= ((unsigned char)text[i] & 0x3F);
+						i += 1;
+					}
+				}
+			}
 		} else {
 			i += 1;
 			continue;
@@ -257,32 +270,43 @@ tray_render_label(StatusModule *module, const char *text, int x, int bar_height,
 			cp = c;
 			i += 1;
 		} else if ((c & 0xE0) == 0xC0) {
-			/* 2-byte sequence (110xxxxx 10xxxxxx) */
+			/* 2-byte sequence (110xxxxx 10xxxxxx).
+			 * Rykk kun forbi bytes som finnes — trunkert sekvens
+			 * må ikke hoppe forbi NUL (OOB-les). */
 			cp = (c & 0x1F) << 6;
-			if (text[i + 1])
-				cp |= ((unsigned char)text[i + 1] & 0x3F);
-			i += 2;
+			i += 1;
+			if (text[i]) {
+				cp |= ((unsigned char)text[i] & 0x3F);
+				i += 1;
+			}
 		} else if ((c & 0xF0) == 0xE0) {
 			/* 3-byte sequence (1110xxxx 10xxxxxx 10xxxxxx) */
 			cp = (c & 0x0F) << 12;
-			if (text[i + 1]) {
-				cp |= ((unsigned char)text[i + 1] & 0x3F) << 6;
-				if (text[i + 2])
-					cp |= ((unsigned char)text[i + 2] & 0x3F);
+			i += 1;
+			if (text[i]) {
+				cp |= ((unsigned char)text[i] & 0x3F) << 6;
+				i += 1;
+				if (text[i]) {
+					cp |= ((unsigned char)text[i] & 0x3F);
+					i += 1;
+				}
 			}
-			i += 3;
 		} else if ((c & 0xF8) == 0xF0) {
 			/* 4-byte sequence (11110xxx 10xxxxxx 10xxxxxx 10xxxxxx) */
 			cp = (c & 0x07) << 18;
-			if (text[i + 1]) {
-				cp |= ((unsigned char)text[i + 1] & 0x3F) << 12;
-				if (text[i + 2]) {
-					cp |= ((unsigned char)text[i + 2] & 0x3F) << 6;
-					if (text[i + 3])
-						cp |= ((unsigned char)text[i + 3] & 0x3F);
+			i += 1;
+			if (text[i]) {
+				cp |= ((unsigned char)text[i] & 0x3F) << 12;
+				i += 1;
+				if (text[i]) {
+					cp |= ((unsigned char)text[i] & 0x3F) << 6;
+					i += 1;
+					if (text[i]) {
+						cp |= ((unsigned char)text[i] & 0x3F);
+						i += 1;
+					}
 				}
 			}
-			i += 4;
 		} else {
 			/* Invalid UTF-8, skip byte */
 			i += 1;
@@ -1674,7 +1698,7 @@ rendercpupopup(Monitor *m)
 	uint64_t now;
 	int use_right_gap;
 	int hover_idx;
-	int popup_x = m->statusbar.cpu.x;
+	int popup_x;
 	int need_fetch_now;
 	int max_proc_text_w = 0;
 	int any_has_kill = 0;
@@ -1683,6 +1707,8 @@ rendercpupopup(Monitor *m)
 
 	if (!m || !m->statusbar.cpu_popup.tree)
 		return;
+	/* Etter NULL-sjekken — init i deklarasjonen krasjet på m == NULL. */
+	popup_x = m->statusbar.cpu.x;
 
 	p = &m->statusbar.cpu_popup;
 	hover_idx = p->hover_idx;
@@ -3034,6 +3060,11 @@ readcpustats(struct CpuSample *out, int maxcount)
 		unsigned long long user, nice, system, idle, iowait, irq, softirq, steal;
 		unsigned long long idle_all, non_idle;
 
+		/* Aggregatlinjen "cpu  ..." (uten indeks) matcher også cpu%d —
+		 * første jiffies-tall blir da tolket som kjerneindeks. Krev
+		 * siffer rett etter "cpu". */
+		if (line[3] < '0' || line[3] > '9')
+			continue;
 		if (sscanf(line, "cpu%d %llu %llu %llu %llu %llu %llu %llu %llu",
 				&idx, &user, &nice, &system, &idle, &iowait, &irq, &softirq,
 				&steal) == 9) {
@@ -3456,7 +3487,9 @@ wireless_signal_percent(const char *iface)
 		char name[IF_NAMESIZE] = {0};
 		double link = -1.0;
 
-		if (sscanf(line, " %[^:]: %*[^ ] %lf", name, &link) == 2) {
+		/* %15: bounds — name er IF_NAMESIZE(16); uten bredde smadrer
+		 * en lang linje stacken. */
+		if (sscanf(line, " %15[^:]: %*[^ ] %lf", name, &link) == 2) {
 			if (strcmp(name, iface) == 0) {
 				quality = link;
 				break;

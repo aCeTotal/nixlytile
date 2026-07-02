@@ -19,6 +19,7 @@
 #include <limits.h>
 #include <getopt.h>
 #include <libinput.h>
+#include <pthread.h>
 #include <linux/input-event-codes.h>
 #include <linux/input.h>
 #include <math.h>
@@ -1589,6 +1590,7 @@ extern int game_mode_raw_input_applied;
 #define MAX_POINTER_DEVICES 32
 extern struct libinput_device *pointer_devices[MAX_POINTER_DEVICES];
 extern int pointer_device_count;
+extern pthread_mutex_t pointer_devices_lock;
 
 /* config hot-reload */
 extern int config_inotify_fd;

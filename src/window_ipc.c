@@ -140,7 +140,10 @@ json_str_escape(char *dst, size_t cap, const char *src)
 	if (cap < 3)
 		return 0;
 	dst[i++] = '"';
-	while (*src && i + 7 < cap) {
+	/* i + 7 < cap - 1: rom for worst-case escape (6 tegn) + slutt-quote
+	 * + NUL som caller skriver på dst[retur] — ellers off-by-one på
+	 * cap-grensen. */
+	while (*src && i + 7 < cap - 1) {
 		unsigned char c = (unsigned char)*src++;
 		if (c == '"' || c == '\\') {
 			dst[i++] = '\\';
