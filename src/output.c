@@ -2175,7 +2175,24 @@ rendermon(struct wl_listener *listener, void *data)
 		dt = (double)(frame_start_ns - m->last_anim_ns) / 1e9;
 		m->last_anim_ns = frame_start_ns;
 		if (dt < 0.0) dt = 0.0;
-		if (dt > 0.1) dt = 0.1;
+		{
+			/* Idle-gap reset: dt is measured from the LAST rendered
+			 * frame, so the first tick of an animation started on an
+			 * idle output gets a stale clock.  The 1800-stiffness
+			 * springs (ws switch, tile scroll) cover ~50 % of their
+			 * travel in 40 ms and ~98 % in 100 ms — a fat first tick
+			 * eats the slide and it reads as a snap.  Anything beyond
+			 * a few missed vblanks means "idle", not "animating":
+			 * restart at one nominal frame. */
+			double frame_s = (m->wlr_output && m->wlr_output->refresh > 0)
+					? 1000.0 / (double)m->wlr_output->refresh
+					: 0.016;
+			double idle_gap = 3.0 * frame_s;
+			if (idle_gap < 0.034)
+				idle_gap = 0.034;
+			if (dt > idle_gap)
+				dt = frame_s;
+		}
 
 		still = monitor_anim_tick(m, dt);
 		/* monitor_anim_tick already called monitor_apply_positions

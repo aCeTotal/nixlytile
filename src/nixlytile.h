@@ -577,6 +577,7 @@ typedef struct {
 	char service[128];
 	char menu_path[128];
 	struct wl_list entries;
+	TrayMenuEntry *hover;   /* entry under the cursor (hover highlight) */
 } TrayMenu;
 
 struct StatusBar {
@@ -987,6 +988,12 @@ typedef struct {
 	 * small spring steps accumulate cleanly without truncation. */
 	double geom_fx, geom_fy, geom_fw, geom_fh;
 	double geom_vx, geom_vy, geom_vw, geom_vh;
+	/* Size-anim configure tracking: inner (surface) size sent to the
+	 * client at anim start, and the surface's natural size when the
+	 * anim began.  When the natural size changes mid-anim the client
+	 * has rendered at its new size — unfreeze early and show it. */
+	int anim_final_w, anim_final_h;
+	int anim_start_nat_w, anim_start_nat_h;
 	/* Cached size from last expensive resize() pass — used to skip
 	 * clip + scale recomputation when only position changed
 	 * (camera scroll), avoiding per-frame surface-tree walks for
@@ -2297,6 +2304,7 @@ void refreshstatusram(void);
 void refreshstatusicons(void);
 void refreshstatusfan(void);
 void refreshstatustags(void);
+void refreshworkspacemodule(Monitor *m);
 void init_status_refresh_tasks(void);
 void seed_status_rng(void);
 uint32_t random_status_delay_ms(void);
@@ -2424,6 +2432,7 @@ int tray_menu_open_at(Monitor *m, TrayItem *it, int icon_x);
 void tray_menu_render(Monitor *m);
 void tray_menu_draw_text(struct wlr_scene_tree *tree, const char *text, int x, int y, int row_h);
 TrayMenuEntry *tray_menu_entry_at(Monitor *m, int lx, int ly);
+void tray_menu_update_hover(Monitor *m, double cx, double cy);
 int tray_menu_send_event(TrayMenu *menu, TrayMenuEntry *entry, uint32_t time_msec);
 int tray_menu_parse_node(sd_bus_message *msg, TrayMenu *menu, int depth, int max_depth);
 int tray_menu_parse_node_body(sd_bus_message *msg, TrayMenu *menu, int depth, int max_depth);

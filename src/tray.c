@@ -2,6 +2,12 @@
 #include "nixlytile.h"
 #include "client.h"
 
+/* Waybar/GTK-dark-style popup menu colors */
+static const float tray_menu_bg[]          = {0.11f, 0.11f, 0.12f, 0.98f};
+static const float tray_menu_border[]      = {0.35f, 0.35f, 0.38f, 1.0f};
+static const float tray_menu_separator[]   = {0.35f, 0.35f, 0.38f, 1.0f};
+static const float tray_menu_fg_disabled[] = {0.5f, 0.5f, 0.5f, 1.0f};
+
 int
 tray_load_icon_file(TrayItem *it, const char *path, int desired_h)
 {
@@ -689,6 +695,7 @@ tray_menu_clear(TrayMenu *menu)
 	menu->width = menu->height = 0;
 	menu->x = menu->y = 0;
 	menu->visible = 0;
+	menu->hover = NULL;
 	menu->service[0] = '\0';
 	menu->menu_path[0] = '\0';
 
@@ -793,7 +800,7 @@ tray_menu_parse_node(sd_bus_message *msg, TrayMenu *menu, int depth, int max_dep
 int
 tray_menu_parse_node_body(sd_bus_message *msg, TrayMenu *menu, int depth, int max_depth)
 {
-	TrayMenuEntry *entry;
+	TrayMenuEntry *entry = NULL;
 	int id = 0, r = 0;
 	int enabled = 1, visible = 1;
 	int is_separator = 0, has_submenu = 0;
@@ -899,21 +906,44 @@ tray_menu_parse_node_body(sd_bus_message *msg, TrayMenu *menu, int depth, int ma
 	if (r < 0)
 		return r;
 
+	/* Invisible nodes take their whole subtree with them. */
+	if (!visible) {
+		if (sd_bus_message_skip(msg, "av") < 0)
+			return -EINVAL;
+		return 0;
+	}
+
+	/* Append this node's entry BEFORE parsing children so submenu
+	 * items land below their parent in the flat entry list. */
+	if (depth > 0 && depth <= max_depth) {
+		entry = ecalloc(1, sizeof(*entry));
+		entry->id = id;
+		entry->enabled = enabled;
+		entry->is_separator = is_separator;
+		entry->depth = depth - 1;
+		entry->toggle_type = toggle_type;
+		entry->toggle_state = toggle_state;
+		if (label[0])
+			snprintf(entry->label, sizeof(entry->label), "%s", label);
+		wl_list_insert(menu->entries.prev, &entry->link);
+	}
+
+	/* Children: dbusmenu wraps each child node in a variant ("av"). */
 	{
-		r = sd_bus_message_enter_container(msg, 'a', "(ia{sv}av)");
+		r = sd_bus_message_enter_container(msg, 'a', "v");
 		if (r < 0)
 			return r;
-		while ((r = sd_bus_message_enter_container(msg, 'r', "ia{sv}av")) > 0) {
+		while ((r = sd_bus_message_enter_container(msg, 'v', "(ia{sv}av)")) > 0) {
 			child_count++;
 			if (depth < max_depth) {
-				int cr = tray_menu_parse_node_body(msg, menu, depth + 1, max_depth);
+				int cr = tray_menu_parse_node(msg, menu, depth + 1, max_depth);
 				if (cr < 0) {
 					sd_bus_message_exit_container(msg);
 					r = cr;
 					break;
 				}
 			} else {
-				if (sd_bus_message_skip(msg, "ia{sv}av") < 0) {
+				if (sd_bus_message_skip(msg, "(ia{sv}av)") < 0) {
 					sd_bus_message_exit_container(msg);
 					r = -EINVAL;
 					break;
@@ -926,21 +956,8 @@ tray_menu_parse_node_body(sd_bus_message *msg, TrayMenu *menu, int depth, int ma
 			return r;
 	}
 
-	if (!visible || depth == 0 || depth > max_depth)
-		return 0;
-
-	entry = ecalloc(1, sizeof(*entry));
-	entry->id = id;
-	entry->enabled = enabled;
-	entry->is_separator = is_separator;
-	entry->depth = depth - 1;
-	entry->has_submenu = has_submenu || child_count > 0;
-	entry->toggle_type = toggle_type;
-	entry->toggle_state = toggle_state;
-	if (label[0])
-		snprintf(entry->label, sizeof(entry->label), "%s", label);
-
-	wl_list_insert(menu->entries.prev, &entry->link);
+	if (entry)
+		entry->has_submenu = has_submenu || child_count > 0;
 	return 0;
 }
 
@@ -1076,7 +1093,9 @@ tray_menu_render(Monitor *m)
 	wlr_scene_node_set_position(&menu->bg->node, 0, 0);
 	wl_list_for_each_safe(node, tmp, &menu->bg->children, link)
 		wlr_scene_node_destroy(node);
-	drawrect(menu->bg, 0, 0, menu->width, menu->height, statusbar_bg);
+	/* Waybar/GTK-style popup: solid dark panel with a subtle border */
+	drawrect(menu->bg, 0, 0, menu->width, menu->height, tray_menu_border);
+	drawrect(menu->bg, 1, 1, menu->width - 2, menu->height - 2, tray_menu_bg);
 
 	{
 		int y = padding;
@@ -1090,10 +1109,14 @@ tray_menu_render(Monitor *m)
 
 			if (entry->is_separator) {
 				int sep_y = y + row / 2;
-				drawrect(menu->tree, padding, sep_y, menu->width - 2 * padding, 1, statusbar_fg);
+				drawrect(menu->tree, padding, sep_y, menu->width - 2 * padding, 1, tray_menu_separator);
 				y += row;
 				continue;
 			}
+
+			if (entry == menu->hover && entry->enabled)
+				drawrect(menu->tree, 1, y, menu->width - 2, row,
+						statusbar_tag_active_bg);
 
 			text[0] = '\0';
 			if (entry->toggle_type == 1) {
@@ -1112,7 +1135,14 @@ tray_menu_render(Monitor *m)
 						entry->has_submenu ? "  >" : "");
 			}
 
-			tray_menu_draw_text(menu->tree, text, x, y, row);
+			if (entry->enabled) {
+				tray_menu_draw_text(menu->tree, text, x, y, row);
+			} else {
+				const float *prev_fg = statusbar_fg_override;
+				statusbar_fg_override = tray_menu_fg_disabled;
+				tray_menu_draw_text(menu->tree, text, x, y, row);
+				statusbar_fg_override = prev_fg;
+			}
 			y += row;
 		}
 	}
@@ -1149,8 +1179,10 @@ tray_menu_open_at(Monitor *m, TrayItem *it, int icon_x)
 	if (max_depth < 1)
 		max_depth = 1;
 
-	/* Temporarily disable custom menu parsing to avoid crashes; fall back to client ContextMenu */
-	return 0;
+	/* Let the app refresh its menu before we fetch the layout
+	 * (waybar/libdbusmenu do the same); result is advisory. */
+	sd_bus_call_method(tray_bus, it->service, it->menu,
+			"com.canonical.dbusmenu", "AboutToShow", NULL, NULL, "i", 0);
 
 	r = sd_bus_message_new_method_call(tray_bus, &req, it->service, it->menu,
 			"com.canonical.dbusmenu", "GetLayout");
@@ -1172,8 +1204,8 @@ tray_menu_open_at(Monitor *m, TrayItem *it, int icon_x)
 	}
 
 	{
-		int revision = 0;
-		if (sd_bus_message_read(reply, "i", &revision) < 0)
+		uint32_t revision = 0;
+		if ((r = sd_bus_message_read(reply, "u", &revision)) < 0)
 			goto fail;
 		(void)revision;
 		if ((r = tray_menu_parse_node(reply, menu, 0, max_depth)) < 0)
@@ -1220,6 +1252,29 @@ fail:
 	sd_bus_error_free(&err);
 	tray_menu_hide_all();
 	return 0;
+}
+
+/* Hover highlight tracking (waybar-style row highlight under cursor). */
+void
+tray_menu_update_hover(Monitor *m, double cx, double cy)
+{
+	TrayMenu *menu;
+	TrayMenuEntry *entry = NULL;
+	int lx, ly;
+
+	if (!m || !m->statusbar.tray_menu.tree || !m->statusbar.tray_menu.visible)
+		return;
+
+	menu = &m->statusbar.tray_menu;
+	lx = (int)floor(cx) - m->statusbar.area.x - menu->x;
+	ly = (int)floor(cy) - m->statusbar.area.y - menu->y;
+	if (lx >= 0 && ly >= 0 && lx < menu->width && ly < menu->height)
+		entry = tray_menu_entry_at(m, lx, ly);
+
+	if (entry == menu->hover)
+		return;
+	menu->hover = entry;
+	tray_menu_render(m);
 }
 
 TrayMenuEntry *

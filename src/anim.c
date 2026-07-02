@@ -219,30 +219,40 @@ client_set_target_geom(Client *c, struct wlr_box g)
 		int size_changed = (c->geom.width != g.width ||
 				c->geom.height != g.height);
 		if (size_changed) {
+			/* Configure with the FINAL target size (col->target_width,
+			 * col->target_height per-client share), not the lerped
+			 * intermediate `g` — the client renders ONCE at the size
+			 * it will settle at.  Re-sent whenever the final target
+			 * moves mid-anim (interactive column drag-resize), so the
+			 * client's content tracks the live edge instead of only
+			 * updating after release. */
+			int nc = c->column->n_clients;
+			int gap = c->mon && c->mon->gaps ? (int)gappx : 0;
+			int per_h_target = nc > 0
+				? (c->column->target_height - gap * (nc - 1)) / nc
+				: c->column->target_height;
+			int final_w = c->column->target_width  - 2 * c->bw;
+			int final_h = per_h_target - 2 * c->bw;
+			if (final_w < 1) final_w = 1;
+			if (final_h < 1) final_h = 1;
 			if (!c->anim_active) {
+				struct wlr_box nat;
 				c->geom_fx = (double)c->geom.x;
 				c->geom_fy = (double)c->geom.y;
 				c->geom_fw = (double)c->geom.width;
 				c->geom_fh = (double)c->geom.height;
 				c->geom_vx = c->geom_vy = c->geom_vw = c->geom_vh = 0.0;
-				/* Send configure ONCE at anim start with the
-				 * FINAL target size (col->target_width,
-				 * col->target_height per-client share).  Using
-				 * the lerped intermediate `g` would tell the
-				 * client to render at a mid-anim size which it
-				 * then re-renders on settle — two render passes
-				 * and a visible re-layout flash on slow clients
-				 * (Blender). */
-				int nc = c->column->n_clients;
-				int gap = c->mon && c->mon->gaps ? (int)gappx : 0;
-				int per_h_target = nc > 0
-					? (c->column->target_height - gap * (nc - 1)) / nc
-					: c->column->target_height;
-				int final_w = c->column->target_width  - 2 * c->bw;
-				int final_h = per_h_target - 2 * c->bw;
-				if (final_w < 1) final_w = 1;
-				if (final_h < 1) final_h = 1;
 				client_set_size(c, final_w, final_h);
+				c->anim_final_w = final_w;
+				c->anim_final_h = final_h;
+				client_get_geometry(c, &nat);
+				c->anim_start_nat_w = nat.width;
+				c->anim_start_nat_h = nat.height;
+			} else if (final_w != c->anim_final_w ||
+					final_h != c->anim_final_h) {
+				client_set_size(c, final_w, final_h);
+				c->anim_final_w = final_w;
+				c->anim_final_h = final_h;
 			}
 			c->anim_active = 1;
 		} else {
@@ -251,12 +261,38 @@ client_set_target_geom(Client *c, struct wlr_box g)
 		}
 	} else {
 		/* Floating / non-column: per-client anim path. */
+		int size_changed = (c->geom.width != g.width ||
+				c->geom.height != g.height);
+		int final_w = g.width  - 2 * c->bw;
+		int final_h = g.height - 2 * c->bw;
+		if (final_w < 1) final_w = 1;
+		if (final_h < 1) final_h = 1;
 		if (!c->anim_active) {
 			c->geom_fx = (double)c->geom.x;
 			c->geom_fy = (double)c->geom.y;
 			c->geom_fw = (double)c->geom.width;
 			c->geom_fh = (double)c->geom.height;
 			c->geom_vx = c->geom_vy = c->geom_vw = c->geom_vh = 0.0;
+			if (size_changed) {
+				/* Configure the final size NOW (fullscreen toggle,
+				 * float-resize) — the client renders its new
+				 * content during the anim, not after settle. */
+				struct wlr_box nat;
+				client_set_size(c, final_w, final_h);
+				c->anim_final_w = final_w;
+				c->anim_final_h = final_h;
+				client_get_geometry(c, &nat);
+				c->anim_start_nat_w = nat.width;
+				c->anim_start_nat_h = nat.height;
+			} else {
+				c->anim_final_w = c->anim_final_h = 0;
+			}
+		} else if (size_changed && c->anim_final_w > 0 &&
+				(final_w != c->anim_final_w ||
+				 final_h != c->anim_final_h)) {
+			client_set_size(c, final_w, final_h);
+			c->anim_final_w = final_w;
+			c->anim_final_h = final_h;
 		}
 		c->anim_active = 1;
 	}
@@ -303,16 +339,33 @@ client_anim_apply(Client *c, struct wlr_box g)
 	/* Resize the frozen snapshot to match the lerped box.  This is
 	 * the single biggest visual fix: instead of leaving a black
 	 * exposed area where the surface natural size doesn't cover the
-	 * box, we stretch the cached buffer to fill it.  Briefly blurry
-	 * for ~250ms, then crisp when the client commits a buffer at the
-	 * target size and unfreeze happens. */
+	 * box, we stretch the cached buffer to fill it. */
 	inner_w = g.width  - 2 * c->bw;
 	inner_h = g.height - 2 * c->bw;
 	if (inner_w < 1) inner_w = 1;
 	if (inner_h < 1) inner_h = 1;
+
+	/* Early unfreeze: the moment the client commits a buffer at a NEW
+	 * natural size (it was configured with the final size at anim
+	 * start), swap the stretched stale snapshot for the live surface.
+	 * Fresh content then shows mid-anim, scaled into the moving box,
+	 * instead of popping in only after the anim settles. */
+	if (c->frozen_buffer && c->anim_final_w > 0) {
+		struct wlr_box nat;
+		client_get_geometry(c, &nat);
+		if (nat.width > 0 && nat.height > 0 &&
+				(nat.width != c->anim_start_nat_w ||
+				 nat.height != c->anim_start_nat_h))
+			client_unfreeze(c);
+	}
+
 	if (c->frozen_buffer) {
 		wlr_scene_buffer_set_dest_size(c->frozen_buffer,
 				inner_w, inner_h);
+	} else {
+		/* Live surface during a size anim — keep it scaled to the
+		 * lerped box every frame so content tracks the moving edge. */
+		client_scale_to_box(c, inner_w, inner_h);
 	}
 }
 

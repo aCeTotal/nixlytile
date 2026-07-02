@@ -342,12 +342,17 @@ workspace_attach_client(Workspace *ws, Client *c)
 
 	column_add_client(col, c);
 	ws->focused_col = col;
+	refreshworkspacemodule(ws->mon);
 }
 
 void
 workspace_detach_client(Client *c)
 {
+	Workspace *ws = c && c->column ? c->column->ws : NULL;
+
 	column_remove_client(c);
+	if (ws)
+		refreshworkspacemodule(ws->mon);
 }
 
 /* Re-insert a (previously detached) client into the workspace as a new
@@ -575,6 +580,8 @@ monitor_compact_workspaces(Monitor *m)
 		if (m->next_ws_id > 0)
 			m->next_ws_id--;
 	}
+
+	refreshworkspacemodule(m);
 }
 
 /* Niri preset_column_widths (proportional).  Matches user's Niri config:
@@ -1584,6 +1591,8 @@ workspace_switch(Monitor *m, Workspace *target)
 	/* Force a frame so the anim tick advances soon. */
 	if (m->wlr_output)
 		wlr_output_schedule_frame(m->wlr_output);
+
+	refreshworkspacemodule(m);
 }
 
 void
@@ -1753,5 +1762,36 @@ monitor_apply_positions(Monitor *m)
 				j++;
 			}
 		}
+	}
+
+	/* Fullscreen clients are detached from their column and live on
+	 * LyrFS, so the per-workspace loop above never moves them — a ws
+	 * switch over a fullscreen game/video used to pop instead of
+	 * slide.  Give them the same vertical treatment as tiles: offset
+	 * by their bound workspace's stride position during the slide,
+	 * enabled while mid-anim, disabled when settled on an inactive
+	 * ws (arrange() also disables them; we re-enable for the anim). */
+	wl_list_for_each(c, &clients, link) {
+		int fs_y_base, fs_visible;
+
+		if (c->mon != m || !c->isfullscreen || !c->fs_ws || !c->scene)
+			continue;
+		if (!client_surface(c) || !client_surface(c)->mapped)
+			continue;
+
+		fs_visible = (c->fs_ws == m->active_ws) || vertical_anim;
+		if (!fs_visible) {
+			if (c->scene->node.enabled)
+				wlr_scene_node_set_enabled(&c->scene->node, 0);
+			continue;
+		}
+
+		fs_y_base = (c->fs_ws->idx -
+				(m->active_ws ? m->active_ws->idx : 0)) * ws_stride
+				+ (int)m->ws_y_offset;
+		if (!c->scene->node.enabled)
+			wlr_scene_node_set_enabled(&c->scene->node, 1);
+		wlr_scene_node_set_position(&c->scene->node,
+				c->geom.x, c->geom.y + fs_y_base);
 	}
 }

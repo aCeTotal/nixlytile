@@ -406,9 +406,7 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 	StatusModule *mic = &m->statusbar.mic;
 	StatusModule *vol = &m->statusbar.volume;
 	StatusModule *cpu = &m->statusbar.cpu;
-	StatusModule *sys = &m->statusbar.sysicons;
 	StatusModule *tray = &m->statusbar.traylabel;
-	StatusModule *bt = &m->statusbar.bluetooth;
 	StatusModule *stm = &m->statusbar.steam;
 	StatusModule *dsc = &m->statusbar.discord;
 
@@ -435,18 +433,16 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 			if (it->w > 0 && local >= it->x && local < it->x + it->w) {
 				int sx = m->statusbar.area.x + tray->x + it->x;
 				int sy = m->statusbar.area.y + m->statusbar.area.height;
+				/* Right click → compositor-rendered dbusmenu dropdown;
+				 * fall back to the item's own ContextMenu if the app
+				 * exposes no dbusmenu. */
+				if (button == BTN_RIGHT &&
+						tray_menu_open_at(m, it, tray->x + it->x + it->w / 2))
+					return 1;
 				tray_item_activate(it, button, button == BTN_RIGHT, sx, sy);
 				return 1;
 			}
 		}
-		return 1;
-	}
-
-	if (button == BTN_LEFT &&
-			sys->width > 0 &&
-			lx >= sys->x && lx < sys->x + sys->width) {
-		Arg arg = { .v = netcmd };
-		spawn(&arg);
 		return 1;
 	}
 
@@ -476,19 +472,6 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 		return 1;
 	}
 
-	/* Bluetooth module click - open bluetooth manager */
-	if (button == BTN_LEFT &&
-			bt->width > 0 &&
-			lx >= bt->x && lx < bt->x + bt->width) {
-		pid_t pid = fork();
-		if (pid == 0) {
-			setsid();
-			execlp("blueman-manager", "blueman-manager", NULL);
-			_exit(1);
-		}
-		return 1;
-	}
-
 	/* Steam module click - focus or launch Steam */
 	if (button == BTN_LEFT &&
 			stm->width > 0 &&
@@ -510,8 +493,18 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 			int bx = tags->box_x[i];
 			int bw = tags->box_w[i];
 			if (lx >= bx && lx < bx + bw) {
-				Arg arg = { .ui = 1u << tags->box_tag[i] };
-				view(&arg);
+				/* box_tag holds the workspace's position in
+				 * m->workspaces (see renderworkspaces) */
+				Workspace *ws;
+				int pos = 0;
+				wl_list_for_each(ws, &m->workspaces, link) {
+					if (pos++ == tags->box_tag[i]) {
+						workspace_switch(m, ws);
+						arrange(m);
+						printstatus();
+						break;
+					}
+				}
 				return 1;
 			}
 		}
@@ -2093,6 +2086,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 				updateramhover(selmon, cursor->x, cursor->y);
 				updatebatteryhover(selmon, cursor->x, cursor->y);
 				updatenethover(selmon, cursor->x, cursor->y);
+				tray_menu_update_hover(selmon, cursor->x, cursor->y);
 			}
 		}
 	}

@@ -1120,10 +1120,10 @@ ensure_discord_icon_buffer(int target_h)
 void
 renderbluetooth(Monitor *m, int bar_height)
 {
+	/* Bluetooth module is disabled — the SNI tray covers it */
 	StatusModule *module;
-	int padding, target_h, icon_x, icon_y, base_h;
-	struct wlr_scene_buffer *scene_buf;
 
+	(void)bar_height;
 	if (!m || !m->statusbar.bluetooth.tree)
 		return;
 
@@ -1131,57 +1131,7 @@ renderbluetooth(Monitor *m, int bar_height)
 	clearstatusmodule(module);
 	module->width = 0;
 	module->x = 0;
-
-	/* Lazy one-time probe — findbluetoothdevice() had no caller, so
-	 * bluetooth_available stayed 0 and the icon could never appear. */
-	{
-		static int bt_probed;
-		if (!bt_probed) {
-			bt_probed = 1;
-			bluetooth_available = findbluetoothdevice();
-		}
-	}
-
-	/* Only show if bluetooth is available */
-	if (!bluetooth_available) {
-		wlr_scene_node_set_enabled(&module->tree->node, 0);
-		return;
-	}
-
-	padding = statusbar_module_padding / 2;
-	if (padding < 1)
-		padding = 1;
-	base_h = bar_height - 2 * padding;
-	target_h = (int)lround(base_h * 1.5);
-	if (target_h > bar_height)
-		target_h = bar_height;
-	if (target_h <= 0)
-		target_h = bar_height - padding;
-	if (target_h <= 0)
-		target_h = 1;
-
-	if (ensure_bluetooth_icon_buffer(target_h) != 0 || !bluetooth_icon_buf ||
-			bluetooth_icon_w <= 0 || bluetooth_icon_h <= 0) {
-		wlr_scene_node_set_enabled(&module->tree->node, 0);
-		return;
-	}
-
-	module->width = bluetooth_icon_w + 2 * padding;
-	if (module->width < bluetooth_icon_w)
-		module->width = bluetooth_icon_w;
-
-	updatemodulebg(module, module->width, bar_height, statusbar_bg);
-
-	scene_buf = wlr_scene_buffer_create(module->tree, NULL);
-	if (scene_buf) {
-		int usable_w = module->width - 2 * padding;
-		icon_x = padding + MAX(0, (usable_w - bluetooth_icon_w) / 2);
-		icon_y = MAX(0, (bar_height - bluetooth_icon_h) / 2);
-		wlr_scene_buffer_set_buffer(scene_buf, bluetooth_icon_buf);
-		wlr_scene_node_set_position(&scene_buf->node, icon_x, icon_y);
-	}
-
-	wlr_scene_node_set_enabled(&module->tree->node, module->width > 0);
+	wlr_scene_node_set_enabled(&module->tree->node, 0);
 }
 
 void
@@ -1304,10 +1254,10 @@ renderdiscord(Monitor *m, int bar_height)
 void
 rendertrayicons(Monitor *m, int bar_height)
 {
+	/* Wifi/network icon module is disabled — the SNI tray covers it */
 	StatusModule *module;
-	int padding, target_h, icon_x, icon_y, base_h;
-	struct wlr_scene_buffer *scene_buf;
 
+	(void)bar_height;
 	if (!m || !m->statusbar.sysicons.tree)
 		return;
 
@@ -1315,41 +1265,7 @@ rendertrayicons(Monitor *m, int bar_height)
 	clearstatusmodule(module);
 	module->width = 0;
 	module->x = 0;
-
-	/* Use a small padding so the icon fills most of the bar height */
-	padding = statusbar_module_padding / 2;
-	if (padding < 1)
-		padding = 1;
-	base_h = bar_height - 2 * padding;
-	target_h = (int)lround(base_h * 1.5); /* 50% larger */
-	if (target_h > bar_height)
-		target_h = bar_height;
-	if (target_h <= 0)
-		target_h = bar_height - padding;
-	if (target_h <= 0)
-		target_h = 1;
-
-	if (ensure_net_icon_buffer(target_h) != 0 || !net_icon_buf || net_icon_w <= 0 || net_icon_h <= 0) {
-		wlr_scene_node_set_enabled(&module->tree->node, 0);
-		return;
-	}
-
-	module->width = net_icon_w + 2 * padding;
-	if (module->width < net_icon_w)
-		module->width = net_icon_w;
-
-	updatemodulebg(module, module->width, bar_height, statusbar_bg);
-
-	scene_buf = wlr_scene_buffer_create(module->tree, NULL);
-	if (scene_buf) {
-		int usable_w = module->width - 2 * padding;
-		icon_x = padding + MAX(0, (usable_w - net_icon_w) / 2);
-		icon_y = MAX(0, (bar_height - net_icon_h) / 2);
-		wlr_scene_buffer_set_buffer(scene_buf, net_icon_buf);
-		wlr_scene_node_set_position(&scene_buf->node, icon_x, icon_y);
-	}
-
-	wlr_scene_node_set_enabled(&module->tree->node, module->width > 0);
+	wlr_scene_node_set_enabled(&module->tree->node, 0);
 }
 
 /* Render the SNI system-tray items (real icons) into the traylabel module.
@@ -2974,11 +2890,11 @@ rendernetpopup(Monitor *m)
 void
 renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 {
-	uint32_t mask = 0;
+	Workspace *ws;
 	Client *c;
 	int padding, inner, spacing, outer_pad;
 	int box_h, box_y, total_w = 0;
-	int x, count = 0;
+	int x, count = 0, pos = -1;
 	struct wlr_scene_buffer *scene_buf;
 	struct wlr_buffer *buffer;
 
@@ -2999,30 +2915,38 @@ renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 	if (module->hover_tag < -1 || module->hover_tag >= TAGCOUNT)
 		module->hover_tag = -1;
 
-	wl_list_for_each(c, &clients, link) {
-		if (c->mon != m)
-			continue;
-		mask |= c->tags;
-	}
-	mask |= m->tagset[m->seltags];
-	mask |= 1u; /* Always show workspace 1 */
-	mask &= TAGMASK;
-
 	clearstatusmodule(module);
 
 	box_h = MAX(1, MIN(bar_height - 2, statusfont.height + inner * 2 + 2));
 	box_y = (bar_height - box_h) / 2;
 	x = outer_pad;
 
-	for (int i = 0; i < TAGCOUNT; i++) {
+	/* One box per Niri-style workspace, in stack order.  Shown when the
+	 * workspace has content (tiles or a fullscreen client) or is active.
+	 * box_tag stores the workspace's position in m->workspaces. */
+	wl_list_for_each(ws, &m->workspaces, link) {
 		const struct fcft_glyph *glyph;
 		int min_x, max_x, min_y, max_y;
 		int text_w, text_h, box_w;
 		int origin_x, origin_y;
 		const float *bgcol;
-		int active;
+		int active, occupied, i;
 
-		if (!(mask & (1u << i)))
+		if (++pos >= TAGCOUNT)
+			break;
+		i = pos;
+
+		occupied = workspace_has_clients(ws);
+		if (!occupied) {
+			wl_list_for_each(c, &clients, link) {
+				if (c->fs_ws == ws) {
+					occupied = 1;
+					break;
+				}
+			}
+		}
+		active = (ws == m->active_ws);
+		if (!occupied && !active && pos != 0)
 			continue;
 
 		if (count > 0) {
@@ -3046,7 +2970,6 @@ renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 		origin_x = x + (box_w - text_w) / 2 - min_x;
 		origin_y = box_y + (box_h - text_h) / 2 - min_y;
 
-		active = (m->tagset[m->seltags] & (1u << i)) != 0;
 		bgcol = statusbar_tag_bg;
 		if (active)
 			bgcol = statusbar_tag_active_bg;
@@ -4663,8 +4586,18 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 			renderbattery(&m->statusbar.battery, bar_area.height, battery_text);
 		if (m->statusbar.volume.tree)
 			rendervolume(&m->statusbar.volume, bar_area.height, volume_text);
+		if (m->statusbar.mic.tree)
+			rendermic(&m->statusbar.mic, bar_area.height, mic_text);
 		if (m->statusbar.ram.tree)
 			renderram(&m->statusbar.ram, bar_area.height, ram_text);
+		if (m->statusbar.clock.tree) {
+			time_t now = time(NULL);
+			struct tm tm;
+			char timestr[6] = {0};
+			if (now != (time_t)-1 && localtime_r(&now, &tm)
+					&& strftime(timestr, sizeof(timestr), "%H:%M", &tm))
+				renderclock(&m->statusbar.clock, bar_area.height, timestr);
+		}
 	}
 	if (m->statusbar.cpu_popup.tree && m->statusbar.cpu_popup.visible)
 		rendercpupopup(m);
@@ -5187,6 +5120,20 @@ refreshstatusicons(void)
 			renderdiscord(m, barh);
 		positionstatusmodules(m);
 	}
+}
+
+/* Re-render the workspace boxes for one monitor (workspace switched or
+ * occupancy changed). */
+void
+refreshworkspacemodule(Monitor *m)
+{
+	int barh;
+
+	if (!m || !m->statusbar.tags.tree || !m->showbar)
+		return;
+	barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
+	renderworkspaces(m, &m->statusbar.tags, barh);
+	positionstatusmodules(m);
 }
 
 void
