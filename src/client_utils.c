@@ -607,6 +607,14 @@ looks_like_game(Client *c)
 	if (is_retro_emulator_client(c))
 		return 0;
 
+	/* Browsers are never games.  Chromium can set a wp_tearing_control
+	 * ASYNC hint, which would otherwise trip the protocol-hint branch —
+	 * fullscreennotify then ignores the browser's own unfullscreen
+	 * request (Esc on YouTube) and the exclusive-fullscreen input regime
+	 * never releases. */
+	if (is_browser_client(c))
+		return 0;
+
 	/* Steam main window / popups are never games. Must be checked before
 	 * process-ancestry detection, which otherwise matches the Steam
 	 * launcher itself via its own comm. */

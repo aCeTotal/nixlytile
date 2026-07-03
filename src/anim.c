@@ -228,9 +228,27 @@ client_set_target_geom(Client *c, struct wlr_box g)
 			 * updating after release. */
 			int nc = c->column->n_clients;
 			int gap = c->mon && c->mon->gaps ? (int)gappx : 0;
-			int per_h_target = nc > 0
-				? (c->column->target_height - gap * (nc - 1)) / nc
-				: c->column->target_height;
+			int per_h_target;
+			if (nc > 0) {
+				/* Weighted height share — must mirror
+				 * monitor_apply_positions so the configured
+				 * final size matches the settle geometry. */
+				int avail_t = c->column->target_height
+						- gap * (nc - 1);
+				double w = c->col_weight > 0.0
+						? c->col_weight : 1.0;
+				double sumw = 0.0;
+				Client *cc;
+				wl_list_for_each(cc, &c->column->clients,
+						column_link)
+					sumw += cc->col_weight > 0.0
+							? cc->col_weight : 1.0;
+				if (sumw <= 0.0)
+					sumw = (double)nc;
+				per_h_target = (int)((double)avail_t * w / sumw);
+			} else {
+				per_h_target = c->column->target_height;
+			}
 			int final_w = c->column->target_width  - 2 * c->bw;
 			int final_h = per_h_target - 2 * c->bw;
 			if (final_w < 1) final_w = 1;
@@ -510,6 +528,12 @@ monitor_freeze_clients(Monitor *m, int include_x11, int include_wayland)
 		 * pre-anim state and the fade-in wouldn't render. */
 		if (c->open_anim_active)
 			continue;
+		/* Fullscreen clients: never freeze.  The root-buffer snapshot
+		 * drops subsurfaces (browser video lives in one), so a frozen
+		 * fullscreen browser renders as a static black page while its
+		 * scene_surface is disabled — black screen with live cursor. */
+		if (c->isfullscreen)
+			continue;
 #ifdef XWAYLAND
 		is_x11 = client_is_x11(c);
 #else
@@ -616,10 +640,15 @@ monitor_anim_tick(Monitor *m, double dt)
 				(double)m->w_target.height, SPRING_WINDOW, dt);
 		if (moved_pos || moved_size) {
 			active = 1;
+			/* Derive width/height from the rounded FAR edge, not
+			 * from independent truncation: y and height springs are
+			 * symmetric so y_f + h_f is constant during a statusbar
+			 * toggle, but (int)y_f + (int)h_f jitters ±1px — the
+			 * bottom edge of every tile visibly wobbles. */
 			m->w.x = (int)m->w_x_f;
 			m->w.y = (int)m->w_y_f;
-			m->w.width = (int)m->w_w_f;
-			m->w.height = (int)m->w_h_f;
+			m->w.width = (int)(m->w_x_f + m->w_w_f) - m->w.x;
+			m->w.height = (int)(m->w_y_f + m->w_h_f) - m->w.y;
 		}
 		if (moved_size)
 			size_anim = 1;

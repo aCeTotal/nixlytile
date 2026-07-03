@@ -1635,7 +1635,8 @@ classify_fullscreen_content(Monitor *m, int *out_game, int *out_video, int *out_
 		 * players tag their surface VIDEO only when playback starts
 		 * (e.g. nixlymedia), long after this cache was filled.
 		 * Re-read the cheap protocol hint instead of trusting it. */
-		if (c->isfullscreen) {
+		if (c->isfullscreen
+				&& (!c->fs_ws || c->fs_ws == m->active_ws)) {
 			int video_now = is_video_content(c)
 					|| c->detected_video_hz > 0.0f;
 			if (video_now != m->classify_cache_video) {
@@ -1654,8 +1655,18 @@ classify_fullscreen_content(Monitor *m, int *out_game, int *out_video, int *out_
 	*out_video = 0;
 	*out_tearing = 0;
 
-	if (c && c->isfullscreen) {
-		*out_game = client_wants_tearing(c) || is_game_content(c);
+	if (c && c->isfullscreen
+			&& (!c->fs_ws || c->fs_ws == m->active_ws)) {
+		/* fs_ws guard: a fullscreen client bound to an INACTIVE
+		 * workspace is hidden (Niri-style switch keeps tags, so
+		 * focustop still returns it) — classifying it as video/game
+		 * would drive the cadence/hold path while the desktop is
+		 * showing.
+		 * Browsers never take the game path (tearing flips, game VRR,
+		 * frame-repeat) even if they set a tearing hint — fullscreen
+		 * YouTube is video, not a game. */
+		*out_game = (client_wants_tearing(c) || is_game_content(c))
+				&& !is_browser_client(c);
 		*out_video = is_video_content(c) || c->detected_video_hz > 0.0f;
 		if (*out_game && !*out_video)
 			*out_tearing = 1;
@@ -2657,10 +2668,21 @@ frame_done:
 	 * frame callback drains no matter how long it stays hidden.
 	 * Only surfaces that actually requested a callback get one. */
 	if (frame_start_ns - m->hidden_done_ns >= 1000000000ULL) {
-		Client *hc;
+		Client *hc, *fsc = fullscreen_visible_on(m);
 		wl_list_for_each(hc, &clients, link) {
 			struct wlr_surface *hs;
-			if (hc->mon != m || !hc->scene || hc->scene->node.enabled)
+			int starved;
+			if (hc->mon != m || !hc->scene)
+				continue;
+			/* Starved of frame_done despite an enabled root node:
+			 * frozen clients (scene_surface disabled, only the
+			 * snapshot renders) and clients fully occluded by a
+			 * fullscreen client (zero visible region → wlroots
+			 * silently drops their callbacks). */
+			starved = !hc->scene->node.enabled
+					|| hc->frozen_buffer
+					|| (fsc && hc != fsc);
+			if (!starved)
 				continue;
 			hs = client_surface(hc);
 			if (!hs || !hs->mapped)
@@ -5224,6 +5246,10 @@ check_fullscreen_video(void)
 	wl_list_for_each(m, &mons, link) {
 		c = focustop(m);
 		if (!c || !c->isfullscreen)
+			continue;
+		/* Bound to an inactive workspace (Niri-style switch keeps
+		 * tags) → hidden; don't (re-)establish cadence/VRR for it. */
+		if (c->fs_ws && c->fs_ws != m->active_ws)
 			continue;
 
 		any_fullscreen_active = 1;

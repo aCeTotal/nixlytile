@@ -2445,6 +2445,36 @@ close_logging(void)
 	}
 }
 
+/* ── Client freeze watchdog ──────────────────────────────────────────
+ * Ping every mapped managed client every 3 s.  A client that doesn't
+ * pong within the shell ping timeout (5 s for xdg, wlroots-internal
+ * 10 s for XWayland) gets ping_timeout → pingtimeoutnotify → SIGKILL,
+ * so a frozen program can never wedge its tile or the session. */
+static struct wl_event_source *client_ping_timer;
+
+static int
+client_ping_tick(void *data)
+{
+	Client *c;
+	(void)data;
+
+	wl_list_for_each(c, &clients, link) {
+		struct wlr_surface *s = client_surface(c);
+		if (!s || !s->mapped || client_is_unmanaged(c))
+			continue;
+#ifdef XWAYLAND
+		if (client_is_x11(c)) {
+			wlr_xwayland_surface_ping(c->surface.xwayland);
+			continue;
+		}
+#endif
+		wlr_xdg_surface_ping(c->surface.xdg);
+	}
+
+	wl_event_source_timer_update(client_ping_timer, 3000);
+	return 0;
+}
+
 void
 setup(void)
 {
@@ -2476,6 +2506,9 @@ setup(void)
 	status_timer = wl_event_loop_add_timer(event_loop, updatestatusclock, NULL);
 	status_cpu_timer = wl_event_loop_add_timer(event_loop, updatestatuscpu, NULL);
 	status_hover_timer = wl_event_loop_add_timer(event_loop, updatehoverfade, NULL);
+	client_ping_timer = wl_event_loop_add_timer(event_loop, client_ping_tick, NULL);
+	if (client_ping_timer)
+		wl_event_source_timer_update(client_ping_timer, 3000);
 	tray_init();
 	fcft_initialized = fcft_init(FCFT_LOG_COLORIZE_NEVER, 0, FCFT_LOG_CLASS_ERROR);
 	if (!fcft_initialized)
@@ -2782,6 +2815,9 @@ setup(void)
 	window_ipc_init(event_loop);
 
 	xdg_shell = wlr_xdg_shell_create(dpy, 6);
+	/* Freeze watchdog: a pinged client has this long to pong before
+	 * ping_timeout fires and pingtimeoutnotify kills it. */
+	xdg_shell->ping_timeout = 5000;
 	wl_signal_add(&xdg_shell->events.new_toplevel, &new_xdg_toplevel);
 	wl_signal_add(&xdg_shell->events.new_popup, &new_xdg_popup);
 
@@ -3762,6 +3798,7 @@ createnotifyx11(struct wl_listener *listener, void *data)
 	/* Listen to the various events it can emit */
 	LISTEN(&xsurface->events.associate, &c->associate, associatex11);
 	LISTEN(&xsurface->events.destroy, &c->destroy, destroynotify);
+	LISTEN(&xsurface->events.ping_timeout, &c->ping_timeout, pingtimeoutnotify);
 	LISTEN(&xsurface->events.dissociate, &c->dissociate, dissociatex11);
 	LISTEN(&xsurface->events.request_activate, &c->activate, activatex11);
 	LISTEN(&xsurface->events.request_minimize, &c->minimize, minimizenotify);

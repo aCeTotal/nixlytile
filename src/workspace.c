@@ -230,6 +230,17 @@ column_destroy(Column *col)
 	free(col);
 }
 
+/* Membership change invalidates the column's height weights (set by
+ * Mod+RightDrag as pixel values for a specific member set) — reset to
+ * even split. */
+static void
+column_reset_weights(Column *col)
+{
+	Client *c;
+	wl_list_for_each(c, &col->clients, column_link)
+		c->col_weight = 0.0;
+}
+
 void
 column_add_client(Column *col, Client *c)
 {
@@ -240,8 +251,10 @@ column_add_client(Column *col, Client *c)
 		column_remove_client(c);
 
 	c->column = col;
+	c->col_weight = 0.0;
 	wl_list_insert(col->clients.prev, &c->column_link);
 	col->n_clients++;
+	column_reset_weights(col);
 }
 
 void
@@ -255,11 +268,15 @@ column_remove_client(Client *c)
 	col = c->column;
 	wl_list_remove(&c->column_link);
 	c->column = NULL;
+	c->col_weight = 0.0;
 	col->n_clients--;
 
 	/* Empty columns auto-destruct (Niri behavior). */
-	if (col->n_clients == 0)
+	if (col->n_clients == 0) {
 		column_destroy(col);
+		return;
+	}
+	column_reset_weights(col);
 }
 
 void
@@ -1202,13 +1219,21 @@ focus_first_in_workspace(Workspace *ws)
 
 	col = ws->focused_col;
 	if (!col || wl_list_empty(&col->clients)) {
-		if (wl_list_empty(&ws->columns))
+		if (wl_list_empty(&ws->columns)) {
+			/* Empty workspace: clear keyboard focus.  Leaving it
+			 * on the previous ws's (now hidden) client — e.g. a
+			 * fullscreen video — sends every keystroke to an
+			 * invisible surface and reads as a frozen desktop. */
+			focusclient(NULL, 0);
 			return;
+		}
 		col = wl_container_of(ws->columns.next, col, link);
 		ws->focused_col = col;
 	}
-	if (wl_list_empty(&col->clients))
+	if (wl_list_empty(&col->clients)) {
+		focusclient(NULL, 0);
 		return;
+	}
 
 	c = wl_container_of(col->clients.next, c, column_link);
 	focusclient(c, 0);
@@ -1561,6 +1586,12 @@ workspace_switch(Monitor *m, Workspace *target)
 	if (!m || !target || target == m->active_ws)
 		return;
 
+	/* Same invalidation as the tag-switch paths (view/tag/...): the
+	 * outgoing ws may hold a fullscreen video whose cadence/VRR state
+	 * and classify cache would otherwise survive the switch and keep
+	 * rendermon in the video hold path with the video hidden. */
+	invalidate_video_pacing(m);
+
 	old_idx = m->active_ws ? m->active_ws->idx : 0;
 	new_idx = target->idx;
 	mon_h = m->m.height;
@@ -1760,24 +1791,33 @@ monitor_apply_positions(Monitor *m)
 			int col_abs_y = m->w.y + ws_y_base + col->y;
 			int nc = col->n_clients;
 			int j = 0;
-			int per_h, used_h;
+			int avail, used_h, y_cursor = 0;
+			double sumw = 0.0;
 
 			if (nc == 0)
 				continue;
-			/* Use live m->w.height so per-client per_h lerps with
-			 * the column-height spring (waybar toggle case). */
+			/* Use live m->w.height so per-client heights lerp with
+			 * the column-height spring (waybar toggle case).
+			 * Heights are weighted (Mod+RightDrag vertical resize);
+			 * weight <= 0 means default 1.0. */
 			used_h = m->w.height;
-			per_h = (used_h - gap * (nc - 1)) / nc;
+			avail = used_h - gap * (nc - 1);
+			wl_list_for_each(c, &col->clients, column_link)
+				sumw += c->col_weight > 0.0 ? c->col_weight : 1.0;
+			if (sumw <= 0.0)
+				sumw = (double)nc;
 
 			wl_list_for_each(c, &col->clients, column_link) {
 				struct wlr_box geo;
+				double w = c->col_weight > 0.0 ? c->col_weight : 1.0;
 				geo.x = col_abs_x;
-				geo.y = col_abs_y + j * (per_h + gap);
+				geo.y = col_abs_y + y_cursor;
 				geo.width = col->width;
 				geo.height = (j == nc - 1)
-					? (used_h - j * (per_h + gap))
-					: per_h;
+					? (avail - y_cursor + gap * j)
+					: (int)((double)avail * w / sumw);
 				client_set_target_geom(c, geo);
+				y_cursor += geo.height + gap;
 				j++;
 			}
 		}

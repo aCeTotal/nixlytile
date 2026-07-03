@@ -356,6 +356,15 @@ commitnotify(struct wl_listener *listener, void *data)
 	if (c->isfullscreen)
 		track_client_frame(c);
 
+	/* Mid-anim commits must not push the lerped intermediate geometry
+	 * back as a configure.  The anim path configured the FINAL size at
+	 * anim start; re-sending c->geom here makes the client chase the
+	 * spring with intermediate-size renders (content visibly ratchets,
+	 * worst at the bottom edge on a statusbar toggle).  The settle
+	 * branch in clients_anim_tick sends the authoritative resize. */
+	if (c->anim_active)
+		return;
+
 	/* For tiled clients in a tiling layout, use the geometry from btrtile
 	 * (stored in old_geom) to ensure proper tiling. This prevents clients
 	 * from appearing at their initial centered position before the layout
@@ -385,6 +394,7 @@ createnotify(struct wl_listener *listener, void *data)
 	LISTEN(&toplevel->base->surface->events.map, &c->map, mapnotify);
 	LISTEN(&toplevel->base->surface->events.unmap, &c->unmap, unmapnotify);
 	LISTEN(&toplevel->events.destroy, &c->destroy, destroynotify);
+	LISTEN(&toplevel->base->events.ping_timeout, &c->ping_timeout, pingtimeoutnotify);
 	LISTEN(&toplevel->events.request_fullscreen, &c->fullscreen, fullscreennotify);
 	LISTEN(&toplevel->events.request_maximize, &c->maximize, maximizenotify);
 	LISTEN(&toplevel->events.set_title, &c->set_title, updatetitle);
@@ -399,6 +409,25 @@ destroydecoration(struct wl_listener *listener, void *data)
 	wl_list_remove(&c->set_decoration_mode.link);
 }
 
+/*
+ * Freeze watchdog: the periodic ping tick (client_ping_tick in
+ * nixlytile.c) pings every mapped client; a client that doesn't pong
+ * within the shell's ping timeout is considered frozen and killed so
+ * it can't wedge its tile or the session.
+ */
+void
+pingtimeoutnotify(struct wl_listener *listener, void *data)
+{
+	Client *c = wl_container_of(listener, c, ping_timeout);
+	pid_t pid = client_get_pid(c);
+
+	wlr_log(WLR_ERROR,
+		"Freeze watchdog: '%s' (pid %d) unresponsive to ping — killing",
+		client_get_appid(c) ? client_get_appid(c) : "(null)", (int)pid);
+	if (pid > 1)
+		kill(pid, SIGKILL);
+}
+
 void
 destroynotify(struct wl_listener *listener, void *data)
 {
@@ -408,6 +437,7 @@ destroynotify(struct wl_listener *listener, void *data)
 	wl_list_remove(&c->destroy.link);
 	wl_list_remove(&c->set_title.link);
 	wl_list_remove(&c->fullscreen.link);
+	wl_list_remove(&c->ping_timeout.link);
 #ifdef XWAYLAND
 	if (c->type != XDGShell) {
 		wl_list_remove(&c->activate.link);
@@ -1634,6 +1664,20 @@ setfullscreen(Client *c, int fullscreen)
 		 * via fsgeom): no border, covers the statusbar, and gives
 		 * wlroots the geometry it needs for direct scanout. */
 		resize(c, fsgeom, 0);
+		/* Cancel any in-flight geometry anim.  After the detach above
+		 * nothing updates target_geom for this client again, so a live
+		 * spring would drag the surface back toward the stale tile box
+		 * and settle with a tile-sized configure while still
+		 * fullscreen — the user sees fullscreen_bg (black) instead. */
+		c->anim_active = 0;
+		c->target_geom = c->geom;
+		c->geom_fx = (double)c->geom.x;
+		c->geom_fy = (double)c->geom.y;
+		c->geom_fw = (double)c->geom.width;
+		c->geom_fh = (double)c->geom.height;
+		c->geom_vx = c->geom_vy = c->geom_vw = c->geom_vh = 0.0;
+		client_unfreeze(c);
+		client_scale_reset(c);
 		/* Retro emulators: native presentation only. No VRR, no
 		 * refresh-rate matching, no video-classify cadence — those cause
 		 * black flicker/artifacts on HDMI TVs. Resolution drop via
@@ -1658,7 +1702,8 @@ setfullscreen(Client *c, int fullscreen)
 		c->video_detect_retries = 0;
 		c->video_detect_phase = 0;
 		if (!_is_retro) {
-			if (is_game_content(c) || client_wants_tearing(c)) {
+			if ((is_game_content(c) || client_wants_tearing(c))
+					&& !is_browser_client(c)) {
 				enable_game_vrr(c->mon);
 			} else {
 				set_video_refresh_rate(c->mon, c);
@@ -1893,6 +1938,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 		cursor_mode = CurNormal;
 		grabc = NULL;
 	}
+	input_client_gone(c);
 
 	/* Velg managed/unmanaged-gren ut fra FAKTISK listemedlemskap, ikke
 	 * client_is_unmanaged(): ved override_redirect-toggle har wlroots

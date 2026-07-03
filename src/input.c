@@ -17,12 +17,43 @@ static int     grab_resize_col_w0 = 0;
 static int     grab_resize_nbr_w0 = 0;
 static double  grab_resize_start_x = 0.0;
 
+/* Mod+RightDrag tile resize state: column width + intra-column height
+ * weights (replaces the removed btrtile split-ratio machinery). */
+static Column *tile_rsz_col = NULL;   /* column whose width is dragged */
+static int     tile_rsz_hsign = 0;    /* +1 = right edge, -1 = left edge */
+static int     tile_rsz_w0 = 0;       /* column width at grab */
+static Client *tile_rsz_ca = NULL;    /* upper client of the height pair */
+static Client *tile_rsz_cb = NULL;    /* lower client of the height pair */
+static int     tile_rsz_ha0 = 0;      /* ca height at grab (px) */
+static int     tile_rsz_hb0 = 0;      /* cb height at grab (px) */
+
+static void
+tile_resize_reset(void)
+{
+	tile_rsz_col = NULL;
+	tile_rsz_hsign = 0;
+	tile_rsz_w0 = 0;
+	tile_rsz_ca = tile_rsz_cb = NULL;
+	tile_rsz_ha0 = tile_rsz_hb0 = 0;
+}
+
+/* Called from unmapnotify — a client can die mid-drag; the next motion
+ * event would write weights through dangling pointers. */
+void
+input_client_gone(Client *c)
+{
+	if (c == tile_rsz_ca || c == tile_rsz_cb)
+		tile_resize_reset();
+}
+
 /* Called from column_destroy() — a column can die mid-drag (client in
  * it closes), and the next motion event would write into freed memory
  * through these pointers. */
 void
 input_column_gone(Column *col)
 {
+	if (col == tile_rsz_col)
+		tile_resize_reset();
 	if (col != grab_resize_col && col != grab_resize_nbr)
 		return;
 	grab_resize_col = grab_resize_nbr = NULL;
@@ -610,6 +641,7 @@ buttonpress(struct wl_listener *listener, void *data)
 		 * (time == 0 && resizing_from_mouse) stays armed forever
 		 * after the first mouse resize. */
 		resizing_from_mouse = 0;
+		tile_resize_reset();
 		if (!locked && cursor_mode == CurColResize) {
 			cursor_mode = CurNormal;
 			grab_resize_col = grab_resize_nbr = NULL;
@@ -2194,62 +2226,55 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 				goto focus;
 
 			if (tiled && resizing_from_mouse) {
-				double ratio, ratio_h;
+				/* Column-layout tile resize (Mod+RightDrag):
+				 * horizontal → column width (px override),
+				 * vertical → height weights between the grabbed
+				 * client and its in-column neighbour. */
 				int changed = 0;
 				double dx_total = cursor->x - resize_start_x;
 				double dy_total = cursor->y - resize_start_y;
-				LayoutNode *client_node;
 
-				if (!resize_split_node && !resize_split_node_h) {
-					LayoutNode **curr_root = get_current_root(selmon);
-					client_node = curr_root ? find_client_node(*curr_root, grabc) : NULL;
-					if (!client_node)
-						goto focus;
-
-					resize_use_v = resize_use_h = 0;
-
-					resize_split_node = closest_split_node(client_node, 1, cursor->x,
-							&resize_start_ratio_v, &resize_start_box_v, NULL);
-					if (!resize_split_node)
-						resize_start_ratio_v = 0.5;
-
-					resize_split_node_h = closest_split_node(client_node, 0, cursor->y,
-							&resize_start_ratio_h, &resize_start_box_h, NULL);
-					if (!resize_split_node_h)
-						resize_start_ratio_h = 0.5;
-
-					apply_resize_axis_choice();
+				if (tile_rsz_col) {
+					const int min_w = 100;
+					int new_w = tile_rsz_w0
+						+ (int)(tile_rsz_hsign * dx_total);
+					int mon_w = selmon && selmon->w_initialized
+							? selmon->w_target.width
+							: (selmon ? selmon->w.width : 0);
+					if (new_w < min_w)
+						new_w = min_w;
+					if (mon_w > 0 && new_w > mon_w)
+						new_w = mon_w;
+					if (new_w != tile_rsz_col->width_px_override) {
+						tile_rsz_col->fullscreen = 0;
+						tile_rsz_col->width_px_override = new_w;
+						/* Track the cursor directly during
+						 * the drag (same as CurColResize)
+						 * instead of springing after it. */
+						tile_rsz_col->just_created = 1;
+						changed = 1;
+					}
 				}
 
-				if (resize_use_v && resize_split_node && resize_start_box_v.width > 0) {
-					double current = resize_split_node->split_ratio;
-					ratio = resize_start_ratio_v + dx_total / resize_start_box_v.width;
-						if (ratio < 0.05f)
-							ratio = 0.05f;
-						if (ratio > 0.95f)
-							ratio = 0.95f;
-						if (fabs(ratio - current) >= resize_ratio_epsilon) {
-							float old_r = resize_split_node->split_ratio;
-							resize_split_node->split_ratio = (float)ratio;
-							(void)old_r;
-							changed = 1;
-						}
+				if (tile_rsz_ca && tile_rsz_cb) {
+					const int min_h = 80;
+					int dy = (int)dy_total;
+					int new_a = tile_rsz_ha0 + dy;
+					int new_b;
+					if (new_a < min_h)
+						new_a = min_h;
+					if (tile_rsz_ha0 + tile_rsz_hb0 - new_a < min_h)
+						new_a = tile_rsz_ha0 + tile_rsz_hb0 - min_h;
+					new_b = tile_rsz_ha0 + tile_rsz_hb0 - new_a;
+					if ((double)new_a != tile_rsz_ca->col_weight ||
+							(double)new_b != tile_rsz_cb->col_weight) {
+						tile_rsz_ca->col_weight = (double)new_a;
+						tile_rsz_cb->col_weight = (double)new_b;
+						changed = 1;
 					}
+				}
 
-				if (resize_use_h && resize_split_node_h && resize_start_box_h.height > 0) {
-					double current_h = resize_split_node_h->split_ratio;
-					ratio_h = resize_start_ratio_h + dy_total / resize_start_box_h.height;
-						if (ratio_h < 0.05f)
-							ratio_h = 0.05f;
-						if (ratio_h > 0.95f)
-							ratio_h = 0.95f;
-						if (fabs(ratio_h - current_h) >= resize_ratio_epsilon) {
-							resize_split_node_h->split_ratio = (float)ratio_h;
-							changed = 1;
-						}
-					}
-
-			if (changed)
+			if (changed && selmon)
 				arrange(selmon);
 
 		} else if (grabc && grabc->isfloating) {
@@ -2430,23 +2455,60 @@ moveresize(const Arg *arg)
 				struct wlr_box start_geom = grabc->geom;
 				const char *cursor_name = pick_resize_handle(grabc, cursor->x, cursor->y);
 				double start_x = cursor->x, start_y = cursor->y;
+				Column *col = grabc->column;
 				grabcx = (int)round(cursor->x);
 				grabcy = (int)round(cursor->y);
 
-				resize_start_box_v = (struct wlr_box){0};
-				resize_start_box_h = (struct wlr_box){0};
 				resize_start_box_f = start_geom;
 				resize_start_x = start_x;
 				resize_start_y = start_y;
-				resize_start_ratio_v = resize_start_ratio_h = 0.0;
-				resize_split_node = NULL;
-				resize_split_node_h = NULL;
 				resize_last_time = 0;
 				resize_last_x = start_x;
 				resize_last_y = start_y;
 				resizing_from_mouse = 1;
-				/* Keep geometry unchanged as we switch to floating resize. */
-				resize(grabc, start_geom, 1);
+
+				/* Column-layout grab state: width via px override,
+				 * heights via the weight pair across the nearest
+				 * horizontal boundary. */
+				tile_resize_reset();
+				if (col) {
+					tile_rsz_col = col;
+					tile_rsz_w0 = col->target_width;
+					tile_rsz_hsign = (cursor->x >= grabc->geom.x
+							+ grabc->geom.width / 2.0) ? 1 : -1;
+					if (col->n_clients >= 2) {
+						Client *prev = NULL, *next = NULL, *cc;
+						int below = cursor->y >= grabc->geom.y
+								+ grabc->geom.height / 2.0;
+						if (grabc->column_link.prev != &col->clients)
+							prev = wl_container_of(
+								grabc->column_link.prev,
+								prev, column_link);
+						if (grabc->column_link.next != &col->clients)
+							next = wl_container_of(
+								grabc->column_link.next,
+								next, column_link);
+						if (next && (below || !prev)) {
+							tile_rsz_ca = grabc;
+							tile_rsz_cb = next;
+						} else if (prev) {
+							tile_rsz_ca = prev;
+							tile_rsz_cb = grabc;
+						}
+						if (tile_rsz_ca && tile_rsz_cb) {
+							tile_rsz_ha0 = tile_rsz_ca->geom.height;
+							tile_rsz_hb0 = tile_rsz_cb->geom.height;
+							/* Pin every weight to its current px
+							 * height so adjusting the pair leaves
+							 * the other clients untouched. */
+							wl_list_for_each(cc, &col->clients,
+									column_link)
+								cc->col_weight = (double)
+									(cc->geom.height > 0
+									 ? cc->geom.height : 1);
+						}
+					}
+				}
 				nixly_cursor_set_xcursor(cursor_name);
 			}
 			break;

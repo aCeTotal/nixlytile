@@ -973,6 +973,8 @@ typedef struct {
 	/* ── Niri-style placement (phase 2) ───────────────────────────── */
 	Column *column;               /* owning column; NULL = floating/unmapped */
 	struct wl_list column_link;   /* link in Column.clients (top→bottom) */
+	double col_weight;            /* height share within column; <=0 → 1.0 */
+	struct wl_listener ping_timeout; /* freeze watchdog: unresponsive → kill */
 	Workspace *fs_ws;             /* workspace fullscreened on; NULL = not fs / unbound (always visible) */
 
 	/* ── Per-client geometry animation (phase 4) ──────────────────
@@ -1986,6 +1988,7 @@ void applybounds(Client *c, struct wlr_box *bbox);
 void applyrules(Client *c);
 void createnotify(struct wl_listener *listener, void *data);
 void destroynotify(struct wl_listener *listener, void *data);
+void pingtimeoutnotify(struct wl_listener *listener, void *data);
 void mapnotify(struct wl_listener *listener, void *data);
 void unmapnotify(struct wl_listener *listener, void *data);
 void focusclient(Client *c, int lift);
@@ -2140,6 +2143,7 @@ void hidetagthumbnail(Monitor *m);
 void axisnotify(struct wl_listener *listener, void *data);
 void buttonpress(struct wl_listener *listener, void *data);
 void input_column_gone(Column *col);
+void input_client_gone(Client *c);
 void chvt(const Arg *arg);
 void createkeyboard(struct wlr_keyboard *keyboard);
 KeyboardGroup *createkeyboardgroup(void);

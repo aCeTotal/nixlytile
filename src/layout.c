@@ -189,10 +189,12 @@ arrangelayers(Monitor *m)
 	 * would keep the full box and render under the status bar.
 	 * Restore the invariant before comparing against old_w below. */
 	if (m->w_initialized) {
+		/* Same far-edge rounding as monitor_anim_tick so the resync
+		 * can't shift the bottom/right edge by 1px. */
 		m->w.x = (int)m->w_x_f;
 		m->w.y = (int)m->w_y_f;
-		m->w.width = (int)m->w_w_f;
-		m->w.height = (int)m->w_h_f;
+		m->w.width = (int)(m->w_x_f + m->w_w_f) - m->w.x;
+		m->w.height = (int)(m->w_y_f + m->w_h_f) - m->w.y;
 	}
 	old_w = m->w;
 
