@@ -978,9 +978,54 @@ tray_menu_draw_text(struct wlr_scene_tree *tree, const char *text, int x, int y,
 	if (!statusfont.font)
 		return;
 
-	for (size_t i = 0; text[i]; i++) {
+	for (size_t i = 0; text[i]; ) {
 		long kern_x = 0, kern_y = 0;
-		uint32_t cp = (unsigned char)text[i];
+		uint32_t cp;
+		unsigned char ch = (unsigned char)text[i];
+
+		/* Decode UTF-8 to Unicode codepoint (same walk as
+		 * status_text_width — never step past NUL on a truncated
+		 * multibyte tail). */
+		if ((ch & 0x80) == 0) {
+			cp = ch;
+			i += 1;
+		} else if ((ch & 0xE0) == 0xC0) {
+			cp = (ch & 0x1F) << 6;
+			i += 1;
+			if (text[i]) {
+				cp |= ((unsigned char)text[i] & 0x3F);
+				i += 1;
+			}
+		} else if ((ch & 0xF0) == 0xE0) {
+			cp = (ch & 0x0F) << 12;
+			i += 1;
+			if (text[i]) {
+				cp |= ((unsigned char)text[i] & 0x3F) << 6;
+				i += 1;
+				if (text[i]) {
+					cp |= ((unsigned char)text[i] & 0x3F);
+					i += 1;
+				}
+			}
+		} else if ((ch & 0xF8) == 0xF0) {
+			cp = (ch & 0x07) << 18;
+			i += 1;
+			if (text[i]) {
+				cp |= ((unsigned char)text[i] & 0x3F) << 12;
+				i += 1;
+				if (text[i]) {
+					cp |= ((unsigned char)text[i] & 0x3F) << 6;
+					i += 1;
+					if (text[i]) {
+						cp |= ((unsigned char)text[i] & 0x3F);
+						i += 1;
+					}
+				}
+			}
+		} else {
+			i += 1;
+			continue;
+		}
 
 		if (prev_cp)
 			fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
@@ -1002,7 +1047,7 @@ tray_menu_draw_text(struct wlr_scene_tree *tree, const char *text, int x, int y,
 			if (-glyph->y + glyph->height > max_y)
 				max_y = -glyph->y + glyph->height;
 			pen_x += glyph->advance.x;
-			if (text[i + 1])
+			if (text[i])
 				pen_x += statusbar_font_spacing;
 		}
 		prev_cp = cp;
@@ -1088,9 +1133,9 @@ tray_menu_render(Monitor *m)
 
 	if (max_width <= 0)
 		max_width = 80;
-	/* Cap the popup at 150px; longer labels get clipped. */
-	if (max_width > 150)
-		max_width = 150;
+	/* Size to content; never wider than the bar area. */
+	if (m->statusbar.area.width > 0 && max_width > m->statusbar.area.width)
+		max_width = m->statusbar.area.width;
 
 	menu->width = max_width;
 	menu->height = total_height;
@@ -1202,7 +1247,13 @@ tray_menu_open_at(Monitor *m, TrayItem *it, int icon_x)
 	if (r < 0)
 		goto fail;
 
-	r = sd_bus_message_append(req, "iias", 0, max_depth, props);
+	/* "as" cannot be appended from a char** via the varargs form —
+	 * that reads the pointer as an element count and fails with
+	 * -EINVAL, which made GetLayout fail for every item. */
+	r = sd_bus_message_append(req, "ii", 0, max_depth);
+	if (r < 0)
+		goto fail;
+	r = sd_bus_message_append_strv(req, props);
 	if (r < 0)
 		goto fail;
 
@@ -1756,13 +1807,11 @@ tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y)
 		method = "SecondaryActivate";
 	else
 		method = "Activate";
-	tray_anchor_x = x;
-	tray_anchor_y = y;
-	tray_anchor_time_ms = monotonic_msec();
 	if (context_menu) {
-		/* ensure transient menus are placed near the icon even if GetLayout fails */
+		/* anchor so a menu window the app opens floats under the icon */
 		tray_anchor_x = x;
 		tray_anchor_y = y;
+		tray_anchor_time_ms = monotonic_msec();
 	}
 	item_path = it->path[0] ? it->path : "/StatusNotifierItem";
 	for (int attempt = 0; attempt < 2; attempt++) {

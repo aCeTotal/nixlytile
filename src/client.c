@@ -780,6 +780,7 @@ mapnotify(struct wl_listener *listener, void *data)
 	Client *w, *c = wl_container_of(listener, c, map);
 	Monitor *m;
 	int i;
+	int tray_popup = 0;
 
 	/* Create scene tree for this client and its border */
 	{
@@ -1177,6 +1178,20 @@ mapnotify(struct wl_listener *listener, void *data)
 	if (c->output == NULL)
 		die("oom");
 
+	/* Menu window opened by a tray icon's ContextMenu fallback (app
+	 * exposes no usable dbusmenu): float it under the icon instead of
+	 * tiling it.  Only small windows qualify — a main app window
+	 * toggled via the tray stays tiled. */
+	if (tray_anchor_time_ms &&
+			monotonic_msec() - tray_anchor_time_ms < 3000 &&
+			c->geom.width > 0 && c->geom.height > 0 &&
+			c->geom.width < c->mon->m.width / 2 &&
+			c->geom.height < c->mon->m.height) {
+		c->isfloating = 1;
+		tray_popup = 1;
+		tray_anchor_time_ms = 0;
+	}
+
 	/*
 	 * AUTO-FULLSCREEN FOR GAMES
 	 *
@@ -1273,7 +1288,12 @@ mapnotify(struct wl_listener *listener, void *data)
 		int mh = c->mon->m.height;
 		int gw = c->geom.width;
 		int gh = c->geom.height;
-		if (gw > 0 && gw < mw && gh > 0 && gh < mh) {
+		if (tray_popup) {
+			c->geom.x = MAX(c->mon->m.x,
+					MIN(tray_anchor_x, c->mon->m.x + mw - gw));
+			c->geom.y = MAX(c->mon->m.y,
+					MIN(tray_anchor_y, c->mon->m.y + mh - gh));
+		} else if (gw > 0 && gw < mw && gh > 0 && gh < mh) {
 			c->geom.x = c->mon->m.x + (mw - gw) / 2;
 			c->geom.y = c->mon->m.y + (mh - gh) / 2;
 		}
