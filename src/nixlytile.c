@@ -2405,10 +2405,10 @@ init_logging(void)
 static void
 close_logging(void)
 {
-	if (diag_timer) {
-		wl_event_source_remove(diag_timer);
-		diag_timer = NULL;
-	}
+	/* diag_timer's event source is already freed by wl_display_destroy()
+	 * before this runs; calling wl_event_source_remove() here would touch
+	 * the freed timer heap (use-after-free crash in heap_sift_down). */
+	diag_timer = NULL;
 	if (diag_log_fd >= 0) {
 		dprintf(diag_log_fd, "\n=== diagnostics ended ===\n");
 		close(diag_log_fd);
