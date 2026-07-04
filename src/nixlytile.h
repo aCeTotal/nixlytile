@@ -974,6 +974,7 @@ typedef struct {
 	Column *column;               /* owning column; NULL = floating/unmapped */
 	struct wl_list column_link;   /* link in Column.clients (top→bottom) */
 	double col_weight;            /* height share within column; <=0 → 1.0 */
+	int area_clipped;             /* 1 = tile currently cropped to m->w (straddles/past tile-area edge) */
 	struct wl_listener ping_timeout; /* freeze watchdog: unresponsive → kill */
 	Workspace *fs_ws;             /* workspace fullscreened on; NULL = not fs / unbound (always visible) */
 
@@ -2026,6 +2027,7 @@ void setpsel(struct wl_listener *listener, void *data);
 void setsel(struct wl_listener *listener, void *data);
 void resize(Client *c, struct wlr_box geo, int interact);
 void client_apply_scene_geom(Client *c, struct wlr_box geo);
+void client_clip_to_usable(Client *c);
 void client_send_configure_only(Client *c, int w, int h);
 void tag(const Arg *arg);
 void tagmon(const Arg *arg);

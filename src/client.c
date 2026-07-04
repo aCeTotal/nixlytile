@@ -1468,6 +1468,173 @@ client_apply_scene_geom(Client *c, struct wlr_box geo)
 	}
 }
 
+/* Restore a tile to its full (unclipped) scene geometry after it was
+ * cropped by client_clip_to_usable().  Re-sets the plain window-geometry
+ * surface clip, full-size borders, and an uncropped frozen snapshot. */
+static void
+client_clip_reset(Client *c)
+{
+	struct wlr_box clip;
+	int i;
+
+	c->area_clipped = 0;
+
+	client_get_clip(c, &clip);
+	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+
+	wlr_scene_rect_set_size(c->border[0], c->geom.width, c->bw);
+	wlr_scene_rect_set_size(c->border[1], c->geom.width, c->bw);
+	wlr_scene_rect_set_size(c->border[2], c->bw, c->geom.height - 2 * c->bw);
+	wlr_scene_rect_set_size(c->border[3], c->bw, c->geom.height - 2 * c->bw);
+	wlr_scene_node_set_position(&c->border[0]->node, 0, 0);
+	wlr_scene_node_set_position(&c->border[1]->node, 0, c->geom.height - c->bw);
+	wlr_scene_node_set_position(&c->border[2]->node, 0, c->bw);
+	wlr_scene_node_set_position(&c->border[3]->node, c->geom.width - c->bw, c->bw);
+	for (i = 0; i < 4; i++)
+		wlr_scene_node_set_enabled(&c->border[i]->node, 1);
+
+	if (c->frozen_buffer) {
+		int inner_w = c->geom.width  - 2 * c->bw;
+		int inner_h = c->geom.height - 2 * c->bw;
+		if (inner_w < 1) inner_w = 1;
+		if (inner_h < 1) inner_h = 1;
+		wlr_scene_buffer_set_source_box(c->frozen_buffer, NULL);
+		wlr_scene_buffer_set_dest_size(c->frozen_buffer, inner_w, inner_h);
+		wlr_scene_node_set_position(&c->frozen_buffer->node, c->bw, c->bw);
+		wlr_scene_node_set_enabled(&c->frozen_buffer->node, 1);
+	}
+}
+
+/* Crop a tiled client so no part of it ever renders outside the monitor's
+ * usable tile area (m->w).  A column scrolled partly past the tile-area
+ * edge — or a spring overshoot during a tile resize / statusbar toggle —
+ * otherwise bleeds into the surrounding gap margin.  All three node kinds
+ * a tile is built from are handled: the surface tree (subsurface clip),
+ * the four border rects (resized/hidden), and the frozen animation
+ * snapshot (source-box crop).  scene_surface->node enable state is left
+ * untouched so this never fights the freeze/unfreeze machinery. */
+void
+client_clip_to_usable(Client *c)
+{
+	struct wlr_box area;
+	int ax0, ay0, ax1, ay1;   /* usable area, client-tree-local coords */
+	int i;
+
+	if (!c || !c->mon || !c->scene || !c->scene_surface)
+		return;
+	/* Only tiled column clients scroll into the margin.  Floating and
+	 * fullscreen surfaces are placed deliberately and must render where
+	 * they're put. */
+	if (c->isfloating || c->isfullscreen || !c->column) {
+		if (c->area_clipped)
+			client_clip_reset(c);
+		return;
+	}
+
+	area = c->mon->w;
+	ax0 = area.x - c->geom.x;
+	ay0 = area.y - c->geom.y;
+	ax1 = ax0 + area.width;
+	ay1 = ay0 + area.height;
+
+	/* Fully inside the usable area → no crop needed.  Restore once if we
+	 * were previously clipped, otherwise fast-path out (the common case
+	 * every frame for non-edge tiles). */
+	if (ax0 <= 0 && ay0 <= 0 &&
+			ax1 >= c->geom.width && ay1 >= c->geom.height) {
+		if (c->area_clipped)
+			client_clip_reset(c);
+		return;
+	}
+
+	c->area_clipped = 1;
+
+	/* ── Surface: intersect the window-geometry clip with the usable
+	 *    area, both in surface-local coords.  Surface pixel s maps to
+	 *    output geom.{x,y}+bw+s, so the usable area shifts by that. */
+	{
+		struct wlr_box wgeom, clip;
+		int su_x0, su_y0, su_x1, su_y1;
+		int cx0, cy0, cx1, cy1;
+
+		client_get_clip(c, &wgeom);
+		su_x0 = area.x - (c->geom.x + (int)c->bw);
+		su_y0 = area.y - (c->geom.y + (int)c->bw);
+		su_x1 = su_x0 + area.width;
+		su_y1 = su_y0 + area.height;
+
+		cx0 = MAX(wgeom.x, su_x0);
+		cy0 = MAX(wgeom.y, su_y0);
+		cx1 = MIN(wgeom.x + wgeom.width,  su_x1);
+		cy1 = MIN(wgeom.y + wgeom.height, su_y1);
+
+		if (cx1 > cx0 && cy1 > cy0)
+			clip = (struct wlr_box){ cx0, cy0, cx1 - cx0, cy1 - cy0 };
+		else
+			/* No overlap: a non-empty box far off the surface makes
+			 * wlroots disable the buffer node (empty clip would instead
+			 * DISABLE clipping and show the whole surface). */
+			clip = (struct wlr_box){ 1 << 20, 0, 1, 1 };
+		wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+	}
+
+	/* ── Borders: crop each rect to the usable area; hide if fully out. */
+	{
+		int W = c->geom.width, H = c->geom.height, bw = (int)c->bw;
+		struct wlr_box b[4] = {
+			{ 0,      0,      W,  bw },          /* top */
+			{ 0,      H - bw, W,  bw },          /* bottom */
+			{ 0,      bw,     bw, H - 2 * bw },  /* left */
+			{ W - bw, bw,     bw, H - 2 * bw },  /* right */
+		};
+		for (i = 0; i < 4; i++) {
+			int ix0 = MAX(b[i].x, ax0);
+			int iy0 = MAX(b[i].y, ay0);
+			int ix1 = MIN(b[i].x + b[i].width,  ax1);
+			int iy1 = MIN(b[i].y + b[i].height, ay1);
+			if (ix1 > ix0 && iy1 > iy0) {
+				wlr_scene_rect_set_size(c->border[i],
+						ix1 - ix0, iy1 - iy0);
+				wlr_scene_node_set_position(&c->border[i]->node,
+						ix0, iy0);
+				wlr_scene_node_set_enabled(&c->border[i]->node, 1);
+			} else {
+				wlr_scene_node_set_enabled(&c->border[i]->node, 0);
+			}
+		}
+	}
+
+	/* ── Frozen snapshot (present only during size anims): crop the
+	 *    source rect to the visible slice of the inner box. */
+	if (c->frozen_buffer && c->frozen_buffer->buffer) {
+		int bw = (int)c->bw;
+		int iw = c->geom.width  - 2 * bw;
+		int ih = c->geom.height - 2 * bw;
+		int vx0 = MAX(bw, ax0);
+		int vy0 = MAX(bw, ay0);
+		int vx1 = MIN(bw + iw, ax1);
+		int vy1 = MIN(bw + ih, ay1);
+		if (iw > 0 && ih > 0 && vx1 > vx0 && vy1 > vy0) {
+			double sw = c->frozen_buffer->buffer->width;
+			double sh = c->frozen_buffer->buffer->height;
+			struct wlr_fbox src = {
+				.x = (double)(vx0 - bw) / iw * sw,
+				.y = (double)(vy0 - bw) / ih * sh,
+				.width  = (double)(vx1 - vx0) / iw * sw,
+				.height = (double)(vy1 - vy0) / ih * sh,
+			};
+			wlr_scene_buffer_set_source_box(c->frozen_buffer, &src);
+			wlr_scene_buffer_set_dest_size(c->frozen_buffer,
+					vx1 - vx0, vy1 - vy0);
+			wlr_scene_node_set_position(&c->frozen_buffer->node,
+					vx0, vy0);
+			wlr_scene_node_set_enabled(&c->frozen_buffer->node, 1);
+		} else {
+			wlr_scene_node_set_enabled(&c->frozen_buffer->node, 0);
+		}
+	}
+}
+
 void
 resize(Client *c, struct wlr_box geo, int interact)
 {
@@ -1553,6 +1720,10 @@ resize(Client *c, struct wlr_box geo, int interact)
 	 * Chrome) they cost real time per frame. */
 	if (c->geom.width == c->last_size_w &&
 			c->geom.height == c->last_size_h) {
+		/* Position-only (camera scroll / ws switch): re-crop edge
+		 * tiles so a column scrolled past the tile-area edge doesn't
+		 * bleed into the gap margin. */
+		client_clip_to_usable(c);
 		return;
 	}
 	c->last_size_w = c->geom.width;
@@ -1567,6 +1738,8 @@ resize(Client *c, struct wlr_box geo, int interact)
 		if (natural.width > 0 && natural.height > 0)
 			client_scale_to_box(c, c->geom.width, c->geom.height);
 	}
+
+	client_clip_to_usable(c);
 }
 
 void

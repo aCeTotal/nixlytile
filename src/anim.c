@@ -385,6 +385,10 @@ client_anim_apply(Client *c, struct wlr_box g)
 		 * lerped box every frame so content tracks the moving edge. */
 		client_scale_to_box(c, inner_w, inner_h);
 	}
+
+	/* Crop to the usable tile area so an animating tile never overshoots
+	 * into the gap margin (covers surface, borders, and this snapshot). */
+	client_clip_to_usable(c);
 }
 
 static int
