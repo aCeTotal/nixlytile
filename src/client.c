@@ -1,5 +1,6 @@
 #include "nixlytile.h"
 #include "client.h"
+#include "diag.h"
 
 /* ── Pending launch tracking ──────────────────────────────────────────
  * When the modal launcher or spawn() starts a program, we record the
@@ -289,6 +290,12 @@ void
 commitnotify(struct wl_listener *listener, void *data)
 {
 	Client *c = wl_container_of(listener, c, commit);
+
+	/* Count client frame submissions per monitor — lets the diag freeze
+	 * detector tell a client-side stall (0 commits) from a compositor-side
+	 * stall (client committing but nothing presented). */
+	if (c->mon)
+		c->mon->diag_commits_in++;
 
 	if (c->surface.xdg->initial_commit) {
 		applyrules(c);
@@ -1780,6 +1787,13 @@ setfullscreen(Client *c, int fullscreen)
 
 	c->isfullscreen = fullscreen;
 
+	if (fullscreen != was)
+		diag_logf("FS", "%s appid='%s' mon=%s geom=%dx%d@%d,%d",
+			fullscreen ? "ENTER" : "EXIT",
+			client_get_appid(c) ? client_get_appid(c) : "(null)",
+			c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)",
+			c->geom.width, c->geom.height, c->geom.x, c->geom.y);
+
 	/* Bind the fullscreen window to the workspace it was fullscreened on.
 	 * Visibility, cursor confinement and exclusive focus key off this so
 	 * switching to another workspace hides the game instead of leaving it
@@ -1802,6 +1816,11 @@ setfullscreen(Client *c, int fullscreen)
 		wlr_log(WLR_INFO,
 			"GAME_TRACE: setfullscreen early-return mon=%p mapped=%d",
 			(void*)c->mon,
+			client_surface(c) ? client_surface(c)->mapped : -1);
+		diag_logf("FS", "DEFER appid='%s' want=%d mon=%p mapped=%d — "
+			"fullscreen geometry not applied yet (waits for map/commit)",
+			client_get_appid(c) ? client_get_appid(c) : "(null)",
+			fullscreen, (void*)c->mon,
 			client_surface(c) ? client_surface(c)->mapped : -1);
 		return;
 	}

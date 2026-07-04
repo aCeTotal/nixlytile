@@ -2,6 +2,7 @@
 #include "nixlytile.h"
 #include "client.h"
 #include "config_loader.h"
+#include "diag.h"
 #include <execinfo.h>
 
 static int
@@ -2488,6 +2489,10 @@ setup(void)
 	init_logging();
 	pthread_setname_np(pthread_self(), "nixlyOS");
 	wlr_log_init(WLR_DEBUG, log_callback);
+
+	/* Open /tmp/nixlytile-diag.log for detailed render/fullscreen/tile
+	 * diagnostics (freeze detection etc.). Always on; fresh each session. */
+	diag_init();
 
 	/* Make sure spawned terminals get the real login shell, not the minimal wrapper shell */
 	ensure_shell_env();

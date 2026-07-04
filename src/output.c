@@ -1,5 +1,6 @@
 #include "nixlytile.h"
 #include "client.h"
+#include "diag.h"
 
 static int idle_heartbeat_cb(void *data);
 static int edid_reprobe_cb(void *data);
@@ -2051,6 +2052,11 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 					"disabling direct scanout, falling back "
 					"to GPU composition + XRGB8888",
 					m->wlr_output->name, m->commit_failures);
+				diag_logf("COMMITFAIL",
+					"%s: %u consecutive output commit failures — forcing GPU "
+					"composition + XRGB8888. Likely KMS rejected the buffer "
+					"format/modifier (e.g. 10-bit CCS without ReBAR).",
+					m->wlr_output->name, m->commit_failures);
 				m->scanout_blacklist = 1;
 
 				/* Force fresh XRGB8888 swapchain without re-modesetting.
@@ -2243,6 +2249,63 @@ rendermon(struct wl_listener *listener, void *data)
 
 	classify_fullscreen_content(m, &is_game, &is_video, &allow_tearing);
 
+	/* ── Diagnostic heartbeat (diag.c → /tmp/nixlytile-diag.log) ──────────
+	 * Once per second per monitor: dump render state + per-interval counters,
+	 * and if a fullscreen client is up but nothing reaches the screen, emit a
+	 * FREEZE line naming the likely cause.  Placed at the top of rendermon so
+	 * it still fires on vblanks that later early-return (commit failures). */
+	m->diag_vblanks++;
+	if (m->diag_snap_ns == 0) {
+		m->diag_snap_ns = frame_start_ns;
+		m->diag_presented0 = m->frames_presented;
+	} else if (frame_start_ns - m->diag_snap_ns >= 1000000000ULL) {
+		Client *fc = fullscreen_visible_on(m);
+		const char *appid = fc ? client_get_appid(fc) : NULL;
+		unsigned long long presents = m->frames_presented - m->diag_presented0;
+
+		diag_logf("MON",
+			"%s fs=%s cls=%s vblanks=%u builds=%u idle_skip=%u "
+			"client_commits=%u presents=%llu/s dropped=%lu held=%lu "
+			"cadence=%d vrr=%d scanout=%d hdr=%d 10bit=%d "
+			"commit_fail=%u scene_fail=%d",
+			m->wlr_output->name, appid ? appid : "-",
+			is_game ? "game" : (is_video ? "video" : "-"),
+			m->diag_vblanks, m->diag_builds, m->diag_idle_skips,
+			m->diag_commits_in, presents,
+			(unsigned long)m->frames_dropped, (unsigned long)m->frames_held,
+			m->video_cadence_active, m->vrr_active, m->direct_scanout_active,
+			m->hdr_active, m->render_10bit_active,
+			m->commit_failures, m->scene_build_failures);
+
+		if (fc && presents == 0) {
+			const char *cause;
+			if (m->commit_failures > 0)
+				cause = "output commit failing (buffer/modeset/GPU) — see COMMITFAIL";
+			else if (m->scene_build_failures > 0)
+				cause = "scene build failing (renderer/GPU alloc)";
+			else if (m->diag_commits_in == 0)
+				cause = "client submitted 0 frames — client-side stall, not compositor";
+			else if (m->diag_builds == 0)
+				cause = "compositor never sampled the surface (build_state skipped) — "
+					"client committing but wp_presentation feedback starved";
+			else
+				cause = "built but never presented — commit held / no pageflip";
+			diag_logf("FREEZE",
+				"%s fs=%s presents=0 over ~1s — CAUSE: %s "
+				"(vblanks=%u builds=%u idle_skip=%u client_commits=%u)",
+				m->wlr_output->name, appid ? appid : "?", cause,
+				m->diag_vblanks, m->diag_builds, m->diag_idle_skips,
+				m->diag_commits_in);
+		}
+
+		m->diag_snap_ns = frame_start_ns;
+		m->diag_presented0 = m->frames_presented;
+		m->diag_vblanks = 0;
+		m->diag_builds = 0;
+		m->diag_idle_skips = 0;
+		m->diag_commits_in = 0;
+	}
+
 	/* Decide if this monitor should enter/exit HDR this frame. The actual
 	 * wlr_output_state mutation happens inside commit_output_frame so the
 	 * transition rides on the same atomic commit as the rendered buffer. */
@@ -2260,42 +2323,14 @@ rendermon(struct wl_listener *listener, void *data)
 	 * For 24fps @ 144Hz the player submits every 6th vblank.
 	 */
 	if (is_video && !is_game && m->video_cadence_active && !m->vrr_active) {
-		/*
-		 * Content-driven pacing for external video players.
-		 *
-		 * Instead of a Bresenham cadence clock (which runs out of phase
-		 * with the player's frame submissions and drops every other
-		 * frame), we present whenever the player has submitted a new
-		 * frame.  The player's own PTS-based timing creates the natural
-		 * cadence (e.g., 3:2 pulldown for 24fps@60Hz).
-		 *
-		 * On hold vblanks (no new content): skip rendering entirely.
-		 * The display keeps showing the old frame.  Send frame_done
-		 * so the player can continue its decode pipeline.
-		 *
-		 * On present vblanks (new content): render normally, commit
-		 * the new frame to the display.
-		 */
-		/* Hold decision: "did the player submit new content" is
-		 * exactly wlr_scene_output_needs_frame() (pending damage).
-		 * The old code built the scene state and misread its return
-		 * value as "new frame" — build succeeds even with zero new
-		 * content, so the hold path never held, and a real build
-		 * error was misread as a hold with no recovery.  Deferred
-		 * VRR/HDR transitions still need a commit, so don't hold
-		 * while one is pending. */
-		if (!wlr_scene_output_needs_frame(m->scene_output) &&
-		    !m->vrr_pending &&
-		    !m->hdr_entry_pending && !m->hdr_exit_pending) {
-			/* No new video frame - hold */
-			request_frame(m);
-			wlr_scene_output_send_frame_done(m->scene_output, &now);
-			if (m->tag_switch_debug > 0)
-				m->tag_switch_debug--;
-			return;
-		}
-		/* New content — fall through to the normal build path,
-		 * which has the 10-bit / XRGB8888 failure recovery. */
+		/* Cadence "hold" removed: it skipped build_state on no-new-content
+		 * vblanks (wlr_scene_output_needs_frame) as a power optimisation,
+		 * but that never sampled the fullscreen surface, dropping its
+		 * wp_presentation feedback → feedback-driven clients (browsers/
+		 * YouTube, eframe/nixlymedia) starved and froze at ~3 fps
+		 * (Chromium's kMaxNumberOfFrames guard).  Commit 3d3b2cc built the
+		 * scene every vblank and did not freeze.  Fall through to the
+		 * normal build path so every committed frame is sampled. */
 	} else if (!is_video && m->video_cadence_active) {
 		/* Video exited fullscreen - deactivate cadence.
 		 * Clear all cadence state so rendermon doesn't enter the
@@ -2330,12 +2365,21 @@ rendermon(struct wl_listener *listener, void *data)
 		 * skip render + commit entirely.  Without this gate every
 		 * commit's pageflip fires the next frame event and the
 		 * compositor composites at full refresh forever, even on a
-		 * completely idle desktop. */
-		if (!wlr_scene_output_needs_frame(m->scene_output) &&
+		 * completely idle desktop.
+		 *
+		 * Exempt fullscreen video/game: skipping build_state here means
+		 * the fullscreen surface is never sampled, which drops its
+		 * wp_presentation feedback and freezes feedback-driven clients
+		 * (browsers/YouTube, eframe/nixlymedia) at ~3 fps.  Commit
+		 * 3d3b2cc had no idle gate and did not freeze — so for fullscreen
+		 * content we always build, matching that behaviour. */
+		if (!is_video && !is_game &&
+		    !wlr_scene_output_needs_frame(m->scene_output) &&
 		    !m->vrr_pending &&
 		    !m->hdr_entry_pending && !m->hdr_exit_pending &&
 		    !(m->toast_overlay_layer && !m->toast_overlay_active &&
 		      !m->toast_overlay_disabled_sent)) {
+			m->diag_idle_skips++;
 			m->frames_since_content_change++;
 			m->last_frame_ns = frame_start_ns;
 			if (m->tag_switch_debug > 0)
@@ -2343,6 +2387,7 @@ rendermon(struct wl_listener *listener, void *data)
 			goto frame_done;
 		}
 
+		m->diag_builds++;
 		wlr_output_state_init(&state);
 		if (m->tag_switch_debug > 0)
 			write(STDERR_FILENO, "TS:scene-build>\n", 16);

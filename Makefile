@@ -28,7 +28,7 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            gamemode.o client_utils.o gpu.o draw.o layer.o workspace.o anim.o \
            dwl_ipc.o dwl-ipc-unstable-v2-protocol.o window_ipc.o \
            config_parser.o config_loader.o apptoggle.o \
-           statusbar.o tray.o statusbar_support.o
+           statusbar.o tray.o statusbar_support.o diag.o
 
 PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstable-v1-protocol.h \
              $(SRC)/wlr-layer-shell-unstable-v1-protocol.h $(SRC)/wlr-output-power-management-unstable-v1-protocol.h \
@@ -40,21 +40,23 @@ nixlytile: nixlytile.o util.o $(MOD_OBJS)
 	$(CC) nixlytile.o util.o $(MOD_OBJS) $(MOD_CFLAGS) $(LDFLAGS) $(LDLIBS) -o $@
 
 # Core compositor
-nixlytile.o: $(SRC)/nixlytile.c $(SRC)/nixlytile.h $(SRC)/client.h config.mk $(PROTO_HDRS)
+nixlytile.o: $(SRC)/nixlytile.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/diag.h config.mk $(PROTO_HDRS)
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 util.o: $(SRC)/util.c $(SRC)/util.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+diag.o: $(SRC)/diag.c $(SRC)/diag.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 
 # Compositor modules
 globals.o: $(SRC)/globals.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/config.h config.mk $(PROTO_HDRS)
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-client.o: $(SRC)/client.c $(SRC)/nixlytile.h $(SRC)/client.h
+client.o: $(SRC)/client.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/diag.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 layout.o: $(SRC)/layout.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 input.o: $(SRC)/input.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-output.o: $(SRC)/output.c $(SRC)/nixlytile.h $(SRC)/client.h
+output.o: $(SRC)/output.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/diag.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 gamemode.o: $(SRC)/gamemode.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
@@ -68,7 +70,7 @@ layer.o: $(SRC)/layer.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 workspace.o: $(SRC)/workspace.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-anim.o: $(SRC)/anim.c $(SRC)/nixlytile.h $(SRC)/client.h
+anim.o: $(SRC)/anim.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/diag.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 dwl_ipc.o: $(SRC)/dwl_ipc.c $(SRC)/nixlytile.h $(SRC)/dwl-ipc-unstable-v2-protocol.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<

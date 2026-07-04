@@ -1205,6 +1205,13 @@ struct Monitor {
 	int game_vrr_stable_frames;
 	uint64_t game_vrr_lfc_warn_ns;   /* last LFC-range warning timestamp */
 	uint64_t scanout_diag_warn_ns;   /* last direct-scanout failure diagnostic timestamp */
+	/* --- diag.c heartbeat: per-interval render counters + freeze detect --- */
+	uint64_t diag_snap_ns;        /* last heartbeat timestamp */
+	uint64_t diag_presented0;     /* frames_presented at last heartbeat */
+	uint32_t diag_vblanks;        /* rendermon entries since last heartbeat */
+	uint32_t diag_builds;         /* build_state reached since last heartbeat */
+	uint32_t diag_idle_skips;     /* idle-gate build_state skips since last heartbeat */
+	uint32_t diag_commits_in;     /* client surface commits on this mon since last heartbeat */
 	struct wlr_scene_tree *hz_osd_tree;
 	struct wlr_scene_tree *hz_osd_bg;
 	int hz_osd_visible;

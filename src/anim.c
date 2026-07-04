@@ -1,5 +1,6 @@
 #include "nixlytile.h"
 #include "client.h"
+#include "diag.h"
 
 /*
  * Apply a (sx, sy) visual scale to every scene_buffer beneath a
@@ -498,6 +499,13 @@ client_freeze(Client *c)
 
 	if (c->scene_surface)
 		wlr_scene_node_set_enabled(&c->scene_surface->node, 0);
+
+	/* A frozen tile shows a static snapshot with its live surface disabled.
+	 * Normal during an anim (paired with UNFREEZE); a FREEZE with no matching
+	 * UNFREEZE = a tile stuck frozen. */
+	diag_logf("TILE", "FREEZE appid='%s' %dx%d (live surface disabled, snapshot shown)",
+		client_get_appid(c) ? client_get_appid(c) : "(null)",
+		c->geom.width, c->geom.height);
 }
 
 void
@@ -510,6 +518,9 @@ client_unfreeze(Client *c)
 	c->frozen_buffer = NULL;
 	if (c->scene_surface)
 		wlr_scene_node_set_enabled(&c->scene_surface->node, 1);
+
+	diag_logf("TILE", "UNFREEZE appid='%s' (live surface re-enabled)",
+		client_get_appid(c) ? client_get_appid(c) : "(null)");
 }
 
 /* Two-tier freeze: X11 frozen on any anim (heavy, no subsurfaces).
