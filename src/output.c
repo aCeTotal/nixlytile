@@ -2059,6 +2059,18 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 					m->wlr_output->name, m->commit_failures);
 				m->scanout_blacklist = 1;
 
+				/* scanout_blacklist alone only relabels stats — it
+				 * does NOT stop wlr_scene re-electing the fullscreen
+				 * client buffer for direct scanout.  That buffer's
+				 * atomic test passes but the real pageflip keeps
+				 * failing (test/commit divergence, e.g. i915 10-bit
+				 * CCS without ReBAR), so the scene picks it every
+				 * vblank and the commit loops forever → freeze.
+				 * Turn off scene-wide direct-scanout election to force
+				 * GPU composition into the compositor's own swapchain,
+				 * which commits.  Restored on the next good commit. */
+				scene->WLR_PRIVATE.direct_scanout = false;
+
 				/* Force fresh XRGB8888 swapchain without re-modesetting.
 				 * Mode is unchanged — set_mode on NVIDIA triggers a full
 				 * modeset that blocks the compositor for ~100ms. */
@@ -2098,11 +2110,15 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 				}
 			}
 		} else {
+			if (m->scanout_blacklist)
+				scene->WLR_PRIVATE.direct_scanout = true;
 			m->commit_failures = 0;
 			m->scanout_blacklist = 0;
 			hdr_commit_ok = 1;
 		}
 	} else {
+		if (m->scanout_blacklist)
+			scene->WLR_PRIVATE.direct_scanout = true;
 		m->commit_failures = 0;
 		m->scanout_blacklist = 0;
 		hdr_commit_ok = 1;
