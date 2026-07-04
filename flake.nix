@@ -29,13 +29,13 @@
               wayland wayland-protocols libdrm libxkbcommon pixman libinput
               xwayland seatd libxcb libxcb-wm
               libgbm hwdata libliftoff libdisplay-info lcms2 libxcb-errors
-              libglvnd
+              vulkan-loader vulkan-headers
             ];
             mesonFlags = [
               "-Dexamples=false"
               "-Dxwayland=enabled"
               "-Dbackends=drm,libinput"
-              "-Drenderers=gles2"
+              "-Drenderers=vulkan"
               "-Dallocators=gbm"
             ];
           };
@@ -143,7 +143,7 @@
               runHook preInstall
               make PREFIX=$out MANDIR=$out/share/man DATADIR=$out/share install
               wrapProgram $out/bin/nixlytile \
-                --set WLR_RENDERER gles2 \
+                --set WLR_RENDERER vulkan \
                 --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps}
               runHook postInstall
             '';

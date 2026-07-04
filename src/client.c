@@ -1856,8 +1856,9 @@ setfullscreen(Client *c, int fullscreen)
 		 * black flicker/artifacts on HDMI TVs. Resolution drop via
 		 * apply_console_mode stays (user-intentional). */
 		int _is_retro = is_retro_emulator_client(c);
+		int _is_browser = is_browser_client(c);
 		int _is_game = (is_game_content(c) || client_wants_tearing(c))
-				&& !is_browser_client(c);
+				&& !_is_browser;
 		/* VRR (adaptive sync) only for games — their variable frame
 		 * times are what VRR exists to smooth.  Fullscreen video and
 		 * browsers are constant-rate: the content-driven cadence path
@@ -1866,13 +1867,22 @@ setfullscreen(Client *c, int fullscreen)
 		 * compositor mid-commit and shows as "fullscreen YouTube froze". */
 		if (!_is_retro && _is_game) {
 			set_adaptive_sync(c->mon, 1);
-		} else if (_is_retro && c->mon && c->mon->wlr_output
+		} else if ((_is_retro || _is_browser) && c->mon && c->mon->wlr_output
 				&& !c->mon->retro_scanout_lock) {
 			/* Lock attach_render so wlroots picks GPU composition
-			 * instead of direct scanout. Retroarch buffer modifiers
-			 * (e.g. 10-bit Y-tiled CCS) can be rejected by the kernel
-			 * on commit, producing visible black frames before the
-			 * commit_failures fallback kicks in. */
+			 * instead of direct scanout.
+			 *
+			 * Retro: Retroarch buffer modifiers (e.g. 10-bit Y-tiled
+			 * CCS) can be rejected by the kernel on commit, producing
+			 * visible black frames before the commit_failures fallback.
+			 *
+			 * Browser: Chrome delegates fullscreen video to a
+			 * wl_subsurface hinted for a hardware overlay plane,
+			 * punching a transparent hole in its main buffer.  Direct
+			 * scanout of that main buffer drops the subsurface, so the
+			 * video area shows black while the rest of the desktop keeps
+			 * responding — "can't show YouTube video in fullscreen".
+			 * Forcing composition blends the subsurface back in. */
 			wlr_output_lock_attach_render(c->mon->wlr_output, true);
 			c->mon->retro_scanout_lock = 1;
 		}
