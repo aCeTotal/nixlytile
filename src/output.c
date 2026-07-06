@@ -2071,14 +2071,22 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 				 * which commits.  Restored on the next good commit. */
 				scene->WLR_PRIVATE.direct_scanout = false;
 
-				/* Force fresh XRGB8888 swapchain without re-modesetting.
-				 * Mode is unchanged — set_mode on NVIDIA triggers a full
-				 * modeset that blocks the compositor for ~100ms. */
+				/* Force fresh XRGB8888 swapchain. Carry the current
+				 * mode: a render-format-only state (no mode) is rejected
+				 * by the i915 atomic test, so the commit was silently
+				 * skipped and the swapchain stayed 10-bit — the exact
+				 * format KMS keeps rejecting → freeze loop. Re-passing the
+				 * SAME current_mode is a no-op modeset in wlroots (no
+				 * NVIDIA stall) but makes the state pass the test. Also
+				 * clear render_10bit_active so nothing re-elects 10-bit. */
 				struct wlr_output_state fb;
 				wlr_output_state_init(&fb);
 				wlr_output_state_set_render_format(&fb, DRM_FORMAT_XRGB8888);
-				if (wlr_output_test_state(m->wlr_output, &fb))
-					wlr_output_commit_state(m->wlr_output, &fb);
+				if (m->wlr_output->current_mode)
+					wlr_output_state_set_mode(&fb, m->wlr_output->current_mode);
+				if (wlr_output_test_state(m->wlr_output, &fb) &&
+				    wlr_output_commit_state(m->wlr_output, &fb))
+					m->render_10bit_active = 0;
 				wlr_output_state_finish(&fb);
 
 				if (compositor_rt_applied) {
