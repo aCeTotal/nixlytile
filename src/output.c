@@ -2107,21 +2107,25 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 					 *    After the single drain, scanout stays disabled and
 					 *    frames reschedule at ~60Hz through GPU composition;
 					 *    the flag clears on the next good commit. */
-					if (!m->transient_reset_done &&
+					if ((!m->transient_reset_done ||
+					     now - m->last_transient_reset_ns > 1000000000ULL) &&
 					    m->wlr_output->current_mode) {
-						m->transient_reset_done = 1;
-						wlr_log(WLR_ERROR,
-							"%s: %u transient commit failures "
-							"(pageflip stuck) — disabling scanout + "
-							"blocking-modeset CRTC reset",
-							m->wlr_output->name, m->commit_failures);
-						diag_logf("COMMITFAIL",
-							"%s: %u transient commit failures (errno=%d %s) — "
-							"pending pageflip stuck; disabling direct scanout + "
-							"blocking-modeset reset with fresh GPU buffer "
-							"(no format fallback: not a KMS reject).",
-							m->wlr_output->name, m->commit_failures,
-							commit_errno, strerror(commit_errno));
+						m->last_transient_reset_ns = now;
+						if (!m->transient_reset_done) {
+							m->transient_reset_done = 1;
+							wlr_log(WLR_ERROR,
+								"%s: %u transient commit failures "
+								"(pageflip stuck) — disabling scanout + "
+								"blocking-modeset CRTC reset (retry @1Hz until drained)",
+								m->wlr_output->name, m->commit_failures);
+							diag_logf("COMMITFAIL",
+								"%s: %u transient commit failures (errno=%d %s) — "
+								"pending pageflip stuck; disabling direct scanout + "
+								"blocking-modeset reset with fresh GPU buffer, retry "
+								"@1Hz until drained (no format fallback: not a KMS reject).",
+								m->wlr_output->name, m->commit_failures,
+								commit_errno, strerror(commit_errno));
+						}
 						struct wlr_scene_output_state_options ropts = {0};
 						struct wlr_output_state rs;
 						wlr_output_state_init(&rs);

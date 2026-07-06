@@ -1294,8 +1294,18 @@ struct Monitor {
 	 * main thread — doing it repeatedly (was: every 30 fails) pegs the
 	 * thread at ~7fps and freezes the cursor, and each modeset kills the
 	 * in-flight flip → more EAGAIN → runaway storm. Do it at most once per
-	 * storm; cleared on the next good commit. */
+	 * storm; cleared on the next good commit.
+	 *
+	 * BUT a single blocking modeset does not always drain the wedged
+	 * flip — when it doesn't, presents stalled at 0 for ~6s until the
+	 * kernel timed out the flip on its own (chrome 10-bit fullscreen on
+	 * eDP froze at fs-enter). So the reset is now RETRIED on a 1s
+	 * throttle (last_transient_reset_ns) rather than fired only once:
+	 * 140ms modeset per 1000ms ≈ 14% (~50fps during the brief drain
+	 * window, not the 7fps storm), and the wedge drains in 1-2 retries.
+	 * transient_reset_done now only gates the once-per-storm log. */
 	int transient_reset_done;
+	uint64_t last_transient_reset_ns;
 	int scanout_blacklist;
 	/* Frames to keep scanout blacklisted after a commit-fail fallback.
 	 * Without this, the first good (GPU-composited) commit immediately
