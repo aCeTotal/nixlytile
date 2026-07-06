@@ -1725,6 +1725,30 @@ ensure_shell_env(void)
 static void
 log_callback(enum wlr_log_importance importance, const char *fmt, va_list args)
 {
+	/* WLR_ERROR always reaches the diag log (production has no wlroots log
+	 * file); rate-capped so a per-vblank error storm can't flood it. */
+	if (importance == WLR_ERROR) {
+		static time_t err_sec;
+		static int err_count;
+		struct timespec now;
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		if (now.tv_sec != err_sec) {
+			if (err_count > 8)
+				diag_logf("WLRERR", "(%d more errors suppressed this second)",
+					err_count - 8);
+			err_sec = now.tv_sec;
+			err_count = 0;
+		}
+		if (++err_count <= 8) {
+			char msg[512];
+			va_list args_copy;
+			va_copy(args_copy, args);
+			vsnprintf(msg, sizeof(msg), fmt, args_copy);
+			va_end(args_copy);
+			diag_logf("WLRERR", "%s", msg);
+		}
+	}
+
 	if (!log_file)
 		return;
 

@@ -543,6 +543,12 @@ static struct wlr_drm_connector *drm_page_flip_pop(
 static void drm_connector_set_pending_page_flip(struct wlr_drm_connector *conn,
 		struct wlr_drm_page_flip *page_flip) {
 	if (conn->pending_page_flip != NULL) {
+		wlr_drm_conn_log(conn, WLR_ERROR,
+			"pending page-flip %s while flip event still outstanding "
+			"(old event will be orphaned)",
+			page_flip != NULL ? "replaced" : "cleared");
+	}
+	if (conn->pending_page_flip != NULL) {
 		struct wlr_drm_page_flip *page_flip = conn->pending_page_flip;
 		for (size_t i = 0; i < page_flip->connectors_len; i++) {
 			if (page_flip->connectors[i].connector == conn) {
@@ -2007,6 +2013,8 @@ static void handle_page_flip(int fd, unsigned seq,
 	}
 
 	if (conn == NULL) {
+		wlr_log(WLR_ERROR, "page-flip event for CRTC %u matched no connector "
+			"(orphaned event)", crtc_id);
 		return;
 	}
 
