@@ -2068,32 +2068,64 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 				uint64_t now = get_time_ns();
 
 				if (transient) {
-					if (m->commit_failures % 30 == 0) {
+					/* A stuck/lost nonblocking pageflip on the elected
+					 * fullscreen client scanout buffer. Two independent
+					 * faults keep the storm alive and BOTH must be cleared:
+					 *
+					 * 1. wlr_scene re-elects the same wedged client buffer
+					 *    for direct scanout every vblank, so even a good
+					 *    reset is undone on the next frame. Turn scene-wide
+					 *    direct scanout OFF and hold it for the rest of the
+					 *    fullscreen session — setfullscreen-exit re-arms it
+					 *    — exactly like the format-reject branch below. Now
+					 *    builds go through GPU composition into our own
+					 *    swapchain instead of the client's buffer. */
+					if (!m->scanout_blacklist) {
+						m->scanout_blacklist = 1;
+						m->diag_scanout_falls++;
+					}
+					m->scanout_cooldown = 1u << 30;
+					scene->WLR_PRIVATE.direct_scanout = false;
+
+					/* 2. The kernel rejects every new NONBLOCK flip with
+					 *    EAGAIN while the previous flip is pending, and a
+					 *    bufferless same-mode modeset inherits that same
+					 *    pending buffer as primary_fb — so it re-commits the
+					 *    wedged buffer and never drains. Build a FRESH
+					 *    GPU-composited frame (direct scanout is now off) and
+					 *    commit it as a BLOCKING modeset: set_mode flips
+					 *    allow_reconfiguration → nonblock=false +
+					 *    ALLOW_MODESET, so the kernel processes it
+					 *    synchronously and it supersedes the wedged flip.
+					 *    This is the same blocking modeset setfullscreen-exit
+					 *    relies on and is the only thing that unsticks it.
+					 *    Rate-limited to ~2 Hz; frames keep scheduling in
+					 *    between so GPU composition can retry on its own. */
+					if (m->commit_failures % 30 == 0 &&
+					    m->wlr_output->current_mode) {
 						wlr_log(WLR_ERROR,
 							"%s: %u transient commit failures "
-							"(pageflip stuck) — resetting CRTC "
-							"with a modeset",
+							"(pageflip stuck) — disabling scanout + "
+							"blocking-modeset CRTC reset",
 							m->wlr_output->name, m->commit_failures);
 						diag_logf("COMMITFAIL",
 							"%s: %u transient commit failures (errno=%d %s) — "
-							"pending pageflip stuck; resetting CRTC with a "
-							"modeset (no format fallback: not a KMS reject).",
+							"pending pageflip stuck; disabling direct scanout + "
+							"blocking-modeset reset with fresh GPU buffer "
+							"(no format fallback: not a KMS reject).",
 							m->wlr_output->name, m->commit_failures,
 							commit_errno, strerror(commit_errno));
-						/* A modeset commit is blocking (no NONBLOCK)
-						 * and carries ALLOW_MODESET, so it drains the
-						 * stuck pending flip. Re-passing the SAME
-						 * current mode is a no-op modeset in wlroots
-						 * but forces the transaction through. */
-						if (m->wlr_output->current_mode) {
-							struct wlr_output_state rs;
-							wlr_output_state_init(&rs);
+						struct wlr_scene_output_state_options ropts = {0};
+						struct wlr_output_state rs;
+						wlr_output_state_init(&rs);
+						if (wlr_scene_output_build_state(m->scene_output,
+								&rs, &ropts)) {
 							wlr_output_state_set_mode(&rs,
 								m->wlr_output->current_mode);
 							if (wlr_output_test_state(m->wlr_output, &rs))
 								wlr_output_commit_state(m->wlr_output, &rs);
-							wlr_output_state_finish(&rs);
 						}
+						wlr_output_state_finish(&rs);
 					}
 					if (now - m->last_commit_fail_ns > 16000000ULL) {
 						m->last_commit_fail_ns = now;
