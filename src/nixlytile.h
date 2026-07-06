@@ -1289,6 +1289,13 @@ struct Monitor {
 	 * that i915 cannot scan out). See fix for retroarch-freeze. */
 	uint32_t commit_failures;
 	uint64_t last_commit_fail_ns;
+	/* One-shot guard for the transient-EAGAIN blocking-modeset CRTC reset.
+	 * The reset does a BLOCKING eDP modeset (~140ms) on the compositor
+	 * main thread — doing it repeatedly (was: every 30 fails) pegs the
+	 * thread at ~7fps and freezes the cursor, and each modeset kills the
+	 * in-flight flip → more EAGAIN → runaway storm. Do it at most once per
+	 * storm; cleared on the next good commit. */
+	int transient_reset_done;
 	int scanout_blacklist;
 	/* Frames to keep scanout blacklisted after a commit-fail fallback.
 	 * Without this, the first good (GPU-composited) commit immediately

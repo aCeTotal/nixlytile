@@ -2099,10 +2099,17 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 					 *    synchronously and it supersedes the wedged flip.
 					 *    This is the same blocking modeset setfullscreen-exit
 					 *    relies on and is the only thing that unsticks it.
-					 *    Rate-limited to ~2 Hz; frames keep scheduling in
-					 *    between so GPU composition can retry on its own. */
-					if (m->commit_failures % 30 == 0 &&
+					 *    Done ONCE per storm (transient_reset_done): a
+					 *    blocking eDP modeset takes ~140ms on the compositor
+					 *    main thread, so repeating it froze the cursor and
+					 *    capped presentation at ~7fps while each modeset
+					 *    killed the in-flight flip → more EAGAIN → runaway.
+					 *    After the single drain, scanout stays disabled and
+					 *    frames reschedule at ~60Hz through GPU composition;
+					 *    the flag clears on the next good commit. */
+					if (!m->transient_reset_done &&
 					    m->wlr_output->current_mode) {
+						m->transient_reset_done = 1;
 						wlr_log(WLR_ERROR,
 							"%s: %u transient commit failures "
 							"(pageflip stuck) — disabling scanout + "
@@ -2224,6 +2231,7 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 			}
 		} else {
 			m->commit_failures = 0;
+			m->transient_reset_done = 0;
 			if (m->scanout_blacklist) {
 				/* Good commit, but it came from GPU composition.
 				 * Keep scanout disabled until the cooldown drains
@@ -2243,6 +2251,7 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 		}
 	} else {
 		m->commit_failures = 0;
+		m->transient_reset_done = 0;
 		if (m->scanout_blacklist) {
 			if (--m->scanout_cooldown <= 0) {
 				scene->WLR_PRIVATE.direct_scanout = true;
@@ -2411,13 +2420,16 @@ rendermon(struct wl_listener *listener, void *data)
 		Client *fc = fullscreen_visible_on(m);
 		const char *appid = fc ? client_get_appid(fc) : NULL;
 		unsigned long long presents = m->frames_presented - m->diag_presented0;
+		struct wlr_box fcnat = {0};
+		if (fc)
+			client_get_geometry(fc, &fcnat);
 
 		diag_logf("MON",
 			"%s fs=%s cls=%s vblanks=%u builds=%u idle_skip=%u "
 			"client_commits=%u presents=%llu/s dropped=%lu held=%lu "
 			"cadence=%d vrr=%d scanout=%d hdr=%d 10bit=%d "
 			"commit_fail=%u commitfail_ev=%u scanout_fall=%u scanout_rearm=%u "
-			"scanout_bl=%d scene_fail=%d",
+			"scanout_bl=%d scene_fail=%d geom=%dx%d@%d,%d surf=%dx%d mm=%dx%d@%d,%d",
 			m->wlr_output->name, appid ? appid : "-",
 			is_game ? "game" : (is_video ? "video" : "-"),
 			m->diag_vblanks, m->diag_builds, m->diag_idle_skips,
@@ -2427,7 +2439,11 @@ rendermon(struct wl_listener *listener, void *data)
 			m->hdr_active, m->render_10bit_active,
 			m->commit_failures, m->diag_commit_fails,
 			m->diag_scanout_falls, m->diag_scanout_rearms,
-			m->scanout_blacklist, m->scene_build_failures);
+			m->scanout_blacklist, m->scene_build_failures,
+			fc ? fc->geom.width : 0, fc ? fc->geom.height : 0,
+			fc ? fc->geom.x : 0, fc ? fc->geom.y : 0,
+			fcnat.width, fcnat.height,
+			m->m.width, m->m.height, m->m.x, m->m.y);
 
 		if (fc && presents == 0) {
 			const char *cause;
