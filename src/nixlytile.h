@@ -1212,6 +1212,9 @@ struct Monitor {
 	uint32_t diag_builds;         /* build_state reached since last heartbeat */
 	uint32_t diag_idle_skips;     /* idle-gate build_state skips since last heartbeat */
 	uint32_t diag_commits_in;     /* client surface commits on this mon since last heartbeat */
+	uint32_t diag_commit_fails;   /* failed output commit attempts since last heartbeat */
+	uint32_t diag_scanout_falls;  /* scanout->GPU-composition fallbacks engaged since last heartbeat */
+	uint32_t diag_scanout_rearms; /* direct scanout re-armed (cooldown drained) since last heartbeat */
 	struct wlr_scene_tree *hz_osd_tree;
 	struct wlr_scene_tree *hz_osd_bg;
 	int hz_osd_visible;
@@ -1287,6 +1290,14 @@ struct Monitor {
 	uint32_t commit_failures;
 	uint64_t last_commit_fail_ns;
 	int scanout_blacklist;
+	/* Frames to keep scanout blacklisted after a commit-fail fallback.
+	 * Without this, the first good (GPU-composited) commit immediately
+	 * restored scene-wide direct scanout, which re-elected the same
+	 * client buffer that KMS keeps rejecting → 4 fails → fallback →
+	 * 1 good → restore → repeat: a sub-1fps flap that reads as a freeze
+	 * (YouTube fullscreen on eDP). Hold the fallback for this many good
+	 * frames before re-arming direct scanout. */
+	int scanout_cooldown;
 	/* Retro emulator fullscreen on this monitor holds an
 	 * attach_render lock to force GPU composition. Kernel may reject
 	 * retroarch buffer modifiers (10-bit Y-tiled CCS on i915 etc.),

@@ -2006,6 +2006,7 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 		}
 
 		if (!committed) {
+			m->diag_commit_fails++;
 			/* Force full damage — the failed commit's buffer was
 			 * never displayed, so the swapchain's next buffer has
 			 * stale content from 2+ frames ago. */
@@ -2058,6 +2059,14 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 					"format/modifier (e.g. 10-bit CCS without ReBAR).",
 					m->wlr_output->name, m->commit_failures);
 				m->scanout_blacklist = 1;
+				m->diag_scanout_falls++;
+				/* Hold the fallback for the rest of this fullscreen
+				 * session so we don't re-arm direct scanout on the
+				 * very next good commit and flap back into the failing
+				 * client-buffer election (that flap is the freeze).
+				 * setfullscreen-exit clears it, restoring scanout for
+				 * the desktop. Re-armed on any further fail. */
+				m->scanout_cooldown = 1u << 30;
 
 				/* scanout_blacklist alone only relabels stats — it
 				 * does NOT stop wlr_scene re-electing the fullscreen
@@ -2118,17 +2127,37 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 				}
 			}
 		} else {
-			if (m->scanout_blacklist)
-				scene->WLR_PRIVATE.direct_scanout = true;
 			m->commit_failures = 0;
-			m->scanout_blacklist = 0;
+			if (m->scanout_blacklist) {
+				/* Good commit, but it came from GPU composition.
+				 * Keep scanout disabled until the cooldown drains
+				 * so we don't re-elect the client buffer KMS keeps
+				 * rejecting and flap back into the freeze. */
+				if (--m->scanout_cooldown <= 0) {
+					scene->WLR_PRIVATE.direct_scanout = true;
+					m->scanout_blacklist = 0;
+					m->scanout_cooldown = 0;
+					m->diag_scanout_rearms++;
+					diag_logf("SCANOUT",
+						"%s: cooldown drained — re-arming direct scanout",
+						m->wlr_output->name);
+				}
+			}
 			hdr_commit_ok = 1;
 		}
 	} else {
-		if (m->scanout_blacklist)
-			scene->WLR_PRIVATE.direct_scanout = true;
 		m->commit_failures = 0;
-		m->scanout_blacklist = 0;
+		if (m->scanout_blacklist) {
+			if (--m->scanout_cooldown <= 0) {
+				scene->WLR_PRIVATE.direct_scanout = true;
+				m->scanout_blacklist = 0;
+				m->scanout_cooldown = 0;
+				m->diag_scanout_rearms++;
+				diag_logf("SCANOUT",
+					"%s: cooldown drained — re-arming direct scanout",
+					m->wlr_output->name);
+			}
+		}
 		hdr_commit_ok = 1;
 	}
 
@@ -2291,7 +2320,8 @@ rendermon(struct wl_listener *listener, void *data)
 			"%s fs=%s cls=%s vblanks=%u builds=%u idle_skip=%u "
 			"client_commits=%u presents=%llu/s dropped=%lu held=%lu "
 			"cadence=%d vrr=%d scanout=%d hdr=%d 10bit=%d "
-			"commit_fail=%u scene_fail=%d",
+			"commit_fail=%u commitfail_ev=%u scanout_fall=%u scanout_rearm=%u "
+			"scanout_bl=%d scene_fail=%d",
 			m->wlr_output->name, appid ? appid : "-",
 			is_game ? "game" : (is_video ? "video" : "-"),
 			m->diag_vblanks, m->diag_builds, m->diag_idle_skips,
@@ -2299,11 +2329,17 @@ rendermon(struct wl_listener *listener, void *data)
 			(unsigned long)m->frames_dropped, (unsigned long)m->frames_held,
 			m->video_cadence_active, m->vrr_active, m->direct_scanout_active,
 			m->hdr_active, m->render_10bit_active,
-			m->commit_failures, m->scene_build_failures);
+			m->commit_failures, m->diag_commit_fails,
+			m->diag_scanout_falls, m->diag_scanout_rearms,
+			m->scanout_blacklist, m->scene_build_failures);
 
 		if (fc && presents == 0) {
 			const char *cause;
-			if (m->commit_failures > 0)
+			if (m->diag_scanout_falls > 0 || m->diag_scanout_rearms > 0)
+				cause = "direct-scanout commit-fail FLAP — client buffer keeps "
+					"failing the pageflip, GPU-composition fallback engaged "
+					"(scanout_fall/rearm counts; see COMMITFAIL/SCANOUT)";
+			else if (m->diag_commit_fails > 0 || m->commit_failures > 0)
 				cause = "output commit failing (buffer/modeset/GPU) — see COMMITFAIL";
 			else if (m->scene_build_failures > 0)
 				cause = "scene build failing (renderer/GPU alloc)";
@@ -2328,6 +2364,9 @@ rendermon(struct wl_listener *listener, void *data)
 		m->diag_builds = 0;
 		m->diag_idle_skips = 0;
 		m->diag_commits_in = 0;
+		m->diag_commit_fails = 0;
+		m->diag_scanout_falls = 0;
+		m->diag_scanout_rearms = 0;
 	}
 
 	/* Decide if this monitor should enter/exit HDR this frame. The actual

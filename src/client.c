@@ -1935,6 +1935,17 @@ setfullscreen(Client *c, int fullscreen)
 			wlr_output_lock_attach_render(c->mon->wlr_output, false);
 			c->mon->retro_scanout_lock = 0;
 		}
+		/* End of a fullscreen commit-fail scanout fallback (e.g.
+		 * YouTube on eDP): tell output.c to re-arm direct scanout
+		 * on its next good commit — which now succeeds because the
+		 * fullscreen client is gone. Draining via output.c keeps the
+		 * scene->direct_scanout toggle in one place. */
+		if (c->mon && c->mon->scanout_blacklist) {
+			c->mon->scanout_cooldown = 1;
+			diag_logf("SCANOUT", "%s: fullscreen exit — re-arming "
+				"direct scanout on next commit",
+				c->mon->wlr_output ? c->mon->wlr_output->name : "(null)");
+		}
 		set_adaptive_sync(c->mon, 0);
 		/* Disable game VRR when exiting fullscreen */
 		disable_game_vrr(c->mon);
