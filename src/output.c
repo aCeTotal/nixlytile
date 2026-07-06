@@ -2048,97 +2048,146 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 				wlr_log(WLR_ERROR, "Output commit failed on %s (n=%u)",
 					m->wlr_output->name, m->commit_failures);
 				request_frame(m);
-			} else if (m->commit_failures == 4) {
-				/* Kernel is refusing this buffer format/modifier
-				 * persistently (e.g. 10-bit Y-tiled CCS on i915
-				 * without Resizable BAR). Blacklist direct
-				 * scanout so the next frame goes through GPU
-				 * composition, force XRGB8888 render format to
-				 * get a fresh swapchain, and drop compositor
-				 * RT-priority so user-space can still preempt. */
-				wlr_log(WLR_ERROR,
-					"%s: %u consecutive commit failures — "
-					"disabling direct scanout, falling back "
-					"to GPU composition + XRGB8888",
-					m->wlr_output->name, m->commit_failures);
-				diag_logf("COMMITFAIL",
-					"%s: %u consecutive output commit failures (errno=%d %s) — "
-					"forcing GPU composition + XRGB8888. Likely KMS rejected the "
-					"buffer format/modifier (e.g. 10-bit CCS without ReBAR).",
-					m->wlr_output->name, m->commit_failures,
-					commit_errno, strerror(commit_errno));
-				m->scanout_blacklist = 1;
-				m->diag_scanout_falls++;
-				/* Hold the fallback for the rest of this fullscreen
-				 * session so we don't re-arm direct scanout on the
-				 * very next good commit and flap back into the failing
-				 * client-buffer election (that flap is the freeze).
-				 * setfullscreen-exit clears it, restoring scanout for
-				 * the desktop. Re-armed on any further fail. */
-				m->scanout_cooldown = 1u << 30;
-
-				/* scanout_blacklist alone only relabels stats — it
-				 * does NOT stop wlr_scene re-electing the fullscreen
-				 * client buffer for direct scanout.  That buffer's
-				 * atomic test passes but the real pageflip keeps
-				 * failing (test/commit divergence, e.g. i915 10-bit
-				 * CCS without ReBAR), so the scene picks it every
-				 * vblank and the commit loops forever → freeze.
-				 * Turn off scene-wide direct-scanout election to force
-				 * GPU composition into the compositor's own swapchain,
-				 * which commits.  Restored on the next good commit. */
-				scene->WLR_PRIVATE.direct_scanout = false;
-
-				/* Force fresh XRGB8888 swapchain. Carry the current
-				 * mode: a render-format-only state (no mode) is rejected
-				 * by the i915 atomic test, so the commit was silently
-				 * skipped and the swapchain stayed 10-bit — the exact
-				 * format KMS keeps rejecting → freeze loop. Re-passing the
-				 * SAME current_mode is a no-op modeset in wlroots (no
-				 * NVIDIA stall) but makes the state pass the test. Also
-				 * clear render_10bit_active so nothing re-elects 10-bit. */
-				struct wlr_output_state fb;
-				wlr_output_state_init(&fb);
-				wlr_output_state_set_render_format(&fb, DRM_FORMAT_XRGB8888);
-				if (m->wlr_output->current_mode)
-					wlr_output_state_set_mode(&fb, m->wlr_output->current_mode);
-				if (wlr_output_test_state(m->wlr_output, &fb) &&
-				    wlr_output_commit_state(m->wlr_output, &fb))
-					m->render_10bit_active = 0;
-				wlr_output_state_finish(&fb);
-
-				if (compositor_rt_applied) {
-					struct sched_param sp = { .sched_priority = 0 };
-					sched_setscheduler(0, SCHED_OTHER, &sp);
-					compositor_rt_applied = 0;
-					wlr_log(WLR_ERROR,
-						"RT scheduling dropped after %u commit failures",
-						m->commit_failures);
-				}
-
-				/* Defer next frame instead of nanosleep — sleeping in
-				 * the main thread freezes cursor/input for 100ms. */
-				m->last_commit_fail_ns = get_time_ns();
-				request_frame(m);
 			} else {
-				/* Still failing after fallback — rate-limit
-				 * frame scheduling to ~60 Hz and log once per
-				 * second so we don't melt the event loop. */
+				/* Past 3 consecutive failures. Split by errno.
+				 *
+				 * EAGAIN/EBUSY is TRANSIENT: the previous nonblocking
+				 * pageflip on this CRTC has not completed (stuck or lost
+				 * flip event) — a timing fault, NOT a KMS format reject.
+				 * Forcing XRGB8888 + disabling direct scanout cannot fix
+				 * it and only throws the swapchain away; instead back off
+				 * and, if the flip stays wedged, reset the CRTC with a
+				 * blocking modeset (the same recovery the fullscreen-exit
+				 * path already relies on to unstick this).
+				 *
+				 * Everything else (EINVAL/ENOSPC/EPERM/...) is the kernel
+				 * refusing the buffer format/modifier persistently (e.g.
+				 * 10-bit Y-tiled CCS on i915 without ReBAR) → the
+				 * GPU-composition + XRGB8888 fallback. */
+				int transient = (commit_errno == EAGAIN || commit_errno == EBUSY);
 				uint64_t now = get_time_ns();
-				if (m->commit_failures % 60 == 0) {
+
+				if (transient) {
+					if (m->commit_failures % 30 == 0) {
+						wlr_log(WLR_ERROR,
+							"%s: %u transient commit failures "
+							"(pageflip stuck) — resetting CRTC "
+							"with a modeset",
+							m->wlr_output->name, m->commit_failures);
+						diag_logf("COMMITFAIL",
+							"%s: %u transient commit failures (errno=%d %s) — "
+							"pending pageflip stuck; resetting CRTC with a "
+							"modeset (no format fallback: not a KMS reject).",
+							m->wlr_output->name, m->commit_failures,
+							commit_errno, strerror(commit_errno));
+						/* A modeset commit is blocking (no NONBLOCK)
+						 * and carries ALLOW_MODESET, so it drains the
+						 * stuck pending flip. Re-passing the SAME
+						 * current mode is a no-op modeset in wlroots
+						 * but forces the transaction through. */
+						if (m->wlr_output->current_mode) {
+							struct wlr_output_state rs;
+							wlr_output_state_init(&rs);
+							wlr_output_state_set_mode(&rs,
+								m->wlr_output->current_mode);
+							if (wlr_output_test_state(m->wlr_output, &rs))
+								wlr_output_commit_state(m->wlr_output, &rs);
+							wlr_output_state_finish(&rs);
+						}
+					}
+					if (now - m->last_commit_fail_ns > 16000000ULL) {
+						m->last_commit_fail_ns = now;
+						request_frame(m);
+					}
+				} else if (!m->scanout_blacklist) {
+					/* First format/permission rejection past the
+					 * threshold. Blacklist direct scanout so the next
+					 * frame goes through GPU composition, force XRGB8888
+					 * for a fresh swapchain, and drop compositor
+					 * RT-priority so user-space can still preempt. */
 					wlr_log(WLR_ERROR,
-						"%s: %u commit failures (still retrying)",
+						"%s: %u consecutive commit failures — "
+						"disabling direct scanout, falling back "
+						"to GPU composition + XRGB8888",
 						m->wlr_output->name, m->commit_failures);
 					diag_logf("COMMITFAIL",
-						"%s: %u commit failures AFTER fallback (errno=%d %s) — "
-						"GPU-composited XRGB8888 commit still rejected; "
-						"fallback insufficient for this failure mode.",
+						"%s: %u consecutive output commit failures (errno=%d %s) — "
+						"forcing GPU composition + XRGB8888. Likely KMS rejected the "
+						"buffer format/modifier (e.g. 10-bit CCS without ReBAR).",
 						m->wlr_output->name, m->commit_failures,
 						commit_errno, strerror(commit_errno));
-				}
-				if (now - m->last_commit_fail_ns > 16000000ULL) {
+					m->scanout_blacklist = 1;
+					m->diag_scanout_falls++;
+					/* Hold the fallback for the rest of this fullscreen
+					 * session so we don't re-arm direct scanout on the
+					 * very next good commit and flap back into the failing
+					 * client-buffer election (that flap is the freeze).
+					 * setfullscreen-exit clears it, restoring scanout for
+					 * the desktop. Re-armed on any further fail. */
+					m->scanout_cooldown = 1u << 30;
+
+					/* scanout_blacklist alone only relabels stats — it
+					 * does NOT stop wlr_scene re-electing the fullscreen
+					 * client buffer for direct scanout.  That buffer's
+					 * atomic test passes but the real pageflip keeps
+					 * failing (test/commit divergence, e.g. i915 10-bit
+					 * CCS without ReBAR), so the scene picks it every
+					 * vblank and the commit loops forever → freeze.
+					 * Turn off scene-wide direct-scanout election to force
+					 * GPU composition into the compositor's own swapchain,
+					 * which commits.  Restored on the next good commit. */
+					scene->WLR_PRIVATE.direct_scanout = false;
+
+					/* Force fresh XRGB8888 swapchain. Carry the current
+					 * mode: a render-format-only state (no mode) is rejected
+					 * by the i915 atomic test, so the commit was silently
+					 * skipped and the swapchain stayed 10-bit — the exact
+					 * format KMS keeps rejecting → freeze loop. Re-passing the
+					 * SAME current_mode is a no-op modeset in wlroots (no
+					 * NVIDIA stall) but makes the state pass the test. Also
+					 * clear render_10bit_active so nothing re-elects 10-bit. */
+					struct wlr_output_state fb;
+					wlr_output_state_init(&fb);
+					wlr_output_state_set_render_format(&fb, DRM_FORMAT_XRGB8888);
+					if (m->wlr_output->current_mode)
+						wlr_output_state_set_mode(&fb, m->wlr_output->current_mode);
+					if (wlr_output_test_state(m->wlr_output, &fb) &&
+					    wlr_output_commit_state(m->wlr_output, &fb))
+						m->render_10bit_active = 0;
+					wlr_output_state_finish(&fb);
+
+					if (compositor_rt_applied) {
+						struct sched_param sp = { .sched_priority = 0 };
+						sched_setscheduler(0, SCHED_OTHER, &sp);
+						compositor_rt_applied = 0;
+						wlr_log(WLR_ERROR,
+							"RT scheduling dropped after %u commit failures",
+							m->commit_failures);
+					}
+
+					/* Defer next frame instead of nanosleep — sleeping in
+					 * the main thread freezes cursor/input for 100ms. */
 					m->last_commit_fail_ns = now;
 					request_frame(m);
+				} else {
+					/* Still failing after the format fallback —
+					 * rate-limit frame scheduling to ~60 Hz and log
+					 * once per second so we don't melt the event loop. */
+					if (m->commit_failures % 60 == 0) {
+						wlr_log(WLR_ERROR,
+							"%s: %u commit failures (still retrying)",
+							m->wlr_output->name, m->commit_failures);
+						diag_logf("COMMITFAIL",
+							"%s: %u commit failures AFTER fallback (errno=%d %s) — "
+							"GPU-composited XRGB8888 commit still rejected; "
+							"fallback insufficient for this failure mode.",
+							m->wlr_output->name, m->commit_failures,
+							commit_errno, strerror(commit_errno));
+					}
+					if (now - m->last_commit_fail_ns > 16000000ULL) {
+						m->last_commit_fail_ns = now;
+						request_frame(m);
+					}
 				}
 			}
 		} else {
