@@ -4250,6 +4250,22 @@ init_monitor_color_settings(Monitor *m)
 					m->wlr_output->name);
 			}
 		}
+		/* Internal laptop panels (eDP/LVDS/DSI): skip auto 10-bit.
+		 * i915 10-bit needs a Y-tiled CCS modifier for the scanout
+		 * buffer, and async page-flips of that buffer on eDP get stuck
+		 * in the kernel (EAGAIN storm → frozen screen, EPERM on the
+		 * CCS commit). The internal panel gains nothing from 10-bit —
+		 * HDR/wide-gamut is only meaningful on the external TV — so
+		 * gate it off here. External connectors still auto-enable. */
+		if (!skip_10bit &&
+		    (strncmp(m->wlr_output->name, "eDP", 3) == 0 ||
+		     strncmp(m->wlr_output->name, "LVDS", 4) == 0 ||
+		     strncmp(m->wlr_output->name, "DSI", 3) == 0)) {
+			skip_10bit = 1;
+			wlr_log(WLR_INFO, "Monitor %s: skipping auto 10-bit on "
+				"internal panel (avoids i915 CCS async-flip stall)",
+				m->wlr_output->name);
+		}
 		/* Nvidia EGL/GBM may not properly handle XRGB2101010 render
 		 * targets, causing swapchain format failures and black screen.
 		 * Skip auto-enable on Nvidia-primary systems; users can still
