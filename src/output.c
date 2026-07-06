@@ -1972,6 +1972,10 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 
 	int hdr_commit_ok = 0;
 	if (!wlr_output_commit_state(m->wlr_output, state)) {
+		/* drmModeAtomicCommit sets errno on the failing atomic commit;
+		 * capture it before any wlr_log/retry clobbers it so the real
+		 * KMS reject reason (EINVAL/EBUSY/ENOSPC/...) lands in diag.log. */
+		int commit_errno = errno;
 		int committed = 0;
 
 		/* If VRR was piggybacked and commit failed, the driver may
@@ -1995,14 +1999,18 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 				m->vrr_pending_tries = 0;
 			}
 			committed = wlr_output_commit_state(m->wlr_output, state);
+			if (!committed)
+				commit_errno = errno;
 		}
 
 		if (!committed && allow_tearing) {
 			state->tearing_page_flip = false;
 			committed = wlr_output_commit_state(m->wlr_output, state);
-			if (!committed)
+			if (!committed) {
+				commit_errno = errno;
 				wlr_log(WLR_ERROR, "Output commit failed on %s (non-tearing retry)",
 					m->wlr_output->name);
+			}
 		}
 
 		if (!committed) {
@@ -2054,10 +2062,11 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 					"to GPU composition + XRGB8888",
 					m->wlr_output->name, m->commit_failures);
 				diag_logf("COMMITFAIL",
-					"%s: %u consecutive output commit failures — forcing GPU "
-					"composition + XRGB8888. Likely KMS rejected the buffer "
-					"format/modifier (e.g. 10-bit CCS without ReBAR).",
-					m->wlr_output->name, m->commit_failures);
+					"%s: %u consecutive output commit failures (errno=%d %s) — "
+					"forcing GPU composition + XRGB8888. Likely KMS rejected the "
+					"buffer format/modifier (e.g. 10-bit CCS without ReBAR).",
+					m->wlr_output->name, m->commit_failures,
+					commit_errno, strerror(commit_errno));
 				m->scanout_blacklist = 1;
 				m->diag_scanout_falls++;
 				/* Hold the fallback for the rest of this fullscreen
@@ -2120,6 +2129,12 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 					wlr_log(WLR_ERROR,
 						"%s: %u commit failures (still retrying)",
 						m->wlr_output->name, m->commit_failures);
+					diag_logf("COMMITFAIL",
+						"%s: %u commit failures AFTER fallback (errno=%d %s) — "
+						"GPU-composited XRGB8888 commit still rejected; "
+						"fallback insufficient for this failure mode.",
+						m->wlr_output->name, m->commit_failures,
+						commit_errno, strerror(commit_errno));
 				}
 				if (now - m->last_commit_fail_ns > 16000000ULL) {
 					m->last_commit_fail_ns = now;
