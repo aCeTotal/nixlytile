@@ -2128,15 +2128,53 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 						}
 						struct wlr_scene_output_state_options ropts = {0};
 						struct wlr_output_state rs;
+						int r_build = 0, r_test = 0, r_commit = 0;
+						int r_errno = 0;
+						uint64_t drain_t0 = get_time_ns();
 						wlr_output_state_init(&rs);
-						if (wlr_scene_output_build_state(m->scene_output,
-								&rs, &ropts)) {
+						r_build = wlr_scene_output_build_state(
+							m->scene_output, &rs, &ropts);
+						if (r_build) {
 							wlr_output_state_set_mode(&rs,
 								m->wlr_output->current_mode);
-							if (wlr_output_test_state(m->wlr_output, &rs))
-								wlr_output_commit_state(m->wlr_output, &rs);
+							r_test = wlr_output_test_state(
+								m->wlr_output, &rs);
+							if (r_test)
+								r_commit = wlr_output_commit_state(
+									m->wlr_output, &rs);
+							if (!r_commit)
+								r_errno = errno;
 						}
 						wlr_output_state_finish(&rs);
+						/* Every drain outcome is logged: a silently
+						 * failing drain (build/test reject) previously
+						 * looked identical to a succeeding one, hiding
+						 * why the storm never cleared. */
+						diag_logf("COMMITFAIL",
+							"%s: drain build=%d test=%d commit=%d "
+							"errno=%d took=%ums (streak=%u)",
+							m->wlr_output->name, r_build, r_test,
+							r_commit, r_errno,
+							(unsigned)((get_time_ns() - drain_t0)
+								/ 1000000ULL),
+							m->commit_failures);
+					}
+					/* Once per second while the storm lasts, dump the
+					 * failing commit's contents — pins whether the
+					 * EAGAIN is buffer-only or carries extra state
+					 * (VRR/format/layers) the kernel chokes on. */
+					if (m->commit_failures % 60 == 5) {
+						diag_logf("COMMITFAIL",
+							"%s: EAGAIN state committed=0x%x "
+							"buffer=%d adaptive=%d layers=%d "
+							"tearing=%d (streak=%u)",
+							m->wlr_output->name,
+							(unsigned)state->committed,
+							!!(state->committed & WLR_OUTPUT_STATE_BUFFER),
+							!!(state->committed & WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED),
+							(int)state->layers_len,
+							state->tearing_page_flip,
+							m->commit_failures);
 					}
 					if (now - m->last_commit_fail_ns > 16000000ULL) {
 						m->last_commit_fail_ns = now;
