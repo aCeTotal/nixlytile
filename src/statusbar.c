@@ -3869,53 +3869,36 @@ set_pipewire_mic_volume(double percent)
 	return 0;
 }
 
+/* Run a wpctl command and wait for it to finish before returning.
+ * The global SIGCHLD reaper may steal the exit status (pclose then
+ * sees ECHILD), but pclose still blocks until the command has exited —
+ * which is the guarantee the mute toggles need before re-reading
+ * PipeWire state.  The old async fork() setters raced their own
+ * read-back: the toggle re-read PipeWire before wpctl had run, cached
+ * the stale pre-toggle state, and the icon needed a second click. */
+static void
+run_wpctl_sync(const char *cmd)
+{
+	FILE *fp = popen(cmd, "r");
+
+	if (fp)
+		pclose(fp);
+}
+
 int
 toggle_pipewire_mute(void)
 {
-	int ret;
-	int current;
 	int is_headset = pipewire_sink_is_headset();
-	double vol;
-	uint64_t now;
-	double base;
-	double target;
 
-	/* Always force a fresh read from PipeWire to get accurate mute state */
+	/* Native toggle: PipeWire flips mute atomically and preserves the
+	 * volume level, so no compositor-side state guessing or volume
+	 * restore is needed. */
+	run_wpctl_sync("wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle");
+
+	/* Read back the ACTUAL state so icon and system can never
+	 * disagree. */
 	volume_invalidate_cache(is_headset);
-	vol = pipewire_volume_percent(&is_headset);
-	/*
-	 * Determine current mute state. If volume_muted is still -1 (unknown),
-	 * treat it as unmuted (0) so first click will mute.
-	 */
-	current = (vol >= 0.0 && volume_muted == 1) ? 1 : 0;
-	base = vol >= 0.0 ? vol : volume_last_for_type(is_headset);
-
-	if (current == 0) { /* muting */
-		ret = set_pipewire_mute(1);
-		if (ret != 0)
-			return -1;
-		volume_muted = 1;
-		now = monotonic_msec();
-		if (base >= 0.0) {
-			volume_cache_store(is_headset, base, volume_muted, now);
-			speaker_stored = base;
-		} else {
-			volume_invalidate_cache(is_headset);
-		}
-	} else { /* unmuting */
-		target = speaker_stored >= 0.0 ? speaker_stored : base;
-		ret = set_pipewire_mute(0);
-		if (ret != 0)
-			return -1;
-		volume_muted = 0;
-		if (target >= 0.0)
-			set_pipewire_volume(target);
-		if (target >= 0.0) {
-			speaker_active = target;
-		}
-		volume_invalidate_cache(is_headset);
-		pipewire_volume_percent(&is_headset); /* refresh cache from PipeWire */
-	}
+	pipewire_volume_percent(&is_headset);
 
 	refreshstatusvolume();
 	return 0;
@@ -3924,57 +3907,11 @@ toggle_pipewire_mute(void)
 int
 toggle_pipewire_mic_mute(void)
 {
-	int ret;
-	int current;
-	double vol;
-	double base;
-	double target;
+	run_wpctl_sync("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle");
 
-	/* Always force a fresh read from PipeWire to get accurate mute state */
 	mic_last_read_ms = 0;
-	vol = pipewire_mic_volume_percent();
-	/*
-	 * Determine current mute state. If mic_muted is still -1 (unknown),
-	 * treat it as unmuted (0) so first click will mute.
-	 */
-	current = (vol >= 0.0 && mic_muted == 1) ? 1 : 0;
-	base = vol >= 0.0 ? vol : mic_last_percent;
+	pipewire_mic_volume_percent();
 
-	if (current == 0) { /* muting */
-		ret = set_pipewire_mic_mute(1);
-		if (ret != 0)
-			return -1;
-		mic_muted = 1;
-		mic_cached_muted = mic_muted;
-		if (base >= 0.0) {
-			mic_cached = base;
-			mic_last_percent = base;
-			microphone_active = base;
-			mic_last_read_ms = monotonic_msec();
-			microphone_stored = base;
-		}
-	} else { /* unmuting */
-		target = microphone_stored >= 0.0 ? microphone_stored : base;
-		ret = set_pipewire_mic_mute(0);
-		if (ret != 0)
-			return -1;
-		mic_muted = 0;
-		mic_cached_muted = mic_muted;
-		mic_last_read_ms = 0;
-		mic_cached = -1.0;
-		if (target >= 0.0) {
-			set_pipewire_mic_volume(target);
-			mic_cached = target;
-			mic_last_percent = target;
-			microphone_active = target;
-			mic_last_read_ms = monotonic_msec();
-		} else {
-			pipewire_mic_volume_percent(); /* refresh cache from PipeWire */
-		}
-	}
-
-	if (mic_last_percent < 0.0)
-		mic_last_percent = mic_cached >= 0.0 ? mic_cached : mic_last_percent;
 	refreshstatusmic();
 	return 0;
 }
@@ -3982,7 +3919,7 @@ toggle_pipewire_mic_mute(void)
 void
 positionstatusmodules(Monitor *m)
 {
-	int x, spacing;
+	int x, spacing, left_end;
 
 	if (!m || !m->statusbar.tree)
 		return;
@@ -4055,6 +3992,9 @@ positionstatusmodules(Monitor *m)
 	if (m->statusbar.traylabel.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.traylabel.tree->node,
 				m->statusbar.traylabel.width > 0);
+	if (m->statusbar.terminfo.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.terminfo.tree->node,
+				m->statusbar.terminfo.width > 0);
 	if (m->statusbar.steam.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.steam.tree->node,
 				m->statusbar.steam.width > 0);
@@ -4110,6 +4050,7 @@ positionstatusmodules(Monitor *m)
 		m->statusbar.traylabel.x = x;
 		x += m->statusbar.traylabel.width + spacing;
 	}
+	left_end = x;
 
 	x = m->statusbar.area.width;
 	spacing = statusbar_module_spacing;
@@ -4156,6 +4097,29 @@ positionstatusmodules(Monitor *m)
 		m->statusbar.battery.x = x;
 		x -= spacing;
 	}
+
+	/* Terminal-info label: centered in the free span between the left
+	 * group (tags/steam/net/tray) and the right group.  x is now the
+	 * left edge of the leftmost right-side module minus spacing. */
+	if (m->statusbar.terminfo.tree) {
+		int w = m->statusbar.terminfo.width;
+		int right_start = x + spacing;
+
+		if (right_start > m->statusbar.area.width)
+			right_start = m->statusbar.area.width;
+		if (w > 0 && right_start - left_end >= w) {
+			int tx = left_end + (right_start - left_end - w) / 2;
+			wlr_scene_node_set_position(
+					&m->statusbar.terminfo.tree->node, tx, 0);
+			m->statusbar.terminfo.x = tx;
+			wlr_scene_node_set_enabled(
+					&m->statusbar.terminfo.tree->node, 1);
+		} else {
+			wlr_scene_node_set_enabled(
+					&m->statusbar.terminfo.tree->node, 0);
+		}
+	}
+
 	if (m->statusbar.cpu_popup.tree) {
 		if (m->statusbar.cpu.width > 0 && m->statusbar.area.height > 0) {
 			int popup_x = m->statusbar.cpu.x;
@@ -5501,6 +5465,7 @@ initstatusbar(Monitor *m)
 		m->statusbar.traylabel.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.traylabel.tree)
 			m->statusbar.traylabel.bg = wlr_scene_tree_create(m->statusbar.traylabel.tree);
+		m->statusbar.terminfo.tree = wlr_scene_tree_create(m->statusbar.tree);
 		m->statusbar.steam.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.steam.tree)
 			m->statusbar.steam.bg = wlr_scene_tree_create(m->statusbar.steam.tree);

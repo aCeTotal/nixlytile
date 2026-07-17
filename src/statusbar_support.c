@@ -20,6 +20,7 @@ StatusRefreshTask status_tasks[STATUS_TASKS_COUNT] = {
 	{ refreshstatusnet, 0 },
 	{ refreshstatusicons, 0 },
 	{ refreshstatusfan, 0 },
+	{ refreshstatusterminfo, 0 },
 };
 int status_rng_seeded;
 const double status_icon_scale = 2.0;
@@ -170,9 +171,7 @@ char mic_text[32] = "--%";
 double volume_last_speaker_percent = 70.0;
 double volume_last_headset_percent = 70.0;
 double speaker_active = -1.0;
-double speaker_stored = 70.0;
 double microphone_active = -1.0;
-double microphone_stored = 80.0;
 char volume_text[32] = "--%";
 int volume_muted = -1;
 int mic_muted = -1;
@@ -1436,7 +1435,6 @@ apply_startup_defaults(void)
 
 	if (set_pipewire_volume(speaker_default) == 0) {
 		speaker_active = speaker_default;
-		speaker_stored = speaker_default;
 		volume_last_speaker_percent = speaker_default;
 		volume_last_headset_percent = speaker_default;
 	}
@@ -1467,7 +1465,6 @@ apply_startup_defaults(void)
 
 			if (set_pipewire_mic_volume(mic_default) == 0) {
 				microphone_active = mic_default;
-				microphone_stored = mic_default;
 				mic_last_percent = mic_default;
 			}
 		}

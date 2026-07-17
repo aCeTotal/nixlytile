@@ -372,6 +372,22 @@ commitnotify(struct wl_listener *listener, void *data)
 	if (c->anim_active)
 		return;
 
+	/* Refresh the surface clip when the xdg window-geometry OFFSET
+	 * changes without a size change.  Chrome drops its CSD shadow
+	 * margin when it acks fullscreen: geometry goes (10,11)→(0,0) but
+	 * the buffer stays monitor-sized, so resize()'s no-change fast-path
+	 * never re-runs and a stale clip keeps cropping the shadow-less
+	 * buffer — visible as a wallpaper strip at the top/left of
+	 * fullscreen video.  Column tiles are excluded (their clip is owned
+	 * by client_clip_to_usable).  wlroots dedups equal clip boxes, so
+	 * this is free on the common no-change commit. */
+	if (!c->column && c->scene_surface) {
+		struct wlr_box fresh_clip;
+		client_get_clip(c, &fresh_clip);
+		wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node,
+				&fresh_clip);
+	}
+
 	/* For tiled clients in a tiling layout, use the geometry from btrtile
 	 * (stored in old_geom) to ensure proper tiling. This prevents clients
 	 * from appearing at their initial centered position before the layout
@@ -564,6 +580,10 @@ focusclient(Client *c, int lift)
 		}
 	}
 	printstatus();
+
+	/* Statusbar terminal-info follows keyboard focus (shows/hides and
+	 * swaps cwd/ssh context immediately on focus change). */
+	trigger_status_task_now(refreshstatusterminfo);
 
 	if (!c) {
 		/* With no client, all we have left is to clear focus */
@@ -1372,6 +1392,9 @@ unset_fullscreen:
 	 * fullscreen / unmanaged / floating (Niri only animates tiles). */
 	if (!client_is_unmanaged(c) && !c->isfullscreen && !c->isfloating)
 		client_start_open_anim(c);
+
+	/* Launch cover: a game/launcher window mapped — schedule reveal. */
+	launchfx_client_mapped(c);
 }
 
 void
@@ -1876,8 +1899,10 @@ setfullscreen(Client *c, int fullscreen)
 		 * apply_console_mode stays (user-intentional). */
 		int _is_retro = is_retro_emulator_client(c);
 		int _is_browser = is_browser_client(c);
-		int _is_game = (is_game_content(c) || client_wants_tearing(c))
-				&& !_is_browser;
+		/* looks_like_game: protocol hints + Steam/Proton detection, so
+		 * Xwayland games (no content-type, no tearing hint when vsynced)
+		 * still get VRR.  Browsers/retro/Steam-UI excluded inside. */
+		int _is_game = looks_like_game(c);
 		/* VRR (adaptive sync) only for games — their variable frame
 		 * times are what VRR exists to smooth.  Fullscreen video and
 		 * browsers are constant-rate: the content-driven cadence path
@@ -1910,6 +1935,7 @@ setfullscreen(Client *c, int fullscreen)
 		c->frame_time_count = 0;
 		c->detected_video_hz = 0.0f;
 		c->last_buffer = NULL;
+		c->game_last_buffer = NULL;
 		c->video_detect_retries = 0;
 		c->video_detect_phase = 0;
 		if (!_is_retro) {

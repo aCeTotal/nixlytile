@@ -265,6 +265,7 @@ adjust_backlight_by_steps(int steps)
 int
 adjust_volume_by_steps(int steps)
 {
+	static uint64_t last_adjust_ms;
 	double vol;
 	int is_headset;
 	uint64_t now;
@@ -273,13 +274,24 @@ adjust_volume_by_steps(int steps)
 		return 0;
 
 	is_headset = pipewire_sink_is_headset();
-	volume_invalidate_cache(is_headset); /* force fresh read if needed */
 
-	vol = speaker_active >= 0.0 ? speaker_active : volume_last_for_type(is_headset);
+	/* First notch of a gesture: base on the REAL system volume — apps
+	 * and hotkeys change it behind our back, and stepping from a stale
+	 * cache makes the level jump.  During a rapid gesture trust the
+	 * locally accumulated value instead of forking wpctl per notch. */
+	now = monotonic_msec();
+	if (now - last_adjust_ms > 1000) {
+		volume_invalidate_cache(is_headset);
+		vol = pipewire_volume_percent(&is_headset);
+	} else {
+		vol = speaker_active >= 0.0 ? speaker_active
+				: volume_last_for_type(is_headset);
+	}
 	if (vol < 0.0)
 		vol = pipewire_volume_percent(&is_headset);
 	if (vol < 0.0)
 		return 0;
+	last_adjust_ms = now;
 
 	if (volume_muted == 1) {
 		set_pipewire_mute(0);
@@ -309,18 +321,26 @@ adjust_volume_by_steps(int steps)
 int
 adjust_mic_by_steps(int steps)
 {
+	static uint64_t last_adjust_ms;
 	double vol;
 	double target;
+	uint64_t now;
 
 	if (steps == 0)
 		return 0;
 
+	/* Same fresh-base-per-gesture policy as adjust_volume_by_steps. */
+	now = monotonic_msec();
 	mic_last_read_ms = 0;
-	vol = microphone_active >= 0.0 ? microphone_active : mic_last_percent;
+	if (now - last_adjust_ms > 1000)
+		vol = pipewire_mic_volume_percent();
+	else
+		vol = microphone_active >= 0.0 ? microphone_active : mic_last_percent;
 	if (vol < 0.0)
 		vol = pipewire_mic_volume_percent();
 	if (vol < 0.0)
 		return 0;
+	last_adjust_ms = now;
 
 	if (mic_muted == 1) {
 		set_pipewire_mic_mute(0);
@@ -467,13 +487,21 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 			if (it->w > 0 && local >= it->x && local < it->x + it->w) {
 				int sx = m->statusbar.area.x + tray->x + it->x;
 				int sy = m->statusbar.area.y + m->statusbar.area.height;
-				/* Left or right click → compositor-rendered dbusmenu
-				 * dropdown under the icon; fall back to the item's own
-				 * Activate/ContextMenu if the app exposes no dbusmenu. */
-				if ((button == BTN_LEFT || button == BTN_RIGHT) &&
-						tray_menu_open_at(m, it, tray->x + it->x + it->w / 2))
+				/* Right click → compositor-rendered dbusmenu dropdown
+				 * under the icon; fall back to the item's own
+				 * ContextMenu if the app exposes no dbusmenu.  Left
+				 * click → SNI Activate so the app raises its window;
+				 * menu-only items (no Activate) fall back to the
+				 * dropdown. */
+				if (button == BTN_RIGHT) {
+					if (tray_menu_open_at(m, it, tray->x + it->x + it->w / 2))
+						return 1;
+					tray_item_activate(it, button, 1, sx, sy);
 					return 1;
-				tray_item_activate(it, button, button == BTN_RIGHT, sx, sy);
+				}
+				if (tray_item_activate(it, button, 0, sx, sy) != 0 &&
+						button == BTN_LEFT)
+					tray_menu_open_at(m, it, tray->x + it->x + it->w / 2);
 				return 1;
 			}
 		}

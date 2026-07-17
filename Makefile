@@ -28,7 +28,7 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            gamemode.o client_utils.o gpu.o draw.o layer.o workspace.o anim.o \
            dwl_ipc.o dwl-ipc-unstable-v2-protocol.o window_ipc.o \
            config_parser.o config_loader.o apptoggle.o \
-           statusbar.o tray.o statusbar_support.o diag.o
+           statusbar.o tray.o statusbar_support.o terminfo.o launchfx.o diag.o
 
 PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstable-v1-protocol.h \
              $(SRC)/wlr-layer-shell-unstable-v1-protocol.h $(SRC)/wlr-output-power-management-unstable-v1-protocol.h \
@@ -87,6 +87,10 @@ statusbar.o: $(SRC)/statusbar.c $(SRC)/nixlytile.h $(SRC)/client.h
 tray.o: $(SRC)/tray.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 statusbar_support.o: $(SRC)/statusbar_support.c $(SRC)/nixlytile.h $(SRC)/client.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+terminfo.o: $(SRC)/terminfo.c $(SRC)/nixlytile.h $(SRC)/client.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+launchfx.o: $(SRC)/launchfx.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 dwl-ipc-unstable-v2-protocol.o: $(SRC)/dwl-ipc-unstable-v2-protocol.c
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<

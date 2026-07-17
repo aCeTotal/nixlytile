@@ -1788,7 +1788,7 @@ tray_first_item(void)
 	return wl_container_of(tray_items.next, sample, link);
 }
 
-__attribute__((unused)) void
+int
 tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y)
 {
 	const char *method;
@@ -1800,7 +1800,7 @@ tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y)
 	int r = -1;
 
 	if (!tray_bus || !it)
-		return;
+		return -1;
 	if (context_menu)
 		method = "ContextMenu";
 	else if (button == BTN_MIDDLE)
@@ -1819,7 +1819,7 @@ tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y)
 			r = sd_bus_call_method(tray_bus, it->service, item_path,
 					ifaces[i], method, NULL, NULL, "ii", x, y);
 			if (r >= 0)
-				return;
+				return 0;
 		}
 		/* If bus is broken, try to re-init once */
 		if (r == -EBADFD || r == -EPIPE || r == -ENOTCONN) {
@@ -1832,6 +1832,7 @@ tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y)
 	}
 	wlr_log(WLR_ERROR, "tray: %s %s failed on %s%s: %s",
 			method, it->service, item_path, it->path[0] ? "" : "(null)", strerror(-r));
+	return -1;
 }
 
 void

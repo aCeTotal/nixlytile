@@ -59,6 +59,58 @@ set_cpu_governor(const char *governor)
 		wlr_log(WLR_INFO, "CPU governor: %s (%d cores)", governor, count);
 }
 
+/* Pre-launch boost: launchfx detects the Steam Play press seconds
+ * before any window exists.  Raising the governor immediately makes
+ * Proton setup / shader compilation / asset load run at full clock;
+ * ultra game mode takes ownership when the game window maps. */
+static int prelaunch_boost_active;
+
+void
+game_prelaunch_boost(void)
+{
+	if (prelaunch_boost_active)
+		return;
+	prelaunch_boost_active = 1;
+	set_cpu_governor("performance");
+}
+
+void
+game_prelaunch_release(void)
+{
+	if (!prelaunch_boost_active)
+		return;
+	prelaunch_boost_active = 0;
+	/* Ultra game mode owns the governor while active — don't fight it.
+	 * Only restore when the launch never reached game mode (abort). */
+	if (!game_mode_ultra && !game_mode_governor_applied)
+		set_cpu_governor("schedutil");
+}
+
+/* Apply nice + ioprio to every thread of a process (both are per-task
+ * on Linux; the TGID-leader calls in apply/restore_game_priority miss
+ * threads spawned before game mode engaged). */
+static void
+game_priority_all_threads(pid_t pid, int nice_val, int ioprio)
+{
+	char task_dir[64];
+	DIR *d;
+	struct dirent *ent;
+
+	snprintf(task_dir, sizeof(task_dir), "/proc/%d/task", pid);
+	d = opendir(task_dir);
+	if (!d)
+		return;
+	while ((ent = readdir(d))) {
+		pid_t tid;
+		if (ent->d_name[0] < '0' || ent->d_name[0] > '9')
+			continue;
+		tid = (pid_t)atoi(ent->d_name);
+		setpriority(PRIO_PROCESS, tid, nice_val);
+		syscall(__NR_ioprio_set, IOPRIO_WHO_PROCESS, tid, ioprio);
+	}
+	closedir(d);
+}
+
 void
 apply_game_priority(pid_t pid)
 {
@@ -92,6 +144,16 @@ apply_game_priority(pid_t pid)
 		wlr_log(WLR_INFO, "Game priority: ioprio_set failed for PID %d: %s",
 			pid, strerror(errno));
 	}
+
+	/*
+	 * Linux nice and ioprio are PER-TASK: the calls above only hit the
+	 * thread-group leader, so a game's render/RHI/audio threads (spawned
+	 * before game mode engaged) would keep nice 0 / default ioprio.
+	 * Walk /proc/PID/task so every thread gets the boost — same pattern
+	 * as set_process_affinity_all_threads.
+	 */
+	game_priority_all_threads(pid, -10,
+		IOPRIO_PRIO_VALUE(IOPRIO_CLASS_RT, 0));
 
 	/*
 	 * Protect game from OOM killer by lowering its OOM score.
@@ -136,6 +198,9 @@ restore_game_priority(pid_t pid)
 		game_mode_ioclass_applied = 0;
 		wlr_log(WLR_INFO, "Game priority: restored ioprio BE/4 for PID %d", pid);
 	}
+
+	/* Per-thread restore, mirroring the per-thread apply */
+	game_priority_all_threads(pid, 0, IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 4));
 
 	/* Restore OOM score to 0 (normal) */
 	if (game_mode_oom_applied) {
@@ -3132,7 +3197,23 @@ stats_panel_refresh_cb(void *data)
 	snprintf(line, sizeof(line), "  Status:");
 	tray_render_label(&mod, line, padding, y_offset + line_height, label_color);
 	if (fps_limit_enabled) {
-		snprintf(line, sizeof(line), "ON (%d FPS)", fps_limit_value);
+		/* Fixed refresh snaps the cap to the nearest vblank divisor
+		 * (see the vblank-locked limiter in rendermon) — show the
+		 * rate the game actually gets. */
+		float snap_hz = 0.0f;
+		if (!m->game_vrr_active && m->present_interval_ns > 0)
+			snap_hz = 1000000000.0f / (float)m->present_interval_ns;
+		else if (!m->game_vrr_active && m->wlr_output->current_mode)
+			snap_hz = (float)m->wlr_output->current_mode->refresh / 1000.0f;
+		if (snap_hz >= 30.0f) {
+			int n = (int)roundf(snap_hz / (float)fps_limit_value);
+			if (n < 1)
+				n = 1;
+			snprintf(line, sizeof(line), "ON (%d → %.0f FPS)",
+				fps_limit_value, snap_hz / (float)n);
+		} else {
+			snprintf(line, sizeof(line), "ON (%d FPS)", fps_limit_value);
+		}
 		tray_render_label(&mod, line, col2_x, y_offset + line_height, warn_color);
 	} else {
 		snprintf(line, sizeof(line), "OFF");

@@ -2529,6 +2529,7 @@ setup(void)
 	diag_timer = wl_event_loop_add_timer(event_loop, diag_timer_cb, NULL);
 	stall_watch_start();
 	gm_bg_init();
+	launchfx_init();
 
 	/* ── embedded status bar + system tray (replaces waybar) ────────── */
 	wl_list_init(&tray_items);

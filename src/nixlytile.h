@@ -483,7 +483,7 @@ typedef struct {
 	uint64_t next_due_ms;
 } StatusRefreshTask;
 
-#define STATUS_TASKS_COUNT 9
+#define STATUS_TASKS_COUNT 10
 
 #define FAN_MAX_DEVICES   8
 #define FAN_MAX_PER_DEV   6
@@ -596,6 +596,7 @@ struct StatusBar {
 	StatusModule tags;
 	StatusModule traylabel;
 	StatusModule steam;
+	StatusModule terminfo;
 	CpuPopup cpu_popup;
 	RamPopup ram_popup;
 	BatteryPopup battery_popup;
@@ -961,6 +962,10 @@ typedef struct {
 	int frame_time_count;
 	float detected_video_hz;
 	struct wlr_buffer *last_buffer;
+	/* Separate change-tracker for the game frame-pacing path: last_buffer
+	 * is consumed by video detection at commit time (commitnotify), so
+	 * rendermon needs its own pointer to see the same buffer change. */
+	struct wlr_buffer *game_last_buffer;
 	int video_detect_retries;
 	int video_detect_phase;
 	struct wlr_ext_foreign_toplevel_handle_v1 *foreign_toplevel_handle;
@@ -1252,6 +1257,7 @@ struct Monitor {
 	uint64_t total_latency_ns;
 	uint64_t fps_limit_last_frame_ns;
 	uint64_t fps_limit_interval_ns;
+	int fps_limit_vblank_count;   /* vblank-locked limiter: vblanks since release */
 	int frame_repeat_enabled;
 	int frame_repeat_count;
 	int frame_repeat_current;
@@ -1283,6 +1289,7 @@ struct Monitor {
 	int memory_pressure;
 	int supports_10bit;
 	int render_10bit_active;
+	int game_dropped_10bit;   /* 10-bit dropped for game scanout; restore on exit */
 	int scene_build_failures;
 	/* Commit failure throttle — break infinite retry-loops when the
 	 * kernel refuses a buffer format/modifier (e.g. 10-bit Y-tiled CCS
@@ -1756,9 +1763,7 @@ extern char mic_text[32];
 extern double volume_last_speaker_percent;
 extern double volume_last_headset_percent;
 extern double speaker_active;
-extern double speaker_stored;
 extern double microphone_active;
-extern double microphone_stored;
 extern char volume_text[32];
 extern int volume_muted;
 extern int mic_muted;
@@ -2329,6 +2334,8 @@ void refreshstatuscpu(void);
 void refreshstatusram(void);
 void refreshstatusicons(void);
 void refreshstatusfan(void);
+void refreshstatusterminfo(void);   /* terminfo.c */
+int is_terminal_client(Client *c);  /* terminfo.c */
 void refreshstatustags(void);
 void refreshworkspacemodule(Monitor *m);
 void init_status_refresh_tasks(void);
@@ -2337,6 +2344,7 @@ uint32_t random_status_delay_ms(void);
 double volume_last_for_type(int is_headset);
 void volume_cache_store(int is_headset, double level, int muted, uint64_t now);
 int status_should_render(StatusModule *module, int barh, const char *text);
+void clearstatusmodule(StatusModule *module);
 void initial_status_refresh(void);
 void schedule_status_timer(void);
 void schedule_next_status_refresh(void);
@@ -2472,7 +2480,7 @@ void tray_remove_item(const char *service);
 int tray_name_owner_changed(sd_bus_message *m, void *userdata, sd_bus_error *ret_error);
 void tray_init(void);
 TrayItem *tray_first_item(void);
-void tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y);
+int tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y);
 
 /* network.c */
 void vpn_connections_clear(void);
@@ -2650,6 +2658,13 @@ int bt_device_signal_cb(sd_bus_message *m, void *userdata, sd_bus_error *error);
 
 /* gamemode.c */
 void update_game_mode(void);
+void game_prelaunch_boost(void);
+void game_prelaunch_release(void);
+
+/* launchfx.c */
+void launchfx_init(void);
+void launchfx_client_mapped(Client *c);
+void launchfx_game_ready(void);
 void schedule_game_mode_update(void);
 void gm_bg_init(void);
 void gm_bg_cleanup(void);

@@ -1643,7 +1643,8 @@ classify_fullscreen_content(Monitor *m, int *out_game, int *out_video, int *out_
 			if (video_now != m->classify_cache_video) {
 				m->classify_cache_video = video_now;
 				m->classify_cache_tearing =
-					m->classify_cache_game && !video_now;
+					m->classify_cache_game && !video_now
+					&& client_wants_tearing(c);
 			}
 		}
 		*out_game = m->classify_cache_game;
@@ -1663,13 +1664,19 @@ classify_fullscreen_content(Monitor *m, int *out_game, int *out_video, int *out_
 		 * focustop still returns it) — classifying it as video/game
 		 * would drive the cadence/hold path while the desktop is
 		 * showing.
-		 * Browsers never take the game path (tearing flips, game VRR,
-		 * frame-repeat) even if they set a tearing hint — fullscreen
-		 * YouTube is video, not a game. */
-		*out_game = (client_wants_tearing(c) || is_game_content(c))
-				&& !is_browser_client(c);
+		 * looks_like_game covers protocol hints (content-type GAME,
+		 * tearing ASYNC) AND Steam/Proton detection — Xwayland games
+		 * never set content-type, and a vsynced Proton game sets no
+		 * tearing hint either, so protocol hints alone left every such
+		 * game without VRR/frame pacing.  Browsers, retro emulators and
+		 * Steam UI are excluded inside looks_like_game.
+		 * Tearing (async pageflips) only when the client REQUESTED it
+		 * via the tearing-control ASYNC hint — gamescope does the same;
+		 * forcing async flips on vsynced games just adds visible tearing
+		 * with none of the latency benefit the game asked for. */
+		*out_game = looks_like_game(c);
 		*out_video = is_video_content(c) || c->detected_video_hz > 0.0f;
-		if (*out_game && !*out_video)
+		if (*out_game && !*out_video && client_wants_tearing(c))
 			*out_tearing = 1;
 	}
 
@@ -1686,8 +1693,8 @@ track_game_frame_pacing(Monitor *m, uint64_t frame_start_ns)
 	if (m->game_frame_submit_ns > 0 && frame_start_ns > m->game_frame_submit_ns) {
 		uint64_t game_interval = frame_start_ns - m->game_frame_submit_ns;
 
-		/* Only track reasonable intervals (8ms - 100ms = ~10-120fps) */
-		if (game_interval > 8000000 && game_interval < 100000000) {
+		/* Only track reasonable intervals (3ms - 100ms = ~10-333fps) */
+		if (game_interval > 3000000 && game_interval < 100000000) {
 			m->game_frame_intervals[m->game_frame_interval_idx] = game_interval;
 			m->game_frame_interval_idx = (m->game_frame_interval_idx + 1) % 16;
 			if (m->game_frame_interval_count < 16)
@@ -2457,6 +2464,37 @@ rendermon(struct wl_listener *listener, void *data)
 
 	classify_fullscreen_content(m, &is_game, &is_video, &allow_tearing);
 
+	/* A 10-bit render format is a direct-scanout blocker: the game's
+	 * 8-bit client buffer doesn't match the 10-bit swapchain, so wlroots
+	 * falls back to GPU composition every frame.  Scanout is the single
+	 * biggest win for game latency/pacing — drop to 8-bit while a
+	 * fullscreen game is up and restore 10-bit when it leaves.  Games
+	 * render 8-bit anyway, so nothing is lost visually. */
+	if (is_game && m->render_10bit_active) {
+		struct wlr_output_state fmt;
+		wlr_output_state_init(&fmt);
+		wlr_output_state_set_render_format(&fmt, DRM_FORMAT_XRGB8888);
+		if (m->wlr_output->current_mode)
+			wlr_output_state_set_mode(&fmt, m->wlr_output->current_mode);
+		if (wlr_output_test_state(m->wlr_output, &fmt) &&
+				wlr_output_commit_state(m->wlr_output, &fmt)) {
+			m->render_10bit_active = 0;
+			m->game_dropped_10bit = 1;
+			wlr_log(WLR_INFO,
+				"Dropped 10-bit render on %s for game direct scanout",
+				m->wlr_output->name);
+		}
+		wlr_output_state_finish(&fmt);
+	} else if (!is_game && m->game_dropped_10bit) {
+		m->game_dropped_10bit = 0;
+		enable_10bit_rendering(m);
+	}
+
+	/* Launch cover reveal: a fullscreen game is classified on this
+	 * monitor — the content the user is waiting for is on screen. */
+	if (is_game)
+		launchfx_game_ready();
+
 	/* ── Diagnostic heartbeat (diag.c → /tmp/nixlytile-diag.log) ──────────
 	 * Once per second per monitor: dump render state + per-interval counters,
 	 * and if a fullscreen client is up but nothing reaches the screen, emit a
@@ -2782,8 +2820,25 @@ rendermon(struct wl_listener *listener, void *data)
 				m->wlr_output->name);
 		}
 		use_frame_pacing = 1;
-		if (needs_frame)
-			track_game_frame_pacing(m, frame_start_ns);
+		/* Only sample the pacing tracker when the game actually
+		 * submitted a NEW buffer.  Fullscreen content is exempt from
+		 * the idle gate, so this code runs every vblank — feeding
+		 * every pass into the tracker measured the vblank interval
+		 * instead of the game's frame interval (estimated_game_fps
+		 * pinned at display Hz → frame-repeat never engaged; at 144 Hz
+		 * the 6.9 ms vblank fell under the interval filter and FPS was
+		 * never estimated at all).  Buffer-pointer comparison works for
+		 * both xdg and Xwayland clients, like track_client_frame. */
+		if (needs_frame) {
+			Client *gc = focustop(m);
+			struct wlr_surface *gsurf = gc ? client_surface(gc) : NULL;
+			struct wlr_buffer *gbuf = gsurf
+				? (struct wlr_buffer *)gsurf->buffer : NULL;
+			if (gbuf && gbuf != gc->game_last_buffer) {
+				gc->game_last_buffer = gbuf;
+				track_game_frame_pacing(m, frame_start_ns);
+			}
+		}
 	}
 
 	/* Frame doubling/tripling for smooth low-FPS playback (non-VRR).
@@ -2797,8 +2852,12 @@ rendermon(struct wl_listener *listener, void *data)
 		 * Don't use frame_repeat (delays frame_done) for video -
 		 * the Bresenham cadence handles pacing when active,
 		 * otherwise let the player run freely. */
-	} else if (is_game && m->frame_pacing_active && !m->game_vrr_active && !allow_tearing) {
-		/* Skip recalculation if FPS hasn't changed by more than 2% */
+	} else if (is_game && m->frame_pacing_active && !m->game_vrr_active &&
+			!allow_tearing && !fps_limit_enabled) {
+		/* fps_limit_enabled excluded: the vblank-locked limiter IS the
+		 * pacing then — frame-repeat gating on top would multiply the
+		 * two hold counts (N×N vblanks per frame_done).
+		 * Skip recalculation if FPS hasn't changed by more than 2% */
 		float fps_delta = m->estimated_game_fps - m->frame_repeat_last_fps;
 		if (fps_delta < 0) fps_delta = -fps_delta;
 		if (m->frame_repeat_last_fps <= 0.0f ||
@@ -2850,28 +2909,57 @@ frame_done:
 	 * frame, so controlling this signal controls the framerate.
 	 */
 	if (fps_limit_enabled && fps_limit_value > 0 && is_game) {
-		uint64_t target_interval_ns = 1000000000ULL / (uint64_t)fps_limit_value;
-		uint64_t now_ns = frame_start_ns;
-		uint64_t elapsed_ns = 0;
+		float display_hz = 0.0f;
 
-		if (m->fps_limit_last_frame_ns > 0)
-			elapsed_ns = now_ns - m->fps_limit_last_frame_ns;
+		if (m->present_interval_ns > 0)
+			display_hz = 1000000000.0f / (float)m->present_interval_ns;
+		else if (m->wlr_output->current_mode)
+			display_hz = (float)m->wlr_output->current_mode->refresh / 1000.0f;
 
-		m->fps_limit_interval_ns = target_interval_ns;
+		if (!m->game_vrr_active && !allow_tearing && display_hz >= 30.0f) {
+			/*
+			 * Fixed refresh → vblank-locked release (Steam Deck's
+			 * half-rate vsync): send frame_done every N-th vblank,
+			 * N = round(Hz / cap).  A time-based limiter beats
+			 * against the vblank grid — cap 60 on a 144 Hz panel
+			 * shows frames alternately for 2 and 3 vblanks
+			 * (13.9/20.8 ms = judder).  Counting vblanks gives
+			 * exactly display_hz/N with zero variance; the
+			 * effective cap snaps to the nearest divisor
+			 * (60 on 144 Hz → 72).
+			 */
+			int n = (int)roundf(display_hz / (float)fps_limit_value);
+			if (n < 1)
+				n = 1;
+			m->fps_limit_vblank_count++;
+			if (m->fps_limit_vblank_count < n) {
+				request_frame(m);
+				return;
+			}
+			m->fps_limit_vblank_count = 0;
+		} else {
+			/*
+			 * VRR / tearing: presents aren't vblank-quantized, so a
+			 * time-based release is already even at the exact cap.
+			 */
+			uint64_t target_interval_ns = 1000000000ULL / (uint64_t)fps_limit_value;
+			uint64_t now_ns = frame_start_ns;
+			uint64_t elapsed_ns = 0;
 
-		/*
-		 * If not enough time has passed since last frame_done,
-		 * skip sending frame_done this vblank. The game will
-		 * continue to wait, effectively limiting its framerate.
-		 */
-		if (elapsed_ns < target_interval_ns) {
-			/* Don't send frame_done yet - limiter is active.
-			 * Schedule next vblank so rendermon keeps firing. */
-			request_frame(m);
-			return;
+			if (m->fps_limit_last_frame_ns > 0)
+				elapsed_ns = now_ns - m->fps_limit_last_frame_ns;
+
+			m->fps_limit_interval_ns = target_interval_ns;
+
+			if (elapsed_ns < target_interval_ns) {
+				/* Don't send frame_done yet - limiter is active.
+				 * Schedule next vblank so rendermon keeps firing. */
+				request_frame(m);
+				return;
+			}
+
+			m->fps_limit_last_frame_ns = now_ns;
 		}
-
-		m->fps_limit_last_frame_ns = now_ns;
 	}
 
 	/*
@@ -2937,7 +3025,9 @@ frame_done:
 	 * frame_done to them at ~1 Hz so a render thread blocked on a
 	 * frame callback drains no matter how long it stays hidden.
 	 * Only surfaces that actually requested a callback get one. */
-	if (frame_start_ns - m->hidden_done_ns >= 1000000000ULL) {
+	{
+		int hidden_due =
+			frame_start_ns - m->hidden_done_ns >= 1000000000ULL;
 		Client *hc, *fsc = fullscreen_visible_on(m);
 		wl_list_for_each(hc, &clients, link) {
 			struct wlr_surface *hs;
@@ -2954,13 +3044,26 @@ frame_done:
 					|| (fsc && hc != fsc);
 			if (!starved)
 				continue;
+			/* FROZEN clients drip every vblank, not at 1 Hz: a size
+			 * anim (Mod+F maximize) configures the final size at anim
+			 * start and waits for the client to commit it — but the
+			 * disabled live surface gets no frame callbacks from
+			 * wlroots, so the client won't render the new size until
+			 * a callback arrives.  At 1 Hz the early-unfreeze never
+			 * fires mid-anim and the content visibly lags (or worse:
+			 * on an idle desktop only the 1 Hz heartbeat drives this,
+			 * and a client needing several callbacks to relayout
+			 * looks stuck until a ws switch forces damage). */
+			if (!hc->frozen_buffer && !hidden_due)
+				continue;
 			hs = client_surface(hc);
 			if (!hs || !hs->mapped)
 				continue;
 			wlr_surface_for_each_surface(hs, hidden_frame_done_iter,
 					&now);
 		}
-		m->hidden_done_ns = frame_start_ns;
+		if (hidden_due)
+			m->hidden_done_ns = frame_start_ns;
 	}
 
 	/*
