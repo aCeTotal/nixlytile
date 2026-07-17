@@ -462,7 +462,6 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 	StatusModule *vol = &m->statusbar.volume;
 	StatusModule *cpu = &m->statusbar.cpu;
 	StatusModule *tray = &m->statusbar.traylabel;
-	StatusModule *stm = &m->statusbar.steam;
 
 	if (m->statusbar.cpu_popup.visible) {
 		if (cpu_popup_handle_click(m, lx, ly, button))
@@ -531,14 +530,6 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 			Arg arg = { .v = pavucontrolcmd };
 			spawn(&arg);
 		}
-		return 1;
-	}
-
-	/* Steam module click - focus or launch Steam */
-	if (button == BTN_LEFT &&
-			stm->width > 0 &&
-			lx >= stm->x && lx < stm->x + stm->width) {
-		focus_or_launch_app("steam", "steam");
 		return 1;
 	}
 

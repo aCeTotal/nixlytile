@@ -422,7 +422,7 @@ renderbattery(StatusModule *module, int bar_height, const char *text)
 
 	render_icon_label(module, bar_height, text,
 			ensure_battery_icon_buffer, &battery_icon_buf, &battery_icon_w, &battery_icon_h,
-			status_text_width("100%"), statusbar_icon_text_gap_battery, statusbar_fg);
+			0, statusbar_icon_text_gap_battery, statusbar_fg);
 }
 
 void
@@ -438,7 +438,7 @@ rendervolume(StatusModule *module, int bar_height, const char *text)
 {
 	render_icon_label(module, bar_height, text,
 			ensure_volume_icon_buffer, &volume_icon_buf, &volume_icon_w, &volume_icon_h,
-			status_text_width("100%"), statusbar_icon_text_gap_volume, volume_text_color);
+			0, statusbar_icon_text_gap_volume, volume_text_color);
 }
 
 void
@@ -446,7 +446,7 @@ rendermic(StatusModule *module, int bar_height, const char *text)
 {
 	render_icon_label(module, bar_height, text,
 			ensure_mic_icon_buffer, &mic_icon_buf, &mic_icon_w, &mic_icon_h,
-			status_text_width("100%"), statusbar_icon_text_gap_microphone, mic_text_color);
+			0, statusbar_icon_text_gap_microphone, mic_text_color);
 }
 
 void
@@ -941,130 +941,6 @@ ensure_net_icon_buffer(int target_h)
 		return load_net_icon_buffer(net_icon_no_conn, target_h);
 
 	return -1;
-}
-
-void
-drop_steam_icon_buffer(void)
-{
-	if (steam_icon_buf) {
-		wlr_buffer_drop(steam_icon_buf);
-		steam_icon_buf = NULL;
-	}
-	steam_icon_loaded_h = 0;
-	steam_icon_loaded_path[0] = '\0';
-	steam_icon_w = 0;
-	steam_icon_h = 0;
-}
-
-int
-load_steam_icon_buffer(const char *path, int target_h)
-{
-	GError *gerr = NULL;
-	struct wlr_buffer *buf;
-	int w = 0, h = 0;
-	GdkPixbuf *pixbuf = NULL;
-	char resolved[PATH_MAX];
-	const char *load_path = path;
-
-	if (!path || !*path || target_h <= 0)
-		return -1;
-
-	if (resolve_asset_path(path, resolved, sizeof(resolved)) == 0)
-		load_path = resolved;
-
-	if (tray_load_svg_pixbuf(load_path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(load_path, &gerr);
-		if (!pixbuf) {
-			if (gerr) {
-				wlr_log(WLR_ERROR, "steam icon: failed to load '%s': %s", load_path, gerr->message);
-				g_error_free(gerr);
-			}
-			return -1;
-		}
-	}
-
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-
-	drop_steam_icon_buffer();
-	steam_icon_buf = buf;
-	steam_icon_w = w;
-	steam_icon_h = h;
-	steam_icon_loaded_h = target_h;
-	snprintf(steam_icon_loaded_path, sizeof(steam_icon_loaded_path), "%s", load_path);
-	return 0;
-}
-
-int
-ensure_steam_icon_buffer(int target_h)
-{
-	if (target_h <= 0)
-		return -1;
-
-	if (steam_icon_buf && steam_icon_loaded_h == target_h &&
-			strncmp(steam_icon_loaded_path, steam_icon_path, sizeof(steam_icon_loaded_path)) == 0)
-		return 0;
-
-	return load_steam_icon_buffer(steam_icon_path, target_h);
-}
-
-void
-rendersteam(Monitor *m, int bar_height)
-{
-	StatusModule *module;
-	int padding, target_h, icon_x, icon_y, base_h;
-	struct wlr_scene_buffer *scene_buf;
-
-	if (!m || !m->statusbar.steam.tree)
-		return;
-
-	module = &m->statusbar.steam;
-	clearstatusmodule(module);
-	module->width = 0;
-	module->x = 0;
-
-	/* Only show if Steam process is running */
-	steam_running = is_process_running("steam");
-	if (!steam_running) {
-		wlr_scene_node_set_enabled(&module->tree->node, 0);
-		return;
-	}
-
-	padding = statusbar_module_padding / 2;
-	if (padding < 1)
-		padding = 1;
-	base_h = bar_height - 2 * padding;
-	target_h = (int)lround(base_h * 1.5);
-	if (target_h > bar_height)
-		target_h = bar_height;
-	if (target_h <= 0)
-		target_h = bar_height - padding;
-	if (target_h <= 0)
-		target_h = 1;
-
-	if (ensure_steam_icon_buffer(target_h) != 0 || !steam_icon_buf ||
-			steam_icon_w <= 0 || steam_icon_h <= 0) {
-		wlr_scene_node_set_enabled(&module->tree->node, 0);
-		return;
-	}
-
-	module->width = steam_icon_w + 2 * padding;
-	if (module->width < steam_icon_w)
-		module->width = steam_icon_w;
-
-	updatemodulebg(module, module->width, bar_height, statusbar_bg);
-
-	scene_buf = wlr_scene_buffer_create(module->tree, NULL);
-	if (scene_buf) {
-		int usable_w = module->width - 2 * padding;
-		icon_x = padding + MAX(0, (usable_w - steam_icon_w) / 2);
-		icon_y = MAX(0, (bar_height - steam_icon_h) / 2);
-		wlr_scene_buffer_set_buffer(scene_buf, steam_icon_buf);
-		wlr_scene_node_set_position(&scene_buf->node, icon_x, icon_y);
-	}
-
-	wlr_scene_node_set_enabled(&module->tree->node, module->width > 0);
 }
 
 /* Render the SNI system-tray items (real icons) into the traylabel module.
@@ -3934,10 +3810,6 @@ positionstatusmodules(Monitor *m)
 			wlr_scene_node_set_enabled(&m->statusbar.traylabel.tree->node, 0);
 			m->statusbar.traylabel.x = 0;
 		}
-		if (m->statusbar.steam.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.steam.tree->node, 0);
-			m->statusbar.steam.x = 0;
-		}
 		if (m->statusbar.tray_menu.tree) {
 			wlr_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 0);
 			m->statusbar.tray_menu.visible = 0;
@@ -3995,9 +3867,6 @@ positionstatusmodules(Monitor *m)
 	if (m->statusbar.terminfo.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.terminfo.tree->node,
 				m->statusbar.terminfo.width > 0);
-	if (m->statusbar.steam.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.steam.tree->node,
-				m->statusbar.steam.width > 0);
 	if (m->statusbar.cpu.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.cpu.tree->node,
 				m->statusbar.cpu.width > 0);
@@ -4033,12 +3902,6 @@ positionstatusmodules(Monitor *m)
 		wlr_scene_node_set_position(&m->statusbar.tags.tree->node, x, 0);
 		m->statusbar.tags.x = x;
 		x += m->statusbar.tags.width + spacing;
-	}
-	/* Group connection-related icons together with minimal spacing */
-	if (m->statusbar.steam.width > 0) {
-		wlr_scene_node_set_position(&m->statusbar.steam.tree->node, x, 0);
-		m->statusbar.steam.x = x;
-		x += m->statusbar.steam.width + 2;
 	}
 	if (m->statusbar.net.width > 0) {
 		wlr_scene_node_set_position(&m->statusbar.net.tree->node, x, 0);
@@ -4284,16 +4147,13 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 	 * and their own text; their refresh paths (2 s cpu tick, 45 s icon
 	 * tick, volume/net events) re-render on content change, so a full
 	 * re-rasterization here on EVERY arrangelayers (each layer-surface
-	 * commit!) — including the is_process_running() /proc walks in
-	 * rendersteam — is wasted work unless the height
+	 * commit!) is wasted work unless the height
 	 * changed or the bar was just re-shown. */
 	renderworkspaces(m, &m->statusbar.tags, bar_area.height);
 	if (m->statusbar.last_layout_h != bar_area.height) {
 		m->statusbar.last_layout_h = bar_area.height;
 		if (m->statusbar.traylabel.tree)
 			rendertray(m, bar_area.height);
-		if (m->statusbar.steam.tree)
-			rendersteam(m, bar_area.height);
 		if (m->statusbar.cpu.tree)
 			rendercpu(&m->statusbar.cpu, bar_area.height, cpu_text);
 		if (m->statusbar.net.tree)
@@ -4828,8 +4688,6 @@ refreshstatusicons(void)
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
 		if (m->statusbar.traylabel.tree)
 			rendertray(m, barh);
-		if (m->statusbar.steam.tree)
-			rendersteam(m, barh);
 		positionstatusmodules(m);
 	}
 }
@@ -5073,6 +4931,12 @@ updatestatuscpu(void *data)
 				delay_ms = 1000;
 		}
 		status_tasks[chosen].next_due_ms = now + delay_ms;
+	} else if (status_tasks[chosen].fn == refreshstatusterminfo
+			&& terminfo_wants_fast_poll()) {
+		/* Focused terminal: repoll /proc quickly so cwd/ssh changes
+		 * show up without a focus round-trip.  Render only happens
+		 * when the text actually changes (status_should_render). */
+		status_tasks[chosen].next_due_ms = now + 500;
 	} else if (status_task_hover_active(status_tasks[chosen].fn)) {
 		status_tasks[chosen].next_due_ms = now + STATUS_FAST_MS;
 	} else {
@@ -5466,9 +5330,6 @@ initstatusbar(Monitor *m)
 		if (m->statusbar.traylabel.tree)
 			m->statusbar.traylabel.bg = wlr_scene_tree_create(m->statusbar.traylabel.tree);
 		m->statusbar.terminfo.tree = wlr_scene_tree_create(m->statusbar.tree);
-		m->statusbar.steam.tree = wlr_scene_tree_create(m->statusbar.tree);
-		if (m->statusbar.steam.tree)
-			m->statusbar.steam.bg = wlr_scene_tree_create(m->statusbar.steam.tree);
 		m->statusbar.tray_menu.tree = wlr_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.tray_menu.tree) {
 			m->statusbar.tray_menu.bg = wlr_scene_tree_create(m->statusbar.tray_menu.tree);

@@ -595,7 +595,6 @@ struct StatusBar {
 	StatusModule ram;
 	StatusModule tags;
 	StatusModule traylabel;
-	StatusModule steam;
 	StatusModule terminfo;
 	CpuPopup cpu_popup;
 	RamPopup ram_popup;
@@ -1832,8 +1831,6 @@ extern char volume_icon_path[PATH_MAX];
 extern char volume_icon_loaded_path[PATH_MAX];
 extern char clock_icon_path[PATH_MAX];
 extern char clock_icon_loaded_path[PATH_MAX];
-extern char steam_icon_path[PATH_MAX];
-extern char steam_icon_loaded_path[PATH_MAX];
 extern int net_icon_loaded_h, net_icon_w, net_icon_h;
 extern struct wlr_buffer *net_icon_buf;
 extern int clock_icon_loaded_h, clock_icon_w, clock_icon_h;
@@ -1850,9 +1847,6 @@ extern int mic_icon_loaded_h, mic_icon_w, mic_icon_h;
 extern struct wlr_buffer *mic_icon_buf;
 extern int volume_icon_loaded_h, volume_icon_w, volume_icon_h;
 extern struct wlr_buffer *volume_icon_buf;
-extern int steam_icon_loaded_h, steam_icon_w, steam_icon_h;
-extern struct wlr_buffer *steam_icon_buf;
-extern int steam_running;
 extern char fan_icon_path[PATH_MAX];
 extern char fan_icon_loaded_path[PATH_MAX];
 extern int fan_icon_loaded_h, fan_icon_w, fan_icon_h;
@@ -2336,6 +2330,7 @@ void refreshstatusicons(void);
 void refreshstatusfan(void);
 void refreshstatusterminfo(void);   /* terminfo.c */
 int is_terminal_client(Client *c);  /* terminfo.c */
+int terminfo_wants_fast_poll(void); /* terminfo.c */
 void refreshstatustags(void);
 void refreshworkspacemodule(Monitor *m);
 void init_status_refresh_tasks(void);
@@ -2367,7 +2362,6 @@ void drop_clock_icon_buffer(void);
 int ensure_mic_icon_buffer(int target_h);
 void drop_mic_icon_buffer(void);
 void drop_net_icon_buffer(void);
-void drop_steam_icon_buffer(void);
 void init_net_icon_paths(void);
 int ensure_volume_icon_buffer(int target_h);
 void drop_volume_icon_buffer(void);

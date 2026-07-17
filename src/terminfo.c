@@ -167,6 +167,31 @@ terminfo_collect(Client *c, char *out, size_t n)
 	}
 }
 
+/* The terminal that actually holds keyboard focus.  Not focustop(): in
+ * workspace mode every client matches VISIBLEON (tagset is static), so
+ * focustop keeps returning the terminal after switching to an empty
+ * workspace even though its keyboard focus was cleared. */
+static Client *
+focused_terminal(void)
+{
+	struct wlr_surface *surf = seat ? seat->keyboard_state.focused_surface : NULL;
+	Client *c = NULL;
+
+	if (!surf)
+		return NULL;
+	toplevel_from_wlr_surface(surf, &c, NULL);
+	if (c && !c->isfullscreen && is_terminal_client(c) &&
+			client_surface(c) && client_surface(c)->mapped)
+		return c;
+	return NULL;
+}
+
+int
+terminfo_wants_fast_poll(void)
+{
+	return focused_terminal() != NULL;
+}
+
 static void
 renderterminfo(StatusModule *module, int bar_height, const char *text)
 {
@@ -199,9 +224,8 @@ refreshstatusterminfo(void)
 	int barh;
 
 	text[0] = '\0';
-	c = selmon ? focustop(selmon) : NULL;
-	if (c && !c->isfullscreen && is_terminal_client(c) &&
-			client_surface(c) && client_surface(c)->mapped)
+	c = focused_terminal();
+	if (c)
 		terminfo_collect(c, text, sizeof(text));
 
 	wl_list_for_each(m, &mons, link) {
