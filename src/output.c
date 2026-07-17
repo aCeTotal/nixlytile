@@ -1971,6 +1971,12 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 		apply_pending_hdr_state(m, state);
 
 	int hdr_commit_ok = 0;
+	/* Clear errno so a commit that fails BEFORE any syscall (e.g. a
+	 * wlroots pre-flight reject logged only at DEBUG) reads as errno=0
+	 * instead of a stale EAGAIN from the event loop — the stale value
+	 * misclassified a permanent reject as "transient pageflip stuck"
+	 * and locked fullscreen video at 1 fps. */
+	errno = 0;
 	if (!wlr_output_commit_state(m->wlr_output, state)) {
 		/* drmModeAtomicCommit sets errno on the failing atomic commit;
 		 * capture it before any wlr_log/retry clobbers it so the real
@@ -1998,6 +2004,7 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 				m->vrr_pending = 0;
 				m->vrr_pending_tries = 0;
 			}
+			errno = 0;
 			committed = wlr_output_commit_state(m->wlr_output, state);
 			if (!committed)
 				commit_errno = errno;
@@ -2005,6 +2012,7 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 
 		if (!committed && allow_tearing) {
 			state->tearing_page_flip = false;
+			errno = 0;
 			committed = wlr_output_commit_state(m->wlr_output, state);
 			if (!committed) {
 				commit_errno = errno;

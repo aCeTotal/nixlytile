@@ -43,7 +43,8 @@ static const uint32_t COMMIT_OUTPUT_STATE =
 	WLR_OUTPUT_STATE_WAIT_TIMELINE |
 	WLR_OUTPUT_STATE_SIGNAL_TIMELINE |
 	WLR_OUTPUT_STATE_COLOR_TRANSFORM |
-	WLR_OUTPUT_STATE_IMAGE_DESCRIPTION;
+	WLR_OUTPUT_STATE_IMAGE_DESCRIPTION |
+	WLR_OUTPUT_STATE_CONTENT_TYPE;
 
 static const uint32_t SUPPORTED_OUTPUT_STATE =
 	WLR_OUTPUT_STATE_BACKEND_OPTIONAL | COMMIT_OUTPUT_STATE;
@@ -830,7 +831,10 @@ static bool drm_connector_prepare(struct wlr_drm_connector_state *conn_state, bo
 
 	uint32_t unsupported = state->committed & ~SUPPORTED_OUTPUT_STATE;
 	if (unsupported != 0) {
-		wlr_log(WLR_DEBUG, "Unsupported output state fields: 0x%"PRIx32,
+		// ERROR not DEBUG: this pre-flight reject fails the commit without
+		// a syscall, so errno is stale and the compositor cannot tell why
+		// the commit failed unless this line is visible in production logs.
+		wlr_log(WLR_ERROR, "Unsupported output state fields: 0x%"PRIx32,
 			unsupported);
 		return false;
 	}
