@@ -1196,6 +1196,28 @@ run(const char *startup_cmd)
 	 * Set up after autostart so it can adopt the spawned nixlymedia pid. */
 	apptoggle_setup();
 
+	/* Always-on responsiveness: elevate the compositor thread so it keeps
+	 * getting CPU even when the machine is saturated (100% load) — input
+	 * and the spring-driven animations stay smooth under any load.  nice
+	 * is orthogonal to the SCHED_RR boost game mode applies: it persists
+	 * whenever the thread runs SCHED_OTHER, giving the responsiveness
+	 * without the lockup risk of always-on hard real-time.  ioprio RT
+	 * keeps compositor I/O (config/sysfs reads) prompt under load too. */
+	{
+#ifndef IOPRIO_CLASS_RT
+#define IOPRIO_CLASS_RT			1
+#define IOPRIO_WHO_PROCESS		1
+#define IOPRIO_PRIO_VALUE(cls, data)	(((cls) << 13) | (data))
+#endif
+		if (setpriority(PRIO_PROCESS, 0, -10) == 0)
+			wlr_log(WLR_INFO, "Compositor nice -10 (always-on responsiveness)");
+		else
+			wlr_log(WLR_INFO, "Compositor nice -10 failed (need CAP_SYS_NICE): %s",
+				strerror(errno));
+		syscall(__NR_ioprio_set, IOPRIO_WHO_PROCESS, 0,
+			IOPRIO_PRIO_VALUE(IOPRIO_CLASS_RT, 4));
+	}
+
 	/* Run the Wayland event loop. This does not return until you exit the
 	 * compositor. Starting the backend rigged up all of the necessary event
 	 * loop configuration to listen to libinput events, DRM events, generate

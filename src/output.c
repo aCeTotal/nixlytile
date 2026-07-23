@@ -2425,6 +2425,28 @@ rendermon(struct wl_listener *listener, void *data)
 	now.tv_sec = frame_start_ns / 1000000000ULL;
 	now.tv_nsec = frame_start_ns % 1000000000ULL;
 
+	/* Per-frame hitch detector.  The MON heartbeat is a 1 Hz aggregate,
+	 * far too coarse to see a single late vblank.  If the PREVIOUS frame
+	 * was mid-animation and this vblank arrives >2.5 nominal frames late,
+	 * that is a visible stutter.  last_commit_duration_ns separates a DRM
+	 * commit stall (large last_commit) from a CPU stall elsewhere
+	 * (large gap, small last_commit → build/apply/keybind work). */
+	{
+		int was_animating = m->anim_was_active;
+		if (was_animating && m->last_frame_ns && m->wlr_output &&
+				m->wlr_output->refresh > 0) {
+			uint64_t nominal = 1000000000ULL /
+				(uint64_t)(m->wlr_output->refresh / 1000);
+			uint64_t gap = frame_start_ns - m->last_frame_ns;
+			if (nominal > 0 && gap > nominal * 5 / 2)
+				diag_logf("ANIMHITCH",
+					"%s gap=%.2fms nominal=%.2fms last_commit=%.2fms",
+					m->wlr_output->name,
+					gap / 1e6, nominal / 1e6,
+					m->last_commit_duration_ns / 1e6);
+		}
+	}
+
 	/* ── Niri-style workspace animation tick ─────────────────────── */
 	{
 		double dt;

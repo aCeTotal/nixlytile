@@ -733,23 +733,34 @@ monitor_anim_tick(Monitor *m, double dt)
 		}
 	}
 
-	/* Two-tier freeze:
-	 *   X11 → freeze on ANY anim.  X11 doesn't use Wayland
-	 *     subsurfaces, so root-buffer snapshot is complete.
-	 *   Wayland → freeze ONLY on size anim.  Browsers (Firefox,
-	 *     Chrome) render content in subsurfaces; root-buffer
-	 *     snapshot drops them and the visible window becomes the
-	 *     bare CSD frame, leaking into adjacent workspaces during
-	 *     a ws-switch slide.  Pure pos anims keep the live surface.
+	/* Freeze policy — live content is the default, snapshot the exception:
+	 *
+	 *   SIZE anim (tile resize, Mod+F fullscreen) → NEVER freeze, any
+	 *     client type.  client_anim_apply scales the LIVE surface into the
+	 *     lerped box every frame (client_scale_to_box, which walks every
+	 *     scene buffer so subsurfaces — browser/Electron video — scale
+	 *     too).  Combined with the final-size configure sent at anim start
+	 *     (client_set_target_geom), content stays live and continuous the
+	 *     whole slide and snaps crisp the instant the client commits the
+	 *     new size — for X11, Electron and native Wayland alike.  No
+	 *     black growing edge: the stale buffer is stretched to fill until
+	 *     the fresh one lands.
+	 *
+	 *   PURE POSITION anim (ws-switch slide) → freeze X11 only.  X11 has
+	 *     no subsurfaces so its root snapshot is complete, and it avoids
+	 *     X11 movement tearing.  Wayland is never frozen (snapshot drops
+	 *     its subsurfaces → CSD frame leaks into the adjacent workspace);
+	 *     its live surface just translates, which needs no content update
+	 *     to look right.
 	 */
-	if (active && !m->anim_was_active)
-		monitor_freeze_clients(m, /*x11=*/1, /*wl=*/0);
-	if (size_anim && !m->size_anim_was_active)
-		monitor_freeze_clients(m, /*x11=*/0, /*wl=*/1);
-	if (!size_anim && m->size_anim_was_active)
-		monitor_unfreeze_clients(m, /*x11=*/0, /*wl=*/1);
-	if (!active && m->anim_was_active)
-		monitor_unfreeze_clients(m, /*x11=*/1, /*wl=*/1);
+	{
+		int pos_only = active && !size_anim;
+		if (pos_only && !m->pos_anim_was_active)
+			monitor_freeze_clients(m, /*x11=*/1, /*wl=*/0);
+		if (!pos_only && m->pos_anim_was_active)
+			monitor_unfreeze_clients(m, /*x11=*/1, /*wl=*/0);
+		m->pos_anim_was_active = pos_only;
+	}
 	m->anim_was_active = active;
 	m->size_anim_was_active = size_anim;
 	return active;

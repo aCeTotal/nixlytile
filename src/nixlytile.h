@@ -1404,6 +1404,7 @@ struct Monitor {
 	uint64_t last_anim_ns;        /* last anim tick timestamp */
 	int anim_was_active;          /* edge-detection: any anim active */
 	int size_anim_was_active;     /* edge-detection: freeze only on SIZE anims */
+	int pos_anim_was_active;      /* edge-detection: X11 freeze on PURE pos anims */
 	/* Spring state for the tile area (m->w).  When a layer-shell
 	 * surface like waybar (de)appears, m->w changes — but stepping
 	 * m->w directly snaps every tile.  Spring it so the edge facing
