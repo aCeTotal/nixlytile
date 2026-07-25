@@ -696,6 +696,8 @@ tray_menu_clear(TrayMenu *menu)
 	menu->x = menu->y = 0;
 	menu->visible = 0;
 	menu->hover = NULL;
+	if (menu->hover_rect)
+		wlr_scene_node_set_enabled(&menu->hover_rect->node, 0);
 	menu->service[0] = '\0';
 	menu->menu_path[0] = '\0';
 
@@ -1104,6 +1106,8 @@ tray_menu_render(Monitor *m)
 	wl_list_for_each_safe(node, tmp, &menu->tree->children, link) {
 		if (menu->bg && node == &menu->bg->node)
 			continue;
+		if (menu->hover_rect && node == &menu->hover_rect->node)
+			continue;
 		wlr_scene_node_destroy(node);
 	}
 
@@ -1150,6 +1154,15 @@ tray_menu_render(Monitor *m)
 	drawrect(menu->bg, 0, 0, menu->width, menu->height, tray_menu_border);
 	drawrect(menu->bg, 1, 1, menu->width - 2, menu->height - 2, tray_menu_bg);
 
+	/* Persistent hover highlight: text nodes are recreated after it each
+	 * render, so it stays below the labels; hover moves it without a
+	 * full re-render. */
+	if (!menu->hover_rect)
+		menu->hover_rect = wlr_scene_rect_create(menu->tree, 1, 1,
+				statusbar_tag_active_bg);
+	if (menu->hover_rect)
+		wlr_scene_node_set_enabled(&menu->hover_rect->node, 0);
+
 	{
 		int y = padding;
 		wl_list_for_each(entry, &menu->entries, link) {
@@ -1167,9 +1180,12 @@ tray_menu_render(Monitor *m)
 				continue;
 			}
 
-			if (entry == menu->hover && entry->enabled)
-				drawrect(menu->tree, 1, y, menu->width - 2, row,
-						statusbar_tag_active_bg);
+			if (entry == menu->hover && entry->enabled && menu->hover_rect) {
+				wlr_scene_rect_set_size(menu->hover_rect,
+						menu->width - 2, row);
+				wlr_scene_node_set_position(&menu->hover_rect->node, 1, y);
+				wlr_scene_node_set_enabled(&menu->hover_rect->node, 1);
+			}
 
 			text[0] = '\0';
 			if (entry->toggle_type == 1) {
@@ -1338,7 +1354,18 @@ tray_menu_update_hover(Monitor *m, double cx, double cy)
 	if (entry == menu->hover)
 		return;
 	menu->hover = entry;
-	tray_menu_render(m);
+	/* Move the persistent highlight rect instead of re-rendering the
+	 * whole menu (glyph buffers per row made that visibly laggy). */
+	if (!menu->hover_rect)
+		return;
+	if (entry) {
+		wlr_scene_rect_set_size(menu->hover_rect,
+				menu->width - 2, entry->height);
+		wlr_scene_node_set_position(&menu->hover_rect->node, 1, entry->y);
+		wlr_scene_node_set_enabled(&menu->hover_rect->node, 1);
+	} else {
+		wlr_scene_node_set_enabled(&menu->hover_rect->node, 0);
+	}
 }
 
 TrayMenuEntry *

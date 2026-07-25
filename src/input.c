@@ -2141,6 +2141,16 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		}
 	}
 
+	/* A visible bar popup/dropdown occludes whatever is beneath it.
+	 * xytonode sees only surfaces, and the popups are scene rects and
+	 * glyph buffers, so without this the client under the popup keeps
+	 * getting pointer focus + motion (hover-highlighting its content
+	 * and eating scroll events while the popup is open). */
+	if (selmon && statusbar_popup_at(selmon, cursor->x, cursor->y)) {
+		c = NULL;
+		surface = NULL;
+	}
+
 	if (cursor_mode == CurPressed && !seat->drag
 			&& surface != seat->pointer_state.focused_surface
 			&& toplevel_from_wlr_surface(seat->pointer_state.focused_surface, &w, &l) >= 0) {

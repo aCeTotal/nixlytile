@@ -951,7 +951,7 @@ rendertray(Monitor *m, int bar_height)
 {
 	StatusModule *module;
 	TrayItem *it;
-	int padding, gap, x, count = 0;
+	int padding, gap, x, slot = 0, count = 0;
 
 	if (!m || !m->statusbar.traylabel.tree)
 		return;
@@ -966,11 +966,10 @@ rendertray(Monitor *m, int bar_height)
 		padding = 1;
 	gap = 4;
 
-	x = padding;
+	/* First pass: load icons and find the widest one.  Every icon is
+	 * centered in an equally wide slot so the spacing between icons is
+	 * identical regardless of individual icon aspect ratios. */
 	wl_list_for_each(it, &tray_items, link) {
-		struct wlr_scene_buffer *scene_buf;
-		int icon_y;
-
 		if (!it->icon_buf) {
 			/* Retry: the item may have registered before its icon
 			 * properties were ready (SNI startup race).  NewIcon
@@ -992,6 +991,15 @@ rendertray(Monitor *m, int bar_height)
 						now_ms + 10000;
 			}
 		}
+		if (it->icon_buf && it->icon_w > slot)
+			slot = it->icon_w;
+	}
+
+	x = padding;
+	wl_list_for_each(it, &tray_items, link) {
+		struct wlr_scene_buffer *scene_buf;
+		int icon_y;
+
 		if (!it->icon_buf || it->icon_w <= 0 || it->icon_h <= 0) {
 			it->x = x;
 			it->w = 0;
@@ -999,13 +1007,14 @@ rendertray(Monitor *m, int bar_height)
 		}
 
 		it->x = x;
-		it->w = it->icon_w + gap;
+		it->w = slot + gap;
 		icon_y = MAX(0, (bar_height - it->icon_h) / 2);
 
 		scene_buf = wlr_scene_buffer_create(module->tree, NULL);
 		if (scene_buf) {
 			wlr_scene_buffer_set_buffer(scene_buf, it->icon_buf);
-			wlr_scene_node_set_position(&scene_buf->node, x, icon_y);
+			wlr_scene_node_set_position(&scene_buf->node,
+					x + (slot - it->icon_w) / 2, icon_y);
 		}
 
 		x += it->w;
@@ -5293,6 +5302,43 @@ updatenethover(Monitor *m, double cx, double cy)
 		p->hover_start_ms = 0;
 		set_status_task_due(refreshstatusnet, now + 60000);
 	}
+}
+
+static int
+popup_contains(Monitor *m, struct wlr_scene_tree *tree, int visible,
+		int w, int h, double cx, double cy)
+{
+	int x0, y0;
+
+	if (!tree || !visible || w <= 0 || h <= 0)
+		return 0;
+	x0 = m->statusbar.area.x + tree->node.x;
+	y0 = m->statusbar.area.y + tree->node.y;
+	return cx >= x0 && cx < x0 + w && cy >= y0 && cy < y0 + h;
+}
+
+/* 1 if (cx,cy) is inside a visible bar popup/dropdown.  Used to stop
+ * pointer focus and motion from leaking to the client underneath. */
+int
+statusbar_popup_at(Monitor *m, double cx, double cy)
+{
+	struct StatusBar *sb;
+
+	if (!m || !m->showbar)
+		return 0;
+	sb = &m->statusbar;
+	return popup_contains(m, sb->tray_menu.tree, sb->tray_menu.visible,
+				sb->tray_menu.width, sb->tray_menu.height, cx, cy)
+		|| popup_contains(m, sb->cpu_popup.tree, sb->cpu_popup.visible,
+				sb->cpu_popup.width, sb->cpu_popup.height, cx, cy)
+		|| popup_contains(m, sb->ram_popup.tree, sb->ram_popup.visible,
+				sb->ram_popup.width, sb->ram_popup.height, cx, cy)
+		|| popup_contains(m, sb->battery_popup.tree, sb->battery_popup.visible,
+				sb->battery_popup.width, sb->battery_popup.height, cx, cy)
+		|| popup_contains(m, sb->net_popup.tree, sb->net_popup.visible,
+				sb->net_popup.width, sb->net_popup.height, cx, cy)
+		|| popup_contains(m, sb->fan_popup.tree, sb->fan_popup.visible,
+				sb->fan_popup.width, sb->fan_popup.height, cx, cy);
 }
 
 int

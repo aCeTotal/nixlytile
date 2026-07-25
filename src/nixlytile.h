@@ -579,6 +579,7 @@ typedef struct {
 	char menu_path[128];
 	struct wl_list entries;
 	TrayMenuEntry *hover;   /* entry under the cursor (hover highlight) */
+	struct wlr_scene_rect *hover_rect; /* persistent highlight; moved on hover */
 } TrayMenu;
 
 struct StatusBar {
@@ -2461,6 +2462,7 @@ void tray_menu_draw_text(struct wlr_scene_tree *tree, const char *text, int x, i
 		int max_w);
 TrayMenuEntry *tray_menu_entry_at(Monitor *m, int lx, int ly);
 void tray_menu_update_hover(Monitor *m, double cx, double cy);
+int statusbar_popup_at(Monitor *m, double cx, double cy);
 int tray_menu_send_event(TrayMenu *menu, TrayMenuEntry *entry, uint32_t time_msec);
 int tray_menu_parse_node(sd_bus_message *msg, TrayMenu *menu, int depth, int max_depth);
 int tray_menu_parse_node_body(sd_bus_message *msg, TrayMenu *menu, int depth, int max_depth);
