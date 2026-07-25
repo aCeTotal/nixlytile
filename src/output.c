@@ -280,6 +280,10 @@ edid_reprobe_cb(void *data)
 	before = m->wlr_output->current_mode;
 	try_reapply_bestmode(m);
 
+	/* EDID that settles late can also bring HDR/deep-color blocks the
+	 * initial probe never saw — re-evaluate caps each reprobe round. */
+	refresh_color_caps(m);
+
 	if (m->wlr_output->current_mode == before) {
 		m->edid_reprobe_stable_rounds++;
 	} else {
@@ -3210,6 +3214,11 @@ requestmonstate(struct wl_listener *listener, void *data)
 
 	try_reapply_bestmode(m);
 
+	/* Late EDID may also have flipped HDR/10-bit capability (UHD Color
+	 * toggled on the TV, full EDID after HDMI handshake). Pick up the
+	 * refreshed wlroots caps and auto-upgrade. */
+	refresh_color_caps(m);
+
 	updatemons(NULL, NULL);
 }
 
@@ -4285,6 +4294,40 @@ enable_10bit_rendering(Monitor *m)
 	return success;
 }
 
+/* Gates for automatic 10-bit enable. Returns 1 when auto 10-bit must be
+ * skipped: secondary GPU (cross-GPU format negotiation), internal panels
+ * (i915 CCS async-flip stall) and Nvidia-primary (XRGB2101010 swapchain
+ * failures). See the comments at the call site in
+ * init_monitor_color_settings for details. */
+static int
+should_skip_auto_10bit(Monitor *m)
+{
+	if (wlr_output_is_drm(m->wlr_output) &&
+	    wlr_drm_backend_get_parent(m->wlr_output->backend)) {
+		wlr_log(WLR_INFO, "Monitor %s is on secondary GPU, "
+			"skipping 10-bit to avoid cross-GPU format issues",
+			m->wlr_output->name);
+		return 1;
+	}
+	if (strncmp(m->wlr_output->name, "eDP", 3) == 0 ||
+	    strncmp(m->wlr_output->name, "LVDS", 4) == 0 ||
+	    strncmp(m->wlr_output->name, "DSI", 3) == 0) {
+		wlr_log(WLR_INFO, "Monitor %s: skipping auto 10-bit on "
+			"internal panel (avoids i915 CCS async-flip stall)",
+			m->wlr_output->name);
+		return 1;
+	}
+	if (discrete_gpu_idx >= 0 &&
+	    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA &&
+	    (integrated_gpu_idx < 0 || nvidia_render_primary)) {
+		wlr_log(WLR_INFO, "Monitor %s: skipping auto 10-bit on "
+			"Nvidia-primary GPU to avoid format issues",
+			m->wlr_output->name);
+		return 1;
+	}
+	return 0;
+}
+
 void
 init_monitor_color_settings(Monitor *m)
 {
@@ -4390,49 +4433,8 @@ init_monitor_color_settings(Monitor *m)
 	 * calls corrupted wlroots' internal atomic state and caused EPERM
 	 * on subsequent mode changes.
 	 */
-	if (m->supports_10bit) {
-		int skip_10bit = 0;
-		if (wlr_output_is_drm(m->wlr_output)) {
-			struct wlr_backend *parent =
-				wlr_drm_backend_get_parent(m->wlr_output->backend);
-			if (parent) {
-				skip_10bit = 1;
-				wlr_log(WLR_INFO, "Monitor %s is on secondary GPU, "
-					"skipping 10-bit to avoid cross-GPU format issues",
-					m->wlr_output->name);
-			}
-		}
-		/* Internal laptop panels (eDP/LVDS/DSI): skip auto 10-bit.
-		 * i915 10-bit needs a Y-tiled CCS modifier for the scanout
-		 * buffer, and async page-flips of that buffer on eDP get stuck
-		 * in the kernel (EAGAIN storm → frozen screen, EPERM on the
-		 * CCS commit). The internal panel gains nothing from 10-bit —
-		 * HDR/wide-gamut is only meaningful on the external TV — so
-		 * gate it off here. External connectors still auto-enable. */
-		if (!skip_10bit &&
-		    (strncmp(m->wlr_output->name, "eDP", 3) == 0 ||
-		     strncmp(m->wlr_output->name, "LVDS", 4) == 0 ||
-		     strncmp(m->wlr_output->name, "DSI", 3) == 0)) {
-			skip_10bit = 1;
-			wlr_log(WLR_INFO, "Monitor %s: skipping auto 10-bit on "
-				"internal panel (avoids i915 CCS async-flip stall)",
-				m->wlr_output->name);
-		}
-		/* Nvidia EGL/GBM may not properly handle XRGB2101010 render
-		 * targets, causing swapchain format failures and black screen.
-		 * Skip auto-enable on Nvidia-primary systems; users can still
-		 * enable 10-bit manually if their setup supports it. */
-		if (!skip_10bit && discrete_gpu_idx >= 0 &&
-		    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA &&
-		    (integrated_gpu_idx < 0 || nvidia_render_primary)) {
-			skip_10bit = 1;
-			wlr_log(WLR_INFO, "Monitor %s: skipping auto 10-bit on "
-				"Nvidia-primary GPU to avoid format issues",
-				m->wlr_output->name);
-		}
-		if (!skip_10bit)
-			enable_10bit_rendering(m);
-	}
+	if (m->supports_10bit && !should_skip_auto_10bit(m))
+		enable_10bit_rendering(m);
 
 	/*
 	 * wlroots 0.20 manages "max bpc" and "Colorspace" DRM connector
@@ -4441,6 +4443,67 @@ init_monitor_color_settings(Monitor *m)
 	 * with legacy drmModeConnectorSetProperty corrupts the internal
 	 * state and causes subsequent mode changes to fail.
 	 */
+}
+
+/* Re-evaluate display color capabilities after the EDID changed underneath
+ * us mid-session — TV woke up, user toggled "UHD Color"/Enhanced HDMI, AVR
+ * finished its handshake. wlroots re-parses the EDID and updates
+ * supported_transfer_functions/supported_primaries; this picks up the new
+ * values without tearing down the Monitor. Unlike init_monitor_color_settings
+ * it must NOT reset live HDR/10-bit state — it only reacts to capability
+ * transitions:
+ *   caps appeared  → auto-enable 10-bit; update_hdr_target enters HDR on the
+ *                    next vblank if a PQ fullscreen client is present
+ *   caps vanished  → queue HDR exit */
+void
+refresh_color_caps(Monitor *m)
+{
+	int secondary_gpu, hdr_now, tenbit_now;
+
+	if (!m || !m->wlr_output || !m->wlr_output->enabled || m->is_mirror)
+		return;
+
+	secondary_gpu = 0;
+	if (wlr_output_is_drm(m->wlr_output) &&
+	    wlr_drm_backend_get_parent(m->wlr_output->backend))
+		secondary_gpu = 1;
+
+	hdr_now = (!secondary_gpu &&
+		(m->wlr_output->supported_transfer_functions &
+			WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ) &&
+		(m->wlr_output->supported_primaries &
+			WLR_COLOR_NAMED_PRIMARIES_BT2020)) ? 1 : 0;
+	tenbit_now = detect_10bit_support(m);
+
+	if (hdr_now == m->hdr_capable && tenbit_now == m->supports_10bit)
+		return;
+
+	wlr_log(WLR_INFO,
+		"Monitor %s: display caps changed — 10-bit %s→%s, HDR %s→%s "
+		"(tf=0x%x primaries=0x%x)",
+		m->wlr_output->name,
+		m->supports_10bit ? "yes" : "no", tenbit_now ? "yes" : "no",
+		m->hdr_capable ? "yes" : "no", hdr_now ? "yes" : "no",
+		m->wlr_output->supported_transfer_functions,
+		m->wlr_output->supported_primaries);
+
+	m->supports_10bit = tenbit_now;
+	m->hdr_capable = hdr_now;
+
+	if (!hdr_now && m->hdr_active && !m->hdr_exit_pending)
+		m->hdr_exit_pending = 1;
+
+	/* New EDID may carry new connector props (fresh HDMI handshake) —
+	 * re-assert full-range RGB so blacks stay black. Idempotent. */
+	force_hdmi_full_range(m);
+
+	/* Upgrade to 10-bit scanout right away when it just became possible.
+	 * enable_10bit_rendering itself test-commits and falls back to 8-bit,
+	 * and refuses to touch the format while HDR owns it. Don't fight the
+	 * game path — restore happens when the game exits. */
+	if (m->supports_10bit && !m->render_10bit_active &&
+	    !m->game_dropped_10bit && !should_skip_auto_10bit(m))
+		enable_10bit_rendering(m);
 }
 
 void

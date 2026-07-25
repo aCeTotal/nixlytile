@@ -2257,6 +2257,7 @@ int set_drm_color_properties(Monitor *m, int max_bpc);
 int enable_10bit_rendering(Monitor *m);
 void force_hdmi_full_range(Monitor *m);
 void init_monitor_color_settings(Monitor *m);
+void refresh_color_caps(Monitor *m);
 void update_game_vrr(Monitor *m, float current_fps);
 void enable_game_vrr(Monitor *m);
 void disable_game_vrr(Monitor *m);
