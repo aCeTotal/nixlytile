@@ -3100,6 +3100,25 @@ frame_done:
 	 * need to know a vblank occurred for proper timing.
 	 */
 	wlr_scene_output_send_frame_done(m->scene_output, &now);
+
+	/*
+	 * Fullscreen video/game: keep the vblank chain alive unconditionally.
+	 *
+	 * The chain otherwise dies on the first vblank where build_state has
+	 * no new content (no commit → no pageflip → no next frame event).
+	 * Restart then depends on client damage scheduling a frame — but the
+	 * video subsurface sits BELOW the (translucent) UI parent surface and
+	 * its damage does not reliably schedule one.  Measured result: the
+	 * compositor latched only ~4-5 of nixlymedia's 24 video commits/s
+	 * (the UI heartbeat rate), discarding the rest — video on glass at
+	 * ~5 fps with varying cadence, while the app-side stats looked
+	 * healthy.  The good state (every video frame latched) only engaged
+	 * when something else happened to keep rendermon self-sustaining.
+	 * Cost: rendermon runs at refresh rate while fullscreen video/game
+	 * is up — same behaviour the is_video idle-gate exemption above
+	 * already intends. */
+	if (is_video || is_game)
+		request_frame(m);
 }
 
 void

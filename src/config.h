@@ -5,16 +5,17 @@
                         (hex & 0xFF) / 255.0f }
 
 /* Runtime configurable variables - these can be overridden by config file */
-/* appearance */
-int sloppyfocus               = 1;  /* focus follows mouse */
-int bypass_surface_visibility = 0;  /* 1 means idle inhibitors will disable idle tracking even if it's surface isn't visible  */
-int smartgaps                 = 0;  /* 1 means no outer gap when there is only one window */
-int gaps                      = 1;  /* 1 means gaps between windows are added */
-unsigned int gappx            = 5;  /* gap pixel between windows */
-unsigned int borderpx         = 1;  /* border pixel of windows */
+/* appearance — match Niri config:
+ *   gaps 4, border off, focus-ring width 1 #00beff active / #595959 inactive */
+int sloppyfocus               = 1;  /* focus-follows-mouse (Niri) */
+int bypass_surface_visibility = 0;
+int smartgaps                 = 0;
+int gaps                      = 1;
+unsigned int gappx            = 4;  /* Niri: gaps 4 */
+unsigned int borderpx         = 1;  /* Niri: focus-ring width 1 (border off) */
 float rootcolor[]             = COLOR(0x222222ff);
-float bordercolor[]           = COLOR(0x444444ff);
-float focuscolor[]            = COLOR(0x005577ff);
+float bordercolor[]           = COLOR(0x595959ff); /* Niri inactive */
+float focuscolor[]            = COLOR(0x00beffff); /* Niri active */
 float urgentcolor[]           = COLOR(0xff0000ff);
 unsigned int statusbar_height = 26;
 unsigned int statusbar_module_spacing = 10;
@@ -103,23 +104,20 @@ const MonitorRule monrules[] = {
 	{ NULL,       0.55f, 1,      1,    &layouts[0], WL_OUTPUT_TRANSFORM_NORMAL,   -1,  -1 },
 };
 
-/* keyboard */
+/* keyboard — match Niri input { keyboard { xkb { layout "no" } } } */
 const struct xkb_rule_names xkb_rules = {
-	/* can specify fields: rules, model, layout, variant, options */
-	/* example:
-	.options = "ctrl:nocaps",
-	*/
+	.layout = "no",
 	.options = NULL,
 };
 
-int repeat_delay = 250;
-int repeat_rate = 60;
+int repeat_delay = 300;   /* Niri: repeat-delay 300 */
+int repeat_rate = 100;    /* Niri: repeat-rate 100 */
 
-/* Trackpad */
+/* Trackpad — match Niri touchpad { tap; natural-scroll } */
 int tap_to_click = 1;
 int tap_and_drag = 1;
 int drag_lock = 1;
-int natural_scrolling = 0;
+int natural_scrolling = 1; /* Niri: natural-scroll */
 int disable_while_typing = 1;
 int left_handed = 0;
 int middle_button_emulation = 0;
@@ -167,174 +165,129 @@ enum libinput_config_tap_button_map button_map = LIBINPUT_CONFIG_TAP_MAP_LRM;
 unsigned int modkey = WLR_MODIFIER_LOGO;
 unsigned int monitorkey = WLR_MODIFIER_CTRL;
 
-#define TAGKEYS(KEY,SKEY,TAG) \
-	{ MODKEY,                    KEY,            view,            {.ui = 1 << TAG} }, \
-	{ MODKEY|WLR_MODIFIER_CTRL,  KEY,            toggleview,      {.ui = 1 << TAG} }, \
-	{ MODKEY|WLR_MODIFIER_SHIFT, KEY,            tag,             {.ui = 1 << TAG} }, \
-	{ MODKEY|WLR_MODIFIER_CTRL|WLR_MODIFIER_SHIFT,KEY,toggletag,  {.ui = 1 << TAG} }
-
-/* Move focused tile to monitor by number (0-indexed) */
-#define MONITORKEYS(KEY,MONNUM) \
-	{ MONITORKEY|WLR_MODIFIER_SHIFT, KEY, tagtomonitornum, {.ui = MONNUM} }
-
 /* helper for spawning shell commands in the pre dwm-5.0 fashion */
 #define SHCMD(cmd) { .v = (const char*[]){ "/bin/sh", "-c", cmd, NULL } }
 
-/* commands - can be overridden by config file */
+/* commands — match Niri spawn-at-startup + binds */
 const char *termcmd[] = { "foot", NULL };
 const char *alacrittycmd[] = { "alacritty", NULL };
 const char *btopcmd[] = { "alacritty", "-e", "btop", NULL };
-/* Chromium-family browsers: force native Wayland (Ozone) instead of
- * XWayland.  XWayland-managed Chrome triggers a buffer rebuild + jumpy
- * geometry update every time the compositor commits a new configure
- * (tile resize, neighbour move, workspace switch) because XWayland
- * proxies all configures through XSetWMNormalHints and Chrome reflows.
- * Native Wayland surfaces accept configures directly and only reflow
- * when their own renderer is ready. */
-const char *bravecmd[] __attribute__((unused)) = {
-	"brave",
-	"--ozone-platform-hint=auto",
-	"--enable-features=UseOzonePlatform,WaylandWindowDecorations",
-	NULL
-};
-const char *chromecmd[] = {
-	"google-chrome-stable",
-	"--ozone-platform-hint=auto",
-	"--enable-features=UseOzonePlatform,WaylandWindowDecorations",
-	NULL
-};
-const char *nixlylaunchercmd[] = { "apptoggle", NULL };
-const char *menucmd[] __attribute__((unused)) = { "wmenu-run", NULL };
+const char *chromecmd[] = { "google-chrome-stable", NULL };
+const char *dolphincmd[] = { "dolphin", NULL };
+const char *fuzzelcmd[] = { "fuzzel", NULL };
+const char *apptogglecmd[] = { "apptoggle", NULL };
+const char *lockcmd[] = { "nixly-lockscreen", NULL };
 const char *netcmd[] = { "nm-connection-editor", NULL };
 const char *pavucontrolcmd[] = { "pavucontrol", NULL };
 const char *screenshotcmd[] = { "grimshot", "copy", "area", NULL };
 const char *screenshotscreencmd[] = { "grimshot", "copy", "output", NULL };
-const char *thunarcmd[] = { "thunar", NULL };
 
 /* Wallpaper path - can be overridden by config file */
 char wallpaper_path[PATH_MAX] = "$HOME/.nixlyos/wallpapers/beach.jpg";
 
-/* Startup command run when no -s is provided.  waybar is replaced by the
- * built-in embedded status bar + system tray, so it is no longer spawned. */
+/* Startup matches Niri spawn-at-startup list.  Waybar uses the
+ * nixlytile-specific config (dwl/tags + matching style.css). */
 char autostart_cmd[4096] =
-	"eval $(gnome-keyring-daemon --start --components=secrets,ssh,pkcs11) & "
-	"thunar --daemon & "
+	"swaybg -i \"$HOME/.nixlyos/wallpapers/beach.jpg\" -m fill & "
+	"\"$HOME/.local/bin/niri-set-max-mode.sh\" --watch & "
+	"waybar <&- & "
 	"nm-applet --indicator & "
 	"blueman-applet & "
-	"swaybg -i \"$HOME/.nixlyos/wallpapers/beach.jpg\" -m fill";
-
-/* Maximum number of runtime keybindings */
-#define MAX_KEYS 256
-#define MAX_SPAWN_CMD 512
+	"xwayland-satellite & "
+	"sh -c 'wl-paste --type text --watch clipman store --no-persist' & "
+	"sh -c 'wl-paste --primary --type text --watch clipman store --no-persist' & "
+	"appd & "
+	"nixly_steam -silent";
 
 /* Runtime spawn commands - can be set from config */
 char spawn_cmd_terminal[MAX_SPAWN_CMD] = "foot";
 char spawn_cmd_terminal_alt[MAX_SPAWN_CMD] = "alacritty";
-char spawn_cmd_browser[MAX_SPAWN_CMD] = "brave";
-char spawn_cmd_filemanager[MAX_SPAWN_CMD] = "thunar";
-char spawn_cmd_launcher[MAX_SPAWN_CMD] = "wmenu-run";
+char spawn_cmd_browser[MAX_SPAWN_CMD] = "google-chrome-stable";
+char spawn_cmd_filemanager[MAX_SPAWN_CMD] = "dolphin";
+char spawn_cmd_launcher[MAX_SPAWN_CMD] = "fuzzel";
 
 /* Runtime keybindings array - populated at startup */
 Key runtime_keys[MAX_KEYS];
 size_t runtime_keys_count = 0;
 
-/* Default keybindings — Niri-style: vertical workspaces, horizontal columns.
- *   Mod+H/L         focus column left/right
- *   Mod+J/K         focus workspace down/up (vertical scroll)
- *   Mod+Shift+H/L   move focused column left/right
- *   Mod+Shift+J/K   move focused client to workspace below/above
- *   Mod+Q           kill window
- *   Mod+Return      spawn terminal
- *   Mod+F           toggle fullscreen
- *   Mod+Space       toggle floating
- *   Mod+Shift+Q     quit compositor
- */
+/* Niri-matching keybindings (from ~/.config/niri/config.kdl) */
 const Key default_keys[] = {
+	/* Window management */
+	{ MODKEY,                    XKB_KEY_q,          killclient,        {0} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Q,          quit,              {0} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_space,      togglefloating,    {0} },
+	{ MODKEY,                    XKB_KEY_c,          togglefloating,    {0} },
+	{ MODKEY,                    XKB_KEY_f,          maximize_column,   {0} },
+	{ MODKEY,                    XKB_KEY_b,          togglestatusbar,   {0} },
+
+	/* Focus navigation */
+	{ MODKEY,                    XKB_KEY_h,          focus_column_dir,            {.i = -1} },
+	{ MODKEY,                    XKB_KEY_l,          focus_column_dir,            {.i = +1} },
+	{ MODKEY,                    XKB_KEY_j,          focus_window_in_column_dir,  {.i = +1} },
+	{ MODKEY,                    XKB_KEY_k,          focus_window_in_column_dir,  {.i = -1} },
+	{ MODKEY,                    XKB_KEY_Left,       focus_column_dir,            {.i = -1} },
+	{ MODKEY,                    XKB_KEY_Right,      focus_column_dir,            {.i = +1} },
+	{ MODKEY,                    XKB_KEY_Up,         focus_workspace_dir,         {.i = -1} },
+	{ MODKEY,                    XKB_KEY_Down,       focus_workspace_dir,         {.i = +1} },
+
+	/* Window movement */
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_H,          move_column_dir,             {.i = -1} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_L,          move_column_dir,             {.i = +1} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_J,          move_window_in_column_dir,   {.i = +1} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_K,          move_window_in_column_dir,   {.i = -1} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Left,       move_column_dir,             {.i = -1} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Right,      move_column_dir,             {.i = +1} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Up,         move_window_in_column_dir,   {.i = -1} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Down,       move_window_in_column_dir,   {.i = +1} },
+
+	/* Column width / consume / expel */
+	{ MODKEY,                    XKB_KEY_r,          switch_preset_column_width,  {0} },
+	{ MODKEY,                    XKB_KEY_a,          swap_window_dir,             {.i = -1} },
+	{ MODKEY,                    XKB_KEY_d,          swap_window_dir,             {.i = +1} },
+	{ MODKEY,                    XKB_KEY_x,          expel_window_from_column,    {0} },
+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Left,       switch_preset_column_width,  {0} },
+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Right,      switch_preset_column_width,  {0} },
+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Up,         center_column,               {0} },
+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Down,       maximize_column,             {0} },
+
+	/* Applications */
 	{ MODKEY,                    XKB_KEY_Return,     spawn,          {.v = alacrittycmd} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Return,     spawn,          {.v = termcmd} },
-	{ MODKEY,                    XKB_KEY_e,          spawn,          {.v = thunarcmd} },
+	{ MODKEY,                    XKB_KEY_p,          spawn,          {.v = apptogglecmd} },
+	{ MODKEY,                    XKB_KEY_g,          spawn,          {.v = fuzzelcmd} },
+	{ MODKEY,                    XKB_KEY_i,          spawn,          {.v = fuzzelcmd} },
+	{ MODKEY,                    XKB_KEY_e,          spawn,          {.v = dolphincmd} },
+	{ MODKEY,                    XKB_KEY_Escape,     spawn,          {.v = lockcmd} },
+	{ MODKEY,                    XKB_KEY_F12,        spawn,          {.v = lockcmd} },
 	{ MODKEY,                    XKB_KEY_BackSpace,  spawn,          {.v = chromecmd} },
-	{ MODKEY,                    XKB_KEY_p,          spawn,          {.v = nixlylaunchercmd} },
-
-	/* Screenshot — mark & copy region (Mod+s / Print), full screen (Shift+Print) */
 	{ MODKEY,                    XKB_KEY_s,          spawn,          {.v = screenshotcmd} },
 	{ 0,                         XKB_KEY_Print,      spawn,          {.v = screenshotcmd} },
 	{ WLR_MODIFIER_SHIFT,        XKB_KEY_Print,      spawn,          {.v = screenshotscreencmd} },
 
-	/* Column focus (horizontal scroll within workspace) */
-	{ MODKEY,                    XKB_KEY_h,          focus_column_dir,    {.i = -1} },
-	{ MODKEY,                    XKB_KEY_l,          focus_column_dir,    {.i = +1} },
-	{ MODKEY,                    XKB_KEY_Left,       focus_column_dir,    {.i = -1} },
-	{ MODKEY,                    XKB_KEY_Right,      focus_column_dir,    {.i = +1} },
+	/* Workspaces */
+	{ MODKEY,                    XKB_KEY_1,          focus_workspace_n, {.i = 0} },
+	{ MODKEY,                    XKB_KEY_2,          focus_workspace_n, {.i = 1} },
+	{ MODKEY,                    XKB_KEY_3,          focus_workspace_n, {.i = 2} },
+	{ MODKEY,                    XKB_KEY_4,          focus_workspace_n, {.i = 3} },
+	{ MODKEY,                    XKB_KEY_5,          focus_workspace_n, {.i = 4} },
+	{ MODKEY,                    XKB_KEY_6,          focus_workspace_n, {.i = 5} },
+	{ MODKEY,                    XKB_KEY_7,          focus_workspace_n, {.i = 6} },
+	{ MODKEY,                    XKB_KEY_8,          focus_workspace_n, {.i = 7} },
+	{ MODKEY,                    XKB_KEY_9,          focus_workspace_n, {.i = 8} },
+	{ MODKEY,                    XKB_KEY_0,          focus_workspace_n, {.i = 9} },
 
-	/* Workspace focus (vertical scroll between workspaces) */
-	{ MODKEY,                    XKB_KEY_k,          focus_workspace_dir, {.i = -1} },
-	{ MODKEY,                    XKB_KEY_j,          focus_workspace_dir, {.i = +1} },
-	{ MODKEY,                    XKB_KEY_Up,         focus_workspace_dir, {.i = -1} },
-	{ MODKEY,                    XKB_KEY_Down,       focus_workspace_dir, {.i = +1} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_1,          move_client_to_ws_n, {.i = 0} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_2,          move_client_to_ws_n, {.i = 1} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_3,          move_client_to_ws_n, {.i = 2} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_4,          move_client_to_ws_n, {.i = 3} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_5,          move_client_to_ws_n, {.i = 4} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_6,          move_client_to_ws_n, {.i = 5} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_7,          move_client_to_ws_n, {.i = 6} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_8,          move_client_to_ws_n, {.i = 7} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_9,          move_client_to_ws_n, {.i = 8} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_0,          move_client_to_ws_n, {.i = 9} },
 
-	/* Mod+Tab — toggle between two most recently used workspaces */
-	{ MODKEY,                    XKB_KEY_Tab,        focus_last_workspace, {0} },
-
-	/* Move column left/right */
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_H,          move_column_dir,     {.i = -1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_L,          move_column_dir,     {.i = +1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Left,       move_column_dir,     {.i = -1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Right,      move_column_dir,     {.i = +1} },
-
-	/* Resize focused tile.  Up = grow, Down = shrink.  Both edges that
-	 * touch a neighbour move outward (grow) or inward (shrink); edges
-	 * at the screen border stay locked. */
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Up,         resize_column_dir,   {.i = +1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Down,       resize_column_dir,   {.i = -1} },
-
-	/* Move client to workspace above/below (vim-style keys retained;
-	 * arrows are taken over by resize above) */
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_K,          move_client_to_ws_dir, {.i = -1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_J,          move_client_to_ws_dir, {.i = +1} },
-
-	/* Window state */
-	{ MODKEY,                    XKB_KEY_q,          killclient,        {0} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_C,          killclient,        {0} },
-	/* Mod+F = Niri-style column-expand (just width, navigation preserved)
-	 * Mod+Shift+F = real Wayland fullscreen (for games / direct scanout) */
-	{ MODKEY,                    XKB_KEY_f,          toggle_column_fullscreen, {0} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_F,          togglefullscreen,  {0} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_space,      togglefloating,    {0} },
-	{ MODKEY,                    XKB_KEY_c,          togglefloating,    {0} },
-	{ MODKEY,                    XKB_KEY_b,          togglestatusbar,   {0} },
-
-	/* Multi-monitor */
-	{ MODKEY,                    XKB_KEY_comma,      focusmon,       {.i = WLR_DIRECTION_LEFT} },
-	{ MODKEY,                    XKB_KEY_period,     focusmon,       {.i = WLR_DIRECTION_RIGHT} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_less,       tagmon,         {.i = WLR_DIRECTION_LEFT} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_greater,    tagmon,         {.i = WLR_DIRECTION_RIGHT} },
-
-	/* Numbered workspace switch (Mod+1..9 = workspace 0..8).
-	 * Mod+Shift+1..9 = move focused window to that workspace. */
-	{ MODKEY,                    XKB_KEY_1,          focus_workspace_n,    {.i = 0} },
-	{ MODKEY,                    XKB_KEY_2,          focus_workspace_n,    {.i = 1} },
-	{ MODKEY,                    XKB_KEY_3,          focus_workspace_n,    {.i = 2} },
-	{ MODKEY,                    XKB_KEY_4,          focus_workspace_n,    {.i = 3} },
-	{ MODKEY,                    XKB_KEY_5,          focus_workspace_n,    {.i = 4} },
-	{ MODKEY,                    XKB_KEY_6,          focus_workspace_n,    {.i = 5} },
-	{ MODKEY,                    XKB_KEY_7,          focus_workspace_n,    {.i = 6} },
-	{ MODKEY,                    XKB_KEY_8,          focus_workspace_n,    {.i = 7} },
-	{ MODKEY,                    XKB_KEY_9,          focus_workspace_n,    {.i = 8} },
-
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_1,          move_client_to_ws_n,  {.i = 0} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_2,          move_client_to_ws_n,  {.i = 1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_3,          move_client_to_ws_n,  {.i = 2} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_4,          move_client_to_ws_n,  {.i = 3} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_5,          move_client_to_ws_n,  {.i = 4} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_6,          move_client_to_ws_n,  {.i = 5} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_7,          move_client_to_ws_n,  {.i = 6} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_8,          move_client_to_ws_n,  {.i = 7} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_9,          move_client_to_ws_n,  {.i = 8} },
-
-	/* Alt + H/J/K/L or arrows: move tile within current workspace.
-	 * Alt+H/Left, Alt+L/Right shift the focused column horizontally.
-	 * Alt+K/Up,   Alt+J/Down move the focused window within its column. */
+	/* Alt + H/J/K/L or arrows: move tile within current workspace. */
 	{ WLR_MODIFIER_ALT,          XKB_KEY_h,          move_column_dir,            {.i = -1} },
 	{ WLR_MODIFIER_ALT,          XKB_KEY_l,          move_column_dir,            {.i = +1} },
 	{ WLR_MODIFIER_ALT,          XKB_KEY_Left,       move_column_dir,            {.i = -1} },
@@ -344,26 +297,13 @@ const Key default_keys[] = {
 	{ WLR_MODIFIER_ALT,          XKB_KEY_Up,         move_window_in_column_dir,  {.i = -1} },
 	{ WLR_MODIFIER_ALT,          XKB_KEY_Down,       move_window_in_column_dir,  {.i = +1} },
 
-	/* Quit compositor */
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Q,          quit,           {0} },
+	{ MODKEY,                    XKB_KEY_Tab,        focus_last_workspace, {0} },
 
-	/* Monitor navigation: CTRL + arrow keys to warp cursor to monitor */
-	{ MONITORKEY,                XKB_KEY_Up,         warptomonitor,  {.i = WLR_DIRECTION_UP} },
-	{ MONITORKEY,                XKB_KEY_Down,       warptomonitor,  {.i = WLR_DIRECTION_DOWN} },
-	{ MONITORKEY,                XKB_KEY_Left,       warptomonitor,  {.i = WLR_DIRECTION_LEFT} },
-	{ MONITORKEY,                XKB_KEY_Right,      warptomonitor,  {.i = WLR_DIRECTION_RIGHT} },
+	/* Monitor navigation */
+	{ MODKEY,                    XKB_KEY_comma,      focusmon,       {.i = WLR_DIRECTION_LEFT} },
+	{ MODKEY,                    XKB_KEY_period,     focusmon,       {.i = WLR_DIRECTION_RIGHT} },
 
-	/* Move tile to monitor: CTRL + Shift + monitor number */
-	MONITORKEYS(XKB_KEY_exclam,     0),  /* Ctrl+Shift+1 -> monitor 0 */
-	MONITORKEYS(XKB_KEY_at,         1),  /* Ctrl+Shift+2 -> monitor 1 */
-	MONITORKEYS(XKB_KEY_numbersign, 2),  /* Ctrl+Shift+3 -> monitor 2 */
-	MONITORKEYS(XKB_KEY_dollar,     3),  /* Ctrl+Shift+4 -> monitor 3 */
-
-	/* Ctrl-Alt-Backspace and Ctrl-Alt-Fx used to be handled by X server */
 	{ WLR_MODIFIER_CTRL|WLR_MODIFIER_ALT,XKB_KEY_Terminate_Server, quit, {0} },
-	/* Ctrl-Alt-Fx is used to switch to another VT, if you don't know what a VT is
-	 * do not remove them.
-	 */
 #define CHVT(n) { WLR_MODIFIER_CTRL|WLR_MODIFIER_ALT,XKB_KEY_XF86Switch_VT_##n, chvt, {.ui = (n)} }
 	CHVT(1), CHVT(2), CHVT(3), CHVT(4), CHVT(5), CHVT(6),
 	CHVT(7), CHVT(8), CHVT(9), CHVT(10), CHVT(11), CHVT(12),
