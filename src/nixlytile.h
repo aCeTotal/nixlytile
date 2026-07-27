@@ -399,6 +399,9 @@ struct StatusModule {
 	 * on monitors 2..N stale forever. */
 	char last_render_text[64];
 	int last_render_h;
+	/* workspace-row dedup (tags module): hash of everything the row
+	 * draws, so an unchanged row is never re-rasterized. */
+	uint64_t render_sig;
 };
 
 typedef struct {

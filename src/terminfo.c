@@ -231,7 +231,7 @@ refreshstatusterminfo(void)
 	wl_list_for_each(m, &mons, link) {
 		const char *t = (m == selmon) ? text : "";
 
-		if (!m->statusbar.terminfo.tree || !m->showbar)
+		if (!m->statusbar.terminfo.tree)
 			continue;
 		/* Hidden and staying hidden: skip — status_should_render
 		 * treats a cached empty string as "always render". */

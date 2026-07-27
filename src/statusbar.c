@@ -2578,6 +2578,9 @@ renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 	int x, count = 0, pos = -1;
 	struct wlr_scene_buffer *scene_buf;
 	struct wlr_buffer *buffer;
+	struct { int tag; int active; } shown[TAGCOUNT];
+	int shown_count = 0, n;
+	uint64_t sig;
 
 	if (!m || !module || !module->tree)
 		return;
@@ -2591,31 +2594,20 @@ renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 	spacing = statusbar_workspace_spacing;
 	/* give the module a little extra padding so bg extends past boxes */
 	outer_pad = padding + spacing + 6;
-	module->box_count = 0;
-	module->tagmask = 0;
 	if (module->hover_tag < -1 || module->hover_tag >= TAGCOUNT)
 		module->hover_tag = -1;
 
-	clearstatusmodule(module);
-
 	box_h = MAX(1, MIN(bar_height - 2, statusfont.height + inner * 2 + 2));
 	box_y = (bar_height - box_h) / 2;
-	x = outer_pad;
 
 	/* One box per Niri-style workspace, in stack order.  Shown when the
 	 * workspace has content (tiles or a fullscreen client) or is active.
 	 * box_tag stores the workspace's position in m->workspaces. */
 	wl_list_for_each(ws, &m->workspaces, link) {
-		const struct fcft_glyph *glyph;
-		int min_x, max_x, min_y, max_y;
-		int text_w, text_h, box_w;
-		int origin_x, origin_y;
-		const float *bgcol;
-		int active, occupied, i;
+		int active, occupied;
 
 		if (++pos >= TAGCOUNT)
 			break;
-		i = pos;
 
 		occupied = workspace_has_clients(ws);
 		if (!occupied) {
@@ -2629,6 +2621,57 @@ renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 		active = (ws == m->active_ws);
 		if (!occupied && !active && pos != 0)
 			continue;
+
+		shown[shown_count].tag = pos;
+		shown[shown_count].active = active;
+		shown_count++;
+	}
+
+	/* Hash of everything the row will draw.  arrangelayers runs on every
+	 * layer-surface commit and on every frame of the bar's slide, and a
+	 * re-render tears down the digit textures and uploads new ones — the
+	 * boxes are scene rects and come back instantly, the digits do not,
+	 * so a redundant re-render shows numberless boxes for a few frames.
+	 * Identical hash means the row on screen is already the right one. */
+	sig = 1469598103934665603ULL;
+#define SIG_MIX(v) do { sig = (sig ^ (uint64_t)(int64_t)(v)) * 1099511628211ULL; } while (0)
+	SIG_MIX(bar_height);
+	SIG_MIX(box_h);
+	SIG_MIX(box_y);
+	SIG_MIX(statusfont.height);
+	SIG_MIX(inner);
+	SIG_MIX(spacing);
+	SIG_MIX(outer_pad);
+	SIG_MIX(shown_count);
+	for (n = 0; n < shown_count; n++) {
+		SIG_MIX(shown[n].tag);
+		SIG_MIX(shown[n].active);
+		SIG_MIX(lround(module->hover_alpha[shown[n].tag] * 255.0f));
+	}
+	for (n = 0; n < 4; n++) {
+		SIG_MIX(lround(statusbar_tag_bg[n] * 255.0f));
+		SIG_MIX(lround(statusbar_tag_active_bg[n] * 255.0f));
+		SIG_MIX(lround(statusbar_tag_hover_bg[n] * 255.0f));
+	}
+#undef SIG_MIX
+
+	if (sig == module->render_sig && module->width > 0)
+		return;
+	module->render_sig = sig;
+
+	module->box_count = 0;
+	module->tagmask = 0;
+	clearstatusmodule(module);
+	x = outer_pad;
+
+	for (n = 0; n < shown_count; n++) {
+		const struct fcft_glyph *glyph;
+		int min_x, max_x, min_y, max_y;
+		int text_w, text_h, box_w;
+		int origin_x, origin_y;
+		const float *bgcol;
+		int active = shown[n].active;
+		int i = shown[n].tag;
 
 		if (count > 0) {
 			x += spacing;
@@ -4214,9 +4257,11 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 	if (!m->showbar) {
 		hidetagthumbnail(m);
 		*client_area = *area;
-		m->statusbar.area = (struct wlr_box){0};
-		m->statusbar.last_layout_h = 0; /* force full render on re-show */
-		/* Node stays in the scene and slides out with the tile edge —
+		/* area/last_layout_h are deliberately kept: the modules stay
+		 * rasterized and keep refreshing while hidden, so re-showing is
+		 * a pure node move — no relayout, no re-rasterization, no
+		 * module-by-module pop-in.
+		 * Node stays in the scene and slides out with the tile edge —
 		 * statusbar_anim_sync disables it once it is fully off-screen. */
 		statusbar_anim_sync(m);
 		return;
@@ -4312,7 +4357,7 @@ refreshstatusclock(void)
 		return;
 
 	wl_list_for_each(m, &mons, link) {
-		if (!m->statusbar.clock.tree || !m->showbar)
+		if (!m->statusbar.clock.tree)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
 		renderclock(&m->statusbar.clock, barh, timestr);
@@ -4357,7 +4402,7 @@ refreshstatuslight(void)
 	}
 
 	wl_list_for_each(m, &mons, link) {
-		if (!m->statusbar.light.tree || !m->showbar)
+		if (!m->statusbar.light.tree)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
 		if (status_should_render(&m->statusbar.light, barh, light_text)) {
@@ -4491,7 +4536,7 @@ refreshstatusnet(void)
 	set_net_icon_path(icon_path);
 
 	wl_list_for_each(m, &mons, link) {
-		if (!m->statusbar.net.tree || !m->showbar)
+		if (!m->statusbar.net.tree)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
 		if (status_should_render(&m->statusbar.net, barh, net_text)
@@ -4555,7 +4600,7 @@ refreshstatusbattery(void)
 	}
 
 	wl_list_for_each(m, &mons, link) {
-		if (!m->statusbar.battery.tree || !m->showbar)
+		if (!m->statusbar.battery.tree)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
 		if (status_should_render(&m->statusbar.battery, barh, battery_text)) {
@@ -4583,7 +4628,7 @@ refreshstatuscpu(void)
 	}
 
 	wl_list_for_each(m, &mons, link) {
-		if (!m->statusbar.cpu.tree || !m->showbar)
+		if (!m->statusbar.cpu.tree)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
 		if (status_should_render(&m->statusbar.cpu, barh, cpu_text)
@@ -4616,7 +4661,7 @@ refreshstatusram(void)
 	}
 
 	wl_list_for_each(m, &mons, link) {
-		if (!m->statusbar.ram.tree || !m->showbar)
+		if (!m->statusbar.ram.tree)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
 		if (status_should_render(&m->statusbar.ram, barh, ram_text)) {
@@ -4705,7 +4750,7 @@ refreshstatusvolume(void)
 	volume_last_color_is_muted = use_muted_color;
 
 	wl_list_for_each(m, &mons, link) {
-		if (!m->statusbar.volume.tree || !m->showbar)
+		if (!m->statusbar.volume.tree)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
 		if (status_should_render(&m->statusbar.volume, barh, volume_text)
@@ -4781,7 +4826,7 @@ refreshstatusmic(void)
 	}
 
 	wl_list_for_each(m, &mons, link) {
-		if (!m->statusbar.mic.tree || !m->showbar)
+		if (!m->statusbar.mic.tree)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
 		if (status_should_render(&m->statusbar.mic, barh, mic_text)
@@ -4799,8 +4844,6 @@ refreshstatusicons(void)
 	int barh;
 
 	wl_list_for_each(m, &mons, link) {
-		if (!m->showbar)
-			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
 		if (m->statusbar.traylabel.tree)
 			rendertray(m, barh);
@@ -4815,7 +4858,7 @@ refreshworkspacemodule(Monitor *m)
 {
 	int barh;
 
-	if (!m || !m->statusbar.tags.tree || !m->showbar)
+	if (!m || !m->statusbar.tags.tree)
 		return;
 	barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
 	renderworkspaces(m, &m->statusbar.tags, barh);
@@ -4829,15 +4872,15 @@ refreshstatustags(void)
 	int barh;
 
 	wl_list_for_each(m, &mons, link) {
-		if (!m->statusbar.tags.tree || !m->showbar)
+		if (!m->statusbar.tags.tree)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
 		renderworkspaces(m, &m->statusbar.tags, barh);
-		if (m->statusbar.traylabel.tree) {
-			clearstatusmodule(&m->statusbar.traylabel);
-			m->statusbar.traylabel.width = 0;
-			wlr_scene_node_set_enabled(&m->statusbar.traylabel.tree->node, 0);
-		}
+		/* Re-render rather than blank: blanking left the tray gone until
+		 * the 45 s icon tick, and with the bar hidden that gap outlives
+		 * the re-show — the bar would come back without its tray. */
+		if (m->statusbar.traylabel.tree)
+			rendertray(m, barh);
 		m->statusbar.tags.hover_tag = -1;
 		for (int i = 0; i < TAGCOUNT; i++)
 			m->statusbar.tags.hover_alpha[i] = 0.0f;
@@ -5771,45 +5814,19 @@ statusbar_printstatus_legacy(void)
 	fflush(stdout);
 }
 
-/* Repaint every module from scratch the next time the bar is laid out.
- *
- * While the bar is hidden the refresh tasks keep updating their globals but
- * skip the render — and a one-shot signal like the volume/mic force_render
- * flag is consumed by that skipped pass.  Afterwards status_should_render
- * sees unchanged text and suppresses the render, so a module whose text
- * rarely moves (volume, mic, light, battery) stays blank or keeps a stale
- * mute icon until its text happens to change, which can be minutes.
- * Clearing the per-module dedup cache makes the next refresh unconditional;
- * zeroing last_layout_h makes layoutstatusbar re-rasterize everything
- * immediately from the already-current globals, so the bar is complete on
- * the first frame it slides back in. */
+/* Restart the status polling after a stretch with the timers disarmed
+ * (game mode).  The rendered modules are left untouched: they still hold the
+ * last state that was rasterized, so the bar is complete the instant it comes
+ * back and each module repaints itself only once its own task reports new
+ * text. */
 void
 statusbar_force_refresh(Monitor *m)
 {
-	StatusModule *mods[11];
 	size_t i;
 	uint64_t now;
 
 	if (!m)
 		return;
-
-	mods[0] = &m->statusbar.tags;
-	mods[1] = &m->statusbar.traylabel;
-	mods[2] = &m->statusbar.terminfo;
-	mods[3] = &m->statusbar.cpu;
-	mods[4] = &m->statusbar.net;
-	mods[5] = &m->statusbar.battery;
-	mods[6] = &m->statusbar.light;
-	mods[7] = &m->statusbar.mic;
-	mods[8] = &m->statusbar.volume;
-	mods[9] = &m->statusbar.ram;
-	mods[10] = &m->statusbar.clock;
-
-	for (i = 0; i < LENGTH(mods); i++) {
-		mods[i]->last_render_text[0] = '\0';
-		mods[i]->last_render_h = 0;
-	}
-	m->statusbar.last_layout_h = 0;
 
 	/* Drop the 8 s read throttles: a mute toggled from pavucontrol or a
 	 * headset button while the bar was away must show its real state, not
@@ -5823,10 +5840,9 @@ statusbar_force_refresh(Monitor *m)
 	 * synchronously on the main loop, tens of ms apiece, and the cache
 	 * invalidation above guarantees they all take the slow path.  Firing
 	 * all ten one event-loop iteration apart drops that stall straight
-	 * into the slide-in and the bar visibly hitches into place.  The text
-	 * rasterized above is already correct from the cached globals, so the
-	 * reads wait for the tile-area spring to settle and then run one per
-	 * frame or so.
+	 * into the slide-in and the bar visibly hitches into place.  Nothing
+	 * on screen waits for them, so the reads wait for the tile-area spring
+	 * to settle and then run one per frame or so.
 	 * This also re-arms both timers, which game mode leaves disarmed:
 	 * schedule_next_status_refresh bails while game_mode_active, so the
 	 * tick that fired during game mode never rescheduled itself. */
@@ -5846,8 +5862,8 @@ togglestatusbar(const Arg *arg)
 		return;
 	selmon->showbar = !selmon->showbar;
 	diag_logf("BAR", "toggle showbar=%d", selmon->showbar);
-	if (selmon->showbar)
-		statusbar_force_refresh(selmon);
+	/* No refresh on re-show: the modules kept rendering while hidden, so
+	 * the bar that slides back in is the same one that slid out. */
 	arrangelayers(selmon);
 }
 
