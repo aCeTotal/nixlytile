@@ -5783,6 +5783,7 @@ statusbar_force_refresh(Monitor *m)
 {
 	StatusModule *mods[11];
 	size_t i;
+	uint64_t now;
 
 	if (!m)
 		return;
@@ -5812,13 +5813,22 @@ statusbar_force_refresh(Monitor *m)
 	volume_invalidate_cache(1);
 	mic_last_read_ms = 0;
 
-	/* Run every status task on the next event-loop iteration so the
-	 * re-rasterized text is replaced by freshly read values right away.
+	/* Re-run every status task — but not on the frames the bar is sliding
+	 * in on.  volume/mic/light each fork+exec a helper (wpctl, light)
+	 * synchronously on the main loop, tens of ms apiece, and the cache
+	 * invalidation above guarantees they all take the slow path.  Firing
+	 * all ten one event-loop iteration apart drops that stall straight
+	 * into the slide-in and the bar visibly hitches into place.  The text
+	 * rasterized above is already correct from the cached globals, so the
+	 * reads wait for the tile-area spring to settle and then run one per
+	 * frame or so.
 	 * This also re-arms both timers, which game mode leaves disarmed:
 	 * schedule_next_status_refresh bails while game_mode_active, so the
 	 * tick that fired during game mode never rescheduled itself. */
+	now = monotonic_msec();
 	for (i = 0; i < LENGTH(status_tasks); i++)
-		status_tasks[i].next_due_ms = 0;
+		status_tasks[i].next_due_ms = now + STATUS_SETTLE_MS
+				+ i * STATUS_STAGGER_MS;
 	schedule_next_status_refresh();
 	schedule_status_timer();
 }

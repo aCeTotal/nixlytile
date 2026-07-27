@@ -164,6 +164,11 @@
 #define TAGMASK                 ((1u << TAGCOUNT) - 1)
 #define MAX_TAGS                32
 #define STATUS_FAST_MS          3000
+/* Delay before the post-unhide refresh burst starts (tile-area spring is
+ * critically damped at stiffness 800 -> settles in ~250ms) and the spacing
+ * between its forking tasks. */
+#define STATUS_SETTLE_MS        300
+#define STATUS_STAGGER_MS       50
 #define LISTEN(E, L, H)         wl_signal_add((E), ((L)->notify = (H), (L)))
 #define LISTEN_STATIC(E, H)     do { struct wl_listener *_l = ecalloc(1, sizeof(*_l)); _l->notify = (H); wl_signal_add((E), _l); } while (0)
 #define MODAL_MAX_RESULTS 200
