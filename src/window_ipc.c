@@ -306,6 +306,54 @@ send_err(NiriIpcClient *cl, const char *msg)
 		client_enqueue(cl, buf, (size_t)n);
 }
 
+/* Reply to VideoPlaying with the mode that is actually driving the panel:
+ * refresh in millihertz and whether VRR owns the pacing (in which case the
+ * fixed rate is meaningless to the player). */
+static void
+send_video_mode(NiriIpcClient *cl, Monitor *m)
+{
+	char buf[192];
+	int mhz = 0;
+	int vrr = 0;
+	int n;
+
+	if (m && m->wlr_output && m->wlr_output->current_mode)
+		mhz = m->wlr_output->current_mode->refresh;
+	if (m)
+		vrr = (m->vrr_active || m->vrr_pending == 1) ? 1 : 0;
+
+	n = snprintf(buf, sizeof buf,
+		"{\"Ok\":{\"VideoMode\":{\"output\":\"%s\",\"mhz\":%d,\"vrr\":%s}}}\n",
+		(m && m->wlr_output && m->wlr_output->name) ? m->wlr_output->name : "",
+		mhz, vrr ? "true" : "false");
+	if (n > 0)
+		client_enqueue(cl, buf, (size_t)n);
+}
+
+/* Monitor to act on when the client did not name one it knows (output
+ * "auto", or a name we don't have). Prefer the monitor whose focused
+ * fullscreen client is video content; on stop, prefer one still holding a
+ * video mode. Falls back to selmon. */
+static Monitor *
+video_monitor_fallback(int is_stop)
+{
+	Monitor *m;
+	Client *c;
+
+	if (is_stop) {
+		wl_list_for_each(m, &mons, link) {
+			if (m->video_mode_active || m->vrr_active)
+				return m;
+		}
+	}
+	wl_list_for_each(m, &mons, link) {
+		c = focustop(m);
+		if (c && c->isfullscreen && is_video_content(c))
+			return m;
+	}
+	return selmon;
+}
+
 static void
 focus_workspace_by_window_id(uint64_t id)
 {
@@ -380,8 +428,17 @@ handle_request_line(NiriIpcClient *cl, char *line)
 	 * what output its fullscreen video is on and what container-fps the
 	 * stream has. We delegate to apply_best_video_mode (which picks VRR
 	 * if capable, else exact mode, else integer multiple). On stop we
-	 * call restore_max_refresh_rate. Surface-scoped: payload carries the
-	 * wl_output name so we never guess a monitor. */
+	 * call restore_max_refresh_rate.
+	 *
+	 * output="auto" (or an unknown name) means "the monitor showing the
+	 * video" — we resolve it here via is_video_content instead of trusting
+	 * the client's guess.  A client with several wl_outputs cannot know
+	 * which one its surface is on without tracking wl_surface.enter, and
+	 * getting it wrong mode-switches the wrong screen.
+	 *
+	 * The reply carries the mode actually applied so the player can hold
+	 * playback until the display has settled, and can detect later that
+	 * the mode was lost (hotplug, tag switch, failed commit). */
 	if (strstr(line, "\"VideoPlaying\"") || strstr(line, "\"VideoStopped\"")) {
 		int is_stop = strstr(line, "\"VideoStopped\"") != NULL;
 		const char *p = strstr(line, "\"output\":");
@@ -405,18 +462,40 @@ handle_request_line(NiriIpcClient *cl, char *line)
 				break;
 			}
 		}
+		if (!m)
+			m = video_monitor_fallback(is_stop);
 		if (!m) { send_err(cl, "output not found"); return; }
 
 		if (is_stop) {
+			/* Restore the resolved monitor, plus any other monitor
+			 * still stuck in a video mode with no video on it — that
+			 * is a monitor the player left behind when it moved
+			 * screens. A monitor that IS showing fullscreen video
+			 * (another player on the other screen) keeps its mode.
+			 * _safe because the commit inside can re-enter monitor
+			 * bookkeeping (updatemons). */
+			Monitor *tmpm;
 			restore_max_refresh_rate(m);
+			wl_list_for_each_safe(it, tmpm, &mons, link) {
+				Client *fc;
+				if (it == m)
+					continue;
+				if (!it->video_mode_active && !it->vrr_active)
+					continue;
+				fc = focustop(it);
+				if (fc && fc->isfullscreen && is_video_content(fc))
+					continue;
+				restore_max_refresh_rate(it);
+			}
+			send_handled(cl);
 		} else {
 			const char *fp = strstr(line, "\"fps\":");
 			if (!fp) { send_err(cl, "missing fps"); return; }
 			float fps = strtof(fp + 6, NULL);
 			if (fps <= 0.0f) { send_err(cl, "bad fps"); return; }
 			apply_best_video_mode(m, fps);
+			send_video_mode(cl, m);
 		}
-		send_handled(cl);
 		return;
 	}
 

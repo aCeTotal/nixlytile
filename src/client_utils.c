@@ -424,16 +424,38 @@ is_wine_or_proton_process(pid_t pid)
 
 	snprintf(path, sizeof(path), "/proc/%d/exe", pid);
 	len = readlink(path, target, sizeof(target) - 1);
-	if (len <= 0)
-		return 0;
-	target[len] = '\0';
+	if (len > 0) {
+		target[len] = '\0';
 
-	if (strstr(target, "wine-preloader") ||
-	    strstr(target, "wine64-preloader") ||
-	    strstr(target, "wineserver") ||
-	    strstr(target, "/proton") ||
-	    strstr(target, "/wine"))
-		return 1;
+		if (strstr(target, "wine-preloader") ||
+		    strstr(target, "wine64-preloader") ||
+		    strstr(target, "wineserver") ||
+		    strstr(target, "/proton") ||
+		    strstr(target, "/wine"))
+			return 1;
+	}
+
+	/* Modern wine execs the .exe directly, so /proc/pid/exe can be a
+	 * path with no "wine" in it at all. argv[0] still ends in .exe —
+	 * nothing native on this system does. */
+	{
+		FILE *f;
+		char arg0[512];
+		size_t n;
+
+		snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+		f = fopen(path, "r");
+		if (!f)
+			return 0;
+		n = fread(arg0, 1, sizeof(arg0) - 1, f);
+		fclose(f);
+		if (n == 0)
+			return 0;
+		arg0[n] = '\0';   /* cmdline is NUL-separated: this is argv[0] */
+		n = strlen(arg0);
+		if (n > 4 && strcasecmp(arg0 + n - 4, ".exe") == 0)
+			return 1;
+	}
 
 	return 0;
 }
@@ -465,20 +487,23 @@ is_known_game_app(const char *app)
 	return 0;
 }
 
-int
-is_game_launcher_child(pid_t pid)
+/* Walk the parent chain and report whether any ancestor's comm matches one
+ * of the needles — exact when `exact`, substring otherwise. The process's
+ * own comm is deliberately NOT tested — otherwise the Steam main window
+ * (comm="steam") matches itself. */
+static int
+ancestry_comm_matches(pid_t pid, const char *const *needles, int exact)
 {
 	char path[64], comm[64];
 	FILE *f;
 	pid_t ppid;
 	int depth = 0;
 	const int max_depth = 10; /* Prevent infinite loops */
+	int i;
 
 	if (pid <= 1)
 		return 0;
 
-	/* Read the initial process's ppid, but do NOT test its own comm.
-	 * Otherwise the Steam main window (comm="steam") matches itself. */
 	snprintf(path, sizeof(path), "/proc/%d/stat", pid);
 	f = fopen(path, "r");
 	if (!f)
@@ -503,17 +528,56 @@ is_game_launcher_child(pid_t pid)
 		}
 		fclose(f);
 
-		/* Steam-only ancestry: steam client itself or reaper (Steam's
-		 * per-game wrapper). Lutris/Heroic/Bottles deliberately excluded —
-		 * gamemode must ONLY engage for Steam-launched games. */
-		if (strcasestr(comm, "steam") ||
-		    strcasestr(comm, "reaper"))
-			return 1;
+		for (i = 0; needles[i]; i++) {
+			if (exact ? strcasecmp(comm, needles[i]) == 0
+				  : strcasestr(comm, needles[i]) != NULL)
+				return 1;
+		}
 
 		pid = ppid;
 		depth++;
 	}
 	return 0;
+}
+
+/* Any game launcher or Windows runtime, not just Steam. Used by
+ * looks_like_game so a title started from Lutris, Heroic, Bottles, umu,
+ * gamescope or bare Wine gets the same fullscreen/VRR treatment as a Steam
+ * title. Ultra game mode stays Steam-only on purpose (see gamemode.c) —
+ * that is a separate, more invasive decision than "this is a game".
+ * Emulators are not listed; the retro path excludes them earlier. */
+int
+is_game_runtime_child(pid_t pid)
+{
+	/* Exact comm match (comm is the 15-char TASK_COMM_LEN name). Substring
+	 * matching here would classify anything under an Electron app whose
+	 * name merely starts with "proton" (Proton Mail) as a game. */
+	static const char *const runtimes[] = {
+		"steam", "reaper",                        /* Steam */
+		"lutris", "lutris-wrapper", "heroic",     /* launchers */
+		"bottles", "bottles-cli",
+		"legendary", "gogdl", "nile",             /* Heroic backends */
+		"minigalaxy", "portproton", "itch",
+		"gamescope", "umu-run", "umu",            /* wrappers */
+		"wine", "wine64", "wineserver",           /* Wine */
+		"wine-preloader", "wine64-preloader",
+		"proton", "pressure-vessel", "srt-bwrap", /* Proton runtime */
+		NULL
+	};
+
+	return ancestry_comm_matches(pid, runtimes, 1);
+}
+
+int
+is_game_launcher_child(pid_t pid)
+{
+	/* Steam-only ancestry: the steam client itself or reaper (Steam's
+	 * per-game wrapper). Lutris/Heroic/Bottles deliberately excluded —
+	 * ultra game mode must ONLY engage for Steam-launched games.
+	 * is_game_runtime_child covers the rest for classification. */
+	static const char *const steam_only[] = { "steam", "reaper", NULL };
+
+	return ancestry_comm_matches(pid, steam_only, 0);
 }
 
 int
@@ -646,10 +710,19 @@ looks_like_game(Client *c)
 				is_wine_or_proton_process(pid) ? 1 : -1;
 		if (c->wine_verdict > 0)
 			return 1;
-		if (c->launcher_child_verdict == 0)
-			c->launcher_child_verdict =
-				is_game_launcher_child(pid) ? 1 : -1;
-		if (c->launcher_child_verdict > 0)
+		/* Any launcher, not just Steam: a native Wayland title from
+		 * Lutris/Heroic/Bottles/gamescope carries no protocol hint and
+		 * no steam_app_ app-id, so ancestry is the only signal. */
+		if (c->game_runtime_verdict == 0) {
+			c->game_runtime_verdict =
+				is_game_runtime_child(pid) ? 1 : -1;
+			if (c->game_runtime_verdict > 0)
+				wlr_log(WLR_INFO,
+					"Detected game via launcher ancestry: "
+					"app_id='%s', pid=%d",
+					app ? app : "(null)", pid);
+		}
+		if (c->game_runtime_verdict > 0)
 			return 1;
 	}
 

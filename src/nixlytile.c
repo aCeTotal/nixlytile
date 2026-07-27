@@ -1373,8 +1373,16 @@ find_best_video_mode(Monitor *m, float video_hz)
 
 	wlr_log(WLR_DEBUG, "Evaluating video modes for %.3f Hz on %s:", video_hz, m->wlr_output->name);
 
-	/* Option 1: VRR (best quality if available) */
-	if (m->vrr_capable && fullscreen_adaptive_sync_enabled) {
+	/* Option 1: VRR (best quality if available) — but only when the panel
+	 * can actually hold the source rate. VRR ranges bottom out around
+	 * 48 Hz; below that the frame rate must be multiplied by LFC. AMD and
+	 * Intel do that in the driver (gcaps.has_hw_lfc), NVIDIA does not, and
+	 * a 23.976 fps stream then falls out of range: the link renegotiates
+	 * mid-playback and shows up as flicker and lag spikes. In that case a
+	 * fixed mode at an exact multiple paces better, so let it win by
+	 * simply not offering VRR as a candidate. */
+	if (m->vrr_capable && fullscreen_adaptive_sync_enabled
+			&& (video_hz >= VRR_MIN_SAFE_HZ || m->gcaps.has_hw_lfc)) {
 		candidate.method = 3;
 		candidate.mode = NULL;
 		candidate.multiplier = 1;

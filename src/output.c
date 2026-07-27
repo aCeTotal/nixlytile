@@ -3140,11 +3140,14 @@ outputpresent(struct wl_listener *listener, void *data)
 		     (uint64_t)event->when.tv_nsec;
 
 	/* Calculate interval between presents (vblank interval).
-	 * Skip when video cadence is active - presents happen every 2-3
-	 * vblanks during cadence, which would contaminate the measurement
-	 * and give wrong display_hz for future calculations. */
-	if (m->last_present_ns > 0 && present_ns > m->last_present_ns &&
-	    !m->video_cadence_active) {
+	 *
+	 * This used to be skipped while video cadence was active, back when
+	 * the cadence held frames and presents landed every 2-3 vblanks. The
+	 * hold is gone (see rendermon) — fullscreen video is exempt from the
+	 * idle gate and commits every vblank — so skipping now just freezes
+	 * present_interval_ns at whatever it held when the video started, and
+	 * everything downstream reads a stale display Hz. */
+	if (m->last_present_ns > 0 && present_ns > m->last_present_ns) {
 		uint64_t interval = present_ns - m->last_present_ns;
 		/* Sanity check: interval should be reasonable (1ms - 100ms) */
 		if (interval > 1000000 && interval < 100000000) {
@@ -3556,6 +3559,26 @@ client_wants_tearing(Client *c)
 			tearing_control_mgr, surface);
 
 	return hint == WP_TEARING_CONTROL_V1_PRESENTATION_HINT_ASYNC;
+}
+
+/* True for the film and broadcast rates a modeset is worth doing for.
+ * Anything else (a measurement that landed between rates, an animation
+ * loop, a game-ish clip) keeps the current mode — a wrong modeset costs
+ * seconds of black screen on HDMI. */
+int
+is_standard_video_rate(float hz)
+{
+	static const float rates[] = {
+		23.976f, 24.0f, 25.0f, 29.97f, 30.0f,
+		47.952f, 48.0f, 50.0f, 59.94f, 60.0f,
+	};
+	size_t i;
+
+	for (i = 0; i < LENGTH(rates); i++) {
+		if (fabsf(hz - rates[i]) < 0.01f)
+			return 1;
+	}
+	return 0;
 }
 
 void
@@ -4764,6 +4787,16 @@ enable_vrr_video_mode(Monitor *m, float video_hz)
 		return 0;
 	}
 
+	/* Rate below the assumed VRR floor needs LFC to stay in range. Without
+	 * driver LFC the panel drops out of VRR mid-playback (flicker, lag
+	 * spikes) — refuse, so callers fall through to a fixed mode. */
+	if (video_hz > 0.0f && video_hz < VRR_MIN_SAFE_HZ && !m->gcaps.has_hw_lfc) {
+		wlr_log(WLR_DEBUG,
+			"VRR declined for %.3f Hz on %s: below %.0f Hz and no hardware LFC",
+			video_hz, m->wlr_output->name, VRR_MIN_SAFE_HZ);
+		return 0;
+	}
+
 	/* Save original mode before first switch. */
 	if (!m->video_mode_active && !m->vrr_active)
 		m->original_mode = m->wlr_output->current_mode;
@@ -5860,8 +5893,28 @@ check_fullscreen_video(void)
 				c->video_detect_phase = 2;
 				c->video_detect_retries = 0;
 
-				/* Try VRR first - best possible solution */
-				if (m->vrr_capable && enable_vrr_video_mode(m, use_hz)) {
+				/* Match the display to the content the same way the
+				 * nixlymedia IPC path does (VRR when the panel holds
+				 * the rate, else an exact mode or integer multiple).
+				 * Players that do not talk to us — mpv, VLC, a browser
+				 * in fullscreen — otherwise never got a mode switch at
+				 * all and judder on a fixed-refresh panel.
+				 *
+				 * Two guards, because a wrong modeset costs seconds of
+				 * black screen: the client must tag itself video
+				 * (wp_content_type_v1 — the loose estimate below for
+				 * untagged clients rounds 45 fps to 50 and must never
+				 * drive a modeset), and the rate must be a real film or
+				 * broadcast rate.
+				 * Skipped entirely when a mode is already applied (the
+				 * IPC path got here first with the container's own fps,
+				 * which beats anything we measure off frame timing). */
+				if (is_video && !m->video_mode_active && !m->vrr_active
+						&& is_standard_video_rate(use_hz)
+						&& apply_best_video_mode(m, use_hz)) {
+					wlr_log(WLR_DEBUG, "Video %.3f Hz on %s: display matched",
+							use_hz, m->wlr_output->name);
+				} else if (m->vrr_capable && enable_vrr_video_mode(m, use_hz)) {
 					wlr_log(WLR_DEBUG, "Video %.3f Hz on %s: using VRR",
 							use_hz, m->wlr_output->name);
 				} else {

@@ -333,6 +333,19 @@ client_set_target_geom(Client *c, struct wlr_box g)
  *     freeze is active (rare — only for the brief window before
  *     monitor_freeze_clients runs), we fall back to live surface
  *     animation. */
+/* True while the user is dragging a tile edge or column border.
+ *
+ * Interactive resize must show REAL content, not a stretched snapshot: the
+ * pointer sets the size directly, so there is no animation to cover up, and
+ * scaling the old buffer is exactly the "everything stretches until you let
+ * go, then reflows" effect. The client is reconfigured on every motion
+ * event, so it reflows as the edge moves. */
+static int
+live_resize_active(void)
+{
+	return cursor_mode == CurResize || cursor_mode == CurColResize;
+}
+
 static void
 client_anim_apply(Client *c, struct wlr_box g)
 {
@@ -363,6 +376,17 @@ client_anim_apply(Client *c, struct wlr_box g)
 	inner_h = g.height - 2 * c->bw;
 	if (inner_w < 1) inner_w = 1;
 	if (inner_h < 1) inner_h = 1;
+
+	/* Live drag: no snapshot, no scaling. The surface renders at the size
+	 * it was just configured with, so text reflows and layouts recompute
+	 * while the edge moves. */
+	if (live_resize_active()) {
+		if (c->frozen_buffer)
+			client_unfreeze(c);
+		client_scale_reset(c);
+		client_clip_to_usable(c);
+		return;
+	}
 
 	/* Early unfreeze: the moment the client commits a buffer at a NEW
 	 * natural size (it was configured with the final size at anim
@@ -532,6 +556,12 @@ static void
 monitor_freeze_clients(Monitor *m, int include_x11, int include_wayland)
 {
 	Client *c;
+
+	/* Never during a drag — the point of a live resize is that the client
+	 * repaints as the edge moves, and a snapshot would hide exactly that. */
+	if (live_resize_active())
+		return;
+
 	wl_list_for_each(c, &clients, link) {
 		int is_x11;
 		if (c->mon != m || !client_surface(c) ||
@@ -664,6 +694,9 @@ monitor_anim_tick(Monitor *m, double dt)
 			m->w.y = (int)m->w_y_f;
 			m->w.width = (int)(m->w_x_f + m->w_w_f) - m->w.x;
 			m->w.height = (int)(m->w_y_f + m->w_h_f) - m->w.y;
+			/* The bar rides the same spring — see
+			 * statusbar_anim_sync. */
+			statusbar_anim_sync(m);
 		}
 		if (moved_size)
 			size_anim = 1;

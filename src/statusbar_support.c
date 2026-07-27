@@ -1365,16 +1365,32 @@ ssid_event_cb(int fd, uint32_t mask, void *data)
 }
 
 /* ── startup defaults (backlight / volume / mic) ─────────────────── */
+/* Audio defaults are applied once PipeWire answers. nixlytile starts before
+ * (or racing with) the pipewire/wireplumber user services, so the first
+ * attempts can hit a wpctl that talks to nothing: the set-mute silently does
+ * nothing while the bar goes on to claim "unmuted, 70%". Bounded retries on
+ * the normal status-refresh cadence, and nothing is asserted that has not
+ * been read back. */
+#define AUDIO_DEFAULTS_MAX_TRIES 30
+
 void
 apply_startup_defaults(void)
 {
-	static int applied = 0;
+	static int light_applied = 0;
+	static int audio_applied = 0;
+	static int audio_tries = 0;
 	const double light_default = 40.0;
 	const double speaker_default = 70.0;
 	const double mic_default = 80.0;
+	char cmd[96];
 
-	if (applied)
+	if (light_applied && audio_applied)
 		return;
+
+	if (light_applied)
+		goto audio;
+
+	light_applied = 1;
 
 	/* Backlight - only on laptops with a backlight device.
 	 * Ensure paths are initialized before checking availability,
@@ -1396,75 +1412,71 @@ apply_startup_defaults(void)
 		}
 	}
 
+audio:
+	if (audio_applied || audio_tries >= AUDIO_DEFAULTS_MAX_TRIES)
+		return;
+	audio_tries++;
+
 	/*
-	 * Speaker/headset volume - read actual state from PipeWire first,
-	 * then unmute and set to default. This ensures statusbar shows
-	 * correct state from the very beginning.
+	 * Speaker/headset volume: unmute and set the default, then read the
+	 * result back. Answers PipeWire does not give us are not invented —
+	 * a failed read means the service is not up, and we return without
+	 * marking done so the next status refresh tries again.
 	 */
 	{
 		int is_headset = 0;
-		double actual_vol;
 
-		/* Invalidate cache to force fresh read from PipeWire */
 		volume_invalidate_cache(0); /* speaker */
 		volume_invalidate_cache(1); /* headset */
+		if (pipewire_volume_percent(&is_headset) < 0.0)
+			return;   /* PipeWire not answering yet — retry later */
 
-		/* Read actual current state from PipeWire */
-		actual_vol = pipewire_volume_percent(&is_headset);
-		(void)actual_vol; /* We just want the mute state synced */
+		/* Synchronous: the async fork()+wpctl form returns before the
+		 * change lands, so the read-back below would see stale state. */
+		run_wpctl_sync("wpctl set-mute @DEFAULT_AUDIO_SINK@ 0");
+		snprintf(cmd, sizeof(cmd),
+			"wpctl set-volume @DEFAULT_AUDIO_SINK@ %.2f",
+			speaker_default / 100.0);
+		run_wpctl_sync(cmd);
 
-		/* Now unmute and set volume */
-		set_pipewire_mute(0);
-
-		/* Update all mute state variables to match */
-		volume_muted = 0;
-		volume_cached_speaker_muted = 0;
-		volume_cached_headset_muted = 0;
-
-		/* Invalidate cache again so next read gets fresh data */
 		volume_invalidate_cache(0);
 		volume_invalidate_cache(1);
-	}
-
-	if (set_pipewire_volume(speaker_default) == 0) {
-		speaker_active = speaker_default;
-		volume_last_speaker_percent = speaker_default;
-		volume_last_headset_percent = speaker_default;
+		{
+			double v = pipewire_volume_percent(&is_headset);
+			if (v >= 0.0) {
+				speaker_active = v;
+				volume_last_speaker_percent = v;
+				volume_last_headset_percent = v;
+			}
+		}
 	}
 
 	/*
-	 * Microphone volume - read actual state from PipeWire first,
-	 * then unmute and set to default.  Skip if no mic source exists
-	 * (e.g. desktop without a microphone connected).
+	 * Microphone: same shape. Skip if no mic source exists (e.g. desktop
+	 * without a microphone connected).
 	 */
 	{
-		double actual_mic;
-
-		/* Invalidate cache to force fresh read */
 		mic_last_read_ms = 0;
+		if (pipewire_mic_volume_percent() >= 0.0) {
+			run_wpctl_sync("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0");
+			snprintf(cmd, sizeof(cmd),
+				"wpctl set-volume @DEFAULT_AUDIO_SOURCE@ %.2f",
+				mic_default / 100.0);
+			run_wpctl_sync(cmd);
 
-		/* Read actual current state from PipeWire */
-		actual_mic = pipewire_mic_volume_percent();
-
-		if (actual_mic >= 0.0) {
-			/* Mic source exists - unmute and set volume */
-			set_pipewire_mic_mute(0);
-
-			mic_muted = 0;
-			mic_cached_muted = 0;
-
-			/* Invalidate cache again */
 			mic_last_read_ms = 0;
-
-			if (set_pipewire_mic_volume(mic_default) == 0) {
-				microphone_active = mic_default;
-				mic_last_percent = mic_default;
+			{
+				double v = pipewire_mic_volume_percent();
+				if (v >= 0.0) {
+					microphone_active = v;
+					mic_last_percent = v;
+				}
 			}
 		}
 		/* else: no mic source, leave microphone_active = -1.0 */
 	}
 
-	applied = 1;
+	audio_applied = 1;
 }
 
 /* ── extra net-async globals (public IP / SSID fetch state) ──────── */

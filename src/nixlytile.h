@@ -212,6 +212,9 @@ extern const char *osk_layout_upper[OSK_ROWS][OSK_COLS];
 #define GAME_VRR_FPS_DEADBAND 3.0f
 #define GAME_VRR_MIN_FPS 20.0f
 #define GAME_VRR_MAX_FPS 165.0f
+/* Lowest rate a VRR panel is assumed to hold without driver LFC. Below this
+ * video prefers a fixed mode instead of VRR. */
+#define VRR_MIN_SAFE_HZ 48.0f
 
 /* ── enums ─────────────────────────────────────────────────────────── */
 enum { CurNormal, CurPressed, CurMove, CurResize, CurColResize };
@@ -585,6 +588,10 @@ typedef struct {
 struct StatusBar {
 	struct wlr_scene_tree *tree;
 	struct wlr_box area;
+	/* Where the bar sits when fully shown. Kept while hidden too — the
+	 * slide-out/-in animation needs the slot it travels to and from
+	 * (statusbar_anim_sync). width/height 0 = never laid out yet. */
+	struct wlr_box slot;
 	int last_layout_h; /* bar height at last full module render; 0 = force */
 	StatusModule clock;
 	StatusModule cpu;
@@ -952,7 +959,8 @@ typedef struct {
 	 * /proc on every call — from per-event hot paths like
 	 * configurex11 and buttonpress. */
 	int wine_verdict;
-	int launcher_child_verdict;
+	int launcher_child_verdict;   /* Steam ancestry (game mode, monitor pin) */
+	int game_runtime_verdict;     /* any launcher/runtime ancestry */
 	uint32_t resize;
 	int pending_resize_w, pending_resize_h;
 	struct wlr_box old_geom;
@@ -2085,6 +2093,7 @@ int is_retro_emulator_client(Client *c);
 void read_steam_properties(Client *c);
 int is_steam_cmd(const char *cmd);
 int is_game_launcher_child(pid_t pid);
+int is_game_runtime_child(pid_t pid);
 int client_wants_tearing(Client *c);
 void track_client_frame(Client *c);
 float detect_video_framerate(Client *c);
@@ -2243,6 +2252,7 @@ void updatemons(struct wl_listener *listener, void *data);
 void auto_arrange_monitors(void);
 void warp_cursor_to_startup_monitor(void);
 void set_adaptive_sync(Monitor *m, int enabled);
+int is_standard_video_rate(float hz);
 void set_video_refresh_rate(Monitor *m, Client *c);
 void restore_max_refresh_rate(Monitor *m);
 void apply_console_mode(Monitor *m, Client *c);
@@ -2851,6 +2861,8 @@ uint64_t get_time_ns(void);
 uint64_t monotonic_msec(void);
 void ensure_shell_env(void);
 void apply_startup_defaults(void);
+void run_wpctl_sync(const char *cmd);
+void statusbar_anim_sync(Monitor *m);
 int has_nixlytile_session_target(void);
 int node_contains_client(LayoutNode *node, Client *c);
 int subtree_bounds(LayoutNode *node, Monitor *m, struct wlr_box *out);

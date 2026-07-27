@@ -3566,10 +3566,15 @@ pipewire_volume_percent(int *is_headset_out)
 	}
 
 	pclose(fp);
+	/* No parse = no answer (wpctl before PipeWire is up, no sink). Keep
+	 * the previous state: writing muted=0 here is how the bar ends up
+	 * claiming "unmuted" on a sink that is in fact muted. */
+	if (level < 0.0)
+		return -1.0;
+
 	volume_muted = muted;
 	volume_cache_store(is_headset, level, muted, now);
-	if (level >= 0.0)
-		speaker_active = level;
+	speaker_active = level;
 	return level;
 }
 
@@ -3602,13 +3607,16 @@ pipewire_mic_volume_percent(void)
 	}
 
 	pclose(fp);
+	/* Same as the sink: an unparsable answer must not be read as
+	 * "unmuted" — keep the last known state and report failure. */
+	if (level < 0.0)
+		return -1.0;
+
 	mic_muted = muted;
-	if (level >= 0.0) {
-		mic_cached = level;
-		mic_cached_muted = muted;
-		mic_last_read_ms = now;
-		microphone_active = level;
-	}
+	mic_cached = level;
+	mic_cached_muted = muted;
+	mic_last_read_ms = now;
+	microphone_active = level;
 	return level;
 }
 
@@ -3761,7 +3769,7 @@ set_pipewire_mic_volume(double percent)
  * PipeWire state.  The old async fork() setters raced their own
  * read-back: the toggle re-read PipeWire before wpctl had run, cached
  * the stale pre-toggle state, and the icon needed a second click. */
-static void
+void
 run_wpctl_sync(const char *cmd)
 {
 	FILE *fp = popen(cmd, "r");
@@ -3810,6 +3818,30 @@ positionstatusmodules(Monitor *m)
 		return;
 
 	if (!m->showbar || !m->statusbar.area.width || !m->statusbar.area.height) {
+		/* Bar toggled off but already laid out once: it is sliding out
+		 * with the tile edge. Tear down popups and menus, but leave the
+		 * bar's own nodes alone — blanking the modules mid-slide would
+		 * show an empty bar gliding off. statusbar_anim_sync owns the
+		 * tree's visibility and disables it once it is off-screen. */
+		if (m->statusbar.slot.height > 0) {
+			if (m->statusbar.tray_menu.tree) {
+				wlr_scene_node_set_enabled(
+					&m->statusbar.tray_menu.tree->node, 0);
+				m->statusbar.tray_menu.visible = 0;
+			}
+			if (m->statusbar.cpu_popup.tree) {
+				wlr_scene_node_set_enabled(
+					&m->statusbar.cpu_popup.tree->node, 0);
+				m->statusbar.cpu_popup.visible = 0;
+			}
+			if (m->statusbar.net_popup.tree) {
+				wlr_scene_node_set_enabled(
+					&m->statusbar.net_popup.tree->node, 0);
+				m->statusbar.net_popup.visible = 0;
+			}
+			statusbar_anim_sync(m);
+			return;
+		}
 		wlr_scene_node_set_enabled(&m->statusbar.tree->node, 0);
 		if (m->statusbar.tags.tree) {
 			wlr_scene_node_set_enabled(&m->statusbar.tags.tree->node, 0);
@@ -4116,6 +4148,59 @@ schedule_popup_delay(uint32_t ms)
 		wl_event_source_timer_update(popup_delay_timer, ms);
 }
 
+/* Slide the bar in lock-step with the tile area.
+ *
+ * togglestatusbar only flips m->showbar; the tile area then springs to its
+ * new top edge in monitor_anim_tick. The bar's own offset is derived from
+ * that same spring value rather than from a second animation, so the gap
+ * between the bar's bottom edge and the tiles is pixel-identical in every
+ * frame of the transition — two independent timelines would drift.
+ *
+ * Fully off-screen (offset == slide distance) disables the node, so a
+ * hidden bar costs nothing and cannot be clicked. */
+void
+statusbar_anim_sync(Monitor *m)
+{
+	int gap, bar_h, slide, offset, shown_x, shown_y, tile_top_with_bar;
+	double tile_top_now;
+
+	if (!m || !m->statusbar.tree || !m->wlr_output || !m->wlr_output->enabled)
+		return;
+
+	gap = m->gaps ? (int)gappx : 0;
+
+	/* The slot layoutstatusbar last computed — it accounts for exclusive
+	 * layer surfaces, which m->m does not. Before the first layout (or on
+	 * a monitor that has never shown the bar) fall back to the monitor
+	 * box. */
+	if (m->statusbar.slot.height > 0) {
+		shown_x = m->statusbar.slot.x;
+		shown_y = m->statusbar.slot.y;
+		bar_h = m->statusbar.slot.height;
+	} else {
+		shown_x = m->m.x + gap;
+		shown_y = m->m.y + statusbar_top_gap;
+		bar_h = MIN((int)statusbar_height, m->m.height);
+	}
+	if (bar_h <= 0)
+		return;
+
+	/* Where arrangelayers puts the tile top when the bar is visible. */
+	tile_top_with_bar = shown_y + bar_h + gap;
+	slide = bar_h + statusbar_top_gap;
+
+	tile_top_now = m->w_initialized ? m->w_y_f : (double)tile_top_with_bar;
+	offset = (int)lround((double)tile_top_with_bar - tile_top_now);
+	if (offset < 0)
+		offset = 0;
+	if (offset > slide)
+		offset = slide;
+
+	wlr_scene_node_set_position(&m->statusbar.tree->node,
+			shown_x, shown_y - offset);
+	wlr_scene_node_set_enabled(&m->statusbar.tree->node, offset < slide);
+}
+
 void
 layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_area)
 {
@@ -4126,11 +4211,13 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 		return;
 
 	if (!m->showbar) {
-		wlr_scene_node_set_enabled(&m->statusbar.tree->node, 0);
 		hidetagthumbnail(m);
 		*client_area = *area;
 		m->statusbar.area = (struct wlr_box){0};
 		m->statusbar.last_layout_h = 0; /* force full render on re-show */
+		/* Node stays in the scene and slides out with the tile edge —
+		 * statusbar_anim_sync disables it once it is fully off-screen. */
+		statusbar_anim_sync(m);
 		return;
 	}
 
@@ -4147,9 +4234,12 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 	if (bar_area.height < 0)
 		bar_area.height = 0;
 
-	wlr_scene_node_set_enabled(&m->statusbar.tree->node, 1);
-	wlr_scene_node_set_position(&m->statusbar.tree->node, bar_area.x, bar_area.y);
 	m->statusbar.area = bar_area;
+	m->statusbar.slot = bar_area;
+	/* Position comes from the slide state, not straight from bar_area:
+	 * on re-show the bar starts off-screen and rides the tile-area
+	 * spring back down. */
+	statusbar_anim_sync(m);
 
 	/* Tags reflect occupancy/focus which changes with every arrange —
 	 * always re-render.  The other modules only depend on bar height
@@ -4543,7 +4633,16 @@ refreshstatusvolume(void)
 	int use_muted_color = 0;
 	const char *icon = volume_icon_speaker_100;
 
-	if (vol < 0.0) {
+	/* Startup defaults retry here until PipeWire answers — no-op once
+	 * they have been applied. */
+	apply_startup_defaults();
+
+	/* Always re-read (throttled to one wpctl call per 8s inside
+	 * pipewire_volume_percent). Reading only when the cached level was
+	 * negative meant mute/volume changed anywhere else — pavucontrol, a
+	 * headset button, or a startup default that never landed — stayed
+	 * invisible for the rest of the session. */
+	{
 		double read = pipewire_volume_percent(&is_headset);
 		if (read >= 0.0) {
 			vol = read;
@@ -4623,7 +4722,10 @@ refreshstatusmic(void)
 	int use_muted_color = 0;
 	const char *icon = mic_icon_unmuted;
 
-	if (vol < 0.0) {
+	/* Re-read every refresh (8s throttle lives in the reader) so an
+	 * externally muted mic — or a startup default that never reached
+	 * PipeWire — cannot leave the icon lying. */
+	{
 		double read = pipewire_mic_volume_percent();
 		if (read >= 0.0) {
 			vol = read;
