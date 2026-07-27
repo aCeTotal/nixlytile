@@ -1039,6 +1039,10 @@ typedef struct {
 	double open_progress;
 	double open_progress_vel;
 	int open_anim_active;
+	/* Adoptert av varselbanen (notify.c): står i høyre marg og skal
+	 * ikke sentreres av mapnotify/configurex11. Nullstilles når den har
+	 * glidd ut — vinduet lever videre, vi eier det bare ikke lenger. */
+	int is_notif;
 } Client;
 
 /* ── Standalone close anim ───────────────────────────────────────────
@@ -1173,6 +1177,21 @@ typedef struct {
 	double damping;
 	double stiffness;
 } SpringParams;
+
+/* ── varsel i høyre marg (notify.c) ─────────────────────────────────
+ * Ett lite fokusløst vindu som er adoptert av varselbanen. Lever bare så
+ * lenge animasjonen gjør det; klienten eier selve vinduet. */
+typedef struct {
+	struct wl_list link;
+	Client *c;
+	Monitor *m;
+	int w, h;
+	int slot_y;             /* fast y i margen */
+	int target_x, off_x;    /* innslidd og utenfor-kanten x */
+	double x_f, x_vel;      /* fjærtilstand på x */
+	int hiding;             /* 1 = på vei ut */
+	struct wl_event_source *timer;
+} Notif;
 
 /* ── monitor ───────────────────────────────────────────────────────── */
 struct Monitor {
@@ -2157,6 +2176,14 @@ void window_ipc_publish_workspace_activated(void);
 /* anim.c */
 int anim_tick(double *current, double target, double rate, double dt);
 int spring_tick(double *pos, double *vel, double target, SpringParams sp, double dt);
+
+/* notify.c */
+extern struct wl_list notifs;
+int notify_try_adopt(Client *c);
+void notify_start_offscreen(Client *c);
+void notify_release(Client *c);
+void notify_tick(Monitor *m, double dt, int *still);
+
 int monitor_anim_tick(Monitor *m, double dt);
 void client_set_target_geom(Client *c, struct wlr_box g);
 void client_scale_to_box(Client *c, int box_w, int box_h);

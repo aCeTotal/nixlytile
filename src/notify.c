@@ -1,0 +1,285 @@
+#include "nixlytile.h"
+#include "client.h"
+
+/* Varselbane.
+ *
+ * Små flytende vinduer uten fokus-ønske — Steam sine vennevarsler, blueman
+ * sine tilkoblingsbokser — er ikke dialoger og skal ikke behandles som det.
+ * Uten denne banen treffer de sentrerings-regelen i mapnotify/configurex11
+ * og lander midt på skjermen, over det du holder på med.
+ *
+ * Her adopteres de i stedet: parkeres i høyre marg, glir inn fra utsiden,
+ * står NOTIF_HOLD_MS, og glir ut igjen. Vinduet lukkes ALDRI av oss — det
+ * gjemmes bare når det har glidd ut. Steam og blueman gjenbruker og river
+ * ned sine egne varselvinduer, og en close fra compositoren midt i den
+ * livssyklusen kan få dem til å slutte å vise varsler i det hele tatt.
+ *
+ * Slide-en kjøres på scene-noden direkte, ikke via resize(): resize() kaller
+ * applybounds() som klemmer klienten inn i flate-arealet, og da kommer den
+ * aldri utenfor skjermkanten. */
+
+/* Hvor langt inn fra skjermkanten varselet står, og luft mellom dem. */
+#define NOTIF_MARGIN 16
+#define NOTIF_GAP 10
+/* Synlig tid før den glir ut igjen. */
+#define NOTIF_HOLD_MS 4000
+/* Størrelsestak for å bli regnet som varsel, som andel av skjermen. Over
+ * dette er det et ekte vindu selv om det er flytende og fokusløst. */
+#define NOTIF_MAX_W_NUM 2
+#define NOTIF_MAX_W_DEN 5
+#define NOTIF_MAX_H_NUM 1
+#define NOTIF_MAX_H_DEN 4
+
+/* Samme følelse som vindusfjæra ellers i compositoren (kritisk dempet, ingen
+ * overshoot). SPRING_WINDOW er static i anim.c, så verdiene gjentas her. */
+static const SpringParams SPRING_NOTIF = { 1.0, 1.0, 800.0 };
+
+struct wl_list notifs;
+
+/* request_frame() er static inline i output.c. Her holder det å be om en
+ * frame direkte — fjæra tikkes videre av monitor_anim_tick. */
+static void
+notif_schedule(Monitor *m)
+{
+	if (m && m->wlr_output)
+		wlr_output_schedule_frame(m->wlr_output);
+}
+
+static int
+notif_hide_timeout(void *data)
+{
+	Notif *n = data;
+
+	n->hiding = 1;
+	n->target_x = n->off_x;
+	notif_schedule(n->m);
+	return 0;
+}
+
+/* Ledig y i margen: stable nedover fra toppen av flate-arealet (m->w.y
+ * ligger allerede under statuslinja) og hopp over slots som er tatt. */
+static int
+notif_free_slot_y(Monitor *m, int h)
+{
+	int y = m->w.y + NOTIF_MARGIN;
+	int again = 1;
+
+	while (again) {
+		Notif *o;
+		again = 0;
+		wl_list_for_each(o, &notifs, link) {
+			if (o->m != m || o->hiding)
+				continue;
+			if (y < o->slot_y + o->h + NOTIF_GAP
+					&& o->slot_y < y + h + NOTIF_GAP) {
+				y = o->slot_y + o->h + NOTIF_GAP;
+				again = 1;
+				break;
+			}
+		}
+	}
+	return y;
+}
+
+/* Er dette et varsel? Kun X11: "uten fokus-ønske" finnes som begrep i
+ * ICCCM/override-redirect, men har ingen motpart i xdg-shell — en Wayland-
+ * toplevel kan ikke si at den ikke vil ha fokus, så vi har ingenting å
+ * klassifisere på der og lar dem være. */
+/* Skjermen varselet hører til. Override-redirect-klienter går aldri gjennom
+ * applyrules/setmon, så c->mon er NULL for dem — utled fra der vinduet ble
+ * mappet, ellers aktiv skjerm. */
+static Monitor *
+notif_monitor_for(Client *c)
+{
+	Monitor *m;
+
+	if (c->mon)
+		return c->mon;
+	m = xytomon(c->geom.x + c->geom.width / 2,
+			c->geom.y + c->geom.height / 2);
+	return m ? m : selmon;
+}
+
+static int
+notify_looks_like_notification(Client *c, Monitor **out)
+{
+	Monitor *m;
+	int max_w, max_h;
+
+	if (!c)
+		return 0;
+	if (c->isfullscreen || c->is_game_splash || looks_like_game(c))
+		return 0;
+
+	m = notif_monitor_for(c);
+	if (!m || m->m.width <= 0 || m->m.height <= 0)
+		return 0;
+	*out = m;
+	max_w = m->m.width * NOTIF_MAX_W_NUM / NOTIF_MAX_W_DEN;
+	max_h = m->m.height * NOTIF_MAX_H_NUM / NOTIF_MAX_H_DEN;
+	if (c->geom.width <= 0 || c->geom.height <= 0)
+		return 0;
+	if (c->geom.width > max_w || c->geom.height > max_h)
+		return 0;
+
+#ifdef XWAYLAND
+	if (client_is_x11(c)) {
+		/* Override-redirect som ikke ber om fokus: Steams vennevarsler.
+		 * client_wants_focus() er allerede compositorens definisjon av
+		 * "denne vil ha input" for akkurat den klassen. */
+		if (client_is_unmanaged(c))
+			return !client_wants_focus(c);
+
+		/* Managed X11: vindustypen er utvetydig når den er satt, og
+		 * fanger de som ikke er override-redirect. */
+		if (!c->isfloating)
+			return 0;
+		if (wlr_xwayland_surface_has_window_type(c->surface.xwayland,
+					WLR_XWAYLAND_NET_WM_WINDOW_TYPE_NOTIFICATION)
+				|| wlr_xwayland_surface_has_window_type(c->surface.xwayland,
+					WLR_XWAYLAND_NET_WM_WINDOW_TYPE_TOOLTIP))
+			return 1;
+		/* Ellers: liten, flytende og uten input-modell = varsel.
+		 * ICCCM WM_HINTS input=False + ingen WM_TAKE_FOCUS er så nær
+		 * "vil ikke ha fokus" som X11 kommer for managed vinduer. */
+		return wlr_xwayland_surface_icccm_input_model(c->surface.xwayland)
+				== WLR_ICCCM_INPUT_MODEL_NONE;
+	}
+#endif
+
+	/* Wayland xdg-toplevel. Her finnes ingen "vil ikke ha fokus"-hint i
+	 * det hele tatt — xdg-shell har ikke noe motstykke til ICCCM-input
+	 * eller override-redirect. Nærmeste holdbare proxy er: liten, flytende,
+	 * og UTEN parent. En ekte dialog setter parent på toplevel'en sin
+	 * (set_parent) nettopp for å si "jeg hører til det vinduet"; et varsel
+	 * står alene. Uten parent-kravet ville en liten frittstående dialog
+	 * blitt skjøvet ut i margen og forsvunnet etter 4 s. */
+	if (!c->isfloating)
+		return 0;
+	if (!c->surface.xdg || !c->surface.xdg->toplevel)
+		return 0;
+	return c->surface.xdg->toplevel->parent == NULL;
+}
+
+int
+notify_try_adopt(Client *c)
+{
+	Monitor *m = NULL;
+	Notif *n;
+
+	if (!notify_looks_like_notification(c, &m) || !m)
+		return 0;
+
+	n = calloc(1, sizeof(*n));
+	if (!n)
+		return 0;
+
+	n->c = c;
+	n->m = m;
+	n->w = c->geom.width;
+	n->h = c->geom.height;
+	n->slot_y = notif_free_slot_y(n->m, n->h);
+	n->target_x = n->m->m.x + n->m->m.width - n->w - NOTIF_MARGIN;
+	/* Start helt utenfor kanten, ikke bare delvis: en varselboks som
+	 * dukker opp halvveis inne har allerede "poppet" før den glir. */
+	n->off_x = n->m->m.x + n->m->m.width + NOTIF_GAP;
+	n->x_f = (double)n->off_x;
+	n->x_vel = 0.0;
+	n->hiding = 0;
+
+	c->is_notif = 1;
+	c->geom.x = n->target_x;
+	c->geom.y = n->slot_y;
+	wlr_scene_node_set_position(&c->scene->node, n->off_x, n->slot_y);
+
+	n->timer = wl_event_loop_add_timer(event_loop, notif_hide_timeout, n);
+	if (n->timer)
+		wl_event_source_timer_update(n->timer, NOTIF_HOLD_MS);
+
+	wl_list_insert(&notifs, &n->link);
+	notif_schedule(n->m);
+	return 1;
+}
+
+/* Sett noden tilbake til utgangspunktet utenfor kanten.
+ *
+ * Managed klienter må gjennom resize() etter adopsjonen for å få rammer og
+ * flate på plass i slotten, og resize() setter scene-noden til c->geom. Det
+ * ville plassert varselet ferdig innslidd. Kalles derfor rett etter resize,
+ * så fjæra har noe å gli fra. */
+void
+notify_start_offscreen(Client *c)
+{
+	Notif *n;
+
+	if (!c || !c->is_notif)
+		return;
+	wl_list_for_each(n, &notifs, link) {
+		if (n->c != c)
+			continue;
+		wlr_scene_node_set_position(&c->scene->node, n->off_x, n->slot_y);
+		return;
+	}
+}
+
+void
+notify_release(Client *c)
+{
+	Notif *n, *tmp;
+
+	if (!c || !c->is_notif)
+		return;
+	wl_list_for_each_safe(n, tmp, &notifs, link) {
+		if (n->c != c)
+			continue;
+		if (n->timer)
+			wl_event_source_remove(n->timer);
+		wl_list_remove(&n->link);
+		free(n);
+	}
+	c->is_notif = 0;
+}
+
+void
+notify_tick(Monitor *m, double dt, int *still)
+{
+	Notif *n, *tmp;
+
+	*still = 0;
+	wl_list_for_each_safe(n, tmp, &notifs, link) {
+		if (n->m != m)
+			continue;
+		if (!n->c || !client_surface(n->c)
+				|| !client_surface(n->c)->mapped) {
+			/* Klienten forsvant under animasjonen. */
+			if (n->timer)
+				wl_event_source_remove(n->timer);
+			wl_list_remove(&n->link);
+			free(n);
+			continue;
+		}
+
+		if (spring_tick(&n->x_f, &n->x_vel, (double)n->target_x,
+				SPRING_NOTIF, dt)) {
+			wlr_scene_node_set_position(&n->c->scene->node,
+					(int)n->x_f, n->slot_y);
+			*still = 1;
+			continue;
+		}
+
+		/* Fjæra er i mål. */
+		wlr_scene_node_set_position(&n->c->scene->node,
+				n->target_x, n->slot_y);
+		if (!n->hiding)
+			continue;
+
+		/* Ute av syne: gjem noden og slipp slotten. Vinduet lever
+		 * videre — klienten eier det og river det ned selv. */
+		wlr_scene_node_set_enabled(&n->c->scene->node, 0);
+		n->c->is_notif = 0;
+		if (n->timer)
+			wl_event_source_remove(n->timer);
+		wl_list_remove(&n->link);
+		free(n);
+	}
+}

@@ -3631,6 +3631,15 @@ restore_max_refresh_rate(Monitor *m)
 	if (!max_mode)
 		return;
 
+	/* Video kjørte allerede på maks-moden (kilde-fps matchet panelet, eller
+	 * VRR gjorde jobben uten modebytte). Ikke commit den på nytt — det er
+	 * et modeset uten endring, og på eDP/HDMI kan det blanke skjermen. */
+	if (m->wlr_output->current_mode == max_mode) {
+		m->video_mode_active = 0;
+		m->original_mode = NULL;
+		return;
+	}
+
 	wlr_log(WLR_DEBUG, "Restoring %s to max mode: %dx%d@%dmHz",
 			m->wlr_output->name, max_mode->width, max_mode->height,
 			max_mode->refresh);
@@ -4871,6 +4880,21 @@ apply_best_video_mode(Monitor *m, float video_hz)
 	case 1: /* Existing mode */
 		if (!best.mode) {
 			wlr_log(WLR_ERROR, "Best method is existing mode but no mode set");
+			break;
+		}
+
+		/* Allerede på denne moden. Skjer ved episode-bytte: klienten
+		 * sender VideoPlaying på nytt med samme fps uten mellomliggende
+		 * VideoStopped (den holder moden med vilje over byttet). En ny
+		 * commit av gjeldende mode kan slå ut i full modeset i DRM-
+		 * backenden — svart skjerm mens linken re-syncer, helt uten
+		 * grunn. Marker eierskap og la panelet stå. */
+		if (m->wlr_output->current_mode == best.mode) {
+			m->video_mode_active = 1;
+			success = 1;
+			wlr_log(WLR_DEBUG, "Mode %d.%03d Hz already active on %s — no commit",
+					best.mode->refresh / 1000, best.mode->refresh % 1000,
+					m->wlr_output->name);
 			break;
 		}
 

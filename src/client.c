@@ -915,6 +915,11 @@ mapnotify(struct wl_listener *listener, void *data)
 		 * origin check leaves them alone. */
 		{
 			int center = 0;
+			/* Varsel? Da hører det hjemme i høyre marg, ikke midt på
+			 * skjermen. notify_try_adopt setter geom + scene-posisjon
+			 * selv og starter slide-en. */
+			if (notify_try_adopt(c))
+				goto notif_placed;
 #ifdef XWAYLAND
 			if (c->surface.xwayland &&
 					wlr_xwayland_surface_has_window_type(c->surface.xwayland,
@@ -940,10 +945,12 @@ mapnotify(struct wl_listener *listener, void *data)
 			}
 		}
 
+notif_placed:
 		/* Unmanaged clients always are floating */
 		wlr_scene_node_reparent(&c->scene->node,
 			layers[client_has_fullscreen_ancestor(c) ? LyrFS : LyrFloat]);
-		wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
+		if (!c->is_notif)
+			wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
 		client_set_size(c, c->geom.width, c->geom.height);
 		if (client_wants_focus(c)) {
 			wlr_log(WLR_INFO, "mapnotify: unmanaged client wants focus, setting exclusive_focus");
@@ -1285,6 +1292,20 @@ mapnotify(struct wl_listener *listener, void *data)
 		wlr_scene_node_reparent(&c->scene->node, layers[LyrOverlay]);
 		resize(c, c->geom, 1);
 		focusclient(c, 1);
+		printstatus();
+		return;
+	}
+
+	/* Varsel (managed X11 eller Wayland-toplevel): høyre marg istf senter.
+	 * Her er c->mon og c->isfloating avgjort av applyrules/setmon, som er
+	 * det klassifiseringen trenger. LyrOverlay av samme grunn som splash —
+	 * et varsel skal være synlig over et fullskjermsvindu. Ingen
+	 * focusclient: varselet skal ikke stjele tastaturet. */
+	if (notify_try_adopt(c)) {
+		wlr_scene_node_set_enabled(&c->scene->node, 1);
+		wlr_scene_node_reparent(&c->scene->node, layers[LyrOverlay]);
+		resize(c, c->geom, 1);
+		notify_start_offscreen(c);
 		printstatus();
 		return;
 	}
@@ -2171,6 +2192,10 @@ unmapnotify(struct wl_listener *listener, void *data)
 {
 	/* Called when the surface is unmapped, and should no longer be shown. */
 	Client *c = wl_container_of(listener, c, unmap);
+
+	/* Varselet forsvant før slide-en var ferdig — slipp slotten og
+	 * drep timeren så den ikke fyrer på et dødt vindu. */
+	notify_release(c);
 
 	if (looks_like_game(c) || is_game_content(c))
 		game_log("GAME_UNMAP: appid='%s' title='%s' type=%s "

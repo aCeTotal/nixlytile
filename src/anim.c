@@ -747,6 +747,15 @@ monitor_anim_tick(Monitor *m, double dt)
 	if (close_still)
 		active = 1;
 
+	/* Varsel-slide i høyre marg. Egen liste: override-redirect-klienter
+	 * står ikke i `clients`, så clients_anim_tick ser dem aldri. */
+	{
+		int notif_still = 0;
+		notify_tick(m, dt, &notif_still);
+		if (notif_still)
+			active = 1;
+	}
+
 	/* Open anim tick — per-client scale + fade. */
 	{
 		Client *c;

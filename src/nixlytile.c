@@ -816,6 +816,11 @@ cleanup(void)
 	wlr_backend_destroy(backend);
 
 	wl_display_destroy(dpy);
+	/* handlesig() sjekker dpy før wl_display_terminate. Uten nulling her
+	 * treffer et SIGTERM/SIGINT som lander under nedrigging (exit-handlers
+	 * kan bruke sekunder i GL-teardown) en destruert display → write() til
+	 * lukket terminate_efd → wl_abort() → SIGABRT istf ren exit. */
+	dpy = NULL;
 	/* Destroy after the wayland display (when the monitors are already destroyed)
 	   to avoid destroying them with an invalid scene output. */
 	wlr_scene_node_destroy(&scene->tree.node);
@@ -1112,13 +1117,26 @@ run(const char *startup_cmd)
 
 		fork_detach();
 
-		/* First: import environment variables */
+		/* First: import environment variables.
+		 *
+		 * Begge halvdelene trengs. systemctl import-environment treffer
+		 * bare systemd-user-managerens miljø; D-Bus har sitt EGET
+		 * aktiveringsmiljø, og tjenester som startes derfra (dunst er
+		 * Type=dbus) arver det. Uten dbus-update-activation-environment
+		 * blir de sittende med verdier fra en tidligere sesjon — dunst
+		 * fant hverken wayland-socketen eller X-displayet og aborterte
+		 * ved hver eneste notifikasjon.
+		 *
+		 * Kjøres via sh så en manglende binær ikke stopper den andre;
+		 * execvp-varianten _exit(1)'et stille og tok resten med seg. */
 		import_pid = fork();
 		if (import_pid == 0) {
-			execvp("systemctl", (char *const[]) {
-				"systemctl", "--user", "import-environment",
-				"DISPLAY", "WAYLAND_DISPLAY", NULL
-			});
+			execl("/bin/sh", "/bin/sh", "-c",
+				"systemctl --user import-environment "
+				"DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP; "
+				"dbus-update-activation-environment --systemd "
+				"DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP",
+				NULL);
 			_exit(1);
 		}
 
@@ -2862,6 +2880,7 @@ setup(void)
 	wl_list_init(&clients);
 	wl_list_init(&fstack);
 	wl_list_init(&closing_anims);
+	wl_list_init(&notifs);
 	wl_list_init(&text_inputs);
 
 	/* Niri-style waybar support: expose zdwl_ipc_manager_v2 so the
@@ -3625,6 +3644,15 @@ configurex11(struct wl_listener *listener, void *data)
 		 * centering done in mapnotify so subsequent configure
 		 * requests don't snap the splash to the top-left. */
 		int recenter = 0;
+		/* Adoptert av varselbanen: notify_tick eier posisjonen mens
+		 * det glir. Å sentrere her ville rykket det til midten midt
+		 * i animasjonen. */
+		if (c->is_notif) {
+			wlr_xwayland_surface_configure(c->surface.xwayland,
+					c->geom.x, c->geom.y,
+					event->width, event->height);
+			return;
+		}
 		if (wlr_xwayland_surface_has_window_type(c->surface.xwayland,
 					WLR_XWAYLAND_NET_WM_WINDOW_TYPE_SPLASH))
 			recenter = 1;
