@@ -1,6 +1,7 @@
 /* statusbar.c - Auto-extracted from nixlytile.c */
 #include "nixlytile.h"
 #include "client.h"
+#include "diag.h"
 
 void
 clearstatusmodule(StatusModule *module)
@@ -951,7 +952,7 @@ rendertray(Monitor *m, int bar_height)
 {
 	StatusModule *module;
 	TrayItem *it;
-	int padding, gap, x, slot = 0, count = 0;
+	int padding, gap, x, count = 0;
 
 	if (!m || !m->statusbar.traylabel.tree)
 		return;
@@ -966,9 +967,10 @@ rendertray(Monitor *m, int bar_height)
 		padding = 1;
 	gap = 4;
 
-	/* First pass: load icons and find the widest one.  Every icon is
-	 * centered in an equally wide slot so the spacing between icons is
-	 * identical regardless of individual icon aspect ratios. */
+	/* First pass: load icons.  Advance is per-icon width + gap, so the
+	 * whitespace between two neighbours is always exactly `gap`.  A fixed
+	 * slot (widest icon) instead gives even CENTER distance, which reads
+	 * as uneven spacing the moment the icons differ in width. */
 	wl_list_for_each(it, &tray_items, link) {
 		if (!it->icon_buf) {
 			/* Retry: the item may have registered before its icon
@@ -991,8 +993,6 @@ rendertray(Monitor *m, int bar_height)
 						now_ms + 10000;
 			}
 		}
-		if (it->icon_buf && it->icon_w > slot)
-			slot = it->icon_w;
 	}
 
 	x = padding;
@@ -1007,21 +1007,22 @@ rendertray(Monitor *m, int bar_height)
 		}
 
 		it->x = x;
-		it->w = slot + gap;
+		it->w = it->icon_w + gap;
 		icon_y = MAX(0, (bar_height - it->icon_h) / 2);
 
 		scene_buf = wlr_scene_buffer_create(module->tree, NULL);
 		if (scene_buf) {
 			wlr_scene_buffer_set_buffer(scene_buf, it->icon_buf);
-			wlr_scene_node_set_position(&scene_buf->node,
-					x + (slot - it->icon_w) / 2, icon_y);
+			wlr_scene_node_set_position(&scene_buf->node, x, icon_y);
 		}
 
 		x += it->w;
 		count++;
 	}
 
-	module->width = count > 0 ? x + padding : 0;
+	/* Drop the gap trailing the last icon so the module has the same
+	 * padding on both sides. */
+	module->width = count > 0 ? x - gap + padding : 0;
 	if (module->width > 0)
 		updatemodulebg(module, module->width, bar_height, statusbar_bg);
 	wlr_scene_node_set_enabled(&module->tree->node, module->width > 0);
@@ -4249,6 +4250,10 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 	 * commit!) is wasted work unless the height
 	 * changed or the bar was just re-shown. */
 	renderworkspaces(m, &m->statusbar.tags, bar_area.height);
+	diag_logf("BAR", "layout %s barh=%d tags_w=%d boxes=%d font=%d reshow=%d",
+		m->wlr_output->name, bar_area.height, m->statusbar.tags.width,
+		m->statusbar.tags.box_count, statusfont.font ? 1 : 0,
+		m->statusbar.last_layout_h != bar_area.height);
 	if (m->statusbar.last_layout_h != bar_area.height) {
 		m->statusbar.last_layout_h = bar_area.height;
 		if (m->statusbar.traylabel.tree)
@@ -5840,6 +5845,7 @@ togglestatusbar(const Arg *arg)
 	if (!selmon)
 		return;
 	selmon->showbar = !selmon->showbar;
+	diag_logf("BAR", "toggle showbar=%d", selmon->showbar);
 	if (selmon->showbar)
 		statusbar_force_refresh(selmon);
 	arrangelayers(selmon);

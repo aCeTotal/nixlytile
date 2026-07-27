@@ -1195,6 +1195,7 @@ typedef struct {
 	int target_x, off_x;    /* innslidd og utenfor-kanten x */
 	double x_f, x_vel;      /* fjærtilstand på x */
 	int hiding;             /* 1 = på vei ut */
+	int sticky;             /* 1 = venter på inntasting, glir aldri ut selv */
 	struct wl_event_source *timer;
 } Notif;
 
@@ -2185,6 +2186,7 @@ int spring_tick(double *pos, double *vel, double target, SpringParams sp, double
 /* notify.c */
 extern struct wl_list notifs;
 int notify_try_adopt(Client *c);
+int notify_wants_keyboard(Client *c);
 void notify_start_offscreen(Client *c);
 void notify_release(Client *c);
 void notify_tick(Monitor *m, double dt, int *still);

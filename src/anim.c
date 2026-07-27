@@ -508,8 +508,18 @@ client_freeze(Client *c)
 	if (!c || c->frozen_buffer || !c->scene)
 		return;
 	surface = client_surface(c);
-	if (!surface || !surface->buffer || !surface->mapped)
+	if (!surface || !surface->mapped)
 		return;
+	if (!surface->buffer) {
+		/* Ingen buffer å snapshotte: klienten har ikke levert innhold
+		 * (typisk en X11-klient som har stått skjult på en inaktiv
+		 * workspace). Live-flaten står igjen uten innhold — tilen
+		 * rendres tom til klienten tegner igjen. */
+		diag_logf("TILE", "FREEZE-SKIP appid='%s' %dx%d (no buffer — tile renders empty)",
+			client_get_appid(c) ? client_get_appid(c) : "(null)",
+			c->geom.width, c->geom.height);
+		return;
+	}
 
 	c->frozen_buffer = wlr_scene_buffer_create(c->scene,
 			&surface->buffer->base);

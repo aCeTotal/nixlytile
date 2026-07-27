@@ -9,7 +9,9 @@
  * og lander midt på skjermen, over det du holder på med.
  *
  * Her adopteres de i stedet: parkeres i høyre marg, glir inn fra utsiden,
- * står NOTIF_HOLD_MS, og glir ut igjen. Vinduet lukkes ALDRI av oss — det
+ * står NOTIF_HOLD_MS, og glir ut igjen. Unntaket er prompts som venter på
+ * inntasting (passordbokser): de får tastaturet og blir stående til klienten
+ * selv river dem ned — se notif_wants_input(). Vinduet lukkes ALDRI av oss — det
  * gjemmes bare når det har glidd ut. Steam og blueman gjenbruker og river
  * ned sine egne varselvinduer, og en close fra compositoren midt i den
  * livssyklusen kan få dem til å slutte å vise varsler i det hele tatt.
@@ -49,6 +51,14 @@ static int
 notif_hide_timeout(void *data)
 {
 	Notif *n = data;
+
+	/* Sikkerhetsnett for prompts notif_wants_input() ikke kjente igjen:
+	 * har boksen tastaturet når timeren går, står brukeren og skriver i
+	 * den. Da blir den stående — ingen ny timer. */
+	if (n->c && client_surface(n->c) == seat->keyboard_state.focused_surface) {
+		n->sticky = 1;
+		return 0;
+	}
 
 	n->hiding = 1;
 	n->target_x = n->off_x;
@@ -100,6 +110,41 @@ notif_monitor_for(Client *c)
 	return m ? m : selmon;
 }
 
+#ifdef XWAYLAND
+/* Nedtrekksmeny/kontekstmeny fra en X11-klient. */
+static int
+notif_is_menu(Client *c)
+{
+	static const enum wlr_xwayland_net_wm_window_type type[] = {
+		WLR_XWAYLAND_NET_WM_WINDOW_TYPE_MENU,
+		WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DROPDOWN_MENU,
+		WLR_XWAYLAND_NET_WM_WINDOW_TYPE_POPUP_MENU,
+		WLR_XWAYLAND_NET_WM_WINDOW_TYPE_COMBO,
+		WLR_XWAYLAND_NET_WM_WINDOW_TYPE_TOOLBAR,
+		WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DND,
+	};
+	size_t i;
+
+	for (i = 0; i < LENGTH(type); i++)
+		if (wlr_xwayland_surface_has_window_type(c->surface.xwayland,
+					type[i]))
+			return 1;
+
+	/* Uten vindustype (eldre toolkits): menyen åpnes inntil pekeren.
+	 * Litt slark rundt boksen, siden en meny kan åpne seg opp/til
+	 * venstre når det ikke er plass under. */
+	if (client_is_unmanaged(c) && cursor) {
+		struct wlr_box b = c->geom;
+		int slack = 8;
+		if (cursor->x >= b.x - slack && cursor->x <= b.x + b.width + slack
+				&& cursor->y >= b.y - slack
+				&& cursor->y <= b.y + b.height + slack)
+			return 1;
+	}
+	return 0;
+}
+#endif
+
 static int
 notify_looks_like_notification(Client *c, Monitor **out)
 {
@@ -124,6 +169,14 @@ notify_looks_like_notification(Client *c, Monitor **out)
 
 #ifdef XWAYLAND
 	if (client_is_x11(c)) {
+		/* Menyer er override-redirect og ber ikke om fokus — samme
+		 * signatur som et varsel — men de hører hjemme der klienten
+		 * la dem, under musepekeren. Vindustypen sier det når den er
+		 * satt; ellers: en boks som åpner seg under pekeren er en
+		 * meny, et varsel dukker opp der brukeren ikke er. */
+		if (notif_is_menu(c))
+			return 0;
+
 		/* Override-redirect som ikke ber om fokus: Steams vennevarsler.
 		 * client_wants_focus() er allerede compositorens definisjon av
 		 * "denne vil ha input" for akkurat den klassen. */
@@ -161,6 +214,54 @@ notify_looks_like_notification(Client *c, Monitor **out)
 	return c->surface.xdg->toplevel->parent == NULL;
 }
 
+/* Passordbokser — polkit-agenten, pinentry, ssh-askpass, nøkkelring — er
+ * små, flytende og uten parent, altså nøyaktig samme signatur som et varsel.
+ * De skal fortsatt gli inn i margen, men de venter på inntasting: de får
+ * tastaturet, og de glir aldri ut av seg selv. */
+static int
+notif_wants_input(Client *c)
+{
+	static const char *const pat[] = {
+		"polkit", "pinentry", "askpass", "keyring", "gcr",
+		"authenticat", "autentiser", "password", "passord",
+	};
+	const char *field[2];
+	size_t i, j;
+
+	/* xdg-dialog-v1: klienten sier selv at dette er en dialog, ikke et
+	 * varsel. GTK4/libadwaita setter den på alle dialogene sine. */
+	if (!client_is_x11(c) && c->surface.xdg && c->surface.xdg->toplevel
+			&& wlr_xdg_dialog_v1_try_from_wlr_xdg_toplevel(
+				c->surface.xdg->toplevel))
+		return 1;
+
+	field[0] = client_get_appid(c);
+	field[1] = client_get_title(c);
+	for (i = 0; i < LENGTH(field); i++) {
+		if (!field[i])
+			continue;
+		for (j = 0; j < LENGTH(pat); j++)
+			if (strcasestr(field[i], pat[j]))
+				return 1;
+	}
+	return 0;
+}
+
+/* Er dette varselet en prompt som venter på tastetrykk? Kalles fra
+ * mapnotify rett etter adopsjonen for å gi den fokus. */
+int
+notify_wants_keyboard(Client *c)
+{
+	Notif *n;
+
+	if (!c || !c->is_notif)
+		return 0;
+	wl_list_for_each(n, &notifs, link)
+		if (n->c == c)
+			return n->sticky;
+	return 0;
+}
+
 int
 notify_try_adopt(Client *c)
 {
@@ -186,15 +287,19 @@ notify_try_adopt(Client *c)
 	n->x_f = (double)n->off_x;
 	n->x_vel = 0.0;
 	n->hiding = 0;
+	n->sticky = notif_wants_input(c);
 
 	c->is_notif = 1;
 	c->geom.x = n->target_x;
 	c->geom.y = n->slot_y;
 	wlr_scene_node_set_position(&c->scene->node, n->off_x, n->slot_y);
 
-	n->timer = wl_event_loop_add_timer(event_loop, notif_hide_timeout, n);
-	if (n->timer)
-		wl_event_source_timer_update(n->timer, NOTIF_HOLD_MS);
+	if (!n->sticky) {
+		n->timer = wl_event_loop_add_timer(event_loop,
+				notif_hide_timeout, n);
+		if (n->timer)
+			wl_event_source_timer_update(n->timer, NOTIF_HOLD_MS);
+	}
 
 	wl_list_insert(&notifs, &n->link);
 	notif_schedule(n->m);

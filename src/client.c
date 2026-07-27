@@ -1306,6 +1306,12 @@ notif_placed:
 		wlr_scene_node_reparent(&c->scene->node, layers[LyrOverlay]);
 		resize(c, c->geom, 1);
 		notify_start_offscreen(c);
+		/* Unntaket fra "ingen focusclient": en passordboks venter på
+		 * inntasting og er ubrukelig uten tastaturet. lift=0 — den
+		 * ligger allerede i LyrOverlay, og warpcursor ville rykket
+		 * pekeren ut i margen. */
+		if (notify_wants_keyboard(c))
+			focusclient(c, 0);
 		printstatus();
 		return;
 	}
