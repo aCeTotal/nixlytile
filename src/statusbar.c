@@ -4200,8 +4200,15 @@ schedule_popup_delay(uint32_t ms)
  * between the bar's bottom edge and the tiles is pixel-identical in every
  * frame of the transition — two independent timelines would drift.
  *
- * Fully off-screen (offset == slide distance) disables the node, so a
- * hidden bar costs nothing and cannot be clicked. */
+ * Fully off-screen (offset == slide distance) parks the node far above every
+ * output instead of disabling it: the scene graph releases the buffer AND the
+ * texture of every buffer node under a disabled tree
+ * (scene_node_cleanup_when_disabled), so a disabled bar loses every glyph and
+ * icon it had rasterized and comes back as bare module backgrounds. Parked
+ * off-screen it is just as invisible and just as uncomposited, but its content
+ * survives, so re-showing is a pure node move. Clicks cannot reach it either —
+ * every bar input path tests m->showbar first. */
+#define STATUSBAR_PARK_Y 100000
 void
 statusbar_anim_sync(Monitor *m)
 {
@@ -4240,9 +4247,10 @@ statusbar_anim_sync(Monitor *m)
 	if (offset > slide)
 		offset = slide;
 
-	wlr_scene_node_set_position(&m->statusbar.tree->node,
-			shown_x, shown_y - offset);
-	wlr_scene_node_set_enabled(&m->statusbar.tree->node, offset < slide);
+	wlr_scene_node_set_enabled(&m->statusbar.tree->node, 1);
+	wlr_scene_node_set_position(&m->statusbar.tree->node, shown_x,
+			offset < slide ? shown_y - offset
+					: shown_y - STATUSBAR_PARK_Y);
 }
 
 void
