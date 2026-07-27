@@ -2543,6 +2543,10 @@ update_game_mode(void)
 			/* Re-enable showbar on all monitors */
 			wl_list_for_each(m, &mons, link) {
 				m->showbar = 1;
+				/* Game mode cleared showbar without an arrange, so
+				 * layoutstatusbar never armed its re-show render and
+				 * the status timers stayed disarmed — force both. */
+				statusbar_force_refresh(m);
 				/* Disable game VRR on all monitors when leaving game mode */
 				if (m->game_vrr_active)
 					disable_game_vrr(m);

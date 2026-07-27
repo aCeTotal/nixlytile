@@ -2308,6 +2308,7 @@ void monitor_effective_size(Monitor *m, int *w, int *h);
 void printstatus(void);
 
 void togglestatusbar(const Arg *arg);
+void statusbar_force_refresh(Monitor *m);
 
 #if 1
 void initstatusbar(Monitor *m);

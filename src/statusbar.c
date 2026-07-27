@@ -5766,6 +5766,63 @@ statusbar_printstatus_legacy(void)
 	fflush(stdout);
 }
 
+/* Repaint every module from scratch the next time the bar is laid out.
+ *
+ * While the bar is hidden the refresh tasks keep updating their globals but
+ * skip the render — and a one-shot signal like the volume/mic force_render
+ * flag is consumed by that skipped pass.  Afterwards status_should_render
+ * sees unchanged text and suppresses the render, so a module whose text
+ * rarely moves (volume, mic, light, battery) stays blank or keeps a stale
+ * mute icon until its text happens to change, which can be minutes.
+ * Clearing the per-module dedup cache makes the next refresh unconditional;
+ * zeroing last_layout_h makes layoutstatusbar re-rasterize everything
+ * immediately from the already-current globals, so the bar is complete on
+ * the first frame it slides back in. */
+void
+statusbar_force_refresh(Monitor *m)
+{
+	StatusModule *mods[11];
+	size_t i;
+
+	if (!m)
+		return;
+
+	mods[0] = &m->statusbar.tags;
+	mods[1] = &m->statusbar.traylabel;
+	mods[2] = &m->statusbar.terminfo;
+	mods[3] = &m->statusbar.cpu;
+	mods[4] = &m->statusbar.net;
+	mods[5] = &m->statusbar.battery;
+	mods[6] = &m->statusbar.light;
+	mods[7] = &m->statusbar.mic;
+	mods[8] = &m->statusbar.volume;
+	mods[9] = &m->statusbar.ram;
+	mods[10] = &m->statusbar.clock;
+
+	for (i = 0; i < LENGTH(mods); i++) {
+		mods[i]->last_render_text[0] = '\0';
+		mods[i]->last_render_h = 0;
+	}
+	m->statusbar.last_layout_h = 0;
+
+	/* Drop the 8 s read throttles: a mute toggled from pavucontrol or a
+	 * headset button while the bar was away must show its real state, not
+	 * the level cached before it was hidden. */
+	volume_invalidate_cache(0);
+	volume_invalidate_cache(1);
+	mic_last_read_ms = 0;
+
+	/* Run every status task on the next event-loop iteration so the
+	 * re-rasterized text is replaced by freshly read values right away.
+	 * This also re-arms both timers, which game mode leaves disarmed:
+	 * schedule_next_status_refresh bails while game_mode_active, so the
+	 * tick that fired during game mode never rescheduled itself. */
+	for (i = 0; i < LENGTH(status_tasks); i++)
+		status_tasks[i].next_due_ms = 0;
+	schedule_next_status_refresh();
+	schedule_status_timer();
+}
+
 void
 togglestatusbar(const Arg *arg)
 {
@@ -5773,6 +5830,8 @@ togglestatusbar(const Arg *arg)
 	if (!selmon)
 		return;
 	selmon->showbar = !selmon->showbar;
+	if (selmon->showbar)
+		statusbar_force_refresh(selmon);
 	arrangelayers(selmon);
 }
 
