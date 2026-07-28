@@ -4265,12 +4265,16 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 	if (!m->showbar) {
 		hidetagthumbnail(m);
 		*client_area = *area;
-		/* area/last_layout_h are deliberately kept: the modules stay
-		 * rasterized and keep refreshing while hidden, so re-showing is
-		 * a pure node move — no relayout, no re-rasterization, no
-		 * module-by-module pop-in.
-		 * Node stays in the scene and slides out with the tile edge —
-		 * statusbar_anim_sync disables it once it is fully off-screen. */
+		/* Arm a full module re-render for the re-show layout: buffer
+		 * nodes can lose their contents while the bar is away (scene
+		 * cleanup on any disabled subtree), and the change-gated
+		 * refresh paths never repaint unchanged text — so repaint
+		 * everything the moment the bar comes back instead of trusting
+		 * the parked content to have survived. */
+		m->statusbar.last_layout_h = 0;
+		m->statusbar.tags.render_sig = 0;
+		/* Node stays in the scene and slides out with the tile edge —
+		 * statusbar_anim_sync parks it once it is fully off-screen. */
 		statusbar_anim_sync(m);
 		return;
 	}
@@ -4332,6 +4336,10 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 			if (now != (time_t)-1 && localtime_r(&now, &tm)
 					&& strftime(timestr, sizeof(timestr), "%H:%M", &tm))
 				renderclock(&m->statusbar.clock, bar_area.height, timestr);
+		}
+		if (m->statusbar.terminfo.tree) {
+			m->statusbar.terminfo.last_render_text[0] = '\0';
+			refreshstatusterminfo();
 		}
 	}
 	if (m->statusbar.cpu_popup.tree && m->statusbar.cpu_popup.visible)
@@ -5842,6 +5850,11 @@ statusbar_force_refresh(Monitor *m)
 	volume_invalidate_cache(0);
 	volume_invalidate_cache(1);
 	mic_last_read_ms = 0;
+
+	/* Arm a full module re-render on the next shown layout — the parked
+	 * modules may have lost their buffer contents while the bar was away. */
+	m->statusbar.last_layout_h = 0;
+	m->statusbar.tags.render_sig = 0;
 
 	/* Re-run every status task — but not on the frames the bar is sliding
 	 * in on.  volume/mic/light each fork+exec a helper (wpctl, light)
