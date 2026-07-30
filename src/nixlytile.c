@@ -1346,7 +1346,9 @@ run(const char *startup_cmd)
  *
  * Score components:
  * - Perfect sync (integer multiple): 100 points base
- * - VRR: 150 points (best possible - true frame-by-frame sync)
+ * - VRR: 90 points (fallback only — rendermon commits every vblank
+ *   during fullscreen video, so VRR paces at panel max rate, not at
+ *   the video rate; a fixed exact multiple is strictly better)
  * - Lower multiplier: bonus (2x > 3x > 4x)
  * - Precision penalty: deduct for non-exact matches
  */
@@ -1366,9 +1368,9 @@ run(const char *startup_cmd)
  * Evaluates ALL options and returns the one with highest quality score.
  *
  * Priority (by quality):
- * 1. VRR if available - true judder-free
- * 2. Exact integer multiple mode (120Hz for 24fps, etc)
- * 3. Custom CVT mode at exact multiple
+ * 1. Exact integer multiple mode (120Hz for 24fps, etc)
+ * 2. Custom CVT mode at exact multiple
+ * 3. VRR if available
  * 4. Closest available mode
  */
 VideoModeCandidate
@@ -1399,7 +1401,7 @@ find_best_video_mode(Monitor *m, float video_hz)
 	 * mid-playback and shows up as flicker and lag spikes. In that case a
 	 * fixed mode at an exact multiple paces better, so let it win by
 	 * simply not offering VRR as a candidate. */
-	if (m->vrr_capable && fullscreen_adaptive_sync_enabled
+	if (m->vrr_capable && fullscreen_adaptive_sync_enabled && !m->vrr_unusable
 			&& (video_hz >= VRR_MIN_SAFE_HZ || m->gcaps.has_hw_lfc)) {
 		candidate.method = 3;
 		candidate.mode = NULL;

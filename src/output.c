@@ -2012,6 +2012,14 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 				wlr_log(WLR_ERROR,
 					"VRR change rejected %d times on %s — giving up",
 					m->vrr_pending_tries, m->wlr_output->name);
+				/* Was this a video-VRR enable? Then fall back to a
+				 * fixed multiple mode instead of leaving the panel on
+				 * the desktop rate (pulldown judder). Deferred to
+				 * rendermon — we're mid-commit here. */
+				if (m->vrr_pending == 1 && m->vrr_pending_hz > 0.0f) {
+					m->vrr_unusable = 1;
+					m->video_fixed_fallback_hz = m->vrr_pending_hz;
+				}
 				m->vrr_pending = 0;
 				m->vrr_pending_tries = 0;
 			}
@@ -2063,12 +2071,24 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 				}
 			}
 
+			int transient = (commit_errno == EAGAIN || commit_errno == EBUSY);
+
 			if (m->commit_failures <= 3) {
 				wlr_log(WLR_ERROR, "Output commit failed on %s (n=%u)",
 					m->wlr_output->name, m->commit_failures);
 				request_frame(m);
+			} else if (transient && m->commit_failures <= 12) {
+				/* EAGAIN/EBUSY = a flip is still in flight in the
+				 * kernel. That usually drains within a vblank or two,
+				 * and each retry pass costs a full scene build (~ms),
+				 * so 12 passes ≈ 1-3 vblanks of natural backoff.
+				 * Escalating to the blocking-modeset drain after only 4
+				 * turned every flip race into an 11-16ms main-thread
+				 * stall + direct-scanout loss (TV log: recovery in 35%
+				 * of playback seconds, scanout off the whole session). */
+				request_frame(m);
 			} else {
-				/* Past 3 consecutive failures. Split by errno.
+				/* Past the retry window. Split by errno.
 				 *
 				 * EAGAIN/EBUSY is TRANSIENT: the previous nonblocking
 				 * pageflip on this CRTC has not completed (stuck or lost
@@ -2083,7 +2103,6 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 				 * refusing the buffer format/modifier persistently (e.g.
 				 * 10-bit Y-tiled CCS on i915 without ReBAR) → the
 				 * GPU-composition + XRGB8888 fallback. */
-				int transient = (commit_errno == EAGAIN || commit_errno == EBUSY);
 				uint64_t now = get_time_ns();
 
 				if (transient) {
@@ -2103,7 +2122,18 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 						m->scanout_blacklist = 1;
 						m->diag_scanout_falls++;
 					}
-					m->scanout_cooldown = 1u << 30;
+					/* Re-arm after ~600 good commits (~10s @ 60Hz).
+					 * The old 1u<<30 hold kept every 4K frame going
+					 * through GPU composition for the rest of the
+					 * session (TV log: scanout off 46687 of 46690 s,
+					 * scanout_rearm=0). Flap guard: re-blacklisted
+					 * within 30s of a re-arm means the client buffer
+					 * genuinely keeps wedging flips — hold for the
+					 * session (fullscreen-exit still clears it). */
+					m->scanout_cooldown =
+						(m->last_scanout_rearm_ns &&
+						 now - m->last_scanout_rearm_ns < 30000000000ULL)
+							? (int)(1u << 30) : 600;
 					scene->WLR_PRIVATE.direct_scanout = false;
 
 					/* 2. The kernel rejects every new NONBLOCK flip with
@@ -2182,7 +2212,8 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 					 * failing commit's contents — pins whether the
 					 * EAGAIN is buffer-only or carries extra state
 					 * (VRR/format/layers) the kernel chokes on. */
-					if (m->commit_failures % 60 == 5) {
+					if (m->commit_failures == 13 ||
+					    m->commit_failures % 60 == 5) {
 						diag_logf("COMMITFAIL",
 							"%s: EAGAIN state committed=0x%x "
 							"buffer=%d adaptive=%d layers=%d "
@@ -2303,6 +2334,7 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 					m->scanout_blacklist = 0;
 					m->scanout_cooldown = 0;
 					m->diag_scanout_rearms++;
+					m->last_scanout_rearm_ns = get_time_ns();
 					diag_logf("SCANOUT",
 						"%s: cooldown drained — re-arming direct scanout",
 						m->wlr_output->name);
@@ -2319,6 +2351,7 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 				m->scanout_blacklist = 0;
 				m->scanout_cooldown = 0;
 				m->diag_scanout_rearms++;
+				m->last_scanout_rearm_ns = get_time_ns();
 				diag_logf("SCANOUT",
 					"%s: cooldown drained — re-arming direct scanout",
 					m->wlr_output->name);
@@ -2356,9 +2389,18 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 			wlr_log(WLR_DEBUG, "VRR enabled for %.3f Hz video on %s",
 					m->vrr_pending_hz, m->wlr_output->name);
 		} else {
-			wlr_log(WLR_ERROR, "VRR enable failed on %s (hw rejected)",
+			wlr_log(WLR_ERROR, "VRR enable failed on %s (hw rejected) — "
+					"falling back to fixed multiple mode",
 					m->wlr_output->name);
+			/* Without this fallback the panel silently stays on its
+			 * desktop mode (e.g. 60 Hz for 23.976 video = 3:2 pulldown
+			 * judder for the rest of the film). Mark VRR unusable and
+			 * let rendermon apply the best fixed mode outside the
+			 * commit path. */
+			m->vrr_unusable = 1;
+			m->video_fixed_fallback_hz = m->vrr_pending_hz;
 			m->vrr_pending = 0;
+			request_frame(m);
 		}
 	} else if (m->vrr_pending == -1) {
 		if (m->wlr_output->adaptive_sync_status == WLR_OUTPUT_ADAPTIVE_SYNC_DISABLED) {
@@ -2489,6 +2531,16 @@ rendermon(struct wl_listener *listener, void *data)
 	}
 
 	classify_fullscreen_content(m, &is_game, &is_video, &allow_tearing);
+
+	/* Deferred fixed-mode fallback after a VRR reject (see
+	 * commit_output_frame). Blocking modeset — runs here, outside the
+	 * commit path. Only while the video is still up. */
+	if (m->video_fixed_fallback_hz > 0.0f) {
+		float fb_hz = m->video_fixed_fallback_hz;
+		m->video_fixed_fallback_hz = 0.0f;
+		if (is_video && !m->video_mode_active)
+			apply_best_video_mode(m, fb_hz);
+	}
 
 	/* A 10-bit render format is a direct-scanout blocker: the game's
 	 * 8-bit client buffer doesn't match the 10-bit swapchain, so wlroots
@@ -3622,6 +3674,11 @@ restore_max_refresh_rate(Monitor *m)
 	if (m->vrr_active)
 		disable_vrr_video_mode(m);
 
+	/* Video session over — next one gets a fresh VRR chance (input may
+	 * have been replugged to a VRR-capable port in between). */
+	m->vrr_unusable = 0;
+	m->video_fixed_fallback_hz = 0.0f;
+
 	/* Only restore mode if we're in video mode */
 	if (!m->video_mode_active)
 		return;
@@ -4719,8 +4776,15 @@ score_video_mode(int method, float video_hz, float display_hz, int multiplier)
 	float judder = calculate_judder_ms(video_hz, display_hz);
 
 	switch (method) {
-	case 3: /* VRR - best possible */
-		score = 150.0f;
+	case 3: /* VRR — fallback, not winner, for video content.
+		 * rendermon commits every vblank while fullscreen video is up
+		 * (the is_video request_frame chain), so an adaptive-sync panel
+		 * ends up pacing at its max rate anyway — the video frames latch
+		 * on whatever vblank follows and judder like fixed 60. A fixed
+		 * mode at an exact integer multiple of the source rate paces
+		 * perfectly. Score VRR below any perfect multiple (100+) and any
+		 * exact CVT (95+), above imperfect fixed modes (≤50). */
+		score = 90.0f;
 		break;
 	case 1: /* Existing mode - good if it's a perfect multiple */
 	case 2: /* Custom CVT mode */
@@ -4790,6 +4854,11 @@ enable_vrr_video_mode(Monitor *m, float video_hz)
 		wlr_log(WLR_DEBUG, "Monitor %s does not support VRR", m->wlr_output->name);
 		return 0;
 	}
+
+	/* Hardware already rejected a VRR enable this session — don't burn
+	 * another commit on it, let callers fall through to a fixed mode. */
+	if (m->vrr_unusable)
+		return 0;
 
 	if (!fullscreen_adaptive_sync_enabled) {
 		wlr_log(WLR_DEBUG, "Adaptive sync disabled by user");

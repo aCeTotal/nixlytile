@@ -1358,6 +1358,20 @@ struct Monitor {
 	 * (YouTube fullscreen on eDP). Hold the fallback for this many good
 	 * frames before re-arming direct scanout. */
 	int scanout_cooldown;
+	/* When the last scanout re-arm happened. A new blacklist within
+	 * SCANOUT_FLAP_WINDOW_NS of a re-arm means the client buffer keeps
+	 * failing (flap) — hold the fallback for the session instead of
+	 * bouncing. 0 = never re-armed. */
+	uint64_t last_scanout_rearm_ns;
+	/* Hardware rejected a VRR enable this video session — stop offering
+	 * VRR as a mode candidate and use a fixed multiple mode instead.
+	 * Cleared in restore_max_refresh_rate (next session gets a fresh
+	 * chance, e.g. after replug to a VRR-capable input). */
+	int vrr_unusable;
+	/* Deferred fixed-mode fallback after a VRR reject: rendermon picks
+	 * this up outside the commit path (a blocking modeset mid-commit is
+	 * asking for trouble) and calls apply_best_video_mode with it. */
+	float video_fixed_fallback_hz;
 	/* Retro emulator fullscreen on this monitor holds an
 	 * attach_render lock to force GPU composition. Kernel may reject
 	 * retroarch buffer modifiers (10-bit Y-tiled CCS on i915 etc.),
