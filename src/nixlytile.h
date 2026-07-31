@@ -629,6 +629,7 @@ struct TrayItem {
 	int has_menu;
 	int icon_tried;
 	int icon_failed;
+	int passive; /* SNI Status == "Passive" -> hidden in tray */
 	uint64_t icon_retry_not_before_ms;
 	int x;
 	int w;

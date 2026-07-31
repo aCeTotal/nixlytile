@@ -1,4 +1,5 @@
 #include "nixlytile.h"
+#include "client.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -515,6 +516,42 @@ handle_request_line(NiriIpcClient *cl, char *line)
 			return;
 		}
 		send_err(cl, "Unsupported FocusWorkspace reference");
+		return;
+	}
+
+	/* Action::FocusWindow — jump to the workspace holding the first
+	 * client whose app_id matches, and focus it.  Used by herdr-launch
+	 * so Super+Return anywhere jumps to the terminal running herdr. */
+	if (strstr(line, "\"FocusWindow\"")) {
+		const char *p = strstr(line, "\"app_id\":");
+		if (!p) { send_err(cl, "missing app_id"); return; }
+		p = strchr(p + 9, '"');
+		if (!p) { send_err(cl, "bad app_id"); return; }
+		const char *s = p + 1;
+		const char *e = strchr(s, '"');
+		if (!e || e == s) { send_err(cl, "bad app_id"); return; }
+		char name[128];
+		size_t nlen = (size_t)(e - s);
+		if (nlen >= sizeof name) nlen = sizeof name - 1;
+		memcpy(name, s, nlen);
+		name[nlen] = 0;
+
+		Client *c;
+		wl_list_for_each(c, &clients, link) {
+			const char *aid = client_get_appid(c);
+			if (!aid || strcmp(aid, name) != 0)
+				continue;
+			if (c->column && c->column->ws && c->column->ws->mon) {
+				Monitor *m = c->column->ws->mon;
+				workspace_switch(m, c->column->ws);
+				arrange(m);
+			}
+			focusclient(c, 1);
+			printstatus();
+			send_handled(cl);
+			return;
+		}
+		send_err(cl, "no such window");
 		return;
 	}
 

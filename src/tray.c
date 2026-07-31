@@ -1431,6 +1431,19 @@ out:
 	return r < 0 ? r : 0;
 }
 
+/* SNI Status: "Passive" means the item asks to be hidden ("Active" and
+ * "NeedsAttention" are both shown).  Items that don't implement the
+ * property are treated as active. */
+static void
+tray_item_query_status(TrayItem *it)
+{
+	char status[32] = {0};
+
+	it->passive = 0;
+	if (tray_get_string_property(it, "Status", status, sizeof(status)) == 0)
+		it->passive = strcmp(status, "Passive") == 0;
+}
+
 void
 tray_add_item(const char *service, const char *path, int emit_signals)
 {
@@ -1449,8 +1462,10 @@ tray_add_item(const char *service, const char *path, int emit_signals)
 	snprintf(it->label, sizeof(it->label), "%s", base);
 	it->icon_tried = 0;
 	it->icon_failed = 0;
+	tray_item_query_status(it);
 	wl_list_insert(&tray_items, &it->link);
-	wlr_log(WLR_INFO, "tray: registered %s%s", service, path);
+	wlr_log(WLR_INFO, "tray: registered %s%s%s", service, path,
+			it->passive ? " (passive)" : "");
 
 	tray_update_icons_text();
 
@@ -1637,6 +1652,49 @@ tray_item_new_icon(sd_bus_message *m, void *userdata, sd_bus_error *ret_error)
 	return 0;
 }
 
+/* An item changed its SNI Status (Active/Passive/NeedsAttention).  The
+ * signal carries the new value; sender is the unique bus name, so items
+ * registered under a well-known name won't strcmp-match — re-query those
+ * via the Status property instead. */
+static int
+tray_item_new_status(sd_bus_message *m, void *userdata, sd_bus_error *ret_error)
+{
+	const char *sender = sd_bus_message_get_sender(m);
+	const char *status = NULL;
+	TrayItem *it;
+	int matched = 0, changed = 0;
+
+	(void)userdata;
+	(void)ret_error;
+
+	if (sd_bus_message_read(m, "s", &status) < 0)
+		status = NULL;
+
+	wl_list_for_each(it, &tray_items, link) {
+		if (sender && it->service[0] && strcmp(it->service, sender) == 0) {
+			int passive = it->passive;
+			if (status)
+				it->passive = strcmp(status, "Passive") == 0;
+			else
+				tray_item_query_status(it);
+			changed |= it->passive != passive;
+			matched = 1;
+		}
+	}
+
+	if (!matched) {
+		wl_list_for_each(it, &tray_items, link) {
+			int passive = it->passive;
+			tray_item_query_status(it);
+			changed |= it->passive != passive;
+		}
+	}
+
+	if (changed)
+		tray_update_icons_text();
+	return 0;
+}
+
 int
 tray_bus_event(int fd, uint32_t mask, void *data)
 {
@@ -1736,6 +1794,13 @@ tray_init(void)
 	sd_bus_add_match(tray_bus, NULL,
 		"type='signal',interface='org.freedesktop.StatusNotifierItem',member='NewAttentionIcon'",
 		tray_item_new_icon, NULL);
+	/* Hide/show items when they flip SNI Status (Passive <-> Active) */
+	sd_bus_add_match(tray_bus, NULL,
+		"type='signal',interface='org.kde.StatusNotifierItem',member='NewStatus'",
+		tray_item_new_status, NULL);
+	sd_bus_add_match(tray_bus, NULL,
+		"type='signal',interface='org.freedesktop.StatusNotifierItem',member='NewStatus'",
+		tray_item_new_status, NULL);
 
 	fd = sd_bus_get_fd(tray_bus);
 	events = sd_bus_get_events(tray_bus);

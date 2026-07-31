@@ -511,6 +511,13 @@ focusclient(Client *c, int lift)
 	if (locked)
 		return;
 
+	/* Managed klient midt i teardown (unmapnotify/setmon har NULLet
+	 * c->mon): kan fortsatt leveres hit via pointerfocus-races — å
+	 * fokusere den ville deref-e c->mon. Ikke rør fokus; kalleren
+	 * (unmapnotify) refokuserer etterpå. */
+	if (c && !client_is_unmanaged(c) && !c->mon)
+		return;
+
 	/* Warp cursor to center of client if it is outside */
 	if (lift)
 		warpcursor(c);
@@ -2268,7 +2275,6 @@ unmapnotify(struct wl_listener *listener, void *data)
 		 * X11 unmap→remap (DXVK alt-tab o.l.) → UAF. */
 		c->fs_ws = NULL;
 		wl_list_remove(&c->link);
-		setmon(c, NULL, 0);
 		wl_list_remove(&c->flink);
 		/* Re-init flink so any defensive wl_list_remove() later in
 		 * the focus path (e.g. focusclient re-entering with this
@@ -2278,9 +2284,15 @@ unmapnotify(struct wl_listener *listener, void *data)
 		wl_list_init(&c->flink);
 		/* Hide the still-alive scene node so sloppy-focus (motionnotify
 		 * → xytonode → pointerfocus) can't re-pick this client during
-		 * the focusclient call that follows. */
+		 * the focusclient calls that follow.  Both defenses MUST run
+		 * before setmon: setmon(c, NULL, 0) NULLer c->mon og
+		 * re-entrer selv focusclient → motionnotify → pointerfocus,
+		 * som ellers plukker denne døende klienten via den fortsatt
+		 * synlige scene-noden og dereffer c->mon (= NULL) → SEGV
+		 * (Steam-vindu som unmapper under oppstart trigget dette). */
 		if (c->scene)
 			wlr_scene_node_set_enabled(&c->scene->node, 0);
+		setmon(c, NULL, 0);
 
 		/* Close any gap left by an emptied workspace: if active_ws (or
 		 * any other ws on this monitor) is now empty but still has

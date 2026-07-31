@@ -972,6 +972,8 @@ rendertray(Monitor *m, int bar_height)
 	 * slot (widest icon) instead gives even CENTER distance, which reads
 	 * as uneven spacing the moment the icons differ in width. */
 	wl_list_for_each(it, &tray_items, link) {
+		if (it->passive)
+			continue;
 		if (!it->icon_buf) {
 			/* Retry: the item may have registered before its icon
 			 * properties were ready (SNI startup race).  NewIcon
@@ -1000,7 +1002,7 @@ rendertray(Monitor *m, int bar_height)
 		struct wlr_scene_buffer *scene_buf;
 		int icon_y;
 
-		if (!it->icon_buf || it->icon_w <= 0 || it->icon_h <= 0) {
+		if (it->passive || !it->icon_buf || it->icon_w <= 0 || it->icon_h <= 0) {
 			it->x = x;
 			it->w = 0;
 			continue;
