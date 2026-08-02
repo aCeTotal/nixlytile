@@ -2835,48 +2835,28 @@ cpuaverage(void)
 	return (sum_busy / sum_total) * 100.0;
 }
 
-int
-readmeminfo(unsigned long long *total_kb, unsigned long long *avail_kb)
+double
+ramused_mb(void)
 {
 	FILE *fp;
 	char line[256];
-	unsigned long long total = 0, avail = 0;
+	unsigned long long anon = 0;
 
 	fp = fopen("/proc/meminfo", "r");
 	if (!fp)
-		return -1;
+		return -1.0;
 
 	while (fgets(line, sizeof(line), fp)) {
-		if (sscanf(line, "MemTotal: %llu kB", &total) == 1)
-			continue;
-		if (sscanf(line, "MemAvailable: %llu kB", &avail) == 1)
-			continue;
+		if (sscanf(line, "AnonPages: %llu kB", &anon) == 1)
+			break;
 	}
 
 	fclose(fp);
 
-	if (total == 0 || avail == 0)
-		return -1;
-
-	if (total_kb)
-		*total_kb = total;
-	if (avail_kb)
-		*avail_kb = avail;
-	return 0;
-}
-
-double
-ramused_mb(void)
-{
-	unsigned long long total, avail;
-
-	if (readmeminfo(&total, &avail) != 0)
+	if (anon == 0)
 		return -1.0;
 
-	if (total <= avail)
-		return 0.0;
-
-	return (double)(total - avail) / 1024.0;
+	return (double)anon / 1024.0;
 }
 
 int

@@ -2474,7 +2474,6 @@ int updatestatuscpu(void *data);
 int updatestatusclock(void *data);
 int updatehoverfade(void *data);
 int readcpustats(struct CpuSample *out, int maxcount);
-int readmeminfo(unsigned long long *total_kb, unsigned long long *avail_kb);
 int set_backlight_percent(double percent);
 int set_backlight_relative(double delta_percent);
 int set_pipewire_volume(double percent);

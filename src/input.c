@@ -20,8 +20,10 @@ static double  grab_resize_start_x = 0.0;
 /* Mod+RightDrag tile resize state: column width + intra-column height
  * weights (replaces the removed btrtile split-ratio machinery). */
 static Column *tile_rsz_col = NULL;   /* column whose width is dragged */
+static Column *tile_rsz_nbr = NULL;   /* neighbour column on the dragged side */
 static int     tile_rsz_hsign = 0;    /* +1 = right edge, -1 = left edge */
 static int     tile_rsz_w0 = 0;       /* column width at grab */
+static int     tile_rsz_nbr_w0 = 0;   /* neighbour width at grab */
 static Client *tile_rsz_ca = NULL;    /* upper client of the height pair */
 static Client *tile_rsz_cb = NULL;    /* lower client of the height pair */
 static int     tile_rsz_ha0 = 0;      /* ca height at grab (px) */
@@ -31,8 +33,10 @@ static void
 tile_resize_reset(void)
 {
 	tile_rsz_col = NULL;
+	tile_rsz_nbr = NULL;
 	tile_rsz_hsign = 0;
 	tile_rsz_w0 = 0;
+	tile_rsz_nbr_w0 = 0;
 	tile_rsz_ca = tile_rsz_cb = NULL;
 	tile_rsz_ha0 = tile_rsz_hb0 = 0;
 }
@@ -52,7 +56,7 @@ input_client_gone(Client *c)
 void
 input_column_gone(Column *col)
 {
-	if (col == tile_rsz_col)
+	if (col == tile_rsz_col || col == tile_rsz_nbr)
 		tile_resize_reset();
 	if (col != grab_resize_col && col != grab_resize_nbr)
 		return;
@@ -2221,20 +2225,6 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 					if (selmon)
 						arrange(selmon);
 				}
-			} else if (selmon) {
-				/* Alone on workspace — just clamp to monitor width. */
-				int mon_w = selmon->w_initialized
-						? selmon->w_target.width
-						: selmon->w.width;
-				if (mon_w < 1) mon_w = selmon->w.width;
-				if (new_w < min_w) new_w = min_w;
-				if (new_w > mon_w) new_w = mon_w;
-				if (new_w != grab_resize_col->width_px_override) {
-					grab_resize_col->fullscreen = 0;
-					grab_resize_col->width_px_override = new_w;
-					grab_resize_col->just_created = 1;
-					arrange(selmon);
-				}
 			}
 		}
 		return;
@@ -2263,24 +2253,22 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 				double dx_total = cursor->x - resize_start_x;
 				double dy_total = cursor->y - resize_start_y;
 
-				if (tile_rsz_col) {
+				if (tile_rsz_col && tile_rsz_nbr) {
 					const int min_w = 100;
-					int new_w = tile_rsz_w0
-						+ (int)(tile_rsz_hsign * dx_total);
-					int mon_w = selmon && selmon->w_initialized
-							? selmon->w_target.width
-							: (selmon ? selmon->w.width : 0);
-					if (new_w < min_w)
-						new_w = min_w;
-					if (mon_w > 0 && new_w > mon_w)
-						new_w = mon_w;
-					if (new_w != tile_rsz_col->width_px_override) {
+					int delta = (int)(tile_rsz_hsign * dx_total);
+					int new_w = tile_rsz_w0 + delta;
+					int new_nbr_w = tile_rsz_nbr_w0 - delta;
+					if (new_w >= min_w && new_nbr_w >= min_w &&
+							new_w != tile_rsz_col->width_px_override) {
 						tile_rsz_col->fullscreen = 0;
+						tile_rsz_nbr->fullscreen = 0;
 						tile_rsz_col->width_px_override = new_w;
+						tile_rsz_nbr->width_px_override = new_nbr_w;
 						/* Track the cursor directly during
 						 * the drag (same as CurColResize)
 						 * instead of springing after it. */
 						tile_rsz_col->just_created = 1;
+						tile_rsz_nbr->just_created = 1;
 						changed = 1;
 					}
 				}
@@ -2444,23 +2432,8 @@ moveresize(const Arg *arg)
 			nixly_cursor_set_xcursor("col-resize");
 			return;
 		}
-		/* Alone on the workspace: no neighbours, but the right edge is
-		 * still draggable.  Width grows/shrinks; left edge stays at
-		 * x=0.  Pick whichever edge the cursor is closer to. */
-		if (!left_nbr && !right_nbr
-				&& (left_dist <= COL_RESIZE_EDGE_PX
-					|| right_dist <= COL_RESIZE_EDGE_PX)) {
-			grab_resize_col = col;
-			grab_resize_nbr = NULL;
-			grab_resize_sign = (right_dist <= left_dist) ? +1 : -1;
-			grab_resize_col_w0 = col->target_width;
-			grab_resize_nbr_w0 = 0;
-			grab_resize_start_x = cursor->x;
-			cursor_mode = CurColResize;
-			nixly_cursor_set_xcursor("col-resize");
-			return;
-		}
-		/* No edge in range — fall through to move. */
+		/* No neighbour on the grabbed side (outer edge) or no edge in
+		 * range — the edge is locked; fall through to move. */
 	}
 
 	if (grabc->was_tiled) {
@@ -2482,9 +2455,9 @@ moveresize(const Arg *arg)
 		case CurResize:
 			{
 				struct wlr_box start_geom = grabc->geom;
-				const char *cursor_name = pick_resize_handle(grabc, cursor->x, cursor->y);
 				double start_x = cursor->x, start_y = cursor->y;
 				Column *col = grabc->column;
+				pick_resize_handle(grabc, cursor->x, cursor->y);
 				grabcx = (int)round(cursor->x);
 				grabcy = (int)round(cursor->y);
 
@@ -2496,49 +2469,73 @@ moveresize(const Arg *arg)
 				resize_last_y = start_y;
 				resizing_from_mouse = 1;
 
-				/* Column-layout grab state: width via px override,
-				 * heights via the weight pair across the nearest
-				 * horizontal boundary. */
+				/* Column-layout grab state: the grabbed edge and the
+				 * neighbour on that side resize; the opposite edge
+				 * stays locked.  An edge with no neighbour tile is
+				 * fully locked — that axis is dropped. */
 				tile_resize_reset();
-				if (col) {
-					tile_rsz_col = col;
-					tile_rsz_w0 = col->target_width;
-					tile_rsz_hsign = (cursor->x >= grabc->geom.x
-							+ grabc->geom.width / 2.0) ? 1 : -1;
-					if (col->n_clients >= 2) {
-						Client *prev = NULL, *next = NULL, *cc;
-						int below = cursor->y >= grabc->geom.y
-								+ grabc->geom.height / 2.0;
-						if (grabc->column_link.prev != &col->clients)
-							prev = wl_container_of(
-								grabc->column_link.prev,
-								prev, column_link);
-						if (grabc->column_link.next != &col->clients)
-							next = wl_container_of(
-								grabc->column_link.next,
-								next, column_link);
-						if (next && (below || !prev)) {
-							tile_rsz_ca = grabc;
-							tile_rsz_cb = next;
-						} else if (prev) {
-							tile_rsz_ca = prev;
-							tile_rsz_cb = grabc;
-						}
-						if (tile_rsz_ca && tile_rsz_cb) {
-							tile_rsz_ha0 = tile_rsz_ca->geom.height;
-							tile_rsz_hb0 = tile_rsz_cb->geom.height;
-							/* Pin every weight to its current px
-							 * height so adjusting the pair leaves
-							 * the other clients untouched. */
-							wl_list_for_each(cc, &col->clients,
-									column_link)
-								cc->col_weight = (double)
-									(cc->geom.height > 0
-									 ? cc->geom.height : 1);
-						}
+				if (col && resize_dir_x) {
+					Column *nbr = NULL;
+					if (resize_dir_x < 0 && col->ws &&
+							col->link.prev != &col->ws->columns)
+						nbr = wl_container_of(col->link.prev,
+								nbr, link);
+					else if (resize_dir_x > 0 && col->ws &&
+							col->link.next != &col->ws->columns)
+						nbr = wl_container_of(col->link.next,
+								nbr, link);
+					if (nbr) {
+						tile_rsz_col = col;
+						tile_rsz_nbr = nbr;
+						tile_rsz_w0 = col->target_width;
+						tile_rsz_nbr_w0 = nbr->target_width;
+						tile_rsz_hsign = resize_dir_x;
+					} else {
+						resize_dir_x = 0;
 					}
 				}
-				nixly_cursor_set_xcursor(cursor_name);
+				if (col && resize_dir_y && col->n_clients >= 2) {
+					Client *prev = NULL, *next = NULL, *cc;
+					if (grabc->column_link.prev != &col->clients)
+						prev = wl_container_of(
+							grabc->column_link.prev,
+							prev, column_link);
+					if (grabc->column_link.next != &col->clients)
+						next = wl_container_of(
+							grabc->column_link.next,
+							next, column_link);
+					if (resize_dir_y > 0 && next) {
+						tile_rsz_ca = grabc;
+						tile_rsz_cb = next;
+					} else if (resize_dir_y < 0 && prev) {
+						tile_rsz_ca = prev;
+						tile_rsz_cb = grabc;
+					}
+					if (tile_rsz_ca && tile_rsz_cb) {
+						tile_rsz_ha0 = tile_rsz_ca->geom.height;
+						tile_rsz_hb0 = tile_rsz_cb->geom.height;
+						/* Pin every weight to its current px
+						 * height so adjusting the pair leaves
+						 * the other clients untouched. */
+						wl_list_for_each(cc, &col->clients,
+								column_link)
+							cc->col_weight = (double)
+								(cc->geom.height > 0
+								 ? cc->geom.height : 1);
+					}
+				}
+				if (!tile_rsz_ca)
+					resize_dir_y = 0;
+				if (!resize_dir_x && !resize_dir_y) {
+					/* Both grabbed edges are locked — no resize. */
+					resizing_from_mouse = 0;
+					cursor_mode = CurNormal;
+					grabc = NULL;
+					nixly_cursor_set_xcursor("default");
+					break;
+				}
+				nixly_cursor_set_xcursor(resize_cursor_from_dirs(
+						resize_dir_x, resize_dir_y));
 			}
 			break;
 		}
