@@ -55,6 +55,15 @@ client_scale_to_box(Client *c, int box_w, int box_h)
 			!client_surface(c)->mapped)
 		return;
 
+	/* A cropped tile (straddling the usable-area edge) is owned by
+	 * client_clip_to_usable: the subsurface-tree clip has already set
+	 * src/dest for the visible slice.  Raw dest_size scaling here would
+	 * stretch that cropped source back to full box size — content
+	 * bleeding over the statusbar / gap margins (worst with slow-acking
+	 * browsers).  Skip; content re-scales once fully inside. */
+	if (c->area_clipped)
+		return;
+
 	client_get_geometry(c, &natural);
 	if (natural.width <= 0 || natural.height <= 0 || box_w <= 0 || box_h <= 0)
 		return;
@@ -104,6 +113,11 @@ static const SpringParams SPRING_HORIZONTAL = { 1.0, 1.0, 1800.0 };
  * oscillation past the target ws position. */
 static const SpringParams SPRING_WS_SWITCH  = { 1.0, 1.0, 1800.0 };
 static const SpringParams SPRING_WINDOW     = { 1.0, 1.0,  800.0 };
+/* Column x/width MUST match the camera spring (SPRING_HORIZONTAL):
+ * closing/moving/resizing a column animates col->x together with
+ * scroll_x, and mismatched stiffness makes the reflowing columns
+ * visibly trail the camera — tiles drift out of lock-step. */
+static const SpringParams SPRING_COLUMN     = { 1.0, 1.0, 1800.0 };
 static const SpringParams SPRING_OPEN       = { 1.0, 0.9,  900.0 }; /* slight overshoot for life */
 static const SpringParams SPRING_CLOSE      = { 1.0, 1.0,  900.0 };
 
@@ -723,13 +737,13 @@ monitor_anim_tick(Monitor *m, double dt)
 			wl_list_for_each(col, &wsi->columns, link) {
 				if (spring_tick(&col->x_f, &col->x_vel,
 						(double)col->target_x,
-						SPRING_WINDOW, dt))
+						SPRING_COLUMN, dt))
 					active = 1;
 				col->x = (int)col->x_f;
 				if (spring_tick(&col->width_f,
 						&col->width_vel,
 						(double)col->target_width,
-						SPRING_WINDOW, dt)) {
+						SPRING_COLUMN, dt)) {
 					active = 1;
 					size_anim = 1;
 				}

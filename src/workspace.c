@@ -1852,5 +1852,30 @@ monitor_apply_positions(Monitor *m)
 			wlr_scene_node_set_enabled(&c->scene->node, 1);
 		wlr_scene_node_set_position(&c->scene->node,
 				c->geom.x, c->geom.y + fs_y_base);
+
+		/* Fullscreen lives on LyrFS, ABOVE the statusbar layer — mid
+		 * slide it would draw over the bar instead of passing under it
+		 * like tiles do.  Clip the surface to below the bar's bottom
+		 * edge while the slide is in flight; restore the full clip once
+		 * settled (an active fullscreen covers the bar by design). */
+		if (c->scene_surface) {
+			struct wlr_box wg;
+			client_get_clip(c, &wg);
+			if (vertical_anim && m->showbar &&
+					m->statusbar.slot.height > 0) {
+				int bar_bottom = m->statusbar.slot.y +
+						m->statusbar.slot.height;
+				int sy0 = bar_bottom -
+						(c->geom.y + fs_y_base + (int)c->bw);
+				if (sy0 > wg.y) {
+					wg.height -= sy0 - wg.y;
+					wg.y = sy0;
+				}
+				if (wg.height <= 0)
+					wg = (struct wlr_box){ 1 << 20, 0, 1, 1 };
+			}
+			wlr_scene_subsurface_tree_set_clip(
+					&c->scene_surface->node, &wg);
+		}
 	}
 }

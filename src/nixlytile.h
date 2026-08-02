@@ -439,6 +439,7 @@ typedef struct {
 	int height;
 	int kill_x, kill_y, kill_w, kill_h;
 	int has_kill;
+	struct wlr_scene_rect *kill_rect;
 } RamProcEntry;
 
 typedef struct {

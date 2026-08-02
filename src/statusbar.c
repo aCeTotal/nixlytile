@@ -1827,6 +1827,8 @@ renderrampopup(Monitor *m)
 			continue;
 		wlr_scene_node_destroy(node);
 	}
+	for (int i = 0; i < (int)LENGTH(p->procs); i++)
+		p->procs[i].kill_rect = NULL;
 
 	if (!statusfont.font) {
 		p->width = p->height = 0;
@@ -1970,7 +1972,9 @@ renderrampopup(Monitor *m)
 			e->kill_y = btn_y;
 			e->kill_w = kill_w;
 			e->kill_h = kill_h;
-			drawrect(p->tree, btn_x, btn_y, kill_w, kill_h, btn_color);
+			e->kill_rect = wlr_scene_rect_create(p->tree, kill_w, kill_h, btn_color);
+			if (e->kill_rect)
+				wlr_scene_node_set_position(&e->kill_rect->node, btn_x, btn_y);
 
 			btn = wlr_scene_tree_create(p->tree);
 			if (btn) {
@@ -2840,23 +2844,25 @@ ramused_mb(void)
 {
 	FILE *fp;
 	char line[256];
-	unsigned long long anon = 0;
+	unsigned long long total = 0, avail = 0;
 
 	fp = fopen("/proc/meminfo", "r");
 	if (!fp)
 		return -1.0;
 
 	while (fgets(line, sizeof(line), fp)) {
-		if (sscanf(line, "AnonPages: %llu kB", &anon) == 1)
+		if (sscanf(line, "MemTotal: %llu kB", &total) == 1)
+			continue;
+		if (sscanf(line, "MemAvailable: %llu kB", &avail) == 1)
 			break;
 	}
 
 	fclose(fp);
 
-	if (anon == 0)
+	if (total == 0 || avail == 0 || avail > total)
 		return -1.0;
 
-	return (double)anon / 1024.0;
+	return (double)(total - avail) / 1024.0;
 }
 
 int
@@ -5334,11 +5340,6 @@ updateramhover(Monitor *m, double cx, double cy)
 			return;
 		}
 
-		if (!was_visible) {
-			/* Short delay to avoid flicker on quick mouse movements */
-			p->suppress_refresh_until_ms = now + 100;
-			p->refresh_data = 1; /* Trigger immediate fetch when delay passes */
-		}
 		p->visible = 1;
 		wlr_scene_node_set_enabled(&p->tree->node, 1);
 		wlr_scene_node_set_position(&p->tree->node,
@@ -5352,16 +5353,21 @@ updateramhover(Monitor *m, double cx, double cy)
 				 now >= p->suppress_refresh_until_ms);
 		if (need_refresh)
 			p->refresh_data = 1;
-		if (new_hover != p->hover_idx || !was_visible || need_refresh) {
-			int allow_render = 1;
-			if (!need_refresh && was_visible && new_hover != p->hover_idx &&
-					p->last_render_ms > 0 && now >= p->last_render_ms &&
-					now - p->last_render_ms < 16)
-				allow_render = 0;
-			if (allow_render) {
-				p->hover_idx = new_hover;
-				renderrampopup(m);
-			}
+		if (!was_visible || need_refresh) {
+			p->hover_idx = new_hover;
+			renderrampopup(m);
+		} else if (new_hover != p->hover_idx) {
+			/* Recolor kill buttons in place — full re-render is too
+			 * slow for hover feedback */
+			int old = p->hover_idx;
+			if (old >= 0 && old < p->proc_count && p->procs[old].kill_rect)
+				wlr_scene_rect_set_color(p->procs[old].kill_rect,
+						statusbar_volume_muted_fg);
+			if (new_hover >= 0 && new_hover < p->proc_count &&
+					p->procs[new_hover].kill_rect)
+				wlr_scene_rect_set_color(p->procs[new_hover].kill_rect,
+						statusbar_tag_active_bg);
+			p->hover_idx = new_hover;
 		}
 		if (!was_visible)
 			schedule_ram_popup_refresh(100);
