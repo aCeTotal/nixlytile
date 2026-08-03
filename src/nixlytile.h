@@ -1034,6 +1034,11 @@ typedef struct {
 	 * / redraw per frame → choppiness + "doesn't adjust until
 	 * refocus" symptom. */
 	int last_configured_w, last_configured_h;
+	/* Timestamp of the last X11 configure actually sent — used by
+	 * client_request_size to pace ConfigureNotify during a live drag
+	 * (XWayland has no ack to gate on).  Dropped intermediates are
+	 * kept in pending_resize_w/h and flushed on button release. */
+	uint32_t x11_cfg_ms;
 	/* Last scene-node position pushed to wlroots.  Tracked separately
 	 * from c->geom because callers sometimes pre-modify c->geom and
 	 * then invoke resize() with the same value — pos_changed would
@@ -2121,6 +2126,8 @@ void setsel(struct wl_listener *listener, void *data);
 void resize(Client *c, struct wlr_box geo, int interact);
 void client_apply_scene_geom(Client *c, struct wlr_box geo);
 void client_clip_to_usable(Client *c);
+void client_request_size(Client *c, int w, int h);
+void client_flush_pending_size(Client *c);
 void client_send_configure_only(Client *c, int w, int h);
 void tag(const Arg *arg);
 void tagmon(const Arg *arg);

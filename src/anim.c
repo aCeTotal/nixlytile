@@ -275,7 +275,7 @@ client_set_target_geom(Client *c, struct wlr_box g)
 				c->geom_fw = (double)c->geom.width;
 				c->geom_fh = (double)c->geom.height;
 				c->geom_vx = c->geom_vy = c->geom_vw = c->geom_vh = 0.0;
-				client_set_size(c, final_w, final_h);
+				client_request_size(c, final_w, final_h);
 				c->anim_final_w = final_w;
 				c->anim_final_h = final_h;
 				client_get_geometry(c, &nat);
@@ -283,7 +283,7 @@ client_set_target_geom(Client *c, struct wlr_box g)
 				c->anim_start_nat_h = nat.height;
 			} else if (final_w != c->anim_final_w ||
 					final_h != c->anim_final_h) {
-				client_set_size(c, final_w, final_h);
+				client_request_size(c, final_w, final_h);
 				c->anim_final_w = final_w;
 				c->anim_final_h = final_h;
 			}
@@ -311,7 +311,7 @@ client_set_target_geom(Client *c, struct wlr_box g)
 				 * float-resize) — the client renders its new
 				 * content during the anim, not after settle. */
 				struct wlr_box nat;
-				client_set_size(c, final_w, final_h);
+				client_request_size(c, final_w, final_h);
 				c->anim_final_w = final_w;
 				c->anim_final_h = final_h;
 				client_get_geometry(c, &nat);
@@ -323,7 +323,7 @@ client_set_target_geom(Client *c, struct wlr_box g)
 		} else if (size_changed && c->anim_final_w > 0 &&
 				(final_w != c->anim_final_w ||
 				 final_h != c->anim_final_h)) {
-			client_set_size(c, final_w, final_h);
+			client_request_size(c, final_w, final_h);
 			c->anim_final_w = final_w;
 			c->anim_final_h = final_h;
 		}
@@ -379,9 +379,14 @@ animcommitnotify(struct wl_listener *listener, void *data)
 	(void)data;
 	if (!c->anim_active || !c->scene_surface || !c->mon)
 		return;
-	/* Live drag shows real content at real size — natural is correct. */
-	if (cursor_mode == CurResize || cursor_mode == CurColResize)
+	/* Live drag shows real content at real size — natural is correct.
+	 * Still re-pin the clip: this commit may carry a buffer larger than
+	 * the tile box, and a neighbouring output's rendermon can fire
+	 * before the next anim tick re-clips it. */
+	if (cursor_mode == CurResize || cursor_mode == CurColResize) {
+		client_clip_to_usable(c);
 		return;
+	}
 	if (c->frozen_buffer)
 		return;
 	iw = c->geom.width - 2 * c->bw;
@@ -531,9 +536,15 @@ clients_anim_tick(Monitor *m, double dt)
 			client_anim_apply(c, g);
 			active = 1;
 		} else {
-			resize(c, c->target_geom, 0);
-			client_scale_reset(c);
+			/* Settle: clear anim_active FIRST so the clip inside
+			 * resize() runs in box-clip mode — a client that hasn't
+			 * committed the final size yet must be cropped to its
+			 * box, not left bleeding over the neighbour until the
+			 * commit lands.  scale_reset before resize() so the
+			 * clip's dest sizing stays authoritative. */
 			c->anim_active = 0;
+			client_scale_reset(c);
+			resize(c, c->target_geom, 0);
 		}
 	}
 

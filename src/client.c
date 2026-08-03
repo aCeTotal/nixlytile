@@ -386,6 +386,13 @@ commitnotify(struct wl_listener *listener, void *data)
 		client_get_clip(c, &fresh_clip);
 		wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node,
 				&fresh_clip);
+	} else if (c->column && c->scene_surface) {
+		/* Column tiles: re-evaluate the box/area clip against the
+		 * freshly committed buffer.  A stale oversized buffer gets
+		 * released here (crop lifted the moment the content fits) and
+		 * a newly oversized one gets caught before another output's
+		 * rendermon can draw it across the monitor edge. */
+		client_clip_to_usable(c);
 	}
 
 	/* For tiled clients in a tiling layout, use the geometry from btrtile
@@ -1589,6 +1596,7 @@ client_clip_to_usable(Client *c)
 {
 	struct wlr_box area;
 	int ax0, ay0, ax1, ay1;   /* usable area, client-tree-local coords */
+	int box_clip = 0;
 	int i;
 
 	if (!c || !c->mon || !c->scene || !c->scene_surface)
@@ -1602,6 +1610,21 @@ client_clip_to_usable(Client *c)
 		return;
 	}
 
+	/* Outside a size anim — and always during a live drag — the surface
+	 * must also stay inside its own tile box: a buffer committed at a
+	 * LARGER size than the box (shrink drag / reflow, slow-acking client)
+	 * otherwise draws over the neighbour tile, and across the monitor
+	 * edge onto the neighbouring output when the tile sits at the edge,
+	 * until the client finally commits the new size ("snaps into place").
+	 * During a non-live size anim client_scale_to_box owns the fit. */
+	if (!c->anim_active || cursor_mode == CurResize ||
+			cursor_mode == CurColResize) {
+		struct wlr_box nat;
+		client_get_geometry(c, &nat);
+		box_clip = (nat.width  > c->geom.width  - 2 * (int)c->bw ||
+				nat.height > c->geom.height - 2 * (int)c->bw);
+	}
+
 	area = c->mon->w;
 	ax0 = area.x - c->geom.x;
 	ay0 = area.y - c->geom.y;
@@ -1611,7 +1634,7 @@ client_clip_to_usable(Client *c)
 	/* Fully inside the usable area → no crop needed.  Restore once if we
 	 * were previously clipped, otherwise fast-path out (the common case
 	 * every frame for non-edge tiles). */
-	if (ax0 <= 0 && ay0 <= 0 &&
+	if (!box_clip && ax0 <= 0 && ay0 <= 0 &&
 			ax1 >= c->geom.width && ay1 >= c->geom.height) {
 		if (c->area_clipped)
 			client_clip_reset(c);
@@ -1633,6 +1656,15 @@ client_clip_to_usable(Client *c)
 		su_y0 = area.y - (c->geom.y + (int)c->bw);
 		su_x1 = su_x0 + area.width;
 		su_y1 = su_y0 + area.height;
+
+		/* Oversized stale buffer: additionally clamp to the tile's own
+		 * inner box so nothing draws outside the tile borders. */
+		if (box_clip) {
+			su_x0 = MAX(su_x0, 0);
+			su_y0 = MAX(su_y0, 0);
+			su_x1 = MIN(su_x1, c->geom.width  - 2 * (int)c->bw);
+			su_y1 = MIN(su_y1, c->geom.height - 2 * (int)c->bw);
+		}
 
 		cx0 = MAX(wgeom.x, su_x0);
 		cy0 = MAX(wgeom.y, su_y0);
@@ -1706,6 +1738,76 @@ client_clip_to_usable(Client *c)
 	}
 }
 
+/* Pace X11 configures during a live drag: XWayland has no configure ack,
+ * so Discord/X11 apps otherwise receive ConfigureNotify at pointer-motion
+ * rate (up to 125/s), queue a relayout for each, and keep "adjusting"
+ * long after the drag ended. */
+#define X11_RESIZE_PACE_MS 40
+
+/*
+ * Paced size request — ALL size configures during layout/anim/drag go
+ * through here.
+ *
+ *   xdg: gate on the outstanding-ack serial.  At most one configure is
+ *   in flight; newer sizes land in pending_resize_w/h and commitnotify
+ *   sends the newest on ack.  Slow-acking clients (Electron) resize at
+ *   the rate THEY can handle instead of building a relayout backlog.
+ *
+ *   X11: no ack exists, so pace by time during a live drag.  Dropped
+ *   intermediates stay in pending_resize_w/h (last_configured_* only
+ *   tracks sizes actually sent) and client_flush_pending_size sends the
+ *   final one on button release.
+ */
+void
+client_request_size(Client *c, int w, int h)
+{
+	if (w == c->last_configured_w && h == c->last_configured_h)
+		return;
+#ifdef XWAYLAND
+	if (client_is_x11(c)) {
+		uint32_t now = (uint32_t)monotonic_msec();
+		int live = (cursor_mode == CurResize ||
+				cursor_mode == CurColResize);
+		c->pending_resize_w = w;
+		c->pending_resize_h = h;
+		if (live && c->x11_cfg_ms &&
+				now - c->x11_cfg_ms < X11_RESIZE_PACE_MS)
+			return;
+		c->x11_cfg_ms = now;
+		c->last_configured_w = w;
+		c->last_configured_h = h;
+		client_set_size(c, w, h);
+		return;
+	}
+#endif
+	c->pending_resize_w = w;
+	c->pending_resize_h = h;
+	c->last_configured_w = w;
+	c->last_configured_h = h;
+	if (!c->resize)
+		c->resize = client_set_size(c, w, h);
+}
+
+/* Send a size that was dropped by the X11 pacing above.  Called on
+ * button release so the app always converges on the final drag size.
+ * xdg needs no flush — the ack chain in commitnotify handles it. */
+void
+client_flush_pending_size(Client *c)
+{
+#ifdef XWAYLAND
+	if (!client_is_x11(c))
+		return;
+	if (c->pending_resize_w > 0 && c->pending_resize_h > 0 &&
+			(c->pending_resize_w != c->last_configured_w ||
+			 c->pending_resize_h != c->last_configured_h)) {
+		c->last_configured_w = c->pending_resize_w;
+		c->last_configured_h = c->pending_resize_h;
+		c->x11_cfg_ms = (uint32_t)monotonic_msec();
+		client_set_size(c, c->pending_resize_w, c->pending_resize_h);
+	}
+#endif
+}
+
 void
 resize(Client *c, struct wlr_box geo, int interact)
 {
@@ -1776,14 +1878,7 @@ resize(Client *c, struct wlr_box geo, int interact)
 	 * during a 70ms scroll → choppy + "doesn't redraw until
 	 * refocus" behaviour.  Skip when the SIZE we'd configure
 	 * matches the last sent. */
-	if (reqw != c->last_configured_w || reqh != c->last_configured_h) {
-		if (!c->resize)
-			c->resize = client_set_size(c, reqw, reqh);
-		c->pending_resize_w = reqw;
-		c->pending_resize_h = reqh;
-		c->last_configured_w = reqw;
-		c->last_configured_h = reqh;
-	}
+	client_request_size(c, reqw, reqh);
 
 	/* Fast-path: when only POSITION changed (camera scroll / ws
 	 * switch), skip the expensive clip + scale tree walks.  These

@@ -665,6 +665,14 @@ buttonpress(struct wl_listener *listener, void *data)
 		 * after the first mouse resize. */
 		resizing_from_mouse = 0;
 		tile_resize_reset();
+		/* X11 configures dropped by drag pacing (client_request_size):
+		 * send the final size now so Discord/X11 apps land exactly on
+		 * the released geometry instead of the last paced step. */
+		if (cursor_mode == CurResize || cursor_mode == CurColResize) {
+			Client *rc;
+			wl_list_for_each(rc, &clients, link)
+				client_flush_pending_size(rc);
+		}
 		if (!locked && cursor_mode == CurColResize) {
 			cursor_mode = CurNormal;
 			grab_resize_col = grab_resize_nbr = NULL;
@@ -2271,6 +2279,34 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 						tile_rsz_nbr->just_created = 1;
 						changed = 1;
 					}
+				} else if (tile_rsz_col && tile_rsz_col->ws && selmon) {
+					/* Free right edge: resize against the screen
+					 * edge.  Clamp so the edge stops exactly at
+					 * the tile area's right edge — the column can
+					 * never grow past it, so nothing ever spills
+					 * onto a neighbouring output and the camera
+					 * never scrolls mid-drag. */
+					const int min_w = 100;
+					int delta = (int)(tile_rsz_hsign * dx_total);
+					int new_w = tile_rsz_w0 + delta;
+					int mon_w = selmon->w_initialized
+							? selmon->w_target.width
+							: selmon->w.width;
+					int max_w = tile_rsz_col->ws->target_scroll_x
+							+ mon_w - tile_rsz_col->target_x;
+					if (max_w > mon_w)
+						max_w = mon_w;
+					if (new_w > max_w)
+						new_w = max_w;
+					if (new_w < min_w)
+						new_w = min_w;
+					if (max_w >= min_w &&
+							new_w != tile_rsz_col->width_px_override) {
+						tile_rsz_col->fullscreen = 0;
+						tile_rsz_col->width_px_override = new_w;
+						tile_rsz_col->just_created = 1;
+						changed = 1;
+					}
 				}
 
 				if (tile_rsz_ca && tile_rsz_cb) {
@@ -2471,8 +2507,11 @@ moveresize(const Arg *arg)
 
 				/* Column-layout grab state: the grabbed edge and the
 				 * neighbour on that side resize; the opposite edge
-				 * stays locked.  An edge with no neighbour tile is
-				 * fully locked — that axis is dropped. */
+				 * stays locked.  A free RIGHT edge (no neighbour)
+				 * resizes against the screen edge — clamped in
+				 * motionnotify so it never crosses onto another
+				 * output.  A free LEFT edge is pinned by the layout
+				 * to the screen edge already — that axis is dropped. */
 				tile_resize_reset();
 				if (col && resize_dir_x) {
 					Column *nbr = NULL;
@@ -2489,6 +2528,11 @@ moveresize(const Arg *arg)
 						tile_rsz_nbr = nbr;
 						tile_rsz_w0 = col->target_width;
 						tile_rsz_nbr_w0 = nbr->target_width;
+						tile_rsz_hsign = resize_dir_x;
+					} else if (resize_dir_x > 0) {
+						tile_rsz_col = col;
+						tile_rsz_nbr = NULL;
+						tile_rsz_w0 = col->target_width;
 						tile_rsz_hsign = resize_dir_x;
 					} else {
 						resize_dir_x = 0;
