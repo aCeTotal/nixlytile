@@ -985,14 +985,20 @@ createmon(struct wl_listener *listener, void *data)
 	 */
 	m->scene_output = wlr_scene_output_create(scene, wlr_output);
 
-	/* runtime monitor position calculation removed (config.c gone) */
-
 	/* If runtime config placed this monitor explicitly, use that position.
-	 * Otherwise auto_arrange_monitors() will position all monitors. */
-	if (m->m.x != -1 && m->m.y != -1)
-		wlr_output_layout_add(output_layout, wlr_output, m->m.x, m->m.y);
-	else
-		auto_arrange_monitors();
+	 * If monitors.conf has a grid entry for it, grid layout positions all
+	 * monitors. Otherwise auto_arrange_monitors() positions them. */
+	{
+		RuntimeMonitorConfig *mc = monconf_find(wlr_output->name);
+		if (m->m.x != -1 && m->m.y != -1) {
+			wlr_output_layout_add(output_layout, wlr_output, m->m.x, m->m.y);
+		} else if (mc && mc->grid_col >= 0) {
+			wlr_output_layout_add_auto(output_layout, wlr_output);
+			monconf_apply_layout();
+		} else {
+			auto_arrange_monitors();
+		}
+	}
 
 	wl_list_for_each(c, &clients, link) {
 		if (c->output && strcmp(wlr_output->name, c->output) == 0)

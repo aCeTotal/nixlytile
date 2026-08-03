@@ -2361,6 +2361,15 @@ RuntimeMonitorConfig *find_monitor_config(const char *name);
 void calculate_monitor_position(Monitor *m, RuntimeMonitorConfig *cfg, int *out_x, int *out_y);
 void monitor_effective_size(Monitor *m, int *w, int *h);
 
+/* monitors_conf.c — ~/.local/nixlyos/monitors.conf (written by nixlycc) */
+extern RuntimeMonitorConfig monconf_monitors[MAX_MONITORS];
+extern int monconf_monitor_count;
+int load_monitors_conf(void);
+RuntimeMonitorConfig *monconf_find(const char *name);
+void monconf_apply_layout(void);
+void reload_monitors_conf(void);
+void setup_monitors_conf_watch(void);
+
 /* dwl-style status broadcast on stdout — waybar's dwl/tags module
  * reads this from its stdin to render workspace selectors. */
 void printstatus(void);

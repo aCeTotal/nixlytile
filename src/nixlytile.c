@@ -1071,7 +1071,7 @@ run(const char *startup_cmd)
 	 * monitors are created one at a time.  The grid→pixel conversion
 	 * lives in reload_monitors_conf(), which was previously only called
 	 * on hot-reload (inotify), not at startup. */
-	/* runtime monitor reload removed (config.c gone) */
+	monconf_apply_layout();
 
 	/* Now that the socket exists and the backend is started, run the
 	 * startup commands.  If KDL config provided an autostart list, each
@@ -1718,6 +1718,10 @@ MonitorPosition config_parse_monitor_position(const char *pos)
 RuntimeMonitorConfig *find_monitor_config(const char *name)
 {
 	int i;
+	/* monitors.conf (nixlycc GUI) takes priority over config.kdl */
+	RuntimeMonitorConfig *mc = monconf_find(name);
+	if (mc)
+		return mc;
 	for (i = 0; i < runtime_monitor_count; i++) {
 		/* Support wildcards: "*" matches all, "DP-*" matches DP-1, DP-2, etc. */
 		const char *pattern = runtime_monitors[i].name;
@@ -2601,6 +2605,9 @@ setup(void)
 	/* SIGUSR1 → reload ~/.config/nixlytile/config.kdl.  Handled on the
 	 * wl event loop (no async-signal concerns). */
 	wl_event_loop_add_signal(event_loop, SIGUSR1, sigusr1_reload, NULL);
+
+	/* ~/.local/nixlyos/monitors.conf → inotify hot-reload (nixlycc GUI) */
+	setup_monitors_conf_watch();
 
 	/* Detect GPUs early — env vars (WLR_DRM_NO_ATOMIC, GBM_BACKEND etc.)
 	 * and WLR_DRM_DEVICES filtering must happen before backend creation.
@@ -4107,6 +4114,11 @@ main(int argc, char *argv[])
 	 * happen before setup() so the xkb keymap / repeat rate / colors /
 	 * monitor rules / keybindings are visible to wlroots init. */
 	load_config();
+
+	/* Load ~/.local/nixlyos/monitors.conf (nixlycc GUI) — must happen
+	 * before setup() so createmon() sees mode/transform for each output.
+	 * Entries override config.kdl monitor nodes. */
+	load_monitors_conf();
 
 	/* NOTE: Do NOT call set_dgpu_env() here in the compositor process.
 	 * It sets DRI_PRIME, __GLX_VENDOR_LIBRARY_NAME, etc. which are

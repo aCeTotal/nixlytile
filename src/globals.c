@@ -23,6 +23,8 @@ int monconf_inotify_fd = -1;
 int monconf_watch_wd = -1;
 char monconf_path_cached[PATH_MAX] = {0};
 struct wl_event_source *monconf_watch_source = NULL;
+RuntimeMonitorConfig monconf_monitors[MAX_MONITORS];
+int monconf_monitor_count = 0;
 struct wl_event_source *monitor_setup_timer = NULL;
 int monovl_inotify_fd = -1;
 int monovl_watch_wd = -1;
