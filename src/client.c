@@ -1619,10 +1619,10 @@ client_clip_to_usable(Client *c)
 	 * During a non-live size anim client_scale_to_box owns the fit. */
 	if (!c->anim_active || cursor_mode == CurResize ||
 			cursor_mode == CurColResize) {
-		struct wlr_box nat;
-		client_get_geometry(c, &nat);
-		box_clip = (nat.width  > c->geom.width  - 2 * (int)c->bw ||
-				nat.height > c->geom.height - 2 * (int)c->bw);
+		int nat_w, nat_h;
+		client_get_committed_size(c, &nat_w, &nat_h);
+		box_clip = (nat_w > c->geom.width  - 2 * (int)c->bw ||
+				nat_h > c->geom.height - 2 * (int)c->bw);
 	}
 
 	area = c->mon->w;
@@ -1899,10 +1899,11 @@ resize(Client *c, struct wlr_box geo, int interact)
 	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
 
 	{
-		struct wlr_box natural;
-		client_get_geometry(c, &natural);
-		if (natural.width > 0 && natural.height > 0)
-			client_scale_to_box(c, c->geom.width, c->geom.height);
+		int nat_w, nat_h;
+		client_get_committed_size(c, &nat_w, &nat_h);
+		if (nat_w > 0 && nat_h > 0)
+			client_scale_to_box(c, c->geom.width - 2 * (int)c->bw,
+					c->geom.height - 2 * (int)c->bw);
 	}
 
 	client_clip_to_usable(c);

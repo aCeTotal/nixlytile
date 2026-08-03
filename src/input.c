@@ -670,6 +670,8 @@ buttonpress(struct wl_listener *listener, void *data)
 		 * the released geometry instead of the last paced step. */
 		if (cursor_mode == CurResize || cursor_mode == CurColResize) {
 			Client *rc;
+			if (grabc)
+				client_set_resizing(grabc, 0);
 			wl_list_for_each(rc, &clients, link)
 				client_flush_pending_size(rc);
 		}
@@ -2454,6 +2456,7 @@ moveresize(const Arg *arg)
 			grab_resize_nbr_w0 = left_nbr->target_width;
 			grab_resize_start_x = cursor->x;
 			cursor_mode = CurColResize;
+			client_set_resizing(grabc, 1);
 			nixly_cursor_set_xcursor("col-resize");
 			return;
 		}
@@ -2465,6 +2468,7 @@ moveresize(const Arg *arg)
 			grab_resize_nbr_w0 = right_nbr->target_width;
 			grab_resize_start_x = cursor->x;
 			cursor_mode = CurColResize;
+			client_set_resizing(grabc, 1);
 			nixly_cursor_set_xcursor("col-resize");
 			return;
 		}
@@ -2578,6 +2582,7 @@ moveresize(const Arg *arg)
 					nixly_cursor_set_xcursor("default");
 					break;
 				}
+				client_set_resizing(grabc, 1);
 				nixly_cursor_set_xcursor(resize_cursor_from_dirs(
 						resize_dir_x, resize_dir_y));
 			}
@@ -2612,6 +2617,7 @@ moveresize(const Arg *arg)
 				resize_last_x = start_x;
 				resize_last_y = start_y;
 				resizing_from_mouse = 1;
+				client_set_resizing(grabc, 1);
 				nixly_cursor_set_xcursor(cursor_name);
 			}
 			break;

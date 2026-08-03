@@ -1034,6 +1034,12 @@ typedef struct {
 	 * / redraw per frame → choppiness + "doesn't adjust until
 	 * refocus" symptom. */
 	int last_configured_w, last_configured_h;
+	/* Last suspended state sent via xdg_toplevel (layout.c visibility).
+	 * Without this dedup every arrange() — one per pointer-motion event
+	 * during a drag — schedules a configure to EVERY xdg client on the
+	 * monitor; Electron acks each with a full relayout and falls far
+	 * behind. */
+	int suspended;
 	/* Timestamp of the last X11 configure actually sent — used by
 	 * client_request_size to pace ConfigureNotify during a live drag
 	 * (XWayland has no ack to gate on).  Dropped intermediates are

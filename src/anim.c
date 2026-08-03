@@ -48,7 +48,7 @@ scene_buffer_natural_iter(struct wlr_scene_buffer *buf, int sx, int sy, void *da
 void
 client_scale_to_box(Client *c, int box_w, int box_h)
 {
-	struct wlr_box natural;
+	int nat_w, nat_h;
 	double scale[2];
 
 	if (!c || !c->scene_surface || !client_surface(c) ||
@@ -64,12 +64,12 @@ client_scale_to_box(Client *c, int box_w, int box_h)
 	if (c->area_clipped)
 		return;
 
-	client_get_geometry(c, &natural);
-	if (natural.width <= 0 || natural.height <= 0 || box_w <= 0 || box_h <= 0)
+	client_get_committed_size(c, &nat_w, &nat_h);
+	if (nat_w <= 0 || nat_h <= 0 || box_w <= 0 || box_h <= 0)
 		return;
 
-	scale[0] = (double)box_w / (double)natural.width;
-	scale[1] = (double)box_h / (double)natural.height;
+	scale[0] = (double)box_w / (double)nat_w;
+	scale[1] = (double)box_h / (double)nat_h;
 
 	wlr_scene_node_for_each_buffer(&c->scene_surface->node,
 			scene_buffer_scale_iter, scale);
@@ -224,6 +224,19 @@ client_set_target_geom(Client *c, struct wlr_box g)
 		return;
 	}
 
+	/* First placement (never been through resize(): last_size_w only
+	 * gets set there): the scene node still sits at the (0,0) map
+	 * default and c->geom holds the client's natural/X11-root coords —
+	 * both usually on ANOTHER monitor.  Springing from there animates
+	 * the window across screens before it lands.  Snap straight to the
+	 * target instead: resize() writes the scene position synchronously,
+	 * inside this arrange pass, before any output can render a frame. */
+	if (c->last_size_w == 0 && c->last_size_h == 0) {
+		c->anim_active = 0;
+		resize(c, g, 0);
+		return;
+	}
+
 	if (c->geom.x == g.x && c->geom.y == g.y &&
 			c->geom.width == g.width && c->geom.height == g.height) {
 		c->anim_active = 0;
@@ -269,7 +282,6 @@ client_set_target_geom(Client *c, struct wlr_box g)
 			if (final_w < 1) final_w = 1;
 			if (final_h < 1) final_h = 1;
 			if (!c->anim_active) {
-				struct wlr_box nat;
 				c->geom_fx = (double)c->geom.x;
 				c->geom_fy = (double)c->geom.y;
 				c->geom_fw = (double)c->geom.width;
@@ -278,9 +290,9 @@ client_set_target_geom(Client *c, struct wlr_box g)
 				client_request_size(c, final_w, final_h);
 				c->anim_final_w = final_w;
 				c->anim_final_h = final_h;
-				client_get_geometry(c, &nat);
-				c->anim_start_nat_w = nat.width;
-				c->anim_start_nat_h = nat.height;
+				client_get_committed_size(c,
+						&c->anim_start_nat_w,
+						&c->anim_start_nat_h);
 			} else if (final_w != c->anim_final_w ||
 					final_h != c->anim_final_h) {
 				client_request_size(c, final_w, final_h);
@@ -310,13 +322,12 @@ client_set_target_geom(Client *c, struct wlr_box g)
 				/* Configure the final size NOW (fullscreen toggle,
 				 * float-resize) — the client renders its new
 				 * content during the anim, not after settle. */
-				struct wlr_box nat;
 				client_request_size(c, final_w, final_h);
 				c->anim_final_w = final_w;
 				c->anim_final_h = final_h;
-				client_get_geometry(c, &nat);
-				c->anim_start_nat_w = nat.width;
-				c->anim_start_nat_h = nat.height;
+				client_get_committed_size(c,
+						&c->anim_start_nat_w,
+						&c->anim_start_nat_h);
 			} else {
 				c->anim_final_w = c->anim_final_h = 0;
 			}
@@ -447,11 +458,11 @@ client_anim_apply(Client *c, struct wlr_box g)
 	 * Fresh content then shows mid-anim, scaled into the moving box,
 	 * instead of popping in only after the anim settles. */
 	if (c->frozen_buffer && c->anim_final_w > 0) {
-		struct wlr_box nat;
-		client_get_geometry(c, &nat);
-		if (nat.width > 0 && nat.height > 0 &&
-				(nat.width != c->anim_start_nat_w ||
-				 nat.height != c->anim_start_nat_h))
+		int nat_w, nat_h;
+		client_get_committed_size(c, &nat_w, &nat_h);
+		if (nat_w > 0 && nat_h > 0 &&
+				(nat_w != c->anim_start_nat_w ||
+				 nat_h != c->anim_start_nat_h))
 			client_unfreeze(c);
 	}
 
@@ -545,6 +556,23 @@ clients_anim_tick(Monitor *m, double dt)
 			c->anim_active = 0;
 			client_scale_reset(c);
 			resize(c, c->target_geom, 0);
+#ifdef XWAYLAND
+			/* client_request_size's size-only dedup drops the
+			 * configure when just the POSITION changed (fullscreen
+			 * exit returns the tile to its slot at unchanged size).
+			 * The X11 client then keeps stale root coords and
+			 * misplaces menus/tooltips.  xsurface->x/y mirror the
+			 * last configure actually sent — flush once at settle
+			 * if they disagree with where the window ended up. */
+			if (client_is_x11(c) &&
+					(c->surface.xwayland->x !=
+						c->geom.x + (int)c->bw ||
+					 c->surface.xwayland->y !=
+						c->geom.y + (int)c->bw))
+				client_set_size(c,
+					c->geom.width - 2 * (int)c->bw,
+					c->geom.height - 2 * (int)c->bw);
+#endif
 		}
 	}
 

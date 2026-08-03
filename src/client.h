@@ -181,6 +181,36 @@ client_get_geometry(Client *c, struct wlr_box *geom)
 	*geom = c->surface.xdg->geometry;
 }
 
+/* Size the client has actually COMMITTED — unlike client_get_geometry,
+ * which for X11 returns xsurface->width/height, overwritten synchronously
+ * by wlr_xwayland_surface_configure with the size we just REQUESTED.
+ * Scaling, box-clipping and "has the client caught up" checks need the
+ * committed truth, or they compare a value against itself. */
+static inline void
+client_get_committed_size(Client *c, int *w, int *h)
+{
+#ifdef XWAYLAND
+	if (client_is_x11(c)) {
+		struct wlr_surface *s = client_surface(c);
+		*w = s ? s->current.width : 0;
+		*h = s ? s->current.height : 0;
+		return;
+	}
+#endif
+	*w = c->surface.xdg->geometry.width;
+	*h = c->surface.xdg->geometry.height;
+}
+
+static inline void
+client_set_resizing(Client *c, int resizing)
+{
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+		return;
+#endif
+	wlr_xdg_toplevel_set_resizing(c->surface.xdg->toplevel, resizing);
+}
+
 static inline Client *
 client_get_parent(Client *c)
 {
@@ -414,7 +444,9 @@ client_set_suspended(Client *c, int suspended)
 	if (client_is_x11(c))
 		return;
 #endif
-
+	if (c->suspended == suspended)
+		return;
+	c->suspended = suspended;
 	wlr_xdg_toplevel_set_suspended(c->surface.xdg->toplevel, suspended);
 }
 
