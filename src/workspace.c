@@ -1786,8 +1786,22 @@ monitor_apply_positions(Monitor *m)
 			/* m->w is the LIVE (spring-lerped) tile bbox.  Use it
 			 * for positions so a waybar toggle slides every tile's
 			 * top edge in lock-step with m->w.y while keeping the
-			 * bottom locked (m->w.y + m->w.height stays constant). */
-			int col_abs_x = m->w.x + col->x - row_scroll;
+			 * bottom locked (m->w.y + m->w.height stays constant).
+			 *
+			 * Column x/width come from the CONTINUOUS spring values,
+			 * rounding the left and right EDGES independently.  The
+			 * old int path ((int)x_f − (int)scroll_x_f + (int)width_f)
+			 * summed three independent truncations, so an edge whose
+			 * continuous position is constant (the locked side of a
+			 * resize, where x and width springs cancel exactly)
+			 * jittered ±1px every frame. */
+			double scroll_f = (ws == m->active_ws)
+					? ws->scroll_x_f : (double)row_scroll;
+			int col_abs_x = m->w.x +
+					(int)lround(col->x_f - scroll_f);
+			int col_w = m->w.x +
+					(int)lround(col->x_f + col->width_f - scroll_f)
+					- col_abs_x;
 			int col_abs_y = m->w.y + ws_y_base + col->y;
 			int nc = col->n_clients;
 			int j = 0;
@@ -1812,7 +1826,7 @@ monitor_apply_positions(Monitor *m)
 				double w = c->col_weight > 0.0 ? c->col_weight : 1.0;
 				geo.x = col_abs_x;
 				geo.y = col_abs_y + y_cursor;
-				geo.width = col->width;
+				geo.width = col_w;
 				geo.height = (j == nc - 1)
 					? (avail - y_cursor + gap * j)
 					: (int)((double)avail * w / sumw);

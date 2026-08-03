@@ -942,6 +942,10 @@ typedef struct {
 	} surface;
 	struct wlr_xdg_toplevel_decoration_v1 *decoration;
 	struct wl_listener commit;
+	/* Post-scene commit hook (both XDG and X11): registered in mapnotify
+	 * AFTER the scene surface, so it runs after wlroots' own commit
+	 * handler and can re-pin anim scaling that handler just reset. */
+	struct wl_listener anim_commit;
 	struct wl_listener map;
 	struct wl_listener maximize;
 	struct wl_listener unmap;
@@ -2106,6 +2110,7 @@ void warpcursor(const Client *c);
 Client *find_client_by_app_id(const char *app_id);
 void focus_or_launch_app(const char *app_id, const char *launch_cmd);
 void commitnotify(struct wl_listener *listener, void *data);
+void animcommitnotify(struct wl_listener *listener, void *data);
 void createdecoration(struct wl_listener *listener, void *data);
 void destroydecoration(struct wl_listener *listener, void *data);
 void requestdecorationmode(struct wl_listener *listener, void *data);

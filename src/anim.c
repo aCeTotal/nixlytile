@@ -360,6 +360,40 @@ live_resize_active(void)
 	return cursor_mode == CurResize || cursor_mode == CurColResize;
 }
 
+/* Surface commit while a geometry anim is in flight.  wlroots' own
+ * commit handler (surface_reconfigure) has just reset every buffer's
+ * dest_size to the surface's NATURAL size — which is the FINAL size we
+ * configured at anim start.  Left uncorrected, the surface renders past
+ * the lerped box until the next anim tick: the "locked" edge of the
+ * tile visibly pops outward, and near a monitor edge the overshoot
+ * spills onto the neighbouring output (another output's rendermon can
+ * fire before our next tick re-scales).  Re-pin clip + scale now.
+ * Registered in mapnotify AFTER the scene surface is created so it runs
+ * after wlroots' handler. */
+void
+animcommitnotify(struct wl_listener *listener, void *data)
+{
+	Client *c = wl_container_of(listener, c, anim_commit);
+	int iw, ih;
+
+	(void)data;
+	if (!c->anim_active || !c->scene_surface || !c->mon)
+		return;
+	/* Live drag shows real content at real size — natural is correct. */
+	if (cursor_mode == CurResize || cursor_mode == CurColResize)
+		return;
+	if (c->frozen_buffer)
+		return;
+	iw = c->geom.width - 2 * c->bw;
+	ih = c->geom.height - 2 * c->bw;
+	if (iw < 1) iw = 1;
+	if (ih < 1) ih = 1;
+	/* Clip first: if the clip box changed, set_clip reconfigures
+	 * dest_size again — scaling after keeps the scale authoritative. */
+	client_clip_to_usable(c);
+	client_scale_to_box(c, iw, ih);
+}
+
 static void
 client_anim_apply(Client *c, struct wlr_box g)
 {
@@ -486,10 +520,14 @@ clients_anim_tick(Monitor *m, double dt)
 		}
 
 		if (moved) {
+			/* Round the far edge, not the size: a locked
+			 * bottom/right edge (x and width springs cancelling)
+			 * stays put instead of jittering ±1px from two
+			 * independent truncations. */
 			g.x = (int)c->geom_fx;
 			g.y = (int)c->geom_fy;
-			g.width = (int)c->geom_fw;
-			g.height = (int)c->geom_fh;
+			g.width = (int)(c->geom_fx + c->geom_fw) - g.x;
+			g.height = (int)(c->geom_fy + c->geom_fh) - g.y;
 			client_anim_apply(c, g);
 			active = 1;
 		} else {
@@ -747,7 +785,11 @@ monitor_anim_tick(Monitor *m, double dt)
 					active = 1;
 					size_anim = 1;
 				}
-				col->width = (int)col->width_f;
+				/* Far-edge rounding (same as m->w above): x and
+				 * width springs cancel exactly on a locked right
+				 * edge, but (int)x_f + (int)width_f jitters ±1px. */
+				col->width = (int)(col->x_f + col->width_f)
+						- col->x;
 			}
 		}
 	}

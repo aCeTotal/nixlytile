@@ -887,6 +887,13 @@ mapnotify(struct wl_listener *listener, void *data)
 			return;
 		}
 		c->scene->node.data = c->scene_surface->node.data = c;
+
+		/* Must be registered AFTER the scene surface above: wlroots'
+		 * commit handler resets buffer dest_size to natural size every
+		 * commit, and this hook (running later in signal order) re-pins
+		 * the anim scaling so mid-anim commits can't overshoot the
+		 * lerped box.  Removed in unmapnotify (X11 can remap). */
+		LISTEN(&surf->events.commit, &c->anim_commit, animcommitnotify);
 	}
 
 	/* Register with ext-foreign-toplevel-list for external tool visibility */
@@ -2339,6 +2346,12 @@ unmapnotify(struct wl_listener *listener, void *data)
 		wlr_ext_foreign_toplevel_handle_v1_destroy(c->foreign_toplevel_handle);
 		c->foreign_toplevel_handle = NULL;
 	}
+
+	/* Registered in mapnotify; guard for the early-failure paths that
+	 * never reached the LISTEN (wl_list_remove NULLs next/prev, ecalloc
+	 * starts NULL, so next != NULL is precisely "registered"). */
+	if (c->anim_commit.link.next)
+		wl_list_remove(&c->anim_commit.link);
 
 	wlr_scene_node_destroy(&c->scene->node);
 	printstatus();
