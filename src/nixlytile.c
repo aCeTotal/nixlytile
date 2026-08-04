@@ -3861,6 +3861,24 @@ configurex11(struct wl_listener *listener, void *data)
 		}
 		resize(c, (struct wlr_box){.x = bx, .y = by, .width = bw, .height = bh}, 0);
 	} else {
+		/* Tiled: the layout owns the geometry, so we deny the request —
+		 * but per ICCCM the client must still get a ConfigureNotify
+		 * telling it the ACTUAL geometry, or it assumes its requested
+		 * size and renders at it (cropped/misfit tile until the next
+		 * real layout change).  arrange() alone can't send it: every
+		 * dedup layer (unchanged geom → no resize → request_size
+		 * skipped) swallows the reply.  Send it explicitly, bypassing
+		 * the last_configured dedup — re-asserting the same size IS
+		 * the reply. */
+		if (c->mon && c->geom.width > 0 && c->geom.height > 0) {
+			int iw = c->geom.width  - 2 * (int)c->bw;
+			int ih = c->geom.height - 2 * (int)c->bw;
+			if (iw > 0 && ih > 0) {
+				client_set_size(c, iw, ih);
+				c->last_configured_w = iw;
+				c->last_configured_h = ih;
+			}
+		}
 		arrange(c->mon);
 	}
 }

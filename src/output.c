@@ -1245,6 +1245,9 @@ outputmgrapplyortest(struct wlr_output_configuration_v1 *config, int test)
 		/* Ensure displays previously disabled by wlr-output-power-management-v1
 		 * are properly handled*/
 		m->asleep = 0;
+		/* See powermgrsetmode: un-wedge a frame_scheduled left over
+		 * from a schedule_frame issued while the output was off. */
+		m->frame_scheduled = 0;
 
 		wlr_output_state_init(&state);
 		wlr_output_state_set_enabled(&state, config_head->state.enabled);
@@ -1329,6 +1332,12 @@ powermgrsetmode(struct wl_listener *listener, void *data)
 	wlr_output_commit_state(m->wlr_output, &state);
 
 	m->asleep = !event->mode;
+	/* A schedule_frame issued while the output was off emits no frame
+	 * event, so frame_scheduled can be wedged at 1 — which silently
+	 * blocks every future request_frame/arrange schedule.  Reset on
+	 * wake so the first arrange after wake actually ticks. */
+	if (event->mode)
+		m->frame_scheduled = 0;
 	updatemons(NULL, NULL);
 }
 
@@ -3125,7 +3134,17 @@ frame_done:
 			 * silently drops their callbacks). */
 			starved = !hc->scene->node.enabled
 					|| hc->frozen_buffer
-					|| (fsc && hc != fsc);
+					|| (fsc && hc != fsc)
+					/* Column-maximize (Mod+F): neighbour tiles are
+					 * pushed off-viewport / fully covered — enabled
+					 * scene node but zero visible region, so wlroots
+					 * drops their callbacks.  Without the drip their
+					 * toolkits block on frame callbacks and can't ack
+					 * or commit any pending resize while covered. */
+					|| (hc->column && hc->column->ws &&
+						hc->column->ws->focused_col &&
+						hc->column->ws->focused_col->fullscreen &&
+						hc->column != hc->column->ws->focused_col);
 			if (!starved)
 				continue;
 			/* FROZEN clients drip every vblank, not at 1 Hz: a size

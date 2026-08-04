@@ -393,6 +393,22 @@ commitnotify(struct wl_listener *listener, void *data)
 		 * a newly oversized one gets caught before another output's
 		 * rendermon can draw it across the monitor edge. */
 		client_clip_to_usable(c);
+		/* Self-heal: the client just committed a size that doesn't
+		 * match its tile box and no anim owns the geometry.  Normally
+		 * last_configured already equals the box and the dedup in
+		 * client_request_size makes this a no-op; but an aborted anim
+		 * can leave the client configured for an abandoned size — this
+		 * re-sends the correct one so the tile converges on the next
+		 * commit instead of staying cropped/stretched forever. */
+		{
+			int iw = c->geom.width  - 2 * (int)c->bw;
+			int ih = c->geom.height - 2 * (int)c->bw;
+			int nw, nh;
+			client_get_committed_size(c, &nw, &nh);
+			if (iw > 0 && ih > 0 && nw > 0 && nh > 0 &&
+					(nw != iw || nh != ih))
+				client_request_size(c, iw, ih);
+		}
 	}
 
 	/* For tiled clients in a tiling layout, use the geometry from btrtile
@@ -1822,12 +1838,17 @@ resize(Client *c, struct wlr_box geo, int interact)
 	/* Hard fast-path: nothing whatsoever changed → no work, no
 	 * scene damage, no wlroots call.  Critical for keeping heavy
 	 * clients (Blender) smooth — every wasted call costs frame time
-	 * at 4K @ 60Hz. */
+	 * at 4K @ 60Hz.  Only valid when the size we last CONFIGURED the
+	 * client with also matches — an aborted anim can leave an
+	 * outstanding configure at a different size, and returning here
+	 * would block the client_request_size below that repairs it. */
 	if (!interact &&
 			geo.x == c->geom.x && geo.y == c->geom.y &&
 			geo.width == c->geom.width && geo.height == c->geom.height &&
 			geo.width == c->last_size_w &&
-			geo.height == c->last_size_h)
+			geo.height == c->last_size_h &&
+			c->last_configured_w == geo.width - 2 * (int)c->bw &&
+			c->last_configured_h == geo.height - 2 * (int)c->bw)
 		return;
 
 	bbox = interact ? &sgeom : &c->mon->w;
@@ -1898,6 +1919,13 @@ resize(Client *c, struct wlr_box geo, int interact)
 	client_get_clip(c, &clip);
 	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
 
+	/* Clip BEFORE scaling: client_clip_to_usable clears a stale
+	 * area_clipped left over from the anim (a tile that straddled the
+	 * usable-area edge mid-anim but has now settled inside).  With the
+	 * old order the flag made client_scale_to_box skip, so the settled
+	 * tile kept its unscaled buffer until the client's next commit. */
+	client_clip_to_usable(c);
+
 	{
 		int nat_w, nat_h;
 		client_get_committed_size(c, &nat_w, &nat_h);
@@ -1905,8 +1933,6 @@ resize(Client *c, struct wlr_box geo, int interact)
 			client_scale_to_box(c, c->geom.width - 2 * (int)c->bw,
 					c->geom.height - 2 * (int)c->bw);
 	}
-
-	client_clip_to_usable(c);
 }
 
 void
@@ -2448,6 +2474,20 @@ unmapnotify(struct wl_listener *listener, void *data)
 	 * starts NULL, so next != NULL is precisely "registered"). */
 	if (c->anim_commit.link.next)
 		wl_list_remove(&c->anim_commit.link);
+
+	/* X11 clients can remap the same Client (DXVK/Steam do).  Stale
+	 * resize-tracking from the previous mapping would let the dedups
+	 * (last_configured, last_size, resize()'s fast-path) swallow the
+	 * first configures of the new mapping.  last_size 0/0 also routes
+	 * the first placement through the snap path in
+	 * client_set_target_geom, as on a fresh map. */
+	c->last_configured_w = c->last_configured_h = 0;
+	c->pending_resize_w = c->pending_resize_h = 0;
+	c->last_size_w = c->last_size_h = 0;
+	c->x11_cfg_ms = 0;
+	c->area_clipped = 0;
+	c->anim_active = 0;
+	c->resize = 0;
 
 	wlr_scene_node_destroy(&c->scene->node);
 	printstatus();

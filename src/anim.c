@@ -239,7 +239,15 @@ client_set_target_geom(Client *c, struct wlr_box g)
 
 	if (c->geom.x == g.x && c->geom.y == g.y &&
 			c->geom.width == g.width && c->geom.height == g.height) {
-		c->anim_active = 0;
+		/* Target equals current geometry.  If an anim is in flight this
+		 * is a mid-anim arrange() (springs un-ticked since last frame,
+		 * so g == c->geom for every animating client) — do NOT cancel:
+		 * clearing anim_active here abandons the settle (scale_reset +
+		 * final resize) and orphans the final-size configure sent at
+		 * anim start, leaving the tile cropped/stretched at the wrong
+		 * size until layout numbers change again.  Keep the anim alive;
+		 * clients_anim_tick either continues it or performs the full
+		 * settle on the next frame (arrange scheduled one). */
 		return;
 	}
 
@@ -388,7 +396,30 @@ animcommitnotify(struct wl_listener *listener, void *data)
 	int iw, ih;
 
 	(void)data;
-	if (!c->anim_active || !c->scene_surface || !c->mon)
+	if (!c->scene_surface || !c->mon)
+		return;
+#ifdef XWAYLAND
+	if (!c->anim_active && client_is_x11(c) && c->column) {
+		/* X11 has no xdg commitnotify doing post-settle work — this
+		 * hook is its only commit path.  Re-pin the clip against the
+		 * fresh buffer, and self-heal a size desync: X11 has no ack
+		 * chain, so a configure lost to an aborted anim (or a client
+		 * that reasserted its own size) leaves the committed size
+		 * permanently different from the tile box.  request_size's
+		 * dedup makes this a no-op whenever last_configured already
+		 * matches the box. */
+		int nw, nh;
+		iw = c->geom.width  - 2 * (int)c->bw;
+		ih = c->geom.height - 2 * (int)c->bw;
+		client_clip_to_usable(c);
+		client_get_committed_size(c, &nw, &nh);
+		if (iw > 0 && ih > 0 && nw > 0 && nh > 0 &&
+				(nw != iw || nh != ih))
+			client_request_size(c, iw, ih);
+		return;
+	}
+#endif
+	if (!c->anim_active)
 		return;
 	/* Live drag shows real content at real size — natural is correct.
 	 * Still re-pin the clip: this commit may carry a buffer larger than
