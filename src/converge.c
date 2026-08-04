@@ -69,11 +69,25 @@ converge_candidate(Client *c, Monitor *m)
 /* True while a client still owes us a commit at its tile size.  Used by
  * the frame-done drip in rendermon: a client that can't repaint can't
  * converge, so it must keep getting frame callbacks even while it is
- * covered or off-viewport. */
+ * covered or off-viewport.  A client we already gave up on is excluded:
+ * it will never commit that size, and dripping it every vblank forever
+ * is pure overhead. */
 int
 client_size_pending(Client *c)
 {
-	return c && c->converge_since != 0;
+	return c && c->converge_since != 0 && !c->converge_gave_up;
+}
+
+/* Give-up is latched against the box it was reached at.  A different box
+ * is a real layout change (tile resize, ws move, bar toggle) that the
+ * client may well be able to satisfy — re-arm the watchdog. */
+static void
+converge_clear(Client *c)
+{
+	c->converge_since = 0;
+	c->converge_tries = 0;
+	c->converge_gave_up = 0;
+	c->converge_gave_up_w = c->converge_gave_up_h = 0;
 }
 
 int
@@ -92,26 +106,46 @@ clients_converge_tick(Monitor *m)
 		int nw, nh, iw, ih, min_w, min_h;
 
 		if (!converge_candidate(c, m)) {
-			c->converge_since = 0;
-			c->converge_tries = 0;
+			/* Not ours right now (animating, dragging, floating).
+			 * Keep a latched give-up: the anim that runs on every
+			 * focus switch would otherwise clear it and re-run the
+			 * whole 4-configure burst against a client that already
+			 * proved it cannot comply. */
+			if (!c->converge_gave_up)
+				converge_clear(c);
 			continue;
 		}
 
 		iw = c->geom.width  - 2 * (int)c->bw;
 		ih = c->geom.height - 2 * (int)c->bw;
+
+		/* Latched give-up at this same box: keep the buffer stretched
+		 * into the box (the client still renders at its own size) but
+		 * report nothing pending — no vblank chain, no frame_done drip.
+		 * Without this a client that structurally can't reach its box
+		 * pins the output at full refresh for as long as it is open. */
+		if (c->converge_gave_up) {
+			if (iw == c->converge_gave_up_w &&
+					ih == c->converge_gave_up_h) {
+				client_scale_to_box(c, iw, ih);
+				client_clip_to_usable(c);
+				continue;
+			}
+			converge_clear(c);
+		}
+
 		client_get_committed_size(c, &nw, &nh);
 		client_get_min_size(c, &min_w, &min_h);
 		if (axis_settled(nw, iw, min_w) && axis_settled(nh, ih, min_h)) {
-			c->converge_since = 0;
-			c->converge_tries = 0;
+			converge_clear(c);
 			continue;
 		}
 
-		pending = 1;
 		if (!c->converge_since) {
 			/* First frame of the mismatch — the configure is
 			 * probably in flight.  Start the clock. */
 			c->converge_since = now ? now : 1;
+			pending = 1;
 			continue;
 		}
 
@@ -121,17 +155,19 @@ clients_converge_tick(Monitor *m)
 		client_scale_to_box(c, iw, ih);
 		client_clip_to_usable(c);
 
-		if (now - c->converge_since < CONVERGE_GRACE_MS)
+		if (now - c->converge_since < CONVERGE_GRACE_MS) {
+			pending = 1;
 			continue;
+		}
 
 		if (c->converge_tries >= CONVERGE_MAX_TRIES) {
-			if (c->converge_tries == CONVERGE_MAX_TRIES) {
-				c->converge_tries++;
-				diag_logf("TILE",
-					"CONVERGE-GIVEUP appid='%s' box=%dx%d committed=%dx%d (kept scaled to box)",
-					client_get_appid(c) ? client_get_appid(c) : "(null)",
-					iw, ih, nw, nh);
-			}
+			c->converge_gave_up = 1;
+			c->converge_gave_up_w = iw;
+			c->converge_gave_up_h = ih;
+			diag_logf("TILE",
+				"CONVERGE-GIVEUP appid='%s' box=%dx%d committed=%dx%d (kept scaled to box)",
+				client_get_appid(c) ? client_get_appid(c) : "(null)",
+				iw, ih, nw, nh);
 			continue;
 		}
 
@@ -146,6 +182,7 @@ clients_converge_tick(Monitor *m)
 		client_request_size(c, iw, ih);
 		c->converge_tries++;
 		c->converge_since = now ? now : 1;
+		pending = 1;
 		diag_logf("TILE",
 			"CONVERGE appid='%s' box=%dx%d committed=%dx%d try=%d",
 			client_get_appid(c) ? client_get_appid(c) : "(null)",

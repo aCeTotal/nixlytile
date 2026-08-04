@@ -2490,6 +2490,8 @@ unmapnotify(struct wl_listener *listener, void *data)
 	c->resize = 0;
 	c->converge_since = 0;
 	c->converge_tries = 0;
+	c->converge_gave_up = 0;
+	c->converge_gave_up_w = c->converge_gave_up_h = 0;
 
 	wlr_scene_node_destroy(&c->scene->node);
 	printstatus();

@@ -1074,6 +1074,14 @@ typedef struct {
 	 * configures since then. */
 	uint32_t converge_since;
 	int converge_tries;
+	/* Latched give-up: set when the watchdog stopped re-driving this
+	 * client, together with the box it gave up on.  While the box is
+	 * unchanged the client is treated as settled (no per-frame vblank
+	 * chain, no frame_done drip) — a client that structurally cannot
+	 * reach its box (Blender) otherwise pins the output at full refresh
+	 * forever.  A real box change clears it and re-arms the watchdog. */
+	int converge_gave_up;
+	int converge_gave_up_w, converge_gave_up_h;
 } Client;
 
 /* ── Standalone close anim ───────────────────────────────────────────
