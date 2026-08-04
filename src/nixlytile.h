@@ -1068,6 +1068,12 @@ typedef struct {
 	 * ikke sentreres av mapnotify/configurex11. Nullstilles når den har
 	 * glidd ut — vinduet lever videre, vi eier det bare ikke lenger. */
 	int is_notif;
+	/* Size-convergence watchdog (converge.c).  converge_since is the
+	 * msec timestamp when the committed size was first seen to disagree
+	 * with the tile box (0 = converged), converge_tries counts re-sent
+	 * configures since then. */
+	uint32_t converge_since;
+	int converge_tries;
 } Client;
 
 /* ── Standalone close anim ───────────────────────────────────────────
@@ -2135,6 +2141,9 @@ void client_clip_to_usable(Client *c);
 void client_request_size(Client *c, int w, int h);
 void client_flush_pending_size(Client *c);
 void client_send_configure_only(Client *c, int w, int h);
+/* converge.c — size-convergence watchdog */
+int client_size_pending(Client *c);
+int clients_converge_tick(Monitor *m);
 void tag(const Arg *arg);
 void tagmon(const Arg *arg);
 void toggletag(const Arg *arg);

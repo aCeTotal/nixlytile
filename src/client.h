@@ -201,6 +201,33 @@ client_get_committed_size(Client *c, int *w, int *h)
 	*h = c->surface.xdg->geometry.height;
 }
 
+/* Minimum size the client has declared (0 = none).  A tile narrower or
+ * shorter than this can never be satisfied: the client commits its
+ * minimum no matter what we configure, so convergence must compare
+ * against MAX(box, min) instead of the box alone — otherwise the
+ * watchdog re-configures such a client forever. */
+static inline void
+client_get_min_size(Client *c, int *w, int *h)
+{
+	*w = *h = 0;
+#ifdef XWAYLAND
+	if (client_is_x11(c)) {
+		xcb_size_hints_t *sh = c->surface.xwayland->size_hints;
+		if (sh && (sh->flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE)) {
+			*w = sh->min_width  > 0 ? sh->min_width  : 0;
+			*h = sh->min_height > 0 ? sh->min_height : 0;
+		}
+		return;
+	}
+#endif
+	if (c->surface.xdg->toplevel) {
+		struct wlr_xdg_toplevel_state *st =
+				&c->surface.xdg->toplevel->current;
+		*w = st->min_width  > 0 ? st->min_width  : 0;
+		*h = st->min_height > 0 ? st->min_height : 0;
+	}
+}
+
 static inline void
 client_set_resizing(Client *c, int resizing)
 {

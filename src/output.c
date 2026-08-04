@@ -2537,6 +2537,14 @@ rendermon(struct wl_listener *listener, void *data)
 		}
 
 		still = monitor_anim_tick(m, dt);
+		/* Size-convergence watchdog: re-drive any tile whose committed
+		 * size drifted away from its box (see converge.c).  Runs after
+		 * the anim tick so a tile that settled this frame is judged on
+		 * its final geometry, and keeps the vblank chain alive while
+		 * anything is still un-converged — otherwise an idle output
+		 * would only re-check at the 1 Hz heartbeat. */
+		if (clients_converge_tick(m))
+			still = 1;
 		/* monitor_anim_tick already called monitor_apply_positions
 		 * internally to keep target_geom in lock-step with the
 		 * just-ticked scroll/col springs.  Here we only need to
@@ -3144,7 +3152,12 @@ frame_done:
 					|| (hc->column && hc->column->ws &&
 						hc->column->ws->focused_col &&
 						hc->column->ws->focused_col->fullscreen &&
-						hc->column != hc->column->ws->focused_col);
+						hc->column != hc->column->ws->focused_col)
+					/* Owes us a commit at its tile size: it
+					 * cannot repaint without a frame callback,
+					 * so it cannot converge.  Drip regardless
+					 * of why it is otherwise invisible. */
+					|| client_size_pending(hc);
 			if (!starved)
 				continue;
 			/* FROZEN clients drip every vblank, not at 1 Hz: a size
@@ -3157,7 +3170,8 @@ frame_done:
 			 * on an idle desktop only the 1 Hz heartbeat drives this,
 			 * and a client needing several callbacks to relayout
 			 * looks stuck until a ws switch forces damage). */
-			if (!hc->frozen_buffer && !hidden_due)
+			if (!hc->frozen_buffer && !client_size_pending(hc) &&
+					!hidden_due)
 				continue;
 			hs = client_surface(hc);
 			if (!hs || !hs->mapped)
