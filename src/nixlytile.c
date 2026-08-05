@@ -4180,6 +4180,11 @@ xwaylandready(struct wl_listener *listener, void *data)
 	/* assign the one and only seat */
 	wlr_xwayland_set_seat(xwayland, seat);
 
+	/* Give Xwayland a RandR primary output from the start (the focused
+	 * monitor) so X11 apps launched before any game fullscreens don't
+	 * read modes from an arbitrary first-enumerated output. */
+	xwayland_set_primary(selmon);
+
 	/* Set the default XWayland cursor to match the rest of dwl. */
 	wlr_xcursor_manager_load(cursor_mgr, 1);
 	if ((xcursor = wlr_xcursor_manager_get_xcursor(cursor_mgr, "default", 1)))

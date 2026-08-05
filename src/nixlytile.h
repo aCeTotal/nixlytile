@@ -971,6 +971,7 @@ typedef struct {
 	int isfloating, isurgent, isfullscreen, issticky, was_tiled;
 	int isfixed;                  /* float-type with fixed size — reject interactive resize */
 	int is_game_splash;         /* Game splash/EAC launcher → keep centered */
+	int fx_covered;             /* launch cover already played for this client */
 	/* Memoized pid-based probes (0=unknown, 1=yes, -1=no).  The pid
 	 * never changes for a client, and the uncached versions walk
 	 * /proc on every call — from per-event hot paths like
@@ -2173,6 +2174,7 @@ int is_browser_client(Client *c);
 int looks_like_game(Client *c);
 int is_retro_emulator_client(Client *c);
 void read_steam_properties(Client *c);
+void xwayland_set_primary(Monitor *m);
 int is_steam_cmd(const char *cmd);
 int is_game_launcher_child(pid_t pid);
 int is_game_runtime_child(pid_t pid);
@@ -2781,6 +2783,7 @@ void game_prelaunch_release(void);
 /* launchfx.c */
 void launchfx_init(void);
 void launchfx_client_mapped(Client *c);
+void launchfx_fullscreen_starting(Client *c);
 void launchfx_game_ready(void);
 void schedule_game_mode_update(void);
 void gm_bg_init(void);

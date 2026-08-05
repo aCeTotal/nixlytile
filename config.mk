@@ -30,7 +30,7 @@ WLR_LIBS = `$(PKG_CONFIG) --libs wlroots-0.20`
 OPTFLAGS = -O3
 
 XWAYLAND = -DXWAYLAND
-XLIBS = xcb xcb-icccm
+XLIBS = xcb xcb-icccm xcb-randr
 
 # nixlytile itself only uses C99 features, but wlroots' headers use anonymous unions (C11).
 # To avoid warnings about them, we do not use -std=c99 and instead of using the

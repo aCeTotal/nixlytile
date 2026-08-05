@@ -25,7 +25,7 @@ MOD_CFLAGS = $(NLCFLAGS) -Wno-declaration-after-statement
 
 # Compositor module object files
 MOD_OBJS = globals.o client.o layout.o input.o output.o \
-           gamemode.o client_utils.o gpu.o draw.o layer.o workspace.o anim.o \
+           gamemode.o client_utils.o xrandr_primary.o gpu.o draw.o layer.o workspace.o anim.o \
            dwl_ipc.o dwl-ipc-unstable-v2-protocol.o window_ipc.o \
            config_parser.o config_loader.o monitors_conf.o monitor_setup.o \
            input_conf.o \
@@ -72,6 +72,8 @@ input_conf.o: $(SRC)/input_conf.c $(SRC)/nixlytile.h
 gamemode.o: $(SRC)/gamemode.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 client_utils.o: $(SRC)/client_utils.c $(SRC)/nixlytile.h $(SRC)/client.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+xrandr_primary.o: $(SRC)/xrandr_primary.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 gpu.o: $(SRC)/gpu.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<

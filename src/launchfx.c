@@ -248,6 +248,47 @@ fx_readahead(pid_t reaper)
 	}
 }
 
+/* Build the cover scene on m and start the grow tick.  Returns 0 on
+ * allocation failure. */
+static int
+fx_start_cover(Monitor *m)
+{
+	fx.mon = m;
+	fx.dot_buf = make_dot_buffer(FX_DOT_TEX);
+	if (!fx.dot_buf)
+		return 0;
+	fx.tree = wlr_scene_tree_create(layers[LyrOverlay]);
+	if (!fx.tree) {
+		wlr_buffer_drop(fx.dot_buf);
+		fx.dot_buf = NULL;
+		return 0;
+	}
+	wlr_scene_node_set_position(&fx.tree->node, fx.mon->m.x, fx.mon->m.y);
+	fx.dot = wlr_scene_buffer_create(fx.tree, fx.dot_buf);
+	if (!fx.dot) {
+		fx_teardown();
+		return 0;
+	}
+
+	fx.active = 1;
+	fx.grown = 0;
+	fx.reveal_pending = 0;
+	fx.reaper = 0;
+	fx.orphan_ms = 0;
+	fx.window_ms = 0;
+	fx.start_ms = monotonic_msec();
+
+	game_prelaunch_boost();
+
+	fx.tick = wl_event_loop_add_timer(event_loop, fx_tick_cb, NULL);
+	if (fx.tick)
+		wl_event_source_timer_update(fx.tick, 1);
+	fx.watchdog = wl_event_loop_add_timer(event_loop, fx_watchdog_cb, NULL);
+	if (fx.watchdog)
+		wl_event_source_timer_update(fx.watchdog, FX_WATCHDOG_MS);
+	return 1;
+}
+
 static void
 launchfx_start(pid_t reaper)
 {
@@ -264,42 +305,34 @@ launchfx_start(pid_t reaper)
 
 	fx_readahead(reaper);
 
-	fx.mon = selmon;
-	fx.dot_buf = make_dot_buffer(FX_DOT_TEX);
-	if (!fx.dot_buf)
+	if (!fx_start_cover(selmon))
 		return;
-	fx.tree = wlr_scene_tree_create(layers[LyrOverlay]);
-	if (!fx.tree) {
-		wlr_buffer_drop(fx.dot_buf);
-		fx.dot_buf = NULL;
-		return;
-	}
-	wlr_scene_node_set_position(&fx.tree->node, fx.mon->m.x, fx.mon->m.y);
-	fx.dot = wlr_scene_buffer_create(fx.tree, fx.dot_buf);
-	if (!fx.dot) {
-		fx_teardown();
-		return;
-	}
-
-	fx.active = 1;
-	fx.grown = 0;
-	fx.reveal_pending = 0;
 	fx.reaper = reaper;
-	fx.orphan_ms = 0;
-	fx.window_ms = 0;
-	fx.start_ms = monotonic_msec();
-
-	game_prelaunch_boost();
-
-	fx.tick = wl_event_loop_add_timer(event_loop, fx_tick_cb, NULL);
-	if (fx.tick)
-		wl_event_source_timer_update(fx.tick, 1);
-	fx.watchdog = wl_event_loop_add_timer(event_loop, fx_watchdog_cb, NULL);
-	if (fx.watchdog)
-		wl_event_source_timer_update(fx.watchdog, FX_WATCHDOG_MS);
 
 	wlr_log(WLR_INFO, "launchfx: Steam launch detected (reaper pid %d) — "
 			"pre-boost + cover animation", (int)reaper);
+}
+
+/* Called from setfullscreen() the moment a game takes the screen.
+ * Fallback for launches the reaper poll never saw (non-Steam launchers,
+ * detection misses): play the cover grow right before fullscreen and
+ * let rendermon's launchfx_game_ready() reveal the presenting game. */
+void
+launchfx_fullscreen_starting(Client *c)
+{
+	if (fx.active || !c || !c->mon || !c->mon->wlr_output)
+		return;
+	if (c->fx_covered || !looks_like_game(c))
+		return;
+	c->fx_covered = 1;
+	if (!fx_start_cover(c->mon))
+		return;
+	/* Arm the interactive-launcher fallback: the window exists, so a
+	 * game that fullscreens but never presents must still be revealed. */
+	fx.window_ms = monotonic_msec();
+
+	wlr_log(WLR_INFO, "launchfx: game fullscreen without launch cover — "
+			"playing cover animation on %s", c->mon->wlr_output->name);
 }
 
 /* A game (or game-launcher child) window mapped.  Do NOT reveal yet —

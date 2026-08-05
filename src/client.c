@@ -2037,6 +2037,14 @@ setfullscreen(Client *c, int fullscreen)
 			c->mon->wlr_output->name,
 			fsgeom.width, fsgeom.height, fsgeom.x, fsgeom.y,
 			c->mon->m.width, c->mon->m.height, c->mon->m.x, c->mon->m.y);
+		/* X11 games read modes/desktop size from the RandR primary
+		 * output — point it at the monitor the game fullscreens on. */
+		if (client_is_x11(c))
+			xwayland_set_primary(c->mon);
+		/* Launch cover fallback: play the grow animation right before
+		 * the game takes the screen if the reaper poll never started
+		 * one for this launch. */
+		launchfx_fullscreen_starting(c);
 		c->prev = c->geom;
 		/* Every fullscreen client takes the full output rect (m->m,
 		 * via fsgeom): no border, covers the statusbar, and gives
