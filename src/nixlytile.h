@@ -1774,8 +1774,9 @@ extern int dgpu_render_fd;
 extern int g_explicit_sync_ok; /* 1 = DRM syncobj timeline manager active */
 extern struct wl_event_source *dgpu_power_watchdog;
 
-/* cpu cursor (Nvidia HW cursor plane) */
+/* cpu cursor (Nvidia HW cursor plane) — two buffers, alternated per update */
 extern struct CpuCursorBuffer *cpu_cursor_buf;
+extern struct CpuCursorBuffer *cpu_cursor_buf_b;
 extern int cpu_cursor_active;
 
 #if 1

@@ -248,6 +248,39 @@ static struct wlr_surface *tracked_cursor_surface;
 static struct wl_listener  tracked_cursor_commit;
 static struct wl_listener  tracked_cursor_destroy;
 static int                 tracked_cursor_hx, tracked_cursor_hy;
+static struct CpuCursorBuffer *cursor_shown_buf;
+
+/*
+ * Pick the CPU cursor buffer to paint the next image into.
+ *
+ * wlr_cursor_set_buffer() returns early when buffer, hotspot and scale are all
+ * unchanged, and the DRM backend copies (blits/renders) the cursor buffer at
+ * set-time on multi-GPU and on the rendered-cursor path.  Painting a new image
+ * into the one buffer we already handed over therefore never reaches the
+ * screen: the plane keeps showing the previously committed image.  Proton/wine
+ * games hit this constantly — they alternate between a transparent
+ * hide-cursor image and a real cursor at the *same* hotspot (usually 0,0), so
+ * once the transparent one is committed the pointer stays invisible until
+ * something changes the hotspot (e.g. the compositor's own arrow after a
+ * workspace switch).
+ *
+ * Alternating between two buffers makes every update a genuinely new buffer,
+ * and keeps us from painting into the buffer the cursor plane is scanning out.
+ */
+static struct CpuCursorBuffer *
+cursor_back_buffer(void)
+{
+	if (cpu_cursor_buf_b && cursor_shown_buf == cpu_cursor_buf)
+		return cpu_cursor_buf_b;
+	return cpu_cursor_buf;
+}
+
+static void
+cursor_commit_buffer(struct CpuCursorBuffer *buf, int32_t hx, int32_t hy)
+{
+	cursor_shown_buf = buf;
+	wlr_cursor_set_buffer(cursor, buf ? &buf->base : NULL, hx, hy, 1.0f);
+}
 
 static void
 stop_tracking_cursor_surface(void)
@@ -262,46 +295,57 @@ stop_tracking_cursor_surface(void)
 static void
 upload_cursor_surface(struct wlr_surface *surface, int hx, int hy)
 {
+	struct CpuCursorBuffer *buf = cursor_back_buffer();
 	void *src_data;
 	uint32_t src_format, copy_w, copy_h, y;
 	size_t src_stride;
 	uint8_t *dst;
+
+	if (!buf)
+		return;
 
 	if (!wlr_buffer_begin_data_ptr_access(&surface->buffer->base,
 			WLR_BUFFER_DATA_PTR_ACCESS_READ,
 			&src_data, &src_format, &src_stride)) {
 		struct wlr_texture *tex = wlr_texture_from_buffer(drw,
 			&surface->buffer->base);
-		if (!tex)
+		if (!tex) {
+			game_log("CURSOR: client surface upload failed "
+				"(no data ptr, no texture) — keeping previous image");
 			return;
+		}
 
-		copy_w = MIN((uint32_t)tex->width, cpu_cursor_buf->width);
-		copy_h = MIN((uint32_t)tex->height, cpu_cursor_buf->height);
+		copy_w = MIN((uint32_t)tex->width, buf->width);
+		copy_h = MIN((uint32_t)tex->height, buf->height);
 
-		memset(cpu_cursor_buf->map, 0, cpu_cursor_buf->map_size);
+		memset(buf->map, 0, buf->map_size);
 
 		if (!wlr_texture_read_pixels(tex,
 				&(struct wlr_texture_read_pixels_options){
-			.data = cpu_cursor_buf->map,
+			.data = buf->map,
 			.format = DRM_FORMAT_ARGB8888,
-			.stride = cpu_cursor_buf->stride,
+			.stride = buf->stride,
 			.src_box = { .width = copy_w, .height = copy_h },
 		})) {
 			wlr_texture_destroy(tex);
+			/* Buffer is blank now, but it is the back buffer — the
+			 * displayed image is untouched because we don't commit. */
+			game_log("CURSOR: client surface read_pixels failed "
+				"(%ux%u) — keeping previous image", copy_w, copy_h);
 			return;
 		}
 
 		wlr_texture_destroy(tex);
 	} else {
-		memset(cpu_cursor_buf->map, 0, cpu_cursor_buf->map_size);
+		memset(buf->map, 0, buf->map_size);
 
-		copy_w = MIN((uint32_t)surface->current.width, cpu_cursor_buf->width);
-		copy_h = MIN((uint32_t)surface->current.height, cpu_cursor_buf->height);
+		copy_w = MIN((uint32_t)surface->current.width, buf->width);
+		copy_h = MIN((uint32_t)surface->current.height, buf->height);
 
-		dst = (uint8_t *)cpu_cursor_buf->map;
+		dst = (uint8_t *)buf->map;
 
 		for (y = 0; y < copy_h; y++) {
-			memcpy(dst + y * cpu_cursor_buf->stride,
+			memcpy(dst + y * buf->stride,
 				(uint8_t *)src_data + y * src_stride,
 				copy_w * 4);
 		}
@@ -309,8 +353,19 @@ upload_cursor_surface(struct wlr_surface *surface, int hx, int hy)
 		wlr_buffer_end_data_ptr_access(&surface->buffer->base);
 	}
 
-	wlr_cursor_set_buffer(cursor, &cpu_cursor_buf->base,
-		(int32_t)hx, (int32_t)hy, 1.0f);
+	if (game_log_fd >= 0) {
+		uint32_t px, opaque = 0;
+		const uint8_t *p = (const uint8_t *)buf->map;
+		for (y = 0; y < copy_h; y++)
+			for (px = 0; px < copy_w; px++)
+				if (p[y * buf->stride + px * 4 + 3])
+					opaque++;
+		game_log("CURSOR: client image %ux%u hotspot=%d,%d "
+			"nonzero_alpha=%u buf=%s", copy_w, copy_h, hx, hy, opaque,
+			buf == cpu_cursor_buf ? "A" : "B");
+	}
+
+	cursor_commit_buffer(buf, (int32_t)hx, (int32_t)hy);
 }
 
 static void
@@ -335,6 +390,7 @@ tracked_cursor_handle_commit(struct wl_listener *listener, void *data)
 void
 nixly_cursor_set_xcursor(const char *name)
 {
+	struct CpuCursorBuffer *buf;
 	struct wlr_xcursor *xcur;
 	struct wlr_xcursor_image *img;
 	uint32_t src_stride, copy_w, copy_h, y;
@@ -362,25 +418,32 @@ nixly_cursor_set_xcursor(const char *name)
 		return;
 	}
 
+	buf = cursor_back_buffer();
+	if (!buf)
+		return;
+
 	img = xcur->images[0];
 
-	memset(cpu_cursor_buf->map, 0, cpu_cursor_buf->map_size);
+	memset(buf->map, 0, buf->map_size);
 
-	copy_w = MIN(img->width, cpu_cursor_buf->width);
-	copy_h = MIN(img->height, cpu_cursor_buf->height);
+	copy_w = MIN(img->width, buf->width);
+	copy_h = MIN(img->height, buf->height);
 	src_stride = img->width * 4;
 
 	src = img->buffer;
-	dst = (uint8_t *)cpu_cursor_buf->map;
+	dst = (uint8_t *)buf->map;
 
 	for (y = 0; y < copy_h; y++) {
-		memcpy(dst + y * cpu_cursor_buf->stride,
+		memcpy(dst + y * buf->stride,
 			src + y * src_stride,
 			copy_w * 4);
 	}
 
-	wlr_cursor_set_buffer(cursor, &cpu_cursor_buf->base,
-		(int32_t)img->hotspot_x, (int32_t)img->hotspot_y, 1.0f);
+	game_log("CURSOR: xcursor '%s' %ux%u hotspot=%u,%u buf=%s", name,
+		copy_w, copy_h, img->hotspot_x, img->hotspot_y,
+		buf == cpu_cursor_buf ? "A" : "B");
+
+	cursor_commit_buffer(buf, (int32_t)img->hotspot_x, (int32_t)img->hotspot_y);
 }
 
 void
@@ -397,7 +460,8 @@ nixly_cursor_set_client_surface(struct wlr_surface *surface, int hx, int hy)
 	}
 
 	if (!surface) {
-		wlr_cursor_set_buffer(cursor, NULL, 0, 0, 1.0f);
+		game_log("CURSOR: client hid cursor (NULL surface)");
+		cursor_commit_buffer(NULL, 0, 0);
 		return;
 	}
 

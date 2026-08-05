@@ -212,6 +212,11 @@
             runtimeInputs = with pkgs; [ coreutils gawk gnugrep procps systemd util-linux ];
             text = builtins.readFile ./scripts/nixly-gametune;
           };
+          prewarm = pkgs.writeShellApplication {
+            name = "nixly-prewarm";
+            runtimeInputs = with pkgs; [ coreutils findutils gawk gnugrep procps util-linux vulkan-tools ];
+            text = builtins.readFile ./scripts/nixly-prewarm;
+          };
         in {
           options.programs.nixlytile = {
             enable = lib.mkEnableOption "nixlytile game mode support";
@@ -244,6 +249,22 @@
               };
             };
 
+            prewarm = {
+              enable = lib.mkOption {
+                type = lib.types.bool;
+                default = true;
+                description = ''
+                  Background shader pre-processing for installed Steam
+                  games: a user timer replays every game's downloaded
+                  Vulkan pipeline caches into the per-game GPU driver
+                  caches at idle priority, so first launches don't stall
+                  on shader compilation.  The compositor additionally
+                  runs `nixly-prewarm readahead` at the moment Play is
+                  pressed to pull the game's working set into RAM.
+                '';
+              };
+            };
+
             resourceLimits = lib.mkOption {
               type = lib.types.bool;
               default = true;
@@ -260,6 +281,38 @@
             {
               environment.systemPackages = [ cfg.package ];
             }
+
+            (lib.mkIf cfg.prewarm.enable {
+              # steam-run gives Steam's fossilize_replay the FHS env it
+              # needs; the script itself must be on PATH for the
+              # compositor's launch-time readahead.
+              environment.systemPackages = [ prewarm pkgs.steam-run ];
+
+              systemd.user.services.nixly-prewarm = {
+                description = "nixlytile Steam shader prewarm";
+                serviceConfig = {
+                  Type = "oneshot";
+                  ExecStart = "${prewarm}/bin/nixly-prewarm run";
+                  Nice = 19;
+                  IOSchedulingClass = "idle";
+                  CPUSchedulingPolicy = "batch";
+                };
+                # fossilize_replay via steam-run + vendor Vulkan ICDs
+                path = [ "/run/current-system/sw" ];
+              };
+
+              systemd.user.timers.nixly-prewarm = {
+                description = "nixlytile Steam shader prewarm timer";
+                wantedBy = [ "timers.target" ];
+                timerConfig = {
+                  # Soon after login, then periodically — new/updated
+                  # pipeline caches downloaded by Steam get processed
+                  # without waiting for Steam's own idle heuristics.
+                  OnStartupSec = "5min";
+                  OnUnitInactiveSec = "6h";
+                };
+              };
+            })
 
             (lib.mkIf cfg.gameMode.enable {
               users.groups.${cfg.gameMode.group} = { };

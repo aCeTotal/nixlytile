@@ -1,0 +1,302 @@
+#!/usr/bin/env bash
+# nixly-prewarm — background shader pre-processing for installed Steam games.
+#
+# Steam downloads community Vulkan pipeline caches (fozpipelinesv6/*.foz)
+# but only converts them into actual GPU driver caches when it feels like
+# it, so first launches stall on shader compilation.  This replays every
+# game's pipeline cache with Steam's own fossilize_replay into the exact
+# per-app cache directories the game will use at launch (nvidiav1 /
+# mesa_shader_cache_sf), at idle CPU/IO priority.
+#
+# Also provides `readahead <appid>`: pull a game's binaries and shader
+# caches into the page cache the moment Play is pressed (called by the
+# compositor's launchfx).
+#
+# Written to be safe under `set -euo pipefail` (writeShellApplication).
+#
+# Usage: nixly-prewarm run|daemon [interval-min]|readahead <appid>|status
+
+set -u
+
+LOG_TAG=nixly-prewarm
+log() { echo "$*" >&2; logger -t "$LOG_TAG" -- "$*" 2>/dev/null || true; }
+
+steam_root() {
+	local r
+	for r in "$HOME/.local/share/Steam" "$HOME/.steam/steam" "$HOME/.steam/root"; do
+		if [ -d "$r/steamapps" ]; then
+			echo "$r"
+			return 0
+		fi
+	done
+	return 1
+}
+
+# Every steamapps dir: main library + extra libraries from libraryfolders.vdf
+steam_libraries() {
+	local root vdf lib
+	root=$(steam_root) || return 0
+	echo "$root/steamapps"
+	vdf="$root/steamapps/libraryfolders.vdf"
+	[ -f "$vdf" ] || return 0
+	awk -F'"' '/"path"/ { print $4 "/steamapps" }' "$vdf" |
+		while read -r lib; do
+			if [ "$lib" != "$root/steamapps" ] && [ -d "$lib" ]; then
+				echo "$lib"
+			fi
+		done
+}
+
+# Lines: <appid>\t<steamapps-dir>\t<installdir-name>
+installed_games() {
+	local lib mf appid installdir
+	steam_libraries | while read -r lib; do
+		for mf in "$lib"/appmanifest_*.acf; do
+			[ -f "$mf" ] || continue
+			appid=$(awk -F'"' '/"appid"/ { print $4; exit }' "$mf")
+			installdir=$(awk -F'"' '/"installdir"/ { print $4; exit }' "$mf")
+			if [ -n "$appid" ]; then
+				printf '%s\t%s\t%s\n' "$appid" "$lib" "$installdir"
+			fi
+		done
+	done
+}
+
+find_replayer() {
+	local root fhs=""
+	root=$(steam_root) || return 1
+	# NixOS: Steam's binaries need an FHS env (no /bin/bash, no
+	# /lib64/ld-linux); steam-run provides one.
+	if command -v steam-run >/dev/null 2>&1; then
+		fhs="steam-run"
+	fi
+	if [ -x "$root/ubuntu12_64/fossilize_replay" ] &&
+	   [ -f "$root/ubuntu12_32/steam-runtime/run.sh" ]; then
+		echo "$fhs bash $root/ubuntu12_32/steam-runtime/run.sh $root/ubuntu12_64/fossilize_replay"
+		return 0
+	fi
+	if [ -x "$root/ubuntu12_64/fossilize_replay" ] && [ -n "$fhs" ]; then
+		echo "$fhs $root/ubuntu12_64/fossilize_replay"
+		return 0
+	fi
+	if command -v fossilize-replay >/dev/null 2>&1; then
+		echo "fossilize-replay"
+		return 0
+	fi
+	return 1
+}
+
+have_nvidia() { [ -d /sys/module/nvidia ]; }
+
+# A game is running: Steam's per-game reaper wrapper lives exactly as
+# long as the launched game.  gamescope covers non-Steam sessions.
+game_running() {
+	pgrep -x reaper >/dev/null 2>&1 || pgrep -x gamescope >/dev/null 2>&1
+}
+
+# Run the replayer command ($@) in its own process group, SIGSTOPping the
+# whole group while a game is running (zero CPU/GPU use) and resuming the
+# moment the game exits.  Returns the replayer's exit status.
+run_replayer_paused() {
+	local pid paused=0 rc=0
+	setsid "$@" >/dev/null 2>&1 &
+	pid=$!
+	while kill -0 "$pid" 2>/dev/null; do
+		if game_running; then
+			if [ "$paused" -eq 0 ]; then
+				kill -STOP -- "-$pid" 2>/dev/null || true
+				paused=1
+				log "paused: game running"
+			fi
+		elif [ "$paused" -eq 1 ]; then
+			kill -CONT -- "-$pid" 2>/dev/null || true
+			paused=0
+			log "resumed: game exited"
+		fi
+		sleep 5
+	done
+	wait "$pid" || rc=$?
+	return "$rc"
+}
+
+# Vulkan device index of the NVIDIA GPU (empty if none/undetectable).
+# Games on hybrid laptops run on the dGPU; fossilize defaults to device 0
+# which is usually the iGPU — replaying there warms the wrong cache.
+nvidia_device_index() {
+	command -v vulkaninfo >/dev/null 2>&1 || return 0
+	vulkaninfo --summary 2>/dev/null | awk '
+		/^GPU[0-9]+:/ { gpu = substr($1, 4, length($1) - 4) }
+		/vendorID/ && $NF == "0x10de" { print gpu; exit }' || true
+}
+
+# Replay one app's pipeline caches into its per-app driver cache dirs.
+# Skipped when nothing changed since the last successful pass (stamp file).
+replay_app() {
+	local appid=$1 lib=$2 cache="$2/shadercache/$1"
+	local fozdir="$2/shadercache/$1/fozpipelinesv6"
+	local stamp="$2/shadercache/$1/.nixly-prewarm-stamp"
+	local replayer threads foz fozfiles=()
+
+	[ -d "$fozdir" ] || return 0
+
+	# Old layout: single-file databases at top level.  New layout:
+	# steamapprun_pipeline_cache.<hash>/ dirs each holding their own
+	# steam_pipeline_cache.foz (this is where the bulk lives).
+	for foz in "$fozdir"/steam_pipeline_cache.foz \
+	           "$fozdir"/steamapprun_pipeline_cache* \
+	           "$fozdir"/steamapprun_pipeline_cache*/steam_pipeline_cache.foz \
+	           "$fozdir"/steamapprun_pipeline_cache*/steamapp_pipeline_cache.foz; do
+		if [ -f "$foz" ]; then
+			fozfiles+=("$foz")
+		fi
+	done
+	[ ${#fozfiles[@]} -gt 0 ] || return 0
+
+	if [ -f "$stamp" ] &&
+	   [ -z "$(find "${fozfiles[@]}" -newer "$stamp" 2>/dev/null || true)" ]; then
+		return 0
+	fi
+
+	replayer=$(find_replayer) || { log "no fossilize_replay found"; return 0; }
+	threads=$(( $(nproc) / 2 ))
+	if [ "$threads" -lt 1 ]; then
+		threads=1
+	fi
+
+	mkdir -p "$cache/nvidiav1" "$cache/mesa_shader_cache_sf"
+
+	log "replaying pipeline caches for app $appid (${#fozfiles[@]} file(s))"
+
+	local env_common=(
+		"__GL_SHADER_DISK_CACHE=1"
+		"__GL_SHADER_DISK_CACHE_PATH=$cache/nvidiav1"
+		"__GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1"
+		"MESA_SHADER_CACHE_DIR=$cache/mesa_shader_cache_sf"
+		"MESA_DISK_CACHE_SINGLE_FILE=1"
+	)
+	# Hybrid laptops: games run on the dGPU via PRIME offload, so the
+	# replay must compile on the same GPU or it warms the wrong cache.
+	local devargs=() devidx=""
+	if have_nvidia; then
+		env_common+=("__NV_PRIME_RENDER_OFFLOAD=1" "__VK_LAYER_NV_optimus=NVIDIA_only")
+		devidx=$(nvidia_device_index)
+		if [ -n "$devidx" ]; then
+			devargs=(--device-index "$devidx")
+		fi
+	fi
+
+	# Don't even start while a game is up.
+	while game_running; do
+		sleep 30
+	done
+
+	# shellcheck disable=SC2086  # replayer is intentionally multiple words
+	if run_replayer_paused env "${env_common[@]}" nice -n 19 ionice -c 3 \
+			$replayer --num-threads "$threads" "${devargs[@]}" \
+			"${fozfiles[@]}"; then
+		touch "$stamp"
+		log "app $appid done"
+	elif [ ${#devargs[@]} -gt 0 ] &&
+	     run_replayer_paused env "${env_common[@]}" nice -n 19 ionice -c 3 \
+			$replayer --num-threads "$threads" \
+			"${fozfiles[@]}"; then
+		# Device index from vulkaninfo didn't match fossilize's
+		# enumeration — retry on the default device.
+		touch "$stamp"
+		log "app $appid done (default device)"
+	else
+		log "app $appid replay failed (non-fatal)"
+	fi
+}
+
+cmd_run() {
+	local appid lib
+	installed_games | while IFS=$'\t' read -r appid lib _; do
+		replay_app "$appid" "$lib" || true
+	done
+	log "prewarm pass complete"
+}
+
+cmd_daemon() {
+	local interval_min=${1:-360}
+	while :; do
+		cmd_run
+		sleep $(( interval_min * 60 ))
+	done
+}
+
+# Pull the launched game's working set into the page cache: driver shader
+# caches, DXVK/VKD3D state, Proton prefix registry, and the game's own
+# executables/libraries.  Big media assets are skipped — they stream fine.
+cmd_readahead() {
+	local appid=$1 line lib installdir cache gamedir compat
+
+	line=$(installed_games | awk -F'\t' -v id="$appid" '$1 == id { print; exit }')
+	if [ -z "$line" ]; then
+		log "readahead: app $appid not installed"
+		return 0
+	fi
+	lib=$(printf '%s' "$line" | cut -f2)
+	installdir=$(printf '%s' "$line" | cut -f3)
+
+	cache="$lib/shadercache/$appid"
+	gamedir="$lib/common/$installdir"
+	compat="$lib/compatdata/$appid"
+
+	log "readahead app $appid"
+
+	# Shader/driver caches first — these gate first-frame time.
+	if [ -d "$cache" ]; then
+		nice -n 19 ionice -c 3 find "$cache" \
+			-path "$cache/fozpipelinesv6" -prune -o \
+			-type f -exec cat {} + > /dev/null 2>&1 || true
+	fi
+
+	# Proton prefix: registry + small files
+	if [ -d "$compat" ]; then
+		nice -n 19 ionice -c 3 find "$compat" \
+			-type f -size -20M -exec cat {} + > /dev/null 2>&1 || true
+	fi
+
+	# Game binaries and libraries (bounded per-file so a 100 GB game
+	# can't blow away the page cache)
+	if [ -d "$gamedir" ]; then
+		nice -n 19 ionice -c 3 find "$gamedir" -type f \
+			\( -iname '*.exe' -o -iname '*.dll' -o -iname '*.so' \
+			   -o -iname '*.so.*' -o -iname '*.ini' -o -iname '*.cfg' \
+			   -o -iname '*.json' -o -iname '*.xml' \) \
+			-size -200M -exec cat {} + > /dev/null 2>&1 || true
+	fi
+
+	log "readahead app $appid done"
+}
+
+cmd_status() {
+	local appid lib installdir cache
+	installed_games | while IFS=$'\t' read -r appid lib installdir; do
+		cache="$lib/shadercache/$appid"
+		printf '%-10s %-30s ' "$appid" "$installdir"
+		if [ -d "$cache" ]; then
+			printf 'foz=%s nvidia=%s mesa=%s stamp=%s\n' \
+				"$(du -sh "$cache/fozpipelinesv6" 2>/dev/null | cut -f1 || true)" \
+				"$(du -sh "$cache/nvidiav1" 2>/dev/null | cut -f1 || true)" \
+				"$(du -sh "$cache/mesa_shader_cache_sf" 2>/dev/null | cut -f1 || true)" \
+				"$([ -f "$cache/.nixly-prewarm-stamp" ] && echo yes || echo no)"
+		else
+			echo "no shadercache"
+		fi
+	done
+}
+
+case "${1:-}" in
+run)       cmd_run ;;
+daemon)    shift; cmd_daemon "${1:-360}" ;;
+readahead) if [ $# -lt 2 ]; then
+	           echo "usage: nixly-prewarm readahead <appid>" >&2
+	           exit 2
+           fi
+           cmd_readahead "$2" ;;
+status)    cmd_status ;;
+*)         echo "usage: nixly-prewarm run|daemon [interval-min]|readahead <appid>|status" >&2
+           exit 2 ;;
+esac

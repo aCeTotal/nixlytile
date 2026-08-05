@@ -152,6 +152,7 @@ int nvidia_render_primary = 0; /* reverseSync: dGPU renders session, iGPU output
 
 /* CPU cursor buffer for Nvidia HW cursor plane */
 struct CpuCursorBuffer *cpu_cursor_buf = NULL;
+struct CpuCursorBuffer *cpu_cursor_buf_b = NULL;
 int cpu_cursor_active = 0;
 int dgpu_render_fd = -1;     /* Held open to prevent dGPU D3cold/runtime suspend */
 int g_explicit_sync_ok = 0;  /* 1 = DRM syncobj timeline manager active */

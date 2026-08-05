@@ -13,7 +13,9 @@
  *     window is ready — the game appears right as the black completes.
  */
 #include <cairo/cairo.h>
+#include <fcntl.h>
 #include <math.h>
+#include <unistd.h>
 
 #include "nixlytile.h"
 #include "client.h"
@@ -23,12 +25,22 @@
 #define FX_GROW_MS      500.0
 #define FX_DOT_TEX      256   /* circle texture size; scaled up when drawn */
 #define FX_WATCHDOG_MS  45000
+/* One Play press spawns a CHAIN of short-lived reaper processes
+ * (first-time setup, install scripts) before the game's own reaper.
+ * When the tracked reaper dies, wait this long for the next stage
+ * before concluding the launch was aborted. */
+#define FX_CHAIN_GRACE_MS 3000
+/* A game window mapped but never went fullscreen: it's an interactive
+ * launcher/config dialog the user must click — reveal it. */
+#define FX_LAUNCHER_MS  10000
 
 static struct {
 	int active;               /* animation running (grow or hold) */
 	int grown;                /* black covers the full monitor */
 	int reveal_pending;       /* game ready before grow finished */
-	pid_t reaper;             /* launch wrapper that triggered us */
+	pid_t reaper;             /* newest live reaper of the launch chain */
+	uint64_t orphan_ms;       /* when the tracked reaper died; 0 = alive */
+	uint64_t window_ms;       /* when the first game window mapped; 0 = none */
 	Monitor *mon;
 	struct wlr_scene_tree *tree;
 	struct wlr_scene_buffer *dot;
@@ -109,6 +121,8 @@ fx_teardown(void)
 	fx.grown = 0;
 	fx.reveal_pending = 0;
 	fx.reaper = 0;
+	fx.orphan_ms = 0;
+	fx.window_ms = 0;
 	fx.mon = NULL;
 }
 
@@ -195,11 +209,60 @@ fx_watchdog_cb(void *data)
 	return 0;
 }
 
+/* Warm the page cache for the game being launched: reaper's cmdline
+ * carries "AppId=N".  Fire-and-forget; nixly-prewarm does the work at
+ * idle I/O priority. */
+static void
+fx_readahead(pid_t reaper)
+{
+	char path[64], buf[4096], appid[32];
+	ssize_t n;
+	int fd, i;
+	char *p = NULL;
+
+	snprintf(path, sizeof(path), "/proc/%d/cmdline", (int)reaper);
+	fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return;
+	n = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (n <= 0)
+		return;
+	buf[n] = '\0';
+	/* cmdline args are NUL-separated — scan every arg */
+	for (i = 0; i < (int)n; i += (int)strlen(buf + i) + 1) {
+		if (strncmp(buf + i, "AppId=", 6) == 0) {
+			p = buf + i + 6;
+			break;
+		}
+	}
+	if (!p || !p[0])
+		return;
+	snprintf(appid, sizeof(appid), "%s", p);
+
+	if (fork() == 0) {
+		setsid();
+		execlp("nixly-prewarm", "nixly-prewarm", "readahead", appid,
+				(char *)NULL);
+		_exit(127);
+	}
+}
+
 static void
 launchfx_start(pid_t reaper)
 {
+	Client *fsc;
+
 	if (fx.active || !selmon || !selmon->wlr_output)
 		return;
+
+	/* A fullscreen game is already on screen (e.g. Steam runs a setup
+	 * step for something else) — never black it out. */
+	fsc = fullscreen_visible_on(selmon);
+	if (fsc && looks_like_game(fsc))
+		return;
+
+	fx_readahead(reaper);
 
 	fx.mon = selmon;
 	fx.dot_buf = make_dot_buffer(FX_DOT_TEX);
@@ -222,6 +285,8 @@ launchfx_start(pid_t reaper)
 	fx.grown = 0;
 	fx.reveal_pending = 0;
 	fx.reaper = reaper;
+	fx.orphan_ms = 0;
+	fx.window_ms = 0;
 	fx.start_ms = monotonic_msec();
 
 	game_prelaunch_boost();
@@ -237,9 +302,11 @@ launchfx_start(pid_t reaper)
 			"pre-boost + cover animation", (int)reaper);
 }
 
-/* A game (or game-launcher child) window mapped — the content the user
- * is waiting for exists.  Reveal once the cover has fully grown, so the
- * sequence is always dot → full black → game. */
+/* A game (or game-launcher child) window mapped.  Do NOT reveal yet —
+ * Proton titles map splash/launcher windows first.  The cover stays up
+ * until the game is fullscreen and presenting (launchfx_game_ready);
+ * this timestamp only arms the interactive-launcher fallback in the
+ * poll timer. */
 void
 launchfx_client_mapped(Client *c)
 {
@@ -247,10 +314,13 @@ launchfx_client_mapped(Client *c)
 		return;
 	if (!looks_like_game(c))
 		return;
-	if (fx.grown)
-		fx_finish();
-	else
-		fx.reveal_pending = 1;
+	/* Unmanaged (override-redirect) windows are splash screens — never
+	 * interactive, so they must not arm the reveal fallback; the cover
+	 * holds until the real window arrives. */
+	if (client_is_unmanaged(c))
+		return;
+	if (!fx.window_ms)
+		fx.window_ms = monotonic_msec();
 }
 
 /* Belt-and-braces from rendermon: a fullscreen game is classified and
@@ -305,11 +375,34 @@ fx_poll_cb(void *data)
 
 	(void)data;
 
-	/* Launch aborted / game exited: the reaper wrapper lives exactly as
-	 * long as the launched game.  If it died while the cover is up, the
-	 * game crashed during load — reveal the desktop. */
-	if (fx.active && fx.reaper > 0 && kill(fx.reaper, 0) != 0)
-		fx_finish();
+	if (fx.active) {
+		uint64_t now = monotonic_msec();
+
+		/* Track the launch chain: the reaper wrapper lives exactly as
+		 * long as its stage.  Setup stages die and are replaced (the
+		 * scan below adopts the successor); only a chain that ends
+		 * with no successor and no window means abort/crash. */
+		if (fx.reaper > 0 && kill(fx.reaper, 0) != 0) {
+			fx.reaper = 0;
+			fx.orphan_ms = now;
+		}
+		if (!fx.reaper && fx.orphan_ms) {
+			if (fx.window_ms) {
+				/* Game exited/crashed during load */
+				fx_finish();
+			} else if (now - fx.orphan_ms > FX_CHAIN_GRACE_MS) {
+				/* Chain ended without any window: aborted */
+				fx_finish();
+			}
+		}
+
+		/* Interactive launcher fallback: a game window has been up
+		 * this long without going fullscreen — the user needs to see
+		 * and click it. */
+		if (fx.active && fx.window_ms &&
+				now - fx.window_ms > FX_LAUNCHER_MS)
+			fx_finish();
+	}
 
 	/* Forget dead reapers so a later relaunch re-triggers. */
 	for (i = 0; i < seen_reaper_count; ) {
@@ -344,7 +437,14 @@ fx_poll_cb(void *data)
 				if (seen_reaper_count <
 						(int)LENGTH(seen_reapers))
 					seen_reapers[seen_reaper_count++] = pid;
-				launchfx_start(pid);
+				if (fx.active) {
+					/* Next stage of the same Play press —
+					 * adopt it, keep the one cover up. */
+					fx.reaper = pid;
+					fx.orphan_ms = 0;
+				} else {
+					launchfx_start(pid);
+				}
 			}
 			closedir(dir);
 		}

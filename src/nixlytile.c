@@ -805,6 +805,9 @@ cleanup(void)
 		kill(-child_pid, SIGTERM);
 		waitpid(child_pid, NULL, 0);
 	}
+	/* B first: it never owns the DRM fd, A may. */
+	cpu_cursor_buffer_destroy(cpu_cursor_buf_b);
+	cpu_cursor_buf_b = NULL;
 	cpu_cursor_buffer_destroy(cpu_cursor_buf);
 	cpu_cursor_buf = NULL;
 	cpu_cursor_active = 0;
@@ -3110,6 +3113,16 @@ setup(void)
 				(uint32_t)cursor_w, (uint32_t)cursor_h, cdrm_owns);
 			if (cpu_cursor_buf) {
 				cpu_cursor_active = 1;
+				/* Second buffer so cursor updates can alternate:
+				 * wlr_cursor_set_buffer() ignores a call whose
+				 * buffer+hotspot+scale are unchanged, which would
+				 * drop content-only image changes. */
+				cpu_cursor_buf_b = cpu_cursor_buffer_create(cdrm_fd,
+					(uint32_t)cursor_w, (uint32_t)cursor_h, 0);
+				if (!cpu_cursor_buf_b)
+					wlr_log(WLR_ERROR,
+						"NVIDIA: second CPU cursor buffer failed; "
+						"cursor image updates may be dropped");
 				wlr_log(WLR_INFO,
 					"NVIDIA: CPU cursor buffer enabled "
 					"(HW cursor plane with dumb buffer, %lux%lu)",
