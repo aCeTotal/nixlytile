@@ -1100,6 +1100,10 @@ run(const char *startup_cmd)
 	 * scene, so it needs the layers and the monitors to exist. */
 	setup_monitor_overlay_watch();
 
+	/* /etc/nixlyos/input.conf → pointer and keyboard settings from nixlycc.
+	 * After the devices exist, so the first read can apply to them. */
+	setup_input_conf_watch();
+
 	/* Now that the socket exists and the backend is started, run the
 	 * startup commands.  If KDL config provided an autostart list, each
 	 * entry gets its own pid (for diff-based hot-reload).  Otherwise

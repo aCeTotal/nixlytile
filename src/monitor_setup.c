@@ -9,7 +9,8 @@
  *
  * One line per monitor — connector name first, then the label to show in the
  * top-left corner of that screen, so it is obvious which box in the panel is
- * which physical display. The optional highlight line names the screen whose
+ * which physical display. The box shows the label on the first row and the
+ * connector on the second. The optional highlight line names the screen whose
  * box is being dragged right now; that screen gets a red glow that fades in
  * and stays up until the box is dropped, then fades back out.
  *
@@ -115,10 +116,12 @@ monovl_place_glow(MonovlEntry *e, Monitor *m)
 	wlr_scene_node_lower_to_bottom(&e->glow->node);
 }
 
+/* Two rows: the label from nixlycc, then the connector this screen hangs off
+ * — the box is the only place that mapping is visible. */
 static void
 monovl_place_label(MonovlEntry *e, Monitor *m)
 {
-	int text_w, box_w, box_h, row_h;
+	int text_w, name_w, wide, box_w, box_h, row_h;
 
 	monovl_drop_label(e);
 	if (!statusfont.font)
@@ -126,18 +129,21 @@ monovl_place_label(MonovlEntry *e, Monitor *m)
 
 	row_h = statusfont.font->height;
 	text_w = status_text_width(e->label);
+	name_w = status_text_width(e->name);
 	if (text_w <= 0)
 		return;
 
-	box_w = text_w + MONOVL_PADDING * 2;
-	box_h = row_h + MONOVL_PADDING;
+	wide = name_w > text_w ? name_w : text_w;
+	box_w = wide + MONOVL_PADDING * 2;
+	box_h = row_h * 2 + MONOVL_PADDING;
 
 	e->tree = wlr_scene_tree_create(layers[LyrOverlay]);
 	if (!e->tree)
 		return;
 
 	drawroundedrect(e->tree, 0, 0, box_w, box_h, monovl_box_bg);
-	tray_menu_draw_text(e->tree, e->label, MONOVL_PADDING, 0, box_h, text_w);
+	tray_menu_draw_text(e->tree, e->label, MONOVL_PADDING, 0, box_h / 2, wide);
+	tray_menu_draw_text(e->tree, e->name, MONOVL_PADDING, box_h / 2, box_h / 2, wide);
 	wlr_scene_node_set_position(&e->tree->node,
 		m->m.x + MONOVL_MARGIN, m->m.y + MONOVL_MARGIN);
 }

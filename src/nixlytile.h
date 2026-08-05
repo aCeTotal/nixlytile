@@ -2403,6 +2403,11 @@ void reload_monitors_conf(void);
 /* monitor_setup.c — ~/.local/nixlyos/monitor_overlay (written by nixlycc):
  * per-screen ID boxes and the red glow while a box is dragged. */
 void setup_monitor_overlay_watch(void);
+
+/* /etc/nixlyos/input.conf — pointer and keyboard settings from nixlycc's
+ * Mouse & Keyboard page, re-read whenever a rebuild replaces the file. */
+void setup_input_conf_watch(void);
+void input_conf_update(void);
 void monitor_overlay_update(void);
 void setup_monitors_conf_watch(void);
 
