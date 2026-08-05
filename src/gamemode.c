@@ -1,5 +1,6 @@
 #include "nixlytile.h"
 #include "client.h"
+#include "spawn.h"
 #include <pthread.h>
 #include <poll.h>
 
@@ -13,8 +14,7 @@ static inline void fan_boost_deactivate(void) { }
 /*
  * ioprio constants (not always available in headers)
  */
-#ifndef IOPRIO_CLASS_RT
-#define IOPRIO_CLASS_RT		1
+#ifndef IOPRIO_CLASS_BE
 #define IOPRIO_CLASS_BE		2
 #define IOPRIO_WHO_PROCESS	1
 #define IOPRIO_PRIO_VALUE(class, data)	(((class) << 13) | (data))
@@ -24,45 +24,75 @@ static inline void fan_boost_deactivate(void) { }
 static int has_protected_ancestor(pid_t pid);
 static int is_child_of(pid_t pid, pid_t ancestor);
 
-static void
-set_cpu_governor(const char *governor)
+/*
+ * Privileged tuning lives in nixly-gametune.service (nixlyos:
+ * modules/core/gametune.nix).  The compositor is an unprivileged user
+ * process: every /proc/sys, /sys/kernel and /dev/cpu_dma_latency write this
+ * file used to attempt failed with EACCES, so that half of game mode was a
+ * silent no-op.  The unit holds /dev/cpu_dma_latency at 0 (no deep C-states)
+ * and lowers swappiness for as long as it runs; a polkit rule lets the
+ * gamemode group start/stop it.  Everything else that was poked at runtime —
+ * CPU governor, THP, nmi_watchdog, split_lock, io scheduler, IRQ affinity —
+ * is now static system config and needs nothing from us.
+ */
+static int gametune_active;
+
+/* Whether the privileged helper unit exists at all. Probed once. */
+static int
+gametune_unit_present(void)
 {
-	DIR *dir;
-	struct dirent *ent;
-	char path[PATH_MAX];
-	FILE *fp;
-	int count = 0;
+	static int present = -1;
+	if (present >= 0)
+		return present;
 
-	dir = opendir("/sys/devices/system/cpu");
-	if (!dir)
+	static const char *const argv[] = {
+		"systemctl", "cat", "nixly-gametune.service", NULL
+	};
+	present = run_cmd(argv) == 0;
+	if (!present)
+		wlr_log(WLR_ERROR, "gametune: nixly-gametune.service is not installed — "
+			"C-state latency, CPU/GPU power limits and I/O tuning will NOT be "
+			"applied. Enable the nixlytile NixOS module (nixosModules.default).");
+	return present;
+}
+
+static void
+gametune_start(void)
+{
+	if (gametune_active)
 		return;
+	if (!gametune_unit_present())
+		return;
+	gametune_active = 1;
 
-	while ((ent = readdir(dir))) {
-		if (strncmp(ent->d_name, "cpu", 3) != 0)
-			continue;
-		if (ent->d_name[3] < '0' || ent->d_name[3] > '9')
-			continue;
+	static const char *const argv[] = {
+		"systemctl", "start", "--no-block", "nixly-gametune.service", NULL
+	};
+	if (run_cmd(argv) != 0)
+		wlr_log(WLR_ERROR, "gametune: failed to start nixly-gametune.service "
+			"(polkit rule missing? user must be in the 'gamemode' group)");
+	else
+		wlr_log(WLR_INFO, "gametune: nixly-gametune.service started");
+}
 
-		snprintf(path, sizeof(path),
-			"/sys/devices/system/cpu/%s/cpufreq/scaling_governor",
-			ent->d_name);
-		fp = fopen(path, "w");
-		if (fp) {
-			fprintf(fp, "%s\n", governor);
-			fclose(fp);
-			count++;
-		}
-	}
-	closedir(dir);
+static void
+gametune_stop(void)
+{
+	if (!gametune_active)
+		return;
+	gametune_active = 0;
 
-	if (count > 0)
-		wlr_log(WLR_INFO, "CPU governor: %s (%d cores)", governor, count);
+	static const char *const argv[] = {
+		"systemctl", "stop", "--no-block", "nixly-gametune.service", NULL
+	};
+	run_cmd(argv);
+	wlr_log(WLR_INFO, "gametune: nixly-gametune.service stopped");
 }
 
 /* Pre-launch boost: launchfx detects the Steam Play press seconds
- * before any window exists.  Raising the governor immediately makes
- * Proton setup / shader compilation / asset load run at full clock;
- * ultra game mode takes ownership when the game window maps. */
+ * before any window exists.  Killing C-state wakeup latency this early makes
+ * Proton setup / shader compilation / asset load run without idle-exit
+ * stalls; ultra game mode takes ownership when the game window maps. */
 static int prelaunch_boost_active;
 
 void
@@ -71,7 +101,7 @@ game_prelaunch_boost(void)
 	if (prelaunch_boost_active)
 		return;
 	prelaunch_boost_active = 1;
-	set_cpu_governor("performance");
+	gametune_start();
 }
 
 void
@@ -80,10 +110,10 @@ game_prelaunch_release(void)
 	if (!prelaunch_boost_active)
 		return;
 	prelaunch_boost_active = 0;
-	/* Ultra game mode owns the governor while active — don't fight it.
-	 * Only restore when the launch never reached game mode (abort). */
-	if (!game_mode_ultra && !game_mode_governor_applied)
-		set_cpu_governor("schedutil");
+	/* Ultra game mode owns the tuning while active — don't fight it.
+	 * Only release when the launch never reached game mode (abort). */
+	if (!game_mode_ultra)
+		gametune_stop();
 }
 
 /* Apply nice + ioprio to every thread of a process (both are per-task
@@ -133,13 +163,16 @@ apply_game_priority(pid_t pid)
 	}
 
 	/*
-	 * Set I/O scheduling to real-time class (highest priority).
-	 * This ensures the game gets the fastest possible disk access.
+	 * Set I/O priority to best-effort class 0 (highest non-RT).
+	 * NOT IOPRIO_CLASS_RT: that needs CAP_SYS_ADMIN and always failed
+	 * with EPERM from an unprivileged compositor.  BE/0 is allowed for
+	 * our own uid and is what mq-deadline/bfq actually act on — NVMe runs
+	 * the `none` scheduler, where ioprio is ignored either way.
 	 */
 	if (syscall(__NR_ioprio_set, IOPRIO_WHO_PROCESS, pid,
-		    IOPRIO_PRIO_VALUE(IOPRIO_CLASS_RT, 0)) == 0) {
+		    IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 0)) == 0) {
 		game_mode_ioclass_applied = 1;
-		wlr_log(WLR_INFO, "Game priority: set ioprio RT class for PID %d", pid);
+		wlr_log(WLR_INFO, "Game priority: set ioprio BE/0 for PID %d", pid);
 	} else {
 		wlr_log(WLR_INFO, "Game priority: ioprio_set failed for PID %d: %s",
 			pid, strerror(errno));
@@ -153,7 +186,7 @@ apply_game_priority(pid_t pid)
 	 * as set_process_affinity_all_threads.
 	 */
 	game_priority_all_threads(pid, -10,
-		IOPRIO_PRIO_VALUE(IOPRIO_CLASS_RT, 0));
+		IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 0));
 
 	/*
 	 * Protect game from OOM killer by lowering its OOM score.
@@ -168,11 +201,8 @@ apply_game_priority(pid_t pid)
 		wlr_log(WLR_INFO, "Game priority: set oom_score_adj=-500 for PID %d", pid);
 	}
 
-	/*
-	 * Set CPU governor to performance for maximum clock speeds.
-	 */
-	set_cpu_governor("performance");
-	game_mode_governor_applied = 1;
+	/* No governor handling here: scaling_governor is root-owned (the write
+	 * always failed) and the system now runs `performance` permanently. */
 }
 
 void
@@ -212,12 +242,6 @@ restore_game_priority(pid_t pid)
 		}
 		game_mode_oom_applied = 0;
 		wlr_log(WLR_INFO, "Game priority: restored oom_score_adj=0 for PID %d", pid);
-	}
-
-	/* Restore CPU governor to schedutil (energy-efficient default) */
-	if (game_mode_governor_applied) {
-		set_cpu_governor("schedutil");
-		game_mode_governor_applied = 0;
 	}
 }
 
@@ -432,6 +456,31 @@ restore_competing_processes(void)
 
 	wlr_log(WLR_INFO, "CPU isolate: restored %d processes to SCHED_OTHER",
 		lowered_pid_count);
+	lowered_pid_count = 0;
+}
+
+/*
+ * Undo the two things that leave the session unusable if the compositor dies
+ * without running cleanup(): SIGSTOPped background processes and processes
+ * pushed to SCHED_IDLE. Everything else game mode touches (GPU clocks, the
+ * gametune unit, VRR) either self-restores or merely wastes power.
+ *
+ * Called from a fatal signal handler, so nothing here may allocate, take a
+ * lock or touch stdio: only raw syscalls, and only on state that was already
+ * written down before the crash.
+ */
+void
+gm_emergency_restore(void)
+{
+	struct sched_param sp = {0};
+	int i;
+
+	for (i = 0; i < frozen_pid_count; i++)
+		kill(frozen_pids[i], SIGCONT);
+	frozen_pid_count = 0;
+
+	for (i = 0; i < lowered_pid_count; i++)
+		sched_setscheduler(lowered_pids[i], SCHED_OTHER, &sp);
 	lowered_pid_count = 0;
 }
 
@@ -752,89 +801,6 @@ unfreeze_background_processes(void)
 }
 
 /*
- * Apply memory optimizations for game mode.
- * Drops page cache, lowers swappiness, and triggers memory compaction.
- */
-void
-apply_memory_optimization(void)
-{
-	int fd;
-
-	/* NOTE: no drop_caches here — evicting the page cache right before
-	 * a game streams gigabytes of assets forces everything back from
-	 * disk and causes the load-time I/O it was meant to avoid.
-	 * reclaim_frozen_memory() already frees the RAM that matters. */
-
-	/* Lower swappiness to minimize swap thrashing during gaming */
-	fd = open("/proc/sys/vm/swappiness", O_WRONLY);
-	if (fd >= 0) {
-		write(fd, "10\n", 3);
-		close(fd);
-		game_mode_swappiness_applied = 1;
-	}
-
-	/* Trigger memory compaction for huge pages */
-	fd = open("/proc/sys/vm/compact_memory", O_WRONLY);
-	if (fd >= 0) {
-		write(fd, "1\n", 2);
-		close(fd);
-	}
-
-	wlr_log(WLR_INFO, "Memory optimization applied (drop_caches, swappiness=10, compact)");
-}
-
-/*
- * Restore memory settings to defaults after game mode exits.
- */
-void
-restore_memory_optimization(void)
-{
-	int fd;
-
-	if (game_mode_swappiness_applied) {
-		fd = open("/proc/sys/vm/swappiness", O_WRONLY);
-		if (fd >= 0) {
-			write(fd, "60\n", 3);
-			close(fd);
-		}
-		game_mode_swappiness_applied = 0;
-		wlr_log(WLR_INFO, "Memory optimization restored (swappiness=60)");
-	}
-}
-
-/*
- * CPU DMA Latency (PM QoS) — Prevent deep C-states.
- * Writing 0 to /dev/cpu_dma_latency and keeping the fd open prevents
- * the CPU from entering deep sleep states (C3+), eliminating wakeup
- * latency spikes that cause micro-stuttering.
- */
-static int cpu_dma_latency_fd = -1;
-
-void
-apply_cpu_latency_qos(void)
-{
-	int32_t latency = 0;
-	cpu_dma_latency_fd = open("/dev/cpu_dma_latency", O_WRONLY);
-	if (cpu_dma_latency_fd >= 0) {
-		write(cpu_dma_latency_fd, &latency, sizeof(latency));
-		/* FD must stay open to maintain the QoS constraint */
-		wlr_log(WLR_INFO, "CPU DMA latency QoS: set to 0 (prevent deep C-states)");
-	} else {
-		wlr_log(WLR_INFO, "CPU DMA latency QoS: open failed: %s", strerror(errno));
-	}
-}
-
-void
-restore_cpu_latency_qos(void)
-{
-	if (cpu_dma_latency_fd >= 0) {
-		close(cpu_dma_latency_fd);  /* Closing releases the QoS constraint */
-		cpu_dma_latency_fd = -1;
-		wlr_log(WLR_INFO, "CPU DMA latency QoS: restored (fd closed)");
-	}
-}
-
-/*
  * CPU Affinity — Core isolation.
  * Pin the compositor to core 0 and the game to cores 1..N-1 to prevent
  * them from competing for the same CPU cache lines and scheduler slots.
@@ -863,28 +829,98 @@ set_process_affinity_all_threads(pid_t pid, const cpu_set_t *set)
 	closedir(d);
 }
 
+/*
+ * Split the online CPUs into a compositor set and a game set.
+ * Returns 0 when the machine is too small to isolate anything.
+ *
+ * The compositor set is cpu0 plus ALL of its SMT siblings — one physical
+ * core — which is also where IRQBALANCE_BANNED_CPUS keeps every hardware
+ * interrupt.  Reading thread_siblings_list is the point: cpu0 and cpu1 are
+ * two *different* physical cores under both Intel and modern AMD
+ * enumeration, so the old fixed "compositor 0-1 / game 2..N-1" split gave
+ * the compositor two whole cores and then handed the game their SMT
+ * siblings to fight over.  Adapts to any core count and either topology.
+ */
+static int
+gm_core_split(cpu_set_t *comp, cpu_set_t *game)
+{
+	long ncores = sysconf(_SC_NPROCESSORS_ONLN);
+	FILE *fp;
+	char buf[256];
+	long i;
+
+	/* Under 8 logical CPUs, giving one core away costs more than the
+	 * isolation buys — leave the scheduler alone. */
+	if (ncores < 8)
+		return 0;
+
+	CPU_ZERO(comp);
+	fp = fopen("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list", "r");
+	if (fp) {
+		if (fgets(buf, sizeof(buf), fp)) {
+			/* "0,8" (SMT pair), "0-1" (range) or "0" (no SMT) */
+			char *tok = strtok(buf, ",\n");
+			while (tok) {
+				int a = -1, b = -1;
+				if (sscanf(tok, "%d-%d", &a, &b) == 2) {
+					for (i = a; i <= b && i < ncores; i++)
+						CPU_SET(i, comp);
+				} else if (sscanf(tok, "%d", &a) == 1 && a < ncores) {
+					CPU_SET(a, comp);
+				}
+				tok = strtok(NULL, ",\n");
+			}
+		}
+		fclose(fp);
+	}
+	if (CPU_COUNT(comp) == 0)
+		CPU_SET(0, comp);
+
+	/* Never leave the compositor on a single logical CPU: with every IRQ
+	 * pinned to the same core and SCHED_RR on, a one-CPU pin made tight
+	 * retry loops un-preemptable (the retroarch 10-bit scanout freeze). */
+	if (CPU_COUNT(comp) < 2)
+		CPU_SET(1, comp);
+
+	CPU_ZERO(game);
+	for (i = 0; i < ncores; i++)
+		if (!CPU_ISSET(i, comp))
+			CPU_SET(i, game);
+
+	return CPU_COUNT(game) > 0;
+}
+
 void
 apply_cpu_affinity(pid_t game_pid)
 {
-	int ncores = sysconf(_SC_NPROCESSORS_ONLN);
-	if (ncores < 4 || game_pid <= 1) return;
+	cpu_set_t all_set;
+	long ncores = sysconf(_SC_NPROCESSORS_ONLN);
 
-	/* NOTE: the compositor pin happens on the MAIN thread in
-	 * update_game_mode() (next to the SCHED_RR boost) —
-	 * sched_setaffinity(0, ...) here would pin the gm-bg worker
-	 * thread this function runs on, not the compositor. */
+	if (game_pid <= 1 || ncores < 1)
+		return;
 
-	/* Pin game to cores 2..N-1 (leave cores 0-1 for compositor+IRQ) */
-	cpu_set_t game_set;
-	CPU_ZERO(&game_set);
-	int game_first = (ncores >= 4) ? 2 : 1;
-	for (int i = game_first; i < ncores; i++)
-		CPU_SET(i, &game_set);
-	set_process_affinity_all_threads(game_pid, &game_set);
+	/*
+	 * The game gets every CPU. An earlier version fenced it off the
+	 * compositor's physical core, which cost a CPU-bound game a full core
+	 * (2 of 16 threads here) to solve a problem the SCHED_RR boost already
+	 * solves: at real-time priority the compositor preempts the game
+	 * whenever it needs to run, so it cannot be starved by a SCHED_OTHER
+	 * process no matter which CPU that process occupies.
+	 *
+	 * The compositor still pins itself to physical core 0 (see
+	 * update_game_mode) for cache locality — that pin restricts only the
+	 * compositor, not the game.
+	 *
+	 * This also re-applies the full mask over anything a previous game
+	 * session or an external tool left behind.
+	 */
+	CPU_ZERO(&all_set);
+	for (long i = 0; i < ncores; i++)
+		CPU_SET(i, &all_set);
+	set_process_affinity_all_threads(game_pid, &all_set);
 
 	game_mode_affinity_applied = 1;
-	wlr_log(WLR_INFO, "CPU affinity: game PID %d→cores %d-%d",
-		game_pid, game_first, ncores - 1);
+	wlr_log(WLR_INFO, "CPU affinity: game PID %d → all %ld CPUs", game_pid, ncores);
 }
 
 void
@@ -902,208 +938,6 @@ restore_cpu_affinity(pid_t game_pid)
 
 	game_mode_affinity_applied = 0;
 	wlr_log(WLR_INFO, "CPU affinity: restored to all cores");
-}
-
-/*
- * Transparent Huge Pages (THP).
- * Enabling THP reduces TLB misses for games with large memory allocations.
- */
-static char thp_saved_value[32] = "";
-
-void
-apply_transparent_hugepages(void)
-{
-	int fd;
-	char buf[64];
-	ssize_t n;
-
-	/* Save current setting */
-	fd = open("/sys/kernel/mm/transparent_hugepage/enabled", O_RDONLY);
-	if (fd >= 0) {
-		n = read(fd, buf, sizeof(buf) - 1);
-		close(fd);
-		if (n > 0) {
-			buf[n] = '\0';
-			/* Extract current value from [brackets] */
-			char *start = strchr(buf, '[');
-			char *end = start ? strchr(start, ']') : NULL;
-			if (start && end) {
-				int len = end - start - 1;
-				if (len < (int)sizeof(thp_saved_value)) {
-					memcpy(thp_saved_value, start + 1, len);
-					thp_saved_value[len] = '\0';
-				}
-			}
-		}
-	}
-
-	/* Set to "always" for maximum hugepage usage */
-	fd = open("/sys/kernel/mm/transparent_hugepage/enabled", O_WRONLY);
-	if (fd >= 0) {
-		write(fd, "always\n", 7);
-		close(fd);
-		wlr_log(WLR_INFO, "THP: set to 'always' (was '%s')", thp_saved_value);
-	} else {
-		wlr_log(WLR_INFO, "THP: open failed: %s", strerror(errno));
-	}
-}
-
-void
-restore_transparent_hugepages(void)
-{
-	int fd;
-	if (thp_saved_value[0]) {
-		fd = open("/sys/kernel/mm/transparent_hugepage/enabled", O_WRONLY);
-		if (fd >= 0) {
-			write(fd, thp_saved_value, strlen(thp_saved_value));
-			close(fd);
-			wlr_log(WLR_INFO, "THP: restored to '%s'", thp_saved_value);
-		}
-		thp_saved_value[0] = '\0';
-	}
-}
-
-/*
- * I/O Scheduler — Low-latency disk access.
- * Switching NVMe/SSD to 'none' or 'mq-deadline' reduces disk I/O latency
- * during texture streaming and asset loading.
- */
-#define MAX_BLOCK_DEVS 16
-
-static struct {
-	char path[128];
-	char saved_scheduler[32];
-} saved_io_schedulers[MAX_BLOCK_DEVS];
-static int saved_io_scheduler_count = 0;
-
-void
-apply_io_scheduler(void)
-{
-	DIR *dir;
-	struct dirent *ent;
-	char path[256], buf[128];
-	int fd;
-	ssize_t n;
-
-	saved_io_scheduler_count = 0;
-	dir = opendir("/sys/block");
-	if (!dir) return;
-
-	while ((ent = readdir(dir)) && saved_io_scheduler_count < MAX_BLOCK_DEVS) {
-		if (ent->d_name[0] == '.') continue;
-		/* Skip loop/ram devices */
-		if (strncmp(ent->d_name, "loop", 4) == 0 || strncmp(ent->d_name, "ram", 3) == 0)
-			continue;
-
-		snprintf(path, sizeof(path), "/sys/block/%s/queue/scheduler", ent->d_name);
-
-		/* Read current scheduler */
-		fd = open(path, O_RDONLY);
-		if (fd < 0) continue;
-		n = read(fd, buf, sizeof(buf) - 1);
-		close(fd);
-		if (n <= 0) continue;
-		buf[n] = '\0';
-
-		/* Extract active scheduler from [brackets] */
-		char *start = strchr(buf, '[');
-		char *end = start ? strchr(start, ']') : NULL;
-		if (!start || !end) continue;
-
-		int idx = saved_io_scheduler_count;
-		int len = end - start - 1;
-		if (len >= (int)sizeof(saved_io_schedulers[idx].saved_scheduler)) continue;
-
-		strncpy(saved_io_schedulers[idx].path, path, sizeof(saved_io_schedulers[idx].path) - 1);
-		saved_io_schedulers[idx].path[sizeof(saved_io_schedulers[idx].path) - 1] = '\0';
-		memcpy(saved_io_schedulers[idx].saved_scheduler, start + 1, len);
-		saved_io_schedulers[idx].saved_scheduler[len] = '\0';
-
-		/* Set to "none" for lowest latency (best for NVMe), fall back to "mq-deadline" */
-		fd = open(path, O_WRONLY);
-		if (fd >= 0) {
-			if (write(fd, "none", 4) < 0)
-				write(fd, "mq-deadline", 11);
-			close(fd);
-			wlr_log(WLR_INFO, "I/O scheduler: %s → none (was '%s')",
-				ent->d_name, saved_io_schedulers[idx].saved_scheduler);
-			saved_io_scheduler_count++;
-		}
-	}
-	closedir(dir);
-}
-
-void
-restore_io_scheduler(void)
-{
-	int fd;
-	for (int i = 0; i < saved_io_scheduler_count; i++) {
-		fd = open(saved_io_schedulers[i].path, O_WRONLY);
-		if (fd >= 0) {
-			write(fd, saved_io_schedulers[i].saved_scheduler,
-				strlen(saved_io_schedulers[i].saved_scheduler));
-			close(fd);
-		}
-	}
-	if (saved_io_scheduler_count > 0)
-		wlr_log(WLR_INFO, "I/O scheduler: restored %d devices", saved_io_scheduler_count);
-	saved_io_scheduler_count = 0;
-}
-
-/*
- * Disable Kernel Watchdog — Remove NMI interrupts.
- * The kernel watchdog generates periodic NMI interrupts that can cause
- * micro-stuttering. Disabling it during gaming eliminates this jitter source.
- */
-static int watchdog_was_enabled = -1;
-
-void
-apply_disable_watchdog(void)
-{
-	int fd;
-	char buf[8];
-	ssize_t n;
-
-	/* Save current state */
-	fd = open("/proc/sys/kernel/nmi_watchdog", O_RDONLY);
-	if (fd >= 0) {
-		n = read(fd, buf, sizeof(buf) - 1);
-		close(fd);
-		if (n > 0) {
-			buf[n] = '\0';
-			watchdog_was_enabled = atoi(buf);
-		}
-	}
-
-	/* Disable NMI watchdog */
-	fd = open("/proc/sys/kernel/nmi_watchdog", O_WRONLY);
-	if (fd >= 0) {
-		write(fd, "0\n", 2);
-		close(fd);
-		wlr_log(WLR_INFO, "Kernel watchdog: NMI disabled");
-	}
-
-	/* Disable software watchdog too */
-	fd = open("/proc/sys/kernel/watchdog", O_WRONLY);
-	if (fd >= 0) {
-		write(fd, "0\n", 2);
-		close(fd);
-		wlr_log(WLR_INFO, "Kernel watchdog: software watchdog disabled");
-	}
-}
-
-void
-restore_watchdog(void)
-{
-	int fd;
-	if (watchdog_was_enabled > 0) {
-		fd = open("/proc/sys/kernel/nmi_watchdog", O_WRONLY);
-		if (fd >= 0) { write(fd, "1\n", 2); close(fd); }
-		fd = open("/proc/sys/kernel/watchdog", O_WRONLY);
-		if (fd >= 0) { write(fd, "1\n", 2); close(fd); }
-		wlr_log(WLR_INFO, "Kernel watchdog: restored (was enabled)");
-	}
-	watchdog_was_enabled = -1;
 }
 
 /*
@@ -1144,148 +978,12 @@ restore_raw_input(void)
 }
 
 /*
- * IRQ Affinity — Move hardware interrupts to compositor core.
- * Moving IRQs to core 0 means game cores are completely interrupt-free.
- * This is the natural complement to CPU affinity (core isolation).
+ * Save-then-write helper for sysfs knobs we can restore afterwards.
+ * Only the GPU power paths use it now — the /proc/sys users (scheduler
+ * granularity, dirty ratios, MGLRU, split_lock, watchdog, swappiness) were
+ * removed: those files are root-owned and every write failed with EACCES.
+ * See gametune_start() for what replaced them.
  */
-#define MAX_IRQS 512
-
-static struct {
-	int irq;
-	char saved_affinity[32];
-} saved_irq_affinities[MAX_IRQS];
-static int saved_irq_affinity_count = 0;
-
-/*
- * Return 1 if this IRQ is safe to pin to core 0.
- *
- * Pinning display/GPU/input/audio IRQs to a single saturated core was the
- * root cause of "Atomic commit failed: Device or resource busy" storms —
- * page-flip completion events couldn't be delivered in time, wlroots
- * retried commits indefinitely, and the compositor appeared frozen.
- * Each IRQ dir contains a subdirectory named after the driver/device;
- * we skip anything display-, GPU-, input-, or audio-related.
- */
-static int
-irq_is_safe_to_pin(const char *irq_num)
-{
-	char path[256];
-	DIR *d;
-	struct dirent *e;
-	int safe = 1;
-
-	snprintf(path, sizeof(path), "/proc/irq/%s", irq_num);
-	d = opendir(path);
-	if (!d) return 0;
-
-	while ((e = readdir(d))) {
-		if (e->d_name[0] == '.') continue;
-		/* Subdir name = device/driver label */
-		if (strcasestr(e->d_name, "nvidia") ||
-		    strcasestr(e->d_name, "i915")   ||
-		    strcasestr(e->d_name, "amdgpu") ||
-		    strcasestr(e->d_name, "radeon") ||
-		    strcasestr(e->d_name, "drm")    ||
-		    strcasestr(e->d_name, "xhci")   ||  /* USB — gamepad/kbd/mouse */
-		    strcasestr(e->d_name, "ehci")   ||
-		    strcasestr(e->d_name, "ohci")   ||
-		    strcasestr(e->d_name, "snd")    ||  /* ALSA sound card */
-		    strcasestr(e->d_name, "hda")) {     /* HD Audio */
-			safe = 0;
-			break;
-		}
-	}
-	closedir(d);
-	return safe;
-}
-
-void
-apply_irq_affinity(void)
-{
-	DIR *dir;
-	struct dirent *ent;
-	char path[256], buf[64];
-	int fd;
-	ssize_t n;
-	int skipped = 0;
-
-	saved_irq_affinity_count = 0;
-	dir = opendir("/proc/irq");
-	if (!dir) return;
-
-	while ((ent = readdir(dir)) && saved_irq_affinity_count < MAX_IRQS) {
-		/* Only numeric entries (IRQ numbers) */
-		if (ent->d_name[0] < '0' || ent->d_name[0] > '9')
-			continue;
-
-		/* Skip display/GPU/input/audio IRQs — see irq_is_safe_to_pin() */
-		if (!irq_is_safe_to_pin(ent->d_name)) {
-			skipped++;
-			continue;
-		}
-
-		snprintf(path, sizeof(path), "/proc/irq/%s/smp_affinity_list", ent->d_name);
-
-		/* Read current affinity */
-		fd = open(path, O_RDONLY);
-		if (fd < 0) continue;
-		n = read(fd, buf, sizeof(buf) - 1);
-		close(fd);
-		if (n <= 0) continue;
-		buf[n] = '\0';
-		/* Strip trailing newline */
-		if (n > 0 && buf[n - 1] == '\n') buf[n - 1] = '\0';
-
-		int idx = saved_irq_affinity_count;
-		saved_irq_affinities[idx].irq = atoi(ent->d_name);
-		strncpy(saved_irq_affinities[idx].saved_affinity, buf,
-			sizeof(saved_irq_affinities[idx].saved_affinity) - 1);
-		saved_irq_affinities[idx].saved_affinity[
-			sizeof(saved_irq_affinities[idx].saved_affinity) - 1] = '\0';
-
-		/* Pin to core 0 only */
-		fd = open(path, O_WRONLY);
-		if (fd >= 0) {
-			write(fd, "0", 1);
-			close(fd);
-			saved_irq_affinity_count++;
-		}
-	}
-	closedir(dir);
-	wlr_log(WLR_INFO, "IRQ affinity: pinned %d IRQs to core 0 (skipped %d display/GPU/input/audio)",
-		saved_irq_affinity_count, skipped);
-}
-
-void
-restore_irq_affinity(void)
-{
-	char path[256];
-	int fd;
-
-	for (int i = 0; i < saved_irq_affinity_count; i++) {
-		snprintf(path, sizeof(path), "/proc/irq/%d/smp_affinity_list",
-			saved_irq_affinities[i].irq);
-		fd = open(path, O_WRONLY);
-		if (fd >= 0) {
-			write(fd, saved_irq_affinities[i].saved_affinity,
-				strlen(saved_irq_affinities[i].saved_affinity));
-			close(fd);
-		}
-	}
-	if (saved_irq_affinity_count > 0)
-		wlr_log(WLR_INFO, "IRQ affinity: restored %d IRQs", saved_irq_affinity_count);
-	saved_irq_affinity_count = 0;
-}
-
-/*
- * CFS Scheduler Tuning — Optimize scheduler for low-latency gaming.
- * Lower granularity = faster response, higher migration cost = keep processes
- * on their assigned cores (better cache utilization with affinity).
- */
-static char sched_saved_min_granularity[32] = "";
-static char sched_saved_wakeup_granularity[32] = "";
-static char sched_saved_migration_cost[32] = "";
-
 static void
 sched_save_and_write(const char *path, const char *value, char *save_buf, size_t save_len)
 {
@@ -1325,33 +1023,6 @@ sched_restore(const char *path, char *save_buf)
 	}
 }
 
-void
-apply_scheduler_tuning(void)
-{
-	/* Lower min_granularity for faster preemption (default ~3ms → 1ms) */
-	sched_save_and_write("/proc/sys/kernel/sched_min_granularity_ns",
-		"1000000", sched_saved_min_granularity, sizeof(sched_saved_min_granularity));
-
-	/* Lower wakeup_granularity for faster wakeup preemption (default ~4ms → 500μs) */
-	sched_save_and_write("/proc/sys/kernel/sched_wakeup_granularity_ns",
-		"500000", sched_saved_wakeup_granularity, sizeof(sched_saved_wakeup_granularity));
-
-	/* Higher migration_cost to keep tasks on their assigned cores (default ~500μs → 5ms) */
-	sched_save_and_write("/proc/sys/kernel/sched_migration_cost_ns",
-		"5000000", sched_saved_migration_cost, sizeof(sched_saved_migration_cost));
-
-	wlr_log(WLR_INFO, "Scheduler tuning: min_gran=1ms, wakeup_gran=500μs, migration_cost=5ms");
-}
-
-void
-restore_scheduler_tuning(void)
-{
-	sched_restore("/proc/sys/kernel/sched_min_granularity_ns", sched_saved_min_granularity);
-	sched_restore("/proc/sys/kernel/sched_wakeup_granularity_ns", sched_saved_wakeup_granularity);
-	sched_restore("/proc/sys/kernel/sched_migration_cost_ns", sched_saved_migration_cost);
-	wlr_log(WLR_INFO, "Scheduler tuning: restored defaults");
-}
-
 /*
  * GPU Power State — Force maximum GPU performance.
  * For AMD: set power_dma_perf_level to "high" and use VR power profile.
@@ -1374,6 +1045,13 @@ static int nv_gpu_index = 0;  /* nvidia-smi GPU index (auto-detected) */
 /*
  * Run nvidia-smi with given args. Returns 0 on success.
  * Optionally captures first line of stdout into out_buf.
+ *
+ * pclose() is unreliable here: handlesig() reaps with waitpid(-1, WNOHANG)
+ * on every SIGCHLD, so it races popen's child and pclose() then returns -1
+ * with ECHILD even though the command ran fine.  Every caller gates its
+ * tuning step on this return value, so treating "status unknown" as failure
+ * silently skipped GPU clock locks, power limits and persistence mode.
+ * ECHILD therefore means success-unknown, not failure.
  */
 static int
 nvidia_smi_run(const char *args, char *out_buf, size_t out_len)
@@ -1398,6 +1076,14 @@ nvidia_smi_run(const char *args, char *out_buf, size_t out_len)
 	}
 
 	ret = pclose(fp);
+	if (ret == -1) {
+		/* Child already reaped by the SIGCHLD handler. For queries the
+		 * captured output tells us whether it worked; for setters we
+		 * have nothing to go on, so assume it ran. */
+		if (out_buf && out_len > 0)
+			return out_buf[0] != '\0' ? 0 : -1;
+		return 0;
+	}
 	return WIFEXITED(ret) ? WEXITSTATUS(ret) : -1;
 }
 
@@ -1918,127 +1604,6 @@ restore_gpu_sched_priority(pid_t pid)
 	gpu_sched_applied = 0;
 }
 
-/*
- * Dirty Writeback Tuning — Prevent I/O stalls from page writeback.
- * Allow more dirty pages in RAM before flushing, reduces disk I/O
- * interference during texture streaming and asset loading.
- */
-static char dirty_saved_ratio[32] = "";
-static char dirty_saved_bg_ratio[32] = "";
-static char dirty_saved_expire[32] = "";
-static char dirty_saved_writeback[32] = "";
-
-void
-apply_dirty_writeback_tuning(void)
-{
-	/* Allow more dirty pages before forced writeback (default ~20 → 80%) */
-	sched_save_and_write("/proc/sys/vm/dirty_ratio",
-		"80", dirty_saved_ratio, sizeof(dirty_saved_ratio));
-
-	/* Start background writeback earlier (default ~10 → 5%) */
-	sched_save_and_write("/proc/sys/vm/dirty_background_ratio",
-		"5", dirty_saved_bg_ratio, sizeof(dirty_saved_bg_ratio));
-
-	/* Keep dirty pages longer before expiring (default ~3000 → 6000 centisecs) */
-	sched_save_and_write("/proc/sys/vm/dirty_expire_centisecs",
-		"6000", dirty_saved_expire, sizeof(dirty_saved_expire));
-
-	/* Background writeback interval (default ~500 → 1500 centisecs) */
-	sched_save_and_write("/proc/sys/vm/dirty_writeback_centisecs",
-		"1500", dirty_saved_writeback, sizeof(dirty_saved_writeback));
-
-	wlr_log(WLR_INFO, "Dirty writeback: ratio=80, bg=5, expire=6000, writeback=1500");
-}
-
-void
-restore_dirty_writeback_tuning(void)
-{
-	sched_restore("/proc/sys/vm/dirty_ratio", dirty_saved_ratio);
-	sched_restore("/proc/sys/vm/dirty_background_ratio", dirty_saved_bg_ratio);
-	sched_restore("/proc/sys/vm/dirty_expire_centisecs", dirty_saved_expire);
-	sched_restore("/proc/sys/vm/dirty_writeback_centisecs", dirty_saved_writeback);
-	wlr_log(WLR_INFO, "Dirty writeback: restored defaults");
-}
-
-/*
- * Split Lock Mitigation Disable — Remove performance penalty.
- * Split lock detection costs ~70μs per event; disabling it eliminates
- * this overhead for games that trigger unaligned atomic operations.
- */
-static int split_lock_saved = -1;
-
-void
-apply_disable_split_lock(void)
-{
-	int fd;
-	char buf[8];
-	ssize_t n;
-
-	fd = open("/proc/sys/kernel/split_lock_mitigate", O_RDONLY);
-	if (fd >= 0) {
-		n = read(fd, buf, sizeof(buf) - 1);
-		close(fd);
-		if (n > 0) {
-			buf[n] = '\0';
-			split_lock_saved = atoi(buf);
-		}
-	}
-
-	fd = open("/proc/sys/kernel/split_lock_mitigate", O_WRONLY);
-	if (fd >= 0) {
-		write(fd, "0\n", 2);
-		close(fd);
-		wlr_log(WLR_INFO, "Split lock mitigation: disabled");
-	} else {
-		wlr_log(WLR_INFO, "Split lock mitigation: not available");
-	}
-}
-
-void
-restore_split_lock(void)
-{
-	int fd;
-	if (split_lock_saved > 0) {
-		fd = open("/proc/sys/kernel/split_lock_mitigate", O_WRONLY);
-		if (fd >= 0) {
-			write(fd, "1\n", 2);
-			close(fd);
-		}
-		wlr_log(WLR_INFO, "Split lock mitigation: restored");
-	}
-	split_lock_saved = -1;
-}
-
-/*
- * MGLRU Tuning (Multi-Gen LRU) — Optimize page reclaim.
- * Full MGLRU mode with no minimum TTL gives the kernel maximum
- * flexibility for efficient memory management during gaming.
- */
-static char mglru_saved_enabled[32] = "";
-static char mglru_saved_min_ttl[32] = "";
-
-void
-apply_mglru_tuning(void)
-{
-	/* Enable full MGLRU (value 5 = all features) */
-	sched_save_and_write("/sys/kernel/mm/lru_gen/enabled",
-		"5", mglru_saved_enabled, sizeof(mglru_saved_enabled));
-
-	/* Set min_ttl to 0 for most aggressive reclaim */
-	sched_save_and_write("/sys/kernel/mm/lru_gen/min_ttl_ms",
-		"0", mglru_saved_min_ttl, sizeof(mglru_saved_min_ttl));
-
-	wlr_log(WLR_INFO, "MGLRU: enabled=5, min_ttl=0");
-}
-
-void
-restore_mglru_tuning(void)
-{
-	sched_restore("/sys/kernel/mm/lru_gen/enabled", mglru_saved_enabled);
-	sched_restore("/sys/kernel/mm/lru_gen/min_ttl_ms", mglru_saved_min_ttl);
-	wlr_log(WLR_INFO, "MGLRU: restored defaults");
-}
-
 static int is_wine_or_proton_process(pid_t pid);
 static int is_known_game_app(const char *app);
 
@@ -2218,25 +1783,15 @@ gm_ultra_exit(pid_t pid)
 {
 	wlr_log(WLR_INFO, "gm-bg: exiting ultra (pid=%d)", pid);
 	restore_competing_processes();
-	restore_mglru_tuning();
-	restore_split_lock();
-	restore_dirty_writeback_tuning();
 	restore_gpu_power_state();
-	restore_scheduler_tuning();
-	restore_irq_affinity();
 	restore_raw_input();
-	/* restore_watchdog() paired with the disabled
-	 * apply_disable_watchdog() — no-op now. */
-	restore_io_scheduler();
-	restore_transparent_hugepages();
 	if (pid > 1) {
 		restore_cpu_affinity(pid);
 		restore_gpu_sched_priority(pid);
 		restore_game_priority(pid);
 	}
-	restore_cpu_latency_qos();
+	gametune_stop();
 	unfreeze_background_processes();
-	restore_memory_optimization();
 	restore_power_profile();
 	fan_boost_deactivate();
 	wlr_log(WLR_INFO, "gm-bg: ultra exit complete");
@@ -2265,20 +1820,13 @@ gm_bg_worker_func(void *arg)
 			fan_boost_activate();
 			apply_power_profile_performance();
 			freeze_background_processes();
-			apply_memory_optimization();
-			apply_cpu_latency_qos();
-			apply_transparent_hugepages();
-			apply_io_scheduler();
-			/* apply_disable_watchdog() intentionally not called —
-			 * hardware watchdog is our last line of defence if the
-			 * compositor locks up (e.g. scanout retry-loop). */
+			/* Root-only knobs (C-state QoS, swappiness, memory
+			 * compaction) go through nixly-gametune.service; the
+			 * rest — THP, watchdog, split_lock, io scheduler,
+			 * governor, IRQ affinity — is static system config. */
+			gametune_start();
 			apply_raw_input();
-			apply_irq_affinity();
-			apply_scheduler_tuning();
 			apply_gpu_power_state();
-			apply_dirty_writeback_tuning();
-			apply_disable_split_lock();
-			apply_mglru_tuning();
 			if (pid > 1) {
 				apply_game_priority(pid);
 				apply_cpu_affinity(pid);
@@ -2396,23 +1944,23 @@ update_game_mode(void)
 	}
 
 	/*
-	 * Positive Steam-only detection.
-	 * Game mode activates ONLY for Steam-launched games. Every other
-	 * fullscreen surface — RetroArch, browsers, video, Lutris, Heroic,
-	 * Bottles, bare Wine, gamescope, minecraft — is left alone.
-	 * This prevents false positives (freeze storms when non-games trip
-	 * the aggressive system tuning path).
+	 * Positive game detection.
+	 *
+	 * This used to accept Steam titles only, which meant a game started
+	 * from Lutris, Heroic, Bottles, umu, gamescope, bare Wine/Proton or a
+	 * native Linux binary got no GPU clock lock, no background freeze and
+	 * no RT compositor — the whole tuning path simply never ran.
+	 *
+	 * looks_like_game() is the same classifier the fullscreen/VRR/scanout
+	 * path already trusts, and it is conservative in exactly the places
+	 * that matter: browsers, retro emulators, the Steam client itself and
+	 * its popups all return 0 before any positive signal is considered.
+	 * Using it here makes the aggressive tuning follow the same definition
+	 * of "this is a game" as the rest of the compositor, on every machine
+	 * and every launcher.
 	 */
-	if (c && !is_steam_client(c) && !is_steam_popup(c)) {
-		const char *app = client_get_appid(c);
-
-		/* 1. Wayland-native Steam game (app_id=steam_app_NNNN) */
-		if (app && strncasecmp(app, "steam_app_", 10) == 0)
-			is_game = 1;
-		/* 2. XWayland STEAM_GAME atom or Steam/reaper process ancestry */
-		else if (is_steam_game(c))
-			is_game = 1;
-	}
+	if (c && !is_steam_client(c) && !is_steam_popup(c) && looks_like_game(c))
+		is_game = 1;
 
 	game_mode_active = is_game;
 	game_mode_client = is_game ? c : NULL;
@@ -2469,23 +2017,18 @@ update_game_mode(void)
 			}
 		}
 
-		/* Pin the compositor thread to cores 0-1.  Runs HERE (main
-		 * thread) because sched_setaffinity(0, ...) affects the
-		 * calling thread — on the gm-bg worker it pinned the worker.
-		 * Two cores, not one: a single-core pin + all-IRQ→core-0 +
-		 * SCHED_RR made the compositor un-preemptable in tight
-		 * retry-loops (retroarch 10-bit scanout freeze). */
+		/* Pin the compositor thread to physical core 0 (all its SMT
+		 * threads).  Runs HERE (main thread) because
+		 * sched_setaffinity(0, ...) affects the calling thread — on
+		 * the gm-bg worker it pinned the worker.  Same split the game
+		 * affinity uses; see gm_core_split(). */
 		{
-			int ncores = sysconf(_SC_NPROCESSORS_ONLN);
-			if (ncores >= 4) {
-				cpu_set_t cset;
-				CPU_ZERO(&cset);
-				CPU_SET(0, &cset);
-				CPU_SET(1, &cset);
-				if (sched_setaffinity(0, sizeof(cset), &cset) == 0) {
-					compositor_pin_applied = 1;
-					wlr_log(WLR_INFO, "Compositor pinned to cores 0-1");
-				}
+			cpu_set_t comp_set, game_set;
+			if (gm_core_split(&comp_set, &game_set) &&
+			    sched_setaffinity(0, sizeof(comp_set), &comp_set) == 0) {
+				compositor_pin_applied = 1;
+				wlr_log(WLR_INFO, "Compositor pinned to %d CPU(s) of physical core 0",
+					CPU_COUNT(&comp_set));
 			}
 		}
 

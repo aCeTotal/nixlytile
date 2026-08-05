@@ -72,16 +72,16 @@ static bool write_pixels(struct wlr_vk_texture *texture,
 
 	// get staging buffer
 	struct wlr_vk_buffer_span span = vulkan_get_stage_span(renderer, bsize, format_info->bytes_per_block);
-	if (!span.buffer || span.alloc.size != bsize) {
+	if (!span.buffer || span.size != bsize) {
 		wlr_log(WLR_ERROR, "Failed to retrieve staging buffer");
 		free(copies);
 		return false;
 	}
-	char *map = (char*)span.buffer->cpu_mapping + span.alloc.start;
+	char *map = (char*)span.buffer->cpu_mapping + span.offset;
 
 	// upload data
 
-	uint32_t buf_off = span.alloc.start;
+	uint32_t buf_off = span.offset;
 	for (int i = 0; i < rects_len; i++) {
 		pixman_box32_t rect = rects[i];
 		uint32_t width = rect.x2 - rect.x1;
@@ -238,7 +238,8 @@ static bool vulkan_texture_read_pixels(struct wlr_texture *wlr_texture,
 	void *p = wlr_texture_read_pixel_options_get_data(options);
 
 	return vulkan_read_pixels(texture->renderer, texture->format->vk, texture->image,
-		options->format, options->stride, src.width, src.height, src.x, src.y, 0, 0, p);
+		options->format, options->stride, src.width, src.height, src.x, src.y, 0, 0, p,
+		options->wait_timeline, options->wait_point);
 }
 
 static uint32_t vulkan_texture_preferred_read_format(struct wlr_texture *wlr_texture) {
@@ -329,6 +330,7 @@ struct wlr_vk_texture_view *vulkan_texture_get_or_create_view(struct wlr_vk_text
 
 	view->ds_pool = vulkan_alloc_texture_ds(texture->renderer, pipeline_layout->ds, &view->ds);
 	if (!view->ds_pool) {
+		vkDestroyImageView(dev, view->image_view, NULL);
 		free(view);
 		wlr_log(WLR_ERROR, "failed to allocate descriptor");
 		return NULL;

@@ -240,7 +240,7 @@ static bool _scene_nodes_in_box(struct wlr_scene_node *node, struct wlr_box *box
 		struct wlr_box node_box = { .x = lx, .y = ly };
 		scene_node_get_size(node, &node_box.width, &node_box.height);
 
-		if (wlr_box_intersection(&node_box, &node_box, box) &&
+		if (wlr_box_intersects(&node_box, box) &&
 				iterator(node, lx, ly, user_data)) {
 			return true;
 		}
@@ -432,7 +432,21 @@ static void update_node_update_outputs(struct wlr_scene_node *node,
 	uint64_t active_outputs = 0;
 
 	if (!pixman_region32_empty(&node->visible)) {
-		uint32_t visible_area = region_area(&node->visible);
+		struct wlr_scene_output *scene_output;
+
+		// Compute the region covered by all outputs, then intersect with the
+		// node's visible region
+		pixman_region32_t visible;
+		pixman_region32_init(&visible);
+		wl_list_for_each(scene_output, outputs, link) {
+			int width, height;
+			wlr_output_effective_resolution(scene_output->output, &width, &height);
+			pixman_region32_union_rect(&visible, &visible,
+				scene_output->x, scene_output->y, width, height);
+		}
+		pixman_region32_intersect(&visible, &visible, &node->visible);
+		uint32_t visible_area = region_area(&visible);
+		pixman_region32_fini(&visible);
 
 		// let's update the outputs in two steps:
 		//  - the primary outputs
@@ -440,7 +454,6 @@ static void update_node_update_outputs(struct wlr_scene_node *node,
 		// This ensures that the enter/leave signals can rely on the primary output
 		// to have a reasonable value. Otherwise, they may get a value that's in
 		// the middle of a calculation.
-		struct wlr_scene_output *scene_output;
 		wl_list_for_each(scene_output, outputs, link) {
 			if (scene_output == ignore) {
 				continue;
@@ -464,9 +477,9 @@ static void update_node_update_outputs(struct wlr_scene_node *node,
 			uint32_t overlap = region_area(&intersection);
 			pixman_region32_fini(&intersection);
 
-			// If the overlap accounts for less than 10% of the visible node area,
+			// If the overlap accounts for 10% of the visible node area or less,
 			// ignore this output
-			if (overlap >= 0.1 * visible_area) {
+			if (overlap > 0.1 * visible_area) {
 				if (overlap >= largest_overlap) {
 					largest_overlap = overlap;
 					scene_buffer->primary_output = scene_output;
@@ -476,11 +489,6 @@ static void update_node_update_outputs(struct wlr_scene_node *node,
 				count++;
 			}
 		}
-	}
-
-	if (old_primary_output != scene_buffer->primary_output) {
-		scene_buffer->prev_feedback_options =
-			(struct wlr_linux_dmabuf_feedback_v1_init_options){0};
 	}
 
 	uint64_t old_active = scene_buffer->active_outputs;
@@ -1565,6 +1573,8 @@ static void scene_entry_render(struct render_list_entry *entry, const struct ren
 		struct wlr_scene_output_sample_event sample_event = {
 			.output = data->output,
 			.direct_scanout = false,
+			.release_timeline = data->output->in_timeline,
+			.release_point = data->output->in_point,
 		};
 		wl_signal_emit_mutable(&scene_buffer->events.output_sample, &sample_event);
 
@@ -1797,7 +1807,10 @@ struct wlr_scene_output *wlr_scene_output_create(struct wlr_scene *scene,
 	if (drm_fd >= 0 && output->backend->features.timeline &&
 			output->renderer != NULL && output->renderer->features.timeline) {
 		scene_output->in_timeline = wlr_drm_syncobj_timeline_create(drm_fd);
-		if (scene_output->in_timeline == NULL) {
+		scene_output->out_timeline = wlr_drm_syncobj_timeline_create(drm_fd);
+		if (scene_output->in_timeline == NULL || scene_output->out_timeline == NULL) {
+			wlr_drm_syncobj_timeline_unref(scene_output->in_timeline);
+			wlr_drm_syncobj_timeline_unref(scene_output->out_timeline);
 			return NULL;
 		}
 	}
@@ -1852,7 +1865,14 @@ void wlr_scene_output_destroy(struct wlr_scene_output *scene_output) {
 	wl_list_remove(&scene_output->output_commit.link);
 	wl_list_remove(&scene_output->output_damage.link);
 	wl_list_remove(&scene_output->output_needs_frame.link);
-	wlr_drm_syncobj_timeline_unref(scene_output->in_timeline);
+	if (scene_output->in_timeline != NULL) {
+		wlr_drm_syncobj_timeline_signal(scene_output->in_timeline, UINT64_MAX);
+		wlr_drm_syncobj_timeline_unref(scene_output->in_timeline);
+	}
+	if (scene_output->out_timeline != NULL) {
+		wlr_drm_syncobj_timeline_signal(scene_output->out_timeline, UINT64_MAX);
+		wlr_drm_syncobj_timeline_unref(scene_output->out_timeline);
+	}
 	wlr_color_transform_unref(scene_output->gamma_lut_color_transform);
 	wlr_color_transform_unref(scene_output->prev_gamma_lut_color_transform);
 	wlr_color_transform_unref(scene_output->prev_supplied_color_transform);
@@ -2148,6 +2168,12 @@ static enum scene_direct_scanout_result scene_entry_try_direct_scanout(
 	if (buffer->wait_timeline != NULL) {
 		wlr_output_state_set_wait_timeline(&pending, buffer->wait_timeline, buffer->wait_point);
 	}
+
+	if (scene_output->out_timeline) {
+		scene_output->out_point++;
+		wlr_output_state_set_signal_timeline(&pending, scene_output->out_timeline, scene_output->out_point);
+	}
+
 	if (!wlr_output_test_state(scene_output->output, &pending)) {
 		wlr_output_state_finish(&pending);
 		return SCANOUT_CANDIDATE;
@@ -2159,6 +2185,8 @@ static enum scene_direct_scanout_result scene_entry_try_direct_scanout(
 	struct wlr_scene_output_sample_event sample_event = {
 		.output = scene_output,
 		.direct_scanout = true,
+		.release_timeline = data->output->out_timeline,
+		.release_point = data->output->out_point,
 	};
 	wl_signal_emit_mutable(&buffer->events.output_sample, &sample_event);
 	return SCANOUT_SUCCESS;
@@ -2618,6 +2646,9 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 	if (scene_output->in_timeline != NULL) {
 		wlr_output_state_set_wait_timeline(state, scene_output->in_timeline,
 			scene_output->in_point);
+		scene_output->out_point++;
+		wlr_output_state_set_signal_timeline(state, scene_output->out_timeline,
+			scene_output->out_point);
 	}
 
 	if (!render_gamma_lut) {
@@ -2685,8 +2716,7 @@ static void scene_output_for_each_scene_buffer(const struct wlr_box *output_box,
 		struct wlr_box node_box = { .x = lx, .y = ly };
 		scene_node_get_size(node, &node_box.width, &node_box.height);
 
-		struct wlr_box intersection;
-		if (wlr_box_intersection(&intersection, output_box, &node_box)) {
+		if (wlr_box_intersects(output_box, &node_box)) {
 			struct wlr_scene_buffer *scene_buffer =
 				wlr_scene_buffer_from_node(node);
 			user_iterator(scene_buffer, lx, ly, user_data);

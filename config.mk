@@ -24,6 +24,11 @@ WLR_LIBS = `$(PKG_CONFIG) --libs wlroots-0.20`
 #	-I$(PWD)/wlroots/0.19/include/wlroots-0.20
 #WLR_LIBS = -Wl,-rpath,$(PWD)/wlroots/0.19/lib64 -L$(PWD)/wlroots/0.19/lib64 -lwlroots-0.20
 
+# Optimization. Without this the compiler defaults to -O0: neither the nix
+# stdenv nor the Makefile passed any -O flag, so every build so far was
+# unoptimized.
+OPTFLAGS = -O3
+
 XWAYLAND = -DXWAYLAND
 XLIBS = xcb xcb-icccm
 

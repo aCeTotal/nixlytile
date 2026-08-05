@@ -63,6 +63,9 @@ struct wlr_vk_device {
 	struct wlr_drm_format_set dmabuf_render_formats;
 	struct wlr_drm_format_set dmabuf_texture_formats;
 	struct wlr_drm_format_set shm_texture_formats;
+
+	float timestamp_period;
+	uint32_t timestamp_valid_bits;
 };
 
 // Tries to find the VkPhysicalDevice for the given drm fd.
@@ -205,6 +208,7 @@ struct wlr_vk_render_format_setup {
 	bool use_blending_buffer;
 	bool use_srgb;
 	VkRenderPass render_pass;
+	VkRenderPass render_pass_clear;
 
 	VkPipeline output_pipe_identity;
 	VkPipeline output_pipe_srgb;
@@ -280,8 +284,6 @@ struct wlr_vk_command_buffer {
 	uint64_t timeline_point;
 	// Textures to destroy after the command buffer completes
 	struct wl_list destroy_textures; // wlr_vk_texture.destroy_link
-	// Staging shared buffers to release after the command buffer completes
-	struct wl_list stage_buffers; // wlr_vk_shared_buffer.link
 	// Color transform to unref after the command buffer completes
 	struct wlr_color_transform *color_transform;
 
@@ -351,7 +353,7 @@ struct wlr_vk_renderer {
 	struct {
 		struct wlr_vk_command_buffer *cb;
 		uint64_t last_timeline_point;
-		struct wl_list buffers; // wlr_vk_shared_buffer.link
+		struct wl_list buffers; // wlr_vk_stage_buffer.link
 	} stage;
 
 	struct {
@@ -365,9 +367,10 @@ struct wlr_vk_renderer {
 
 // vertex shader push constant range data
 struct wlr_vk_vert_pcr_data {
-	float mat4[4][4];
+	float proj_packed[6];
 	float uv_off[2];
 	float uv_size[2];
+	float padding[2];
 };
 
 struct wlr_vk_frag_texture_pcr_data {
@@ -412,7 +415,13 @@ VkCommandBuffer vulkan_record_stage_cb(struct wlr_vk_renderer *renderer);
 
 // Submits the current stage command buffer and waits until it has
 // finished execution.
-bool vulkan_submit_stage_wait(struct wlr_vk_renderer *renderer);
+bool vulkan_submit_stage_wait(struct wlr_vk_renderer *renderer, int wait_sync_file_fd);
+
+struct wlr_vk_render_timer {
+	struct wlr_render_timer base;
+	struct wlr_vk_renderer *renderer;
+	VkQueryPool query_pool;
+};
 
 struct wlr_vk_render_pass_texture {
 	struct wlr_vk_texture *texture;
@@ -446,13 +455,19 @@ struct wlr_vk_render_pass {
 struct wlr_vk_render_pass *vulkan_begin_render_pass(struct wlr_vk_renderer *renderer,
 	struct wlr_vk_render_buffer *buffer, const struct wlr_buffer_pass_options *options);
 
-// Suballocates a buffer span with the given size that can be mapped
-// and used as staging buffer. The allocation is implicitly released when the
-// stage cb has finished execution. The start of the span will be a multiple
-// of the given alignment.
+// Suballocates a buffer span with the given size from the staging ring buffer
+// that is mapped for CPU access. vulkan_stage_mark_submit must be called after
+// allocations are made to mark the timeline point after which the allocations
+// will be released. The start of the span will be a multiple of alignment.
 struct wlr_vk_buffer_span vulkan_get_stage_span(
 	struct wlr_vk_renderer *renderer, VkDeviceSize size,
 	VkDeviceSize alignment);
+
+// Records a watermark on all staging buffers with new allocations with the
+// specified timeline point. Once the timeline point is passed, the span will
+// be reclaimed by vulkan_stage_buffer_reclaim.
+void vulkan_stage_mark_submit(struct wlr_vk_renderer *renderer,
+	uint64_t timeline_point);
 
 // Tries to allocate a texture descriptor set. Will additionally
 // return the pool it was allocated from when successful (for freeing it later).
@@ -480,6 +495,8 @@ uint64_t vulkan_end_command_buffer(struct wlr_vk_command_buffer *cb,
 void vulkan_reset_command_buffer(struct wlr_vk_command_buffer *cb);
 bool vulkan_wait_command_buffer(struct wlr_vk_command_buffer *cb,
 	struct wlr_vk_renderer *renderer);
+VkSemaphore vulkan_command_buffer_wait_sync_file(struct wlr_vk_renderer *renderer,
+	struct wlr_vk_command_buffer *render_cb, size_t sem_index, int sync_file_fd);
 
 bool vulkan_sync_render_pass_release(struct wlr_vk_renderer *renderer,
 	struct wlr_vk_render_pass *pass);
@@ -492,7 +509,8 @@ bool vulkan_read_pixels(struct wlr_vk_renderer *vk_renderer,
 	VkFormat src_format, VkImage src_image,
 	uint32_t drm_format, uint32_t stride,
 	uint32_t width, uint32_t height, uint32_t src_x, uint32_t src_y,
-	uint32_t dst_x, uint32_t dst_y, void *data);
+	uint32_t dst_x, uint32_t dst_y, void *data,
+	struct wlr_drm_syncobj_timeline *wait_timeline, uint64_t wait_point);
 
 // State (e.g. image texture) associated with a surface.
 struct wlr_vk_texture {
@@ -534,29 +552,43 @@ struct wlr_vk_descriptor_pool {
 	struct wl_list link; // wlr_vk_renderer.descriptor_pools
 };
 
-struct wlr_vk_allocation {
-	VkDeviceSize start;
-	VkDeviceSize size;
+struct wlr_vk_stage_watermark {
+	VkDeviceSize head;
+	uint64_t timeline_point;
 };
 
-// List of suballocated staging buffers.
-// Used to upload to/read from device local images.
-struct wlr_vk_shared_buffer {
-	struct wl_list link; // wlr_vk_renderer.stage.buffers or wlr_vk_command_buffer.stage_buffers
+// Ring buffer for staging transfers
+struct wlr_vk_stage_buffer {
+	struct wl_list link; // wlr_vk_renderer.stage.buffers
 	VkBuffer buffer;
 	VkDeviceMemory memory;
 	VkDeviceSize buf_size;
 	void *cpu_mapping;
-	struct wl_array allocs; // struct wlr_vk_allocation
-	int64_t last_used_ms;
+
+	VkDeviceSize head;
+	VkDeviceSize tail;
+
+	struct wl_array watermarks; // struct wlr_vk_stage_watermark
+	int empty_gc_cnt;
 };
 
-// Suballocated range on a buffer.
+// Suballocated range on a staging ring buffer.
 struct wlr_vk_buffer_span {
-	struct wlr_vk_shared_buffer *buffer;
-	struct wlr_vk_allocation alloc;
+	struct wlr_vk_stage_buffer *buffer;
+	VkDeviceSize offset;
+	VkDeviceSize size;
 };
 
+// Suballocate a span of size bytes from a staging ring buffer, with the
+// returned offset rounded up to the given alignment. Returns the byte offset
+// of the allocation, or (VkDeviceSize)-1 if the buffer is too full to fit it.
+VkDeviceSize vulkan_stage_buffer_alloc(struct wlr_vk_stage_buffer *buf,
+	VkDeviceSize size, VkDeviceSize alignment);
+
+// Free all allocations covered by watermarks whose timeline point has been
+// reached.
+void vulkan_stage_buffer_reclaim(struct wlr_vk_stage_buffer *buf,
+	uint64_t current_point);
 
 // Prepared form for a color transform
 struct wlr_vk_color_transform {
@@ -577,13 +609,6 @@ struct wlr_vk_color_transform {
 	enum wlr_color_transfer_function inverse_eotf;
 };
 void vk_color_transform_destroy(struct wlr_addon *addon);
-
-struct wlr_vk_render_timer {
-	struct wlr_render_timer base;
-	struct wlr_vk_renderer *renderer;
-	VkQueryPool query_pool; // 2 slots: begin + end
-	bool pending;
-};
 
 // util
 const char *vulkan_strerror(VkResult err);

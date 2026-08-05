@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <drm_fourcc.h>
 #include <vulkan/vulkan.h>
+#include <wayland-util.h>
 #include <wlr/render/color.h>
 #include <wlr/render/interface.h>
 #include <wlr/types/wlr_drm.h>
@@ -31,11 +32,9 @@
 #include "render/vulkan/shaders/texture.frag.h"
 #include "render/vulkan/shaders/quad.frag.h"
 #include "render/vulkan/shaders/output.frag.h"
-#include "types/wlr_buffer.h"
-#include "util/time.h"
+#include "util/array.h"
 
 // TODO:
-// - simplify stage allocation, don't track allocations but use ringbuffer-like
 // - use a pipeline cache (not sure when to save though, after every pipeline
 //   creation?)
 // - create pipelines as derivatives of each other
@@ -281,6 +280,7 @@ static void destroy_render_format_setup(struct wlr_vk_renderer *renderer,
 
 	VkDevice dev = renderer->dev->dev;
 	vkDestroyRenderPass(dev, setup->render_pass, NULL);
+	vkDestroyRenderPass(dev, setup->render_pass_clear, NULL);
 	vkDestroyPipeline(dev, setup->output_pipe_identity, NULL);
 	vkDestroyPipeline(dev, setup->output_pipe_srgb, NULL);
 	vkDestroyPipeline(dev, setup->output_pipe_pq, NULL);
@@ -297,18 +297,13 @@ static void destroy_render_format_setup(struct wlr_vk_renderer *renderer,
 	free(setup);
 }
 
-static void shared_buffer_destroy(struct wlr_vk_renderer *r,
-		struct wlr_vk_shared_buffer *buffer) {
+static void stage_buffer_destroy(struct wlr_vk_renderer *r,
+		struct wlr_vk_stage_buffer *buffer) {
 	if (!buffer) {
 		return;
 	}
 
-	if (buffer->allocs.size > 0) {
-		wlr_log(WLR_ERROR, "shared_buffer_finish: %zu allocations left",
-			buffer->allocs.size / sizeof(struct wlr_vk_allocation));
-	}
-
-	wl_array_release(&buffer->allocs);
+	wl_array_release(&buffer->watermarks);
 	if (buffer->cpu_mapping) {
 		vkUnmapMemory(r->dev->dev, buffer->memory);
 		buffer->cpu_mapping = NULL;
@@ -324,75 +319,12 @@ static void shared_buffer_destroy(struct wlr_vk_renderer *r,
 	free(buffer);
 }
 
-struct wlr_vk_buffer_span vulkan_get_stage_span(struct wlr_vk_renderer *r,
-		VkDeviceSize size, VkDeviceSize alignment) {
-	// try to find free span
-	// simple greedy allocation algorithm - should be enough for this usecase
-	// since all allocations are freed together after the frame
-	struct wlr_vk_shared_buffer *buf;
-	wl_list_for_each_reverse(buf, &r->stage.buffers, link) {
-		VkDeviceSize start = 0u;
-		if (buf->allocs.size > 0) {
-			const struct wlr_vk_allocation *allocs = buf->allocs.data;
-			size_t allocs_len = buf->allocs.size / sizeof(struct wlr_vk_allocation);
-			const struct wlr_vk_allocation *last = &allocs[allocs_len - 1];
-			start = last->start + last->size;
-		}
-
-		assert(start <= buf->buf_size);
-
-		// ensure the proposed start is a multiple of alignment
-		start += alignment - 1 - ((start + alignment - 1) % alignment);
-
-		if (buf->buf_size - start < size) {
-			continue;
-		}
-
-		struct wlr_vk_allocation *a = wl_array_add(&buf->allocs, sizeof(*a));
-		if (a == NULL) {
-			wlr_log_errno(WLR_ERROR, "Allocation failed");
-			goto error_alloc;
-		}
-
-		*a = (struct wlr_vk_allocation){
-			.start = start,
-			.size = size,
-		};
-		return (struct wlr_vk_buffer_span) {
-			.buffer = buf,
-			.alloc = *a,
-		};
-	}
-
-	if (size > max_stage_size) {
-		wlr_log(WLR_ERROR, "cannot vulkan stage buffer: "
-			"requested size (%zu bytes) exceeds maximum (%zu bytes)",
-			(size_t)size, (size_t)max_stage_size);
-		goto error_alloc;
-	}
-
-	// we didn't find a free buffer - create one
-	// size = clamp(max(size * 2, prev_size * 2), min_size, max_size)
-	VkDeviceSize bsize = size * 2;
-	bsize = bsize < min_stage_size ? min_stage_size : bsize;
-	if (!wl_list_empty(&r->stage.buffers)) {
-		struct wl_list *last_link = r->stage.buffers.prev;
-		struct wlr_vk_shared_buffer *prev = wl_container_of(
-			last_link, prev, link);
-		VkDeviceSize last_size = 2 * prev->buf_size;
-		bsize = bsize < last_size ? last_size : bsize;
-	}
-
-	if (bsize > max_stage_size) {
-		wlr_log(WLR_INFO, "vulkan stage buffers have reached max size");
-		bsize = max_stage_size;
-	}
-
-	// create buffer
-	buf = calloc(1, sizeof(*buf));
+static struct wlr_vk_stage_buffer *stage_buffer_create(
+		struct wlr_vk_renderer *r, VkDeviceSize bsize) {
+	struct wlr_vk_stage_buffer *buf = calloc(1, sizeof(*buf));
 	if (!buf) {
 		wlr_log_errno(WLR_ERROR, "Allocation failed");
-		goto error_alloc;
+		return NULL;
 	}
 
 	wl_list_init(&buf->link);
@@ -402,7 +334,8 @@ struct wlr_vk_buffer_span vulkan_get_stage_span(struct wlr_vk_renderer *r,
 		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
 		.size = bsize,
 		.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-			VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+			VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+			VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
 		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
 	};
 	res = vkCreateBuffer(r->dev->dev, &buf_info, NULL, &buf->buffer);
@@ -429,7 +362,7 @@ struct wlr_vk_buffer_span vulkan_get_stage_span(struct wlr_vk_renderer *r,
 	};
 	res = vkAllocateMemory(r->dev->dev, &mem_info, NULL, &buf->memory);
 	if (res != VK_SUCCESS) {
-		wlr_vk_error("vkAllocatorMemory", res);
+		wlr_vk_error("vkAllocateMemory", res);
 		goto error;
 	}
 
@@ -445,32 +378,160 @@ struct wlr_vk_buffer_span vulkan_get_stage_span(struct wlr_vk_renderer *r,
 		goto error;
 	}
 
-	struct wlr_vk_allocation *a = wl_array_add(&buf->allocs, sizeof(*a));
-	if (a == NULL) {
-		wlr_log_errno(WLR_ERROR, "Allocation failed");
+	buf->buf_size = bsize;
+	return buf;
+
+error:
+	stage_buffer_destroy(r, buf);
+	return NULL;
+}
+
+void vulkan_stage_buffer_reclaim(struct wlr_vk_stage_buffer *buf,
+		uint64_t current_point) {
+
+	size_t completed = 0;
+	struct wlr_vk_stage_watermark *mark;
+	wl_array_for_each(mark, &buf->watermarks) {
+		if (mark->timeline_point > current_point) {
+			break;
+		}
+		buf->tail = mark->head;
+		completed++;
+	}
+
+	if (completed > 0) {
+		completed *= sizeof(struct wlr_vk_stage_watermark);
+		if (completed == buf->watermarks.size) {
+			buf->watermarks.size = 0;
+		} else {
+			array_remove_at(&buf->watermarks, 0, completed);
+		}
+	}
+}
+
+VkDeviceSize vulkan_stage_buffer_alloc(struct wlr_vk_stage_buffer *buf,
+		VkDeviceSize size, VkDeviceSize alignment) {
+	VkDeviceSize head = buf->head;
+
+	// Round up to the next multiple of alignment
+	VkDeviceSize rem = head % alignment;
+	if (rem != 0) {
+		head += alignment - rem;
+	}
+
+	VkDeviceSize end = head >= buf->tail ? buf->buf_size : buf->tail;
+	if (head + size < end) {
+		// Regular allocation head till end of available space
+		buf->head = head + size;
+		return head;
+	} else if (size < buf->tail && head >= buf->tail) {
+		// First allocation after wrap-around
+		buf->head = size;
+		return 0;
+	}
+
+	return (VkDeviceSize)-1;
+}
+
+struct wlr_vk_buffer_span vulkan_get_stage_span(struct wlr_vk_renderer *r,
+		VkDeviceSize size, VkDeviceSize alignment) {
+	if (size >= max_stage_size) {
+		wlr_log(WLR_ERROR, "cannot allocate stage buffer: "
+			"requested size (%zu bytes) exceeds maximum (%zu bytes)",
+			(size_t)size, (size_t)max_stage_size-1);
 		goto error;
 	}
 
-	buf->buf_size = bsize;
-	wl_list_insert(&r->stage.buffers, &buf->link);
+	VkDeviceSize max_buf_size = min_stage_size / 2;
+	struct wlr_vk_stage_buffer *buf;
+	wl_list_for_each(buf, &r->stage.buffers, link) {
+		VkDeviceSize offset = vulkan_stage_buffer_alloc(buf, size, alignment);
+		if (offset != (VkDeviceSize)-1) {
+			return (struct wlr_vk_buffer_span) {
+				.buffer = buf,
+				.offset = offset,
+				.size = size,
+			};
+		}
+		if (buf->buf_size > max_buf_size) {
+			max_buf_size = buf->buf_size;
+		}
+	}
 
-	*a = (struct wlr_vk_allocation){
-		.start = 0,
-		.size = size,
-	};
+	VkDeviceSize bsize = max_buf_size * 2;
+	while (size * 2 > bsize) {
+		bsize *= 2;
+	}
+	if (bsize > max_stage_size) {
+		wlr_log(WLR_INFO, "vulkan stage buffer has reached max size");
+		bsize = max_stage_size;
+	}
+
+	struct wlr_vk_stage_buffer *new_buf = stage_buffer_create(r, bsize);
+	if (new_buf == NULL) {
+		goto error;
+	}
+
+	wl_list_insert(r->stage.buffers.prev, &new_buf->link);
+
+	VkDeviceSize offset = vulkan_stage_buffer_alloc(new_buf, size, alignment);
+	assert(offset != (VkDeviceSize)-1);
+
 	return (struct wlr_vk_buffer_span) {
-		.buffer = buf,
-		.alloc = *a,
+		.buffer = new_buf,
+		.offset = offset,
+		.size = size,
 	};
 
 error:
-	shared_buffer_destroy(r, buf);
-
-error_alloc:
 	return (struct wlr_vk_buffer_span) {
 		.buffer = NULL,
-		.alloc = (struct wlr_vk_allocation) {0, 0},
+		.offset = 0,
+		.size = 0,
 	};
+}
+
+void vulkan_stage_mark_submit(struct wlr_vk_renderer *renderer,
+		uint64_t timeline_point) {
+	struct wlr_vk_stage_buffer *buf;
+	wl_list_for_each(buf, &renderer->stage.buffers, link) {
+		if (buf->head == buf->tail) {
+			continue;
+		}
+
+		struct wlr_vk_stage_watermark *mark = wl_array_add(
+			&buf->watermarks, sizeof(*mark));
+		if (mark == NULL) {
+			wlr_log_errno(WLR_ERROR, "Allocation failed");
+			continue;
+		}
+
+		*mark = (struct wlr_vk_stage_watermark){
+			.head = buf->head,
+			.timeline_point = timeline_point,
+		};
+	}
+}
+
+static void stage_buffer_gc(struct wlr_vk_renderer *renderer, uint64_t current_point) {
+	struct wlr_vk_stage_buffer *buf, *buf_tmp;
+	wl_list_for_each_safe(buf, buf_tmp, &renderer->stage.buffers, link) {
+		if (buf->head != buf->tail) {
+			buf->empty_gc_cnt = 0;
+			vulkan_stage_buffer_reclaim(buf, current_point);
+			continue;
+		}
+		if (buf->buf_size <= min_stage_size) {
+			// We will not deallocate the first buffer
+			continue;
+		}
+
+		buf->empty_gc_cnt++;
+		if (buf->empty_gc_cnt >= 1000) {
+			// This buffer hasn't been used for a while, so let's deallocate it
+			stage_buffer_destroy(renderer, buf);
+		}
+	}
 }
 
 VkCommandBuffer vulkan_record_stage_cb(struct wlr_vk_renderer *renderer) {
@@ -489,7 +550,52 @@ VkCommandBuffer vulkan_record_stage_cb(struct wlr_vk_renderer *renderer) {
 	return renderer->stage.cb->vk;
 }
 
-bool vulkan_submit_stage_wait(struct wlr_vk_renderer *renderer) {
+VkSemaphore vulkan_command_buffer_wait_sync_file(struct wlr_vk_renderer *renderer,
+		struct wlr_vk_command_buffer *render_cb, size_t sem_index, int sync_file_fd) {
+	VkResult res;
+
+	VkSemaphore *wait_semaphores = render_cb->wait_semaphores.data;
+	size_t wait_semaphores_len = render_cb->wait_semaphores.size / sizeof(wait_semaphores[0]);
+
+	VkSemaphore *sem_ptr;
+	if (sem_index >= wait_semaphores_len) {
+		sem_ptr = wl_array_add(&render_cb->wait_semaphores, sizeof(*sem_ptr));
+		if (sem_ptr == NULL) {
+			return VK_NULL_HANDLE;
+		}
+		*sem_ptr = VK_NULL_HANDLE;
+	} else {
+		sem_ptr = &wait_semaphores[sem_index];
+	}
+
+	if (*sem_ptr == VK_NULL_HANDLE) {
+		VkSemaphoreCreateInfo semaphore_info = {
+			.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+		};
+		res = vkCreateSemaphore(renderer->dev->dev, &semaphore_info, NULL, sem_ptr);
+		if (res != VK_SUCCESS) {
+			wlr_vk_error("vkCreateSemaphore", res);
+			return VK_NULL_HANDLE;
+		}
+	}
+
+	VkImportSemaphoreFdInfoKHR import_info = {
+		.sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
+		.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+		.flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT,
+		.semaphore = *sem_ptr,
+		.fd = sync_file_fd,
+	};
+	res = renderer->dev->api.vkImportSemaphoreFdKHR(renderer->dev->dev, &import_info);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkImportSemaphoreFdKHR", res);
+		return VK_NULL_HANDLE;
+	}
+
+	return *sem_ptr;
+}
+
+bool vulkan_submit_stage_wait(struct wlr_vk_renderer *renderer, int wait_sync_file_fd) {
 	if (renderer->stage.cb == NULL) {
 		return false;
 	}
@@ -502,6 +608,8 @@ bool vulkan_submit_stage_wait(struct wlr_vk_renderer *renderer) {
 		return false;
 	}
 
+	VkSemaphore wait_semaphore;
+	VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 	VkTimelineSemaphoreSubmitInfoKHR timeline_submit_info = {
 		.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO_KHR,
 		.signalSemaphoreValueCount = 1,
@@ -515,16 +623,32 @@ bool vulkan_submit_stage_wait(struct wlr_vk_renderer *renderer) {
 		.signalSemaphoreCount = 1,
 		.pSignalSemaphores = &renderer->timeline_semaphore,
 	};
+
+	if (wait_sync_file_fd != -1) {
+		wait_semaphore = vulkan_command_buffer_wait_sync_file(renderer, cb, 0, wait_sync_file_fd);
+		if (wait_semaphore == VK_NULL_HANDLE) {
+			return false;
+		}
+		submit_info.waitSemaphoreCount = 1;
+		submit_info.pWaitSemaphores = &wait_semaphore;
+		submit_info.pWaitDstStageMask = &wait_stage;
+	}
+
+	vulkan_stage_mark_submit(renderer, timeline_point);
+
 	VkResult res = vkQueueSubmit(renderer->dev->queue, 1, &submit_info, VK_NULL_HANDLE);
 	if (res != VK_SUCCESS) {
 		wlr_vk_error("vkQueueSubmit", res);
 		return false;
 	}
 
-	// NOTE: don't release stage allocations here since they may still be
-	// used for reading. Will be done next frame.
+	if (!vulkan_wait_command_buffer(cb, renderer)) {
+		return false;
+	}
 
-	return vulkan_wait_command_buffer(cb, renderer);
+	// We did a blocking wait so this is now the current point
+	stage_buffer_gc(renderer, timeline_point);
+	return true;
 }
 
 struct wlr_vk_format_props *vulkan_format_props_from_drm(
@@ -558,7 +682,6 @@ static bool init_command_buffer(struct wlr_vk_command_buffer *cb,
 		.vk = vk_cb,
 	};
 	wl_list_init(&cb->destroy_textures);
-	wl_list_init(&cb->stage_buffers);
 	return true;
 }
 
@@ -584,21 +707,12 @@ bool vulkan_wait_command_buffer(struct wlr_vk_command_buffer *cb,
 }
 
 static void release_command_buffer_resources(struct wlr_vk_command_buffer *cb,
-		struct wlr_vk_renderer *renderer, int64_t now) {
+		struct wlr_vk_renderer *renderer) {
 	struct wlr_vk_texture *texture, *texture_tmp;
 	wl_list_for_each_safe(texture, texture_tmp, &cb->destroy_textures, destroy_link) {
 		wl_list_remove(&texture->destroy_link);
 		texture->last_used_cb = NULL;
 		wlr_texture_destroy(&texture->wlr_texture);
-	}
-
-	struct wlr_vk_shared_buffer *buf, *buf_tmp;
-	wl_list_for_each_safe(buf, buf_tmp, &cb->stage_buffers, link) {
-		buf->allocs.size = 0;
-		buf->last_used_ms = now;
-
-		wl_list_remove(&buf->link);
-		wl_list_insert(&renderer->stage.buffers, &buf->link);
 	}
 
 	if (cb->color_transform) {
@@ -621,22 +735,14 @@ static struct wlr_vk_command_buffer *get_command_buffer(
 		return NULL;
 	}
 
-
-	// Garbage collect any buffers that have remained unused for too long
-	int64_t now = get_current_time_msec();
-	struct wlr_vk_shared_buffer *buf, *buf_tmp;
-	wl_list_for_each_safe(buf, buf_tmp, &renderer->stage.buffers, link) {
-		if (buf->allocs.size == 0 && buf->last_used_ms + 10000 < now) {
-			shared_buffer_destroy(renderer, buf);
-		}
-	}
+	stage_buffer_gc(renderer, current_point);
 
 	// Destroy textures for completed command buffers
 	for (size_t i = 0; i < VULKAN_COMMAND_BUFFERS_CAP; i++) {
 		struct wlr_vk_command_buffer *cb = &renderer->command_buffers[i];
 		if (cb->vk != VK_NULL_HANDLE && !cb->recording &&
 				cb->timeline_point <= current_point) {
-			release_command_buffer_resources(cb, renderer, now);
+			release_command_buffer_resources(cb, renderer);
 		}
 	}
 
@@ -1262,7 +1368,7 @@ static void vulkan_destroy(struct wlr_renderer *wlr_renderer) {
 		if (cb->vk == VK_NULL_HANDLE) {
 			continue;
 		}
-		release_command_buffer_resources(cb, renderer, 0);
+		release_command_buffer_resources(cb, renderer);
 		if (cb->binary_semaphore != VK_NULL_HANDLE) {
 			vkDestroySemaphore(renderer->dev->dev, cb->binary_semaphore, NULL);
 		}
@@ -1274,9 +1380,9 @@ static void vulkan_destroy(struct wlr_renderer *wlr_renderer) {
 	}
 
 	// stage.cb automatically freed with command pool
-	struct wlr_vk_shared_buffer *buf, *tmp_buf;
+	struct wlr_vk_stage_buffer *buf, *tmp_buf;
 	wl_list_for_each_safe(buf, tmp_buf, &renderer->stage.buffers, link) {
-		shared_buffer_destroy(renderer, buf);
+		stage_buffer_destroy(renderer, buf);
 	}
 
 	struct wlr_vk_texture *tex, *tex_tmp;
@@ -1378,7 +1484,8 @@ bool vulkan_read_pixels(struct wlr_vk_renderer *vk_renderer,
 		VkFormat src_format, VkImage src_image,
 		uint32_t drm_format, uint32_t stride,
 		uint32_t width, uint32_t height, uint32_t src_x, uint32_t src_y,
-		uint32_t dst_x, uint32_t dst_y, void *data) {
+		uint32_t dst_x, uint32_t dst_y, void *data,
+		struct wlr_drm_syncobj_timeline *wait_timeline, uint64_t wait_point) {
 	VkDevice dev = vk_renderer->dev->dev;
 
 	const struct wlr_pixel_format_info *pixel_format_info = drm_get_pixel_format_info(drm_format);
@@ -1564,7 +1671,17 @@ bool vulkan_read_pixels(struct wlr_vk_renderer *vk_renderer,
 			VK_PIPELINE_STAGE_TRANSFER_BIT,
 			VK_ACCESS_MEMORY_READ_BIT);
 
-	if (!vulkan_submit_stage_wait(vk_renderer)) {
+	int wait_sync_file_fd = -1;
+	if (wait_timeline != NULL) {
+		wait_sync_file_fd = wlr_drm_syncobj_timeline_export_sync_file(wait_timeline, wait_point);
+		if (wait_sync_file_fd < 0) {
+			wlr_log(WLR_ERROR, "Failed to export wait timeline point as sync_file");
+			return false;
+		}
+	}
+
+	if (!vulkan_submit_stage_wait(vk_renderer, wait_sync_file_fd)) {
+		close(wait_sync_file_fd);
 		return false;
 	}
 
@@ -1620,80 +1737,6 @@ destroy_image:
 	return false;
 }
 
-static const struct wlr_render_timer_impl vk_render_timer_impl;
-
-static struct wlr_render_timer *vk_render_timer_create(
-		struct wlr_renderer *wlr_renderer) {
-	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
-
-	VkPhysicalDeviceProperties phdev_props;
-	vkGetPhysicalDeviceProperties(renderer->dev->phdev, &phdev_props);
-	if (phdev_props.limits.timestampComputeAndGraphics == VK_FALSE) {
-		wlr_log(WLR_ERROR, "GPU does not support timestamp queries");
-		return NULL;
-	}
-
-	struct wlr_vk_render_timer *timer = calloc(1, sizeof(*timer));
-	if (!timer) {
-		return NULL;
-	}
-	timer->base.impl = &vk_render_timer_impl;
-	timer->renderer = renderer;
-
-	VkQueryPoolCreateInfo pool_info = {
-		.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
-		.queryType = VK_QUERY_TYPE_TIMESTAMP,
-		.queryCount = 2, // begin + end
-	};
-	VkResult res = vkCreateQueryPool(renderer->dev->dev, &pool_info, NULL,
-		&timer->query_pool);
-	if (res != VK_SUCCESS) {
-		wlr_vk_error("vkCreateQueryPool", res);
-		free(timer);
-		return NULL;
-	}
-
-	return &timer->base;
-}
-
-static int vk_render_timer_get_duration_ns(struct wlr_render_timer *wlr_timer) {
-	struct wlr_vk_render_timer *timer = wl_container_of(wlr_timer, timer, base);
-	struct wlr_vk_renderer *renderer = timer->renderer;
-
-	if (!timer->pending) {
-		return -1;
-	}
-
-	uint64_t timestamps[2];
-	VkResult res = vkGetQueryPoolResults(renderer->dev->dev, timer->query_pool,
-		0, 2, sizeof(timestamps), timestamps, sizeof(uint64_t),
-		VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-	if (res != VK_SUCCESS) {
-		wlr_vk_error("vkGetQueryPoolResults", res);
-		return -1;
-	}
-
-	timer->pending = false;
-
-	VkPhysicalDeviceProperties phdev_props;
-	vkGetPhysicalDeviceProperties(renderer->dev->phdev, &phdev_props);
-	float period = phdev_props.limits.timestampPeriod; // nanoseconds per tick
-
-	uint64_t delta = timestamps[1] - timestamps[0];
-	return (int)(delta * period);
-}
-
-static void vk_render_timer_destroy(struct wlr_render_timer *wlr_timer) {
-	struct wlr_vk_render_timer *timer = wl_container_of(wlr_timer, timer, base);
-	vkDestroyQueryPool(timer->renderer->dev->dev, timer->query_pool, NULL);
-	free(timer);
-}
-
-static const struct wlr_render_timer_impl vk_render_timer_impl = {
-	.get_duration_ns = vk_render_timer_get_duration_ns,
-	.destroy = vk_render_timer_destroy,
-};
-
 static int vulkan_get_drm_fd(struct wlr_renderer *wlr_renderer) {
 	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
 	return renderer->dev->drm_fd;
@@ -1719,6 +1762,80 @@ static struct wlr_render_pass *vulkan_begin_buffer_pass(struct wlr_renderer *wlr
 	return &render_pass->base;
 }
 
+static const struct wlr_render_timer_impl render_timer_impl;
+
+static struct wlr_render_timer *vulkan_render_timer_create(
+		struct wlr_renderer *wlr_renderer) {
+	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
+	if (renderer->dev->timestamp_valid_bits == 0) {
+		wlr_log(WLR_ERROR, "Failed to create render timer: "
+			"timestamp queries not supported by queue family");
+		return NULL;
+	}
+
+	struct wlr_vk_render_timer *timer = calloc(1, sizeof(*timer));
+	if (!timer) {
+		wlr_log_errno(WLR_ERROR, "Allocation failed");
+		return NULL;
+	}
+
+	VkQueryPoolCreateInfo pool_info = {
+		.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+		.queryType = VK_QUERY_TYPE_TIMESTAMP,
+		.queryCount = 2,
+	};
+	VkResult res = vkCreateQueryPool(renderer->dev->dev, &pool_info,
+		NULL, &timer->query_pool);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkCreateQueryPool", res);
+		free(timer);
+		return NULL;
+	}
+
+	timer->base.impl = &render_timer_impl;
+	timer->renderer = renderer;
+	return &timer->base;
+}
+
+static int vulkan_render_timer_get_duration_ns(
+		struct wlr_render_timer *wlr_timer) {
+	struct wlr_vk_render_timer *timer =
+		wl_container_of(wlr_timer, timer, base);
+	struct wlr_vk_renderer *renderer = timer->renderer;
+
+	// Layout: [ timestamp1, avail1, timestamp2, avail2 ]
+	uint64_t data[4] = {0};
+	VkResult res = vkGetQueryPoolResults(renderer->dev->dev,
+		timer->query_pool, 0, 2, sizeof(data), data,
+		2 * sizeof(uint64_t),
+		VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+	if (res == VK_NOT_READY || data[1] == 0 || data[3] == 0) {
+		wlr_log(WLR_ERROR, "Failed to get render duration: "
+			"timestamp query results not yet ready");
+		return -1;
+	}
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkGetQueryPoolResults", res);
+		return -1;
+	}
+
+	uint64_t ticks = data[2] - data[0];
+	return (int)(ticks * renderer->dev->timestamp_period);
+}
+
+static void vulkan_render_timer_destroy(
+		struct wlr_render_timer *wlr_timer) {
+	struct wlr_vk_render_timer *timer =
+		wl_container_of(wlr_timer, timer, base);
+	vkDestroyQueryPool(timer->renderer->dev->dev, timer->query_pool, NULL);
+	free(timer);
+}
+
+static const struct wlr_render_timer_impl render_timer_impl = {
+	.get_duration_ns = vulkan_render_timer_get_duration_ns,
+	.destroy = vulkan_render_timer_destroy,
+};
+
 static const struct wlr_renderer_impl renderer_impl = {
 	.get_texture_formats = vulkan_get_texture_formats,
 	.get_render_formats = vulkan_get_render_formats,
@@ -1726,7 +1843,7 @@ static const struct wlr_renderer_impl renderer_impl = {
 	.get_drm_fd = vulkan_get_drm_fd,
 	.texture_from_buffer = vulkan_texture_from_buffer,
 	.begin_buffer_pass = vulkan_begin_buffer_pass,
-	.render_timer_create = vk_render_timer_create,
+	.render_timer_create = vulkan_render_timer_create,
 };
 
 // Initializes the VkDescriptorSetLayout and VkPipelineLayout needed
@@ -1756,6 +1873,10 @@ static bool init_tex_layouts(struct wlr_vk_renderer *renderer,
 		wlr_vk_error("vkCreateDescriptorSetLayout", res);
 		return false;
 	}
+
+	static_assert(sizeof(struct wlr_vk_vert_pcr_data) +
+		sizeof(struct wlr_vk_frag_texture_pcr_data) < 128,
+		"Expected to need <= 128 bytes of push constants");
 
 	VkPushConstantRange pc_ranges[] = {
 		{
@@ -1850,6 +1971,10 @@ static bool init_blend_to_output_layouts(struct wlr_vk_renderer *renderer) {
 		return false;
 	}
 
+	static_assert(sizeof(struct wlr_vk_vert_pcr_data) +
+		sizeof(struct wlr_vk_frag_output_pcr_data) < 128,
+		"Expected to need <= 128 bytes of push constants");
+
 	// pipeline layout -- standard vertex uniforms, no shader uniforms
 	VkPushConstantRange pc_ranges[] = {
 		{
@@ -1926,6 +2051,25 @@ static bool pipeline_key_equals(const struct wlr_vk_pipeline_key *a,
 
 	return true;
 }
+
+static const VkVertexInputBindingDescription instance_vert_binding = {
+	.binding = 0,
+	.stride = sizeof(float) * 4,
+	.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE,
+};
+static const VkVertexInputAttributeDescription instance_vert_attr = {
+	.location = 0,
+	.binding = 0,
+	.format = VK_FORMAT_R32G32B32A32_SFLOAT,
+	.offset = 0,
+};
+static const VkPipelineVertexInputStateCreateInfo instance_vert_input = {
+	.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+	.vertexBindingDescriptionCount = 1,
+	.pVertexBindingDescriptions = &instance_vert_binding,
+	.vertexAttributeDescriptionCount = 1,
+	.pVertexAttributeDescriptions = &instance_vert_attr,
+};
 
 // Initializes the pipeline for rendering textures and using the given
 // VkRenderPass and VkPipelineLayout.
@@ -2058,10 +2202,6 @@ struct wlr_vk_pipeline *setup_get_or_create_pipeline(
 		.dynamicStateCount = sizeof(dyn_states) / sizeof(dyn_states[0]),
 	};
 
-	VkPipelineVertexInputStateCreateInfo vertex = {
-		.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-	};
-
 	VkGraphicsPipelineCreateInfo pinfo = {
 		.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
 		.layout = pipeline_layout->vk,
@@ -2076,7 +2216,7 @@ struct wlr_vk_pipeline *setup_get_or_create_pipeline(
 		.pMultisampleState = &multisample,
 		.pViewportState = &viewport,
 		.pDynamicState = &dynamic,
-		.pVertexInputState = &vertex,
+		.pVertexInputState = &instance_vert_input,
 	};
 
 	res = vkCreateGraphicsPipelines(dev, renderer->pipeline_cache, 1, &pinfo, NULL, &pipeline->vk);
@@ -2175,10 +2315,6 @@ static bool init_blend_to_output_pipeline(struct wlr_vk_renderer *renderer,
 		.dynamicStateCount = sizeof(dyn_states) / sizeof(dyn_states[0]),
 	};
 
-	VkPipelineVertexInputStateCreateInfo vertex = {
-		.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-	};
-
 	VkPipelineCreateFlags flags = 0;
 	if (base_pipeline == VK_NULL_HANDLE) {
 		flags = VK_PIPELINE_CREATE_ALLOW_DERIVATIVES_BIT;
@@ -2201,7 +2337,7 @@ static bool init_blend_to_output_pipeline(struct wlr_vk_renderer *renderer,
 		.pMultisampleState = &multisample,
 		.pViewportState = &viewport,
 		.pDynamicState = &dynamic,
-		.pVertexInputState = &vertex,
+		.pVertexInputState = &instance_vert_input,
 		.basePipelineHandle = base_pipeline,
 		.basePipelineIndex = -1,
 	};
@@ -2625,6 +2761,14 @@ static struct wlr_vk_render_format_setup *find_or_create_render_setup(
 		res = vkCreateRenderPass(dev, &rp_info, NULL, &setup->render_pass);
 		if (res != VK_SUCCESS) {
 			wlr_vk_error("Failed to create 2-step render pass", res);
+			goto error;
+		}
+
+		attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		res = vkCreateRenderPass(dev, &rp_info, NULL, &setup->render_pass_clear);
+		if (res != VK_SUCCESS) {
+			wlr_vk_error("Failed to create 2-step clear render pass", res);
 			goto error;
 		}
 

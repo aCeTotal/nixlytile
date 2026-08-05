@@ -22,7 +22,7 @@
 
           wlrootsLocal = pkgs.stdenv.mkDerivation {
             pname = "wlroots";
-            version = "0.20.0-rc4";
+            version = "0.20.2";
             src = ./wlroots;
             nativeBuildInputs = with pkgs; [ meson ninja pkg-config wayland-scanner glslang ];
             buildInputs = with pkgs; [
@@ -32,6 +32,9 @@
               vulkan-loader vulkan-headers
             ];
             mesonFlags = [
+              # nixpkgs' meson hook defaults to --buildtype=plain, which passes
+              # no -O flag at all -> wlroots was built at -O0.
+              "--buildtype=release"
               "-Dexamples=false"
               "-Dxwayland=enabled"
               "-Dbackends=drm,libinput"
@@ -188,5 +191,129 @@
             program = "${ps.buildScript}/bin/nixlytile-build";
           };
         });
+
+      # Privileged half of game mode.
+      #
+      # The compositor is an unprivileged user process, so the tuning that
+      # needs root — C-state latency, CPU governor/EPP, GPU power state,
+      # kernel VM knobs — cannot be done by it. This module installs the
+      # helper unit it starts, the polkit rule that lets it do so, and the
+      # resource limits it needs for its own scheduling boosts.
+      #
+      # Usage in configuration.nix:
+      #   imports = [ nixlytile.nixosModules.default ];
+      #   programs.nixlytile.enable = true;
+      #   users.users.<you>.extraGroups = [ "gamemode" ];
+      nixosModules.default = { config, lib, pkgs, ... }:
+        let
+          cfg = config.programs.nixlytile;
+          gametune = pkgs.writeShellApplication {
+            name = "nixly-gametune";
+            runtimeInputs = with pkgs; [ coreutils gawk gnugrep procps systemd util-linux ];
+            text = builtins.readFile ./scripts/nixly-gametune;
+          };
+        in {
+          options.programs.nixlytile = {
+            enable = lib.mkEnableOption "nixlytile game mode support";
+
+            package = lib.mkOption {
+              type = lib.types.package;
+              default = self.packages.${pkgs.system}.default;
+              defaultText = "nixlytile.packages.\${system}.default";
+              description = "The nixlytile package to install.";
+            };
+
+            gameMode = {
+              enable = lib.mkOption {
+                type = lib.types.bool;
+                default = true;
+                description = ''
+                  Install nixly-gametune.service. Without it the compositor
+                  logs an error on every game start and all privileged tuning
+                  is skipped.
+                '';
+              };
+
+              group = lib.mkOption {
+                type = lib.types.str;
+                default = "gamemode";
+                description = ''
+                  Group allowed to start and stop the tuning unit. Add your
+                  user to it, otherwise polkit denies the request.
+                '';
+              };
+            };
+
+            resourceLimits = lib.mkOption {
+              type = lib.types.bool;
+              default = true;
+              description = ''
+                Raise RLIMIT_NICE and RLIMIT_RTPRIO for the game-mode group.
+                Without this the compositor cannot renice a game below 0
+                (setpriority returns EPERM) and cannot take real-time
+                priority for its own frame loop.
+              '';
+            };
+          };
+
+          config = lib.mkIf cfg.enable (lib.mkMerge [
+            {
+              environment.systemPackages = [ cfg.package ];
+            }
+
+            (lib.mkIf cfg.gameMode.enable {
+              users.groups.${cfg.gameMode.group} = { };
+
+              systemd.services.nixly-gametune = {
+                description = "nixlytile game mode tuning";
+                # Never started at boot: the compositor starts it when a
+                # game goes fullscreen and stops it when the game exits.
+                #
+                # The system profile is on PATH so vendor tools land in
+                # scope: nvidia-smi lives in /run/current-system/sw/bin and
+                # is the only way to lock clocks and raise the power limit
+                # on NVIDIA. Harmless on AMD and Intel machines.
+                path = [ "/run/current-system/sw" ];
+                serviceConfig = {
+                  Type = "exec";
+                  ExecStart = "${gametune}/bin/nixly-gametune daemon";
+                  # The daemon restores everything from its TERM trap; this
+                  # is the belt-and-braces path for a killed daemon.
+                  ExecStopPost = "${gametune}/bin/nixly-gametune restore";
+                  RuntimeDirectory = "nixly-gametune";
+                  RuntimeDirectoryPreserve = "yes";
+                  # Tuning must survive the game, not the unit's own start.
+                  TimeoutStopSec = "15s";
+                  Restart = "no";
+                };
+              };
+
+              # Let the game-mode group control that one unit, nothing else.
+              security.polkit.extraConfig = ''
+                polkit.addRule(function(action, subject) {
+                  if (action.id == "org.freedesktop.systemd1.manage-units" &&
+                      action.lookup("unit") == "nixly-gametune.service" &&
+                      subject.isInGroup("${cfg.gameMode.group}")) {
+                    return polkit.Result.YES;
+                  }
+                });
+              '';
+            })
+
+            (lib.mkIf cfg.resourceLimits {
+              security.pam.loginLimits = [
+                # Negative nice for the game process. RLIMIT_NICE is
+                # expressed as 20 - min_nice, so 30 allows nice -10.
+                { domain = "@${cfg.gameMode.group}"; type = "-"; item = "nice"; value = "-10"; }
+                # Real-time priority for the compositor's frame loop.
+                { domain = "@${cfg.gameMode.group}"; type = "-"; item = "rtprio"; value = "95"; }
+                # Let the compositor and the game lock buffers in memory.
+                { domain = "@${cfg.gameMode.group}"; type = "-"; item = "memlock"; value = "unlimited"; }
+              ];
+            })
+          ]);
+        };
+
+      nixosModules.nixlytile = self.nixosModules.default;
     };
 }

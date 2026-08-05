@@ -1,0 +1,414 @@
+#!/usr/bin/env bash
+# nixly-gametune — privileged game-mode tuning for nixlytile.
+#
+# The compositor runs as an unprivileged user process, so every /proc/sys,
+# /sys/class/drm and /dev/cpu_dma_latency write it attempted failed with
+# EACCES. Everything that needs root lives here instead, started and stopped
+# by the compositor through nixly-gametune.service.
+#
+# Everything is auto-detected: CPU scaling driver, GPU vendor and the
+# knobs each of them actually exposes. Nothing is hardcoded to one machine.
+#
+# Every value is saved before it is changed and restored on stop, so a
+# machine that has been gaming is indistinguishable from one that has not.
+#
+# Usage: nixly-gametune daemon|apply|restore|status
+
+set -u
+
+# NIXLY_GAMETUNE_ROOT prefixes every /sys and /proc path so the tuning can be
+# exercised against a fake tree in tests; empty in production.
+ROOT=${NIXLY_GAMETUNE_ROOT:-}
+STATE_DIR=${NIXLY_GAMETUNE_STATE:-/run/nixly-gametune}
+LOG_TAG=nixly-gametune
+
+log() { echo "$*" >&2; logger -t "$LOG_TAG" -- "$*" 2>/dev/null || true; }
+
+# --------------------------------------------------------------- state store
+#
+# save_and_set <key> <file> <new value>
+#   Records the current contents of <file> under <key>, then writes the new
+#   value. Files that do not exist or cannot be written are skipped, so the
+#   same script works on a laptop with no discrete GPU and on a desktop with
+#   three of them.
+save_and_set() {
+	local key=$1 file=$2 value=$3 old
+
+	[ -w "$file" ] || return 0
+	old=$(cat "$file" 2>/dev/null) || return 0
+	[ -n "$old" ] || return 0
+
+	printf '%s\n' "$file" > "$STATE_DIR/$key.path"
+	printf '%s\n' "$old" > "$STATE_DIR/$key.value"
+
+	if printf '%s\n' "$value" > "$file" 2>/dev/null; then
+		log "set $file: $old -> $value"
+	else
+		rm -f "$STATE_DIR/$key.path" "$STATE_DIR/$key.value"
+	fi
+}
+
+restore_all() {
+	local pathfile key file value
+	for pathfile in "$STATE_DIR"/*.path; do
+		[ -e "$pathfile" ] || continue
+		key=${pathfile%.path}
+		file=$(cat "$pathfile" 2>/dev/null)
+		value=$(cat "$key.value" 2>/dev/null)
+		if [ -n "$file" ] && [ -n "$value" ] && [ -w "$file" ]; then
+			printf '%s\n' "$value" > "$file" 2>/dev/null &&
+				log "restored $file -> $value"
+		fi
+		rm -f "$pathfile" "$key.value"
+	done
+}
+
+# ---------------------------------------------------------------------- CPU
+
+tune_cpu() {
+	local policy name driver govs
+
+	for policy in "${ROOT}"/sys/devices/system/cpu/cpufreq/policy*; do
+		[ -d "$policy" ] || continue
+		name=$(basename "$policy")
+		driver=$(cat "$policy/scaling_driver" 2>/dev/null || echo unknown)
+
+		# Only switch governor if the driver offers `performance`.
+		# intel_pstate/amd_pstate in passive mode expose the generic
+		# governors; in active mode they expose powersave+performance
+		# and the real control is the energy/performance preference.
+		govs=$(cat "$policy/scaling_available_governors" 2>/dev/null || true)
+		case " $govs " in
+		*" performance "*)
+			save_and_set "cpu-$name-gov" "$policy/scaling_governor" performance
+			;;
+		esac
+
+		# Energy/Performance Preference: this is what actually decides
+		# turbo residency on modern intel_pstate/amd_pstate systems.
+		# `performance` here matters more than the governor name.
+		if [ -f "$policy/energy_performance_preference" ]; then
+			save_and_set "cpu-$name-epp" \
+				"$policy/energy_performance_preference" performance
+		fi
+
+		log "cpu $name: driver=$driver tuned"
+	done
+
+	# Boost must be on for the governor change to mean anything.
+	[ -f "${ROOT}/sys/devices/system/cpu/cpufreq/boost" ] &&
+		save_and_set cpu-boost "${ROOT}/sys/devices/system/cpu/cpufreq/boost" 1
+	[ -f "${ROOT}/sys/devices/system/cpu/intel_pstate/no_turbo" ] &&
+		save_and_set cpu-no-turbo "${ROOT}/sys/devices/system/cpu/intel_pstate/no_turbo" 0
+	[ -f "${ROOT}/sys/devices/system/cpu/intel_pstate/min_perf_pct" ] &&
+		save_and_set cpu-min-perf "${ROOT}/sys/devices/system/cpu/intel_pstate/min_perf_pct" 50
+
+	# ACPI platform profile (laptops): performance if the firmware has it.
+	if [ -f "${ROOT}/sys/firmware/acpi/platform_profile" ]; then
+		case "$(cat "${ROOT}/sys/firmware/acpi/platform_profile_choices" 2>/dev/null)" in
+		*performance*)
+			save_and_set platform-profile \
+				"${ROOT}/sys/firmware/acpi/platform_profile" performance
+			;;
+		esac
+	fi
+}
+
+# ------------------------------------------------------------------- kernel
+
+tune_kernel() {
+	# Watchdog interrupts are pure overhead during a game.
+	save_and_set nmi-watchdog "${ROOT}/proc/sys/kernel/nmi_watchdog" 0
+
+	# Split-lock mitigation stalls every core that hits a split lock.
+	# Several Windows games under Proton trigger it constantly.
+	[ -f "${ROOT}/proc/sys/kernel/split_lock_mitigate" ] &&
+		save_and_set split-lock "${ROOT}/proc/sys/kernel/split_lock_mitigate" 0
+
+	# Do not swap out a running game.
+	save_and_set swappiness "${ROOT}/proc/sys/vm/swappiness" 10
+
+	# Proactive compaction causes multi-millisecond allocation stalls.
+	[ -f "${ROOT}/proc/sys/vm/compaction_proactiveness" ] &&
+		save_and_set compaction "${ROOT}/proc/sys/vm/compaction_proactiveness" 0
+
+	# Large writeback bursts (shader cache, save files) stall the game's
+	# own I/O. Smaller, more frequent flushes keep frame times flat.
+	save_and_set dirty-ratio "${ROOT}/proc/sys/vm/dirty_ratio" 10
+	save_and_set dirty-bg-ratio "${ROOT}/proc/sys/vm/dirty_background_ratio" 5
+
+	# THP: never force `always` — it costs latency in allocation-heavy
+	# engines. Only lift an explicit `never`, which starves games that ask
+	# for huge pages through madvise.
+	local thp=${ROOT}/sys/kernel/mm/transparent_hugepage/enabled
+	if [ -f "$thp" ] && grep -q '\[never\]' "$thp" 2>/dev/null; then
+		save_and_set thp "$thp" madvise
+	fi
+}
+
+# ---------------------------------------------------------------------- GPU
+#
+# Detected per card from the driver name, so the same unit does the right
+# thing on AMD, Intel and NVIDIA without being told which one is present.
+
+tune_gpu_amd() {
+	local dev=$1 card=$2 profile
+
+	save_and_set "gpu-$card-dpm" \
+		"$dev/power_dpm_force_performance_level" high
+
+	# pp_power_profile_mode lists the modes; pick 3D_FULL_SCREEN by name
+	# because its index differs between GPU generations.
+	if [ -f "$dev/pp_power_profile_mode" ]; then
+		profile=$(awk '/3D_FULL_SCREEN/ {gsub(/[^0-9]/, "", $1); print $1; exit}' \
+			"$dev/pp_power_profile_mode" 2>/dev/null)
+		if [ -n "${profile:-}" ]; then
+			save_and_set "gpu-$card-profile" \
+				"$dev/pp_power_profile_mode" "$profile"
+		fi
+	fi
+	log "gpu $card: amdgpu tuned"
+}
+
+tune_gpu_intel() {
+	local dev=$1 card=$2 max freq_dir
+
+	# i915 exposes gt_{min,max,boost}_freq_mhz on the card node.
+	if [ -f "${ROOT}/sys/class/drm/$card/gt_max_freq_mhz" ]; then
+		max=$(cat "${ROOT}/sys/class/drm/$card/gt_max_freq_mhz" 2>/dev/null)
+		[ -n "${max:-}" ] &&
+			save_and_set "gpu-$card-minfreq" \
+				"${ROOT}/sys/class/drm/$card/gt_min_freq_mhz" "$max"
+		[ -f "${ROOT}/sys/class/drm/$card/gt_boost_freq_mhz" ] && [ -n "${max:-}" ] &&
+			save_and_set "gpu-$card-boost" \
+				"${ROOT}/sys/class/drm/$card/gt_boost_freq_mhz" "$max"
+		log "gpu $card: i915 min_freq -> $max MHz"
+		return
+	fi
+
+	# xe driver: per-tile/gt frequency nodes.
+	for freq_dir in "$dev"/tile*/gt*/freq0; do
+		[ -d "$freq_dir" ] || continue
+		max=$(cat "$freq_dir/max_freq" 2>/dev/null)
+		[ -n "${max:-}" ] &&
+			save_and_set "gpu-$card-$(basename "$(dirname "$freq_dir")")-min" \
+				"$freq_dir/min_freq" "$max"
+		log "gpu $card: xe min_freq -> $max MHz"
+	done
+}
+
+tune_gpu_nvidia() {
+	local card=$1 idx bus max_clock max_mem max_pl
+
+	command -v nvidia-smi >/dev/null 2>&1 || return 0
+
+	# Map the DRM card to an nvidia-smi index via the PCI bus id.
+	bus=$(basename "$(readlink -f "${ROOT}/sys/class/drm/$card/device")")
+	idx=$(nvidia-smi --query-gpu=index,pci.bus_id --format=csv,noheader 2>/dev/null |
+		awk -F', *' -v bus="$bus" 'tolower($2) ~ tolower(substr(bus, 6)) {print $1; exit}')
+	idx=${idx:-0}
+
+	nvidia-smi -i "$idx" -pm 1 >/dev/null 2>&1 &&
+		echo "$idx" > "$STATE_DIR/nvidia-persistence.idx"
+
+	max_pl=$(nvidia-smi -i "$idx" --query-gpu=power.max_limit \
+		--format=csv,noheader,nounits 2>/dev/null | tr -d ' ')
+	if [ -n "${max_pl:-}" ]; then
+		nvidia-smi -i "$idx" --query-gpu=power.limit \
+			--format=csv,noheader,nounits 2>/dev/null | tr -d ' ' \
+			> "$STATE_DIR/nvidia-powerlimit.value"
+		nvidia-smi -i "$idx" --power-limit="${max_pl%%.*}" >/dev/null 2>&1 &&
+			log "gpu $card: nvidia power limit -> ${max_pl%%.*} W"
+	fi
+
+	max_clock=$(nvidia-smi -i "$idx" --query-gpu=clocks.max.graphics \
+		--format=csv,noheader,nounits 2>/dev/null | tr -d ' ')
+	if [ -n "${max_clock:-}" ]; then
+		nvidia-smi -i "$idx" --lock-gpu-clocks=0,"$max_clock" >/dev/null 2>&1 &&
+			echo "$idx" > "$STATE_DIR/nvidia-clocks.idx" &&
+			log "gpu $card: nvidia gpu clocks locked <= $max_clock MHz"
+	fi
+
+	max_mem=$(nvidia-smi -i "$idx" --query-gpu=clocks.max.memory \
+		--format=csv,noheader,nounits 2>/dev/null | tr -d ' ')
+	if [ -n "${max_mem:-}" ]; then
+		nvidia-smi -i "$idx" --lock-memory-clocks=0,"$max_mem" >/dev/null 2>&1 &&
+			echo "$idx" > "$STATE_DIR/nvidia-memclocks.idx"
+	fi
+}
+
+restore_nvidia() {
+	local idx pl
+
+	command -v nvidia-smi >/dev/null 2>&1 || return 0
+
+	if [ -f "$STATE_DIR/nvidia-clocks.idx" ]; then
+		idx=$(cat "$STATE_DIR/nvidia-clocks.idx")
+		nvidia-smi -i "$idx" --reset-gpu-clocks >/dev/null 2>&1
+		rm -f "$STATE_DIR/nvidia-clocks.idx"
+	fi
+	if [ -f "$STATE_DIR/nvidia-memclocks.idx" ]; then
+		idx=$(cat "$STATE_DIR/nvidia-memclocks.idx")
+		nvidia-smi -i "$idx" --reset-memory-clocks >/dev/null 2>&1
+		rm -f "$STATE_DIR/nvidia-memclocks.idx"
+	fi
+	if [ -f "$STATE_DIR/nvidia-powerlimit.value" ] &&
+	   [ -f "$STATE_DIR/nvidia-persistence.idx" ]; then
+		idx=$(cat "$STATE_DIR/nvidia-persistence.idx")
+		pl=$(cat "$STATE_DIR/nvidia-powerlimit.value")
+		[ -n "$pl" ] && nvidia-smi -i "$idx" --power-limit="${pl%%.*}" >/dev/null 2>&1
+		rm -f "$STATE_DIR/nvidia-powerlimit.value"
+	fi
+	rm -f "$STATE_DIR/nvidia-persistence.idx"
+}
+
+tune_gpu() {
+	local card dev driver
+
+	for card in "${ROOT}"/sys/class/drm/card*; do
+		[ -e "$card/device/driver" ] || continue
+		case "$(basename "$card")" in *-*) continue;; esac  # skip connectors
+
+		dev=$card/device
+		driver=$(basename "$(readlink -f "$dev/driver")")
+
+		case "$driver" in
+		amdgpu)         tune_gpu_amd "$dev" "$(basename "$card")" ;;
+		i915|xe)        tune_gpu_intel "$dev" "$(basename "$card")" ;;
+		nvidia*)        tune_gpu_nvidia "$(basename "$card")" ;;
+		*)              log "gpu $(basename "$card"): driver $driver, nothing to tune" ;;
+		esac
+	done
+}
+
+# ------------------------------------------------------- competing services
+#
+# ananicy(-cpp) reclassifies processes by its own rules and will happily undo
+# the compositor's scheduling decisions mid-game. Pause it for the duration.
+
+pause_daemons() {
+	local unit
+	for unit in ananicy-cpp.service ananicy.service; do
+		if systemctl is-active --quiet "$unit" 2>/dev/null; then
+			systemctl stop "$unit" >/dev/null 2>&1 &&
+				touch "$STATE_DIR/paused-$unit" &&
+				log "paused $unit"
+		fi
+	done
+}
+
+resume_daemons() {
+	local marker unit
+	for marker in "$STATE_DIR"/paused-*.service; do
+		[ -e "$marker" ] || continue
+		unit=$(basename "$marker")
+		unit=${unit#paused-}
+		systemctl start "$unit" >/dev/null 2>&1 && log "resumed $unit"
+		rm -f "$marker"
+	done
+}
+
+# ------------------------------------------------------------------ verbs
+
+do_apply() {
+	mkdir -p "$STATE_DIR"
+	tune_cpu
+	tune_kernel
+	tune_gpu
+	pause_daemons
+	log "applied"
+}
+
+do_restore() {
+	[ -d "$STATE_DIR" ] || return 0
+	resume_daemons
+	restore_nvidia
+	restore_all
+	log "restored"
+}
+
+do_status() {
+	local pathfile
+	if [ ! -d "$STATE_DIR" ] || ! ls "$STATE_DIR"/*.path >/dev/null 2>&1; then
+		echo "inactive"
+		return 0
+	fi
+	echo "active, holding:"
+	for pathfile in "$STATE_DIR"/*.path; do
+		[ -e "$pathfile" ] || continue
+		echo "  $(cat "$pathfile") (was $(cat "${pathfile%.path}.value"))"
+	done
+}
+
+# Last-resort unfreeze.
+#
+# Game mode SIGSTOPs background processes. The compositor undoes that on exit
+# and even from its own crash handler, but nothing runs after SIGKILL or a
+# kernel OOM kill — the session would come back with every background process
+# still stopped. If the compositor is gone and we are shutting down anyway,
+# resume every stopped process that is not root's.
+unfreeze_orphans() {
+	local status pid uid state count=0
+
+	for status in /proc/[0-9]*/status; do
+		[ -r "$status" ] || continue
+		state=$(awk '/^State:/ {print $2; exit}' "$status" 2>/dev/null)
+		[ "$state" = "T" ] || continue
+		uid=$(awk '/^Uid:/ {print $2; exit}' "$status" 2>/dev/null)
+		[ -n "${uid:-}" ] && [ "$uid" != "0" ] || continue
+		pid=${status#/proc/}
+		pid=${pid%/status}
+		kill -CONT "$pid" 2>/dev/null && count=$((count + 1))
+	done
+
+	[ "$count" -gt 0 ] && log "resumed $count stopped process(es) orphaned by the compositor"
+	return 0
+}
+
+# The C-state latency request only lives as long as the fd is open, which is
+# exactly the behaviour we want: if this process dies for any reason the
+# kernel drops the request by itself. Everything else is undone by the trap.
+do_daemon() {
+	local missing=0
+
+	do_apply
+
+	if [ -w /dev/cpu_dma_latency ]; then
+		exec 9<>/dev/cpu_dma_latency
+		printf '\x00\x00\x00\x00' >&9
+		log "holding /dev/cpu_dma_latency at 0 us (no deep C-states)"
+	else
+		log "warning: /dev/cpu_dma_latency not writable, C-state latency unchanged"
+	fi
+
+	trap 'do_restore; exit 0' TERM INT
+
+	# Poll for the compositor rather than sleeping forever: it is what
+	# stops this unit, so if it dies without doing so the machine would
+	# stay locked to performance clocks until the next reboot.
+	while :; do
+		sleep 5 &
+		wait $! || true
+
+		if pgrep -x nixlytile >/dev/null 2>&1; then
+			missing=0
+			continue
+		fi
+
+		missing=$((missing + 1))
+		[ "$missing" -ge 2 ] || continue
+
+		log "compositor is gone, restoring and exiting"
+		unfreeze_orphans
+		do_restore
+		exit 0
+	done
+}
+
+case "${1:-daemon}" in
+daemon)  do_daemon ;;
+apply)   do_apply ;;
+restore) do_restore ;;
+status)  do_status ;;
+*)       echo "usage: $0 daemon|apply|restore|status" >&2; exit 1 ;;
+esac

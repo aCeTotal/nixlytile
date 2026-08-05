@@ -131,8 +131,6 @@ struct wlr_scene_surface {
 		struct wlr_addon addon;
 
 		struct wl_listener outputs_update;
-		struct wl_listener output_enter;
-		struct wl_listener output_leave;
 		struct wl_listener output_sample;
 		struct wl_listener frame_done;
 		struct wl_listener surface_destroy;
@@ -155,6 +153,8 @@ struct wlr_scene_outputs_update_event {
 struct wlr_scene_output_sample_event {
 	struct wlr_scene_output *output;
 	bool direct_scanout;
+	struct wlr_drm_syncobj_timeline *release_timeline;
+	uint64_t release_point;
 };
 
 struct wlr_scene_frame_done_event {
@@ -268,6 +268,8 @@ struct wlr_scene_output {
 
 		struct wlr_drm_syncobj_timeline *in_timeline;
 		uint64_t in_point;
+		struct wlr_drm_syncobj_timeline *out_timeline;
+		uint64_t out_point;
 	} WLR_PRIVATE;
 };
 

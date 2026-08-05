@@ -1,18 +1,18 @@
 #include <assert.h>
 #include <stdlib.h>
-#include <xf86drm.h>
 #include <wlr/types/wlr_alpha_modifier_v1.h>
 #include <wlr/types/wlr_color_management_v1.h>
 #include <wlr/types/wlr_color_representation_v1.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_scene.h>
+#include <wlr/types/wlr_fifo_v1.h>
 #include <wlr/types/wlr_fractional_scale_v1.h>
-#include <wlr/render/drm_syncobj.h>
 #include <wlr/types/wlr_linux_drm_syncobj_v1.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_presentation_time.h>
 #include <wlr/types/wlr_single_pixel_buffer_v1.h>
 #include <wlr/util/transform.h>
+#include "render/drm_syncobj_merger.h"
 #include "types/wlr_scene.h"
 
 static void surface_reconfigure(struct wlr_scene_surface *scene_surface);
@@ -34,15 +34,15 @@ static struct wlr_output *get_surface_frame_pacing_output(struct wlr_surface *su
 	struct wlr_output *frame_pacing_output = NULL;
 	struct wlr_surface_output *surface_output;
 	wl_list_for_each(surface_output, &surface->current_outputs, link) {
-		if (frame_pacing_output == NULL ||
-				surface_output->output->refresh > frame_pacing_output->refresh) {
+		if (!surface_output->suspended && (frame_pacing_output == NULL ||
+				surface_output->output->refresh > frame_pacing_output->refresh)) {
 			frame_pacing_output = surface_output->output;
 		}
 	}
 	return frame_pacing_output;
 }
 
-static bool get_tf_preference(enum wlr_color_transfer_function tf) {
+static int get_tf_preference(enum wlr_color_transfer_function tf) {
 	switch (tf) {
 	case WLR_COLOR_TRANSFER_FUNCTION_GAMMA22:
 		return 0;
@@ -56,7 +56,7 @@ static bool get_tf_preference(enum wlr_color_transfer_function tf) {
 	abort(); // unreachable
 }
 
-static bool get_primaries_preference(enum wlr_color_named_primaries primaries) {
+static int get_primaries_preference(enum wlr_color_named_primaries primaries) {
 	switch (primaries) {
 	case WLR_COLOR_NAMED_PRIMARIES_SRGB:
 		return 0;
@@ -121,11 +121,58 @@ static void handle_scene_buffer_outputs_update(
 		struct wl_listener *listener, void *data) {
 	struct wlr_scene_surface *surface =
 		wl_container_of(listener, surface, outputs_update);
+	struct wlr_scene_outputs_update_event *event = data;
 	struct wlr_scene *scene = scene_node_get_root(&surface->buffer->node);
 
-	// If the surface is no longer visible on any output, keep the last sent
-	// preferred configuration to avoid unnecessary redraws
-	if (wl_list_empty(&surface->surface->current_outputs)) {
+	// If the surface is no longer visible on any output in the scene, keep the
+	// last sent preferred configuration to avoid unnecessary redraws
+	bool suspend = event->size == 0;
+
+	// To avoid sending redundant leave/enter events when a surface is hidden and then shown
+	// without moving to a different output the following policy is implemented:
+	//
+	// 1. When a surface transitions from being visible on >0 outputs to being visible on 0 outputs
+	//    don't send any leave events.
+	//
+	// 2. When a surface transitions from being visible on 0 outputs to being visible on >0 outputs
+	//    send leave events for all entered outputs on which the surface is no longer visible as
+	//    well as enter events for any outputs not already entered.
+	struct wlr_surface_output *entered_output, *tmp;
+	wl_list_for_each_safe(entered_output, tmp, &surface->surface->current_outputs, link) {
+		bool active = false;
+		for (size_t i = 0; i < event->size; i++) {
+			if (entered_output->output == event->active[i]->output) {
+				active = true;
+				break;
+			}
+		}
+
+		struct wlr_scene_output *scene_output;
+		wl_list_for_each(scene_output, &scene->outputs, link) {
+			if (scene_output->output == entered_output->output) {
+				entered_output->suspended = suspend;
+				if (!suspend && !active) {
+					wlr_surface_send_leave(surface->surface, entered_output->output);
+				}
+				break;
+			}
+		}
+	}
+
+	// No reason to update the preferred configuration if we aren't sending leave/enter events.
+	if (suspend) {
+		// The surface is no longer visible on any output (e.g. tag switch), so
+		// no further sample event will arrive to complete its release point.
+		// Drop our merger reference: the release point is signalled as soon as
+		// the GPU work accumulated so far completes. Without this, clients that
+		// block on the release fence before submitting again (observed with
+		// nvidia) never get released and deadlock.
+		struct wlr_linux_drm_syncobj_surface_v1_state *syncobj_state =
+			wlr_linux_drm_syncobj_v1_get_surface_state(surface->surface);
+		if (syncobj_state != NULL && syncobj_state->release_merger != NULL) {
+			wlr_drm_syncobj_merger_unref(syncobj_state->release_merger);
+			syncobj_state->release_merger = NULL;
+		}
 		return;
 	}
 
@@ -134,6 +181,12 @@ static void handle_scene_buffer_outputs_update(
 	// restore it from the underlying wlr_surface buffer.
 	if (surface->buffer->buffer == NULL && surface->surface->buffer != NULL) {
 		surface_reconfigure(surface);
+	}
+
+	for (size_t i = 0; i < event->size; i++) {
+		// This function internally checks if an enter event was already sent for the output
+		// to avoid sending redundant events.
+		wlr_surface_send_enter(surface->surface, event->active[i]->output);
 	}
 
 	double scale = get_surface_preferred_buffer_scale(surface->surface);
@@ -148,45 +201,25 @@ static void handle_scene_buffer_outputs_update(
 	}
 }
 
-static void handle_scene_buffer_output_enter(
-		struct wl_listener *listener, void *data) {
-	struct wlr_scene_surface *surface =
-		wl_container_of(listener, surface, output_enter);
-	struct wlr_scene_output *output = data;
-
-	wlr_surface_send_enter(surface->surface, output->output);
-}
-
-static void handle_scene_buffer_output_leave(
-		struct wl_listener *listener, void *data) {
-	struct wlr_scene_surface *surface =
-		wl_container_of(listener, surface, output_leave);
-	struct wlr_scene_output *output = data;
-
-	wlr_surface_send_leave(surface->surface, output->output);
-
-	// When the surface leaves all outputs (e.g. tag switch), directly signal
-	// the explicit sync release fence so the client can submit new buffers.
-	// Without this, nvidia clients deadlock: compositor holds buffer waiting
-	// for GPU, client blocks waiting for release fence signal.
-	// drmSyncobjTimelineSignal is idempotent — double-signal is a no-op.
-	if (surface->buffer->active_outputs == 0) {
-		struct wlr_linux_drm_syncobj_surface_v1_state *syncobj =
-			wlr_linux_drm_syncobj_v1_get_surface_state(surface->surface);
-		if (syncobj != NULL && syncobj->release_timeline != NULL) {
-			drmSyncobjTimelineSignal(syncobj->release_timeline->drm_fd,
-				&syncobj->release_timeline->handle,
-				&syncobj->release_point, 1);
-		}
-	}
-}
-
 static void handle_scene_buffer_output_sample(
 		struct wl_listener *listener, void *data) {
 	struct wlr_scene_surface *surface =
 		wl_container_of(listener, surface, output_sample);
 	const struct wlr_scene_output_sample_event *event = data;
 	struct wlr_output *output = event->output->output;
+
+	struct wlr_linux_drm_syncobj_surface_v1_state *syncobj_surface_state =
+	wlr_linux_drm_syncobj_v1_get_surface_state(surface->surface);
+	if (syncobj_surface_state != NULL && event->release_timeline != NULL) {
+		wlr_linux_drm_syncobj_v1_state_add_release_point(syncobj_surface_state,
+			event->release_timeline, event->release_point, output->event_loop);
+	}
+
+	// The content has been latched for display: clear any fifo barrier so the
+	// next commit waiting on it can be applied. This paces fifo clients to the
+	// refresh rate without them relying on frame callbacks.
+	wlr_fifo_v1_surface_latched(surface->surface);
+
 	if (get_surface_frame_pacing_output(surface->surface) != output) {
 		return;
 	}
@@ -360,27 +393,15 @@ static void surface_reconfigure(struct wlr_scene_surface *scene_surface) {
 		struct wlr_linux_drm_syncobj_surface_v1_state *syncobj_surface_state =
 			wlr_linux_drm_syncobj_v1_get_surface_state(surface);
 
-		struct wlr_drm_syncobj_timeline *wait_timeline = NULL;
-		uint64_t wait_point = 0;
-		if (syncobj_surface_state != NULL) {
-			wait_timeline = syncobj_surface_state->acquire_timeline;
-			wait_point = syncobj_surface_state->acquire_point;
-		}
-
 		struct wlr_scene_buffer_set_buffer_options options = {
 			.damage = &surface->buffer_damage,
-			.wait_timeline = wait_timeline,
-			.wait_point = wait_point,
 		};
+		if (syncobj_surface_state != NULL) {
+			options.wait_timeline = syncobj_surface_state->acquire_timeline;
+			options.wait_point = syncobj_surface_state->acquire_point;
+		}
 		wlr_scene_buffer_set_buffer_with_options(scene_buffer,
 			&surface->buffer->base, &options);
-
-		if (syncobj_surface_state != NULL &&
-				(surface->current.committed & WLR_SURFACE_STATE_BUFFER) &&
-				surface->buffer->source != NULL) {
-			wlr_linux_drm_syncobj_v1_state_signal_release_with_buffer(syncobj_surface_state,
-				surface->buffer->source);
-		}
 	} else {
 		wlr_scene_buffer_set_buffer(scene_buffer, NULL);
 	}
@@ -403,10 +424,9 @@ static void handle_scene_surface_surface_commit(
 	// the surface anyway.
 	int lx, ly;
 	bool enabled = wlr_scene_node_coords(&scene_buffer->node, &lx, &ly);
-
-	if (!wl_list_empty(&surface->surface->current.frame_callback_list) &&
-			surface->buffer->primary_output != NULL && enabled) {
-		wlr_output_schedule_frame(surface->buffer->primary_output->output);
+	struct wlr_output *output = get_surface_frame_pacing_output(surface->surface);
+	if (!wl_list_empty(&surface->surface->current.frame_callback_list) && output && enabled) {
+		wlr_output_schedule_frame(output);
 	}
 }
 
@@ -429,8 +449,6 @@ static void surface_addon_destroy(struct wlr_addon *addon) {
 	wlr_addon_finish(&surface->addon);
 
 	wl_list_remove(&surface->outputs_update.link);
-	wl_list_remove(&surface->output_enter.link);
-	wl_list_remove(&surface->output_leave.link);
 	wl_list_remove(&surface->output_sample.link);
 	wl_list_remove(&surface->frame_done.link);
 	wl_list_remove(&surface->surface_destroy.link);
@@ -475,12 +493,6 @@ struct wlr_scene_surface *wlr_scene_surface_create(struct wlr_scene_tree *parent
 
 	surface->outputs_update.notify = handle_scene_buffer_outputs_update;
 	wl_signal_add(&scene_buffer->events.outputs_update, &surface->outputs_update);
-
-	surface->output_enter.notify = handle_scene_buffer_output_enter;
-	wl_signal_add(&scene_buffer->events.output_enter, &surface->output_enter);
-
-	surface->output_leave.notify = handle_scene_buffer_output_leave;
-	wl_signal_add(&scene_buffer->events.output_leave, &surface->output_leave);
 
 	surface->output_sample.notify = handle_scene_buffer_output_sample;
 	wl_signal_add(&scene_buffer->events.output_sample, &surface->output_sample);

@@ -944,6 +944,28 @@ handlesig(int signo)
 	}
 }
 
+/*
+ * Fatal signal handler.
+ *
+ * Game mode SIGSTOPs background processes and pushes others to SCHED_IDLE.
+ * cleanup() undoes that on a normal quit, but a crash never reaches it: the
+ * session would come back with the browser, the file manager and everything
+ * else still frozen, needing a manual SIGCONT from a TTY.
+ *
+ * Undo it here, then restore the default action and re-raise so the crash
+ * still produces its core dump and exit status.
+ */
+static void
+handlefatalsig(int signo)
+{
+	(void)write(STDERR_FILENO,
+		"handlefatalsig: fatal signal, unfreezing background processes\n", 62);
+	gm_emergency_restore();
+
+	signal(signo, SIG_DFL);
+	raise(signo);
+}
+
 
 
 
@@ -2558,11 +2580,21 @@ void
 setup(void)
 {
 	int drm_fd, i, sig[] = {SIGCHLD, SIGINT, SIGTERM, SIGPIPE};
+	int fatal_sig[] = {SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE};
 	struct sigaction sa = {.sa_flags = SA_RESTART, .sa_handler = handlesig};
 	sigemptyset(&sa.sa_mask);
 
 	for (i = 0; i < (int)LENGTH(sig); i++)
 		sigaction(sig[i], &sa, NULL);
+
+	/* Never leave frozen background processes behind on a crash. */
+	{
+		struct sigaction fsa = {.sa_flags = SA_RESETHAND,
+			.sa_handler = handlefatalsig};
+		sigemptyset(&fsa.sa_mask);
+		for (i = 0; i < (int)LENGTH(fatal_sig); i++)
+			sigaction(fatal_sig[i], &fsa, NULL);
+	}
 
 	init_logging();
 	pthread_setname_np(pthread_self(), "nixlyOS");
@@ -2798,6 +2830,11 @@ setup(void)
 	wlr_fractional_scale_manager_v1_create(dpy, 1);
 	wlr_presentation_create(dpy, backend, 2);
 	wlr_alpha_modifier_v1_create(dpy);
+	/* fifo-v1 + commit-timing-v1: lets Vulkan/EGL clients (Mesa WSI) pace
+	 * themselves on the display refresh and target a presentation time
+	 * instead of relying on frame callbacks. */
+	wlr_fifo_manager_v1_create(dpy, 1);
+	wlr_commit_timing_manager_v1_create(dpy, 1);
 	content_type_mgr = wlr_content_type_manager_v1_create(dpy, 1);
 	tearing_control_mgr = wlr_tearing_control_manager_v1_create(dpy, 1);
 	protocol_fixes = wlr_fixes_create(dpy, 1);

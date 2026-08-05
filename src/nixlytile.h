@@ -62,8 +62,10 @@
 #include <wlr/interfaces/wlr_buffer.h>
 #include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_alpha_modifier_v1.h>
+#include <wlr/types/wlr_commit_timing_v1.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_content_type_v1.h>
+#include <wlr/types/wlr_fifo_v1.h>
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_cursor_shape_v1.h>
 #include <wlr/types/wlr_data_control_v1.h>
@@ -1699,7 +1701,6 @@ extern pid_t retro_session_pid;
 extern int game_mode_nice_applied;
 extern int game_mode_ioclass_applied;
 extern int game_mode_oom_applied;
-extern int game_mode_governor_applied;
 extern int compositor_rt_applied;
 extern int compositor_pin_applied;
 extern int fan_boost_active;
@@ -1707,7 +1708,6 @@ extern int fan_thermal_active;
 extern struct wl_event_source *fan_thermal_timer;
 extern pid_t frozen_pids[4096];
 extern int frozen_pid_count;
-extern int game_mode_swappiness_applied;
 extern int game_mode_affinity_applied;
 extern int game_mode_raw_input_applied;
 #define MAX_POINTER_DEVICES 32
@@ -2773,36 +2773,18 @@ void launchfx_game_ready(void);
 void schedule_game_mode_update(void);
 void gm_bg_init(void);
 void gm_bg_cleanup(void);
+/* Async-signal-safe: unfreeze/unthrottle everything from a fatal handler */
+void gm_emergency_restore(void);
 void freeze_background_processes(void);
 void unfreeze_background_processes(void);
-void apply_memory_optimization(void);
-void restore_memory_optimization(void);
-void apply_cpu_latency_qos(void);
-void restore_cpu_latency_qos(void);
 void apply_cpu_affinity(pid_t game_pid);
 void restore_cpu_affinity(pid_t game_pid);
-void apply_transparent_hugepages(void);
-void restore_transparent_hugepages(void);
-void apply_io_scheduler(void);
-void restore_io_scheduler(void);
-void apply_disable_watchdog(void);
-void restore_watchdog(void);
 void apply_raw_input(void);
 void restore_raw_input(void);
-void apply_irq_affinity(void);
-void restore_irq_affinity(void);
-void apply_scheduler_tuning(void);
-void restore_scheduler_tuning(void);
 void apply_gpu_power_state(void);
 void restore_gpu_power_state(void);
 void apply_gpu_sched_priority(pid_t pid);
 void restore_gpu_sched_priority(pid_t pid);
-void apply_dirty_writeback_tuning(void);
-void restore_dirty_writeback_tuning(void);
-void apply_disable_split_lock(void);
-void restore_split_lock(void);
-void apply_mglru_tuning(void);
-void restore_mglru_tuning(void);
 void apply_power_profile_performance(void);
 void restore_power_profile(void);
 void lower_competing_processes(pid_t game_pid);
