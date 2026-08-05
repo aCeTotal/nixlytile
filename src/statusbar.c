@@ -445,6 +445,15 @@ rendervolume(StatusModule *module, int bar_height, const char *text)
 void
 rendermic(StatusModule *module, int bar_height, const char *text)
 {
+	if (!mic_available) {
+		if (module && module->tree) {
+			clearstatusmodule(module);
+			module->width = 0;
+			wlr_scene_node_set_enabled(&module->tree->node, 0);
+		}
+		return;
+	}
+
 	render_icon_label(module, bar_height, text,
 			ensure_mic_icon_buffer, &mic_icon_buf, &mic_icon_w, &mic_icon_h,
 			0, statusbar_icon_text_gap_microphone, mic_text_color);
@@ -2905,6 +2914,8 @@ findbatterydevice(char *capacity_path, size_t capacity_len)
 	while ((ent = readdir(dir))) {
 		char type_path[PATH_MAX];
 		char cap_path[PATH_MAX];
+		char scope_path[PATH_MAX];
+		char scope[32];
 		struct stat st;
 		FILE *fp;
 		char type[32] = {0};
@@ -2915,6 +2926,9 @@ findbatterydevice(char *capacity_path, size_t capacity_len)
 
 		if (snprintf(type_path, sizeof(type_path), "/sys/class/power_supply/%s/type",
 					ent->d_name) >= (int)sizeof(type_path))
+			continue;
+		if (snprintf(scope_path, sizeof(scope_path), "/sys/class/power_supply/%s/scope",
+					ent->d_name) >= (int)sizeof(scope_path))
 			continue;
 		if (snprintf(cap_path, sizeof(cap_path), "/sys/class/power_supply/%s/capacity",
 					ent->d_name) >= (int)sizeof(cap_path))
@@ -2940,6 +2954,12 @@ findbatterydevice(char *capacity_path, size_t capacity_len)
 		if (nl)
 			*nl = '\0';
 		if (strcmp(type, "Battery") != 0)
+			continue;
+
+		/* Peripheral batteries (wireless mice, keyboards, headsets) also report
+		 * type "Battery"; only a system battery has scope "System" or none. */
+		if (readfirstline(scope_path, scope, sizeof(scope)) == 0 &&
+				strcmp(scope, "System") != 0)
 			continue;
 
 		if (snprintf(found, sizeof(found), "%s", cap_path) >= (int)sizeof(found))
@@ -4781,11 +4801,29 @@ refreshstatusmic(void)
 	 * PipeWire — cannot leave the icon lying. */
 	{
 		double read = pipewire_mic_volume_percent();
-		if (read >= 0.0) {
+		int available = read >= 0.0;
+
+		if (available) {
 			vol = read;
 			microphone_active = read;
 			mic_last_percent = read;
 		}
+		if (available != mic_available) {
+			mic_available = available;
+			force_render = 1;
+		}
+	}
+	if (!mic_available) {
+		if (force_render) {
+			/* Mic just went away: drop the module and reflow. */
+			wl_list_for_each(m, &mons, link) {
+				if (!m->statusbar.mic.tree)
+					continue;
+				rendermic(&m->statusbar.mic, 0, mic_text);
+				positionstatusmodules(m);
+			}
+		}
+		return;
 	}
 	if (vol >= 0.0)
 		mic_last_percent = vol;

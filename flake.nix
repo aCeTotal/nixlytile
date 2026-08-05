@@ -264,6 +264,12 @@
             (lib.mkIf cfg.gameMode.enable {
               users.groups.${cfg.gameMode.group} = { };
 
+              # NT synchronisation primitives in the kernel (6.14+). Wine 11
+              # and Proton 11 use /dev/ntsync automatically when it exists,
+              # replacing the esync/fsync emulation and its CPU overhead.
+              # No-op when the kernel has it built in.
+              boot.kernelModules = [ "ntsync" ];
+
               systemd.services.nixly-gametune = {
                 description = "nixlytile game mode tuning";
                 # Never started at boot: the compositor starts it when a
@@ -288,13 +294,33 @@
                 };
               };
 
-              # Let the game-mode group control that one unit, nothing else.
+              # Per-game OOM protection. Lowering oom_score_adj needs
+              # CAP_SYS_RESOURCE, so the compositor cannot do it itself; the
+              # game PID is the instance name.
+              systemd.services."nixly-gameprio@" = {
+                description = "nixlytile OOM protection for game PID %i";
+                serviceConfig = {
+                  Type = "oneshot";
+                  RemainAfterExit = true;
+                  ExecStart = "${gametune}/bin/nixly-gametune protect %i";
+                  ExecStop = "${gametune}/bin/nixly-gametune unprotect %i";
+                  # Same directory as the tuning unit: that is where the
+                  # saved oom_score_adj values live.
+                  RuntimeDirectory = "nixly-gametune";
+                  RuntimeDirectoryPreserve = "yes";
+                };
+              };
+
+              # Let the game-mode group control those units, nothing else.
               security.polkit.extraConfig = ''
                 polkit.addRule(function(action, subject) {
                   if (action.id == "org.freedesktop.systemd1.manage-units" &&
-                      action.lookup("unit") == "nixly-gametune.service" &&
                       subject.isInGroup("${cfg.gameMode.group}")) {
-                    return polkit.Result.YES;
+                    var unit = action.lookup("unit");
+                    if (unit && (unit == "nixly-gametune.service" ||
+                        unit.indexOf("nixly-gameprio@") == 0)) {
+                      return polkit.Result.YES;
+                    }
                   }
                 });
               '';

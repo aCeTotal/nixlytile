@@ -116,6 +116,36 @@ tune_cpu() {
 
 # ------------------------------------------------------------------- kernel
 
+# True when every active swap device is backed by zram (compressed RAM).
+swap_is_zram() {
+	local swaps=${ROOT}/proc/swaps found=0 dev rest
+
+	[ -r "$swaps" ] || return 1
+	while read -r dev rest; do
+		case "$dev" in
+		Filename|"") continue ;;
+		/dev/zram*) found=1 ;;
+		*) return 1 ;;
+		esac
+	done < "$swaps"
+	[ "$found" = 1 ]
+}
+
+# Reclaim hits the cgroup with the least protection first. Biasing it away
+# from the session (game, compositor, its page cache) and towards system
+# daemons is the difference between a stutter and a swapped-out frame on a
+# machine with little RAM.
+tune_cgroups() {
+	local user_slice=${ROOT}/sys/fs/cgroup/user.slice mem_kb half
+
+	[ -f "$user_slice/memory.low" ] || return 0
+	mem_kb=$(awk '/^MemTotal:/ {print $2}' "${ROOT}/proc/meminfo" 2>/dev/null) || return 0
+	[ -n "$mem_kb" ] || return 0
+
+	half=$(( mem_kb * 1024 / 2 ))
+	save_and_set user-memory-low "$user_slice/memory.low" "$half"
+}
+
 tune_kernel() {
 	# Watchdog interrupts are pure overhead during a game.
 	save_and_set nmi-watchdog "${ROOT}/proc/sys/kernel/nmi_watchdog" 0
@@ -125,12 +155,29 @@ tune_kernel() {
 	[ -f "${ROOT}/proc/sys/kernel/split_lock_mitigate" ] &&
 		save_and_set split-lock "${ROOT}/proc/sys/kernel/split_lock_mitigate" 0
 
-	# Do not swap out a running game.
-	save_and_set swappiness "${ROOT}/proc/sys/vm/swappiness" 10
+	# Swappiness: only lower it when swap is a real disk. With zram, swap
+	# is compressed RAM — pushing cold anon pages out is cheap and buys
+	# page cache the game actually reads (assets, shader cache). Lowering
+	# it there evicts the cache instead, which costs disk I/O mid-frame.
+	# SteamOS 3.6+ ships zram with swappiness 180 for the same reason.
+	if swap_is_zram; then
+		log "swap is zram: leaving vm.swappiness at $(cat "${ROOT}/proc/sys/vm/swappiness" 2>/dev/null)"
+	else
+		save_and_set swappiness "${ROOT}/proc/sys/vm/swappiness" 10
+	fi
 
 	# Proactive compaction causes multi-millisecond allocation stalls.
 	[ -f "${ROOT}/proc/sys/vm/compaction_proactiveness" ] &&
 		save_and_set compaction "${ROOT}/proc/sys/vm/compaction_proactiveness" 0
+
+	# Watermark boosting raises the reclaim target after a fragmentation
+	# event, so a single allocation burst drags the kernel into reclaiming
+	# far past what it needed — a frame-time spike. Games allocate in
+	# bursts constantly; 0 keeps reclaim at the plain watermarks.
+	if [ -f "${ROOT}/proc/sys/vm/watermark_boost_factor" ]; then
+		save_and_set watermark-boost \
+			"${ROOT}/proc/sys/vm/watermark_boost_factor" 0
+	fi
 
 	# Large writeback bursts (shader cache, save files) stall the game's
 	# own I/O. Smaller, more frequent flushes keep frame times flat.
@@ -314,6 +361,7 @@ do_apply() {
 	mkdir -p "$STATE_DIR"
 	tune_cpu
 	tune_kernel
+	tune_cgroups
 	tune_gpu
 	pause_daemons
 	log "applied"
@@ -338,6 +386,72 @@ do_status() {
 		[ -e "$pathfile" ] || continue
 		echo "  $(cat "$pathfile") (was $(cat "${pathfile%.path}.value"))"
 	done
+}
+
+# OOM protection for the game tree.
+#
+# Lowering oom_score_adj needs CAP_SYS_RESOURCE, so the compositor's own
+# attempt always failed with EACCES: under memory pressure the kernel was
+# free to pick the game. Here we are root, so it works — and the value is
+# saved so `unprotect` puts it back (raising it again is unprivileged, but
+# only this side can restore a game that started out negative).
+#
+# The whole tree matters, not just the leader: a Proton game is a wine
+# server plus several helper processes, and killing any of them ends the
+# session just as effectively.
+oom_protect_tree() {
+	local root_pid=$1 value=$2
+	local state=$STATE_DIR/oom.$root_pid
+	local pid ppid old count=0
+
+	: > "$state"
+	# One pass over /proc, repeated until no new descendant is picked up,
+	# so children that appear below an already-matched parent are caught.
+	local matched=" $root_pid " proc pass=0
+	while [ "$pass" -lt 3 ]; do
+		pass=$((pass + 1))
+		for proc in /proc/[0-9]*; do
+			pid=${proc#/proc/}
+			case "$matched" in *" $pid "*) continue ;; esac
+			ppid=$(awk '/^PPid:/ {print $2; exit}' "$proc/status" 2>/dev/null) || continue
+			[ -n "${ppid:-}" ] || continue
+			case "$matched" in *" $ppid "*) matched="$matched$pid " ;; esac
+		done
+	done
+
+	for pid in $matched; do
+		[ -f "/proc/$pid/oom_score_adj" ] || continue
+		old=$(cat "/proc/$pid/oom_score_adj" 2>/dev/null) || continue
+		printf '%s %s\n' "$pid" "$old" >> "$state"
+		printf '%s\n' "$value" > "/proc/$pid/oom_score_adj" 2>/dev/null &&
+			count=$((count + 1))
+	done
+
+	log "oom_score_adj=$value for $count process(es) in the tree of $root_pid"
+}
+
+do_protect() {
+	local pid=${1:-}
+
+	[ -n "$pid" ] || { echo "usage: $0 protect <pid>" >&2; exit 1; }
+	[ -d "/proc/$pid" ] || { log "protect: pid $pid is gone"; return 0; }
+	mkdir -p "$STATE_DIR"
+	oom_protect_tree "$pid" -900
+}
+
+do_unprotect() {
+	local pid=${1:-} state old_pid old_value
+
+	[ -n "$pid" ] || { echo "usage: $0 unprotect <pid>" >&2; exit 1; }
+	state=$STATE_DIR/oom.$pid
+	[ -f "$state" ] || return 0
+
+	while read -r old_pid old_value; do
+		[ -f "/proc/$old_pid/oom_score_adj" ] || continue
+		printf '%s\n' "$old_value" > "/proc/$old_pid/oom_score_adj" 2>/dev/null
+	done < "$state"
+	rm -f "$state"
+	log "oom_score_adj restored for the tree of $pid"
 }
 
 # Last-resort unfreeze.
@@ -406,9 +520,11 @@ do_daemon() {
 }
 
 case "${1:-daemon}" in
-daemon)  do_daemon ;;
-apply)   do_apply ;;
-restore) do_restore ;;
-status)  do_status ;;
-*)       echo "usage: $0 daemon|apply|restore|status" >&2; exit 1 ;;
+daemon)    do_daemon ;;
+apply)     do_apply ;;
+restore)   do_restore ;;
+status)    do_status ;;
+protect)   do_protect "${2:-}" ;;
+unprotect) do_unprotect "${2:-}" ;;
+*)         echo "usage: $0 daemon|apply|restore|status|protect <pid>|unprotect <pid>" >&2; exit 1 ;;
 esac

@@ -167,6 +167,7 @@ double speaker_active = -1.0;
 double microphone_active = -1.0;
 char volume_text[32] = "--%";
 int volume_muted = -1;
+int mic_available;
 int mic_muted = -1;
 int mic_last_color_is_muted = -1;
 int volume_last_color_is_muted = -1;

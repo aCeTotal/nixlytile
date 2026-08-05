@@ -1849,6 +1849,7 @@ extern double speaker_active;
 extern double microphone_active;
 extern char volume_text[32];
 extern int volume_muted;
+extern int mic_available;
 extern int mic_muted;
 extern int mic_last_color_is_muted;
 extern int volume_last_color_is_muted;
@@ -2550,6 +2551,7 @@ double battery_percent(void);
 double backlight_percent(void);
 int findbacklightdevice(char *brightness_path, size_t brightness_len,
 		char *max_path, size_t max_len);
+int readfirstline(const char *path, char *buf, size_t len);
 int findbatterydevice(char *capacity_path, size_t capacity_len);
 int findbluetoothdevice(void);
 int cpu_popup_refresh_timeout(void *data);
@@ -2806,6 +2808,10 @@ float ease_out_cubic(float t);
 /* apptoggle.c — gamepad L1+R1 toggle between nixlymedia and retroarch */
 void apptoggle_setup(void);
 void apptoggle_cleanup(void);
+
+/* mic_watch.c — /dev/snd hotplug watch for the microphone module */
+void mic_watch_setup(void);
+void mic_watch_cleanup(void);
 
 /* nixlytile.c */
 void steam_set_ge_proton_default(void);

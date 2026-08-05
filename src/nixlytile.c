@@ -760,6 +760,7 @@ cleanup(void)
 {
 	wlr_log(WLR_ERROR, "cleanup() called - starting cleanup sequence");
 	apptoggle_cleanup();
+	mic_watch_cleanup();
 	/* Shut down game mode background worker (unfreezes processes if needed) */
 	gm_bg_cleanup();
 	window_ipc_finish();
@@ -1244,6 +1245,9 @@ run(const char *startup_cmd)
 	/* Gamepad L1+R1 toggle between nixlymedia and retroarch.
 	 * Set up after autostart so it can adopt the spawned nixlymedia pid. */
 	apptoggle_setup();
+
+	/* Microphone module follows capture-device hotplug. */
+	mic_watch_setup();
 
 	/* Always-on responsiveness: elevate the compositor thread so it keeps
 	 * getting CPU even when the machine is saturated (100% load) — input
@@ -1805,6 +1809,30 @@ ensure_shell_env(void)
 	pw = getpwuid(getuid());
 	if (pw && pw->pw_shell && *pw->pw_shell)
 		setenv("SHELL", pw->pw_shell, 1);
+}
+
+/*
+ * Point Wine/Proton at the kernel's NT synchronisation driver.
+ *
+ * Upstream Proton 11 picks /dev/ntsync up on its own, but GE and CachyOS
+ * builds still gate it behind PROTON_USE_NTSYNC, and Wine needs WINENTSYNC
+ * for a bare wine prefix. Setting them here means every child the compositor
+ * spawns — Steam included — inherits them, and esync/fsync emulation with
+ * its eventfd storm is out of the picture. Never overrides a value the user
+ * already exported, so a per-game override still wins.
+ */
+static void
+enable_ntsync_env(void)
+{
+	if (access("/dev/ntsync", R_OK | W_OK) != 0) {
+		wlr_log(WLR_INFO, "ntsync: /dev/ntsync unavailable — Proton falls "
+			"back to fsync/esync (needs kernel 6.14+)");
+		return;
+	}
+
+	setenv("PROTON_USE_NTSYNC", "1", 0);
+	setenv("WINENTSYNC", "1", 0);
+	wlr_log(WLR_INFO, "ntsync: /dev/ntsync present, enabled for Proton and Wine");
 }
 
 static void
@@ -2615,6 +2643,9 @@ setup(void)
 
 	/* Make sure spawned terminals get the real login shell, not the minimal wrapper shell */
 	ensure_shell_env();
+
+	/* Every child — Steam included — inherits the ntsync opt-in. */
+	enable_ntsync_env();
 
 	/* The Wayland display is managed by libwayland. It handles accepting
 	 * clients from the Unix socket, manging Wayland globals, and so on. */

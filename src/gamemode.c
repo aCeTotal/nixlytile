@@ -89,6 +89,43 @@ gametune_stop(void)
 	wlr_log(WLR_INFO, "gametune: nixly-gametune.service stopped");
 }
 
+/*
+ * OOM protection for the game tree, applied by nixly-gametune through a
+ * per-PID template unit — the same polkit-allowed path as the tuning unit.
+ * The helper walks the game's process tree, saves every oom_score_adj and
+ * sets -900, so a memory squeeze takes the browser instead of the game.
+ */
+static void
+game_oom_protect(pid_t pid)
+{
+	char unit[64];
+
+	if (pid <= 1 || !gametune_unit_present())
+		return;
+
+	snprintf(unit, sizeof(unit), "nixly-gameprio@%d.service", (int)pid);
+	const char *const argv[] = { "systemctl", "start", "--no-block", unit, NULL };
+	if (run_cmd(argv) != 0)
+		wlr_log(WLR_ERROR, "gametune: failed to start %s — game stays "
+			"unprotected from the OOM killer", unit);
+	else
+		game_mode_oom_applied = 1;
+}
+
+static void
+game_oom_unprotect(pid_t pid)
+{
+	char unit[64];
+
+	if (!game_mode_oom_applied)
+		return;
+	game_mode_oom_applied = 0;
+
+	snprintf(unit, sizeof(unit), "nixly-gameprio@%d.service", (int)pid);
+	const char *const argv[] = { "systemctl", "stop", "--no-block", unit, NULL };
+	run_cmd(argv);
+}
+
 /* Pre-launch boost: launchfx detects the Steam Play press seconds
  * before any window exists.  Killing C-state wakeup latency this early makes
  * Proton setup / shader compilation / asset load run without idle-exit
@@ -144,9 +181,6 @@ game_priority_all_threads(pid_t pid, int nice_val, int ioprio)
 void
 apply_game_priority(pid_t pid)
 {
-	char path[64];
-	FILE *fp;
-
 	if (pid <= 1)
 		return;
 
@@ -188,18 +222,10 @@ apply_game_priority(pid_t pid)
 	game_priority_all_threads(pid, -10,
 		IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 0));
 
-	/*
-	 * Protect game from OOM killer by lowering its OOM score.
-	 * -500 makes it much less likely to be killed under memory pressure.
-	 */
-	snprintf(path, sizeof(path), "/proc/%d/oom_score_adj", pid);
-	fp = fopen(path, "w");
-	if (fp) {
-		fprintf(fp, "-500\n");
-		fclose(fp);
-		game_mode_oom_applied = 1;
-		wlr_log(WLR_INFO, "Game priority: set oom_score_adj=-500 for PID %d", pid);
-	}
+	/* OOM protection goes through the root helper: lowering oom_score_adj
+	 * needs CAP_SYS_RESOURCE, so writing it from here always failed with
+	 * EACCES and left the game as killable as anything else. */
+	game_oom_protect(pid);
 
 	/* No governor handling here: scaling_governor is root-owned (the write
 	 * always failed) and the system now runs `performance` permanently. */
@@ -208,9 +234,6 @@ apply_game_priority(pid_t pid)
 void
 restore_game_priority(pid_t pid)
 {
-	char path[64];
-	FILE *fp;
-
 	if (pid <= 1)
 		return;
 
@@ -232,17 +255,7 @@ restore_game_priority(pid_t pid)
 	/* Per-thread restore, mirroring the per-thread apply */
 	game_priority_all_threads(pid, 0, IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 4));
 
-	/* Restore OOM score to 0 (normal) */
-	if (game_mode_oom_applied) {
-		snprintf(path, sizeof(path), "/proc/%d/oom_score_adj", pid);
-		fp = fopen(path, "w");
-		if (fp) {
-			fprintf(fp, "0\n");
-			fclose(fp);
-		}
-		game_mode_oom_applied = 0;
-		wlr_log(WLR_INFO, "Game priority: restored oom_score_adj=0 for PID %d", pid);
-	}
+	game_oom_unprotect(pid);
 }
 
 /*
