@@ -6295,6 +6295,9 @@ updatemons(struct wl_listener *listener, void *data)
 
 	wlr_output_manager_v1_set_configuration(output_mgr, config);
 
+	/* Screens moved or came and went — keep the nixlycc ID boxes on them. */
+	monitor_overlay_update();
+
 	in_updatemons = 0;
 }
 

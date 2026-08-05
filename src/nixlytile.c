@@ -1095,6 +1095,11 @@ run(const char *startup_cmd)
 	 * on hot-reload (inotify), not at startup. */
 	monconf_apply_layout();
 
+	/* ~/.local/nixlyos/monitor_overlay → per-screen ID boxes and drag glow.
+	 * Goes here, not next to the monitors.conf watch: it draws into the
+	 * scene, so it needs the layers and the monitors to exist. */
+	setup_monitor_overlay_watch();
+
 	/* Now that the socket exists and the backend is started, run the
 	 * startup commands.  If KDL config provided an autostart list, each
 	 * entry gets its own pid (for diff-based hot-reload).  Otherwise

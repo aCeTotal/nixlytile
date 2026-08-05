@@ -109,6 +109,9 @@ load_monitors_conf(void)
 				m->transform = WL_OUTPUT_TRANSFORM_90;
 			} else if (strcmp(tok, "transform=rotate-270") == 0) {
 				m->transform = WL_OUTPUT_TRANSFORM_270;
+			} else if (strncmp(tok, "mirror=", 7) == 0) {
+				snprintf(m->mirror, sizeof(m->mirror), "%s",
+					tok + 7);
 			}
 		}
 
@@ -191,6 +194,8 @@ monconf_apply_layout(void)
 		if (!cfg || cfg->grid_col < 0 || cfg->grid_row < 0 ||
 		    cfg->grid_col >= MAX_MONITORS || cfg->grid_row >= MAX_MONITORS)
 			continue;
+		if (cfg->mirror[0])
+			continue; /* sits on top of its source, owns no cell */
 		monitor_effective_size(m, &w, &h);
 		if (w > col_w[cfg->grid_col])
 			col_w[cfg->grid_col] = w;
@@ -220,12 +225,46 @@ monconf_apply_layout(void)
 		if (!cfg || cfg->grid_col < 0 || cfg->grid_row < 0 ||
 		    cfg->grid_col >= MAX_MONITORS || cfg->grid_row >= MAX_MONITORS)
 			continue;
+		if (cfg->mirror[0])
+			continue;
 		monitor_effective_size(m, &w, &h);
 		x = col_x[cfg->grid_col] + (col_w[cfg->grid_col] - w) / 2;
 		y = row_y[cfg->grid_row] + (row_h[cfg->grid_row] - h) / 2;
 		wlr_output_layout_add(output_layout, m->wlr_output, x, y);
 		wlr_log(WLR_INFO, "monitors.conf: %s grid=%d,%d → (%d,%d) [%dx%d]",
 			m->wlr_output->name, cfg->grid_col, cfg->grid_row, x, y, w, h);
+		placed++;
+	}
+
+	/* Mirrors go last: they take the position their source just got, and
+	 * two outputs on the same layout box scan out the same picture. */
+	wl_list_for_each(m, &mons, link) {
+		RuntimeMonitorConfig *cfg;
+		struct wlr_output_layout_output *lo;
+		Monitor *src = NULL, *cand;
+
+		if (!m->wlr_output || !m->wlr_output->enabled)
+			continue;
+		cfg = monconf_find(m->wlr_output->name);
+		if (!cfg || !cfg->mirror[0])
+			continue;
+
+		wl_list_for_each(cand, &mons, link) {
+			if (cand->wlr_output && cand->wlr_output->enabled &&
+			    strcmp(cand->wlr_output->name, cfg->mirror) == 0) {
+				src = cand;
+				break;
+			}
+		}
+		if (!src)
+			continue;
+		lo = wlr_output_layout_get(output_layout, src->wlr_output);
+		if (!lo)
+			continue;
+
+		wlr_output_layout_add(output_layout, m->wlr_output, lo->x, lo->y);
+		wlr_log(WLR_INFO, "monitors.conf: %s mirrors %s → (%d,%d)",
+			m->wlr_output->name, cfg->mirror, lo->x, lo->y);
 		placed++;
 	}
 
@@ -241,6 +280,7 @@ reload_monitors_conf(void)
 		return; /* file missing/unreadable — keep current state */
 	monconf_apply_modes();
 	monconf_apply_layout();
+	monitor_overlay_update(); /* screens moved — the ID boxes follow */
 }
 
 /* ── inotify watch ────────────────────────────────────────────────── */

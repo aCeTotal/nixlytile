@@ -328,6 +328,7 @@ typedef struct {
 	int enabled;
 	int transform;
 	int grid_col, grid_row; /* 2D grid pos (-1 = use position enum) */
+	char mirror[64];        /* connector to mirror ("" = independent) */
 } RuntimeMonitorConfig;
 
 extern RuntimeMonitorConfig runtime_monitors[MAX_MONITORS];
@@ -2398,6 +2399,11 @@ int load_monitors_conf(void);
 RuntimeMonitorConfig *monconf_find(const char *name);
 void monconf_apply_layout(void);
 void reload_monitors_conf(void);
+
+/* monitor_setup.c — ~/.local/nixlyos/monitor_overlay (written by nixlycc):
+ * per-screen ID boxes and the red glow while a box is dragged. */
+void setup_monitor_overlay_watch(void);
+void monitor_overlay_update(void);
 void setup_monitors_conf_watch(void);
 
 /* dwl-style status broadcast on stdout — waybar's dwl/tags module
@@ -2644,9 +2650,6 @@ void setup_monitors_conf_watch(void);
 void reload_monitors_conf(void);
 int schedule_monitor_setup_popup(void);
 
-/* monitor_setup.c — external overlay (nixlycc IPC) */
-void setup_monitor_overlay_watch(void);
-void monitor_overlay_update(void);
 #endif /* monitor_setup.c */
 
 #if 0 /* launcher.c / nixpkgs.c removed */
