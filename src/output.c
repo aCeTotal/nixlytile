@@ -86,6 +86,7 @@ cleanupmon(struct wl_listener *listener, void *data)
 		m->stats_panel_anim_timer = NULL;
 	}
 	wlr_scene_node_destroy(&m->fullscreen_bg->node);
+	cleanupstatusbar(m);
 	free(m);
 
 	/* Re-arrange remaining monitors after removal */

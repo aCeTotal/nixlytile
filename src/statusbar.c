@@ -5744,6 +5744,38 @@ initstatusbar(Monitor *m)
 	}
 }
 
+/* Tear down everything initstatusbar hung off the *global* layer trees.
+ * layers[LyrTop]/[LyrBlock] outlive the monitor, so without this a
+ * destroyed output (Nvidia hotplug/suspend re-enumerates its outputs)
+ * leaves its bar behind as a frozen copy in layout space — the new
+ * monitor's bar just gets drawn on top of the corpse. */
+void
+cleanupstatusbar(Monitor *m)
+{
+	if (!m)
+		return;
+
+	tray_menu_clear(&m->statusbar.tray_menu);
+	m->statusbar.tray_menu.hover_rect = NULL;
+
+	if (m->statusbar.tree)
+		wlr_scene_node_destroy(&m->statusbar.tree->node);
+	if (m->modal.tree)
+		wlr_scene_node_destroy(&m->modal.tree->node);
+	if (m->nixpkgs.tree)
+		wlr_scene_node_destroy(&m->nixpkgs.tree->node);
+	if (m->sudo_popup.tree)
+		wlr_scene_node_destroy(&m->sudo_popup.tree->node);
+	if (m->gamepad_menu.tree)
+		wlr_scene_node_destroy(&m->gamepad_menu.tree->node);
+
+	m->statusbar.tree = NULL;
+	m->modal.tree = NULL;
+	m->nixpkgs.tree = NULL;
+	m->sudo_popup.tree = NULL;
+	m->gamepad_menu.tree = NULL;
+}
+
 void
 updatetaghover(Monitor *m, double cx, double cy)
 {

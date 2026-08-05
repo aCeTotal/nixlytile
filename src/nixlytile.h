@@ -2421,6 +2421,7 @@ void statusbar_force_refresh(Monitor *m);
 
 #if 1
 void initstatusbar(Monitor *m);
+void cleanupstatusbar(Monitor *m);
 void layoutstatusbar(Monitor *m, const struct wlr_box *area,
 		struct wlr_box *client_area);
 void positionstatusmodules(Monitor *m);
