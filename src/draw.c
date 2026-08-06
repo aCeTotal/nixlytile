@@ -309,8 +309,17 @@ upload_cursor_surface(struct wlr_surface *surface, int hx, int hy)
 	if (!wlr_buffer_begin_data_ptr_access(&surface->buffer->base,
 			WLR_BUFFER_DATA_PTR_ACCESS_READ,
 			&src_data, &src_format, &src_stride)) {
-		struct wlr_texture *tex = wlr_texture_from_buffer(drw,
-			&surface->buffer->base);
+		/* The client often destroys the source wl_buffer right after
+		 * commit; the wlr_client_buffer then has no dmabuf/shm/data-ptr
+		 * left, so importing a fresh texture fails.  The texture created
+		 * at commit time survives, so prefer it. */
+		struct wlr_texture *tex = wlr_surface_get_texture(surface);
+		struct wlr_texture *own_tex = NULL;
+		if (!tex) {
+			own_tex = wlr_texture_from_buffer(drw,
+				&surface->buffer->base);
+			tex = own_tex;
+		}
 		if (!tex) {
 			game_log("CURSOR: client surface upload failed "
 				"(no data ptr, no texture) — keeping previous image");
@@ -329,7 +338,7 @@ upload_cursor_surface(struct wlr_surface *surface, int hx, int hy)
 			.stride = buf->stride,
 			.src_box = { .width = copy_w, .height = copy_h },
 		})) {
-			wlr_texture_destroy(tex);
+			wlr_texture_destroy(own_tex);
 			/* Buffer is blank now, but it is the back buffer — the
 			 * displayed image is untouched because we don't commit. */
 			game_log("CURSOR: client surface read_pixels failed "
@@ -337,7 +346,7 @@ upload_cursor_surface(struct wlr_surface *surface, int hx, int hy)
 			return;
 		}
 
-		wlr_texture_destroy(tex);
+		wlr_texture_destroy(own_tex);
 	} else {
 		memset(buf->map, 0, buf->map_size);
 

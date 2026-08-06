@@ -214,7 +214,7 @@
           };
           prewarm = pkgs.writeShellApplication {
             name = "nixly-prewarm";
-            runtimeInputs = with pkgs; [ coreutils findutils gawk gnugrep procps util-linux vulkan-tools ];
+            runtimeInputs = with pkgs; [ coreutils findutils gawk gnugrep inotify-tools procps util-linux vulkan-tools ];
             text = builtins.readFile ./scripts/nixly-prewarm;
           };
         in {
@@ -311,6 +311,24 @@
                   OnStartupSec = "5min";
                   OnUnitInactiveSec = "6h";
                 };
+              };
+
+              # Install watcher: inotify on every Steam library's
+              # shadercache — the moment a new/updated game's pipeline
+              # caches land, they are replayed into the driver caches.
+              # The timer above stays as a backstop for missed events.
+              systemd.user.services.nixly-prewarm-watch = {
+                description = "nixlytile Steam shader prewarm install watcher";
+                wantedBy = [ "default.target" ];
+                serviceConfig = {
+                  ExecStart = "${prewarm}/bin/nixly-prewarm watch";
+                  Restart = "on-failure";
+                  RestartSec = 30;
+                  Nice = 19;
+                  IOSchedulingClass = "idle";
+                  CPUSchedulingPolicy = "batch";
+                };
+                path = [ "/run/current-system/sw" ];
               };
             })
 

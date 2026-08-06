@@ -1992,6 +1992,27 @@ update_game_mode(void)
 		 * No-op if a cover is up or already played for this client. */
 		launchfx_fullscreen_starting(c);
 
+		/* Give the cover a 1 s head start: ultra mode flips on direct
+		 * scanout and heavy tuning, which would put the game on screen
+		 * before the grow animation has played.  Hold activation until
+		 * the cover has run, then retry via the debounce timer. */
+		{
+			int hold = launchfx_cover_headstart_remaining();
+			if (hold > 0) {
+				game_mode_active = 0;
+				game_mode_ultra = 0;
+				game_mode_client = NULL;
+				if (!game_mode_debounce_timer)
+					game_mode_debounce_timer =
+						wl_event_loop_add_timer(event_loop,
+							game_mode_debounce_cb, NULL);
+				if (game_mode_debounce_timer)
+					wl_event_source_timer_update(
+						game_mode_debounce_timer, hold);
+				return;
+			}
+		}
+
 		/*
 		 * Get game PID FIRST — before freeze_background_processes()
 		 * so the game and its children are excluded from SIGSTOP.

@@ -2787,6 +2787,7 @@ void game_prelaunch_release(void);
 void launchfx_init(void);
 void launchfx_client_mapped(Client *c);
 void launchfx_fullscreen_starting(Client *c);
+int launchfx_cover_headstart_remaining(void);
 void launchfx_game_ready(void);
 void launchfx_note_commit(Client *c);
 

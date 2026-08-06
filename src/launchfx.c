@@ -23,6 +23,7 @@
 #define FX_POLL_MS      200
 #define FX_TICK_MS      16
 #define FX_GROW_MS      500.0
+#define FX_HEADSTART_MS 1000  /* cover plays this long before ultra mode */
 #define FX_DOT_TEX      256   /* circle texture size; scaled up when drawn */
 #define FX_WATCHDOG_MS  45000
 /* One Play press spawns a CHAIN of short-lived reaper processes
@@ -345,6 +346,23 @@ launchfx_fullscreen_starting(Client *c)
 
 	wlr_log(WLR_INFO, "launchfx: game mode activated — "
 			"playing cover animation on %s", c->mon->wlr_output->name);
+}
+
+/* Head start for the cover: update_game_mode() delays ultra activation
+ * until the cover has been playing this long, so the grow animation
+ * finishes before the game (direct scanout) takes over the screen.
+ * Returns remaining ms, 0 when no cover is up or the time has passed. */
+int
+launchfx_cover_headstart_remaining(void)
+{
+	uint64_t elapsed;
+
+	if (!fx.tree)
+		return 0;
+	elapsed = monotonic_msec() - fx.start_ms;
+	if (elapsed >= FX_HEADSTART_MS)
+		return 0;
+	return (int)(FX_HEADSTART_MS - elapsed);
 }
 
 /* A game (or game-launcher child) window mapped.  Do NOT reveal yet —

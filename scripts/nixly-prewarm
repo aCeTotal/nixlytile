@@ -14,7 +14,7 @@
 #
 # Written to be safe under `set -euo pipefail` (writeShellApplication).
 #
-# Usage: nixly-prewarm run|daemon [interval-min]|readahead <appid>|status
+# Usage: nixly-prewarm run|daemon [interval-min]|watch|readahead <appid>|status
 
 set -u
 
@@ -211,10 +211,66 @@ replay_app() {
 
 cmd_run() {
 	local appid lib
-	installed_games | while IFS=$'\t' read -r appid lib _; do
-		replay_app "$appid" "$lib" || true
+	# Single instance: the install watcher and the periodic timer can
+	# both trigger a pass at the same time.
+	(
+		flock -n 9 || { log "another prewarm pass is running"; exit 0; }
+		installed_games | while IFS=$'\t' read -r appid lib _; do
+			replay_app "$appid" "$lib" || true
+		done
+		log "prewarm pass complete"
+	) 9>"${XDG_RUNTIME_DIR:-/tmp}/nixly-prewarm.lock"
+}
+
+# React to game installs/updates the moment they happen: Steam drops the
+# fozpipelinesv6/*.foz pipeline caches into shadercache/<appid>/ at the
+# end of an install or update — that file appearing is exactly the
+# moment a replay becomes possible.  Watch every library's shadercache
+# recursively (new per-app dirs included); watch the steamapps dir
+# itself only until its shadercache exists.  Stamp files keep the
+# triggered pass cheap for every already-processed game.
+cmd_watch() {
+	local lib watch=()
+
+	log "watch: startup pass"
+	cmd_run
+
+	while :; do
+		watch=()
+		while read -r lib; do
+			if [ -d "$lib/shadercache" ]; then
+				watch+=("$lib/shadercache")
+			elif [ -d "$lib" ]; then
+				watch+=("$lib")
+			fi
+		done < <(steam_libraries)
+
+		if [ ${#watch[@]} -eq 0 ]; then
+			sleep 300
+			continue
+		fi
+
+		# Block until a pipeline cache lands (or a shadercache dir is
+		# first created).  Also re-scans libraries on every wakeup, so
+		# a Steam library added later gets picked up.
+		if ! inotifywait -q -q -r \
+				-e close_write -e moved_to -e create \
+				--include '(shadercache|\.foz)$' \
+				"${watch[@]}"; then
+			sleep 60
+			continue
+		fi
+
+		# Steam writes foz files in bursts during install — let the
+		# burst settle before replaying.
+		sleep 30
+		cmd_run
+		# A long replay pass is a blind spot: caches landing while it
+		# ran fired no watched event.  One extra pass picks those up
+		# (cheap — stamps skip everything already done).
+		sleep 30
+		cmd_run
 	done
-	log "prewarm pass complete"
 }
 
 cmd_daemon() {
@@ -291,12 +347,13 @@ cmd_status() {
 case "${1:-}" in
 run)       cmd_run ;;
 daemon)    shift; cmd_daemon "${1:-360}" ;;
+watch)     cmd_watch ;;
 readahead) if [ $# -lt 2 ]; then
 	           echo "usage: nixly-prewarm readahead <appid>" >&2
 	           exit 2
            fi
            cmd_readahead "$2" ;;
 status)    cmd_status ;;
-*)         echo "usage: nixly-prewarm run|daemon [interval-min]|readahead <appid>|status" >&2
+*)         echo "usage: nixly-prewarm run|daemon [interval-min]|watch|readahead <appid>|status" >&2
            exit 2 ;;
 esac
