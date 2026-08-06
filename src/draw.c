@@ -375,16 +375,35 @@ tracked_cursor_handle_destroy(struct wl_listener *listener, void *data)
 	stop_tracking_cursor_surface();
 }
 
+/* The CPU-cursor path never calls wlr_cursor_set_surface(), which is the
+ * only wlroots path that answers wl_surface.frame requests on cursor
+ * surfaces (cursor_output_cursor_handle_output_commit).  Xwayland requests
+ * a frame callback with every cursor image it attaches and defers ALL
+ * further cursor updates until it fires — so without this, an Xwayland
+ * game's first show/hide cycle works and every later "show" is silently
+ * withheld by Xwayland: the pointer stays invisible for the rest of the
+ * session (menus included).  Drain the callbacks ourselves. */
+static void
+cursor_surface_send_frame_done(struct wlr_surface *surface)
+{
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	wlr_surface_send_frame_done(surface, &now);
+}
+
 static void
 tracked_cursor_handle_commit(struct wl_listener *listener, void *data)
 {
 	(void)listener; (void)data;
-	if (!tracked_cursor_surface || !tracked_cursor_surface->buffer)
+	if (!tracked_cursor_surface)
 		return;
-	tracked_cursor_hx -= tracked_cursor_surface->current.dx;
-	tracked_cursor_hy -= tracked_cursor_surface->current.dy;
-	upload_cursor_surface(tracked_cursor_surface,
-		tracked_cursor_hx, tracked_cursor_hy);
+	if (tracked_cursor_surface->buffer) {
+		tracked_cursor_hx -= tracked_cursor_surface->current.dx;
+		tracked_cursor_hy -= tracked_cursor_surface->current.dy;
+		upload_cursor_surface(tracked_cursor_surface,
+			tracked_cursor_hx, tracked_cursor_hy);
+	}
+	cursor_surface_send_frame_done(tracked_cursor_surface);
 }
 
 void
@@ -476,4 +495,8 @@ nixly_cursor_set_client_surface(struct wlr_surface *surface, int hx, int hy)
 	if (surface->buffer) {
 		upload_cursor_surface(surface, hx, hy);
 	}
+	/* Drain any frame callback committed before this set_cursor arrived
+	 * (clients may commit the cursor surface first).  No-op when the
+	 * callback list is empty. */
+	cursor_surface_send_frame_done(surface);
 }
