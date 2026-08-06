@@ -769,6 +769,7 @@ monitor_anim_tick(Monitor *m, double dt)
 {
 	int active = 0;
 	int size_anim = 0;            /* freeze only when REAL size change in flight */
+	int camera_anim = 0;          /* scroll_x / ws_y spring moving this frame */
 	Workspace *ws;
 	int close_still = 0;
 	int vertical_anim;
@@ -791,14 +792,18 @@ monitor_anim_tick(Monitor *m, double dt)
 			ws->scroll_x_f = (double)ws->scroll_x;
 		if (spring_tick(&ws->scroll_x_f, &ws->scroll_x_vel,
 				(double)ws->target_scroll_x,
-				SPRING_HORIZONTAL, dt))
+				SPRING_HORIZONTAL, dt)) {
 			active = 1;
+			camera_anim = 1;
+		}
 		ws->scroll_x = (int)ws->scroll_x_f;
 	}
 
 	if (spring_tick(&m->ws_y_offset, &m->ws_y_vel, 0.0,
-			SPRING_WS_SWITCH, dt))
+			SPRING_WS_SWITCH, dt)) {
 		active = 1;
+		camera_anim = 1;
+	}
 
 	/* Tile-area spring (m->w).  When waybar (un)mounts or changes
 	 * its exclusive zone, m->w_target shifts but m->w lerps —
@@ -939,6 +944,14 @@ monitor_anim_tick(Monitor *m, double dt)
 			monitor_unfreeze_clients(m, /*x11=*/1, /*wl=*/0);
 		m->pos_anim_was_active = pos_only;
 	}
+	/* Camera slide (tile-select scroll / ws switch) with no size change:
+	 * rendermon withholds frame_done from clients this frame so heavy
+	 * tiles (Blender playing an animation) pause their render loop for
+	 * the ~150ms slide instead of racing the compositor for GPU time.
+	 * A slide only translates existing buffers — no client repaint can
+	 * improve it.  Size anims are excluded: there the client MUST
+	 * repaint to converge on its new size. */
+	m->camera_anim_active = camera_anim && !size_anim;
 	m->anim_was_active = active;
 	m->size_anim_was_active = size_anim;
 	return active;

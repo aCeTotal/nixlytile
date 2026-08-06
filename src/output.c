@@ -2724,6 +2724,47 @@ rendermon(struct wl_listener *listener, void *data)
 	 * automatically use direct scanout - bypassing GPU composition entirely.
 	 * This gives optimal frame pacing for games and video.
 	 */
+	/* Software cursor vs direct scanout: wlr_scene draws software
+	 * cursors ONLY on the composited path
+	 * (wlr_output_add_software_cursors_to_render_pass) — the direct
+	 * scanout path returns before it.  On outputs without a working HW
+	 * cursor plane (NVIDIA, HDR's lock_software_cursors), a fullscreen
+	 * game electing scanout makes the pointer invisible: it shows for
+	 * the first seconds (OSD/toast blocks scanout → composition), then
+	 * vanishes for the whole session, menus included.  Hold scanout
+	 * election off while a visible software cursor sits on this output;
+	 * release the hold when the cursor is hidden (game grabbed it with
+	 * a NULL surface) or the HW plane is back, so pointer-locked games
+	 * keep the scanout fast path. */
+	{
+		int sw_cursor_visible = 0;
+		struct wlr_output_cursor *oc;
+		wl_list_for_each(oc, &m->wlr_output->cursors, link) {
+			if (oc->enabled && oc->visible && oc->texture &&
+					oc != m->wlr_output->hardware_cursor) {
+				sw_cursor_visible = 1;
+				break;
+			}
+		}
+		if (sw_cursor_visible) {
+			if (scene->WLR_PRIVATE.direct_scanout) {
+				m->sw_cursor_scanout_hold = 1;
+				scene->WLR_PRIVATE.direct_scanout = false;
+				diag_logf("SCANOUT",
+					"%s: software cursor visible — holding direct scanout off",
+					m->wlr_output->name);
+			}
+		} else if (m->sw_cursor_scanout_hold) {
+			m->sw_cursor_scanout_hold = 0;
+			if (!m->scanout_blacklist) {
+				scene->WLR_PRIVATE.direct_scanout = true;
+				diag_logf("SCANOUT",
+					"%s: software cursor gone — releasing scanout hold",
+					m->wlr_output->name);
+			}
+		}
+	}
+
 	{
 		/* Idle gate: nothing changed and no deferred output state
 		 * (VRR/HDR/toast-plane teardown) is waiting for a commit —
@@ -3127,9 +3168,9 @@ frame_done:
 	 * frame_done to them at ~1 Hz so a render thread blocked on a
 	 * frame callback drains no matter how long it stays hidden.
 	 * Only surfaces that actually requested a callback get one. */
+	int hidden_due =
+		frame_start_ns - m->hidden_done_ns >= 1000000000ULL;
 	{
-		int hidden_due =
-			frame_start_ns - m->hidden_done_ns >= 1000000000ULL;
 		Client *hc, *fsc = fullscreen_visible_on(m);
 		wl_list_for_each(hc, &clients, link) {
 			struct wlr_surface *hs;
@@ -3170,10 +3211,21 @@ frame_done:
 			 * fires mid-anim and the content visibly lags (or worse:
 			 * on an idle desktop only the 1 Hz heartbeat drives this,
 			 * and a client needing several callbacks to relayout
-			 * looks stuck until a ws switch forces damage). */
-			if (!hc->frozen_buffer && !client_size_pending(hc) &&
-					!hidden_due)
-				continue;
+			 * looks stuck until a ws switch forces damage).
+			 *
+			 * Exception: during a camera slide the whole point of the
+			 * frame_done throttle (see below) is that heavy clients
+			 * pause rendering — a frozen X11 Blender dripped every
+			 * vblank here would keep racing the compositor for the
+			 * GPU.  Its snapshot needs no repaint; size-pending
+			 * clients still drip so pending configures converge. */
+			{
+				int vblank_drip = client_size_pending(hc) ||
+						(hc->frozen_buffer &&
+						 !m->camera_anim_active);
+				if (!vblank_drip && !hidden_due)
+					continue;
+			}
 			hs = client_surface(hc);
 			if (!hs || !hs->mapped)
 				continue;
@@ -3194,8 +3246,21 @@ frame_done:
 	 *
 	 * We always send this, even if we didn't commit, because clients
 	 * need to know a vblank occurred for proper timing.
-	 */
-	wlr_scene_output_send_frame_done(m->scene_output, &now);
+	 *
+	 * Exception: while a camera slide is in flight (tile-select scroll,
+	 * ws switch), withhold frame_done so heavy visible clients (Blender
+	 * playing an animation) pause their render loop for the slide's
+	 * ~150ms instead of racing the compositor for the GPU — measured as
+	 * pageflips locked to the client's frame cadence (~10ms gaps on a
+	 * 3.33ms panel, ANIMHITCH) whenever a heavy tile was on screen.
+	 * The slide only translates existing buffers, so no client repaint
+	 * can improve it.  Callbacks queue in the surface and flush on the
+	 * first frame after settle.  Fullscreen video/games keep their
+	 * pacing, and the 1 Hz hidden_due flush bounds starvation during a
+	 * continuous Mod+scroll column cycle.  The drip block above still
+	 * serves size-pending/frozen clients every vblank regardless. */
+	if (!(m->camera_anim_active && !is_video && !is_game && !hidden_due))
+		wlr_scene_output_send_frame_done(m->scene_output, &now);
 
 	/*
 	 * Fullscreen video/game: keep the vblank chain alive unconditionally.

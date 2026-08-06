@@ -1491,6 +1491,8 @@ struct Monitor {
 	int anim_was_active;          /* edge-detection: any anim active */
 	int size_anim_was_active;     /* edge-detection: freeze only on SIZE anims */
 	int pos_anim_was_active;      /* edge-detection: X11 freeze on PURE pos anims */
+	int camera_anim_active;       /* camera in flight (scroll_x / ws_y spring) — gates frame_done throttle */
+	int sw_cursor_scanout_hold;   /* we disabled scanout election for a visible software cursor */
 	/* Spring state for the tile area (m->w).  When a layer-shell
 	 * surface like waybar (de)appears, m->w changes — but stepping
 	 * m->w directly snaps every tile.  Spring it so the edge facing
