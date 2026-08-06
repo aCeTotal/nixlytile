@@ -284,25 +284,6 @@ cursor_commit_buffer(struct CpuCursorBuffer *buf, int32_t hx, int32_t hy)
 
 static int cursor_paint_xcursor(const char *name);
 
-/* Policy: the pointer must ALWAYS be visible while a fullscreen game is
- * on screen.  The only exception is an active pointer LOCK on the game
- * surface (mouselook) — the cursor position is frozen then, so showing a
- * stuck arrow would be wrong.  XWayland maps X11 mouselook grabs to a
- * locked pointer constraint, so FPS play still gets its hidden cursor. */
-static int
-game_cursor_must_show(void)
-{
-	Client *fsc = selmon ? fullscreen_visible_on(selmon) : NULL;
-
-	if (!fsc || !looks_like_game(fsc))
-		return 0;
-	if (active_constraint &&
-			active_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED &&
-			active_constraint->surface == seat->pointer_state.focused_surface)
-		return 0;
-	return 1;
-}
-
 static void
 stop_tracking_cursor_surface(void)
 {
@@ -384,17 +365,6 @@ upload_cursor_surface(struct wlr_surface *surface, int hx, int hy)
 		game_log("CURSOR: client image %ux%u hotspot=%d,%d "
 			"nonzero_alpha=%u buf=%s", copy_w, copy_h, hx, hy, opaque,
 			buf == cpu_cursor_buf ? "A" : "B");
-
-		/* Fully transparent client cursor while a fullscreen game is
-		 * on screen = the Proton/Wine "hide cursor" pattern.  The
-		 * pointer must always be visible in games, so paint the
-		 * default arrow instead — the surface stays tracked, so the
-		 * game's next real cursor image still replaces it. */
-		if (opaque == 0 && game_cursor_must_show()) {
-			game_log("CURSOR: transparent game cursor — forcing default arrow");
-			if (cursor_paint_xcursor("default"))
-				return;
-		}
 	}
 
 	cursor_commit_buffer(buf, (int32_t)hx, (int32_t)hy);
@@ -505,15 +475,6 @@ nixly_cursor_set_xcursor(const char *name)
 void
 nixly_cursor_set_client_surface(struct wlr_surface *surface, int hx, int hy)
 {
-	/* A game unsetting its cursor (NULL surface) must not leave the
-	 * pointer invisible — force the default arrow unless a pointer
-	 * lock is active (see game_cursor_must_show). */
-	if (!surface && game_cursor_must_show()) {
-		game_log("CURSOR: game hid cursor (NULL surface) — forcing default arrow");
-		nixly_cursor_set_xcursor("default");
-		return;
-	}
-
 	cursor_from_client = 1;
 	cursor_cached_name[0] = '\0';
 

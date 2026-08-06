@@ -2738,16 +2738,28 @@ rendermon(struct wl_listener *listener, void *data)
 	 * disables the wlr cursor → no visible software cursor → the
 	 * scanout fast path returns for pointer-locked play.  Unlocked
 	 * when the game leaves so the desktop gets its HW plane back. */
-	if (is_game && !m->game_cursor_swlock) {
-		m->game_cursor_swlock = 1;
-		wlr_output_lock_software_cursors(m->wlr_output, true);
-		diag_logf("CURSOR", "%s: fullscreen game — forcing software cursor",
-			m->wlr_output->name);
-	} else if (!is_game && m->game_cursor_swlock) {
-		m->game_cursor_swlock = 0;
-		wlr_output_lock_software_cursors(m->wlr_output, false);
-		diag_logf("CURSOR", "%s: game gone — hardware cursor allowed again",
-			m->wlr_output->name);
+	{
+		/* classify_fullscreen_content() keys off focustop(m): a floating
+		 * popup (Steam overlay, notification) on top of a fullscreen
+		 * game reports is_game=0 and would release the lock mid-game.
+		 * Key the lock off "a fullscreen game is visible" instead. */
+		int game_visible = is_game;
+		if (!game_visible) {
+			Client *gfsc = fullscreen_visible_on(m);
+			if (gfsc && looks_like_game(gfsc))
+				game_visible = 1;
+		}
+		if (game_visible && !m->game_cursor_swlock) {
+			m->game_cursor_swlock = 1;
+			wlr_output_lock_software_cursors(m->wlr_output, true);
+			diag_logf("CURSOR", "%s: fullscreen game — forcing software cursor",
+				m->wlr_output->name);
+		} else if (!game_visible && m->game_cursor_swlock) {
+			m->game_cursor_swlock = 0;
+			wlr_output_lock_software_cursors(m->wlr_output, false);
+			diag_logf("CURSOR", "%s: game gone — hardware cursor allowed again",
+				m->wlr_output->name);
+		}
 	}
 
 	/* Software cursor vs direct scanout: wlr_scene draws software

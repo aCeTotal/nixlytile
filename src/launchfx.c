@@ -250,6 +250,26 @@ fx_readahead(pid_t reaper)
 	}
 }
 
+/* Start tracking a launch: pre-boost + chain/abort watchdog.  No visual
+ * — the cover animation plays later, at game-mode activation. */
+static void
+fx_track_start(void)
+{
+	fx.active = 1;
+	fx.grown = 0;
+	fx.reveal_pending = 0;
+	fx.content_seen = 0;
+	fx.reaper = 0;
+	fx.orphan_ms = 0;
+	fx.window_ms = 0;
+
+	game_prelaunch_boost();
+
+	fx.watchdog = wl_event_loop_add_timer(event_loop, fx_watchdog_cb, NULL);
+	if (fx.watchdog)
+		wl_event_source_timer_update(fx.watchdog, FX_WATCHDOG_MS);
+}
+
 /* Build the cover scene on m and start the grow tick.  Returns 0 on
  * allocation failure. */
 static int
@@ -272,23 +292,11 @@ fx_start_cover(Monitor *m)
 		return 0;
 	}
 
-	fx.active = 1;
-	fx.grown = 0;
-	fx.reveal_pending = 0;
-	fx.content_seen = 0;
-	fx.reaper = 0;
-	fx.orphan_ms = 0;
-	fx.window_ms = 0;
 	fx.start_ms = monotonic_msec();
-
-	game_prelaunch_boost();
 
 	fx.tick = wl_event_loop_add_timer(event_loop, fx_tick_cb, NULL);
 	if (fx.tick)
 		wl_event_source_timer_update(fx.tick, 1);
-	fx.watchdog = wl_event_loop_add_timer(event_loop, fx_watchdog_cb, NULL);
-	if (fx.watchdog)
-		wl_event_source_timer_update(fx.watchdog, FX_WATCHDOG_MS);
 	return 1;
 }
 
@@ -301,40 +309,41 @@ launchfx_start(pid_t reaper)
 		return;
 
 	/* A fullscreen game is already on screen (e.g. Steam runs a setup
-	 * step for something else) — never black it out. */
+	 * step for something else) — game mode owns the tuning already. */
 	fsc = fullscreen_visible_on(selmon);
 	if (fsc && looks_like_game(fsc))
 		return;
 
 	fx_readahead(reaper);
 
-	if (!fx_start_cover(selmon))
-		return;
+	fx_track_start();
 	fx.reaper = reaper;
 
 	wlr_log(WLR_INFO, "launchfx: Steam launch detected (reaper pid %d) — "
-			"pre-boost + cover animation", (int)reaper);
+			"pre-boost; cover plays at game-mode activation", (int)reaper);
 }
 
-/* Called from setfullscreen() the moment a game takes the screen.
- * Fallback for launches the reaper poll never saw (non-Steam launchers,
- * detection misses): play the cover grow right before fullscreen and
- * let rendermon's launchfx_game_ready() reveal the presenting game. */
+/* Called from update_game_mode() the moment ultra game mode activates for
+ * a fullscreen game: play the cover grow and let rendermon's
+ * launchfx_game_ready() reveal the presenting game. */
 void
 launchfx_fullscreen_starting(Client *c)
 {
-	if (fx.active || !c || !c->mon || !c->mon->wlr_output)
+	if (!c || !c->mon || !c->mon->wlr_output)
 		return;
-	if (c->fx_covered || !looks_like_game(c))
+	if (fx.tree || c->fx_covered || !looks_like_game(c))
 		return;
 	c->fx_covered = 1;
+	if (!fx.active)
+		fx_track_start();
 	if (!fx_start_cover(c->mon))
 		return;
 	/* Arm the interactive-launcher fallback: the window exists, so a
 	 * game that fullscreens but never presents must still be revealed. */
-	fx.window_ms = monotonic_msec();
+	if (!fx.window_ms)
+		fx.window_ms = monotonic_msec();
 
-	wlr_log(WLR_INFO, "launchfx: game fullscreen without launch cover — "
+	wlr_log(WLR_INFO, "launchfx: game mode activated — "
 			"playing cover animation on %s", c->mon->wlr_output->name);
 }
 

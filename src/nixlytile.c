@@ -2438,13 +2438,33 @@ init_logging(void)
 {
 	#define NIXLY_LOG_DIR "/tmp/nixlytile"
 
-	/* Production mode: skip all log file creation + diag timer when NIXLY_DEBUG
-	 * unset. Eliminates 7 fopen()s, stderr dup, periodic nvidia-smi popen,
-	 * and per-event log writes. Set NIXLY_DEBUG=1 to enable diagnostics. */
+	mkdir(NIXLY_LOG_DIR, 0755);
+
+	/* game_debug.log is always on — game issues (cursor, constraints,
+	 * game mode) must be diagnosable from the field without a restart
+	 * with NIXLY_DEBUG set. */
+	game_log_fd = open(NIXLY_LOG_DIR "/game_debug.log",
+		O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (game_log_fd >= 0) {
+		struct timespec gts;
+		struct tm gtm;
+		char ghdr[128];
+		int gn;
+		clock_gettime(CLOCK_REALTIME, &gts);
+		localtime_r(&gts.tv_sec, &gtm);
+		gn = snprintf(ghdr, sizeof(ghdr),
+			"=== game debug log %04d-%02d-%02d %02d:%02d:%02d (PID %d) ===\n",
+			gtm.tm_year + 1900, gtm.tm_mon + 1, gtm.tm_mday,
+			gtm.tm_hour, gtm.tm_min, gtm.tm_sec, getpid());
+		(void)!write(game_log_fd, ghdr, gn);
+	}
+
+	/* Production mode: skip the remaining log files + diag timer when
+	 * NIXLY_DEBUG unset. Eliminates fopen()s, stderr dup, periodic
+	 * nvidia-smi popen, and per-event log writes. Set NIXLY_DEBUG=1 to
+	 * enable full diagnostics. */
 	if (!getenv("NIXLY_DEBUG"))
 		return;
-
-	mkdir(NIXLY_LOG_DIR, 0755);
 
 	/* Save original stderr before redirect */
 	log_stderr_fd = dup(STDERR_FILENO);
@@ -2529,15 +2549,6 @@ init_logging(void)
 			(void)!write(error_log_fd, hdr, n);
 		}
 
-		game_log_fd = open(NIXLY_LOG_DIR "/game_debug.log",
-			O_WRONLY | O_CREAT | O_TRUNC, 0644);
-		if (game_log_fd >= 0) {
-			int n = snprintf(hdr, sizeof(hdr),
-				"=== game debug log %04d-%02d-%02d %02d:%02d:%02d (PID %d) ===\n",
-				tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-				tm.tm_hour, tm.tm_min, tm.tm_sec, getpid());
-			(void)!write(game_log_fd, hdr, n);
-		}
 	}
 
 	#undef NIXLY_LOG_DIR
