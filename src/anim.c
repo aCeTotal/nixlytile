@@ -396,6 +396,7 @@ animcommitnotify(struct wl_listener *listener, void *data)
 	int iw, ih;
 
 	(void)data;
+	launchfx_note_commit(c);
 	if (!c->scene_surface || !c->mon)
 		return;
 #ifdef XWAYLAND
@@ -893,6 +894,9 @@ monitor_anim_tick(Monitor *m, double dt)
 	{
 		int notif_still = 0;
 		notify_tick(m, dt, &notif_still);
+		if (notif_still)
+			active = 1;
+		osd_tick(m, dt, &notif_still);
 		if (notif_still)
 			active = 1;
 	}

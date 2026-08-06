@@ -1493,6 +1493,7 @@ struct Monitor {
 	int pos_anim_was_active;      /* edge-detection: X11 freeze on PURE pos anims */
 	int camera_anim_active;       /* camera in flight (scroll_x / ws_y spring) — gates frame_done throttle */
 	int sw_cursor_scanout_hold;   /* we disabled scanout election for a visible software cursor */
+	int game_cursor_swlock;       /* software-cursor lock held while a fullscreen game is visible */
 	/* Spring state for the tile area (m->w).  When a layer-shell
 	 * surface like waybar (de)appears, m->w changes — but stepping
 	 * m->w directly snaps every tile.  Spring it so the edge facing
@@ -2787,6 +2788,12 @@ void launchfx_init(void);
 void launchfx_client_mapped(Client *c);
 void launchfx_fullscreen_starting(Client *c);
 void launchfx_game_ready(void);
+void launchfx_note_commit(Client *c);
+
+/* osd.c — compositor-drawn toast notifications */
+void osd_show(Monitor *m, const char *msg);
+void osd_tick(Monitor *m, double dt, int *still);
+void osd_purge_mon(Monitor *m);
 void schedule_game_mode_update(void);
 void gm_bg_init(void);
 void gm_bg_cleanup(void);

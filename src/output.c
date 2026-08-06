@@ -67,6 +67,7 @@ cleanupmon(struct wl_listener *listener, void *data)
 		m->toast_overlay_layer = NULL;
 	}
 	closemon(m);
+	osd_purge_mon(m);
 	ll_cursor_cleanup(m);
 	monitor_cleanup_workspaces(m);
 	wl_event_source_remove(m->idle_heartbeat);
@@ -2724,6 +2725,31 @@ rendermon(struct wl_listener *listener, void *data)
 	 * automatically use direct scanout - bypassing GPU composition entirely.
 	 * This gives optimal frame pacing for games and video.
 	 */
+	/* Fullscreen game: the pointer must ALWAYS be visible.  The HW
+	 * cursor plane can be claimed at set-time yet never reach the
+	 * screen (NVIDIA dumb-buffer passthrough, cross-GPU imports,
+	 * cursor state riding failed commits), and direct scanout skips
+	 * composited software cursors entirely — both make the pointer
+	 * silently invisible exactly when a game is fullscreen.  Lock
+	 * software cursors while a fullscreen game is visible: the cursor
+	 * is composited into every frame, and wlroots refuses direct
+	 * scanout while a visible software cursor exists, so the pointer
+	 * cannot vanish.  A game that hides its cursor (NULL surface)
+	 * disables the wlr cursor → no visible software cursor → the
+	 * scanout fast path returns for pointer-locked play.  Unlocked
+	 * when the game leaves so the desktop gets its HW plane back. */
+	if (is_game && !m->game_cursor_swlock) {
+		m->game_cursor_swlock = 1;
+		wlr_output_lock_software_cursors(m->wlr_output, true);
+		diag_logf("CURSOR", "%s: fullscreen game — forcing software cursor",
+			m->wlr_output->name);
+	} else if (!is_game && m->game_cursor_swlock) {
+		m->game_cursor_swlock = 0;
+		wlr_output_lock_software_cursors(m->wlr_output, false);
+		diag_logf("CURSOR", "%s: game gone — hardware cursor allowed again",
+			m->wlr_output->name);
+	}
+
 	/* Software cursor vs direct scanout: wlr_scene draws software
 	 * cursors ONLY on the composited path
 	 * (wlr_output_add_software_cursors_to_render_pass) — the direct
@@ -5471,8 +5497,10 @@ hide_hz_osd(Monitor *m)
 void
 show_hz_osd(Monitor *m, const char *msg)
 {
-	(void)m;
-	(void)msg;
+	/* All compositor messages (game mode, VRR, FPS limit, Hz/mode
+	 * changes) route to the toast card in osd.c — slides in from the
+	 * right edge like the client notification lane. */
+	osd_show(m, msg);
 }
 #if 0
 void

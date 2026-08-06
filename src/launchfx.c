@@ -38,6 +38,7 @@ static struct {
 	int active;               /* animation running (grow or hold) */
 	int grown;                /* black covers the full monitor */
 	int reveal_pending;       /* game ready before grow finished */
+	int content_seen;         /* fullscreen game committed a buffer under the cover */
 	pid_t reaper;             /* newest live reaper of the launch chain */
 	uint64_t orphan_ms;       /* when the tracked reaper died; 0 = alive */
 	uint64_t window_ms;       /* when the first game window mapped; 0 = none */
@@ -120,6 +121,7 @@ fx_teardown(void)
 	fx.active = 0;
 	fx.grown = 0;
 	fx.reveal_pending = 0;
+	fx.content_seen = 0;
 	fx.reaper = 0;
 	fx.orphan_ms = 0;
 	fx.window_ms = 0;
@@ -158,7 +160,7 @@ fx_grow_complete(void)
 		fx.tick = NULL;
 	}
 	fx.grown = 1;
-	if (fx.reveal_pending)
+	if (fx.reveal_pending && fx.content_seen)
 		fx_finish();
 }
 
@@ -273,6 +275,7 @@ fx_start_cover(Monitor *m)
 	fx.active = 1;
 	fx.grown = 0;
 	fx.reveal_pending = 0;
+	fx.content_seen = 0;
 	fx.reaper = 0;
 	fx.orphan_ms = 0;
 	fx.window_ms = 0;
@@ -357,16 +360,42 @@ launchfx_client_mapped(Client *c)
 }
 
 /* Belt-and-braces from rendermon: a fullscreen game is classified and
- * producing frames on some monitor. */
+ * producing frames on some monitor.  The reveal additionally waits for
+ * content_seen — the game must have committed an actual buffer under the
+ * cover, so the screen stays black until something real is there.
+ * rendermon retries every vblank, so the reveal lands on the first frame
+ * after the commit arrives. */
 void
 launchfx_game_ready(void)
 {
 	if (!fx.active)
 		return;
+	if (!fx.content_seen) {
+		fx.reveal_pending = 1;
+		return;
+	}
 	if (fx.grown)
 		fx_finish();
 	else
 		fx.reveal_pending = 1;
+}
+
+/* Every surface commit passes through here (animcommitnotify).  While a
+ * cover is up, the first buffer commit from a fullscreen game marks the
+ * content the reveal is waiting for. */
+void
+launchfx_note_commit(Client *c)
+{
+	struct wlr_surface *surf;
+
+	if (!fx.active || fx.content_seen || !c || !c->isfullscreen)
+		return;
+	if (!looks_like_game(c))
+		return;
+	surf = client_surface(c);
+	if (!surf || !(surf->current.committed & WLR_SURFACE_STATE_BUFFER))
+		return;
+	fx.content_seen = 1;
 }
 
 static int

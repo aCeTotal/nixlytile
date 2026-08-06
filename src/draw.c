@@ -282,6 +282,27 @@ cursor_commit_buffer(struct CpuCursorBuffer *buf, int32_t hx, int32_t hy)
 	wlr_cursor_set_buffer(cursor, buf ? &buf->base : NULL, hx, hy, 1.0f);
 }
 
+static int cursor_paint_xcursor(const char *name);
+
+/* Policy: the pointer must ALWAYS be visible while a fullscreen game is
+ * on screen.  The only exception is an active pointer LOCK on the game
+ * surface (mouselook) — the cursor position is frozen then, so showing a
+ * stuck arrow would be wrong.  XWayland maps X11 mouselook grabs to a
+ * locked pointer constraint, so FPS play still gets its hidden cursor. */
+static int
+game_cursor_must_show(void)
+{
+	Client *fsc = selmon ? fullscreen_visible_on(selmon) : NULL;
+
+	if (!fsc || !looks_like_game(fsc))
+		return 0;
+	if (active_constraint &&
+			active_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED &&
+			active_constraint->surface == seat->pointer_state.focused_surface)
+		return 0;
+	return 1;
+}
+
 static void
 stop_tracking_cursor_surface(void)
 {
@@ -353,7 +374,7 @@ upload_cursor_surface(struct wlr_surface *surface, int hx, int hy)
 		wlr_buffer_end_data_ptr_access(&surface->buffer->base);
 	}
 
-	if (game_log_fd >= 0) {
+	{
 		uint32_t px, opaque = 0;
 		const uint8_t *p = (const uint8_t *)buf->map;
 		for (y = 0; y < copy_h; y++)
@@ -363,6 +384,17 @@ upload_cursor_surface(struct wlr_surface *surface, int hx, int hy)
 		game_log("CURSOR: client image %ux%u hotspot=%d,%d "
 			"nonzero_alpha=%u buf=%s", copy_w, copy_h, hx, hy, opaque,
 			buf == cpu_cursor_buf ? "A" : "B");
+
+		/* Fully transparent client cursor while a fullscreen game is
+		 * on screen = the Proton/Wine "hide cursor" pattern.  The
+		 * pointer must always be visible in games, so paint the
+		 * default arrow instead — the surface stays tracked, so the
+		 * game's next real cursor image still replaces it. */
+		if (opaque == 0 && game_cursor_must_show()) {
+			game_log("CURSOR: transparent game cursor — forcing default arrow");
+			if (cursor_paint_xcursor("default"))
+				return;
+		}
 	}
 
 	cursor_commit_buffer(buf, (int32_t)hx, (int32_t)hy);
@@ -406,8 +438,12 @@ tracked_cursor_handle_commit(struct wl_listener *listener, void *data)
 	cursor_surface_send_frame_done(tracked_cursor_surface);
 }
 
-void
-nixly_cursor_set_xcursor(const char *name)
+/* Paint an xcursor image into the CPU back buffer and commit it.  Image
+ * only — leaves the client/xcursor cache state and any tracked client
+ * cursor surface untouched, so callers decide the ownership semantics.
+ * Returns 0 if the xcursor or buffer is unavailable. */
+static int
+cursor_paint_xcursor(const char *name)
 {
 	struct CpuCursorBuffer *buf;
 	struct wlr_xcursor *xcur;
@@ -416,30 +452,14 @@ nixly_cursor_set_xcursor(const char *name)
 	const uint8_t *src;
 	uint8_t *dst;
 
-	if (!cursor_from_client && cursor_cached_name[0] &&
-	    strcmp(cursor_cached_name, name) == 0)
-		return;
-
-	cursor_from_client = 0;
-	snprintf(cursor_cached_name, sizeof(cursor_cached_name), "%s", name);
-
-	stop_tracking_cursor_surface();
-
-	if (!cpu_cursor_active) {
-		wlr_cursor_set_xcursor(cursor, cursor_mgr, name);
-		return;
-	}
-
 	wlr_xcursor_manager_load(cursor_mgr, 1);
 	xcur = wlr_xcursor_manager_get_xcursor(cursor_mgr, name, 1);
-	if (!xcur || xcur->image_count == 0) {
-		wlr_cursor_set_xcursor(cursor, cursor_mgr, name);
-		return;
-	}
+	if (!xcur || xcur->image_count == 0)
+		return 0;
 
 	buf = cursor_back_buffer();
 	if (!buf)
-		return;
+		return 0;
 
 	img = xcur->images[0];
 
@@ -463,11 +483,37 @@ nixly_cursor_set_xcursor(const char *name)
 		buf == cpu_cursor_buf ? "A" : "B");
 
 	cursor_commit_buffer(buf, (int32_t)img->hotspot_x, (int32_t)img->hotspot_y);
+	return 1;
+}
+
+void
+nixly_cursor_set_xcursor(const char *name)
+{
+	if (!cursor_from_client && cursor_cached_name[0] &&
+	    strcmp(cursor_cached_name, name) == 0)
+		return;
+
+	cursor_from_client = 0;
+	snprintf(cursor_cached_name, sizeof(cursor_cached_name), "%s", name);
+
+	stop_tracking_cursor_surface();
+
+	if (!cpu_cursor_active || !cursor_paint_xcursor(name))
+		wlr_cursor_set_xcursor(cursor, cursor_mgr, name);
 }
 
 void
 nixly_cursor_set_client_surface(struct wlr_surface *surface, int hx, int hy)
 {
+	/* A game unsetting its cursor (NULL surface) must not leave the
+	 * pointer invisible — force the default arrow unless a pointer
+	 * lock is active (see game_cursor_must_show). */
+	if (!surface && game_cursor_must_show()) {
+		game_log("CURSOR: game hid cursor (NULL surface) — forcing default arrow");
+		nixly_cursor_set_xcursor("default");
+		return;
+	}
+
 	cursor_from_client = 1;
 	cursor_cached_name[0] = '\0';
 

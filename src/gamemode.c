@@ -1986,6 +1986,14 @@ update_game_mode(void)
 		 */
 		wlr_log(WLR_INFO, "ULTRA GAME MODE ACTIVATED - maximum performance, minimal latency");
 
+		/* Play the launch cover (dot grows to black, held until the game
+		 * commits content) even when the Steam-reaper poll and the
+		 * setfullscreen hook both missed it — e.g. a game whose
+		 * classification (comm/app_id) only settled after it went
+		 * fullscreen.  No-op if a cover is active or already played
+		 * for this client. */
+		launchfx_fullscreen_starting(c);
+
 		/*
 		 * Get game PID FIRST — before freeze_background_processes()
 		 * so the game and its children are excluded from SIGSTOP.
