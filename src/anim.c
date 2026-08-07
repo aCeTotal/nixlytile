@@ -19,18 +19,42 @@
  * subsurfaces (browsers, terminals, games), this is visually
  * indistinguishable from a true uniform scale.
  */
+struct scale_ctx {
+	double scale[2];
+	struct wlr_surface *root;   /* the client's toplevel surface */
+	int box_w, box_h;           /* target inner box */
+};
+
 static void
 scene_buffer_scale_iter(struct wlr_scene_buffer *buf, int sx, int sy, void *data)
 {
-	double *scale = data;
+	struct scale_ctx *ctx = data;
+	struct wlr_scene_surface *ss;
 	int w, h;
 
 	(void)sx; (void)sy;
 	if (!buf || !buf->buffer)
 		return;
 
-	w = (int)((double)buf->buffer->width * scale[0]);
-	h = (int)((double)buf->buffer->height * scale[1]);
+	ss = wlr_scene_surface_try_from_buffer(buf);
+	if (ss && ss->surface == ctx->root) {
+		/* Root surface: the window-geometry clip has already trimmed
+		 * the CSD margin off the buffer, so the tile's inner box IS
+		 * its dest size.  Deriving it from raw buffer pixels instead
+		 * overshoots by exactly that margin — Chrome's 20px shadow
+		 * made its content render 20px past the tile border on every
+		 * scaled frame. */
+		w = ctx->box_w;
+		h = ctx->box_h;
+	} else if (ss && ss->surface) {
+		/* Subsurface: scale its logical (viewport-applied) size, not
+		 * the buffer pixels, which differ under buffer_scale > 1. */
+		w = (int)((double)ss->surface->current.width * ctx->scale[0]);
+		h = (int)((double)ss->surface->current.height * ctx->scale[1]);
+	} else {
+		w = (int)((double)buf->buffer->width * ctx->scale[0]);
+		h = (int)((double)buf->buffer->height * ctx->scale[1]);
+	}
 	if (w <= 0 || h <= 0)
 		return;
 	wlr_scene_buffer_set_dest_size(buf, w, h);
@@ -49,7 +73,7 @@ void
 client_scale_to_box(Client *c, int box_w, int box_h)
 {
 	int nat_w, nat_h;
-	double scale[2];
+	struct scale_ctx ctx;
 
 	if (!c || !c->scene_surface || !client_surface(c) ||
 			!client_surface(c)->mapped)
@@ -68,11 +92,14 @@ client_scale_to_box(Client *c, int box_w, int box_h)
 	if (nat_w <= 0 || nat_h <= 0 || box_w <= 0 || box_h <= 0)
 		return;
 
-	scale[0] = (double)box_w / (double)nat_w;
-	scale[1] = (double)box_h / (double)nat_h;
+	ctx.scale[0] = (double)box_w / (double)nat_w;
+	ctx.scale[1] = (double)box_h / (double)nat_h;
+	ctx.root = client_surface(c);
+	ctx.box_w = box_w;
+	ctx.box_h = box_h;
 
 	wlr_scene_node_for_each_buffer(&c->scene_surface->node,
-			scene_buffer_scale_iter, scale);
+			scene_buffer_scale_iter, &ctx);
 }
 
 void
@@ -210,6 +237,8 @@ spring_tick(double *pos, double *vel, double target, SpringParams sp, double dt)
  * target updates from monitor_apply_positions just refresh
  * target_geom — they do NOT interrupt the running anim.
  */
+static int live_resize_active(void);
+
 void
 client_set_target_geom(Client *c, struct wlr_box g)
 {
@@ -255,13 +284,21 @@ client_set_target_geom(Client *c, struct wlr_box g)
 		int size_changed = (c->geom.width != g.width ||
 				c->geom.height != g.height);
 		if (size_changed) {
-			/* Configure with the FINAL target size (col->target_width,
-			 * col->target_height per-client share), not the lerped
-			 * intermediate `g` — the client renders ONCE at the size
-			 * it will settle at.  Re-sent whenever the final target
-			 * moves mid-anim (interactive column drag-resize), so the
-			 * client's content tracks the live edge instead of only
-			 * updating after release. */
+			/* The final size (col->target_width, col->target_height
+			 * per-client share) is configured at SETTLE — see the
+			 * resize() in clients_anim_tick — not here.  Configuring
+			 * it up front makes a fast client (Chrome acks in ~10ms)
+			 * commit its final-size buffer while the box is still near
+			 * its old size; client_scale_to_box then stretches that
+			 * buffer up to the lerped box (measured 2.17×) and the
+			 * content visibly zooms back down over the rest of the
+			 * anim.  Withholding it keeps the client's own buffer as
+			 * the natural size, so the scale walks monotonically
+			 * 1.0 → final and the content simply follows the box.
+			 *
+			 * A live drag is the exception: the pointer owns the size
+			 * there, and the client must re-render at the live edge
+			 * instead of only after release. */
 			int nc = c->column->n_clients;
 			int gap = c->mon && c->mon->gaps ? (int)gappx : 0;
 			int per_h_target;
@@ -295,7 +332,8 @@ client_set_target_geom(Client *c, struct wlr_box g)
 				c->geom_fw = (double)c->geom.width;
 				c->geom_fh = (double)c->geom.height;
 				c->geom_vx = c->geom_vy = c->geom_vw = c->geom_vh = 0.0;
-				client_request_size(c, final_w, final_h);
+				if (live_resize_active())
+					client_request_size(c, final_w, final_h);
 				c->anim_final_w = final_w;
 				c->anim_final_h = final_h;
 				client_get_committed_size(c,
@@ -303,7 +341,8 @@ client_set_target_geom(Client *c, struct wlr_box g)
 						&c->anim_start_nat_h);
 			} else if (final_w != c->anim_final_w ||
 					final_h != c->anim_final_h) {
-				client_request_size(c, final_w, final_h);
+				if (live_resize_active())
+					client_request_size(c, final_w, final_h);
 				c->anim_final_w = final_w;
 				c->anim_final_h = final_h;
 			}
@@ -327,10 +366,12 @@ client_set_target_geom(Client *c, struct wlr_box g)
 			c->geom_fh = (double)c->geom.height;
 			c->geom_vx = c->geom_vy = c->geom_vw = c->geom_vh = 0.0;
 			if (size_changed) {
-				/* Configure the final size NOW (fullscreen toggle,
-				 * float-resize) — the client renders its new
-				 * content during the anim, not after settle. */
-				client_request_size(c, final_w, final_h);
+				/* Same as the column path above: the final size
+				 * (fullscreen toggle, float-resize) is configured
+				 * at settle, so the client's committed buffer stays
+				 * the natural size the anim scales FROM. */
+				if (live_resize_active())
+					client_request_size(c, final_w, final_h);
 				c->anim_final_w = final_w;
 				c->anim_final_h = final_h;
 				client_get_committed_size(c,
@@ -342,7 +383,8 @@ client_set_target_geom(Client *c, struct wlr_box g)
 		} else if (size_changed && c->anim_final_w > 0 &&
 				(final_w != c->anim_final_w ||
 				 final_h != c->anim_final_h)) {
-			client_request_size(c, final_w, final_h);
+			if (live_resize_active())
+				client_request_size(c, final_w, final_h);
 			c->anim_final_w = final_w;
 			c->anim_final_h = final_h;
 		}
