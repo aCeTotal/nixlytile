@@ -1986,10 +1986,10 @@ update_game_mode(void)
 		 */
 		wlr_log(WLR_INFO, "ULTRA GAME MODE ACTIVATED - maximum performance, minimal latency");
 
-		/* Play the launch cover (dot grows to black, held until the game
-		 * commits content).  This is the ONLY trigger — the cover plays
-		 * exactly when game mode activates, never at the Play press.
-		 * No-op if a cover is up or already played for this client. */
+		/* The cover normally started at the fullscreen transition in
+		 * setfullscreen(); this is the backstop for games that reach
+		 * ultra mode without one.  No-op if a cover is up or already
+		 * played for this client. */
 		launchfx_fullscreen_starting(c);
 
 		/* Give the cover a 1 s head start: ultra mode flips on direct

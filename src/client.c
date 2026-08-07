@@ -2031,6 +2031,12 @@ setfullscreen(Client *c, int fullscreen)
 
 	if (fullscreen) {
 		struct wlr_box fsgeom = fullscreen_mirror_geom(c->mon);
+		/* Cover the screen HERE, on the transition into fullscreen:
+		 * the game has not been configured to the output rect yet, so
+		 * nothing of its fullscreen frame has reached the screen and
+		 * the animation lands right before the game comes up. */
+		if (!was)
+			launchfx_fullscreen_starting(c);
 		wlr_log(WLR_INFO,
 			"GAME_TRACE: setfullscreen resize mon='%s' target=%dx%d@%d,%d "
 			"(c->mon->m=%dx%d@%d,%d)",

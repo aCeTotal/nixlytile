@@ -2789,6 +2789,7 @@ int launchfx_active(void);
 
 /* osd.c — compositor-drawn toast notifications */
 void osd_show(Monitor *m, const char *msg);
+void osd_show_force(Monitor *m, const char *msg);
 void osd_tick(Monitor *m, double dt, int *still);
 void osd_purge_mon(Monitor *m);
 void schedule_game_mode_update(void);

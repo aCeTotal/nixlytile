@@ -7,10 +7,13 @@
  *  2. Pre-boost: CPU governor → performance immediately, so Proton
  *     setup / shader compilation / asset loading run at full clock
  *     from t=0.  Full ultra game mode takes over when the window maps.
- *  3. Launch animation: a tiny black dot at the center of the focused
- *     monitor grows smoothly until it covers the screen, holds black
- *     through the load, and is dropped the moment the game's first
- *     window is ready — the game appears right as the black completes.
+ *  3. Launch animation: a tiny black dot at the center of the monitor
+ *     the game takes grows smoothly until it covers the screen, holds
+ *     black through the last of the load, and is dropped the moment the
+ *     game presents its first fullscreen frame.  It starts when the game
+ *     enters fullscreen (setfullscreen), NOT at the Play press: Steam's
+ *     splash/launcher stages run for seconds before that, and covering
+ *     them meant the black came up, timed out and replayed.
  */
 #include <cairo/cairo.h>
 #include <fcntl.h>
@@ -26,6 +29,10 @@
 #define FX_HEADSTART_MS 1000  /* cover plays this long before ultra mode */
 #define FX_DOT_TEX      256   /* circle texture size; scaled up when drawn */
 #define FX_WATCHDOG_MS  45000
+/* Hard cap on how long the black may hold once the cover is up.  The
+ * reveal normally comes from the game's first fullscreen commit; this is
+ * only the "it never presented" escape. */
+#define FX_COVER_MAX_MS 20000
 /* One Play press spawns a CHAIN of short-lived reaper processes
  * (first-time setup, install scripts) before the game's own reaper.
  * When the tracked reaper dies, wait this long for the next stage
@@ -296,6 +303,17 @@ fx_start_cover(Monitor *m)
 
 	fx.start_ms = monotonic_msec();
 
+	/* The game is fullscreen now, so the "window mapped but never
+	 * fullscreened" reveal no longer applies — drop it and let the
+	 * watchdog cap the black instead. */
+	fx.window_ms = 0;
+	if (fx.watchdog)
+		wl_event_source_timer_update(fx.watchdog, FX_COVER_MAX_MS);
+
+	/* The one game-mode message, timed with the intro animation.  Forced
+	 * past the osd_show() gate, which drops toasts during a launch. */
+	osd_show_force(m, "Game Mode On");
+
 	fx.tick = wl_event_loop_add_timer(event_loop, fx_tick_cb, NULL);
 	if (fx.tick)
 		wl_event_source_timer_update(fx.tick, 1);
@@ -321,17 +339,13 @@ launchfx_start(pid_t reaper)
 	fx_track_start();
 	fx.reaper = reaper;
 
-	/* The cover starts HERE, at the Play press — the only point that is
-	 * reliably earlier than the game's first frame.  Starting it at game
-	 * mode activation was too late: the window is mapped, fullscreen and
-	 * already composited by then, so the game flashed on screen while the
-	 * dot was still growing.  From here the grow (500 ms) completes during
-	 * Proton setup, and the black simply holds until the game presents. */
-	fx_start_cover(selmon);
-
+	/* No visual here.  The Play press is only the pre-boost trigger —
+	 * Steam's splash, install and Proton stages run for seconds before
+	 * the game exists, and a cover started here timed out and replayed
+	 * on top of them.  The cover starts at the fullscreen transition. */
 	wlr_log(WLR_INFO, "launchfx: Steam launch detected (reaper pid %d) — "
-			"pre-boost + cover on %s", (int)reaper,
-			selmon->wlr_output->name);
+			"pre-boost; cover plays at the fullscreen transition",
+			(int)reaper);
 }
 
 /* Follow the game if it fullscreens on a monitor other than the one the
@@ -349,9 +363,13 @@ fx_move_cover(Monitor *m)
 		wlr_output_schedule_frame(m->wlr_output);
 }
 
-/* Called from update_game_mode() the moment ultra game mode activates for
- * a fullscreen game: play the cover grow and let rendermon's
- * launchfx_game_ready() reveal the presenting game. */
+/* The cover trigger.  Called from setfullscreen() the moment a game takes
+ * the whole output — before the compositor has configured it, so well
+ * before the game presents its first fullscreen frame — and again from
+ * update_game_mode() as a backstop for games that reach ultra mode
+ * without a fullscreen transition of their own (returning to the tag,
+ * X11 override-redirect fullscreen).  Once per client: c->fx_covered.
+ * rendermon's launchfx_game_ready() drops the black again. */
 void
 launchfx_fullscreen_starting(Client *c)
 {
@@ -359,8 +377,8 @@ launchfx_fullscreen_starting(Client *c)
 		return;
 	if (!looks_like_game(c))
 		return;
-	/* Normal path: the cover has been up since the Play press — just make
-	 * sure it is on the monitor the game actually took. */
+	/* Cover already up (the game moved output, or the backstop fired
+	 * after the setfullscreen trigger) — just keep it on the right one. */
 	if (fx.tree) {
 		fx_move_cover(c->mon);
 		c->fx_covered = 1;
@@ -368,20 +386,16 @@ launchfx_fullscreen_starting(Client *c)
 	}
 	if (c->fx_covered)
 		return;
-	/* Fallback only: a game that started without a detected Play press
-	 * (non-Steam launcher).  The cover still gets its head start below. */
 	c->fx_covered = 1;
+	/* No Play press seen (non-Steam launcher): start tracking now so the
+	 * pre-boost and the abort watchdog exist for this cover too. */
 	if (!fx.active)
 		fx_track_start();
 	if (!fx_start_cover(c->mon))
 		return;
-	/* Arm the interactive-launcher fallback: the window exists, so a
-	 * game that fullscreens but never presents must still be revealed. */
-	if (!fx.window_ms)
-		fx.window_ms = monotonic_msec();
 
-	wlr_log(WLR_INFO, "launchfx: no Play press seen — cover starts at game "
-			"mode activation on %s", c->mon->wlr_output->name);
+	wlr_log(WLR_INFO, "launchfx: game going fullscreen — cover on %s",
+			c->mon->wlr_output->name);
 }
 
 /* A launch is being tracked (pre-boost and/or cover up). */

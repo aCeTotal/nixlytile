@@ -227,19 +227,14 @@ toast_build(Toast *t, const char *msg)
 	return 1;
 }
 
+/* Put a card on screen, no questions asked.  osd_show() gates on game
+ * mode; the launch cover uses this directly for its one "Game Mode On". */
 void
-osd_show(Monitor *m, const char *msg)
+osd_show_force(Monitor *m, const char *msg)
 {
 	Toast *t;
 
 	if (!m || !m->wlr_output || !msg || !*msg)
-		return;
-
-	/* A game launch or game mode retunes VRR, refresh and modes across
-	 * every output — those toasts popped up on all the other monitors
-	 * while the game was starting.  No compositor messages from the Play
-	 * press until game mode ends. */
-	if (game_mode_active || game_mode_ultra || launchfx_active())
 		return;
 
 	/* Swap content in place when a toast is already up on this monitor:
@@ -256,6 +251,8 @@ osd_show(Monitor *m, const char *msg)
 		t->hiding = 0;
 		if (t->timer)
 			wl_event_source_timer_update(t->timer, OSD_HOLD_MS);
+		/* Stay above the launch cover, which lives in the same layer. */
+		wlr_scene_node_raise_to_top(&t->tree->node);
 		osd_schedule(m);
 		return;
 	}
@@ -289,6 +286,18 @@ osd_show(Monitor *m, const char *msg)
 
 	wl_list_insert(&toasts, &t->link);
 	osd_schedule(m);
+}
+
+void
+osd_show(Monitor *m, const char *msg)
+{
+	/* A game launch or game mode retunes VRR, refresh and modes across
+	 * every output — those toasts popped up on all the other monitors
+	 * while the game was starting.  No compositor messages from the Play
+	 * press until game mode ends. */
+	if (game_mode_active || game_mode_ultra || launchfx_active())
+		return;
+	osd_show_force(m, msg);
 }
 
 void
