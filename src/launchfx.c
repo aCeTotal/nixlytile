@@ -46,6 +46,7 @@ static struct {
 	Monitor *mon;
 	struct wlr_scene_tree *tree;
 	struct wlr_scene_buffer *dot;
+	struct wlr_scene_rect *black;
 	struct wlr_buffer *dot_buf;
 	uint64_t start_ms;
 	struct wl_event_source *tick;
@@ -113,6 +114,7 @@ fx_teardown(void)
 		fx.tree = NULL;
 	}
 	fx.dot = NULL;
+	fx.black = NULL;
 	if (fx.dot_buf) {
 		wlr_buffer_drop(fx.dot_buf);
 		fx.dot_buf = NULL;
@@ -142,16 +144,15 @@ fx_finish(void)
 static void
 fx_grow_complete(void)
 {
-	struct wlr_scene_rect *black;
 	static const float black_col[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 
 	if (!fx.mon)
 		return;
 	/* Crisp full-monitor rect replaces the scaled circle. */
-	black = wlr_scene_rect_create(fx.tree,
+	fx.black = wlr_scene_rect_create(fx.tree,
 			fx.mon->m.width, fx.mon->m.height, black_col);
-	if (black)
-		wlr_scene_node_set_position(&black->node, 0, 0);
+	if (fx.black)
+		wlr_scene_node_set_position(&fx.black->node, 0, 0);
 	if (fx.dot) {
 		wlr_scene_node_destroy(&fx.dot->node);
 		fx.dot = NULL;
@@ -320,8 +321,32 @@ launchfx_start(pid_t reaper)
 	fx_track_start();
 	fx.reaper = reaper;
 
+	/* The cover starts HERE, at the Play press — the only point that is
+	 * reliably earlier than the game's first frame.  Starting it at game
+	 * mode activation was too late: the window is mapped, fullscreen and
+	 * already composited by then, so the game flashed on screen while the
+	 * dot was still growing.  From here the grow (500 ms) completes during
+	 * Proton setup, and the black simply holds until the game presents. */
+	fx_start_cover(selmon);
+
 	wlr_log(WLR_INFO, "launchfx: Steam launch detected (reaper pid %d) — "
-			"pre-boost; cover plays at game-mode activation", (int)reaper);
+			"pre-boost + cover on %s", (int)reaper,
+			selmon->wlr_output->name);
+}
+
+/* Follow the game if it fullscreens on a monitor other than the one the
+ * cover was started on. */
+static void
+fx_move_cover(Monitor *m)
+{
+	if (!fx.tree || !m || m == fx.mon)
+		return;
+	fx.mon = m;
+	wlr_scene_node_set_position(&fx.tree->node, m->m.x, m->m.y);
+	if (fx.black)
+		wlr_scene_rect_set_size(fx.black, m->m.width, m->m.height);
+	if (m->wlr_output)
+		wlr_output_schedule_frame(m->wlr_output);
 }
 
 /* Called from update_game_mode() the moment ultra game mode activates for
@@ -332,8 +357,19 @@ launchfx_fullscreen_starting(Client *c)
 {
 	if (!c || !c->mon || !c->mon->wlr_output)
 		return;
-	if (fx.tree || c->fx_covered || !looks_like_game(c))
+	if (!looks_like_game(c))
 		return;
+	/* Normal path: the cover has been up since the Play press — just make
+	 * sure it is on the monitor the game actually took. */
+	if (fx.tree) {
+		fx_move_cover(c->mon);
+		c->fx_covered = 1;
+		return;
+	}
+	if (c->fx_covered)
+		return;
+	/* Fallback only: a game that started without a detected Play press
+	 * (non-Steam launcher).  The cover still gets its head start below. */
 	c->fx_covered = 1;
 	if (!fx.active)
 		fx_track_start();
@@ -344,8 +380,15 @@ launchfx_fullscreen_starting(Client *c)
 	if (!fx.window_ms)
 		fx.window_ms = monotonic_msec();
 
-	wlr_log(WLR_INFO, "launchfx: game mode activated — "
-			"playing cover animation on %s", c->mon->wlr_output->name);
+	wlr_log(WLR_INFO, "launchfx: no Play press seen — cover starts at game "
+			"mode activation on %s", c->mon->wlr_output->name);
+}
+
+/* A launch is being tracked (pre-boost and/or cover up). */
+int
+launchfx_active(void)
+{
+	return fx.active;
 }
 
 /* Head start for the cover: update_game_mode() delays ultra activation

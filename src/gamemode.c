@@ -2073,14 +2073,6 @@ update_game_mode(void)
 		}
 
 		/*
-		 * Show game detection notification AFTER all blocking operations.
-		 * Use show_hz_osd() instead of toast_show() — it renders correctly
-		 * even during direct scanout (centered, larger, proven to work).
-		 */
-		if (c && c->mon)
-			show_hz_osd(c->mon, "Game Mode Active");
-
-		/*
 		 * Ensure the game client has keyboard focus.
 		 * This is critical for games to receive keyboard input immediately.
 		 * Use lift=1 to raise to top and warp cursor for immediate input.
@@ -2188,11 +2180,14 @@ update_game_mode(void)
 			}
 		}
 
-		/* Show exit notification for ultra game mode only */
+		game_mode_ultra = 0;
+
+		/* Show exit notification for ultra game mode only.  After the
+		 * flags are cleared — osd_show() drops toasts while game mode
+		 * is up. */
 		if (was_ultra && selmon)
 			show_hz_osd(selmon, "Game Mode Off");
 
-		game_mode_ultra = 0;
 		game_mode_client = NULL;
 		game_mode_pid = 0;
 		if (game_keepalive_pidfd >= 0) {

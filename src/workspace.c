@@ -1,4 +1,3 @@
-#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <signal.h>
@@ -9,73 +8,6 @@
 
 #include "nixlytile.h"
 #include "client.h"
-
-/* Apps that default to occupying 2 default-tile slots when first
- * attached to a workspace.  Matched case-insensitively as substrings
- * against client appid+title.  Override with explicit Mod+R preset. */
-static const char *const wide_app_tokens[] = {
-	"blender",
-	"firefox",
-	"librewolf",
-	"chromium",
-	"chrome",
-	"google-chrome",
-	"brave",
-	"vivaldi",
-	"opera",
-	"libreoffice",
-	"soffice",
-	"onlyoffice",
-	"wpsoffice",
-	"wps-office",
-	"freeoffice",
-	"writer",
-	"calc",
-	"impress",
-	"draw",
-};
-
-static int
-ci_substr(const char *hay, const char *needle)
-{
-	size_t nlen, i;
-	if (!hay || !needle)
-		return 0;
-	nlen = strlen(needle);
-	if (nlen == 0)
-		return 1;
-	for (i = 0; hay[i]; i++) {
-		size_t j;
-		for (j = 0; j < nlen; j++) {
-			if (!hay[i + j])
-				return 0;
-			if (tolower((unsigned char)hay[i + j])
-					!= tolower((unsigned char)needle[j]))
-				break;
-		}
-		if (j == nlen)
-			return 1;
-	}
-	return 0;
-}
-
-static int
-client_wide_tile_count(Client *c)
-{
-	const char *appid, *title;
-	size_t i;
-
-	if (!c)
-		return 1;
-	appid = client_get_appid(c);
-	title = client_get_title(c);
-	for (i = 0; i < sizeof(wide_app_tokens) / sizeof(wide_app_tokens[0]); i++) {
-		const char *tok = wide_app_tokens[i];
-		if (ci_substr(appid, tok) || ci_substr(title, tok))
-			return 2;
-	}
-	return 1;
-}
 
 /*
  * Niri-style workspace + column primitives.
@@ -177,7 +109,6 @@ column_create(Workspace *ws)
 	col->target_x = col->target_y = 0;
 	col->target_width = col->target_height = 0;
 	col->width_idx = -1;
-	col->wide_tiles = 1;
 	col->width_px_override = 0;
 	col->fullscreen = 0;
 	col->x_f = 0.0;
@@ -336,7 +267,6 @@ workspace_attach_client(Workspace *ws, Client *c)
 	wl_list_init(&col->clients);
 	col->n_clients = 0;
 	col->width_idx = -1;
-	col->wide_tiles = client_wide_tile_count(c);
 	col->width_px_override = 0;
 	col->fullscreen = 0;
 	col->x_f = 0.0;
@@ -416,7 +346,6 @@ workspace_drop_tile(Workspace *ws, Client *c, double screen_x)
 	wl_list_init(&col->clients);
 	col->n_clients = 0;
 	col->width_idx = -1;
-	col->wide_tiles = client_wide_tile_count(c);
 	col->width_px_override = 0;
 	col->fullscreen = 0;
 	col->x_f = 0.0;
@@ -636,8 +565,6 @@ default_tiles_per_row(Monitor *m)
 static int
 column_target_width_px(Column *col, int mon_w, int gap, int n_default)
 {
-	int tile_w, tiles;
-
 	if (!col)
 		return mon_w / 2;
 	if (col->fullscreen)
@@ -652,10 +579,7 @@ column_target_width_px(Column *col, int mon_w, int gap, int n_default)
 		return (int)((double)mon_w *
 				preset_column_widths[col->width_idx]);
 	if (n_default < 1) n_default = 1;
-	tile_w = (mon_w - (n_default - 1) * gap) / n_default;
-	tiles = col->wide_tiles >= 1 ? col->wide_tiles : 1;
-	if (tiles > n_default) tiles = n_default;
-	return tiles * tile_w + (tiles - 1) * gap;
+	return (mon_w - (n_default - 1) * gap) / n_default;
 }
 
 void
@@ -1111,7 +1035,6 @@ expel_window_from_column(const Arg *arg)
 	wl_list_init(&dst->clients);
 	dst->n_clients = 0;
 	dst->width_idx = -1;
-	dst->wide_tiles = client_wide_tile_count(c);
 	/* Snap into place on first layout instead of springing the
 	 * column in from x=0 with width 0. */
 	dst->just_created = 1;

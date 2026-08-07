@@ -235,6 +235,13 @@ osd_show(Monitor *m, const char *msg)
 	if (!m || !m->wlr_output || !msg || !*msg)
 		return;
 
+	/* A game launch or game mode retunes VRR, refresh and modes across
+	 * every output — those toasts popped up on all the other monitors
+	 * while the game was starting.  No compositor messages from the Play
+	 * press until game mode ends. */
+	if (game_mode_active || game_mode_ultra || launchfx_active())
+		return;
+
 	/* Swap content in place when a toast is already up on this monitor:
 	 * keeps rapid-fire updates (FPS-limit scroll) in one card. */
 	wl_list_for_each(t, &toasts, link) {

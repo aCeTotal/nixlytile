@@ -1176,13 +1176,8 @@ struct Column {
 	 * Mod+R cycles forward through preset_column_widths[].  When fullscreen
 	 * is set, width is forced to monitor width regardless of width_idx. */
 	int width_idx;
-	/* How many default-tile slots this column occupies when width_idx
-	 * == -1 (no user preset).  Most clients = 1.  Wide apps (Blender,
-	 * browsers, office suites) default to 2.  Mod+R cycling sets
-	 * width_idx >= 0 and bypasses this. */
-	int wide_tiles;
 	/* Explicit pixel-width override set by Mod+Shift+arrow resize.
-	 * 0 = unused (fall back to preset / wide_tiles).  Wins over both
+	 * 0 = unused (fall back to preset / default tile width).  Wins over both
 	 * when > 0.  Lets neighbour columns slide their shared edge by the
 	 * same delta so total row width is preserved. */
 	int width_px_override;
@@ -2790,6 +2785,7 @@ void launchfx_fullscreen_starting(Client *c);
 int launchfx_cover_headstart_remaining(void);
 void launchfx_game_ready(void);
 void launchfx_note_commit(Client *c);
+int launchfx_active(void);
 
 /* osd.c — compositor-drawn toast notifications */
 void osd_show(Monitor *m, const char *msg);
