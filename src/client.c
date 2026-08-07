@@ -1613,6 +1613,8 @@ client_clip_to_usable(Client *c)
 	struct wlr_box area;
 	int ax0, ay0, ax1, ay1;   /* usable area, client-tree-local coords */
 	int box_clip = 0;
+	int live_fit = 0;         /* live drag + client behind → scale, don't crop */
+	int iw, ih;
 	int i;
 
 	if (!c || !c->mon || !c->scene || !c->scene_surface)
@@ -1626,19 +1628,38 @@ client_clip_to_usable(Client *c)
 		return;
 	}
 
-	/* Outside a size anim — and always during a live drag — the surface
-	 * must also stay inside its own tile box: a buffer committed at a
-	 * LARGER size than the box (shrink drag / reflow, slow-acking client)
+	iw = c->geom.width  - 2 * (int)c->bw;
+	ih = c->geom.height - 2 * (int)c->bw;
+
+	/* The surface must stay inside its own tile box: a buffer committed
+	 * at a size other than the box (drag / reflow, slow-acking client)
 	 * otherwise draws over the neighbour tile, and across the monitor
 	 * edge onto the neighbouring output when the tile sits at the edge,
 	 * until the client finally commits the new size ("snaps into place").
+	 * Two ways to enforce it:
+	 *
+	 *   live drag → SCALE the committed buffer into the box.  The pointer
+	 *     moves the edge every frame and a slow client (Chrome) is always
+	 *     a frame or two behind; cropping it would show a cut-off tile
+	 *     while shrinking and bare background on the growing edge, which
+	 *     is what reads as the tile jumping back and forth.  A client that
+	 *     keeps up commits at box size, the scale is exactly 1.0, and
+	 *     nothing changes for it (Alacritty).
+	 *
+	 *   otherwise → CROP.  There the size is settled and a mismatch means
+	 *     a stale buffer, which must not bleed while it lasts.  A tile
+	 *     straddling the usable-area edge is cropped either way: the area
+	 *     clip owns its dest sizing, so scaling can't apply there.
+	 *
 	 * During a non-live size anim client_scale_to_box owns the fit. */
 	if (!c->anim_active || cursor_mode == CurResize ||
 			cursor_mode == CurColResize) {
 		int nat_w, nat_h;
 		client_get_committed_size(c, &nat_w, &nat_h);
-		box_clip = (nat_w > c->geom.width  - 2 * (int)c->bw ||
-				nat_h > c->geom.height - 2 * (int)c->bw);
+		box_clip = (nat_w > iw || nat_h > ih);
+		if (cursor_mode == CurResize || cursor_mode == CurColResize)
+			live_fit = (nat_w > 0 && nat_h > 0 &&
+					(nat_w != iw || nat_h != ih));
 	}
 
 	area = c->mon->w;
@@ -1650,10 +1671,15 @@ client_clip_to_usable(Client *c)
 	/* Fully inside the usable area → no crop needed.  Restore once if we
 	 * were previously clipped, otherwise fast-path out (the common case
 	 * every frame for non-edge tiles). */
-	if (!box_clip && ax0 <= 0 && ay0 <= 0 &&
+	if ((!box_clip || live_fit) && ax0 <= 0 && ay0 <= 0 &&
 			ax1 >= c->geom.width && ay1 >= c->geom.height) {
 		if (c->area_clipped)
 			client_clip_reset(c);
+		/* Tile fully inside the usable area: no crop, so the live-drag
+		 * fit is a pure scale (client_scale_to_box no-ops once the
+		 * client's committed size matches the box). */
+		if (live_fit && iw > 0 && ih > 0)
+			client_scale_to_box(c, iw, ih);
 		return;
 	}
 
@@ -1727,8 +1753,6 @@ client_clip_to_usable(Client *c)
 	 *    source rect to the visible slice of the inner box. */
 	if (c->frozen_buffer && c->frozen_buffer->buffer) {
 		int bw = (int)c->bw;
-		int iw = c->geom.width  - 2 * bw;
-		int ih = c->geom.height - 2 * bw;
 		int vx0 = MAX(bw, ax0);
 		int vy0 = MAX(bw, ay0);
 		int vx1 = MIN(bw + iw, ax1);

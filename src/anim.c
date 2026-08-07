@@ -473,13 +473,14 @@ client_anim_apply(Client *c, struct wlr_box g)
 	if (inner_w < 1) inner_w = 1;
 	if (inner_h < 1) inner_h = 1;
 
-	/* Live drag: no snapshot, no scaling. The surface renders at the size
-	 * it was just configured with, so text reflows and layouts recompute
-	 * while the edge moves. */
+	/* Live drag: no snapshot. The surface renders at the size it was just
+	 * configured with, so text reflows and layouts recompute while the
+	 * edge moves; client_clip_to_usable scales the committed buffer into
+	 * the box for the frames the client is still behind (scale 1.0, i.e.
+	 * a no-op, as soon as it catches up). */
 	if (live_resize_active()) {
 		if (c->frozen_buffer)
 			client_unfreeze(c);
-		client_scale_reset(c);
 		client_clip_to_usable(c);
 		return;
 	}
@@ -586,7 +587,12 @@ clients_anim_tick(Monitor *m, double dt)
 			 * commit lands.  scale_reset before resize() so the
 			 * clip's dest sizing stays authoritative. */
 			c->anim_active = 0;
-			client_scale_reset(c);
+			/* Mid-drag settle (pointer held still for a frame):
+			 * keep the live-drag scale — resetting it drops the
+			 * fit until the client's next commit, and resize()'s
+			 * no-change fast-path may not re-apply it. */
+			if (!live_resize_active())
+				client_scale_reset(c);
 			resize(c, c->target_geom, 0);
 #ifdef XWAYLAND
 			/* client_request_size's size-only dedup drops the
@@ -955,7 +961,11 @@ monitor_anim_tick(Monitor *m, double dt)
 	 * A slide only translates existing buffers — no client repaint can
 	 * improve it.  Size anims are excluded: there the client MUST
 	 * repaint to converge on its new size. */
-	m->camera_anim_active = camera_anim && !size_anim;
+	/* A live drag also excludes the throttle: the dragged client must
+	 * repaint at the sizes we are configuring, and withholding its frame
+	 * callbacks stalls it behind the pointer for the whole drag. */
+	m->camera_anim_active = camera_anim && !size_anim &&
+			!live_resize_active();
 	m->anim_was_active = active;
 	m->size_anim_was_active = size_anim;
 	return active;
