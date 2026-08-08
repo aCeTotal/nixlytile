@@ -757,6 +757,41 @@ looks_like_game(Client *c)
 	return 0;
 }
 
+/* Window-rule `fullscreen false`: ignore the client's own fullscreen
+ * requests (map-time state and later _NET_WM_STATE/xdg requests) so the
+ * window stays in the tile layout.  Wine flags any undecorated window
+ * covering the output as fullscreen (Gaea's borderless-maximized main
+ * window), which would otherwise hijack the whole workspace.  The user
+ * keybinding calls setfullscreen() directly and is unaffected.
+ * Memoized like the `game false` probe. */
+int
+client_rule_nofullscreen(Client *c)
+{
+	if (!c)
+		return 0;
+	if (c->nofullscreen == 0) {
+		const char *appid = client_get_appid(c);
+		const char *title = client_get_title(c);
+		const Rule *rule_list = runtime_rules_count > 0 ? runtime_rules : rules;
+		size_t rule_count = runtime_rules_count > 0 ? runtime_rules_count : nrules;
+		const Rule *r;
+		/* app-id can be NULL very early in an X11 map — don't freeze
+		 * the verdict until it is known. */
+		if (appid) {
+			c->nofullscreen = -1;
+			for (r = rule_list; r < rule_list + rule_count; r++) {
+				if (r->nofullscreen
+						&& (!r->title || (title && strstr(title, r->title)))
+						&& (!r->id || strstr(appid, r->id))) {
+					c->nofullscreen = 1;
+					break;
+				}
+			}
+		}
+	}
+	return c->nofullscreen > 0;
+}
+
 float
 ease_out_cubic(float t)
 {

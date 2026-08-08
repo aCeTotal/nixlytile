@@ -494,6 +494,8 @@ apply_window_rule(const KdlNode *n)
 	if (kdl_arg_bool(kdl_find_child(n, "floating"), 0, &b)) r->isfloating = b;
 	if (kdl_arg_int(kdl_find_child(n, "monitor"), 0, &li))  r->monitor = (int)li;
 	if (kdl_arg_bool(kdl_find_child(n, "game"), 0, &b))     r->nogame = !b;
+	if (kdl_arg_bool(kdl_find_child(n, "fullscreen"), 0, &b)) r->nofullscreen = !b;
+	if (kdl_arg_bool(kdl_find_child(n, "embedded"), 0, &b))  r->embedded = b;
 }
 
 static void

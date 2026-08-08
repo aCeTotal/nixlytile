@@ -3885,6 +3885,19 @@ configurex11(struct wl_listener *listener, void *data)
 		int bh = event->height + c->bw * 2;
 
 		/*
+		 * Embedded helper window (window-rule `embedded true`, e.g.
+		 * Gaea.Viewport): the app itself keeps it positioned over the
+		 * host window's client area via SetWindowPos.  Honor the
+		 * request verbatim — centering or clamping would tear it away
+		 * from its host.
+		 */
+		if (c->isembedded) {
+			resize(c, (struct wlr_box){.x = bx, .y = by,
+				.width = bw, .height = bh}, 0);
+			return;
+		}
+
+		/*
 		 * Game splash / EAC launcher: ignore client-requested position
 		 * and re-center on the assigned monitor every time. X11 splash
 		 * windows often send configure_request with x,y=(0,0) or some

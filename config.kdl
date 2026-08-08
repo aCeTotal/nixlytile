@@ -78,6 +78,9 @@ monitorkey  "Ctrl"
 // `game false` excludes a client from game-mode classification — use it
 // for Wine productivity apps (Gaea, SpeedTree, …) that the wine-ancestry
 // detector would otherwise force fullscreen.
+// `fullscreen false` makes the compositor refuse the client's own
+// fullscreen requests (Wine flags borderless-maximized windows as
+// fullscreen) so the window stays tiled. Keybinding fullscreen still works.
 window-rule {
     app-id   "Gimp_EXAMPLE"
     tags     0x0
@@ -86,7 +89,17 @@ window-rule {
 }
 window-rule {
     app-id "gaea"
-    game   false
+    game       false
+    fullscreen false
+}
+// `embedded true`: helper window the app itself positions over its main
+// window (Gaea's Unity viewport fails Wine's cross-process SetParent and
+// maps as its own toplevel). Floats borderless and follows the client's
+// own geometry — tiling it tears it off the host and the forced resizes
+// crash the Unity player.
+window-rule {
+    app-id   "gaea.viewport"
+    embedded true
 }
 window-rule {
     app-id   "firefox_EXAMPLE"

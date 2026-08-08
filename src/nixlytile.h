@@ -305,6 +305,8 @@ typedef struct {
 	int isfloating;
 	int monitor;
 	int nogame;   /* window-rule `game false` → never game-mode */
+	int nofullscreen;   /* window-rule `fullscreen false` → ignore client fullscreen requests */
+	int embedded;   /* window-rule `embedded true` → floating, borderless, client-positioned */
 } Rule;
 
 typedef struct {
@@ -975,6 +977,12 @@ typedef struct {
 	int fx_covered;             /* launch cover already played for this client */
 	int nogame;                 /* memoized window-rule `game false` probe
 	                             * (0=unknown, 1=never game, -1=no rule) */
+	int nofullscreen;           /* memoized window-rule `fullscreen false` probe
+	                             * (0=unknown, 1=block, -1=no rule) */
+	int isembedded;             /* window-rule `embedded true`: helper window the
+	                             * app itself positions over its main window
+	                             * (Gaea.Viewport) — float borderless, honor the
+	                             * client's own geometry, never center or tile */
 	/* Memoized pid-based probes (0=unknown, 1=yes, -1=no).  The pid
 	 * never changes for a client, and the uncached versions walk
 	 * /proc on every call — from per-event hot paths like
@@ -2173,6 +2181,7 @@ int is_steam_popup(Client *c);
 int is_steam_game(Client *c);
 int is_browser_client(Client *c);
 int looks_like_game(Client *c);
+int client_rule_nofullscreen(Client *c);
 int is_retro_emulator_client(Client *c);
 void read_steam_properties(Client *c);
 void xwayland_set_primary(Monitor *m);

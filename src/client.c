@@ -199,6 +199,16 @@ applyrules(Client *c)
 				c->isfloating = r->isfloating;
 				float_ruled = 1;
 			}
+			if (r->embedded) {
+				/* App-positioned helper window (Gaea.Viewport):
+				 * float borderless; mapnotify/configurex11 honor
+				 * the client's own geometry instead of
+				 * centering/tiling it. */
+				c->isembedded = 1;
+				c->isfloating = 1;
+				float_ruled = 1;
+				c->bw = 0;
+			}
 			newtags |= r->tags;
 			i = 0;
 			wl_list_for_each(m, &mons, link) {
@@ -768,6 +778,18 @@ fullscreennotify(struct wl_listener *listener, void *data)
 		c->type == X11 ? "X11" : "XDG",
 		want, c->isfullscreen,
 		c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)");
+
+	/* Window-rule `fullscreen false`: refuse the client's fullscreen
+	 * request and tell it so (clears _NET_WM_STATE_FULLSCREEN /
+	 * xdg fullscreen state), keeping the window tiled. */
+	if (want && !c->isfullscreen && client_rule_nofullscreen(c)) {
+		wlr_log(WLR_INFO,
+			"GAME_TRACE: fullscreennotify blocked by rule "
+			"`fullscreen false` for '%s'",
+			client_get_appid(c) ? client_get_appid(c) : "(null)");
+		client_set_fullscreen(c, 0);
+		return;
+	}
 
 	/*
 	 * Games: block client-initiated unfullscreen.
@@ -1415,7 +1437,11 @@ notif_placed:
 		int mh = c->mon->m.height;
 		int gw = c->geom.width;
 		int gh = c->geom.height;
-		if (tray_popup) {
+		if (c->isembedded) {
+			/* App-positioned helper window: keep the geometry the
+			 * client mapped with — it is aimed at the host window's
+			 * client area, not at the monitor center. */
+		} else if (tray_popup) {
 			c->geom.x = MAX(c->mon->m.x,
 					MIN(tray_anchor_x, c->mon->m.x + mw - gw));
 			c->geom.y = MAX(c->mon->m.y,
@@ -2041,7 +2067,7 @@ setfullscreen(Client *c, int fullscreen)
 		return;
 	}
 
-	c->bw = fullscreen ? 0 : borderpx;
+	c->bw = (fullscreen || c->isembedded) ? 0 : borderpx;
 	client_set_fullscreen(c, fullscreen);
 	wlr_scene_node_reparent(&c->scene->node, layers[c->isfullscreen
 			? LyrFS : c->isfloating ? LyrFloat : LyrTile]);
