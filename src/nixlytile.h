@@ -304,6 +304,7 @@ typedef struct {
 	uint32_t tags;
 	int isfloating;
 	int monitor;
+	int nogame;   /* window-rule `game false` → never game-mode */
 } Rule;
 
 typedef struct {
@@ -972,6 +973,8 @@ typedef struct {
 	int isfixed;                  /* float-type with fixed size — reject interactive resize */
 	int is_game_splash;         /* Game splash/EAC launcher → keep centered */
 	int fx_covered;             /* launch cover already played for this client */
+	int nogame;                 /* memoized window-rule `game false` probe
+	                             * (0=unknown, 1=never game, -1=no rule) */
 	/* Memoized pid-based probes (0=unknown, 1=yes, -1=no).  The pid
 	 * never changes for a client, and the uncached versions walk
 	 * /proc on every call — from per-event hot paths like

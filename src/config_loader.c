@@ -486,12 +486,14 @@ apply_window_rule(const KdlNode *n)
 	Rule *r = &runtime_rules[runtime_rules_count++];
 	memset(r, 0, sizeof(*r));
 	r->monitor = -1;
+	r->isfloating = -1;   /* tri-state: unset unless `floating` given */
 
 	if (kdl_arg_string(kdl_find_child(n, "app-id"), 0, &s)) r->id = strdup(s);
 	if (kdl_arg_string(kdl_find_child(n, "title"), 0, &s))  r->title = strdup(s);
 	if (kdl_arg_int(kdl_find_child(n, "tags"), 0, &li))     r->tags = (uint32_t)li;
 	if (kdl_arg_bool(kdl_find_child(n, "floating"), 0, &b)) r->isfloating = b;
 	if (kdl_arg_int(kdl_find_child(n, "monitor"), 0, &li))  r->monitor = (int)li;
+	if (kdl_arg_bool(kdl_find_child(n, "game"), 0, &b))     r->nogame = !b;
 }
 
 static void

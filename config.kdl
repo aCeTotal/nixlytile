@@ -75,11 +75,18 @@ monitorkey  "Ctrl"
 
 // Window placement rules.  Matched on substring of app-id and title.
 // Add as many `window-rule` blocks as you need.
+// `game false` excludes a client from game-mode classification — use it
+// for Wine productivity apps (Gaea, SpeedTree, …) that the wine-ancestry
+// detector would otherwise force fullscreen.
 window-rule {
     app-id   "Gimp_EXAMPLE"
     tags     0x0
     floating true
     monitor  -1
+}
+window-rule {
+    app-id "gaea"
+    game   false
 }
 window-rule {
     app-id   "firefox_EXAMPLE"

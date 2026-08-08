@@ -655,6 +655,34 @@ looks_like_game(Client *c)
 	if (!c)
 		return 0;
 
+	/* Authoritative: window-rule `game false` — Wine productivity apps
+	 * (Gaea, SpeedTree, …) would otherwise trip the wine-ancestry
+	 * branch below and get game-mode fullscreen/input treatment.
+	 * Checked here (not in applyrules) because mapnotify's game
+	 * pre-detect runs before applyrules; memoized like wine_verdict. */
+	if (c->nogame == 0) {
+		const char *appid = client_get_appid(c);
+		const char *title = client_get_title(c);
+		const Rule *rule_list = runtime_rules_count > 0 ? runtime_rules : rules;
+		size_t rule_count = runtime_rules_count > 0 ? runtime_rules_count : nrules;
+		const Rule *r;
+		/* app-id can be NULL very early in an X11 map — don't freeze
+		 * the verdict until it is known. */
+		if (appid) {
+			c->nogame = -1;
+			for (r = rule_list; r < rule_list + rule_count; r++) {
+				if (r->nogame
+						&& (!r->title || (title && strstr(title, r->title)))
+						&& (!r->id || strstr(appid, r->id))) {
+					c->nogame = 1;
+					break;
+				}
+			}
+		}
+	}
+	if (c->nogame > 0)
+		return 0;
+
 #ifdef XWAYLAND
 	/* Authoritative: Steam overlay windows are never games */
 	if (c->is_steam_overlay)

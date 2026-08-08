@@ -185,15 +185,21 @@ applyrules(Client *c)
 		c->geom.width, c->geom.height,
 		selmon && selmon->wlr_output ? selmon->wlr_output->name : "(null)");
 
-	int rule_matched = 0;
+	int float_ruled = 0;
 	const Rule *rule_list = runtime_rules_count > 0 ? runtime_rules : rules;
 	size_t rule_count = runtime_rules_count > 0 ? runtime_rules_count : nrules;
 	for (r = rule_list; r < rule_list + rule_count; r++) {
 		if ((!r->title || strstr(title, r->title))
 				&& (!r->id || strstr(appid, r->id))) {
-			c->isfloating = r->isfloating;
+			/* floating is tri-state in runtime rules: -1 = not
+			 * specified → leave auto-float heuristics in charge.
+			 * A `game false`-only rule must not drag every window
+			 * of the app (modal dialogs!) into the tile layout. */
+			if (r->isfloating >= 0) {
+				c->isfloating = r->isfloating;
+				float_ruled = 1;
+			}
 			newtags |= r->tags;
-			rule_matched = 1;
 			i = 0;
 			wl_list_for_each(m, &mons, link) {
 				if (r->monitor == i++) {
@@ -204,15 +210,15 @@ applyrules(Client *c)
 		}
 	}
 
-	/* Auto-float small / non-resizable windows when no explicit rule
-	 * matched.  Catches Steam startup splash, Discord launcher splash,
+	/* Auto-float small / non-resizable windows when no rule decided
+	 * floating.  Catches Steam startup splash, Discord launcher splash,
 	 * dialogs and other tiny utility windows that look out of place
 	 * tiled at full column width.  Main app windows (which are
 	 * resizable) stay tiled.  client_is_float_type() inspects:
 	 *   - X11: WM_WINDOW_TYPE_{DIALOG,SPLASH,TOOLBAR,UTILITY}, modal,
 	 *     or fixed min==max size hint.
 	 *   - XDG: fixed min==max size constraints. */
-	if (!rule_matched && client_is_float_type(c)) {
+	if (!float_ruled && client_is_float_type(c)) {
 		c->isfloating = 1;
 		c->isfixed = 1;
 	}
