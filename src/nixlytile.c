@@ -3993,7 +3993,16 @@ configurex11(struct wl_listener *listener, void *data)
 				c->last_configured_h = ih;
 			}
 		}
-		arrange(c->mon);
+		/* Wine keeps a maximized window pinned to the work area and
+		 * re-requests that geometry forever; clear the state so it
+		 * treats the window as normal and adopts the tile size. */
+		if (c->surface.xwayland->maximized_horz ||
+				c->surface.xwayland->maximized_vert)
+			wlr_xwayland_surface_set_maximized(c->surface.xwayland,
+					false, false);
+		/* No arrange(): the layout didn't change — denying a request
+		 * must not restart anims (a fighting client would freeze the
+		 * whole monitor in a snapshot/live flicker loop). */
 	}
 }
 
