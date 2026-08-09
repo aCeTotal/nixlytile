@@ -1578,6 +1578,32 @@ client_send_configure_only(Client *c, int w, int h)
 }
 
 /*
+ * Size the four border rects for a WxH box.  wlr_scene_rect_set_size
+ * asserts size >= 0, so a degenerate geom aborts the whole compositor:
+ * Wine apps (Gaea) map a 0x0 toplevel and request fullscreen on it, and
+ * H - 2*bw is then negative.  Clamp instead of dying — a zero-size rect
+ * simply renders nothing until the client commits a real size.
+ */
+void
+client_set_border_size(Client *c, int w, int h)
+{
+	int side_h = h - 2 * (int)c->bw;
+
+	if (w < 0 || side_h < 0)
+		diag_logf("TILE", "CLAMP-BORDER appid='%s' %dx%d bw=%d",
+			client_get_appid(c) ? client_get_appid(c) : "(null)",
+			w, h, (int)c->bw);
+	if (w < 0)
+		w = 0;
+	if (side_h < 0)
+		side_h = 0;
+	wlr_scene_rect_set_size(c->border[0], w, c->bw);
+	wlr_scene_rect_set_size(c->border[1], w, c->bw);
+	wlr_scene_rect_set_size(c->border[2], c->bw, side_h);
+	wlr_scene_rect_set_size(c->border[3], c->bw, side_h);
+}
+
+/*
  * Visual-only scene update: position the client's scene tree + border
  * rects + buffer dest_size to the given geometry, but do NOT send any
  * configure to the client.  Used during animations so we can move /
@@ -1602,10 +1628,7 @@ client_apply_scene_geom(Client *c, struct wlr_box geo)
 
 	wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
 	wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
-	wlr_scene_rect_set_size(c->border[0], c->geom.width, c->bw);
-	wlr_scene_rect_set_size(c->border[1], c->geom.width, c->bw);
-	wlr_scene_rect_set_size(c->border[2], c->bw, c->geom.height - 2 * c->bw);
-	wlr_scene_rect_set_size(c->border[3], c->bw, c->geom.height - 2 * c->bw);
+	client_set_border_size(c, c->geom.width, c->geom.height);
 	wlr_scene_node_set_position(&c->border[1]->node, 0, c->geom.height - c->bw);
 	wlr_scene_node_set_position(&c->border[2]->node, 0, c->bw);
 	wlr_scene_node_set_position(&c->border[3]->node, c->geom.width - c->bw, c->bw);
@@ -1638,10 +1661,7 @@ client_clip_reset(Client *c)
 	client_get_clip(c, &clip);
 	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
 
-	wlr_scene_rect_set_size(c->border[0], c->geom.width, c->bw);
-	wlr_scene_rect_set_size(c->border[1], c->geom.width, c->bw);
-	wlr_scene_rect_set_size(c->border[2], c->bw, c->geom.height - 2 * c->bw);
-	wlr_scene_rect_set_size(c->border[3], c->bw, c->geom.height - 2 * c->bw);
+	client_set_border_size(c, c->geom.width, c->geom.height);
 	wlr_scene_node_set_position(&c->border[0]->node, 0, 0);
 	wlr_scene_node_set_position(&c->border[1]->node, 0, c->geom.height - c->bw);
 	wlr_scene_node_set_position(&c->border[2]->node, 0, c->bw);
@@ -1964,10 +1984,7 @@ resize(Client *c, struct wlr_box geo, int interact)
 	 * helps GPU keep up at 4K @ 60Hz. */
 	if (size_changed) {
 		wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
-		wlr_scene_rect_set_size(c->border[0], c->geom.width, c->bw);
-		wlr_scene_rect_set_size(c->border[1], c->geom.width, c->bw);
-		wlr_scene_rect_set_size(c->border[2], c->bw, c->geom.height - 2 * c->bw);
-		wlr_scene_rect_set_size(c->border[3], c->bw, c->geom.height - 2 * c->bw);
+		client_set_border_size(c, c->geom.width, c->geom.height);
 		wlr_scene_node_set_position(&c->border[1]->node, 0, c->geom.height - c->bw);
 		wlr_scene_node_set_position(&c->border[2]->node, 0, c->bw);
 		wlr_scene_node_set_position(&c->border[3]->node, c->geom.width - c->bw, c->bw);

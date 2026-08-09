@@ -2158,6 +2158,7 @@ void setpsel(struct wl_listener *listener, void *data);
 void setsel(struct wl_listener *listener, void *data);
 void resize(Client *c, struct wlr_box geo, int interact);
 void client_apply_scene_geom(Client *c, struct wlr_box geo);
+void client_set_border_size(Client *c, int w, int h);
 void client_clip_to_usable(Client *c);
 void client_request_size(Client *c, int w, int h);
 void client_flush_pending_size(Client *c);

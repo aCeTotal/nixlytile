@@ -495,10 +495,7 @@ client_anim_apply(Client *c, struct wlr_box g)
 	wlr_scene_node_set_position(&c->scene->node, g.x, g.y);
 	wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
 	if (c->border[0]) {
-		wlr_scene_rect_set_size(c->border[0], g.width, c->bw);
-		wlr_scene_rect_set_size(c->border[1], g.width, c->bw);
-		wlr_scene_rect_set_size(c->border[2], c->bw, g.height - 2 * c->bw);
-		wlr_scene_rect_set_size(c->border[3], c->bw, g.height - 2 * c->bw);
+		client_set_border_size(c, g.width, g.height);
 		wlr_scene_node_set_position(&c->border[1]->node, 0,
 				g.height - c->bw);
 		wlr_scene_node_set_position(&c->border[2]->node, 0, c->bw);
