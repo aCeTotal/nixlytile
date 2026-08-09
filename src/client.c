@@ -1219,6 +1219,36 @@ notif_placed:
 					c->steam_game_id, is_confirmed_steam_game,
 					thresh_w, thresh_h,
 					(int)client_get_pid(c));
+			} else if (!client_wants_fullscreen(c)
+					&& !is_confirmed_steam_game
+					&& !is_game_content(c)
+					&& !client_wants_tearing(c)) {
+				/*
+				 * Only signal was Wine/launcher ancestry (or
+				 * an app-id guess) — no fullscreen request,
+				 * no Steam confirmation, no game content-type
+				 * or tearing hint.  Windows desktop apps run
+				 * under Wine too (Gaea, Affinity, DAWs); they
+				 * open at or near work-area size and would be
+				 * force-fullscreened here, which makes them
+				 * untileable.  Take the normal applyrules
+				 * path instead; a real game that asks for
+				 * fullscreen later still gets it via
+				 * fullscreennotify().
+				 */
+				pre_target_mon = NULL;
+				wlr_log(WLR_INFO,
+					"GAME_TRACE: wine-only heuristic, not "
+					"pre-fullscreening appid='%s' initial=%dx%d",
+					aid ? aid : "(null)", initial_w, initial_h);
+				game_log("GAME_MAP: SKIP appid='%s' title='%s' "
+					"type=%s size=%dx%d fullscreen=0 "
+					"reason=wine_ancestry_only pid=%d",
+					aid ? aid : "(null)",
+					client_get_title(c) ? client_get_title(c) : "(null)",
+					client_is_x11(c) ? "X11" : "XDG",
+					initial_w, initial_h,
+					(int)client_get_pid(c));
 			} else {
 				/*
 				 * Game main window — large enough to be the
