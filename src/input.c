@@ -2052,11 +2052,17 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 			wlr_cursor_move(cursor, device, dx, dy);
 		wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
-		/* Confine cursor to monitor when a fullscreen client is present.
+		/* Confine cursor to monitor when a fullscreen game is present.
 		 * This prevents accidental mouse drift to other monitors during
 		 * fullscreen games. Keybind-based warping (focusmon/warptomonitor)
 		 * bypasses this because they use wlr_cursor_warp() directly and
-		 * change selmon before subsequent motionnotify calls. */
+		 * change selmon before subsequent motionnotify calls.
+		 *
+		 * Only games: a fullscreen video (YouTube) or remote-desktop
+		 * session covers the output too, and trapping the pointer there
+		 * makes the other monitors unreachable.  The classifier runs only
+		 * once the cursor actually leaves the monitor — it walks rules and
+		 * process ancestry, too much for every motion event. */
 		{
 			Client *fsc = fsc_cur;
 			if (fsc) {
@@ -2067,7 +2073,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 				if (cy < mb->y) { cy = mb->y; clamped = 1; }
 				if (cx >= mb->x + mb->width) { cx = mb->x + mb->width - 1; clamped = 1; }
 				if (cy >= mb->y + mb->height) { cy = mb->y + mb->height - 1; clamped = 1; }
-				if (clamped)
+				if (clamped && (is_game_content(fsc) || looks_like_game(fsc)))
 					wlr_cursor_warp(cursor, NULL, cx, cy);
 			}
 		}
