@@ -381,6 +381,30 @@ client_is_unmanaged(Client *c)
 	return 0;
 }
 
+/* Menus, dropdowns, tooltips and drag icons position themselves in root
+ * coordinates — even at (0,0) their position is intentional, so the
+ * splash-centering heuristics must never touch them. */
+static inline int
+client_is_x11_popup(Client *c)
+{
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+		return wlr_xwayland_surface_has_window_type(c->surface.xwayland,
+					WLR_XWAYLAND_NET_WM_WINDOW_TYPE_MENU)
+			|| wlr_xwayland_surface_has_window_type(c->surface.xwayland,
+					WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DROPDOWN_MENU)
+			|| wlr_xwayland_surface_has_window_type(c->surface.xwayland,
+					WLR_XWAYLAND_NET_WM_WINDOW_TYPE_POPUP_MENU)
+			|| wlr_xwayland_surface_has_window_type(c->surface.xwayland,
+					WLR_XWAYLAND_NET_WM_WINDOW_TYPE_TOOLTIP)
+			|| wlr_xwayland_surface_has_window_type(c->surface.xwayland,
+					WLR_XWAYLAND_NET_WM_WINDOW_TYPE_COMBO)
+			|| wlr_xwayland_surface_has_window_type(c->surface.xwayland,
+					WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DND);
+#endif
+	return 0;
+}
+
 static inline void
 client_notify_enter(struct wlr_surface *s, struct wlr_keyboard *kb)
 {

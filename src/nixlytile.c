@@ -3766,7 +3766,7 @@ configurex11(struct wl_listener *listener, void *data)
 		if (wlr_xwayland_surface_has_window_type(c->surface.xwayland,
 					WLR_XWAYLAND_NET_WM_WINDOW_TYPE_SPLASH))
 			recenter = 1;
-		else if (event->x == 0 && event->y == 0
+		else if (!client_is_x11_popup(c) && event->x == 0 && event->y == 0
 				&& event->width > 0 && event->height > 0)
 			recenter = 1;
 

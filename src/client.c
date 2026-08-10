@@ -991,7 +991,8 @@ mapnotify(struct wl_listener *listener, void *data)
 						WLR_XWAYLAND_NET_WM_WINDOW_TYPE_SPLASH))
 				center = 1;
 #endif
-			if (!center && c->geom.x == 0 && c->geom.y == 0 &&
+			if (!center && !client_is_x11_popup(c) &&
+					c->geom.x == 0 && c->geom.y == 0 &&
 					c->geom.width > 0 && c->geom.height > 0)
 				center = 1;
 
