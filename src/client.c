@@ -1392,6 +1392,14 @@ notif_placed:
 		return;
 	}
 
+	/* dcspit instrument screen: owns its output while a game runs, above
+	 * everything the game draws.  No focusclient — the game keeps the
+	 * keyboard, the instruments only show values. */
+	if (instruments_try_adopt(c)) {
+		printstatus();
+		return;
+	}
+
 	/* Varsel (managed X11 eller Wayland-toplevel): høyre marg istf senter.
 	 * Her er c->mon og c->isfloating avgjort av applyrules/setmon, som er
 	 * det klassifiseringen trenger. LyrOverlay av samme grunn som splash —
@@ -2452,6 +2460,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 	/* Varselet forsvant før slide-en var ferdig — slipp slotten og
 	 * drep timeren så den ikke fyrer på et dødt vindu. */
 	notify_release(c);
+	instruments_release(c);
 
 	if (looks_like_game(c) || is_game_content(c))
 		game_log("GAME_UNMAP: appid='%s' title='%s' type=%s "

@@ -1497,6 +1497,19 @@ keypress(struct wl_listener *listener, void *data)
 	if (handled)
 		return;
 
+	/* Never forward the modkey itself to clients. Modifier state still goes
+	 * out via keypressmod, so Mod+X bindings are unaffected — but a bare
+	 * press/release of the key never reaches the client. Without this, an
+	 * X11 client like Citrix wfica passes LeftWin straight into the remote
+	 * session and Windows pops the start menu on every Mod press. */
+	for (i = 0; i < nsyms; i++) {
+		if ((modkey == WLR_MODIFIER_LOGO &&
+		     (syms[i] == XKB_KEY_Super_L || syms[i] == XKB_KEY_Super_R)) ||
+		    (modkey == WLR_MODIFIER_ALT &&
+		     (syms[i] == XKB_KEY_Alt_L || syms[i] == XKB_KEY_Alt_R)))
+			return;
+	}
+
 	wlr_seat_set_keyboard(seat, &group->wlr_group->keyboard);
 	/* Pass unhandled keycodes along to the client. */
 	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {

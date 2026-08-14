@@ -2195,6 +2195,11 @@ update_game_mode(void)
 			game_keepalive_pidfd = -1;
 		}
 	}
+
+	/* dcspit instrument screens follow game mode: shown while the game is
+	 * up, gone the moment it is not — the output is a plain desktop again. */
+	if (game_mode_active != was_active)
+		instruments_update();
 }
 
 #if 0 /* stats panel removed */

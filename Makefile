@@ -31,7 +31,7 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            input_conf.o \
            apptoggle.o mic_watch.o \
            statusbar.o tray.o statusbar_support.o terminfo.o launchfx.o diag.o \
-           notify.o converge.o spawn.o osd.o
+           notify.o instruments.o converge.o spawn.o osd.o
 
 PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstable-v1-protocol.h \
              $(SRC)/wlr-layer-shell-unstable-v1-protocol.h $(SRC)/wlr-output-power-management-unstable-v1-protocol.h \
@@ -86,6 +86,8 @@ workspace.o: $(SRC)/workspace.c $(SRC)/nixlytile.h $(SRC)/client.h
 anim.o: $(SRC)/anim.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/diag.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 notify.o: $(SRC)/notify.c $(SRC)/nixlytile.h $(SRC)/client.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+instruments.o: $(SRC)/instruments.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 osd.o: $(SRC)/osd.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<

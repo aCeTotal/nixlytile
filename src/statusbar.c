@@ -961,7 +961,7 @@ rendertray(Monitor *m, int bar_height)
 {
 	StatusModule *module;
 	TrayItem *it;
-	int padding, gap, x, count = 0;
+	int padding, gap, x, count = 0, right_edge = 0;
 
 	if (!m || !m->statusbar.traylabel.tree)
 		return;
@@ -1009,7 +1009,7 @@ rendertray(Monitor *m, int bar_height)
 	x = padding;
 	wl_list_for_each(it, &tray_items, link) {
 		struct wlr_scene_buffer *scene_buf;
-		int icon_y;
+		int icon_y, content_w;
 
 		if (it->passive || !it->icon_buf || it->icon_w <= 0 || it->icon_h <= 0) {
 			it->x = x;
@@ -1017,23 +1017,37 @@ rendertray(Monitor *m, int bar_height)
 			continue;
 		}
 
+		/* Space by visible content, not buffer width: the icons carry
+		 * different amounts of transparent margin (tray_measure_icon_insets),
+		 * so buffer-width spacing reads as uneven gaps. */
+		content_w = it->icon_w - it->icon_pad_l - it->icon_pad_r;
+		if (content_w <= 0)
+			content_w = it->icon_w;
+		/* x tracks the content edge, the buffer is drawn pad_l to its left:
+		 * keep the first buffer inside the module. */
+		if (count == 0 && x < it->icon_pad_l)
+			x = it->icon_pad_l;
+
 		it->x = x;
-		it->w = it->icon_w + gap;
+		it->w = content_w + gap;
 		icon_y = MAX(0, (bar_height - it->icon_h) / 2);
 
 		scene_buf = wlr_scene_buffer_create(module->tree, NULL);
 		if (scene_buf) {
 			wlr_scene_buffer_set_buffer(scene_buf, it->icon_buf);
-			wlr_scene_node_set_position(&scene_buf->node, x, icon_y);
+			wlr_scene_node_set_position(&scene_buf->node,
+					x - it->icon_pad_l, icon_y);
 		}
 
+		right_edge = MAX(right_edge, x - it->icon_pad_l + it->icon_w);
 		x += it->w;
 		count++;
 	}
 
 	/* Drop the gap trailing the last icon so the module has the same
-	 * padding on both sides. */
-	module->width = count > 0 ? x - gap + padding : 0;
+	 * padding on both sides.  right_edge keeps the last buffer's transparent
+	 * margin inside the module background. */
+	module->width = count > 0 ? MAX(x - gap + padding, right_edge) : 0;
 	if (module->width > 0)
 		updatemodulebg(module, module->width, bar_height, statusbar_bg);
 	wlr_scene_node_set_enabled(&module->tree->node, module->width > 0);

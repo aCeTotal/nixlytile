@@ -1571,19 +1571,53 @@ update_hdr_target(Monitor *m, uint64_t now_ns)
 }
 
 /*
+ * Pick the deep-color render format for HDR from what the primary plane
+ * actually scans out. XBGR2101010 preferred (matches Mesa's HDR10
+ * swapchains → direct scanout stays possible), then the other 10-bit
+ * RGB orders, then FP16. Returns 0 when the plane has no deep format —
+ * HDR still enters with the current (8-bit) swapchain; the PQ infoframe
+ * and BT2020 colorspace are what flip the display into HDR mode.
+ */
+static uint32_t
+pick_hdr_render_format(Monitor *m)
+{
+	static const uint32_t candidates[] = {
+		DRM_FORMAT_XBGR2101010,
+		DRM_FORMAT_XRGB2101010,
+		DRM_FORMAT_ABGR2101010,
+		DRM_FORMAT_ARGB2101010,
+		DRM_FORMAT_XBGR16161616F,
+	};
+	const struct wlr_drm_format_set *formats;
+	size_t i;
+
+	formats = wlr_output_get_primary_formats(m->wlr_output,
+		WLR_BUFFER_CAP_DMABUF);
+	if (!formats)
+		return DRM_FORMAT_XBGR2101010;
+	for (i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+		if (wlr_drm_format_set_get(formats, candidates[i]))
+			return candidates[i];
+	}
+	wlr_log(WLR_INFO,
+		"%s: no 10-bit/FP16 primary plane format — HDR with 8-bit scanout",
+		m->wlr_output->name);
+	return 0;
+}
+
+/*
  * Mutate wlr_output_state to carry an HDR enter or exit transition.
  * Called from inside commit_output_frame so the format swap + image
  * description ride on a single atomic commit with the rendered buffer.
- * On enter we prefer XBGR2101010 (10-bit RGB, fits HDR10 with no
- * bandwidth penalty over FP16); FP16 is left as a future fallback if
- * XBGR2101010 commits start failing on a given driver.
  */
 static void
 apply_pending_hdr_state(Monitor *m, struct wlr_output_state *state)
 {
 	if (m->hdr_entry_pending) {
-		m->hdr_render_format = DRM_FORMAT_XBGR2101010;
-		wlr_output_state_set_render_format(state, m->hdr_render_format);
+		m->hdr_render_format = pick_hdr_render_format(m);
+		if (m->hdr_render_format)
+			wlr_output_state_set_render_format(state,
+				m->hdr_render_format);
 		wlr_output_state_set_image_description(state,
 			&m->hdr_pending_desc);
 	} else if (m->hdr_exit_pending) {
@@ -1627,6 +1661,11 @@ finalize_hdr_transition(Monitor *m, int commit_ok, uint64_t now_ns)
 				m->wlr_output->name);
 			m->hdr_render_format = 0;
 			m->hdr_driver_client = NULL;
+			/* Throttle the re-attempt: without this stamp the entry
+			 * path retries every vblank, and a driver that hard-
+			 * rejects the HDR commit turns that into a failed commit
+			 * (= dropped frame) per vblank. */
+			m->hdr_last_exit_ns = now_ns;
 		}
 	} else if (m->hdr_exit_pending) {
 		m->hdr_exit_pending = 0;
@@ -2833,6 +2872,17 @@ rendermon(struct wl_listener *listener, void *data)
 
 		m->diag_builds++;
 		wlr_output_state_init(&state);
+		/* HDR enter/exit must be in the state BEFORE build_state: the
+		 * scene reads the pending image description to pick the render
+		 * color transform, and the pending render format to size the
+		 * swapchain. Applied here, the transition frame itself is
+		 * rendered with the new transform into the new format — no
+		 * one-frame mismatch where SDR-rendered pixels get displayed
+		 * with the PQ infoframe (or vice versa on exit).
+		 * commit_output_frame re-applies to the same state (idempotent)
+		 * so failure-retry rebuilds keep the transition too. */
+		if (m->hdr_entry_pending || m->hdr_exit_pending)
+			apply_pending_hdr_state(m, &state);
 		if (m->tag_switch_debug > 0)
 			write(STDERR_FILENO, "TS:scene-build>\n", 16);
 		needs_frame = wlr_scene_output_build_state(m->scene_output, &state, &opts);

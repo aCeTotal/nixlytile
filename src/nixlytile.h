@@ -642,6 +642,8 @@ struct TrayItem {
 	int w;
 	int icon_w;
 	int icon_h;
+	int icon_pad_l; /* fully transparent columns at the icon's left edge */
+	int icon_pad_r; /* ...and at its right edge */
 	struct wlr_buffer *icon_buf;
 	struct wl_list link;
 };
@@ -1083,6 +1085,9 @@ typedef struct {
 	 * ikke sentreres av mapnotify/configurex11. Nullstilles når den har
 	 * glidd ut — vinduet lever videre, vi eier det bare ikke lenger. */
 	int is_notif;
+	/* dcspit instrument screen (instruments.c): owns one output while a
+	 * game runs, hidden otherwise. */
+	int is_instrument;
 	/* Size-convergence watchdog (converge.c).  converge_since is the
 	 * msec timestamp when the committed size was first seen to disagree
 	 * with the tile box (0 = converged), converge_tries counts re-sent
@@ -2078,6 +2083,7 @@ struct wlr_buffer *statusbar_buffer_from_pixbuf(GdkPixbuf *pixbuf, int target_h,
 struct wlr_buffer *statusbar_buffer_from_wifi100(int target_h, int *out_w, int *out_h);
 void recolor_wifi100_pixbuf(GdkPixbuf *pixbuf);
 int tray_load_svg_pixbuf(const char *path, int desired_h, GdkPixbuf **out_pixbuf);
+void tray_measure_icon_insets(TrayItem *it);
 int has_svg_extension(const char *path);
 int pathisdir(const char *path);
 int strip_symbolic_suffix(const char *name, char *out, size_t outlen);
@@ -2260,6 +2266,13 @@ int notify_wants_keyboard(Client *c);
 void notify_start_offscreen(Client *c);
 void notify_release(Client *c);
 void notify_tick(Monitor *m, double dt, int *still);
+
+/* instruments.c — dcspit instrument screens */
+int instruments_try_adopt(Client *c);
+void instruments_release(Client *c);
+void instruments_update(void);
+int instruments_should_show(void);
+int instruments_owns(Monitor *m);
 
 int monitor_anim_tick(Monitor *m, double dt);
 void client_set_target_geom(Client *c, struct wlr_box g);

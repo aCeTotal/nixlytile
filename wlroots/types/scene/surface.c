@@ -66,7 +66,25 @@ static int get_primaries_preference(enum wlr_color_named_primaries primaries) {
 	abort(); // unreachable
 }
 
+static bool color_manager_supports_pq_bt2020(struct wlr_color_manager_v1 *manager) {
+	bool has_pq = false, has_bt2020 = false;
+	for (size_t i = 0; i < manager->transfer_functions_len; i++) {
+		if (manager->transfer_functions[i] ==
+				WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ) {
+			has_pq = true;
+		}
+	}
+	for (size_t i = 0; i < manager->primaries_len; i++) {
+		if (manager->primaries[i] ==
+				WP_COLOR_MANAGER_V1_PRIMARIES_BT2020) {
+			has_bt2020 = true;
+		}
+	}
+	return has_pq && has_bt2020;
+}
+
 static void get_surface_preferred_image_description(struct wlr_surface *surface,
+		struct wlr_color_manager_v1 *manager,
 		struct wlr_image_description_v1_data *out) {
 	struct wlr_output_image_description preferred = {
 		.transfer_function = WLR_COLOR_TRANSFER_FUNCTION_GAMMA22,
@@ -84,9 +102,15 @@ static void get_surface_preferred_image_description(struct wlr_surface *surface,
 		 * PQ+BT2020 as preferred anyway. Otherwise clients (mpv with
 		 * target-trc=auto, etc.) would see preferred=sRGB on first
 		 * connect, tonemap to SDR, and the compositor would never see
-		 * a PQ surface to trigger HDR mode. Chicken-and-egg fix. */
+		 * a PQ surface to trigger HDR mode. Chicken-and-egg fix.
+		 * Gated on the color manager actually advertising PQ+BT2020
+		 * (i.e. the renderer supports color transforms): hinting PQ to
+		 * a client that then cannot create a PQ image description would
+		 * end in a protocol error (e.g. GLES2 debug sessions on an HDR
+		 * display). */
 		struct wlr_output_image_description synth;
 		if (img_desc == NULL &&
+		    color_manager_supports_pq_bt2020(manager) &&
 		    (output->supported_transfer_functions &
 				WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ) &&
 		    (output->supported_primaries &
@@ -195,7 +219,8 @@ static void handle_scene_buffer_outputs_update(
 
 	if (scene->color_manager_v1 != NULL) {
 		struct wlr_image_description_v1_data img_desc = {0};
-		get_surface_preferred_image_description(surface->surface, &img_desc);
+		get_surface_preferred_image_description(surface->surface,
+			scene->color_manager_v1, &img_desc);
 		wlr_color_manager_v1_set_surface_preferred_image_description(scene->color_manager_v1,
 			surface->surface, &img_desc);
 	}

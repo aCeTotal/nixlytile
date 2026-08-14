@@ -110,7 +110,9 @@ arrange(Monitor *m)
 	/* Niri-style: floating clients live on LyrFloat, tiled on LyrTile,
 	 * fullscreen on LyrFS.  Reparent if a layer transition happened. */
 	wl_list_for_each(c, &clients, link) {
-		if (c->mon != m || c->scene->node.parent == layers[LyrFS])
+		/* Instrument screens live in LyrOverlay on purpose (instruments.c). */
+		if (c->mon != m || c->is_instrument
+				|| c->scene->node.parent == layers[LyrFS])
 			continue;
 
 		struct wlr_scene_tree *target = c->isfloating

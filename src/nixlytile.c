@@ -1342,8 +1342,12 @@ run(const char *startup_cmd)
  *   - max bpc: Maximum bits per channel (typically 8, 10, 12, or 16)
  *   - Colorspace/output_color_format: RGB 4:4:4 vs YCbCr 4:2:2/4:2:0
  *
- * Note: Full HDR (PQ/BT.2020) requires wlroots with HDR10 support which is
- * still pending merge (MR !5002). This code prepares the infrastructure.
+ * Full HDR10 (PQ/BT.2020) runs on wlroots 0.20 color management:
+ * color-management-v1 is advertised (Vulkan renderer required for the PQ
+ * transforms), a fullscreen PQ+BT2020 client drives the output into HDR
+ * (update_hdr_target in output.c), and the DRM backend then sets
+ * HDR_OUTPUT_METADATA + Colorspace on the connector — which is also what
+ * Sunshine's KMS capture reads to stream HDR to remote devices.
  */
 
 /*

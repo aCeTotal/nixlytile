@@ -8,6 +8,58 @@ static const float tray_menu_border[]      = {0.35f, 0.35f, 0.38f, 1.0f};
 static const float tray_menu_separator[]   = {0.35f, 0.35f, 0.38f, 1.0f};
 static const float tray_menu_fg_disabled[] = {0.5f, 0.5f, 0.5f, 1.0f};
 
+/* Icons carry their own transparent margins: an app logo fills its canvas,
+ * a symbolic glyph sits in a square canvas with several empty columns on
+ * each side. Spacing neighbours by buffer width therefore leaves visibly
+ * different whitespace between them. Measure the transparent border once per
+ * load so rendertray can space by visible content instead. */
+void
+tray_measure_icon_insets(TrayItem *it)
+{
+	void *data = NULL;
+	uint32_t format = 0;
+	size_t stride = 0;
+	int bw, bh, x, y, first = -1, last = -1;
+
+	if (!it)
+		return;
+	it->icon_pad_l = it->icon_pad_r = 0;
+	if (!it->icon_buf)
+		return;
+
+	bw = it->icon_buf->width;
+	bh = it->icon_buf->height;
+	if (bw <= 0 || bh <= 0)
+		return;
+	if (!wlr_buffer_begin_data_ptr_access(it->icon_buf,
+			WLR_BUFFER_DATA_PTR_ACCESS_READ, &data, &format, &stride))
+		return;
+
+	if (data && format == DRM_FORMAT_ARGB8888) {
+		for (x = 0; x < bw; x++) {
+			for (y = 0; y < bh; y++) {
+				uint32_t px = *(const uint32_t *)((const uint8_t *)data +
+						(size_t)y * stride + (size_t)x * 4);
+				/* Ignore near-invisible antialiasing fringe. */
+				if ((px >> 24) > 8) {
+					if (first < 0)
+						first = x;
+					last = x;
+					break;
+				}
+			}
+		}
+	}
+	wlr_buffer_end_data_ptr_access(it->icon_buf);
+
+	if (first < 0 || last < first)
+		return;
+	/* icon_w is what the layout uses; scale the measured columns onto it in
+	 * case the two ever disagree. */
+	it->icon_pad_l = (int)((double)first * (double)it->icon_w / (double)bw);
+	it->icon_pad_r = (int)((double)(bw - 1 - last) * (double)it->icon_w / (double)bw);
+}
+
 int
 tray_load_icon_file(TrayItem *it, const char *path, int desired_h)
 {
@@ -55,6 +107,7 @@ tray_load_icon_file(TrayItem *it, const char *path, int desired_h)
 	it->icon_buf = buf;
 	it->icon_w = w;
 	it->icon_h = h;
+	tray_measure_icon_insets(it);
 	return 0;
 }
 
@@ -521,6 +574,7 @@ tray_item_load_icon(TrayItem *it)
 				it->icon_w = best_w;
 				it->icon_h = best_h;
 			}
+			tray_measure_icon_insets(it);
 			sd_bus_message_unref(reply);
 			sd_bus_error_free(&err);
 			it->icon_failed = 0;
