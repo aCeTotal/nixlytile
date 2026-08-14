@@ -2652,7 +2652,17 @@ unmapnotify(struct wl_listener *listener, void *data)
 	c->converge_gave_up = 0;
 	c->converge_gave_up_w = c->converge_gave_up_h = 0;
 
-	wlr_scene_node_destroy(&c->scene->node);
+	/* NULL the scene pointers after destroy: the surface can commit
+	 * again between unmap and remap (the unmap commit itself reaches
+	 * commitnotify AFTER this handler), and commitnotify's clip path
+	 * only guards on c->scene_surface being non-NULL — a dangling
+	 * pointer there walks the freed scene tree and trips the
+	 * assert(found) in wlr_scene_subsurface_tree_set_clip (crash).
+	 * mapnotify recreates both unconditionally on remap. */
+	if (c->scene)
+		wlr_scene_node_destroy(&c->scene->node);
+	c->scene = NULL;
+	c->scene_surface = NULL;
 	printstatus();
 	motionnotify(0, NULL, 0, 0, 0, 0);
 

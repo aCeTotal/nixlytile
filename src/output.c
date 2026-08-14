@@ -2510,6 +2510,22 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 	}
 }
 
+/* XLEAK companion: dump every scene buffer's effective placement for a
+ * client whose geometry crosses its monitor edge — shows whether the
+ * wlroots-side clip (position + dest size) actually bounds the buffer. */
+static void
+diag_leak_buffer_iter(struct wlr_scene_buffer *buf, int sx, int sy, void *data)
+{
+	Client *ac = data;
+	if (!buf)
+		return;
+	diag_logf("XLEAKBUF",
+		"appid='%s' buf@%d,%d(local %d,%d) dst=%dx%d enabled=%d",
+		client_get_appid(ac) ? client_get_appid(ac) : "(null)",
+		sx, sy, buf->node.x, buf->node.y,
+		buf->dst_width, buf->dst_height, buf->node.enabled);
+}
+
 void
 rendermon(struct wl_listener *listener, void *data)
 {
@@ -2722,6 +2738,50 @@ rendermon(struct wl_listener *listener, void *data)
 				m->wlr_output->name, appid ? appid : "?", cause,
 				m->diag_vblanks, m->diag_builds, m->diag_idle_skips,
 				m->diag_commits_in);
+		}
+
+		/* Cross-edge audit: any enabled client scene node whose geometry
+		 * crosses this monitor's horizontal bounds can paint onto the
+		 * neighbouring output (visible in its gap margin).  Log the
+		 * clip state so the offender and the failing path are named. */
+		{
+			Client *ac;
+			wl_list_for_each(ac, &clients, link) {
+				int nat_w = 0, nat_h = 0, geom_in, buf_in;
+				if (ac->mon != m || !ac->scene ||
+						!ac->scene->node.enabled)
+					continue;
+				client_get_committed_size(ac, &nat_w, &nat_h);
+				geom_in = (ac->geom.x >= m->m.x &&
+						ac->geom.x + ac->geom.width <=
+						m->m.x + m->m.width);
+				/* Oversized buffer: even with geometry inside
+				 * the monitor, the committed buffer can paint
+				 * past the right edge if unclipped. */
+				buf_in = (ac->geom.x + (int)ac->bw + nat_w <=
+						m->m.x + m->m.width);
+				if (geom_in && buf_in)
+					continue;
+				diag_logf("XLEAK",
+					"%s appid='%s' geom=%dx%d@%d,%d nat=%dx%d "
+					"mon=[%d..%d] "
+					"col=%d float=%d fs=%d notif=%d area_clipped=%d "
+					"anim=%d scene@%d,%d",
+					m->wlr_output->name,
+					client_get_appid(ac) ? client_get_appid(ac) : "(null)",
+					ac->geom.width, ac->geom.height,
+					ac->geom.x, ac->geom.y,
+					nat_w, nat_h,
+					m->m.x, m->m.x + m->m.width,
+					ac->column != NULL, ac->isfloating,
+					ac->isfullscreen, ac->is_notif,
+					ac->area_clipped, ac->anim_active,
+					ac->scene->node.x, ac->scene->node.y);
+				if (ac->scene_surface)
+					wlr_scene_node_for_each_buffer(
+						&ac->scene_surface->node,
+						diag_leak_buffer_iter, ac);
+			}
 		}
 
 		m->diag_snap_ns = frame_start_ns;

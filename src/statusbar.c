@@ -4983,8 +4983,10 @@ initial_status_refresh(void)
 	refreshstatuscpu();
 	refreshstatusram();
 	refreshstatuslight();
-	refreshstatusmic();
-	refreshstatusvolume();
+	/* volume/mic intentionally NOT refreshed here: they popen wpctl,
+	 * which blocks for seconds while PipeWire cold-starts alongside the
+	 * compositor — the startup freeze.  init_status_refresh_tasks
+	 * schedules their first run after the audio grace period. */
 	refreshstatusbattery();
 	refreshstatusnet();
 	request_public_ip_async(); /* prefetch public IP in background */
@@ -4999,6 +5001,14 @@ init_status_refresh_tasks(void)
 	uint32_t offset = 100;
 
 	for (size_t i = 0; i < LENGTH(status_tasks); i++) {
+		/* wpctl-based tasks wait out the PipeWire cold-start grace
+		 * period (see apply_startup_defaults) — running them earlier
+		 * blocks the main thread in wpctl's connect. */
+		if (status_tasks[i].fn == refreshstatusvolume ||
+				status_tasks[i].fn == refreshstatusmic) {
+			status_tasks[i].next_due_ms = now + 3200;
+			continue;
+		}
 		status_tasks[i].next_due_ms = now + offset;
 		offset += 200; /* stagger initial fills to avoid clumping */
 	}

@@ -1416,6 +1416,20 @@ apply_startup_defaults(void)
 audio:
 	if (audio_applied || audio_tries >= AUDIO_DEFAULTS_MAX_TRIES)
 		return;
+	/* Hold off on ALL wpctl work for the first seconds of the session:
+	 * PipeWire/WirePlumber cold-start in parallel with the compositor,
+	 * and a wpctl launched before they answer blocks in connect for up
+	 * to seconds — on the main thread, so the whole compositor freezes
+	 * right after startup.  Doesn't count as a try; the status task
+	 * loop retries once the grace period has passed. */
+	{
+		static uint64_t first_ms;
+		uint64_t now_ms = monotonic_msec();
+		if (!first_ms)
+			first_ms = now_ms;
+		if (now_ms - first_ms < 3000)
+			return;
+	}
 	audio_tries++;
 
 	/*
