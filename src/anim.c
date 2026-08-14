@@ -702,6 +702,15 @@ client_freeze(Client *c)
 	if (c->scene_surface)
 		wlr_scene_node_set_enabled(&c->scene_surface->node, 0);
 
+	/* Crop the fresh snapshot NOW.  Freeze runs at the END of the anim
+	 * tick, after this frame's clip pass — a tile straddling (or scrolled
+	 * past) the monitor edge would otherwise carry a full-size unclipped
+	 * snapshot until the next tick, and the neighbouring output's
+	 * rendermon can fire in that window and paint it across the edge
+	 * (Steam/X11: frozen on every scroll step → constant flicker on the
+	 * neighbour screen). */
+	client_clip_to_usable(c);
+
 	/* A frozen tile shows a static snapshot with its live surface disabled.
 	 * Normal during an anim (paired with UNFREEZE); a FREEZE with no matching
 	 * UNFREEZE = a tile stuck frozen. */

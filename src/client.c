@@ -1791,18 +1791,25 @@ client_clip_to_usable(Client *c)
 		int cx0, cy0, cx1, cy1;
 
 		client_get_clip(c, &wgeom);
-		su_x0 = area.x - (c->geom.x + (int)c->bw);
-		su_y0 = area.y - (c->geom.y + (int)c->bw);
+		/* The clip box is SURFACE-local, and the surface origin sits at
+		 * geom + bw MINUS the xdg window-geometry offset (the scene xdg
+		 * tree positions the surface at -geometry.x/y so the CSD shadow
+		 * hangs outside the tile box).  Without the wgeom offset the
+		 * whole clip window shifts left/up by that margin — Chrome
+		 * (offset 10,11) leaked its cropped slice 10px past the usable
+		 * bound, across the monitor edge onto the neighbouring output. */
+		su_x0 = area.x - (c->geom.x + (int)c->bw) + wgeom.x;
+		su_y0 = area.y - (c->geom.y + (int)c->bw) + wgeom.y;
 		su_x1 = su_x0 + area.width;
 		su_y1 = su_y0 + area.height;
 
 		/* Oversized stale buffer: additionally clamp to the tile's own
 		 * inner box so nothing draws outside the tile borders. */
 		if (box_clip) {
-			su_x0 = MAX(su_x0, 0);
-			su_y0 = MAX(su_y0, 0);
-			su_x1 = MIN(su_x1, c->geom.width  - 2 * (int)c->bw);
-			su_y1 = MIN(su_y1, c->geom.height - 2 * (int)c->bw);
+			su_x0 = MAX(su_x0, wgeom.x);
+			su_y0 = MAX(su_y0, wgeom.y);
+			su_x1 = MIN(su_x1, wgeom.x + c->geom.width  - 2 * (int)c->bw);
+			su_y1 = MIN(su_y1, wgeom.y + c->geom.height - 2 * (int)c->bw);
 		}
 
 		cx0 = MAX(wgeom.x, su_x0);
