@@ -1304,6 +1304,7 @@ struct Monitor {
 	uint32_t diag_commit_fails;   /* failed output commit attempts since last heartbeat */
 	uint32_t diag_scanout_falls;  /* scanout->GPU-composition fallbacks engaged since last heartbeat */
 	uint32_t diag_scanout_rearms; /* direct scanout re-armed (cooldown drained) since last heartbeat */
+	uint64_t diag_xpaint_ns;      /* last XPAINT cross-monitor paint log timestamp */
 	struct wlr_scene_tree *hz_osd_tree;
 	struct wlr_scene_tree *hz_osd_bg;
 	int hz_osd_visible;

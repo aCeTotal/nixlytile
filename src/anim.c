@@ -1100,8 +1100,38 @@ anim_spawn_close(Monitor *m, struct wlr_buffer *buffer, struct wlr_box geom)
 		free(a);
 		return;
 	}
-	wlr_scene_node_set_position(&a->tree->node, geom.x, geom.y);
-	wlr_scene_buffer_set_dest_size(a->buffer, geom.width, geom.height);
+	/* Crop to the monitor's usable area, like client_clip_to_usable does
+	 * for the live tile: a tile closing while partially scrolled past
+	 * the monitor edge otherwise paints its hidden part across the
+	 * neighbouring output for the duration of the fade. */
+	if (m) {
+		struct wlr_box vis;
+		if (!wlr_box_intersection(&vis, &geom, &m->w)) {
+			wlr_scene_node_destroy(&a->tree->node);
+			free(a);
+			return;
+		}
+		if (vis.x != geom.x || vis.y != geom.y ||
+				vis.width != geom.width ||
+				vis.height != geom.height) {
+			struct wlr_fbox src = {
+				.x = (double)(vis.x - geom.x) * buffer->width
+						/ geom.width,
+				.y = (double)(vis.y - geom.y) * buffer->height
+						/ geom.height,
+				.width  = (double)vis.width * buffer->width
+						/ geom.width,
+				.height = (double)vis.height * buffer->height
+						/ geom.height,
+			};
+			wlr_scene_buffer_set_source_box(a->buffer, &src);
+		}
+		wlr_scene_node_set_position(&a->tree->node, vis.x, vis.y);
+		wlr_scene_buffer_set_dest_size(a->buffer, vis.width, vis.height);
+	} else {
+		wlr_scene_node_set_position(&a->tree->node, geom.x, geom.y);
+		wlr_scene_buffer_set_dest_size(a->buffer, geom.width, geom.height);
+	}
 	wlr_scene_buffer_set_opacity(a->buffer, 1.0f);
 
 	wl_list_insert(&closing_anims, &a->link);

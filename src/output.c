@@ -2526,6 +2526,100 @@ diag_leak_buffer_iter(struct wlr_scene_buffer *buf, int sx, int sy, void *data)
 		buf->dst_width, buf->dst_height, buf->node.enabled);
 }
 
+/* XPAINT: build-time cross-monitor paint audit.  The 1 Hz XLEAK snapshot
+ * has always shown correctly clipped tiles, yet the leak is visible — so
+ * either a node paints across the edge only BETWEEN heartbeats, or the
+ * scene is truly clean and the artifact is stale swapchain pixels.  This
+ * runs on EVERY vblank of every output: any enabled scene buffer owned by
+ * a client of ANOTHER monitor (or a close-anim snapshot) that intersects
+ * this output is the render-time offender, logged the frame it happens.
+ * If the leak is visible while XPAINT stays silent, the scene is proven
+ * clean at render time and the bug is at the damage/commit level. */
+struct xpaint_scan {
+	Monitor *m;          /* output being audited */
+	Monitor *owner;      /* monitor the walked tree belongs to */
+	const char *label;   /* appid / "close-anim" */
+	uint64_t now;
+};
+
+static void
+diag_xpaint_buffer_iter(struct wlr_scene_buffer *buf, int sx, int sy, void *data)
+{
+	struct xpaint_scan *s = data;
+	struct wlr_box b, vis;
+	int w, h;
+
+	if (!buf)
+		return;
+	w = buf->dst_width > 0 ? buf->dst_width
+			: (buf->buffer ? buf->buffer->width : 0);
+	h = buf->dst_height > 0 ? buf->dst_height
+			: (buf->buffer ? buf->buffer->height : 0);
+	if (w <= 0 || h <= 0)
+		return;
+	b = (struct wlr_box){ sx, sy, w, h };
+	if (!wlr_box_intersection(&vis, &b, &s->m->m))
+		return;
+	if (s->now - s->m->diag_xpaint_ns < 250000000ULL)
+		return;
+	s->m->diag_xpaint_ns = s->now;
+	diag_logf("XPAINT",
+		"%s FOREIGN buffer '%s' (owner=%s) %dx%d@%d,%d visible %dx%d@%d,%d",
+		s->m->wlr_output->name, s->label,
+		s->owner && s->owner->wlr_output
+			? s->owner->wlr_output->name : "?",
+		w, h, sx, sy, vis.width, vis.height, vis.x, vis.y);
+}
+
+static void
+diag_xpaint_audit(Monitor *m, uint64_t now)
+{
+	struct xpaint_scan s = { .m = m, .now = now };
+	Client *ac;
+	ClosingAnim *ca;
+	int i;
+
+	wl_list_for_each(ac, &clients, link) {
+		if (ac->mon == m || !ac->mon || !ac->scene ||
+				!ac->scene->node.enabled)
+			continue;
+		/* Whole client tree: surface buffers, popups, frozen
+		 * snapshot — everything that can carry tile content. */
+		s.owner = ac->mon;
+		s.label = client_get_appid(ac) ? client_get_appid(ac) : "(null)";
+		wlr_scene_node_for_each_buffer(&ac->scene->node,
+				diag_xpaint_buffer_iter, &s);
+		/* Border rects are not buffers — check them directly. */
+		for (i = 0; i < 4; i++) {
+			struct wlr_box b, vis;
+			if (!ac->border[i] || !ac->border[i]->node.enabled)
+				continue;
+			b = (struct wlr_box){
+				ac->scene->node.x + ac->border[i]->node.x,
+				ac->scene->node.y + ac->border[i]->node.y,
+				ac->border[i]->width, ac->border[i]->height };
+			if (!wlr_box_intersection(&vis, &b, &m->m))
+				continue;
+			if (now - m->diag_xpaint_ns < 250000000ULL)
+				continue;
+			m->diag_xpaint_ns = now;
+			diag_logf("XPAINT",
+				"%s FOREIGN border[%d] '%s' (owner=%s) %dx%d@%d,%d",
+				m->wlr_output->name, i, s.label,
+				ac->mon->wlr_output ? ac->mon->wlr_output->name : "?",
+				b.width, b.height, b.x, b.y);
+		}
+	}
+	wl_list_for_each(ca, &closing_anims, link) {
+		if (ca->mon == m || !ca->tree || !ca->tree->node.enabled)
+			continue;
+		s.owner = ca->mon;
+		s.label = "close-anim";
+		wlr_scene_node_for_each_buffer(&ca->tree->node,
+				diag_xpaint_buffer_iter, &s);
+	}
+}
+
 void
 rendermon(struct wl_listener *listener, void *data)
 {
@@ -2618,6 +2712,10 @@ rendermon(struct wl_listener *listener, void *data)
 		if (still && m->wlr_output)
 			wlr_output_schedule_frame(m->wlr_output);
 	}
+
+	/* Cross-monitor paint audit — after the anim/converge tick so it
+	 * sees exactly the scene state this frame's build will render. */
+	diag_xpaint_audit(m, frame_start_ns);
 
 	classify_fullscreen_content(m, &is_game, &is_video, &allow_tearing);
 
