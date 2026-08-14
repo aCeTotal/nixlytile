@@ -568,6 +568,13 @@ fx_poll_cb(void *data)
 		}
 	}
 
+	/* While a game is in game mode and no launch is being tracked there
+	 * is no Play press to detect — skip the /proc sweep (readdir + one
+	 * comm read per pid, every 200 ms) so the compositor thread spends
+	 * nothing on it mid-game.  Resumes when game mode exits. */
+	if (game_mode_active && !fx.active)
+		steam_up = 0;
+
 	if (steam_up) {
 		dir = opendir("/proc");
 		if (dir) {

@@ -2142,7 +2142,7 @@ setfullscreen(Client *c, int fullscreen)
 	}
 
 	if (fullscreen) {
-		struct wlr_box fsgeom = fullscreen_mirror_geom(c->mon);
+		struct wlr_box fsgeom = client_fullscreen_geom(c);
 		/* Cover the screen HERE, on the transition into fullscreen:
 		 * the game has not been configured to the output rect yet, so
 		 * nothing of its fullscreen frame has reached the screen and
@@ -2196,6 +2196,15 @@ setfullscreen(Client *c, int fullscreen)
 		 * compositor mid-commit and shows as "fullscreen YouTube froze". */
 		if (!_is_retro && _is_game) {
 			set_adaptive_sync(c->mon, 1);
+			/* Spanned game renders on every output — VRR on all of
+			 * them, not just the home monitor. */
+			if (c->isspanned) {
+				Monitor *sm;
+				wl_list_for_each(sm, &mons, link)
+					if (sm != c->mon && sm->wlr_output
+							&& sm->wlr_output->enabled && !sm->is_mirror)
+						set_adaptive_sync(sm, 1);
+			}
 		} else if ((_is_retro || _is_browser) && c->mon && c->mon->wlr_output
 				&& !c->mon->retro_scanout_lock) {
 			/* Lock attach_render so wlroots picks GPU composition
@@ -2226,6 +2235,13 @@ setfullscreen(Client *c, int fullscreen)
 		if (!_is_retro) {
 			if (_is_game) {
 				enable_game_vrr(c->mon);
+				if (c->isspanned) {
+					Monitor *sm;
+					wl_list_for_each(sm, &mons, link)
+						if (sm != c->mon && sm->wlr_output
+								&& sm->wlr_output->enabled && !sm->is_mirror)
+							enable_game_vrr(sm);
+				}
 			} else {
 				set_video_refresh_rate(c->mon, c);
 			}
@@ -2260,10 +2276,23 @@ setfullscreen(Client *c, int fullscreen)
 		set_adaptive_sync(c->mon, 0);
 		/* Disable game VRR when exiting fullscreen */
 		disable_game_vrr(c->mon);
+		/* Spanned game had VRR on every output — turn all of it off. */
+		if (c->isspanned) {
+			Monitor *sm;
+			wl_list_for_each(sm, &mons, link) {
+				if (sm != c->mon && sm->wlr_output
+						&& sm->wlr_output->enabled && !sm->is_mirror) {
+					set_adaptive_sync(sm, 0);
+					disable_game_vrr(sm);
+				}
+			}
+		}
 		/* Restore max refresh rate when exiting fullscreen */
 		restore_max_refresh_rate(c->mon);
 		/* Restore native mode if console-mode was applied */
 		restore_console_mode(c->mon);
+		/* Restore native mode if game-resolution scanout was applied */
+		gamescan_restore(c->mon);
 		c->detected_video_hz = 0.0f;
 		c->video_detect_phase = 0;
 		c->video_detect_retries = 0;
@@ -2579,6 +2608,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 		set_adaptive_sync(m, 0);
 		restore_max_refresh_rate(m);
 		restore_console_mode(m);
+		gamescan_restore(m);
 	}
 
 	/* Invalidate fullscreen classification cache */

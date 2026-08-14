@@ -1696,6 +1696,7 @@ const FuncEntry func_table[] = {
 	{ "toggletag",         toggletag,         2 },
 	{ "togglefloating",    togglefloating,    0 },
 	{ "togglefullscreen",  togglefullscreen,  0 },
+	{ "togglegamespan",    togglegamespan,    0 },
 	{ "togglegaps",        togglegaps,        0 },
 	{ "togglestatusbar",   togglestatusbar,   0 },
 	{ "focusmon",          focusmon,          1 },
@@ -3813,7 +3814,11 @@ configurex11(struct wl_listener *listener, void *data)
 	 * events from the letterbox area to the game's surface.
 	 */
 	if (c->isfullscreen && c->mon) {
-		struct wlr_box fsgeom = fullscreen_mirror_geom(c->mon);
+		/* Resolution-driven multi-monitor span: the size the game asks
+		 * for decides.  Bigger than the home monitor → span across all
+		 * outputs; normal single-monitor size → back to one screen. */
+		span_update_from_request(c, event->width, event->height);
+		struct wlr_box fsgeom = client_fullscreen_geom(c);
 		int gw = event->width;
 		int gh = event->height;
 

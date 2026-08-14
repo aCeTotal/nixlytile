@@ -131,6 +131,7 @@ struct wlr_drm_backend {
 	struct wlr_drm_format_set mgpu_formats;
 
 	bool supports_tearing_page_flips;
+	bool in_fence_fd_broken; /* set after first EPERM reject + fence-less retry success */
 };
 
 struct wlr_drm_mode {

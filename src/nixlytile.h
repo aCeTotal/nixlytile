@@ -974,6 +974,8 @@ typedef struct {
 	unsigned int bw;
 	uint32_t tags;
 	int isfloating, isurgent, isfullscreen, issticky, was_tiled;
+	int isspanned;                /* fullscreen spans every enabled output (multi-monitor gaming) */
+	int span_manual;              /* togglegamespan override: force span on, ignore size-driven auto */
 	int isfixed;                  /* float-type with fixed size — reject interactive resize */
 	int is_game_splash;         /* Game splash/EAC launcher → keep centered */
 	int fx_covered;             /* launch cover already played for this client */
@@ -1326,6 +1328,19 @@ struct Monitor {
 	uint64_t last_present_ns;
 	uint64_t present_interval_ns;
 	uint64_t target_present_ns;
+	/* Late-latch commit deferral (latch.c) */
+	struct wl_event_source *latch_timer;
+	int latch_armed;                    /* timer pending for this vblank */
+	int latch_fired;                    /* rendermon re-entered via timer */
+	uint64_t rolling_draw_ns;           /* sawtooth build+commit estimate */
+	int vrr_overlay_skips;              /* consecutive OSD-only build skips under VRR */
+	/* Game-resolution modeset for guaranteed scanout (gamescan.c) */
+	int gamescan_w, gamescan_h;         /* last observed off-mode game buffer size */
+	int gamescan_stable;                /* consecutive vblanks at that size, no scanout */
+	int gamescan_pending;               /* modeset decided, applied top of next rendermon */
+	int gamescan_mode_active;           /* output currently on the game's mode */
+	int gamescan_failed_w, gamescan_failed_h; /* size with no mode / failed commit */
+	struct wlr_output_mode *gamescan_original;
 	int pending_game_frame;
 	uint64_t game_frame_submit_ns;
 	uint64_t game_frame_intervals[16];
@@ -2144,6 +2159,24 @@ void togglefloating(const Arg *arg);
 void togglefullscreen(const Arg *arg);
 void togglefullscreenadaptivesync(const Arg *arg);
 struct wlr_box fullscreen_mirror_geom(Monitor *m);
+/* span.c — fullscreen across all outputs (multi-monitor gaming) */
+struct wlr_box span_geom(void);
+int span_available(void);
+
+/* latch.c */
+int latch_defer_frame(Monitor *m, int is_game, int allow_tearing, uint64_t now_ns);
+void latch_track_draw(Monitor *m, uint64_t draw_ns);
+extern int game_late_latch_enabled;
+
+/* gamescan.c */
+void gamescan_tick(Monitor *m, Client *fc, int is_direct_scanout);
+void gamescan_apply(Monitor *m);
+void gamescan_restore(Monitor *m);
+struct wlr_box client_fullscreen_geom(Client *c);
+Client *spanned_fullscreen_client(void);
+void togglegamespan(const Arg *arg);
+int span_update_from_request(Client *c, int w, int h);
+extern int game_span_auto;    /* config `game-span "auto"`: resolution-driven span */
 void togglemirror(const Arg *arg);
 void togglesticky(const Arg *arg);
 void updatetitle(struct wl_listener *listener, void *data);

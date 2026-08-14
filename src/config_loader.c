@@ -223,6 +223,7 @@ static const ActionEntry actions[] = {
 	{ "spawn",                        spawn,                        A_SPAWN },
 	{ "togglefloating",               togglefloating,               A_NONE },
 	{ "togglefullscreen",             togglefullscreen,             A_NONE },
+	{ "togglegamespan",               togglegamespan,               A_NONE },
 	{ "togglestatusbar",              togglestatusbar,              A_NONE },
 	{ "togglegaps",                   togglegaps,                   A_NONE },
 
@@ -910,6 +911,15 @@ apply_doc(const KdlDoc *doc, int initial)
 			}
 		} else if (!strcmp(n->name, "lock-cursor")) {
 			int b; if (kdl_arg_bool(n, 0, &b)) lock_cursor = b;
+		} else if (!strcmp(n->name, "game-span")) {
+			/* "auto" → span games across all outputs on fullscreen;
+			 * "off" (default) → span only via the togglegamespan bind. */
+			if (kdl_arg_string(n, 0, &s))
+				game_span_auto = !strcasecmp(s, "auto");
+		} else if (!strcmp(n->name, "game-late-latch")) {
+			/* Defer game commits to just before vblank (default on);
+			 * kill-switch in case a driver mispredicts presents. */
+			int b; if (kdl_arg_bool(n, 0, &b)) game_late_latch_enabled = b;
 		} else if (!strcmp(n->name, "workspaces")) {
 			(void)li; /* TAGCOUNT is compile-time; informational only */
 		}

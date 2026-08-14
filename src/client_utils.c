@@ -125,11 +125,17 @@ fullscreen_visible_on(Monitor *m)
 	if (!m)
 		return NULL;
 	wl_list_for_each(c, &clients, link) {
-		if (!c->isfullscreen || c->mon != m)
+		if (!c->isfullscreen)
+			continue;
+		/* A spanned game covers every output, so it counts as the
+		 * fullscreen client on all of them (bar hiding, pointer
+		 * fallback, cursor confinement). Workspace binding is checked
+		 * against its HOME monitor — that is where fs_ws lives. */
+		if (c->mon != m && !(c->isspanned && span_available()))
 			continue;
 		if (!client_surface(c) || !client_surface(c)->mapped)
 			continue;
-		if (c->fs_ws && c->fs_ws != m->active_ws)
+		if (c->fs_ws && c->mon && c->fs_ws != c->mon->active_ws)
 			continue;
 		return c;
 	}

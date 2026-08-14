@@ -71,6 +71,10 @@ cleanupmon(struct wl_listener *listener, void *data)
 	ll_cursor_cleanup(m);
 	monitor_cleanup_workspaces(m);
 	wl_event_source_remove(m->idle_heartbeat);
+	if (m->latch_timer) {
+		wl_event_source_remove(m->latch_timer);
+		m->latch_timer = NULL;
+	}
 	if (m->edid_reprobe_timer) {
 		wl_event_source_remove(m->edid_reprobe_timer);
 		m->edid_reprobe_timer = NULL;
@@ -2523,6 +2527,11 @@ rendermon(struct wl_listener *listener, void *data)
 
 	m->frame_scheduled = 0;
 
+	/* A latch timer is already scheduled to commit for this vblank —
+	 * a stray frame event (anim tick's schedule_frame) must not race it. */
+	if (m->latch_armed)
+		return;
+
 	frame_start_ns = get_time_ns();
 	now.tv_sec = frame_start_ns / 1000000000ULL;
 	now.tv_nsec = frame_start_ns % 1000000000ULL;
@@ -2596,6 +2605,12 @@ rendermon(struct wl_listener *listener, void *data)
 
 	classify_fullscreen_content(m, &is_game, &is_video, &allow_tearing);
 
+	/* Late latch: defer the game build+commit to just before the
+	 * predicted present so the newest game buffer is the one flipped
+	 * (see latch.c).  Re-entry via the latch timer continues below. */
+	if (latch_defer_frame(m, is_game, allow_tearing, frame_start_ns))
+		return;
+
 	/* Deferred fixed-mode fallback after a VRR reject (see
 	 * commit_output_frame). Blocking modeset — runs here, outside the
 	 * commit path. Only while the video is still up. */
@@ -2604,6 +2619,15 @@ rendermon(struct wl_listener *listener, void *data)
 		m->video_fixed_fallback_hz = 0.0f;
 		if (is_video && !m->video_mode_active)
 			apply_best_video_mode(m, fb_hz);
+	}
+
+	/* Deferred game-resolution modeset (see gamescan.c). Blocking
+	 * modeset — runs here, outside the commit path, and only while the
+	 * game is still the fullscreen content. */
+	if (m->gamescan_pending) {
+		m->gamescan_pending = 0;
+		if (is_game)
+			gamescan_apply(m);
 	}
 
 	/* A 10-bit render format is a direct-scanout blocker: the game's
@@ -2842,6 +2866,30 @@ rendermon(struct wl_listener *listener, void *data)
 		}
 	}
 
+	/* VRR overlay-repaint suppression (gamescope's mangohud fix): while a
+	 * game drives a VRR display, compositor-only damage (toast/OSD anim)
+	 * must not force extra flips between game frames — each one refreshes
+	 * the panel and pushes the next real game frame against the panel's
+	 * minimum refresh interval (visible judder).  Skip the build unless
+	 * the game submitted a new buffer, bounded to a few vblanks so OSD
+	 * updates still land promptly when the game idles. */
+	if (is_game && !is_video && m->vrr_active && !m->vrr_pending &&
+	    !m->hdr_entry_pending && !m->hdr_exit_pending) {
+		Client *gc = focustop(m);
+		struct wlr_surface *gsurf = gc ? client_surface(gc) : NULL;
+		struct wlr_buffer *gbuf = gsurf
+			? (struct wlr_buffer *)gsurf->buffer : NULL;
+		if (gbuf && gbuf == gc->game_last_buffer &&
+		    m->vrr_overlay_skips < 3) {
+			m->vrr_overlay_skips++;
+			m->diag_idle_skips++;
+			m->frames_since_content_change++;
+			m->last_frame_ns = frame_start_ns;
+			goto frame_done;
+		}
+		m->vrr_overlay_skips = 0;
+	}
+
 	{
 		/* Idle gate: nothing changed and no deferred output state
 		 * (VRR/HDR/toast-plane teardown) is waiting for a commit —
@@ -2994,6 +3042,12 @@ rendermon(struct wl_listener *listener, void *data)
 		}
 	}
 
+	/* Game-resolution modeset tracker: a fullscreen game presenting a
+	 * stable buffer size the current mode can't scan out (NVIDIA has no
+	 * plane scaling) gets the output switched to its resolution. */
+	if (is_game && needs_frame)
+		gamescan_tick(m, focustop(m), is_direct_scanout);
+
 	/* Scanout failure diagnostic.
 	 *
 	 * When a fullscreen game is visible but direct scanout isn't
@@ -3117,6 +3171,10 @@ rendermon(struct wl_listener *listener, void *data)
 		commit_output_frame(m, &state, allow_tearing, use_frame_pacing, frame_start_ns);
 		if (m->tag_switch_debug > 0)
 			write(STDERR_FILENO, "TS:commit<\n", 11);
+		/* Feed the late-latch draw budget with the full body cost
+		 * (build + commit) actually paid this pass. */
+		if (is_game)
+			latch_track_draw(m, get_time_ns() - frame_start_ns);
 	} else {
 		m->frames_since_content_change++;
 		if (use_frame_pacing && m->pending_game_frame) {
@@ -3172,24 +3230,35 @@ frame_done:
 			/*
 			 * VRR / tearing: presents aren't vblank-quantized, so a
 			 * time-based release is already even at the exact cap.
+			 *
+			 * Anchor the next release at last + interval (gamescope's
+			 * VRR frame limiter) instead of measuring from "now": a
+			 * release always lands a little past its target, and
+			 * re-basing on that late point every cycle accumulates
+			 * drift below the cap.  The 0.2 ms fudge releases a
+			 * marginally-early wakeup instead of holding it a whole
+			 * extra vblank.
 			 */
 			uint64_t target_interval_ns = 1000000000ULL / (uint64_t)fps_limit_value;
 			uint64_t now_ns = frame_start_ns;
-			uint64_t elapsed_ns = 0;
-
-			if (m->fps_limit_last_frame_ns > 0)
-				elapsed_ns = now_ns - m->fps_limit_last_frame_ns;
 
 			m->fps_limit_interval_ns = target_interval_ns;
 
-			if (elapsed_ns < target_interval_ns) {
-				/* Don't send frame_done yet - limiter is active.
-				 * Schedule next vblank so rendermon keeps firing. */
-				request_frame(m);
-				return;
+			if (m->fps_limit_last_frame_ns > 0) {
+				uint64_t next = m->fps_limit_last_frame_ns + target_interval_ns;
+				if (now_ns + 200000ULL < next) {
+					/* Don't send frame_done yet - limiter is active.
+					 * Schedule next vblank so rendermon keeps firing. */
+					request_frame(m);
+					return;
+				}
+				/* Far behind (game stalled): resync instead of
+				 * bursting released frames to catch up. */
+				m->fps_limit_last_frame_ns =
+					(now_ns > next + target_interval_ns) ? now_ns : next;
+			} else {
+				m->fps_limit_last_frame_ns = now_ns;
 			}
-
-			m->fps_limit_last_frame_ns = now_ns;
 		}
 	}
 
@@ -6400,7 +6469,7 @@ updatemons(struct wl_listener *listener, void *data)
 		 */
 		wl_list_for_each(c, &clients, link) {
 			if (c->mon == m && c->isfullscreen) {
-				struct wlr_box fsgeom = fullscreen_mirror_geom(m);
+				struct wlr_box fsgeom = client_fullscreen_geom(c);
 				if (c->geom.width != fsgeom.width ||
 				    c->geom.height != fsgeom.height ||
 				    c->geom.x != fsgeom.x ||

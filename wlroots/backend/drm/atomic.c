@@ -1,4 +1,6 @@
 #include <drm_fourcc.h>
+#include <errno.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -87,6 +89,8 @@ static bool atomic_commit(struct atomic *atom, struct wlr_drm_backend *drm,
 		wlr_log(WLR_DEBUG, "(Atomic commit flags: %s)",
 			flags_str ? flags_str : "<error>");
 		free(flags_str);
+		// Logging may clobber errno; callers inspect it to pick a fallback
+		errno = -ret;
 		return false;
 	}
 
@@ -369,6 +373,15 @@ bool drm_atomic_connector_prepare(struct wlr_drm_connector_state *state, bool mo
 		if (in_fence_fd < 0) {
 			return false;
 		}
+		if (drm->in_fence_fd_broken) {
+			// Driver rejects IN_FENCE_FD with EPERM (NVIDIA 555+): wait the
+			// fence out CPU-side instead so the commit still cannot scan out
+			// an unfinished buffer.
+			struct pollfd pfd = { .fd = in_fence_fd, .events = POLLIN };
+			poll(&pfd, 1, 100);
+			close(in_fence_fd);
+			in_fence_fd = -1;
+		}
 	}
 
 	bool prev_vrr_enabled =
@@ -614,6 +627,40 @@ static bool atomic_device_commit(struct wlr_drm_backend *drm,
 
 	ok = atomic_commit(&atom, drm, state, page_flip, flags);
 	atomic_finish(&atom);
+
+	// NVIDIA 555+ advertises syncobj support but rejects IN_FENCE_FD with
+	// EPERM (gamescope carries the same workaround). Wait the fences out
+	// CPU-side, strip them and retry once; in_fence_fd_broken makes future
+	// commits skip the fence property up front.
+	if (!ok && errno == EPERM && !drm->in_fence_fd_broken) {
+		bool had_fence = false;
+		for (size_t i = 0; i < state->connectors_len; i++) {
+			struct wlr_drm_connector_state *conn_state = &state->connectors[i];
+			if (conn_state->primary_in_fence_fd >= 0) {
+				struct pollfd pfd = {
+					.fd = conn_state->primary_in_fence_fd,
+					.events = POLLIN,
+				};
+				poll(&pfd, 1, 100);
+				close(conn_state->primary_in_fence_fd);
+				conn_state->primary_in_fence_fd = -1;
+				had_fence = true;
+			}
+		}
+		if (had_fence) {
+			wlr_log(WLR_ERROR, "Atomic commit rejected IN_FENCE_FD (EPERM), "
+				"retrying without plane in-fences (CPU-side fence waits)");
+			atomic_begin(&atom);
+			for (size_t i = 0; i < state->connectors_len; i++) {
+				atomic_connector_add(&atom, &state->connectors[i], state->modeset);
+			}
+			ok = atomic_commit(&atom, drm, state, page_flip, flags);
+			atomic_finish(&atom);
+			if (ok) {
+				drm->in_fence_fd_broken = true;
+			}
+		}
+	}
 
 out:
 	for (size_t i = 0; i < state->connectors_len; i++) {

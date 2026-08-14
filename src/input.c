@@ -2079,7 +2079,14 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		{
 			Client *fsc = fsc_cur;
 			if (fsc) {
+				/* Spanned game: the cursor may roam the whole span
+				 * (every monitor the game covers), not just selmon. */
+				struct wlr_box spanbox;
 				struct wlr_box *mb = &selmon->m;
+				if (fsc->isspanned) {
+					spanbox = client_fullscreen_geom(fsc);
+					mb = &spanbox;
+				}
 				double cx = cursor->x, cy = cursor->y;
 				int clamped = 0;
 				if (cx < mb->x) { cx = mb->x; clamped = 1; }
