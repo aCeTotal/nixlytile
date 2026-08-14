@@ -398,10 +398,16 @@ commitnotify(struct wl_listener *listener, void *data)
 	 * by client_clip_to_usable).  wlroots dedups equal clip boxes, so
 	 * this is free on the common no-change commit. */
 	if (!c->column && c->scene_surface) {
-		struct wlr_box fresh_clip;
-		client_get_clip(c, &fresh_clip);
-		wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node,
-				&fresh_clip);
+		if (c->is_notif) {
+			/* Varsel under slide: klippet eies av notify.c og er
+			 * klemt mot skjermkanten — ikke gjenopprett full bredde. */
+			notify_refresh_clip(c);
+		} else {
+			struct wlr_box fresh_clip;
+			client_get_clip(c, &fresh_clip);
+			wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node,
+					&fresh_clip);
+		}
 	} else if (c->column && c->scene_surface) {
 		/* Column tiles: re-evaluate the box/area clip against the
 		 * freshly committed buffer.  A stale oversized buffer gets

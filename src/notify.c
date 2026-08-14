@@ -47,6 +47,67 @@ notif_schedule(Monitor *m)
 		wlr_output_schedule_frame(m->wlr_output);
 }
 
+/* Klipp varselet mot sin egen skjermkant. Noden glir i globale
+ * layout-koordinater, så delen som stikker utenfor høyre kant ville ellers
+ * blitt tegnet på venstre side av naboskjermen. Surface-treet klippes i
+ * surface-lokale koordinater; kantrektene kappes i samme bredde. */
+static void
+notif_clip_to_mon(Notif *n, int x)
+{
+	Client *c = n->c;
+	struct wlr_box clip;
+	int vis = n->m->m.x + n->m->m.width - x;
+	int w = c->geom.width;
+	int rw;
+
+	if (!c->scene_surface)
+		return;
+	if (vis < 0)
+		vis = 0;
+	if (vis > w)
+		vis = w;
+
+	client_get_clip(c, &clip);
+	if (clip.width > vis - (int)c->bw)
+		clip.width = MAX(vis - (int)c->bw, 0);
+	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+
+	/* Unmanaged (override-redirect) klienter har ingen border-rekter. */
+	if (!c->border[0])
+		return;
+
+	if (vis >= w) {
+		client_set_border_size(c, w, c->geom.height);
+		return;
+	}
+	/* border[0]/[1] = topp/bunn (0,·), [2] = venstre, [3] = høyre ved
+	 * x = w - bw. Kapp alt ved vis. */
+	wlr_scene_rect_set_size(c->border[0], vis, c->bw);
+	wlr_scene_rect_set_size(c->border[1], vis, c->bw);
+	wlr_scene_rect_set_size(c->border[2], MIN((int)c->bw, vis),
+			MAX(c->geom.height - 2 * (int)c->bw, 0));
+	rw = vis - (w - (int)c->bw);
+	if (rw < 0)
+		rw = 0;
+	wlr_scene_rect_set_size(c->border[3], rw,
+			MAX(c->geom.height - 2 * (int)c->bw, 0));
+}
+
+/* Kalles fra commit-handleren i client.c: den frisker opp surface-klippet
+ * på hver commit, og ville ellers gjenopprettet full bredde midt i sliden. */
+void
+notify_refresh_clip(Client *c)
+{
+	Notif *n;
+
+	wl_list_for_each(n, &notifs, link) {
+		if (n->c != c)
+			continue;
+		notif_clip_to_mon(n, (int)n->x_f);
+		return;
+	}
+}
+
 static int
 notif_hide_timeout(void *data)
 {
@@ -293,6 +354,7 @@ notify_try_adopt(Client *c)
 	c->geom.x = n->target_x;
 	c->geom.y = n->slot_y;
 	wlr_scene_node_set_position(&c->scene->node, n->off_x, n->slot_y);
+	notif_clip_to_mon(n, n->off_x);
 
 	if (!n->sticky) {
 		n->timer = wl_event_loop_add_timer(event_loop,
@@ -323,6 +385,7 @@ notify_start_offscreen(Client *c)
 		if (n->c != c)
 			continue;
 		wlr_scene_node_set_position(&c->scene->node, n->off_x, n->slot_y);
+		notif_clip_to_mon(n, n->off_x);
 		return;
 	}
 }
@@ -368,6 +431,7 @@ notify_tick(Monitor *m, double dt, int *still)
 				SPRING_NOTIF, dt)) {
 			wlr_scene_node_set_position(&n->c->scene->node,
 					(int)n->x_f, n->slot_y);
+			notif_clip_to_mon(n, (int)n->x_f);
 			*still = 1;
 			continue;
 		}
@@ -375,6 +439,7 @@ notify_tick(Monitor *m, double dt, int *still)
 		/* Fjæra er i mål. */
 		wlr_scene_node_set_position(&n->c->scene->node,
 				n->target_x, n->slot_y);
+		notif_clip_to_mon(n, n->target_x);
 		if (!n->hiding)
 			continue;
 

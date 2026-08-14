@@ -102,7 +102,18 @@ void parse_edid(struct wlr_drm_connector *conn, size_t len, const uint8_t *data)
 
 	const struct di_hdr_static_metadata *hdr_static_metadata = di_info_get_hdr_static_metadata(info);
 	if (conn->props.hdr_output_metadata != 0 && hdr_static_metadata->type1 && hdr_static_metadata->pq) {
-		output->supported_transfer_functions |= WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ;
+		/* nixlytile patch: fake-HDR panels (e.g. Samsung Odyssey G5) advertise
+		 * PQ in the EDID HDR block but omit the desired-content luminance
+		 * values because they have no real HDR hardware. Driving them into
+		 * HDR mode produces a blown-out, over-bright picture. Require a
+		 * reported max luminance before claiming PQ support. */
+		if (hdr_static_metadata->desired_content_max_luminance > 0) {
+			output->supported_transfer_functions |= WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ;
+		} else {
+			wlr_log(WLR_INFO, "connector %s: EDID advertises PQ but no "
+				"max luminance — treating display as SDR-only",
+				conn->name);
+		}
 	}
 
 	di_info_destroy(info);

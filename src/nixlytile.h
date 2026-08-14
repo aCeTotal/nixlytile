@@ -2297,6 +2297,7 @@ extern struct wl_list notifs;
 int notify_try_adopt(Client *c);
 int notify_wants_keyboard(Client *c);
 void notify_start_offscreen(Client *c);
+void notify_refresh_clip(Client *c);
 void notify_release(Client *c);
 void notify_tick(Monitor *m, double dt, int *still);
 

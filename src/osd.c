@@ -227,6 +227,39 @@ toast_build(Toast *t, const char *msg)
 	return 1;
 }
 
+/* Klipp kortet mot sin egen skjermkant: treet glir i globale
+ * layout-koordinater, så delen utenfor høyre kant ville ellers blitt tegnet
+ * på naboskjermen.  Alle barna i t->tree er scene-buffere (kort + glyfer),
+ * ukalerte, så en 1:1 source-box-crop holder. */
+static void
+toast_clip_to_mon(Toast *t, int x)
+{
+	struct wlr_scene_node *node;
+	int lim = t->m->m.x + t->m->m.width - x;
+
+	wl_list_for_each(node, &t->tree->children, link) {
+		struct wlr_scene_buffer *sb = wlr_scene_buffer_from_node(node);
+		int bw = sb->buffer ? sb->buffer->width : 0;
+		int bh = sb->buffer ? sb->buffer->height : 0;
+		int vis = lim - node->x;
+
+		if (bw <= 0)
+			continue;
+		if (vis >= bw) {
+			wlr_scene_node_set_enabled(node, 1);
+			wlr_scene_buffer_set_source_box(sb, NULL);
+			wlr_scene_buffer_set_dest_size(sb, bw, bh);
+		} else if (vis <= 0) {
+			wlr_scene_node_set_enabled(node, 0);
+		} else {
+			struct wlr_fbox src = { 0, 0, vis, bh };
+			wlr_scene_node_set_enabled(node, 1);
+			wlr_scene_buffer_set_source_box(sb, &src);
+			wlr_scene_buffer_set_dest_size(sb, vis, bh);
+		}
+	}
+}
+
 /* Put a card on screen, no questions asked.  osd_show() gates on game
  * mode; the launch cover uses this directly for its one "Game Mode On". */
 void
@@ -253,6 +286,7 @@ osd_show_force(Monitor *m, const char *msg)
 			wl_event_source_timer_update(t->timer, OSD_HOLD_MS);
 		/* Stay above the launch cover, which lives in the same layer. */
 		wlr_scene_node_raise_to_top(&t->tree->node);
+		toast_clip_to_mon(t, (int)t->x_f);
 		osd_schedule(m);
 		return;
 	}
@@ -279,6 +313,7 @@ osd_show_force(Monitor *m, const char *msg)
 	t->x_vel = 0.0;
 	t->hiding = 0;
 	wlr_scene_node_set_position(&t->tree->node, t->off_x, t->slot_y);
+	toast_clip_to_mon(t, t->off_x);
 
 	t->timer = wl_event_loop_add_timer(event_loop, osd_hide_timeout, t);
 	if (t->timer)
@@ -313,11 +348,13 @@ osd_tick(Monitor *m, double dt, int *still)
 				SPRING_OSD, dt)) {
 			wlr_scene_node_set_position(&t->tree->node,
 					(int)t->x_f, t->slot_y);
+			toast_clip_to_mon(t, (int)t->x_f);
 			*still = 1;
 			continue;
 		}
 		wlr_scene_node_set_position(&t->tree->node,
 				t->target_x, t->slot_y);
+		toast_clip_to_mon(t, t->target_x);
 		if (t->hiding)
 			toast_destroy(t);
 	}
