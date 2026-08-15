@@ -1496,12 +1496,25 @@ find_best_video_mode(Monitor *m, float video_hz)
 		}
 	}
 
-	/* Option 3: Check if CVT custom modes could work (score them theoretically) */
-	for (int mult = 1; mult <= 5; mult++) {
+	/* Option 3: Custom modes at exact multiples (scored theoretically;
+	 * apply_best_video_mode prøver skalert-fra-ekte-timings først, CVT
+	 * som fallback, og faller videre til høyere multiplum om panelet
+	 * avviser). Tak = panelets høyeste mode i samme oppløsning — et
+	 * 300 Hz-panel kan ta 287.712 (12×23.976), ikke bare ≤240. */
+	float panel_max_hz = 0.0f;
+	wl_list_for_each(mode, &m->wlr_output->modes, link) {
+		if (mode->width == width && mode->height == height &&
+		    mode->refresh / 1000.0f > panel_max_hz)
+			panel_max_hz = mode->refresh / 1000.0f;
+	}
+	if (panel_max_hz <= 0.0f)
+		panel_max_hz = 240.0f;
+
+	for (int mult = 1; mult <= 12; mult++) {
 		float target_display_hz = video_hz * mult;
 
 		/* Skip if below typical panel minimum or above maximum */
-		if (target_display_hz < 48.0f || target_display_hz > 240.0f)
+		if (target_display_hz < 48.0f || target_display_hz > panel_max_hz * 1.002f)
 			continue;
 
 		/* Check if we already found this rate in existing modes */

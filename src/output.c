@@ -5417,46 +5417,93 @@ apply_best_video_mode(Monitor *m, float video_hz)
 		wlr_output_state_finish(&state);
 		break;
 
-	case 2: /* Custom CVT mode */
+	case 2: { /* Custom mode (scaled from real timings, CVT as fallback) */
+		drmModeModeInfo base;
+		int have_base;
+		float panel_max_hz = 0.0f;
+		struct wlr_output_mode *it;
+		int mult;
+		float applied_hz = 0.0f;
+
 		if (!wlr_output_is_drm(m->wlr_output)) {
-			wlr_log(WLR_ERROR, "CVT mode requires DRM output");
+			wlr_log(WLR_ERROR, "Custom mode requires DRM output");
 			break;
 		}
 		/* current_mode kan være NULL (custom mode / output i limbo
-		 * under hotplug) — CVT trenger bredde/høyde derfra. */
+		 * under hotplug) — vi trenger bredde/høyde/timings derfra. */
 		if (!m->wlr_output->current_mode) {
-			wlr_log(WLR_ERROR, "CVT mode: no current mode on %s",
+			wlr_log(WLR_ERROR, "Custom mode: no current mode on %s",
 					m->wlr_output->name);
 			break;
 		}
 
-		/* Generate CVT mode */
-		generate_cvt_mode(&drm_mode,
-				m->wlr_output->current_mode->width,
-				m->wlr_output->current_mode->height,
-				best.actual_hz);
-
-		new_mode = wlr_drm_connector_add_mode(m->wlr_output, &drm_mode);
-		if (!new_mode) {
-			wlr_log(WLR_ERROR, "Failed to add CVT mode for %.3f Hz", best.actual_hz);
-			break;
+		have_base = drm_mode_timings(m, m->wlr_output->current_mode, &base);
+		wl_list_for_each(it, &m->wlr_output->modes, link) {
+			if (it->width == m->wlr_output->current_mode->width &&
+			    it->height == m->wlr_output->current_mode->height &&
+			    it->refresh / 1000.0f > panel_max_hz)
+				panel_max_hz = it->refresh / 1000.0f;
 		}
 
-		wlr_output_state_init(&state);
-		wlr_output_state_set_mode(&state, new_mode);
+		/* Beste kandidat først, så stigende multiplum (fallende score).
+		 * i915/eDP avviser gjerne store vtotal-strekk (lav rate =
+		 * vtotal utenfor hw-grense) — da redder et høyere multiplum
+		 * avspillingen i stedet for at hele byttet gis opp. */
+		for (mult = best.multiplier; mult <= 12 && !success; mult++) {
+			float target = video_hz * mult;
+			int tries;
 
-		if (wlr_output_test_state(m->wlr_output, &state) &&
-		    wlr_output_commit_state(m->wlr_output, &state)) {
-			m->video_mode_active = 1;
-			success = 1;
+			if (target < 47.9f)
+				continue;
+			if (panel_max_hz > 0.0f && target > panel_max_hz * 1.002f)
+				break;
 
-			config = wlr_output_configuration_v1_create();
-			config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
-			config_head->state.mode = new_mode;
-			wlr_output_manager_v1_set_configuration(output_mgr, config);
+			for (tries = 0; tries < 2 && !success; tries++) {
+				if (tries == 0) {
+					if (!have_base)
+						continue;
+					generate_scaled_mode(&drm_mode, &base, target);
+				} else {
+					generate_cvt_mode(&drm_mode,
+							m->wlr_output->current_mode->width,
+							m->wlr_output->current_mode->height,
+							target);
+				}
 
-			/* Show OSD */
-			int actual_mhz = (int)(best.actual_hz * 1000.0f + 0.5f);
+				new_mode = wlr_drm_connector_add_mode(m->wlr_output, &drm_mode);
+				if (!new_mode) {
+					wlr_log(WLR_DEBUG, "add_mode failed: %s %.3f Hz",
+							tries == 0 ? "scaled" : "CVT", target);
+					continue;
+				}
+
+				wlr_output_state_init(&state);
+				wlr_output_state_set_mode(&state, new_mode);
+				if (wlr_output_test_state(m->wlr_output, &state) &&
+				    wlr_output_commit_state(m->wlr_output, &state)) {
+					m->video_mode_active = 1;
+					success = 1;
+					applied_hz = new_mode->refresh / 1000.0f;
+					best.multiplier = mult;
+
+					config = wlr_output_configuration_v1_create();
+					config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+					config_head->state.mode = new_mode;
+					wlr_output_manager_v1_set_configuration(output_mgr, config);
+
+					wlr_log(WLR_INFO, "Applied %s mode %.3f Hz for %.3f Hz video (%dx)",
+							tries == 0 ? "scaled" : "CVT",
+							applied_hz, video_hz, mult);
+				} else {
+					wlr_log(WLR_DEBUG, "test/commit failed: %s %.3f Hz",
+							tries == 0 ? "scaled" : "CVT", target);
+				}
+				wlr_output_state_finish(&state);
+			}
+		}
+
+		if (success) {
+			int actual_mhz = (int)(applied_hz * 1000.0f + 0.5f);
 			int source_mhz = (int)(video_hz * 1000.0f + 0.5f);
 			if (best.multiplier > 1) {
 				snprintf(osd_msg, sizeof(osd_msg), "%d.%03d Hz (%dx %d.%03d)",
@@ -5468,12 +5515,9 @@ apply_best_video_mode(Monitor *m, float video_hz)
 						actual_mhz / 1000, actual_mhz % 1000);
 			}
 			show_hz_osd(m, osd_msg);
-
-			wlr_log(WLR_DEBUG, "Applied CVT mode %.3f Hz for %.3f Hz video",
-					best.actual_hz, video_hz);
 		}
-		wlr_output_state_finish(&state);
 		break;
+	}
 	}
 
 	if (!success) {
@@ -6028,6 +6072,53 @@ generate_fixed_mode(drmModeModeInfo *mode, const drmModeModeInfo *base, int vref
 
 	snprintf(mode->name, sizeof(mode->name), "%dx%d@%d.00",
 			mode->hdisplay, mode->vdisplay, vrefresh);
+}
+
+/* Mirror of vendored wlroots' struct wlr_drm_mode (backend/drm/drm.h,
+ * private header, not installed): a wlr_output_mode on a DRM output is
+ * the first member, followed by the kernel modeline. Lets us read the
+ * REAL timings of the mode the panel is running — CVT-guessing timings
+ * for an eDP/DP panel with fixed horizontal frequency produces modes the
+ * panel rejects. */
+struct nixly_drm_mode {
+	struct wlr_output_mode wlr_mode;
+	drmModeModeInfo drm_mode;
+};
+
+/* Real kernel timings for a mode on a DRM output. 0 if unavailable. */
+int
+drm_mode_timings(Monitor *m, struct wlr_output_mode *mode, drmModeModeInfo *out)
+{
+	if (!m || !m->wlr_output || !mode || !wlr_output_is_drm(m->wlr_output))
+		return 0;
+	*out = ((struct nixly_drm_mode *)mode)->drm_mode;
+	return out->htotal > 0 && out->vtotal > 0 && out->clock > 0;
+}
+
+/* Exact-rate mode derived from real base timings: keep htotal and all
+ * sync positions, stretch/shrink vtotal to land near the target rate
+ * (this is how VRR modulates rate — panels with a continuous refresh
+ * range accept it), then trim the pixel clock for the exact rate.
+ * Horizontal frequency stays ≈ base, so fixed-hfreq eDP panels keep
+ * their link timing. Millihertz precision — 287.712 Hz for 12×23.976,
+ * where the int-Hz generate_fixed_mode can't express the fraction. */
+void
+generate_scaled_mode(drmModeModeInfo *mode, const drmModeModeInfo *base, float target_hz)
+{
+	double vt;
+
+	*mode = *base;
+	vt = (double)base->clock * 1000.0 / ((double)base->htotal * (double)target_hz);
+	if (vt < (double)(base->vsync_end + 1))
+		vt = (double)(base->vsync_end + 1);
+	if (vt > 65535.0)
+		vt = 65535.0;
+	mode->vtotal = (uint16_t)(vt + 0.5);
+	mode->clock = (uint32_t)((double)target_hz * base->htotal * mode->vtotal / 1000.0 + 0.5);
+	mode->vrefresh = (uint32_t)(target_hz + 0.5f);
+	mode->type = DRM_MODE_TYPE_USERDEF;
+	snprintf(mode->name, sizeof(mode->name), "%dx%d@%.3f",
+			mode->hdisplay, mode->vdisplay, (double)target_hz);
 }
 
 void

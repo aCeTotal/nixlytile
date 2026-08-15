@@ -2445,6 +2445,8 @@ struct wlr_output_mode *find_mode(struct wlr_output *output, int width, int heig
 float score_video_mode(int method, float video_hz, float display_hz, int multiplier);
 float calculate_judder_ms(float video_hz, float display_hz);
 void generate_cvt_mode(drmModeModeInfo *mode, int hdisplay, int vdisplay, float vrefresh);
+void generate_scaled_mode(drmModeModeInfo *mode, const drmModeModeInfo *base, float target_hz);
+int drm_mode_timings(Monitor *m, struct wlr_output_mode *mode, drmModeModeInfo *out);
 void show_hz_osd(Monitor *m, const char *msg);
 void hide_hz_osd(Monitor *m);
 int hz_osd_timeout(void *data);
