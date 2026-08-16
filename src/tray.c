@@ -1517,6 +1517,29 @@ tray_add_item(const char *service, const char *path, int emit_signals)
 	it->icon_tried = 0;
 	it->icon_failed = 0;
 	tray_item_query_status(it);
+	if (tray_get_string_property(it, "Id", it->sni_id, sizeof(it->sni_id)) != 0)
+		it->sni_id[0] = '\0';
+
+	/* One app, one icon: Steam registers the same indicator from two bus
+	 * connections (bootstrap and client both export
+	 * /org/ayatana/NotificationItem/steam), giving two identical tray
+	 * icons.  An existing item with the same SNI Id — or the same
+	 * app-specific object path when Id is unavailable — is the same
+	 * application re-registering: the newest registration wins. */
+	{
+		TrayItem *other, *tmp;
+		wl_list_for_each_safe(other, tmp, &tray_items, link) {
+			int same_id = it->sni_id[0] && other->sni_id[0] &&
+				strcmp(it->sni_id, other->sni_id) == 0;
+			int same_path = strcmp(it->path, other->path) == 0 &&
+				strcmp(it->path, "/StatusNotifierItem") != 0;
+			if (same_id || same_path) {
+				wlr_log(WLR_INFO, "tray: dropping duplicate %s%s (replaced by %s)",
+						other->service, other->path, service);
+				tray_remove_item(other->service);
+			}
+		}
+	}
 	wl_list_insert(&tray_items, &it->link);
 	wlr_log(WLR_INFO, "tray: registered %s%s%s", service, path,
 			it->passive ? " (passive)" : "");

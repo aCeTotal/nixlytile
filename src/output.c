@@ -2805,7 +2805,8 @@ rendermon(struct wl_listener *listener, void *data)
 		diag_logf("MON",
 			"%s fs=%s cls=%s vblanks=%u builds=%u idle_skip=%u "
 			"client_commits=%u presents=%llu/s dropped=%lu held=%lu "
-			"cadence=%d vrr=%d scanout=%d hdr=%d 10bit=%d "
+			"cadence=%d vrr=%d gvrr=%d gfps=%.0f alock=%d pace=%d "
+			"scanout=%d hdr=%d 10bit=%d "
 			"commit_fail=%u commitfail_ev=%u scanout_fall=%u scanout_rearm=%u "
 			"scanout_bl=%d scene_fail=%d geom=%dx%d@%d,%d surf=%dx%d mm=%dx%d@%d,%d",
 			m->wlr_output->name, appid ? appid : "-",
@@ -2813,7 +2814,10 @@ rendermon(struct wl_listener *listener, void *data)
 			m->diag_vblanks, m->diag_builds, m->diag_idle_skips,
 			m->diag_commits_in, presents,
 			(unsigned long)m->frames_dropped, (unsigned long)m->frames_held,
-			m->video_cadence_active, m->vrr_active, m->direct_scanout_active,
+			m->video_cadence_active, m->vrr_active,
+			m->game_vrr_active, m->estimated_game_fps,
+			m->al_lock_fps, m->frame_pacing_active,
+			m->direct_scanout_active,
 			m->hdr_active, m->render_10bit_active,
 			m->commit_failures, m->diag_commit_fails,
 			m->diag_scanout_falls, m->diag_scanout_rearms,

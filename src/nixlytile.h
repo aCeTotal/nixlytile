@@ -632,6 +632,7 @@ struct TrayItem {
 	char service[128];
 	char path[128];
 	char label[64];
+	char sni_id[64]; /* SNI Id property — app identity, used for dedup */
 	char menu[128];
 	int has_menu;
 	int icon_tried;

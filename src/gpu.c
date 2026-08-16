@@ -9,6 +9,32 @@ validate_kernel_module(const char *module_name)
 	return access(path, F_OK) == 0;
 }
 
+/* Fallback when the sysfs param file is unreadable (NVIDIA ships its
+ * param files 0600 root-only): look for module.param=expected on the boot
+ * cmdline, with both underscore and dash spellings of the module name. */
+static int
+cmdline_has_param(const char *module_name, const char *param, const char *expected)
+{
+	char needle[128], buf[4096];
+	char *p;
+	ssize_t n;
+	int fd = open("/proc/cmdline", O_RDONLY);
+	if (fd < 0)
+		return 0;
+	n = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (n <= 0)
+		return 0;
+	buf[n] = '\0';
+	snprintf(needle, sizeof(needle), "%s.%s=%s", module_name, param, expected);
+	if (strstr(buf, needle))
+		return 1;
+	for (p = needle; *p && *p != '.'; p++)
+		if (*p == '_')
+			*p = '-';
+	return strstr(buf, needle) != NULL;
+}
+
 /* Check if a kernel module parameter has a specific value */
 static int
 check_module_param(const char *module_name, const char *param, const char *expected)
@@ -17,7 +43,7 @@ check_module_param(const char *module_name, const char *param, const char *expec
 	snprintf(path, sizeof(path), "/sys/module/%s/parameters/%s", module_name, param);
 	int fd = open(path, O_RDONLY);
 	if (fd < 0)
-		return 0;
+		return errno == EACCES ? cmdline_has_param(module_name, param, expected) : 0;
 	ssize_t n = read(fd, val, sizeof(val) - 1);
 	close(fd);
 	if (n <= 0)
