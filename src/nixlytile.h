@@ -1342,6 +1342,29 @@ struct Monitor {
 	int gamescan_mode_active;           /* output currently on the game's mode */
 	int gamescan_failed_w, gamescan_failed_h; /* size with no mode / failed commit */
 	struct wlr_output_mode *gamescan_original;
+	/* Auto FPS lock (autolock.c) */
+	uint64_t al_sec_start_ns;           /* current 1 s sample bucket start */
+	uint64_t al_worst[16];              /* largest game intervals this second, desc */
+	int al_worst_n;
+	int al_sec_frames;                  /* gameplay frames this second */
+	float al_low_ring[45];              /* per-second sustained-low fps window */
+	int al_ring_idx, al_ring_count;
+	int al_seen_constraint;             /* game grabs pointer → constraint-less = menu */
+	int al_lock_fps;                    /* active auto lock, 0 = none */
+	uint64_t al_lock_since_ns;
+	int al_candidate_fps;
+	uint64_t al_candidate_since_ns;
+	uint64_t al_done_sent_ns;           /* frame_done release → next buffer = render time */
+	uint64_t al_render_ring[16];        /* game render times while locked */
+	int al_render_idx, al_render_count;
+	uint64_t al_last_raise_ns;
+	int al_failed_raise_fps;            /* raise the game couldn't hold */
+	uint64_t al_failed_raise_ns;
+	int al_mode_pending;                /* modeset decided, applied top of rendermon */
+	struct wlr_output_mode *al_target_mode;
+	struct wlr_output_mode *al_failed_mode;
+	int al_mode_active;                 /* output on an autolock-chosen refresh */
+	uint64_t al_last_modeset_ns;
 	int pending_game_frame;
 	uint64_t game_frame_submit_ns;
 	uint64_t game_frame_intervals[16];
@@ -2168,11 +2191,16 @@ int span_available(void);
 int latch_defer_frame(Monitor *m, int is_game, int allow_tearing, uint64_t now_ns);
 void latch_track_draw(Monitor *m, uint64_t draw_ns);
 extern int game_late_latch_enabled;
+extern int game_auto_fps_lock_enabled; /* config `game-auto-fps-lock`: auto lock + refresh match */
 
 /* gamescan.c */
 void gamescan_tick(Monitor *m, Client *fc, int is_direct_scanout);
 void gamescan_apply(Monitor *m);
 void gamescan_restore(Monitor *m);
+void autolock_sample(Monitor *m, uint64_t interval_ns, uint64_t now_ns);
+void autolock_tick(Monitor *m, int allow_tearing, uint64_t now_ns);
+void autolock_apply_mode(Monitor *m);
+void autolock_reset(Monitor *m);
 struct wlr_box client_fullscreen_geom(Client *c);
 Client *spanned_fullscreen_client(void);
 void togglegamespan(const Arg *arg);

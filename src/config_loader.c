@@ -920,6 +920,10 @@ apply_doc(const KdlDoc *doc, int initial)
 			/* Defer game commits to just before vblank (default on);
 			 * kill-switch in case a driver mispredicts presents. */
 			int b; if (kdl_arg_bool(n, 0, &b)) game_late_latch_enabled = b;
+		} else if (!strcmp(n->name, "game-auto-fps-lock")) {
+			/* Lock games to their sustained low fps and match the
+			 * display refresh to it (default on; see autolock.c). */
+			int b; if (kdl_arg_bool(n, 0, &b)) game_auto_fps_lock_enabled = b;
 		} else if (!strcmp(n->name, "workspaces")) {
 			(void)li; /* TAGCOUNT is compile-time; informational only */
 		}

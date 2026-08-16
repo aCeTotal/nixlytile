@@ -1764,6 +1764,8 @@ track_game_frame_pacing(Monitor *m, uint64_t frame_start_ns)
 			if (m->game_frame_interval_count < 16)
 				m->game_frame_interval_count++;
 
+			autolock_sample(m, game_interval, frame_start_ns);
+
 			/* Calculate estimated game FPS from rolling average */
 			if (m->game_frame_interval_count >= 4) {
 				uint64_t avg_interval = 0;
@@ -2744,6 +2746,14 @@ rendermon(struct wl_listener *listener, void *data)
 			gamescan_apply(m);
 	}
 
+	/* Deferred auto-lock refresh modeset (see autolock.c). Same
+	 * deferral pattern as gamescan. */
+	if (m->al_mode_pending) {
+		m->al_mode_pending = 0;
+		if (is_game)
+			autolock_apply_mode(m);
+	}
+
 	/* A 10-bit render format is a direct-scanout blocker: the game's
 	 * 8-bit client buffer doesn't match the 10-bit swapchain, so wlroots
 	 * falls back to GPU composition every frame.  Scanout is the single
@@ -3282,6 +3292,7 @@ rendermon(struct wl_listener *listener, void *data)
 				track_game_frame_pacing(m, frame_start_ns);
 			}
 		}
+		autolock_tick(m, allow_tearing, frame_start_ns);
 	}
 
 	/* Frame doubling/tripling for smooth low-FPS playback (non-VRR).
@@ -3296,10 +3307,11 @@ rendermon(struct wl_listener *listener, void *data)
 		 * the Bresenham cadence handles pacing when active,
 		 * otherwise let the player run freely. */
 	} else if (is_game && m->frame_pacing_active && !m->game_vrr_active &&
-			!allow_tearing && !fps_limit_enabled) {
-		/* fps_limit_enabled excluded: the vblank-locked limiter IS the
-		 * pacing then — frame-repeat gating on top would multiply the
-		 * two hold counts (N×N vblanks per frame_done).
+			!allow_tearing && !fps_limit_enabled &&
+			!(game_auto_fps_lock_enabled && m->al_lock_fps > 0)) {
+		/* fps_limit_enabled / auto lock excluded: the vblank-locked
+		 * limiter IS the pacing then — frame-repeat gating on top would
+		 * multiply the two hold counts (N×N vblanks per frame_done).
 		 * Skip recalculation if FPS hasn't changed by more than 2% */
 		float fps_delta = m->estimated_game_fps - m->frame_repeat_last_fps;
 		if (fps_delta < 0) fps_delta = -fps_delta;
@@ -3354,8 +3366,21 @@ frame_done:
 	 * By delaying frame_done, we effectively limit how fast games can
 	 * render. The game waits for frame_done before starting the next
 	 * frame, so controlling this signal controls the framerate.
+	 *
+	 * Cap source: the manual limiter hotkeys win; otherwise the auto
+	 * FPS lock (autolock.c) supplies the cap.  Auto lock stays out of
+	 * tearing mode — the client asked for unthrottled latency.
 	 */
-	if (fps_limit_enabled && fps_limit_value > 0 && is_game) {
+	{
+	int fps_cap = 0, autolock_cap = 0;
+	if (fps_limit_enabled && fps_limit_value > 0) {
+		fps_cap = fps_limit_value;
+	} else if (game_auto_fps_lock_enabled && m->al_lock_fps > 0
+			&& !allow_tearing) {
+		fps_cap = m->al_lock_fps;
+		autolock_cap = 1;
+	}
+	if (fps_cap > 0 && is_game) {
 		float display_hz = 0.0f;
 
 		if (m->present_interval_ns > 0)
@@ -3375,7 +3400,17 @@ frame_done:
 			 * effective cap snaps to the nearest divisor
 			 * (60 on 144 Hz → 72).
 			 */
-			int n = (int)roundf(display_hz / (float)fps_limit_value);
+			/* Manual cap keeps the historical nearest-divisor snap.
+			 * The auto lock rounds UP instead: releasing faster than
+			 * the game's sustained low (lock 60 on 144 Hz → 72
+			 * releases) puts a 60 fps game on a 72-grid = judder.
+			 * ceil gives the nearest divisor at or below the lock;
+			 * the lock then converges onto it via the low tracking.
+			 * The 0.02 slack absorbs measured-Hz noise (144.1/72
+			 * must not ceil to 3). */
+			int n = autolock_cap
+				? (int)ceilf(display_hz / (float)fps_cap - 0.02f)
+				: (int)roundf(display_hz / (float)fps_cap);
 			if (n < 1)
 				n = 1;
 			m->fps_limit_vblank_count++;
@@ -3397,7 +3432,7 @@ frame_done:
 			 * marginally-early wakeup instead of holding it a whole
 			 * extra vblank.
 			 */
-			uint64_t target_interval_ns = 1000000000ULL / (uint64_t)fps_limit_value;
+			uint64_t target_interval_ns = 1000000000ULL / (uint64_t)fps_cap;
 			uint64_t now_ns = frame_start_ns;
 
 			m->fps_limit_interval_ns = target_interval_ns;
@@ -3418,6 +3453,11 @@ frame_done:
 				m->fps_limit_last_frame_ns = now_ns;
 			}
 		}
+	}
+	/* frame_done releases below — start the auto lock's render-time
+	 * clock (frame_done → next game buffer = actual render cost). */
+	if (autolock_cap)
+		m->al_done_sent_ns = frame_start_ns;
 	}
 
 	/*

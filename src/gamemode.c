@@ -2804,6 +2804,9 @@ stats_panel_refresh_cb(void *data)
 			snprintf(line, sizeof(line), "ON (%d FPS)", fps_limit_value);
 		}
 		tray_render_label(&mod, line, col2_x, y_offset + line_height, warn_color);
+	} else if (game_auto_fps_lock_enabled && m->al_lock_fps > 0) {
+		snprintf(line, sizeof(line), "AUTO (%d FPS)", m->al_lock_fps);
+		tray_render_label(&mod, line, col2_x, y_offset + line_height, good_color);
 	} else {
 		snprintf(line, sizeof(line), "OFF");
 		tray_render_label(&mod, line, col2_x, y_offset + line_height, value_color);

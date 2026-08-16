@@ -2238,6 +2238,7 @@ setfullscreen(Client *c, int fullscreen)
 			c->mon->retro_scanout_lock = 1;
 		}
 		/* Reset frame tracking and video detection state */
+		autolock_reset(c->mon);
 		c->frame_time_idx = 0;
 		c->frame_time_count = 0;
 		c->detected_video_hz = 0.0f;
@@ -2306,6 +2307,8 @@ setfullscreen(Client *c, int fullscreen)
 		restore_console_mode(c->mon);
 		/* Restore native mode if game-resolution scanout was applied */
 		gamescan_restore(c->mon);
+		/* Drop the auto FPS lock and restore refresh if it switched it */
+		autolock_reset(c->mon);
 		c->detected_video_hz = 0.0f;
 		c->video_detect_phase = 0;
 		c->video_detect_retries = 0;
@@ -2622,6 +2625,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 		restore_max_refresh_rate(m);
 		restore_console_mode(m);
 		gamescan_restore(m);
+		autolock_reset(m);
 	}
 
 	/* Invalidate fullscreen classification cache */
