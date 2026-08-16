@@ -3844,10 +3844,19 @@ set_adaptive_sync(Monitor *m, int enable)
 void
 enable_game_vrr(Monitor *m)
 {
-	if (!m || !m->vrr_capable || m->game_vrr_active)
+	if (!m || m->game_vrr_active)
 		return;
 
+	if (!m->vrr_capable) {
+		diag_logf("GVRR", "%s: blocked — output not VRR-capable "
+			"(DRM adaptive-sync test failed at startup)",
+			m->wlr_output->name);
+		return;
+	}
+
 	if (!fullscreen_adaptive_sync_enabled) {
+		diag_logf("GVRR", "%s: blocked — disabled by user setting",
+			m->wlr_output->name);
 		wlr_log(WLR_DEBUG, "Game VRR: disabled by user setting");
 		return;
 	}
@@ -3860,7 +3869,11 @@ enable_game_vrr(Monitor *m)
 		m->game_vrr_stable_frames = 0;
 
 		show_hz_osd(m, "Game VRR Enabled");
+		diag_logf("GVRR", "%s: enabled", m->wlr_output->name);
 		wlr_log(WLR_DEBUG, "Game VRR enabled on %s", m->wlr_output->name);
+	} else {
+		diag_logf("GVRR", "%s: blocked — adaptive-sync commit failed",
+			m->wlr_output->name);
 	}
 }
 

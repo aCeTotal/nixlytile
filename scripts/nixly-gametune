@@ -309,6 +309,48 @@ restore_nvidia() {
 	rm -f "$STATE_DIR/nvidia-persistence.idx"
 }
 
+# Permanent GPU power ceiling, run once at boot by nixly-gpumax.service.
+# Raising the limit alone costs nothing at idle — clocks still scale down —
+# it only removes the cap under load. No state is saved: this is the new
+# baseline, so a game-mode restore lands back on it instead of the factory
+# default.
+gpumax_nvidia() {
+	local card=$1 idx bus max_pl
+
+	command -v nvidia-smi >/dev/null 2>&1 || return 0
+
+	bus=$(basename "$(readlink -f "${ROOT}/sys/class/drm/$card/device")")
+	idx=$(nvidia-smi --query-gpu=index,pci.bus_id --format=csv,noheader 2>/dev/null |
+		awk -F', *' -v bus="$bus" 'tolower($2) ~ tolower(substr(bus, 6)) {print $1; exit}')
+	idx=${idx:-0}
+
+	nvidia-smi -i "$idx" -pm 1 >/dev/null 2>&1 || true
+
+	max_pl=$(nvidia-smi -i "$idx" --query-gpu=power.max_limit \
+		--format=csv,noheader,nounits 2>/dev/null | tr -d ' ')
+	[ -n "${max_pl:-}" ] &&
+		nvidia-smi -i "$idx" --power-limit="${max_pl%%.*}" >/dev/null 2>&1 &&
+		log "gpu $card: nvidia power limit -> ${max_pl%%.*} W (boot baseline)"
+
+	# Explicit success: under the wrapper's errexit a failed set above
+	# would otherwise kill the whole boot service via this return status.
+	return 0
+}
+
+do_gpumax() {
+	local card driver
+
+	for card in "${ROOT}"/sys/class/drm/card*; do
+		[ -e "$card/device/driver" ] || continue
+		case "$(basename "$card")" in *-*) continue;; esac  # skip connectors
+
+		driver=$(basename "$(readlink -f "$card/device/driver")")
+		case "$driver" in
+		nvidia*) gpumax_nvidia "$(basename "$card")" ;;
+		esac
+	done
+}
+
 tune_gpu() {
 	local card dev driver
 
@@ -504,7 +546,9 @@ do_daemon() {
 		sleep 5 &
 		wait $! || true
 
-		if pgrep -x nixlytile >/dev/null 2>&1; then
+		# The compositor renames its main thread to "nixlyOS"
+		# (pthread_setname_np), so comm never reads "nixlytile".
+		if pgrep -x 'nixlytile|nixlyOS' >/dev/null 2>&1; then
 			missing=0
 			continue
 		fi
@@ -524,7 +568,8 @@ daemon)    do_daemon ;;
 apply)     do_apply ;;
 restore)   do_restore ;;
 status)    do_status ;;
+gpumax)    do_gpumax ;;
 protect)   do_protect "${2:-}" ;;
 unprotect) do_unprotect "${2:-}" ;;
-*)         echo "usage: $0 daemon|apply|restore|status|protect <pid>|unprotect <pid>" >&2; exit 1 ;;
+*)         echo "usage: $0 daemon|apply|restore|status|gpumax|protect <pid>|unprotect <pid>" >&2; exit 1 ;;
 esac

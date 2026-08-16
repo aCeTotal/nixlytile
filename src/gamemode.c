@@ -59,11 +59,13 @@ gametune_unit_present(void)
 static void
 gametune_start(void)
 {
-	if (gametune_active)
-		return;
 	if (!gametune_unit_present())
 		return;
 	gametune_active = 1;
+
+	/* No gametune_active short-circuit: the daemon can restore and exit
+	 * behind our back (watchdog, crash), and `systemctl start` on an
+	 * already-active unit is a no-op — always re-assert. */
 
 	static const char *const argv[] = {
 		"systemctl", "start", "--no-block", "nixly-gametune.service", NULL

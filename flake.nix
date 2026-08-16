@@ -365,6 +365,23 @@
                 };
               };
 
+              # GPU power limit at hardware max from boot. An idle GPU still
+              # clocks down on its own, so the raised ceiling costs nothing
+              # until a load arrives — it only removes the cap under load.
+              # Clock locks stay game-mode-only (nixly-gametune): locking
+              # clocks 24/7 would burn power at idle.
+              systemd.services.nixly-gpumax = {
+                description = "nixlytile GPU power limit at hardware max";
+                wantedBy = [ "multi-user.target" ];
+                after = [ "systemd-modules-load.service" ];
+                path = [ "/run/current-system/sw" ];
+                serviceConfig = {
+                  Type = "oneshot";
+                  RemainAfterExit = true;
+                  ExecStart = "${gametune}/bin/nixly-gametune gpumax";
+                };
+              };
+
               # Per-game OOM protection. Lowering oom_score_adj needs
               # CAP_SYS_RESOURCE, so the compositor cannot do it itself; the
               # game PID is the instance name.
