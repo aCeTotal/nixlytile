@@ -80,6 +80,7 @@ span.o: $(SRC)/span.c $(SRC)/nixlytile.h $(SRC)/client.h
 latch.o: $(SRC)/latch.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 gamescan.o: $(SRC)/gamescan.c $(SRC)/nixlytile.h $(SRC)/client.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 autolock.o: $(SRC)/autolock.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 gpu.o: $(SRC)/gpu.c $(SRC)/nixlytile.h $(SRC)/client.h
