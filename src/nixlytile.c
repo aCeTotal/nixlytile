@@ -761,6 +761,7 @@ cleanup(void)
 	wlr_log(WLR_ERROR, "cleanup() called - starting cleanup sequence");
 	apptoggle_cleanup();
 	mic_watch_cleanup();
+	gaming_conf_cleanup();
 	/* Shut down game mode background worker (unfreezes processes if needed) */
 	gm_bg_cleanup();
 	window_ipc_finish();
@@ -1251,6 +1252,10 @@ run(const char *startup_cmd)
 
 	/* Microphone module follows capture-device hotplug. */
 	mic_watch_setup();
+
+	/* Push-to-talk bind from ~/.local/nixlyos/gaming.conf; also force-
+	 * mutes the mic at startup. */
+	gaming_conf_setup();
 
 	/* Always-on responsiveness: elevate the compositor thread so it keeps
 	 * getting CPU even when the machine is saturated (100% load) — input

@@ -572,6 +572,12 @@ buttonpress(struct wl_listener *listener, void *data)
 
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
+	/* Push-to-talk on a mouse button (side/extra/…): unmute while held,
+	 * mute on release.  Runs before all other handling so it works over
+	 * fullscreen games; the button is still forwarded to the client. */
+	ptt_handle_button(event->button,
+			event->state == WL_POINTER_BUTTON_STATE_PRESSED);
+
 	(void)target;
 	(void)b;
 	(void)c;
@@ -1442,6 +1448,13 @@ keypress(struct wl_listener *listener, void *data)
 
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
+	/* Push-to-talk fires on both press and release, before the lock and
+	 * shortcut-inhibitor checks so the bind works inside fullscreen
+	 * games.  The event is never swallowed — it still reaches the
+	 * client below. */
+	ptt_handle_key(mods, event->keycode, syms, nsyms,
+			level0_syms, nlevel0,
+			event->state == WL_KEYBOARD_KEY_STATE_PRESSED);
 
 	/* VT switching using raw evdev keycodes — always works regardless of
 	 * XKB keymap, screen lock state, or active popups/overlays. */

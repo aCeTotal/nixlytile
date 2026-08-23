@@ -2917,6 +2917,13 @@ void apptoggle_cleanup(void);
 void mic_watch_setup(void);
 void mic_watch_cleanup(void);
 
+/* gaming_conf.c — ~/.local/nixlyos/gaming.conf push-to-talk bind */
+void gaming_conf_setup(void);
+void gaming_conf_cleanup(void);
+void ptt_handle_key(uint32_t mods, uint32_t keycode, const xkb_keysym_t *syms,
+	int nsyms, const xkb_keysym_t *level0_syms, int nlevel0, int pressed);
+void ptt_handle_button(uint32_t button, int pressed);
+
 /* nixlytile.c */
 void steam_set_ge_proton_default(void);
 
