@@ -70,6 +70,12 @@ notif_clip_to_mon(Notif *n, int x)
 	client_get_clip(c, &clip);
 	if (clip.width > vis - (int)c->bw)
 		clip.width = MAX(vis - (int)c->bw, 0);
+	/* En TOM klippeboks får wlroots til å fjerne klippet og vise hele
+	 * surfacet — helt utenfor kanten betyr det at varselet dukker opp
+	 * i full bredde på naboskjermen. Bruk en boks langt utenfor
+	 * surfacet i stedet (samme triks som client_clip_to_usable). */
+	if (clip.width <= 0 || clip.height <= 0)
+		clip = (struct wlr_box){ 1 << 20, 0, 1, 1 };
 	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
 
 	/* Unmanaged (override-redirect) klienter har ingen border-rekter. */
@@ -166,6 +172,11 @@ notif_monitor_for(Client *c)
 
 	if (c->mon)
 		return c->mon;
+	/* Mappet på (0,0) = uposisjonert (samme heuristikk som mapnotify) —
+	 * Steam legger varslene sine der, og xytomon ville da alltid valgt
+	 * skjermen øverst til venstre i stedet for den aktive. */
+	if (c->geom.x == 0 && c->geom.y == 0)
+		return selmon;
 	m = xytomon(c->geom.x + c->geom.width / 2,
 			c->geom.y + c->geom.height / 2);
 	return m ? m : selmon;

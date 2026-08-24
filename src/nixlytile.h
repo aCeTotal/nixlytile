@@ -639,8 +639,10 @@ struct TrayItem {
 	int icon_failed;
 	int passive; /* SNI Status == "Passive" -> hidden in tray */
 	int unresponsive; /* siste sync-DBus-kall mot appen timet ut — ikke
-	                   * spør igjen før et signal fra den viser livstegn
-	                   * (sync-kall kjører i hovedloopen og fryser input) */
+	                   * spør igjen før cooldown er over eller et signal
+	                   * fra den viser livstegn (sync-kall kjører i
+	                   * hovedloopen og fryser input) */
+	uint64_t unresponsive_ms; /* når latchen ble satt */
 	uint64_t icon_retry_not_before_ms;
 	int x;
 	int w;
@@ -2889,6 +2891,8 @@ void game_prelaunch_release(void);
 void launchfx_init(void);
 void launchfx_client_mapped(Client *c);
 void launchfx_fullscreen_starting(Client *c);
+int launchfx_defer_fullscreen(Client *c);
+void launchfx_forget_client(Client *c);
 int launchfx_cover_headstart_remaining(void);
 void launchfx_game_ready(void);
 void launchfx_note_commit(Client *c);
@@ -2931,6 +2935,10 @@ void apptoggle_cleanup(void);
 /* mic_watch.c — /dev/snd hotplug watch for the microphone module */
 void mic_watch_setup(void);
 void mic_watch_cleanup(void);
+
+/* audio_watch.c — default-sink change watch for the volume module */
+void audio_watch_setup(void);
+void audio_watch_cleanup(void);
 
 /* gaming_conf.c — ~/.local/nixlyos/gaming.conf push-to-talk bind */
 void gaming_conf_setup(void);

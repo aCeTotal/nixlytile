@@ -402,6 +402,23 @@ tray_find_icon_path(const char *name, const char *theme_path, int desired_h,
 	return 0;
 }
 
+/* Unresponsive er en cooldown, ikke en permanent latch: en app som ble
+ * SIGSTOPpet av game mode eller var treg under oppstart sender ikke
+ * nødvendigvis NewIcon/NewStatus etterpå, så uten timet re-probe blir
+ * ikonet borte for alltid (blueman-applet-symptomet). */
+#define TRAY_UNRESPONSIVE_RETRY_MS 5000
+
+static int
+tray_item_in_backoff(TrayItem *it)
+{
+	if (!it->unresponsive)
+		return 0;
+	if (monotonic_msec() - it->unresponsive_ms < TRAY_UNRESPONSIVE_RETRY_MS)
+		return 1;
+	it->unresponsive = 0; /* cooldown over — prøv igjen */
+	return 0;
+}
+
 int
 tray_get_string_property(TrayItem *it, const char *prop, char *out, size_t outlen)
 {
@@ -416,7 +433,7 @@ tray_get_string_property(TrayItem *it, const char *prop, char *out, size_t outle
 
 	if (!tray_bus || !it || !prop)
 		return -1;
-	if (it->unresponsive)
+	if (tray_item_in_backoff(it))
 		return -1;
 
 	for (size_t iface_idx = 0; iface_idx < LENGTH(ifaces); iface_idx++) {
@@ -433,6 +450,7 @@ tray_get_string_property(TrayItem *it, const char *prop, char *out, size_t outle
 			wlr_log(WLR_ERROR, "tray: %s svarer ikke (Get %s) — later item",
 					it->service, prop);
 			it->unresponsive = 1;
+			it->unresponsive_ms = monotonic_msec();
 			break;
 		}
 	}
@@ -471,7 +489,7 @@ tray_item_load_icon(TrayItem *it)
 
 	if (!tray_bus || !it)
 		return -1;
-	if (it->unresponsive)
+	if (tray_item_in_backoff(it))
 		return -1;
 	if (it->icon_tried && it->icon_failed)
 		return -1;
@@ -525,6 +543,7 @@ tray_item_load_icon(TrayItem *it)
 				break;
 			if (r == -ETIMEDOUT) {
 				it->unresponsive = 1;
+				it->unresponsive_ms = monotonic_msec();
 				break;
 			}
 		}
@@ -816,7 +835,7 @@ tray_item_get_menu_path(TrayItem *it)
 
 	it->has_menu = 0;
 	it->menu[0] = '\0';
-	if (it->unresponsive)
+	if (tray_item_in_backoff(it))
 		return -EINVAL;
 	item_path = it->path[0] ? it->path : "/StatusNotifierItem";
 
@@ -830,6 +849,7 @@ tray_item_get_menu_path(TrayItem *it)
 		if (r < 0) {
 			if (r == -ETIMEDOUT) {
 				it->unresponsive = 1;
+				it->unresponsive_ms = monotonic_msec();
 				break;
 			}
 			continue;

@@ -64,6 +64,12 @@ static struct wl_event_source *fx_poll_timer;
 static pid_t seen_reapers[32];
 static int seen_reaper_count;
 
+/* Klient som ba om fullskjerm mens coveret fortsatt vokste: selve flippen
+ * er utsatt til sirkelen dekker skjermen, så overgangen (og spillets første
+ * blanke/hvite frame) alltid skjer under svart — ikke samtidig med
+ * animasjonen. */
+static Client *fx_pending_fs;
+
 /* Black anti-aliased filled circle wrapped in a PixmanBuffer (cairo
  * ARGB32 and pixman a8r8g8b8 share layout, both premultiplied). */
 static struct wlr_buffer *
@@ -136,6 +142,15 @@ fx_teardown(void)
 	fx.orphan_ms = 0;
 	fx.window_ms = 0;
 	fx.mon = NULL;
+
+	/* Aldri la en utsatt fullskjerm-flipp dø med coveret (watchdog/feil)
+	 * — da ble spillet stående i vindu. Re-entry er trygt: fx.tree er
+	 * borte og fx_covered satt, så deferren slipper flippen rett gjennom. */
+	if (fx_pending_fs) {
+		Client *p = fx_pending_fs;
+		fx_pending_fs = NULL;
+		setfullscreen(p, 1);
+	}
 }
 
 /* Reveal: drop the black cover — the game is ready underneath. */
@@ -169,6 +184,14 @@ fx_grow_complete(void)
 		fx.tick = NULL;
 	}
 	fx.grown = 1;
+	/* Svart dekker nå hele skjermen — utfør fullskjerm-flippen som
+	 * ventet på det. Re-entry gjennom deferren slipper gjennom fordi
+	 * fx.grown er satt. */
+	if (fx_pending_fs) {
+		Client *p = fx_pending_fs;
+		fx_pending_fs = NULL;
+		setfullscreen(p, 1);
+	}
 	if (fx.reveal_pending && fx.content_seen)
 		fx_finish();
 }
@@ -195,10 +218,30 @@ fx_tick_cb(void *data)
 	diam = 8.0 + ease * (final_d - 8.0);
 	di = (int)diam;
 
-	wlr_scene_buffer_set_dest_size(fx.dot, di, di);
-	wlr_scene_node_set_position(&fx.dot->node,
-			(fx.mon->m.width - di) / 2,
-			(fx.mon->m.height - di) / 2);
+	/* Sirkelen ender på skjermens DIAGONAL og stikker da utenfor alle
+	 * kanter — uklippet tegnes overhenget på naboskjermene. Kutt
+	 * senterutsnittet mot skjermstørrelsen med en source box. */
+	{
+		int vw = MIN(di, fx.mon->m.width);
+		int vh = MIN(di, fx.mon->m.height);
+
+		if (vw < di || vh < di) {
+			double s = (double)fx.dot_buf->width / (double)di;
+			struct wlr_fbox src = {
+				.x = (di - vw) / 2.0 * s,
+				.y = (di - vh) / 2.0 * s,
+				.width = vw * s,
+				.height = vh * s,
+			};
+			wlr_scene_buffer_set_source_box(fx.dot, &src);
+		} else {
+			wlr_scene_buffer_set_source_box(fx.dot, NULL);
+		}
+		wlr_scene_buffer_set_dest_size(fx.dot, vw, vh);
+		wlr_scene_node_set_position(&fx.dot->node,
+				(fx.mon->m.width - vw) / 2,
+				(fx.mon->m.height - vh) / 2);
+	}
 	if (fx.mon->wlr_output)
 		wlr_output_schedule_frame(fx.mon->wlr_output);
 
@@ -396,6 +439,45 @@ launchfx_fullscreen_starting(Client *c)
 
 	wlr_log(WLR_INFO, "launchfx: game going fullscreen — cover on %s",
 			c->mon->wlr_output->name);
+}
+
+/* Kalles fra toppen av setfullscreen(c, 1) FØR noe state endres.
+ * Returnerer 1 hvis flippen skal utsettes: coveret startes/vokser, og
+ * setfullscreen kalles igjen herfra når svart dekker skjermen. Uten
+ * dette skjer flippen samtidig med animasjonsstarten — spillets første
+ * (ofte hvite) frame legger seg bak sirkelen i stedet for desktopen. */
+int
+launchfx_defer_fullscreen(Client *c)
+{
+	if (!c || !c->mon || !c->mon->wlr_output)
+		return 0;
+	if (!looks_like_game(c))
+		return 0;
+
+	if (fx.tree) {
+		if (fx.grown)
+			return 0; /* svart står allerede — flipp med en gang */
+		fx_pending_fs = c;
+		return 1;
+	}
+
+	if (c->fx_covered)
+		return 0; /* dekket én gang — ingen replay, ingen utsettelse */
+
+	launchfx_fullscreen_starting(c);
+	if (!fx.tree || fx.grown)
+		return 0; /* cover kunne ikke bygges — ikke blokker flippen */
+	fx_pending_fs = c;
+	return 1;
+}
+
+/* Klienten forsvant (unmap/destroy) eller forlot fullskjerm-ønsket —
+ * ikke flipp en død/angrende klient når coveret er ferdig vokst. */
+void
+launchfx_forget_client(Client *c)
+{
+	if (fx_pending_fs == c)
+		fx_pending_fs = NULL;
 }
 
 /* A launch is being tracked (pre-boost and/or cover up). */

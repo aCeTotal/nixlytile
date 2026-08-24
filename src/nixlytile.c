@@ -761,6 +761,7 @@ cleanup(void)
 	wlr_log(WLR_ERROR, "cleanup() called - starting cleanup sequence");
 	apptoggle_cleanup();
 	mic_watch_cleanup();
+	audio_watch_cleanup();
 	gaming_conf_cleanup();
 	gshortcuts_cleanup();
 	/* Shut down game mode background worker (unfreezes processes if needed) */
@@ -1258,6 +1259,9 @@ run(const char *startup_cmd)
 
 	/* Microphone module follows capture-device hotplug. */
 	mic_watch_setup();
+
+	/* Volume module follows default-sink changes (headset connect). */
+	audio_watch_setup();
 
 	/* Push-to-talk bind from ~/.local/nixlyos/gaming.conf; also force-
 	 * mutes the mic at startup. */

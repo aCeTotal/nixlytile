@@ -525,6 +525,7 @@ destroynotify(struct wl_listener *listener, void *data)
 	}
 	/* Safety net: if unmapnotify didn't clear game mode (e.g. rapid
 	 * client destruction), catch it here before freeing */
+	launchfx_forget_client(c);
 	if (c == game_mode_client) {
 		game_mode_pid = 0;
 		game_mode_client = NULL;
@@ -2096,6 +2097,15 @@ setfullscreen(Client *c, int fullscreen)
 	int was = c->isfullscreen;
 	Workspace *prev_fs_ws = c->fs_ws;
 
+	/* Et spill skal under svart FØR det flipper til fullskjerm: hvis
+	 * cover-animasjonen ikke har dekket skjermen ennå, startes den her
+	 * og selve flippen utsettes — launchfx kaller setfullscreen igjen
+	 * når sirkelen har vokst ferdig (~500 ms). */
+	if (fullscreen && !was && launchfx_defer_fullscreen(c))
+		return;
+	if (!fullscreen)
+		launchfx_forget_client(c);
+
 	wlr_log(WLR_INFO,
 		"GAME_TRACE: setfullscreen enter appid='%s' want=%d was=%d "
 		"c->mon='%s' geom=%dx%d@%d,%d",
@@ -2514,6 +2524,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 	 * drep timeren så den ikke fyrer på et dødt vindu. */
 	notify_release(c);
 	instruments_release(c);
+	launchfx_forget_client(c);
 
 	if (looks_like_game(c) || is_game_content(c))
 		game_log("GAME_UNMAP: appid='%s' title='%s' type=%s "
