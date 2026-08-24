@@ -416,6 +416,8 @@ tray_get_string_property(TrayItem *it, const char *prop, char *out, size_t outle
 
 	if (!tray_bus || !it || !prop)
 		return -1;
+	if (it->unresponsive)
+		return -1;
 
 	for (size_t iface_idx = 0; iface_idx < LENGTH(ifaces); iface_idx++) {
 		sd_bus_error_free(&err);
@@ -427,6 +429,12 @@ tray_get_string_property(TrayItem *it, const char *prop, char *out, size_t outle
 				&err, &reply, "ss", ifaces[iface_idx], prop);
 		if (r >= 0)
 			break;
+		if (r == -ETIMEDOUT) {
+			wlr_log(WLR_ERROR, "tray: %s svarer ikke (Get %s) — later item",
+					it->service, prop);
+			it->unresponsive = 1;
+			break;
+		}
 	}
 	if (r < 0 || !reply)
 		goto out;
@@ -462,6 +470,8 @@ tray_item_load_icon(TrayItem *it)
 	int prop_idx;
 
 	if (!tray_bus || !it)
+		return -1;
+	if (it->unresponsive)
 		return -1;
 	if (it->icon_tried && it->icon_failed)
 		return -1;
@@ -501,6 +511,8 @@ tray_item_load_icon(TrayItem *it)
 		best_score = INT_MAX;
 		best_w = best_h = 0;
 
+		if (it->unresponsive)
+			break;
 		for (size_t iface_idx = 0; iface_idx < LENGTH(ifaces); iface_idx++) {
 			sd_bus_error_free(&err);
 			sd_bus_message_unref(reply);
@@ -511,6 +523,10 @@ tray_item_load_icon(TrayItem *it)
 					&err, &reply, "ss", ifaces[iface_idx], props[prop_idx]);
 			if (r >= 0)
 				break;
+			if (r == -ETIMEDOUT) {
+				it->unresponsive = 1;
+				break;
+			}
 		}
 		if (r < 0)
 			continue;
@@ -661,10 +677,11 @@ tray_search_item_path(const char *service, const char *start_path,
 		else
 			snprintf(child, sizeof(child), "%s/%s", start_path, name);
 
-		if (tray_search_item_path(service, child, out, outlen, depth - 1) == 0) {
-			r = 0;
+		r = tray_search_item_path(service, child, out, outlen, depth - 1);
+		if (r == 0)
 			goto out;
-		}
+		if (r == -ETIMEDOUT) /* hengende app: ikke prøv flere barn */
+			goto out;
 		p = end + 1;
 	}
 
@@ -686,12 +703,17 @@ tray_find_item_path(const char *service, char *path, size_t pathlen)
 		return -EINVAL;
 
 	for (size_t i = 0; i < LENGTH(candidates); i++) {
-		if (tray_search_item_path(service, candidates[i], path, pathlen, 1) == 0)
+		int r = tray_search_item_path(service, candidates[i], path, pathlen, 1);
+		if (r == 0)
 			return 0;
+		if (r == -ETIMEDOUT)
+			goto fallback;
 	}
 
 	if (tray_search_item_path(service, "/", path, pathlen, 6) == 0)
 		return 0;
+
+fallback:
 
 	snprintf(path, pathlen, "%s", "/StatusNotifierItem");
 	return -1;
@@ -794,6 +816,8 @@ tray_item_get_menu_path(TrayItem *it)
 
 	it->has_menu = 0;
 	it->menu[0] = '\0';
+	if (it->unresponsive)
+		return -EINVAL;
 	item_path = it->path[0] ? it->path : "/StatusNotifierItem";
 
 	for (size_t i = 0; i < LENGTH(ifaces); i++) {
@@ -803,8 +827,13 @@ tray_item_get_menu_path(TrayItem *it)
 				item_path,
 				"org.freedesktop.DBus.Properties", "Get",
 				&err, &reply, "ss", ifaces[i], "Menu");
-		if (r < 0)
+		if (r < 0) {
+			if (r == -ETIMEDOUT) {
+				it->unresponsive = 1;
+				break;
+			}
 			continue;
+		}
 		if (sd_bus_message_enter_container(reply, 'v', "o") < 0) {
 			sd_bus_message_unref(reply);
 			continue;
@@ -1327,7 +1356,7 @@ tray_menu_open_at(Monitor *m, TrayItem *it, int icon_x)
 	if (r < 0)
 		goto fail;
 
-	r = sd_bus_call(tray_bus, req, 2 * 1000 * 1000, &err, &reply);
+	r = sd_bus_call(tray_bus, req, 500 * 1000, &err, &reply); /* 500ms: kjører i hovedloopen */
 	if (r < 0)
 		goto fail;
 
@@ -1474,7 +1503,7 @@ tray_menu_send_event(TrayMenu *menu, TrayMenuEntry *entry, uint32_t time_msec)
 	if (r < 0)
 		goto out;
 
-	r = sd_bus_call(tray_bus, msg, 2 * 1000 * 1000, &err, &reply);
+	r = sd_bus_call(tray_bus, msg, 500 * 1000, &err, &reply); /* 500ms: kjører i hovedloopen */
 
 out:
 	if (msg)
@@ -1720,6 +1749,7 @@ tray_item_new_icon(sd_bus_message *m, void *userdata, sd_bus_error *ret_error)
 			it->icon_tried = 0;
 			it->icon_failed = 0;
 			it->icon_w = it->icon_h = 0;
+			it->unresponsive = 0; /* signal = livstegn, prøv igjen */
 			matched = 1;
 		}
 	}
@@ -1750,6 +1780,7 @@ tray_item_new_status(sd_bus_message *m, void *userdata, sd_bus_error *ret_error)
 	wl_list_for_each(it, &tray_items, link) {
 		if (sender && it->service[0] && strcmp(it->service, sender) == 0) {
 			int passive = it->passive;
+			it->unresponsive = 0; /* signal = livstegn, prøv igjen */
 			if (status)
 				it->passive = strcmp(status, "Passive") == 0;
 			else
@@ -1841,7 +1872,11 @@ tray_init(void)
 	}
 
 	/* Keep icon/property queries from stalling the compositor for too long */
-	sd_bus_set_method_call_timeout(tray_bus, 2 * 1000 * 1000); /* 2s */
+	/* Sync-kall kjører i compositor-hovedloopen: en hengende tray-app
+	 * (Electron/Teams) fryser ellers ALL input i hele timeouten. 200 ms
+	 * er nok for en frisk app og caper skaden; unresponsive-latchen i
+	 * TrayItem hindrer gjentatte stalls mot samme app. */
+	sd_bus_set_method_call_timeout(tray_bus, 200 * 1000); /* 200ms */
 
 	r = sd_bus_request_name(tray_bus, "org.kde.StatusNotifierWatcher", name_flags);
 	if (r < 0) {

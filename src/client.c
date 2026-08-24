@@ -939,6 +939,7 @@ mapnotify(struct wl_listener *listener, void *data)
 				"mapnotify: scene surface creation failed — "
 				"DMA-BUF or buffer import error. Check GPU driver and "
 				"/dev/dri/ permissions");
+			surf->data = NULL;
 			wlr_scene_node_destroy(&c->scene->node);
 			c->scene = NULL;
 			return;
@@ -1853,17 +1854,24 @@ client_clip_to_usable(Client *c)
 		}
 	}
 
-	/* ── Frozen snapshot (present only during size anims): crop the
-	 *    source rect to the visible slice of the inner box. */
-	if (c->frozen_buffer && c->frozen_buffer->buffer) {
+	/* ── Frozen snapshot (present during anims): crop the source rect
+	 *    to the visible slice of the inner box.  Dims come from the
+	 *    cached frozen_buf_w/h, NOT frozen_buffer->buffer — wlroots
+	 *    nulls that pointer as soon as the client releases the
+	 *    snapshotted buffer (first commit after freeze) while the
+	 *    texture keeps rendering.  Gating on it froze this whole
+	 *    branch, so a snapshot disabled at freeze time (tile of an
+	 *    incoming workspace, still off-screen) never re-enabled and
+	 *    the tile slid in empty (Steam/Citrix on every ws switch). */
+	if (c->frozen_buffer && c->frozen_buf_w > 0 && c->frozen_buf_h > 0) {
 		int bw = (int)c->bw;
 		int vx0 = MAX(bw, ax0);
 		int vy0 = MAX(bw, ay0);
 		int vx1 = MIN(bw + iw, ax1);
 		int vy1 = MIN(bw + ih, ay1);
 		if (iw > 0 && ih > 0 && vx1 > vx0 && vy1 > vy0) {
-			double sw = c->frozen_buffer->buffer->width;
-			double sh = c->frozen_buffer->buffer->height;
+			double sw = c->frozen_buf_w;
+			double sh = c->frozen_buf_h;
 			struct wlr_fbox src = {
 				.x = (double)(vx0 - bw) / iw * sw,
 				.y = (double)(vy0 - bw) / ih * sh,
@@ -2669,7 +2677,18 @@ unmapnotify(struct wl_listener *listener, void *data)
 	 * only guards on c->scene_surface being non-NULL — a dangling
 	 * pointer there walks the freed scene tree and trips the
 	 * assert(found) in wlr_scene_subsurface_tree_set_clip (crash).
-	 * mapnotify recreates both unconditionally on remap. */
+	 * mapnotify recreates both unconditionally on remap.
+	 * Also clear surface->data (set to c->scene in mapnotify): the
+	 * wl_surface and any idle inhibitor on it outlive the scene tree
+	 * (Electron apps hold inhibitors across unmap), and
+	 * checkidleinhibitor reads surface->data as a scene tree — a
+	 * stale pointer there SEGVs in wlr_scene_node_coords on the
+	 * next arrange(). */
+	{
+		struct wlr_surface *unmap_surf = client_surface(c);
+		if (unmap_surf && unmap_surf->data == c->scene)
+			unmap_surf->data = NULL;
+	}
 	if (c->scene)
 		wlr_scene_node_destroy(&c->scene->node);
 	c->scene = NULL;

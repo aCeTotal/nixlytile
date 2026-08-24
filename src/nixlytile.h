@@ -638,6 +638,9 @@ struct TrayItem {
 	int icon_tried;
 	int icon_failed;
 	int passive; /* SNI Status == "Passive" -> hidden in tray */
+	int unresponsive; /* siste sync-DBus-kall mot appen timet ut — ikke
+	                   * spør igjen før et signal fra den viser livstegn
+	                   * (sync-kall kjører i hovedloopen og fryser input) */
 	uint64_t icon_retry_not_before_ms;
 	int x;
 	int w;
@@ -1078,6 +1081,11 @@ typedef struct {
 	 * stalls — we just blit the cached texture at each new
 	 * position.  Restored at anim end. */
 	struct wlr_scene_buffer *frozen_buffer;
+	/* Snapshot pixel size, cached at freeze.  frozen_buffer->buffer
+	 * goes NULL the moment the client releases the snapshotted
+	 * wlr_buffer (first commit after freeze — wlroots keeps only the
+	 * texture), so the clip path must not read dims from it. */
+	int frozen_buf_w, frozen_buf_h;
 	/* Freeze wanted a snapshot but the surface had no buffer (X11
 	 * client that sat hidden on an inactive workspace — Steam).  The
 	 * tile renders empty until the client paints, so rendermon drips

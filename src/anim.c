@@ -693,6 +693,8 @@ client_freeze(Client *c)
 			&surface->buffer->base);
 	if (!c->frozen_buffer)
 		return;
+	c->frozen_buf_w = surface->buffer->base.width;
+	c->frozen_buf_h = surface->buffer->base.height;
 
 	wlr_scene_node_set_position(&c->frozen_buffer->node, c->bw, c->bw);
 	wlr_scene_buffer_set_dest_size(c->frozen_buffer,

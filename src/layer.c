@@ -185,6 +185,11 @@ destroylayersurfacenotify(struct wl_listener *listener, void *data)
 	wl_list_remove(&l->destroy.link);
 	wl_list_remove(&l->unmap.link);
 	wl_list_remove(&l->surface_commit.link);
+	/* surface->data points at l->popups (createlayersurface); the
+	 * wl_surface can outlive this handler and checkidleinhibitor
+	 * reads surface->data as a scene tree — clear before destroy. */
+	if (l->layer_surface->surface->data == l->popups)
+		l->layer_surface->surface->data = NULL;
 	wlr_scene_node_destroy(&l->scene->node);
 	wlr_scene_node_destroy(&l->popups->node);
 	free(l);
