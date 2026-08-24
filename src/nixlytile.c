@@ -762,6 +762,7 @@ cleanup(void)
 	apptoggle_cleanup();
 	mic_watch_cleanup();
 	gaming_conf_cleanup();
+	gshortcuts_cleanup();
 	/* Shut down game mode background worker (unfreezes processes if needed) */
 	gm_bg_cleanup();
 	window_ipc_finish();
@@ -1066,6 +1067,11 @@ run(const char *startup_cmd)
 	if (!socket)
 		die("startup: display_add_socket_auto");
 	setenv("WAYLAND_DISPLAY", socket, 1);
+	/* xdg-desktop-portal picks its backends from
+	 * <desktop>-portals.conf, keyed on XDG_CURRENT_DESKTOP — needed for
+	 * the GlobalShortcuts backend (gshortcuts.c).  Don't override a
+	 * value the session already set. */
+	setenv("XDG_CURRENT_DESKTOP", "nixlytile", 0);
 
 	/* Pre-launch the nixly_launcher daemon (appd) directly — bypasses
 	 * the autostart shell so the daemon's heavy startup (icon scan, app
@@ -2703,6 +2709,7 @@ setup(void)
 	if (client_ping_timer)
 		wl_event_source_timer_update(client_ping_timer, 3000);
 	tray_init();
+	gshortcuts_init();
 	fcft_initialized = fcft_init(FCFT_LOG_COLORIZE_NEVER, 0, FCFT_LOG_CLASS_ERROR);
 	if (!fcft_initialized)
 		die("couldn't initialize fcft");

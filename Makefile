@@ -29,7 +29,7 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            dwl_ipc.o dwl-ipc-unstable-v2-protocol.o window_ipc.o \
            config_parser.o config_loader.o monitors_conf.o monitor_setup.o \
            input_conf.o \
-           apptoggle.o mic_watch.o gaming_conf.o \
+           apptoggle.o mic_watch.o gaming_conf.o gshortcuts.o \
            statusbar.o tray.o statusbar_support.o terminfo.o launchfx.o diag.o \
            notify.o instruments.o converge.o spawn.o osd.o
 
@@ -115,6 +115,8 @@ mic_watch.o: $(SRC)/mic_watch.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 gaming_conf.o: $(SRC)/gaming_conf.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+gshortcuts.o: $(SRC)/gshortcuts.c $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 statusbar.o: $(SRC)/statusbar.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 tray.o: $(SRC)/tray.c $(SRC)/nixlytile.h $(SRC)/client.h
@@ -188,9 +190,16 @@ install: nixlytile
 	mkdir -p $(DESTDIR)$(DATADIR)/wayland-sessions
 	cp -f nixlytile.desktop $(DESTDIR)$(DATADIR)/wayland-sessions/nixlytile.desktop
 	chmod 644 $(DESTDIR)$(DATADIR)/wayland-sessions/nixlytile.desktop
+	mkdir -p $(DESTDIR)$(DATADIR)/xdg-desktop-portal/portals
+	cp -f nixlytile.portal $(DESTDIR)$(DATADIR)/xdg-desktop-portal/portals/nixlytile.portal
+	chmod 644 $(DESTDIR)$(DATADIR)/xdg-desktop-portal/portals/nixlytile.portal
+	cp -f nixlytile-portals.conf $(DESTDIR)$(DATADIR)/xdg-desktop-portal/nixlytile-portals.conf
+	chmod 644 $(DESTDIR)$(DATADIR)/xdg-desktop-portal/nixlytile-portals.conf
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/nixlytile $(DESTDIR)$(MANDIR)/man1/nixlytile.1 \
-		$(DESTDIR)$(DATADIR)/wayland-sessions/nixlytile.desktop
+		$(DESTDIR)$(DATADIR)/wayland-sessions/nixlytile.desktop \
+		$(DESTDIR)$(DATADIR)/xdg-desktop-portal/portals/nixlytile.portal \
+		$(DESTDIR)$(DATADIR)/xdg-desktop-portal/nixlytile-portals.conf
 
 .SUFFIXES: .c .o
 .c.o:

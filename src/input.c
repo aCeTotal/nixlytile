@@ -1456,6 +1456,15 @@ keypress(struct wl_listener *listener, void *data)
 			level0_syms, nlevel0,
 			event->state == WL_KEYBOARD_KEY_STATE_PRESSED);
 
+	/* Portal GlobalShortcuts (Discord push-to-talk etc.): also before
+	 * the lock/inhibitor checks so they fire inside fullscreen games.
+	 * Unlike PTT the event IS swallowed on match — a global shortcut
+	 * the user bound must not leak into the focused client. */
+	if (gshortcuts_handle_key(mods, event->keycode, syms, nsyms,
+			level0_syms, nlevel0,
+			event->state == WL_KEYBOARD_KEY_STATE_PRESSED))
+		return;
+
 	/* VT switching using raw evdev keycodes — always works regardless of
 	 * XKB keymap, screen lock state, or active popups/overlays. */
 	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED && session &&

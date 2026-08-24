@@ -1373,6 +1373,34 @@ hidden_frame_done_iter(struct wlr_surface *surface, int sx, int sy, void *data)
 {
 	(void)sx; (void)sy;
 	wlr_surface_send_frame_done(surface, data);
+	/* A starved surface is never sampled by build_state, so the scene
+	 * path never clears its fifo-v1 barrier — the client's commits sit
+	 * behind the 100 ms protocol timeout (~10 fps) and it runs out of
+	 * buffers (Chromium video renders through fifo).  Latch explicitly
+	 * whenever we drip; no-op for surfaces without fifo state. */
+	wlr_fifo_v1_surface_latched(surface);
+}
+
+/* Per-buffer drip for VISIBLE clients: a scene buffer whose visible
+ * region is empty (video subsurface fully covered by its parent's
+ * opaque region, tile clipped out by the off-viewport sentinel clip)
+ * is skipped by wlr_scene_output_send_frame_done AND never sampled →
+ * no frame callbacks, no fifo latch.  Chromium's video lives in
+ * exactly such a subsurface; starving it stalls playback and can wedge
+ * the whole window (buffer exhaustion).  Feed those surfaces directly. */
+static void
+culled_buffer_drip_iter(struct wlr_scene_buffer *buf, int sx, int sy, void *data)
+{
+	struct wlr_scene_surface *ss;
+	(void)sx; (void)sy;
+	if (!buf || !buf->node.enabled ||
+			!pixman_region32_empty(&buf->node.WLR_PRIVATE.visible))
+		return;
+	ss = wlr_scene_surface_try_from_buffer(buf);
+	if (!ss)
+		return;
+	wlr_surface_send_frame_done(ss->surface, data);
+	wlr_fifo_v1_surface_latched(ss->surface);
 }
 
 void
@@ -3543,6 +3571,10 @@ frame_done:
 			 * silently drops their callbacks). */
 			starved = !hc->scene->node.enabled
 					|| hc->frozen_buffer
+					/* Slide started with no snapshot-able content
+					 * (hidden X11 client, e.g. Steam) — see
+					 * anim_drip in monitor_freeze_clients. */
+					|| hc->anim_drip
 					|| (fsc && hc != fsc)
 					/* Column-maximize (Mod+F): neighbour tiles are
 					 * pushed off-viewport / fully covered — enabled
@@ -3559,8 +3591,25 @@ frame_done:
 					 * so it cannot converge.  Drip regardless
 					 * of why it is otherwise invisible. */
 					|| client_size_pending(hc);
-			if (!starved)
+			if (!starved) {
+				/* Visible client: the scene path serves every
+				 * buffer that has a visible region — but culled
+				 * buffers (Chromium's video subsurface under an
+				 * opaque parent, sentinel-clipped off-viewport
+				 * tiles) get nothing there.  Drip those directly.
+				 * Skipped mid-slide: the camera-anim withhold
+				 * below deliberately pauses clients, and the
+				 * slide is ~150 ms. */
+				if (!m->camera_anim_active && hc->scene->node.enabled
+						&& hc->scene_surface) {
+					struct wlr_surface *vs = client_surface(hc);
+					if (vs && vs->mapped)
+						wlr_scene_node_for_each_buffer(
+							&hc->scene_surface->node,
+							culled_buffer_drip_iter, &now);
+				}
 				continue;
+			}
 			/* FROZEN clients drip every vblank, not at 1 Hz: a size
 			 * anim (Mod+F maximize) configures the final size at anim
 			 * start and waits for the client to commit it — but the
@@ -3579,7 +3628,12 @@ frame_done:
 			 * GPU.  Its snapshot needs no repaint; size-pending
 			 * clients still drip so pending configures converge. */
 			{
+				/* anim_drip: content-less tile mid-slide — must
+				 * drip every vblank PRECISELY during the camera
+				 * anim (the withhold below blocks its first
+				 * paint otherwise). */
 				int vblank_drip = client_size_pending(hc) ||
+						hc->anim_drip ||
 						(hc->frozen_buffer &&
 						 !m->camera_anim_active);
 				if (!vblank_drip && !hidden_due)
@@ -6577,7 +6631,13 @@ check_fullscreen_video(void)
 						&& apply_best_video_mode(m, use_hz)) {
 					wlr_log(WLR_DEBUG, "Video %.3f Hz on %s: display matched",
 							use_hz, m->wlr_output->name);
-				} else if (m->vrr_capable && enable_vrr_video_mode(m, use_hz)) {
+				} else if (m->vrr_capable && !is_browser_client(c)
+						&& enable_vrr_video_mode(m, use_hz)) {
+					/* Browser guard mirrors setfullscreen()'s VRR rule:
+					 * browsers submit at wildly varying rates and an
+					 * HDMI VRR toggle blocks the compositor mid-commit —
+					 * "fullscreen YouTube froze".  Browsers fall through
+					 * to the cadence path, which never touches the link. */
 					wlr_log(WLR_DEBUG, "Video %.3f Hz on %s: using VRR",
 							use_hz, m->wlr_output->name);
 				} else {

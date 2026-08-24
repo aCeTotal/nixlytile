@@ -751,9 +751,7 @@ monitor_freeze_clients(Monitor *m, int include_x11, int include_wayland)
 
 	wl_list_for_each(c, &clients, link) {
 		int is_x11;
-		if (c->mon != m || !client_surface(c) ||
-				!client_surface(c)->mapped ||
-				c->frozen_buffer)
+		if (c->mon != m || !client_surface(c) || c->frozen_buffer)
 			continue;
 		/* Open anim needs the LIVE surface so the opacity tick is
 		 * visible — freezing would lock the snapshot at the static
@@ -773,7 +771,16 @@ monitor_freeze_clients(Monitor *m, int include_x11, int include_wayland)
 #endif
 		if (is_x11 ? !include_x11 : !include_wayland)
 			continue;
-		client_freeze(c);
+		if (client_surface(c)->mapped)
+			client_freeze(c);
+		/* No snapshot (unmapped, or mapped with no buffer — the
+		 * FREEZE-SKIP case: X11 client that sat hidden on an inactive
+		 * workspace, typically Steam): its tile slides in empty.  Flag
+		 * it so rendermon drips frame_done every vblank through the
+		 * camera-anim withhold — the client can then paint in step
+		 * with the slide instead of popping in after settle. */
+		if (!c->frozen_buffer)
+			c->anim_drip = 1;
 	}
 }
 
@@ -783,7 +790,12 @@ monitor_unfreeze_clients(Monitor *m, int include_x11, int include_wayland)
 	Client *c;
 	wl_list_for_each(c, &clients, link) {
 		int is_x11;
-		if (c->mon != m || !c->frozen_buffer)
+		if (c->mon != m)
+			continue;
+		/* Anim over — the camera-anim withhold is gone, normal
+		 * frame_done flow resumes. */
+		c->anim_drip = 0;
+		if (!c->frozen_buffer)
 			continue;
 #ifdef XWAYLAND
 		is_x11 = client_is_x11(c);

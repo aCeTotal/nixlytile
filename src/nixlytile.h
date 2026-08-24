@@ -1078,6 +1078,13 @@ typedef struct {
 	 * stalls — we just blit the cached texture at each new
 	 * position.  Restored at anim end. */
 	struct wlr_scene_buffer *frozen_buffer;
+	/* Freeze wanted a snapshot but the surface had no buffer (X11
+	 * client that sat hidden on an inactive workspace — Steam).  The
+	 * tile renders empty until the client paints, so rendermon drips
+	 * frame_done every vblank DURING the slide (bypassing the
+	 * camera-anim withhold) to let it appear in step with the anim.
+	 * Cleared when the pos anim ends. */
+	int anim_drip;
 	/* ── Niri-style open anim (scale + fade) ───────────────────────
 	 * open_progress: 0.0 at map → animates to 1.0.  Scale lerps
 	 * 0.5→1.0, opacity 0→1.  Active when open_progress < 1.0. */
@@ -2920,6 +2927,15 @@ void mic_watch_cleanup(void);
 /* gaming_conf.c — ~/.local/nixlyos/gaming.conf push-to-talk bind */
 void gaming_conf_setup(void);
 void gaming_conf_cleanup(void);
+
+/* gshortcuts.c — org.freedesktop.impl.portal.GlobalShortcuts backend
+ * (Discord/OBS global keybinds).  handle_key returns 1 when the event
+ * matched a bound shortcut and must not be forwarded to the client. */
+void gshortcuts_init(void);
+void gshortcuts_cleanup(void);
+int gshortcuts_handle_key(uint32_t mods, uint32_t keycode,
+	const xkb_keysym_t *syms, int nsyms,
+	const xkb_keysym_t *level0_syms, int nlevel0, int pressed);
 void ptt_handle_key(uint32_t mods, uint32_t keycode, const xkb_keysym_t *syms,
 	int nsyms, const xkb_keysym_t *level0_syms, int nlevel0, int pressed);
 void ptt_handle_button(uint32_t button, int pressed);
