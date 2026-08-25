@@ -1,0 +1,1146 @@
+/* Statusbar popup card renderer + show animation. See popup_card.h. */
+#include "nixlytile.h"
+#include "popup_card.h"
+
+#include <cairo/cairo.h>
+#include <librsvg/rsvg.h>
+#include <math.h>
+
+#define CARD_PI 3.14159265358979323846
+
+/* ── theme ───────────────────────────────────────────────────────── */
+
+#define CARD_RADIUS   10.0
+#define CARD_PAD      16
+#define CARD_COLGAP   28
+#define CARD_BG_R     0.055
+#define CARD_BG_G     0.060
+#define CARD_BG_B     0.075
+#define CARD_BG_A     0.93
+#define CARD_BORDER_A 0.09
+#define CARD_MIN_W    250
+
+/* show animation */
+#define CARD_SHOW_MS     150
+#define CARD_SLIDE_PX    10
+#define CARD_SWEEP_DELAY 40
+#define CARD_SWEEP_MS    300
+
+const float card_col_fg[4]     = {0.92f, 0.93f, 0.95f, 1.0f};
+const float card_col_dim[4]    = {0.62f, 0.64f, 0.68f, 1.0f};
+const float card_col_faint[4]  = {0.45f, 0.47f, 0.51f, 1.0f};
+const float card_col_green[4]  = {0.60f, 0.78f, 0.47f, 1.0f};
+const float card_col_yellow[4] = {0.90f, 0.75f, 0.48f, 1.0f};
+const float card_col_red[4]    = {1.00f, 0.42f, 0.42f, 1.0f};
+const float card_col_blue[4]   = {0.38f, 0.69f, 0.94f, 1.0f};
+
+/* ── fonts ───────────────────────────────────────────────────────── */
+
+static struct fcft_font *card_font_big;
+static struct fcft_font *card_font_small;
+
+/* Strip ":size=NN" / ":pixelsize=NN" from a font name so an explicit
+ * pixelsize attribute is the only size in the pattern. */
+static void
+strip_size(const char *name, char *out, size_t len)
+{
+	size_t o = 0;
+
+	while (*name && o + 1 < len) {
+		if (*name == ':' &&
+				(!strncmp(name, ":size=", 6) ||
+				 !strncmp(name, ":pixelsize=", 11))) {
+			name++;
+			while (*name && *name != ':')
+				name++;
+			continue;
+		}
+		out[o++] = *name++;
+	}
+	out[o] = '\0';
+}
+
+static struct fcft_font *
+card_font_load(double factor)
+{
+	const char **fonts;
+	size_t count, i;
+	char names[8][256];
+	const char *stripped[8];
+	char attrs[64];
+	int px;
+
+	if (!statusfont.font)
+		return NULL;
+
+	if (runtime_fonts_set && runtime_fonts[0]) {
+		fonts = (const char **)runtime_fonts;
+		for (count = 0; count < 8 && fonts[count]; count++)
+			;
+	} else {
+		fonts = statusbar_fonts;
+		for (count = 0; count < 8 && fonts[count]; count++)
+			;
+	}
+	if (count == 0)
+		return NULL;
+
+	px = (int)lround((double)statusfont.height * factor);
+	if (px < 8)
+		px = 8;
+	for (i = 0; i < count; i++) {
+		strip_size(fonts[i], names[i], sizeof(names[i]));
+		stripped[i] = names[i];
+	}
+	snprintf(attrs, sizeof(attrs), "pixelsize=%d", px);
+	return fcft_from_name(count, stripped, attrs);
+}
+
+static int
+card_fonts_ensure(void)
+{
+	if (!statusfont.font && !loadstatusfont())
+		return 0;
+	if (!card_font_big)
+		card_font_big = card_font_load(1.30);
+	if (!card_font_small)
+		card_font_small = card_font_load(0.62);
+	return card_font_big && card_font_small;
+}
+
+/* ── text measurement / drawing (fcft → pixman) ──────────────────── */
+
+static uint32_t
+utf8_next(const char **s)
+{
+	const unsigned char *p = (const unsigned char *)*s;
+	uint32_t cp;
+	int len;
+
+	if (p[0] < 0x80) {
+		cp = p[0];
+		len = 1;
+	} else if ((p[0] & 0xE0) == 0xC0) {
+		cp = p[0] & 0x1F;
+		len = 2;
+	} else if ((p[0] & 0xF0) == 0xE0) {
+		cp = p[0] & 0x0F;
+		len = 3;
+	} else if ((p[0] & 0xF8) == 0xF0) {
+		cp = p[0] & 0x07;
+		len = 4;
+	} else {
+		(*s)++;
+		return 0xFFFD;
+	}
+	for (int i = 1; i < len; i++) {
+		if ((p[i] & 0xC0) != 0x80) {
+			len = i;
+			break;
+		}
+		cp = (cp << 6) | (p[i] & 0x3F);
+	}
+	*s += len;
+	return cp;
+}
+
+static int
+text_width_f(struct fcft_font *f, const char *s, int lspc)
+{
+	int pen = 0;
+	uint32_t prev = 0;
+
+	if (!f || !s)
+		return 0;
+	while (*s) {
+		long kx = 0, ky = 0;
+		uint32_t cp = utf8_next(&s);
+		const struct fcft_glyph *g;
+
+		if (prev)
+			fcft_kerning(f, prev, cp, &kx, &ky);
+		pen += (int)kx;
+		g = fcft_rasterize_char_utf32(f, cp, FCFT_SUBPIXEL_NONE);
+		if (g)
+			pen += g->advance.x + (*s ? lspc : 0);
+		prev = cp;
+	}
+	return pen;
+}
+
+/* Draw text with its baseline at (x, baseline). Returns advance. */
+static int
+draw_text_f(pixman_image_t *dst, struct fcft_font *f, const char *s,
+		int x, int baseline, const float col[4], int lspc)
+{
+	int pen = 0;
+	uint32_t prev = 0;
+	pixman_color_t pc;
+	pixman_image_t *solid;
+
+	if (!dst || !f || !s)
+		return 0;
+
+	pc.red   = (uint16_t)lroundf(col[0] * 65535.0f);
+	pc.green = (uint16_t)lroundf(col[1] * 65535.0f);
+	pc.blue  = (uint16_t)lroundf(col[2] * 65535.0f);
+	pc.alpha = (uint16_t)lroundf(col[3] * 65535.0f);
+	solid = pixman_image_create_solid_fill(&pc);
+
+	while (*s) {
+		long kx = 0, ky = 0;
+		uint32_t cp = utf8_next(&s);
+		const struct fcft_glyph *g;
+
+		if (prev)
+			fcft_kerning(f, prev, cp, &kx, &ky);
+		pen += (int)kx;
+		g = fcft_rasterize_char_utf32(f, cp, FCFT_SUBPIXEL_NONE);
+		if (g && g->pix) {
+			if (pixman_image_get_format(g->pix) == PIXMAN_a8r8g8b8)
+				pixman_image_composite32(PIXMAN_OP_OVER, g->pix,
+						NULL, dst, 0, 0, 0, 0,
+						x + pen + g->x, baseline - g->y,
+						g->width, g->height);
+			else
+				pixman_image_composite32(PIXMAN_OP_OVER, solid,
+						g->pix, dst, 0, 0, 0, 0,
+						x + pen + g->x, baseline - g->y,
+						g->width, g->height);
+		}
+		if (g)
+			pen += g->advance.x + (*s ? lspc : 0);
+		prev = cp;
+	}
+	if (solid)
+		pixman_image_unref(solid);
+	return pen;
+}
+
+int
+card_text_width(const char *s)
+{
+	if (!statusfont.font)
+		return 0;
+	return text_width_f(statusfont.font, s, 0);
+}
+
+/* ── card build state ────────────────────────────────────────────── */
+
+typedef enum {
+	CROW_HEADER,
+	CROW_GAUGE,
+	CROW_KV2,
+	CROW_SECTION,
+	CROW_TEXT,
+	CROW_BUTTONS,
+	CROW_GAP,
+	CROW_CAL,
+} CardRowType;
+
+typedef struct {
+	CardRowType type;
+	char a[160], b[160], c[96], d[64];
+	char btn_label[24];
+	const float *bcol, *dcol;
+	double frac;
+	float accent[4];
+	int nbtn, active, hover, id_base;
+	char btn[CARD_MAX_BTN][32];
+	int gap;
+	int hit_id, hot;
+	int year, mon, mday;
+	/* computed in measure */
+	int y, h;
+} CardRow;
+
+struct Card {
+	CardRow rows[CARD_MAX_ROWS];
+	int nrows;
+	int kv_c1, kv_c2;   /* kv2 column widths */
+	int has_kv;
+};
+
+Card *
+card_begin(void)
+{
+	Card *c;
+
+	if (!card_fonts_ensure())
+		return NULL;
+	c = ecalloc(1, sizeof(*c));
+	return c;
+}
+
+static CardRow *
+row_new(Card *c, CardRowType t)
+{
+	CardRow *r;
+
+	if (!c || c->nrows >= CARD_MAX_ROWS)
+		return NULL;
+	r = &c->rows[c->nrows++];
+	r->type = t;
+	r->hit_id = -1;
+	return r;
+}
+
+static void
+setstr(char *dst, size_t len, const char *s)
+{
+	snprintf(dst, len, "%s", s ? s : "");
+}
+
+void
+card_header(Card *c, const char *icon_path, const char *title,
+		const char *sub, const char *value)
+{
+	CardRow *r = row_new(c, CROW_HEADER);
+
+	if (!r)
+		return;
+	setstr(r->a, sizeof(r->a), icon_path);
+	setstr(r->b, sizeof(r->b), title);
+	setstr(r->c, sizeof(r->c), sub);
+	setstr(r->d, sizeof(r->d), value);
+}
+
+void
+card_gauge(Card *c, double frac, const float accent[4])
+{
+	CardRow *r = row_new(c, CROW_GAUGE);
+
+	if (!r)
+		return;
+	if (frac < 0.0)
+		frac = 0.0;
+	if (frac > 1.0)
+		frac = 1.0;
+	r->frac = frac;
+	if (accent)
+		memcpy(r->accent, accent, sizeof(r->accent));
+	else
+		memcpy(r->accent, card_col_fg, sizeof(r->accent));
+}
+
+void
+card_kv2(Card *c, const char *k1, const char *v1, const float *v1col,
+		const char *k2, const char *v2, const float *v2col)
+{
+	CardRow *r = row_new(c, CROW_KV2);
+
+	if (!r)
+		return;
+	setstr(r->a, sizeof(r->a), k1);
+	setstr(r->b, sizeof(r->b), v1);
+	setstr(r->c, sizeof(r->c), k2);
+	setstr(r->d, sizeof(r->d), v2);
+	r->bcol = v1col ? v1col : card_col_fg;
+	r->dcol = v2col ? v2col : card_col_fg;
+}
+
+void
+card_section(Card *c, const char *label)
+{
+	CardRow *r = row_new(c, CROW_SECTION);
+
+	if (!r)
+		return;
+	setstr(r->a, sizeof(r->a), label);
+}
+
+void
+card_text(Card *c, const char *left, const char *right, const float *rightcol)
+{
+	card_text_btn(c, left, right, rightcol, NULL, -1, 0);
+}
+
+void
+card_text_btn(Card *c, const char *left, const char *right,
+		const float *rightcol, const char *btn_label, int hit_id, int hot)
+{
+	CardRow *r = row_new(c, CROW_TEXT);
+
+	if (!r)
+		return;
+	setstr(r->a, sizeof(r->a), left);
+	setstr(r->b, sizeof(r->b), right);
+	setstr(r->btn_label, sizeof(r->btn_label), btn_label);
+	r->bcol = rightcol ? rightcol : card_col_dim;
+	r->hit_id = hit_id;
+	r->hot = hot;
+}
+
+void
+card_buttons(Card *c, const char *labels[], const char *icons[],
+		int n, int active, int hover, int id_base)
+{
+	CardRow *r = row_new(c, CROW_BUTTONS);
+
+	(void)icons;
+	if (!r)
+		return;
+	if (n > CARD_MAX_BTN)
+		n = CARD_MAX_BTN;
+	r->nbtn = n;
+	r->active = active;
+	r->hover = hover;
+	r->id_base = id_base;
+	for (int i = 0; i < n; i++)
+		setstr(r->btn[i], sizeof(r->btn[i]), labels[i]);
+}
+
+void
+card_gap(Card *c, int px)
+{
+	CardRow *r = row_new(c, CROW_GAP);
+
+	if (r)
+		r->gap = px;
+}
+
+void
+card_calendar(Card *c, int year, int mon, int mday)
+{
+	CardRow *r = row_new(c, CROW_CAL);
+
+	if (!r)
+		return;
+	r->year = year;
+	r->mon = mon;
+	r->mday = mday;
+}
+
+/* ── layout ──────────────────────────────────────────────────────── */
+
+#define SMALL_LSPC 2   /* letterspacing for caps labels */
+
+static int
+btn_row_width(CardRow *r)
+{
+	int w = 0;
+
+	for (int i = 0; i < r->nbtn; i++) {
+		w += text_width_f(statusfont.font, r->btn[i], 0) + 2 * 14;
+		if (i)
+			w += 10;
+	}
+	return w;
+}
+
+static int
+cal_cell_w(void)
+{
+	return text_width_f(card_font_small, "00", SMALL_LSPC) + 10;
+}
+
+/* Measure pass: computes each row's height and the card content width. */
+static void
+card_measure(Card *c, int *out_w, int *out_h)
+{
+	int base_h = statusfont.height;
+	int big_h = card_font_big->height;
+	int small_h = card_font_small->height;
+	int w = CARD_MIN_W, y = CARD_PAD;
+
+	/* kv2 column widths first (shared alignment) */
+	c->kv_c1 = c->kv_c2 = 0;
+	for (int i = 0; i < c->nrows; i++) {
+		CardRow *r = &c->rows[i];
+		int c1, c2;
+
+		if (r->type != CROW_KV2)
+			continue;
+		c->has_kv = 1;
+		c1 = text_width_f(statusfont.font, r->a, 0) + 16 +
+			text_width_f(statusfont.font, r->b, 0);
+		c2 = r->c[0] ? text_width_f(statusfont.font, r->c, 0) + 16 +
+			text_width_f(statusfont.font, r->d, 0) : 0;
+		if (c1 > c->kv_c1)
+			c->kv_c1 = c1;
+		if (c2 > c->kv_c2)
+			c->kv_c2 = c2;
+	}
+	if (c->has_kv) {
+		int kvw = c->kv_c1 + (c->kv_c2 ? CARD_COLGAP + c->kv_c2 : 0);
+		if (kvw > w)
+			w = kvw;
+	}
+
+	for (int i = 0; i < c->nrows; i++) {
+		CardRow *r = &c->rows[i];
+		int rw = 0;
+
+		r->y = y;
+		switch (r->type) {
+		case CROW_HEADER: {
+			int icon = r->a[0] ? big_h + 12 : 0;
+			int left = MAX(text_width_f(statusfont.font, r->b, 0),
+					text_width_f(card_font_small, r->c, SMALL_LSPC));
+			rw = icon + left + 24 +
+				text_width_f(card_font_big, r->d, 0);
+			r->h = MAX(base_h + small_h + 4, big_h) + 6;
+			break;
+		}
+		case CROW_GAUGE:
+			r->h = 6 + 12;
+			break;
+		case CROW_KV2:
+			r->h = base_h + 6;
+			break;
+		case CROW_SECTION:
+			r->h = 12 + 1 + (r->a[0] ? 10 + small_h : 0) + 8;
+			rw = r->a[0] ?
+				text_width_f(card_font_small, r->a, SMALL_LSPC) : 0;
+			break;
+		case CROW_TEXT:
+			rw = text_width_f(statusfont.font, r->a, 0) + 16 +
+				text_width_f(statusfont.font, r->b, 0);
+			if (r->btn_label[0])
+				rw += 12 + text_width_f(statusfont.font,
+						r->btn_label, 0) + 16;
+			r->h = base_h + 6;
+			break;
+		case CROW_BUTTONS:
+			rw = btn_row_width(r);
+			r->h = base_h + 18;
+			break;
+		case CROW_GAP:
+			r->h = r->gap;
+			break;
+		case CROW_CAL: {
+			int cw = cal_cell_w();
+			rw = 7 * cw;
+			r->h = small_h + 8 + 6 * (small_h + 6);
+			break;
+		}
+		}
+		if (rw > w)
+			w = rw;
+		y += r->h;
+	}
+
+	*out_w = w + 2 * CARD_PAD;
+	*out_h = y + CARD_PAD;
+}
+
+/* ── drawing ─────────────────────────────────────────────────────── */
+
+static void
+rounded(cairo_t *cr, double x, double y, double w, double h, double r)
+{
+	cairo_new_sub_path(cr);
+	cairo_arc(cr, x + w - r, y + r, r, -CARD_PI / 2, 0);
+	cairo_arc(cr, x + w - r, y + h - r, r, 0, CARD_PI / 2);
+	cairo_arc(cr, x + r, y + h - r, r, CARD_PI / 2, CARD_PI);
+	cairo_arc(cr, x + r, y + r, r, CARD_PI, 3 * CARD_PI / 2);
+	cairo_close_path(cr);
+}
+
+static void
+draw_icon(cairo_t *cr, const char *path, int x, int y, int size)
+{
+	char resolved[PATH_MAX];
+	gchar *data = NULL;
+	gsize len = 0;
+	RsvgHandle *handle;
+	RsvgRectangle vp = { .x = x, .y = y, .width = size, .height = size };
+
+	if (resolve_asset_path(path, resolved, sizeof(resolved)) != 0)
+		return;
+	if (!g_file_get_contents(resolved, &data, &len, NULL) || !data)
+		return;
+	handle = rsvg_handle_new_from_data((const guint8 *)data, len, NULL);
+	g_free(data);
+	if (!handle)
+		return;
+	rsvg_handle_render_document(handle, cr, &vp, NULL);
+	g_object_unref(handle);
+}
+
+static void
+add_hit(CardResult *out, int x, int y, int w, int h, int id)
+{
+	if (out->nhits >= CARD_MAX_HITS)
+		return;
+	out->hits[out->nhits++] = (CardHit){ .x = x, .y = y, .w = w,
+		.h = h, .id = id };
+}
+
+int
+card_finish(Card *c, CardResult *out)
+{
+	int w, h, stride;
+	cairo_surface_t *cs;
+	cairo_t *cr;
+	pixman_image_t *pix;
+	struct PixmanBuffer *buf;
+	void *data;
+	int base_h, base_asc, small_h, small_asc, big_asc;
+	int inner_w;
+
+	if (!c || !out)
+		return -1;
+	memset(out, 0, sizeof(*out));
+	if (!card_fonts_ensure()) {
+		free(c);
+		return -1;
+	}
+
+	base_h = statusfont.height;
+	base_asc = statusfont.ascent;
+	small_h = card_font_small->height;
+	small_asc = card_font_small->ascent;
+	big_asc = card_font_big->ascent;
+
+	card_measure(c, &w, &h);
+	inner_w = w - 2 * CARD_PAD;
+
+	cs = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+	if (cairo_surface_status(cs) != CAIRO_STATUS_SUCCESS) {
+		cairo_surface_destroy(cs);
+		free(c);
+		return -1;
+	}
+	cr = cairo_create(cs);
+
+	/* card body + hairline border */
+	rounded(cr, 0.5, 0.5, w - 1.0, h - 1.0, CARD_RADIUS);
+	cairo_set_source_rgba(cr, CARD_BG_R, CARD_BG_G, CARD_BG_B, CARD_BG_A);
+	cairo_fill_preserve(cr);
+	cairo_set_source_rgba(cr, 1, 1, 1, CARD_BORDER_A);
+	cairo_set_line_width(cr, 1.0);
+	cairo_stroke(cr);
+
+	/* pass A: shapes + icons (cairo) */
+	for (int i = 0; i < c->nrows; i++) {
+		CardRow *r = &c->rows[i];
+		int y = r->y;
+
+		switch (r->type) {
+		case CROW_HEADER:
+			if (r->a[0]) {
+				int isz = card_font_big->height;
+				draw_icon(cr, r->a, CARD_PAD,
+						y + (r->h - 6 - isz) / 2, isz);
+			}
+			break;
+		case CROW_GAUGE: {
+			int gy = y + 3;
+
+			rounded(cr, CARD_PAD, gy, inner_w, 6, 3);
+			cairo_set_source_rgba(cr, 1, 1, 1, 0.13);
+			cairo_fill(cr);
+			if (out->nfills < CARD_MAX_FILLS && r->frac > 0.0) {
+				int fw = (int)lround(inner_w * r->frac);
+				if (fw < 6)
+					fw = 6;
+				out->fills[out->nfills++] = (CardFill){
+					.x = CARD_PAD, .y = gy,
+					.w = fw, .h = 6,
+					.color = { r->accent[0], r->accent[1],
+						r->accent[2], r->accent[3] },
+				};
+			}
+			break;
+		}
+		case CROW_SECTION:
+			cairo_rectangle(cr, CARD_PAD, y + 12, inner_w, 1);
+			cairo_set_source_rgba(cr, 1, 1, 1, 0.08);
+			cairo_fill(cr);
+			break;
+		case CROW_TEXT:
+			if (r->btn_label[0] && r->hit_id >= 0) {
+				int bw = text_width_f(statusfont.font,
+						r->btn_label, 0) + 16;
+				int bh = base_h + 2;
+				int bx = w - CARD_PAD - bw;
+				int by = y + (r->h - bh) / 2;
+
+				rounded(cr, bx, by, bw, bh, 5);
+				if (r->hot)
+					cairo_set_source_rgba(cr, 0.85, 0.30,
+							0.30, 0.85);
+				else
+					cairo_set_source_rgba(cr, 1, 1, 1, 0.10);
+				cairo_fill(cr);
+				add_hit(out, bx, y, bw, r->h, r->hit_id);
+			}
+			break;
+		case CROW_BUTTONS: {
+			int n = r->nbtn;
+			int gap = 10;
+			int bw = n > 0 ? (inner_w - (n - 1) * gap) / n : 0;
+			int bh = r->h - 4;
+
+			for (int b = 0; b < n; b++) {
+				int bx = CARD_PAD + b * (bw + gap);
+
+				rounded(cr, bx + 0.5, y + 0.5, bw - 1, bh - 1, 8);
+				if (b == r->active) {
+					cairo_set_source_rgba(cr, 1, 1, 1, 0.14);
+					cairo_fill_preserve(cr);
+					cairo_set_source_rgba(cr, 1, 1, 1, 0.25);
+				} else if (b == r->hover) {
+					cairo_set_source_rgba(cr, 1, 1, 1, 0.07);
+					cairo_fill_preserve(cr);
+					cairo_set_source_rgba(cr, 1, 1, 1, 0.14);
+				} else {
+					cairo_set_source_rgba(cr, 1, 1, 1, 0.13);
+				}
+				cairo_set_line_width(cr, 1.0);
+				cairo_stroke(cr);
+				add_hit(out, bx, y, bw, bh, r->id_base + b);
+			}
+			break;
+		}
+		case CROW_CAL: {
+			/* today pill */
+			struct tm tmv = {0};
+			int cw = cal_cell_w(), ch = small_h + 6;
+			int wday0, col, rowi;
+
+			tmv.tm_year = r->year - 1900;
+			tmv.tm_mon = r->mon;
+			tmv.tm_mday = 1;
+			tmv.tm_hour = 12;
+			if (mktime(&tmv) != (time_t)-1) {
+				wday0 = (tmv.tm_wday + 6) % 7; /* Mon=0 */
+				col = (wday0 + r->mday - 1) % 7;
+				rowi = (wday0 + r->mday - 1) / 7;
+				rounded(cr, CARD_PAD + col * cw - 3,
+						y + small_h + 8 + rowi * ch - 2,
+						cw - 4 + 6, ch - 2, 6);
+				cairo_set_source_rgba(cr, card_col_blue[0],
+						card_col_blue[1],
+						card_col_blue[2], 0.30);
+				cairo_fill(cr);
+			}
+			break;
+		}
+		default:
+			break;
+		}
+	}
+
+	cairo_destroy(cr);
+	cairo_surface_flush(cs);
+
+	/* copy pixels out of the cairo surface into our own allocation */
+	stride = cairo_image_surface_get_stride(cs);
+	data = ecalloc(1, (size_t)stride * (size_t)h);
+	memcpy(data, cairo_image_surface_get_data(cs),
+			(size_t)stride * (size_t)h);
+	cairo_surface_destroy(cs);
+
+	pix = pixman_image_create_bits(PIXMAN_a8r8g8b8, w, h, data, stride);
+	if (!pix) {
+		free(data);
+		free(c);
+		return -1;
+	}
+
+	/* pass B: text (fcft glyphs via pixman) */
+	for (int i = 0; i < c->nrows; i++) {
+		CardRow *r = &c->rows[i];
+		int y = r->y;
+
+		switch (r->type) {
+		case CROW_HEADER: {
+			int tx = CARD_PAD +
+				(r->a[0] ? card_font_big->height + 12 : 0);
+			int content_h = r->h - 6;
+			int block = base_h + (r->c[0] ? small_h + 4 : 0);
+			int ty = y + (content_h - block) / 2;
+
+			draw_text_f(pix, statusfont.font, r->b, tx,
+					ty + base_asc, card_col_fg, 0);
+			if (r->c[0])
+				draw_text_f(pix, card_font_small, r->c, tx,
+						ty + base_h + 4 + small_asc,
+						card_col_faint, SMALL_LSPC);
+			if (r->d[0]) {
+				int vw = text_width_f(card_font_big, r->d, 0);
+				int vy = y + (content_h - card_font_big->height) / 2;
+
+				draw_text_f(pix, card_font_big, r->d,
+						w - CARD_PAD - vw,
+						vy + big_asc, card_col_fg, 0);
+			}
+			break;
+		}
+		case CROW_KV2: {
+			int bl = y + base_asc;
+			int c1r = CARD_PAD + c->kv_c1;   /* col1 right edge */
+
+			draw_text_f(pix, statusfont.font, r->a, CARD_PAD, bl,
+					card_col_dim, 0);
+			if (r->b[0]) {
+				int vw = text_width_f(statusfont.font, r->b, 0);
+				int vx = c->kv_c2 ? c1r - vw :
+					w - CARD_PAD - vw;
+				draw_text_f(pix, statusfont.font, r->b,
+						vx, bl, r->bcol, 0);
+			}
+			if (r->c[0]) {
+				draw_text_f(pix, statusfont.font, r->c,
+						c1r + CARD_COLGAP, bl,
+						card_col_dim, 0);
+				if (r->d[0]) {
+					int vw = text_width_f(statusfont.font,
+							r->d, 0);
+					draw_text_f(pix, statusfont.font, r->d,
+							w - CARD_PAD - vw, bl,
+							r->dcol, 0);
+				}
+			}
+			break;
+		}
+		case CROW_SECTION:
+			if (r->a[0])
+				draw_text_f(pix, card_font_small, r->a,
+						CARD_PAD, y + 12 + 1 + 10 +
+						small_asc, card_col_faint,
+						SMALL_LSPC);
+			break;
+		case CROW_TEXT: {
+			int bl = y + (r->h - base_h) / 2 + base_asc;
+
+			draw_text_f(pix, statusfont.font, r->a, CARD_PAD, bl,
+					card_col_fg, 0);
+			if (r->b[0]) {
+				int vw = text_width_f(statusfont.font, r->b, 0);
+				int vx = w - CARD_PAD - vw;
+
+				if (r->btn_label[0] && r->hit_id >= 0)
+					vx -= text_width_f(statusfont.font,
+							r->btn_label, 0) + 16 + 12;
+				draw_text_f(pix, statusfont.font, r->b, vx, bl,
+						r->bcol, 0);
+			}
+			if (r->btn_label[0] && r->hit_id >= 0) {
+				int bw = text_width_f(statusfont.font,
+						r->btn_label, 0) + 16;
+				int bx = w - CARD_PAD - bw + 8;
+				int bh = base_h + 2;
+				int by = y + (r->h - bh) / 2;
+
+				draw_text_f(pix, statusfont.font, r->btn_label,
+						bx, by + 1 + base_asc,
+						card_col_fg, 0);
+			}
+			break;
+		}
+		case CROW_BUTTONS: {
+			int n = r->nbtn;
+			int gap = 10;
+			int bw = n > 0 ? (inner_w - (n - 1) * gap) / n : 0;
+			int bh = r->h - 4;
+
+			for (int b = 0; b < n; b++) {
+				int bx = CARD_PAD + b * (bw + gap);
+				int tw = text_width_f(statusfont.font,
+						r->btn[b], 0);
+				int bl = y + (bh - base_h) / 2 + base_asc;
+
+				draw_text_f(pix, statusfont.font, r->btn[b],
+						bx + (bw - tw) / 2, bl,
+						b == r->active ? card_col_fg :
+						card_col_dim, 0);
+			}
+			break;
+		}
+		case CROW_CAL: {
+			static const char *dows[7] =
+				{ "Mo", "Tu", "We", "Th", "Fr", "Sa", "Su" };
+			struct tm tmv = {0};
+			int cw = cal_cell_w(), ch = small_h + 6;
+			int wday0, days;
+
+			for (int d = 0; d < 7; d++)
+				draw_text_f(pix, card_font_small, dows[d],
+						CARD_PAD + d * cw,
+						y + small_asc, card_col_faint,
+						SMALL_LSPC);
+
+			tmv.tm_year = r->year - 1900;
+			tmv.tm_mon = r->mon;
+			tmv.tm_mday = 1;
+			tmv.tm_hour = 12;
+			if (mktime(&tmv) == (time_t)-1)
+				break;
+			wday0 = (tmv.tm_wday + 6) % 7;
+			{
+				static const int dim[12] = { 31, 28, 31, 30, 31,
+					30, 31, 31, 30, 31, 30, 31 };
+				int yy = r->year;
+				days = dim[r->mon];
+				if (r->mon == 1 && ((yy % 4 == 0 && yy % 100 != 0)
+						|| yy % 400 == 0))
+					days = 29;
+			}
+			for (int d = 1; d <= days; d++) {
+				int cell = wday0 + d - 1;
+				int col = cell % 7, rowi = cell / 7;
+				char num[4];
+
+				snprintf(num, sizeof(num), "%d", d);
+				draw_text_f(pix, card_font_small, num,
+						CARD_PAD + col * cw,
+						y + small_h + 8 + rowi * ch +
+						small_asc,
+						d == r->mday ? card_col_fg :
+						card_col_dim, 0);
+			}
+			break;
+		}
+		default:
+			break;
+		}
+	}
+
+	buf = ecalloc(1, sizeof(*buf));
+	buf->image = pix;
+	buf->data = data;
+	buf->drm_format = DRM_FORMAT_ARGB8888;
+	buf->stride = stride;
+	buf->owns_data = 1;
+	wlr_buffer_init(&buf->base, &pixman_buffer_impl, w, h);
+
+	out->buf = &buf->base;
+	out->w = w;
+	out->h = h;
+	free(c);
+	return 0;
+}
+
+/* ── gauge fill buffer ───────────────────────────────────────────── */
+
+static struct wlr_buffer *
+make_fill_buffer(int w, int h, const float col[4])
+{
+	cairo_surface_t *cs;
+	cairo_t *cr;
+	struct PixmanBuffer *buf;
+	void *data;
+	int stride;
+
+	cs = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+	if (cairo_surface_status(cs) != CAIRO_STATUS_SUCCESS) {
+		cairo_surface_destroy(cs);
+		return NULL;
+	}
+	cr = cairo_create(cs);
+	rounded(cr, 0, 0, w, h, h / 2.0);
+	cairo_set_source_rgba(cr, col[0], col[1], col[2], col[3]);
+	cairo_fill(cr);
+	cairo_destroy(cr);
+	cairo_surface_flush(cs);
+
+	stride = cairo_image_surface_get_stride(cs);
+	data = ecalloc(1, (size_t)stride * (size_t)h);
+	memcpy(data, cairo_image_surface_get_data(cs),
+			(size_t)stride * (size_t)h);
+	cairo_surface_destroy(cs);
+
+	buf = ecalloc(1, sizeof(*buf));
+	buf->image = pixman_image_create_bits(PIXMAN_a8r8g8b8, w, h,
+			data, stride);
+	buf->data = data;
+	buf->drm_format = DRM_FORMAT_ARGB8888;
+	buf->stride = stride;
+	buf->owns_data = 1;
+	wlr_buffer_init(&buf->base, &pixman_buffer_impl, w, h);
+	return &buf->base;
+}
+
+/* ── presenter + animation ───────────────────────────────────────── */
+
+#define ANIM_MAX 16
+
+static PopupView *anim_views[ANIM_MAX];
+static int anim_count;
+static struct wl_event_source *anim_timer;
+
+/* Apply the animation frame for `v` at time `now`; returns 1 while
+ * still animating. */
+static int
+view_anim_frame(PopupView *v, uint64_t now)
+{
+	float t = 1.0f, ts = 1.0f;
+	float e, es;
+	uint64_t el;
+
+	if (!v->animating || !v->card)
+		return 0;
+	el = now - v->anim_start_ms;
+	if (el < CARD_SHOW_MS)
+		t = (float)el / CARD_SHOW_MS;
+	if (el < CARD_SWEEP_DELAY)
+		ts = 0.0f;
+	else if (el - CARD_SWEEP_DELAY < CARD_SWEEP_MS)
+		ts = (float)(el - CARD_SWEEP_DELAY) / CARD_SWEEP_MS;
+	e = ease_out_cubic(t);
+	es = ease_out_cubic(ts);
+
+	if (v->content)
+		wlr_scene_node_set_position(&v->content->node, 0,
+				-(int)lroundf(CARD_SLIDE_PX * (1.0f - e)));
+	wlr_scene_buffer_set_opacity(v->card, e);
+
+	for (int i = 0; i < v->nfills; i++) {
+		struct wlr_scene_buffer *fb = v->fills[i];
+		int fw = v->fill_w[i], fh = v->fill_h[i];
+		int rw;
+
+		if (!fb)
+			continue;
+		wlr_scene_buffer_set_opacity(fb, e);
+		rw = (int)lroundf(fw * es);
+		if (rw < 1)
+			rw = 1;
+		wlr_scene_buffer_set_source_box(fb, &(struct wlr_fbox){
+			.x = 0, .y = 0, .width = rw, .height = fh });
+		wlr_scene_buffer_set_dest_size(fb, rw, fh);
+	}
+
+	if (t >= 1.0f && ts >= 1.0f) {
+		v->animating = 0;
+		return 0;
+	}
+	return 1;
+}
+
+static int
+card_anim_tick(void *data)
+{
+	uint64_t now = monotonic_msec();
+	int still = 0;
+
+	(void)data;
+	for (int i = 0; i < anim_count; i++) {
+		if (view_anim_frame(anim_views[i], now)) {
+			still = 1;
+		} else {
+			memmove(&anim_views[i], &anim_views[i + 1],
+					(size_t)(anim_count - i - 1) *
+					sizeof(anim_views[0]));
+			anim_count--;
+			i--;
+		}
+	}
+	if (still && anim_timer)
+		wl_event_source_timer_update(anim_timer, 16);
+	return 0;
+}
+
+static void
+anim_register(PopupView *v)
+{
+	for (int i = 0; i < anim_count; i++)
+		if (anim_views[i] == v)
+			return;
+	if (anim_count >= ANIM_MAX)
+		return;
+	anim_views[anim_count++] = v;
+	if (!event_loop)
+		return;
+	if (!anim_timer)
+		anim_timer = wl_event_loop_add_timer(event_loop, card_anim_tick,
+				NULL);
+	if (anim_timer)
+		wl_event_source_timer_update(anim_timer, 1);
+}
+
+static void
+anim_unregister(PopupView *v)
+{
+	for (int i = 0; i < anim_count; i++) {
+		if (anim_views[i] == v) {
+			memmove(&anim_views[i], &anim_views[i + 1],
+					(size_t)(anim_count - i - 1) *
+					sizeof(anim_views[0]));
+			anim_count--;
+			return;
+		}
+	}
+}
+
+void
+popup_view_apply(PopupView *v, struct wlr_scene_tree *tree, CardResult *res)
+{
+	struct wlr_scene_node *node, *tmp;
+
+	if (!v || !tree || !res || !res->buf)
+		return;
+
+	if (!v->content || v->content->node.parent != tree) {
+		v->content = wlr_scene_tree_create(tree);
+		if (!v->content)
+			return;
+	}
+	wl_list_for_each_safe(node, tmp, &v->content->children, link)
+		wlr_scene_node_destroy(node);
+	v->card = NULL;
+	memset(v->fills, 0, sizeof(v->fills));
+	v->nfills = 0;
+
+	v->card = wlr_scene_buffer_create(v->content, NULL);
+	if (v->card) {
+		wlr_scene_buffer_set_buffer(v->card, res->buf);
+		wlr_scene_node_set_position(&v->card->node, 0, 0);
+	}
+
+	for (int i = 0; i < res->nfills && i < CARD_MAX_FILLS; i++) {
+		CardFill *f = &res->fills[i];
+		struct wlr_buffer *fb = make_fill_buffer(f->w, f->h, f->color);
+		struct wlr_scene_buffer *sb;
+
+		if (!fb)
+			continue;
+		sb = wlr_scene_buffer_create(v->content, NULL);
+		if (sb) {
+			wlr_scene_buffer_set_buffer(sb, fb);
+			wlr_scene_node_set_position(&sb->node, f->x, f->y);
+			v->fills[v->nfills] = sb;
+			v->fill_w[v->nfills] = f->w;
+			v->fill_h[v->nfills] = f->h;
+			v->nfills++;
+		}
+		wlr_buffer_drop(fb);
+	}
+
+	v->w = res->w;
+	v->h = res->h;
+	wlr_buffer_drop(res->buf);
+	res->buf = NULL;
+
+	/* re-applied mid-animation: restore the current frame state so a
+	 * data refresh doesn't pop to full opacity */
+	if (v->animating)
+		view_anim_frame(v, monotonic_msec());
+}
+
+void
+popup_view_show(PopupView *v)
+{
+	if (!v)
+		return;
+	v->anim_start_ms = monotonic_msec();
+	v->animating = 1;
+	view_anim_frame(v, v->anim_start_ms);
+	anim_register(v);
+}
+
+void
+popup_view_hide(PopupView *v)
+{
+	if (!v)
+		return;
+	v->animating = 0;
+	anim_unregister(v);
+	if (v->content)
+		wlr_scene_node_set_position(&v->content->node, 0, 0);
+	if (v->card)
+		wlr_scene_buffer_set_opacity(v->card, 1.0f);
+}

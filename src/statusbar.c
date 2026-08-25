@@ -1370,54 +1370,22 @@ void
 rendercpupopup(Monitor *m)
 {
 	CpuPopup *p;
-	int padding, line_spacing;
-	int line_count;
-	int left_w = 0, right_w = 0;
-	int left_h = 0, right_h = 0;
-	int content_h;
-	int column_gap;
-	int row_height;
-	int button_gap;
-	int kill_text_w;
-	int kill_w;
-	int kill_h;
-	uint64_t now;
-	int use_right_gap;
+	Card *card;
+	CardResult res;
+	char value[16], sub[24], k1[16], v1[16], k2[16], v2[16];
+	int avg_disp;
 	int hover_idx;
-	int popup_x;
-	int need_fetch_now;
-	int max_proc_text_w = 0;
-	int any_has_kill = 0;
-	char line[64];
-	struct wlr_scene_node *node, *tmp;
+	int need_fetch_now = 0;
+	uint64_t now;
 
 	if (!m || !m->statusbar.cpu_popup.tree)
 		return;
-	/* Etter NULL-sjekken — init i deklarasjonen krasjet på m == NULL. */
-	popup_x = m->statusbar.cpu.x;
 
 	p = &m->statusbar.cpu_popup;
 	hover_idx = p->hover_idx;
 	if (hover_idx < -1 || hover_idx >= (int)LENGTH(p->procs))
 		hover_idx = -1;
-	padding = statusbar_module_padding;
-	line_spacing = 2;
-	column_gap = statusbar_module_spacing + 8;
-	row_height = statusfont.height > 0 ? statusfont.height : 16;
-	button_gap = statusbar_module_spacing > 0 ? statusbar_module_spacing / 2 : 6;
-	kill_text_w = status_text_width("Kill");
-	kill_w = kill_text_w + 12;
-	kill_h = row_height;
 	now = monotonic_msec();
-	need_fetch_now = 0;
-	now = monotonic_msec();
-
-	/* Clear previous buffers but keep bg */
-	wl_list_for_each_safe(node, tmp, &p->tree->children, link) {
-		if (p->bg && node == &p->bg->node)
-			continue;
-		wlr_scene_node_destroy(node);
-	}
 
 	if (!statusfont.font || cpu_core_count <= 0) {
 		p->width = p->height = 0;
@@ -1446,157 +1414,86 @@ rendercpupopup(Monitor *m)
 			p->refresh_data = 0;
 		}
 	}
-	line_count = cpu_core_count + 1; /* +1 for avg line */
 
-	for (int i = 0; i < line_count; i++) {
-		double perc = (i < cpu_core_count) ? cpu_last_core_percent[i] : cpu_last_percent;
-
-		if (perc < 0.0) {
-			if (i < cpu_core_count)
-				snprintf(line, sizeof(line), "C%d: --%%", i);
-			else
-				snprintf(line, sizeof(line), "Avg: --%%");
-		} else if (i < cpu_core_count) {
-			snprintf(line, sizeof(line), "C%d: %d%%", i, (int)lround(perc));
-		} else {
-			int avg_disp = (perc < 1.0) ? 0 : (int)lround(perc);
-			snprintf(line, sizeof(line), "Avg: %d%%", avg_disp);
-		}
-		left_w = MAX(left_w, status_text_width(line));
-	}
-	left_h = line_count * row_height + (line_count - 1) * line_spacing;
-
-	/* First pass: find max text width for vertical kill button alignment */
-	for (int i = 0; i < p->proc_count; i++) {
-		CpuProcEntry *e = &p->procs[i];
-		int cpu_disp = (int)lround(e->cpu < 0.0 ? 0.0 : e->cpu);
-		int text_w;
-		char proc_line[128];
-
-		snprintf(proc_line, sizeof(proc_line), "%s %d%%", e->name, cpu_disp);
-		text_w = status_text_width(proc_line);
-		max_proc_text_w = MAX(max_proc_text_w, text_w);
-		if (e->has_kill)
-			any_has_kill = 1;
-	}
-	/* Calculate right_w with aligned kill buttons */
-	if (p->proc_count > 0) {
-		right_w = max_proc_text_w;
-		if (any_has_kill)
-			right_w += button_gap + kill_w;
-	}
-	if (p->proc_count > 0)
-		right_h = p->proc_count * row_height + (p->proc_count - 1) * line_spacing;
-
-	content_h = MAX(left_h, right_h);
-	use_right_gap = right_w > 0 ? column_gap : 0;
-	p->width = 2 * padding + left_w + use_right_gap + right_w;
-	p->height = content_h + 2 * padding;
-
-	if (p->width > 0 && m->statusbar.area.width > 0) {
-		int max_x = m->statusbar.area.width - p->width;
-		if (max_x < 0)
-			max_x = 0;
-		if (popup_x > max_x)
-			popup_x = max_x;
-		if (popup_x < 0)
-			popup_x = 0;
-	}
-
-	if (!p->bg && !(p->bg = wlr_scene_tree_create(p->tree)))
+	card = card_begin();
+	if (!card)
 		return;
-	wlr_scene_node_set_enabled(&p->bg->node, 1);
-	wlr_scene_node_set_position(&p->bg->node, 0, 0);
-	wl_list_for_each_safe(node, tmp, &p->bg->children, link)
-		wlr_scene_node_destroy(node);
-	drawrect(p->bg, 0, 0, p->width, p->height, statusbar_popup_bg);
 
-	for (int i = 0; i < line_count; i++) {
-		double perc = (i < cpu_core_count) ? cpu_last_core_percent[i] : cpu_last_percent;
-		int row_y = padding + i * (row_height + line_spacing);
-		struct wlr_scene_tree *row;
-		StatusModule mod = {0};
+	avg_disp = (cpu_last_percent < 1.0) ? 0 :
+		(int)lround(cpu_last_percent < 0.0 ? 0.0 : cpu_last_percent);
+	snprintf(value, sizeof(value), "%d%%", avg_disp);
+	snprintf(sub, sizeof(sub), "%d CORES", cpu_core_count);
+	card_header(card, cpu_icon_path, "CPU", sub, value);
+	card_gap(card, 6);
+	card_gauge(card, avg_disp / 100.0,
+			avg_disp >= 90 ? card_col_red : card_col_blue);
+	card_gap(card, 2);
 
-		if (perc < 0.0) {
-			if (i < cpu_core_count)
-				snprintf(line, sizeof(line), "C%d: --%%", i);
+	card_section(card, "PER CORE");
+	for (int i = 0; i < cpu_core_count; i += 2) {
+		double p1 = cpu_last_core_percent[i];
+
+		snprintf(k1, sizeof(k1), "C%d", i);
+		if (p1 < 0.0)
+			snprintf(v1, sizeof(v1), "--");
+		else
+			snprintf(v1, sizeof(v1), "%d%%", (int)lround(p1));
+		if (i + 1 < cpu_core_count) {
+			double p2 = cpu_last_core_percent[i + 1];
+
+			snprintf(k2, sizeof(k2), "C%d", i + 1);
+			if (p2 < 0.0)
+				snprintf(v2, sizeof(v2), "--");
 			else
-				snprintf(line, sizeof(line), "Avg: --%%");
-		} else if (i < cpu_core_count) {
-			snprintf(line, sizeof(line), "C%d: %d%%", i, (int)lround(perc));
+				snprintf(v2, sizeof(v2), "%d%%", (int)lround(p2));
+			card_kv2(card, k1, v1, NULL, k2, v2, NULL);
 		} else {
-			int avg_disp = (perc < 1.0) ? 0 : (int)lround(perc);
-			snprintf(line, sizeof(line), "Avg: %d%%", avg_disp);
+			card_kv2(card, k1, v1, NULL, NULL, NULL, NULL);
 		}
-
-		row = wlr_scene_tree_create(p->tree);
-		if (!row)
-			continue;
-		wlr_scene_node_set_position(&row->node, padding, row_y);
-		mod.tree = row;
-		tray_render_label(&mod, line, 0, row_height, statusbar_fg);
 	}
 
-	if (right_w > 0) {
-		int right_x = padding + left_w + use_right_gap;
+	if (p->proc_count > 0) {
+		card_section(card, "TOP PROCESSES");
 		for (int i = 0; i < p->proc_count; i++) {
 			CpuProcEntry *e = &p->procs[i];
 			int cpu_disp = (int)lround(e->cpu < 0.0 ? 0.0 : e->cpu);
-			int row_y = padding + i * (row_height + line_spacing);
-			int text_w;
-			char proc_line[128];
-			struct wlr_scene_tree *row;
-			StatusModule mod = {0};
+			char pct[16];
 
-			snprintf(proc_line, sizeof(proc_line), "%s %d%%", e->name, cpu_disp);
-			row = wlr_scene_tree_create(p->tree);
-			if (row) {
-				wlr_scene_node_set_position(&row->node, right_x, row_y);
-				mod.tree = row;
-				text_w = tray_render_label(&mod, proc_line, 0, row_height, statusbar_fg);
-				if (text_w <= 0)
-					text_w = status_text_width(proc_line);
-			} else {
-				text_w = status_text_width(proc_line);
-			}
-
-			e->y = row_y;
-			e->height = row_height;
-		if (e->has_kill && kill_w > 0 && kill_h > 0) {
-			int btn_x = right_x + max_proc_text_w + button_gap;
-			int btn_y = row_y + (row_height - kill_h) / 2;
-			struct wlr_scene_tree *btn;
-			StatusModule btn_mod = {0};
-			const float *btn_color = statusbar_volume_muted_fg;
-			int is_hover = (hover_idx == i);
-
-			if (is_hover)
-				btn_color = statusbar_tag_active_bg;
-
-			e->kill_x = btn_x;
-				e->kill_y = btn_y;
-				e->kill_w = kill_w;
-				e->kill_h = kill_h;
-				drawrect(p->tree, btn_x, btn_y, kill_w, kill_h, btn_color);
-
-				btn = wlr_scene_tree_create(p->tree);
-				if (btn) {
-					int text_x = (kill_w - kill_text_w) / 2;
-					if (text_x < 2)
-						text_x = 2;
-					wlr_scene_node_set_position(&btn->node, btn_x, btn_y);
-					btn_mod.tree = btn;
-					tray_render_label(&btn_mod, "Kill", text_x, kill_h, statusbar_fg);
-				}
-			} else {
-				e->kill_x = e->kill_y = e->kill_w = e->kill_h = 0;
-				e->has_kill = 0;
-			}
+			snprintf(pct, sizeof(pct), "%d%%", cpu_disp);
+			if (e->has_kill)
+				card_text_btn(card, e->name, pct, card_col_dim,
+						"Kill", i, hover_idx == i);
+			else
+				card_text(card, e->name, pct, card_col_dim);
 		}
 	}
 
-	if (p->width <= 0 || p->height <= 0)
-		wlr_scene_node_set_enabled(&p->tree->node, 0);
+	if (card_finish(card, &res) != 0)
+		return;
+
+	/* Map kill-button hit rects back onto the proc entries the click
+	 * and hover paths read. */
+	for (int i = 0; i < p->proc_count; i++)
+		p->procs[i].kill_x = p->procs[i].kill_y =
+			p->procs[i].kill_w = p->procs[i].kill_h = 0;
+	for (int i = 0; i < res.nhits; i++) {
+		CardHit *hit = &res.hits[i];
+
+		if (hit->id >= 0 && hit->id < p->proc_count) {
+			CpuProcEntry *e = &p->procs[hit->id];
+
+			e->kill_x = hit->x;
+			e->kill_y = hit->y;
+			e->kill_w = hit->w;
+			e->kill_h = hit->h;
+			e->y = hit->y;
+			e->height = hit->h;
+		}
+	}
+
+	popup_view_apply(&p->view, p->tree, &res);
+	p->width = p->view.w;
+	p->height = p->view.h;
 	p->last_render_ms = now;
 }
 
@@ -1811,20 +1708,14 @@ void
 renderrampopup(Monitor *m)
 {
 	RamPopup *p;
-	int padding, line_spacing;
-	int row_height;
-	int button_gap;
-	int kill_text_w;
-	int kill_w;
-	int kill_h;
-	uint64_t now;
+	Card *card;
+	CardResult res;
+	char value[16], v1[32], v2[32];
 	int hover_idx;
-	int popup_x;
-	int need_fetch_now;
-	int max_proc_text_w = 0;
-	int any_has_kill = 0;
-	int content_w = 0, content_h = 0;
-	struct wlr_scene_node *node, *tmp;
+	int need_fetch_now = 0;
+	double total_mb = -1.0, avail_mb = -1.0, used_mb;
+	double used_frac = -1.0;
+	uint64_t now;
 
 	if (!m || !m->statusbar.ram_popup.tree)
 		return;
@@ -1833,25 +1724,7 @@ renderrampopup(Monitor *m)
 	hover_idx = p->hover_idx;
 	if (hover_idx < -1 || hover_idx >= (int)LENGTH(p->procs))
 		hover_idx = -1;
-	padding = statusbar_module_padding;
-	line_spacing = 2;
-	row_height = statusfont.height > 0 ? statusfont.height : 16;
-	button_gap = statusbar_module_spacing > 0 ? statusbar_module_spacing / 2 : 6;
-	kill_text_w = status_text_width("Kill");
-	kill_w = kill_text_w + 12;
-	kill_h = row_height;
 	now = monotonic_msec();
-	need_fetch_now = 0;
-	popup_x = m->statusbar.ram.x;
-
-	/* Clear previous buffers but keep bg */
-	wl_list_for_each_safe(node, tmp, &p->tree->children, link) {
-		if (p->bg && node == &p->bg->node)
-			continue;
-		wlr_scene_node_destroy(node);
-	}
-	for (int i = 0; i < (int)LENGTH(p->procs); i++)
-		p->procs[i].kill_rect = NULL;
 
 	if (!statusfont.font) {
 		p->width = p->height = 0;
@@ -1881,141 +1754,106 @@ renderrampopup(Monitor *m)
 		}
 	}
 
-	if (p->proc_count == 0) {
-		/* Don't hide if we're waiting for data to load (suppress period) */
-		if (p->suppress_refresh_until_ms > 0 && now < p->suppress_refresh_until_ms) {
-			/* Show loading placeholder */
-			const char *loading = "Loading...";
-			int text_w = status_text_width(loading);
-			struct wlr_scene_tree *row;
-			StatusModule mod = {0};
+	/* Totals straight from /proc/meminfo — ram_last_mb only carries
+	 * the used amount. */
+	{
+		FILE *fp = fopen("/proc/meminfo", "r");
+		char line[128];
+		unsigned long long kb;
 
-			p->width = 2 * padding + text_w;
-			p->height = 2 * padding + row_height;
-
-			if (!p->bg && !(p->bg = wlr_scene_tree_create(p->tree)))
-				return;
-			wlr_scene_node_set_enabled(&p->bg->node, 1);
-			wlr_scene_node_set_position(&p->bg->node, 0, 0);
-			wl_list_for_each_safe(node, tmp, &p->bg->children, link)
-				wlr_scene_node_destroy(node);
-			drawrect(p->bg, 0, 0, p->width, p->height, statusbar_popup_bg);
-
-			row = wlr_scene_tree_create(p->tree);
-			if (row) {
-				wlr_scene_node_set_position(&row->node, padding, padding);
-				mod.tree = row;
-				tray_render_label(&mod, loading, 0, row_height, statusbar_fg);
+		if (fp) {
+			while (fgets(line, sizeof(line), fp)) {
+				if (sscanf(line, "MemTotal: %llu kB", &kb) == 1)
+					total_mb = kb / 1024.0;
+				else if (sscanf(line, "MemAvailable: %llu kB", &kb) == 1)
+					avail_mb = kb / 1024.0;
+				if (total_mb >= 0.0 && avail_mb >= 0.0)
+					break;
 			}
-			p->last_render_ms = now;
-			return;
+			fclose(fp);
 		}
-		p->width = p->height = 0;
-		if (p->tree)
-			wlr_scene_node_set_enabled(&p->tree->node, 0);
-		p->visible = 0;
+	}
+	used_mb = (total_mb >= 0.0 && avail_mb >= 0.0) ?
+		total_mb - avail_mb : ram_last_mb;
+	if (total_mb > 0.0 && used_mb >= 0.0)
+		used_frac = used_mb / total_mb;
+
+	card = card_begin();
+	if (!card)
 		return;
+
+	if (used_frac >= 0.0)
+		snprintf(value, sizeof(value), "%.0f%%", used_frac * 100.0);
+	else
+		snprintf(value, sizeof(value), "--");
+	card_header(card, ram_icon_path, "Memory", "SYSTEM RAM", value);
+	card_gap(card, 6);
+	card_gauge(card, used_frac >= 0.0 ? used_frac : 0.0,
+			used_frac >= 0.9 ? card_col_red : card_col_blue);
+	card_gap(card, 6);
+
+	if (used_mb >= 0.0)
+		snprintf(v1, sizeof(v1), "%.1fGB", used_mb / 1024.0);
+	else
+		snprintf(v1, sizeof(v1), "--");
+	if (total_mb >= 0.0)
+		snprintf(v2, sizeof(v2), "%.1fGB", total_mb / 1024.0);
+	else
+		snprintf(v2, sizeof(v2), "--");
+	card_kv2(card, "In use", v1, NULL, "Total", v2, NULL);
+	if (avail_mb >= 0.0) {
+		snprintf(v1, sizeof(v1), "%.1fGB", avail_mb / 1024.0);
+		card_kv2(card, "Available", v1, card_col_green, NULL, NULL, NULL);
 	}
 
-	/* First pass: find max text width for vertical kill button alignment */
-	for (int i = 0; i < p->proc_count; i++) {
-		RamProcEntry *e = &p->procs[i];
-		int text_w;
-		char proc_line[128];
-		char mem_str[16];
+	if (p->proc_count > 0) {
+		card_section(card, "TOP PROCESSES");
+		for (int i = 0; i < p->proc_count; i++) {
+			RamProcEntry *e = &p->procs[i];
+			char amt[16];
 
-		format_mem_size(e->mem_kb, mem_str, sizeof(mem_str));
-		snprintf(proc_line, sizeof(proc_line), "%s %s", e->name, mem_str);
-		text_w = status_text_width(proc_line);
-		max_proc_text_w = MAX(max_proc_text_w, text_w);
-		if (e->has_kill)
-			any_has_kill = 1;
+			if (e->mem_kb >= 1024 * 1024)
+				snprintf(amt, sizeof(amt), "%.1fGB",
+						e->mem_kb / (1024.0 * 1024.0));
+			else
+				snprintf(amt, sizeof(amt), "%luMB",
+						e->mem_kb / 1024);
+			if (e->has_kill)
+				card_text_btn(card, e->name, amt, card_col_dim,
+						"Kill", i, hover_idx == i);
+			else
+				card_text(card, e->name, amt, card_col_dim);
+		}
+	} else if (p->suppress_refresh_until_ms > 0 &&
+			now < p->suppress_refresh_until_ms) {
+		card_section(card, "TOP PROCESSES");
+		card_text(card, "Loading...", NULL, NULL);
 	}
 
-	/* Calculate dimensions */
-	content_w = max_proc_text_w;
-	if (any_has_kill)
-		content_w += button_gap + kill_w;
-	content_h = p->proc_count * row_height + (p->proc_count - 1) * line_spacing;
-
-	p->width = 2 * padding + content_w;
-	p->height = content_h + 2 * padding;
-
-	if (p->width > 0 && m->statusbar.area.width > 0) {
-		int max_x = m->statusbar.area.width - p->width;
-		if (max_x < 0)
-			max_x = 0;
-		if (popup_x > max_x)
-			popup_x = max_x;
-		if (popup_x < 0)
-			popup_x = 0;
-	}
-
-	if (!p->bg && !(p->bg = wlr_scene_tree_create(p->tree)))
+	if (card_finish(card, &res) != 0)
 		return;
-	wlr_scene_node_set_enabled(&p->bg->node, 1);
-	wlr_scene_node_set_position(&p->bg->node, 0, 0);
-	wl_list_for_each_safe(node, tmp, &p->bg->children, link)
-		wlr_scene_node_destroy(node);
-	drawrect(p->bg, 0, 0, p->width, p->height, statusbar_popup_bg);
 
-	/* Render process rows */
-	for (int i = 0; i < p->proc_count; i++) {
-		RamProcEntry *e = &p->procs[i];
-		int row_y = padding + i * (row_height + line_spacing);
-		char proc_line[128];
-		char mem_str[16];
-		struct wlr_scene_tree *row;
-		StatusModule mod = {0};
+	for (int i = 0; i < p->proc_count; i++)
+		p->procs[i].kill_x = p->procs[i].kill_y =
+			p->procs[i].kill_w = p->procs[i].kill_h = 0;
+	for (int i = 0; i < res.nhits; i++) {
+		CardHit *hit = &res.hits[i];
 
-		format_mem_size(e->mem_kb, mem_str, sizeof(mem_str));
-		snprintf(proc_line, sizeof(proc_line), "%s %s", e->name, mem_str);
-		row = wlr_scene_tree_create(p->tree);
-		if (row) {
-			wlr_scene_node_set_position(&row->node, padding, row_y);
-			mod.tree = row;
-			tray_render_label(&mod, proc_line, 0, row_height, statusbar_fg);
-		}
+		if (hit->id >= 0 && hit->id < p->proc_count) {
+			RamProcEntry *e = &p->procs[hit->id];
 
-		e->y = row_y;
-		e->height = row_height;
-
-		if (e->has_kill && kill_w > 0 && kill_h > 0) {
-			int btn_x = padding + max_proc_text_w + button_gap;
-			int btn_y = row_y + (row_height - kill_h) / 2;
-			struct wlr_scene_tree *btn;
-			StatusModule btn_mod = {0};
-			const float *btn_color = statusbar_volume_muted_fg;
-			int is_hover = (hover_idx == i);
-
-			if (is_hover)
-				btn_color = statusbar_tag_active_bg;
-
-			e->kill_x = btn_x;
-			e->kill_y = btn_y;
-			e->kill_w = kill_w;
-			e->kill_h = kill_h;
-			e->kill_rect = wlr_scene_rect_create(p->tree, kill_w, kill_h, btn_color);
-			if (e->kill_rect)
-				wlr_scene_node_set_position(&e->kill_rect->node, btn_x, btn_y);
-
-			btn = wlr_scene_tree_create(p->tree);
-			if (btn) {
-				int text_x = (kill_w - kill_text_w) / 2;
-				if (text_x < 2)
-					text_x = 2;
-				wlr_scene_node_set_position(&btn->node, btn_x, btn_y);
-				btn_mod.tree = btn;
-				tray_render_label(&btn_mod, "Kill", text_x, kill_h, statusbar_fg);
-			}
-		} else {
-			e->kill_x = e->kill_y = e->kill_w = e->kill_h = 0;
-			e->has_kill = 0;
+			e->kill_x = hit->x;
+			e->kill_y = hit->y;
+			e->kill_w = hit->w;
+			e->kill_h = hit->h;
+			e->y = hit->y;
+			e->height = hit->h;
 		}
 	}
 
-	if (p->width <= 0 || p->height <= 0)
-		wlr_scene_node_set_enabled(&p->tree->node, 0);
+	popup_view_apply(&p->view, p->tree, &res);
+	p->width = p->view.w;
+	p->height = p->view.h;
 	p->last_render_ms = now;
 }
 
@@ -2129,6 +1967,15 @@ read_battery_info(BatteryPopup *p)
 			char *nl = strchr(buf, '\n');
 			if (nl) *nl = '\0';
 			p->charging = (strcmp(buf, "Charging") == 0 || strcmp(buf, "Full") == 0);
+			p->actively_charging = (strcmp(buf, "Charging") == 0);
+			if (strcmp(buf, "Charging") == 0)
+				snprintf(p->state, sizeof(p->state), "Charging");
+			else if (strcmp(buf, "Full") == 0)
+				snprintf(p->state, sizeof(p->state), "Full");
+			else if (strcmp(buf, "Not charging") == 0)
+				snprintf(p->state, sizeof(p->state), "Holding");
+			else
+				snprintf(p->state, sizeof(p->state), "Draining");
 		}
 		fclose(fp);
 	}
@@ -2177,6 +2024,128 @@ read_battery_info(BatteryPopup *p)
 			}
 		}
 	}
+
+	/* Design/current capacity (Wh); charge_* variants need a design
+	 * voltage to convert Ah -> Wh */
+	{
+		double vmin = -1.0;
+
+		snprintf(path, sizeof(path), "%s/voltage_min_design", battery_device_dir);
+		if (readulong(path, &val) == 0)
+			vmin = val / 1000000.0;
+
+		p->design_wh = -1.0;
+		snprintf(path, sizeof(path), "%s/energy_full_design", battery_device_dir);
+		if (readulong(path, &val) == 0)
+			p->design_wh = val / 1000000.0;
+		else {
+			snprintf(path, sizeof(path), "%s/charge_full_design", battery_device_dir);
+			if (readulong(path, &val) == 0 && vmin > 0)
+				p->design_wh = (val / 1000000.0) * vmin;
+		}
+
+		p->full_wh = -1.0;
+		snprintf(path, sizeof(path), "%s/energy_full", battery_device_dir);
+		if (readulong(path, &val) == 0)
+			p->full_wh = val / 1000000.0;
+		else {
+			snprintf(path, sizeof(path), "%s/charge_full", battery_device_dir);
+			if (readulong(path, &val) == 0 && vmin > 0)
+				p->full_wh = (val / 1000000.0) * vmin;
+		}
+	}
+
+	p->cycles = -1;
+	snprintf(path, sizeof(path), "%s/cycle_count", battery_device_dir);
+	if (readulong(path, &val) == 0)
+		p->cycles = (int)val;
+
+	p->thr_start = p->thr_end = -1;
+	snprintf(path, sizeof(path), "%s/charge_control_start_threshold", battery_device_dir);
+	if (readulong(path, &val) == 0)
+		p->thr_start = (int)val;
+	snprintf(path, sizeof(path), "%s/charge_control_end_threshold", battery_device_dir);
+	if (readulong(path, &val) == 0)
+		p->thr_end = (int)val;
+
+	read_power_profile(p);
+}
+
+/* Read the current power profile + available choices from whichever
+ * sysfs backend this machine has. Written directly on button clicks;
+ * power-profiles-daemon is intentionally not running. Choices end up
+ * space-separated regardless of the backend's file format. */
+void
+read_power_profile(BatteryPopup *p)
+{
+	FILE *fp;
+	char buf[64];
+
+	p->has_profile = 0;
+	p->profile_backend = PROFILE_BACKEND_NONE;
+	p->profile[0] = '\0';
+	p->choices[0] = '\0';
+
+	/* ACPI platform profile: current + choices on single lines */
+	fp = fopen("/sys/firmware/acpi/platform_profile", "r");
+	if (fp) {
+		if (fgets(buf, sizeof(buf), fp)) {
+			char *nl = strchr(buf, '\n');
+			if (nl) *nl = '\0';
+			snprintf(p->profile, sizeof(p->profile), "%s", buf);
+			p->has_profile = 1;
+			p->profile_backend = PROFILE_BACKEND_ACPI;
+		}
+		fclose(fp);
+	}
+	if (p->profile_backend == PROFILE_BACKEND_ACPI) {
+		fp = fopen("/sys/firmware/acpi/platform_profile_choices", "r");
+		if (fp) {
+			if (fgets(p->choices, sizeof(p->choices), fp)) {
+				char *nl = strchr(p->choices, '\n');
+				if (nl) *nl = '\0';
+			} else {
+				p->choices[0] = '\0';
+			}
+			fclose(fp);
+		}
+		return;
+	}
+
+	/* MSI EC shift mode: one mode per line in available_shift_modes */
+	fp = fopen("/sys/devices/platform/msi-ec/shift_mode", "r");
+	if (fp) {
+		if (fgets(buf, sizeof(buf), fp)) {
+			char *nl = strchr(buf, '\n');
+			if (nl) *nl = '\0';
+			snprintf(p->profile, sizeof(p->profile), "%s", buf);
+			p->has_profile = 1;
+			p->profile_backend = PROFILE_BACKEND_MSI_EC;
+		}
+		fclose(fp);
+	}
+	if (p->profile_backend == PROFILE_BACKEND_MSI_EC) {
+		fp = fopen("/sys/devices/platform/msi-ec/available_shift_modes", "r");
+		if (fp) {
+			size_t len = 0;
+
+			while (fgets(buf, sizeof(buf), fp)) {
+				char *nl = strchr(buf, '\n');
+				int n;
+
+				if (nl) *nl = '\0';
+				if (!buf[0])
+					continue;
+				n = snprintf(p->choices + len,
+						sizeof(p->choices) - len,
+						"%s%s", len ? " " : "", buf);
+				if (n < 0 || (size_t)n >= sizeof(p->choices) - len)
+					break;
+				len += (size_t)n;
+			}
+			fclose(fp);
+		}
+	}
 }
 
 int
@@ -2200,35 +2169,41 @@ battery_popup_clamped_x(Monitor *m, BatteryPopup *p)
 	return popup_x;
 }
 
+/* Map the current profile string (either backend) to a button index
+ * (0 = power-saver, 1 = balanced, 2 = performance), -1 if unknown. */
+int
+battery_profile_index(const char *profile)
+{
+	if (!profile || !*profile)
+		return -1;
+	if (!strcmp(profile, "low-power") || !strcmp(profile, "power-saver")
+			|| !strcmp(profile, "quiet") || !strcmp(profile, "eco"))
+		return 0;
+	if (!strcmp(profile, "balanced") || !strcmp(profile, "balanced-performance")
+			|| !strcmp(profile, "comfort"))
+		return 1;
+	if (!strcmp(profile, "performance") || !strcmp(profile, "sport")
+			|| !strcmp(profile, "turbo"))
+		return 2;
+	return -1;
+}
+
 void
 renderbatterypopup(Monitor *m)
 {
 	BatteryPopup *p;
-	int padding, line_spacing;
-	int row_height;
-	int max_width = 0;
-	int line_count = 0;
-	char lines[5][128];
-	int popup_x;
+	Card *card;
+	CardResult res;
+	char value[16], v1[32], v2[32];
+	const float *accent;
+	const float *statecol;
 	uint64_t now;
-	struct wlr_scene_node *node, *tmp;
 
 	if (!m || !m->statusbar.battery_popup.tree)
 		return;
 
 	p = &m->statusbar.battery_popup;
-	padding = statusbar_module_padding;
-	line_spacing = 2;
-	row_height = statusfont.height > 0 ? statusfont.height : 16;
 	now = monotonic_msec();
-	popup_x = m->statusbar.battery.x;
-
-	/* Clear previous content */
-	wl_list_for_each_safe(node, tmp, &p->tree->children, link) {
-		if (p->bg && node == &p->bg->node)
-			continue;
-		wlr_scene_node_destroy(node);
-	}
 
 	if (!statusfont.font || !battery_available) {
 		p->width = p->height = 0;
@@ -2245,84 +2220,95 @@ renderbatterypopup(Monitor *m)
 		p->refresh_data = 0;
 	}
 
-	/* Build display lines */
-	if (p->charging) {
-		snprintf(lines[line_count++], sizeof(lines[0]), "Charging:");
-	} else {
-		snprintf(lines[line_count++], sizeof(lines[0]), "On Battery:");
+	card = card_begin();
+	if (!card)
+		return;
+
+	if (p->percent >= 0)
+		snprintf(value, sizeof(value), "%.0f%%", p->percent);
+	else
+		snprintf(value, sizeof(value), "--");
+	{
+		const char *dev = strrchr(battery_device_dir, '/');
+		char sub[32];
+		size_t i;
+
+		snprintf(sub, sizeof(sub), "%s", dev && dev[1] ? dev + 1 : "BATTERY");
+		for (i = 0; sub[i]; i++)
+			sub[i] = (char)toupper((unsigned char)sub[i]);
+		card_header(card, battery_icon_path, "Battery", sub, value);
 	}
 
-	if (p->percent >= 0) {
-		snprintf(lines[line_count++], sizeof(lines[0]), "Level: %.0f%%", p->percent);
-	}
+	accent = card_col_fg;
+	if (p->actively_charging)
+		accent = card_col_green;
+	else if (p->percent >= 0 && p->percent <= 15.0)
+		accent = card_col_red;
+	card_gap(card, 6);
+	card_gauge(card, p->percent >= 0 ? p->percent / 100.0 : 0.0, accent);
+	card_gap(card, 6);
 
-	if (p->voltage_v > 0) {
-		snprintf(lines[line_count++], sizeof(lines[0]), "Voltage: %.2f V", p->voltage_v);
-	}
+	if (p->design_wh > 0)
+		snprintf(v1, sizeof(v1), "%.0fWh", p->design_wh);
+	else
+		snprintf(v1, sizeof(v1), "--");
+	if (p->thr_start >= 0 && p->thr_end >= 0)
+		snprintf(v2, sizeof(v2), "%d-%d%%", p->thr_start, p->thr_end);
+	else if (p->thr_end >= 0)
+		snprintf(v2, sizeof(v2), "%d%%", p->thr_end);
+	else
+		snprintf(v2, sizeof(v2), "100%%");
+	card_kv2(card, "Battery size", v1, NULL, "Charge limit", v2, NULL);
+
+	if (p->cycles >= 0)
+		snprintf(v1, sizeof(v1), "%d", p->cycles);
+	else
+		snprintf(v1, sizeof(v1), "--");
+	statecol = card_col_fg;
+	if (!strcmp(p->state, "Holding"))
+		statecol = card_col_yellow;
+	else if (!strcmp(p->state, "Charging") || !strcmp(p->state, "Full"))
+		statecol = card_col_green;
+	card_kv2(card, "Charge cycles", v1, NULL, "Battery state",
+			p->state[0] ? p->state : "--", statecol);
 
 	if (p->power_w > 0) {
-		snprintf(lines[line_count++], sizeof(lines[0]), "Power: %.1f W", p->power_w);
+		snprintf(v1, sizeof(v1), "%.1f W", p->power_w);
+		v2[0] = '\0';
+		if (!p->charging && p->time_remaining_h > 0)
+			snprintf(v2, sizeof(v2), "%dh %dm",
+					(int)p->time_remaining_h,
+					(int)((p->time_remaining_h -
+						(int)p->time_remaining_h) * 60));
+		else if (p->full_wh > 0 && p->design_wh > 0)
+			snprintf(v2, sizeof(v2), "%.0f%%",
+					100.0 * p->full_wh / p->design_wh);
+		card_kv2(card, "Power draw", v1, NULL,
+				(!p->charging && p->time_remaining_h > 0) ?
+				"Time left" : "Health", v2[0] ? v2 : "--", NULL);
 	}
 
-	if (!p->charging && p->time_remaining_h > 0) {
-		int hours = (int)p->time_remaining_h;
-		int mins = (int)((p->time_remaining_h - hours) * 60);
-		snprintf(lines[line_count++], sizeof(lines[0]), "Remaining: %dh %dm", hours, mins);
+	if (p->has_profile) {
+		static const char *labels[3] =
+			{ "Power-saver", "Balanced", "Performance" };
+
+		card_section(card, "POWER PROFILE");
+		card_buttons(card, labels, NULL, 3,
+				battery_profile_index(p->profile),
+				p->btn_hover, 0);
 	}
 
-	if (line_count == 0) {
-		p->width = p->height = 0;
-		if (p->tree)
-			wlr_scene_node_set_enabled(&p->tree->node, 0);
-		p->visible = 0;
+	if (card_finish(card, &res) != 0)
 		return;
-	}
-
-	/* Calculate dimensions */
-	for (int i = 0; i < line_count; i++) {
-		int w = status_text_width(lines[i]);
-		max_width = MAX(max_width, w);
-	}
-
-	p->width = 2 * padding + max_width;
-	p->height = 2 * padding + line_count * row_height + (line_count - 1) * line_spacing;
-
-	/* Clamp position */
-	if (p->width > 0 && m->statusbar.area.width > 0) {
-		int max_x = m->statusbar.area.width - p->width;
-		if (max_x < 0)
-			max_x = 0;
-		if (popup_x > max_x)
-			popup_x = max_x;
-		if (popup_x < 0)
-			popup_x = 0;
-	}
-
-	/* Draw background */
-	if (!p->bg && !(p->bg = wlr_scene_tree_create(p->tree)))
-		return;
-	wlr_scene_node_set_enabled(&p->bg->node, 1);
-	wlr_scene_node_set_position(&p->bg->node, 0, 0);
-	wl_list_for_each_safe(node, tmp, &p->bg->children, link)
-		wlr_scene_node_destroy(node);
-	drawrect(p->bg, 0, 0, p->width, p->height, statusbar_popup_bg);
-
-	/* Render text lines */
-	for (int i = 0; i < line_count; i++) {
-		int row_y = padding + i * (row_height + line_spacing);
-		struct wlr_scene_tree *row;
-		StatusModule mod = {0};
-
-		row = wlr_scene_tree_create(p->tree);
-		if (row) {
-			wlr_scene_node_set_position(&row->node, padding, row_y);
-			mod.tree = row;
-			tray_render_label(&mod, lines[i], 0, row_height, statusbar_fg);
-		}
-	}
+	memcpy(p->hits, res.hits, sizeof(p->hits));
+	p->nhits = res.nhits;
+	popup_view_apply(&p->view, p->tree, &res);
+	p->width = p->view.w;
+	p->height = p->view.h;
 
 	p->last_render_ms = now;
 }
+
 
 void
 updatebatteryhover(Monitor *m, double cx, double cy)
@@ -2406,63 +2392,197 @@ updatebatteryhover(Monitor *m, double cx, double cy)
 		if (need_refresh)
 			p->refresh_data = 1;
 
+		/* Profile-button hover feedback */
+		{
+			int new_hover = -1;
+
+			if (popup_hover) {
+				int rel_x = lx - popup_x;
+				int rel_y = ly - m->statusbar.area.height;
+
+				for (int i = 0; i < p->nhits; i++) {
+					CardHit *hit = &p->hits[i];
+					if (rel_x >= hit->x && rel_x < hit->x + hit->w &&
+							rel_y >= hit->y && rel_y < hit->y + hit->h) {
+						new_hover = hit->id;
+						break;
+					}
+				}
+			}
+			if (new_hover != p->btn_hover) {
+				p->btn_hover = new_hover;
+				if (was_visible && !need_refresh &&
+						p->last_render_ms != 0) {
+					renderbatterypopup(m);
+					p->last_render_ms = now;
+				}
+			}
+		}
+
 		/* Render only when the data changed or the popup just
 		 * appeared — the old 100 ms clause re-rasterized identical
 		 * content 10x per second for the whole hover. */
 		if (!was_visible || need_refresh || p->last_render_ms == 0) {
 			renderbatterypopup(m);
 			p->last_render_ms = now;
+			/* first render establishes the real width — re-clamp so
+			 * the card never hangs past the screen edge */
+			wlr_scene_node_set_position(&p->tree->node,
+					battery_popup_clamped_x(m, p),
+					m->statusbar.area.height);
 		}
+		if (!was_visible)
+			popup_view_show(&p->view);
 	} else if (p->visible || p->hover_start_ms != 0) {
 		p->visible = 0;
 		p->suppress_refresh_until_ms = 0;
 		p->hover_start_ms = 0;
+		p->btn_hover = -1;
+		popup_view_hide(&p->view);
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
 	}
+}
+
+/* 1 if `name` appears as a whole space-separated token in `choices`. */
+static int
+profile_choice_present(const char *choices, const char *name)
+{
+	size_t nlen = strlen(name);
+	const char *s = choices;
+
+	while ((s = strstr(s, name))) {
+		int at_start = (s == choices || s[-1] == ' ');
+		int at_end = (s[nlen] == '\0' || s[nlen] == ' ');
+
+		if (at_start && at_end)
+			return 1;
+		s += nlen;
+	}
+	return 0;
+}
+
+/* Button index -> the profile name this firmware actually offers. */
+static const char *
+profile_name_for_button(BatteryPopup *p, int idx)
+{
+	static const char *acpi_cands[3][2] = {
+		{ "low-power",   "quiet" },
+		{ "balanced",    "balanced-performance" },
+		{ "performance", NULL },
+	};
+	/* Performance prefers turbo over sport — highest MSI mode wins */
+	static const char *msi_cands[3][2] = {
+		{ "eco",     NULL },
+		{ "comfort", NULL },
+		{ "turbo",   "sport" },
+	};
+	const char *(*cands)[2] =
+		p->profile_backend == PROFILE_BACKEND_MSI_EC ?
+		msi_cands : acpi_cands;
+
+	if (idx < 0 || idx > 2)
+		return NULL;
+	if (!p->choices[0])
+		return cands[idx][0];
+	for (int i = 0; i < 2 && cands[idx][i]; i++)
+		if (profile_choice_present(p->choices, cands[idx][i]))
+			return cands[idx][i];
+	return NULL;
+}
+
+/* sysfs file the active backend is controlled through */
+static const char *
+profile_backend_path(BatteryPopup *p)
+{
+	switch (p->profile_backend) {
+	case PROFILE_BACKEND_ACPI:
+		return "/sys/firmware/acpi/platform_profile";
+	case PROFILE_BACKEND_MSI_EC:
+		return "/sys/devices/platform/msi-ec/shift_mode";
+	default:
+		return NULL;
+	}
+}
+
+/* Left click on the battery popup: power-profile buttons. Writes the
+ * ACPI platform profile directly (sysfs made group-writable by a
+ * nixlyos boot rule). Returns 1 when the click was consumed. */
+int
+battery_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
+{
+	BatteryPopup *p;
+	int rel_x, rel_y, popup_x;
+
+	if (!m || !m->statusbar.battery_popup.visible || button != BTN_LEFT)
+		return 0;
+
+	p = &m->statusbar.battery_popup;
+	if (!p->tree || p->width <= 0 || p->height <= 0)
+		return 0;
+
+	popup_x = battery_popup_clamped_x(m, p);
+	rel_x = lx - popup_x;
+	rel_y = ly - m->statusbar.area.height;
+	if (rel_x < 0 || rel_y < 0 || rel_x >= p->width || rel_y >= p->height)
+		return 0;
+
+	for (int i = 0; i < p->nhits; i++) {
+		CardHit *hit = &p->hits[i];
+
+		if (rel_x < hit->x || rel_x >= hit->x + hit->w ||
+				rel_y < hit->y || rel_y >= hit->y + hit->h)
+			continue;
+		if (hit->id < 0 || hit->id > 2)
+			return 1;
+		{
+			const char *name = profile_name_for_button(p, hit->id);
+			const char *path = profile_backend_path(p);
+			int fd;
+			int err = 0;
+			ssize_t n = -1;
+
+			if (!name || !path)
+				return 1;
+			fd = open(path, O_WRONLY);
+			if (fd >= 0) {
+				n = write(fd, name, strlen(name));
+				err = n < 0 ? errno : 0;
+				close(fd);
+			} else {
+				err = errno;
+			}
+			if (n < 0) {
+				wlr_log(WLR_ERROR,
+					"battery popup: writing '%s' to %s failed: %s",
+					name, path, strerror(err));
+				return 1;
+			}
+			/* Show the chosen profile immediately, then refetch
+			 * shortly after so a rejected switch corrects itself. */
+			snprintf(p->profile, sizeof(p->profile), "%s", name);
+			renderbatterypopup(m);
+			p->last_fetch_ms = 0;
+			schedule_popup_delay(400);
+		}
+		return 1;
+	}
+
+	return 1; /* click landed inside the popup — always consume */
 }
 
 void
 rendernetpopup(Monitor *m)
 {
 	NetPopup *p;
-	int padding, line_spacing;
-	int line_count = 4;
-	int max_width = 0;
-	int total_height;
-	char lines[4][128];
-	struct wlr_scene_node *node, *tmp;
+	Card *card;
+	CardResult res;
+	char value[24], sub[64], v1[64];
+	size_t i;
 
 	if (!m || !m->statusbar.net_popup.tree)
 		return;
 
 	p = &m->statusbar.net_popup;
-	padding = statusbar_module_padding;
-	line_spacing = 2;
-
-	if (net_is_wireless) {
-		int sig = (net_last_wifi_quality >= 0.0) ? (int)lround(net_last_wifi_quality) : -1;
-		if (sig >= 0)
-			snprintf(lines[0], sizeof(lines[0]), "Wifi: %s | %d%%", net_ssid, sig);
-		else
-			snprintf(lines[0], sizeof(lines[0]), "Wifi: %s | --", net_ssid);
-	} else {
-		if (net_link_speed_mbps >= 1000)
-			snprintf(lines[0], sizeof(lines[0]), "Ethernet | %.1f Gbps", net_link_speed_mbps / 1000.0);
-		else if (net_link_speed_mbps > 0)
-			snprintf(lines[0], sizeof(lines[0]), "Ethernet | %d Mbps", net_link_speed_mbps);
-		else
-			snprintf(lines[0], sizeof(lines[0]), "Ethernet | --");
-	}
-	snprintf(lines[1], sizeof(lines[1]), "Local: %s", net_local_ip);
-	snprintf(lines[2], sizeof(lines[2]), "Public: %s", net_public_ip);
-	snprintf(lines[3], sizeof(lines[3]), "Up: %s  Down: %s", net_up_text, net_down_text);
-
-	/* Clear previous buffers but keep bg */
-	wl_list_for_each_safe(node, tmp, &p->tree->children, link) {
-		if (p->bg && node == &p->bg->node)
-			continue;
-		wlr_scene_node_destroy(node);
-	}
 
 	if (!statusfont.font || !net_available) {
 		p->width = p->height = 0;
@@ -2472,129 +2592,55 @@ rendernetpopup(Monitor *m)
 		return;
 	}
 
-	/* First pass: compute max width */
-	for (int i = 0; i < line_count; i++) {
-		const struct fcft_glyph *glyph;
-		uint32_t prev_cp = 0;
-		int pen_x = 0;
-		int min_x = INT_MAX, max_x_local = INT_MIN;
-		const char *text = lines[i];
-
-		for (size_t j = 0; text[j]; j++) {
-			long kern_x = 0, kern_y = 0;
-			uint32_t cp = (unsigned char)text[j];
-			if (prev_cp)
-				fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
-			pen_x += (int)kern_x;
-
-			glyph = fcft_rasterize_char_utf32(statusfont.font, cp, statusbar_font_subpixel);
-			if (!glyph || !glyph->pix) {
-				prev_cp = cp;
-				continue;
-			}
-
-			min_x = MIN(min_x, pen_x + glyph->x);
-			max_x_local = MAX(max_x_local, pen_x + glyph->x + glyph->width);
-			pen_x += glyph->advance.x;
-			if (text[j + 1])
-				pen_x += statusbar_font_spacing;
-			prev_cp = cp;
-		}
-
-		if (min_x == INT_MAX || max_x_local == INT_MIN)
-			continue;
-		max_width = MAX(max_width, max_x_local - min_x);
-	}
-
-	p->width = max_width + 2 * padding;
-	p->height = line_count * statusfont.height + (line_count - 1) * line_spacing + 2 * padding;
-	total_height = p->height;
-
-	if (!p->bg && !(p->bg = wlr_scene_tree_create(p->tree)))
+	card = card_begin();
+	if (!card)
 		return;
-	wlr_scene_node_set_enabled(&p->bg->node, 1);
-	wlr_scene_node_set_position(&p->bg->node, 0, 0);
-	wl_list_for_each_safe(node, tmp, &p->bg->children, link)
-		wlr_scene_node_destroy(node);
-	drawrect(p->bg, 0, 0, p->width, total_height, statusbar_popup_bg);
 
-	for (int i = 0; i < line_count; i++) {
-		const char *text = lines[i];
-		int min_x = INT_MAX, max_x_local = INT_MIN;
-		int min_y = INT_MAX, max_y = INT_MIN;
-		int pen_x = 0;
-		int width = 0;
-		int origin_x = 0;
-		int origin_y = 0;
-		uint32_t prev_cp = 0;
+	if (net_is_wireless) {
+		int sig = (net_last_wifi_quality >= 0.0) ?
+			(int)lround(net_last_wifi_quality) : -1;
 
-		tll(struct GlyphRun) glyphs = tll_init();
-		for (size_t j = 0; text[j]; j++) {
-			long kern_x = 0, kern_y = 0;
-			uint32_t cp = (unsigned char)text[j];
-			struct GlyphRun run;
-			const struct fcft_glyph *glyph;
-
-			if (prev_cp)
-				fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
-			pen_x += (int)kern_x;
-
-			glyph = fcft_rasterize_char_utf32(statusfont.font,
-					cp, statusbar_font_subpixel);
-			if (!glyph || !glyph->pix) {
-				prev_cp = cp;
-				continue;
-			}
-
-			run.glyph = glyph;
-			run.pen_x = pen_x;
-			run.codepoint = cp;
-			tll_push_back(glyphs, run);
-
-			min_x = MIN(min_x, pen_x + glyph->x);
-			min_y = MIN(min_y, -glyph->y);
-			max_x_local = MAX(max_x_local, pen_x + glyph->x + glyph->width);
-			max_y = MAX(max_y, -glyph->y + glyph->height);
-
-			pen_x += glyph->advance.x;
-			if (text[j + 1])
-				pen_x += statusbar_font_spacing;
-			prev_cp = cp;
-		}
-
-		if (tll_length(glyphs) == 0) {
-			tll_free(glyphs);
-			continue;
-		}
-
-		width = max_x_local - min_x;
-		origin_x = padding + (max_width - width) / 2;
-		origin_y = padding + i * (statusfont.height + line_spacing) + statusfont.ascent;
-
-		tll_foreach(glyphs, it) {
-			struct wlr_buffer *buffer;
-			struct wlr_scene_buffer *scene_buf;
-			const struct fcft_glyph *glyph = it->item.glyph;
-
-			buffer = statusbar_buffer_from_glyph(glyph);
-			if (!buffer)
-				continue;
-
-			scene_buf = wlr_scene_buffer_create(p->tree, NULL);
-			if (scene_buf) {
-				wlr_scene_buffer_set_buffer(scene_buf, buffer);
-				wlr_scene_node_set_position(&scene_buf->node,
-						origin_x + it->item.pen_x + glyph->x,
-						origin_y - glyph->y);
-			}
-			wlr_buffer_drop(buffer);
-		}
-
-		tll_free(glyphs);
+		if (sig >= 0)
+			snprintf(value, sizeof(value), "%d%%", sig);
+		else
+			snprintf(value, sizeof(value), "--");
+		snprintf(sub, sizeof(sub), "%s", net_ssid[0] ? net_ssid : "WI-FI");
+		for (i = 0; sub[i]; i++)
+			sub[i] = (char)toupper((unsigned char)sub[i]);
+		card_header(card, net_icon_path, "Wi-Fi", sub, value);
+		card_gap(card, 6);
+		card_gauge(card, sig >= 0 ? sig / 100.0 : 0.0,
+				sig >= 0 && sig < 30 ? card_col_yellow :
+				card_col_blue);
+		card_gap(card, 6);
+	} else {
+		if (net_link_speed_mbps >= 1000)
+			snprintf(value, sizeof(value), "%.1fG",
+					net_link_speed_mbps / 1000.0);
+		else if (net_link_speed_mbps > 0)
+			snprintf(value, sizeof(value), "%dM", net_link_speed_mbps);
+		else
+			snprintf(value, sizeof(value), "--");
+		card_header(card, net_icon_path, "Ethernet", "WIRED LINK", value);
+		card_gap(card, 8);
 	}
 
-	if (p->width <= 0 || p->height <= 0)
-		wlr_scene_node_set_enabled(&p->tree->node, 0);
+	card_kv2(card, "Local IP", net_local_ip[0] ? net_local_ip : "--",
+			NULL, NULL, NULL, NULL);
+	card_kv2(card, "Public IP", net_public_ip[0] ? net_public_ip : "--",
+			NULL, NULL, NULL, NULL);
+
+	card_section(card, "THROUGHPUT");
+	snprintf(v1, sizeof(v1), "%s", net_up_text[0] ? net_up_text : "--");
+	card_kv2(card, "Upload", v1, card_col_green, NULL, NULL, NULL);
+	snprintf(v1, sizeof(v1), "%s", net_down_text[0] ? net_down_text : "--");
+	card_kv2(card, "Download", v1, card_col_blue, NULL, NULL, NULL);
+
+	if (card_finish(card, &res) != 0)
+		return;
+	popup_view_apply(&p->view, p->tree, &res);
+	p->width = p->view.w;
+	p->height = p->view.h;
 }
 
 void
@@ -4198,6 +4244,14 @@ popup_delay_timeout(void *data)
 			updatebatteryhover(m, cursor->x, cursor->y);
 		if (m->statusbar.net_popup.hover_start_ms != 0 && !m->statusbar.net_popup.visible)
 			updatenethover(m, cursor->x, cursor->y);
+		if (info_popup_pending(m))
+			updateinfopopups(m, cursor->x, cursor->y);
+		/* battery profile-switch refetch lands here too */
+		if (m->statusbar.battery_popup.visible &&
+				m->statusbar.battery_popup.last_fetch_ms == 0) {
+			m->statusbar.battery_popup.refresh_data = 1;
+			renderbatterypopup(m);
+		}
 	}
 	return 0;
 }
@@ -5328,10 +5382,15 @@ updatecpuhover(Monitor *m, double cx, double cy)
 			if (allow_render) {
 				p->hover_idx = new_hover;
 				rendercpupopup(m);
+				wlr_scene_node_set_position(&p->tree->node,
+						cpu_popup_clamped_x(m, p),
+						m->statusbar.area.height);
 			}
 		}
-		if (!was_visible)
+		if (!was_visible) {
 			schedule_cpu_popup_refresh(1000);
+			popup_view_show(&p->view);
+		}
 	} else if (p->visible || p->hover_start_ms != 0) {
 		p->visible = 0;
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
@@ -5340,6 +5399,7 @@ updatecpuhover(Monitor *m, double cx, double cy)
 		p->last_render_ms = 0;
 		p->suppress_refresh_until_ms = 0;
 		p->hover_start_ms = 0;
+		popup_view_hide(&p->view);
 	}
 }
 
@@ -5429,21 +5489,23 @@ updateramhover(Monitor *m, double cx, double cy)
 		if (!was_visible || need_refresh) {
 			p->hover_idx = new_hover;
 			renderrampopup(m);
+			wlr_scene_node_set_position(&p->tree->node,
+					ram_popup_clamped_x(m, p),
+					m->statusbar.area.height);
 		} else if (new_hover != p->hover_idx) {
-			/* Recolor kill buttons in place — full re-render is too
-			 * slow for hover feedback */
-			int old = p->hover_idx;
-			if (old >= 0 && old < p->proc_count && p->procs[old].kill_rect)
-				wlr_scene_rect_set_color(p->procs[old].kill_rect,
-						statusbar_volume_muted_fg);
-			if (new_hover >= 0 && new_hover < p->proc_count &&
-					p->procs[new_hover].kill_rect)
-				wlr_scene_rect_set_color(p->procs[new_hover].kill_rect,
-						statusbar_tag_active_bg);
-			p->hover_idx = new_hover;
+			/* Kill-button hover highlight; throttled like the CPU
+			 * popup so fast pointer sweeps don't re-raster every
+			 * motion event. */
+			if (p->last_render_ms == 0 || now < p->last_render_ms ||
+					now - p->last_render_ms >= 16) {
+				p->hover_idx = new_hover;
+				renderrampopup(m);
+			}
 		}
-		if (!was_visible)
+		if (!was_visible) {
 			schedule_ram_popup_refresh(100);
+			popup_view_show(&p->view);
+		}
 	} else if (p->visible || p->hover_start_ms != 0) {
 		p->visible = 0;
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
@@ -5452,6 +5514,7 @@ updateramhover(Monitor *m, double cx, double cy)
 		p->last_render_ms = 0;
 		p->suppress_refresh_until_ms = 0;
 		p->hover_start_ms = 0;
+		popup_view_hide(&p->view);
 	}
 }
 
@@ -5473,10 +5536,26 @@ updatenethover(Monitor *m, double cx, double cy)
 
 	p = &m->statusbar.net_popup;
 
+	/* Anchor on the net module itself */
+	p->anchor_w = m->statusbar.net.width;
+	if (p->anchor_w > 0) {
+		p->anchor_x = m->statusbar.net.x;
+		if (p->width > 0 && m->statusbar.area.width > 0) {
+			int max_x = m->statusbar.area.width - p->width;
+
+			if (max_x < 0)
+				max_x = 0;
+			if (p->anchor_x > max_x)
+				p->anchor_x = max_x;
+			if (p->anchor_x < 0)
+				p->anchor_x = 0;
+		}
+	}
+
 	if (!inside && p->anchor_w > 0) {
 		int lx_abs = (int)floor(cx);
 		int ly_abs = (int)floor(cy);
-		int ax0 = m->statusbar.area.x + p->anchor_x;
+		int ax0 = m->statusbar.area.x + m->statusbar.net.x;
 		int ay0 = m->statusbar.area.y;
 		if (lx_abs >= ax0 && lx_abs < ax0 + p->anchor_w &&
 				ly_abs >= ay0 && ly_abs < ay0 + m->statusbar.area.height)
@@ -5521,12 +5600,28 @@ updatenethover(Monitor *m, double cx, double cy)
 		if (!was_visible) {
 			p->anchor_y = m->statusbar.area.height;
 			rendernetpopup(m);
+			/* re-clamp with the freshly rendered width */
+			p->anchor_x = m->statusbar.net.x;
+			if (p->width > 0 && m->statusbar.area.width > 0) {
+				int max_x = m->statusbar.area.width - p->width;
+
+				if (max_x < 0)
+					max_x = 0;
+				if (p->anchor_x > max_x)
+					p->anchor_x = max_x;
+				if (p->anchor_x < 0)
+					p->anchor_x = 0;
+			}
+			wlr_scene_node_set_position(&p->tree->node,
+					p->anchor_x, m->statusbar.area.height);
+			popup_view_show(&p->view);
 		}
 	} else if (p->visible || p->hover_start_ms != 0) {
 		p->visible = 0;
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
 		p->suppress_refresh_until_ms = 0;
 		p->hover_start_ms = 0;
+		popup_view_hide(&p->view);
 		set_status_task_due(refreshstatusnet, now + 60000);
 	}
 }
@@ -5565,7 +5660,15 @@ statusbar_popup_at(Monitor *m, double cx, double cy)
 		|| popup_contains(m, sb->net_popup.tree, sb->net_popup.visible,
 				sb->net_popup.width, sb->net_popup.height, cx, cy)
 		|| popup_contains(m, sb->fan_popup.tree, sb->fan_popup.visible,
-				sb->fan_popup.width, sb->fan_popup.height, cx, cy);
+				sb->fan_popup.width, sb->fan_popup.height, cx, cy)
+		|| popup_contains(m, sb->clock_popup.tree, sb->clock_popup.visible,
+				sb->clock_popup.width, sb->clock_popup.height, cx, cy)
+		|| popup_contains(m, sb->volume_popup.tree, sb->volume_popup.visible,
+				sb->volume_popup.width, sb->volume_popup.height, cx, cy)
+		|| popup_contains(m, sb->mic_popup.tree, sb->mic_popup.visible,
+				sb->mic_popup.width, sb->mic_popup.height, cx, cy)
+		|| popup_contains(m, sb->light_popup.tree, sb->light_popup.visible,
+				sb->light_popup.width, sb->light_popup.height, cx, cy);
 }
 
 int
@@ -5669,6 +5772,19 @@ initstatusbar(Monitor *m)
 			m->statusbar.net_popup.bg = wlr_scene_tree_create(m->statusbar.net_popup.tree);
 			m->statusbar.net_popup.visible = 0;
 			wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
+		}
+		{
+			InfoPopup *info[4] = { &m->statusbar.clock_popup,
+				&m->statusbar.volume_popup, &m->statusbar.mic_popup,
+				&m->statusbar.light_popup };
+			for (int i = 0; i < 4; i++) {
+				info[i]->tree = wlr_scene_tree_create(m->statusbar.tree);
+				info[i]->visible = 0;
+				info[i]->hover_start_ms = 0;
+				info[i]->last_render_ms = 0;
+				if (info[i]->tree)
+					wlr_scene_node_set_enabled(&info[i]->tree->node, 0);
+			}
 		}
 	}
 	if (!m->modal.tree) {
@@ -5792,6 +5908,28 @@ cleanupstatusbar(Monitor *m)
 
 	tray_menu_clear(&m->statusbar.tray_menu);
 	m->statusbar.tray_menu.hover_rect = NULL;
+
+	/* Popup card views hold scene pointers into the statusbar tree and
+	 * may sit on the show-animation timer list — detach before the tree
+	 * (and every node in it) is destroyed. */
+	{
+		PopupView *views[8] = { &m->statusbar.cpu_popup.view,
+			&m->statusbar.ram_popup.view,
+			&m->statusbar.battery_popup.view,
+			&m->statusbar.net_popup.view,
+			&m->statusbar.clock_popup.view,
+			&m->statusbar.volume_popup.view,
+			&m->statusbar.mic_popup.view,
+			&m->statusbar.light_popup.view };
+		for (int i = 0; i < 8; i++) {
+			popup_view_hide(views[i]);
+			memset(views[i], 0, sizeof(*views[i]));
+		}
+		m->statusbar.clock_popup.tree = NULL;
+		m->statusbar.volume_popup.tree = NULL;
+		m->statusbar.mic_popup.tree = NULL;
+		m->statusbar.light_popup.tree = NULL;
+	}
 
 	if (m->statusbar.tree)
 		wlr_scene_node_destroy(&m->statusbar.tree->node);

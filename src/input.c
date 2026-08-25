@@ -477,6 +477,11 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 			return 1;
 	}
 
+	if (m->statusbar.battery_popup.visible) {
+		if (battery_popup_handle_click(m, lx, ly, button))
+			return 1;
+	}
+
 	if (lx < 0 || ly < 0 ||
 			lx >= m->statusbar.area.width ||
 			ly >= m->statusbar.area.height)
@@ -2236,7 +2241,8 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 			selmon->statusbar.ram_popup.visible ||
 			selmon->statusbar.battery_popup.visible ||
 			selmon->statusbar.net_popup.visible ||
-			selmon->statusbar.tray_menu.visible;
+			selmon->statusbar.tray_menu.visible ||
+			info_popup_visible(selmon);
 		int near_bar = (cursor->y >= selmon->statusbar.area.y &&
 			cursor->y <= selmon->statusbar.area.y +
 				selmon->statusbar.area.height + 500);
@@ -2250,6 +2256,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 				updateramhover(selmon, cursor->x, cursor->y);
 				updatebatteryhover(selmon, cursor->x, cursor->y);
 				updatenethover(selmon, cursor->x, cursor->y);
+				updateinfopopups(selmon, cursor->x, cursor->y);
 				tray_menu_update_hover(selmon, cursor->x, cursor->y);
 			}
 		}

@@ -52,6 +52,7 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <time.h>
+#include "popup_card.h"
 #include <unistd.h>
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
@@ -435,6 +436,7 @@ typedef struct {
 	uint64_t hover_start_ms;
 	int proc_count;
 	CpuProcEntry procs[10];
+	PopupView view;
 } CpuPopup;
 
 typedef struct {
@@ -445,7 +447,6 @@ typedef struct {
 	int height;
 	int kill_x, kill_y, kill_w, kill_h;
 	int has_kill;
-	struct wlr_scene_rect *kill_rect;
 } RamProcEntry;
 
 typedef struct {
@@ -462,6 +463,7 @@ typedef struct {
 	uint64_t hover_start_ms;
 	int proc_count;
 	RamProcEntry procs[15];
+	PopupView view;
 } RamPopup;
 
 typedef struct {
@@ -481,7 +483,26 @@ typedef struct {
 	double voltage_v;
 	double power_w;
 	double time_remaining_h;
+	double design_wh;       /* energy_full_design */
+	double full_wh;         /* energy_full (current capacity) */
+	int cycles;             /* cycle_count, -1 unknown */
+	int thr_start;          /* charge_control_start_threshold, -1 unknown */
+	int thr_end;            /* charge_control_end_threshold, -1 unknown */
+	char state[16];         /* Charging / Draining / Holding / Full */
+	char profile[24];       /* current platform power profile */
+	char choices[128];      /* available profiles, space-separated */
+	int has_profile;
+	int profile_backend;    /* PROFILE_BACKEND_* */
+	int btn_hover;          /* hit id under cursor, -1 = none */
+	PopupView view;
+	CardHit hits[CARD_MAX_HITS];
+	int nhits;
 } BatteryPopup;
+
+/* Power-profile sysfs backends (battery popup buttons) */
+#define PROFILE_BACKEND_NONE   0
+#define PROFILE_BACKEND_ACPI   1  /* /sys/firmware/acpi/platform_profile */
+#define PROFILE_BACKEND_MSI_EC 2  /* /sys/devices/platform/msi-ec/shift_mode */
 
 typedef struct {
 	struct wlr_scene_tree *tree;
@@ -494,7 +515,20 @@ typedef struct {
 	int anchor_w;
 	uint64_t suppress_refresh_until_ms;
 	uint64_t hover_start_ms;
+	PopupView view;
 } NetPopup;
+
+/* Simple hover popup (clock / volume / mic / light) — card content
+ * only, no interactive elements. */
+typedef struct {
+	struct wlr_scene_tree *tree;
+	int width;
+	int height;
+	int visible;
+	uint64_t hover_start_ms;
+	uint64_t last_render_ms;
+	PopupView view;
+} InfoPopup;
 
 typedef struct {
 	void (*fn)(void);
@@ -624,6 +658,10 @@ struct StatusBar {
 	BatteryPopup battery_popup;
 	NetPopup net_popup;
 	FanPopup fan_popup;
+	InfoPopup clock_popup;
+	InfoPopup volume_popup;
+	InfoPopup mic_popup;
+	InfoPopup light_popup;
 	TrayMenu tray_menu;
 	StatusModule fan;
 };
@@ -2621,6 +2659,12 @@ int ram_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 int battery_popup_clamped_x(Monitor *m, BatteryPopup *p);
 void updatetaghover(Monitor *m, double cx, double cy);
 void updatenethover(Monitor *m, double cx, double cy);
+void updateinfopopups(Monitor *m, double cx, double cy);
+int info_popup_pending(Monitor *m);
+int info_popup_visible(Monitor *m);
+void info_popups_hide(Monitor *m);
+int battery_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
+void read_power_profile(BatteryPopup *p);
 void updatecpuhover(Monitor *m, double cx, double cy);
 void updateramhover(Monitor *m, double cx, double cy);
 void updatebatteryhover(Monitor *m, double cx, double cy);

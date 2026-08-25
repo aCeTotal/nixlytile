@@ -31,6 +31,7 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            input_conf.o \
            apptoggle.o mic_watch.o audio_watch.o gaming_conf.o gshortcuts.o \
            statusbar.o tray.o statusbar_support.o terminfo.o launchfx.o diag.o \
+           popup_card.o popup_extra.o \
            notify.o instruments.o converge.o spawn.o osd.o
 
 PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstable-v1-protocol.h \
@@ -124,6 +125,10 @@ statusbar.o: $(SRC)/statusbar.c $(SRC)/nixlytile.h $(SRC)/client.h
 tray.o: $(SRC)/tray.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 statusbar_support.o: $(SRC)/statusbar_support.c $(SRC)/nixlytile.h $(SRC)/client.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+popup_card.o: $(SRC)/popup_card.c $(SRC)/popup_card.h $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+popup_extra.o: $(SRC)/popup_extra.c $(SRC)/popup_card.h $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 terminfo.o: $(SRC)/terminfo.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
