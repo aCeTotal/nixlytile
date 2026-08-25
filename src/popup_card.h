@@ -101,6 +101,7 @@ int card_finish(Card *c, CardResult *out);
 
 typedef struct PopupView {
 	struct wlr_scene_tree *content;      /* child of the popup tree */
+	struct wlr_scene_buffer *shadow;
 	struct wlr_scene_buffer *card;
 	struct wlr_scene_buffer *fills[CARD_MAX_FILLS];
 	int fill_w[CARD_MAX_FILLS];      /* target (resting) fill width */
@@ -131,8 +132,13 @@ int card_text_width(const char *s);
  * rounded translucent panel with hairline border, hover pill,
  * checkbox/radio marks and a submenu chevron in the card style. */
 struct wlr_buffer *card_panel_buffer(int w, int h);
+/* Soft floating drop shadow sized for a w×h card; buffer extends
+ * CARD_SHADOW_MARGIN px on every side, position at (-margin,-margin).
+ * radius = the card's corner radius (<= 0 for the default card radius). */
+#define CARD_SHADOW_MARGIN 24
+struct wlr_buffer *card_shadow_buffer(int w, int h, double radius);
 struct wlr_buffer *card_meter_buffer(int w, int h, const float accent[4],
-		const float *hist, int nhist, int head);
+		const float *hist, int nhist, int head, double phase);
 struct wlr_buffer *card_hover_buffer(int w, int h);
 struct wlr_buffer *card_mark_buffer(int radio, int size, int state);
 struct wlr_buffer *card_chevron_buffer(int size);

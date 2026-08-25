@@ -247,6 +247,20 @@ nd_build_card(NdToast *t, const char *app, const char *summary,
 
 	wl_list_for_each_safe(node, tmp, &t->tree->children, link)
 		wlr_scene_node_destroy(node);
+	{
+		struct wlr_buffer *shb = card_shadow_buffer(res.w, res.h, 0);
+
+		if (shb) {
+			sb = wlr_scene_buffer_create(t->tree, NULL);
+			if (sb) {
+				wlr_scene_buffer_set_buffer(sb, shb);
+				wlr_scene_node_set_position(&sb->node,
+						-CARD_SHADOW_MARGIN,
+						-CARD_SHADOW_MARGIN);
+			}
+			wlr_buffer_drop(shb);
+		}
+	}
 	sb = wlr_scene_buffer_create(t->tree, NULL);
 	if (sb) {
 		wlr_scene_buffer_set_buffer(sb, res.buf);

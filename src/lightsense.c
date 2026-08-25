@@ -276,6 +276,12 @@ ls_sample(void *data)
 void
 lightsense_sample_now(void)
 {
+	/* presence.c owns the camera on laptops — route through it so the
+	 * grab happens even during input-activity (single LED blip) */
+	if (presence_active()) {
+		presence_sample_once();
+		return;
+	}
 	if (ls_timer)
 		wl_event_source_timer_update(ls_timer, 1);
 }

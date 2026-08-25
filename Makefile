@@ -30,7 +30,7 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            config_parser.o config_loader.o monitors_conf.o monitor_setup.o \
            input_conf.o \
            apptoggle.o mic_watch.o audio_watch.o audio_devices.o audio_meter.o gaming_conf.o gshortcuts.o \
-           statusbar.o tray.o statusbar_support.o terminfo.o launchfx.o diag.o \
+           statusbar.o tray.o statusbar_support.o terminfo.o launchfx.o diag.o fetch_async.o charge_limit.o \
            popup_card.o popup_extra.o \
            notify.o notifyd.o lightsense.o presence.o powersave.o cpuclock.o instruments.o converge.o spawn.o osd.o
 
@@ -123,6 +123,10 @@ config_loader.o: $(SRC)/config_loader.c $(SRC)/config_loader.h $(SRC)/config_par
 apptoggle.o: $(SRC)/apptoggle.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 mic_watch.o: $(SRC)/mic_watch.c $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+fetch_async.o: $(SRC)/fetch_async.c $(SRC)/fetch_async.h $(SRC)/nixlytile.h $(SRC)/util.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+charge_limit.o: $(SRC)/charge_limit.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 audio_meter.o: $(SRC)/audio_meter.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<

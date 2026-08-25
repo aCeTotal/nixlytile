@@ -16,6 +16,7 @@
 
 #include "nixlytile.h"
 #include "client.h"
+#include "popup_card.h"
 
 #define OSD_MARGIN     16    /* distance from screen edge */
 #define OSD_HOLD_MS    3000
@@ -193,6 +194,17 @@ toast_build(Toast *t, const char *msg)
 
 	wl_list_for_each_safe(node, tmp, &t->tree->children, link)
 		wlr_scene_node_destroy(node);
+
+	buffer = card_shadow_buffer(t->w, t->h, OSD_RADIUS);
+	if (buffer) {
+		scene_buf = wlr_scene_buffer_create(t->tree, NULL);
+		if (scene_buf) {
+			wlr_scene_buffer_set_buffer(scene_buf, buffer);
+			wlr_scene_node_set_position(&scene_buf->node,
+					-CARD_SHADOW_MARGIN, -CARD_SHADOW_MARGIN);
+		}
+		wlr_buffer_drop(buffer);
+	}
 
 	buffer = make_card_buffer(t->w, t->h);
 	if (buffer) {

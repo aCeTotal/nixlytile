@@ -1074,23 +1074,33 @@ make_fill_buffer(int w, int h, const float col[4])
 /* Live audio meter: mirrored rounded bars around the midline, newest at
  * the right. hist is a ring of peak levels [0,1]; head is the newest
  * index. Bars brighten with amplitude so silence stays near-invisible
- * against the card. */
+ * against the card. phase is the fraction [0,1] of the sample period
+ * elapsed since head was pushed: bars slide left continuously so the
+ * scroll stays smooth between pushes, the newest bar entering from the
+ * right edge. */
 struct wlr_buffer *
 card_meter_buffer(int w, int h, const float accent[4],
-		const float *hist, int nhist, int head)
+		const float *hist, int nhist, int head, double phase)
 {
 	cairo_surface_t *cs;
 	cairo_t *cr = cairo_buf_begin(w, h, &cs);
 	const int bar_w = 3, gap = 3;
 	int nbars = (w + gap) / (bar_w + gap);
 	double mid = h / 2.0;
+	double slide;
 
 	if (!cr)
 		return NULL;
-	for (int i = 0; i < nbars; i++) {
+	if (phase < 0.0)
+		phase = 0.0;
+	if (phase > 1.0)
+		phase = 1.0;
+	slide = (1.0 - phase) * (bar_w + gap);
+	/* one extra bar so the left edge stays filled mid-slide */
+	for (int i = 0; i <= nbars; i++) {
 		float v = hist[((head - i) % nhist + nhist) % nhist];
 		double amp, bh;
-		double x = w - bar_w - i * (bar_w + gap);
+		double x = w - bar_w - i * (bar_w + gap) + slide;
 
 		if (v < 0.0f)
 			v = 0.0f;
@@ -1103,6 +1113,39 @@ card_meter_buffer(int w, int h, const float accent[4],
 				0.28 + 0.72 * amp);
 		cairo_fill(cr);
 	}
+	cairo_destroy(cr);
+	return cairo_buf_finish(cs);
+}
+
+/* Soft drop shadow for a w×h card: layered rounded rects approximate a
+ * gaussian falloff, biased slightly downward so the card reads as
+ * floating above the content behind it. The card's own rect is punched
+ * out so the translucent card body isn't darkened from behind. Buffer
+ * is (w+2M)×(h+2M) with the card at (M,M); place the node at (-M,-M)
+ * relative to the card. */
+struct wlr_buffer *
+card_shadow_buffer(int w, int h, double radius)
+{
+	const int M = CARD_SHADOW_MARGIN;
+	const double yoff = 6.0;
+	cairo_surface_t *cs;
+	cairo_t *cr = cairo_buf_begin(w + 2 * M, h + 2 * M, &cs);
+
+	if (!cr)
+		return NULL;
+	if (radius <= 0.0)
+		radius = CARD_RADIUS;
+	for (int i = M; i >= 1; i--) {
+		double a = 0.046 * (1.0 - (double)i / (M + 1));
+
+		rounded(cr, M - i, M - i + yoff, w + 2 * i, h + 2 * i,
+				radius + i);
+		cairo_set_source_rgba(cr, 0, 0, 0, a);
+		cairo_fill(cr);
+	}
+	cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+	rounded(cr, M + 0.5, M + 0.5, w - 1.0, h - 1.0, radius);
+	cairo_fill(cr);
 	cairo_destroy(cr);
 	return cairo_buf_finish(cs);
 }
@@ -1236,6 +1279,8 @@ view_anim_frame(PopupView *v, uint64_t now)
 		wlr_scene_node_set_position(&v->content->node, 0,
 				-(int)lroundf(CARD_SLIDE_PX * (1.0f - e)));
 	wlr_scene_buffer_set_opacity(v->card, e);
+	if (v->shadow)
+		wlr_scene_buffer_set_opacity(v->shadow, e);
 
 	for (int i = 0; i < v->nfills; i++) {
 		struct wlr_scene_buffer *fb = v->fills[i];
@@ -1361,8 +1406,25 @@ popup_view_apply(PopupView *v, struct wlr_scene_tree *tree, CardResult *res)
 	wl_list_for_each_safe(node, tmp, &v->content->children, link)
 		wlr_scene_node_destroy(node);
 	v->card = NULL;
+	v->shadow = NULL;
 	memset(v->fills, 0, sizeof(v->fills));
 	v->nfills = 0;
+
+	/* drop shadow below the card so the popup floats */
+	{
+		struct wlr_buffer *sh = card_shadow_buffer(res->w, res->h, 0);
+
+		if (sh) {
+			v->shadow = wlr_scene_buffer_create(v->content, NULL);
+			if (v->shadow) {
+				wlr_scene_buffer_set_buffer(v->shadow, sh);
+				wlr_scene_node_set_position(&v->shadow->node,
+						-CARD_SHADOW_MARGIN,
+						-CARD_SHADOW_MARGIN);
+			}
+			wlr_buffer_drop(sh);
+		}
+	}
 
 	v->card = wlr_scene_buffer_create(v->content, NULL);
 	if (v->card) {
@@ -1446,4 +1508,6 @@ popup_view_hide(PopupView *v)
 		wlr_scene_node_set_position(&v->content->node, 0, 0);
 	if (v->card)
 		wlr_scene_buffer_set_opacity(v->card, 1.0f);
+	if (v->shadow)
+		wlr_scene_buffer_set_opacity(v->shadow, 1.0f);
 }

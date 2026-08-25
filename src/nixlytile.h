@@ -2680,10 +2680,16 @@ int light_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 void info_popup_slider_release(void);
 /* audio_devices.c */
 int audio_list_devices(int sources, AudioDevice *out, int max);
+int audio_parse_status_devices(FILE *fp, int sources, AudioDevice *out, int max);
+void audio_popup_data_arrived(void);
 void audio_autoselect_headset_mic(void);
 void audio_set_default(uint32_t id);
 int battery_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 void read_power_profile(BatteryPopup *p);
+/* charge_limit.c — battery charge limit (80/90/100), sysfs + persisted */
+int charge_limit_current(void);
+int charge_limit_set(int pct);
+void charge_limit_apply_saved(void);
 void updatecpuhover(Monitor *m, double cx, double cy);
 void updateramhover(Monitor *m, double cx, double cy);
 void updatebatteryhover(Monitor *m, double cx, double cy);
@@ -2719,6 +2725,11 @@ int set_pipewire_mic_mute(int mute);
 int toggle_pipewire_mic_mute(void);
 double pipewire_mic_volume_percent(void);
 double pipewire_volume_percent(int *is_headset_out);
+/* Non-blocking variants for popup render paths: return cached state
+ * immediately, refresh via fetch_async, re-render on arrival. */
+int pipewire_sink_is_headset_nb(void);
+double pipewire_mic_volume_percent_nb(void);
+double pipewire_volume_percent_nb(int *is_headset_out);
 void volume_invalidate_cache(int is_headset);
 double net_bytes_to_rate(unsigned long long cur, unsigned long long prev,
 		double elapsed);
@@ -2990,6 +3001,7 @@ extern uint64_t last_key_activity_ms;
 void presence_init(void);
 int presence_active(void);
 void presence_note_input(void);
+void presence_sample_once(void);
 
 /* lightsense.c — webcam-based auto brightness (Auto/Manual modes) */
 void lightsense_feed_luma(int luma);

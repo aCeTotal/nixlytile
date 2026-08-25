@@ -1,20 +1,26 @@
 /*
  * presence.c — webcam presence watch → full power save.  Laptops only.
  *
- * A forked child grabs a low-res YUYV frame and prints the mean luma
- * plus an 8x6 grid of block means.  The parent compares the grid with
- * the previous sample (gain-compensated, so auto-exposure drift is not
- * motion) — a person in front of the screen always produces block-level
- * motion within a couple of minutes.  No motion AND no input for
- * PR_ABSENT_AFTER_MS → save mode: nixly-lockscreen, backlight to 0,
- * outputs off, powerprofilesctl power-saver.  The first motion sample
- * (polled every PR_INTERVAL_ABSENT_MS) or any local input brings the
- * outputs, backlight and profile straight back — the lockscreen is
- * already up, so waking lands on it.
+ * Input activity alone proves presence, so while the keyboard/pointer
+ * has been touched within PR_CAM_IDLE_MS the camera is never opened —
+ * the webcam LED stays dark during normal use.  Only once input has
+ * been idle that long does a forked child start grabbing low-res YUYV
+ * frames (mean luma + an 8x6 grid of block means) to tell "reading /
+ * watching" from "walked away": the parent affine-fits the previous
+ * grid onto the new one (a·p+b least squares, so auto-exposure gain
+ * AND offset drift are never motion) and thresholds the residual — a
+ * person in front of the screen produces local block motion within a
+ * couple of samples.  No motion AND no input for PR_ABSENT_AFTER_MS →
+ * save mode: nixly-lockscreen, backlight to 0, outputs off, lowest
+ * power profile.  The first motion sample (polled every
+ * PR_INTERVAL_ABSENT_MS) or any local input brings the outputs,
+ * backlight and profile straight back — the lockscreen is already up,
+ * so waking lands on it.
  *
  * The luma mean doubles as the ambient sample for lightsense.c, so the
  * two never fight over the camera: while presence runs, lightsense's
- * own sampler stands down.  Visible idle-inhibitors (video players)
+ * own sampler stands down and pipes explicit sample requests through
+ * presence_sample_once().  Visible idle-inhibitors (video players)
  * block save-entry.
  */
 #include "nixlytile.h"
@@ -30,8 +36,10 @@
 #define PR_INTERVAL_PRESENT_MS 10000
 #define PR_INTERVAL_ABSENT_MS  2500
 #define PR_ABSENT_AFTER_MS     120000
-/* Static-scene noise floor measured ≈0.1-0.6; a person's micro-motion
- * lands well above this, so 1.2 splits them with margin both ways. */
+/* Camera stays untouched (LED off) until input has been idle this long. */
+#define PR_CAM_IDLE_MS         60000
+/* Affine-compensated static-scene residual sits well below 1; a
+ * person's micro-motion lands above 2, so 1.2 splits them with margin. */
 #define PR_MOTION_THRESH       1.2
 #define PR_DARK_DELAY_MS       1500   /* let the lockscreen map first */
 
@@ -46,6 +54,7 @@ static unsigned char pr_prev[PR_NBLOCKS];
 static int pr_have_prev;
 static uint64_t pr_last_motion_ms;
 static int pr_saving;           /* 1 = lock spawned, 2 = dark applied */
+static int pr_force_sample;     /* grab once even during input-active */
 static double pr_saved_backlight = -1.0;
 
 int
@@ -266,6 +275,18 @@ pr_exit_save(void)
 	wlr_log(WLR_INFO, "presence: someone's back — waking to lockscreen");
 }
 
+/* One explicit grab (lightsense wants a fresh ambient sample) even
+ * while input-activity would normally keep the camera closed. */
+void
+presence_sample_once(void)
+{
+	if (!pr_laptop)
+		return;
+	pr_force_sample = 1;
+	if (pr_timer)
+		wl_event_source_timer_update(pr_timer, 1);
+}
+
 /* Called from keypress/motion: local input is presence, wake instantly. */
 void
 presence_note_input(void)
@@ -305,17 +326,34 @@ pr_read_cb(int fd, uint32_t mask, void *data)
 		if (nb == PR_NBLOCKS) {
 			lightsense_feed_luma(mean);
 			if (pr_have_prev) {
-				/* gain-compensated block diff */
-				int gsum = 0, psum = 0;
-				double diff = 0.0;
+				/* Affine-compensated block diff: least-squares
+				 * fit grid ≈ a·prev + b, then threshold the
+				 * residual.  Auto-exposure changes are global
+				 * gain/offset and fit out exactly; the old
+				 * mean-subtraction only cancelled offset, so AE
+				 * hunting in an empty room registered as motion
+				 * and save mode never engaged. */
+				double sp = 0, sg = 0, spp = 0, spg = 0;
+				double a, b, den, diff = 0.0;
 
 				for (int i = 0; i < PR_NBLOCKS; i++) {
-					gsum += grid[i];
-					psum += pr_prev[i];
+					sp += pr_prev[i];
+					sg += grid[i];
+					spp += (double)pr_prev[i] * pr_prev[i];
+					spg += (double)pr_prev[i] * grid[i];
 				}
+				den = PR_NBLOCKS * spp - sp * sp;
+				a = den > 1e-6 ?
+					(PR_NBLOCKS * spg - sp * sg) / den : 1.0;
+				/* runaway fit would mask real scene changes */
+				if (a < 0.5)
+					a = 0.5;
+				if (a > 2.0)
+					a = 2.0;
+				b = (sg - a * sp) / PR_NBLOCKS;
 				for (int i = 0; i < PR_NBLOCKS; i++)
-					diff += fabs((grid[i] - gsum / (double)PR_NBLOCKS) -
-						(pr_prev[i] - psum / (double)PR_NBLOCKS));
+					diff += fabs(grid[i] -
+							(a * pr_prev[i] + b));
 				diff /= PR_NBLOCKS;
 				if (diff > PR_MOTION_THRESH) {
 					pr_last_motion_ms = monotonic_msec();
@@ -360,6 +398,22 @@ pr_sample(void *data)
 			!pr_idle_inhibited() && !game_mode_active)
 		pr_enter_save();
 
+	/* Recent input proves presence on its own: leave the camera (and
+	 * its LED) alone until input has been idle a while.  The baseline
+	 * grid is stale after a camera gap — drop it so the first grab of
+	 * the next idle phase only re-baselines. */
+	{
+		uint64_t input_ms = MAX(last_pointer_motion_ms,
+				last_key_activity_ms);
+
+		if (!pr_saving && !pr_force_sample && input_ms &&
+				now - input_ms < PR_CAM_IDLE_MS) {
+			pr_have_prev = 0;
+			return 0;
+		}
+	}
+	pr_force_sample = 0;
+
 	if (pr_fd >= 0)   /* previous grab still in flight */
 		return 0;
 	if (pipe2(fds, O_CLOEXEC) < 0)
@@ -396,6 +450,8 @@ presence_init(void)
 	if (!pr_laptop)
 		return;
 	pr_last_motion_ms = monotonic_msec();
+	/* single startup grab: gives lightsense its ambient baseline */
+	pr_force_sample = 1;
 	if (!pr_timer)
 		pr_timer = wl_event_loop_add_timer(event_loop, pr_sample, NULL);
 	if (pr_timer)

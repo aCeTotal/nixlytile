@@ -1259,10 +1259,22 @@ tray_menu_render(Monitor *m)
 		wlr_scene_node_destroy(node);
 	/* Same rounded translucent card as the module popups */
 	{
+		struct wlr_buffer *shb = card_shadow_buffer(menu->width,
+				menu->height, 0);
 		struct wlr_buffer *pb = card_panel_buffer(menu->width,
 				menu->height);
 		struct wlr_scene_buffer *sb;
 
+		if (shb) {
+			sb = wlr_scene_buffer_create(menu->bg, NULL);
+			if (sb) {
+				wlr_scene_buffer_set_buffer(sb, shb);
+				wlr_scene_node_set_position(&sb->node,
+						-CARD_SHADOW_MARGIN,
+						-CARD_SHADOW_MARGIN);
+			}
+			wlr_buffer_drop(shb);
+		}
 		if (pb) {
 			sb = wlr_scene_buffer_create(menu->bg, NULL);
 			if (sb)

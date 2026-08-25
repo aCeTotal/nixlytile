@@ -44,20 +44,15 @@ parse_device_line(const char *line, AudioDevice *d)
  * are included too, renamed after the bluez5 device from "Devices:".
  * Returns number of devices written to out. */
 int
-audio_list_devices(int sources, AudioDevice *out, int max)
+audio_parse_status_devices(FILE *fp, int sources, AudioDevice *out, int max)
 {
-	FILE *fp;
 	char line[256];
 	char bt_name[64] = "";
 	const char *target = sources ? "Sources:" : "Sinks:";
 	const char *filter_tag = sources ? "[Audio/Source]" : "[Audio/Sink]";
 	int in_devices = 0, in_target = 0, in_filters = 0, count = 0;
 
-	if (!out || max <= 0)
-		return 0;
-
-	fp = popen("wpctl status", "r");
-	if (!fp)
+	if (!fp || !out || max <= 0)
 		return 0;
 
 	while (fgets(line, sizeof(line), fp) && count < max) {
@@ -119,7 +114,19 @@ audio_list_devices(int sources, AudioDevice *out, int max)
 		}
 		count++;
 	}
+	return count;
+}
 
+int
+audio_list_devices(int sources, AudioDevice *out, int max)
+{
+	FILE *fp;
+	int count;
+
+	fp = popen("wpctl status", "r");
+	if (!fp)
+		return 0;
+	count = audio_parse_status_devices(fp, sources, out, max);
 	pclose(fp);
 	return count;
 }

@@ -4,13 +4,15 @@
  * the level. */
 #include "nixlytile.h"
 #include "popup_card.h"
+#include "fetch_async.h"
 
 #define AUDIO_DEV_MAX  8
 #define SLIDER_HIT_ID  100
 #define MUTE_HIT_ID    101
 
 #define METER_HIST     128
-#define METER_TICK_MS  33
+#define METER_TICK_MS  16   /* draw rate (~60 fps) */
+#define METER_PUSH_MS  33   /* history sample period */
 #define LIGHT_MODE_HIT_BASE 200
 
 /* ── live audio meter overlay (volume=0 / mic=1) ─────────────────── */
@@ -25,8 +27,52 @@ typedef struct {
 } MeterUI;
 static MeterUI meter_ui[2];
 static struct wl_event_source *meter_timer;
+static float meter_pend;          /* max peak since the last history push */
+static uint64_t meter_push_ms;    /* when the newest sample was pushed */
 
 static int meter_tick(void *data);
+
+/* Fraction of the sample period elapsed since the newest push — drives
+ * the sub-pixel slide in card_meter_buffer. */
+static double
+meter_phase(uint64_t now)
+{
+	if (!meter_push_ms || now <= meter_push_ms)
+		return 0.0;
+	if (now - meter_push_ms >= METER_PUSH_MS)
+		return 1.0;
+	return (double)(now - meter_push_ms) / METER_PUSH_MS;
+}
+
+/* (Re)create the overlay node and swap in a freshly drawn frame. Safe
+ * to call right after a card re-render so the meter never drops out for
+ * a frame. */
+static void
+meter_overlay_draw(InfoPopup *p, int is_mic, double phase)
+{
+	MeterUI *mu = &meter_ui[is_mic];
+	struct wlr_buffer *buf;
+	int muted = is_mic ? mic_muted : volume_muted;
+
+	/* Wait out the card show animation: extra children don't take part
+	 * in its fade, so the meter joins once the card has settled. */
+	if (mu->w <= 0 || !p->view.content || p->view.animating)
+		return;
+	if (!mu->node) {
+		mu->node = wlr_scene_buffer_create(p->view.content, NULL);
+		if (mu->node)
+			wlr_scene_node_set_position(&mu->node->node,
+					mu->x, mu->y);
+	}
+	buf = card_meter_buffer(mu->w, mu->h,
+			muted == 1 ? card_col_red :
+			(is_mic ? card_col_green : card_col_blue),
+			mu->hist, METER_HIST, mu->head, phase);
+	if (mu->node && buf)
+		wlr_scene_buffer_set_buffer(mu->node, buf);
+	if (buf)
+		wlr_buffer_drop(buf);
+}
 
 static void
 meter_timer_arm(void)
@@ -38,24 +84,52 @@ meter_timer_arm(void)
 		wl_event_source_timer_update(meter_timer, METER_TICK_MS);
 }
 
-/* ── audio device cache (wpctl status is a fork — cache 2s) ──────── */
+/* ── audio device cache (async wpctl status — cache 2s) ──────────── */
 
 static AudioDevice sink_devs[AUDIO_DEV_MAX], src_devs[AUDIO_DEV_MAX];
 static int sink_dev_count, src_dev_count;
 static uint64_t sink_devs_ms, src_devs_ms;
+static int devs_fetch_inflight;
+
+/* One wpctl status answer fills both caches; re-render the open popup
+ * so the device list appears without waiting for cursor motion. */
+static void
+devs_fetch_done(const char *out, size_t len, void *data)
+{
+	FILE *fp;
+
+	(void)data;
+	devs_fetch_inflight = 0;
+	if (!len)
+		return;
+	fp = fmemopen((void *)out, len, "r");
+	if (fp) {
+		sink_dev_count = audio_parse_status_devices(fp, 0, sink_devs,
+				AUDIO_DEV_MAX);
+		fclose(fp);
+	}
+	fp = fmemopen((void *)out, len, "r");
+	if (fp) {
+		src_dev_count = audio_parse_status_devices(fp, 1, src_devs,
+				AUDIO_DEV_MAX);
+		fclose(fp);
+	}
+	sink_devs_ms = src_devs_ms = monotonic_msec();
+	audio_popup_data_arrived();
+}
 
 static void
 fetch_audio_devices(int sources)
 {
 	uint64_t now = monotonic_msec();
-	AudioDevice *devs = sources ? src_devs : sink_devs;
-	int *count = sources ? &src_dev_count : &sink_dev_count;
 	uint64_t *ms = sources ? &src_devs_ms : &sink_devs_ms;
 
 	if (*ms && now >= *ms && now - *ms < 2000)
 		return;
-	*count = audio_list_devices(sources, devs, AUDIO_DEV_MAX);
-	*ms = now;
+	if (devs_fetch_inflight)
+		return;
+	if (fetch_async("wpctl status", devs_fetch_done, NULL) == 0)
+		devs_fetch_inflight = 1;
 }
 
 /* ── gauge slider drag state ─────────────────────────────────────── */
@@ -85,7 +159,7 @@ slider_commit(void)
 	uint64_t now = monotonic_msec();
 
 	if (sdrag.active == 1) {
-		int is_headset = pipewire_sink_is_headset();
+		int is_headset = pipewire_sink_is_headset_nb();
 
 		if (volume_muted == 1)
 			set_pipewire_mute(0);
@@ -111,17 +185,19 @@ slider_commit(void)
 	}
 }
 
-/* Meter heartbeat: capture peaks while an audio popup is up, push into
- * the history ring and swap the overlay buffer in place. Stops itself
- * (and the pw-record child) the moment no audio popup is visible. */
+/* Meter heartbeat at draw rate: accumulate peaks every tick, push a
+ * history sample every METER_PUSH_MS, and redraw each tick with the
+ * sub-pixel slide so the scroll is smooth. Stops itself (and the
+ * pw-record child) the moment no audio popup is visible. */
 static int
 meter_tick(void *data)
 {
 	Monitor *m;
 	InfoPopup *p = NULL;
 	MeterUI *mu;
-	int is_mic = 0, muted;
+	int is_mic = 0;
 	double peak;
+	uint64_t now = monotonic_msec();
 
 	(void)data;
 	wl_list_for_each(m, &mons, link) {
@@ -141,42 +217,33 @@ meter_tick(void *data)
 		memset(meter_ui[0].hist, 0, sizeof(meter_ui[0].hist));
 		memset(meter_ui[1].hist, 0, sizeof(meter_ui[1].hist));
 		meter_ui[0].node = meter_ui[1].node = NULL;
+		meter_pend = 0.0f;
+		meter_push_ms = 0;
 		return 0;   /* stays disarmed until the next popup render */
 	}
 
 	audio_meter_start(is_mic);
 	peak = audio_meter_take_peak();
-	muted = is_mic ? mic_muted : volume_muted;
-	if (muted == 1)
+	if ((is_mic ? mic_muted : volume_muted) == 1)
 		peak = 0.0;
 	if (peak > 1.0)
 		peak = 1.0;
+	if ((float)peak > meter_pend)
+		meter_pend = (float)peak;
 
 	mu = &meter_ui[is_mic];
-	mu->head = (mu->head + 1) % METER_HIST;
-	mu->hist[mu->head] = (float)peak;
-
-	/* Wait out the card show animation: extra children don't take part
-	 * in its fade, so the meter joins once the card has settled. */
-	if (mu->w > 0 && p->view.content && !p->view.animating) {
-		struct wlr_buffer *buf;
-
-		if (!mu->node) {
-			mu->node = wlr_scene_buffer_create(p->view.content,
-					NULL);
-			if (mu->node)
-				wlr_scene_node_set_position(&mu->node->node,
-						mu->x, mu->y);
-		}
-		buf = card_meter_buffer(mu->w, mu->h,
-				muted == 1 ? card_col_red :
-				(is_mic ? card_col_green : card_col_blue),
-				mu->hist, METER_HIST, mu->head);
-		if (mu->node && buf)
-			wlr_scene_buffer_set_buffer(mu->node, buf);
-		if (buf)
-			wlr_buffer_drop(buf);
+	if (!meter_push_ms || now - meter_push_ms >= METER_PUSH_MS) {
+		mu->head = (mu->head + 1) % METER_HIST;
+		mu->hist[mu->head] = meter_pend;
+		meter_pend = 0.0f;
+		/* keep the cadence stable; resync after a long stall */
+		if (meter_push_ms && now - meter_push_ms < 4 * METER_PUSH_MS)
+			meter_push_ms += METER_PUSH_MS;
+		else
+			meter_push_ms = now;
 	}
+
+	meter_overlay_draw(p, is_mic, meter_phase(now));
 	meter_timer_arm();
 	return 0;
 }
@@ -261,12 +328,14 @@ render_audio_popup(Monitor *m, InfoPopup *p, int is_mic)
 	fetch_audio_devices(is_mic);
 	dev_count = is_mic ? src_dev_count : sink_dev_count;
 
+	/* non-blocking: cached state now, async refresh re-renders when the
+	 * fresh answer lands (audio_popup_data_arrived) */
 	if (sdrag.active && sdrag_popup() == p)
 		vol = sdrag.frac * 100.0;
 	else if (is_mic)
-		vol = pipewire_mic_volume_percent();
+		vol = pipewire_mic_volume_percent_nb();
 	else
-		vol = pipewire_volume_percent(&is_headset);
+		vol = pipewire_volume_percent_nb(&is_headset);
 
 	card = card_begin();
 	if (!card)
@@ -325,12 +394,14 @@ render_audio_popup(Monitor *m, InfoPopup *p, int is_mic)
 	p->width = p->view.w;
 	p->height = p->view.h;
 
-	/* apply destroyed the previous overlay with the old card content */
+	/* apply destroyed the previous overlay with the old card content;
+	 * redraw right away so the meter never blinks out for a frame */
 	meter_ui[is_mic].node = NULL;
 	meter_ui[is_mic].x = res.meter_x;
 	meter_ui[is_mic].y = res.meter_y;
 	meter_ui[is_mic].w = res.meter_w;
 	meter_ui[is_mic].h = res.meter_h;
+	meter_overlay_draw(p, is_mic, meter_phase(monotonic_msec()));
 	meter_timer_arm();
 }
 
@@ -338,6 +409,30 @@ static void
 render_volume_popup(Monitor *m)
 {
 	render_audio_popup(m, &m->statusbar.volume_popup, 0);
+}
+
+/* Async wpctl state landed (volume/mic level, headset probe, device
+ * list): re-render the audio popup that is on screen so the fresh data
+ * shows without waiting for the next cursor motion. */
+void
+audio_popup_data_arrived(void)
+{
+	Monitor *m;
+
+	wl_list_for_each(m, &mons, link) {
+		if (m->statusbar.volume_popup.visible) {
+			render_audio_popup(m, &m->statusbar.volume_popup, 0);
+			m->statusbar.volume_popup.last_render_ms =
+				monotonic_msec();
+			return;
+		}
+		if (m->statusbar.mic_popup.visible) {
+			render_audio_popup(m, &m->statusbar.mic_popup, 1);
+			m->statusbar.mic_popup.last_render_ms =
+				monotonic_msec();
+			return;
+		}
+	}
 }
 
 static void

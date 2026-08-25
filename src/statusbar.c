@@ -2,6 +2,10 @@
 #include "nixlytile.h"
 #include "client.h"
 #include "diag.h"
+#include "fetch_async.h"
+
+/* battery popup: hit ids 0-2 are the power-profile buttons */
+#define CHARGE_LIMIT_HIT_BASE 10
 
 void
 clearstatusmodule(StatusModule *module)
@@ -974,7 +978,7 @@ rendertray(Monitor *m, int bar_height)
 	padding = statusbar_module_padding / 2;
 	if (padding < 1)
 		padding = 1;
-	gap = 4;
+	gap = 6;
 
 	/* First pass: load icons.  Advance is per-icon width + gap, so the
 	 * whitespace between two neighbours is always exactly `gap`.  A fixed
@@ -1296,23 +1300,41 @@ kill_processes_with_name(const char *name)
 	return killed;
 }
 
-int
-read_top_cpu_processes(CpuPopup *p)
+/* ".Discord-wrapped" → "Discord": strip NixOS wrapper decorations
+ * (leading dots, -wrapped/-wrapper/-bin suffixes — possibly cut short
+ * by the 15-char comm limit) and capitalize, for the CPU/RAM popup
+ * lists. Display only — kill and dedup keep the raw comm name. */
+static const char *
+proc_display_name(const char *raw, char *buf, size_t sz)
 {
-	FILE *fp;
+	const char *p = raw;
+	char *cut;
+	size_t len;
+
+	while (*p == '.')
+		p++;
+	snprintf(buf, sz, "%s", *p ? p : raw);
+	cut = strstr(buf, "-wrap");
+	if (cut && cut != buf)
+		*cut = '\0';
+	len = strlen(buf);
+	if (len > 4 && !strcmp(buf + len - 4, "-bin"))
+		buf[len - 4] = '\0';
+	if (buf[0] >= 'a' && buf[0] <= 'z')
+		buf[0] -= 'a' - 'A';
+	return buf;
+}
+
+/* Parse `top -bn1` output (already fetched) into the popup's proc list. */
+static int
+parse_top_cpu_processes(CpuPopup *p, FILE *fp)
+{
 	char line[256];
 	int count = 0;
 	int lines = 0;
 
-	if (!p)
+	if (!p || !fp)
 		return 0;
-
-	/* Use top for real-time CPU usage (not cumulative like ps pcpu) */
-	fp = popen("top -bn1 -o %CPU 2>/dev/null | tail -n +8 | head -50", "r");
-	if (!fp) {
-		p->proc_count = 0;
-		return 0;
-	}
 
 	while (fgets(line, sizeof(line), fp) && lines < 128) {
 		CpuProcEntry *e;
@@ -1359,11 +1381,52 @@ read_top_cpu_processes(CpuPopup *p)
 		}
 	}
 
-	pclose(fp);
 	if (count > 1)
 		qsort(p->procs, (size_t)count, sizeof(p->procs[0]), cpu_proc_cmp);
 	p->proc_count = count;
 	return count;
+}
+
+/* Async replacement for the old popen(top) call: the fetch runs in the
+ * background and the visible popup re-renders when the data lands, so
+ * the cursor never stalls on a popup refresh tick. */
+static int cpu_fetch_inflight;
+
+static void
+cpu_procs_fetch_done(const char *out, size_t len, void *data)
+{
+	Monitor *m;
+	FILE *fp;
+
+	(void)data;
+	cpu_fetch_inflight = 0;
+	if (!len)
+		return;
+	wl_list_for_each(m, &mons, link) {
+		CpuPopup *p = &m->statusbar.cpu_popup;
+
+		if (!p->tree || !p->visible)
+			continue;
+		fp = fmemopen((void *)out, len, "r");
+		if (!fp)
+			return;
+		parse_top_cpu_processes(p, fp);
+		fclose(fp);
+		rendercpupopup(m);
+		return;
+	}
+}
+
+int
+read_top_cpu_processes(CpuPopup *p)
+{
+	(void)p;
+	if (cpu_fetch_inflight)
+		return 0;
+	if (fetch_async("top -bn1 -o %CPU 2>/dev/null | tail -n +8 | head -50",
+			cpu_procs_fetch_done, NULL) == 0)
+		cpu_fetch_inflight = 1;
+	return 0;
 }
 
 void
@@ -1373,6 +1436,7 @@ rendercpupopup(Monitor *m)
 	Card *card;
 	CardResult res;
 	char value[16], sub[24], k1[16], v1[16], k2[16], v2[16];
+	char dispname[64];
 	int avg_disp;
 	int hover_idx;
 	int need_fetch_now = 0;
@@ -1461,10 +1525,16 @@ rendercpupopup(Monitor *m)
 
 			snprintf(pct, sizeof(pct), "%d%%", cpu_disp);
 			if (e->has_kill)
-				card_text_btn(card, e->name, pct, card_col_dim,
+				card_text_btn(card,
+						proc_display_name(e->name, dispname,
+							sizeof(dispname)),
+						pct, card_col_dim,
 						"Kill", i, hover_idx == i);
 			else
-				card_text(card, e->name, pct, card_col_dim);
+				card_text(card,
+						proc_display_name(e->name, dispname,
+							sizeof(dispname)),
+						pct, card_col_dim);
 		}
 	}
 
@@ -1569,24 +1639,17 @@ ram_proc_cmp(const void *a, const void *b)
 	return 0;
 }
 
-int
-read_top_ram_processes(RamPopup *p)
+/* Parse `ps -eo pid,rss,comm` output (already fetched) into the popup. */
+static int
+parse_top_ram_processes(RamPopup *p, FILE *fp)
 {
-	FILE *fp;
 	char line[256];
 	int count = 0;
 	int lines = 0;
 	const unsigned long min_kb = 50 * 1024; /* 50 MB minimum */
 
-	if (!p)
+	if (!p || !fp)
 		return 0;
-
-	/* ps with RSS (resident set size) in KB, sorted by memory */
-	fp = popen("ps -eo pid,rss,comm --no-headers --sort=-rss", "r");
-	if (!fp) {
-		p->proc_count = 0;
-		return 0;
-	}
 
 	while (fgets(line, sizeof(line), fp) && lines < 200 && count < 15) {
 		RamProcEntry *e;
@@ -1633,11 +1696,51 @@ read_top_ram_processes(RamPopup *p)
 		}
 	}
 
-	pclose(fp);
 	if (count > 1)
 		qsort(p->procs, (size_t)count, sizeof(p->procs[0]), ram_proc_cmp);
 	p->proc_count = count;
 	return count;
+}
+
+/* Async replacement for the old popen(ps) call — same shape as the CPU
+ * popup fetch. */
+static int ram_fetch_inflight;
+
+static void
+ram_procs_fetch_done(const char *out, size_t len, void *data)
+{
+	Monitor *m;
+	FILE *fp;
+
+	(void)data;
+	ram_fetch_inflight = 0;
+	if (!len)
+		return;
+	wl_list_for_each(m, &mons, link) {
+		RamPopup *p = &m->statusbar.ram_popup;
+
+		if (!p->tree || !p->visible)
+			continue;
+		fp = fmemopen((void *)out, len, "r");
+		if (!fp)
+			return;
+		parse_top_ram_processes(p, fp);
+		fclose(fp);
+		renderrampopup(m);
+		return;
+	}
+}
+
+int
+read_top_ram_processes(RamPopup *p)
+{
+	(void)p;
+	if (ram_fetch_inflight)
+		return 0;
+	if (fetch_async("ps -eo pid,rss,comm --no-headers --sort=-rss",
+			ram_procs_fetch_done, NULL) == 0)
+		ram_fetch_inflight = 1;
+	return 0;
 }
 
 int
@@ -1809,7 +1912,7 @@ renderrampopup(Monitor *m)
 		card_section(card, "TOP PROCESSES");
 		for (int i = 0; i < p->proc_count; i++) {
 			RamProcEntry *e = &p->procs[i];
-			char amt[16];
+			char amt[16], dispname[64];
 
 			if (e->mem_kb >= 1024 * 1024)
 				snprintf(amt, sizeof(amt), "%.1fGB",
@@ -1818,10 +1921,16 @@ renderrampopup(Monitor *m)
 				snprintf(amt, sizeof(amt), "%luMB",
 						e->mem_kb / 1024);
 			if (e->has_kill)
-				card_text_btn(card, e->name, amt, card_col_dim,
+				card_text_btn(card,
+						proc_display_name(e->name, dispname,
+							sizeof(dispname)),
+						amt, card_col_dim,
 						"Kill", i, hover_idx == i);
 			else
-				card_text(card, e->name, amt, card_col_dim);
+				card_text(card,
+						proc_display_name(e->name, dispname,
+							sizeof(dispname)),
+						amt, card_col_dim);
 		}
 	} else if (p->suppress_refresh_until_ms > 0 &&
 			now < p->suppress_refresh_until_ms) {
@@ -2297,6 +2406,16 @@ renderbatterypopup(Monitor *m)
 				p->btn_hover, 0);
 	}
 
+	/* Charge limit buttons — only when the battery has the sysfs knob */
+	if (p->thr_end >= 0) {
+		static const char *limits[3] = { "80%", "90%", "100%" };
+		int active = p->thr_end >= 100 ? 2 : p->thr_end >= 90 ? 1 : 0;
+
+		card_section(card, "CHARGE LIMIT");
+		card_buttons(card, limits, NULL, 3, active, p->btn_hover,
+				CHARGE_LIMIT_HIT_BASE);
+	}
+
 	if (card_finish(card, &res) != 0)
 		return;
 	memcpy(p->hits, res.hits, sizeof(p->hits));
@@ -2531,6 +2650,18 @@ battery_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 		if (rel_x < hit->x || rel_x >= hit->x + hit->w ||
 				rel_y < hit->y || rel_y >= hit->y + hit->h)
 			continue;
+		if (hit->id >= CHARGE_LIMIT_HIT_BASE &&
+				hit->id <= CHARGE_LIMIT_HIT_BASE + 2) {
+			int pct = 80 + (hit->id - CHARGE_LIMIT_HIT_BASE) * 10;
+
+			if (charge_limit_set(pct) == 0)
+				p->thr_end = pct;
+			renderbatterypopup(m);
+			/* refetch shortly so a rejected write corrects itself */
+			p->last_fetch_ms = 0;
+			schedule_popup_delay(400);
+			return 1;
+		}
 		if (hit->id < 0 || hit->id > 2)
 			return 1;
 		{
@@ -3037,6 +3168,7 @@ findbatterydevice(char *capacity_path, size_t capacity_len)
 		/* Also store the device directory */
 		snprintf(battery_device_dir, sizeof(battery_device_dir),
 				"/sys/class/power_supply/%s", ent->d_name);
+		charge_limit_apply_saved();
 		have_battery = 1;
 		break;
 	}
@@ -3742,18 +3874,27 @@ pipewire_mic_volume_percent(void)
 	return level;
 }
 
+static const char *headset_kw[] = {
+	"headset", "headphone", "headphones", "earbud", "earbuds",
+	"earphone", "handsfree", "bluez", "bluetooth", "a2dp",
+	"hfp", "hsp", "head-unit"
+};
+
+static int
+has_headset_kw(const char *s)
+{
+	for (size_t i = 0; i < LENGTH(headset_kw); i++)
+		if (strcasestr(s, headset_kw[i]))
+			return 1;
+	return 0;
+}
+
 int
 pipewire_sink_is_headset(void)
 {
 	FILE *fp;
 	char line[512];
 	int headset = 0;
-	const char *kw[] = {
-		"headset", "headphone", "headphones", "earbud", "earbuds",
-		"earphone", "handsfree", "bluez", "bluetooth", "a2dp",
-		"hfp", "hsp", "head-unit"
-	};
-	size_t i;
 	uint64_t now = monotonic_msec();
 
 	if (headset_probe_cached >= 0 && now - headset_probe_ms < 8000)
@@ -3764,14 +3905,10 @@ pipewire_sink_is_headset(void)
 		return 0;
 
 	while (fgets(line, sizeof(line), fp)) {
-		for (i = 0; i < LENGTH(kw); i++) {
-			if (strcasestr(line, kw[i])) {
-				headset = 1;
-				break;
-			}
-		}
-		if (headset)
+		if (has_headset_kw(line)) {
+			headset = 1;
 			break;
+		}
 	}
 
 	pclose(fp);
@@ -3788,20 +3925,189 @@ pipewire_sink_is_headset(void)
 	while (fgets(line, sizeof(line), fp)) {
 		if (!strchr(line, '*'))
 			continue;
-		for (i = 0; i < LENGTH(kw); i++) {
-			if (strcasestr(line, kw[i])) {
-				headset = 1;
-				break;
-			}
-		}
-		if (headset)
+		if (has_headset_kw(line)) {
+			headset = 1;
 			break;
+		}
 	}
 
 	pclose(fp);
 	headset_probe_cached = headset;
 	headset_probe_ms = now;
 	return headset;
+}
+
+/* ── non-blocking wpctl state for the popup render path ──────────────
+ * The popup re-render runs on cursor motion and refresh timers; a
+ * popen(wpctl) there freezes the cursor for the duration of the fork +
+ * PipeWire round-trip.  These variants always return the cached state
+ * immediately and refresh it through fetch_async(); the popup re-renders
+ * via audio_popup_data_arrived() when the answer lands. */
+static int vol_fetch_inflight, mic_fetch_inflight, headset_fetch_inflight;
+static uint64_t vol_fetch_start_ms, mic_fetch_start_ms;
+
+static void
+headset_status_fetch_done(const char *out, size_t len, void *data)
+{
+	FILE *fp;
+	char line[512];
+	int headset = 0;
+
+	(void)data;
+	headset_fetch_inflight = 0;
+	fp = fmemopen((void *)out, len ? len : 1, "r");
+	if (!fp)
+		return;
+	while (fgets(line, sizeof(line), fp)) {
+		if (!strchr(line, '*'))
+			continue;
+		if (has_headset_kw(line)) {
+			headset = 1;
+			break;
+		}
+	}
+	fclose(fp);
+	headset_probe_cached = headset;
+	headset_probe_ms = monotonic_msec();
+	audio_popup_data_arrived();
+}
+
+static void
+headset_inspect_fetch_done(const char *out, size_t len, void *data)
+{
+	(void)len;
+	(void)data;
+	if (has_headset_kw(out)) {
+		headset_fetch_inflight = 0;
+		headset_probe_cached = 1;
+		headset_probe_ms = monotonic_msec();
+		audio_popup_data_arrived();
+		return;
+	}
+	/* not conclusive: check the default sink line in wpctl status */
+	if (fetch_async("wpctl status", headset_status_fetch_done, NULL) != 0)
+		headset_fetch_inflight = 0;
+}
+
+int
+pipewire_sink_is_headset_nb(void)
+{
+	uint64_t now = monotonic_msec();
+
+	if (headset_probe_cached >= 0 && now - headset_probe_ms < 8000)
+		return headset_probe_cached;
+	if (!headset_fetch_inflight &&
+			fetch_async("wpctl inspect @DEFAULT_AUDIO_SINK@",
+				headset_inspect_fetch_done, NULL) == 0)
+		headset_fetch_inflight = 1;
+	return headset_probe_cached >= 0 ? headset_probe_cached : 0;
+}
+
+/* Parse one "Volume: 0.70 [MUTED]" reply; level < 0 on parse failure. */
+static double
+parse_wpctl_volume(const char *out, int *muted)
+{
+	const char *v = strstr(out, "Volume:");
+	double raw;
+
+	*muted = strstr(out, "[MUTED]") != NULL;
+	if (v && sscanf(v, "Volume: %lf", &raw) == 1)
+		return raw * 100.0;
+	return -1.0;
+}
+
+static void
+vol_fetch_done(const char *out, size_t len, void *data)
+{
+	int muted, is_headset;
+	double level;
+	uint64_t now = monotonic_msec();
+
+	(void)len;
+	(void)data;
+	vol_fetch_inflight = 0;
+	level = parse_wpctl_volume(out, &muted);
+	if (level < 0.0)
+		return;
+	is_headset = headset_probe_cached == 1;
+	/* a scroll/drag stored a newer value while we were in flight */
+	if ((is_headset ? volume_last_read_headset_ms :
+			volume_last_read_speaker_ms) >= vol_fetch_start_ms)
+		return;
+	volume_muted = muted;
+	volume_cache_store(is_headset, level, muted, now);
+	refreshstatusvolume();
+	audio_popup_data_arrived();
+}
+
+double
+pipewire_volume_percent_nb(int *is_headset_out)
+{
+	uint64_t now = monotonic_msec();
+	int is_headset = pipewire_sink_is_headset_nb();
+	uint64_t last_read = is_headset ? volume_last_read_headset_ms :
+		volume_last_read_speaker_ms;
+	double cached = is_headset ? volume_cached_headset :
+		volume_cached_speaker;
+	int cached_muted = is_headset ? volume_cached_headset_muted :
+		volume_cached_speaker_muted;
+
+	if (is_headset_out)
+		*is_headset_out = is_headset;
+	if (last_read != 0 && now - last_read < 8000 && cached >= 0.0) {
+		volume_muted = cached_muted;
+		return cached;
+	}
+	if (!vol_fetch_inflight &&
+			fetch_async("wpctl get-volume @DEFAULT_AUDIO_SINK@",
+				vol_fetch_done, NULL) == 0) {
+		vol_fetch_inflight = 1;
+		vol_fetch_start_ms = now;
+	}
+	return cached >= 0.0 ? cached : volume_last_for_type(is_headset);
+}
+
+static void
+mic_fetch_done(const char *out, size_t len, void *data)
+{
+	int muted;
+	double level;
+	uint64_t now = monotonic_msec();
+
+	(void)len;
+	(void)data;
+	mic_fetch_inflight = 0;
+	level = parse_wpctl_volume(out, &muted);
+	if (level < 0.0)
+		return;
+	if (mic_last_read_ms >= mic_fetch_start_ms)
+		return;
+	mic_muted = muted;
+	mic_cached = level;
+	mic_cached_muted = muted;
+	mic_last_read_ms = now;
+	microphone_active = level;
+	refreshstatusmic();
+	audio_popup_data_arrived();
+}
+
+double
+pipewire_mic_volume_percent_nb(void)
+{
+	uint64_t now = monotonic_msec();
+
+	if (mic_last_read_ms != 0 && now - mic_last_read_ms < 8000 &&
+			mic_cached >= 0.0) {
+		mic_muted = mic_cached_muted;
+		return mic_cached;
+	}
+	if (!mic_fetch_inflight &&
+			fetch_async("wpctl get-volume @DEFAULT_AUDIO_SOURCE@",
+				mic_fetch_done, NULL) == 0) {
+		mic_fetch_inflight = 1;
+		mic_fetch_start_ms = now;
+	}
+	return mic_cached;
 }
 
 int
