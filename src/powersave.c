@@ -5,41 +5,16 @@
  * machine ALWAYS runs at its absolute best — performance profile, turbo
  * on, clocks uncapped.  Battery = max saving — low-power profile, turbo
  * off, clocks capped hard, compositor FPS capped at 60 if the user's
- * limiter is off.  A 5s poll of the battery status flips between the
- * two on transitions (and once at startup), so manual profile/limiter
- * changes made in between are left alone.  Desktops assert performance
- * once at startup and need no poll.
+ * limiter is off.  Applied only on transitions (and once at startup),
+ * so manual profile/limiter changes in between are left alone.
+ * Battery state comes from
+ * battwatch.c's worker thread — this file never touches sysfs, so the
+ * EC's ~100ms status read can't stall the compositor thread.
  */
 #include "nixlytile.h"
 
-#define PS_POLL_MS 5000
-
-static struct wl_event_source *ps_timer;
-static int ps_engaged = -1;     /* -1 unknown → first tick always applies */
+static int ps_engaged = -1;     /* -1 unknown → first event always applies */
 static int ps_fps_limited;      /* we enabled the limiter, not the user */
-
-static int
-ps_on_battery(void)
-{
-	static const char *paths[] = {
-		"/sys/class/power_supply/BAT0/status",
-		"/sys/class/power_supply/BAT1/status",
-	};
-
-	for (size_t i = 0; i < LENGTH(paths); i++) {
-		char buf[32];
-		FILE *fp = fopen(paths[i], "r");
-
-		if (!fp)
-			continue;
-		if (fgets(buf, sizeof(buf), fp)) {
-			fclose(fp);
-			return strncmp(buf, "Discharging", 11) == 0;
-		}
-		fclose(fp);
-	}
-	return 0;
-}
 
 /* Re-apply whatever clock regime the power state calls for.  Called
  * internally and by presence.c when leaving its (deeper) save mode, so
@@ -85,14 +60,18 @@ ps_full_performance(void)
 	wlr_log(WLR_INFO, "powersave: on wall power — full performance");
 }
 
-static int
-ps_tick(void *data)
+/* Called from battwatch's event-loop callback whenever the published
+ * battery snapshot changes (and once at startup). */
+void
+powersave_battery_event(void)
 {
-	int on_bat = ps_on_battery();
+	BattSnapshot s;
+	int on_bat;
 
-	(void)data;
-	if (ps_timer)
-		wl_event_source_timer_update(ps_timer, PS_POLL_MS);
+	if (!battwatch_get(&s))
+		return;
+	on_bat = s.available &&
+		strncmp(s.status, "Discharging", 11) == 0;
 	if (on_bat && ps_engaged != 1) {
 		ps_engaged = 1;
 		ps_engage();
@@ -100,24 +79,11 @@ ps_tick(void *data)
 		ps_engaged = 0;
 		ps_full_performance();
 	}
-	return 0;
 }
 
 void
 powersave_init(void)
 {
-	struct stat st;
-
-	if (stat("/sys/class/power_supply/BAT0", &st) != 0 &&
-			stat("/sys/class/power_supply/BAT1", &st) != 0) {
-		/* Desktop on fixed power: assert absolute best once. */
-		ps_engaged = 0;
-		ps_full_performance();
-		return;
-	}
-	if (!ps_timer)
-		ps_timer = wl_event_loop_add_timer(event_loop, ps_tick, NULL);
-	if (ps_timer)
-		wl_event_source_timer_update(ps_timer, PS_POLL_MS);
-	ps_tick(NULL);   /* apply the current state right away */
+	/* State arrives from battwatch; nothing to poll here.  Until the
+	 * first snapshot lands the machine keeps its boot defaults. */
 }

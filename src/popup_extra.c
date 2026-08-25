@@ -561,9 +561,12 @@ render_fan_popup(Monitor *m)
 	char value[24], v1[32], v2[32], sect[80];
 	int flat = 0;
 
-	if (!p->tree || fan_total_fans <= 0)
+	if (!p->tree || fan_pub.total_fans <= 0)
 		return;
-	fan_refresh();
+	/* Renders from the last published snapshot — sampling the msi-ec
+	 * here would stall the cursor.  Just ask fanwatch to sample faster
+	 * while the card is up; the request lapses once it closes. */
+	fanwatch_poke_fast();
 
 	card = card_begin();
 	if (!card)
@@ -574,8 +577,8 @@ render_fan_popup(Monitor *m)
 	card_header(card, fan_icon_path, "Fans", "COOLING", value);
 	card_gap(card, 6);
 
-	for (int d = 0; d < fan_ndevices; d++) {
-		FanDevice *dev = &fan_devices[d];
+	for (int d = 0; d < fan_pub.ndevices; d++) {
+		FanDevice *dev = &fan_pub.devices[d];
 		size_t si;
 
 		if (dev->type == FAN_DEV_MSI_EC)
@@ -626,11 +629,11 @@ render_fan_popup(Monitor *m)
 		}
 	}
 
-	if (fan_has_msi) {
+	if (fan_pub.has_msi) {
 		card_section(card, "COOLER BOOST");
 		card_kv2_btn(card, "All fans", "Max speed", NULL, "State",
-				fan_cooler_boost_on ? "On" : "Off",
-				fan_cooler_boost_on ? card_col_red : NULL,
+				fan_pub.cooler_boost_on ? "On" : "Off",
+				fan_pub.cooler_boost_on ? card_col_red : NULL,
 				FAN_BOOST_HIT, p->btn_hover == FAN_BOOST_HIT);
 	}
 
@@ -660,9 +663,11 @@ fan_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 	if (rel_x < 0 || rel_y < 0 || rel_x >= p->width || rel_y >= p->height)
 		return 0;
 
+	/* The sysfs writes are queued to fanwatch's thread, not done here —
+	 * the msi-ec ones block as long as its reads do.  The card redraws
+	 * from the snapshot the worker publishes right after applying. */
 	for (int i = 0; i < p->nhits; i++) {
 		CardHit *hit = &p->hits[i];
-		FanEntry *fe;
 
 		if (hit->w <= 0 ||
 				rel_x < hit->x || rel_x >= hit->x + hit->w ||
@@ -672,24 +677,23 @@ fan_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 				hit->id < FAN_SLIDER_BASE + FAN_MAX_TOTAL) {
 			double frac = (double)(rel_x - hit->x) / hit->w;
 
-			fe = fan_flat(hit->id - FAN_SLIDER_BASE);
-			if (fe) {
-				fan_entry_set_frac(fe, frac);
+			if (fan_flat(hit->id - FAN_SLIDER_BASE)) {
+				fanwatch_set_frac(hit->id - FAN_SLIDER_BASE,
+						frac);
 				p->last_render_ms = 0;
 			}
 			return 1;
 		}
 		if (hit->id >= FAN_AUTO_BASE &&
 				hit->id < FAN_AUTO_BASE + FAN_MAX_TOTAL) {
-			fe = fan_flat(hit->id - FAN_AUTO_BASE);
-			if (fe) {
-				fan_entry_set_auto(fe);
+			if (fan_flat(hit->id - FAN_AUTO_BASE)) {
+				fanwatch_set_auto(hit->id - FAN_AUTO_BASE);
 				p->last_render_ms = 0;
 			}
 			return 1;
 		}
 		if (hit->id == FAN_BOOST_HIT) {
-			fan_cooler_boost_set(!fan_cooler_boost_on);
+			fanwatch_set_boost(!fan_pub.cooler_boost_on);
 			p->last_render_ms = 0;
 			return 1;
 		}

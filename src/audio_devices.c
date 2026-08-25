@@ -1,6 +1,7 @@
 /* PipeWire sink/source enumeration and default-device switching for the
  * volume/mic popups, via wpctl. */
 #include "nixlytile.h"
+#include "fetch_async.h"
 
 /* Parse one "  *   72. Name ...  [tag]" line into out; returns 0 on
  * success. Strips the trailing "[...]" block and whitespace. */
@@ -140,40 +141,47 @@ audio_parse_status_devices(FILE *fp, int sources, AudioDevice *out, int max)
 	return count;
 }
 
-int
-audio_list_devices(int sources, AudioDevice *out, int max)
-{
-	FILE *fp;
-	int count;
-
-	fp = popen("wpctl status", "r");
-	if (!fp)
-		return 0;
-	count = audio_parse_status_devices(fp, sources, out, max);
-	pclose(fp);
-	return count;
-}
-
 void
 audio_set_default(uint32_t id)
 {
 	char cmd[64];
 
 	snprintf(cmd, sizeof(cmd), "wpctl set-default %u", id);
-	run_wpctl_sync(cmd);
+	/* Fire and forget in the background — run_wpctl_sync here blocked
+	 * the compositor for the wpctl fork + PipeWire round-trip. */
+	fetch_async(cmd, NULL, NULL);
 }
 
 /* Headset plugged in / made the default sink: also route the default
- * mic to the headset's own microphone if it isn't already. */
-void
-audio_autoselect_headset_mic(void)
+ * mic to the headset's own microphone if it isn't already.  One async
+ * `wpctl status` answers both questions (default sink headset? which
+ * sources exist?) without ever blocking the compositor thread. */
+static void
+autoselect_status_done(const char *out, size_t len, void *data)
 {
+	FILE *fp;
 	AudioDevice devs[8];
+	char line[512];
+	int headset = 0;
 	int n, def = -1, hs = -1;
 
-	if (pipewire_sink_is_headset() != 1)
+	(void)data;
+	fp = fmemopen((void *)out, len ? len : 1, "r");
+	if (!fp)
 		return;
-	n = audio_list_devices(1, devs, 8);
+	while (fgets(line, sizeof(line), fp)) {
+		if (strchr(line, '*') && audio_line_is_headset(line)) {
+			headset = 1;
+			break;
+		}
+	}
+	if (!headset) {
+		fclose(fp);
+		return;
+	}
+	rewind(fp);
+	n = audio_parse_status_devices(fp, 1, devs, 8);
+	fclose(fp);
 	for (int i = 0; i < n; i++) {
 		if (devs[i].is_default)
 			def = i;
@@ -185,4 +193,10 @@ audio_autoselect_headset_mic(void)
 		mic_last_read_ms = 0;
 		refreshstatusmic();
 	}
+}
+
+void
+audio_autoselect_headset_mic(void)
+{
+	fetch_async("wpctl status", autoselect_status_done, NULL);
 }

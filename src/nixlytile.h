@@ -504,6 +504,57 @@ typedef struct {
 #define PROFILE_BACKEND_ACPI   1  /* /sys/firmware/acpi/platform_profile */
 #define PROFILE_BACKEND_MSI_EC 2  /* /sys/devices/platform/msi-ec/shift_mode */
 
+/* battwatch.c — snapshot of all power_supply + power-profile state,
+ * sampled on a worker thread (EC-backed reads block ~100ms and must
+ * never run on the compositor thread). */
+typedef struct {
+	int available;              /* system battery found */
+	char device_dir[128];       /* /sys/class/power_supply/BAT1 */
+	char status[32];            /* Charging / Discharging / Full / ... */
+	double percent;
+	double voltage_v;
+	double power_w;
+	double time_remaining_h;
+	double design_wh;
+	double full_wh;
+	int cycles;
+	int thr_start;
+	int thr_end;
+	char profile[24];
+	char choices[128];
+	int has_profile;
+	int profile_backend;        /* PROFILE_BACKEND_* */
+	uint64_t stamp_ms;          /* 0 = no sample published yet */
+} BattSnapshot;
+
+void battwatch_init(void);
+int battwatch_get(BattSnapshot *out);
+void battwatch_refresh(void);
+void powersave_battery_event(void);
+void statusbar_battery_event(void);
+
+/* camwatch.c — one webcam frame reduced to mean luma plus a grid of
+ * block means, grabbed on a worker thread (a V4L2 grab blocks for
+ * hundreds of ms and must never run on the compositor thread).
+ * presence.c reads the grid for motion, lightsense.c the mean for
+ * ambient light. */
+#define CAM_GRID_W 8
+#define CAM_GRID_H 6
+#define CAM_NBLOCKS (CAM_GRID_W * CAM_GRID_H)
+
+typedef struct {
+	int valid;                       /* a frame was decoded */
+	int mean;                        /* mean luma, 0-255 */
+	unsigned char grid[CAM_NBLOCKS];
+	uint64_t stamp_ms;               /* 0 = no frame published yet */
+} CamSnapshot;
+
+void camwatch_init(void);
+int camwatch_get(CamSnapshot *out);
+void camwatch_request(void);
+void presence_camera_frame(const CamSnapshot *s);
+void lightsense_camera_frame(const CamSnapshot *s);
+
 typedef struct {
 	struct wlr_scene_tree *tree;
 	struct wlr_scene_tree *bg;
@@ -583,6 +634,16 @@ typedef struct {
 	int fan_count;
 	FanEntry fans[FAN_MAX_PER_DEV];
 } FanDevice;
+
+/* Everything the fan module knows, in one blob so fanwatch.c can sample
+ * a private copy on its thread and publish it with a single assignment. */
+typedef struct {
+	FanDevice devices[FAN_MAX_DEVICES];
+	int ndevices;
+	int total_fans;
+	int has_msi;
+	int cooler_boost_on;
+} FanState;
 
 typedef struct TrayMenuEntry {
 	int id;
@@ -1915,7 +1976,6 @@ extern double net_last_down_bps;
 extern double net_last_up_bps;
 extern char last_clock_render[32];
 /* render dedup state lives in StatusModule (per monitor) */
-extern int battery_path_initialized;
 extern int backlight_paths_initialized;
 extern uint64_t volume_last_read_speaker_ms;
 extern uint64_t volume_last_read_headset_ms;
@@ -1949,7 +2009,6 @@ extern char backlight_brightness_path[PATH_MAX];
 extern char backlight_max_path[PATH_MAX];
 extern int backlight_available;
 extern int backlight_writable;
-extern char battery_capacity_path[PATH_MAX];
 extern char battery_device_dir[PATH_MAX];
 extern int battery_available;
 extern int battery_is_charging;
@@ -2646,13 +2705,13 @@ int light_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 void info_popup_slider_release(void);
 void meter_frame_tick(Monitor *m);
 /* audio_devices.c */
-int audio_list_devices(int sources, AudioDevice *out, int max);
 int audio_parse_status_devices(FILE *fp, int sources, AudioDevice *out, int max);
+int audio_line_is_headset(const char *line);
+void audio_defaults_apply_async(double speaker_pct, double mic_pct);
 void audio_popup_data_arrived(void);
 void audio_autoselect_headset_mic(void);
 void audio_set_default(uint32_t id);
 int battery_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
-void read_power_profile(BatteryPopup *p);
 /* charge_limit.c — battery charge limit (80/90/100), sysfs + persisted */
 int charge_limit_current(void);
 int charge_limit_set(int pct);
@@ -2661,19 +2720,24 @@ void updatecpuhover(Monitor *m, double cx, double cy);
 void updateramhover(Monitor *m, double cx, double cy);
 void updatebatteryhover(Monitor *m, double cx, double cy);
 
-/* fancontrol.c */
-extern FanDevice fan_devices[FAN_MAX_DEVICES];
-extern int fan_ndevices;
-extern int fan_total_fans;
-extern int fan_has_msi;
-extern int fan_cooler_boost_on;
-int fan_scan(void);
-void fan_refresh(void);
+/* fancontrol.c — the sysfs side runs on fanwatch.c's worker thread and
+ * takes the state it works on; fan_pub is the published snapshot and is
+ * only ever touched from the compositor thread. */
+extern FanState fan_pub;
+int fan_scan_state(FanState *fs);
+void fan_refresh_state(FanState *fs);
+void fan_state_set_frac(FanState *fs, int flat, double frac);
+void fan_state_set_auto(FanState *fs, int flat);
+void fan_state_set_boost(FanState *fs, int on);
 FanEntry *fan_flat(int idx);
-void fan_entry_set_frac(FanEntry *f, double frac);
-void fan_entry_set_auto(FanEntry *f);
-void fan_cooler_boost_set(int on);
 int fan_primary_value(char *buf, size_t len);
+
+/* fanwatch.c */
+void fanwatch_init(void);
+void fanwatch_poke_fast(void);
+void fanwatch_set_frac(int flat, double frac);
+void fanwatch_set_auto(int flat);
+void fanwatch_set_boost(int on);
 int fan_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 void renderfan(StatusModule *module, int bar_height, const char *text);
 int ensure_fan_icon_buffer(int target_h);
@@ -2688,12 +2752,9 @@ int set_backlight_relative(double delta_percent);
 int set_pipewire_volume(double percent);
 int set_pipewire_mute(int mute);
 int toggle_pipewire_mute(void);
-int pipewire_sink_is_headset(void);
 int set_pipewire_mic_volume(double percent);
 int set_pipewire_mic_mute(int mute);
 int toggle_pipewire_mic_mute(void);
-double pipewire_mic_volume_percent(void);
-double pipewire_volume_percent(int *is_headset_out);
 /* Non-blocking variants for popup render paths: return cached state
  * immediately, refresh via fetch_async, re-render on arrival. */
 int pipewire_sink_is_headset_nb(void);
@@ -2709,7 +2770,6 @@ double backlight_percent(void);
 int findbacklightdevice(char *brightness_path, size_t brightness_len,
 		char *max_path, size_t max_len);
 int readfirstline(const char *path, char *buf, size_t len);
-int findbatterydevice(char *capacity_path, size_t capacity_len);
 int findbluetoothdevice(void);
 int cpu_popup_refresh_timeout(void *data);
 void schedule_cpu_popup_refresh(uint32_t ms);
@@ -2973,7 +3033,6 @@ void presence_note_input(void);
 void presence_sample_once(void);
 
 /* lightsense.c — webcam-based auto brightness (Auto/Manual modes) */
-void lightsense_feed_luma(int luma);
 extern int light_auto_mode;
 extern double light_manual_value;
 extern int light_ambient_luma;
@@ -3186,7 +3245,6 @@ uint64_t get_time_ns(void);
 uint64_t monotonic_msec(void);
 void ensure_shell_env(void);
 void apply_startup_defaults(void);
-void run_wpctl_sync(const char *cmd);
 void statusbar_anim_sync(Monitor *m);
 int has_nixlytile_session_target(void);
 int node_contains_client(LayoutNode *node, Client *c);

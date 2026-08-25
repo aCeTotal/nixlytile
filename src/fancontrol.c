@@ -3,18 +3,19 @@
  * module (replaces mcontrolcenter).  Desktop fans come from hwmon
  * (fanN_input RPM, pwmN/pwmN_enable control); MSI laptops expose CPU
  * and GPU fan percent + temperature and the cooler-boost switch
- * through the msi-ec platform driver.  Everything is plain sysfs —
- * cheap enough for popup refresh cadence, no subprocesses.
+ * through the msi-ec platform driver.
+ *
+ * Every function here that touches sysfs works on a caller-supplied
+ * FanState and runs on fanwatch.c's worker thread — msi-ec reads go
+ * through the same embedded controller as the battery, where a single
+ * read costs ~100ms.  The compositor thread only reads fan_pub, the
+ * snapshot fanwatch publishes.
  */
 #include "nixlytile.h"
 
 #include <dirent.h>
 
-FanDevice fan_devices[FAN_MAX_DEVICES];
-int fan_ndevices;
-int fan_total_fans;
-int fan_has_msi;
-int fan_cooler_boost_on;
+FanState fan_pub;
 
 #define MSI_EC_DIR "/sys/devices/platform/msi-ec"
 
@@ -110,7 +111,7 @@ fan_dev_type_label(FanDevType type)
 }
 
 static void
-scan_hwmon(void)
+scan_hwmon(FanState *fs)
 {
 	DIR *dir = opendir("/sys/class/hwmon");
 	struct dirent *ent;
@@ -119,8 +120,8 @@ scan_hwmon(void)
 	if (!dir)
 		return;
 
-	while ((ent = readdir(dir)) && fan_ndevices < FAN_MAX_DEVICES) {
-		FanDevice *dev = &fan_devices[fan_ndevices];
+	while ((ent = readdir(dir)) && fs->ndevices < FAN_MAX_DEVICES) {
+		FanDevice *dev = &fs->devices[fs->ndevices];
 		int fan_count = 0;
 
 		if (ent->d_name[0] == '.')
@@ -179,32 +180,32 @@ scan_hwmon(void)
 			fe->temp_mc = sysfs_read_int(path);
 
 			fan_count++;
-			fan_total_fans++;
+			fs->total_fans++;
 		}
 
 		if (fan_count > 0) {
 			dev->fan_count = fan_count;
-			fan_ndevices++;
+			fs->ndevices++;
 		}
 	}
 	closedir(dir);
 }
 
 static void
-scan_msi(void)
+scan_msi(FanState *fs)
 {
 	static const char *dirs[2] = { "cpu", "gpu" };
 	static const char *labels[2] = { "CPU fan", "GPU fan" };
 	FanDevice *dev;
 	char path[PATH_MAX];
 
-	if (fan_ndevices >= FAN_MAX_DEVICES)
+	if (fs->ndevices >= FAN_MAX_DEVICES)
 		return;
 	snprintf(path, sizeof(path), MSI_EC_DIR "/cpu/realtime_fan_speed");
 	if (sysfs_read_int(path) < 0)
 		return;
 
-	dev = &fan_devices[fan_ndevices];
+	dev = &fs->devices[fs->ndevices];
 	snprintf(dev->name, sizeof(dev->name), "msi-ec");
 	dev->type = FAN_DEV_MSI_EC;
 	dev->fan_count = 0;
@@ -229,16 +230,16 @@ scan_msi(void)
 		val = sysfs_read_int(path);
 		fe->temp_mc = val > 0 ? val * 1000 : 0;
 		dev->fan_count++;
-		fan_total_fans++;
+		fs->total_fans++;
 	}
 
 	if (dev->fan_count > 0) {
-		fan_ndevices++;
-		fan_has_msi = 1;
+		fs->ndevices++;
+		fs->has_msi = 1;
 		{
 			char buf[16];
 
-			fan_cooler_boost_on =
+			fs->cooler_boost_on =
 				sysfs_read_str(MSI_EC_DIR "/cooler_boost",
 						buf, sizeof(buf)) == 0 &&
 				strcmp(buf, "on") == 0;
@@ -247,24 +248,21 @@ scan_msi(void)
 }
 
 int
-fan_scan(void)
+fan_scan_state(FanState *fs)
 {
-	memset(fan_devices, 0, sizeof(fan_devices));
-	fan_ndevices = 0;
-	fan_total_fans = 0;
-	fan_has_msi = 0;
-	scan_hwmon();
-	scan_msi();
-	return fan_total_fans;
+	memset(fs, 0, sizeof(*fs));
+	scan_hwmon(fs);
+	scan_msi(fs);
+	return fs->total_fans;
 }
 
 void
-fan_refresh(void)
+fan_refresh_state(FanState *fs)
 {
 	char path[PATH_MAX];
 
-	for (int d = 0; d < fan_ndevices; d++) {
-		FanDevice *dev = &fan_devices[d];
+	for (int d = 0; d < fs->ndevices; d++) {
+		FanDevice *dev = &fs->devices[d];
 
 		for (int f = 0; f < dev->fan_count; f++) {
 			FanEntry *fe = &dev->fans[f];
@@ -306,33 +304,41 @@ fan_refresh(void)
 		}
 	}
 
-	if (fan_has_msi) {
+	if (fs->has_msi) {
 		char buf[16];
 
-		fan_cooler_boost_on =
+		fs->cooler_boost_on =
 			sysfs_read_str(MSI_EC_DIR "/cooler_boost",
 					buf, sizeof(buf)) == 0 &&
 			strcmp(buf, "on") == 0;
 	}
 }
 
-FanEntry *
-fan_flat(int idx)
+static FanEntry *
+fan_flat_in(FanState *fs, int idx)
 {
 	int n = 0;
 
 	if (idx < 0)
 		return NULL;
-	for (int d = 0; d < fan_ndevices; d++)
-		for (int f = 0; f < fan_devices[d].fan_count; f++)
+	for (int d = 0; d < fs->ndevices; d++)
+		for (int f = 0; f < fs->devices[d].fan_count; f++)
 			if (n++ == idx)
-				return &fan_devices[d].fans[f];
+				return &fs->devices[d].fans[f];
 	return NULL;
 }
 
-void
-fan_entry_set_frac(FanEntry *f, double frac)
+FanEntry *
+fan_flat(int idx)
 {
+	return fan_flat_in(&fan_pub, idx);
+}
+
+/* Control writes — worker thread only (msi-ec writes stall like reads). */
+void
+fan_state_set_frac(FanState *fs, int flat, double frac)
+{
+	FanEntry *f = fan_flat_in(fs, flat);
 	char path[PATH_MAX];
 	int pwm;
 
@@ -354,8 +360,9 @@ fan_entry_set_frac(FanEntry *f, double frac)
 }
 
 void
-fan_entry_set_auto(FanEntry *f)
+fan_state_set_auto(FanState *fs, int flat)
 {
+	FanEntry *f = fan_flat_in(fs, flat);
 	char path[PATH_MAX];
 
 	if (!f || !f->has_pwm)
@@ -367,12 +374,13 @@ fan_entry_set_auto(FanEntry *f)
 }
 
 void
-fan_cooler_boost_set(int on)
+fan_state_set_boost(FanState *fs, int on)
 {
-	if (!fan_has_msi)
+	if (!fs->has_msi)
 		return;
-	if (sysfs_write_str(MSI_EC_DIR "/cooler_boost", on ? "on" : "off") == 0)
-		fan_cooler_boost_on = on;
+	if (sysfs_write_str(MSI_EC_DIR "/cooler_boost",
+			on ? "on" : "off") == 0)
+		fs->cooler_boost_on = on;
 }
 
 /* Bar text: MSI CPU-fan percent ("39%"), else the highest RPM. Returns
@@ -382,10 +390,10 @@ fan_primary_value(char *buf, size_t len)
 {
 	int best_rpm = -1;
 
-	if (fan_total_fans <= 0)
+	if (fan_pub.total_fans <= 0)
 		return -1;
-	for (int d = 0; d < fan_ndevices; d++) {
-		FanDevice *dev = &fan_devices[d];
+	for (int d = 0; d < fan_pub.ndevices; d++) {
+		FanDevice *dev = &fan_pub.devices[d];
 
 		for (int f = 0; f < dev->fan_count; f++) {
 			FanEntry *fe = &dev->fans[f];

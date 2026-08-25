@@ -27,3 +27,6 @@ compile_commands.json
 
 # Misc
 -
+
+# Claude worktrees
+.claude/worktrees/

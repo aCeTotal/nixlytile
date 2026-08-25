@@ -40,7 +40,6 @@ double battery_last_percent = -1.0;
 char battery_text[32] = "--%";
 double net_last_down_bps = -1.0;
 double net_last_up_bps = -1.0;
-int battery_path_initialized;
 int backlight_paths_initialized;
 uint64_t volume_last_read_speaker_ms;
 uint64_t volume_last_read_headset_ms;
@@ -182,7 +181,6 @@ char backlight_brightness_path[PATH_MAX];
 char backlight_max_path[PATH_MAX];
 int backlight_available;
 int backlight_writable;
-char battery_capacity_path[PATH_MAX];
 char battery_device_dir[PATH_MAX];  /* e.g. /sys/class/power_supply/BAT0 */
 int battery_available;
 const double volume_max_percent = 150.0;
@@ -1390,7 +1388,6 @@ apply_startup_defaults(void)
 	const double light_default = 40.0;
 	const double speaker_default = 70.0;
 	const double mic_default = 80.0;
-	char cmd[96];
 
 	if (light_applied && audio_applied)
 		return;
@@ -1440,64 +1437,23 @@ audio:
 	audio_tries++;
 
 	/*
-	 * Speaker/headset volume: unmute and set the default, then read the
-	 * result back. Answers PipeWire does not give us are not invented —
-	 * a failed read means the service is not up, and we return without
-	 * marking done so the next status refresh tries again.
+	 * Gate on PipeWire actually answering: the async reader returns -1
+	 * until a background fetch has landed; that fetch's callback
+	 * re-renders the volume module, which retries here.  Answers
+	 * PipeWire does not give us are still not invented.
 	 */
 	{
 		int is_headset = 0;
 
-		volume_invalidate_cache(0); /* speaker */
-		volume_invalidate_cache(1); /* headset */
-		if (pipewire_volume_percent(&is_headset) < 0.0)
+		if (pipewire_volume_percent_nb(&is_headset) < 0.0)
 			return;   /* PipeWire not answering yet — retry later */
-
-		/* Synchronous: the async fork()+wpctl form returns before the
-		 * change lands, so the read-back below would see stale state. */
-		run_wpctl_sync("wpctl set-mute @DEFAULT_AUDIO_SINK@ 0");
-		snprintf(cmd, sizeof(cmd),
-			"wpctl set-volume @DEFAULT_AUDIO_SINK@ %.2f",
-			speaker_default / 100.0);
-		run_wpctl_sync(cmd);
-
-		volume_invalidate_cache(0);
-		volume_invalidate_cache(1);
-		{
-			double v = pipewire_volume_percent(&is_headset);
-			if (v >= 0.0) {
-				speaker_active = v;
-				volume_last_speaker_percent = v;
-				volume_last_headset_percent = v;
-			}
-		}
 	}
 
-	/*
-	 * Microphone: same shape. Skip if no mic source exists (e.g. desktop
-	 * without a microphone connected).
-	 */
-	{
-		mic_last_read_ms = 0;
-		if (pipewire_mic_volume_percent() >= 0.0) {
-			run_wpctl_sync("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0");
-			snprintf(cmd, sizeof(cmd),
-				"wpctl set-volume @DEFAULT_AUDIO_SOURCE@ %.2f",
-				mic_default / 100.0);
-			run_wpctl_sync(cmd);
-
-			mic_last_read_ms = 0;
-			{
-				double v = pipewire_mic_volume_percent();
-				if (v >= 0.0) {
-					microphone_active = v;
-					mic_last_percent = v;
-				}
-			}
-		}
-		/* else: no mic source, leave microphone_active = -1.0 */
-	}
-
+	/* Unmute + set level + read back for sink and source, in
+	 * background shells; the read-back callbacks refresh cache and
+	 * modules when they land.  A missing mic source just makes the
+	 * source commands fail in the child — nothing to skip up front. */
+	audio_defaults_apply_async(speaker_default, mic_default);
 	audio_applied = 1;
 }
 

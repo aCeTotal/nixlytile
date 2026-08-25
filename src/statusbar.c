@@ -466,7 +466,7 @@ rendermic(StatusModule *module, int bar_height, const char *text)
 void
 renderfan(StatusModule *module, int bar_height, const char *text)
 {
-	if (fan_total_fans <= 0) {
+	if (fan_pub.total_fans <= 0) {
 		if (module && module->tree) {
 			clearstatusmodule(module);
 			module->width = 0;
@@ -2133,201 +2133,44 @@ int readulong(const char *path, unsigned long long *out);
 static void
 read_battery_info(BatteryPopup *p)
 {
-	char path[PATH_MAX];
-	char buf[64];
-	FILE *fp;
-	unsigned long long val;
+	BattSnapshot s;
 
-	if (!p || !battery_available || !battery_device_dir[0])
+	if (!p || !battery_available)
+		return;
+	/* All sysfs reads happen on battwatch's worker thread — an EC-backed
+	 * status read blocks ~100ms and used to freeze the cursor whenever
+	 * this popup fetched.  Here we only copy the latest snapshot. */
+	if (!battwatch_get(&s) || !s.available)
 		return;
 
-	/* Read charging status */
-	snprintf(path, sizeof(path), "%s/status", battery_device_dir);
-	fp = fopen(path, "r");
-	if (fp) {
-		if (fgets(buf, sizeof(buf), fp)) {
-			char *nl = strchr(buf, '\n');
-			if (nl) *nl = '\0';
-			p->charging = (strcmp(buf, "Charging") == 0 || strcmp(buf, "Full") == 0);
-			p->actively_charging = (strcmp(buf, "Charging") == 0);
-			if (strcmp(buf, "Charging") == 0)
-				snprintf(p->state, sizeof(p->state), "Charging");
-			else if (strcmp(buf, "Full") == 0)
-				snprintf(p->state, sizeof(p->state), "Full");
-			else if (strcmp(buf, "Not charging") == 0)
-				snprintf(p->state, sizeof(p->state), "Holding");
-			else
-				snprintf(p->state, sizeof(p->state), "Draining");
-		}
-		fclose(fp);
-	}
+	p->charging = (strcmp(s.status, "Charging") == 0 ||
+			strcmp(s.status, "Full") == 0);
+	p->actively_charging = (strcmp(s.status, "Charging") == 0);
+	if (strcmp(s.status, "Charging") == 0)
+		snprintf(p->state, sizeof(p->state), "Charging");
+	else if (strcmp(s.status, "Full") == 0)
+		snprintf(p->state, sizeof(p->state), "Full");
+	else if (strcmp(s.status, "Not charging") == 0)
+		snprintf(p->state, sizeof(p->state), "Holding");
+	else
+		snprintf(p->state, sizeof(p->state), "Draining");
 
-	/* Read capacity percentage */
-	p->percent = battery_percent();
-
-	/* Read voltage (microvolts -> volts) */
-	snprintf(path, sizeof(path), "%s/voltage_now", battery_device_dir);
-	if (readulong(path, &val) == 0) {
-		p->voltage_v = val / 1000000.0;
-	} else {
-		p->voltage_v = -1.0;
-	}
-
-	/* Read power draw (microwatts -> watts) */
-	snprintf(path, sizeof(path), "%s/power_now", battery_device_dir);
-	if (readulong(path, &val) == 0) {
-		p->power_w = val / 1000000.0;
-	} else {
-		/* Try current_now * voltage_now if power_now not available */
-		snprintf(path, sizeof(path), "%s/current_now", battery_device_dir);
-		if (readulong(path, &val) == 0 && p->voltage_v > 0) {
-			double current_a = val / 1000000.0;
-			p->power_w = current_a * p->voltage_v;
-		} else {
-			p->power_w = -1.0;
-		}
-	}
-
-	/* Calculate time remaining */
-	p->time_remaining_h = -1.0;
-	if (!p->charging && p->power_w > 0.1 && p->percent >= 0) {
-		/* Read energy_now (microwatt-hours) */
-		snprintf(path, sizeof(path), "%s/energy_now", battery_device_dir);
-		if (readulong(path, &val) == 0) {
-			double energy_wh = val / 1000000.0;
-			p->time_remaining_h = energy_wh / p->power_w;
-		} else {
-			/* Try charge_now * voltage */
-			snprintf(path, sizeof(path), "%s/charge_now", battery_device_dir);
-			if (readulong(path, &val) == 0 && p->voltage_v > 0) {
-				double charge_ah = val / 1000000.0;
-				double energy_wh = charge_ah * p->voltage_v;
-				p->time_remaining_h = energy_wh / p->power_w;
-			}
-		}
-	}
-
-	/* Design/current capacity (Wh); charge_* variants need a design
-	 * voltage to convert Ah -> Wh */
-	{
-		double vmin = -1.0;
-
-		snprintf(path, sizeof(path), "%s/voltage_min_design", battery_device_dir);
-		if (readulong(path, &val) == 0)
-			vmin = val / 1000000.0;
-
-		p->design_wh = -1.0;
-		snprintf(path, sizeof(path), "%s/energy_full_design", battery_device_dir);
-		if (readulong(path, &val) == 0)
-			p->design_wh = val / 1000000.0;
-		else {
-			snprintf(path, sizeof(path), "%s/charge_full_design", battery_device_dir);
-			if (readulong(path, &val) == 0 && vmin > 0)
-				p->design_wh = (val / 1000000.0) * vmin;
-		}
-
-		p->full_wh = -1.0;
-		snprintf(path, sizeof(path), "%s/energy_full", battery_device_dir);
-		if (readulong(path, &val) == 0)
-			p->full_wh = val / 1000000.0;
-		else {
-			snprintf(path, sizeof(path), "%s/charge_full", battery_device_dir);
-			if (readulong(path, &val) == 0 && vmin > 0)
-				p->full_wh = (val / 1000000.0) * vmin;
-		}
-	}
-
-	p->cycles = -1;
-	snprintf(path, sizeof(path), "%s/cycle_count", battery_device_dir);
-	if (readulong(path, &val) == 0)
-		p->cycles = (int)val;
-
-	p->thr_start = p->thr_end = -1;
-	snprintf(path, sizeof(path), "%s/charge_control_start_threshold", battery_device_dir);
-	if (readulong(path, &val) == 0)
-		p->thr_start = (int)val;
-	snprintf(path, sizeof(path), "%s/charge_control_end_threshold", battery_device_dir);
-	if (readulong(path, &val) == 0)
-		p->thr_end = (int)val;
-
-	read_power_profile(p);
-}
-
-/* Read the current power profile + available choices from whichever
- * sysfs backend this machine has. Written directly on button clicks;
- * power-profiles-daemon is intentionally not running. Choices end up
- * space-separated regardless of the backend's file format. */
-void
-read_power_profile(BatteryPopup *p)
-{
-	FILE *fp;
-	char buf[64];
-
-	p->has_profile = 0;
-	p->profile_backend = PROFILE_BACKEND_NONE;
-	p->profile[0] = '\0';
-	p->choices[0] = '\0';
-
-	/* ACPI platform profile: current + choices on single lines */
-	fp = fopen("/sys/firmware/acpi/platform_profile", "r");
-	if (fp) {
-		if (fgets(buf, sizeof(buf), fp)) {
-			char *nl = strchr(buf, '\n');
-			if (nl) *nl = '\0';
-			snprintf(p->profile, sizeof(p->profile), "%s", buf);
-			p->has_profile = 1;
-			p->profile_backend = PROFILE_BACKEND_ACPI;
-		}
-		fclose(fp);
-	}
-	if (p->profile_backend == PROFILE_BACKEND_ACPI) {
-		fp = fopen("/sys/firmware/acpi/platform_profile_choices", "r");
-		if (fp) {
-			if (fgets(p->choices, sizeof(p->choices), fp)) {
-				char *nl = strchr(p->choices, '\n');
-				if (nl) *nl = '\0';
-			} else {
-				p->choices[0] = '\0';
-			}
-			fclose(fp);
-		}
-		return;
-	}
-
-	/* MSI EC shift mode: one mode per line in available_shift_modes */
-	fp = fopen("/sys/devices/platform/msi-ec/shift_mode", "r");
-	if (fp) {
-		if (fgets(buf, sizeof(buf), fp)) {
-			char *nl = strchr(buf, '\n');
-			if (nl) *nl = '\0';
-			snprintf(p->profile, sizeof(p->profile), "%s", buf);
-			p->has_profile = 1;
-			p->profile_backend = PROFILE_BACKEND_MSI_EC;
-		}
-		fclose(fp);
-	}
-	if (p->profile_backend == PROFILE_BACKEND_MSI_EC) {
-		fp = fopen("/sys/devices/platform/msi-ec/available_shift_modes", "r");
-		if (fp) {
-			size_t len = 0;
-
-			while (fgets(buf, sizeof(buf), fp)) {
-				char *nl = strchr(buf, '\n');
-				int n;
-
-				if (nl) *nl = '\0';
-				if (!buf[0])
-					continue;
-				n = snprintf(p->choices + len,
-						sizeof(p->choices) - len,
-						"%s%s", len ? " " : "", buf);
-				if (n < 0 || (size_t)n >= sizeof(p->choices) - len)
-					break;
-				len += (size_t)n;
-			}
-			fclose(fp);
-		}
-	}
+	p->percent = s.percent;
+	p->voltage_v = s.voltage_v;
+	p->power_w = s.power_w;
+	p->time_remaining_h = s.time_remaining_h;
+	p->design_wh = s.design_wh;
+	p->full_wh = s.full_wh;
+	p->cycles = s.cycles;
+	p->thr_start = s.thr_start;
+	p->thr_end = s.thr_end;
+	snprintf(p->profile, sizeof(p->profile), "%s", s.profile);
+	snprintf(p->choices, sizeof(p->choices), "%s", s.choices);
+	p->has_profile = s.has_profile;
+	p->profile_backend = s.profile_backend;
+	/* Ask the worker for a fresh sample so an open popup shows live
+	 * draw/state on its next refresh. */
+	battwatch_refresh();
 }
 
 int
@@ -3172,91 +3015,6 @@ readulong(const char *path, unsigned long long *out)
 }
 
 int
-findbatterydevice(char *capacity_path, size_t capacity_len)
-{
-	DIR *dir;
-	struct dirent *ent;
-	int have_battery = 0;
-	char found[PATH_MAX] = {0};
-
-	if (!capacity_path || capacity_len == 0)
-		return 0;
-
-	dir = opendir("/sys/class/power_supply");
-	if (!dir)
-		return 0;
-
-	while ((ent = readdir(dir))) {
-		char type_path[PATH_MAX];
-		char cap_path[PATH_MAX];
-		char scope_path[PATH_MAX];
-		char scope[32];
-		struct stat st;
-		FILE *fp;
-		char type[32] = {0};
-		char *nl;
-
-		if (ent->d_name[0] == '.')
-			continue;
-
-		if (snprintf(type_path, sizeof(type_path), "/sys/class/power_supply/%s/type",
-					ent->d_name) >= (int)sizeof(type_path))
-			continue;
-		if (snprintf(scope_path, sizeof(scope_path), "/sys/class/power_supply/%s/scope",
-					ent->d_name) >= (int)sizeof(scope_path))
-			continue;
-		if (snprintf(cap_path, sizeof(cap_path), "/sys/class/power_supply/%s/capacity",
-					ent->d_name) >= (int)sizeof(cap_path))
-			continue;
-
-		if (stat(type_path, &st) != 0 || !S_ISREG(st.st_mode))
-			continue;
-		if (stat(cap_path, &st) != 0 || !S_ISREG(st.st_mode))
-			continue;
-		if (access(cap_path, R_OK) != 0)
-			continue;
-
-		fp = fopen(type_path, "r");
-		if (!fp)
-			continue;
-		if (!fgets(type, sizeof(type), fp)) {
-			fclose(fp);
-			continue;
-		}
-		fclose(fp);
-
-		nl = strchr(type, '\n');
-		if (nl)
-			*nl = '\0';
-		if (strcmp(type, "Battery") != 0)
-			continue;
-
-		/* Peripheral batteries (wireless mice, keyboards, headsets) also report
-		 * type "Battery"; only a system battery has scope "System" or none. */
-		if (readfirstline(scope_path, scope, sizeof(scope)) == 0 &&
-				strcmp(scope, "System") != 0)
-			continue;
-
-		if (snprintf(found, sizeof(found), "%s", cap_path) >= (int)sizeof(found))
-			continue;
-		/* Also store the device directory */
-		snprintf(battery_device_dir, sizeof(battery_device_dir),
-				"/sys/class/power_supply/%s", ent->d_name);
-		charge_limit_apply_saved();
-		have_battery = 1;
-		break;
-	}
-
-	closedir(dir);
-
-	if (!have_battery)
-		return 0;
-	if (snprintf(capacity_path, capacity_len, "%s", found) >= (int)capacity_len)
-		return 0;
-	return 1;
-}
-
-int
 findbluetoothdevice(void)
 {
 	DIR *dir;
@@ -3800,16 +3558,13 @@ set_backlight_relative(double delta_percent)
 double
 battery_percent(void)
 {
-	unsigned long long cur;
+	BattSnapshot s;
 
-	if (!battery_available)
+	/* Cached snapshot from battwatch's worker thread — reading the
+	 * capacity file here would walk EC-backed ACPI on some laptops. */
+	if (!battery_available || !battwatch_get(&s) || !s.available)
 		return -1.0;
-	if (readulong(battery_capacity_path, &cur) != 0)
-		return -1.0;
-	if (cur > 100)
-		cur = 100;
-
-	return (double)cur;
+	return s.percent;
 }
 
 double
@@ -3854,100 +3609,6 @@ volume_invalidate_cache(int is_headset)
 	headset_probe_cached = -1;
 }
 
-double
-pipewire_volume_percent(int *is_headset_out)
-{
-	FILE *fp;
-	char line[128];
-	double level = -1.0;
-	int muted = 0;
-	uint64_t now = monotonic_msec();
-	int is_headset = (is_headset_out && (*is_headset_out == 0 || *is_headset_out == 1))
-			? *is_headset_out
-			: pipewire_sink_is_headset();
-	uint64_t last_read = is_headset ? volume_last_read_headset_ms : volume_last_read_speaker_ms;
-	double cached = is_headset ? volume_cached_headset : volume_cached_speaker;
-	int cached_muted = is_headset ? volume_cached_headset_muted : volume_cached_speaker_muted;
-
-	if (is_headset_out)
-		*is_headset_out = is_headset;
-
-	if (last_read != 0 && now - last_read < 8000 && cached >= 0.0) {
-		volume_muted = cached_muted;
-		if (is_headset)
-			volume_last_headset_percent = cached;
-		else
-			volume_last_speaker_percent = cached;
-		return cached;
-	}
-
-	fp = popen("wpctl get-volume @DEFAULT_AUDIO_SINK@", "r");
-	if (!fp)
-		return -1.0;
-
-	if (fgets(line, sizeof(line), fp)) {
-		double raw = 0.0;
-		if (strstr(line, "[MUTED]"))
-			muted = 1;
-		if (sscanf(line, "Volume: %lf", &raw) == 1)
-			level = raw * 100.0;
-	}
-
-	pclose(fp);
-	/* No parse = no answer (wpctl before PipeWire is up, no sink). Keep
-	 * the previous state: writing muted=0 here is how the bar ends up
-	 * claiming "unmuted" on a sink that is in fact muted. */
-	if (level < 0.0)
-		return -1.0;
-
-	volume_muted = muted;
-	volume_cache_store(is_headset, level, muted, now);
-	speaker_active = level;
-	return level;
-}
-
-double
-pipewire_mic_volume_percent(void)
-{
-	FILE *fp;
-	char line[128];
-	double level = -1.0;
-	int muted = 0;
-	uint64_t now = monotonic_msec();
-
-	if (mic_last_read_ms != 0 && now - mic_last_read_ms < 8000) {
-		if (mic_cached >= 0.0) {
-			mic_muted = mic_cached_muted;
-			return mic_cached;
-		}
-	}
-
-	fp = popen("wpctl get-volume @DEFAULT_AUDIO_SOURCE@", "r");
-	if (!fp)
-		return -1.0;
-
-	if (fgets(line, sizeof(line), fp)) {
-		double raw = 0.0;
-		if (strstr(line, "[MUTED]"))
-			muted = 1;
-		if (sscanf(line, "Volume: %lf", &raw) == 1)
-			level = raw * 100.0;
-	}
-
-	pclose(fp);
-	/* Same as the sink: an unparsable answer must not be read as
-	 * "unmuted" — keep the last known state and report failure. */
-	if (level < 0.0)
-		return -1.0;
-
-	mic_muted = muted;
-	mic_cached = level;
-	mic_cached_muted = muted;
-	mic_last_read_ms = now;
-	microphone_active = level;
-	return level;
-}
-
 static const char *headset_kw[] = {
 	"headset", "headphone", "headphones", "earbud", "earbuds",
 	"earphone", "handsfree", "bluez", "bluetooth", "a2dp",
@@ -3963,52 +3624,11 @@ has_headset_kw(const char *s)
 	return 0;
 }
 
+/* Exported for audio_devices.c's async headset autoselect. */
 int
-pipewire_sink_is_headset(void)
+audio_line_is_headset(const char *line)
 {
-	FILE *fp;
-	char line[512];
-	int headset = 0;
-	uint64_t now = monotonic_msec();
-
-	if (headset_probe_cached >= 0 && now - headset_probe_ms < 8000)
-		return headset_probe_cached;
-
-	fp = popen("wpctl inspect @DEFAULT_AUDIO_SINK@", "r");
-	if (!fp)
-		return 0;
-
-	while (fgets(line, sizeof(line), fp)) {
-		if (has_headset_kw(line)) {
-			headset = 1;
-			break;
-		}
-	}
-
-	pclose(fp);
-	if (headset) {
-		headset_probe_cached = 1;
-		headset_probe_ms = now;
-		return 1;
-	}
-
-	fp = popen("wpctl status", "r");
-	if (!fp)
-		return 0;
-
-	while (fgets(line, sizeof(line), fp)) {
-		if (!strchr(line, '*'))
-			continue;
-		if (has_headset_kw(line)) {
-			headset = 1;
-			break;
-		}
-	}
-
-	pclose(fp);
-	headset_probe_cached = headset;
-	headset_probe_ms = now;
-	return headset;
+	return has_headset_kw(line);
 }
 
 /* ── non-blocking wpctl state for the popup render path ──────────────
@@ -4184,6 +3804,36 @@ pipewire_mic_volume_percent_nb(void)
 	return mic_cached;
 }
 
+/* Startup defaults (apply_startup_defaults): unmute + set level + read
+ * back, all in one background shell per device.  The old run_wpctl_sync
+ * sequence blocked the compositor thread for every wpctl round-trip. */
+void
+audio_defaults_apply_async(double speaker_pct, double mic_pct)
+{
+	char cmd[192];
+	uint64_t now = monotonic_msec();
+
+	volume_invalidate_cache(0);
+	volume_invalidate_cache(1);
+	snprintf(cmd, sizeof(cmd),
+		"wpctl set-mute @DEFAULT_AUDIO_SINK@ 0; "
+		"wpctl set-volume @DEFAULT_AUDIO_SINK@ %.2f; "
+		"wpctl get-volume @DEFAULT_AUDIO_SINK@", speaker_pct / 100.0);
+	if (fetch_async(cmd, vol_fetch_done, NULL) == 0) {
+		vol_fetch_inflight = 1;
+		vol_fetch_start_ms = now;
+	}
+	mic_last_read_ms = 0;
+	snprintf(cmd, sizeof(cmd),
+		"wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0; "
+		"wpctl set-volume @DEFAULT_AUDIO_SOURCE@ %.2f; "
+		"wpctl get-volume @DEFAULT_AUDIO_SOURCE@", mic_pct / 100.0);
+	if (fetch_async(cmd, mic_fetch_done, NULL) == 0) {
+		mic_fetch_inflight = 1;
+		mic_fetch_start_ms = now;
+	}
+}
+
 int
 set_pipewire_mute(int mute)
 {
@@ -4264,50 +3914,38 @@ set_pipewire_mic_volume(double percent)
 	return 0;
 }
 
-/* Run a wpctl command and wait for it to finish before returning.
- * The global SIGCHLD reaper may steal the exit status (pclose then
- * sees ECHILD), but pclose still blocks until the command has exited —
- * which is the guarantee the mute toggles need before re-reading
- * PipeWire state.  The old async fork() setters raced their own
- * read-back: the toggle re-read PipeWire before wpctl had run, cached
- * the stale pre-toggle state, and the icon needed a second click. */
-void
-run_wpctl_sync(const char *cmd)
-{
-	FILE *fp = popen(cmd, "r");
-
-	if (fp)
-		pclose(fp);
-}
-
 int
 toggle_pipewire_mute(void)
 {
-	int is_headset = pipewire_sink_is_headset();
+	int is_headset = pipewire_sink_is_headset_nb();
+	uint64_t now = monotonic_msec();
 
 	/* Native toggle: PipeWire flips mute atomically and preserves the
-	 * volume level, so no compositor-side state guessing or volume
-	 * restore is needed. */
-	run_wpctl_sync("wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle");
-
-	/* Read back the ACTUAL state so icon and system can never
-	 * disagree. */
+	 * volume level.  Toggle and read-back run in one background shell —
+	 * a popen here blocked the compositor for the wpctl fork + PipeWire
+	 * round-trip; vol_fetch_done() re-renders when the answer lands. */
 	volume_invalidate_cache(is_headset);
-	pipewire_volume_percent(&is_headset);
-
-	refreshstatusvolume();
+	if (fetch_async("wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle; "
+			"wpctl get-volume @DEFAULT_AUDIO_SINK@",
+			vol_fetch_done, NULL) == 0) {
+		vol_fetch_inflight = 1;
+		vol_fetch_start_ms = now;
+	}
 	return 0;
 }
 
 int
 toggle_pipewire_mic_mute(void)
 {
-	run_wpctl_sync("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle");
+	uint64_t now = monotonic_msec();
 
 	mic_last_read_ms = 0;
-	pipewire_mic_volume_percent();
-
-	refreshstatusmic();
+	if (fetch_async("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle; "
+			"wpctl get-volume @DEFAULT_AUDIO_SOURCE@",
+			mic_fetch_done, NULL) == 0) {
+		mic_fetch_inflight = 1;
+		mic_fetch_start_ms = now;
+	}
 	return 0;
 }
 
@@ -5067,12 +4705,6 @@ refreshstatusbattery(void)
 	double percent, display;
 	const char *icon = battery_icon_100;
 
-	if (!battery_path_initialized) {
-		battery_available = findbatterydevice(battery_capacity_path,
-				sizeof(battery_capacity_path));
-		battery_path_initialized = 1;
-	}
-
 	percent = battery_percent();
 	display = percent;
 
@@ -5114,6 +4746,30 @@ refreshstatusbattery(void)
 		if (status_should_render(&m->statusbar.battery, barh, battery_text)) {
 			renderbattery(&m->statusbar.battery, barh, battery_text);
 			positionstatusmodules(m);
+		}
+	}
+}
+
+/* battwatch's event-loop callback: a new battery snapshot landed. */
+void
+statusbar_battery_event(void)
+{
+	BattSnapshot s;
+	Monitor *m;
+
+	if (!battwatch_get(&s))
+		return;
+	battery_available = s.available;
+	if (s.available && !battery_device_dir[0]) {
+		snprintf(battery_device_dir, sizeof(battery_device_dir),
+				"%s", s.device_dir);
+		charge_limit_apply_saved();
+	}
+	refreshstatusbattery();
+	wl_list_for_each(m, &mons, link) {
+		if (m->statusbar.battery_popup.visible) {
+			m->statusbar.battery_popup.refresh_data = 1;
+			renderbatterypopup(m);
 		}
 	}
 }
@@ -5182,7 +4838,7 @@ refreshstatusram(void)
 void
 refreshstatusvolume(void)
 {
-	int is_headset = pipewire_sink_is_headset();
+	int is_headset = pipewire_sink_is_headset_nb();
 	double vol = speaker_active;
 	Monitor *m;
 	int barh;
@@ -5201,7 +4857,7 @@ refreshstatusvolume(void)
 	 * headset button, or a startup default that never landed — stayed
 	 * invisible for the rest of the session. */
 	{
-		double read = pipewire_volume_percent(&is_headset);
+		double read = pipewire_volume_percent_nb(&is_headset);
 		if (read >= 0.0) {
 			vol = read;
 			speaker_active = read;
@@ -5290,7 +4946,7 @@ refreshstatusmic(void)
 	 * externally muted mic — or a startup default that never reached
 	 * PipeWire — cannot leave the icon lying. */
 	{
-		double read = pipewire_mic_volume_percent();
+		double read = pipewire_mic_volume_percent_nb();
 		int available = read >= 0.0;
 
 		if (available) {
@@ -5475,20 +5131,16 @@ initial_status_refresh(void)
 	refreshstatustags();
 }
 
+/* Render-only: fanwatch.c's thread does the sysfs sampling and calls
+ * this from its event-loop callback once a new snapshot is published. */
 void
 refreshstatusfan(void)
 {
-	static int fan_scan_done;
 	Monitor *m;
 	int barh;
 
-	if (!fan_scan_done) {
-		fan_scan();
-		fan_scan_done = 1;
-	}
-	if (fan_total_fans <= 0)
+	if (fan_pub.total_fans <= 0)
 		return;
-	fan_refresh();
 	if (fan_primary_value(fan_text, sizeof(fan_text)) != 0)
 		return;
 

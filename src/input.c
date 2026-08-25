@@ -280,22 +280,21 @@ adjust_volume_by_steps(int steps)
 	if (steps == 0)
 		return 0;
 
-	is_headset = pipewire_sink_is_headset();
+	is_headset = pipewire_sink_is_headset_nb();
 
-	/* First notch of a gesture: base on the REAL system volume — apps
-	 * and hotkeys change it behind our back, and stepping from a stale
-	 * cache makes the level jump.  During a rapid gesture trust the
-	 * locally accumulated value instead of forking wpctl per notch. */
+	/* First notch of a gesture: base on the freshest value we have and
+	 * kick an async re-read (_nb) — the old synchronous wpctl read
+	 * froze the cursor mid-scroll for the fork + PipeWire round-trip.
+	 * During a rapid gesture trust the locally accumulated value. */
 	now = monotonic_msec();
 	if (now - last_adjust_ms > 1000) {
-		volume_invalidate_cache(is_headset);
-		vol = pipewire_volume_percent(&is_headset);
+		vol = pipewire_volume_percent_nb(&is_headset);
 	} else {
 		vol = speaker_active >= 0.0 ? speaker_active
 				: volume_last_for_type(is_headset);
 	}
 	if (vol < 0.0)
-		vol = pipewire_volume_percent(&is_headset);
+		vol = pipewire_volume_percent_nb(&is_headset);
 	if (vol < 0.0)
 		return 0;
 	last_adjust_ms = now;
@@ -336,15 +335,14 @@ adjust_mic_by_steps(int steps)
 	if (steps == 0)
 		return 0;
 
-	/* Same fresh-base-per-gesture policy as adjust_volume_by_steps. */
+	/* Same async-base-per-gesture policy as adjust_volume_by_steps. */
 	now = monotonic_msec();
-	mic_last_read_ms = 0;
 	if (now - last_adjust_ms > 1000)
-		vol = pipewire_mic_volume_percent();
+		vol = pipewire_mic_volume_percent_nb();
 	else
 		vol = microphone_active >= 0.0 ? microphone_active : mic_last_percent;
 	if (vol < 0.0)
-		vol = pipewire_mic_volume_percent();
+		vol = pipewire_mic_volume_percent_nb();
 	if (vol < 0.0)
 		return 0;
 	last_adjust_ms = now;
