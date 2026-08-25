@@ -492,6 +492,11 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 			return 1;
 	}
 
+	if (m->statusbar.light_popup.visible) {
+		if (light_popup_handle_click(m, lx, ly, button))
+			return 1;
+	}
+
 	if (lx < 0 || ly < 0 ||
 			lx >= m->statusbar.area.width ||
 			ly >= m->statusbar.area.height)
@@ -535,6 +540,10 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 	if (mic->width > 0 && lx >= mic->x && lx < mic->x + mic->width) {
 		if (button == BTN_LEFT) {
 			toggle_pipewire_mic_mute();
+			/* open popup shows Live/Muted — refresh it now, not on
+			 * the next 500 ms tick */
+			m->statusbar.mic_popup.last_render_ms = 0;
+			updateinfopopups(m, cursor->x, cursor->y);
 		} else if (button == BTN_RIGHT) {
 			Arg arg = { .v = pavucontrolcmd };
 			spawn(&arg);
@@ -545,6 +554,8 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 	if (vol->width > 0 && lx >= vol->x && lx < vol->x + vol->width) {
 		if (button == BTN_LEFT) {
 			toggle_pipewire_mute();
+			m->statusbar.volume_popup.last_render_ms = 0;
+			updateinfopopups(m, cursor->x, cursor->y);
 		} else if (button == BTN_RIGHT) {
 			Arg arg = { .v = pavucontrolcmd };
 			spawn(&arg);

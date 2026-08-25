@@ -10,6 +10,7 @@
 
 static struct wl_event_source *audio_watch_src;
 static struct wl_event_source *audio_watch_retry;
+static struct wl_event_source *audio_watch_mic_sync;
 static int audio_watch_fd = -1;
 static pid_t audio_watch_pid = -1;
 /* pw-metadata dumps the current defaults on startup, so a healthy child
@@ -24,6 +25,16 @@ static int audio_watch_silent_deaths;
 #define AUDIO_WATCH_MAX_SILENT_DEATHS 5
 
 static int audio_watch_spawn(void *data);
+
+/* Default sink changed (e.g. headset connected): once WirePlumber has
+ * settled, route the default mic to the headset mic too. */
+static int
+audio_watch_mic_sync_cb(void *data)
+{
+	(void)data;
+	audio_autoselect_headset_mic();
+	return 0;
+}
 
 static void
 audio_watch_stop(void)
@@ -63,6 +74,12 @@ audio_watch_cb(int fd, uint32_t mask, void *data)
 		volume_invalidate_cache(1);
 		set_status_task_due(refreshstatusvolume,
 				monotonic_msec() + AUDIO_WATCH_SETTLE_MS);
+		if (!audio_watch_mic_sync)
+			audio_watch_mic_sync = wl_event_loop_add_timer(
+					event_loop, audio_watch_mic_sync_cb, NULL);
+		if (audio_watch_mic_sync)
+			wl_event_source_timer_update(audio_watch_mic_sync,
+					AUDIO_WATCH_SETTLE_MS);
 	}
 
 	if ((mask & WL_EVENT_HANGUP) || n == 0) {
@@ -141,5 +158,9 @@ audio_watch_cleanup(void)
 	if (audio_watch_retry) {
 		wl_event_source_remove(audio_watch_retry);
 		audio_watch_retry = NULL;
+	}
+	if (audio_watch_mic_sync) {
+		wl_event_source_remove(audio_watch_mic_sync);
+		audio_watch_mic_sync = NULL;
 	}
 }

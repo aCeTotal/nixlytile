@@ -56,6 +56,11 @@ void card_gauge_id(Card *c, double frac, const float accent[4], int hit_id);
  * colors may be NULL (defaults to fg). */
 void card_kv2(Card *c, const char *k1, const char *v1, const float *v1col,
 		const char *k2, const char *v2, const float *v2col);
+/* kv2 whose second value is a clickable chip: recorded as a hit rect
+ * with hit_id, drawn brighter while hot (hovered). */
+void card_kv2_btn(Card *c, const char *k1, const char *v1, const float *v1col,
+		const char *k2, const char *v2, const float *v2col,
+		int hit_id, int hot);
 /* Separator line + small caps section label (label may be NULL for a
  * bare separator). */
 void card_section(Card *c, const char *label);
@@ -116,5 +121,13 @@ void popup_view_set_fill_frac(PopupView *v, int i, double frac);
 
 /* Measure helpers for callers that need text widths in card fonts. */
 int card_text_width(const char *s);
+
+/* Shared card chrome for popups that render themselves (tray menus):
+ * rounded translucent panel with hairline border, hover pill,
+ * checkbox/radio marks and a submenu chevron in the card style. */
+struct wlr_buffer *card_panel_buffer(int w, int h);
+struct wlr_buffer *card_hover_buffer(int w, int h);
+struct wlr_buffer *card_mark_buffer(int radio, int size, int state);
+struct wlr_buffer *card_chevron_buffer(int size);
 
 #endif

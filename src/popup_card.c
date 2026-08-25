@@ -334,6 +334,14 @@ void
 card_kv2(Card *c, const char *k1, const char *v1, const float *v1col,
 		const char *k2, const char *v2, const float *v2col)
 {
+	card_kv2_btn(c, k1, v1, v1col, k2, v2, v2col, -1, 0);
+}
+
+void
+card_kv2_btn(Card *c, const char *k1, const char *v1, const float *v1col,
+		const char *k2, const char *v2, const float *v2col,
+		int hit_id, int hot)
+{
 	CardRow *r = row_new(c, CROW_KV2);
 
 	if (!r)
@@ -344,6 +352,8 @@ card_kv2(Card *c, const char *k1, const char *v1, const float *v1col,
 	setstr(r->d, sizeof(r->d), v2);
 	r->bcol = v1col ? v1col : card_col_fg;
 	r->dcol = v2col ? v2col : card_col_fg;
+	r->hit_id = hit_id;
+	r->hot = hot;
 }
 
 void
@@ -463,6 +473,8 @@ card_measure(Card *c, int *out_w, int *out_h)
 			text_width_f(statusfont.font, r->b, 0);
 		c2 = r->c[0] ? text_width_f(statusfont.font, r->c, 0) + 16 +
 			text_width_f(statusfont.font, r->d, 0) : 0;
+		if (r->hit_id >= 0)
+			c2 += 16;   /* clickable value chip padding */
 		if (c1 > c->kv_c1)
 			c->kv_c1 = c1;
 		if (c2 > c->kv_c2)
@@ -493,10 +505,10 @@ card_measure(Card *c, int *out_w, int *out_h)
 			r->h = 6 + 12;
 			break;
 		case CROW_KV2:
-			r->h = base_h + 6;
+			r->h = base_h + (r->hit_id >= 0 ? 10 : 6);
 			break;
 		case CROW_SECTION:
-			r->h = 12 + 1 + (r->a[0] ? 10 + small_h : 0) + 8;
+			r->h = 14 + 1 + (r->a[0] ? 12 + small_h : 0) + 10;
 			rw = r->a[0] ?
 				text_width_f(card_font_small, r->a, SMALL_LSPC) : 0;
 			break;
@@ -656,8 +668,27 @@ card_finish(Card *c, CardResult *out)
 						r->hit_id);
 			break;
 		}
+		case CROW_KV2:
+			/* clickable value chip (e.g. mute toggle) */
+			if (r->hit_id >= 0 && r->d[0]) {
+				int vw = text_width_f(statusfont.font, r->d, 0);
+				int bw = vw + 16;
+				int bh = base_h + 6;
+				int bx = w - CARD_PAD - vw - 8;
+				int by = y + (r->h - bh) / 2;
+
+				rounded(cr, bx, by, bw, bh, 6);
+				if (r->hot)
+					cairo_set_source_rgba(cr, 1, 1, 1, 0.16);
+				else
+					cairo_set_source_rgba(cr, 1, 1, 1, 0.07);
+				cairo_fill(cr);
+				add_hit(out, bx - 4, y, bw + 8, r->h,
+						r->hit_id);
+			}
+			break;
 		case CROW_SECTION:
-			cairo_rectangle(cr, CARD_PAD, y + 12, inner_w, 1);
+			cairo_rectangle(cr, CARD_PAD, y + 14, inner_w, 1);
 			cairo_set_source_rgba(cr, 1, 1, 1, 0.08);
 			cairo_fill(cr);
 			break;
@@ -782,7 +813,8 @@ card_finish(Card *c, CardResult *out)
 			break;
 		}
 		case CROW_KV2: {
-			int bl = y + base_asc;
+			/* center within the row (chip rows are taller) */
+			int bl = y + (r->h - base_h) / 2 + base_asc;
 			int c1r = CARD_PAD + c->kv_c1;   /* col1 right edge */
 
 			draw_text_f(pix, statusfont.font, r->a, CARD_PAD, bl,
@@ -811,7 +843,7 @@ card_finish(Card *c, CardResult *out)
 		case CROW_SECTION:
 			if (r->a[0])
 				draw_text_f(pix, card_font_small, r->a,
-						CARD_PAD, y + 12 + 1 + 10 +
+						CARD_PAD, y + 14 + 1 + 12 +
 						small_asc, card_col_faint,
 						SMALL_LSPC);
 			break;
@@ -926,29 +958,20 @@ card_finish(Card *c, CardResult *out)
 	return 0;
 }
 
-/* ── gauge fill buffer ───────────────────────────────────────────── */
+/* ── cairo surface → wlr_buffer ──────────────────────────────────── */
 
+/* Copy a finished cairo surface into a PixmanBuffer-backed wlr_buffer
+ * and destroy the surface. */
 static struct wlr_buffer *
-make_fill_buffer(int w, int h, const float col[4])
+cairo_buf_finish(cairo_surface_t *cs)
 {
-	cairo_surface_t *cs;
-	cairo_t *cr;
 	struct PixmanBuffer *buf;
 	void *data;
-	int stride;
+	int stride, w, h;
 
-	cs = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
-	if (cairo_surface_status(cs) != CAIRO_STATUS_SUCCESS) {
-		cairo_surface_destroy(cs);
-		return NULL;
-	}
-	cr = cairo_create(cs);
-	rounded(cr, 0, 0, w, h, h / 2.0);
-	cairo_set_source_rgba(cr, col[0], col[1], col[2], col[3]);
-	cairo_fill(cr);
-	cairo_destroy(cr);
 	cairo_surface_flush(cs);
-
+	w = cairo_image_surface_get_width(cs);
+	h = cairo_image_surface_get_height(cs);
 	stride = cairo_image_surface_get_stride(cs);
 	data = ecalloc(1, (size_t)stride * (size_t)h);
 	memcpy(data, cairo_image_surface_get_data(cs),
@@ -964,6 +987,135 @@ make_fill_buffer(int w, int h, const float col[4])
 	buf->owns_data = 1;
 	wlr_buffer_init(&buf->base, &pixman_buffer_impl, w, h);
 	return &buf->base;
+}
+
+static cairo_t *
+cairo_buf_begin(int w, int h, cairo_surface_t **out_cs)
+{
+	cairo_surface_t *cs;
+
+	cs = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+	if (cairo_surface_status(cs) != CAIRO_STATUS_SUCCESS) {
+		cairo_surface_destroy(cs);
+		return NULL;
+	}
+	*out_cs = cs;
+	return cairo_create(cs);
+}
+
+/* ── gauge fill buffer ───────────────────────────────────────────── */
+
+static struct wlr_buffer *
+make_fill_buffer(int w, int h, const float col[4])
+{
+	cairo_surface_t *cs;
+	cairo_t *cr = cairo_buf_begin(w, h, &cs);
+
+	if (!cr)
+		return NULL;
+	rounded(cr, 0, 0, w, h, h / 2.0);
+	cairo_set_source_rgba(cr, col[0], col[1], col[2], col[3]);
+	cairo_fill(cr);
+	cairo_destroy(cr);
+	return cairo_buf_finish(cs);
+}
+
+/* ── shared card chrome (tray menus) ─────────────────────────────── */
+
+struct wlr_buffer *
+card_panel_buffer(int w, int h)
+{
+	cairo_surface_t *cs;
+	cairo_t *cr = cairo_buf_begin(w, h, &cs);
+
+	if (!cr)
+		return NULL;
+	rounded(cr, 0.5, 0.5, w - 1.0, h - 1.0, CARD_RADIUS);
+	cairo_set_source_rgba(cr, CARD_BG_R, CARD_BG_G, CARD_BG_B, CARD_BG_A);
+	cairo_fill_preserve(cr);
+	cairo_set_source_rgba(cr, 1, 1, 1, CARD_BORDER_A);
+	cairo_set_line_width(cr, 1.0);
+	cairo_stroke(cr);
+	cairo_destroy(cr);
+	return cairo_buf_finish(cs);
+}
+
+struct wlr_buffer *
+card_hover_buffer(int w, int h)
+{
+	cairo_surface_t *cs;
+	cairo_t *cr = cairo_buf_begin(w, h, &cs);
+
+	if (!cr)
+		return NULL;
+	rounded(cr, 0, 0, w, h, 6);
+	cairo_set_source_rgba(cr, 1, 1, 1, 0.10);
+	cairo_fill(cr);
+	cairo_destroy(cr);
+	return cairo_buf_finish(cs);
+}
+
+struct wlr_buffer *
+card_mark_buffer(int radio, int size, int state)
+{
+	cairo_surface_t *cs;
+	cairo_t *cr = cairo_buf_begin(size, size, &cs);
+	double s = size;
+
+	if (!cr)
+		return NULL;
+	if (radio) {
+		cairo_arc(cr, s / 2, s / 2, s / 2 - 1.0, 0, 2 * CARD_PI);
+		cairo_set_source_rgba(cr, 1, 1, 1, 0.35);
+		cairo_set_line_width(cr, 1.0);
+		cairo_stroke(cr);
+		if (state) {
+			cairo_arc(cr, s / 2, s / 2, s * 0.22, 0, 2 * CARD_PI);
+			cairo_set_source_rgba(cr, card_col_blue[0],
+					card_col_blue[1], card_col_blue[2], 1.0);
+			cairo_fill(cr);
+		}
+	} else if (state) {
+		rounded(cr, 0.5, 0.5, s - 1.0, s - 1.0, 3.0);
+		cairo_set_source_rgba(cr, card_col_blue[0], card_col_blue[1],
+				card_col_blue[2], 0.9);
+		cairo_fill(cr);
+		cairo_set_source_rgba(cr, CARD_BG_R, CARD_BG_G, CARD_BG_B, 1.0);
+		cairo_set_line_width(cr, 1.8);
+		cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+		cairo_move_to(cr, s * 0.25, s * 0.55);
+		cairo_line_to(cr, s * 0.44, s * 0.72);
+		cairo_line_to(cr, s * 0.75, s * 0.30);
+		cairo_stroke(cr);
+	} else {
+		rounded(cr, 0.5, 0.5, s - 1.0, s - 1.0, 3.0);
+		cairo_set_source_rgba(cr, 1, 1, 1, 0.35);
+		cairo_set_line_width(cr, 1.0);
+		cairo_stroke(cr);
+	}
+	cairo_destroy(cr);
+	return cairo_buf_finish(cs);
+}
+
+struct wlr_buffer *
+card_chevron_buffer(int size)
+{
+	cairo_surface_t *cs;
+	cairo_t *cr = cairo_buf_begin(size, size, &cs);
+	double s = size;
+
+	if (!cr)
+		return NULL;
+	cairo_set_source_rgba(cr, 1, 1, 1, 0.50);
+	cairo_set_line_width(cr, 1.5);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+	cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+	cairo_move_to(cr, s * 0.38, s * 0.28);
+	cairo_line_to(cr, s * 0.64, s * 0.50);
+	cairo_line_to(cr, s * 0.38, s * 0.72);
+	cairo_stroke(cr);
+	cairo_destroy(cr);
+	return cairo_buf_finish(cs);
 }
 
 /* ── presenter + animation ───────────────────────────────────────── */

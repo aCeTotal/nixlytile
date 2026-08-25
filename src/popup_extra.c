@@ -7,6 +7,7 @@
 
 #define AUDIO_DEV_MAX  8
 #define SLIDER_HIT_ID  100
+#define MUTE_HIT_ID    101
 
 /* ── audio device cache (wpctl status is a fork — cache 2s) ──────── */
 
@@ -31,7 +32,7 @@ fetch_audio_devices(int sources)
 /* ── gauge slider drag state ─────────────────────────────────────── */
 
 static struct {
-	int active;        /* 0 none, 1 volume, 2 mic */
+	int active;        /* 0 none, 1 volume, 2 mic, 3 brightness */
 	Monitor *mon;
 	double frac;
 	uint64_t last_set_ms;
@@ -42,8 +43,9 @@ sdrag_popup(void)
 {
 	if (!sdrag.active || !sdrag.mon)
 		return NULL;
-	return sdrag.active == 1 ? &sdrag.mon->statusbar.volume_popup
-			: &sdrag.mon->statusbar.mic_popup;
+	return sdrag.active == 1 ? &sdrag.mon->statusbar.volume_popup :
+		sdrag.active == 2 ? &sdrag.mon->statusbar.mic_popup :
+		&sdrag.mon->statusbar.light_popup;
 }
 
 /* Push the dragged fraction to PipeWire + bar module. */
@@ -73,6 +75,9 @@ slider_commit(void)
 		mic_last_read_ms = now;
 		microphone_active = pct;
 		refreshstatusmic();
+	} else if (sdrag.active == 3) {
+		set_backlight_percent(pct);
+		refreshstatuslight();
 	}
 }
 
@@ -185,13 +190,15 @@ render_audio_popup(Monitor *m, InfoPopup *p, int is_mic)
 	card_gap(card, 6);
 
 	if (is_mic)
-		card_kv2(card, "Input level", value, NULL, "State",
+		card_kv2_btn(card, "Input level", value, NULL, "State",
 				muted ? "Muted" : "Live",
-				muted ? card_col_red : card_col_green);
+				muted ? card_col_red : card_col_green,
+				MUTE_HIT_ID, p->btn_hover == MUTE_HIT_ID);
 	else
-		card_kv2(card, "Output", is_headset == 1 ? "Headset" : "Speakers",
+		card_kv2_btn(card, "Output", is_headset == 1 ? "Headset" : "Speakers",
 				NULL, "State", muted ? "Muted" : "Active",
-				muted ? card_col_red : card_col_green);
+				muted ? card_col_red : card_col_green,
+				MUTE_HIT_ID, p->btn_hover == MUTE_HIT_ID);
 
 	if (dev_count > 0) {
 		card_section(card, is_mic ? "INPUT DEVICE" : "OUTPUT DEVICE");
@@ -240,7 +247,10 @@ render_light_popup(Monitor *m)
 
 	if (!p->tree)
 		return;
-	b = backlight_percent();
+	if (sdrag.active == 3 && sdrag_popup() == p)
+		b = sdrag.frac * 100.0;
+	else
+		b = backlight_percent();
 
 	card = card_begin();
 	if (!card)
@@ -252,7 +262,8 @@ render_light_popup(Monitor *m)
 		snprintf(value, sizeof(value), "--");
 	card_header(card, light_icon_path, "Brightness", "BACKLIGHT", value);
 	card_gap(card, 6);
-	card_gauge(card, b >= 0.0 ? b / 100.0 : 0.0, card_col_yellow);
+	card_gauge_id(card, b >= 0.0 ? b / 100.0 : 0.0, card_col_yellow,
+			SLIDER_HIT_ID);
 	card_gap(card, 6);
 
 	/* .../backlight/<device>/brightness → <device> */
@@ -274,6 +285,8 @@ render_light_popup(Monitor *m)
 
 	if (card_finish(card, &res) != 0)
 		return;
+	memcpy(p->hits, res.hits, sizeof(p->hits));
+	p->nhits = res.nhits;
 	popup_view_apply(&p->view, p->tree, &res);
 	p->width = p->view.w;
 	p->height = p->view.h;
@@ -445,7 +458,8 @@ slider_drag_motion(Monitor *m, double cx)
 
 	if (!p || sdrag.mon != m)
 		return;
-	mod = sdrag.active == 1 ? &m->statusbar.volume : &m->statusbar.mic;
+	mod = sdrag.active == 1 ? &m->statusbar.volume :
+		sdrag.active == 2 ? &m->statusbar.mic : &m->statusbar.light;
 	track = info_popup_slider_hit(p);
 	if (!track)
 		return;
@@ -510,6 +524,15 @@ audio_popup_click(Monitor *m, StatusModule *mod, InfoPopup *p, int is_mic,
 			slider_commit();
 			return 1;
 		}
+		if (hit->id == MUTE_HIT_ID) {
+			if (is_mic)
+				toggle_pipewire_mic_mute();
+			else
+				toggle_pipewire_mute();
+			render_audio_popup(m, p, is_mic);
+			p->last_render_ms = monotonic_msec();
+			return 1;
+		}
 		if (hit->id >= 0 && hit->id < count) {
 			audio_set_default(devs[hit->id].id);
 			if (is_mic) {
@@ -542,6 +565,43 @@ mic_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 {
 	return audio_popup_click(m, &m->statusbar.mic,
 			&m->statusbar.mic_popup, 1, lx, ly, button);
+}
+
+/* Click in the brightness popup: gauge = start drag + set level. */
+int
+light_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
+{
+	InfoPopup *p = &m->statusbar.light_popup;
+	CardHit *hit;
+	int popup_x, rel_x, rel_y;
+
+	if (!p->visible || button != BTN_LEFT)
+		return 0;
+
+	popup_x = info_popup_clamped_x(m, &m->statusbar.light, p);
+	rel_x = lx - popup_x;
+	rel_y = ly - m->statusbar.area.height;
+	if (rel_x < 0 || rel_y < 0 || rel_x >= p->width || rel_y >= p->height)
+		return 0;
+
+	hit = info_popup_slider_hit(p);
+	if (hit && rel_x >= hit->x && rel_x < hit->x + hit->w &&
+			rel_y >= hit->y && rel_y < hit->y + hit->h) {
+		double frac = (double)(rel_x - hit->x) / hit->w;
+
+		if (frac < 0.0)
+			frac = 0.0;
+		if (frac > 1.0)
+			frac = 1.0;
+		sdrag.active = 3;
+		sdrag.mon = m;
+		sdrag.frac = frac;
+		sdrag.last_set_ms = monotonic_msec();
+		popup_view_set_fill_frac(&p->view, 0, frac);
+		slider_commit();
+	}
+	/* swallow clicks on the card body */
+	return 1;
 }
 
 void

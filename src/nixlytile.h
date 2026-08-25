@@ -538,6 +538,7 @@ typedef struct {
 	uint32_t id;
 	char name[64];
 	int is_default;
+	int is_headset;   /* bluez filter node (headset mic/sink) */
 } AudioDevice;
 
 typedef struct {
@@ -641,7 +642,7 @@ typedef struct {
 	char menu_path[128];
 	struct wl_list entries;
 	TrayMenuEntry *hover;   /* entry under the cursor (hover highlight) */
-	struct wlr_scene_rect *hover_rect; /* persistent highlight; moved on hover */
+	struct wlr_scene_buffer *hover_rect; /* persistent pill highlight; moved on hover */
 } TrayMenu;
 
 struct StatusBar {
@@ -2675,9 +2676,11 @@ int info_popup_visible(Monitor *m);
 void info_popups_hide(Monitor *m);
 int volume_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 int mic_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
+int light_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 void info_popup_slider_release(void);
 /* audio_devices.c */
 int audio_list_devices(int sources, AudioDevice *out, int max);
+void audio_autoselect_headset_mic(void);
 void audio_set_default(uint32_t id);
 int battery_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 void read_power_profile(BatteryPopup *p);

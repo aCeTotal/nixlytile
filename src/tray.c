@@ -1,15 +1,15 @@
 /* tray.c - Auto-extracted from nixlytile.c */
 #include "nixlytile.h"
 #include "client.h"
+#include "popup_card.h"
 
 /* NewStatus fan-out deferred during game mode; drained on exit. */
 static int tray_status_stale;
 
-/* Waybar/GTK-dark-style popup menu colors */
-static const float tray_menu_bg[]          = {0.11f, 0.11f, 0.12f, 0.98f};
-static const float tray_menu_border[]      = {0.35f, 0.35f, 0.38f, 1.0f};
-static const float tray_menu_separator[]   = {0.35f, 0.35f, 0.38f, 1.0f};
-static const float tray_menu_fg_disabled[] = {0.5f, 0.5f, 0.5f, 1.0f};
+/* Menu chrome (panel, hover pill, marks) comes from the shared popup
+ * card renderer so tray menus match the statusbar module popups. */
+static const float tray_menu_separator[]   = {1.0f, 1.0f, 1.0f, 0.08f};
+static const float tray_menu_fg_disabled[] = {0.45f, 0.47f, 0.51f, 1.0f};
 
 /* Icons carry their own transparent margins: an app logo fills its canvas,
  * a symbolic glyph sits in a square canvas with several empty columns on
@@ -1196,7 +1196,7 @@ tray_menu_render(Monitor *m)
 	TrayMenu *menu;
 	struct wlr_scene_node *node, *tmp;
 	TrayMenuEntry *entry;
-	int padding, line_spacing, indent_w;
+	int padding, line_spacing, indent_w, mark_sz;
 	int max_width = 0;
 	int total_height;
 	int row_h;
@@ -1205,9 +1205,12 @@ tray_menu_render(Monitor *m)
 		return;
 	menu = &m->statusbar.tray_menu;
 
-	padding = statusbar_module_padding;
-	line_spacing = 4;
+	padding = 16;   /* CARD_PAD — same inset as the module popups */
+	line_spacing = 9;   /* separator row height */
 	indent_w = statusbar_font_spacing > 0 ? statusbar_font_spacing * 2 : 10;
+	mark_sz = statusfont.height - 2;
+	if (mark_sz < 10)
+		mark_sz = 10;
 
 	wl_list_for_each_safe(node, tmp, &menu->tree->children, link) {
 		if (menu->bg && node == &menu->bg->node)
@@ -1224,9 +1227,7 @@ tray_menu_render(Monitor *m)
 		return;
 	}
 
-	row_h = statusfont.height + line_spacing;
-	if (row_h < statusfont.height)
-		row_h = statusfont.height;
+	row_h = statusfont.height + 10;
 	total_height = padding * 2;
 
 	wl_list_for_each(entry, &menu->entries, link) {
@@ -1234,15 +1235,15 @@ tray_menu_render(Monitor *m)
 				entry->label[0] ? entry->label : " ");
 		int row_width = text_w + 2 * padding + indent_w * entry->depth;
 		if (entry->toggle_type)
-			row_width += row_h;
+			row_width += mark_sz + 8;
 		if (entry->has_submenu)
-			row_width += row_h / 2;
+			row_width += mark_sz + 6;
 		max_width = MAX(max_width, row_width);
 		total_height += entry->is_separator ? line_spacing : row_h;
 	}
 
-	if (max_width <= 0)
-		max_width = 80;
+	if (max_width < 160)
+		max_width = 160;
 	/* Size to content; never wider than the bar area. */
 	if (m->statusbar.area.width > 0 && max_width > m->statusbar.area.width)
 		max_width = m->statusbar.area.width;
@@ -1256,23 +1257,47 @@ tray_menu_render(Monitor *m)
 	wlr_scene_node_set_position(&menu->bg->node, 0, 0);
 	wl_list_for_each_safe(node, tmp, &menu->bg->children, link)
 		wlr_scene_node_destroy(node);
-	/* Waybar/GTK-style popup: solid dark panel with a subtle border */
-	drawrect(menu->bg, 0, 0, menu->width, menu->height, tray_menu_border);
-	drawrect(menu->bg, 1, 1, menu->width - 2, menu->height - 2, tray_menu_bg);
+	/* Same rounded translucent card as the module popups */
+	{
+		struct wlr_buffer *pb = card_panel_buffer(menu->width,
+				menu->height);
+		struct wlr_scene_buffer *sb;
 
-	/* Persistent hover highlight: text nodes are recreated after it each
+		if (pb) {
+			sb = wlr_scene_buffer_create(menu->bg, NULL);
+			if (sb)
+				wlr_scene_buffer_set_buffer(sb, pb);
+			wlr_buffer_drop(pb);
+		}
+	}
+
+	/* Persistent hover pill: text nodes are recreated after it each
 	 * render, so it stays below the labels; hover moves it without a
-	 * full re-render. */
-	if (!menu->hover_rect)
-		menu->hover_rect = wlr_scene_rect_create(menu->tree, 1, 1,
-				statusbar_tag_active_bg);
-	if (menu->hover_rect)
-		wlr_scene_node_set_enabled(&menu->hover_rect->node, 0);
+	 * full re-render.  Recreated per render since its size depends on
+	 * the menu width. */
+	if (menu->hover_rect) {
+		wlr_scene_node_destroy(&menu->hover_rect->node);
+		menu->hover_rect = NULL;
+	}
+	{
+		struct wlr_buffer *hb = card_hover_buffer(menu->width - 12,
+				row_h - 2);
+
+		if (hb) {
+			menu->hover_rect = wlr_scene_buffer_create(menu->tree,
+					NULL);
+			if (menu->hover_rect) {
+				wlr_scene_buffer_set_buffer(menu->hover_rect, hb);
+				wlr_scene_node_set_enabled(
+						&menu->hover_rect->node, 0);
+			}
+			wlr_buffer_drop(hb);
+		}
+	}
 
 	{
 		int y = padding;
 		wl_list_for_each(entry, &menu->entries, link) {
-			char text[512];
 			int row = entry->is_separator ? line_spacing : row_h;
 			int x = padding + indent_w * entry->depth;
 
@@ -1287,38 +1312,56 @@ tray_menu_render(Monitor *m)
 			}
 
 			if (entry == menu->hover && entry->enabled && menu->hover_rect) {
-				wlr_scene_rect_set_size(menu->hover_rect,
-						menu->width - 2, row);
-				wlr_scene_node_set_position(&menu->hover_rect->node, 1, y);
+				wlr_scene_node_set_position(&menu->hover_rect->node,
+						6, y + 1);
 				wlr_scene_node_set_enabled(&menu->hover_rect->node, 1);
 			}
 
-			text[0] = '\0';
-			if (entry->toggle_type == 1) {
-				snprintf(text, sizeof(text), "%s%s%s",
-						entry->toggle_state ? "[x] " : "[ ] ",
-						entry->label[0] ? entry->label : "",
-						entry->has_submenu ? "  >" : "");
-			} else if (entry->toggle_type == 2) {
-				snprintf(text, sizeof(text), "%s%s%s",
-						entry->toggle_state ? "(o) " : "( ) ",
-						entry->label[0] ? entry->label : "",
-						entry->has_submenu ? "  >" : "");
-			} else {
-				snprintf(text, sizeof(text), "%s%s",
-						entry->label[0] ? entry->label : " ",
-						entry->has_submenu ? "  >" : "");
+			if (entry->toggle_type) {
+				struct wlr_buffer *mb = card_mark_buffer(
+						entry->toggle_type == 2, mark_sz,
+						entry->toggle_state);
+				struct wlr_scene_buffer *sb;
+
+				if (mb) {
+					sb = wlr_scene_buffer_create(menu->tree, NULL);
+					if (sb) {
+						wlr_scene_buffer_set_buffer(sb, mb);
+						wlr_scene_node_set_position(&sb->node,
+								x, y + (row - mark_sz) / 2);
+					}
+					wlr_buffer_drop(mb);
+				}
+				x += mark_sz + 8;
+			}
+
+			if (entry->has_submenu) {
+				struct wlr_buffer *cb = card_chevron_buffer(mark_sz);
+				struct wlr_scene_buffer *sb;
+
+				if (cb) {
+					sb = wlr_scene_buffer_create(menu->tree, NULL);
+					if (sb) {
+						wlr_scene_buffer_set_buffer(sb, cb);
+						wlr_scene_node_set_position(&sb->node,
+								menu->width - padding - mark_sz,
+								y + (row - mark_sz) / 2);
+					}
+					wlr_buffer_drop(cb);
+				}
 			}
 
 			{
-				int text_max_w = menu->width - x - padding;
+				int text_max_w = menu->width - x - padding -
+					(entry->has_submenu ? mark_sz + 6 : 0);
+				const char *label = entry->label[0] ? entry->label : " ";
 				if (entry->enabled) {
-					tray_menu_draw_text(menu->tree, text, x, y, row,
+					tray_menu_draw_text(menu->tree, label, x, y, row,
 							text_max_w);
 				} else {
 					const float *prev_fg = statusbar_fg_override;
 					statusbar_fg_override = tray_menu_fg_disabled;
-					tray_menu_draw_text(menu->tree, text, x, y, row,
+					tray_menu_draw_text(menu->tree, label, x, y, row,
 							text_max_w);
 					statusbar_fg_override = prev_fg;
 				}
@@ -1460,14 +1503,13 @@ tray_menu_update_hover(Monitor *m, double cx, double cy)
 	if (entry == menu->hover)
 		return;
 	menu->hover = entry;
-	/* Move the persistent highlight rect instead of re-rendering the
+	/* Move the persistent highlight pill instead of re-rendering the
 	 * whole menu (glyph buffers per row made that visibly laggy). */
 	if (!menu->hover_rect)
 		return;
 	if (entry) {
-		wlr_scene_rect_set_size(menu->hover_rect,
-				menu->width - 2, entry->height);
-		wlr_scene_node_set_position(&menu->hover_rect->node, 1, entry->y);
+		wlr_scene_node_set_position(&menu->hover_rect->node,
+				6, entry->y + 1);
 		wlr_scene_node_set_enabled(&menu->hover_rect->node, 1);
 	} else {
 		wlr_scene_node_set_enabled(&menu->hover_rect->node, 0);
