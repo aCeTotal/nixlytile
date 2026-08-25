@@ -920,6 +920,12 @@ apply_doc(const KdlDoc *doc, int initial)
 			/* Defer game commits to just before vblank (default on);
 			 * kill-switch in case a driver mispredicts presents. */
 			int b; if (kdl_arg_bool(n, 0, &b)) game_late_latch_enabled = b;
+		} else if (!strcmp(n->name, "game-cursor-idle-hide")) {
+			/* Hide an untouched pointer after 3 s in fullscreen games so
+			 * direct scanout returns; first motion shows it again. The
+			 * never-vanish guarantee (software-cursor lock) is separate
+			 * and unaffected. Default on. */
+			int b; if (kdl_arg_bool(n, 0, &b)) game_cursor_idle_hide = b;
 		} else if (!strcmp(n->name, "game-auto-fps-lock")) {
 			/* Lock games to their sustained low fps and match the
 			 * display refresh to it (default on; see autolock.c). */

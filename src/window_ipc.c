@@ -331,6 +331,46 @@ send_video_mode(NiriIpcClient *cl, Monitor *m)
 		client_enqueue(cl, buf, (size_t)n);
 }
 
+/* Pure query used by nixly-game-wrap to pick its fps cap. Niri-shaped
+ * reply: modes holds just the current mode, so current_mode is always 0.
+ * refresh_rate is in millihertz like niri. "focused" is our extension. */
+static void
+send_outputs(NiriIpcClient *cl)
+{
+	static const char hdr[] = "{\"Ok\":{\"Outputs\":{";
+	static const char tail[] = "}}}\n";
+	Monitor *m;
+	char buf[512];
+	int n, first = 1;
+
+	client_enqueue(cl, hdr, sizeof hdr - 1);
+	wl_list_for_each(m, &mons, link) {
+		struct wlr_output *o = m->wlr_output;
+		if (!o || !o->name)
+			continue;
+		int w = o->width, h = o->height, mhz = 0;
+		if (o->current_mode) {
+			w = o->current_mode->width;
+			h = o->current_mode->height;
+			mhz = o->current_mode->refresh;
+		}
+		n = snprintf(buf, sizeof buf,
+			"%s\"%s\":{\"name\":\"%s\","
+			"\"modes\":[{\"width\":%d,\"height\":%d,"
+			"\"refresh_rate\":%d,\"is_preferred\":true}],"
+			"\"current_mode\":0,\"vrr_supported\":%s,"
+			"\"vrr_enabled\":%s,\"focused\":%s}",
+			first ? "" : ",", o->name, o->name, w, h, mhz,
+			m->vrr_capable ? "true" : "false",
+			(m->vrr_active || m->game_vrr_active) ? "true" : "false",
+			(m == selmon) ? "true" : "false");
+		if (n > 0)
+			client_enqueue(cl, buf, (size_t)n);
+		first = 0;
+	}
+	client_enqueue(cl, tail, sizeof tail - 1);
+}
+
 /* Monitor to act on when the client did not name one it knows (output
  * "auto", or a name we don't have). Prefer the monitor whose focused
  * fullscreen client is video content; on stop, prefer one still holding a
@@ -422,6 +462,13 @@ handle_request_line(NiriIpcClient *cl, char *line)
 		send_handled(cl);
 		cl->subscribed = 1;
 		send_initial_state(cl);
+		return;
+	}
+
+	/* Outputs — read-only; nixly-game-wrap asks for refresh + VRR before
+	 * the game starts. */
+	if (strcmp(line, "\"Outputs\"") == 0) {
+		send_outputs(cl);
 		return;
 	}
 

@@ -1000,6 +1000,7 @@ typedef struct {
 	int wine_verdict;
 	int launcher_child_verdict;   /* Steam ancestry (game mode, monitor pin) */
 	int game_runtime_verdict;     /* any launcher/runtime ancestry */
+	int retro_verdict;            /* is_retro_emulator_client memo */
 	uint32_t resize;
 	int pending_resize_w, pending_resize_h;
 	struct wlr_box old_geom;
@@ -1323,6 +1324,7 @@ struct Monitor {
 	uint32_t diag_scanout_falls;  /* scanout->GPU-composition fallbacks engaged since last heartbeat */
 	uint32_t diag_scanout_rearms; /* direct scanout re-armed (cooldown drained) since last heartbeat */
 	uint64_t diag_xpaint_ns;      /* last XPAINT cross-monitor paint log timestamp */
+	uint64_t diag_xpaint_walk_ns; /* last XPAINT scene-walk (rate-limits the audit) */
 	struct wlr_scene_tree *hz_osd_tree;
 	struct wlr_scene_tree *hz_osd_bg;
 	int hz_osd_visible;
@@ -2210,6 +2212,7 @@ int latch_defer_frame(Monitor *m, int is_game, int allow_tearing, uint64_t now_n
 void latch_track_draw(Monitor *m, uint64_t draw_ns);
 extern int game_late_latch_enabled;
 extern int game_auto_fps_lock_enabled; /* config `game-auto-fps-lock`: auto lock + refresh match */
+extern int game_cursor_idle_hide;      /* config `game-cursor-idle-hide` */
 
 /* gamescan.c */
 void gamescan_tick(Monitor *m, Client *fc, int is_direct_scanout);
@@ -2705,6 +2708,7 @@ int tray_find_item_path(const char *service, char *path, size_t pathlen);
 void tray_add_item(const char *service, const char *path, int emit_signals);
 void tray_scan_existing_items(void);
 void tray_update_icons_text(void);
+void tray_refresh_stale(void);
 void tray_remove_item(const char *service);
 int tray_name_owner_changed(sd_bus_message *m, void *userdata, sd_bus_error *ret_error);
 void tray_init(void);

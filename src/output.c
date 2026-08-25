@@ -2609,6 +2609,13 @@ diag_xpaint_audit(Monitor *m, uint64_t now)
 	ClosingAnim *ca;
 	int i;
 
+	/* Diagnostic only. The walk below visits every foreign client's
+	 * whole scene subtree — per vblank that is real frame-path cost, so
+	 * run it at the same 250 ms cadence its log output is limited to. */
+	if (now - m->diag_xpaint_walk_ns < 250000000ULL)
+		return;
+	m->diag_xpaint_walk_ns = now;
+
 	wl_list_for_each(ac, &clients, link) {
 		if (ac->mon == m || !ac->mon || !ac->scene ||
 				!ac->scene->node.enabled)
@@ -3001,12 +3008,13 @@ rendermon(struct wl_listener *listener, void *data)
 	 * disables the wlr cursor → no visible software cursor → the
 	 * scanout fast path returns for pointer-locked play.  Unlocked
 	 * when the game leaves so the desktop gets its HW plane back. */
+	int game_visible;
 	{
 		/* classify_fullscreen_content() keys off focustop(m): a floating
 		 * popup (Steam overlay, notification) on top of a fullscreen
 		 * game reports is_game=0 and would release the lock mid-game.
 		 * Key the lock off "a fullscreen game is visible" instead. */
-		int game_visible = is_game;
+		game_visible = is_game;
 		if (!game_visible) {
 			Client *gfsc = fullscreen_visible_on(m);
 			if (gfsc && looks_like_game(gfsc))
@@ -3047,6 +3055,15 @@ rendermon(struct wl_listener *listener, void *data)
 				break;
 			}
 		}
+		/* Cursor idle-hide: with a fullscreen game up, an untouched
+		 * pointer should not cost composition forever. After 3 s
+		 * without real motion, treat the cursor as gone — the scanout
+		 * path skips software cursors, so it disappears and the fast
+		 * path returns. First motion recomposites and it is back. */
+		if (game_cursor_idle_hide && sw_cursor_visible && game_visible &&
+				last_pointer_motion_ms &&
+				monotonic_msec() - last_pointer_motion_ms > 3000)
+			sw_cursor_visible = 0;
 		if (sw_cursor_visible) {
 			if (scene->WLR_PRIVATE.direct_scanout) {
 				m->sw_cursor_scanout_hold = 1;

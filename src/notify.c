@@ -339,9 +339,29 @@ notify_try_adopt(Client *c)
 {
 	Monitor *m = NULL;
 	Notif *n;
+	int park = 0;
 
 	if (!notify_looks_like_notification(c, &m) || !m)
 		return 0;
+
+	/* Game mode: a popup on the game monitor forces composition (and an
+	 * animation) for ~4.5 s. Prefer a monitor without a fullscreen
+	 * client; if there is none, park a non-sticky popup offscreen until
+	 * its timeout (DND). Sticky prompts (polkit etc.) must stay visible. */
+	if (game_mode_active) {
+		Monitor *alt = NULL, *it;
+		wl_list_for_each(it, &mons, link) {
+			if (it->wlr_output && it->wlr_output->enabled &&
+					!fullscreen_visible_on(it)) {
+				alt = it;
+				break;
+			}
+		}
+		if (alt)
+			m = alt;
+		else if (!notif_wants_input(c))
+			park = 1;
+	}
 
 	n = calloc(1, sizeof(*n));
 	if (!n)
@@ -353,6 +373,8 @@ notify_try_adopt(Client *c)
 	n->h = c->geom.height;
 	n->slot_y = notif_free_slot_y(n->m, n->h);
 	n->target_x = n->m->m.x + n->m->m.width - n->w - NOTIF_MARGIN;
+	if (park)
+		n->target_x = n->m->m.x + n->m->m.width + NOTIF_GAP;
 	/* Start helt utenfor kanten, ikke bare delvis: en varselboks som
 	 * dukker opp halvveis inne har allerede "poppet" før den glir. */
 	n->off_x = n->m->m.x + n->m->m.width + NOTIF_GAP;

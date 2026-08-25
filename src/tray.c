@@ -2,6 +2,9 @@
 #include "nixlytile.h"
 #include "client.h"
 
+/* NewStatus fan-out deferred during game mode; drained on exit. */
+static int tray_status_stale;
+
 /* Waybar/GTK-dark-style popup menu colors */
 static const float tray_menu_bg[]          = {0.11f, 0.11f, 0.12f, 0.98f};
 static const float tray_menu_border[]      = {0.35f, 0.35f, 0.38f, 1.0f};
@@ -1801,26 +1804,51 @@ tray_item_new_status(sd_bus_message *m, void *userdata, sd_bus_error *ret_error)
 		if (sender && it->service[0] && strcmp(it->service, sender) == 0) {
 			int passive = it->passive;
 			it->unresponsive = 0; /* signal = livstegn, prøv igjen */
-			if (status)
+			if (status) {
 				it->passive = strcmp(status, "Passive") == 0;
-			else
+			} else if (game_mode_active) {
+				tray_status_stale = 1;
+			} else {
 				tray_item_query_status(it);
+			}
 			changed |= it->passive != passive;
 			matched = 1;
 		}
 	}
 
 	if (!matched) {
-		wl_list_for_each(it, &tray_items, link) {
-			int passive = it->passive;
-			tray_item_query_status(it);
-			changed |= it->passive != passive;
+		/* The fan-out below is N synchronous D-Bus round-trips (200 ms
+		 * cap each) on the main loop — never while a game runs; the
+		 * tray is hidden anyway, so requery on game-mode exit. */
+		if (game_mode_active) {
+			tray_status_stale = 1;
+		} else {
+			wl_list_for_each(it, &tray_items, link) {
+				int passive = it->passive;
+				tray_item_query_status(it);
+				changed |= it->passive != passive;
+			}
 		}
 	}
 
-	if (changed)
+	if (changed && !game_mode_active)
 		tray_update_icons_text();
 	return 0;
+}
+
+/* Called on game-mode exit: rerun the status queries that were deferred
+ * while the game ran, then re-render the (now visible) tray. */
+void
+tray_refresh_stale(void)
+{
+	TrayItem *it;
+
+	if (tray_status_stale) {
+		tray_status_stale = 0;
+		wl_list_for_each(it, &tray_items, link)
+			tray_item_query_status(it);
+	}
+	tray_update_icons_text();
 }
 
 int

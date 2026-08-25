@@ -4810,6 +4810,12 @@ refreshstatusmic(void)
 	int use_muted_color = 0;
 	const char *icon = mic_icon_unmuted;
 
+	/* The bar is hidden in game mode, and the fallthrough below can
+	 * popen wpctl on the main loop (PTT edges land here) — skip; the
+	 * game-mode exit refresh re-renders the module. */
+	if (game_mode_active)
+		return;
+
 	/* Re-read every refresh (8s throttle lives in the reader) so an
 	 * externally muted mic — or a startup default that never reached
 	 * PipeWire — cannot leave the icon lying. */
@@ -4900,6 +4906,11 @@ refreshstatusicons(void)
 	int barh;
 
 	wl_list_for_each(m, &mons, link) {
+		/* rendertray can hit sync D-Bus pixmap fetches and icon-theme
+		 * directory scans; never for a hidden bar (game mode). The
+		 * game-mode exit path re-renders via tray_refresh_stale(). */
+		if (!m->showbar)
+			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
 		if (m->statusbar.traylabel.tree)
 			rendertray(m, barh);

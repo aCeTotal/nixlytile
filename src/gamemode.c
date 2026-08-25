@@ -134,24 +134,54 @@ game_oom_unprotect(pid_t pid)
  * stalls; ultra game mode takes ownership when the game window maps. */
 static int prelaunch_boost_active;
 
+/* fx_track_start runs on the main loop while the 16 ms cover animation
+ * ticks; the two systemctl invocations in gametune_start block 50-300 ms,
+ * a visible launch hitch. Run them on a throwaway thread instead. */
+static void *
+prelaunch_start_thread(void *arg)
+{
+	(void)arg;
+	gametune_start();
+	return NULL;
+}
+
+static void *
+prelaunch_stop_thread(void *arg)
+{
+	(void)arg;
+	gametune_stop();
+	return NULL;
+}
+
 void
 game_prelaunch_boost(void)
 {
+	pthread_t t;
+
 	if (prelaunch_boost_active)
 		return;
 	prelaunch_boost_active = 1;
-	gametune_start();
+	if (pthread_create(&t, NULL, prelaunch_start_thread, NULL) == 0)
+		pthread_detach(t);
+	else
+		gametune_start();
 }
 
 void
 game_prelaunch_release(void)
 {
+	pthread_t t;
+
 	if (!prelaunch_boost_active)
 		return;
 	prelaunch_boost_active = 0;
 	/* Ultra game mode owns the tuning while active — don't fight it.
 	 * Only release when the launch never reached game mode (abort). */
-	if (!game_mode_ultra)
+	if (game_mode_ultra)
+		return;
+	if (pthread_create(&t, NULL, prelaunch_stop_thread, NULL) == 0)
+		pthread_detach(t);
+	else
 		gametune_stop();
 }
 
@@ -907,14 +937,128 @@ gm_core_split(cpu_set_t *comp, cpu_set_t *game)
 	return CPU_COUNT(game) > 0;
 }
 
+/*
+ * Asymmetric-L3 detection (X3D dual-CCD): group online CPUs by their L3
+ * domain (cache/index3/shared_cpu_list) and compare sizes.  When one
+ * domain's L3 is strictly larger than another's, that is the V-Cache CCD
+ * and the game belongs there — the equivalent of what Windows' Game Bar
+ * pinning does.  Symmetric parts (equal L3s, single L3, no index3) return
+ * 0 and the game keeps every CPU.  Threads created later inherit the mask.
+ */
+#define GM_L3_MAX_DOMAINS 8
+
+static int
+gm_parse_cpu_list(const char *buf, cpu_set_t *set, long ncores)
+{
+	char tmp[256];
+	char *tok;
+	long i;
+
+	snprintf(tmp, sizeof(tmp), "%s", buf);
+	CPU_ZERO(set);
+	tok = strtok(tmp, ",\n");
+	while (tok) {
+		int a = -1, b = -1;
+		if (sscanf(tok, "%d-%d", &a, &b) == 2) {
+			for (i = a; i <= b && i < ncores; i++)
+				CPU_SET(i, set);
+		} else if (sscanf(tok, "%d", &a) == 1 && a >= 0 && a < ncores) {
+			CPU_SET(a, set);
+		}
+		tok = strtok(NULL, ",\n");
+	}
+	return CPU_COUNT(set) > 0;
+}
+
+static int
+gm_vcache_set(cpu_set_t *out)
+{
+	long ncores = sysconf(_SC_NPROCESSORS_ONLN);
+	cpu_set_t dom_set[GM_L3_MAX_DOMAINS];
+	long dom_kb[GM_L3_MAX_DOMAINS];
+	int ndom = 0;
+	cpu_set_t seen;
+	char path[128], buf[256];
+	FILE *fp;
+	long cpu, kb;
+	int d, best = 0, smaller = 0;
+
+	if (ncores < 12)	/* cache CCD must keep enough threads for a game */
+		return 0;
+
+	CPU_ZERO(&seen);
+	for (cpu = 0; cpu < ncores && ndom < GM_L3_MAX_DOMAINS; cpu++) {
+		if (CPU_ISSET(cpu, &seen))
+			continue;
+		snprintf(path, sizeof(path),
+			"/sys/devices/system/cpu/cpu%ld/cache/index3/shared_cpu_list",
+			cpu);
+		fp = fopen(path, "r");
+		if (!fp)
+			return 0;	/* no L3 info — stay hands-off */
+		if (!fgets(buf, sizeof(buf), fp)) {
+			fclose(fp);
+			return 0;
+		}
+		fclose(fp);
+		if (!gm_parse_cpu_list(buf, &dom_set[ndom], ncores))
+			return 0;
+
+		snprintf(path, sizeof(path),
+			"/sys/devices/system/cpu/cpu%ld/cache/index3/size", cpu);
+		fp = fopen(path, "r");
+		if (!fp)
+			return 0;
+		kb = 0;
+		if (fscanf(fp, "%ld", &kb) != 1 || kb <= 0) {
+			fclose(fp);
+			return 0;
+		}
+		fclose(fp);
+		dom_kb[ndom] = kb;
+
+		CPU_OR(&seen, &seen, &dom_set[ndom]);
+		ndom++;
+	}
+	if (ndom < 2)
+		return 0;
+
+	for (d = 1; d < ndom; d++)
+		if (dom_kb[d] > dom_kb[best])
+			best = d;
+	for (d = 0; d < ndom; d++)
+		if (dom_kb[d] < dom_kb[best])
+			smaller = 1;
+	/* Equal L3s = symmetric CCDs; cross-CCD pinning is not a clear win
+	 * there, so only the asymmetric (V-Cache) case pins. */
+	if (!smaller || CPU_COUNT(&dom_set[best]) < 8)
+		return 0;
+
+	*out = dom_set[best];
+	return 1;
+}
+
 void
 apply_cpu_affinity(pid_t game_pid)
 {
 	cpu_set_t all_set;
+	cpu_set_t vset;
 	long ncores = sysconf(_SC_NPROCESSORS_ONLN);
 
 	if (game_pid <= 1 || ncores < 1)
 		return;
+
+	/* Asymmetric dual-CCD (X3D): the game's working set belongs in the
+	 * big L3.  Everything else (ananicy'd background, compositor's own
+	 * pin) is unaffected; restore_cpu_affinity lifts the mask on exit. */
+	if (gm_vcache_set(&vset)) {
+		set_process_affinity_all_threads(game_pid, &vset);
+		game_mode_affinity_applied = 1;
+		wlr_log(WLR_INFO,
+			"CPU affinity: game PID %d → V-Cache CCD (%d of %ld CPUs)",
+			game_pid, CPU_COUNT(&vset), ncores);
+		return;
+	}
 
 	/*
 	 * The game gets every CPU. An earlier version fenced it off the
@@ -1739,15 +1883,12 @@ is_retro_emulator_pid(pid_t pid)
 	return 0;
 }
 
-int
-is_retro_emulator_client(Client *c)
+static int
+retro_emulator_probe(Client *c)
 {
 	const char *app;
 	pid_t pid;
 	int i;
-
-	if (!c)
-		return 0;
 
 	app = client_get_appid(c);
 	if (app && *app) {
@@ -1774,6 +1915,25 @@ is_retro_emulator_client(Client *c)
 	}
 
 	return 0;
+}
+
+/* Memoized wrapper: the probe walks /proc ancestry, and looks_like_game()
+ * lands here per vblank when an overlay covers a fullscreen game — that
+ * was thousands of /proc opens per second. The verdict is frozen once the
+ * app_id exists (early X11 maps have none yet). */
+int
+is_retro_emulator_client(Client *c)
+{
+	int r;
+
+	if (!c)
+		return 0;
+	if (c->retro_verdict)
+		return c->retro_verdict > 0;
+	r = retro_emulator_probe(c);
+	if (r || client_get_appid(c))
+		c->retro_verdict = r ? 1 : -1;
+	return r;
 }
 
 /*
@@ -2041,9 +2201,17 @@ update_game_mode(void)
 		 */
 		gm_bg_post(1, game_mode_pid);
 
-		/* Hide statusbar on ALL monitors to save GPU compositing time */
+		/* Hide statusbar on ALL monitors to save GPU compositing time.
+		 * arrangelayers is what actually parks the bar tree — without it
+		 * the bar scene node stays enabled under the game and blocks
+		 * direct scanout for clients without a covering opaque region. */
 		wl_list_for_each(m, &mons, link) {
 			m->showbar = 0;
+			arrangelayers(m);
+			/* Any live toast ("Game Mode On" from the launch cover
+			 * included) blocks direct scanout until it expires —
+			 * drop them now that the game owns the screen. */
+			osd_purge_mon(m);
 		}
 
 		/*
@@ -2131,6 +2299,10 @@ update_game_mode(void)
 					disable_game_vrr(m);
 				arrangelayers(m);
 			}
+
+			/* Drain tray status queries deferred during the game and
+			 * re-render the now-visible tray. */
+			tray_refresh_stale();
 
 			if (config_rewatch_timer)
 				wl_event_source_timer_update(config_rewatch_timer, 2000);
@@ -2230,6 +2402,14 @@ stats_panel_anim_cb(void *data)
 		if (m->stats_panel_target_x >= m->m.x + m->m.width) {
 			wlr_scene_node_set_enabled(&m->stats_panel_tree->node, 0);
 			m->stats_panel_visible = 0;
+			/* Destroy, don't just forget: NULLing alone stacked a
+			 * fresh bg/border/content set per panel toggle. */
+			if (m->stats_panel_bg)
+				wlr_scene_node_destroy(&m->stats_panel_bg->node);
+			if (m->stats_panel_border)
+				wlr_scene_node_destroy(&m->stats_panel_border->node);
+			if (m->stats_panel_content)
+				wlr_scene_node_destroy(&m->stats_panel_content->node);
 			m->stats_panel_bg = NULL;
 			m->stats_panel_border = NULL;
 			m->stats_panel_content = NULL;
@@ -2387,7 +2567,7 @@ stats_panel_refresh_cb(void *data)
 
 	/* Separator */
 	static const float sep_color[4] = {0.3f, 0.3f, 0.4f, 1.0f};
-	y_offset += stats_render_separator(m->stats_panel_tree, y_offset,
+	y_offset += stats_render_separator(m->stats_panel_content, y_offset,
 			m->stats_panel_width, padding, sep_color);
 
 	/* ============ VRR STATUS SECTION ============ */
@@ -2439,7 +2619,7 @@ stats_panel_refresh_cb(void *data)
 	}
 	y_offset += line_height + 8;
 
-	y_offset += stats_render_separator(m->stats_panel_tree, y_offset,
+	y_offset += stats_render_separator(m->stats_panel_content, y_offset,
 			m->stats_panel_width, padding, sep_color);
 
 	/* ============ FRAME SMOOTHING SECTION ============ */
@@ -2504,7 +2684,7 @@ stats_panel_refresh_cb(void *data)
 	y_offset += 8;
 
 	/* Separator */
-	y_offset += stats_render_separator(m->stats_panel_tree, y_offset,
+	y_offset += stats_render_separator(m->stats_panel_content, y_offset,
 			m->stats_panel_width, padding, sep_color);
 
 	/* ============ REAL-TIME COMPARISON SECTION ============ */
@@ -2550,7 +2730,7 @@ stats_panel_refresh_cb(void *data)
 	y_offset += 8;
 
 	/* Separator */
-	y_offset += stats_render_separator(m->stats_panel_tree, y_offset,
+	y_offset += stats_render_separator(m->stats_panel_content, y_offset,
 			m->stats_panel_width, padding, sep_color);
 
 	/* ============ RENDERING SECTION ============ */
@@ -2587,7 +2767,7 @@ stats_panel_refresh_cb(void *data)
 	y_offset += 8;
 
 	/* Separator */
-	y_offset += stats_render_separator(m->stats_panel_tree, y_offset,
+	y_offset += stats_render_separator(m->stats_panel_content, y_offset,
 			m->stats_panel_width, padding, sep_color);
 
 	/* ============ GAME MODE SECTION ============ */
@@ -2668,7 +2848,7 @@ stats_panel_refresh_cb(void *data)
 	y_offset += 8;
 
 	/* Separator */
-	y_offset += stats_render_separator(m->stats_panel_tree, y_offset,
+	y_offset += stats_render_separator(m->stats_panel_content, y_offset,
 			m->stats_panel_width, padding, sep_color);
 
 	/* ============ INPUT LATENCY SECTION ============ */
@@ -2727,7 +2907,7 @@ stats_panel_refresh_cb(void *data)
 		}
 		y_offset += 8;
 
-		y_offset += stats_render_separator(m->stats_panel_tree, y_offset,
+		y_offset += stats_render_separator(m->stats_panel_content, y_offset,
 				m->stats_panel_width, padding, sep_color);
 	}
 
@@ -2755,7 +2935,7 @@ stats_panel_refresh_cb(void *data)
 	}
 
 	/* Separator */
-	y_offset += stats_render_separator(m->stats_panel_tree, y_offset,
+	y_offset += stats_render_separator(m->stats_panel_content, y_offset,
 			m->stats_panel_width, padding, sep_color);
 
 	/* ============ FRAME STATS SECTION ============ */
@@ -2778,7 +2958,7 @@ stats_panel_refresh_cb(void *data)
 	y_offset += 8;
 
 	/* Separator */
-	y_offset += stats_render_separator(m->stats_panel_tree, y_offset,
+	y_offset += stats_render_separator(m->stats_panel_content, y_offset,
 			m->stats_panel_width, padding, sep_color);
 
 	/* ============ FPS LIMITER SECTION ============ */
@@ -2830,7 +3010,7 @@ stats_panel_refresh_cb(void *data)
 	y_offset += 8;
 
 	/* Separator */
-	y_offset += stats_render_separator(m->stats_panel_tree, y_offset,
+	y_offset += stats_render_separator(m->stats_panel_content, y_offset,
 			m->stats_panel_width, padding, sep_color);
 
 	/* ============ CONTROLS SECTION ============ */

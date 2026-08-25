@@ -2318,7 +2318,10 @@ diag_timer_cb(void *data)
 
 	diag_log_cpu_breakdown();
 	diag_log_io_stats();
-	diag_log_nvidia();
+	/* nvidia-smi is a synchronous popen that can block 100-500 ms under
+	 * GPU load — a guaranteed multi-frame stall. Never during a game. */
+	if (!game_mode_active)
+		diag_log_nvidia();
 
 	/* Reschedule at 10s instead of 5s — halves wakeups while still useful */
 	if (diag_timer)
@@ -2646,6 +2649,10 @@ client_ping_tick(void *data)
 	wl_list_for_each(c, &clients, link) {
 		struct wlr_surface *s = client_surface(c);
 		if (!s || !s->mapped || client_is_unmanaged(c))
+			continue;
+		/* Don't make the game service ping round-trips mid-session;
+		 * a hung game is obvious without the watchdog. */
+		if (game_mode_active && c->isfullscreen && looks_like_game(c))
 			continue;
 #ifdef XWAYLAND
 		if (client_is_x11(c)) {
