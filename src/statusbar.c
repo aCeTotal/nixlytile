@@ -4066,6 +4066,9 @@ positionstatusmodules(Monitor *m)
 	if (m->statusbar.volume.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.volume.tree->node,
 				m->statusbar.volume.width > 0);
+	if (m->statusbar.fan.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.fan.tree->node,
+				m->statusbar.fan.width > 0);
 	if (m->statusbar.ram.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.ram.tree->node,
 				m->statusbar.ram.width > 0);
