@@ -29,7 +29,7 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            dwl_ipc.o dwl-ipc-unstable-v2-protocol.o window_ipc.o \
            config_parser.o config_loader.o monitors_conf.o monitor_setup.o \
            input_conf.o \
-           apptoggle.o mic_watch.o audio_watch.o gaming_conf.o gshortcuts.o \
+           apptoggle.o mic_watch.o audio_watch.o audio_devices.o gaming_conf.o gshortcuts.o \
            statusbar.o tray.o statusbar_support.o terminfo.o launchfx.o diag.o \
            popup_card.o popup_extra.o \
            notify.o instruments.o converge.o spawn.o osd.o
@@ -115,6 +115,8 @@ apptoggle.o: $(SRC)/apptoggle.c $(SRC)/nixlytile.h $(SRC)/client.h
 mic_watch.o: $(SRC)/mic_watch.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 audio_watch.o: $(SRC)/audio_watch.c $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+audio_devices.o: $(SRC)/audio_devices.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 gaming_conf.o: $(SRC)/gaming_conf.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<

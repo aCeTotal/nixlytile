@@ -482,6 +482,16 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 			return 1;
 	}
 
+	if (m->statusbar.volume_popup.visible) {
+		if (volume_popup_handle_click(m, lx, ly, button))
+			return 1;
+	}
+
+	if (m->statusbar.mic_popup.visible) {
+		if (mic_popup_handle_click(m, lx, ly, button))
+			return 1;
+	}
+
 	if (lx < 0 || ly < 0 ||
 			lx >= m->statusbar.area.width ||
 			ly >= m->statusbar.area.height)
@@ -671,6 +681,8 @@ buttonpress(struct wl_listener *listener, void *data)
 		}
 		break;
 	case WL_POINTER_BUTTON_STATE_RELEASED:
+		/* End a volume/mic popup gauge drag with a final commit. */
+		info_popup_slider_release();
 		/* Without this reset the internal-call guard in motionnotify
 		 * (time == 0 && resizing_from_mouse) stays armed forever
 		 * after the first mouse resize. */

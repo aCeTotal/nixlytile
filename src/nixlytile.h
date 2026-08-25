@@ -518,8 +518,8 @@ typedef struct {
 	PopupView view;
 } NetPopup;
 
-/* Simple hover popup (clock / volume / mic / light) — card content
- * only, no interactive elements. */
+/* Hover popup (clock / volume / mic / light).  Volume/mic carry
+ * interactive hits: device rows and the gauge-as-slider. */
 typedef struct {
 	struct wlr_scene_tree *tree;
 	int width;
@@ -527,8 +527,18 @@ typedef struct {
 	int visible;
 	uint64_t hover_start_ms;
 	uint64_t last_render_ms;
+	int btn_hover;          /* hit id under cursor, -1 = none */
+	CardHit hits[CARD_MAX_HITS];
+	int nhits;
 	PopupView view;
 } InfoPopup;
+
+/* PipeWire sink/source as listed by wpctl status (audio_devices.c) */
+typedef struct {
+	uint32_t id;
+	char name[64];
+	int is_default;
+} AudioDevice;
 
 typedef struct {
 	void (*fn)(void);
@@ -2663,6 +2673,12 @@ void updateinfopopups(Monitor *m, double cx, double cy);
 int info_popup_pending(Monitor *m);
 int info_popup_visible(Monitor *m);
 void info_popups_hide(Monitor *m);
+int volume_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
+int mic_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
+void info_popup_slider_release(void);
+/* audio_devices.c */
+int audio_list_devices(int sources, AudioDevice *out, int max);
+void audio_set_default(uint32_t id);
 int battery_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 void read_power_profile(BatteryPopup *p);
 void updatecpuhover(Monitor *m, double cx, double cy);

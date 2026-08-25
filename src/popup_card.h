@@ -34,6 +34,7 @@ typedef struct CardHit {
 
 typedef struct CardFill {
 	int x, y, w, h;      /* full-size fill area inside the card */
+	int full_w;          /* track width (w = current fill of it) */
 	float color[4];
 } CardFill;
 
@@ -47,6 +48,10 @@ void card_header(Card *c, const char *icon_path, const char *title,
 /* Slim rounded gauge; fill is emitted as a CardFill so the presenter
  * can sweep-animate it. frac clamped to [0,1]. */
 void card_gauge(Card *c, double frac, const float accent[4]);
+/* Gauge that doubles as a slider: the track is recorded as a hit rect
+ * with hit_id, and the fill can later be moved smoothly with
+ * popup_view_set_fill_frac(). */
+void card_gauge_id(Card *c, double frac, const float accent[4], int hit_id);
 /* Two-column key/value row; pass NULL k2 for a single pair. Value
  * colors may be NULL (defaults to fg). */
 void card_kv2(Card *c, const char *k1, const char *v1, const float *v1col,
@@ -88,8 +93,10 @@ typedef struct PopupView {
 	struct wlr_scene_tree *content;      /* child of the popup tree */
 	struct wlr_scene_buffer *card;
 	struct wlr_scene_buffer *fills[CARD_MAX_FILLS];
-	int fill_w[CARD_MAX_FILLS];
+	int fill_w[CARD_MAX_FILLS];      /* target (resting) fill width */
 	int fill_h[CARD_MAX_FILLS];
+	int fill_full_w[CARD_MAX_FILLS]; /* track width */
+	int fill_disp_w[CARD_MAX_FILLS]; /* currently displayed width */
 	int nfills;
 	int w, h;
 	uint64_t anim_start_ms;
@@ -104,6 +111,8 @@ void popup_view_apply(PopupView *v, struct wlr_scene_tree *tree,
 void popup_view_show(PopupView *v);
 /* Stop animating + reset (call when the popup is hidden). */
 void popup_view_hide(PopupView *v);
+/* Ease fill i to `frac` of its track width (slider feedback). */
+void popup_view_set_fill_frac(PopupView *v, int i, double frac);
 
 /* Measure helpers for callers that need text widths in card fonts. */
 int card_text_width(const char *s);

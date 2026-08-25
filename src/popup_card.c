@@ -306,7 +306,7 @@ card_header(Card *c, const char *icon_path, const char *title,
 }
 
 void
-card_gauge(Card *c, double frac, const float accent[4])
+card_gauge_id(Card *c, double frac, const float accent[4], int hit_id)
 {
 	CardRow *r = row_new(c, CROW_GAUGE);
 
@@ -317,10 +317,17 @@ card_gauge(Card *c, double frac, const float accent[4])
 	if (frac > 1.0)
 		frac = 1.0;
 	r->frac = frac;
+	r->hit_id = hit_id;
 	if (accent)
 		memcpy(r->accent, accent, sizeof(r->accent));
 	else
 		memcpy(r->accent, card_col_fg, sizeof(r->accent));
+}
+
+void
+card_gauge(Card *c, double frac, const float accent[4])
+{
+	card_gauge_id(c, frac, accent, -1);
 }
 
 void
@@ -631,17 +638,22 @@ card_finish(Card *c, CardResult *out)
 			rounded(cr, CARD_PAD, gy, inner_w, 6, 3);
 			cairo_set_source_rgba(cr, 1, 1, 1, 0.13);
 			cairo_fill(cr);
-			if (out->nfills < CARD_MAX_FILLS && r->frac > 0.0) {
+			if (out->nfills < CARD_MAX_FILLS &&
+					(r->frac > 0.0 || r->hit_id >= 0)) {
 				int fw = (int)lround(inner_w * r->frac);
 				if (fw < 6)
 					fw = 6;
 				out->fills[out->nfills++] = (CardFill){
 					.x = CARD_PAD, .y = gy,
 					.w = fw, .h = 6,
+					.full_w = inner_w,
 					.color = { r->accent[0], r->accent[1],
 						r->accent[2], r->accent[3] },
 				};
 			}
+			if (r->hit_id >= 0)
+				add_hit(out, CARD_PAD, y, inner_w, r->h,
+						r->hit_id);
 			break;
 		}
 		case CROW_SECTION:
@@ -999,6 +1011,7 @@ view_anim_frame(PopupView *v, uint64_t now)
 		rw = (int)lroundf(fw * es);
 		if (rw < 1)
 			rw = 1;
+		v->fill_disp_w[i] = rw;
 		wlr_scene_buffer_set_source_box(fb, &(struct wlr_fbox){
 			.x = 0, .y = 0, .width = rw, .height = fh });
 		wlr_scene_buffer_set_dest_size(fb, rw, fh);
@@ -1011,6 +1024,34 @@ view_anim_frame(PopupView *v, uint64_t now)
 	return 1;
 }
 
+/* Ease each fill's displayed width toward its target (slider moves);
+ * returns 1 while any fill is still converging. */
+static int
+view_slider_frame(PopupView *v)
+{
+	int still = 0;
+
+	for (int i = 0; i < v->nfills; i++) {
+		struct wlr_scene_buffer *fb = v->fills[i];
+		int target = v->fill_w[i], disp = v->fill_disp_w[i];
+		int step;
+
+		if (!fb || target == disp)
+			continue;
+		step = (target - disp) / 4;
+		if (step == 0)
+			step = target > disp ? 1 : -1;
+		disp += step;
+		v->fill_disp_w[i] = disp;
+		wlr_scene_buffer_set_source_box(fb, &(struct wlr_fbox){
+			.x = 0, .y = 0, .width = disp, .height = v->fill_h[i] });
+		wlr_scene_buffer_set_dest_size(fb, disp, v->fill_h[i]);
+		if (disp != target)
+			still = 1;
+	}
+	return still;
+}
+
 static int
 card_anim_tick(void *data)
 {
@@ -1019,7 +1060,8 @@ card_anim_tick(void *data)
 
 	(void)data;
 	for (int i = 0; i < anim_count; i++) {
-		if (view_anim_frame(anim_views[i], now)) {
+		if (view_anim_frame(anim_views[i], now) ||
+				view_slider_frame(anim_views[i])) {
 			still = 1;
 		} else {
 			memmove(&anim_views[i], &anim_views[i + 1],
@@ -1093,7 +1135,8 @@ popup_view_apply(PopupView *v, struct wlr_scene_tree *tree, CardResult *res)
 
 	for (int i = 0; i < res->nfills && i < CARD_MAX_FILLS; i++) {
 		CardFill *f = &res->fills[i];
-		struct wlr_buffer *fb = make_fill_buffer(f->w, f->h, f->color);
+		int buf_w = f->full_w > f->w ? f->full_w : f->w;
+		struct wlr_buffer *fb = make_fill_buffer(buf_w, f->h, f->color);
 		struct wlr_scene_buffer *sb;
 
 		if (!fb)
@@ -1102,9 +1145,14 @@ popup_view_apply(PopupView *v, struct wlr_scene_tree *tree, CardResult *res)
 		if (sb) {
 			wlr_scene_buffer_set_buffer(sb, fb);
 			wlr_scene_node_set_position(&sb->node, f->x, f->y);
+			wlr_scene_buffer_set_source_box(sb, &(struct wlr_fbox){
+				.x = 0, .y = 0, .width = f->w, .height = f->h });
+			wlr_scene_buffer_set_dest_size(sb, f->w, f->h);
 			v->fills[v->nfills] = sb;
 			v->fill_w[v->nfills] = f->w;
 			v->fill_h[v->nfills] = f->h;
+			v->fill_full_w[v->nfills] = buf_w;
+			v->fill_disp_w[v->nfills] = f->w;
 			v->nfills++;
 		}
 		wlr_buffer_drop(fb);
@@ -1119,6 +1167,24 @@ popup_view_apply(PopupView *v, struct wlr_scene_tree *tree, CardResult *res)
 	 * data refresh doesn't pop to full opacity */
 	if (v->animating)
 		view_anim_frame(v, monotonic_msec());
+}
+
+void
+popup_view_set_fill_frac(PopupView *v, int i, double frac)
+{
+	int target;
+
+	if (!v || i < 0 || i >= v->nfills || !v->fills[i])
+		return;
+	if (frac < 0.0)
+		frac = 0.0;
+	if (frac > 1.0)
+		frac = 1.0;
+	target = (int)lround(v->fill_full_w[i] * frac);
+	if (target < 1)
+		target = 1;
+	v->fill_w[i] = target;
+	anim_register(v);
 }
 
 void

@@ -1754,8 +1754,8 @@ renderrampopup(Monitor *m)
 		}
 	}
 
-	/* Totals straight from /proc/meminfo — ram_last_mb only carries
-	 * the used amount. */
+	/* Total from /proc/meminfo; used is the bar module's last value so
+	 * bar and popup always show the exact same number. */
 	{
 		FILE *fp = fopen("/proc/meminfo", "r");
 		char line[128];
@@ -1763,18 +1763,17 @@ renderrampopup(Monitor *m)
 
 		if (fp) {
 			while (fgets(line, sizeof(line), fp)) {
-				if (sscanf(line, "MemTotal: %llu kB", &kb) == 1)
+				if (sscanf(line, "MemTotal: %llu kB", &kb) == 1) {
 					total_mb = kb / 1024.0;
-				else if (sscanf(line, "MemAvailable: %llu kB", &kb) == 1)
-					avail_mb = kb / 1024.0;
-				if (total_mb >= 0.0 && avail_mb >= 0.0)
 					break;
+				}
 			}
 			fclose(fp);
 		}
 	}
-	used_mb = (total_mb >= 0.0 && avail_mb >= 0.0) ?
-		total_mb - avail_mb : ram_last_mb;
+	used_mb = ram_last_mb >= 0.0 ? ram_last_mb : ramused_mb();
+	if (total_mb >= 0.0 && used_mb >= 0.0 && used_mb <= total_mb)
+		avail_mb = total_mb - used_mb;
 	if (total_mb > 0.0 && used_mb >= 0.0)
 		used_frac = used_mb / total_mb;
 
@@ -2911,27 +2910,38 @@ cpuaverage(void)
 double
 ramused_mb(void)
 {
-	FILE *fp;
-	char line[256];
-	unsigned long long total = 0, avail = 0;
+	/* Sum of process RSS — excludes kernel slab, page cache and other
+	 * reclaimable memory, so the bar shows what processes actually hold. */
+	DIR *dir;
+	struct dirent *de;
+	unsigned long long pages = 0;
+	long page_kb = sysconf(_SC_PAGESIZE) / 1024;
 
-	fp = fopen("/proc/meminfo", "r");
-	if (!fp)
+	dir = opendir("/proc");
+	if (!dir)
 		return -1.0;
 
-	while (fgets(line, sizeof(line), fp)) {
-		if (sscanf(line, "MemTotal: %llu kB", &total) == 1)
+	while ((de = readdir(dir))) {
+		char path[64];
+		FILE *fp;
+		unsigned long long resident;
+
+		if (de->d_name[0] < '0' || de->d_name[0] > '9')
 			continue;
-		if (sscanf(line, "MemAvailable: %llu kB", &avail) == 1)
-			break;
+		snprintf(path, sizeof(path), "/proc/%s/statm", de->d_name);
+		fp = fopen(path, "r");
+		if (!fp)
+			continue;
+		if (fscanf(fp, "%*s %llu", &resident) == 1)
+			pages += resident;
+		fclose(fp);
 	}
+	closedir(dir);
 
-	fclose(fp);
-
-	if (total == 0 || avail == 0 || avail > total)
+	if (pages == 0)
 		return -1.0;
 
-	return (double)(total - avail) / 1024.0;
+	return (double)pages * page_kb / 1024.0;
 }
 
 int
@@ -5782,6 +5792,8 @@ initstatusbar(Monitor *m)
 				info[i]->visible = 0;
 				info[i]->hover_start_ms = 0;
 				info[i]->last_render_ms = 0;
+				info[i]->btn_hover = -1;
+				info[i]->nhits = 0;
 				if (info[i]->tree)
 					wlr_scene_node_set_enabled(&info[i]->tree->node, 0);
 			}
