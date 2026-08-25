@@ -2751,6 +2751,10 @@ rendermon(struct wl_listener *listener, void *data)
 			wlr_output_schedule_frame(m->wlr_output);
 	}
 
+	/* Audio-meter overlay: one exact-phase redraw per displayed frame
+	 * while a volume/mic popup is up (see meter_frame_tick). */
+	meter_frame_tick(m);
+
 	/* Cross-monitor paint audit — after the anim/converge tick so it
 	 * sees exactly the scene state this frame's build will render. */
 	diag_xpaint_audit(m, frame_start_ns);

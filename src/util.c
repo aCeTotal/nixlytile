@@ -4,8 +4,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <spawn.h>
 #include <unistd.h>
 #include <sys/wait.h>
+
+extern char **environ;
 
 #include "util.h"
 
@@ -107,6 +110,8 @@ int
 spawn_async_read(const char *cmd, pid_t *out_pid, int *out_fd)
 {
 	int pipefd[2];
+	posix_spawn_file_actions_t fa;
+	char *argv[] = { "/bin/sh", "-c", (char *)cmd, NULL };
 
 	if (!cmd || !out_pid || !out_fd)
 		return -1;
@@ -114,20 +119,22 @@ spawn_async_read(const char *cmd, pid_t *out_pid, int *out_fd)
 	if (pipe(pipefd) != 0)
 		return -1;
 
-	*out_pid = fork();
-	if (*out_pid == 0) {
-		close(pipefd[0]);
-		dup2(pipefd[1], STDOUT_FILENO);
-		dup2(pipefd[1], STDERR_FILENO);
-		close(pipefd[1]);
-		execl("/bin/sh", "/bin/sh", "-c", cmd, NULL);
-		_exit(127);
-	} else if (*out_pid < 0) {
+	/* posix_spawn (vfork-based): fork() from the compositor copies the
+	 * whole page-table incl. GPU mappings and stalls the event loop for
+	 * tens of ms, felt as a cursor hitch on every popup data refresh */
+	posix_spawn_file_actions_init(&fa);
+	posix_spawn_file_actions_addclose(&fa, pipefd[0]);
+	posix_spawn_file_actions_adddup2(&fa, pipefd[1], STDOUT_FILENO);
+	posix_spawn_file_actions_adddup2(&fa, pipefd[1], STDERR_FILENO);
+	posix_spawn_file_actions_addclose(&fa, pipefd[1]);
+	if (posix_spawn(out_pid, "/bin/sh", &fa, NULL, argv, environ) != 0) {
+		posix_spawn_file_actions_destroy(&fa);
 		close(pipefd[0]);
 		close(pipefd[1]);
 		*out_pid = -1;
 		return -1;
 	}
+	posix_spawn_file_actions_destroy(&fa);
 
 	close(pipefd[1]);
 	*out_fd = pipefd[0];

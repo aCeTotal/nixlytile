@@ -145,6 +145,13 @@ int volume_icon_loaded_h;
 int volume_icon_w;
 int volume_icon_h;
 struct wlr_buffer *volume_icon_buf;
+char fan_icon_path[PATH_MAX] = "images/svg/fan.svg";
+char fan_icon_loaded_path[PATH_MAX];
+int fan_icon_loaded_h;
+int fan_icon_w;
+int fan_icon_h;
+struct wlr_buffer *fan_icon_buf;
+char fan_text[32] = "--";
 unsigned long long net_prev_rx;
 unsigned long long net_prev_tx;
 struct timespec net_prev_ts;
@@ -1505,9 +1512,3 @@ int ssid_fd = -1;
 char ssid_buf[256];
 size_t ssid_len = 0;
 
-/* fancontrol.c was removed in the modular split; the fan status task is
- * a no-op so STATUS_TASKS_COUNT and status_tasks[] stay consistent. */
-void
-refreshstatusfan(void)
-{
-}

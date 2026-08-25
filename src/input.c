@@ -500,6 +500,11 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 			return 1;
 	}
 
+	if (m->statusbar.fan_popup.visible) {
+		if (fan_popup_handle_click(m, lx, ly, button))
+			return 1;
+	}
+
 	if (lx < 0 || ly < 0 ||
 			lx >= m->statusbar.area.width ||
 			ly >= m->statusbar.area.height)

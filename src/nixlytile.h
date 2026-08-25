@@ -572,15 +572,8 @@ typedef struct {
 	int pwm;
 	int pwm_enable;
 	int temp_mc;
-	uint8_t ec_reg_rpm;
-	uint8_t ec_reg_rpm_h;  /* 16-bit RPM tachometer high byte */
-	uint8_t ec_reg_rpm_l;  /* 16-bit RPM tachometer low byte */
-	uint8_t ec_reg_temp;
-	int msi_sysfs; /* uses /sys/devices/platform/msi-ec/ */
+	int msi_sysfs; /* uses /sys/devices/platform/msi-ec/ (rpm = percent) */
 	char msi_sysfs_dir[16]; /* "cpu" or "gpu" */
-	int slider_x, slider_y;
-	int slider_w, slider_h;
-	int row_y, row_h;
 } FanEntry;
 
 typedef struct {
@@ -590,31 +583,6 @@ typedef struct {
 	int fan_count;
 	FanEntry fans[FAN_MAX_PER_DEV];
 } FanDevice;
-
-typedef struct {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *bg;
-	int width;
-	int height;
-	int visible;
-	uint64_t last_fetch_ms;
-	uint64_t last_render_ms;
-	uint64_t hover_start_ms;
-	int dragging;
-	int drag_fan_idx;
-	int device_count;
-	FanDevice devices[FAN_MAX_DEVICES];
-	int total_fans;
-	/* msi-ec system-wide controls */
-	int msi_ec;
-	int fan_mode;           /* 0=auto, 1=silent, 2=advanced */
-	int shift_mode;         /* 0=eco, 1=comfort, 2=sport, 3=turbo */
-	int cooler_boost;       /* 0=off, 1=on */
-	/* hit areas for msi-ec controls */
-	int fanmode_y, fanmode_h;
-	int shiftmode_y, shiftmode_h;
-	int boost_y, boost_h;
-} FanPopup;
 
 typedef struct TrayMenuEntry {
 	int id;
@@ -668,7 +636,7 @@ struct StatusBar {
 	RamPopup ram_popup;
 	BatteryPopup battery_popup;
 	NetPopup net_popup;
-	FanPopup fan_popup;
+	InfoPopup fan_popup;
 	InfoPopup clock_popup;
 	InfoPopup volume_popup;
 	InfoPopup mic_popup;
@@ -2061,8 +2029,6 @@ extern char fan_icon_loaded_path[PATH_MAX];
 extern int fan_icon_loaded_h, fan_icon_w, fan_icon_h;
 extern struct wlr_buffer *fan_icon_buf;
 extern char fan_text[32];
-extern char last_fan_render[32];
-extern int last_fan_h;
 extern unsigned long long net_prev_rx;
 extern unsigned long long net_prev_tx;
 extern struct timespec net_prev_ts;
@@ -2678,6 +2644,7 @@ int volume_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 int mic_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 int light_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 void info_popup_slider_release(void);
+void meter_frame_tick(Monitor *m);
 /* audio_devices.c */
 int audio_list_devices(int sources, AudioDevice *out, int max);
 int audio_parse_status_devices(FILE *fp, int sources, AudioDevice *out, int max);
@@ -2695,21 +2662,23 @@ void updateramhover(Monitor *m, double cx, double cy);
 void updatebatteryhover(Monitor *m, double cx, double cy);
 
 /* fancontrol.c */
-void fan_scan_hwmon(FanPopup *p);
-void fan_read_all(FanPopup *p);
-void fan_write_pwm(FanEntry *f, int pwm);
-void fan_set_manual(FanEntry *f);
-void fan_set_auto(FanEntry *f);
-void renderfanpopup(Monitor *m);
+extern FanDevice fan_devices[FAN_MAX_DEVICES];
+extern int fan_ndevices;
+extern int fan_total_fans;
+extern int fan_has_msi;
+extern int fan_cooler_boost_on;
+int fan_scan(void);
+void fan_refresh(void);
+FanEntry *fan_flat(int idx);
+void fan_entry_set_frac(FanEntry *f, double frac);
+void fan_entry_set_auto(FanEntry *f);
+void fan_cooler_boost_set(int on);
+int fan_primary_value(char *buf, size_t len);
 int fan_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
-void fan_popup_handle_drag(Monitor *m, double cx, double cy);
-void updatefanhover(Monitor *m, double cx, double cy);
 void renderfan(StatusModule *module, int bar_height, const char *text);
 int ensure_fan_icon_buffer(int target_h);
 void drop_fan_icon_buffer(void);
 /* fan_boost_activate/deactivate are file-local (static) in gamemode.c */
-void fan_thermal_start(void);
-void fan_thermal_stop(void);
 int updatestatuscpu(void *data);
 int updatestatusclock(void *data);
 int updatehoverfade(void *data);

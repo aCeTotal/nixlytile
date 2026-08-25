@@ -594,25 +594,81 @@ rounded(cairo_t *cr, double x, double y, double w, double h, double r)
 	cairo_close_path(cr);
 }
 
+/* Icons are re-drawn on every card re-render (popup data refreshes every
+ * couple of seconds); cache the rasterized SVG per (path, size) so the
+ * disk read + XML parse only happens once. */
+#define ICON_CACHE 16
+
+static struct {
+	char path[PATH_MAX];
+	int size;
+	uint64_t used;
+	cairo_surface_t *surf;
+} icon_cache[ICON_CACHE];
+static uint64_t icon_cache_tick;
+
 static void
 draw_icon(cairo_t *cr, const char *path, int x, int y, int size)
 {
 	char resolved[PATH_MAX];
-	gchar *data = NULL;
-	gsize len = 0;
-	RsvgHandle *handle;
-	RsvgRectangle vp = { .x = x, .y = y, .width = size, .height = size };
+	cairo_surface_t *surf = NULL;
+	int lru = 0;
 
 	if (resolve_asset_path(path, resolved, sizeof(resolved)) != 0)
 		return;
-	if (!g_file_get_contents(resolved, &data, &len, NULL) || !data)
-		return;
-	handle = rsvg_handle_new_from_data((const guint8 *)data, len, NULL);
-	g_free(data);
-	if (!handle)
-		return;
-	rsvg_handle_render_document(handle, cr, &vp, NULL);
-	g_object_unref(handle);
+
+	for (int i = 0; i < ICON_CACHE; i++) {
+		if (icon_cache[i].surf && icon_cache[i].size == size &&
+				!strcmp(icon_cache[i].path, resolved)) {
+			icon_cache[i].used = ++icon_cache_tick;
+			surf = icon_cache[i].surf;
+			break;
+		}
+		if (icon_cache[i].used < icon_cache[lru].used)
+			lru = i;
+	}
+
+	if (!surf) {
+		gchar *data = NULL;
+		gsize len = 0;
+		RsvgHandle *handle;
+		RsvgRectangle vp = { .x = 0, .y = 0,
+			.width = size, .height = size };
+		cairo_t *icr;
+
+		if (!g_file_get_contents(resolved, &data, &len, NULL) || !data)
+			return;
+		handle = rsvg_handle_new_from_data((const guint8 *)data, len,
+				NULL);
+		g_free(data);
+		if (!handle)
+			return;
+		surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
+				size, size);
+		if (cairo_surface_status(surf) != CAIRO_STATUS_SUCCESS) {
+			cairo_surface_destroy(surf);
+			g_object_unref(handle);
+			return;
+		}
+		icr = cairo_create(surf);
+		rsvg_handle_render_document(handle, icr, &vp, NULL);
+		cairo_destroy(icr);
+		g_object_unref(handle);
+
+		if (icon_cache[lru].surf)
+			cairo_surface_destroy(icon_cache[lru].surf);
+		snprintf(icon_cache[lru].path, sizeof(icon_cache[lru].path),
+				"%s", resolved);
+		icon_cache[lru].size = size;
+		icon_cache[lru].used = ++icon_cache_tick;
+		icon_cache[lru].surf = surf;
+	}
+
+	cairo_save(cr);
+	cairo_set_source_surface(cr, surf, x, y);
+	cairo_rectangle(cr, x, y, size, size);
+	cairo_fill(cr);
+	cairo_restore(cr);
 }
 
 static void
@@ -1093,11 +1149,12 @@ card_meter_buffer(int w, int h, const float accent[4],
 		return NULL;
 	if (phase < 0.0)
 		phase = 0.0;
-	if (phase > 1.0)
-		phase = 1.0;
+	if (phase > 2.0)
+		phase = 2.0;
 	slide = (1.0 - phase) * (bar_w + gap);
-	/* one extra bar so the left edge stays filled mid-slide */
-	for (int i = 0; i <= nbars; i++) {
+	/* extra bars so the left edge stays filled mid-slide (two when a
+	 * late push lets the phase run past 1.0) */
+	for (int i = 0; i <= nbars + 1; i++) {
 		float v = hist[((head - i) % nhist + nhist) % nhist];
 		double amp, bh;
 		double x = w - bar_w - i * (bar_w + gap) + slide;
@@ -1244,6 +1301,45 @@ card_chevron_buffer(int size)
 	cairo_stroke(cr);
 	cairo_destroy(cr);
 	return cairo_buf_finish(cs);
+}
+
+/* ── shadow cache ────────────────────────────────────────────────── */
+
+/* The shadow depends only on card size, but popups re-render their card
+ * on every data refresh; the 24-layer falloff over (w+48)×(h+48) px is
+ * the most expensive part of a re-render, so cache it per size. Cached
+ * buffers hold their init reference until evicted — the returned buffer
+ * is borrowed and must NOT be dropped by the caller. */
+#define SHADOW_CACHE 8
+
+static struct {
+	int w, h;
+	uint64_t used;
+	struct wlr_buffer *buf;
+} shadow_cache[SHADOW_CACHE];
+static uint64_t shadow_cache_tick;
+
+static struct wlr_buffer *
+shadow_cached(int w, int h)
+{
+	int lru = 0;
+
+	for (int i = 0; i < SHADOW_CACHE; i++) {
+		if (shadow_cache[i].buf && shadow_cache[i].w == w &&
+				shadow_cache[i].h == h) {
+			shadow_cache[i].used = ++shadow_cache_tick;
+			return shadow_cache[i].buf;
+		}
+		if (shadow_cache[i].used < shadow_cache[lru].used)
+			lru = i;
+	}
+	if (shadow_cache[lru].buf)
+		wlr_buffer_drop(shadow_cache[lru].buf);
+	shadow_cache[lru].buf = card_shadow_buffer(w, h, 0);
+	shadow_cache[lru].w = w;
+	shadow_cache[lru].h = h;
+	shadow_cache[lru].used = ++shadow_cache_tick;
+	return shadow_cache[lru].buf;
 }
 
 /* ── presenter + animation ───────────────────────────────────────── */
@@ -1410,9 +1506,10 @@ popup_view_apply(PopupView *v, struct wlr_scene_tree *tree, CardResult *res)
 	memset(v->fills, 0, sizeof(v->fills));
 	v->nfills = 0;
 
-	/* drop shadow below the card so the popup floats */
+	/* drop shadow below the card so the popup floats (cached buffer —
+	 * not dropped here) */
 	{
-		struct wlr_buffer *sh = card_shadow_buffer(res->w, res->h, 0);
+		struct wlr_buffer *sh = shadow_cached(res->w, res->h);
 
 		if (sh) {
 			v->shadow = wlr_scene_buffer_create(v->content, NULL);
@@ -1422,7 +1519,6 @@ popup_view_apply(PopupView *v, struct wlr_scene_tree *tree, CardResult *res)
 						-CARD_SHADOW_MARGIN,
 						-CARD_SHADOW_MARGIN);
 			}
-			wlr_buffer_drop(sh);
 		}
 	}
 

@@ -1,6 +1,6 @@
 #include "nixlytile.h"
 #include "client.h"
-#include "spawn.h"
+#include "run_cmd.h"
 #include <pthread.h>
 #include <poll.h>
 

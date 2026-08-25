@@ -143,16 +143,20 @@ power_profile_set(const char *value)
 	return write_str(path, value);
 }
 
+/* Whole file, not one line: msi-ec's available_shift_modes is one mode
+ * per line, so a single fgets saw only "eco" and power_profile_high
+ * never found "turbo" — AC landed on comfort instead of max. */
 static void
 read_choices(const char *path, char *buf, size_t len)
 {
 	FILE *fp = fopen(path, "r");
+	size_t n;
 
 	buf[0] = '\0';
 	if (!fp)
 		return;
-	if (!fgets(buf, (int)len, fp))
-		buf[0] = '\0';
+	n = fread(buf, 1, len - 1, fp);
+	buf[n] = '\0';
 	fclose(fp);
 }
 

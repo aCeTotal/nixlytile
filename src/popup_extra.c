@@ -14,6 +14,9 @@
 #define METER_TICK_MS  16   /* draw rate (~60 fps) */
 #define METER_PUSH_MS  33   /* history sample period */
 #define LIGHT_MODE_HIT_BASE 200
+#define FAN_SLIDER_BASE 300  /* + flat fan index (pwm gauge) */
+#define FAN_AUTO_BASE   340  /* + flat fan index ("Auto" button) */
+#define FAN_BOOST_HIT   380  /* msi-ec cooler boost chip */
 
 /* ── live audio meter overlay (volume=0 / mic=1) ─────────────────── */
 
@@ -33,15 +36,21 @@ static uint64_t meter_push_ms;    /* when the newest sample was pushed */
 static int meter_tick(void *data);
 
 /* Fraction of the sample period elapsed since the newest push — drives
- * the sub-pixel slide in card_meter_buffer. */
+ * the sub-pixel slide in card_meter_buffer.  May exceed 1.0: pushes are
+ * quantized to timer ticks, so a late push would otherwise freeze the
+ * slide at the slot boundary and then jump backwards when the sample
+ * lands.  Letting the phase run on keeps the scroll uniform through a
+ * late push (the timeline itself is kept uniform by the cadence-stable
+ * meter_push_ms += METER_PUSH_MS in meter_tick). */
 static double
 meter_phase(uint64_t now)
 {
+	double ph;
+
 	if (!meter_push_ms || now <= meter_push_ms)
 		return 0.0;
-	if (now - meter_push_ms >= METER_PUSH_MS)
-		return 1.0;
-	return (double)(now - meter_push_ms) / METER_PUSH_MS;
+	ph = (double)(now - meter_push_ms) / METER_PUSH_MS;
+	return ph > 2.0 ? 2.0 : ph;
 }
 
 /* (Re)create the overlay node and swap in a freshly drawn frame. Safe
@@ -243,9 +252,37 @@ meter_tick(void *data)
 			meter_push_ms = now;
 	}
 
-	meter_overlay_draw(p, is_mic, meter_phase(now));
+	/* Drawing happens in meter_frame_tick (one exact-phase redraw per
+	 * displayed frame); here just keep the vblank chain alive in case
+	 * the self-sustaining damage loop ever breaks. */
+	if (m->wlr_output)
+		wlr_output_schedule_frame(m->wlr_output);
 	meter_timer_arm();
 	return 0;
+}
+
+/* Called from rendermon once per output frame while an audio popup is
+ * visible: redraw the meter with the phase at draw time, so the scroll
+ * is locked to the display clock instead of beating against the 16 ms
+ * timer (the source of the occasional judder).  Each redraw damages the
+ * scene, which schedules the next frame — a self-sustaining per-frame
+ * loop that stops as soon as the popup hides. */
+void
+meter_frame_tick(Monitor *m)
+{
+	InfoPopup *p;
+	int is_mic;
+
+	if (m->statusbar.volume_popup.visible) {
+		p = &m->statusbar.volume_popup;
+		is_mic = 0;
+	} else if (m->statusbar.mic_popup.visible) {
+		p = &m->statusbar.mic_popup;
+		is_mic = 1;
+	} else {
+		return;
+	}
+	meter_overlay_draw(p, is_mic, meter_phase(monotonic_msec()));
 }
 
 /* ── content builders ────────────────────────────────────────────── */
@@ -507,6 +544,158 @@ render_light_popup(Monitor *m)
 	popup_view_apply(&p->view, p->tree, &res);
 	p->width = p->view.w;
 	p->height = p->view.h;
+}
+
+static int info_popup_clamped_x(Monitor *m, StatusModule *mod, InfoPopup *p);
+
+/* Fan overview + control: per-device sections with RPM/percent and
+ * temperature, a pwm gauge per controllable hwmon fan (click to set,
+ * "Auto" to hand back to the BIOS curve), and the msi-ec cooler-boost
+ * switch.  Replaces mcontrolcenter. */
+static void
+render_fan_popup(Monitor *m)
+{
+	InfoPopup *p = &m->statusbar.fan_popup;
+	Card *card;
+	CardResult res;
+	char value[24], v1[32], v2[32], sect[80];
+	int flat = 0;
+
+	if (!p->tree || fan_total_fans <= 0)
+		return;
+	fan_refresh();
+
+	card = card_begin();
+	if (!card)
+		return;
+
+	if (fan_primary_value(value, sizeof(value)) != 0)
+		snprintf(value, sizeof(value), "--");
+	card_header(card, fan_icon_path, "Fans", "COOLING", value);
+	card_gap(card, 6);
+
+	for (int d = 0; d < fan_ndevices; d++) {
+		FanDevice *dev = &fan_devices[d];
+		size_t si;
+
+		if (dev->type == FAN_DEV_MSI_EC)
+			snprintf(sect, sizeof(sect), "LAPTOP FANS");
+		else
+			snprintf(sect, sizeof(sect), "%s", dev->name);
+		for (si = 0; sect[si]; si++)
+			sect[si] = (char)toupper((unsigned char)sect[si]);
+		card_section(card, sect);
+
+		for (int f = 0; f < dev->fan_count; f++) {
+			FanEntry *fe = &dev->fans[f];
+
+			if (fe->msi_sysfs)
+				snprintf(v1, sizeof(v1), "%d%%", fe->rpm);
+			else
+				snprintf(v1, sizeof(v1), "%d RPM", fe->rpm);
+			if (fe->temp_mc > 0) {
+				snprintf(v2, sizeof(v2), "%d\302\260C",
+						fe->temp_mc / 1000);
+				card_kv2(card, fe->label, v1, NULL,
+						"Temp", v2, NULL);
+			} else {
+				card_kv2(card, fe->label, v1, NULL,
+						NULL, NULL, NULL);
+			}
+
+			if (fe->has_pwm) {
+				card_gap(card, 2);
+				card_gauge_id(card, fe->pwm / 255.0,
+						fe->pwm_enable == 1 ?
+						card_col_yellow : card_col_blue,
+						FAN_SLIDER_BASE + flat);
+				card_gap(card, 2);
+				card_text_btn(card, "Control",
+						fe->pwm_enable == 1 ?
+						"Manual" : "Auto",
+						fe->pwm_enable == 1 ?
+						card_col_yellow : card_col_green,
+						fe->pwm_enable == 1 ?
+						"Auto" : NULL,
+						fe->pwm_enable == 1 ?
+						FAN_AUTO_BASE + flat : -1,
+						p->btn_hover ==
+						FAN_AUTO_BASE + flat);
+			}
+			flat++;
+		}
+	}
+
+	if (fan_has_msi) {
+		card_section(card, "COOLER BOOST");
+		card_kv2_btn(card, "All fans", "Max speed", NULL, "State",
+				fan_cooler_boost_on ? "On" : "Off",
+				fan_cooler_boost_on ? card_col_red : NULL,
+				FAN_BOOST_HIT, p->btn_hover == FAN_BOOST_HIT);
+	}
+
+	if (card_finish(card, &res) != 0)
+		return;
+	memcpy(p->hits, res.hits, sizeof(p->hits));
+	p->nhits = res.nhits;
+	popup_view_apply(&p->view, p->tree, &res);
+	p->width = p->view.w;
+	p->height = p->view.h;
+}
+
+/* Click in the fan popup: pwm gauge = set that fan's speed (manual),
+ * "Auto" = back to the firmware curve, boost chip = toggle. */
+int
+fan_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
+{
+	InfoPopup *p = &m->statusbar.fan_popup;
+	int popup_x, rel_x, rel_y;
+
+	if (!p->visible || button != BTN_LEFT)
+		return 0;
+
+	popup_x = info_popup_clamped_x(m, &m->statusbar.fan, p);
+	rel_x = lx - popup_x;
+	rel_y = ly - m->statusbar.area.height;
+	if (rel_x < 0 || rel_y < 0 || rel_x >= p->width || rel_y >= p->height)
+		return 0;
+
+	for (int i = 0; i < p->nhits; i++) {
+		CardHit *hit = &p->hits[i];
+		FanEntry *fe;
+
+		if (hit->w <= 0 ||
+				rel_x < hit->x || rel_x >= hit->x + hit->w ||
+				rel_y < hit->y || rel_y >= hit->y + hit->h)
+			continue;
+		if (hit->id >= FAN_SLIDER_BASE &&
+				hit->id < FAN_SLIDER_BASE + FAN_MAX_TOTAL) {
+			double frac = (double)(rel_x - hit->x) / hit->w;
+
+			fe = fan_flat(hit->id - FAN_SLIDER_BASE);
+			if (fe) {
+				fan_entry_set_frac(fe, frac);
+				p->last_render_ms = 0;
+			}
+			return 1;
+		}
+		if (hit->id >= FAN_AUTO_BASE &&
+				hit->id < FAN_AUTO_BASE + FAN_MAX_TOTAL) {
+			fe = fan_flat(hit->id - FAN_AUTO_BASE);
+			if (fe) {
+				fan_entry_set_auto(fe);
+				p->last_render_ms = 0;
+			}
+			return 1;
+		}
+		if (hit->id == FAN_BOOST_HIT) {
+			fan_cooler_boost_set(!fan_cooler_boost_on);
+			p->last_render_ms = 0;
+			return 1;
+		}
+	}
+	/* swallow clicks on the card body */
+	return 1;
 }
 
 /* ── generic hover plumbing ──────────────────────────────────────── */
@@ -878,6 +1067,8 @@ updateinfopopups(Monitor *m, double cx, double cy)
 			render_mic_popup, cx, cy);
 	info_popup_hover(m, &m->statusbar.light, &m->statusbar.light_popup,
 			render_light_popup, cx, cy);
+	info_popup_hover(m, &m->statusbar.fan, &m->statusbar.fan_popup,
+			render_fan_popup, cx, cy);
 }
 
 /* 1 while some info popup is waiting out its show delay — the shared
@@ -892,7 +1083,9 @@ info_popup_pending(Monitor *m)
 		(m->statusbar.mic_popup.hover_start_ms != 0 &&
 			!m->statusbar.mic_popup.visible) ||
 		(m->statusbar.light_popup.hover_start_ms != 0 &&
-			!m->statusbar.light_popup.visible);
+			!m->statusbar.light_popup.visible) ||
+		(m->statusbar.fan_popup.hover_start_ms != 0 &&
+			!m->statusbar.fan_popup.visible);
 }
 
 int
@@ -901,17 +1094,18 @@ info_popup_visible(Monitor *m)
 	return m->statusbar.clock_popup.visible ||
 		m->statusbar.volume_popup.visible ||
 		m->statusbar.mic_popup.visible ||
-		m->statusbar.light_popup.visible;
+		m->statusbar.light_popup.visible ||
+		m->statusbar.fan_popup.visible;
 }
 
 void
 info_popups_hide(Monitor *m)
 {
-	InfoPopup *ps[4] = { &m->statusbar.clock_popup,
+	InfoPopup *ps[5] = { &m->statusbar.clock_popup,
 		&m->statusbar.volume_popup, &m->statusbar.mic_popup,
-		&m->statusbar.light_popup };
+		&m->statusbar.light_popup, &m->statusbar.fan_popup };
 
-	for (int i = 0; i < 4; i++) {
+	for (int i = 0; i < 5; i++) {
 		InfoPopup *p = ps[i];
 
 		p->visible = 0;

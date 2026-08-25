@@ -3,7 +3,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "spawn.h"
+#include "run_cmd.h"
 
 /*
  * system() cannot be trusted in this process: handlesig() reaps with

@@ -111,8 +111,31 @@ audio_parse_status_devices(FILE *fp, int sources, AudioDevice *out, int max)
 				snprintf(d->name, sizeof(d->name), "%s", bt_name);
 			else
 				snprintf(d->name, sizeof(d->name), "Headset");
+		} else if (sources && bt_name[0] &&
+				!strcmp(d->name, bt_name)) {
+			/* With an HFP profile active the headset's raw capture
+			 * node shows up under Sources: carrying the headset's
+			 * own name — without this it reads as the OUTPUT
+			 * having landed in the mic list. */
+			d->is_headset = 1;
+			snprintf(d->name, sizeof(d->name), "%s Mic", bt_name);
 		}
 		count++;
+	}
+
+	/* Collapse exact duplicate names (raw node + filter can both map
+	 * to "<name> Mic"); keep the default's id if either row is it. */
+	for (int i = 0; i < count; i++) {
+		for (int j = i + 1; j < count; j++) {
+			if (strcmp(out[i].name, out[j].name))
+				continue;
+			if (out[j].is_default)
+				out[i] = out[j];
+			memmove(&out[j], &out[j + 1],
+					(size_t)(count - j - 1) * sizeof(out[0]));
+			count--;
+			j--;
+		}
 	}
 	return count;
 }
