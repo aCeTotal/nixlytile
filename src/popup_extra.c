@@ -9,6 +9,35 @@
 #define SLIDER_HIT_ID  100
 #define MUTE_HIT_ID    101
 
+#define METER_HIST     128
+#define METER_TICK_MS  33
+#define LIGHT_MODE_HIT_BASE 200
+
+/* ── live audio meter overlay (volume=0 / mic=1) ─────────────────── */
+
+typedef struct {
+	struct wlr_scene_buffer *node;   /* child of view content; reset on
+	                                  * every re-render (children are
+	                                  * destroyed by popup_view_apply) */
+	int x, y, w, h;                  /* rect from CardResult */
+	float hist[METER_HIST];
+	int head;
+} MeterUI;
+static MeterUI meter_ui[2];
+static struct wl_event_source *meter_timer;
+
+static int meter_tick(void *data);
+
+static void
+meter_timer_arm(void)
+{
+	if (!meter_timer)
+		meter_timer = wl_event_loop_add_timer(event_loop, meter_tick,
+				NULL);
+	if (meter_timer)
+		wl_event_source_timer_update(meter_timer, METER_TICK_MS);
+}
+
 /* ── audio device cache (wpctl status is a fork — cache 2s) ──────── */
 
 static AudioDevice sink_devs[AUDIO_DEV_MAX], src_devs[AUDIO_DEV_MAX];
@@ -77,8 +106,79 @@ slider_commit(void)
 		refreshstatusmic();
 	} else if (sdrag.active == 3) {
 		set_backlight_percent(pct);
+		light_mode_set_manual(pct);
 		refreshstatuslight();
 	}
+}
+
+/* Meter heartbeat: capture peaks while an audio popup is up, push into
+ * the history ring and swap the overlay buffer in place. Stops itself
+ * (and the pw-record child) the moment no audio popup is visible. */
+static int
+meter_tick(void *data)
+{
+	Monitor *m;
+	InfoPopup *p = NULL;
+	MeterUI *mu;
+	int is_mic = 0, muted;
+	double peak;
+
+	(void)data;
+	wl_list_for_each(m, &mons, link) {
+		if (m->statusbar.volume_popup.visible) {
+			p = &m->statusbar.volume_popup;
+			is_mic = 0;
+			break;
+		}
+		if (m->statusbar.mic_popup.visible) {
+			p = &m->statusbar.mic_popup;
+			is_mic = 1;
+			break;
+		}
+	}
+	if (!p) {
+		audio_meter_stop();
+		memset(meter_ui[0].hist, 0, sizeof(meter_ui[0].hist));
+		memset(meter_ui[1].hist, 0, sizeof(meter_ui[1].hist));
+		meter_ui[0].node = meter_ui[1].node = NULL;
+		return 0;   /* stays disarmed until the next popup render */
+	}
+
+	audio_meter_start(is_mic);
+	peak = audio_meter_take_peak();
+	muted = is_mic ? mic_muted : volume_muted;
+	if (muted == 1)
+		peak = 0.0;
+	if (peak > 1.0)
+		peak = 1.0;
+
+	mu = &meter_ui[is_mic];
+	mu->head = (mu->head + 1) % METER_HIST;
+	mu->hist[mu->head] = (float)peak;
+
+	/* Wait out the card show animation: extra children don't take part
+	 * in its fade, so the meter joins once the card has settled. */
+	if (mu->w > 0 && p->view.content && !p->view.animating) {
+		struct wlr_buffer *buf;
+
+		if (!mu->node) {
+			mu->node = wlr_scene_buffer_create(p->view.content,
+					NULL);
+			if (mu->node)
+				wlr_scene_node_set_position(&mu->node->node,
+						mu->x, mu->y);
+		}
+		buf = card_meter_buffer(mu->w, mu->h,
+				muted == 1 ? card_col_red :
+				(is_mic ? card_col_green : card_col_blue),
+				mu->hist, METER_HIST, mu->head);
+		if (mu->node && buf)
+			wlr_scene_buffer_set_buffer(mu->node, buf);
+		if (buf)
+			wlr_buffer_drop(buf);
+	}
+	meter_timer_arm();
+	return 0;
 }
 
 /* ── content builders ────────────────────────────────────────────── */
@@ -187,7 +287,9 @@ render_audio_popup(Monitor *m, InfoPopup *p, int is_mic)
 			muted ? card_col_red :
 			(is_mic ? card_col_green : card_col_blue),
 			SLIDER_HIT_ID);
-	card_gap(card, 6);
+	card_gap(card, 4);
+	card_meter(card);
+	card_gap(card, 4);
 
 	if (is_mic)
 		card_kv2_btn(card, "Input level", value, NULL, "State",
@@ -222,6 +324,14 @@ render_audio_popup(Monitor *m, InfoPopup *p, int is_mic)
 	popup_view_apply(&p->view, p->tree, &res);
 	p->width = p->view.w;
 	p->height = p->view.h;
+
+	/* apply destroyed the previous overlay with the old card content */
+	meter_ui[is_mic].node = NULL;
+	meter_ui[is_mic].x = res.meter_x;
+	meter_ui[is_mic].y = res.meter_y;
+	meter_ui[is_mic].w = res.meter_w;
+	meter_ui[is_mic].h = res.meter_h;
+	meter_timer_arm();
 }
 
 static void
@@ -281,7 +391,19 @@ render_light_popup(Monitor *m)
 				snprintf(dev, sizeof(dev), "%s", slash + 1);
 		}
 	}
-	card_kv2(card, "Device", dev[0] ? dev : "--", NULL, NULL, NULL, NULL);
+	card_kv2(card, "Device", dev[0] ? dev : "--", NULL, "Ambient",
+			light_ambient_luma < 0 ? "--" :
+			light_ambient_luma <= 25 ? "Dark" :
+			light_ambient_luma <= 85 ? "Dim" :
+			light_ambient_luma <= 150 ? "Normal" : "Bright", NULL);
+
+	{
+		static const char *labels[2] = { "Auto", "Manual" };
+
+		card_section(card, "MODE");
+		card_buttons(card, labels, NULL, 2, light_auto_mode ? 0 : 1,
+				p->btn_hover, LIGHT_MODE_HIT_BASE);
+	}
 
 	if (card_finish(card, &res) != 0)
 		return;
@@ -599,6 +721,35 @@ light_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 		sdrag.last_set_ms = monotonic_msec();
 		popup_view_set_fill_frac(&p->view, 0, frac);
 		slider_commit();
+		return 1;
+	}
+
+	/* Auto/Manual mode buttons */
+	for (int i = 0; i < p->nhits; i++) {
+		CardHit *h = &p->hits[i];
+
+		if (h->id < LIGHT_MODE_HIT_BASE || h->id > LIGHT_MODE_HIT_BASE + 1)
+			continue;
+		if (rel_x < h->x || rel_x >= h->x + h->w ||
+				rel_y < h->y || rel_y >= h->y + h->h)
+			continue;
+		if (h->id == LIGHT_MODE_HIT_BASE) {
+			light_mode_set_auto();
+		} else {
+			/* restore the remembered manual level; none stored →
+			 * lock the current one */
+			double v = light_manual_value >= 0.0 ?
+				light_manual_value : backlight_percent();
+
+			light_mode_set_manual(v);
+			if (v >= 0.0 && set_backlight_percent(v) == 0) {
+				light_last_percent = v;
+				light_cached_percent = v;
+				refreshstatuslight();
+			}
+		}
+		p->last_render_ms = 0;
+		return 1;
 	}
 	/* swallow clicks on the card body */
 	return 1;

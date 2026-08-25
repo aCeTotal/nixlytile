@@ -4242,6 +4242,24 @@ popup_delay_timeout(void *data)
 	Monitor *m;
 	(void)data;
 
+	/* Full hover re-poll for the bar under the cursor: motionnotify's
+	 * 8ms throttle can drop the burst's last event, leaving the module
+	 * under the resting cursor without hover state (popup never shows).
+	 * The throttled path schedules this timeout to catch up. */
+	m = xytomon(cursor->x, cursor->y);
+	if (m && m->showbar) {
+		Client *fs = focustop(m);
+
+		if (!(fs && fs->isfullscreen)) {
+			updatecpuhover(m, cursor->x, cursor->y);
+			updateramhover(m, cursor->x, cursor->y);
+			updatebatteryhover(m, cursor->x, cursor->y);
+			updatenethover(m, cursor->x, cursor->y);
+			updateinfopopups(m, cursor->x, cursor->y);
+			tray_menu_update_hover(m, cursor->x, cursor->y);
+		}
+	}
+
 	wl_list_for_each(m, &mons, link) {
 		if (!m->showbar)
 			continue;

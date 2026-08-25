@@ -13,6 +13,7 @@
 #define CARD_RADIUS   10.0
 #define CARD_PAD      16
 #define CARD_COLGAP   28
+#define CARD_METER_H  44
 #define CARD_BG_R     0.055
 #define CARD_BG_G     0.060
 #define CARD_BG_B     0.075
@@ -230,6 +231,7 @@ card_text_width(const char *s)
 typedef enum {
 	CROW_HEADER,
 	CROW_GAUGE,
+	CROW_METER,
 	CROW_KV2,
 	CROW_SECTION,
 	CROW_TEXT,
@@ -258,6 +260,7 @@ struct Card {
 	CardRow rows[CARD_MAX_ROWS];
 	int nrows;
 	int kv_c1, kv_c2;   /* kv2 column widths */
+	int kv_k1, kv_k2;   /* kv2 max key widths (values hug keys) */
 	int has_kv;
 };
 
@@ -289,6 +292,20 @@ static void
 setstr(char *dst, size_t len, const char *s)
 {
 	snprintf(dst, len, "%s", s ? s : "");
+}
+
+/* key labels get trailing ':' unless empty or already present */
+static void
+setkey(char *dst, size_t len, const char *s)
+{
+	size_t n;
+
+	setstr(dst, len, s);
+	n = strlen(dst);
+	if (n > 0 && dst[n - 1] != ':' && n + 1 < len) {
+		dst[n] = ':';
+		dst[n + 1] = '\0';
+	}
 }
 
 void
@@ -331,6 +348,12 @@ card_gauge(Card *c, double frac, const float accent[4])
 }
 
 void
+card_meter(Card *c)
+{
+	row_new(c, CROW_METER);
+}
+
+void
 card_kv2(Card *c, const char *k1, const char *v1, const float *v1col,
 		const char *k2, const char *v2, const float *v2col)
 {
@@ -346,9 +369,9 @@ card_kv2_btn(Card *c, const char *k1, const char *v1, const float *v1col,
 
 	if (!r)
 		return;
-	setstr(r->a, sizeof(r->a), k1);
+	setkey(r->a, sizeof(r->a), k1);
 	setstr(r->b, sizeof(r->b), v1);
-	setstr(r->c, sizeof(r->c), k2);
+	setkey(r->c, sizeof(r->c), k2);
 	setstr(r->d, sizeof(r->d), v2);
 	r->bcol = v1col ? v1col : card_col_fg;
 	r->dcol = v2col ? v2col : card_col_fg;
@@ -462,26 +485,38 @@ card_measure(Card *c, int *out_w, int *out_h)
 
 	/* kv2 column widths first (shared alignment) */
 	c->kv_c1 = c->kv_c2 = 0;
+	c->kv_k1 = c->kv_k2 = 0;
 	for (int i = 0; i < c->nrows; i++) {
 		CardRow *r = &c->rows[i];
-		int c1, c2;
+		int k1, v1, k2, v2;
 
 		if (r->type != CROW_KV2)
 			continue;
 		c->has_kv = 1;
-		c1 = text_width_f(statusfont.font, r->a, 0) + 16 +
-			text_width_f(statusfont.font, r->b, 0);
-		c2 = r->c[0] ? text_width_f(statusfont.font, r->c, 0) + 16 +
-			text_width_f(statusfont.font, r->d, 0) : 0;
+		k1 = text_width_f(statusfont.font, r->a, 0);
+		v1 = text_width_f(statusfont.font, r->b, 0);
+		k2 = r->c[0] ? text_width_f(statusfont.font, r->c, 0) : 0;
+		v2 = r->c[0] ? text_width_f(statusfont.font, r->d, 0) : 0;
 		if (r->hit_id >= 0)
-			c2 += 16;   /* clickable value chip padding */
-		if (c1 > c->kv_c1)
-			c->kv_c1 = c1;
-		if (c2 > c->kv_c2)
-			c->kv_c2 = c2;
+			v2 += 16;   /* clickable value chip padding */
+		if (k1 > c->kv_k1)
+			c->kv_k1 = k1;
+		if (k2 > c->kv_k2)
+			c->kv_k2 = k2;
+		if (v1 > c->kv_c1)
+			c->kv_c1 = v1;
+		if (k2 && v2 > c->kv_c2)
+			c->kv_c2 = v2;
 	}
+	/* values left-align after longest key, so col = kmax + gap + vmax */
+	if (c->kv_c1 || c->kv_k1)
+		c->kv_c1 += c->kv_k1 + 16;
+	if (c->kv_c2 || c->kv_k2)
+		c->kv_c2 += c->kv_k2 + 16;
 	if (c->has_kv) {
-		int kvw = c->kv_c1 + (c->kv_c2 ? CARD_COLGAP + c->kv_c2 : 0);
+		/* equal-width columns so key/value gaps match across rows */
+		int kvw = c->kv_c2 ?
+			2 * MAX(c->kv_c1, c->kv_c2) + CARD_COLGAP : c->kv_c1;
 		if (kvw > w)
 			w = kvw;
 	}
@@ -523,6 +558,9 @@ card_measure(Card *c, int *out_w, int *out_h)
 		case CROW_BUTTONS:
 			rw = btn_row_width(r);
 			r->h = base_h + 18;
+			break;
+		case CROW_METER:
+			r->h = CARD_METER_H;
 			break;
 		case CROW_GAP:
 			r->h = r->gap;
@@ -668,13 +706,27 @@ card_finish(Card *c, CardResult *out)
 						r->hit_id);
 			break;
 		}
+		case CROW_METER:
+			/* faint midline; the live waveform is an overlay
+			 * buffer the popup drops into this rect each tick
+			 * (card_meter_buffer) */
+			cairo_rectangle(cr, CARD_PAD, y + r->h / 2, inner_w, 1);
+			cairo_set_source_rgba(cr, 1, 1, 1, 0.07);
+			cairo_fill(cr);
+			out->meter_x = CARD_PAD;
+			out->meter_y = y;
+			out->meter_w = inner_w;
+			out->meter_h = r->h;
+			break;
 		case CROW_KV2:
 			/* clickable value chip (e.g. mute toggle) */
 			if (r->hit_id >= 0 && r->d[0]) {
 				int vw = text_width_f(statusfont.font, r->d, 0);
+				int colw = (w - 2 * CARD_PAD - CARD_COLGAP) / 2;
 				int bw = vw + 16;
 				int bh = base_h + 6;
-				int bx = w - CARD_PAD - vw - 8;
+				int bx = CARD_PAD + colw + CARD_COLGAP +
+					c->kv_k2 + 16;
 				int by = y + (r->h - bh) / 2;
 
 				rounded(cr, bx, by, bw, bh, 6);
@@ -815,28 +867,25 @@ card_finish(Card *c, CardResult *out)
 		case CROW_KV2: {
 			/* center within the row (chip rows are taller) */
 			int bl = y + (r->h - base_h) / 2 + base_asc;
-			int c1r = CARD_PAD + c->kv_c1;   /* col1 right edge */
+			int colw = (w - 2 * CARD_PAD - CARD_COLGAP) / 2;
+			int x2 = CARD_PAD + colw + CARD_COLGAP;
 
 			draw_text_f(pix, statusfont.font, r->a, CARD_PAD, bl,
 					card_col_dim, 0);
-			if (r->b[0]) {
-				int vw = text_width_f(statusfont.font, r->b, 0);
-				int vx = c->kv_c2 ? c1r - vw :
-					w - CARD_PAD - vw;
+			if (r->b[0])
 				draw_text_f(pix, statusfont.font, r->b,
-						vx, bl, r->bcol, 0);
-			}
+						CARD_PAD + c->kv_k1 + 16, bl,
+						r->bcol, 0);
 			if (r->c[0]) {
+				int vx = x2 + c->kv_k2 + 16;
+
 				draw_text_f(pix, statusfont.font, r->c,
-						c1r + CARD_COLGAP, bl,
-						card_col_dim, 0);
-				if (r->d[0]) {
-					int vw = text_width_f(statusfont.font,
-							r->d, 0);
+						x2, bl, card_col_dim, 0);
+				if (r->d[0])
 					draw_text_f(pix, statusfont.font, r->d,
-							w - CARD_PAD - vw, bl,
+							r->hit_id >= 0 ?
+							vx + 8 : vx, bl,
 							r->dcol, 0);
-				}
 			}
 			break;
 		}
@@ -1021,6 +1070,42 @@ make_fill_buffer(int w, int h, const float col[4])
 }
 
 /* ── shared card chrome (tray menus) ─────────────────────────────── */
+
+/* Live audio meter: mirrored rounded bars around the midline, newest at
+ * the right. hist is a ring of peak levels [0,1]; head is the newest
+ * index. Bars brighten with amplitude so silence stays near-invisible
+ * against the card. */
+struct wlr_buffer *
+card_meter_buffer(int w, int h, const float accent[4],
+		const float *hist, int nhist, int head)
+{
+	cairo_surface_t *cs;
+	cairo_t *cr = cairo_buf_begin(w, h, &cs);
+	const int bar_w = 3, gap = 3;
+	int nbars = (w + gap) / (bar_w + gap);
+	double mid = h / 2.0;
+
+	if (!cr)
+		return NULL;
+	for (int i = 0; i < nbars; i++) {
+		float v = hist[((head - i) % nhist + nhist) % nhist];
+		double amp, bh;
+		double x = w - bar_w - i * (bar_w + gap);
+
+		if (v < 0.0f)
+			v = 0.0f;
+		if (v > 1.0f)
+			v = 1.0f;
+		amp = sqrt((double)v);   /* perceptual boost for low levels */
+		bh = 2.0 + amp * (h - 6);
+		rounded(cr, x, mid - bh / 2.0, bar_w, bh, bar_w / 2.0);
+		cairo_set_source_rgba(cr, accent[0], accent[1], accent[2],
+				0.28 + 0.72 * amp);
+		cairo_fill(cr);
+	}
+	cairo_destroy(cr);
+	return cairo_buf_finish(cs);
+}
 
 struct wlr_buffer *
 card_panel_buffer(int w, int h)

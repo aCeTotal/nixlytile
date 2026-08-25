@@ -68,6 +68,7 @@ cleanupmon(struct wl_listener *listener, void *data)
 	}
 	closemon(m);
 	osd_purge_mon(m);
+	notifyd_purge_mon(m);
 	ll_cursor_cleanup(m);
 	monitor_cleanup_workspaces(m);
 	wl_event_source_remove(m->idle_heartbeat);

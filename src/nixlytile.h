@@ -2775,6 +2775,7 @@ void tray_refresh_stale(void);
 void tray_remove_item(const char *service);
 int tray_name_owner_changed(sd_bus_message *m, void *userdata, sd_bus_error *ret_error);
 void tray_init(void);
+void tray_menu_hover_suppress(void);
 TrayItem *tray_first_item(void);
 int tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y);
 
@@ -2970,6 +2971,46 @@ void osd_show(Monitor *m, const char *msg);
 void osd_show_force(Monitor *m, const char *msg);
 void osd_tick(Monitor *m, double dt, int *still);
 void osd_purge_mon(Monitor *m);
+
+/* cpuclock.c — sysfs CPU clock + platform-profile control */
+void cpuclock_cap(double frac);
+void cpuclock_restore(void);
+void cpuclock_boost(int on);
+int power_profile_get(char *buf, size_t len);
+int power_profile_set(const char *value);
+void power_profile_low(void);
+void power_profile_high(void);
+
+/* powersave.c — max battery saving while discharging (laptops) */
+void powersave_init(void);
+void powersave_reassert(void);
+
+/* presence.c — webcam presence watch → full power save (laptops) */
+extern uint64_t last_key_activity_ms;
+void presence_init(void);
+int presence_active(void);
+void presence_note_input(void);
+
+/* lightsense.c — webcam-based auto brightness (Auto/Manual modes) */
+void lightsense_feed_luma(int luma);
+extern int light_auto_mode;
+extern double light_manual_value;
+extern int light_ambient_luma;
+void lightsense_init(void);
+void lightsense_sample_now(void);
+void light_mode_set_manual(double value);
+void light_mode_set_auto(void);
+
+/* audio_meter.c — pw-record peak capture for the popup live meters */
+void audio_meter_start(int mic);
+void audio_meter_stop(void);
+int audio_meter_running(int mic);
+double audio_meter_take_peak(void);
+
+/* notifyd.c — in-compositor org.freedesktop.Notifications daemon */
+void notifyd_init(void);
+void notifyd_tick(Monitor *m, double dt, int *still);
+void notifyd_purge_mon(Monitor *m);
 void schedule_game_mode_update(void);
 void gm_bg_init(void);
 void gm_bg_cleanup(void);

@@ -240,6 +240,7 @@ adjust_backlight_by_steps(int steps)
 			percent = 100.0;
 		light_last_percent = percent;
 		light_cached_percent = percent;
+		light_mode_set_manual(percent);
 		refreshstatuslight();
 		return 1;
 	}
@@ -255,11 +256,13 @@ adjust_backlight_by_steps(int steps)
 		if (set_backlight_percent(target) != 0) {
 			light_last_percent = target;
 			light_cached_percent = target;
+			light_mode_set_manual(target);
 			refreshstatuslight();
 			return 1;
 		}
 		light_last_percent = target;
 		light_cached_percent = target;
+		light_mode_set_manual(target);
 	}
 
 	refreshstatuslight();
@@ -525,6 +528,8 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 				if (tray_item_activate(it, button, 0, sx, sy) != 0 &&
 						button == BTN_LEFT)
 					tray_menu_open_at(m, it, tray->x + it->x + it->w / 2);
+				else
+					tray_menu_hover_suppress();
 				return 1;
 			}
 		}
@@ -630,9 +635,11 @@ buttonpress(struct wl_listener *listener, void *data)
 				if (entry)
 					tray_menu_send_event(menu, entry, event->time_msec);
 				tray_menu_hide_all();
+				tray_menu_hover_suppress();
 				return;
 			}
 			tray_menu_hide_all();
+			tray_menu_hover_suppress();
 		}
 
 		/* Clicks on the embedded status bar (tags, tray, modules).
@@ -1458,6 +1465,9 @@ keypress(struct wl_listener *listener, void *data)
 		selmon->last_input_ns = get_time_ns();
 	}
 
+	last_key_activity_ms = monotonic_msec();
+	presence_note_input();
+
 	/* Translate libinput keycode -> xkbcommon */
 	uint32_t keycode = event->keycode + 8;
 	/* Get a list of keysyms based on the keymap for this keyboard */
@@ -2257,30 +2267,45 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	 * Skip when far from the bar and no popup is open (popups need
 	 * hover tracking to close).  Throttled to ~125 Hz — highlights
 	 * don't need 1 kHz updates. */
-	if (selmon && selmon->showbar && selmon->statusbar.area.height > 0) {
-		Client *fs = focustop(selmon);
-		int any_popup_open =
-			selmon->statusbar.cpu_popup.visible ||
-			selmon->statusbar.ram_popup.visible ||
-			selmon->statusbar.battery_popup.visible ||
-			selmon->statusbar.net_popup.visible ||
-			selmon->statusbar.tray_menu.visible ||
-			info_popup_visible(selmon);
-		int near_bar = (cursor->y >= selmon->statusbar.area.y &&
-			cursor->y <= selmon->statusbar.area.y +
-				selmon->statusbar.area.height + 500);
+	{
+		/* Hover on the bar under the CURSOR, not selmon: without
+		 * sloppyfocus selmon stays behind when the pointer crosses
+		 * to another monitor's bar. */
+		Monitor *hm = xytomon(cursor->x, cursor->y);
 
-		if (!(fs && fs->isfullscreen) && (near_bar || any_popup_open)) {
-			static uint32_t last_hover_ms;
-			if (!time || time - last_hover_ms >= 8) {
-				if (time) last_hover_ms = time;
-				updatetaghover(selmon, cursor->x, cursor->y);
-				updatecpuhover(selmon, cursor->x, cursor->y);
-				updateramhover(selmon, cursor->x, cursor->y);
-				updatebatteryhover(selmon, cursor->x, cursor->y);
-				updatenethover(selmon, cursor->x, cursor->y);
-				updateinfopopups(selmon, cursor->x, cursor->y);
-				tray_menu_update_hover(selmon, cursor->x, cursor->y);
+		if (!hm)
+			hm = selmon;
+		if (hm && hm->showbar && hm->statusbar.area.height > 0) {
+			Client *fs = focustop(hm);
+			int any_popup_open =
+				hm->statusbar.cpu_popup.visible ||
+				hm->statusbar.ram_popup.visible ||
+				hm->statusbar.battery_popup.visible ||
+				hm->statusbar.net_popup.visible ||
+				hm->statusbar.tray_menu.visible ||
+				info_popup_visible(hm);
+			int near_bar = (cursor->y >= hm->statusbar.area.y &&
+				cursor->y <= hm->statusbar.area.y +
+					hm->statusbar.area.height + 500);
+
+			if (!(fs && fs->isfullscreen) &&
+					(near_bar || any_popup_open)) {
+				static uint32_t last_hover_ms;
+				if (!time || time - last_hover_ms >= 8) {
+					if (time) last_hover_ms = time;
+					updatetaghover(hm, cursor->x, cursor->y);
+					updatecpuhover(hm, cursor->x, cursor->y);
+					updateramhover(hm, cursor->x, cursor->y);
+					updatebatteryhover(hm, cursor->x, cursor->y);
+					updatenethover(hm, cursor->x, cursor->y);
+					updateinfopopups(hm, cursor->x, cursor->y);
+					tray_menu_update_hover(hm, cursor->x, cursor->y);
+				} else {
+					/* Throttled: if this was the burst's last
+					 * event, hover state is stale where the
+					 * cursor came to rest — re-poll shortly. */
+					schedule_popup_delay(10);
+				}
 			}
 		}
 	}
@@ -2294,6 +2319,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 
 	tiled = grabc && !grabc->isfloating && !grabc->isfullscreen;
 	last_pointer_motion_ms = monotonic_msec();
+	presence_note_input();
 	if (cursor_mode == CurColResize) {
 		if (grab_resize_col) {
 			const int min_w = 100;

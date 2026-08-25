@@ -2720,6 +2720,10 @@ setup(void)
 	if (client_ping_timer)
 		wl_event_source_timer_update(client_ping_timer, 3000);
 	tray_init();
+	notifyd_init();
+	lightsense_init();
+	presence_init();
+	powersave_init();
 	gshortcuts_init();
 	fcft_initialized = fcft_init(FCFT_LOG_COLORIZE_NEVER, 0, FCFT_LOG_CLASS_ERROR);
 	if (!fcft_initialized)

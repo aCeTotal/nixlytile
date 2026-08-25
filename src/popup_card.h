@@ -52,6 +52,10 @@ void card_gauge(Card *c, double frac, const float accent[4]);
  * with hit_id, and the fill can later be moved smoothly with
  * popup_view_set_fill_frac(). */
 void card_gauge_id(Card *c, double frac, const float accent[4], int hit_id);
+/* Reserved live-meter row: card draws a faint midline and reports the
+ * rect in CardResult.meter_*; the popup overlays card_meter_buffer()
+ * frames there. */
+void card_meter(Card *c);
 /* Two-column key/value row; pass NULL k2 for a single pair. Value
  * colors may be NULL (defaults to fg). */
 void card_kv2(Card *c, const char *k1, const char *v1, const float *v1col,
@@ -86,6 +90,7 @@ typedef struct CardResult {
 	int nhits;
 	CardFill fills[CARD_MAX_FILLS];
 	int nfills;
+	int meter_x, meter_y, meter_w, meter_h;   /* live-meter rect (w=0: none) */
 } CardResult;
 
 /* Rasterize and free the card. Returns 0 on success; result owns buf
@@ -126,6 +131,8 @@ int card_text_width(const char *s);
  * rounded translucent panel with hairline border, hover pill,
  * checkbox/radio marks and a submenu chevron in the card style. */
 struct wlr_buffer *card_panel_buffer(int w, int h);
+struct wlr_buffer *card_meter_buffer(int w, int h, const float accent[4],
+		const float *hist, int nhist, int head);
 struct wlr_buffer *card_hover_buffer(int w, int h);
 struct wlr_buffer *card_mark_buffer(int radio, int size, int state);
 struct wlr_buffer *card_chevron_buffer(int size);

@@ -29,10 +29,10 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            dwl_ipc.o dwl-ipc-unstable-v2-protocol.o window_ipc.o \
            config_parser.o config_loader.o monitors_conf.o monitor_setup.o \
            input_conf.o \
-           apptoggle.o mic_watch.o audio_watch.o audio_devices.o gaming_conf.o gshortcuts.o \
+           apptoggle.o mic_watch.o audio_watch.o audio_devices.o audio_meter.o gaming_conf.o gshortcuts.o \
            statusbar.o tray.o statusbar_support.o terminfo.o launchfx.o diag.o \
            popup_card.o popup_extra.o \
-           notify.o instruments.o converge.o spawn.o osd.o
+           notify.o notifyd.o lightsense.o presence.o powersave.o cpuclock.o instruments.o converge.o spawn.o osd.o
 
 PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstable-v1-protocol.h \
              $(SRC)/wlr-layer-shell-unstable-v1-protocol.h $(SRC)/wlr-output-power-management-unstable-v1-protocol.h \
@@ -96,6 +96,16 @@ anim.o: $(SRC)/anim.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/diag.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 notify.o: $(SRC)/notify.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+notifyd.o: $(SRC)/notifyd.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/popup_card.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+lightsense.o: $(SRC)/lightsense.c $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+presence.o: $(SRC)/presence.c $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+powersave.o: $(SRC)/powersave.c $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+cpuclock.o: $(SRC)/cpuclock.c $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 instruments.o: $(SRC)/instruments.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 osd.o: $(SRC)/osd.c $(SRC)/nixlytile.h $(SRC)/client.h
@@ -113,6 +123,8 @@ config_loader.o: $(SRC)/config_loader.c $(SRC)/config_loader.h $(SRC)/config_par
 apptoggle.o: $(SRC)/apptoggle.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 mic_watch.o: $(SRC)/mic_watch.c $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+audio_meter.o: $(SRC)/audio_meter.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 audio_watch.o: $(SRC)/audio_watch.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<

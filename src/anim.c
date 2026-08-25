@@ -967,6 +967,9 @@ monitor_anim_tick(Monitor *m, double dt)
 		osd_tick(m, dt, &notif_still);
 		if (notif_still)
 			active = 1;
+		notifyd_tick(m, dt, &notif_still);
+		if (notif_still)
+			active = 1;
 	}
 
 	/* Open anim tick — per-client scale + fade. */

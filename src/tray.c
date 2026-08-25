@@ -1483,18 +1483,93 @@ fail:
 	return 0;
 }
 
+/* Hover-open dwell state: rest on a tray icon and its dropdown opens by
+ * itself (same 300ms feel as the module popups); leave both the icon
+ * row and the menu and it closes again. */
+static struct {
+	Monitor *mon;
+	TrayItem *it;         /* identity only — never dereferenced stale */
+	TrayItem *failed;     /* item without a dbusmenu — don't re-fetch */
+	uint64_t start_ms;
+} tray_hover;
+static uint64_t tray_hover_suppress_until;
+
+/* A click just handled the menu (activate/entry/close): don't let the
+ * dwell logic pop it right back open under the resting cursor. */
+void
+tray_menu_hover_suppress(void)
+{
+	tray_hover_suppress_until = monotonic_msec() + 600;
+}
+
 /* Hover highlight tracking (waybar-style row highlight under cursor). */
 void
 tray_menu_update_hover(Monitor *m, double cx, double cy)
 {
 	TrayMenu *menu;
 	TrayMenuEntry *entry = NULL;
+	StatusModule *tray;
+	TrayItem *over = NULL;
 	int lx, ly;
+	int blx, bly;
 
-	if (!m || !m->statusbar.tray_menu.tree || !m->statusbar.tray_menu.visible)
+	if (!m || !m->statusbar.tray_menu.tree)
 		return;
 
 	menu = &m->statusbar.tray_menu;
+	tray = &m->statusbar.traylabel;
+	blx = (int)floor(cx) - m->statusbar.area.x;
+	bly = (int)floor(cy) - m->statusbar.area.y;
+
+	if (m->showbar && tray->width > 0 && bly >= 0 &&
+			bly < m->statusbar.area.height &&
+			blx >= tray->x && blx < tray->x + tray->width) {
+		TrayItem *it;
+		int local = blx - tray->x;
+
+		wl_list_for_each(it, &tray_items, link)
+			if (it->w > 0 && local >= it->x && local < it->x + it->w) {
+				over = it;
+				break;
+			}
+	}
+
+	if (over) {
+		uint64_t now = monotonic_msec();
+		int open_for_it = menu->visible &&
+			!strcmp(menu->service, over->service);
+
+		if (tray_hover.it != over || tray_hover.mon != m) {
+			tray_hover.it = over;
+			tray_hover.mon = m;
+			tray_hover.start_ms = now;
+			tray_hover.failed = NULL;
+		}
+		if (now < tray_hover_suppress_until)
+			tray_hover.start_ms = now;
+		if (!open_for_it && tray_hover.failed != over) {
+			if (now - tray_hover.start_ms >= 300) {
+				if (!tray_menu_open_at(m, over,
+						tray->x + over->x + over->w / 2))
+					tray_hover.failed = over;
+			} else {
+				schedule_popup_delay((uint32_t)(300 -
+						(now - tray_hover.start_ms)) + 1);
+			}
+		}
+	} else {
+		tray_hover.it = NULL;
+		tray_hover.mon = NULL;
+		/* left the icon row: close unless the cursor is in the menu */
+		if (menu->visible && !(blx - menu->x >= 0 &&
+				bly - menu->y >= 0 &&
+				blx - menu->x < menu->width &&
+				bly - menu->y < menu->height))
+			tray_menu_hide_all();
+	}
+
+	if (!menu->visible)
+		return;
 	lx = (int)floor(cx) - m->statusbar.area.x - menu->x;
 	ly = (int)floor(cy) - m->statusbar.area.y - menu->y;
 	if (lx >= 0 && ly >= 0 && lx < menu->width && ly < menu->height)
