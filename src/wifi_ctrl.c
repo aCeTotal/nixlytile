@@ -202,6 +202,12 @@ wifi_ctrl_sync(void)
 {
 	NetLinkSnap s;
 
+	if (nm_backend_active()) {
+		/* NM owns the supplicant; never attach to (or mutate) it */
+		if (wc_cmd_fd >= 0)
+			wc_close();
+		return;
+	}
 	netmon_get(&s);
 	if (!s.wifi.present || s.wifi_blocked) {
 		if (wc_cmd_fd >= 0)
@@ -243,12 +249,18 @@ wifi_ctrl_sync(void)
 int
 wifi_ctrl_ok(void)
 {
+	if (nm_backend_active())
+		return 1;
 	return wc_cmd_fd >= 0;
 }
 
 void
 wifi_scan_request(void)
 {
+	if (nm_backend_active()) {
+		nm_wifi_scan_request();
+		return;
+	}
 	wc_cmd_ok("SCAN");
 }
 
@@ -298,6 +310,8 @@ wifi_scan_get(WifiNet *out, int max)
 	int nsaved, count = 0;
 	char *line, *save;
 
+	if (nm_backend_active())
+		return nm_wifi_scan_get(out, max);
 	if (wc_request("SCAN_RESULTS", buf, sizeof(buf)) < 0)
 		return 0;
 	nsaved = wifi_list_saved(saved, 32);
@@ -396,6 +410,8 @@ wifi_status_get(WifiStatus *out)
 	static char buf[4096];
 	char val[64];
 
+	if (nm_backend_active())
+		return nm_wifi_status_get(out);
 	memset(out, 0, sizeof(*out));
 	out->signal_dbm = -127;
 	out->link_speed_mbps = -1;
@@ -438,6 +454,8 @@ wifi_connect(const char *ssid, const char *psk, int hidden)
 	char reply[64], cmd[256];
 	int id;
 
+	if (nm_backend_active())
+		return nm_wifi_connect(ssid, psk, hidden);
 	if (wc_request("ADD_NETWORK", reply, sizeof(reply)) < 0)
 		return -1;
 	if (!isdigit((unsigned char)reply[0]))
@@ -488,6 +506,8 @@ wifi_connect_known(int net_id)
 {
 	char cmd[64];
 
+	if (nm_backend_active())
+		return nm_wifi_connect_known(net_id);
 	wc_error[0] = '\0';
 	snprintf(cmd, sizeof(cmd), "SELECT_NETWORK %d", net_id);
 	if (wc_cmd_ok(cmd) != 0)
@@ -498,6 +518,10 @@ wifi_connect_known(int net_id)
 void
 wifi_disconnect(void)
 {
+	if (nm_backend_active()) {
+		nm_wifi_disconnect();
+		return;
+	}
 	wc_cmd_ok("DISCONNECT");
 }
 
@@ -506,6 +530,8 @@ wifi_forget(int net_id)
 {
 	char cmd[64];
 
+	if (nm_backend_active())
+		return nm_wifi_forget(net_id);
 	snprintf(cmd, sizeof(cmd), "REMOVE_NETWORK %d", net_id);
 	if (wc_cmd_ok(cmd) != 0)
 		return -1;
@@ -516,5 +542,7 @@ wifi_forget(int net_id)
 const char *
 wifi_last_error(void)
 {
+	if (nm_backend_active())
+		return nm_wifi_last_error();
 	return wc_error;
 }

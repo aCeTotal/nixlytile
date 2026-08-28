@@ -220,8 +220,11 @@ netmon_rescan(void)
 	nm_snap.wifi_blocked = wifi_soft_blocked();
 
 	/* wifi-off-on-ethernet policy; an explicit user choice (either
-	 * direction) always wins over the automatic rule */
-	if (nm_snap.eth.present && nm_snap.wifi.present) {
+	 * direction) always wins over the automatic rule.  Stands down
+	 * entirely while NetworkManager runs — NM owns radio policy and
+	 * a surprise rfkill block would cut its wifi connection. */
+	if (!nm_backend_active() &&
+			nm_snap.eth.present && nm_snap.wifi.present) {
 		if (nm_snap.eth.carrier && !nm_snap.wifi_user_on &&
 				!nm_snap.wifi_blocked) {
 			rfkill_wifi(1);
@@ -295,7 +298,8 @@ netmon_init(void)
 	netmon_rescan();
 	/* A soft-block left over from a previous session's policy would
 	 * strand the machine offline when the cable is gone at boot. */
-	if (nm_snap.wifi.present && nm_snap.wifi_blocked &&
+	if (!nm_backend_active() &&
+			nm_snap.wifi.present && nm_snap.wifi_blocked &&
 			!(nm_snap.eth.present && nm_snap.eth.carrier)) {
 		rfkill_wifi(0);
 		nm_snap.wifi_blocked = 0;

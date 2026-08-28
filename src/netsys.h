@@ -91,6 +91,21 @@ int wifi_forget(int net_id);
 /* Last auth failure ("wrong password"), cleared on connect; "" if none. */
 const char *wifi_last_error(void);
 
+/* ── wifi_nm.c: NetworkManager coexistence backend ───────────────────
+ * While NM runs it owns the wifi device; the wifi_* API above delegates
+ * here (nmcli via fetch_async, cache-backed) and netmon's rfkill policy
+ * stands down so NM keeps working exactly as before. */
+
+int nm_backend_active(void);
+void nm_wifi_scan_request(void);
+int nm_wifi_scan_get(WifiNet *out, int max);
+int nm_wifi_status_get(WifiStatus *out);
+int nm_wifi_connect(const char *ssid, const char *psk, int hidden);
+int nm_wifi_connect_known(int id);
+void nm_wifi_disconnect(void);
+int nm_wifi_forget(int id);
+const char *nm_wifi_last_error(void);
+
 /* ── btmon.c: bluetoothd over sd-bus ─────────────────────────────── */
 
 #define BT_DEV_MAX 24

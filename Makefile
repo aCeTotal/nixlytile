@@ -32,7 +32,7 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            apptoggle.o mic_watch.o audio_watch.o audio_devices.o audio_meter.o gaming_conf.o gshortcuts.o \
            statusbar.o tray.o statusbar_support.o terminfo.o launchfx.o diag.o fetch_async.o charge_limit.o fancontrol.o fanwatch.o \
            popup_card.o popup_extra.o \
-           netmon.o wifi_ctrl.o btmon.o vpnctl.o text_entry.o net_ui.o bt_ui.o display_ui.o \
+           netmon.o wifi_ctrl.o wifi_nm.o btmon.o vpnctl.o text_entry.o net_ui.o bt_ui.o display_ui.o \
            notify.o notifyd.o lightsense.o presence.o powersave.o battwatch.o camwatch.o cpuclock.o instruments.o converge.o spawn.o osd.o
 
 PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstable-v1-protocol.h \
@@ -142,6 +142,9 @@ netmon.o: $(SRC)/netmon.c $(SRC)/netsys.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 
 wifi_ctrl.o: $(SRC)/wifi_ctrl.c $(SRC)/netsys.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+
+wifi_nm.o: $(SRC)/wifi_nm.c $(SRC)/netsys.h $(SRC)/fetch_async.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 
 btmon.o: $(SRC)/btmon.c $(SRC)/netsys.h
