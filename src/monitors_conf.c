@@ -3,7 +3,8 @@
  * The file is written by nixlycc (Monitors page).  Format, one line per
  * monitor:
  *
- *   monitor = DP-1 grid=0,0 2560x1440@144 [transform=rotate-90|rotate-270]
+ *   monitor = DP-1 grid=0,0 2560x1440@144 [scale=1.25]
+ *             [transform=rotate-90|rotate-180|rotate-270]
  *
  * Entries here take priority over `monitor` nodes in config.kdl (see
  * find_monitor_config in nixlytile.c).  An inotify watch on the
@@ -107,8 +108,13 @@ load_monitors_conf(void)
 				m->height = b;
 			} else if (strcmp(tok, "transform=rotate-90") == 0) {
 				m->transform = WL_OUTPUT_TRANSFORM_90;
+			} else if (strcmp(tok, "transform=rotate-180") == 0) {
+				m->transform = WL_OUTPUT_TRANSFORM_180;
 			} else if (strcmp(tok, "transform=rotate-270") == 0) {
 				m->transform = WL_OUTPUT_TRANSFORM_270;
+			} else if (sscanf(tok, "scale=%f", &hz) == 1) {
+				if (hz >= 0.5f && hz <= 4.0f)
+					m->scale = hz;
 			} else if (strncmp(tok, "mirror=", 7) == 0) {
 				snprintf(m->mirror, sizeof(m->mirror), "%s",
 					tok + 7);
@@ -155,6 +161,8 @@ monconf_apply_modes(void)
 		wlr_output_state_init(&st);
 		wlr_output_state_set_enabled(&st, 1);
 		wlr_output_state_set_transform(&st, cfg->transform);
+		if (cfg->scale >= 0.5f && cfg->scale <= 4.0f)
+			wlr_output_state_set_scale(&st, cfg->scale);
 		if (cfg->width > 0 && cfg->height > 0)
 			mode = find_mode(m->wlr_output, cfg->width, cfg->height,
 				cfg->refresh);

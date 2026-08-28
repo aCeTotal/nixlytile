@@ -659,7 +659,7 @@ fan_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 
 	popup_x = info_popup_clamped_x(m, &m->statusbar.fan, p);
 	rel_x = lx - popup_x;
-	rel_y = ly - m->statusbar.area.height;
+	rel_y = ly - statusbar_popup_y(m);
 	if (rel_x < 0 || rel_y < 0 || rel_x >= p->width || rel_y >= p->height)
 		return 0;
 
@@ -747,12 +747,12 @@ info_popup_hover(Monitor *m, StatusModule *mod, InfoPopup *p,
 	else if (p->visible && p->width > 0 && p->height > 0 &&
 			lx >= popup_x && lx < popup_x + p->width &&
 			ly >= m->statusbar.area.height &&
-			ly < m->statusbar.area.height + p->height)
+			ly < statusbar_popup_y(m) + p->height)
 		inside = 1;
 
 	/* an active gauge drag holds its popup open even when the cursor
-	 * leaves the card */
-	if (sdrag_popup() == p)
+	 * leaves the card; same for a display-box reorder drag */
+	if (sdrag_popup() == p || display_drag_popup() == p)
 		inside = 1;
 
 	was_visible = p->visible;
@@ -760,7 +760,7 @@ info_popup_hover(Monitor *m, StatusModule *mod, InfoPopup *p,
 	/* hover highlight for device "Use" buttons */
 	if (inside && p->visible && p->nhits > 0) {
 		int rel_x = lx - popup_x;
-		int rel_y = ly - m->statusbar.area.height;
+		int rel_y = ly - statusbar_popup_y(m);
 		int nh = -1;
 
 		for (int i = 0; i < p->nhits; i++) {
@@ -812,7 +812,7 @@ info_popup_hover(Monitor *m, StatusModule *mod, InfoPopup *p,
 		}
 		wlr_scene_node_set_enabled(&p->tree->node, 1);
 		wlr_scene_node_set_position(&p->tree->node,
-				popup_x, m->statusbar.area.height);
+				popup_x, statusbar_popup_y(m));
 		if (!was_visible)
 			popup_view_show(&p->view);
 	} else if (p->visible || p->hover_start_ms != 0) {
@@ -908,7 +908,7 @@ audio_popup_click(Monitor *m, StatusModule *mod, InfoPopup *p, int is_mic,
 
 	popup_x = info_popup_clamped_x(m, mod, p);
 	rel_x = lx - popup_x;
-	rel_y = ly - m->statusbar.area.height;
+	rel_y = ly - statusbar_popup_y(m);
 	if (rel_x < 0 || rel_y < 0 || rel_x >= p->width || rel_y >= p->height)
 		return 0;
 
@@ -990,7 +990,7 @@ light_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 
 	popup_x = info_popup_clamped_x(m, &m->statusbar.light, p);
 	rel_x = lx - popup_x;
-	rel_y = ly - m->statusbar.area.height;
+	rel_y = ly - statusbar_popup_y(m);
 	if (rel_x < 0 || rel_y < 0 || rel_x >= p->width || rel_y >= p->height)
 		return 0;
 
@@ -1063,6 +1063,7 @@ updateinfopopups(Monitor *m, double cx, double cy)
 		return;
 	if (sdrag.active)
 		slider_drag_motion(m, cx);
+	display_drag_motion(m, cx);
 	info_popup_hover(m, &m->statusbar.clock, &m->statusbar.clock_popup,
 			render_clock_popup, cx, cy);
 	info_popup_hover(m, &m->statusbar.volume, &m->statusbar.volume_popup,
@@ -1073,6 +1074,10 @@ updateinfopopups(Monitor *m, double cx, double cy)
 			render_light_popup, cx, cy);
 	info_popup_hover(m, &m->statusbar.fan, &m->statusbar.fan_popup,
 			render_fan_popup, cx, cy);
+	info_popup_hover(m, &m->statusbar.bluetooth, &m->statusbar.bt_popup,
+			render_bt_popup, cx, cy);
+	info_popup_hover(m, &m->statusbar.display, &m->statusbar.display_popup,
+			render_display_popup, cx, cy);
 }
 
 /* 1 while some info popup is waiting out its show delay — the shared
@@ -1089,7 +1094,11 @@ info_popup_pending(Monitor *m)
 		(m->statusbar.light_popup.hover_start_ms != 0 &&
 			!m->statusbar.light_popup.visible) ||
 		(m->statusbar.fan_popup.hover_start_ms != 0 &&
-			!m->statusbar.fan_popup.visible);
+			!m->statusbar.fan_popup.visible) ||
+		(m->statusbar.bt_popup.hover_start_ms != 0 &&
+			!m->statusbar.bt_popup.visible) ||
+		(m->statusbar.display_popup.hover_start_ms != 0 &&
+			!m->statusbar.display_popup.visible);
 }
 
 int
@@ -1099,17 +1108,20 @@ info_popup_visible(Monitor *m)
 		m->statusbar.volume_popup.visible ||
 		m->statusbar.mic_popup.visible ||
 		m->statusbar.light_popup.visible ||
-		m->statusbar.fan_popup.visible;
+		m->statusbar.fan_popup.visible ||
+		m->statusbar.bt_popup.visible ||
+		m->statusbar.display_popup.visible;
 }
 
 void
 info_popups_hide(Monitor *m)
 {
-	InfoPopup *ps[5] = { &m->statusbar.clock_popup,
+	InfoPopup *ps[7] = { &m->statusbar.clock_popup,
 		&m->statusbar.volume_popup, &m->statusbar.mic_popup,
-		&m->statusbar.light_popup, &m->statusbar.fan_popup };
+		&m->statusbar.light_popup, &m->statusbar.fan_popup,
+		&m->statusbar.bt_popup, &m->statusbar.display_popup };
 
-	for (int i = 0; i < 5; i++) {
+	for (int i = 0; i < 7; i++) {
 		InfoPopup *p = ps[i];
 
 		p->visible = 0;

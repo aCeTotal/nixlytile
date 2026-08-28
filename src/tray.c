@@ -1477,7 +1477,7 @@ tray_menu_open_at(Monitor *m, TrayItem *it, int icon_x)
 		desired_x = max_x;
 
 	menu->x = desired_x;
-	menu->y = m->statusbar.area.height;
+	menu->y = statusbar_popup_y(m);
 	wlr_scene_node_set_position(&menu->tree->node, menu->x, menu->y);
 	wlr_scene_node_set_enabled(&menu->tree->node, 1);
 	menu->visible = 1;

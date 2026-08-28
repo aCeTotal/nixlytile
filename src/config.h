@@ -191,8 +191,6 @@ char autostart_cmd[4096] =
 	"swaybg -i \"$HOME/.nixlyos/wallpapers/beach.jpg\" -m fill & "
 	"\"$HOME/.local/bin/niri-set-max-mode.sh\" --watch & "
 	"waybar <&- & "
-	"nm-applet --indicator & "
-	"blueman-applet & "
 	"xwayland-satellite & "
 	"sh -c 'wl-paste --type text --watch clipman store --no-persist' & "
 	"sh -c 'wl-paste --primary --type text --watch clipman store --no-persist' & "

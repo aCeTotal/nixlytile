@@ -566,6 +566,9 @@ typedef struct {
 	int anchor_w;
 	uint64_t suppress_refresh_until_ms;
 	uint64_t hover_start_ms;
+	int btn_hover;          /* hit id under cursor, -1 = none */
+	CardHit hits[CARD_MAX_HITS];
+	int nhits;
 	PopupView view;
 } NetPopup;
 
@@ -597,7 +600,7 @@ typedef struct {
 	uint64_t next_due_ms;
 } StatusRefreshTask;
 
-#define STATUS_TASKS_COUNT 10
+#define STATUS_TASKS_COUNT 11
 
 #define FAN_MAX_DEVICES   8
 #define FAN_MAX_PER_DEV   6
@@ -702,8 +705,12 @@ struct StatusBar {
 	InfoPopup volume_popup;
 	InfoPopup mic_popup;
 	InfoPopup light_popup;
+	InfoPopup bt_popup;
+	InfoPopup display_popup;
 	TrayMenu tray_menu;
 	StatusModule fan;
+	StatusModule bluetooth;
+	StatusModule display;
 };
 
 struct TrayItem {
@@ -1944,12 +1951,6 @@ extern int public_ip_fd;
 extern struct wl_event_source *public_ip_event;
 extern char public_ip_buf[128];
 extern size_t public_ip_len;
-extern pid_t ssid_pid;
-extern int ssid_fd;
-extern struct wl_event_source *ssid_event;
-extern char ssid_buf[256];
-extern size_t ssid_len;
-extern time_t ssid_last_time;
 
 /* tray */
 extern int tray_anchor_x;
@@ -2088,6 +2089,14 @@ extern char fan_icon_loaded_path[PATH_MAX];
 extern int fan_icon_loaded_h, fan_icon_w, fan_icon_h;
 extern struct wlr_buffer *fan_icon_buf;
 extern char fan_text[32];
+extern char bt_icon_path[PATH_MAX];
+extern char bt_icon_loaded_path[PATH_MAX];
+extern int bt_icon_loaded_h, bt_icon_w, bt_icon_h;
+extern struct wlr_buffer *bt_icon_buf;
+extern char display_icon_path[PATH_MAX];
+extern char display_icon_loaded_path[PATH_MAX];
+extern int display_icon_loaded_h, display_icon_w, display_icon_h;
+extern struct wlr_buffer *display_icon_buf;
 extern unsigned long long net_prev_rx;
 extern unsigned long long net_prev_tx;
 extern struct timespec net_prev_ts;
@@ -2347,6 +2356,9 @@ int is_browser_client(Client *c);
 int looks_like_game(Client *c);
 int client_rule_nofullscreen(Client *c);
 int is_retro_emulator_client(Client *c);
+int retro_content_running(Client *c);
+int retro_blocks_game(Client *c);
+void menu_maxhz_update(void);
 void read_steam_properties(Client *c);
 void xwayland_set_primary(Monitor *m);
 int is_steam_cmd(const char *cmd);
@@ -2635,6 +2647,7 @@ void refreshstatusvolume(void);
 void refreshstatusmic(void);
 void refreshstatusbattery(void);
 void refreshstatusnet(void);
+void refreshstatusbluetooth(void);
 void refreshstatuscpu(void);
 void refreshstatusram(void);
 void refreshstatusicons(void);
@@ -2695,6 +2708,27 @@ int ram_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 int battery_popup_clamped_x(Monitor *m, BatteryPopup *p);
 void updatetaghover(Monitor *m, double cx, double cy);
 void updatenethover(Monitor *m, double cx, double cy);
+void net_popup_track_hover(Monitor *m, double cx, double cy);
+int net_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
+void rendernetpopup(Monitor *m);
+void renderbluetooth(StatusModule *module, int bar_height, const char *text);
+void render_bt_popup(Monitor *m);
+int bt_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
+int ensure_bt_icon_buffer(int target_h);
+void drop_bt_icon_buffer(void);
+int ensure_net_icon_buffer(int target_h);
+void renderdisplays(StatusModule *module, int bar_height, const char *text);
+void render_display_popup(Monitor *m);
+int display_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
+void display_drag_motion(Monitor *m, double cx);
+void display_drag_release(void);
+InfoPopup *display_drag_popup(void);
+int ensure_display_icon_buffer(int target_h);
+void drop_display_icon_buffer(void);
+void format_speed(double bps, char *out, size_t len);
+int localip(const char *iface, char *out, size_t len);
+const char *wifi_icon_for_quality(double quality_pct);
+void set_net_icon_path(const char *path);
 void updateinfopopups(Monitor *m, double cx, double cy);
 int info_popup_pending(Monitor *m);
 int info_popup_visible(Monitor *m);
@@ -2801,6 +2835,8 @@ void tray_menu_draw_text(struct wlr_scene_tree *tree, const char *text, int x, i
 TrayMenuEntry *tray_menu_entry_at(Monitor *m, int lx, int ly);
 void tray_menu_update_hover(Monitor *m, double cx, double cy);
 int statusbar_popup_at(Monitor *m, double cx, double cy);
+/* y where bar popups anchor: bar bottom + outer tile gap (tiles' top edge) */
+int statusbar_popup_y(Monitor *m);
 int tray_menu_send_event(TrayMenu *menu, TrayMenuEntry *entry, uint32_t time_msec);
 int tray_menu_parse_node(sd_bus_message *msg, TrayMenu *menu, int depth, int max_depth);
 int tray_menu_parse_node_body(sd_bus_message *msg, TrayMenu *menu, int depth, int max_depth);
@@ -2828,10 +2864,7 @@ int vpn_connect_event_cb(int fd, uint32_t mask, void *data);
 void request_public_ip_async_ex(int force);
 void request_public_ip_async(void);
 void stop_public_ip_fetch(void);
-void request_ssid_async(const char *iface);
-void stop_ssid_fetch(void);
 int public_ip_event_cb(int fd, uint32_t mask, void *data);
-int ssid_event_cb(int fd, uint32_t mask, void *data);
 
 /* popup.c */
 void sudo_popup_show(Monitor *m, const char *title, const char *cmd, const char *pkg_name);

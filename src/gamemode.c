@@ -1936,6 +1936,126 @@ is_retro_emulator_client(Client *c)
 	return r;
 }
 
+/* RetroArch keeps one window for both menu and running content; the
+ * title is the only public signal.  Menu: "RetroArch" or
+ * "RetroArch 1.x.y".  Content loaded: the title grows a " - core/
+ * content" suffix (or a core replaces it entirely).  Only RetroArch
+ * gets this in-game promotion — other emulators keep the blanket
+ * exclusion (their titles are not this predictable). */
+int
+retro_content_running(Client *c)
+{
+	const char *app, *t;
+
+	if (!c)
+		return 0;
+	app = client_get_appid(c);
+	if (!app || !strcasestr(app, "retroarch"))
+		return 0;
+	t = client_get_title(c);
+	if (!t || !*t)
+		return 0;
+	if (strstr(t, " - "))
+		return 1;
+	if (strncasecmp(t, "retroarch", 9) == 0)
+		return 0;   /* plain menu title */
+	return 1;           /* a core renamed the window */
+}
+
+/* The retro exclusion, made content-aware: RetroArch sitting in its
+ * menu still blocks game mode, but once content runs the full game
+ * path (ultra tuning, framepace, VRR) engages. */
+int
+retro_blocks_game(Client *c)
+{
+	return is_retro_emulator_client(c) && !retro_content_running(c);
+}
+
+/* ── menu max-refresh hold (RetroArch / nixlymedia) ──────────────── */
+
+/* While the focused client is a RetroArch or nixlymedia *menu*, its
+ * monitor runs at the highest refresh rate the current resolution
+ * offers.  The hold is dropped the moment content runs (game mode owns
+ * the output) or video plays (the cadence path owns the refresh rate),
+ * restoring the mode that was active before. */
+static Monitor *menuhz_mon;
+static struct wlr_output_mode *menuhz_saved;
+static struct wl_event_source *menuhz_timer;
+
+static int
+menu_maxhz_client(Client *c)
+{
+	const char *app = c ? client_get_appid(c) : NULL;
+
+	if (app && (strcasestr(app, "retroarch") ||
+			strcasestr(app, "nixlymedia")))
+		return 1;
+	return is_retro_emulator_client(c);
+}
+
+static void
+menuhz_commit(Monitor *m, struct wlr_output_mode *mode)
+{
+	struct wlr_output_state st;
+
+	if (!m || !m->wlr_output || !mode ||
+			m->wlr_output->current_mode == mode)
+		return;
+	wlr_output_state_init(&st);
+	wlr_output_state_set_mode(&st, mode);
+	if (wlr_output_test_state(m->wlr_output, &st))
+		wlr_output_commit_state(m->wlr_output, &st);
+	wlr_output_state_finish(&st);
+}
+
+static int menuhz_timer_cb(void *data);
+
+void
+menu_maxhz_update(void)
+{
+	Client *f = selmon ? focustop(selmon) : NULL;
+	Monitor *want = NULL;
+
+	if (f && !game_mode_active && menu_maxhz_client(f) &&
+			!retro_content_running(f) && !is_video_content(f))
+		want = f->mon ? f->mon : selmon;
+
+	if (want != menuhz_mon) {
+		if (menuhz_mon && menuhz_saved && !game_mode_active)
+			menuhz_commit(menuhz_mon, menuhz_saved);
+		menuhz_mon = want;
+		menuhz_saved = NULL;
+		if (want && want->wlr_output && want->wlr_output->current_mode)
+			menuhz_saved = want->wlr_output->current_mode;
+	}
+	if (menuhz_mon && menuhz_mon->wlr_output &&
+			menuhz_mon->wlr_output->current_mode) {
+		struct wlr_output_mode *cur =
+			menuhz_mon->wlr_output->current_mode;
+		struct wlr_output_mode *max = find_mode(menuhz_mon->wlr_output,
+				cur->width, cur->height, 0);
+
+		if (max && max != cur)
+			menuhz_commit(menuhz_mon, max);
+	}
+	/* video/content state changes have no dedicated event — re-check
+	 * once a second while the hold (or a candidate) exists */
+	if (menuhz_mon) {
+		if (!menuhz_timer)
+			menuhz_timer = wl_event_loop_add_timer(event_loop,
+					menuhz_timer_cb, NULL);
+		if (menuhz_timer)
+			wl_event_source_timer_update(menuhz_timer, 1000);
+	}
+}
+
+static int
+menuhz_timer_cb(void *data)
+{
+	menu_maxhz_update();
+	return 0;
+}
+
 /*
  * Background worker thread for game mode system operations.
  * All blocking I/O (process freeze/unfreeze, sysfs writes, DRM ioctls,
@@ -2088,15 +2208,23 @@ update_game_mode(void)
 	Client *c = get_fullscreen_client();
 	Monitor *m;
 	int is_game = 0;
+	int retro_menu = 0;
+
+	/* Menu max-Hz hold for RetroArch/nixlymedia tracks the same events
+	 * that drive game mode. */
+	menu_maxhz_update();
 
 	/*
-	 * Emulators must never engage game mode. Match on Wayland app_id
-	 * AND /proc/PID/comm — app_id may be unset on the first mapnotify,
-	 * but the process name is always available. Treat as if no
-	 * fullscreen client existed.
+	 * Emulators in their menus must not engage game mode.  Match on
+	 * Wayland app_id AND /proc/PID/comm — app_id may be unset on the
+	 * first mapnotify, but the process name is always available.
+	 * RetroArch with content running is a real game: the exclusion
+	 * lifts and the full ultra/framepace path engages.
 	 */
-	if (c && is_retro_emulator_client(c))
+	if (c && retro_blocks_game(c)) {
+		retro_menu = 1;
 		c = NULL;
+	}
 
 	/*
 	 * Guard: if ultra game mode is active and the game process is still
@@ -2104,8 +2232,10 @@ update_game_mode(void)
 	 * is temporarily not found (e.g., surface unmap during loading,
 	 * brief focus loss, or tag switch).  Deactivating would reset GPU
 	 * power state, clock locks, and fan boost — causing severe FPS drops.
+	 * Exception: RetroArch back in its menu — same process, but the
+	 * game is over and ultra must wind down.
 	 */
-	if (was_ultra && !c && game_mode_pid > 1) {
+	if (was_ultra && !c && !retro_menu && game_mode_pid > 1) {
 		int alive;
 		if (game_keepalive_pidfd >= 0) {
 			/* pidfd: POLLIN = process exited.  Immune to PID reuse

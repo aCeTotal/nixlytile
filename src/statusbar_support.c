@@ -21,12 +21,10 @@ StatusRefreshTask status_tasks[STATUS_TASKS_COUNT] = {
 	{ refreshstatusicons, 0 },
 	{ refreshstatusfan, 0 },
 	{ refreshstatusterminfo, 0 },
+	{ refreshstatusbluetooth, 0 },
 };
 int status_rng_seeded;
 const double status_icon_scale = 2.0;
-pid_t ssid_pid = -1;
-struct wl_event_source *ssid_event = NULL;
-time_t ssid_last_time = 0;
 int tray_anchor_x = -1;
 int tray_anchor_y = -1;
 uint64_t tray_anchor_time_ms;
@@ -1264,112 +1262,6 @@ public_ip_event_cb(int fd, uint32_t mask, void *data)
 	return 0;
 }
 
-void
-request_ssid_async(const char *iface)
-{
-	char cmd[256];
-	const char *iw = "/run/current-system/sw/bin/iw";
-	const char *nmcli = "/run/current-system/sw/bin/nmcli";
-
-	if (!iface || !*iface)
-		return;
-	if (ssid_pid > 0 || ssid_event)
-		return;
-	if (access(nmcli, X_OK) != 0) {
-		nmcli = "/run/wrappers/bin/nmcli";
-		if (access(nmcli, X_OK) != 0)
-			nmcli = "nmcli";
-	}
-	if (access(iw, X_OK) != 0) {
-		iw = "/run/wrappers/bin/iw";
-		if (access(iw, X_OK) != 0)
-			iw = "iw";
-	}
-	if (snprintf(cmd, sizeof(cmd),
-				"%s -t -f active,ssid dev wifi | grep '^yes' | cut -d: -f2 || "
-				"%s dev %s link 2>/dev/null",
-				nmcli, iw, iface) >= (int)sizeof(cmd))
-		return;
-
-	if (spawn_async_read(cmd, &ssid_pid, &ssid_fd) != 0)
-		return;
-
-	ssid_len = 0;
-	ssid_buf[0] = '\0';
-	ssid_event = wl_event_loop_add_fd(event_loop, ssid_fd,
-			WL_EVENT_READABLE | WL_EVENT_HANGUP,
-			ssid_event_cb, NULL);
-	if (!ssid_event)
-		stop_ssid_fetch();
-}
-
-void
-stop_ssid_fetch(void)
-{
-	cleanup_async_task(&ssid_event, &ssid_fd, &ssid_pid);
-	ssid_len = 0;
-	ssid_buf[0] = '\0';
-}
-
-int
-ssid_event_cb(int fd, uint32_t mask, void *data)
-{
-	ssize_t n;
-	(void)data;
-	(void)mask;
-
-	for (;;) {
-		if (ssid_len >= sizeof(ssid_buf) - 1)
-			break;
-		n = read(fd, ssid_buf + ssid_len, sizeof(ssid_buf) - 1 - ssid_len);
-		if (n > 0) {
-			ssid_len += (size_t)n;
-			continue;
-		} else if (n == 0) {
-			break;
-		} else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-			return 0;
-		} else {
-			break;
-		}
-	}
-
-	ssid_buf[ssid_len] = '\0';
-	if (ssid_buf[0]) {
-		char *line = ssid_buf;
-		while (line && *line) {
-			char *next = strpbrk(line, "\r\n");
-			if (next)
-				*next = '\0';
-
-			/* Try iw-style output first */
-			char *ssid = strstr(line, "SSID");
-			if (ssid) {
-				while (*ssid && *ssid != ':' && *ssid != ' ')
-					ssid++;
-				while (*ssid == ':' || *ssid == ' ' || *ssid == '\t')
-					ssid++;
-			} else {
-				ssid = line;
-				while (*ssid == ' ' || *ssid == '\t')
-					ssid++;
-			}
-
-			if (ssid && *ssid) {
-				snprintf(net_ssid, sizeof(net_ssid), "%s", ssid);
-				break;
-			}
-
-			line = next ? next + 1 : NULL;
-		}
-	}
-	if (!net_ssid[0])
-		snprintf(net_ssid, sizeof(net_ssid), "WiFi");
-	ssid_last_time = time(NULL);
-	stop_ssid_fetch();
-	return 0;
-}
-
 /* ── startup defaults (backlight / volume / mic) ─────────────────── */
 /* Audio defaults are applied once PipeWire answers. nixlytile starts before
  * (or racing with) the pipewire/wireplumber user services, so the first
@@ -1464,7 +1356,4 @@ struct wl_event_source *public_ip_event = NULL;
 char public_ip_buf[128];
 size_t public_ip_len = 0;
 time_t net_public_ip_last;
-int ssid_fd = -1;
-char ssid_buf[256];
-size_t ssid_len = 0;
 

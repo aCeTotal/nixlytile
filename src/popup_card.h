@@ -13,8 +13,8 @@
 #include <stdint.h>
 #include <wlr/types/wlr_scene.h>
 
-#define CARD_MAX_ROWS  40
-#define CARD_MAX_HITS  16
+#define CARD_MAX_ROWS  56
+#define CARD_MAX_HITS  48
 #define CARD_MAX_FILLS 6
 #define CARD_MAX_BTN   4
 
@@ -79,6 +79,19 @@ void card_text_btn(Card *c, const char *left, const char *right,
  * a lighter fill. Hits recorded as id_base + index. */
 void card_buttons(Card *c, const char *labels[], const char *icons[],
 		int n, int active, int hover, int id_base);
+/* Strip of proportional display boxes (monitor arrangement).  wr/hr are
+ * the displays' relative logical sizes; boxes are drawn left-to-right,
+ * `sel` highlighted, and `drag_idx` (>=0) lifted and shifted `drag_dx`
+ * px while dragging.  Hits (id_base + index) are recorded at the slot
+ * positions, never at the dragged offset. */
+#define CARD_DISP_MAX 8
+typedef struct {
+	char name[20];
+	char sub[20];
+	float wr, hr;
+} CardDisp;
+void card_displays(Card *c, const CardDisp *d, int n, int sel,
+		int drag_idx, int drag_dx, int id_base);
 void card_gap(Card *c, int px);
 /* Mini month calendar (Mon-first) highlighting mday. */
 void card_calendar(Card *c, int year, int mon, int mday);

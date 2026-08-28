@@ -1,5 +1,6 @@
 #include "nixlytile.h"
 #include "client.h"
+#include "netsys.h"
 
 static void (*last_keybinding_func)(const Arg *);
 
@@ -503,6 +504,21 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 			return 1;
 	}
 
+	if (m->statusbar.net_popup.visible) {
+		if (net_popup_handle_click(m, lx, ly, button))
+			return 1;
+	}
+
+	if (m->statusbar.bt_popup.visible) {
+		if (bt_popup_handle_click(m, lx, ly, button))
+			return 1;
+	}
+
+	if (m->statusbar.display_popup.visible) {
+		if (display_popup_handle_click(m, lx, ly, button))
+			return 1;
+	}
+
 	if (lx < 0 || ly < 0 ||
 			lx >= m->statusbar.area.width ||
 			ly >= m->statusbar.area.height)
@@ -704,6 +720,8 @@ buttonpress(struct wl_listener *listener, void *data)
 	case WL_POINTER_BUTTON_STATE_RELEASED:
 		/* End a volume/mic popup gauge drag with a final commit. */
 		info_popup_slider_release();
+		/* End a display-box reorder drag (writes monitors.conf). */
+		display_drag_release();
 		/* Without this reset the internal-call guard in motionnotify
 		 * (time == 0 && resizing_from_mouse) stays armed forever
 		 * after the first mouse resize. */
@@ -1522,6 +1540,26 @@ keypress(struct wl_listener *listener, void *data)
 			wlr_session_change_vt(session, vt);
 			return;
 		}
+	}
+
+	/* Popup text entry (wifi SSID / passphrase): while active, keys go
+	 * to the entry buffer instead of bindings or clients. */
+	if (!locked && text_entry_active()) {
+		/* disarm any in-flight binding repeat — its release will be
+		 * swallowed here and would otherwise repeat forever */
+		group->nsyms = 0;
+		wl_event_source_timer_update(group->key_repeat_source, 0);
+		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+			char utf8[8] = "";
+
+			xkb_state_key_get_utf8(
+					group->wlr_group->keyboard.xkb_state,
+					keycode, utf8, sizeof(utf8));
+			for (i = 0; i < nsyms; i++)
+				if (text_entry_key(syms[i], utf8))
+					break;
+		}
+		return;
 	}
 
 	/* On _press_ if there is no active screen locker,

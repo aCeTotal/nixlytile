@@ -699,10 +699,11 @@ looks_like_game(Client *c)
 		return 1;
 #endif
 
-	/* Retro emulators are explicitly excluded from game-mode treatment.
-	 * Must be checked before the protocol-hint branches because RetroArch
-	 * announces content-type=game on its Wayland surface. */
-	if (is_retro_emulator_client(c))
+	/* Retro emulators in their menus are excluded from game-mode
+	 * treatment.  Must be checked before the protocol-hint branches
+	 * because RetroArch announces content-type=game on its Wayland
+	 * surface.  RetroArch running actual content passes through. */
+	if (retro_blocks_game(c))
 		return 0;
 
 	/* Browsers are never games.  Chromium can set a wp_tearing_control

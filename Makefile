@@ -32,6 +32,7 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            apptoggle.o mic_watch.o audio_watch.o audio_devices.o audio_meter.o gaming_conf.o gshortcuts.o \
            statusbar.o tray.o statusbar_support.o terminfo.o launchfx.o diag.o fetch_async.o charge_limit.o fancontrol.o fanwatch.o \
            popup_card.o popup_extra.o \
+           netmon.o wifi_ctrl.o btmon.o vpnctl.o text_entry.o net_ui.o bt_ui.o display_ui.o \
            notify.o notifyd.o lightsense.o presence.o powersave.o battwatch.o camwatch.o cpuclock.o instruments.o converge.o spawn.o osd.o
 
 PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstable-v1-protocol.h \
@@ -135,6 +136,30 @@ charge_limit.o: $(SRC)/charge_limit.c $(SRC)/nixlytile.h
 fancontrol.o: $(SRC)/fancontrol.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 fanwatch.o: $(SRC)/fanwatch.c $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+
+netmon.o: $(SRC)/netmon.c $(SRC)/netsys.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+
+wifi_ctrl.o: $(SRC)/wifi_ctrl.c $(SRC)/netsys.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+
+btmon.o: $(SRC)/btmon.c $(SRC)/netsys.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+
+vpnctl.o: $(SRC)/vpnctl.c $(SRC)/netsys.h $(SRC)/fetch_async.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+
+text_entry.o: $(SRC)/text_entry.c $(SRC)/netsys.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+
+net_ui.o: $(SRC)/net_ui.c $(SRC)/nixlytile.h $(SRC)/netsys.h $(SRC)/popup_card.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+
+bt_ui.o: $(SRC)/bt_ui.c $(SRC)/nixlytile.h $(SRC)/netsys.h $(SRC)/popup_card.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+
+display_ui.o: $(SRC)/display_ui.c $(SRC)/nixlytile.h $(SRC)/popup_card.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 audio_meter.o: $(SRC)/audio_meter.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<

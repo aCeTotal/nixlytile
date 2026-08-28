@@ -4128,10 +4128,10 @@ is_game_content(Client *c)
 	if (!c || !content_type_mgr)
 		return 0;
 
-	/* Retro emulators announce content-type=game but must never be
-	 * treated as games anywhere (no VRR modeset, no direct scanout,
-	 * no splash-block, no fullscreen-lock, no input override). */
-	if (is_retro_emulator_client(c))
+	/* Retro emulators announce content-type=game, but only RetroArch
+	 * actually running content counts as a game (menus get no VRR
+	 * modeset, no direct scanout, no fullscreen-lock). */
+	if (retro_blocks_game(c))
 		return 0;
 
 	surface = client_surface(c);
@@ -4152,8 +4152,8 @@ client_wants_tearing(Client *c)
 		return 0;
 
 	/* Retro emulators: ignore tearing hint too — same rationale as
-	 * is_game_content. No game-path treatment at all. */
-	if (is_retro_emulator_client(c))
+	 * is_game_content.  Lifts for RetroArch with content running. */
+	if (retro_blocks_game(c))
 		return 0;
 
 	surface = client_surface(c);

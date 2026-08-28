@@ -3,6 +3,7 @@
 #include "client.h"
 #include "config_loader.h"
 #include "diag.h"
+#include "netsys.h"
 #include <execinfo.h>
 
 static int
@@ -2721,6 +2722,10 @@ setup(void)
 		wl_event_source_timer_update(client_ping_timer, 3000);
 	tray_init();
 	notifyd_init();
+	netmon_init();
+	wifi_ctrl_init();
+	btmon_init();
+	vpnctl_init();
 	camwatch_init();
 	lightsense_init();
 	presence_init();

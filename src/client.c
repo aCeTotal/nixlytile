@@ -661,6 +661,9 @@ focusclient(Client *c, int lift)
 	/* Activate the new client */
 	client_activate_surface(client_surface(c), 1);
 
+	/* Focus drives the RetroArch/nixlymedia menu max-Hz hold (checked
+	 * inside the debounced game-mode update). */
+	schedule_game_mode_update();
 }
 
 void
@@ -2209,11 +2212,12 @@ setfullscreen(Client *c, int fullscreen)
 		c->geom_vx = c->geom_vy = c->geom_vw = c->geom_vh = 0.0;
 		client_unfreeze(c);
 		client_scale_reset(c);
-		/* Retro emulators: native presentation only. No VRR, no
-		 * refresh-rate matching, no video-classify cadence — those cause
-		 * black flicker/artifacts on HDMI TVs. Resolution drop via
-		 * apply_console_mode stays (user-intentional). */
-		int _is_retro = is_retro_emulator_client(c);
+		/* Retro emulators in their menus: native presentation only. No
+		 * VRR, no refresh-rate matching, no video-classify cadence —
+		 * those cause black flicker/artifacts on HDMI TVs. Resolution
+		 * drop via apply_console_mode stays (user-intentional).
+		 * RetroArch running content is a game: VRR/framepace engage. */
+		int _is_retro = retro_blocks_game(c);
 		int _is_browser = is_browser_client(c);
 		/* looks_like_game: protocol hints + Steam/Proton detection, so
 		 * Xwayland games (no content-type, no tearing hint when vsynced)
@@ -2725,6 +2729,11 @@ updatetitle(struct wl_listener *listener, void *data)
 	Client *c = wl_container_of(listener, c, set_title);
 	if (c == focustop(c->mon))
 		printstatus();
+	/* RetroArch flips its title exactly when content starts/stops —
+	 * that's the trigger for in-game promotion and the menu max-Hz
+	 * hold. Debounced, so this is free for ordinary title spam. */
+	if (is_retro_emulator_client(c))
+		schedule_game_mode_update();
 	if (c->foreign_toplevel_handle) {
 		struct wlr_ext_foreign_toplevel_handle_v1_state ftstate = {
 			.title = client_get_title(c),

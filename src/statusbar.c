@@ -3,6 +3,7 @@
 #include "client.h"
 #include "diag.h"
 #include "fetch_async.h"
+#include "netsys.h"
 
 /* battery popup: hit ids 0-2 are the power-profile buttons */
 #define CHARGE_LIMIT_HIT_BASE 10
@@ -405,12 +406,12 @@ renderlight(StatusModule *module, int bar_height, const char *text)
 void
 rendernet(StatusModule *module, int bar_height, const char *text)
 {
-	/* Net text module is disabled; keep node hidden */
-	if (module && module->tree) {
-		clearstatusmodule(module);
-		module->width = 0;
-		wlr_scene_node_set_enabled(&module->tree->node, 0);
-	}
+	/* Icon-only module; `text` is a change-key, never drawn. */
+	(void)text;
+	render_icon_label(module, bar_height, "",
+			ensure_net_icon_buffer, &net_icon_buf,
+			&net_icon_w, &net_icon_h, 0, statusbar_icon_text_gap,
+			statusbar_fg);
 }
 
 void
@@ -1282,7 +1283,7 @@ cpu_popup_hover_index(Monitor *m, CpuPopup *p)
 
 	popup_x = cpu_popup_clamped_x(m, p);
 	rel_x = (int)floor(cursor->x) - m->statusbar.area.x - popup_x;
-	rel_y = (int)floor(cursor->y) - m->statusbar.area.y - m->statusbar.area.height;
+	rel_y = (int)floor(cursor->y) - m->statusbar.area.y - statusbar_popup_y(m);
 	if (rel_x < 0 || rel_y < 0 || rel_x >= p->width || rel_y >= p->height)
 		return -1;
 
@@ -1667,7 +1668,7 @@ cpu_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 	}
 
 	rel_x = lx - popup_x;
-	rel_y = ly - m->statusbar.area.height;
+	rel_y = ly - statusbar_popup_y(m);
 	if (rel_x < 0 || rel_y < 0 || rel_x >= p->width || rel_y >= p->height)
 		return 0;
 
@@ -1857,7 +1858,7 @@ ram_popup_hover_index(Monitor *m, RamPopup *p)
 	lx = (int)round(cx) - m->statusbar.area.x;
 	ly = (int)round(cy) - m->statusbar.area.y;
 	rel_x = lx - popup_x;
-	rel_y = ly - m->statusbar.area.height;
+	rel_y = ly - statusbar_popup_y(m);
 
 	for (int i = 0; i < p->proc_count; i++) {
 		RamProcEntry *e = &p->procs[i];
@@ -2062,7 +2063,7 @@ ram_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 	}
 
 	rel_x = lx - popup_x;
-	rel_y = ly - m->statusbar.area.height;
+	rel_y = ly - statusbar_popup_y(m);
 	if (rel_x < 0 || rel_y < 0 || rel_x >= p->width || rel_y >= p->height)
 		return 0;
 
@@ -2377,7 +2378,7 @@ updatebatteryhover(Monitor *m, double cx, double cy)
 			lx >= popup_x &&
 			lx < popup_x + p->width &&
 			ly >= m->statusbar.area.height &&
-			ly < m->statusbar.area.height + p->height) {
+			ly < statusbar_popup_y(m) + p->height) {
 		popup_hover = 1;
 	}
 
@@ -2414,7 +2415,7 @@ updatebatteryhover(Monitor *m, double cx, double cy)
 		p->visible = 1;
 		wlr_scene_node_set_enabled(&p->tree->node, 1);
 		wlr_scene_node_set_position(&p->tree->node,
-				popup_x, m->statusbar.area.height);
+				popup_x, statusbar_popup_y(m));
 
 		/* Check if refresh is needed (every 500ms after delay) */
 		stale_refresh = (p->last_fetch_ms == 0 ||
@@ -2433,7 +2434,7 @@ updatebatteryhover(Monitor *m, double cx, double cy)
 
 			if (popup_hover) {
 				int rel_x = lx - popup_x;
-				int rel_y = ly - m->statusbar.area.height;
+				int rel_y = ly - statusbar_popup_y(m);
 
 				for (int i = 0; i < p->nhits; i++) {
 					CardHit *hit = &p->hits[i];
@@ -2464,7 +2465,7 @@ updatebatteryhover(Monitor *m, double cx, double cy)
 			 * the card never hangs past the screen edge */
 			wlr_scene_node_set_position(&p->tree->node,
 					battery_popup_clamped_x(m, p),
-					m->statusbar.area.height);
+					statusbar_popup_y(m));
 		}
 		if (!was_visible)
 			popup_view_show(&p->view);
@@ -2557,7 +2558,7 @@ battery_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 
 	popup_x = battery_popup_clamped_x(m, p);
 	rel_x = lx - popup_x;
-	rel_y = ly - m->statusbar.area.height;
+	rel_y = ly - statusbar_popup_y(m);
 	if (rel_x < 0 || rel_y < 0 || rel_x >= p->width || rel_y >= p->height)
 		return 0;
 
@@ -2615,79 +2616,6 @@ battery_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 	}
 
 	return 1; /* click landed inside the popup — always consume */
-}
-
-void
-rendernetpopup(Monitor *m)
-{
-	NetPopup *p;
-	Card *card;
-	CardResult res;
-	char value[24], sub[64], v1[64];
-	size_t i;
-
-	if (!m || !m->statusbar.net_popup.tree)
-		return;
-
-	p = &m->statusbar.net_popup;
-
-	if (!statusfont.font || !net_available) {
-		p->width = p->height = 0;
-		if (p->tree)
-			wlr_scene_node_set_enabled(&p->tree->node, 0);
-		p->visible = 0;
-		return;
-	}
-
-	card = card_begin();
-	if (!card)
-		return;
-
-	if (net_is_wireless) {
-		int sig = (net_last_wifi_quality >= 0.0) ?
-			(int)lround(net_last_wifi_quality) : -1;
-
-		if (sig >= 0)
-			snprintf(value, sizeof(value), "%d%%", sig);
-		else
-			snprintf(value, sizeof(value), "--");
-		snprintf(sub, sizeof(sub), "%s", net_ssid[0] ? net_ssid : "WI-FI");
-		for (i = 0; sub[i]; i++)
-			sub[i] = (char)toupper((unsigned char)sub[i]);
-		card_header(card, net_icon_path, "Wi-Fi", sub, value);
-		card_gap(card, 6);
-		card_gauge(card, sig >= 0 ? sig / 100.0 : 0.0,
-				sig >= 0 && sig < 30 ? card_col_yellow :
-				card_col_blue);
-		card_gap(card, 6);
-	} else {
-		if (net_link_speed_mbps >= 1000)
-			snprintf(value, sizeof(value), "%.1fG",
-					net_link_speed_mbps / 1000.0);
-		else if (net_link_speed_mbps > 0)
-			snprintf(value, sizeof(value), "%dM", net_link_speed_mbps);
-		else
-			snprintf(value, sizeof(value), "--");
-		card_header(card, net_icon_path, "Ethernet", "WIRED LINK", value);
-		card_gap(card, 8);
-	}
-
-	card_kv2(card, "Local IP", net_local_ip[0] ? net_local_ip : "--",
-			NULL, NULL, NULL, NULL);
-	card_kv2(card, "Public IP", net_public_ip[0] ? net_public_ip : "--",
-			NULL, NULL, NULL, NULL);
-
-	card_section(card, "THROUGHPUT");
-	snprintf(v1, sizeof(v1), "%s", net_up_text[0] ? net_up_text : "--");
-	card_kv2(card, "Upload", v1, card_col_green, NULL, NULL, NULL);
-	snprintf(v1, sizeof(v1), "%s", net_down_text[0] ? net_down_text : "--");
-	card_kv2(card, "Download", v1, card_col_blue, NULL, NULL, NULL);
-
-	if (card_finish(card, &res) != 0)
-		return;
-	popup_view_apply(&p->view, p->tree, &res);
-	p->width = p->view.w;
-	p->height = p->view.h;
 }
 
 void
@@ -4003,6 +3931,14 @@ positionstatusmodules(Monitor *m)
 			wlr_scene_node_set_enabled(&m->statusbar.net.tree->node, 0);
 			m->statusbar.net.x = 0;
 		}
+		if (m->statusbar.bluetooth.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.bluetooth.tree->node, 0);
+			m->statusbar.bluetooth.x = 0;
+		}
+		if (m->statusbar.display.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.display.tree->node, 0);
+			m->statusbar.display.x = 0;
+		}
 		if (m->statusbar.battery.tree) {
 			wlr_scene_node_set_enabled(&m->statusbar.battery.tree->node, 0);
 			m->statusbar.battery.x = 0;
@@ -4069,6 +4005,12 @@ positionstatusmodules(Monitor *m)
 	if (m->statusbar.fan.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.fan.tree->node,
 				m->statusbar.fan.width > 0);
+	if (m->statusbar.bluetooth.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.bluetooth.tree->node,
+				m->statusbar.bluetooth.width > 0);
+	if (m->statusbar.display.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.display.tree->node,
+				m->statusbar.display.width > 0);
 	if (m->statusbar.ram.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.ram.tree->node,
 				m->statusbar.ram.width > 0);
@@ -4086,11 +4028,6 @@ positionstatusmodules(Monitor *m)
 		wlr_scene_node_set_position(&m->statusbar.tags.tree->node, x, 0);
 		m->statusbar.tags.x = x;
 		x += m->statusbar.tags.width + spacing;
-	}
-	if (m->statusbar.net.width > 0) {
-		wlr_scene_node_set_position(&m->statusbar.net.tree->node, x, 0);
-		m->statusbar.net.x = x;
-		x += m->statusbar.net.width + spacing;
 	}
 	if (m->statusbar.traylabel.width > 0) {
 		wlr_scene_node_set_position(&m->statusbar.traylabel.tree->node, x, 0);
@@ -4150,6 +4087,24 @@ positionstatusmodules(Monitor *m)
 		m->statusbar.battery.x = x;
 		x -= spacing;
 	}
+	if (m->statusbar.net.width > 0) {
+		x -= m->statusbar.net.width;
+		wlr_scene_node_set_position(&m->statusbar.net.tree->node, x, 0);
+		m->statusbar.net.x = x;
+		x -= spacing;
+	}
+	if (m->statusbar.bluetooth.width > 0) {
+		x -= m->statusbar.bluetooth.width;
+		wlr_scene_node_set_position(&m->statusbar.bluetooth.tree->node, x, 0);
+		m->statusbar.bluetooth.x = x;
+		x -= spacing;
+	}
+	if (m->statusbar.display.width > 0) {
+		x -= m->statusbar.display.width;
+		wlr_scene_node_set_position(&m->statusbar.display.tree->node, x, 0);
+		m->statusbar.display.x = x;
+		x -= spacing;
+	}
 
 	/* Terminal-info label: centered in the free span between the left
 	 * group (tags/steam/net/tray) and the right group.  x is now the
@@ -4184,7 +4139,7 @@ positionstatusmodules(Monitor *m)
 			if (popup_x < 0)
 				popup_x = 0;
 			wlr_scene_node_set_position(&m->statusbar.cpu_popup.tree->node,
-					popup_x, m->statusbar.area.height);
+					popup_x, statusbar_popup_y(m));
 			m->statusbar.cpu_popup.refresh_data = 1;
 		} else {
 			wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
@@ -4197,7 +4152,7 @@ positionstatusmodules(Monitor *m)
 
 		if (m->statusbar.area.height > 0) {
 			wlr_scene_node_set_position(&m->statusbar.net_popup.tree->node,
-					pos_x, m->statusbar.area.height);
+					pos_x, statusbar_popup_y(m));
 			if (!m->statusbar.net_popup.visible)
 				wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
 		} else {
@@ -4216,7 +4171,7 @@ positionstatusmodules(Monitor *m)
 			if (menu_x < 0)
 				menu_x = 0;
 			m->statusbar.tray_menu.x = menu_x;
-			m->statusbar.tray_menu.y = m->statusbar.area.height;
+			m->statusbar.tray_menu.y = statusbar_popup_y(m);
 			wlr_scene_node_set_position(&m->statusbar.tray_menu.tree->node,
 					m->statusbar.tray_menu.x, m->statusbar.tray_menu.y);
 			wlr_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 1);
@@ -4458,6 +4413,10 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 			rendervolume(&m->statusbar.volume, bar_area.height, volume_text);
 		if (m->statusbar.fan.tree)
 			renderfan(&m->statusbar.fan, bar_area.height, fan_text);
+		if (m->statusbar.bluetooth.tree)
+			renderbluetooth(&m->statusbar.bluetooth, bar_area.height, "");
+		if (m->statusbar.display.tree)
+			renderdisplays(&m->statusbar.display, bar_area.height, "");
 		if (m->statusbar.mic.tree)
 			rendermic(&m->statusbar.mic, bar_area.height, mic_text);
 		if (m->statusbar.ram.tree)
@@ -4557,145 +4516,6 @@ refreshstatuslight(void)
 		if (status_should_render(&m->statusbar.light, barh, light_text)) {
 			renderlight(&m->statusbar.light, barh, light_text);
 			positionstatusmodules(m);
-		}
-	}
-}
-
-void
-refreshstatusnet(void)
-	{
-		Monitor *m;
-		int barh;
-		char iface[IF_NAMESIZE] = {0};
-		char path[PATH_MAX];
-		time_t now_sec = time(NULL);
-		unsigned long long rx = 0, tx = 0;
-	struct timespec now_ts = {0};
-	double elapsed = 0.0;
-	int rx_ok = 0, tx_ok = 0;
-	double wifi_quality = -1.0;
-	const char *icon_path = net_icon_no_conn_resolved[0] ? net_icon_no_conn_resolved : net_icon_no_conn;
-	int link_speed = -1;
-	int popup_active = 0;
-
-	wl_list_for_each(m, &mons, link) {
-		if (m->statusbar.net_popup.visible) {
-			popup_active = 1;
-			break;
-		}
-	}
-	net_available = findactiveinterface(iface, sizeof(iface), &net_is_wireless);
-	if (!net_available) {
-		snprintf(net_text, sizeof(net_text), "Net: --");
-		snprintf(net_local_ip, sizeof(net_local_ip), "--");
-		snprintf(net_down_text, sizeof(net_down_text), "--");
-		snprintf(net_up_text, sizeof(net_up_text), "--");
-		snprintf(net_ssid, sizeof(net_ssid), "--");
-		net_last_wifi_quality = -1.0;
-		net_link_speed_mbps = -1;
-		net_last_down_bps = net_last_up_bps = -1.0;
-		net_prev_valid = 0;
-		net_prev_iface[0] = '\0';
-		stop_ssid_fetch();
-		ssid_last_time = 0;
-	} else {
-		int need_ssid;
-
-		snprintf(net_iface, sizeof(net_iface), "%s", iface);
-		if (strncmp(net_prev_iface, net_iface, sizeof(net_prev_iface)) != 0) {
-			net_prev_valid = 0;
-			net_prev_rx = net_prev_tx = 0;
-			snprintf(net_prev_iface, sizeof(net_prev_iface), "%s", net_iface);
-			if (net_is_wireless) {
-				stop_ssid_fetch();
-				ssid_last_time = 0;
-			}
-		}
-
-		if (net_is_wireless) {
-			need_ssid = (!net_ssid[0] || strcmp(net_ssid, "--") == 0 ||
-					(now_sec != (time_t)-1 &&
-					 (now_sec - ssid_last_time > 60 || ssid_last_time == 0)));
-			if ((popup_active || need_ssid) && now_sec != (time_t)-1 &&
-					!ssid_event && ssid_pid <= 0) {
-				request_ssid_async(net_iface);
-			}
-			if (!net_ssid[0])
-				snprintf(net_ssid, sizeof(net_ssid), "WiFi");
-			snprintf(net_text, sizeof(net_text), "WiFi: %s", net_ssid);
-		} else {
-			stop_ssid_fetch();
-			ssid_last_time = 0;
-			snprintf(net_text, sizeof(net_text), "Wired");
-			snprintf(net_ssid, sizeof(net_ssid), "Ethernet");
-		}
-
-		if (!net_is_wireless) {
-			icon_path = net_icon_eth_resolved[0] ? net_icon_eth_resolved : net_icon_eth;
-			if (readlinkspeedmbps(net_iface, &link_speed) == 0)
-				net_link_speed_mbps = link_speed;
-			else
-				net_link_speed_mbps = -1;
-			net_last_wifi_quality = -1.0;
-		} else {
-			wifi_quality = wireless_signal_percent(net_iface);
-			if (wifi_quality < 0.0)
-				wifi_quality = 50.0;
-			icon_path = wifi_icon_for_quality(wifi_quality);
-			net_last_wifi_quality = wifi_quality;
-			if (readlinkspeedmbps(net_iface, &link_speed) == 0)
-				net_link_speed_mbps = link_speed;
-			else
-				net_link_speed_mbps = -1;
-		}
-
-		if (!localip(net_iface, net_local_ip, sizeof(net_local_ip)))
-			snprintf(net_local_ip, sizeof(net_local_ip), "--");
-
-		if (popup_active)
-			request_public_ip_async_ex(1); /* force update when hovering */
-
-		clock_gettime(CLOCK_MONOTONIC, &now_ts);
-
-		if (popup_active) {
-			if (snprintf(path, sizeof(path), "/sys/class/net/%s/statistics/rx_bytes", net_iface)
-					< (int)sizeof(path))
-				rx_ok = (readulong(path, &rx) == 0);
-			if (snprintf(path, sizeof(path), "/sys/class/net/%s/statistics/tx_bytes", net_iface)
-					< (int)sizeof(path))
-				tx_ok = (readulong(path, &tx) == 0);
-
-			if (net_prev_valid) {
-				elapsed = (now_ts.tv_sec - net_prev_ts.tv_sec)
-					+ (now_ts.tv_nsec - net_prev_ts.tv_nsec) / 1e9;
-			}
-			net_last_down_bps = (net_prev_valid && rx_ok) ? net_bytes_to_rate(rx, net_prev_rx, elapsed) : -1.0;
-			net_last_up_bps = (net_prev_valid && tx_ok) ? net_bytes_to_rate(tx, net_prev_tx, elapsed) : -1.0;
-			format_speed(net_last_down_bps, net_down_text, sizeof(net_down_text));
-			format_speed(net_last_up_bps, net_up_text, sizeof(net_up_text));
-
-			if (rx_ok && tx_ok) {
-				net_prev_rx = rx;
-				net_prev_tx = tx;
-				net_prev_ts = now_ts;
-				net_prev_valid = 1;
-			}
-		}
-	}
-	set_net_icon_path(icon_path);
-
-	wl_list_for_each(m, &mons, link) {
-		if (!m->statusbar.net.tree)
-			continue;
-		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		if (status_should_render(&m->statusbar.net, barh, net_text)
-				|| m->statusbar.net_popup.visible) {
-			rendernet(&m->statusbar.net, barh, net_text);
-			if (m->statusbar.net_popup.visible)
-				rendernetpopup(m);
-			positionstatusmodules(m);
-		} else if (m->statusbar.net_popup.visible) {
-			rendernetpopup(m);
 		}
 	}
 }
@@ -5219,6 +5039,12 @@ status_task_hover_active(void (*fn)(void))
 				return 1;
 		}
 	}
+	if (fn == refreshstatusbluetooth) {
+		wl_list_for_each(m, &mons, link) {
+			if (m->showbar && m->statusbar.bt_popup.visible)
+				return 1;
+		}
+	}
 	return 0;
 }
 
@@ -5428,7 +5254,7 @@ updatecpuhover(Monitor *m, double cx, double cy)
 			lx >= popup_x &&
 			lx < popup_x + p->width &&
 			ly >= m->statusbar.area.height &&
-			ly < m->statusbar.area.height + p->height) {
+			ly < statusbar_popup_y(m) + p->height) {
 		popup_hover = 1;
 	}
 
@@ -5463,7 +5289,7 @@ updatecpuhover(Monitor *m, double cx, double cy)
 		p->visible = 1;
 		wlr_scene_node_set_enabled(&p->tree->node, 1);
 		wlr_scene_node_set_position(&p->tree->node,
-				popup_x, m->statusbar.area.height);
+				popup_x, statusbar_popup_y(m));
 		new_hover = cpu_popup_hover_index(m, p);
 		stale_refresh = (p->last_fetch_ms == 0 ||
 				now < p->last_fetch_ms ||
@@ -5484,7 +5310,7 @@ updatecpuhover(Monitor *m, double cx, double cy)
 				rendercpupopup(m);
 				wlr_scene_node_set_position(&p->tree->node,
 						cpu_popup_clamped_x(m, p),
-						m->statusbar.area.height);
+						statusbar_popup_y(m));
 			}
 		}
 		if (!was_visible) {
@@ -5545,7 +5371,7 @@ updateramhover(Monitor *m, double cx, double cy)
 			lx >= popup_x &&
 			lx < popup_x + p->width &&
 			ly >= m->statusbar.area.height &&
-			ly < m->statusbar.area.height + p->height) {
+			ly < statusbar_popup_y(m) + p->height) {
 		popup_hover = 1;
 	}
 
@@ -5576,7 +5402,7 @@ updateramhover(Monitor *m, double cx, double cy)
 		p->visible = 1;
 		wlr_scene_node_set_enabled(&p->tree->node, 1);
 		wlr_scene_node_set_position(&p->tree->node,
-				popup_x, m->statusbar.area.height);
+				popup_x, statusbar_popup_y(m));
 		new_hover = ram_popup_hover_index(m, p);
 		stale_refresh = (p->last_fetch_ms == 0 ||
 				now < p->last_fetch_ms ||
@@ -5591,7 +5417,7 @@ updateramhover(Monitor *m, double cx, double cy)
 			renderrampopup(m);
 			wlr_scene_node_set_position(&p->tree->node,
 					ram_popup_clamped_x(m, p),
-					m->statusbar.area.height);
+					statusbar_popup_y(m));
 		} else if (new_hover != p->hover_idx) {
 			/* Kill-button hover highlight; throttled like the CPU
 			 * popup so fast pointer sweeps don't re-raster every
@@ -5667,12 +5493,16 @@ updatenethover(Monitor *m, double cx, double cy)
 		int px0 = m->statusbar.area.x + p->anchor_x;
 		int py0 = m->statusbar.area.y + m->statusbar.area.height;
 		int px1 = px0 + p->width;
-		int py1 = py0 + p->height;
+		int py1 = m->statusbar.area.y + statusbar_popup_y(m) + p->height;
 		int cx_i = (int)floor(cx);
 		int cy_i = (int)floor(cy);
 		if (cx_i >= px0 && cx_i < px1 && cy_i >= py0 && cy_i < py1)
 			inside = 1;
 	}
+
+	/* Hold the popup open while an SSID/password entry is active */
+	if (p->visible && text_entry_active())
+		inside = 1;
 
 	was_visible = p->visible;
 
@@ -5696,9 +5526,9 @@ updatenethover(Monitor *m, double cx, double cy)
 		p->visible = 1;
 		wlr_scene_node_set_enabled(&p->tree->node, 1);
 		wlr_scene_node_set_position(&p->tree->node,
-				p->anchor_x, m->statusbar.area.height);
+				p->anchor_x, statusbar_popup_y(m));
 		if (!was_visible) {
-			p->anchor_y = m->statusbar.area.height;
+			p->anchor_y = statusbar_popup_y(m);
 			rendernetpopup(m);
 			/* re-clamp with the freshly rendered width */
 			p->anchor_x = m->statusbar.net.x;
@@ -5713,14 +5543,16 @@ updatenethover(Monitor *m, double cx, double cy)
 					p->anchor_x = 0;
 			}
 			wlr_scene_node_set_position(&p->tree->node,
-					p->anchor_x, m->statusbar.area.height);
+					p->anchor_x, statusbar_popup_y(m));
 			popup_view_show(&p->view);
 		}
+		net_popup_track_hover(m, cx, cy);
 	} else if (p->visible || p->hover_start_ms != 0) {
 		p->visible = 0;
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
 		p->suppress_refresh_until_ms = 0;
 		p->hover_start_ms = 0;
+		p->btn_hover = -1;
 		popup_view_hide(&p->view);
 		set_status_task_due(refreshstatusnet, now + 60000);
 	}
@@ -5768,7 +5600,13 @@ statusbar_popup_at(Monitor *m, double cx, double cy)
 		|| popup_contains(m, sb->mic_popup.tree, sb->mic_popup.visible,
 				sb->mic_popup.width, sb->mic_popup.height, cx, cy)
 		|| popup_contains(m, sb->light_popup.tree, sb->light_popup.visible,
-				sb->light_popup.width, sb->light_popup.height, cx, cy);
+				sb->light_popup.width, sb->light_popup.height, cx, cy)
+		|| popup_contains(m, sb->bt_popup.tree, sb->bt_popup.visible,
+				sb->bt_popup.width, sb->bt_popup.height, cx, cy)
+		|| popup_contains(m, sb->display_popup.tree,
+				sb->display_popup.visible,
+				sb->display_popup.width,
+				sb->display_popup.height, cx, cy);
 }
 
 int
@@ -5834,6 +5672,12 @@ initstatusbar(Monitor *m)
 	m->statusbar.fan.tree = wlr_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.fan.tree)
 		m->statusbar.fan.bg = wlr_scene_tree_create(m->statusbar.fan.tree);
+	m->statusbar.bluetooth.tree = wlr_scene_tree_create(m->statusbar.tree);
+	if (m->statusbar.bluetooth.tree)
+		m->statusbar.bluetooth.bg = wlr_scene_tree_create(m->statusbar.bluetooth.tree);
+	m->statusbar.display.tree = wlr_scene_tree_create(m->statusbar.tree);
+	if (m->statusbar.display.tree)
+		m->statusbar.display.bg = wlr_scene_tree_create(m->statusbar.display.tree);
 	m->statusbar.ram.tree = wlr_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.ram.tree)
 		m->statusbar.ram.bg = wlr_scene_tree_create(m->statusbar.ram.tree);
@@ -5874,13 +5718,16 @@ initstatusbar(Monitor *m)
 		if (m->statusbar.net_popup.tree) {
 			m->statusbar.net_popup.bg = wlr_scene_tree_create(m->statusbar.net_popup.tree);
 			m->statusbar.net_popup.visible = 0;
+			m->statusbar.net_popup.btn_hover = -1;
+			m->statusbar.net_popup.nhits = 0;
 			wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
 		}
 		{
-			InfoPopup *info[5] = { &m->statusbar.clock_popup,
+			InfoPopup *info[7] = { &m->statusbar.clock_popup,
 				&m->statusbar.volume_popup, &m->statusbar.mic_popup,
-				&m->statusbar.light_popup, &m->statusbar.fan_popup };
-			for (int i = 0; i < 5; i++) {
+				&m->statusbar.light_popup, &m->statusbar.fan_popup,
+				&m->statusbar.bt_popup, &m->statusbar.display_popup };
+			for (int i = 0; i < 7; i++) {
 				info[i]->tree = wlr_scene_tree_create(m->statusbar.tree);
 				info[i]->visible = 0;
 				info[i]->hover_start_ms = 0;
@@ -6224,3 +6071,15 @@ togglestatusbar(const Arg *arg)
 	arrangelayers(selmon);
 }
 
+
+/* Anchor for every bar popup/dropdown: not flush against the bar, but at
+ * the top edge of the tiles below it (bar bottom + the outer tile gap).
+ * Hover keep-alive rects still start at the bar bottom so the cursor can
+ * cross the gap strip without the popup closing. */
+int
+statusbar_popup_y(Monitor *m)
+{
+	int gap = (m->gaps && gappx > 0) ? (int)gappx : 0;
+
+	return m->statusbar.area.height + gap;
+}

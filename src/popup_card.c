@@ -236,6 +236,7 @@ typedef enum {
 	CROW_SECTION,
 	CROW_TEXT,
 	CROW_BUTTONS,
+	CROW_DISPLAYS,
 	CROW_GAP,
 	CROW_CAL,
 } CardRowType;
@@ -252,6 +253,8 @@ typedef struct {
 	int gap;
 	int hit_id, hot;
 	int year, mon, mday;
+	CardDisp dsp[CARD_DISP_MAX];
+	int ndsp;
 	/* computed in measure */
 	int y, h;
 } CardRow;
@@ -430,6 +433,26 @@ card_buttons(Card *c, const char *labels[], const char *icons[],
 		setstr(r->btn[i], sizeof(r->btn[i]), labels[i]);
 }
 
+#define DISP_STRIP_H 96
+
+void
+card_displays(Card *c, const CardDisp *d, int n, int sel,
+		int drag_idx, int drag_dx, int id_base)
+{
+	CardRow *r = row_new(c, CROW_DISPLAYS);
+
+	if (!r)
+		return;
+	if (n > CARD_DISP_MAX)
+		n = CARD_DISP_MAX;
+	memcpy(r->dsp, d, n * sizeof(*d));
+	r->ndsp = n;
+	r->active = sel;
+	r->hover = drag_idx;
+	r->gap = drag_dx;
+	r->id_base = id_base;
+}
+
 void
 card_gap(Card *c, int px)
 {
@@ -559,6 +582,10 @@ card_measure(Card *c, int *out_w, int *out_h)
 			rw = btn_row_width(r);
 			r->h = base_h + 18;
 			break;
+		case CROW_DISPLAYS:
+			rw = r->ndsp * 84;
+			r->h = DISP_STRIP_H;
+			break;
 		case CROW_METER:
 			r->h = CARD_METER_H;
 			break;
@@ -669,6 +696,47 @@ draw_icon(cairo_t *cr, const char *path, int x, int y, int size)
 	cairo_rectangle(cr, x, y, size, size);
 	cairo_fill(cr);
 	cairo_restore(cr);
+}
+
+/* Shared box layout for a CROW_DISPLAYS strip (used by both the cairo
+ * fill pass and the fcft text pass).  Boxes are proportional to the
+ * displays' logical sizes, centered in the strip. */
+static int
+disp_layout(const CardRow *r, int inner_w, int strip_y,
+		int *bx, int *by, int *bw, int *bh)
+{
+	int n = r->ndsp, gap = 12, i, x;
+	float sum_wr = 0, max_hr = 0;
+	double k, total;
+
+	for (i = 0; i < n; i++) {
+		sum_wr += r->dsp[i].wr;
+		if (r->dsp[i].hr > max_hr)
+			max_hr = r->dsp[i].hr;
+	}
+	if (n == 0 || sum_wr <= 0.0f || max_hr <= 0.0f)
+		return 0;
+	k = (double)(inner_w - gap * (n - 1)) / sum_wr;
+	if (k * max_hr > DISP_STRIP_H - 16)
+		k = (DISP_STRIP_H - 16) / max_hr;
+	total = gap * (n - 1);
+	for (i = 0; i < n; i++)
+		total += r->dsp[i].wr * k;
+	x = CARD_PAD + (inner_w - (int)total) / 2;
+	if (x < CARD_PAD)
+		x = CARD_PAD;
+	for (i = 0; i < n; i++) {
+		bw[i] = (int)(r->dsp[i].wr * k);
+		bh[i] = (int)(r->dsp[i].hr * k);
+		if (bw[i] < 40)
+			bw[i] = 40;
+		if (bh[i] < 40)
+			bh[i] = 40;
+		bx[i] = x;
+		by[i] = strip_y + (DISP_STRIP_H - bh[i]) / 2;
+		x += bw[i] + gap;
+	}
+	return n;
 }
 
 static void
@@ -845,6 +913,54 @@ card_finish(Card *c, CardResult *out)
 			}
 			break;
 		}
+		case CROW_DISPLAYS: {
+			int bx[CARD_DISP_MAX], by[CARD_DISP_MAX];
+			int bw[CARD_DISP_MAX], bh[CARD_DISP_MAX];
+			int n = disp_layout(r, inner_w, y, bx, by, bw, bh);
+			int pass, b;
+
+			/* dragged box drawn last so it floats above the rest */
+			for (pass = 0; pass < 2; pass++)
+				for (b = 0; b < n; b++) {
+					int dragged = b == r->hover;
+					int x0 = bx[b];
+
+					if (dragged != pass)
+						continue;
+					if (dragged) {
+						x0 += r->gap;
+						if (x0 < CARD_PAD)
+							x0 = CARD_PAD;
+						if (x0 + bw[b] >
+								CARD_PAD + inner_w)
+							x0 = CARD_PAD +
+								inner_w - bw[b];
+					}
+					rounded(cr, x0 + 0.5, by[b] + 0.5,
+							bw[b] - 1, bh[b] - 1, 7);
+					cairo_set_source_rgba(cr, 1, 1, 1,
+							dragged ? 0.16 :
+							b == r->active ?
+							0.11 : 0.05);
+					cairo_fill_preserve(cr);
+					if (b == r->active)
+						cairo_set_source_rgba(cr,
+							card_col_blue[0],
+							card_col_blue[1],
+							card_col_blue[2],
+							0.90);
+					else
+						cairo_set_source_rgba(cr,
+							1, 1, 1, 0.14);
+					cairo_set_line_width(cr,
+							b == r->active ?
+							1.6 : 1.0);
+					cairo_stroke(cr);
+					add_hit(out, bx[b], y, bw[b],
+							r->h, r->id_base + b);
+				}
+			break;
+		}
 		case CROW_CAL: {
 			/* today pill */
 			struct tm tmv = {0};
@@ -996,6 +1112,44 @@ card_finish(Card *c, CardResult *out)
 						bx + (bw - tw) / 2, bl,
 						b == r->active ? card_col_fg :
 						card_col_dim, 0);
+			}
+			break;
+		}
+		case CROW_DISPLAYS: {
+			int bx[CARD_DISP_MAX], by[CARD_DISP_MAX];
+			int bw[CARD_DISP_MAX], bh[CARD_DISP_MAX];
+			int n = disp_layout(r, inner_w, y, bx, by, bw, bh);
+			int b;
+
+			for (b = 0; b < n; b++) {
+				struct fcft_font *nf = statusfont.font;
+				int x0 = bx[b], tw, block, ty;
+
+				if (b == r->hover) {
+					x0 += r->gap;
+					if (x0 < CARD_PAD)
+						x0 = CARD_PAD;
+					if (x0 + bw[b] > CARD_PAD + inner_w)
+						x0 = CARD_PAD + inner_w - bw[b];
+				}
+				if (text_width_f(nf, r->dsp[b].name, 0) >
+						bw[b] - 10)
+					nf = card_font_small;
+				block = nf->height + 3 + small_h;
+				ty = by[b] + (bh[b] - block) / 2;
+				tw = text_width_f(nf, r->dsp[b].name, 0);
+				draw_text_f(pix, nf, r->dsp[b].name,
+						x0 + (bw[b] - tw) / 2,
+						ty + nf->ascent,
+						b == r->active ? card_col_fg :
+						card_col_dim, 0);
+				tw = text_width_f(card_font_small,
+						r->dsp[b].sub, 0);
+				draw_text_f(pix, card_font_small,
+						r->dsp[b].sub,
+						x0 + (bw[b] - tw) / 2,
+						ty + nf->height + 3 + small_asc,
+						card_col_faint, 0);
 			}
 			break;
 		}
