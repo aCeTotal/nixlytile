@@ -25,6 +25,7 @@ static int nm_max_rate;
 static char nm_saved[NM_SAVED_MAX][64];
 static int nm_nsaved;
 static char nm_error[64];
+static char nm_pend_ssid[64];   /* profile to delete if the connect fails */
 static int nm_list_inflight, nm_saved_inflight;
 static uint64_t nm_list_done_ms, nm_saved_done_ms;
 
@@ -218,6 +219,8 @@ nm_list_done(const char *out, size_t len, void *data)
 			w->freq_mhz = freq;
 			w->signal_dbm = sig_dbm;
 			w->secured = secured;
+			snprintf(w->sec, sizeof(w->sec), "%s",
+					secured ? f[5] : "Open");
 			w->connected = active;
 			w->known_id = -1;
 			for (j = 0; j < nm_nsaved; j++) {
@@ -360,6 +363,33 @@ nm_act_done(const char *out, size_t len, void *data)
 	netsys_changed();
 }
 
+/* A failed `dev wifi connect` leaves the half-made profile behind and
+ * NM keeps retrying it with the bad password; delete it so only
+ * successful connects are remembered. */
+static void
+nm_cleanup_done(const char *out, size_t len, void *data)
+{
+	/* keep nm_error (the connect failure) for the popup */
+	nm_saved_done_ms = 0;
+	netsys_changed();
+}
+
+static void
+nm_connect_done(const char *out, size_t len, void *data)
+{
+	nm_act_done(out, len, data);
+	if (nm_error[0] && nm_pend_ssid[0]) {
+		char qs[140], cmd[192];
+
+		nm_quote(qs, sizeof(qs), nm_pend_ssid);
+		snprintf(cmd, sizeof(cmd),
+				"nmcli connection delete id %s 2>/dev/null",
+				qs);
+		fetch_async(cmd, nm_cleanup_done, NULL);
+	}
+	nm_pend_ssid[0] = '\0';
+}
+
 int
 nm_wifi_connect(const char *ssid, const char *psk, int hidden)
 {
@@ -377,7 +407,8 @@ nm_wifi_connect(const char *ssid, const char *psk, int hidden)
 				qs, hidden ? " hidden yes" : "");
 	}
 	nm_error[0] = '\0';
-	return fetch_async(cmd, nm_act_done, NULL);
+	snprintf(nm_pend_ssid, sizeof(nm_pend_ssid), "%s", ssid);
+	return fetch_async(cmd, nm_connect_done, NULL);
 }
 
 int

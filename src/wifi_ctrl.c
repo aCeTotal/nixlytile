@@ -29,6 +29,8 @@ static char wc_local_cmd[108];
 static char wc_local_evt[108];
 static char wc_error[64];
 static int wc_max_linkspeed;
+static int wc_pend_id = -1;   /* network added by wifi_connect, unsaved
+                               * until CTRL-EVENT-CONNECTED confirms it */
 static uint64_t wc_backoff_until;   /* wedged supplicant: skip requests */
 
 static uint64_t
@@ -181,10 +183,26 @@ wc_evt_event(int fd, uint32_t mask, void *data)
 			 * so the chosen one couldn't be outraced; now that the
 			 * association stuck, restore them for future roaming */
 			wc_cmd_ok("ENABLE_NETWORK all");
+			/* persist the new network only now that it worked, so
+			 * it auto-connects from here on */
+			if (wc_pend_id >= 0) {
+				wc_cmd_ok("SAVE_CONFIG");
+				wc_pend_id = -1;
+			}
 		}
 		if (strstr(buf, "CTRL-EVENT-SSID-TEMP-DISABLED") &&
 				strstr(buf, "WRONG_KEY")) {
 			snprintf(wc_error, sizeof(wc_error), "Wrong password");
+			/* drop the failed attempt so a bad password is never
+			 * saved and never retried */
+			if (wc_pend_id >= 0) {
+				char cmd[64];
+
+				snprintf(cmd, sizeof(cmd), "REMOVE_NETWORK %d",
+						wc_pend_id);
+				wc_cmd_ok(cmd);
+				wc_pend_id = -1;
+			}
 			poke = 1;
 		}
 		if (strstr(buf, "CTRL-EVENT-AUTH-REJECT")) {
@@ -270,6 +288,27 @@ wifi_scan_request(void)
 		return;
 	}
 	wc_cmd_ok("SCAN");
+}
+
+/* Human label for the scan flags column, e.g. "[WPA2-SAE-CCMP][ESS]". */
+static void
+wc_sec_label(const char *flags, char *out, size_t len)
+{
+	int sae = strstr(flags, "SAE") != NULL;
+	int psk = strstr(flags, "PSK") != NULL;
+
+	if (sae && psk)
+		snprintf(out, len, "WPA2/3");
+	else if (sae)
+		snprintf(out, len, "WPA3");
+	else if (strstr(flags, "WPA2"))
+		snprintf(out, len, "WPA2");
+	else if (strstr(flags, "WPA"))
+		snprintf(out, len, "WPA");
+	else if (strstr(flags, "WEP"))
+		snprintf(out, len, "WEP");
+	else
+		snprintf(out, len, "Open");
 }
 
 /* Saved networks: id -> ssid map used to mark scan entries as known. */
@@ -362,6 +401,7 @@ wifi_scan_get(WifiNet *out, int max)
 			w->secured = strstr(flags, "WPA") != NULL ||
 				strstr(flags, "WEP") != NULL ||
 				strstr(flags, "SAE") != NULL;
+			wc_sec_label(flags, w->sec, sizeof(w->sec));
 			w->known_id = -1;
 			for (i = 0; i < nsaved; i++) {
 				if (strcmp(saved[i].ssid, ssid) == 0) {
@@ -501,7 +541,12 @@ wifi_connect(const char *ssid, const char *psk, int hidden)
 	snprintf(cmd, sizeof(cmd), "SELECT_NETWORK %d", id);
 	if (wc_cmd_ok(cmd) != 0)
 		goto fail;
-	wc_cmd_ok("SAVE_CONFIG");
+	/* an earlier attempt that never connected is dead weight */
+	if (wc_pend_id >= 0 && wc_pend_id != id) {
+		snprintf(cmd, sizeof(cmd), "REMOVE_NETWORK %d", wc_pend_id);
+		wc_cmd_ok(cmd);
+	}
+	wc_pend_id = id;   /* saved on CTRL-EVENT-CONNECTED */
 	return 0;
 fail:
 	snprintf(cmd, sizeof(cmd), "REMOVE_NETWORK %d", id);
@@ -517,6 +562,12 @@ wifi_connect_known(int net_id)
 	if (nm_backend_active())
 		return nm_wifi_connect_known(net_id);
 	wc_error[0] = '\0';
+	/* abandon any unconfirmed attempt so CONNECTED can't save it */
+	if (wc_pend_id >= 0 && wc_pend_id != net_id) {
+		snprintf(cmd, sizeof(cmd), "REMOVE_NETWORK %d", wc_pend_id);
+		wc_cmd_ok(cmd);
+		wc_pend_id = -1;
+	}
 	snprintf(cmd, sizeof(cmd), "SELECT_NETWORK %d", net_id);
 	if (wc_cmd_ok(cmd) != 0)
 		return -1;

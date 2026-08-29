@@ -58,6 +58,7 @@ typedef struct {
 	int freq_mhz;
 	int signal_dbm;
 	int secured;            /* WPA/WPA2/WPA3/WEP */
+	char sec[16];           /* "WPA2", "WPA3", "WEP", "Open", ... */
 	int known;              /* matches a saved network */
 	int known_id;           /* wpa network id when known, else -1 */
 	int connected;

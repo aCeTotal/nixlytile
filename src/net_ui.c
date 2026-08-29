@@ -25,7 +25,7 @@
 #define NET_HIT_NET_BASE    510   /* + scan index */
 #define NET_HIT_VPN_BASE    560   /* + 2*i (even: toggle, odd: auto) */
 
-#define NET_LIST_MAX 10
+#define NET_LIST_MAX 24   /* = WIFI_SCAN_MAX: show every network found */
 #define VPN_LIST_MAX 6
 
 static WifiNet ui_nets[WIFI_SCAN_MAX];
@@ -399,6 +399,9 @@ rendernetpopup(Monitor *m)
 			snprintf(v2, sizeof(v2), "%.1f GHz",
 					ws.freq_mhz / 1000.0);
 			card_kv2(card, "Signal", v1, NULL, "Freq", v2, NULL);
+			card_kv2(card, "Security",
+					ws.key_mgmt[0] ? ws.key_mgmt : "Open",
+					NULL, NULL, NULL, NULL);
 			if (ws.link_speed_mbps > 0) {
 				snprintf(v1, sizeof(v1), "%d Mbit/s",
 						ws.link_speed_mbps);
@@ -427,7 +430,10 @@ rendernetpopup(Monitor *m)
 			if (w->connected)
 				continue;   /* shown above */
 			snprintf(v1, sizeof(v1), "%s %s", w->ssid, sec_tag(w));
-			snprintf(v2, sizeof(v2), "%d dBm%s", w->signal_dbm,
+			snprintf(v2, sizeof(v2), "%d%% · %d dBm · %s%s",
+					(int)lround(dbm_to_pct(w->signal_dbm)),
+					w->signal_dbm,
+					w->sec[0] ? w->sec : "Open",
 					w->known ? " · saved" : "");
 			btn = w->known ? "Join" : (w->secured ? "Join…" : "Join");
 			card_text_btn(card, v1, v2,
