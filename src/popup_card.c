@@ -231,6 +231,8 @@ card_text_width(const char *s)
 typedef enum {
 	CROW_HEADER,
 	CROW_GAUGE,
+	CROW_WAVE,
+	CROW_LOAD,
 	CROW_METER,
 	CROW_KV2,
 	CROW_SECTION,
@@ -348,6 +350,36 @@ void
 card_gauge(Card *c, double frac, const float accent[4])
 {
 	card_gauge_id(c, frac, accent, -1);
+}
+
+void
+card_wave(Card *c, double frac, const float accent[4])
+{
+	CardRow *r = row_new(c, CROW_WAVE);
+
+	if (!r)
+		return;
+	if (frac < 0.0)
+		frac = 0.0;
+	if (frac > 1.0)
+		frac = 1.0;
+	r->frac = frac;
+	if (accent)
+		memcpy(r->accent, accent, sizeof(r->accent));
+	else
+		memcpy(r->accent, card_col_fg, sizeof(r->accent));
+}
+
+void
+card_loading(Card *c, const char *label, double phase)
+{
+	CardRow *r = row_new(c, CROW_LOAD);
+
+	if (!r)
+		return;
+	setstr(r->a, sizeof(r->a), label);
+	r->frac = phase - floor(phase);
+	memcpy(r->accent, card_col_blue, sizeof(r->accent));
 }
 
 void
@@ -561,6 +593,13 @@ card_measure(Card *c, int *out_w, int *out_h)
 		}
 		case CROW_GAUGE:
 			r->h = 6 + 12;
+			break;
+		case CROW_WAVE:
+			r->h = 26;
+			break;
+		case CROW_LOAD:
+			rw = 26 + text_width_f(statusfont.font, r->a, 0);
+			r->h = 34;
 			break;
 		case CROW_KV2:
 			r->h = base_h + (r->hit_id >= 0 ? 10 : 6);
@@ -830,6 +869,94 @@ card_finish(Card *c, CardResult *out)
 						r->hit_id);
 			break;
 		}
+		case CROW_WAVE: {
+			/* Signal as a carrier wave: amplitude AND frequency
+			 * scale with frac, so a weak link reads as a lazy
+			 * ripple and a strong one as a dense oscillation.
+			 * Edge envelope tapers the wave into the baseline. */
+			double mid = r->y + r->h / 2.0;
+			double amp = (r->h / 2.0 - 3.0) * (0.12 + 0.88 * r->frac);
+			double cycles = 2.0 + 5.0 * r->frac;
+			double k = 2.0 * M_PI * cycles / inner_w;
+			const float *a = r->accent;
+			int wx;
+
+			cairo_rectangle(cr, CARD_PAD, mid - 0.5, inner_w, 1);
+			cairo_set_source_rgba(cr, 1, 1, 1, 0.07);
+			cairo_fill(cr);
+
+			cairo_save(cr);
+			cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+			cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+
+			/* phase-shifted echo behind the carrier */
+			for (wx = 0; wx <= inner_w; wx += 2) {
+				double env = fmin(1.0, fmin(wx / 18.0,
+						(inner_w - wx) / 18.0));
+				double wy = mid - 0.55 * amp * env *
+					sin(k * wx + M_PI / 3.0);
+				if (wx == 0)
+					cairo_move_to(cr, CARD_PAD + wx, wy);
+				else
+					cairo_line_to(cr, CARD_PAD + wx, wy);
+			}
+			cairo_set_source_rgba(cr, a[0], a[1], a[2],
+					a[3] * 0.22);
+			cairo_set_line_width(cr, 1.0);
+			cairo_stroke(cr);
+
+			/* carrier: glow -> halo -> bright core, same path */
+			for (wx = 0; wx <= inner_w; wx += 2) {
+				double env = fmin(1.0, fmin(wx / 18.0,
+						(inner_w - wx) / 18.0));
+				double wy = mid - amp * env * sin(k * wx);
+				if (wx == 0)
+					cairo_move_to(cr, CARD_PAD + wx, wy);
+				else
+					cairo_line_to(cr, CARD_PAD + wx, wy);
+			}
+			cairo_set_source_rgba(cr, a[0], a[1], a[2],
+					a[3] * 0.15);
+			cairo_set_line_width(cr, 5.0);
+			cairo_stroke_preserve(cr);
+			cairo_set_source_rgba(cr, a[0], a[1], a[2],
+					a[3] * 0.40);
+			cairo_set_line_width(cr, 2.4);
+			cairo_stroke_preserve(cr);
+			cairo_set_source_rgba(cr, a[0], a[1], a[2], a[3]);
+			cairo_set_line_width(cr, 1.3);
+			cairo_stroke(cr);
+			cairo_restore(cr);
+			break;
+		}
+		case CROW_LOAD: {
+			/* spinner arc + label, centered as one group; the label
+			 * glyphs land in pass B at the same offsets */
+			int tw = text_width_f(statusfont.font, r->a, 0);
+			int gx = (w - (26 + tw)) / 2;
+			double cxr = gx + 9, cyr = r->y + r->h / 2.0;
+			double a0 = r->frac * 2.0 * M_PI;
+			const float *a = r->accent;
+
+			cairo_save(cr);
+			cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+			/* faint track ring */
+			cairo_arc(cr, cxr, cyr, 7.0, 0, 2.0 * M_PI);
+			cairo_set_source_rgba(cr, 1, 1, 1, 0.10);
+			cairo_set_line_width(cr, 2.0);
+			cairo_stroke(cr);
+			/* glowing arc */
+			cairo_arc(cr, cxr, cyr, 7.0, a0, a0 + 4.4);
+			cairo_set_source_rgba(cr, a[0], a[1], a[2],
+					a[3] * 0.25);
+			cairo_set_line_width(cr, 4.5);
+			cairo_stroke_preserve(cr);
+			cairo_set_source_rgba(cr, a[0], a[1], a[2], a[3]);
+			cairo_set_line_width(cr, 2.0);
+			cairo_stroke(cr);
+			cairo_restore(cr);
+			break;
+		}
 		case CROW_METER:
 			/* faint midline; the live waveform is an overlay
 			 * buffer the popup drops into this rect each tick
@@ -1067,6 +1194,16 @@ card_finish(Card *c, CardResult *out)
 						CARD_PAD, y + 14 + 1 + 12 +
 						small_asc, card_col_faint,
 						SMALL_LSPC);
+			break;
+		case CROW_LOAD:
+			if (r->a[0]) {
+				int tw = text_width_f(statusfont.font, r->a, 0);
+				int gx = (w - (26 + tw)) / 2;
+
+				draw_text_f(pix, statusfont.font, r->a, gx + 26,
+						y + (r->h - base_h) / 2 + base_asc,
+						card_col_dim, 0);
+			}
 			break;
 		case CROW_TEXT: {
 			int bl = y + (r->h - base_h) / 2 + base_asc;

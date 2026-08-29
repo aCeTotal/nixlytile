@@ -17,24 +17,23 @@ static const float tray_menu_fg_disabled[] = {0.45f, 0.47f, 0.51f, 1.0f};
  * different whitespace between them. Measure the transparent border once per
  * load so rendertray can space by visible content instead. */
 void
-tray_measure_icon_insets(TrayItem *it)
+statusbar_buffer_insets(struct wlr_buffer *buf, int icon_w,
+		int *pad_l, int *pad_r)
 {
 	void *data = NULL;
 	uint32_t format = 0;
 	size_t stride = 0;
 	int bw, bh, x, y, first = -1, last = -1;
 
-	if (!it)
-		return;
-	it->icon_pad_l = it->icon_pad_r = 0;
-	if (!it->icon_buf)
+	*pad_l = *pad_r = 0;
+	if (!buf)
 		return;
 
-	bw = it->icon_buf->width;
-	bh = it->icon_buf->height;
+	bw = buf->width;
+	bh = buf->height;
 	if (bw <= 0 || bh <= 0)
 		return;
-	if (!wlr_buffer_begin_data_ptr_access(it->icon_buf,
+	if (!wlr_buffer_begin_data_ptr_access(buf,
 			WLR_BUFFER_DATA_PTR_ACCESS_READ, &data, &format, &stride))
 		return;
 
@@ -53,14 +52,26 @@ tray_measure_icon_insets(TrayItem *it)
 			}
 		}
 	}
-	wlr_buffer_end_data_ptr_access(it->icon_buf);
+	wlr_buffer_end_data_ptr_access(buf);
 
 	if (first < 0 || last < first)
 		return;
 	/* icon_w is what the layout uses; scale the measured columns onto it in
 	 * case the two ever disagree. */
-	it->icon_pad_l = (int)((double)first * (double)it->icon_w / (double)bw);
-	it->icon_pad_r = (int)((double)(bw - 1 - last) * (double)it->icon_w / (double)bw);
+	*pad_l = (int)((double)first * (double)icon_w / (double)bw);
+	*pad_r = (int)((double)(bw - 1 - last) * (double)icon_w / (double)bw);
+}
+
+void
+tray_measure_icon_insets(TrayItem *it)
+{
+	if (!it)
+		return;
+	it->icon_pad_l = it->icon_pad_r = 0;
+	if (!it->icon_buf)
+		return;
+	statusbar_buffer_insets(it->icon_buf, it->icon_w,
+			&it->icon_pad_l, &it->icon_pad_r);
 }
 
 int

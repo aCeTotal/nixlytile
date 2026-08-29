@@ -160,16 +160,18 @@ render_icon_label(StatusModule *module, int bar_height, const char *text,
 		tray_render_label(module, text, x, bar_height, fg);
 }
 
-/* Icon-only module drawn like an SNI tray item: same icon target size
- * and horizontal padding as rendertray, no label. */
+/* Icon-only module drawn like an SNI tray item: same icon target size as
+ * rendertray, no label.  Module width is the icon's VISIBLE content width
+ * (transparent SVG margins measured off, like rendertray does via
+ * tray_measure_icon_insets) so the layout's TRAY_ICON_GAP advance gives
+ * the same whitespace between these icons as between SNI icons. */
 void
 render_tray_icon_module(StatusModule *module, int bar_height,
 		int (*ensure_icon)(int target_h), struct wlr_buffer **icon_buf,
 		int *icon_w, int *icon_h)
 {
 	struct wlr_scene_buffer *scene_buf;
-	int padding = statusbar_module_padding / 2;
-	int target_h;
+	int target_h, pad_l, pad_r, content_w;
 
 	if (!module || !module->tree)
 		return;
@@ -178,8 +180,6 @@ render_tray_icon_module(StatusModule *module, int bar_height,
 		module->width = 0;
 		return;
 	}
-	if (padding < 1)
-		padding = 1;
 	target_h = MAX(12, bar_height - 4);
 	if (ensure_icon(target_h) != 0 || !*icon_buf
 			|| *icon_w <= 0 || *icon_h <= 0) {
@@ -187,12 +187,18 @@ render_tray_icon_module(StatusModule *module, int bar_height,
 		wlr_scene_node_set_enabled(&module->tree->node, 0);
 		return;
 	}
-	module->width = *icon_w + 2 * padding;
+	statusbar_buffer_insets(*icon_buf, *icon_w, &pad_l, &pad_r);
+	content_w = *icon_w - pad_l - pad_r;
+	if (content_w <= 0) {
+		content_w = *icon_w;
+		pad_l = 0;
+	}
+	module->width = content_w;
 	updatemodulebg(module, module->width, bar_height, statusbar_bg);
 	scene_buf = wlr_scene_buffer_create(module->tree, NULL);
 	if (scene_buf) {
 		wlr_scene_buffer_set_buffer(scene_buf, *icon_buf);
-		wlr_scene_node_set_position(&scene_buf->node, padding,
+		wlr_scene_node_set_position(&scene_buf->node, -pad_l,
 				MAX(0, (bar_height - *icon_h) / 2));
 	}
 }
@@ -4069,9 +4075,15 @@ positionstatusmodules(Monitor *m)
 		x += m->statusbar.tags.width + spacing;
 	}
 	if (m->statusbar.traylabel.width > 0) {
+		/* rendertray pads its trailing edge by module_padding/2;
+		 * subtract it so the whitespace to the first icon-only module
+		 * (content-width, no padding) is exactly TRAY_ICON_GAP. */
+		int tray_pad = statusbar_module_padding / 2;
+		if (tray_pad < 1)
+			tray_pad = 1;
 		wlr_scene_node_set_position(&m->statusbar.traylabel.tree->node, x, 0);
 		m->statusbar.traylabel.x = x;
-		x += m->statusbar.traylabel.width + TRAY_ICON_GAP;
+		x += m->statusbar.traylabel.width + TRAY_ICON_GAP - tray_pad;
 	}
 	/* net/bluetooth/display live in the tray cluster as icon-only
 	 * entries, spaced like the SNI icons. */

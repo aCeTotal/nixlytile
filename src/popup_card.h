@@ -52,6 +52,12 @@ void card_gauge(Card *c, double frac, const float accent[4]);
  * with hit_id, and the fill can later be moved smoothly with
  * popup_view_set_fill_frac(). */
 void card_gauge_id(Card *c, double frac, const float accent[4], int hit_id);
+/* Sine-wave signal meter: amplitude and wave density scale with frac
+ * (clamped to [0,1]). Static raster, no fill sweep. */
+void card_wave(Card *c, double frac, const float accent[4]);
+/* Centered spinner arc + label row. phase [0,1) rotates the arc; pass
+ * a time-derived phase so periodic re-renders animate it. */
+void card_loading(Card *c, const char *label, double phase);
 /* Reserved live-meter row: card draws a faint midline and reports the
  * rect in CardResult.meter_*; the popup overlays card_meter_buffer()
  * frames there. */

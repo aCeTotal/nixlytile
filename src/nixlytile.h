@@ -2226,6 +2226,7 @@ struct wlr_buffer *statusbar_buffer_from_wifi100(int target_h, int *out_w, int *
 void recolor_wifi100_pixbuf(GdkPixbuf *pixbuf);
 int tray_load_svg_pixbuf(const char *path, int desired_h, GdkPixbuf **out_pixbuf);
 void tray_measure_icon_insets(TrayItem *it);
+void statusbar_buffer_insets(struct wlr_buffer *buf, int icon_w, int *pad_l, int *pad_r);
 int has_svg_extension(const char *path);
 int pathisdir(const char *path);
 int strip_symbolic_suffix(const char *name, char *out, size_t outlen);

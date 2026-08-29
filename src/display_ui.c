@@ -15,7 +15,7 @@
 #include "popup_card.h"
 
 #define DHIT_BOX   200   /* + strip index */
-#define DHIT_SCALE 220   /* + preset index */
+#define DHIT_SCALE 220   /* slider track */
 #define DHIT_RATE  230   /* + rate index */
 #define DHIT_ROT   240   /* + transform index (normal/90/180/270) */
 
@@ -26,8 +26,9 @@ char display_icon_loaded_path[PATH_MAX];
 int display_icon_loaded_h, display_icon_w, display_icon_h;
 struct wlr_buffer *display_icon_buf;
 
-static const float scale_presets[] = { 1.00f, 1.25f, 1.50f, 1.75f, 2.00f };
-#define NSCALES ((int)(sizeof(scale_presets) / sizeof(scale_presets[0])))
+/* scale slider range: 50%..200%, 5% steps, default 100% */
+#define SCALE_MIN 0.5f
+#define SCALE_MAX 2.0f
 
 typedef struct {
 	Monitor *mon;
@@ -55,6 +56,8 @@ static struct {
 	double start_cx;        /* layout-x where the press landed */
 	int dx;
 	int moved;
+	int scale;              /* dragging the scale slider, not a box */
+	double frac;            /* current slider position [0,1] */
 } ddrag;
 
 /* ── model ───────────────────────────────────────────────────────── */
@@ -389,23 +392,10 @@ render_display_popup(Monitor *m)
 				"Rotation", rot_lbl[transform_index(d->transform)],
 				NULL);
 
-		card_section(card, "SCALE");
-		{
-			const char *lbl[NSCALES];
-			static char lblbuf[NSCALES][8];
-			int active = -1;
-
-			for (i = 0; i < NSCALES; i++) {
-				snprintf(lblbuf[i], sizeof(lblbuf[i]), "%d%%",
-					(int)lroundf(scale_presets[i] * 100.0f));
-				lbl[i] = lblbuf[i];
-				if (fabsf(d->scale - scale_presets[i]) < 0.01f)
-					active = i;
-			}
-			card_buttons(card, lbl, NULL, NSCALES, active,
-					btn_hover_idx(hot, DHIT_SCALE, NSCALES),
-					DHIT_SCALE);
-		}
+		card_section(card, "SCALE · 50% – 200%");
+		card_gauge_id(card,
+				(d->scale - SCALE_MIN) / (SCALE_MAX - SCALE_MIN),
+				card_col_blue, DHIT_SCALE);
 
 		if (di_nrates > 1) {
 			const char *lbl[DISP_RATES_MAX];
@@ -473,6 +463,26 @@ display_drag_motion(Monitor *m, double cx)
 	if (!ddrag.active || ddrag.mon != m)
 		return;
 	p = &m->statusbar.display_popup;
+	if (ddrag.scale) {
+		CardHit *track = find_hit(p, DHIT_SCALE);
+		double frac;
+		int rel_x;
+
+		if (!track)
+			return;
+		rel_x = (int)floor(cx) - m->statusbar.area.x -
+			p->tree->node.x;
+		frac = (double)(rel_x - track->x) / track->w;
+		if (frac < 0.0)
+			frac = 0.0;
+		if (frac > 1.0)
+			frac = 1.0;
+		if (frac != ddrag.frac) {
+			ddrag.frac = frac;
+			popup_view_set_fill_frac(&p->view, 0, frac);
+		}
+		return;
+	}
 	ddrag.dx = (int)(cx - ddrag.start_cx);
 	if (!ddrag.moved && (ddrag.dx > 4 || ddrag.dx < -4))
 		ddrag.moved = 1;
@@ -520,6 +530,19 @@ display_drag_release(void)
 		return;
 	m = ddrag.mon;
 	ddrag.active = 0;
+	if (ddrag.scale) {
+		float sc = SCALE_MIN +
+			(float)ddrag.frac * (SCALE_MAX - SCALE_MIN);
+
+		/* 5% steps */
+		sc = roundf(sc * 20.0f) / 20.0f;
+		ddrag.scale = 0;
+		di[dsel].scale = sc;
+		monconf_write();
+		if (m)
+			render_display_popup(m);
+		return;
+	}
 	if (ddrag.moved)
 		monconf_write();
 	ddrag.moved = 0;
@@ -561,16 +584,28 @@ display_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 			snprintf(dsel_name, sizeof(dsel_name), "%s",
 					di[dsel].name);
 			ddrag.active = 1;
+			ddrag.scale = 0;
 			ddrag.mon = m;
 			ddrag.idx = dsel;
 			ddrag.start_cx = m->statusbar.area.x + lx;
 			ddrag.dx = 0;
 			ddrag.moved = 0;
 			render_display_popup(m);
-		} else if (id >= DHIT_SCALE && id < DHIT_SCALE + NSCALES) {
-			di[dsel].scale = scale_presets[id - DHIT_SCALE];
-			monconf_write();
-			render_display_popup(m);
+		} else if (id == DHIT_SCALE) {
+			double frac = (double)(rel_x - hit->x) / hit->w;
+
+			if (frac < 0.0)
+				frac = 0.0;
+			if (frac > 1.0)
+				frac = 1.0;
+			/* live drag: fill follows the pointer, the scale is
+			 * applied once on release (output reconfigure is too
+			 * heavy for per-motion commits) */
+			ddrag.active = 1;
+			ddrag.scale = 1;
+			ddrag.mon = m;
+			ddrag.frac = frac;
+			popup_view_set_fill_frac(&p->view, 0, frac);
 		} else if (id >= DHIT_RATE && id < DHIT_RATE + di_nrates) {
 			di[dsel].hz = di_rates[id - DHIT_RATE];
 			monconf_write();

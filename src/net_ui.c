@@ -373,7 +373,7 @@ rendernetpopup(Monitor *m)
 			sub[si] = (char)toupper((unsigned char)sub[si]);
 		card_header(card, net_icon_path, "Wi-Fi", sub, value);
 		card_gap(card, 6);
-		card_gauge(card, pct / 100.0,
+		card_wave(card, pct / 100.0,
 				pct < 30 ? card_col_yellow : card_col_blue);
 		card_gap(card, 6);
 	} else {
@@ -389,7 +389,17 @@ rendernetpopup(Monitor *m)
 		card_text(card, text_entry_display(), NULL, card_col_blue);
 	}
 
-	if (net_available) {
+	if (net_available && strcmp(net_local_ip, "--") == 0 &&
+			!ui_gateway[0] &&
+			strcmp(net_public_ip, "--") == 0 &&
+			net_last_down_bps < 0.0 && net_last_up_bps < 0.0) {
+		/* link up but nothing fetched yet (DHCP/first tick):
+		 * spinner instead of a wall of "--" rows */
+		card_gap(card, 10);
+		card_loading(card, "LOADING DATA",
+				(double)(monotonic_msec() % 2400) / 2400.0);
+		card_gap(card, 10);
+	} else if (net_available) {
 		card_kv2(card, "Local IP",
 				net_local_ip[0] ? net_local_ip : "--", NULL,
 				"Gateway", ui_gateway[0] ? ui_gateway : "--",
