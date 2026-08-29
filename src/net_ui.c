@@ -22,10 +22,12 @@
 #define NET_HIT_SCAN        501
 #define NET_HIT_HIDDEN      502
 #define NET_HIT_DISCONNECT  503
+#define NET_HIT_SEARCH      504
 #define NET_HIT_NET_BASE    510   /* + scan index */
 #define NET_HIT_VPN_BASE    560   /* + 2*i (even: toggle, odd: auto) */
 
 #define NET_LIST_MAX 24   /* = WIFI_SCAN_MAX: show every network found */
+#define NET_LIST_FOLD 12  /* rows shown without a search filter */
 #define VPN_LIST_MAX 6
 
 static WifiNet ui_nets[WIFI_SCAN_MAX];
@@ -47,6 +49,9 @@ static char ui_gateway[64];
 static char ui_dns[128];
 static char ui_pend_ssid[33];
 static int ui_pend_hidden;
+static char ui_search[33];
+
+static const char search_label[] = "Search networks";
 
 void
 netsys_changed(void)
@@ -76,6 +81,37 @@ hidden_ssid_submitted(const char *text, void *data)
 	snprintf(label, sizeof(label), "Password for %s (empty = open)",
 			ui_pend_ssid);
 	text_entry_begin(label, 1, psk_submitted, NULL);
+}
+
+static void
+search_submitted(const char *text, void *data)
+{
+	snprintf(ui_search, sizeof(ui_search), "%s", text);
+}
+
+/* case-insensitive substring (strcasestr needs _GNU_SOURCE before
+ * string.h, which this file can't guarantee) */
+static int
+ssid_match(const char *ssid, const char *needle)
+{
+	size_t nl = strlen(needle);
+
+	if (!nl)
+		return 1;
+	for (; *ssid; ssid++)
+		if (strncasecmp(ssid, needle, nl) == 0)
+			return 1;
+	return 0;
+}
+
+/* live filter: the search entry while typing, else the submitted one */
+static const char *
+net_filter(void)
+{
+	if (text_entry_active() &&
+			strcmp(text_entry_label(), search_label) == 0)
+		return text_entry_display();
+	return ui_search;
 }
 
 static void
@@ -126,6 +162,8 @@ refreshstatusnet(void)
 	 * was torn down another way, stop swallowing keyboard input */
 	if (!popup_active && text_entry_active())
 		text_entry_cancel();
+	if (!popup_active)
+		ui_search[0] = '\0';
 
 	netmon_get(&s);
 	memset(&ws, 0, sizeof(ws));
@@ -259,6 +297,30 @@ sec_tag(const WifiNet *w)
 	return w->secured ? "🔒" : "";
 }
 
+/* "a, b, c" -> "a · b +1", bounded so long resolver lists (or IPv6
+ * servers) can never widen the card */
+static void
+dns_compact(const char *in, char *out, size_t len)
+{
+	char buf[128], *tok, *save;
+	int n = 0, extra = 0;
+
+	out[0] = '\0';
+	snprintf(buf, sizeof(buf), "%s", in);
+	for (tok = strtok_r(buf, ", ", &save); tok;
+			tok = strtok_r(NULL, ", ", &save)) {
+		if (n < 2 && strlen(out) + strlen(tok) < 36) {
+			snprintf(out + strlen(out), len - strlen(out),
+					"%s%s", n ? " · " : "", tok);
+			n++;
+		} else {
+			extra++;
+		}
+	}
+	if (extra)
+		snprintf(out + strlen(out), len - strlen(out), " +%d", extra);
+}
+
 void
 rendernetpopup(Monitor *m)
 {
@@ -335,8 +397,12 @@ rendernetpopup(Monitor *m)
 		card_kv2(card, "Public IP",
 				net_public_ip[0] ? net_public_ip : "--", NULL,
 				NULL, NULL, NULL);
-		if (ui_dns[0])
-			card_kv2(card, "DNS", ui_dns, NULL, NULL, NULL, NULL);
+		if (ui_dns[0]) {
+			/* text row, not kv2: kv2 width feeds the shared
+			 * column grid, so one long value widens every row */
+			dns_compact(ui_dns, v1, sizeof(v1));
+			card_text(card, "DNS", v1, NULL);
+		}
 
 		card_section(card, "THROUGHPUT");
 		card_kv2(card, "Upload",
@@ -344,24 +410,15 @@ rendernetpopup(Monitor *m)
 				card_col_green, "Download",
 				net_down_text[0] ? net_down_text : "--",
 				card_col_blue);
-		if (ui_stats_ok) {
+		if (ui_stats_ok && (ui_stats.rx_errors || ui_stats.tx_errors ||
+				ui_stats.rx_dropped || ui_stats.tx_dropped)) {
 			snprintf(v1, sizeof(v1), "%llu / %llu",
 					ui_stats.rx_errors, ui_stats.tx_errors);
 			snprintf(v2, sizeof(v2), "%llu / %llu",
 					ui_stats.rx_dropped,
 					ui_stats.tx_dropped);
-			card_kv2(card, "Errors rx/tx", v1,
-					(ui_stats.rx_errors ||
-					 ui_stats.tx_errors) ?
-					card_col_yellow : NULL,
-					"Drops", v2,
-					(ui_stats.rx_dropped ||
-					 ui_stats.tx_dropped) ?
-					card_col_yellow : NULL);
-			snprintf(v1, sizeof(v1), "%llu", ui_stats.rx_packets);
-			snprintf(v2, sizeof(v2), "%llu", ui_stats.tx_packets);
-			card_kv2(card, "Pkts in", v1, NULL, "Pkts out", v2,
-					NULL);
+			card_kv2(card, "Errors rx/tx", v1, card_col_yellow,
+					"Drops", v2, card_col_yellow);
 		}
 	}
 
@@ -392,16 +449,17 @@ rendernetpopup(Monitor *m)
 				hot == NET_HIT_WIFI_TOGGLE);
 	}
 	if (s.wifi.present && !s.wifi_blocked) {
+		const char *filter = net_filter();
+		int folded = 0, listed = 0;
+
 		if (wifi_assoc) {
 			card_kv2(card, "SSID", ws.ssid, card_col_green,
 					"BSSID", ws.bssid, NULL);
-			snprintf(v1, sizeof(v1), "%d dBm", ws.signal_dbm);
-			snprintf(v2, sizeof(v2), "%.1f GHz",
-					ws.freq_mhz / 1000.0);
-			card_kv2(card, "Signal", v1, NULL, "Freq", v2, NULL);
-			card_kv2(card, "Security",
+			snprintf(v1, sizeof(v1), "%d dBm · %.1f GHz",
+					ws.signal_dbm, ws.freq_mhz / 1000.0);
+			card_kv2(card, "Signal", v1, NULL, "Security",
 					ws.key_mgmt[0] ? ws.key_mgmt : "Open",
-					NULL, NULL, NULL, NULL);
+					NULL);
 			if (ws.link_speed_mbps > 0) {
 				snprintf(v1, sizeof(v1), "%d Mbit/s",
 						ws.link_speed_mbps);
@@ -410,9 +468,6 @@ rendernetpopup(Monitor *m)
 				card_kv2(card, "Link rate", v1, card_col_green,
 						"Max seen", v2, NULL);
 			}
-			card_text_btn(card, "Connection", NULL, NULL,
-					"Disconnect", NET_HIT_DISCONNECT,
-					hot == NET_HIT_DISCONNECT);
 		}
 		if (wifi_last_error()[0])
 			card_text(card, wifi_last_error(), NULL, card_col_red);
@@ -421,18 +476,39 @@ rendernetpopup(Monitor *m)
 				ui_scanning ? "Scanning…" : NULL,
 				card_col_dim, "Scan", NET_HIT_SCAN,
 				hot == NET_HIT_SCAN);
+		card_text_btn(card, "Search",
+				filter[0] ? filter : NULL,
+				filter[0] ? card_col_blue : NULL,
+				filter[0] ? "Clear" : "Find",
+				NET_HIT_SEARCH, hot == NET_HIT_SEARCH);
 		ui_nshown = ui_nnets < NET_LIST_MAX ? ui_nnets : NET_LIST_MAX;
 		for (i = 0; i < ui_nshown; i++) {
 			WifiNet *w = &ui_shown[i];
 			const char *btn;
 
 			*w = ui_nets[i];
-			if (w->connected)
-				continue;   /* shown above */
+			if (w->connected) {
+				snprintf(v1, sizeof(v1), "%s %s",
+						w->ssid, sec_tag(w));
+				snprintf(v2, sizeof(v2), "Connected · %d%%",
+						(int)lround(dbm_to_pct(
+								w->signal_dbm)));
+				card_text_btn(card, v1, v2, card_col_green,
+						"Disconnect",
+						NET_HIT_DISCONNECT,
+						hot == NET_HIT_DISCONNECT);
+				continue;
+			}
+			if (filter[0] && !ssid_match(w->ssid, filter))
+				continue;
+			if (!filter[0] && listed >= NET_LIST_FOLD) {
+				folded++;
+				continue;
+			}
+			listed++;
 			snprintf(v1, sizeof(v1), "%s %s", w->ssid, sec_tag(w));
-			snprintf(v2, sizeof(v2), "%d%% · %d dBm · %s%s",
+			snprintf(v2, sizeof(v2), "%d%% · %s%s",
 					(int)lround(dbm_to_pct(w->signal_dbm)),
-					w->signal_dbm,
 					w->sec[0] ? w->sec : "Open",
 					w->known ? " · saved" : "");
 			btn = w->known ? "Join" : (w->secured ? "Join…" : "Join");
@@ -440,6 +516,11 @@ rendernetpopup(Monitor *m)
 					w->known ? card_col_green : card_col_dim,
 					btn, NET_HIT_NET_BASE + i,
 					hot == NET_HIT_NET_BASE + i);
+		}
+		if (folded) {
+			snprintf(v1, sizeof(v1), "+%d more · search to filter",
+					folded);
+			card_text(card, v1, NULL, NULL);
 		}
 		card_text_btn(card, "Hidden network", NULL, NULL, "Join…",
 				NET_HIT_HIDDEN, hot == NET_HIT_HIDDEN);
@@ -553,6 +634,18 @@ net_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 			wifi_scan_request();
 			ui_scanning = 1;
 			ui_scan_req_ms = monotonic_msec();
+		} else if (id == NET_HIT_SEARCH && button == BTN_LEFT) {
+			if (text_entry_active() &&
+					strcmp(text_entry_label(),
+						search_label) == 0) {
+				text_entry_cancel();
+				ui_search[0] = '\0';
+			} else if (ui_search[0]) {
+				ui_search[0] = '\0';
+			} else {
+				text_entry_begin(search_label, 0,
+						search_submitted, NULL);
+			}
 		} else if (id == NET_HIT_HIDDEN && button == BTN_LEFT) {
 			text_entry_begin("Hidden network SSID", 0,
 					hidden_ssid_submitted, NULL);

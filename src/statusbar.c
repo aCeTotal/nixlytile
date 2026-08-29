@@ -7,6 +7,9 @@
 
 /* battery popup: hit ids 0-2 are the power-profile buttons */
 #define CHARGE_LIMIT_HIT_BASE 10
+/* Gap between SNI tray icons AND between the tray cluster's icon-only
+ * modules (net/bluetooth/display) — keep the two in sync. */
+#define TRAY_ICON_GAP 14
 
 void
 clearstatusmodule(StatusModule *module)
@@ -1089,7 +1092,7 @@ rendertray(Monitor *m, int bar_height)
 	padding = statusbar_module_padding / 2;
 	if (padding < 1)
 		padding = 1;
-	gap = 6;
+	gap = TRAY_ICON_GAP;
 
 	/* First pass: load icons.  Advance is per-icon width + gap, so the
 	 * whitespace between two neighbours is always exactly `gap`.  A fixed
@@ -4068,19 +4071,19 @@ positionstatusmodules(Monitor *m)
 	if (m->statusbar.traylabel.width > 0) {
 		wlr_scene_node_set_position(&m->statusbar.traylabel.tree->node, x, 0);
 		m->statusbar.traylabel.x = x;
-		x += m->statusbar.traylabel.width + 6;
+		x += m->statusbar.traylabel.width + TRAY_ICON_GAP;
 	}
 	/* net/bluetooth/display live in the tray cluster as icon-only
-	 * entries, spaced like the SNI icons (gap 6). */
+	 * entries, spaced like the SNI icons. */
 	if (m->statusbar.net.width > 0) {
 		wlr_scene_node_set_position(&m->statusbar.net.tree->node, x, 0);
 		m->statusbar.net.x = x;
-		x += m->statusbar.net.width + 6;
+		x += m->statusbar.net.width + TRAY_ICON_GAP;
 	}
 	if (m->statusbar.bluetooth.width > 0) {
 		wlr_scene_node_set_position(&m->statusbar.bluetooth.tree->node, x, 0);
 		m->statusbar.bluetooth.x = x;
-		x += m->statusbar.bluetooth.width + 6;
+		x += m->statusbar.bluetooth.width + TRAY_ICON_GAP;
 	}
 	if (m->statusbar.display.width > 0) {
 		wlr_scene_node_set_position(&m->statusbar.display.tree->node, x, 0);
