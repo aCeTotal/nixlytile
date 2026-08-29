@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
@@ -74,19 +75,32 @@ wc_open_sock(const char *iface, const char *tag, char *local, size_t llen)
 	fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
 	if (fd < 0)
 		return -1;
-	rundir = getenv("XDG_RUNTIME_DIR");
-	if (!rundir)
-		rundir = "/tmp";
-	snprintf(local, llen, "%s/nixlytile-wpa-%s-%d", rundir, tag,
-			(int)getpid());
+	/* bind the reply socket under /run/wpa_supplicant/client: a
+	 * sandboxed supplicant (RootDirectory=/run/wpa_supplicant) can't
+	 * resolve XDG_RUNTIME_DIR paths, so replies sent there vanish */
+	snprintf(local, llen, "/run/wpa_supplicant/client/nixlytile-%s-%d",
+			tag, (int)getpid());
 	unlink(local);
 	memset(&sa, 0, sizeof(sa));
 	sa.sun_family = AF_UNIX;
 	snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", local);
 	if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-		close(fd);
-		return -1;
+		rundir = getenv("XDG_RUNTIME_DIR");
+		if (!rundir)
+			rundir = "/tmp";
+		snprintf(local, llen, "%s/nixlytile-wpa-%s-%d", rundir, tag,
+				(int)getpid());
+		unlink(local);
+		memset(&sa, 0, sizeof(sa));
+		sa.sun_family = AF_UNIX;
+		snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", local);
+		if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+			close(fd);
+			return -1;
+		}
 	}
+	/* the unprivileged supplicant must be able to write the reply */
+	chmod(local, 0666);
 	/* nixpkgs moved the ctrl sockets under a "control" subdir; try the
 	 * new layout first, then the classic one. */
 	memset(&sa, 0, sizeof(sa));
