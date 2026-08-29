@@ -2711,6 +2711,9 @@ void updatenethover(Monitor *m, double cx, double cy);
 void net_popup_track_hover(Monitor *m, double cx, double cy);
 int net_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 void rendernetpopup(Monitor *m);
+void render_tray_icon_module(StatusModule *module, int bar_height,
+		int (*ensure_icon)(int target_h), struct wlr_buffer **icon_buf,
+		int *icon_w, int *icon_h);
 void renderbluetooth(StatusModule *module, int bar_height, const char *text);
 void render_bt_popup(Monitor *m);
 int bt_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);

@@ -1,14 +1,14 @@
-<?xml version="1.0" encoding="iso-8859-1"?>
-<!-- Uploaded to: SVG Repo, www.svgrepo.com, Generator: SVG Repo Mixer Tools -->
-<svg version="1.1" id="Layer_1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" 
-	 viewBox="0 0 512 512" xml:space="preserve">
-<rect width="512" height="512"/>
-<g>
-	<rect x="97.352" y="141.952" style="fill:#F2B851;" width="317.304" height="280.48"/>
-	<rect x="160.88" y="89.56" style="fill:#F2B851;" width="190.192" height="190.192"/>
-</g>
-<rect x="345.12" y="350.12" width="31.56" height="72.32"/>
-<rect x="275.184" y="350.12" width="31.56" height="72.32"/>
-<rect x="205.256" y="350.12" width="31.56" height="72.32"/>
-<rect x="135.32" y="350.12" width="31.56" height="72.32"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- clip tab -->
+  <rect x="24" y="10" width="16" height="10" rx="2" fill="#82CC00"></rect>
+  <!-- plug body -->
+  <rect x="14" y="18" width="36" height="28" rx="3" fill="#82CC00"></rect>
+  <rect x="48" y="18" width="2" height="28" rx="1" fill="#5E9E00"></rect>
+  <!-- pins -->
+  <rect x="21" y="22" width="3" height="9" rx="1" fill="#3F6B00"></rect>
+  <rect x="28" y="22" width="3" height="9" rx="1" fill="#3F6B00"></rect>
+  <rect x="35" y="22" width="3" height="9" rx="1" fill="#3F6B00"></rect>
+  <rect x="42" y="22" width="3" height="9" rx="1" fill="#3F6B00"></rect>
+  <!-- cable -->
+  <rect x="30" y="46" width="4" height="12" rx="2" fill="#5E9E00"></rect>
 </svg>

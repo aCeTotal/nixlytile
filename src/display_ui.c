@@ -310,10 +310,9 @@ void
 renderdisplays(StatusModule *module, int bar_height, const char *text)
 {
 	(void)text;
-	render_icon_label(module, bar_height, "",
+	render_tray_icon_module(module, bar_height,
 			ensure_display_icon_buffer, &display_icon_buf,
-			&display_icon_w, &display_icon_h, 0,
-			statusbar_icon_text_gap, statusbar_fg);
+			&display_icon_w, &display_icon_h);
 }
 
 /* ── popup ───────────────────────────────────────────────────────── */

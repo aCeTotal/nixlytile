@@ -1,10 +1,6 @@
-<!--?xml version="1.0" encoding="utf-8"?-->
-<svg xmlns="http://www.w3.org/2000/svg" aria-label="Bluetooth" role="img" viewBox="0 0 512 512">
-
-  <!-- Skygge (2D offset, ingen blur) -->
-  <path fill="none" stroke="#1E40AF" stroke-width="33" stroke-linecap="round" stroke-linejoin="round" transform="translate(10 10)" d="M151 154l190 191-87 90V78l87 93-190 192"></path>
-
-  <!-- Hovedsymbol -->
-  <path fill="none" stroke="#3B82F6" stroke-width="33" stroke-linecap="round" stroke-linejoin="round" d="M151 154l190 191-87 90V78l87 93-190 192"></path>
-
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- shade (2D offset, no blur) -->
+  <path fill="none" stroke="#1E40AF" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" transform="translate(1.5 1.5)" d="M19 19.25 L42.75 43.125 L31.875 54.375 L31.875 9.75 L42.75 21.375 L19 43.25"></path>
+  <!-- main -->
+  <path fill="none" stroke="#3B82F6" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" d="M19 19.25 L42.75 43.125 L31.875 54.375 L31.875 9.75 L42.75 21.375 L19 43.25"></path>
 </svg>

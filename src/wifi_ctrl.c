@@ -85,6 +85,14 @@ wc_open_sock(const char *iface, const char *tag, char *local, size_t llen)
 		close(fd);
 		return -1;
 	}
+	/* nixpkgs moved the ctrl sockets under a "control" subdir; try the
+	 * new layout first, then the classic one. */
+	memset(&sa, 0, sizeof(sa));
+	sa.sun_family = AF_UNIX;
+	snprintf(sa.sun_path, sizeof(sa.sun_path),
+			"/run/wpa_supplicant/control/%s", iface);
+	if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) == 0)
+		return fd;
 	memset(&sa, 0, sizeof(sa));
 	sa.sun_family = AF_UNIX;
 	snprintf(sa.sun_path, sizeof(sa.sun_path),

@@ -157,6 +157,43 @@ render_icon_label(StatusModule *module, int bar_height, const char *text,
 		tray_render_label(module, text, x, bar_height, fg);
 }
 
+/* Icon-only module drawn like an SNI tray item: same icon target size
+ * and horizontal padding as rendertray, no label. */
+void
+render_tray_icon_module(StatusModule *module, int bar_height,
+		int (*ensure_icon)(int target_h), struct wlr_buffer **icon_buf,
+		int *icon_w, int *icon_h)
+{
+	struct wlr_scene_buffer *scene_buf;
+	int padding = statusbar_module_padding / 2;
+	int target_h;
+
+	if (!module || !module->tree)
+		return;
+	clearstatusmodule(module);
+	if (bar_height <= 0) {
+		module->width = 0;
+		return;
+	}
+	if (padding < 1)
+		padding = 1;
+	target_h = MAX(12, bar_height - 4);
+	if (ensure_icon(target_h) != 0 || !*icon_buf
+			|| *icon_w <= 0 || *icon_h <= 0) {
+		module->width = 0;
+		wlr_scene_node_set_enabled(&module->tree->node, 0);
+		return;
+	}
+	module->width = *icon_w + 2 * padding;
+	updatemodulebg(module, module->width, bar_height, statusbar_bg);
+	scene_buf = wlr_scene_buffer_create(module->tree, NULL);
+	if (scene_buf) {
+		wlr_scene_buffer_set_buffer(scene_buf, *icon_buf);
+		wlr_scene_node_set_position(&scene_buf->node, padding,
+				MAX(0, (bar_height - *icon_h) / 2));
+	}
+}
+
 int
 status_text_width(const char *text)
 {
@@ -408,10 +445,9 @@ rendernet(StatusModule *module, int bar_height, const char *text)
 {
 	/* Icon-only module; `text` is a change-key, never drawn. */
 	(void)text;
-	render_icon_label(module, bar_height, "",
+	render_tray_icon_module(module, bar_height,
 			ensure_net_icon_buffer, &net_icon_buf,
-			&net_icon_w, &net_icon_h, 0, statusbar_icon_text_gap,
-			statusbar_fg);
+			&net_icon_w, &net_icon_h);
 }
 
 void
@@ -4032,7 +4068,24 @@ positionstatusmodules(Monitor *m)
 	if (m->statusbar.traylabel.width > 0) {
 		wlr_scene_node_set_position(&m->statusbar.traylabel.tree->node, x, 0);
 		m->statusbar.traylabel.x = x;
-		x += m->statusbar.traylabel.width + spacing;
+		x += m->statusbar.traylabel.width + 6;
+	}
+	/* net/bluetooth/display live in the tray cluster as icon-only
+	 * entries, spaced like the SNI icons (gap 6). */
+	if (m->statusbar.net.width > 0) {
+		wlr_scene_node_set_position(&m->statusbar.net.tree->node, x, 0);
+		m->statusbar.net.x = x;
+		x += m->statusbar.net.width + 6;
+	}
+	if (m->statusbar.bluetooth.width > 0) {
+		wlr_scene_node_set_position(&m->statusbar.bluetooth.tree->node, x, 0);
+		m->statusbar.bluetooth.x = x;
+		x += m->statusbar.bluetooth.width + 6;
+	}
+	if (m->statusbar.display.width > 0) {
+		wlr_scene_node_set_position(&m->statusbar.display.tree->node, x, 0);
+		m->statusbar.display.x = x;
+		x += m->statusbar.display.width + spacing;
 	}
 	left_end = x;
 
@@ -4085,24 +4138,6 @@ positionstatusmodules(Monitor *m)
 		x -= m->statusbar.battery.width;
 		wlr_scene_node_set_position(&m->statusbar.battery.tree->node, x, 0);
 		m->statusbar.battery.x = x;
-		x -= spacing;
-	}
-	if (m->statusbar.net.width > 0) {
-		x -= m->statusbar.net.width;
-		wlr_scene_node_set_position(&m->statusbar.net.tree->node, x, 0);
-		m->statusbar.net.x = x;
-		x -= spacing;
-	}
-	if (m->statusbar.bluetooth.width > 0) {
-		x -= m->statusbar.bluetooth.width;
-		wlr_scene_node_set_position(&m->statusbar.bluetooth.tree->node, x, 0);
-		m->statusbar.bluetooth.x = x;
-		x -= spacing;
-	}
-	if (m->statusbar.display.width > 0) {
-		x -= m->statusbar.display.width;
-		wlr_scene_node_set_position(&m->statusbar.display.tree->node, x, 0);
-		m->statusbar.display.x = x;
 		x -= spacing;
 	}
 

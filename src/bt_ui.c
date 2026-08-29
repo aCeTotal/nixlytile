@@ -94,10 +94,9 @@ renderbluetooth(StatusModule *module, int bar_height, const char *text)
 		return;
 	}
 	(void)text;
-	render_icon_label(module, bar_height, "",
+	render_tray_icon_module(module, bar_height,
 			ensure_bt_icon_buffer, &bt_icon_buf,
-			&bt_icon_w, &bt_icon_h, 0, statusbar_icon_text_gap,
-			statusbar_fg);
+			&bt_icon_w, &bt_icon_h);
 }
 
 void

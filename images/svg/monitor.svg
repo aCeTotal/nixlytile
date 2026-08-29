@@ -1,8 +1,12 @@
-<?xml version="1.0" encoding="iso-8859-1"?>
-<svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" xml:space="preserve">
-<rect width="512" height="512"/>
-<rect x="56" y="96" rx="24" style="fill:#F2B851;" width="400" height="264"/>
-<rect x="84" y="124" rx="10" width="344" height="208"/>
-<rect x="232" y="360" style="fill:#F2B851;" width="48" height="44"/>
-<rect x="152" y="404" rx="10" style="fill:#F2B851;" width="208" height="24"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- frame -->
+  <rect x="4" y="8" width="54" height="36" rx="3" fill="#F2B851"></rect>
+  <rect x="56" y="8" width="2" height="36" rx="1" fill="#C0913C"></rect>
+  <!-- screen -->
+  <rect x="9" y="13" width="44" height="26" rx="2" fill="#1A1A1A"></rect>
+  <!-- neck -->
+  <rect x="28" y="44" width="8" height="6" fill="#F2B851"></rect>
+  <!-- foot -->
+  <rect x="18" y="50" width="28" height="6" rx="2" fill="#F2B851"></rect>
+  <rect x="44" y="50" width="2" height="6" rx="1" fill="#C0913C"></rect>
 </svg>
