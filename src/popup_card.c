@@ -869,66 +869,18 @@ card_finish(Card *c, CardResult *out)
 						r->hit_id);
 			break;
 		}
-		case CROW_WAVE: {
-			/* Signal as a carrier wave: amplitude AND frequency
-			 * scale with frac, so a weak link reads as a lazy
-			 * ripple and a strong one as a dense oscillation.
-			 * Edge envelope tapers the wave into the baseline. */
-			double mid = r->y + r->h / 2.0;
-			double amp = (r->h / 2.0 - 3.0) * (0.12 + 0.88 * r->frac);
-			double cycles = 2.0 + 5.0 * r->frac;
-			double k = 2.0 * M_PI * cycles / inner_w;
-			const float *a = r->accent;
-			int wx;
-
-			cairo_rectangle(cr, CARD_PAD, mid - 0.5, inner_w, 1);
+		case CROW_WAVE:
+			/* faint baseline; the live spectrum is an overlay
+			 * buffer the popup drops into this rect each tick
+			 * (card_spectrum_buffer) */
+			cairo_rectangle(cr, CARD_PAD, y + r->h - 1, inner_w, 1);
 			cairo_set_source_rgba(cr, 1, 1, 1, 0.07);
 			cairo_fill(cr);
-
-			cairo_save(cr);
-			cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
-			cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
-
-			/* phase-shifted echo behind the carrier */
-			for (wx = 0; wx <= inner_w; wx += 2) {
-				double env = fmin(1.0, fmin(wx / 18.0,
-						(inner_w - wx) / 18.0));
-				double wy = mid - 0.55 * amp * env *
-					sin(k * wx + M_PI / 3.0);
-				if (wx == 0)
-					cairo_move_to(cr, CARD_PAD + wx, wy);
-				else
-					cairo_line_to(cr, CARD_PAD + wx, wy);
-			}
-			cairo_set_source_rgba(cr, a[0], a[1], a[2],
-					a[3] * 0.22);
-			cairo_set_line_width(cr, 1.0);
-			cairo_stroke(cr);
-
-			/* carrier: glow -> halo -> bright core, same path */
-			for (wx = 0; wx <= inner_w; wx += 2) {
-				double env = fmin(1.0, fmin(wx / 18.0,
-						(inner_w - wx) / 18.0));
-				double wy = mid - amp * env * sin(k * wx);
-				if (wx == 0)
-					cairo_move_to(cr, CARD_PAD + wx, wy);
-				else
-					cairo_line_to(cr, CARD_PAD + wx, wy);
-			}
-			cairo_set_source_rgba(cr, a[0], a[1], a[2],
-					a[3] * 0.15);
-			cairo_set_line_width(cr, 5.0);
-			cairo_stroke_preserve(cr);
-			cairo_set_source_rgba(cr, a[0], a[1], a[2],
-					a[3] * 0.40);
-			cairo_set_line_width(cr, 2.4);
-			cairo_stroke_preserve(cr);
-			cairo_set_source_rgba(cr, a[0], a[1], a[2], a[3]);
-			cairo_set_line_width(cr, 1.3);
-			cairo_stroke(cr);
-			cairo_restore(cr);
+			out->wave_x = CARD_PAD;
+			out->wave_y = y;
+			out->wave_w = inner_w;
+			out->wave_h = r->h;
 			break;
-		}
 		case CROW_LOAD: {
 			/* spinner arc + label, centered as one group; the label
 			 * glyphs land in pass B at the same offsets */
@@ -1459,6 +1411,69 @@ card_meter_buffer(int w, int h, const float accent[4],
 		rounded(cr, x, mid - bh / 2.0, bar_w, bh, bar_w / 2.0);
 		cairo_set_source_rgba(cr, accent[0], accent[1], accent[2],
 				0.28 + 0.72 * amp);
+		cairo_fill(cr);
+	}
+	cairo_destroy(cr);
+	return cairo_buf_finish(cs);
+}
+
+/* Per-bar spectrum level: two incommensurate sines beat against each
+ * other so the motion reads organic, never a marching wave. */
+static double
+spec_level(double ph, int i)
+{
+	double v = 0.5 + 0.30 * sin(ph * 2.1 + i * 0.83) +
+			0.24 * sin(ph * 3.7 + i * 1.94 + 1.7);
+
+	return v < 0.0 ? 0.0 : v > 1.0 ? 1.0 : v;
+}
+
+/* Wi-Fi spectrum analyzer: bottom-aligned bars tapering toward the
+ * high end, with peak-hold caps. Overall height and motion speed scale
+ * with frac (signal strength) so a weak link idles and a strong one is
+ * lively. t is wall time in seconds; each frame is a pure function of
+ * (t, frac) so the overlay needs no history state. */
+struct wlr_buffer *
+card_spectrum_buffer(int w, int h, const float accent[4], double frac,
+		double t)
+{
+	cairo_surface_t *cs;
+	cairo_t *cr = cairo_buf_begin(w, h, &cs);
+	const int bar_w = 3, gap = 2;
+	int nbars = (w + gap) / (bar_w + gap);
+	double base = h - 1.0;
+
+	if (!cr)
+		return NULL;
+	if (frac < 0.0)
+		frac = 0.0;
+	if (frac > 1.0)
+		frac = 1.0;
+	for (int i = 0; i < nbars; i++) {
+		double ph = t * (1.2 + 1.0 * frac);
+		double tilt = 1.0 - 0.45 * i / (nbars > 1 ? nbars - 1 : 1);
+		double env = (0.2 + 0.8 * frac) * tilt * (h - 5.0);
+		double v = spec_level(ph, i);
+		double x = i * (bar_w + gap);
+		double bh = 2.0 + env * v;
+		double peak = v;
+
+		rounded(cr, x, base - bh, bar_w, bh, 1.5);
+		cairo_set_source_rgba(cr, accent[0], accent[1], accent[2],
+				accent[3] * (0.30 + 0.70 * v));
+		cairo_fill(cr);
+
+		/* peak-hold cap: max level over the recent past, floating
+		 * just above the bar and decaying as the bar falls away */
+		for (int s = 1; s <= 4; s++) {
+			double pv = spec_level(ph - s * 0.09, i);
+			if (pv > peak)
+				peak = pv;
+		}
+		cairo_rectangle(cr, x, base - (2.0 + env * peak) - 3.0,
+				bar_w, 1.5);
+		cairo_set_source_rgba(cr, accent[0], accent[1], accent[2],
+				accent[3] * 0.85);
 		cairo_fill(cr);
 	}
 	cairo_destroy(cr);

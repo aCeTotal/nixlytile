@@ -321,6 +321,80 @@ dns_compact(const char *in, char *out, size_t len)
 		snprintf(out + strlen(out), len - strlen(out), " +%d", extra);
 }
 
+/* ── live spectrum overlay (wifi header) ─────────────────────────── */
+
+#define SPEC_TICK_MS 33
+
+static struct wlr_scene_buffer *spec_node;   /* child of view content;
+                                              * reset on every re-render */
+static int spec_x, spec_y, spec_w, spec_h;
+static double spec_frac;
+static const float *spec_accent;
+static struct wl_event_source *spec_timer;
+
+/* (Re)create the overlay node and swap in a freshly drawn frame. Safe
+ * to call right after a card re-render so the spectrum never drops out
+ * for a frame. */
+static void
+spec_overlay_draw(NetPopup *p)
+{
+	struct wlr_buffer *buf;
+
+	/* Wait out the card show animation: extra children don't take part
+	 * in its fade, so the spectrum joins once the card has settled. */
+	if (spec_w <= 0 || !p->view.content || p->view.animating)
+		return;
+	if (!spec_node) {
+		spec_node = wlr_scene_buffer_create(p->view.content, NULL);
+		if (spec_node)
+			wlr_scene_node_set_position(&spec_node->node,
+					spec_x, spec_y);
+	}
+	buf = card_spectrum_buffer(spec_w, spec_h, spec_accent, spec_frac,
+			monotonic_msec() / 1000.0);
+	if (spec_node && buf)
+		wlr_scene_buffer_set_buffer(spec_node, buf);
+	if (buf)
+		wlr_buffer_drop(buf);
+}
+
+/* ~30 fps heartbeat; stops itself the moment no net popup is visible
+ * or the header has no spectrum row (ethernet / disconnected). */
+static int
+spec_tick(void *data)
+{
+	Monitor *m, *pm = NULL;
+	NetPopup *p = NULL;
+
+	(void)data;
+	wl_list_for_each(m, &mons, link) {
+		if (m->statusbar.net_popup.visible) {
+			p = &m->statusbar.net_popup;
+			pm = m;
+			break;
+		}
+	}
+	if (!p || spec_w <= 0) {
+		spec_node = NULL;
+		return 0;   /* stays disarmed until the next popup render */
+	}
+	spec_overlay_draw(p);
+	if (pm->wlr_output)
+		wlr_output_schedule_frame(pm->wlr_output);
+	wl_event_source_timer_update(spec_timer, SPEC_TICK_MS);
+	return 0;
+}
+
+static void
+spec_timer_arm(void)
+{
+	if (!spec_timer)
+		spec_timer = wl_event_loop_add_timer(event_loop, spec_tick,
+				NULL);
+	if (spec_timer)
+		wl_event_source_timer_update(spec_timer, SPEC_TICK_MS);
+}
+
 void
 rendernetpopup(Monitor *m)
 {
@@ -373,8 +447,9 @@ rendernetpopup(Monitor *m)
 			sub[si] = (char)toupper((unsigned char)sub[si]);
 		card_header(card, net_icon_path, "Wi-Fi", sub, value);
 		card_gap(card, 6);
-		card_wave(card, pct / 100.0,
-				pct < 30 ? card_col_yellow : card_col_blue);
+		spec_frac = pct / 100.0;
+		spec_accent = pct < 30 ? card_col_yellow : card_col_blue;
+		card_wave(card, spec_frac, spec_accent);
 		card_gap(card, 6);
 	} else {
 		card_header(card, net_icon_path, "Network", "DISCONNECTED",
@@ -572,6 +647,18 @@ rendernetpopup(Monitor *m)
 	popup_view_apply(&p->view, p->tree, &res);
 	p->width = p->view.w;
 	p->height = p->view.h;
+
+	/* apply destroyed the previous overlay with the old card content;
+	 * redraw right away so the spectrum never blinks out for a frame */
+	spec_node = NULL;
+	spec_x = res.wave_x;
+	spec_y = res.wave_y;
+	spec_w = res.wave_w;
+	spec_h = res.wave_h;
+	if (spec_w > 0) {
+		spec_overlay_draw(p);
+		spec_timer_arm();
+	}
 }
 
 /* ── hover + clicks ──────────────────────────────────────────────── */

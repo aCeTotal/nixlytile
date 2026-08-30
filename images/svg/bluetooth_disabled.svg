@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- shade (2D offset, no blur) -->
+  <g fill="none" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" transform="translate(1.5 1.5)">
+    <path stroke="#374151" d="M19 19.25 L42.75 43.125 L31.875 54.375 L31.875 9.75 L42.75 21.375 L19 43.25"></path>
+    <path stroke="#7F1D1D" d="M12 10 L52 54"></path>
+  </g>
+  <!-- main: greyed rune + red slash -->
+  <g fill="none" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+    <path stroke="#6B7280" d="M19 19.25 L42.75 43.125 L31.875 54.375 L31.875 9.75 L42.75 21.375 L19 43.25"></path>
+    <path stroke="#E53935" d="M12 10 L52 54"></path>
+  </g>
+</svg>

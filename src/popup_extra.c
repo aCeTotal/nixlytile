@@ -170,20 +170,28 @@ slider_commit(void)
 	if (sdrag.active == 1) {
 		int is_headset = pipewire_sink_is_headset_nb();
 
-		if (volume_muted == 1)
-			set_pipewire_mute(0);
 		set_pipewire_volume(pct);
-		volume_cache_store(is_headset, pct, 0, now);
+		if (pct <= 0.0) {
+			/* dragged to zero = mute */
+			set_pipewire_mute(1);
+			volume_cache_store(is_headset, 0.0, 1, now);
+		} else {
+			if (volume_muted == 1)
+				set_pipewire_mute(0);
+			volume_cache_store(is_headset, pct, 0, now);
+		}
 		speaker_active = pct;
 		refreshstatusvolume();
 	} else if (sdrag.active == 2) {
-		if (mic_muted == 1)
-			set_pipewire_mic_mute(0);
 		set_pipewire_mic_volume(pct);
+		if (pct <= 0.0) {
+			/* dragged to zero = mute */
+			set_pipewire_mic_mute(1);
+		} else if (mic_muted == 1) {
+			set_pipewire_mic_mute(0);
+		}
 		mic_last_percent = pct;
 		mic_cached = pct;
-		mic_cached_muted = 0;
-		mic_muted = 0;
 		mic_last_read_ms = now;
 		microphone_active = pct;
 		refreshstatusmic();
@@ -707,6 +715,9 @@ fan_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 /* Re-render cadence while visible; volume/light react to scroll wheel
  * changes on the module underneath the cursor. */
 #define INFO_RERENDER_MS 500
+/* Cursor must stay outside icon+popup this long before an info popup
+ * hides — crossing the bar→popup gap never closes it. */
+#define INFO_POPUP_GRACE_MS 250
 
 static void
 info_popup_hover(Monitor *m, StatusModule *mod, InfoPopup *p,
@@ -729,7 +740,15 @@ info_popup_hover(Monitor *m, StatusModule *mod, InfoPopup *p,
 	lx = (int)floor(cx) - m->statusbar.area.x;
 	ly = (int)floor(cy) - m->statusbar.area.y;
 
-	popup_x = mod->x;
+	if (p->visible) {
+		/* Anchor stays where the popup opened: the module's x shifts
+		 * as its text width changes (70% -> 5%) and must not yank
+		 * the popup — and its hover rect — out from under the
+		 * cursor mid-interaction. */
+		popup_x = p->tree->node.x;
+	} else {
+		popup_x = mod->x;
+	}
 	if (p->width > 0 && m->statusbar.area.width > 0) {
 		int max_x = m->statusbar.area.width - p->width;
 
@@ -782,6 +801,7 @@ info_popup_hover(Monitor *m, StatusModule *mod, InfoPopup *p,
 	}
 
 	if (inside) {
+		p->outside_since_ms = 0;
 		if (p->hover_start_ms == 0)
 			p->hover_start_ms = now;
 		if (!was_visible && (now - p->hover_start_ms) < 300) {
@@ -797,8 +817,10 @@ info_popup_hover(Monitor *m, StatusModule *mod, InfoPopup *p,
 				now - p->last_render_ms >= INFO_RERENDER_MS) {
 			render(m);
 			p->last_render_ms = now;
-			/* re-clamp with the fresh size */
-			popup_x = mod->x;
+			/* re-clamp with the fresh size (fresh anchor only on
+			 * show — see the stable-anchor comment above) */
+			if (!was_visible)
+				popup_x = mod->x;
 			if (p->width > 0 && m->statusbar.area.width > 0) {
 				int max_x = m->statusbar.area.width - p->width;
 
@@ -815,13 +837,30 @@ info_popup_hover(Monitor *m, StatusModule *mod, InfoPopup *p,
 				popup_x, statusbar_popup_y(m));
 		if (!was_visible)
 			popup_view_show(&p->view);
-	} else if (p->visible || p->hover_start_ms != 0) {
+	} else if (p->visible) {
+		/* Close-grace: a transit through the bar→popup gap strip or
+		 * a brief overshoot outside the card must not kill the
+		 * popup.  Only hide once the cursor has stayed outside
+		 * continuously for the whole grace window. */
+		if (p->outside_since_ms == 0) {
+			p->outside_since_ms = now;
+			schedule_popup_delay(INFO_POPUP_GRACE_MS + 1);
+			return;
+		}
+		if (now - p->outside_since_ms < INFO_POPUP_GRACE_MS) {
+			schedule_popup_delay(INFO_POPUP_GRACE_MS -
+					(now - p->outside_since_ms) + 1);
+			return;
+		}
 		p->visible = 0;
+		p->outside_since_ms = 0;
 		p->hover_start_ms = 0;
 		p->last_render_ms = 0;
 		p->btn_hover = -1;
 		popup_view_hide(&p->view);
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
+	} else if (p->hover_start_ms != 0) {
+		p->hover_start_ms = 0;
 	}
 }
 
@@ -830,7 +869,10 @@ info_popup_hover(Monitor *m, StatusModule *mod, InfoPopup *p,
 static int
 info_popup_clamped_x(Monitor *m, StatusModule *mod, InfoPopup *p)
 {
-	int popup_x = mod->x;
+	/* While visible, use the popup's actual position (the anchor is
+	 * frozen at show time — see info_popup_hover) so click and drag
+	 * coordinates always match what is on screen. */
+	int popup_x = p->visible && p->tree ? p->tree->node.x : mod->x;
 
 	if (p->width > 0 && m->statusbar.area.width > 0) {
 		int max_x = m->statusbar.area.width - p->width;
@@ -1056,6 +1098,33 @@ info_popup_slider_release(void)
 	sdrag.mon = NULL;
 }
 
+/* Volume/mic/light just changed (drag, scroll, keybind, external): mark
+ * any open popup stale and schedule a hover re-poll so the popup's %
+ * and gauge follow the bar module in lock-step. */
+void
+info_popup_mark_stale(void)
+{
+	Monitor *m;
+	int any = 0;
+
+	wl_list_for_each(m, &mons, link) {
+		if (m->statusbar.volume_popup.visible) {
+			m->statusbar.volume_popup.last_render_ms = 0;
+			any = 1;
+		}
+		if (m->statusbar.mic_popup.visible) {
+			m->statusbar.mic_popup.last_render_ms = 0;
+			any = 1;
+		}
+		if (m->statusbar.light_popup.visible) {
+			m->statusbar.light_popup.last_render_ms = 0;
+			any = 1;
+		}
+	}
+	if (any)
+		schedule_popup_delay(1);
+}
+
 void
 updateinfopopups(Monitor *m, double cx, double cy)
 {
@@ -1085,7 +1154,14 @@ updateinfopopups(Monitor *m, double cx, double cy)
 int
 info_popup_pending(Monitor *m)
 {
-	return (m->statusbar.clock_popup.hover_start_ms != 0 &&
+	return m->statusbar.clock_popup.outside_since_ms != 0 ||
+		m->statusbar.volume_popup.outside_since_ms != 0 ||
+		m->statusbar.mic_popup.outside_since_ms != 0 ||
+		m->statusbar.light_popup.outside_since_ms != 0 ||
+		m->statusbar.fan_popup.outside_since_ms != 0 ||
+		m->statusbar.bt_popup.outside_since_ms != 0 ||
+		m->statusbar.display_popup.outside_since_ms != 0 ||
+		(m->statusbar.clock_popup.hover_start_ms != 0 &&
 			!m->statusbar.clock_popup.visible) ||
 		(m->statusbar.volume_popup.hover_start_ms != 0 &&
 			!m->statusbar.volume_popup.visible) ||

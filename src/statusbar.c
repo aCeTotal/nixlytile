@@ -4302,7 +4302,8 @@ popup_delay_timeout(void *data)
 			updateramhover(m, cursor->x, cursor->y);
 		if (m->statusbar.battery_popup.hover_start_ms != 0 && !m->statusbar.battery_popup.visible)
 			updatebatteryhover(m, cursor->x, cursor->y);
-		if (m->statusbar.net_popup.hover_start_ms != 0 && !m->statusbar.net_popup.visible)
+		if ((m->statusbar.net_popup.hover_start_ms != 0 && !m->statusbar.net_popup.visible) ||
+				m->statusbar.net_popup.outside_since_ms != 0)
 			updatenethover(m, cursor->x, cursor->y);
 		if (info_popup_pending(m))
 			updateinfopopups(m, cursor->x, cursor->y);
@@ -4568,6 +4569,7 @@ refreshstatuslight(void)
 			positionstatusmodules(m);
 		}
 	}
+	info_popup_mark_stale();
 }
 
 void
@@ -4796,6 +4798,7 @@ refreshstatusvolume(void)
 			positionstatusmodules(m);
 		}
 	}
+	info_popup_mark_stale();
 }
 
 void
@@ -4896,6 +4899,7 @@ refreshstatusmic(void)
 			positionstatusmodules(m);
 		}
 	}
+	info_popup_mark_stale();
 }
 
 void
@@ -5494,6 +5498,10 @@ updateramhover(Monitor *m, double cx, double cy)
 	}
 }
 
+/* Cursor must stay outside icon+popup this long before the net popup
+ * hides — crossing the bar→popup gap never closes it. */
+#define NET_POPUP_GRACE_MS 250
+
 void
 updatenethover(Monitor *m, double cx, double cy)
 {
@@ -5557,6 +5565,7 @@ updatenethover(Monitor *m, double cx, double cy)
 	was_visible = p->visible;
 
 	if (inside) {
+		p->outside_since_ms = 0;
 		/* Track when hover started for delay */
 		if (p->hover_start_ms == 0)
 			p->hover_start_ms = now;
@@ -5597,14 +5606,31 @@ updatenethover(Monitor *m, double cx, double cy)
 			popup_view_show(&p->view);
 		}
 		net_popup_track_hover(m, cx, cy);
-	} else if (p->visible || p->hover_start_ms != 0) {
+	} else if (p->visible) {
+		/* Close-grace: a transit through the bar→popup gap strip or
+		 * a brief overshoot outside the card must not kill the
+		 * popup.  Only hide once the cursor has stayed outside
+		 * continuously for the whole grace window. */
+		if (p->outside_since_ms == 0) {
+			p->outside_since_ms = now;
+			schedule_popup_delay(NET_POPUP_GRACE_MS + 1);
+			return;
+		}
+		if (now - p->outside_since_ms < NET_POPUP_GRACE_MS) {
+			schedule_popup_delay(NET_POPUP_GRACE_MS -
+					(now - p->outside_since_ms) + 1);
+			return;
+		}
 		p->visible = 0;
+		p->outside_since_ms = 0;
 		wlr_scene_node_set_enabled(&p->tree->node, 0);
 		p->suppress_refresh_until_ms = 0;
 		p->hover_start_ms = 0;
 		p->btn_hover = -1;
 		popup_view_hide(&p->view);
 		set_status_task_due(refreshstatusnet, now + 60000);
+	} else if (p->hover_start_ms != 0) {
+		p->hover_start_ms = 0;
 	}
 }
 

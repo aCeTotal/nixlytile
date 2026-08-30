@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- shade (2D offset, no blur) -->
+  <g fill="none" stroke="#1E40AF" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" transform="translate(1.5 1.5)">
+    <path d="M13 19.25 L36.75 43.125 L25.875 54.375 L25.875 9.75 L36.75 21.375 L13 43.25"></path>
+    <path d="M45.5 25.5a9 9 0 0 1 0 13"></path>
+    <path d="M51.5 19.5a17.5 17.5 0 0 1 0 25"></path>
+  </g>
+  <!-- main -->
+  <g fill="none" stroke="#3B82F6" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M13 19.25 L36.75 43.125 L25.875 54.375 L25.875 9.75 L36.75 21.375 L13 43.25"></path>
+    <path d="M45.5 25.5a9 9 0 0 1 0 13"></path>
+    <path d="M51.5 19.5a17.5 17.5 0 0 1 0 25"></path>
+  </g>
+</svg>

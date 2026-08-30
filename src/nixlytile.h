@@ -566,6 +566,7 @@ typedef struct {
 	int anchor_w;
 	uint64_t suppress_refresh_until_ms;
 	uint64_t hover_start_ms;
+	uint64_t outside_since_ms;   /* close-grace: when the cursor left */
 	int btn_hover;          /* hit id under cursor, -1 = none */
 	CardHit hits[CARD_MAX_HITS];
 	int nhits;
@@ -581,6 +582,7 @@ typedef struct {
 	int visible;
 	uint64_t hover_start_ms;
 	uint64_t last_render_ms;
+	uint64_t outside_since_ms;   /* close-grace: when the cursor left */
 	int btn_hover;          /* hit id under cursor, -1 = none */
 	CardHit hits[CARD_MAX_HITS];
 	int nhits;
@@ -2734,6 +2736,7 @@ int localip(const char *iface, char *out, size_t len);
 const char *wifi_icon_for_quality(double quality_pct);
 void set_net_icon_path(const char *path);
 void updateinfopopups(Monitor *m, double cx, double cy);
+void info_popup_mark_stale(void);
 int info_popup_pending(Monitor *m);
 int info_popup_visible(Monitor *m);
 void info_popups_hide(Monitor *m);

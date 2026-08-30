@@ -52,8 +52,10 @@ void card_gauge(Card *c, double frac, const float accent[4]);
  * with hit_id, and the fill can later be moved smoothly with
  * popup_view_set_fill_frac(). */
 void card_gauge_id(Card *c, double frac, const float accent[4], int hit_id);
-/* Sine-wave signal meter: amplitude and wave density scale with frac
- * (clamped to [0,1]). Static raster, no fill sweep. */
+/* Reserved spectrum-analyzer row: card draws a faint baseline and
+ * reports the rect in CardResult.wave_*; the popup overlays
+ * card_spectrum_buffer() frames there. frac (clamped to [0,1]) is kept
+ * for callers that pass it straight through to the buffer. */
 void card_wave(Card *c, double frac, const float accent[4]);
 /* Centered spinner arc + label row. phase [0,1) rotates the arc; pass
  * a time-derived phase so periodic re-renders animate it. */
@@ -110,6 +112,7 @@ typedef struct CardResult {
 	CardFill fills[CARD_MAX_FILLS];
 	int nfills;
 	int meter_x, meter_y, meter_w, meter_h;   /* live-meter rect (w=0: none) */
+	int wave_x, wave_y, wave_w, wave_h;       /* spectrum rect (w=0: none) */
 } CardResult;
 
 /* Rasterize and free the card. Returns 0 on success; result owns buf
@@ -158,6 +161,10 @@ struct wlr_buffer *card_panel_buffer(int w, int h);
 struct wlr_buffer *card_shadow_buffer(int w, int h, double radius);
 struct wlr_buffer *card_meter_buffer(int w, int h, const float accent[4],
 		const float *hist, int nhist, int head, double phase);
+/* Spectrum-analyzer frame for the card_wave rect: bottom-aligned bars
+ * whose envelope scales with frac, animated by t (seconds). */
+struct wlr_buffer *card_spectrum_buffer(int w, int h, const float accent[4],
+		double frac, double t);
 struct wlr_buffer *card_hover_buffer(int w, int h);
 struct wlr_buffer *card_mark_buffer(int radio, int size, int state);
 struct wlr_buffer *card_chevron_buffer(int size);

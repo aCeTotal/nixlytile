@@ -314,13 +314,19 @@ adjust_volume_by_steps(int steps)
 		return 0;
 
 	now = monotonic_msec();
-	volume_cache_store(is_headset, vol, 0, now);
-	speaker_active = vol;
-	if (is_headset) {
-		volume_cached_headset_muted = 0;
+	if (vol <= 0.0) {
+		/* scrolled down to zero = mute */
+		set_pipewire_mute(1);
+		volume_cache_store(is_headset, 0.0, 1, now);
 	} else {
-		volume_cached_speaker_muted = 0;
+		volume_cache_store(is_headset, vol, 0, now);
+		if (is_headset) {
+			volume_cached_headset_muted = 0;
+		} else {
+			volume_cached_speaker_muted = 0;
+		}
 	}
+	speaker_active = vol;
 	refreshstatusvolume();
 	return 1;
 }
@@ -361,14 +367,33 @@ adjust_mic_by_steps(int steps)
 	if (set_pipewire_mic_volume(target) != 0)
 		return 0;
 
+	if (target <= 0.0) {
+		/* scrolled down to zero = mute */
+		set_pipewire_mic_mute(1);
+	} else {
+		mic_cached_muted = 0;
+		mic_muted = 0;
+	}
 	mic_last_percent = target;
 	mic_cached = target;
-	mic_cached_muted = 0;
-	mic_muted = 0;
 	mic_last_read_ms = monotonic_msec();
 	microphone_active = target;
 	refreshstatusmic();
 	return 1;
+}
+
+/* Cursor inside a visible info popup's card (layout coords). */
+static int
+info_popup_under(Monitor *m, InfoPopup *p)
+{
+	int x0, y0;
+
+	if (!p->tree || !p->visible || p->width <= 0 || p->height <= 0)
+		return 0;
+	x0 = m->statusbar.area.x + p->tree->node.x;
+	y0 = m->statusbar.area.y + p->tree->node.y;
+	return cursor->x >= x0 && cursor->x < x0 + p->width &&
+		cursor->y >= y0 && cursor->y < y0 + p->height;
 }
 
 int
@@ -395,14 +420,26 @@ handlestatusscroll(struct wlr_pointer_axis_event *event)
 	if (fullscreen_visible_on(m))
 		return 0;
 
-	lx = (int)floor(cursor->x) - m->statusbar.area.x;
-	ly = (int)floor(cursor->y) - m->statusbar.area.y;
-	if (lx < 0 || ly < 0 || lx >= m->statusbar.area.width || ly >= m->statusbar.area.height)
-		return 0;
-
 	steps = -scrollsteps(event);
 	if (steps == 0)
 		return 0;
+
+	/* Over an open volume/mic/light popup: scroll adjusts the same
+	 * value as on the bar module itself. */
+	if (info_popup_under(m, &m->statusbar.volume_popup))
+		return adjust_volume_by_steps(steps);
+	if (info_popup_under(m, &m->statusbar.mic_popup))
+		return adjust_mic_by_steps(steps);
+	if (info_popup_under(m, &m->statusbar.light_popup))
+		return adjust_backlight_by_steps(steps);
+
+	lx = (int)floor(cursor->x) - m->statusbar.area.x;
+	ly = (int)floor(cursor->y) - m->statusbar.area.y;
+	if (lx < 0 || ly < 0 || lx >= m->statusbar.area.width || ly >= m->statusbar.area.height) {
+		/* swallow scrolls over the other bar popups — they must not
+		 * leak to the client underneath */
+		return statusbar_popup_at(m, cursor->x, cursor->y);
+	}
 
 	if (m->statusbar.light.width > 0 &&
 			lx >= m->statusbar.light.x &&

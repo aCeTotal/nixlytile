@@ -15,7 +15,7 @@
 #define BT_HIT_SCAN  211
 #define BT_HIT_DEV   220   /* + device index */
 
-char bt_icon_path[PATH_MAX] = "images/svg/bluetooth.svg";
+char bt_icon_path[PATH_MAX] = "images/svg/bluetooth_searching.svg";
 char bt_icon_loaded_path[PATH_MAX];
 int bt_icon_loaded_h, bt_icon_w, bt_icon_h;
 struct wlr_buffer *bt_icon_buf;
@@ -94,6 +94,11 @@ renderbluetooth(StatusModule *module, int bar_height, const char *text)
 		return;
 	}
 	(void)text;
+	/* searching = default (powered); disabled variant when the radio
+	 * is off — ensure_bt_icon_buffer reloads on path change */
+	snprintf(bt_icon_path, sizeof(bt_icon_path), "%s", a.powered ?
+			"images/svg/bluetooth_searching.svg" :
+			"images/svg/bluetooth_disabled.svg");
 	render_tray_icon_module(module, bar_height,
 			ensure_bt_icon_buffer, &bt_icon_buf,
 			&bt_icon_w, &bt_icon_h);
