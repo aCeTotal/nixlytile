@@ -228,6 +228,21 @@
               description = "The nixlytile package to install.";
             };
 
+            fanControl = {
+              enable = lib.mkOption {
+                type = lib.types.bool;
+                default = true;
+                description = ''
+                  Fan control for the statusbar Fans popup: the
+                  nixly-fand root helper (MSI EC fan tables, root-owned
+                  hwmon pwm files, NVML fan control on desktop NVIDIA),
+                  ec_sys with write support for the EC tables, and
+                  relaxed permissions on the common fan sysfs knobs so
+                  the compositor can write them directly.
+                '';
+              };
+            };
+
             gameMode = {
               enable = lib.mkOption {
                 type = lib.types.bool;
@@ -330,6 +345,39 @@
                 };
                 path = [ "/run/current-system/sw" ];
               };
+            })
+
+            (lib.mkIf cfg.fanControl.enable {
+              # Raw EC access for the MSI fan tables. nixly-fand only
+              # accepts writes to the fan-table byte ranges, so the
+              # dangerous surface of write_support stays behind it.
+              boot.kernelModules = [ "ec_sys" ];
+              boot.extraModprobeConfig = ''
+                options ec_sys write_support=1
+              '';
+
+              systemd.services.nixly-fand = {
+                description = "nixlytile fan control helper";
+                wantedBy = [ "multi-user.target" ];
+                after = [ "systemd-modules-load.service" ];
+                serviceConfig = {
+                  Type = "exec";
+                  ExecStart = "${cfg.package}/bin/nixly-fand";
+                  Restart = "on-failure";
+                  RestartSec = 5;
+                };
+              };
+
+              # Direct unprivileged writes for the common knobs — the
+              # compositor falls back to the helper socket for anything
+              # still root-owned.
+              services.udev.extraRules = ''
+                SUBSYSTEM=="hwmon", ACTION=="add", RUN+="${pkgs.runtimeShell} -c 'chmod 666 /sys%p/pwm* 2>/dev/null || true'"
+              '';
+              systemd.tmpfiles.rules = [
+                "z /sys/devices/platform/msi-ec/fan_mode 0666 - - -"
+                "z /sys/devices/platform/msi-ec/cooler_boost 0666 - - -"
+              ];
             })
 
             (lib.mkIf cfg.gameMode.enable {

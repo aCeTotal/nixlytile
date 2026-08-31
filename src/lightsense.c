@@ -21,10 +21,16 @@
 #define LS_INTERVAL_MS 30000
 #define LS_FIRST_MS    2500
 #define LS_HYSTERESIS  5.0
+#define LS_AC_PERCENT  60.0
 
 int light_auto_mode = 1;
 double light_manual_value = -1.0;
 int light_ambient_luma = -1;
+
+/* Wall power: hold LS_AC_PERCENT and skip the ambient loop entirely —
+ * auto brightness is a battery-saving measure.  Manual adjustments
+ * still work (they switch the mode to manual as usual). */
+static int ls_on_ac;
 
 static struct wl_event_source *ls_timer;
 static char ls_conf_path[PATH_MAX];
@@ -103,7 +109,7 @@ ls_apply(int luma)
 	double target, cur;
 
 	light_ambient_luma = luma;
-	if (!light_auto_mode || !backlight_available)
+	if (!light_auto_mode || ls_on_ac || !backlight_available)
 		return;
 	target = ls_target(luma);
 	cur = backlight_percent();
@@ -132,7 +138,7 @@ ls_sample(void *data)
 		wl_event_source_timer_update(ls_timer, LS_INTERVAL_MS);
 	/* presence.c owns the camera cadence on laptops — asking here too
 	 * would light the webcam LED during normal use. */
-	if (!light_auto_mode || presence_active())
+	if (!light_auto_mode || ls_on_ac || presence_active())
 		return 0;
 	camwatch_request();
 	return 0;
@@ -166,6 +172,28 @@ light_mode_set_auto(void)
 {
 	light_auto_mode = 1;
 	lightsense_sample_now();
+}
+
+/* powersave.c reports AC/battery transitions.  Plugging in pins the
+ * backlight at LS_AC_PERCENT; unplugging hands control back to the
+ * ambient loop (if the mode is still Auto). */
+void
+lightsense_power_event(int on_ac)
+{
+	if (on_ac == ls_on_ac)
+		return;
+	ls_on_ac = on_ac;
+	if (on_ac) {
+		if (!backlight_available)
+			return;
+		if (set_backlight_percent(LS_AC_PERCENT) != 0)
+			return;
+		light_last_percent = LS_AC_PERCENT;
+		light_cached_percent = LS_AC_PERCENT;
+		refreshstatuslight();
+	} else if (light_auto_mode) {
+		lightsense_sample_now();
+	}
 }
 
 void

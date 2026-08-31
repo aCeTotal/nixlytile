@@ -607,6 +607,7 @@ typedef struct {
 #define FAN_MAX_DEVICES   8
 #define FAN_MAX_PER_DEV   6
 #define FAN_MAX_TOTAL    (FAN_MAX_DEVICES * FAN_MAX_PER_DEV)
+#define FAN_CURVE_PTS     6
 
 typedef enum {
 	FAN_DEV_CPU,
@@ -617,6 +618,31 @@ typedef enum {
 	FAN_DEV_MSI_EC,
 	FAN_DEV_UNKNOWN,
 } FanDevType;
+
+/* Which control path this fan speaks (FAN_CTL_NONE = read-only). */
+typedef enum {
+	FAN_CTL_NONE,
+	FAN_CTL_PWM,     /* hwmon pwmN / pwmN_enable */
+	FAN_CTL_MSI_EC,  /* MSI EC fan table via nixly-fand helper */
+	FAN_CTL_NVML,    /* desktop NVIDIA via NVML */
+} FanCtlKind;
+
+typedef enum {
+	FAN_MODE_AUTO,
+	FAN_MODE_MANUAL,
+	FAN_MODE_CURVE,
+} FanCtlMode;
+
+/* temp→speed table, temps ascending; step semantics: at or above
+ * temp[i] the fan runs pct[i], below temp[0] it runs base.  Matches
+ * the MSI EC table layout (base = the EC's 7th speed byte) so one
+ * model serves every control path.  User-edited curves set
+ * base = pct[0]; base only differs on tables read back from the EC. */
+typedef struct {
+	uint8_t temp[FAN_CURVE_PTS]; /* °C */
+	uint8_t pct[FAN_CURVE_PTS];  /* 0-100 */
+	uint8_t base;                /* 0-100, speed below temp[0] */
+} FanCurve;
 
 typedef struct {
 	char label[64];
@@ -630,6 +656,15 @@ typedef struct {
 	int temp_mc;
 	int msi_sysfs; /* uses /sys/devices/platform/msi-ec/ (rpm = percent) */
 	char msi_sysfs_dir[16]; /* "cpu" or "gpu" */
+	int ctl;         /* FanCtlKind */
+	int mode;        /* FanCtlMode */
+	int manual_pct;  /* last manual speed, 0-100 */
+	FanCurve curve;
+	FanCurve factory;   /* msi-ec: EC table found at scan (restored on Auto) */
+	int nvml_gpu;    /* FAN_CTL_NVML: gpu + fan index */
+	int nvml_fan;
+	int ec_is_gpu;   /* FAN_CTL_MSI_EC: which EC table */
+	int curve_applied_pct; /* software-curve loop: last pct written */
 } FanEntry;
 
 typedef struct {
@@ -648,6 +683,7 @@ typedef struct {
 	int total_fans;
 	int has_msi;
 	int cooler_boost_on;
+	int helper_ok;   /* nixly-fand root helper reachable */
 } FanState;
 
 typedef struct TrayMenuEntry {
@@ -713,6 +749,8 @@ struct StatusBar {
 	StatusModule fan;
 	StatusModule bluetooth;
 	StatusModule display;
+	StatusModule power;
+	InfoPopup power_popup;
 };
 
 struct TrayItem {
@@ -2731,6 +2769,13 @@ void display_drag_release(void);
 InfoPopup *display_drag_popup(void);
 int ensure_display_icon_buffer(int target_h);
 void drop_display_icon_buffer(void);
+/* power_ui.c — power icon module + Logout/Lock/Reboot/Shutdown popup */
+void renderpower(StatusModule *module, int bar_height, const char *text);
+void render_power_popup(Monitor *m);
+int power_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
+int ensure_power_icon_buffer(int target_h);
+void drop_power_icon_buffer(void);
+extern char power_icon_path[PATH_MAX];
 void format_speed(double bps, char *out, size_t len);
 int localip(const char *iface, char *out, size_t len);
 const char *wifi_icon_for_quality(double quality_pct);
@@ -2769,15 +2814,51 @@ int fan_scan_state(FanState *fs);
 void fan_refresh_state(FanState *fs);
 void fan_state_set_frac(FanState *fs, int flat, double frac);
 void fan_state_set_auto(FanState *fs, int flat);
+void fan_state_set_curve(FanState *fs, int flat, const FanCurve *c);
 void fan_state_set_boost(FanState *fs, int on);
+void fan_state_curve_tick(FanState *fs);
+void fan_state_apply_saved(FanState *fs);
+int fan_entry_section(const FanDevice *dev, const FanEntry *fe); /* 0 CPU 1 GPU 2 other */
+int fan_shows_pct(const FanEntry *fe); /* rpm field holds percent */
 FanEntry *fan_flat(int idx);
 int fan_primary_value(char *buf, size_t len);
+
+/* fancurve.c — curve eval + fans.conf persistence.  Load/lookup run on
+ * fanwatch's worker thread at startup; store runs on the compositor
+ * thread after UI edits (internal lock). */
+double fan_curve_eval(const FanCurve *c, int temp_c);
+void fan_curve_default(FanCurve *c, int section);
+void fan_conf_key(const FanDevice *dev, const FanEntry *fe,
+		char *buf, size_t len);
+void fanconf_load(void);
+int fanconf_lookup(const char *key, int *mode, int *manual_pct, FanCurve *c);
+void fanconf_store(const char *key, int mode, int manual_pct,
+		const FanCurve *c);
+
+/* fan_helper.c — client for the nixly-fand root helper socket (worker
+ * thread only). */
+int fan_helper_available(void);
+int fan_helper_ec_read(int off);
+int fan_helper_ec_write(int off, int val);
+int fan_helper_pwm(const char *hwmon, int idx, int val); /* val -1 = auto */
+int fan_helper_nv(int gpu, int fan, int pct);            /* pct -1 = auto */
+
+/* fan_ec.c — MSI EC fan tables through the helper (worker thread). */
+int fan_ec_read_curve(int is_gpu, FanCurve *out);
+int fan_ec_write_curve(int is_gpu, const FanCurve *c);
+int fan_ec_write_flat(int is_gpu, int pct);
+
+/* fan_nvml.c — desktop NVIDIA fans via NVML (worker thread). */
+int fan_nvml_scan(FanState *fs);
+void fan_nvml_refresh(FanState *fs);
+int fan_nvml_set(int gpu, int fan, int pct); /* pct -1 = auto */
 
 /* fanwatch.c */
 void fanwatch_init(void);
 void fanwatch_poke_fast(void);
 void fanwatch_set_frac(int flat, double frac);
 void fanwatch_set_auto(int flat);
+void fanwatch_set_curve(int flat, const FanCurve *c);
 void fanwatch_set_boost(int on);
 int fan_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 void renderfan(StatusModule *module, int bar_height, const char *text);
@@ -3078,6 +3159,7 @@ extern double light_manual_value;
 extern int light_ambient_luma;
 void lightsense_init(void);
 void lightsense_sample_now(void);
+void lightsense_power_event(int on_ac);
 void light_mode_set_manual(double value);
 void light_mode_set_auto(void);
 

@@ -27,13 +27,14 @@
 
 #define FW_MAX_PENDING 8
 
-enum { FW_CTL_FRAC, FW_CTL_AUTO, FW_CTL_BOOST };
+enum { FW_CTL_FRAC, FW_CTL_AUTO, FW_CTL_BOOST, FW_CTL_CURVE };
 
 typedef struct {
 	int kind;
 	int flat;
 	double frac;
 	int on;
+	FanCurve curve;
 } FwCtl;
 
 static pthread_t fw_thread;
@@ -55,6 +56,7 @@ fw_worker(void *data)
 	(void)data;
 	pthread_setname_np(pthread_self(), "nixly-fanwatch");
 
+	fanconf_load();
 	if (fan_scan_state(&local) <= 0) {
 		/* No fans: publish the empty state once so the module hides,
 		 * then this thread has nothing left to do. */
@@ -65,6 +67,7 @@ fw_worker(void *data)
 			(void)!write(fw_pipe[1], "f", 1);
 		return NULL;
 	}
+	fan_state_apply_saved(&local);
 
 	for (;;) {
 		FwCtl ctl[FW_MAX_PENDING];
@@ -95,10 +98,15 @@ fw_worker(void *data)
 			case FW_CTL_BOOST:
 				fan_state_set_boost(&local, ctl[i].on);
 				break;
+			case FW_CTL_CURVE:
+				fan_state_set_curve(&local, ctl[i].flat,
+						&ctl[i].curve);
+				break;
 			}
 		}
 
 		fan_refresh_state(&local);
+		fan_state_curve_tick(&local);
 
 		pthread_mutex_lock(&fw_lock);
 		changed = memcmp(&fw_pub, &local, sizeof(local)) != 0;
@@ -165,7 +173,7 @@ fw_queue(FwCtl c)
 void
 fanwatch_set_frac(int flat, double frac)
 {
-	FwCtl c = { FW_CTL_FRAC, flat, frac, 0 };
+	FwCtl c = { FW_CTL_FRAC, flat, frac, 0, {{0},{0},0} };
 
 	fw_queue(c);
 }
@@ -173,7 +181,7 @@ fanwatch_set_frac(int flat, double frac)
 void
 fanwatch_set_auto(int flat)
 {
-	FwCtl c = { FW_CTL_AUTO, flat, 0.0, 0 };
+	FwCtl c = { FW_CTL_AUTO, flat, 0.0, 0, {{0},{0},0} };
 
 	fw_queue(c);
 }
@@ -181,7 +189,15 @@ fanwatch_set_auto(int flat)
 void
 fanwatch_set_boost(int on)
 {
-	FwCtl c = { FW_CTL_BOOST, 0, 0.0, on };
+	FwCtl c = { FW_CTL_BOOST, 0, 0.0, on, {{0},{0},0} };
+
+	fw_queue(c);
+}
+
+void
+fanwatch_set_curve(int flat, const FanCurve *curve)
+{
+	FwCtl c = { FW_CTL_CURVE, flat, 0.0, 0, *curve };
 
 	fw_queue(c);
 }

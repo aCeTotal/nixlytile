@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- plump-line reboot: open circular arrow -->
+  <path d="M 49.3 22 A 20 20 0 1 0 52 32" fill="none"
+        stroke="#E6E6E6" stroke-width="7" stroke-linecap="round"/>
+  <path d="M 51 8 V 23 H 36" fill="none"
+        stroke="#E6E6E6" stroke-width="7" stroke-linecap="round"
+        stroke-linejoin="round"/>
+</svg>

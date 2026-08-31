@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- plump-line shutdown: power glyph, warm red -->
+  <path d="M 20.5 19.6 A 20 20 0 1 0 43.5 19.6" fill="none"
+        stroke="#E0685E" stroke-width="7" stroke-linecap="round"/>
+  <path d="M 32 8 V 30" fill="none"
+        stroke="#E0685E" stroke-width="7" stroke-linecap="round"/>
+</svg>

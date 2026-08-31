@@ -141,3 +141,27 @@ spawn_async_read(const char *cmd, pid_t *out_pid, int *out_fd)
 	fcntl(*out_fd, F_SETFL, fcntl(*out_fd, F_GETFL) | O_NONBLOCK);
 	return 0;
 }
+
+/* Fire-and-forget command via posix_spawnp (vfork-based) — a plain
+ * fork() from the compositor copies the whole page table incl. GPU
+ * mappings and stalls the event loop for tens of ms, felt as a cursor
+ * hitch when a slider drag commits every 60ms.  The child gets its own
+ * session (like the setsid() in the fork pattern it replaces); the
+ * SIGCHLD handler reaps it. */
+int
+spawn_cmd_async(const char *const argv[])
+{
+	extern char **environ;
+	posix_spawnattr_t at;
+	pid_t pid;
+	int r;
+
+	posix_spawnattr_init(&at);
+#ifdef POSIX_SPAWN_SETSID
+	posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSID);
+#endif
+	r = posix_spawnp(&pid, argv[0], NULL, &at, (char *const *)argv,
+			environ);
+	posix_spawnattr_destroy(&at);
+	return r == 0 ? 0 : -1;
+}

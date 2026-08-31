@@ -103,6 +103,22 @@ void card_displays(Card *c, const CardDisp *d, int n, int sel,
 void card_gap(Card *c, int px);
 /* Mini month calendar (Mon-first) highlighting mday. */
 void card_calendar(Card *c, int year, int mon, int mday);
+/* Override the card's minimum content width (default CARD_MIN_W) —
+ * for compact menus that should hug their rows. */
+void card_min_w(Card *c, int w);
+/* Icon + label row with a full-width hover pill (compact menus).
+ * Icon is an svg asset path drawn at text height. */
+void card_icon_text(Card *c, const char *icon_path, const char *label,
+		const float *labelcol, int hit_id, int hot);
+/* Editable temp→speed step curve (fan popup): n points (temp °C, pct),
+ * `sel` highlighted.  One hit rect covering exactly the plot area is
+ * recorded with hit_id; callers map cursor→(temp, pct) linearly with
+ * CARD_CURVE_TMIN/TMAX on x and 100→0 top→bottom on y. */
+#define CARD_CURVE_PTS_MAX 8
+#define CARD_CURVE_TMIN 20
+#define CARD_CURVE_TMAX 100
+void card_curve(Card *c, const uint8_t *temps, const uint8_t *pcts, int n,
+		int sel, const float accent[4], int hit_id);
 
 typedef struct CardResult {
 	struct wlr_buffer *buf;
@@ -146,6 +162,10 @@ void popup_view_show(PopupView *v);
 void popup_view_hide(PopupView *v);
 /* Ease fill i to `frac` of its track width (slider feedback). */
 void popup_view_set_fill_frac(PopupView *v, int i, double frac);
+/* Move fill i to `frac` immediately — pointer drags, where the fill
+ * must track the cursor 1:1 (the eased variant trails ~4 frames behind
+ * and feels rubbery under the finger). */
+void popup_view_drag_fill_frac(PopupView *v, int i, double frac);
 
 /* Measure helpers for callers that need text widths in card fonts. */
 int card_text_width(const char *s);

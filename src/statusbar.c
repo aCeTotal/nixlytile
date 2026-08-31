@@ -3814,10 +3814,11 @@ set_pipewire_mute(int mute)
 
 	snprintf(arg, sizeof(arg), "%d", mute ? 1 : 0);
 
-	if (fork() == 0) {
-		setsid();
-		execlp("wpctl", "wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", arg, (char *)NULL);
-		_exit(127);
+	{
+		const char *const argv[] = { "wpctl", "set-mute",
+			"@DEFAULT_AUDIO_SINK@", arg, NULL };
+
+		spawn_cmd_async(argv);
 	}
 
 	/* Update cached state optimistically */
@@ -3832,10 +3833,11 @@ set_pipewire_mic_mute(int mute)
 
 	snprintf(arg, sizeof(arg), "%d", mute ? 1 : 0);
 
-	if (fork() == 0) {
-		setsid();
-		execlp("wpctl", "wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", arg, (char *)NULL);
-		_exit(127);
+	{
+		const char *const argv[] = { "wpctl", "set-mute",
+			"@DEFAULT_AUDIO_SOURCE@", arg, NULL };
+
+		spawn_cmd_async(argv);
 	}
 
 	/* Update cached state optimistically */
@@ -3856,10 +3858,11 @@ set_pipewire_volume(double percent)
 
 	snprintf(arg, sizeof(arg), "%.2f%%", percent);
 
-	if (fork() == 0) {
-		setsid();
-		execlp("wpctl", "wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", arg, (char *)NULL);
-		_exit(127);
+	{
+		const char *const argv[] = { "wpctl", "set-volume",
+			"@DEFAULT_AUDIO_SINK@", arg, NULL };
+
+		spawn_cmd_async(argv);
 	}
 
 	return 0;
@@ -3877,10 +3880,11 @@ set_pipewire_mic_volume(double percent)
 
 	snprintf(arg, sizeof(arg), "%.2f%%", percent);
 
-	if (fork() == 0) {
-		setsid();
-		execlp("wpctl", "wpctl", "set-volume", "@DEFAULT_AUDIO_SOURCE@", arg, (char *)NULL);
-		_exit(127);
+	{
+		const char *const argv[] = { "wpctl", "set-volume",
+			"@DEFAULT_AUDIO_SOURCE@", arg, NULL };
+
+		spawn_cmd_async(argv);
 	}
 
 	mic_last_percent = percent;
@@ -4008,6 +4012,10 @@ positionstatusmodules(Monitor *m)
 			wlr_scene_node_set_enabled(&m->statusbar.clock.tree->node, 0);
 			m->statusbar.clock.x = 0;
 		}
+		if (m->statusbar.power.tree) {
+			wlr_scene_node_set_enabled(&m->statusbar.power.tree->node, 0);
+			m->statusbar.power.x = 0;
+		}
 		if (m->statusbar.cpu_popup.tree) {
 			wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
 			m->statusbar.cpu_popup.visible = 0;
@@ -4062,6 +4070,9 @@ positionstatusmodules(Monitor *m)
 	if (m->statusbar.clock.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.clock.tree->node,
 				m->statusbar.clock.width > 0);
+	if (m->statusbar.power.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.power.tree->node,
+				m->statusbar.power.width > 0);
 	if (m->statusbar.cpu_popup.tree && m->statusbar.cpu.width > 0) {
 		if (!m->statusbar.cpu_popup.visible)
 			wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
@@ -4107,6 +4118,13 @@ positionstatusmodules(Monitor *m)
 	x = m->statusbar.area.width;
 	spacing = statusbar_module_spacing;
 
+	/* power sits right of the clock — outermost on the right edge */
+	if (m->statusbar.power.width > 0) {
+		x -= m->statusbar.power.width;
+		wlr_scene_node_set_position(&m->statusbar.power.tree->node, x, 0);
+		m->statusbar.power.x = x;
+		x -= spacing;
+	}
 	if (m->statusbar.clock.width > 0) {
 		x -= m->statusbar.clock.width;
 		wlr_scene_node_set_position(&m->statusbar.clock.tree->node, x, 0);
@@ -4468,6 +4486,8 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 			renderbluetooth(&m->statusbar.bluetooth, bar_area.height, "");
 		if (m->statusbar.display.tree)
 			renderdisplays(&m->statusbar.display, bar_area.height, "");
+		if (m->statusbar.power.tree)
+			renderpower(&m->statusbar.power, bar_area.height, "");
 		if (m->statusbar.mic.tree)
 			rendermic(&m->statusbar.mic, bar_area.height, mic_text);
 		if (m->statusbar.ram.tree)
@@ -5682,7 +5702,11 @@ statusbar_popup_at(Monitor *m, double cx, double cy)
 		|| popup_contains(m, sb->display_popup.tree,
 				sb->display_popup.visible,
 				sb->display_popup.width,
-				sb->display_popup.height, cx, cy);
+				sb->display_popup.height, cx, cy)
+		|| popup_contains(m, sb->power_popup.tree,
+				sb->power_popup.visible,
+				sb->power_popup.width,
+				sb->power_popup.height, cx, cy);
 }
 
 int
@@ -5760,6 +5784,9 @@ initstatusbar(Monitor *m)
 	m->statusbar.clock.tree = wlr_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.clock.tree)
 		m->statusbar.clock.bg = wlr_scene_tree_create(m->statusbar.clock.tree);
+	m->statusbar.power.tree = wlr_scene_tree_create(m->statusbar.tree);
+	if (m->statusbar.power.tree)
+		m->statusbar.power.bg = wlr_scene_tree_create(m->statusbar.power.tree);
 	m->statusbar.cpu_popup.tree = wlr_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.cpu_popup.tree) {
 		m->statusbar.cpu_popup.bg = wlr_scene_tree_create(m->statusbar.cpu_popup.tree);
@@ -5799,11 +5826,12 @@ initstatusbar(Monitor *m)
 			wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
 		}
 		{
-			InfoPopup *info[7] = { &m->statusbar.clock_popup,
+			InfoPopup *info[8] = { &m->statusbar.clock_popup,
 				&m->statusbar.volume_popup, &m->statusbar.mic_popup,
 				&m->statusbar.light_popup, &m->statusbar.fan_popup,
-				&m->statusbar.bt_popup, &m->statusbar.display_popup };
-			for (int i = 0; i < 7; i++) {
+				&m->statusbar.bt_popup, &m->statusbar.display_popup,
+				&m->statusbar.power_popup };
+			for (int i = 0; i < 8; i++) {
 				info[i]->tree = wlr_scene_tree_create(m->statusbar.tree);
 				info[i]->visible = 0;
 				info[i]->hover_start_ms = 0;

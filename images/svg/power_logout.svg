@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- plump-line logout: door bracket + arrow out -->
+  <path d="M 28 10 H 16 a 6 6 0 0 0 -6 6 v 32 a 6 6 0 0 0 6 6 h 12"
+        fill="none" stroke="#E6E6E6" stroke-width="7" stroke-linecap="round"
+        stroke-linejoin="round"/>
+  <path d="M 26 32 H 54 M 44 22 L 54 32 L 44 42" fill="none"
+        stroke="#E6E6E6" stroke-width="7" stroke-linecap="round"
+        stroke-linejoin="round"/>
+</svg>

@@ -75,9 +75,11 @@ powersave_battery_event(void)
 	if (on_bat && ps_engaged != 1) {
 		ps_engaged = 1;
 		ps_engage();
+		lightsense_power_event(0);
 	} else if (!on_bat && ps_engaged != 0) {
 		ps_engaged = 0;
 		ps_full_performance();
+		lightsense_power_event(1);
 	}
 }
 

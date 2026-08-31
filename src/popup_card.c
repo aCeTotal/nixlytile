@@ -241,6 +241,8 @@ typedef enum {
 	CROW_DISPLAYS,
 	CROW_GAP,
 	CROW_CAL,
+	CROW_CURVE,
+	CROW_ICONTEXT,
 } CardRowType;
 
 typedef struct {
@@ -257,6 +259,8 @@ typedef struct {
 	int year, mon, mday;
 	CardDisp dsp[CARD_DISP_MAX];
 	int ndsp;
+	uint8_t cv_t[CARD_CURVE_PTS_MAX], cv_p[CARD_CURVE_PTS_MAX];
+	int ncv;
 	/* computed in measure */
 	int y, h;
 } CardRow;
@@ -267,6 +271,7 @@ struct Card {
 	int kv_c1, kv_c2;   /* kv2 column widths */
 	int kv_k1, kv_k2;   /* kv2 max key widths (values hug keys) */
 	int has_kv;
+	int min_w;          /* 0 = CARD_MIN_W */
 };
 
 Card *
@@ -466,6 +471,7 @@ card_buttons(Card *c, const char *labels[], const char *icons[],
 }
 
 #define DISP_STRIP_H 96
+#define CARD_CURVE_H 72   /* curve plot height (labels row below) */
 
 void
 card_displays(Card *c, const CardDisp *d, int n, int sel,
@@ -492,6 +498,49 @@ card_gap(Card *c, int px)
 
 	if (r)
 		r->gap = px;
+}
+
+void
+card_min_w(Card *c, int w)
+{
+	if (c && w > 0)
+		c->min_w = w;
+}
+
+void
+card_icon_text(Card *c, const char *icon_path, const char *label,
+		const float *labelcol, int hit_id, int hot)
+{
+	CardRow *r = row_new(c, CROW_ICONTEXT);
+
+	if (!r)
+		return;
+	setstr(r->a, sizeof(r->a), icon_path);
+	setstr(r->b, sizeof(r->b), label);
+	r->bcol = labelcol ? labelcol : card_col_fg;
+	r->hit_id = hit_id;
+	r->hot = hot;
+}
+
+void
+card_curve(Card *c, const uint8_t *temps, const uint8_t *pcts, int n,
+		int sel, const float accent[4], int hit_id)
+{
+	CardRow *r = row_new(c, CROW_CURVE);
+
+	if (!r)
+		return;
+	if (n > CARD_CURVE_PTS_MAX)
+		n = CARD_CURVE_PTS_MAX;
+	memcpy(r->cv_t, temps, (size_t)n);
+	memcpy(r->cv_p, pcts, (size_t)n);
+	r->ncv = n;
+	r->active = sel;
+	r->hit_id = hit_id;
+	if (accent)
+		memcpy(r->accent, accent, sizeof(r->accent));
+	else
+		memcpy(r->accent, card_col_blue, sizeof(r->accent));
 }
 
 void
@@ -536,7 +585,7 @@ card_measure(Card *c, int *out_w, int *out_h)
 	int base_h = statusfont.height;
 	int big_h = card_font_big->height;
 	int small_h = card_font_small->height;
-	int w = CARD_MIN_W, y = CARD_PAD;
+	int w = c->min_w > 0 ? c->min_w : CARD_MIN_W, y = CARD_PAD;
 
 	/* kv2 column widths first (shared alignment) */
 	c->kv_c1 = c->kv_c2 = 0;
@@ -627,6 +676,14 @@ card_measure(Card *c, int *out_w, int *out_h)
 			break;
 		case CROW_METER:
 			r->h = CARD_METER_H;
+			break;
+		case CROW_CURVE:
+			r->h = CARD_CURVE_H + small_h + 12;
+			break;
+		case CROW_ICONTEXT:
+			rw = base_h + 10 +
+				text_width_f(statusfont.font, r->b, 0);
+			r->h = base_h + 14;
 			break;
 		case CROW_GAP:
 			r->h = r->gap;
@@ -992,6 +1049,101 @@ card_finish(Card *c, CardResult *out)
 			}
 			break;
 		}
+		case CROW_ICONTEXT: {
+			int isz = base_h;
+
+			if (r->hot) {
+				rounded(cr, CARD_PAD - 6, y + 1,
+						inner_w + 12, r->h - 2, 7);
+				cairo_set_source_rgba(cr, 1, 1, 1, 0.10);
+				cairo_fill(cr);
+			}
+			if (r->a[0])
+				draw_icon(cr, r->a, CARD_PAD,
+						y + (r->h - isz) / 2, isz);
+			if (r->hit_id >= 0)
+				add_hit(out, CARD_PAD - 6, y, inner_w + 12,
+						r->h, r->hit_id);
+			break;
+		}
+		case CROW_CURVE: {
+			const float *a = r->accent;
+			double span = CARD_CURVE_TMAX - CARD_CURVE_TMIN;
+			double px[CARD_CURVE_PTS_MAX], py[CARD_CURVE_PTS_MAX];
+
+			/* plot backdrop + quarter gridlines */
+			rounded(cr, CARD_PAD, y, inner_w, CARD_CURVE_H, 6);
+			cairo_set_source_rgba(cr, 1, 1, 1, 0.05);
+			cairo_fill(cr);
+			for (int g = 1; g <= 3; g++) {
+				cairo_rectangle(cr, CARD_PAD,
+						y + g * CARD_CURVE_H / 4.0,
+						inner_w, 1);
+				cairo_set_source_rgba(cr, 1, 1, 1, 0.06);
+				cairo_fill(cr);
+			}
+
+			for (int p = 0; p < r->ncv; p++) {
+				double t = r->cv_t[p];
+
+				if (t < CARD_CURVE_TMIN)
+					t = CARD_CURVE_TMIN;
+				if (t > CARD_CURVE_TMAX)
+					t = CARD_CURVE_TMAX;
+				px[p] = CARD_PAD + (t - CARD_CURVE_TMIN) /
+						span * inner_w;
+				py[p] = y + CARD_CURVE_H -
+						r->cv_p[p] / 100.0 * CARD_CURVE_H;
+			}
+			if (r->ncv > 0) {
+				/* step outline: pct[i] holds from temp[i] up
+				 * to the next threshold; pct[0] floors the
+				 * left edge */
+				cairo_save(cr);
+				rounded(cr, CARD_PAD, y, inner_w, CARD_CURVE_H, 6);
+				cairo_clip(cr);
+				cairo_move_to(cr, CARD_PAD, py[0]);
+				cairo_line_to(cr, px[0], py[0]);
+				for (int p = 1; p < r->ncv; p++) {
+					cairo_line_to(cr, px[p], py[p - 1]);
+					cairo_line_to(cr, px[p], py[p]);
+				}
+				cairo_line_to(cr, CARD_PAD + inner_w,
+						py[r->ncv - 1]);
+				cairo_set_source_rgba(cr, a[0], a[1], a[2],
+						a[3] * 0.9);
+				cairo_set_line_width(cr, 2.0);
+				cairo_stroke_preserve(cr);
+				/* soft fill down to the floor */
+				cairo_line_to(cr, CARD_PAD + inner_w,
+						y + CARD_CURVE_H);
+				cairo_line_to(cr, CARD_PAD, y + CARD_CURVE_H);
+				cairo_close_path(cr);
+				cairo_set_source_rgba(cr, a[0], a[1], a[2],
+						a[3] * 0.12);
+				cairo_fill(cr);
+				cairo_restore(cr);
+			}
+			for (int p = 0; p < r->ncv; p++) {
+				if (p == r->active) {
+					cairo_arc(cr, px[p], py[p], 5.5,
+							0, 2 * CARD_PI);
+					cairo_set_source_rgba(cr, 1, 1, 1, 0.9);
+					cairo_set_line_width(cr, 1.5);
+					cairo_stroke(cr);
+				}
+				cairo_arc(cr, px[p], py[p],
+						p == r->active ? 4.0 : 3.2,
+						0, 2 * CARD_PI);
+				cairo_set_source_rgba(cr, a[0], a[1], a[2],
+						a[3]);
+				cairo_fill(cr);
+			}
+			if (r->hit_id >= 0)
+				add_hit(out, CARD_PAD, y, inner_w,
+						CARD_CURVE_H, r->hit_id);
+			break;
+		}
 		case CROW_DISPLAYS: {
 			int bx[CARD_DISP_MAX], by[CARD_DISP_MAX];
 			int bw[CARD_DISP_MAX], bh[CARD_DISP_MAX];
@@ -1201,6 +1353,54 @@ card_finish(Card *c, CardResult *out)
 						bx + (bw - tw) / 2, bl,
 						b == r->active ? card_col_fg :
 						card_col_dim, 0);
+			}
+			break;
+		}
+		case CROW_ICONTEXT:
+			draw_text_f(pix, statusfont.font, r->b,
+					CARD_PAD + base_h + 10,
+					y + (r->h - base_h) / 2 + base_asc,
+					r->bcol, 0);
+			break;
+		case CROW_CURVE: {
+			double span = CARD_CURVE_TMAX - CARD_CURVE_TMIN;
+			int ly = y + CARD_CURVE_H + 6 + small_asc;
+
+			for (int p = 0; p < r->ncv; p++) {
+				char t[8];
+				double t_cl = r->cv_t[p];
+				int tw, tx;
+
+				if (t_cl < CARD_CURVE_TMIN)
+					t_cl = CARD_CURVE_TMIN;
+				if (t_cl > CARD_CURVE_TMAX)
+					t_cl = CARD_CURVE_TMAX;
+				snprintf(t, sizeof(t), "%d", r->cv_t[p]);
+				tw = text_width_f(card_font_small, t,
+						SMALL_LSPC);
+				tx = CARD_PAD + (int)((t_cl - CARD_CURVE_TMIN) /
+						span * inner_w) - tw / 2;
+				if (tx < CARD_PAD)
+					tx = CARD_PAD;
+				if (tx + tw > w - CARD_PAD)
+					tx = w - CARD_PAD - tw;
+				draw_text_f(pix, card_font_small, t, tx, ly,
+						p == r->active ? card_col_fg :
+						card_col_faint, SMALL_LSPC);
+			}
+			if (r->active >= 0 && r->active < r->ncv) {
+				char lab[24];
+				int tw;
+
+				snprintf(lab, sizeof(lab), "%d\302\260C \302\267 %d%%",
+						r->cv_t[r->active],
+						r->cv_p[r->active]);
+				tw = text_width_f(card_font_small, lab,
+						SMALL_LSPC);
+				draw_text_f(pix, card_font_small, lab,
+						w - CARD_PAD - tw - 8,
+						y + 6 + small_asc,
+						card_col_fg, SMALL_LSPC);
 			}
 			break;
 		}
@@ -1870,22 +2070,41 @@ popup_view_apply(PopupView *v, struct wlr_scene_tree *tree, CardResult *res)
 		view_anim_frame(v, monotonic_msec());
 }
 
-void
-popup_view_set_fill_frac(PopupView *v, int i, double frac)
+static int
+fill_target_w(PopupView *v, int i, double frac)
 {
 	int target;
 
-	if (!v || i < 0 || i >= v->nfills || !v->fills[i])
-		return;
 	if (frac < 0.0)
 		frac = 0.0;
 	if (frac > 1.0)
 		frac = 1.0;
 	target = (int)lround(v->fill_full_w[i] * frac);
-	if (target < 1)
-		target = 1;
-	v->fill_w[i] = target;
+	return target < 1 ? 1 : target;
+}
+
+void
+popup_view_set_fill_frac(PopupView *v, int i, double frac)
+{
+	if (!v || i < 0 || i >= v->nfills || !v->fills[i])
+		return;
+	v->fill_w[i] = fill_target_w(v, i, frac);
 	anim_register(v);
+}
+
+void
+popup_view_drag_fill_frac(PopupView *v, int i, double frac)
+{
+	int target;
+
+	if (!v || i < 0 || i >= v->nfills || !v->fills[i])
+		return;
+	target = fill_target_w(v, i, frac);
+	v->fill_w[i] = target;
+	v->fill_disp_w[i] = target;
+	wlr_scene_buffer_set_source_box(v->fills[i], &(struct wlr_fbox){
+		.x = 0, .y = 0, .width = target, .height = v->fill_h[i] });
+	wlr_scene_buffer_set_dest_size(v->fills[i], target, v->fill_h[i]);
 }
 
 void

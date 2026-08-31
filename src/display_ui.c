@@ -479,7 +479,7 @@ display_drag_motion(Monitor *m, double cx)
 			frac = 1.0;
 		if (frac != ddrag.frac) {
 			ddrag.frac = frac;
-			popup_view_set_fill_frac(&p->view, 0, frac);
+			popup_view_drag_fill_frac(&p->view, 0, frac);
 		}
 		return;
 	}
@@ -605,7 +605,7 @@ display_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 			ddrag.scale = 1;
 			ddrag.mon = m;
 			ddrag.frac = frac;
-			popup_view_set_fill_frac(&p->view, 0, frac);
+			popup_view_drag_fill_frac(&p->view, 0, frac);
 		} else if (id >= DHIT_RATE && id < DHIT_RATE + di_nrates) {
 			di[dsel].hz = di_rates[id - DHIT_RATE];
 			monconf_write();

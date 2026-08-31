@@ -31,8 +31,9 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            input_conf.o \
            apptoggle.o mic_watch.o audio_watch.o audio_devices.o audio_meter.o gaming_conf.o gshortcuts.o \
            statusbar.o tray.o statusbar_support.o terminfo.o launchfx.o diag.o fetch_async.o charge_limit.o fancontrol.o fanwatch.o \
+           fancurve.o fan_helper.o fan_ec.o fan_nvml.o \
            popup_card.o popup_extra.o \
-           netmon.o wifi_ctrl.o wifi_nm.o btmon.o vpnctl.o text_entry.o net_ui.o bt_ui.o display_ui.o \
+           netmon.o wifi_ctrl.o wifi_nm.o btmon.o vpnctl.o text_entry.o net_ui.o bt_ui.o display_ui.o power_ui.o \
            notify.o notifyd.o lightsense.o presence.o powersave.o battwatch.o camwatch.o cpuclock.o instruments.o converge.o spawn.o osd.o
 
 PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstable-v1-protocol.h \
@@ -137,6 +138,18 @@ fancontrol.o: $(SRC)/fancontrol.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 fanwatch.o: $(SRC)/fanwatch.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+fancurve.o: $(SRC)/fancurve.c $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+fan_helper.o: $(SRC)/fan_helper.c $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+fan_ec.o: $(SRC)/fan_ec.c $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+fan_nvml.o: $(SRC)/fan_nvml.c $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+
+# Root fan helper — standalone binary, no compositor deps
+nixly-fand: $(SRC)/nixly_fand.c
+	$(CC) -O2 -Wall -Wextra -o $@ $(SRC)/nixly_fand.c -ldl
 
 netmon.o: $(SRC)/netmon.c $(SRC)/netsys.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
@@ -163,6 +176,9 @@ bt_ui.o: $(SRC)/bt_ui.c $(SRC)/nixlytile.h $(SRC)/netsys.h $(SRC)/popup_card.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 
 display_ui.o: $(SRC)/display_ui.c $(SRC)/nixlytile.h $(SRC)/popup_card.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+
+power_ui.o: $(SRC)/power_ui.c $(SRC)/nixlytile.h $(SRC)/popup_card.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 audio_meter.o: $(SRC)/audio_meter.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
@@ -228,7 +244,7 @@ $(SRC)/dwl-ipc-unstable-v2-protocol.c: $(SRC)/dwl-ipc-unstable-v2-protocol.h
 $(SRC)/config.h:
 	cp $(SRC)/config.def.h $@
 clean:
-	rm -f nixlytile *.o $(SRC)/*-protocol.h $(SRC)/*-protocol.c
+	rm -f nixlytile nixly-fand *.o $(SRC)/*-protocol.h $(SRC)/*-protocol.c
 
 dist: clean
 	mkdir -p nixlytile-$(VERSION)
@@ -238,11 +254,13 @@ dist: clean
 	tar -caf nixlytile-$(VERSION).tar.gz nixlytile-$(VERSION)
 	rm -rf nixlytile-$(VERSION)
 
-install: nixlytile
+install: nixlytile nixly-fand
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
 	rm -f $(DESTDIR)$(PREFIX)/bin/nixlytile
 	cp -f nixlytile $(DESTDIR)$(PREFIX)/bin
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/nixlytile
+	cp -f nixly-fand $(DESTDIR)$(PREFIX)/bin
+	chmod 755 $(DESTDIR)$(PREFIX)/bin/nixly-fand
 	mkdir -p $(DESTDIR)$(DATADIR)/nixlytile/images
 	cp -r images/svg $(DESTDIR)$(DATADIR)/nixlytile/images/
 	mkdir -p $(DESTDIR)$(MANDIR)/man1
