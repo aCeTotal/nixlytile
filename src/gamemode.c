@@ -210,11 +210,56 @@ game_priority_all_threads(pid_t pid, int nice_val, int ioprio)
 	closedir(d);
 }
 
+#ifndef SCHED_BATCH
+#define SCHED_BATCH 3
+#endif
+#ifndef SCHED_IDLE
+#define SCHED_IDLE 5
+#endif
+
+/* ananicy-style daemons classify the Steam launcher tree as background
+ * (sched idle) and every game forked from it inherits the class; their
+ * name-based reclassification misses UE titles, which rename comm at
+ * startup (Squad → "GameThread").  nice is meaningless inside
+ * SCHED_IDLE, so lift the whole thread group back to SCHED_OTHER before
+ * boosting.  IDLE→OTHER needs no privilege for own-uid tasks. */
+static void
+game_policy_repair(pid_t pid)
+{
+	char task_dir[64];
+	DIR *d;
+	struct dirent *ent;
+	struct sched_param sp = {0};
+	int pol, fixed = 0;
+
+	snprintf(task_dir, sizeof(task_dir), "/proc/%d/task", pid);
+	d = opendir(task_dir);
+	if (!d)
+		return;
+	while ((ent = readdir(d))) {
+		pid_t tid;
+		if (ent->d_name[0] < '0' || ent->d_name[0] > '9')
+			continue;
+		tid = (pid_t)atoi(ent->d_name);
+		pol = sched_getscheduler(tid);
+		if ((pol == SCHED_IDLE || pol == SCHED_BATCH) &&
+		    sched_setscheduler(tid, SCHED_OTHER, &sp) == 0)
+			fixed++;
+	}
+	closedir(d);
+	if (fixed)
+		wlr_log(WLR_INFO,
+			"Game priority: lifted %d SCHED_IDLE/BATCH tasks to SCHED_OTHER for PID %d",
+			fixed, pid);
+}
+
 void
 apply_game_priority(pid_t pid)
 {
 	if (pid <= 1)
 		return;
+
+	game_policy_repair(pid);
 
 	/*
 	 * Set nice value to -10 (requires CAP_SYS_NICE or root).

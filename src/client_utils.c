@@ -116,6 +116,32 @@ get_fullscreen_client(void)
 	return NULL;
 }
 
+/* A visible fullscreen client that pushed a new buffer within the last few
+ * seconds — playing video (mpv, vlc, youtube) or a rendering game.  Frame
+ * times come from track_client_frame in commitnotify; a paused player stops
+ * committing and drops out after the window.  Gates the idle/lockscreen
+ * paths, which cannot rely on every player taking a protocol inhibitor. */
+int
+fullscreen_video_playing(void)
+{
+	Client *c;
+	uint64_t now = monotonic_msec();
+
+	wl_list_for_each(c, &clients, link) {
+		int idx;
+		if (!c->isfullscreen || !client_surface(c)->mapped
+				|| !VISIBLEON(c, c->mon)
+				|| (c->fs_ws && c->fs_ws != c->mon->active_ws))
+			continue;
+		if (c->frame_time_count == 0)
+			continue;
+		idx = (c->frame_time_idx - 1 + 32) % 32;
+		if (now - c->frame_times[idx] < 3000)
+			return 1;
+	}
+	return 0;
+}
+
 /* The fullscreen client currently visible on monitor m: mapped, on m, and
  * — if bound to a workspace — on m's active workspace.  NULL if none. */
 Client *

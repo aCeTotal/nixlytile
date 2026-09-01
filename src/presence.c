@@ -243,7 +243,8 @@ pr_sample(void *data)
 			MAX(last_pointer_motion_ms, last_key_activity_ms));
 	if (!pr_saving && idle_ref &&
 			now - idle_ref >= PR_ABSENT_AFTER_MS &&
-			!pr_idle_inhibited() && !game_mode_active)
+			!pr_idle_inhibited() && !game_mode_active &&
+			!fullscreen_video_playing())
 		pr_enter_save();
 
 	/* Recent input proves presence on its own: leave the camera (and

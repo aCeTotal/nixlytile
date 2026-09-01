@@ -16,6 +16,14 @@ checkidleinhibitor(struct wlr_surface *exclude)
 		}
 	}
 
+	/* A running game or playing fullscreen video must never idle into
+	 * the lockscreen (nixly-idled locks via ext-idle-notify), and games
+	 * and some players never take a protocol inhibitor.  Re-evaluated
+	 * every second from the idle-gate timer, since neither condition
+	 * emits an event when it ends. */
+	if (!inhibited && (game_mode_active || fullscreen_video_playing()))
+		inhibited = 1;
+
 	wlr_idle_notifier_v1_set_inhibited(idle_notifier, inhibited);
 }
 

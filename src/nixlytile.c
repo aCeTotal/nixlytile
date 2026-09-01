@@ -2651,6 +2651,22 @@ close_logging(void)
  * so a frozen program can never wedge its tile or the session. */
 static struct wl_event_source *client_ping_timer;
 
+/* ── Idle-gate re-evaluation ─────────────────────────────────────────
+ * checkidleinhibitor also inhibits on game mode / playing fullscreen
+ * video, but neither condition raises an event when it changes — poll
+ * once a second so ext-idle-notify clients (nixly-idled) see the
+ * transition. */
+static struct wl_event_source *idle_gate_timer;
+
+static int
+idle_gate_tick(void *data)
+{
+	(void)data;
+	checkidleinhibitor(NULL);
+	wl_event_source_timer_update(idle_gate_timer, 1000);
+	return 0;
+}
+
 static int
 client_ping_tick(void *data)
 {
@@ -2730,6 +2746,9 @@ setup(void)
 	client_ping_timer = wl_event_loop_add_timer(event_loop, client_ping_tick, NULL);
 	if (client_ping_timer)
 		wl_event_source_timer_update(client_ping_timer, 3000);
+	idle_gate_timer = wl_event_loop_add_timer(event_loop, idle_gate_tick, NULL);
+	if (idle_gate_timer)
+		wl_event_source_timer_update(idle_gate_timer, 1000);
 	tray_init();
 	notifyd_init();
 	netmon_init();

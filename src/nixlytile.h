@@ -2439,6 +2439,7 @@ void track_client_frame(Client *c);
 float detect_video_framerate(Client *c);
 int any_client_fullscreen(void);
 Client *get_fullscreen_client(void);
+int fullscreen_video_playing(void);
 Client *fullscreen_visible_on(Monitor *m);
 int client_is_fs_companion(Client *c, Client *fsc);
 int is_process_running(const char *name);
