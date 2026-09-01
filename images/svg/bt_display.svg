@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- frame -->
+  <rect x="4" y="8" width="54" height="36" rx="3" fill="#3B82F6"></rect>
+  <rect x="56" y="8" width="2" height="36" rx="1" fill="#1E40AF"></rect>
+  <!-- screen -->
+  <rect x="9" y="13" width="44" height="26" rx="2" fill="#1A1A1A"></rect>
+  <!-- neck -->
+  <rect x="28" y="44" width="8" height="6" fill="#3B82F6"></rect>
+  <!-- foot -->
+  <rect x="18" y="50" width="28" height="6" rx="2" fill="#3B82F6"></rect>
+  <rect x="44" y="50" width="2" height="6" rx="1" fill="#1E40AF"></rect>
+</svg>

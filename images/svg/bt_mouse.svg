@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- body -->
+  <rect x="21" y="10" width="22" height="44" rx="11" fill="#3B82F6"></rect>
+  <rect x="41" y="16" width="2" height="32" rx="1" fill="#1E40AF"></rect>
+  <!-- button split -->
+  <rect x="21" y="26" width="22" height="2" fill="#1E40AF"></rect>
+  <!-- scroll wheel -->
+  <rect x="30" y="16" width="4" height="8" rx="2" fill="#1A1A1A"></rect>
+</svg>

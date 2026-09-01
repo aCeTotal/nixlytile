@@ -102,10 +102,22 @@ fan_nvml_scan(FanState *fs)
 		for (unsigned f = 0; f < nfans; f++) {
 			FanEntry *fe = &dev->fans[dev->fan_count];
 
+			const char *ln = name;
+
 			memset(fe, 0, sizeof(*fe));
-			snprintf(fe->label, sizeof(fe->label),
-					nfans > 1 ? "GPU fan %u" : "GPU fan",
-					f + 1);
+			/* card name on the row: "RTX 4090" not "GPU fan" */
+			if (strncmp(ln, "NVIDIA ", 7) == 0)
+				ln += 7;
+			if (strncmp(ln, "GeForce ", 8) == 0)
+				ln += 8;
+			if (!ln[0])
+				ln = "GPU";
+			if (nfans > 1)
+				snprintf(fe->label, sizeof(fe->label),
+						"%s fan %u", ln, f + 1);
+			else
+				snprintf(fe->label, sizeof(fe->label),
+						"%s", ln);
 			fe->ctl = FAN_CTL_NVML;
 			fe->nvml_gpu = (int)g;
 			fe->nvml_fan = (int)f;

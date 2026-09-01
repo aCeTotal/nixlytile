@@ -1278,8 +1278,8 @@ apply_startup_defaults(void)
 	static int audio_applied = 0;
 	static int audio_tries = 0;
 	const double light_default = 40.0;
-	const double speaker_default = 70.0;
-	const double mic_default = 80.0;
+	const double speaker_default = 80.0;
+	const double mic_default = 50.0;
 
 	if (light_applied && audio_applied)
 		return;

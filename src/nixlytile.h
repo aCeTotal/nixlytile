@@ -2819,6 +2819,7 @@ void fan_state_set_boost(FanState *fs, int on);
 void fan_state_curve_tick(FanState *fs);
 void fan_state_apply_saved(FanState *fs);
 int fan_entry_section(const FanDevice *dev, const FanEntry *fe); /* 0 CPU 1 GPU 2 other */
+const char *fan_gpu_name(void); /* dGPU marketing name, NULL unknown */
 int fan_shows_pct(const FanEntry *fe); /* rpm field holds percent */
 FanEntry *fan_flat(int idx);
 int fan_primary_value(char *buf, size_t len);

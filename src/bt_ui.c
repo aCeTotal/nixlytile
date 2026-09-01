@@ -3,9 +3,11 @@
  * battery.  Left-click a device = pair or connect/disconnect;
  * right-click = forget.
  */
+#include <ctype.h>
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "nixlytile.h"
 #include "netsys.h"
@@ -27,6 +29,63 @@ void
 btsys_changed(void)
 {
 	trigger_status_task_now(refreshstatusbluetooth);
+}
+
+/* Device-type icon: bluez Icon hint first, name keywords as fallback. */
+static const char *
+bt_dev_svg(const BtDev *d)
+{
+	char low[64];
+	int i;
+
+	for (i = 0; d->name[i] && i < (int)sizeof(low) - 1; i++)
+		low[i] = (char)tolower((unsigned char)d->name[i]);
+	low[i] = '\0';
+	/* TVs advertise as plain audio sinks — name beats icon there */
+	if (strstr(low, "[tv]") || strstr(low, "bravia"))
+		return "images/svg/bt_display.svg";
+	if (strstr(d->icon, "gaming"))
+		return "images/svg/bt_controller.svg";
+	if (strstr(d->icon, "headset") || strstr(d->icon, "headphone"))
+		return "images/svg/bt_headset.svg";
+	if (strstr(d->icon, "keyboard"))
+		return "images/svg/bt_keyboard.svg";
+	if (strstr(d->icon, "mouse") || strstr(d->icon, "tablet"))
+		return "images/svg/bt_mouse.svg";
+	if (strstr(d->icon, "display") || strstr(d->icon, "video"))
+		return "images/svg/bt_display.svg";
+	if (strncmp(d->icon, "phone", 5) == 0)
+		return "images/svg/bt_phone.svg";
+	if (strstr(d->icon, "computer"))
+		return "images/svg/bt_computer.svg";
+	if (strstr(d->icon, "watch"))
+		return "images/svg/bt_watch.svg";
+	if (strstr(d->icon, "audio-card") || strstr(d->icon, "multimedia"))
+		return "images/svg/bt_speaker.svg";
+
+	for (i = 0; d->name[i] && i < (int)sizeof(low) - 1; i++)
+		low[i] = (char)tolower((unsigned char)d->name[i]);
+	low[i] = '\0';
+	if (strstr(low, "controller") || strstr(low, "gamepad") ||
+			strstr(low, "dualsense") || strstr(low, "dualshock") ||
+			strstr(low, "xbox") || strstr(low, "joy-con"))
+		return "images/svg/bt_controller.svg";
+	if (strstr(low, "headset") || strstr(low, "headphone") ||
+			strstr(low, "buds") || strstr(low, "pods") ||
+			strstr(low, "arctis"))
+		return "images/svg/bt_headset.svg";
+	if (strstr(low, "keyboard"))
+		return "images/svg/bt_keyboard.svg";
+	if (strstr(low, "mouse"))
+		return "images/svg/bt_mouse.svg";
+	if (strstr(low, "speaker") || strstr(low, "soundbar"))
+		return "images/svg/bt_speaker.svg";
+	if (strstr(low, " tv") || strncmp(low, "tv ", 3) == 0 ||
+			strstr(low, "bravia") || strstr(low, "shield"))
+		return "images/svg/bt_display.svg";
+	if (strstr(low, "watch"))
+		return "images/svg/bt_watch.svg";
+	return "images/svg/bluetooth.svg";
 }
 
 void
@@ -149,40 +208,84 @@ render_bt_popup(Monitor *m)
 				"MAC", a.addr, NULL);
 
 	if (a.powered) {
-		card_section(card, "DEVICES · RIGHT-CLICK = FORGET");
-		card_text_btn(card, "Discovery",
-				a.discovering ? "Scanning…" : NULL,
-				card_col_dim,
-				a.discovering ? "Stop" : "Scan",
-				BT_HIT_SCAN, hot == BT_HIT_SCAN);
-		for (i = 0; i < bt_ui_ndevs; i++) {
-			BtDev *d = &bt_ui_devs[i];
-			const char *btn;
-			size_t pos;
+		int nmine = 0, nnear = 0, pass;
 
-			if (!d->name[0] && !d->paired)
-				continue;   /* nameless broadcast noise */
-			pos = snprintf(v1, sizeof(v1), "%s",
-					d->name[0] ? d->name : d->addr);
-			if (d->battery >= 0 && pos < sizeof(v1) - 8)
-				snprintf(v1 + pos, sizeof(v1) - pos,
-						" · %d%%", d->battery);
-			if (d->connected)
-				snprintf(v2, sizeof(v2), "Connected");
-			else if (d->paired)
-				snprintf(v2, sizeof(v2), "Paired");
-			else if (d->rssi)
-				snprintf(v2, sizeof(v2), "%d dBm", d->rssi);
-			else
-				v2[0] = '\0';
-			btn = d->connected ? "Disc" :
-				(d->paired ? "Conn" : "Pair");
-			card_text_btn(card, v1, v2[0] ? v2 : NULL,
-					d->connected ? card_col_green :
-					card_col_dim,
-					btn, BT_HIT_DEV + i,
-					hot == BT_HIT_DEV + i);
+		for (i = 0; i < bt_ui_ndevs; i++) {
+			if (bt_ui_devs[i].paired || bt_ui_devs[i].connected)
+				nmine++;
+			else if (bt_ui_devs[i].name[0])
+				nnear++;
 		}
+
+		/* pass 0: my (paired/connected) devices with live link
+		 * info; pass 1: nearby scan results */
+		for (pass = 0; pass < 2; pass++) {
+			if (pass == 0 && nmine)
+				card_section(card,
+						"MY DEVICES · RIGHT-CLICK = FORGET");
+			if (pass == 1) {
+				card_section(card, "NEARBY");
+				card_text_btn(card, "Discovery",
+						a.discovering ?
+						"Scanning…" : NULL,
+						card_col_dim,
+						a.discovering ? "Stop" : "Scan",
+						BT_HIT_SCAN,
+						hot == BT_HIT_SCAN);
+			}
+			for (i = 0; i < bt_ui_ndevs; i++) {
+				BtDev *d = &bt_ui_devs[i];
+				const char *btn;
+				const float *col = card_col_dim;
+				int mine = d->paired || d->connected;
+
+				if ((pass == 0) != mine)
+					continue;
+				if (!d->name[0] && !mine)
+					continue;   /* nameless noise */
+				snprintf(v1, sizeof(v1), "%s",
+						d->name[0] ? d->name : d->addr);
+				if (d->connected) {
+					size_t pos = 0;
+
+					v2[0] = '\0';
+					if (d->rssi)
+						pos = snprintf(v2, sizeof(v2),
+								"%d dBm",
+								d->rssi);
+					if (d->battery >= 0)
+						snprintf(v2 + pos,
+								sizeof(v2) - pos,
+								"%s%d%%",
+								pos ? " · " : "",
+								d->battery);
+					if (!v2[0])
+						snprintf(v2, sizeof(v2),
+								"Connected");
+					col = card_col_green;
+				} else if (d->paired) {
+					snprintf(v2, sizeof(v2), "%s",
+							d->want_conn ?
+							"Reconnecting…" :
+							"Paired");
+				} else if (d->rssi) {
+					snprintf(v2, sizeof(v2), "%d dBm",
+							d->rssi);
+				} else {
+					v2[0] = '\0';
+				}
+				btn = d->connected ? "Disc" :
+					(d->paired ? "Conn" : "Pair");
+				card_icon_text_btn(card, bt_dev_svg(d), v1,
+						v2[0] ? v2 : NULL, col,
+						btn, BT_HIT_DEV + i,
+						hot == BT_HIT_DEV + i);
+			}
+			if (pass == 0 && nmine && nnear)
+				card_gap(card, 2);
+		}
+		if (nconn)
+			bt_rssi_ping();
 	}
 
 	if (card_finish(card, &res) != 0)
@@ -197,10 +300,13 @@ render_bt_popup(Monitor *m)
 void
 refreshstatusbluetooth(void)
 {
+	static uint64_t last_visible_ms;
 	Monitor *m;
 	BtAdapter a;
 	BtDev devs[BT_DEV_MAX];
-	int barh, nconn = 0, i, n;
+	struct timespec ts;
+	uint64_t now;
+	int barh, nconn = 0, any_vis = 0, i, n;
 
 	if (btmon_adapter(&a)) {
 		n = btmon_devices(devs, BT_DEV_MAX);
@@ -208,6 +314,17 @@ refreshstatusbluetooth(void)
 			if (devs[i].connected)
 				nconn++;
 	}
+	wl_list_for_each(m, &mons, link)
+		any_vis |= m->statusbar.bt_popup.visible;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	now = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+	if (any_vis)
+		last_visible_ms = now;
+	else if (a.discovering && last_visible_ms &&
+			now - last_visible_ms > 3000)
+		/* nobody is watching the list: stop the scan — inquiry
+		 * steals radio slots from live A2DP links (crackle) */
+		btmon_set_discovering(0);
 	/* change-key: presence, power, connected count */
 	snprintf(bt_text, sizeof(bt_text), "%d|%d|%d",
 			btmon_adapter(&a), a.powered, nconn);

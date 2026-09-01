@@ -15,10 +15,8 @@
  * release is tracked by keycode/button, so letting go of the modifier
  * first cannot leave the mic open.
  *
- * The mic is also force-muted at startup (with retries, since PipeWire
- * usually comes up after the compositor).  An inotify watch on the
- * ~/.local/nixlyos directory reloads the bind whenever nixlycc rewrites
- * the file.
+ * An inotify watch on the ~/.local/nixlyos directory reloads the bind
+ * whenever nixlycc rewrites the file.
  */
 
 #include "nixlytile.h"
@@ -50,12 +48,6 @@ static char gamingconf_dir[PATH_MAX];
 static char gamingconf_path[PATH_MAX];
 static int gamingconf_fd = -1;
 static struct wl_event_source *gamingconf_source;
-
-/* PipeWire comes up after nixlytile; retry the startup mute until the
- * grace period is over. */
-static struct wl_event_source *startmute_timer;
-static int startmute_tries;
-static const int startmute_delays_ms[] = { 2000, 4000, 8000 };
 
 static void
 gamingconf_resolve_paths(void)
@@ -224,21 +216,6 @@ ptt_handle_button(uint32_t button, int pressed)
 }
 
 static int
-startmute_cb(void *data)
-{
-	(void)data;
-
-	set_pipewire_mic_mute(1);
-	set_status_task_due(refreshstatusmic, monotonic_msec() + 500);
-
-	if (startmute_tries < (int)(sizeof(startmute_delays_ms)
-			/ sizeof(startmute_delays_ms[0])))
-		wl_event_source_timer_update(startmute_timer,
-			startmute_delays_ms[startmute_tries++]);
-	return 0;
-}
-
-static int
 gamingconf_readable(int fd, uint32_t mask, void *data)
 {
 	char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
@@ -270,14 +247,6 @@ gaming_conf_setup(void)
 	gamingconf_resolve_paths();
 	gaming_conf_load();
 
-	/* The mic always starts muted; PipeWire may not be up yet, so the
-	 * timer retries a few times. */
-	set_pipewire_mic_mute(1);
-	startmute_timer = wl_event_loop_add_timer(event_loop, startmute_cb, NULL);
-	if (startmute_timer)
-		wl_event_source_timer_update(startmute_timer,
-			startmute_delays_ms[startmute_tries++]);
-
 	mkdir(gamingconf_dir, 0755);
 
 	gamingconf_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
@@ -305,10 +274,6 @@ gaming_conf_setup(void)
 void
 gaming_conf_cleanup(void)
 {
-	if (startmute_timer) {
-		wl_event_source_remove(startmute_timer);
-		startmute_timer = NULL;
-	}
 	if (gamingconf_source) {
 		wl_event_source_remove(gamingconf_source);
 		gamingconf_source = NULL;

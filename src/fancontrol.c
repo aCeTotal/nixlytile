@@ -14,6 +14,7 @@
 #include "nixlytile.h"
 
 #include <dirent.h>
+#include <glob.h>
 
 FanState fan_pub;
 
@@ -120,6 +121,45 @@ int
 fan_shows_pct(const FanEntry *fe)
 {
 	return fe->msi_sysfs || fe->ctl == FAN_CTL_NVML;
+}
+
+/* Marketing name of the discrete GPU for fan labels ("RTX 3070 Laptop
+ * GPU").  The nvidia driver exposes it in procfs, so no NVML needed;
+ * cached after the first read.  NULL when unknown. */
+const char *
+fan_gpu_name(void)
+{
+	static char name[48];
+	static int done;
+	glob_t g;
+
+	if (done)
+		return name[0] ? name : NULL;
+	done = 1;
+	if (glob("/proc/driver/nvidia/gpus/*/information", 0, NULL, &g) == 0
+			&& g.gl_pathc > 0) {
+		FILE *f = fopen(g.gl_pathv[0], "r");
+		char line[128];
+
+		if (f) {
+			if (fgets(line, sizeof(line), f) &&
+					strncmp(line, "Model:", 6) == 0) {
+				char *s = line + 6;
+
+				while (*s == ' ' || *s == '\t')
+					s++;
+				if (strncmp(s, "NVIDIA ", 7) == 0)
+					s += 7;
+				if (strncmp(s, "GeForce ", 8) == 0)
+					s += 8;
+				s[strcspn(s, "\n")] = '\0';
+				snprintf(name, sizeof(name), "%s", s);
+			}
+			fclose(f);
+		}
+	}
+	globfree(&g);
+	return name[0] ? name : NULL;
 }
 
 static const char *
@@ -262,7 +302,12 @@ scan_msi(FanState *fs)
 			if (val < 0)
 				continue;
 			memset(fe, 0, sizeof(*fe));
-			snprintf(fe->label, sizeof(fe->label), "%s", labels[i]);
+			if (i == 1 && fan_gpu_name())
+				snprintf(fe->label, sizeof(fe->label), "%s",
+						fan_gpu_name());
+			else
+				snprintf(fe->label, sizeof(fe->label), "%s",
+						labels[i]);
 			fe->msi_sysfs = 1;
 			snprintf(fe->msi_sysfs_dir, sizeof(fe->msi_sysfs_dir),
 					"%s", dirs[i]);

@@ -13,6 +13,7 @@
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <systemd/sd-bus.h>
 #include <unistd.h>
 #include <wayland-server-core.h>
@@ -30,13 +31,98 @@ static struct wl_event_source *bt_src;
 static struct wl_event_source *obex_src;
 static struct wl_event_source *bt_timer;
 static struct wl_event_source *obex_timer;
+static struct wl_event_source *reconn_timer;
 
-static BtAdapter bt_adapter;
-static char bt_adapter_path[128];
+#define BT_ADAPT_MAX 4
+
+typedef struct {
+	char path[128];
+	BtAdapter a;
+} BtAdSlot;
+
+static BtAdSlot bt_ads[BT_ADAPT_MAX];
+static int bt_nads;
 static BtDev bt_devs[BT_DEV_MAX];
 static int bt_ndevs;
 
 /* ── model ───────────────────────────────────────────────────────── */
+
+static uint64_t
+now_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static BtAdSlot *
+ad_find(const char *path)
+{
+	int i;
+
+	for (i = 0; i < bt_nads; i++)
+		if (strcmp(bt_ads[i].path, path) == 0)
+			return &bt_ads[i];
+	return NULL;
+}
+
+static BtAdSlot *
+ad_add(const char *path)
+{
+	BtAdSlot *s = ad_find(path);
+	const char *hci;
+
+	if (s)
+		return s;
+	if (bt_nads >= BT_ADAPT_MAX)
+		return NULL;
+	s = &bt_ads[bt_nads++];
+	memset(s, 0, sizeof(*s));
+	snprintf(s->path, sizeof(s->path), "%s", path);
+	s->a.present = 1;
+	s->a.id = -1;
+	hci = strstr(path, "/hci");
+	if (hci)
+		s->a.id = atoi(hci + 4);
+	return s;
+}
+
+static void
+ad_remove(const char *path)
+{
+	int i, j;
+
+	for (i = 0; i < bt_nads; i++) {
+		if (strcmp(bt_ads[i].path, path) != 0)
+			continue;
+		memmove(&bt_ads[i], &bt_ads[i + 1],
+				(bt_nads - i - 1) * sizeof(BtAdSlot));
+		bt_nads--;
+		/* drop the adapter's devices too */
+		for (j = bt_ndevs - 1; j >= 0; j--)
+			if (strncmp(bt_devs[j].path, path, strlen(path)) == 0)
+				memmove(&bt_devs[j], &bt_devs[j + 1],
+						(--bt_ndevs - j) *
+						sizeof(BtDev));
+		return;
+	}
+}
+
+/* Connected-device count under one adapter — the "load" used to spread
+ * new pairings across adapters. */
+static int
+ad_load(const BtAdSlot *s)
+{
+	int i, n = 0;
+	size_t plen = strlen(s->path);
+
+	for (i = 0; i < bt_ndevs; i++)
+		if (bt_devs[i].connected &&
+				strncmp(bt_devs[i].path, s->path, plen) == 0)
+			n++;
+	return n;
+}
 
 static BtDev *
 dev_find(const char *path)
@@ -78,6 +164,99 @@ dev_remove(const char *path)
 			return;
 		}
 	}
+}
+
+/* ── auto-reconnect ──────────────────────────────────────────────────
+ * A paired device that drops its link without the user asking for it is
+ * redialed with backoff (1.5s, 3s, 6s, … capped 30s) until it is back.
+ * User Disconnect/forget clears want_conn, so intentional disconnects
+ * stay disconnected. */
+
+static void reconn_arm(int delay_ms);
+static int ignore_reply_cb(sd_bus_message *m, void *userdata,
+		sd_bus_error *err);
+
+static void
+dev_conn_transition(BtDev *d)
+{
+	if (d->connected) {
+		d->want_conn = 1;
+		d->retry_n = 0;
+		d->retry_at_ms = 0;
+		bt_audio_on_connect(d->addr, d->icon);
+	} else if (d->paired && d->want_conn) {
+		d->retry_n = 0;
+		d->retry_at_ms = now_ms() + 1500;
+		reconn_arm(1500);
+	}
+}
+
+static int
+reconn_tick(void *data)
+{
+	uint64_t now = now_ms();
+	uint64_t next = 0;
+	int i;
+
+	for (i = 0; i < bt_ndevs; i++) {
+		BtDev *d = &bt_devs[i];
+		uint64_t backoff;
+
+		if (!d->paired || !d->want_conn || d->connected ||
+				!d->retry_at_ms)
+			continue;
+		if (d->retry_at_ms <= now) {
+			sd_bus_call_method_async(bt_bus, NULL, "org.bluez",
+					d->path, "org.bluez.Device1",
+					"Connect", ignore_reply_cb, NULL, "");
+			if (d->retry_n < 16)
+				d->retry_n++;
+			backoff = 1500u << d->retry_n;
+			if (backoff > 30000)
+				backoff = 30000;
+			d->retry_at_ms = now + backoff;
+		}
+		if (!next || d->retry_at_ms < next)
+			next = d->retry_at_ms;
+	}
+	if (next)
+		reconn_arm((int)(next - now) + 50);
+	return 0;
+}
+
+static void
+reconn_arm(int delay_ms)
+{
+	if (!reconn_timer)
+		reconn_timer = wl_event_loop_add_timer(event_loop,
+				reconn_tick, NULL);
+	if (reconn_timer)
+		wl_event_source_timer_update(reconn_timer,
+				delay_ms > 0 ? delay_ms : 1);
+}
+
+/* Boot / radio-on: dial every paired device (staggered so a pile of
+ * peripherals doesn't page the same radio at once).  Devices that are
+ * off simply keep the 30s redial ticking until they appear. */
+static void
+reconn_schedule_all(void)
+{
+	uint64_t now = now_ms();
+	int i, k = 0;
+
+	for (i = 0; i < bt_ndevs; i++) {
+		BtDev *d = &bt_devs[i];
+
+		if (!d->paired || d->connected)
+			continue;
+		d->want_conn = 1;
+		if (!d->retry_at_ms) {
+			d->retry_n = 0;
+			d->retry_at_ms = now + 1500 + k++ * 700;
+		}
+	}
+	if (k)
+		reconn_arm(1500);
 }
 
 /* ── property parsing ────────────────────────────────────────────── */
@@ -153,18 +332,24 @@ parse_props(sd_bus_message *m, const char *iface, const char *path)
 		r = sd_bus_message_read(m, "s", &key);
 		if (r < 0)
 			return r;
-		if (strcmp(iface, "org.bluez.Adapter1") == 0 &&
-				strcmp(path, bt_adapter_path) == 0) {
-			if (strcmp(key, "Powered") == 0)
-				var_bool(m, &bt_adapter.powered);
+		if (strcmp(iface, "org.bluez.Adapter1") == 0) {
+			BtAdSlot *s = ad_add(path);
+
+			if (!s)
+				sd_bus_message_skip(m, "v");
+			else if (strcmp(key, "Powered") == 0) {
+				int old = s->a.powered;
+
+				if (var_bool(m, &s->a.powered) == 0 &&
+						!old && s->a.powered)
+					reconn_schedule_all();
+			}
 			else if (strcmp(key, "Discovering") == 0)
-				var_bool(m, &bt_adapter.discovering);
+				var_bool(m, &s->a.discovering);
 			else if (strcmp(key, "Name") == 0)
-				var_str(m, bt_adapter.name,
-						sizeof(bt_adapter.name));
+				var_str(m, s->a.name, sizeof(s->a.name));
 			else if (strcmp(key, "Address") == 0)
-				var_str(m, bt_adapter.addr,
-						sizeof(bt_adapter.addr));
+				var_str(m, s->a.addr, sizeof(s->a.addr));
 			else
 				sd_bus_message_skip(m, "v");
 		} else if (strcmp(iface, "org.bluez.Device1") == 0) {
@@ -182,9 +367,13 @@ parse_props(sd_bus_message *m, const char *iface, const char *path)
 				var_bool(m, &d->paired);
 			else if (strcmp(key, "Trusted") == 0)
 				var_bool(m, &d->trusted);
-			else if (strcmp(key, "Connected") == 0)
-				var_bool(m, &d->connected);
-			else if (strcmp(key, "RSSI") == 0)
+			else if (strcmp(key, "Connected") == 0) {
+				int old = d->connected;
+
+				if (var_bool(m, &d->connected) == 0 &&
+						old != d->connected)
+					dev_conn_transition(d);
+			} else if (strcmp(key, "RSSI") == 0)
 				var_i16(m, &d->rssi);
 			else
 				sd_bus_message_skip(m, "v");
@@ -220,12 +409,8 @@ parse_object_ifaces(sd_bus_message *m, const char *path)
 		r = sd_bus_message_read(m, "s", &iface);
 		if (r < 0)
 			return r;
-		if (strcmp(iface, "org.bluez.Adapter1") == 0 &&
-				!bt_adapter_path[0]) {
-			bt_adapter.present = 1;
-			snprintf(bt_adapter_path, sizeof(bt_adapter_path),
-					"%s", path);
-		}
+		if (strcmp(iface, "org.bluez.Adapter1") == 0)
+			ad_add(path);
 		r = parse_props(m, iface, path);
 		if (r < 0)
 			return r;
@@ -254,6 +439,8 @@ managed_objects_cb(sd_bus_message *m, void *userdata, sd_bus_error *err)
 		parse_object_ifaces(m, path);
 		sd_bus_message_exit_container(m);
 	}
+	/* everything paired reconnects by itself from boot */
+	reconn_schedule_all();
 	btsys_changed();
 	return 0;
 }
@@ -284,12 +471,8 @@ interfaces_removed_cb(sd_bus_message *m, void *userdata, sd_bus_error *err)
 	while (sd_bus_message_read(m, "s", &iface) > 0) {
 		if (strcmp(iface, "org.bluez.Device1") == 0)
 			dev_remove(path);
-		else if (strcmp(iface, "org.bluez.Adapter1") == 0 &&
-				strcmp(path, bt_adapter_path) == 0) {
-			memset(&bt_adapter, 0, sizeof(bt_adapter));
-			bt_adapter_path[0] = '\0';
-			bt_ndevs = 0;
-		}
+		else if (strcmp(iface, "org.bluez.Adapter1") == 0)
+			ad_remove(path);
 	}
 	btsys_changed();
 	return 0;
@@ -515,7 +698,8 @@ bt_bus_event(int fd, uint32_t mask, void *data)
 		bt_src = NULL;
 		sd_bus_unref(bt_bus);
 		bt_bus = NULL;
-		memset(&bt_adapter, 0, sizeof(bt_adapter));
+		memset(bt_ads, 0, sizeof(bt_ads));
+		bt_nads = 0;
 		bt_ndevs = 0;
 		btsys_changed();
 		return 0;
@@ -624,17 +808,87 @@ btmon_init(void)
 int
 btmon_adapter(BtAdapter *out)
 {
-	*out = bt_adapter;
-	return bt_adapter.present;
+	int i;
+
+	memset(out, 0, sizeof(*out));
+	out->id = -1;
+	for (i = 0; i < bt_nads; i++) {
+		out->present = 1;
+		out->powered |= bt_ads[i].a.powered;
+		out->discovering |= bt_ads[i].a.discovering;
+		if (!out->name[0]) {
+			snprintf(out->name, sizeof(out->name), "%s",
+					bt_ads[i].a.name);
+			snprintf(out->addr, sizeof(out->addr), "%s",
+					bt_ads[i].a.addr);
+			out->id = bt_ads[i].a.id;
+		}
+	}
+	return out->present;
+}
+
+int
+btmon_adapters(BtAdapter *out, int max)
+{
+	int n = bt_nads < max ? bt_nads : max;
+	int i;
+
+	for (i = 0; i < n; i++)
+		out[i] = bt_ads[i].a;
+	return n;
+}
+
+/* With several adapters the same nearby device shows up once per
+ * discovering adapter.  Collapse unpaired duplicates to the object on
+ * the least-loaded powered adapter, so Pair lands new devices where
+ * there is most radio headroom. */
+static int
+dev_spread_skip(const BtDev *d)
+{
+	int i;
+	const BtAdSlot *own = NULL, *best = NULL;
+
+	if (d->paired || d->connected || bt_nads < 2)
+		return 0;
+	for (i = 0; i < bt_nads; i++)
+		if (strncmp(d->path, bt_ads[i].path,
+					strlen(bt_ads[i].path)) == 0)
+			own = &bt_ads[i];
+	if (!own)
+		return 0;
+	for (i = 0; i < bt_ndevs; i++) {
+		const BtDev *o = &bt_devs[i];
+		const BtAdSlot *oa = NULL;
+		int j;
+
+		if (o == d || o->paired || o->connected ||
+				strcmp(o->addr, d->addr) != 0)
+			continue;
+		for (j = 0; j < bt_nads; j++)
+			if (strncmp(o->path, bt_ads[j].path,
+						strlen(bt_ads[j].path)) == 0)
+				oa = &bt_ads[j];
+		if (!oa || !oa->a.powered)
+			continue;
+		if (!best || ad_load(oa) < ad_load(best))
+			best = oa;
+	}
+	/* keep this entry unless a duplicate sits on a strictly less
+	 * loaded adapter */
+	return best && own->a.powered && ad_load(best) < ad_load(own);
 }
 
 int
 btmon_devices(BtDev *out, int max)
 {
-	int n = bt_ndevs < max ? bt_ndevs : max;
+	int n = 0;
 	int i, j;
 
-	memcpy(out, bt_devs, n * sizeof(BtDev));
+	for (i = 0; i < bt_ndevs && n < max; i++) {
+		if (dev_spread_skip(&bt_devs[i]))
+			continue;
+		out[n++] = bt_devs[i];
+	}
 	/* connected first, then paired, then by RSSI */
 	for (i = 0; i < n; i++)
 		for (j = i + 1; j < n; j++) {
@@ -652,25 +906,75 @@ btmon_devices(BtDev *out, int max)
 }
 
 void
+btmon_set_link_rssi(const char *addr, int rssi)
+{
+	int i, changed = 0;
+
+	for (i = 0; i < bt_ndevs; i++) {
+		if (!bt_devs[i].connected ||
+				strcasecmp(bt_devs[i].addr, addr) != 0)
+			continue;
+		if (bt_devs[i].rssi != rssi) {
+			bt_devs[i].rssi = rssi;
+			changed = 1;
+		}
+	}
+	if (changed)
+		btsys_changed();
+}
+
+void
 btmon_set_powered(int on)
 {
-	if (!bt_bus || !bt_adapter_path[0])
+	int i;
+
+	if (!bt_bus)
 		return;
-	sd_bus_call_method_async(bt_bus, NULL, "org.bluez", bt_adapter_path,
-			"org.freedesktop.DBus.Properties", "Set",
-			ignore_reply_cb, NULL, "ssv",
-			"org.bluez.Adapter1", "Powered", "b", on);
+	for (i = 0; i < bt_nads; i++)
+		sd_bus_call_method_async(bt_bus, NULL, "org.bluez",
+				bt_ads[i].path,
+				"org.freedesktop.DBus.Properties", "Set",
+				ignore_reply_cb, NULL, "ssv",
+				"org.bluez.Adapter1", "Powered", "b", on);
+}
+
+/* Discovery left running starves A2DP of radio slots (audible as
+ * crackle), so it always times out by itself. */
+static struct wl_event_source *disc_timer;
+
+static int
+disc_timeout_cb(void *data)
+{
+	btmon_set_discovering(0);
+	return 0;
 }
 
 void
 btmon_set_discovering(int on)
 {
-	if (!bt_bus || !bt_adapter_path[0])
+	int i;
+
+	if (!bt_bus)
 		return;
-	sd_bus_call_method_async(bt_bus, NULL, "org.bluez", bt_adapter_path,
-			"org.bluez.Adapter1",
-			on ? "StartDiscovery" : "StopDiscovery",
-			ignore_reply_cb, NULL, "");
+	if (on) {
+		if (!disc_timer)
+			disc_timer = wl_event_loop_add_timer(event_loop,
+					disc_timeout_cb, NULL);
+		if (disc_timer)
+			wl_event_source_timer_update(disc_timer, 45000);
+	} else if (disc_timer) {
+		wl_event_source_timer_update(disc_timer, 0);
+	}
+	for (i = 0; i < bt_nads; i++) {
+		if (on && !bt_ads[i].a.powered)
+			continue;
+		if (on == bt_ads[i].a.discovering)
+			continue;
+		sd_bus_call_method_async(bt_bus, NULL, "org.bluez",
+				bt_ads[i].path, "org.bluez.Adapter1",
+				on ? "StartDiscovery" : "StopDiscovery",
+				ignore_reply_cb, NULL, "");
+	}
 }
 
 static int
@@ -714,8 +1018,15 @@ btmon_pair(const char *path)
 void
 btmon_connect(const char *path)
 {
+	BtDev *d = dev_find(path);
+
 	if (!bt_bus)
 		return;
+	if (d) {
+		d->want_conn = 1;
+		d->retry_n = 0;
+		d->retry_at_ms = 0;
+	}
 	sd_bus_call_method_async(bt_bus, NULL, "org.bluez", path,
 			"org.bluez.Device1", "Connect",
 			ignore_reply_cb, NULL, "");
@@ -724,8 +1035,15 @@ btmon_connect(const char *path)
 void
 btmon_disconnect(const char *path)
 {
+	BtDev *d = dev_find(path);
+
 	if (!bt_bus)
 		return;
+	if (d) {
+		/* user choice: stay disconnected, no auto-redial */
+		d->want_conn = 0;
+		d->retry_at_ms = 0;
+	}
 	sd_bus_call_method_async(bt_bus, NULL, "org.bluez", path,
 			"org.bluez.Device1", "Disconnect",
 			ignore_reply_cb, NULL, "");
@@ -734,11 +1052,21 @@ btmon_disconnect(const char *path)
 void
 btmon_remove(const char *path)
 {
-	if (!bt_bus || !bt_adapter_path[0])
+	int i;
+
+	if (!bt_bus)
 		return;
-	sd_bus_call_method_async(bt_bus, NULL, "org.bluez", bt_adapter_path,
-			"org.bluez.Adapter1", "RemoveDevice",
-			ignore_reply_cb, NULL, "o", path);
+	/* RemoveDevice must go to the adapter owning the object */
+	for (i = 0; i < bt_nads; i++) {
+		if (strncmp(path, bt_ads[i].path,
+					strlen(bt_ads[i].path)) != 0)
+			continue;
+		sd_bus_call_method_async(bt_bus, NULL, "org.bluez",
+				bt_ads[i].path, "org.bluez.Adapter1",
+				"RemoveDevice", ignore_reply_cb, NULL,
+				"o", path);
+		return;
+	}
 }
 
 /* ── OBEX send ───────────────────────────────────────────────────── */

@@ -439,12 +439,22 @@ void
 card_text_btn(Card *c, const char *left, const char *right,
 		const float *rightcol, const char *btn_label, int hit_id, int hot)
 {
+	card_icon_text_btn(c, NULL, left, right, rightcol, btn_label,
+			hit_id, hot);
+}
+
+void
+card_icon_text_btn(Card *c, const char *icon_path, const char *left,
+		const char *right, const float *rightcol,
+		const char *btn_label, int hit_id, int hot)
+{
 	CardRow *r = row_new(c, CROW_TEXT);
 
 	if (!r)
 		return;
 	setstr(r->a, sizeof(r->a), left);
 	setstr(r->b, sizeof(r->b), right);
+	setstr(r->c, sizeof(r->c), icon_path);
 	setstr(r->btn_label, sizeof(r->btn_label), btn_label);
 	r->bcol = rightcol ? rightcol : card_col_dim;
 	r->hit_id = hit_id;
@@ -661,10 +671,12 @@ card_measure(Card *c, int *out_w, int *out_h)
 		case CROW_TEXT:
 			rw = text_width_f(statusfont.font, r->a, 0) + 16 +
 				text_width_f(statusfont.font, r->b, 0);
+			if (r->c[0])
+				rw += base_h + 10;
 			if (r->btn_label[0])
 				rw += 12 + text_width_f(statusfont.font,
 						r->btn_label, 0) + 16;
-			r->h = base_h + 6;
+			r->h = base_h + (r->c[0] ? 10 : 6);
 			break;
 		case CROW_BUTTONS:
 			rw = btn_row_width(r);
@@ -1005,6 +1017,12 @@ card_finish(Card *c, CardResult *out)
 			cairo_fill(cr);
 			break;
 		case CROW_TEXT:
+			if (r->c[0]) {
+				int isz = base_h;
+
+				draw_icon(cr, r->c, CARD_PAD,
+						y + (r->h - isz) / 2, isz);
+			}
 			if (r->btn_label[0] && r->hit_id >= 0) {
 				int bw = text_width_f(statusfont.font,
 						r->btn_label, 0) + 16;
@@ -1311,8 +1329,9 @@ card_finish(Card *c, CardResult *out)
 			break;
 		case CROW_TEXT: {
 			int bl = y + (r->h - base_h) / 2 + base_asc;
+			int tx = CARD_PAD + (r->c[0] ? base_h + 10 : 0);
 
-			draw_text_f(pix, statusfont.font, r->a, CARD_PAD, bl,
+			draw_text_f(pix, statusfont.font, r->a, tx, bl,
 					card_col_fg, 0);
 			if (r->b[0]) {
 				int vw = text_width_f(statusfont.font, r->b, 0);

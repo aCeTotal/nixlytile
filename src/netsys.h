@@ -121,19 +121,27 @@ typedef struct {
 	int connected;
 	int rssi;               /* 0 = unknown */
 	int battery;            /* -1 = unknown */
+	int want_conn;          /* auto-reconnect target (paired, not
+	                         * user-disconnected) */
+	uint64_t retry_at_ms;   /* reconnect engine: next attempt */
+	int retry_n;
 } BtDev;
 
 typedef struct {
 	int present;            /* adapter exists */
 	int powered;
 	int discovering;
+	int id;                 /* hciN index (-1 = unknown) */
 	char name[64];
 	char addr[18];
 } BtAdapter;
 
 void btmon_init(void);
-int btmon_adapter(BtAdapter *out);
+int btmon_adapter(BtAdapter *out);          /* aggregate over adapters */
+int btmon_adapters(BtAdapter *out, int max);/* all slots, returns count */
 int btmon_devices(BtDev *out, int max);     /* returns count */
+/* Live link RSSI push from bt_rssi.c (addr = AA:BB:.. uppercase). */
+void btmon_set_link_rssi(const char *addr, int rssi);
 void btmon_set_powered(int on);
 void btmon_set_discovering(int on);
 void btmon_pair(const char *path);          /* pair + trust + connect */
@@ -142,6 +150,14 @@ void btmon_disconnect(const char *path);
 void btmon_remove(const char *path);
 /* OBEX file transfer: send a local file to a paired device. */
 int btmon_send_file(const char *addr, const char *filepath);
+
+/* ── bt_rssi.c: live link RSSI via raw HCI (unprivileged) ────────── */
+
+void bt_rssi_ping(void);    /* popup visible: keep polling ~2s for 6s */
+
+/* ── bt_audio.c: force best A2DP profile when a headset connects ── */
+
+void bt_audio_on_connect(const char *addr, const char *icon);
 
 /* ── vpnctl.c: VPN profiles as systemd units ─────────────────────── */
 

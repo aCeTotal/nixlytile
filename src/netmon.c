@@ -316,10 +316,15 @@ netmon_get(NetLinkSnap *out)
 int
 netmon_stats(const char *iface, NetIfStats *out)
 {
+	/* rx_dropped is deliberately not read: on wifi it also counts
+	 * mac80211 protocol discards (foreign broadcasts, group mgmt
+	 * frames) that never affect traffic.  Only ring/buffer overruns
+	 * are real rx loss. */
 	static const char *files[] = {
 		"rx_bytes", "tx_bytes", "rx_packets", "tx_packets",
-		"rx_errors", "tx_errors", "rx_dropped", "tx_dropped",
+		"rx_errors", "tx_errors", "rx_missed_errors", "tx_dropped",
 	};
+	static const char *extra[] = { "rx_over_errors", "rx_fifo_errors" };
 	unsigned long long *vals = &out->rx_bytes;
 	size_t i;
 
@@ -335,6 +340,20 @@ netmon_stats(const char *iface, NetIfStats *out)
 			return -1;
 		if (fgets(buf, sizeof(buf), f))
 			sscanf(buf, "%llu", &vals[i]);
+		fclose(f);
+	}
+	for (i = 0; i < sizeof(extra) / sizeof(extra[0]); i++) {
+		char path[256], buf[32];
+		unsigned long long v = 0;
+		FILE *f;
+
+		snprintf(path, sizeof(path),
+				"/sys/class/net/%s/statistics/%s", iface, extra[i]);
+		f = fopen(path, "r");
+		if (!f)
+			continue;
+		if (fgets(buf, sizeof(buf), f) && sscanf(buf, "%llu", &v) == 1)
+			out->rx_dropped += v;
 		fclose(f);
 	}
 	return 0;
