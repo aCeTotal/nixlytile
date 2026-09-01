@@ -78,6 +78,7 @@ static void encode_color_matrix(const float mat3[9], float mat4[4][4]) {
 static void render_pass_destroy(struct wlr_vk_render_pass *pass) {
 	struct wlr_vk_render_pass_texture *pass_texture;
 	wl_array_for_each(pass_texture, &pass->textures) {
+		pass_texture->texture->pass_synced = false;
 		wlr_drm_syncobj_timeline_unref(pass_texture->wait_timeline);
 	}
 
@@ -90,6 +91,13 @@ static void render_pass_destroy(struct wlr_vk_render_pass *pass) {
 
 static bool render_pass_wait_render_buffer(struct wlr_vk_render_pass *pass,
 		VkSemaphoreSubmitInfoKHR *render_wait, uint32_t *render_wait_len_ptr) {
+	if (pass->signal_timeline != NULL &&
+			!pass->renderer->dev->implicit_sync_interop) {
+		// Explicit sync is in use: skip the blocking poll() fallback,
+		// mirroring vulkan_sync_render_pass_release()
+		return true;
+	}
+
 	int sync_file_fds[WLR_DMABUF_MAX_PLANES];
 	for (size_t i = 0; i < WLR_DMABUF_MAX_PLANES; i++) {
 		sync_file_fds[i] = -1;
@@ -114,7 +122,7 @@ static bool render_pass_wait_render_buffer(struct wlr_vk_render_pass *pass,
 		render_wait[*render_wait_len_ptr] = (VkSemaphoreSubmitInfoKHR){
 			.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO_KHR,
 			.semaphore = sem,
-			.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR,
+			.stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT_KHR,
 		};
 
 		(*render_wait_len_ptr)++;
@@ -408,7 +416,7 @@ static bool render_pass_submit(struct wlr_render_pass *wlr_pass) {
 			render_wait[render_wait_len] = (VkSemaphoreSubmitInfoKHR){
 				.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO_KHR,
 				.semaphore = sem,
-				.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR,
+				.stageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT_KHR,
 			};
 
 			render_wait_len++;
@@ -493,7 +501,8 @@ static bool render_pass_submit(struct wlr_render_pass *wlr_pass) {
 		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
 		0, 0, NULL, 0, NULL, barrier_count, acquire_barriers);
 
-	vkCmdPipelineBarrier(render_cb->vk, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+	vkCmdPipelineBarrier(render_cb->vk,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
 		VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL,
 		barrier_count, release_barriers);
 
@@ -532,7 +541,7 @@ static bool render_pass_submit(struct wlr_render_pass *wlr_pass) {
 			.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO_KHR,
 			.semaphore = renderer->timeline_semaphore,
 			.value = renderer->stage.last_timeline_point,
-			.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR,
+			.stageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT_KHR,
 		};
 
 		stage_submit.waitSemaphoreInfoCount = 1;
@@ -955,13 +964,17 @@ static void render_pass_add_texture(struct wlr_render_pass *wlr_pass,
 
 	texture->last_used_cb = pass->command_buffer;
 
-	if (texture->dmabuf_imported || (options != NULL && options->wait_timeline != NULL)) {
+	if ((texture->dmabuf_imported || (options != NULL && options->wait_timeline != NULL)) &&
+			!texture->pass_synced) {
 		struct wlr_vk_render_pass_texture *pass_texture =
 			wl_array_add(&pass->textures, sizeof(*pass_texture));
 		if (pass_texture == NULL) {
 			pass->failed = true;
 			return;
 		}
+		// Only sync each unique texture once per pass; the flag is cleared
+		// for all pass textures in render_pass_destroy()
+		texture->pass_synced = true;
 
 		struct wlr_drm_syncobj_timeline *wait_timeline = NULL;
 		uint64_t wait_point = 0;
@@ -1305,6 +1318,7 @@ struct wlr_vk_render_pass *vulkan_begin_render_pass(struct wlr_vk_renderer *rend
 
 	VkCommandBufferBeginInfo begin_info = {
 		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+		.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
 	};
 	VkResult res = vkBeginCommandBuffer(cb->vk, &begin_info);
 	if (res != VK_SUCCESS) {

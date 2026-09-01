@@ -1,4 +1,5 @@
 #include "nixlytile.h"
+#include <pthread.h>
 
 /* Check if a kernel module is loaded via /sys/module/<name> */
 static int
@@ -710,53 +711,64 @@ filter_igpu_without_display(void)
  * Assert power/control=on on the dGPU and all its PCI siblings.
  * Called at startup and periodically by the watchdog timer.
  */
+/*
+ * Assert power/control=on + autosuspend off for one PCI function.
+ * Reads power/control first: a read is cheap and side-effect free,
+ * while writing "on" calls pm_runtime_forbid() which takes the device
+ * PM lock and synchronously resumes a runtime-suspended device —
+ * several hundred ms for a dGPU in D3cold.
+ */
+static void
+pci_fn_assert_power_on(const char *slot)
+{
+	char pci_path[128];
+	char cur[8] = {0};
+	int fd;
+
+	snprintf(pci_path, sizeof(pci_path),
+		"/sys/bus/pci/devices/%s/power/control", slot);
+	fd = open(pci_path, O_RDONLY);
+	if (fd < 0)
+		return; /* function absent — skip its delay file too */
+	(void)!read(fd, cur, sizeof(cur) - 1);
+	close(fd);
+	if (strncmp(cur, "on", 2) == 0)
+		return;
+
+	fd = open(pci_path, O_WRONLY);
+	if (fd >= 0) {
+		(void)!write(fd, "on", 2);
+		close(fd);
+	}
+	snprintf(pci_path, sizeof(pci_path),
+		"/sys/bus/pci/devices/%s/power/autosuspend_delay_ms", slot);
+	fd = open(pci_path, O_WRONLY);
+	if (fd >= 0) {
+		(void)!write(fd, "-1", 2);
+		close(fd);
+	}
+}
+
 void
 dgpu_assert_power_on(GpuInfo *gpu)
 {
-	char pci_path[128];
-	int fd;
-
 	if (!gpu || !gpu->pci_slot[0])
 		return;
 
 	/* Main GPU function */
-	snprintf(pci_path, sizeof(pci_path),
-		"/sys/bus/pci/devices/%s/power/control", gpu->pci_slot);
-	fd = open(pci_path, O_WRONLY);
-	if (fd >= 0) {
-		write(fd, "on", 2);
-		close(fd);
-	}
-	snprintf(pci_path, sizeof(pci_path),
-		"/sys/bus/pci/devices/%s/power/autosuspend_delay_ms", gpu->pci_slot);
-	fd = open(pci_path, O_WRONLY);
-	if (fd >= 0) {
-		write(fd, "-1", 2);
-		close(fd);
-	}
+	pci_fn_assert_power_on(gpu->pci_slot);
 
 	/* All sibling PCI functions (.1 audio, .2 USB-C, etc) */
 	char slot_prefix[64];
+	char slot_fn[80];
 	strncpy(slot_prefix, gpu->pci_slot, sizeof(slot_prefix) - 1);
 	slot_prefix[sizeof(slot_prefix) - 1] = '\0';
 	char *dot = strrchr(slot_prefix, '.');
 	if (dot) {
 		*dot = '\0';
 		for (int fn = 1; fn <= 7; fn++) {
-			snprintf(pci_path, sizeof(pci_path),
-				"/sys/bus/pci/devices/%s.%d/power/control", slot_prefix, fn);
-			fd = open(pci_path, O_WRONLY);
-			if (fd >= 0) {
-				write(fd, "on", 2);
-				close(fd);
-			}
-			snprintf(pci_path, sizeof(pci_path),
-				"/sys/bus/pci/devices/%s.%d/power/autosuspend_delay_ms", slot_prefix, fn);
-			fd = open(pci_path, O_WRONLY);
-			if (fd >= 0) {
-				write(fd, "-1", 2);
-				close(fd);
-			}
+			snprintf(slot_fn, sizeof(slot_fn), "%s.%d", slot_prefix, fn);
+			pci_fn_assert_power_on(slot_fn);
 		}
 	}
 }
@@ -766,6 +778,22 @@ dgpu_assert_power_on(GpuInfo *gpu)
  * Counteracts nvidia-powerd, power-profiles-daemon, tlp, udev rules,
  * or any other service that periodically re-enables runtime PM.
  */
+/* The sysfs power writes run on their own thread: writing "on" to
+ * power/control can synchronously resume a D3cold device (>1s), which
+ * must never happen on the compositor thread. */
+static void *
+dgpu_power_worker(void *arg)
+{
+	(void)arg;
+	pthread_setname_np(pthread_self(), "dgpu-power");
+	for (;;) {
+		if (discrete_gpu_idx >= 0 && discrete_gpu_idx < detected_gpu_count)
+			dgpu_assert_power_on(&detected_gpus[discrete_gpu_idx]);
+		sleep(60);
+	}
+	return NULL;
+}
+
 static int
 dgpu_power_watchdog_tick(void *data)
 {
@@ -773,7 +801,6 @@ dgpu_power_watchdog_tick(void *data)
 
 	if (discrete_gpu_idx >= 0 && discrete_gpu_idx < detected_gpu_count) {
 		GpuInfo *dgpu = &detected_gpus[discrete_gpu_idx];
-		dgpu_assert_power_on(dgpu);
 
 		/* Verify the render node fd is still open */
 		if (dgpu_render_fd >= 0 && fcntl(dgpu_render_fd, F_GETFD) < 0) {
@@ -798,6 +825,15 @@ dgpu_power_watchdog_start(void)
 		dgpu_power_watchdog_tick, NULL);
 	if (dgpu_power_watchdog)
 		wl_event_source_timer_update(dgpu_power_watchdog, 60000);
+
+	{
+		pthread_t tid;
+		pthread_attr_t attr;
+		pthread_attr_init(&attr);
+		pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+		pthread_create(&tid, &attr, dgpu_power_worker, NULL);
+		pthread_attr_destroy(&attr);
+	}
 }
 
 int

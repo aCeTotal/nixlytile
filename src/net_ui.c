@@ -11,7 +11,6 @@
 #include <net/if.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 
 #include "nixlytile.h"
 #include "netsys.h"
@@ -47,6 +46,7 @@ static WifiNet ui_shown[NET_LIST_MAX];
 static int ui_nshown;
 static char ui_gateway[64];
 static char ui_dns[128];
+static uint64_t net_prev_stamp_ms;   /* netwatch stamp of net_prev_rx/tx */
 static char ui_pend_ssid[33];
 static int ui_pend_hidden;
 static char ui_search[33];
@@ -148,7 +148,6 @@ refreshstatusnet(void)
 	int barh, popup_active = 0;
 	int wifi_assoc = 0;
 	const char *icon_path;
-	struct timespec now_ts;
 	uint64_t now = monotonic_msec();
 
 	wl_list_for_each(m, &mons, link) {
@@ -224,31 +223,37 @@ refreshstatusnet(void)
 	}
 
 	if (popup_active && net_available) {
-		double elapsed = 0.0;
-
 		request_public_ip_async_ex(1);
 		netmon_gateway(ui_gateway, sizeof(ui_gateway));
 		netmon_dns(ui_dns, sizeof(ui_dns));
 		ui_stats_ok = netmon_stats(net_iface, &ui_stats) == 0;
 
-		clock_gettime(CLOCK_MONOTONIC, &now_ts);
-		if (net_prev_valid)
-			elapsed = (now_ts.tv_sec - net_prev_ts.tv_sec)
-				+ (now_ts.tv_nsec - net_prev_ts.tv_nsec) / 1e9;
-		net_last_down_bps = (net_prev_valid && ui_stats_ok) ?
-			net_bytes_to_rate(ui_stats.rx_bytes, net_prev_rx,
-					elapsed) : -1.0;
-		net_last_up_bps = (net_prev_valid && ui_stats_ok) ?
-			net_bytes_to_rate(ui_stats.tx_bytes, net_prev_tx,
-					elapsed) : -1.0;
-		format_speed(net_last_down_bps, net_down_text,
-				sizeof(net_down_text));
-		format_speed(net_last_up_bps, net_up_text,
-				sizeof(net_up_text));
-		if (ui_stats_ok) {
+		if (!ui_stats_ok) {
+			net_last_down_bps = net_last_up_bps = -1.0;
+			snprintf(net_down_text, sizeof(net_down_text), "--");
+			snprintf(net_up_text, sizeof(net_up_text), "--");
+		} else if (!net_prev_valid ||
+				ui_stats.stamp_ms != net_prev_stamp_ms) {
+			/* rate only across two distinct worker samples: the
+			 * snapshot can repeat between 1s ticks, and a zero
+			 * delta would flash the rate to 0 */
+			double elapsed = net_prev_valid ?
+				(ui_stats.stamp_ms - net_prev_stamp_ms) /
+				1000.0 : 0.0;
+
+			net_last_down_bps = net_prev_valid ?
+				net_bytes_to_rate(ui_stats.rx_bytes,
+						net_prev_rx, elapsed) : -1.0;
+			net_last_up_bps = net_prev_valid ?
+				net_bytes_to_rate(ui_stats.tx_bytes,
+						net_prev_tx, elapsed) : -1.0;
+			format_speed(net_last_down_bps, net_down_text,
+					sizeof(net_down_text));
+			format_speed(net_last_up_bps, net_up_text,
+					sizeof(net_up_text));
 			net_prev_rx = ui_stats.rx_bytes;
 			net_prev_tx = ui_stats.tx_bytes;
-			net_prev_ts = now_ts;
+			net_prev_stamp_ms = ui_stats.stamp_ms;
 			net_prev_valid = 1;
 		}
 	}
@@ -331,6 +336,79 @@ static int spec_x, spec_y, spec_w, spec_h;
 static double spec_frac;
 static const float *spec_accent;
 static struct wl_event_source *spec_timer;
+/* Ping-pong frame buffers: the 33ms tick used to route every frame
+ * through card_spectrum_buffer (cairo surface create + ecalloc + full
+ * copy + wlr buffer create, then drop).  Instead two persistent
+ * pixman-backed wlr_buffers are drawn in place with cairo and reused
+ * across ticks; two alternate so a frame the scene may still be
+ * presenting is never scribbled.  Dropped when the overlay closes. */
+static struct PixmanBuffer *spec_bufs[2];
+static int spec_buf_flip;
+
+#define SPEC_PI 3.14159265358979323846
+
+static void
+spec_bufs_drop(void)
+{
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		if (spec_bufs[i]) {
+			wlr_buffer_drop(&spec_bufs[i]->base);
+			spec_bufs[i] = NULL;
+		}
+	}
+}
+
+static struct PixmanBuffer *
+spec_buf_acquire(int w, int h)
+{
+	struct PixmanBuffer *b = spec_bufs[spec_buf_flip];
+
+	if (b && (b->base.width != w || b->base.height != h)) {
+		spec_bufs_drop();
+		b = NULL;
+	}
+	if (!b) {
+		int stride = w * 4;
+		void *data = ecalloc(1, (size_t)stride * (size_t)h);
+
+		b = ecalloc(1, sizeof(*b));
+		b->image = pixman_image_create_bits(PIXMAN_a8r8g8b8, w, h,
+				data, stride);
+		b->data = data;
+		b->drm_format = DRM_FORMAT_ARGB8888;
+		b->stride = stride;
+		b->owns_data = 1;
+		wlr_buffer_init(&b->base, &pixman_buffer_impl, w, h);
+		spec_bufs[spec_buf_flip] = b;
+	}
+	spec_buf_flip ^= 1;
+	return b;
+}
+
+/* Per-bar level — mirrors popup_card.c's card_spectrum_buffer: two
+ * incommensurate sines beat against each other so the motion reads
+ * organic, never a marching wave. */
+static double
+spec_level(double ph, int i)
+{
+	double v = 0.5 + 0.30 * sin(ph * 2.1 + i * 0.83) +
+			0.24 * sin(ph * 3.7 + i * 1.94 + 1.7);
+
+	return v < 0.0 ? 0.0 : v > 1.0 ? 1.0 : v;
+}
+
+static void
+spec_rounded(cairo_t *cr, double x, double y, double w, double h, double r)
+{
+	cairo_new_sub_path(cr);
+	cairo_arc(cr, x + w - r, y + r, r, -SPEC_PI / 2, 0);
+	cairo_arc(cr, x + w - r, y + h - r, r, 0, SPEC_PI / 2);
+	cairo_arc(cr, x + r, y + h - r, r, SPEC_PI / 2, SPEC_PI);
+	cairo_arc(cr, x + r, y + r, r, SPEC_PI, 3 * SPEC_PI / 2);
+	cairo_close_path(cr);
+}
 
 /* (Re)create the overlay node and swap in a freshly drawn frame. Safe
  * to call right after a card re-render so the spectrum never drops out
@@ -338,7 +416,12 @@ static struct wl_event_source *spec_timer;
 static void
 spec_overlay_draw(NetPopup *p)
 {
-	struct wlr_buffer *buf;
+	struct PixmanBuffer *pb;
+	cairo_surface_t *cs;
+	cairo_t *cr;
+	const int bar_w = 3, gap = 2;
+	int nbars, i;
+	double base, frac, t;
 
 	/* Wait out the card show animation: extra children don't take part
 	 * in its fade, so the spectrum joins once the card has settled. */
@@ -350,12 +433,61 @@ spec_overlay_draw(NetPopup *p)
 			wlr_scene_node_set_position(&spec_node->node,
 					spec_x, spec_y);
 	}
-	buf = card_spectrum_buffer(spec_w, spec_h, spec_accent, spec_frac,
-			monotonic_msec() / 1000.0);
-	if (spec_node && buf)
-		wlr_scene_buffer_set_buffer(spec_node, buf);
-	if (buf)
-		wlr_buffer_drop(buf);
+	if (!spec_node)
+		return;
+	pb = spec_buf_acquire(spec_w, spec_h);
+	cs = cairo_image_surface_create_for_data(pb->data,
+			CAIRO_FORMAT_ARGB32, spec_w, spec_h, pb->stride);
+	if (cairo_surface_status(cs) != CAIRO_STATUS_SUCCESS) {
+		cairo_surface_destroy(cs);
+		return;
+	}
+	cr = cairo_create(cs);
+	cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+	cairo_paint(cr);
+	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+
+	/* same frame as popup_card.c's card_spectrum_buffer: bottom-aligned
+	 * bars tapering toward the high end with peak-hold caps, envelope
+	 * and speed scaling with signal strength */
+	nbars = (spec_w + gap) / (bar_w + gap);
+	base = spec_h - 1.0;
+	frac = spec_frac < 0.0 ? 0.0 : spec_frac > 1.0 ? 1.0 : spec_frac;
+	t = monotonic_msec() / 1000.0;
+	for (i = 0; i < nbars; i++) {
+		double ph = t * (1.2 + 1.0 * frac);
+		double tilt = 1.0 - 0.45 * i / (nbars > 1 ? nbars - 1 : 1);
+		double env = (0.2 + 0.8 * frac) * tilt * (spec_h - 5.0);
+		double v = spec_level(ph, i);
+		double x = i * (bar_w + gap);
+		double bh = 2.0 + env * v;
+		double peak = v;
+		int s;
+
+		spec_rounded(cr, x, base - bh, bar_w, bh, 1.5);
+		cairo_set_source_rgba(cr, spec_accent[0], spec_accent[1],
+				spec_accent[2],
+				spec_accent[3] * (0.30 + 0.70 * v));
+		cairo_fill(cr);
+
+		/* peak-hold cap: max level over the recent past, floating
+		 * just above the bar and decaying as the bar falls away */
+		for (s = 1; s <= 4; s++) {
+			double pv = spec_level(ph - s * 0.09, i);
+
+			if (pv > peak)
+				peak = pv;
+		}
+		cairo_rectangle(cr, x, base - (2.0 + env * peak) - 3.0,
+				bar_w, 1.5);
+		cairo_set_source_rgba(cr, spec_accent[0], spec_accent[1],
+				spec_accent[2], spec_accent[3] * 0.85);
+		cairo_fill(cr);
+	}
+	cairo_destroy(cr);
+	cairo_surface_flush(cs);
+	cairo_surface_destroy(cs);
+	wlr_scene_buffer_set_buffer(spec_node, &pb->base);
 }
 
 /* ~30 fps heartbeat; stops itself the moment no net popup is visible
@@ -376,6 +508,7 @@ spec_tick(void *data)
 	}
 	if (!p || spec_w <= 0) {
 		spec_node = NULL;
+		spec_bufs_drop();
 		return 0;   /* stays disarmed until the next popup render */
 	}
 	spec_overlay_draw(p);

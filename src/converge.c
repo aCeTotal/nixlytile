@@ -88,6 +88,7 @@ converge_clear(Client *c)
 	c->converge_tries = 0;
 	c->converge_gave_up = 0;
 	c->converge_gave_up_w = c->converge_gave_up_h = 0;
+	c->converge_applied = 0;
 }
 
 int
@@ -127,8 +128,26 @@ clients_converge_tick(Monitor *m)
 		if (c->converge_gave_up) {
 			if (iw == c->converge_gave_up_w &&
 					ih == c->converge_gave_up_h) {
-				client_scale_to_box(c, iw, ih);
-				client_clip_to_usable(c);
+				/* Steady state: the scale/clip is already in
+				 * place.  Re-apply only when the tile moved or
+				 * the client committed a new natural size —
+				 * client_scale_to_box walks the whole scene
+				 * subtree, pure no-op waste every other frame
+				 * (wlroots dedups the setters anyway). */
+				client_get_committed_size(c, &nw, &nh);
+				if (!c->converge_applied ||
+						c->converge_applied_x != c->geom.x ||
+						c->converge_applied_y != c->geom.y ||
+						c->converge_applied_nat_w != nw ||
+						c->converge_applied_nat_h != nh) {
+					client_scale_to_box(c, iw, ih);
+					client_clip_to_usable(c);
+					c->converge_applied = 1;
+					c->converge_applied_x = c->geom.x;
+					c->converge_applied_y = c->geom.y;
+					c->converge_applied_nat_w = nw;
+					c->converge_applied_nat_h = nh;
+				}
 				continue;
 			}
 			converge_clear(c);

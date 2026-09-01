@@ -17,11 +17,14 @@
 #include <linux/rtnetlink.h>
 #include <linux/sockios.h>
 #include <net/if.h>
+#include <pthread.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include <wayland-server-core.h>
 
@@ -313,8 +316,34 @@ netmon_get(NetLinkSnap *out)
 	*out = nm_snap;
 }
 
-int
-netmon_stats(const char *iface, NetIfStats *out)
+/* ── stats/route/dns: worker-sampled snapshot ────────────────────────
+ * The raw reads below run only on wifi_ctrl.c's netwatch worker (the
+ * statistics files can trigger firmware queries on some wireless
+ * drivers); the public getters copy the latest snapshot and poke the
+ * worker when it has gone stale. */
+
+#define NW_STALE_MS 900
+
+static pthread_mutex_t nw_lock = PTHREAD_MUTEX_INITIALIZER;
+static NetIfStats nw_stats;              /* guarded by nw_lock */
+static int nw_stats_ok;                  /* guarded by nw_lock */
+static char nw_stats_iface[IF_NAMESIZE]; /* iface nw_stats belongs to */
+static char nw_want_iface[IF_NAMESIZE];  /* iface the UI last asked for */
+static char nw_gateway[64];              /* guarded by nw_lock */
+static char nw_dns[128];                 /* guarded by nw_lock */
+static uint64_t nw_stamp_ms;             /* last worker sample */
+
+static uint64_t
+nw_now_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static int
+nw_stats_read(const char *iface, NetIfStats *out)
 {
 	/* rx_dropped is deliberately not read: on wifi it also counts
 	 * mac80211 protocol discards (foreign broadcasts, group mgmt
@@ -359,8 +388,8 @@ netmon_stats(const char *iface, NetIfStats *out)
 	return 0;
 }
 
-int
-netmon_gateway(char *out, size_t len)
+static int
+nw_gateway_read(char *out, size_t len)
 {
 	FILE *f;
 	char line[256];
@@ -385,8 +414,8 @@ netmon_gateway(char *out, size_t len)
 	return out[0] ? 0 : -1;
 }
 
-int
-netmon_dns(char *out, size_t len)
+static int
+nw_dns_read(char *out, size_t len)
 {
 	FILE *f;
 	char line[256];
@@ -413,6 +442,99 @@ netmon_dns(char *out, size_t len)
 	}
 	fclose(f);
 	return out[0] ? 0 : -1;
+}
+
+/* Snapshot getters (compositor thread): copy under the mutex, poke the
+ * worker when the data is stale so the next 1s UI tick sees it fresh.
+ * First-ever call returns empty/zeroed data. */
+
+int
+netmon_stats(const char *iface, NetIfStats *out)
+{
+	uint64_t now = nw_now_ms();
+	int ok, stale;
+
+	pthread_mutex_lock(&nw_lock);
+	ok = nw_stats_ok && strcmp(nw_stats_iface, iface) == 0;
+	if (ok)
+		*out = nw_stats;
+	else
+		memset(out, 0, sizeof(*out));
+	stale = !nw_stamp_ms || now - nw_stamp_ms >= NW_STALE_MS ||
+		strcmp(nw_want_iface, iface) != 0;
+	snprintf(nw_want_iface, sizeof(nw_want_iface), "%s", iface);
+	pthread_mutex_unlock(&nw_lock);
+	if (stale)
+		netwatch_poke();
+	return ok ? 0 : -1;
+}
+
+int
+netmon_gateway(char *out, size_t len)
+{
+	uint64_t now = nw_now_ms();
+	int stale;
+
+	pthread_mutex_lock(&nw_lock);
+	snprintf(out, len, "%s", nw_gateway);
+	stale = !nw_stamp_ms || now - nw_stamp_ms >= NW_STALE_MS;
+	pthread_mutex_unlock(&nw_lock);
+	if (stale)
+		netwatch_poke();
+	return out[0] ? 0 : -1;
+}
+
+int
+netmon_dns(char *out, size_t len)
+{
+	uint64_t now = nw_now_ms();
+	int stale;
+
+	pthread_mutex_lock(&nw_lock);
+	snprintf(out, len, "%s", nw_dns);
+	stale = !nw_stamp_ms || now - nw_stamp_ms >= NW_STALE_MS;
+	pthread_mutex_unlock(&nw_lock);
+	if (stale)
+		netwatch_poke();
+	return out[0] ? 0 : -1;
+}
+
+/* Netwatch worker thread only: raw reads + publish. */
+int
+netmon_worker_sample(void)
+{
+	char iface[IF_NAMESIZE], gw[64], dns[128];
+	NetIfStats st;
+	int st_ok = 0, changed;
+	uint64_t now = nw_now_ms();
+
+	pthread_mutex_lock(&nw_lock);
+	snprintf(iface, sizeof(iface), "%s", nw_want_iface);
+	pthread_mutex_unlock(&nw_lock);
+
+	memset(&st, 0, sizeof(st));
+	if (iface[0])
+		st_ok = nw_stats_read(iface, &st) == 0;
+	st.stamp_ms = now;
+	if (nw_gateway_read(gw, sizeof(gw)) != 0)
+		gw[0] = '\0';
+	if (nw_dns_read(dns, sizeof(dns)) != 0)
+		dns[0] = '\0';
+
+	pthread_mutex_lock(&nw_lock);
+	changed = st_ok != nw_stats_ok ||
+		memcmp(&nw_stats, &st, offsetof(NetIfStats, stamp_ms)) != 0 ||
+		strcmp(nw_stats_iface, iface) != 0 ||
+		strcmp(nw_gateway, gw) != 0 ||
+		strcmp(nw_dns, dns) != 0;
+	nw_stats = st;
+	nw_stats_ok = st_ok;
+	snprintf(nw_stats_iface, sizeof(nw_stats_iface), "%s", iface);
+	snprintf(nw_gateway, sizeof(nw_gateway), "%s", gw);
+	snprintf(nw_dns, sizeof(nw_dns), "%s", dns);
+	nw_stamp_ms = now;
+	pthread_mutex_unlock(&nw_lock);
+	return changed;
 }
 
 void

@@ -49,9 +49,23 @@ void rect_union_add(struct rect_union *ru, const pixman_box32_t *box) {
 	}
 
 	int nrects = (int)(ru->unsorted.size / sizeof(pixman_box32_t));
-	if (nrects >= 1024) {
-		handle_alloc_failure(ru);
-		return;
+	if (nrects >= 256) {
+		// Fold the accumulated rects into the region incrementally, so a
+		// large number of rects never degrades evaluation to the bounding box
+		pixman_region32_t reg;
+		bool ok = pixman_region32_init_rects(&reg, ru->unsorted.data, nrects);
+		if (!ok) {
+			handle_alloc_failure(ru);
+			return;
+		}
+		ok = pixman_region32_union(&ru->region, &ru->region, &reg);
+		pixman_region32_fini(&reg);
+		if (!ok) {
+			handle_alloc_failure(ru);
+			return;
+		}
+		// Reset the unsorted array, keeping its allocation
+		ru->unsorted.size = 0;
 	}
 
 	pixman_box32_t *entry = wl_array_add(&ru->unsorted, sizeof(*entry));

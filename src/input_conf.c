@@ -145,9 +145,28 @@ apply_to_keyboards(void)
 	runtime_xkb_rules.variant = inputconf_variant[0] ? inputconf_variant : NULL;
 	runtime_xkb_rules_set = 1;
 
+	/* Skip the recompile when the effective tuple is unchanged — a
+	 * keymap compile parses the whole XKB rules tree from disk
+	 * (30-100 ms on the compositor thread), and a NixOS /etc swap
+	 * rewrites input.conf on every rebuild even when identical. */
+	{
+		static char last_tuple[512];
+		char tuple[512];
+
+		names = getxkbrules();
+		snprintf(tuple, sizeof(tuple), "%s\x1f%s\x1f%s\x1f%s\x1f%s",
+			names.rules ? names.rules : "",
+			names.model ? names.model : "",
+			names.layout ? names.layout : "",
+			names.variant ? names.variant : "",
+			names.options ? names.options : "");
+		if (strcmp(tuple, last_tuple) == 0)
+			return;
+		snprintf(last_tuple, sizeof(last_tuple), "%s", tuple);
+	}
+
 	if (!(context = xkb_context_new(XKB_CONTEXT_NO_FLAGS)))
 		return;
-	names = getxkbrules();
 	keymap = xkb_keymap_new_from_names(context, &names, XKB_KEYMAP_COMPILE_NO_FLAGS);
 	if (keymap) {
 		wlr_keyboard_set_keymap(&kb_group->wlr_group->keyboard, keymap);

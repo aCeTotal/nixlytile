@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <pwd.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -797,14 +798,23 @@ apply_autostart_diff(char **new_cmds, size_t new_count, int initial)
 			runtime_autostart_pids[j] = old_pids[match_old[j]];
 			continue;
 		}
-		/* Spawn newly added command via shell. */
-		pid_t pid = fork();
-		if (pid == 0) {
-			setsid();
-			execl("/bin/sh", "/bin/sh", "-c", new_cmds[j], (char *)NULL);
-			_exit(127);
-		} else if (pid > 0) {
-			runtime_autostart_pids[j] = pid;
+		/* Spawn newly added command via shell.  posix_spawn, not
+		 * fork(): this runs on the inotify config-reload path and a
+		 * fork copies the compositor's whole page table. */
+		{
+			extern char **environ;
+			char *sh_argv[] = { "/bin/sh", "-c", new_cmds[j], NULL };
+			posix_spawnattr_t at;
+			pid_t pid = -1;
+
+			posix_spawnattr_init(&at);
+#ifdef POSIX_SPAWN_SETSID
+			posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSID);
+#endif
+			if (posix_spawn(&pid, "/bin/sh", NULL, &at, sh_argv,
+					environ) == 0)
+				runtime_autostart_pids[j] = pid;
+			posix_spawnattr_destroy(&at);
 		}
 	}
 	free(old_pids);

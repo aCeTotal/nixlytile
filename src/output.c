@@ -2658,32 +2658,17 @@ diag_xpaint_audit(Monitor *m, uint64_t now)
 	}
 }
 
-void
-rendermon(struct wl_listener *listener, void *data)
+/* Per-vblank prologue: everything that must run exactly once per
+ * vblank, BEFORE the late-latch decision — hitch detector, anim +
+ * converge tick, meter redraw, cross-monitor paint audit.  Split out
+ * of rendermon so the deferred latch re-entry (latch_timer_cb →
+ * rendermon with latch_fired set) does not run it a second time for
+ * the same vblank: that doubled the per-frame bookkeeping in the
+ * fullscreen-game path and split spring steps into uneven substeps
+ * via the last_anim_ns rewrite. */
+static void
+rendermon_prologue(Monitor *m, uint64_t frame_start_ns)
 {
-	Monitor *m = wl_container_of(listener, m, frame);
-	struct wlr_scene_output_state_options opts = {0};
-	struct wlr_output_state state;
-	struct timespec now;
-	uint64_t frame_start_ns;
-	int needs_frame = 0;
-	int allow_tearing = 0;
-	int is_video = 0;
-	int is_game = 0;
-	int is_direct_scanout = 0;
-	int use_frame_pacing = 0;
-
-	m->frame_scheduled = 0;
-
-	/* A latch timer is already scheduled to commit for this vblank —
-	 * a stray frame event (anim tick's schedule_frame) must not race it. */
-	if (m->latch_armed)
-		return;
-
-	frame_start_ns = get_time_ns();
-	now.tv_sec = frame_start_ns / 1000000000ULL;
-	now.tv_nsec = frame_start_ns % 1000000000ULL;
-
 	/* Per-frame hitch detector.  The MON heartbeat is a 1 Hz aggregate,
 	 * far too coarse to see a single late vblank.  If the PREVIOUS frame
 	 * was mid-animation and this vblank arrives >2.5 nominal frames late,
@@ -2758,6 +2743,38 @@ rendermon(struct wl_listener *listener, void *data)
 	/* Cross-monitor paint audit — after the anim/converge tick so it
 	 * sees exactly the scene state this frame's build will render. */
 	diag_xpaint_audit(m, frame_start_ns);
+}
+
+void
+rendermon(struct wl_listener *listener, void *data)
+{
+	Monitor *m = wl_container_of(listener, m, frame);
+	struct wlr_scene_output_state_options opts = {0};
+	struct wlr_output_state state;
+	struct timespec now;
+	uint64_t frame_start_ns;
+	int needs_frame = 0;
+	int allow_tearing = 0;
+	int is_video = 0;
+	int is_game = 0;
+	int is_direct_scanout = 0;
+	int use_frame_pacing = 0;
+
+	m->frame_scheduled = 0;
+
+	/* A latch timer is already scheduled to commit for this vblank —
+	 * a stray frame event (anim tick's schedule_frame) must not race it. */
+	if (m->latch_armed)
+		return;
+
+	frame_start_ns = get_time_ns();
+	now.tv_sec = frame_start_ns / 1000000000ULL;
+	now.tv_nsec = frame_start_ns % 1000000000ULL;
+
+	/* Once per vblank: skipped on the deferred latch re-entry, which
+	 * already ran it when this vblank's frame event fired (latch.c). */
+	if (!m->latch_fired)
+		rendermon_prologue(m, frame_start_ns);
 
 	classify_fullscreen_content(m, &is_game, &is_video, &allow_tearing);
 
@@ -3014,17 +3031,18 @@ rendermon(struct wl_listener *listener, void *data)
 	 * scanout fast path returns for pointer-locked play.  Unlocked
 	 * when the game leaves so the desktop gets its HW plane back. */
 	int game_visible;
+	/* Computed once per pass: reused by the game cursor lock below and
+	 * the frame-done drip near the end — it walks all clients, so the
+	 * old second call doubled that walk every frame. */
+	Client *vis_fsc = fullscreen_visible_on(m);
 	{
 		/* classify_fullscreen_content() keys off focustop(m): a floating
 		 * popup (Steam overlay, notification) on top of a fullscreen
 		 * game reports is_game=0 and would release the lock mid-game.
 		 * Key the lock off "a fullscreen game is visible" instead. */
 		game_visible = is_game;
-		if (!game_visible) {
-			Client *gfsc = fullscreen_visible_on(m);
-			if (gfsc && looks_like_game(gfsc))
-				game_visible = 1;
-		}
+		if (!game_visible && vis_fsc && looks_like_game(vis_fsc))
+			game_visible = 1;
 		if (game_visible && !m->game_cursor_swlock) {
 			m->game_cursor_swlock = 1;
 			wlr_output_lock_software_cursors(m->wlr_output, true);
@@ -3067,7 +3085,7 @@ rendermon(struct wl_listener *listener, void *data)
 		 * path returns. First motion recomposites and it is back. */
 		if (game_cursor_idle_hide && sw_cursor_visible && game_visible &&
 				last_pointer_motion_ms &&
-				monotonic_msec() - last_pointer_motion_ms > 3000)
+				frame_start_ns / 1000000 - last_pointer_motion_ms > 3000)
 			sw_cursor_visible = 0;
 		if (sw_cursor_visible) {
 			if (scene->WLR_PRIVATE.direct_scanout) {
@@ -3580,7 +3598,7 @@ frame_done:
 	int hidden_due =
 		frame_start_ns - m->hidden_done_ns >= 1000000000ULL;
 	{
-		Client *hc, *fsc = fullscreen_visible_on(m);
+		Client *hc, *fsc = vis_fsc;
 		wl_list_for_each(hc, &clients, link) {
 			struct wlr_surface *hs;
 			int starved;
@@ -3591,6 +3609,8 @@ frame_done:
 			 * snapshot renders) and clients fully occluded by a
 			 * fullscreen client (zero visible region → wlroots
 			 * silently drops their callbacks). */
+			/* Cheapest checks first — this runs for every client on
+			 * the monitor every pass. */
 			starved = !hc->scene->node.enabled
 					|| hc->frozen_buffer
 					/* Slide started with no snapshot-able content
@@ -3598,6 +3618,11 @@ frame_done:
 					 * anim_drip in monitor_freeze_clients. */
 					|| hc->anim_drip
 					|| (fsc && hc != fsc)
+					/* Owes us a commit at its tile size: it
+					 * cannot repaint without a frame callback,
+					 * so it cannot converge.  Drip regardless
+					 * of why it is otherwise invisible. */
+					|| client_size_pending(hc)
 					/* Column-maximize (Mod+F): neighbour tiles are
 					 * pushed off-viewport / fully covered — enabled
 					 * scene node but zero visible region, so wlroots
@@ -3607,12 +3632,7 @@ frame_done:
 					|| (hc->column && hc->column->ws &&
 						hc->column->ws->focused_col &&
 						hc->column->ws->focused_col->fullscreen &&
-						hc->column != hc->column->ws->focused_col)
-					/* Owes us a commit at its tile size: it
-					 * cannot repaint without a frame callback,
-					 * so it cannot converge.  Drip regardless
-					 * of why it is otherwise invisible. */
-					|| client_size_pending(hc);
+						hc->column != hc->column->ws->focused_col);
 			if (!starved) {
 				/* Visible client: the scene path serves every
 				 * buffer that has a visible region — but culled
@@ -3625,7 +3645,18 @@ frame_done:
 				if (!m->camera_anim_active && hc->scene->node.enabled
 						&& hc->scene_surface) {
 					struct wlr_surface *vs = client_surface(hc);
-					if (vs && vs->mapped)
+					/* The walk visits every node of the
+					 * subsurface tree.  A client with no
+					 * subsurfaces and no area clip has exactly
+					 * one buffer — the toplevel's own, which is
+					 * visible here and already served by
+					 * wlr_scene_output_send_frame_done — so the
+					 * walk cannot find a culled buffer: skip it
+					 * (the common case for every plain tile). */
+					if (vs && vs->mapped &&
+							(hc->area_clipped ||
+							 !wl_list_empty(&vs->current.subsurfaces_below) ||
+							 !wl_list_empty(&vs->current.subsurfaces_above)))
 						wlr_scene_node_for_each_buffer(
 							&hc->scene_surface->node,
 							culled_buffer_drip_iter, &now);
@@ -4103,9 +4134,19 @@ is_video_content(Client *c)
 {
 	struct wlr_surface *surface;
 	int found = 0;
+	uint64_t now;
 
 	if (!c || !content_type_mgr)
 		return 0;
+
+	/* Memoized: the walk recurses the whole subsurface tree and the
+	 * classify cache-hit path calls this every frame.  Content-type
+	 * changes (players tag the surface only when playback starts) are
+	 * picked up on the ~500 ms recheck — same latency class as the
+	 * detected_video_hz fallback. */
+	now = monotonic_msec();
+	if (c->video_content_ms && now - c->video_content_ms < 500)
+		return c->video_content_verdict;
 
 	surface = client_surface(c);
 	if (!surface)
@@ -4116,6 +4157,8 @@ is_video_content(Client *c)
 	 * instead of just the toplevel. */
 	wlr_surface_for_each_surface(surface, video_content_walk, &found);
 
+	c->video_content_verdict = found;
+	c->video_content_ms = now ? now : 1;
 	return found;
 }
 

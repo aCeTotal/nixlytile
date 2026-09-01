@@ -12,6 +12,7 @@
  * (FPS-limit scroll) update a single card instead of stacking.
  */
 #include <cairo/cairo.h>
+#include <limits.h>
 #include <math.h>
 
 #include "nixlytile.h"
@@ -38,6 +39,9 @@ typedef struct Toast {
 	int target_x, off_x;
 	double x_f, x_vel;
 	int hiding;
+	/* Last x pushed to the scene (INT_MIN = never) — lets the settled
+	 * hold skip the per-frame position + per-glyph clip walk. */
+	int last_set_x;
 	struct wl_event_source *timer;
 } Toast;
 
@@ -324,6 +328,7 @@ osd_show_force(Monitor *m, const char *msg)
 	t->x_f = (double)t->off_x;
 	t->x_vel = 0.0;
 	t->hiding = 0;
+	t->last_set_x = INT_MIN;
 	wlr_scene_node_set_position(&t->tree->node, t->off_x, t->slot_y);
 	toast_clip_to_mon(t, t->off_x);
 
@@ -361,14 +366,23 @@ osd_tick(Monitor *m, double dt, int *still)
 			wlr_scene_node_set_position(&t->tree->node,
 					(int)t->x_f, t->slot_y);
 			toast_clip_to_mon(t, (int)t->x_f);
+			t->last_set_x = (int)t->x_f;
 			*still = 1;
 			continue;
 		}
+		if (t->hiding) {
+			toast_destroy(t);
+			continue;
+		}
+		/* Settled hold: position and clip are already in place —
+		 * re-applying every frame walks one scene node per glyph
+		 * for the whole 3 s hold. */
+		if (t->last_set_x == t->target_x)
+			continue;
 		wlr_scene_node_set_position(&t->tree->node,
 				t->target_x, t->slot_y);
 		toast_clip_to_mon(t, t->target_x);
-		if (t->hiding)
-			toast_destroy(t);
+		t->last_set_x = t->target_x;
 	}
 }
 

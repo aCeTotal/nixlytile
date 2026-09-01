@@ -68,6 +68,7 @@
             librsvg
             gdk-pixbuf
             glib
+            vulkan-headers
           ];
 
           buildScript = pkgs.writeShellApplication {
@@ -128,6 +129,7 @@
               pkgs.librsvg
               pkgs.gdk-pixbuf
               pkgs.glib
+              pkgs.vulkan-headers
             ];
 
             makeFlags = [ "PKG_CONFIG=${pkgs.pkg-config}/bin/pkg-config" ];

@@ -2267,7 +2267,48 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		 */
 		Monitor *cm = xytomon(cursor->x, cursor->y);
 		if (cm && cm->scene_output && !cm->wlr_output->hardware_cursor) {
-			wlr_damage_ring_add_whole(&cm->scene_output->damage_ring);
+			/* Damage only the union of the previous and current
+			 * cursor boxes (covers every back buffer's stale copy
+			 * via buffer-age damage accumulation) instead of the
+			 * whole output — full damage here forces a complete
+			 * composite per motion event, at mouse polling rate.
+			 * Rotated outputs keep the old full-damage path since
+			 * the cursor box would need transform math. */
+			if (cm->wlr_output->transform != WL_OUTPUT_TRANSFORM_NORMAL) {
+				wlr_damage_ring_add_whole(&cm->scene_output->damage_ring);
+			} else {
+				struct wlr_output_cursor *oc;
+				struct wlr_box cur = {0};
+				wl_list_for_each(oc, &cm->wlr_output->cursors, link) {
+					if (!oc->enabled || !oc->visible)
+						continue;
+					struct wlr_box b = {
+						.x = (int)oc->x - oc->hotspot_x,
+						.y = (int)oc->y - oc->hotspot_y,
+						.width = (int)oc->width + 1,
+						.height = (int)oc->height + 1,
+					};
+					if (wlr_box_empty(&cur)) {
+						cur = b;
+					} else {
+						int x2 = cur.x + cur.width > b.x + b.width ?
+							cur.x + cur.width : b.x + b.width;
+						int y2 = cur.y + cur.height > b.y + b.height ?
+							cur.y + cur.height : b.y + b.height;
+						if (b.x < cur.x) cur.x = b.x;
+						if (b.y < cur.y) cur.y = b.y;
+						cur.width = x2 - cur.x;
+						cur.height = y2 - cur.y;
+					}
+				}
+				if (!wlr_box_empty(&cur)) {
+					wlr_damage_ring_add_box(&cm->scene_output->damage_ring, &cur);
+					if (!wlr_box_empty(&cm->swcur_prev_box))
+						wlr_damage_ring_add_box(&cm->scene_output->damage_ring,
+								&cm->swcur_prev_box);
+					cm->swcur_prev_box = cur;
+				}
+			}
 			wlr_output_schedule_frame(cm->wlr_output);
 		}
 

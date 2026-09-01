@@ -186,6 +186,22 @@ struct wlr_buffer *card_panel_buffer(int w, int h);
 struct wlr_buffer *card_shadow_buffer(int w, int h, double radius);
 struct wlr_buffer *card_meter_buffer(int w, int h, const float accent[4],
 		const float *hist, int nhist, int head, double phase);
+/* Persistent ping-pong raster pair for the per-frame meter overlay:
+ * card_meter_raster() draws directly into one of two pre-allocated
+ * CPU buffers (no per-frame surface alloc + memcpy) and returns the
+ * one just drawn — set it on the scene node, do NOT drop it.  The
+ * buffers alternate because the scene may still reference the
+ * previous frame's.  Free with card_meter_raster_finish() when the
+ * meter goes away (also called internally on a size change). */
+typedef struct {
+	struct wlr_buffer *buf[2];
+	int next;
+	int w, h;
+} MeterRaster;
+struct wlr_buffer *card_meter_raster(MeterRaster *mr, int w, int h,
+		const float accent[4], const float *hist, int nhist, int head,
+		double phase);
+void card_meter_raster_finish(MeterRaster *mr);
 /* Spectrum-analyzer frame for the card_wave rect: bottom-aligned bars
  * whose envelope scales with frac, animated by t (seconds). */
 struct wlr_buffer *card_spectrum_buffer(int w, int h, const float accent[4],

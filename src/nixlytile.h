@@ -401,6 +401,9 @@ struct StatusModule {
 	uint32_t tagmask;
 	int hover_tag;
 	float hover_alpha[MAX_TAGS];
+	/* persistent per-box hover highlight rects (tags module): retinted
+	 * in place during the hover fade so the digit textures survive. */
+	struct wlr_scene_rect *hover_rect[MAX_TAGS];
 	/* render dedup — per monitor, NOT global: a shared cache is
 	 * consumed by the first monitor in the loop and leaves modules
 	 * on monitors 2..N stale forever. */
@@ -805,6 +808,7 @@ struct CpuCursorBuffer {
 	uint32_t stride;              /* Row stride in bytes */
 	void *map;                    /* mmap'd CPU pointer */
 	size_t map_size;              /* mmap size */
+	uint32_t used_w, used_h;      /* extent of last written image */
 };
 
 struct CpuSample {
@@ -1126,6 +1130,21 @@ typedef struct {
 	int launcher_child_verdict;   /* Steam ancestry (game mode, monitor pin) */
 	int game_runtime_verdict;     /* any launcher/runtime ancestry */
 	int retro_verdict;            /* is_retro_emulator_client memo */
+	/* Memoized looks_like_game verdict (0=unknown, 1=game, -1=not).
+	 * Keyed on an appid/title/fullscreen hash and re-checked at ~2 Hz
+	 * so late protocol hints (content-type GAME, tearing) are still
+	 * picked up — the full probe runs strcasestr chains + protocol
+	 * lookups per call and rendermon calls it every frame while
+	 * fullscreen content is up. */
+	int game_verdict;
+	uint32_t game_verdict_key;
+	uint64_t game_verdict_ms;
+	/* Memoized is_video_content walk (recursive subsurface walk,
+	 * called per frame from the classify cache-hit path).  Recomputed
+	 * at most every ~500 ms — same latency class as the
+	 * detected_video_hz fallback. */
+	int video_content_verdict;
+	uint64_t video_content_ms;
 	uint32_t resize;
 	int pending_resize_w, pending_resize_h;
 	struct wlr_box old_geom;
@@ -1248,6 +1267,14 @@ typedef struct {
 	 * forever.  A real box change clears it and re-arms the watchdog. */
 	int converge_gave_up;
 	int converge_gave_up_w, converge_gave_up_h;
+	/* Last state the gave-up scale/clip was actually pushed at.  The
+	 * gave-up branch runs every frame for as long as the client is
+	 * open; client_scale_to_box walks the whole scene subtree, pure
+	 * waste unless the tile moved or the client committed a new
+	 * natural size. */
+	int converge_applied;
+	int converge_applied_x, converge_applied_y;
+	int converge_applied_nat_w, converge_applied_nat_h;
 } Client;
 
 /* ── Standalone close anim ───────────────────────────────────────────
@@ -1474,6 +1501,8 @@ struct Monitor {
 	uint64_t last_present_ns;
 	uint64_t present_interval_ns;
 	uint64_t target_present_ns;
+	/* Previous software-cursor box (buffer coords) for targeted damage */
+	struct wlr_box swcur_prev_box;
 	/* Late-latch commit deferral (latch.c) */
 	struct wl_event_source *latch_timer;
 	int latch_armed;                    /* timer pending for this vblank */

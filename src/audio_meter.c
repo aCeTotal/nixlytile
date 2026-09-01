@@ -81,48 +81,23 @@ audio_meter_cb(int fd, uint32_t mask, void *data)
 void
 audio_meter_start(int mic)
 {
-	int fds[2];
+	static const char *argv_mic[] = { "pw-record", "--rate", "8000",
+			"--channels", "1", "--format", "f32", "-", NULL };
+	static const char *argv_sink[] = { "pw-record", "-P",
+			"{ stream.capture.sink = true }", "--rate", "8000",
+			"--channels", "1", "--format", "f32", "-", NULL };
 	pid_t pid;
+	int fd;
 
 	if (meter_fd >= 0 && meter_mic == mic)
 		return;
 	audio_meter_stop();
 
-	if (pipe2(fds, O_CLOEXEC) < 0)
+	/* posix_spawn, not fork(): reached from the popup render path */
+	if (spawn_argv_read(mic ? argv_mic : argv_sink, &pid, &fd) < 0)
 		return;
-	pid = fork();
-	if (pid < 0) {
-		close(fds[0]);
-		close(fds[1]);
-		return;
-	}
-	if (pid == 0) {
-		int devnull = open("/dev/null", O_RDWR);
 
-		dup2(fds[1], STDOUT_FILENO);
-		if (devnull >= 0) {
-			dup2(devnull, STDIN_FILENO);
-			dup2(devnull, STDERR_FILENO);
-			close(devnull);
-		}
-		close(fds[0]);
-		close(fds[1]);
-		setsid();
-		if (mic)
-			execlp("pw-record", "pw-record", "--rate", "8000",
-					"--channels", "1", "--format", "f32",
-					"-", NULL);
-		else
-			execlp("pw-record", "pw-record", "-P",
-					"{ stream.capture.sink = true }",
-					"--rate", "8000", "--channels", "1",
-					"--format", "f32", "-", NULL);
-		_exit(127);
-	}
-
-	close(fds[1]);
-	fcntl(fds[0], F_SETFL, O_NONBLOCK);
-	meter_fd = fds[0];
+	meter_fd = fd;
 	meter_pid = pid;
 	meter_mic = mic;
 	meter_peak = 0.0f;

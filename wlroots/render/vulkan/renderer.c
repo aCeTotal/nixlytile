@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 #include <drm_fourcc.h>
 #include <vulkan/vulkan.h>
@@ -153,6 +154,32 @@ static void nixly_vk_cache_save(const void *data, size_t size) {
 		return;
 	}
 	wlr_log(WLR_INFO, "vulkan pipeline cache: saved %zu bytes to %s", size, path);
+}
+
+static void save_pipeline_cache(struct wlr_vk_renderer *renderer) {
+	if (renderer->pipeline_cache == VK_NULL_HANDLE) {
+		return;
+	}
+
+	VkDevice dev = renderer->dev->dev;
+	size_t cache_size = 0;
+	VkResult save_res = vkGetPipelineCacheData(dev,
+		renderer->pipeline_cache, &cache_size, NULL);
+	if (save_res == VK_SUCCESS && cache_size > 0) {
+		void *cache_data = malloc(cache_size);
+		if (cache_data) {
+			save_res = vkGetPipelineCacheData(dev,
+				renderer->pipeline_cache, &cache_size, cache_data);
+			if (save_res == VK_SUCCESS)
+				nixly_vk_cache_save(cache_data, cache_size);
+			else
+				wlr_vk_error("vkGetPipelineCacheData", save_res);
+			free(cache_data);
+		}
+	}
+
+	renderer->pipeline_cache_dirty = false;
+	clock_gettime(CLOCK_MONOTONIC, &renderer->pipeline_cache_last_save);
 }
 
 bool wlr_renderer_is_vk(struct wlr_renderer *wlr_renderer) {
@@ -543,6 +570,7 @@ VkCommandBuffer vulkan_record_stage_cb(struct wlr_vk_renderer *renderer) {
 
 		VkCommandBufferBeginInfo begin_info = {
 			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+			.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
 		};
 		vkBeginCommandBuffer(renderer->stage.cb->vk, &begin_info);
 	}
@@ -736,6 +764,16 @@ static struct wlr_vk_command_buffer *get_command_buffer(
 	}
 
 	stage_buffer_gc(renderer, current_point);
+
+	// Periodically persist the pipeline cache so a crash doesn't lose
+	// this session's pipeline compilations
+	if (renderer->pipeline_cache_dirty) {
+		struct timespec now;
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		if (now.tv_sec - renderer->pipeline_cache_last_save.tv_sec >= 30) {
+			save_pipeline_cache(renderer);
+		}
+	}
 
 	// Destroy textures for completed command buffers
 	for (size_t i = 0; i < VULKAN_COMMAND_BUFFERS_CAP; i++) {
@@ -1225,7 +1263,7 @@ static bool buffer_export_sync_file(struct wlr_vk_renderer *renderer, struct wlr
 				.fd = dmabuf.fd[i],
 				.events = (flags & DMA_BUF_SYNC_WRITE) ? POLLOUT : POLLIN,
 			};
-			int timeout_ms = 1000;
+			int timeout_ms = 100;
 			int ret = poll(&pollfd, 1, timeout_ms);
 			if (ret < 0) {
 				wlr_log_errno(WLR_ERROR, "Failed to wait for DMA-BUF fence");
@@ -1444,23 +1482,7 @@ static void vulkan_destroy(struct wlr_renderer *wlr_renderer) {
 	vkDestroyImage(dev->dev, renderer->dummy3d_image, NULL);
 	vkFreeMemory(dev->dev, renderer->dummy3d_mem, NULL);
 
-	if (renderer->pipeline_cache != VK_NULL_HANDLE) {
-		size_t cache_size = 0;
-		VkResult save_res = vkGetPipelineCacheData(dev->dev,
-			renderer->pipeline_cache, &cache_size, NULL);
-		if (save_res == VK_SUCCESS && cache_size > 0) {
-			void *cache_data = malloc(cache_size);
-			if (cache_data) {
-				save_res = vkGetPipelineCacheData(dev->dev,
-					renderer->pipeline_cache, &cache_size, cache_data);
-				if (save_res == VK_SUCCESS)
-					nixly_vk_cache_save(cache_data, cache_size);
-				else
-					wlr_vk_error("vkGetPipelineCacheData", save_res);
-				free(cache_data);
-			}
-		}
-	}
+	save_pipeline_cache(renderer);
 	vkDestroyPipelineCache(dev->dev, renderer->pipeline_cache, NULL);
 	vkDestroySemaphore(dev->dev, renderer->timeline_semaphore, NULL);
 	vkDestroyPipelineLayout(dev->dev, renderer->output_pipe_layout, NULL);
@@ -1470,6 +1492,7 @@ static void vulkan_destroy(struct wlr_renderer *wlr_renderer) {
 	vkDestroySampler(dev->dev, renderer->output_sampler_lut3d, NULL);
 
 	if (renderer->read_pixels_cache.initialized) {
+		vkUnmapMemory(dev->dev, renderer->read_pixels_cache.dst_img_memory);
 		vkFreeMemory(dev->dev, renderer->read_pixels_cache.dst_img_memory, NULL);
 		vkDestroyImage(dev->dev, renderer->read_pixels_cache.dst_image, NULL);
 	}
@@ -1505,12 +1528,24 @@ bool vulkan_read_pixels(struct wlr_vk_renderer *vk_renderer,
 		return false;
 	}
 	VkFormat dst_format = wlr_vk_format->vk;
-	VkFormatProperties dst_format_props = {0}, src_format_props = {0};
-	vkGetPhysicalDeviceFormatProperties(vk_renderer->dev->phdev, dst_format, &dst_format_props);
-	vkGetPhysicalDeviceFormatProperties(vk_renderer->dev->phdev, src_format, &src_format_props);
+	bool blit_supported;
+	if (vk_renderer->read_pixels_cache.initialized &&
+			vk_renderer->read_pixels_cache.drm_format == drm_format &&
+			vk_renderer->read_pixels_cache.src_format == src_format) {
+		blit_supported = vk_renderer->read_pixels_cache.blit_supported;
+	} else {
+		VkFormatProperties dst_format_props = {0}, src_format_props = {0};
+		vkGetPhysicalDeviceFormatProperties(vk_renderer->dev->phdev, dst_format, &dst_format_props);
+		vkGetPhysicalDeviceFormatProperties(vk_renderer->dev->phdev, src_format, &src_format_props);
 
-	bool blit_supported = src_format_props.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT &&
-		dst_format_props.linearTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT;
+		blit_supported = src_format_props.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT &&
+			dst_format_props.linearTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT;
+		if (vk_renderer->read_pixels_cache.initialized &&
+				vk_renderer->read_pixels_cache.drm_format == drm_format) {
+			vk_renderer->read_pixels_cache.src_format = src_format;
+			vk_renderer->read_pixels_cache.blit_supported = blit_supported;
+		}
+	}
 	if (!blit_supported && src_format != dst_format) {
 		wlr_log(WLR_ERROR, "vulkan_read_pixels: blit unsupported and no manual "
 					"conversion available from src to dst format.");
@@ -1520,6 +1555,7 @@ bool vulkan_read_pixels(struct wlr_vk_renderer *vk_renderer,
 	VkResult res;
 	VkImage dst_image;
 	VkDeviceMemory dst_img_memory;
+	void *dst_img_map;
 	bool use_cached = vk_renderer->read_pixels_cache.initialized &&
 		vk_renderer->read_pixels_cache.drm_format == drm_format &&
 		vk_renderer->read_pixels_cache.width == width &&
@@ -1528,6 +1564,7 @@ bool vulkan_read_pixels(struct wlr_vk_renderer *vk_renderer,
 	if (use_cached) {
 		dst_image = vk_renderer->read_pixels_cache.dst_image;
 		dst_img_memory = vk_renderer->read_pixels_cache.dst_img_memory;
+		dst_img_map = vk_renderer->read_pixels_cache.map;
 	} else {
 		VkImageCreateInfo image_create_info = {
 			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -1578,7 +1615,15 @@ bool vulkan_read_pixels(struct wlr_vk_renderer *vk_renderer,
 			goto free_memory;
 		}
 
+		// Map once here; the mapping stays alive for the cache's lifetime
+		res = vkMapMemory(dev, dst_img_memory, 0, VK_WHOLE_SIZE, 0, &dst_img_map);
+		if (res != VK_SUCCESS) {
+			wlr_vk_error("vkMapMemory", res);
+			goto free_memory;
+		}
+
 		if (vk_renderer->read_pixels_cache.initialized) {
+			vkUnmapMemory(dev, vk_renderer->read_pixels_cache.dst_img_memory);
 			vkFreeMemory(dev, vk_renderer->read_pixels_cache.dst_img_memory, NULL);
 			vkDestroyImage(dev, vk_renderer->read_pixels_cache.dst_image, NULL);
 		}
@@ -1586,8 +1631,11 @@ bool vulkan_read_pixels(struct wlr_vk_renderer *vk_renderer,
 		vk_renderer->read_pixels_cache.drm_format = drm_format;
 		vk_renderer->read_pixels_cache.dst_image = dst_image;
 		vk_renderer->read_pixels_cache.dst_img_memory = dst_img_memory;
+		vk_renderer->read_pixels_cache.map = dst_img_map;
 		vk_renderer->read_pixels_cache.width = width;
 		vk_renderer->read_pixels_cache.height = height;
+		vk_renderer->read_pixels_cache.src_format = src_format;
+		vk_renderer->read_pixels_cache.blit_supported = blit_supported;
 	}
 
 	VkCommandBuffer cb = vulkan_record_stage_cb(vk_renderer);
@@ -1693,12 +1741,7 @@ bool vulkan_read_pixels(struct wlr_vk_renderer *vk_renderer,
 	VkSubresourceLayout img_sub_layout;
 	vkGetImageSubresourceLayout(dev, dst_image, &img_sub_res, &img_sub_layout);
 
-	void *v;
-	res = vkMapMemory(dev, dst_img_memory, 0, VK_WHOLE_SIZE, 0, &v);
-	if (res != VK_SUCCESS) {
-		wlr_vk_error("vkMapMemory", res);
-		return false;
-	}
+	void *v = dst_img_map;
 
 	VkMappedMemoryRange mem_range = {
 		.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
@@ -1709,7 +1752,6 @@ bool vulkan_read_pixels(struct wlr_vk_renderer *vk_renderer,
 	res = vkInvalidateMappedMemoryRanges(dev, 1, &mem_range);
 	if (res != VK_SUCCESS) {
 		wlr_vk_error("vkInvalidateMappedMemoryRanges", res);
-		vkUnmapMemory(dev, dst_img_memory);
 		return false;
 	}
 
@@ -1725,8 +1767,8 @@ bool vulkan_read_pixels(struct wlr_vk_renderer *vk_renderer,
 		}
 	}
 
-	vkUnmapMemory(dev, dst_img_memory);
-	// Don't need to free anything else, since memory and image are cached
+	// Don't need to unmap or free anything, since the mapping, memory and
+	// image are cached
 	return true;
 
 free_memory:
@@ -2225,6 +2267,7 @@ struct wlr_vk_pipeline *setup_get_or_create_pipeline(
 		free(pipeline);
 		return NULL;
 	}
+	renderer->pipeline_cache_dirty = true;
 
 	wl_list_insert(&setup->pipelines, &pipeline->link);
 	return pipeline;
@@ -2347,6 +2390,7 @@ static bool init_blend_to_output_pipeline(struct wlr_vk_renderer *renderer,
 		wlr_vk_error("failed to create vulkan pipelines:", res);
 		return false;
 	}
+	renderer->pipeline_cache_dirty = true;
 
 	return true;
 }
@@ -2711,18 +2755,16 @@ static struct wlr_vk_render_format_setup *find_or_create_render_setup(
 		VkSubpassDependency deps[] = {
 			{
 				.srcSubpass = VK_SUBPASS_EXTERNAL,
-				.srcStageMask = VK_PIPELINE_STAGE_HOST_BIT |
-					VK_PIPELINE_STAGE_TRANSFER_BIT |
+				.srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT |
 					VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT |
 					VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-				.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT |
-					VK_ACCESS_TRANSFER_WRITE_BIT |
+				.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT |
 					VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
 				.dstSubpass = 0,
-				.dstStageMask = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+				.dstStageMask = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+					VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 				.dstAccessMask = VK_ACCESS_UNIFORM_READ_BIT |
 					VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
-					VK_ACCESS_INDIRECT_COMMAND_READ_BIT |
 					VK_ACCESS_SHADER_READ_BIT,
 			},
 			{
@@ -2840,18 +2882,16 @@ static struct wlr_vk_render_format_setup *find_or_create_render_setup(
 		VkSubpassDependency deps[] = {
 			{
 				.srcSubpass = VK_SUBPASS_EXTERNAL,
-				.srcStageMask = VK_PIPELINE_STAGE_HOST_BIT |
-					VK_PIPELINE_STAGE_TRANSFER_BIT |
+				.srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT |
 					VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT |
 					VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-				.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT |
-					VK_ACCESS_TRANSFER_WRITE_BIT |
+				.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT |
 					VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
 				.dstSubpass = 0,
-				.dstStageMask = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+				.dstStageMask = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+					VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 				.dstAccessMask = VK_ACCESS_UNIFORM_READ_BIT |
 					VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
-					VK_ACCESS_INDIRECT_COMMAND_READ_BIT |
 					VK_ACCESS_SHADER_READ_BIT,
 			},
 			{
@@ -2981,6 +3021,7 @@ struct wlr_renderer *vulkan_renderer_create_for_device(struct wlr_vk_device *dev
 	if (cache_init_size > 0) {
 		wlr_log(WLR_INFO, "vulkan pipeline cache: loaded %zu bytes", cache_init_size);
 	}
+	clock_gettime(CLOCK_MONOTONIC, &renderer->pipeline_cache_last_save);
 
 	VkSemaphoreTypeCreateInfoKHR semaphore_type_info = {
 		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO_KHR,

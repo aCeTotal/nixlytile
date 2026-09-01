@@ -1596,19 +1596,15 @@ make_fill_buffer(int w, int h, const float col[4])
  * elapsed since head was pushed: bars slide left continuously so the
  * scroll stays smooth between pushes, the newest bar entering from the
  * right edge. */
-struct wlr_buffer *
-card_meter_buffer(int w, int h, const float accent[4],
+static void
+card_meter_draw(cairo_t *cr, int w, int h, const float accent[4],
 		const float *hist, int nhist, int head, double phase)
 {
-	cairo_surface_t *cs;
-	cairo_t *cr = cairo_buf_begin(w, h, &cs);
 	const int bar_w = 3, gap = 3;
 	int nbars = (w + gap) / (bar_w + gap);
 	double mid = h / 2.0;
 	double slide;
 
-	if (!cr)
-		return NULL;
 	if (phase < 0.0)
 		phase = 0.0;
 	if (phase > 2.0)
@@ -1632,8 +1628,92 @@ card_meter_buffer(int w, int h, const float accent[4],
 				0.28 + 0.72 * amp);
 		cairo_fill(cr);
 	}
+}
+
+struct wlr_buffer *
+card_meter_buffer(int w, int h, const float accent[4],
+		const float *hist, int nhist, int head, double phase)
+{
+	cairo_surface_t *cs;
+	cairo_t *cr = cairo_buf_begin(w, h, &cs);
+
+	if (!cr)
+		return NULL;
+	card_meter_draw(cr, w, h, accent, hist, nhist, head, phase);
 	cairo_destroy(cr);
 	return cairo_buf_finish(cs);
+}
+
+void
+card_meter_raster_finish(MeterRaster *mr)
+{
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		if (mr->buf[i])
+			wlr_buffer_drop(mr->buf[i]);
+		mr->buf[i] = NULL;
+	}
+	mr->next = 0;
+	mr->w = mr->h = 0;
+}
+
+/* Per-frame meter path: rendered every displayed frame, so the generic
+ * cairo_buf_begin/finish route (surface alloc + zero, ecalloc, full
+ * memcpy, buffer freed right after the scene takes it) was pure
+ * per-frame churn.  Draw with cairo directly over a persistent pixman
+ * buffer's pixels instead; two buffers alternate because the scene may
+ * still hold the previous frame's. */
+struct wlr_buffer *
+card_meter_raster(MeterRaster *mr, int w, int h, const float accent[4],
+		const float *hist, int nhist, int head, double phase)
+{
+	struct PixmanBuffer *buf;
+	cairo_surface_t *cs;
+	cairo_t *cr;
+	struct wlr_buffer *out;
+
+	if (w <= 0 || h <= 0)
+		return NULL;
+	if (mr->w != w || mr->h != h) {
+		card_meter_raster_finish(mr);
+		mr->w = w;
+		mr->h = h;
+	}
+	if (!mr->buf[mr->next]) {
+		int stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, w);
+		buf = ecalloc(1, sizeof(*buf));
+		buf->data = ecalloc(1, (size_t)stride * (size_t)h);
+		buf->image = pixman_image_create_bits(PIXMAN_a8r8g8b8, w, h,
+				buf->data, stride);
+		buf->drm_format = DRM_FORMAT_ARGB8888;
+		buf->stride = stride;
+		buf->owns_data = 1;
+		wlr_buffer_init(&buf->base, &pixman_buffer_impl, w, h);
+		mr->buf[mr->next] = &buf->base;
+	} else {
+		buf = wl_container_of(mr->buf[mr->next], buf, base);
+	}
+
+	cs = cairo_image_surface_create_for_data(buf->data,
+			CAIRO_FORMAT_ARGB32, w, h, buf->stride);
+	if (cairo_surface_status(cs) != CAIRO_STATUS_SUCCESS) {
+		cairo_surface_destroy(cs);
+		return NULL;
+	}
+	cr = cairo_create(cs);
+	/* reused pixels — clear the previous frame's bars */
+	cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+	cairo_paint(cr);
+	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+	card_meter_draw(cr, w, h, accent, hist, nhist, head, phase);
+	cairo_destroy(cr);
+	cairo_surface_flush(cs);
+	cairo_surface_destroy(cs);
+
+	out = mr->buf[mr->next];
+	mr->next ^= 1;
+	return out;
 }
 
 /* Per-bar spectrum level: two incommensurate sines beat against each

@@ -1410,12 +1410,10 @@ kill_processes_with_name(const char *name)
 
 	closedir(dir);
 	if (killed == 0 && found > 0) {
-		/* Fallback: use pkill (non-blocking) */
-		if (fork() == 0) {
-			setsid();
-			execlp("pkill", "pkill", "-9", "-x", name, (char *)NULL);
-			_exit(127);
-		}
+		/* Fallback: pkill via posix_spawn — fork() here copies the
+		 * compositor's page table (incl. GPU mappings) on a click. */
+		const char *const argv[] = { "pkill", "-9", "-x", name, NULL };
+		spawn_cmd_async(argv);
 	}
 	return killed;
 }
@@ -2663,15 +2661,44 @@ battery_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 	return 1; /* click landed inside the popup — always consume */
 }
 
+/* Retint the persistent hover rects in place: hover_alpha is deliberately
+ * NOT part of the render signature, so a fade tick never tears down and
+ * re-rasterizes the tag digits (visible as numberless boxes). */
+static void
+updatehoverrects(StatusModule *module)
+{
+	int n;
+
+	if (!module || !module->tree)
+		return;
+
+	for (n = 0; n < module->box_count; n++) {
+		float col[4];
+
+		if (!module->hover_rect[n])
+			continue;
+		col[0] = statusbar_tag_hover_bg[0];
+		col[1] = statusbar_tag_hover_bg[1];
+		col[2] = statusbar_tag_hover_bg[2];
+		col[3] = statusbar_tag_hover_bg[3] *
+			module->hover_alpha[module->box_tag[n]];
+		wlr_scene_rect_set_color(module->hover_rect[n], col);
+	}
+}
+
 void
 renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 {
 	Workspace *ws;
 	Client *c;
+	Workspace *ws_at[TAGCOUNT];
+	int ws_count = 0;
+	uint32_t fs_occ = 0;
 	int padding, inner, spacing, outer_pad;
 	int box_h, box_y, total_w = 0;
-	int x, count = 0, pos = -1;
+	int x, count = 0, pos;
 	struct wlr_scene_buffer *scene_buf;
+	struct wlr_scene_rect *hrect;
 	struct wlr_buffer *buffer;
 	struct { int tag; int active; } shown[TAGCOUNT];
 	int shown_count = 0, n;
@@ -2697,23 +2724,29 @@ renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 
 	/* One box per Niri-style workspace, in stack order.  Shown when the
 	 * workspace has content (tiles or a fullscreen client) or is active.
-	 * box_tag stores the workspace's position in m->workspaces. */
+	 * box_tag stores the workspace's position in m->workspaces.  The
+	 * fullscreen check is a single pass over clients into a bitmap —
+	 * the old per-workspace client walk was O(workspaces x clients). */
 	wl_list_for_each(ws, &m->workspaces, link) {
-		int active, occupied;
-
-		if (++pos >= TAGCOUNT)
+		if (ws_count >= TAGCOUNT)
 			break;
-
-		occupied = workspace_has_clients(ws);
-		if (!occupied) {
-			wl_list_for_each(c, &clients, link) {
-				if (c->fs_ws == ws) {
-					occupied = 1;
-					break;
-				}
+		ws_at[ws_count++] = ws;
+	}
+	wl_list_for_each(c, &clients, link) {
+		if (!c->fs_ws)
+			continue;
+		for (n = 0; n < ws_count; n++) {
+			if (ws_at[n] == c->fs_ws) {
+				fs_occ |= 1u << n;
+				break;
 			}
 		}
-		active = (ws == m->active_ws);
+	}
+	for (pos = 0; pos < ws_count; pos++) {
+		int active = (ws_at[pos] == m->active_ws);
+		int occupied = workspace_has_clients(ws_at[pos]) ||
+			(fs_occ & (1u << pos)) != 0;
+
 		if (!occupied && !active && pos != 0)
 			continue;
 
@@ -2738,10 +2771,12 @@ renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 	SIG_MIX(spacing);
 	SIG_MIX(outer_pad);
 	SIG_MIX(shown_count);
+	/* hover_alpha is intentionally NOT mixed in: the fade retints the
+	 * persistent hover rects via updatehoverrects() so a fade tick never
+	 * invalidates the row and re-rasterizes the digits. */
 	for (n = 0; n < shown_count; n++) {
 		SIG_MIX(shown[n].tag);
 		SIG_MIX(shown[n].active);
-		SIG_MIX(lround(module->hover_alpha[shown[n].tag] * 255.0f));
 	}
 	for (n = 0; n < 4; n++) {
 		SIG_MIX(lround(statusbar_tag_bg[n] * 255.0f));
@@ -2795,9 +2830,20 @@ renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 
 		drawrect(module->tree, x, box_y, box_w, box_h, bgcol);
 
-		if (!active && module->hover_alpha[i] > 0.0f) {
-			drawhoverrect(module->tree, x, box_y, box_w, box_h,
-					statusbar_tag_hover_bg, module->hover_alpha[i]);
+		/* Persistent hover highlight — created even at alpha 0 so the
+		 * fade can retint it in place without re-rendering the row. */
+		hrect = NULL;
+		if (!active) {
+			float col[4];
+
+			col[0] = statusbar_tag_hover_bg[0];
+			col[1] = statusbar_tag_hover_bg[1];
+			col[2] = statusbar_tag_hover_bg[2];
+			col[3] = statusbar_tag_hover_bg[3] * module->hover_alpha[i];
+			hrect = wlr_scene_rect_create(module->tree, box_w, box_h,
+					col);
+			if (hrect)
+				wlr_scene_node_set_position(&hrect->node, x, box_y);
 		}
 
 		buffer = statusbar_buffer_from_glyph(glyph);
@@ -2819,6 +2865,7 @@ renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 			module->box_x[idx] = outer_pad + total_w - box_w;
 			module->box_w[idx] = box_w;
 			module->box_tag[idx] = i;
+			module->hover_rect[idx] = hrect;
 			module->tagmask |= (1u << i);
 			module->box_count++;
 		}
@@ -2931,38 +2978,31 @@ cpuaverage(void)
 double
 ramused_mb(void)
 {
-	/* Sum of process RSS — excludes kernel slab, page cache and other
-	 * reclaimable memory, so the bar shows what processes actually hold. */
-	DIR *dir;
-	struct dirent *de;
-	unsigned long long pages = 0;
-	long page_kb = sysconf(_SC_PAGESIZE) / 1024;
+	/* MemTotal - MemAvailable from /proc/meminfo — one file read.  The
+	 * old per-process /proc/<pid>/statm walk cost hundreds of
+	 * fopen/fscanf on the compositor thread every status tick. */
+	FILE *fp;
+	char line[128];
+	unsigned long long total_kb = 0, avail_kb = 0;
 
-	dir = opendir("/proc");
-	if (!dir)
+	fp = fopen("/proc/meminfo", "r");
+	if (!fp)
 		return -1.0;
 
-	while ((de = readdir(dir))) {
-		char path[64];
-		FILE *fp;
-		unsigned long long resident;
-
-		if (de->d_name[0] < '0' || de->d_name[0] > '9')
-			continue;
-		snprintf(path, sizeof(path), "/proc/%s/statm", de->d_name);
-		fp = fopen(path, "r");
-		if (!fp)
-			continue;
-		if (fscanf(fp, "%*s %llu", &resident) == 1)
-			pages += resident;
-		fclose(fp);
+	while (fgets(line, sizeof(line), fp)) {
+		if (total_kb == 0 && strncmp(line, "MemTotal:", 9) == 0)
+			sscanf(line + 9, "%llu", &total_kb);
+		else if (avail_kb == 0 && strncmp(line, "MemAvailable:", 13) == 0)
+			sscanf(line + 13, "%llu", &avail_kb);
+		if (total_kb && avail_kb)
+			break;
 	}
-	closedir(dir);
+	fclose(fp);
 
-	if (pages == 0)
+	if (total_kb == 0 || avail_kb == 0 || avail_kb > total_kb)
 		return -1.0;
 
-	return (double)pages * page_kb / 1024.0;
+	return (double)(total_kb - avail_kb) / 1024.0;
 }
 
 int
@@ -3287,6 +3327,14 @@ int
 findbacklightdevice(char *brightness_path, size_t brightness_len,
 		char *max_path, size_t max_len)
 {
+	/* Probe once and cache the verdict — this is called per brightness
+	 * scroll notch and from refreshstatuslight, and the opendir + stat
+	 * + access sweep is wasted work when the answer never changes.
+	 * Re-probe only if the cached device disappeared. */
+	static int cached = -1; /* -1 unprobed, 0 none, 1 found */
+	static int cached_writable;
+	static char cached_bpath[PATH_MAX];
+	static char cached_mpath[PATH_MAX];
 	DIR *dir;
 	struct dirent *ent;
 	char w_bpath[PATH_MAX] = {0};
@@ -3299,9 +3347,29 @@ findbacklightdevice(char *brightness_path, size_t brightness_len,
 	if (!brightness_path || !max_path || brightness_len == 0 || max_len == 0)
 		return 0;
 
+	if (cached == 1 && access(cached_bpath, R_OK) != 0)
+		cached = -1;
+
+	if (cached >= 0) {
+		if (!cached) {
+			backlight_writable = 0;
+			return 0;
+		}
+		if (snprintf(brightness_path, brightness_len, "%s",
+					cached_bpath) >= (int)brightness_len)
+			return 0;
+		if (snprintf(max_path, max_len, "%s",
+					cached_mpath) >= (int)max_len)
+			return 0;
+		backlight_writable = cached_writable;
+		return 1;
+	}
+
 	dir = opendir("/sys/class/backlight");
-	if (!dir)
+	if (!dir) {
+		cached = 0;
 		return 0;
+	}
 
 	backlight_writable = 0;
 
@@ -3347,6 +3415,10 @@ findbacklightdevice(char *brightness_path, size_t brightness_len,
 		if (snprintf(max_path, max_len, "%s", w_mpath) >= (int)max_len)
 			return 0;
 		backlight_writable = 1;
+		snprintf(cached_bpath, sizeof(cached_bpath), "%s", w_bpath);
+		snprintf(cached_mpath, sizeof(cached_mpath), "%s", w_mpath);
+		cached_writable = 1;
+		cached = 1;
 		return 1;
 	}
 
@@ -3356,47 +3428,45 @@ findbacklightdevice(char *brightness_path, size_t brightness_len,
 		if (snprintf(max_path, max_len, "%s", r_mpath) >= (int)max_len)
 			return 0;
 		backlight_writable = 0;
+		snprintf(cached_bpath, sizeof(cached_bpath), "%s", r_bpath);
+		snprintf(cached_mpath, sizeof(cached_mpath), "%s", r_mpath);
+		cached_writable = 0;
+		cached = 1;
 		return 1;
 	}
 
+	cached = 0;
 	return 0;
 }
 
-int
-readulong_cmd(const char *cmd, unsigned long long *out)
+/* Async brightness read for machines without a sysfs backlight: the old
+ * popen(brightnessctl)/popen(light -G) pair blocked the compositor per
+ * scroll notch and per status tick.  The reply lands in
+ * light_cached_percent and re-renders the light module. */
+static int bl_cmd_fetch_inflight;
+static uint64_t bl_cmd_fetch_ms;
+
+static void
+bl_cmd_fetch_done(const char *out, size_t len, void *data)
 {
-	FILE *fp;
-	char buf[64];
-	unsigned long long val;
-	char *end = NULL;
+	double percent;
 
-	if (!cmd || !out)
-		return -1;
-
-	fp = popen(cmd, "r");
-	if (!fp)
-		return -1;
-	if (!fgets(buf, sizeof(buf), fp)) {
-		pclose(fp);
-		return -1;
-	}
-	pclose(fp);
-
-	errno = 0;
-	val = strtoull(buf, &end, 10);
-	if (errno != 0)
-		return -1;
-	if (end == buf)
-		return -1;
-	*out = val;
-	return 0;
+	(void)len;
+	(void)data;
+	bl_cmd_fetch_inflight = 0;
+	bl_cmd_fetch_ms = monotonic_msec();
+	if (sscanf(out, "%lf", &percent) != 1 || percent < 0.0)
+		return;
+	if (percent > 100.0)
+		percent = 100.0;
+	light_cached_percent = percent;
+	refreshstatuslight();
 }
 
 double
 backlight_percent(void)
 {
 	unsigned long long cur, max;
-	double percent;
 
 	/* sysfs first — two file reads, no fork.  The brightnessctl /
 	 * light fallbacks each cost a fork+exec and this runs on every
@@ -3411,31 +3481,21 @@ backlight_percent(void)
 		}
 	}
 
-	/* Fallback to brightnessctl */
-	if (readulong_cmd("brightnessctl g", &cur) == 0 &&
-			readulong_cmd("brightnessctl m", &max) == 0 && max > 0) {
-		if (cur > max)
-			cur = max;
-		light_cached_percent = ((double)cur * 100.0) / (double)max;
-		return light_cached_percent;
-	}
-
-	/* Fallback to light -G */
+	/* No sysfs device: read via brightnessctl/light in the background
+	 * and return the cached value immediately — bl_cmd_fetch_done()
+	 * re-renders when the answer lands. */
 	{
-		FILE *fp = popen("light -G", "r");
-		if (fp) {
-			if (fscanf(fp, "%lf", &percent) == 1) {
-				pclose(fp);
-				if (percent < 0.0)
-					percent = -1.0;
-				if (percent > 100.0)
-					percent = 100.0;
-				if (percent >= 0.0)
-					light_cached_percent = percent;
-				return percent;
-			}
-			pclose(fp);
-		}
+		uint64_t now = monotonic_msec();
+
+		if (!bl_cmd_fetch_inflight && now - bl_cmd_fetch_ms > 2000 &&
+				fetch_async(
+					"c=$(brightnessctl g 2>/dev/null); "
+					"m=$(brightnessctl m 2>/dev/null); "
+					"if [ -n \"$c\" ] && [ -n \"$m\" ] && [ \"$m\" -gt 0 ] 2>/dev/null; "
+					"then echo $((c * 100 / m)); "
+					"else light -G 2>/dev/null; fi",
+					bl_cmd_fetch_done, NULL) == 0)
+			bl_cmd_fetch_inflight = 1;
 	}
 
 	return light_cached_percent;
@@ -3469,18 +3529,17 @@ set_backlight_percent(double percent)
 		}
 	}
 
-	/* Use external tools (non-blocking) */
+	/* External tools via posix_spawn — fork() here copies the
+	 * compositor's page table (incl. GPU mappings) on every brightness
+	 * scroll notch.  The shell keeps the brightnessctl→light fallback. */
 	{
-		char arg[32];
-		snprintf(arg, sizeof(arg), "%.2f%%", percent);
-
-		if (fork() == 0) {
-			setsid();
-			execlp("brightnessctl", "brightnessctl", "set", arg, (char *)NULL);
-			/* If brightnessctl fails, try light */
-			snprintf(arg, sizeof(arg), "%.2f", percent);
-			execlp("light", "light", "-S", arg, (char *)NULL);
-			_exit(127);
+		char cmd[96];
+		snprintf(cmd, sizeof(cmd),
+				"brightnessctl set %.2f%% || light -S %.2f",
+				percent, percent);
+		{
+			const char *const argv[] = { "/bin/sh", "-c", cmd, NULL };
+			spawn_cmd_async(argv);
 		}
 		light_cached_percent = percent;
 		return 0;
@@ -3517,12 +3576,17 @@ set_backlight_relative(double delta_percent)
 		snprintf(light_arg, sizeof(light_arg), "%.2f", -delta_percent);
 	}
 
-	if (fork() == 0) {
-		setsid();
-		execlp("brightnessctl", "brightnessctl", "set", arg, (char *)NULL);
-		/* If brightnessctl fails, try light */
-		execlp("light", "light", delta_percent > 0 ? "-A" : "-U", light_arg, (char *)NULL);
-		_exit(127);
+	/* posix_spawn, not fork(): this runs per scroll notch and a fork
+	 * copies the compositor's page table incl. GPU mappings.  The shell
+	 * keeps the brightnessctl→light fallback. */
+	{
+		char cmd[96];
+		snprintf(cmd, sizeof(cmd), "brightnessctl set %s || light %s %s",
+				arg, delta_percent > 0 ? "-A" : "-U", light_arg);
+		{
+			const char *const argv[] = { "/bin/sh", "-c", cmd, NULL };
+			spawn_cmd_async(argv);
+		}
 	}
 
 	return 0;
@@ -4974,6 +5038,7 @@ refreshstatustags(void)
 		m->statusbar.tags.hover_tag = -1;
 		for (int i = 0; i < TAGCOUNT; i++)
 			m->statusbar.tags.hover_alpha[i] = 0.0f;
+		updatehoverrects(&m->statusbar.tags);
 		positionstatusmodules(m);
 	}
 }
@@ -5277,6 +5342,7 @@ updatehoverfade(void *data)
 
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
 		renderworkspaces(m, &m->statusbar.tags, barh);
+		updatehoverrects(&m->statusbar.tags);
 		positionstatusmodules(m);
 	}
 
@@ -6040,6 +6106,7 @@ updatetaghover(Monitor *m, double cx, double cy)
 		for (int i = 0; i < TAGCOUNT; i++)
 			tags->hover_alpha[i] = (tags->hover_tag == i) ? 1.0f : 0.0f;
 		renderworkspaces(m, tags, bar_h);
+		updatehoverrects(tags);
 		positionstatusmodules(m);
 		return;
 	}

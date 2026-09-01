@@ -294,6 +294,29 @@ stop_tracking_cursor_surface(void)
 	tracked_cursor_surface = NULL;
 }
 
+/* Clear only the bands the previous image occupied beyond the new one.
+ * The dumb-buffer mapping is write-combined; a full map_size memset per
+ * cursor commit (256 KB at 256x256 caps) costs real time on the
+ * compositor thread, while the stale area is usually a thin band. */
+static void
+cursor_clear_stale(struct CpuCursorBuffer *buf, uint32_t new_w, uint32_t new_h)
+{
+	uint32_t prev_w = buf->used_w, prev_h = buf->used_h, y;
+	uint8_t *map = buf->map;
+
+	if (prev_w > new_w)
+		for (y = 0; y < prev_h; y++)
+			memset(map + y * buf->stride + new_w * 4, 0,
+				(prev_w - new_w) * 4);
+	if (prev_h > new_h) {
+		uint32_t w = MIN(new_w, prev_w);
+		for (y = new_h; y < prev_h; y++)
+			memset(map + y * buf->stride, 0, w * 4);
+	}
+	buf->used_w = new_w;
+	buf->used_h = new_h;
+}
+
 static void
 upload_cursor_surface(struct wlr_surface *surface, int hx, int hy)
 {
@@ -302,6 +325,9 @@ upload_cursor_surface(struct wlr_surface *surface, int hx, int hy)
 	uint32_t src_format, copy_w, copy_h, y;
 	size_t src_stride;
 	uint8_t *dst;
+	uint32_t opaque = 0;
+	int opaque_known = 0;
+	char alpha_str[16];
 
 	if (!buf)
 		return;
@@ -329,7 +355,7 @@ upload_cursor_surface(struct wlr_surface *surface, int hx, int hy)
 		copy_w = MIN((uint32_t)tex->width, buf->width);
 		copy_h = MIN((uint32_t)tex->height, buf->height);
 
-		memset(buf->map, 0, buf->map_size);
+		cursor_clear_stale(buf, copy_w, copy_h);
 
 		if (!wlr_texture_read_pixels(tex,
 				&(struct wlr_texture_read_pixels_options){
@@ -348,33 +374,36 @@ upload_cursor_surface(struct wlr_surface *surface, int hx, int hy)
 
 		wlr_texture_destroy(own_tex);
 	} else {
-		memset(buf->map, 0, buf->map_size);
-
 		copy_w = MIN((uint32_t)surface->current.width, buf->width);
 		copy_h = MIN((uint32_t)surface->current.height, buf->height);
 
+		cursor_clear_stale(buf, copy_w, copy_h);
+
 		dst = (uint8_t *)buf->map;
 
+		/* Count nonzero alpha from the source while it is cache-hot;
+		 * reading it back from the write-combined mapping would be an
+		 * uncached load per byte. */
 		for (y = 0; y < copy_h; y++) {
-			memcpy(dst + y * buf->stride,
-				(uint8_t *)src_data + y * src_stride,
-				copy_w * 4);
+			const uint8_t *srow = (const uint8_t *)src_data + y * src_stride;
+			uint32_t px;
+			memcpy(dst + y * buf->stride, srow, copy_w * 4);
+			for (px = 0; px < copy_w; px++)
+				if (srow[px * 4 + 3])
+					opaque++;
 		}
+		opaque_known = 1;
 
 		wlr_buffer_end_data_ptr_access(&surface->buffer->base);
 	}
 
-	{
-		uint32_t px, opaque = 0;
-		const uint8_t *p = (const uint8_t *)buf->map;
-		for (y = 0; y < copy_h; y++)
-			for (px = 0; px < copy_w; px++)
-				if (p[y * buf->stride + px * 4 + 3])
-					opaque++;
-		game_log("CURSOR: client image %ux%u hotspot=%d,%d "
-			"nonzero_alpha=%u buf=%s", copy_w, copy_h, hx, hy, opaque,
-			buf == cpu_cursor_buf ? "A" : "B");
-	}
+	if (opaque_known)
+		snprintf(alpha_str, sizeof(alpha_str), "%u", opaque);
+	else
+		snprintf(alpha_str, sizeof(alpha_str), "n/a");
+	game_log("CURSOR: client image %ux%u hotspot=%d,%d "
+		"nonzero_alpha=%s buf=%s", copy_w, copy_h, hx, hy, alpha_str,
+		buf == cpu_cursor_buf ? "A" : "B");
 
 	cursor_commit_buffer(buf, (int32_t)hx, (int32_t)hy);
 }
@@ -442,10 +471,10 @@ cursor_paint_xcursor(const char *name)
 
 	img = xcur->images[0];
 
-	memset(buf->map, 0, buf->map_size);
-
 	copy_w = MIN(img->width, buf->width);
 	copy_h = MIN(img->height, buf->height);
+
+	cursor_clear_stale(buf, copy_w, copy_h);
 	src_stride = img->width * 4;
 
 	src = img->buffer;

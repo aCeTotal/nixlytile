@@ -5,11 +5,12 @@
  * module group (tags/steam/net/tray) and the right module group, and
  * only while a terminal client has keyboard focus.
  */
-#include <fcntl.h>
-#include <limits.h>
-
 #include "nixlytile.h"
 #include "client.h"
+
+#include <fcntl.h>
+#include <limits.h>
+#include <pthread.h>
 
 int
 is_terminal_client(Client *c)
@@ -112,16 +113,18 @@ ssh_target(pid_t pid, char *out, size_t n)
 	return 0;
 }
 
+/* Runs on the ti_worker thread only: every step is /proc I/O, and the
+ * readlink of a cwd on a dead network mount (NFS/sshfs) can block
+ * uninterruptibly — that must never stall the compositor thread. */
 static void
-terminfo_collect(Client *c, char *out, size_t n)
+terminfo_collect(pid_t cur, char *out, size_t n)
 {
 	char comm[64], target[128], cwd[PATH_MAX], path[64];
-	pid_t cur, next, deepest;
+	pid_t next, deepest;
 	ssize_t l;
 	int depth;
 
 	out[0] = '\0';
-	cur = client_get_pid(c);
 	if (cur <= 1)
 		return;
 
@@ -165,6 +168,79 @@ terminfo_collect(Client *c, char *out, size_t n)
 		snprintf(tail, sizeof(tail), "…%s", out + strlen(out) - 46);
 		snprintf(out, n, "%s", tail);
 	}
+}
+
+/* Worker thread: owns all /proc reads.  The main thread only hands it
+ * the focused terminal's pid and renders the last published string. */
+#define TI_POLL_MS 500
+
+static pthread_mutex_t ti_lock = PTHREAD_MUTEX_INITIALIZER;
+static char ti_text[128];          /* published result */
+static pid_t ti_pid;               /* pid to inspect; 0 = no terminal */
+static int ti_pipe[2] = { -1, -1 };
+static int ti_started;
+
+static void *
+ti_worker(void *arg)
+{
+	char local[128], last[128] = "";
+
+	(void)arg;
+	pthread_setname_np(pthread_self(), "nixly-terminfo");
+	for (;;) {
+		pid_t pid;
+
+		pthread_mutex_lock(&ti_lock);
+		pid = ti_pid;
+		pthread_mutex_unlock(&ti_lock);
+
+		local[0] = '\0';
+		if (pid > 1)
+			terminfo_collect(pid, local, sizeof(local));
+
+		if (strcmp(local, last) != 0) {
+			snprintf(last, sizeof(last), "%s", local);
+			pthread_mutex_lock(&ti_lock);
+			snprintf(ti_text, sizeof(ti_text), "%s", local);
+			pthread_mutex_unlock(&ti_lock);
+			(void)!write(ti_pipe[1], "t", 1);
+		}
+		usleep(TI_POLL_MS * 1000);
+	}
+	return NULL;
+}
+
+static int
+ti_event(int fd, uint32_t mask, void *data)
+{
+	char drain[8];
+
+	(void)mask; (void)data;
+	while (read(fd, drain, sizeof(drain)) > 0)
+		;
+	refreshstatusterminfo();
+	return 0;
+}
+
+static void
+ti_start(void)
+{
+	pthread_t tid;
+	pthread_attr_t attr;
+
+	if (ti_started)
+		return;
+	ti_started = 1;
+	if (pipe2(ti_pipe, O_CLOEXEC | O_NONBLOCK) < 0)
+		return;
+	wl_event_loop_add_fd(event_loop, ti_pipe[0], WL_EVENT_READABLE,
+			ti_event, NULL);
+	pthread_attr_init(&attr);
+	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+	if (pthread_create(&tid, &attr, ti_worker, NULL) != 0)
+		wlr_log(WLR_ERROR, "terminfo: worker start failed — "
+			"terminal context disabled");
+	pthread_attr_destroy(&attr);
 }
 
 /* The terminal that actually holds keyboard focus.  Not focustop(): in
@@ -223,10 +299,18 @@ refreshstatusterminfo(void)
 	Client *c;
 	int barh;
 
-	text[0] = '\0';
+	ti_start();
+
+	/* Hand the worker the focused terminal's pid; render whatever it
+	 * last published (at most TI_POLL_MS stale). */
 	c = focused_terminal();
+	pthread_mutex_lock(&ti_lock);
+	ti_pid = c ? client_get_pid(c) : 0;
 	if (c)
-		terminfo_collect(c, text, sizeof(text));
+		snprintf(text, sizeof(text), "%s", ti_text);
+	else
+		text[0] = '\0';
+	pthread_mutex_unlock(&ti_lock);
 
 	wl_list_for_each(m, &mons, link) {
 		const char *t = (m == selmon) ? text : "";

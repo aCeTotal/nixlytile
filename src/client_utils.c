@@ -250,8 +250,6 @@ steam_launch_bigpicture(void)
 void
 steam_kill(void)
 {
-	pid_t pid;
-
 	if (!is_process_running("steam")) {
 		return;
 	}
@@ -259,29 +257,23 @@ steam_kill(void)
 	wlr_log(WLR_INFO, "Killing Steam process");
 
 	/* Use pkill to kill all steam processes */
-	pid = fork();
-	if (pid == 0) {
-		setsid();
-		execlp("pkill", "pkill", "-9", "steam", (char *)NULL);
-		_exit(127);
+	{
+		static const char *argv[] = { "pkill", "-9", "steam", NULL };
+		spawn_cmd_async(argv);
 	}
 }
 
 void
 live_tv_kill(void)
 {
-	pid_t pid;
-	int status;
-
-	/* Kill Chrome/Chromium kiosk instances used for streaming (NRK, Netflix, Viaplay, TV2 Play, F1TV) */
-	pid = fork();
-	if (pid == 0) {
-		setsid();
-		execlp("pkill", "pkill", "-9", "-f", "(google-chrome|chromium).*--kiosk.*(nrk\\.no|netflix\\.com|viaplay\\.no|tv2\\.no|f1tv)", (char *)NULL);
-		_exit(127);
-	}
-	if (pid > 0)
-		waitpid(pid, &status, 0);
+	/* Kill Chrome/Chromium kiosk instances used for streaming (NRK,
+	 * Netflix, Viaplay, TV2 Play, F1TV).  Fire-and-forget: pkill -f
+	 * walks all of /proc, and waiting for it blocked the compositor
+	 * thread 50-300 ms on this interactive path. */
+	static const char *argv[] = { "pkill", "-9", "-f",
+		"(google-chrome|chromium).*--kiosk.*(nrk\\.no|netflix\\.com|viaplay\\.no|tv2\\.no|f1tv)",
+		NULL };
+	spawn_cmd_async(argv);
 }
 
 /*
@@ -652,8 +644,8 @@ is_browser_client(Client *c)
 	return 0;
 }
 
-int
-looks_like_game(Client *c)
+static int
+looks_like_game_uncached(Client *c)
 {
 	const char *app;
 	pid_t pid;
@@ -762,6 +754,46 @@ looks_like_game(Client *c)
 	}
 
 	return 0;
+}
+
+/* FNV-1a over a (possibly NULL) string, chained via h. */
+static uint32_t
+game_verdict_hash(const char *s, uint32_t h)
+{
+	for (; s && *s; s++)
+		h = (h ^ (unsigned char)*s) * 16777619u;
+	return h;
+}
+
+/* Memoized front-end: rendermon calls this every frame while fullscreen
+ * content is up, and the uncached probe runs strcasestr/strcasecmp
+ * chains plus content-type + tearing protocol lookups per call.  The
+ * verdict is invalidated the moment appid/title or the fullscreen state
+ * changes (hash key), and re-checked at ~2 Hz regardless so protocol
+ * hints that arrive after map (content-type GAME, tearing ASYNC) are
+ * still picked up promptly.  The expensive /proc ancestry walks stay
+ * memoized inside the uncached probe as before. */
+int
+looks_like_game(Client *c)
+{
+	uint32_t key;
+	uint64_t now;
+
+	if (!c)
+		return 0;
+
+	key = game_verdict_hash(client_get_appid(c),
+			game_verdict_hash(client_get_title(c),
+			c->isfullscreen ? 2166136261u : 2166136262u));
+	now = monotonic_msec();
+	if (c->game_verdict != 0 && key == c->game_verdict_key &&
+			now - c->game_verdict_ms < 500)
+		return c->game_verdict > 0;
+
+	c->game_verdict = looks_like_game_uncached(c) ? 1 : -1;
+	c->game_verdict_key = key;
+	c->game_verdict_ms = now;
+	return c->game_verdict > 0;
 }
 
 /* Window-rule `fullscreen false`: ignore the client's own fullscreen

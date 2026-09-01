@@ -93,17 +93,11 @@ pr_outputs_set(int enabled)
 static void
 pr_spawn_lock(void)
 {
-	pid_t pid;
+	static const char *argv[] = { "nixly-lockscreen", NULL };
 
 	if (locked)
 		return;
-	pid = fork();
-	if (pid == 0) {
-		setsid();
-		execlp("nixly-lockscreen", "nixly-lockscreen", NULL);
-		_exit(127);
-	}
-	(void)pid;
+	spawn_cmd_async(argv);
 }
 
 /* Stage 2: lockscreen has had time to map — go fully dark. */

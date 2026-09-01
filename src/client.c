@@ -1,6 +1,7 @@
 #include "nixlytile.h"
 #include "client.h"
 #include "diag.h"
+#include <pthread.h>
 
 /* ── Pending launch tracking ──────────────────────────────────────────
  * When the modal launcher or spawn() starts a program, we record the
@@ -3046,14 +3047,41 @@ proc_autokill_eligible(const char *name)
 	return 0;
 }
 
+static void *
+autokill_sweep(void *arg)
+{
+	char *name = arg;
+	char comm[64];
+	DIR *d;
+	struct dirent *de;
+
+	pthread_setname_np(pthread_self(), "nixly-autokill");
+	d = opendir("/proc");
+	if (d) {
+		while ((de = readdir(d)) != NULL) {
+			pid_t pid;
+			if (de->d_name[0] < '1' || de->d_name[0] > '9')
+				continue;
+			pid = (pid_t)atoi(de->d_name);
+			if (pid <= 1)
+				continue;
+			read_proc_comm(pid, comm, sizeof(comm));
+			normalize_proc_name(comm);
+			if (strcasecmp(comm, name) == 0)
+				kill(pid, SIGTERM);
+		}
+		closedir(d);
+	}
+	free(name);
+	return NULL;
+}
+
 static int
 autokill_timer_cb(void *data)
 {
 	PendingAutoKill *ak = data;
 	Client *c;
 	char comm[64];
-	DIR *d;
-	struct dirent *de;
 
 	/* Check if any client still has this process name */
 	wl_list_for_each(c, &clients, link) {
@@ -3068,22 +3096,20 @@ autokill_timer_cb(void *data)
 		}
 	}
 
-	/* No windows remain — SIGTERM all processes with this name */
-	d = opendir("/proc");
-	if (d) {
-		while ((de = readdir(d)) != NULL) {
-			pid_t pid;
-			if (de->d_name[0] < '1' || de->d_name[0] > '9')
-				continue;
-			pid = (pid_t)atoi(de->d_name);
-			if (pid <= 1)
-				continue;
-			read_proc_comm(pid, comm, sizeof(comm));
-			normalize_proc_name(comm);
-			if (strcasecmp(comm, ak->name) == 0)
-				kill(pid, SIGTERM);
-		}
-		closedir(d);
+	/* No windows remain — SIGTERM all processes with this name.  The
+	 * /proc sweep (~600 × open/read/close of comm) runs on a detached
+	 * thread; only the cheap tracked-client check above needs the
+	 * compositor thread. */
+	{
+		char *name_copy = strdup(ak->name);
+		pthread_t tid;
+		pthread_attr_t attr;
+		pthread_attr_init(&attr);
+		pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+		if (!name_copy ||
+		    pthread_create(&tid, &attr, autokill_sweep, name_copy) != 0)
+			free(name_copy);
+		pthread_attr_destroy(&attr);
 	}
 
 cleanup:

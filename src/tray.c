@@ -3,8 +3,180 @@
 #include "client.h"
 #include "popup_card.h"
 
-/* NewStatus fan-out deferred during game mode; drained on exit. */
-static int tray_status_stale;
+#include <errno.h>
+#include <poll.h>
+#include <pthread.h>
+
+/* All sd_bus traffic lives on a worker thread (tw_worker): every SNI
+ * property Get, Introspect walk, dbusmenu fetch and icon-theme disk scan
+ * is a serial blocking call, and running them on the compositor loop
+ * froze input whenever an app (re)appeared on the session bus (Discord
+ * restart, Steam bootstrap).  The worker owns tray_bus and a private
+ * item list (tw_items); the main thread owns tray_items (read directly
+ * by statusbar.c/input.c) and only mutates it by applying TwEvent
+ * updates posted through tw_events + a wakeup pipe.  Main→worker
+ * requests (activate, menu open/click, icon retries) travel as TwCmd
+ * through tw_cmds + a second pipe into the worker's poll loop.  Same
+ * shape as battwatch.c/fanwatch.c. */
+
+enum {
+	TW_EV_UPSERT,
+	TW_EV_REMOVE,
+	TW_EV_MENU,
+};
+
+typedef struct {
+	int kind;
+	char service[128];
+	/* upsert */
+	char path[128];
+	char label[64];
+	char sni_id[64];
+	char menu[128];
+	int has_menu;
+	int passive;
+	int icon_valid;              /* icon_* fields below carry a result */
+	int icon_failed;
+	struct wlr_buffer *icon_buf; /* ownership moves to the main thread */
+	int icon_w, icon_h;
+	int icon_pad_l, icon_pad_r;
+	/* menu open result */
+	void *mon;                   /* Monitor identity; NULL = use selmon */
+	int icon_x;
+	char menu_path[128];
+	struct wl_list entries;      /* TrayMenuEntry list (may be empty) */
+	struct wl_list link;
+} TwEvent;
+
+enum {
+	TW_CMD_ACTIVATE,
+	TW_CMD_MENU_OPEN,
+	TW_CMD_MENU_PROBE,
+	TW_CMD_MENU_EVENT,
+	TW_CMD_LOAD_ICON,
+	TW_CMD_REFRESH_STATUS,
+};
+
+typedef struct {
+	int kind;
+	char service[128];
+	char menu_path[128];
+	char method[24];   /* activate */
+	int button;
+	int x, y;
+	int id;            /* menu entry id */
+	uint32_t time_msec;
+	void *mon;         /* menu open: Monitor identity */
+	int icon_x;
+	struct wl_list link;
+} TwCmd;
+
+static pthread_t tw_thread;
+static pthread_mutex_t tw_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct wl_list tw_events;    /* guarded by tw_lock */
+static struct wl_list tw_cmds;      /* guarded by tw_lock */
+static int tw_run;                  /* guarded by tw_lock */
+static int tw_dead;                 /* bus lost — drop cmds; guarded */
+static int tw_pipe[2] = { -1, -1 }; /* worker → main: state changed */
+static int tw_wake[2] = { -1, -1 }; /* main → worker: command queued */
+
+static struct wl_list tw_items;     /* worker-private TrayItem list */
+
+/* Worker-private negative icon-lookup cache: a failed theme scan costs
+ * up to ~1e5 stat() calls, so remember names that resolved to nothing
+ * and skip the rescan until a NewIcon signal clears the cache. */
+static char tw_neg_icons[32][128];
+static size_t tw_neg_count;
+
+/* Menu-open request in flight (main thread): don't re-enqueue a fetch
+ * for the same item on every pointer-motion dwell tick. */
+static char tw_menu_pending[128];
+static uint64_t tw_menu_pending_ms;
+
+static int tw_item_load_icon(TrayItem *it);
+
+static TrayItem *
+tw_find_witem(const char *service)
+{
+	TrayItem *it;
+
+	wl_list_for_each(it, &tw_items, link)
+		if (strcmp(it->service, service) == 0)
+			return it;
+	return NULL;
+}
+
+static int
+tw_queue_cmd(const TwCmd *c)
+{
+	TwCmd *cmd;
+	int ok;
+
+	pthread_mutex_lock(&tw_lock);
+	ok = tw_run && !tw_dead;
+	pthread_mutex_unlock(&tw_lock);
+	if (!ok)
+		return -1;
+
+	cmd = ecalloc(1, sizeof(*cmd));
+	*cmd = *c;
+	pthread_mutex_lock(&tw_lock);
+	wl_list_insert(tw_cmds.prev, &cmd->link);
+	pthread_mutex_unlock(&tw_lock);
+	if (tw_wake[1] >= 0)
+		(void)!write(tw_wake[1], "t", 1);
+	return 0;
+}
+
+static TwEvent *
+tw_event_new(int kind, const char *service)
+{
+	TwEvent *ev = ecalloc(1, sizeof(*ev));
+
+	ev->kind = kind;
+	wl_list_init(&ev->entries);
+	if (service)
+		snprintf(ev->service, sizeof(ev->service), "%s", service);
+	return ev;
+}
+
+static void
+tw_post_event(TwEvent *ev)
+{
+	pthread_mutex_lock(&tw_lock);
+	wl_list_insert(tw_events.prev, &ev->link);
+	pthread_mutex_unlock(&tw_lock);
+	if (tw_pipe[1] >= 0)
+		(void)!write(tw_pipe[1], "t", 1);
+}
+
+/* Publish one worker item's current state to the main thread.  With
+ * take_icon the freshly loaded icon buffer moves into the event — after
+ * that only the main thread ever touches it (wlr_buffer refcounting is
+ * not thread-safe, so ownership transfer instead of sharing). */
+static void
+tw_post_upsert(TrayItem *wit, int take_icon)
+{
+	TwEvent *ev = tw_event_new(TW_EV_UPSERT, wit->service);
+
+	snprintf(ev->path, sizeof(ev->path), "%s", wit->path);
+	snprintf(ev->label, sizeof(ev->label), "%s", wit->label);
+	snprintf(ev->sni_id, sizeof(ev->sni_id), "%s", wit->sni_id);
+	snprintf(ev->menu, sizeof(ev->menu), "%s", wit->menu);
+	ev->has_menu = wit->has_menu;
+	ev->passive = wit->passive;
+	if (take_icon) {
+		ev->icon_valid = 1;
+		ev->icon_failed = wit->icon_failed;
+		ev->icon_buf = wit->icon_buf;
+		wit->icon_buf = NULL;
+		ev->icon_w = wit->icon_w;
+		ev->icon_h = wit->icon_h;
+		ev->icon_pad_l = wit->icon_pad_l;
+		ev->icon_pad_r = wit->icon_pad_r;
+	}
+	tw_post_event(ev);
+}
 
 /* Menu chrome (panel, hover pill, marks) comes from the shared popup
  * card renderer so tray menus match the statusbar module popups. */
@@ -281,7 +453,7 @@ tray_find_icon_path(const char *name, const char *theme_path, int desired_h,
 	const char *xdg_data_dirs;
 	char best_path[PATH_MAX] = {0};
 	/* static: 256 * PATH_MAX is too large for the stack, and icon lookup
-	 * runs single-threaded on the compositor event loop. */
+	 * runs single-threaded on the tray worker thread. */
 	static char pathbufs[256][PATH_MAX];
 	size_t pathcount = 0;
 	int found = 0;
@@ -483,8 +655,29 @@ out:
 	return (val && *val) ? 0 : -1;
 }
 
-int
-tray_item_load_icon(TrayItem *it)
+/* Worker side: tray_find_icon_path filtered through the negative cache,
+ * so an icon name that already failed a full theme scan is rejected
+ * without paying the stat() storm again. */
+static int
+tw_find_icon_cached(const char *name, const char *theme_path, int desired_h,
+		char *out, size_t outlen)
+{
+	for (size_t i = 0; i < tw_neg_count; i++)
+		if (strcmp(tw_neg_icons[i], name) == 0)
+			return -1;
+	if (tray_find_icon_path(name, theme_path, desired_h, out, outlen) == 0)
+		return 0;
+	if (tw_neg_count >= LENGTH(tw_neg_icons))
+		tw_neg_count = 0; /* full: recycle — stale hits only cost a rescan */
+	snprintf(tw_neg_icons[tw_neg_count], sizeof(tw_neg_icons[0]), "%s", name);
+	tw_neg_count++;
+	return -1;
+}
+
+/* Worker side: blocking property Gets + icon theme scan.  The result
+ * buffer is handed to the main thread via tw_post_upsert(it, 1). */
+static int
+tw_item_load_icon(TrayItem *it)
 {
 	sd_bus_message *reply = NULL;
 	sd_bus_error err = SD_BUS_ERROR_NULL;
@@ -519,7 +712,7 @@ tray_item_load_icon(TrayItem *it)
 				sizeof(icon_theme_path));
 
 		if (tray_get_string_property(it, "AttentionIconName", icon_name, sizeof(icon_name)) == 0 &&
-				tray_find_icon_path(icon_name, icon_theme_path, desired_h,
+				tw_find_icon_cached(icon_name, icon_theme_path, desired_h,
 					icon_path, sizeof(icon_path)) == 0 &&
 				tray_load_icon_file(it, icon_path, desired_h) == 0) {
 			it->icon_failed = 0;
@@ -529,7 +722,7 @@ tray_item_load_icon(TrayItem *it)
 		memset(icon_name, 0, sizeof(icon_name));
 		memset(icon_path, 0, sizeof(icon_path));
 		if (tray_get_string_property(it, "IconName", icon_name, sizeof(icon_name)) == 0 &&
-				tray_find_icon_path(icon_name, icon_theme_path, desired_h,
+				tw_find_icon_cached(icon_name, icon_theme_path, desired_h,
 					icon_path, sizeof(icon_path)) == 0 &&
 				tray_load_icon_file(it, icon_path, desired_h) == 0) {
 			it->icon_failed = 0;
@@ -1394,43 +1587,44 @@ tray_menu_render(Monitor *m)
 	}
 }
 
-__attribute__((unused)) int
-tray_menu_open_at(Monitor *m, TrayItem *it, int icon_x)
+/* Worker side: fetch one item's dbusmenu layout and post the parsed
+ * entry list to the main thread (empty list = no menu / fetch failed,
+ * which the main thread turns into the hover failed-latch). */
+static void
+tw_menu_fetch(TrayItem *wit, void *mon, int icon_x)
 {
 	sd_bus_message *req = NULL, *reply = NULL;
 	sd_bus_error err = SD_BUS_ERROR_NULL;
 	char *props[] = {"label", "enabled", "type", "children-display",
 		"toggle-type", "toggle-state", "visible", NULL};
-	int r;
+	int r = -1;
 	int max_depth = 3; /* limited depth for safety; can be raised if needed */
-	TrayMenu *menu;
-	int desired_x, max_x;
+	int had_menu = wit->has_menu;
+	TrayMenu shell = {0};
+	TwEvent *ev;
 	const char *sig;
 
-	if (!m || !m->showbar || !m->statusbar.tray_menu.tree || !it || !tray_bus)
-		return 0;
-	if (!m->statusbar.area.width || !m->statusbar.area.height)
-		return 0;
+	wl_list_init(&shell.entries);
+	ev = tw_event_new(TW_EV_MENU, wit->service);
+	ev->mon = mon;
+	ev->icon_x = icon_x;
 
-	if (tray_item_get_menu_path(it) != 0 || !it->has_menu)
-		return 0;
-
-	menu = &m->statusbar.tray_menu;
-	tray_menu_hide_all();
-	tray_menu_clear(menu);
-	wl_list_init(&menu->entries);
-	if (!menu->tree) {
-		return 0;
+	/* Re-read the Menu property every open (apps create it lazily). */
+	if (tray_item_get_menu_path(wit) != 0 || !wit->has_menu) {
+		if (wit->has_menu != had_menu)
+			tw_post_upsert(wit, 0);
+		goto post;
 	}
-	if (max_depth < 1)
-		max_depth = 1;
+	if (wit->has_menu != had_menu)
+		tw_post_upsert(wit, 0);
+	snprintf(ev->menu_path, sizeof(ev->menu_path), "%s", wit->menu);
 
 	/* Let the app refresh its menu before we fetch the layout
 	 * (waybar/libdbusmenu do the same); result is advisory. */
-	sd_bus_call_method(tray_bus, it->service, it->menu,
+	sd_bus_call_method(tray_bus, wit->service, wit->menu,
 			"com.canonical.dbusmenu", "AboutToShow", NULL, NULL, "i", 0);
 
-	r = sd_bus_message_new_method_call(tray_bus, &req, it->service, it->menu,
+	r = sd_bus_message_new_method_call(tray_bus, &req, wit->service, wit->menu,
 			"com.canonical.dbusmenu", "GetLayout");
 	if (r < 0)
 		goto fail;
@@ -1445,7 +1639,7 @@ tray_menu_open_at(Monitor *m, TrayItem *it, int icon_x)
 	if (r < 0)
 		goto fail;
 
-	r = sd_bus_call(tray_bus, req, 500 * 1000, &err, &reply); /* 500ms: kjører i hovedloopen */
+	r = sd_bus_call(tray_bus, req, 500 * 1000, &err, &reply);
 	if (r < 0)
 		goto fail;
 
@@ -1460,50 +1654,68 @@ tray_menu_open_at(Monitor *m, TrayItem *it, int icon_x)
 		if ((r = sd_bus_message_read(reply, "u", &revision)) < 0)
 			goto fail;
 		(void)revision;
-		if ((r = tray_menu_parse_node(reply, menu, 0, max_depth)) < 0)
+		if ((r = tray_menu_parse_node(reply, &shell, 0, max_depth)) < 0)
 			goto fail;
 	}
 
-	sd_bus_message_unref(req);
-	sd_bus_message_unref(reply);
-	sd_bus_error_free(&err);
-
-	if (wl_list_empty(&menu->entries))
-		goto fail;
-
-	snprintf(menu->service, sizeof(menu->service), "%s", it->service);
-	snprintf(menu->menu_path, sizeof(menu->menu_path), "%s", it->menu);
-
-	tray_menu_render(m);
-	if (menu->width <= 0 || menu->height <= 0)
-		goto fail;
-
-	desired_x = icon_x - menu->width / 2;
-	if (desired_x < 0)
-		desired_x = 0;
-	max_x = m->statusbar.area.width - menu->width;
-	if (max_x < 0)
-		max_x = 0;
-	if (desired_x > max_x)
-		desired_x = max_x;
-
-	menu->x = desired_x;
-	menu->y = statusbar_popup_y(m);
-	wlr_scene_node_set_position(&menu->tree->node, menu->x, menu->y);
-	wlr_scene_node_set_enabled(&menu->tree->node, 1);
-	menu->visible = 1;
-	return 1;
+	wl_list_insert_list(&ev->entries, &shell.entries);
+	wl_list_init(&shell.entries);
+	goto post;
 
 fail:
 	wlr_log(WLR_ERROR, "tray: GetLayout failed for %s%s: %s",
-			it->service, it->menu, err.message ? err.message : strerror(-r));
+			wit->service, wit->menu, err.message ? err.message : strerror(-r));
+	{
+		TrayMenuEntry *e, *tmp;
+		wl_list_for_each_safe(e, tmp, &shell.entries, link) {
+			wl_list_remove(&e->link);
+			free(e);
+		}
+	}
+post:
 	if (req)
 		sd_bus_message_unref(req);
 	if (reply)
 		sd_bus_message_unref(reply);
 	sd_bus_error_free(&err);
-	tray_menu_hide_all();
-	return 0;
+	tw_post_event(ev);
+}
+
+/* Main thread: request the dropdown for an item.  The layout fetch runs
+ * on the worker; the menu appears when the TW_EV_MENU result lands.
+ * Returns 1 when a fetch is under way (or already pending), 0 when the
+ * item has no dbusmenu — callers then fall back to SNI ContextMenu. */
+__attribute__((unused)) int
+tray_menu_open_at(Monitor *m, TrayItem *it, int icon_x)
+{
+	TwCmd c = {0};
+	uint64_t now = monotonic_msec();
+
+	if (!m || !m->showbar || !m->statusbar.tray_menu.tree || !it)
+		return 0;
+	if (!m->statusbar.area.width || !m->statusbar.area.height)
+		return 0;
+	if (!it->has_menu) {
+		/* No dbusmenu last we looked; re-probe off-thread so an app
+		 * that creates its menu lazily works on a later click. */
+		c.kind = TW_CMD_MENU_PROBE;
+		snprintf(c.service, sizeof(c.service), "%s", it->service);
+		tw_queue_cmd(&c);
+		return 0;
+	}
+	if (strcmp(tw_menu_pending, it->service) == 0 &&
+			now - tw_menu_pending_ms < 1000)
+		return 1; /* fetch already in flight */
+
+	c.kind = TW_CMD_MENU_OPEN;
+	snprintf(c.service, sizeof(c.service), "%s", it->service);
+	c.mon = m;
+	c.icon_x = icon_x;
+	if (tw_queue_cmd(&c) != 0)
+		return 0;
+	snprintf(tw_menu_pending, sizeof(tw_menu_pending), "%s", it->service);
+	tw_menu_pending_ms = now;
+	return 1;
 }
 
 /* Hover-open dwell state: rest on a tray icon and its dropdown opens by
@@ -1633,22 +1845,20 @@ tray_menu_entry_at(Monitor *m, int lx, int ly)
 	return NULL;
 }
 
-int
-tray_menu_send_event(TrayMenu *menu, TrayMenuEntry *entry, uint32_t time_msec)
+/* Worker side: deliver a dbusmenu "clicked" event. */
+static void
+tw_do_menu_event(TwCmd *cmd)
 {
 	sd_bus_message *msg = NULL, *reply = NULL;
 	sd_bus_error err = SD_BUS_ERROR_NULL;
 	int r;
 
-	if (!tray_bus || !menu || !entry || !menu->service[0] || !menu->menu_path[0])
-		return -EINVAL;
-
-	r = sd_bus_message_new_method_call(tray_bus, &msg, menu->service, menu->menu_path,
-			"com.canonical.dbusmenu", "Event");
+	r = sd_bus_message_new_method_call(tray_bus, &msg, cmd->service,
+			cmd->menu_path, "com.canonical.dbusmenu", "Event");
 	if (r < 0)
 		goto out;
 
-	r = sd_bus_message_append(msg, "is", entry->id, "clicked");
+	r = sd_bus_message_append(msg, "is", cmd->id, "clicked");
 	if (r < 0)
 		goto out;
 
@@ -1662,11 +1872,11 @@ tray_menu_send_event(TrayMenu *menu, TrayMenuEntry *entry, uint32_t time_msec)
 	if (r < 0)
 		goto out;
 
-	r = sd_bus_message_append(msg, "u", time_msec);
+	r = sd_bus_message_append(msg, "u", cmd->time_msec);
 	if (r < 0)
 		goto out;
 
-	r = sd_bus_call(tray_bus, msg, 500 * 1000, &err, &reply); /* 500ms: kjører i hovedloopen */
+	r = sd_bus_call(tray_bus, msg, 500 * 1000, &err, &reply);
 
 out:
 	if (msg)
@@ -1674,7 +1884,27 @@ out:
 	if (reply)
 		sd_bus_message_unref(reply);
 	sd_bus_error_free(&err);
-	return r < 0 ? r : 0;
+	if (r < 0)
+		wlr_log(WLR_ERROR, "tray: menu Event failed for %s%s: %s",
+				cmd->service, cmd->menu_path, strerror(-r));
+}
+
+/* Main thread: queue the click for the worker; the D-Bus call must not
+ * run on the compositor loop. */
+int
+tray_menu_send_event(TrayMenu *menu, TrayMenuEntry *entry, uint32_t time_msec)
+{
+	TwCmd c = {0};
+
+	if (!menu || !entry || !menu->service[0] || !menu->menu_path[0])
+		return -EINVAL;
+
+	c.kind = TW_CMD_MENU_EVENT;
+	snprintf(c.service, sizeof(c.service), "%s", menu->service);
+	snprintf(c.menu_path, sizeof(c.menu_path), "%s", menu->menu_path);
+	c.id = entry->id;
+	c.time_msec = time_msec;
+	return tw_queue_cmd(&c);
 }
 
 /* SNI Status: "Passive" means the item asks to be hidden ("Active" and
@@ -1690,6 +1920,9 @@ tray_item_query_status(TrayItem *it)
 		it->passive = strcmp(status, "Passive") == 0;
 }
 
+/* Worker side: register/replace an item in the worker list, fetch its
+ * properties, menu path and icon (all blocking — fine here), then
+ * publish it to the main thread. */
 void
 tray_add_item(const char *service, const char *path, int emit_signals)
 {
@@ -1720,7 +1953,7 @@ tray_add_item(const char *service, const char *path, int emit_signals)
 	 * application re-registering: the newest registration wins. */
 	{
 		TrayItem *other, *tmp;
-		wl_list_for_each_safe(other, tmp, &tray_items, link) {
+		wl_list_for_each_safe(other, tmp, &tw_items, link) {
 			int same_id = it->sni_id[0] && other->sni_id[0] &&
 				strcmp(it->sni_id, other->sni_id) == 0;
 			int same_path = strcmp(it->path, other->path) == 0 &&
@@ -1732,11 +1965,15 @@ tray_add_item(const char *service, const char *path, int emit_signals)
 			}
 		}
 	}
-	wl_list_insert(&tray_items, &it->link);
+	wl_list_insert(&tw_items, &it->link);
 	wlr_log(WLR_INFO, "tray: registered %s%s%s", service, path,
 			it->passive ? " (passive)" : "");
 
-	tray_update_icons_text();
+	/* Eager fetch: rendertray used to load icons lazily on the main
+	 * thread; now the item must arrive render-ready. */
+	tray_item_get_menu_path(it);
+	tw_item_load_icon(it);
+	tw_post_upsert(it, 1);
 
 	if (!emit_signals || !tray_bus)
 		return;
@@ -1841,7 +2078,7 @@ tray_property_get_registered(sd_bus *bus, const char *path, const char *interfac
 	if (sd_bus_message_open_container(reply, 'a', "s") < 0)
 		return -EINVAL;
 
-	wl_list_for_each(it, &tray_items, link) {
+	wl_list_for_each(it, &tw_items, link) {
 		char full[256];
 		snprintf(full, sizeof(full), "%s%s", it->service, it->path);
 		sd_bus_message_append_basic(reply, 's', full);
@@ -1891,19 +2128,19 @@ tray_name_owner_changed(sd_bus_message *m, void *userdata, sd_bus_error *ret_err
 }
 
 /* An item published a new icon (or its icon became available after the
- * initial registration race).  Drop the cached buffer, clear the failure
- * latch so tray_item_load_icon retries, and repaint the tray. */
+ * initial registration race).  Runs on the worker: clear the failure
+ * latches, reload right here and publish the fresh buffer. */
 static int
 tray_item_new_icon(sd_bus_message *m, void *userdata, sd_bus_error *ret_error)
 {
 	const char *sender = sd_bus_message_get_sender(m);
 	TrayItem *it;
-	int matched = 0;
 
 	(void)userdata;
 	(void)ret_error;
 
-	wl_list_for_each(it, &tray_items, link) {
+	tw_neg_count = 0; /* the app may have just installed its icon */
+	wl_list_for_each(it, &tw_items, link) {
 		if (sender && it->service[0] && strcmp(it->service, sender) == 0) {
 			if (it->icon_buf) {
 				wlr_buffer_drop(it->icon_buf);
@@ -1913,26 +2150,25 @@ tray_item_new_icon(sd_bus_message *m, void *userdata, sd_bus_error *ret_error)
 			it->icon_failed = 0;
 			it->icon_w = it->icon_h = 0;
 			it->unresponsive = 0; /* signal = livstegn, prøv igjen */
-			matched = 1;
+			tw_item_load_icon(it);
+			tw_post_upsert(it, 1);
 		}
 	}
-
-	if (matched)
-		tray_update_icons_text();
 	return 0;
 }
 
 /* An item changed its SNI Status (Active/Passive/NeedsAttention).  The
  * signal carries the new value; sender is the unique bus name, so items
  * registered under a well-known name won't strcmp-match — re-query those
- * via the Status property instead. */
+ * via the Status property instead.  Runs on the worker, so the N-item
+ * fan-out of blocking round-trips no longer needs game-mode deferral. */
 static int
 tray_item_new_status(sd_bus_message *m, void *userdata, sd_bus_error *ret_error)
 {
 	const char *sender = sd_bus_message_get_sender(m);
 	const char *status = NULL;
 	TrayItem *it;
-	int matched = 0, changed = 0;
+	int matched = 0;
 
 	(void)userdata;
 	(void)ret_error;
@@ -1940,99 +2176,240 @@ tray_item_new_status(sd_bus_message *m, void *userdata, sd_bus_error *ret_error)
 	if (sd_bus_message_read(m, "s", &status) < 0)
 		status = NULL;
 
-	wl_list_for_each(it, &tray_items, link) {
+	wl_list_for_each(it, &tw_items, link) {
 		if (sender && it->service[0] && strcmp(it->service, sender) == 0) {
 			int passive = it->passive;
 			it->unresponsive = 0; /* signal = livstegn, prøv igjen */
-			if (status) {
+			if (status)
 				it->passive = strcmp(status, "Passive") == 0;
-			} else if (game_mode_active) {
-				tray_status_stale = 1;
-			} else {
+			else
 				tray_item_query_status(it);
-			}
-			changed |= it->passive != passive;
+			if (it->passive != passive)
+				tw_post_upsert(it, 0);
 			matched = 1;
 		}
 	}
 
 	if (!matched) {
-		/* The fan-out below is N synchronous D-Bus round-trips (200 ms
-		 * cap each) on the main loop — never while a game runs; the
-		 * tray is hidden anyway, so requery on game-mode exit. */
-		if (game_mode_active) {
-			tray_status_stale = 1;
-		} else {
-			wl_list_for_each(it, &tray_items, link) {
-				int passive = it->passive;
-				tray_item_query_status(it);
-				changed |= it->passive != passive;
-			}
+		wl_list_for_each(it, &tw_items, link) {
+			int passive = it->passive;
+			tray_item_query_status(it);
+			if (it->passive != passive)
+				tw_post_upsert(it, 0);
 		}
 	}
+	return 0;
+}
 
-	if (changed && !game_mode_active)
+/* Called on game-mode exit: have the worker re-check the SNI statuses,
+ * then re-render the (now visible) tray. */
+void
+tray_refresh_stale(void)
+{
+	TwCmd c = {0};
+
+	c.kind = TW_CMD_REFRESH_STATUS;
+	tw_queue_cmd(&c);
+	tray_update_icons_text();
+}
+
+/* ── main-thread side: apply worker events to the render state ─────── */
+
+static TrayItem *
+tw_main_find(const char *service)
+{
+	TrayItem *it;
+
+	wl_list_for_each(it, &tray_items, link)
+		if (strcmp(it->service, service) == 0)
+			return it;
+	return NULL;
+}
+
+static int
+tw_apply_upsert(TwEvent *ev)
+{
+	TrayItem *it = tw_main_find(ev->service);
+
+	if (!it) {
+		it = ecalloc(1, sizeof(*it));
+		snprintf(it->service, sizeof(it->service), "%s", ev->service);
+		wl_list_insert(&tray_items, &it->link);
+	}
+	snprintf(it->path, sizeof(it->path), "%s", ev->path);
+	snprintf(it->label, sizeof(it->label), "%s", ev->label);
+	snprintf(it->sni_id, sizeof(it->sni_id), "%s", ev->sni_id);
+	snprintf(it->menu, sizeof(it->menu), "%s", ev->menu);
+	it->has_menu = ev->has_menu;
+	it->passive = ev->passive;
+	if (ev->icon_valid) {
+		if (it->icon_buf)
+			wlr_buffer_drop(it->icon_buf);
+		it->icon_buf = ev->icon_buf; /* ownership taken */
+		ev->icon_buf = NULL;
+		it->icon_w = ev->icon_w;
+		it->icon_h = ev->icon_h;
+		it->icon_pad_l = ev->icon_pad_l;
+		it->icon_pad_r = ev->icon_pad_r;
+		it->icon_tried = 1;
+		it->icon_failed = ev->icon_failed;
+		/* rendertray's 10s retry backoff, armed here because the
+		 * failure is only known once the worker reports back */
+		if (ev->icon_failed)
+			it->icon_retry_not_before_ms = monotonic_msec() + 10000;
+	}
+	return 1;
+}
+
+static int
+tw_apply_remove(const char *service)
+{
+	TrayItem *it, *tmp;
+	Monitor *m;
+
+	wl_list_for_each(m, &mons, link) {
+		if (strcmp(m->statusbar.tray_menu.service, service) == 0)
+			tray_menu_hide(m);
+	}
+
+	wl_list_for_each_safe(it, tmp, &tray_items, link) {
+		if (strcmp(it->service, service) == 0) {
+			wl_list_remove(&it->link);
+			if (it->icon_buf)
+				wlr_buffer_drop(it->icon_buf);
+			free(it);
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/* Show a fetched dbusmenu layout (tail of the old synchronous
+ * tray_menu_open_at).  ev->mon is identity only — the monitor may have
+ * gone away while the worker fetched. */
+static void
+tw_apply_menu(TwEvent *ev)
+{
+	Monitor *m = NULL, *iter;
+	TrayItem *it = tw_main_find(ev->service);
+	TrayMenu *menu;
+	int icon_x = ev->icon_x;
+	int desired_x, max_x;
+
+	tw_menu_pending[0] = '\0';
+
+	wl_list_for_each(iter, &mons, link) {
+		if (ev->mon ? (void *)iter == ev->mon : iter == selmon) {
+			m = iter;
+			break;
+		}
+	}
+	/* NULL mon: worker-initiated fallback (Activate failed on a
+	 * menu-only item) — anchor under the icon on the focused bar. */
+	if (!ev->mon && m && it)
+		icon_x = m->statusbar.traylabel.x + it->x + it->w / 2;
+
+	if (wl_list_empty(&ev->entries)) {
+		/* no dbusmenu: latch so hover-open stops re-fetching */
+		tray_hover.failed = it;
+		return;
+	}
+	if (!m || !m->showbar || !m->statusbar.tray_menu.tree ||
+			!m->statusbar.area.width || !m->statusbar.area.height)
+		return; /* leftover entries freed by tw_event_free */
+
+	menu = &m->statusbar.tray_menu;
+	tray_menu_hide_all();
+	tray_menu_clear(menu);
+	wl_list_init(&menu->entries);
+	wl_list_insert_list(&menu->entries, &ev->entries);
+	wl_list_init(&ev->entries);
+
+	snprintf(menu->service, sizeof(menu->service), "%s", ev->service);
+	snprintf(menu->menu_path, sizeof(menu->menu_path), "%s", ev->menu_path);
+
+	tray_menu_render(m);
+	if (menu->width <= 0 || menu->height <= 0) {
+		tray_menu_hide_all();
+		return;
+	}
+
+	desired_x = icon_x - menu->width / 2;
+	if (desired_x < 0)
+		desired_x = 0;
+	max_x = m->statusbar.area.width - menu->width;
+	if (max_x < 0)
+		max_x = 0;
+	if (desired_x > max_x)
+		desired_x = max_x;
+
+	menu->x = desired_x;
+	menu->y = statusbar_popup_y(m);
+	wlr_scene_node_set_position(&menu->tree->node, menu->x, menu->y);
+	wlr_scene_node_set_enabled(&menu->tree->node, 1);
+	menu->visible = 1;
+}
+
+static void
+tw_event_free(TwEvent *ev)
+{
+	TrayMenuEntry *e, *tmp;
+
+	wl_list_for_each_safe(e, tmp, &ev->entries, link) {
+		wl_list_remove(&e->link);
+		free(e);
+	}
+	if (ev->icon_buf)
+		wlr_buffer_drop(ev->icon_buf);
+	free(ev);
+}
+
+/* Wakeup-pipe callback on the compositor loop: drain the pipe, apply
+ * every posted event, then re-render the tray once. */
+static int
+tw_event(int fd, uint32_t mask, void *data)
+{
+	char buf[64];
+	struct wl_list evs;
+	TwEvent *ev, *tmp;
+	int items_changed = 0;
+
+	(void)mask;
+	(void)data;
+	while (read(fd, buf, sizeof(buf)) > 0)
+		;
+
+	wl_list_init(&evs);
+	pthread_mutex_lock(&tw_lock);
+	wl_list_insert_list(&evs, &tw_events);
+	wl_list_init(&tw_events);
+	pthread_mutex_unlock(&tw_lock);
+
+	wl_list_for_each_safe(ev, tmp, &evs, link) {
+		wl_list_remove(&ev->link);
+		switch (ev->kind) {
+		case TW_EV_UPSERT:
+			items_changed |= tw_apply_upsert(ev);
+			break;
+		case TW_EV_REMOVE:
+			items_changed |= tw_apply_remove(ev->service);
+			break;
+		case TW_EV_MENU:
+			tw_apply_menu(ev);
+			break;
+		}
+		tw_event_free(ev);
+	}
+
+	if (items_changed)
 		tray_update_icons_text();
 	return 0;
 }
 
-/* Called on game-mode exit: rerun the status queries that were deferred
- * while the game ran, then re-render the (now visible) tray. */
-void
-tray_refresh_stale(void)
-{
-	TrayItem *it;
+/* ── worker side: bus lifecycle, command execution, poll loop ──────── */
 
-	if (tray_status_stale) {
-		tray_status_stale = 0;
-		wl_list_for_each(it, &tray_items, link)
-			tray_item_query_status(it);
-	}
-	tray_update_icons_text();
-}
-
-int
-tray_bus_event(int fd, uint32_t mask, void *data)
-{
-	sd_bus *bus = data;
-	int r;
-	int events;
-	uint32_t newmask;
-
-	(void)fd;
-	if (!bus)
-		return 0;
-
-	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR)) {
-		/* Session bus died (dbus restart).  epoll reports HUP
-		 * regardless of the requested mask, so returning without
-		 * removing the source would re-fire this callback forever
-		 * at 100% CPU. */
-		wlr_log(WLR_ERROR, "tray: session bus hangup — disabling tray");
-		if (tray_event) {
-			wl_event_source_remove(tray_event);
-			tray_event = NULL;
-		}
-		return 0;
-	}
-
-	while ((r = sd_bus_process(bus, NULL)) > 0)
-		;
-
-	events = sd_bus_get_events(bus);
-	newmask = 0;
-	if (events & SD_BUS_EVENT_READABLE)
-		newmask |= WL_EVENT_READABLE;
-	if (events & SD_BUS_EVENT_WRITABLE)
-		newmask |= WL_EVENT_WRITABLE;
-	if (tray_event)
-		wl_event_source_fd_update(tray_event, newmask ? newmask : WL_EVENT_READABLE);
-
-	return 0;
-}
-
-void
-tray_init(void)
+static int
+tw_bus_setup(void)
 {
 	static const sd_bus_vtable tray_vtable[] = {
 		SD_BUS_VTABLE_START(0),
@@ -2044,26 +2421,23 @@ tray_init(void)
 		SD_BUS_VTABLE_END
 	};
 	int r;
-	int fd;
-	int events;
-	uint32_t mask = WL_EVENT_READABLE;
 	uint64_t name_flags = SD_BUS_NAME_ALLOW_REPLACEMENT | SD_BUS_NAME_REPLACE_EXISTING;
 
 	if (tray_bus)
-		return;
+		return 0;
 
 	r = sd_bus_open_user(&tray_bus);
 	if (r < 0) {
 		wlr_log(WLR_ERROR, "tray: failed to connect to session bus: %s", strerror(-r));
 		tray_bus = NULL;
-		return;
+		return -1;
 	}
 
-	/* Keep icon/property queries from stalling the compositor for too long */
-	/* Sync-kall kjører i compositor-hovedloopen: en hengende tray-app
-	 * (Electron/Teams) fryser ellers ALL input i hele timeouten. 200 ms
-	 * er nok for en frisk app og caper skaden; unresponsive-latchen i
-	 * TrayItem hindrer gjentatte stalls mot samme app. */
+	/* Sync-kall kjører nå på worker-tråden, så compositor-input fryser
+	 * ikke lenger — men 200 ms caper fortsatt hvor lenge en hengende
+	 * tray-app (Electron/Teams) kan blokkere køen av tray-jobber;
+	 * unresponsive-latchen i TrayItem hindrer gjentatte stalls mot
+	 * samme app. */
 	sd_bus_set_method_call_timeout(tray_bus, 200 * 1000); /* 200ms */
 
 	r = sd_bus_request_name(tray_bus, "org.kde.StatusNotifierWatcher", name_flags);
@@ -2102,22 +2476,10 @@ tray_init(void)
 		"type='signal',interface='org.freedesktop.StatusNotifierItem',member='NewStatus'",
 		tray_item_new_status, NULL);
 
-	fd = sd_bus_get_fd(tray_bus);
-	events = sd_bus_get_events(tray_bus);
-	mask = 0;
-	if (events & SD_BUS_EVENT_READABLE)
-		mask |= WL_EVENT_READABLE;
-	if (events & SD_BUS_EVENT_WRITABLE)
-		mask |= WL_EVENT_WRITABLE;
-	if (mask == 0)
-		mask = WL_EVENT_READABLE;
-
-	tray_event = wl_event_loop_add_fd(event_loop, fd, mask, tray_bus_event, tray_bus);
 	tray_scan_existing_items();
 	tray_host_registered = 1;
 	tray_emit_host_registered();
-	tray_update_icons_text();
-	return;
+	return 0;
 fail:
 	if (tray_vtable_slot)
 		sd_bus_slot_unref(tray_vtable_slot);
@@ -2128,37 +2490,246 @@ fail:
 	if (tray_name_slot)
 		sd_bus_slot_unref(tray_name_slot);
 	tray_name_slot = NULL;
-	if (tray_event) {
-		wl_event_source_remove(tray_event);
-		tray_event = NULL;
-	}
 	if (tray_bus) {
 		sd_bus_unref(tray_bus);
 		tray_bus = NULL;
 	}
+	return -1;
 }
 
+/* Session bus died (dbus restart): drop the connection and latch the
+ * tray dead, mirroring what the old HUP handler on the main loop did. */
+static void
+tw_bus_lost(void)
+{
+	wlr_log(WLR_ERROR, "tray: session bus hangup — disabling tray");
+	if (tray_vtable_slot)
+		sd_bus_slot_unref(tray_vtable_slot);
+	tray_vtable_slot = NULL;
+	if (tray_fdo_vtable_slot)
+		sd_bus_slot_unref(tray_fdo_vtable_slot);
+	tray_fdo_vtable_slot = NULL;
+	if (tray_name_slot)
+		sd_bus_slot_unref(tray_name_slot);
+	tray_name_slot = NULL;
+	if (tray_bus) {
+		sd_bus_unref(tray_bus);
+		tray_bus = NULL;
+	}
+	pthread_mutex_lock(&tw_lock);
+	tw_dead = 1;
+	pthread_mutex_unlock(&tw_lock);
+}
+
+/* Worker side: SNI Activate/SecondaryActivate/ContextMenu.  On a failed
+ * left-click Activate the item is menu-only — fall back to the dropdown,
+ * as the old synchronous path did via its return value into input.c. */
+static void
+tw_do_activate(TwCmd *cmd)
+{
+	const char *ifaces[] = {
+		"org.kde.StatusNotifierItem",
+		"org.freedesktop.StatusNotifierItem",
+	};
+	TrayItem *wit = tw_find_witem(cmd->service);
+	const char *item_path;
+	int r = -1;
+
+	if (!wit)
+		return;
+	item_path = wit->path[0] ? wit->path : "/StatusNotifierItem";
+	for (size_t i = 0; i < LENGTH(ifaces); i++) {
+		r = sd_bus_call_method(tray_bus, wit->service, item_path,
+				ifaces[i], cmd->method, NULL, NULL, "ii",
+				cmd->x, cmd->y);
+		if (r >= 0)
+			return;
+	}
+	if (cmd->button == BTN_LEFT && strcmp(cmd->method, "Activate") == 0) {
+		tw_menu_fetch(wit, NULL, 0);
+		return;
+	}
+	wlr_log(WLR_ERROR, "tray: %s %s failed on %s: %s",
+			cmd->method, wit->service, item_path, strerror(-r));
+}
+
+static void
+tw_do_cmd(TwCmd *cmd)
+{
+	TrayItem *wit;
+
+	switch (cmd->kind) {
+	case TW_CMD_ACTIVATE:
+		tw_do_activate(cmd);
+		break;
+	case TW_CMD_MENU_OPEN:
+		wit = tw_find_witem(cmd->service);
+		if (wit)
+			tw_menu_fetch(wit, cmd->mon, cmd->icon_x);
+		break;
+	case TW_CMD_MENU_PROBE:
+		wit = tw_find_witem(cmd->service);
+		if (wit) {
+			int had = wit->has_menu;
+			if (tray_item_get_menu_path(wit) == 0 &&
+					wit->has_menu != had)
+				tw_post_upsert(wit, 0);
+		}
+		break;
+	case TW_CMD_MENU_EVENT:
+		tw_do_menu_event(cmd);
+		break;
+	case TW_CMD_LOAD_ICON:
+		wit = tw_find_witem(cmd->service);
+		if (wit && !wit->icon_w) {
+			wit->icon_tried = 0;
+			wit->icon_failed = 0;
+			tw_item_load_icon(wit);
+			tw_post_upsert(wit, 1);
+		}
+		break;
+	case TW_CMD_REFRESH_STATUS:
+		wl_list_for_each(wit, &tw_items, link) {
+			int passive = wit->passive;
+			tray_item_query_status(wit);
+			if (wit->passive != passive)
+				tw_post_upsert(wit, 0);
+		}
+		break;
+	}
+}
+
+static void *
+tw_worker(void *data)
+{
+	(void)data;
+	pthread_setname_np(pthread_self(), "nixly-tray");
+
+	if (tw_bus_setup() != 0) {
+		pthread_mutex_lock(&tw_lock);
+		tw_dead = 1;
+		pthread_mutex_unlock(&tw_lock);
+	}
+
+	for (;;) {
+		struct pollfd pfd[2];
+		int nfds = 0, bus_idx = -1;
+		int timeout_ms = -1;
+		char buf[16];
+		int r;
+
+		/* queued main-thread requests first */
+		for (;;) {
+			TwCmd *cmd = NULL;
+
+			pthread_mutex_lock(&tw_lock);
+			if (!wl_list_empty(&tw_cmds)) {
+				cmd = wl_container_of(tw_cmds.next, cmd, link);
+				wl_list_remove(&cmd->link);
+			}
+			pthread_mutex_unlock(&tw_lock);
+			if (!cmd)
+				break;
+			if (tray_bus)
+				tw_do_cmd(cmd);
+			free(cmd);
+		}
+
+		if (tray_bus) {
+			while ((r = sd_bus_process(tray_bus, NULL)) > 0)
+				;
+			if (r < 0) {
+				tw_bus_lost();
+				continue;
+			}
+		}
+
+		pfd[nfds].fd = tw_wake[0];
+		pfd[nfds].events = POLLIN;
+		pfd[nfds].revents = 0;
+		nfds++;
+		if (tray_bus) {
+			int events = sd_bus_get_events(tray_bus);
+			uint64_t usec = UINT64_MAX;
+
+			bus_idx = nfds;
+			pfd[nfds].fd = sd_bus_get_fd(tray_bus);
+			pfd[nfds].events = 0;
+			pfd[nfds].revents = 0;
+			if (events > 0) {
+				if (events & SD_BUS_EVENT_READABLE)
+					pfd[nfds].events |= POLLIN;
+				if (events & SD_BUS_EVENT_WRITABLE)
+					pfd[nfds].events |= POLLOUT;
+			}
+			if (pfd[nfds].events == 0)
+				pfd[nfds].events = POLLIN;
+			nfds++;
+			if (sd_bus_get_timeout(tray_bus, &usec) >= 0 &&
+					usec != UINT64_MAX) {
+				uint64_t now_ms = monotonic_msec();
+				uint64_t abs_ms = usec / 1000;
+
+				timeout_ms = abs_ms > now_ms ?
+					(int)MIN(abs_ms - now_ms, (uint64_t)INT_MAX) : 0;
+			}
+		}
+
+		if (poll(pfd, (nfds_t)nfds, timeout_ms) < 0 && errno != EINTR)
+			break;
+
+		while (read(tw_wake[0], buf, sizeof(buf)) > 0)
+			;
+		if (bus_idx >= 0 &&
+				(pfd[bus_idx].revents & (POLLHUP | POLLERR)))
+			tw_bus_lost();
+	}
+	return NULL;
+}
+
+void
+tray_init(void)
+{
+	if (tw_run)
+		return;
+	wl_list_init(&tw_items);
+	wl_list_init(&tw_events);
+	wl_list_init(&tw_cmds);
+	if (pipe2(tw_pipe, O_CLOEXEC | O_NONBLOCK) < 0)
+		return;
+	if (pipe2(tw_wake, O_CLOEXEC | O_NONBLOCK) < 0) {
+		close(tw_pipe[0]);
+		close(tw_pipe[1]);
+		tw_pipe[0] = tw_pipe[1] = -1;
+		return;
+	}
+	tray_event = wl_event_loop_add_fd(event_loop, tw_pipe[0],
+			WL_EVENT_READABLE, tw_event, NULL);
+	tw_run = 1;
+	if (pthread_create(&tw_thread, NULL, tw_worker, NULL) != 0) {
+		tw_run = 0;
+		wlr_log(WLR_ERROR, "tray: worker thread start failed — "
+			"tray unavailable");
+	}
+}
+
+/* Worker side: drop an item from the worker list and tell the main
+ * thread (which also hides any open menu for it in tw_apply_remove). */
 void
 tray_remove_item(const char *service)
 {
 	TrayItem *it, *tmp;
-	Monitor *m;
 
 	if (!service)
 		return;
 
-	wl_list_for_each(m, &mons, link) {
-		if (strcmp(m->statusbar.tray_menu.service, service) == 0)
-			tray_menu_hide(m);
-	}
-
-	wl_list_for_each_safe(it, tmp, &tray_items, link) {
+	wl_list_for_each_safe(it, tmp, &tw_items, link) {
 		if (strcmp(it->service, service) == 0) {
 			wl_list_remove(&it->link);
 			if (it->icon_buf)
 				wlr_buffer_drop(it->icon_buf);
 			free(it);
-			tray_update_icons_text();
+			tw_post_event(tw_event_new(TW_EV_REMOVE, service));
 			sd_bus_emit_signal(tray_bus, NULL, "/StatusNotifierWatcher",
 					"org.kde.StatusNotifierWatcher",
 					"StatusNotifierItemUnregistered", "s", service);
@@ -2180,50 +2751,51 @@ tray_first_item(void)
 	return wl_container_of(tray_items.next, sample, link);
 }
 
+/* Main thread: queue the SNI activation for the worker (the D-Bus call
+ * took up to 800ms synchronously before). */
 int
 tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y)
 {
-	const char *method;
-	const char *ifaces[] = {
-		"org.kde.StatusNotifierItem",
-		"org.freedesktop.StatusNotifierItem",
-	};
-	const char *item_path;
-	int r = -1;
+	TwCmd c = {0};
 
-	if (!tray_bus || !it)
+	if (!it)
 		return -1;
-	if (context_menu)
-		method = "ContextMenu";
-	else if (button == BTN_MIDDLE)
-		method = "SecondaryActivate";
-	else
-		method = "Activate";
 	if (context_menu) {
 		/* anchor so a menu window the app opens floats under the icon */
 		tray_anchor_x = x;
 		tray_anchor_y = y;
 		tray_anchor_time_ms = monotonic_msec();
 	}
-	item_path = it->path[0] ? it->path : "/StatusNotifierItem";
-	for (int attempt = 0; attempt < 2; attempt++) {
-		for (size_t i = 0; i < LENGTH(ifaces); i++) {
-			r = sd_bus_call_method(tray_bus, it->service, item_path,
-					ifaces[i], method, NULL, NULL, "ii", x, y);
-			if (r >= 0)
-				return 0;
-		}
-		/* If bus is broken, try to re-init once */
-		if (r == -EBADFD || r == -EPIPE || r == -ENOTCONN) {
-			tray_init();
-			if (!tray_bus)
-				break;
-		} else {
-			break;
-		}
-	}
-	wlr_log(WLR_ERROR, "tray: %s %s failed on %s%s: %s",
-			method, it->service, item_path, it->path[0] ? "" : "(null)", strerror(-r));
+	c.kind = TW_CMD_ACTIVATE;
+	snprintf(c.service, sizeof(c.service), "%s", it->service);
+	if (context_menu)
+		snprintf(c.method, sizeof(c.method), "ContextMenu");
+	else if (button == BTN_MIDDLE)
+		snprintf(c.method, sizeof(c.method), "SecondaryActivate");
+	else
+		snprintf(c.method, sizeof(c.method), "Activate");
+	c.button = button;
+	c.x = x;
+	c.y = y;
+	return tw_queue_cmd(&c);
+}
+
+/* Main-thread accessor (rendertray): never blocks.  Marks the item
+ * tried and asks the worker to (re)fetch; the icon lands later via a
+ * TW_EV_UPSERT. */
+int
+tray_item_load_icon(TrayItem *it)
+{
+	TwCmd c = {0};
+
+	if (!it)
+		return -1;
+	it->icon_tried = 1;
+	if (it->icon_buf)
+		return 0;
+	c.kind = TW_CMD_LOAD_ICON;
+	snprintf(c.service, sizeof(c.service), "%s", it->service);
+	tw_queue_cmd(&c);
 	return -1;
 }
 

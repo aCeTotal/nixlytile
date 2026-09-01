@@ -99,40 +99,19 @@ audio_watch_cb(int fd, uint32_t mask, void *data)
 static int
 audio_watch_spawn(void *data)
 {
-	int fds[2];
+	static const char *argv[] = { "pw-metadata", "-m", "default", NULL };
 	pid_t pid;
+	int fd;
 
 	(void)data;
 
 	if (audio_watch_fd >= 0)
 		return 0;
-	if (pipe2(fds, O_CLOEXEC) < 0)
+	/* posix_spawn, not fork(): this runs on a main-loop retry timer */
+	if (spawn_argv_read(argv, &pid, &fd) < 0)
 		return 0;
 
-	pid = fork();
-	if (pid < 0) {
-		close(fds[0]);
-		close(fds[1]);
-		return 0;
-	}
-	if (pid == 0) {
-		int devnull = open("/dev/null", O_RDWR);
-		dup2(fds[1], STDOUT_FILENO);
-		if (devnull >= 0) {
-			dup2(devnull, STDIN_FILENO);
-			dup2(devnull, STDERR_FILENO);
-			close(devnull);
-		}
-		close(fds[0]);
-		close(fds[1]);
-		setsid();
-		execlp("pw-metadata", "pw-metadata", "-m", "default", NULL);
-		_exit(127);
-	}
-
-	close(fds[1]);
-	fcntl(fds[0], F_SETFL, O_NONBLOCK);
-	audio_watch_fd = fds[0];
+	audio_watch_fd = fd;
 	audio_watch_pid = pid;
 	audio_watch_got_data = 0;
 	audio_watch_src = wl_event_loop_add_fd(event_loop, audio_watch_fd,

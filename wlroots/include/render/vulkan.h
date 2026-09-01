@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdbool.h>
+#include <time.h>
 #include <vulkan/vulkan.h>
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/render/wlr_texture.h>
@@ -329,6 +330,9 @@ struct wlr_vk_renderer {
 	bool dummy3d_image_transitioned;
 
 	VkPipelineCache pipeline_cache;
+	// Debounced on-disk persistence of the pipeline cache
+	bool pipeline_cache_dirty;
+	struct timespec pipeline_cache_last_save;
 
 	VkSemaphore timeline_semaphore;
 	uint64_t timeline_point;
@@ -362,6 +366,9 @@ struct wlr_vk_renderer {
 		uint32_t width, height;
 		VkImage dst_image;
 		VkDeviceMemory dst_img_memory;
+		void *map; // persistent mapping of dst_img_memory
+		VkFormat src_format;
+		bool blit_supported; // for src_format -> the cached dst image
 	} read_pixels_cache;
 };
 
@@ -523,6 +530,7 @@ struct wlr_vk_texture {
 	struct wlr_vk_command_buffer *last_used_cb; // to track when it can be destroyed
 	bool dmabuf_imported;
 	bool owned; // if dmabuf_imported: whether we have ownership of the image
+	bool pass_synced; // whether already in the current pass's texture sync list
 	bool transitioned; // if dma_imported: whether we transitioned it away from preinit
 	bool has_alpha; // whether the image is has alpha channel
 	bool using_mutable_srgb; // can be accessed through _SRGB format view

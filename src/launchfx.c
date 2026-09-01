@@ -15,13 +15,14 @@
  *     splash/launcher stages run for seconds before that, and covering
  *     them meant the black came up, timed out and replayed.
  */
+#include "nixlytile.h"
+#include "client.h"
+
 #include <cairo/cairo.h>
 #include <fcntl.h>
 #include <math.h>
+#include <pthread.h>
 #include <unistd.h>
-
-#include "nixlytile.h"
-#include "client.h"
 
 #define FX_POLL_MS      200
 #define FX_TICK_MS      16
@@ -294,11 +295,9 @@ fx_readahead(pid_t reaper)
 		return;
 	snprintf(appid, sizeof(appid), "%s", p);
 
-	if (fork() == 0) {
-		setsid();
-		execlp("nixly-prewarm", "nixly-prewarm", "readahead", appid,
-				(char *)NULL);
-		_exit(127);
+	{
+		const char *argv[] = { "nixly-prewarm", "readahead", appid, NULL };
+		spawn_cmd_async(argv);
 	}
 }
 
@@ -592,11 +591,89 @@ reaper_seen(pid_t pid)
 	return 0;
 }
 
-static int
-fx_poll_cb(void *data)
+/* The /proc reaper sweep runs on its own thread: ~600 pids × open/read/
+ * close of /proc/PID/comm every 200 ms is milliseconds of main-thread
+ * time for the whole life of the Steam process.  The worker publishes
+ * candidate pids through a pipe; all launch state (seen_reapers, fx)
+ * stays on the compositor thread. */
+static int fxw_pipe[2] = { -1, -1 };
+static pthread_mutex_t fxw_lock = PTHREAD_MUTEX_INITIALIZER;
+static pid_t fxw_found[32];
+static int fxw_found_count;
+static volatile int fxw_scan_enabled;
+
+static void *
+fxw_worker(void *arg)
 {
 	DIR *dir;
 	struct dirent *ent;
+
+	(void)arg;
+	pthread_setname_np(pthread_self(), "nixly-launchfx");
+	for (;;) {
+		if (fxw_scan_enabled && (dir = opendir("/proc"))) {
+			pid_t found[32];
+			int n = 0;
+			while ((ent = readdir(dir)) && n < (int)LENGTH(found)) {
+				pid_t pid;
+				if (ent->d_name[0] < '0' || ent->d_name[0] > '9')
+					continue;
+				pid = (pid_t)atoi(ent->d_name);
+				if (!proc_comm_is(pid, "reaper"))
+					continue;
+				found[n++] = pid;
+			}
+			closedir(dir);
+			if (n > 0) {
+				pthread_mutex_lock(&fxw_lock);
+				memcpy(fxw_found, found,
+					(size_t)n * sizeof(found[0]));
+				fxw_found_count = n;
+				pthread_mutex_unlock(&fxw_lock);
+				(void)!write(fxw_pipe[1], "r", 1);
+			}
+		}
+		usleep(FX_POLL_MS * 1000);
+	}
+	return NULL;
+}
+
+static int
+fxw_event(int fd, uint32_t mask, void *data)
+{
+	char drain[16];
+	pid_t found[32];
+	int n, i;
+
+	(void)mask; (void)data;
+	while (read(fd, drain, sizeof(drain)) > 0)
+		;
+	pthread_mutex_lock(&fxw_lock);
+	n = fxw_found_count;
+	memcpy(found, fxw_found, (size_t)n * sizeof(found[0]));
+	pthread_mutex_unlock(&fxw_lock);
+
+	for (i = 0; i < n; i++) {
+		pid_t pid = found[i];
+		if (reaper_seen(pid))
+			continue;
+		if (seen_reaper_count < (int)LENGTH(seen_reapers))
+			seen_reapers[seen_reaper_count++] = pid;
+		if (fx.active) {
+			/* Next stage of the same Play press —
+			 * adopt it, keep the one cover up. */
+			fx.reaper = pid;
+			fx.orphan_ms = 0;
+		} else {
+			launchfx_start(pid);
+		}
+	}
+	return 0;
+}
+
+static int
+fx_poll_cb(void *data)
+{
 	Client *c;
 	int steam_up = 0;
 	int i, j;
@@ -651,39 +728,14 @@ fx_poll_cb(void *data)
 	}
 
 	/* While a game is in game mode and no launch is being tracked there
-	 * is no Play press to detect — skip the /proc sweep (readdir + one
-	 * comm read per pid, every 200 ms) so the compositor thread spends
-	 * nothing on it mid-game.  Resumes when game mode exits. */
+	 * is no Play press to detect — stop the worker's /proc sweep so
+	 * nothing runs mid-game.  Resumes when game mode exits. */
 	if (game_mode_active && !fx.active)
 		steam_up = 0;
 
-	if (steam_up) {
-		dir = opendir("/proc");
-		if (dir) {
-			while ((ent = readdir(dir))) {
-				pid_t pid;
-				if (ent->d_name[0] < '0' || ent->d_name[0] > '9')
-					continue;
-				pid = (pid_t)atoi(ent->d_name);
-				if (reaper_seen(pid))
-					continue;
-				if (!proc_comm_is(pid, "reaper"))
-					continue;
-				if (seen_reaper_count <
-						(int)LENGTH(seen_reapers))
-					seen_reapers[seen_reaper_count++] = pid;
-				if (fx.active) {
-					/* Next stage of the same Play press —
-					 * adopt it, keep the one cover up. */
-					fx.reaper = pid;
-					fx.orphan_ms = 0;
-				} else {
-					launchfx_start(pid);
-				}
-			}
-			closedir(dir);
-		}
-	}
+	/* The sweep itself runs on the fxw_worker thread; results arrive
+	 * via fxw_event.  Here we only gate it. */
+	fxw_scan_enabled = steam_up;
 
 	wl_event_source_timer_update(fx_poll_timer, FX_POLL_MS);
 	return 0;
@@ -695,4 +747,17 @@ launchfx_init(void)
 	fx_poll_timer = wl_event_loop_add_timer(event_loop, fx_poll_cb, NULL);
 	if (fx_poll_timer)
 		wl_event_source_timer_update(fx_poll_timer, FX_POLL_MS);
+
+	if (pipe2(fxw_pipe, O_CLOEXEC | O_NONBLOCK) == 0) {
+		pthread_t tid;
+		pthread_attr_t attr;
+		wl_event_loop_add_fd(event_loop, fxw_pipe[0],
+				WL_EVENT_READABLE, fxw_event, NULL);
+		pthread_attr_init(&attr);
+		pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+		if (pthread_create(&tid, &attr, fxw_worker, NULL) != 0)
+			wlr_log(WLR_ERROR, "launchfx: sweep thread start failed — "
+				"Play-press detection disabled");
+		pthread_attr_destroy(&attr);
+	}
 }

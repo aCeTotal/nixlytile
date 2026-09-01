@@ -3,9 +3,12 @@
  * Kernel-direct where possible: rtnetlink + sysfs + ethtool ioctl for
  * links, /dev/rfkill for radio policy, wpa_supplicant's unix control
  * socket for wifi, sd-bus straight to bluetoothd for bluetooth, and
- * systemd units (via systemctl + polkit) for VPN profiles.  Everything
- * runs on the compositor event loop; no worker threads, no polling
- * while idle.
+ * systemd units (via systemctl + polkit) for VPN profiles.  All UI
+ * entry points run on the compositor event loop; the wpa control
+ * socket and the popup's stats/route/dns file reads live on a small
+ * "netwatch" worker thread (wifi_ctrl.c) that publishes snapshots, so
+ * a wedged supplicant or a slow sysfs read can never stall input.  No
+ * polling while idle: the worker only samples when poked.
  */
 #ifndef NETSYS_H
 #define NETSYS_H
@@ -36,14 +39,23 @@ typedef struct {
 	unsigned long long rx_packets, tx_packets;
 	unsigned long long rx_errors, tx_errors;
 	unsigned long long rx_dropped, tx_dropped;
+	uint64_t stamp_ms;      /* when the worker sampled these counters;
+	                         * keep last so the memcmp in
+	                         * netmon_worker_sample can exclude it */
 } NetIfStats;
 
 void netmon_init(void);
 void netmon_get(NetLinkSnap *out);
-int netmon_stats(const char *iface, NetIfStats *out);   /* 0 on ok */
-/* Route/DNS info for the popup (reads /proc/net/route + resolv.conf). */
+/* Stats/route/DNS getters return the latest worker snapshot (0 on ok)
+ * and poke the netwatch worker when it has gone stale; they never touch
+ * sysfs/procfs themselves. */
+int netmon_stats(const char *iface, NetIfStats *out);
 int netmon_gateway(char *out, size_t len);
 int netmon_dns(char *out, size_t len);
+/* Worker side: perform the raw stats/route/dns reads and publish the
+ * snapshot.  Called only from wifi_ctrl.c's netwatch worker thread;
+ * returns 1 when the published data changed. */
+int netmon_worker_sample(void);
 /* Radio policy: enable/disable wifi via rfkill.  user=1 marks it as an
  * explicit user choice that overrides the wifi-off-on-ethernet rule. */
 void netmon_wifi_set_enabled(int on, int user);
@@ -91,6 +103,8 @@ void wifi_disconnect(void);
 int wifi_forget(int net_id);
 /* Last auth failure ("wrong password"), cleared on connect; "" if none. */
 const char *wifi_last_error(void);
+/* Wake the netwatch worker for a fresh netmon sample (stats/route/dns). */
+void netwatch_poke(void);
 
 /* ── wifi_nm.c: NetworkManager coexistence backend ───────────────────
  * While NM runs it owns the wifi device; the wifi_* API above delegates

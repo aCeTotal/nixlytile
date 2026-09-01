@@ -1,4 +1,5 @@
 /* See LICENSE.dwm file for copyright and license details. */
+#define _GNU_SOURCE
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -164,4 +165,46 @@ spawn_cmd_async(const char *const argv[])
 			environ);
 	posix_spawnattr_destroy(&at);
 	return r == 0 ? 0 : -1;
+}
+
+/* Spawn argv with stdout captured in a pipe (stdin/stderr → /dev/null),
+ * own session, via posix_spawnp — see spawn_cmd_async for why fork()
+ * is banned on the compositor thread. */
+int
+spawn_argv_read(const char *const argv[], pid_t *out_pid, int *out_fd)
+{
+	int pipefd[2];
+	posix_spawn_file_actions_t fa;
+	posix_spawnattr_t at;
+	int r;
+
+	if (!argv || !out_pid || !out_fd)
+		return -1;
+	if (pipe2(pipefd, O_CLOEXEC) != 0)
+		return -1;
+
+	posix_spawn_file_actions_init(&fa);
+	posix_spawn_file_actions_adddup2(&fa, pipefd[1], STDOUT_FILENO);
+	posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null",
+			O_RDWR, 0);
+	posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, "/dev/null",
+			O_RDWR, 0);
+	posix_spawnattr_init(&at);
+#ifdef POSIX_SPAWN_SETSID
+	posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSID);
+#endif
+	r = posix_spawnp(out_pid, argv[0], &fa, &at, (char *const *)argv,
+			environ);
+	posix_spawnattr_destroy(&at);
+	posix_spawn_file_actions_destroy(&fa);
+	if (r != 0) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		*out_pid = -1;
+		return -1;
+	}
+	close(pipefd[1]);
+	*out_fd = pipefd[0];
+	fcntl(*out_fd, F_SETFL, fcntl(*out_fd, F_GETFL) | O_NONBLOCK);
+	return 0;
 }

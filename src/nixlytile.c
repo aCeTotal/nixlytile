@@ -1,5 +1,6 @@
 /* nixlytile.c - Core compositor: setup, run, cleanup, main */
 #include "nixlytile.h"
+#include <wlr/render/vulkan.h>
 #include "client.h"
 #include "config_loader.h"
 #include "diag.h"
@@ -1089,6 +1090,15 @@ run(const char *startup_cmd)
 			execlp("appd", "appd", (char *)NULL);
 			_exit(127);
 		}
+	}
+
+	/* Prime the XKB system-defaults cache (may popen localectl → D-Bus
+	 * round trip with service activation) now, before the event loop —
+	 * so a later keyboard hotplug or config reload never pays it on the
+	 * compositor thread. */
+	{
+		struct xkb_rule_names prime = {0};
+		applyxkbdefaultsfromsystem(&prime);
 	}
 
 	/* Start the backend. This will enumerate outputs and inputs, become the DRM
@@ -2873,7 +2883,7 @@ setup(void)
 	 *   10BIT   — HDR/10-bit render format supported by the renderer.
 	 */
 	{
-		const char *renderer_name = "GLES2";
+		const char *renderer_name = wlr_renderer_is_vk(drw) ? "Vulkan" : "GLES2";
 		int has_dmabuf =
 			wlr_renderer_get_texture_formats(drw, WLR_BUFFER_CAP_DMABUF) != NULL;
 		const char *gpu_label = "unknown";

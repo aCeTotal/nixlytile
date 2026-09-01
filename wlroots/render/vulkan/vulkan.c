@@ -544,9 +544,13 @@ struct wlr_vk_device *vulkan_device_create(struct wlr_vk_instance *ini,
 	if (dev->implicit_sync_interop) {
 		wlr_log(WLR_INFO, "Implicit sync interop supported");
 	} else {
-		wlr_log(WLR_ERROR, "Vulkan: implicit_sync_interop not available — "
+		wlr_log(WLR_ERROR, "Vulkan: implicit_sync_interop not available "
+			"(exportable_semaphore=%d, importable_semaphore=%d, "
+			"dmabuf_sync_file_import_export=%d) — "
 			"DMA-BUF sync will use blocking poll() fallback. "
-			"Check kernel version and Vulkan driver.");
+			"Check kernel version and Vulkan driver.",
+			exportable_semaphore, importable_semaphore,
+			dmabuf_sync_file_import_export);
 	}
 
 	VkPhysicalDeviceSamplerYcbcrConversionFeatures phdev_sampler_ycbcr_features = {
@@ -571,17 +575,26 @@ struct wlr_vk_device *vulkan_device_create(struct wlr_vk_instance *ini,
 	};
 
 	VkDeviceQueueGlobalPriorityCreateInfoEXT global_priority;
-	bool has_global_priority = check_extension(avail_ext_props, avail_extc,
-		VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME);
+	bool has_global_priority_khr = check_extension(avail_ext_props, avail_extc,
+		VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME);
+	bool has_global_priority = has_global_priority_khr ||
+		check_extension(avail_ext_props, avail_extc,
+			VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME);
 	if (has_global_priority) {
 		// If global priorities are supported, request a high-priority context
 		global_priority = (VkDeviceQueueGlobalPriorityCreateInfoEXT){
-			.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_EXT,
-			.globalPriority = VK_QUEUE_GLOBAL_PRIORITY_HIGH_EXT,
+			.sType = has_global_priority_khr ?
+				VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR :
+				VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_EXT,
+			.globalPriority = has_global_priority_khr ?
+				VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR : VK_QUEUE_GLOBAL_PRIORITY_HIGH_EXT,
 		};
 		qinfo.pNext = &global_priority;
-		extensions[extensions_len++] = VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME;
-		wlr_log(WLR_DEBUG, "Requesting a high-priority device queue");
+		extensions[extensions_len++] = has_global_priority_khr ?
+			VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME :
+			VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME;
+		wlr_log(WLR_DEBUG, "Requesting a high-priority device queue (%s)",
+			has_global_priority_khr ? "KHR" : "EXT");
 	} else {
 		wlr_log(WLR_DEBUG, "Global priorities are not supported, "
 			"falling back to regular queue priority");

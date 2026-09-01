@@ -29,6 +29,7 @@ typedef struct {
 	int x, y, w, h;                  /* rect from CardResult */
 	float hist[METER_HIST];
 	int head;
+	MeterRaster raster;              /* persistent ping-pong frame pair */
 } MeterUI;
 static MeterUI meter_ui[2];
 static struct wl_event_source *meter_timer;
@@ -75,14 +76,14 @@ meter_overlay_draw(InfoPopup *p, int is_mic, double phase)
 			wlr_scene_node_set_position(&mu->node->node,
 					mu->x, mu->y);
 	}
-	buf = card_meter_buffer(mu->w, mu->h,
+	/* Persistent ping-pong raster: no per-frame alloc/memcpy, and the
+	 * returned buffer stays owned by mu->raster — no drop here. */
+	buf = card_meter_raster(&mu->raster, mu->w, mu->h,
 			muted == 1 ? card_col_red :
 			(is_mic ? card_col_green : card_col_blue),
 			mu->hist, METER_HIST, mu->head, phase);
 	if (mu->node && buf)
 		wlr_scene_buffer_set_buffer(mu->node, buf);
-	if (buf)
-		wlr_buffer_drop(buf);
 }
 
 static void
@@ -282,6 +283,8 @@ meter_tick(void *data)
 		memset(meter_ui[0].hist, 0, sizeof(meter_ui[0].hist));
 		memset(meter_ui[1].hist, 0, sizeof(meter_ui[1].hist));
 		meter_ui[0].node = meter_ui[1].node = NULL;
+		card_meter_raster_finish(&meter_ui[0].raster);
+		card_meter_raster_finish(&meter_ui[1].raster);
 		meter_pend = 0.0f;
 		meter_push_ms = 0;
 		return 0;   /* stays disarmed until the next popup render */
@@ -326,8 +329,10 @@ meter_tick(void *data)
 void
 meter_frame_tick(Monitor *m)
 {
+	static uint64_t last_raster_ms;
 	InfoPopup *p;
 	int is_mic;
+	uint64_t now;
 
 	if (m->statusbar.volume_popup.visible) {
 		p = &m->statusbar.volume_popup;
@@ -338,7 +343,14 @@ meter_frame_tick(Monitor *m)
 	} else {
 		return;
 	}
-	meter_overlay_draw(p, is_mic, meter_phase(monotonic_msec()));
+	/* ~60 Hz cap: the bars are 3 px wide — re-rastering per vblank on
+	 * a 144 Hz panel is invisible.  The 16 ms meter timer keeps the
+	 * vblank chain alive, so skipped ticks cost nothing. */
+	now = monotonic_msec();
+	if (now - last_raster_ms < 16)
+		return;
+	last_raster_ms = now;
+	meter_overlay_draw(p, is_mic, meter_phase(now));
 }
 
 /* ── content builders ────────────────────────────────────────────── */
