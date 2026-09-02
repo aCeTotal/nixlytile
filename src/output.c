@@ -3837,6 +3837,7 @@ frame_done:
 		int cap = unfocused_fps_cap < 1 ? 1 : unfocused_fps_cap;
 		uint64_t interval = 1000000000ULL / (uint64_t)cap;
 		Client *foc = focustop(m);
+		LayerSurface *efl = exclusive_focus;
 
 		if (foc && foc->scene && foc->scene->node.enabled &&
 				client_surface(foc)) {
@@ -3845,6 +3846,14 @@ frame_done:
 				wlr_surface_for_each_surface(fs,
 					hidden_frame_done_iter, &now);
 		}
+		/* A keyboard-focused layer surface (launcher, fuzzel) is the
+		 * active UI just like a focused toplevel — it must render every
+		 * vblank, not at the unfocused cap (2 Hz on battery made its
+		 * page switches take seconds). */
+		if (efl && efl->mapped && efl->layer_surface->surface->mapped)
+			wlr_surface_for_each_surface(
+				efl->layer_surface->surface,
+				hidden_frame_done_iter, &now);
 		if (frame_start_ns - m->unfocused_done_ns >= interval) {
 			wlr_scene_output_send_frame_done(m->scene_output, &now);
 			m->unfocused_done_ns = frame_start_ns;

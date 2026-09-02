@@ -26,7 +26,11 @@ powersave_reassert(void)
 		power_profile_low();
 		cpuclock_perf(0);       /* powersave governor + EPP power */
 		cpuclock_boost(0);
-		cpuclock_cap(0.35);     /* hard clock cap toward the 9.5 W budget */
+		cpuclock_cap(0.6);      /* mild cap: powersave governor + EPP
+					 * already idle the clocks down; 0.35
+					 * (1.29 GHz ceiling) made everything
+					 * crawl while saving almost nothing —
+					 * idle draw is panel/platform-bound */
 		output_lowpower_refresh(1);  /* panels → lowest refresh (60 Hz) */
 		unfocused_fps_cap = 2;  /* background tiles nearly frozen on battery */
 	} else {
