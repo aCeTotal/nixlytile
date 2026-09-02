@@ -191,11 +191,28 @@ dev_conn_transition(BtDev *d)
 	}
 }
 
+/* Paging an absent device parks the radio for seconds per attempt and
+ * makes a live A2DP stream stutter/crackle, so background redials are
+ * held while any audio device is up.  Bonded peripherals page us
+ * themselves when powered on, so they still reconnect. */
+static int
+audio_link_up(void)
+{
+	int i;
+
+	for (i = 0; i < bt_ndevs; i++)
+		if (bt_devs[i].connected &&
+				strncmp(bt_devs[i].icon, "audio", 5) == 0)
+			return 1;
+	return 0;
+}
+
 static int
 reconn_tick(void *data)
 {
 	uint64_t now = now_ms();
 	uint64_t next = 0;
+	int hold = audio_link_up();
 	int i;
 
 	for (i = 0; i < bt_ndevs; i++) {
@@ -206,17 +223,23 @@ reconn_tick(void *data)
 				!d->retry_at_ms)
 			continue;
 		if (d->retry_at_ms <= now) {
-			sd_bus_call_method_async(bt_bus, NULL, "org.bluez",
-					d->path, "org.bluez.Device1",
-					"Connect", ignore_reply_cb, NULL, "");
-			/* background redial: stay "Paired" in the UI;
-			 * "Connecting.." only once the link comes up */
-			if (d->retry_n < 16)
-				d->retry_n++;
-			backoff = 1500u << d->retry_n;
-			if (backoff > 30000)
-				backoff = 30000;
-			d->retry_at_ms = now + backoff;
+			if (hold) {
+				d->retry_at_ms = now + 30000;
+			} else {
+				sd_bus_call_method_async(bt_bus, NULL,
+						"org.bluez", d->path,
+						"org.bluez.Device1", "Connect",
+						ignore_reply_cb, NULL, "");
+				/* background redial: stay "Paired" in the
+				 * UI; "Connecting.." only once the link
+				 * comes up */
+				if (d->retry_n < 16)
+					d->retry_n++;
+				backoff = 1500u << d->retry_n;
+				if (backoff > 30000)
+					backoff = 30000;
+				d->retry_at_ms = now + backoff;
+			}
 		}
 		if (!next || d->retry_at_ms < next)
 			next = d->retry_at_ms;
