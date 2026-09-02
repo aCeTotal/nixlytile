@@ -170,8 +170,13 @@ render_bt_popup(Monitor *m)
 	Card *card;
 	CardResult res;
 	BtAdapter a;
+	struct timespec ts;
+	uint64_t now;
 	char v1[96], v2[64];
 	int nconn = 0, i, hot;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	now = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 
 	if (!m || !m->statusbar.bt_popup.tree)
 		return;
@@ -258,24 +263,21 @@ render_bt_popup(Monitor *m)
 								"%s%d%%",
 								pos ? " · " : "",
 								d->battery);
-					if (!v2[0])
-						snprintf(v2, sizeof(v2),
-								"Connected");
 					col = card_col_green;
-				} else if (d->paired) {
-					snprintf(v2, sizeof(v2), "%s",
-							d->want_conn ?
-							"Reconnecting…" :
-							"Paired");
-				} else if (d->rssi) {
-					snprintf(v2, sizeof(v2), "%d dBm",
-							d->rssi);
 				} else {
 					v2[0] = '\0';
 				}
-				btn = d->connected ? "Disc" :
-					(d->paired ? "Conn" : "Pair");
-				card_icon_text_btn(card, bt_dev_svg(d), v1,
+				if (d->connected)
+					btn = "Connected";
+				else if (d->paired)
+					btn = d->want_conn && d->dial_ms &&
+						now - d->dial_ms < 5000 ?
+						"Connecting.." : "Paired";
+				else
+					btn = d->pair_ms &&
+						now - d->pair_ms < 30000 ?
+						"Pairing.." : "Pair";
+				card_icon_text_rbtn(card, bt_dev_svg(d), v1,
 						v2[0] ? v2 : NULL, col,
 						btn, BT_HIT_DEV + i,
 						hot == BT_HIT_DEV + i);

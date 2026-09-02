@@ -209,6 +209,8 @@ reconn_tick(void *data)
 			sd_bus_call_method_async(bt_bus, NULL, "org.bluez",
 					d->path, "org.bluez.Device1",
 					"Connect", ignore_reply_cb, NULL, "");
+			d->dial_ms = now;
+			btsys_changed();
 			if (d->retry_n < 16)
 				d->retry_n++;
 			backoff = 1500u << d->retry_n;
@@ -373,9 +375,23 @@ parse_props(sd_bus_message *m, const char *iface, const char *path)
 				if (var_bool(m, &d->connected) == 0 &&
 						old != d->connected)
 					dev_conn_transition(d);
-			} else if (strcmp(key, "RSSI") == 0)
+			} else if (strcmp(key, "RSSI") == 0) {
 				var_i16(m, &d->rssi);
-			else
+				/* advert seen: the device is in range right
+				 * now — dial immediately instead of waiting
+				 * out the backoff (retry_n=1 keeps follow-up
+				 * retries at 3s so streaming adverts don't
+				 * hammer Connect) */
+				if (d->paired && d->want_conn &&
+						!d->connected &&
+						d->retry_at_ms &&
+						d->retry_at_ms >
+						now_ms() + 3000) {
+					d->retry_n = 1;
+					d->retry_at_ms = now_ms();
+					reconn_arm(1);
+				}
+			} else
 				sd_bus_message_skip(m, "v");
 		} else if (strcmp(iface, "org.bluez.Battery1") == 0) {
 			BtDev *d = dev_find(path);
@@ -981,7 +997,10 @@ static int
 pair_done_cb(sd_bus_message *m, void *userdata, sd_bus_error *err)
 {
 	char *path = userdata;
+	BtDev *d = dev_find(path);
 
+	if (d)
+		d->pair_ms = 0;
 	if (!sd_bus_message_is_method_error(m, NULL)) {
 		/* trust + connect once paired */
 		sd_bus_call_method_async(bt_bus, NULL, "org.bluez", path,
@@ -991,6 +1010,8 @@ pair_done_cb(sd_bus_message *m, void *userdata, sd_bus_error *err)
 		sd_bus_call_method_async(bt_bus, NULL, "org.bluez", path,
 				"org.bluez.Device1", "Connect",
 				ignore_reply_cb, NULL, "");
+		if (d)
+			d->dial_ms = now_ms();
 	} else {
 		bt_osd("Bluetooth pairing failed");
 	}
@@ -1002,6 +1023,7 @@ pair_done_cb(sd_bus_message *m, void *userdata, sd_bus_error *err)
 void
 btmon_pair(const char *path)
 {
+	BtDev *d = dev_find(path);
 	char *copy;
 
 	if (!bt_bus)
@@ -1011,8 +1033,12 @@ btmon_pair(const char *path)
 		return;
 	if (sd_bus_call_method_async(bt_bus, NULL, "org.bluez", path,
 			"org.bluez.Device1", "Pair",
-			pair_done_cb, copy, "") < 0)
+			pair_done_cb, copy, "") < 0) {
 		free(copy);
+		return;
+	}
+	if (d)
+		d->pair_ms = now_ms();
 }
 
 void
@@ -1026,6 +1052,7 @@ btmon_connect(const char *path)
 		d->want_conn = 1;
 		d->retry_n = 0;
 		d->retry_at_ms = 0;
+		d->dial_ms = now_ms();
 	}
 	sd_bus_call_method_async(bt_bus, NULL, "org.bluez", path,
 			"org.bluez.Device1", "Connect",

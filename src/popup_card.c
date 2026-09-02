@@ -250,6 +250,7 @@ typedef struct {
 	CardRowType type;
 	char a[160], b[160], c[96], d[64];
 	char btn_label[24];
+	int btn_right;
 	const float *bcol, *dcol;
 	double frac;
 	float accent[4];
@@ -461,6 +462,17 @@ card_icon_text_btn(Card *c, const char *icon_path, const char *left,
 	r->bcol = rightcol ? rightcol : card_col_dim;
 	r->hit_id = hit_id;
 	r->hot = hot;
+}
+
+void
+card_icon_text_rbtn(Card *c, const char *icon_path, const char *left,
+		const char *right, const float *rightcol,
+		const char *btn_label, int hit_id, int hot)
+{
+	card_icon_text_btn(c, icon_path, left, right, rightcol, btn_label,
+			hit_id, hot);
+	if (c && c->nrows > 0)
+		c->rows[c->nrows - 1].btn_right = 1;
 }
 
 void
@@ -1027,6 +1039,12 @@ card_finish(Card *c, CardResult *out)
 			cairo_fill(cr);
 			break;
 		case CROW_TEXT:
+			/* full-row buttons: faint wash across the row on hover */
+			if (r->btn_right && r->hot) {
+				rounded(cr, 6, y + 1, w - 12, r->h - 2, 6);
+				cairo_set_source_rgba(cr, 1, 1, 1, 0.05);
+				cairo_fill(cr);
+			}
 			if (r->c[0]) {
 				int isz = CARD_TICON(base_h);
 
@@ -1037,7 +1055,8 @@ card_finish(Card *c, CardResult *out)
 				int bw = text_width_f(statusfont.font,
 						r->btn_label, 0) + 16;
 				int bh = base_h + 2;
-				int bx = CARD_PAD +
+				int bx = r->btn_right ? w - CARD_PAD - bw :
+					CARD_PAD +
 					(r->c[0] ? CARD_TICON(base_h) + 10 : 0) +
 					text_width_f(statusfont.font, r->a, 0) +
 					12;
@@ -1050,7 +1069,13 @@ card_finish(Card *c, CardResult *out)
 				else
 					cairo_set_source_rgba(cr, 1, 1, 1, 0.10);
 				cairo_fill(cr);
-				add_hit(out, bx, y, bw, r->h, r->hit_id);
+				/* right-pinned buttons act on the whole row */
+				if (r->btn_right)
+					add_hit(out, 0, y, w, r->h,
+							r->hit_id);
+				else
+					add_hit(out, bx, y, bw, r->h,
+							r->hit_id);
 			}
 			break;
 		case CROW_BUTTONS: {
@@ -1363,24 +1388,31 @@ card_finish(Card *c, CardResult *out)
 		case CROW_TEXT: {
 			int bl = y + (r->h - base_h) / 2 + base_asc;
 			int tx = CARD_PAD + (r->c[0] ? CARD_TICON(base_h) + 10 : 0);
+			int bw = 0;
 
+			if (r->btn_label[0] && r->hit_id >= 0)
+				bw = text_width_f(statusfont.font,
+						r->btn_label, 0) + 16;
 			draw_text_f(pix, statusfont.font, r->a, tx, bl,
 					card_col_fg, 0);
 			if (r->b[0]) {
 				int vw = text_width_f(statusfont.font, r->b, 0);
 				int vx = w - CARD_PAD - vw;
 
+				if (r->btn_right && bw)
+					vx -= bw + 12;
 				draw_text_f(pix, statusfont.font, r->b, vx, bl,
 						r->bcol, 0);
 			}
-			if (r->btn_label[0] && r->hit_id >= 0) {
-				int bx = tx + text_width_f(statusfont.font,
-						r->a, 0) + 12 + 8;
+			if (bw) {
+				int bx = r->btn_right ? w - CARD_PAD - bw :
+					tx + text_width_f(statusfont.font,
+							r->a, 0) + 12;
 				int bh = base_h + 2;
 				int by = y + (r->h - bh) / 2;
 
 				draw_text_f(pix, statusfont.font, r->btn_label,
-						bx, by + 1 + base_asc,
+						bx + 8, by + 1 + base_asc,
 						card_col_fg, 0);
 			}
 			break;

@@ -139,6 +139,8 @@ typedef struct {
 	                         * user-disconnected) */
 	uint64_t retry_at_ms;   /* reconnect engine: next attempt */
 	int retry_n;
+	uint64_t dial_ms;       /* last Connect attempt — UI "Connecting.." */
+	uint64_t pair_ms;       /* Pair() in flight — UI "Pairing.." */
 } BtDev;
 
 typedef struct {

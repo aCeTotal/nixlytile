@@ -88,6 +88,11 @@ void card_text_btn(Card *c, const char *left, const char *right,
 void card_icon_text_btn(Card *c, const char *icon_path, const char *left,
 		const char *right, const float *rightcol,
 		const char *btn_label, int hit_id, int hot);
+/* icon_text_btn with the button pinned to the right card edge, so
+ * buttons across rows stack in one column; right text sits left of it */
+void card_icon_text_rbtn(Card *c, const char *icon_path, const char *left,
+		const char *right, const float *rightcol,
+		const char *btn_label, int hit_id, int hot);
 /* Row of equal buttons; active index gets filled style, hovered index
  * a lighter fill. Hits recorded as id_base + index. */
 void card_buttons(Card *c, const char *labels[], const char *icons[],
