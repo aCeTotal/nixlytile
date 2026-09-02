@@ -199,9 +199,8 @@ render_bt_popup(Monitor *m)
 			a.powered ? v1 : "--");
 	card_gap(card, 6);
 
-	card_kv2_btn(card, "Power", a.powered ? "On" : "Off",
-			a.powered ? card_col_green : NULL,
-			"Toggle", a.powered ? "Disable" : "Enable", NULL,
+	card_text_btn(card, "Power", NULL, NULL,
+			a.powered ? "On" : "Off",
 			BT_HIT_POWER, hot == BT_HIT_POWER);
 	if (a.powered)
 		card_kv2(card, "Adapter", a.name[0] ? a.name : "--", NULL,

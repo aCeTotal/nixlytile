@@ -659,11 +659,9 @@ rendernetpopup(Monitor *m)
 	if (!s.wifi.present) {
 		card_text(card, "No wifi adapter", NULL, NULL);
 	} else {
-		card_kv2_btn(card, "Radio",
+		card_text_btn(card, "Radio", NULL, NULL,
 				s.wifi_blocked ? "Off" : "On",
-				s.wifi_blocked ? NULL : card_col_green,
-				"Toggle", s.wifi_blocked ? "Enable" : "Disable",
-				NULL, NET_HIT_WIFI_TOGGLE,
+				NET_HIT_WIFI_TOGGLE,
 				hot == NET_HIT_WIFI_TOGGLE);
 	}
 	if (s.wifi.present && !s.wifi_blocked) {

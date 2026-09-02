@@ -19,7 +19,7 @@
 #define DHIT_RATE  230   /* + rate index */
 #define DHIT_ROT   240   /* + transform index (normal/90/180/270) */
 
-#define DISP_RATES_MAX 4
+#define DISP_RATES_MAX 6   /* 4 EDID rates + custom 120-cap / OC entries */
 
 char display_icon_path[PATH_MAX] = "images/svg/monitor.svg";
 char display_icon_loaded_path[PATH_MAX];
@@ -46,6 +46,7 @@ static int ndi;
 static int dsel;
 static char dsel_name[64];
 static float di_rates[DISP_RATES_MAX];
+static int di_rate_oc[DISP_RATES_MAX];   /* overclock entry → red */
 static int di_nrates;
 
 /* drag-to-reorder state (mirrors the volume slider's sdrag pattern) */
@@ -110,9 +111,11 @@ build_disp(void)
 			d->h = mode->height;
 			d->hz = mode->refresh / 1000.0f;
 		} else {
+			/* custom modes have no current_mode entry */
 			d->w = m->wlr_output->width;
 			d->h = m->wlr_output->height;
-			d->hz = 60.0f;
+			d->hz = m->wlr_output->refresh > 0 ?
+				m->wlr_output->refresh / 1000.0f : 60.0f;
 		}
 		d->scale = m->wlr_output->scale > 0.1f ?
 			m->wlr_output->scale : 1.0f;
@@ -145,9 +148,11 @@ static void
 build_rates(const DispInfo *d)
 {
 	struct wlr_output_mode *mode;
+	int std_max = DISP_RATES_MAX - 2;   /* room for custom entries */
 	int i, j;
 
 	di_nrates = 0;
+	memset(di_rate_oc, 0, sizeof(di_rate_oc));
 	if (!d->mon || !d->mon->wlr_output)
 		return;
 	wl_list_for_each(mode, &d->mon->wlr_output->modes, link) {
@@ -160,7 +165,7 @@ build_rates(const DispInfo *d)
 				break;
 		if (i < di_nrates)
 			continue;
-		if (di_nrates < DISP_RATES_MAX) {
+		if (di_nrates < std_max) {
 			di_rates[di_nrates++] = hz;
 		} else {
 			/* keep the highest rates */
@@ -172,12 +177,38 @@ build_rates(const DispInfo *d)
 				di_rates[lo] = hz;
 		}
 	}
+	/* custom entries: fast panels get a 120 Hz cap mode (committed as
+	 * a custom modeline, advertised to clients like any other mode);
+	 * 60 Hz panels get red overclock modes */
+	if (di_nrates > 0) {
+		float top = di_rates[0];
+
+		for (i = 1; i < di_nrates; i++)
+			if (di_rates[i] > top)
+				top = di_rates[i];
+		if (top > 121.0f) {
+			for (i = 0; i < di_nrates; i++)
+				if (fabsf(di_rates[i] - 120.0f) < 1.0f)
+					break;
+			if (i == di_nrates)
+				di_rates[di_nrates++] = 120.0f;
+		} else if (top <= 60.5f) {
+			di_rate_oc[di_nrates] = 1;
+			di_rates[di_nrates++] = 100.0f;
+			di_rate_oc[di_nrates] = 1;
+			di_rates[di_nrates++] = 80.0f;
+		}
+	}
 	for (i = 0; i < di_nrates; i++)
 		for (j = i + 1; j < di_nrates; j++)
 			if (di_rates[j] > di_rates[i]) {
 				float t = di_rates[i];
+				int o = di_rate_oc[i];
+
 				di_rates[i] = di_rates[j];
 				di_rates[j] = t;
+				di_rate_oc[i] = di_rate_oc[j];
+				di_rate_oc[j] = o;
 			}
 }
 
@@ -253,6 +284,24 @@ monconf_write(void)
 	fclose(fp);
 	/* rename triggers the IN_MOVED_TO inotify reload in monitors_conf */
 	rename(tmp, monconf_path_cached);
+}
+
+/* Commit a new scale directly to the output (live path — the conf file
+ * is only written on release, so a drag doesn't spam inotify reloads). */
+static void
+disp_apply_scale(DispInfo *d, float sc)
+{
+	struct wlr_output_state st;
+
+	d->scale = sc;
+	if (!d->mon || !d->mon->wlr_output)
+		return;
+	wlr_output_state_init(&st);
+	wlr_output_state_set_scale(&st, sc);
+	if (wlr_output_test_state(d->mon->wlr_output, &st))
+		wlr_output_commit_state(d->mon->wlr_output, &st);
+	wlr_output_state_finish(&st);
+	monconf_apply_layout();
 }
 
 /* ── icon ────────────────────────────────────────────────────────── */
@@ -400,7 +449,7 @@ render_display_popup(Monitor *m)
 		if (di_nrates > 1) {
 			const char *lbl[DISP_RATES_MAX];
 			static char rbuf[DISP_RATES_MAX][12];
-			int active = -1;
+			int active = -1, mask = 0;
 
 			card_section(card, "REFRESH RATE");
 			for (i = 0; i < di_nrates; i++) {
@@ -409,10 +458,12 @@ render_display_popup(Monitor *m)
 				lbl[i] = rbuf[i];
 				if (fabsf(d->hz - di_rates[i]) < 0.5f)
 					active = i;
+				if (di_rate_oc[i])
+					mask |= 1 << i;
 			}
-			card_buttons(card, lbl, NULL, di_nrates, active,
+			card_buttons_mask(card, lbl, di_nrates, active,
 					btn_hover_idx(hot, DHIT_RATE,
-						di_nrates), DHIT_RATE);
+						di_nrates), DHIT_RATE, mask);
 		}
 
 		card_section(card, "ROTATION");
@@ -478,7 +529,16 @@ display_drag_motion(Monitor *m, double cx)
 		if (frac > 1.0)
 			frac = 1.0;
 		if (frac != ddrag.frac) {
+			float sc = SCALE_MIN +
+				(float)frac * (SCALE_MAX - SCALE_MIN);
+
 			ddrag.frac = frac;
+			/* live: commit on each 5% step crossing */
+			sc = roundf(sc * 20.0f) / 20.0f;
+			if (fabsf(sc - di[dsel].scale) > 0.001f) {
+				disp_apply_scale(&di[dsel], sc);
+				render_display_popup(m);
+			}
 			popup_view_drag_fill_frac(&p->view, 0, frac);
 		}
 		return;
@@ -534,10 +594,12 @@ display_drag_release(void)
 		float sc = SCALE_MIN +
 			(float)ddrag.frac * (SCALE_MAX - SCALE_MIN);
 
-		/* 5% steps */
+		/* 5% steps; covers click-without-motion (already applied
+		 * live during a drag) */
 		sc = roundf(sc * 20.0f) / 20.0f;
 		ddrag.scale = 0;
-		di[dsel].scale = sc;
+		if (fabsf(sc - di[dsel].scale) > 0.001f)
+			disp_apply_scale(&di[dsel], sc);
 		monconf_write();
 		if (m)
 			render_display_popup(m);

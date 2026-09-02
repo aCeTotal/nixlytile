@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- connector shell (chamfered corner = DP) -->
+  <path fill="#3B82F6" d="M14 20 h28 l8 8 v10 a3 3 0 0 1 -3 3 H14 a3 3 0 0 1 -3 -3 V23 a3 3 0 0 1 3 -3 Z"></path>
+  <rect x="47" y="29" width="2" height="10" rx="1" fill="#1E40AF"></rect>
+  <!-- pins -->
+  <rect x="17" y="26" width="3" height="8" rx="1" fill="#1A1A1A"></rect>
+  <rect x="24" y="26" width="3" height="8" rx="1" fill="#1A1A1A"></rect>
+  <rect x="31" y="26" width="3" height="8" rx="1" fill="#1A1A1A"></rect>
+  <rect x="38" y="26" width="3" height="8" rx="1" fill="#1A1A1A"></rect>
+  <!-- cable -->
+  <rect x="30" y="41" width="4" height="14" rx="2" fill="#1E40AF"></rect>
+</svg>

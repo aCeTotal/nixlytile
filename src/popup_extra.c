@@ -414,6 +414,36 @@ render_clock_popup(Monitor *m)
 	p->height = p->view.h;
 }
 
+/* Connection-type icon for a sink/source, keyed on the wpctl name:
+ * HDMI/DP/USB/jack/bluetooth, with a speaker/mic fallback. */
+static const char *
+audio_dev_svg(const AudioDevice *d, int is_mic)
+{
+	char low[64];
+	int i;
+
+	for (i = 0; d->name[i] && i < (int)sizeof(low) - 1; i++)
+		low[i] = (char)tolower((unsigned char)d->name[i]);
+	low[i] = '\0';
+	if (d->is_headset)
+		return "images/svg/bt_headset.svg";
+	if (strstr(low, "hdmi"))
+		return "images/svg/audio_hdmi.svg";
+	if (strstr(low, "displayport") || strstr(low, "display port"))
+		return "images/svg/audio_dp.svg";
+	if (strstr(low, "usb"))
+		return "images/svg/audio_usb.svg";
+	if (strstr(low, "headset") || strstr(low, "headphone") ||
+			strstr(low, "buds") || strstr(low, "pods") ||
+			strstr(low, "arctis"))
+		return "images/svg/bt_headset.svg";
+	if (strstr(low, "analog") || strstr(low, "jack") ||
+			strstr(low, "line"))
+		return "images/svg/audio_jack.svg";
+	return is_mic ? "images/svg/audio_mic.svg" :
+		"images/svg/bt_speaker.svg";
+}
+
 /* Shared body for the volume/mic popups: header + draggable gauge +
  * state row + default-device picker. */
 static void
@@ -477,16 +507,19 @@ render_audio_popup(Monitor *m, InfoPopup *p, int is_mic)
 				MUTE_HIT_ID, p->btn_hover == MUTE_HIT_ID);
 
 	if (dev_count > 0) {
-		card_section(card, is_mic ? "INPUT DEVICE" : "OUTPUT DEVICE");
+		card_section(card, is_mic ? "INPUT DEVICES" : "OUTPUT DEVICES");
 		for (int i = 0; i < dev_count; i++) {
 			AudioDevice *d = &devs[i];
 			char name[36];
 
 			snprintf(name, sizeof(name), "%.33s", d->name);
 			if (d->is_default)
-				card_text(card, name, "Active", card_col_green);
+				card_icon_text_btn(card, audio_dev_svg(d, is_mic),
+						name, "Active", card_col_green,
+						NULL, -1, 0);
 			else
-				card_text_btn(card, name, NULL, NULL, "Use",
+				card_icon_text_btn(card, audio_dev_svg(d, is_mic),
+						name, NULL, NULL, "Use",
 						i, p->btn_hover == i);
 		}
 	}

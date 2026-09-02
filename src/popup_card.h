@@ -16,7 +16,7 @@
 #define CARD_MAX_ROWS  56
 #define CARD_MAX_HITS  48
 #define CARD_MAX_FILLS 6
-#define CARD_MAX_BTN   4
+#define CARD_MAX_BTN   6
 
 /* Accent palette (RGBA, non-premultiplied float) */
 extern const float card_col_fg[4];       /* primary text */
@@ -92,6 +92,10 @@ void card_icon_text_btn(Card *c, const char *icon_path, const char *left,
  * a lighter fill. Hits recorded as id_base + index. */
 void card_buttons(Card *c, const char *labels[], const char *icons[],
 		int n, int active, int hover, int id_base);
+/* Same, but buttons whose bit is set in red_mask are drawn in red
+ * (overclock / danger entries). */
+void card_buttons_mask(Card *c, const char *labels[],
+		int n, int active, int hover, int id_base, int red_mask);
 /* Strip of proportional display boxes (monitor arrangement).  wr/hr are
  * the displays' relative logical sizes; boxes are drawn left-to-right,
  * `sel` highlighted, and `drag_idx` (>=0) lifted and shifted `drag_dx`

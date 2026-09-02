@@ -1728,6 +1728,10 @@ static struct {
 	uint64_t start_ms;
 } tray_hover;
 static uint64_t tray_hover_suppress_until;
+/* Same close-grace as the module popups (INFO_POPUP_GRACE_MS): crossing
+ * the bar→menu gap or a brief overshoot must not kill the menu. */
+#define TRAY_MENU_GRACE_MS 250
+static uint64_t tray_menu_outside_ms;
 
 /* A click just handled the menu (activate/entry/close): don't let the
  * dwell logic pop it right back open under the resting cursor. */
@@ -1774,6 +1778,7 @@ tray_menu_update_hover(Monitor *m, double cx, double cy)
 		int open_for_it = menu->visible &&
 			!strcmp(menu->service, over->service);
 
+		tray_menu_outside_ms = 0;
 		if (tray_hover.it != over || tray_hover.mon != m) {
 			tray_hover.it = over;
 			tray_hover.mon = m;
@@ -1795,12 +1800,32 @@ tray_menu_update_hover(Monitor *m, double cx, double cy)
 	} else {
 		tray_hover.it = NULL;
 		tray_hover.mon = NULL;
-		/* left the icon row: close unless the cursor is in the menu */
-		if (menu->visible && !(blx - menu->x >= 0 &&
-				bly - menu->y >= 0 &&
-				blx - menu->x < menu->width &&
-				bly - menu->y < menu->height))
-			tray_menu_hide_all();
+		/* left the icon row: the menu itself and the bar→menu gap
+		 * strip count as inside; anywhere else only closes after the
+		 * cursor stayed out for the whole grace window */
+		if (menu->visible) {
+			uint64_t now = monotonic_msec();
+			int inside = blx >= menu->x &&
+				blx < menu->x + menu->width &&
+				bly >= m->statusbar.area.height &&
+				bly < menu->y + menu->height;
+
+			if (inside) {
+				tray_menu_outside_ms = 0;
+			} else if (tray_menu_outside_ms == 0) {
+				tray_menu_outside_ms = now;
+				schedule_popup_delay(TRAY_MENU_GRACE_MS + 1);
+			} else if (now - tray_menu_outside_ms <
+					TRAY_MENU_GRACE_MS) {
+				schedule_popup_delay((uint32_t)
+						(TRAY_MENU_GRACE_MS -
+						(now - tray_menu_outside_ms))
+						+ 1);
+			} else {
+				tray_menu_outside_ms = 0;
+				tray_menu_hide_all();
+			}
+		}
 	}
 
 	if (!menu->visible)

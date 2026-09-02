@@ -14,6 +14,7 @@
 #define CARD_PAD      16
 #define CARD_COLGAP   28
 #define CARD_METER_H  44
+#define CARD_TICON(h) ((h) + 6)   /* CROW_TEXT row icon size */
 #define CARD_BG_R     0.055
 #define CARD_BG_G     0.060
 #define CARD_BG_B     0.075
@@ -253,6 +254,7 @@ typedef struct {
 	double frac;
 	float accent[4];
 	int nbtn, active, hover, id_base;
+	int red_mask;
 	char btn[CARD_MAX_BTN][32];
 	int gap;
 	int hit_id, hot;
@@ -465,9 +467,16 @@ void
 card_buttons(Card *c, const char *labels[], const char *icons[],
 		int n, int active, int hover, int id_base)
 {
+	(void)icons;
+	card_buttons_mask(c, labels, n, active, hover, id_base, 0);
+}
+
+void
+card_buttons_mask(Card *c, const char *labels[],
+		int n, int active, int hover, int id_base, int red_mask)
+{
 	CardRow *r = row_new(c, CROW_BUTTONS);
 
-	(void)icons;
 	if (!r)
 		return;
 	if (n > CARD_MAX_BTN)
@@ -476,6 +485,7 @@ card_buttons(Card *c, const char *labels[], const char *icons[],
 	r->active = active;
 	r->hover = hover;
 	r->id_base = id_base;
+	r->red_mask = red_mask;
 	for (int i = 0; i < n; i++)
 		setstr(r->btn[i], sizeof(r->btn[i]), labels[i]);
 }
@@ -672,7 +682,7 @@ card_measure(Card *c, int *out_w, int *out_h)
 			rw = text_width_f(statusfont.font, r->a, 0) + 16 +
 				text_width_f(statusfont.font, r->b, 0);
 			if (r->c[0])
-				rw += base_h + 10;
+				rw += CARD_TICON(base_h) + 10;
 			if (r->btn_label[0])
 				rw += 12 + text_width_f(statusfont.font,
 						r->btn_label, 0) + 16;
@@ -1018,7 +1028,7 @@ card_finish(Card *c, CardResult *out)
 			break;
 		case CROW_TEXT:
 			if (r->c[0]) {
-				int isz = base_h;
+				int isz = CARD_TICON(base_h);
 
 				draw_icon(cr, r->c, CARD_PAD,
 						y + (r->h - isz) / 2, isz);
@@ -1048,16 +1058,36 @@ card_finish(Card *c, CardResult *out)
 
 			for (int b = 0; b < n; b++) {
 				int bx = CARD_PAD + b * (bw + gap);
+				int red = r->red_mask >> b & 1;
 
 				rounded(cr, bx + 0.5, y + 0.5, bw - 1, bh - 1, 8);
 				if (b == r->active) {
-					cairo_set_source_rgba(cr, 1, 1, 1, 0.14);
+					if (red)
+						cairo_set_source_rgba(cr,
+								0.85, 0.30, 0.30, 0.30);
+					else
+						cairo_set_source_rgba(cr, 1, 1, 1, 0.14);
 					cairo_fill_preserve(cr);
-					cairo_set_source_rgba(cr, 1, 1, 1, 0.25);
+					if (red)
+						cairo_set_source_rgba(cr,
+								0.90, 0.35, 0.35, 0.60);
+					else
+						cairo_set_source_rgba(cr, 1, 1, 1, 0.25);
 				} else if (b == r->hover) {
-					cairo_set_source_rgba(cr, 1, 1, 1, 0.07);
+					if (red)
+						cairo_set_source_rgba(cr,
+								0.85, 0.30, 0.30, 0.18);
+					else
+						cairo_set_source_rgba(cr, 1, 1, 1, 0.07);
 					cairo_fill_preserve(cr);
-					cairo_set_source_rgba(cr, 1, 1, 1, 0.14);
+					if (red)
+						cairo_set_source_rgba(cr,
+								0.90, 0.35, 0.35, 0.45);
+					else
+						cairo_set_source_rgba(cr, 1, 1, 1, 0.14);
+				} else if (red) {
+					cairo_set_source_rgba(cr,
+							0.90, 0.35, 0.35, 0.35);
 				} else {
 					cairo_set_source_rgba(cr, 1, 1, 1, 0.13);
 				}
@@ -1329,7 +1359,7 @@ card_finish(Card *c, CardResult *out)
 			break;
 		case CROW_TEXT: {
 			int bl = y + (r->h - base_h) / 2 + base_asc;
-			int tx = CARD_PAD + (r->c[0] ? base_h + 10 : 0);
+			int tx = CARD_PAD + (r->c[0] ? CARD_TICON(base_h) + 10 : 0);
 
 			draw_text_f(pix, statusfont.font, r->a, tx, bl,
 					card_col_fg, 0);
@@ -1370,8 +1400,10 @@ card_finish(Card *c, CardResult *out)
 
 				draw_text_f(pix, statusfont.font, r->btn[b],
 						bx + (bw - tw) / 2, bl,
-						b == r->active ? card_col_fg :
-						card_col_dim, 0);
+						r->red_mask >> b & 1 ?
+						card_col_red :
+						(b == r->active ? card_col_fg :
+						card_col_dim), 0);
 			}
 			break;
 		}

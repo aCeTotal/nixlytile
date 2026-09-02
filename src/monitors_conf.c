@@ -142,6 +142,31 @@ monconf_find(const char *name)
 	return NULL;
 }
 
+/* One test+commit attempt with the cfg's transform/scale plus either a
+ * custom modeline (custom_mhz > 0) or a listed mode. */
+static int
+monconf_commit_mode(Monitor *m, RuntimeMonitorConfig *cfg,
+		struct wlr_output_mode *mode, int custom_mhz)
+{
+	struct wlr_output_state st;
+	int ok;
+
+	wlr_output_state_init(&st);
+	wlr_output_state_set_enabled(&st, 1);
+	wlr_output_state_set_transform(&st, cfg->transform);
+	if (cfg->scale >= 0.5f && cfg->scale <= 4.0f)
+		wlr_output_state_set_scale(&st, cfg->scale);
+	if (custom_mhz > 0)
+		wlr_output_state_set_custom_mode(&st, cfg->width, cfg->height,
+			custom_mhz);
+	else if (mode)
+		wlr_output_state_set_mode(&st, mode);
+	ok = wlr_output_test_state(m->wlr_output, &st) &&
+		wlr_output_commit_state(m->wlr_output, &st);
+	wlr_output_state_finish(&st);
+	return ok;
+}
+
 /* Commit mode/transform for every monitor that has a monitors.conf entry. */
 static void
 monconf_apply_modes(void)
@@ -149,7 +174,6 @@ monconf_apply_modes(void)
 	Monitor *m;
 	wl_list_for_each(m, &mons, link) {
 		RuntimeMonitorConfig *cfg;
-		struct wlr_output_state st;
 		struct wlr_output_mode *mode;
 
 		if (!m->wlr_output)
@@ -158,21 +182,36 @@ monconf_apply_modes(void)
 		if (!cfg)
 			continue;
 
-		wlr_output_state_init(&st);
-		wlr_output_state_set_enabled(&st, 1);
-		wlr_output_state_set_transform(&st, cfg->transform);
-		if (cfg->scale >= 0.5f && cfg->scale <= 4.0f)
-			wlr_output_state_set_scale(&st, cfg->scale);
 		if (cfg->width > 0 && cfg->height > 0)
 			mode = find_mode(m->wlr_output, cfg->width, cfg->height,
 				cfg->refresh);
 		else
 			mode = bestmode(m->wlr_output);
-		if (mode)
-			wlr_output_state_set_mode(&st, mode);
-		if (wlr_output_test_state(m->wlr_output, &st))
-			wlr_output_commit_state(m->wlr_output, &st);
-		wlr_output_state_finish(&st);
+		/* Requested rate isn't in the EDID list (120 Hz cap on a
+		 * faster panel, or an overclock on a slow one): commit it as
+		 * a custom modeline — clients see it like any other mode.
+		 * If the test or commit fails, fall straight back to the
+		 * highest standard rate at that resolution. */
+		if (cfg->width > 0 && cfg->height > 0 && cfg->refresh > 0 &&
+				(!mode || fabsf(mode->refresh / 1000.0f -
+					cfg->refresh) > 1.0f)) {
+			if (monconf_commit_mode(m, cfg, NULL,
+					(int)(cfg->refresh * 1000.0f + 0.5f))) {
+				wlr_log(WLR_INFO,
+					"monitors.conf: %s custom mode %dx%d@%.3f",
+					m->wlr_output->name, cfg->width,
+					cfg->height, cfg->refresh);
+				continue;
+			}
+			mode = find_mode(m->wlr_output, cfg->width,
+					cfg->height, 0);
+			wlr_log(WLR_INFO,
+				"monitors.conf: %s custom %.3f Hz failed, "
+				"falling back to %d mHz",
+				m->wlr_output->name, cfg->refresh,
+				mode ? mode->refresh : 0);
+		}
+		monconf_commit_mode(m, cfg, mode, 0);
 	}
 }
 

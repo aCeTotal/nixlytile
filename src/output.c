@@ -6803,6 +6803,26 @@ updatemons(struct wl_listener *listener, void *data)
 		return;
 	in_updatemons = 1;
 
+	/* Displays-popup interaction (scale drag / reorder) reshapes the
+	 * layout while the pointer sits on the popup: remember the cursor's
+	 * offset inside that monitor so we can pin it there afterwards —
+	 * otherwise the monitor moves away under the cursor and the hover
+	 * check closes the popup. */
+	Monitor *holdm = NULL;
+	double hold_dx = 0, hold_dy = 0;
+	wl_list_for_each(m, &mons, link) {
+		if (m->statusbar.display_popup.visible &&
+				cursor->x >= m->m.x &&
+				cursor->x < m->m.x + m->m.width &&
+				cursor->y >= m->m.y &&
+				cursor->y < m->m.y + m->m.height) {
+			holdm = m;
+			hold_dx = cursor->x - m->m.x;
+			hold_dy = cursor->y - m->m.y;
+			break;
+		}
+	}
+
 	config = wlr_output_configuration_v1_create();
 
 	/* First remove from the layout the disabled monitors */
@@ -6929,12 +6949,19 @@ updatemons(struct wl_listener *listener, void *data)
 		}
 	}
 
+	if (holdm && holdm->wlr_output && holdm->wlr_output->enabled)
+		wlr_cursor_warp_closest(cursor, NULL,
+				holdm->m.x + hold_dx, holdm->m.y + hold_dy);
+
 	if (selmon && selmon->wlr_output->enabled) {
 		wl_list_for_each(c, &clients, link) {
 			if (!c->mon && client_surface(c)->mapped)
 				setmon(c, selmon, c->tags);
 		}
-		focusclient(focustop(selmon), 1);
+		/* lift=0 while the displays popup is in use: lift warps the
+		 * cursor to the focused tile, which would yank it off the
+		 * popup mid-interaction */
+		focusclient(focustop(selmon), holdm ? 0 : 1);
 		if (selmon->lock_surface) {
 			client_notify_enter(selmon->lock_surface->surface,
 					wlr_seat_get_keyboard(seat));
