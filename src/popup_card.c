@@ -19,6 +19,7 @@
 #define CARD_BG_G     0.060
 #define CARD_BG_B     0.075
 #define CARD_BG_A     0.93
+#define CARD_BG_A_TILE 0.99   /* backdrop when windows sit under the popup */
 #define CARD_BORDER_A 0.09
 #define CARD_MIN_W    250
 
@@ -249,6 +250,7 @@ typedef enum {
 typedef struct {
 	CardRowType type;
 	char a[160], b[160], c[96], d[64];
+	char micon1[64], micon2[64];   /* CROW_TEXT status icons */
 	char btn_label[24];
 	int btn_right;
 	int btn_solo;       /* btn_right hit rect = button only, no row wash */
@@ -474,6 +476,21 @@ card_icon_text_rbtn(Card *c, const char *icon_path, const char *left,
 			hit_id, hot);
 	if (c && c->nrows > 0)
 		c->rows[c->nrows - 1].btn_right = 1;
+}
+
+void
+card_icon_text_rbtn_icons(Card *c, const char *icon_path,
+		const char *left, const char *sicon1, const char *sicon2,
+		const char *btn_label, int hit_id, int hot)
+{
+	card_icon_text_rbtn(c, icon_path, left, NULL, NULL, btn_label,
+			hit_id, hot);
+	if (c && c->nrows > 0) {
+		CardRow *r = &c->rows[c->nrows - 1];
+
+		setstr(r->micon1, sizeof(r->micon1), sicon1);
+		setstr(r->micon2, sizeof(r->micon2), sicon2);
+	}
 }
 
 void
@@ -708,6 +725,10 @@ card_measure(Card *c, int *out_w, int *out_h)
 				text_width_f(statusfont.font, r->b, 0);
 			if (r->c[0])
 				rw += CARD_TICON(base_h) + 10;
+			if (r->micon1[0])
+				rw += base_h + 2 + 8;
+			if (r->micon2[0])
+				rw += base_h + 2 + 8;
 			if (r->btn_label[0])
 				rw += 12 + text_width_f(statusfont.font,
 						r->btn_label, 0) + 16;
@@ -891,6 +912,20 @@ add_hit(CardResult *out, int x, int y, int w, int h, int id)
 		.h = h, .id = id };
 }
 
+/* Popups read fine glassy over the wallpaper, but over window content
+ * the bleed-through hurts legibility: with any client visible on the
+ * focused monitor the backdrop goes nearly opaque. */
+static double
+card_bg_a(void)
+{
+	Client *c;
+
+	wl_list_for_each(c, &clients, link)
+		if (VISIBLEON(c, selmon))
+			return CARD_BG_A_TILE;
+	return CARD_BG_A;
+}
+
 int
 card_finish(Card *c, CardResult *out)
 {
@@ -930,7 +965,7 @@ card_finish(Card *c, CardResult *out)
 
 	/* card body + hairline border */
 	rounded(cr, 0.5, 0.5, w - 1.0, h - 1.0, CARD_RADIUS);
-	cairo_set_source_rgba(cr, CARD_BG_R, CARD_BG_G, CARD_BG_B, CARD_BG_A);
+	cairo_set_source_rgba(cr, CARD_BG_R, CARD_BG_G, CARD_BG_B, card_bg_a());
 	cairo_fill_preserve(cr);
 	cairo_set_source_rgba(cr, 1, 1, 1, CARD_BORDER_A);
 	cairo_set_line_width(cr, 1.0);
@@ -1063,6 +1098,25 @@ card_finish(Card *c, CardResult *out)
 
 				draw_icon(cr, r->c, CARD_PAD,
 						y + (r->h - isz) / 2, isz);
+			}
+			if (r->micon1[0] || r->micon2[0]) {
+				int isz = base_h + 2;
+				int ix = w - CARD_PAD;
+
+				if (r->btn_label[0] && r->hit_id >= 0)
+					ix -= text_width_f(statusfont.font,
+							r->btn_label, 0) + 16 + 12;
+				if (r->micon2[0]) {
+					ix -= isz;
+					draw_icon(cr, r->micon2, ix,
+							y + (r->h - isz) / 2, isz);
+					ix -= 8;
+				}
+				if (r->micon1[0]) {
+					ix -= isz;
+					draw_icon(cr, r->micon1, ix,
+							y + (r->h - isz) / 2, isz);
+				}
 			}
 			if (r->btn_label[0] && r->hit_id >= 0) {
 				int bw = text_width_f(statusfont.font,
@@ -1898,7 +1952,7 @@ card_panel_buffer(int w, int h)
 	if (!cr)
 		return NULL;
 	rounded(cr, 0.5, 0.5, w - 1.0, h - 1.0, CARD_RADIUS);
-	cairo_set_source_rgba(cr, CARD_BG_R, CARD_BG_G, CARD_BG_B, CARD_BG_A);
+	cairo_set_source_rgba(cr, CARD_BG_R, CARD_BG_G, CARD_BG_B, card_bg_a());
 	cairo_fill_preserve(cr);
 	cairo_set_source_rgba(cr, 1, 1, 1, CARD_BORDER_A);
 	cairo_set_line_width(cr, 1.0);

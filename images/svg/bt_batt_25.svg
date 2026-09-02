@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- shell -->
+  <rect x="4" y="20" width="50" height="24" rx="6" fill="none" stroke="#B0B0B0" stroke-width="4"></rect>
+  <!-- terminal -->
+  <rect x="56" y="27" width="6" height="10" rx="2" fill="#B0B0B0"></rect>
+  <!-- charge (low: red) -->
+  <rect x="9" y="25" width="10" height="14" rx="3" fill="#D94D4D"></rect>
+  <rect x="17" y="25" width="2" height="14" rx="1" fill="#A33A3A"></rect>
+</svg>

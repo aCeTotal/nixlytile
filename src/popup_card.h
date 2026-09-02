@@ -97,6 +97,12 @@ void card_icon_text_btn(Card *c, const char *icon_path, const char *left,
 void card_icon_text_rbtn(Card *c, const char *icon_path, const char *left,
 		const char *right, const float *rightcol,
 		const char *btn_label, int hit_id, int hot);
+/* icon_text_rbtn with up to two small status icons (svg asset paths,
+ * drawn at text height, right-aligned left of the button) in place of
+ * the right text — BT device signal/battery. Either may be NULL. */
+void card_icon_text_rbtn_icons(Card *c, const char *icon_path,
+		const char *left, const char *sicon1, const char *sicon2,
+		const char *btn_label, int hit_id, int hot);
 /* Row of equal buttons; active index gets filled style, hovered index
  * a lighter fill. Hits recorded as id_base + index. */
 void card_buttons(Card *c, const char *labels[], const char *icons[],

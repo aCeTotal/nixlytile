@@ -3906,9 +3906,13 @@ pipewire_mic_volume_percent_nb(void)
 
 /* Startup defaults (apply_startup_defaults): unmute + set level + read
  * back, all in one background shell per device.  The old run_wpctl_sync
- * sequence blocked the compositor thread for every wpctl round-trip. */
+ * sequence blocked the compositor thread for every wpctl round-trip.
+ * Sink and source are separate calls: the default source often
+ * enumerates seconds after the sink, and a set-mute fired at a missing
+ * source fails silently — the caller retries the mic half until the
+ * source actually answers. */
 void
-audio_defaults_apply_async(double speaker_pct, double mic_pct)
+audio_sink_defaults_apply_async(double speaker_pct)
 {
 	char cmd[192];
 	uint64_t now = monotonic_msec();
@@ -3923,6 +3927,14 @@ audio_defaults_apply_async(double speaker_pct, double mic_pct)
 		vol_fetch_inflight = 1;
 		vol_fetch_start_ms = now;
 	}
+}
+
+void
+audio_mic_defaults_apply_async(double mic_pct)
+{
+	char cmd[192];
+	uint64_t now = monotonic_msec();
+
 	mic_last_read_ms = 0;
 	snprintf(cmd, sizeof(cmd),
 		"wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0; "

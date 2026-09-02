@@ -1276,12 +1276,13 @@ apply_startup_defaults(void)
 {
 	static int light_applied = 0;
 	static int audio_applied = 0;
+	static int mic_applied = 0;
 	static int audio_tries = 0;
 	const double light_default = 40.0;
 	const double speaker_default = 80.0;
 	const double mic_default = 50.0;
 
-	if (light_applied && audio_applied)
+	if (light_applied && audio_applied && mic_applied)
 		return;
 
 	if (light_applied)
@@ -1310,7 +1311,8 @@ apply_startup_defaults(void)
 	}
 
 audio:
-	if (audio_applied || audio_tries >= AUDIO_DEFAULTS_MAX_TRIES)
+	if ((audio_applied && mic_applied) ||
+			audio_tries >= AUDIO_DEFAULTS_MAX_TRIES)
 		return;
 	/* Hold off on ALL wpctl work for the first seconds of the session:
 	 * PipeWire/WirePlumber cold-start in parallel with the compositor,
@@ -1329,24 +1331,28 @@ audio:
 	audio_tries++;
 
 	/*
-	 * Gate on PipeWire actually answering: the async reader returns -1
-	 * until a background fetch has landed; that fetch's callback
-	 * re-renders the volume module, which retries here.  Answers
+	 * Gate on PipeWire actually answering: the async readers return -1
+	 * until a background fetch has landed; those fetches' callbacks
+	 * re-render the volume/mic modules, which retry here.  Answers
 	 * PipeWire does not give us are still not invented.
+	 *
+	 * Sink and source gate separately: the default source often shows
+	 * up seconds after the sink (webcam/BT mics), and an unmute fired
+	 * at a missing source fails silently — leaving the mic muted from
+	 * WirePlumber's restored state for the whole session.
 	 */
-	{
+	if (!audio_applied) {
 		int is_headset = 0;
 
-		if (pipewire_volume_percent_nb(&is_headset) < 0.0)
-			return;   /* PipeWire not answering yet — retry later */
+		if (pipewire_volume_percent_nb(&is_headset) >= 0.0) {
+			audio_sink_defaults_apply_async(speaker_default);
+			audio_applied = 1;
+		}
 	}
-
-	/* Unmute + set level + read back for sink and source, in
-	 * background shells; the read-back callbacks refresh cache and
-	 * modules when they land.  A missing mic source just makes the
-	 * source commands fail in the child — nothing to skip up front. */
-	audio_defaults_apply_async(speaker_default, mic_default);
-	audio_applied = 1;
+	if (!mic_applied && pipewire_mic_volume_percent_nb() >= 0.0) {
+		audio_mic_defaults_apply_async(mic_default);
+		mic_applied = 1;
+	}
 }
 
 /* ── extra net-async globals (public IP / SSID fetch state) ──────── */

@@ -302,30 +302,6 @@ sec_tag(const WifiNet *w)
 	return w->secured ? "🔒" : "";
 }
 
-/* "a, b, c" -> "a · b +1", bounded so long resolver lists (or IPv6
- * servers) can never widen the card */
-static void
-dns_compact(const char *in, char *out, size_t len)
-{
-	char buf[128], *tok, *save;
-	int n = 0, extra = 0;
-
-	out[0] = '\0';
-	snprintf(buf, sizeof(buf), "%s", in);
-	for (tok = strtok_r(buf, ", ", &save); tok;
-			tok = strtok_r(NULL, ", ", &save)) {
-		if (n < 2 && strlen(out) + strlen(tok) < 36) {
-			snprintf(out + strlen(out), len - strlen(out),
-					"%s%s", n ? " · " : "", tok);
-			n++;
-		} else {
-			extra++;
-		}
-	}
-	if (extra)
-		snprintf(out + strlen(out), len - strlen(out), " +%d", extra);
-}
-
 /* ── live spectrum overlay (wifi header) ─────────────────────────── */
 
 #define SPEC_TICK_MS 33
@@ -579,11 +555,7 @@ rendernetpopup(Monitor *m)
 		for (si = 0; sub[si]; si++)
 			sub[si] = (char)toupper((unsigned char)sub[si]);
 		card_header(card, net_icon_path, "Wi-Fi", sub, value);
-		card_gap(card, 6);
-		spec_frac = pct / 100.0;
-		spec_accent = pct < 30 ? card_col_yellow : card_col_blue;
-		card_wave(card, spec_frac, spec_accent);
-		card_gap(card, 6);
+		card_gap(card, 8);
 	} else {
 		card_header(card, net_icon_path, "Network", "DISCONNECTED",
 				"--");
@@ -608,19 +580,31 @@ rendernetpopup(Monitor *m)
 				(double)(monotonic_msec() % 2400) / 2400.0);
 		card_gap(card, 10);
 	} else if (net_available) {
-		card_kv2(card, "Local IP",
-				net_local_ip[0] ? net_local_ip : "--", NULL,
-				"Gateway", ui_gateway[0] ? ui_gateway : "--",
-				NULL);
-		card_kv2(card, "Public IP",
-				net_public_ip[0] ? net_public_ip : "--", NULL,
-				NULL, NULL, NULL);
-		if (ui_dns[0]) {
-			/* text row, not kv2: kv2 width feeds the shared
-			 * column grid, so one long value widens every row */
-			dns_compact(ui_dns, v1, sizeof(v1));
-			card_text(card, "DNS", v1, NULL);
-		}
+		/* left column: Local IP / Public IP / Gateway stacked;
+		 * right column: DNS with one server per row */
+		char dbuf[128], *tok, *save;
+		const char *dns[6];
+		const char *lk[3] = { "Local IP", "Public IP", "Gateway" };
+		const char *lv[3];
+		int ndns = 0, nrows, row;
+
+		lv[0] = net_local_ip[0] ? net_local_ip : "--";
+		lv[1] = net_public_ip[0] ? net_public_ip : "--";
+		lv[2] = ui_gateway[0] ? ui_gateway : "--";
+		snprintf(dbuf, sizeof(dbuf), "%s", ui_dns);
+		for (tok = strtok_r(dbuf, ", ", &save);
+				tok && ndns < (int)LENGTH(dns);
+				tok = strtok_r(NULL, ", ", &save))
+			dns[ndns++] = tok;
+		nrows = ndns > 3 ? ndns : 3;
+		for (row = 0; row < nrows; row++)
+			card_kv2(card,
+					row < 3 ? lk[row] : "",
+					row < 3 ? lv[row] : "",
+					NULL,
+					row < ndns ? (row ? "" : "DNS") : NULL,
+					row < ndns ? dns[row] : NULL,
+					NULL);
 
 		card_section(card, "THROUGHPUT");
 		card_kv2(card, "Upload",
@@ -669,6 +653,7 @@ rendernetpopup(Monitor *m)
 		int folded = 0, listed = 0;
 
 		if (wifi_assoc) {
+			card_section(card, "CONNECTION");
 			card_kv2(card, "SSID", ws.ssid, card_col_green,
 					"BSSID", ws.bssid, NULL);
 			snprintf(v1, sizeof(v1), "%d dBm · %.1f GHz",
@@ -688,6 +673,7 @@ rendernetpopup(Monitor *m)
 		if (wifi_last_error()[0])
 			card_text(card, wifi_last_error(), NULL, card_col_red);
 
+		card_section(card, "NETWORKS");
 		card_text_btn(card, "Networks",
 				ui_scanning ? "Scanning…" : NULL,
 				card_col_dim, "Scan", NET_HIT_SCAN,

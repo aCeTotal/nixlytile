@@ -88,6 +88,33 @@ bt_dev_svg(const BtDev *d)
 	return "images/svg/bluetooth.svg";
 }
 
+/* Link-quality bars for a connected device. BR/EDR RSSI 0 means "in
+ * golden range" but doubles as the no-reading sentinel, so callers only
+ * ask for an icon when rssi != 0. */
+static const char *
+bt_sig_svg(int rssi)
+{
+	if (rssi >= -60)
+		return "images/svg/wifi_100.svg";
+	if (rssi >= -70)
+		return "images/svg/wifi_75.svg";
+	if (rssi >= -80)
+		return "images/svg/wifi_50.svg";
+	return "images/svg/wifi_25.svg";
+}
+
+static const char *
+bt_batt_svg(int pct)
+{
+	if (pct > 75)
+		return "images/svg/bt_batt_100.svg";
+	if (pct > 50)
+		return "images/svg/bt_batt_75.svg";
+	if (pct > 25)
+		return "images/svg/bt_batt_50.svg";
+	return "images/svg/bt_batt_25.svg";
+}
+
 void
 drop_bt_icon_buffer(void)
 {
@@ -172,7 +199,7 @@ render_bt_popup(Monitor *m)
 	BtAdapter a;
 	struct timespec ts;
 	uint64_t now;
-	char v1[96], v2[64];
+	char v1[96];
 	int nconn = 0, i, hot;
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -240,7 +267,7 @@ render_bt_popup(Monitor *m)
 			for (i = 0; i < bt_ui_ndevs; i++) {
 				BtDev *d = &bt_ui_devs[i];
 				const char *btn;
-				const float *col = card_col_dim;
+				const char *sig = NULL, *bat = NULL;
 				int mine = d->paired || d->connected;
 
 				if ((pass == 0) != mine)
@@ -250,38 +277,38 @@ render_bt_popup(Monitor *m)
 				snprintf(v1, sizeof(v1), "%s",
 						d->name[0] ? d->name : d->addr);
 				if (d->connected) {
-					size_t pos = 0;
-
-					v2[0] = '\0';
 					if (d->rssi)
-						pos = snprintf(v2, sizeof(v2),
-								"%d dBm",
-								d->rssi);
+						sig = bt_sig_svg(d->rssi);
 					if (d->battery >= 0)
-						snprintf(v2 + pos,
-								sizeof(v2) - pos,
-								"%s%d%%",
-								pos ? " · " : "",
-								d->battery);
-					col = card_col_green;
-				} else {
-					v2[0] = '\0';
+						bat = bt_batt_svg(d->battery);
 				}
 				if (d->connected)
-					btn = d->svc_resolved ?
-						"Connected" : "Connecting..";
+					btn = !d->svc_resolved ?
+						"Connecting.." :
+						hot == BT_HIT_DEV + i ?
+						"Disconnect" : "Connected";
 				else if (d->paired)
 					btn = d->want_conn && d->dial_ms &&
 						now - d->dial_ms < 5000 ?
-						"Connecting.." : "Paired";
+						"Connecting.." :
+						hot == BT_HIT_DEV + i ?
+						"Connect" : "Paired";
 				else
 					btn = d->pair_ms &&
 						now - d->pair_ms < 30000 ?
 						"Pairing.." : "Pair";
-				card_icon_text_rbtn(card, bt_dev_svg(d), v1,
-						v2[0] ? v2 : NULL, col,
-						btn, BT_HIT_DEV + i,
-						hot == BT_HIT_DEV + i);
+				if (sig || bat)
+					card_icon_text_rbtn_icons(card,
+							bt_dev_svg(d), v1,
+							sig, bat,
+							btn, BT_HIT_DEV + i,
+							hot == BT_HIT_DEV + i);
+				else
+					card_icon_text_rbtn(card,
+							bt_dev_svg(d), v1,
+							NULL, card_col_dim,
+							btn, BT_HIT_DEV + i,
+							hot == BT_HIT_DEV + i);
 			}
 			if (pass == 0 && nmine && nnear)
 				card_gap(card, 2);

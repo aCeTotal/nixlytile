@@ -2838,7 +2838,8 @@ void meter_frame_tick(Monitor *m);
 /* audio_devices.c */
 int audio_parse_status_devices(FILE *fp, int sources, AudioDevice *out, int max);
 int audio_line_is_headset(const char *line);
-void audio_defaults_apply_async(double speaker_pct, double mic_pct);
+void audio_sink_defaults_apply_async(double speaker_pct);
+void audio_mic_defaults_apply_async(double mic_pct);
 void audio_popup_data_arrived(void);
 void audio_autoselect_headset_mic(void);
 void audio_set_default(uint32_t id);
