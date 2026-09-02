@@ -149,12 +149,22 @@ build_rates(const DispInfo *d)
 {
 	struct wlr_output_mode *mode;
 	int std_max = DISP_RATES_MAX - 2;   /* room for custom entries */
+	int have_paced = 0;
 	int i, j;
 
 	di_nrates = 0;
 	memset(di_rate_oc, 0, sizeof(di_rate_oc));
 	if (!d->mon || !d->mon->wlr_output)
 		return;
+	/* Divisor modes (pace.c) already give granular real rates — no
+	 * synthetic 120-cap/OC entries needed, so the full row is theirs. */
+	wl_list_for_each(mode, &d->mon->wlr_output->modes, link)
+		if (wlr_drm_connector_mode_pace_divisor(d->mon->wlr_output,
+				mode)) {
+			have_paced = 1;
+			std_max = DISP_RATES_MAX;
+			break;
+		}
 	wl_list_for_each(mode, &d->mon->wlr_output->modes, link) {
 		float hz = mode->refresh / 1000.0f;
 
@@ -180,7 +190,7 @@ build_rates(const DispInfo *d)
 	/* custom entries: fast panels get a 120 Hz cap mode (committed as
 	 * a custom modeline, advertised to clients like any other mode);
 	 * 60 Hz panels get red overclock modes */
-	if (di_nrates > 0) {
+	if (di_nrates > 0 && !have_paced) {
 		float top = di_rates[0];
 
 		for (i = 1; i < di_nrates; i++)

@@ -83,6 +83,22 @@ struct wlr_output_mode *wlr_drm_connector_add_mode(struct wlr_output *output,
 	const drmModeModeInfo *mode);
 
 /**
+ * Register a paced virtual mode advertised at base->refresh / divisor.
+ * Committing it programs base's native scanout timings; the compositor
+ * must flip only every Nth vblank to realize the advertised rate.
+ * Returns the existing mode if an identical one is already registered.
+ */
+struct wlr_output_mode *wlr_drm_connector_add_paced_mode(
+	struct wlr_output *output, struct wlr_output_mode *base, int divisor);
+
+/**
+ * Pace divisor of a mode registered with wlr_drm_connector_add_paced_mode(),
+ * 0 for normal modes or non-DRM outputs.
+ */
+int wlr_drm_connector_mode_pace_divisor(struct wlr_output *output,
+	struct wlr_output_mode *mode);
+
+/**
  * Get the raw DRM mode information from a struct wlr_output_mode.
  *
  * The mode passed in must belong to a DRM output.

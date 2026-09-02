@@ -1511,6 +1511,10 @@ struct Monitor {
 	int latch_armed;                    /* timer pending for this vblank */
 	int latch_fired;                    /* rendermon re-entered via timer */
 	uint64_t rolling_draw_ns;           /* sawtooth build+commit estimate */
+	/* Paced virtual mode: commit every Nth vblank (pace.c) */
+	struct wl_event_source *pace_timer;
+	int pace_armed;                     /* timer pending for the commit window */
+	int pace_fired;                     /* rendermon re-entered via timer */
 	int vrr_overlay_skips;              /* consecutive OSD-only build skips under VRR */
 	/* Game-resolution modeset for guaranteed scanout (gamescan.c) */
 	int gamescan_w, gamescan_h;         /* last observed off-mode game buffer size */
@@ -1642,6 +1646,7 @@ struct Monitor {
 	int retro_scanout_lock;
 	/* Frame-done watchdog */
 	uint64_t hidden_done_ns;            /* last 1 Hz frame_done drip to hidden mapped surfaces */
+	uint64_t unfocused_done_ns;         /* last throttled blanket frame_done to unfocused-visible surfaces */
 	struct wl_event_source *idle_heartbeat; /* one-shot 1s watchdog, re-armed every rendermon pass */
 	/* EDID re-probe: TVs (esp. over HDMI from sleep) often expose no/limited
 	 * modes at createmon time, then publish full mode list once the HDMI
@@ -1924,6 +1929,8 @@ extern LayoutNode *resize_split_node_h;
 extern int fullscreen_adaptive_sync_enabled;
 extern int fps_limit_enabled;
 extern int fps_limit_value;
+extern int focus_power_save;
+extern int unfocused_fps_cap;
 extern int game_mode_active;
 extern int htpc_mode_active;
 extern int game_mode_ultra;
@@ -2366,6 +2373,10 @@ int span_available(void);
 /* latch.c */
 int latch_defer_frame(Monitor *m, int is_game, int allow_tearing, uint64_t now_ns);
 void latch_track_draw(Monitor *m, uint64_t draw_ns);
+
+/* pace.c — paced virtual refresh modes (every-Nth-vblank commit) */
+void pace_register_modes(struct wlr_output *output);
+int pace_defer_frame(Monitor *m, int allow_tearing, uint64_t now_ns);
 extern int game_late_latch_enabled;
 extern int game_auto_fps_lock_enabled; /* config `game-auto-fps-lock`: auto lock + refresh match */
 extern int game_cursor_idle_hide;      /* config `game-cursor-idle-hide` */
@@ -2596,7 +2607,7 @@ int scrollsteps(const struct wlr_pointer_axis_event *event);
 /* output.c */
 void createmon(struct wl_listener *listener, void *data);
 void cleanupmon(struct wl_listener *listener, void *data);
-void closemon(Monitor *m);
+void closemon(Monitor *m, int destroying);
 Monitor *dirtomon(enum wlr_direction dir);
 Monitor *xytomon(double x, double y);
 void xytonode(double x, double y, struct wlr_surface **psurface,
@@ -3172,6 +3183,8 @@ void osd_purge_mon(Monitor *m);
 void cpuclock_cap(double frac);
 void cpuclock_restore(void);
 void cpuclock_boost(int on);
+void cpuclock_perf(int on_ac);
+void output_lowpower_refresh(int on_battery);
 int power_profile_get(char *buf, size_t len);
 int power_profile_set(const char *value);
 void power_profile_low(void);

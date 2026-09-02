@@ -137,6 +137,9 @@ struct wlr_drm_backend {
 struct wlr_drm_mode {
 	struct wlr_output_mode wlr_mode;
 	drmModeModeInfo drm_mode;
+	/* Paced virtual mode: scanout runs at drm_mode's native rate, the
+	 * compositor flips every Nth vblank. 0 = normal mode. */
+	int pace_divisor;
 };
 
 struct wlr_drm_device_state {

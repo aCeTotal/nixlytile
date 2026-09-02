@@ -66,7 +66,7 @@ cleanupmon(struct wl_listener *listener, void *data)
 		wlr_output_layer_destroy(m->toast_overlay_layer);
 		m->toast_overlay_layer = NULL;
 	}
-	closemon(m);
+	closemon(m, 1);
 	osd_purge_mon(m);
 	notifyd_purge_mon(m);
 	ll_cursor_cleanup(m);
@@ -75,6 +75,10 @@ cleanupmon(struct wl_listener *listener, void *data)
 	if (m->latch_timer) {
 		wl_event_source_remove(m->latch_timer);
 		m->latch_timer = NULL;
+	}
+	if (m->pace_timer) {
+		wl_event_source_remove(m->pace_timer);
+		m->pace_timer = NULL;
 	}
 	if (m->edid_reprobe_timer) {
 		wl_event_source_remove(m->edid_reprobe_timer);
@@ -100,7 +104,7 @@ cleanupmon(struct wl_listener *listener, void *data)
 }
 
 void
-closemon(Monitor *m)
+closemon(Monitor *m, int destroying)
 {
 	/* update selmon if needed and
 	 * move closed monitor's clients to the focused one */
@@ -119,6 +123,18 @@ closemon(Monitor *m)
 			}
 		}
 	}
+
+	/* Single-monitor suspend: the only output is being disabled (not
+	 * destroyed) and there is no other screen to move to.  Migrating
+	 * would run setmon(c, NULL, …), which detaches every client from
+	 * its column and tears down the whole tiled layout — so on resume
+	 * the windows come back as free-floating.  The Monitor struct (and
+	 * its workspaces/columns) survives a disable, so leave clients
+	 * exactly where they are; arrange() on resume restores the layout
+	 * identically.  Only skip when NOT destroying — a real output
+	 * teardown (cleanupmon) frees m and must not leave clients on it. */
+	if (!destroying && !selmon)
+		return;
 
 	wl_list_for_each(c, &clients, link) {
 		if (c->isfloating && c->geom.x > m->m.width)
@@ -183,6 +199,66 @@ bestmode(struct wlr_output *output)
 	}
 
 	return best;
+}
+
+/* Drop every panel to its lowest refresh at the current resolution on
+ * battery; restore the configured/best rate on AC.  A 300 Hz panel run
+ * at 60 Hz cuts the display pipe's pixel-clock power draw substantially
+ * — a real win toward the 9.5 W battery budget — and pairs with the FPS
+ * cap powersave.c already applies.  Runs on the compositor thread from
+ * powersave_reassert(); a plain modeset, no game/video-pacing coupling
+ * (fullscreen game/video on battery is capped anyway). */
+void
+output_lowpower_refresh(int on_battery)
+{
+	Monitor *m;
+
+	if (!on_battery) {
+		/* Restore the configured rate — monconf_apply_modes() handles
+		 * pinned, paced (150/100/75) and custom modes correctly, which a
+		 * plain find_mode cannot. */
+		monconf_apply_modes();
+		updatemons(NULL, NULL);
+		return;
+	}
+
+	wl_list_for_each(m, &mons, link) {
+		struct wlr_output *o = m->wlr_output;
+		struct wlr_output_mode *target = NULL, *mode, *cur;
+		struct wlr_output_state st;
+
+		if (!o || !o->enabled)
+			continue;
+		cur = o->current_mode;
+		if (!cur)
+			continue;
+
+		/* Lowest refresh at the resolution we're already running (the
+		 * true native 60 Hz, never a paced divisor mode — those are all
+		 * higher). */
+		wl_list_for_each(mode, &o->modes, link) {
+			if (mode->width != cur->width ||
+					mode->height != cur->height)
+				continue;
+			if (!target || mode->refresh < target->refresh)
+				target = mode;
+		}
+		if (!target || target == cur)
+			continue;
+
+		wlr_output_state_init(&st);
+		wlr_output_state_set_enabled(&st, 1);
+		wlr_output_state_set_mode(&st, target);
+		if (wlr_output_test_state(o, &st) &&
+				wlr_output_commit_state(o, &st)) {
+			wlr_log(WLR_INFO, "powersave: %s → %dx%d@%d (battery)",
+				o->name, target->width, target->height,
+				target->refresh / 1000);
+			invalidate_video_pacing(m);
+		}
+		wlr_output_state_finish(&st);
+	}
+	updatemons(NULL, NULL);
 }
 
 struct wlr_output_mode *
@@ -691,6 +767,10 @@ createmon(struct wl_listener *listener, void *data)
 			"allocator/renderer buffer caps mismatch", wlr_output->name);
 		return;
 	}
+
+	/* Divisor modes for fast panels (300 Hz → 150/100/75) must exist
+	 * before any mode lookup below or in monitors.conf apply. */
+	pace_register_modes(wlr_output);
 
 	m = wlr_output->data = ecalloc(1, sizeof(*m));
 	m->wlr_output = wlr_output;
@@ -2763,20 +2843,27 @@ rendermon(struct wl_listener *listener, void *data)
 	m->frame_scheduled = 0;
 
 	/* A latch timer is already scheduled to commit for this vblank —
-	 * a stray frame event (anim tick's schedule_frame) must not race it. */
-	if (m->latch_armed)
+	 * a stray frame event (anim tick's schedule_frame) must not race it.
+	 * Same for a pending paced-mode commit window (pace.c). */
+	if (m->latch_armed || m->pace_armed)
 		return;
 
 	frame_start_ns = get_time_ns();
 	now.tv_sec = frame_start_ns / 1000000000ULL;
 	now.tv_nsec = frame_start_ns % 1000000000ULL;
 
-	/* Once per vblank: skipped on the deferred latch re-entry, which
+	/* Once per vblank: skipped on the deferred latch/pace re-entry, which
 	 * already ran it when this vblank's frame event fired (latch.c). */
-	if (!m->latch_fired)
+	if (!m->latch_fired && !m->pace_fired)
 		rendermon_prologue(m, frame_start_ns);
 
 	classify_fullscreen_content(m, &is_game, &is_video, &allow_tearing);
+
+	/* Paced virtual mode (150/100/75 on a 300 Hz panel): hold the
+	 * build+commit until the window before the Nth vblank so the flip
+	 * lands exactly on the paced grid (see pace.c). */
+	if (pace_defer_frame(m, allow_tearing, frame_start_ns))
+		return;
 
 	/* Late latch: defer the game build+commit to just before the
 	 * predicted present so the newest game buffer is the one flipped
@@ -3725,8 +3812,46 @@ frame_done:
 	 * pacing, and the 1 Hz hidden_due flush bounds starvation during a
 	 * continuous Mod+scroll column cycle.  The drip block above still
 	 * serves size-pending/frozen clients every vblank regardless. */
-	if (!(m->camera_anim_active && !is_video && !is_game && !hidden_due))
+	if (m->camera_anim_active && !is_video && !is_game && !hidden_due) {
+		/* slide in flight — withhold (see comment above) */
+	} else if (focus_power_save && !is_game && !is_video &&
+			!m->camera_anim_active) {
+		/*
+		 * Focus-based power saving on the desktop: the focused window is
+		 * the only one that needs to render every vblank.  Unfocused but
+		 * still-visible tiles (Niri columns side by side, a window behind
+		 * a floating one) are throttled to unfocused_fps_cap — static UI
+		 * looks identical, a background video degrades to a low frame
+		 * rate instead of costing a full render every vblank.  Hidden and
+		 * occluded surfaces are already dripped at ~1 Hz above; fullscreen
+		 * game/video keep their own full pacing via the branches around
+		 * this one.
+		 *
+		 * Mechanism: serve the focused client every vblank directly, and
+		 * run the blanket scene send (which honours occlusion) only once
+		 * per throttle interval to catch the unfocused-visible ones.  A
+		 * blanket send to a client that already got its callback this
+		 * frame is a no-op, so the double-serve on throttle vblanks is
+		 * harmless.
+		 */
+		int cap = unfocused_fps_cap < 1 ? 1 : unfocused_fps_cap;
+		uint64_t interval = 1000000000ULL / (uint64_t)cap;
+		Client *foc = focustop(m);
+
+		if (foc && foc->scene && foc->scene->node.enabled &&
+				client_surface(foc)) {
+			struct wlr_surface *fs = client_surface(foc);
+			if (fs->mapped)
+				wlr_surface_for_each_surface(fs,
+					hidden_frame_done_iter, &now);
+		}
+		if (frame_start_ns - m->unfocused_done_ns >= interval) {
+			wlr_scene_output_send_frame_done(m->scene_output, &now);
+			m->unfocused_done_ns = frame_start_ns;
+		}
+	} else {
 		wlr_scene_output_send_frame_done(m->scene_output, &now);
+	}
 
 	/*
 	 * Fullscreen video/game: keep the vblank chain alive unconditionally.
@@ -3837,6 +3962,10 @@ requestmonstate(struct wl_listener *listener, void *data)
 	 * still returns the same client. */
 	if (m->hdr_active && !m->hdr_exit_pending)
 		m->hdr_exit_pending = 1;
+
+	/* Late EDID may have brought the fast native mode the divisor
+	 * modes derive from. Idempotent. */
+	pace_register_modes(m->wlr_output);
 
 	try_reapply_bestmode(m);
 
@@ -3957,6 +4086,16 @@ enable_game_vrr(Monitor *m)
 	if (!m->vrr_capable) {
 		diag_logf("GVRR", "%s: blocked — output not VRR-capable "
 			"(DRM adaptive-sync test failed at startup)",
+			m->wlr_output->name);
+		return;
+	}
+
+	/* A paced divisor mode (pace.c) IS the user's fixed-rate pin: VRR
+	 * would flip on the ms-granular pace timer instead of the vblank
+	 * grid — jitter and VRR flicker for nothing. */
+	if (wlr_drm_connector_mode_pace_divisor(m->wlr_output,
+			m->wlr_output->current_mode) >= 2) {
+		diag_logf("GVRR", "%s: blocked — paced divisor mode active",
 			m->wlr_output->name);
 		return;
 	}
@@ -6833,7 +6972,7 @@ updatemons(struct wl_listener *listener, void *data)
 		config_head->state.enabled = 0;
 		/* Remove this output from the layout to avoid cursor enter inside it */
 		wlr_output_layout_remove(output_layout, m->wlr_output);
-		closemon(m);
+		closemon(m, 0);
 		m->m = m->w = (struct wlr_box){0};
 	}
 	/* Insert outputs that need to */
@@ -6867,6 +7006,19 @@ updatemons(struct wl_listener *listener, void *data)
 					c->geom.width, c->geom.height, c->geom.x, c->geom.y,
 					c->output);
 				c->mon = m;
+				/* If the monitor was torn down and rebuilt (output
+				 * destroy+create, not a plain disable), the client
+				 * lost its column when the old workspace was freed.
+				 * Re-attach tileable clients so they come back tiled
+				 * instead of stranded at their last geometry (which
+				 * reads as floating). The plain-disable path keeps the
+				 * column, so this is a no-op there. */
+				if (!c->isfloating && !c->isfullscreen
+						&& !client_is_unmanaged(c)
+						&& !c->column && m->active_ws
+						&& client_surface(c)
+						&& client_surface(c)->mapped)
+					workspace_attach_client(m->active_ws, c);
 			}
 		}
 	}

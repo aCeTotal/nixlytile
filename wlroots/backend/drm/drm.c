@@ -603,6 +603,17 @@ static void drm_connector_apply_commit(const struct wlr_drm_connector_state *sta
 
 	if (state->base->committed & WLR_OUTPUT_STATE_MODE) {
 		conn->refresh = calculate_refresh_rate(&state->mode);
+		/* Paced virtual mode: scanout runs at the native rate but frames
+		 * flip every Nth vblank — report the paced rate in present events
+		 * so clients pace against the interval they actually get. */
+		if (state->base->mode_type == WLR_OUTPUT_STATE_MODE_FIXED &&
+				state->base->mode != NULL) {
+			struct wlr_drm_mode *drm_mode =
+				wl_container_of(state->base->mode, drm_mode, wlr_mode);
+			if (drm_mode->pace_divisor >= 2) {
+				conn->refresh = state->base->mode->refresh;
+			}
+		}
 	}
 
 	if (!state->active) {
@@ -1165,6 +1176,60 @@ struct wlr_output_mode *wlr_drm_connector_add_mode(struct wlr_output *output,
 			mode->wlr_mode.refresh);
 
 	return &mode->wlr_mode;
+}
+
+/* Register a paced virtual mode: advertised at base->refresh / divisor,
+ * committed with base's native scanout timings.  The compositor is
+ * responsible for flipping only every Nth vblank (pace.c).  Used for
+ * panels whose driver rejects every non-EDID pixel clock (i915 eDP
+ * DRRS panels accept exactly the fixed EDID clocks, nothing between),
+ * where an even divisor of the native rate is the only judder-free
+ * lower refresh available. */
+struct wlr_output_mode *wlr_drm_connector_add_paced_mode(
+		struct wlr_output *output, struct wlr_output_mode *base,
+		int divisor) {
+	struct wlr_drm_connector *conn = get_drm_connector_from_output(output);
+	struct wlr_drm_mode *base_mode = wl_container_of(base, base_mode, wlr_mode);
+
+	if (divisor < 2 || base_mode->pace_divisor != 0) {
+		return NULL;
+	}
+
+	struct wlr_output_mode *wlr_mode;
+	wl_list_for_each(wlr_mode, &conn->output.modes, link) {
+		struct wlr_drm_mode *mode = wl_container_of(wlr_mode, mode, wlr_mode);
+		if (mode->pace_divisor == divisor &&
+				memcmp(&mode->drm_mode, &base_mode->drm_mode,
+					sizeof(mode->drm_mode)) == 0) {
+			return wlr_mode;
+		}
+	}
+
+	struct wlr_drm_mode *mode = drm_mode_create(&base_mode->drm_mode);
+	if (!mode) {
+		return NULL;
+	}
+	mode->wlr_mode.refresh = base->refresh / divisor;
+	mode->wlr_mode.preferred = false;
+	mode->pace_divisor = divisor;
+
+	wl_list_insert(&conn->output.modes, &mode->wlr_mode.link);
+
+	wlr_drm_conn_log(conn, WLR_INFO, "Registered paced mode "
+			"%"PRId32"x%"PRId32"@%"PRId32" (scanout @%"PRId32", 1/%d)",
+			mode->wlr_mode.width, mode->wlr_mode.height,
+			mode->wlr_mode.refresh, base->refresh, divisor);
+
+	return &mode->wlr_mode;
+}
+
+int wlr_drm_connector_mode_pace_divisor(struct wlr_output *output,
+		struct wlr_output_mode *wlr_mode) {
+	if (output == NULL || wlr_mode == NULL || !wlr_output_is_drm(output)) {
+		return 0;
+	}
+	const struct wlr_drm_mode *mode = wl_container_of(wlr_mode, mode, wlr_mode);
+	return mode->pace_divisor;
 }
 
 const drmModeModeInfo *wlr_drm_mode_get_info(struct wlr_output_mode *wlr_mode) {

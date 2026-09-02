@@ -106,6 +106,42 @@ cpuclock_boost(int on)
 		write_str(BOOST, on ? "1" : "0");
 }
 
+/* Per-policy scaling governor + energy-performance preference.  On
+ * battery the freq cap alone is not enough: with the performance
+ * governor the CPU pins to the capped ceiling and never idles down, and
+ * EPP=performance disables the pstate driver's power heuristics.  So on
+ * battery drop to the powersave governor (lets the core race-to-idle at
+ * low clocks) and EPP=power; on AC restore performance/performance.
+ * Both files are group-writable via the nixlyos perms boot service; if
+ * EPP isn't writable (older perms), the governor change still lands. */
+void
+cpuclock_perf(int on_ac)
+{
+	DIR *d = opendir(CPUFREQ_DIR);
+	struct dirent *e;
+	const char *gov = on_ac ? "performance" : "powersave";
+	const char *epp = on_ac ? "performance" : "power";
+
+	if (!d)
+		return;
+	while ((e = readdir(d))) {
+		char path[PATH_MAX];
+
+		if (strncmp(e->d_name, "policy", 6) != 0)
+			continue;
+		snprintf(path, sizeof(path), CPUFREQ_DIR "/%s/scaling_governor",
+				e->d_name);
+		if (access(path, W_OK) == 0)
+			write_str(path, gov);
+		snprintf(path, sizeof(path),
+				CPUFREQ_DIR "/%s/energy_performance_preference",
+				e->d_name);
+		if (access(path, W_OK) == 0)
+			write_str(path, epp);
+	}
+	closedir(d);
+}
+
 static const char *
 profile_path(void)
 {

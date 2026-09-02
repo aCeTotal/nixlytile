@@ -24,12 +24,18 @@ powersave_reassert(void)
 {
 	if (ps_engaged == 1) {
 		power_profile_low();
+		cpuclock_perf(0);       /* powersave governor + EPP power */
 		cpuclock_boost(0);
-		cpuclock_cap(0.4);
+		cpuclock_cap(0.35);     /* hard clock cap toward the 9.5 W budget */
+		output_lowpower_refresh(1);  /* panels → lowest refresh (60 Hz) */
+		unfocused_fps_cap = 2;  /* background tiles nearly frozen on battery */
 	} else {
 		power_profile_high();
+		cpuclock_perf(1);       /* performance governor + EPP perf */
 		cpuclock_boost(1);
 		cpuclock_restore();
+		output_lowpower_refresh(0);  /* restore pinned/best refresh */
+		unfocused_fps_cap = 10; /* light throttle on wall power */
 	}
 }
 

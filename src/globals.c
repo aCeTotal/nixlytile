@@ -116,6 +116,12 @@ LayoutNode *resize_split_node_h;
 int fullscreen_adaptive_sync_enabled = 1;
 int fps_limit_enabled = 0;        /* 1 if FPS limiter is active */
 int fps_limit_value = 60;         /* FPS limit value (default 60) */
+/* Focus-based power saving: only the focused window renders at full rate;
+ * unfocused-but-visible tiles are throttled to unfocused_fps_cap (hidden
+ * windows are already dripped at ~1 Hz elsewhere). powersave.c tightens the
+ * cap on battery. */
+int focus_power_save = 1;         /* 1 = throttle unfocused-visible clients */
+int unfocused_fps_cap = 10;       /* frame_done rate for unfocused-visible (AC) */
 int game_auto_fps_lock_enabled = 1; /* auto FPS lock + refresh match (autolock.c) */
 int game_cursor_idle_hide = 1;    /* hide untouched cursor after 3 s in games */
 int game_mode_active = 0; /* Set when any client is fullscreen - pauses background tasks */
