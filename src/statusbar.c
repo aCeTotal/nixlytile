@@ -1350,6 +1350,7 @@ kill_processes_with_name(const char *name)
 	struct dirent *ent;
 	int killed = 0;
 	int found = 0;
+	int kill_self = 0;
 
 	if (!name || !*name)
 		return 0;
@@ -1378,7 +1379,7 @@ kill_processes_with_name(const char *name)
 			continue;
 
 		pid = (pid_t)atoi(ent->d_name);
-		if (pid <= 1 || pid == getpid())
+		if (pid <= 1)
 			continue;
 
 		snprintf(comm_path, sizeof(comm_path), "/proc/%s/comm", ent->d_name);
@@ -1399,6 +1400,12 @@ kill_processes_with_name(const char *name)
 			 * setting it for every numeric /proc entry made the
 			 * pkill fallback fork for names that never existed. */
 			found = 1;
+			if (pid == getpid()) {
+				/* self (comm=nixlyOS): die last so the
+				 * other matches still get their SIGKILL */
+				kill_self = 1;
+				continue;
+			}
 			if (kill(pid, SIGKILL) == 0) {
 				killed++;
 			} else {
@@ -1409,6 +1416,10 @@ kill_processes_with_name(const char *name)
 	}
 
 	closedir(dir);
+	if (kill_self) {
+		kill(getpid(), SIGKILL);
+		killed++;
+	}
 	if (killed == 0 && found > 0) {
 		/* Fallback: pkill via posix_spawn — fork() here copies the
 		 * compositor's page table (incl. GPU mappings) on a click. */
@@ -1643,7 +1654,7 @@ rendercpupopup(Monitor *m)
 
 			snprintf(pct, sizeof(pct), "%d%%", cpu_disp);
 			if (e->has_kill)
-				card_text_btn(card,
+				card_text_rbtn(card,
 						proc_display_name(e->name, dispname,
 							sizeof(dispname)),
 						pct, card_col_dim,
@@ -1721,13 +1732,16 @@ cpu_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 			continue;
 		if (rel_x >= e->kill_x && rel_x < e->kill_x + e->kill_w &&
 				rel_y >= e->kill_y && rel_y < e->kill_y + e->kill_h) {
-			if (cpu_proc_is_critical(e->pid, e->name))
-				return 1;
-			if (kill_processes_with_name(e->name) == 0) {
-				if (kill(e->pid, SIGKILL) != 0)
-					wlr_log(WLR_ERROR, "cpu popup: kill %d failed: %s",
-							e->pid, strerror(errno));
-			}
+			kill_processes_with_name(e->name);
+			if (kill(e->pid, SIGKILL) != 0 && errno != ESRCH)
+				wlr_log(WLR_ERROR, "cpu popup: kill %d failed: %s",
+						e->pid, strerror(errno));
+			/* drop the row right away so the click visibly
+			 * removes the process from the list */
+			memmove(e, e + 1,
+					(size_t)(p->proc_count - 1 - i) *
+					sizeof(*e));
+			p->proc_count--;
 			p->last_fetch_ms = monotonic_msec();
 			p->suppress_refresh_until_ms = p->last_fetch_ms + 2000;
 			p->refresh_data = 0;
@@ -2039,7 +2053,7 @@ renderrampopup(Monitor *m)
 				snprintf(amt, sizeof(amt), "%luMB",
 						e->mem_kb / 1024);
 			if (e->has_kill)
-				card_text_btn(card,
+				card_text_rbtn(card,
 						proc_display_name(e->name, dispname,
 							sizeof(dispname)),
 						amt, card_col_dim,
@@ -2116,13 +2130,16 @@ ram_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 			continue;
 		if (rel_x >= e->kill_x && rel_x < e->kill_x + e->kill_w &&
 				rel_y >= e->kill_y && rel_y < e->kill_y + e->kill_h) {
-			if (cpu_proc_is_critical(e->pid, e->name))
-				return 1;
-			if (kill_processes_with_name(e->name) == 0) {
-				if (kill(e->pid, SIGKILL) != 0)
-					wlr_log(WLR_ERROR, "ram popup: kill %d failed: %s",
-							e->pid, strerror(errno));
-			}
+			kill_processes_with_name(e->name);
+			if (kill(e->pid, SIGKILL) != 0 && errno != ESRCH)
+				wlr_log(WLR_ERROR, "ram popup: kill %d failed: %s",
+						e->pid, strerror(errno));
+			/* drop the row right away so the click visibly
+			 * removes the process from the list */
+			memmove(e, e + 1,
+					(size_t)(p->proc_count - 1 - i) *
+					sizeof(*e));
+			p->proc_count--;
 			p->last_fetch_ms = monotonic_msec();
 			p->suppress_refresh_until_ms = p->last_fetch_ms + 2000;
 			p->refresh_data = 0;
@@ -2206,6 +2223,7 @@ read_battery_info(BatteryPopup *p)
 	p->design_wh = s.design_wh;
 	p->full_wh = s.full_wh;
 	p->cycles = s.cycles;
+	p->cycles_est = s.cycles_est;
 	p->thr_start = s.thr_start;
 	p->thr_end = s.thr_end;
 	snprintf(p->profile, sizeof(p->profile), "%s", s.profile);
@@ -2329,8 +2347,11 @@ renderbatterypopup(Monitor *m)
 		snprintf(v2, sizeof(v2), "100%%");
 	card_kv2(card, "Battery size", v1, NULL, "Charge limit", v2, NULL);
 
-	if (p->cycles >= 0)
+	if (p->cycles > 0)
 		snprintf(v1, sizeof(v1), "%d", p->cycles);
+	else if (p->cycles_est >= 0)
+		/* firmware count stuck at 0 (MSI EC) — tracked estimate */
+		snprintf(v1, sizeof(v1), "~%d", p->cycles_est);
 	else
 		snprintf(v1, sizeof(v1), "--");
 	statecol = card_col_fg;
@@ -2364,7 +2385,8 @@ renderbatterypopup(Monitor *m)
 		card_section(card, "POWER PROFILE");
 		card_buttons(card, labels, NULL, 3,
 				battery_profile_index(p->profile),
-				p->btn_hover, 0);
+				p->btn_hover >= 0 && p->btn_hover < 3 ?
+				p->btn_hover : -1, 0);
 	}
 
 	/* Charge limit buttons — only when the battery has the sysfs knob */
@@ -2373,7 +2395,10 @@ renderbatterypopup(Monitor *m)
 		int active = p->thr_end >= 100 ? 2 : p->thr_end >= 90 ? 1 : 0;
 
 		card_section(card, "CHARGE LIMIT");
-		card_buttons(card, limits, NULL, 3, active, p->btn_hover,
+		card_buttons(card, limits, NULL, 3, active,
+				p->btn_hover >= CHARGE_LIMIT_HIT_BASE &&
+				p->btn_hover <= CHARGE_LIMIT_HIT_BASE + 2 ?
+				p->btn_hover - CHARGE_LIMIT_HIT_BASE : -1,
 				CHARGE_LIMIT_HIT_BASE);
 	}
 

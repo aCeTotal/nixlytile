@@ -90,12 +90,35 @@ cw_grab(CamSnapshot *s)
 		if (ioctl(fd, VIDIOC_QBUF, &buf) < 0 ||
 				ioctl(fd, VIDIOC_STREAMON, &type) < 0)
 			goto next;
-		FD_ZERO(&fds);
-		FD_SET(fd, &fds);
-		if (select(fd + 1, &fds, NULL, NULL, &tv) <= 0 ||
-				ioctl(fd, VIDIOC_DQBUF, &buf) < 0) {
-			ioctl(fd, VIDIOC_STREAMOFF, &type);
-			goto next;
+		/* Skip warm-up frames: the sensor's auto-exposure needs a
+		 * handful of frames to converge, and the very first frame
+		 * reads far darker than the room (lightsense then dimmed to
+		 * minimum in normal light).  Dequeue a few and keep the
+		 * last. */
+		{
+			int ok = 0;
+
+			for (int f = 0; f < 6; f++) {
+				FD_ZERO(&fds);
+				FD_SET(fd, &fds);
+				tv.tv_sec = 3;
+				tv.tv_usec = 0;
+				if (select(fd + 1, &fds, NULL, NULL, &tv) <= 0 ||
+						ioctl(fd, VIDIOC_DQBUF, &buf) < 0) {
+					ok = 0;
+					break;
+				}
+				ok = 1;
+				/* not the last: hand the buffer back */
+				if (f < 5 && ioctl(fd, VIDIOC_QBUF, &buf) < 0) {
+					ok = 0;
+					break;
+				}
+			}
+			if (!ok) {
+				ioctl(fd, VIDIOC_STREAMOFF, &type);
+				goto next;
+			}
 		}
 
 		/* YUYV: every even byte is a Y sample */

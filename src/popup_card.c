@@ -251,6 +251,7 @@ typedef struct {
 	char a[160], b[160], c[96], d[64];
 	char btn_label[24];
 	int btn_right;
+	int btn_solo;       /* btn_right hit rect = button only, no row wash */
 	const float *bcol, *dcol;
 	double frac;
 	float accent[4];
@@ -473,6 +474,18 @@ card_icon_text_rbtn(Card *c, const char *icon_path, const char *left,
 			hit_id, hot);
 	if (c && c->nrows > 0)
 		c->rows[c->nrows - 1].btn_right = 1;
+}
+
+void
+card_text_rbtn(Card *c, const char *left, const char *right,
+		const float *rightcol, const char *btn_label, int hit_id, int hot)
+{
+	card_icon_text_btn(c, NULL, left, right, rightcol, btn_label,
+			hit_id, hot);
+	if (c && c->nrows > 0) {
+		c->rows[c->nrows - 1].btn_right = 1;
+		c->rows[c->nrows - 1].btn_solo = 1;
+	}
 }
 
 void
@@ -1040,7 +1053,7 @@ card_finish(Card *c, CardResult *out)
 			break;
 		case CROW_TEXT:
 			/* full-row buttons: faint wash across the row on hover */
-			if (r->btn_right && r->hot) {
+			if (r->btn_right && !r->btn_solo && r->hot) {
 				rounded(cr, 6, y + 1, w - 12, r->h - 2, 6);
 				cairo_set_source_rgba(cr, 1, 1, 1, 0.05);
 				cairo_fill(cr);
@@ -1069,8 +1082,9 @@ card_finish(Card *c, CardResult *out)
 				else
 					cairo_set_source_rgba(cr, 1, 1, 1, 0.10);
 				cairo_fill(cr);
-				/* right-pinned buttons act on the whole row */
-				if (r->btn_right)
+				/* right-pinned buttons act on the whole row
+				 * (solo: button rect only — Kill rows) */
+				if (r->btn_right && !r->btn_solo)
 					add_hit(out, 0, y, w, r->h,
 							r->hit_id);
 				else

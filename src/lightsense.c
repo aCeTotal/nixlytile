@@ -86,21 +86,20 @@ ls_load(void)
 	fclose(fp);
 }
 
-/* Mean luma → backlight percent, biased as low as comfortably readable:
- * pitch dark ≈8, dim ≈8-25, normal indoor ≈25-38, bright room climbs to
- * 60, direct daylight caps at 80. */
+/* Mean luma → backlight percent: pitch dark 13, dim ≈13-20, normal
+ * indoor ≈20-30, above that climbs fast — direct daylight hits 100. */
 static double
 ls_target(int luma)
 {
 	if (luma <= 25)
-		return 8.0;
+		return 13.0;
 	if (luma <= 85)
-		return 8.0 + (luma - 25) * (25.0 - 8.0) / 60.0;
+		return 13.0 + (luma - 25) * (20.0 - 13.0) / 60.0;
 	if (luma <= 150)
-		return 25.0 + (luma - 85) * (38.0 - 25.0) / 65.0;
+		return 20.0 + (luma - 85) * (30.0 - 20.0) / 65.0;
 	if (luma >= 210)
-		return 80.0;
-	return 38.0 + (luma - 150) * (80.0 - 38.0) / 60.0;
+		return 100.0;
+	return 30.0 + (luma - 150) * (100.0 - 30.0) / 60.0;
 }
 
 static void

@@ -62,6 +62,54 @@ bw_ull(const char *path, unsigned long long *out)
 	return 0;
 }
 
+/* Estimated charge cycles: EC firmware on MSI laptops never counts —
+ * cycle_count reads 0 forever.  Track discharge ourselves: every drop
+ * in energy_now/charge_now accumulates into a lifetime µWh counter
+ * persisted under XDG state; one cycle = design capacity discharged.
+ * Worker-thread only. */
+static unsigned long long bw_acc_uwh;
+static unsigned long long bw_acc_saved_uwh;
+static unsigned long long bw_prev_uwh;
+static int bw_prev_valid;
+static char bw_acc_path[PATH_MAX];
+
+static void
+bw_acc_init(void)
+{
+	const char *st = getenv("XDG_STATE_HOME");
+	const char *home = getenv("HOME");
+	char dir[PATH_MAX - 32];
+
+	if (st && *st)
+		snprintf(dir, sizeof(dir), "%s/nixlyos", st);
+	else if (home && *home)
+		snprintf(dir, sizeof(dir), "%s/.local/state/nixlyos", home);
+	else
+		return;
+	mkdir(dir, 0755);
+	snprintf(bw_acc_path, sizeof(bw_acc_path), "%s/battery_discharge_uwh",
+			dir);
+	if (bw_ull(bw_acc_path, &bw_acc_uwh) != 0)
+		bw_acc_uwh = 0;
+	bw_acc_saved_uwh = bw_acc_uwh;
+}
+
+static void
+bw_acc_save_maybe(void)
+{
+	FILE *fp;
+
+	/* persist every 0.05Wh (~once per percent on a 50Wh pack) */
+	if (!bw_acc_path[0] || bw_acc_uwh - bw_acc_saved_uwh < 50000ull)
+		return;
+	fp = fopen(bw_acc_path, "w");
+	if (!fp)
+		return;
+	fprintf(fp, "%llu\n", bw_acc_uwh);
+	fclose(fp);
+	bw_acc_saved_uwh = bw_acc_uwh;
+}
+
 /* System battery discovery — same rules as the old findbatterydevice():
  * type Battery, scope System or none (skips mouse/headset batteries). */
 static int
@@ -230,6 +278,39 @@ bw_sample(BattSnapshot *s)
 	if (bw_ull(path, &val) == 0)
 		s->cycles = (int)val;
 
+	s->cycles_est = -1;
+	{
+		unsigned long long now_uwh = 0;
+		int have = 0;
+
+		snprintf(path, sizeof(path), "%s/energy_now", d);
+		if (bw_ull(path, &val) == 0) {
+			now_uwh = val;
+			have = 1;
+		} else {
+			snprintf(path, sizeof(path), "%s/charge_now", d);
+			if (bw_ull(path, &val) == 0 && vmin > 0) {
+				now_uwh = (unsigned long long)
+					((double)val * vmin);
+				have = 1;
+			}
+		}
+		if (have) {
+			/* only count drops; >5Wh between 2s samples is a
+			 * sysfs glitch, not real discharge */
+			if (bw_prev_valid && now_uwh < bw_prev_uwh &&
+					bw_prev_uwh - now_uwh < 5000000ull)
+				bw_acc_uwh += bw_prev_uwh - now_uwh;
+			bw_prev_uwh = now_uwh;
+			bw_prev_valid = 1;
+		}
+		if (s->design_wh > 0)
+			s->cycles_est = (int)(bw_acc_uwh /
+					(unsigned long long)
+					(s->design_wh * 1e6));
+		bw_acc_save_maybe();
+	}
+
 	s->thr_start = s->thr_end = -1;
 	snprintf(path, sizeof(path), "%s/charge_control_start_threshold", d);
 	if (bw_ull(path, &val) == 0)
@@ -251,6 +332,8 @@ bw_worker(void *data)
 
 	local.available = bw_find_device(local.device_dir,
 			sizeof(local.device_dir));
+	if (local.available)
+		bw_acc_init();
 
 	while (bw_run) {
 		int changed;

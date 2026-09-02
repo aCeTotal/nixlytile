@@ -209,8 +209,8 @@ reconn_tick(void *data)
 			sd_bus_call_method_async(bt_bus, NULL, "org.bluez",
 					d->path, "org.bluez.Device1",
 					"Connect", ignore_reply_cb, NULL, "");
-			d->dial_ms = now;
-			btsys_changed();
+			/* background redial: stay "Paired" in the UI;
+			 * "Connecting.." only once the link comes up */
 			if (d->retry_n < 16)
 				d->retry_n++;
 			backoff = 1500u << d->retry_n;
@@ -375,7 +375,9 @@ parse_props(sd_bus_message *m, const char *iface, const char *path)
 				if (var_bool(m, &d->connected) == 0 &&
 						old != d->connected)
 					dev_conn_transition(d);
-			} else if (strcmp(key, "RSSI") == 0) {
+			} else if (strcmp(key, "ServicesResolved") == 0)
+				var_bool(m, &d->svc_resolved);
+			else if (strcmp(key, "RSSI") == 0) {
 				var_i16(m, &d->rssi);
 				/* advert seen: the device is in range right
 				 * now — dial immediately instead of waiting

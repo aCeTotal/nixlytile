@@ -83,6 +83,10 @@ void card_text(Card *c, const char *left, const char *right,
 		const float *rightcol);
 void card_text_btn(Card *c, const char *left, const char *right,
 		const float *rightcol, const char *btn_label, int hit_id, int hot);
+/* text_btn with the button pinned to the right card edge (right text
+ * sits left of it); hit rect is the button only — Kill rows. */
+void card_text_rbtn(Card *c, const char *left, const char *right,
+		const float *rightcol, const char *btn_label, int hit_id, int hot);
 /* text_btn with an svg icon (asset path, drawn at text height) left of
  * the label — device lists. icon_path may be NULL. */
 void card_icon_text_btn(Card *c, const char *icon_path, const char *left,

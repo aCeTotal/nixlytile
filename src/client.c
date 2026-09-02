@@ -2823,8 +2823,16 @@ warpcursor(const Client *c)
 {
 	double target_x, target_y;
 	int box_x, box_y, box_w, box_h;
+	Monitor *cm;
 
 	if (!c || !cursor || !c->mon)
+		return;
+
+	/* Pointer parked on a statusbar popup (e.g. the Kill button in the
+	 * CPU/RAM list): the refocus after the victim's window unmaps must
+	 * not yank the pointer away — that closes the popup mid-click. */
+	cm = xytomon(cursor->x, cursor->y);
+	if (cm && statusbar_popup_at(cm, cursor->x, cursor->y))
 		return;
 
 	/* Compute warp target from the SETTLED layout position, not the

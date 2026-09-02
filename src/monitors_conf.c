@@ -167,8 +167,46 @@ monconf_commit_mode(Monitor *m, RuntimeMonitorConfig *cfg,
 	return ok;
 }
 
+/* Rate not in the EDID list (120 Hz cap / overclock): register a real
+ * DRM mode and commit it like any listed mode.  Same machinery as the
+ * video-rate switcher in output.c — scaled-from-base timings keep the
+ * panel's horizontal frequency (fixed-hfreq eDP rejects the naive
+ * clock-only rescale wlroots does for set_custom_mode), CVT as second
+ * try.  Non-DRM backends (nested/headless) keep the wlroots custom
+ * path. */
+static int
+monconf_commit_custom(Monitor *m, RuntimeMonitorConfig *cfg)
+{
+	drmModeModeInfo base, gen;
+	struct wlr_output_mode *base_mode, *new_mode;
+	int tries;
+
+	if (!wlr_output_is_drm(m->wlr_output))
+		return monconf_commit_mode(m, cfg, NULL,
+				(int)(cfg->refresh * 1000.0f + 0.5f));
+
+	base_mode = find_mode(m->wlr_output, cfg->width, cfg->height, 0);
+	for (tries = 0; tries < 2; tries++) {
+		if (tries == 0) {
+			if (!base_mode ||
+					!drm_mode_timings(m, base_mode, &base))
+				continue;
+			generate_scaled_mode(&gen, &base, cfg->refresh);
+		} else {
+			generate_cvt_mode(&gen, cfg->width, cfg->height,
+					cfg->refresh);
+		}
+		new_mode = wlr_drm_connector_add_mode(m->wlr_output, &gen);
+		if (!new_mode)
+			continue;
+		if (monconf_commit_mode(m, cfg, new_mode, 0))
+			return 1;
+	}
+	return 0;
+}
+
 /* Commit mode/transform for every monitor that has a monitors.conf entry. */
-static void
+void
 monconf_apply_modes(void)
 {
 	Monitor *m;
@@ -188,15 +226,14 @@ monconf_apply_modes(void)
 		else
 			mode = bestmode(m->wlr_output);
 		/* Requested rate isn't in the EDID list (120 Hz cap on a
-		 * faster panel, or an overclock on a slow one): commit it as
-		 * a custom modeline — clients see it like any other mode.
-		 * If the test or commit fails, fall straight back to the
-		 * highest standard rate at that resolution. */
+		 * faster panel, or an overclock on a slow one): register and
+		 * commit it as a real mode — clients see it like any other.
+		 * If every attempt fails, fall straight back to the highest
+		 * standard rate at that resolution. */
 		if (cfg->width > 0 && cfg->height > 0 && cfg->refresh > 0 &&
 				(!mode || fabsf(mode->refresh / 1000.0f -
 					cfg->refresh) > 1.0f)) {
-			if (monconf_commit_mode(m, cfg, NULL,
-					(int)(cfg->refresh * 1000.0f + 0.5f))) {
+			if (monconf_commit_custom(m, cfg)) {
 				wlr_log(WLR_INFO,
 					"monitors.conf: %s custom mode %dx%d@%.3f",
 					m->wlr_output->name, cfg->width,

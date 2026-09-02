@@ -268,7 +268,8 @@ render_bt_popup(Monitor *m)
 					v2[0] = '\0';
 				}
 				if (d->connected)
-					btn = "Connected";
+					btn = d->svc_resolved ?
+						"Connected" : "Connecting..";
 				else if (d->paired)
 					btn = d->want_conn && d->dial_ms &&
 						now - d->dial_ms < 5000 ?

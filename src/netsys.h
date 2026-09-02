@@ -133,6 +133,7 @@ typedef struct {
 	int paired;
 	int trusted;
 	int connected;
+	int svc_resolved;       /* profiles up — UI "Connected" vs "Connecting.." */
 	int rssi;               /* 0 = unknown */
 	int battery;            /* -1 = unknown */
 	int want_conn;          /* auto-reconnect target (paired, not

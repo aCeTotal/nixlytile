@@ -1115,7 +1115,13 @@ run(const char *startup_cmd)
 	 * heights can be computed.  createmon() can't do this because
 	 * monitors are created one at a time.  The grid→pixel conversion
 	 * lives in reload_monitors_conf(), which was previously only called
-	 * on hot-reload (inotify), not at startup. */
+	 * on hot-reload (inotify), not at startup.
+	 *
+	 * Modes too: createmon() can only pick from the EDID list, so a
+	 * custom rate (120 Hz cap / overclock) needs the same apply pass
+	 * here as on hot-reload — otherwise it only takes effect after a
+	 * later conf reload. */
+	monconf_apply_modes();
 	monconf_apply_layout();
 
 	/* ~/.local/nixlyos/monitor_overlay → per-screen ID boxes and drag glow.

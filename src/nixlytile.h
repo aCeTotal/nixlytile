@@ -489,6 +489,7 @@ typedef struct {
 	double design_wh;       /* energy_full_design */
 	double full_wh;         /* energy_full (current capacity) */
 	int cycles;             /* cycle_count, -1 unknown */
+	int cycles_est;         /* estimate from tracked discharge, -1 unknown */
 	int thr_start;          /* charge_control_start_threshold, -1 unknown */
 	int thr_end;            /* charge_control_end_threshold, -1 unknown */
 	char state[16];         /* Charging / Draining / Holding / Full */
@@ -521,6 +522,8 @@ typedef struct {
 	double design_wh;
 	double full_wh;
 	int cycles;
+	int cycles_est;             /* firmware count 0/absent: estimate from
+	                             * accumulated discharge, -1 unknown */
 	int thr_start;
 	int thr_end;
 	char profile[24];
@@ -2668,6 +2671,7 @@ extern RuntimeMonitorConfig monconf_monitors[MAX_MONITORS];
 extern int monconf_monitor_count;
 int load_monitors_conf(void);
 RuntimeMonitorConfig *monconf_find(const char *name);
+void monconf_apply_modes(void);
 void monconf_apply_layout(void);
 void reload_monitors_conf(void);
 
