@@ -415,6 +415,8 @@ render_display_popup(Monitor *m)
 	card = card_begin();
 	if (!card)
 		return;
+	card_at(m, m->statusbar.area.x + p->tree->node.x,
+			m->statusbar.area.y + statusbar_popup_y(m));
 	hot = p->btn_hover;
 
 	snprintf(v1, sizeof(v1), "%d", ndi);

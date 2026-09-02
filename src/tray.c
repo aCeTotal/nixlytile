@@ -1465,8 +1465,11 @@ tray_menu_render(Monitor *m)
 	{
 		struct wlr_buffer *shb = card_shadow_buffer(menu->width,
 				menu->height, 0);
-		struct wlr_buffer *pb = card_panel_buffer(menu->width,
-				menu->height);
+		struct wlr_buffer *pb;
+
+		card_at(m, m->statusbar.area.x + menu->x,
+				m->statusbar.area.y + menu->y);
+		pb = card_panel_buffer(menu->width, menu->height);
 		struct wlr_scene_buffer *sb;
 
 		if (shb) {

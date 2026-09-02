@@ -245,6 +245,8 @@ typedef enum {
 	CROW_CAL,
 	CROW_CURVE,
 	CROW_ICONTEXT,
+	CROW_BIGBTN,
+	CROW_QR,
 } CardRowType;
 
 typedef struct {
@@ -262,11 +264,14 @@ typedef struct {
 	char btn[CARD_MAX_BTN][32];
 	int gap;
 	int hit_id, hot;
+	int hit_id2, hot2;   /* CROW_TEXT second right button (label in d) */
 	int year, mon, mday;
 	CardDisp dsp[CARD_DISP_MAX];
 	int ndsp;
 	uint8_t cv_t[CARD_CURVE_PTS_MAX], cv_p[CARD_CURVE_PTS_MAX];
 	int ncv;
+	const uint8_t *qr;   /* CROW_QR module matrix (caller-owned) */
+	int qr_size;
 	/* computed in measure */
 	int y, h;
 } CardRow;
@@ -301,6 +306,7 @@ row_new(Card *c, CardRowType t)
 	r = &c->rows[c->nrows++];
 	r->type = t;
 	r->hit_id = -1;
+	r->hit_id2 = -1;
 	return r;
 }
 
@@ -494,6 +500,21 @@ card_icon_text_rbtn_icons(Card *c, const char *icon_path,
 }
 
 void
+card_icon_text_hit(Card *c, const char *icon_path, const char *left,
+		const char *right, const float *rightcol, const char *sicon,
+		int hit_id, int hot)
+{
+	card_icon_text_btn(c, icon_path, left, right, rightcol, NULL,
+			hit_id, hot);
+	if (c && c->nrows > 0) {
+		CardRow *r = &c->rows[c->nrows - 1];
+
+		r->btn_right = 1;   /* full-row wash + hit, no button */
+		setstr(r->micon1, sizeof(r->micon1), sicon);
+	}
+}
+
+void
 card_text_rbtn(Card *c, const char *left, const char *right,
 		const float *rightcol, const char *btn_label, int hit_id, int hot)
 {
@@ -503,6 +524,24 @@ card_text_rbtn(Card *c, const char *left, const char *right,
 		c->rows[c->nrows - 1].btn_right = 1;
 		c->rows[c->nrows - 1].btn_solo = 1;
 	}
+}
+
+void
+card_text_btn2(Card *c, const char *left,
+		const char *btn1, int hit_id1, int hot1,
+		const char *btn2, int hit_id2, int hot2)
+{
+	CardRow *r;
+
+	card_icon_text_btn(c, NULL, left, NULL, NULL, btn1, hit_id1, hot1);
+	if (!c || c->nrows == 0)
+		return;
+	r = &c->rows[c->nrows - 1];
+	r->btn_right = 1;
+	r->btn_solo = 1;
+	setstr(r->d, sizeof(r->d), btn2);
+	r->hit_id2 = hit_id2;
+	r->hot2 = hot2;
 }
 
 void
@@ -585,6 +624,34 @@ card_icon_text(Card *c, const char *icon_path, const char *label,
 }
 
 void
+card_big_btn(Card *c, const char *label, const float accent[4],
+		int hit_id, int hot)
+{
+	CardRow *r = row_new(c, CROW_BIGBTN);
+
+	if (!r)
+		return;
+	setstr(r->a, sizeof(r->a), label);
+	r->hit_id = hit_id;
+	r->hot = hot;
+	if (accent)
+		memcpy(r->accent, accent, sizeof(r->accent));
+	else
+		memcpy(r->accent, card_col_fg, sizeof(r->accent));
+}
+
+void
+card_qr(Card *c, const uint8_t *modules, int size)
+{
+	CardRow *r = row_new(c, CROW_QR);
+
+	if (!r || size <= 0)
+		return;
+	r->qr = modules;
+	r->qr_size = size;
+}
+
+void
 card_curve(Card *c, const uint8_t *temps, const uint8_t *pcts, int n,
 		int sel, const float accent[4], int hit_id)
 {
@@ -662,7 +729,7 @@ card_measure(Card *c, int *out_w, int *out_h)
 		k1 = text_width_f(statusfont.font, r->a, 0);
 		v1 = text_width_f(statusfont.font, r->b, 0);
 		k2 = r->c[0] ? text_width_f(statusfont.font, r->c, 0) : 0;
-		v2 = r->c[0] ? text_width_f(statusfont.font, r->d, 0) : 0;
+		v2 = r->d[0] ? text_width_f(statusfont.font, r->d, 0) : 0;
 		if (r->hit_id >= 0)
 			v2 += 16;   /* clickable value chip padding */
 		if (k1 > c->kv_k1)
@@ -671,7 +738,7 @@ card_measure(Card *c, int *out_w, int *out_h)
 			c->kv_k2 = k2;
 		if (v1 > c->kv_c1)
 			c->kv_c1 = v1;
-		if (k2 && v2 > c->kv_c2)
+		if (v2 > c->kv_c2)
 			c->kv_c2 = v2;
 	}
 	/* values left-align after longest key, so col = kmax + gap + vmax */
@@ -732,6 +799,9 @@ card_measure(Card *c, int *out_w, int *out_h)
 			if (r->btn_label[0])
 				rw += 12 + text_width_f(statusfont.font,
 						r->btn_label, 0) + 16;
+			if (r->d[0] && r->hit_id2 >= 0)
+				rw += 10 + text_width_f(statusfont.font,
+						r->d, 0) + 16;
 			r->h = base_h + (r->c[0] ? 10 : 6);
 			break;
 		case CROW_BUTTONS:
@@ -753,6 +823,22 @@ card_measure(Card *c, int *out_w, int *out_h)
 				text_width_f(statusfont.font, r->b, 0);
 			r->h = base_h + 14;
 			break;
+		case CROW_BIGBTN:
+			rw = text_width_f(statusfont.font, r->a, 0) + 2 * 24;
+			r->h = base_h + 26;
+			break;
+		case CROW_QR: {
+			int scale = r->qr_size > 0 ? 200 / r->qr_size : 3;
+
+			if (scale < 3)
+				scale = 3;
+			if (scale > 6)
+				scale = 6;
+			r->gap = scale;   /* px per module, reused in draw */
+			rw = r->qr_size * scale + 2 * 16;
+			r->h = r->qr_size * scale + 2 * 16;
+			break;
+		}
 		case CROW_GAP:
 			r->h = r->gap;
 			break;
@@ -913,16 +999,43 @@ add_hit(CardResult *out, int x, int y, int w, int h, int id)
 }
 
 /* Popups read fine glassy over the wallpaper, but over window content
- * the bleed-through hurts legibility: with any client visible on the
- * focused monitor the backdrop goes nearly opaque. */
+ * the bleed-through hurts legibility: when the card actually overlaps
+ * a visible client the backdrop goes nearly opaque, over bare
+ * wallpaper it stays translucent.  Callers pass their landing spot via
+ * card_at(); without it any client visible on selmon darkens (legacy
+ * behaviour for toasts/menus that place themselves late). */
+static Monitor *card_at_mon;
+static int card_at_x, card_at_y, card_at_valid;
+
+void
+card_at(struct Monitor *m, int x, int y)
+{
+	card_at_mon = m;
+	card_at_x = x;
+	card_at_y = y;
+	card_at_valid = m != NULL;
+}
+
 static double
-card_bg_a(void)
+card_bg_a(int w, int h)
 {
 	Client *c;
 
-	wl_list_for_each(c, &clients, link)
-		if (VISIBLEON(c, selmon))
+	if (!card_at_valid) {
+		wl_list_for_each(c, &clients, link)
+			if (VISIBLEON(c, selmon))
+				return CARD_BG_A_TILE;
+		return CARD_BG_A;
+	}
+	wl_list_for_each(c, &clients, link) {
+		if (!VISIBLEON(c, card_at_mon))
+			continue;
+		if (card_at_x < c->geom.x + c->geom.width &&
+				card_at_x + w > c->geom.x &&
+				card_at_y < c->geom.y + c->geom.height &&
+				card_at_y + h > c->geom.y)
 			return CARD_BG_A_TILE;
+	}
 	return CARD_BG_A;
 }
 
@@ -958,6 +1071,7 @@ card_finish(Card *c, CardResult *out)
 	cs = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
 	if (cairo_surface_status(cs) != CAIRO_STATUS_SUCCESS) {
 		cairo_surface_destroy(cs);
+		card_at_valid = 0;
 		free(c);
 		return -1;
 	}
@@ -965,7 +1079,9 @@ card_finish(Card *c, CardResult *out)
 
 	/* card body + hairline border */
 	rounded(cr, 0.5, 0.5, w - 1.0, h - 1.0, CARD_RADIUS);
-	cairo_set_source_rgba(cr, CARD_BG_R, CARD_BG_G, CARD_BG_B, card_bg_a());
+	cairo_set_source_rgba(cr, CARD_BG_R, CARD_BG_G, CARD_BG_B,
+			card_bg_a(w, h));
+	card_at_valid = 0;
 	cairo_fill_preserve(cr);
 	cairo_set_source_rgba(cr, 1, 1, 1, CARD_BORDER_A);
 	cairo_set_line_width(cr, 1.0);
@@ -1118,6 +1234,23 @@ card_finish(Card *c, CardResult *out)
 							y + (r->h - isz) / 2, isz);
 				}
 			}
+			/* optional second right-pinned button (text_btn2) */
+			if (r->d[0] && r->hit_id2 >= 0) {
+				int bw2 = text_width_f(statusfont.font,
+						r->d, 0) + 16;
+				int bh = base_h + 2;
+				int bx2 = w - CARD_PAD - bw2;
+				int by = y + (r->h - bh) / 2;
+
+				rounded(cr, bx2, by, bw2, bh, 5);
+				if (r->hot2)
+					cairo_set_source_rgba(cr, 0.85, 0.30,
+							0.30, 0.85);
+				else
+					cairo_set_source_rgba(cr, 1, 1, 1, 0.10);
+				cairo_fill(cr);
+				add_hit(out, bx2, y, bw2, r->h, r->hit_id2);
+			}
 			if (r->btn_label[0] && r->hit_id >= 0) {
 				int bw = text_width_f(statusfont.font,
 						r->btn_label, 0) + 16;
@@ -1129,6 +1262,9 @@ card_finish(Card *c, CardResult *out)
 					12;
 				int by = y + (r->h - bh) / 2;
 
+				if (r->d[0] && r->hit_id2 >= 0 && r->btn_right)
+					bx -= text_width_f(statusfont.font,
+							r->d, 0) + 16 + 10;
 				rounded(cr, bx, by, bw, bh, 5);
 				if (r->hot)
 					cairo_set_source_rgba(cr, 0.85, 0.30,
@@ -1144,6 +1280,9 @@ card_finish(Card *c, CardResult *out)
 				else
 					add_hit(out, bx, y, bw, r->h,
 							r->hit_id);
+			} else if (r->btn_right && r->hit_id >= 0) {
+				/* buttonless full-row hit (card_icon_text_hit) */
+				add_hit(out, 0, y, w, r->h, r->hit_id);
 			}
 			break;
 		case CROW_BUTTONS: {
@@ -1191,6 +1330,45 @@ card_finish(Card *c, CardResult *out)
 				cairo_stroke(cr);
 				add_hit(out, bx, y, bw, bh, r->id_base + b);
 			}
+			break;
+		}
+		case CROW_BIGBTN: {
+			const float *a = r->accent;
+
+			rounded(cr, CARD_PAD + 0.5, y + 2.5, inner_w - 1,
+					r->h - 5, 8);
+			cairo_set_source_rgba(cr, a[0], a[1], a[2],
+					r->hot ? 0.38 : 0.22);
+			cairo_fill_preserve(cr);
+			cairo_set_source_rgba(cr, a[0], a[1], a[2],
+					r->hot ? 0.95 : 0.60);
+			cairo_set_line_width(cr, 1.0);
+			cairo_stroke(cr);
+			if (r->hit_id >= 0)
+				add_hit(out, CARD_PAD, y, inner_w, r->h,
+						r->hit_id);
+			break;
+		}
+		case CROW_QR: {
+			int scale = r->gap;
+			int qs = r->qr_size * scale;
+			int qx = CARD_PAD + (inner_w - qs - 2 * 16) / 2;
+			int mx, my;
+
+			/* white plate = quiet zone; QR needs the contrast,
+			 * the translucent card bg is not enough */
+			rounded(cr, qx, y, qs + 2 * 16, qs + 2 * 16, 8);
+			cairo_set_source_rgba(cr, 1, 1, 1, 1);
+			cairo_fill(cr);
+			cairo_set_source_rgba(cr, 0, 0, 0, 1);
+			for (my = 0; my < r->qr_size; my++)
+				for (mx = 0; mx < r->qr_size; mx++)
+					if (r->qr[my * r->qr_size + mx] & 1)
+						cairo_rectangle(cr,
+								qx + 16 + mx * scale,
+								y + 16 + my * scale,
+								scale, scale);
+			cairo_fill(cr);
 			break;
 		}
 		case CROW_ICONTEXT: {
@@ -1423,11 +1601,12 @@ card_finish(Card *c, CardResult *out)
 				draw_text_f(pix, statusfont.font, r->b,
 						CARD_PAD + c->kv_k1 + 16, bl,
 						r->bcol, 0);
-			if (r->c[0]) {
+			if (r->c[0] || r->d[0]) {
 				int vx = x2 + c->kv_k2 + 16;
 
-				draw_text_f(pix, statusfont.font, r->c,
-						x2, bl, card_col_dim, 0);
+				if (r->c[0])
+					draw_text_f(pix, statusfont.font, r->c,
+							x2, bl, card_col_dim, 0);
 				if (r->d[0])
 					draw_text_f(pix, statusfont.font, r->d,
 							r->hit_id >= 0 ?
@@ -1469,8 +1648,24 @@ card_finish(Card *c, CardResult *out)
 
 				if (r->btn_right && bw)
 					vx -= bw + 12;
+				/* sit left of the right-edge status icons */
+				if (r->micon1[0])
+					vx -= base_h + 2 + 8;
+				if (r->micon2[0])
+					vx -= base_h + 2 + 8;
 				draw_text_f(pix, statusfont.font, r->b, vx, bl,
 						r->bcol, 0);
+			}
+			if (r->d[0] && r->hit_id2 >= 0) {
+				int bw2 = text_width_f(statusfont.font,
+						r->d, 0) + 16;
+				int bh = base_h + 2;
+				int by = y + (r->h - bh) / 2;
+
+				draw_text_f(pix, statusfont.font, r->d,
+						w - CARD_PAD - bw2 + 8,
+						by + 1 + base_asc,
+						card_col_fg, 0);
 			}
 			if (bw) {
 				int bx = r->btn_right ? w - CARD_PAD - bw :
@@ -1479,6 +1674,9 @@ card_finish(Card *c, CardResult *out)
 				int bh = base_h + 2;
 				int by = y + (r->h - bh) / 2;
 
+				if (r->d[0] && r->hit_id2 >= 0 && r->btn_right)
+					bx -= text_width_f(statusfont.font,
+							r->d, 0) + 16 + 10;
 				draw_text_f(pix, statusfont.font, r->btn_label,
 						bx + 8, by + 1 + base_asc,
 						card_col_fg, 0);
@@ -1512,6 +1710,15 @@ card_finish(Card *c, CardResult *out)
 					y + (r->h - base_h) / 2 + base_asc,
 					r->bcol, 0);
 			break;
+		case CROW_BIGBTN: {
+			int tw = text_width_f(statusfont.font, r->a, 0);
+
+			draw_text_f(pix, statusfont.font, r->a,
+					CARD_PAD + (inner_w - tw) / 2,
+					y + (r->h - base_h) / 2 + base_asc,
+					card_col_fg, 0);
+			break;
+		}
 		case CROW_CURVE: {
 			double span = CARD_CURVE_TMAX - CARD_CURVE_TMIN;
 			int ly = y + CARD_CURVE_H + 6 + small_asc;
@@ -1952,7 +2159,9 @@ card_panel_buffer(int w, int h)
 	if (!cr)
 		return NULL;
 	rounded(cr, 0.5, 0.5, w - 1.0, h - 1.0, CARD_RADIUS);
-	cairo_set_source_rgba(cr, CARD_BG_R, CARD_BG_G, CARD_BG_B, card_bg_a());
+	cairo_set_source_rgba(cr, CARD_BG_R, CARD_BG_G, CARD_BG_B,
+			card_bg_a(w, h));
+	card_at_valid = 0;
 	cairo_fill_preserve(cr);
 	cairo_set_source_rgba(cr, 1, 1, 1, CARD_BORDER_A);
 	cairo_set_line_width(cr, 1.0);

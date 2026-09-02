@@ -69,6 +69,8 @@
             gdk-pixbuf
             glib
             vulkan-headers
+            qrencode
+            quirc
           ];
 
           buildScript = pkgs.writeShellApplication {
@@ -96,6 +98,7 @@
           runtimeDeps = with pkgs; [
             xwayland
             foot
+            wl-clipboard
           ];
           defaultPackage = pkgs.stdenv.mkDerivation {
             pname = "nixlytile";
@@ -130,6 +133,8 @@
               pkgs.gdk-pixbuf
               pkgs.glib
               pkgs.vulkan-headers
+              pkgs.qrencode
+              pkgs.quirc
             ];
 
             makeFlags = [ "PKG_CONFIG=${pkgs.pkg-config}/bin/pkg-config" ];

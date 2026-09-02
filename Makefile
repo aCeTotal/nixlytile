@@ -15,10 +15,12 @@ DEVCFLAGS = -g -Wpedantic -Wall -Wextra -Wdeclaration-after-statement \
 
 # CFLAGS / LDFLAGS
 PKGS      = wayland-server xkbcommon libinput libdrm $(XLIBS) fcft pixman-1 libsystemd \
-            cairo librsvg-2.0 gdk-pixbuf-2.0 glib-2.0
+            cairo librsvg-2.0 gdk-pixbuf-2.0 glib-2.0 libqrencode
+# quirc (QR decoding for hover-detect) ships no pkg-config file
+QUIRC_LIBS = -lquirc
 WP_INCS = -I$(shell $(PKG_CONFIG) --variable=prefix wayland-protocols 2>/dev/null)/include
 NLCFLAGS = `$(PKG_CONFIG) --cflags $(PKGS)` $(WLR_INCS) $(WP_INCS) $(CPPFLAGS_EXTRA) $(DEVCFLAGS) $(CFLAGS) $(OPTFLAGS)
-LDLIBS    = `$(PKG_CONFIG) --libs $(PKGS)` $(WLR_LIBS) -lm -lpthread $(LIBS)
+LDLIBS    = `$(PKG_CONFIG) --libs $(PKGS)` $(WLR_LIBS) $(QUIRC_LIBS) -lm -lpthread $(LIBS)
 
 # Allow C99 style declarations in all modules
 MOD_CFLAGS = $(NLCFLAGS) -Wno-declaration-after-statement
@@ -33,7 +35,7 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            statusbar.o tray.o statusbar_support.o terminfo.o launchfx.o diag.o fetch_async.o charge_limit.o fancontrol.o fanwatch.o \
            fancurve.o fan_helper.o fan_ec.o fan_nvml.o \
            popup_card.o popup_extra.o \
-           netmon.o wifi_ctrl.o wifi_nm.o btmon.o bt_rssi.o bt_audio.o vpnctl.o text_entry.o net_ui.o bt_ui.o display_ui.o power_ui.o \
+           netmon.o wifi_ctrl.o wifi_nm.o wifi_share.o qr_scan.o btmon.o bt_rssi.o bt_audio.o vpnctl.o text_entry.o net_ui.o bt_ui.o display_ui.o power_ui.o \
            notify.o notifyd.o lightsense.o presence.o powersave.o battwatch.o camwatch.o cpuclock.o instruments.o converge.o spawn.o osd.o
 
 PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstable-v1-protocol.h \
@@ -160,6 +162,12 @@ wifi_ctrl.o: $(SRC)/wifi_ctrl.c $(SRC)/netsys.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 
 wifi_nm.o: $(SRC)/wifi_nm.c $(SRC)/netsys.h $(SRC)/fetch_async.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+
+wifi_share.o: $(SRC)/wifi_share.c $(SRC)/netsys.h $(SRC)/run_cmd.h $(SRC)/util.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+
+qr_scan.o: $(SRC)/qr_scan.c $(SRC)/nixlytile.h $(SRC)/netsys.h $(SRC)/popup_card.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 
 btmon.o: $(SRC)/btmon.c $(SRC)/netsys.h

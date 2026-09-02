@@ -255,6 +255,22 @@ slider_commit(void)
  * history sample every METER_PUSH_MS, and redraw each tick with the
  * sub-pixel slide so the scroll is smooth. Stops itself (and the
  * pw-record child) the moment no audio popup is visible. */
+
+/* Capturing from a bluez mic makes WirePlumber flip the headset
+ * A2DP→HFP: the A2DP sink vanishes mid-playback and players pause.
+ * The live meter is not worth that — BT default mics (and an unknown
+ * device list) get a flat meter instead of a capture stream. */
+static int
+mic_meter_blocked(void)
+{
+	if (src_dev_count == 0)
+		return 1;
+	for (int i = 0; i < src_dev_count; i++)
+		if (src_devs[i].is_default)
+			return src_devs[i].is_headset;
+	return 0;
+}
+
 static int
 meter_tick(void *data)
 {
@@ -290,7 +306,10 @@ meter_tick(void *data)
 		return 0;   /* stays disarmed until the next popup render */
 	}
 
-	audio_meter_start(is_mic);
+	if (is_mic && mic_meter_blocked())
+		audio_meter_stop();
+	else
+		audio_meter_start(is_mic);
 	peak = audio_meter_take_peak();
 	if ((is_mic ? mic_muted : volume_muted) == 1)
 		peak = 0.0;
@@ -372,6 +391,8 @@ render_clock_popup(Monitor *m)
 	card = card_begin();
 	if (!card)
 		return;
+	card_at(m, m->statusbar.area.x + p->tree->node.x,
+			m->statusbar.area.y + statusbar_popup_y(m));
 
 	strftime(value, sizeof(value), "%H:%M", &lt);
 	strftime(sub, sizeof(sub), "%A", &lt);
@@ -475,6 +496,8 @@ render_audio_popup(Monitor *m, InfoPopup *p, int is_mic)
 	card = card_begin();
 	if (!card)
 		return;
+	card_at(m, m->statusbar.area.x + p->tree->node.x,
+			m->statusbar.area.y + statusbar_popup_y(m));
 
 	if (vol >= 0.0)
 		snprintf(value, sizeof(value), "%.0f%%", vol);
@@ -513,14 +536,13 @@ render_audio_popup(Monitor *m, InfoPopup *p, int is_mic)
 			char name[36];
 
 			snprintf(name, sizeof(name), "%.33s", d->name);
-			if (d->is_default)
-				card_icon_text_btn(card, audio_dev_svg(d, is_mic),
-						name, "Active", card_col_green,
-						NULL, -1, 0);
-			else
-				card_icon_text_btn(card, audio_dev_svg(d, is_mic),
-						name, NULL, NULL, "Use",
-						i, p->btn_hover == i);
+			/* BT-popup style: whole row is the click target with a
+			 * hover wash; the default device reads "Active" */
+			card_icon_text_hit(card, audio_dev_svg(d, is_mic),
+					name, d->is_default ? "Active" : NULL,
+					card_col_green, NULL,
+					d->is_default ? -1 : i,
+					p->btn_hover == i);
 		}
 	}
 
@@ -598,6 +620,8 @@ render_light_popup(Monitor *m)
 	card = card_begin();
 	if (!card)
 		return;
+	card_at(m, m->statusbar.area.x + p->tree->node.x,
+			m->statusbar.area.y + statusbar_popup_y(m));
 
 	if (b >= 0.0)
 		snprintf(value, sizeof(value), "%.0f%%", b);
@@ -676,6 +700,8 @@ render_fan_popup(Monitor *m)
 	card = card_begin();
 	if (!card)
 		return;
+	card_at(m, m->statusbar.area.x + p->tree->node.x,
+			m->statusbar.area.y + statusbar_popup_y(m));
 
 	if (fan_primary_value(value, sizeof(value)) != 0)
 		snprintf(value, sizeof(value), "--");
@@ -1249,6 +1275,10 @@ audio_popup_click(Monitor *m, StatusModule *mod, InfoPopup *p, int is_mic,
 		}
 		if (hit->id >= 0 && hit->id < count) {
 			audio_set_default(devs[hit->id].id);
+			/* manual pick beats the headset-sink guard */
+			if (!is_mic)
+				audio_headset_sink_override(
+						!devs[hit->id].is_headset);
 			if (is_mic) {
 				src_devs_ms = 0;
 				mic_last_read_ms = 0;

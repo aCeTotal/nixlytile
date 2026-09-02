@@ -18,6 +18,7 @@
 #include "fetch_async.h"
 
 extern struct wl_event_loop *event_loop;
+void audio_headset_guard_start(void);   /* audio_devices.c */
 
 static struct wl_event_source *ba_timer;
 static char ba_card[64];        /* bluez_card.AA_BB_.. we are fixing */
@@ -152,4 +153,7 @@ bt_audio_on_connect(const char *addr, const char *icon)
 			ba_card[i] = '_';
 	ba_tries = 0;
 	ba_schedule(2500);
+	/* fresh connect: headset becomes and stays the default sink until
+	 * the user manually picks something else */
+	audio_headset_guard_start();
 }

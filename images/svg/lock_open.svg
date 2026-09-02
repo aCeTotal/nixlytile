@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- plump-line padlock, shackle swung open (open network) -->
+  <rect x="12" y="28" width="40" height="26" rx="7" fill="none"
+        stroke="#82CC00" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M 21 28 v -7 a 11 11 0 0 1 22 0 v 2" fill="none"
+        stroke="#82CC00" stroke-width="7" stroke-linecap="round"
+        transform="rotate(-28 21 28)"/>
+  <circle cx="32" cy="41" r="3.5" fill="#82CC00"/>
+</svg>

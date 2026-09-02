@@ -703,6 +703,10 @@ buttonpress(struct wl_listener *listener, void *data)
 			tray_menu_hover_suppress();
 		}
 
+		/* Hover-QR "Connect to SSID" popup eats its click. */
+		if (qr_scan_handle_click(cursor->x, cursor->y, event->button))
+			return;
+
 		/* Clicks on the embedded status bar (tags, tray, modules).
 		 * A fullscreen client covers the bar area — clicks there
 		 * belong to the client, not the bar. */
@@ -2371,6 +2375,14 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	 * getting pointer focus + motion (hover-highlighting its content
 	 * and eating scroll events while the popup is open). */
 	if (selmon && statusbar_popup_at(selmon, cursor->x, cursor->y)) {
+		c = NULL;
+		surface = NULL;
+	}
+
+	/* Hover-QR detect: arm/dismiss the "Connect to SSID" popup; the
+	 * popup occludes the client under it just like the bar popups. */
+	qr_scan_motion(time);
+	if (qr_scan_popup_at(cursor->x, cursor->y)) {
 		c = NULL;
 		surface = NULL;
 	}

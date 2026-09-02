@@ -103,6 +103,18 @@ void wifi_disconnect(void);
 int wifi_forget(int net_id);
 /* Last auth failure ("wrong password"), cleared on connect; "" if none. */
 const char *wifi_last_error(void);
+
+/* ── wifi_share.c: QR code for the connected network ─────────────── */
+
+void wifi_share_toggle(const WifiStatus *ws);   /* build / dismiss */
+int wifi_share_active(void);
+const char *wifi_share_ssid(void);
+/* Module matrix (row-major, bit0 = dark); NULL when unavailable —
+ * wifi_share_status() then holds the reason. */
+const uint8_t *wifi_share_qr(int *size);
+const char *wifi_share_status(void);
+void wifi_share_copy(void);                     /* PNG → clipboard */
+void wifi_share_reset(void);
 /* Wake the netwatch worker for a fresh netmon sample (stats/route/dns). */
 void netwatch_poke(void);
 
@@ -205,6 +217,11 @@ int text_entry_active(void);
 const char *text_entry_label(void);
 /* Current content; masked entries return a run of dots for display. */
 const char *text_entry_display(void);
+/* Raw (unmasked) content — for in-process consumers like an inline
+ * Connect button that must read the field without an Enter press. */
+const char *text_entry_text(void);
+/* Prefill the active entry (field focus switching). */
+void text_entry_set_text(const char *text);
 /* Feed one xkb keysym (+ UTF-8 text, may be "") from the keyboard
  * handler.  Returns 1 when the key was consumed. */
 int text_entry_key(uint32_t keysym, const char *utf8);

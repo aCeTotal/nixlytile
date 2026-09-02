@@ -101,6 +101,8 @@ render_power_popup(Monitor *m)
 	card = card_begin();
 	if (!card)
 		return;
+	card_at(m, m->statusbar.area.x + p->tree->node.x,
+			m->statusbar.area.y + statusbar_popup_y(m));
 	card_min_w(card, 1);   /* hug the rows — no header, no filler */
 	for (int i = 0; i < 4; i++)
 		card_icon_text(card, power_rows[i].icon, power_rows[i].label,

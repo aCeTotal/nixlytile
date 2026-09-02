@@ -18,16 +18,23 @@
 
 /* hit ids in the net popup */
 #define NET_HIT_WIFI_TOGGLE 500
-#define NET_HIT_SCAN        501
-#define NET_HIT_HIDDEN      502
-#define NET_HIT_DISCONNECT  503
-#define NET_HIT_SEARCH      504
+#define NET_HIT_SCAN        501   /* Scan Wi-Fi (card_buttons base) */
+#define NET_HIT_HIDDEN      502   /* Connect hidden network (base+1) */
+#define NET_HIT_BACK        503
+#define NET_HIT_CONNECT     504
+#define NET_HIT_DISCONNECT2 505   /* CONNECTION-section Disconnect */
+#define NET_HIT_SHARE       506
+#define NET_HIT_SHARE_COPY  507
+#define NET_HIT_FIELD_SSID  508
+#define NET_HIT_FIELD_PSK   509
 #define NET_HIT_NET_BASE    510   /* + scan index */
 #define NET_HIT_VPN_BASE    560   /* + 2*i (even: toggle, odd: auto) */
 
 #define NET_LIST_MAX 24   /* = WIFI_SCAN_MAX: show every network found */
-#define NET_LIST_FOLD 12  /* rows shown without a search filter */
 #define VPN_LIST_MAX 6
+
+/* popup view: normal info card, scan list, or hidden-network form */
+enum { NETV_NORMAL, NETV_SCAN, NETV_HIDDEN };
 
 static WifiNet ui_nets[WIFI_SCAN_MAX];
 static int ui_nnets;
@@ -47,11 +54,14 @@ static int ui_nshown;
 static char ui_gateway[64];
 static char ui_dns[128];
 static uint64_t net_prev_stamp_ms;   /* netwatch stamp of net_prev_rx/tx */
-static char ui_pend_ssid[33];
-static int ui_pend_hidden;
-static char ui_search[33];
+static int ui_view;
+static char ui_target[33];    /* ssid of the in-flight connect attempt */
+static char ui_hid_ssid[33];  /* hidden-network form fields (committed) */
+static char ui_hid_psk[64];
+static int ui_hid_focus;      /* 0 = SSID field, 1 = passphrase */
 
-static const char search_label[] = "Search networks";
+static const char lock_closed_icon[] = "images/svg/lock_closed.svg";
+static const char lock_open_icon[] = "images/svg/lock_open.svg";
 
 void
 netsys_changed(void)
@@ -62,67 +72,58 @@ netsys_changed(void)
 /* ── text-entry chains ───────────────────────────────────────────── */
 
 static void
-psk_submitted(const char *text, void *data)
+scan_psk_submitted(const char *text, void *data)
 {
-	if (ui_pend_ssid[0])
-		wifi_connect(ui_pend_ssid, text, ui_pend_hidden);
-	memset(ui_pend_ssid, 0, sizeof(ui_pend_ssid));
+	if (ui_target[0])
+		wifi_connect(ui_target, text, 0);
+}
+
+static void hid_psk_submitted(const char *text, void *data);
+
+static void
+hid_ssid_submitted(const char *text, void *data)
+{
+	snprintf(ui_hid_ssid, sizeof(ui_hid_ssid), "%s", text);
+	ui_hid_focus = 1;
+	text_entry_begin("Passphrase", 1, hid_psk_submitted, NULL);
+	text_entry_set_text(ui_hid_psk);
 }
 
 static void
-hidden_ssid_submitted(const char *text, void *data)
+hid_psk_submitted(const char *text, void *data)
 {
-	char label[96];
+	snprintf(ui_hid_psk, sizeof(ui_hid_psk), "%s", text);
+	if (ui_hid_ssid[0]) {
+		snprintf(ui_target, sizeof(ui_target), "%s", ui_hid_ssid);
+		wifi_connect(ui_hid_ssid, ui_hid_psk, 1);
+	}
+}
 
-	if (!text[0])
+/* commit the focused hidden-form field out of the live entry */
+static void
+hid_capture_focused(void)
+{
+	if (!text_entry_active())
 		return;
-	snprintf(ui_pend_ssid, sizeof(ui_pend_ssid), "%s", text);
-	ui_pend_hidden = 1;
-	snprintf(label, sizeof(label), "Password for %s (empty = open)",
-			ui_pend_ssid);
-	text_entry_begin(label, 1, psk_submitted, NULL);
+	if (ui_hid_focus == 0)
+		snprintf(ui_hid_ssid, sizeof(ui_hid_ssid), "%s",
+				text_entry_text());
+	else
+		snprintf(ui_hid_psk, sizeof(ui_hid_psk), "%s",
+				text_entry_text());
+	text_entry_cancel();
 }
 
 static void
-search_submitted(const char *text, void *data)
+net_view_reset(void)
 {
-	snprintf(ui_search, sizeof(ui_search), "%s", text);
-}
-
-/* case-insensitive substring (strcasestr needs _GNU_SOURCE before
- * string.h, which this file can't guarantee) */
-static int
-ssid_match(const char *ssid, const char *needle)
-{
-	size_t nl = strlen(needle);
-
-	if (!nl)
-		return 1;
-	for (; *ssid; ssid++)
-		if (strncasecmp(ssid, needle, nl) == 0)
-			return 1;
-	return 0;
-}
-
-/* live filter: the search entry while typing, else the submitted one */
-static const char *
-net_filter(void)
-{
-	if (text_entry_active() &&
-			strcmp(text_entry_label(), search_label) == 0)
-		return text_entry_display();
-	return ui_search;
-}
-
-static void
-ask_psk(const char *ssid, int hidden)
-{
-	char label[96];
-
-	snprintf(ui_pend_ssid, sizeof(ui_pend_ssid), "%s", ssid);
-	ui_pend_hidden = hidden;
-	snprintf(label, sizeof(label), "Password for %s", ssid);
-	text_entry_begin(label, 1, psk_submitted, NULL);
+	ui_view = NETV_NORMAL;
+	ui_target[0] = '\0';
+	ui_hid_ssid[0] = '\0';
+	memset(ui_hid_psk, 0, sizeof(ui_hid_psk));
+	ui_hid_focus = 0;
+	if (text_entry_active())
+		text_entry_cancel();
 }
 
 /* ── data refresh (status task) ──────────────────────────────────── */
@@ -161,8 +162,11 @@ refreshstatusnet(void)
 	 * was torn down another way, stop swallowing keyboard input */
 	if (!popup_active && text_entry_active())
 		text_entry_cancel();
-	if (!popup_active)
-		ui_search[0] = '\0';
+	if (!popup_active) {
+		if (ui_view != NETV_NORMAL)
+			net_view_reset();
+		wifi_share_reset();
+	}
 
 	netmon_get(&s);
 	memset(&ws, 0, sizeof(ws));
@@ -171,6 +175,15 @@ refreshstatusnet(void)
 		wifi_assoc = strcmp(ws.state, "COMPLETED") == 0;
 	}
 	ui_ws = ws;
+
+	/* radio gone → the scan/hidden views have nothing to stand on */
+	if (ui_view != NETV_NORMAL && (!s.wifi.present || s.wifi_blocked))
+		net_view_reset();
+	/* successful connect from scan/hidden → back to the normal card,
+	 * now showing the new network */
+	if (ui_view != NETV_NORMAL && ui_target[0] && wifi_assoc &&
+			strcmp(ws.ssid, ui_target) == 0)
+		net_view_reset();
 
 	net_available = (s.eth.present && s.eth.carrier) || wifi_assoc;
 	net_is_wireless = !(s.eth.present && s.eth.carrier) && wifi_assoc;
@@ -296,10 +309,102 @@ refreshstatusnet(void)
 
 /* ── popup card ──────────────────────────────────────────────────── */
 
-static const char *
-sec_tag(const WifiNet *w)
+/* CONNECTION-footer buttons that enter the scan / hidden views */
+static void
+scan_hidden_buttons(Card *card, int hot)
 {
-	return w->secured ? "🔒" : "";
+	const char *lbl[2] = { "Scan Wi-Fi", "Connect hidden network" };
+
+	card_gap(card, 4);
+	card_buttons(card, lbl, NULL, 2, -1,
+			hot == NET_HIT_SCAN ? 0 :
+			hot == NET_HIT_HIDDEN ? 1 : -1, NET_HIT_SCAN);
+}
+
+/* Scan view: header + every found network as a BT-style hover row —
+ * signal icon, SSID, security method, open/closed padlock.  The picked
+ * row turns into a passphrase entry with a Connect button. */
+static void
+render_scan_view(Card *card, int hot)
+{
+	int i;
+
+	card_section(card, "NETWORKS");
+	card_text_rbtn(card, "Select a network",
+			ui_scanning ? "Scanning…" : NULL, card_col_dim,
+			"Back", NET_HIT_BACK, hot == NET_HIT_BACK);
+	if (wifi_last_error()[0])
+		card_text(card, wifi_last_error(), NULL, card_col_red);
+	ui_nshown = ui_nnets < NET_LIST_MAX ? ui_nnets : NET_LIST_MAX;
+	if (!ui_nshown) {
+		card_gap(card, 8);
+		card_loading(card, "SCANNING",
+				(double)(monotonic_msec() % 2400) / 2400.0);
+		card_gap(card, 8);
+		return;
+	}
+	for (i = 0; i < ui_nshown; i++) {
+		WifiNet *w = &ui_shown[i];
+		const char *sec;
+
+		*w = ui_nets[i];
+		if (ui_target[0] && text_entry_active() &&
+				strcmp(w->ssid, ui_target) == 0) {
+			card_text_rbtn(card, w->ssid,
+					text_entry_display(), card_col_blue,
+					"Connect", NET_HIT_CONNECT,
+					hot == NET_HIT_CONNECT);
+			continue;
+		}
+		sec = w->connected ? "Connected" :
+			(w->secured ? (w->sec[0] ? w->sec : "WPA") : "Open");
+		card_icon_text_hit(card,
+				wifi_icon_for_quality(dbm_to_pct(w->signal_dbm)),
+				w->ssid, sec,
+				w->connected || w->known ?
+				card_col_green : card_col_dim,
+				w->secured ? lock_closed_icon : lock_open_icon,
+				NET_HIT_NET_BASE + i,
+				hot == NET_HIT_NET_BASE + i);
+	}
+}
+
+/* Hidden-network view: SSID + passphrase fields stacked, Connect below */
+static void
+render_hidden_view(Card *card, int hot)
+{
+	static char pdots[4 * 64];
+	const char *lbl[1] = { "Connect" };
+	const char *sd, *pd;
+	size_t i, n;
+
+	card_section(card, "HIDDEN NETWORK");
+	card_text_rbtn(card, "Enter network details", NULL, NULL,
+			"Back", NET_HIT_BACK, hot == NET_HIT_BACK);
+	sd = ui_hid_focus == 0 && text_entry_active() ?
+		text_entry_display() : ui_hid_ssid;
+	if (ui_hid_focus == 1 && text_entry_active()) {
+		pd = text_entry_display();
+	} else {
+		n = strlen(ui_hid_psk);
+		pdots[0] = '\0';
+		for (i = 0; i < n; i++)
+			strcat(pdots, "•");
+		pd = pdots;
+	}
+	card_icon_text_hit(card, NULL, "SSID", sd,
+			ui_hid_focus == 0 && text_entry_active() ?
+			card_col_blue : card_col_fg,
+			NULL, NET_HIT_FIELD_SSID, hot == NET_HIT_FIELD_SSID);
+	card_icon_text_hit(card, NULL, "Passphrase", pd,
+			ui_hid_focus == 1 && text_entry_active() ?
+			card_col_blue : card_col_fg,
+			NULL, NET_HIT_FIELD_PSK, hot == NET_HIT_FIELD_PSK);
+	if (wifi_last_error()[0])
+		card_text(card, wifi_last_error(), NULL, card_col_red);
+	card_gap(card, 4);
+	card_buttons(card, lbl, NULL, 1, -1,
+			hot == NET_HIT_CONNECT ? 0 : -1, NET_HIT_CONNECT);
 }
 
 /* ── live spectrum overlay (wifi header) ─────────────────────────── */
@@ -533,6 +638,8 @@ rendernetpopup(Monitor *m)
 	card = card_begin();
 	if (!card)
 		return;
+	card_at(m, m->statusbar.area.x + p->anchor_x,
+			m->statusbar.area.y + statusbar_popup_y(m));
 	hot = p->btn_hover;
 
 	/* header */
@@ -562,11 +669,13 @@ rendernetpopup(Monitor *m)
 		card_gap(card, 8);
 	}
 
-	/* text entry (SSID / password prompt) */
-	if (text_entry_active()) {
-		card_section(card, "INPUT · ENTER = OK · ESC = CANCEL");
-		card_text(card, text_entry_label(), NULL, NULL);
-		card_text(card, text_entry_display(), NULL, card_col_blue);
+	/* scan / hidden views replace everything below the header */
+	if (ui_view != NETV_NORMAL) {
+		if (ui_view == NETV_SCAN)
+			render_scan_view(card, hot);
+		else
+			render_hidden_view(card, hot);
+		goto finish;
 	}
 
 	if (net_available && strcmp(net_local_ip, "--") == 0 &&
@@ -643,24 +752,24 @@ rendernetpopup(Monitor *m)
 	if (!s.wifi.present) {
 		card_text(card, "No wifi adapter", NULL, NULL);
 	} else {
-		card_text_btn(card, "Radio", NULL, NULL,
-				s.wifi_blocked ? "Off" : "On",
+		card_big_btn(card,
+				s.wifi_blocked ? "Radio OFF" : "Radio ON",
+				s.wifi_blocked ? card_col_red : card_col_green,
 				NET_HIT_WIFI_TOGGLE,
 				hot == NET_HIT_WIFI_TOGGLE);
 	}
 	if (s.wifi.present && !s.wifi_blocked) {
-		const char *filter = net_filter();
-		int folded = 0, listed = 0;
-
 		if (wifi_assoc) {
 			card_section(card, "CONNECTION");
-			card_kv2(card, "SSID", ws.ssid, card_col_green,
-					"BSSID", ws.bssid, NULL);
+			card_text_btn2(card, ws.ssid,
+					"Disconnect", NET_HIT_DISCONNECT2,
+					hot == NET_HIT_DISCONNECT2,
+					"Share Wi-Fi", NET_HIT_SHARE,
+					hot == NET_HIT_SHARE);
 			snprintf(v1, sizeof(v1), "%d dBm · %.1f GHz",
 					ws.signal_dbm, ws.freq_mhz / 1000.0);
-			card_kv2(card, "Signal", v1, NULL, "Security",
-					ws.key_mgmt[0] ? ws.key_mgmt : "Open",
-					NULL);
+			card_kv2(card, "Signal", v1, NULL,
+					"BSSID", ws.bssid, NULL);
 			if (ws.link_speed_mbps > 0) {
 				snprintf(v1, sizeof(v1), "%d Mbit/s",
 						ws.link_speed_mbps);
@@ -669,63 +778,38 @@ rendernetpopup(Monitor *m)
 				card_kv2(card, "Link rate", v1, card_col_green,
 						"Max seen", v2, NULL);
 			}
-		}
-		if (wifi_last_error()[0])
-			card_text(card, wifi_last_error(), NULL, card_col_red);
+			card_kv2(card, "Security",
+					ws.key_mgmt[0] ? ws.key_mgmt : "Open",
+					NULL, NULL, NULL, NULL);
+			scan_hidden_buttons(card, hot);
+			if (wifi_share_active() &&
+					strcmp(wifi_share_ssid(), ws.ssid) != 0)
+				wifi_share_reset();
+			if (wifi_share_active()) {
+				int qs;
+				const uint8_t *qm = wifi_share_qr(&qs);
 
-		card_section(card, "NETWORKS");
-		card_text_btn(card, "Networks",
-				ui_scanning ? "Scanning…" : NULL,
-				card_col_dim, "Scan", NET_HIT_SCAN,
-				hot == NET_HIT_SCAN);
-		card_text_btn(card, "Search",
-				filter[0] ? filter : NULL,
-				filter[0] ? card_col_blue : NULL,
-				filter[0] ? "Clear" : "Find",
-				NET_HIT_SEARCH, hot == NET_HIT_SEARCH);
-		ui_nshown = ui_nnets < NET_LIST_MAX ? ui_nnets : NET_LIST_MAX;
-		for (i = 0; i < ui_nshown; i++) {
-			WifiNet *w = &ui_shown[i];
-			const char *btn;
-
-			*w = ui_nets[i];
-			if (w->connected) {
-				snprintf(v1, sizeof(v1), "%s %s",
-						w->ssid, sec_tag(w));
-				snprintf(v2, sizeof(v2), "Connected · %d%%",
-						(int)lround(dbm_to_pct(
-								w->signal_dbm)));
-				card_text_btn(card, v1, v2, card_col_green,
-						"Disconnect",
-						NET_HIT_DISCONNECT,
-						hot == NET_HIT_DISCONNECT);
-				continue;
+				card_section(card, "SHARE WI-FI");
+				if (qm) {
+					card_gap(card, 4);
+					card_qr(card, qm, qs);
+					card_gap(card, 4);
+					card_text_btn(card,
+							"Scan to join this network",
+							NULL, NULL, "Copy image",
+							NET_HIT_SHARE_COPY,
+							hot == NET_HIT_SHARE_COPY);
+				} else {
+					card_text(card, wifi_share_status(),
+							NULL, card_col_red);
+				}
 			}
-			if (filter[0] && !ssid_match(w->ssid, filter))
-				continue;
-			if (!filter[0] && listed >= NET_LIST_FOLD) {
-				folded++;
-				continue;
-			}
-			listed++;
-			snprintf(v1, sizeof(v1), "%s %s", w->ssid, sec_tag(w));
-			snprintf(v2, sizeof(v2), "%d%% · %s%s",
-					(int)lround(dbm_to_pct(w->signal_dbm)),
-					w->sec[0] ? w->sec : "Open",
-					w->known ? " · saved" : "");
-			btn = w->known ? "Join" : (w->secured ? "Join…" : "Join");
-			card_text_btn(card, v1, v2,
-					w->known ? card_col_green : card_col_dim,
-					btn, NET_HIT_NET_BASE + i,
-					hot == NET_HIT_NET_BASE + i);
+		} else {
+			if (wifi_last_error()[0])
+				card_text(card, wifi_last_error(), NULL,
+						card_col_red);
+			scan_hidden_buttons(card, hot);
 		}
-		if (folded) {
-			snprintf(v1, sizeof(v1), "+%d more · search to filter",
-					folded);
-			card_text(card, v1, NULL, NULL);
-		}
-		card_text_btn(card, "Hidden network", NULL, NULL, "Join…",
-				NET_HIT_HIDDEN, hot == NET_HIT_HIDDEN);
 	}
 
 	/* VPN */
@@ -757,6 +841,7 @@ rendernetpopup(Monitor *m)
 		}
 	}
 
+finish:
 	if (card_finish(card, &res) != 0)
 		return;
 	memcpy(p->hits, res.hits, sizeof(p->hits));
@@ -845,26 +930,58 @@ net_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 			netmon_get(&s);
 			netmon_wifi_set_enabled(s.wifi_blocked, 1);
 		} else if (id == NET_HIT_SCAN && button == BTN_LEFT) {
+			ui_view = NETV_SCAN;
+			ui_target[0] = '\0';
+			if (text_entry_active())
+				text_entry_cancel();
 			wifi_scan_request();
 			ui_scanning = 1;
 			ui_scan_req_ms = monotonic_msec();
-		} else if (id == NET_HIT_SEARCH && button == BTN_LEFT) {
-			if (text_entry_active() &&
-					strcmp(text_entry_label(),
-						search_label) == 0) {
-				text_entry_cancel();
-				ui_search[0] = '\0';
-			} else if (ui_search[0]) {
-				ui_search[0] = '\0';
-			} else {
-				text_entry_begin(search_label, 0,
-						search_submitted, NULL);
-			}
 		} else if (id == NET_HIT_HIDDEN && button == BTN_LEFT) {
-			text_entry_begin("Hidden network SSID", 0,
-					hidden_ssid_submitted, NULL);
-		} else if (id == NET_HIT_DISCONNECT && button == BTN_LEFT) {
+			ui_view = NETV_HIDDEN;
+			ui_target[0] = '\0';
+			ui_hid_ssid[0] = '\0';
+			memset(ui_hid_psk, 0, sizeof(ui_hid_psk));
+			ui_hid_focus = 0;
+			text_entry_begin("SSID", 0, hid_ssid_submitted, NULL);
+		} else if (id == NET_HIT_BACK && button == BTN_LEFT) {
+			net_view_reset();
+		} else if (id == NET_HIT_CONNECT && button == BTN_LEFT) {
+			if (ui_view == NETV_SCAN && ui_target[0]) {
+				char psk[80];
+
+				snprintf(psk, sizeof(psk), "%s",
+						text_entry_text());
+				if (text_entry_active())
+					text_entry_cancel();
+				wifi_connect(ui_target, psk, 0);
+				memset(psk, 0, sizeof(psk));
+			} else if (ui_view == NETV_HIDDEN) {
+				hid_capture_focused();
+				if (ui_hid_ssid[0]) {
+					snprintf(ui_target, sizeof(ui_target),
+							"%s", ui_hid_ssid);
+					wifi_connect(ui_hid_ssid,
+							ui_hid_psk, 1);
+				}
+			}
+		} else if (id == NET_HIT_FIELD_SSID && button == BTN_LEFT) {
+			hid_capture_focused();
+			ui_hid_focus = 0;
+			text_entry_begin("SSID", 0, hid_ssid_submitted, NULL);
+			text_entry_set_text(ui_hid_ssid);
+		} else if (id == NET_HIT_FIELD_PSK && button == BTN_LEFT) {
+			hid_capture_focused();
+			ui_hid_focus = 1;
+			text_entry_begin("Passphrase", 1, hid_psk_submitted,
+					NULL);
+			text_entry_set_text(ui_hid_psk);
+		} else if (id == NET_HIT_DISCONNECT2 && button == BTN_LEFT) {
 			wifi_disconnect();
+		} else if (id == NET_HIT_SHARE && button == BTN_LEFT) {
+			wifi_share_toggle(&ui_ws);
+		} else if (id == NET_HIT_SHARE_COPY && button == BTN_LEFT) {
+			wifi_share_copy();
 		} else if (id >= NET_HIT_NET_BASE &&
 				id < NET_HIT_NET_BASE + NET_LIST_MAX) {
 			WifiNet *w = &ui_shown[id - NET_HIT_NET_BASE];
@@ -874,11 +991,21 @@ net_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 			} else if (button == BTN_RIGHT) {
 				if (w->known)
 					wifi_forget(w->known_id);
+			} else if (w->connected) {
+				/* already on this network */
 			} else if (w->known) {
+				snprintf(ui_target, sizeof(ui_target), "%s",
+						w->ssid);
 				wifi_connect_known(w->known_id);
 			} else if (w->secured) {
-				ask_psk(w->ssid, 0);
+				/* row becomes a passphrase entry + Connect */
+				snprintf(ui_target, sizeof(ui_target), "%s",
+						w->ssid);
+				text_entry_begin("Passphrase", 1,
+						scan_psk_submitted, NULL);
 			} else {
+				snprintf(ui_target, sizeof(ui_target), "%s",
+						w->ssid);
 				wifi_connect(w->ssid, "", 0);
 			}
 		} else if (id >= NET_HIT_VPN_BASE &&

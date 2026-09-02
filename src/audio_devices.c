@@ -200,3 +200,83 @@ audio_autoselect_headset_mic(void)
 {
 	fetch_async("wpctl status", autoselect_status_done, NULL);
 }
+
+/* ── headset sink guard ──────────────────────────────────────────────
+ * WirePlumber profile flips (A2DP↔HFP) tear the bluez sink down for a
+ * moment; the default sink then lands on the speakers and can stay
+ * there.  While a bluetooth audio device is connected the headset is
+ * kept as the default sink, unless the user manually picked another
+ * device in the volume popup. */
+
+static struct wl_event_source *hg_timer;
+static int hg_misses;
+static int hg_override;   /* user manually chose a non-headset sink */
+
+void
+audio_headset_sink_override(int manual_non_headset)
+{
+	hg_override = manual_non_headset;
+}
+
+static void hg_schedule(int ms);
+
+static void
+hg_status_done(const char *out, size_t len, void *data)
+{
+	FILE *fp;
+	AudioDevice devs[8];
+	int n, def = -1, hs = -1;
+
+	(void)data;
+	fp = fmemopen((void *)out, len ? len : 1, "r");
+	if (!fp)
+		return;
+	n = audio_parse_status_devices(fp, 0, devs, 8);
+	fclose(fp);
+	for (int i = 0; i < n; i++) {
+		if (devs[i].is_default)
+			def = i;
+		if (devs[i].is_headset && hs < 0)
+			hs = i;
+	}
+	if (hs < 0) {
+		/* the bluez sink vanishes briefly mid profile switch — only
+		 * give up once it has stayed gone */
+		if (++hg_misses < 5)
+			hg_schedule(4000);
+		return;
+	}
+	hg_misses = 0;
+	if (!hg_override && def != hs) {
+		audio_set_default(devs[hs].id);
+		volume_invalidate_cache(0);
+		volume_invalidate_cache(1);
+		refreshstatusvolume();
+	}
+	hg_schedule(4000);
+}
+
+static int
+hg_tick(void *data)
+{
+	(void)data;
+	fetch_async("wpctl status", hg_status_done, NULL);
+	return 0;
+}
+
+static void
+hg_schedule(int ms)
+{
+	if (!hg_timer)
+		hg_timer = wl_event_loop_add_timer(event_loop, hg_tick, NULL);
+	if (hg_timer)
+		wl_event_source_timer_update(hg_timer, ms);
+}
+
+void
+audio_headset_guard_start(void)
+{
+	hg_override = 0;
+	hg_misses = 0;
+	hg_schedule(3000);
+}

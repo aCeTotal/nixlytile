@@ -87,6 +87,19 @@ void card_text_btn(Card *c, const char *left, const char *right,
  * sits left of it); hit rect is the button only — Kill rows. */
 void card_text_rbtn(Card *c, const char *left, const char *right,
 		const float *rightcol, const char *btn_label, int hit_id, int hot);
+/* Row with two buttons pinned to the right card edge ([btn1][btn2],
+ * btn2 outermost); each button is its own hit rect. */
+void card_text_btn2(Card *c, const char *left,
+		const char *btn1, int hit_id1, int hot1,
+		const char *btn2, int hit_id2, int hot2);
+/* Full-width accent-tinted button row (Radio ON/OFF); brighter while
+ * hot. */
+void card_big_btn(Card *c, const char *label, const float accent[4],
+		int hit_id, int hot);
+/* QR code row: size×size module matrix (row-major, bit0 = dark) drawn
+ * on a white plate with quiet zone, centered. Matrix is caller-owned
+ * and only read during card_finish. */
+void card_qr(Card *c, const uint8_t *modules, int size);
 /* text_btn with an svg icon (asset path, drawn at text height) left of
  * the label — device lists. icon_path may be NULL. */
 void card_icon_text_btn(Card *c, const char *icon_path, const char *left,
@@ -97,6 +110,13 @@ void card_icon_text_btn(Card *c, const char *icon_path, const char *left,
 void card_icon_text_rbtn(Card *c, const char *icon_path, const char *left,
 		const char *right, const float *rightcol,
 		const char *btn_label, int hit_id, int hot);
+/* Full-row-clickable row (BT-device hover style, but no button): icon
+ * + left text, right text, optional status icon (svg asset path) at
+ * the right card edge; the whole row is the hit rect and washes on
+ * hover. icon_path/right/sicon may be NULL. */
+void card_icon_text_hit(Card *c, const char *icon_path, const char *left,
+		const char *right, const float *rightcol, const char *sicon,
+		int hit_id, int hot);
 /* icon_text_rbtn with up to two small status icons (svg asset paths,
  * drawn at text height, right-aligned left of the button) in place of
  * the right text — BT device signal/battery. Either may be NULL. */
@@ -130,6 +150,12 @@ void card_calendar(Card *c, int year, int mon, int mday);
 /* Override the card's minimum content width (default CARD_MIN_W) —
  * for compact menus that should hug their rows. */
 void card_min_w(Card *c, int w);
+/* Where the card will be shown (layout coords, monitor it belongs to):
+ * the backdrop only darkens when the card overlaps a visible client
+ * there — over bare wallpaper it stays translucent.  Consumed by the
+ * next card_finish; without it any client visible on selmon darkens. */
+struct Monitor;
+void card_at(struct Monitor *m, int x, int y);
 /* Icon + label row with a full-width hover pill (compact menus).
  * Icon is an svg asset path drawn at text height. */
 void card_icon_text(Card *c, const char *icon_path, const char *label,

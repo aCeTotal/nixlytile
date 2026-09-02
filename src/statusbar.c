@@ -1611,6 +1611,8 @@ rendercpupopup(Monitor *m)
 	card = card_begin();
 	if (!card)
 		return;
+	card_at(m, m->statusbar.area.x + m->statusbar.cpu.x,
+			m->statusbar.area.y + statusbar_popup_y(m));
 
 	avg_disp = (cpu_last_percent < 1.0) ? 0 :
 		(int)lround(cpu_last_percent < 0.0 ? 0.0 : cpu_last_percent);
@@ -2015,6 +2017,8 @@ renderrampopup(Monitor *m)
 	card = card_begin();
 	if (!card)
 		return;
+	card_at(m, m->statusbar.area.x + m->statusbar.ram.x,
+			m->statusbar.area.y + statusbar_popup_y(m));
 
 	if (used_frac >= 0.0)
 		snprintf(value, sizeof(value), "%.0f%%", used_frac * 100.0);
@@ -2310,6 +2314,8 @@ renderbatterypopup(Monitor *m)
 	card = card_begin();
 	if (!card)
 		return;
+	card_at(m, m->statusbar.area.x + m->statusbar.battery.x,
+			m->statusbar.area.y + statusbar_popup_y(m));
 
 	if (p->percent >= 0)
 		snprintf(value, sizeof(value), "%.0f%%", p->percent);

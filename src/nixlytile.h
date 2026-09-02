@@ -2843,6 +2843,10 @@ void audio_mic_defaults_apply_async(double mic_pct);
 void audio_popup_data_arrived(void);
 void audio_autoselect_headset_mic(void);
 void audio_set_default(uint32_t id);
+/* Keep a connected BT headset as the default sink (audio_devices.c);
+ * override(1) = user manually picked a non-headset sink. */
+void audio_headset_guard_start(void);
+void audio_headset_sink_override(int manual_non_headset);
 int battery_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 /* charge_limit.c — battery charge limit (80/90/100), sysfs + persisted */
 int charge_limit_current(void);
@@ -2970,6 +2974,11 @@ void tray_menu_draw_text(struct wlr_scene_tree *tree, const char *text, int x, i
 TrayMenuEntry *tray_menu_entry_at(Monitor *m, int lx, int ly);
 void tray_menu_update_hover(Monitor *m, double cx, double cy);
 int statusbar_popup_at(Monitor *m, double cx, double cy);
+
+/* qr_scan.c: hover QR detection → "Connect to SSID" popup */
+void qr_scan_motion(uint32_t time);
+int qr_scan_popup_at(double cx, double cy);
+int qr_scan_handle_click(double cx, double cy, uint32_t button);
 /* y where bar popups anchor: bar bottom + outer tile gap (tiles' top edge) */
 int statusbar_popup_y(Monitor *m);
 int tray_menu_send_event(TrayMenu *menu, TrayMenuEntry *entry, uint32_t time_msec);

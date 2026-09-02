@@ -54,6 +54,19 @@ text_entry_label(void)
 }
 
 const char *
+text_entry_text(void)
+{
+	return te_buf;
+}
+
+void
+text_entry_set_text(const char *text)
+{
+	snprintf(te_buf, sizeof(te_buf), "%s", text ? text : "");
+	netsys_changed();
+}
+
+const char *
 text_entry_display(void)
 {
 	if (!te_masked) {
