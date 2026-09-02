@@ -235,8 +235,8 @@ adjust_backlight_by_steps(int steps)
 			percent = newp;
 		else
 			percent = percent + delta;
-		if (percent < 0.0)
-			percent = 0.0;
+		if (percent < 1.0)
+			percent = 1.0;
 		if (percent > 100.0)
 			percent = 100.0;
 		light_last_percent = percent;
@@ -249,8 +249,8 @@ adjust_backlight_by_steps(int steps)
 	/* Fall back to absolute write */
 	{
 		double target = percent + delta;
-		if (target < 0.0)
-			target = 0.0;
+		if (target < 1.0)
+			target = 1.0;
 		if (target > 100.0)
 			target = 100.0;
 

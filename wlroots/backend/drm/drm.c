@@ -670,6 +670,44 @@ static bool drm_commit(struct wlr_drm_backend *drm,
 	return ok;
 }
 
+/* Build a custom modeline from an EDID mode at the same resolution:
+ * keep the panel's known-good timings and scale only the pixel clock to
+ * hit the requested refresh.  CVT full-blanking timings have far more
+ * blanking than native modes, so their pixel clock routinely exceeds
+ * the panel/link budget and the screen flickers. */
+static bool generate_scaled_mode(struct wlr_output *output,
+		drmModeModeInfo *out, int32_t width, int32_t height,
+		int32_t refresh) {
+	struct wlr_drm_mode *best = NULL;
+	struct wlr_output_mode *wlr_mode;
+
+	if (refresh <= 0) {
+		return false;
+	}
+	wl_list_for_each(wlr_mode, &output->modes, link) {
+		struct wlr_drm_mode *m = wl_container_of(wlr_mode, m, wlr_mode);
+		if (wlr_mode->width != width || wlr_mode->height != height) {
+			continue;
+		}
+		if (m->drm_mode.flags & DRM_MODE_FLAG_INTERLACE) {
+			continue;
+		}
+		if (!best || abs(wlr_mode->refresh - refresh) <
+				abs(best->wlr_mode.refresh - refresh)) {
+			best = m;
+		}
+	}
+	if (!best) {
+		return false;
+	}
+	*out = best->drm_mode;
+	out->clock = (uint64_t)refresh * out->htotal * out->vtotal / 1000000;
+	out->vrefresh = (refresh + 500) / 1000;
+	snprintf(out->name, sizeof(out->name), "%dx%d@%d",
+		width, height, out->vrefresh);
+	return true;
+}
+
 static void drm_connector_state_init(struct wlr_drm_connector_state *state,
 		struct wlr_drm_connector *conn,
 		const struct wlr_output_state *base) {
@@ -702,6 +740,9 @@ static void drm_connector_state_init(struct wlr_drm_connector_state *state,
 	if (mode) {
 		struct wlr_drm_mode *drm_mode = wl_container_of(mode, drm_mode, wlr_mode);
 		state->mode = drm_mode->drm_mode;
+	} else if (generate_scaled_mode(&conn->output, &state->mode,
+			width, height, refresh)) {
+		state->mode.type = DRM_MODE_TYPE_USERDEF;
 	} else {
 		generate_cvt_mode(&state->mode, width, height, (float)refresh / 1000);
 		state->mode.type = DRM_MODE_TYPE_USERDEF;

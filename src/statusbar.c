@@ -3323,6 +3323,31 @@ net_bytes_to_rate(unsigned long long cur, unsigned long long prev, double elapse
 	return (double)(cur - prev) / elapsed;
 }
 
+/* Preference order when several /sys/class/backlight entries exist:
+ * type=raw is the GPU-native device that actually moves the panel;
+ * platform/firmware (acpi_video0, vendor WMI) are fallbacks. */
+static int
+backlight_type_rank(const char *name)
+{
+	char path[PATH_MAX], buf[16];
+	FILE *fp;
+
+	snprintf(path, sizeof(path), "/sys/class/backlight/%s/type", name);
+	fp = fopen(path, "r");
+	if (!fp)
+		return 3;
+	if (!fgets(buf, sizeof(buf), fp))
+		buf[0] = '\0';
+	fclose(fp);
+	if (strncmp(buf, "raw", 3) == 0)
+		return 0;
+	if (strncmp(buf, "platform", 8) == 0)
+		return 1;
+	if (strncmp(buf, "firmware", 8) == 0)
+		return 2;
+	return 3;
+}
+
 int
 findbacklightdevice(char *brightness_path, size_t brightness_len,
 		char *max_path, size_t max_len)
@@ -3343,6 +3368,7 @@ findbacklightdevice(char *brightness_path, size_t brightness_len,
 	char r_mpath[PATH_MAX] = {0};
 	int have_writable = 0;
 	int have_readable = 0;
+	int w_rank = 99, r_rank = 99;
 
 	if (!brightness_path || !max_path || brightness_len == 0 || max_len == 0)
 		return 0;
@@ -3377,6 +3403,7 @@ findbacklightdevice(char *brightness_path, size_t brightness_len,
 		char bpath[PATH_MAX];
 		char mpath[PATH_MAX];
 		struct stat st;
+		int rank;
 
 		if (ent->d_name[0] == '.')
 			continue;
@@ -3394,16 +3421,23 @@ findbacklightdevice(char *brightness_path, size_t brightness_len,
 		if (access(bpath, R_OK) != 0 || access(mpath, R_OK) != 0)
 			continue;
 
-		if (access(bpath, W_OK) == 0 && !have_writable) {
+		rank = backlight_type_rank(ent->d_name);
+
+		if (access(bpath, W_OK) == 0 &&
+				(!have_writable || rank < w_rank)) {
 			if (snprintf(w_bpath, sizeof(w_bpath), "%s", bpath) < (int)sizeof(w_bpath)
-					&& snprintf(w_mpath, sizeof(w_mpath), "%s", mpath) < (int)sizeof(w_mpath))
+					&& snprintf(w_mpath, sizeof(w_mpath), "%s", mpath) < (int)sizeof(w_mpath)) {
 				have_writable = 1;
+				w_rank = rank;
+			}
 		}
 
-		if (!have_readable) {
+		if (!have_readable || rank < r_rank) {
 			if (snprintf(r_bpath, sizeof(r_bpath), "%s", bpath) < (int)sizeof(r_bpath)
-					&& snprintf(r_mpath, sizeof(r_mpath), "%s", mpath) < (int)sizeof(r_mpath))
+					&& snprintf(r_mpath, sizeof(r_mpath), "%s", mpath) < (int)sizeof(r_mpath)) {
 				have_readable = 1;
+				r_rank = rank;
+			}
 		}
 	}
 
@@ -3508,13 +3542,17 @@ set_backlight_percent(double percent)
 	FILE *fp;
 	int attempted = 0;
 
-	if (percent < 0.0)
-		percent = 0.0;
+	/* Floor at 1%: a 0 write turns the panel fully off and locks the
+	 * user out of the machine they need to turn it back up. */
+	if (percent < 1.0)
+		percent = 1.0;
 	if (percent > 100.0)
 		percent = 100.0;
 
 	if (backlight_available && readulong(backlight_max_path, &max) == 0 && max > 0) {
 		target = (unsigned long long)lround((percent / 100.0) * (double)max);
+		if (target < 1)
+			target = 1;
 		if (target > max)
 			target = max;
 
@@ -3535,7 +3573,7 @@ set_backlight_percent(double percent)
 	{
 		char cmd[96];
 		snprintf(cmd, sizeof(cmd),
-				"brightnessctl set %.2f%% || light -S %.2f",
+				"brightnessctl -n set %.2f%% || light -S %.2f",
 				percent, percent);
 		{
 			const char *const argv[] = { "/bin/sh", "-c", cmd, NULL };
@@ -3560,8 +3598,8 @@ set_backlight_relative(double delta_percent)
 	cur = light_cached_percent >= 0.0 ? light_cached_percent : backlight_percent();
 	if (cur >= 0.0) {
 		double target = cur + delta_percent;
-		if (target < 0.0)
-			target = 0.0;
+		if (target < 1.0)
+			target = 1.0;
 		if (target > 100.0)
 			target = 100.0;
 		light_cached_percent = target;
@@ -3581,7 +3619,7 @@ set_backlight_relative(double delta_percent)
 	 * keeps the brightnessctl→light fallback. */
 	{
 		char cmd[96];
-		snprintf(cmd, sizeof(cmd), "brightnessctl set %s || light %s %s",
+		snprintf(cmd, sizeof(cmd), "brightnessctl -n set %s || light %s %s",
 				arg, delta_percent > 0 ? "-A" : "-U", light_arg);
 		{
 			const char *const argv[] = { "/bin/sh", "-c", cmd, NULL };

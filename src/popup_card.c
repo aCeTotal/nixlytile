@@ -1037,7 +1037,10 @@ card_finish(Card *c, CardResult *out)
 				int bw = text_width_f(statusfont.font,
 						r->btn_label, 0) + 16;
 				int bh = base_h + 2;
-				int bx = w - CARD_PAD - bw;
+				int bx = CARD_PAD +
+					(r->c[0] ? CARD_TICON(base_h) + 10 : 0) +
+					text_width_f(statusfont.font, r->a, 0) +
+					12;
 				int by = y + (r->h - bh) / 2;
 
 				rounded(cr, bx, by, bw, bh, 5);
@@ -1367,16 +1370,12 @@ card_finish(Card *c, CardResult *out)
 				int vw = text_width_f(statusfont.font, r->b, 0);
 				int vx = w - CARD_PAD - vw;
 
-				if (r->btn_label[0] && r->hit_id >= 0)
-					vx -= text_width_f(statusfont.font,
-							r->btn_label, 0) + 16 + 12;
 				draw_text_f(pix, statusfont.font, r->b, vx, bl,
 						r->bcol, 0);
 			}
 			if (r->btn_label[0] && r->hit_id >= 0) {
-				int bw = text_width_f(statusfont.font,
-						r->btn_label, 0) + 16;
-				int bx = w - CARD_PAD - bw + 8;
+				int bx = tx + text_width_f(statusfont.font,
+						r->a, 0) + 12 + 8;
 				int bh = base_h + 2;
 				int by = y + (r->h - bh) / 2;
 
