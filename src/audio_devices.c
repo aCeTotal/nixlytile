@@ -112,14 +112,15 @@ audio_parse_status_devices(FILE *fp, int sources, AudioDevice *out, int max)
 				snprintf(d->name, sizeof(d->name), "%s", bt_name);
 			else
 				snprintf(d->name, sizeof(d->name), "Headset");
-		} else if (sources && bt_name[0] &&
-				!strcmp(d->name, bt_name)) {
-			/* With an HFP profile active the headset's raw capture
-			 * node shows up under Sources: carrying the headset's
-			 * own name — without this it reads as the OUTPUT
-			 * having landed in the mic list. */
+		} else if (bt_name[0] && !strcmp(d->name, bt_name)) {
+			/* Sinks (and with HFP active, raw capture nodes) show
+			 * up carrying the bluez device's human name, not a
+			 * bluez_ prefix — match on that name so they still
+			 * read as headset. */
 			d->is_headset = 1;
-			snprintf(d->name, sizeof(d->name), "%s Mic", bt_name);
+			if (sources)
+				snprintf(d->name, sizeof(d->name), "%s Mic",
+						bt_name);
 		}
 		count++;
 	}
@@ -188,11 +189,22 @@ autoselect_status_done(const char *out, size_t len, void *data)
 		if (devs[i].is_headset && hs < 0)
 			hs = i;
 	}
-	if (hs >= 0 && hs != def) {
+	if (hs < 0)
+		return;
+	if (hs != def)
 		audio_set_default(devs[hs].id);
-		mic_last_read_ms = 0;
-		refreshstatusmic();
+	/* WirePlumber restores the bluez mic node's saved mute state on
+	 * connect, which can leave the mic dead from a past session even
+	 * though the bar says live.  Assert unmute unless the user muted
+	 * through us. */
+	if (mic_muted != 1) {
+		char cmd[64];
+
+		snprintf(cmd, sizeof(cmd), "wpctl set-mute %u 0", devs[hs].id);
+		fetch_async(cmd, NULL, NULL);
 	}
+	mic_last_read_ms = 0;
+	refreshstatusmic();
 }
 
 void

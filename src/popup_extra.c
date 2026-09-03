@@ -486,9 +486,11 @@ render_audio_popup(Monitor *m, InfoPopup *p, int is_mic)
 
 	/* non-blocking: cached state now, async refresh re-renders when the
 	 * fresh answer lands (audio_popup_data_arrived) */
-	if (sdrag.active && sdrag_popup() == p)
+	if (sdrag.active && sdrag_popup() == p) {
 		vol = sdrag.frac * 100.0;
-	else if (is_mic)
+		if (!is_mic)
+			is_headset = pipewire_sink_is_headset_nb();
+	} else if (is_mic)
 		vol = pipewire_mic_volume_percent_nb();
 	else
 		vol = pipewire_volume_percent_nb(&is_headset);
