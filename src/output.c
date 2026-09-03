@@ -3884,7 +3884,13 @@ frame_done:
 	if (m->camera_anim_active && !is_video && !is_game && !hidden_due) {
 		/* slide in flight — withhold (see comment above) */
 	} else if (focus_power_save && !is_game && !is_video &&
-			!m->camera_anim_active) {
+			!m->camera_anim_active && !locked) {
+		/* !locked: the session-lock surface is neither a focused
+		 * toplevel nor an exclusive layer surface, so under this
+		 * throttle it only got the blanket frame_done at
+		 * unfocused_fps_cap — the lockscreen animated at ~5 fps.
+		 * While locked everything else is hidden anyway; the blanket
+		 * send below serves the lock surface every vblank. */
 		/*
 		 * Focus-based power saving on the desktop: the focused window is
 		 * the only one that needs to render every vblank.  Unfocused but
