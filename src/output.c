@@ -3952,8 +3952,15 @@ frame_done:
 	 * when something else happened to keep rendermon self-sustaining.
 	 * Cost: rendermon runs at refresh rate while fullscreen video/game
 	 * is up — same behaviour the is_video idle-gate exemption above
-	 * already intends. */
-	if (is_video || is_game)
+	 * already intends.
+	 *
+	 * locked: the session-lock surface starves the same way — its
+	 * self-clocked frame-callback loop settles at ~90ms per cycle once
+	 * the chain goes cold (measured: 11 fps steady, full rate whenever
+	 * compositor-side damage kept rendermon firing).  The lockscreen is
+	 * meant to animate every vblank (max refresh is forced for the whole
+	 * lock), so keep the chain alive while locked too. */
+	if (is_video || is_game || locked)
 		request_frame(m);
 }
 
