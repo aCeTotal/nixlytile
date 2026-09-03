@@ -212,6 +212,10 @@ destroylock(SessionLock *lock, int unlock)
 
 	wlr_scene_node_set_enabled(&locked_bg->node, 0);
 
+	/* The lock forced max refresh; re-apply whatever the power state
+	 * wants (battery → low refresh, AC → pinned/best modes). */
+	powersave_reassert();
+
 	focusclient(focustop(selmon), 0);
 	motionnotify(0, NULL, 0, 0, 0, 0);
 
@@ -274,6 +278,10 @@ locksession(struct wl_listener *listener, void *data)
 	LISTEN(&session_lock->events.new_surface, &lock->new_surface, createlocksurface);
 	LISTEN(&session_lock->events.destroy, &lock->destroy, destroysessionlock);
 	LISTEN(&session_lock->events.unlock, &lock->unlock, unlocksession);
+
+	/* Lockscreen animates every vblank — run the panel at its maximum
+	 * refresh for the whole lock, battery included. */
+	output_lock_max_refresh();
 
 	wlr_session_lock_v1_send_locked(session_lock);
 }

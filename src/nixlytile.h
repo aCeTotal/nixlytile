@@ -3195,6 +3195,7 @@ void cpuclock_restore(void);
 void cpuclock_boost(int on);
 void cpuclock_perf(int on_ac);
 void output_lowpower_refresh(int on_battery);
+void output_lock_max_refresh(void);
 int power_profile_get(char *buf, size_t len);
 int power_profile_set(const char *value);
 void power_profile_low(void);

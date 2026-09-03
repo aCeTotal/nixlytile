@@ -208,10 +208,63 @@ bestmode(struct wlr_output *output)
  * cap powersave.c already applies.  Runs on the compositor thread from
  * powersave_reassert(); a plain modeset, no game/video-pacing coupling
  * (fullscreen game/video on battery is capped anyway). */
+/* Lockscreen always runs at the panel's maximum refresh: switch every
+ * output to the highest-refresh mode at its current resolution (real
+ * scanout modes only — paced divisor modes are virtual and slower).
+ * The battery low-refresh drop is skipped while locked; unlock calls
+ * powersave_reassert() which re-applies whatever the power state wants. */
+void
+output_lock_max_refresh(void)
+{
+	Monitor *m;
+
+	wl_list_for_each(m, &mons, link) {
+		struct wlr_output *o = m->wlr_output;
+		struct wlr_output_mode *target = NULL, *mode, *cur;
+		struct wlr_output_state st;
+
+		if (!o || !o->enabled)
+			continue;
+		cur = o->current_mode;
+		if (!cur)
+			continue;
+
+		wl_list_for_each(mode, &o->modes, link) {
+			if (mode->width != cur->width ||
+					mode->height != cur->height)
+				continue;
+			if (wlr_drm_connector_mode_pace_divisor(o, mode))
+				continue;
+			if (!target || mode->refresh > target->refresh)
+				target = mode;
+		}
+		if (!target || target == cur)
+			continue;
+
+		wlr_output_state_init(&st);
+		wlr_output_state_set_enabled(&st, 1);
+		wlr_output_state_set_mode(&st, target);
+		if (wlr_output_test_state(o, &st) &&
+				wlr_output_commit_state(o, &st)) {
+			wlr_log(WLR_INFO, "lock: %s → %dx%d@%d (max refresh)",
+				o->name, target->width, target->height,
+				target->refresh / 1000);
+			invalidate_video_pacing(m);
+		}
+		wlr_output_state_finish(&st);
+	}
+	updatemons(NULL, NULL);
+}
+
 void
 output_lowpower_refresh(int on_battery)
 {
 	Monitor *m;
+
+	/* Locked: the lockscreen owns the refresh rate (max). The unlock
+	 * path re-asserts the power state. */
+	if (on_battery && locked)
+		return;
 
 	if (!on_battery) {
 		/* Restore the configured rate — monconf_apply_modes() handles
@@ -2857,6 +2910,15 @@ rendermon(struct wl_listener *listener, void *data)
 	if (!m->latch_fired && !m->pace_fired)
 		rendermon_prologue(m, frame_start_ns);
 
+	/* scene->direct_scanout is scene-GLOBAL, but every hold that writes
+	 * it below is per-monitor state (commit-fail blacklist, sw-cursor
+	 * hold).  On multi-head, monitor A's hold would otherwise kill
+	 * scanout for the game on monitor B — and B's re-arm would silently
+	 * undo A's hold.  Re-derive the flag from THIS monitor's holds
+	 * before building its frame. */
+	scene->WLR_PRIVATE.direct_scanout =
+		!m->scanout_blacklist && !m->sw_cursor_scanout_hold;
+
 	classify_fullscreen_content(m, &is_game, &is_video, &allow_tearing);
 
 	/* Paced virtual mode (150/100/75 on a 300 Hz panel): hold the
@@ -3200,7 +3262,8 @@ rendermon(struct wl_listener *listener, void *data)
 	 * minimum refresh interval (visible judder).  Skip the build unless
 	 * the game submitted a new buffer, bounded to a few vblanks so OSD
 	 * updates still land promptly when the game idles. */
-	if (is_game && !is_video && m->vrr_active && !m->vrr_pending &&
+	if (is_game && !is_video && (m->vrr_active || m->game_vrr_active) &&
+	    !m->vrr_pending &&
 	    !m->hdr_entry_pending && !m->hdr_exit_pending) {
 		Client *gc = focustop(m);
 		struct wlr_surface *gsurf = gc ? client_surface(gc) : NULL;
@@ -3425,13 +3488,19 @@ rendermon(struct wl_listener *listener, void *data)
 	 * Enable even without direct scanout — many Proton/Wine games
 	 * don't get direct scanout due to format or size mismatch, but
 	 * still benefit from even frame cadence. */
-	if (is_game && !allow_tearing) {
-		if (!m->frame_pacing_active) {
-			m->frame_pacing_active = 1;
-			wlr_log(WLR_DEBUG, "Frame pacing enabled for fullscreen game on %s",
-				m->wlr_output->name);
+	if (is_game) {
+		if (!allow_tearing) {
+			if (!m->frame_pacing_active) {
+				m->frame_pacing_active = 1;
+				wlr_log(WLR_DEBUG, "Frame pacing enabled for fullscreen game on %s",
+					m->wlr_output->name);
+			}
+			use_frame_pacing = 1;
 		}
-		use_frame_pacing = 1;
+		/* Under tearing the deferral machinery stays off (each helper
+		 * guards on allow_tearing), but the fps/interval tracker below
+		 * still runs so estimated_game_fps, the game panel stats and
+		 * autolock sampling aren't blind for tearing clients. */
 		/* Only sample the pacing tracker when the game actually
 		 * submitted a NEW buffer.  Fullscreen content is exempt from
 		 * the idle gate, so this code runs every vblank — feeding
@@ -4012,6 +4081,14 @@ commit_adaptive_sync(Monitor *m, int enable)
 		wlr_log(WLR_ERROR, "VRR: commit refused — invalid monitor state");
 		return 0;
 	}
+
+	/* Already in the requested state (e.g. set_adaptive_sync ran just
+	 * before enable_game_vrr): skip the redundant blocking test+commit. */
+	expected = enable
+		? WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED
+		: WLR_OUTPUT_ADAPTIVE_SYNC_DISABLED;
+	if (m->wlr_output->adaptive_sync_status == expected)
+		return 1;
 
 	wlr_output_state_init(&state);
 	wlr_output_state_set_adaptive_sync_enabled(&state, enable ? true : false);

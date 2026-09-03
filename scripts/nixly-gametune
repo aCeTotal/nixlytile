@@ -112,6 +112,50 @@ tune_cpu() {
 			;;
 		esac
 	fi
+
+	# AMD X3D dual-CCD: bias the scheduler's core ranking toward the
+	# V-Cache CCD (amd_3d_vcache driver; the glob matches nothing on every
+	# other machine). nixlytile additionally hard pins the game there —
+	# this covers the game's helper processes too.
+	local f
+	for f in "${ROOT}"/sys/bus/platform/devices/AMDI0101*/amd_x3d_mode; do
+		[ -f "$f" ] || continue
+		save_and_set "x3d-$(basename "$(dirname "$f")")" "$f" cache
+	done
+}
+
+# ---------------------------------------------------------------- scheduler
+#
+# scx_lavd: Valve/Igalia's latency-aware sched-ext scheduler, built for the
+# Steam Deck and shipped as the gaming default on CachyOS and Bazzite. It
+# holds p99 frame times noticeably better than EEVDF when anything competes
+# with the game (shader compiles, asset streaming, background daemons).
+# Only attached while game mode runs; killing it drops the kernel straight
+# back to EEVDF, so there is nothing to restore.
+
+start_scx() {
+	local state=${ROOT}/sys/kernel/sched_ext/state
+
+	[ -r "$state" ] || return 0
+	command -v scx_lavd >/dev/null 2>&1 || return 0
+	if [ "$(cat "$state" 2>/dev/null)" != "disabled" ]; then
+		log "scx: another sched_ext scheduler is attached, leaving it alone"
+		return 0
+	fi
+
+	scx_lavd --performance </dev/null >/dev/null 2>&1 &
+	echo $! > "$STATE_DIR/scx.pid"
+	log "scx_lavd attached (pid $!)"
+}
+
+stop_scx() {
+	local pid
+
+	[ -f "$STATE_DIR/scx.pid" ] || return 0
+	pid=$(cat "$STATE_DIR/scx.pid" 2>/dev/null)
+	rm -f "$STATE_DIR/scx.pid"
+	[ -n "$pid" ] && kill "$pid" 2>/dev/null
+	log "scx_lavd detached"
 }
 
 # ------------------------------------------------------------------- kernel
@@ -190,7 +234,15 @@ tune_kernel() {
 	local thp=${ROOT}/sys/kernel/mm/transparent_hugepage/enabled
 	if [ -f "$thp" ] && grep -q '\[never\]' "$thp" 2>/dev/null; then
 		save_and_set thp "$thp" madvise
+		# The file reads back as the whole choice list; the kernel only
+		# accepts one word on write, and we know the selection was never.
+		[ -f "$STATE_DIR/thp.value" ] &&
+			printf 'never\n' > "$STATE_DIR/thp.value"
 	fi
+
+	# One explicit compaction up front, replacing the proactive one that
+	# was just switched off: contiguous memory now, no stalls mid-game.
+	echo 1 > "${ROOT}/proc/sys/vm/compact_memory" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------- GPU
@@ -406,11 +458,13 @@ do_apply() {
 	tune_cgroups
 	tune_gpu
 	pause_daemons
+	start_scx
 	log "applied"
 }
 
 do_restore() {
 	[ -d "$STATE_DIR" ] || return 0
+	stop_scx
 	resume_daemons
 	restore_nvidia
 	restore_all
@@ -428,6 +482,9 @@ do_status() {
 		[ -e "$pathfile" ] || continue
 		echo "  $(cat "$pathfile") (was $(cat "${pathfile%.path}.value"))"
 	done
+	[ -f "$STATE_DIR/scx.pid" ] &&
+		echo "  scx_lavd (pid $(cat "$STATE_DIR/scx.pid" 2>/dev/null))"
+	return 0
 }
 
 # OOM protection for the game tree.
@@ -472,6 +529,71 @@ oom_protect_tree() {
 	log "oom_score_adj=$value for $count process(es) in the tree of $root_pid"
 }
 
+# VRAM protection for the game (Valve's dmem cgroup work, kernel >= 6.14
+# with the TTM eviction patches, e.g. any CachyOS kernel >= 7.0rc7-2).
+#
+# dmem.min on the game's cgroup guarantees its VRAM allocations cannot be
+# evicted by background processes — the kernel evicts everyone else first.
+# This is exactly what Valve's dmemcg-booster/gamescope do for foreground
+# apps. No-op when no DRM driver registered a dmem region (Intel/NVIDIA
+# today — amdgpu has it), or on kernels without CONFIG_CGROUP_DMEM.
+dmem_protect() {
+	local pid=$1 root=${ROOT}/sys/fs/cgroup rel cg d part rest
+	local region cap count=0
+
+	[ -s "$root/dmem.capacity" ] || return 0
+	rel=$(awk -F'::' '$1=="0" {print $2; exit}' "/proc/$pid/cgroup" 2>/dev/null)
+	[ -n "$rel" ] && [ "$rel" != "/" ] || return 0
+	cg="$root$rel"
+	[ -d "$cg" ] || return 0
+
+	# Enable the controller in every ancestor's subtree_control (slices
+	# are process-free, so the no-internal-process rule is satisfied).
+	# Must happen BEFORE looking for dmem.min: the file only appears in
+	# the leaf once the parent's subtree_control includes +dmem.
+	d=$root
+	rest=${rel#/}
+	while [ -n "$rest" ]; do
+		part=${rest%%/*}
+		echo "+dmem" > "$d/cgroup.subtree_control" 2>/dev/null || {
+			log "dmem: cannot enable controller in $d — skipping VRAM protection"
+			return 0
+		}
+		d="$d/$part"
+		case "$rest" in */*) rest=${rest#*/} ;; *) rest= ;; esac
+	done
+	[ -f "$cg/dmem.min" ] || return 0
+
+	# Protect every region up to its full capacity: background allocations
+	# can no longer evict the game's VRAM.
+	while read -r region cap; do
+		[ -n "$region" ] && [ -n "${cap:-}" ] || continue
+		echo "$region $cap" > "$cg/dmem.min" 2>/dev/null && count=$((count + 1))
+	done < "$root/dmem.capacity"
+
+	if [ "$count" -gt 0 ]; then
+		printf '%s\n' "$rel" > "$STATE_DIR/dmem.$pid"
+		log "dmem.min: protected $count VRAM region(s) for cgroup $rel"
+	fi
+}
+
+dmem_unprotect() {
+	local pid=$1 root=${ROOT}/sys/fs/cgroup state rel cg region cap
+
+	state=$STATE_DIR/dmem.$pid
+	[ -f "$state" ] || return 0
+	rel=$(cat "$state" 2>/dev/null)
+	rm -f "$state"
+	cg="$root$rel"
+	[ -n "$rel" ] && [ -f "$cg/dmem.min" ] || return 0
+
+	while read -r region cap; do
+		[ -n "$region" ] || continue
+		echo "$region 0" > "$cg/dmem.min" 2>/dev/null || true
+	done < "$root/dmem.capacity"
+	log "dmem.min: VRAM protection removed for cgroup $rel"
+}
+
 do_protect() {
 	local pid=${1:-}
 
@@ -479,6 +601,7 @@ do_protect() {
 	[ -d "/proc/$pid" ] || { log "protect: pid $pid is gone"; return 0; }
 	mkdir -p "$STATE_DIR"
 	oom_protect_tree "$pid" -900
+	dmem_protect "$pid"
 }
 
 do_unprotect() {
@@ -494,6 +617,7 @@ do_unprotect() {
 	done < "$state"
 	rm -f "$state"
 	log "oom_score_adj restored for the tree of $pid"
+	dmem_unprotect "$pid"
 }
 
 # Last-resort unfreeze.

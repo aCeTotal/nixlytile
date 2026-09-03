@@ -75,7 +75,7 @@ latch_defer_frame(Monitor *m, int is_game, int allow_tearing, uint64_t now_ns)
 
 	if (!game_late_latch_enabled || !is_game || m->latch_fired)
 		return 0;
-	if (m->vrr_active || allow_tearing)
+	if (m->vrr_active || m->game_vrr_active || allow_tearing)
 		return 0;
 	if (m->present_interval_ns == 0 || m->target_present_ns <= now_ns)
 		return 0;
