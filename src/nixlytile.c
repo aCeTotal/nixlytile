@@ -4336,6 +4336,25 @@ main(int argc, char *argv[])
 	const char *startup_cmd = NULL;
 	int c;
 
+	/* The display manager may run under SCHED_IDLE/BATCH (ananicy's
+	 * cachyos rules classify sddm as BG_CPUIO) and the session inherits
+	 * that class through fork.  A SCHED_IDLE session starves completely
+	 * whenever any SCHED_OTHER process needs CPU (shader prewarm, nix
+	 * builds): Steam's webhelper IPC times out and crashes, new app
+	 * launches hang.  Lift ourselves back to SCHED_OTHER before anything
+	 * is spawned so every child inherits a sane class.  IDLE→OTHER is
+	 * always permitted for our own process, no capability needed. */
+	{
+		int pol = sched_getscheduler(0);
+		if (pol == SCHED_IDLE || pol == SCHED_BATCH) {
+			struct sched_param sp = {0};
+			if (sched_setscheduler(0, SCHED_OTHER, &sp) == 0)
+				fprintf(stderr, "nixlytile: lifted inherited "
+					"SCHED_%s to SCHED_OTHER\n",
+					pol == SCHED_IDLE ? "IDLE" : "BATCH");
+		}
+	}
+
 	while ((c = getopt(argc, argv, "s:hdv")) != -1) {
 		if (c == 's')
 			startup_cmd = optarg;

@@ -225,8 +225,15 @@ tune_kernel() {
 
 	# Large writeback bursts (shader cache, save files) stall the game's
 	# own I/O. Smaller, more frequent flushes keep frame times flat.
-	save_and_set dirty-ratio "${ROOT}/proc/sys/vm/dirty_ratio" 10
-	save_and_set dirty-bg-ratio "${ROOT}/proc/sys/vm/dirty_background_ratio" 5
+	# Only touch the ratio knobs when the system actually uses them:
+	# writing dirty_ratio zeroes dirty_bytes in the kernel, so on a
+	# byte-based config (dirty_bytes != 0, ratio reads back 0) restore
+	# would write ratio 0 back and leave BOTH families at 0 — every
+	# writer then stalls in balance_dirty_pages.
+	if [ "$(cat "${ROOT}/proc/sys/vm/dirty_bytes" 2>/dev/null)" = "0" ]; then
+		save_and_set dirty-ratio "${ROOT}/proc/sys/vm/dirty_ratio" 10
+		save_and_set dirty-bg-ratio "${ROOT}/proc/sys/vm/dirty_background_ratio" 5
+	fi
 
 	# THP: never force `always` — it costs latency in allocation-heavy
 	# engines. Only lift an explicit `never`, which starves games that ask
