@@ -744,7 +744,7 @@ struct StatusBar {
 	RamPopup ram_popup;
 	BatteryPopup battery_popup;
 	NetPopup net_popup;
-	InfoPopup fan_popup;
+	InfoPopup disk_popup;
 	InfoPopup clock_popup;
 	InfoPopup volume_popup;
 	InfoPopup mic_popup;
@@ -752,7 +752,7 @@ struct StatusBar {
 	InfoPopup bt_popup;
 	InfoPopup display_popup;
 	TrayMenu tray_menu;
-	StatusModule fan;
+	StatusModule disk;
 	StatusModule bluetooth;
 	StatusModule display;
 	StatusModule power;
@@ -2163,11 +2163,7 @@ extern int mic_icon_loaded_h, mic_icon_w, mic_icon_h;
 extern struct wlr_buffer *mic_icon_buf;
 extern int volume_icon_loaded_h, volume_icon_w, volume_icon_h;
 extern struct wlr_buffer *volume_icon_buf;
-extern char fan_icon_path[PATH_MAX];
-extern char fan_icon_loaded_path[PATH_MAX];
-extern int fan_icon_loaded_h, fan_icon_w, fan_icon_h;
-extern struct wlr_buffer *fan_icon_buf;
-extern char fan_text[32];
+extern char disk_icon_path[PATH_MAX];
 extern char bt_icon_path[PATH_MAX];
 extern char bt_icon_loaded_path[PATH_MAX];
 extern int bt_icon_loaded_h, bt_icon_w, bt_icon_h;
@@ -2737,7 +2733,6 @@ void refreshstatusbluetooth(void);
 void refreshstatuscpu(void);
 void refreshstatusram(void);
 void refreshstatusicons(void);
-void refreshstatusfan(void);
 void refreshstatusterminfo(void);   /* terminfo.c */
 int is_terminal_client(Client *c);  /* terminfo.c */
 int terminfo_wants_fast_poll(void); /* terminfo.c */
@@ -2911,11 +2906,78 @@ void fanwatch_set_frac(int flat, double frac);
 void fanwatch_set_auto(int flat);
 void fanwatch_set_curve(int flat, const FanCurve *c);
 void fanwatch_set_boost(int on);
-int fan_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
-void renderfan(StatusModule *module, int bar_height, const char *text);
-int ensure_fan_icon_buffer(int target_h);
-void drop_fan_icon_buffer(void);
 /* fan_boost_activate/deactivate are file-local (static) in gamemode.c */
+
+/* ── disk module ─────────────────────────────────────────────────────
+ * diskwatch.c samples /sys/block + /run/udev/data + statfs on a worker
+ * thread and publishes DiskSnapshot; disk_ui.c renders the bar icon and
+ * the popup (usage list, USB drives, format view); disk_helper.c talks
+ * to the nixly-diskd root helper (worker thread only). */
+#define DISK_MAX       10
+#define DISK_PART_MAX  14
+
+typedef struct {
+	char dev[40];             /* /dev/nvme0n1p2 */
+	char fstype[16];          /* "" = no filesystem */
+	char label[40];
+	char uuid[48];
+	char mount[96];           /* "" = not mounted */
+	unsigned long long size_b;
+	unsigned long long used_b, avail_b;   /* mounted only */
+	unsigned long long start_b;           /* offset on the disk */
+} DiskPart;
+
+typedef struct {
+	char dev[40];             /* /dev/sda */
+	char model[52];
+	unsigned long long size_b;
+	int is_usb;               /* usb transport or removable */
+	int is_system;            /* holds / or /home etc — never formattable */
+	int npart;
+	DiskPart parts[DISK_PART_MAX];
+} DiskDev;
+
+typedef struct {
+	int ndisks;
+	DiskDev disks[DISK_MAX];
+	int helper_ok;            /* nixly-diskd reachable */
+	int op_running;           /* a format/mount job is in flight */
+	char op_msg[96];          /* progress / result line for the popup */
+	int op_failed;
+	uint64_t stamp_ms;
+} DiskSnapshot;
+
+/* diskwatch.c */
+void diskwatch_init(void);
+int diskwatch_get(DiskSnapshot *out);
+void diskwatch_refresh(void);
+/* Queue a format job on the worker: op is a disk_helper plan executed
+ * off-thread; the result lands in the next snapshot (op_msg). */
+typedef struct {
+	char disk[40];            /* whole-disk ops (wipe) */
+	char part[40];            /* partition ops (mkfs/mount); may be "" */
+	int wipe;                 /* 1 = new GPT on .disk first */
+	int rmpart;               /* >0 = delete partition number, no mkfs */
+	int format;               /* 1 = mkfs; 0 = mount-only (fstype is
+	                           * still passed for ownership options) */
+	unsigned long long start_mib, end_mib;  /* mkpart range; 0/0 = none */
+	char fstype[16];
+	char label[40];
+	int mount_after;          /* mount + nixlyos config entry */
+	int is_usb;               /* /run/media instead of /mnt, no config */
+} DiskJob;
+void diskwatch_run_job(const DiskJob *job);
+
+/* disk_helper.c — client for the nixly-diskd socket (worker thread). */
+int disk_helper_available(void);
+int disk_helper_cmd(const char *cmd, char *reply, size_t len);
+
+/* disk_ui.c */
+void renderdisk(StatusModule *module, int bar_height, const char *text);
+void refreshstatusdisk(void);
+void render_disk_popup(Monitor *m);
+int disk_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
+void disk_popup_entry_changed(void);
 int updatestatuscpu(void *data);
 int updatestatusclock(void *data);
 int updatehoverfade(void *data);

@@ -14,11 +14,6 @@
 #define METER_TICK_MS  16   /* draw rate (~60 fps) */
 #define METER_PUSH_MS  33   /* history sample period */
 #define LIGHT_MODE_HIT_BASE 200
-#define FAN_SLIDER_HIT  270  /* manual gauge of the expanded fan */
-#define FAN_MODE_HIT    272  /* +0 Auto  +1 Manual  +2 Curve */
-#define FAN_CURVE_HIT   276  /* curve plot of the expanded fan */
-#define FAN_ROW_BASE    300  /* + flat fan index (expand/collapse) */
-#define FAN_BOOST_HIT   380  /* msi-ec cooler boost chip */
 
 /* ── live audio meter overlay (volume=0 / mic=1) ─────────────────── */
 
@@ -147,63 +142,20 @@ fetch_audio_devices(int sources)
 /* ── gauge slider drag state ─────────────────────────────────────── */
 
 static struct {
-	int active;        /* 0 none, 1 volume, 2 mic, 3 brightness,
-	                    * 4 fan gauge, 5 fan curve point */
+	int active;        /* 0 none, 1 volume, 2 mic, 3 brightness */
 	Monitor *mon;
 	double frac;
 	uint64_t last_set_ms;
 } sdrag;
-
-/* Fan popup edit state: which fan row is expanded and the curve being
- * edited (a local copy — the published snapshot must not overwrite the
- * table mid-drag).  Committed to fanwatch + fans.conf on release. */
-static struct {
-	int flat;          /* expanded flat fan index, -1 none */
-	FanCurve curve;
-	int sel;           /* selected curve point, -1 */
-} fedit = { -1, {{0},{0},0}, -1 };
 
 static InfoPopup *
 sdrag_popup(void)
 {
 	if (!sdrag.active || !sdrag.mon)
 		return NULL;
-	if (sdrag.active >= 4)
-		return &sdrag.mon->statusbar.fan_popup;
 	return sdrag.active == 1 ? &sdrag.mon->statusbar.volume_popup :
 		sdrag.active == 2 ? &sdrag.mon->statusbar.mic_popup :
 		&sdrag.mon->statusbar.light_popup;
-}
-
-/* fan_pub entry + owning device for a flat index (compositor thread). */
-static FanEntry *
-fan_pub_flat(int idx, FanDevice **devout)
-{
-	int n = 0;
-
-	for (int d = 0; d < fan_pub.ndevices; d++)
-		for (int f = 0; f < fan_pub.devices[d].fan_count; f++)
-			if (n++ == idx) {
-				if (devout)
-					*devout = &fan_pub.devices[d];
-				return &fan_pub.devices[d].fans[f];
-			}
-	return NULL;
-}
-
-/* Persist one fan's mode/level/curve to fans.conf. */
-static void
-fan_store_conf(int flat, int mode, int manual_pct, const FanCurve *c)
-{
-	FanDevice *dev;
-	FanEntry *fe = fan_pub_flat(flat, &dev);
-	char key[96];
-
-	if (!fe)
-		return;
-	fan_conf_key(dev, fe, key, sizeof(key));
-	fanconf_store(key, mode, manual_pct >= 0 ? manual_pct : fe->manual_pct,
-			c ? c : &fe->curve);
 }
 
 /* Push the dragged fraction to PipeWire + bar module. */
@@ -245,9 +197,6 @@ slider_commit(void)
 		set_backlight_percent(pct);
 		light_mode_set_manual(pct);
 		refreshstatuslight();
-	} else if (sdrag.active == 4) {
-		/* queued to fanwatch's thread — sysfs/EC writes block */
-		fanwatch_set_frac(fedit.flat, sdrag.frac);
 	}
 }
 
@@ -676,321 +625,6 @@ render_light_popup(Monitor *m)
 static int info_popup_clamped_x(Monitor *m, StatusModule *mod, InfoPopup *p);
 static CardHit *popup_hit_by_id(InfoPopup *p, int id);
 
-/* Fan overview + control, grouped CPU / GPU / OTHER.  Every fan row
- * shows live speed + temperature; controllable fans expand (Adjust) to
- * an Auto / Manual / Curve mode switch with a draggable speed gauge and
- * an editable temp→speed curve.  Covers hwmon pwm (desktop and most
- * laptop EC drivers), the MSI EC tables via nixly-fand, and desktop
- * NVIDIA via NVML.  Replaces mcontrolcenter. */
-static void
-render_fan_popup(Monitor *m)
-{
-	static const char *sect_label[3] =
-		{ "CPU FANS", "GPU FANS", "OTHER FANS" };
-	InfoPopup *p = &m->statusbar.fan_popup;
-	Card *card;
-	CardResult res;
-	char value[24], v1[48];
-
-	if (!p->tree || fan_pub.total_fans <= 0)
-		return;
-	/* Renders from the last published snapshot — sampling the msi-ec
-	 * here would stall the cursor.  Just ask fanwatch to sample faster
-	 * while the card is up; the request lapses once it closes. */
-	fanwatch_poke_fast();
-
-	card = card_begin();
-	if (!card)
-		return;
-	card_at(m, m->statusbar.area.x + p->tree->node.x,
-			m->statusbar.area.y + statusbar_popup_y(m));
-
-	if (fan_primary_value(value, sizeof(value)) != 0)
-		snprintf(value, sizeof(value), "--");
-	card_header(card, fan_icon_path, "Fans", "COOLING", value);
-	card_gap(card, 6);
-
-	for (int sec = 0; sec < 3; sec++) {
-		int flat = -1, shown = 0;
-
-		for (int d = 0; d < fan_pub.ndevices; d++) {
-			FanDevice *dev = &fan_pub.devices[d];
-
-			for (int f = 0; f < dev->fan_count; f++) {
-				FanEntry *fe = &dev->fans[f];
-				const float *vcol;
-				int expanded;
-
-				flat++;
-				if (fan_entry_section(dev, fe) != sec)
-					continue;
-				if (!shown) {
-					card_section(card, sect_label[sec]);
-					shown = 1;
-				}
-				expanded = fedit.flat == flat;
-
-				if (fan_shows_pct(fe))
-					snprintf(v1, sizeof(v1), "%d%%",
-							fe->rpm);
-				else
-					snprintf(v1, sizeof(v1), "%d RPM",
-							fe->rpm);
-				if (fe->temp_mc > 0) {
-					size_t n = strlen(v1);
-
-					snprintf(v1 + n, sizeof(v1) - n,
-							" \302\267 %d\302\260C",
-							fe->temp_mc / 1000);
-				}
-				vcol = fe->ctl == FAN_CTL_NONE ? card_col_dim :
-					fe->mode == FAN_MODE_MANUAL ?
-						card_col_yellow :
-					fe->mode == FAN_MODE_CURVE ?
-						card_col_blue : card_col_green;
-				card_text_btn(card, fe->label, v1, vcol,
-						fe->ctl != FAN_CTL_NONE ?
-						(expanded ? "Close" : "Adjust")
-						: NULL,
-						fe->ctl != FAN_CTL_NONE ?
-						FAN_ROW_BASE + flat : -1,
-						p->btn_hover ==
-						FAN_ROW_BASE + flat);
-
-				if (!expanded || fe->ctl == FAN_CTL_NONE)
-					continue;
-				{
-					static const char *modes[3] =
-						{ "Auto", "Manual", "Curve" };
-					int hov = p->btn_hover >= FAN_MODE_HIT &&
-						p->btn_hover < FAN_MODE_HIT + 3 ?
-						p->btn_hover - FAN_MODE_HIT : -1;
-
-					card_gap(card, 4);
-					card_buttons(card, modes, NULL, 3,
-							fe->mode, hov,
-							FAN_MODE_HIT);
-				}
-				if (fe->mode == FAN_MODE_MANUAL) {
-					double frac = sdrag.active == 4 ?
-						sdrag.frac :
-						fe->manual_pct / 100.0;
-
-					card_gap(card, 6);
-					card_gauge_id(card, frac,
-							card_col_yellow,
-							FAN_SLIDER_HIT);
-					card_gap(card, 2);
-				}
-				if (fe->mode == FAN_MODE_CURVE) {
-					card_gap(card, 6);
-					card_curve(card, fedit.curve.temp,
-							fedit.curve.pct,
-							FAN_CURVE_PTS,
-							fedit.sel,
-							card_col_blue,
-							FAN_CURVE_HIT);
-					card_gap(card, 2);
-				}
-			}
-		}
-	}
-
-	if (fan_pub.has_msi && !fan_pub.helper_ok) {
-		card_section(card, NULL);
-		card_text(card, "Curve control needs nixly-fand",
-				"helper off", card_col_dim);
-	}
-
-	if (fan_pub.has_msi) {
-		card_section(card, "COOLER BOOST");
-		card_kv2_btn(card, "All fans", "Max speed", NULL, "State",
-				fan_pub.cooler_boost_on ? "On" : "Off",
-				fan_pub.cooler_boost_on ? card_col_red : NULL,
-				FAN_BOOST_HIT, p->btn_hover == FAN_BOOST_HIT);
-	}
-
-	if (card_finish(card, &res) != 0)
-		return;
-	memcpy(p->hits, res.hits, sizeof(p->hits));
-	p->nhits = res.nhits;
-	popup_view_apply(&p->view, p->tree, &res);
-	p->width = p->view.w;
-	p->height = p->view.h;
-}
-
-/* Click in the fan popup: pwm gauge = set that fan's speed (manual),
- * "Auto" = back to the firmware curve, boost chip = toggle. */
-int
-fan_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
-{
-	InfoPopup *p = &m->statusbar.fan_popup;
-	int popup_x, rel_x, rel_y;
-
-	if (!p->visible || button != BTN_LEFT)
-		return 0;
-
-	popup_x = info_popup_clamped_x(m, &m->statusbar.fan, p);
-	rel_x = lx - popup_x;
-	rel_y = ly - statusbar_popup_y(m);
-	if (rel_x < 0 || rel_y < 0 || rel_x >= p->width || rel_y >= p->height)
-		return 0;
-
-	/* The sysfs/EC writes are queued to fanwatch's thread, not done
-	 * here — the msi-ec ones block as long as its reads do.  The card
-	 * redraws from the snapshot the worker publishes after applying. */
-	for (int i = 0; i < p->nhits; i++) {
-		CardHit *hit = &p->hits[i];
-		FanEntry *fe;
-
-		if (hit->w <= 0 ||
-				rel_x < hit->x || rel_x >= hit->x + hit->w ||
-				rel_y < hit->y || rel_y >= hit->y + hit->h)
-			continue;
-		if (hit->id >= FAN_ROW_BASE &&
-				hit->id < FAN_ROW_BASE + FAN_MAX_TOTAL) {
-			int flat = hit->id - FAN_ROW_BASE;
-
-			fe = fan_pub_flat(flat, NULL);
-			if (fe && fedit.flat != flat) {
-				fedit.flat = flat;
-				fedit.curve = fe->curve;
-				fedit.sel = -1;
-			} else {
-				fedit.flat = -1;
-			}
-			p->last_render_ms = 0;
-			return 1;
-		}
-		if (hit->id >= FAN_MODE_HIT && hit->id < FAN_MODE_HIT + 3) {
-			int mode = hit->id - FAN_MODE_HIT;
-
-			fe = fan_pub_flat(fedit.flat, NULL);
-			if (!fe || fe->ctl == FAN_CTL_NONE)
-				return 1;
-			switch (mode) {
-			case FAN_MODE_AUTO:
-				fanwatch_set_auto(fedit.flat);
-				break;
-			case FAN_MODE_MANUAL:
-				fanwatch_set_frac(fedit.flat,
-						fe->manual_pct / 100.0);
-				break;
-			case FAN_MODE_CURVE:
-				fanwatch_set_curve(fedit.flat, &fedit.curve);
-				break;
-			}
-			fan_store_conf(fedit.flat, mode, -1, &fedit.curve);
-			p->last_render_ms = 0;
-			return 1;
-		}
-		if (hit->id == FAN_SLIDER_HIT) {
-			double frac = (double)(rel_x - hit->x) / hit->w;
-
-			if (frac < 0.0)
-				frac = 0.0;
-			if (frac > 1.0)
-				frac = 1.0;
-			sdrag.active = 4;
-			sdrag.mon = m;
-			sdrag.frac = frac;
-			sdrag.last_set_ms = monotonic_msec();
-			popup_view_drag_fill_frac(&p->view, 0, frac);
-			slider_commit();
-			return 1;
-		}
-		if (hit->id == FAN_CURVE_HIT) {
-			/* pick the nearest point, then drag it */
-			double fx = (double)(rel_x - hit->x) / hit->w;
-			double fy = (double)(rel_y - hit->y) / hit->h;
-			double t = CARD_CURVE_TMIN +
-				fx * (CARD_CURVE_TMAX - CARD_CURVE_TMIN);
-			int best = 0;
-			double bestd = 1e9;
-
-			for (int j = 0; j < FAN_CURVE_PTS; j++) {
-				double dt = (t - fedit.curve.temp[j]) /
-					(CARD_CURVE_TMAX - CARD_CURVE_TMIN);
-				double dp = (1.0 - fy) -
-					fedit.curve.pct[j] / 100.0;
-				double dd = dt * dt + dp * dp;
-
-				if (dd < bestd) {
-					bestd = dd;
-					best = j;
-				}
-			}
-			fedit.sel = best;
-			sdrag.active = 5;
-			sdrag.mon = m;
-			sdrag.last_set_ms = 0;
-			p->last_render_ms = 0;
-			return 1;
-		}
-		if (hit->id == FAN_BOOST_HIT) {
-			fanwatch_set_boost(!fan_pub.cooler_boost_on);
-			p->last_render_ms = 0;
-			return 1;
-		}
-	}
-	/* swallow clicks on the card body */
-	return 1;
-}
-
-/* Ongoing curve-point drag: move the selected point with the cursor
- * (temp clamped between its neighbours, speed 0-100 in 5% steps) and
- * re-render the card at ~25 fps.  The table is committed to fanwatch +
- * fans.conf on release. */
-static void
-fan_curve_drag_motion(Monitor *m, double cx, double cy)
-{
-	InfoPopup *p = &m->statusbar.fan_popup;
-	CardHit *hit;
-	int popup_x, rel_x, rel_y, t, pct, lo, hi;
-	uint64_t now;
-
-	if (sdrag.active != 5 || sdrag.mon != m || !p->visible ||
-			fedit.sel < 0)
-		return;
-	hit = popup_hit_by_id(p, FAN_CURVE_HIT);
-	if (!hit)
-		return;
-	popup_x = info_popup_clamped_x(m, &m->statusbar.fan, p);
-	rel_x = (int)floor(cx) - m->statusbar.area.x - popup_x;
-	rel_y = (int)floor(cy) - m->statusbar.area.y - statusbar_popup_y(m);
-
-	t = CARD_CURVE_TMIN + (int)lround(
-			(double)(rel_x - hit->x) / hit->w *
-			(CARD_CURVE_TMAX - CARD_CURVE_TMIN));
-	pct = (int)lround((1.0 - (double)(rel_y - hit->y) / hit->h) * 20.0)
-			* 5;
-	lo = fedit.sel > 0 ? fedit.curve.temp[fedit.sel - 1] + 1 :
-			CARD_CURVE_TMIN;
-	hi = fedit.sel < FAN_CURVE_PTS - 1 ?
-			fedit.curve.temp[fedit.sel + 1] - 1 : CARD_CURVE_TMAX;
-	if (t < lo)
-		t = lo;
-	if (t > hi)
-		t = hi;
-	if (pct < 0)
-		pct = 0;
-	if (pct > 100)
-		pct = 100;
-	if (fedit.curve.temp[fedit.sel] == t &&
-			fedit.curve.pct[fedit.sel] == pct)
-		return;
-	fedit.curve.temp[fedit.sel] = (uint8_t)t;
-	fedit.curve.pct[fedit.sel] = (uint8_t)pct;
-	if (fedit.sel == 0)
-		fedit.curve.base = (uint8_t)pct; /* floor follows point 0 */
-
-	now = monotonic_msec();
-	if (now - sdrag.last_set_ms >= 40) {
-		sdrag.last_set_ms = now;
-		render_fan_popup(m);
-		p->last_render_ms = now;
-	}
-}
 
 /* ── generic hover plumbing ──────────────────────────────────────── */
 
@@ -1196,13 +830,11 @@ slider_drag_motion(Monitor *m, double cx)
 	double frac;
 	uint64_t now;
 
-	if (!p || sdrag.mon != m || sdrag.active == 5)
+	if (!p || sdrag.mon != m)
 		return;
 	mod = sdrag.active == 1 ? &m->statusbar.volume :
-		sdrag.active == 2 ? &m->statusbar.mic :
-		sdrag.active == 3 ? &m->statusbar.light : &m->statusbar.fan;
-	track = sdrag.active == 4 ? popup_hit_by_id(p, FAN_SLIDER_HIT) :
-		info_popup_slider_hit(p);
+		sdrag.active == 2 ? &m->statusbar.mic : &m->statusbar.light;
+	track = info_popup_slider_hit(p);
 	if (!track)
 		return;
 
@@ -1386,16 +1018,7 @@ info_popup_slider_release(void)
 
 	if (!p)
 		return;
-	if (sdrag.active == 5) {
-		/* curve drag: commit the edited table + persist */
-		fanwatch_set_curve(fedit.flat, &fedit.curve);
-		fan_store_conf(fedit.flat, FAN_MODE_CURVE, -1, &fedit.curve);
-	} else {
-		slider_commit();
-		if (sdrag.active == 4)
-			fan_store_conf(fedit.flat, FAN_MODE_MANUAL,
-					(int)lround(sdrag.frac * 100.0), NULL);
-	}
+	slider_commit();
 	p->last_render_ms = 0;   /* refresh the % text with the final level */
 	sdrag.active = 0;
 	sdrag.mon = NULL;
@@ -1435,7 +1058,6 @@ updateinfopopups(Monitor *m, double cx, double cy)
 		return;
 	if (sdrag.active)
 		slider_drag_motion(m, cx);
-	fan_curve_drag_motion(m, cx, cy);
 	display_drag_motion(m, cx);
 	info_popup_hover(m, &m->statusbar.clock, &m->statusbar.clock_popup,
 			render_clock_popup, cx, cy);
@@ -1445,8 +1067,8 @@ updateinfopopups(Monitor *m, double cx, double cy)
 			render_mic_popup, cx, cy);
 	info_popup_hover(m, &m->statusbar.light, &m->statusbar.light_popup,
 			render_light_popup, cx, cy);
-	info_popup_hover(m, &m->statusbar.fan, &m->statusbar.fan_popup,
-			render_fan_popup, cx, cy);
+	info_popup_hover(m, &m->statusbar.disk, &m->statusbar.disk_popup,
+			render_disk_popup, cx, cy);
 	info_popup_hover(m, &m->statusbar.bluetooth, &m->statusbar.bt_popup,
 			render_bt_popup, cx, cy);
 	info_popup_hover(m, &m->statusbar.display, &m->statusbar.display_popup,
@@ -1464,7 +1086,7 @@ info_popup_pending(Monitor *m)
 		m->statusbar.volume_popup.outside_since_ms != 0 ||
 		m->statusbar.mic_popup.outside_since_ms != 0 ||
 		m->statusbar.light_popup.outside_since_ms != 0 ||
-		m->statusbar.fan_popup.outside_since_ms != 0 ||
+		m->statusbar.disk_popup.outside_since_ms != 0 ||
 		m->statusbar.bt_popup.outside_since_ms != 0 ||
 		m->statusbar.display_popup.outside_since_ms != 0 ||
 		m->statusbar.power_popup.outside_since_ms != 0 ||
@@ -1478,8 +1100,8 @@ info_popup_pending(Monitor *m)
 			!m->statusbar.mic_popup.visible) ||
 		(m->statusbar.light_popup.hover_start_ms != 0 &&
 			!m->statusbar.light_popup.visible) ||
-		(m->statusbar.fan_popup.hover_start_ms != 0 &&
-			!m->statusbar.fan_popup.visible) ||
+		(m->statusbar.disk_popup.hover_start_ms != 0 &&
+			!m->statusbar.disk_popup.visible) ||
 		(m->statusbar.bt_popup.hover_start_ms != 0 &&
 			!m->statusbar.bt_popup.visible) ||
 		(m->statusbar.display_popup.hover_start_ms != 0 &&
@@ -1493,7 +1115,7 @@ info_popup_visible(Monitor *m)
 		m->statusbar.volume_popup.visible ||
 		m->statusbar.mic_popup.visible ||
 		m->statusbar.light_popup.visible ||
-		m->statusbar.fan_popup.visible ||
+		m->statusbar.disk_popup.visible ||
 		m->statusbar.bt_popup.visible ||
 		m->statusbar.display_popup.visible ||
 		m->statusbar.power_popup.visible;
@@ -1504,7 +1126,7 @@ info_popups_hide(Monitor *m)
 {
 	InfoPopup *ps[8] = { &m->statusbar.clock_popup,
 		&m->statusbar.volume_popup, &m->statusbar.mic_popup,
-		&m->statusbar.light_popup, &m->statusbar.fan_popup,
+		&m->statusbar.light_popup, &m->statusbar.disk_popup,
 		&m->statusbar.bt_popup, &m->statusbar.display_popup,
 		&m->statusbar.power_popup };
 

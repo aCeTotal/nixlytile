@@ -510,23 +510,6 @@ rendermic(StatusModule *module, int bar_height, const char *text)
 }
 
 void
-renderfan(StatusModule *module, int bar_height, const char *text)
-{
-	if (fan_pub.total_fans <= 0) {
-		if (module && module->tree) {
-			clearstatusmodule(module);
-			module->width = 0;
-			wlr_scene_node_set_enabled(&module->tree->node, 0);
-		}
-		return;
-	}
-
-	render_icon_label(module, bar_height, text,
-			ensure_fan_icon_buffer, &fan_icon_buf, &fan_icon_w, &fan_icon_h,
-			0, statusbar_icon_text_gap, statusbar_fg);
-}
-
-void
 drop_cpu_icon_buffer(void)
 {
 	if (cpu_icon_buf) {
@@ -808,63 +791,6 @@ ensure_volume_icon_buffer(int target_h)
 	volume_icon_h = h;
 	volume_icon_loaded_h = target_h;
 	snprintf(volume_icon_loaded_path, sizeof(volume_icon_loaded_path), "%s", path);
-	return 0;
-}
-
-void
-drop_fan_icon_buffer(void)
-{
-	if (fan_icon_buf) {
-		wlr_buffer_drop(fan_icon_buf);
-		fan_icon_buf = NULL;
-	}
-	fan_icon_loaded_h = 0;
-	fan_icon_w = fan_icon_h = 0;
-	fan_icon_loaded_path[0] = '\0';
-}
-
-int
-ensure_fan_icon_buffer(int target_h)
-{
-	GdkPixbuf *pixbuf = NULL;
-	GError *gerr = NULL;
-	struct wlr_buffer *buf;
-	int w = 0, h = 0;
-	char resolved[PATH_MAX];
-	const char *path = fan_icon_path;
-
-	if (target_h <= 0)
-		return -1;
-
-	if (resolve_asset_path(fan_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
-		path = resolved;
-
-	if (fan_icon_buf && fan_icon_loaded_h == target_h &&
-			strncmp(fan_icon_loaded_path, path, sizeof(fan_icon_loaded_path)) == 0)
-		return 0;
-
-	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
-		if (!pixbuf) {
-			if (gerr) {
-				wlr_log(WLR_ERROR, "fan icon: failed to load '%s': %s",
-						path, gerr->message);
-				g_error_free(gerr);
-			}
-			return -1;
-		}
-	}
-
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-
-	drop_fan_icon_buffer();
-	fan_icon_buf = buf;
-	fan_icon_w = w;
-	fan_icon_h = h;
-	fan_icon_loaded_h = target_h;
-	snprintf(fan_icon_loaded_path, sizeof(fan_icon_loaded_path), "%s", path);
 	return 0;
 }
 
@@ -4200,9 +4126,9 @@ positionstatusmodules(Monitor *m)
 	if (m->statusbar.volume.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.volume.tree->node,
 				m->statusbar.volume.width > 0);
-	if (m->statusbar.fan.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.fan.tree->node,
-				m->statusbar.fan.width > 0);
+	if (m->statusbar.disk.tree)
+		wlr_scene_node_set_enabled(&m->statusbar.disk.tree->node,
+				m->statusbar.disk.width > 0);
 	if (m->statusbar.bluetooth.tree)
 		wlr_scene_node_set_enabled(&m->statusbar.bluetooth.tree->node,
 				m->statusbar.bluetooth.width > 0);
@@ -4288,6 +4214,13 @@ positionstatusmodules(Monitor *m)
 		m->statusbar.cpu.x = x;
 		x -= spacing;
 	}
+	/* disk sits immediately left of the CPU module */
+	if (m->statusbar.disk.width > 0) {
+		x -= m->statusbar.disk.width;
+		wlr_scene_node_set_position(&m->statusbar.disk.tree->node, x, 0);
+		m->statusbar.disk.x = x;
+		x -= spacing;
+	}
 	if (m->statusbar.mic.width > 0) {
 		x -= m->statusbar.mic.width;
 		wlr_scene_node_set_position(&m->statusbar.mic.tree->node, x, 0);
@@ -4298,12 +4231,6 @@ positionstatusmodules(Monitor *m)
 		x -= m->statusbar.volume.width;
 		wlr_scene_node_set_position(&m->statusbar.volume.tree->node, x, 0);
 		m->statusbar.volume.x = x;
-		x -= spacing;
-	}
-	if (m->statusbar.fan.width > 0) {
-		x -= m->statusbar.fan.width;
-		wlr_scene_node_set_position(&m->statusbar.fan.tree->node, x, 0);
-		m->statusbar.fan.x = x;
 		x -= spacing;
 	}
 	if (m->statusbar.light.width > 0) {
@@ -4443,9 +4370,9 @@ popup_delay_timeout(void *data)
 	 * The throttled path schedules this timeout to catch up. */
 	m = xytomon(cursor->x, cursor->y);
 	if (m && m->showbar) {
-		Client *fs = focustop(m);
-
-		if (!(fs && fs->isfullscreen)) {
+		/* fullscreen_visible_on, not focustop: a fullscreen client
+		 * bound to an INACTIVE workspace must not block bar hover. */
+		if (!fullscreen_visible_on(m)) {
 			updatecpuhover(m, cursor->x, cursor->y);
 			updateramhover(m, cursor->x, cursor->y);
 			updatebatteryhover(m, cursor->x, cursor->y);
@@ -4625,8 +4552,8 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 			renderbattery(&m->statusbar.battery, bar_area.height, battery_text);
 		if (m->statusbar.volume.tree)
 			rendervolume(&m->statusbar.volume, bar_area.height, volume_text);
-		if (m->statusbar.fan.tree)
-			renderfan(&m->statusbar.fan, bar_area.height, fan_text);
+		if (m->statusbar.disk.tree)
+			renderdisk(&m->statusbar.disk, bar_area.height, NULL);
 		if (m->statusbar.bluetooth.tree)
 			renderbluetooth(&m->statusbar.bluetooth, bar_area.height, "");
 		if (m->statusbar.display.tree)
@@ -5174,30 +5101,6 @@ initial_status_refresh(void)
 	refreshstatustags();
 }
 
-/* Render-only: fanwatch.c's thread does the sysfs sampling and calls
- * this from its event-loop callback once a new snapshot is published. */
-void
-refreshstatusfan(void)
-{
-	Monitor *m;
-	int barh;
-
-	if (fan_pub.total_fans <= 0)
-		return;
-	if (fan_primary_value(fan_text, sizeof(fan_text)) != 0)
-		return;
-
-	wl_list_for_each(m, &mons, link) {
-		if (!m->statusbar.fan.tree)
-			continue;
-		barh = m->statusbar.area.height ? m->statusbar.area.height :
-			(int)statusbar_height;
-		if (status_should_render(&m->statusbar.fan, barh, fan_text)) {
-			renderfan(&m->statusbar.fan, barh, fan_text);
-			positionstatusmodules(m);
-		}
-	}
-}
 
 void
 init_status_refresh_tasks(void)
@@ -5834,8 +5737,8 @@ statusbar_popup_at(Monitor *m, double cx, double cy)
 				sb->battery_popup.width, sb->battery_popup.height, cx, cy)
 		|| popup_contains(m, sb->net_popup.tree, sb->net_popup.visible,
 				sb->net_popup.width, sb->net_popup.height, cx, cy)
-		|| popup_contains(m, sb->fan_popup.tree, sb->fan_popup.visible,
-				sb->fan_popup.width, sb->fan_popup.height, cx, cy)
+		|| popup_contains(m, sb->disk_popup.tree, sb->disk_popup.visible,
+				sb->disk_popup.width, sb->disk_popup.height, cx, cy)
 		|| popup_contains(m, sb->clock_popup.tree, sb->clock_popup.visible,
 				sb->clock_popup.width, sb->clock_popup.height, cx, cy)
 		|| popup_contains(m, sb->volume_popup.tree, sb->volume_popup.visible,
@@ -5916,9 +5819,9 @@ initstatusbar(Monitor *m)
 	m->statusbar.volume.tree = wlr_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.volume.tree)
 		m->statusbar.volume.bg = wlr_scene_tree_create(m->statusbar.volume.tree);
-	m->statusbar.fan.tree = wlr_scene_tree_create(m->statusbar.tree);
-	if (m->statusbar.fan.tree)
-		m->statusbar.fan.bg = wlr_scene_tree_create(m->statusbar.fan.tree);
+	m->statusbar.disk.tree = wlr_scene_tree_create(m->statusbar.tree);
+	if (m->statusbar.disk.tree)
+		m->statusbar.disk.bg = wlr_scene_tree_create(m->statusbar.disk.tree);
 	m->statusbar.bluetooth.tree = wlr_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.bluetooth.tree)
 		m->statusbar.bluetooth.bg = wlr_scene_tree_create(m->statusbar.bluetooth.tree);
@@ -5975,7 +5878,7 @@ initstatusbar(Monitor *m)
 		{
 			InfoPopup *info[8] = { &m->statusbar.clock_popup,
 				&m->statusbar.volume_popup, &m->statusbar.mic_popup,
-				&m->statusbar.light_popup, &m->statusbar.fan_popup,
+				&m->statusbar.light_popup, &m->statusbar.disk_popup,
 				&m->statusbar.bt_popup, &m->statusbar.display_popup,
 				&m->statusbar.power_popup };
 			for (int i = 0; i < 8; i++) {

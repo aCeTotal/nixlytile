@@ -145,7 +145,6 @@ fw_event(int fd, uint32_t mask, void *data)
 	pthread_mutex_lock(&fw_lock);
 	fan_pub = fw_pub;
 	pthread_mutex_unlock(&fw_lock);
-	refreshstatusfan();
 	return 0;
 }
 

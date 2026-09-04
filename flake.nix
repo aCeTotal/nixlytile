@@ -250,6 +250,20 @@
               };
             };
 
+            diskControl = {
+              enable = lib.mkOption {
+                type = lib.types.bool;
+                default = true;
+                description = ''
+                  Disk management for the statusbar Storage popup: the
+                  nixly-diskd root helper (partitioning via parted,
+                  mkfs for ext4/btrfs/xfs/vfat/exfat/ntfs, mount).
+                  Mutating commands are refused on the disks holding
+                  the system mounts.
+                '';
+              };
+            };
+
             gameMode = {
               enable = lib.mkOption {
                 type = lib.types.bool;
@@ -385,6 +399,30 @@
                 "z /sys/devices/platform/msi-ec/fan_mode 0666 - - -"
                 "z /sys/devices/platform/msi-ec/cooler_boost 0666 - - -"
               ];
+            })
+
+            (lib.mkIf cfg.diskControl.enable {
+              systemd.services.nixly-diskd = {
+                description = "nixlytile disk management helper";
+                wantedBy = [ "multi-user.target" ];
+                path = with pkgs; [
+                  parted
+                  util-linux    # wipefs, mount, umount
+                  e2fsprogs
+                  btrfs-progs
+                  xfsprogs
+                  dosfstools
+                  exfatprogs
+                  ntfs3g
+                  systemd       # udevadm settle
+                ];
+                serviceConfig = {
+                  Type = "exec";
+                  ExecStart = "${cfg.package}/bin/nixly-diskd";
+                  Restart = "on-failure";
+                  RestartSec = 5;
+                };
+              };
             })
 
             (lib.mkIf cfg.gameMode.enable {

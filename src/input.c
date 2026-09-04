@@ -536,8 +536,8 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 			return 1;
 	}
 
-	if (m->statusbar.fan_popup.visible) {
-		if (fan_popup_handle_click(m, lx, ly, button))
+	if (m->statusbar.disk_popup.visible) {
+		if (disk_popup_handle_click(m, lx, ly, button))
 			return 1;
 	}
 
@@ -2412,7 +2412,10 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		if (!hm)
 			hm = selmon;
 		if (hm && hm->showbar && hm->statusbar.area.height > 0) {
-			Client *fs = focustop(hm);
+			/* fullscreen_visible_on, not focustop: a fullscreen
+			 * client bound to an INACTIVE workspace must not block
+			 * bar hover on the active one. */
+			Client *fs = fullscreen_visible_on(hm);
 			int any_popup_open =
 				hm->statusbar.cpu_popup.visible ||
 				hm->statusbar.ram_popup.visible ||
@@ -2424,8 +2427,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 				cursor->y <= hm->statusbar.area.y +
 					hm->statusbar.area.height + 500);
 
-			if (!(fs && fs->isfullscreen) &&
-					(near_bar || any_popup_open)) {
+			if (!fs && (near_bar || any_popup_open)) {
 				static uint32_t last_hover_ms;
 				if (!time || time - last_hover_ms >= 8) {
 					if (time) last_hover_ms = time;

@@ -2766,6 +2766,7 @@ setup(void)
 	presence_init();
 	battwatch_init();
 	fanwatch_init();
+	diskwatch_init();
 	powersave_init();
 	gshortcuts_init();
 	fcft_initialized = fcft_init(FCFT_LOG_COLORIZE_NEVER, 0, FCFT_LOG_CLASS_ERROR);

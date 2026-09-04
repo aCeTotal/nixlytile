@@ -67,6 +67,9 @@ void
 netsys_changed(void)
 {
 	trigger_status_task_now(refreshstatusnet);
+	/* text_entry keystrokes land here too — echo into the disk
+	 * popup's Name field when that is what hosts the entry */
+	disk_popup_entry_changed();
 }
 
 /* ── text-entry chains ───────────────────────────────────────────── */

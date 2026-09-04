@@ -34,6 +34,7 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            apptoggle.o mic_watch.o audio_watch.o audio_devices.o audio_meter.o gaming_conf.o gshortcuts.o \
            statusbar.o tray.o statusbar_support.o terminfo.o launchfx.o diag.o fetch_async.o charge_limit.o fancontrol.o fanwatch.o \
            fancurve.o fan_helper.o fan_ec.o fan_nvml.o \
+           diskwatch.o disk_helper.o disk_ui.o \
            popup_card.o popup_extra.o \
            netmon.o wifi_ctrl.o wifi_nm.o wifi_share.o qr_scan.o btmon.o bt_rssi.o bt_audio.o vpnctl.o text_entry.o net_ui.o bt_ui.o display_ui.o power_ui.o \
            notify.o notifyd.o lightsense.o presence.o powersave.o battwatch.o camwatch.o cpuclock.o instruments.o converge.o spawn.o osd.o
@@ -155,6 +156,17 @@ fan_nvml.o: $(SRC)/fan_nvml.c $(SRC)/nixlytile.h
 nixly-fand: $(SRC)/nixly_fand.c
 	$(CC) -O2 -Wall -Wextra -o $@ $(SRC)/nixly_fand.c -ldl
 
+diskwatch.o: $(SRC)/diskwatch.c $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+disk_helper.o: $(SRC)/disk_helper.c $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+disk_ui.o: $(SRC)/disk_ui.c $(SRC)/nixlytile.h $(SRC)/popup_card.h $(SRC)/netsys.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+
+# Root disk helper — standalone binary, no compositor deps
+nixly-diskd: $(SRC)/nixly_diskd.c
+	$(CC) -O2 -Wall -Wextra -o $@ $(SRC)/nixly_diskd.c
+
 netmon.o: $(SRC)/netmon.c $(SRC)/netsys.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 
@@ -260,7 +272,7 @@ $(SRC)/dwl-ipc-unstable-v2-protocol.c: $(SRC)/dwl-ipc-unstable-v2-protocol.h
 $(SRC)/config.h:
 	cp $(SRC)/config.def.h $@
 clean:
-	rm -f nixlytile nixly-fand *.o $(SRC)/*-protocol.h $(SRC)/*-protocol.c
+	rm -f nixlytile nixly-fand nixly-diskd *.o $(SRC)/*-protocol.h $(SRC)/*-protocol.c
 
 dist: clean
 	mkdir -p nixlytile-$(VERSION)
@@ -270,13 +282,15 @@ dist: clean
 	tar -caf nixlytile-$(VERSION).tar.gz nixlytile-$(VERSION)
 	rm -rf nixlytile-$(VERSION)
 
-install: nixlytile nixly-fand
+install: nixlytile nixly-fand nixly-diskd
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
 	rm -f $(DESTDIR)$(PREFIX)/bin/nixlytile
 	cp -f nixlytile $(DESTDIR)$(PREFIX)/bin
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/nixlytile
 	cp -f nixly-fand $(DESTDIR)$(PREFIX)/bin
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/nixly-fand
+	cp -f nixly-diskd $(DESTDIR)$(PREFIX)/bin
+	chmod 755 $(DESTDIR)$(PREFIX)/bin/nixly-diskd
 	mkdir -p $(DESTDIR)$(DATADIR)/nixlytile/images
 	cp -r images/svg $(DESTDIR)$(DATADIR)/nixlytile/images/
 	mkdir -p $(DESTDIR)$(MANDIR)/man1

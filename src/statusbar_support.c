@@ -19,7 +19,7 @@ StatusRefreshTask status_tasks[STATUS_TASKS_COUNT] = {
 	{ refreshstatusbattery, 0 },
 	{ refreshstatusnet, 0 },
 	{ refreshstatusicons, 0 },
-	{ refreshstatusfan, 0 },
+	{ refreshstatusdisk, 0 },
 	{ refreshstatusterminfo, 0 },
 	{ refreshstatusbluetooth, 0 },
 };
@@ -142,13 +142,7 @@ int volume_icon_loaded_h;
 int volume_icon_w;
 int volume_icon_h;
 struct wlr_buffer *volume_icon_buf;
-char fan_icon_path[PATH_MAX] = "images/svg/fan.svg";
-char fan_icon_loaded_path[PATH_MAX];
-int fan_icon_loaded_h;
-int fan_icon_w;
-int fan_icon_h;
-struct wlr_buffer *fan_icon_buf;
-char fan_text[32] = "--";
+char disk_icon_path[PATH_MAX] = "images/svg/disk.svg";
 unsigned long long net_prev_rx;
 unsigned long long net_prev_tx;
 struct timespec net_prev_ts;
