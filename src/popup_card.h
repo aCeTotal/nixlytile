@@ -76,6 +76,10 @@ void card_kv2_btn(Card *c, const char *k1, const char *v1, const float *v1col,
 /* Separator line + small caps section label (label may be NULL for a
  * bare separator). */
 void card_section(Card *c, const char *label);
+/* Section header with a button pinned to the right card edge; hit rect
+ * is the button only. */
+void card_section_btn(Card *c, const char *label, const char *btn_label,
+		int hit_id, int hot);
 /* Plain row: left text + optional right-aligned text. When hit_id >= 0
  * a "Kill"-style button is drawn at the right edge and recorded as a
  * hit rect with that id (hot = hovered). */

@@ -442,6 +442,20 @@ card_section(Card *c, const char *label)
 }
 
 void
+card_section_btn(Card *c, const char *label, const char *btn_label,
+		int hit_id, int hot)
+{
+	CardRow *r = row_new(c, CROW_SECTION);
+
+	if (!r)
+		return;
+	setstr(r->a, sizeof(r->a), label);
+	setstr(r->btn_label, sizeof(r->btn_label), btn_label);
+	r->hit_id = hit_id;
+	r->hot = hot;
+}
+
+void
 card_text(Card *c, const char *left, const char *right, const float *rightcol)
 {
 	card_text_btn(c, left, right, rightcol, NULL, -1, 0);
@@ -786,6 +800,9 @@ card_measure(Card *c, int *out_w, int *out_h)
 			r->h = 14 + 1 + (r->a[0] ? 12 + small_h : 0) + 10;
 			rw = r->a[0] ?
 				text_width_f(card_font_small, r->a, SMALL_LSPC) : 0;
+			if (r->btn_label[0])
+				rw += 12 + text_width_f(statusfont.font,
+						r->btn_label, 0) + 16;
 			break;
 		case CROW_TEXT:
 			rw = text_width_f(statusfont.font, r->a, 0) + 16 +
@@ -1201,6 +1218,23 @@ card_finish(Card *c, CardResult *out)
 			cairo_rectangle(cr, CARD_PAD, y + 14, inner_w, 1);
 			cairo_set_source_rgba(cr, 1, 1, 1, 0.08);
 			cairo_fill(cr);
+			if (r->btn_label[0] && r->hit_id >= 0) {
+				int bw = text_width_f(statusfont.font,
+						r->btn_label, 0) + 16;
+				int bh = base_h + 2;
+				int bx = w - CARD_PAD - bw;
+				int by = y + 15 + (r->h - 15 - bh) / 2;
+
+				rounded(cr, bx, by, bw, bh, 5);
+				if (r->hot)
+					cairo_set_source_rgba(cr, 0.85, 0.30,
+							0.30, 0.85);
+				else
+					cairo_set_source_rgba(cr, 1, 1, 1, 0.10);
+				cairo_fill(cr);
+				add_hit(out, bx, y + 15, bw, r->h - 15,
+						r->hit_id);
+			}
 			break;
 		case CROW_TEXT:
 			/* full-row buttons: faint wash across the row on hover */
@@ -1621,6 +1655,17 @@ card_finish(Card *c, CardResult *out)
 						CARD_PAD, y + 14 + 1 + 12 +
 						small_asc, card_col_faint,
 						SMALL_LSPC);
+			if (r->btn_label[0] && r->hit_id >= 0) {
+				int bw = text_width_f(statusfont.font,
+						r->btn_label, 0) + 16;
+				int bh = base_h + 2;
+				int bx = w - CARD_PAD - bw;
+				int by = y + 15 + (r->h - 15 - bh) / 2;
+
+				draw_text_f(pix, statusfont.font, r->btn_label,
+						bx + 8, by + 1 + base_asc,
+						card_col_fg, 0);
+			}
 			break;
 		case CROW_LOAD:
 			if (r->a[0]) {

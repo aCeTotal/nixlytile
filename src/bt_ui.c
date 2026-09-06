@@ -190,6 +190,18 @@ renderbluetooth(StatusModule *module, int bar_height, const char *text)
 			&bt_icon_w, &bt_icon_h);
 }
 
+/* Popup just became visible: kick off discovery so the NEARBY list
+ * fills without a manual Scan click. refreshstatusbluetooth stops it
+ * again 3 s after the popup closes. */
+void
+bt_popup_opened(void)
+{
+	BtAdapter a;
+
+	if (btmon_adapter(&a) && a.powered && !a.discovering)
+		btmon_set_discovering(1);
+}
+
 void
 render_bt_popup(Monitor *m)
 {
@@ -256,16 +268,11 @@ render_bt_popup(Monitor *m)
 			if (pass == 0 && nmine)
 				card_section(card,
 						"MY DEVICES · RIGHT-CLICK = FORGET");
-			if (pass == 1) {
-				card_section(card, "NEARBY");
-				card_text_btn(card, "Discovery",
-						a.discovering ?
-						"Scanning…" : NULL,
-						card_col_dim,
+			if (pass == 1)
+				card_section_btn(card, "NEARBY",
 						a.discovering ? "Stop" : "Scan",
 						BT_HIT_SCAN,
 						hot == BT_HIT_SCAN);
-			}
 			for (i = 0; i < bt_ui_ndevs; i++) {
 				BtDev *d = &bt_ui_devs[i];
 				const char *btn;

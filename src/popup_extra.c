@@ -1069,8 +1069,15 @@ updateinfopopups(Monitor *m, double cx, double cy)
 			render_light_popup, cx, cy);
 	info_popup_hover(m, &m->statusbar.disk, &m->statusbar.disk_popup,
 			render_disk_popup, cx, cy);
-	info_popup_hover(m, &m->statusbar.bluetooth, &m->statusbar.bt_popup,
-			render_bt_popup, cx, cy);
+	{
+		int bt_was = m->statusbar.bt_popup.visible;
+
+		info_popup_hover(m, &m->statusbar.bluetooth,
+				&m->statusbar.bt_popup, render_bt_popup,
+				cx, cy);
+		if (m->statusbar.bt_popup.visible && !bt_was)
+			bt_popup_opened();
+	}
 	info_popup_hover(m, &m->statusbar.display, &m->statusbar.display_popup,
 			render_display_popup, cx, cy);
 	info_popup_hover(m, &m->statusbar.power, &m->statusbar.power_popup,

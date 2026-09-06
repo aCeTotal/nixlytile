@@ -2826,6 +2826,7 @@ void render_tray_icon_module(StatusModule *module, int bar_height,
 		int *icon_w, int *icon_h);
 void renderbluetooth(StatusModule *module, int bar_height, const char *text);
 void render_bt_popup(Monitor *m);
+void bt_popup_opened(void);
 int bt_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 int ensure_bt_icon_buffer(int target_h);
 void drop_bt_icon_buffer(void);
