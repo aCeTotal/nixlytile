@@ -33,57 +33,21 @@ int light_ambient_luma = -1;
 static int ls_on_ac;
 
 static struct wl_event_source *ls_timer;
-static char ls_conf_path[PATH_MAX];
 
-static void
-ls_resolve_path(void)
-{
-	const char *home = getenv("HOME");
-
-	if (!home) {
-		struct passwd *pw = getpwuid(getuid());
-		if (pw)
-			home = pw->pw_dir;
-	}
-	if (!home)
-		home = "/";
-	snprintf(ls_conf_path, sizeof(ls_conf_path),
-			"%s/.local/nixlyos/brightness.conf", home);
-}
-
+/* Persistence lives in status_conf.c (~/.local/nixlyos/status.nix). */
 static void
 ls_save(void)
 {
-	FILE *fp;
-	char dir[PATH_MAX];
-	char *slash;
-
-	if (!ls_conf_path[0])
-		return;
-	snprintf(dir, sizeof(dir), "%s", ls_conf_path);
-	slash = strrchr(dir, '/');
-	if (slash) {
-		*slash = '\0';
-		mkdir(dir, 0755);
-	}
-	fp = fopen(ls_conf_path, "w");
-	if (!fp)
-		return;
-	fprintf(fp, "manual %.1f\n", light_manual_value);
-	fclose(fp);
+	status_conf_update("brightness", light_manual_value);
 }
 
 static void
 ls_load(void)
 {
-	FILE *fp = fopen(ls_conf_path, "r");
-	double v;
+	double v = status_conf_brightness();
 
-	if (!fp)
-		return;
-	if (fscanf(fp, "manual %lf", &v) == 1 && v >= 0.0 && v <= 100.0)
+	if (v >= 0.0 && v <= 100.0)
 		light_manual_value = v;
-	fclose(fp);
 }
 
 /* Mean luma → backlight percent: pitch dark 13, dim ≈13-20, normal
@@ -170,6 +134,9 @@ void
 light_mode_set_auto(void)
 {
 	light_auto_mode = 1;
+	/* -1 marks auto in status.nix, so the next login starts auto too. */
+	light_manual_value = -1.0;
+	ls_save();
 	lightsense_sample_now();
 }
 
@@ -198,8 +165,12 @@ lightsense_power_event(int on_ac)
 void
 lightsense_init(void)
 {
-	ls_resolve_path();
 	ls_load();
+	/* A saved manual level means the user has chosen a brightness: start
+	 * in manual so the restored value holds until the next adjustment,
+	 * instead of the ambient loop drifting away from it. */
+	if (light_manual_value >= 0.0)
+		light_auto_mode = 0;
 	if (!ls_timer)
 		ls_timer = wl_event_loop_add_timer(event_loop, ls_sample, NULL);
 	if (ls_timer)

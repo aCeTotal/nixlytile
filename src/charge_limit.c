@@ -14,63 +14,25 @@
 
 static int charge_limit = 80;
 static int cl_loaded;
-static char cl_conf_path[PATH_MAX];
 
-static void
-cl_resolve_path(void)
-{
-	const char *home = getenv("HOME");
-
-	if (!home) {
-		struct passwd *pw = getpwuid(getuid());
-		if (pw)
-			home = pw->pw_dir;
-	}
-	if (!home)
-		home = "/";
-	snprintf(cl_conf_path, sizeof(cl_conf_path),
-			"%s/.local/nixlyos/charge_limit.conf", home);
-}
-
+/* Persistence lives in status_conf.c (~/.local/nixlyos/status.nix). */
 static void
 cl_load(void)
 {
-	FILE *fp;
 	int v;
 
 	if (cl_loaded)
 		return;
 	cl_loaded = 1;
-	cl_resolve_path();
-	fp = fopen(cl_conf_path, "r");
-	if (!fp)
-		return;
-	if (fscanf(fp, "limit %d", &v) == 1 &&
-			(v == 80 || v == 90 || v == 100))
+	v = status_conf_chargelimit();
+	if (v == 80 || v == 90 || v == 100)
 		charge_limit = v;
-	fclose(fp);
 }
 
 static void
 cl_save(void)
 {
-	FILE *fp;
-	char dir[PATH_MAX];
-	char *slash;
-
-	if (!cl_conf_path[0])
-		cl_resolve_path();
-	snprintf(dir, sizeof(dir), "%s", cl_conf_path);
-	slash = strrchr(dir, '/');
-	if (slash) {
-		*slash = '\0';
-		mkdir(dir, 0755);
-	}
-	fp = fopen(cl_conf_path, "w");
-	if (!fp)
-		return;
-	fprintf(fp, "limit %d\n", charge_limit);
-	fclose(fp);
+	status_conf_update("chargelimit", charge_limit);
 }
 
 static int

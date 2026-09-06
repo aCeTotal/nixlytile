@@ -1272,9 +1272,15 @@ apply_startup_defaults(void)
 	static int audio_applied = 0;
 	static int mic_applied = 0;
 	static int audio_tries = 0;
-	const double light_default = 40.0;
-	const double speaker_default = 80.0;
-	const double mic_default = 50.0;
+	/* Saved levels from status.nix win over the built-in defaults, so a
+	 * reboot lands on yesterday's brightness/volume/mic. brightness -1
+	 * means auto — lightsense starts its ambient loop from 40. */
+	const double light_default =
+		status_conf_brightness() >= 0.0 ? status_conf_brightness() : 40.0;
+	const double speaker_default =
+		status_conf_volume() >= 0.0 ? status_conf_volume() : 80.0;
+	const double mic_default =
+		status_conf_mic() >= 0.0 ? status_conf_mic() : 50.0;
 
 	if (light_applied && audio_applied && mic_applied)
 		return;

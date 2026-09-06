@@ -1133,6 +1133,13 @@ run(const char *startup_cmd)
 	 * After the devices exist, so the first read can apply to them. */
 	setup_input_conf_watch();
 
+	/* ~/.local/nixlyos/bindings.conf → user keybindings, reloaded on save. */
+	setup_bindings_conf_watch();
+
+	/* ~/.local/nixlyos/statusbar.conf → bar layout + persistent charge
+	 * limit / brightness / volume / mic; external edits apply live. */
+	setup_statusbar_conf_watch();
+
 	/* Now that the socket exists and the backend is started, run the
 	 * startup commands.  If KDL config provided an autostart list, each
 	 * entry gets its own pid (for diff-based hot-reload).  Otherwise

@@ -412,6 +412,8 @@ struct StatusModule {
 	/* workspace-row dedup (tags module): hash of everything the row
 	 * draws, so an unchanged row is never re-rasterized. */
 	uint64_t render_sig;
+	/* statusbar.conf: show only the icon, no text/percent. */
+	int icons_only;
 };
 
 typedef struct {
@@ -2690,6 +2692,33 @@ void setup_monitor_overlay_watch(void);
  * Mouse & Keyboard page, re-read whenever a rebuild replaces the file. */
 void setup_input_conf_watch(void);
 void input_conf_update(void);
+
+/* ~/.local/nixlyos/bindings.conf — user keybindings (KDL bind lines),
+ * reloaded on save so edits apply without rebuild or relogin. */
+void setup_bindings_conf_watch(void);
+
+/* ~/.local/nixlyos/statusbar.conf — the whole statusbar in one file:
+ * per-module placement (left/middle/right, file order = bar order,
+ * icons-only) plus the persistent charge limit / brightness / volume /
+ * mic levels. Levels save on every manual change and restore at login;
+ * external edits of both levels and layout apply live. brightness -1 =
+ * auto. */
+#define BARMOD_MAX 24
+typedef struct {
+	char name[24];
+	int side;        /* 0 = left, 1 = middle, 2 = right */
+	int icons_only;
+} BarModCfg;
+double status_conf_brightness(void);
+double status_conf_volume(void);
+double status_conf_mic(void);
+int status_conf_chargelimit(void);
+void status_conf_update(const char *key, double value);
+int barmod_count(void);
+const BarModCfg *barmod_get(int i);
+const BarModCfg *barmod_find(const char *name);
+void statusbar_conf_changed(void);   /* statusbar.c: re-render + relayout */
+void setup_statusbar_conf_watch(void);
 void monitor_overlay_update(void);
 void setup_monitors_conf_watch(void);
 

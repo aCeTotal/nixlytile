@@ -858,6 +858,59 @@ resolve_config_path(char *out, size_t cap)
 	snprintf(out, cap, "%s/.config/nixlytile/config.kdl", home);
 }
 
+static void
+resolve_bindings_path(char *out, size_t cap)
+{
+	const char *dir = getenv("NIXLYOS_DIR");
+	if (dir && *dir) {
+		snprintf(out, cap, "%s/bindings.conf", dir);
+		return;
+	}
+	const char *home = getenv("HOME");
+	if (!home) {
+		struct passwd *pw = getpwuid(getuid());
+		if (pw) home = pw->pw_dir;
+	}
+	if (!home) home = "/";
+	snprintf(out, cap, "%s/.local/nixlyos/bindings.conf", home);
+}
+
+/* Keybindings live in ~/.local/nixlyos/bindings.conf (native KDL bind lines)
+ * so an edit applies without a rebuild: the inotify watch in bindings_conf.c
+ * reloads on save. Applied after config.kdl; only bind nodes are honoured,
+ * and missing file means config.kdl/default keys stay in charge. */
+static void
+apply_bindings_conf(void)
+{
+	char path[PATH_MAX];
+	resolve_bindings_path(path, sizeof(path));
+	char *text = read_file(path);
+	if (!text)
+		return;
+	KdlDoc doc = kdl_parse(text);
+	free(text);
+	if (doc.err) {
+		fprintf(stderr, "nixlytile: bindings.conf parse error: %s\n", doc.err);
+		kdl_doc_free(&doc);
+		return;
+	}
+	for (size_t i = 0; i < doc.n_roots; i++) {
+		const KdlNode *n = &doc.roots[i];
+		if (!strcmp(n->name, "bind"))
+			apply_bind(n);
+		else
+			fprintf(stderr,
+				"nixlytile: bindings.conf: ignoring node '%s' (line %d)\n",
+				n->name, n->line);
+	}
+	kdl_doc_free(&doc);
+	if (runtime_keys_count > 0) {
+		keys = runtime_keys;
+		keys_count = runtime_keys_count;
+	}
+	fprintf(stderr, "nixlytile: applied %s\n", path);
+}
+
 static int
 apply_doc(const KdlDoc *doc, int initial)
 {
@@ -967,6 +1020,7 @@ load_config(void)
 	if (!text) {
 		fprintf(stderr, "nixlytile: no config at %s (using defaults)\n",
 			nixlytile_config_path);
+		apply_bindings_conf();
 		return 0;
 	}
 	KdlDoc doc = kdl_parse(text);
@@ -978,6 +1032,7 @@ load_config(void)
 	}
 	apply_doc(&doc, /*initial=*/1);
 	kdl_doc_free(&doc);
+	apply_bindings_conf();
 	runtime_config_loaded = 1;
 	fprintf(stderr, "nixlytile: loaded %s\n", nixlytile_config_path);
 	return 1;
@@ -1003,6 +1058,7 @@ reload_config(void)
 	}
 	apply_doc(&doc, /*initial=*/0);
 	kdl_doc_free(&doc);
+	apply_bindings_conf();
 
 	hotapply_keyboard();
 	hotapply_libinput();

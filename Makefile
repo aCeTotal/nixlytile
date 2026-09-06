@@ -30,7 +30,7 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            gamemode.o client_utils.o xrandr_primary.o gpu.o draw.o layer.o workspace.o anim.o span.o latch.o pace.o gamescan.o autolock.o \
            dwl_ipc.o dwl-ipc-unstable-v2-protocol.o window_ipc.o \
            config_parser.o config_loader.o monitors_conf.o monitor_setup.o \
-           input_conf.o \
+           input_conf.o bindings_conf.o statusbar_conf.o \
            apptoggle.o mic_watch.o audio_watch.o audio_devices.o audio_meter.o gaming_conf.o gshortcuts.o \
            statusbar.o tray.o statusbar_support.o terminfo.o launchfx.o diag.o fetch_async.o charge_limit.o fancontrol.o fanwatch.o \
            fancurve.o fan_helper.o fan_ec.o fan_nvml.o \
@@ -74,6 +74,10 @@ monitors_conf.o: $(SRC)/monitors_conf.c $(SRC)/nixlytile.h
 monitor_setup.o: $(SRC)/monitor_setup.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 input_conf.o: $(SRC)/input_conf.c $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+bindings_conf.o: $(SRC)/bindings_conf.c $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+statusbar_conf.o: $(SRC)/statusbar_conf.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 gamemode.o: $(SRC)/gamemode.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<

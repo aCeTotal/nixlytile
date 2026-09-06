@@ -103,6 +103,13 @@ render_icon_label(StatusModule *module, int bar_height, const char *text,
 	if (!module || !module->tree)
 		return;
 
+	/* statusbar.conf icons-only: keep the icon, drop the text (and the
+	 * reserved min text width some modules use against jitter). */
+	if (module->icons_only) {
+		text = NULL;
+		min_text_w = 0;
+	}
+
 	clearstatusmodule(module);
 
 	if (bar_height <= 0) {
@@ -3936,6 +3943,7 @@ set_pipewire_volume(double percent)
 		spawn_cmd_async(argv);
 	}
 
+	status_conf_update("volume", percent);
 	return 0;
 }
 
@@ -3959,6 +3967,7 @@ set_pipewire_mic_volume(double percent)
 	}
 
 	mic_last_percent = percent;
+	status_conf_update("mic", percent);
 	return 0;
 }
 
@@ -3995,6 +4004,95 @@ toggle_pipewire_mic_mute(void)
 		mic_fetch_start_ms = now;
 	}
 	return 0;
+}
+
+void positionstatusmodules(Monitor *m);
+
+/* statusbar.conf name → StatusModule field. The bar's building blocks;
+ * which of them show, where and in what order is the config's call. */
+static const struct {
+	const char *name;
+	size_t off;
+} barmod_defs[] = {
+	{ "workspaces",   offsetof(struct StatusBar, tags) },
+	{ "tray",         offsetof(struct StatusBar, traylabel) },
+	{ "net",          offsetof(struct StatusBar, net) },
+	{ "bluetooth",    offsetof(struct StatusBar, bluetooth) },
+	{ "display",      offsetof(struct StatusBar, display) },
+	{ "window-title", offsetof(struct StatusBar, terminfo) },
+	{ "battery",      offsetof(struct StatusBar, battery) },
+	{ "light",        offsetof(struct StatusBar, light) },
+	{ "volume",       offsetof(struct StatusBar, volume) },
+	{ "mic",          offsetof(struct StatusBar, mic) },
+	{ "disk",         offsetof(struct StatusBar, disk) },
+	{ "cpu",          offsetof(struct StatusBar, cpu) },
+	{ "ram",          offsetof(struct StatusBar, ram) },
+	{ "clock",        offsetof(struct StatusBar, clock) },
+	{ "power",        offsetof(struct StatusBar, power) },
+};
+#define BARMOD_DEF_COUNT (sizeof(barmod_defs) / sizeof(barmod_defs[0]))
+
+static StatusModule *
+barmod_at(Monitor *m, int i)
+{
+	return (StatusModule *)((char *)&m->statusbar + barmod_defs[i].off);
+}
+
+static StatusModule *
+barmod_by_name(Monitor *m, const char *name)
+{
+	size_t i;
+
+	for (i = 0; i < BARMOD_DEF_COUNT; i++)
+		if (!strcmp(barmod_defs[i].name, name))
+			return barmod_at(m, (int)i);
+	return NULL;
+}
+
+/* Push icons-only from statusbar.conf into the modules; a change busts
+ * the render dedup so the next refresh redraws in the new style. */
+static void
+barmod_sync_flags(Monitor *m)
+{
+	size_t i;
+
+	for (i = 0; i < BARMOD_DEF_COUNT; i++) {
+		const BarModCfg *cfg = barmod_find(barmod_defs[i].name);
+		StatusModule *mod = barmod_at(m, (int)i);
+		int io = cfg ? cfg->icons_only : 0;
+
+		if (mod->icons_only != io) {
+			mod->icons_only = io;
+			mod->last_render_text[0] = '\0';
+			mod->last_render_h = 0;
+		}
+	}
+}
+
+/* statusbar.conf changed on disk: re-render every module (icons-only may
+ * have flipped) and lay the bar out again in the new order. */
+void
+statusbar_conf_changed(void)
+{
+	Monitor *m;
+
+	wl_list_for_each(m, &mons, link)
+		barmod_sync_flags(m);
+	refreshstatustags();
+	refreshstatusclock();
+	refreshstatuslight();
+	refreshstatusvolume();
+	refreshstatusmic();
+	refreshstatusbattery();
+	refreshstatusnet();
+	refreshstatusbluetooth();
+	refreshstatuscpu();
+	refreshstatusram();
+	refreshstatusicons();
+	refreshstatusterminfo();
+	refreshstatusdisk();
+	wl_list_for_each(m, &mons, link)
+		positionstatusmodules(m);
 }
 
 void
@@ -4099,172 +4197,110 @@ positionstatusmodules(Monitor *m)
 	}
 
 	wlr_scene_node_set_enabled(&m->statusbar.tree->node, 1);
-	if (m->statusbar.tags.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.tags.tree->node,
-				m->statusbar.tags.width > 0);
-	if (m->statusbar.traylabel.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.traylabel.tree->node,
-				m->statusbar.traylabel.width > 0);
-	if (m->statusbar.terminfo.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.terminfo.tree->node,
-				m->statusbar.terminfo.width > 0);
-	if (m->statusbar.cpu.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.cpu.tree->node,
-				m->statusbar.cpu.width > 0);
-	if (m->statusbar.net.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.net.tree->node,
-				m->statusbar.net.width > 0);
-	if (m->statusbar.battery.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.battery.tree->node,
-				m->statusbar.battery.width > 0);
-	if (m->statusbar.light.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.light.tree->node,
-				m->statusbar.light.width > 0);
-	if (m->statusbar.mic.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.mic.tree->node,
-				m->statusbar.mic.width > 0);
-	if (m->statusbar.volume.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.volume.tree->node,
-				m->statusbar.volume.width > 0);
-	if (m->statusbar.disk.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.disk.tree->node,
-				m->statusbar.disk.width > 0);
-	if (m->statusbar.bluetooth.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.bluetooth.tree->node,
-				m->statusbar.bluetooth.width > 0);
-	if (m->statusbar.display.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.display.tree->node,
-				m->statusbar.display.width > 0);
-	if (m->statusbar.ram.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.ram.tree->node,
-				m->statusbar.ram.width > 0);
-	if (m->statusbar.clock.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.clock.tree->node,
-				m->statusbar.clock.width > 0);
-	if (m->statusbar.power.tree)
-		wlr_scene_node_set_enabled(&m->statusbar.power.tree->node,
-				m->statusbar.power.width > 0);
-	if (m->statusbar.cpu_popup.tree && m->statusbar.cpu.width > 0) {
-		if (!m->statusbar.cpu_popup.visible)
-			wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
-	}
-	x = 0;
-	spacing = statusbar_module_spacing;
 
-	if (m->statusbar.tags.width > 0) {
-		wlr_scene_node_set_position(&m->statusbar.tags.tree->node, x, 0);
-		m->statusbar.tags.x = x;
-		x += m->statusbar.tags.width + spacing;
-	}
-	if (m->statusbar.traylabel.width > 0) {
-		/* rendertray pads its trailing edge by module_padding/2;
-		 * subtract it so the whitespace to the first icon-only module
-		 * (content-width, no padding) is exactly TRAY_ICON_GAP. */
-		int tray_pad = statusbar_module_padding / 2;
-		if (tray_pad < 1)
-			tray_pad = 1;
-		wlr_scene_node_set_position(&m->statusbar.traylabel.tree->node, x, 0);
-		m->statusbar.traylabel.x = x;
-		x += m->statusbar.traylabel.width + TRAY_ICON_GAP - tray_pad;
-	}
-	/* net/bluetooth/display live in the tray cluster as icon-only
-	 * entries, spaced like the SNI icons. */
-	if (m->statusbar.net.width > 0) {
-		wlr_scene_node_set_position(&m->statusbar.net.tree->node, x, 0);
-		m->statusbar.net.x = x;
-		x += m->statusbar.net.width + TRAY_ICON_GAP;
-	}
-	if (m->statusbar.bluetooth.width > 0) {
-		wlr_scene_node_set_position(&m->statusbar.bluetooth.tree->node, x, 0);
-		m->statusbar.bluetooth.x = x;
-		x += m->statusbar.bluetooth.width + TRAY_ICON_GAP;
-	}
-	if (m->statusbar.display.width > 0) {
-		wlr_scene_node_set_position(&m->statusbar.display.tree->node, x, 0);
-		m->statusbar.display.x = x;
-		x += m->statusbar.display.width + spacing;
-	}
-	left_end = x;
+	/* statusbar.conf drives everything from here: which modules show,
+	 * their side, their order (file order) and icons-only. A module the
+	 * file does not list stays disabled. */
+	barmod_sync_flags(m);
+	{
+		int i, right_start, mid_w, mid_n, mx;
+		const BarModCfg *cfg;
+		StatusModule *mod;
 
-	x = m->statusbar.area.width;
-	spacing = statusbar_module_spacing;
+		for (i = 0; i < (int)BARMOD_DEF_COUNT; i++) {
+			mod = barmod_at(m, i);
+			if (mod->tree)
+				wlr_scene_node_set_enabled(&mod->tree->node,
+					mod->width > 0 &&
+					barmod_find(barmod_defs[i].name) != NULL);
+		}
+		if (m->statusbar.cpu_popup.tree && m->statusbar.cpu.width > 0) {
+			if (!m->statusbar.cpu_popup.visible)
+				wlr_scene_node_set_enabled(
+					&m->statusbar.cpu_popup.tree->node, 0);
+		}
 
-	/* power sits right of the clock — outermost on the right edge */
-	if (m->statusbar.power.width > 0) {
-		x -= m->statusbar.power.width;
-		wlr_scene_node_set_position(&m->statusbar.power.tree->node, x, 0);
-		m->statusbar.power.x = x;
-		x -= spacing;
-	}
-	if (m->statusbar.clock.width > 0) {
-		x -= m->statusbar.clock.width;
-		wlr_scene_node_set_position(&m->statusbar.clock.tree->node, x, 0);
-		m->statusbar.clock.x = x;
-		x -= spacing;
-	}
-	if (m->statusbar.ram.width > 0) {
-		x -= m->statusbar.ram.width;
-		wlr_scene_node_set_position(&m->statusbar.ram.tree->node, x, 0);
-		m->statusbar.ram.x = x;
-		x -= spacing;
-	}
-	if (m->statusbar.cpu.width > 0) {
-		x -= m->statusbar.cpu.width;
-		wlr_scene_node_set_position(&m->statusbar.cpu.tree->node, x, 0);
-		m->statusbar.cpu.x = x;
-		x -= spacing;
-	}
-	/* disk sits immediately left of the CPU module */
-	if (m->statusbar.disk.width > 0) {
-		x -= m->statusbar.disk.width;
-		wlr_scene_node_set_position(&m->statusbar.disk.tree->node, x, 0);
-		m->statusbar.disk.x = x;
-		x -= spacing;
-	}
-	if (m->statusbar.mic.width > 0) {
-		x -= m->statusbar.mic.width;
-		wlr_scene_node_set_position(&m->statusbar.mic.tree->node, x, 0);
-		m->statusbar.mic.x = x;
-		x -= spacing;
-	}
-	if (m->statusbar.volume.width > 0) {
-		x -= m->statusbar.volume.width;
-		wlr_scene_node_set_position(&m->statusbar.volume.tree->node, x, 0);
-		m->statusbar.volume.x = x;
-		x -= spacing;
-	}
-	if (m->statusbar.light.width > 0) {
-		x -= m->statusbar.light.width;
-		wlr_scene_node_set_position(&m->statusbar.light.tree->node, x, 0);
-		m->statusbar.light.x = x;
-		x -= spacing;
-	}
-	if (m->statusbar.battery.width > 0) {
-		x -= m->statusbar.battery.width;
-		wlr_scene_node_set_position(&m->statusbar.battery.tree->node, x, 0);
-		m->statusbar.battery.x = x;
-		x -= spacing;
-	}
+		spacing = statusbar_module_spacing;
 
-	/* Terminal-info label: centered in the free span between the left
-	 * group (tags/steam/net/tray) and the right group.  x is now the
-	 * left edge of the leftmost right-side module minus spacing. */
-	if (m->statusbar.terminfo.tree) {
-		int w = m->statusbar.terminfo.width;
-		int right_start = x + spacing;
+		/* Left group, file order. */
+		x = 0;
+		for (i = 0; i < barmod_count(); i++) {
+			cfg = barmod_get(i);
+			if (cfg->side != 0)
+				continue;
+			mod = barmod_by_name(m, cfg->name);
+			if (!mod || !mod->tree || mod->width <= 0)
+				continue;
+			wlr_scene_node_set_position(&mod->tree->node, x, 0);
+			mod->x = x;
+			if (mod == &m->statusbar.traylabel) {
+				/* rendertray pads its trailing edge by
+				 * module_padding/2; subtract it so the gap to
+				 * the next icon-only module is exactly
+				 * TRAY_ICON_GAP. */
+				int tray_pad = statusbar_module_padding / 2;
+				if (tray_pad < 1)
+					tray_pad = 1;
+				x += mod->width + TRAY_ICON_GAP - tray_pad;
+			} else if (mod == &m->statusbar.net ||
+					mod == &m->statusbar.bluetooth) {
+				/* tray cluster: spaced like the SNI icons */
+				x += mod->width + TRAY_ICON_GAP;
+			} else {
+				x += mod->width + spacing;
+			}
+		}
+		left_end = x;
 
+		/* Right group, file order left→right, placed from the edge. */
+		x = m->statusbar.area.width;
+		for (i = barmod_count() - 1; i >= 0; i--) {
+			cfg = barmod_get(i);
+			if (cfg->side != 2)
+				continue;
+			mod = barmod_by_name(m, cfg->name);
+			if (!mod || !mod->tree || mod->width <= 0)
+				continue;
+			x -= mod->width;
+			wlr_scene_node_set_position(&mod->tree->node, x, 0);
+			mod->x = x;
+			x -= spacing;
+		}
+		right_start = x + spacing;
 		if (right_start > m->statusbar.area.width)
 			right_start = m->statusbar.area.width;
-		if (w > 0 && right_start - left_end >= w) {
-			int tx = left_end + (right_start - left_end - w) / 2;
-			wlr_scene_node_set_position(
-					&m->statusbar.terminfo.tree->node, tx, 0);
-			m->statusbar.terminfo.x = tx;
-			wlr_scene_node_set_enabled(
-					&m->statusbar.terminfo.tree->node, 1);
-		} else {
-			wlr_scene_node_set_enabled(
-					&m->statusbar.terminfo.tree->node, 0);
+
+		/* Middle group: centered in the free span; hidden when it does
+		 * not fit (same rule the window-title always had). */
+		mid_w = 0;
+		mid_n = 0;
+		for (i = 0; i < barmod_count(); i++) {
+			cfg = barmod_get(i);
+			if (cfg->side != 1)
+				continue;
+			mod = barmod_by_name(m, cfg->name);
+			if (!mod || !mod->tree || mod->width <= 0)
+				continue;
+			mid_w += mod->width + (mid_n > 0 ? spacing : 0);
+			mid_n++;
+		}
+		mx = left_end + (right_start - left_end - mid_w) / 2;
+		for (i = 0; i < barmod_count(); i++) {
+			cfg = barmod_get(i);
+			if (cfg->side != 1)
+				continue;
+			mod = barmod_by_name(m, cfg->name);
+			if (!mod || !mod->tree)
+				continue;
+			if (mod->width <= 0 || mid_w <= 0 ||
+					right_start - left_end < mid_w) {
+				wlr_scene_node_set_enabled(&mod->tree->node, 0);
+				continue;
+			}
+			wlr_scene_node_set_position(&mod->tree->node, mx, 0);
+			mod->x = mx;
+			wlr_scene_node_set_enabled(&mod->tree->node, 1);
+			mx += mod->width + spacing;
 		}
 	}
 
