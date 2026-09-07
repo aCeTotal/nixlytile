@@ -45,6 +45,11 @@ Card *card_begin(void);
  * subtitle under it, big right-aligned value. */
 void card_header(Card *c, const char *icon_path, const char *title,
 		const char *sub, const char *value);
+/* Header with a small button chip right of the title/sub block
+ * (Radio ON/OFF); hit rect is the chip only. */
+void card_header_btn(Card *c, const char *icon_path, const char *title,
+		const char *sub, const char *value, const char *btn_label,
+		int hit_id, int hot);
 /* Slim rounded gauge; fill is emitted as a CardFill so the presenter
  * can sweep-animate it. frac clamped to [0,1]. */
 void card_gauge(Card *c, double frac, const float accent[4]);
@@ -114,6 +119,14 @@ void card_icon_text_btn(Card *c, const char *icon_path, const char *left,
 void card_icon_text_rbtn(Card *c, const char *icon_path, const char *left,
 		const char *right, const float *rightcol,
 		const char *btn_label, int hit_id, int hot);
+/* icon_text_rbtn whose hit rect is the button only (no full-row hit) —
+ * inline entry rows where a stray row click must not submit */
+void card_icon_text_rbtn_solo(Card *c, const char *icon_path,
+		const char *left, const char *right, const float *rightcol,
+		const char *btn_label, int hit_id, int hot);
+/* Enlarge the last added row: taller with a bigger leading icon
+ * (network/device list rows). */
+void card_row_big(Card *c);
 /* Full-row-clickable row (BT-device hover style, but no button): icon
  * + left text, right text, optional status icon (svg asset path) at
  * the right card edge; the whole row is the hit rect and washes on

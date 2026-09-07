@@ -14,7 +14,8 @@
 #define CARD_PAD      16
 #define CARD_COLGAP   28
 #define CARD_METER_H  44
-#define CARD_TICON(h) ((h) + 6)   /* CROW_TEXT row icon size */
+#define CARD_TICON(h) ((h) + 6)        /* CROW_TEXT row icon size */
+#define CARD_TICON_BIG(h) ((h) + 14)   /* big list-row icon size */
 #define CARD_BG_R     0.055
 #define CARD_BG_G     0.060
 #define CARD_BG_B     0.075
@@ -256,6 +257,7 @@ typedef struct {
 	char btn_label[24];
 	int btn_right;
 	int btn_solo;       /* btn_right hit rect = button only, no row wash */
+	int big;            /* CROW_TEXT: taller row, bigger leading icon */
 	const float *bcol, *dcol;
 	double frac;
 	float accent[4];
@@ -342,6 +344,21 @@ card_header(Card *c, const char *icon_path, const char *title,
 	setstr(r->b, sizeof(r->b), title);
 	setstr(r->c, sizeof(r->c), sub);
 	setstr(r->d, sizeof(r->d), value);
+}
+
+void
+card_header_btn(Card *c, const char *icon_path, const char *title,
+		const char *sub, const char *value, const char *btn_label,
+		int hit_id, int hot)
+{
+	card_header(c, icon_path, title, sub, value);
+	if (c && c->nrows > 0) {
+		CardRow *r = &c->rows[c->nrows - 1];
+
+		setstr(r->btn_label, sizeof(r->btn_label), btn_label);
+		r->hit_id = hit_id;
+		r->hot = hot;
+	}
 }
 
 void
@@ -538,6 +555,26 @@ card_text_rbtn(Card *c, const char *left, const char *right,
 		c->rows[c->nrows - 1].btn_right = 1;
 		c->rows[c->nrows - 1].btn_solo = 1;
 	}
+}
+
+void
+card_icon_text_rbtn_solo(Card *c, const char *icon_path, const char *left,
+		const char *right, const float *rightcol,
+		const char *btn_label, int hit_id, int hot)
+{
+	card_icon_text_btn(c, icon_path, left, right, rightcol, btn_label,
+			hit_id, hot);
+	if (c && c->nrows > 0) {
+		c->rows[c->nrows - 1].btn_right = 1;
+		c->rows[c->nrows - 1].btn_solo = 1;
+	}
+}
+
+void
+card_row_big(Card *c)
+{
+	if (c && c->nrows > 0)
+		c->rows[c->nrows - 1].big = 1;
 }
 
 void
@@ -780,6 +817,9 @@ card_measure(Card *c, int *out_w, int *out_h)
 					text_width_f(card_font_small, r->c, SMALL_LSPC));
 			rw = icon + left + 24 +
 				text_width_f(card_font_big, r->d, 0);
+			if (r->btn_label[0])
+				rw += 12 + text_width_f(statusfont.font,
+						r->btn_label, 0) + 16;
 			r->h = MAX(base_h + small_h + 4, big_h) + 6;
 			break;
 		}
@@ -808,7 +848,8 @@ card_measure(Card *c, int *out_w, int *out_h)
 			rw = text_width_f(statusfont.font, r->a, 0) + 16 +
 				text_width_f(statusfont.font, r->b, 0);
 			if (r->c[0])
-				rw += CARD_TICON(base_h) + 10;
+				rw += (r->big ? CARD_TICON_BIG(base_h) :
+						CARD_TICON(base_h)) + 10;
 			if (r->micon1[0])
 				rw += base_h + 2 + 8;
 			if (r->micon2[0])
@@ -819,7 +860,8 @@ card_measure(Card *c, int *out_w, int *out_h)
 			if (r->d[0] && r->hit_id2 >= 0)
 				rw += 10 + text_width_f(statusfont.font,
 						r->d, 0) + 16;
-			r->h = base_h + (r->c[0] ? 10 : 6);
+			r->h = base_h + (r->c[0] ? 10 : 6) +
+				(r->big ? 12 : 0);
 			break;
 		case CROW_BUTTONS:
 			rw = btn_row_width(r);
@@ -1116,6 +1158,28 @@ card_finish(Card *c, CardResult *out)
 				draw_icon(cr, r->a, CARD_PAD,
 						y + (r->h - 6 - isz) / 2, isz);
 			}
+			if (r->btn_label[0] && r->hit_id >= 0) {
+				int left = MAX(text_width_f(statusfont.font,
+							r->b, 0),
+						text_width_f(card_font_small,
+							r->c, SMALL_LSPC));
+				int bx = CARD_PAD +
+					(r->a[0] ? card_font_big->height + 12 : 0) +
+					left + 12;
+				int bw = text_width_f(statusfont.font,
+						r->btn_label, 0) + 16;
+				int bh = base_h + 2;
+				int by = y + (r->h - 6 - bh) / 2;
+
+				rounded(cr, bx, by, bw, bh, 5);
+				if (r->hot)
+					cairo_set_source_rgba(cr, 0.85, 0.30,
+							0.30, 0.85);
+				else
+					cairo_set_source_rgba(cr, 1, 1, 1, 0.10);
+				cairo_fill(cr);
+				add_hit(out, bx, y, bw, r->h, r->hit_id);
+			}
 			break;
 		case CROW_GAUGE: {
 			int gy = y + 3;
@@ -1244,7 +1308,8 @@ card_finish(Card *c, CardResult *out)
 				cairo_fill(cr);
 			}
 			if (r->c[0]) {
-				int isz = CARD_TICON(base_h);
+				int isz = r->big ? CARD_TICON_BIG(base_h) :
+					CARD_TICON(base_h);
 
 				draw_icon(cr, r->c, CARD_PAD,
 						y + (r->h - isz) / 2, isz);
@@ -1291,7 +1356,9 @@ card_finish(Card *c, CardResult *out)
 				int bh = base_h + 2;
 				int bx = r->btn_right ? w - CARD_PAD - bw :
 					CARD_PAD +
-					(r->c[0] ? CARD_TICON(base_h) + 10 : 0) +
+					(r->c[0] ? (r->big ?
+						CARD_TICON_BIG(base_h) :
+						CARD_TICON(base_h)) + 10 : 0) +
 					text_width_f(statusfont.font, r->a, 0) +
 					12;
 				int by = y + (r->h - bh) / 2;
@@ -1621,6 +1688,19 @@ card_finish(Card *c, CardResult *out)
 						w - CARD_PAD - vw,
 						vy + big_asc, card_col_fg, 0);
 			}
+			if (r->btn_label[0] && r->hit_id >= 0) {
+				int left = MAX(text_width_f(statusfont.font,
+							r->b, 0),
+						text_width_f(card_font_small,
+							r->c, SMALL_LSPC));
+				int bx = tx + left + 12;
+				int bh = base_h + 2;
+				int by = y + (content_h - bh) / 2;
+
+				draw_text_f(pix, statusfont.font, r->btn_label,
+						bx + 8, by + 1 + base_asc,
+						card_col_fg, 0);
+			}
 			break;
 		}
 		case CROW_KV2: {
@@ -1679,7 +1759,9 @@ card_finish(Card *c, CardResult *out)
 			break;
 		case CROW_TEXT: {
 			int bl = y + (r->h - base_h) / 2 + base_asc;
-			int tx = CARD_PAD + (r->c[0] ? CARD_TICON(base_h) + 10 : 0);
+			int tx = CARD_PAD + (r->c[0] ? (r->big ?
+					CARD_TICON_BIG(base_h) :
+					CARD_TICON(base_h)) + 10 : 0);
 			int bw = 0;
 
 			if (r->btn_label[0] && r->hit_id >= 0)

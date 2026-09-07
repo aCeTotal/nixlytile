@@ -324,20 +324,20 @@ scan_hidden_buttons(Card *card, int hot)
 			hot == NET_HIT_HIDDEN ? 1 : -1, NET_HIT_SCAN);
 }
 
-/* Scan view: header + every found network as a BT-style hover row —
- * signal icon, SSID, security method, open/closed padlock.  The picked
- * row turns into a passphrase entry with a Connect button. */
+/* Fixed content width whenever the network list (or its inline
+ * passphrase entry) is visible, so the card never resizes between
+ * picking a network and typing the passphrase. */
+#define NET_LIST_W 380
+
+/* Every found network, strongest first, as a big hover row — signal
+ * icon, SSID, security method, open/closed padlock.  Fills ui_shown so
+ * clicks resolve against exactly what was drawn.  The picked row turns
+ * into a passphrase entry with a Connect button, keeping its icon. */
 static void
-render_scan_view(Card *card, int hot)
+render_net_list(Card *card, int hot)
 {
 	int i;
 
-	card_section(card, "NETWORKS");
-	card_text_rbtn(card, "Select a network",
-			ui_scanning ? "Scanning…" : NULL, card_col_dim,
-			"Back", NET_HIT_BACK, hot == NET_HIT_BACK);
-	if (wifi_last_error()[0])
-		card_text(card, wifi_last_error(), NULL, card_col_red);
 	ui_nshown = ui_nnets < NET_LIST_MAX ? ui_nnets : NET_LIST_MAX;
 	if (!ui_nshown) {
 		card_gap(card, 8);
@@ -349,27 +349,44 @@ render_scan_view(Card *card, int hot)
 	for (i = 0; i < ui_nshown; i++) {
 		WifiNet *w = &ui_shown[i];
 		const char *sec;
+		const char *icon;
 
 		*w = ui_nets[i];
+		icon = wifi_icon_for_quality(dbm_to_pct(w->signal_dbm));
 		if (ui_target[0] && text_entry_active() &&
 				strcmp(w->ssid, ui_target) == 0) {
-			card_text_rbtn(card, w->ssid,
+			card_icon_text_rbtn_solo(card, icon, w->ssid,
 					text_entry_display(), card_col_blue,
 					"Connect", NET_HIT_CONNECT,
 					hot == NET_HIT_CONNECT);
+			card_row_big(card);
 			continue;
 		}
 		sec = w->connected ? "Connected" :
 			(w->secured ? (w->sec[0] ? w->sec : "WPA") : "Open");
-		card_icon_text_hit(card,
-				wifi_icon_for_quality(dbm_to_pct(w->signal_dbm)),
+		card_icon_text_hit(card, icon,
 				w->ssid, sec,
 				w->connected || w->known ?
 				card_col_green : card_col_dim,
 				w->secured ? lock_closed_icon : lock_open_icon,
 				NET_HIT_NET_BASE + i,
 				hot == NET_HIT_NET_BASE + i);
+		card_row_big(card);
 	}
+}
+
+/* Scan view: header row + the network list */
+static void
+render_scan_view(Card *card, int hot)
+{
+	card_min_w(card, NET_LIST_W);
+	card_section(card, "NETWORKS");
+	card_text_rbtn(card, "Select a network",
+			ui_scanning ? "Scanning…" : NULL, card_col_dim,
+			"Back", NET_HIT_BACK, hot == NET_HIT_BACK);
+	if (wifi_last_error()[0])
+		card_text(card, wifi_last_error(), NULL, card_col_red);
+	render_net_list(card, hot);
 }
 
 /* Hidden-network view: SSID + passphrase fields stacked, Connect below */
@@ -645,7 +662,12 @@ rendernetpopup(Monitor *m)
 			m->statusbar.area.y + statusbar_popup_y(m));
 	hot = p->btn_hover;
 
-	/* header */
+	/* header; radio toggle chip right of the title block */
+	const char *radio_lbl = s.wifi.present ?
+		(s.wifi_blocked ? "Radio OFF" : "Radio ON") : NULL;
+	int radio_hit = radio_lbl ? NET_HIT_WIFI_TOGGLE : -1;
+	int radio_hot = hot == NET_HIT_WIFI_TOGGLE;
+
 	if (s.eth.present && s.eth.carrier) {
 		if (s.eth.speed_mbps >= 1000)
 			snprintf(value, sizeof(value), "%.1fG",
@@ -654,8 +676,8 @@ rendernetpopup(Monitor *m)
 			snprintf(value, sizeof(value), "%dM", s.eth.speed_mbps);
 		else
 			snprintf(value, sizeof(value), "--");
-		card_header(card, net_icon_path, "Ethernet", "WIRED LINK",
-				value);
+		card_header_btn(card, net_icon_path, "Ethernet", "WIRED LINK",
+				value, radio_lbl, radio_hit, radio_hot);
 		card_gap(card, 8);
 	} else if (wifi_assoc) {
 		int pct = (int)lround(dbm_to_pct(ws.signal_dbm));
@@ -664,20 +686,14 @@ rendernetpopup(Monitor *m)
 		snprintf(sub, sizeof(sub), "%s", ws.ssid);
 		for (si = 0; sub[si]; si++)
 			sub[si] = (char)toupper((unsigned char)sub[si]);
-		card_header(card, net_icon_path, "Wi-Fi", sub, value);
+		card_header_btn(card, net_icon_path, "Wi-Fi", sub, value,
+				radio_lbl, radio_hit, radio_hot);
 		card_gap(card, 8);
 	} else {
-		card_header(card, net_icon_path, "Network", "DISCONNECTED",
-				"--");
+		card_header_btn(card, net_icon_path, "Network", "DISCONNECTED",
+				"--", radio_lbl, radio_hit, radio_hot);
 		card_gap(card, 8);
 	}
-
-	/* radio toggle pinned at the top, right of the Wi-Fi label */
-	if (s.wifi.present)
-		card_text_btn(card, "Wi-Fi", NULL, NULL,
-				s.wifi_blocked ? "Radio OFF" : "Radio ON",
-				NET_HIT_WIFI_TOGGLE,
-				hot == NET_HIT_WIFI_TOGGLE);
 
 	/* scan / hidden views replace everything below the header */
 	if (ui_view != NETV_NORMAL) {
@@ -812,9 +828,12 @@ rendernetpopup(Monitor *m)
 				}
 			}
 		} else {
+			/* not associated: show every found network directly */
+			card_min_w(card, NET_LIST_W);
 			if (wifi_last_error()[0])
 				card_text(card, wifi_last_error(), NULL,
 						card_col_red);
+			render_net_list(card, hot);
 			scan_hidden_buttons(card, hot);
 		}
 	}
@@ -1005,9 +1024,11 @@ net_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 						w->ssid);
 				wifi_connect_known(w->known_id);
 			} else if (w->secured) {
-				/* row becomes a passphrase entry + Connect */
+				/* row becomes a passphrase entry + Connect;
+				 * the entry row lives in the scan view */
 				snprintf(ui_target, sizeof(ui_target), "%s",
 						w->ssid);
+				ui_view = NETV_SCAN;
 				text_entry_begin("Passphrase", 1,
 						scan_psk_submitted, NULL);
 			} else {
