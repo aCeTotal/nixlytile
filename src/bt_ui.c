@@ -17,6 +17,33 @@
 #define BT_HIT_SCAN  211
 #define BT_HIT_DEV   220   /* + device index */
 
+extern struct wl_event_loop *event_loop;
+
+/* "Connecting.."/"Pairing.." are time-windowed, but the popup only
+ * redraws on D-Bus traffic — a one-shot timer re-renders at the
+ * earliest label expiry so stale labels can't stick. */
+#define BT_SVC_GRACE_MS 8000
+
+static struct wl_event_source *bt_label_timer;
+
+static int
+bt_label_tick(void *data)
+{
+	btsys_changed();
+	return 0;
+}
+
+static void
+bt_label_arm(uint64_t delay_ms)
+{
+	if (!bt_label_timer)
+		bt_label_timer = wl_event_loop_add_timer(event_loop,
+				bt_label_tick, NULL);
+	if (bt_label_timer)
+		wl_event_source_timer_update(bt_label_timer,
+				delay_ms > 0 ? (int)delay_ms : 1);
+}
+
 char bt_icon_path[PATH_MAX] = "images/svg/bluetooth_searching.svg";
 char bt_icon_loaded_path[PATH_MAX];
 int bt_icon_loaded_h, bt_icon_w, bt_icon_h;
@@ -212,6 +239,7 @@ render_bt_popup(Monitor *m)
 	struct timespec ts;
 	uint64_t now;
 	char v1[96];
+	uint64_t expiry = 0;
 	int nconn = 0, i, hot;
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -291,21 +319,51 @@ render_bt_popup(Monitor *m)
 					if (d->battery >= 0)
 						bat = bt_batt_svg(d->battery);
 				}
-				if (d->connected)
-					btn = !d->svc_resolved ?
-						"Connecting.." :
-						hot == BT_HIT_DEV + i ?
-						"Disconnect" : "Connected";
-				else if (d->paired)
-					btn = d->want_conn && d->dial_ms &&
-						now - d->dial_ms < 5000 ?
-						"Connecting.." :
-						hot == BT_HIT_DEV + i ?
-						"Connect" : "Paired";
-				else
-					btn = d->pair_ms &&
-						now - d->pair_ms < 30000 ?
-						"Pairing.." : "Pair";
+				if (d->connected) {
+					/* profiles may never resolve (SDP
+					 * skipped on reconnect) — cap the
+					 * wait so a working link can't sit
+					 * on "Connecting.." forever */
+					if (!d->svc_resolved && d->conn_ms &&
+							now - d->conn_ms <
+							BT_SVC_GRACE_MS) {
+						btn = "Connecting..";
+						if (!expiry || d->conn_ms +
+								BT_SVC_GRACE_MS
+								< expiry)
+							expiry = d->conn_ms +
+								BT_SVC_GRACE_MS;
+					} else {
+						btn = hot == BT_HIT_DEV + i ?
+							"Disconnect" :
+							"Connected";
+					}
+				} else if (d->paired) {
+					if (d->want_conn && d->dial_ms &&
+							now - d->dial_ms <
+							5000) {
+						btn = "Connecting..";
+						if (!expiry || d->dial_ms +
+								5000 < expiry)
+							expiry = d->dial_ms +
+								5000;
+					} else {
+						btn = hot == BT_HIT_DEV + i ?
+							"Connect" : "Paired";
+					}
+				} else {
+					if (d->pair_ms &&
+							now - d->pair_ms <
+							30000) {
+						btn = "Pairing..";
+						if (!expiry || d->pair_ms +
+								30000 < expiry)
+							expiry = d->pair_ms +
+								30000;
+					} else {
+						btn = "Pair";
+					}
+				}
 				if (sig || bat)
 					card_icon_text_rbtn_icons(card,
 							bt_dev_svg(d), v1,
@@ -325,6 +383,8 @@ render_bt_popup(Monitor *m)
 		if (nconn)
 			bt_rssi_ping();
 	}
+	if (expiry)
+		bt_label_arm(expiry > now ? expiry - now + 50 : 1);
 
 	if (card_finish(card, &res) != 0)
 		return;

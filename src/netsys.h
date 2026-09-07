@@ -154,6 +154,8 @@ typedef struct {
 	int retry_n;
 	uint64_t dial_ms;       /* last Connect attempt — UI "Connecting.." */
 	uint64_t pair_ms;       /* Pair() in flight — UI "Pairing.." */
+	uint64_t conn_ms;       /* link came up — caps the "Connecting.."
+	                         * wait for ServicesResolved */
 } BtDev;
 
 typedef struct {

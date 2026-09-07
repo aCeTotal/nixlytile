@@ -183,6 +183,7 @@ dev_conn_transition(BtDev *d)
 		d->want_conn = 1;
 		d->retry_n = 0;
 		d->retry_at_ms = 0;
+		d->conn_ms = now_ms();
 		bt_audio_on_connect(d->addr, d->icon);
 	} else if (d->paired && d->want_conn) {
 		d->retry_n = 0;
