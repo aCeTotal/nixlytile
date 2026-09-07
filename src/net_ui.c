@@ -672,6 +672,13 @@ rendernetpopup(Monitor *m)
 		card_gap(card, 8);
 	}
 
+	/* radio toggle pinned at the top, right of the Wi-Fi label */
+	if (s.wifi.present)
+		card_text_btn(card, "Wi-Fi", NULL, NULL,
+				s.wifi_blocked ? "Radio OFF" : "Radio ON",
+				NET_HIT_WIFI_TOGGLE,
+				hot == NET_HIT_WIFI_TOGGLE);
+
 	/* scan / hidden views replace everything below the header */
 	if (ui_view != NETV_NORMAL) {
 		if (ui_view == NETV_SCAN)
@@ -695,7 +702,7 @@ rendernetpopup(Monitor *m)
 		/* left column: Local IP / Public IP / Gateway stacked;
 		 * right column: DNS with one server per row */
 		char dbuf[128], *tok, *save;
-		const char *dns[6];
+		const char *dns[4];
 		const char *lk[3] = { "Local IP", "Public IP", "Gateway" };
 		const char *lv[3];
 		int ndns = 0, nrows, row;
@@ -706,8 +713,11 @@ rendernetpopup(Monitor *m)
 		snprintf(dbuf, sizeof(dbuf), "%s", ui_dns);
 		for (tok = strtok_r(dbuf, ", ", &save);
 				tok && ndns < (int)LENGTH(dns);
-				tok = strtok_r(NULL, ", ", &save))
+				tok = strtok_r(NULL, ", ", &save)) {
+			if (strncmp(tok, "2001:4600", 9) == 0)
+				continue;   /* ISP RA junk, too wide for the row */
 			dns[ndns++] = tok;
+		}
 		nrows = ndns > 3 ? ndns : 3;
 		for (row = 0; row < nrows; row++)
 			card_kv2(card,
@@ -751,19 +761,13 @@ rendernetpopup(Monitor *m)
 	}
 
 	/* wifi */
-	card_section(card, "WI-FI");
 	if (!s.wifi.present) {
+		card_section(card, "WI-FI");
 		card_text(card, "No wifi adapter", NULL, NULL);
-	} else {
-		card_big_btn(card,
-				s.wifi_blocked ? "Radio OFF" : "Radio ON",
-				s.wifi_blocked ? card_col_red : card_col_green,
-				NET_HIT_WIFI_TOGGLE,
-				hot == NET_HIT_WIFI_TOGGLE);
 	}
 	if (s.wifi.present && !s.wifi_blocked) {
+		card_section(card, "WI-FI");
 		if (wifi_assoc) {
-			card_section(card, "CONNECTION");
 			card_text_btn2(card, ws.ssid,
 					"Disconnect", NET_HIT_DISCONNECT2,
 					hot == NET_HIT_DISCONNECT2,

@@ -1,5 +1,5 @@
 /* VPN profiles = systemd units.  Any wg-quick / openvpn / openconnect /
- * strongswan / tailscale unit on the system shows up as a profile; the
+ * strongswan unit on the system shows up as a profile; the
  * popup starts/stops them via systemctl (authorized by a polkit rule
  * for the wheel group) and "autoconnect" is simply the unit's enabled
  * state.  No daemon of our own, nothing resident: two async systemctl
@@ -21,7 +21,7 @@ static const char vpn_list_cmd[] =
 	"'wg-quick@*.service' 'wg-quick-*.service' 'openvpn-*.service' "
 	"'openconnect-*.service' 'openfortivpn-*.service' "
 	"'strongswan.service' 'strongswan-swanctl.service' "
-	"'tailscaled.service' 2>/dev/null";
+	"2>/dev/null";
 
 static void
 vpn_make_label(VpnProfile *p)
@@ -47,8 +47,6 @@ vpn_make_label(VpnProfile *p)
 		snprintf(p->label, sizeof(p->label), "%s · Fortinet", name);
 	} else if (strncmp(u, "strongswan", 10) == 0) {
 		snprintf(p->label, sizeof(p->label), "IPsec · strongSwan");
-	} else if (strncmp(u, "tailscaled", 10) == 0) {
-		snprintf(p->label, sizeof(p->label), "Tailscale");
 	} else {
 		snprintf(p->label, sizeof(p->label), "%s", u);
 	}
