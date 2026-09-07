@@ -459,6 +459,24 @@ static bool scene_buffer_point_accepts_input(struct wlr_scene_buffer *scene_buff
 		double *sx, double *sy) {
 	struct wlr_scene_surface *scene_surface =
 		wlr_scene_surface_try_from_buffer(scene_buffer);
+	struct wlr_surface_state *state = &scene_surface->surface->current;
+
+	// Incoming coordinates are node-local, i.e. in destination space.
+	// When the buffer is stretched (dst size != clipped surface size),
+	// unscale back to surface space before hit-testing, otherwise input
+	// only lands on the top-left unscaled fraction of the node and the
+	// client receives coordinates offset by the scale factor.
+	int width = state->width;
+	int height = state->height;
+	if (!wlr_box_empty(&scene_surface->clip)) {
+		width = min(scene_surface->clip.width, width - scene_surface->clip.x);
+		height = min(scene_surface->clip.height, height - scene_surface->clip.y);
+	}
+	if (scene_buffer->dst_width > 0 && scene_buffer->dst_height > 0 &&
+			width > 0 && height > 0) {
+		*sx *= (double)width / scene_buffer->dst_width;
+		*sy *= (double)height / scene_buffer->dst_height;
+	}
 
 	*sx += scene_surface->clip.x;
 	*sy += scene_surface->clip.y;
