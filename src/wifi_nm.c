@@ -411,19 +411,6 @@ nm_wifi_connect(const char *ssid, const char *psk, int hidden)
 	return fetch_async(cmd, nm_connect_done, NULL);
 }
 
-int
-nm_wifi_connect_known(int id)
-{
-	char qs[140], cmd[192];
-
-	if (id < 0 || id >= nm_nsaved)
-		return -1;
-	nm_quote(qs, sizeof(qs), nm_saved[id]);
-	snprintf(cmd, sizeof(cmd), "nmcli connection up id %s 2>&1", qs);
-	nm_error[0] = '\0';
-	return fetch_async(cmd, nm_act_done, NULL);
-}
-
 void
 nm_wifi_disconnect(void)
 {

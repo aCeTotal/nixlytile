@@ -54,8 +54,6 @@ const float *statusbar_fg_override = NULL;
 struct wl_event_source *cpu_popup_refresh_timer = NULL;
 struct wl_event_source *ram_popup_refresh_timer = NULL;
 struct wl_event_source *popup_delay_timer = NULL;
-struct wl_list vpn_connections; /* VpnConnection */
-int vpn_list_initialized;
 char net_text[64] = "Net: --";
 char net_local_ip[64] = "--";
 char net_public_ip[64] = "--";

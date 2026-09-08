@@ -5811,10 +5811,6 @@ initstatusbar(Monitor *m)
 		return;
 
 	wl_list_init(&m->statusbar.tray_menu.entries);
-	if (!vpn_list_initialized) {
-		wl_list_init(&vpn_connections);
-		vpn_list_initialized = 1;
-	}
 	m->showbar = 1;
 	m->statusbar.area = (struct wlr_box){0};
 	m->statusbar.tree = wlr_scene_tree_create(layers[LyrTop]);

@@ -253,6 +253,8 @@ typedef enum {
 typedef struct {
 	CardRowType type;
 	char a[160], b[160], c[96], d[64];
+	char sub[64];                  /* CROW_TEXT small line under the label */
+	const float *subcol;
 	char micon1[64], micon2[64];   /* CROW_TEXT status icons */
 	char btn_label[24];
 	int btn_right;
@@ -578,6 +580,18 @@ card_row_big(Card *c)
 }
 
 void
+card_row_sub(Card *c, const char *sub, const float *col)
+{
+	CardRow *r;
+
+	if (!c || c->nrows == 0)
+		return;
+	r = &c->rows[c->nrows - 1];
+	setstr(r->sub, sizeof(r->sub), sub);
+	r->subcol = col ? col : card_col_dim;
+}
+
+void
 card_text_btn2(Card *c, const char *left,
 		const char *btn1, int hit_id1, int hot1,
 		const char *btn2, int hit_id2, int hot2)
@@ -845,7 +859,9 @@ card_measure(Card *c, int *out_w, int *out_h)
 						r->btn_label, 0) + 16;
 			break;
 		case CROW_TEXT:
-			rw = text_width_f(statusfont.font, r->a, 0) + 16 +
+			rw = MAX(text_width_f(statusfont.font, r->a, 0),
+					r->sub[0] ? text_width_f(card_font_small,
+						r->sub, 0) : 0) + 16 +
 				text_width_f(statusfont.font, r->b, 0);
 			if (r->c[0])
 				rw += (r->big ? CARD_TICON_BIG(base_h) :
@@ -860,8 +876,12 @@ card_measure(Card *c, int *out_w, int *out_h)
 			if (r->d[0] && r->hit_id2 >= 0)
 				rw += 10 + text_width_f(statusfont.font,
 						r->d, 0) + 16;
-			r->h = base_h + (r->c[0] ? 10 : 6) +
-				(r->big ? 12 : 0);
+			if (r->sub[0])
+				r->h = base_h + small_h +
+					(r->big ? 18 : 10);
+			else
+				r->h = base_h + (r->c[0] ? 10 : 6) +
+					(r->big ? 12 : 0);
 			break;
 		case CROW_BUTTONS:
 			rw = btn_row_width(r);
@@ -1767,8 +1787,19 @@ card_finish(Card *c, CardResult *out)
 			if (r->btn_label[0] && r->hit_id >= 0)
 				bw = text_width_f(statusfont.font,
 						r->btn_label, 0) + 16;
-			draw_text_f(pix, statusfont.font, r->a, tx, bl,
-					card_col_fg, 0);
+			if (r->sub[0]) {
+				/* two-line: label on top, small sub below */
+				int ty0 = y + (r->h - (base_h + small_h + 2)) / 2;
+
+				draw_text_f(pix, statusfont.font, r->a, tx,
+						ty0 + base_asc, card_col_fg, 0);
+				draw_text_f(pix, card_font_small, r->sub, tx,
+						ty0 + base_h + 2 + small_asc,
+						r->subcol, 0);
+			} else {
+				draw_text_f(pix, statusfont.font, r->a, tx, bl,
+						card_col_fg, 0);
+			}
 			if (r->b[0]) {
 				int vw = text_width_f(statusfont.font, r->b, 0);
 				int vx = w - CARD_PAD - vw;

@@ -904,14 +904,6 @@ typedef struct {
 	int prefers_dgpu;
 } DesktopEntry;
 
-/* ── network types ─────────────────────────────────────────────────── */
-typedef struct VpnConnection {
-	char name[128];
-	char uuid[64];
-	int active;
-	struct wl_list link;
-} VpnConnection;
-
 typedef struct {
 	struct wlr_scene_tree *tree;
 	struct wlr_scene_tree *bg;
@@ -2105,20 +2097,6 @@ extern struct wl_event_source *hz_osd_timer;
 extern struct wl_event_source *osk_dpad_repeat_timer;
 extern int osk_dpad_held_button;
 extern Monitor *osk_dpad_held_mon;
-extern struct wl_list vpn_connections;
-extern int vpn_list_initialized;
-extern pid_t vpn_scan_pid;
-extern int vpn_scan_fd;
-extern struct wl_event_source *vpn_scan_event;
-extern char vpn_scan_buf[8192];
-extern size_t vpn_scan_len;
-extern int vpn_scan_inflight;
-extern pid_t vpn_connect_pid;
-extern int vpn_connect_fd;
-extern struct wl_event_source *vpn_connect_event;
-extern char vpn_connect_buf[4096];
-extern size_t vpn_connect_len;
-extern char vpn_pending_name[128];
 extern char net_text[64];
 extern char net_local_ip[64];
 extern char net_public_ip[64];
@@ -3092,11 +3070,6 @@ TrayItem *tray_first_item(void);
 int tray_item_activate(TrayItem *it, int button, int context_menu, int x, int y);
 
 /* network.c */
-void vpn_connections_clear(void);
-VpnConnection *vpn_connection_at_index(int idx);
-int vpn_scan_event_cb(int fd, uint32_t mask, void *data);
-void vpn_connect(const char *name);
-int vpn_connect_event_cb(int fd, uint32_t mask, void *data);
 void request_public_ip_async_ex(int force);
 void request_public_ip_async(void);
 void stop_public_ip_fetch(void);

@@ -39,7 +39,6 @@ enum {
 	WR_CTL_SYNC,            /* (re)open cmd socket for iface ("" = close) */
 	WR_CTL_SCAN,
 	WR_CTL_CONNECT,
-	WR_CTL_CONNECT_KNOWN,
 	WR_CTL_DISCONNECT,
 	WR_CTL_FORGET,
 	WR_CTL_CONNECTED,       /* CTRL-EVENT-CONNECTED: enable all + save pend */
@@ -94,6 +93,8 @@ static char wc_local_cmd[108];
 static int wc_max_linkspeed;
 static int wc_pend_id = -1;   /* network added by connect, unsaved
                                * until CTRL-EVENT-CONNECTED confirms it */
+static char wc_pend_ssid[33]; /* its ssid: older saved duplicates are
+                               * dropped when the connect sticks */
 static uint64_t wc_backoff_until;   /* wedged supplicant: skip requests */
 
 static uint64_t
@@ -238,7 +239,6 @@ wc_sec_label(const char *flags, char *out, size_t len)
 struct saved_net {
 	int id;
 	char ssid[33];
-	int current;
 };
 
 static int
@@ -265,25 +265,36 @@ wifi_list_saved(struct saved_net *out, int max)
 			sn->id = atoi(line);
 			*tab2 = '\0';
 			snprintf(sn->ssid, sizeof(sn->ssid), "%s", tab1 + 1);
-			sn->current = strstr(tab2 + 1, "[CURRENT]") != NULL;
 			count++;
 		}
 	}
 	return count;
 }
 
+static void wc_kv(const char *buf, const char *key, char *out, size_t len);
+
 /* Worker: SCAN_RESULTS + LIST_NETWORKS into a WifiNet list. */
 static int
 wr_sample_scan(WifiNet *out, int max)
 {
 	static char buf[16384];
+	static char sbuf[4096];
 	struct saved_net saved[32];
-	int nsaved, count = 0;
+	char st_state[24] = "", st_ssid[33] = "";
+	int nsaved, completed, count = 0;
 	char *line, *save;
 
 	if (wc_request("SCAN_RESULTS", buf, sizeof(buf)) < 0)
 		return 0;
 	nsaved = wifi_list_saved(saved, 32);
+	/* "connected" must mean a completed association — LIST_NETWORKS
+	 * keeps the last-selected network [CURRENT] even when the link is
+	 * down, which made rows claim Connected while disconnected */
+	if (wc_request("STATUS", sbuf, sizeof(sbuf)) >= 0) {
+		wc_kv(sbuf, "wpa_state", st_state, sizeof(st_state));
+		wc_kv(sbuf, "ssid", st_ssid, sizeof(st_ssid));
+	}
+	completed = strcmp(st_state, "COMPLETED") == 0;
 
 	line = strtok_r(buf, "\n", &save);   /* header */
 	while (count < max) {
@@ -325,11 +336,12 @@ wr_sample_scan(WifiNet *out, int max)
 				strstr(flags, "SAE") != NULL;
 			wc_sec_label(flags, w->sec, sizeof(w->sec));
 			w->known_id = -1;
+			w->connected = completed &&
+				strcmp(ssid, st_ssid) == 0;
 			for (i = 0; i < nsaved; i++) {
 				if (strcmp(saved[i].ssid, ssid) == 0) {
 					w->known = 1;
 					w->known_id = saved[i].id;
-					w->connected = saved[i].current;
 					break;
 				}
 			}
@@ -480,6 +492,7 @@ wr_do_connect(const WrCtl *c)
 		wc_cmd_ok(cmd);
 	}
 	wc_pend_id = id;   /* saved on CTRL-EVENT-CONNECTED */
+	snprintf(wc_pend_ssid, sizeof(wc_pend_ssid), "%s", c->ssid);
 	return;
 fail:
 	snprintf(cmd, sizeof(cmd), "REMOVE_NETWORK %d", id);
@@ -511,17 +524,6 @@ wr_run_ctl(const WrCtl *c)
 	case WR_CTL_CONNECT:
 		wr_do_connect(c);
 		break;
-	case WR_CTL_CONNECT_KNOWN:
-		/* abandon any unconfirmed attempt so CONNECTED can't save it */
-		if (wc_pend_id >= 0 && wc_pend_id != c->id) {
-			snprintf(cmd, sizeof(cmd), "REMOVE_NETWORK %d",
-					wc_pend_id);
-			wc_cmd_ok(cmd);
-			wc_pend_id = -1;
-		}
-		snprintf(cmd, sizeof(cmd), "SELECT_NETWORK %d", c->id);
-		wc_cmd_ok(cmd);
-		break;
 	case WR_CTL_DISCONNECT:
 		wc_cmd_ok("DISCONNECT");
 		break;
@@ -536,10 +538,25 @@ wr_run_ctl(const WrCtl *c)
 		 * stuck, restore them for future roaming */
 		wc_cmd_ok("ENABLE_NETWORK all");
 		/* persist the new network only now that it worked, so it
-		 * auto-connects from here on */
+		 * auto-connects from here on; older saved entries for the
+		 * same ssid are duplicates — drop them */
 		if (wc_pend_id >= 0) {
+			struct saved_net saved[32];
+			int n = wifi_list_saved(saved, 32), i;
+
+			for (i = 0; i < n; i++) {
+				if (saved[i].id == wc_pend_id ||
+						strcmp(saved[i].ssid,
+							wc_pend_ssid) != 0)
+					continue;
+				snprintf(cmd, sizeof(cmd),
+						"REMOVE_NETWORK %d",
+						saved[i].id);
+				wc_cmd_ok(cmd);
+			}
 			wc_cmd_ok("SAVE_CONFIG");
 			wc_pend_id = -1;
+			wc_pend_ssid[0] = '\0';
 		}
 		break;
 	case WR_CTL_WRONG_KEY:
@@ -550,6 +567,7 @@ wr_run_ctl(const WrCtl *c)
 					wc_pend_id);
 			wc_cmd_ok(cmd);
 			wc_pend_id = -1;
+			wc_pend_ssid[0] = '\0';
 		}
 		break;
 	}
@@ -907,18 +925,6 @@ wifi_connect(const char *ssid, const char *psk, int hidden)
 	wc_error[0] = '\0';
 	wr_queue(&c);
 	return 0;   /* queued; failures surface via events/last_error */
-}
-
-int
-wifi_connect_known(int net_id)
-{
-	WrCtl c = { .kind = WR_CTL_CONNECT_KNOWN, .id = net_id };
-
-	if (nm_backend_active())
-		return nm_wifi_connect_known(net_id);
-	wc_error[0] = '\0';
-	wr_queue(&c);
-	return 0;
 }
 
 void

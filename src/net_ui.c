@@ -1,6 +1,6 @@
-/* Network module + popup: one combined ethernet/wifi/VPN surface.
- * Data comes from netmon (rtnetlink/sysfs/ethtool), wifi_ctrl
- * (wpa_supplicant) and vpnctl (systemd units) — no nmcli, no
+/* Network module + popup: one combined ethernet/wifi surface.
+ * Data comes from netmon (rtnetlink/sysfs/ethtool) and wifi_ctrl
+ * (wpa_supplicant) — no nmcli, no
  * NetworkManager.  Ethernet with carrier hides wifi (the radio is
  * rfkill-blocked by netmon's policy) but a toggle in the popup can
  * force it back on.  All heavy reads happen only while the popup is
@@ -28,10 +28,8 @@
 #define NET_HIT_FIELD_SSID  508
 #define NET_HIT_FIELD_PSK   509
 #define NET_HIT_NET_BASE    510   /* + scan index */
-#define NET_HIT_VPN_BASE    560   /* + 2*i (even: toggle, odd: auto) */
 
 #define NET_LIST_MAX 24   /* = WIFI_SCAN_MAX: show every network found */
-#define VPN_LIST_MAX 6
 
 /* popup view: normal info card, scan list, or hidden-network form */
 enum { NETV_NORMAL, NETV_SCAN, NETV_HIDDEN };
@@ -40,7 +38,6 @@ static WifiNet ui_nets[WIFI_SCAN_MAX];
 static int ui_nnets;
 static int ui_scanning;
 static uint64_t ui_scan_req_ms;
-static uint64_t ui_vpn_refresh_ms;
 static NetIfStats ui_stats;
 static int ui_stats_ok;
 /* status cache: rendernetpopup runs on every hover change, so it must
@@ -56,6 +53,7 @@ static char ui_dns[128];
 static uint64_t net_prev_stamp_ms;   /* netwatch stamp of net_prev_rx/tx */
 static int ui_view;
 static char ui_target[33];    /* ssid of the in-flight connect attempt */
+static uint64_t ui_connect_ms;   /* when the attempt was queued */
 static char ui_hid_ssid[33];  /* hidden-network form fields (committed) */
 static char ui_hid_psk[64];
 static int ui_hid_focus;      /* 0 = SSID field, 1 = passphrase */
@@ -77,8 +75,10 @@ netsys_changed(void)
 static void
 scan_psk_submitted(const char *text, void *data)
 {
-	if (ui_target[0])
+	if (ui_target[0]) {
+		ui_connect_ms = monotonic_msec();
 		wifi_connect(ui_target, text, 0);
+	}
 }
 
 static void hid_psk_submitted(const char *text, void *data);
@@ -98,6 +98,7 @@ hid_psk_submitted(const char *text, void *data)
 	snprintf(ui_hid_psk, sizeof(ui_hid_psk), "%s", text);
 	if (ui_hid_ssid[0]) {
 		snprintf(ui_target, sizeof(ui_target), "%s", ui_hid_ssid);
+		ui_connect_ms = monotonic_msec();
 		wifi_connect(ui_hid_ssid, ui_hid_psk, 1);
 	}
 }
@@ -166,7 +167,7 @@ refreshstatusnet(void)
 	if (!popup_active && text_entry_active())
 		text_entry_cancel();
 	if (!popup_active) {
-		if (ui_view != NETV_NORMAL)
+		if (ui_view != NETV_NORMAL || ui_target[0])
 			net_view_reset();
 		wifi_share_reset();
 	}
@@ -180,12 +181,12 @@ refreshstatusnet(void)
 	ui_ws = ws;
 
 	/* radio gone → the scan/hidden views have nothing to stand on */
-	if (ui_view != NETV_NORMAL && (!s.wifi.present || s.wifi_blocked))
+	if ((ui_view != NETV_NORMAL || ui_target[0]) &&
+			(!s.wifi.present || s.wifi_blocked))
 		net_view_reset();
-	/* successful connect from scan/hidden → back to the normal card,
-	 * now showing the new network */
-	if (ui_view != NETV_NORMAL && ui_target[0] && wifi_assoc &&
-			strcmp(ws.ssid, ui_target) == 0)
+	/* successful connect → back to the normal card, now showing the
+	 * new network (the inline entry lives in any list view) */
+	if (ui_target[0] && wifi_assoc && strcmp(ws.ssid, ui_target) == 0)
 		net_view_reset();
 
 	net_available = (s.eth.present && s.eth.carrier) || wifi_assoc;
@@ -286,11 +287,6 @@ refreshstatusnet(void)
 			ui_scan_req_ms = now;
 		}
 	}
-	if (popup_active && now - ui_vpn_refresh_ms > 10000) {
-		vpnctl_refresh();
-		ui_vpn_refresh_ms = now;
-	}
-
 	set_net_icon_path(icon_path);
 
 	wl_list_for_each(m, &mons, link) {
@@ -327,12 +323,13 @@ scan_hidden_buttons(Card *card, int hot)
 /* Fixed content width whenever the network list (or its inline
  * passphrase entry) is visible, so the card never resizes between
  * picking a network and typing the passphrase. */
-#define NET_LIST_W 380
+#define NET_LIST_W 460
 
-/* Every found network, strongest first, as a big hover row — signal
- * icon, SSID, security method, open/closed padlock.  Fills ui_shown so
- * clicks resolve against exactly what was drawn.  The picked row turns
- * into a passphrase entry with a Connect button, keeping its icon. */
+/* Every found network, strongest first, as a big two-line hover row —
+ * signal icon, SSID over security/state, signal %, open/closed padlock.
+ * Fills ui_shown so clicks resolve against exactly what was drawn.
+ * The picked row turns into a passphrase entry with a Connect button,
+ * keeping its icon. */
 static void
 render_net_list(Card *card, int hot)
 {
@@ -348,8 +345,9 @@ render_net_list(Card *card, int hot)
 	}
 	for (i = 0; i < ui_nshown; i++) {
 		WifiNet *w = &ui_shown[i];
-		const char *sec;
 		const char *icon;
+		const float *subcol = card_col_dim;
+		char pct[8], sub[64];
 
 		*w = ui_nets[i];
 		icon = wifi_icon_for_quality(dbm_to_pct(w->signal_dbm));
@@ -359,18 +357,33 @@ render_net_list(Card *card, int hot)
 					text_entry_display(), card_col_blue,
 					"Connect", NET_HIT_CONNECT,
 					hot == NET_HIT_CONNECT);
+			card_row_sub(card, "Enter passphrase, then Connect",
+					card_col_blue);
 			card_row_big(card);
 			continue;
 		}
-		sec = w->connected ? "Connected" :
-			(w->secured ? (w->sec[0] ? w->sec : "WPA") : "Open");
-		card_icon_text_hit(card, icon,
-				w->ssid, sec,
-				w->connected || w->known ?
-				card_col_green : card_col_dim,
+		if (w->connected) {
+			snprintf(sub, sizeof(sub), "Connected");
+			subcol = card_col_green;
+		} else if (ui_target[0] &&
+				strcmp(w->ssid, ui_target) == 0 &&
+				!wifi_last_error()[0] &&
+				monotonic_msec() - ui_connect_ms < 15000) {
+			snprintf(sub, sizeof(sub), "Connecting…");
+			subcol = card_col_blue;
+		} else {
+			snprintf(sub, sizeof(sub), "%s%s",
+					w->secured ?
+					(w->sec[0] ? w->sec : "WPA") : "Open",
+					w->known ? " · Saved" : "");
+		}
+		snprintf(pct, sizeof(pct), "%d%%",
+				(int)lround(dbm_to_pct(w->signal_dbm)));
+		card_icon_text_hit(card, icon, w->ssid, pct, card_col_dim,
 				w->secured ? lock_closed_icon : lock_open_icon,
 				NET_HIT_NET_BASE + i,
 				hot == NET_HIT_NET_BASE + i);
+		card_row_sub(card, sub, subcol);
 		card_row_big(card);
 	}
 }
@@ -638,7 +651,7 @@ rendernetpopup(Monitor *m)
 	NetLinkSnap s;
 	WifiStatus ws;
 	char value[32], sub[64], v1[64], v2[64];
-	int wifi_assoc = 0, hot, i;
+	int wifi_assoc = 0, hot;
 	size_t si;
 
 	if (!m || !m->statusbar.net_popup.tree)
@@ -838,35 +851,6 @@ rendernetpopup(Monitor *m)
 		}
 	}
 
-	/* VPN */
-	{
-		VpnProfile prof[VPN_MAX];
-		int nprof = vpnctl_profiles(prof, VPN_MAX);
-
-		if (nprof > 0) {
-			card_section(card, "VPN");
-			for (i = 0; i < nprof && i < VPN_LIST_MAX; i++) {
-				VpnProfile *v = &prof[i];
-				int tid = NET_HIT_VPN_BASE + 2 * i;
-				int aid = tid + 1;
-
-				card_text_btn(card, v->label,
-						v->busy ? "…" :
-						(v->active ? "Active" : NULL),
-						v->active ? card_col_green :
-						card_col_dim,
-						v->active ? "Stop" : "Start",
-						tid, hot == tid);
-				card_kv2_btn(card, "", "", NULL,
-						"Autoconnect",
-						v->autoconnect ? "On" : "Off",
-						v->autoconnect ?
-						card_col_green : NULL,
-						aid, hot == aid);
-			}
-		}
-	}
-
 finish:
 	if (card_finish(card, &res) != 0)
 		return;
@@ -973,13 +957,14 @@ net_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 		} else if (id == NET_HIT_BACK && button == BTN_LEFT) {
 			net_view_reset();
 		} else if (id == NET_HIT_CONNECT && button == BTN_LEFT) {
-			if (ui_view == NETV_SCAN && ui_target[0]) {
+			if (ui_view != NETV_HIDDEN && ui_target[0]) {
 				char psk[80];
 
 				snprintf(psk, sizeof(psk), "%s",
 						text_entry_text());
 				if (text_entry_active())
 					text_entry_cancel();
+				ui_connect_ms = monotonic_msec();
 				wifi_connect(ui_target, psk, 0);
 				memset(psk, 0, sizeof(psk));
 			} else if (ui_view == NETV_HIDDEN) {
@@ -987,6 +972,7 @@ net_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 				if (ui_hid_ssid[0]) {
 					snprintf(ui_target, sizeof(ui_target),
 							"%s", ui_hid_ssid);
+					ui_connect_ms = monotonic_msec();
 					wifi_connect(ui_hid_ssid,
 							ui_hid_psk, 1);
 				}
@@ -1019,37 +1005,18 @@ net_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 					wifi_forget(w->known_id);
 			} else if (w->connected) {
 				/* already on this network */
-			} else if (w->known) {
-				snprintf(ui_target, sizeof(ui_target), "%s",
-						w->ssid);
-				wifi_connect_known(w->known_id);
 			} else if (w->secured) {
-				/* row becomes a passphrase entry + Connect;
-				 * the entry row lives in the scan view */
+				/* row becomes a passphrase entry + Connect,
+				 * inline in whichever list is showing */
 				snprintf(ui_target, sizeof(ui_target), "%s",
 						w->ssid);
-				ui_view = NETV_SCAN;
 				text_entry_begin("Passphrase", 1,
 						scan_psk_submitted, NULL);
 			} else {
 				snprintf(ui_target, sizeof(ui_target), "%s",
 						w->ssid);
+				ui_connect_ms = monotonic_msec();
 				wifi_connect(w->ssid, "", 0);
-			}
-		} else if (id >= NET_HIT_VPN_BASE &&
-				id < NET_HIT_VPN_BASE + 2 * VPN_LIST_MAX &&
-				button == BTN_LEFT) {
-			int idx = (id - NET_HIT_VPN_BASE) / 2;
-
-			if ((id - NET_HIT_VPN_BASE) % 2 == 0) {
-				vpnctl_toggle(idx);
-			} else {
-				VpnProfile prof[VPN_MAX];
-				int nprof = vpnctl_profiles(prof, VPN_MAX);
-
-				if (idx < nprof)
-					vpnctl_set_autoconnect(idx,
-							!prof[idx].autoconnect);
 			}
 		}
 		netsys_changed();

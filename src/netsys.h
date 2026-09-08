@@ -2,8 +2,7 @@
  *
  * Kernel-direct where possible: rtnetlink + sysfs + ethtool ioctl for
  * links, /dev/rfkill for radio policy, wpa_supplicant's unix control
- * socket for wifi, sd-bus straight to bluetoothd for bluetooth, and
- * systemd units (via systemctl + polkit) for VPN profiles.  All UI
+ * socket for wifi, sd-bus straight to bluetoothd for bluetooth.  All UI
  * entry points run on the compositor event loop; the wpa control
  * socket and the popup's stats/route/dns file reads live on a small
  * "netwatch" worker thread (wifi_ctrl.c) that publishes snapshots, so
@@ -98,7 +97,6 @@ int wifi_status_get(WifiStatus *out);
 /* Connect to a network; psk NULL/"" for open networks.  hidden=1 sets
  * scan_ssid so hidden SSIDs are probed directly.  Saves config. */
 int wifi_connect(const char *ssid, const char *psk, int hidden);
-int wifi_connect_known(int net_id);
 void wifi_disconnect(void);
 int wifi_forget(int net_id);
 /* Last auth failure ("wrong password"), cleared on connect; "" if none. */
@@ -128,7 +126,6 @@ void nm_wifi_scan_request(void);
 int nm_wifi_scan_get(WifiNet *out, int max);
 int nm_wifi_status_get(WifiStatus *out);
 int nm_wifi_connect(const char *ssid, const char *psk, int hidden);
-int nm_wifi_connect_known(int id);
 void nm_wifi_disconnect(void);
 int nm_wifi_forget(int id);
 const char *nm_wifi_last_error(void);
@@ -190,24 +187,6 @@ void bt_rssi_ping(void);    /* popup visible: keep polling ~2s for 6s */
 
 void bt_audio_on_connect(const char *addr, const char *icon);
 
-/* ── vpnctl.c: VPN profiles as systemd units ─────────────────────── */
-
-#define VPN_MAX 12
-
-typedef struct {
-	char unit[96];          /* e.g. wg-quick-wg0.service */
-	char label[64];         /* display name, e.g. "wg0 (WireGuard)" */
-	int active;
-	int autoconnect;        /* unit enabled */
-	int busy;               /* start/stop in flight */
-} VpnProfile;
-
-void vpnctl_init(void);
-void vpnctl_refresh(void);                  /* async re-list units */
-int vpnctl_profiles(VpnProfile *out, int max);
-void vpnctl_toggle(int idx);                /* start/stop */
-void vpnctl_set_autoconnect(int idx, int on);
-
 /* ── text_entry.c: single-line input for popups ──────────────────── */
 
 typedef void (*text_entry_submit_fn)(const char *text, void *data);
@@ -230,7 +209,7 @@ int text_entry_key(uint32_t keysym, const char *utf8);
 
 /* ── shared plumbing ─────────────────────────────────────────────── */
 
-/* Poke the statusbar: something in net/bt/vpn state changed. */
+/* Poke the statusbar: something in net/bt state changed. */
 void netsys_changed(void);
 void btsys_changed(void);
 

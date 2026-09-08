@@ -287,20 +287,6 @@ const char *osk_layout_upper[OSK_ROWS][OSK_COLS] = {
 
 
 
-#if 0
-VpnConnection *
-vpn_connection_at_index(int idx)
-{
-	VpnConnection *v;
-	int i = 0;
-	wl_list_for_each(v, &vpn_connections, link) {
-		if (i == idx)
-			return v;
-		i++;
-	}
-	return NULL;
-}
-#endif
 
 
 
@@ -2767,7 +2753,6 @@ setup(void)
 	netmon_init();
 	wifi_ctrl_init();
 	btmon_init();
-	vpnctl_init();
 	camwatch_init();
 	lightsense_init();
 	presence_init();

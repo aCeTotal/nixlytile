@@ -127,6 +127,8 @@ void card_icon_text_rbtn_solo(Card *c, const char *icon_path,
 /* Enlarge the last added row: taller with a bigger leading icon
  * (network/device list rows). */
 void card_row_big(Card *c);
+/* Small second line under the last row's label (CROW_TEXT). */
+void card_row_sub(Card *c, const char *sub, const float *col);
 /* Full-row-clickable row (BT-device hover style, but no button): icon
  * + left text, right text, optional status icon (svg asset path) at
  * the right card edge; the whole row is the hit rect and washes on
