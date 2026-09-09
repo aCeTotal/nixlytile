@@ -34,6 +34,132 @@ draw_border(struct wlr_scene_tree *parent, int x, int y,
 	drawrect(parent, x + w - thickness, y, thickness, h, color);
 }
 
+/* ── text ───────────────────────────────────────────────────────────
+ * fcft glyph blitting onto a pixman image.  popup_card.c grew its own
+ * private copy of this first; these are the exported ones for modules
+ * that just need a line of text on a surface they already own. */
+
+static uint32_t
+text_utf8_next(const char **s)
+{
+	const unsigned char *p = (const unsigned char *)*s;
+	uint32_t cp;
+	int extra;
+
+	if (p[0] < 0x80)      { cp = p[0];        extra = 0; }
+	else if ((p[0] & 0xE0) == 0xC0) { cp = p[0] & 0x1F; extra = 1; }
+	else if ((p[0] & 0xF0) == 0xE0) { cp = p[0] & 0x0F; extra = 2; }
+	else if ((p[0] & 0xF8) == 0xF0) { cp = p[0] & 0x07; extra = 3; }
+	else                  { cp = '?';         extra = 0; }
+
+	for (int i = 1; i <= extra; i++) {
+		if ((p[i] & 0xC0) != 0x80) { cp = '?'; extra = i - 1; break; }
+		cp = (cp << 6) | (p[i] & 0x3F);
+	}
+	*s = (const char *)(p + extra + 1);
+	return cp;
+}
+
+int
+nixly_text_width(struct fcft_font *f, const char *s)
+{
+	int pen = 0;
+	uint32_t prev = 0;
+
+	if (!f || !s)
+		return 0;
+	while (*s) {
+		long kx = 0, ky = 0;
+		uint32_t cp = text_utf8_next(&s);
+		const struct fcft_glyph *g;
+
+		if (prev)
+			fcft_kerning(f, prev, cp, &kx, &ky);
+		pen += (int)kx;
+		g = fcft_rasterize_char_utf32(f, cp, FCFT_SUBPIXEL_NONE);
+		if (g)
+			pen += g->advance.x;
+		prev = cp;
+	}
+	return pen;
+}
+
+/* Draw s with its baseline at (x, baseline).  Stops before max_w is
+ * exceeded and appends an ellipsis, so callers can hand it any title
+ * without measuring first.  Returns the advance actually used. */
+int
+nixly_text_draw(pixman_image_t *dst, struct fcft_font *f, const char *s,
+		int x, int baseline, const float col[static 4], int max_w)
+{
+	int pen = 0;
+	uint32_t prev = 0;
+	pixman_color_t pc;
+	pixman_image_t *solid;
+	int ell_w;
+
+	if (!dst || !f || !s)
+		return 0;
+
+	pc.red   = (uint16_t)lroundf(col[0] * 65535.0f);
+	pc.green = (uint16_t)lroundf(col[1] * 65535.0f);
+	pc.blue  = (uint16_t)lroundf(col[2] * 65535.0f);
+	pc.alpha = (uint16_t)lroundf(col[3] * 65535.0f);
+	solid = pixman_image_create_solid_fill(&pc);
+	if (!solid)
+		return 0;
+
+	ell_w = max_w > 0 ? nixly_text_width(f, "…") : 0;
+
+	while (*s) {
+		long kx = 0, ky = 0;
+		const char *next = s;
+		uint32_t cp = text_utf8_next(&next);
+		const struct fcft_glyph *g;
+
+		if (prev)
+			fcft_kerning(f, prev, cp, &kx, &ky);
+		g = fcft_rasterize_char_utf32(f, cp, FCFT_SUBPIXEL_NONE);
+		if (!g) {
+			s = next;
+			prev = cp;
+			continue;
+		}
+		/* Would this glyph (plus room for the ellipsis) overflow? */
+		if (max_w > 0 && pen + (int)kx + g->advance.x + ell_w > max_w) {
+			const struct fcft_glyph *e =
+				fcft_rasterize_char_utf32(f, 0x2026,
+						FCFT_SUBPIXEL_NONE);
+			if (e && e->pix)
+				pixman_image_composite32(PIXMAN_OP_OVER, solid,
+						e->pix, dst, 0, 0, 0, 0,
+						x + pen + e->x, baseline - e->y,
+						e->width, e->height);
+			if (e)
+				pen += e->advance.x;
+			break;
+		}
+		pen += (int)kx;
+		if (g->pix) {
+			if (pixman_image_get_format(g->pix) == PIXMAN_a8r8g8b8)
+				pixman_image_composite32(PIXMAN_OP_OVER, g->pix,
+						NULL, dst, 0, 0, 0, 0,
+						x + pen + g->x, baseline - g->y,
+						g->width, g->height);
+			else
+				pixman_image_composite32(PIXMAN_OP_OVER, solid,
+						g->pix, dst, 0, 0, 0, 0,
+						x + pen + g->x, baseline - g->y,
+						g->width, g->height);
+		}
+		pen += g->advance.x;
+		prev = cp;
+		s = next;
+	}
+
+	pixman_image_unref(solid);
+	return pen;
+}
+
 void
 pixman_buffer_destroy(struct wlr_buffer *wlr_buffer)
 {

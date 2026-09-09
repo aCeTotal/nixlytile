@@ -31,13 +31,14 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            dwl_ipc.o dwl-ipc-unstable-v2-protocol.o window_ipc.o \
            config_parser.o config_loader.o monitors_conf.o monitor_setup.o \
            input_conf.o bindings_conf.o statusbar_conf.o \
+           remote.o remote_pad.o remote_mouse.o \
            apptoggle.o mic_watch.o audio_watch.o audio_devices.o audio_meter.o gaming_conf.o gshortcuts.o \
            statusbar.o tray.o statusbar_support.o terminfo.o launchfx.o diag.o fetch_async.o charge_limit.o fancontrol.o fanwatch.o \
            fancurve.o fan_helper.o fan_ec.o fan_nvml.o \
            diskwatch.o disk_helper.o disk_ui.o \
            popup_card.o popup_extra.o \
            netmon.o wifi_ctrl.o wifi_nm.o wifi_share.o qr_scan.o btmon.o bt_rssi.o bt_audio.o text_entry.o net_ui.o bt_ui.o display_ui.o power_ui.o \
-           notify.o notifyd.o lightsense.o presence.o powersave.o battwatch.o camwatch.o cpuclock.o instruments.o converge.o spawn.o osd.o
+           notify.o notifyd.o lightsense.o presence.o powersave.o battwatch.o camwatch.o cpuclock.o instruments.o converge.o spawn.o osd.o dwt.o launchboost.o overview.o
 
 PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstable-v1-protocol.h \
              $(SRC)/wlr-layer-shell-unstable-v1-protocol.h $(SRC)/wlr-output-power-management-unstable-v1-protocol.h \
@@ -56,6 +57,12 @@ util.o: $(SRC)/util.c $(SRC)/util.h
 diag.o: $(SRC)/diag.c $(SRC)/diag.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 spawn.o: $(SRC)/spawn.c $(SRC)/run_cmd.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+dwt.o: $(SRC)/dwt.c $(SRC)/dwt.h $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+launchboost.o: $(SRC)/launchboost.c $(SRC)/launchboost.h $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+overview.o: $(SRC)/overview.c $(SRC)/overview.h $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 
 # Compositor modules
@@ -136,6 +143,12 @@ config_parser.o: $(SRC)/config_parser.c $(SRC)/config_parser.h
 config_loader.o: $(SRC)/config_loader.c $(SRC)/config_loader.h $(SRC)/config_parser.h $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 apptoggle.o: $(SRC)/apptoggle.c $(SRC)/nixlytile.h $(SRC)/client.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+remote.o: $(SRC)/remote.c $(SRC)/remote.h $(SRC)/nixlytile.h $(SRC)/client.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+remote_pad.o: $(SRC)/remote_pad.c $(SRC)/remote.h $(SRC)/nixlytile.h $(SRC)/client.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+remote_mouse.o: $(SRC)/remote_mouse.c $(SRC)/remote.h $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 mic_watch.o: $(SRC)/mic_watch.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<

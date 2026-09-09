@@ -1,6 +1,8 @@
 #include "nixlytile.h"
 #include "client.h"
 #include "diag.h"
+#include "overview.h"
+#include "remote.h"
 
 static int idle_heartbeat_cb(void *data);
 static int edid_reprobe_cb(void *data);
@@ -13,6 +15,10 @@ cleanupmon(struct wl_listener *listener, void *data)
 	Monitor *m = wl_container_of(listener, m, destroy);
 	LayerSurface *l, *tmp;
 	size_t i;
+
+	/* The overview's scene tree and its geometry are anchored to this
+	 * monitor — drop it before m goes away. */
+	overview_purge_mon(m);
 
 	/* If a laptop display is being removed, clear is_mirror on any output
 	 * that was mirroring it so it becomes an independent display. */
@@ -117,7 +123,8 @@ closemon(Monitor *m, int destroying)
 		Monitor *iter;
 		selmon = NULL;
 		wl_list_for_each(iter, &mons, link) {
-			if (iter->wlr_output->enabled && !iter->is_mirror) {
+			if (iter->wlr_output->enabled && !iter->is_mirror
+					&& !REMOTE_PARKED(iter)) {
 				selmon = iter;
 				break;
 			}
@@ -557,7 +564,8 @@ auto_arrange_monitors(void)
 
 	/* Phase 1: Collect enabled, non-mirror monitors */
 	wl_list_for_each(m, &mons, link) {
-		if (m->wlr_output->enabled && !m->is_mirror && n < MAX_MONITORS) {
+		if (m->wlr_output->enabled && !m->is_mirror && !m->is_virtual
+				&& n < MAX_MONITORS) {
 			MonitorProbe *p = &probes[n];
 			p->mon = m;
 			monitor_effective_size(m, &p->eff_w, &p->eff_h);
@@ -827,6 +835,11 @@ createmon(struct wl_listener *listener, void *data)
 
 	m = wlr_output->data = ecalloc(1, sizeof(*m));
 	m->wlr_output = wlr_output;
+	if (wlr_output_is_headless(wlr_output)) {
+		static int last_virt_idx;
+		m->is_virtual = 1;
+		m->virt_idx = ++last_virt_idx;
+	}
 
 	for (i = 0; i < LENGTH(m->layers); i++)
 	wl_list_init(&m->layers[i]);
@@ -842,8 +855,24 @@ createmon(struct wl_listener *listener, void *data)
 
 	m->tagset[0] = m->tagset[1] = 1;
 
+	/* Virtual outputs stay parked off-layout until a remote session claims
+	 * them.  Skip user config entirely — remote.c owns their mode. */
+	if (m->is_virtual) {
+		use_runtime_config = 1;
+		m->mfact = 0.55f;
+		m->nmaster = 1;
+		m->lt[0] = &layouts[0];
+		m->lt[1] = &layouts[nlayouts > 1 ? 1 : 0];
+		strncpy(m->ltsymbol, m->lt[m->sellt]->symbol, LENGTH(m->ltsymbol));
+		m->m.x = REMOTE_PARK_X + REMOTE_PARK_STEP * (m->virt_idx - 1);
+		m->m.y = 0;
+		wlr_output_state_set_custom_mode(&state, REMOTE_PARK_W,
+			REMOTE_PARK_H, REMOTE_PARK_HZ * 1000);
+		wlr_output_state_set_scale(&state, 1.0f);
+	}
+
 	/* First check runtime monitor configuration */
-	rtcfg = find_monitor_config(wlr_output->name);
+	rtcfg = m->is_virtual ? NULL : find_monitor_config(wlr_output->name);
 	if (rtcfg) {
 		use_runtime_config = 1;
 		wlr_log(WLR_INFO, "Using runtime config for monitor %s", wlr_output->name);
@@ -1275,11 +1304,13 @@ dirtomon(enum wlr_direction dir)
 	if (!wlr_output_layout_get(output_layout, selmon->wlr_output))
 		return selmon;
 	if ((next = wlr_output_layout_adjacent_output(output_layout,
-			dir, selmon->wlr_output, selmon->m.x, selmon->m.y)))
+			dir, selmon->wlr_output, selmon->m.x, selmon->m.y))
+			&& !REMOTE_PARKED((Monitor *)next->data))
 		return next->data;
 	if ((next = wlr_output_layout_farthest_output(output_layout,
 			dir ^ (WLR_DIRECTION_LEFT|WLR_DIRECTION_RIGHT),
-			selmon->wlr_output, selmon->m.x, selmon->m.y)))
+			selmon->wlr_output, selmon->m.x, selmon->m.y))
+			&& !REMOTE_PARKED((Monitor *)next->data))
 		return next->data;
 	return selmon;
 }
@@ -1438,12 +1469,12 @@ outputmgrtest(struct wl_listener *listener, void *data)
 	outputmgrapplyortest(config, 1);
 }
 
+/* DPMS an output on/off.  Shared by the wlr-output-power protocol and
+ * remote mode, which blanks the physical screens while streaming. */
 void
-powermgrsetmode(struct wl_listener *listener, void *data)
+monitor_set_power(Monitor *m, int on)
 {
-	struct wlr_output_power_v1_set_mode_event *event = data;
 	struct wlr_output_state state = {0};
-	Monitor *m = event->output->data;
 
 	if (!m)
 		return;
@@ -1453,7 +1484,7 @@ powermgrsetmode(struct wl_listener *listener, void *data)
 	/* If the output is going to sleep while HDR is active, clear HDR
 	 * state synchronously so the next wake re-evaluates from scratch
 	 * rather than coming back with stale hdr_active=1. */
-	if (!event->mode && m->hdr_active) {
+	if (!on && m->hdr_active) {
 		wlr_output_state_set_render_format(&state,
 			m->render_10bit_active ?
 			DRM_FORMAT_XRGB2101010 : DRM_FORMAT_XRGB8888);
@@ -1468,17 +1499,25 @@ powermgrsetmode(struct wl_listener *listener, void *data)
 		m->hdr_commit_fail_count = 0;
 	}
 
-	wlr_output_state_set_enabled(&state, event->mode);
+	wlr_output_state_set_enabled(&state, on);
 	wlr_output_commit_state(m->wlr_output, &state);
 
-	m->asleep = !event->mode;
+	m->asleep = !on;
 	/* A schedule_frame issued while the output was off emits no frame
 	 * event, so frame_scheduled can be wedged at 1 — which silently
 	 * blocks every future request_frame/arrange schedule.  Reset on
 	 * wake so the first arrange after wake actually ticks. */
-	if (event->mode)
+	if (on)
 		m->frame_scheduled = 0;
 	updatemons(NULL, NULL);
+}
+
+void
+powermgrsetmode(struct wl_listener *listener, void *data)
+{
+	struct wlr_output_power_v1_set_mode_event *event = data;
+
+	monitor_set_power(event->output->data, event->mode);
 }
 
 /* ── Idle monitor render throttle ─────────────────────────────────── */
@@ -1698,6 +1737,29 @@ update_hdr_target(Monitor *m, uint64_t now_ns)
 		return;
 	}
 
+	/* Remote session: the whole stream is HDR, so skip content gating —
+	 * SDR windows are tone-mapped by the renderer's color pipeline. */
+	if (m->hdr_force) {
+		if (m->hdr_active)
+			return;
+		memset(&m->hdr_pending_desc, 0, sizeof(m->hdr_pending_desc));
+		m->hdr_pending_desc.transfer_function =
+			WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ;
+		m->hdr_pending_desc.primaries =
+			WLR_COLOR_NAMED_PRIMARIES_BT2020;
+		m->hdr_pending_desc.mastering_luminance.min = 0.005;
+		m->hdr_pending_desc.mastering_luminance.max = 1000.0;
+		m->hdr_pending_desc.max_cll = 1000.0;
+		m->hdr_pending_desc.max_fall = 400.0;
+		m->hdr_driver_client = NULL;
+		m->hdr_entry_pending = 1;
+		return;
+	}
+	if (m->is_virtual && m->hdr_active) {
+		m->hdr_exit_pending = 1;
+		return;
+	}
+
 	driver = hdr_driver_for(m, &pq_surface);
 
 	if (driver && !m->hdr_active) {
@@ -1851,7 +1913,15 @@ finalize_hdr_transition(Monitor *m, int commit_ok, uint64_t now_ns)
 static void
 classify_fullscreen_content(Monitor *m, int *out_game, int *out_video, int *out_tearing)
 {
-	Client *c = focustop(m);
+	/* The fullscreen client that is actually ON SCREEN — not the
+	 * keyboard-focused one.  Super+Left/Right moves focus to a
+	 * neighbouring column while the video keeps covering the output;
+	 * with focustop() the classification flipped to "no video" mid-
+	 * playback, which tore down the cadence, dropped the VIDEO
+	 * content-type, re-armed the camera-slide frame_done withhold and
+	 * handed the player to the unfocused fps cap — the video visibly
+	 * stuttered on every column switch. */
+	Client *c = fullscreen_visible_on(m);
 
 	/* Return cached result if the top client hasn't changed.
 	 * Guard against NULL == NULL: after invalidate_video_pacing()
@@ -3185,10 +3255,10 @@ rendermon(struct wl_listener *listener, void *data)
 	 * old second call doubled that walk every frame. */
 	Client *vis_fsc = fullscreen_visible_on(m);
 	{
-		/* classify_fullscreen_content() keys off focustop(m): a floating
-		 * popup (Steam overlay, notification) on top of a fullscreen
-		 * game reports is_game=0 and would release the lock mid-game.
-		 * Key the lock off "a fullscreen game is visible" instead. */
+		/* Belt and braces: is_game now derives from the same
+		 * fullscreen_visible_on() client, but keep the explicit check
+		 * so a classify cache miss can't release the cursor lock
+		 * mid-game. */
 		game_visible = is_game;
 		if (!game_visible && vis_fsc && looks_like_game(vis_fsc))
 			game_visible = 1;
@@ -3265,7 +3335,9 @@ rendermon(struct wl_listener *listener, void *data)
 	if (is_game && !is_video && (m->vrr_active || m->game_vrr_active) &&
 	    !m->vrr_pending &&
 	    !m->hdr_entry_pending && !m->hdr_exit_pending) {
-		Client *gc = focustop(m);
+		Client *gc = fullscreen_visible_on(m);  /* not focustop — the
+							 * VRR skip must track the
+							 * game's own buffer */
 		struct wlr_surface *gsurf = gc ? client_surface(gc) : NULL;
 		struct wlr_buffer *gbuf = gsurf
 			? (struct wlr_buffer *)gsurf->buffer : NULL;
@@ -3511,7 +3583,9 @@ rendermon(struct wl_listener *listener, void *data)
 		 * never estimated at all).  Buffer-pointer comparison works for
 		 * both xdg and Xwayland clients, like track_client_frame. */
 		if (needs_frame) {
-			Client *gc = focustop(m);
+			Client *gc = fullscreen_visible_on(m);  /* the client the
+								* pacing is FOR, not
+								* whoever holds focus */
 			struct wlr_surface *gsurf = gc ? client_surface(gc) : NULL;
 			struct wlr_buffer *gbuf = gsurf
 				? (struct wlr_buffer *)gsurf->buffer : NULL;
@@ -3527,7 +3601,8 @@ rendermon(struct wl_listener *listener, void *data)
 	 * For video: use detected_video_hz as the fps source.
 	 * For games: use estimated_game_fps from real-time tracking. */
 	if (is_video && !m->vrr_active && m->frame_pacing_active) {
-		Client *vc = focustop(m);
+		Client *vc = fullscreen_visible_on(m);  /* not focustop — see
+							* classify_fullscreen_content */
 		if (vc && vc->detected_video_hz > 0.0f)
 			m->estimated_game_fps = vc->detected_video_hz;
 		/* Video players manage their own frame timing based on PTS.
@@ -3883,8 +3958,8 @@ frame_done:
 	 * serves size-pending/frozen clients every vblank regardless. */
 	if (m->camera_anim_active && !is_video && !is_game && !hidden_due) {
 		/* slide in flight — withhold (see comment above) */
-	} else if (focus_power_save && !is_game && !is_video &&
-			!m->camera_anim_active && !locked) {
+	} else if (focus_power_save && unfocused_fps_cap > 0 && !is_game &&
+			!is_video && !m->camera_anim_active && !locked) {
 		/* !locked: the session-lock surface is neither a focused
 		 * toplevel nor an exclusive layer surface, so under this
 		 * throttle it only got the blanket frame_done at

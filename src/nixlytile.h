@@ -1172,6 +1172,10 @@ typedef struct {
 	struct wl_listener ping_timeout; /* freeze watchdog: unresponsive → kill */
 	Workspace *fs_ws;             /* workspace fullscreened on; NULL = not fs / unbound (always visible) */
 
+	/* Remote-mode restore slot: where this client sat before streaming */
+	char rst_out[32];
+	int rst_ws, rst_col, rst_row;
+
 	/* ── Per-client geometry animation (phase 4) ──────────────────
 	 * target_geom is what the layout wants; geom is what's currently
 	 * shown (moves toward target each anim tick).  When unset
@@ -1444,6 +1448,9 @@ struct Monitor {
 	char ltsymbol[16];
 	int asleep;
 	int is_mirror;  /* This output mirrors the laptop display */
+	int is_virtual; /* Headless output used for remote desktop streaming */
+	int virt_idx;   /* 1-based index among virtual outputs */
+	int hdr_force;  /* Drive output into HDR regardless of client content */
 	LayoutNode *root[MAX_TAGS];
 	struct wlr_output_mode *original_mode;
 	int video_mode_active;
@@ -2268,6 +2275,9 @@ void draw_border(struct wlr_scene_tree *parent, int x, int y,
 		int w, int h, int thickness, const float color[static 4]);
 void drawroundedrect(struct wlr_scene_tree *parent, int x, int y,
 		int width, int height, const float color[static 4]);
+int nixly_text_width(struct fcft_font *f, const char *s);
+int nixly_text_draw(pixman_image_t *dst, struct fcft_font *f, const char *s,
+		int x, int baseline, const float color[static 4], int max_w);
 #if 1
 struct wlr_buffer *statusbar_buffer_from_argb32(const uint32_t *data, int width, int height);
 struct wlr_buffer *statusbar_buffer_from_argb32_raw(const uint32_t *data, int width, int height);
@@ -2308,6 +2318,7 @@ int resolve_asset_path(const char *path, char *out, size_t len);
 #define PENDING_LAUNCH_TIMEOUT_MS 60000 /* 60s for very slow apps */
 
 void pending_launch_add(pid_t pid, uint32_t tags, const char *output_name);
+int64_t pending_launch_age_ms(pid_t client_pid);
 int pending_launch_find(pid_t client_pid, uint32_t *out_tags,
 	char *out_output, size_t out_output_sz);
 
@@ -2448,6 +2459,8 @@ int workspace_has_clients(Workspace *ws);
 void workspace_attach_client(Workspace *ws, Client *c);
 void workspace_detach_client(Client *c);
 void workspace_drop_tile(Workspace *ws, Client *c, double screen_x);
+void workspace_adopt_column(Workspace *dst, Column *col);
+void workspace_move_to_monitor(Workspace *ws, Monitor *dst);
 void workspace_focus_client(Client *c);
 void workspace_layout(Workspace *ws);
 void monitor_apply_positions(Monitor *m);
@@ -2471,6 +2484,7 @@ void expel_window_from_column(const Arg *arg);
 void move_window_in_column_dir(const Arg *arg);
 void focus_window_in_column_dir(const Arg *arg);
 extern const double preset_column_widths[];
+void workspace_new_column_inner_size(Monitor *m, int bw, int *out_w, int *out_h);
 extern const int n_preset_column_widths;
 extern const int default_column_width_idx;
 
@@ -2594,6 +2608,7 @@ void outputmgrapply(struct wl_listener *listener, void *data);
 void outputmgrapplyortest(struct wlr_output_configuration_v1 *config, int test);
 void outputmgrtest(struct wl_listener *listener, void *data);
 void powermgrsetmode(struct wl_listener *listener, void *data);
+void monitor_set_power(Monitor *m, int on);
 void gpureset(struct wl_listener *listener, void *data);
 void requestmonstate(struct wl_listener *listener, void *data);
 void updatemons(struct wl_listener *listener, void *data);
@@ -3269,6 +3284,7 @@ void power_profile_high(void);
 /* powersave.c — max battery saving while discharging (laptops) */
 void powersave_init(void);
 void powersave_reassert(void);
+double powersave_clock_cap(void);
 
 /* presence.c — webcam presence watch → full power save (laptops) */
 extern uint64_t last_key_activity_ms;

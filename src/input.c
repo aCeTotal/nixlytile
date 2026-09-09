@@ -1,6 +1,9 @@
 #include "nixlytile.h"
 #include "client.h"
 #include "netsys.h"
+#include "diag.h"
+#include "dwt.h"
+#include "overview.h"
 
 static void (*last_keybinding_func)(const Arg *);
 
@@ -466,6 +469,10 @@ void
 axisnotify(struct wl_listener *listener, void *data)
 {
 	struct wlr_pointer_axis_event *event = data;
+
+	if (dwt_suppress(&event->pointer->base))
+		return;
+
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
 	/* Scroll on a statusbar module adjusts brightness/mic/volume. */
@@ -662,6 +669,9 @@ buttonpress(struct wl_listener *listener, void *data)
 	Client *c, *target = NULL;
 	const Button *b;
 
+	if (dwt_suppress(&event->pointer->base))
+		return;
+
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
 	/* Push-to-talk on a mouse button (side/extra/…): unmute while held,
@@ -682,6 +692,11 @@ buttonpress(struct wl_listener *listener, void *data)
 		selmon = xytomon(cursor->x, cursor->y);
 		if (locked)
 			break;
+
+		/* The overview owns the screen; a click must not fall through
+		 * to a thumbnail (see the gate in motionnotify). */
+		if (overview_is_open())
+			return;
 
 		/* An open tray context-menu eats the next click. */
 		if (selmon && selmon->statusbar.tray_menu.visible) {
@@ -721,7 +736,36 @@ buttonpress(struct wl_listener *listener, void *data)
 		 * lift=0 → focus but DO NOT warp cursor.  The user clicked
 		 * AT a specific location — we must not yank the pointer
 		 * away to tile-center, that would lose the click target. */
-		xytonode(cursor->x, cursor->y, NULL, &c, NULL, NULL, NULL);
+		{
+			struct wlr_surface *hit = NULL;
+			double hx = 0, hy = 0;
+			xytonode(cursor->x, cursor->y, &hit, &c, NULL, &hx, &hy);
+			/* CLICK probe: a press that resolves to no surface (or to
+			 * surface coords outside the client's committed size) is a
+			 * dead click — the client never sees the button. */
+			{
+				int nw = 0, nh = 0;
+				if (c)
+					client_get_committed_size(c, &nw, &nh);
+				diag_logf("CLICK",
+					"btn=%u at=%.0f,%.0f surf=%s appid='%s' sxy=%.0f,%.0f geom=%dx%d@%d,%d nat=%dx%d bw=%d frozen=%d ss_en=%d clipped=%d anim=%d giveup=%d float=%d fs=%d focus_surf=%s",
+					event->button, cursor->x, cursor->y,
+					hit ? "yes" : "NULL",
+					c ? (client_get_appid(c) ? client_get_appid(c) : "(null)") : "-",
+					hx, hy,
+					c ? c->geom.width : 0, c ? c->geom.height : 0,
+					c ? c->geom.x : 0, c ? c->geom.y : 0,
+					nw, nh, c ? (int)c->bw : 0,
+					c ? (c->frozen_buffer != NULL) : 0,
+					(c && c->scene_surface) ? c->scene_surface->node.enabled : -1,
+					c ? c->area_clipped : 0,
+					c ? c->anim_active : 0,
+					c ? c->converge_gave_up : 0,
+					c ? c->isfloating : 0,
+					c ? c->isfullscreen : 0,
+					seat->pointer_state.focused_surface ? "yes" : "NULL");
+			}
+		}
 		/* A visible fullscreen client owns input exclusively — a click
 		 * on a tile beside a letterboxed game keeps focus on the game. */
 		{
@@ -1534,6 +1578,8 @@ keypress(struct wl_listener *listener, void *data)
 
 	last_key_activity_ms = monotonic_msec();
 	presence_note_input();
+	dwt_note_key(event->keycode,
+			event->state == WL_KEYBOARD_KEY_STATE_PRESSED);
 
 	/* Translate libinput keycode -> xkbcommon */
 	uint32_t keycode = event->keycode + 8;
@@ -1610,6 +1656,17 @@ keypress(struct wl_listener *listener, void *data)
 
 	/* On _press_ if there is no active screen locker,
 	 * attempt to process a compositor keybinding. */
+	/* The overview is modal: while it is up, arrows/Enter/Escape drive
+	 * the grid and nothing else reaches a client.  Modified chords fall
+	 * through to the bind table below, so Super+O closes it again. */
+	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED
+			&& overview_is_open()) {
+		for (i = 0; i < nsyms; i++)
+			handled = overview_handle_key(mods, syms[i]) || handled;
+		if (handled)
+			return;
+	}
+
 	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 		if (!shortcuts_are_inhibited()) {
 			last_keybinding_func = NULL;
@@ -1708,6 +1765,9 @@ motionabsolute(struct wl_listener *listener, void *data)
 	 * so we have to warp the mouse there. Also, some hardware emits these events. */
 	struct wlr_pointer_motion_absolute_event *event = data;
 	double lx, ly, dx, dy;
+
+	if (dwt_suppress(&event->pointer->base))
+		return;
 
 	if (!event->time_msec) /* this is 0 with virtual pointers */
 		wlr_cursor_warp_absolute(cursor, &event->pointer->base, event->x, event->y);
@@ -2369,6 +2429,16 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		}
 	}
 
+	/* The overview's thumbnails ARE wlr_scene_surfaces of the real
+	 * clients, so xytonode happily resolves a hover over a thumbnail to
+	 * that client — at scaled-down coordinates, which would hover-
+	 * highlight random widgets in a window the user is only looking at.
+	 * The overview is keyboard-driven; give it no pointer at all. */
+	if (overview_is_open()) {
+		c = NULL;
+		surface = NULL;
+	}
+
 	/* A visible bar popup/dropdown occludes whatever is beneath it.
 	 * xytonode sees only surfaces, and the popups are scene rects and
 	 * glyph buffers, so without this the client under the popup keeps
@@ -2649,6 +2719,10 @@ motionrelative(struct wl_listener *listener, void *data)
 	/* This event is forwarded by the cursor when a pointer emits a _relative_
 	 * pointer motion event (i.e. a delta) */
 	struct wlr_pointer_motion_event *event = data;
+
+	if (dwt_suppress(&event->pointer->base))
+		return;
+
 	/* The cursor doesn't move unless we tell it to. The cursor automatically
 	 * handles constraining the motion to the output layout, as well as any
 	 * special configuration applied for the specific input device which

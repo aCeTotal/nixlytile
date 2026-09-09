@@ -190,6 +190,8 @@ const Key keys[] = {
 	{ MODKEY,                    XKB_KEY_f,          maximize_column,   {0} },
 	{ MODKEY,                    XKB_KEY_b,          togglestatusbar,   {0} },
 
+	{ MODKEY,                    XKB_KEY_o,          overview_toggle,   {0} },
+
 	/* Focus navigation */
 	{ MODKEY,                    XKB_KEY_h,          focus_column_dir,            {.i = -1} },
 	{ MODKEY,                    XKB_KEY_l,          focus_column_dir,            {.i = +1} },

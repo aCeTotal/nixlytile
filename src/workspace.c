@@ -302,6 +302,82 @@ workspace_detach_client(Client *c)
 		refreshworkspacemodule(ws->mon);
 }
 
+/* Move a column to another workspace, clients and stacking intact.
+ * Appends at the end so source order is preserved across repeated calls. */
+void
+workspace_adopt_column(Workspace *dst, Column *col)
+{
+	Workspace *src;
+	Client *c;
+
+	if (!dst || !col || col->ws == dst)
+		return;
+
+	src = col->ws;
+	wl_list_remove(&col->link);
+	if (src) {
+		src->n_columns--;
+		if (src->focused_col == col)
+			src->focused_col = wl_list_empty(&src->columns) ? NULL
+				: wl_container_of(src->columns.next,
+					src->focused_col, link);
+	}
+
+	col->ws = dst;
+	wl_list_insert(dst->columns.prev, &col->link);
+	dst->n_columns++;
+	if (!dst->focused_col)
+		dst->focused_col = col;
+
+	/* Springs are meaningless across monitors — snap on next layout */
+	col->just_created = 1;
+
+	if (dst->mon) {
+		wl_list_for_each(c, &col->clients, column_link) {
+			c->mon = dst->mon;
+			c->tags = dst->mon->tagset[dst->mon->seltags];
+		}
+	}
+}
+
+/* Move a whole workspace to another monitor, columns intact. */
+void
+workspace_move_to_monitor(Workspace *ws, Monitor *dst)
+{
+	Monitor *src;
+	Column *col;
+	Client *c;
+
+	if (!ws || !dst || ws->mon == dst)
+		return;
+
+	src = ws->mon;
+	wl_list_remove(&ws->link);
+	if (src) {
+		src->n_workspaces--;
+		if (src->active_ws == ws)
+			src->active_ws = wl_list_empty(&src->workspaces) ? NULL
+				: wl_container_of(src->workspaces.next, ws, link);
+		if (src->prev_ws == ws)
+			src->prev_ws = NULL;
+	}
+
+	ws->mon = dst;
+	ws->idx = dst->next_ws_id++;
+	wl_list_insert(dst->workspaces.prev, &ws->link);
+	dst->n_workspaces++;
+	if (!dst->active_ws)
+		dst->active_ws = ws;
+
+	wl_list_for_each(col, &ws->columns, link) {
+		col->just_created = 1;
+		wl_list_for_each(c, &col->clients, column_link) {
+			c->mon = dst;
+			c->tags = dst->tagset[dst->seltags];
+		}
+	}
+}
+
 /* Re-insert a (previously detached) client into the workspace as a new
  * column placed at the drop position.  Used by mouse drag-to-tile: the
  * client floated during drag; on release we slot it into the column row
@@ -555,6 +631,51 @@ default_tiles_per_row(Monitor *m)
 	if (aspect >= 3.0) return 4;
 	if (aspect >= 2.0) return 3;
 	return 2;
+}
+
+/* Inner (border-subtracted) size a BRAND-NEW default column will end up
+ * with on m.  Used by the pre-configure in commitnotify so a client's
+ * first configure already carries its final tile size.
+ *
+ * It has to mirror workspace_layout() exactly.  It did not: the
+ * pre-configure assumed the preset_column_widths[default] proportion
+ * (0.5 × 1912 = 956), while a fresh column actually takes the aspect-fit
+ * branch ((1912 − gap)/2 = 954).  Two pixels apart is enough for a second
+ * configure, and every GTK/Qt client answers that with a full re-layout
+ * and a second render before its window is ever on screen.  One configure
+ * = one layout = one paint. */
+void
+workspace_new_column_inner_size(Monitor *m, int bw, int *out_w, int *out_h)
+{
+	int mon_w, mon_h, gap, n_default, w, h;
+
+	if (out_w) *out_w = 0;
+	if (out_h) *out_h = 0;
+	if (!m)
+		return;
+
+	gap = m->gaps ? (int)gappx : 0;
+	/* w_target, not w — workspace_layout() sizes off the target so a
+	 * mid-spring bar toggle can't feed an intermediate width. */
+	mon_w = m->w_initialized ? m->w_target.width : m->w.width;
+	mon_h = m->w_initialized ? m->w_target.height : m->w.height;
+	if (mon_w <= 0 || mon_h <= 0) {
+		mon_w = m->m.width - 2 * gap;
+		mon_h = m->m.height - 2 * gap;
+	}
+	if (mon_w <= 0 || mon_h <= 0)
+		return;
+
+	n_default = default_tiles_per_row(m);
+	if (n_default < 1)
+		n_default = 1;
+	w = (mon_w - (n_default - 1) * gap) / n_default - 2 * bw;
+	h = mon_h - 2 * bw;
+	if (w < 1) w = 1;
+	if (h < 1) h = 1;
+
+	if (out_w) *out_w = w;
+	if (out_h) *out_h = h;
 }
 
 /* Target width in PIXELS for a column.  Three cases:

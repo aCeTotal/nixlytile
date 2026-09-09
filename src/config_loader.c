@@ -10,7 +10,9 @@
 #include "nixlytile.h"
 #include "client.h"
 #include "config_parser.h"
+#include "remote.h"
 #include "config_loader.h"
+#include "overview.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -226,6 +228,7 @@ static const ActionEntry actions[] = {
 	{ "togglefullscreen",             togglefullscreen,             A_NONE },
 	{ "togglegamespan",               togglegamespan,               A_NONE },
 	{ "togglestatusbar",              togglestatusbar,              A_NONE },
+	{ "toggle-overview",              overview_toggle,              A_NONE },
 	{ "togglegaps",                   togglegaps,                   A_NONE },
 
 	{ "focus-column-dir",             focus_column_dir,             A_INT },
@@ -318,6 +321,20 @@ expand_path(const char *p)
 }
 
 /* ── apply functions ──────────────────────────────────────────────── */
+
+static void
+apply_remote(const KdlNode *n)
+{
+	long li;
+	if (!n) return;
+	if (kdl_arg_int(kdl_find_child(n, "outputs"), 0, &li)) {
+		if (li < 1) li = 1;
+		if (li > REMOTE_MAX_OUTPUTS) li = REMOTE_MAX_OUTPUTS;
+		remote_outputs = (int)li;
+	}
+	if (kdl_arg_int(kdl_find_child(n, "mouse-speed"), 0, &li) && li > 0)
+		remote_mouse_speed = (int)li;
+}
 
 static void
 apply_appearance(const KdlNode *n)
@@ -945,6 +962,7 @@ apply_doc(const KdlDoc *doc, int initial)
 		long li;
 
 		if (!strcmp(n->name, "appearance"))         apply_appearance(n);
+		else if (!strcmp(n->name, "remote"))        apply_remote(n);
 		else if (!strcmp(n->name, "input"))         apply_input(n);
 		else if (!strcmp(n->name, "monitor"))       apply_monitor(n);
 		else if (!strcmp(n->name, "window-rule"))   apply_window_rule(n);

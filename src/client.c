@@ -1,6 +1,7 @@
 #include "nixlytile.h"
 #include "client.h"
 #include "diag.h"
+#include "overview.h"
 #include <pthread.h>
 
 /* ── Pending launch tracking ──────────────────────────────────────────
@@ -81,6 +82,27 @@ pending_launch_add(pid_t pid, uint32_t tags, const char *output_name)
 	pl->launch_ms = now;
 	snprintf(pl->output, sizeof(pl->output), "%s",
 		output_name ? output_name : "");
+}
+
+/* Milliseconds between the spawn that (transitively) produced client_pid
+ * and now, or -1 when this client did not come from one of our launches.
+ * Used by the LAUNCH diag line to separate app start-up cost (spawn →
+ * first buffer) from compositor cost (everything after map). */
+int64_t
+pending_launch_age_ms(pid_t client_pid)
+{
+	uint64_t now = monotonic_msec();
+
+	for (int i = pending_launch_count - 1; i >= 0; i--) {
+		PendingLaunchEntry *pl = &pending_launches[i];
+
+		if (now - pl->launch_ms >= PENDING_LAUNCH_TIMEOUT_MS)
+			continue;
+		if (client_pid == pl->pid ||
+				is_pid_descendant_of(client_pid, pl->pid))
+			return (int64_t)(now - pl->launch_ms);
+	}
+	return -1;
 }
 
 int
@@ -329,32 +351,25 @@ commitnotify(struct wl_listener *listener, void *data)
 		/* Niri parity: pre-configure at the default-column tile size
 		 * so the client commits its initial buffer at the target
 		 * dimensions, not its natural preferred size.  Eliminates the
-		 * "small box → full tile" pop-in on spawn. */
+		 * "small box → full tile" pop-in on spawn.
+		 *
+		 * The size MUST be the one workspace_layout() will hand the new
+		 * column, otherwise the client gets a second configure a few ms
+		 * later and re-lays-out and re-renders its whole window before
+		 * it is ever displayed (measured on Thunar: configure(954,1041)
+		 * then configure(952,1041)).  workspace_new_column_inner_size()
+		 * is that computation, kept next to the layout it mirrors. */
 		{
 			Monitor *m = c->mon ? c->mon : selmon;
-			int avail_w = 0, avail_h = 0, w, h;
-			double prop;
-			if (m) {
-				avail_w = m->w.width;
-				avail_h = m->w.height;
-				if (avail_w <= 0 || avail_h <= 0) {
-					int gap = (m->gaps && gappx > 0) ? (int)gappx : 0;
-					avail_w = m->m.width - 2 * gap;
-					avail_h = m->m.height - 2 * gap;
-				}
-			}
-			if (avail_w > 200 && avail_h > 200) {
-				prop = preset_column_widths[default_column_width_idx];
-				w = (int)((double)avail_w * prop) - 2 * c->bw;
-				h = avail_h - 2 * c->bw;
-				if (w < 100) w = 100;
-				if (h < 100) h = 100;
+			int w = 0, h = 0;
+
+			workspace_new_column_inner_size(m, (int)c->bw, &w, &h);
+			if (w > 100 && h > 100)
 				wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel,
 						w, h);
-			} else {
+			else
 				wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel,
 						0, 0);
-			}
 		}
 		return;
 	}
@@ -1542,6 +1557,21 @@ unset_fullscreen:
 
 	/* Launch cover: a game/launcher window mapped — schedule reveal. */
 	launchfx_client_mapped(c);
+
+	/* LAUNCH probe: map fires only once the client has committed its
+	 * first buffer, so this age is app-side start-up cost (exec, toolkit,
+	 * EGL, theme, D-Bus).  Anything the compositor adds happens after
+	 * this line.  Answers "is the launch slow because of nixlytile or
+	 * because of the app" without guessing. */
+	{
+		pid_t cpid = client_get_pid(c);
+		int64_t age = cpid > 0 ? pending_launch_age_ms(cpid) : -1;
+		if (age >= 0)
+			diag_logf("LAUNCH",
+				"appid='%s' spawn->mapped=%lldms",
+				client_get_appid(c) ? client_get_appid(c) : "(null)",
+				(long long)age);
+	}
 }
 
 void
@@ -2038,6 +2068,15 @@ resize(Client *c, struct wlr_box geo, int interact)
 	 * refocus" behaviour.  Skip when the SIZE we'd configure
 	 * matches the last sent. */
 	client_request_size(c, reqw, reqh);
+
+	/* A pure move leaves client_request_size's size dedup unsatisfied, so
+	 * an X11 client would keep stale root coords — see
+	 * client_flush_x11_pos.  Only when nothing is animating: during a
+	 * camera slide the position changes every frame and Xwayland would get
+	 * a configure per frame (the flood this path exists to avoid); the
+	 * anim settle in monitor_anim_tick flushes once at the end instead. */
+	if (!c->anim_active && !(c->mon && c->mon->anim_was_active))
+		client_flush_x11_pos(c);
 
 	/* Fast-path: when only POSITION changed (camera scroll / ws
 	 * switch), skip the expensive clip + scale tree walks.  These
@@ -2584,6 +2623,10 @@ unmapnotify(struct wl_listener *listener, void *data)
 				anim_spawn_close(unmap_mon, &surf->buffer->base,
 						c->geom);
 		}
+		/* A thumbnail of this client may be on screen right now; the
+		 * mirror node does not keep the surface alive, so the overview
+		 * has to go before the surface does. */
+		overview_purge_client(c);
 		/* Critical: unfreeze BEFORE destroying the scene tree, else
 		 * the snapshot scene_buffer's parent vanishes and we leak
 		 * a wlr_buffer lock. */

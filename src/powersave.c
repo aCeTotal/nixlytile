@@ -13,6 +13,11 @@
  */
 #include "nixlytile.h"
 
+/* Battery clock ceiling, as a fraction of each policy's min..max range.
+ * Shared with powersave_clock_cap() so launchboost.c restores exactly what
+ * powersave_reassert() set. */
+#define PS_BATTERY_CAP 0.6
+
 static int ps_engaged = -1;     /* -1 unknown → first event always applies */
 static int ps_fps_limited;      /* we enabled the limiter, not the user */
 
@@ -26,21 +31,37 @@ powersave_reassert(void)
 		power_profile_low();
 		cpuclock_perf(0);       /* powersave governor + EPP power */
 		cpuclock_boost(0);
-		cpuclock_cap(0.6);      /* mild cap: powersave governor + EPP
+		cpuclock_cap(PS_BATTERY_CAP);  /* mild cap: powersave governor + EPP
 					 * already idle the clocks down; 0.35
 					 * (1.29 GHz ceiling) made everything
 					 * crawl while saving almost nothing —
 					 * idle draw is panel/platform-bound */
 		output_lowpower_refresh(1);  /* panels → lowest refresh (60 Hz) */
-		unfocused_fps_cap = 2;  /* background tiles nearly frozen on battery */
+		unfocused_fps_cap = 20; /* visible background tiles stay watchable —
+					 * 2 froze a side-by-side video outright,
+					 * which reads as a broken compositor rather
+					 * than as power saving */
 	} else {
 		power_profile_high();
 		cpuclock_perf(1);       /* performance governor + EPP perf */
 		cpuclock_boost(1);
 		cpuclock_restore();
 		output_lowpower_refresh(0);  /* restore pinned/best refresh */
-		unfocused_fps_cap = 10; /* light throttle on wall power */
+		unfocused_fps_cap = 0;  /* no throttle on wall power — "always at
+					 * its absolute best" applies to every
+					 * visible tile, not just the focused one */
 	}
+}
+
+/* The clock cap the current power state wants.  launchboost.c releases it
+ * for the length of a launch and puts this value back, so the two never
+ * disagree about what "normal" is.  Read from the boost worker thread —
+ * ps_engaged is a plain int written only here, so a stale read costs at
+ * most one boost window at the wrong cap. */
+double
+powersave_clock_cap(void)
+{
+	return ps_engaged == 1 ? PS_BATTERY_CAP : 1.0;
 }
 
 static void

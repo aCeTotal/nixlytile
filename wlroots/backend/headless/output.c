@@ -11,7 +11,9 @@ static const uint32_t SUPPORTED_OUTPUT_STATE =
 	WLR_OUTPUT_STATE_BACKEND_OPTIONAL |
 	WLR_OUTPUT_STATE_BUFFER |
 	WLR_OUTPUT_STATE_ENABLED |
-	WLR_OUTPUT_STATE_MODE;
+	WLR_OUTPUT_STATE_MODE |
+	/* nixlytile: accept image descriptions so headless outputs can go HDR */
+	WLR_OUTPUT_STATE_IMAGE_DESCRIPTION;
 
 static size_t last_output_num = 0;
 
@@ -135,6 +137,10 @@ struct wlr_output *wlr_headless_add_output(struct wlr_backend *wlr_backend,
 
 	wlr_output_init(wlr_output, &backend->backend, &output_impl, backend->event_loop, &state);
 	wlr_output_state_finish(&state);
+
+	/* nixlytile: no EDID to read, so claim HDR unconditionally */
+	wlr_output->supported_primaries |= WLR_COLOR_NAMED_PRIMARIES_BT2020;
+	wlr_output->supported_transfer_functions |= WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ;
 
 	output_update_refresh(output, 0);
 

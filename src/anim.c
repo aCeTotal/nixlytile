@@ -1,6 +1,7 @@
 #include "nixlytile.h"
 #include "client.h"
 #include "diag.h"
+#include "overview.h"
 
 /*
  * Apply a (sx, sy) visual scale to every scene_buffer beneath a
@@ -145,7 +146,11 @@ static const SpringParams SPRING_WINDOW     = { 1.0, 1.0,  800.0 };
  * scroll_x, and mismatched stiffness makes the reflowing columns
  * visibly trail the camera — tiles drift out of lock-step. */
 static const SpringParams SPRING_COLUMN     = { 1.0, 1.0, 1800.0 };
-static const SpringParams SPRING_OPEN       = { 1.0, 0.9,  900.0 }; /* slight overshoot for life */
+/* Open fade: stiffness 900 settled in ~150ms, which is 150ms of a window
+ * that is ALREADY rendered sitting there half-transparent — the whole
+ * compositor-side share of "nothing opens instantly".  4900 (ω=70) keeps
+ * the fade visible but puts it under human reaction time. */
+static const SpringParams SPRING_OPEN       = { 1.0, 0.9, 4900.0 }; /* slight overshoot for life */
 static const SpringParams SPRING_CLOSE      = { 1.0, 1.0,  900.0 };
 
 int
@@ -970,6 +975,9 @@ monitor_anim_tick(Monitor *m, double dt)
 		notifyd_tick(m, dt, &notif_still);
 		if (notif_still)
 			active = 1;
+		overview_tick(m, dt, &notif_still);
+		if (notif_still)
+			active = 1;
 	}
 
 	/* Open anim tick — per-client scale + fade. */
@@ -1031,6 +1039,20 @@ monitor_anim_tick(Monitor *m, double dt)
 	 * callbacks stalls it behind the pointer for the whole drag. */
 	m->camera_anim_active = camera_anim && !size_anim &&
 			!live_resize_active();
+
+	/* Anim over: flush the position to every X11 client this monitor
+	 * moved.  A camera slide / column reflow with no size change never
+	 * reconfigures them (see client_flush_x11_pos), and the per-client
+	 * settle above only covers clients that had anim_active — column
+	 * clients moving at unchanged size take client_set_target_geom's
+	 * anim_active = 0 branch and never get there. */
+	if (m->anim_was_active && !active) {
+		Client *c;
+		wl_list_for_each(c, &clients, link)
+			if (c->mon == m)
+				client_flush_x11_pos(c);
+	}
+
 	m->anim_was_active = active;
 	m->size_anim_was_active = size_anim;
 	return active;

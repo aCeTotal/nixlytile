@@ -4,6 +4,8 @@
 #include "client.h"
 #include "config_loader.h"
 #include "diag.h"
+#include "launchboost.h"
+#include "remote.h"
 #include "netsys.h"
 #include <execinfo.h>
 
@@ -748,6 +750,7 @@ cleanup(void)
 {
 	wlr_log(WLR_ERROR, "cleanup() called - starting cleanup sequence");
 	apptoggle_cleanup();
+	remote_pad_cleanup();
 	mic_watch_cleanup();
 	audio_watch_cleanup();
 	gaming_conf_cleanup();
@@ -1266,6 +1269,9 @@ run(const char *startup_cmd)
 	/* Gamepad L1+R1 toggle between nixlymedia and retroarch.
 	 * Set up after autostart so it can adopt the spawned nixlymedia pid. */
 	apptoggle_setup();
+
+	/* Gamepad desktop navigation, only live during a remote session. */
+	remote_pad_init();
 
 	/* Microphone module follows capture-device hotplug. */
 	mic_watch_setup();
@@ -2760,6 +2766,7 @@ setup(void)
 	fanwatch_init();
 	diskwatch_init();
 	powersave_init();
+	launchboost_init();
 	gshortcuts_init();
 	fcft_initialized = fcft_init(FCFT_LOG_COLORIZE_NEVER, 0, FCFT_LOG_CLASS_ERROR);
 	if (!fcft_initialized)
@@ -2789,6 +2796,10 @@ setup(void)
 	 * if an X11 server is running. */
 	if (!(backend = wlr_backend_autocreate(event_loop, &session)))
 		die("couldn't create backend");
+
+	/* Virtual outputs for remote desktop.  Added before the renderer so
+	 * the multi-backend's buffer caps account for them. */
+	remote_backend_init(dpy, remote_outputs);
 
 	/* Initialize the scene graph used to lay out windows */
 	scene = wlr_scene_create();
@@ -3599,6 +3610,11 @@ spawn_cmd(const char *cmd)
 
 	if (!cmd || !cmd[0])
 		return -1;
+
+	/* Before the fork: the child needs the clocks from its very first
+	 * instruction, and on battery the 60% cap is still in place until the
+	 * boost worker lifts it. */
+	launchboost_kick();
 
 	pid = fork();
 	if (pid > 0) {

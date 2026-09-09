@@ -470,6 +470,39 @@ client_set_size(Client *c, uint32_t width, uint32_t height)
 	return wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel, (int32_t)width, (int32_t)height);
 }
 
+/* Push the tile's current POSITION to an X11 client whose Xwayland
+ * window still sits at older root coords.
+ *
+ * client_request_size dedups on size alone, and resize()'s pure-move path
+ * only touches the scene node — so a tile moved without changing size
+ * (column reflow when a window opens/closes, camera scroll, ws switch)
+ * never reaches Xwayland.  The X server then hit-tests pointer events
+ * against the stale rectangle, and any X11 window still parked over it in
+ * the stacking order swallows them: Steam's settings window opened as its
+ * own tile got no clicks at all until a size change (Mod+F twice) flushed
+ * the positions.  No-op when the coords already agree, so callers can fire
+ * it freely.  Returns 1 if a configure was sent. */
+static inline int
+client_flush_x11_pos(Client *c)
+{
+#ifdef XWAYLAND
+	if (c && client_is_x11(c) && client_surface(c) &&
+			client_surface(c)->mapped &&
+			(c->surface.xwayland->x != c->geom.x + (int)c->bw ||
+			 c->surface.xwayland->y != c->geom.y + (int)c->bw)) {
+		int w = c->geom.width  - 2 * (int)c->bw;
+		int h = c->geom.height - 2 * (int)c->bw;
+		if (w < 1) w = 1;
+		if (h < 1) h = 1;
+		client_set_size(c, (uint32_t)w, (uint32_t)h);
+		return 1;
+	}
+#else
+	(void)c;
+#endif
+	return 0;
+}
+
 static inline void
 client_set_tiled(Client *c, uint32_t edges)
 {

@@ -1,5 +1,6 @@
 #include "nixlytile.h"
 #include "client.h"
+#include "remote.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -544,6 +545,40 @@ handle_request_line(NiriIpcClient *cl, char *line)
 			apply_best_video_mode(m, fps);
 			send_video_mode(cl, m);
 		}
+		return;
+	}
+
+	/* Action::RemoteStart / RemoteStop — nixly-remote drives these from
+	 * Sunshine's prep-cmd with the Moonlight client's geometry. */
+	if (strstr(line, "\"RemoteStart\"") || strstr(line, "\"RemoteStop\"")) {
+		int is_stop = strstr(line, "\"RemoteStop\"") != NULL;
+		const char *err, *p;
+		RemoteParams rp = { .scale = 1.0, .output = 1, .outputs = 1 };
+
+		if ((p = strstr(line, "\"output\":")))
+			rp.output = (int)strtol(p + 9, NULL, 10);
+
+		if (is_stop) {
+			err = remote_stop(rp.output);
+			if (err) send_err(cl, err); else send_handled(cl);
+			return;
+		}
+
+		if (!(p = strstr(line, "\"width\":"))) { send_err(cl, "missing width"); return; }
+		rp.width = (int)strtol(p + 8, NULL, 10);
+		if (!(p = strstr(line, "\"height\":"))) { send_err(cl, "missing height"); return; }
+		rp.height = (int)strtol(p + 9, NULL, 10);
+		if ((p = strstr(line, "\"fps\":")))
+			rp.fps = (int)strtol(p + 6, NULL, 10);
+		if ((p = strstr(line, "\"scale\":")))
+			rp.scale = strtod(p + 8, NULL);
+		if ((p = strstr(line, "\"outputs\":")))
+			rp.outputs = (int)strtol(p + 10, NULL, 10);
+		if ((p = strstr(line, "\"hdr\":")))
+			rp.hdr = strncmp(p + 6, "true", 4) == 0 || p[6] == '1';
+
+		err = remote_start(&rp);
+		if (err) send_err(cl, err); else send_handled(cl);
 		return;
 	}
 

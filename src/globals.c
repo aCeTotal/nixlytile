@@ -121,7 +121,13 @@ int fps_limit_value = 60;         /* FPS limit value (default 60) */
  * windows are already dripped at ~1 Hz elsewhere). powersave.c tightens the
  * cap on battery. */
 int focus_power_save = 1;         /* 1 = throttle unfocused-visible clients */
-int unfocused_fps_cap = 10;       /* frame_done rate for unfocused-visible (AC) */
+int unfocused_fps_cap = 0;        /* frame_done rate for unfocused-visible; 0 = no
+                                   * throttle.  A tile you can SEE must animate at
+                                   * panel rate — capping it made a YouTube tile
+                                   * beside the focused one visibly stutter, and a
+                                   * static tile costs nothing anyway (it stops
+                                   * asking for frame callbacks on its own).
+                                   * powersave.c re-caps this on battery. */
 int game_auto_fps_lock_enabled = 1; /* auto FPS lock + refresh match (autolock.c) */
 int game_cursor_idle_hide = 1;    /* hide untouched cursor after 3 s in games */
 int game_mode_active = 0; /* Set when any client is fullscreen - pauses background tasks */
@@ -236,6 +242,7 @@ int runtime_fonts_set = 0;
 /* attempt to encapsulate suck into one file */
 
 /* configuration, allows nested code to access above variables */
+#include "overview.h"
 #include "config.h"
 
 const size_t nrules = LENGTH(rules);
