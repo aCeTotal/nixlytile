@@ -169,6 +169,10 @@ void card_calendar(Card *c, int year, int mon, int mday);
 /* Override the card's minimum content width (default CARD_MIN_W) —
  * for compact menus that should hug their rows. */
 void card_min_w(Card *c, int w);
+/* Reserve `px` of right-edge space on the row just added, even when that row
+ * has no value text there — a device list reserves the "Active" tag column on
+ * every row so the popup keeps one width no matter which device is active. */
+void card_row_reserve_right(Card *c, int px);
 /* Where the card will be shown (layout coords, monitor it belongs to):
  * the backdrop only darkens when the card overlaps a visible client
  * there — over bare wallpaper it stays translucent.  Consumed by the

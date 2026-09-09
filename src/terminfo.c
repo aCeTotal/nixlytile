@@ -175,7 +175,9 @@ terminfo_collect(pid_t cur, char *out, size_t n)
 #define TI_POLL_MS 500
 
 static pthread_mutex_t ti_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t ti_wake = PTHREAD_COND_INITIALIZER;
 static char ti_text[128];          /* published result */
+static pid_t ti_text_pid;          /* pid ti_text belongs to */
 static pid_t ti_pid;               /* pid to inspect; 0 = no terminal */
 static int ti_pipe[2] = { -1, -1 };
 static int ti_started;
@@ -183,12 +185,14 @@ static int ti_started;
 static void *
 ti_worker(void *arg)
 {
-	char local[128], last[128] = "";
+	char local[128];
 
 	(void)arg;
 	pthread_setname_np(pthread_self(), "nixly-terminfo");
 	for (;;) {
 		pid_t pid;
+		int changed;
+		struct timespec deadline;
 
 		pthread_mutex_lock(&ti_lock);
 		pid = ti_pid;
@@ -198,14 +202,32 @@ ti_worker(void *arg)
 		if (pid > 1)
 			terminfo_collect(pid, local, sizeof(local));
 
-		if (strcmp(local, last) != 0) {
-			snprintf(last, sizeof(last), "%s", local);
-			pthread_mutex_lock(&ti_lock);
-			snprintf(ti_text, sizeof(ti_text), "%s", local);
-			pthread_mutex_unlock(&ti_lock);
+		/* Publish the pid WITH the text: the main thread refuses to
+		 * draw one terminal's cwd under another's selection, so the
+		 * pid must travel with the string it belongs to. */
+		pthread_mutex_lock(&ti_lock);
+		changed = (pid != ti_text_pid || strcmp(local, ti_text) != 0);
+		ti_text_pid = pid;
+		snprintf(ti_text, sizeof(ti_text), "%s", local);
+		pthread_mutex_unlock(&ti_lock);
+		if (changed)
 			(void)!write(ti_pipe[1], "t", 1);
+
+		/* Sleep until the poll interval expires — or until focus
+		 * hands us a different terminal, which must not wait for it. */
+		clock_gettime(CLOCK_REALTIME, &deadline);
+		deadline.tv_nsec += (long)TI_POLL_MS * 1000000L;
+		if (deadline.tv_nsec >= 1000000000L) {
+			deadline.tv_sec += deadline.tv_nsec / 1000000000L;
+			deadline.tv_nsec %= 1000000000L;
 		}
-		usleep(TI_POLL_MS * 1000);
+		pthread_mutex_lock(&ti_lock);
+		while (ti_pid == pid) {
+			if (pthread_cond_timedwait(&ti_wake, &ti_lock,
+					&deadline) == ETIMEDOUT)
+				break;
+		}
+		pthread_mutex_unlock(&ti_lock);
 	}
 	return NULL;
 }
@@ -286,8 +308,10 @@ renderterminfo(StatusModule *module, int bar_height, const char *text)
 		return;
 	}
 
-	tray_render_label(module, text, padding, bar_height, statusbar_fg);
 	module->width = text_w + 2 * padding;
+	/* Same rounded card as the clock and the other right-hand modules. */
+	updatemodulebg(module, module->width, bar_height, statusbar_bg);
+	tray_render_label(module, text, padding, bar_height, statusbar_fg);
 	wlr_scene_node_set_enabled(&module->tree->node, 1);
 }
 
@@ -304,13 +328,25 @@ refreshstatusterminfo(void)
 	/* Hand the worker the focused terminal's pid; render whatever it
 	 * last published (at most TI_POLL_MS stale). */
 	c = focused_terminal();
-	pthread_mutex_lock(&ti_lock);
-	ti_pid = c ? client_get_pid(c) : 0;
-	if (c)
-		snprintf(text, sizeof(text), "%s", ti_text);
-	else
-		text[0] = '\0';
-	pthread_mutex_unlock(&ti_lock);
+	{
+		pid_t want = c ? client_get_pid(c) : 0;
+
+		pthread_mutex_lock(&ti_lock);
+		if (ti_pid != want) {
+			ti_pid = want;
+			/* New selection: don't make it wait out the poll
+			 * interval — the box must track focus, not a timer. */
+			pthread_cond_signal(&ti_wake);
+		}
+		/* Only draw text the worker collected for THIS terminal;
+		 * the previous one's cwd under a new selection is exactly the
+		 * "box lags behind" symptom. */
+		if (c && ti_text_pid == want)
+			snprintf(text, sizeof(text), "%s", ti_text);
+		else
+			text[0] = '\0';
+		pthread_mutex_unlock(&ti_lock);
+	}
 
 	wl_list_for_each(m, &mons, link) {
 		const char *t = (m == selmon) ? text : "";

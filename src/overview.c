@@ -239,25 +239,24 @@ header_buffer(Cell *cell, int w, int h)
 		}
 	}
 
+	/* No app id down here — the white line above already names the
+	 * window.  This line carries only what that line can't say: where
+	 * the shell is, or what it is running. */
 	if (host[0])
-		snprintf(sub, sizeof(sub), "%s  ·  ssh %s",
-				appid && *appid ? appid : "?", host);
+		snprintf(sub, sizeof(sub), "ssh %s", host);
 	else if (path[0])
-		snprintf(sub, sizeof(sub), "%s  ·  %s",
-				appid && *appid ? appid : "?", path);
+		snprintf(sub, sizeof(sub), "%s", path);
 	else if (comm[0])
-		snprintf(sub, sizeof(sub), "%s  ·  %s",
-				appid && *appid ? appid : "?", comm);
-	else
-		snprintf(sub, sizeof(sub), "%s",
-				appid && *appid ? appid : "?");
+		snprintf(sub, sizeof(sub), "%s", comm);
 
 	base = statusfont.font->ascent;
 	nixly_text_draw(img, statusfont.font, title, OV_LABEL_PAD, base,
 			col_title, w - 2 * OV_LABEL_PAD);
-	nixly_text_draw(img, statusfont.font, sub, OV_LABEL_PAD,
-			base + statusfont.font->height,
-			host[0] ? col_ssh : col_app, w - 2 * OV_LABEL_PAD);
+	if (sub[0])
+		nixly_text_draw(img, statusfont.font, sub, OV_LABEL_PAD,
+				base + statusfont.font->height,
+				host[0] ? col_ssh : col_app,
+				w - 2 * OV_LABEL_PAD);
 
 	pixman_image_unref(img);
 
@@ -467,6 +466,11 @@ apply_all(void)
 static void
 overview_teardown(void)
 {
+	/* Real windows come back the moment the mirrors are gone. */
+	if (layers[LyrTile])
+		wlr_scene_node_set_enabled(&layers[LyrTile]->node, 1);
+	if (layers[LyrFloat])
+		wlr_scene_node_set_enabled(&layers[LyrFloat]->node, 1);
 	if (ov.tree) {
 		/* One destroy takes the mirrors, headers, rects and backdrop —
 		 * the mirrored SURFACES belong to the clients and are
@@ -620,6 +624,15 @@ overview_open(Monitor *m)
 
 	layout_cells();
 	build_scene();
+	/* Hide the real windows for the whole overview: the mirrors start
+	 * exactly on top of them, so this is invisible at t=0 and leaves a
+	 * clean backdrop behind the tiles as they fly out into the grid —
+	 * no dimmed copy of the desktop showing through.  Whole layers, not
+	 * per-client nodes, so an arrange() mid-overview can't bring them
+	 * back.  Restored in overview_teardown, i.e. when the mirrors land
+	 * back on the real windows. */
+	wlr_scene_node_set_enabled(&layers[LyrTile]->node, 0);
+	wlr_scene_node_set_enabled(&layers[LyrFloat]->node, 0);
 	apply_all();
 	monitor_wake(m);
 }

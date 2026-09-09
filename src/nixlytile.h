@@ -1171,6 +1171,7 @@ typedef struct {
 	int area_clipped;             /* 1 = tile currently cropped to m->w (straddles/past tile-area edge) */
 	struct wl_listener ping_timeout; /* freeze watchdog: unresponsive → kill */
 	Workspace *fs_ws;             /* workspace fullscreened on; NULL = not fs / unbound (always visible) */
+	int fs_col_idx;               /* column slot held before fullscreen; -1 = none */
 
 	/* Remote-mode restore slot: where this client sat before streaming */
 	char rst_out[32];
@@ -1476,6 +1477,8 @@ struct Monitor {
 	uint32_t diag_builds;         /* build_state reached since last heartbeat */
 	uint32_t diag_idle_skips;     /* idle-gate build_state skips since last heartbeat */
 	uint32_t diag_commits_in;     /* client surface commits on this mon since last heartbeat */
+	uint32_t diag_focus_commits;  /* commits from the keyboard-focused client */
+	uint32_t diag_focus_keys;     /* keys delivered to it since last heartbeat */
 	uint32_t diag_commit_fails;   /* failed output commit attempts since last heartbeat */
 	uint32_t diag_scanout_falls;  /* scanout->GPU-composition fallbacks engaged since last heartbeat */
 	uint32_t diag_scanout_rearms; /* direct scanout re-armed (cooldown drained) since last heartbeat */
@@ -1486,6 +1489,8 @@ struct Monitor {
 	int hz_osd_visible;
 	uint64_t last_frame_ns;
 	uint64_t last_commit_duration_ns;
+	uint64_t last_build_ns;       /* scene build+render of the last pass */
+	uint64_t last_flip_ns;        /* output commit (pageflip submit) of it */
 	uint64_t rolling_commit_time_ns;
 	int frames_since_content_change;
 	int direct_scanout_active;
@@ -2452,6 +2457,8 @@ Column *column_create(Workspace *ws);
 void column_destroy(Column *col);
 void column_add_client(Column *col, Client *c);
 void column_remove_client(Client *c);
+int column_index(Column *col);
+void column_move_to_index(Column *col, int idx);
 void monitor_init_workspaces(Monitor *m);
 void monitor_cleanup_workspaces(Monitor *m);
 void monitor_compact_workspaces(Monitor *m);
@@ -2741,6 +2748,9 @@ void render_icon_label(StatusModule *module, int bar_height, const char *text,
 		int (*ensure_icon)(int target_h), struct wlr_buffer **icon_buf,
 		int *icon_w, int *icon_h, int min_text_w, int icon_gap,
 		const float text_color[static 4]);
+void client_kick_frame_done(Client *c);
+void updatemodulebg(StatusModule *module, int width, int height,
+		const float color[static 4]);
 void renderworkspaces(Monitor *m, StatusModule *module, int bar_height);
 int tray_render_label(StatusModule *module, const char *text, int x, int bar_height,
 		const float color[static 4]);

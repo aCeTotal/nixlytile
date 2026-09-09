@@ -260,6 +260,10 @@ typedef struct {
 	int btn_right;
 	int btn_solo;       /* btn_right hit rect = button only, no row wash */
 	int big;            /* CROW_TEXT: taller row, bigger leading icon */
+	int rsv;            /* CROW_TEXT: right-column width to keep free even
+			     * when THIS row carries no value (device lists:
+			     * the card must not resize when the "Active" tag
+			     * moves to a longer name) */
 	const float *bcol, *dcol;
 	double frac;
 	float accent[4];
@@ -673,6 +677,16 @@ card_min_w(Card *c, int w)
 		c->min_w = w;
 }
 
+/* Keep `px` free at the right edge of the row just added, whether or not it
+ * has a value there.  Lets a list reserve one shared tag column so the card
+ * keeps its width when the tag moves between rows. */
+void
+card_row_reserve_right(Card *c, int px)
+{
+	if (c && c->nrows > 0 && px > 0)
+		c->rows[c->nrows - 1].rsv = px;
+}
+
 void
 card_icon_text(Card *c, const char *icon_path, const char *label,
 		const float *labelcol, int hit_id, int hot)
@@ -862,7 +876,8 @@ card_measure(Card *c, int *out_w, int *out_h)
 			rw = MAX(text_width_f(statusfont.font, r->a, 0),
 					r->sub[0] ? text_width_f(card_font_small,
 						r->sub, 0) : 0) + 16 +
-				text_width_f(statusfont.font, r->b, 0);
+				MAX(text_width_f(statusfont.font, r->b, 0),
+					r->rsv);
 			if (r->c[0])
 				rw += (r->big ? CARD_TICON_BIG(base_h) :
 						CARD_TICON(base_h)) + 10;

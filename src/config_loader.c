@@ -328,7 +328,7 @@ apply_remote(const KdlNode *n)
 	long li;
 	if (!n) return;
 	if (kdl_arg_int(kdl_find_child(n, "outputs"), 0, &li)) {
-		if (li < 1) li = 1;
+		if (li < 0) li = 0;   /* 0 = no virtual outputs at all */
 		if (li > REMOTE_MAX_OUTPUTS) li = REMOTE_MAX_OUTPUTS;
 		remote_outputs = (int)li;
 	}

@@ -494,6 +494,12 @@ render_audio_popup(Monitor *m, InfoPopup *p, int is_mic)
 					card_col_green, NULL,
 					d->is_default ? -1 : i,
 					p->btn_hover == i);
+			/* Hold the tag column open on EVERY device row: the
+			 * card is then wide enough for "Active" beside the
+			 * longest name, and picking another device doesn't
+			 * resize the popup. */
+			card_row_reserve_right(card,
+					card_text_width("Active") + 8);
 		}
 	}
 

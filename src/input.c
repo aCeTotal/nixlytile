@@ -1546,6 +1546,23 @@ keybinding(uint32_t mods, xkb_keysym_t sym)
 	return 0;
 }
 
+/* Only directional navigation makes sense on key-repeat.  Everything else
+ * — toggles (Super+B statusbar, Super+Tab last-workspace, fullscreen),
+ * spawns, layout switches — would fire dozens of times per second while
+ * the key is held down. */
+static int
+binding_repeats(void (*func)(const Arg *))
+{
+	return func == focus_column_dir
+		|| func == focus_workspace_dir
+		|| func == focus_window_in_column_dir
+		|| func == move_column_dir
+		|| func == move_window_in_column_dir
+		|| func == move_client_to_ws_dir
+		|| func == swap_window_dir
+		|| func == resize_column_dir;
+}
+
 static int
 shortcuts_are_inhibited(void)
 {
@@ -1684,7 +1701,8 @@ keypress(struct wl_listener *listener, void *data)
 
 	{
 		int allow_repeat = 0;
-		if (handled && group->wlr_group->keyboard.repeat_info.delay > 0)
+		if (handled && binding_repeats(last_keybinding_func)
+				&& group->wlr_group->keyboard.repeat_info.delay > 0)
 			allow_repeat = 1;
 		if (allow_repeat) {
 			group->mods = mods;
@@ -1721,6 +1739,12 @@ keypress(struct wl_listener *listener, void *data)
 		wlr_log(WLR_DEBUG, "keypress: forwarding key %d to client, focused_surface=%p",
 			event->keycode, (void*)focused);
 	}
+	/* Count keystrokes handed to the focused window (see the STALE
+	 * detector in the rendermon heartbeat: keys in, zero commits out
+	 * is a client starved of frame callbacks). */
+	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED && selmon)
+		selmon->diag_focus_keys++;
+
 	wlr_seat_keyboard_notify_key(seat, event->time_msec,
 			event->keycode, event->state);
 }

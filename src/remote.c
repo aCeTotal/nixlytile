@@ -41,8 +41,13 @@ remote_backend_init(struct wl_display *display, int n_outputs)
 
 	if (!backend || !wlr_backend_is_multi(backend))
 		return;
-	if (n_outputs < 1)
-		n_outputs = 1;
+	/* `remote { outputs 0 }` means none: no headless backend, no parked
+	 * output anywhere in the compositor.  Remote sessions are then
+	 * unavailable until it is raised again. */
+	if (n_outputs < 1) {
+		wlr_log(WLR_INFO, "remote: disabled (outputs 0)");
+		return;
+	}
 	if (n_outputs > REMOTE_MAX_OUTPUTS)
 		n_outputs = REMOTE_MAX_OUTPUTS;
 

@@ -210,6 +210,45 @@ column_remove_client(Client *c)
 	column_reset_weights(col);
 }
 
+/* Position of a column in its workspace's left→right order (-1: none). */
+int
+column_index(Column *col)
+{
+	Column *other;
+	int i = 0;
+
+	if (!col || !col->ws)
+		return -1;
+	wl_list_for_each(other, &col->ws->columns, link) {
+		if (other == col)
+			return i;
+		i++;
+	}
+	return -1;
+}
+
+/* Move a column to slot `idx` in the row.  Used to put a tile back where
+ * it was: entering fullscreen destroys its column, and reattaching just
+ * appends next to whatever is focused — which reorders the row. */
+void
+column_move_to_index(Column *col, int idx)
+{
+	Column *other;
+	int i = 0;
+
+	if (!col || !col->ws || idx < 0 || idx == column_index(col))
+		return;
+
+	wl_list_remove(&col->link);
+	wl_list_for_each(other, &col->ws->columns, link) {
+		if (i++ == idx) {
+			wl_list_insert(other->link.prev, &col->link);
+			return;
+		}
+	}
+	wl_list_insert(col->ws->columns.prev, &col->link);
+}
+
 void
 monitor_init_workspaces(Monitor *m)
 {
@@ -1334,12 +1373,11 @@ focus_column_dir(const Arg *arg)
 	if (!m_next || !m_next->wlr_output->enabled)
 		return;
 
-	selmon = m_next;
-
 	/* Pick a tile on the new monitor — entering from the LEFT (we moved
 	 * right) lands on the leftmost tile; entering from the right lands
-	 * on the rightmost.  If empty, warp the cursor to the monitor centre
-	 * so the user has a clear visual landing point. */
+	 * on the rightmost.  A destination with no tile is NOT a valid stop:
+	 * the outermost tile is always the last stop, so holding the key
+	 * can never park the pointer on empty screen. */
 	if (m_next->active_ws && !wl_list_empty(&m_next->active_ws->columns)) {
 		Column *target;
 		struct wl_list *node = (arg->i > 0)
@@ -1347,6 +1385,7 @@ focus_column_dir(const Arg *arg)
 				: m_next->active_ws->columns.prev;
 		target = wl_container_of(node, target, link);
 		if (target && !wl_list_empty(&target->clients)) {
+			selmon = m_next;
 			m_next->active_ws->focused_col = target;
 			arrange(m_next);
 			{
@@ -1355,18 +1394,8 @@ focus_column_dir(const Arg *arg)
 				focusclient(c, 1);
 			}
 			printstatus();
-			return;
 		}
 	}
-
-	/* No tiles on the destination monitor — warp cursor to its centre
-	 * and drop keyboard focus so the user sees they've landed on an
-	 * empty screen. */
-	wlr_cursor_warp(cursor, NULL,
-			m_next->m.x + m_next->m.width / 2.0,
-			m_next->m.y + m_next->m.height / 2.0);
-	focusclient(NULL, 0);
-	printstatus();
 }
 
 /* Move focused column left/right by swapping list order.  At the workspace

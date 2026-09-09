@@ -1554,6 +1554,25 @@ hidden_frame_done_iter(struct wlr_surface *surface, int sx, int sy, void *data)
 	wlr_fifo_v1_surface_latched(surface);
 }
 
+/* Release a client's queued frame callbacks right now.  Called on focus
+ * change: an unfocused tile runs at unfocused_fps_cap (20 Hz on battery),
+ * so the window the user just selected would otherwise sit on a queued
+ * callback for up to a full throttle interval before it can repaint —
+ * felt as the new tile "waking up late" (heavy clients like Blender
+ * repaint on activation, so the whole repaint starts behind).  Surfaces
+ * without a pending callback ignore this. */
+void
+client_kick_frame_done(Client *c)
+{
+	struct wlr_surface *s = c ? client_surface(c) : NULL;
+	struct timespec now;
+
+	if (!s || !s->mapped)
+		return;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	wlr_surface_for_each_surface(s, hidden_frame_done_iter, &now);
+}
+
 /* Per-buffer drip for VISIBLE clients: a scene buffer whose visible
  * region is empty (video subsurface fully covered by its parent's
  * opaque region, tile clipped out by the off-viewport sentinel clip)
@@ -2886,11 +2905,19 @@ rendermon_prologue(Monitor *m, uint64_t frame_start_ns)
 				(uint64_t)(m->wlr_output->refresh / 1000);
 			uint64_t gap = frame_start_ns - m->last_frame_ns;
 			if (nominal > 0 && gap > nominal * 5 / 2)
+				/* frame = whole previous pass (entry→commit end);
+				 * build = scene render; flip = output commit.
+				 * frame ≈ build+flip and gap ≫ frame means the
+				 * compositor was ready and the vblank/pageflip
+				 * chain kept it waiting — not CPU cost here. */
 				diag_logf("ANIMHITCH",
-					"%s gap=%.2fms nominal=%.2fms last_commit=%.2fms",
+					"%s gap=%.2fms nominal=%.2fms frame=%.2fms "
+					"build=%.2fms flip=%.2fms",
 					m->wlr_output->name,
 					gap / 1e6, nominal / 1e6,
-					m->last_commit_duration_ns / 1e6);
+					m->last_commit_duration_ns / 1e6,
+					m->last_build_ns / 1e6,
+					m->last_flip_ns / 1e6);
 		}
 	}
 
@@ -3128,6 +3155,36 @@ rendermon(struct wl_listener *listener, void *data)
 				m->diag_commits_in);
 		}
 
+		/* Stale-tile detector: the user typed into the focused window
+		 * and it produced no frame all second.  A client cannot draw
+		 * without a frame callback, so this names the withhold that
+		 * starved it — the "tile doesn't show what I type until I
+		 * switch workspace and back" report.  Silent on an idle
+		 * desktop: no keys delivered, nothing logged. */
+		if (m->diag_focus_keys > 0 && m->diag_focus_commits == 0) {
+			struct wlr_surface *fsurf = seat
+				? seat->keyboard_state.focused_surface : NULL;
+			Client *kc = NULL;
+
+			if (fsurf)
+				toplevel_from_wlr_surface(fsurf, &kc, NULL);
+			if (kc && kc->mon == m)
+				diag_logf("STALE",
+					"%s appid='%s' keys=%u commits=0 over ~1s — "
+					"camera_anim=%d frozen=%d node_enabled=%d "
+					"anim_drip=%d size_pending=%d fps_cap=%d "
+					"focustop_match=%d builds=%u",
+					m->wlr_output->name,
+					client_get_appid(kc) ? client_get_appid(kc) : "(null)",
+					m->diag_focus_keys,
+					m->camera_anim_active,
+					kc->frozen_buffer ? 1 : 0,
+					kc->scene ? kc->scene->node.enabled : -1,
+					kc->anim_drip, client_size_pending(kc),
+					unfocused_fps_cap,
+					focustop(m) == kc, m->diag_builds);
+		}
+
 		/* Cross-edge audit: any enabled client scene node whose geometry
 		 * crosses this monitor's horizontal bounds can paint onto the
 		 * neighbouring output (visible in its gap margin).  Log the
@@ -3178,6 +3235,8 @@ rendermon(struct wl_listener *listener, void *data)
 		m->diag_builds = 0;
 		m->diag_idle_skips = 0;
 		m->diag_commits_in = 0;
+		m->diag_focus_commits = 0;
+		m->diag_focus_keys = 0;
 		m->diag_commit_fails = 0;
 		m->diag_scanout_falls = 0;
 		m->diag_scanout_rearms = 0;
@@ -3395,7 +3454,12 @@ rendermon(struct wl_listener *listener, void *data)
 			apply_pending_hdr_state(m, &state);
 		if (m->tag_switch_debug > 0)
 			write(STDERR_FILENO, "TS:scene-build>\n", 16);
-		needs_frame = wlr_scene_output_build_state(m->scene_output, &state, &opts);
+		{
+			uint64_t build0 = get_time_ns();
+			needs_frame = wlr_scene_output_build_state(m->scene_output,
+					&state, &opts);
+			m->last_build_ns = get_time_ns() - build0;
+		}
 		if (m->tag_switch_debug > 0)
 			write(STDERR_FILENO, "TS:scene-build<\n", 16);
 
@@ -3641,7 +3705,12 @@ rendermon(struct wl_listener *listener, void *data)
 	if (needs_frame) {
 		if (m->tag_switch_debug > 0)
 			write(STDERR_FILENO, "TS:commit>\n", 11);
-		commit_output_frame(m, &state, allow_tearing, use_frame_pacing, frame_start_ns);
+		{
+			uint64_t flip0 = get_time_ns();
+			commit_output_frame(m, &state, allow_tearing,
+					use_frame_pacing, frame_start_ns);
+			m->last_flip_ns = get_time_ns() - flip0;
+		}
 		if (m->tag_switch_debug > 0)
 			write(STDERR_FILENO, "TS:commit<\n", 11);
 		/* Feed the late-latch draw budget with the full body cost
@@ -3843,6 +3912,11 @@ frame_done:
 			/* Cheapest checks first — this runs for every client on
 			 * the monitor every pass. */
 			starved = !hc->scene->node.enabled
+					/* Overview hides the tile/float layers so
+					 * only the mirrors show: the client's own
+					 * node is still enabled but has no visible
+					 * region, so wlroots drops its callbacks. */
+					|| overview_is_open()
 					|| hc->frozen_buffer
 					/* Slide started with no snapshot-able content
 					 * (hidden X11 client, e.g. Steam) — see

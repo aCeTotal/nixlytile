@@ -333,8 +333,16 @@ commitnotify(struct wl_listener *listener, void *data)
 	/* Count client frame submissions per monitor — lets the diag freeze
 	 * detector tell a client-side stall (0 commits) from a compositor-side
 	 * stall (client committing but nothing presented). */
-	if (c->mon)
+	if (c->mon) {
 		c->mon->diag_commits_in++;
+		/* Separate counter for the window the user is typing into —
+		 * the heartbeat pairs it with the delivered-key count to tell
+		 * "client never redrew" (frame-callback starvation) from
+		 * "client redrew, compositor never showed it". */
+		if (seat && client_surface(c) &&
+				seat->keyboard_state.focused_surface == client_surface(c))
+			c->mon->diag_focus_commits++;
+	}
 
 	if (c->surface.xdg->initial_commit) {
 		applyrules(c);
@@ -473,6 +481,7 @@ createnotify(struct wl_listener *listener, void *data)
 	c = toplevel->base->data = ecalloc(1, sizeof(*c));
 	c->surface.xdg = toplevel->base;
 	c->bw = borderpx;
+	c->fs_col_idx = -1;
 
 	LISTEN(&toplevel->base->surface->events.commit, &c->commit, commitnotify);
 	LISTEN(&toplevel->base->surface->events.map, &c->map, mapnotify);
@@ -650,15 +659,15 @@ focusclient(Client *c, int lift)
 	}
 	printstatus();
 
-	/* Statusbar terminal-info follows keyboard focus (shows/hides and
-	 * swaps cwd/ssh context immediately on focus change). */
-	trigger_status_task_now(refreshstatusterminfo);
-
 	if (!c) {
 		/* With no client, all we have left is to clear focus */
 		wlr_seat_keyboard_notify_clear_focus(seat);
 		/* Notify text inputs about focus loss */
 		text_input_focus_change(old, NULL);
+		/* Focus is cleared only NOW — refreshing before this point
+		 * would read the outgoing client as still focused and leave
+		 * the terminal box up on a workspace with no terminals. */
+		refreshstatusterminfo();
 		return;
 	}
 
@@ -676,6 +685,21 @@ focusclient(Client *c, int lift)
 
 	/* Activate the new client */
 	client_activate_surface(client_surface(c), 1);
+
+	/* Activation makes heavy clients (Blender, Electron) repaint.  If
+	 * this one was sitting at the unfocused frame_done cap, release its
+	 * queued callback now instead of up to a throttle interval later —
+	 * otherwise its first repaint after the switch starts late and the
+	 * whole selection reads as sluggish. */
+	if (unfocused_fps_cap > 0)
+		client_kick_frame_done(c);
+
+	/* Statusbar terminal-info follows keyboard focus: shows/hides and
+	 * swaps cwd/ssh context in the same frame as the selection.  Runs
+	 * AFTER client_notify_enter — it keys off the seat's focused
+	 * surface, so any earlier call would render the previous tile's
+	 * context. */
+	refreshstatusterminfo();
 
 	/* Focus drives the RetroArch/nixlymedia menu max-Hz hold (checked
 	 * inside the debounced game-mode update). */
@@ -896,21 +920,84 @@ fullscreennotify(struct wl_listener *listener, void *data)
 	setfullscreen(c, want);
 }
 
+/* Hard-kill backstop for killclient: a window that ignored the close
+ * request (Wine's "really quit?" dialogs, hung X11 clients, anything that
+ * swallows WM_DELETE_WINDOW) dies with its process instead of surviving
+ * the keybind.  Both the Client pointer and the pid must still match a
+ * LIVE mapped client — a target that closed politely is off the list by
+ * then and nothing is signalled. */
+static Client *kill_pending_c;
+static pid_t kill_pending_pid;
+static struct wl_event_source *kill_force_timer;
+
+#define KILL_GRACE_MS 300
+
+static int
+killclient_force(void *data)
+{
+	Client *c;
+	Client *want = kill_pending_c;
+	pid_t pid = kill_pending_pid;
+
+	(void)data;
+	kill_pending_c = NULL;
+	kill_pending_pid = 0;
+	if (!want || pid <= 1)
+		return 0;
+
+	wl_list_for_each(c, &clients, link) {
+		if (c != want || client_get_pid(c) != pid)
+			continue;
+		if (!client_surface(c) || !client_surface(c)->mapped)
+			return 0;
+		wlr_log(WLR_INFO,
+			"killclient: '%s' (pid %d) ignored close — SIGKILL",
+			client_get_appid(c) ? client_get_appid(c) : "(null)",
+			(int)pid);
+		kill(pid, SIGKILL);
+		return 0;
+	}
+	return 0;
+}
+
 void
 killclient(const Arg *arg)
 {
+	/* The window the user is actually looking at is the one holding
+	 * keyboard focus.  focustop() alone can name a client on another
+	 * workspace (in workspace mode every client matches VISIBLEON), and
+	 * the old ws guard then turned the keybind into a no-op — the
+	 * "nothing happens" case. */
+	struct wlr_surface *surf = seat ? seat->keyboard_state.focused_surface : NULL;
+	Client *sel = NULL;
+	pid_t pid;
+
 	(void)arg;
-	Client *sel = focustop(selmon);
+	if (surf)
+		toplevel_from_wlr_surface(surf, &sel, NULL);
+	if (!sel || !client_surface(sel) || !client_surface(sel)->mapped) {
+		sel = focustop(selmon);
+		if (sel && selmon && selmon->active_ws && sel->column &&
+				sel->column->ws != selmon->active_ws)
+			sel = NULL;
+	}
 	if (!sel)
 		return;
-	/* Only kill if the focused client lives in the currently-active
-	 * workspace.  Without this guard, a floating window or a stale
-	 * focus-stack entry from another workspace could be killed
-	 * unexpectedly when the user just wants to close "this tile". */
-	if (selmon && selmon->active_ws && sel->column &&
-			sel->column->ws != selmon->active_ws)
-		return;
+
+	pid = client_get_pid(sel);
 	client_send_close(sel);
+
+	if (pid > 1) {
+		if (!kill_force_timer)
+			kill_force_timer = wl_event_loop_add_timer(event_loop,
+					killclient_force, NULL);
+		if (kill_force_timer) {
+			kill_pending_c = sel;
+			kill_pending_pid = pid;
+			wl_event_source_timer_update(kill_force_timer,
+					KILL_GRACE_MS);
+		}
+	}
 }
 
 void
@@ -2160,11 +2247,13 @@ setfullscreen(Client *c, int fullscreen)
 	c->isfullscreen = fullscreen;
 
 	if (fullscreen != was)
-		diag_logf("FS", "%s appid='%s' mon=%s geom=%dx%d@%d,%d",
+		diag_logf("FS", "%s appid='%s' mon=%s geom=%dx%d@%d,%d "
+			"ack_pending=%u last_cfg=%dx%d",
 			fullscreen ? "ENTER" : "EXIT",
 			client_get_appid(c) ? client_get_appid(c) : "(null)",
 			c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)",
-			c->geom.width, c->geom.height, c->geom.x, c->geom.y);
+			c->geom.width, c->geom.height, c->geom.x, c->geom.y,
+			c->resize, c->last_configured_w, c->last_configured_h);
 
 	/* Bind the fullscreen window to the workspace it was fullscreened on.
 	 * Visibility, cursor confinement and exclusive focus key off this so
@@ -2176,6 +2265,10 @@ setfullscreen(Client *c, int fullscreen)
 	 * Reattach when leaving (if still tile-able).  Do this early so the
 	 * arrange() at the bottom sees the right column state. */
 	if (!was && fullscreen) {
+		/* Remember the slot so leaving fullscreen doesn't shuffle the
+		 * row: the column dies here, and a plain reattach lands right
+		 * of whatever column holds focus meanwhile. */
+		c->fs_col_idx = column_index(c->column);
 		workspace_detach_client(c);
 	} else if (was && !fullscreen && !c->isfloating
 			&& !client_is_unmanaged(c) && c->mon && c->mon->active_ws) {
@@ -2183,6 +2276,8 @@ setfullscreen(Client *c, int fullscreen)
 		 * whichever workspace happens to be active. */
 		workspace_attach_client(prev_fs_ws && prev_fs_ws->mon == c->mon
 				? prev_fs_ws : c->mon->active_ws, c);
+		column_move_to_index(c->column, c->fs_col_idx);
+		c->fs_col_idx = -1;
 	}
 	if (!c->mon || !client_surface(c)->mapped) {
 		wlr_log(WLR_INFO,
@@ -2199,6 +2294,15 @@ setfullscreen(Client *c, int fullscreen)
 
 	c->bw = (fullscreen || c->isembedded) ? 0 : borderpx;
 	client_set_fullscreen(c, fullscreen);
+	/* Drop the one-configure-in-flight gate for this transition.  The
+	 * fullscreen STATE configure is scheduled right above; if
+	 * client_request_size then parks the new size behind an unacked
+	 * configure, that state configure goes out alone carrying the OLD
+	 * size — the client relayouts fullscreen-styled at tile size (one
+	 * visible size jump) and only reaches the real size a round trip
+	 * later.  Zeroing here lets the size ride the same configure, so
+	 * the window goes straight to fullscreen in one step. */
+	c->resize = 0;
 	wlr_scene_node_reparent(&c->scene->node, layers[c->isfullscreen
 			? LyrFS : c->isfloating ? LyrFloat : LyrTile]);
 

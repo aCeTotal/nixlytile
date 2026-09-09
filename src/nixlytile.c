@@ -4132,6 +4132,7 @@ createnotifyx11(struct wl_listener *listener, void *data)
 	c = xsurface->data = ecalloc(1, sizeof(*c));
 	c->surface.xwayland = xsurface;
 	c->type = X11;
+	c->fs_col_idx = -1;
 	c->bw = client_is_unmanaged(c) ? 0 : borderpx;
 
 	/* Listen to the various events it can emit */

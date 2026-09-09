@@ -99,6 +99,13 @@ build_disp(void)
 
 		if (!m->wlr_output || !m->wlr_output->enabled)
 			continue;
+		/* Virtual (headless) outputs never appear here — parked or
+		 * carrying a live Moonlight session.  This popup configures
+		 * screens you physically have; a remote output's mode, scale
+		 * and HDR come from the client over RemoteStart, and its
+		 * settings are never written to monitors.conf anyway. */
+		if (m->is_virtual)
+			continue;
 		if (ndi >= CARD_DISP_MAX)
 			break;
 		d = &di[ndi++];
