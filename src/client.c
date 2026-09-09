@@ -1452,6 +1452,18 @@ notif_placed:
 	if (c->output == NULL)
 		die("oom");
 
+	/* X11 games read their mode list from the RandR primary output, and
+	 * they do it during D3D/GL device init — well before the fullscreen
+	 * transition where setfullscreen() points primary at c->mon.  Until
+	 * then primary is whatever the Xwayland-ready hook picked (selmon at
+	 * compositor start), so a game placed on the ultrawide enumerated —
+	 * and persisted — the neighbouring 1080p monitor's modes instead.
+	 * c->mon is final here, so aim primary at the monitor the game
+	 * actually maps on.  Games only: setting primary on every X11 map
+	 * would let a dialog on a side monitor drag it away again. */
+	if (client_is_x11(c) && looks_like_game(c))
+		xwayland_set_primary(c->mon);
+
 	/* Menu window opened by a tray icon's ContextMenu fallback (app
 	 * exposes no usable dbusmenu): float it under the icon instead of
 	 * tiling it.  Only small windows qualify — a main app window

@@ -208,6 +208,38 @@ bestmode(struct wlr_output *output)
 	return best;
 }
 
+/* Is the monitors.conf `WxH[@Hz]` entry a real user pin?
+ *
+ * The Displays popup writes the *current* mode back on every edit, so a
+ * plain native setup always carries a WxH@Hz token.  Treating that as a
+ * pin permanently disabled gamescan/console/auto-fps modesetting — and on
+ * NVIDIA, where planes cannot scale, losing gamescan costs every game
+ * rendering under native its direct scanout.  Only a mode that differs
+ * from the panel's best mode is a deliberate choice worth protecting. */
+int
+monitor_mode_pinned(struct wlr_output *o)
+{
+	RuntimeMonitorConfig *rtcfg;
+	struct wlr_output_mode *best;
+
+	if (!o)
+		return 0;
+	rtcfg = find_monitor_config(o->name);
+	if (!rtcfg || rtcfg->width <= 0 || rtcfg->height <= 0)
+		return 0;
+	best = bestmode(o);
+	if (!best)
+		return 1;
+	if (rtcfg->width != best->width || rtcfg->height != best->height)
+		return 1;
+	/* Same resolution, lower refresh: still deliberate (paced divisor
+	 * modes, flicker-prone panels). */
+	if (rtcfg->refresh > 0.0f &&
+			fabsf(rtcfg->refresh - (float)best->refresh / 1000.0f) > 1.0f)
+		return 1;
+	return 0;
+}
+
 /* Drop every panel to its lowest refresh at the current resolution on
  * battery; restore the configured/best rate on AC.  A 300 Hz panel run
  * at 60 Hz cuts the display pipe's pixel-clock power draw substantially
@@ -359,15 +391,13 @@ try_reapply_bestmode(Monitor *m)
 	struct wlr_output *o;
 	struct wlr_output_mode *best;
 	struct wlr_output_state st;
-	RuntimeMonitorConfig *rtcfg;
 
 	if (!m || !m->wlr_output)
 		return;
 	o = m->wlr_output;
 
-	/* Respect user-pinned resolution. */
-	rtcfg = find_monitor_config(o->name);
-	if (rtcfg && rtcfg->width > 0 && rtcfg->height > 0)
+	/* Respect a user-pinned resolution (native pin doesn't count). */
+	if (monitor_mode_pinned(o))
 		return;
 
 	best = bestmode(o);
@@ -4744,7 +4774,6 @@ apply_console_mode(Monitor *m, Client *c)
 	struct wlr_output_state state;
 	struct wlr_output_configuration_v1 *config;
 	struct wlr_output_configuration_head_v1 *config_head;
-	RuntimeMonitorConfig *rtcfg;
 
 	if (!m || !m->wlr_output || !m->wlr_output->enabled || !c)
 		return;
@@ -4753,9 +4782,8 @@ apply_console_mode(Monitor *m, Client *c)
 	if (!client_wants_console_mode(c))
 		return;
 
-	/* Respect user-pinned resolution. */
-	rtcfg = find_monitor_config(m->wlr_output->name);
-	if (rtcfg && rtcfg->width > 0 && rtcfg->height > 0)
+	/* Respect a user-pinned resolution (native pin doesn't count). */
+	if (monitor_mode_pinned(m->wlr_output))
 		return;
 
 	/* Monitor already does 4K@60+ — leave native mode. */

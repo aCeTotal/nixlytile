@@ -250,6 +250,24 @@ monconf_apply_modes(void)
 		}
 		monconf_commit_mode(m, cfg, mode, 0);
 	}
+
+	/* Moving a monitor to another port renames its connector (DP-1 ->
+	 * DP-2), and the renamed entry then matches nothing: no grid layout,
+	 * no mode, no scale — silently.  Name the orphans in the log so the
+	 * next stale-config hunt starts with the answer. */
+	for (int i = 0; i < monconf_monitor_count; i++) {
+		int found = 0;
+		wl_list_for_each(m, &mons, link)
+			if (m->wlr_output && strcmp(m->wlr_output->name,
+					monconf_monitors[i].name) == 0) {
+				found = 1;
+				break;
+			}
+		if (!found)
+			wlr_log(WLR_INFO, "monitors.conf: entry '%s' matches no "
+				"connected output (stale connector name?)",
+				monconf_monitors[i].name);
+	}
 }
 
 /* Position monitors from their grid=C,R cells.  Column widths / row

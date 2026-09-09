@@ -85,16 +85,14 @@ gamescan_apply(Monitor *m)
 	struct wlr_output_state state;
 	struct wlr_output_configuration_v1 *config;
 	struct wlr_output_configuration_head_v1 *config_head;
-	RuntimeMonitorConfig *rtcfg;
 
 	if (!m || !m->wlr_output || !m->wlr_output->enabled)
 		return;
 	if (m->gamescan_mode_active || m->gamescan_w <= 0 || m->gamescan_h <= 0)
 		return;
 
-	/* Respect user-pinned resolution. */
-	rtcfg = find_monitor_config(m->wlr_output->name);
-	if (rtcfg && rtcfg->width > 0 && rtcfg->height > 0)
+	/* Respect a user-pinned resolution (native pin doesn't count). */
+	if (monitor_mode_pinned(m->wlr_output))
 		return;
 
 	target = find_mode(m->wlr_output, m->gamescan_w, m->gamescan_h, 0);

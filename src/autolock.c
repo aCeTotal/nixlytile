@@ -221,7 +221,6 @@ static void
 al_consider_modeset(Monitor *m, uint64_t now_ns)
 {
 	struct wlr_output_mode *mode, *cur, *best = NULL;
-	RuntimeMonitorConfig *rtcfg;
 	float hz, eff, err;
 	int n, lock = m->al_lock_fps;
 
@@ -234,9 +233,8 @@ al_consider_modeset(Monitor *m, uint64_t now_ns)
 	    now_ns - m->al_last_modeset_ns < AL_MODE_MIN_GAP_NS)
 		return;
 
-	/* Respect a user-pinned refresh rate. */
-	rtcfg = find_monitor_config(m->wlr_output->name);
-	if (rtcfg && rtcfg->refresh > 0)
+	/* Respect a user-pinned refresh rate (native pin doesn't count). */
+	if (monitor_mode_pinned(m->wlr_output))
 		return;
 
 	/* Current mode already an exact multiple → nothing to gain. */

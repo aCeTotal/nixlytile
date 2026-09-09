@@ -2671,6 +2671,7 @@ int hz_osd_timeout(void *data);
 void testhzosd(const Arg *arg);
 void setcustomhz(const Arg *arg);
 struct wlr_output_mode *bestmode(struct wlr_output *output);
+int monitor_mode_pinned(struct wlr_output *output);
 RuntimeMonitorConfig *find_monitor_config(const char *name);
 void calculate_monitor_position(Monitor *m, RuntimeMonitorConfig *cfg, int *out_x, int *out_y);
 void monitor_effective_size(Monitor *m, int *w, int *h);
