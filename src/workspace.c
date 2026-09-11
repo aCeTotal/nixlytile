@@ -545,6 +545,30 @@ max_nonempty_ws_idx(Monitor *m)
 	return max_idx;
 }
 
+int
+workspace_max_nonempty_idx(Monitor *m)
+{
+	return max_nonempty_ws_idx(m);
+}
+
+/* Workspace with index idx on m, creating trailing workspaces as needed —
+ * window-rule `workspace N` may address a workspace before it exists. */
+Workspace *
+workspace_get_or_create_idx(Monitor *m, int idx)
+{
+	Workspace *ws;
+
+	if (!m || idx < 0)
+		return NULL;
+	for (;;) {
+		wl_list_for_each(ws, &m->workspaces, link)
+			if (ws->idx == idx)
+				return ws;
+		if (m->n_workspaces > idx || !workspace_create(m))
+			return NULL;
+	}
+}
+
 /* Close index gaps left by emptied workspaces.  When a workspace
  * becomes empty but there's still a populated workspace below it,
  * destroy the empty one and shift everything below it up by one slot.
@@ -559,6 +583,12 @@ monitor_compact_workspaces(Monitor *m)
 	int changed = 1;
 
 	if (!m)
+		return;
+	/* HTPC: workspaces are a fixed app grid (1=Steam 2=RetroArch
+	 * 3=GeForce NOW 4=nixlymedia). A crashed app leaves its workspace
+	 * empty for a second before the supervisor loop respawns it —
+	 * compacting would shift every app one slot up in that window. */
+	if (htpc_mode_active)
 		return;
 
 	while (changed) {
@@ -1695,6 +1725,11 @@ workspace_switch(Monitor *m, Workspace *target)
 		wlr_output_schedule_frame(m->wlr_output);
 
 	refreshworkspacemodule(m);
+
+	/* HTPC: the incoming workspace's fullscreen app was mapped hidden
+	 * with its output side effects skipped — apply them now, and drop
+	 * the outgoing app's holds. No-op outside htpc mode. */
+	htpc_ws_refresh_fx(m);
 }
 
 void

@@ -1,32 +1,29 @@
 /*
- * apptoggle.c — gamepad-only toggle between nixlymedia and retroarch.
+ * htpc_pad.c — HTPC gamepad workspace navigation.
  *
- * Press L1+R1 simultaneously on any connected gamepad to switch:
- *   running nixlymedia → kill, spawn retroarch
- *   running retroarch  → kill, spawn nixlymedia
- *   neither            → spawn nixlymedia
+ * Shoulder buttons pass through to the running app untouched (devices
+ * are opened non-exclusively, never grabbed).  Holding L1 or R1 for
+ * 1.5 s slides one workspace back/forward with the normal vertical
+ * slide animation; keeping it held keeps sliding every 600 ms until
+ * the last populated workspace in that direction.
  *
- * Opens /dev/input/event* devices non-exclusively; inotify picks up
- * hotplugged pads.  1s debounce. Compositor SIGCHLD handler reaps.
+ * Only active in htpc mode (htpc_mode_active).  Same non-exclusive
+ * evdev scan + inotify hotplug pattern as apptoggle.c.
  */
 #include "nixlytile.h"
 #include "client.h"
 
 #include <dirent.h>
 #include <fcntl.h>
-#include <signal.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
-#include <time.h>
 #include <unistd.h>
 
-#define APPTOGGLE_DEBOUNCE_MS 1000
+#define HOLD_MS   1500
+#define REPEAT_MS 600
 #define LONGS_FOR(bits) (((bits) + 8 * sizeof(long) - 1) / (8 * sizeof(long)))
 #define TESTBIT(b, arr) (((arr)[(b) / (8 * sizeof(long))] >> ((b) % (8 * sizeof(long)))) & 1UL)
-
-typedef enum { APP_NONE, APP_NIXLYMEDIA, APP_RETROARCH } CurrentApp;
 
 typedef struct {
 	int fd;
@@ -35,23 +32,14 @@ typedef struct {
 	int l1_down;
 	int r1_down;
 	struct wl_list link;
-} GamepadDev;
+} HtpcPad;
 
-static struct wl_list gamepads_list;
+static struct wl_list pads_list;
 static int inotify_fd = -1;
 static struct wl_event_source *inotify_src;
-static CurrentApp current_app = APP_NONE;
-static pid_t current_pid = 0;
-static uint64_t last_toggle_ms = 0;
-static int apptoggle_inited = 0;
-
-static uint64_t
-now_ms(void)
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
-}
+static struct wl_event_source *hold_timer;
+static int hold_dir;   /* -1 = L1 held, +1 = R1 held, 0 = none */
+static int pad_inited;
 
 static int
 is_gamepad(int fd)
@@ -60,15 +48,13 @@ is_gamepad(int fd)
 	memset(key_bits, 0, sizeof(key_bits));
 	if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(key_bits)), key_bits) < 0)
 		return 0;
-	/* Real gamepads expose BTN_GAMEPAD (== BTN_SOUTH) plus L1/R1.
-	 * Keyboards/mice never do. */
 	return TESTBIT(BTN_GAMEPAD, key_bits)
 		&& TESTBIT(BTN_TL, key_bits)
 		&& TESTBIT(BTN_TR, key_bits);
 }
 
 static void
-remove_device(GamepadDev *gp)
+remove_device(HtpcPad *gp)
 {
 	if (gp->src)
 		wl_event_source_remove(gp->src);
@@ -78,55 +64,72 @@ remove_device(GamepadDev *gp)
 	free(gp);
 }
 
-static void
-perform_toggle(void)
+static int
+step_workspace(void)
 {
-	uint64_t now = now_ms();
-	if (now - last_toggle_ms < APPTOGGLE_DEBOUNCE_MS)
-		return;
-	last_toggle_ms = now;
+	int cur, max_idx, target;
+	Arg a;
 
-	/* Drop tracked pid if process is gone. */
-	if (current_pid > 0 && kill(current_pid, 0) != 0) {
-		current_pid = 0;
-		current_app = APP_NONE;
-	}
-
-	const char *next_cmd;
-	CurrentApp next_app;
-	if (current_app == APP_RETROARCH) {
-		next_cmd = "nixlymedia";
-		next_app = APP_NIXLYMEDIA;
-	} else if (current_app == APP_NIXLYMEDIA) {
-		next_cmd = "retroarch";
-		next_app = APP_RETROARCH;
-	} else {
-		next_cmd = "nixlymedia";
-		next_app = APP_NIXLYMEDIA;
-	}
-
-	if (current_pid > 0) {
-		kill(current_pid, SIGKILL);
-		current_pid = 0;
-	}
-	current_app = APP_NONE;
-
-	pid_t pid = spawn_cmd(next_cmd);
-	if (pid > 0) {
-		current_pid = pid;
-		current_app = next_app;
-	}
-	wlr_log(WLR_INFO, "apptoggle: spawn '%s' pid=%d", next_cmd, (int)pid);
+	if (!hold_dir || !selmon || !selmon->active_ws)
+		return 0;
+	cur = selmon->active_ws->idx;
+	max_idx = workspace_max_nonempty_idx(selmon);
+	if (max_idx < 0)
+		return 0;
+	target = cur + hold_dir;
+	if (target < 0)
+		target = 0;
+	if (target > max_idx)
+		target = max_idx;
+	if (target == cur)
+		return 0;
+	a.i = target;
+	focus_workspace_n(&a);
+	return 1;
 }
 
 static int
-gamepad_event_cb(int fd, uint32_t mask, void *data)
+hold_timer_cb(void *data)
 {
-	GamepadDev *gp = data;
+	(void)data;
+	if (!hold_dir)
+		return 0;
+	/* Keep repeating while held; once clamped at the end this just
+	 * re-arms without switching, so releasing needs no bookkeeping. */
+	step_workspace();
+	if (hold_timer)
+		wl_event_source_timer_update(hold_timer, REPEAT_MS);
+	return 0;
+}
+
+/* Aggregate shoulder state over every connected pad.  Exactly one side
+ * held → arm the 1.5 s hold; both or neither → cancel. */
+static void
+reevaluate(void)
+{
+	HtpcPad *gp;
+	int l = 0, r = 0, dir;
+
+	wl_list_for_each(gp, &pads_list, link) {
+		l |= gp->l1_down;
+		r |= gp->r1_down;
+	}
+	dir = (l && !r) ? -1 : (r && !l) ? 1 : 0;
+	if (dir == hold_dir)
+		return;
+	hold_dir = dir;
+	if (hold_timer)
+		wl_event_source_timer_update(hold_timer, dir ? HOLD_MS : 0);
+}
+
+static int
+pad_event_cb(int fd, uint32_t mask, void *data)
+{
+	HtpcPad *gp = data;
 
 	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR)) {
-		wlr_log(WLR_INFO, "apptoggle: gamepad gone %s", gp->path);
 		remove_device(gp);
+		reevaluate();
 		return 0;
 	}
 
@@ -141,12 +144,11 @@ gamepad_event_cb(int fd, uint32_t mask, void *data)
 			gp->r1_down = (ev.value != 0);
 		else
 			continue;
-		if (gp->l1_down && gp->r1_down)
-			perform_toggle();
+		reevaluate();
 	}
 	if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
-		wlr_log(WLR_INFO, "apptoggle: read err on %s, dropping", gp->path);
 		remove_device(gp);
+		reevaluate();
 	}
 	return 0;
 }
@@ -154,9 +156,9 @@ gamepad_event_cb(int fd, uint32_t mask, void *data)
 static void
 try_add_device(const char *path)
 {
-	GamepadDev *gp;
+	HtpcPad *gp;
 
-	wl_list_for_each(gp, &gamepads_list, link) {
+	wl_list_for_each(gp, &pads_list, link) {
 		if (strcmp(gp->path, path) == 0)
 			return;
 	}
@@ -177,14 +179,14 @@ try_add_device(const char *path)
 	gp->fd = fd;
 	snprintf(gp->path, sizeof(gp->path), "%s", path);
 	gp->src = wl_event_loop_add_fd(event_loop, fd, WL_EVENT_READABLE,
-				       gamepad_event_cb, gp);
+				       pad_event_cb, gp);
 	if (!gp->src) {
 		close(fd);
 		free(gp);
 		return;
 	}
-	wl_list_insert(&gamepads_list, &gp->link);
-	wlr_log(WLR_INFO, "apptoggle: gamepad added %s", path);
+	wl_list_insert(&pads_list, &gp->link);
+	wlr_log(WLR_INFO, "htpc_pad: gamepad added %s", path);
 }
 
 static int
@@ -229,28 +231,13 @@ scan_devices(void)
 }
 
 void
-apptoggle_setup(void)
+htpc_pad_setup(void)
 {
-	if (apptoggle_inited)
+	if (pad_inited || !htpc_mode_active)
 		return;
-	/* HTPC: apps live on fixed workspaces and are supervised externally;
-	 * holding L1/R1 switches workspace instead (htpc_pad.c). The kill/
-	 * spawn toggle would fight the supervisors — keep it desktop-only. */
-	if (htpc_mode_active)
-		return;
-	wl_list_init(&gamepads_list);
+	wl_list_init(&pads_list);
 
-	/* Adopt the nixlymedia pid spawned by autostart so the first
-	 * shoulder-press kills it rather than just stacking retroarch. */
-	for (size_t i = 0; i < runtime_autostart_count; i++) {
-		if (runtime_autostart[i]
-		    && strstr(runtime_autostart[i], "nixlymedia")
-		    && runtime_autostart_pids[i] > 0) {
-			current_pid = runtime_autostart_pids[i];
-			current_app = APP_NIXLYMEDIA;
-			break;
-		}
-	}
+	hold_timer = wl_event_loop_add_timer(event_loop, hold_timer_cb, NULL);
 
 	inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
 	if (inotify_fd >= 0) {
@@ -261,17 +248,23 @@ apptoggle_setup(void)
 						   inotify_cb, NULL);
 	}
 	scan_devices();
-	apptoggle_inited = 1;
-	wlr_log(WLR_INFO, "apptoggle: setup done (tracked pid=%d app=%d)",
-		(int)current_pid, (int)current_app);
+	pad_inited = 1;
+	wlr_log(WLR_INFO, "htpc_pad: setup done");
 }
 
 void
-apptoggle_cleanup(void)
+htpc_pad_cleanup(void)
 {
-	GamepadDev *gp, *tmp;
-	wl_list_for_each_safe(gp, tmp, &gamepads_list, link)
+	HtpcPad *gp, *tmp;
+
+	if (!pad_inited)
+		return;
+	wl_list_for_each_safe(gp, tmp, &pads_list, link)
 		remove_device(gp);
+	if (hold_timer) {
+		wl_event_source_remove(hold_timer);
+		hold_timer = NULL;
+	}
 	if (inotify_src) {
 		wl_event_source_remove(inotify_src);
 		inotify_src = NULL;
@@ -280,5 +273,6 @@ apptoggle_cleanup(void)
 		close(inotify_fd);
 		inotify_fd = -1;
 	}
-	apptoggle_inited = 0;
+	hold_dir = 0;
+	pad_inited = 0;
 }

@@ -750,6 +750,7 @@ cleanup(void)
 {
 	wlr_log(WLR_ERROR, "cleanup() called - starting cleanup sequence");
 	apptoggle_cleanup();
+	htpc_pad_cleanup();
 	remote_pad_cleanup();
 	mic_watch_cleanup();
 	audio_watch_cleanup();
@@ -1269,6 +1270,9 @@ run(const char *startup_cmd)
 	/* Gamepad L1+R1 toggle between nixlymedia and retroarch.
 	 * Set up after autostart so it can adopt the spawned nixlymedia pid. */
 	apptoggle_setup();
+
+	/* HTPC: hold L1/R1 1.5 s to slide between the app workspaces. */
+	htpc_pad_setup();
 
 	/* Gamepad desktop navigation, only live during a remote session. */
 	remote_pad_init();

@@ -308,6 +308,11 @@ typedef struct {
 	int nogame;   /* window-rule `game false` → never game-mode */
 	int nofullscreen;   /* window-rule `fullscreen false` → ignore client fullscreen requests */
 	int embedded;   /* window-rule `embedded true` → floating, borderless, client-positioned */
+	int ws;   /* window-rule `workspace N` (1-based); 0 = unset. Maps the
+	           * client onto that workspace WITHOUT raising/focusing it
+	           * when the workspace is not the active one (HTPC: each app
+	           * owns a fixed workspace). Kept last so the positional
+	           * initializers in config.h stay valid. */
 } Rule;
 
 typedef struct {
@@ -1172,6 +1177,7 @@ typedef struct {
 	struct wl_listener ping_timeout; /* freeze watchdog: unresponsive → kill */
 	Workspace *fs_ws;             /* workspace fullscreened on; NULL = not fs / unbound (always visible) */
 	int fs_col_idx;               /* column slot held before fullscreen; -1 = none */
+	int rule_ws;                  /* window-rule `workspace N` (1-based); 0 = none */
 
 	/* Remote-mode restore slot: where this client sat before streaming */
 	char rst_out[32];
@@ -2457,6 +2463,9 @@ int fullscreen_video_playing(void);
 Client *fullscreen_visible_on(Monitor *m);
 int client_is_fs_companion(Client *c, Client *fsc);
 int is_process_running(const char *name);
+int client_rule_ws_lookup(Client *c);
+Workspace *client_target_ws(Client *c);
+int client_hidden_map(Client *c);
 
 /* workspace.c (Niri-style) */
 Workspace *workspace_create(Monitor *m);
@@ -2470,6 +2479,8 @@ void column_move_to_index(Column *col, int idx);
 void monitor_init_workspaces(Monitor *m);
 void monitor_cleanup_workspaces(Monitor *m);
 void monitor_compact_workspaces(Monitor *m);
+Workspace *workspace_get_or_create_idx(Monitor *m, int idx);
+int workspace_max_nonempty_idx(Monitor *m);
 int workspace_has_clients(Workspace *ws);
 void workspace_attach_client(Workspace *ws, Client *c);
 void workspace_detach_client(Client *c);
@@ -3360,6 +3371,13 @@ float ease_out_cubic(float t);
 /* apptoggle.c — gamepad L1+R1 toggle between nixlymedia and retroarch */
 void apptoggle_setup(void);
 void apptoggle_cleanup(void);
+
+/* htpc_pad.c — HTPC gamepad workspace nav: hold L1/R1 1.5 s to slide */
+void htpc_pad_setup(void);
+void htpc_pad_cleanup(void);
+
+/* client.c — HTPC: swap fullscreen output side effects on ws switch */
+void htpc_ws_refresh_fx(Monitor *m);
 
 /* mic_watch.c — /dev/snd hotplug watch for the microphone module */
 void mic_watch_setup(void);

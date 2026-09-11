@@ -2035,6 +2035,12 @@ menu_maxhz_client(Client *c)
 	if (app && (strcasestr(app, "retroarch") ||
 			strcasestr(app, "nixlymedia")))
 		return 1;
+	/* Steam Big Picture and its guide-button menu: the menu is a
+	 * separate steamwebhelper toplevel, so when it takes focus the
+	 * hold used to drop — BPM ran at max Hz but the menu did not.
+	 * is_steam_popup() excludes actual games (steam_app_*). */
+	if (is_steam_client(c) || is_steam_popup(c))
+		return 1;
 	return is_retro_emulator_client(c);
 }
 
@@ -2495,9 +2501,10 @@ update_game_mode(void)
 
 		/* Restore additional timers if we were in ultra mode */
 		if (was_ultra) {
-			/* Re-enable showbar on all monitors */
+			/* Re-enable showbar on all monitors (never in htpc
+			 * mode — the bar stays hidden there permanently) */
 			wl_list_for_each(m, &mons, link) {
-				m->showbar = 1;
+				m->showbar = htpc_mode_active ? 0 : 1;
 				/* Game mode cleared showbar without an arrange, so
 				 * layoutstatusbar never armed its re-show render and
 				 * the status timers stayed disarmed — force both. */

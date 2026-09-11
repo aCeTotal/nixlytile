@@ -148,6 +148,11 @@ client_is_forced_fullscreen_appid(const char *appid)
 		return 1;
 	if (strcasestr(appid, "retroarch"))
 		return 1;
+	/* HTPC only: GeForce NOW owns workspace 3 fullscreen. Desktop keeps
+	 * the normal game heuristics (windowed use is legitimate there). */
+	if (htpc_mode_active && (strcasestr(appid, "geforcenow")
+			|| strcasestr(appid, "geforce now")))
+		return 1;
 	return 0;
 }
 
@@ -1196,6 +1201,12 @@ notif_placed:
 	int pre_game_splash = 0;    /* Game splash → float centered */
 	Monitor *pre_target_mon = NULL;
 
+	/* Rule-assigned workspace, resolved BEFORE the pre-fullscreen paths
+	 * below — they skip applyrules but must still honor `workspace N`
+	 * (HTPC: every app maps onto its own fixed workspace, hidden when
+	 * that workspace is not the active one). */
+	c->rule_ws = client_rule_ws_lookup(c);
+
 	/* nixlymedia / retroarch: always map fullscreen over waybar.
 	 * Pin to selmon, bypass applyrules, force tiled+fullscreen so
 	 * the row reflows. Workspace switching keeps working because
@@ -1495,7 +1506,10 @@ notif_placed:
 			"GAME_TRACE: pre-fullscreen game ready c->mon='%s' geom=%dx%d@%d,%d",
 			c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)",
 			c->geom.width, c->geom.height, c->geom.x, c->geom.y);
-		focusclient(c, 1);
+		/* Mapped onto an inactive rule workspace: stays hidden there,
+		 * the active app keeps focus. */
+		if (!client_hidden_map(c))
+			focusclient(c, 1);
 		printstatus();
 		goto unset_fullscreen;
 	}
@@ -1630,6 +1644,10 @@ unset_fullscreen:
 		 * destroying pointer constraints and breaking mouse input. */
 		const char *new_appid = client_get_appid(c);
 		wl_list_for_each(w, &clients, link) {
+			/* A client mapped hidden onto an inactive rule workspace
+			 * must never unfullscreen the app the user is watching. */
+			if (client_hidden_map(c))
+				break;
 			if (w == c || w == p || !w->isfullscreen || m != w->mon
 					|| !(w->tags & c->tags))
 				continue;
@@ -2239,11 +2257,19 @@ setfullscreen(Client *c, int fullscreen)
 	int was = c->isfullscreen;
 	Workspace *prev_fs_ws = c->fs_ws;
 
+	/* Rule-assigned workspace (HTPC: one app per workspace). When it is
+	 * not the active workspace the client maps hidden: geometry only —
+	 * no cover animation, no focus steal, no output modesets. Those are
+	 * applied by htpc_ws_refresh_fx() when its workspace activates. */
+	Workspace *fs_target = (fullscreen && c->mon) ? client_target_ws(c) : NULL;
+	int hidden_fs = fullscreen && c->mon && fs_target
+			&& fs_target != c->mon->active_ws;
+
 	/* Et spill skal under svart FØR det flipper til fullskjerm: hvis
 	 * cover-animasjonen ikke har dekket skjermen ennå, startes den her
 	 * og selve flippen utsettes — launchfx kaller setfullscreen igjen
 	 * når sirkelen har vokst ferdig (~500 ms). */
-	if (fullscreen && !was && launchfx_defer_fullscreen(c))
+	if (fullscreen && !was && !hidden_fs && launchfx_defer_fullscreen(c))
 		return;
 	if (!fullscreen)
 		launchfx_forget_client(c);
@@ -2271,7 +2297,7 @@ setfullscreen(Client *c, int fullscreen)
 	 * Visibility, cursor confinement and exclusive focus key off this so
 	 * switching to another workspace hides the game instead of leaving it
 	 * stuck on screen (tags don't change on a Niri-style ws switch). */
-	c->fs_ws = (fullscreen && c->mon) ? c->mon->active_ws : NULL;
+	c->fs_ws = fs_target;
 
 	/* Detach from column when entering fullscreen so the row reflows.
 	 * Reattach when leaving (if still tile-able).  Do this early so the
@@ -2337,7 +2363,7 @@ setfullscreen(Client *c, int fullscreen)
 		 * the game has not been configured to the output rect yet, so
 		 * nothing of its fullscreen frame has reached the screen and
 		 * the animation lands right before the game comes up. */
-		if (!was)
+		if (!was && !hidden_fs)
 			launchfx_fullscreen_starting(c);
 		wlr_log(WLR_INFO,
 			"GAME_TRACE: setfullscreen resize mon='%s' target=%dx%d@%d,%d "
@@ -2347,7 +2373,7 @@ setfullscreen(Client *c, int fullscreen)
 			c->mon->m.width, c->mon->m.height, c->mon->m.x, c->mon->m.y);
 		/* X11 games read modes/desktop size from the RandR primary
 		 * output — point it at the monitor the game fullscreens on. */
-		if (client_is_x11(c))
+		if (client_is_x11(c) && !hidden_fs)
 			xwayland_set_primary(c->mon);
 		c->prev = c->geom;
 		/* Every fullscreen client takes the full output rect (m->m,
@@ -2385,7 +2411,7 @@ setfullscreen(Client *c, int fullscreen)
 		 * (set_video_refresh_rate + check_fullscreen_video below) paces
 		 * them perfectly WITHOUT a VRR modeset, which on HDMI blocks the
 		 * compositor mid-commit and shows as "fullscreen YouTube froze". */
-		if (!_is_retro && _is_game) {
+		if (!hidden_fs && !_is_retro && _is_game) {
 			set_adaptive_sync(c->mon, 1);
 			/* Spanned game renders on every output — VRR on all of
 			 * them, not just the home monitor. */
@@ -2396,7 +2422,8 @@ setfullscreen(Client *c, int fullscreen)
 							&& sm->wlr_output->enabled && !sm->is_mirror)
 						set_adaptive_sync(sm, 1);
 			}
-		} else if ((_is_retro || _is_browser) && c->mon && c->mon->wlr_output
+		} else if (!hidden_fs && (_is_retro || _is_browser)
+				&& c->mon && c->mon->wlr_output
 				&& !c->mon->retro_scanout_lock) {
 			/* Lock attach_render so wlroots picks GPU composition
 			 * instead of direct scanout.
@@ -2416,7 +2443,8 @@ setfullscreen(Client *c, int fullscreen)
 			c->mon->retro_scanout_lock = 1;
 		}
 		/* Reset frame tracking and video detection state */
-		autolock_reset(c->mon);
+		if (!hidden_fs)
+			autolock_reset(c->mon);
 		c->frame_time_idx = 0;
 		c->frame_time_count = 0;
 		c->detected_video_hz = 0.0f;
@@ -2424,7 +2452,7 @@ setfullscreen(Client *c, int fullscreen)
 		c->game_last_buffer = NULL;
 		c->video_detect_retries = 0;
 		c->video_detect_phase = 0;
-		if (!_is_retro) {
+		if (!hidden_fs && !_is_retro) {
 			if (_is_game) {
 				enable_game_vrr(c->mon);
 				if (c->isspanned) {
@@ -2440,13 +2468,13 @@ setfullscreen(Client *c, int fullscreen)
 		}
 		/* Steam Big Picture / RetroArch: drop to 1080p best-refresh
 		 * if the output cannot do 4K@60+. */
-		if (client_wants_console_mode(c))
+		if (!hidden_fs && client_wants_console_mode(c))
 			apply_console_mode(c->mon, c);
 		/* Games never enter video detection: a game with a stable
 		 * frame rate (menus at 60, capped titles, RetroArch cores)
 		 * would get video-classified, which suppresses tearing and
 		 * shadows the game frame-repeat pacer with the video path. */
-		if (!_is_retro && !_is_game)
+		if (!hidden_fs && !_is_retro && !_is_game)
 			schedule_video_check(200);
 	} else {
 		/* restore previous size only for floating windows since their
@@ -2514,7 +2542,7 @@ setfullscreen(Client *c, int fullscreen)
 	schedule_game_mode_update();
 
 	/* Ensure fullscreen client gets keyboard focus immediately */
-	if (fullscreen) {
+	if (fullscreen && !hidden_fs) {
 		exclusive_focus = NULL;  /* Clear any exclusive focus that might block */
 		focusclient(c, 1);
 	}
@@ -2554,12 +2582,59 @@ setmon(Client *c, Monitor *m, uint32_t newtags)
 			resize(c, c->geom, 0);
 		c->tags = newtags ? newtags : m->tagset[m->seltags]; /* assign tags of target monitor */
 		if (!c->isfloating && !c->isfullscreen && !client_is_unmanaged(c)
-				&& m->active_ws)
-			workspace_attach_client(m->active_ws, c);
+				&& m->active_ws) {
+			/* Rule-assigned workspace wins over the active one
+			 * (HTPC: each app owns a fixed workspace). */
+			Workspace *tws = client_target_ws(c);
+			workspace_attach_client(tws ? tws : m->active_ws, c);
+		}
 		setfullscreen(c, c->isfullscreen); /* This will call arrange(c->mon) */
 		setfloating(c, c->isfloating);
 	}
+	/* Mapped hidden onto an inactive rule workspace: park it at the
+	 * bottom of the focus stack so focustop() never hands it focus
+	 * while the user is on another workspace. */
+	if (client_hidden_map(c) && !client_is_unmanaged(c)) {
+		wl_list_remove(&c->flink);
+		wl_list_insert(fstack.prev, &c->flink);
+	}
 	focusclient(focustop(selmon), 1);
+}
+
+/* HTPC: fullscreen apps live one per workspace; inactive ones were mapped
+ * hidden with their output side effects skipped (setfullscreen hidden_fs
+ * path). On a workspace switch drop the outgoing app's output holds and
+ * re-run setfullscreen for the incoming one so VRR / console mode /
+ * scanout locks / video pacing match what the user now sees. Called from
+ * workspace_switch(); no-op outside htpc mode. */
+void
+htpc_ws_refresh_fx(Monitor *m)
+{
+	Client *c, *fsc = NULL;
+
+	if (!htpc_mode_active || !m || !m->active_ws)
+		return;
+
+	if (m->wlr_output && m->retro_scanout_lock) {
+		wlr_output_lock_attach_render(m->wlr_output, false);
+		m->retro_scanout_lock = 0;
+	}
+	set_adaptive_sync(m, 0);
+	disable_game_vrr(m);
+	restore_console_mode(m);
+	gamescan_restore(m);
+	autolock_reset(m);
+
+	wl_list_for_each(c, &clients, link) {
+		if (c->mon == m && c->isfullscreen && c->fs_ws == m->active_ws
+				&& client_surface(c) && client_surface(c)->mapped) {
+			fsc = c;
+			break;
+		}
+	}
+	if (fsc)
+		setfullscreen(fsc, 1);
+	schedule_game_mode_update();
 }
 
 void
@@ -2805,8 +2880,12 @@ unmapnotify(struct wl_listener *listener, void *data)
 		if (unmap_mon)
 			arrange(unmap_mon);
 	}
-	/* Toggle adaptive sync off and restore refresh rate when fullscreen client is unmapped */
-	if (c->isfullscreen) {
+	/* Toggle adaptive sync off and restore refresh rate when fullscreen
+	 * client is unmapped.  Not when it was hidden on an inactive rule
+	 * workspace (HTPC app crash): its output holds were never applied,
+	 * and the restores would disturb the app the user is watching. */
+	if (c->isfullscreen
+			&& !(c->fs_ws && c->mon && c->fs_ws != c->mon->active_ws)) {
 		Monitor *m = c->mon ? c->mon : selmon;
 		set_adaptive_sync(m, 0);
 		restore_max_refresh_rate(m);

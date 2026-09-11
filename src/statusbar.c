@@ -5811,7 +5811,7 @@ initstatusbar(Monitor *m)
 		return;
 
 	wl_list_init(&m->statusbar.tray_menu.entries);
-	m->showbar = 1;
+	m->showbar = htpc_mode_active ? 0 : 1;
 	m->statusbar.area = (struct wlr_box){0};
 	m->statusbar.tree = wlr_scene_tree_create(layers[LyrTop]);
 	if (m->statusbar.tree) {
@@ -6250,6 +6250,9 @@ togglestatusbar(const Arg *arg)
 {
 	(void)arg;
 	if (!selmon)
+		return;
+	/* HTPC: the bar is always hidden — 10-foot UI, no desktop chrome. */
+	if (htpc_mode_active)
 		return;
 	selmon->showbar = !selmon->showbar;
 	diag_logf("BAR", "toggle showbar=%d", selmon->showbar);

@@ -890,7 +890,7 @@ createmon(struct wl_listener *listener, void *data)
 	for (i = 0; i < LENGTH(m->layers); i++)
 	wl_list_init(&m->layers[i]);
 
-	m->showbar = 1;
+	m->showbar = htpc_mode_active ? 0 : 1;
 	/* Statusbar + workspace allocation happens after the first
 	 * successful commit below — the two bail-out paths (config-
 	 * disabled output, commit failure) free(m) and would leak them. */

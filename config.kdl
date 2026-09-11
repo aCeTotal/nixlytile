@@ -81,6 +81,12 @@ monitorkey  "Ctrl"
 // `fullscreen false` makes the compositor refuse the client's own
 // fullscreen requests (Wine flags borderless-maximized windows as
 // fullscreen) so the window stays tiled. Keybinding fullscreen still works.
+// `workspace N` (1-based) pins the app to that workspace; when it is not
+// the active one the client maps hidden there — no focus steal, no popup
+// on the workspace you are looking at. Used by HTPC mode (one app per
+// workspace), which is enabled with a top-level `htpc true` node:
+// statusbar permanently hidden, no workspace compaction, and holding a
+// gamepad shoulder button (L1/R1) 1.5 s slides between workspaces.
 window-rule {
     app-id   "Gimp_EXAMPLE"
     tags     0x0

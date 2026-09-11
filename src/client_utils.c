@@ -197,6 +197,66 @@ any_client_fullscreen(void)
 	return get_fullscreen_client() != NULL;
 }
 
+/* Last matching window-rule `workspace N` for this client (1-based),
+ * 0 if none. Same substring matching as applyrules(); needed separately
+ * because the pre-fullscreen map paths skip applyrules entirely. */
+int
+client_rule_ws_lookup(Client *c)
+{
+	const char *appid = client_get_appid(c);
+	const char *title = client_get_title(c);
+	const Rule *rule_list = runtime_rules_count > 0 ? runtime_rules : rules;
+	size_t rule_count = runtime_rules_count > 0 ? runtime_rules_count : nrules;
+	const Rule *r;
+	int ws = 0;
+
+	for (r = rule_list; r < rule_list + rule_count; r++) {
+		if (r->ws <= 0)
+			continue;
+		if (r->title && (!title || !strstr(title, r->title)))
+			continue;
+		if (r->id && (!appid || !strstr(appid, r->id)))
+			continue;
+		ws = r->ws;
+	}
+	return ws;
+}
+
+/* Workspace this client belongs on: its rule-assigned workspace when one
+ * exists (created on demand), otherwise the monitor's active workspace. */
+Workspace *
+client_target_ws(Client *c)
+{
+	Monitor *m;
+	Workspace *ws;
+
+	if (!c)
+		return NULL;
+	m = c->mon ? c->mon : selmon;
+	if (!m)
+		return NULL;
+	if (c->rule_ws > 0) {
+		ws = workspace_get_or_create_idx(m, c->rule_ws - 1);
+		if (ws)
+			return ws;
+	}
+	return m->active_ws;
+}
+
+/* True when the client's rule-assigned workspace is not the active one:
+ * it must map hidden — no focus steal, no raise, no output modesets. */
+int
+client_hidden_map(Client *c)
+{
+	Monitor *m = c ? c->mon : NULL;
+	Workspace *t;
+
+	if (!m || c->rule_ws <= 0 || !m->active_ws)
+		return 0;
+	t = client_target_ws(c);
+	return t && t != m->active_ws;
+}
+
 pid_t
 client_get_pid(Client *c)
 {

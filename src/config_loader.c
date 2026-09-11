@@ -515,6 +515,10 @@ apply_window_rule(const KdlNode *n)
 	if (kdl_arg_bool(kdl_find_child(n, "game"), 0, &b))     r->nogame = !b;
 	if (kdl_arg_bool(kdl_find_child(n, "fullscreen"), 0, &b)) r->nofullscreen = !b;
 	if (kdl_arg_bool(kdl_find_child(n, "embedded"), 0, &b))  r->embedded = b;
+	/* `workspace N` (1-based): map the app onto that workspace; when it
+	 * is not the active one the client maps hidden (no focus steal). */
+	if (kdl_arg_int(kdl_find_child(n, "workspace"), 0, &li) && li > 0)
+		r->ws = (int)li;
 }
 
 static void
@@ -1013,6 +1017,19 @@ apply_doc(const KdlDoc *doc, int initial)
 			int b; if (kdl_arg_bool(n, 0, &b)) game_auto_fps_lock_enabled = b;
 		} else if (!strcmp(n->name, "workspaces")) {
 			(void)li; /* TAGCOUNT is compile-time; informational only */
+		} else if (!strcmp(n->name, "htpc")) {
+			/* HTPC mode: statusbar permanently hidden, fixed app
+			 * workspaces (window-rule `workspace N`), gamepad
+			 * hold-to-switch (htpc_pad.c), no workspace compaction. */
+			int b;
+			if (kdl_arg_bool(n, 0, &b) && htpc_mode_active != b) {
+				Monitor *m;
+				htpc_mode_active = b;
+				wl_list_for_each(m, &mons, link) {
+					m->showbar = b ? 0 : 1;
+					arrangelayers(m);
+				}
+			}
 		}
 	}
 

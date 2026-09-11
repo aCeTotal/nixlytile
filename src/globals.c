@@ -131,7 +131,9 @@ int unfocused_fps_cap = 0;        /* frame_done rate for unfocused-visible; 0 = 
 int game_auto_fps_lock_enabled = 1; /* auto FPS lock + refresh match (autolock.c) */
 int game_cursor_idle_hide = 1;    /* hide untouched cursor after 3 s in games */
 int game_mode_active = 0; /* Set when any client is fullscreen - pauses background tasks */
-int htpc_mode_active = 0; /* HTPC mode (media center); statusbar throttles refresh when set */
+int htpc_mode_active = 0; /* config.kdl `htpc true`: statusbar hidden + refresh throttled,
+                           * fixed app workspaces (window-rule `workspace N`, no compaction),
+                           * gamepad hold-L1/R1 workspace nav (htpc_pad.c) */
 int game_mode_ultra = 0;  /* Ultra game mode - maximum performance, minimal latency */
 Client *game_mode_client = NULL;  /* The fullscreen game client */
 pid_t game_mode_pid = 0;  /* PID of fullscreen game process */
