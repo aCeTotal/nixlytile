@@ -1463,6 +1463,8 @@ struct Monitor {
 	int vrr_pending;        /* 0=none, 1=enable, -1=disable (deferred to next frame commit) */
 	int vrr_pending_tries;  /* strip-retries before giving up on a pending VRR change */
 	float vrr_pending_hz;   /* target Hz when vrr_pending==1 */
+	int vrr_pending_game;   /* pending toggle is for a game (game_vrr_
+	                         * active bookkeeping), not video pacing */
 	int game_vrr_active;
 	float game_vrr_target_fps;
 	float game_vrr_last_fps;
@@ -1644,6 +1646,11 @@ struct Monitor {
 	 * this up outside the commit path (a blocking modeset mid-commit is
 	 * asking for trouble) and calls apply_best_video_mode with it. */
 	float video_fixed_fallback_hz;
+	/* Deferred bestmode restore when the fullscreen video left this
+	 * monitor without a setfullscreen(0)/unmap (tag/workspace switch):
+	 * the 24 Hz video mode must not survive onto the desktop.  Same
+	 * rendermon deferral as video_fixed_fallback_hz. */
+	int video_restore_pending;
 	/* Retro emulator fullscreen on this monitor holds an
 	 * attach_render lock to force GPU composition. Kernel may reject
 	 * retroarch buffer modifiers (10-bit Y-tiled CCS on i915 etc.),
@@ -2435,6 +2442,7 @@ int is_retro_emulator_client(Client *c);
 int retro_content_running(Client *c);
 int retro_blocks_game(Client *c);
 void menu_maxhz_update(void);
+void menuhz_forget(Monitor *m);
 void read_steam_properties(Client *c);
 void xwayland_set_primary(Monitor *m);
 int is_steam_cmd(const char *cmd);

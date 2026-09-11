@@ -2442,7 +2442,11 @@ setfullscreen(Client *c, int fullscreen)
 		 * if the output cannot do 4K@60+. */
 		if (client_wants_console_mode(c))
 			apply_console_mode(c->mon, c);
-		if (!_is_retro)
+		/* Games never enter video detection: a game with a stable
+		 * frame rate (menus at 60, capped titles, RetroArch cores)
+		 * would get video-classified, which suppresses tearing and
+		 * shadows the game frame-repeat pacer with the video path. */
+		if (!_is_retro && !_is_game)
 			schedule_video_check(200);
 	} else {
 		/* restore previous size only for floating windows since their

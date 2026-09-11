@@ -495,6 +495,12 @@ is_known_game_app(const char *app)
 		/* Game launchers / wrappers */
 		"gamescope", "heroic", "lutris", "bottles",
 		"net.lutris.Lutris", "com.heroicgameslauncher.hgl",
+		/* GeForce NOW (flatpak Electron): no content-type, no Steam
+		 * ancestry (bwrap parent), not a browser — without this it
+		 * fell into the untagged path and got neither game framepace
+		 * nor a matched mode.  The stream is a fixed-rate fullscreen
+		 * feed; game treatment gives VRR/autolock pacing. */
+		"com.nvidia.geforcenow", "geforcenow", "GeForce NOW",
 		/* Known games */
 		"minecraft", "Minecraft",
 		"com.mojang.minecraft",

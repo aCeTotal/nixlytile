@@ -20,6 +20,10 @@ cleanupmon(struct wl_listener *listener, void *data)
 	 * monitor — drop it before m goes away. */
 	overview_purge_mon(m);
 
+	/* Menu-refresh hold statics point here; the 1 s timer must never
+	 * dereference the freed Monitor. */
+	menuhz_forget(m);
+
 	/* If a laptop display is being removed, clear is_mirror on any output
 	 * that was mirroring it so it becomes an independent display. */
 	if (strncmp(m->wlr_output->name, "eDP", 3) == 0 ||
@@ -325,12 +329,15 @@ output_lowpower_refresh(int on_battery)
 		if (!cur)
 			continue;
 
-		/* Lowest refresh at the resolution we're already running (the
-		 * true native 60 Hz, never a paced divisor mode — those are all
-		 * higher). */
+		/* Lowest REAL scanout refresh at the resolution we're already
+		 * running.  Paced divisor modes are virtual (and on a 200 Hz
+		 * panel the 1/4 divisor undercuts the native 60) — skip them
+		 * like output_lock_max_refresh does. */
 		wl_list_for_each(mode, &o->modes, link) {
 			if (mode->width != cur->width ||
 					mode->height != cur->height)
+				continue;
+			if (wlr_drm_connector_mode_pace_divisor(o, mode))
 				continue;
 			if (!target || mode->refresh < target->refresh)
 				target = mode;
@@ -398,6 +405,15 @@ try_reapply_bestmode(Monitor *m)
 
 	/* Respect a user-pinned resolution (native pin doesn't count). */
 	if (monitor_mode_pinned(o))
+		return;
+
+	/* A mode owner is holding this output (video 24 Hz, gamescan
+	 * resolution, autolock refresh, console mode, VRR).  An HDMI link
+	 * event or late EDID mid-session must not yank the display back
+	 * to bestmode while the owner still believes its mode is applied
+	 * — every restore path would then be a silent no-op. */
+	if (m->video_mode_active || m->vrr_active || m->console_mode_active
+			|| m->gamescan_mode_active || m->al_mode_active)
 		return;
 
 	best = bestmode(o);
@@ -1986,6 +2002,19 @@ classify_fullscreen_content(Monitor *m, int *out_game, int *out_video, int *out_
 			int video_now = is_video_content(c)
 					|| c->detected_video_hz > 0.0f;
 			if (video_now != m->classify_cache_video) {
+				/* Tag arrived after detection gave up (client
+				 * was untagged or idle during the scan): rerun
+				 * detection so mode-match/VRR/cadence engage
+				 * for the playback that just started. */
+				if (video_now && c->video_detect_phase == 2
+						&& c->detected_video_hz <= 0.0f) {
+					c->video_detect_phase = 0;
+					c->video_detect_retries = 0;
+					c->frame_time_idx = 0;
+					c->frame_time_count = 0;
+					c->last_buffer = NULL;
+					schedule_video_check(200);
+				}
 				m->classify_cache_video = video_now;
 				m->classify_cache_tearing =
 					m->classify_cache_game && !video_now
@@ -2363,7 +2392,12 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 					m->vrr_unusable = 1;
 					m->video_fixed_fallback_hz = m->vrr_pending_hz;
 				}
+				/* Game enable given up: roll back the
+				 * optimistic game_vrr_active. */
+				if (m->vrr_pending == 1 && m->vrr_pending_game)
+					m->game_vrr_active = 0;
 				m->vrr_pending = 0;
+				m->vrr_pending_game = 0;
 				m->vrr_pending_tries = 0;
 			}
 			errno = 0;
@@ -2720,17 +2754,34 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 			struct wlr_output_configuration_v1 *vrr_config;
 			struct wlr_output_configuration_head_v1 *vrr_head;
 
-			m->vrr_active = 1;
-			m->vrr_target_hz = m->vrr_pending_hz;
-			m->vrr_pending = 0;
+			if (m->vrr_pending_game) {
+				/* Game VRR: game_vrr_active was already set
+				 * optimistically at schedule time — do NOT
+				 * raise the video-VRR flags. */
+				m->vrr_pending = 0;
+				m->vrr_pending_game = 0;
+				wlr_log(WLR_DEBUG, "Game VRR verified active on %s",
+						m->wlr_output->name);
+			} else {
+				m->vrr_active = 1;
+				m->vrr_target_hz = m->vrr_pending_hz;
+				m->vrr_pending = 0;
+				wlr_log(WLR_DEBUG, "VRR enabled for %.3f Hz video on %s",
+						m->vrr_pending_hz, m->wlr_output->name);
+			}
 
 			vrr_config = wlr_output_configuration_v1_create();
 			vrr_head = wlr_output_configuration_head_v1_create(vrr_config, m->wlr_output);
 			vrr_head->state.adaptive_sync_enabled = 1;
 			wlr_output_manager_v1_set_configuration(output_mgr, vrr_config);
-
-			wlr_log(WLR_DEBUG, "VRR enabled for %.3f Hz video on %s",
-					m->vrr_pending_hz, m->wlr_output->name);
+		} else if (m->vrr_pending_game) {
+			wlr_log(WLR_ERROR, "Game VRR enable failed on %s (hw rejected)",
+					m->wlr_output->name);
+			/* Roll back the optimistic flag; the game runs at the
+			 * fixed mode with frame-repeat/autolock pacing. */
+			m->game_vrr_active = 0;
+			m->vrr_pending = 0;
+			m->vrr_pending_game = 0;
 		} else {
 			wlr_log(WLR_ERROR, "VRR enable failed on %s (hw rejected) — "
 					"falling back to fixed multiple mode",
@@ -2753,6 +2804,7 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 			m->vrr_active = 0;
 			m->vrr_target_hz = 0.0f;
 			m->vrr_pending = 0;
+			m->vrr_pending_game = 0;
 
 			vrr_config = wlr_output_configuration_v1_create();
 			vrr_head = wlr_output_configuration_head_v1_create(vrr_config, m->wlr_output);
@@ -2764,6 +2816,7 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 			wlr_log(WLR_ERROR, "VRR disable failed on %s (hw rejected)",
 					m->wlr_output->name);
 			m->vrr_pending = 0;
+			m->vrr_pending_game = 0;
 		}
 	}
 
@@ -3068,6 +3121,15 @@ rendermon(struct wl_listener *listener, void *data)
 		m->video_fixed_fallback_hz = 0.0f;
 		if (is_video && !m->video_mode_active)
 			apply_best_video_mode(m, fb_hz);
+	}
+
+	/* Deferred bestmode restore after the video left this monitor via
+	 * tag/workspace switch (no setfullscreen(0)/unmap ran).  Skipped if
+	 * a fullscreen video became visible again before the vblank. */
+	if (m->video_restore_pending) {
+		m->video_restore_pending = 0;
+		if (!is_video && m->video_mode_active)
+			restore_max_refresh_rate(m);
 	}
 
 	/* Deferred game-resolution modeset (see gamescan.c). Blocking
@@ -4247,112 +4309,33 @@ requestmonstate(struct wl_listener *listener, void *data)
 	updatemons(NULL, NULL);
 }
 
-/*
- * Commit an adaptive-sync state change on the given output.
- *
- * Performs the full verification chain:
- *   1. test_state() — backend reports whether the state would commit
- *   2. commit_state() — backend applies the state to the kernel
- *   3. post-commit check — wlr_output->adaptive_sync_status reflects reality
- *
- * Returns 1 iff all three steps succeeded AND the hardware now reports the
- * requested state. Failure at any stage is logged with the specific reason.
- *
- * This is the foundation for all VRR enable/disable operations. Callers
- * should update their internal state (m->vrr_active etc.) ONLY when this
- * returns 1.
- */
-static int
-commit_adaptive_sync(Monitor *m, int enable)
-{
-	struct wlr_output_state state;
-	enum wlr_output_adaptive_sync_status expected;
-	int ok;
-
-	if (!m || !m->wlr_output || !m->wlr_output->enabled) {
-		wlr_log(WLR_ERROR, "VRR: commit refused — invalid monitor state");
-		return 0;
-	}
-
-	/* Already in the requested state (e.g. set_adaptive_sync ran just
-	 * before enable_game_vrr): skip the redundant blocking test+commit. */
-	expected = enable
-		? WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED
-		: WLR_OUTPUT_ADAPTIVE_SYNC_DISABLED;
-	if (m->wlr_output->adaptive_sync_status == expected)
-		return 1;
-
-	wlr_output_state_init(&state);
-	wlr_output_state_set_adaptive_sync_enabled(&state, enable ? true : false);
-
-	/* Phase 1: test before commit to catch capability mismatch early. */
-	if (!wlr_output_test_state(m->wlr_output, &state)) {
-		wlr_log(WLR_ERROR,
-			"VRR: test_state rejected adaptive_sync=%d on %s "
-			"(hardware or mode incompatible)",
-			enable, m->wlr_output->name);
-		wlr_output_state_finish(&state);
-		return 0;
-	}
-
-	/* Phase 2: commit. Can still fail on race (display hot-unplug,
-	 * kernel rejection after test passed, etc.) */
-	ok = wlr_output_commit_state(m->wlr_output, &state);
-	wlr_output_state_finish(&state);
-	if (!ok) {
-		wlr_log(WLR_ERROR,
-			"VRR: commit_state failed adaptive_sync=%d on %s "
-			"(test passed but kernel rejected — possible race)",
-			enable, m->wlr_output->name);
-		return 0;
-	}
-
-	/* Phase 3: post-commit verification. wlroots updates
-	 * adaptive_sync_status after successful commit, so this confirms
-	 * the kernel-level property change actually took effect.
-	 * Guards against silent "commit succeeded but hardware didn't
-	 * apply the property" failure mode. */
-	expected = enable
-		? WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED
-		: WLR_OUTPUT_ADAPTIVE_SYNC_DISABLED;
-	if (m->wlr_output->adaptive_sync_status != expected) {
-		wlr_log(WLR_ERROR,
-			"VRR: commit succeeded on %s but adaptive_sync_status=%d "
-			"(expected %d) — backend silently dropped the property",
-			m->wlr_output->name,
-			(int)m->wlr_output->adaptive_sync_status,
-			(int)expected);
-		return 0;
-	}
-
-	wlr_log(WLR_INFO, "VRR: adaptive_sync=%d verified active on %s",
-		enable, m->wlr_output->name);
-	return 1;
-}
-
 void
 set_adaptive_sync(Monitor *m, int enable)
 {
-	struct wlr_output_configuration_v1 *config;
-	struct wlr_output_configuration_head_v1 *config_head;
+	enum wlr_output_adaptive_sync_status expected;
 
 	if (!m || !m->wlr_output || !m->wlr_output->enabled
 			|| !fullscreen_adaptive_sync_enabled
 			|| !m->vrr_capable)
 		return;
 
-	/* Use the verified commit helper. If it fails, we do NOT broadcast
-	 * the state change — output_mgr would otherwise advertise VRR as
-	 * active to clients while the hardware silently ignored the request. */
-	if (!commit_adaptive_sync(m, enable))
+	/* Deferred like the video path: a standalone adaptive-sync commit
+	 * (no buffer) is BLOCKING in the DRM backend — up to seconds on
+	 * HDMI, and this runs on every game fullscreen enter/exit.  The
+	 * toggle piggybacks on the next buffer commit (NONBLOCK); the
+	 * finalize step in commit_output_frame verifies hardware state and
+	 * broadcasts to output_mgr. */
+	expected = enable
+		? WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED
+		: WLR_OUTPUT_ADAPTIVE_SYNC_DISABLED;
+	if (m->wlr_output->adaptive_sync_status == expected
+			&& m->vrr_pending == 0)
 		return;
-
-	/* Broadcast the adaptive sync state change to output_mgr only after
-	 * verified success. */
-	config = wlr_output_configuration_v1_create();
-	config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
-	config_head->state.adaptive_sync_enabled = enable;
-	wlr_output_manager_v1_set_configuration(output_mgr, config);
+	m->vrr_pending = enable ? 1 : -1;
+	m->vrr_pending_hz = 0.0f;
+	m->vrr_pending_game = 1;
+	m->vrr_pending_tries = 0;
+	request_frame(m);
 }
 
 void
@@ -4385,20 +4368,27 @@ enable_game_vrr(Monitor *m)
 		return;
 	}
 
-	if (commit_adaptive_sync(m, 1)) {
-		m->game_vrr_active = 1;
-		m->game_vrr_target_fps = 0.0f;
-		m->game_vrr_last_fps = 0.0f;
-		m->game_vrr_last_change_ns = get_time_ns();
-		m->game_vrr_stable_frames = 0;
-
-		show_hz_osd(m, "Game VRR Enabled");
-		diag_logf("GVRR", "%s: enabled", m->wlr_output->name);
-		wlr_log(WLR_DEBUG, "Game VRR enabled on %s", m->wlr_output->name);
-	} else {
-		diag_logf("GVRR", "%s: blocked — adaptive-sync commit failed",
-			m->wlr_output->name);
+	/* Deferred (piggybacks on the next buffer commit, see
+	 * set_adaptive_sync).  game_vrr_active is set optimistically so the
+	 * pacing paths engage immediately; the finalize step rolls it back
+	 * if the hardware rejects the toggle. */
+	m->game_vrr_active = 1;
+	m->game_vrr_target_fps = 0.0f;
+	m->game_vrr_last_fps = 0.0f;
+	m->game_vrr_last_change_ns = get_time_ns();
+	m->game_vrr_stable_frames = 0;
+	if (m->wlr_output->adaptive_sync_status
+			!= WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED) {
+		m->vrr_pending = 1;
+		m->vrr_pending_hz = 0.0f;
+		m->vrr_pending_game = 1;
+		m->vrr_pending_tries = 0;
+		request_frame(m);
 	}
+
+	show_hz_osd(m, "Game VRR Enabled");
+	diag_logf("GVRR", "%s: enabled (deferred commit)", m->wlr_output->name);
+	wlr_log(WLR_DEBUG, "Game VRR enabled on %s", m->wlr_output->name);
 }
 
 void
@@ -4407,10 +4397,21 @@ disable_game_vrr(Monitor *m)
 	if (!m || !m->game_vrr_active)
 		return;
 
-	if (commit_adaptive_sync(m, 0)) {
-		wlr_log(WLR_DEBUG, "Game VRR disabled on %s (was targeting %.1f FPS)",
-			m->wlr_output->name, m->game_vrr_target_fps);
+	/* Deferred, same as enable.  A pending never-committed enable is
+	 * simply cancelled. */
+	if (m->vrr_pending == 1 && m->vrr_pending_game) {
+		m->vrr_pending = 0;
+		m->vrr_pending_game = 0;
+	} else if (m->wlr_output && m->wlr_output->adaptive_sync_status
+			!= WLR_OUTPUT_ADAPTIVE_SYNC_DISABLED) {
+		m->vrr_pending = -1;
+		m->vrr_pending_hz = 0.0f;
+		m->vrr_pending_game = 1;
+		m->vrr_pending_tries = 0;
+		request_frame(m);
 	}
+	wlr_log(WLR_DEBUG, "Game VRR disable scheduled on %s (was targeting %.1f FPS)",
+		m->wlr_output->name, m->game_vrr_target_fps);
 
 	m->game_vrr_active = 0;
 	m->game_vrr_target_fps = 0.0f;
@@ -4696,8 +4697,18 @@ restore_max_refresh_rate(Monitor *m)
 	if (!m->video_mode_active)
 		return;
 
-	/* Find best (highest refresh) mode */
-	max_mode = bestmode(m->wlr_output);
+	/* A user-pinned mode (monitor rule) beats bestmode — without this
+	 * the first video session silently trades a pinned 4K@60 (HDMI
+	 * bandwidth/chroma choice) for 4K@120 forever. */
+	max_mode = NULL;
+	{
+		RuntimeMonitorConfig *rtcfg = find_monitor_config(m->wlr_output->name);
+		if (rtcfg && rtcfg->width > 0 && rtcfg->height > 0)
+			max_mode = find_mode(m->wlr_output, rtcfg->width,
+					rtcfg->height, rtcfg->refresh);
+	}
+	if (!max_mode)
+		max_mode = bestmode(m->wlr_output);
 	if (!max_mode)
 		return;
 
@@ -5800,8 +5811,12 @@ score_video_mode(int method, float video_hz, float display_hz, int multiplier)
 	case 1: /* Existing mode - good if it's a perfect multiple */
 	case 2: /* Custom CVT mode */
 		if (judder < 0.1f) {
-			/* Near-perfect sync */
-			score = 100.0f;
+			/* Near-perfect sync.  Judder-continuous inside the
+			 * bucket: TVs advertise both 23.976 and 24.000 (and
+			 * 119.88/120.00) — a flat 100 made list order pick the
+			 * winner, and 24.000 for 23.976 content is a dropped
+			 * or doubled frame every ~41 s. */
+			score = 100.0f - judder * 50.0f;
 			/* Bonus for lower multiplier (less frame repeats) */
 			score += (10 - multiplier) * 2.0f;
 		} else {
@@ -5897,6 +5912,7 @@ enable_vrr_video_mode(Monitor *m, float video_hz)
 	 * non-blocking (DRM_MODE_ATOMIC_NONBLOCK). */
 	m->vrr_pending = 1;
 	m->vrr_pending_hz = video_hz;
+	m->vrr_pending_game = 0;
 	request_frame(m);
 
 	wlr_log(WLR_DEBUG, "VRR enable deferred for %.3f Hz video on %s",
@@ -5919,6 +5935,7 @@ disable_vrr_video_mode(Monitor *m)
 	 * Same rationale as enable: standalone VRR commit is blocking. */
 	m->vrr_pending = -1;
 	m->vrr_pending_hz = 0.0f;
+	m->vrr_pending_game = 0;
 	request_frame(m);
 
 	wlr_log(WLR_DEBUG, "VRR disable deferred on %s", m->wlr_output->name);
@@ -6337,10 +6354,18 @@ invalidate_video_pacing(Monitor *m)
 	 * commit (non-blocking). */
 	if (m->vrr_pending == 1) {
 		m->vrr_pending = 0;
+		/* A cancelled GAME enable must also roll back the optimistic
+		 * game_vrr_active, or the return-to-tag path ("already
+		 * active") would never re-enable it. */
+		if (m->vrr_pending_game) {
+			m->vrr_pending_game = 0;
+			m->game_vrr_active = 0;
+		}
 		wlr_log(WLR_DEBUG, "Pending VRR enable cancelled (tag switch)");
 	}
 	if (m->vrr_active) {
 		m->vrr_pending = -1;
+		m->vrr_pending_game = 0;
 		wlr_log(WLR_DEBUG, "VRR disable scheduled (tag switch)");
 	}
 
@@ -6374,6 +6399,17 @@ invalidate_video_pacing(Monitor *m)
 	 * pending (e.g. last rendermon was a cadence hold that
 	 * returned without committing). */
 	request_frame(m);
+
+	/* Video-matched mode (e.g. 24 Hz) must not survive onto the
+	 * desktop when the video client is no longer the visible
+	 * fullscreen content.  Modeset can't run here (commit path);
+	 * rendermon consumes the flag, and re-checks visibility so a
+	 * switch straight back to the video tag stays on the mode. */
+	if (m->video_mode_active) {
+		Client *vc = fullscreen_visible_on(m);
+		if (!vc || !is_video_content(vc))
+			m->video_restore_pending = 1;
+	}
 
 	/* Schedule a video check so cadence/VRR is re-established
 	 * when switching back to a tag with a fullscreen video.
@@ -6967,13 +7003,27 @@ check_fullscreen_video(void)
 	int any_fullscreen_active = 0;
 
 	wl_list_for_each(m, &mons, link) {
-		c = focustop(m);
+		/* fullscreen_visible_on, not focustop: focus moved to a side
+		 * column mid-detection must not stall the scan (classification
+		 * at classify_output_content was already fixed the same way). */
+		c = fullscreen_visible_on(m);
 		if (!c || !c->isfullscreen)
 			continue;
 		/* Bound to an inactive workspace (Niri-style switch keeps
 		 * tags) → hidden; don't (re-)establish cadence/VRR for it. */
 		if (c->fs_ws && c->fs_ws != m->active_ws)
 			continue;
+
+		/* Games are handled by the game pacers (VRR/frame-repeat/
+		 * autolock).  Video-classifying one by its stable frame rate
+		 * suppresses tearing and shadows the game frame-repeat branch
+		 * in rendermon.  Classification can flip to "game" after the
+		 * check was scheduled (Steam appid arrives late on XWayland),
+		 * so the guard lives here, not only in setfullscreen(). */
+		if (looks_like_game(c)) {
+			c->video_detect_phase = 2;
+			continue;
+		}
 
 		any_fullscreen_active = 1;
 
@@ -6994,6 +7044,18 @@ check_fullscreen_video(void)
 
 		/* Already successfully detected */
 		if (c->video_detect_phase == 2 && (m->vrr_active || c->detected_video_hz > 0.0f)) {
+			/* Switching back to the video tag: the matched mode was
+			 * restored to bestmode on the way out (video_restore_
+			 * pending) — re-apply it the same way the first
+			 * detection did.  Timer context, outside the commit
+			 * path, so the blocking modeset is fine here. */
+			if (!m->vrr_active && !m->video_mode_active
+					&& c->detected_video_hz > 0.0f
+					&& is_video_content(c)
+					&& is_standard_video_rate(c->detected_video_hz)
+					&& apply_best_video_mode(m, c->detected_video_hz)) {
+				continue;
+			}
 			/* Re-establish cadence if it was cleared (tag switch
 			 * calls invalidate_video_pacing which zeroes cadence
 			 * and VRR state).  Without this, switching away and
@@ -7032,10 +7094,18 @@ check_fullscreen_video(void)
 		/* Phase 0: Scanning - collecting frame samples (silent, no OSD) */
 		if (c->video_detect_phase == 0) {
 			/* Use fewer samples for faster detection (8 instead of 16) */
-			if (c->frame_time_count < 8)
+			if (c->frame_time_count < 8) {
+				/* Static or non-committing client (splash
+				 * screen, idle UI): give up after ~10 s
+				 * instead of rescheduling the 200 ms check
+				 * for the rest of the session. */
+				if (++c->video_detect_retries >= 50)
+					c->video_detect_phase = 2;
 				continue;
+			}
 			/* Enough samples collected, move to analysis */
 			c->video_detect_phase = 1;
+			c->video_detect_retries = 0;
 		}
 
 		/* Phase 1: Analysis - try to detect video framerate */
@@ -7086,6 +7156,17 @@ check_fullscreen_video(void)
 			}
 
 			if (use_hz > 0.0f) {
+				/* Untagged client at a stable rate — Steam Big
+				 * Picture UI, splash screens, launchers.  Marking
+				 * it video (detected_video_hz) would flip output
+				 * classification, suppress tearing and put menus
+				 * under video pacing.  Only wp_content_type=VIDEO
+				 * clients get video treatment; the rest leave the
+				 * display at the fixed max-refresh mode. */
+				if (!is_video) {
+					c->video_detect_phase = 2;
+					continue;
+				}
 				c->detected_video_hz = use_hz;
 				c->video_detect_phase = 2;
 				c->video_detect_retries = 0;
@@ -7184,7 +7265,7 @@ check_fullscreen_video(void)
 	if (any_fullscreen_active) {
 		int all_stable = 1;
 		wl_list_for_each(m, &mons, link) {
-			c = focustop(m);
+			c = fullscreen_visible_on(m);
 			if (c && c->isfullscreen && c->video_detect_phase < 2) {
 				all_stable = 0;
 				break;

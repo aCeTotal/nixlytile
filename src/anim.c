@@ -444,6 +444,12 @@ animcommitnotify(struct wl_listener *listener, void *data)
 
 	(void)data;
 	launchfx_note_commit(c);
+	/* X11 clients have no xdg commitnotify, so fullscreen frame-rate
+	 * detection never got a single sample from them — video pacing and
+	 * the idle-inhibit "video playing" check were dead for X11 players,
+	 * and check_fullscreen_video rescheduled itself forever waiting. */
+	if (c->isfullscreen && client_is_x11(c))
+		track_client_frame(c);
 	if (!c->scene_surface || !c->mon)
 		return;
 #ifdef XWAYLAND

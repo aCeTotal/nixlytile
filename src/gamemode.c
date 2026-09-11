@@ -2048,9 +2048,32 @@ menuhz_commit(Monitor *m, struct wlr_output_mode *mode)
 		return;
 	wlr_output_state_init(&st);
 	wlr_output_state_set_mode(&st, mode);
-	if (wlr_output_test_state(m->wlr_output, &st))
-		wlr_output_commit_state(m->wlr_output, &st);
+	if (wlr_output_test_state(m->wlr_output, &st)
+			&& wlr_output_commit_state(m->wlr_output, &st)) {
+		/* Same broadcast as every other modeset path — without it
+		 * output-management clients (nixlycc) show a stale mode. */
+		struct wlr_output_configuration_v1 *config =
+			wlr_output_configuration_v1_create();
+		struct wlr_output_configuration_head_v1 *config_head =
+			wlr_output_configuration_head_v1_create(config,
+					m->wlr_output);
+		config_head->state.mode = mode;
+		wlr_output_manager_v1_set_configuration(output_mgr, config);
+		updatemons(NULL, NULL);
+	}
 	wlr_output_state_finish(&st);
+}
+
+/* Monitor is being destroyed: drop the menu-refresh hold statics so the
+ * 1 s timer never dereferences the freed Monitor (TVs power-cycling HDMI
+ * make unplug-while-held reachable in practice). */
+void
+menuhz_forget(Monitor *m)
+{
+	if (menuhz_mon != m)
+		return;
+	menuhz_mon = NULL;
+	menuhz_saved = NULL;
 }
 
 static int menuhz_timer_cb(void *data);
@@ -2066,7 +2089,14 @@ menu_maxhz_update(void)
 		want = f->mon ? f->mon : selmon;
 
 	if (want != menuhz_mon) {
-		if (menuhz_mon && menuhz_saved && !game_mode_active)
+		/* Video/VRR may have taken the output between the 1 Hz
+		 * re-checks (nixlymedia starts playback → IPC applies the
+		 * 23.976 mode).  Committing the saved max-refresh mode back
+		 * now would clobber it while video_mode_active stays set —
+		 * just drop the hold, the video paths own restoration. */
+		if (menuhz_mon && menuhz_saved && !game_mode_active
+				&& !menuhz_mon->video_mode_active
+				&& !menuhz_mon->vrr_active)
 			menuhz_commit(menuhz_mon, menuhz_saved);
 		menuhz_mon = want;
 		menuhz_saved = NULL;
@@ -2074,6 +2104,7 @@ menu_maxhz_update(void)
 			menuhz_saved = want->wlr_output->current_mode;
 	}
 	if (menuhz_mon && menuhz_mon->wlr_output &&
+			!menuhz_mon->video_mode_active && !menuhz_mon->vrr_active &&
 			menuhz_mon->wlr_output->current_mode) {
 		struct wlr_output_mode *cur =
 			menuhz_mon->wlr_output->current_mode;
@@ -2266,8 +2297,10 @@ update_game_mode(void)
 	 * RetroArch with content running is a real game: the exclusion
 	 * lifts and the full ultra/framepace path engages.
 	 */
+	Client *retro_c = NULL;
 	if (c && retro_blocks_game(c)) {
 		retro_menu = 1;
+		retro_c = c;
 		c = NULL;
 	}
 
@@ -2529,6 +2562,16 @@ update_game_mode(void)
 					m->video_cadence_counter = 0;
 				}
 			}
+		}
+
+		/* RetroArch content → menu is a game exit with no
+		 * setfullscreen transition, so the gamescan resolution and
+		 * autolock refresh would survive into the menu (menuhz only
+		 * raises refresh at the game's resolution).  Restore the
+		 * menu to bestmode explicitly. */
+		if (retro_menu && retro_c && retro_c->mon) {
+			gamescan_restore(retro_c->mon);
+			autolock_reset(retro_c->mon);
 		}
 
 		game_mode_ultra = 0;

@@ -394,6 +394,15 @@ autolock_apply_mode(Monitor *m)
 	m->al_target_mode = NULL;
 	if (!target || target == m->wlr_output->current_mode)
 		return;
+	/* Stale target: gamescan switched the resolution on this same
+	 * vblank (it runs first in rendermon).  Committing a mode picked
+	 * for the old resolution would silently revert the game's
+	 * resolution switch; drop it and let the lock re-derive a target
+	 * at the new resolution. */
+	if (m->wlr_output->current_mode
+			&& (target->width != m->wlr_output->current_mode->width
+			|| target->height != m->wlr_output->current_mode->height))
+		return;
 	wlr_output_state_init(&state);
 	wlr_output_state_set_mode(&state, target);
 	if (wlr_output_test_state(m->wlr_output, &state)

@@ -38,7 +38,11 @@ gamescan_tick(Monitor *m, Client *fc, int is_direct_scanout)
 	struct wlr_surface *surf;
 	int bw, bh;
 
-	if (!m || !fc || m->gamescan_mode_active || m->gamescan_pending)
+	/* Not gated on gamescan_mode_active: a game changing its internal
+	 * resolution again (settings change, dynamic-res step) re-runs the
+	 * stability window and re-modesets; the buffer==mode check below
+	 * keeps the applied mode quiet in the steady state. */
+	if (!m || !fc || m->gamescan_pending)
 		return;
 	if (is_direct_scanout) {
 		m->gamescan_stable = 0;
@@ -88,7 +92,11 @@ gamescan_apply(Monitor *m)
 
 	if (!m || !m->wlr_output || !m->wlr_output->enabled)
 		return;
-	if (m->gamescan_mode_active || m->gamescan_w <= 0 || m->gamescan_h <= 0)
+	/* gamescan_mode_active does not block: a re-arm modeset (game
+	 * changed internal resolution mid-session) just switches again;
+	 * gamescan_original keeps pointing at the pre-game mode and
+	 * restore-on-exit uses bestmode() regardless. */
+	if (m->gamescan_w <= 0 || m->gamescan_h <= 0)
 		return;
 
 	/* Respect a user-pinned resolution (native pin doesn't count). */
@@ -102,13 +110,18 @@ gamescan_apply(Monitor *m)
 		return;
 	}
 
-	m->gamescan_original = m->wlr_output->current_mode;
+	if (!m->gamescan_mode_active)
+		m->gamescan_original = m->wlr_output->current_mode;
 
 	wlr_output_state_init(&state);
 	wlr_output_state_set_mode(&state, target);
 	if (wlr_output_test_state(m->wlr_output, &state)
 	    && wlr_output_commit_state(m->wlr_output, &state)) {
 		m->gamescan_mode_active = 1;
+		/* Any autolock target was picked at the old resolution —
+		 * it is stale now (see autolock_apply_mode's guard). */
+		m->al_mode_pending = 0;
+		m->al_target_mode = NULL;
 		wlr_log(WLR_INFO,
 			"Game scanout mode: %s switched to %dx%d@%dmHz to match game buffer",
 			m->wlr_output->name, target->width, target->height,
