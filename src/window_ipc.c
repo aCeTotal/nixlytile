@@ -1,5 +1,6 @@
 #include "nixlytile.h"
 #include "client.h"
+#include "game_black.h"
 #include "remote.h"
 
 #include <errno.h>
@@ -470,6 +471,26 @@ handle_request_line(NiriIpcClient *cl, char *line)
 	 * the game starts. */
 	if (strcmp(line, "\"Outputs\"") == 0) {
 		send_outputs(cl);
+		return;
+	}
+
+	/* GameSurface — read-only; nixly-game-wrap polls this after launch
+	 * to catch games stuck on a black screen. */
+	if (strcmp(line, "\"GameSurface\"") == 0) {
+		static const char *names[] =
+			{ "none", "nobuffer", "black", "content" };
+		const char *appid = NULL;
+		int st = game_black_state(&appid);
+		char esc[128];
+		size_t elen = json_str_escape(esc, sizeof esc,
+				appid ? appid : "");
+		esc[elen] = 0;
+		char buf[256];
+		int bn = snprintf(buf, sizeof buf,
+			"{\"Ok\":{\"GameSurface\":{\"appid\":%s,\"state\":\"%s\"}}}\n",
+			esc, names[st]);
+		if (bn > 0)
+			client_enqueue(cl, buf, (size_t)bn);
 		return;
 	}
 

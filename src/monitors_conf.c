@@ -339,11 +339,18 @@ monconf_apply_layout(void)
 	}
 
 	/* Mirrors go last: they take the position their source just got, and
-	 * two outputs on the same layout box scan out the same picture. */
+	 * two outputs on the same layout box scan out the same picture.
+	 * A mirror may itself point at another mirror (any number of
+	 * monitors may mirror the same or a mirrored screen), so follow
+	 * the chain to its non-mirror root — roots were placed by the
+	 * grid pass above, so their layout position is already final.
+	 * A cycle (A↔B) has no root; those entries are skipped. */
 	wl_list_for_each(m, &mons, link) {
 		RuntimeMonitorConfig *cfg;
 		struct wlr_output_layout_output *lo;
 		Monitor *src = NULL, *cand;
+		const char *tgt;
+		int hops;
 
 		if (!m->wlr_output || !m->wlr_output->enabled)
 			continue;
@@ -351,15 +358,33 @@ monconf_apply_layout(void)
 		if (!cfg || !cfg->mirror[0])
 			continue;
 
-		wl_list_for_each(cand, &mons, link) {
-			if (cand->wlr_output && cand->wlr_output->enabled &&
-			    strcmp(cand->wlr_output->name, cfg->mirror) == 0) {
-				src = cand;
-				break;
+		tgt = cfg->mirror;
+		for (hops = 0; hops < MAX_MONITORS; hops++) {
+			RuntimeMonitorConfig *scfg;
+
+			src = NULL;
+			wl_list_for_each(cand, &mons, link) {
+				if (cand->wlr_output &&
+				    cand->wlr_output->enabled &&
+				    strcmp(cand->wlr_output->name, tgt) == 0) {
+					src = cand;
+					break;
+				}
 			}
+			if (!src || src == m)
+				break;
+			scfg = monconf_find(src->wlr_output->name);
+			if (!scfg || !scfg->mirror[0])
+				break;   /* non-mirror root found */
+			tgt = scfg->mirror;
 		}
-		if (!src)
+		if (!src || src == m || hops >= MAX_MONITORS) {
+			if (src == m || hops >= MAX_MONITORS)
+				wlr_log(WLR_ERROR,
+					"monitors.conf: mirror cycle via %s, "
+					"skipping", m->wlr_output->name);
 			continue;
+		}
 		lo = wlr_output_layout_get(output_layout, src->wlr_output);
 		if (!lo)
 			continue;

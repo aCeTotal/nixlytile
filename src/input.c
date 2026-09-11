@@ -2037,7 +2037,8 @@ cursor_snap_across_dead_zone(double dx, double dy)
 		double best_gap = 1e30;
 		Monitor *m;
 		wl_list_for_each(m, &mons, link) {
-			if (!m->wlr_output->enabled || m->is_mirror || m == cur_mon)
+			if (!m->wlr_output->enabled || m->is_mirror || m->is_virtual
+					|| m == cur_mon)
 				continue;
 			struct wlr_box *db = &m->m;
 			if (db->width <= 0 || db->height <= 0)
@@ -2085,7 +2086,8 @@ cursor_snap_across_dead_zone(double dx, double dy)
 		double best_gap = 1e30;
 		Monitor *m;
 		wl_list_for_each(m, &mons, link) {
-			if (!m->wlr_output->enabled || m->is_mirror || m == cur_mon)
+			if (!m->wlr_output->enabled || m->is_mirror || m->is_virtual
+					|| m == cur_mon)
 				continue;
 			struct wlr_box *db = &m->m;
 			if (db->width <= 0 || db->height <= 0)
@@ -2151,7 +2153,7 @@ cursor_snap_across_dead_zone(double dx, double dy)
 	double snap_x = tx, snap_y = ty;
 
 	wl_list_for_each(m, &mons, link) {
-		if (!m->wlr_output->enabled || m->is_mirror)
+		if (!m->wlr_output->enabled || m->is_mirror || m->is_virtual)
 			continue;
 		struct wlr_box *b = &m->m;
 		if (b->width <= 0 || b->height <= 0)

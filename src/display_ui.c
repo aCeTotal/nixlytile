@@ -18,6 +18,7 @@
 #define DHIT_SCALE 220   /* slider track */
 #define DHIT_RATE  230   /* + rate index */
 #define DHIT_ROT   240   /* + transform index (normal/90/180/270) */
+#define DHIT_MIR   250   /* + strip index (skipping the selected one) */
 
 #define DISP_RATES_MAX 6   /* 4 EDID rates + custom 120-cap / OC entries */
 
@@ -489,6 +490,25 @@ render_display_popup(Monitor *m)
 		card_buttons(card, rot_lbl, NULL, 4,
 				transform_index(d->transform),
 				btn_hover_idx(hot, DHIT_ROT, 4), DHIT_ROT);
+
+		/* One button per other output; clicking the active target
+		 * again turns mirroring off. Hidden with a single display. */
+		if (ndi > 1) {
+			const char *mlbl[CARD_DISP_MAX];
+			int nmir = 0, mactive = -1;
+
+			for (i = 0; i < ndi; i++) {
+				if (i == dsel)
+					continue;
+				if (strcmp(di[i].name, d->mirror) == 0)
+					mactive = nmir;
+				mlbl[nmir++] = di[i].name;
+			}
+			card_section(card, "MIRROR");
+			card_buttons(card, mlbl, NULL, nmir, mactive,
+					btn_hover_idx(hot, DHIT_MIR, nmir),
+					DHIT_MIR);
+		}
 	}
 
 	if (card_finish(card, &res) != 0)
@@ -702,6 +722,27 @@ display_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 			di[dsel].transform = tr[id - DHIT_ROT];
 			monconf_write();
 			render_display_popup(m);
+		} else if (id >= DHIT_MIR && id < DHIT_MIR + ndi) {
+			/* button order = di[] order minus the selected entry */
+			int j = id - DHIT_MIR, k;
+
+			for (k = 0; k < ndi; k++) {
+				if (k == dsel)
+					continue;
+				if (j-- == 0)
+					break;
+			}
+			if (k < ndi) {
+				char tgt[64];
+
+				snprintf(tgt, sizeof(tgt), "%s", di[k].name);
+				if (strcmp(di[dsel].mirror, tgt) == 0)
+					di[dsel].mirror[0] = '\0';
+				else
+					memcpy(di[dsel].mirror, tgt, sizeof(tgt));
+				monconf_write();
+				render_display_popup(m);
+			}
 		}
 		return 1;
 	}

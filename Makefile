@@ -28,7 +28,7 @@ MOD_CFLAGS = $(NLCFLAGS) -Wno-declaration-after-statement
 # Compositor module object files
 MOD_OBJS = globals.o client.o layout.o input.o output.o \
            gamemode.o client_utils.o xrandr_primary.o gpu.o draw.o layer.o workspace.o anim.o span.o latch.o pace.o gamescan.o autolock.o \
-           dwl_ipc.o dwl-ipc-unstable-v2-protocol.o window_ipc.o \
+           dwl_ipc.o dwl-ipc-unstable-v2-protocol.o window_ipc.o game_black.o \
            config_parser.o config_loader.o monitors_conf.o monitor_setup.o \
            input_conf.o bindings_conf.o statusbar_conf.o \
            remote.o remote_pad.o remote_mouse.o \
@@ -136,7 +136,9 @@ converge.o: $(SRC)/converge.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/diag.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 dwl_ipc.o: $(SRC)/dwl_ipc.c $(SRC)/nixlytile.h $(SRC)/dwl-ipc-unstable-v2-protocol.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-window_ipc.o: $(SRC)/window_ipc.c $(SRC)/nixlytile.h
+window_ipc.o: $(SRC)/window_ipc.c $(SRC)/nixlytile.h $(SRC)/game_black.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+game_black.o: $(SRC)/game_black.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/game_black.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 config_parser.o: $(SRC)/config_parser.c $(SRC)/config_parser.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
