@@ -758,6 +758,7 @@ cleanup(void)
 	gshortcuts_cleanup();
 	/* Shut down game mode background worker (unfreezes processes if needed) */
 	gm_bg_cleanup();
+	wsfreeze_thaw_all();
 	window_ipc_finish();
 	cleanuplisteners();
 #ifdef XWAYLAND
@@ -960,6 +961,7 @@ handlefatalsig(int signo)
 	(void)write(STDERR_FILENO,
 		"handlefatalsig: fatal signal, unfreezing background processes\n", 62);
 	gm_emergency_restore();
+	wsfreeze_thaw_all();
 
 	signal(signo, SIG_DFL);
 	raise(signo);

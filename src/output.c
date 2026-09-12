@@ -7490,6 +7490,10 @@ updatemons(struct wl_listener *listener, void *data)
 	/* Screens moved or came and went — keep the nixlycc ID boxes on them. */
 	monitor_overlay_update();
 
+	/* Output set changed (DPMS, hotplug): the HTPC session freezer needs
+	 * to re-evaluate dark/awake. */
+	wsfreeze_poke();
+
 	in_updatemons = 0;
 }
 

@@ -2296,6 +2296,9 @@ game_mode_debounce_cb(void *data)
 void
 schedule_game_mode_update(void)
 {
+	/* Same trigger set (map/unmap/view/fullscreen/ws switch) drives the
+	 * HTPC workspace freezer: thaw synchronously, refreeze debounced. */
+	wsfreeze_poke();
 	if (!game_mode_debounce_timer)
 		game_mode_debounce_timer = wl_event_loop_add_timer(event_loop,
 			game_mode_debounce_cb, NULL);

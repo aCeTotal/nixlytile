@@ -3387,6 +3387,11 @@ int htpc_guide_select(void);
 /* client.c — HTPC: swap fullscreen output side effects on ws switch */
 void htpc_ws_refresh_fx(Monitor *m);
 
+/* wsfreeze.c — HTPC: SIGSTOP hidden-workspace client trees; freeze the
+ * whole session + mute the sink while no output is enabled and awake */
+void wsfreeze_poke(void);
+void wsfreeze_thaw_all(void);
+
 /* mic_watch.c — /dev/snd hotplug watch for the microphone module */
 void mic_watch_setup(void);
 void mic_watch_cleanup(void);
