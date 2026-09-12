@@ -2,9 +2,11 @@
  * htpc_guide.c — HTPC guide-button workspace menu.
  *
  * Pressing the gamepad guide button (BTN_MODE) in htpc mode opens a
- * compositor-drawn menu listing the fixed app workspaces (1 Steam,
- * 2 RetroArch, 3 GeForce NOW, 4 nixlymedia).  D-pad up/down moves the
- * selection, A switches to that workspace, B or guide closes.
+ * compositor-drawn menu listing the HTPC apps (Steam, RetroArch,
+ * GeForce NOW, nixlymedia).  Only ONE app runs at a time on the single
+ * workspace: D-pad up/down moves the selection, A spawns
+ * `htpc-switch <app>` (nixlyos htpc/session.nix) which kills the
+ * running app and starts the chosen one, B or guide closes.
  *
  * While the menu is open every gamepad is grabbed exclusively
  * (EVIOCGRAB via htpc_pad_grab), so navigating the menu never leaks
@@ -36,9 +38,20 @@ static const char *entries[] = {
 };
 #define GUIDE_N ((int)(sizeof(entries) / sizeof(entries[0])))
 
+/* argv per entry for the htpc-switch spawn on select. */
+static const char *switch_cmd[GUIDE_N][3] = {
+	{ "htpc-switch", "steam",      NULL },
+	{ "htpc-switch", "retroarch",  NULL },
+	{ "htpc-switch", "geforcenow", NULL },
+	{ "htpc-switch", "nixlymedia", NULL },
+};
+
 static struct wlr_scene_tree *menu_tree;
 static Monitor *menu_mon;
 static int menu_sel;
+/* entries[] index of the app currently running; the supervisor boots
+ * into RetroArch, so that is the initial highlight. */
+static int menu_current = 1;
 static int card_w, card_h;
 
 /* Everything scales with the output so the card reads the same from
@@ -283,8 +296,7 @@ guide_open(void)
 	if (menu_tree || !htpc_mode_active || !selmon)
 		return;
 	menu_mon = selmon;
-	menu_sel = (selmon->active_ws && selmon->active_ws->idx < GUIDE_N)
-			? selmon->active_ws->idx : 0;
+	menu_sel = menu_current;
 	menu_tree = wlr_scene_tree_create(layers[LyrOverlay]);
 	if (!menu_tree) {
 		menu_mon = NULL;
@@ -331,7 +343,10 @@ htpc_guide_select(void)
 	if (!menu_tree)
 		return 0;
 	htpc_guide_close();
-	a.i = sel;
-	focus_workspace_n(&a);
+	if (sel != menu_current) {
+		menu_current = sel;
+		a.v = switch_cmd[sel];
+		spawn(&a);
+	}
 	return 1;
 }
