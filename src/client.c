@@ -2651,6 +2651,17 @@ htpc_ws_refresh_fx(Monitor *m)
 	if (fsc)
 		setfullscreen(fsc, 1);
 	schedule_game_mode_update();
+
+	/* Per-workspace audio: only the app the user is looking at may
+	 * play.  The helper (nixlyos htpc/audio-focus.nix) mutes every
+	 * other workspace's PipeWire streams; a missing binary is a
+	 * silent no-op. */
+	{
+		char cmd[64];
+		snprintf(cmd, sizeof(cmd), "htpc-audio-focus %d",
+				m->active_ws->idx);
+		spawn_cmd(cmd);
+	}
 }
 
 void

@@ -157,9 +157,19 @@ pad_event_cb(int fd, uint32_t mask, void *data)
 		/* Guide menu (htpc_guide.c): guide toggles it; while it is
 		 * open — pads grabbed exclusively — the d-pad moves the
 		 * selection (button or hat), A selects, B closes.  Shoulder
-		 * hold-nav below stays untouched. */
+		 * hold-nav below stays untouched.
+		 *
+		 * Toggle on RELEASE, not press: Steam shares this evdev fd
+		 * and the kernel queues each event to every open client
+		 * before our grab lands.  Toggling on press grabbed the pad
+		 * between down and up, so Steam saw the down but never the
+		 * up — and a held guide button is Big Picture's power-menu
+		 * chord.  On release both halves of the press are already in
+		 * Steam's queue (a clean short press it ignores with "Guide
+		 * Button Focuses Steam" off), and the grab still lands before
+		 * any menu navigation. */
 		if (ev.type == EV_KEY && ev.code == BTN_MODE) {
-			if (ev.value == 1)
+			if (ev.value == 0)
 				htpc_guide_toggle();
 			continue;
 		}

@@ -64,7 +64,7 @@ strip_size(const char *name, char *out, size_t len)
 	out[o] = '\0';
 }
 
-static struct fcft_font *
+struct fcft_font *
 card_font_load(double factor)
 {
 	const char **fonts;

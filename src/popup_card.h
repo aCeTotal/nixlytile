@@ -40,6 +40,11 @@ typedef struct CardFill {
 
 typedef struct Card Card;
 
+/* Load the statusbar font family at statusfont.height * factor px.
+ * Caller owns the returned font (fcft_destroy). NULL on failure. */
+struct fcft_font;
+struct fcft_font *card_font_load(double factor);
+
 Card *card_begin(void);
 /* Header: icon (svg asset path, may be NULL), bold title, small caps
  * subtitle under it, big right-aligned value. */

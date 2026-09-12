@@ -2056,6 +2056,9 @@ menuhz_commit(Monitor *m, struct wlr_output_mode *mode)
 	wlr_output_state_set_mode(&st, mode);
 	if (wlr_output_test_state(m->wlr_output, &st)
 			&& wlr_output_commit_state(m->wlr_output, &st)) {
+		wlr_log(WLR_INFO, "menuhz: %s → %dx%d@%dmHz",
+				m->wlr_output->name, mode->width, mode->height,
+				mode->refresh);
 		/* Same broadcast as every other modeset path — without it
 		 * output-management clients (nixlycc) show a stale mode. */
 		struct wlr_output_configuration_v1 *config =
@@ -2066,6 +2069,10 @@ menuhz_commit(Monitor *m, struct wlr_output_mode *mode)
 		config_head->state.mode = mode;
 		wlr_output_manager_v1_set_configuration(output_mgr, config);
 		updatemons(NULL, NULL);
+	} else {
+		wlr_log(WLR_ERROR, "menuhz: %s rejected %dx%d@%dmHz",
+				m->wlr_output->name, mode->width, mode->height,
+				mode->refresh);
 	}
 	wlr_output_state_finish(&st);
 }
@@ -2106,8 +2113,22 @@ menu_maxhz_update(void)
 			menuhz_commit(menuhz_mon, menuhz_saved);
 		menuhz_mon = want;
 		menuhz_saved = NULL;
-		if (want && want->wlr_output && want->wlr_output->current_mode)
-			menuhz_saved = want->wlr_output->current_mode;
+		if (want && want->wlr_output && want->wlr_output->current_mode) {
+			struct wlr_output_mode *cur =
+				want->wlr_output->current_mode;
+			struct wlr_output_mode *max =
+				find_mode(want->wlr_output,
+						cur->width, cur->height, 0);
+
+			menuhz_saved = cur;
+			wlr_log(WLR_INFO, "menuhz: hold on %s (%s), cur "
+					"%dx%d@%dmHz, max at this res %dmHz",
+					want->wlr_output->name,
+					f && client_get_appid(f)
+						? client_get_appid(f) : "?",
+					cur->width, cur->height, cur->refresh,
+					max ? max->refresh : 0);
+		}
 	}
 	if (menuhz_mon && menuhz_mon->wlr_output &&
 			!menuhz_mon->video_mode_active && !menuhz_mon->vrr_active &&
@@ -2292,10 +2313,6 @@ update_game_mode(void)
 	int is_game = 0;
 	int retro_menu = 0;
 
-	/* Menu max-Hz hold for RetroArch/nixlymedia tracks the same events
-	 * that drive game mode. */
-	menu_maxhz_update();
-
 	/*
 	 * Emulators in their menus must not engage game mode.  Match on
 	 * Wayland app_id AND /proc/PID/comm — app_id may be unset on the
@@ -2356,6 +2373,13 @@ update_game_mode(void)
 	game_mode_active = is_game;
 	game_mode_client = is_game ? c : NULL;
 	game_mode_ultra  = is_game;
+
+	/* Menu max-Hz hold for RetroArch/nixlymedia/Steam menus.  Must run
+	 * AFTER the reclassification above: it is gated on
+	 * !game_mode_active, and with the stale value a RetroArch game
+	 * exit left the menu stuck on the game's mode (e.g. 60 Hz) until
+	 * the next workspace switch. */
+	menu_maxhz_update();
 
 	if (game_mode_ultra && !was_ultra) {
 		/*
