@@ -1025,9 +1025,18 @@ apply_doc(const KdlDoc *doc, int initial)
 			if (kdl_arg_bool(n, 0, &b) && htpc_mode_active != b) {
 				Monitor *m;
 				htpc_mode_active = b;
-				wl_list_for_each(m, &mons, link) {
-					m->showbar = b ? 0 : 1;
-					arrangelayers(m);
+				/* Initial load runs from main() BEFORE setup()
+				 * has wl_list_init'd `mons` — iterating the
+				 * zeroed list segfaults the compositor on
+				 * every boot with `htpc true`.  Monitors do
+				 * not exist yet anyway: createmon() reads
+				 * htpc_mode_active for the initial showbar.
+				 * Only a runtime re-load must walk them. */
+				if (!initial) {
+					wl_list_for_each(m, &mons, link) {
+						m->showbar = b ? 0 : 1;
+						arrangelayers(m);
+					}
 				}
 			}
 		}

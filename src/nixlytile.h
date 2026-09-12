@@ -3375,6 +3375,14 @@ void apptoggle_cleanup(void);
 /* htpc_pad.c — HTPC gamepad workspace nav: hold L1/R1 1.5 s to slide */
 void htpc_pad_setup(void);
 void htpc_pad_cleanup(void);
+void htpc_pad_grab(int on);
+
+/* htpc_guide.c — HTPC guide-button workspace menu */
+void htpc_guide_toggle(void);
+void htpc_guide_close(void);
+int htpc_guide_is_open(void);
+int htpc_guide_nav(int dir);
+int htpc_guide_select(void);
 
 /* client.c — HTPC: swap fullscreen output side effects on ws switch */
 void htpc_ws_refresh_fx(Monitor *m);

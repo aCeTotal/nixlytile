@@ -1923,8 +1923,24 @@ client_clip_to_usable(Client *c)
 	 * every frame for non-edge tiles). */
 	if ((!box_clip || live_fit) && ax0 <= 0 && ay0 <= 0 &&
 			ax1 >= c->geom.width && ay1 >= c->geom.height) {
-		if (c->area_clipped)
+		if (c->area_clipped) {
 			client_clip_reset(c);
+		} else {
+			/* The xdg window-geometry OFFSET can change on any
+			 * commit without a size change (GTK shrinks its CSD
+			 * shadow when the window is tiled/unfocused: geometry
+			 * (25,25)→(20,20)).  The scene xdg helper follows the
+			 * new offset immediately, but a clip taken at the old
+			 * offset keeps cropping at the old origin — the window
+			 * frame loses its first pixels and the content sits
+			 * inset from the tile border by exactly the offset
+			 * delta.  Refresh unconditionally; wlroots dedups
+			 * equal clip boxes so the no-change commit is free. */
+			struct wlr_box fresh;
+			client_get_clip(c, &fresh);
+			wlr_scene_subsurface_tree_set_clip(
+					&c->scene_surface->node, &fresh);
+		}
 		/* Tile fully inside the usable area: no crop, so the live-drag
 		 * fit is a pure scale (client_scale_to_box no-ops once the
 		 * client's committed size matches the box). */

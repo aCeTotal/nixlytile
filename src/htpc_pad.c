@@ -122,6 +122,24 @@ reevaluate(void)
 		wl_event_source_timer_update(hold_timer, dir ? HOLD_MS : 0);
 }
 
+/* Exclusive grab of every pad while the guide menu is open: menu
+ * navigation must not leak into the app on screen.  Closing the fd on
+ * device removal drops the kernel grab by itself. */
+static int pads_grabbed;
+
+void
+htpc_pad_grab(int on)
+{
+	HtpcPad *gp;
+
+	if (!pad_inited || pads_grabbed == !!on)
+		return;
+	pads_grabbed = !!on;
+	wl_list_for_each(gp, &pads_list, link)
+		if (gp->fd >= 0)
+			ioctl(gp->fd, EVIOCGRAB, on ? (void *)1 : (void *)0);
+}
+
 static int
 pad_event_cb(int fd, uint32_t mask, void *data)
 {
@@ -136,6 +154,31 @@ pad_event_cb(int fd, uint32_t mask, void *data)
 	struct input_event ev;
 	ssize_t n;
 	while ((n = read(fd, &ev, sizeof(ev))) == (ssize_t)sizeof(ev)) {
+		/* Guide menu (htpc_guide.c): guide toggles it; while it is
+		 * open — pads grabbed exclusively — the d-pad moves the
+		 * selection (button or hat), A selects, B closes.  Shoulder
+		 * hold-nav below stays untouched. */
+		if (ev.type == EV_KEY && ev.code == BTN_MODE) {
+			if (ev.value == 1)
+				htpc_guide_toggle();
+			continue;
+		}
+		if (htpc_guide_is_open()) {
+			if (ev.type == EV_KEY && ev.value == 1) {
+				if (ev.code == BTN_DPAD_UP)
+					htpc_guide_nav(-1);
+				else if (ev.code == BTN_DPAD_DOWN)
+					htpc_guide_nav(1);
+				else if (ev.code == BTN_SOUTH)
+					htpc_guide_select();
+				else if (ev.code == BTN_EAST)
+					htpc_guide_close();
+			} else if (ev.type == EV_ABS &&
+					ev.code == ABS_HAT0Y && ev.value != 0) {
+				htpc_guide_nav(ev.value < 0 ? -1 : 1);
+			}
+			continue;
+		}
 		if (ev.type != EV_KEY)
 			continue;
 		if (ev.code == BTN_TL)
@@ -186,6 +229,9 @@ try_add_device(const char *path)
 		return;
 	}
 	wl_list_insert(&pads_list, &gp->link);
+	/* Hotplug while the guide menu is open: join the active grab. */
+	if (pads_grabbed)
+		ioctl(fd, EVIOCGRAB, (void *)1);
 	wlr_log(WLR_INFO, "htpc_pad: gamepad added %s", path);
 }
 
@@ -259,6 +305,8 @@ htpc_pad_cleanup(void)
 
 	if (!pad_inited)
 		return;
+	htpc_guide_close();
+	pads_grabbed = 0;
 	wl_list_for_each_safe(gp, tmp, &pads_list, link)
 		remove_device(gp);
 	if (hold_timer) {
