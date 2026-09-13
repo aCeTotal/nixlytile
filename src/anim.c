@@ -444,6 +444,18 @@ animcommitnotify(struct wl_listener *listener, void *data)
 
 	(void)data;
 	launchfx_note_commit(c);
+	/* Wake the size-convergence watchdog only when the COMMITTED size
+	 * changed — kicking on every commit would keep its per-frame client
+	 * walk alive for the whole lifetime of any animating/video client. */
+	{
+		int cw = 0, ch = 0;
+		client_get_committed_size(c, &cw, &ch);
+		if (cw != c->conv_seen_w || ch != c->conv_seen_h) {
+			c->conv_seen_w = cw;
+			c->conv_seen_h = ch;
+			converge_kick(c);
+		}
+	}
 	/* X11 clients have no xdg commitnotify, so fullscreen frame-rate
 	 * detection never got a single sample from them — video pacing and
 	 * the idle-inhibit "video playing" check were dead for X11 players,

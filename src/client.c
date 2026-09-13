@@ -2081,6 +2081,8 @@ client_clip_to_usable(Client *c)
 void
 client_request_size(Client *c, int w, int h)
 {
+	/* Every outgoing configure re-arms the convergence watchdog. */
+	converge_kick(c);
 	if (w == c->last_configured_w && h == c->last_configured_h)
 		return;
 #ifdef XWAYLAND

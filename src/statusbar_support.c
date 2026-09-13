@@ -245,6 +245,37 @@ drawroundedrect(struct wlr_scene_tree *parent, int x, int y,
 }
 
 /* ── icon/font buffer + asset-path helpers ───────────────────────── */
+/* ── glyph → wlr_buffer cache ───────────────────────────────────────
+ * This used to allocate + composite a fresh wlr_buffer per glyph per
+ * render: a 60-char title = 60 allocations and 60 GPU texture uploads
+ * on every re-render, and wlroots could never reuse a texture.  fcft
+ * already caches the rasterized glyph; cache the wrapped wlr_buffer
+ * too, keyed on (glyph, fg color).  The cache owns the buffer's
+ * creator reference — callers must NOT wlr_buffer_drop() the result;
+ * scene nodes take their own locks.  Direct-mapped: a collision drops
+ * the old entry (its buffer lives on until the last scene node
+ * unlocks it).  Flush whenever an fcft font is destroyed — the glyph
+ * pointers key the table and a new font may reuse the addresses. */
+#define GLYPH_BUF_CACHE 1024
+static struct {
+	const struct fcft_glyph *glyph;
+	uint32_t fg;
+	struct wlr_buffer *buf;
+} glyph_buf_cache[GLYPH_BUF_CACHE];
+
+void
+statusbar_glyph_cache_flush(void)
+{
+	int i;
+
+	for (i = 0; i < GLYPH_BUF_CACHE; i++) {
+		if (glyph_buf_cache[i].buf)
+			wlr_buffer_drop(glyph_buf_cache[i].buf);
+		glyph_buf_cache[i].glyph = NULL;
+		glyph_buf_cache[i].buf = NULL;
+	}
+}
+
 struct wlr_buffer *
 statusbar_buffer_from_glyph(const struct fcft_glyph *glyph)
 {
@@ -252,6 +283,7 @@ statusbar_buffer_from_glyph(const struct fcft_glyph *glyph)
 	struct PixmanBuffer *buf;
 	pixman_color_t col;
 	uint32_t *data;
+	uint32_t fgkey = 0, slot;
 	int width, height, stride, force_color;
 
 	if (!glyph || !glyph->pix)
@@ -261,6 +293,25 @@ statusbar_buffer_from_glyph(const struct fcft_glyph *glyph)
 	height = glyph->height;
 	if (width <= 0 || height <= 0)
 		return NULL;
+
+	force_color = statusbar_font_force_color || pixman_image_get_format(glyph->pix) == PIXMAN_a8;
+	if (force_color) {
+		const float *fg = statusbar_fg_override ? statusbar_fg_override : statusbar_fg;
+		col.alpha = (uint16_t)lroundf(fg[3] * 65535.0f);
+		col.red = (uint16_t)lroundf(fg[0] * 65535.0f);
+		col.green = (uint16_t)lroundf(fg[1] * 65535.0f);
+		col.blue = (uint16_t)lroundf(fg[2] * 65535.0f);
+		fgkey = ((uint32_t)(col.alpha >> 8) << 24) |
+			((uint32_t)(col.red >> 8) << 16) |
+			((uint32_t)(col.green >> 8) << 8) |
+			(uint32_t)(col.blue >> 8);
+	}
+
+	slot = (uint32_t)(((uintptr_t)glyph >> 4) ^
+			(fgkey * 2654435761u)) & (GLYPH_BUF_CACHE - 1);
+	if (glyph_buf_cache[slot].glyph == glyph &&
+			glyph_buf_cache[slot].fg == fgkey)
+		return glyph_buf_cache[slot].buf;
 
 	stride = width * 4;
 	data = ecalloc(height, stride);
@@ -274,13 +325,7 @@ statusbar_buffer_from_glyph(const struct fcft_glyph *glyph)
 		return NULL;
 	}
 
-	force_color = statusbar_font_force_color || pixman_image_get_format(glyph->pix) == PIXMAN_a8;
 	if (force_color) {
-		const float *fg = statusbar_fg_override ? statusbar_fg_override : statusbar_fg;
-		col.alpha = (uint16_t)lroundf(fg[3] * 65535.0f);
-		col.red = (uint16_t)lroundf(fg[0] * 65535.0f);
-		col.green = (uint16_t)lroundf(fg[1] * 65535.0f);
-		col.blue = (uint16_t)lroundf(fg[2] * 65535.0f);
 		solid = pixman_image_create_solid_fill(&col);
 		pixman_image_composite32(PIXMAN_OP_SRC, solid, glyph->pix, dst,
 				0, 0, 0, 0, 0, 0, width, height);
@@ -305,6 +350,12 @@ statusbar_buffer_from_glyph(const struct fcft_glyph *glyph)
 	buf->stride = stride;
 	buf->owns_data = 1;
 	wlr_buffer_init(&buf->base, &pixman_buffer_impl, width, height);
+
+	if (glyph_buf_cache[slot].buf)
+		wlr_buffer_drop(glyph_buf_cache[slot].buf);
+	glyph_buf_cache[slot].glyph = glyph;
+	glyph_buf_cache[slot].fg = fgkey;
+	glyph_buf_cache[slot].buf = &buf->base;
 
 	return &buf->base;
 }
@@ -1136,6 +1187,7 @@ loadstatusfont(void)
 void
 freestatusfont(void)
 {
+	statusbar_glyph_cache_flush();
 	if (statusfont.font)
 		fcft_destroy(statusfont.font);
 	statusfont.font = NULL;

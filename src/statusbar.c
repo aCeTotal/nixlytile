@@ -194,7 +194,35 @@ render_tray_icon_module(StatusModule *module, int bar_height,
 		wlr_scene_node_set_enabled(&module->tree->node, 0);
 		return;
 	}
-	statusbar_buffer_insets(*icon_buf, *icon_w, &pad_l, &pad_r);
+	/* Inset scan reads every icon pixel row — memoize per buffer: the
+	 * ensure_* caches keep one buffer per (path, height) alive, so
+	 * pointer identity is stable for as long as the entry is cached. */
+	{
+		static struct {
+			struct wlr_buffer *buf;
+			int icon_w, pad_l, pad_r;
+		} inset_cache[8];
+		static int inset_pos;
+		int ci, hit = 0;
+
+		for (ci = 0; ci < 8; ci++) {
+			if (inset_cache[ci].buf == *icon_buf &&
+					inset_cache[ci].icon_w == *icon_w) {
+				pad_l = inset_cache[ci].pad_l;
+				pad_r = inset_cache[ci].pad_r;
+				hit = 1;
+				break;
+			}
+		}
+		if (!hit) {
+			statusbar_buffer_insets(*icon_buf, *icon_w, &pad_l, &pad_r);
+			inset_cache[inset_pos].buf = *icon_buf;
+			inset_cache[inset_pos].icon_w = *icon_w;
+			inset_cache[inset_pos].pad_l = pad_l;
+			inset_cache[inset_pos].pad_r = pad_r;
+			inset_pos = (inset_pos + 1) % 8;
+		}
+	}
 	content_w = *icon_w - pad_l - pad_r;
 	if (content_w <= 0) {
 		content_w = *icon_w;
@@ -410,6 +438,7 @@ tray_render_label(StatusModule *module, const char *text, int x, int bar_height,
 
 	tll_foreach(glyphs, it) {
 		glyph = it->item.glyph;
+		/* Cache-owned buffer — no drop; the scene node holds a lock. */
 		buffer = statusbar_buffer_from_glyph(glyph);
 		if (!buffer)
 			continue;
@@ -421,7 +450,6 @@ tray_render_label(StatusModule *module, const char *text, int x, int bar_height,
 					x + it->item.pen_x + glyph->x,
 					origin_y - glyph->y);
 		}
-		wlr_buffer_drop(buffer);
 	}
 
 	tll_free(glyphs);
@@ -1602,8 +1630,16 @@ rendercpupopup(Monitor *m)
 		}
 	}
 
-	if (card_finish(card, &res) != 0)
-		return;
+	{
+		int cf = card_finish_sig(card, &res, &p->view.render_sig);
+		if (cf < 0)
+			return;
+		if (cf > 0) {
+			/* unchanged — scene content + hit rects stay valid */
+			p->last_render_ms = now;
+			return;
+		}
+	}
 
 	/* Map kill-button hit rects back onto the proc entries the click
 	 * and hover paths read. */
@@ -2007,8 +2043,16 @@ renderrampopup(Monitor *m)
 		card_text(card, "Loading...", NULL, NULL);
 	}
 
-	if (card_finish(card, &res) != 0)
-		return;
+	{
+		int cf = card_finish_sig(card, &res, &p->view.render_sig);
+		if (cf < 0)
+			return;
+		if (cf > 0) {
+			/* unchanged — scene content + hit rects stay valid */
+			p->last_render_ms = now;
+			return;
+		}
+	}
 
 	for (int i = 0; i < p->proc_count; i++)
 		p->procs[i].kill_x = p->procs[i].kill_y =
@@ -2341,8 +2385,16 @@ renderbatterypopup(Monitor *m)
 				CHARGE_LIMIT_HIT_BASE);
 	}
 
-	if (card_finish(card, &res) != 0)
-		return;
+	{
+		int cf = card_finish_sig(card, &res, &p->view.render_sig);
+		if (cf < 0)
+			return;
+		if (cf > 0) {
+			/* unchanged — scene content + hit rects stay valid */
+			p->last_render_ms = now;
+			return;
+		}
+	}
 	memcpy(p->hits, res.hits, sizeof(p->hits));
 	p->nhits = res.nhits;
 	popup_view_apply(&p->view, p->tree, &res);
@@ -2810,6 +2862,7 @@ renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 				wlr_scene_node_set_position(&hrect->node, x, box_y);
 		}
 
+		/* Cache-owned buffer — no drop; the scene node holds a lock. */
 		buffer = statusbar_buffer_from_glyph(glyph);
 		if (buffer) {
 			scene_buf = wlr_scene_buffer_create(module->tree, NULL);
@@ -2819,7 +2872,6 @@ renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 						origin_x + glyph->x,
 						origin_y - glyph->y);
 			}
-			wlr_buffer_drop(buffer);
 		}
 
 		x += box_w;
@@ -3461,23 +3513,44 @@ bl_cmd_fetch_done(const char *out, size_t len, void *data)
 	refreshstatuslight();
 }
 
+static unsigned long long bl_max_cached;   /* immutable after probe */
+static int bl_fd = -1;                     /* persistent brightness fd */
+
 double
 backlight_percent(void)
 {
-	unsigned long long cur, max;
+	unsigned long long cur;
 
-	/* sysfs first — two file reads, no fork.  The brightnessctl /
-	 * light fallbacks each cost a fork+exec and this runs on every
-	 * brightness scroll notch and 45 s refresh tick. */
+	/* sysfs first — no fork.  This runs on every brightness scroll
+	 * notch and per light-popup render, so keep the brightness file
+	 * open and pread() it instead of fopen/fclose per call; max_
+	 * brightness never changes after probe and is read once. */
 	if (backlight_available) {
-		if (readulong(backlight_brightness_path, &cur) == 0 &&
-				readulong(backlight_max_path, &max) == 0 && max > 0) {
-			if (cur > max)
-				cur = max;
-			light_cached_percent = ((double)cur * 100.0) / (double)max;
-			return light_cached_percent;
+		if (bl_max_cached == 0 &&
+				(readulong(backlight_max_path, &bl_max_cached) != 0 ||
+				 bl_max_cached == 0))
+			goto fallback;
+		if (bl_fd < 0)
+			bl_fd = open(backlight_brightness_path, O_RDONLY | O_CLOEXEC);
+		if (bl_fd >= 0) {
+			char buf[32];
+			ssize_t n = pread(bl_fd, buf, sizeof(buf) - 1, 0);
+			if (n > 0) {
+				buf[n] = '\0';
+				cur = strtoull(buf, NULL, 10);
+				if (cur > bl_max_cached)
+					cur = bl_max_cached;
+				light_cached_percent =
+					((double)cur * 100.0) / (double)bl_max_cached;
+				return light_cached_percent;
+			}
+			/* Read failed — device gone?  Drop the fd and fall
+			 * through to the async fallback like before. */
+			close(bl_fd);
+			bl_fd = -1;
 		}
 	}
+fallback:
 
 	/* No sysfs device: read via brightnessctl/light in the background
 	 * and return the cached value immediately — bl_cmd_fetch_done()
@@ -4612,11 +4685,16 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 			m->statusbar.terminfo.last_render_text[0] = '\0';
 			refreshstatusterminfo();
 		}
+		/* Open popups re-anchor with the bar; full card re-raster is
+		 * only needed here on a geometry change — content refresh has
+		 * its own 2 s timer.  Outside this gate an animating layer
+		 * client (notification, OSD) commit-storms arrangelayers and
+		 * re-rastered both cards per commit. */
+		if (m->statusbar.cpu_popup.tree && m->statusbar.cpu_popup.visible)
+			rendercpupopup(m);
+		if (m->statusbar.net_popup.tree && m->statusbar.net_popup.visible)
+			rendernetpopup(m);
 	}
-	if (m->statusbar.cpu_popup.tree && m->statusbar.cpu_popup.visible)
-		rendercpupopup(m);
-	if (m->statusbar.net_popup.tree && m->statusbar.net_popup.visible)
-		rendernetpopup(m);
 	positionstatusmodules(m);
 
 	*client_area = *area;
@@ -4647,8 +4725,10 @@ refreshstatusclock(void)
 		if (!m->statusbar.clock.tree)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		renderclock(&m->statusbar.clock, barh, timestr);
-		positionstatusmodules(m);
+		if (status_should_render(&m->statusbar.clock, barh, timestr)) {
+			renderclock(&m->statusbar.clock, barh, timestr);
+			positionstatusmodules(m);
+		}
 	}
 }
 

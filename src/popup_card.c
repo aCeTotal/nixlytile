@@ -1133,6 +1133,75 @@ card_bg_a(int w, int h)
 	return CARD_BG_A;
 }
 
+static uint32_t
+sig_bytes(const void *p, size_t n, uint32_t h)
+{
+	const unsigned char *b = p;
+
+	while (n--)
+		h = (h ^ *b++) * 16777619u;
+	return h;
+}
+
+/* card_finish with a change gate: hashes the card's full content (rows
+ * incl. hover state, pointed-to colors, QR matrix, backdrop alpha) and
+ * skips the whole rasterization when it matches *sig — the periodic
+ * popup refresh timers (500 ms info popups, 2 s cpu/ram) re-render
+ * identical cards almost every tick otherwise.  Returns 1 and frees the
+ * card when unchanged (out untouched, existing scene content stays);
+ * else behaves as card_finish and stores the new sig.  Reset the sig
+ * (popup_view_hide does) whenever the scene content is torn down. */
+int
+card_finish_sig(Card *c, CardResult *out, uint32_t *sig)
+{
+	uint32_t h32 = 2166136261u;
+	int w, h, i;
+	double bg_a;
+
+	if (!sig)
+		return card_finish(c, out);
+	if (!c || !out)
+		return -1;
+
+	card_measure(c, &w, &h);
+	bg_a = card_bg_a(w, h);
+
+	h32 = sig_bytes(&c->nrows, sizeof(c->nrows), h32);
+	h32 = sig_bytes(&c->min_w, sizeof(c->min_w), h32);
+	h32 = sig_bytes(c->rows, (size_t)c->nrows * sizeof(CardRow), h32);
+	for (i = 0; i < c->nrows; i++) {
+		const CardRow *r = &c->rows[i];
+
+		/* Color/QR pointers are hashed above by address; hash the
+		 * pointed-to values too so an aliased pointer with changed
+		 * content can never false-match. */
+		if (r->subcol)
+			h32 = sig_bytes(r->subcol, 4 * sizeof(float), h32);
+		if (r->bcol)
+			h32 = sig_bytes(r->bcol, 4 * sizeof(float), h32);
+		if (r->dcol)
+			h32 = sig_bytes(r->dcol, 4 * sizeof(float), h32);
+		if (r->qr && r->qr_size > 0)
+			h32 = sig_bytes(r->qr,
+					(size_t)r->qr_size * (size_t)r->qr_size,
+					h32);
+	}
+	h32 = sig_bytes(&bg_a, sizeof(bg_a), h32);
+	if (h32 == 0)
+		h32 = 1;
+
+	if (h32 == *sig) {
+		free(c);
+		return 1;
+	}
+	if (card_finish(c, out) != 0) {
+		*sig = 0;
+		return -1;
+	}
+	*sig = h32;
+	return 0;
+}
+
 int
 card_finish(Card *c, CardResult *out)
 {
@@ -1162,9 +1231,17 @@ card_finish(Card *c, CardResult *out)
 	card_measure(c, &w, &h);
 	inner_w = w - 2 * CARD_PAD;
 
-	cs = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+	/* Draw straight into the final pixel allocation: cairo (pass A) and
+	 * the fcft/pixman text pass (pass B) share `data`, so the old
+	 * surface→ecalloc→memcpy handoff (three full passes over ~w×h×4
+	 * bytes) is gone. */
+	stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, w);
+	data = ecalloc(1, (size_t)stride * (size_t)h);
+	cs = cairo_image_surface_create_for_data(data, CAIRO_FORMAT_ARGB32,
+			w, h, stride);
 	if (cairo_surface_status(cs) != CAIRO_STATUS_SUCCESS) {
 		cairo_surface_destroy(cs);
+		free(data);
 		card_at_valid = 0;
 		free(c);
 		return -1;
@@ -1681,12 +1758,6 @@ card_finish(Card *c, CardResult *out)
 
 	cairo_destroy(cr);
 	cairo_surface_flush(cs);
-
-	/* copy pixels out of the cairo surface into our own allocation */
-	stride = cairo_image_surface_get_stride(cs);
-	data = ecalloc(1, (size_t)stride * (size_t)h);
-	memcpy(data, cairo_image_surface_get_data(cs),
-			(size_t)stride * (size_t)h);
 	cairo_surface_destroy(cs);
 
 	pix = pixman_image_create_bits(PIXMAN_a8r8g8b8, w, h, data, stride);
@@ -2038,8 +2109,16 @@ card_finish(Card *c, CardResult *out)
 
 /* ── cairo surface → wlr_buffer ──────────────────────────────────── */
 
-/* Copy a finished cairo surface into a PixmanBuffer-backed wlr_buffer
- * and destroy the surface. */
+/* Pixel allocation handed from cairo_buf_begin() to cairo_buf_finish()
+ * via surface user data (no destroy func — ownership moves to the
+ * PixmanBuffer; error paths free it explicitly). */
+static cairo_user_data_key_t cairo_buf_data_key;
+
+/* Wrap a finished cairo surface's pixels in a PixmanBuffer-backed
+ * wlr_buffer and destroy the surface.  cairo_buf_begin() allocates the
+ * pixel memory itself (create_for_data), so no copy happens here — the
+ * old create + ecalloc + memcpy path moved the same ~w×h×4 bytes three
+ * times per popup render. */
 static struct wlr_buffer *
 cairo_buf_finish(cairo_surface_t *cs)
 {
@@ -2051,10 +2130,11 @@ cairo_buf_finish(cairo_surface_t *cs)
 	w = cairo_image_surface_get_width(cs);
 	h = cairo_image_surface_get_height(cs);
 	stride = cairo_image_surface_get_stride(cs);
-	data = ecalloc(1, (size_t)stride * (size_t)h);
-	memcpy(data, cairo_image_surface_get_data(cs),
-			(size_t)stride * (size_t)h);
+	data = cairo_surface_get_user_data(cs, &cairo_buf_data_key);
+	cairo_surface_set_user_data(cs, &cairo_buf_data_key, NULL, NULL);
 	cairo_surface_destroy(cs);
+	if (!data)
+		return NULL;
 
 	buf = ecalloc(1, sizeof(*buf));
 	buf->image = pixman_image_create_bits(PIXMAN_a8r8g8b8, w, h,
@@ -2071,10 +2151,24 @@ static cairo_t *
 cairo_buf_begin(int w, int h, cairo_surface_t **out_cs)
 {
 	cairo_surface_t *cs;
+	void *data;
+	int stride;
 
-	cs = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+	stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, w);
+	if (stride <= 0)
+		return NULL;
+	data = ecalloc(1, (size_t)stride * (size_t)h);
+	cs = cairo_image_surface_create_for_data(data, CAIRO_FORMAT_ARGB32,
+			w, h, stride);
 	if (cairo_surface_status(cs) != CAIRO_STATUS_SUCCESS) {
 		cairo_surface_destroy(cs);
+		free(data);
+		return NULL;
+	}
+	if (cairo_surface_set_user_data(cs, &cairo_buf_data_key, data, NULL)
+			!= CAIRO_STATUS_SUCCESS) {
+		cairo_surface_destroy(cs);
+		free(data);
 		return NULL;
 	}
 	*out_cs = cs;
@@ -2736,6 +2830,10 @@ popup_view_hide(PopupView *v)
 	if (!v)
 		return;
 	v->animating = 0;
+	/* Force a real render on next show — guards against any teardown
+	 * of the scene content while hidden (costs one extra raster per
+	 * popup-open, nothing more). */
+	v->render_sig = 0;
 	anim_unregister(v);
 	if (v->content)
 		wlr_scene_node_set_position(&v->content->node, 0, 0);

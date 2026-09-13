@@ -73,7 +73,7 @@ int
 pace_defer_frame(Monitor *m, int allow_tearing, uint64_t now_ns)
 {
 	uint64_t vb_ns, target;
-	int div, delay_ms;
+	int div;
 
 	if (m->pace_fired || allow_tearing)
 		return 0;
@@ -89,23 +89,19 @@ pace_defer_frame(Monitor *m, int allow_tearing, uint64_t now_ns)
 
 	/* The flip must land on the Nth vblank after the last present: any
 	 * commit inside ((N-1)·vb, N·vb) does, since the fixed scanout
-	 * quantizes it.  Aim half a vblank before the target vblank —
-	 * ms-granular timers firing up to 1 ms early still land inside the
-	 * window.  A missed window (heavy frame, idle wake) just commits
+	 * quantizes it.  Aim half a vblank before the target vblank.
+	 * A missed window (heavy frame, idle wake) just commits
 	 * immediately and re-anchors on its own present event. */
 	target = m->last_present_ns + (uint64_t)div * vb_ns - vb_ns / 2;
-	if (now_ns + 1000000ULL >= target)
-		return 0;
-	delay_ms = (int)((target - now_ns) / 1000000ULL);
-	if (delay_ms < 1)
+	if (now_ns + 100000ULL >= target)
 		return 0;
 
 	if (!m->pace_timer)
-		m->pace_timer = wl_event_loop_add_timer(event_loop, pace_timer_cb, m);
+		m->pace_timer = nstimer_create(pace_timer_cb, m);
 	if (!m->pace_timer)
 		return 0;
 
-	wl_event_source_timer_update(m->pace_timer, delay_ms);
+	nstimer_arm_abs(m->pace_timer, target);
 	m->pace_armed = 1;
 	return 1;
 }

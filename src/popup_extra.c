@@ -377,8 +377,11 @@ render_clock_popup(Monitor *m)
 	card_section(card, buf);
 	card_calendar(card, lt.tm_year + 1900, lt.tm_mon, lt.tm_mday);
 
-	if (card_finish(card, &res) != 0)
-		return;
+	{
+		int cf = card_finish_sig(card, &res, &p->view.render_sig);
+		if (cf != 0)
+			return; /* error, or unchanged (content stays) */
+	}
 	popup_view_apply(&p->view, p->tree, &res);
 	p->width = p->view.w;
 	p->height = p->view.h;
@@ -503,8 +506,12 @@ render_audio_popup(Monitor *m, InfoPopup *p, int is_mic)
 		}
 	}
 
-	if (card_finish(card, &res) != 0)
-		return;
+	{
+		int cf = card_finish_sig(card, &res, &p->view.render_sig);
+		if (cf != 0)
+			return; /* error, or unchanged — content, hit rects
+				 * and the live meter overlay stay valid */
+	}
 	memcpy(p->hits, res.hits, sizeof(p->hits));
 	p->nhits = res.nhits;
 	popup_view_apply(&p->view, p->tree, &res);
@@ -619,8 +626,11 @@ render_light_popup(Monitor *m)
 				p->btn_hover, LIGHT_MODE_HIT_BASE);
 	}
 
-	if (card_finish(card, &res) != 0)
-		return;
+	{
+		int cf = card_finish_sig(card, &res, &p->view.render_sig);
+		if (cf != 0)
+			return; /* error, or unchanged (content stays) */
+	}
 	memcpy(p->hits, res.hits, sizeof(p->hits));
 	p->nhits = res.nhits;
 	popup_view_apply(&p->view, p->tree, &res);

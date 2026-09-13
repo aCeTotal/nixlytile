@@ -212,6 +212,12 @@ typedef struct CardResult {
 /* Rasterize and free the card. Returns 0 on success; result owns buf
  * (drop with wlr_buffer_drop after handing to the scene). */
 int card_finish(Card *c, CardResult *out);
+/* card_finish with a content-change gate keyed on *sig (use
+ * view.render_sig).  Returns 1 when the card is identical to the last
+ * rendered one: the card is freed, out is untouched and the existing
+ * scene content must be kept.  0 = rendered (as card_finish), -1 =
+ * error. */
+int card_finish_sig(Card *c, CardResult *out, uint32_t *sig);
 
 /* ── presenter ───────────────────────────────────────────────────── */
 
@@ -228,6 +234,7 @@ typedef struct PopupView {
 	int w, h;
 	uint64_t anim_start_ms;
 	int animating;
+	uint32_t render_sig;             /* card_finish_sig change gate */
 } PopupView;
 
 /* Render a finished card into the popup tree (replaces previous card

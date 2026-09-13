@@ -11,6 +11,7 @@
 #include "nixlytile.h"
 
 #include <dirent.h>
+#include <pthread.h>
 
 #define CPUFREQ_DIR "/sys/devices/system/cpu/cpufreq"
 #define NO_TURBO    "/sys/devices/system/cpu/intel_pstate/no_turbo"
@@ -216,6 +217,121 @@ power_profile_low(void)
 		write_str(path, "quiet");
 	else
 		write_str(path, "balanced");
+}
+
+/* ── async regime worker ─────────────────────────────────────────────
+ * A full regime switch is ~100+ sysfs syscalls (per-policy governor +
+ * EPP + cap writes, EC platform-profile write measured at ~100 ms) and
+ * used to run on the compositor thread — landing exactly on unlock/
+ * wake/AC-plug, where the stall is maximally visible.  Serialize the
+ * writes on one worker with a latest-wins mailbox: rapid transitions
+ * can't interleave their sysfs writes out of order. */
+enum cc_job { CC_NONE = -1, CC_BATTERY, CC_AC, CC_DARK };
+
+static pthread_mutex_t cc_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t cc_cond = PTHREAD_COND_INITIALIZER;
+static int cc_pending = CC_NONE;
+static double cc_pending_cap = 1.0;
+static int cc_started;
+
+static void *
+cc_worker(void *arg)
+{
+	(void)arg;
+	pthread_setname_np(pthread_self(), "nixly-cpuclock");
+	for (;;) {
+		int job;
+		double cap;
+
+		pthread_mutex_lock(&cc_lock);
+		while (cc_pending == CC_NONE)
+			pthread_cond_wait(&cc_cond, &cc_lock);
+		job = cc_pending;
+		cap = cc_pending_cap;
+		cc_pending = CC_NONE;
+		pthread_mutex_unlock(&cc_lock);
+
+		switch (job) {
+		case CC_BATTERY:
+			power_profile_low();
+			cpuclock_perf(0);
+			cpuclock_boost(0);
+			cpuclock_cap(cap);
+			break;
+		case CC_AC:
+			power_profile_high();
+			cpuclock_perf(1);
+			cpuclock_boost(1);
+			cpuclock_cap(cap);
+			break;
+		case CC_DARK:
+			power_profile_low();
+			cpuclock_boost(0);
+			cpuclock_cap(cap);
+			break;
+		}
+	}
+	return NULL;
+}
+
+static void
+cc_submit(int job, double cap)
+{
+	pthread_mutex_lock(&cc_lock);
+	if (!cc_started) {
+		pthread_t thr;
+
+		if (pthread_create(&thr, NULL, cc_worker, NULL) == 0) {
+			pthread_detach(thr);
+			cc_started = 1;
+		}
+	}
+	if (cc_started) {
+		cc_pending = job;
+		cc_pending_cap = cap;
+		pthread_cond_signal(&cc_cond);
+		pthread_mutex_unlock(&cc_lock);
+		return;
+	}
+	pthread_mutex_unlock(&cc_lock);
+	/* Thread start failed — fall back to the synchronous path. */
+	switch (job) {
+	case CC_BATTERY:
+		power_profile_low();
+		cpuclock_perf(0);
+		cpuclock_boost(0);
+		cpuclock_cap(cap);
+		break;
+	case CC_AC:
+		power_profile_high();
+		cpuclock_perf(1);
+		cpuclock_boost(1);
+		cpuclock_cap(cap);
+		break;
+	case CC_DARK:
+		power_profile_low();
+		cpuclock_boost(0);
+		cpuclock_cap(cap);
+		break;
+	}
+}
+
+void
+cpuclock_regime_battery_async(double cap)
+{
+	cc_submit(CC_BATTERY, cap);
+}
+
+void
+cpuclock_regime_ac_async(void)
+{
+	cc_submit(CC_AC, 1.0);
+}
+
+void
+cpuclock_regime_dark_async(void)
+{
+	cc_submit(CC_DARK, 0.0);
 }
 
 /* Highest-performance profile the backend offers. */

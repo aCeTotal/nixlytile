@@ -83,6 +83,8 @@ static int wc_evt_fd = -1;
 static struct wl_event_source *wc_evt_src;
 static char wc_evt_iface[IF_NAMESIZE];
 static char wc_local_evt[108];
+static int wc_evt_attached;             /* ATTACH handshake completed */
+static struct wl_event_source *wc_evt_attach_timer; /* handshake timeout */
 static char wc_error[64];
 
 /* ── worker-thread state: command socket (never touched by main) ── */
@@ -700,6 +702,7 @@ wc_evt_close(void)
 		wc_local_evt[0] = '\0';
 	}
 	wc_evt_iface[0] = '\0';
+	wc_evt_attached = 0;
 }
 
 /* recv on a ready fd — never blocks.  Supplicant writes that need a
@@ -722,6 +725,20 @@ wc_evt_event(int fd, uint32_t mask, void *data)
 	}
 	while ((n = recv(fd, buf, sizeof(buf) - 1, MSG_DONTWAIT)) > 0) {
 		buf[n] = '\0';
+		/* First message after ATTACH is the handshake reply. */
+		if (!wc_evt_attached) {
+			if (strncmp(buf, "OK", 2) == 0) {
+				wc_evt_attached = 1;
+				continue;
+			}
+			if (strncmp(buf, "FAIL", 4) == 0) {
+				wc_evt_close();
+				return 0;
+			}
+			/* Unsolicited event before the reply — treat the
+			 * attach as accepted and fall through to parse it. */
+			wc_evt_attached = 1;
+		}
 		if (strstr(buf, "CTRL-EVENT-SCAN-RESULTS") ||
 				strstr(buf, "CTRL-EVENT-CONNECTED") ||
 				strstr(buf, "CTRL-EVENT-DISCONNECTED"))
@@ -750,27 +767,33 @@ wc_evt_event(int fd, uint32_t mask, void *data)
 	return 0;
 }
 
+/* ATTACH handshake is asynchronous: the old blocking poll(300 ms) for
+ * the OK reply ran on the compositor thread from every netlink settle —
+ * a hung/slow wpa_supplicant froze the compositor for 300 ms each time.
+ * Now the fd goes onto the event loop immediately, wc_evt_event consumes
+ * the OK/FAIL reply, and this timer tears the socket down if no reply
+ * arrives in time (wifi_ctrl_sync retries on the next rescan). */
+static int
+wc_evt_attach_timeout(void *data)
+{
+	(void)data;
+	if (!wc_evt_attached && wc_evt_src)
+		wc_evt_close();
+	return 0;
+}
+
 static void
 wc_evt_open(const char *iface)
 {
-	char reply[16];
-	ssize_t n;
-	struct pollfd pfd;
-
 	wc_evt_fd = wc_open_sock(iface, "evt",
 			wc_local_evt, sizeof(wc_local_evt));
 	if (wc_evt_fd < 0)
 		return;
-	pfd.fd = wc_evt_fd;
-	pfd.events = POLLIN;
-	if (send(wc_evt_fd, "ATTACH", 6, 0) >= 0 &&
-			poll(&pfd, 1, 300) > 0 &&
-			(n = recv(wc_evt_fd, reply, sizeof(reply) - 1, 0)) > 0) {
-		reply[n] = '\0';
-		if (strncmp(reply, "OK", 2) == 0)
-			wc_evt_src = wl_event_loop_add_fd(event_loop,
-					wc_evt_fd, WL_EVENT_READABLE,
-					wc_evt_event, NULL);
+	if (send(wc_evt_fd, "ATTACH", 6, 0) >= 0) {
+		wc_evt_attached = 0;
+		wc_evt_src = wl_event_loop_add_fd(event_loop,
+				wc_evt_fd, WL_EVENT_READABLE,
+				wc_evt_event, NULL);
 	}
 	if (!wc_evt_src) {
 		close(wc_evt_fd);
@@ -779,6 +802,11 @@ wc_evt_open(const char *iface)
 		wc_local_evt[0] = '\0';
 		return;
 	}
+	if (!wc_evt_attach_timer)
+		wc_evt_attach_timer = wl_event_loop_add_timer(event_loop,
+				wc_evt_attach_timeout, NULL);
+	if (wc_evt_attach_timer)
+		wl_event_source_timer_update(wc_evt_attach_timer, 300);
 	snprintf(wc_evt_iface, sizeof(wc_evt_iface), "%s", iface);
 }
 

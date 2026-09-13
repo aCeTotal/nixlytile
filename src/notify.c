@@ -465,14 +465,19 @@ notify_tick(Monitor *m, double dt, int *still)
 			wlr_scene_node_set_position(&n->c->scene->node,
 					(int)n->x_f, n->slot_y);
 			notif_clip_to_mon(n, (int)n->x_f);
+			n->settled_applied = 0;
 			*still = 1;
 			continue;
 		}
 
-		/* Fjæra er i mål. */
-		wlr_scene_node_set_position(&n->c->scene->node,
-				n->target_x, n->slot_y);
-		notif_clip_to_mon(n, n->target_x);
+		/* Fjæra er i mål — sett sluttposisjonen én gang, ikke hver
+		 * frame varselet står på skjermen (samme latch som osd_tick). */
+		if (!n->settled_applied) {
+			n->settled_applied = 1;
+			wlr_scene_node_set_position(&n->c->scene->node,
+					n->target_x, n->slot_y);
+			notif_clip_to_mon(n, n->target_x);
+		}
 		if (!n->hiding)
 			continue;
 

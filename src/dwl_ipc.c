@@ -38,6 +38,9 @@ typedef struct DwlIpcOutput {
 	struct wl_list link;          /* in dwl_ipc_outputs */
 	struct wl_resource *resource; /* zdwl_ipc_output_v2 */
 	struct wlr_output *output;    /* associated wl_output */
+	uint32_t last_sig;            /* FNV of last published state — skips
+	                               * identical frames (printstatus fires on
+	                               * every title change) */
 } DwlIpcOutput;
 
 static struct wl_global *dwl_ipc_global;
@@ -240,6 +243,23 @@ ipc_manager_bind(struct wl_client *client, void *data, uint32_t version,
 
 /* ── per-frame publish ────────────────────────────────────────────── */
 
+/* FNV-1a chaining helpers for the publish signature. */
+static uint32_t
+ipc_hash_u32(uint32_t v, uint32_t h)
+{
+	for (int b = 0; b < 4; b++, v >>= 8)
+		h = (h ^ (v & 0xff)) * 16777619u;
+	return h;
+}
+
+static uint32_t
+ipc_hash_str(const char *s, uint32_t h)
+{
+	for (; s && *s; s++)
+		h = (h ^ (unsigned char)*s) * 16777619u;
+	return h;
+}
+
 void
 dwl_ipc_publish(void)
 {
@@ -250,18 +270,21 @@ dwl_ipc_publish(void)
 	int i;
 	int active_layout;
 
-	if (!dwl_ipc_global)
+	if (!dwl_ipc_global || wl_list_empty(&dwl_ipc_outputs))
 		return;
 
 	wl_list_for_each(out, &dwl_ipc_outputs, link) {
+		uint32_t sig = 2166136261u;
+		int active;
+
 		if (!out->resource || !out->output)
 			continue;
 		m = monitor_for_wlr_output(out->output);
 		if (!m)
 			continue;
 
-		zdwl_ipc_output_v2_send_active(out->resource,
-				m == selmon ? 1 : 0);
+		active = m == selmon ? 1 : 0;
+		sig = ipc_hash_u32((uint32_t)active, sig);
 
 		/* Find the first empty tag idx — Niri shows occupied workspaces
 		 * plus exactly one trailing empty slot.  We forge clients_count=1
@@ -283,9 +306,12 @@ dwl_ipc_publish(void)
 			if (!has_clients) { next_empty_idx = i; break; }
 		}
 
-		/* Build per-tag events.  For each tag idx 0..IPC_TAG_COUNT-1,
+		/* Build per-tag values.  For each tag idx 0..IPC_TAG_COUNT-1,
 		 * compute state, client count and focused flag from the
-		 * matching workspace on this monitor. */
+		 * matching workspace on this monitor.  Values are staged so
+		 * the whole frame can be skipped when nothing changed. */
+		uint32_t tag_state[IPC_TAG_COUNT], tag_count[IPC_TAG_COUNT],
+			tag_focused[IPC_TAG_COUNT];
 		for (i = 0; i < IPC_TAG_COUNT; i++) {
 			uint32_t state = 0;
 			uint32_t clients_count = 0;
@@ -339,8 +365,12 @@ dwl_ipc_publish(void)
 					clients_count = 1;
 			}
 
-			zdwl_ipc_output_v2_send_tag(out->resource, i,
-					state, clients_count, focused);
+			tag_state[i] = state;
+			tag_count[i] = clients_count;
+			tag_focused[i] = focused;
+			sig = ipc_hash_u32(state, sig);
+			sig = ipc_hash_u32(clients_count, sig);
+			sig = ipc_hash_u32(focused, sig);
 		}
 
 		/* Layout: 1 if active workspace's focused column is
@@ -349,16 +379,33 @@ dwl_ipc_publish(void)
 		if (m->active_ws && m->active_ws->focused_col &&
 				m->active_ws->focused_col->fullscreen)
 			active_layout = 1;
-		zdwl_ipc_output_v2_send_layout(out->resource, active_layout);
-		zdwl_ipc_output_v2_send_layout_symbol(out->resource,
-				IPC_LAYOUT_NAMES[active_layout]);
+		sig = ipc_hash_u32((uint32_t)active_layout, sig);
 
 		/* Title + appid from focused client on this monitor. */
 		c = focustop(m);
-		zdwl_ipc_output_v2_send_title(out->resource,
-				(c && client_get_title(c)) ? client_get_title(c) : "");
-		zdwl_ipc_output_v2_send_appid(out->resource,
-				(c && client_get_appid(c)) ? client_get_appid(c) : "");
+		const char *title = (c && client_get_title(c)) ?
+				client_get_title(c) : "";
+		const char *appid = (c && client_get_appid(c)) ?
+				client_get_appid(c) : "";
+		sig = ipc_hash_str(title, sig);
+		sig = ipc_hash_str(appid, sig);
+
+		/* Identical to the last published frame for this output —
+		 * skip the sends so waybar isn't woken into a repaint on
+		 * every one of printstatus()'s ~25 call sites. */
+		if (sig == out->last_sig)
+			continue;
+		out->last_sig = sig;
+
+		zdwl_ipc_output_v2_send_active(out->resource, active);
+		for (i = 0; i < IPC_TAG_COUNT; i++)
+			zdwl_ipc_output_v2_send_tag(out->resource, i,
+					tag_state[i], tag_count[i], tag_focused[i]);
+		zdwl_ipc_output_v2_send_layout(out->resource, active_layout);
+		zdwl_ipc_output_v2_send_layout_symbol(out->resource,
+				IPC_LAYOUT_NAMES[active_layout]);
+		zdwl_ipc_output_v2_send_title(out->resource, title);
+		zdwl_ipc_output_v2_send_appid(out->resource, appid);
 
 		zdwl_ipc_output_v2_send_frame(out->resource);
 	}

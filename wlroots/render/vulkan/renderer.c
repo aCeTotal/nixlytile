@@ -7,6 +7,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -156,8 +158,34 @@ static void nixly_vk_cache_save(const void *data, size_t size) {
 	wlr_log(WLR_INFO, "vulkan pipeline cache: saved %zu bytes to %s", size, path);
 }
 
-static void save_pipeline_cache(struct wlr_vk_renderer *renderer) {
+// The disk write (fwrite + fsync, potentially several MB) used to run on the
+// render thread inside get_command_buffer() and cost a visible frame hitch
+// right after a new pipeline compiled.  Hand the snapshot to a detached
+// writer thread instead; vkGetPipelineCacheData itself is cheap.
+struct nixly_vk_cache_job {
+	void *data;
+	size_t size;
+};
+
+static atomic_bool nixly_vk_cache_save_inflight;
+
+static void *nixly_vk_cache_save_thread(void *arg) {
+	struct nixly_vk_cache_job *job = arg;
+	nixly_vk_cache_save(job->data, job->size);
+	free(job->data);
+	free(job);
+	atomic_store(&nixly_vk_cache_save_inflight, false);
+	return NULL;
+}
+
+// sync: write on this thread (renderer teardown — the process may exit
+// before a detached writer would finish).  Async spawns a writer thread.
+static void save_pipeline_cache(struct wlr_vk_renderer *renderer, bool sync) {
 	if (renderer->pipeline_cache == VK_NULL_HANDLE) {
+		return;
+	}
+	if (atomic_load(&nixly_vk_cache_save_inflight)) {
+		// A previous snapshot is still being written; retry next period
 		return;
 	}
 
@@ -170,10 +198,30 @@ static void save_pipeline_cache(struct wlr_vk_renderer *renderer) {
 		if (cache_data) {
 			save_res = vkGetPipelineCacheData(dev,
 				renderer->pipeline_cache, &cache_size, cache_data);
-			if (save_res == VK_SUCCESS)
-				nixly_vk_cache_save(cache_data, cache_size);
-			else
+			if (save_res != VK_SUCCESS) {
 				wlr_vk_error("vkGetPipelineCacheData", save_res);
+			} else if (sync) {
+				nixly_vk_cache_save(cache_data, cache_size);
+			} else {
+				struct nixly_vk_cache_job *job = malloc(sizeof(*job));
+				if (job) {
+					job->data = cache_data;
+					job->size = cache_size;
+					atomic_store(&nixly_vk_cache_save_inflight, true);
+					pthread_t thr;
+					if (pthread_create(&thr, NULL,
+							nixly_vk_cache_save_thread, job) == 0) {
+						pthread_detach(thr);
+						cache_data = NULL;
+					} else {
+						atomic_store(&nixly_vk_cache_save_inflight, false);
+						free(job);
+						nixly_vk_cache_save(cache_data, cache_size);
+					}
+				} else {
+					nixly_vk_cache_save(cache_data, cache_size);
+				}
+			}
 			free(cache_data);
 		}
 	}
@@ -771,7 +819,7 @@ static struct wlr_vk_command_buffer *get_command_buffer(
 		struct timespec now;
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		if (now.tv_sec - renderer->pipeline_cache_last_save.tv_sec >= 30) {
-			save_pipeline_cache(renderer);
+			save_pipeline_cache(renderer, false);
 		}
 	}
 
@@ -1482,7 +1530,7 @@ static void vulkan_destroy(struct wlr_renderer *wlr_renderer) {
 	vkDestroyImage(dev->dev, renderer->dummy3d_image, NULL);
 	vkFreeMemory(dev->dev, renderer->dummy3d_mem, NULL);
 
-	save_pipeline_cache(renderer);
+	save_pipeline_cache(renderer, true);
 	vkDestroyPipelineCache(dev->dev, renderer->pipeline_cache, NULL);
 	vkDestroySemaphore(dev->dev, renderer->timeline_semaphore, NULL);
 	vkDestroyPipelineLayout(dev->dev, renderer->output_pipe_layout, NULL);

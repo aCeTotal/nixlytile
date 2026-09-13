@@ -1809,6 +1809,9 @@ monitor_apply_positions(Monitor *m)
 
 	if (!m || !m->wlr_output->enabled)
 		return;
+	/* Positions moved: a gave-up client's scale/clip anchor must be
+	 * re-checked (see converge_kick). */
+	m->converge_dirty = 1;
 
 	gap = m->gaps ? (int)gappx : 0;
 	ws_stride = m->m.height;

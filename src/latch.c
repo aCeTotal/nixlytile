@@ -71,7 +71,6 @@ int
 latch_defer_frame(Monitor *m, int is_game, int allow_tearing, uint64_t now_ns)
 {
 	uint64_t lead, deadline;
-	int delay_ms;
 
 	if (!game_late_latch_enabled || !is_game || m->latch_fired)
 		return 0;
@@ -86,19 +85,17 @@ latch_defer_frame(Monitor *m, int is_game, int allow_tearing, uint64_t now_ns)
 		lead += LATCH_COMPOSITE_NS;
 
 	deadline = m->target_present_ns;
-	if (deadline <= now_ns + lead)
-		return 0;
-	/* wl timers are ms-granular; integer floor fires early, never late */
-	delay_ms = (int)((deadline - now_ns - lead) / 1000000ULL);
-	if (delay_ms < 1)
+	/* 100 µs floor: a deadline closer than that gains nothing over the
+	 * immediate path. */
+	if (deadline <= now_ns + lead + 100000ULL)
 		return 0;
 
 	if (!m->latch_timer)
-		m->latch_timer = wl_event_loop_add_timer(event_loop, latch_timer_cb, m);
+		m->latch_timer = nstimer_create(latch_timer_cb, m);
 	if (!m->latch_timer)
 		return 0;
 
-	wl_event_source_timer_update(m->latch_timer, delay_ms);
+	nstimer_arm_abs(m->latch_timer, deadline - lead);
 	m->latch_armed = 1;
 	return 1;
 }

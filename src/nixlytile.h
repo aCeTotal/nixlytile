@@ -271,6 +271,7 @@ typedef struct StatusModule StatusModule;
 typedef struct GamepadDevice GamepadDevice;
 typedef struct TrayMenuEntry TrayMenuEntry;
 typedef struct TrayItem TrayItem;
+typedef struct NsTimer NsTimer;
 
 /* ── basic types ───────────────────────────────────────────────────── */
 typedef union {
@@ -1267,6 +1268,8 @@ typedef struct {
 	 * configures since then. */
 	uint32_t converge_since;
 	int converge_tries;
+	int conv_seen_w, conv_seen_h;  /* last committed size seen by animcommitnotify
+	                                * (size-change edge → converge_kick) */
 	/* Latched give-up: set when the watchdog stopped re-driving this
 	 * client, together with the box it gave up on.  While the box is
 	 * unchanged the client is treated as settled (no per-frame vblank
@@ -1426,6 +1429,7 @@ typedef struct {
 	double x_f, x_vel;      /* fjærtilstand på x */
 	int hiding;             /* 1 = på vei ut */
 	int sticky;             /* 1 = venter på inntasting, glir aldri ut selv */
+	int settled_applied;    /* 1 = sluttposisjon+clip allerede satt (skipper per-frame reapply) */
 	struct wl_event_source *timer;
 } Notif;
 
@@ -1521,14 +1525,21 @@ struct Monitor {
 	/* Previous software-cursor box (buffer coords) for targeted damage */
 	struct wlr_box swcur_prev_box;
 	/* Late-latch commit deferral (latch.c) */
-	struct wl_event_source *latch_timer;
+	NsTimer *latch_timer;
 	int latch_armed;                    /* timer pending for this vblank */
 	int latch_fired;                    /* rendermon re-entered via timer */
 	uint64_t rolling_draw_ns;           /* sawtooth build+commit estimate */
 	/* Paced virtual mode: commit every Nth vblank (pace.c) */
-	struct wl_event_source *pace_timer;
+	NsTimer *pace_timer;
 	int pace_armed;                     /* timer pending for the commit window */
 	int pace_fired;                     /* rendermon re-entered via timer */
+	/* Zero-damage vblank pacer: while fullscreen video/game (or the lock
+	 * screen) is up and a vblank had nothing new to commit, rendermon
+	 * skips build+commit and this timer sustains the frame_done chain on
+	 * the vblank grid instead (request_frame would force a full build —
+	 * wlr_output_schedule_frame sets needs_frame). */
+	NsTimer *fd_pacer;
+	int fd_pacer_fired;                 /* rendermon re-entered via pacer */
 	int vrr_overlay_skips;              /* consecutive OSD-only build skips under VRR */
 	/* Game-resolution modeset for guaranteed scanout (gamescan.c) */
 	int gamescan_w, gamescan_h;         /* last observed off-mode game buffer size */
@@ -1667,6 +1678,7 @@ struct Monitor {
 	uint64_t hidden_done_ns;            /* last 1 Hz frame_done drip to hidden mapped surfaces */
 	uint64_t unfocused_done_ns;         /* last throttled blanket frame_done to unfocused-visible surfaces */
 	struct wl_event_source *idle_heartbeat; /* one-shot 1s watchdog, re-armed every rendermon pass */
+	uint64_t heartbeat_armed_ns;        /* last idle_heartbeat arm — skips redundant timerfd_settime per vblank */
 	/* EDID re-probe: TVs (esp. over HDMI from sleep) often expose no/limited
 	 * modes at createmon time, then publish full mode list once the HDMI
 	 * handshake completes. We retry bestmode at 2s/5s/15s after createmon,
@@ -1708,6 +1720,11 @@ struct Monitor {
 	 *     fallback would even kick in. */
 	uint64_t hdr_last_commit_ok_ns;
 	uint32_t hdr_commit_fail_count;
+	/* hdr_driver_for() probe memo: per-toplevel PQ-walk result, 250 ms TTL.
+	 * hdr_probe_surface is identity-compared only, never dereferenced. */
+	void *hdr_probe_surface;
+	uint64_t hdr_probe_ns;
+	int hdr_probe_found;
 	/* Cached fullscreen content classification (avoid per-vblank protocol lookups) */
 	Client *classify_cache_client;
 	int classify_cache_game;
@@ -1717,19 +1734,6 @@ struct Monitor {
 	/* Cached FPS for frame repeat hysteresis */
 	float frame_repeat_last_fps;
 	/* Stats panel persistent nodes */
-	struct wlr_scene_rect *stats_panel_bg;
-	struct wlr_scene_rect *stats_panel_border;
-	struct wlr_scene_tree *stats_panel_content;
-	struct wlr_scene_tree *stats_panel_tree;
-	struct wl_event_source *stats_panel_timer;
-	struct wl_event_source *stats_panel_anim_timer;
-	int stats_panel_visible;
-	int stats_panel_target_x;
-	int stats_panel_current_x;
-	int stats_panel_width;
-	uint64_t stats_panel_anim_start;
-	int stats_panel_animating;
-
 	/* ── Niri-style workspaces (phase 2 — parallel to legacy tagset[]) ── */
 	struct wl_list workspaces;    /* Workspace.link, ordered top→bottom */
 	Workspace *active_ws;         /* currently visible workspace */
@@ -1742,6 +1746,7 @@ struct Monitor {
 	int anim_was_active;          /* edge-detection: any anim active */
 	int size_anim_was_active;     /* edge-detection: freeze only on SIZE anims */
 	int pos_anim_was_active;      /* edge-detection: X11 freeze on PURE pos anims */
+	int converge_dirty;           /* something to (re)check — see converge_kick() */
 	int camera_anim_active;       /* camera in flight (scroll_x / ws_y spring) — gates frame_done throttle */
 	int sw_cursor_scanout_hold;   /* we disabled scanout election for a visible software cursor */
 	int game_cursor_swlock;       /* software-cursor lock held while a fullscreen game is visible */
@@ -2303,7 +2308,10 @@ struct wlr_buffer *statusbar_scaled_buffer_from_argb32(const uint32_t *data,
 		int width, int height, int target_h);
 struct wlr_buffer *statusbar_scaled_buffer_from_argb32_raw(const uint32_t *data,
 		int width, int height, int target_h);
+/* Returns a CACHE-OWNED buffer: do not wlr_buffer_drop() it — attach it
+ * to a scene node (which locks it) and leave the reference alone. */
 struct wlr_buffer *statusbar_buffer_from_glyph(const struct fcft_glyph *glyph);
+void statusbar_glyph_cache_flush(void);
 struct wlr_buffer *statusbar_buffer_from_pixbuf(GdkPixbuf *pixbuf, int target_h, int *out_w, int *out_h);
 struct wlr_buffer *statusbar_buffer_from_wifi100(int target_h, int *out_w, int *out_h);
 void recolor_wifi100_pixbuf(GdkPixbuf *pixbuf);
@@ -2427,6 +2435,7 @@ void client_send_configure_only(Client *c, int w, int h);
 /* converge.c — size-convergence watchdog */
 int client_size_pending(Client *c);
 int clients_converge_tick(Monitor *m);
+void converge_kick(Client *c);
 void tag(const Arg *arg);
 void tagmon(const Arg *arg);
 void toggletag(const Arg *arg);
@@ -3304,6 +3313,13 @@ void cpuclock_cap(double frac);
 void cpuclock_restore(void);
 void cpuclock_boost(int on);
 void cpuclock_perf(int on_ac);
+/* Full regime switches, applied on cpuclock.c's worker thread
+ * (latest-wins): battery = low profile + powersave governor/EPP +
+ * boost off + cap; AC = high profile + performance + boost + uncapped;
+ * dark = presence "nobody watching" (low profile, boost off, cap 0). */
+void cpuclock_regime_battery_async(double cap);
+void cpuclock_regime_ac_async(void);
+void cpuclock_regime_dark_async(void);
 void output_lowpower_refresh(int on_battery);
 void output_lock_max_refresh(void);
 int power_profile_get(char *buf, size_t len);
@@ -3421,9 +3437,6 @@ void steam_set_ge_proton_default(void);
 
 #if 0 /* bluetooth.c / config.c removed */
 void cec_switch_to_active_source(void);
-void gamepanel(const Arg *arg);
-Monitor *stats_panel_visible_monitor(void);
-int stats_panel_handle_key(Monitor *m, xkb_keysym_t sym);
 #endif
 
 /* config_loader.c */
@@ -3554,6 +3567,12 @@ ensure_nix_paths(void)
 }
 void quit(const Arg *arg);
 uint64_t get_time_ns(void);
+
+/* nstimer.c — ns-precision one-shot timers (CLOCK_MONOTONIC timerfd) */
+NsTimer *nstimer_create(int (*cb)(void *), void *data);
+void nstimer_arm_abs(NsTimer *t, uint64_t abs_ns);
+void nstimer_disarm(NsTimer *t);
+void nstimer_destroy(NsTimer *t);
 uint64_t monotonic_msec(void);
 void ensure_shell_env(void);
 void apply_startup_defaults(void);

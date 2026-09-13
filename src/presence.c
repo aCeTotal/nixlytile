@@ -112,10 +112,10 @@ pr_go_dark(void *data)
 	pr_saved_backlight = backlight_percent();
 	set_backlight_percent(0.0);
 
-	/* nobody's watching: lowest profile, lowest clock, turbo off */
-	power_profile_low();
-	cpuclock_boost(0);
-	cpuclock_cap(0.0);
+	/* nobody's watching: lowest profile, lowest clock, turbo off —
+	 * applied on the cpuclock worker (the EC profile write alone can
+	 * stall ~100 ms). */
+	cpuclock_regime_dark_async();
 
 	pr_outputs_set(0);
 	wlr_log(WLR_INFO, "presence: nobody in front — full power save");

@@ -18,6 +18,7 @@
 
 static pthread_t bw_thread;
 static pthread_mutex_t bw_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t bw_cond = PTHREAD_COND_INITIALIZER;
 static BattSnapshot bw_state;          /* guarded by bw_lock */
 static int bw_pipe[2] = { -1, -1 };
 static struct wl_event_source *bw_src;
@@ -354,15 +355,22 @@ bw_worker(void *data)
 		if (!local.available)
 			break;
 
-		for (int i = 0; i < BW_POLL_MS / 100 && bw_run; i++) {
-			struct timespec ts = { 0, 100 * 1000000 };
+		/* Sleep the poll interval on the condvar instead of a 100 ms
+		 * flag-poll loop (20 wakeups per window) — battwatch_refresh()
+		 * signals for an immediate re-sample.  Same shape as fanwatch. */
+		pthread_mutex_lock(&bw_lock);
+		if (bw_run && !bw_poke) {
+			struct timespec ts;
 
-			if (bw_poke) {
-				bw_poke = 0;
-				break;
-			}
-			nanosleep(&ts, NULL);
+			clock_gettime(CLOCK_REALTIME, &ts);
+			ts.tv_sec += BW_POLL_MS / 1000;
+			ts.tv_nsec += (long)(BW_POLL_MS % 1000) * 1000000L;
+			ts.tv_sec += ts.tv_nsec / 1000000000L;
+			ts.tv_nsec %= 1000000000L;
+			pthread_cond_timedwait(&bw_cond, &bw_lock, &ts);
 		}
+		bw_poke = 0;
+		pthread_mutex_unlock(&bw_lock);
 	}
 	return NULL;
 }
@@ -394,7 +402,10 @@ battwatch_get(BattSnapshot *out)
 void
 battwatch_refresh(void)
 {
+	pthread_mutex_lock(&bw_lock);
 	bw_poke = 1;
+	pthread_cond_signal(&bw_cond);
+	pthread_mutex_unlock(&bw_lock);
 }
 
 void

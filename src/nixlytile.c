@@ -1765,7 +1765,6 @@ const FuncEntry func_table[] = {
 	{ "warptomonitor",     warptomonitor,     1 },
 	{ "tagtomonitornum",   tagtomonitornum,   2 },
 	{ "chvt",              chvt,              2 },
-	{ "gamepanel", gamepanel, 0 },
 	{ "screenshot_begin", screenshot_begin, 0 },
 	{ NULL, NULL, 0 }
 };

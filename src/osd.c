@@ -225,6 +225,7 @@ toast_build(Toast *t, const char *msg)
 
 		tll_foreach(glyphs, it) {
 			glyph = it->item.glyph;
+			/* Cache-owned buffer — no drop; scene node locks it. */
 			buffer = statusbar_buffer_from_glyph(glyph);
 			if (!buffer)
 				continue;
@@ -235,7 +236,6 @@ toast_build(Toast *t, const char *msg)
 						text_x + it->item.pen_x + glyph->x,
 						origin_y - glyph->y);
 			}
-			wlr_buffer_drop(buffer);
 		}
 	}
 

@@ -110,8 +110,11 @@ render_power_popup(Monitor *m)
 				POWER_HIT_BASE + i,
 				p->btn_hover == POWER_HIT_BASE + i);
 
-	if (card_finish(card, &res) != 0)
-		return;
+	{
+		int cf = card_finish_sig(card, &res, &p->view.render_sig);
+		if (cf != 0)
+			return; /* error, or unchanged (content stays) */
+	}
 	memcpy(p->hits, res.hits, sizeof(p->hits));
 	p->nhits = res.nhits;
 	popup_view_apply(&p->view, p->tree, &res);

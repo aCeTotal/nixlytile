@@ -210,14 +210,24 @@ statusbar_buffer_insets(struct wlr_buffer *buf, int icon_w,
 		return;
 
 	if (data && format == DRM_FORMAT_ARGB8888) {
-		for (x = 0; x < bw; x++) {
-			for (y = 0; y < bh; y++) {
-				uint32_t px = *(const uint32_t *)((const uint8_t *)data +
-						(size_t)y * stride + (size_t)x * 4);
+		/* Row-major with shrinking bounds: each row only scans left of
+		 * the best-known first column and right of the best-known last
+		 * column, so the walk touches O(border) pixels instead of every
+		 * pixel column-major (a cache miss per pixel). */
+		for (y = 0; y < bh; y++) {
+			const uint32_t *row = (const uint32_t *)
+					((const uint8_t *)data + (size_t)y * stride);
+			int lo = first < 0 ? bw : first;
+
+			for (x = 0; x < lo; x++) {
 				/* Ignore near-invisible antialiasing fringe. */
-				if ((px >> 24) > 8) {
-					if (first < 0)
-						first = x;
+				if ((row[x] >> 24) > 8) {
+					first = x;
+					break;
+				}
+			}
+			for (x = bw - 1; x > last; x--) {
+				if ((row[x] >> 24) > 8) {
 					last = x;
 					break;
 				}
@@ -1376,6 +1386,7 @@ tray_menu_draw_text(struct wlr_scene_tree *tree, const char *text, int x, int y,
 
 		tll_foreach(glyphs, it) {
 			glyph = it->item.glyph;
+			/* Cache-owned buffer — no drop; scene node locks it. */
 			buffer = statusbar_buffer_from_glyph(glyph);
 			if (!buffer)
 				continue;
@@ -1387,7 +1398,6 @@ tray_menu_draw_text(struct wlr_scene_tree *tree, const char *text, int x, int y,
 						x + it->item.pen_x + glyph->x,
 						origin_y - glyph->y);
 			}
-			wlr_buffer_drop(buffer);
 		}
 	}
 

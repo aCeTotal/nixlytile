@@ -27,11 +27,12 @@ static int ps_fps_limited;      /* we enabled the limiter, not the user */
 void
 powersave_reassert(void)
 {
+	/* The sysfs regime (profile + governor + EPP + cap — ~100+ writes,
+	 * the EC profile alone ~100 ms) runs on cpuclock.c's worker; only
+	 * the modeset and the fps-cap flag stay on the compositor thread. */
 	if (ps_engaged == 1) {
-		power_profile_low();
-		cpuclock_perf(0);       /* powersave governor + EPP power */
-		cpuclock_boost(0);
-		cpuclock_cap(PS_BATTERY_CAP);  /* mild cap: powersave governor + EPP
+		cpuclock_regime_battery_async(PS_BATTERY_CAP);
+					/* mild cap: powersave governor + EPP
 					 * already idle the clocks down; 0.35
 					 * (1.29 GHz ceiling) made everything
 					 * crawl while saving almost nothing —
@@ -42,10 +43,7 @@ powersave_reassert(void)
 					 * which reads as a broken compositor rather
 					 * than as power saving */
 	} else {
-		power_profile_high();
-		cpuclock_perf(1);       /* performance governor + EPP perf */
-		cpuclock_boost(1);
-		cpuclock_restore();
+		cpuclock_regime_ac_async();
 		output_lowpower_refresh(0);  /* restore pinned/best refresh */
 		unfocused_fps_cap = 0;  /* no throttle on wall power — "always at
 					 * its absolute best" applies to every

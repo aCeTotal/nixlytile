@@ -91,6 +91,26 @@ converge_clear(Client *c)
 	c->converge_applied = 0;
 }
 
+/* Event-driven gate for the per-frame walk below.  A size mismatch can
+ * only ARISE from (a) an outgoing configure (client_request_size), (b) a
+ * client commit (animcommitnotify), or (c) a geometry move re-anchoring
+ * a gave-up client's scale/clip (monitor_apply_positions).  All three
+ * call this; the tick then re-walks until everything reports settled and
+ * clears the flag — so a fully settled desktop skips the whole
+ * clients walk (with two protocol-size reads per client) every frame. */
+void
+converge_kick(Client *c)
+{
+	Monitor *m;
+
+	if (c && c->mon) {
+		c->mon->converge_dirty = 1;
+		return;
+	}
+	wl_list_for_each(m, &mons, link)
+		m->converge_dirty = 1;
+}
+
 int
 clients_converge_tick(Monitor *m)
 {
@@ -99,6 +119,8 @@ clients_converge_tick(Monitor *m)
 	int pending = 0;
 
 	if (!m)
+		return 0;
+	if (!m->converge_dirty)
 		return 0;
 
 	now = (uint32_t)monotonic_msec();
@@ -208,5 +230,6 @@ clients_converge_tick(Monitor *m)
 			iw, ih, nw, nh, c->converge_tries);
 	}
 
+	m->converge_dirty = pending;
 	return pending;
 }

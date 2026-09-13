@@ -517,8 +517,11 @@ render_disk_popup(Monitor *m)
 	else
 		render_disk_list(m, p, card);
 
-	if (card_finish(card, &res) != 0)
-		return;
+	{
+		int cf = card_finish_sig(card, &res, &p->view.render_sig);
+		if (cf != 0)
+			return; /* error, or unchanged (content stays) */
+	}
 	memcpy(p->hits, res.hits, sizeof(p->hits));
 	p->nhits = res.nhits;
 	popup_view_apply(&p->view, p->tree, &res);

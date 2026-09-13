@@ -83,27 +83,20 @@ cleanupmon(struct wl_listener *listener, void *data)
 	monitor_cleanup_workspaces(m);
 	wl_event_source_remove(m->idle_heartbeat);
 	if (m->latch_timer) {
-		wl_event_source_remove(m->latch_timer);
+		nstimer_destroy(m->latch_timer);
 		m->latch_timer = NULL;
 	}
 	if (m->pace_timer) {
-		wl_event_source_remove(m->pace_timer);
+		nstimer_destroy(m->pace_timer);
 		m->pace_timer = NULL;
+	}
+	if (m->fd_pacer) {
+		nstimer_destroy(m->fd_pacer);
+		m->fd_pacer = NULL;
 	}
 	if (m->edid_reprobe_timer) {
 		wl_event_source_remove(m->edid_reprobe_timer);
 		m->edid_reprobe_timer = NULL;
-	}
-	/* Gamemode-timerne har m som callback-data. Uten remove her fyrer
-	 * de etter free(m) under → use-after-free-krasj ved hotplug/unplug
-	 * mens stats-panelet er aktivt. */
-	if (m->stats_panel_timer) {
-		wl_event_source_remove(m->stats_panel_timer);
-		m->stats_panel_timer = NULL;
-	}
-	if (m->stats_panel_anim_timer) {
-		wl_event_source_remove(m->stats_panel_anim_timer);
-		m->stats_panel_anim_timer = NULL;
 	}
 	wlr_scene_node_destroy(&m->fullscreen_bg->node);
 	cleanupstatusbar(m);
@@ -1587,6 +1580,50 @@ idle_heartbeat_cb(void *data)
 	return 0; /* one-shot; re-armed at the end of every rendermon pass */
 }
 
+/* Zero-damage vblank pacer (see Monitor.fd_pacer): re-enter rendermon on
+ * the vblank grid without setting output->needs_frame, so the pass can
+ * skip build+commit and just serve frame_done + the starvation drips. */
+static int
+fd_pacer_cb(void *data)
+{
+	Monitor *m = data;
+
+	/* A deferred commit (latch/pace) already owns this vblank. */
+	if (m->latch_armed || m->pace_armed)
+		return 0;
+	m->fd_pacer_fired = 1;
+	rendermon(&m->frame, NULL);
+	m->fd_pacer_fired = 0;
+	return 0;
+}
+
+/* Arm the pacer at the next vblank-grid point after now.  Grid base is the
+ * last real present; interval prefers the measured (mode-filtered) vblank
+ * interval and falls back to the mode refresh. */
+static void
+pace_frame_done_chain(Monitor *m, uint64_t now_ns)
+{
+	uint64_t iv = m->present_interval_ns;
+	uint64_t base, k;
+
+	if (!iv && m->wlr_output->current_mode &&
+			m->wlr_output->current_mode->refresh > 0)
+		iv = 1000000000000ULL /
+			(uint64_t)m->wlr_output->current_mode->refresh;
+	if (!iv)
+		iv = 16666667ULL;
+	if (!m->fd_pacer)
+		m->fd_pacer = nstimer_create(fd_pacer_cb, m);
+	if (!m->fd_pacer)
+		return;
+	base = m->last_present_ns ? m->last_present_ns : now_ns;
+	/* First grid point at least 0.5 ms out, so a pass that raced a flip
+	 * doesn't double-fire inside the same vblank. */
+	k = now_ns + 500000ULL > base ?
+		(now_ns + 500000ULL - base) / iv + 1 : 1;
+	nstimer_arm_abs(m->fd_pacer, base + k * iv);
+}
+
 static void
 hidden_frame_done_iter(struct wlr_surface *surface, int sx, int sy, void *data)
 {
@@ -1716,7 +1753,7 @@ hdr_driver_for(Monitor *m, struct wlr_surface **out_pq_surface)
 	if (!m || !m->hdr_capable)
 		return NULL;
 
-	if (m->toast_visible || m->hz_osd_visible || m->stats_panel_visible)
+	if (m->toast_visible || m->hz_osd_visible)
 		return NULL;
 
 	c = focustop(m);
@@ -1727,7 +1764,29 @@ hdr_driver_for(Monitor *m, struct wlr_surface **out_pq_surface)
 	if (!surface)
 		return NULL;
 
+	/* The full subsurface walk + image-description lookup per node runs
+	 * every vblank while any fullscreen client sits on an hdr_capable
+	 * output; the answer changes at most a few times per session.
+	 * Memoize per (monitor, toplevel surface) for 250 ms:
+	 *   - negative result → return NULL without walking;
+	 *   - positive result → only reusable while hdr_active, because the
+	 *     caller needs the actual PQ surface (out_pq_surface) on the
+	 *     entry transition and we must not cache that pointer (a
+	 *     subsurface can die under us).  hdr_probe_surface is compared,
+	 *     never dereferenced. */
+	uint64_t now = get_time_ns();
+	if ((void *)surface == m->hdr_probe_surface &&
+			now - m->hdr_probe_ns < 250000000ULL) {
+		if (!m->hdr_probe_found)
+			return NULL;
+		if (m->hdr_active)
+			return c;
+	}
+
 	wlr_surface_for_each_surface(surface, hdr_surface_walk, &ctx);
+	m->hdr_probe_surface = surface;
+	m->hdr_probe_found = ctx.found != NULL;
+	m->hdr_probe_ns = now;
 	if (!ctx.found)
 		return NULL;
 
@@ -3072,6 +3131,7 @@ rendermon(struct wl_listener *listener, void *data)
 	int is_game = 0;
 	int is_direct_scanout = 0;
 	int use_frame_pacing = 0;
+	int did_commit = 0;
 
 	m->frame_scheduled = 0;
 
@@ -3413,7 +3473,22 @@ rendermon(struct wl_listener *listener, void *data)
 		game_visible = is_game;
 		if (!game_visible && vis_fsc && looks_like_game(vis_fsc))
 			game_visible = 1;
-		if (game_visible && !m->game_cursor_swlock) {
+		/* Only force software cursors when the HW cursor plane can't
+		 * be trusted: no plane at all (input.c:2359 uses the same
+		 * signal), or an NVIDIA output — NVIDIA has shipped drivers
+		 * where set_cursor reports success but the plane shows nothing
+		 * above direct scanout, so there the blanket lock stays as the
+		 * guarantee that the pointer exists in games.  On AMD/Intel
+		 * with a working plane the cursor rides its own DRM plane and
+		 * stays visible above scanout, so the lock only cost full GPU
+		 * composition of every game frame for nothing.  If the plane
+		 * fails later, wlroots falls back to a software cursor by
+		 * itself, the sw-cursor scanout hold below catches it, and
+		 * this lock engages on the next pass. */
+		if (game_visible && !m->game_cursor_swlock &&
+				(!m->wlr_output->hardware_cursor ||
+				 m->gcaps.vendor == GPU_VENDOR_NVIDIA ||
+				 m->gcaps.vendor == GPU_VENDOR_UNKNOWN)) {
 			m->game_cursor_swlock = 1;
 			wlr_output_lock_software_cursors(m->wlr_output, true);
 			diag_logf("CURSOR", "%s: fullscreen game — forcing software cursor",
@@ -3486,9 +3561,8 @@ rendermon(struct wl_listener *listener, void *data)
 	if (is_game && !is_video && (m->vrr_active || m->game_vrr_active) &&
 	    !m->vrr_pending &&
 	    !m->hdr_entry_pending && !m->hdr_exit_pending) {
-		Client *gc = fullscreen_visible_on(m);  /* not focustop — the
-							 * VRR skip must track the
-							 * game's own buffer */
+		Client *gc = vis_fsc;  /* not focustop — the VRR skip must
+					* track the game's own buffer */
 		struct wlr_surface *gsurf = gc ? client_surface(gc) : NULL;
 		struct wlr_buffer *gbuf = gsurf
 			? (struct wlr_buffer *)gsurf->buffer : NULL;
@@ -3511,14 +3585,18 @@ rendermon(struct wl_listener *listener, void *data)
 		 * compositor composites at full refresh forever, even on a
 		 * completely idle desktop.
 		 *
-		 * Exempt fullscreen video/game: skipping build_state here means
-		 * the fullscreen surface is never sampled, which drops its
-		 * wp_presentation feedback and freezes feedback-driven clients
-		 * (browsers/YouTube, eframe/nixlymedia) at ~3 fps.  Commit
-		 * 3d3b2cc had no idle gate and did not freeze — so for fullscreen
-		 * content we always build, matching that behaviour. */
-		if (!is_video && !is_game &&
-		    !wlr_scene_output_needs_frame(m->scene_output) &&
+		 * Fullscreen video/game takes this gate too: a zero-damage
+		 * build never samples the surface (scene_entry_render early-
+		 * returns on empty damage), so it delivers no wp_presentation
+		 * feedback anyway — it only costs a swapchain acquire and an
+		 * atomic commit per vblank (24 fps video on a 300 Hz panel =
+		 * ~276 wasted flips/s).  What the old always-build exemption
+		 * actually provided was the frame_done/vblank chain; that is
+		 * now sustained by fd_pacer (armed at the end of this pass),
+		 * which wakes rendermon on the vblank grid without forcing a
+		 * build.  The historical ~3 fps "YouTube froze" failure was
+		 * chain starvation, not feedback loss — the pacer serves it. */
+		if (!wlr_scene_output_needs_frame(m->scene_output) &&
 		    !m->vrr_pending &&
 		    !m->hdr_entry_pending && !m->hdr_exit_pending &&
 		    !(m->toast_overlay_layer && !m->toast_overlay_active &&
@@ -3739,9 +3817,8 @@ rendermon(struct wl_listener *listener, void *data)
 		 * never estimated at all).  Buffer-pointer comparison works for
 		 * both xdg and Xwayland clients, like track_client_frame. */
 		if (needs_frame) {
-			Client *gc = fullscreen_visible_on(m);  /* the client the
-								* pacing is FOR, not
-								* whoever holds focus */
+			Client *gc = vis_fsc;  /* the client the pacing is
+						* FOR, not whoever holds focus */
 			struct wlr_surface *gsurf = gc ? client_surface(gc) : NULL;
 			struct wlr_buffer *gbuf = gsurf
 				? (struct wlr_buffer *)gsurf->buffer : NULL;
@@ -3757,8 +3834,8 @@ rendermon(struct wl_listener *listener, void *data)
 	 * For video: use detected_video_hz as the fps source.
 	 * For games: use estimated_game_fps from real-time tracking. */
 	if (is_video && !m->vrr_active && m->frame_pacing_active) {
-		Client *vc = fullscreen_visible_on(m);  /* not focustop — see
-							* classify_fullscreen_content */
+		Client *vc = vis_fsc;  /* not focustop — see
+					* classify_fullscreen_content */
 		if (vc && vc->detected_video_hz > 0.0f)
 			m->estimated_game_fps = vc->detected_video_hz;
 		/* Video players manage their own frame timing based on PTS.
@@ -3803,6 +3880,7 @@ rendermon(struct wl_listener *listener, void *data)
 					use_frame_pacing, frame_start_ns);
 			m->last_flip_ns = get_time_ns() - flip0;
 		}
+		did_commit = 1;
 		if (m->tag_switch_debug > 0)
 			write(STDERR_FILENO, "TS:commit<\n", 11);
 		/* Feed the late-latch draw budget with the full body cost
@@ -3979,7 +4057,14 @@ frame_done:
 	 * on a static scene rendermon stops firing long before that, so
 	 * the gate never armed and a client waiting on frame_done
 	 * starved forever (nixlymedia's startup freeze). */
-	wl_event_source_timer_update(m->idle_heartbeat, 1000);
+	/* wl_event_source_timer_update is a real timerfd_settime(2) syscall;
+	 * at high refresh re-arming every vblank is measurable.  Re-arm only
+	 * when the deadline would move by >200 ms — the watchdog then fires
+	 * up to 200 ms early, which is harmless (it just requests a frame). */
+	if (frame_start_ns - m->heartbeat_armed_ns > 200000000ULL) {
+		m->heartbeat_armed_ns = frame_start_ns;
+		wl_event_source_timer_update(m->idle_heartbeat, 1000);
+	}
 
 	/* Mapped-but-hidden surfaces (fullscreen client bound to an
 	 * inactive workspace, tiles behind a fullscreen client) are
@@ -4179,30 +4264,27 @@ frame_done:
 	}
 
 	/*
-	 * Fullscreen video/game: keep the vblank chain alive unconditionally.
+	 * Fullscreen video/game (and the lock screen): keep the frame_done
+	 * chain alive across zero-damage vblanks.
 	 *
-	 * The chain otherwise dies on the first vblank where build_state has
-	 * no new content (no commit → no pageflip → no next frame event).
-	 * Restart then depends on client damage scheduling a frame — but the
-	 * video subsurface sits BELOW the (translucent) UI parent surface and
-	 * its damage does not reliably schedule one.  Measured result: the
-	 * compositor latched only ~4-5 of nixlymedia's 24 video commits/s
-	 * (the UI heartbeat rate), discarding the rest — video on glass at
-	 * ~5 fps with varying cadence, while the app-side stats looked
-	 * healthy.  The good state (every video frame latched) only engaged
-	 * when something else happened to keep rendermon self-sustaining.
-	 * Cost: rendermon runs at refresh rate while fullscreen video/game
-	 * is up — same behaviour the is_video idle-gate exemption above
-	 * already intends.
+	 * The chain otherwise dies on the first vblank where nothing was
+	 * committed (no pageflip → no next frame event).  Restart then
+	 * depends on client damage scheduling a frame — but a culled video
+	 * subsurface (below a translucent UI parent) commits without
+	 * creating visible scene damage, so no frame gets scheduled.
+	 * Measured result: only ~4-5 of nixlymedia's 24 video commits/s were
+	 * latched (the UI heartbeat rate).  The lockscreen starved the same
+	 * way (~11 fps once the chain went cold).
 	 *
-	 * locked: the session-lock surface starves the same way — its
-	 * self-clocked frame-callback loop settles at ~90ms per cycle once
-	 * the chain goes cold (measured: 11 fps steady, full rate whenever
-	 * compositor-side damage kept rendermon firing).  The lockscreen is
-	 * meant to animate every vblank (max refresh is forced for the whole
-	 * lock), so keep the chain alive while locked too. */
-	if (is_video || is_game || locked)
-		request_frame(m);
+	 * request_frame() can't sustain the chain: wlr_output_schedule_frame
+	 * marks the output needs_frame, forcing a full build+commit on the
+	 * next pass — a pageflip every vblank regardless of content (the old
+	 * behaviour).  Instead arm fd_pacer on the vblank grid: the paced
+	 * pass serves frame_done + the culled-buffer drip, and re-arms only
+	 * while passes keep committing nothing.  A real commit re-enters via
+	 * its own pageflip frame event and the pacer stays quiet. */
+	if ((is_video || is_game || locked) && !did_commit)
+		pace_frame_done_chain(m, frame_start_ns);
 }
 
 void
@@ -4221,16 +4303,28 @@ outputpresent(struct wl_listener *listener, void *data)
 
 	/* Calculate interval between presents (vblank interval).
 	 *
-	 * This used to be skipped while video cadence was active, back when
-	 * the cadence held frames and presents landed every 2-3 vblanks. The
-	 * hold is gone (see rendermon) — fullscreen video is exempt from the
-	 * idle gate and commits every vblank — so skipping now just freezes
-	 * present_interval_ns at whatever it held when the video started, and
-	 * everything downstream reads a stale display Hz. */
+	 * Zero-damage vblanks no longer commit (idle gate + fd_pacer), so
+	 * raw present deltas measure CONTENT rate whenever content runs
+	 * below refresh — 24 fps video on 60 Hz presents every 2-3 vblanks.
+	 * Folding those into the average would poison every display-Hz
+	 * consumer (fps limiter, frame repeat, autolock, latch).  Only
+	 * accept deltas consistent with the active mode's vblank interval;
+	 * everything else (k>1 vblank gaps, VRR content-paced deltas)
+	 * leaves the estimate at the true max-rate value. */
 	if (m->last_present_ns > 0 && present_ns > m->last_present_ns) {
 		uint64_t interval = present_ns - m->last_present_ns;
-		/* Sanity check: interval should be reasonable (1ms - 100ms) */
-		if (interval > 1000000 && interval < 100000000) {
+		uint64_t mode_iv = 0;
+
+		if (m->wlr_output->current_mode &&
+				m->wlr_output->current_mode->refresh > 0)
+			mode_iv = 1000000000000ULL /
+				(uint64_t)m->wlr_output->current_mode->refresh;
+		/* Sanity check: 1-100 ms and within [0.5, 1.5]× the mode's
+		 * vblank interval (fractional rates like 59.94 still pass). */
+		if (interval > 1000000 && interval < 100000000 &&
+		    (mode_iv == 0 ||
+		     (interval > mode_iv / 2 &&
+		      interval < mode_iv + mode_iv / 2))) {
 			/* Rolling average with 90% old, 10% new */
 			if (m->present_interval_ns == 0) {
 				m->present_interval_ns = interval;
@@ -6554,6 +6648,7 @@ show_hz_osd_orig(Monitor *m, const char *msg)
 
 		tll_foreach(glyphs, it) {
 			glyph = it->item.glyph;
+			/* Cache-owned buffer — no drop; scene node locks it. */
 			buffer = statusbar_buffer_from_glyph(glyph);
 			if (!buffer)
 				continue;
@@ -6565,7 +6660,6 @@ show_hz_osd_orig(Monitor *m, const char *msg)
 						padding + it->item.pen_x + glyph->x,
 						origin_y - glyph->y);
 			}
-			wlr_buffer_drop(buffer);
 		}
 	}
 

@@ -78,8 +78,12 @@ guide_metrics(void)
 	if (px < statusfont.height)
 		px = statusfont.height;
 	if (!menu_font || menu_font_px != px) {
-		if (menu_font)
+		if (menu_font) {
+			/* Glyph pointers from this font key the glyph-buffer
+			 * cache; a new font may reuse the addresses. */
+			statusbar_glyph_cache_flush();
 			fcft_destroy(menu_font);
+		}
 		menu_font = card_font_load((double)px / statusfont.height);
 		menu_font_px = menu_font ? px : 0;
 	}
@@ -203,6 +207,7 @@ guide_draw_text(struct wlr_scene_tree *tree, const char *s, int x, int y)
 		glyph = fcft_rasterize_char_utf32(f, cp,
 				statusbar_font_subpixel);
 		if (glyph && glyph->pix) {
+			/* Cache-owned buffer — no drop; scene node locks it. */
 			buffer = statusbar_buffer_from_glyph(glyph);
 			if (buffer) {
 				sb = wlr_scene_buffer_create(tree, NULL);
@@ -212,7 +217,6 @@ guide_draw_text(struct wlr_scene_tree *tree, const char *s, int x, int y)
 							x + pen_x + glyph->x,
 							y - glyph->y);
 				}
-				wlr_buffer_drop(buffer);
 			}
 		}
 		if (glyph)
