@@ -23,8 +23,13 @@ diag_flush(void)
 void
 diag_init(void)
 {
-	/* Truncate: one self-contained log per compositor session. */
-	diag_fp = fopen(DIAG_PATH, "w");
+	/* Truncate: one self-contained log per compositor session.
+	 * NIXLYTILE_DIAG_PATH override keeps a nested debug instance from
+	 * clobbering the live session's log. */
+	const char *path = getenv("NIXLYTILE_DIAG_PATH");
+	if (!path)
+		path = DIAG_PATH;
+	diag_fp = fopen(path, "w");
 	if (!diag_fp)
 		return;
 	/* Fully buffered: diag_logf runs inside rendermon (heartbeat,

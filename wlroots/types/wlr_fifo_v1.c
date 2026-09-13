@@ -63,22 +63,24 @@ static void fifo_arm_timeout(struct wlr_fifo_v1 *fifo) {
 	}
 }
 
-// Clear the barrier and release the commit waiting on it, if any. Applying
-// that commit may set the barrier again (via the synced commit hook), in which
-// case the commits behind it stay queued.
+// Clear the barrier and release the commits waiting on it. Releasing a
+// commit applies it, which may set the barrier again (via the synced commit
+// hook) — commits behind it then stay queued, waiting on the new barrier.
+// Commits must keep draining until that happens: releasing only one and
+// stopping strands the rest behind a barrier that no longer exists (a
+// wait_barrier-only commit, like Mesa's WSI sends after every frame, clears
+// no state on application), and a queue headed by such a commit degrades the
+// client to the FIFO_BARRIER_TIMEOUT_MS fallback cadence permanently.
 static void fifo_clear_barrier(struct wlr_fifo_v1 *fifo) {
 	fifo->barrier = false;
 
-	if (wl_list_empty(&fifo->commits)) {
-		fifo_disarm_timeout(fifo);
-		return;
+	while (!fifo->barrier && !wl_list_empty(&fifo->commits)) {
+		struct wlr_fifo_v1_commit *commit =
+			wl_container_of(fifo->commits.next, commit, link);
+		wl_list_remove(&commit->link);
+		wlr_surface_unlock_cached(commit->surface, commit->cached_seq);
+		free(commit);
 	}
-
-	struct wlr_fifo_v1_commit *commit =
-		wl_container_of(fifo->commits.next, commit, link);
-	wl_list_remove(&commit->link);
-	wlr_surface_unlock_cached(commit->surface, commit->cached_seq);
-	free(commit);
 
 	if (wl_list_empty(&fifo->commits)) {
 		fifo_disarm_timeout(fifo);
