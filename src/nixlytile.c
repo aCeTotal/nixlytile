@@ -2661,6 +2661,11 @@ close_logging(void)
  * so a frozen program can never wedge its tile or the session. */
 static struct wl_event_source *client_ping_timer;
 
+/* Grace window in which a recent buffer commit vouches for a client
+ * instead of a pong.  Longer than the 3 s tick so one slow frame can't
+ * open a hole, shorter than the ping timeout it stands in for. */
+#define PING_SKIP_COMMIT_MS 4000
+
 /* ── Idle-gate re-evaluation ─────────────────────────────────────────
  * checkidleinhibitor also inhibits on game mode / playing fullscreen
  * video, but neither condition raises an event when it changes — poll
@@ -2690,6 +2695,16 @@ client_ping_tick(void *data)
 		/* Don't make the game service ping round-trips mid-session;
 		 * a hung game is obvious without the watchdog. */
 		if (game_mode_active && c->isfullscreen && looks_like_game(c))
+			continue;
+		/* A client that is still handing us buffers is alive, however
+		 * slowly.  One blocked inside the GPU driver between frames
+		 * can miss the 5 s pong deadline while plainly running —
+		 * RetroArch stalled on a PCSX2 readback was SIGKILLed
+		 * mid-session that way.  Commits are the liveness signal; the
+		 * watchdog still catches clients that have gone quiet. */
+		if (c->last_buffer_commit_ms &&
+				monotonic_msec() - c->last_buffer_commit_ms
+					< PING_SKIP_COMMIT_MS)
 			continue;
 #ifdef XWAYLAND
 		if (client_is_x11(c)) {

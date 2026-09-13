@@ -348,8 +348,12 @@ commitnotify(struct wl_listener *listener, void *data)
 		 * barrier).  Skipping the build leaves the release point unsignalled,
 		 * and the client's Mesa WSI burns its full 100 ms acquire timeout —
 		 * measured as RetroArch/PCSX2 pinned at exactly 10 fps. */
-		if (cs && (cs->current.committed & WLR_SURFACE_STATE_BUFFER))
+		if (cs && (cs->current.committed & WLR_SURFACE_STATE_BUFFER)) {
 			c->mon->unsampled_buffer = 1;
+			/* Liveness for the freeze watchdog — see
+			 * client_ping_tick. */
+			c->last_buffer_commit_ms = monotonic_msec();
+		}
 		/* Separate counter for the window the user is typing into —
 		 * the heartbeat pairs it with the delivered-key count to tell
 		 * "client never redrew" (frame-callback starvation) from

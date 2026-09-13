@@ -1148,6 +1148,16 @@ typedef struct {
 	 * detected_video_hz fallback. */
 	int video_content_verdict;
 	uint64_t video_content_ms;
+	/* Memoized retro_content_running probe (reads /proc/<pid>/maps,
+	 * ~2000 lines for RetroArch).  Same ~500 ms window as the video
+	 * walk above — retro_blocks_game is consulted several times per
+	 * vblank while fullscreen content is up. */
+	int retro_content_verdict;
+	uint64_t retro_content_ms;
+	/* Last wl_surface commit carrying a buffer, for the freeze
+	 * watchdog: a client still producing frames is alive even when it
+	 * is too busy inside the GPU driver to answer a ping. */
+	uint64_t last_buffer_commit_ms;
 	uint32_t resize;
 	int pending_resize_w, pending_resize_h;
 	struct wlr_box old_geom;

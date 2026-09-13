@@ -1981,30 +1981,63 @@ is_retro_emulator_client(Client *c)
 	return r;
 }
 
-/* RetroArch keeps one window for both menu and running content; the
- * title is the only public signal.  Menu: "RetroArch" or
- * "RetroArch 1.x.y".  Content loaded: the title grows a " - core/
- * content" suffix (or a core replaces it entirely).  Only RetroArch
- * gets this in-game promotion — other emulators keep the blanket
- * exclusion (their titles are not this predictable). */
+/* RetroArch keeps one window for both menu and running content, so the
+ * promotion needs a signal that separates the two.  The window title
+ * used to serve: menu "RetroArch 1.x.y", content "… - core - game".
+ * It doesn't — a fullscreen RetroArch playing a PS2 title was still
+ * classified cls=- on the HTPC, which kept the 10-bit render format
+ * (an explicit direct-scanout blocker) and left the game composited
+ * with no frame pacing.
+ *
+ * The loaded libretro core is the real signal: RetroArch dlopens
+ * <core>_libretro.so when content starts and it shows up in the
+ * process map.  No core mapped = the plain menu, which keeps the
+ * blanket retro exclusion. */
+static int
+retro_core_loaded(pid_t pid)
+{
+	char path[64], line[512];
+	FILE *f;
+	int found = 0;
+
+	snprintf(path, sizeof path, "/proc/%d/maps", (int)pid);
+	if (!(f = fopen(path, "r")))
+		return 0;
+	while (fgets(line, sizeof line, f)) {
+		if (strstr(line, "_libretro.so")) {
+			found = 1;
+			break;
+		}
+	}
+	fclose(f);
+	return found;
+}
+
 int
 retro_content_running(Client *c)
 {
-	const char *app, *t;
+	const char *app;
+	pid_t pid;
+	uint64_t now;
 
 	if (!c)
 		return 0;
 	app = client_get_appid(c);
 	if (!app || !strcasestr(app, "retroarch"))
 		return 0;
-	t = client_get_title(c);
-	if (!t || !*t)
+	pid = client_get_pid(c);
+	if (pid <= 1)
 		return 0;
-	if (strstr(t, " - "))
-		return 1;
-	if (strncasecmp(t, "retroarch", 9) == 0)
-		return 0;   /* plain menu title */
-	return 1;           /* a core renamed the window */
+
+	/* Memoized: the map walk is far too heavy for the per-vblank
+	 * callers, and content load/unload is a human-speed event. */
+	now = monotonic_msec();
+	if (c->retro_content_ms && now - c->retro_content_ms < 500)
+		return c->retro_content_verdict;
+
+	c->retro_content_verdict = retro_core_loaded(pid);
+	c->retro_content_ms = now ? now : 1;
+	return c->retro_content_verdict;
 }
 
 /* The retro exclusion, made content-aware: RetroArch sitting in its
