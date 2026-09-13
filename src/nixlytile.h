@@ -1489,6 +1489,9 @@ struct Monitor {
 	uint32_t diag_builds;         /* build_state reached since last heartbeat */
 	uint32_t diag_idle_skips;     /* idle-gate build_state skips since last heartbeat */
 	uint32_t diag_commits_in;     /* client surface commits on this mon since last heartbeat */
+	int unsampled_buffer;         /* a client attached a buffer the scene has not
+	                               * sampled yet — the idle gate must not skip
+	                               * build_state while this is set (see output.c) */
 	uint32_t diag_focus_commits;  /* commits from the keyboard-focused client */
 	uint32_t diag_focus_keys;     /* keys delivered to it since last heartbeat */
 	uint32_t diag_commit_fails;   /* failed output commit attempts since last heartbeat */

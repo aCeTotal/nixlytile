@@ -339,7 +339,17 @@ commitnotify(struct wl_listener *listener, void *data)
 	 * detector tell a client-side stall (0 commits) from a compositor-side
 	 * stall (client committing but nothing presented). */
 	if (c->mon) {
+		struct wlr_surface *cs = client_surface(c);
+
 		c->mon->diag_commits_in++;
+		/* A newly attached buffer must reach wlr_scene_output_build_state:
+		 * the scene's output_sample event is the only thing that registers
+		 * the client's explicit-sync release point (and clears the fifo-v1
+		 * barrier).  Skipping the build leaves the release point unsignalled,
+		 * and the client's Mesa WSI burns its full 100 ms acquire timeout —
+		 * measured as RetroArch/PCSX2 pinned at exactly 10 fps. */
+		if (cs && (cs->current.committed & WLR_SURFACE_STATE_BUFFER))
+			c->mon->unsampled_buffer = 1;
 		/* Separate counter for the window the user is typing into —
 		 * the heartbeat pairs it with the delivered-key count to tell
 		 * "client never redrew" (frame-callback starvation) from

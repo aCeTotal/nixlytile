@@ -3597,6 +3597,7 @@ rendermon(struct wl_listener *listener, void *data)
 		 * build.  The historical ~3 fps "YouTube froze" failure was
 		 * chain starvation, not feedback loss — the pacer serves it. */
 		if (!wlr_scene_output_needs_frame(m->scene_output) &&
+		    !m->unsampled_buffer &&
 		    !m->vrr_pending &&
 		    !m->hdr_entry_pending && !m->hdr_exit_pending &&
 		    !(m->toast_overlay_layer && !m->toast_overlay_active &&
@@ -3610,6 +3611,7 @@ rendermon(struct wl_listener *listener, void *data)
 		}
 
 		m->diag_builds++;
+		m->unsampled_buffer = 0;
 		wlr_output_state_init(&state);
 		/* HDR enter/exit must be in the state BEFORE build_state: the
 		 * scene reads the pending image description to pick the render
