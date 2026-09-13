@@ -2060,6 +2060,18 @@ classify_fullscreen_content(Monitor *m, int *out_game, int *out_video, int *out_
 				&& (!c->fs_ws || c->fs_ws == m->active_ws)) {
 			int video_now = is_video_content(c)
 					|| c->detected_video_hz > 0.0f;
+			/* The game flag flips in place too: RetroArch loads and
+			 * closes content inside ONE toplevel, so 86c3f49's maps-
+			 * probe fixed retro_content_running() but this cache kept
+			 * returning the frozen game=0 — the whole PS2 session ran
+			 * cls=- (no pacing, no 8-bit drop, no scanout election,
+			 * no launch-cover reveal).  looks_like_game's expensive
+			 * probes are memoized, so this is cheap per vblank. */
+			int game_now = looks_like_game(c);
+			if (game_now != m->classify_cache_game) {
+				retro_content_reclass(m, c, game_now);
+				m->classify_cache_game = game_now;
+			}
 			if (video_now != m->classify_cache_video) {
 				/* Tag arrived after detection gave up (client
 				 * was untagged or idle during the scan): rerun
@@ -2075,10 +2087,12 @@ classify_fullscreen_content(Monitor *m, int *out_game, int *out_video, int *out_
 					schedule_video_check(200);
 				}
 				m->classify_cache_video = video_now;
-				m->classify_cache_tearing =
-					m->classify_cache_game && !video_now
-					&& client_wants_tearing(c);
 			}
+			/* Outside the video-change branch: a game flip alone
+			 * must also refresh the tearing verdict. */
+			m->classify_cache_tearing =
+				m->classify_cache_game && !m->classify_cache_video
+				&& client_wants_tearing(c);
 		}
 		*out_game = m->classify_cache_game;
 		*out_video = m->classify_cache_video;
@@ -3465,6 +3479,14 @@ rendermon(struct wl_listener *listener, void *data)
 	 * the frame-done drip near the end — it walks all clients, so the
 	 * old second call doubled that walk every frame. */
 	Client *vis_fsc = fullscreen_visible_on(m);
+	/* RetroArch & co pace themselves (audio sync + vsync).  The
+	 * compositor throttles (autolock, frame-repeat) measure buffer
+	 * ARRIVALS, and a vsync-paced client can never commit faster than
+	 * its frame_done release rate — the measurement re-confirms the
+	 * throttle forever.  One PCSX2 shader-compile second locked the
+	 * whole session to the 10 fps floor that way.  Exempt emulators
+	 * from the automatic pacing; the manual limiter hotkeys still win. */
+	int self_paced = vis_fsc && is_retro_emulator_client(vis_fsc);
 	{
 		/* Belt and braces: is_game now derives from the same
 		 * fullscreen_visible_on() client, but keep the explicit check
@@ -3829,7 +3851,8 @@ rendermon(struct wl_listener *listener, void *data)
 				track_game_frame_pacing(m, frame_start_ns);
 			}
 		}
-		autolock_tick(m, allow_tearing, frame_start_ns);
+		if (!self_paced)
+			autolock_tick(m, allow_tearing, frame_start_ns);
 	}
 
 	/* Frame doubling/tripling for smooth low-FPS playback (non-VRR).
@@ -3844,7 +3867,8 @@ rendermon(struct wl_listener *listener, void *data)
 		 * Don't use frame_repeat (delays frame_done) for video -
 		 * the Bresenham cadence handles pacing when active,
 		 * otherwise let the player run freely. */
-	} else if (is_game && m->frame_pacing_active && !m->game_vrr_active &&
+	} else if (is_game && !self_paced && m->frame_pacing_active &&
+			!m->game_vrr_active &&
 			!allow_tearing && !fps_limit_enabled &&
 			!(game_auto_fps_lock_enabled && m->al_lock_fps > 0)) {
 		/* fps_limit_enabled / auto lock excluded: the vblank-locked
@@ -3920,7 +3944,7 @@ frame_done:
 	if (fps_limit_enabled && fps_limit_value > 0) {
 		fps_cap = fps_limit_value;
 	} else if (game_auto_fps_lock_enabled && m->al_lock_fps > 0
-			&& !allow_tearing) {
+			&& !allow_tearing && !self_paced) {
 		fps_cap = m->al_lock_fps;
 		autolock_cap = 1;
 	}
@@ -4020,7 +4044,8 @@ frame_done:
 	 * Instead of uneven frame times (16-17-16-17-16ms), we get
 	 * perfectly consistent frame times (33-33-33-33-33ms for 30fps).
 	 */
-	if (m->frame_repeat_enabled && m->frame_repeat_count > 1 && is_game) {
+	if (m->frame_repeat_enabled && m->frame_repeat_count > 1 && is_game &&
+			!self_paced) {
 		m->frame_repeat_current++;
 
 		/*
@@ -4853,8 +4878,11 @@ output_has_4k_60hz(struct wlr_output *output)
 {
 	struct wlr_output_mode *mode;
 	wl_list_for_each(mode, &output->modes, link) {
+		/* >= 59000: TVs advertising 59.94 Hz (59940 mHz) as their only
+		 * 4K mode failed the exact-60000 test and were silently dropped
+		 * to 1080p by console mode. */
 		if (mode->width == 3840 && mode->height == 2160
-		    && mode->refresh >= 60000)
+		    && mode->refresh >= 59000)
 			return 1;
 	}
 	return 0;

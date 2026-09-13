@@ -462,6 +462,21 @@ animcommitnotify(struct wl_listener *listener, void *data)
 	 * and check_fullscreen_video rescheduled itself forever waiting. */
 	if (c->isfullscreen && client_is_x11(c))
 		track_client_frame(c);
+	/* Same gap for the new-buffer bookkeeping commitnotify does for
+	 * xdg clients: without it the idle gate's build guarantee
+	 * (mon->unsampled_buffer → explicit-sync release/fifo latch) and
+	 * the ping watchdog's commit-liveness exemption never existed for
+	 * X11 clients — the exact 10 fps WSI-timeout class of bug the xdg
+	 * side was fixed for. */
+	if (c->mon && client_is_x11(c)) {
+		struct wlr_surface *cs = client_surface(c);
+
+		c->mon->diag_commits_in++;
+		if (cs && (cs->current.committed & WLR_SURFACE_STATE_BUFFER)) {
+			c->mon->unsampled_buffer = 1;
+			c->last_buffer_commit_ms = monotonic_msec();
+		}
+	}
 	if (!c->scene_surface || !c->mon)
 		return;
 #ifdef XWAYLAND

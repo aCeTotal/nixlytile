@@ -174,8 +174,21 @@ wsf_outputs_dark(void)
 static void
 wsf_set_mute(int on)
 {
-	const char *argv[] = { "wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@",
-		on ? "1" : "0", NULL };
+	if (on) {
+		const char *argv[] = { "wpctl", "set-mute",
+			"@DEFAULT_AUDIO_SINK@", "1", NULL };
+		spawn_cmd_async(argv);
+		return;
+	}
+	/* Wake: unmute ALLE sinks, ikke bare gjeldende default — default-
+	 * noden kan byttes ut mens sesjonen er mørk (i915 slipper
+	 * connectoren ved TV-off, WirePlumber flytter default), og da
+	 * treffer mute og unmute ulike sinks: én blir stående mutet. */
+	const char *argv[] = { "sh", "-c",
+		"wpctl status | awk '/Sinks:/{s=1;next} /Sources:/{s=0} "
+		"s && match($0,/[0-9]+\\./){print substr($0,RSTART,RLENGTH-1)}'"
+		" | while read -r id; do wpctl set-mute \"$id\" 0; done",
+		NULL };
 	spawn_cmd_async(argv);
 }
 

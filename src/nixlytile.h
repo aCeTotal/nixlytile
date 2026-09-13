@@ -2469,6 +2469,7 @@ int client_rule_nofullscreen(Client *c);
 int is_retro_emulator_client(Client *c);
 int retro_content_running(Client *c);
 int retro_blocks_game(Client *c);
+void retro_content_reclass(Monitor *m, Client *c, int game_now);
 void menu_maxhz_update(void);
 void menuhz_forget(Monitor *m);
 void read_steam_properties(Client *c);

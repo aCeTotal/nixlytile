@@ -2049,6 +2049,41 @@ retro_blocks_game(Client *c)
 	return is_retro_emulator_client(c) && !retro_content_running(c);
 }
 
+/* RetroArch flips menu<->content inside ONE toplevel, so the pacing
+ * regime chosen at fullscreen-enter (setfullscreen) goes stale: the
+ * menu-only scanout lock stayed on for the whole game session and
+ * nothing armed game pacing.  Called from the classify cache the
+ * moment the game flag flips in place.  Promotion drops the lock and
+ * starts sampling fresh; demotion restores native menu presentation. */
+void
+retro_content_reclass(Monitor *m, Client *c, int game_now)
+{
+	if (!m || !m->wlr_output || !is_retro_emulator_client(c))
+		return;
+	if (game_now) {
+		if (m->retro_scanout_lock) {
+			wlr_output_lock_attach_render(m->wlr_output, false);
+			m->retro_scanout_lock = 0;
+		}
+		set_adaptive_sync(m, 1);
+	} else {
+		if (!m->retro_scanout_lock) {
+			wlr_output_lock_attach_render(m->wlr_output, true);
+			m->retro_scanout_lock = 1;
+		}
+		set_adaptive_sync(m, 0);
+		disable_game_vrr(m);
+	}
+	/* Stale locks/rings from the previous regime must not throttle the
+	 * new one (autolock's low ring spans 45 s). */
+	autolock_reset(m);
+	schedule_game_mode_update();
+	wlr_log(WLR_INFO, "retro reclass: %s → %s on %s",
+		client_get_appid(c) ? client_get_appid(c) : "?",
+		game_now ? "content (game path)" : "menu (native)",
+		m->wlr_output->name);
+}
+
 /* ── menu max-refresh hold (RetroArch / nixlymedia) ──────────────── */
 
 /* While the focused client is a RetroArch or nixlymedia *menu*, its
@@ -2059,6 +2094,10 @@ retro_blocks_game(Client *c)
 static Monitor *menuhz_mon;
 static struct wlr_output_mode *menuhz_saved;
 static struct wl_event_source *menuhz_timer;
+/* Mode the output rejected — without this memory the 1 s re-check
+ * retried the same failing modeset forever (HDMI retrain/blank loop
+ * in every menu on TVs whose max mode fails link training). */
+static struct wlr_output_mode *menuhz_failed;
 
 static int
 menu_maxhz_client(Client *c)
@@ -2106,6 +2145,7 @@ menuhz_commit(Monitor *m, struct wlr_output_mode *mode)
 		wlr_log(WLR_ERROR, "menuhz: %s rejected %dx%d@%dmHz",
 				m->wlr_output->name, mode->width, mode->height,
 				mode->refresh);
+		menuhz_failed = mode;
 	}
 	wlr_output_state_finish(&st);
 }
@@ -2120,6 +2160,7 @@ menuhz_forget(Monitor *m)
 		return;
 	menuhz_mon = NULL;
 	menuhz_saved = NULL;
+	menuhz_failed = NULL;
 }
 
 static int menuhz_timer_cb(void *data);
@@ -2146,6 +2187,7 @@ menu_maxhz_update(void)
 			menuhz_commit(menuhz_mon, menuhz_saved);
 		menuhz_mon = want;
 		menuhz_saved = NULL;
+		menuhz_failed = NULL;
 		if (want && want->wlr_output && want->wlr_output->current_mode) {
 			struct wlr_output_mode *cur =
 				want->wlr_output->current_mode;
@@ -2171,7 +2213,7 @@ menu_maxhz_update(void)
 		struct wlr_output_mode *max = find_mode(menuhz_mon->wlr_output,
 				cur->width, cur->height, 0);
 
-		if (max && max != cur)
+		if (max && max != cur && max != menuhz_failed)
 			menuhz_commit(menuhz_mon, max);
 	}
 	/* video/content state changes have no dedicated event — re-check
@@ -2427,8 +2469,14 @@ update_game_mode(void)
 		/* The cover normally started at the fullscreen transition in
 		 * setfullscreen(); this is the backstop for games that reach
 		 * ultra mode without one.  No-op if a cover is up or already
-		 * played for this client. */
-		launchfx_fullscreen_starting(c);
+		 * played for this client.
+		 * Never for retro emulators: promotion happens inside an
+		 * already-presenting fullscreen toplevel (menu → content), and
+		 * an opaque cover over it starves the explicit-sync client —
+		 * never sampled → no release point → 100 ms WSI timeout per
+		 * frame (10 fps) under up to 20 s of black. */
+		if (!is_retro_emulator_client(c))
+			launchfx_fullscreen_starting(c);
 
 		/* Give the cover a 1 s head start: ultra mode flips on direct
 		 * scanout and heavy tuning, which would put the game on screen
