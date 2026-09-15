@@ -1574,10 +1574,14 @@ focus_workspace_n(const Arg *arg)
 	/* Cap N at (highest-non-empty-ws + 1) so the user can land on
 	 * at most one trailing empty workspace.  If they want ws 5 but
 	 * only ws 0 has tiles, they get redirected to ws 1 (the single
-	 * allowed empty trailing slot). */
-	max_filled = max_nonempty_ws_idx(selmon);
-	if (n > max_filled + 1)
-		n = max_filled + 1;
+	 * allowed empty trailing slot).  HTPC is exempt: its workspaces are
+	 * a fixed app grid, so the guide must reach ws 3 (GeForce NOW) even
+	 * when nothing below it has mapped yet. */
+	if (!htpc_mode_active) {
+		max_filled = max_nonempty_ws_idx(selmon);
+		if (n > max_filled + 1)
+			n = max_filled + 1;
+	}
 	if (n < 0)
 		n = 0;
 

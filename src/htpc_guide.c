@@ -3,10 +3,10 @@
  *
  * Pressing the gamepad guide button (BTN_MODE) in htpc mode opens a
  * compositor-drawn menu listing the HTPC apps (Steam, RetroArch,
- * GeForce NOW, nixlymedia).  Only ONE app runs at a time on the single
- * workspace: D-pad up/down moves the selection, A spawns
- * `htpc-switch <app>` (nixlyos htpc/session.nix) which kills the
- * running app and starts the chosen one, B or guide closes.
+ * GeForce NOW, nixlymedia).  Each app owns one workspace and stays
+ * resident there; D-pad up/down moves the selection, A switches to that
+ * workspace (spawning the app only if it is not running), B or guide
+ * closes.
  *
  * While the menu is open every gamepad is grabbed exclusively
  * (EVIOCGRAB via htpc_pad_grab), so navigating the menu never leaks
@@ -38,20 +38,26 @@ static const char *entries[] = {
 };
 #define GUIDE_N ((int)(sizeof(entries) / sizeof(entries[0])))
 
-/* argv per entry for the htpc-switch spawn on select. */
-static const char *switch_cmd[GUIDE_N][3] = {
-	{ "htpc-switch", "steam",      NULL },
-	{ "htpc-switch", "retroarch",  NULL },
-	{ "htpc-switch", "geforcenow", NULL },
-	{ "htpc-switch", "nixlymedia", NULL },
+/* Names go to htpc-start/-stop (nixlyos htpc/session.nix) and must match
+ * its case labels; app_ws is the workspace each one is rule-placed on
+ * (window-rule in nixlyos home/nixlytile.nix, 1-based there, 0-based
+ * here). nixlymedia holds workspace 0 because that is the one active at
+ * startup — the boot app must not map hidden. */
+static const char *app_name[GUIDE_N] = {
+	"steam",
+	"retroarch",
+	"geforcenow",
+	"nixlymedia",
 };
+static const int app_ws[GUIDE_N] = { 3, 1, 2, 0 };
+#define GUIDE_GFN 2
 
 static struct wlr_scene_tree *menu_tree;
 static Monitor *menu_mon;
 static int menu_sel;
-/* entries[] index of the app currently running; the supervisor boots
- * into RetroArch, so that is the initial highlight. */
-static int menu_current = 1;
+/* entries[] index of the app on screen; the session boots into
+ * nixlymedia, so that is the initial highlight. */
+static int menu_current = 3;
 static int card_w, card_h;
 
 /* Everything scales with the output so the card reads the same from
@@ -338,19 +344,40 @@ htpc_guide_nav(int dir)
 	return 1;
 }
 
+/* Selecting an app is a workspace switch, not a restart: every app owns a
+ * workspace (window-rule in nixlyos home/nixlytile.nix), inactive ones map
+ * hidden and wsfreeze SIGSTOPs them, and htpc_ws_refresh_fx() re-applies
+ * the output state for the one coming up.  Measured 2026-09-15: killing
+ * and respawning cost 9.2 s for Steam; a workspace switch is one frame.
+ * The app is only spawned when its workspace is empty (first use, or
+ * after a crash). */
 int
 htpc_guide_select(void)
 {
 	Arg a;
+	Workspace *ws;
 	int sel = menu_sel;
 
 	if (!menu_tree)
 		return 0;
 	htpc_guide_close();
-	if (sel != menu_current) {
-		menu_current = sel;
-		a.v = switch_cmd[sel];
-		spawn(&a);
+	if (sel == menu_current)
+		return 1;
+	a.i = app_ws[sel];
+
+	/* GeForce NOW is the one app that cannot wait off-screen: frozen,
+	 * NVIDIA tears the session down anyway, so leaving kills it. */
+	if (menu_current == GUIDE_GFN && sel != GUIDE_GFN)
+		spawn_cmd("htpc-stop geforcenow");
+
+	ws = selmon ? workspace_get_or_create_idx(selmon, a.i) : NULL;
+	if (!ws || !workspace_has_clients(ws)) {
+		char cmd[64];
+		snprintf(cmd, sizeof(cmd), "htpc-start %s", app_name[sel]);
+		spawn_cmd(cmd);
 	}
+
+	menu_current = sel;
+	focus_workspace_n(&a);
 	return 1;
 }

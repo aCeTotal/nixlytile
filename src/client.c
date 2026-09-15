@@ -2678,6 +2678,22 @@ htpc_ws_refresh_fx(Monitor *m)
 				m->active_ws->idx);
 		spawn_cmd(cmd);
 	}
+
+	/* Per-workspace GPU clock: nixlymedia and GeForce NOW stay at RP1
+	 * because VRM noise at high clocks reaches the eARC chain; Steam and
+	 * RetroArch get the full range (nixlyos htpc/gpu-clock.nix). */
+	{
+		static const char *ws_app[] = {
+			"nixlymedia", "retroarch", "geforcenow", "steam"
+		};
+		int i = m->active_ws->idx;
+		char cmd[64];
+
+		if (i >= 0 && i < (int)LENGTH(ws_app)) {
+			snprintf(cmd, sizeof(cmd), "htpc-gpu-clock %s", ws_app[i]);
+			spawn_cmd(cmd);
+		}
+	}
 }
 
 void
