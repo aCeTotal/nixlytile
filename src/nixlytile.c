@@ -2782,11 +2782,16 @@ setup(void)
 	netmon_init();
 	wifi_ctrl_init();
 	btmon_init();
-	camwatch_init();
-	lightsense_init();
-	presence_init();
-	battwatch_init();
-	fanwatch_init();
+	/* Laptop-only sensors. On the HTPC they watch hardware that is not
+	 * there and feed a hidden bar, and the timer-driven ones fire on the
+	 * compositor thread — jitter between frames for no output. */
+	if (!htpc_mode_active) {
+		camwatch_init();
+		lightsense_init();
+		presence_init();
+		battwatch_init();
+		fanwatch_init();
+	}
 	diskwatch_init();
 	powersave_init();
 	launchboost_init();
@@ -3142,8 +3147,9 @@ setup(void)
 	/* Only the lock screen may cover the session with its own surface. */
 	wlsec_privileged(session_lock_mgr->global);
 	wl_signal_add(&session_lock_mgr->events.new_lock, &new_session_lock);
+	/* Black: matches the locker, so no grey flash before it maps. */
 	locked_bg = wlr_scene_rect_create(layers[LyrBlock], sgeom.width, sgeom.height,
-			(float [4]){0.1f, 0.1f, 0.1f, 1.0f});
+			(float [4]){0.0f, 0.0f, 0.0f, 1.0f});
 	wlr_scene_node_set_enabled(&locked_bg->node, 0);
 
 	/* Use decoration protocols to negotiate server-side decorations */
