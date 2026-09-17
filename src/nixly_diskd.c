@@ -9,9 +9,10 @@
  *   umount <dir-or-dev>
  *   ping                             liveness probe
  *
- * One text line per connection round on /run/nixly-diskd.sock (0666 —
- * every mutating command is refused on the disks holding the system
- * mounts, and device/dir arguments are strictly validated).  Replies
+ * One text line per connection round on /run/nixly-diskd.sock (root:wheel
+ * 0660, peer checked via SO_PEERCRED — every mutating command is refused
+ * on the disks holding the system mounts, and device/dir arguments are
+ * strictly validated).  Replies
  * "ok" or "err <msg>".  Built standalone (no compositor deps), run as a
  * systemd service from the nixlyos flake with parted + mkfs tools on
  * PATH.
@@ -32,6 +33,8 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#include "priv_sock.h"
 
 #define SOCK_PATH "/run/nixly-diskd.sock"
 #define MAX_SYS_DISKS 8
@@ -379,7 +382,7 @@ mkdirs(const char *dir)
 static void
 cmd_mount(FILE *out, const char *args)
 {
-	char fstype[16], dev[64], dir[192], opts[96], eb[128];
+	char fstype[16], dev[64], dir[192], opts[128], eb[128];
 	int uid, perm_fs;
 
 	if (sscanf(args, "%15s %63s %191s %d", fstype, dev, dir, &uid) != 4 ||
@@ -395,8 +398,13 @@ cmd_mount(FILE *out, const char *args)
 	 * mount time; unix filesystems get a chown on the mount root. */
 	perm_fs = strcmp(fstype, "vfat") == 0 ||
 		strcmp(fstype, "exfat") == 0 || strcmp(fstype, "ntfs") == 0;
+	/* Removable media never carries setuid bits, device nodes or
+	 * executables: a prepared stick would otherwise be instant root. */
 	if (perm_fs)
-		snprintf(opts, sizeof(opts), "uid=%d,gid=%d", uid, uid);
+		snprintf(opts, sizeof(opts), "nosuid,nodev,noexec,uid=%d,gid=%d",
+				uid, uid);
+	else
+		snprintf(opts, sizeof(opts), "nosuid,nodev,noexec");
 	{
 		char *argv[10];
 		int n = 0, r;
@@ -407,10 +415,8 @@ cmd_mount(FILE *out, const char *args)
 			argv[n++] = strcmp(fstype, "ntfs") == 0 ?
 				"ntfs3" : fstype;
 		}
-		if (perm_fs) {
-			argv[n++] = "-o";
-			argv[n++] = opts;
-		}
+		argv[n++] = "-o";
+		argv[n++] = opts;
 		argv[n++] = dev;
 		argv[n++] = dir;
 		argv[n] = NULL;
@@ -477,7 +483,7 @@ main(void)
 		perror("bind");
 		return 1;
 	}
-	chmod(sock, 0666);
+	sock_restrict(sock);
 
 	for (;;) {
 		char line[256];
@@ -487,6 +493,10 @@ main(void)
 
 		if (cfd < 0)
 			continue;
+		if (!peer_allowed(cfd)) {
+			close(cfd);
+			continue;
+		}
 		n = read(cfd, line, sizeof(line) - 1);
 		if (n <= 0) {
 			close(cfd);

@@ -30,3 +30,8 @@ compile_commands.json
 
 # Claude worktrees
 .claude/worktrees/
+
+# Agent scratch: plans and notes stay local, never in a push
+.claude/
+CLAUDE.local.md
+*.plan.md

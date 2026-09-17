@@ -1057,8 +1057,11 @@ get_time_ns(void)
 void
 run(const char *startup_cmd)
 {
-	/* Add a Unix socket to the Wayland display. */
-	const char *socket = wl_display_add_socket_auto(dpy);
+	/* Filter has to be in place before the first client can connect. */
+	const char *socket;
+
+	wlsec_init();
+	socket = wl_display_add_socket_auto(dpy);
 	if (!socket)
 		die("startup: display_add_socket_auto");
 	setenv("WAYLAND_DISPLAY", socket, 1);
@@ -2986,10 +2989,13 @@ setup(void)
 	compositor = wlr_compositor_create(dpy, 6, drw);
 	wlr_subcompositor_create(dpy);
 	wlr_data_device_manager_create(dpy);
-	wlr_export_dmabuf_manager_v1_create(dpy);
-	wlr_screencopy_manager_v1_create(dpy);
-	wlr_data_control_manager_v1_create(dpy);
+	/* Capture and clipboard-history protocols: wlsec_privileged() keeps
+	 * them off the registry for everything but the allowlisted tools. */
+	wlsec_privileged(wlr_export_dmabuf_manager_v1_create(dpy)->global);
+	wlsec_privileged(wlr_screencopy_manager_v1_create(dpy)->global);
+	wlsec_privileged(wlr_data_control_manager_v1_create(dpy)->global);
 	ext_data_control_mgr = wlr_ext_data_control_manager_v1_create(dpy, 1);
+	wlsec_privileged(ext_data_control_mgr->global);
 	wlr_primary_selection_v1_device_manager_create(dpy);
 	wlr_viewporter_create(dpy);
 	wlr_single_pixel_buffer_manager_v1_create(dpy);
@@ -3005,6 +3011,8 @@ setup(void)
 	tearing_control_mgr = wlr_tearing_control_manager_v1_create(dpy, 1);
 	protocol_fixes = wlr_fixes_create(dpy, 1);
 	security_ctx_mgr = wlr_security_context_manager_v1_create(dpy);
+	/* A sandbox must not be able to mint its own security contexts. */
+	wlsec_privileged(security_ctx_mgr->global);
 	xdg_dialog_mgr = wlr_xdg_wm_dialog_v1_create(dpy, 1);
 	system_bell = wlr_xdg_system_bell_v1_create(dpy, 1);
 	pointer_gestures = wlr_pointer_gestures_v1_create(dpy);
@@ -3020,16 +3028,25 @@ setup(void)
 
 	/* Foreign toplevel list — expose window list to external tools */
 	foreign_toplevel_list = wlr_ext_foreign_toplevel_list_v1_create(dpy, 1);
+	wlsec_privileged(foreign_toplevel_list->global);
 
 	/* Modern screen capture (ext-image-copy-capture-v1) */
 	image_copy_capture_mgr = wlr_ext_image_copy_capture_manager_v1_create(dpy, 1);
-	wlr_ext_output_image_capture_source_manager_v1_create(dpy, 1);
+	wlsec_privileged(image_copy_capture_mgr->global);
+	wlsec_privileged(wlr_ext_output_image_capture_source_manager_v1_create(
+			dpy, 1)->global);
 
 	/* Initializes the interface used to implement urgency hints */
 	activation = wlr_xdg_activation_v1_create(dpy);
 	wl_signal_add(&activation->events.request_activate, &request_activate);
 
-	wlr_scene_set_gamma_control_manager_v1(scene, wlr_gamma_control_manager_v1_create(dpy));
+	{
+		struct wlr_gamma_control_manager_v1 *gamma =
+			wlr_gamma_control_manager_v1_create(dpy);
+
+		wlr_scene_set_gamma_control_manager_v1(scene, gamma);
+		wlsec_privileged(gamma->global);
+	}
 
 	/* Color management v1 — let apps negotiate color spaces (sRGB, P3, BT.2020, HDR PQ) */
 	{
@@ -3070,6 +3087,7 @@ setup(void)
 		dpy, 1, drw);
 
 	power_mgr = wlr_output_power_manager_v1_create(dpy);
+	wlsec_privileged(power_mgr->global);
 	wl_signal_add(&power_mgr->events.set_mode, &output_power_mgr_set_mode);
 
 	/* Creates an output layout, which is a wlroots utility for working with an
@@ -3121,6 +3139,8 @@ setup(void)
 	wl_signal_add(&idle_inhibit_mgr->events.new_inhibitor, &new_idle_inhibitor);
 
 	session_lock_mgr = wlr_session_lock_manager_v1_create(dpy);
+	/* Only the lock screen may cover the session with its own surface. */
+	wlsec_privileged(session_lock_mgr->global);
 	wl_signal_add(&session_lock_mgr->events.new_lock, &new_session_lock);
 	locked_bg = wlr_scene_rect_create(layers[LyrBlock], sgeom.width, sgeom.height,
 			(float [4]){0.1f, 0.1f, 0.1f, 1.0f});
@@ -3311,9 +3331,11 @@ setup(void)
 	 */
 	wl_signal_add(&backend->events.new_input, &new_input_device);
 	virtual_keyboard_mgr = wlr_virtual_keyboard_manager_v1_create(dpy);
+	wlsec_privileged(virtual_keyboard_mgr->global);
 	wl_signal_add(&virtual_keyboard_mgr->events.new_virtual_keyboard,
 			&new_virtual_keyboard);
 	virtual_pointer_mgr = wlr_virtual_pointer_manager_v1_create(dpy);
+	wlsec_privileged(virtual_pointer_mgr->global);
     wl_signal_add(&virtual_pointer_mgr->events.new_virtual_pointer,
             &new_virtual_pointer);
 	text_input_mgr = wlr_text_input_manager_v3_create(dpy);

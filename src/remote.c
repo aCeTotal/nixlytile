@@ -167,9 +167,30 @@ configure_output(Monitor *m, const RemoteParams *p)
 			m->wlr_output->name);
 	wlr_output_state_finish(&state);
 
+	/* Claimed by a session: back in the layout, visible to clients */
+	if (!wlr_output_layout_get(output_layout, m->wlr_output))
+		wlr_output_layout_add_auto(output_layout, m->wlr_output);
+	wlr_output_create_global(m->wlr_output, dpy);
+
 	m->asleep = 0;
 	m->frame_scheduled = 0;
 	m->hdr_force = p->hdr ? 1 : 0;
+}
+
+void
+remote_hide_parked(Monitor *m)
+{
+	if (!m || !m->wlr_output)
+		return;
+
+	wlr_output_layout_remove(output_layout, m->wlr_output);
+	wlr_output_destroy_global(m->wlr_output);
+
+	m->m.x = REMOTE_PARK_X + REMOTE_PARK_STEP * (m->virt_idx - 1);
+	m->m.y = 0;
+	m->m.width = m->wlr_output->width;
+	m->m.height = m->wlr_output->height;
+	m->w = m->m;
 }
 
 static void
@@ -186,6 +207,8 @@ park_output(Monitor *m)
 	wlr_output_state_set_scale(&state, 1.0f);
 	wlr_output_commit_state(m->wlr_output, &state);
 	wlr_output_state_finish(&state);
+
+	remote_hide_parked(m);
 }
 
 /* Handheld: every physical monitor collapses onto one workspace */

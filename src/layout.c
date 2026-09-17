@@ -123,8 +123,11 @@ arrange(Monitor *m)
 	}
 
 	/* Workspace layout (replaces tile/monocle/btrtile) */
-	if (m->active_ws)
-		workspace_layout(m->active_ws);
+	{
+		Workspace *ws = monitor_active_ws(m);
+		if (ws)
+			workspace_layout(ws);
+	}
 
 	monitor_apply_positions(m);
 

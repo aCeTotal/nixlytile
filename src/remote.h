@@ -35,6 +35,10 @@ const char *remote_stop(int output);
 
 int remote_is_active(void);
 
+/* Take a parked output out of the layout and out of the client-visible
+ * globals; the park box is kept so internal per-monitor code has sizes. */
+void remote_hide_parked(Monitor *m);
+
 /* remote_pad.c */
 void remote_pad_init(void);
 void remote_pad_cleanup(void);

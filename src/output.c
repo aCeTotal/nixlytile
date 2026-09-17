@@ -9,6 +9,36 @@ static int edid_reprobe_cb(void *data);
 static void try_reapply_bestmode(Monitor *m);
 static void schedule_edid_reprobe(Monitor *m);
 
+/* Layout entries queued for removal.  Dropping one frees it, and every
+ * caller here runs inside a layout signal emission where the remaining
+ * listeners still hold that entry — so the drop waits for idle.  A stale
+ * pointer is harmless: the lookup compares addresses, never derefs. */
+static struct wlr_output *layout_drop_queue[MAX_MONITORS];
+static int layout_drop_n;
+static struct wl_event_source *layout_drop_source;
+
+static void
+layout_drop_run(void *data)
+{
+	int i;
+
+	layout_drop_source = NULL;
+	for (i = 0; i < layout_drop_n; i++)
+		wlr_output_layout_remove(output_layout, layout_drop_queue[i]);
+	layout_drop_n = 0;
+}
+
+static void
+layout_drop(struct wlr_output *o)
+{
+	if (!o || layout_drop_n >= MAX_MONITORS)
+		return;
+	layout_drop_queue[layout_drop_n++] = o;
+	if (!layout_drop_source)
+		layout_drop_source = wl_event_loop_add_idle(
+			wl_display_get_event_loop(dpy), layout_drop_run, NULL);
+}
+
 void
 cleanupmon(struct wl_listener *listener, void *data)
 {
@@ -1198,7 +1228,12 @@ createmon(struct wl_listener *listener, void *data)
 	 * monitors. Otherwise auto_arrange_monitors() positions them. */
 	{
 		RuntimeMonitorConfig *mc = monconf_find(wlr_output->name);
-		if (m->m.x != -1 && m->m.y != -1) {
+		if (REMOTE_PARKED(m)) {
+			/* Never in the layout: as a client-visible phantom output
+			 * it collects swaybg/waybar surfaces and shrinks the
+			 * launcher, which sizes itself off the smallest output. */
+			remote_hide_parked(m);
+		} else if (m->m.x != -1 && m->m.y != -1) {
 			wlr_output_layout_add(output_layout, wlr_output, m->m.x, m->m.y);
 		} else if (mc && mc->grid_col >= 0) {
 			wlr_output_layout_add_auto(output_layout, wlr_output);
@@ -7454,22 +7489,22 @@ updatemons(struct wl_listener *listener, void *data)
 			continue;
 		config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
 		config_head->state.enabled = 0;
-		/* Remove this output from the layout to avoid cursor enter inside it */
-		wlr_output_layout_remove(output_layout, m->wlr_output);
+		/* Out of the layout so the cursor can't enter it — deferred,
+		 * because updatemons runs from the layout's own change signal
+		 * and freeing an entry there strands the remaining listeners. */
+		layout_drop(m->wlr_output);
 		closemon(m, 0);
 		m->m = m->w = (struct wlr_box){0};
 	}
 	/* Insert outputs that need to */
 	wl_list_for_each_safe(m, mtmp, &mons, link) {
-		if (!m->wlr_output || !m->wlr_output->enabled
-				|| wlr_output_layout_get(output_layout, m->wlr_output))
+		if (!m->wlr_output || !m->wlr_output->enabled)
 			continue;
-		/* auto-placing a parked output would glue it to the desktop */
+		/* Parked outputs were left out by createmon; removing one here
+		 * would free the layout entry mid-signal and crash the add. */
 		if (REMOTE_PARKED(m))
-			wlr_output_layout_add(output_layout, m->wlr_output,
-					REMOTE_PARK_X + REMOTE_PARK_STEP
-					* (m->virt_idx - 1), 0);
-		else
+			continue;
+		if (!wlr_output_layout_get(output_layout, m->wlr_output))
 			wlr_output_layout_add_auto(output_layout, m->wlr_output);
 	}
 

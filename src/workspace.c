@@ -577,6 +577,30 @@ workspace_get_or_create_idx(Monitor *m, int idx)
  * If the empty workspace was the active one, the next workspace takes
  * its place — the user is never stranded on a workspace they can't
  * leave to reach tiles. */
+/* active_ws must live on m's own list: a stale cross-monitor pointer
+ * walks out of the list in workspace_focus_dir and hands workspace_layout
+ * the list head cast as a Workspace (SEGV, whole session dies).  Repair
+ * to m's first workspace instead of trusting the pointer. */
+Workspace *
+monitor_active_ws(Monitor *m)
+{
+	Workspace *ws;
+
+	if (!m)
+		return NULL;
+	wl_list_for_each(ws, &m->workspaces, link)
+		if (ws == m->active_ws)
+			return ws;
+
+	if (m->active_ws)
+		wlr_log(WLR_ERROR, "active_ws not on %s — repairing",
+			m->wlr_output ? m->wlr_output->name : "?");
+	m->active_ws = wl_list_empty(&m->workspaces) ? NULL
+		: wl_container_of(m->workspaces.next, ws, link);
+	m->prev_ws = NULL;
+	return m->active_ws;
+}
+
 void
 monitor_compact_workspaces(Monitor *m)
 {
@@ -784,7 +808,7 @@ workspace_layout(Workspace *ws)
 		return;
 
 	m = ws->mon;
-	if (!m->wlr_output->enabled)
+	if (!m->wlr_output || !m->wlr_output->enabled)
 		return;
 
 	gap = m->gaps ? (int)gappx : 0;
@@ -1610,7 +1634,7 @@ move_client_to_ws_n(const Arg *arg)
 	Client *c;
 	int n;
 
-	if (!arg || !selmon || !selmon->active_ws)
+	if (!arg || !selmon || !monitor_active_ws(selmon))
 		return;
 	n = arg->i;
 	if (n < 0)
@@ -1647,14 +1671,13 @@ move_client_to_ws_dir(const Arg *arg)
 	Workspace *cur, *target = NULL;
 	Client *c;
 
-	if (!arg || !selmon || !selmon->active_ws)
+	if (!arg || !selmon || !(cur = monitor_active_ws(selmon)))
 		return;
 
 	c = focustop(selmon);
 	if (!c || c->isfloating || c->isfullscreen)
 		return;
 
-	cur = selmon->active_ws;
 	if (arg->i > 0) {
 		if (cur->link.next != &selmon->workspaces)
 			target = wl_container_of(cur->link.next, target, link);
@@ -1742,10 +1765,8 @@ workspace_focus_dir(Monitor *m, int dir)
 {
 	Workspace *cur, *target = NULL;
 
-	if (!m || !m->active_ws || dir == 0)
+	if (!m || dir == 0 || !(cur = monitor_active_ws(m)))
 		return;
-
-	cur = m->active_ws;
 	if (dir > 0) {
 		/* Forward: only allow advance if the current ws is occupied
 		 * (tiles or a fullscreen client) OR we're moving into an

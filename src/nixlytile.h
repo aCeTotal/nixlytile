@@ -2502,6 +2502,7 @@ void column_move_to_index(Column *col, int idx);
 void monitor_init_workspaces(Monitor *m);
 void monitor_cleanup_workspaces(Monitor *m);
 void monitor_compact_workspaces(Monitor *m);
+Workspace *monitor_active_ws(Monitor *m);
 Workspace *workspace_get_or_create_idx(Monitor *m, int idx);
 int workspace_max_nonempty_idx(Monitor *m);
 int workspace_has_clients(Workspace *ws);
@@ -3381,6 +3382,10 @@ double audio_meter_take_peak(void);
 
 /* notifyd.c — in-compositor org.freedesktop.Notifications daemon */
 void notifyd_init(void);
+
+/* wlsec.c — registry filter for the privileged Wayland protocols */
+void wlsec_privileged(struct wl_global *global);
+void wlsec_init(void);
 void notifyd_tick(Monitor *m, double dt, int *still);
 void notifyd_purge_mon(Monitor *m);
 void schedule_game_mode_update(void);

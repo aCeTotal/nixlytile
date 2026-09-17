@@ -9,7 +9,8 @@
  *                           pct -1 restores the driver's auto policy
  *   ping                    liveness probe
  *
- * One text line per connection round on /run/nixly-fand.sock (0666 —
+ * One text line per connection round on /run/nixly-fand.sock (root:wheel
+ * 0660, peer checked via SO_PEERCRED —
  * the command surface is deliberately too narrow to matter: fan-table
  * EC bytes, pwm files, fan percent).  Replies "ok[ <val>]" or
  * "err <msg>".  Built standalone (no compositor deps), run as a
@@ -28,6 +29,8 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+
+#include "priv_sock.h"
 
 #define SOCK_PATH "/run/nixly-fand.sock"
 #define EC_IO     "/sys/kernel/debug/ec/ec0/io"
@@ -220,7 +223,7 @@ main(void)
 		perror("bind");
 		return 1;
 	}
-	chmod(sock, 0666);
+	sock_restrict(sock);
 
 	for (;;) {
 		char line[128];
@@ -230,6 +233,10 @@ main(void)
 
 		if (cfd < 0)
 			continue;
+		if (!peer_allowed(cfd)) {
+			close(cfd);
+			continue;
+		}
 		n = read(cfd, line, sizeof(line) - 1);
 		if (n <= 0) {
 			close(cfd);

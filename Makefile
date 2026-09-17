@@ -38,7 +38,7 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            diskwatch.o disk_helper.o disk_ui.o \
            popup_card.o popup_extra.o \
            netmon.o wifi_ctrl.o wifi_nm.o wifi_share.o qr_scan.o btmon.o bt_rssi.o bt_audio.o text_entry.o net_ui.o bt_ui.o display_ui.o power_ui.o \
-           notify.o notifyd.o lightsense.o presence.o powersave.o battwatch.o camwatch.o cpuclock.o instruments.o converge.o spawn.o osd.o dwt.o launchboost.o overview.o
+           notify.o notifyd.o wlsec.o lightsense.o presence.o powersave.o battwatch.o camwatch.o cpuclock.o instruments.o converge.o spawn.o osd.o dwt.o launchboost.o overview.o
 
 PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstable-v1-protocol.h \
              $(SRC)/wlr-layer-shell-unstable-v1-protocol.h $(SRC)/wlr-output-power-management-unstable-v1-protocol.h \
@@ -117,6 +117,8 @@ anim.o: $(SRC)/anim.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/diag.h
 notify.o: $(SRC)/notify.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 notifyd.o: $(SRC)/notifyd.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/popup_card.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+wlsec.o: $(SRC)/wlsec.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 lightsense.o: $(SRC)/lightsense.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
