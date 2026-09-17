@@ -2991,6 +2991,7 @@ void fanwatch_set_boost(int on);
  * to the nixly-diskd root helper (worker thread only). */
 #define DISK_MAX       10
 #define DISK_PART_MAX  14
+#define DISK_NFS_MAX   12
 
 typedef struct {
 	char dev[40];             /* /dev/nvme0n1p2 */
@@ -3013,9 +3014,18 @@ typedef struct {
 	DiskPart parts[DISK_PART_MAX];
 } DiskDev;
 
+/* NFS share from /proc/self/mounts; automount targets show unmounted. */
+typedef struct {
+	char export[96];          /* 10.0.0.8:/bigdisk1 */
+	char mount[112];
+	int mounted;
+} DiskNfs;
+
 typedef struct {
 	int ndisks;
 	DiskDev disks[DISK_MAX];
+	int nnfs;
+	DiskNfs nfs[DISK_NFS_MAX];
 	int helper_ok;            /* nixly-diskd reachable */
 	int op_running;           /* a format/mount job is in flight */
 	char op_msg[96];          /* progress / result line for the popup */

@@ -32,6 +32,9 @@ typedef struct NdToast {
 	uint32_t id;
 	Monitor *m;
 	struct wlr_scene_tree *tree;
+	/* Natural size per child: the scene drops its wlr_buffer pointer on
+	 * texture upload, so the clip pass cannot read it back. */
+	struct wlr_scene_buffer *shadow_sb, *card_sb;
 	int w, h;
 	int slot_y;
 	int target_x, off_x;
@@ -109,32 +112,35 @@ nd_free_slot_y(Monitor *m, int h)
 /* Klipp mot egen skjermkant under sliden (kopiert fra osd.c: barna er
  * uskalerte scene-buffere, 1:1 source-box-crop holder). */
 static void
+nd_clip_one(struct wlr_scene_buffer *sb, int bw, int bh, int lim)
+{
+	int vis;
+
+	if (!sb || bw <= 0)
+		return;
+	vis = lim - sb->node.x;
+	if (vis >= bw) {
+		wlr_scene_node_set_enabled(&sb->node, 1);
+		wlr_scene_buffer_set_source_box(sb, NULL);
+		wlr_scene_buffer_set_dest_size(sb, bw, bh);
+	} else if (vis <= 0) {
+		wlr_scene_node_set_enabled(&sb->node, 0);
+	} else {
+		struct wlr_fbox src = { 0, 0, vis, bh };
+		wlr_scene_node_set_enabled(&sb->node, 1);
+		wlr_scene_buffer_set_source_box(sb, &src);
+		wlr_scene_buffer_set_dest_size(sb, vis, bh);
+	}
+}
+
+static void
 nd_clip_to_mon(NdToast *t, int x)
 {
-	struct wlr_scene_node *node;
 	int lim = t->m->m.x + t->m->m.width - x;
+	int m2 = 2 * CARD_SHADOW_MARGIN;
 
-	wl_list_for_each(node, &t->tree->children, link) {
-		struct wlr_scene_buffer *sb = wlr_scene_buffer_from_node(node);
-		int bw = sb->buffer ? sb->buffer->width : 0;
-		int bh = sb->buffer ? sb->buffer->height : 0;
-		int vis = lim - node->x;
-
-		if (bw <= 0)
-			continue;
-		if (vis >= bw) {
-			wlr_scene_node_set_enabled(node, 1);
-			wlr_scene_buffer_set_source_box(sb, NULL);
-			wlr_scene_buffer_set_dest_size(sb, bw, bh);
-		} else if (vis <= 0) {
-			wlr_scene_node_set_enabled(node, 0);
-		} else {
-			struct wlr_fbox src = { 0, 0, vis, bh };
-			wlr_scene_node_set_enabled(node, 1);
-			wlr_scene_buffer_set_source_box(sb, &src);
-			wlr_scene_buffer_set_dest_size(sb, vis, bh);
-		}
-	}
+	nd_clip_one(t->shadow_sb, t->w + m2, t->h + m2, lim);
+	nd_clip_one(t->card_sb, t->w, t->h, lim);
 }
 
 /* Fjern enkel Pango-markup (<b>, <i>, <a href=…>) og de fem
@@ -247,6 +253,7 @@ nd_build_card(NdToast *t, const char *app, const char *summary,
 
 	wl_list_for_each_safe(node, tmp, &t->tree->children, link)
 		wlr_scene_node_destroy(node);
+	t->shadow_sb = t->card_sb = NULL;
 	{
 		struct wlr_buffer *shb = card_shadow_buffer(res.w, res.h, 0);
 
@@ -257,6 +264,7 @@ nd_build_card(NdToast *t, const char *app, const char *summary,
 				wlr_scene_node_set_position(&sb->node,
 						-CARD_SHADOW_MARGIN,
 						-CARD_SHADOW_MARGIN);
+				t->shadow_sb = sb;
 			}
 			wlr_buffer_drop(shb);
 		}
@@ -265,6 +273,7 @@ nd_build_card(NdToast *t, const char *app, const char *summary,
 	if (sb) {
 		wlr_scene_buffer_set_buffer(sb, res.buf);
 		wlr_scene_node_set_position(&sb->node, 0, 0);
+		t->card_sb = sb;
 	}
 	wlr_buffer_drop(res.buf);
 	t->w = res.w;

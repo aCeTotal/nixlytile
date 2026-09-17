@@ -274,6 +274,9 @@ monconf_write(void)
 	for (k = 0; k < monconf_monitor_count; k++) {
 		RuntimeMonitorConfig *c = &monconf_monitors[k];
 
+		/* drop a virtual output an older writer left behind */
+		if (strncmp(c->name, "HEADLESS", 8) == 0)
+			continue;
 		for (i = 0; i < ndi; i++)
 			if (strcmp(di[i].name, c->name) == 0)
 				break;

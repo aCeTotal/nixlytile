@@ -290,7 +290,7 @@ monconf_apply_layout(void)
 	wl_list_for_each(m, &mons, link) {
 		RuntimeMonitorConfig *cfg;
 		int w, h;
-		if (!m->wlr_output || !m->wlr_output->enabled)
+		if (!m->wlr_output || !m->wlr_output->enabled || m->is_virtual)
 			continue;
 		cfg = monconf_find(m->wlr_output->name);
 		if (!cfg || cfg->grid_col < 0 || cfg->grid_row < 0 ||
@@ -321,7 +321,8 @@ monconf_apply_layout(void)
 	wl_list_for_each(m, &mons, link) {
 		RuntimeMonitorConfig *cfg;
 		int w, h, x, y;
-		if (!m->wlr_output || !m->wlr_output->enabled)
+		/* a virtual output is parked off-layout, never a grid cell */
+		if (!m->wlr_output || !m->wlr_output->enabled || m->is_virtual)
 			continue;
 		cfg = monconf_find(m->wlr_output->name);
 		if (!cfg || cfg->grid_col < 0 || cfg->grid_row < 0 ||
@@ -352,7 +353,7 @@ monconf_apply_layout(void)
 		const char *tgt;
 		int hops;
 
-		if (!m->wlr_output || !m->wlr_output->enabled)
+		if (!m->wlr_output || !m->wlr_output->enabled || m->is_virtual)
 			continue;
 		cfg = monconf_find(m->wlr_output->name);
 		if (!cfg || !cfg->mirror[0])

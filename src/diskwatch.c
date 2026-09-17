@@ -95,6 +95,24 @@ dw_udev_fs(const char *sys_dev_file, char *fstype, size_t ftlen,
 	fclose(fp);
 }
 
+/* Decode the \0NN escapes the kernel writes for spaces and friends. */
+static void
+dw_unescape(const char *src, char *dst, size_t len)
+{
+	char *w = dst;
+
+	while (*src && (size_t)(w - dst) < len - 1) {
+		if (src[0] == '\\' && src[1] && src[2] && src[3]) {
+			*w++ = (char)(((src[1] - '0') << 6) |
+					((src[2] - '0') << 3) | (src[3] - '0'));
+			src += 4;
+		} else {
+			*w++ = *src++;
+		}
+	}
+	*w = '\0';
+}
+
 /* Mount table: /dev/<name> (or a /dev/disk/by-* alias resolving to it)
  * → mountpoint.  Octal escapes in mountpoints (\040) are decoded. */
 static int
@@ -117,23 +135,7 @@ dw_find_mount(const char *dev, char *mount, size_t len)
 			cand = real;
 		if (strcmp(cand, dev) != 0)
 			continue;
-		/* decode \0NN escapes */
-		{
-			char *w = mount;
-			const char *r = mdir;
-
-			while (*r && (size_t)(w - mount) < len - 1) {
-				if (r[0] == '\\' && r[1] && r[2] && r[3]) {
-					*w++ = (char)(((r[1] - '0') << 6) |
-							((r[2] - '0') << 3) |
-							(r[3] - '0'));
-					r += 4;
-				} else {
-					*w++ = *r++;
-				}
-			}
-			*w = '\0';
-		}
+		dw_unescape(mdir, mount, len);
 		found = 1;
 		break;
 	}
@@ -200,6 +202,50 @@ dw_part_cmp(const void *a, const void *b)
 	const DiskPart *pa = a, *pb = b;
 
 	return pa->start_b < pb->start_b ? -1 : pa->start_b > pb->start_b;
+}
+
+/* NFS shares from the mount table, plus idle automount targets under
+ * /mnt that have not been mounted yet.  No statfs: a dead server would
+ * stall the worker for the whole soft-mount timeout. */
+static void
+dw_sample_nfs(DiskSnapshot *s)
+{
+	FILE *fp = fopen("/proc/self/mounts", "r");
+	char mdev[128], mdir[192], type[64], dir[112];
+
+	s->nnfs = 0;
+	if (!fp)
+		return;
+	while (fscanf(fp, "%127s %191s %63s %*s %*d %*d\n",
+				mdev, mdir, type) == 3) {
+		int automnt = strcmp(type, "autofs") == 0;
+		DiskNfs *n = NULL;
+
+		if (!automnt && strncmp(type, "nfs", 3) != 0)
+			continue;
+		if (automnt && strncmp(mdir, "/mnt/", 5) != 0)
+			continue;
+		dw_unescape(mdir, dir, sizeof(dir));
+		for (int i = 0; i < s->nnfs; i++)
+			if (strcmp(s->nfs[i].mount, dir) == 0) {
+				n = &s->nfs[i];
+				break;
+			}
+		if (n && automnt)
+			continue;   /* already have the real mount */
+		if (!n) {
+			if (s->nnfs >= DISK_NFS_MAX)
+				break;
+			n = &s->nfs[s->nnfs++];
+			memset(n, 0, sizeof(*n));
+			snprintf(n->mount, sizeof(n->mount), "%s", dir);
+		}
+		if (!automnt) {
+			snprintf(n->export, sizeof(n->export), "%s", mdev);
+			n->mounted = 1;
+		}
+	}
+	fclose(fp);
 }
 
 static void
@@ -307,6 +353,7 @@ dw_sample(DiskSnapshot *s)
 		s->ndisks++;
 	}
 	closedir(dir);
+	dw_sample_nfs(s);
 	s->helper_ok = disk_helper_available();
 }
 

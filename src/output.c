@@ -4265,7 +4265,10 @@ frame_done:
 		int cap = unfocused_fps_cap < 1 ? 1 : unfocused_fps_cap;
 		uint64_t interval = 1000000000ULL / (uint64_t)cap;
 		Client *foc = focustop(m);
-		LayerSurface *efl = exclusive_focus;
+		/* exclusive_focus may hold a Client */
+		LayerSurface *efl = (exclusive_focus &&
+				*(unsigned int *)exclusive_focus == LayerShell)
+				? exclusive_focus : NULL;
 
 		if (foc && foc->scene && foc->scene->node.enabled &&
 				client_surface(foc)) {
@@ -7458,8 +7461,15 @@ updatemons(struct wl_listener *listener, void *data)
 	}
 	/* Insert outputs that need to */
 	wl_list_for_each_safe(m, mtmp, &mons, link) {
-		if (m->wlr_output && m->wlr_output->enabled
-				&& !wlr_output_layout_get(output_layout, m->wlr_output))
+		if (!m->wlr_output || !m->wlr_output->enabled
+				|| wlr_output_layout_get(output_layout, m->wlr_output))
+			continue;
+		/* auto-placing a parked output would glue it to the desktop */
+		if (REMOTE_PARKED(m))
+			wlr_output_layout_add(output_layout, m->wlr_output,
+					REMOTE_PARK_X + REMOTE_PARK_STEP
+					* (m->virt_idx - 1), 0);
+		else
 			wlr_output_layout_add_auto(output_layout, m->wlr_output);
 	}
 
@@ -7487,6 +7497,10 @@ updatemons(struct wl_listener *listener, void *data)
 					c->geom.width, c->geom.height, c->geom.x, c->geom.y,
 					c->output);
 				c->mon = m;
+				/* foreign column corrupts active_ws */
+				if (c->column && c->column->ws
+						&& c->column->ws->mon != m)
+					workspace_detach_client(c);
 				/* If the monitor was torn down and rebuilt (output
 				 * destroy+create, not a plain disable), the client
 				 * lost its column when the old workspace was freed.
@@ -7515,7 +7529,7 @@ updatemons(struct wl_listener *listener, void *data)
 	wlr_scene_rect_set_size(locked_bg, sgeom.width, sgeom.height);
 
 	wl_list_for_each(m, &mons, link) {
-		if (!m->wlr_output->enabled)
+		if (!m->wlr_output->enabled || REMOTE_PARKED(m))
 			continue;
 		config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
 
@@ -7577,9 +7591,9 @@ updatemons(struct wl_listener *listener, void *data)
 		config_head->state.x = m->m.x;
 		config_head->state.y = m->m.y;
 
-		if (!selmon && !m->is_mirror) {
+		/* parked virtual output never selmon */
+		if (!m->is_mirror && (!selmon || REMOTE_PARKED(selmon)))
 			selmon = m;
-		}
 	}
 
 	if (holdm && holdm->wlr_output && holdm->wlr_output->enabled)

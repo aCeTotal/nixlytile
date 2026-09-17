@@ -24,6 +24,7 @@
 #define DK_HIT_OPEN_BASE 440   /* + flat usb part index: file browser */
 #define DK_HIT_UFMT_BASE 470   /* + flat usb part index: format view */
 #define DK_HIT_DEL_BASE  500   /* + partition index in the format view */
+#define DK_HIT_NFS_BASE  600   /* + nfs index: file browser */
 
 #define DK_MIN_PART_MIB  64
 
@@ -105,15 +106,6 @@ ensure_disk_icon_buffer(int target_h)
 	return 0;
 }
 
-void
-renderdisk(StatusModule *module, int bar_height, const char *text)
-{
-	(void)text;
-	render_tray_icon_module(module, bar_height,
-			ensure_disk_icon_buffer, &disk_icon_buf,
-			&disk_icon_w, &disk_icon_h);
-}
-
 /* ── formatting helpers ──────────────────────────────────────────── */
 
 static void
@@ -131,6 +123,39 @@ dk_human(unsigned long long b, char *out, size_t len)
 		snprintf(out, len, "%.1f %s", v, unit[u]);
 	else
 		snprintf(out, len, "%.0f %s", v, unit[u]);
+}
+
+/* Free space across every mounted partition; empty before the first
+ * snapshot so the bar shows the icon alone instead of "0 B". */
+static void
+dk_free_text(char *out, size_t len)
+{
+	unsigned long long free_b = 0;
+	int mounted = 0;
+
+	for (int d = 0; d < dsnap.ndisks; d++)
+		for (int i = 0; i < dsnap.disks[d].npart; i++)
+			if (dsnap.disks[d].parts[i].mount[0]) {
+				free_b += dsnap.disks[d].parts[i].avail_b;
+				mounted = 1;
+			}
+	if (!mounted) {
+		out[0] = '\0';
+		return;
+	}
+	dk_human(free_b, out, len);
+}
+
+void
+renderdisk(StatusModule *module, int bar_height, const char *text)
+{
+	char free_txt[24];
+
+	(void)text;
+	dk_free_text(free_txt, sizeof(free_txt));
+	render_icon_label(module, bar_height, free_txt,
+			ensure_disk_icon_buffer, &disk_icon_buf,
+			&disk_icon_w, &disk_icon_h, 0, 0, statusbar_fg);
 }
 
 static int
@@ -227,17 +252,10 @@ dk_part_rows(Card *card, const DiskPart *p)
 static void
 render_disk_list(Monitor *m, InfoPopup *p, Card *card)
 {
-	unsigned long long total_free = 0;
 	char value[24], buf[96], sz[24];
 	int shown;
 
-	for (int d = 0; d < dsnap.ndisks; d++)
-		for (int i = 0; i < dsnap.disks[d].npart; i++)
-			if (dsnap.disks[d].parts[i].mount[0])
-				total_free +=
-					dsnap.disks[d].parts[i].avail_b;
-	dk_human(total_free, sz, sizeof(sz));
-	snprintf(value, sizeof(value), "%s", sz);
+	dk_free_text(value, sizeof(value));
 	card_header(card, disk_icon_path, "Storage", "DISKS FREE", value);
 	card_gap(card, 6);
 
@@ -271,6 +289,47 @@ render_disk_list(Monitor *m, InfoPopup *p, Card *card)
 		for (int i = 0; i < dev->npart; i++)
 			if (dev->parts[i].mount[0])
 				dk_part_rows(card, &dev->parts[i]);
+	}
+
+	/* not mounted / non-Linux internal disks, formattable */
+	shown = 0;
+	for (int d = 0; d < dsnap.ndisks; d++) {
+		DiskDev *dev = &dsnap.disks[d];
+		const char *state;
+
+		if (dev->is_usb || dk_disk_usable(dev))
+			continue;
+		if (dev->is_system)
+			continue;
+		if (!shown) {
+			card_section(card, "NOT IN USE");
+			shown = 1;
+		}
+		state = "no filesystem";
+		for (int i = 0; i < dev->npart; i++)
+			if (dev->parts[i].fstype[0]) {
+				state = dev->parts[i].fstype;
+				break;
+			}
+		dk_human(dev->size_b, sz, sizeof(sz));
+		snprintf(buf, sizeof(buf), "%s  ·  %s  ·  %s",
+				dev->model[0] ? dev->model : dev->dev,
+				sz, state);
+		card_text_rbtn(card, buf, NULL, NULL, "Format disk",
+				DK_HIT_FMT_BASE + d,
+				p->btn_hover == DK_HIT_FMT_BASE + d);
+	}
+
+	/* NFS shares: export path + one-click open */
+	for (int i = 0; i < dsnap.nnfs; i++) {
+		DiskNfs *n = &dsnap.nfs[i];
+
+		if (i == 0)
+			card_section(card, "NFS");
+		card_text_rbtn(card, n->export[0] ? n->export : n->mount,
+				n->mounted ? n->mount : "not mounted",
+				card_col_dim, "Open", DK_HIT_NFS_BASE + i,
+				p->btn_hover == DK_HIT_NFS_BASE + i);
 	}
 
 	/* USB drives: every partition gets Open + Format */
@@ -331,35 +390,6 @@ render_disk_list(Monitor *m, InfoPopup *p, Card *card)
 				}
 			}
 		}
-	}
-
-	/* not mounted / non-Linux internal disks, formattable */
-	shown = 0;
-	for (int d = 0; d < dsnap.ndisks; d++) {
-		DiskDev *dev = &dsnap.disks[d];
-		const char *state;
-
-		if (dev->is_usb || dk_disk_usable(dev))
-			continue;
-		if (dev->is_system)
-			continue;
-		if (!shown) {
-			card_section(card, "NOT IN USE");
-			shown = 1;
-		}
-		state = "no filesystem";
-		for (int i = 0; i < dev->npart; i++)
-			if (dev->parts[i].fstype[0]) {
-				state = dev->parts[i].fstype;
-				break;
-			}
-		dk_human(dev->size_b, sz, sizeof(sz));
-		snprintf(buf, sizeof(buf), "%s  ·  %s  ·  %s",
-				dev->model[0] ? dev->model : dev->dev,
-				sz, state);
-		card_text_rbtn(card, buf, NULL, NULL, "Format disk",
-				DK_HIT_FMT_BASE + d,
-				p->btn_hover == DK_HIT_FMT_BASE + d);
 	}
 
 	if (!dsnap.helper_ok) {
@@ -798,6 +828,16 @@ disk_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 			}
 			return 1;
 		}
+		if (id >= DK_HIT_NFS_BASE &&
+				id < DK_HIT_NFS_BASE + DISK_NFS_MAX) {
+			int n = id - DK_HIT_NFS_BASE;
+
+			if (n < dsnap.nnfs) {
+				dk_spawn_open(dsnap.nfs[n].mount);
+				info_popups_hide(m);
+			}
+			return 1;
+		}
 		if (id >= DK_HIT_UFMT_BASE && id < DK_HIT_DEL_BASE) {
 			DiskDev *dev;
 
@@ -837,10 +877,16 @@ disk_popup_entry_changed(void)
 void
 refreshstatusdisk(void)
 {
+	static char bar_txt[24];
 	Monitor *m;
-	int barh;
+	char txt[24];
+	int barh, changed;
 
 	diskwatch_get(&dsnap);
+	dk_free_text(txt, sizeof(txt));
+	changed = strcmp(txt, bar_txt) != 0;
+	if (changed)
+		snprintf(bar_txt, sizeof(bar_txt), "%s", txt);
 
 	/* a mount we queued for "Open" just appeared → file browser */
 	if (dview.pending_open[0]) {
@@ -861,7 +907,7 @@ refreshstatusdisk(void)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height :
 			(int)statusbar_height;
-		if (m->statusbar.disk.width <= 0) {
+		if (m->statusbar.disk.width <= 0 || changed) {
 			renderdisk(&m->statusbar.disk, barh, NULL);
 			positionstatusmodules(m);
 		}

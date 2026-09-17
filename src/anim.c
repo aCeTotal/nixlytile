@@ -53,6 +53,9 @@ scene_buffer_scale_iter(struct wlr_scene_buffer *buf, int sx, int sy, void *data
 		w = (int)((double)ss->surface->current.width * ctx->scale[0]);
 		h = (int)((double)ss->surface->current.height * ctx->scale[1]);
 	} else {
+		/* buf->buffer is NULL once the texture is uploaded */
+		if (!buf->buffer)
+			return;
 		w = (int)((double)buf->buffer->width * ctx->scale[0]);
 		h = (int)((double)buf->buffer->height * ctx->scale[1]);
 	}

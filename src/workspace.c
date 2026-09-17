@@ -1690,7 +1690,8 @@ workspace_switch(Monitor *m, Workspace *target)
 {
 	int old_idx, new_idx, mon_h;
 
-	if (!m || !target || target == m->active_ws)
+	/* foreign target strands active_ws */
+	if (!m || !target || target == m->active_ws || target->mon != m)
 		return;
 
 	/* Same invalidation as the tag-switch paths (view/tag/...): the

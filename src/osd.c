@@ -30,10 +30,21 @@
 /* Same critically-damped feel as the client notification lane. */
 static const SpringParams SPRING_OSD = { 1.0, 1.0, 800.0 };
 
+/* Natural size per child buffer: the scene drops its wlr_buffer pointer
+ * as soon as the texture is uploaded, so the clip pass cannot read it. */
+#define OSD_MAX_KIDS 128
+
+typedef struct {
+	struct wlr_scene_buffer *sb;
+	int w, h;
+} ToastKid;
+
 typedef struct Toast {
 	struct wl_list link;
 	Monitor *m;
 	struct wlr_scene_tree *tree;
+	ToastKid kid[OSD_MAX_KIDS];
+	int nkids;
 	int w, h;
 	int slot_y;
 	int target_x, off_x;
@@ -143,6 +154,17 @@ make_card_buffer(int w, int h)
 	return &buf->base;
 }
 
+static void
+toast_track(Toast *t, struct wlr_scene_buffer *sb, int w, int h)
+{
+	if (t->nkids >= OSD_MAX_KIDS)
+		return;
+	t->kid[t->nkids].sb = sb;
+	t->kid[t->nkids].w = w;
+	t->kid[t->nkids].h = h;
+	t->nkids++;
+}
+
 /* (Re)build the card contents in t->tree and set t->w/t->h.
  * Returns 0 when nothing could be rendered. */
 static int
@@ -198,6 +220,7 @@ toast_build(Toast *t, const char *msg)
 
 	wl_list_for_each_safe(node, tmp, &t->tree->children, link)
 		wlr_scene_node_destroy(node);
+	t->nkids = 0;
 
 	buffer = card_shadow_buffer(t->w, t->h, OSD_RADIUS);
 	if (buffer) {
@@ -206,6 +229,7 @@ toast_build(Toast *t, const char *msg)
 			wlr_scene_buffer_set_buffer(scene_buf, buffer);
 			wlr_scene_node_set_position(&scene_buf->node,
 					-CARD_SHADOW_MARGIN, -CARD_SHADOW_MARGIN);
+			toast_track(t, scene_buf, buffer->width, buffer->height);
 		}
 		wlr_buffer_drop(buffer);
 	}
@@ -216,6 +240,7 @@ toast_build(Toast *t, const char *msg)
 		if (scene_buf) {
 			wlr_scene_buffer_set_buffer(scene_buf, buffer);
 			wlr_scene_node_set_position(&scene_buf->node, 0, 0);
+			toast_track(t, scene_buf, buffer->width, buffer->height);
 		}
 		wlr_buffer_drop(buffer);
 	}
@@ -235,6 +260,8 @@ toast_build(Toast *t, const char *msg)
 				wlr_scene_node_set_position(&scene_buf->node,
 						text_x + it->item.pen_x + glyph->x,
 						origin_y - glyph->y);
+				toast_track(t, scene_buf, buffer->width,
+						buffer->height);
 			}
 		}
 	}
@@ -250,26 +277,25 @@ toast_build(Toast *t, const char *msg)
 static void
 toast_clip_to_mon(Toast *t, int x)
 {
-	struct wlr_scene_node *node;
 	int lim = t->m->m.x + t->m->m.width - x;
+	int i;
 
-	wl_list_for_each(node, &t->tree->children, link) {
-		struct wlr_scene_buffer *sb = wlr_scene_buffer_from_node(node);
-		int bw = sb->buffer ? sb->buffer->width : 0;
-		int bh = sb->buffer ? sb->buffer->height : 0;
-		int vis = lim - node->x;
+	for (i = 0; i < t->nkids; i++) {
+		struct wlr_scene_buffer *sb = t->kid[i].sb;
+		int bw = t->kid[i].w, bh = t->kid[i].h;
+		int vis = lim - sb->node.x;
 
 		if (bw <= 0)
 			continue;
 		if (vis >= bw) {
-			wlr_scene_node_set_enabled(node, 1);
+			wlr_scene_node_set_enabled(&sb->node, 1);
 			wlr_scene_buffer_set_source_box(sb, NULL);
 			wlr_scene_buffer_set_dest_size(sb, bw, bh);
 		} else if (vis <= 0) {
-			wlr_scene_node_set_enabled(node, 0);
+			wlr_scene_node_set_enabled(&sb->node, 0);
 		} else {
 			struct wlr_fbox src = { 0, 0, vis, bh };
-			wlr_scene_node_set_enabled(node, 1);
+			wlr_scene_node_set_enabled(&sb->node, 1);
 			wlr_scene_buffer_set_source_box(sb, &src);
 			wlr_scene_buffer_set_dest_size(sb, vis, bh);
 		}
