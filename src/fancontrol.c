@@ -215,6 +215,7 @@ scan_hwmon(FanState *fs)
 			dev->type = classify_hwmon(namebuf);
 
 			memset(fe, 0, sizeof(*fe));
+			fe->curve_step = -1;
 			snprintf(fe->hwmon_path, sizeof(fe->hwmon_path),
 					"%s", dev->hwmon_path);
 			fe->fan_index = fi;
@@ -302,6 +303,7 @@ scan_msi(FanState *fs)
 			if (val < 0)
 				continue;
 			memset(fe, 0, sizeof(*fe));
+			fe->curve_step = -1;
 			if (i == 1 && fan_gpu_name())
 				snprintf(fe->label, sizeof(fe->label), "%s",
 						fan_gpu_name());
@@ -595,6 +597,7 @@ fan_state_set_curve(FanState *fs, int flat, const FanCurve *c)
 			return;
 	} else {
 		f->curve_applied_pct = -1; /* force a write on next tick */
+		f->curve_step = -1;
 	}
 	f->mode = FAN_MODE_CURVE;
 	msi_sync_fan_mode(fs);
@@ -616,30 +619,55 @@ fan_state_curve_tick(FanState *fs)
 			FanEntry *fe = &dev->fans[f];
 			int temp_mc, pct;
 
+			int write_pct;
+
 			if (fe->mode != FAN_MODE_CURVE ||
 					(fe->ctl != FAN_CTL_PWM &&
 					 fe->ctl != FAN_CTL_NVML))
 				continue;
 			temp_mc = fe->temp_mc > 0 ? fe->temp_mc : cpu_mc;
-			pct = (int)fan_curve_eval(&fe->curve,
-					temp_mc / 1000);
+			/* No temperature, no curve: leave the firmware alone
+			 * rather than guess a speed from nothing. */
+			if (temp_mc <= 0)
+				continue;
+			pct = (int)fan_curve_eval_stable(&fe->curve,
+					temp_mc / 1000, &fe->curve_step);
 			if (fe->curve_applied_pct >= 0 &&
 					abs(pct - fe->curve_applied_pct) < 2)
 				continue;
+			write_pct = pct;
+			if (pct > 0 && fe->curve_applied_pct == 0 &&
+					pct < FAN_SPINUP_PCT)
+				write_pct = FAN_SPINUP_PCT;
 			if (fe->ctl == FAN_CTL_PWM ?
-					pwm_write(fe, (int)lround(pct * 2.55)) == 0 :
+					pwm_write(fe, (int)lround(write_pct * 2.55)) == 0 :
 					fan_nvml_set(fe->nvml_gpu,
-							fe->nvml_fan, pct) == 0)
-				fe->curve_applied_pct = pct;
+							fe->nvml_fan, write_pct) == 0)
+				fe->curve_applied_pct = write_pct;
 		}
 	}
 }
 
+/* A pump reports as a fan and must never be slowed by a temp curve. */
+static int
+fan_is_pump(const FanEntry *fe)
+{
+	char low[64];
+	size_t i;
+
+	for (i = 0; i < sizeof(low) - 1 && fe->label[i]; i++)
+		low[i] = (char)tolower((unsigned char)fe->label[i]);
+	low[i] = '\0';
+	return strstr(low, "pump") != NULL;
+}
+
 /* Re-apply what fans.conf remembers, right after the initial scan.
- * Fans without a saved entry stay untouched (firmware default). */
+ * A fan nobody has configured gets the quiet default curve, so every
+ * machine is silent out of the box without anyone opening the popup. */
 void
 fan_state_apply_saved(FanState *fs)
 {
+	int cpu_mc = fan_cpu_temp_mc(fs);
 	int flat = 0;
 
 	for (int d = 0; d < fs->ndevices; d++) {
@@ -654,8 +682,19 @@ fan_state_apply_saved(FanState *fs)
 			if (fe->ctl == FAN_CTL_NONE)
 				continue;
 			fan_conf_key(dev, fe, key, sizeof(key));
-			if (!fanconf_lookup(key, &mode, &pct, &c))
+			if (!fanconf_lookup(key, &mode, &pct, &c)) {
+				/* Taking a fan off firmware control without a
+				 * temperature to steer it would be blind. */
+				if (fan_is_pump(fe))
+					continue;
+				if (fe->ctl != FAN_CTL_MSI_EC &&
+						fe->temp_mc <= 0 && cpu_mc <= 0)
+					continue;
+				fan_curve_default(&fe->curve,
+						fan_entry_section(dev, fe));
+				fan_state_set_curve(fs, flat, &fe->curve);
 				continue;
+			}
 			fe->curve = c;
 			fe->manual_pct = pct;
 			switch (mode) {

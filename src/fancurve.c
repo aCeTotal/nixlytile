@@ -41,18 +41,52 @@ fan_curve_eval(const FanCurve *c, int temp_c)
 	return (double)pct;
 }
 
-/* section: 0 CPU, 1 GPU, 2 other — GPUs idle cooler than CPUs. */
+/* The quiet default every fan starts on: silent until the silicon is
+ * actually warm, then the smallest step that still holds the temperature.
+ * 20% is the floor because most fans stall below it, and full speed is
+ * reserved for the last few degrees before throttling.
+ * section: 0 CPU, 1 GPU, 2 other. */
 void
 fan_curve_default(FanCurve *c, int section)
 {
-	static const uint8_t t_cpu[FAN_CURVE_PTS] = { 45, 55, 65, 75, 85, 92 };
-	static const uint8_t p_cpu[FAN_CURVE_PTS] = { 25, 35, 50, 65, 85, 100 };
-	static const uint8_t t_gpu[FAN_CURVE_PTS] = { 40, 50, 60, 70, 80, 88 };
-	static const uint8_t p_gpu[FAN_CURVE_PTS] = { 20, 30, 45, 60, 80, 100 };
+	static const uint8_t t_cpu[FAN_CURVE_PTS] = { 50, 60, 70, 80, 88, 94 };
+	static const uint8_t p_cpu[FAN_CURVE_PTS] = { 20, 28, 38, 52, 75, 100 };
+	static const uint8_t t_gpu[FAN_CURVE_PTS] = { 45, 55, 65, 75, 82, 87 };
+	static const uint8_t p_gpu[FAN_CURVE_PTS] = { 20, 28, 38, 52, 70, 100 };
+	static const uint8_t t_case[FAN_CURVE_PTS] = { 50, 60, 70, 80, 88, 95 };
+	static const uint8_t p_case[FAN_CURVE_PTS] = { 20, 25, 35, 50, 70, 100 };
+	const uint8_t *t = section == 1 ? t_gpu : section == 2 ? t_case : t_cpu;
+	const uint8_t *p = section == 1 ? p_gpu : section == 2 ? p_case : p_cpu;
 
-	memcpy(c->temp, section == 1 ? t_gpu : t_cpu, FAN_CURVE_PTS);
-	memcpy(c->pct, section == 1 ? p_gpu : p_cpu, FAN_CURVE_PTS);
-	c->base = c->pct[0];
+	memcpy(c->temp, t, FAN_CURVE_PTS);
+	memcpy(c->pct, p, FAN_CURVE_PTS);
+	/* CPU and GPU fans may stop when cold; an unidentified fan could be
+	 * an AIO pump, and a stopped pump kills the loop. */
+	c->base = section == 2 ? p[0] : 0;
+}
+
+/* Step lookup with 5°C hysteresis and one step down per tick: a
+ * temperature sitting on a threshold would otherwise make the fan hunt
+ * between two speeds forever, which is the opposite of quiet.
+ * *step is the caller's remembered index, -1 = below the table. */
+double
+fan_curve_eval_stable(const FanCurve *c, int temp_c, int *step)
+{
+	int want = -1, cur = *step;
+
+	for (int i = 0; i < FAN_CURVE_PTS; i++)
+		if (temp_c >= c->temp[i])
+			want = i;
+
+	if (cur < -1 || cur >= FAN_CURVE_PTS)
+		cur = want;
+	else if (want > cur)
+		cur = want;              /* heat needs an answer now */
+	else if (want < cur && temp_c < (int)c->temp[cur] - FAN_CURVE_HYST_C)
+		cur--;                   /* cooling is allowed to take its time */
+
+	*step = cur;
+	return cur < 0 ? (double)c->base : (double)c->pct[cur];
 }
 
 /* Stable per-fan key: device name + label, spaces flattened. */

@@ -105,6 +105,7 @@ fan_nvml_scan(FanState *fs)
 			const char *ln = name;
 
 			memset(fe, 0, sizeof(*fe));
+			fe->curve_step = -1;
 			/* card name on the row: "RTX 4090" not "GPU fan" */
 			if (strncmp(ln, "NVIDIA ", 7) == 0)
 				ln += 7;

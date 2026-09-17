@@ -622,6 +622,8 @@ typedef struct {
 #define FAN_MAX_PER_DEV   6
 #define FAN_MAX_TOTAL    (FAN_MAX_DEVICES * FAN_MAX_PER_DEV)
 #define FAN_CURVE_PTS     6
+#define FAN_CURVE_HYST_C  5  /* °C a fan must cool before it steps down */
+#define FAN_SPINUP_PCT   35  /* a stopped fan needs a kick to start turning */
 
 typedef enum {
 	FAN_DEV_CPU,
@@ -679,6 +681,7 @@ typedef struct {
 	int nvml_fan;
 	int ec_is_gpu;   /* FAN_CTL_MSI_EC: which EC table */
 	int curve_applied_pct; /* software-curve loop: last pct written */
+	int curve_step;        /* software-curve loop: current table index */
 } FanEntry;
 
 typedef struct {
@@ -2950,6 +2953,7 @@ int fan_primary_value(char *buf, size_t len);
  * fanwatch's worker thread at startup; store runs on the compositor
  * thread after UI edits (internal lock). */
 double fan_curve_eval(const FanCurve *c, int temp_c);
+double fan_curve_eval_stable(const FanCurve *c, int temp_c, int *step);
 void fan_curve_default(FanCurve *c, int section);
 void fan_conf_key(const FanDevice *dev, const FanEntry *fe,
 		char *buf, size_t len);
