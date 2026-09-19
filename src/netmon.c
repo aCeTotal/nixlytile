@@ -59,6 +59,16 @@ read_sysfs_str(const char *iface, const char *file, char *out, size_t len)
 	return 0;
 }
 
+/* Carrier without filling a NetLink: used to pick the live NIC. */
+static int
+iface_carrier(const char *iface)
+{
+	char buf[32];
+
+	return read_sysfs_str(iface, "carrier", buf, sizeof(buf)) == 0 &&
+			buf[0] == '1';
+}
+
 static int
 iface_wireless(const char *iface)
 {
@@ -168,6 +178,7 @@ netmon_rescan(void)
 	DIR *d;
 	struct dirent *de;
 	int had_eth_carrier = nm_snap.eth.carrier;
+	int eth_carrier = 0;
 
 	nm_snap.eth.present = nm_snap.wifi.present = 0;
 	d = opendir("/sys/class/net");
@@ -197,8 +208,12 @@ netmon_rescan(void)
 						sizeof(nm_snap.wifi.iface),
 						"%s", de->d_name);
 			}
-		} else if (!nm_snap.eth.present) {
+		} else if (!nm_snap.eth.present ||
+				(!eth_carrier && iface_carrier(de->d_name))) {
+			/* A live link beats a dead one: USB tethering wins over
+			 * an unplugged onboard NIC. */
 			nm_snap.eth.present = 1;
+			eth_carrier = iface_carrier(de->d_name);
 			snprintf(nm_snap.eth.iface, sizeof(nm_snap.eth.iface),
 					"%s", de->d_name);
 		}
