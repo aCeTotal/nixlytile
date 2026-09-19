@@ -353,6 +353,7 @@ commitnotify(struct wl_listener *listener, void *data)
 			/* Liveness for the freeze watchdog — see
 			 * client_ping_tick. */
 			c->last_buffer_commit_ms = monotonic_msec();
+			c->ping_misses = 0;
 		}
 		/* Separate counter for the window the user is typing into —
 		 * the heartbeat pairs it with the delivered-key count to tell
@@ -527,11 +528,26 @@ destroydecoration(struct wl_listener *listener, void *data)
  * within the shell's ping timeout is considered frozen and killed so
  * it can't wedge its tile or the session.
  */
+#define PING_MISS_LIMIT 3
+
 void
 pingtimeoutnotify(struct wl_listener *listener, void *data)
 {
 	Client *c = wl_container_of(listener, c, ping_timeout);
 	pid_t pid = client_get_pid(c);
+
+	/* One missed pong is a stall, not a death: GeForce NOW sitting on its
+	 * login wall was SIGKILLed that way, and the OAuth callback then had
+	 * no loopback server left to redirect to. Kill only after the client
+	 * has gone silent across PING_MISS_LIMIT rounds; any buffer commit
+	 * resets the count. */
+	if (++c->ping_misses < PING_MISS_LIMIT) {
+		wlr_log(WLR_INFO,
+			"Freeze watchdog: '%s' (pid %d) missed ping %d/%d",
+			client_get_appid(c) ? client_get_appid(c) : "(null)",
+			(int)pid, c->ping_misses, PING_MISS_LIMIT);
+		return;
+	}
 
 	wlr_log(WLR_ERROR,
 		"Freeze watchdog: '%s' (pid %d) unresponsive to ping — killing",

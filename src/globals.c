@@ -229,6 +229,7 @@ struct wlr_xwayland *xwayland;
 xcb_atom_t atom_steam_game;
 xcb_atom_t atom_steam_overlay;
 xcb_atom_t atom_steam_bigpicture;
+xcb_atom_t atom_net_wm_ping;
 #endif
 
 #ifndef WLR_SILENCE

@@ -266,6 +266,23 @@ client_has_children(Client *c)
 	return wl_list_length(&c->surface.xdg->link) > 1;
 }
 
+#ifdef XWAYLAND
+/* Does the X11 client list _NET_WM_PING in WM_PROTOCOLS? */
+static inline int
+client_supports_net_wm_ping(Client *c)
+{
+	struct wlr_xwayland_surface *s = c->surface.xwayland;
+	size_t i;
+
+	if (!atom_net_wm_ping || !s)
+		return 0;
+	for (i = 0; i < s->protocols_len; i++)
+		if (s->protocols[i] == atom_net_wm_ping)
+			return 1;
+	return 0;
+}
+#endif
+
 static inline const char *
 client_get_title(Client *c)
 {

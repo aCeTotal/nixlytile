@@ -2711,7 +2711,12 @@ client_ping_tick(void *data)
 			continue;
 #ifdef XWAYLAND
 		if (client_is_x11(c)) {
-			wlr_xwayland_surface_ping(c->surface.xwayland);
+			/* wlroots sends the ping regardless of WM_PROTOCOLS, so a
+			 * client that never implemented _NET_WM_PING (GeForce NOW's
+			 * CEF window) times out the moment it goes idle and gets
+			 * SIGKILLed. Only ping clients that answer. */
+			if (client_supports_net_wm_ping(c))
+				wlr_xwayland_surface_ping(c->surface.xwayland);
 			continue;
 		}
 #endif
@@ -4338,10 +4343,15 @@ xwaylandready(struct wl_listener *listener, void *data)
 		xcb_intern_atom_cookie_t sg = xcb_intern_atom(xc, 0, 10, "STEAM_GAME");
 		xcb_intern_atom_cookie_t so = xcb_intern_atom(xc, 0, 13, "STEAM_OVERLAY");
 		xcb_intern_atom_cookie_t sb = xcb_intern_atom(xc, 0, 16, "STEAM_BIGPICTURE");
+		xcb_intern_atom_cookie_t np = xcb_intern_atom(xc, 0, 12, "_NET_WM_PING");
 		xcb_intern_atom_reply_t *r;
 
 		if ((r = xcb_intern_atom_reply(xc, sg, NULL))) {
 			atom_steam_game = r->atom;
+			free(r);
+		}
+		if ((r = xcb_intern_atom_reply(xc, np, NULL))) {
+			atom_net_wm_ping = r->atom;
 			free(r);
 		}
 		if ((r = xcb_intern_atom_reply(xc, so, NULL))) {

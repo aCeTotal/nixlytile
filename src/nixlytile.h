@@ -1161,6 +1161,7 @@ typedef struct {
 	 * watchdog: a client still producing frames is alive even when it
 	 * is too busy inside the GPU driver to answer a ping. */
 	uint64_t last_buffer_commit_ms;
+	int ping_misses;
 	uint32_t resize;
 	int pending_resize_w, pending_resize_h;
 	struct wlr_box old_geom;
@@ -2298,6 +2299,7 @@ extern struct wlr_xwayland *xwayland;
 extern xcb_atom_t atom_steam_game;       /* STEAM_GAME (Cardinal: AppID) */
 extern xcb_atom_t atom_steam_overlay;    /* STEAM_OVERLAY (Cardinal: 0/1) */
 extern xcb_atom_t atom_steam_bigpicture; /* STEAM_BIGPICTURE (Cardinal: 0/1) */
+extern xcb_atom_t atom_net_wm_ping;      /* _NET_WM_PING (WM_PROTOCOLS entry) */
 #endif
 
 /* layermap */
