@@ -12,6 +12,9 @@ static int resizing_from_mouse = 0;
 static int drag_was_alone_in_column = 0;
 uint64_t last_pointer_motion_ms = 0;
 
+/* Re-entry guard: focusclient() calls back into motionnotify/pointerfocus. */
+static int in_pointerfocus;
+
 /* Mouse-drag column resize state (Mod+Left near an edge). */
 #define COL_RESIZE_EDGE_PX 50
 static Column *grab_resize_col = NULL;
@@ -1158,6 +1161,10 @@ cursorwarptohint(void)
 	double sy = active_constraint->current.cursor_hint.y;
 
 	toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
+	/* Warped to another monitor on purpose: the hint would yank the
+	 * cursor straight back into the game. */
+	if (c && c->mon && xytomon(cursor->x, cursor->y) != c->mon)
+		return;
 	if (c && active_constraint->current.cursor_hint.enabled) {
 		double off_x = c->scene_surface ? c->scene_surface->node.x : c->bw;
 		double off_y = c->scene_surface ? c->scene_surface->node.y : c->bw;
@@ -1577,6 +1584,43 @@ shortcuts_are_inhibited(void)
 
 /* try_*_key handlers removed (overlays gone) */
 
+/* Keyboard focus lost with the cursor standing still: nothing holds it, the
+ * holder left the screen, or an unrelated window took it from the fullscreen
+ * game under the pointer.  Hand it back without waiting for a mouse move. */
+static int
+refocus_lost_keyboard(void)
+{
+	struct wlr_surface *surface = NULL, *kfocus;
+	Client *c = NULL, *kc = NULL;
+	LayerSurface *kl = NULL;
+	double sx, sy;
+	int lost;
+
+	if (!sloppyfocus || locked || exclusive_focus || in_pointerfocus)
+		return 0;
+
+	kfocus = seat->keyboard_state.focused_surface;
+	if (kfocus && toplevel_from_wlr_surface(kfocus, &kc, &kl) == LayerShell)
+		return 0;
+	if (kc && client_is_unmanaged(kc))
+		return 0;
+
+	xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
+	if (!c || client_is_unmanaged(c) || !c->mon || client_surface(c) == kfocus)
+		return 0;
+
+	lost = !kfocus || !kc || !VISIBLEON(kc, kc->mon)
+			|| (c == fullscreen_visible_on(selmon)
+				&& !client_is_fs_companion(kc, c));
+	if (!lost)
+		return 0;
+
+	in_pointerfocus = 1;
+	focusclient(c, 0);
+	in_pointerfocus = 0;
+	return 1;
+}
+
 void
 keypress(struct wl_listener *listener, void *data)
 {
@@ -1733,6 +1777,13 @@ keypress(struct wl_listener *listener, void *data)
 	}
 
 	wlr_seat_set_keyboard(seat, &group->wlr_group->keyboard);
+
+	/* The enter after a refocus already carries this key as held, so
+	 * forwarding it too would double the press. */
+	if (refocus_lost_keyboard()
+			&& event->state == WL_KEYBOARD_KEY_STATE_PRESSED)
+		return;
+
 	/* Pass unhandled keycodes along to the client. */
 	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 		struct wlr_surface *focused = seat->keyboard_state.focused_surface;
@@ -2270,6 +2321,25 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 							(uint64_t)time * 1000,
 							raw_dx, raw_dy,
 							dx_unaccel, dy_unaccel);
+					/* Locked mouselook returns before pointerfocus, so
+					 * a keyboard focus lost mid-stream never comes back
+					 * while the mouse keeps working.  Re-assert here. */
+					if (sloppyfocus && !in_pointerfocus
+							&& !client_is_unmanaged(c)
+							&& client_surface(c) !=
+								seat->keyboard_state.focused_surface
+							&& !exclusive_focus) {
+						Client *kc = NULL;
+						LayerSurface *kl = NULL;
+						if (toplevel_from_wlr_surface(
+								seat->keyboard_state.focused_surface,
+								&kc, &kl) != LayerShell
+								&& !(kc && client_is_unmanaged(kc))) {
+							in_pointerfocus = 1;
+							focusclient(c, 0);
+							in_pointerfocus = 0;
+						}
+					}
 					return;
 				}
 			}
@@ -2972,7 +3042,6 @@ pointerfocus(Client *c, struct wlr_surface *surface, double sx, double sy,
 		uint32_t time)
 {
 	struct timespec now;
-	static int in_pointerfocus = 0;
 
 	/* Focus follows mouse: focus client under cursor.
 	 * Use re-entry guard to prevent infinite recursion since focusclient
@@ -3012,7 +3081,21 @@ pointerfocus(Client *c, struct wlr_surface *surface, double sx, double sy,
 	int fs_blocks = fs_owner && c && c != fs_owner
 			&& !client_is_fs_companion(c, fs_owner);
 
-	if (!in_pointerfocus && surface != seat->pointer_state.focused_surface &&
+	/* Keyboard focus lost without the pointer ever leaving the surface
+	 * (overlay closed, refocus race, focusclient(NULL)): the surface
+	 * compare alone never re-fires, so a pointer-locked game keeps the
+	 * mouse but never gets the keyboard back.  Re-assert unless a layer
+	 * surface or an unmanaged client legitimately holds it. */
+	struct wlr_surface *kfocus = seat->keyboard_state.focused_surface;
+	Client *kc = NULL;
+	LayerSurface *kl = NULL;
+	int kb_stale = sloppyfocus && c && client_surface(c) != kfocus
+			&& !exclusive_focus
+			&& toplevel_from_wlr_surface(kfocus, &kc, &kl) != LayerShell
+			&& !(kc && client_is_unmanaged(kc));
+
+	if (!in_pointerfocus && (surface != seat->pointer_state.focused_surface
+				|| kb_stale) &&
 			sloppyfocus && c && !client_is_unmanaged(c) && !anim_in_progress
 			&& !fs_blocks) {
 		in_pointerfocus = 1;

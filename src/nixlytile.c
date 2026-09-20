@@ -4061,6 +4061,10 @@ configurex11(struct wl_listener *listener, void *data)
 		 * monitor center.
 		 */
 		if (c->mon && c->is_game_splash) {
+			/* Bootstrapper reusing its window for the game itself:
+			 * it stops being a splash at full size. */
+			if (game_promote_fullscreen(c, bw, bh))
+				return;
 			int mx = c->mon->m.x;
 			int my = c->mon->m.y;
 			int mw = c->mon->m.width;
@@ -4129,6 +4133,11 @@ configurex11(struct wl_listener *listener, void *data)
 		}
 		resize(c, (struct wlr_box){.x = bx, .y = by, .width = bw, .height = bh}, 0);
 	} else {
+		/* A tiled window that reads as a game belongs in fullscreen,
+		 * not in the layout with gaps around it. */
+		if (game_promote_fullscreen(c, event->width, event->height))
+			return;
+
 		/* Tiled: the layout owns the geometry, so we deny the request —
 		 * but per ICCCM the client must still get a ConfigureNotify
 		 * telling it the ACTUAL geometry, or it assumes its requested

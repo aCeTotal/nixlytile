@@ -3044,12 +3044,40 @@ unmapnotify(struct wl_listener *listener, void *data)
 	schedule_game_mode_update();
 }
 
+/* Late game verdict: app-id/title lands after map (XWayland, Proton
+ * bootstrappers) or a splash window grows into the game, leaving it tiled
+ * or floating.  Promote to true fullscreen the moment it reads as a game
+ * at a real size.  cw/ch are content dimensions, border excluded. */
+int
+game_promote_fullscreen(Client *c, int cw, int ch)
+{
+	if (!c || !c->mon || c->isfullscreen || !client_surface(c)
+			|| !client_surface(c)->mapped || client_is_unmanaged(c))
+		return 0;
+	if (cw <= 0 || ch <= 0)
+		return 0;
+	/* Same splash cap as fullscreennotify. */
+	if ((cw <= 1280 && ch <= 800)
+			|| (cw < c->mon->m.width / 3 && ch < c->mon->m.height / 3))
+		return 0;
+	if (client_rule_nofullscreen(c) || !looks_like_game(c))
+		return 0;
+
+	wlr_log(WLR_INFO, "GAME_TRACE: late promote to fullscreen '%s' %dx%d",
+		client_get_appid(c) ? client_get_appid(c) : "(null)", cw, ch);
+	c->is_game_splash = 0;
+	setfullscreen(c, 1);
+	return 1;
+}
+
 void
 updatetitle(struct wl_listener *listener, void *data)
 {
 	Client *c = wl_container_of(listener, c, set_title);
 	if (c == focustop(c->mon))
 		printstatus();
+	game_promote_fullscreen(c, c->geom.width - 2 * c->bw,
+			c->geom.height - 2 * c->bw);
 	/* RetroArch flips its title exactly when content starts/stops —
 	 * that's the trigger for in-game promotion and the menu max-Hz
 	 * hold. Debounced, so this is free for ordinary title spam. */

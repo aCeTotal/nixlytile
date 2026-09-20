@@ -2392,6 +2392,7 @@ void setmon(Client *c, Monitor *m, uint32_t newtags);
 void killclient(const Arg *arg);
 void setfloating(Client *c, int floating);
 void setfullscreen(Client *c, int fullscreen);
+int game_promote_fullscreen(Client *c, int cw, int ch);
 void setsticky(Client *c, int sticky);
 void togglefloating(const Arg *arg);
 void togglefullscreen(const Arg *arg);

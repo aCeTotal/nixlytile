@@ -229,6 +229,10 @@ render_tray_icon_module(StatusModule *module, int bar_height,
 		pad_l = 0;
 	}
 	module->width = content_w;
+	/* A single failed load above disabled the node; nothing else turns
+	 * it back on, so the module stayed blank for the rest of the
+	 * session while its popup kept working. */
+	wlr_scene_node_set_enabled(&module->tree->node, 1);
 	updatemodulebg(module, module->width, bar_height, statusbar_bg);
 	scene_buf = wlr_scene_buffer_create(module->tree, NULL);
 	if (scene_buf) {
@@ -492,6 +496,17 @@ rendernet(StatusModule *module, int bar_height, const char *text)
 	render_tray_icon_module(module, bar_height,
 			ensure_net_icon_buffer, &net_icon_buf,
 			&net_icon_w, &net_icon_h);
+	{
+		static int last_blank = -1;
+		int blank = module && module->width <= 0;
+		if (blank != last_blank) {
+			last_blank = blank;
+			diag_logf("BAR", "net module %s icon='%s' barh=%d w=%d h=%d",
+					blank ? "BLANK" : "ok",
+					net_icon_path, bar_height,
+					net_icon_w, net_icon_h);
+		}
+	}
 }
 
 void
@@ -5185,6 +5200,12 @@ int
 status_should_render(StatusModule *module, int barh, const char *text)
 {
 	if (!module || !text)
+		return 1;
+
+	/* Nothing on the bar: a failed icon load or a zero-height bar at the
+	 * last render left the module blank, and the dedup would keep it that
+	 * way until the text happened to change. */
+	if (module->width <= 0)
 		return 1;
 
 	if (module->last_render_h != barh || module->last_render_text[0] == '\0'
