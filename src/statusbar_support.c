@@ -992,7 +992,7 @@ statusbar_scaled_buffer_from_argb32_ex(const uint32_t *data, int width, int heig
 		/* If the first pass produced fully transparent data, retry assuming RGBA order */
 		size_t alpha_sum = 0;
 		for (size_t n = 0; n < (size_t)width * (size_t)height; n++)
-			alpha_sum += src_copy[n * 4];
+			alpha_sum += ((const uint32_t *)src_copy)[n] >> 24;
 		if (alpha_sum == 0) {
 			memcpy(src_copy, data, src_size);
 			fix_tray_argb32((uint32_t *)src_copy, (size_t)width * (size_t)height, 1);
@@ -1119,7 +1119,7 @@ statusbar_buffer_from_argb32(const uint32_t *data, int width, int height)
 	{
 		size_t alpha_sum = 0;
 		for (size_t n = 0; n < (size_t)width * (size_t)height; n++)
-			alpha_sum += copy[n * 4];
+			alpha_sum += ((const uint32_t *)copy)[n] >> 24;
 		if (alpha_sum == 0) {
 			memcpy(copy, data, size);
 			fix_tray_argb32((uint32_t *)copy, (size_t)width * (size_t)height, 1);
