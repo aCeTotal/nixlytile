@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- triangle -->
+  <path d="M32 8 L60 56 H4 Z" fill="#D94D4D" stroke="#8C2F2F" stroke-width="3" stroke-linejoin="round"></path>
+  <!-- bang -->
+  <rect x="29" y="24" width="6" height="18" rx="3" fill="#FFFFFF"></rect>
+  <circle cx="32" cy="48" r="3.5" fill="#FFFFFF"></circle>
+</svg>

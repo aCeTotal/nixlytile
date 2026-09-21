@@ -185,10 +185,14 @@ dev_conn_transition(BtDev *d)
 		d->retry_at_ms = 0;
 		d->conn_ms = now_ms();
 		bt_audio_on_connect(d->addr, d->icon);
-	} else if (d->paired && d->want_conn) {
-		d->retry_n = 0;
-		d->retry_at_ms = now_ms() + 1500;
-		reconn_arm(1500);
+	} else {
+		bt_caps_clear(d->addr);
+		bt_caps_apply();
+		if (d->paired && d->want_conn) {
+			d->retry_n = 0;
+			d->retry_at_ms = now_ms() + 1500;
+			reconn_arm(1500);
+		}
 	}
 }
 
@@ -329,6 +333,34 @@ var_i16(sd_bus_message *m, int *dst)
 	return -1;
 }
 
+/* UUIDs → LE Audio (ASCS + PACS) and HFP/HSP mic. */
+static int
+var_uuids(sd_bus_message *m, int *le_audio, int *has_mic)
+{
+	const char *s;
+	int ascs = 0, pacs = 0;
+
+	if (sd_bus_message_enter_container(m, 'v', "as") < 0) {
+		sd_bus_message_skip(m, "v");
+		return -1;
+	}
+	if (sd_bus_message_enter_container(m, 'a', "s") < 0)
+		return -1;
+	while (sd_bus_message_read(m, "s", &s) > 0) {
+		if (strncasecmp(s, "0000184e-", 9) == 0)
+			ascs = 1;
+		else if (strncasecmp(s, "00001850-", 9) == 0)
+			pacs = 1;
+		else if (has_mic && (strncasecmp(s, "0000111e-", 9) == 0 ||
+					strncasecmp(s, "00001108-", 9) == 0))
+			*has_mic = 1;
+	}
+	sd_bus_message_exit_container(m);
+	sd_bus_message_exit_container(m);
+	*le_audio = ascs && pacs;
+	return 0;
+}
+
 static int
 var_u8(sd_bus_message *m, int *dst)
 {
@@ -376,6 +408,8 @@ parse_props(sd_bus_message *m, const char *iface, const char *path)
 				var_str(m, s->a.name, sizeof(s->a.name));
 			else if (strcmp(key, "Address") == 0)
 				var_str(m, s->a.addr, sizeof(s->a.addr));
+			else if (strcmp(key, "UUIDs") == 0)
+				var_uuids(m, &s->a.le_audio, NULL);
 			else
 				sd_bus_message_skip(m, "v");
 		} else if (strcmp(iface, "org.bluez.Device1") == 0) {
@@ -389,6 +423,8 @@ parse_props(sd_bus_message *m, const char *iface, const char *path)
 				var_str(m, d->addr, sizeof(d->addr));
 			else if (strcmp(key, "Icon") == 0)
 				var_str(m, d->icon, sizeof(d->icon));
+			else if (strcmp(key, "UUIDs") == 0)
+				var_uuids(m, &d->le_audio, &d->has_mic);
 			else if (strcmp(key, "Paired") == 0)
 				var_bool(m, &d->paired);
 			else if (strcmp(key, "Trusted") == 0)
@@ -824,6 +860,8 @@ btmon_init(void)
 		bus_update_mask(bt_bus, bt_src);
 	bt_timer = wl_event_loop_add_timer(event_loop, bt_timer_cb, NULL);
 	bus_arm_timer(bt_bus, bt_timer);
+	/* Assert the safe mic policy before any headset is up. */
+	bt_caps_apply();
 
 	/* OBEX: session bus; obexd is D-Bus activated on first use */
 	if (sd_bus_open_user(&obex_bus) >= 0) {
@@ -878,6 +916,23 @@ btmon_adapters(BtAdapter *out, int max)
 	for (i = 0; i < n; i++)
 		out[i] = bt_ads[i].a;
 	return n;
+}
+
+int
+btmon_adapter_for(const char *dev_path, BtAdapter *out)
+{
+	int i;
+
+	for (i = 0; i < bt_nads; i++) {
+		size_t plen = strlen(bt_ads[i].path);
+
+		if (strncmp(dev_path, bt_ads[i].path, plen) == 0 &&
+				dev_path[plen] == '/') {
+			*out = bt_ads[i].a;
+			return 1;
+		}
+	}
+	return 0;
 }
 
 /* With several adapters the same nearby device shows up once per

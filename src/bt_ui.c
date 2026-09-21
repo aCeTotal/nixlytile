@@ -16,6 +16,7 @@
 #define BT_HIT_POWER 210
 #define BT_HIT_SCAN  211
 #define BT_HIT_DEV   220   /* + device index */
+#define BT_HIT_WARN  260   /* + device index: mic warning triangle */
 
 extern struct wl_event_loop *event_loop;
 
@@ -306,6 +307,7 @@ render_bt_popup(Monitor *m)
 				const char *btn;
 				const char *sig = NULL, *bat = NULL;
 				int mine = d->paired || d->connected;
+				int block;
 
 				if ((pass == 0) != mine)
 					continue;
@@ -376,6 +378,16 @@ render_bt_popup(Monitor *m)
 							NULL, card_col_dim,
 							btn, BT_HIT_DEV + i,
 							hot == BT_HIT_DEV + i);
+				block = bt_caps_block(d);
+				if (block != BT_MIC_OK) {
+					card_row_warn(card,
+							"images/svg/bt_mic_warn.svg",
+							BT_HIT_WARN + i);
+					if (hot == BT_HIT_WARN + i)
+						card_row_sub(card,
+								bt_caps_reason(block),
+								card_col_red);
+				}
 			}
 			if (pass == 0 && nmine && nnear)
 				card_gap(card, 2);
@@ -474,6 +486,8 @@ bt_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 				rel_y < hit->y || rel_y >= hit->y + hit->h)
 			continue;
 		id = hit->id;
+		if (id >= BT_HIT_WARN && id < BT_HIT_WARN + BT_DEV_MAX)
+			return 1;       /* hover-only explanation */
 		if (id == BT_HIT_POWER && button == BTN_LEFT) {
 			BtAdapter a;
 

@@ -256,6 +256,8 @@ typedef struct {
 	char sub[64];                  /* CROW_TEXT small line under the label */
 	const float *subcol;
 	char micon1[64], micon2[64];   /* CROW_TEXT status icons */
+	char warn[64];                 /* CROW_TEXT icon right of the label */
+	int warn_hit;
 	char btn_label[24];
 	int btn_right;
 	int btn_solo;       /* btn_right hit rect = button only, no row wash */
@@ -596,6 +598,18 @@ card_row_sub(Card *c, const char *sub, const float *col)
 }
 
 void
+card_row_warn(Card *c, const char *icon_path, int hit_id)
+{
+	CardRow *r;
+
+	if (!c || c->nrows == 0)
+		return;
+	r = &c->rows[c->nrows - 1];
+	setstr(r->warn, sizeof(r->warn), icon_path);
+	r->warn_hit = hit_id;
+}
+
+void
 card_text_btn2(Card *c, const char *left,
 		const char *btn1, int hit_id1, int hot1,
 		const char *btn2, int hit_id2, int hot2)
@@ -873,7 +887,8 @@ card_measure(Card *c, int *out_w, int *out_h)
 						r->btn_label, 0) + 16;
 			break;
 		case CROW_TEXT:
-			rw = MAX(text_width_f(statusfont.font, r->a, 0),
+			rw = MAX(text_width_f(statusfont.font, r->a, 0) +
+					(r->warn[0] ? base_h + 6 : 0),
 					r->sub[0] ? text_width_f(card_font_small,
 						r->sub, 0) : 0) + 16 +
 				MAX(text_width_f(statusfont.font, r->b, 0),
@@ -1425,6 +1440,21 @@ card_finish(Card *c, CardResult *out)
 
 				draw_icon(cr, r->c, CARD_PAD,
 						y + (r->h - isz) / 2, isz);
+			}
+			/* Before the row hit: wins hover. */
+			if (r->warn[0]) {
+				int wx = CARD_PAD +
+					(r->c[0] ? (r->big ?
+						CARD_TICON_BIG(base_h) :
+						CARD_TICON(base_h)) + 10 : 0) +
+					text_width_f(statusfont.font, r->a, 0) + 6;
+				int wy = r->sub[0] ?
+					y + (r->h - (base_h + small_h + 2)) / 2 :
+					y + (r->h - base_h) / 2;
+
+				draw_icon(cr, r->warn, wx, wy, base_h);
+				add_hit(out, wx - 3, wy - 3, base_h + 6,
+						base_h + 6, r->warn_hit);
 			}
 			if (r->micon1[0] || r->micon2[0]) {
 				int isz = base_h + 2;

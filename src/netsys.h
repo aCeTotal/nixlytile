@@ -143,6 +143,8 @@ typedef struct {
 	int trusted;
 	int connected;
 	int svc_resolved;       /* profiles up — UI "Connected" vs "Connecting.." */
+	int le_audio;           /* advertises LE Audio (ASCS + PACS) */
+	int has_mic;            /* offers HFP/HSP — a headset microphone */
 	int rssi;               /* 0 = unknown */
 	int battery;            /* -1 = unknown */
 	int want_conn;          /* auto-reconnect target (paired, not
@@ -160,6 +162,7 @@ typedef struct {
 	int powered;
 	int discovering;
 	int id;                 /* hciN index (-1 = unknown) */
+	int le_audio;           /* LE Audio endpoints registered (ASCS + PACS) */
 	char name[64];
 	char addr[18];
 } BtAdapter;
@@ -167,6 +170,8 @@ typedef struct {
 void btmon_init(void);
 int btmon_adapter(BtAdapter *out);          /* aggregate over adapters */
 int btmon_adapters(BtAdapter *out, int max);/* all slots, returns count */
+/* The adapter a device object path belongs to; 0 when unknown. */
+int btmon_adapter_for(const char *dev_path, BtAdapter *out);
 int btmon_devices(BtDev *out, int max);     /* returns count */
 /* Live link RSSI push from bt_rssi.c (addr = AA:BB:.. uppercase). */
 void btmon_set_link_rssi(const char *addr, int rssi);
@@ -183,9 +188,27 @@ int btmon_send_file(const char *addr, const char *filepath);
 
 void bt_rssi_ping(void);    /* popup visible: keep polling ~2s for 6s */
 
-/* ── bt_audio.c: force best A2DP profile when a headset connects ── */
+/* ── bt_audio.c: pick the best profile when a headset connects ──── */
 
 void bt_audio_on_connect(const char *addr, const char *icon);
+
+/* ── bt_caps.c: may this headset use its microphone? ─────────────── */
+
+enum {
+	BT_MIC_OK,              /* full quality both ways */
+	BT_MIC_BROKEN_SCO,      /* controller loses the link on HFP */
+	BT_MIC_NO_LE_ADAPTER,   /* controller is classic-only */
+	BT_MIC_NO_LE_DEVICE,    /* headset is classic-only */
+};
+
+int bt_caps_block(const BtDev *d);
+int bt_caps_block_addr(const char *addr);
+const char *bt_caps_reason(int block);
+/* bt_audio.c reports whether the card actually landed on LE Audio. */
+void bt_caps_set_bap(const char *addr, int active);
+void bt_caps_clear(const char *addr);
+/* Push the microphone policy to WirePlumber. */
+void bt_caps_apply(void);
 
 /* ── text_entry.c: single-line input for popups ──────────────────── */
 

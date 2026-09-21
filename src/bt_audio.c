@@ -1,8 +1,10 @@
 /* When a bluetooth audio device connects, force its PipeWire card onto
- * the best A2DP profile instead of whatever it came up on (a mic grab
- * at connect time can leave it stuck on HFP = telephone-quality sound).
- * Codec rank favours low latency first, then quality: aptX-LL, aptX-HD,
- * LDAC, AAC, aptX, SBC-XQ, plain a2dp, SBC.
+ * the best profile instead of whatever it came up on (a mic grab at
+ * connect time can leave it stuck on HFP = telephone-quality sound).
+ * LE Audio's bap-duplex wins whenever bt_caps allows the mic, since it
+ * is the only profile that carries full quality in both directions;
+ * otherwise the A2DP codec rank favours low latency first, then
+ * quality: aptX-LL, aptX-HD, LDAC, AAC, aptX, SBC-XQ, plain a2dp, SBC.
  *
  * The card takes a moment to appear after Connect, so the check runs on
  * a timer and retries a few times.  All process I/O goes through
@@ -22,7 +24,10 @@ void audio_headset_guard_start(void);   /* audio_devices.c */
 
 static struct wl_event_source *ba_timer;
 static char ba_card[64];        /* bluez_card.AA_BB_.. we are fixing */
+static char ba_addr[18];
 static int ba_tries;
+
+#define BAP_PROFILE "bap-duplex"
 
 static const char *rank[] = {
 	"a2dp-sink-aptx_ll", "a2dp-sink-aptx_hd", "a2dp-sink-ldac",
@@ -52,8 +57,9 @@ ba_dump_done(const char *out, size_t len, void *data)
 	const char *p;
 	char cur[64] = "";
 	int pwid = -1;
-	int best = -1, best_idx = -1;
+	int best = -1, best_idx = -1, bap_idx = -1;
 	int in_enum = 0;
+	int want_bap = bt_caps_block_addr(ba_addr) == BT_MIC_OK;
 
 	if (!out[0]) {
 		/* card not up yet */
@@ -89,6 +95,8 @@ ba_dump_done(const char *out, size_t len, void *data)
 			if (in_enum) {
 				int r = profile_rank(name);
 
+				if (strcmp(name, BAP_PROFILE) == 0)
+					bap_idx = idx;
 				if (r >= 0 && (best < 0 || r < best)) {
 					best = r;
 					best_idx = idx;
@@ -100,9 +108,18 @@ ba_dump_done(const char *out, size_t len, void *data)
 		}
 	}
 
+	if (want_bap && bap_idx >= 0)
+		best_idx = bap_idx;
+	else
+		want_bap = 0;
+	/* Mic unlocks only on LE Audio. */
+	bt_caps_set_bap(ba_addr, want_bap);
+
 	if (pwid < 0 || best_idx < 0)
 		return;
-	if (cur[0] && profile_rank(cur) >= 0 && profile_rank(cur) <= best)
+	if (want_bap ? strcmp(cur, BAP_PROFILE) == 0 :
+			(cur[0] && profile_rank(cur) >= 0 &&
+			 profile_rank(cur) <= best))
 		return;         /* already on the best profile */
 	{
 		char cmd[128];
@@ -147,6 +164,7 @@ bt_audio_on_connect(const char *addr, const char *icon)
 
 	if (!icon || strncmp(icon, "audio", 5) != 0)
 		return;
+	snprintf(ba_addr, sizeof(ba_addr), "%s", addr);
 	snprintf(ba_card, sizeof(ba_card), "bluez_card.%s", addr);
 	for (i = 0; ba_card[i]; i++)
 		if (ba_card[i] == ':')

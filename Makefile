@@ -37,7 +37,7 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            fancurve.o fan_helper.o fan_ec.o fan_nvml.o \
            diskwatch.o disk_helper.o disk_ui.o \
            popup_card.o popup_extra.o \
-           netmon.o wifi_ctrl.o wifi_nm.o wifi_share.o qr_scan.o btmon.o bt_rssi.o bt_audio.o text_entry.o net_ui.o bt_ui.o display_ui.o power_ui.o \
+           netmon.o wifi_ctrl.o wifi_nm.o wifi_share.o qr_scan.o btmon.o bt_rssi.o bt_audio.o bt_caps.o text_entry.o net_ui.o bt_ui.o display_ui.o power_ui.o \
            notify.o notifyd.o wlsec.o lightsense.o presence.o powersave.o battwatch.o camwatch.o cpuclock.o instruments.o converge.o spawn.o osd.o dwt.o launchboost.o overview.o
 
 PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstable-v1-protocol.h \
@@ -218,6 +218,9 @@ bt_rssi.o: $(SRC)/bt_rssi.c $(SRC)/netsys.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 
 bt_audio.o: $(SRC)/bt_audio.c $(SRC)/netsys.h $(SRC)/fetch_async.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+
+bt_caps.o: $(SRC)/bt_caps.c $(SRC)/netsys.h $(SRC)/fetch_async.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 
 text_entry.o: $(SRC)/text_entry.c $(SRC)/netsys.h

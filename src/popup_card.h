@@ -134,6 +134,9 @@ void card_icon_text_rbtn_solo(Card *c, const char *icon_path,
 void card_row_big(Card *c);
 /* Small second line under the last row's label (CROW_TEXT). */
 void card_row_sub(Card *c, const char *sub, const float *col);
+/* Warning icon right of the last row's label, with its own hit rect so
+ * hovering it can show the explanation (CROW_TEXT). */
+void card_row_warn(Card *c, const char *icon_path, int hit_id);
 /* Full-row-clickable row (BT-device hover style, but no button): icon
  * + left text, right text, optional status icon (svg asset path) at
  * the right card edge; the whole row is the hit rect and washes on
