@@ -99,11 +99,13 @@ bt_caps_reason(int block)
 {
 	switch (block) {
 	case BT_MIC_BROKEN_SCO:
-		return "Controller dies on headset mic — mic off";
+		return "This controller crashes on headset mic: mic kept off";
 	case BT_MIC_NO_LE_ADAPTER:
-		return "No LE Audio here: mic would kill sound quality";
+		return "Controller has no LE Audio: mic would drop sound to "
+		       "call quality";
 	case BT_MIC_NO_LE_DEVICE:
-		return "Headset has no LE Audio — mic stays off";
+		return "Headset has no LE Audio: mic would drop sound to call "
+		       "quality";
 	}
 	return "";
 }
