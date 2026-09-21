@@ -102,6 +102,10 @@ audio_parse_status_devices(FILE *fp, int sources, AudioDevice *out, int max)
 		d = &out[count];
 		if (parse_device_line(line, d) != 0)
 			continue;
+		/* Filters are only listed for the bluetooth loopbacks; processing
+		 * filters like nixly-mic are not devices the user picks. */
+		if (in_filters && strncmp(d->name, "bluez_", 6))
+			continue;
 		if (!strncmp(d->name, "bluez_input.", 12) ||
 				!strncmp(d->name, "bluez_output.", 13)) {
 			d->is_headset = 1;
