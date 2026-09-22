@@ -422,14 +422,44 @@ client_is_x11_popup(Client *c)
 	return 0;
 }
 
+static inline int
+keycode_is_modkey(struct wlr_keyboard *kb, uint32_t keycode)
+{
+	const xkb_keysym_t *syms;
+	int nsyms, i;
+
+	nsyms = xkb_state_key_get_syms(kb->xkb_state, keycode + 8, &syms);
+	for (i = 0; i < nsyms; i++) {
+		if (modkey == WLR_MODIFIER_LOGO &&
+				(syms[i] == XKB_KEY_Super_L || syms[i] == XKB_KEY_Super_R))
+			return 1;
+		if (modkey == WLR_MODIFIER_ALT &&
+				(syms[i] == XKB_KEY_Alt_L || syms[i] == XKB_KEY_Alt_R))
+			return 1;
+	}
+	return 0;
+}
+
 static inline void
 client_notify_enter(struct wlr_surface *s, struct wlr_keyboard *kb)
 {
-	if (kb)
-		wlr_seat_keyboard_notify_enter(seat, s, kb->keycodes,
-				kb->num_keycodes, &kb->modifiers);
-	else
+	uint32_t held[WLR_KEYBOARD_KEYS_CAP];
+	size_t i, n = 0;
+
+	if (!kb) {
 		wlr_seat_keyboard_notify_enter(seat, s, NULL, 0, NULL);
+		return;
+	}
+
+	/* keypress() never forwards the modkey's own press or release, so a
+	 * client handed it as held here keeps it down forever — XWayland then
+	 * feeds every later keystroke to the app as Super+key and games stop
+	 * moving.  Switching workspace with Super held is all it takes. */
+	for (i = 0; i < kb->num_keycodes; i++)
+		if (!keycode_is_modkey(kb, kb->keycodes[i]))
+			held[n++] = kb->keycodes[i];
+
+	wlr_seat_keyboard_notify_enter(seat, s, held, n, &kb->modifiers);
 }
 
 static inline void
