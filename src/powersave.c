@@ -1,16 +1,4 @@
-/*
- * powersave.c — battery saving on discharge, full performance on power.
- *
- * The rule: wall power (or a desktop with no battery at all) = the
- * machine ALWAYS runs at its absolute best — performance profile, turbo
- * on, clocks uncapped.  Battery = max saving — low-power profile, turbo
- * off, clocks capped hard, compositor FPS capped at 60 if the user's
- * limiter is off.  Applied only on transitions (and once at startup),
- * so manual profile/limiter changes in between are left alone.
- * Battery state comes from
- * battwatch.c's worker thread — this file never touches sysfs, so the
- * EC's ~100ms status read can't stall the compositor thread.
- */
+/* Battery saving, quiet on wall power. */
 #include "nixlytile.h"
 
 /* Battery clock ceiling, as a fraction of each policy's min..max range.
@@ -43,11 +31,10 @@ powersave_reassert(void)
 					 * which reads as a broken compositor rather
 					 * than as power saving */
 	} else {
-		cpuclock_regime_ac_async();
+		if (!game_mode_active)
+			cpuclock_regime_ac_async();
 		output_lowpower_refresh(0);  /* restore pinned/best refresh */
-		unfocused_fps_cap = 0;  /* no throttle on wall power — "always at
-					 * its absolute best" applies to every
-					 * visible tile, not just the focused one */
+		unfocused_fps_cap = 0;  /* no throttle on wall power */
 	}
 }
 
@@ -76,9 +63,9 @@ ps_engage(void)
 	wlr_log(WLR_INFO, "powersave: on battery — max saving engaged");
 }
 
-/* Wall power: absolute best, always. */
+/* Wall power: quiet, games boost. */
 static void
-ps_full_performance(void)
+ps_wall_power(void)
 {
 	powersave_reassert();
 
@@ -86,7 +73,7 @@ ps_full_performance(void)
 		fps_limit_enabled = 0;
 		ps_fps_limited = 0;
 	}
-	wlr_log(WLR_INFO, "powersave: on wall power — full performance");
+	wlr_log(WLR_INFO, "powersave: on wall power — quiet profile");
 }
 
 /* Called from battwatch's event-loop callback whenever the published
@@ -107,7 +94,7 @@ powersave_battery_event(void)
 		lightsense_power_event(0);
 	} else if (!on_bat && ps_engaged != 0) {
 		ps_engaged = 0;
-		ps_full_performance();
+		ps_wall_power();
 		lightsense_power_event(1);
 	}
 }

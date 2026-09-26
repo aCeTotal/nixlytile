@@ -1411,7 +1411,7 @@ gpureset(struct wl_listener *listener, void *data)
 	struct gpu_reset_cleanup *cleanup;
 	Monitor *m;
 
-	if (!(drw = wlr_renderer_autocreate(backend)))
+	if (!(drw = gpu_renderer_create(backend)))
 		die("couldn't recreate renderer");
 
 	if (!(alloc = wlr_allocator_autocreate(backend, drw)))
@@ -1615,16 +1615,14 @@ idle_heartbeat_cb(void *data)
 	return 0; /* one-shot; re-armed at the end of every rendermon pass */
 }
 
-/* Zero-damage vblank pacer (see Monitor.fd_pacer): re-enter rendermon on
- * the vblank grid without setting output->needs_frame, so the pass can
- * skip build+commit and just serve frame_done + the starvation drips. */
+/* Zero-damage vblank frame_done pacer */
 static int
 fd_pacer_cb(void *data)
 {
 	Monitor *m = data;
 
-	/* A deferred commit (latch/pace) already owns this vblank. */
-	if (m->latch_armed || m->pace_armed)
+	/* Another commit owns this vblank */
+	if (m->latch_armed || m->pace_armed || m->wlr_output->frame_pending)
 		return 0;
 	m->fd_pacer_fired = 1;
 	rendermon(&m->frame, NULL);

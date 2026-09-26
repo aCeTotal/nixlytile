@@ -191,6 +191,8 @@ remote_hide_parked(Monitor *m)
 	m->m.width = m->wlr_output->width;
 	m->m.height = m->wlr_output->height;
 	m->w = m->m;
+	/* At 0,0 it hijacks pacing */
+	wlr_scene_output_set_position(m->scene_output, m->m.x, m->m.y);
 }
 
 static void

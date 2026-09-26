@@ -48,6 +48,19 @@ static uint64_t fw_fast_until_ms;      /* guarded by fw_lock */
 static int fw_pipe[2] = { -1, -1 };
 static struct wl_event_source *fw_src;
 
+/* Rescan once the helper appears. */
+static void
+fw_refresh(FanState *fs)
+{
+	int had_helper = fs->helper_ok;
+
+	fan_refresh_state(fs);
+	if (had_helper || !fs->helper_ok)
+		return;
+	fan_scan_state(fs);
+	fan_state_apply_saved(fs);
+}
+
 static void *
 fw_worker(void *data)
 {
@@ -105,7 +118,7 @@ fw_worker(void *data)
 			}
 		}
 
-		fan_refresh_state(&local);
+		fw_refresh(&local);
 		fan_state_curve_tick(&local);
 
 		pthread_mutex_lock(&fw_lock);

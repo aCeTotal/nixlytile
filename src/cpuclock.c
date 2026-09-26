@@ -19,7 +19,6 @@
 #define ACPI_PROFILE "/sys/firmware/acpi/platform_profile"
 #define ACPI_CHOICES "/sys/firmware/acpi/platform_profile_choices"
 #define MSI_PROFILE  "/sys/devices/platform/msi-ec/shift_mode"
-#define MSI_CHOICES  "/sys/devices/platform/msi-ec/available_shift_modes"
 
 static int
 read_ul(const char *path, unsigned long *out)
@@ -107,38 +106,31 @@ cpuclock_boost(int on)
 		write_str(BOOST, on ? "1" : "0");
 }
 
-/* Per-policy scaling governor + energy-performance preference.  On
- * battery the freq cap alone is not enough: with the performance
- * governor the CPU pins to the capped ceiling and never idles down, and
- * EPP=performance disables the pstate driver's power heuristics.  So on
- * battery drop to the powersave governor (lets the core race-to-idle at
- * low clocks) and EPP=power; on AC restore performance/performance.
- * Both files are group-writable via the nixlyos perms boot service; if
- * EPP isn't writable (older perms), the governor change still lands. */
+/* Demand-driven clocks, EPP sets aggressiveness. */
 void
-cpuclock_perf(int on_ac)
+cpuclock_epp(const char *epp)
 {
 	DIR *d = opendir(CPUFREQ_DIR);
 	struct dirent *e;
-	const char *gov = on_ac ? "performance" : "powersave";
-	const char *epp = on_ac ? "performance" : "power";
 
 	if (!d)
 		return;
 	while ((e = readdir(d))) {
-		char path[PATH_MAX];
+		char gov[PATH_MAX], pref[PATH_MAX];
+		int has_epp;
 
 		if (strncmp(e->d_name, "policy", 6) != 0)
 			continue;
-		snprintf(path, sizeof(path), CPUFREQ_DIR "/%s/scaling_governor",
+		snprintf(gov, sizeof(gov), CPUFREQ_DIR "/%s/scaling_governor",
 				e->d_name);
-		if (access(path, W_OK) == 0)
-			write_str(path, gov);
-		snprintf(path, sizeof(path),
+		snprintf(pref, sizeof(pref),
 				CPUFREQ_DIR "/%s/energy_performance_preference",
 				e->d_name);
-		if (access(path, W_OK) == 0)
-			write_str(path, epp);
+		has_epp = access(pref, W_OK) == 0;
+		if (access(gov, W_OK) == 0)
+			write_str(gov, has_epp ? "powersave" : "schedutil");
+		if (has_epp)
+			write_str(pref, epp);
 	}
 	closedir(d);
 }
@@ -180,9 +172,7 @@ power_profile_set(const char *value)
 	return write_str(path, value);
 }
 
-/* Whole file, not one line: msi-ec's available_shift_modes is one mode
- * per line, so a single fgets saw only "eco" and power_profile_high
- * never found "turbo" — AC landed on comfort instead of max. */
+/* Whole file, not one line. */
 static void
 read_choices(const char *path, char *buf, size_t len)
 {
@@ -234,6 +224,30 @@ static int cc_pending = CC_NONE;
 static double cc_pending_cap = 1.0;
 static int cc_started;
 
+static void
+cc_apply(int job, double cap)
+{
+	switch (job) {
+	case CC_BATTERY:
+		power_profile_low();
+		cpuclock_epp("power");
+		cpuclock_boost(0);
+		cpuclock_cap(cap);
+		break;
+	case CC_AC:
+		power_profile_quiet();
+		cpuclock_epp("balance_performance");
+		cpuclock_boost(1);
+		cpuclock_cap(cap);
+		break;
+	case CC_DARK:
+		power_profile_low();
+		cpuclock_boost(0);
+		cpuclock_cap(cap);
+		break;
+	}
+}
+
 static void *
 cc_worker(void *arg)
 {
@@ -251,25 +265,7 @@ cc_worker(void *arg)
 		cc_pending = CC_NONE;
 		pthread_mutex_unlock(&cc_lock);
 
-		switch (job) {
-		case CC_BATTERY:
-			power_profile_low();
-			cpuclock_perf(0);
-			cpuclock_boost(0);
-			cpuclock_cap(cap);
-			break;
-		case CC_AC:
-			power_profile_high();
-			cpuclock_perf(1);
-			cpuclock_boost(1);
-			cpuclock_cap(cap);
-			break;
-		case CC_DARK:
-			power_profile_low();
-			cpuclock_boost(0);
-			cpuclock_cap(cap);
-			break;
-		}
+		cc_apply(job, cap);
 	}
 	return NULL;
 }
@@ -295,25 +291,7 @@ cc_submit(int job, double cap)
 	}
 	pthread_mutex_unlock(&cc_lock);
 	/* Thread start failed — fall back to the synchronous path. */
-	switch (job) {
-	case CC_BATTERY:
-		power_profile_low();
-		cpuclock_perf(0);
-		cpuclock_boost(0);
-		cpuclock_cap(cap);
-		break;
-	case CC_AC:
-		power_profile_high();
-		cpuclock_perf(1);
-		cpuclock_boost(1);
-		cpuclock_cap(cap);
-		break;
-	case CC_DARK:
-		power_profile_low();
-		cpuclock_boost(0);
-		cpuclock_cap(cap);
-		break;
-	}
+	cc_apply(job, cap);
 }
 
 void
@@ -334,28 +312,13 @@ cpuclock_regime_dark_async(void)
 	cc_submit(CC_DARK, 0.0);
 }
 
-/* Highest-performance profile the backend offers. */
+/* Balanced firmware profile, never turbo. */
 void
-power_profile_high(void)
+power_profile_quiet(void)
 {
 	const char *path = profile_path();
-	char choices[256];
 
 	if (!path)
 		return;
-	if (strcmp(path, MSI_PROFILE) == 0) {
-		read_choices(MSI_CHOICES, choices, sizeof(choices));
-		if (!choices[0] || strstr(choices, "turbo"))
-			write_str(path, "turbo");
-		else if (strstr(choices, "sport"))
-			write_str(path, "sport");
-		else
-			write_str(path, "comfort");
-		return;
-	}
-	read_choices(ACPI_CHOICES, choices, sizeof(choices));
-	if (!choices[0] || strstr(choices, "performance"))
-		write_str(path, "performance");
-	else
-		write_str(path, "balanced");
+	write_str(path, strcmp(path, MSI_PROFILE) == 0 ? "comfort" : "balanced");
 }

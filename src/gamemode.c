@@ -1404,13 +1404,11 @@ apply_nvidia_gpu_power(GpuInfo *gpu)
 			wlr_log(WLR_INFO, "NVIDIA: memory clocks locked → %s MHz", buf);
 	}
 
-	/*
-	 * 5. Re-assert PCI runtime PM disabled (also done by watchdog timer).
-	 *    This is belt-and-suspenders with the startup D3cold prevention
-	 *    and the 10-second watchdog timer.
-	 */
-	dgpu_assert_power_on(gpu);
-	wlr_log(WLR_INFO, "NVIDIA: PCI power/control=on re-asserted for game mode");
+	/* 5. Pin power unless offload-only. */
+	if (!dgpu_may_sleep) {
+		dgpu_assert_power_on(gpu);
+		wlr_log(WLR_INFO, "NVIDIA: PCI power/control=on re-asserted for game mode");
+	}
 
 	/*
 	 * 6. Set compute mode to DEFAULT to allow concurrent graphics + compute.
@@ -1505,12 +1503,7 @@ restore_nvidia_gpu_power(void)
 		wlr_log(WLR_INFO, "NVIDIA: persistence mode restored (off)");
 	}
 
-	/*
-	 * Do NOT restore PCI power management — keep power/control=on.
-	 * D3cold prevention is set at startup in detect_gpus() and must
-	 * persist for the compositor's entire lifetime, otherwise the GPU
-	 * suspends after ~15-20s and won't wake for the next game launch.
-	 */
+	/* PCI power policy stays startup's. */
 
 	/* Restore PowerMizer to adaptive mode (nvidia-settings, silent fail on Wayland) */
 	{

@@ -57,6 +57,45 @@ check_module_param(const char *module_name, const char *param, const char *expec
 
 static int gpu_has_connected_display(int card_index);
 
+/* Hybrid laptop, iGPU drives displays. */
+static int
+dgpu_is_offload_only(const GpuInfo *dgpu)
+{
+	return integrated_gpu_idx >= 0 && !nvidia_render_primary &&
+		dgpu->vendor == GPU_VENDOR_NVIDIA &&
+		!gpu_has_connected_display(dgpu->card_index);
+}
+
+/* Pin runtime PM on, hold render node. */
+static void
+dgpu_hold_awake(GpuInfo *dgpu)
+{
+	dgpu_assert_power_on(dgpu);
+	if (!dgpu->render_path[0])
+		return;
+	dgpu_render_fd = open(dgpu->render_path, O_RDWR);
+	if (dgpu_render_fd >= 0)
+		wlr_log(WLR_INFO, "dGPU: holding %s open (fd=%d) to prevent D3cold",
+			dgpu->render_path, dgpu_render_fd);
+	else
+		wlr_log(WLR_ERROR, "dGPU: failed to open %s: %s",
+			dgpu->render_path, strerror(errno));
+}
+
+/* NVIDIA's ICD would wake the dGPU. */
+struct wlr_renderer *
+gpu_renderer_create(struct wlr_backend *b)
+{
+	struct wlr_renderer *r;
+
+	if (!dgpu_may_sleep)
+		return wlr_renderer_autocreate(b);
+	setenv("VK_LOADER_DRIVERS_DISABLE", "*nvidia*", 1);
+	r = wlr_renderer_autocreate(b);
+	unsetenv("VK_LOADER_DRIVERS_DISABLE");
+	return r;
+}
+
 void
 detect_gpus(void)
 {
@@ -282,45 +321,14 @@ detect_gpus(void)
 		wlr_log(WLR_INFO, "No discrete GPU detected");
 	}
 
-	/*
-	 * Prevent dGPU D3cold/runtime-suspend permanently.
-	 *
-	 * Three layers of protection against the GPU switching to integrated:
-	 *
-	 * 1. Set power/control=on + autosuspend_delay_ms=-1 on the GPU and ALL
-	 *    sibling PCI functions (audio, USB-C, etc).  This disables the
-	 *    kernel's runtime PM for the PCI device.
-	 *
-	 * 2. Hold an open fd on the dGPU's render node (/dev/dri/renderDXXX)
-	 *    for the compositor's entire lifetime.  This keeps the GPU "in use"
-	 *    from the driver's perspective, preventing NVIDIA's internal dynamic
-	 *    power management from powering off the GPU even if something
-	 *    external (nvidia-powerd, udev, power-profiles-daemon, tlp)
-	 *    re-enables runtime PM in sysfs.
-	 *
-	 * 3. A periodic watchdog timer (dgpu_power_watchdog_tick) re-asserts
-	 *    the sysfs power settings every 10 seconds, counteracting any
-	 *    external service that overrides them.
-	 */
 	if (discrete_gpu_idx >= 0) {
 		GpuInfo *dgpu = &detected_gpus[discrete_gpu_idx];
 
-		dgpu_assert_power_on(dgpu);
-
-		/*
-		 * Hold the render node open — prevents the driver from
-		 * considering the GPU idle and triggering D3cold.
-		 */
-		if (dgpu->render_path[0]) {
-			dgpu_render_fd = open(dgpu->render_path, O_RDWR);
-			if (dgpu_render_fd >= 0) {
-				wlr_log(WLR_INFO, "dGPU: holding %s open (fd=%d) to prevent D3cold",
-					dgpu->render_path, dgpu_render_fd);
-			} else {
-				wlr_log(WLR_ERROR, "dGPU: failed to open %s: %s",
-					dgpu->render_path, strerror(errno));
-			}
-		}
+		dgpu_may_sleep = dgpu_is_offload_only(dgpu);
+		if (dgpu_may_sleep)
+			wlr_log(WLR_INFO, "dGPU: offload only, runtime suspend allowed");
+		else
+			dgpu_hold_awake(dgpu);
 
 		/*
 		 * Check NVreg_DynamicPowerManagement — if set to 0x02 (fine-grained),
@@ -819,7 +827,7 @@ dgpu_power_watchdog_tick(void *data)
 void
 dgpu_power_watchdog_start(void)
 {
-	if (discrete_gpu_idx < 0 || dgpu_power_watchdog)
+	if (discrete_gpu_idx < 0 || dgpu_may_sleep || dgpu_power_watchdog)
 		return;
 	dgpu_power_watchdog = wl_event_loop_add_timer(event_loop,
 		dgpu_power_watchdog_tick, NULL);

@@ -2842,10 +2842,8 @@ setup(void)
 	drag_icon = wlr_scene_tree_create(&scene->tree);
 	wlr_scene_node_place_below(&drag_icon->node, &layers[LyrBlock]->node);
 
-	/* Autocreates a GLES2 renderer. The renderer is responsible for
-	 * defining the various pixel formats it supports for shared memory,
-	 * this configures that for clients. */
-	if (!(drw = wlr_renderer_autocreate(backend)))
+	/* Renderer sets client shm formats. */
+	if (!(drw = gpu_renderer_create(backend)))
 		die("couldn't create renderer");
 	wl_signal_add(&drw->events.lost, &gpu_reset);
 

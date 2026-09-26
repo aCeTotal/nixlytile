@@ -2049,6 +2049,7 @@ extern int detected_gpu_count;
 extern int discrete_gpu_idx;
 extern int integrated_gpu_idx;
 extern int nvidia_render_primary;
+extern int dgpu_may_sleep;
 extern int dgpu_render_fd;
 extern int g_explicit_sync_ok; /* 1 = DRM syncobj timeline manager active */
 extern struct wl_event_source *dgpu_power_watchdog;
@@ -3271,6 +3272,7 @@ void detect_gpus(void);
 void filter_igpu_without_display(void);
 void dgpu_assert_power_on(GpuInfo *gpu);
 void dgpu_power_watchdog_start(void);
+struct wlr_renderer *gpu_renderer_create(struct wlr_backend *b);
 int should_use_dgpu(const char *cmd);
 void set_dgpu_env(void);
 void set_steam_env(void);
@@ -3344,11 +3346,8 @@ void osd_purge_mon(Monitor *m);
 void cpuclock_cap(double frac);
 void cpuclock_restore(void);
 void cpuclock_boost(int on);
-void cpuclock_perf(int on_ac);
-/* Full regime switches, applied on cpuclock.c's worker thread
- * (latest-wins): battery = low profile + powersave governor/EPP +
- * boost off + cap; AC = high profile + performance + boost + uncapped;
- * dark = presence "nobody watching" (low profile, boost off, cap 0). */
+void cpuclock_epp(const char *epp);
+/* Battery saves, AC stays quiet. */
 void cpuclock_regime_battery_async(double cap);
 void cpuclock_regime_ac_async(void);
 void cpuclock_regime_dark_async(void);
@@ -3357,7 +3356,7 @@ void output_lock_max_refresh(void);
 int power_profile_get(char *buf, size_t len);
 int power_profile_set(const char *value);
 void power_profile_low(void);
-void power_profile_high(void);
+void power_profile_quiet(void);
 
 /* powersave.c — max battery saving while discharging (laptops) */
 void powersave_init(void);
