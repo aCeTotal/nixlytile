@@ -8,6 +8,7 @@
 
 #include "nixlytile.h"
 #include "client.h"
+#include "diag.h"
 
 /*
  * Niri-style workspace + column primitives.
@@ -543,12 +544,6 @@ max_nonempty_ws_idx(Monitor *m)
 			max_idx = ws->idx;
 	}
 	return max_idx;
-}
-
-int
-workspace_max_nonempty_idx(Monitor *m)
-{
-	return max_nonempty_ws_idx(m);
 }
 
 /* Workspace with index idx on m, creating trailing workspaces as needed —
@@ -1726,6 +1721,7 @@ workspace_switch(Monitor *m, Workspace *target)
 	old_idx = m->active_ws ? m->active_ws->idx : 0;
 	new_idx = target->idx;
 	mon_h = m->m.height;
+	diag_logf("WS", "%s: %d -> %d", m->wlr_output->name, old_idx, new_idx);
 
 	/* Snap outgoing ws's camera fully to its target so its slide-out
 	 * renders at the same position the user just left.  Sync the float

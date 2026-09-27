@@ -2686,33 +2686,6 @@ htpc_ws_refresh_fx(Monitor *m)
 	if (fsc)
 		setfullscreen(fsc, 1);
 	schedule_game_mode_update();
-
-	/* Per-workspace audio: only the app the user is looking at may
-	 * play.  The helper (nixlyos htpc/audio-focus.nix) mutes every
-	 * other workspace's PipeWire streams; a missing binary is a
-	 * silent no-op. */
-	{
-		char cmd[64];
-		snprintf(cmd, sizeof(cmd), "htpc-audio-focus %d",
-				m->active_ws->idx);
-		spawn_cmd(cmd);
-	}
-
-	/* Per-workspace GPU clock: nixlymedia and GeForce NOW stay at RP1
-	 * because VRM noise at high clocks reaches the eARC chain; Steam and
-	 * RetroArch get the full range (nixlyos htpc/gpu-clock.nix). */
-	{
-		static const char *ws_app[] = {
-			"nixlymedia", "retroarch", "geforcenow", "steam"
-		};
-		int i = m->active_ws->idx;
-		char cmd[64];
-
-		if (i >= 0 && i < (int)LENGTH(ws_app)) {
-			snprintf(cmd, sizeof(cmd), "htpc-gpu-clock %s", ws_app[i]);
-			spawn_cmd(cmd);
-		}
-	}
 }
 
 void
@@ -3108,10 +3081,11 @@ urgent(struct wl_listener *listener, void *data)
 	if (client_surface(c)->mapped)
 		client_set_border_color(c, urgentcolor);
 
-	/* Tray-icon / dock-style activation: jump to the client's
-	 * workspace and focus it.  xdg-activation is the protocol used
-	 * by SNI tray menus and app launchers when re-activating an
-	 * already-running app. */
+	/* HTPC switches only via guide. */
+	if (htpc_mode_active)
+		return;
+
+	/* Jump to activated client. */
 	if (c->mon && c->column && c->column->ws &&
 			client_surface(c)->mapped) {
 		Monitor *target_mon = c->mon;

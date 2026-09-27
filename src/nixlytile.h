@@ -2511,7 +2511,6 @@ void monitor_cleanup_workspaces(Monitor *m);
 void monitor_compact_workspaces(Monitor *m);
 Workspace *monitor_active_ws(Monitor *m);
 Workspace *workspace_get_or_create_idx(Monitor *m, int idx);
-int workspace_max_nonempty_idx(Monitor *m);
 int workspace_has_clients(Workspace *ws);
 void workspace_attach_client(Workspace *ws, Client *c);
 void workspace_detach_client(Client *c);
