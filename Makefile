@@ -33,7 +33,7 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            input_conf.o bindings_conf.o statusbar_conf.o \
            remote.o remote_pad.o remote_mouse.o \
            apptoggle.o htpc_pad.o htpc_guide.o wsfreeze.o mic_watch.o audio_watch.o audio_devices.o audio_meter.o gaming_conf.o gshortcuts.o \
-           statusbar.o tray.o statusbar_support.o terminfo.o launchfx.o wobble.o diag.o fetch_async.o charge_limit.o fancontrol.o fanwatch.o \
+           statusbar.o tray.o statusbar_support.o terminfo.o launchfx.o wobble.o wobble_render.o column_focus.o diag.o fetch_async.o charge_limit.o fancontrol.o fanwatch.o \
            fancurve.o fan_helper.o fan_ec.o fan_nvml.o \
            diskwatch.o disk_helper.o disk_ui.o \
            popup_card.o popup_extra.o \
@@ -259,7 +259,11 @@ popup_extra.o: $(SRC)/popup_extra.c $(SRC)/popup_card.h $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 terminfo.o: $(SRC)/terminfo.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-wobble.o: $(SRC)/wobble.c $(SRC)/nixlytile.h $(SRC)/client.h
+wobble.o: $(SRC)/wobble.c $(SRC)/wobble.h $(SRC)/nixlytile.h $(SRC)/client.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+wobble_render.o: $(SRC)/wobble_render.c $(SRC)/wobble.h $(SRC)/nixlytile.h $(SRC)/client.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+column_focus.o: $(SRC)/column_focus.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 launchfx.o: $(SRC)/launchfx.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<

@@ -1385,68 +1385,6 @@ focus_workspace_dir(const Arg *arg)
 	printstatus();
 }
 
-void
-focus_column_dir(const Arg *arg)
-{
-	Column *col;
-	Monitor *m_next;
-	struct wlr_output *next_out;
-	enum wlr_direction wdir;
-
-	if (!arg || !selmon || !selmon->active_ws)
-		return;
-
-	col = workspace_focus_col_dir(selmon->active_ws, arg->i);
-	if (col && !wl_list_empty(&col->clients)) {
-		/* Arrange FIRST so target_scroll_x / target_x reflect the new
-		 * focus.  focusclient → warpcursor reads target_* — stale
-		 * values would land the cursor on the OLD focused tile's
-		 * projected position. */
-		arrange(selmon);
-		{
-			Client *c = wl_container_of(col->clients.next, c, column_link);
-			focusclient(c, 1);
-		}
-		return;
-	}
-
-	/* At edge of current workspace — try crossing to adjacent monitor. */
-	wdir = (arg->i > 0) ? WLR_DIRECTION_RIGHT : WLR_DIRECTION_LEFT;
-	next_out = wlr_output_layout_adjacent_output(output_layout, wdir,
-			selmon->wlr_output,
-			selmon->m.x + selmon->m.width / 2.0,
-			selmon->m.y + selmon->m.height / 2.0);
-	if (!next_out)
-		return;
-	m_next = next_out->data;
-	if (!m_next || !m_next->wlr_output->enabled)
-		return;
-
-	/* Pick a tile on the new monitor — entering from the LEFT (we moved
-	 * right) lands on the leftmost tile; entering from the right lands
-	 * on the rightmost.  A destination with no tile is NOT a valid stop:
-	 * the outermost tile is always the last stop, so holding the key
-	 * can never park the pointer on empty screen. */
-	if (m_next->active_ws && !wl_list_empty(&m_next->active_ws->columns)) {
-		Column *target;
-		struct wl_list *node = (arg->i > 0)
-				? m_next->active_ws->columns.next
-				: m_next->active_ws->columns.prev;
-		target = wl_container_of(node, target, link);
-		if (target && !wl_list_empty(&target->clients)) {
-			selmon = m_next;
-			m_next->active_ws->focused_col = target;
-			arrange(m_next);
-			{
-				Client *c = wl_container_of(target->clients.next,
-						c, column_link);
-				focusclient(c, 1);
-			}
-			printstatus();
-		}
-	}
-}
-
 /* Move focused column left/right by swapping list order.  At the workspace
  * edge, cross to the adjacent monitor (treats the whole multi-monitor row
  * as one continuous tile strip).  Multi-client columns are preserved
@@ -1790,34 +1728,6 @@ workspace_focus_dir(Monitor *m, int dir)
 
 	if (target)
 		workspace_switch(m, target);
-}
-
-/* Move focus left/right between columns within the active workspace.
- * Returns the newly-focused column (NULL if no movement possible). */
-Column *
-workspace_focus_col_dir(Workspace *ws, int dir)
-{
-	Column *cur, *target = NULL;
-
-	if (!ws || dir == 0)
-		return NULL;
-
-	cur = ws->focused_col;
-	if (!cur) {
-		if (wl_list_empty(&ws->columns))
-			return NULL;
-		target = wl_container_of(ws->columns.next, target, link);
-	} else if (dir > 0) {
-		if (cur->link.next != &ws->columns)
-			target = wl_container_of(cur->link.next, target, link);
-	} else {
-		if (cur->link.prev != &ws->columns)
-			target = wl_container_of(cur->link.prev, target, link);
-	}
-
-	if (target)
-		ws->focused_col = target;
-	return target;
 }
 
 void

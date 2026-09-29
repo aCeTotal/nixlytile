@@ -1,101 +1,125 @@
-/*
- * wobble.c — jelly drag for floating windows.
- *
- * While a floating window is dragged, its surface is hidden and shown
- * as horizontal strips of the same buffer instead.  Each strip edge is
- * a damped spring: edges near the grab point follow the cursor almost
- * rigidly, distant edges lag and swing back, so the window bends and
- * settles like jelly.  Pure scene graph (source box + dest size per
- * strip), no renderer work; the strips are dropped once it is still.
- */
 #include "nixlytile.h"
 #include "client.h"
+#include "wobble.h"
 
 #include <math.h>
 #include <stdlib.h>
 
-#define WOBBLE_STRIP_PX   8      /* target strip height */
-#define WOBBLE_MIN_STRIPS 16
-#define WOBBLE_MAX_STRIPS 128
-#define WOBBLE_STIFFNESS  320.0  /* spring constant at the grab edge */
-#define WOBBLE_LOOSEST    0.22   /* stiffness share at the far edge */
-#define WOBBLE_DAMPING    0.32   /* damping ratio; below 1 overshoots */
-#define WOBBLE_MAX_LAG    0.30   /* offset cap, share of window height */
-#define WOBBLE_REST_PX    0.3
-#define WOBBLE_REST_VEL   6.0
+#define WOBBLE_STIFFNESS  1000.0 /* spring constant at the grab edge */
+#define WOBBLE_LOOSEST    0.40   /* stiffness share at the far edge */
+#define WOBBLE_DAMPING    0.38   /* damping ratio; below 1 overshoots */
+#define WOBBLE_MAX_LAG    0.25   /* offset cap, share of window height */
+#define WOBBLE_STEP       (1.0 / 240.0)
 #define WOBBLE_MAX_DT     0.033
+#define WOBBLE_REST_PX    0.5
+#define WOBBLE_REST_VEL   12.0
 
-struct Wobble {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_buffer **strips;
-	uint32_t seq;                /* commit the strips show */
-	int shown;
-	double *x, *y, *vx, *vy;     /* per strip edge, n + 1 each */
-	int n;
-	int grab;                    /* edge pinned under the cursor */
-	int held;
-	int last_x, last_y;
-	int border_enabled[4];
-};
+enum WobbleState { WobbleDone, WobbleIdle, WobbleMoving };
 
 static int
-wobble_eligible(struct wlr_surface *surf)
+wobble_eligible(Client *c)
 {
-	/* Only the root buffer is stripped; subsurface content (video,
-	 * GL children) would vanish mid-drag, so those move rigidly. */
-	return surf && surf->buffer
+	struct wlr_surface *surf = client_surface(c);
+
+	/* Only content the view reproduces. */
+	return c->isfloating && !c->isfullscreen && !c->frozen_buffer
+		&& surf && surf->buffer && surf->buffer->texture
+		&& surf->current.transform == WL_OUTPUT_TRANSFORM_NORMAL
+		&& !wlr_surface_get_image_description_v1_data(surf)
 		&& wl_list_empty(&surf->current.subsurfaces_above)
 		&& wl_list_empty(&surf->current.subsurfaces_below);
 }
 
+static bool
+wobble_rejects_input(struct wlr_scene_buffer *buffer, double *sx, double *sy)
+{
+	return false;
+}
+
 static void
-wobble_hide_client(Client *c, Wobble *w, int hidden)
+wobble_find_real(struct wlr_scene_buffer *buffer, int sx, int sy, void *out)
+{
+	*(struct wlr_scene_buffer **)out = buffer;
+}
+
+static float
+wobble_alpha(struct wlr_surface *surf)
+{
+	const struct wlr_alpha_modifier_surface_v1_state *state =
+		wlr_alpha_modifier_v1_get_surface_state(surf);
+
+	return state ? (float)state->multiplier : 1.0f;
+}
+
+/* Runs after wlroots resets opacity. */
+static void
+wobble_commit(struct wl_listener *listener, void *data)
+{
+	Wobble *w = wl_container_of(listener, w, commit);
+
+	if (w->concealed)
+		wlr_scene_buffer_set_opacity(w->real, 0.0f);
+}
+
+static void
+wobble_conceal(Client *c, Wobble *w)
 {
 	int i;
 
-	wlr_scene_node_set_enabled(&c->scene_surface->node, !hidden);
+	wlr_scene_buffer_set_opacity(w->real, 0.0f);
+	if (w->concealed)
+		return;
 	for (i = 0; i < 4; i++) {
-		if (hidden)
-			w->border_enabled[i] = c->border[i]->node.enabled;
-		wlr_scene_node_set_enabled(&c->border[i]->node,
-				!hidden && w->border_enabled[i]);
+		w->border_enabled[i] = c->border[i]->node.enabled;
+		wlr_scene_node_set_enabled(&c->border[i]->node, 0);
 	}
+	w->concealed = 1;
+}
+
+static void
+wobble_reveal(Client *c, Wobble *w)
+{
+	int i;
+
+	if (!w->concealed)
+		return;
+	wlr_scene_buffer_set_opacity(w->real, wobble_alpha(client_surface(c)));
+	for (i = 0; i < 4; i++)
+		wlr_scene_node_set_enabled(&c->border[i]->node, w->border_enabled[i]);
 }
 
 static Wobble *
-wobble_create(Client *c, int height)
+wobble_create(Client *c, struct wlr_scene_buffer *real)
 {
 	Wobble *w = ecalloc(1, sizeof(*w));
-	int i;
 
-	w->n = MAX(WOBBLE_MIN_STRIPS, MIN(WOBBLE_MAX_STRIPS, height / WOBBLE_STRIP_PX));
-	w->strips = ecalloc((size_t)w->n, sizeof(*w->strips));
-	w->x = ecalloc(4 * (size_t)(w->n + 1), sizeof(double));
-	w->y = w->x + w->n + 1;
-	w->vx = w->y + w->n + 1;
-	w->vy = w->vx + w->n + 1;
-	w->tree = wlr_scene_tree_create(c->scene);
-	for (i = 0; i < w->n; i++)
-		w->strips[i] = wlr_scene_buffer_create(w->tree, NULL);
-	wobble_hide_client(c, w, 1);
+	w->real = real;
+	w->view = wlr_scene_buffer_create(c->scene, NULL);
+	w->view->point_accepts_input = wobble_rejects_input;
+	wlr_scene_node_place_below(&w->view->node, &c->scene_surface->node);
+	w->commit.notify = wobble_commit;
+	wl_signal_add(&client_surface(c)->events.commit, &w->commit);
 	return w;
 }
 
 void
 wobble_grab(Client *c, double cursor_y)
 {
-	struct wlr_surface *surf = client_surface(c);
 	int height = c->geom.height - 2 * (int)c->bw;
+	struct wlr_scene_buffer *real = NULL;
 	Wobble *w;
 
-	if (height <= 0 || !wobble_eligible(surf))
+	if (height <= 0 || !wobble_eligible(c))
+		return;
+	wlr_scene_node_for_each_buffer(&c->scene_surface->node, wobble_find_real, &real);
+	if (!real)
 		return;
 	if (!c->wobble)
-		c->wobble = wobble_create(c, height);
+		c->wobble = wobble_create(c, real);
 	w = c->wobble;
 	w->held = 1;
-	w->grab = (int)lround((cursor_y - c->geom.y - c->bw) / height * w->n);
-	w->grab = MAX(0, MIN(w->n, w->grab));
+	w->grab = (int)lround((cursor_y - c->geom.y - c->bw) / height * WOBBLE_EDGES);
+	w->grab = MAX(0, MIN(WOBBLE_EDGES, w->grab));
 	w->last_x = c->geom.x;
 	w->last_y = c->geom.y;
 	if (c->mon && c->mon->wlr_output)
@@ -116,135 +140,100 @@ wobble_stop(Client *c)
 
 	if (!w)
 		return;
-	wlr_scene_node_destroy(&w->tree->node);
-	wobble_hide_client(c, w, 0);
-	free(w->strips);
-	free(w->x);
+	wobble_reveal(c, w);
+	wl_list_remove(&w->commit.link);
+	wlr_scene_node_destroy(&w->view->node);
+	wlr_swapchain_destroy(w->swapchain);
 	free(w);
 	c->wobble = NULL;
 }
 
+/* Loose edges lag the move. */
 static void
-wobble_spring(Wobble *w, int edge, double dx, double dy, double dt)
+wobble_substep(Wobble *w, const double moved[2], double h)
 {
-	double near = 1.0 - fabs((double)(edge - w->grab)) / w->n;
-	double k = WOBBLE_STIFFNESS * (WOBBLE_LOOSEST + (1.0 - WOBBLE_LOOSEST) * near);
-	double damping = 2.0 * WOBBLE_DAMPING * sqrt(k);
-	double cap = WOBBLE_MAX_LAG * w->n * WOBBLE_STRIP_PX;
+	int e, a;
 
-	if (w->held && edge == w->grab) {
-		w->x[edge] = w->y[edge] = w->vx[edge] = w->vy[edge] = 0.0;
-		return;
+	for (e = 0; e <= WOBBLE_EDGES; e++) {
+		double loose = fabs((double)(e - w->grab)) / WOBBLE_EDGES;
+		double k = WOBBLE_STIFFNESS * (1.0 - (1.0 - WOBBLE_LOOSEST) * loose);
+		double damping = 2.0 * WOBBLE_DAMPING * sqrt(k);
+
+		for (a = 0; a < 2; a++) {
+			double *off = &w->off[a][e], *vel = &w->vel[a][e];
+
+			*off -= moved[a] * loose;
+			*vel += (-k * *off - damping * *vel) * h;
+			*off = fmax(-w->cap, fmin(w->cap, *off + *vel * h));
+		}
 	}
-	/* The window moved by (dx, dy); loose edges stay behind. */
-	w->x[edge] -= dx * (1.0 - near);
-	w->y[edge] -= dy * (1.0 - near);
-	w->vx[edge] += (-k * w->x[edge] - damping * w->vx[edge]) * dt;
-	w->vy[edge] += (-k * w->y[edge] - damping * w->vy[edge]) * dt;
-	w->x[edge] = fmax(-cap, fmin(cap, w->x[edge] + w->vx[edge] * dt));
-	w->y[edge] = fmax(-cap, fmin(cap, w->y[edge] + w->vy[edge] * dt));
 }
 
-static struct wlr_fbox
-wobble_source(Client *c, struct wlr_surface *surf, struct wlr_buffer *buf)
-{
-	struct wlr_fbox whole = { 0, 0, buf->width, buf->height };
-	struct wlr_box g;
-	double sx, sy;
-
-	if (client_is_x11(c) || surf->current.width <= 0 || surf->current.height <= 0)
-		return whole;
-	client_get_geometry(c, &g);
-	if (g.width <= 0 || g.height <= 0)
-		return whole;
-	sx = (double)buf->width / surf->current.width;
-	sy = (double)buf->height / surf->current.height;
-	return (struct wlr_fbox){ g.x * sx, g.y * sy, g.width * sx, g.height * sy };
-}
-
+/* Fixed steps keep every refresh rate alike. */
 static void
-wobble_layout(Client *c, struct wlr_surface *surf)
+wobble_integrate(Wobble *w, const double moved[2], double dt)
 {
-	Wobble *w = c->wobble;
-	struct wlr_buffer *buf = &surf->buffer->base;
-	struct wlr_fbox src = wobble_source(c, surf, buf);
-	int bw = (int)c->bw;
-	int width = c->geom.width - 2 * bw;
-	int height = c->geom.height - 2 * bw;
-	int refresh = !w->shown || surf->current.seq != w->seq;
+	int steps = MAX(1, (int)ceil(dt / WOBBLE_STEP));
+	double part[2] = { moved[0] / steps, moved[1] / steps };
 	int i;
 
-	for (i = 0; i < w->n; i++) {
-		struct wlr_scene_buffer *strip = w->strips[i];
-		int top = (int)lround((double)height * i / w->n + w->y[i]);
-		int bottom = (int)lround((double)height * (i + 1) / w->n + w->y[i + 1]);
-		struct wlr_fbox slice = {
-			src.x, src.y + src.height * i / w->n,
-			src.width, src.height / w->n,
-		};
-
-		if (refresh)
-			wlr_scene_buffer_set_buffer(strip, buf);
-		wlr_scene_buffer_set_source_box(strip, &slice);
-		wlr_scene_buffer_set_dest_size(strip, width, MAX(1, bottom - top));
-		wlr_scene_node_set_position(&strip->node,
-				bw + (int)lround((w->x[i] + w->x[i + 1]) / 2.0), bw + top);
-	}
-	w->seq = surf->current.seq;
-	w->shown = 1;
+	for (i = 0; i < steps; i++)
+		wobble_substep(w, part, dt / steps);
 }
 
 static int
-wobble_settled(const Wobble *w)
+wobble_resting(const Wobble *w)
 {
+	const double *off = &w->off[0][0], *vel = &w->vel[0][0];
 	int i;
 
-	if (w->held)
-		return 0;
-	for (i = 0; i <= w->n; i++) {
-		if (fabs(w->x[i]) > WOBBLE_REST_PX || fabs(w->y[i]) > WOBBLE_REST_PX
-				|| fabs(w->vx[i]) > WOBBLE_REST_VEL
-				|| fabs(w->vy[i]) > WOBBLE_REST_VEL)
+	for (i = 0; i < 2 * (WOBBLE_EDGES + 1); i++) {
+		if (fabs(off[i]) > WOBBLE_REST_PX || fabs(vel[i]) > WOBBLE_REST_VEL)
 			return 0;
 	}
 	return 1;
 }
 
-/* Returns 1 while the client still wobbles. */
-static int
+static enum WobbleState
 wobble_step(Client *c, double dt)
 {
 	Wobble *w = c->wobble;
-	struct wlr_surface *surf = client_surface(c);
-	double dx = c->geom.x - w->last_x;
-	double dy = c->geom.y - w->last_y;
-	int i;
+	double moved[2] = { c->geom.x - w->last_x, c->geom.y - w->last_y };
+	int resting;
 
-	if (!wobble_eligible(surf))
-		return 0;
+	if (!wobble_eligible(c))
+		return WobbleDone;
 	w->last_x = c->geom.x;
 	w->last_y = c->geom.y;
-	for (i = 0; i <= w->n; i++)
-		wobble_spring(w, i, dx, dy, dt);
-	if (wobble_settled(w))
-		return 0;
-	wobble_layout(c, surf);
-	return 1;
+	w->cap = WOBBLE_MAX_LAG * (c->geom.height - 2 * (int)c->bw);
+	wobble_integrate(w, moved, dt);
+	resting = wobble_resting(w);
+	if (resting && !w->held)
+		return WobbleDone;
+	if (resting && w->concealed && client_surface(c)->current.seq == w->seq)
+		return WobbleIdle;
+	if (!wobble_render(c, w))
+		return WobbleDone;
+	wlr_scene_buffer_set_opacity(w->view, wobble_alpha(client_surface(c)));
+	wobble_conceal(c, w);
+	w->seq = client_surface(c)->current.seq;
+	return WobbleMoving;
 }
 
 void
 wobble_tick(Monitor *m, double dt, int *still)
 {
 	Client *c;
+	enum WobbleState state;
 
 	*still = 0;
 	dt = MIN(dt, WOBBLE_MAX_DT);
 	wl_list_for_each(c, &clients, link) {
 		if (!c->wobble || c->mon != m)
 			continue;
-		if (wobble_step(c, dt))
-			*still = 1;
-		else
+		state = wobble_step(c, dt);
+		if (state == WobbleDone)
 			wobble_stop(c);
+		*still |= state == WobbleMoving;
 	}
 }

@@ -2525,9 +2525,7 @@ void workspace_layout(Workspace *ws);
 void monitor_apply_positions(Monitor *m);
 void workspace_switch(Monitor *m, Workspace *target);
 void workspace_focus_dir(Monitor *m, int dir);
-Column *workspace_focus_col_dir(Workspace *ws, int dir);
 void focus_workspace_dir(const Arg *arg);
-void focus_column_dir(const Arg *arg);
 void move_column_dir(const Arg *arg);
 void move_client_to_ws_dir(const Arg *arg);
 void focus_workspace_n(const Arg *arg);
@@ -2593,6 +2591,9 @@ void wobble_release(Client *c);
 void wobble_stop(Client *c);
 void wobble_tick(Monitor *m, double dt, int *still);
 void client_apply_open_anim(Client *c);
+
+/* column_focus.c */
+void focus_column_dir(const Arg *arg);
 
 /* layout.c */
 void arrange(Monitor *m);

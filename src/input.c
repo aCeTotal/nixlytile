@@ -2920,13 +2920,13 @@ moveresize(const Arg *arg)
 		case CurMove:
 			{
 				struct wlr_box start_geom = grabc->geom;
-				/* Start drag tracking before making floating */
+				/* Track before floating. */
 				start_tile_drag(selmon, grabc);
-				setfloating(grabc, 1);
-				/* Anchor to the original cursor offset within the window */
+				/* Before arrange's internal motion. */
 				grabcx = (int)round(cursor->x) - start_geom.x;
 				grabcy = (int)round(cursor->y) - start_geom.y;
-				/* Keep the window anchored under the cursor when leaving tiling. */
+				setfloating(grabc, 1);
+				/* Re-anchor under the cursor. */
 				resize(grabc, start_geom, 1);
 				nixly_cursor_set_xcursor("fleur");
 				break;
@@ -3028,9 +3028,7 @@ moveresize(const Arg *arg)
 			break;
 		}
 	} else {
-		/* Default floating logic */
-		/* Float the window and tell motionnotify to grab it */
-		setfloating(grabc, 1);
+		/* Already floating, no re-arrange. */
 		switch (cursor_mode) {
 		case CurMove:
 			grabcx = (int)round(cursor->x) - grabc->geom.x;
