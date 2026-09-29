@@ -997,6 +997,12 @@ monitor_anim_tick(Monitor *m, double dt)
 	closing_anims_tick(m, dt, &close_still);
 	if (close_still)
 		active = 1;
+	{
+		int wobble_still = 0;
+		wobble_tick(m, dt, &wobble_still);
+		if (wobble_still)
+			active = 1;
+	}
 
 	/* Varsel-slide i høyre marg. Egen liste: override-redirect-klienter
 	 * står ikke i `clients`, så clients_anim_tick ser dem aldri. */

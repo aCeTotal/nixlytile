@@ -61,6 +61,7 @@
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/render/drm_format_set.h>
 #include <wlr/interfaces/wlr_buffer.h>
+#include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_alpha_modifier_v1.h>
 #include <wlr/types/wlr_commit_timing_v1.h>
@@ -264,6 +265,7 @@ typedef struct {
 /* ── forward declarations ──────────────────────────────────────────── */
 typedef struct LayoutNode LayoutNode;
 typedef struct Monitor Monitor;
+typedef struct Wobble Wobble;
 typedef struct Workspace Workspace;
 typedef struct Column Column;
 typedef struct StatusBar StatusBar;
@@ -1118,6 +1120,7 @@ typedef struct {
 	int isspanned;                /* fullscreen spans every enabled output (multi-monitor gaming) */
 	int span_manual;              /* togglegamespan override: force span on, ignore size-driven auto */
 	int isfixed;                  /* float-type with fixed size — reject interactive resize */
+	struct Wobble *wobble;        /* jelly strips while dragged */
 	int is_game_splash;         /* Game splash/EAC launcher → keep centered */
 	int fx_covered;             /* launch cover already played for this client */
 	int nogame;                 /* memoized window-rule `game false` probe
@@ -2583,6 +2586,12 @@ void client_unfreeze(Client *c);
 void client_start_open_anim(Client *c);
 void anim_spawn_close(Monitor *m, struct wlr_buffer *buffer, struct wlr_box geom);
 void closing_anims_tick(Monitor *m, double dt, int *still);
+
+/* wobble.c */
+void wobble_grab(Client *c, double cursor_y);
+void wobble_release(Client *c);
+void wobble_stop(Client *c);
+void wobble_tick(Monitor *m, double dt, int *still);
 void client_apply_open_anim(Client *c);
 
 /* layout.c */
@@ -2618,6 +2627,7 @@ int keybinding(uint32_t mods, xkb_keysym_t sym);
 void keypress(struct wl_listener *listener, void *data);
 void keypressmod(struct wl_listener *listener, void *data);
 int keyrepeat(void *data);
+void setgroupkeymap(struct xkb_keymap *keymap);
 void createpointer(struct wlr_pointer *pointer);
 void newkbshortcutsinhibitor(struct wl_listener *listener, void *data);
 void createpointerconstraint(struct wl_listener *listener, void *data);

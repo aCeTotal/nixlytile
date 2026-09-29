@@ -843,6 +843,8 @@ buttonpress(struct wl_listener *listener, void *data)
 			cursor_mode = CurNormal;
 			/* Drop the window off on its new monitor */
 			selmon = xytomon(cursor->x, cursor->y);
+			if (grabc && was_move)
+				wobble_release(grabc);
 			if (grabc) {
 				if (was_move && grabc->was_tiled && selmon
 						&& selmon->active_ws) {
@@ -896,11 +898,34 @@ chvt(const Arg *arg)
 void
 createkeyboard(struct wlr_keyboard *keyboard)
 {
+	uint32_t locks = kb_group->wlr_group->keyboard.modifiers.locked;
+
 	/* Set the keymap to match the group keymap */
 	wlr_keyboard_set_keymap(keyboard, kb_group->wlr_group->keyboard.keymap);
+	wlr_keyboard_notify_modifiers(keyboard, 0, 0, locks, 0);
 
 	/* Add the new keyboard to the group */
 	wlr_keyboard_group_add_keyboard(kb_group->wlr_group, keyboard);
+}
+
+static uint32_t
+numlockmask(struct xkb_keymap *keymap)
+{
+	xkb_mod_index_t num = xkb_keymap_mod_get_index(keymap, XKB_MOD_NAME_NUM);
+
+	return num == XKB_MOD_INVALID ? 0 : 1u << num;
+}
+
+/* Keymap swaps reset xkb locks. */
+void
+setgroupkeymap(struct xkb_keymap *keymap)
+{
+	struct wlr_keyboard *kb = &kb_group->wlr_group->keyboard;
+	struct wlr_keyboard_modifiers mods = kb->modifiers;
+
+	wlr_keyboard_set_keymap(kb, keymap);
+	wlr_keyboard_notify_modifiers(kb, mods.depressed, mods.latched,
+			mods.locked, mods.group);
 }
 
 KeyboardGroup *
@@ -934,6 +959,8 @@ createkeyboardgroup(void)
 	}
 
 	wlr_keyboard_set_keymap(&group->wlr_group->keyboard, keymap);
+	wlr_keyboard_notify_modifiers(&group->wlr_group->keyboard,
+			0, 0, numlockmask(keymap), 0);
 	xkb_keymap_unref(keymap);
 	xkb_context_unref(context);
 
@@ -3008,6 +3035,7 @@ moveresize(const Arg *arg)
 		case CurMove:
 			grabcx = (int)round(cursor->x) - grabc->geom.x;
 			grabcy = (int)round(cursor->y) - grabc->geom.y;
+			wobble_grab(grabc, cursor->y);
 			nixly_cursor_set_xcursor("fleur");
 			break;
 		case CurResize:

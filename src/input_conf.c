@@ -169,7 +169,7 @@ apply_to_keyboards(void)
 		return;
 	keymap = xkb_keymap_new_from_names(context, &names, XKB_KEYMAP_COMPILE_NO_FLAGS);
 	if (keymap) {
-		wlr_keyboard_set_keymap(&kb_group->wlr_group->keyboard, keymap);
+		setgroupkeymap(keymap);
 		xkb_keymap_unref(keymap);
 	} else {
 		wlr_log(WLR_ERROR, "input_conf: layout \"%s\" did not compile", inputconf_layout);

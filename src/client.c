@@ -392,7 +392,7 @@ commitnotify(struct wl_listener *listener, void *data)
 			int w = 0, h = 0;
 
 			workspace_new_column_inner_size(m, (int)c->bw, &w, &h);
-			if (w > 100 && h > 100)
+			if (!c->isfloating && w > 100 && h > 100)
 				wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel,
 						w, h);
 			else
@@ -2859,6 +2859,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 		 * would wl_list_remove() zeroed links and crash. */
 		if (!c->scene)
 			return;
+		wobble_stop(c);
 		/* Niri-style close anim: snapshot the surface's last buffer
 		 * into an independent scene tree that survives Client teardown,
 		 * then animate scale 1→0.5 + opacity 1→0.  Skip for floating /

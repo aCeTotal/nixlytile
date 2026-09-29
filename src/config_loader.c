@@ -699,7 +699,7 @@ hotapply_keyboard(void)
 	struct xkb_keymap *km = xkb_keymap_new_from_names(ctx, &names,
 		XKB_KEYMAP_COMPILE_NO_FLAGS);
 	if (km) {
-		wlr_keyboard_set_keymap(&kb_group->wlr_group->keyboard, km);
+		setgroupkeymap(km);
 		xkb_keymap_unref(km);
 	}
 	xkb_context_unref(ctx);
