@@ -3912,6 +3912,14 @@ mic_fetch_done(const char *out, size_t len, void *data)
 	audio_popup_data_arrived();
 }
 
+/* Mutes apps; voice keeps hearing. */
+#define CHAT_MIC \
+	"m=$(pw-cli ls Node | awk '/^\\tid [0-9]+,/ { id = $2 } " \
+	"/node.name = \"nixly-mic\"$/ { print id + 0; exit }'); " \
+	"m=${m:-@DEFAULT_AUDIO_SOURCE@}; "
+#define MIC_READ \
+	"wpctl get-volume @DEFAULT_AUDIO_SOURCE@; wpctl get-volume $m"
+
 double
 pipewire_mic_volume_percent_nb(void)
 {
@@ -3923,8 +3931,7 @@ pipewire_mic_volume_percent_nb(void)
 		return mic_cached;
 	}
 	if (!mic_fetch_inflight &&
-			fetch_async("wpctl get-volume @DEFAULT_AUDIO_SOURCE@",
-				mic_fetch_done, NULL) == 0) {
+			fetch_async(CHAT_MIC MIC_READ, mic_fetch_done, NULL) == 0) {
 		mic_fetch_inflight = 1;
 		mic_fetch_start_ms = now;
 	}
@@ -3959,14 +3966,15 @@ audio_sink_defaults_apply_async(double speaker_pct)
 void
 audio_mic_defaults_apply_async(double mic_pct)
 {
-	char cmd[192];
+	char cmd[512];
 	uint64_t now = monotonic_msec();
 
 	mic_last_read_ms = 0;
 	snprintf(cmd, sizeof(cmd),
-		"wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0; "
-		"wpctl set-volume @DEFAULT_AUDIO_SOURCE@ %.2f; "
-		"wpctl get-volume @DEFAULT_AUDIO_SOURCE@", mic_pct / 100.0);
+		"wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0; " CHAT_MIC
+		"wpctl set-mute $m 0; "
+		"wpctl set-volume @DEFAULT_AUDIO_SOURCE@ %.2f; " MIC_READ,
+		mic_pct / 100.0);
 	if (fetch_async(cmd, mic_fetch_done, NULL) == 0) {
 		mic_fetch_inflight = 1;
 		mic_fetch_start_ms = now;
@@ -3995,16 +4003,11 @@ set_pipewire_mute(int mute)
 int
 set_pipewire_mic_mute(int mute)
 {
-	char arg[8];
+	char cmd[384];
+	const char *const argv[] = { "/bin/sh", "-c", cmd, NULL };
 
-	snprintf(arg, sizeof(arg), "%d", mute ? 1 : 0);
-
-	{
-		const char *const argv[] = { "wpctl", "set-mute",
-			"@DEFAULT_AUDIO_SOURCE@", arg, NULL };
-
-		spawn_cmd_async(argv);
-	}
+	snprintf(cmd, sizeof(cmd), CHAT_MIC "wpctl set-mute $m %d", mute ? 1 : 0);
+	spawn_cmd_async(argv);
 
 	/* Update cached state optimistically */
 	mic_muted = mute;
@@ -4085,8 +4088,7 @@ toggle_pipewire_mic_mute(void)
 	uint64_t now = monotonic_msec();
 
 	mic_last_read_ms = 0;
-	if (fetch_async("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle; "
-			"wpctl get-volume @DEFAULT_AUDIO_SOURCE@",
+	if (fetch_async(CHAT_MIC "wpctl set-mute $m toggle; " MIC_READ,
 			mic_fetch_done, NULL) == 0) {
 		mic_fetch_inflight = 1;
 		mic_fetch_start_ms = now;

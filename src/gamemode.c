@@ -455,7 +455,7 @@ lower_competing_processes(pid_t game_pid)
 		"sshd",
 		"bash", "zsh", "fish", "sh", "dash",
 		"gnome-keyring", "gcr-ssh-agent", "ssh-agent",
-		"gamemoded",
+		"gamemoded", "nixly-voice",
 		NULL
 	};
 
@@ -781,7 +781,7 @@ freeze_background_processes(void)
 		"sshd",
 		"bash", "zsh", "fish", "sh", "dash",
 		"gnome-keyring", "gcr-ssh-agent", "ssh-agent",
-		"gamemoded",
+		"gamemoded", "nixly-voice",
 		NULL
 	};
 

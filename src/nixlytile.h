@@ -3457,6 +3457,15 @@ void wsfreeze_thaw_all(void);
 void mic_watch_setup(void);
 void mic_watch_cleanup(void);
 
+/* voice.c — nixly-voice spoken commands */
+void voice_start(void);
+void voice_stop(void);
+
+/* default_app.c — XDG default application lookup */
+int default_app_exec(const char *mime, char *out, size_t size);
+int desktop_exec(const char *path, char *out, size_t size);
+int desktop_name(const char *path, char *out, size_t size);
+
 /* audio_watch.c — default-sink change watch for the volume module */
 void audio_watch_setup(void);
 void audio_watch_cleanup(void);

@@ -753,6 +753,7 @@ cleanup(void)
 	htpc_pad_cleanup();
 	remote_pad_cleanup();
 	mic_watch_cleanup();
+	voice_stop();
 	audio_watch_cleanup();
 	gaming_conf_cleanup();
 	gshortcuts_cleanup();
@@ -1284,6 +1285,9 @@ run(const char *startup_cmd)
 
 	/* Microphone module follows capture-device hotplug. */
 	mic_watch_setup();
+
+	/* Spoken commands from nixly-voice. */
+	voice_start();
 
 	/* Volume module follows default-sink changes (headset connect). */
 	audio_watch_setup();
@@ -3714,11 +3718,13 @@ spawn_cmd(const char *cmd)
 
 	if (is_steam_cmd(cmd_str)) {
 		const char *steam_bin = "steam";
+		/* Games launch by steam:// URI. */
+		const char *uri = strstr(cmd, "steam://");
 		if (access("/etc/profiles/per-user/total/bin/nixly_steam", X_OK) == 0)
 			steam_bin = "nixly_steam";
 		else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
 			steam_bin = "nixly_steam";
-		snprintf(cmd_str, sizeof(cmd_str), "%s", steam_bin);
+		snprintf(cmd_str, sizeof(cmd_str), "%s%s%s", steam_bin, uri ? " " : "", uri ? uri : "");
 	} else if (should_use_dgpu(cmd_str) && integrated_gpu_idx >= 0) {
 		set_dgpu_env();
 	}
