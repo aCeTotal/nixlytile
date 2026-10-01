@@ -1282,7 +1282,7 @@ typedef struct {
 	int conv_seen_w, conv_seen_h;  /* last committed size seen by animcommitnotify
 	                                * (size-change edge → converge_kick) */
 	/* Tile transaction state, see txn.c. */
-	struct wlr_box tile_target, tile_shown, tile_txn;
+	struct wlr_box tile_target, tile_shown, tile_txn, tile_sent;
 	int tile_ox, tile_oy;         /* live camera offset */
 	uint64_t tile_ws_id;          /* workspace of tile_shown; 0 = unplaced */
 	uint32_t tile_pass;

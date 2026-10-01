@@ -97,6 +97,7 @@ configure(Client *c, struct wlr_box box)
 	int cw, ch;
 
 	content_size(c, &cw, &ch);
+	c->tile_sent = box;
 	client_set_bounds(c, box.width, box.height);
 	c->txn_w = c->pending_resize_w = c->last_configured_w = w;
 	c->txn_h = c->pending_resize_h = c->last_configured_h = h;
@@ -105,6 +106,24 @@ configure(Client *c, struct wlr_box box)
 	c->txn_sent_ns = get_time_ns();
 	c->txn_owed = cw != w || ch != h;
 	return c->txn_owed;
+}
+
+/* Pointer drag: no shared hold. */
+static int
+loose(Monitor *m)
+{
+	return !m->txn_active &&
+			(cursor_mode == CurResize || cursor_mode == CurColResize);
+}
+
+/* Loose tiles chase their own target. */
+static void
+chase(Client *c)
+{
+	if (same_size(c->tile_target, c->tile_shown))
+		c->tile_shown = c->tile_target;
+	else if (!txn_owes(c) && !configure(c, c->tile_target))
+		c->tile_shown = c->tile_target;
 }
 
 /* Late clients: one configure in flight. */
@@ -233,7 +252,8 @@ txn_place(Monitor *m)
 {
 	Client *c;
 	int cw, ch;
-	int hold = m->txn_active || needed(m);
+	int drag = loose(m);
+	int hold = !drag && (m->txn_active || needed(m));
 
 	wl_list_for_each(c, &clients, link) {
 		if (!in_pass(c, m))
@@ -245,6 +265,8 @@ txn_place(Monitor *m)
 					ch != c->tile_shown.height - 2 * (int)c->bw;
 			if (c->txn_late)
 				configure(c, c->tile_shown);
+		} else if (drag) {
+			chase(c);
 		} else if (!hold) {
 			c->tile_shown = c->tile_target;
 		}
@@ -259,7 +281,7 @@ txn_tick(Monitor *m)
 			get_time_ns() - m->txn_start_ns >= TXN_TIMEOUT_NS))
 		settle(m);
 	/* Begin on vblank: freshest target. */
-	if (!m->txn_active && needed(m))
+	if (!m->txn_active && !loose(m) && needed(m))
 		begin(m);
 	return m->txn_active;
 }
@@ -299,6 +321,14 @@ txncommitnotify(struct wl_listener *listener, void *data)
 		}
 		c->txn_lock_seq = wlr_surface_lock_pending(client_surface(c));
 		c->txn_locked = 1;
+		return;
+	}
+	/* Loose: box follows the answered content. */
+	if (!c->in_txn && !c->txn_late) {
+		c->tile_shown = c->tile_sent;
+		if (loose(c->mon))
+			chase(c);
+		show(c);
 		return;
 	}
 	/* Late: resync, or chase the box. */

@@ -829,6 +829,9 @@ buttonpress(struct wl_listener *listener, void *data)
 				client_flush_pending_size(rc);
 			/* Drags skip the watchdog: recheck now. */
 			converge_kick(NULL);
+			/* Tick starts the final txn. */
+			if (selmon)
+				wlr_output_schedule_frame(selmon->wlr_output);
 		}
 		if (!locked && cursor_mode == CurColResize) {
 			cursor_mode = CurNormal;
