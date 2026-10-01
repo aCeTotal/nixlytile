@@ -337,6 +337,8 @@ workspace_detach_client(Client *c)
 {
 	Workspace *ws = c && c->column ? c->column->ws : NULL;
 
+	txn_forget(c);
+	c->float_want_set = 0;
 	column_remove_client(c);
 	if (ws)
 		refreshworkspacemodule(ws->mon);
@@ -764,6 +766,23 @@ workspace_new_column_inner_size(Monitor *m, int bw, int *out_w, int *out_h)
 
 	if (out_w) *out_w = w;
 	if (out_h) *out_h = h;
+}
+
+/* Narrowest a column may be dragged. */
+#define COLUMN_MIN_PX 100
+
+/* Widest client minimum in the column. */
+int
+column_min_width(Column *col)
+{
+	Client *c;
+	int w, h, min = COLUMN_MIN_PX;
+
+	wl_list_for_each(c, &col->clients, column_link) {
+		client_get_min_size(c, &w, &h);
+		min = MAX(min, w + 2 * (int)c->bw);
+	}
+	return min;
 }
 
 /* Target width in PIXELS for a column.  Three cases:
@@ -1741,9 +1760,9 @@ monitor_apply_positions(Monitor *m)
 
 	if (!m || !m->wlr_output->enabled)
 		return;
-	/* Positions moved: a gave-up client's scale/clip anchor must be
-	 * re-checked (see converge_kick). */
+	/* Re-check gave-up clients. */
 	m->converge_dirty = 1;
+	m->tile_pass++;
 
 	gap = m->gaps ? (int)gappx : 0;
 	ws_stride = m->m.height;
@@ -1766,6 +1785,7 @@ monitor_apply_positions(Monitor *m)
 	wl_list_for_each(ws, &m->workspaces, link) {
 		int ws_y_base;
 		int row_scroll;
+		int ox, oy;
 		int ws_visible = (ws == m->active_ws) || vertical_anim;
 
 		/* Settled state: inactive ws clients live off-screen, but
@@ -1825,40 +1845,24 @@ monitor_apply_positions(Monitor *m)
 			col->y = col->target_y;
 		}
 
+		/* Live camera offset, never held. */
+		ox = m->w.x - (int)lround(ws == m->active_ws
+				? ws->scroll_x_f : (double)row_scroll);
+		oy = m->w.y + ws_y_base;
+
 		wl_list_for_each(col, &ws->columns, link) {
-			/* m->w is the LIVE (spring-lerped) tile bbox.  Use it
-			 * for positions so a waybar toggle slides every tile's
-			 * top edge in lock-step with m->w.y while keeping the
-			 * bottom locked (m->w.y + m->w.height stays constant).
-			 *
-			 * Column x/width come from the CONTINUOUS spring values,
-			 * rounding the left and right EDGES independently.  The
-			 * old int path ((int)x_f − (int)scroll_x_f + (int)width_f)
-			 * summed three independent truncations, so an edge whose
-			 * continuous position is constant (the locked side of a
-			 * resize, where x and width springs cancel exactly)
-			 * jittered ±1px every frame. */
-			double scroll_f = (ws == m->active_ws)
-					? ws->scroll_x_f : (double)row_scroll;
-			int col_abs_x = m->w.x +
-					(int)lround(col->x_f - scroll_f);
-			int col_w = m->w.x +
-					(int)lround(col->x_f + col->width_f - scroll_f)
-					- col_abs_x;
-			int col_abs_y = m->w.y + ws_y_base + col->y;
+			/* Edges rounded independently: no jitter. */
+			int col_x = (int)lround(col->x_f);
+			int col_w = (int)lround(col->x_f + col->width_f) - col_x;
 			int nc = col->n_clients;
 			int j = 0;
-			int avail, used_h, y_cursor = 0;
+			int avail, y_cursor = 0;
 			double sumw = 0.0;
 
 			if (nc == 0)
 				continue;
-			/* Use live m->w.height so per-client heights lerp with
-			 * the column-height spring (waybar toggle case).
-			 * Heights are weighted (Mod+RightDrag vertical resize);
-			 * weight <= 0 means default 1.0. */
-			used_h = m->w.height;
-			avail = used_h - gap * (nc - 1);
+			/* Weighted heights, weight <= 0 means 1. */
+			avail = m->w.height - gap * (nc - 1);
 			wl_list_for_each(c, &col->clients, column_link)
 				sumw += c->col_weight > 0.0 ? c->col_weight : 1.0;
 			if (sumw <= 0.0)
@@ -1867,18 +1871,19 @@ monitor_apply_positions(Monitor *m)
 			wl_list_for_each(c, &col->clients, column_link) {
 				struct wlr_box geo;
 				double w = c->col_weight > 0.0 ? c->col_weight : 1.0;
-				geo.x = col_abs_x;
-				geo.y = col_abs_y + y_cursor;
+				geo.x = col_x;
+				geo.y = col->y + y_cursor;
 				geo.width = col_w;
 				geo.height = (j == nc - 1)
 					? (avail - y_cursor + gap * j)
 					: (int)((double)avail * w / sumw);
-				client_set_target_geom(c, geo);
+				txn_set_target(c, geo, ox, oy);
 				y_cursor += geo.height + gap;
 				j++;
 			}
 		}
 	}
+	txn_place(m);
 
 	/* Fullscreen clients are detached from their column and live on
 	 * LyrFS, so the per-workspace loop above never moves them — a ws

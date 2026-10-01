@@ -38,7 +38,7 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            diskwatch.o disk_helper.o disk_ui.o \
            popup_card.o popup_extra.o \
            netmon.o wifi_ctrl.o wifi_nm.o wifi_share.o qr_scan.o btmon.o bt_rssi.o bt_audio.o bt_caps.o text_entry.o net_ui.o bt_ui.o display_ui.o power_ui.o \
-           notify.o notifyd.o wlsec.o lightsense.o presence.o powersave.o battwatch.o camwatch.o cpuclock.o instruments.o converge.o spawn.o osd.o dwt.o launchboost.o overview.o \
+           notify.o notifyd.o wlsec.o lightsense.o presence.o powersave.o battwatch.o camwatch.o cpuclock.o instruments.o converge.o txn.o floatfit.o fshold.o spawn.o osd.o dwt.o launchboost.o overview.o \
            voice.o default_app.o
 
 PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstable-v1-protocol.h \
@@ -138,6 +138,12 @@ instruments.o: $(SRC)/instruments.c $(SRC)/nixlytile.h $(SRC)/client.h
 osd.o: $(SRC)/osd.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 converge.o: $(SRC)/converge.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/diag.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+txn.o: $(SRC)/txn.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/diag.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+floatfit.o: $(SRC)/floatfit.c $(SRC)/nixlytile.h $(SRC)/client.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+fshold.o: $(SRC)/fshold.c $(SRC)/nixlytile.h $(SRC)/client.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 dwl_ipc.o: $(SRC)/dwl_ipc.c $(SRC)/nixlytile.h $(SRC)/dwl-ipc-unstable-v2-protocol.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<

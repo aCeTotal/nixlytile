@@ -820,15 +820,15 @@ buttonpress(struct wl_listener *listener, void *data)
 		 * after the first mouse resize. */
 		resizing_from_mouse = 0;
 		tile_resize_reset();
-		/* X11 configures dropped by drag pacing (client_request_size):
-		 * send the final size now so Discord/X11 apps land exactly on
-		 * the released geometry instead of the last paced step. */
+		/* Flush paced X11 sizes. */
 		if (cursor_mode == CurResize || cursor_mode == CurColResize) {
 			Client *rc;
 			if (grabc)
 				client_set_resizing(grabc, 0);
 			wl_list_for_each(rc, &clients, link)
 				client_flush_pending_size(rc);
+			/* Drags skip the watchdog: recheck now. */
+			converge_kick(NULL);
 		}
 		if (!locked && cursor_mode == CurColResize) {
 			cursor_mode = CurNormal;
@@ -2281,6 +2281,24 @@ cursor_snap_across_dead_zone(double dx, double dy)
 	return 1;
 }
 
+/* Drag the edge col shares with nbr. */
+static int
+drag_shared_edge(Column *col, Column *nbr, int w0, int nbr_w0, int delta)
+{
+	int total = w0 + nbr_w0;
+	int new_w = MAX(column_min_width(col),
+			MIN(w0 + delta, total - column_min_width(nbr)));
+
+	if (new_w == col->width_px_override)
+		return 0;
+	col->fullscreen = nbr->fullscreen = 0;
+	col->width_px_override = new_w;
+	nbr->width_px_override = total - new_w;
+	/* Follow the pointer, no spring. */
+	col->just_created = nbr->just_created = 1;
+	return 1;
+}
+
 void
 motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double dy,
 		double dx_unaccel, double dy_unaccel)
@@ -2652,26 +2670,12 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	last_pointer_motion_ms = monotonic_msec();
 	presence_note_input();
 	if (cursor_mode == CurColResize) {
-		if (grab_resize_col) {
-			const int min_w = 100;
-			double dx = cursor->x - grab_resize_start_x;
-			int delta = (int)(grab_resize_sign * dx);
-			int new_w = grab_resize_col_w0 + delta;
-			if (grab_resize_nbr) {
-				int new_nbr_w = grab_resize_nbr_w0 - delta;
-				if (new_w >= min_w && new_nbr_w >= min_w &&
-						new_w != grab_resize_col->width_px_override) {
-					grab_resize_col->fullscreen = 0;
-					grab_resize_nbr->fullscreen = 0;
-					grab_resize_col->width_px_override = new_w;
-					grab_resize_nbr->width_px_override = new_nbr_w;
-					grab_resize_col->just_created = 1;
-					grab_resize_nbr->just_created = 1;
-					if (selmon)
-						arrange(selmon);
-				}
-			}
-		}
+		if (grab_resize_col && grab_resize_nbr && selmon &&
+				drag_shared_edge(grab_resize_col, grab_resize_nbr,
+					grab_resize_col_w0, grab_resize_nbr_w0,
+					(int)(grab_resize_sign *
+						(cursor->x - grab_resize_start_x))))
+			arrange(selmon);
 		return;
 	}
 	if (cursor_mode == CurMove) {
@@ -2699,31 +2703,13 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 				double dy_total = cursor->y - resize_start_y;
 
 				if (tile_rsz_col && tile_rsz_nbr) {
-					const int min_w = 100;
-					int delta = (int)(tile_rsz_hsign * dx_total);
-					int new_w = tile_rsz_w0 + delta;
-					int new_nbr_w = tile_rsz_nbr_w0 - delta;
-					if (new_w >= min_w && new_nbr_w >= min_w &&
-							new_w != tile_rsz_col->width_px_override) {
-						tile_rsz_col->fullscreen = 0;
-						tile_rsz_nbr->fullscreen = 0;
-						tile_rsz_col->width_px_override = new_w;
-						tile_rsz_nbr->width_px_override = new_nbr_w;
-						/* Track the cursor directly during
-						 * the drag (same as CurColResize)
-						 * instead of springing after it. */
-						tile_rsz_col->just_created = 1;
-						tile_rsz_nbr->just_created = 1;
-						changed = 1;
-					}
+					changed = drag_shared_edge(tile_rsz_col,
+							tile_rsz_nbr, tile_rsz_w0,
+							tile_rsz_nbr_w0,
+							(int)(tile_rsz_hsign * dx_total));
 				} else if (tile_rsz_col && tile_rsz_col->ws && selmon) {
-					/* Free right edge: resize against the screen
-					 * edge.  Clamp so the edge stops exactly at
-					 * the tile area's right edge — the column can
-					 * never grow past it, so nothing ever spills
-					 * onto a neighbouring output and the camera
-					 * never scrolls mid-drag. */
-					const int min_w = 100;
+					/* Free right edge: clamp to screen. */
+					int min_w = column_min_width(tile_rsz_col);
 					int delta = (int)(tile_rsz_hsign * dx_total);
 					int new_w = tile_rsz_w0 + delta;
 					int mon_w = selmon->w_initialized
@@ -2748,8 +2734,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 
 				if (tile_rsz_ca && tile_rsz_cb) {
 					const int min_h = 80;
-					int dy = (int)dy_total;
-					int new_a = tile_rsz_ha0 + dy;
+					int new_a = tile_rsz_ha0 + (int)dy_total;
 					int new_b;
 					if (new_a < min_h)
 						new_a = min_h;
@@ -2802,7 +2787,10 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 				}
 			}
 
-			resize(grabc, box, 1);
+			/* The opposite edges stay put. */
+			float_set(grabc, box,
+					resize_dir_x < 0 ? ANCHOR_END : ANCHOR_START,
+					resize_dir_y < 0 ? ANCHOR_END : ANCHOR_START);
 			return;
 		}
 	}
@@ -3120,10 +3108,12 @@ pointerfocus(Client *c, struct wlr_surface *surface, double sx, double sy,
 			&& toplevel_from_wlr_surface(kfocus, &kc, &kl) != LayerShell
 			&& !(kc && client_is_unmanaged(kc));
 
+	/* Resize grabs keep focus on the grabbed window. */
 	if (!in_pointerfocus && (surface != seat->pointer_state.focused_surface
 				|| kb_stale) &&
 			sloppyfocus && c && !client_is_unmanaged(c) && !anim_in_progress
-			&& !fs_blocks) {
+			&& !fs_blocks && cursor_mode != CurResize
+			&& cursor_mode != CurColResize) {
 		in_pointerfocus = 1;
 		focusclient(c, 0);
 		in_pointerfocus = 0;

@@ -3139,6 +3139,10 @@ rendermon_prologue(Monitor *m, uint64_t frame_start_ns)
 		}
 
 		still = monitor_anim_tick(m, dt);
+		if (txn_tick(m))
+			still = 1;
+		if (fshold_tick(m))
+			still = 1;
 		/* Size-convergence watchdog: re-drive any tile whose committed
 		 * size drifted away from its box (see converge.c).  Runs after
 		 * the anim tick so a tile that settled this frame is judged on

@@ -1212,12 +1212,6 @@ typedef struct {
 	 * small spring steps accumulate cleanly without truncation. */
 	double geom_fx, geom_fy, geom_fw, geom_fh;
 	double geom_vx, geom_vy, geom_vw, geom_vh;
-	/* Size-anim configure tracking: inner (surface) size sent to the
-	 * client at anim start, and the surface's natural size when the
-	 * anim began.  When the natural size changes mid-anim the client
-	 * has rendered at its new size — unfreeze early and show it. */
-	int anim_final_w, anim_final_h;
-	int anim_start_nat_w, anim_start_nat_h;
 	/* Cached size from last expensive resize() pass — used to skip
 	 * clip + scale recomputation when only position changed
 	 * (camera scroll), avoiding per-frame surface-tree walks for
@@ -1287,6 +1281,26 @@ typedef struct {
 	int converge_tries;
 	int conv_seen_w, conv_seen_h;  /* last committed size seen by animcommitnotify
 	                                * (size-change edge → converge_kick) */
+	/* Tile transaction state, see txn.c. */
+	struct wlr_box tile_target, tile_shown, tile_txn;
+	int tile_ox, tile_oy;         /* live camera offset */
+	uint64_t tile_ws_id;          /* workspace of tile_shown; 0 = unplaced */
+	uint32_t tile_pass;
+	int tile_fresh, in_txn, txn_wait, txn_late, txn_owed, txn_locked;
+	int txn_w, txn_h;
+	int content_w, content_h;      /* newest committed or held size */
+	uint32_t txn_serial, txn_lock_seq;
+	uint64_t txn_sent_ns;
+	struct wl_listener txn_commit;
+	/* Floating box follows content, see floatfit.c. */
+	struct wlr_box float_want;
+	int float_ax, float_ay, float_want_set;
+	/* Fullscreen switch awaiting content, see fshold.c. */
+	int fs_hold;                  /* FS_ENTERING or FS_LEAVING */
+	int fs_told;                  /* transition already sent */
+	int fs_w, fs_h;
+	uint32_t fs_serial;
+	uint64_t fs_hold_ns;
 	/* Latched give-up: set when the watchdog stopped re-driving this
 	 * client, together with the box it gave up on.  While the box is
 	 * unchanged the client is treated as settled (no per-frame vblank
@@ -1768,6 +1782,9 @@ struct Monitor {
 	int pos_anim_was_active;      /* edge-detection: X11 freeze on PURE pos anims */
 	int converge_dirty;           /* something to (re)check — see converge_kick() */
 	int camera_anim_active;       /* camera in flight (scroll_x / ws_y spring) — gates frame_done throttle */
+	int txn_active;               /* tile transaction awaiting commits */
+	uint64_t txn_start_ns;
+	uint32_t tile_pass;           /* monitor_apply_positions generation */
 	int sw_cursor_scanout_hold;   /* we disabled scanout election for a visible software cursor */
 	int game_cursor_swlock;       /* software-cursor lock held while a fullscreen game is visible */
 	/* Spring state for the tile area (m->w).  When a layer-shell
@@ -2449,12 +2466,33 @@ void fullscreennotify(struct wl_listener *listener, void *data);
 void setpsel(struct wl_listener *listener, void *data);
 void setsel(struct wl_listener *listener, void *data);
 void resize(Client *c, struct wlr_box geo, int interact);
+void client_place(Client *c, struct wlr_box geo);
 void client_apply_scene_geom(Client *c, struct wlr_box geo);
 void client_set_border_size(Client *c, int w, int h);
 void client_clip_to_usable(Client *c);
 void client_request_size(Client *c, int w, int h);
 void client_flush_pending_size(Client *c);
 void client_send_configure_only(Client *c, int w, int h);
+/* Floating box anchor per axis. */
+enum { ANCHOR_START, ANCHOR_END, ANCHOR_MID };
+/* Fullscreen transition in flight. */
+enum { FS_SETTLED, FS_ENTERING, FS_LEAVING, FS_REVERTING };
+/* floatfit.c */
+void float_set(Client *c, struct wlr_box want, int ax, int ay);
+void float_fit(Client *c);
+/* fshold.c */
+void fullscreen_request(Client *c, int on);
+int fshold_commit(Client *c);
+int fshold_tick(Monitor *m);
+void fshold_cancel(Client *c);
+void fshold_forget(Client *c);
+/* txn.c */
+void txn_set_target(Client *c, struct wlr_box box, int ox, int oy);
+void txn_place(Monitor *m);
+int txn_tick(Monitor *m);
+int txn_owes(Client *c);
+void txn_forget(Client *c);
+void txncommitnotify(struct wl_listener *listener, void *data);
 /* converge.c — size-convergence watchdog */
 int client_size_pending(Client *c);
 int clients_converge_tick(Monitor *m);
@@ -2508,6 +2546,7 @@ void column_destroy(Column *col);
 void column_add_client(Column *col, Client *c);
 void column_remove_client(Client *c);
 int column_index(Column *col);
+int column_min_width(Column *col);
 void column_move_to_index(Column *col, int idx);
 void monitor_init_workspaces(Monitor *m);
 void monitor_cleanup_workspaces(Monitor *m);
@@ -2579,7 +2618,7 @@ int instruments_owns(Monitor *m);
 int monitor_anim_tick(Monitor *m, double dt);
 void client_set_target_geom(Client *c, struct wlr_box g);
 void client_scale_to_box(Client *c, int box_w, int box_h);
-void client_scale_reset(Client *c);
+void client_freeze(Client *c);
 void client_unfreeze(Client *c);
 void client_start_open_anim(Client *c);
 void anim_spawn_close(Monitor *m, struct wlr_buffer *buffer, struct wlr_box geom);

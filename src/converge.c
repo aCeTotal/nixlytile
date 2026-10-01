@@ -19,7 +19,7 @@
  * that cannot comply (declared minimum larger than the tile) is detected
  * via its min size and counted as converged, so it is never re-driven in
  * a loop; anything else that refuses after CONVERGE_MAX_TRIES is left
- * scaled to its box, which is at least visually correct.
+ * cropped to its box.
  */
 #include "nixlytile.h"
 #include "client.h"
@@ -29,8 +29,7 @@
  * configure was lost.  Comfortably above a slow toolkit's relayout, well
  * below "the user notices". */
 #define CONVERGE_GRACE_MS  150
-/* Re-sends before we stop fighting the client and just scale its buffer
- * into the box. */
+/* Re-sends before cropping for good. */
 #define CONVERGE_MAX_TRIES 4
 
 /* One axis is settled when the client committed the box — or, for a box
@@ -54,7 +53,8 @@ converge_candidate(Client *c, Monitor *m)
 {
 	struct wlr_surface *s;
 
-	if (c->mon != m || !c->column || c->anim_active)
+	if (c->mon != m || !c->column || c->anim_active || m->txn_active ||
+			txn_owes(c))
 		return 0;
 	if (c->isfloating || c->isfullscreen)
 		return 0;
@@ -75,7 +75,8 @@ converge_candidate(Client *c, Monitor *m)
 int
 client_size_pending(Client *c)
 {
-	return c && c->converge_since != 0 && !c->converge_gave_up;
+	return c && ((c->converge_since != 0 && !c->converge_gave_up) ||
+			txn_owes(c));
 }
 
 /* Give-up is latched against the box it was reached at.  A different box
@@ -94,7 +95,7 @@ converge_clear(Client *c)
 /* Event-driven gate for the per-frame walk below.  A size mismatch can
  * only ARISE from (a) an outgoing configure (client_request_size), (b) a
  * client commit (animcommitnotify), or (c) a geometry move re-anchoring
- * a gave-up client's scale/clip (monitor_apply_positions).  All three
+ * a gave-up client's crop (monitor_apply_positions).  All three
  * call this; the tick then re-walks until everything reports settled and
  * clears the flag — so a fully settled desktop skips the whole
  * clients walk (with two protocol-size reads per client) every frame. */
@@ -136,33 +137,25 @@ clients_converge_tick(Monitor *m)
 			 * proved it cannot comply. */
 			if (!c->converge_gave_up)
 				converge_clear(c);
+			/* Re-check once the owed render lapses. */
+			pending |= c->mon == m && txn_owes(c);
 			continue;
 		}
 
 		iw = c->geom.width  - 2 * (int)c->bw;
 		ih = c->geom.height - 2 * (int)c->bw;
 
-		/* Latched give-up at this same box: keep the buffer stretched
-		 * into the box (the client still renders at its own size) but
-		 * report nothing pending — no vblank chain, no frame_done drip.
-		 * Without this a client that structurally can't reach its box
-		 * pins the output at full refresh for as long as it is open. */
+		/* Latched give-up at this box: crop, report idle. */
 		if (c->converge_gave_up) {
 			if (iw == c->converge_gave_up_w &&
 					ih == c->converge_gave_up_h) {
-				/* Steady state: the scale/clip is already in
-				 * place.  Re-apply only when the tile moved or
-				 * the client committed a new natural size —
-				 * client_scale_to_box walks the whole scene
-				 * subtree, pure no-op waste every other frame
-				 * (wlroots dedups the setters anyway). */
+				/* Re-crop only after a move or commit. */
 				client_get_committed_size(c, &nw, &nh);
 				if (!c->converge_applied ||
 						c->converge_applied_x != c->geom.x ||
 						c->converge_applied_y != c->geom.y ||
 						c->converge_applied_nat_w != nw ||
 						c->converge_applied_nat_h != nh) {
-					client_scale_to_box(c, iw, ih);
 					client_clip_to_usable(c);
 					c->converge_applied = 1;
 					c->converge_applied_x = c->geom.x;
@@ -190,10 +183,7 @@ clients_converge_tick(Monitor *m)
 			continue;
 		}
 
-		/* Whatever the client is showing does not fit the box: stretch
-		 * its current buffer into it and crop to the usable area, so
-		 * the tile looks right for every frame the mismatch lasts. */
-		client_scale_to_box(c, iw, ih);
+		/* Mismatch is cropped, never stretched. */
 		client_clip_to_usable(c);
 
 		if (now - c->converge_since < CONVERGE_GRACE_MS) {
@@ -206,7 +196,7 @@ clients_converge_tick(Monitor *m)
 			c->converge_gave_up_w = iw;
 			c->converge_gave_up_h = ih;
 			diag_logf("TILE",
-				"CONVERGE-GIVEUP appid='%s' box=%dx%d committed=%dx%d (kept scaled to box)",
+				"CONVERGE-GIVEUP appid='%s' box=%dx%d committed=%dx%d (kept cropped to box)",
 				client_get_appid(c) ? client_get_appid(c) : "(null)",
 				iw, ih, nw, nh);
 			continue;

@@ -423,15 +423,6 @@ commitnotify(struct wl_listener *listener, void *data)
 	if (c->isfullscreen)
 		track_client_frame(c);
 
-	/* Mid-anim commits must not push the lerped intermediate geometry
-	 * back as a configure.  The anim path configured the FINAL size at
-	 * anim start; re-sending c->geom here makes the client chase the
-	 * spring with intermediate-size renders (content visibly ratchets,
-	 * worst at the bottom edge on a statusbar toggle).  The settle
-	 * branch in clients_anim_tick sends the authoritative resize. */
-	if (c->anim_active)
-		return;
-
 	/* Refresh the surface clip when the xdg window-geometry OFFSET
 	 * changes without a size change.  Chrome drops its CSD shadow
 	 * margin when it acks fullscreen: geometry goes (10,11)→(0,0) but
@@ -453,29 +444,23 @@ commitnotify(struct wl_listener *listener, void *data)
 					&fresh_clip);
 		}
 	} else if (c->column && c->scene_surface) {
-		/* Column tiles: re-evaluate the box/area clip against the
-		 * freshly committed buffer.  A stale oversized buffer gets
-		 * released here (crop lifted the moment the content fits) and
-		 * a newly oversized one gets caught before another output's
-		 * rendermon can draw it across the monitor edge. */
+		/* Crop against the fresh buffer. */
 		client_clip_to_usable(c);
-		/* Self-heal: the client just committed a size that doesn't
-		 * match its tile box and no anim owns the geometry.  Normally
-		 * last_configured already equals the box and the dedup in
-		 * client_request_size makes this a no-op; but an aborted anim
-		 * can leave the client configured for an abandoned size — this
-		 * re-sends the correct one so the tile converges on the next
-		 * commit instead of staying cropped/stretched forever. */
+		/* Re-send a configure lost elsewhere. */
 		{
 			int iw = c->geom.width  - 2 * (int)c->bw;
 			int ih = c->geom.height - 2 * (int)c->bw;
 			int nw, nh;
 			client_get_committed_size(c, &nw, &nh);
-			if (iw > 0 && ih > 0 && nw > 0 && nh > 0 &&
+			if (!c->in_txn && iw > 0 && ih > 0 && nw > 0 && nh > 0 &&
 					(nw != iw || nh != ih))
 				client_request_size(c, iw, ih);
 		}
 	}
+
+	/* txn.c places tiles. */
+	if (c->column)
+		return;
 
 	/* For tiled clients in a tiling layout, use the geometry from btrtile
 	 * (stored in old_geom) to ensure proper tiling. This prevents clients
@@ -485,6 +470,9 @@ commitnotify(struct wl_listener *listener, void *data)
 	    c->mon->lt[c->mon->sellt]->arrange &&
 	    c->old_geom.width > 0 && c->old_geom.height > 0) {
 		resize(c, c->old_geom, 0);
+	} else if (c->isfloating && !c->isfullscreen && !c->is_notif &&
+			!c->is_instrument) {
+		float_fit(c);
 	} else {
 		resize(c, c->geom, (c->isfloating && !c->isfullscreen));
 	}
@@ -952,7 +940,7 @@ fullscreennotify(struct wl_listener *listener, void *data)
 			c->geom.width, c->geom.height,
 			c->mon && c->mon->wlr_output
 				? c->mon->wlr_output->name : "(null)");
-	setfullscreen(c, want);
+	fullscreen_request(c, want);
 }
 
 /* Hard-kill backstop for killclient: a window that ignored the close
@@ -1094,6 +1082,7 @@ mapnotify(struct wl_listener *listener, void *data)
 		 * the anim scaling so mid-anim commits can't overshoot the
 		 * lerped box.  Removed in unmapnotify (X11 can remap). */
 		LISTEN(&surf->events.commit, &c->anim_commit, animcommitnotify);
+		LISTEN(&surf->events.client_commit, &c->txn_commit, txncommitnotify);
 	}
 
 	/* Register with ext-foreign-toplevel-list for external tool visibility */
@@ -1892,8 +1881,8 @@ client_clip_to_usable(Client *c)
 {
 	struct wlr_box area;
 	int ax0, ay0, ax1, ay1;   /* usable area, client-tree-local coords */
-	int box_clip = 0;
-	int live_fit = 0;         /* live drag + client behind → scale, don't crop */
+	int box_clip;
+	int nat_w, nat_h;
 	int iw, ih;
 	int i;
 
@@ -1911,36 +1900,9 @@ client_clip_to_usable(Client *c)
 	iw = c->geom.width  - 2 * (int)c->bw;
 	ih = c->geom.height - 2 * (int)c->bw;
 
-	/* The surface must stay inside its own tile box: a buffer committed
-	 * at a size other than the box (drag / reflow, slow-acking client)
-	 * otherwise draws over the neighbour tile, and across the monitor
-	 * edge onto the neighbouring output when the tile sits at the edge,
-	 * until the client finally commits the new size ("snaps into place").
-	 * Two ways to enforce it:
-	 *
-	 *   live drag → SCALE the committed buffer into the box.  The pointer
-	 *     moves the edge every frame and a slow client (Chrome) is always
-	 *     a frame or two behind; cropping it would show a cut-off tile
-	 *     while shrinking and bare background on the growing edge, which
-	 *     is what reads as the tile jumping back and forth.  A client that
-	 *     keeps up commits at box size, the scale is exactly 1.0, and
-	 *     nothing changes for it (Alacritty).
-	 *
-	 *   otherwise → CROP.  There the size is settled and a mismatch means
-	 *     a stale buffer, which must not bleed while it lasts.  A tile
-	 *     straddling the usable-area edge is cropped either way: the area
-	 *     clip owns its dest sizing, so scaling can't apply there.
-	 *
-	 * During a non-live size anim client_scale_to_box owns the fit. */
-	if (!c->anim_active || cursor_mode == CurResize ||
-			cursor_mode == CurColResize) {
-		int nat_w, nat_h;
-		client_get_committed_size(c, &nat_w, &nat_h);
-		box_clip = (nat_w > iw || nat_h > ih);
-		if (cursor_mode == CurResize || cursor_mode == CurColResize)
-			live_fit = (nat_w > 0 && nat_h > 0 &&
-					(nat_w != iw || nat_h != ih));
-	}
+	/* Never scaled: crop oversized buffers. */
+	client_get_committed_size(c, &nat_w, &nat_h);
+	box_clip = (nat_w > iw || nat_h > ih);
 
 	area = c->mon->w;
 	ax0 = area.x - c->geom.x;
@@ -1951,7 +1913,7 @@ client_clip_to_usable(Client *c)
 	/* Fully inside the usable area → no crop needed.  Restore once if we
 	 * were previously clipped, otherwise fast-path out (the common case
 	 * every frame for non-edge tiles). */
-	if ((!box_clip || live_fit) && ax0 <= 0 && ay0 <= 0 &&
+	if (!box_clip && ax0 <= 0 && ay0 <= 0 &&
 			ax1 >= c->geom.width && ay1 >= c->geom.height) {
 		if (c->area_clipped) {
 			client_clip_reset(c);
@@ -1971,11 +1933,6 @@ client_clip_to_usable(Client *c)
 			wlr_scene_subsurface_tree_set_clip(
 					&c->scene_surface->node, &fresh);
 		}
-		/* Tile fully inside the usable area: no crop, so the live-drag
-		 * fit is a pure scale (client_scale_to_box no-ops once the
-		 * client's committed size matches the box). */
-		if (live_fit && iw > 0 && ih > 0)
-			client_scale_to_box(c, iw, ih);
 		return;
 	}
 
@@ -2088,26 +2045,10 @@ client_clip_to_usable(Client *c)
 	}
 }
 
-/* Pace X11 configures during a live drag: XWayland has no configure ack,
- * so Discord/X11 apps otherwise receive ConfigureNotify at pointer-motion
- * rate (up to 125/s), queue a relayout for each, and keep "adjusting"
- * long after the drag ended. */
+/* X11 has no ack: pace drags. */
 #define X11_RESIZE_PACE_MS 40
 
-/*
- * Paced size request — ALL size configures during layout/anim/drag go
- * through here.
- *
- *   xdg: gate on the outstanding-ack serial.  At most one configure is
- *   in flight; newer sizes land in pending_resize_w/h and commitnotify
- *   sends the newest on ack.  Slow-acking clients (Electron) resize at
- *   the rate THEY can handle instead of building a relayout backlog.
- *
- *   X11: no ack exists, so pace by time during a live drag.  Dropped
- *   intermediates stay in pending_resize_w/h (last_configured_* only
- *   tracks sizes actually sent) and client_flush_pending_size sends the
- *   final one on button release.
- */
+/* Paced size request: one configure in flight. */
 void
 client_request_size(Client *c, int w, int h)
 {
@@ -2123,10 +2064,16 @@ client_request_size(Client *c, int w, int h)
 		uint32_t now = (uint32_t)monotonic_msec();
 		int live = (cursor_mode == CurResize ||
 				cursor_mode == CurColResize);
+		int nw, nh;
+
 		c->pending_resize_w = w;
 		c->pending_resize_h = h;
+		/* A caught-up commit stands in for an ack. */
+		client_get_committed_size(c, &nw, &nh);
 		if (live && c->x11_cfg_ms &&
-				now - c->x11_cfg_ms < X11_RESIZE_PACE_MS)
+				now - c->x11_cfg_ms < X11_RESIZE_PACE_MS &&
+				(nw != c->last_configured_w ||
+				 nh != c->last_configured_h))
 			return;
 		c->x11_cfg_ms = now;
 		c->last_configured_w = w;
@@ -2163,24 +2110,44 @@ client_flush_pending_size(Client *c)
 #endif
 }
 
+/* Scene placement only, no configure. */
+void
+client_place(Client *c, struct wlr_box geo)
+{
+	struct wlr_box clip;
+
+	c->geom = geo;
+	/* last_pos: callers may pre-set geom. */
+	if (c->last_pos_x != geo.x || c->last_pos_y != geo.y) {
+		wlr_scene_node_set_position(&c->scene->node, geo.x, geo.y);
+		c->last_pos_x = geo.x;
+		c->last_pos_y = geo.y;
+	}
+	if (geo.width == c->last_size_w && geo.height == c->last_size_h) {
+		client_clip_to_usable(c);
+		return;
+	}
+	c->last_size_w = geo.width;
+	c->last_size_h = geo.height;
+	wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
+	client_set_border_size(c, geo.width, geo.height);
+	wlr_scene_node_set_position(&c->border[1]->node, 0, geo.height - c->bw);
+	wlr_scene_node_set_position(&c->border[2]->node, 0, c->bw);
+	wlr_scene_node_set_position(&c->border[3]->node, geo.width - c->bw, c->bw);
+	client_get_clip(c, &clip);
+	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+	client_clip_to_usable(c);
+}
+
 void
 resize(Client *c, struct wlr_box geo, int interact)
 {
 	struct wlr_box *bbox;
-	struct wlr_box clip;
-	int reqw, reqh;
-	int size_changed, pos_changed;
 
 	if (!c->mon || !client_surface(c)->mapped)
 		return;
 
-	/* Hard fast-path: nothing whatsoever changed → no work, no
-	 * scene damage, no wlroots call.  Critical for keeping heavy
-	 * clients (Blender) smooth — every wasted call costs frame time
-	 * at 4K @ 60Hz.  Only valid when the size we last CONFIGURED the
-	 * client with also matches — an aborted anim can leave an
-	 * outstanding configure at a different size, and returning here
-	 * would block the client_request_size below that repairs it. */
+	/* Nothing changed, configured size included. */
 	if (!interact &&
 			geo.x == c->geom.x && geo.y == c->geom.y &&
 			geo.width == c->geom.width && geo.height == c->geom.height &&
@@ -2192,92 +2159,21 @@ resize(Client *c, struct wlr_box geo, int interact)
 
 	bbox = interact ? &sgeom : &c->mon->w;
 
-	client_set_bounds(c, geo.width, geo.height);
 	c->geom = geo;
 	if (!c->column)
 		applybounds(c, bbox);
-
-	size_changed = (c->geom.width != c->last_size_w ||
-			c->geom.height != c->last_size_h);
-
-	/* Compare against the last position actually pushed to wlroots,
-	 * not c->geom (callers may have pre-set c->geom to the new value
-	 * before invoking resize, which would defeat a c->geom comparison). */
-	pos_changed = (c->last_pos_x != c->geom.x || c->last_pos_y != c->geom.y);
-	if (pos_changed) {
-		wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
-		c->last_pos_x = c->geom.x;
-		c->last_pos_y = c->geom.y;
-	}
-
-	/* Border rects + surface offsets only need rewriting on actual
-	 * size change.  For pure camera scroll (size unchanged) this
-	 * skips 7 wlroots calls per client per frame — a meaningful
-	 * win for heavy clients (Blender, Chrome) where every saved µs
-	 * helps GPU keep up at 4K @ 60Hz. */
-	if (size_changed) {
-		wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
-		client_set_border_size(c, c->geom.width, c->geom.height);
-		wlr_scene_node_set_position(&c->border[1]->node, 0, c->geom.height - c->bw);
-		wlr_scene_node_set_position(&c->border[2]->node, 0, c->bw);
-		wlr_scene_node_set_position(&c->border[3]->node, c->geom.width - c->bw, c->bw);
-	}
-
-	reqw = c->geom.width - 2 * c->bw;
-	reqh = c->geom.height - 2 * c->bw;
-
-	/*
-	 * Avoid flooding heavy clients with ConfigureNotify on every
-	 * camera-scroll frame.  For X11 (Blender, Chrome, games),
-	 * wlr_xwayland_surface_configure has no dedup — every position
-	 * change spawns an event that the client treats as a window
-	 * resize hint.  Result: Blender re-evaluates layout 60×/sec
-	 * during a 70ms scroll → choppy + "doesn't redraw until
-	 * refocus" behaviour.  Skip when the SIZE we'd configure
-	 * matches the last sent. */
-	client_request_size(c, reqw, reqh);
-
-	/* A pure move leaves client_request_size's size dedup unsatisfied, so
-	 * an X11 client would keep stale root coords — see
-	 * client_flush_x11_pos.  Only when nothing is animating: during a
-	 * camera slide the position changes every frame and Xwayland would get
-	 * a configure per frame (the flood this path exists to avoid); the
-	 * anim settle in monitor_anim_tick flushes once at the end instead. */
-	if (!c->anim_active && !(c->mon && c->mon->anim_was_active))
-		client_flush_x11_pos(c);
-
-	/* Fast-path: when only POSITION changed (camera scroll / ws
-	 * switch), skip the expensive clip + scale tree walks.  These
-	 * walk the entire surface tree and for heavy clients (Blender,
-	 * Chrome) they cost real time per frame. */
-	if (c->geom.width == c->last_size_w &&
-			c->geom.height == c->last_size_h) {
-		/* Position-only (camera scroll / ws switch): re-crop edge
-		 * tiles so a column scrolled past the tile-area edge doesn't
-		 * bleed into the gap margin. */
-		client_clip_to_usable(c);
+	if (!c->column && !c->isfullscreen) {
+		float_set(c, c->geom, ANCHOR_START, ANCHOR_START);
 		return;
 	}
-	c->last_size_w = c->geom.width;
-	c->last_size_h = c->geom.height;
+	client_set_bounds(c, c->geom.width, c->geom.height);
+	client_place(c, c->geom);
+	client_request_size(c, c->geom.width - 2 * (int)c->bw,
+			c->geom.height - 2 * (int)c->bw);
 
-	client_get_clip(c, &clip);
-	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
-
-	/* Clip BEFORE scaling: client_clip_to_usable clears a stale
-	 * area_clipped left over from the anim (a tile that straddled the
-	 * usable-area edge mid-anim but has now settled inside).  With the
-	 * old order the flag made client_scale_to_box skip, so the settled
-	 * tile kept its unscaled buffer until the client's next commit. */
-	client_clip_to_usable(c);
-
-	{
-		int nat_w, nat_h;
-		client_get_committed_size(c, &nat_w, &nat_h);
-		if (nat_w > 0 && nat_h > 0)
-			client_scale_to_box(c, c->geom.width - 2 * (int)c->bw,
-					c->geom.height - 2 * (int)c->bw);
-	}
+	/* Pure X11 moves flush once anims settle. */
+	if (!c->anim_active && !(c->mon && c->mon->anim_was_active))
+		client_flush_x11_pos(c);
 }
 
 void
@@ -2307,7 +2203,10 @@ setfullscreen(Client *c, int fullscreen)
 {
 	int was = c->isfullscreen;
 	Workspace *prev_fs_ws = c->fs_ws;
+	int told = fullscreen ? FS_ENTERING : FS_LEAVING;
 
+	/* Direct calls win over a pending switch. */
+	fshold_cancel(c);
 	/* Rule-assigned workspace (HTPC: one app per workspace). When it is
 	 * not the active workspace the client maps hidden: geometry only —
 	 * no cover animation, no focus steal, no output modesets. Those are
@@ -2382,7 +2281,9 @@ setfullscreen(Client *c, int fullscreen)
 	}
 
 	c->bw = (fullscreen || c->isembedded) ? 0 : borderpx;
-	client_set_fullscreen(c, fullscreen);
+	if (c->fs_told != told)
+		client_set_fullscreen(c, fullscreen);
+	c->fs_told = FS_SETTLED;
 	/* Drop the one-configure-in-flight gate for this transition.  The
 	 * fullscreen STATE configure is scheduled right above; if
 	 * client_request_size then parks the new size behind an unacked
@@ -2444,7 +2345,8 @@ setfullscreen(Client *c, int fullscreen)
 		c->geom_fh = (double)c->geom.height;
 		c->geom_vx = c->geom_vy = c->geom_vw = c->geom_vh = 0.0;
 		client_unfreeze(c);
-		client_scale_reset(c);
+		/* Leaving fullscreen animates from here. */
+		c->float_want_set = 0;
 		/* Retro emulators in their menus: native presentation only. No
 		 * VRR, no refresh-rate matching, no video-classify cadence —
 		 * those cause black flicker/artifacts on HDMI TVs. Resolution
@@ -2754,7 +2656,8 @@ togglefullscreen(const Arg *arg)
 {
 	Client *sel = focustop(selmon);
 	if (sel)
-		setfullscreen(sel, !sel->isfullscreen);
+		fullscreen_request(sel, sel->fs_hold != FS_SETTLED
+				? sel->fs_hold == FS_LEAVING : !sel->isfullscreen);
 }
 
 void
@@ -2813,6 +2716,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 	/* Varselet forsvant før slide-en var ferdig — slipp slotten og
 	 * drep timeren så den ikke fyrer på et dødt vindu. */
 	notify_release(c);
+	fshold_forget(c);
 	instruments_release(c);
 	launchfx_forget_client(c);
 
@@ -2962,6 +2866,8 @@ unmapnotify(struct wl_listener *listener, void *data)
 	 * starts NULL, so next != NULL is precisely "registered"). */
 	if (c->anim_commit.link.next)
 		wl_list_remove(&c->anim_commit.link);
+	if (c->txn_commit.link.next)
+		wl_list_remove(&c->txn_commit.link);
 
 	/* X11 clients can remap the same Client (DXVK/Steam do).  Stale
 	 * resize-tracking from the previous mapping would let the dedups

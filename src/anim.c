@@ -64,15 +64,6 @@ scene_buffer_scale_iter(struct wlr_scene_buffer *buf, int sx, int sy, void *data
 	wlr_scene_buffer_set_dest_size(buf, w, h);
 }
 
-static void
-scene_buffer_natural_iter(struct wlr_scene_buffer *buf, int sx, int sy, void *data)
-{
-	(void)sx; (void)sy; (void)data;
-	if (!buf)
-		return;
-	wlr_scene_buffer_set_dest_size(buf, 0, 0);
-}
-
 void
 client_scale_to_box(Client *c, int box_w, int box_h)
 {
@@ -104,15 +95,6 @@ client_scale_to_box(Client *c, int box_w, int box_h)
 
 	wlr_scene_node_for_each_buffer(&c->scene_surface->node,
 			scene_buffer_scale_iter, &ctx);
-}
-
-void
-client_scale_reset(Client *c)
-{
-	if (!c || !c->scene_surface)
-		return;
-	wlr_scene_node_for_each_buffer(&c->scene_surface->node,
-			scene_buffer_natural_iter, NULL);
 }
 
 /*
@@ -225,31 +207,12 @@ spring_tick(double *pos, double *vel, double target, SpringParams sp, double dt)
 	return 1;
 }
 
-/*
- * Set a client's target geometry.
- *
- * Column clients have two distinct transition modes:
- *   1. Position-only change (camera scroll, ws Y switch): the layout
- *      drives c->geom every frame from scroll_x / ws_y_offset which
- *      themselves animate.  Snap c->geom to target — adding a second
- *      per-client anim layer would just lag.
- *   2. Size change (column-fullscreen toggle): the column's box
- *      width/height transitions.  Animate via the per-client anim
- *      tick, which also applies scene-buffer scaling each frame for
- *      smooth realtime content scaling.
- *
- * Floating / fullscreen / non-column clients always use the anim
- * path (they get step-change targets like fullscreen geom).
- *
- * Once an anim is in progress (anim_active == 1), subsequent
- * target updates from monitor_apply_positions just refresh
- * target_geom — they do NOT interrupt the running anim.
- */
-static int live_resize_active(void);
-
+/* Floating geometry spring, content-synced. */
 void
 client_set_target_geom(Client *c, struct wlr_box g)
 {
+	struct wlr_box from;
+
 	if (!c)
 		return;
 
@@ -261,189 +224,40 @@ client_set_target_geom(Client *c, struct wlr_box g)
 		return;
 	}
 
-	/* First placement (never been through resize(): last_size_w only
-	 * gets set there): the scene node still sits at the (0,0) map
-	 * default and c->geom holds the client's natural/X11-root coords —
-	 * both usually on ANOTHER monitor.  Springing from there animates
-	 * the window across screens before it lands.  Snap straight to the
-	 * target instead: resize() writes the scene position synchronously,
-	 * inside this arrange pass, before any output can render a frame. */
+	/* First placement snaps: no cross-screen slide. */
 	if (c->last_size_w == 0 && c->last_size_h == 0) {
 		c->anim_active = 0;
 		resize(c, g, 0);
 		return;
 	}
 
-	if (c->geom.x == g.x && c->geom.y == g.y &&
-			c->geom.width == g.width && c->geom.height == g.height) {
-		/* Target equals current geometry.  If an anim is in flight this
-		 * is a mid-anim arrange() (springs un-ticked since last frame,
-		 * so g == c->geom for every animating client) — do NOT cancel:
-		 * clearing anim_active here abandons the settle (scale_reset +
-		 * final resize) and orphans the final-size configure sent at
-		 * anim start, leaving the tile cropped/stretched at the wrong
-		 * size until layout numbers change again.  Keep the anim alive;
-		 * clients_anim_tick either continues it or performs the full
-		 * settle on the next frame (arrange scheduled one). */
+	/* Mid-anim arrange keeps the anim alive. */
+	from = c->float_want_set ? c->float_want : c->geom;
+	if (wlr_box_equal(&from, &g))
 		return;
-	}
 
-	if (c->column) {
-		int size_changed = (c->geom.width != g.width ||
-				c->geom.height != g.height);
-		if (size_changed) {
-			/* The final size (col->target_width, col->target_height
-			 * per-client share) is configured at SETTLE — see the
-			 * resize() in clients_anim_tick — not here.  Configuring
-			 * it up front makes a fast client (Chrome acks in ~10ms)
-			 * commit its final-size buffer while the box is still near
-			 * its old size; client_scale_to_box then stretches that
-			 * buffer up to the lerped box (measured 2.17×) and the
-			 * content visibly zooms back down over the rest of the
-			 * anim.  Withholding it keeps the client's own buffer as
-			 * the natural size, so the scale walks monotonically
-			 * 1.0 → final and the content simply follows the box.
-			 *
-			 * A live drag is the exception: the pointer owns the size
-			 * there, and the client must re-render at the live edge
-			 * instead of only after release. */
-			int nc = c->column->n_clients;
-			int gap = c->mon && c->mon->gaps ? (int)gappx : 0;
-			int per_h_target;
-			if (nc > 0) {
-				/* Weighted height share — must mirror
-				 * monitor_apply_positions so the configured
-				 * final size matches the settle geometry. */
-				int avail_t = c->column->target_height
-						- gap * (nc - 1);
-				double w = c->col_weight > 0.0
-						? c->col_weight : 1.0;
-				double sumw = 0.0;
-				Client *cc;
-				wl_list_for_each(cc, &c->column->clients,
-						column_link)
-					sumw += cc->col_weight > 0.0
-							? cc->col_weight : 1.0;
-				if (sumw <= 0.0)
-					sumw = (double)nc;
-				per_h_target = (int)((double)avail_t * w / sumw);
-			} else {
-				per_h_target = c->column->target_height;
-			}
-			int final_w = c->column->target_width  - 2 * c->bw;
-			int final_h = per_h_target - 2 * c->bw;
-			if (final_w < 1) final_w = 1;
-			if (final_h < 1) final_h = 1;
-			if (!c->anim_active) {
-				c->geom_fx = (double)c->geom.x;
-				c->geom_fy = (double)c->geom.y;
-				c->geom_fw = (double)c->geom.width;
-				c->geom_fh = (double)c->geom.height;
-				c->geom_vx = c->geom_vy = c->geom_vw = c->geom_vh = 0.0;
-				if (live_resize_active())
-					client_request_size(c, final_w, final_h);
-				c->anim_final_w = final_w;
-				c->anim_final_h = final_h;
-				client_get_committed_size(c,
-						&c->anim_start_nat_w,
-						&c->anim_start_nat_h);
-			} else if (final_w != c->anim_final_w ||
-					final_h != c->anim_final_h) {
-				if (live_resize_active())
-					client_request_size(c, final_w, final_h);
-				c->anim_final_w = final_w;
-				c->anim_final_h = final_h;
-			}
-			c->anim_active = 1;
-		} else {
-			c->anim_active = 0;
-			resize(c, g, 0);
-		}
-	} else {
-		/* Floating / non-column: per-client anim path. */
-		int size_changed = (c->geom.width != g.width ||
-				c->geom.height != g.height);
-		int final_w = g.width  - 2 * c->bw;
-		int final_h = g.height - 2 * c->bw;
-		if (final_w < 1) final_w = 1;
-		if (final_h < 1) final_h = 1;
-		if (!c->anim_active) {
-			c->geom_fx = (double)c->geom.x;
-			c->geom_fy = (double)c->geom.y;
-			c->geom_fw = (double)c->geom.width;
-			c->geom_fh = (double)c->geom.height;
-			c->geom_vx = c->geom_vy = c->geom_vw = c->geom_vh = 0.0;
-			if (size_changed) {
-				/* Same as the column path above: the final size
-				 * (fullscreen toggle, float-resize) is configured
-				 * at settle, so the client's committed buffer stays
-				 * the natural size the anim scales FROM. */
-				if (live_resize_active())
-					client_request_size(c, final_w, final_h);
-				c->anim_final_w = final_w;
-				c->anim_final_h = final_h;
-				client_get_committed_size(c,
-						&c->anim_start_nat_w,
-						&c->anim_start_nat_h);
-			} else {
-				c->anim_final_w = c->anim_final_h = 0;
-			}
-		} else if (size_changed && c->anim_final_w > 0 &&
-				(final_w != c->anim_final_w ||
-				 final_h != c->anim_final_h)) {
-			if (live_resize_active())
-				client_request_size(c, final_w, final_h);
-			c->anim_final_w = final_w;
-			c->anim_final_h = final_h;
-		}
-		c->anim_active = 1;
+	if (!c->anim_active) {
+		c->geom_fx = (double)from.x;
+		c->geom_fy = (double)from.y;
+		c->geom_fw = (double)from.width;
+		c->geom_fh = (double)from.height;
+		c->geom_vx = c->geom_vy = c->geom_vw = c->geom_vh = 0.0;
 	}
+	c->anim_active = 1;
 }
 
-/*
- * Per-client geometry tick.  Advances c->geom toward c->target_geom
- * for any client with an active animation.  Called from
- * monitor_anim_tick once per frame.  Returns 1 if any client moved.
- */
-/* Per-frame scene update during a column geom anim.  Writes:
- *   - scene tree position (anchor point shifts as left edge moves)
- *   - border rect size/position (border frames the animating box)
- *   - frozen_buffer dest_size (the snapshot scales to fill the
- *     lerped box) — this is what makes a Blender / heavy-app
- *     fullscreen toggle smooth: the cached single-texture snapshot
- *     stretches with the box, no black exposed area, and Blender
- *     doesn't have to repaint until the anim settles.  When no
- *     freeze is active (rare — only for the brief window before
- *     monitor_freeze_clients runs), we fall back to live surface
- *     animation. */
-/* True while the user is dragging a tile edge or column border.
- *
- * Interactive resize must show REAL content, not a stretched snapshot: the
- * pointer sets the size directly, so there is no animation to cover up, and
- * scaling the old buffer is exactly the "everything stretches until you let
- * go, then reflows" effect. The client is reconfigured on every motion
- * event, so it reflows as the edge moves. */
+/* Pointer drags a tile edge. */
 static int
 live_resize_active(void)
 {
 	return cursor_mode == CurResize || cursor_mode == CurColResize;
 }
 
-/* Surface commit while a geometry anim is in flight.  wlroots' own
- * commit handler (surface_reconfigure) has just reset every buffer's
- * dest_size to the surface's NATURAL size — which is the FINAL size we
- * configured at anim start.  Left uncorrected, the surface renders past
- * the lerped box until the next anim tick: the "locked" edge of the
- * tile visibly pops outward, and near a monitor edge the overshoot
- * spills onto the neighbouring output (another output's rendermon can
- * fire before our next tick re-scales).  Re-pin clip + scale now.
- * Registered in mapnotify AFTER the scene surface is created so it runs
- * after wlroots' handler. */
+/* Runs after the scene saw the commit. */
 void
 animcommitnotify(struct wl_listener *listener, void *data)
 {
 	Client *c = wl_container_of(listener, c, anim_commit);
-	int iw, ih;
 
 	(void)data;
 	launchfx_note_commit(c);
@@ -483,114 +297,29 @@ animcommitnotify(struct wl_listener *listener, void *data)
 	if (!c->scene_surface || !c->mon)
 		return;
 #ifdef XWAYLAND
-	if (!c->anim_active && client_is_x11(c) && c->column) {
-		/* X11 has no xdg commitnotify doing post-settle work — this
-		 * hook is its only commit path.  Re-pin the clip against the
-		 * fresh buffer, and self-heal a size desync: X11 has no ack
-		 * chain, so a configure lost to an aborted anim (or a client
-		 * that reasserted its own size) leaves the committed size
-		 * permanently different from the tile box.  request_size's
-		 * dedup makes this a no-op whenever last_configured already
-		 * matches the box. */
-		int nw, nh;
+	int iw, ih, nw, nh;
+
+	if (!client_is_x11(c))
+		return;
+	client_get_committed_size(c, &nw, &nh);
+	if (c->column) {
+		/* X11 tiles: re-clip, re-send lost configures. */
 		iw = c->geom.width  - 2 * (int)c->bw;
 		ih = c->geom.height - 2 * (int)c->bw;
 		client_clip_to_usable(c);
-		client_get_committed_size(c, &nw, &nh);
-		if (iw > 0 && ih > 0 && nw > 0 && nh > 0 &&
+		if (!c->in_txn && iw > 0 && ih > 0 && nw > 0 && nh > 0 &&
 				(nw != iw || nh != ih))
 			client_request_size(c, iw, ih);
 		return;
 	}
+	if (c->isfullscreen || c->is_notif || c->is_instrument ||
+			client_is_unmanaged(c))
+		return;
+	/* Caught up: send the newest paced size. */
+	if (nw == c->last_configured_w && nh == c->last_configured_h)
+		client_flush_pending_size(c);
+	float_fit(c);
 #endif
-	if (!c->anim_active)
-		return;
-	/* Live drag shows real content at real size — natural is correct.
-	 * Still re-pin the clip: this commit may carry a buffer larger than
-	 * the tile box, and a neighbouring output's rendermon can fire
-	 * before the next anim tick re-clips it. */
-	if (cursor_mode == CurResize || cursor_mode == CurColResize) {
-		client_clip_to_usable(c);
-		return;
-	}
-	if (c->frozen_buffer)
-		return;
-	iw = c->geom.width - 2 * c->bw;
-	ih = c->geom.height - 2 * c->bw;
-	if (iw < 1) iw = 1;
-	if (ih < 1) ih = 1;
-	/* Clip first: if the clip box changed, set_clip reconfigures
-	 * dest_size again — scaling after keeps the scale authoritative. */
-	client_clip_to_usable(c);
-	client_scale_to_box(c, iw, ih);
-}
-
-static void
-client_anim_apply(Client *c, struct wlr_box g)
-{
-	int inner_w, inner_h;
-
-	if (!c || !c->scene || !client_surface(c) || !client_surface(c)->mapped)
-		return;
-	c->geom = g;
-	wlr_scene_node_set_position(&c->scene->node, g.x, g.y);
-	wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
-	if (c->border[0]) {
-		client_set_border_size(c, g.width, g.height);
-		wlr_scene_node_set_position(&c->border[1]->node, 0,
-				g.height - c->bw);
-		wlr_scene_node_set_position(&c->border[2]->node, 0, c->bw);
-		wlr_scene_node_set_position(&c->border[3]->node,
-				g.width - c->bw, c->bw);
-	}
-
-	/* Resize the frozen snapshot to match the lerped box.  This is
-	 * the single biggest visual fix: instead of leaving a black
-	 * exposed area where the surface natural size doesn't cover the
-	 * box, we stretch the cached buffer to fill it. */
-	inner_w = g.width  - 2 * c->bw;
-	inner_h = g.height - 2 * c->bw;
-	if (inner_w < 1) inner_w = 1;
-	if (inner_h < 1) inner_h = 1;
-
-	/* Live drag: no snapshot. The surface renders at the size it was just
-	 * configured with, so text reflows and layouts recompute while the
-	 * edge moves; client_clip_to_usable scales the committed buffer into
-	 * the box for the frames the client is still behind (scale 1.0, i.e.
-	 * a no-op, as soon as it catches up). */
-	if (live_resize_active()) {
-		if (c->frozen_buffer)
-			client_unfreeze(c);
-		client_clip_to_usable(c);
-		return;
-	}
-
-	/* Early unfreeze: the moment the client commits a buffer at a NEW
-	 * natural size (it was configured with the final size at anim
-	 * start), swap the stretched stale snapshot for the live surface.
-	 * Fresh content then shows mid-anim, scaled into the moving box,
-	 * instead of popping in only after the anim settles. */
-	if (c->frozen_buffer && c->anim_final_w > 0) {
-		int nat_w, nat_h;
-		client_get_committed_size(c, &nat_w, &nat_h);
-		if (nat_w > 0 && nat_h > 0 &&
-				(nat_w != c->anim_start_nat_w ||
-				 nat_h != c->anim_start_nat_h))
-			client_unfreeze(c);
-	}
-
-	if (c->frozen_buffer) {
-		wlr_scene_buffer_set_dest_size(c->frozen_buffer,
-				inner_w, inner_h);
-	} else {
-		/* Live surface during a size anim — keep it scaled to the
-		 * lerped box every frame so content tracks the moving edge. */
-		client_scale_to_box(c, inner_w, inner_h);
-	}
-
-	/* Crop to the usable tile area so an animating tile never overshoots
-	 * into the gap margin (covers surface, borders, and this snapshot). */
-	client_clip_to_usable(c);
 }
 
 static int
@@ -610,43 +339,19 @@ clients_anim_tick(Monitor *m, double dt)
 			continue;
 		}
 
-		if (c->column) {
-			/* Column clients: ALL FOUR axes are derived each frame
-			 * from upstream springs (m->w, scroll_x_f, col->x_f,
-			 * col->width_f).  Re-springing here would introduce a
-			 * second-stage lag, breaking edge sync (the side
-			 * facing the screen wobbles when target == current
-			 * because the spring trails the source).  Snap to the
-			 * live target — the visual lerp emerges from the
-			 * upstream parameter springs which all use the same
-			 * stiffness/damping, so they stay in lock-step. */
-			c->geom_fx = (double)c->target_geom.x;
-			c->geom_fy = (double)c->target_geom.y;
-			c->geom_fw = (double)c->target_geom.width;
-			c->geom_fh = (double)c->target_geom.height;
-			c->geom_vx = c->geom_vy = c->geom_vw = c->geom_vh = 0.0;
-			moved = (c->geom.x != c->target_geom.x ||
-				c->geom.y != c->target_geom.y ||
-				c->geom.width != c->target_geom.width ||
-				c->geom.height != c->target_geom.height);
-		} else {
-			/* Floating / non-column: target is static during
-			 * the anim, so per-axis spring on all 4 is correct
-			 * (sides with target == current stay locked via
-			 * spring_tick's early-out). */
-			moved |= spring_tick(&c->geom_fx, &c->geom_vx,
-					(double)c->target_geom.x,
-					SPRING_WINDOW, dt);
-			moved |= spring_tick(&c->geom_fy, &c->geom_vy,
-					(double)c->target_geom.y,
-					SPRING_WINDOW, dt);
-			moved |= spring_tick(&c->geom_fw, &c->geom_vw,
-					(double)c->target_geom.width,
-					SPRING_WINDOW, dt);
-			moved |= spring_tick(&c->geom_fh, &c->geom_vh,
-					(double)c->target_geom.height,
-					SPRING_WINDOW, dt);
-		}
+		/* Static target: per-axis springs. */
+		moved |= spring_tick(&c->geom_fx, &c->geom_vx,
+				(double)c->target_geom.x,
+				SPRING_WINDOW, dt);
+		moved |= spring_tick(&c->geom_fy, &c->geom_vy,
+				(double)c->target_geom.y,
+				SPRING_WINDOW, dt);
+		moved |= spring_tick(&c->geom_fw, &c->geom_vw,
+				(double)c->target_geom.width,
+				SPRING_WINDOW, dt);
+		moved |= spring_tick(&c->geom_fh, &c->geom_vh,
+				(double)c->target_geom.height,
+				SPRING_WINDOW, dt);
 
 		if (moved) {
 			/* Round the far edge, not the size: a locked
@@ -657,40 +362,12 @@ clients_anim_tick(Monitor *m, double dt)
 			g.y = (int)c->geom_fy;
 			g.width = (int)(c->geom_fx + c->geom_fw) - g.x;
 			g.height = (int)(c->geom_fy + c->geom_fh) - g.y;
-			client_anim_apply(c, g);
+			client_unfreeze(c);
+			float_set(c, g, ANCHOR_MID, ANCHOR_MID);
 			active = 1;
 		} else {
-			/* Settle: clear anim_active FIRST so the clip inside
-			 * resize() runs in box-clip mode — a client that hasn't
-			 * committed the final size yet must be cropped to its
-			 * box, not left bleeding over the neighbour until the
-			 * commit lands.  scale_reset before resize() so the
-			 * clip's dest sizing stays authoritative. */
 			c->anim_active = 0;
-			/* Mid-drag settle (pointer held still for a frame):
-			 * keep the live-drag scale — resetting it drops the
-			 * fit until the client's next commit, and resize()'s
-			 * no-change fast-path may not re-apply it. */
-			if (!live_resize_active())
-				client_scale_reset(c);
-			resize(c, c->target_geom, 0);
-#ifdef XWAYLAND
-			/* client_request_size's size-only dedup drops the
-			 * configure when just the POSITION changed (fullscreen
-			 * exit returns the tile to its slot at unchanged size).
-			 * The X11 client then keeps stale root coords and
-			 * misplaces menus/tooltips.  xsurface->x/y mirror the
-			 * last configure actually sent — flush once at settle
-			 * if they disagree with where the window ended up. */
-			if (client_is_x11(c) &&
-					(c->surface.xwayland->x !=
-						c->geom.x + (int)c->bw ||
-					 c->surface.xwayland->y !=
-						c->geom.y + (int)c->bw))
-				client_set_size(c,
-					c->geom.width - 2 * (int)c->bw,
-					c->geom.height - 2 * (int)c->bw);
-#endif
+			float_set(c, c->target_geom, ANCHOR_MID, ANCHOR_MID);
 		}
 	}
 
@@ -709,7 +386,7 @@ clients_anim_tick(Monitor *m, double dt)
  * Lock/unlock is handled internally by wlr_scene_buffer_create /
  * scene_node_destroy — no manual buffer_lock needed.
  */
-static void
+void
 client_freeze(Client *c)
 {
 	struct wlr_surface *surface;
@@ -854,13 +531,6 @@ monitor_unfreeze_clients(Monitor *m, int include_x11, int include_wayland)
 		wlr_scene_buffer_set_dest_size(c->frozen_buffer,
 				inner_w, inner_h);
 		client_unfreeze(c);
-		/* Scale the live surface to fill the box until the client
-		 * commits a buffer at the new natural size.  Without this,
-		 * an unfreeze right after a size anim can flash the OLD
-		 * natural-sized surface in the new larger box (= black
-		 * exposed area on the growing edge for heavy/slow clients
-		 * like Blender). */
-		client_scale_to_box(c, inner_w, inner_h);
 	}
 }
 
@@ -1041,26 +711,7 @@ monitor_anim_tick(Monitor *m, double dt)
 		}
 	}
 
-	/* Freeze policy — live content is the default, snapshot the exception:
-	 *
-	 *   SIZE anim (tile resize, Mod+F fullscreen) → NEVER freeze, any
-	 *     client type.  client_anim_apply scales the LIVE surface into the
-	 *     lerped box every frame (client_scale_to_box, which walks every
-	 *     scene buffer so subsurfaces — browser/Electron video — scale
-	 *     too).  Combined with the final-size configure sent at anim start
-	 *     (client_set_target_geom), content stays live and continuous the
-	 *     whole slide and snaps crisp the instant the client commits the
-	 *     new size — for X11, Electron and native Wayland alike.  No
-	 *     black growing edge: the stale buffer is stretched to fill until
-	 *     the fresh one lands.
-	 *
-	 *   PURE POSITION anim (ws-switch slide) → freeze X11 only.  X11 has
-	 *     no subsurfaces so its root snapshot is complete, and it avoids
-	 *     X11 movement tearing.  Wayland is never frozen (snapshot drops
-	 *     its subsurfaces → CSD frame leaks into the adjacent workspace);
-	 *     its live surface just translates, which needs no content update
-	 *     to look right.
-	 */
+	/* Snapshot X11 on pure slides only. */
 	{
 		int pos_only = active && !size_anim;
 		if (pos_only && !m->pos_anim_was_active)
@@ -1069,18 +720,9 @@ monitor_anim_tick(Monitor *m, double dt)
 			monitor_unfreeze_clients(m, /*x11=*/1, /*wl=*/0);
 		m->pos_anim_was_active = pos_only;
 	}
-	/* Camera slide (tile-select scroll / ws switch) with no size change:
-	 * rendermon withholds frame_done from clients this frame so heavy
-	 * tiles (Blender playing an animation) pause their render loop for
-	 * the ~150ms slide instead of racing the compositor for GPU time.
-	 * A slide only translates existing buffers — no client repaint can
-	 * improve it.  Size anims are excluded: there the client MUST
-	 * repaint to converge on its new size. */
-	/* A live drag also excludes the throttle: the dragged client must
-	 * repaint at the sizes we are configuring, and withholding its frame
-	 * callbacks stalls it behind the pointer for the whole drag. */
+	/* Pure slides pause client rendering. */
 	m->camera_anim_active = camera_anim && !size_anim &&
-			!live_resize_active();
+			!live_resize_active() && !m->txn_active;
 
 	/* Anim over: flush the position to every X11 client this monitor
 	 * moved.  A camera slide / column reflow with no size change never
