@@ -2580,7 +2580,7 @@ void expel_window_from_column(const Arg *arg);
 void move_window_in_column_dir(const Arg *arg);
 void focus_window_in_column_dir(const Arg *arg);
 extern const double preset_column_widths[];
-void workspace_new_column_inner_size(Monitor *m, int bw, int *out_w, int *out_h);
+void workspace_new_column_inner_size(Workspace *ws, int bw, int *out_w, int *out_h);
 extern const int n_preset_column_widths;
 extern const int default_column_width_idx;
 
@@ -3501,9 +3501,21 @@ void voice_start(void);
 void voice_stop(void);
 
 /* default_app.c — XDG default application lookup */
+#define APP_NAMES    3
+#define APP_NAME_MAX 256
+
+/* Ids a running window may carry. */
+typedef struct {
+	char name[APP_NAMES][APP_NAME_MAX];
+	int n;
+} AppNames;
+
+int default_app_path(const char *mime, char out[PATH_MAX]);
 int default_app_exec(const char *mime, char *out, size_t size);
 int desktop_exec(const char *path, char *out, size_t size);
-int desktop_name(const char *path, char *out, size_t size);
+void app_names_from_desktop(const char *path, AppNames *a);
+void app_names_add_program(AppNames *a, const char *exec);
+int app_names_match(const AppNames *a, const char *app_id);
 
 /* audio_watch.c — default-sink change watch for the volume module */
 void audio_watch_setup(void);

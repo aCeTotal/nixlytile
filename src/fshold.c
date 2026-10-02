@@ -17,7 +17,8 @@ switch_box(Client *c, int on, struct wlr_box *box)
 	/* Floating exits animate in step with content. */
 	if (c->isfloating)
 		return 0;
-	workspace_new_column_inner_size(c->mon, (int)borderpx, &w, &h);
+	workspace_new_column_inner_size(c->fs_ws && c->fs_ws->mon == c->mon
+			? c->fs_ws : c->mon->active_ws, (int)borderpx, &w, &h);
 	*box = (struct wlr_box){ 0, 0, w + 2 * (int)borderpx, h + 2 * (int)borderpx };
 	return w > 0 && h > 0;
 }

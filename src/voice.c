@@ -1,4 +1,5 @@
 #include "nixlytile.h"
+#include "client.h"
 
 #include <fcntl.h>
 #include <spawn.h>
@@ -83,6 +84,49 @@ voice_browser_exec(char exec[VOICE_ARG_MAX])
 	return 1;
 }
 
+/* Most recently focused match. */
+static Client *
+voice_window(const AppNames *names)
+{
+	Client *c;
+
+	wl_list_for_each(c, &fstack, flink)
+		if (app_names_match(names, client_get_appid(c)))
+			return c;
+	return NULL;
+}
+
+/* Running apps get focus, not a twin. */
+static int
+voice_jump(const AppNames *names)
+{
+	Client *c = voice_window(names);
+	Workspace *ws;
+
+	if (!c)
+		return 0;
+	ws = c->column ? c->column->ws : NULL;
+	if (ws && ws->mon && ws != ws->mon->active_ws) {
+		workspace_switch(ws->mon, ws);
+		arrange(ws->mon);
+	}
+	focusclient(c, 1);
+	printstatus();
+	return 1;
+}
+
+static void
+voice_browser_names(AppNames *names)
+{
+	const char *env = getenv("BROWSER");
+	char path[PATH_MAX];
+
+	if (env && *env)
+		app_names_add_program(names, env);
+	else if (default_app_path(VOICE_BROWSER, path))
+		app_names_from_desktop(path, names);
+}
+
 static void
 voice_home(const char *arg)
 {
@@ -97,28 +141,33 @@ voice_home(const char *arg)
 	voice_encode(home ? home : "/", "/", path);
 	snprintf(uri, sizeof(uri), "file://%s", path);
 	voice_run(exec, uri);
-	osd_show(selmon, "Åpner hjemmemappe");
 }
 
 static void
 voice_calculator(const char *arg)
 {
+	AppNames names = { 0 };
+
 	(void)arg;
-	spawn_cmd(VOICE_CALCULATOR);
-	osd_show(selmon, "Åpner kalkulator");
+	app_names_add_program(&names, VOICE_CALCULATOR);
+	if (!voice_jump(&names))
+		spawn_cmd(VOICE_CALCULATOR);
 }
 
 static void
 voice_browser(const char *arg)
 {
 	char exec[VOICE_ARG_MAX];
+	AppNames names = { 0 };
 
 	(void)arg;
+	voice_browser_names(&names);
+	if (voice_jump(&names))
+		return;
 	if (voice_browser_exec(exec))
 		voice_run(exec, NULL);
 	else
 		voice_run("xdg-open", VOICE_HOMEPAGE);
-	osd_show(selmon, "Åpner nettleser");
 }
 
 static void
@@ -127,15 +176,12 @@ voice_search(const char *query)
 	char exec[VOICE_ARG_MAX];
 	char encoded[VOICE_ARG_MAX];
 	char url[VOICE_URL_MAX];
-	char toast[VOICE_LINE_MAX + 16];
 
 	if (!voice_browser_exec(exec))
 		snprintf(exec, sizeof(exec), "xdg-open");
 	voice_encode(query, "", encoded);
 	snprintf(url, sizeof(url), "%s%s", VOICE_SEARCH, encoded);
 	voice_run(exec, url);
-	snprintf(toast, sizeof(toast), "Google: %s", query);
-	osd_show(selmon, toast);
 }
 
 /* Any app nixly_launcher lists. */
@@ -143,18 +189,16 @@ static void
 voice_launch(const char *path)
 {
 	char exec[VOICE_ARG_MAX];
-	char name[VOICE_LINE_MAX];
-	char toast[VOICE_LINE_MAX + 16];
+	AppNames names = { 0 };
 
+	app_names_from_desktop(path, &names);
+	if (voice_jump(&names))
+		return;
 	if (!desktop_exec(path, exec, sizeof(exec))) {
 		wlr_log(WLR_ERROR, "voice: no Exec in %s", path);
 		return;
 	}
 	spawn_cmd(exec);
-	if (!desktop_name(path, name, sizeof(name)))
-		return;
-	snprintf(toast, sizeof(toast), "Åpner %s", name);
-	osd_show(selmon, toast);
 }
 
 static const VoiceCommand voice_commands[] = {

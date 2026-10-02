@@ -2,6 +2,8 @@
 
 #define DA_LINE  1024
 #define DA_ROOTS 8192
+#define DA_SUFFIX ".desktop"
+#define DA_SUFFIX_LEN (sizeof(DA_SUFFIX) - 1)
 
 typedef struct {
 	const char *home_var;
@@ -157,13 +159,12 @@ desktop_exec(const char *path, char *out, size_t size)
 }
 
 int
-desktop_name(const char *path, char *out, size_t size)
+default_app_path(const char *mime, char out[PATH_MAX])
 {
-	char name[DA_LINE];
-
-	if (!ini_value(path, (IniKey){ "Desktop Entry", "Name" }, name))
-		return 0;
-	return snprintf(out, size, "%s", name) < (int)size;
+	for (size_t i = 0; i < LENGTH(sources); i++)
+		if (source_lookup(&sources[i], mime, out))
+			return 1;
+	return 0;
 }
 
 int
@@ -171,8 +172,53 @@ default_app_exec(const char *mime, char *out, size_t size)
 {
 	char path[PATH_MAX];
 
-	for (size_t i = 0; i < LENGTH(sources); i++)
-		if (source_lookup(&sources[i], mime, path))
-			return desktop_exec(path, out, size);
+	return default_app_path(mime, path) && desktop_exec(path, out, size);
+}
+
+static void
+app_names_add(AppNames *a, const char *name, size_t len)
+{
+	if (!len || a->n == APP_NAMES)
+		return;
+	snprintf(a->name[a->n++], APP_NAME_MAX, "%.*s", (int)len, name);
+}
+
+/* Basename of the first word. */
+void
+app_names_add_program(AppNames *a, const char *exec)
+{
+	size_t len = strcspn(exec, " \t");
+	const char *base = exec;
+
+	for (const char *p = exec; p < exec + len; p++)
+		if (*p == '/')
+			base = p + 1;
+	app_names_add(a, base, len - (size_t)(base - exec));
+}
+
+void
+app_names_from_desktop(const char *path, AppNames *a)
+{
+	const char *id = strrchr(path, '/');
+	char line[DA_LINE];
+	size_t len;
+
+	id = id ? id + 1 : path;
+	len = strlen(id);
+	if (len > DA_SUFFIX_LEN && !strcmp(id + len - DA_SUFFIX_LEN, DA_SUFFIX))
+		len -= DA_SUFFIX_LEN;
+	app_names_add(a, id, len);
+	if (ini_value(path, (IniKey){ "Desktop Entry", "StartupWMClass" }, line))
+		app_names_add(a, line, strlen(line));
+	if (ini_value(path, (IniKey){ "Desktop Entry", "Exec" }, line))
+		app_names_add_program(a, line);
+}
+
+int
+app_names_match(const AppNames *a, const char *app_id)
+{
+	for (int i = 0; i < a->n; i++)
+		if (!strcasecmp(a->name[i], app_id))
+			return 1;
 	return 0;
 }

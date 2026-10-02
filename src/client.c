@@ -376,22 +376,11 @@ commitnotify(struct wl_listener *listener, void *data)
 		if (c->decoration)
 			requestdecorationmode(&c->set_decoration_mode, c->decoration);
 
-		/* Niri parity: pre-configure at the default-column tile size
-		 * so the client commits its initial buffer at the target
-		 * dimensions, not its natural preferred size.  Eliminates the
-		 * "small box → full tile" pop-in on spawn.
-		 *
-		 * The size MUST be the one workspace_layout() will hand the new
-		 * column, otherwise the client gets a second configure a few ms
-		 * later and re-lays-out and re-renders its whole window before
-		 * it is ever displayed (measured on Thunar: configure(954,1041)
-		 * then configure(952,1041)).  workspace_new_column_inner_size()
-		 * is that computation, kept next to the layout it mirrors. */
+		/* Pre-configure at final tile size. */
 		{
-			Monitor *m = c->mon ? c->mon : selmon;
 			int w = 0, h = 0;
 
-			workspace_new_column_inner_size(m, (int)c->bw, &w, &h);
+			workspace_new_column_inner_size(client_target_ws(c), (int)c->bw, &w, &h);
 			if (!c->isfloating && w > 100 && h > 100)
 				wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel,
 						w, h);

@@ -723,30 +723,73 @@ default_tiles_per_row(Monitor *m)
 	return 2;
 }
 
-/* Inner (border-subtracted) size a BRAND-NEW default column will end up
- * with on m.  Used by the pre-configure in commitnotify so a client's
- * first configure already carries its final tile size.
- *
- * It has to mirror workspace_layout() exactly.  It did not: the
- * pre-configure assumed the preset_column_widths[default] proportion
- * (0.5 × 1912 = 956), while a fresh column actually takes the aspect-fit
- * branch ((1912 − gap)/2 = 954).  Two pixels apart is enough for a second
- * configure, and every GTK/Qt client answers that with a full re-layout
- * and a second render before its window is ever on screen.  One configure
- * = one layout = one paint. */
-void
-workspace_new_column_inner_size(Monitor *m, int bw, int *out_w, int *out_h)
+/* Default tiles squeeze down to this fraction. */
+#define FLEX_MIN_DIVISOR 2
+
+/* Target width of a column. */
+static int
+column_target_width_px(Column *col, int mon_w, int flex_w)
 {
-	int mon_w, mon_h, gap, n_default, w, h;
+	if (col->fullscreen)
+		return mon_w;
+	if (col->width_px_override > 0)
+		return MAX(50, MIN(col->width_px_override, mon_w));
+	if (col->width_idx >= 0 && col->width_idx < n_preset_column_widths)
+		return (int)((double)mon_w *
+				preset_column_widths[col->width_idx]);
+	return flex_w;
+}
+
+/* Column has no user-chosen width. */
+static int
+column_is_flex(Column *col)
+{
+	return !col->fullscreen && col->width_px_override <= 0 &&
+		col->width_idx < 0;
+}
+
+/* Default width that keeps N tiles visible. */
+static int
+flex_column_width(Workspace *ws, int mon_w, int gap, int n_new)
+{
+	Column *col;
+	int n_default = default_tiles_per_row(ws->mon);
+	int std_w = (mon_w - (n_default - 1) * gap) / n_default;
+	int n = ws->n_columns + n_new;
+	int n_flex = n_new, fixed = 0, fit;
+
+	if (n > n_default)
+		return std_w;
+	wl_list_for_each(col, &ws->columns, link) {
+		if (column_is_flex(col))
+			n_flex++;
+		else
+			fixed += column_target_width_px(col, mon_w, std_w);
+	}
+	if (n_flex == 0)
+		return std_w;
+	fit = (mon_w - fixed - (n - 1) * gap) / n_flex;
+	if (fit < std_w / FLEX_MIN_DIVISOR)
+		return std_w;
+	if (fit > std_w && n < n_default)
+		return std_w;
+	return fit;
+}
+
+/* Inner size of a new default column. */
+void
+workspace_new_column_inner_size(Workspace *ws, int bw, int *out_w, int *out_h)
+{
+	Monitor *m;
+	int mon_w, mon_h, gap, w, h;
 
 	if (out_w) *out_w = 0;
 	if (out_h) *out_h = 0;
-	if (!m)
+	if (!ws || !ws->mon)
 		return;
 
+	m = ws->mon;
 	gap = m->gaps ? (int)gappx : 0;
-	/* w_target, not w — workspace_layout() sizes off the target so a
-	 * mid-spring bar toggle can't feed an intermediate width. */
 	mon_w = m->w_initialized ? m->w_target.width : m->w.width;
 	mon_h = m->w_initialized ? m->w_target.height : m->w.height;
 	if (mon_w <= 0 || mon_h <= 0) {
@@ -756,10 +799,7 @@ workspace_new_column_inner_size(Monitor *m, int bw, int *out_w, int *out_h)
 	if (mon_w <= 0 || mon_h <= 0)
 		return;
 
-	n_default = default_tiles_per_row(m);
-	if (n_default < 1)
-		n_default = 1;
-	w = (mon_w - (n_default - 1) * gap) / n_default - 2 * bw;
+	w = flex_column_width(ws, mon_w, gap, 1) - 2 * bw;
 	h = mon_h - 2 * bw;
 	if (w < 1) w = 1;
 	if (h < 1) h = 1;
@@ -783,31 +823,6 @@ column_min_width(Column *col)
 		min = MAX(min, w + 2 * (int)c->bw);
 	}
 	return min;
-}
-
-/* Target width in PIXELS for a column.  Three cases:
- *   - fullscreen toggle: full m->w.width (covers tile area).
- *   - user-chosen preset (Mod+R): literal proportion of m->w.width.
- *   - default (width_idx == -1): aspect-based fit width — N tiles
- *     filling the row exactly with (N-1) inter-tile gaps visible. */
-static int
-column_target_width_px(Column *col, int mon_w, int gap, int n_default)
-{
-	if (!col)
-		return mon_w / 2;
-	if (col->fullscreen)
-		return mon_w;
-	if (col->width_px_override > 0) {
-		int w = col->width_px_override;
-		if (w > mon_w) w = mon_w;
-		if (w < 50) w = 50;
-		return w;
-	}
-	if (col->width_idx >= 0 && col->width_idx < n_preset_column_widths)
-		return (int)((double)mon_w *
-				preset_column_widths[col->width_idx]);
-	if (n_default < 1) n_default = 1;
-	return (mon_w - (n_default - 1) * gap) / n_default;
 }
 
 void
@@ -840,16 +855,11 @@ workspace_layout(Workspace *ws)
 	if (n == 0)
 		return;
 
-	/* Aspect-based default tile width: N default tiles fit EXACTLY
-	 * in m->w.width with (N-1)*gap inter-tile gaps visible.  Per-col
-	 * width: fullscreen → full, preset (Mod+R) → literal proportion,
-	 * default → aspect fit. */
 	{
-		int n_default = default_tiles_per_row(m);
+		int flex_w = flex_column_width(ws, mon_w, gap, 0);
 		x_cursor = 0;
 		wl_list_for_each(col, &ws->columns, link) {
-			int w = column_target_width_px(col, mon_w, gap,
-					n_default);
+			int w = column_target_width_px(col, mon_w, flex_w);
 			if (w < 1) w = 1;
 			col->target_width = w;
 			col->target_height = mon_h;
@@ -1076,7 +1086,7 @@ resize_column_dir(const Arg *arg)
 {
 	Column *col, *left_nbr = NULL, *right_nbr = NULL;
 	int dir;
-	int mon_w, gap, n_default, step;
+	int mon_w, step;
 	const int min_w = 100;
 	int cur_w, new_w;
 	int left_cur = 0, left_new = 0;
@@ -1094,13 +1104,6 @@ resize_column_dir(const Arg *arg)
 	mon_w = selmon->w_initialized ? selmon->w_target.width : selmon->w.width;
 	if (mon_w < 1)
 		mon_w = selmon->w.width;
-	gap = selmon->gaps ? (int)gappx : 0;
-	n_default = 2;
-	if (selmon->m.height > 0) {
-		double a = (double)selmon->m.width / (double)selmon->m.height;
-		if (a >= 3.0) n_default = 4;
-		else if (a >= 2.0) n_default = 3;
-	}
 	step = mon_w / 20;
 	if (step < 40) step = 40;
 
@@ -1109,7 +1112,7 @@ resize_column_dir(const Arg *arg)
 	if (col->link.next != &col->ws->columns)
 		right_nbr = wl_container_of(col->link.next, right_nbr, link);
 
-	cur_w = column_target_width_px(col, mon_w, gap, n_default);
+	cur_w = col->target_width;
 
 	/* Alone on the workspace: no neighbours to share with — just
 	 * resize own width.  Right edge moves (column is left-anchored at
@@ -1135,14 +1138,14 @@ resize_column_dir(const Arg *arg)
 
 	delta_total = 0;
 	if (left_nbr) {
-		left_cur = column_target_width_px(left_nbr, mon_w, gap, n_default);
+		left_cur = left_nbr->target_width;
 		left_new = left_cur - dir * step;
 		if (left_new < min_w)
 			return;
 		delta_total += step;
 	}
 	if (right_nbr) {
-		right_cur = column_target_width_px(right_nbr, mon_w, gap, n_default);
+		right_cur = right_nbr->target_width;
 		right_new = right_cur - dir * step;
 		if (right_new < min_w)
 			return;
