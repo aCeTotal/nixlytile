@@ -1785,6 +1785,7 @@ struct Monitor {
 	int converge_dirty;           /* something to (re)check — see converge_kick() */
 	int camera_anim_active;       /* camera in flight (scroll_x / ws_y spring) — gates frame_done throttle */
 	int txn_active;               /* tile transaction awaiting commits */
+	int tile_spring;              /* column width spring moving */
 	uint64_t txn_start_ns;
 	uint32_t tile_pass;           /* monitor_apply_positions generation */
 	int sw_cursor_scanout_hold;   /* we disabled scanout election for a visible software cursor */

@@ -107,12 +107,12 @@ configure(Client *c, struct wlr_box box)
 	return c->txn_owed;
 }
 
-/* Pointer drag: no shared hold. */
+/* Drag or spring: no hold. */
 static int
 loose(Monitor *m)
 {
-	return !m->txn_active &&
-			(cursor_mode == CurResize || cursor_mode == CurColResize);
+	return !m->txn_active && (m->tile_spring ||
+			cursor_mode == CurResize || cursor_mode == CurColResize);
 }
 
 static int
@@ -125,12 +125,12 @@ fits(Client *c, struct wlr_box box)
 			ch == box.height - 2 * (int)c->bw;
 }
 
-/* Box tracks pointer; content follows. */
+/* Box tracks target; content follows. */
 static void
 chase(Client *c)
 {
 	c->tile_shown = c->tile_target;
-	if (!txn_owes(c) && !fits(c, c->tile_target))
+	if (!txn_owes(c) && !c->fs_hold && !fits(c, c->tile_target))
 		configure(c, c->tile_target);
 }
 

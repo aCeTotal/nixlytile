@@ -621,6 +621,7 @@ monitor_anim_tick(Monitor *m, double dt)
 
 	vertical_anim = (fabs(m->ws_y_offset) > 0.5 ||
 			fabs(m->ws_y_vel) > 0.5);
+	m->tile_spring = 0;
 	{
 		Workspace *wsi;
 		Column *col;
@@ -639,6 +640,7 @@ monitor_anim_tick(Monitor *m, double dt)
 						SPRING_COLUMN, dt)) {
 					active = 1;
 					size_anim = 1;
+					m->tile_spring = 1;
 				}
 				/* Far-edge rounding (same as m->w above): x and
 				 * width springs cancel exactly on a locked right
