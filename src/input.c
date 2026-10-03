@@ -1833,14 +1833,12 @@ keypress(struct wl_listener *listener, void *data)
 void
 keypressmod(struct wl_listener *listener, void *data)
 {
-	/* This event is raised when a modifier key, such as shift or alt, is
-	 * pressed. We simply communicate this to the client. */
 	KeyboardGroup *group = wl_container_of(listener, group, modifiers);
+	struct wlr_keyboard_modifiers mods =
+		client_modifiers(&group->wlr_group->keyboard);
 
 	wlr_seat_set_keyboard(seat, &group->wlr_group->keyboard);
-	/* Send modifiers to the client. */
-	wlr_seat_keyboard_notify_modifiers(seat,
-			&group->wlr_group->keyboard.modifiers);
+	wlr_seat_keyboard_notify_modifiers(seat, &mods);
 }
 
 int

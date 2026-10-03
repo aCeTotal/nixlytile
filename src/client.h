@@ -455,9 +455,27 @@ keycode_is_modkey(struct wlr_keyboard *kb, uint32_t keycode)
 	return 0;
 }
 
+/* Modifiers as clients see them. */
+static inline struct wlr_keyboard_modifiers
+client_modifiers(const struct wlr_keyboard *kb)
+{
+	struct wlr_keyboard_modifiers m = kb->modifiers;
+	xkb_mod_index_t idx = kb->mod_indexes[__builtin_ctz(modkey)];
+	xkb_mod_mask_t mask;
+
+	if (idx == XKB_MOD_INVALID)
+		return m;
+	mask = (xkb_mod_mask_t)1 << idx;
+	m.depressed &= ~mask;
+	m.latched &= ~mask;
+	m.locked &= ~mask;
+	return m;
+}
+
 static inline void
 client_notify_enter(struct wlr_surface *s, struct wlr_keyboard *kb)
 {
+	struct wlr_keyboard_modifiers mods;
 	uint32_t held[WLR_KEYBOARD_KEYS_CAP];
 	size_t i, n = 0;
 
@@ -466,15 +484,13 @@ client_notify_enter(struct wlr_surface *s, struct wlr_keyboard *kb)
 		return;
 	}
 
-	/* keypress() never forwards the modkey's own press or release, so a
-	 * client handed it as held here keeps it down forever — XWayland then
-	 * feeds every later keystroke to the app as Super+key and games stop
-	 * moving.  Switching workspace with Super held is all it takes. */
+	/* Modkey is never forwarded. */
 	for (i = 0; i < kb->num_keycodes; i++)
 		if (!keycode_is_modkey(kb, kb->keycodes[i]))
 			held[n++] = kb->keycodes[i];
 
-	wlr_seat_keyboard_notify_enter(seat, s, held, n, &kb->modifiers);
+	mods = client_modifiers(kb);
+	wlr_seat_keyboard_notify_enter(seat, s, held, n, &mods);
 }
 
 static inline void
