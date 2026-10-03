@@ -90,6 +90,7 @@ enum wlr_scene_debug_damage_option {
 /** A sub-tree in the scene-graph. */
 struct wlr_scene_tree {
 	struct wlr_scene_node node;
+	float opacity; // multiplies into every descendant
 
 	struct wl_list children; // wlr_scene_node.link
 };
@@ -387,6 +388,11 @@ void wlr_scene_set_color_manager_v1(struct wlr_scene *scene, struct wlr_color_ma
  * Add a node displaying nothing but its children.
  */
 struct wlr_scene_tree *wlr_scene_tree_create(struct wlr_scene_tree *parent);
+
+/**
+ * Sets the opacity applied to every node below this tree.
+ */
+void wlr_scene_tree_set_opacity(struct wlr_scene_tree *tree, float opacity);
 
 /**
  * Add a node displaying a single surface to the scene-graph.

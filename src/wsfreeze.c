@@ -149,6 +149,8 @@ wsf_client_visible(Client *c)
 		Workspace *ws = NULL;
 		if (c->isfullscreen && c->fs_ws)
 			ws = c->fs_ws;
+		else if (client_float_ws(c))
+			ws = client_float_ws(c);
 		else if (c->column && c->column->ws)
 			ws = c->column->ws;
 		if (ws)

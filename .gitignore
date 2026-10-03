@@ -1,6 +1,9 @@
 # Build artifacts
 *.o
 nixlytile
+nixly-fand
+nixly-diskd
+nixly-jaild
 result
 result-*
 game_params.conf

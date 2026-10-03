@@ -2173,6 +2173,8 @@ setfloating(Client *c, int floating)
 	/* If in floating layout do not change the client's layer */
 	if (!c->mon || !client_surface(c)->mapped || !c->mon->lt[c->mon->sellt]->arrange)
 		return;
+	if (floating && (!was || !c->float_ws || c->float_ws->mon != c->mon))
+		c->float_ws = c->mon->active_ws;
 	wlr_scene_node_reparent(&c->scene->node, layers[c->isfullscreen ||
 			client_has_fullscreen_ancestor(c) ? LyrFS
 			: c->isfloating ? LyrFloat : LyrTile]);
@@ -2632,15 +2634,6 @@ tagmon(const Arg *arg)
 }
 
 void
-togglefloating(const Arg *arg)
-{
-	Client *sel = focustop(selmon);
-	/* return if fullscreen */
-	if (sel && !sel->isfullscreen)
-		setfloating(sel, !sel->isfloating);
-}
-
-void
 togglefullscreen(const Arg *arg)
 {
 	Client *sel = focustop(selmon);
@@ -2778,6 +2771,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 		 * dereferer fullscreen_assign_ws freed workspace ved
 		 * X11 unmap→remap (DXVK alt-tab o.l.) → UAF. */
 		c->fs_ws = NULL;
+		c->float_ws = NULL;
 		wl_list_remove(&c->link);
 		wl_list_remove(&c->flink);
 		/* Re-init flink so any defensive wl_list_remove() later in

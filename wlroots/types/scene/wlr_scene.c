@@ -169,7 +169,7 @@ void wlr_scene_node_destroy(struct wlr_scene_node *node) {
 
 static void scene_tree_init(struct wlr_scene_tree *tree,
 		struct wlr_scene_tree *parent) {
-	*tree = (struct wlr_scene_tree){0};
+	*tree = (struct wlr_scene_tree){ .opacity = 1 };
 	scene_node_init(&tree->node, WLR_SCENE_NODE_TREE, parent);
 	wl_list_init(&tree->children);
 }
@@ -214,6 +214,15 @@ struct wlr_scene_tree *wlr_scene_tree_create(struct wlr_scene_tree *parent) {
 
 	scene_tree_init(tree, parent);
 	return tree;
+}
+
+static float scene_node_inherited_opacity(const struct wlr_scene_node *node) {
+	float opacity = 1;
+	for (const struct wlr_scene_tree *tree = node->parent; tree != NULL;
+			tree = tree->node.parent) {
+		opacity *= tree->opacity;
+	}
+	return opacity;
 }
 
 typedef bool (*scene_node_box_iterator_func_t)(struct wlr_scene_node *node,
@@ -262,6 +271,10 @@ static void scene_node_opaque_region(struct wlr_scene_node *node, int x, int y,
 		pixman_region32_t *opaque) {
 	int width, height;
 	scene_node_get_size(node, &width, &height);
+
+	if (scene_node_inherited_opacity(node) != 1) {
+		return;
+	}
 
 	if (node->type == WLR_SCENE_NODE_RECT) {
 		struct wlr_scene_rect *scene_rect = wlr_scene_rect_from_node(node);
@@ -1147,6 +1160,16 @@ void wlr_scene_buffer_send_frame_done(struct wlr_scene_buffer *scene_buffer,
 	}
 }
 
+void wlr_scene_tree_set_opacity(struct wlr_scene_tree *tree, float opacity) {
+	if (tree->opacity == opacity) {
+		return;
+	}
+
+	assert(opacity >= 0 && opacity <= 1);
+	tree->opacity = opacity;
+	scene_node_update(&tree->node, NULL);
+}
+
 void wlr_scene_buffer_set_opacity(struct wlr_scene_buffer *scene_buffer,
 		float opacity) {
 	if (scene_buffer->opacity == opacity) {
@@ -1485,6 +1508,8 @@ static void scene_entry_render(struct render_list_entry *entry, const struct ren
 		return;
 	}
 
+	float opacity = scene_node_inherited_opacity(node);
+
 	int x = entry->x - data->logical.x;
 	int y = entry->y - data->logical.y;
 
@@ -1511,10 +1536,10 @@ static void scene_entry_render(struct render_list_entry *entry, const struct ren
 		wlr_render_pass_add_rect(data->render_pass, &(struct wlr_render_rect_options){
 			.box = dst_box,
 			.color = {
-				.r = scene_rect->color[0],
-				.g = scene_rect->color[1],
-				.b = scene_rect->color[2],
-				.a = scene_rect->color[3],
+				.r = scene_rect->color[0] * opacity,
+				.g = scene_rect->color[1] * opacity,
+				.b = scene_rect->color[2] * opacity,
+				.a = scene_rect->color[3] * opacity,
 			},
 			.clip = &render_region,
 		});
@@ -1531,7 +1556,7 @@ static void scene_entry_render(struct render_list_entry *entry, const struct ren
 					.g = (float)scene_buffer->single_pixel_buffer_color[1] / (float)UINT32_MAX,
 					.b = (float)scene_buffer->single_pixel_buffer_color[2] / (float)UINT32_MAX,
 					.a = (float)scene_buffer->single_pixel_buffer_color[3] /
-						(float)UINT32_MAX * scene_buffer->opacity,
+						(float)UINT32_MAX * scene_buffer->opacity * opacity,
 				},
 				.clip = &render_region,
 			});
@@ -1560,6 +1585,7 @@ static void scene_entry_render(struct render_list_entry *entry, const struct ren
 		wlr_color_transfer_function_get_default_luminance(
 			WLR_COLOR_TRANSFER_FUNCTION_SRGB, &srgb_lum);
 		float luminance_multiplier = get_luminance_multiplier(&src_lum, &srgb_lum);
+		float alpha = scene_buffer->opacity * opacity;
 
 		wlr_render_pass_add_texture(data->render_pass, &(struct wlr_render_texture_options) {
 			.texture = texture,
@@ -1567,7 +1593,7 @@ static void scene_entry_render(struct render_list_entry *entry, const struct ren
 			.dst_box = dst_box,
 			.transform = transform,
 			.clip = &render_region,
-			.alpha = &scene_buffer->opacity,
+			.alpha = &alpha,
 			.filter_mode = scene_buffer->filter_mode,
 			.blend_mode = !data->output->scene->calculate_visibility ||
 					!pixman_region32_empty(&opaque) ?
@@ -1966,7 +1992,8 @@ static bool construct_render_list_iterator(struct wlr_scene_node *node,
 		struct wlr_scene_rect *rect = wlr_scene_rect_from_node(node);
 		float *black = (float[4]){ 0.f, 0.f, 0.f, 1.f };
 
-		if (memcmp(rect->color, black, sizeof(float) * 4) == 0) {
+		if (memcmp(rect->color, black, sizeof(float) * 4) == 0 &&
+				scene_node_inherited_opacity(node) == 1) {
 			return false;
 		}
 	}
@@ -1976,7 +2003,8 @@ static bool construct_render_list_iterator(struct wlr_scene_node *node,
 			(!data->fractional_scale || data->render_list->size == 0)) {
 		struct wlr_scene_buffer *scene_buffer = wlr_scene_buffer_from_node(node);
 
-		if (scene_buffer_is_black_opaque(scene_buffer)) {
+		if (scene_buffer_is_black_opaque(scene_buffer) &&
+				scene_node_inherited_opacity(node) == 1) {
 			return false;
 		}
 	}

@@ -66,12 +66,13 @@ workspace_destroy(Workspace *ws)
 	if (!ws)
 		return;
 
-	/* A fullscreen client detached from its column still references this
-	 * workspace via fs_ws — clear it so the dangling pointer can't be
-	 * compared after free (it reverts to always-visible/unbound). */
-	wl_list_for_each(c, &clients, link)
+	/* Unbind clients from dying workspace. */
+	wl_list_for_each(c, &clients, link) {
 		if (c->fs_ws == ws)
 			c->fs_ws = NULL;
+		if (c->float_ws == ws)
+			c->float_ws = NULL;
+	}
 
 	wl_list_for_each_safe(col, coltmp, &ws->columns, link)
 		column_destroy(col);
@@ -418,6 +419,12 @@ workspace_move_to_monitor(Workspace *ws, Monitor *dst)
 			c->tags = dst->tagset[dst->seltags];
 		}
 	}
+	wl_list_for_each(c, &clients, link) {
+		if (client_float_ws(c) != ws)
+			continue;
+		c->mon = dst;
+		c->tags = dst->tagset[dst->seltags];
+	}
 }
 
 /* Re-insert a (previously detached) client into the workspace as a new
@@ -512,11 +519,7 @@ workspace_focus_client(Client *c)
  *   and writes them to client geometry / scene positions.  Called
  *   every frame from the rendermon path.
  */
-/* A workspace is "occupied" if it has tiled columns OR hosts a
- * fullscreen client.  Fullscreen clients are detached from columns
- * (n_columns stays 0) and bound to the workspace only via fs_ws, so the
- * raw n_columns check would treat a fullscreen-only workspace as empty —
- * making it unreachable by navigation and a target for compaction. */
+/* Tiles or bound detached clients. */
 int
 workspace_has_clients(Workspace *ws)
 {
@@ -526,9 +529,19 @@ workspace_has_clients(Workspace *ws)
 	if (ws->n_columns > 0)
 		return 1;
 	wl_list_for_each(c, &clients, link)
-		if (c->isfullscreen && c->fs_ws == ws)
+		if ((c->isfullscreen && c->fs_ws == ws) || client_float_ws(c) == ws)
 			return 1;
 	return 0;
+}
+
+/* Workspace a floating window lives on; NULL = shown everywhere. */
+Workspace *
+client_float_ws(Client *c)
+{
+	if (!c->isfloating || c->isfullscreen || c->issticky || c->is_notif
+			|| client_is_unmanaged(c))
+		return NULL;
+	return c->float_ws;
 }
 
 /* Highest workspace index that currently holds at least one tile.
@@ -1888,40 +1901,36 @@ monitor_apply_positions(Monitor *m)
 	}
 	txn_place(m);
 
-	/* Fullscreen clients are detached from their column and live on
-	 * LyrFS, so the per-workspace loop above never moves them — a ws
-	 * switch over a fullscreen game/video used to pop instead of
-	 * slide.  Give them the same vertical treatment as tiles: offset
-	 * by their bound workspace's stride position during the slide,
-	 * enabled while mid-anim, disabled when settled on an inactive
-	 * ws (arrange() also disables them; we re-enable for the anim). */
+	/* Detached clients slide with their workspace. */
 	wl_list_for_each(c, &clients, link) {
-		int fs_y_base, fs_visible;
+		Workspace *bound;
+		int y_base, visible;
 
-		if (c->mon != m || !c->isfullscreen || !c->fs_ws || !c->scene)
+		if (c->mon != m || !c->scene)
 			continue;
-		if (!client_surface(c) || !client_surface(c)->mapped)
+		bound = c->isfullscreen ? c->fs_ws : client_float_ws(c);
+		if (!bound || !client_surface(c) || !client_surface(c)->mapped)
 			continue;
 
-		fs_visible = (c->fs_ws == m->active_ws) || vertical_anim;
-		if (!fs_visible) {
+		visible = bound == m->active_ws || vertical_anim;
+		if (visible && active_fsc && c != active_fsc && !vertical_anim
+				&& !client_is_fs_companion(c, active_fsc))
+			visible = 0;
+		if (!visible) {
 			if (c->scene->node.enabled)
 				wlr_scene_node_set_enabled(&c->scene->node, 0);
 			continue;
 		}
 
-		fs_y_base = (c->fs_ws->idx -
-				(m->active_ws ? m->active_ws->idx : 0)) * ws_stride
-				+ (int)m->ws_y_offset;
+		y_base = (bound->idx - (m->active_ws ? m->active_ws->idx : 0))
+				* ws_stride + (int)m->ws_y_offset;
 		if (!c->scene->node.enabled)
 			wlr_scene_node_set_enabled(&c->scene->node, 1);
 		wlr_scene_node_set_position(&c->scene->node,
-				c->geom.x, c->geom.y + fs_y_base);
+				c->geom.x, c->geom.y + y_base);
 
-		/* Fullscreen lives on LyrFS, ABOVE the statusbar layer, and an
-		 * active fullscreen covers the bar by design — so let it slide
-		 * over the bar during the switch too, full monitor height. */
-		if (c->scene_surface) {
+		/* Fullscreen slides over the bar. */
+		if (c->isfullscreen && c->scene_surface) {
 			struct wlr_box wg;
 			client_get_clip(c, &wg);
 			wlr_scene_subsurface_tree_set_clip(

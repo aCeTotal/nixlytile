@@ -1194,6 +1194,7 @@ typedef struct {
 	int area_clipped;             /* 1 = tile currently cropped to m->w (straddles/past tile-area edge) */
 	struct wl_listener ping_timeout; /* freeze watchdog: unresponsive → kill */
 	Workspace *fs_ws;             /* workspace fullscreened on; NULL = not fs / unbound (always visible) */
+	Workspace *float_ws;          /* workspace floated on; NULL = unbound */
 	int fs_col_idx;               /* column slot held before fullscreen; -1 = none */
 	int rule_ws;                  /* window-rule `workspace N` (1-based); 0 = none */
 
@@ -1832,6 +1833,7 @@ extern unsigned int statusbar_icon_text_gap_clock;
 extern unsigned int statusbar_top_gap;
 extern float statusbar_fg[];
 extern float statusbar_bg[];
+extern float statusbar_opacity;
 extern float statusbar_popup_bg[];
 extern float statusbar_volume_muted_fg[];
 extern float statusbar_mic_muted_fg[];
@@ -2415,7 +2417,6 @@ void setfloating(Client *c, int floating);
 void setfullscreen(Client *c, int fullscreen);
 int game_promote_fullscreen(Client *c, int cw, int ch);
 void setsticky(Client *c, int sticky);
-void togglefloating(const Arg *arg);
 void togglefullscreen(const Arg *arg);
 void togglefullscreenadaptivesync(const Arg *arg);
 struct wlr_box fullscreen_mirror_geom(Monitor *m);
@@ -2554,6 +2555,7 @@ void monitor_compact_workspaces(Monitor *m);
 Workspace *monitor_active_ws(Monitor *m);
 Workspace *workspace_get_or_create_idx(Monitor *m, int idx);
 int workspace_has_clients(Workspace *ws);
+Workspace *client_float_ws(Client *c);
 void workspace_attach_client(Workspace *ws, Client *c);
 void workspace_detach_client(Client *c);
 void workspace_drop_tile(Workspace *ws, Client *c, double screen_x);
@@ -3530,12 +3532,22 @@ void gaming_conf_cleanup(void);
  * matched a bound shortcut and must not be forwarded to the client. */
 void gshortcuts_init(void);
 void gshortcuts_cleanup(void);
+sd_bus *portal_bus(void);
 int gshortcuts_handle_key(uint32_t mods, uint32_t keycode,
 	const xkb_keysym_t *syms, int nsyms,
 	const xkb_keysym_t *level0_syms, int nlevel0, int pressed);
 void ptt_handle_key(uint32_t mods, uint32_t keycode, const xkb_keysym_t *syms,
 	int nsyms, const xkb_keysym_t *level0_syms, int nlevel0, int pressed);
 void ptt_handle_button(uint32_t button, int pressed);
+
+/* filechooser.c — FileChooser portal, jail grants */
+void filechooser_init(void);
+void filechooser_cleanup(void);
+
+/* jail_grant.c — nixly-jaild client */
+int jail_hides(pid_t pid, const char *path);
+int jail_grant_send(const char *req, size_t len);
+int jail_grant_ok(int fd);
 
 /* nixlytile.c */
 void steam_set_ge_proton_default(void);

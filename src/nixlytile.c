@@ -756,6 +756,7 @@ cleanup(void)
 	voice_stop();
 	audio_watch_cleanup();
 	gaming_conf_cleanup();
+	filechooser_cleanup();
 	gshortcuts_cleanup();
 	/* Shut down game mode background worker (unfreezes processes if needed) */
 	gm_bg_cleanup();
@@ -1751,7 +1752,6 @@ const FuncEntry func_table[] = {
 	{ "tag",               tag,               2 },
 	{ "toggleview",        toggleview,        2 },
 	{ "toggletag",         toggletag,         2 },
-	{ "togglefloating",    togglefloating,    0 },
 	{ "togglefullscreen",  togglefullscreen,  0 },
 	{ "togglegamespan",    togglegamespan,    0 },
 	{ "togglegaps",        togglegaps,        0 },
@@ -2805,6 +2805,7 @@ setup(void)
 	powersave_init();
 	launchboost_init();
 	gshortcuts_init();
+	filechooser_init();
 	fcft_initialized = fcft_init(FCFT_LOG_COLORIZE_NEVER, 0, FCFT_LOG_CLASS_ERROR);
 	if (!fcft_initialized)
 		die("couldn't initialize fcft");

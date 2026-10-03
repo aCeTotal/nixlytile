@@ -32,7 +32,7 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            config_parser.o config_loader.o monitors_conf.o monitor_setup.o \
            input_conf.o bindings_conf.o statusbar_conf.o \
            remote.o remote_pad.o remote_mouse.o \
-           apptoggle.o htpc_pad.o htpc_guide.o wsfreeze.o mic_watch.o audio_watch.o audio_devices.o audio_meter.o gaming_conf.o gshortcuts.o \
+           apptoggle.o htpc_pad.o htpc_guide.o wsfreeze.o mic_watch.o audio_watch.o audio_devices.o audio_meter.o gaming_conf.o gshortcuts.o filechooser.o jail_grant.o \
            statusbar.o tray.o statusbar_support.o terminfo.o launchfx.o wobble.o wobble_render.o column_focus.o diag.o fetch_async.o charge_limit.o fancontrol.o fanwatch.o \
            fancurve.o fan_helper.o fan_ec.o fan_nvml.o \
            diskwatch.o disk_helper.o disk_ui.o \
@@ -207,6 +207,15 @@ disk_ui.o: $(SRC)/disk_ui.c $(SRC)/nixlytile.h $(SRC)/popup_card.h $(SRC)/netsys
 nixly-diskd: $(SRC)/nixly_diskd.c
 	$(CC) -O2 -Wall -Wextra -o $@ $(SRC)/nixly_diskd.c
 
+filechooser.o: $(SRC)/filechooser.c $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+jail_grant.o: $(SRC)/jail_grant.c $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+
+# Root jail grant helper — standalone binary, no compositor deps
+nixly-jaild: $(SRC)/nixly_jaild.c $(SRC)/jaild_attach.c $(SRC)/jaild.h $(SRC)/priv_sock.h
+	$(CC) -O2 -Wall -Wextra -o $@ $(SRC)/nixly_jaild.c $(SRC)/jaild_attach.c
+
 netmon.o: $(SRC)/netmon.c $(SRC)/netsys.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 
@@ -318,7 +327,7 @@ $(SRC)/dwl-ipc-unstable-v2-protocol.c: $(SRC)/dwl-ipc-unstable-v2-protocol.h
 $(SRC)/config.h:
 	cp $(SRC)/config.def.h $@
 clean:
-	rm -f nixlytile nixly-fand nixly-diskd *.o $(SRC)/*-protocol.h $(SRC)/*-protocol.c
+	rm -f nixlytile nixly-fand nixly-diskd nixly-jaild *.o $(SRC)/*-protocol.h $(SRC)/*-protocol.c
 
 dist: clean
 	mkdir -p nixlytile-$(VERSION)
@@ -328,7 +337,7 @@ dist: clean
 	tar -caf nixlytile-$(VERSION).tar.gz nixlytile-$(VERSION)
 	rm -rf nixlytile-$(VERSION)
 
-install: nixlytile nixly-fand nixly-diskd
+install: nixlytile nixly-fand nixly-diskd nixly-jaild
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
 	rm -f $(DESTDIR)$(PREFIX)/bin/nixlytile
 	cp -f nixlytile $(DESTDIR)$(PREFIX)/bin
@@ -337,6 +346,8 @@ install: nixlytile nixly-fand nixly-diskd
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/nixly-fand
 	cp -f nixly-diskd $(DESTDIR)$(PREFIX)/bin
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/nixly-diskd
+	cp -f nixly-jaild $(DESTDIR)$(PREFIX)/bin
+	chmod 755 $(DESTDIR)$(PREFIX)/bin/nixly-jaild
 	mkdir -p $(DESTDIR)$(DATADIR)/nixlytile/images
 	cp -r images/svg $(DESTDIR)$(DATADIR)/nixlytile/images/
 	mkdir -p $(DESTDIR)$(MANDIR)/man1
@@ -350,11 +361,15 @@ install: nixlytile nixly-fand nixly-diskd
 	chmod 644 $(DESTDIR)$(DATADIR)/xdg-desktop-portal/portals/nixlytile.portal
 	cp -f nixlytile-portals.conf $(DESTDIR)$(DATADIR)/xdg-desktop-portal/nixlytile-portals.conf
 	chmod 644 $(DESTDIR)$(DATADIR)/xdg-desktop-portal/nixlytile-portals.conf
+	mkdir -p $(DESTDIR)$(DATADIR)/polkit-1/actions
+	cp -f org.nixlytile.jail-grant.policy $(DESTDIR)$(DATADIR)/polkit-1/actions/
+	chmod 644 $(DESTDIR)$(DATADIR)/polkit-1/actions/org.nixlytile.jail-grant.policy
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/nixlytile $(DESTDIR)$(MANDIR)/man1/nixlytile.1 \
 		$(DESTDIR)$(DATADIR)/wayland-sessions/nixlytile.desktop \
 		$(DESTDIR)$(DATADIR)/xdg-desktop-portal/portals/nixlytile.portal \
-		$(DESTDIR)$(DATADIR)/xdg-desktop-portal/nixlytile-portals.conf
+		$(DESTDIR)$(DATADIR)/xdg-desktop-portal/nixlytile-portals.conf \
+		$(DESTDIR)$(DATADIR)/polkit-1/actions/org.nixlytile.jail-grant.policy
 
 .SUFFIXES: .c .o
 .c.o:

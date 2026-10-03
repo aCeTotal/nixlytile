@@ -945,3 +945,9 @@ gshortcuts_cleanup(void)
 	sd_bus_unref(gs_bus);
 	gs_bus = NULL;
 }
+
+sd_bus *
+portal_bus(void)
+{
+	return gs_bus;
+}

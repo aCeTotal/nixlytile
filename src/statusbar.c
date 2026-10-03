@@ -6027,6 +6027,20 @@ initstatusbar(Monitor *m)
 					wlr_scene_node_set_enabled(&info[i]->tree->node, 0);
 			}
 		}
+		{
+			StatusModule *mods[] = { &m->statusbar.tags,
+				&m->statusbar.traylabel, &m->statusbar.terminfo,
+				&m->statusbar.cpu, &m->statusbar.net,
+				&m->statusbar.battery, &m->statusbar.light,
+				&m->statusbar.mic, &m->statusbar.volume,
+				&m->statusbar.disk, &m->statusbar.bluetooth,
+				&m->statusbar.display, &m->statusbar.ram,
+				&m->statusbar.clock, &m->statusbar.power };
+			for (size_t i = 0; i < LENGTH(mods); i++)
+				if (mods[i]->tree)
+					wlr_scene_tree_set_opacity(mods[i]->tree,
+							statusbar_opacity);
+		}
 	}
 	if (!m->modal.tree) {
 		m->modal.tree = wlr_scene_tree_create(layers[LyrTop]);

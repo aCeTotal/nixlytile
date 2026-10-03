@@ -29,6 +29,7 @@ const unsigned int statusbar_icon_text_gap_clock = statusbar_icon_text_gap;
 const unsigned int statusbar_top_gap = 3;
 const float statusbar_fg[]          = COLOR(0xffffffff);
 const float statusbar_bg[]          = COLOR(0x00000016);
+const float statusbar_opacity        = 0.5f; /* bar modules, not popups */
 const float statusbar_popup_bg[]    = COLOR(0x00000080); /* ~50% */
 const float statusbar_volume_muted_fg[] = COLOR(0xff4c4cff);
 const float statusbar_mic_muted_fg[] = COLOR(0xff4c4cff);
@@ -160,7 +161,7 @@ const enum libinput_config_tap_button_map button_map = LIBINPUT_CONFIG_TAP_MAP_L
 /* commands — match Niri spawn-at-startup + binds */
 const char *termcmd[] = { "foot", NULL };
 const char *alacrittycmd[] = { "alacritty", NULL };
-const char *chromecmd[] = { "google-chrome-stable", NULL };
+const char *browsercmd[] = { "brave", NULL };
 const char *dolphincmd[] = { "dolphin", NULL };
 const char *fuzzelcmd[] = { "fuzzel", NULL };
 const char *apptogglecmd[] = { "apptoggle", NULL };
@@ -185,8 +186,6 @@ const Key keys[] = {
 	/* Window management */
 	{ MODKEY,                    XKB_KEY_q,          killclient,        {0} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Q,          quit,              {0} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_space,      togglefloating,    {0} },
-	{ MODKEY,                    XKB_KEY_c,          togglefloating,    {0} },
 	{ MODKEY,                    XKB_KEY_f,          maximize_column,   {0} },
 	{ MODKEY,                    XKB_KEY_b,          togglestatusbar,   {0} },
 
@@ -231,7 +230,7 @@ const Key keys[] = {
 	{ MODKEY,                    XKB_KEY_e,          spawn,          {.v = dolphincmd} },
 	{ MODKEY,                    XKB_KEY_Escape,     spawn,          {.v = lockcmd} },
 	{ MODKEY,                    XKB_KEY_F12,        spawn,          {.v = lockcmd} },
-	{ MODKEY,                    XKB_KEY_BackSpace,  spawn,          {.v = chromecmd} },
+	{ MODKEY,                    XKB_KEY_BackSpace,  spawn,          {.v = browsercmd} },
 	{ MODKEY,                    XKB_KEY_s,          spawn,          {.v = screenshotcmd} },
 	{ 0,                         XKB_KEY_Print,      spawn,          {.v = screenshotcmd} },
 	{ WLR_MODIFIER_SHIFT,        XKB_KEY_Print,      spawn,          {.v = screenshotscreencmd} },
@@ -283,6 +282,5 @@ const Key keys[] = {
 
 const Button buttons[] = {
 	{ MODKEY, BTN_LEFT,   moveresize,     {.ui = CurMove} },
-	{ MODKEY, BTN_MIDDLE, togglefloating, {0} },
 	{ MODKEY, BTN_RIGHT,  moveresize,     {.ui = CurResize} },
 };

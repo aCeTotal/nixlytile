@@ -153,7 +153,7 @@ autostart "nixlymedia"
 //   • String arg for spawn (`/bin/sh -c` is implicit)
 //
 // Action list:
-//   quit  killclient  spawn  togglefloating  togglefullscreen
+//   quit  killclient  spawn  togglefullscreen
 //   togglestatusbar  togglegaps  focus-column-dir  focus-workspace-dir
 //   focus-workspace-n  focus-window-in-column-dir  focus-last-workspace
 //   move-column-dir  move-window-in-column-dir  move-client-to-ws-dir
@@ -172,7 +172,7 @@ bind "Mod+i"            "spawn" "fuzzel"
 bind "Mod+e"            "spawn" "dolphin"
 bind "Mod+Escape"       "spawn" "nixly-lockscreen"
 bind "Mod+F12"          "spawn" "nixly-lockscreen"
-bind "Mod+BackSpace"    "spawn" "google-chrome-stable --ozone-platform-hint=auto --enable-features=UseOzonePlatform,WaylandWindowDecorations"
+bind "Mod+BackSpace"    "spawn" "brave"
 bind "Mod+s"            "spawn" "grimshot copy area"
 bind "Print"            "spawn" "grimshot copy area"
 bind "Shift+Print"      "spawn" "grimshot copy output"
@@ -180,8 +180,6 @@ bind "Shift+Print"      "spawn" "grimshot copy output"
 // Window management
 bind "Mod+q"            "killclient"
 bind "Mod+Shift+Q"      "quit"
-bind "Mod+Shift+space"  "togglefloating"
-bind "Mod+c"            "togglefloating"
 bind "Mod+f"            "maximize-column"
 bind "Mod+Shift+F"      "togglefullscreen"
 bind "Mod+b"            "togglestatusbar"

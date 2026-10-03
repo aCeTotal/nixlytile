@@ -224,7 +224,6 @@ static const ActionEntry actions[] = {
 	{ "quit",                         quit,                         A_NONE },
 	{ "killclient",                   killclient,                   A_NONE },
 	{ "spawn",                        spawn,                        A_SPAWN },
-	{ "togglefloating",               togglefloating,               A_NONE },
 	{ "togglefullscreen",             togglefullscreen,             A_NONE },
 	{ "togglegamespan",               togglegamespan,               A_NONE },
 	{ "togglestatusbar",              togglestatusbar,              A_NONE },

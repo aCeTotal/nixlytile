@@ -55,6 +55,8 @@ arrange(Monitor *m)
 			 */
 			if (c->isfullscreen && c->fs_ws && c->fs_ws != m->active_ws)
 				vis = 0;
+			if (client_float_ws(c) && client_float_ws(c) != m->active_ws)
+				vis = 0;
 			/*
 			 * A fullscreen client owns the active workspace
 			 * exclusively: disable every OTHER client on this
