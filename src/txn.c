@@ -97,7 +97,6 @@ configure(Client *c, struct wlr_box box)
 	int cw, ch;
 
 	content_size(c, &cw, &ch);
-	c->tile_sent = box;
 	client_set_bounds(c, box.width, box.height);
 	c->txn_w = c->pending_resize_w = c->last_configured_w = w;
 	c->txn_h = c->pending_resize_h = c->last_configured_h = h;
@@ -116,14 +115,23 @@ loose(Monitor *m)
 			(cursor_mode == CurResize || cursor_mode == CurColResize);
 }
 
-/* Loose tiles chase their own target. */
+static int
+fits(Client *c, struct wlr_box box)
+{
+	int cw, ch;
+
+	content_size(c, &cw, &ch);
+	return cw == box.width - 2 * (int)c->bw &&
+			ch == box.height - 2 * (int)c->bw;
+}
+
+/* Box tracks pointer; content follows. */
 static void
 chase(Client *c)
 {
-	if (same_size(c->tile_target, c->tile_shown))
-		c->tile_shown = c->tile_target;
-	else if (!txn_owes(c) && !configure(c, c->tile_target))
-		c->tile_shown = c->tile_target;
+	c->tile_shown = c->tile_target;
+	if (!txn_owes(c) && !fits(c, c->tile_target))
+		configure(c, c->tile_target);
 }
 
 /* Late clients: one configure in flight. */
@@ -323,15 +331,7 @@ txncommitnotify(struct wl_listener *listener, void *data)
 		c->txn_locked = 1;
 		return;
 	}
-	/* Loose: box follows the answered content. */
-	if (!c->in_txn && !c->txn_late) {
-		c->tile_shown = c->tile_sent;
-		if (loose(c->mon))
-			chase(c);
-		show(c);
-		return;
-	}
-	/* Late: resync, or chase the box. */
+	/* Late or loose: resync to the box. */
 	box = c->in_txn ? c->tile_txn : c->tile_shown;
 	c->txn_late = c->content_w != box.width - 2 * (int)c->bw ||
 			c->content_h != box.height - 2 * (int)c->bw;

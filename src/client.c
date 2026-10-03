@@ -1160,6 +1160,7 @@ notif_placed:
 				c->isurgent ? urgentcolor : bordercolor);
 		c->border[i]->node.data = c;
 	}
+	tilefill_create(c);
 
 	/* Initialize client geometry with room for border */
 	client_set_tiled(c, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
@@ -1877,6 +1878,7 @@ client_clip_to_usable(Client *c)
 
 	if (!c || !c->mon || !c->scene || !c->scene_surface)
 		return;
+	tilefill_update(c);
 	/* Only tiled column clients scroll into the margin.  Floating and
 	 * fullscreen surfaces are placed deliberately and must render where
 	 * they're put. */
@@ -2892,6 +2894,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 		wlr_scene_node_destroy(&c->scene->node);
 	c->scene = NULL;
 	c->scene_surface = NULL;
+	c->fill[0] = c->fill[1] = NULL;
 	printstatus();
 	motionnotify(0, NULL, 0, 0, 0, 0);
 

@@ -1081,6 +1081,7 @@ typedef struct {
 	Monitor *mon;
 	struct wlr_scene_tree *scene;
 	struct wlr_scene_rect *border[4];
+	struct wlr_scene_rect *fill[2];
 	struct wlr_scene_tree *scene_surface;
 	struct wl_list link;
 	struct wl_list flink;
@@ -1283,7 +1284,7 @@ typedef struct {
 	int conv_seen_w, conv_seen_h;  /* last committed size seen by animcommitnotify
 	                                * (size-change edge → converge_kick) */
 	/* Tile transaction state, see txn.c. */
-	struct wlr_box tile_target, tile_shown, tile_txn, tile_sent;
+	struct wlr_box tile_target, tile_shown, tile_txn;
 	int tile_ox, tile_oy;         /* live camera offset */
 	uint64_t tile_ws_id;          /* workspace of tile_shown; 0 = unplaced */
 	uint32_t tile_pass;
@@ -2494,6 +2495,9 @@ int txn_tick(Monitor *m);
 int txn_owes(Client *c);
 void txn_forget(Client *c);
 void txncommitnotify(struct wl_listener *listener, void *data);
+/* tilefill.c */
+void tilefill_create(Client *c);
+void tilefill_update(Client *c);
 /* converge.c — size-convergence watchdog */
 int client_size_pending(Client *c);
 int clients_converge_tick(Monitor *m);
