@@ -25,6 +25,8 @@
  * presence_sample_once().  Visible idle-inhibitors (video players)
  * block save-entry.
  */
+#include <wlr/types/wlr_switch.h>
+
 #include "nixlytile.h"
 
 #define PR_INTERVAL_PRESENT_MS 10000
@@ -78,16 +80,9 @@ pr_outputs_set(int enabled)
 {
 	Monitor *m;
 
-	wl_list_for_each(m, &mons, link) {
-		struct wlr_output_state st;
-
-		if (!m->wlr_output)
-			continue;
-		wlr_output_state_init(&st);
-		wlr_output_state_set_enabled(&st, enabled);
-		wlr_output_commit_state(m->wlr_output, &st);
-		wlr_output_state_finish(&st);
-	}
+	wl_list_for_each(m, &mons, link)
+		if (!m->is_virtual)
+			monitor_set_power(m, enabled);
 }
 
 static void
@@ -284,4 +279,40 @@ presence_init(void)
 		pr_timer = wl_event_loop_add_timer(event_loop, pr_sample, NULL);
 	if (pr_timer)
 		wl_event_source_timer_update(pr_timer, PR_INTERVAL_PRESENT_MS);
+}
+
+typedef struct {
+	struct wl_listener toggle;
+	struct wl_listener destroy;
+} PresenceSwitch;
+
+static void
+pr_switch_toggle(struct wl_listener *listener, void *data)
+{
+	struct wlr_switch_toggle_event *event = data;
+
+	if (event->switch_type == WLR_SWITCH_TYPE_LID
+			&& event->switch_state == WLR_SWITCH_STATE_OFF)
+		presence_note_input();
+}
+
+static void
+pr_switch_destroy(struct wl_listener *listener, void *data)
+{
+	PresenceSwitch *sw = wl_container_of(listener, sw, destroy);
+
+	wl_list_remove(&sw->toggle.link);
+	wl_list_remove(&sw->destroy.link);
+	free(sw);
+}
+
+/* Opening the lid is presence. */
+void
+presence_watch_switch(struct wlr_input_device *device)
+{
+	PresenceSwitch *sw = ecalloc(1, sizeof(*sw));
+
+	LISTEN(&wlr_switch_from_input_device(device)->events.toggle,
+			&sw->toggle, pr_switch_toggle);
+	LISTEN(&device->events.destroy, &sw->destroy, pr_switch_destroy);
 }

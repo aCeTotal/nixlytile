@@ -103,7 +103,7 @@ I would probably just submit raphi's patchset but I don't think that would be po
       </description>
       <arg name="tag" type="uint" summary="Index of the tag"/>
       <arg name="state" type="uint" enum="tag_state" summary="The state of the tag."/>
-      <arg name="clients" type="uint" summary="The number of clients in the tag."/>
+      <arg name="client_count" type="uint" summary="The number of clients in the tag."/>
       <arg name="focused" type="uint" summary="If there is a focused client. Nonzero being valid, zero being invalid."/>
     </event>
 

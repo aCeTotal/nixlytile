@@ -119,6 +119,15 @@ static const char sc_seed[] =
 "volume 80.0\n"
 "mic 50.0\n";
 
+/* 0 when the path fits. */
+static int
+sc_file(char *path, size_t size, const char *name)
+{
+	int n = snprintf(path, size, "%s/%s", sc_dir, name);
+
+	return n < 0 || (size_t)n >= size ? -1 : 0;
+}
+
 static void
 sc_resolve_path(void)
 {
@@ -137,7 +146,8 @@ sc_resolve_path(void)
 			home = "/";
 		snprintf(sc_dir, sizeof(sc_dir), "%s/.local/nixlyos", home);
 	}
-	snprintf(sc_path, sizeof(sc_path), "%s/%s", sc_dir, STATUSBARCONF_NAME);
+	if (sc_file(sc_path, sizeof(sc_path), STATUSBARCONF_NAME))
+		sc_path[0] = '\0';
 }
 
 static void
@@ -206,15 +216,13 @@ sc_migrate_legacy(void)
 	double d;
 	int i;
 
-	snprintf(path, sizeof(path), "%s/brightness.conf", sc_dir);
-	fp = fopen(path, "r");
+	fp = sc_file(path, sizeof(path), "brightness.conf") ? NULL : fopen(path, "r");
 	if (fp) {
 		if (fscanf(fp, "manual %lf", &d) == 1 && d >= 0.0 && d <= 100.0)
 			sc_brightness = d;
 		fclose(fp);
 	}
-	snprintf(path, sizeof(path), "%s/charge_limit.conf", sc_dir);
-	fp = fopen(path, "r");
+	fp = sc_file(path, sizeof(path), "charge_limit.conf") ? NULL : fopen(path, "r");
 	if (fp) {
 		if (fscanf(fp, "limit %d", &i) == 1 &&
 				(i == 80 || i == 90 || i == 100))

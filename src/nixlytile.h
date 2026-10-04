@@ -2530,6 +2530,7 @@ void read_steam_properties(Client *c);
 void xwayland_set_primary(Monitor *m);
 int is_steam_cmd(const char *cmd);
 int is_game_launcher_child(pid_t pid);
+extern const char *const game_runtime_comms[];
 int is_game_runtime_child(pid_t pid);
 int client_wants_tearing(Client *c);
 void track_client_frame(Client *c);
@@ -2854,7 +2855,7 @@ void renderram(StatusModule *module, int bar_height, const char *text);
 void render_icon_label(StatusModule *module, int bar_height, const char *text,
 		int (*ensure_icon)(int target_h), struct wlr_buffer **icon_buf,
 		int *icon_w, int *icon_h, int min_text_w, int icon_gap,
-		const float text_color[static 4]);
+		const float *text_color);
 void client_kick_frame_done(Client *c);
 void updatemodulebg(StatusModule *module, int width, int height,
 		const float color[static 4]);
@@ -3425,6 +3426,7 @@ void presence_init(void);
 int presence_active(void);
 void presence_note_input(void);
 void presence_sample_once(void);
+void presence_watch_switch(struct wlr_input_device *device);
 
 /* lightsense.c — webcam-based auto brightness (Auto/Manual modes) */
 extern int light_auto_mode;
@@ -3498,6 +3500,10 @@ void htpc_ws_refresh_fx(Monitor *m);
  * whole session + mute the sink while no output is enabled and awake */
 void wsfreeze_poke(void);
 void wsfreeze_thaw_all(void);
+
+/* appreap.c — end windowless apps */
+void appreap_track(Client *c);
+void appreap_poke(void);
 
 /* mic_watch.c — /dev/snd hotplug watch for the microphone module */
 void mic_watch_setup(void);
@@ -3642,57 +3648,35 @@ fork_detach(void)
 	prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
 }
 
-/*
- * Ensure NixOS per-user profile bin dirs are in PATH.
- * Desktop files for per-user packages use relative binary names
- * (e.g. "FreeCAD", "gimp-3.0") that need these dirs in PATH.
- * Call in forked child before exec.
- */
+#define NIX_SYSTEM_BIN "/run/current-system/sw/bin"
+
+/* Profile bins for desktop files. */
 static inline void
 ensure_nix_paths(void)
 {
 	const char *user = getenv("USER");
 	const char *home = getenv("HOME");
 	const char *path = getenv("PATH");
-	char extra[PATH_MAX];
+	char user_bin[PATH_MAX] = "", home_bin[PATH_MAX] = "";
 	char newpath[8192];
-	int need_update = 0;
+	const char *ub, *hb;
+	int n;
 
 	if (!path)
-		path = "/run/current-system/sw/bin";
+		path = NIX_SYSTEM_BIN;
+	if (user)
+		snprintf(user_bin, sizeof(user_bin), "/etc/profiles/per-user/%s/bin", user);
+	if (home)
+		snprintf(home_bin, sizeof(home_bin), "%s/.nix-profile/bin", home);
+	ub = user_bin[0] && !strstr(path, user_bin) ? user_bin : "";
+	hb = home_bin[0] && !strstr(path, home_bin) ? home_bin : "";
 
-	snprintf(newpath, sizeof(newpath), "%s", path);
-
-	if (user) {
-		snprintf(extra, sizeof(extra), "/etc/profiles/per-user/%s/bin", user);
-		if (!strstr(newpath, extra)) {
-			char tmp[8192];
-			snprintf(tmp, sizeof(tmp), "%s:%s", extra, newpath);
-			snprintf(newpath, sizeof(newpath), "%s", tmp);
-			need_update = 1;
-		}
-	}
-
-	if (home) {
-		snprintf(extra, sizeof(extra), "%s/.nix-profile/bin", home);
-		if (!strstr(newpath, extra)) {
-			char tmp[8192];
-			snprintf(tmp, sizeof(tmp), "%s:%s", extra, newpath);
-			snprintf(newpath, sizeof(newpath), "%s", tmp);
-			need_update = 1;
-		}
-	}
-
-	/* System-wide NixOS binaries */
-	if (!strstr(newpath, "/run/current-system/sw/bin")) {
-		char tmp[8192];
-		snprintf(tmp, sizeof(tmp), "%s:/run/current-system/sw/bin", newpath);
-		snprintf(newpath, sizeof(newpath), "%s", tmp);
-		need_update = 1;
-	}
-
-	if (need_update)
-		setenv("PATH", newpath, 1);
+	n = snprintf(newpath, sizeof(newpath), "%s%s%s%s%s%s",
+		ub, *ub ? ":" : "", hb, *hb ? ":" : "", path,
+		strstr(path, NIX_SYSTEM_BIN) ? "" : ":" NIX_SYSTEM_BIN);
+	if (n < 0 || n >= (int)sizeof(newpath) || !strcmp(newpath, path))
+		return;
+	setenv("PATH", newpath, 1);
 }
 void quit(const Arg *arg);
 uint64_t get_time_ns(void);

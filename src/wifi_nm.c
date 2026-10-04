@@ -63,7 +63,7 @@ nm_backend_active(void)
 
 		if (de->d_name[0] < '0' || de->d_name[0] > '9')
 			continue;
-		snprintf(path, sizeof(path), "/proc/%s/comm", de->d_name);
+		snprintf(path, sizeof(path), "/proc/%d/comm", atoi(de->d_name));
 		f = fopen(path, "r");
 		if (!f)
 			continue;

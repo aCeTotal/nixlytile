@@ -12,6 +12,10 @@
 #include <limits.h>
 #include <pthread.h>
 
+#define TI_PATH_SHOWN 48
+#define TI_PATH_TAIL  46
+#define TI_SSH_SHOWN  100
+
 int
 is_terminal_client(Client *c)
 {
@@ -140,7 +144,7 @@ terminfo_collect(pid_t cur, char *out, size_t n)
 		proc_comm(cur, comm, sizeof(comm));
 		if (strcmp(comm, "ssh") == 0 &&
 				ssh_target(cur, target, sizeof(target))) {
-			snprintf(out, n, "ssh %s", target);
+			snprintf(out, n, "ssh %.*s", TI_SSH_SHOWN, target);
 			return;
 		}
 	}
@@ -154,19 +158,20 @@ terminfo_collect(pid_t cur, char *out, size_t n)
 	{
 		const char *home = getenv("HOME");
 		size_t hl = home ? strlen(home) : 0;
+		const char *tilde = "", *rest = cwd;
+		size_t rl;
 
 		if (hl && strncmp(cwd, home, hl) == 0 &&
-				(cwd[hl] == '/' || cwd[hl] == '\0'))
-			snprintf(out, n, "~%s", cwd + hl);
+				(cwd[hl] == '/' || cwd[hl] == '\0')) {
+			tilde = "~";
+			rest = cwd + hl;
+		}
+		rl = strlen(rest);
+		/* Long path keeps its tail. */
+		if (strlen(tilde) + rl > TI_PATH_SHOWN)
+			snprintf(out, n, "…%.*s", TI_PATH_TAIL, rest + rl - TI_PATH_TAIL);
 		else
-			snprintf(out, n, "%s", cwd);
-	}
-
-	/* Long path: keep the tail — the most specific part */
-	if (strlen(out) > 48) {
-		char tail[64];
-		snprintf(tail, sizeof(tail), "…%s", out + strlen(out) - 46);
-		snprintf(out, n, "%s", tail);
+			snprintf(out, n, "%s%.*s", tilde, TI_PATH_SHOWN, rest);
 	}
 }
 

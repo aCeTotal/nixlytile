@@ -10,3 +10,5 @@ char *read_file_to_string(const char *path, size_t *out_len);
 int spawn_async_read(const char *cmd, pid_t *out_pid, int *out_fd);
 int spawn_argv_read(const char *const argv[], pid_t *out_pid, int *out_fd);
 int spawn_cmd_async(const char *const argv[]);
+int write_all(int fd, const void *buf, size_t len);
+int write_file_str(const char *path, const char *s);

@@ -183,6 +183,16 @@ void btmon_disconnect(const char *path);
 void btmon_remove(const char *path);
 /* OBEX file transfer: send a local file to a paired device. */
 int btmon_send_file(const char *addr, const char *filepath);
+int btmon_daemon_up(void);
+void btmon_daemon_wake(void);
+void btmon_daemon_stop(void);
+int btmon_connected_count(void);
+
+/* btidle.c: bluetoothd on demand */
+void btidle_touch(void);
+void btidle_wake(void);
+void btidle_ready(void);
+int btidle_dormant(void);
 
 /* ── bt_rssi.c: live link RSSI via raw HCI (unprivileged) ────────── */
 

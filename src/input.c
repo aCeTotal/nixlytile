@@ -9,7 +9,6 @@ static void (*last_keybinding_func)(const Arg *);
 
 /* btrtile.c removed — local stubs to keep input.c compiling */
 static int resizing_from_mouse = 0;
-static int drag_was_alone_in_column = 0;
 uint64_t last_pointer_motion_ms = 0;
 
 /* Re-entry guard: focusclient() calls back into motionnotify/pointerfocus. */
@@ -1196,8 +1195,8 @@ cursorwarptohint(void)
 	if (c && c->mon && xytomon(cursor->x, cursor->y) != c->mon)
 		return;
 	if (c && active_constraint->current.cursor_hint.enabled) {
-		double off_x = c->scene_surface ? c->scene_surface->node.x : c->bw;
-		double off_y = c->scene_surface ? c->scene_surface->node.y : c->bw;
+		double off_x = c->scene_surface ? c->scene_surface->node.x : (int)c->bw;
+		double off_y = c->scene_surface ? c->scene_surface->node.y : (int)c->bw;
 		wlr_cursor_warp(cursor, NULL, sx + c->geom.x + off_x, sy + c->geom.y + off_y);
 		wlr_seat_pointer_warp(active_constraint->seat, sx, sy);
 	}
@@ -1547,6 +1546,9 @@ inputdevice(struct wl_listener *listener, void *data)
 		break;
 	case WLR_INPUT_DEVICE_TABLET_PAD:
 		createtabletpad(wlr_tablet_pad_from_input_device(device));
+		break;
+	case WLR_INPUT_DEVICE_SWITCH:
+		presence_watch_switch(device);
 		break;
 	default:
 		break;

@@ -3,6 +3,7 @@
  * interactive: pick the default sink/source and drag the gauge to set
  * the level. */
 #include "nixlytile.h"
+#include "netsys.h"
 #include "popup_card.h"
 #include "fetch_async.h"
 
@@ -1093,6 +1094,9 @@ updateinfopopups(Monitor *m, double cx, double cy)
 				cx, cy);
 		if (m->statusbar.bt_popup.visible && !bt_was)
 			bt_popup_opened();
+		if (m->statusbar.bt_popup.visible ||
+				m->statusbar.bt_popup.hover_start_ms)
+			btidle_wake();
 	}
 	info_popup_hover(m, &m->statusbar.display, &m->statusbar.display_popup,
 			render_display_popup, cx, cy);

@@ -407,7 +407,7 @@ render_format_view(Monitor *m, InfoPopup *p, Card *card)
 {
 	DiskDev *dev = dk_find_disk(dview.disk);
 	unsigned long long tail, new_mib;
-	char sz[24], buf[112], val[48];
+	char sz[24], buf[112], val[64];
 	int table;
 
 	(void)m;

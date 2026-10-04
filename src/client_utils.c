@@ -377,7 +377,6 @@ read_steam_properties(Client *c)
 {
 #ifdef XWAYLAND
 	xcb_connection_t *xc;
-	xcb_get_property_cookie_t cookie;
 	xcb_get_property_reply_t *reply;
 	xcb_window_t win;
 
@@ -630,32 +629,25 @@ ancestry_comm_matches(pid_t pid, const char *const *needles, int exact)
 	return 0;
 }
 
-/* Any game launcher or Windows runtime, not just Steam. Used by
- * looks_like_game so a title started from Lutris, Heroic, Bottles, umu,
- * gamescope or bare Wine gets the same fullscreen/VRR treatment as a Steam
- * title. Ultra game mode stays Steam-only on purpose (see gamemode.c) —
- * that is a separate, more invasive decision than "this is a game".
- * Emulators are not listed; the retro path excludes them earlier. */
+/* Exact comm names, never substrings. */
+const char *const game_runtime_comms[] = {
+	"steam", "reaper",
+	"lutris", "lutris-wrapper", "heroic",
+	"bottles", "bottles-cli",
+	"legendary", "gogdl", "nile",
+	"minigalaxy", "portproton", "itch",
+	"gamescope", "umu-run", "umu",
+	"wine", "wine64", "wineserver",
+	"wine-preloader", "wine64-preloader",
+	"proton", "pressure-vessel", "srt-bwrap",
+	NULL
+};
+
+/* Any launcher or Windows runtime. */
 int
 is_game_runtime_child(pid_t pid)
 {
-	/* Exact comm match (comm is the 15-char TASK_COMM_LEN name). Substring
-	 * matching here would classify anything under an Electron app whose
-	 * name merely starts with "proton" (Proton Mail) as a game. */
-	static const char *const runtimes[] = {
-		"steam", "reaper",                        /* Steam */
-		"lutris", "lutris-wrapper", "heroic",     /* launchers */
-		"bottles", "bottles-cli",
-		"legendary", "gogdl", "nile",             /* Heroic backends */
-		"minigalaxy", "portproton", "itch",
-		"gamescope", "umu-run", "umu",            /* wrappers */
-		"wine", "wine64", "wineserver",           /* Wine */
-		"wine-preloader", "wine64-preloader",
-		"proton", "pressure-vessel", "srt-bwrap", /* Proton runtime */
-		NULL
-	};
-
-	return ancestry_comm_matches(pid, runtimes, 1);
+	return ancestry_comm_matches(pid, game_runtime_comms, 1);
 }
 
 int

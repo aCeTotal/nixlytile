@@ -139,14 +139,11 @@ cleanupmon(struct wl_listener *listener, void *data)
 void
 closemon(Monitor *m, int destroying)
 {
-	/* update selmon if needed and
-	 * move closed monitor's clients to the focused one */
 	Client *c;
+	Monitor *dest;
+
+	/* Fall back to first usable output. */
 	if (m == selmon) {
-		/* Gamle do/while leste alltid mons.next (samme element) og
-		 * avanserte aldri i lista — med disabled førstemonitor ble
-		 * selmon NULL selv når en enabled fantes lenger bak. Gå
-		 * faktisk gjennom lista. Tom liste → selmon = NULL. */
 		Monitor *iter;
 		selmon = NULL;
 		wl_list_for_each(iter, &mons, link) {
@@ -158,16 +155,9 @@ closemon(Monitor *m, int destroying)
 		}
 	}
 
-	/* Single-monitor suspend: the only output is being disabled (not
-	 * destroyed) and there is no other screen to move to.  Migrating
-	 * would run setmon(c, NULL, …), which detaches every client from
-	 * its column and tears down the whole tiled layout — so on resume
-	 * the windows come back as free-floating.  The Monitor struct (and
-	 * its workspaces/columns) survives a disable, so leave clients
-	 * exactly where they are; arrange() on resume restores the layout
-	 * identically.  Only skip when NOT destroying — a real output
-	 * teardown (cleanupmon) frees m and must not leave clients on it. */
-	if (!destroying && !selmon)
+	/* Keep layout across lone-output disable. */
+	dest = selmon;
+	if (!destroying && !dest)
 		return;
 
 	wl_list_for_each(c, &clients, link) {
@@ -175,8 +165,10 @@ closemon(Monitor *m, int destroying)
 			resize(c, (struct wlr_box){.x = c->geom.x - m->w.width, .y = c->geom.y,
 					.width = c->geom.width, .height = c->geom.height}, 0);
 		if (c->mon == m)
-			setmon(c, selmon, c->tags);
+			setmon(c, dest, c->tags);
 	}
+	/* Undo sloppy-focus reselect of m. */
+	selmon = dest;
 	focusclient(focustop(selmon), 1);
 	printstatus();
 }
@@ -932,7 +924,7 @@ createmon(struct wl_listener *listener, void *data)
 		m->nmaster = 1;
 		m->lt[0] = &layouts[0];
 		m->lt[1] = &layouts[nlayouts > 1 ? 1 : 0];
-		strncpy(m->ltsymbol, m->lt[m->sellt]->symbol, LENGTH(m->ltsymbol));
+		snprintf(m->ltsymbol, sizeof(m->ltsymbol), "%s", m->lt[m->sellt]->symbol);
 		m->m.x = REMOTE_PARK_X + REMOTE_PARK_STEP * (m->virt_idx - 1);
 		m->m.y = 0;
 		wlr_output_state_set_custom_mode(&state, REMOTE_PARK_W,
@@ -962,7 +954,7 @@ createmon(struct wl_listener *listener, void *data)
 		m->nmaster = rtcfg->nmaster;
 		m->lt[0] = &layouts[0];
 		m->lt[1] = &layouts[nlayouts > 1 ? 1 : 0];
-		strncpy(m->ltsymbol, m->lt[m->sellt]->symbol, LENGTH(m->ltsymbol));
+		snprintf(m->ltsymbol, sizeof(m->ltsymbol), "%s", m->lt[m->sellt]->symbol);
 		wlr_output_state_set_scale(&state, rtcfg->scale);
 		wlr_output_state_set_transform(&state, rtcfg->transform);
 
@@ -1000,7 +992,7 @@ createmon(struct wl_listener *listener, void *data)
 				m->nmaster = r->nmaster;
 				m->lt[0] = r->lt;
 				m->lt[1] = &layouts[nlayouts > 1 && r->lt != &layouts[1]];
-				strncpy(m->ltsymbol, m->lt[m->sellt]->symbol, LENGTH(m->ltsymbol));
+				snprintf(m->ltsymbol, sizeof(m->ltsymbol), "%s", m->lt[m->sellt]->symbol);
 				wlr_output_state_set_transform(&state, r->rr);
 				break;
 			}
@@ -3684,7 +3676,7 @@ rendermon(struct wl_listener *listener, void *data)
 		if (m->hdr_entry_pending || m->hdr_exit_pending)
 			apply_pending_hdr_state(m, &state);
 		if (m->tag_switch_debug > 0)
-			write(STDERR_FILENO, "TS:scene-build>\n", 16);
+			write_all(STDERR_FILENO, "TS:scene-build>\n", 16);
 		{
 			uint64_t build0 = get_time_ns();
 			needs_frame = wlr_scene_output_build_state(m->scene_output,
@@ -3692,7 +3684,7 @@ rendermon(struct wl_listener *listener, void *data)
 			m->last_build_ns = get_time_ns() - build0;
 		}
 		if (m->tag_switch_debug > 0)
-			write(STDERR_FILENO, "TS:scene-build<\n", 16);
+			write_all(STDERR_FILENO, "TS:scene-build<\n", 16);
 
 		/* If build_state failed and 10-bit is active, the backend may not
 		 * support the 10-bit render format at composition time (e.g. NVIDIA).
@@ -3742,11 +3734,11 @@ rendermon(struct wl_listener *listener, void *data)
 				if (m->wlr_output->current_mode)
 					wlr_output_state_set_mode(&fb, m->wlr_output->current_mode);
 				if (m->tag_switch_debug > 0)
-					write(STDERR_FILENO, "TS:recovery-modeset>\n", 21);
+					write_all(STDERR_FILENO, "TS:recovery-modeset>\n", 21);
 				if (wlr_output_test_state(m->wlr_output, &fb))
 					wlr_output_commit_state(m->wlr_output, &fb);
 				if (m->tag_switch_debug > 0)
-					write(STDERR_FILENO, "TS:recovery-modeset<\n", 21);
+					write_all(STDERR_FILENO, "TS:recovery-modeset<\n", 21);
 				wlr_output_state_finish(&fb);
 			} else if (m->scene_build_failures == 4) {
 				wlr_log(WLR_ERROR,
@@ -3936,7 +3928,7 @@ rendermon(struct wl_listener *listener, void *data)
 
 	if (needs_frame) {
 		if (m->tag_switch_debug > 0)
-			write(STDERR_FILENO, "TS:commit>\n", 11);
+			write_all(STDERR_FILENO, "TS:commit>\n", 11);
 		{
 			uint64_t flip0 = get_time_ns();
 			commit_output_frame(m, &state, allow_tearing,
@@ -3945,7 +3937,7 @@ rendermon(struct wl_listener *listener, void *data)
 		}
 		did_commit = 1;
 		if (m->tag_switch_debug > 0)
-			write(STDERR_FILENO, "TS:commit<\n", 11);
+			write_all(STDERR_FILENO, "TS:commit<\n", 11);
 		/* Feed the late-latch draw budget with the full body cost
 		 * (build + commit) actually paid this pass. */
 		if (is_game)
@@ -6958,16 +6950,18 @@ setcustomhz(const Arg *arg)
 	base_drm_mode.hdisplay = width;
 	base_drm_mode.vdisplay = height;
 	base_drm_mode.vrefresh = (current->refresh + 500) / 1000;
-	base_drm_mode.clock = current->refresh * width * height / 1000000;
+	base_drm_mode.clock = (uint32_t)((uint64_t)current->refresh * width * height / 1000000);
 
 	/* Try to get actual DRM timings from preferred mode */
 	struct wlr_output_mode *pref;
 	wl_list_for_each(pref, &m->wlr_output->modes, link) {
 		if (pref->width == width && pref->height == height && pref->preferred) {
 			/* Use preferred mode timings as base - these are EDID-verified */
-			base_drm_mode.clock = pref->refresh * width * height / 1000000;
+			base_drm_mode.clock = (uint32_t)((uint64_t)pref->refresh * width * height / 1000000);
 			/* Estimate htotal/vtotal from clock and refresh */
-			int total_pixels = (pref->refresh > 0) ? (base_drm_mode.clock * 1000000 / pref->refresh) : (width * height);
+			int total_pixels = pref->refresh > 0 ?
+				(int)((uint64_t)base_drm_mode.clock * 1000000 / (uint64_t)pref->refresh) :
+				width * height;
 			/* Assume typical blanking ratio for htotal/vtotal estimation */
 			base_drm_mode.htotal = width + 160; /* CVT-RB typical H blank */
 			base_drm_mode.vtotal = total_pixels / base_drm_mode.htotal;

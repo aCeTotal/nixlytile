@@ -222,7 +222,9 @@ scan_devices(void)
 		if (strncmp(e->d_name, "event", 5) != 0)
 			continue;
 		char path[64];
-		snprintf(path, sizeof(path), "/dev/input/%s", e->d_name);
+		if (snprintf(path, sizeof(path), "/dev/input/%s", e->d_name)
+				>= (int)sizeof(path))
+			continue;
 		try_add_device(path);
 	}
 	closedir(d);

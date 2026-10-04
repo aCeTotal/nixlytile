@@ -1433,7 +1433,7 @@ move_column_dir(const Arg *arg)
 	Workspace *dst_ws;
 	struct wlr_output *next_out;
 	enum wlr_direction wdir;
-	Client *clients[64];
+	Client *moved[64];
 	Client *focus_target = NULL;
 	int n = 0, i;
 	Column *new_col = NULL;
@@ -1479,23 +1479,23 @@ move_column_dir(const Arg *arg)
 	{
 		Client *c;
 		wl_list_for_each(c, &cur->clients, column_link) {
-			if (n >= (int)(sizeof(clients) / sizeof(clients[0])))
+			if (n >= (int)LENGTH(moved))
 				break;
-			clients[n++] = c;
+			moved[n++] = c;
 		}
 	}
 	if (n == 0)
 		return;
 	focus_target = focustop(src_mon);
 	if (!focus_target || focus_target->column != cur)
-		focus_target = clients[0];
+		focus_target = moved[0];
 
 	/* setmon detaches from old column (auto-destroying it when empty)
 	 * and attaches to dst_ws as a fresh column.  We migrate every
 	 * client, then merge them back into a single column so multi-client
 	 * groupings survive the hop. */
 	for (i = 0; i < n; i++) {
-		Client *cc = clients[i];
+		Client *cc = moved[i];
 		setmon(cc, m_next, 0);
 		if (!new_col) {
 			new_col = cc->column;

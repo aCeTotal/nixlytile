@@ -104,6 +104,14 @@ qs_popup_show(void)
 		wlr_output_schedule_frame(m->wlr_output);
 }
 
+/* Oversized fields mean bogus QR. */
+static int
+qs_reject(void)
+{
+	qs_ssid[0] = qs_psk[0] = '\0';
+	return -1;
+}
+
 /* WIFI:T:WPA;S:<ssid>;P:<psk>;H:true;; with \-escaped \ ; , : " */
 static int
 wifi_qr_parse(const char *s)
@@ -134,14 +142,24 @@ wifi_qr_parse(const char *s)
 		val[o] = '\0';
 		if (*s == ';')
 			s++;
-		if (key == 'S')
-			snprintf(qs_ssid, sizeof(qs_ssid), "%s", val);
-		else if (key == 'P')
-			snprintf(qs_psk, sizeof(qs_psk), "%s", val);
-		else if (key == 'H')
+		switch (key) {
+		case 'S':
+			if (snprintf(qs_ssid, sizeof(qs_ssid), "%s", val)
+					>= (int)sizeof(qs_ssid))
+				return qs_reject();
+			break;
+		case 'P':
+			if (snprintf(qs_psk, sizeof(qs_psk), "%s", val)
+					>= (int)sizeof(qs_psk))
+				return qs_reject();
+			break;
+		case 'H':
 			qs_hidden = strcmp(val, "true") == 0;
-		else if (key == 'T')
+			break;
+		case 'T':
 			open_net = strcmp(val, "nopass") == 0;
+			break;
+		}
 	}
 	if (!qs_ssid[0])
 		return -1;

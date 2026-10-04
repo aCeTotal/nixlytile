@@ -76,10 +76,9 @@ int nixlytile_mode = 1;
 
 /* NOTE: ALWAYS keep a rule declared even if you don't use rules (e.g leave at least one example) */
 const Rule rules[] = {
-	/* app_id             title       tags mask     isfloating   monitor */
 	/* examples: */
-	{ "Gimp_EXAMPLE",     NULL,       0,            1,           -1 }, /* Start on currently visible tags floating, not tiled */
-	{ "firefox_EXAMPLE",  NULL,       1 << 8,       0,           -1 }, /* Start on ONLY tag "9" */
+	{ .id = "Gimp_EXAMPLE", .isfloating = 1, .monitor = -1 },
+	{ .id = "firefox_EXAMPLE", .tags = 1 << 8, .monitor = -1 },
 };
 
 /* layout(s) */

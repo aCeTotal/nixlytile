@@ -831,10 +831,15 @@ tray_load_svg_pixbuf(const char *path, int desired_h, GdkPixbuf **out_pixbuf)
 
 	if (!rsvg_handle_get_intrinsic_size_in_pixels(handle, &svg_w, &svg_h) ||
 			svg_w <= 0.0 || svg_h <= 0.0) {
-		RsvgDimensionData dim = {0};
-		rsvg_handle_get_dimensions(handle, &dim);
-		svg_w = dim.width;
-		svg_h = dim.height;
+		gboolean has_w, has_h, has_vb;
+		RsvgLength len_w, len_h;
+		RsvgRectangle vb = {0};
+
+		/* No absolute size: use the viewBox. */
+		rsvg_handle_get_intrinsic_dimensions(handle, &has_w, &len_w,
+				&has_h, &len_h, &has_vb, &vb);
+		svg_w = has_vb ? vb.width : 0.0;
+		svg_h = has_vb ? vb.height : 0.0;
 	}
 
 	target_h = (desired_h > 0) ? desired_h :
@@ -1298,7 +1303,8 @@ public_ip_event_cb(int fd, uint32_t mask, void *data)
 		}
 	}
 	if (public_ip_buf[0])
-		snprintf(net_public_ip, sizeof(net_public_ip), "%s", public_ip_buf);
+		snprintf(net_public_ip, sizeof(net_public_ip), "%.*s",
+				(int)sizeof(net_public_ip) - 1, public_ip_buf);
 	else if (!net_public_ip[0])
 		snprintf(net_public_ip, sizeof(net_public_ip), "--");
 	net_public_ip_last = time(NULL);

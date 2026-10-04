@@ -109,8 +109,6 @@ client_scale_to_box(Client *c, int box_w, int box_h)
  * roughly ~250ms.  Semi-implicit Euler with sub-stepping keeps the
  * sim stable even at large dt (e.g. first frame after idle).
  */
-#define ANIM_RATE_DEFAULT   40.0  /* legacy exp-decay, kept for compat with anim_tick callers */
-#define ANIM_RATE_WS_SWITCH 60.0
 #define ANIM_SETTLED_POS    0.5
 #define ANIM_SETTLED_VEL    2.0
 

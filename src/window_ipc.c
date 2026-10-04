@@ -53,17 +53,6 @@ static char socket_path[256];
 /* ── helpers ──────────────────────────────────────────────────────── */
 
 static void
-set_cloexec_nonblock(int fd)
-{
-	int flags = fcntl(fd, F_GETFL, 0);
-	if (flags >= 0)
-		fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-	flags = fcntl(fd, F_GETFD, 0);
-	if (flags >= 0)
-		fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
-}
-
-static void
 client_arm_write(NiriIpcClient *cl, int on)
 {
 	if (!cl->src)
@@ -269,8 +258,8 @@ build_workspaces_changed(char **out_buf, size_t *out_len)
 			 * workspace?" — a heap pointer here both leaked ASLR
 			 * layout to IPC clients and changed across restarts. */
 			uint32_t name_hash = 2166136261u;
-			for (const char *p = m->wlr_output->name; *p; p++)
-				name_hash = (name_hash ^ (unsigned char)*p) * 16777619u;
+			for (const char *ch = m->wlr_output->name; *ch; ch++)
+				name_hash = (name_hash ^ (unsigned char)*ch) * 16777619u;
 			uint64_t synth_id = (uint64_t)0xFFFFFFFF00000000ULL
 				| (uint64_t)name_hash;
 			APPEND("{\"id\":%llu,\"idx\":%d,\"name\":null,\"output\":%s,"

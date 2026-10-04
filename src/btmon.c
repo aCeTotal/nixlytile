@@ -44,6 +44,7 @@ static BtAdSlot bt_ads[BT_ADAPT_MAX];
 static int bt_nads;
 static BtDev bt_devs[BT_DEV_MAX];
 static int bt_ndevs;
+static int bluez_up;
 
 /* ── model ───────────────────────────────────────────────────────── */
 
@@ -188,6 +189,7 @@ dev_conn_transition(BtDev *d)
 	} else {
 		bt_caps_clear(d->addr);
 		bt_caps_apply();
+		btidle_touch();
 		if (d->paired && d->want_conn) {
 			d->retry_n = 0;
 			d->retry_at_ms = now_ms() + 1500;
@@ -520,6 +522,7 @@ managed_objects_cb(sd_bus_message *m, void *userdata, sd_bus_error *err)
 	/* everything paired reconnects by itself from boot */
 	reconn_schedule_all();
 	btsys_changed();
+	btidle_ready();
 	return 0;
 }
 
@@ -816,6 +819,117 @@ ignore_reply_cb(sd_bus_message *m, void *userdata, sd_bus_error *err)
 	return 0;
 }
 
+/* Activates obexd. */
+static void
+obex_attach(void)
+{
+	if (obex_bus)
+		sd_bus_call_method_async(obex_bus, NULL, "org.bluez.obex",
+				"/org/bluez/obex", "org.bluez.obex.AgentManager1",
+				"RegisterAgent", ignore_reply_cb, NULL, "o",
+				OBEX_AGENT_PATH);
+}
+
+static void
+obex_detach(void)
+{
+	if (obex_bus)
+		sd_bus_call_method_async(obex_bus, NULL,
+				"org.freedesktop.systemd1",
+				"/org/freedesktop/systemd1",
+				"org.freedesktop.systemd1.Manager", "StopUnit",
+				ignore_reply_cb, NULL, "ss", "obex.service",
+				"replace");
+}
+
+static void
+bluez_attach(void)
+{
+	bluez_up = 1;
+	obex_attach();
+	sd_bus_call_method_async(bt_bus, NULL, "org.bluez", "/org/bluez",
+			"org.bluez.AgentManager1", "RegisterAgent",
+			ignore_reply_cb, NULL, "os", BT_AGENT_PATH,
+			"KeyboardDisplay");
+	sd_bus_call_method_async(bt_bus, NULL, "org.bluez", "/org/bluez",
+			"org.bluez.AgentManager1", "RequestDefaultAgent",
+			ignore_reply_cb, NULL, "o", BT_AGENT_PATH);
+	sd_bus_call_method_async(bt_bus, NULL, "org.bluez", "/",
+			"org.freedesktop.DBus.ObjectManager", "GetManagedObjects",
+			managed_objects_cb, NULL, "");
+}
+
+static void
+bluez_detach(void)
+{
+	bluez_up = 0;
+	obex_detach();
+	memset(bt_ads, 0, sizeof(bt_ads));
+	bt_nads = 0;
+	bt_ndevs = 0;
+	btsys_changed();
+}
+
+static int
+name_owner_cb(sd_bus_message *m, void *userdata, sd_bus_error *err)
+{
+	const char *name, *old_owner, *new_owner;
+
+	if (sd_bus_message_read(m, "sss", &name, &old_owner, &new_owner) < 0)
+		return 0;
+	if (new_owner[0])
+		bluez_attach();
+	else
+		bluez_detach();
+	return 0;
+}
+
+static int
+initial_owner_cb(sd_bus_message *m, void *userdata, sd_bus_error *err)
+{
+	if (!sd_bus_message_is_method_error(m, NULL))
+		bluez_attach();
+	return 0;
+}
+
+int
+btmon_daemon_up(void)
+{
+	return bluez_up;
+}
+
+/* Any call D-Bus-activates bluetoothd. */
+void
+btmon_daemon_wake(void)
+{
+	if (bt_bus)
+		sd_bus_call_method_async(bt_bus, NULL, "org.bluez", "/",
+				"org.freedesktop.DBus.Peer", "Ping",
+				ignore_reply_cb, NULL, "");
+}
+
+void
+btmon_daemon_stop(void)
+{
+	if (bt_bus)
+		sd_bus_call_method_async(bt_bus, NULL,
+				"org.freedesktop.systemd1",
+				"/org/freedesktop/systemd1",
+				"org.freedesktop.systemd1.Manager", "StopUnit",
+				ignore_reply_cb, NULL, "ss", "bluetooth.service",
+				"replace");
+}
+
+int
+btmon_connected_count(void)
+{
+	int i, n = 0;
+
+	for (i = 0; i < bt_ndevs; i++)
+		n += bt_devs[i].connected;
+	return n;
+}
+
 void
 btmon_init(void)
 {
@@ -839,20 +953,17 @@ btmon_init(void)
 			"interface='org.freedesktop.DBus.Properties',"
 			"member='PropertiesChanged',path_namespace='/org/bluez'",
 			props_changed_cb, NULL);
+	sd_bus_add_match(bt_bus, NULL,
+			"type='signal',sender='org.freedesktop.DBus',"
+			"member='NameOwnerChanged',arg0='org.bluez'",
+			name_owner_cb, NULL);
 
 	sd_bus_add_object_vtable(bt_bus, NULL, BT_AGENT_PATH,
 			"org.bluez.Agent1", agent_vtable, NULL);
-	sd_bus_call_method_async(bt_bus, NULL, "org.bluez", "/org/bluez",
-			"org.bluez.AgentManager1", "RegisterAgent",
-			ignore_reply_cb, NULL, "os", BT_AGENT_PATH,
-			"KeyboardDisplay");
-	sd_bus_call_method_async(bt_bus, NULL, "org.bluez", "/org/bluez",
-			"org.bluez.AgentManager1", "RequestDefaultAgent",
-			ignore_reply_cb, NULL, "o", BT_AGENT_PATH);
-
-	sd_bus_call_method_async(bt_bus, NULL, "org.bluez", "/",
-			"org.freedesktop.DBus.ObjectManager", "GetManagedObjects",
-			managed_objects_cb, NULL, "");
+	/* Never activates a dormant bluetoothd. */
+	sd_bus_call_method_async(bt_bus, NULL, "org.freedesktop.DBus",
+			"/org/freedesktop/DBus", "org.freedesktop.DBus",
+			"GetNameOwner", initial_owner_cb, NULL, "s", "org.bluez");
 
 	bt_src = wl_event_loop_add_fd(event_loop, sd_bus_get_fd(bt_bus),
 			WL_EVENT_READABLE, bt_bus_event, NULL);
@@ -863,15 +974,11 @@ btmon_init(void)
 	/* Assert the safe mic policy before any headset is up. */
 	bt_caps_apply();
 
-	/* OBEX: session bus; obexd is D-Bus activated on first use */
+	/* obexd lives only alongside bluetoothd. */
 	if (sd_bus_open_user(&obex_bus) >= 0) {
 		sd_bus_set_method_call_timeout(obex_bus, 90ULL * 1000000);
 		sd_bus_add_object_vtable(obex_bus, NULL, OBEX_AGENT_PATH,
 				"org.bluez.obex.Agent1", obex_agent_vtable, NULL);
-		sd_bus_call_method_async(obex_bus, NULL, "org.bluez.obex",
-				"/org/bluez/obex", "org.bluez.obex.AgentManager1",
-				"RegisterAgent", ignore_reply_cb, NULL, "o",
-				OBEX_AGENT_PATH);
 		obex_src = wl_event_loop_add_fd(event_loop,
 				sd_bus_get_fd(obex_bus), WL_EVENT_READABLE,
 				obex_bus_event, NULL);

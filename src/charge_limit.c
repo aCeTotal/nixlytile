@@ -71,20 +71,28 @@ cl_read_int(const char *path, int *out)
 	return 0;
 }
 
+/* 0 when the path fits. */
+static int
+cl_knob(char *path, size_t size, const char *knob)
+{
+	int n = snprintf(path, size, "%s/%s", battery_device_dir, knob);
+
+	return n < 0 || (size_t)n >= size ? -1 : 0;
+}
+
 static int
 cl_apply_sysfs(int pct)
 {
 	char path[PATH_MAX];
 	int start;
 
-	if (!battery_device_dir[0])
+	if (!battery_device_dir[0] ||
+			cl_knob(path, sizeof(path), "charge_control_start_threshold"))
 		return -1;
-	snprintf(path, sizeof(path), "%s/charge_control_start_threshold",
-			battery_device_dir);
 	if (cl_read_int(path, &start) == 0 && start >= pct)
 		cl_write_sysfs_int(path, pct > 5 ? pct - 5 : 0);
-	snprintf(path, sizeof(path), "%s/charge_control_end_threshold",
-			battery_device_dir);
+	if (cl_knob(path, sizeof(path), "charge_control_end_threshold"))
+		return -1;
 	return cl_write_sysfs_int(path, pct);
 }
 
@@ -124,9 +132,8 @@ charge_limit_apply_saved(void)
 	if (applied || !battery_device_dir[0])
 		return;
 	applied = 1;
-	snprintf(path, sizeof(path), "%s/charge_control_end_threshold",
-			battery_device_dir);
-	if (access(path, W_OK) != 0)
+	if (cl_knob(path, sizeof(path), "charge_control_end_threshold") ||
+			access(path, W_OK) != 0)
 		return;   /* no knob (or not writable): nothing to enforce */
 	cl_load();
 	cl_apply_sysfs(charge_limit);

@@ -89,7 +89,7 @@ void
 render_icon_label(StatusModule *module, int bar_height, const char *text,
 		int (*ensure_icon)(int target_h), struct wlr_buffer **icon_buf,
 		int *icon_w, int *icon_h, int min_text_w, int icon_gap,
-		const float text_color[static 4])
+		const float *text_color)
 {
 	int padding = statusbar_module_padding;
 	int text_w = 0;
@@ -1343,7 +1343,7 @@ kill_processes_with_name(const char *name)
 		size_t len;
 		int is_num = 1;
 
-		if (!ent->d_name || !*ent->d_name)
+		if (!*ent->d_name)
 			continue;
 		for (size_t i = 0; ent->d_name[i]; i++) {
 			if (!isdigit((unsigned char)ent->d_name[i])) {
@@ -3177,9 +3177,9 @@ findactiveinterface(char *iface, size_t len, int *is_wireless)
 			continue;
 
 		if (iface_is_wireless(ent->d_name)) {
-			snprintf(best_wifi, sizeof(best_wifi), "%s", ent->d_name);
+			snprintf(best_wifi, sizeof(best_wifi), "%.*s", IF_NAMESIZE - 1, ent->d_name);
 		} else if (!best_wired[0]) {
-			snprintf(best_wired, sizeof(best_wired), "%s", ent->d_name);
+			snprintf(best_wired, sizeof(best_wired), "%.*s", IF_NAMESIZE - 1, ent->d_name);
 		}
 
 		if (best_wifi[0])
@@ -3592,7 +3592,6 @@ set_backlight_percent(double percent)
 {
 	unsigned long long max, target;
 	FILE *fp;
-	int attempted = 0;
 
 	/* Floor at 1%: a 0 write turns the panel fully off and locks the
 	 * user out of the machine they need to turn it back up. */
@@ -3609,7 +3608,6 @@ set_backlight_percent(double percent)
 			target = max;
 
 		if (backlight_writable && (fp = fopen(backlight_brightness_path, "w"))) {
-			attempted = 1;
 			if (fprintf(fp, "%llu", target) >= 0) {
 				fclose(fp);
 				light_cached_percent = percent;
@@ -3670,7 +3668,7 @@ set_backlight_relative(double delta_percent)
 	 * copies the compositor's page table incl. GPU mappings.  The shell
 	 * keeps the brightnessctl→light fallback. */
 	{
-		char cmd[96];
+		char cmd[128];
 		snprintf(cmd, sizeof(cmd), "brightnessctl -n set %s || light %s %s",
 				arg, delta_percent > 0 ? "-A" : "-U", light_arg);
 		{

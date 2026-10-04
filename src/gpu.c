@@ -179,7 +179,7 @@ detect_gpus(void)
 			link_target[len] = '\0';
 			const char *driver_name = strrchr(link_target, '/');
 			driver_name = driver_name ? driver_name + 1 : link_target;
-			snprintf(gpu->driver, sizeof(gpu->driver), "%s", driver_name);
+			snprintf(gpu->driver, sizeof(gpu->driver), "%.31s", driver_name);
 		}
 
 		/* Get PCI slot from uevent */
@@ -191,10 +191,15 @@ detect_gpus(void)
 				if (strncmp(line, "PCI_SLOT_NAME=", 14) == 0) {
 					char *nl = strchr(line + 14, '\n');
 					if (nl) *nl = '\0';
-					snprintf(gpu->pci_slot, sizeof(gpu->pci_slot), "%s", line + 14);
+					if (snprintf(gpu->pci_slot, sizeof(gpu->pci_slot), "%s",
+							line + 14) >= (int)sizeof(gpu->pci_slot)) {
+						gpu->pci_slot[0] = '\0';
+						break;
+					}
 					/* Create underscore version for DRI_PRIME */
-					snprintf(gpu->pci_slot_underscore, sizeof(gpu->pci_slot_underscore),
-						"pci-%s", gpu->pci_slot);
+					memcpy(gpu->pci_slot_underscore, "pci-", 4);
+					memcpy(gpu->pci_slot_underscore + 4, gpu->pci_slot,
+						sizeof(gpu->pci_slot));
 					for (char *p = gpu->pci_slot_underscore; *p; p++) {
 						if (*p == ':' || *p == '.') *p = '_';
 					}

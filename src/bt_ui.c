@@ -199,7 +199,9 @@ renderbluetooth(StatusModule *module, int bar_height, const char *text)
 {
 	BtAdapter a;
 
-	if (!btmon_adapter(&a)) {
+	if (!btmon_adapter(&a) && btidle_dormant()) {
+		a.powered = 1;
+	} else if (!a.present) {
 		if (module && module->tree) {
 			clearstatusmodule(module);
 			module->width = 0;

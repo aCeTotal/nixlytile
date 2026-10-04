@@ -75,8 +75,8 @@ iface_wireless(const char *iface)
 	char path[256];
 	struct stat st;
 
-	snprintf(path, sizeof(path), "/sys/class/net/%s/wireless", iface);
-	return stat(path, &st) == 0;
+	return snprintf(path, sizeof(path), "/sys/class/net/%s/wireless", iface)
+			< (int)sizeof(path) && stat(path, &st) == 0;
 }
 
 static void
@@ -123,7 +123,7 @@ fill_link(NetLink *l)
 	if (read_sysfs_str(l->iface, "carrier", buf, sizeof(buf)) == 0)
 		l->carrier = buf[0] == '1';
 	if (read_sysfs_str(l->iface, "address", buf, sizeof(buf)) == 0)
-		snprintf(l->mac, sizeof(l->mac), "%s", buf);
+		snprintf(l->mac, sizeof(l->mac), "%.*s", (int)sizeof(l->mac) - 1, buf);
 	if (l->carrier)
 		ethtool_speed(l);
 	else {
@@ -193,8 +193,9 @@ netmon_rescan(void)
 		{
 			char path[256];
 			struct stat st;
-			snprintf(path, sizeof(path),
-					"/sys/class/net/%s/device", de->d_name);
+			if (snprintf(path, sizeof(path), "/sys/class/net/%s/device",
+					de->d_name) >= (int)sizeof(path))
+				continue;
 			if (stat(path, &st) != 0)
 				continue;
 		}
@@ -206,7 +207,7 @@ netmon_rescan(void)
 				nm_snap.wifi.present = 1;
 				snprintf(nm_snap.wifi.iface,
 						sizeof(nm_snap.wifi.iface),
-						"%s", de->d_name);
+						"%.*s", IF_NAMESIZE - 1, de->d_name);
 			}
 		} else if (!nm_snap.eth.present ||
 				(!eth_carrier && iface_carrier(de->d_name))) {
@@ -215,7 +216,7 @@ netmon_rescan(void)
 			nm_snap.eth.present = 1;
 			eth_carrier = iface_carrier(de->d_name);
 			snprintf(nm_snap.eth.iface, sizeof(nm_snap.eth.iface),
-					"%s", de->d_name);
+					"%.*s", IF_NAMESIZE - 1, de->d_name);
 		}
 	}
 	closedir(d);
@@ -434,6 +435,7 @@ nw_dns_read(char *out, size_t len)
 {
 	FILE *f;
 	char line[256];
+	size_t used = 0;
 
 	out[0] = '\0';
 	/* systemd-resolved: the real upstream is in its own resolv.conf */
@@ -444,16 +446,16 @@ nw_dns_read(char *out, size_t len)
 		return -1;
 	while (fgets(line, sizeof(line), f)) {
 		char ns[128];
+		int n;
 
-		if (sscanf(line, "nameserver %127s", ns) == 1) {
-			if (out[0])
-				snprintf(out + strlen(out), len - strlen(out),
-						", %s", ns);
-			else
-				snprintf(out, len, "%s", ns);
-			if (strlen(out) > len - 20)
-				break;
+		if (sscanf(line, "nameserver %127s", ns) != 1)
+			continue;
+		n = snprintf(out + used, len - used, "%s%s", used ? ", " : "", ns);
+		if (n < 0 || (size_t)n >= len - used) {
+			out[used] = '\0';
+			break;
 		}
+		used += (size_t)n;
 	}
 	fclose(f);
 	return out[0] ? 0 : -1;

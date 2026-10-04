@@ -1,5 +1,6 @@
 /* See LICENSE.dwm file for copyright and license details. */
 #define _GNU_SOURCE
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -207,4 +208,36 @@ spawn_argv_read(const char *const argv[], pid_t *out_pid, int *out_fd)
 	*out_fd = pipefd[0];
 	fcntl(*out_fd, F_SETFL, fcntl(*out_fd, F_GETFL) | O_NONBLOCK);
 	return 0;
+}
+
+/* Async-signal-safe; 0 when all written. */
+int
+write_all(int fd, const void *buf, size_t len)
+{
+	const char *p = buf;
+
+	while (len) {
+		ssize_t n = write(fd, p, len);
+
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+			return -1;
+		p += n;
+		len -= (size_t)n;
+	}
+	return 0;
+}
+
+int
+write_file_str(const char *path, const char *s)
+{
+	int fd = open(path, O_WRONLY | O_CLOEXEC);
+	int r;
+
+	if (fd < 0)
+		return -1;
+	r = write_all(fd, s, strlen(s));
+	close(fd);
+	return r;
 }

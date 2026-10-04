@@ -25,6 +25,8 @@
 #define WLSEC_MAX_GLOBALS 24
 #define WLSEC_MAX_NAMES   32
 #define WLSEC_CACHE       64
+#define WLSEC_WRAPPED     "-wrapped"
+#define WLSEC_WRAPPED_LEN (sizeof(WLSEC_WRAPPED) - 1)
 
 static const struct wl_global *wlsec_globals[WLSEC_MAX_GLOBALS];
 static int wlsec_nglobals;
@@ -128,7 +130,8 @@ static int
 wlsec_exe_allowed(pid_t pid)
 {
 	char link[64], exe[PATH_MAX];
-	const char *base;
+	char *base;
+	size_t len;
 	ssize_t n;
 	int i;
 
@@ -139,8 +142,13 @@ wlsec_exe_allowed(pid_t pid)
 	exe[n] = '\0';
 	base = strrchr(exe, '/');
 	base = base ? base + 1 : exe;
-	/* Nix store names are hashed store paths, never the bare binary, so
-	 * compare the basename only. */
+	/* Unwrap wrapProgram's .name-wrapped. */
+	len = strlen(base);
+	if (base[0] == '.' && len > WLSEC_WRAPPED_LEN + 1
+			&& strcmp(base + len - WLSEC_WRAPPED_LEN, WLSEC_WRAPPED) == 0) {
+		base[len - WLSEC_WRAPPED_LEN] = '\0';
+		base++;
+	}
 	for (i = 0; i < wlsec_nnames; i++)
 		if (strcmp(wlsec_names[i], base) == 0)
 			return 1;

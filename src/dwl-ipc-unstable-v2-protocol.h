@@ -337,13 +337,13 @@ zdwl_ipc_output_v2_send_active(struct wl_resource *resource_, uint32_t active)
  * @param resource_ The client's resource
  * @param tag Index of the tag
  * @param state The state of the tag.
- * @param clients The number of clients in the tag.
+ * @param client_count The number of clients in the tag.
  * @param focused If there is a focused client. Nonzero being valid, zero being invalid.
  */
 static inline void
-zdwl_ipc_output_v2_send_tag(struct wl_resource *resource_, uint32_t tag, uint32_t state, uint32_t clients, uint32_t focused)
+zdwl_ipc_output_v2_send_tag(struct wl_resource *resource_, uint32_t tag, uint32_t state, uint32_t client_count, uint32_t focused)
 {
-	wl_resource_post_event(resource_, ZDWL_IPC_OUTPUT_V2_TAG, tag, state, clients, focused);
+	wl_resource_post_event(resource_, ZDWL_IPC_OUTPUT_V2_TAG, tag, state, client_count, focused);
 }
 
 /**

@@ -153,7 +153,7 @@ fan_gpu_name(void)
 				if (strncmp(s, "GeForce ", 8) == 0)
 					s += 8;
 				s[strcspn(s, "\n")] = '\0';
-				snprintf(name, sizeof(name), "%s", s);
+				snprintf(name, sizeof(name), "%.47s", s);
 			}
 			fclose(f);
 		}
@@ -209,15 +209,16 @@ scan_hwmon(FanState *fs)
 			if (rpm < 0)
 				continue;
 
-			snprintf(dev->hwmon_path, sizeof(dev->hwmon_path),
-					"/sys/class/hwmon/%s", ent->d_name);
+			if (snprintf(dev->hwmon_path, sizeof(dev->hwmon_path),
+					"/sys/class/hwmon/%s", ent->d_name)
+					>= (int)sizeof(dev->hwmon_path))
+				continue;
 			snprintf(dev->name, sizeof(dev->name), "%s", namebuf);
 			dev->type = classify_hwmon(namebuf);
 
 			memset(fe, 0, sizeof(*fe));
 			fe->curve_step = -1;
-			snprintf(fe->hwmon_path, sizeof(fe->hwmon_path),
-					"%s", dev->hwmon_path);
+			memcpy(fe->hwmon_path, dev->hwmon_path, sizeof(fe->hwmon_path));
 			fe->fan_index = fi;
 			fe->pwm_index = fi;
 			fe->rpm = rpm;

@@ -204,7 +204,7 @@ run(char *const argv[], char *errbuf, size_t errlen)
 		for (p = last; *p; p++)
 			if (*p == '\n')
 				*p = '\0';
-		snprintf(errbuf, errlen, "%s", last);
+		snprintf(errbuf, errlen, "%.*s", (int)errlen - 1, last);
 	}
 	return -1;
 }

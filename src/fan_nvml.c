@@ -115,7 +115,7 @@ fan_nvml_scan(FanState *fs)
 				ln = "GPU";
 			if (nfans > 1)
 				snprintf(fe->label, sizeof(fe->label),
-						"%s fan %u", ln, f + 1);
+						"%.40s fan %u", ln, f + 1);
 			else
 				snprintf(fe->label, sizeof(fe->label),
 						"%s", ln);

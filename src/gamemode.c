@@ -374,7 +374,9 @@ apply_power_profile_performance(void)
 		if (fgets(buf, sizeof(buf), fp)) {
 			char *nl = strchr(buf, '\n');
 			if (nl) *nl = '\0';
-			snprintf(ppd_saved_profile, sizeof(ppd_saved_profile), "%s", buf);
+			if (snprintf(ppd_saved_profile, sizeof(ppd_saved_profile), "%s", buf)
+					>= (int)sizeof(ppd_saved_profile))
+				ppd_saved_profile[0] = '\0';
 		}
 		pclose(fp);
 	}
@@ -1207,24 +1209,14 @@ sched_save_and_write(const char *path, const char *value, char *save_buf, size_t
 		}
 	}
 
-	/* Write new value */
-	fd = open(path, O_WRONLY);
-	if (fd >= 0) {
-		write(fd, value, strlen(value));
-		close(fd);
-	}
+	write_file_str(path, value);
 }
 
 static void
 sched_restore(const char *path, char *save_buf)
 {
-	int fd;
 	if (save_buf[0]) {
-		fd = open(path, O_WRONLY);
-		if (fd >= 0) {
-			write(fd, save_buf, strlen(save_buf));
-			close(fd);
-		}
+		write_file_str(path, save_buf);
 		save_buf[0] = '\0';
 	}
 }
@@ -1385,8 +1377,9 @@ apply_nvidia_gpu_power(GpuInfo *gpu)
 	if (nvidia_smi_query("clocks.max.graphics", buf, sizeof(buf)) == 0 && buf[0]) {
 		char *dot = strchr(buf, '.');
 		if (dot) *dot = '\0';
-		snprintf(args, sizeof(args), "-i %d -lgc %s,%s", nv_gpu_index, buf, buf);
-		if (nvidia_smi_run(args, NULL, 0) == 0) {
+		if (snprintf(args, sizeof(args), "-i %d -lgc %s,%s", nv_gpu_index,
+				buf, buf) < (int)sizeof(args) &&
+				nvidia_smi_run(args, NULL, 0) == 0) {
 			nv_clocks_locked = 1;
 			wlr_log(WLR_INFO, "NVIDIA: GPU clocks locked → %s MHz", buf);
 		}
@@ -1399,8 +1392,9 @@ apply_nvidia_gpu_power(GpuInfo *gpu)
 	if (nvidia_smi_query("clocks.max.memory", buf, sizeof(buf)) == 0 && buf[0]) {
 		char *dot = strchr(buf, '.');
 		if (dot) *dot = '\0';
-		snprintf(args, sizeof(args), "-i %d -lmc %s,%s", nv_gpu_index, buf, buf);
-		if (nvidia_smi_run(args, NULL, 0) == 0)
+		if (snprintf(args, sizeof(args), "-i %d -lmc %s,%s", nv_gpu_index,
+				buf, buf) < (int)sizeof(args) &&
+				nvidia_smi_run(args, NULL, 0) == 0)
 			wlr_log(WLR_INFO, "NVIDIA: memory clocks locked → %s MHz", buf);
 	}
 
@@ -1558,24 +1552,20 @@ apply_gpu_power_state(void)
 						char *nl = strchr(line, '\n');
 						if (nl) *nl = '\0';
 						if (strchr(line, '*')) {
-							/* Extract profile number */
 							while (*line == ' ') line++;
-							strncpy(gpu_saved_power_profile, line,
-								sizeof(gpu_saved_power_profile) - 1);
-							/* Just save the profile index number */
-							char *sp = strchr(gpu_saved_power_profile, ' ');
-							if (sp) *sp = '\0';
+							/* Profile index only. */
+							if (snprintf(gpu_saved_power_profile,
+									sizeof(gpu_saved_power_profile), "%.*s",
+									(int)strcspn(line, " "), line)
+									>= (int)sizeof(gpu_saved_power_profile))
+								gpu_saved_power_profile[0] = '\0';
 							break;
 						}
 						line = nl ? nl + 1 : NULL;
 					}
 				}
-				/* Set to profile 3 (3D_FULL_SCREEN) for max performance */
-				fd = open(gpu_power_profile_path, O_WRONLY);
-				if (fd >= 0) {
-					write(fd, "3", 1);
-					close(fd);
-				}
+				/* 3 = 3D_FULL_SCREEN. */
+				write_file_str(gpu_power_profile_path, "3");
 			}
 		}
 
@@ -1618,11 +1608,7 @@ restore_gpu_power_state(void)
 		wlr_log(WLR_INFO, "GPU power: AMD perf level restored");
 	}
 	if (gpu_saved_power_profile[0]) {
-		int fd = open(gpu_power_profile_path, O_WRONLY);
-		if (fd >= 0) {
-			write(fd, gpu_saved_power_profile, strlen(gpu_saved_power_profile));
-			close(fd);
-		}
+		write_file_str(gpu_power_profile_path, gpu_saved_power_profile);
 		gpu_saved_power_profile[0] = '\0';
 		wlr_log(WLR_INFO, "GPU power: AMD power profile restored");
 	}
@@ -1662,7 +1648,7 @@ static int gpu_sched_local_fd = -1;  /* duplicated DRM fd from game process */
 static int
 find_process_drm_fd(pid_t pid)
 {
-	char dir_path[64], link_path[80], target[256];
+	char dir_path[64], target[256];
 	DIR *d;
 	struct dirent *ent;
 	ssize_t len;
@@ -1675,8 +1661,7 @@ find_process_drm_fd(pid_t pid)
 	while ((ent = readdir(d)) != NULL) {
 		if (ent->d_name[0] == '.')
 			continue;
-		snprintf(link_path, sizeof(link_path), "/proc/%d/fd/%s", pid, ent->d_name);
-		len = readlink(link_path, target, sizeof(target) - 1);
+		len = readlinkat(dirfd(d), ent->d_name, target, sizeof(target) - 1);
 		if (len <= 0)
 			continue;
 		target[len] = '\0';
@@ -1802,9 +1787,6 @@ restore_gpu_sched_priority(pid_t pid)
 
 	gpu_sched_applied = 0;
 }
-
-static int is_wine_or_proton_process(pid_t pid);
-static int is_known_game_app(const char *app);
 
 /*
  * Retro emulators must NEVER trigger game mode — no statusbar hide,

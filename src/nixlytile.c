@@ -487,11 +487,13 @@ steam_set_ge_proton_default(void)
 			if (strncmp(entry->d_name, "GE-Proton", 9) == 0) {
 				int major = 0, minor = 0;
 				/* Parse GE-ProtonX-Y format */
-				if (sscanf(entry->d_name, "GE-Proton%d-%d", &major, &minor) >= 1) {
+				size_t len = strlen(entry->d_name);
+				if (len < sizeof(ge_proton_name) &&
+						sscanf(entry->d_name, "GE-Proton%d-%d", &major, &minor) >= 1) {
 					if (major > best_major || (major == best_major && minor > best_minor)) {
 						best_major = major;
 						best_minor = minor;
-						snprintf(ge_proton_name, sizeof(ge_proton_name), "%s", entry->d_name);
+						memcpy(ge_proton_name, entry->d_name, len + 1);
 					}
 				}
 			}
@@ -528,7 +530,7 @@ steam_set_ge_proton_default(void)
 		fclose(fp);
 		return;
 	}
-	fread(config_content, 1, config_size, fp);
+	config_size = fread(config_content, 1, config_size, fp);
 	config_content[config_size] = '\0';
 	fclose(fp);
 
@@ -935,15 +937,15 @@ handlesig(int signo)
 		/* No quit()/wlr_log here — stdio locking inside a signal
 		 * handler can self-deadlock if the signal lands mid-log.
 		 * write() + wl_display_terminate only. */
-		(void)write(STDERR_FILENO, "handlesig: SIGINT received, quitting\n", 37);
+		write_all(STDERR_FILENO, "handlesig: SIGINT received, quitting\n", 37);
 		if (dpy)
 			wl_display_terminate(dpy);
 	} else if (signo == SIGTERM) {
-		(void)write(STDERR_FILENO, "handlesig: SIGTERM received, quitting\n", 38);
+		write_all(STDERR_FILENO, "handlesig: SIGTERM received, quitting\n", 38);
 		if (dpy)
 			wl_display_terminate(dpy);
 	} else if (signo == SIGPIPE) {
-		(void)write(STDERR_FILENO, "handlesig: SIGPIPE received (ignored)\n", 38);
+		write_all(STDERR_FILENO, "handlesig: SIGPIPE received (ignored)\n", 38);
 	}
 }
 
@@ -961,7 +963,7 @@ handlesig(int signo)
 static void
 handlefatalsig(int signo)
 {
-	(void)write(STDERR_FILENO,
+	write_all(STDERR_FILENO,
 		"handlefatalsig: fatal signal, unfreezing background processes\n", 62);
 	gm_emergency_restore();
 	wsfreeze_thaw_all();
@@ -2054,7 +2056,7 @@ diag_log_cpu_breakdown(void)
 				int n;
 
 				/* Read thread name */
-				snprintf(path, sizeof(path), "/proc/self/task/%s/comm", de->d_name);
+				snprintf(path, sizeof(path), "/proc/self/task/%d/comm", tid);
 				FILE *f = fopen(path, "r");
 				if (f) {
 					if (fgets(cur_threads[cur_count].name, sizeof(cur_threads[cur_count].name), f)) {
@@ -2067,7 +2069,7 @@ diag_log_cpu_breakdown(void)
 				}
 
 				/* Read thread CPU times from stat */
-				snprintf(path, sizeof(path), "/proc/self/task/%s/stat", de->d_name);
+				snprintf(path, sizeof(path), "/proc/self/task/%d/stat", tid);
 				f = fopen(path, "r");
 				if (f) {
 					n = fread(buf, 1, sizeof(buf)-1, f);
@@ -2143,7 +2145,7 @@ diag_log_cpu_breakdown(void)
 				pid_t pid = atoi(de->d_name);
 				char path[128], buf[512];
 				int n;
-				snprintf(path, sizeof(path), "/proc/%s/stat", de->d_name);
+				snprintf(path, sizeof(path), "/proc/%d/stat", pid);
 				FILE *f = fopen(path, "r");
 				if (!f) continue;
 				n = fread(buf, 1, sizeof(buf)-1, f);
@@ -3705,8 +3707,9 @@ spawn_cmd(const char *cmd)
 
 	{
 		const char *home = getenv("HOME");
-		if (home && *home)
-			(void)chdir(home);
+		/* Never inherit the compositor cwd. */
+		if ((!home || !*home || chdir(home) != 0) && chdir("/") != 0)
+			_exit(127);
 	}
 
 	ensure_nix_paths();

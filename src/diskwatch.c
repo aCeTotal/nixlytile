@@ -64,6 +64,14 @@ dw_ull(const char *path)
 	return strtoull(buf, NULL, 10);
 }
 
+/* Empty when it does not fit. */
+static void
+dw_copy(char *dst, size_t len, const char *src)
+{
+	if (snprintf(dst, len, "%s", src) >= (int)len)
+		dst[0] = '\0';
+}
+
 /* Filesystem probe results udev already collected — world-readable, so
  * no blkid and no device-read permission needed. */
 static void
@@ -86,11 +94,11 @@ dw_udev_fs(const char *sys_dev_file, char *fstype, size_t ftlen,
 		if (nl)
 			*nl = '\0';
 		if (strncmp(line, "E:ID_FS_TYPE=", 13) == 0)
-			snprintf(fstype, ftlen, "%s", line + 13);
+			dw_copy(fstype, ftlen, line + 13);
 		else if (strncmp(line, "E:ID_FS_LABEL=", 14) == 0)
-			snprintf(label, lblen, "%s", line + 14);
+			dw_copy(label, lblen, line + 14);
 		else if (strncmp(line, "E:ID_FS_UUID=", 13) == 0)
-			snprintf(uuid, idlen, "%s", line + 13);
+			dw_copy(uuid, idlen, line + 13);
 	}
 	fclose(fp);
 }
@@ -155,14 +163,17 @@ dw_is_system_mount(const char *mount)
 	return 0;
 }
 
-static void
+/* -1 when the device path does not fit. */
+static int
 dw_fill_part(DiskPart *p, const char *disk_name, const char *part_name)
 {
 	char path[PATH_MAX];
 	struct statvfs vfs;
 
 	memset(p, 0, sizeof(*p));
-	snprintf(p->dev, sizeof(p->dev), "/dev/%s", part_name);
+	if (snprintf(p->dev, sizeof(p->dev), "/dev/%s", part_name)
+			>= (int)sizeof(p->dev))
+		return -1;
 	snprintf(path, sizeof(path), "/sys/block/%s/%s/size",
 			disk_name, part_name);
 	p->size_b = dw_ull(path) * 512ull;
@@ -185,6 +196,7 @@ dw_fill_part(DiskPart *p, const char *disk_name, const char *part_name)
 		if (total)
 			p->size_b = total;
 	}
+	return 0;
 }
 
 static int
@@ -238,10 +250,10 @@ dw_sample_nfs(DiskSnapshot *s)
 				break;
 			n = &s->nfs[s->nnfs++];
 			memset(n, 0, sizeof(*n));
-			snprintf(n->mount, sizeof(n->mount), "%s", dir);
+			dw_copy(n->mount, sizeof(n->mount), dir);
 		}
 		if (!automnt) {
-			snprintf(n->export, sizeof(n->export), "%s", mdev);
+			dw_copy(n->export, sizeof(n->export), mdev);
 			n->mounted = 1;
 		}
 	}
@@ -271,7 +283,9 @@ dw_sample(DiskSnapshot *s)
 
 		d = &s->disks[s->ndisks];
 		memset(d, 0, sizeof(*d));
-		snprintf(d->dev, sizeof(d->dev), "/dev/%s", ent->d_name);
+		if (snprintf(d->dev, sizeof(d->dev), "/dev/%s", ent->d_name)
+				>= (int)sizeof(d->dev))
+			continue;
 		d->size_b = dw_ull(path) * 512ull;
 		snprintf(path, sizeof(path), "/sys/block/%s/device/model",
 				ent->d_name);
@@ -305,8 +319,9 @@ dw_sample(DiskSnapshot *s)
 					continue;
 				if (access(pp, R_OK) != 0)
 					continue;
-				dw_fill_part(&d->parts[d->npart++],
-						ent->d_name, pent->d_name);
+				if (dw_fill_part(&d->parts[d->npart],
+						ent->d_name, pent->d_name) == 0)
+					d->npart++;
 			}
 			closedir(pdir);
 		}
@@ -320,7 +335,7 @@ dw_sample(DiskSnapshot *s)
 			struct statvfs vfs;
 
 			memset(p, 0, sizeof(*p));
-			snprintf(p->dev, sizeof(p->dev), "%s", d->dev);
+			memcpy(p->dev, d->dev, sizeof(p->dev));
 			p->size_b = d->size_b;
 			snprintf(path, sizeof(path), "/sys/block/%s/dev",
 					ent->d_name);
@@ -382,7 +397,8 @@ dw_conf_add(const char *uuid, const char *fstype, const char *mountdir)
 	FILE *in, *out;
 
 	dw_conf_path(path, sizeof(path));
-	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp))
+		return;
 	out = fopen(tmp, "w");
 	if (!out)
 		return;
@@ -427,11 +443,12 @@ dw_write_nix(void)
 	if (!home)
 		return;
 	dw_conf_path(conf, sizeof(conf));
-	snprintf(repo, sizeof(repo), "%s/.nixlyos", home);
-	snprintf(nix, sizeof(nix), "%s/modules/core/disks-auto.nix", repo);
-	if (access(repo, W_OK) != 0)
+	if (snprintf(repo, sizeof(repo), "%s/.nixlyos", home) >= (int)sizeof(repo) ||
+			snprintf(nix, sizeof(nix), "%s/modules/core/disks-auto.nix",
+				repo) >= (int)sizeof(nix) ||
+			snprintf(tmp, sizeof(tmp), "%s.tmp", nix) >= (int)sizeof(tmp) ||
+			access(repo, W_OK) != 0)
 		return;
-	snprintf(tmp, sizeof(tmp), "%s.tmp", nix);
 	out = fopen(tmp, "w");
 	if (!out)
 		return;

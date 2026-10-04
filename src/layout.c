@@ -107,7 +107,7 @@ arrange(Monitor *m)
 		}
 	}
 
-	strncpy(m->ltsymbol, m->lt[m->sellt]->symbol, LENGTH(m->ltsymbol));
+	snprintf(m->ltsymbol, sizeof(m->ltsymbol), "%s", m->lt[m->sellt]->symbol);
 
 	/* Niri-style: floating clients live on LyrFloat, tiled on LyrTile,
 	 * fullscreen on LyrFS.  Reparent if a layer transition happened. */
@@ -304,7 +304,7 @@ setlayout(const Arg *arg)
 		selmon->sellt ^= 1;
 	if (arg && arg->v)
 		selmon->lt[selmon->sellt] = (Layout *)arg->v;
-	strncpy(selmon->ltsymbol, selmon->lt[selmon->sellt]->symbol, LENGTH(selmon->ltsymbol));
+	snprintf(selmon->ltsymbol, sizeof(selmon->ltsymbol), "%s", selmon->lt[selmon->sellt]->symbol);
 	arrange(selmon);
 	printstatus();
 }
