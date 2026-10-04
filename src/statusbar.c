@@ -5085,6 +5085,8 @@ refreshstatusmic(void)
 		use_muted_color = 1;
 		display = display < 0.0 ? 0.0 : display;
 	}
+	if (mic_gate_talk_closed())
+		use_muted_color = 1;
 
 	if (display < 0.0) {
 		snprintf(mic_text, sizeof(mic_text), "--%%");
@@ -5098,10 +5100,7 @@ refreshstatusmic(void)
 		snprintf(mic_text, sizeof(mic_text), "%d%%", (int)lround(display));
 	}
 
-	if (mic_muted == 1)
-		icon = mic_icon_muted;
-	else
-		icon = mic_icon_unmuted;
+	icon = use_muted_color ? mic_icon_muted : mic_icon_unmuted;
 
 	if (strncmp(mic_icon_path, icon, sizeof(mic_icon_path)) != 0) {
 		snprintf(mic_icon_path, sizeof(mic_icon_path), "%s", icon);

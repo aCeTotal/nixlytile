@@ -1,23 +1,4 @@
-/* gaming_conf.c — ~/.local/nixlyos/gaming.conf hot-reload (push-to-talk).
- *
- * The file is written by nixlycc (Gaming page).  Format, one key=value per
- * line:
- *
- *   ptt-bind=ctrl+key:0x6d      keysym in hex (layout-safe, from xkb)
- *   ptt-bind=mouse:275          evdev button code (275 = BTN_SIDE)
- *   ptt-bind=alt+f13            keysym by name also accepted
- *   ptt-label=Ctrl+M            display text, ignored here
- *
- * Push-to-talk: the microphone is unmuted while the bound key/button is
- * held and muted again the moment it is released.  The press is matched
- * before any lock/shortcut-inhibitor checks in input.c so it works inside
- * fullscreen games, and the event is still forwarded to the client.  The
- * release is tracked by keycode/button, so letting go of the modifier
- * first cannot leave the mic open.
- *
- * An inotify watch on the ~/.local/nixlyos directory reloads the bind
- * whenever nixlycc rewrites the file.
- */
+/* Push-to-talk and push-to-mute binds from gaming.conf. */
 
 #include "nixlytile.h"
 
@@ -32,17 +13,35 @@
 
 #define GAMINGCONF_NAME "gaming.conf"
 
-/* Parsed bind.  Either keysym or button is set, never both. */
-static uint32_t ptt_mods;
-static xkb_keysym_t ptt_keysym;   /* XKB_KEY_NoSymbol when unset */
-static uint32_t ptt_button;       /* 0 when unset */
+enum bind_role { BIND_TALK, BIND_VOIP };
 
-/* Held state: the exact keycode/button that armed PTT, so release
- * matches even after the modifiers were dropped. */
-static int ptt_key_held;
-static uint32_t ptt_held_keycode;
-static int ptt_button_held;
-static uint32_t ptt_held_button;
+static const struct {
+	const char *key;
+	enum bind_role role;
+} bind_keys[] = {
+	{ "ptt-bind", BIND_TALK },
+	{ "ptm-bind", BIND_VOIP },
+};
+
+/* Either keysym or button is set; held is the code holding it. */
+struct bind {
+	enum bind_role role;
+	uint32_t mods;
+	xkb_keysym_t keysym;
+	uint32_t button;
+	uint32_t held;
+};
+
+struct keypress {
+	uint32_t mods;
+	const xkb_keysym_t *syms;
+	int nsyms;
+	const xkb_keysym_t *level0_syms;
+	int nlevel0;
+};
+
+static struct bind *binds;
+static size_t nbinds, capbinds;
 
 static char gamingconf_dir[PATH_MAX];
 static char gamingconf_path[PATH_MAX];
@@ -66,55 +65,92 @@ gamingconf_resolve_paths(void)
 		"%s/.local/nixlyos/" GAMINGCONF_NAME, home);
 }
 
-/* Mute/unmute plus the optimistic statusbar refresh the click handler
- * uses: cache the new state and stamp the read time so refreshstatusmic
- * shows it immediately instead of re-reading stale PipeWire state. */
+/* Push-to-mute opens the mic but closes Discord. */
 static void
-ptt_set_mute(int mute)
+apply_gate(void)
 {
-	set_pipewire_mic_mute(mute);
-	mic_last_read_ms = monotonic_msec();
-	refreshstatusmic();
+	int has_talk = 0, talking = 0, muting = 0;
+	uint32_t closed = 0;
+	size_t i;
+
+	for (i = 0; i < nbinds; i++) {
+		if (binds[i].role == BIND_TALK) {
+			has_talk = 1;
+			talking |= binds[i].held != 0;
+			continue;
+		}
+		muting |= binds[i].held != 0;
+	}
+	if (has_talk && !talking && !muting)
+		closed |= MIC_GATE_TALK;
+	if (muting)
+		closed |= MIC_GATE_VOIP;
+	mic_gate_set(closed);
 }
 
-static void
-parse_bind(const char *value)
+static int
+parse_bind(const char *value, struct bind *b)
 {
 	char buf[128];
 	char *tok, *save = NULL;
-	uint32_t mods = 0;
-	xkb_keysym_t sym = XKB_KEY_NoSymbol;
-	uint32_t button = 0;
 
 	snprintf(buf, sizeof(buf), "%s", value);
-
 	for (tok = strtok_r(buf, "+", &save); tok;
 			tok = strtok_r(NULL, "+", &save)) {
 		if (strcmp(tok, "ctrl") == 0)
-			mods |= WLR_MODIFIER_CTRL;
+			b->mods |= WLR_MODIFIER_CTRL;
 		else if (strcmp(tok, "alt") == 0)
-			mods |= WLR_MODIFIER_ALT;
+			b->mods |= WLR_MODIFIER_ALT;
 		else if (strcmp(tok, "shift") == 0)
-			mods |= WLR_MODIFIER_SHIFT;
+			b->mods |= WLR_MODIFIER_SHIFT;
 		else if (strcmp(tok, "super") == 0)
-			mods |= WLR_MODIFIER_LOGO;
+			b->mods |= WLR_MODIFIER_LOGO;
 		else if (strncmp(tok, "mouse:", 6) == 0)
-			button = (uint32_t)strtoul(tok + 6, NULL, 0);
+			b->button = (uint32_t)strtoul(tok + 6, NULL, 0);
 		else if (strncmp(tok, "key:", 4) == 0)
-			sym = (xkb_keysym_t)strtoul(tok + 4, NULL, 0);
+			b->keysym = (xkb_keysym_t)strtoul(tok + 4, NULL, 0);
 		else
-			sym = xkb_keysym_from_name(tok,
+			b->keysym = xkb_keysym_from_name(tok,
 				XKB_KEYSYM_CASE_INSENSITIVE);
 	}
-
-	if (button) {
-		ptt_button = button;
-		ptt_keysym = XKB_KEY_NoSymbol;
-	} else if (sym != XKB_KEY_NoSymbol) {
-		ptt_keysym = xkb_keysym_to_lower(sym);
-		ptt_button = 0;
+	if (b->button) {
+		b->keysym = XKB_KEY_NoSymbol;
+		return 1;
 	}
-	ptt_mods = mods;
+	b->keysym = xkb_keysym_to_lower(b->keysym);
+	return b->keysym != XKB_KEY_NoSymbol;
+}
+
+static void
+add_bind(enum bind_role role, const char *value)
+{
+	struct bind b = { .role = role, .keysym = XKB_KEY_NoSymbol };
+	struct bind *grown;
+
+	if (!parse_bind(value, &b))
+		return;
+	if (nbinds == capbinds) {
+		size_t cap = capbinds ? capbinds * 2 : 4;
+		if (!(grown = realloc(binds, cap * sizeof(*binds))))
+			return;
+		binds = grown;
+		capbinds = cap;
+	}
+	binds[nbinds++] = b;
+}
+
+static void
+add_line(char *line)
+{
+	char *eq = strchr(line, '=');
+	size_t i;
+
+	if (line[0] == '#' || !eq)
+		return;
+	*eq = '\0';
+	for (i = 0; i < LENGTH(bind_keys); i++)
+		if (strcmp(line, bind_keys[i].key) == 0)
+			add_bind(bind_keys[i].role, eq + 1);
 }
 
 static void
@@ -123,96 +159,96 @@ gaming_conf_load(void)
 	char line[256];
 	FILE *fp;
 
-	/* A removed or rewritten bind must never leave the mic open. */
-	if (ptt_key_held || ptt_button_held) {
-		ptt_key_held = ptt_button_held = 0;
-		ptt_set_mute(1);
-	}
-	ptt_mods = 0;
-	ptt_keysym = XKB_KEY_NoSymbol;
-	ptt_button = 0;
-
+	nbinds = 0;
 	fp = fopen(gamingconf_path, "r");
-	if (!fp)
-		return;
-
-	while (fgets(line, sizeof(line), fp)) {
-		char *nl = strchr(line, '\n');
-		char *eq;
-
-		if (nl)
-			*nl = '\0';
-		if (line[0] == '#' || line[0] == '\0')
-			continue;
-		if (!(eq = strchr(line, '=')))
-			continue;
-		*eq = '\0';
-		if (strcmp(line, "ptt-bind") == 0)
-			parse_bind(eq + 1);
+	if (fp) {
+		while (fgets(line, sizeof(line), fp)) {
+			line[strcspn(line, "\n")] = '\0';
+			add_line(line);
+		}
+		fclose(fp);
 	}
-	fclose(fp);
+	apply_gate();
+	wlr_log(WLR_INFO, "gaming.conf: %zu mic bind(s)", nbinds);
+}
 
-	if (ptt_keysym != XKB_KEY_NoSymbol)
-		wlr_log(WLR_INFO, "gaming.conf: push-to-talk on keysym 0x%x mods 0x%x",
-			ptt_keysym, ptt_mods);
-	else if (ptt_button)
-		wlr_log(WLR_INFO, "gaming.conf: push-to-talk on button %u mods 0x%x",
-			ptt_button, ptt_mods);
+static int
+key_matches(const struct bind *b, const struct keypress *kp)
+{
+	int i;
+
+	if (b->keysym == XKB_KEY_NoSymbol ||
+			CLEANMASK(kp->mods) != CLEANMASK(b->mods))
+		return 0;
+	for (i = 0; i < kp->nsyms + kp->nlevel0; i++) {
+		xkb_keysym_t sym = i < kp->nsyms ? kp->syms[i]
+			: kp->level0_syms[i - kp->nsyms];
+		if (xkb_keysym_to_lower(sym) == b->keysym)
+			return 1;
+	}
+	return 0;
+}
+
+/* Release matches the holding code, so modifiers may lift first. */
+static void
+release_code(uint32_t code)
+{
+	int changed = 0;
+	size_t i;
+
+	for (i = 0; i < nbinds; i++) {
+		if (binds[i].held != code)
+			continue;
+		binds[i].held = 0;
+		changed = 1;
+	}
+	if (changed)
+		apply_gate();
 }
 
 void
 ptt_handle_key(uint32_t mods, uint32_t keycode, const xkb_keysym_t *syms,
 	int nsyms, const xkb_keysym_t *level0_syms, int nlevel0, int pressed)
 {
-	int i;
+	struct keypress kp = { mods, syms, nsyms, level0_syms, nlevel0 };
+	int changed = 0;
+	size_t i;
 
 	if (!pressed) {
-		if (ptt_key_held && keycode == ptt_held_keycode) {
-			ptt_key_held = 0;
-			ptt_set_mute(1);
-		}
+		release_code(keycode);
 		return;
 	}
-
-	if (ptt_keysym == XKB_KEY_NoSymbol || ptt_key_held)
-		return;
-	if (CLEANMASK(mods) != CLEANMASK(ptt_mods))
-		return;
-
-	for (i = 0; i < nsyms + nlevel0; i++) {
-		xkb_keysym_t sym = i < nsyms ? syms[i] : level0_syms[i - nsyms];
-		if (xkb_keysym_to_lower(sym) == ptt_keysym) {
-			ptt_key_held = 1;
-			ptt_held_keycode = keycode;
-			ptt_set_mute(0);
-			return;
-		}
+	for (i = 0; i < nbinds; i++) {
+		if (binds[i].held || !key_matches(&binds[i], &kp))
+			continue;
+		binds[i].held = keycode;
+		changed = 1;
 	}
+	if (changed)
+		apply_gate();
 }
 
 void
 ptt_handle_button(uint32_t button, int pressed)
 {
+	struct wlr_keyboard *kb = wlr_seat_get_keyboard(seat);
+	uint32_t mods = kb ? wlr_keyboard_get_modifiers(kb) : 0;
+	int changed = 0;
+	size_t i;
+
 	if (!pressed) {
-		if (ptt_button_held && button == ptt_held_button) {
-			ptt_button_held = 0;
-			ptt_set_mute(1);
-		}
+		release_code(button);
 		return;
 	}
-
-	if (!ptt_button || ptt_button_held || button != ptt_button)
-		return;
-	if (ptt_mods) {
-		struct wlr_keyboard *kb = wlr_seat_get_keyboard(seat);
-		uint32_t mods = kb ? wlr_keyboard_get_modifiers(kb) : 0;
-		if (CLEANMASK(mods) != CLEANMASK(ptt_mods))
-			return;
+	for (i = 0; i < nbinds; i++) {
+		if (binds[i].held || binds[i].button != button ||
+				CLEANMASK(mods) != CLEANMASK(binds[i].mods))
+			continue;
+		binds[i].held = button;
+		changed = 1;
 	}
-
-	ptt_button_held = 1;
-	ptt_held_button = button;
-	ptt_set_mute(0);
+	if (changed)
+		apply_gate();
 }
 
 static int
@@ -282,4 +318,7 @@ gaming_conf_cleanup(void)
 		close(gamingconf_fd);
 		gamingconf_fd = -1;
 	}
+	free(binds);
+	binds = NULL;
+	nbinds = capbinds = 0;
 }

@@ -32,7 +32,7 @@ MOD_OBJS = globals.o client.o layout.o input.o output.o \
            config_parser.o config_loader.o monitors_conf.o monitor_setup.o \
            input_conf.o bindings_conf.o statusbar_conf.o \
            remote.o remote_pad.o remote_mouse.o \
-           apptoggle.o htpc_pad.o htpc_guide.o wsfreeze.o mic_watch.o audio_watch.o audio_devices.o audio_meter.o gaming_conf.o gshortcuts.o filechooser.o jail_grant.o \
+           apptoggle.o htpc_pad.o htpc_guide.o wsfreeze.o mic_watch.o audio_watch.o audio_devices.o audio_meter.o gaming_conf.o mic_gate.o gshortcuts.o filechooser.o jail_grant.o \
            statusbar.o tray.o statusbar_support.o terminfo.o launchfx.o wobble.o wobble_render.o column_focus.o diag.o fetch_async.o charge_limit.o fancontrol.o fanwatch.o \
            fancurve.o fan_helper.o fan_ec.o fan_nvml.o \
            diskwatch.o disk_helper.o disk_ui.o \
@@ -266,6 +266,8 @@ audio_watch.o: $(SRC)/audio_watch.c $(SRC)/nixlytile.h
 audio_devices.o: $(SRC)/audio_devices.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 gaming_conf.o: $(SRC)/gaming_conf.c $(SRC)/nixlytile.h
+	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+mic_gate.o: $(SRC)/mic_gate.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
 gshortcuts.o: $(SRC)/gshortcuts.c $(SRC)/nixlytile.h
 	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<

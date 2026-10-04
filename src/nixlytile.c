@@ -756,6 +756,7 @@ cleanup(void)
 	voice_stop();
 	audio_watch_cleanup();
 	gaming_conf_cleanup();
+	mic_gate_cleanup();
 	filechooser_cleanup();
 	gshortcuts_cleanup();
 	/* Shut down game mode background worker (unfreezes processes if needed) */
@@ -1293,8 +1294,8 @@ run(const char *startup_cmd)
 	/* Volume module follows default-sink changes (headset connect). */
 	audio_watch_setup();
 
-	/* Push-to-talk bind from ~/.local/nixlyos/gaming.conf; also force-
-	 * mutes the mic at startup. */
+	/* Mic binds from gaming.conf. */
+	mic_gate_setup();
 	gaming_conf_setup();
 
 	/* Always-on responsiveness: elevate the compositor thread so it keeps

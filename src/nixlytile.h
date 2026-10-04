@@ -3528,9 +3528,16 @@ int app_names_match(const AppNames *a, const char *app_id);
 void audio_watch_setup(void);
 void audio_watch_cleanup(void);
 
-/* gaming_conf.c — ~/.local/nixlyos/gaming.conf push-to-talk bind */
+/* gaming_conf.c — mic binds */
 void gaming_conf_setup(void);
 void gaming_conf_cleanup(void);
+
+/* mic_gate.c — nixly-gate bits */
+enum { MIC_GATE_TALK = 1u << 0, MIC_GATE_VOIP = 1u << 1 };
+void mic_gate_setup(void);
+void mic_gate_set(uint32_t closed);
+int mic_gate_talk_closed(void);
+void mic_gate_cleanup(void);
 
 /* gshortcuts.c — org.freedesktop.impl.portal.GlobalShortcuts backend
  * (Discord/OBS global keybinds).  handle_key returns 1 when the event
