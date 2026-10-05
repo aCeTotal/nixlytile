@@ -42,6 +42,7 @@ workspace_create(Monitor *m)
 	}
 	ws->mon = m;
 	ws->idx = m->next_ws_id++;
+	snprintf(ws->home, sizeof(ws->home), "%s", m->wlr_output->name);
 	wl_list_init(&ws->columns);
 	ws->n_columns = 0;
 	ws->scroll_x = ws->target_scroll_x = 0;
@@ -388,6 +389,7 @@ void
 workspace_move_to_monitor(Workspace *ws, Monitor *dst)
 {
 	Monitor *src;
+	Workspace *other;
 	Column *col;
 	Client *c;
 
@@ -397,6 +399,11 @@ workspace_move_to_monitor(Workspace *ws, Monitor *dst)
 	src = ws->mon;
 	wl_list_remove(&ws->link);
 	if (src) {
+		wl_list_for_each(other, &src->workspaces, link) {
+			if (other->idx > ws->idx)
+				other->idx--;
+		}
+		src->next_ws_id--;
 		src->n_workspaces--;
 		if (src->active_ws == ws)
 			src->active_ws = wl_list_empty(&src->workspaces) ? NULL

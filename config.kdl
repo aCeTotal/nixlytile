@@ -154,7 +154,7 @@ autostart "nixlymedia"
 //
 // Action list:
 //   quit  killclient  spawn  togglefullscreen
-//   togglestatusbar  togglegaps  focus-column-dir  focus-workspace-dir
+//   togglestatusbar  togglegaps  togglemultigpu  focus-column-dir  focus-workspace-dir
 //   focus-workspace-n  focus-window-in-column-dir  focus-last-workspace
 //   move-column-dir  move-window-in-column-dir  move-client-to-ws-dir
 //   move-client-to-ws-n  swap-window-dir  expel-window-from-column
@@ -183,6 +183,7 @@ bind "Mod+Shift+Q"      "quit"
 bind "Mod+f"            "maximize-column"
 bind "Mod+Shift+F"      "togglefullscreen"
 bind "Mod+b"            "togglestatusbar"
+bind "Mod+Shift+M"      "togglemultigpu"
 
 // Focus navigation
 bind "Mod+h"            "focus-column-dir"             -1

@@ -1437,6 +1437,7 @@ struct Workspace {
 	int n_columns;
 	Monitor *mon;
 	Column *focused_col;          /* last-focused column for view-restore */
+	char home[32];                /* output it belongs to */
 };
 
 /* Niri-style spring parameters.  Mass=1, damping=damping ratio
@@ -2567,6 +2568,8 @@ void workspace_detach_client(Client *c);
 void workspace_drop_tile(Workspace *ws, Client *c, double screen_x);
 void workspace_adopt_column(Workspace *dst, Column *col);
 void workspace_move_to_monitor(Workspace *ws, Monitor *dst);
+void monitor_evacuate_workspaces(Monitor *m, Monitor *dst);
+void monitor_reclaim_workspaces(Monitor *m);
 void workspace_focus_client(Client *c);
 void workspace_layout(Workspace *ws);
 void monitor_apply_positions(Monitor *m);
@@ -3395,6 +3398,8 @@ int launchfx_active(void);
 
 /* osd.c — compositor-drawn toast notifications */
 void osd_show(Monitor *m, const char *msg);
+void togglemultigpu(const Arg *arg);
+void multigpu_publish(Monitor *m, uint64_t present_ns);
 void osd_show_force(Monitor *m, const char *msg);
 void osd_tick(Monitor *m, double dt, int *still);
 void osd_purge_mon(Monitor *m);

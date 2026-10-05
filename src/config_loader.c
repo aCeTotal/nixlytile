@@ -227,6 +227,7 @@ static const ActionEntry actions[] = {
 	{ "togglefullscreen",             togglefullscreen,             A_NONE },
 	{ "togglegamespan",               togglegamespan,               A_NONE },
 	{ "togglestatusbar",              togglestatusbar,              A_NONE },
+	{ "togglemultigpu",               togglemultigpu,               A_NONE },
 	{ "toggle-overview",              overview_toggle,              A_NONE },
 	{ "togglegaps",                   togglegaps,                   A_NONE },
 

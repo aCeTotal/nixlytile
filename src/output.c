@@ -160,6 +160,7 @@ closemon(Monitor *m, int destroying)
 	if (!destroying && !dest)
 		return;
 
+	monitor_evacuate_workspaces(m, selmon);
 	wl_list_for_each(c, &clients, link) {
 		if (c->isfloating && c->geom.x > m->m.width)
 			resize(c, (struct wlr_box){.x = c->geom.x - m->w.width, .y = c->geom.y,
@@ -4396,6 +4397,7 @@ outputpresent(struct wl_listener *listener, void *data)
 
 	m->last_present_ns = present_ns;
 	m->frames_presented++;
+	multigpu_publish(m, present_ns);
 
 	/*
 	 * If we're in frame pacing mode and have a pending game frame,
@@ -7504,16 +7506,11 @@ updatemons(struct wl_listener *listener, void *data)
 			wlr_output_layout_add_auto(output_layout, m->wlr_output);
 	}
 
-	/*
-	 * Restore clients to their original monitor after suspend/resume.
-	 * When a monitor is disabled (e.g., laptop suspend), closemon() moves
-	 * all clients to another monitor. But c->output still remembers which
-	 * monitor the client originally belonged to. When the monitor wakes up,
-	 * we need to move clients back to their original monitor.
-	 */
+	/* Return workspaces and clients home. */
 	wl_list_for_each(m, &mons, link) {
 		if (!m->wlr_output->enabled || m->is_mirror)
 			continue;
+		monitor_reclaim_workspaces(m);
 		wl_list_for_each(c, &clients, link) {
 			if (c->output && c->mon != m
 					&& strcmp(m->wlr_output->name, c->output) == 0) {
