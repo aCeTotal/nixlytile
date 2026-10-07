@@ -274,6 +274,8 @@ typedef struct GamepadDevice GamepadDevice;
 typedef struct TrayMenuEntry TrayMenuEntry;
 typedef struct TrayItem TrayItem;
 typedef struct NsTimer NsTimer;
+typedef struct DynRender DynRender;
+struct vrs_link;
 
 /* ── basic types ───────────────────────────────────────────────────── */
 typedef union {
@@ -1467,6 +1469,35 @@ typedef struct {
 	struct wl_event_source *timer;
 } Notif;
 
+#define DR_WORK_SLOTS 16
+#define DR_MISS_SLOTS 4
+#define DR_BUDGET_MAX 0.85f
+
+/* Dynamic rendering rate ladder state. */
+struct DynRender {
+	struct vrs_link *link;
+	Client *game;
+	unsigned int link_gen;
+	int owner;                  /* drives the frame_done gate */
+	int rung;                   /* 0 = fastest rate */
+	int budget_rung;            /* raise target while preparing */
+	int fresh;                  /* frame latched since release */
+	float budget_frac;          /* GPU share of interval */
+	uint64_t released_ns;
+	uint64_t work[DR_WORK_SLOTS];   /* release → buffer commit */
+	int work_idx, work_n;
+	uint64_t miss_ns[DR_MISS_SLOTS];
+	int miss_idx;
+	uint64_t calm_ns;           /* last miss or rung change */
+	uint64_t eval_ns;
+	uint64_t prepare_ns;        /* raise preparation began */
+	uint32_t level_seen;
+	uint64_t level_rise_ns;     /* layer last coarsened */
+	uint64_t raise_ns;
+	uint64_t hold_ns;           /* no raise before this */
+	uint64_t backoff_ns;
+};
+
 /* ── monitor ───────────────────────────────────────────────────────── */
 struct Monitor {
 	struct wl_list link;
@@ -1608,6 +1639,7 @@ struct Monitor {
 	struct wlr_output_mode *al_failed_mode;
 	int al_mode_active;                 /* output on an autolock-chosen refresh */
 	uint64_t al_last_modeset_ns;
+	DynRender dr;
 	int pending_game_frame;
 	uint64_t game_frame_submit_ns;
 	uint64_t game_frame_intervals[16];
@@ -1621,7 +1653,6 @@ struct Monitor {
 	uint64_t total_latency_ns;
 	uint64_t fps_limit_last_frame_ns;
 	uint64_t fps_limit_interval_ns;
-	int fps_limit_vblank_count;   /* vblank-locked limiter: vblanks since release */
 	int frame_repeat_enabled;
 	int frame_repeat_count;
 	int frame_repeat_current;
@@ -2083,6 +2114,7 @@ extern struct wl_event_source *dgpu_power_watchdog;
 extern struct CpuCursorBuffer *cpu_cursor_buf;
 extern struct CpuCursorBuffer *cpu_cursor_buf_b;
 extern int cpu_cursor_active;
+extern int cursor_hidden_by_client;
 
 #if 1
 extern struct wl_event_source *bt_scan_timer;
@@ -2446,6 +2478,35 @@ void autolock_sample(Monitor *m, uint64_t interval_ns, uint64_t now_ns);
 void autolock_tick(Monitor *m, int allow_tearing, uint64_t now_ns);
 void autolock_apply_mode(Monitor *m);
 void autolock_reset(Monitor *m);
+
+/* dynrender.c — dynamic rendering frame hooks */
+extern int dynamic_render_enabled;
+void dynrender_tick(Monitor *m, Client *game, uint64_t now);
+void dynrender_latched(Monitor *m);
+void dynrender_committed(Client *c);
+void dynrender_release(Monitor *m, uint64_t now);
+int dynrender_vblanks(Monitor *m);
+uint64_t dynrender_interval_ns(Monitor *m);
+void dynrender_link_closed(const struct vrs_link *page);
+const char *dynrender_diag(Monitor *m);
+
+/* ladder.c — perfect-match fps ladder */
+uint64_t rung_vblank_ns(Monitor *m);
+uint64_t rung_interval(Monitor *m, int rung);
+float rung_fps(Monitor *m, int rung);
+void ladder_start(Monitor *m, uint64_t now);
+void ladder_tick(Monitor *m, uint64_t now);
+void ladder_missed(Monitor *m, uint64_t now);
+
+/* vrslink.c — VRS layer link server */
+extern unsigned int vrslink_generation;
+struct vrs_link *vrslink_for_pid(pid_t pid);
+void vrslink_target(struct vrs_link *page, uint64_t interval_ns, uint64_t budget_ns);
+void vrslink_cursor(struct vrs_link *page, Client *game);
+void vrslink_idle(struct vrs_link *page);
+void vrslink_setup(void);
+void vrslink_cleanup(void);
+
 struct wlr_box client_fullscreen_geom(Client *c);
 Client *spanned_fullscreen_client(void);
 void togglegamespan(const Arg *arg);
@@ -3539,7 +3600,7 @@ int app_names_match(const AppNames *a, const char *app_id);
 void audio_watch_setup(void);
 void audio_watch_cleanup(void);
 
-/* gaming_conf.c — mic binds */
+/* gaming_conf.c — mic binds, dynamic rendering */
 void gaming_conf_setup(void);
 void gaming_conf_cleanup(void);
 

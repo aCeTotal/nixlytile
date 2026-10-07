@@ -342,18 +342,12 @@ commitnotify(struct wl_listener *listener, void *data)
 		struct wlr_surface *cs = client_surface(c);
 
 		c->mon->diag_commits_in++;
-		/* A newly attached buffer must reach wlr_scene_output_build_state:
-		 * the scene's output_sample event is the only thing that registers
-		 * the client's explicit-sync release point (and clears the fifo-v1
-		 * barrier).  Skipping the build leaves the release point unsignalled,
-		 * and the client's Mesa WSI burns its full 100 ms acquire timeout —
-		 * measured as RetroArch/PCSX2 pinned at exactly 10 fps. */
+		/* Sample new buffers: explicit-sync release. */
 		if (cs && (cs->current.committed & WLR_SURFACE_STATE_BUFFER)) {
 			c->mon->unsampled_buffer = 1;
-			/* Liveness for the freeze watchdog — see
-			 * client_ping_tick. */
 			c->last_buffer_commit_ms = monotonic_msec();
 			c->ping_misses = 0;
+			dynrender_committed(c);
 		}
 		/* Separate counter for the window the user is typing into —
 		 * the heartbeat pairs it with the delivered-key count to tell

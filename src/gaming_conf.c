@@ -1,4 +1,4 @@
-/* Push-to-talk and push-to-mute binds from gaming.conf. */
+/* gaming.conf: mic binds, dynamic rendering. */
 
 #include "nixlytile.h"
 
@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #define GAMINGCONF_NAME "gaming.conf"
+#define DYNAMIC_RENDER_KEY "dynamic-render"
 
 enum bind_role { BIND_TALK, BIND_VOIP };
 
@@ -148,6 +149,10 @@ add_line(char *line)
 	if (line[0] == '#' || !eq)
 		return;
 	*eq = '\0';
+	if (strcmp(line, DYNAMIC_RENDER_KEY) == 0) {
+		dynamic_render_enabled = strcmp(eq + 1, "0") != 0;
+		return;
+	}
 	for (i = 0; i < LENGTH(bind_keys); i++)
 		if (strcmp(line, bind_keys[i].key) == 0)
 			add_bind(bind_keys[i].role, eq + 1);
@@ -160,6 +165,7 @@ gaming_conf_load(void)
 	FILE *fp;
 
 	nbinds = 0;
+	dynamic_render_enabled = 1;
 	fp = fopen(gamingconf_path, "r");
 	if (fp) {
 		while (fgets(line, sizeof(line), fp)) {
@@ -169,7 +175,8 @@ gaming_conf_load(void)
 		fclose(fp);
 	}
 	apply_gate();
-	wlr_log(WLR_INFO, "gaming.conf: %zu mic bind(s)", nbinds);
+	wlr_log(WLR_INFO, "gaming.conf: %zu mic bind(s), dynamic rendering %s",
+		nbinds, dynamic_render_enabled ? "on" : "off");
 }
 
 static int

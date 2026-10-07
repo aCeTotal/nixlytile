@@ -1,0 +1,14 @@
+{
+    "file_format_version": "1.2.1",
+    "layer": {
+        "name": "VK_LAYER_NIXLY_vrs_@BITS@",
+        "type": "GLOBAL",
+        "library_path": "@LIB@",
+        "library_arch": "@BITS@",
+        "api_version": "1.4.341",
+        "implementation_version": "1",
+        "description": "nixlytile dynamic rendering",
+        "enable_environment": { "NIXLY_VRS": "1" },
+        "disable_environment": { "NIXLY_VRS_DISABLE": "1" }
+    }
+}

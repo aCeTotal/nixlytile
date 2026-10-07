@@ -1623,9 +1623,17 @@ fd_pacer_cb(void *data)
 	return 0;
 }
 
-/* Arm the pacer at the next vblank-grid point after now.  Grid base is the
- * last real present; interval prefers the measured (mode-filtered) vblank
- * interval and falls back to the mode refresh. */
+/* Timed pass, no forced build. */
+static void
+pace_at(Monitor *m, uint64_t when_ns)
+{
+	if (!m->fd_pacer)
+		m->fd_pacer = nstimer_create(fd_pacer_cb, m);
+	if (m->fd_pacer)
+		nstimer_arm_abs(m->fd_pacer, when_ns);
+}
+
+/* Pacer at next vblank-grid point. */
 static void
 pace_frame_done_chain(Monitor *m, uint64_t now_ns)
 {
@@ -1638,16 +1646,11 @@ pace_frame_done_chain(Monitor *m, uint64_t now_ns)
 			(uint64_t)m->wlr_output->current_mode->refresh;
 	if (!iv)
 		iv = 16666667ULL;
-	if (!m->fd_pacer)
-		m->fd_pacer = nstimer_create(fd_pacer_cb, m);
-	if (!m->fd_pacer)
-		return;
 	base = m->last_present_ns ? m->last_present_ns : now_ns;
-	/* First grid point at least 0.5 ms out, so a pass that raced a flip
-	 * doesn't double-fire inside the same vblank. */
+	/* Half-ms lead avoids double fire. */
 	k = now_ns + 500000ULL > base ?
 		(now_ns + 500000ULL - base) / iv + 1 : 1;
-	nstimer_arm_abs(m->fd_pacer, base + k * iv);
+	pace_at(m, base + k * iv);
 }
 
 static void
@@ -3161,6 +3164,8 @@ rendermon_prologue(Monitor *m, uint64_t frame_start_ns)
 	diag_xpaint_audit(m, frame_start_ns);
 }
 
+/* Early wakeups still release. */
+#define LIMITER_EARLY_NS 200000ULL
 void
 rendermon(struct wl_listener *listener, void *data)
 {
@@ -3284,11 +3289,7 @@ rendermon(struct wl_listener *listener, void *data)
 	if (is_game)
 		launchfx_game_ready();
 
-	/* ── Diagnostic heartbeat (diag.c → /tmp/nixlytile-diag.log) ──────────
-	 * Once per second per monitor: dump render state + per-interval counters,
-	 * and if a fullscreen client is up but nothing reaches the screen, emit a
-	 * FREEZE line naming the likely cause.  Placed at the top of rendermon so
-	 * it still fires on vblanks that later early-return (commit failures). */
+	/* Per-second diag heartbeat, freeze causes. */
 	m->diag_vblanks++;
 	if (m->diag_snap_ns == 0) {
 		m->diag_snap_ns = frame_start_ns;
@@ -3304,7 +3305,7 @@ rendermon(struct wl_listener *listener, void *data)
 		diag_logf("MON",
 			"%s fs=%s cls=%s vblanks=%u builds=%u idle_skip=%u "
 			"client_commits=%u presents=%llu/s dropped=%lu held=%lu "
-			"cadence=%d vrr=%d gvrr=%d gfps=%.0f alock=%d pace=%d "
+			"cadence=%d vrr=%d gvrr=%d gfps=%.0f alock=%d %s pace=%d "
 			"scanout=%d hdr=%d 10bit=%d "
 			"commit_fail=%u commitfail_ev=%u scanout_fall=%u scanout_rearm=%u "
 			"scanout_bl=%d scene_fail=%d geom=%dx%d@%d,%d surf=%dx%d mm=%dx%d@%d,%d",
@@ -3315,7 +3316,7 @@ rendermon(struct wl_listener *listener, void *data)
 			(unsigned long)m->frames_dropped, (unsigned long)m->frames_held,
 			m->video_cadence_active, m->vrr_active,
 			m->game_vrr_active, m->estimated_game_fps,
-			m->al_lock_fps, m->frame_pacing_active,
+			m->al_lock_fps, dynrender_diag(m), m->frame_pacing_active,
 			m->direct_scanout_active,
 			m->hdr_active, m->render_10bit_active,
 			m->commit_failures, m->diag_commit_fails,
@@ -3857,54 +3858,32 @@ rendermon(struct wl_listener *listener, void *data)
 			}
 			use_frame_pacing = 1;
 		}
-		/* Under tearing the deferral machinery stays off (each helper
-		 * guards on allow_tearing), but the fps/interval tracker below
-		 * still runs so estimated_game_fps, the game panel stats and
-		 * autolock sampling aren't blind for tearing clients. */
-		/* Only sample the pacing tracker when the game actually
-		 * submitted a NEW buffer.  Fullscreen content is exempt from
-		 * the idle gate, so this code runs every vblank — feeding
-		 * every pass into the tracker measured the vblank interval
-		 * instead of the game's frame interval (estimated_game_fps
-		 * pinned at display Hz → frame-repeat never engaged; at 144 Hz
-		 * the 6.9 ms vblank fell under the interval filter and FPS was
-		 * never estimated at all).  Buffer-pointer comparison works for
-		 * both xdg and Xwayland clients, like track_client_frame. */
+		/* New buffers only, tearing included. */
 		if (needs_frame) {
-			Client *gc = vis_fsc;  /* the client the pacing is
-						* FOR, not whoever holds focus */
+			Client *gc = vis_fsc;
 			struct wlr_surface *gsurf = gc ? client_surface(gc) : NULL;
 			struct wlr_buffer *gbuf = gsurf
 				? (struct wlr_buffer *)gsurf->buffer : NULL;
 			if (gbuf && gbuf != gc->game_last_buffer) {
 				gc->game_last_buffer = gbuf;
 				track_game_frame_pacing(m, frame_start_ns);
+				dynrender_latched(m);
 			}
 		}
-		if (!self_paced)
+		if (!self_paced && !m->dr.owner)
 			autolock_tick(m, allow_tearing, frame_start_ns);
 	}
 
-	/* Frame doubling/tripling for smooth low-FPS playback (non-VRR).
-	 * For video: use detected_video_hz as the fps source.
-	 * For games: use estimated_game_fps from real-time tracking. */
+	/* Frame repeat; video paces itself. */
 	if (is_video && !m->vrr_active && m->frame_pacing_active) {
-		Client *vc = vis_fsc;  /* not focustop — see
-					* classify_fullscreen_content */
+		Client *vc = vis_fsc;
 		if (vc && vc->detected_video_hz > 0.0f)
 			m->estimated_game_fps = vc->detected_video_hz;
-		/* Video players manage their own frame timing based on PTS.
-		 * Don't use frame_repeat (delays frame_done) for video -
-		 * the Bresenham cadence handles pacing when active,
-		 * otherwise let the player run freely. */
 	} else if (is_game && !self_paced && m->frame_pacing_active &&
 			!m->game_vrr_active &&
-			!allow_tearing && !fps_limit_enabled &&
+			!allow_tearing && !fps_limit_enabled && !m->dr.owner &&
 			!(game_auto_fps_lock_enabled && m->al_lock_fps > 0)) {
-		/* fps_limit_enabled / auto lock excluded: the vblank-locked
-		 * limiter IS the pacing then — frame-repeat gating on top would
-		 * multiply the two hold counts (N×N vblanks per frame_done).
-		 * Skip recalculation if FPS hasn't changed by more than 2% */
+		/* Caps pace already; 2% recalc. */
 		float fps_delta = m->estimated_game_fps - m->frame_repeat_last_fps;
 		if (fps_delta < 0) fps_delta = -fps_delta;
 		if (m->frame_repeat_last_fps <= 0.0f ||
@@ -3958,27 +3937,21 @@ rendermon(struct wl_listener *listener, void *data)
 		m->tag_switch_debug--;
 
 frame_done:
-	/*
-	 * FPS Limiter - controls when we send frame_done to clients.
-	 *
-	 * By delaying frame_done, we effectively limit how fast games can
-	 * render. The game waits for frame_done before starting the next
-	 * frame, so controlling this signal controls the framerate.
-	 *
-	 * Cap source: the manual limiter hotkeys win; otherwise the auto
-	 * FPS lock (autolock.c) supplies the cap.  Auto lock stays out of
-	 * tearing mode — the client asked for unthrottled latency.
-	 */
+	dynrender_tick(m, is_game && !allow_tearing && !self_paced
+		? vis_fsc : NULL, frame_start_ns);
+	/* frame_done gate caps game fps. */
 	{
-	int fps_cap = 0, autolock_cap = 0;
+	int fps_cap = 0, autolock_cap = 0, dynrender_cap = 0;
 	if (fps_limit_enabled && fps_limit_value > 0) {
 		fps_cap = fps_limit_value;
+	} else if (m->dr.owner) {
+		dynrender_cap = 1;
 	} else if (game_auto_fps_lock_enabled && m->al_lock_fps > 0
 			&& !allow_tearing && !self_paced) {
 		fps_cap = m->al_lock_fps;
 		autolock_cap = 1;
 	}
-	if (fps_cap > 0 && is_game) {
+	if ((fps_cap > 0 || dynrender_cap) && is_game) {
 		float display_hz = 0.0f;
 
 		if (m->present_interval_ns > 0)
@@ -3987,75 +3960,46 @@ frame_done:
 			display_hz = (float)m->wlr_output->current_mode->refresh / 1000.0f;
 
 		if (!m->game_vrr_active && !allow_tearing && display_hz >= 30.0f) {
-			/*
-			 * Fixed refresh → vblank-locked release (Steam Deck's
-			 * half-rate vsync): send frame_done every N-th vblank,
-			 * N = round(Hz / cap).  A time-based limiter beats
-			 * against the vblank grid — cap 60 on a 144 Hz panel
-			 * shows frames alternately for 2 and 3 vblanks
-			 * (13.9/20.8 ms = judder).  Counting vblanks gives
-			 * exactly display_hz/N with zero variance; the
-			 * effective cap snaps to the nearest divisor
-			 * (60 on 144 Hz → 72).
-			 */
-			/* Manual cap keeps the historical nearest-divisor snap.
-			 * The auto lock rounds UP instead: releasing faster than
-			 * the game's sustained low (lock 60 on 144 Hz → 72
-			 * releases) puts a 60 fps game on a 72-grid = judder.
-			 * ceil gives the nearest divisor at or below the lock;
-			 * the lock then converges onto it via the low tracking.
-			 * The 0.02 slack absorbs measured-Hz noise (144.1/72
-			 * must not ceil to 3). */
-			int n = autolock_cap
+			/* Autolock rounds up, manual nearest. */
+			int n = dynrender_cap ? dynrender_vblanks(m)
+				: autolock_cap
 				? (int)ceilf(display_hz / (float)fps_cap - 0.02f)
 				: (int)roundf(display_hz / (float)fps_cap);
+			uint64_t vblank = (uint64_t)(1000000000.0f / display_hz);
+
 			if (n < 1)
 				n = 1;
-			m->fps_limit_vblank_count++;
-			if (m->fps_limit_vblank_count < n) {
-				request_frame(m);
+			m->fps_limit_interval_ns = (uint64_t)n * vblank;
+			/* Vblanks by time, not passes. */
+			if (m->fps_limit_last_frame_ns && frame_start_ns + vblank / 2
+					< m->fps_limit_last_frame_ns + m->fps_limit_interval_ns) {
+				pace_frame_done_chain(m, frame_start_ns);
 				return;
 			}
-			m->fps_limit_vblank_count = 0;
+			m->fps_limit_last_frame_ns = frame_start_ns;
 		} else {
-			/*
-			 * VRR / tearing: presents aren't vblank-quantized, so a
-			 * time-based release is already even at the exact cap.
-			 *
-			 * Anchor the next release at last + interval (gamescope's
-			 * VRR frame limiter) instead of measuring from "now": a
-			 * release always lands a little past its target, and
-			 * re-basing on that late point every cycle accumulates
-			 * drift below the cap.  The 0.2 ms fudge releases a
-			 * marginally-early wakeup instead of holding it a whole
-			 * extra vblank.
-			 */
-			uint64_t target_interval_ns = 1000000000ULL / (uint64_t)fps_cap;
-			uint64_t now_ns = frame_start_ns;
+			/* VRR: anchored to last release. */
+			uint64_t target_interval_ns = dynrender_cap
+				? dynrender_interval_ns(m)
+				: 1000000000ULL / (uint64_t)fps_cap;
+			uint64_t next = m->fps_limit_last_frame_ns + target_interval_ns;
 
 			m->fps_limit_interval_ns = target_interval_ns;
-
-			if (m->fps_limit_last_frame_ns > 0) {
-				uint64_t next = m->fps_limit_last_frame_ns + target_interval_ns;
-				if (now_ns + 200000ULL < next) {
-					/* Don't send frame_done yet - limiter is active.
-					 * Schedule next vblank so rendermon keeps firing. */
-					request_frame(m);
-					return;
-				}
-				/* Far behind (game stalled): resync instead of
-				 * bursting released frames to catch up. */
-				m->fps_limit_last_frame_ns =
-					(now_ns > next + target_interval_ns) ? now_ns : next;
-			} else {
-				m->fps_limit_last_frame_ns = now_ns;
+			if (m->fps_limit_last_frame_ns && frame_start_ns + LIMITER_EARLY_NS < next) {
+				pace_at(m, next - LIMITER_EARLY_NS);
+				return;
 			}
+			/* Stalled game: resync, no burst. */
+			m->fps_limit_last_frame_ns = !m->fps_limit_last_frame_ns
+				|| frame_start_ns > next + target_interval_ns
+				? frame_start_ns : next;
 		}
 	}
-	/* frame_done releases below — start the auto lock's render-time
-	 * clock (frame_done → next game buffer = actual render cost). */
+	/* Release clocks for autolock, dynrender. */
 	if (autolock_cap)
 		m->al_done_sent_ns = frame_start_ns;
+	if (dynrender_cap)
+		dynrender_release(m, frame_start_ns);
 	}
 
 	/*

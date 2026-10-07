@@ -369,6 +369,7 @@ cpu_cursor_buffer_destroy(struct CpuCursorBuffer *buf)
 
 /* Cursor image cache + tracked surface for CPU-cursor mode (Nvidia) */
 static int    cursor_from_client;
+int           cursor_hidden_by_client;
 static char   cursor_cached_name[64];
 static struct wlr_surface *tracked_cursor_surface;
 static struct wl_listener  tracked_cursor_commit;
@@ -628,6 +629,7 @@ nixly_cursor_set_xcursor(const char *name)
 		return;
 
 	cursor_from_client = 0;
+	cursor_hidden_by_client = 0;
 	snprintf(cursor_cached_name, sizeof(cursor_cached_name), "%s", name);
 
 	stop_tracking_cursor_surface();
@@ -640,6 +642,7 @@ void
 nixly_cursor_set_client_surface(struct wlr_surface *surface, int hx, int hy)
 {
 	cursor_from_client = 1;
+	cursor_hidden_by_client = !surface;
 	cursor_cached_name[0] = '\0';
 
 	stop_tracking_cursor_surface();
