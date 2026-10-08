@@ -2680,6 +2680,11 @@ void notify_refresh_clip(Client *c);
 void notify_release(Client *c);
 void notify_tick(Monitor *m, double dt, int *still);
 
+/* notify_ghost.c */
+void notify_ghost_spawn(const Notif *n);
+void notify_ghost_tick(Monitor *m, double dt, int *still);
+void notify_ghost_purge_mon(Monitor *m);
+
 /* instruments.c — dcspit instrument screens */
 int instruments_try_adopt(Client *c);
 void instruments_release(Client *c);

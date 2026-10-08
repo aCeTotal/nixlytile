@@ -433,6 +433,7 @@ notify_release(Client *c)
 	wl_list_for_each_safe(n, tmp, &notifs, link) {
 		if (n->c != c)
 			continue;
+		notify_ghost_spawn(n);
 		if (n->timer)
 			wl_event_source_remove(n->timer);
 		wl_list_remove(&n->link);

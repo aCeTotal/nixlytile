@@ -2207,8 +2207,8 @@ cairo_buf_begin(int w, int h, cairo_surface_t **out_cs)
 
 /* ── gauge fill buffer ───────────────────────────────────────────── */
 
-static struct wlr_buffer *
-make_fill_buffer(int w, int h, const float col[4])
+struct wlr_buffer *
+card_fill_buffer(int w, int h, const float col[4])
 {
 	cairo_surface_t *cs;
 	cairo_t *cr = cairo_buf_begin(w, h, &cs);
@@ -2773,7 +2773,7 @@ popup_view_apply(PopupView *v, struct wlr_scene_tree *tree, CardResult *res)
 	for (int i = 0; i < res->nfills && i < CARD_MAX_FILLS; i++) {
 		CardFill *f = &res->fills[i];
 		int buf_w = f->full_w > f->w ? f->full_w : f->w;
-		struct wlr_buffer *fb = make_fill_buffer(buf_w, f->h, f->color);
+		struct wlr_buffer *fb = card_fill_buffer(buf_w, f->h, f->color);
 		struct wlr_scene_buffer *sb;
 
 		if (!fb)

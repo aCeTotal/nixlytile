@@ -677,6 +677,9 @@ monitor_anim_tick(Monitor *m, double dt)
 		notify_tick(m, dt, &notif_still);
 		if (notif_still)
 			active = 1;
+		notify_ghost_tick(m, dt, &notif_still);
+		if (notif_still)
+			active = 1;
 		osd_tick(m, dt, &notif_still);
 		if (notif_still)
 			active = 1;

@@ -289,6 +289,8 @@ void card_meter_raster_finish(MeterRaster *mr);
  * whose envelope scales with frac, animated by t (seconds). */
 struct wlr_buffer *card_spectrum_buffer(int w, int h, const float accent[4],
 		double frac, double t);
+/* Pill gauge fill, caller crops. */
+struct wlr_buffer *card_fill_buffer(int w, int h, const float col[4]);
 struct wlr_buffer *card_hover_buffer(int w, int h);
 struct wlr_buffer *card_mark_buffer(int radio, int size, int state);
 struct wlr_buffer *card_chevron_buffer(int size);

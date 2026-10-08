@@ -55,6 +55,11 @@ typedef struct NdToast {
 	uint32_t close_reason;
 	struct wl_event_source *timer;
 	NdActions actions;
+	/* Percent from "value", or -1. */
+	int progress;
+	struct wlr_scene_buffer *fill_sb;
+	int fill_x, fill_h;
+	double fill_f, fill_vel, fill_target;
 	CardHit hits[ND_MAX_ACTIONS];
 	int nhits;
 } NdToast;
@@ -158,6 +163,22 @@ nd_clip_one(struct wlr_scene_buffer *sb, int bw, int bh, int lim)
 	}
 }
 
+/* Crop fill to progress, edge. */
+static void
+nd_clip_fill(NdToast *t, int lim)
+{
+	int w = MIN((int)lround(t->fill_f), lim - t->fill_x);
+
+	if (w <= 0) {
+		wlr_scene_node_set_enabled(&t->fill_sb->node, 0);
+		return;
+	}
+	wlr_scene_node_set_enabled(&t->fill_sb->node, 1);
+	wlr_scene_buffer_set_source_box(t->fill_sb,
+			&(struct wlr_fbox){ 0, 0, w, t->fill_h });
+	wlr_scene_buffer_set_dest_size(t->fill_sb, w, t->fill_h);
+}
+
 static void
 nd_clip_to_mon(NdToast *t, int x)
 {
@@ -166,6 +187,8 @@ nd_clip_to_mon(NdToast *t, int x)
 
 	nd_clip_one(t->shadow_sb, t->w + m2, t->h + m2, lim);
 	nd_clip_one(t->card_sb, t->w, t->h, lim);
+	if (t->fill_sb)
+		nd_clip_fill(t, lim);
 }
 
 /* Fjern enkel Pango-markup (<b>, <i>, <a href=…>) og de fem
@@ -289,6 +312,62 @@ nd_read_actions(sd_bus_message *msg, NdActions *a)
 	return sd_bus_message_exit_container(msg);
 }
 
+static int32_t
+nd_read_value(sd_bus_message *msg)
+{
+	int32_t v = -1;
+
+	if (sd_bus_message_enter_container(msg, 'v', "i") <= 0) {
+		sd_bus_message_skip(msg, "v");
+		return -1;
+	}
+	sd_bus_message_read(msg, "i", &v);
+	sd_bus_message_exit_container(msg);
+	return v;
+}
+
+/* Spec "value" hint, or -1. */
+static int
+nd_read_progress(sd_bus_message *msg)
+{
+	const char *key;
+	int32_t v = -1;
+
+	if (sd_bus_message_enter_container(msg, 'a', "{sv}") <= 0)
+		return -1;
+	while (sd_bus_message_enter_container(msg, 'e', "sv") > 0) {
+		if (sd_bus_message_read(msg, "s", &key) > 0 && !strcmp(key, "value"))
+			v = nd_read_value(msg);
+		else
+			sd_bus_message_skip(msg, "v");
+		sd_bus_message_exit_container(msg);
+	}
+	sd_bus_message_exit_container(msg);
+	return v < 0 ? -1 : MIN(v, 100);
+}
+
+/* Own node so fill glides. */
+static void
+nd_add_fill(NdToast *t, const CardResult *res)
+{
+	const CardFill *f = &res->fills[0];
+	struct wlr_buffer *fb;
+
+	if (!res->nfills)
+		return;
+	fb = card_fill_buffer(f->full_w, f->h, f->color);
+	if (!fb)
+		return;
+	t->fill_sb = wlr_scene_buffer_create(t->tree, fb);
+	wlr_buffer_drop(fb);
+	if (!t->fill_sb)
+		return;
+	wlr_scene_node_set_position(&t->fill_sb->node, f->x, f->y);
+	t->fill_x = f->x;
+	t->fill_h = f->h;
+	t->fill_target = f->w;
+}
+
 /* (Re)bygg kortinnholdet i t->tree og oppdater t->w/h. */
 static int
 nd_build_card(NdToast *t, const char *app, const char *summary,
@@ -300,6 +379,7 @@ nd_build_card(NdToast *t, const char *app, const char *summary,
 	struct wlr_scene_buffer *sb;
 	char sub[48];
 	char title[96];
+	char pct[8];
 
 	if (!card)
 		return 0;
@@ -313,10 +393,15 @@ nd_build_card(NdToast *t, const char *app, const char *summary,
 	nd_strip_markup(title, sizeof(title), summary && summary[0] ?
 			summary : "Notification");
 
-	card_header(card, NULL, title, sub, NULL);
+	snprintf(pct, sizeof(pct), "%d%%", t->progress);
+	card_header(card, NULL, title, sub, t->progress >= 0 ? pct : NULL);
 	if (body && body[0]) {
 		card_gap(card, 2);
 		nd_body_rows(card, body);
+	}
+	if (t->progress >= 0) {
+		card_gap(card, 8);
+		card_gauge(card, t->progress / 100.0, card_col_blue);
 	}
 	if (t->actions.n)
 		nd_action_row(card, &t->actions);
@@ -326,7 +411,7 @@ nd_build_card(NdToast *t, const char *app, const char *summary,
 
 	wl_list_for_each_safe(node, tmp, &t->tree->children, link)
 		wlr_scene_node_destroy(node);
-	t->shadow_sb = t->card_sb = NULL;
+	t->shadow_sb = t->card_sb = t->fill_sb = NULL;
 	{
 		struct wlr_buffer *shb = card_shadow_buffer(res.w, res.h, 0);
 
@@ -349,6 +434,7 @@ nd_build_card(NdToast *t, const char *app, const char *summary,
 		t->card_sb = sb;
 	}
 	wlr_buffer_drop(res.buf);
+	nd_add_fill(t, &res);
 	t->w = res.w;
 	t->h = res.h;
 	return sb != NULL;
@@ -381,6 +467,7 @@ notifyd_method_notify(sd_bus_message *msg, void *userdata,
 	Monitor *m;
 	NdToast *t = NULL, *it;
 	NdActions acts = { 0 };
+	int progress;
 	int r;
 
 	r = sd_bus_message_read(msg, "susss", &app, &rid, &icon, &summary,
@@ -390,7 +477,7 @@ notifyd_method_notify(sd_bus_message *msg, void *userdata,
 	r = nd_read_actions(msg, &acts);
 	if (r < 0)
 		return r;
-	sd_bus_message_skip(msg, "a{sv}");
+	progress = nd_read_progress(msg);
 	sd_bus_message_read(msg, "i", &expire);
 
 	if (rid)
@@ -418,6 +505,7 @@ notifyd_method_notify(sd_bus_message *msg, void *userdata,
 		t->m = m;
 		t->close_reason = ND_EXPIRED;
 		t->actions = acts;
+		t->progress = progress;
 		t->tree = wlr_scene_tree_create(layers[LyrOverlay]);
 		if (!t->tree) {
 			free(t);
@@ -439,6 +527,7 @@ notifyd_method_notify(sd_bus_message *msg, void *userdata,
 		wl_list_insert(&nd_toasts, &t->link);
 	} else {
 		t->actions = acts;
+		t->progress = progress;
 		if (!nd_build_card(t, app, summary, body))
 			return sd_bus_reply_method_return(msg, "u", t->id);
 	}
@@ -607,22 +696,24 @@ void
 notifyd_tick(Monitor *m, double dt, int *still)
 {
 	NdToast *t, *tmp;
+	int moving;
 
 	*still = 0;
 	wl_list_for_each_safe(t, tmp, &nd_toasts, link) {
 		if (t->m != m)
 			continue;
-		if (spring_tick(&t->x_f, &t->x_vel, (double)t->target_x,
-				SPRING_ND, dt)) {
-			wlr_scene_node_set_position(&t->tree->node,
-					(int)t->x_f, t->slot_y);
-			nd_clip_to_mon(t, (int)t->x_f);
+		moving = spring_tick(&t->x_f, &t->x_vel, (double)t->target_x,
+				SPRING_ND, dt);
+		if (t->fill_sb)
+			moving |= spring_tick(&t->fill_f, &t->fill_vel,
+					t->fill_target, SPRING_ND, dt);
+		wlr_scene_node_set_position(&t->tree->node,
+				(int)t->x_f, t->slot_y);
+		nd_clip_to_mon(t, (int)t->x_f);
+		if (moving) {
 			*still = 1;
 			continue;
 		}
-		wlr_scene_node_set_position(&t->tree->node,
-				t->target_x, t->slot_y);
-		nd_clip_to_mon(t, t->target_x);
 		if (t->hiding)
 			nd_toast_destroy(t);
 	}
