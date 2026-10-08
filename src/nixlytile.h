@@ -3518,6 +3518,7 @@ void wlsec_privileged(struct wl_global *global);
 void wlsec_init(void);
 void notifyd_tick(Monitor *m, double dt, int *still);
 void notifyd_purge_mon(Monitor *m);
+int notifyd_handle_click(double cx, double cy, uint32_t button);
 void schedule_game_mode_update(void);
 void gm_bg_init(void);
 void gm_bg_cleanup(void);

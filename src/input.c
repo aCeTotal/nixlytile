@@ -724,6 +724,9 @@ buttonpress(struct wl_listener *listener, void *data)
 		if (qr_scan_handle_click(cursor->x, cursor->y, event->button))
 			return;
 
+		if (notifyd_handle_click(cursor->x, cursor->y, event->button))
+			return;
+
 		/* Clicks on the embedded status bar (tags, tray, modules).
 		 * A fullscreen client covers the bar area — clicks there
 		 * belong to the client, not the bar. */

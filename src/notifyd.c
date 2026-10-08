@@ -23,6 +23,18 @@
 #define ND_MAX_HOLD_MS   30000
 #define ND_WRAP_PX       340
 #define ND_MAX_LINES     4
+#define ND_MAX_ACTIONS   3
+#define ND_ACTION_LEN    48
+#define ND_HIT_BASE      1
+
+/* Spec close reasons. */
+enum { ND_EXPIRED = 1, ND_DISMISSED = 2, ND_CLOSED = 3 };
+
+typedef struct {
+	char key[ND_MAX_ACTIONS][ND_ACTION_LEN];
+	char label[ND_MAX_ACTIONS][ND_ACTION_LEN];
+	int n;
+} NdActions;
 
 /* Same critically-damped feel as osd.c / notify.c. */
 static const SpringParams SPRING_ND = { 1.0, 1.0, 800.0 };
@@ -40,8 +52,11 @@ typedef struct NdToast {
 	int target_x, off_x;
 	double x_f, x_vel;
 	int hiding;
-	uint32_t close_reason;   /* 1 expired, 3 CloseNotification */
+	uint32_t close_reason;
 	struct wl_event_source *timer;
+	NdActions actions;
+	CardHit hits[ND_MAX_ACTIONS];
+	int nhits;
 } NdToast;
 
 static struct wl_list nd_toasts = { &nd_toasts, &nd_toasts };
@@ -58,13 +73,18 @@ nd_schedule(Monitor *m)
 }
 
 static void
-nd_toast_destroy(NdToast *t)
+nd_emit_closed(uint32_t id, uint32_t reason)
 {
 	if (notifyd_bus)
 		sd_bus_emit_signal(notifyd_bus, "/org/freedesktop/Notifications",
 				"org.freedesktop.Notifications",
-				"NotificationClosed", "uu", t->id,
-				t->close_reason);
+				"NotificationClosed", "uu", id, reason);
+}
+
+static void
+nd_toast_destroy(NdToast *t)
+{
+	nd_emit_closed(t->id, t->close_reason);
 	if (t->timer)
 		wl_event_source_remove(t->timer);
 	if (t->tree)
@@ -73,14 +93,19 @@ nd_toast_destroy(NdToast *t)
 	free(t);
 }
 
-static int
-nd_hide_timeout(void *data)
+static void
+nd_hide(NdToast *t, uint32_t reason)
 {
-	NdToast *t = data;
-
+	t->close_reason = reason;
 	t->hiding = 1;
 	t->target_x = t->off_x;
 	nd_schedule(t->m);
+}
+
+static int
+nd_hide_timeout(void *data)
+{
+	nd_hide(data, ND_EXPIRED);
 	return 0;
 }
 
@@ -219,6 +244,51 @@ nd_body_rows(Card *card, const char *body)
 	}
 }
 
+/* Primary action first, filled. */
+static void
+nd_action_row(Card *card, const NdActions *a)
+{
+	const char *labels[ND_MAX_ACTIONS];
+
+	for (int i = 0; i < a->n; i++)
+		labels[i] = a->label[i];
+	card_gap(card, 6);
+	card_buttons(card, labels, NULL, a->n, 0, -1, ND_HIT_BASE);
+}
+
+static void
+nd_keep_hits(NdToast *t, const CardResult *res)
+{
+	t->nhits = 0;
+	for (int i = 0; i < res->nhits && t->nhits < ND_MAX_ACTIONS; i++) {
+		int id = res->hits[i].id - ND_HIT_BASE;
+
+		if (id >= 0 && id < t->actions.n)
+			t->hits[t->nhits++] = res->hits[i];
+	}
+}
+
+/* Key/label pairs; extras beyond the cap are dropped. */
+static int
+nd_read_actions(sd_bus_message *msg, NdActions *a)
+{
+	const char *key, *label;
+	int r;
+
+	r = sd_bus_message_enter_container(msg, 'a', "s");
+	if (r < 0)
+		return r;
+	while (sd_bus_message_read(msg, "s", &key) > 0 &&
+			sd_bus_message_read(msg, "s", &label) > 0) {
+		if (a->n == ND_MAX_ACTIONS)
+			continue;
+		snprintf(a->key[a->n], ND_ACTION_LEN, "%s", key);
+		snprintf(a->label[a->n], ND_ACTION_LEN, "%s", label);
+		a->n++;
+	}
+	return sd_bus_message_exit_container(msg);
+}
+
 /* (Re)bygg kortinnholdet i t->tree og oppdater t->w/h. */
 static int
 nd_build_card(NdToast *t, const char *app, const char *summary,
@@ -248,8 +318,11 @@ nd_build_card(NdToast *t, const char *app, const char *summary,
 		card_gap(card, 2);
 		nd_body_rows(card, body);
 	}
+	if (t->actions.n)
+		nd_action_row(card, &t->actions);
 	if (card_finish(card, &res))
 		return 0;
+	nd_keep_hits(t, &res);
 
 	wl_list_for_each_safe(node, tmp, &t->tree->children, link)
 		wlr_scene_node_destroy(node);
@@ -307,13 +380,16 @@ notifyd_method_notify(sd_bus_message *msg, void *userdata,
 	uint64_t hold;
 	Monitor *m;
 	NdToast *t = NULL, *it;
+	NdActions acts = { 0 };
 	int r;
 
 	r = sd_bus_message_read(msg, "susss", &app, &rid, &icon, &summary,
 			&body);
 	if (r < 0)
 		return r;
-	sd_bus_message_skip(msg, "as");
+	r = nd_read_actions(msg, &acts);
+	if (r < 0)
+		return r;
 	sd_bus_message_skip(msg, "a{sv}");
 	sd_bus_message_read(msg, "i", &expire);
 
@@ -326,8 +402,12 @@ notifyd_method_notify(sd_bus_message *msg, void *userdata,
 
 	m = t ? t->m : nd_pick_mon();
 	if (!m || !m->wlr_output) {
-		/* DND (game mode) eller ingen skjerm: svar med id uten kort. */
-		return sd_bus_reply_method_return(msg, "u", notifyd_next_id++);
+		/* DND or no screen: never shown, so closed at once. */
+		uint32_t id = notifyd_next_id++;
+
+		r = sd_bus_reply_method_return(msg, "u", id);
+		nd_emit_closed(id, ND_EXPIRED);
+		return r;
 	}
 
 	if (!t) {
@@ -336,7 +416,8 @@ notifyd_method_notify(sd_bus_message *msg, void *userdata,
 			return -ENOMEM;
 		t->id = notifyd_next_id++;
 		t->m = m;
-		t->close_reason = 1;
+		t->close_reason = ND_EXPIRED;
+		t->actions = acts;
 		t->tree = wlr_scene_tree_create(layers[LyrOverlay]);
 		if (!t->tree) {
 			free(t);
@@ -356,8 +437,10 @@ notifyd_method_notify(sd_bus_message *msg, void *userdata,
 		t->timer = wl_event_loop_add_timer(event_loop, nd_hide_timeout,
 				t);
 		wl_list_insert(&nd_toasts, &t->link);
-	} else if (!nd_build_card(t, app, summary, body)) {
-		return sd_bus_reply_method_return(msg, "u", t->id);
+	} else {
+		t->actions = acts;
+		if (!nd_build_card(t, app, summary, body))
+			return sd_bus_reply_method_return(msg, "u", t->id);
 	}
 
 	/* Re-anker (bredden kan ha endret seg) og gli inn igjen om kortet var
@@ -366,8 +449,10 @@ notifyd_method_notify(sd_bus_message *msg, void *userdata,
 	t->hiding = 0;
 	hold = expire > 0 ? MIN((uint64_t)expire, (uint64_t)ND_MAX_HOLD_MS)
 		: ND_HOLD_MS;
+	/* Zero means stay until clicked. */
 	if (t->timer)
-		wl_event_source_timer_update(t->timer, (int)hold);
+		wl_event_source_timer_update(t->timer,
+				expire == 0 ? 0 : (int)hold);
 	wlr_scene_node_raise_to_top(&t->tree->node);
 	nd_clip_to_mon(t, (int)t->x_f);
 	nd_schedule(m);
@@ -389,10 +474,7 @@ notifyd_method_close(sd_bus_message *msg, void *userdata,
 	wl_list_for_each(t, &nd_toasts, link) {
 		if (t->id != id)
 			continue;
-		t->close_reason = 3;
-		t->hiding = 1;
-		t->target_x = t->off_x;
-		nd_schedule(t->m);
+		nd_hide(t, ND_CLOSED);
 		break;
 	}
 	return sd_bus_reply_method_return(msg, "");
@@ -402,7 +484,7 @@ static int
 notifyd_method_caps(sd_bus_message *msg, void *userdata,
 		sd_bus_error *ret_error)
 {
-	return sd_bus_reply_method_return(msg, "as", 2, "body",
+	return sd_bus_reply_method_return(msg, "as", 3, "actions", "body",
 			"body-markup");
 }
 
@@ -555,4 +637,42 @@ notifyd_purge_mon(Monitor *m)
 	wl_list_for_each_safe(t, tmp, &nd_toasts, link)
 		if (t->m == m)
 			nd_toast_destroy(t);
+}
+
+static void
+nd_invoke(NdToast *t, int x, int y)
+{
+	for (int i = 0; i < t->nhits; i++) {
+		const CardHit *h = &t->hits[i];
+
+		if (x < h->x || y < h->y || x >= h->x + h->w || y >= h->y + h->h)
+			continue;
+		if (notifyd_bus)
+			sd_bus_emit_signal(notifyd_bus,
+					"/org/freedesktop/Notifications",
+					"org.freedesktop.Notifications",
+					"ActionInvoked", "us", t->id,
+					t->actions.key[h->id - ND_HIT_BASE]);
+		return;
+	}
+}
+
+/* Any click dismisses; a left click on a button also invokes it. */
+int
+notifyd_handle_click(double cx, double cy, uint32_t button)
+{
+	NdToast *t;
+
+	wl_list_for_each(t, &nd_toasts, link) {
+		int x = (int)lround(cx - t->x_f);
+		int y = (int)lround(cy - t->slot_y);
+
+		if (t->hiding || x < 0 || y < 0 || x >= t->w || y >= t->h)
+			continue;
+		if (button == BTN_LEFT)
+			nd_invoke(t, x, y);
+		nd_hide(t, ND_DISMISSED);
+		return 1;
+	}
+	return 0;
 }

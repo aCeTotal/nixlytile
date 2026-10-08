@@ -1291,9 +1291,6 @@ run(const char *startup_cmd)
 	/* Microphone module follows capture-device hotplug. */
 	mic_watch_setup();
 
-	/* Spoken commands from nixly-voice. */
-	voice_start();
-
 	/* Volume module follows default-sink changes (headset connect). */
 	audio_watch_setup();
 
