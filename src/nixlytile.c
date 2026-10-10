@@ -2771,6 +2771,8 @@ setup(void)
 	 * clients from the Unix socket, manging Wayland globals, and so on. */
 	dpy = wl_display_create();
 	event_loop = wl_display_get_event_loop(dpy);
+	/* Block SIGUSR1 before threads spawn. */
+	wl_event_loop_add_signal(event_loop, SIGUSR1, sigusr1_reload, NULL);
 	wl_list_init(&mons);
 	diag_timer = wl_event_loop_add_timer(event_loop, diag_timer_cb, NULL);
 	stall_watch_start();
@@ -2815,10 +2817,6 @@ setup(void)
 	if (!loadstatusfont())
 		die("couldn't load statusbar font");
 	tray_update_icons_text();
-
-	/* SIGUSR1 → reload ~/.config/nixlytile/config.kdl.  Handled on the
-	 * wl event loop (no async-signal concerns). */
-	wl_event_loop_add_signal(event_loop, SIGUSR1, sigusr1_reload, NULL);
 
 	/* ~/.local/nixlyos/monitors.conf → inotify hot-reload (nixlycc GUI) */
 	setup_monitors_conf_watch();
