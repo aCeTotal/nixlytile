@@ -85,7 +85,6 @@ page_create(int *memfd)
 		return NULL;
 	page->magic = VRS_LINK_MAGIC;
 	page->version = VRS_LINK_VERSION;
-	atomic_store(&page->cursor, VRS_CURSOR_NONE);
 	return page;
 }
 
@@ -157,37 +156,6 @@ void
 vrslink_idle(struct vrs_link *page)
 {
 	atomic_store(&page->active, 0);
-}
-
-static uint32_t
-pack_axis(double pos)
-{
-	return (uint32_t)(MIN(MAX(pos, 0.0), 1.0) * VRS_CURSOR_SCALE);
-}
-
-/* Hidden pointer: center focus only. */
-static uint32_t
-cursor_focus(Client *game)
-{
-	struct wlr_surface *s = client_surface(game);
-	double sx, sy;
-
-	if (cursor_hidden_by_client || !s || !game->scene_surface
-			|| seat->pointer_state.focused_surface != s
-			|| s->current.width <= 0 || s->current.height <= 0)
-		return VRS_CURSOR_NONE;
-	if (active_constraint
-			&& active_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED)
-		return VRS_CURSOR_NONE;
-	sx = (cursor->x - game->geom.x - game->scene_surface->node.x) / s->current.width;
-	sy = (cursor->y - game->geom.y - game->scene_surface->node.y) / s->current.height;
-	return pack_axis(sx) << 16 | pack_axis(sy);
-}
-
-void
-vrslink_cursor(struct vrs_link *page, Client *game)
-{
-	atomic_store(&page->cursor, cursor_focus(game));
 }
 
 struct vrs_link *

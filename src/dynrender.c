@@ -9,7 +9,7 @@ int dynamic_render_enabled = 1;
 
 /* Manual caps still get VRS. */
 static void
-publish(Monitor *m, Client *game)
+publish(Monitor *m)
 {
 	DynRender *d = &m->dr;
 	uint64_t interval = d->owner ? rung_interval(m, d->budget_rung)
@@ -18,7 +18,6 @@ publish(Monitor *m, Client *game)
 	if (!d->link)
 		return;
 	vrslink_target(d->link, interval, (uint64_t)((float)interval * d->budget_frac));
-	vrslink_cursor(d->link, game);
 }
 
 static void
@@ -67,7 +66,7 @@ dynrender_tick(Monitor *m, Client *game, uint64_t now)
 	track_level(d, now);
 	if (d->owner)
 		ladder_tick(m, now);
-	publish(m, game);
+	publish(m);
 }
 
 void

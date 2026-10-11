@@ -6,9 +6,9 @@
 #define FSR_EXTENSION VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME
 #define RATES_MAX     16
 
-/* Requested size per ring. */
-static const VkExtent2D ring_size[PATTERN_RINGS] = {
-	{ 1, 1 }, { 2, 1 }, { 2, 2 }, { 4, 2 }, { 4, 4 },
+/* 1x2 survives 8x MSAA. */
+static const VkExtent2D level_size[VRS_LEVELS] = {
+	{ 1, 1 }, { 1, 2 }, { 2, 2 },
 };
 
 static int
@@ -52,7 +52,7 @@ device_supports_attachment(const struct device_setup *s)
 
 /* Largest supported size within request. */
 static uint8_t
-ring_code(const VkPhysicalDeviceFragmentShadingRateKHR *rates, uint32_t n,
+level_code(const VkPhysicalDeviceFragmentShadingRateKHR *rates, uint32_t n,
 	VkExtent2D want)
 {
 	VkExtent2D best = { 1, 1 };
@@ -90,8 +90,8 @@ read_rates(struct device_setup *s)
 	s->texel = fsr.minFragmentShadingRateAttachmentTexelSize;
 	if (s->inst->GetPhysicalDeviceFragmentShadingRatesKHR(s->phys, &n, rates) < 0)
 		n = 0;
-	for (i = 0; i < PATTERN_RINGS; i++)
-		s->codes[i] = ring_code(rates, n, ring_size[i]);
+	for (i = 0; i < VRS_LEVELS; i++)
+		s->codes[i] = level_code(rates, n, level_size[i]);
 }
 
 /* Features clashing with injected rates. */

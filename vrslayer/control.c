@@ -1,5 +1,4 @@
 #include "control.h"
-#include "pattern.h"
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -12,11 +11,13 @@
 #define SHARE_WEIGHT  0.3f
 #define SHARE_MIN     0.05f
 #define MIN_COST_GAP  0.1f
+#define MIN_GAIN      0.1f
+#define LEARN_MIN     16
 #define HOLD_NS       500000000ULL
 #define HOLD_MAX_NS   8000000000ULL
 #define RELAPSE_NS    1000000000ULL
 #define REFINE_NS     50000000ULL
-#define COARSEN_STEP  2
+#define COARSEN_STEP  1
 #define URGENT        1.1f
 #define STALE_NS      1000000000ULL
 
@@ -61,6 +62,9 @@ learn_share(struct control *c, int level, uint64_t now)
 	share = MIN(MAX(per_cost / full, SHARE_MIN), 1.0f);
 	c->share = c->share > 0.0f ? c->share + SHARE_WEIGHT * (share - c->share)
 		: share;
+	if (++c->learned >= LEARN_MIN
+			&& c->share * (1.0f - c->cost[VRS_LEVELS - 1]) < MIN_GAIN)
+		c->futile = 1;
 }
 
 /* Rises fast, decays slowly. */
@@ -123,15 +127,10 @@ coarse_goal(const struct control *c, float budget)
 	return MIN(MAX(fitting(c, VRS_FILL * budget), c->level + 1), VRS_LEVELS - 1);
 }
 
-/* Center sharpens up to fill. */
 static int
 fine_goal(const struct control *c, float budget)
 {
-	int level = fitting(c, RELAX_TARGET * budget);
-
-	if (c->level <= PATTERN_LEVEL_SOFT)
-		return MIN(level, c->level);
-	return MIN(level, MAX(fitting(c, VRS_FILL * budget), PATTERN_LEVEL_SOFT));
+	return MIN(fitting(c, RELAX_TARGET * budget), c->level);
 }
 
 /* Quickly undone refining holds longer. */
@@ -152,9 +151,8 @@ static void
 choose_goal(struct control *c, float budget, uint64_t now)
 {
 	float gpu = c->gpu[c->level];
-	float relax = c->level > PATTERN_LEVEL_SOFT ? VRS_FILL : RELAX;
 
-	if (budget <= 0.0f) {
+	if (budget <= 0.0f || c->futile) {
 		c->goal = 0;
 		return;
 	}
@@ -165,7 +163,7 @@ choose_goal(struct control *c, float budget, uint64_t now)
 	}
 	if (c->goal > c->level)
 		return;
-	if (!c->level || gpu >= relax * budget || now < c->hold_ns) {
+	if (!c->level || gpu >= RELAX * budget || now < c->hold_ns) {
 		c->goal = c->level;
 		return;
 	}

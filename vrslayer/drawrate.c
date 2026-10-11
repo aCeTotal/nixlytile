@@ -5,6 +5,7 @@
 #define RECENT          4
 #define UNKNOWN         (-1)
 #define FSR_DYNAMIC     VK_DYNAMIC_STATE_FRAGMENT_SHADING_RATE_KHR
+#define ATOC_DYNAMIC    VK_DYNAMIC_STATE_ALPHA_TO_COVERAGE_ENABLE_EXT
 #define LIBRARY_BIT     VK_PIPELINE_CREATE_LIBRARY_BIT_KHR
 #define LIBRARY_BIT2    VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR
 #define FRAGMENT_SUBSET VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT
@@ -13,11 +14,12 @@
 
 enum kind { KIND_COMPLETE, KIND_LIBRARY, KIND_LINKED };
 
-/* Depth state per command buffer. */
+/* Rate-relevant state per command buffer. */
 struct recording {
 	VkCommandBuffer cmd;
 	signed char test;
 	signed char compares;
+	signed char coverage;
 };
 
 static _Thread_local struct recording recent[RECENT];
@@ -70,6 +72,18 @@ compares(VkCompareOp op)
 	return op != VK_COMPARE_OP_ALWAYS && op != VK_COMPARE_OP_NEVER;
 }
 
+/* Coarse coverage dither reads as noise. */
+static int
+per_sample(const VkGraphicsPipelineCreateInfo *in)
+{
+	const VkPipelineMultisampleStateCreateInfo *ms = in->pMultisampleState;
+
+	if (!ms)
+		return 0;
+	return ms->sampleShadingEnable
+		|| (ms->alphaToCoverageEnable && !is_dynamic(in, ATOC_DYNAMIC));
+}
+
 /* Depth-tested draws: scene, not UI. */
 static int
 depth_tested(const VkGraphicsPipelineCreateInfo *in)
@@ -85,6 +99,13 @@ depth_tested(const VkGraphicsPipelineCreateInfo *in)
 			&& !is_dynamic(in, VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE))
 		return 0;
 	return ds->depthTestEnable && compares(ds->depthCompareOp);
+}
+
+/* Baked: unknowable coverage stays full. */
+static int
+static_rate(const VkGraphicsPipelineCreateInfo *in)
+{
+	return depth_tested(in) && !per_sample(in) && !is_dynamic(in, ATOC_DYNAMIC);
 }
 
 static void
@@ -117,7 +138,7 @@ add_static(const VkGraphicsPipelineCreateInfo *in,
 		.fragmentSize = { 1, 1 },
 		.combinerOps = {
 			VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR,
-			depth_tested(in) ? VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR
+			static_rate(in) ? VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR
 				: VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR,
 		},
 	};
@@ -151,7 +172,7 @@ drawrate_patch(const VkGraphicsPipelineCreateInfo *in,
 		patch_library(in, out, p);
 		return;
 	}
-	if (depth_dynamic(in)) {
+	if (depth_dynamic(in) && !per_sample(in)) {
 		add_dynamic(in, out, p);
 		return;
 	}
@@ -169,18 +190,19 @@ recording_of(VkCommandBuffer cmd)
 		if (recent[i].cmd == cmd)
 			return &recent[i];
 	r = &recent[recent_next++ % RECENT];
-	*r = (struct recording){ cmd, UNKNOWN, UNKNOWN };
+	*r = (struct recording){ cmd, UNKNOWN, UNKNOWN, UNKNOWN };
 	return r;
 }
 
-/* Unknown compare counts as real. */
+/* Unknown: compare real, coverage off. */
 static void
 apply_rate(struct device *dev, VkCommandBuffer cmd, const struct recording *r)
 {
 	static const VkExtent2D full = { 1, 1 };
 	VkFragmentShadingRateCombinerOpKHR ops[2] = {
 		VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR,
-		r->test == 1 && r->compares ? VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR
+		r->test == 1 && r->compares && r->coverage != 1
+			? VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR
 			: VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR,
 	};
 
@@ -195,7 +217,7 @@ drawrate_begin(VkCommandBuffer cmd, const VkCommandBufferBeginInfo *info)
 
 	for (i = 0; i < RECENT; i++)
 		if (recent[i].cmd == cmd)
-			recent[i] = (struct recording){ cmd, UNKNOWN, UNKNOWN };
+			recent[i] = (struct recording){ cmd, UNKNOWN, UNKNOWN, UNKNOWN };
 	return dev->vk.BeginCommandBuffer(cmd, info);
 }
 
@@ -238,5 +260,19 @@ drawrate_depth_compare(VkCommandBuffer cmd, VkCompareOp op)
 		return;
 	r = recording_of(cmd);
 	r->compares = (signed char)compares(op);
+	apply_rate(dev, cmd, r);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+drawrate_coverage(VkCommandBuffer cmd, VkBool32 enable)
+{
+	struct device *dev = device_of(cmd);
+	struct recording *r;
+
+	dev->vk.CmdSetAlphaToCoverageEnableEXT(cmd, enable);
+	if (!dev->vrs)
+		return;
+	r = recording_of(cmd);
+	r->coverage = enable != VK_FALSE;
 	apply_rate(dev, cmd, r);
 }

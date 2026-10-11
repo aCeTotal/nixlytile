@@ -45,6 +45,7 @@ static const struct hook device_hooks[] = {
 	HOOK(CmdSetDepthTestEnableEXT, drawrate_depth_test),
 	HOOK(CmdSetDepthCompareOp, drawrate_depth_compare),
 	HOOK(CmdSetDepthCompareOpEXT, drawrate_depth_compare),
+	HOOK(CmdSetAlphaToCoverageEnableEXT, drawrate_coverage),
 };
 
 static PFN_vkVoidFunction

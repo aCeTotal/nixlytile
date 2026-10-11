@@ -2,9 +2,6 @@
 
 #include <stdlib.h>
 
-#define NOMINAL_W 128
-#define NOMINAL_H 72
-
 static VkLayerDeviceCreateInfo *
 link_info(const VkDeviceCreateInfo *info, VkLayerFunction function)
 {
@@ -103,22 +100,15 @@ load_properties(struct device *dev)
 	dev->timestamp_period = props.properties.limits.timestampPeriod;
 }
 
-/* Shaded fraction per level, 16:9. */
+/* Code packs log2 width, height. */
 static void
 load_costs(struct device *dev)
 {
-	uint8_t texels[NOMINAL_W * NOMINAL_H];
-	struct pattern_grid g = {
-		texels, NOMINAL_W, NOMINAL_H, 1, 1, NOMINAL_W, NOMINAL_H,
-	};
-	struct pattern p = {
-		.codes = dev->codes,
-		.foci = 1,
-		.focus[0] = { 0.5f * NOMINAL_W, 0.5f * NOMINAL_H, 1.0f },
-	};
+	int i;
 
-	for (p.level = 0; p.level < VRS_LEVELS; p.level++)
-		dev->control.cost[p.level] = pattern_cost(&g, &p);
+	for (i = 0; i < VRS_LEVELS; i++)
+		dev->control.cost[i] = 1.0f
+			/ (float)(1u << ((dev->codes[i] >> 2) + (dev->codes[i] & 3u)));
 }
 
 static struct device *
@@ -134,7 +124,7 @@ device_new(VkDevice handle, const struct device_setup *s, int vrs)
 	dev->inst = s->inst;
 	dev->vrs = vrs;
 	dev->texel = s->texel;
-	for (i = 0; i < PATTERN_RINGS; i++)
+	for (i = 0; i < VRS_LEVELS; i++)
 		dev->codes[i] = s->codes[i];
 	pthread_mutex_init(&dev->lock, NULL);
 	return dev;

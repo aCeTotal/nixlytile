@@ -62,7 +62,7 @@ frame_init(struct device *dev, VkQueue queue)
 static int
 usable(struct device *dev)
 {
-	return dev->vrs && !atomic_load(&dev->unsafe);
+	return dev->vrs && !atomic_load(&dev->unsafe) && !dev->control.futile;
 }
 
 static int

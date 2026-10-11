@@ -12,7 +12,7 @@ OPTFLAGS = -O2
 LIB      = libnixly_vrs.so
 MANIFEST = nixly_vrs_$(BITS).json
 OBJS     = layer.o instance.o registry.o device.o features.o pipeline.o \
-           rate.o rendering.o upload.o pattern.o timing.o control.o frame.o \
+           rate.o rendering.o upload.o timing.o control.o frame.o \
            submit.o connect.o drawrate.o
 
 VRS_CFLAGS  = -std=c11 -g -fPIC -fvisibility=hidden -D_GNU_SOURCE -DVK_NO_PROTOTYPES \
@@ -29,7 +29,7 @@ $(LIB): $(OBJS)
 .c.o:
 	$(CC) $(VRS_CFLAGS) -c $<
 
-$(OBJS): layer.h link.h pattern.h control.h
+$(OBJS): layer.h link.h control.h
 
 $(MANIFEST): manifest.json.in
 	sed -e 's|@LIB@|$(LIBDIR)/$(LIB)|' -e 's|@BITS@|$(BITS)|g' \

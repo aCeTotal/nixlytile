@@ -19,6 +19,8 @@ struct control {
 	uint64_t seen[VRS_LEVELS];
 	uint64_t measured[VRS_LEVELS];
 	float share;                /* shading share; 0 uses prior */
+	int learned;                /* share updates so far */
+	int futile;                 /* coarsest saves too little */
 	int level;
 	int goal;                   /* level being approached */
 	uint64_t hold_ns;           /* no refining before */

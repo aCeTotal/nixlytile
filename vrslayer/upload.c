@@ -1,17 +1,10 @@
 #include "layer.h"
 
-#define CURSOR_SCALE 0.4f
-
-struct paint_params {
-	int level;
-	uint32_t cursor;
-};
-
 struct upload_job {
 	struct rate_image *rates[RATE_SIZES];
 	int count;
 	uint32_t slot;
-	struct paint_params params;
+	int level;
 };
 
 struct recording {
@@ -20,6 +13,8 @@ struct recording {
 	const struct upload_job *job;
 };
 
+static const VkImageSubresourceRange whole = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
 static int
 slot_done(struct device *dev, uint32_t slot)
 {
@@ -27,55 +22,8 @@ slot_done(struct device *dev, uint32_t slot)
 		|| timing_passed(dev, dev->uploads.mark[slot]);
 }
 
-static struct paint_params
-current_params(struct device *dev)
-{
-	struct vrs_link *page = link_page();
-	int level = atomic_load(&dev->level);
-
-	return (struct paint_params){
-		.level = level,
-		.cursor = page && level ? atomic_load(&page->cursor) : VRS_CURSOR_NONE,
-	};
-}
-
-/* Level plus cursor tile. */
-static uint64_t
-paint_key(const struct rate_image *r, struct paint_params p)
-{
-	uint64_t x, y;
-
-	if (p.cursor == VRS_CURSOR_NONE)
-		return (uint64_t)p.level << 48 | 1ULL << 47;
-	x = (uint64_t)(p.cursor >> 16) * r->grid.width / VRS_CURSOR_SCALE;
-	y = (uint64_t)(p.cursor & 0xffffu) * r->grid.height / VRS_CURSOR_SCALE;
-	return (uint64_t)p.level << 48 | x << 16 | y;
-}
-
-static struct pattern
-pattern_for(const struct device *dev, const struct rate_image *r,
-	struct paint_params params)
-{
-	struct pattern p = {
-		.codes = dev->codes,
-		.level = params.level,
-		.foci = 1,
-		.focus[0] = { 0.5f * (float)r->size.width, 0.5f * (float)r->size.height, 1.0f },
-	};
-
-	if (params.cursor == VRS_CURSOR_NONE)
-		return p;
-	p.focus[1] = (struct pattern_focus){
-		(float)(params.cursor >> 16) / VRS_CURSOR_SCALE * (float)r->size.width,
-		(float)(params.cursor & 0xffffu) / VRS_CURSOR_SCALE * (float)r->size.height,
-		CURSOR_SCALE,
-	};
-	p.foci = 2;
-	return p;
-}
-
 static void
-barrier_before_copy(const struct recording *rec, struct rate_image *r)
+barrier_before_clear(const struct recording *rec, struct rate_image *r)
 {
 	VkImageMemoryBarrier b = {
 		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -85,7 +33,7 @@ barrier_before_copy(const struct recording *rec, struct rate_image *r)
 		.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
 		.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
 		.image = r->image,
-		.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+		.subresourceRange = whole,
 	};
 
 	rec->dev->vk.CmdPipelineBarrier(rec->cmd,
@@ -94,7 +42,7 @@ barrier_before_copy(const struct recording *rec, struct rate_image *r)
 }
 
 static void
-barrier_after_copy(const struct recording *rec, struct rate_image *r)
+barrier_after_clear(const struct recording *rec, struct rate_image *r)
 {
 	VkImageMemoryBarrier b = {
 		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -105,7 +53,7 @@ barrier_after_copy(const struct recording *rec, struct rate_image *r)
 		.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
 		.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
 		.image = r->image,
-		.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+		.subresourceRange = whole,
 	};
 
 	rec->dev->vk.CmdPipelineBarrier(rec->cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -113,33 +61,18 @@ barrier_after_copy(const struct recording *rec, struct rate_image *r)
 		0, 0, NULL, 0, NULL, 1, &b);
 }
 
+/* One rate fills the screen. */
 static void
 upload_one(const struct recording *rec, struct rate_image *r)
 {
-	const struct upload_job *job = rec->job;
-	struct pattern p = pattern_for(rec->dev, r, job->params);
-	VkDeviceSize offset = job->slot * r->slot_bytes;
-	struct pattern_grid g = {
-		.texels = r->mapped + offset,
-		.columns = r->grid.width,
-		.rows = r->grid.height,
-		.texel_w = rec->dev->texel.width,
-		.texel_h = rec->dev->texel.height,
-		.width = r->size.width,
-		.height = r->size.height,
-	};
-	VkBufferImageCopy copy = {
-		.bufferOffset = offset,
-		.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-		.imageExtent = { r->grid.width, r->grid.height, 1 },
-	};
+	int level = rec->job->level;
+	VkClearColorValue rate = { .uint32 = { rec->dev->codes[level] } };
 
-	pattern_paint(&g, &p);
-	barrier_before_copy(rec, r);
-	rec->dev->vk.CmdCopyBufferToImage(rec->cmd, r->staging, r->image,
-		VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
-	barrier_after_copy(rec, r);
-	r->painted = paint_key(r, job->params);
+	barrier_before_clear(rec, r);
+	rec->dev->vk.CmdClearColorImage(rec->cmd, r->image, VK_IMAGE_LAYOUT_GENERAL,
+		&rate, 1, &whole);
+	barrier_after_clear(rec, r);
+	r->painted = level;
 	r->initialized = 1;
 	if (atomic_load(&r->state) != RATE_FRESH)
 		return;
@@ -170,12 +103,11 @@ record_upload(struct device *dev, const struct upload_job *job)
 }
 
 static int
-needs_paint(struct rate_image *r, struct paint_params params)
+needs_paint(struct rate_image *r, int level)
 {
 	int state = atomic_load(&r->state);
 
-	return state == RATE_FRESH
-		|| (state == RATE_READY && r->painted != paint_key(r, params));
+	return state == RATE_FRESH || (state == RATE_READY && r->painted != level);
 }
 
 /* Changed images only; else NULL. */
@@ -184,14 +116,14 @@ upload_changes(struct device *dev)
 {
 	struct upload_job job = {
 		.slot = dev->uploads.seq % UPLOAD_SLOTS,
-		.params = current_params(dev),
+		.level = atomic_load(&dev->level),
 	};
 	int i;
 
 	if (!dev->vrs || !slot_done(dev, job.slot))
 		return VK_NULL_HANDLE;
 	for (i = 0; i < RATE_SIZES; i++)
-		if (needs_paint(&dev->rates[i], job.params))
+		if (needs_paint(&dev->rates[i], job.level))
 			job.rates[job.count++] = &dev->rates[i];
 	return job.count ? record_upload(dev, &job) : VK_NULL_HANDLE;
 }

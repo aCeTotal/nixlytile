@@ -2502,7 +2502,6 @@ void ladder_missed(Monitor *m, uint64_t now);
 extern unsigned int vrslink_generation;
 struct vrs_link *vrslink_for_pid(pid_t pid);
 void vrslink_target(struct vrs_link *page, uint64_t interval_ns, uint64_t budget_ns);
-void vrslink_cursor(struct vrs_link *page, Client *game);
 void vrslink_idle(struct vrs_link *page);
 void vrslink_setup(void);
 void vrslink_cleanup(void);

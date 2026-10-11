@@ -10,13 +10,12 @@
 #define EVAL_NS             250000000ULL
 #define CALM_NS             2000000000ULL
 #define PREPARE_MAX_NS      500000000ULL
-#define PROBATION_NS        3000000000ULL
+#define PROBATION_NS        10000000000ULL
 #define BACKOFF_MIN_NS      15000000000ULL
 #define BACKOFF_MAX_NS      240000000000ULL
 #define BUDGET_MIN          0.55f
 #define BUDGET_STEP         0.08f
 #define BUDGET_RECOVER      0.02f
-#define GPU_BOUND           0.5f
 #define VRS_GRACE_NS        500000000ULL
 #define HOLD_MARGIN         0.6f
 #define CPU_SHARE           0.8f
@@ -120,7 +119,7 @@ vrs_converging(const DynRender *d, uint64_t now)
 	return vrs_usable(d->link) && now - d->level_rise_ns < VRS_GRACE_NS;
 }
 
-/* GPU-bound: tighter budget helps. */
+/* Only GPU at budget: tighten. */
 static int
 vrs_tighten(DynRender *d)
 {
@@ -128,7 +127,7 @@ vrs_tighten(DynRender *d)
 
 	if (!vrs_usable(l) || d->budget_frac - BUDGET_STEP < BUDGET_MIN
 			|| (float)atomic_load(&l->gpu_ns)
-			< GPU_BOUND * (float)atomic_load(&l->interval_ns))
+			< VRS_FILL * (float)atomic_load(&l->budget_ns))
 		return 0;
 	d->budget_frac -= BUDGET_STEP;
 	return 1;
@@ -156,13 +155,12 @@ step_down(Monitor *m, uint64_t now)
 		set_rung(m, target, now);
 }
 
-/* Holds with VRS fully applied. */
+/* Holds at coarsest usable level. */
 static int
 fits(const DynRender *d, float interval, float work)
 {
 	const struct vrs_link *l = d->link;
-	float gpu = l && atomic_load(&l->level_max)
-		? (float)atomic_load(&l->gpu_min_ns) : 0.0f;
+	float gpu = l ? (float)atomic_load(&l->gpu_min_ns) : 0.0f;
 
 	return work <= CPU_SHARE * interval
 		&& gpu <= VRS_FILL * d->budget_frac * interval;

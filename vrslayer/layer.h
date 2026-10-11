@@ -10,7 +10,6 @@
 
 #include "control.h"
 #include "link.h"
-#include "pattern.h"
 
 #define EXPORT __attribute__((visibility("default")))
 
@@ -42,13 +41,13 @@
 	X(CreateImage) X(DestroyImage) X(CreateImageView) X(DestroyImageView) \
 	X(GetImageMemoryRequirements) X(BindImageMemory) \
 	X(CreateBuffer) X(DestroyBuffer) X(GetBufferMemoryRequirements) \
-	X(BindBufferMemory) X(AllocateMemory) X(FreeMemory) X(MapMemory) \
+	X(BindBufferMemory) X(AllocateMemory) X(FreeMemory) \
 	X(CreateCommandPool) X(DestroyCommandPool) X(AllocateCommandBuffers) \
 	X(BeginCommandBuffer) X(EndCommandBuffer) X(CmdPipelineBarrier) \
-	X(CmdCopyBufferToImage) X(CmdResetQueryPool) X(CmdWriteTimestamp) \
+	X(CmdClearColorImage) X(CmdResetQueryPool) X(CmdWriteTimestamp) \
 	X(CmdFillBuffer) X(CreateSemaphore) X(DestroySemaphore) \
 	X(CmdBindPipeline) X(CmdSetDepthTestEnable) X(CmdSetDepthCompareOp) \
-	X(CmdSetFragmentShadingRateKHR) \
+	X(CmdSetFragmentShadingRateKHR) X(CmdSetAlphaToCoverageEnableEXT) \
 	X(AcquireNextImageKHR) X(AcquireNextImage2KHR) \
 	X(CreateQueryPool) X(DestroyQueryPool) X(GetQueryPoolResults)
 
@@ -78,13 +77,9 @@ struct rate_image {
 	VkImage image;
 	VkImageView view;
 	VkDeviceMemory memory;
-	VkBuffer staging;
-	VkDeviceMemory staging_memory;
-	uint8_t *mapped;
-	VkDeviceSize slot_bytes;
 	uint32_t upload_mark;       /* timing mark of first upload */
 	int initialized;
-	uint64_t painted;           /* params of the last paint */
+	int painted;                /* level of the last paint */
 };
 
 /* Present queue busy-time ring. */
@@ -147,7 +142,7 @@ struct device {
 	_Atomic int unsafe;         /* unpatched pipeline exists */
 	_Atomic int bind_rate;      /* static-depth library seen */
 	VkExtent2D texel;
-	uint8_t codes[PATTERN_RINGS];
+	uint8_t codes[VRS_LEVELS];
 	VkPhysicalDeviceMemoryProperties memory;
 	VkQueueFamilyProperties families[FAMILIES_MAX];
 	uint32_t nfamilies;
@@ -179,7 +174,7 @@ struct device_setup {
 	VkPhysicalDeviceFragmentShadingRateFeaturesKHR features;
 	const char **extensions;
 	VkExtent2D texel;
-	uint8_t codes[PATTERN_RINGS];
+	uint8_t codes[VRS_LEVELS];
 };
 
 static inline uint64_t
@@ -245,6 +240,8 @@ VKAPI_ATTR void VKAPI_CALL drawrate_depth_test(VkCommandBuffer cmd,
 	VkBool32 enable);
 VKAPI_ATTR void VKAPI_CALL drawrate_depth_compare(VkCommandBuffer cmd,
 	VkCompareOp op);
+VKAPI_ATTR void VKAPI_CALL drawrate_coverage(VkCommandBuffer cmd,
+	VkBool32 enable);
 
 VkImageView rate_view(struct device *dev, VkExtent2D size);
 void rate_settle(struct device *dev);
