@@ -185,10 +185,9 @@ void btmon_remove(const char *path);
 int btmon_send_file(const char *addr, const char *filepath);
 int btmon_daemon_up(void);
 void btmon_daemon_wake(void);
-void btmon_daemon_stop(void);
 int btmon_connected_count(void);
 
-/* btidle.c: bluetoothd on demand */
+/* btidle.c: radio off when idle */
 void btidle_touch(void);
 void btidle_wake(void);
 void btidle_ready(void);

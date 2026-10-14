@@ -401,8 +401,10 @@ parse_props(sd_bus_message *m, const char *iface, const char *path)
 				int old = s->a.powered;
 
 				if (var_bool(m, &s->a.powered) == 0 &&
-						!old && s->a.powered)
+						!old && s->a.powered) {
 					reconn_schedule_all();
+					btidle_ready();
+				}
 			}
 			else if (strcmp(key, "Discovering") == 0)
 				var_bool(m, &s->a.discovering);
@@ -906,18 +908,6 @@ btmon_daemon_wake(void)
 		sd_bus_call_method_async(bt_bus, NULL, "org.bluez", "/",
 				"org.freedesktop.DBus.Peer", "Ping",
 				ignore_reply_cb, NULL, "");
-}
-
-void
-btmon_daemon_stop(void)
-{
-	if (bt_bus)
-		sd_bus_call_method_async(bt_bus, NULL,
-				"org.freedesktop.systemd1",
-				"/org/freedesktop/systemd1",
-				"org.freedesktop.systemd1.Manager", "StopUnit",
-				ignore_reply_cb, NULL, "ss", "bluetooth.service",
-				"replace");
 }
 
 int

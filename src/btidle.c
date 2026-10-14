@@ -6,6 +6,8 @@
 
 static struct wl_event_source *idle_timer;
 static uint64_t woke_at;
+/* idle parked radio, not user */
+static int parked;
 
 static int
 popup_open(void)
@@ -32,13 +34,16 @@ in_use(void)
 static int
 idle_cb(void *data)
 {
-	if (!btmon_daemon_up())
-		return 0;
+	BtAdapter a;
+
 	if (in_use()) {
 		btidle_touch();
 		return 0;
 	}
-	btmon_daemon_stop();
+	if (!btmon_adapter(&a) || !a.powered)
+		return 0;
+	parked = 1;
+	btmon_set_powered(0);
 	return 0;
 }
 
@@ -57,6 +62,11 @@ btidle_wake(void)
 	uint64_t now = monotonic_msec();
 
 	btidle_touch();
+	if (parked && btmon_daemon_up()) {
+		parked = 0;
+		btmon_set_powered(1);
+		return;
+	}
 	if (btmon_daemon_up() || now - woke_at < BTIDLE_WAKE_MS)
 		return;
 	woke_at = now;
@@ -74,5 +84,5 @@ btidle_ready(void)
 int
 btidle_dormant(void)
 {
-	return !btmon_daemon_up() && findbluetoothdevice();
+	return parked || (!btmon_daemon_up() && findbluetoothdevice());
 }
