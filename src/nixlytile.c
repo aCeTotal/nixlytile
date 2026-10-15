@@ -2510,7 +2510,7 @@ init_logging(void)
 	 * game mode) must be diagnosable from the field without a restart
 	 * with NIXLY_DEBUG set. */
 	game_log_fd = open(NIXLY_LOG_DIR "/game_debug.log",
-		O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 	if (game_log_fd >= 0) {
 		struct timespec gts;
 		struct tm gtm;
@@ -2536,7 +2536,7 @@ init_logging(void)
 	log_stderr_fd = dup(STDERR_FILENO);
 
 	/* Open wlroots log file */
-	log_file = fopen(NIXLY_LOG_DIR "/wlroots.log", "w");
+	log_file = fopen(NIXLY_LOG_DIR "/wlroots.log", "we");
 	if (log_file) {
 		struct timespec ts;
 		struct tm tm;
@@ -2549,7 +2549,7 @@ init_logging(void)
 	}
 
 	/* Open full debug log (always active, captures everything) */
-	debug_log_file = fopen(NIXLY_LOG_DIR "/WLR_DEBUG.log", "w");
+	debug_log_file = fopen(NIXLY_LOG_DIR "/WLR_DEBUG.log", "we");
 	if (debug_log_file) {
 		struct timespec ts;
 		struct tm tm;
@@ -2564,7 +2564,7 @@ init_logging(void)
 	/* Redirect stderr → file so XWayland crash output is captured.
 	 * XWayland is a child process that inherits our stderr. */
 	int stderr_log = open(NIXLY_LOG_DIR "/xwayland.log",
-		O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 	if (stderr_log >= 0) {
 		/* Write header */
 		struct timespec ts;
@@ -2586,7 +2586,7 @@ init_logging(void)
 		char hdr[256];
 
 		diag_log_fd = open(NIXLY_LOG_DIR "/diagnostics.log",
-			O_WRONLY | O_CREAT | O_TRUNC, 0644);
+			O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 		if (diag_log_fd >= 0) {
 			int n = snprintf(hdr, sizeof(hdr),
 				"=== nixlytile diagnostics %04d-%02d-%02d %02d:%02d:%02d (PID %d) ===\n",
@@ -2596,7 +2596,7 @@ init_logging(void)
 		}
 
 		audio_log_fd = open(NIXLY_LOG_DIR "/audio.log",
-			O_WRONLY | O_CREAT | O_TRUNC, 0644);
+			O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 		if (audio_log_fd >= 0) {
 			int n = snprintf(hdr, sizeof(hdr),
 				"=== audio log %04d-%02d-%02d %02d:%02d:%02d ===\n",
@@ -2606,7 +2606,7 @@ init_logging(void)
 		}
 
 		error_log_fd = open(NIXLY_LOG_DIR "/errors.log",
-			O_WRONLY | O_CREAT | O_TRUNC, 0644);
+			O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 		if (error_log_fd >= 0) {
 			int n = snprintf(hdr, sizeof(hdr),
 				"=== error log %04d-%02d-%02d %02d:%02d:%02d ===\n",
@@ -3000,6 +3000,7 @@ setup(void)
 	 * the clients cannot set the selection directly without compositor approval,
 	 * see the setsel() function. */
 	compositor = wlr_compositor_create(dpy, 6, drw);
+	bufready_init();
 	wlr_subcompositor_create(dpy);
 	wlr_data_device_manager_create(dpy);
 	/* Capture and clipboard-history protocols: wlsec_privileged() keeps

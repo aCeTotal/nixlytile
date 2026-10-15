@@ -3572,6 +3572,9 @@ void htpc_ws_refresh_fx(Monitor *m);
 void wsfreeze_poke(void);
 void wsfreeze_thaw_all(void);
 
+/* bufready.c */
+void bufready_init(void);
+
 /* appreap.c — end windowless apps */
 void appreap_track(Client *c);
 void appreap_poke(void);

@@ -38,14 +38,14 @@ save_and_set() {
 	old=$(cat "$file" 2>/dev/null) || return 0
 	[ -n "$old" ] || return 0
 
-	printf '%s\n' "$file" > "$STATE_DIR/$key.path"
-	printf '%s\n' "$old" > "$STATE_DIR/$key.value"
-
-	if printf '%s\n' "$value" > "$file" 2>/dev/null; then
-		log "set $file: $old -> $value"
-	else
-		rm -f "$STATE_DIR/$key.path" "$STATE_DIR/$key.value"
+	# A killed run left the true original.
+	if [ ! -e "$STATE_DIR/$key.value" ]; then
+		printf '%s\n' "$file" > "$STATE_DIR/$key.path"
+		printf '%s\n' "$old" > "$STATE_DIR/$key.value"
 	fi
+
+	printf '%s\n' "$value" > "$file" 2>/dev/null || return 0
+	log "set $file: $old -> $value"
 }
 
 restore_all() {
@@ -160,19 +160,14 @@ stop_scx() {
 
 # ------------------------------------------------------------------- kernel
 
-# True when every active swap device is backed by zram (compressed RAM).
+# True when the swap the kernel fills first is zram.
 swap_is_zram() {
-	local swaps=${ROOT}/proc/swaps found=0 dev rest
+	local swaps=${ROOT}/proc/swaps top
 
 	[ -r "$swaps" ] || return 1
-	while read -r dev rest; do
-		case "$dev" in
-		Filename|"") continue ;;
-		/dev/zram*) found=1 ;;
-		*) return 1 ;;
-		esac
-	done < "$swaps"
-	[ "$found" = 1 ]
+	top=$(awk 'NR > 1 && (best == "" || $5 > prio) { best = $1; prio = $5 } END { print best }' "$swaps")
+	case "$top" in /dev/zram*) return 0 ;; esac
+	return 1
 }
 
 # Reclaim hits the cgroup with the least protection first. Biasing it away
@@ -314,6 +309,8 @@ tune_gpu_nvidia() {
 		awk -F', *' -v bus="$bus" 'tolower($2) ~ tolower(substr(bus, 6)) {print $1; exit}')
 	idx=${idx:-0}
 
+	nvidia-smi -i "$idx" --query-gpu=persistence_mode --format=csv,noheader 2>/dev/null |
+		grep -q Disabled && touch "$STATE_DIR/nvidia-persistence.ours"
 	nvidia-smi -i "$idx" -pm 1 >/dev/null 2>&1 &&
 		echo "$idx" > "$STATE_DIR/nvidia-persistence.idx"
 
@@ -365,7 +362,10 @@ restore_nvidia() {
 		[ -n "$pl" ] && nvidia-smi -i "$idx" --power-limit="${pl%%.*}" >/dev/null 2>&1
 		rm -f "$STATE_DIR/nvidia-powerlimit.value"
 	fi
-	rm -f "$STATE_DIR/nvidia-persistence.idx"
+	if [ -f "$STATE_DIR/nvidia-persistence.ours" ] && [ -f "$STATE_DIR/nvidia-persistence.idx" ]; then
+		nvidia-smi -i "$(cat "$STATE_DIR/nvidia-persistence.idx")" -pm 0 >/dev/null 2>&1
+	fi
+	rm -f "$STATE_DIR/nvidia-persistence.ours" "$STATE_DIR/nvidia-persistence.idx"
 }
 
 # Permanent GPU power ceiling, run once at boot by nixly-gpumax.service.
@@ -658,6 +658,7 @@ unfreeze_orphans() {
 do_daemon() {
 	local missing=0
 
+	trap 'do_restore; exit 0' TERM INT
 	do_apply
 
 	if [ -w /dev/cpu_dma_latency ]; then
@@ -667,8 +668,6 @@ do_daemon() {
 	else
 		log "warning: /dev/cpu_dma_latency not writable, C-state latency unchanged"
 	fi
-
-	trap 'do_restore; exit 0' TERM INT
 
 	# Poll for the compositor rather than sleeping forever: it is what
 	# stops this unit, so if it dies without doing so the machine would

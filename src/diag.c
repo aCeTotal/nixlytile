@@ -29,7 +29,7 @@ diag_init(void)
 	const char *path = getenv("NIXLYTILE_DIAG_PATH");
 	if (!path)
 		path = DIAG_PATH;
-	diag_fp = fopen(path, "w");
+	diag_fp = fopen(path, "we");
 	if (!diag_fp)
 		return;
 	/* Fully buffered: diag_logf runs inside rendermon (heartbeat,
