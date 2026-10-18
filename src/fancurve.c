@@ -49,10 +49,10 @@ fan_curve_eval(const FanCurve *c, int temp_c)
 void
 fan_curve_default(FanCurve *c, int section)
 {
-	static const uint8_t t_cpu[FAN_CURVE_PTS] = { 50, 60, 70, 80, 88, 94 };
-	static const uint8_t p_cpu[FAN_CURVE_PTS] = { 20, 28, 38, 52, 75, 100 };
-	static const uint8_t t_gpu[FAN_CURVE_PTS] = { 45, 55, 65, 75, 82, 87 };
-	static const uint8_t p_gpu[FAN_CURVE_PTS] = { 20, 28, 38, 52, 70, 100 };
+	static const uint8_t t_cpu[FAN_CURVE_PTS] = { 50, 60, 70, 77, 83, 88 };
+	static const uint8_t p_cpu[FAN_CURVE_PTS] = { 20, 28, 40, 60, 80, 100 };
+	static const uint8_t t_gpu[FAN_CURVE_PTS] = { 45, 55, 65, 72, 77, 82 };
+	static const uint8_t p_gpu[FAN_CURVE_PTS] = { 20, 28, 40, 60, 80, 100 };
 	static const uint8_t t_case[FAN_CURVE_PTS] = { 50, 60, 70, 80, 88, 95 };
 	static const uint8_t p_case[FAN_CURVE_PTS] = { 20, 25, 35, 50, 70, 100 };
 	const uint8_t *t = section == 1 ? t_gpu : section == 2 ? t_case : t_cpu;

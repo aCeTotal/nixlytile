@@ -3478,7 +3478,6 @@ void cpuclock_epp(const char *epp);
 void cpuclock_regime_battery_async(double cap);
 void cpuclock_regime_ac_async(void);
 void cpuclock_regime_dark_async(void);
-void output_lowpower_refresh(int on_battery);
 void output_lock_max_refresh(void);
 int power_profile_get(char *buf, size_t len);
 int power_profile_set(const char *value);

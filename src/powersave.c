@@ -7,7 +7,6 @@
 #define PS_BATTERY_CAP 0.6
 
 static int ps_engaged = -1;     /* -1 unknown → first event always applies */
-static int ps_fps_limited;      /* we enabled the limiter, not the user */
 
 /* Re-apply whatever clock regime the power state calls for.  Called
  * internally and by presence.c when leaving its (deeper) save mode, so
@@ -25,7 +24,6 @@ powersave_reassert(void)
 					 * (1.29 GHz ceiling) made everything
 					 * crawl while saving almost nothing —
 					 * idle draw is panel/platform-bound */
-		output_lowpower_refresh(1);  /* panels → lowest refresh (60 Hz) */
 		unfocused_fps_cap = 20; /* visible background tiles stay watchable —
 					 * 2 froze a side-by-side video outright,
 					 * which reads as a broken compositor rather
@@ -33,9 +31,10 @@ powersave_reassert(void)
 	} else {
 		if (!game_mode_active)
 			cpuclock_regime_ac_async();
-		output_lowpower_refresh(0);  /* restore pinned/best refresh */
 		unfocused_fps_cap = 0;  /* no throttle on wall power */
 	}
+	monconf_apply_modes();
+	updatemons(NULL, NULL);
 }
 
 /* The clock cap the current power state wants.  launchboost.c releases it
@@ -53,13 +52,6 @@ static void
 ps_engage(void)
 {
 	powersave_reassert();
-
-	if (!fps_limit_enabled) {
-		fps_limit_enabled = 1;
-		if (fps_limit_value > 60)
-			fps_limit_value = 60;
-		ps_fps_limited = 1;
-	}
 	wlr_log(WLR_INFO, "powersave: on battery — max saving engaged");
 }
 
@@ -68,11 +60,6 @@ static void
 ps_wall_power(void)
 {
 	powersave_reassert();
-
-	if (ps_fps_limited) {
-		fps_limit_enabled = 0;
-		ps_fps_limited = 0;
-	}
 	wlr_log(WLR_INFO, "powersave: on wall power — quiet profile");
 }
 

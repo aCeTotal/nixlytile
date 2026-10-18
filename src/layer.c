@@ -212,8 +212,7 @@ destroylock(SessionLock *lock, int unlock)
 
 	wlr_scene_node_set_enabled(&locked_bg->node, 0);
 
-	/* The lock forced max refresh; re-apply whatever the power state
-	 * wants (battery → low refresh, AC → pinned/best modes). */
+	/* Lock forced max refresh. */
 	powersave_reassert();
 
 	focusclient(focustop(selmon), 0);

@@ -261,18 +261,9 @@ monitor_mode_pinned(struct wlr_output *o)
 	return 0;
 }
 
-/* Drop every panel to its lowest refresh at the current resolution on
- * battery; restore the configured/best rate on AC.  A 300 Hz panel run
- * at 60 Hz cuts the display pipe's pixel-clock power draw substantially
- * — a real win toward the 9.5 W battery budget — and pairs with the FPS
- * cap powersave.c already applies.  Runs on the compositor thread from
- * powersave_reassert(); a plain modeset, no game/video-pacing coupling
- * (fullscreen game/video on battery is capped anyway). */
 /* Lockscreen always runs at the panel's maximum refresh: switch every
  * output to the highest-refresh mode at its current resolution (real
- * scanout modes only — paced divisor modes are virtual and slower).
- * The battery low-refresh drop is skipped while locked; unlock calls
- * powersave_reassert() which re-applies whatever the power state wants. */
+ * scanout modes only — paced divisor modes are virtual and slower). */
 void
 output_lock_max_refresh(void)
 {
@@ -307,67 +298,6 @@ output_lock_max_refresh(void)
 		if (wlr_output_test_state(o, &st) &&
 				wlr_output_commit_state(o, &st)) {
 			wlr_log(WLR_INFO, "lock: %s → %dx%d@%d (max refresh)",
-				o->name, target->width, target->height,
-				target->refresh / 1000);
-			invalidate_video_pacing(m);
-		}
-		wlr_output_state_finish(&st);
-	}
-	updatemons(NULL, NULL);
-}
-
-void
-output_lowpower_refresh(int on_battery)
-{
-	Monitor *m;
-
-	/* Locked: the lockscreen owns the refresh rate (max). The unlock
-	 * path re-asserts the power state. */
-	if (on_battery && locked)
-		return;
-
-	if (!on_battery) {
-		/* Restore the configured rate — monconf_apply_modes() handles
-		 * pinned, paced (150/100/75) and custom modes correctly, which a
-		 * plain find_mode cannot. */
-		monconf_apply_modes();
-		updatemons(NULL, NULL);
-		return;
-	}
-
-	wl_list_for_each(m, &mons, link) {
-		struct wlr_output *o = m->wlr_output;
-		struct wlr_output_mode *target = NULL, *mode, *cur;
-		struct wlr_output_state st;
-
-		if (!o || !o->enabled)
-			continue;
-		cur = o->current_mode;
-		if (!cur)
-			continue;
-
-		/* Lowest REAL scanout refresh at the resolution we're already
-		 * running.  Paced divisor modes are virtual (and on a 200 Hz
-		 * panel the 1/4 divisor undercuts the native 60) — skip them
-		 * like output_lock_max_refresh does. */
-		wl_list_for_each(mode, &o->modes, link) {
-			if (mode->width != cur->width ||
-					mode->height != cur->height)
-				continue;
-			if (wlr_drm_connector_mode_pace_divisor(o, mode))
-				continue;
-			if (!target || mode->refresh < target->refresh)
-				target = mode;
-		}
-		if (!target || target == cur)
-			continue;
-
-		wlr_output_state_init(&st);
-		wlr_output_state_set_enabled(&st, 1);
-		wlr_output_state_set_mode(&st, target);
-		if (wlr_output_test_state(o, &st) &&
-				wlr_output_commit_state(o, &st)) {
-			wlr_log(WLR_INFO, "powersave: %s → %dx%d@%d (battery)",
 				o->name, target->width, target->height,
 				target->refresh / 1000);
 			invalidate_video_pacing(m);
