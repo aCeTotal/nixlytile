@@ -61,6 +61,8 @@ gametune_start(void)
 {
 	if (!gametune_unit_present())
 		return;
+	if (!gametune_active)
+		fanwatch_set_game(1);
 	gametune_active = 1;
 
 	/* No gametune_active short-circuit: the daemon can restore and exit
@@ -83,6 +85,7 @@ gametune_stop(void)
 	if (!gametune_active)
 		return;
 	gametune_active = 0;
+	fanwatch_set_game(0);
 
 	static const char *const argv[] = {
 		"systemctl", "stop", "--no-block", "nixly-gametune.service", NULL

@@ -205,6 +205,40 @@ bw_read_profile(BattSnapshot *s)
 	}
 }
 
+/* Any online mains or USB-C supply wins over battery status. */
+static void
+bw_read_source(BattSnapshot *s)
+{
+	DIR *dir = opendir("/sys/class/power_supply");
+	struct dirent *ent;
+
+	s->source = POWER_UNKNOWN;
+	if (!dir)
+		return;
+	while ((ent = readdir(dir))) {
+		char path[PATH_MAX];
+		char type[32], online[8];
+
+		if (ent->d_name[0] == '.')
+			continue;
+		snprintf(path, sizeof(path),
+				"/sys/class/power_supply/%s/type", ent->d_name);
+		if (bw_line(path, type, sizeof(type)) != 0 ||
+				strcmp(type, "Battery") == 0)
+			continue;
+		snprintf(path, sizeof(path),
+				"/sys/class/power_supply/%s/online", ent->d_name);
+		if (bw_line(path, online, sizeof(online)) != 0)
+			continue;
+		s->source = POWER_BATTERY;
+		if (strcmp(online, "0") == 0)
+			continue;
+		s->source = POWER_EXTERNAL;
+		break;
+	}
+	closedir(dir);
+}
+
 static void
 bw_sample(BattSnapshot *s)
 {
@@ -320,6 +354,7 @@ bw_sample(BattSnapshot *s)
 	if (bw_ull(path, &val) == 0)
 		s->thr_end = (int)val;
 
+	bw_read_source(s);
 	bw_read_profile(s);
 }
 

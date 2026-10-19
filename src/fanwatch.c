@@ -27,7 +27,7 @@
 
 #define FW_MAX_PENDING 8
 
-enum { FW_CTL_FRAC, FW_CTL_AUTO, FW_CTL_BOOST, FW_CTL_CURVE };
+enum { FW_CTL_FRAC, FW_CTL_AUTO, FW_CTL_BOOST, FW_CTL_CURVE, FW_CTL_GAME };
 
 typedef struct {
 	int kind;
@@ -114,6 +114,9 @@ fw_worker(void *data)
 			case FW_CTL_CURVE:
 				fan_state_set_curve(&local, ctl[i].flat,
 						&ctl[i].curve);
+				break;
+			case FW_CTL_GAME:
+				fan_state_set_game(&local, ctl[i].on);
 				break;
 			}
 		}
@@ -202,6 +205,14 @@ void
 fanwatch_set_boost(int on)
 {
 	FwCtl c = { FW_CTL_BOOST, 0, 0.0, on, {{0},{0},0} };
+
+	fw_queue(c);
+}
+
+void
+fanwatch_set_game(int on)
+{
+	FwCtl c = { FW_CTL_GAME, 0, 0.0, on, {{0},{0},0} };
 
 	fw_queue(c);
 }

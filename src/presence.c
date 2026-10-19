@@ -107,9 +107,7 @@ pr_go_dark(void *data)
 	pr_saved_backlight = backlight_percent();
 	set_backlight_percent(0.0);
 
-	/* nobody's watching: lowest profile, lowest clock, turbo off —
-	 * applied on the cpuclock worker (the EC profile write alone can
-	 * stall ~100 ms). */
+	/* Lowest clock, turbo off. */
 	cpuclock_regime_dark_async();
 
 	pr_outputs_set(0);

@@ -235,13 +235,12 @@ cc_apply(int job, double cap)
 		cpuclock_cap(cap);
 		break;
 	case CC_AC:
-		power_profile_quiet();
-		cpuclock_epp("balance_performance");
+		power_profile_high();
+		cpuclock_epp("performance");
 		cpuclock_boost(1);
 		cpuclock_cap(cap);
 		break;
 	case CC_DARK:
-		power_profile_low();
 		cpuclock_boost(0);
 		cpuclock_cap(cap);
 		break;
@@ -312,13 +311,13 @@ cpuclock_regime_dark_async(void)
 	cc_submit(CC_DARK, 0.0);
 }
 
-/* Balanced firmware profile, never turbo. */
+/* Fastest firmware profile. */
 void
-power_profile_quiet(void)
+power_profile_high(void)
 {
 	const char *path = profile_path();
 
 	if (!path)
 		return;
-	write_str(path, strcmp(path, MSI_PROFILE) == 0 ? "comfort" : "balanced");
+	write_str(path, strcmp(path, MSI_PROFILE) == 0 ? "turbo" : "performance");
 }

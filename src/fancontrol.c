@@ -19,6 +19,10 @@
 FanState fan_pub;
 
 #define MSI_EC_DIR "/sys/devices/platform/msi-ec"
+/* Fan ceiling outside games. */
+#define FAN_QUIET_MAX_PCT 60
+
+static int fan_game; /* worker thread only */
 
 static int
 sysfs_read_int(const char *path)
@@ -585,6 +589,23 @@ fan_state_set_auto(FanState *fs, int flat)
 	msi_sync_fan_mode(fs);
 }
 
+static int
+fan_cap_pct(int pct)
+{
+	return fan_game || pct < FAN_QUIET_MAX_PCT ? pct : FAN_QUIET_MAX_PCT;
+}
+
+static int
+fan_ec_write_capped(const FanEntry *f)
+{
+	FanCurve c = f->curve;
+
+	c.base = (uint8_t)fan_cap_pct(c.base);
+	for (int i = 0; i < FAN_CURVE_PTS; i++)
+		c.pct[i] = (uint8_t)fan_cap_pct(c.pct[i]);
+	return fan_ec_write_curve(f->ec_is_gpu, &c);
+}
+
 void
 fan_state_set_curve(FanState *fs, int flat, const FanCurve *c)
 {
@@ -594,7 +615,7 @@ fan_state_set_curve(FanState *fs, int flat, const FanCurve *c)
 		return;
 	f->curve = *c;
 	if (f->ctl == FAN_CTL_MSI_EC) {
-		if (fan_ec_write_curve(f->ec_is_gpu, c) != 0)
+		if (fan_ec_write_capped(f) != 0)
 			return;
 	} else {
 		f->curve_applied_pct = -1; /* force a write on next tick */
@@ -631,8 +652,8 @@ fan_state_curve_tick(FanState *fs)
 			 * rather than guess a speed from nothing. */
 			if (temp_mc <= 0)
 				continue;
-			pct = (int)fan_curve_eval_stable(&fe->curve,
-					temp_mc / 1000, &fe->curve_step);
+			pct = fan_cap_pct((int)fan_curve_eval_stable(&fe->curve,
+					temp_mc / 1000, &fe->curve_step));
 			if (fe->curve_applied_pct >= 0 &&
 					abs(pct - fe->curve_applied_pct) < 2)
 				continue;
@@ -647,6 +668,25 @@ fan_state_curve_tick(FanState *fs)
 				fe->curve_applied_pct = write_pct;
 		}
 	}
+}
+
+/* Games lift the quiet ceiling. */
+void
+fan_state_set_game(FanState *fs, int on)
+{
+	FanEntry *fe;
+
+	if (fan_game == on)
+		return;
+	fan_game = on;
+	for (int i = 0; (fe = fan_flat_in(fs, i)); i++) {
+		if (fe->mode != FAN_MODE_CURVE)
+			continue;
+		if (fe->ctl == FAN_CTL_MSI_EC)
+			fan_ec_write_capped(fe);
+		fe->curve_applied_pct = -1;
+	}
+	fan_state_curve_tick(fs);
 }
 
 /* A pump reports as a fan and must never be slowed by a temp curve. */

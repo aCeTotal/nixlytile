@@ -1,4 +1,4 @@
-/* Battery saving, quiet on wall power. */
+/* Battery saving, full speed on wall power. */
 #include "nixlytile.h"
 
 /* Battery clock ceiling, as a fraction of each policy's min..max range.
@@ -73,8 +73,9 @@ powersave_battery_event(void)
 
 	if (!battwatch_get(&s))
 		return;
-	on_bat = s.available &&
-		strncmp(s.status, "Discharging", 11) == 0;
+	on_bat = s.available && (s.source == POWER_UNKNOWN ?
+		strncmp(s.status, "Discharging", 11) == 0 :
+		s.source == POWER_BATTERY);
 	if (on_bat && ps_engaged != 1) {
 		ps_engaged = 1;
 		ps_engage();

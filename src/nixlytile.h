@@ -520,6 +520,8 @@ typedef struct {
 #define PROFILE_BACKEND_ACPI   1  /* /sys/firmware/acpi/platform_profile */
 #define PROFILE_BACKEND_MSI_EC 2  /* /sys/devices/platform/msi-ec/shift_mode */
 
+enum power_source { POWER_UNKNOWN, POWER_BATTERY, POWER_EXTERNAL };
+
 /* battwatch.c — snapshot of all power_supply + power-profile state,
  * sampled on a worker thread (EC-backed reads block ~100ms and must
  * never run on the compositor thread). */
@@ -527,6 +529,7 @@ typedef struct {
 	int available;              /* system battery found */
 	char device_dir[128];       /* /sys/class/power_supply/BAT1 */
 	char status[32];            /* Charging / Discharging / Full / ... */
+	enum power_source source;
 	double percent;
 	double voltage_v;
 	double power_w;
@@ -3071,6 +3074,7 @@ void fan_state_set_auto(FanState *fs, int flat);
 void fan_state_set_curve(FanState *fs, int flat, const FanCurve *c);
 void fan_state_set_boost(FanState *fs, int on);
 void fan_state_curve_tick(FanState *fs);
+void fan_state_set_game(FanState *fs, int on);
 void fan_state_apply_saved(FanState *fs);
 int fan_entry_section(const FanDevice *dev, const FanEntry *fe); /* 0 CPU 1 GPU 2 other */
 const char *fan_gpu_name(void); /* dGPU marketing name, NULL unknown */
@@ -3116,6 +3120,7 @@ void fanwatch_set_frac(int flat, double frac);
 void fanwatch_set_auto(int flat);
 void fanwatch_set_curve(int flat, const FanCurve *c);
 void fanwatch_set_boost(int on);
+void fanwatch_set_game(int on);
 /* fan_boost_activate/deactivate are file-local (static) in gamemode.c */
 
 /* ── disk module ─────────────────────────────────────────────────────
@@ -3482,7 +3487,7 @@ void output_lock_max_refresh(void);
 int power_profile_get(char *buf, size_t len);
 int power_profile_set(const char *value);
 void power_profile_low(void);
-void power_profile_quiet(void);
+void power_profile_high(void);
 
 /* powersave.c — max battery saving while discharging (laptops) */
 void powersave_init(void);
