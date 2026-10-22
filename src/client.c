@@ -406,6 +406,10 @@ commitnotify(struct wl_listener *listener, void *data)
 	if (c->isfullscreen)
 		track_client_frame(c);
 
+	/* Zoom box is visual, not a size. */
+	if (c->fsx_active)
+		return;
+
 	/* Refresh the surface clip when the xdg window-geometry OFFSET
 	 * changes without a size change.  Chrome drops its CSD shadow
 	 * margin when it acks fullscreen: geometry goes (10,11)→(0,0) but
@@ -2186,10 +2190,20 @@ setfloating(Client *c, int floating)
 	printstatus();
 }
 
+/* Games keep their launch cover. */
+static int
+fs_zoomable(Client *c)
+{
+	return c->mon && client_surface(c)->mapped && c->scene->node.enabled
+		&& !client_is_unmanaged(c) && !looks_like_game(c)
+		&& !is_game_content(c);
+}
+
 void
 setfullscreen(Client *c, int fullscreen)
 {
 	int was = c->isfullscreen;
+	struct wlr_box fsx_from = c->geom;
 	Workspace *prev_fs_ws = c->fs_ws;
 	int told = fullscreen ? FS_ENTERING : FS_LEAVING;
 
@@ -2202,6 +2216,7 @@ setfullscreen(Client *c, int fullscreen)
 	Workspace *fs_target = (fullscreen && c->mon) ? client_target_ws(c) : NULL;
 	int hidden_fs = fullscreen && c->mon && fs_target
 			&& fs_target != c->mon->active_ws;
+	int fs_anim = fullscreen != was && !hidden_fs && fs_zoomable(c);
 
 	/* Et spill skal under svart FØR det flipper til fullskjerm: hvis
 	 * cover-animasjonen ikke har dekket skjermen ennå, startes den her
@@ -2333,6 +2348,8 @@ setfullscreen(Client *c, int fullscreen)
 		c->geom_fh = (double)c->geom.height;
 		c->geom_vx = c->geom_vy = c->geom_vw = c->geom_vh = 0.0;
 		client_unfreeze(c);
+		if (fs_anim)
+			client_start_fs_transition(c, fsx_from);
 		/* Leaving fullscreen animates from here. */
 		c->float_want_set = 0;
 		/* Retro emulators in their menus: native presentation only. No
@@ -2418,6 +2435,10 @@ setfullscreen(Client *c, int fullscreen)
 		if (!hidden_fs && !_is_retro && !_is_game)
 			schedule_video_check(200);
 	} else {
+		if (fs_anim && !c->isfloating && c->column) {
+			client_start_fs_transition(c, fsx_from);
+			wlr_scene_node_reparent(&c->scene->node, layers[LyrFS]);
+		}
 		/* restore previous size only for floating windows since their
 		 * positions are set by the user. Tiled windows will be positioned
 		 * by the layout system in arrange(). */

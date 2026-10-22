@@ -2514,21 +2514,6 @@ update_game_mode(void)
 			osd_purge_mon(m);
 		}
 
-		/*
-		 * Boost compositor thread to real-time scheduling for lower
-		 * input-to-display latency. Priority 2 is low RT (won't starve
-		 * audio at priority ~50), but enough to wake promptly for vsync.
-		 */
-		{
-			struct sched_param sp = { .sched_priority = 2 };
-			if (sched_setscheduler(0, SCHED_RR, &sp) == 0) {
-				compositor_rt_applied = 1;
-				wlr_log(WLR_INFO, "Compositor RT priority set (SCHED_RR, prio=2)");
-			} else {
-				wlr_log(WLR_INFO, "Compositor RT priority failed: %s", strerror(errno));
-			}
-		}
-
 		/* Pin the compositor thread to physical core 0 (all its SMT
 		 * threads).  Runs HERE (main thread) because
 		 * sched_setaffinity(0, ...) affects the calling thread — on
@@ -2607,14 +2592,6 @@ update_game_mode(void)
 
 			if (config_rewatch_timer)
 				wl_event_source_timer_update(config_rewatch_timer, 2000);
-
-			/* Restore compositor to normal scheduling (needs main thread: pid=0) */
-			if (compositor_rt_applied) {
-				struct sched_param sp = { .sched_priority = 0 };
-				sched_setscheduler(0, SCHED_OTHER, &sp);
-				compositor_rt_applied = 0;
-				wlr_log(WLR_INFO, "Compositor scheduling restored to SCHED_OTHER");
-			}
 
 			/* Un-pin compositor (main thread, like the pin) */
 			if (compositor_pin_applied) {

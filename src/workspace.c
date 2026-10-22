@@ -1799,6 +1799,7 @@ monitor_apply_positions(Monitor *m)
 	wl_list_for_each(c, &clients, link) {
 		if (c->mon == m && c->isfullscreen
 				&& c->fs_ws == m->active_ws
+				&& !c->fsx_active
 				&& client_surface(c) && client_surface(c)->mapped) {
 			active_fsc = c;
 			break;
@@ -1937,7 +1938,7 @@ monitor_apply_positions(Monitor *m)
 				c->geom.x, c->geom.y + y_base);
 
 		/* Fullscreen slides over the bar. */
-		if (c->isfullscreen && c->scene_surface) {
+		if (c->isfullscreen && c->scene_surface && !c->fsx_active) {
 			struct wlr_box wg;
 			client_get_clip(c, &wg);
 			wlr_scene_subsurface_tree_set_clip(

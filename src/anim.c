@@ -135,6 +135,110 @@ static const SpringParams SPRING_COLUMN     = { 1.0, 1.0, 1800.0 };
  * the fade visible but puts it under human reaction time. */
 static const SpringParams SPRING_OPEN       = { 1.0, 0.9, 4900.0 }; /* slight overshoot for life */
 static const SpringParams SPRING_CLOSE      = { 1.0, 1.0,  900.0 };
+/* Settles in ~200 ms, no overshoot. */
+static const SpringParams SPRING_FULLSCREEN = { 1.0, 1.0, 1000.0 };
+/* Per-mille: settle thresholds are pixel-sized. */
+#define FSX_SPAN 1000.0
+
+/* Largest aw:ah box centered in `in`. */
+static struct wlr_box
+fit_box(int aw, int ah, struct wlr_box in)
+{
+	struct wlr_box b;
+	double s;
+
+	if (aw <= 0 || ah <= 0)
+		return in;
+	s = fmin((double)in.width / aw, (double)in.height / ah);
+	b.width = (int)lround(aw * s);
+	b.height = (int)lround(ah * s);
+	b.x = in.x + (in.width - b.width) / 2;
+	b.y = in.y + (in.height - b.height) / 2;
+	return b;
+}
+
+static int
+lerp_px(int a, int b, double t)
+{
+	return a + (int)lround((double)(b - a) * t);
+}
+
+void
+client_start_fs_transition(Client *c, struct wlr_box from)
+{
+	if (wlr_box_empty(&from))
+		return;
+	c->fsx_from = from;
+	c->fsx_p = 0.0;
+	c->fsx_v = 0.0;
+	c->fsx_active = 1;
+}
+
+/* Content zooms undistorted between boxes. */
+void
+client_fs_transition_apply(Client *c, struct wlr_box to)
+{
+	struct wlr_box start, box, clip;
+	double t = c->fsx_p / FSX_SPAN;
+	int cw, ch, x1, y1;
+
+	client_get_committed_size(c, &cw, &ch);
+	if (cw <= 0 || ch <= 0)
+		return;
+	start = fit_box(to.width, to.height, c->fsx_from);
+	box.x = lerp_px(start.x, to.x, t);
+	box.y = lerp_px(start.y, to.y, t);
+	x1 = lerp_px(start.x + start.width, to.x + to.width, t);
+	y1 = lerp_px(start.y + start.height, to.y + to.height, t);
+	box.width = x1 - box.x;
+	box.height = y1 - box.y;
+	client_apply_scene_geom(c, fit_box(cw, ch, box));
+	client_get_clip(c, &clip);
+	clip.width = cw;
+	clip.height = ch;
+	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+}
+
+static void
+fs_transition_end(Client *c)
+{
+	c->fsx_active = 0;
+	/* Next placement rebuilds clip and borders. */
+	c->last_size_w = c->last_size_h = 0;
+	if (c->isfullscreen) {
+		client_apply_scene_geom(c, client_fullscreen_geom(c));
+	} else {
+		wlr_scene_node_reparent(&c->scene->node,
+				layers[c->isfloating ? LyrFloat : LyrTile]);
+	}
+	arrange(c->mon);
+}
+
+static int
+fs_transitions_tick(Monitor *m, double dt)
+{
+	Client *c, *tmp;
+	int active = 0;
+
+	wl_list_for_each_safe(c, tmp, &clients, link) {
+		if (c->mon != m || !c->fsx_active)
+			continue;
+		if (!client_surface(c) || !client_surface(c)->mapped) {
+			c->fsx_active = 0;
+			continue;
+		}
+		if (!spring_tick(&c->fsx_p, &c->fsx_v, FSX_SPAN,
+				SPRING_FULLSCREEN, dt)) {
+			fs_transition_end(c);
+			continue;
+		}
+		active = 1;
+		/* Tiles leaving fullscreen are placed by txn. */
+		if (c->isfullscreen)
+			client_fs_transition_apply(c, client_fullscreen_geom(c));
+	}
+	return active;
+}
 
 int
 anim_tick(double *current, double target, double rate, double dt)
@@ -288,7 +392,7 @@ animcommitnotify(struct wl_listener *listener, void *data)
 			dynrender_committed(c);
 		}
 	}
-	if (!c->scene_surface || !c->mon)
+	if (!c->scene_surface || !c->mon || c->fsx_active)
 		return;
 #ifdef XWAYLAND
 	int iw, ih, nw, nh;
@@ -643,6 +747,11 @@ monitor_anim_tick(Monitor *m, double dt)
 						- col->x;
 			}
 		}
+	}
+
+	if (fs_transitions_tick(m, dt)) {
+		active = 1;
+		size_anim = 1;
 	}
 
 	/* ── Step 2: recompute target_geom only if a parameter spring

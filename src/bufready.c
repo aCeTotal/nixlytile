@@ -127,3 +127,10 @@ bufready_init(void)
 	new_surface.notify = surface_new;
 	wl_signal_add(&compositor->events.new_surface, &new_surface);
 }
+
+/* wlroots asserts on a live listener. */
+void
+bufready_finish(void)
+{
+	wl_list_remove(&new_surface.link);
+}

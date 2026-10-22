@@ -75,7 +75,7 @@ arrange(Monitor *m)
 			 * nodes are shared across all monitors and must not be
 			 * disabled here, or every other monitor goes black.
 			 */
-			if (fsc && c != fsc) {
+			if (fsc && c != fsc && !fsc->fsx_active) {
 				/* Keep descendants (dialogs, popups) and same-app
 				 * helpers (game splashes, launchers) visible on top;
 				 * hide everything else. */
@@ -92,7 +92,7 @@ arrange(Monitor *m)
 	 * doesn't fill the entire screen (letterboxed games, etc.).
 	 */
 	wlr_scene_node_set_enabled(&m->fullscreen_bg->node,
-		fsc && !covers_full_screen);
+		fsc && !covers_full_screen && !fsc->fsx_active);
 
 	if (fsc) {
 		/*

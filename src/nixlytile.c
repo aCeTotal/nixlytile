@@ -765,6 +765,7 @@ cleanup(void)
 	/* Shut down game mode background worker (unfreezes processes if needed) */
 	gm_bg_cleanup();
 	wsfreeze_thaw_all();
+	gpuboost_finish();
 	window_ipc_finish();
 	cleanuplisteners();
 #ifdef XWAYLAND
@@ -871,6 +872,7 @@ cleanuplisteners(void)
 	 * asserter på ikke-tom listener_list → SIGABRT ved shutdown
 	 * (observert i coredumps). */
 	wl_list_remove(&new_text_input.link);
+	bufready_finish();
 #ifdef XWAYLAND
 	/* Only added when wlr_xwayland_create() succeeded — the links are
 	 * zeroed otherwise and wl_list_remove would crash the shutdown. */
@@ -1299,13 +1301,7 @@ run(const char *startup_cmd)
 	gaming_conf_setup();
 	vrslink_setup();
 
-	/* Always-on responsiveness: elevate the compositor thread so it keeps
-	 * getting CPU even when the machine is saturated (100% load) — input
-	 * and the spring-driven animations stay smooth under any load.  nice
-	 * is orthogonal to the SCHED_RR boost game mode applies: it persists
-	 * whenever the thread runs SCHED_OTHER, giving the responsiveness
-	 * without the lockup risk of always-on hard real-time.  ioprio RT
-	 * keeps compositor I/O (config/sysfs reads) prompt under load too. */
+	/* RR preempts CPU hogs; nice is fallback. */
 	{
 #ifndef IOPRIO_CLASS_RT
 #define IOPRIO_CLASS_RT			1
@@ -1319,6 +1315,7 @@ run(const char *startup_cmd)
 				strerror(errno));
 		syscall(__NR_ioprio_set, IOPRIO_WHO_PROCESS, 0,
 			IOPRIO_PRIO_VALUE(IOPRIO_CLASS_RT, 4));
+		compositor_rt_on();
 	}
 
 	/* Run the Wayland event loop. This does not return until you exit the
@@ -2851,6 +2848,7 @@ setup(void)
 	if (!(drw = gpu_renderer_create(backend)))
 		die("couldn't create renderer");
 	wl_signal_add(&drw->events.lost, &gpu_reset);
+	gpuboost_init();
 
 	/* Log renderer and GPU state for diagnostics */
 	{

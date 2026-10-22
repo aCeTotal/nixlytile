@@ -53,7 +53,7 @@ converge_candidate(Client *c, Monitor *m)
 {
 	struct wlr_surface *s;
 
-	if (c->mon != m || !c->column || c->anim_active || m->txn_active ||
+	if (c->mon != m || !c->column || c->anim_active || c->fsx_active || m->txn_active ||
 			txn_owes(c))
 		return 0;
 	if (c->isfloating || c->isfullscreen)

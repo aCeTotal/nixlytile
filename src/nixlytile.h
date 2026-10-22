@@ -1273,6 +1273,10 @@ typedef struct {
 	double open_progress;
 	double open_progress_vel;
 	int open_anim_active;
+	/* Fullscreen zoom in or out. */
+	int fsx_active;
+	struct wlr_box fsx_from;
+	double fsx_p, fsx_v;
 	/* Adoptert av varselbanen (notify.c): står i høyre marg og skal
 	 * ikke sentreres av mapnotify/configurex11. Nullstilles når den har
 	 * glidd ut — vinduet lever videre, vi eier det bare ikke lenger. */
@@ -2694,9 +2698,21 @@ void instruments_update(void);
 int instruments_should_show(void);
 int instruments_owns(Monitor *m);
 
+/* rtsched.c */
+void compositor_rt_on(void);
+void compositor_rt_suspend(void);
+void compositor_rt_resume(void);
+
+/* gpuboost.c */
+void gpuboost_init(void);
+void gpuboost_kick(uint64_t now_ns);
+void gpuboost_finish(void);
+
 int monitor_anim_tick(Monitor *m, double dt);
 void client_set_target_geom(Client *c, struct wlr_box g);
 void client_scale_to_box(Client *c, int box_w, int box_h);
+void client_start_fs_transition(Client *c, struct wlr_box from);
+void client_fs_transition_apply(Client *c, struct wlr_box to);
 void client_freeze(Client *c);
 void client_unfreeze(Client *c);
 void client_start_open_anim(Client *c);
@@ -3578,6 +3594,7 @@ void wsfreeze_thaw_all(void);
 
 /* bufready.c */
 void bufready_init(void);
+void bufready_finish(void);
 
 /* appreap.c — end windowless apps */
 void appreap_track(Client *c);

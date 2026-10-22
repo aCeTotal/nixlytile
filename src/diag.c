@@ -1,6 +1,7 @@
 /*
  * diag.c — always-on diagnostic logger. See diag.h.
  */
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,8 +10,11 @@
 #include "diag.h"
 
 #define DIAG_PATH "/tmp/nixlytile-diag.log"
+/* /tmp is RAM: two chunks max. */
+#define DIAG_ROTATE_BYTES (8L << 20)
 
 static FILE *diag_fp;
+static char diag_path[PATH_MAX];
 static time_t diag_flush_sec;
 
 static void
@@ -18,6 +22,18 @@ diag_flush(void)
 {
 	if (diag_fp)
 		fflush(diag_fp);
+}
+
+static void
+diag_rotate(void)
+{
+	char old[PATH_MAX + 2];
+
+	snprintf(old, sizeof(old), "%s.1", diag_path);
+	rename(diag_path, old);
+	diag_fp = freopen(diag_path, "we", diag_fp);
+	if (diag_fp)
+		setvbuf(diag_fp, NULL, _IOFBF, 64 * 1024);
 }
 
 void
@@ -29,6 +45,7 @@ diag_init(void)
 	const char *path = getenv("NIXLYTILE_DIAG_PATH");
 	if (!path)
 		path = DIAG_PATH;
+	snprintf(diag_path, sizeof(diag_path), "%s", path);
 	diag_fp = fopen(path, "we");
 	if (!diag_fp)
 		return;
@@ -67,5 +84,7 @@ diag_logf(const char *cat, const char *fmt, ...)
 	if (ts.tv_sec != diag_flush_sec) {
 		diag_flush_sec = ts.tv_sec;
 		fflush(diag_fp);
+		if (ftell(diag_fp) > DIAG_ROTATE_BYTES)
+			diag_rotate();
 	}
 }

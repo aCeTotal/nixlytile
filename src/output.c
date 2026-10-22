@@ -2698,9 +2698,7 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 					wlr_output_state_finish(&fb);
 
 					if (compositor_rt_applied) {
-						struct sched_param sp = { .sched_priority = 0 };
-						sched_setscheduler(0, SCHED_OTHER, &sp);
-						compositor_rt_applied = 0;
+						compositor_rt_suspend();
 						wlr_log(WLR_ERROR,
 							"RT scheduling dropped after %u commit failures",
 							m->commit_failures);
@@ -2733,6 +2731,7 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 			}
 		} else {
 			m->commit_failures = 0;
+			compositor_rt_resume();
 			m->transient_reset_done = 0;
 			if (m->scanout_blacklist) {
 				/* Good commit, but it came from GPU composition.
@@ -2754,6 +2753,7 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 		}
 	} else {
 		m->commit_failures = 0;
+		compositor_rt_resume();
 		m->transient_reset_done = 0;
 		if (m->scanout_blacklist) {
 			if (--m->scanout_cooldown <= 0) {
@@ -3082,6 +3082,8 @@ rendermon_prologue(Monitor *m, uint64_t frame_start_ns)
 		 * internally to keep target_geom in lock-step with the
 		 * just-ticked scroll/col springs.  Here we only need to
 		 * schedule the next vblank when something is still moving. */
+		if (still)
+			gpuboost_kick(frame_start_ns);
 		if (still && m->wlr_output)
 			wlr_output_schedule_frame(m->wlr_output);
 	}

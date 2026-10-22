@@ -42,6 +42,10 @@ show(Client *c)
 
 	g.x += c->tile_ox;
 	g.y += c->tile_oy;
+	if (c->fsx_active) {
+		client_fs_transition_apply(c, g);
+		return;
+	}
 	client_place(c, g);
 	if (!c->in_txn && !txn_owes(c) && !c->mon->anim_was_active)
 		client_flush_x11_pos(c);
