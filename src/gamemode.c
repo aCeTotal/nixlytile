@@ -526,6 +526,10 @@ lower_competing_processes(pid_t game_pid)
 		if (game_pid > 1 && is_child_of(pid, game_pid))
 			continue;
 
+		/* Keep pre-idle tasks idle. */
+		if (sched_getscheduler(pid) == SCHED_IDLE)
+			continue;
+
 		struct sched_param sp = {0};
 		if (sched_setscheduler(pid, SCHED_IDLE, &sp) == 0) {
 			if (lowered_pid_count < MAX_LOWERED_PIDS)
@@ -2094,6 +2098,12 @@ menu_maxhz_client(Client *c)
 	return is_retro_emulator_client(c);
 }
 
+static int
+same_resolution(struct wlr_output_mode *a, struct wlr_output_mode *b)
+{
+	return a && b && a->width == b->width && a->height == b->height;
+}
+
 static void
 menuhz_commit(Monitor *m, struct wlr_output_mode *mode)
 {
@@ -2154,14 +2164,12 @@ menu_maxhz_update(void)
 		want = f->mon ? f->mon : selmon;
 
 	if (want != menuhz_mon) {
-		/* Video/VRR may have taken the output between the 1 Hz
-		 * re-checks (nixlymedia starts playback → IPC applies the
-		 * 23.976 mode).  Committing the saved max-refresh mode back
-		 * now would clobber it while video_mode_active stays set —
-		 * just drop the hold, the video paths own restoration. */
+		/* Others own video and resolution. */
 		if (menuhz_mon && menuhz_saved && !game_mode_active
 				&& !menuhz_mon->video_mode_active
-				&& !menuhz_mon->vrr_active)
+				&& !menuhz_mon->vrr_active
+				&& same_resolution(menuhz_saved,
+					menuhz_mon->wlr_output->current_mode))
 			menuhz_commit(menuhz_mon, menuhz_saved);
 		menuhz_mon = want;
 		menuhz_saved = NULL;

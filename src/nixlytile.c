@@ -1449,6 +1449,53 @@ run(const char *startup_cmd)
  * Score a video mode candidate. Higher score = better.
  */
 
+/* Best integer-multiple mode at res. */
+static VideoModeCandidate
+best_existing_video_mode(Monitor *m, float video_hz,
+		const struct wlr_output_mode *res)
+{
+	int width = res->width, height = res->height;
+	VideoModeCandidate best = { .score = -1.0f, .judder_ms = 999.0f };
+	VideoModeCandidate candidate;
+	struct wlr_output_mode *mode;
+
+	wl_list_for_each(mode, &m->wlr_output->modes, link) {
+		if (mode->width != width || mode->height != height)
+			continue;
+
+		float mode_hz = mode->refresh / 1000.0f;
+		float ratio = mode_hz / video_hz;
+		int multiple = (int)(ratio + 0.5f);
+
+		if (multiple < 1 || multiple > 8)
+			continue;
+
+		float expected_hz = video_hz * multiple;
+		float diff = fabsf(mode_hz - expected_hz);
+
+		/* Only consider if within 0.5% tolerance */
+		if (diff > expected_hz * 0.005f)
+			continue;
+
+		candidate.method = 1;
+		candidate.mode = mode;
+		candidate.multiplier = multiple;
+		candidate.target_hz = video_hz;
+		candidate.actual_hz = mode_hz;
+		candidate.judder_ms = calculate_judder_ms(video_hz, mode_hz);
+		candidate.score = score_video_mode(1, video_hz, mode_hz, multiple);
+
+		wlr_log(WLR_DEBUG, "  Mode %dx%d %d.%03dHz: %dx mult, score=%.1f, judder=%.2fms",
+				width, height, mode->refresh / 1000, mode->refresh % 1000,
+				multiple, candidate.score, candidate.judder_ms);
+
+		if (candidate.score > best.score) {
+			best = candidate;
+		}
+	}
+	return best;
+}
+
 /*
  * Find the absolute best video mode for the given framerate.
  * Evaluates ALL options and returns the one with highest quality score.
@@ -1464,7 +1511,7 @@ find_best_video_mode(Monitor *m, float video_hz)
 {
 	VideoModeCandidate best = {0};
 	VideoModeCandidate candidate;
-	struct wlr_output_mode *mode;
+	struct wlr_output_mode *mode, *native;
 	int width, height;
 
 	best.score = -1.0f;
@@ -1478,6 +1525,14 @@ find_best_video_mode(Monitor *m, float video_hz)
 	height = m->wlr_output->current_mode->height;
 
 	wlr_log(WLR_DEBUG, "Evaluating video modes for %.3f Hz on %s:", video_hz, m->wlr_output->name);
+
+	/* Console UI: native if exact. */
+	native = m->console_mode_active ? bestmode(m->wlr_output) : NULL;
+	if (native) {
+		candidate = best_existing_video_mode(m, video_hz, native);
+		if (candidate.judder_ms < VIDEO_PERFECT_JUDDER_MS)
+			return candidate;
+	}
 
 	/* Option 1: VRR (best quality if available) — but only when the panel
 	 * can actually hold the source rate. VRR ranges bottom out around
@@ -1505,39 +1560,10 @@ find_best_video_mode(Monitor *m, float video_hz)
 	}
 
 	/* Option 2: Scan existing modes for integer multiples */
-	wl_list_for_each(mode, &m->wlr_output->modes, link) {
-		if (mode->width != width || mode->height != height)
-			continue;
-
-		float mode_hz = mode->refresh / 1000.0f;
-		float ratio = mode_hz / video_hz;
-		int multiple = (int)(ratio + 0.5f);
-
-		if (multiple < 1 || multiple > 8)
-			continue;
-
-		float expected_hz = video_hz * multiple;
-		float diff = fabsf(mode_hz - expected_hz);
-
-		/* Only consider if within 0.5% tolerance */
-		if (diff > expected_hz * 0.005f)
-			continue;
-
-		candidate.method = 1;
-		candidate.mode = mode;
-		candidate.multiplier = multiple;
-		candidate.target_hz = video_hz;
-		candidate.actual_hz = mode_hz;
-		candidate.judder_ms = calculate_judder_ms(video_hz, mode_hz);
-		candidate.score = score_video_mode(1, video_hz, mode_hz, multiple);
-
-		wlr_log(WLR_DEBUG, "  Mode %d.%03dHz: %dx mult, score=%.1f, judder=%.2fms",
-				mode->refresh / 1000, mode->refresh % 1000,
-				multiple, candidate.score, candidate.judder_ms);
-
-		if (candidate.score > best.score) {
-			best = candidate;
-		}
+	candidate = best_existing_video_mode(m, video_hz,
+			m->wlr_output->current_mode);
+	if (candidate.score > best.score) {
+		best = candidate;
 	}
 
 	/* Option 3: Custom modes at exact multiples (scored theoretically;

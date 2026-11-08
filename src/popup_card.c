@@ -248,6 +248,7 @@ typedef enum {
 	CROW_ICONTEXT,
 	CROW_BIGBTN,
 	CROW_QR,
+	CROW_IMAGE,
 } CardRowType;
 
 typedef struct {
@@ -282,6 +283,7 @@ typedef struct {
 	int ncv;
 	const uint8_t *qr;   /* CROW_QR module matrix (caller-owned) */
 	int qr_size;
+	cairo_surface_t *img;   /* CROW_IMAGE, caller-owned */
 	/* computed in measure */
 	int y, h;
 } CardRow;
@@ -745,6 +747,15 @@ card_qr(Card *c, const uint8_t *modules, int size)
 }
 
 void
+card_image(Card *c, cairo_surface_t *img)
+{
+	CardRow *r = row_new(c, CROW_IMAGE);
+
+	if (r)
+		r->img = img;
+}
+
+void
 card_curve(Card *c, const uint8_t *temps, const uint8_t *pcts, int n,
 		int sel, const float accent[4], int hit_id)
 {
@@ -950,6 +961,10 @@ card_measure(Card *c, int *out_w, int *out_h)
 		}
 		case CROW_GAP:
 			r->h = r->gap;
+			break;
+		case CROW_IMAGE:
+			rw = cairo_image_surface_get_width(r->img);
+			r->h = cairo_image_surface_get_height(r->img);
 			break;
 		case CROW_CAL: {
 			int cw = cal_cell_w();
@@ -1612,6 +1627,18 @@ card_finish(Card *c, CardResult *out)
 								y + 16 + my * scale,
 								scale, scale);
 			cairo_fill(cr);
+			break;
+		}
+		case CROW_IMAGE: {
+			int iw = cairo_image_surface_get_width(r->img);
+			int ix = CARD_PAD + (inner_w - iw) / 2;
+
+			cairo_save(cr);
+			rounded(cr, ix, y, iw, r->h, 8);
+			cairo_clip(cr);
+			cairo_set_source_surface(cr, r->img, ix, y);
+			cairo_paint(cr);
+			cairo_restore(cr);
 			break;
 		}
 		case CROW_ICONTEXT: {

@@ -1664,6 +1664,9 @@ unset_fullscreen:
 			if (w->fs_ws && w->mon && w->fs_ws != w->mon->active_ws)
 				continue;
 			const char *old_appid = client_get_appid(w);
+			/* Fullscreen newcomer stacks over hosts. */
+			if (c->isfullscreen && client_is_forced_fullscreen_appid(old_appid))
+				continue;
 			if (new_appid && old_appid && strcmp(new_appid, old_appid) == 0) {
 				wlr_log(WLR_INFO,
 					"GAME_TRACE: unset_fullscreen skip same-app '%s'",
@@ -2313,7 +2316,13 @@ setfullscreen(Client *c, int fullscreen)
 	}
 
 	if (fullscreen) {
-		struct wlr_box fsgeom = client_fullscreen_geom(c);
+		struct wlr_box fsgeom;
+
+		c->prev = c->geom;
+		/* Console mode before first configure. */
+		if (!hidden_fs && client_wants_console_mode(c))
+			apply_console_mode(c->mon, c);
+		fsgeom = client_fullscreen_geom(c);
 		/* Cover the screen HERE, on the transition into fullscreen:
 		 * the game has not been configured to the output rect yet, so
 		 * nothing of its fullscreen frame has reached the screen and
@@ -2330,7 +2339,6 @@ setfullscreen(Client *c, int fullscreen)
 		 * output — point it at the monitor the game fullscreens on. */
 		if (client_is_x11(c) && !hidden_fs)
 			xwayland_set_primary(c->mon);
-		c->prev = c->geom;
 		/* Every fullscreen client takes the full output rect (m->m,
 		 * via fsgeom): no border, covers the statusbar, and gives
 		 * wlroots the geometry it needs for direct scanout. */
@@ -2424,10 +2432,6 @@ setfullscreen(Client *c, int fullscreen)
 				set_video_refresh_rate(c->mon, c);
 			}
 		}
-		/* Steam Big Picture / RetroArch: drop to 1080p best-refresh
-		 * if the output cannot do 4K@60+. */
-		if (!hidden_fs && client_wants_console_mode(c))
-			apply_console_mode(c->mon, c);
 		/* Games never enter video detection: a game with a stable
 		 * frame rate (menus at 60, capped titles, RetroArch cores)
 		 * would get video-classified, which suppresses tearing and
@@ -2473,10 +2477,10 @@ setfullscreen(Client *c, int fullscreen)
 				}
 			}
 		}
-		/* Restore max refresh rate when exiting fullscreen */
+		/* Owner restores console first. */
+		if (client_wants_console_mode(c))
+			restore_console_mode(c->mon);
 		restore_max_refresh_rate(c->mon);
-		/* Restore native mode if console-mode was applied */
-		restore_console_mode(c->mon);
 		/* Restore native mode if game-resolution scanout was applied */
 		gamescan_restore(c->mon);
 		/* Drop the auto FPS lock and restore refresh if it switched it */
@@ -2583,7 +2587,6 @@ htpc_ws_refresh_fx(Monitor *m)
 	}
 	set_adaptive_sync(m, 0);
 	disable_game_vrr(m);
-	restore_console_mode(m);
 	gamescan_restore(m);
 	autolock_reset(m);
 
@@ -2594,6 +2597,9 @@ htpc_ws_refresh_fx(Monitor *m)
 			break;
 		}
 	}
+	/* Console to console: no modeset. */
+	if (!fsc || !client_wants_console_mode(fsc))
+		restore_console_mode(m);
 	if (fsc)
 		setfullscreen(fsc, 1);
 	schedule_game_mode_update();
@@ -2838,8 +2844,9 @@ unmapnotify(struct wl_listener *listener, void *data)
 			&& !(c->fs_ws && c->mon && c->fs_ws != c->mon->active_ws)) {
 		Monitor *m = c->mon ? c->mon : selmon;
 		set_adaptive_sync(m, 0);
+		if (client_wants_console_mode(c))
+			restore_console_mode(m);
 		restore_max_refresh_rate(m);
-		restore_console_mode(m);
 		gamescan_restore(m);
 		autolock_reset(m);
 	}

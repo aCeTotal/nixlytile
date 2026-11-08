@@ -78,6 +78,7 @@ struct wlr_drm_crtc {
 	bool own_mode_id;
 	uint32_t mode_id;
 	uint32_t gamma_lut;
+	bool cursor_plane_on;
 
 	// Legacy only
 	int legacy_gamma_size;
@@ -170,6 +171,8 @@ struct wlr_drm_connector_state {
 	bool vrr_enabled;
 	uint32_t colorspace;
 	uint32_t hdr_output_metadata;
+	uint32_t content_type;
+	bool content_type_deferred;
 };
 
 /**
@@ -227,6 +230,9 @@ struct wlr_drm_connector {
 	// Atomic modesetting only
 	uint32_t colorspace;
 	uint32_t hdr_output_metadata;
+	uint32_t content_type;
+	// Content type needs modeset
+	bool content_type_needs_modeset;
 
 	int32_t refresh;
 };

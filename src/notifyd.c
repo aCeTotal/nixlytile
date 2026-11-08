@@ -34,6 +34,8 @@ typedef struct {
 	char key[ND_MAX_ACTIONS][ND_ACTION_LEN];
 	char label[ND_MAX_ACTIONS][ND_ACTION_LEN];
 	int n;
+	/* Card click, never a button. */
+	int has_default;
 } NdActions;
 
 /* Same critically-damped feel as osd.c / notify.c. */
@@ -62,6 +64,8 @@ typedef struct NdToast {
 	double fill_f, fill_vel, fill_target;
 	CardHit hits[ND_MAX_ACTIONS];
 	int nhits;
+	cairo_surface_t *img;
+	uint32_t seq;
 } NdToast;
 
 static struct wl_list nd_toasts = { &nd_toasts, &nd_toasts };
@@ -94,6 +98,8 @@ nd_toast_destroy(NdToast *t)
 		wl_event_source_remove(t->timer);
 	if (t->tree)
 		wlr_scene_node_destroy(&t->tree->node);
+	if (t->img)
+		cairo_surface_destroy(t->img);
 	wl_list_remove(&t->link);
 	free(t);
 }
@@ -303,6 +309,10 @@ nd_read_actions(sd_bus_message *msg, NdActions *a)
 		return r;
 	while (sd_bus_message_read(msg, "s", &key) > 0 &&
 			sd_bus_message_read(msg, "s", &label) > 0) {
+		if (!strcmp(key, "default")) {
+			a->has_default = 1;
+			continue;
+		}
 		if (a->n == ND_MAX_ACTIONS)
 			continue;
 		snprintf(a->key[a->n], ND_ACTION_LEN, "%s", key);
@@ -311,6 +321,22 @@ nd_read_actions(sd_bus_message *msg, NdActions *a)
 	}
 	return sd_bus_message_exit_container(msg);
 }
+
+typedef struct {
+	int progress;
+	const char *image;
+} NdHints;
+
+/* Notify args across decode. */
+typedef struct {
+	char app[48];
+	char summary[256];
+	char body[1024];
+	uint32_t id, seq;
+	NdActions acts;
+	int progress;
+	int32_t expire;
+} NdMsg;
 
 static int32_t
 nd_read_value(sd_bus_message *msg)
@@ -326,24 +352,46 @@ nd_read_value(sd_bus_message *msg)
 	return v;
 }
 
-/* Spec "value" hint, or -1. */
-static int
-nd_read_progress(sd_bus_message *msg)
+static const char *
+nd_read_path(sd_bus_message *msg)
 {
+	const char *s = NULL;
+
+	if (sd_bus_message_enter_container(msg, 'v', "s") <= 0) {
+		sd_bus_message_skip(msg, "v");
+		return NULL;
+	}
+	sd_bus_message_read(msg, "s", &s);
+	sd_bus_message_exit_container(msg);
+	if (s && !strncmp(s, "file://", 7))
+		s += 7;
+	return s;
+}
+
+/* Spec "value" and "image-path" hints. */
+static NdHints
+nd_read_hints(sd_bus_message *msg)
+{
+	NdHints h = { -1, NULL };
 	const char *key;
 	int32_t v = -1;
 
 	if (sd_bus_message_enter_container(msg, 'a', "{sv}") <= 0)
-		return -1;
+		return h;
 	while (sd_bus_message_enter_container(msg, 'e', "sv") > 0) {
-		if (sd_bus_message_read(msg, "s", &key) > 0 && !strcmp(key, "value"))
+		if (sd_bus_message_read(msg, "s", &key) <= 0)
+			sd_bus_message_skip(msg, "v");
+		else if (!strcmp(key, "value"))
 			v = nd_read_value(msg);
+		else if (!strcmp(key, "image-path"))
+			h.image = nd_read_path(msg);
 		else
 			sd_bus_message_skip(msg, "v");
 		sd_bus_message_exit_container(msg);
 	}
 	sd_bus_message_exit_container(msg);
-	return v < 0 ? -1 : MIN(v, 100);
+	h.progress = v < 0 ? -1 : MIN(v, 100);
+	return h;
 }
 
 /* Own node so fill glides. */
@@ -399,6 +447,10 @@ nd_build_card(NdToast *t, const char *app, const char *summary,
 		card_gap(card, 2);
 		nd_body_rows(card, body);
 	}
+	if (t->img) {
+		card_gap(card, 8);
+		card_image(card, t->img);
+	}
 	if (t->progress >= 0) {
 		card_gap(card, 8);
 		card_gauge(card, t->progress / 100.0, card_col_blue);
@@ -440,14 +492,13 @@ nd_build_card(NdToast *t, const char *app, const char *summary,
 	return sb != NULL;
 }
 
-/* Game mode: foretrekk en skjerm uten fullskjermsklient (samme DND-logikk
- * som notify.c); finnes ingen, vises ikke varselet. */
+/* Spill/HTPC: aldri over fullskjerm. */
 static Monitor *
 nd_pick_mon(void)
 {
 	Monitor *it;
 
-	if (!game_mode_active)
+	if (!game_mode_active && !htpc_mode_active)
 		return selmon;
 	wl_list_for_each(it, &mons, link)
 		if (it->wlr_output && it->wlr_output->enabled
@@ -456,97 +507,155 @@ nd_pick_mon(void)
 	return NULL;
 }
 
-static int
-notifyd_method_notify(sd_bus_message *msg, void *userdata,
-		sd_bus_error *ret_error)
+static NdToast *
+nd_find(uint32_t id)
 {
-	const char *app = NULL, *icon = NULL, *summary = NULL, *body = NULL;
-	uint32_t rid = 0;
-	int32_t expire = -1;
-	uint64_t hold;
-	Monitor *m;
-	NdToast *t = NULL, *it;
-	NdActions acts = { 0 };
-	int progress;
-	int r;
+	NdToast *t;
 
-	r = sd_bus_message_read(msg, "susss", &app, &rid, &icon, &summary,
-			&body);
-	if (r < 0)
-		return r;
-	r = nd_read_actions(msg, &acts);
-	if (r < 0)
-		return r;
-	progress = nd_read_progress(msg);
-	sd_bus_message_read(msg, "i", &expire);
+	wl_list_for_each(t, &nd_toasts, link)
+		if (t->id == id)
+			return t;
+	return NULL;
+}
 
-	if (rid)
-		wl_list_for_each(it, &nd_toasts, link)
-			if (it->id == rid) {
-				t = it;
-				break;
-			}
-
-	m = t ? t->m : nd_pick_mon();
-	if (!m || !m->wlr_output) {
-		/* DND or no screen: never shown, so closed at once. */
-		uint32_t id = notifyd_next_id++;
-
-		r = sd_bus_reply_method_return(msg, "u", id);
-		nd_emit_closed(id, ND_EXPIRED);
-		return r;
-	}
+/* Takes img; NULL on failure. */
+static NdToast *
+nd_create(const NdMsg *p, Monitor *m, cairo_surface_t *img)
+{
+	NdToast *t = calloc(1, sizeof(*t));
 
 	if (!t) {
-		t = calloc(1, sizeof(*t));
-		if (!t)
-			return -ENOMEM;
-		t->id = notifyd_next_id++;
-		t->m = m;
-		t->close_reason = ND_EXPIRED;
-		t->actions = acts;
-		t->progress = progress;
-		t->tree = wlr_scene_tree_create(layers[LyrOverlay]);
-		if (!t->tree) {
-			free(t);
-			return -ENOMEM;
-		}
-		if (!nd_build_card(t, app, summary, body)) {
-			wlr_scene_node_destroy(&t->tree->node);
-			free(t);
-			return sd_bus_reply_method_return(msg, "u",
-					notifyd_next_id - 1);
-		}
-		t->slot_y = nd_free_slot_y(m, t->h);
-		t->off_x = m->m.x + m->m.width + ND_GAP;
-		t->x_f = (double)t->off_x;
-		t->x_vel = 0.0;
-		wlr_scene_node_set_position(&t->tree->node, t->off_x, t->slot_y);
-		t->timer = wl_event_loop_add_timer(event_loop, nd_hide_timeout,
-				t);
-		wl_list_insert(&nd_toasts, &t->link);
-	} else {
-		t->actions = acts;
-		t->progress = progress;
-		if (!nd_build_card(t, app, summary, body))
-			return sd_bus_reply_method_return(msg, "u", t->id);
+		if (img)
+			cairo_surface_destroy(img);
+		return NULL;
 	}
+	t->id = p->id;
+	t->m = m;
+	t->close_reason = ND_EXPIRED;
+	t->actions = p->acts;
+	t->progress = p->progress;
+	t->seq = p->seq;
+	t->img = img;
+	t->tree = wlr_scene_tree_create(layers[LyrOverlay]);
+	if (!t->tree || !nd_build_card(t, p->app, p->summary, p->body)) {
+		if (t->tree)
+			wlr_scene_node_destroy(&t->tree->node);
+		if (img)
+			cairo_surface_destroy(img);
+		free(t);
+		return NULL;
+	}
+	t->slot_y = nd_free_slot_y(m, t->h);
+	t->off_x = m->m.x + m->m.width + ND_GAP;
+	t->x_f = (double)t->off_x;
+	t->x_vel = 0.0;
+	wlr_scene_node_set_position(&t->tree->node, t->off_x, t->slot_y);
+	t->timer = wl_event_loop_add_timer(event_loop, nd_hide_timeout, t);
+	wl_list_insert(&nd_toasts, &t->link);
+	return t;
+}
 
-	/* Re-anker (bredden kan ha endret seg) og gli inn igjen om kortet var
-	 * på vei ut. */
-	t->target_x = m->m.x + m->m.width - t->w - ND_MARGIN;
+/* Takes img; NULL on failure. */
+static NdToast *
+nd_update(NdToast *t, const NdMsg *p, cairo_surface_t *img)
+{
+	if (t->img)
+		cairo_surface_destroy(t->img);
+	t->img = img;
+	t->actions = p->acts;
+	t->progress = p->progress;
+	t->seq = p->seq;
+	return nd_build_card(t, p->app, p->summary, p->body) ? t : NULL;
+}
+
+/* Re-anchor and slide in. */
+static void
+nd_present(NdToast *t, int32_t expire)
+{
+	uint64_t hold = expire > 0 ?
+		MIN((uint64_t)expire, (uint64_t)ND_MAX_HOLD_MS) : ND_HOLD_MS;
+
+	t->target_x = t->m->m.x + t->m->m.width - t->w - ND_MARGIN;
 	t->hiding = 0;
-	hold = expire > 0 ? MIN((uint64_t)expire, (uint64_t)ND_MAX_HOLD_MS)
-		: ND_HOLD_MS;
 	/* Zero means stay until clicked. */
 	if (t->timer)
 		wl_event_source_timer_update(t->timer,
 				expire == 0 ? 0 : (int)hold);
 	wlr_scene_node_raise_to_top(&t->tree->node);
 	nd_clip_to_mon(t, (int)t->x_f);
-	nd_schedule(m);
+	nd_schedule(t->m);
+}
 
-	return sd_bus_reply_method_return(msg, "u", t->id);
+/* Takes img. */
+static void
+nd_show(const NdMsg *p, cairo_surface_t *img)
+{
+	NdToast *t = nd_find(p->id);
+	Monitor *m = t ? t->m : nd_pick_mon();
+
+	if (t && t->seq > p->seq) {
+		if (img)
+			cairo_surface_destroy(img);
+		return;
+	}
+	if (!m || !m->wlr_output) {
+		/* DND or no screen. */
+		if (img)
+			cairo_surface_destroy(img);
+		nd_emit_closed(p->id, ND_EXPIRED);
+		return;
+	}
+	t = t ? nd_update(t, p, img) : nd_create(p, m, img);
+	if (t)
+		nd_present(t, p->expire);
+}
+
+static void
+nd_thumb_done(cairo_surface_t *img, void *data)
+{
+	nd_show(data, img);
+	free(data);
+}
+
+static int
+notifyd_method_notify(sd_bus_message *msg, void *userdata,
+		sd_bus_error *ret_error)
+{
+	static uint32_t seq;
+	const char *app = NULL, *icon = NULL, *summary = NULL, *body = NULL;
+	uint32_t rid = 0;
+	NdHints hints;
+	NdMsg *p = calloc(1, sizeof(*p));
+	int r;
+
+	if (!p)
+		return -ENOMEM;
+	r = sd_bus_message_read(msg, "susss", &app, &rid, &icon, &summary,
+			&body);
+	if (r >= 0)
+		r = nd_read_actions(msg, &p->acts);
+	if (r < 0) {
+		free(p);
+		return r;
+	}
+	hints = nd_read_hints(msg);
+	p->expire = -1;
+	sd_bus_message_read(msg, "i", &p->expire);
+	snprintf(p->app, sizeof(p->app), "%s", app);
+	snprintf(p->summary, sizeof(p->summary), "%s", summary);
+	snprintf(p->body, sizeof(p->body), "%s", body);
+	p->progress = hints.progress;
+	p->id = rid && nd_find(rid) ? rid : notifyd_next_id++;
+	p->seq = ++seq;
+
+	r = sd_bus_reply_method_return(msg, "u", p->id);
+	if (hints.image) {
+		thumb_load_async(hints.image, nd_thumb_done, p);
+		return r;
+	}
+	nd_show(p, NULL);
+	free(p);
+	return r;
 }
 
 static int
@@ -731,6 +840,15 @@ notifyd_purge_mon(Monitor *m)
 }
 
 static void
+nd_emit_action(NdToast *t, const char *key)
+{
+	if (notifyd_bus)
+		sd_bus_emit_signal(notifyd_bus, "/org/freedesktop/Notifications",
+				"org.freedesktop.Notifications",
+				"ActionInvoked", "us", t->id, key);
+}
+
+static void
 nd_invoke(NdToast *t, int x, int y)
 {
 	for (int i = 0; i < t->nhits; i++) {
@@ -738,17 +856,14 @@ nd_invoke(NdToast *t, int x, int y)
 
 		if (x < h->x || y < h->y || x >= h->x + h->w || y >= h->y + h->h)
 			continue;
-		if (notifyd_bus)
-			sd_bus_emit_signal(notifyd_bus,
-					"/org/freedesktop/Notifications",
-					"org.freedesktop.Notifications",
-					"ActionInvoked", "us", t->id,
-					t->actions.key[h->id - ND_HIT_BASE]);
+		nd_emit_action(t, t->actions.key[h->id - ND_HIT_BASE]);
 		return;
 	}
+	if (t->actions.has_default)
+		nd_emit_action(t, "default");
 }
 
-/* Any click dismisses; a left click on a button also invokes it. */
+/* Click dismisses; left invokes. */
 int
 notifyd_handle_click(double cx, double cy, uint32_t button)
 {

@@ -45,7 +45,7 @@ static const char *app_name[GUIDE_N] = {
 	"geforcenow",
 	"nixlymedia",
 };
-/* htpc-app boots nixlymedia. */
+/* Autostart boots nixlymedia. */
 #define GUIDE_BOOT 3
 
 static struct wlr_scene_tree *menu_tree;

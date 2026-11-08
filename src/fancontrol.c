@@ -21,8 +21,12 @@ FanState fan_pub;
 #define MSI_EC_DIR "/sys/devices/platform/msi-ec"
 /* Fan ceiling outside games. */
 #define FAN_QUIET_MAX_PCT 60
+/* Heat lifts the ceiling too. */
+#define FAN_HOT_ON_C  75
+#define FAN_HOT_OFF_C 68
 
 static int fan_game; /* worker thread only */
+static int fan_hot; /* worker thread only */
 
 static int
 sysfs_read_int(const char *path)
@@ -592,7 +596,8 @@ fan_state_set_auto(FanState *fs, int flat)
 static int
 fan_cap_pct(int pct)
 {
-	return fan_game || pct < FAN_QUIET_MAX_PCT ? pct : FAN_QUIET_MAX_PCT;
+	return fan_game || fan_hot || pct < FAN_QUIET_MAX_PCT ?
+		pct : FAN_QUIET_MAX_PCT;
 }
 
 static int
@@ -626,13 +631,51 @@ fan_state_set_curve(FanState *fs, int flat, const FanCurve *c)
 	fan_state_curve_tick(fs);
 }
 
-/* Software curve loop for hwmon/NVML fans (the MSI EC runs its table by
- * itself).  Called after every sample on fanwatch's thread; writes only
- * when the target moved ≥2% so idle ticks cost nothing. */
+static void
+fan_state_recap(FanState *fs)
+{
+	FanEntry *fe;
+
+	for (int i = 0; (fe = fan_flat_in(fs, i)); i++) {
+		if (fe->mode != FAN_MODE_CURVE)
+			continue;
+		if (fe->ctl == FAN_CTL_MSI_EC)
+			fan_ec_write_capped(fe);
+		fe->curve_applied_pct = -1;
+	}
+}
+
+static int
+fan_hottest_c(FanState *fs)
+{
+	FanEntry *fe;
+	int best = 0;
+
+	for (int i = 0; (fe = fan_flat_in(fs, i)); i++)
+		if (fe->temp_mc > best)
+			best = fe->temp_mc;
+	return best / 1000;
+}
+
+static void
+fan_state_hot_tick(FanState *fs)
+{
+	int hot = fan_hottest_c(fs) >=
+		(fan_hot ? FAN_HOT_OFF_C : FAN_HOT_ON_C);
+
+	if (hot == fan_hot)
+		return;
+	fan_hot = hot;
+	fan_state_recap(fs);
+}
+
+/* Software curve for hwmon/NVML. */
 void
 fan_state_curve_tick(FanState *fs)
 {
 	int cpu_mc = fan_cpu_temp_mc(fs);
+
+	fan_state_hot_tick(fs);
 
 	for (int d = 0; d < fs->ndevices; d++) {
 		FanDevice *dev = &fs->devices[d];
@@ -674,18 +717,10 @@ fan_state_curve_tick(FanState *fs)
 void
 fan_state_set_game(FanState *fs, int on)
 {
-	FanEntry *fe;
-
 	if (fan_game == on)
 		return;
 	fan_game = on;
-	for (int i = 0; (fe = fan_flat_in(fs, i)); i++) {
-		if (fe->mode != FAN_MODE_CURVE)
-			continue;
-		if (fe->ctl == FAN_CTL_MSI_EC)
-			fan_ec_write_capped(fe);
-		fe->curve_applied_pct = -1;
-	}
+	fan_state_recap(fs);
 	fan_state_curve_tick(fs);
 }
 

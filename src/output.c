@@ -4739,6 +4739,10 @@ restore_max_refresh_rate(Monitor *m)
 			max_mode = find_mode(m->wlr_output, rtcfg->width,
 					rtcfg->height, rtcfg->refresh);
 	}
+	/* Console UI keeps its mode. */
+	if (!max_mode && m->console_mode_active)
+		max_mode = find_mode(m->wlr_output, CONSOLE_MODE_WIDTH,
+				CONSOLE_MODE_HEIGHT, 0);
 	if (!max_mode)
 		max_mode = bestmode(m->wlr_output);
 	if (!max_mode)
@@ -4802,9 +4806,14 @@ output_has_4k_60hz(struct wlr_output *output)
 int
 client_wants_console_mode(Client *c)
 {
+	const char *app;
+
 	if (!c)
 		return 0;
 	if (is_retro_emulator_client(c))
+		return 1;
+	app = client_get_appid(c);
+	if (app && strcasestr(app, "nixlymedia"))
 		return 1;
 #ifdef XWAYLAND
 	if (c->is_steam_bigpicture)
@@ -4836,11 +4845,15 @@ apply_console_mode(Monitor *m, Client *c)
 	if (output_has_4k_60hz(m->wlr_output))
 		return;
 
-	target = find_mode(m->wlr_output, 1920, 1080, 0);
+	target = find_mode(m->wlr_output, CONSOLE_MODE_WIDTH,
+			CONSOLE_MODE_HEIGHT, 0);
 	if (!target)
 		return;
-	if (m->wlr_output->current_mode == target)
+	/* Already there: restore still owed. */
+	if (m->wlr_output->current_mode == target) {
+		m->console_mode_active = target != bestmode(m->wlr_output);
 		return;
+	}
 
 	m->console_mode_original = m->wlr_output->current_mode;
 
@@ -4887,7 +4900,7 @@ restore_console_mode(Monitor *m)
 		return;
 
 	target = bestmode(m->wlr_output);
-	if (!target) {
+	if (!target || m->wlr_output->current_mode == target) {
 		m->console_mode_active = 0;
 		m->console_mode_original = NULL;
 		return;
@@ -5845,7 +5858,7 @@ score_video_mode(int method, float video_hz, float display_hz, int multiplier)
 		break;
 	case 1: /* Existing mode - good if it's a perfect multiple */
 	case 2: /* Custom CVT mode */
-		if (judder < 0.1f) {
+		if (judder < VIDEO_PERFECT_JUDDER_MS) {
 			/* Near-perfect sync.  Judder-continuous inside the
 			 * bucket: TVs advertise both 23.976 and 24.000 (and
 			 * 119.88/120.00) — a flat 100 made list order pick the

@@ -344,11 +344,8 @@ notify_try_adopt(Client *c)
 	if (!notify_looks_like_notification(c, &m) || !m)
 		return 0;
 
-	/* Game mode: a popup on the game monitor forces composition (and an
-	 * animation) for ~4.5 s. Prefer a monitor without a fullscreen
-	 * client; if there is none, park a non-sticky popup offscreen until
-	 * its timeout (DND). Sticky prompts (polkit etc.) must stay visible. */
-	if (game_mode_active) {
+	/* Games/HTPC: park popups off fullscreen. */
+	if (game_mode_active || htpc_mode_active) {
 		Monitor *alt = NULL, *it;
 		wl_list_for_each(it, &mons, link) {
 			if (it->wlr_output && it->wlr_output->enabled &&

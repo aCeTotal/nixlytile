@@ -224,6 +224,11 @@ extern const char *osk_layout_upper[OSK_ROWS][OSK_COLS];
 /* Lowest rate a VRR panel is assumed to hold without driver LFC. Below this
  * video prefers a fixed mode instead of VRR. */
 #define VRR_MIN_SAFE_HZ 48.0f
+/* Video judder counted as perfect. */
+#define VIDEO_PERFECT_JUDDER_MS 0.1f
+/* Console-mode UI resolution. */
+#define CONSOLE_MODE_WIDTH 1920
+#define CONSOLE_MODE_HEIGHT 1080
 
 /* ── enums ─────────────────────────────────────────────────────────── */
 enum { CurNormal, CurPressed, CurMove, CurResize, CurColResize };
@@ -3543,6 +3548,11 @@ void wlsec_init(void);
 void notifyd_tick(Monitor *m, double dt, int *still);
 void notifyd_purge_mon(Monitor *m);
 int notifyd_handle_click(double cx, double cy, uint32_t button);
+
+/* thumb.c */
+typedef void (*thumb_done_fn)(cairo_surface_t *img, void *data);
+void thumb_load_async(const char *path, thumb_done_fn done, void *data);
+
 void schedule_game_mode_update(void);
 void gm_bg_init(void);
 void gm_bg_cleanup(void);

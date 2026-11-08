@@ -11,6 +11,7 @@
 #define POPUP_CARD_H
 
 #include <stdint.h>
+#include <cairo/cairo.h>
 #include <wlr/types/wlr_scene.h>
 
 #define CARD_MAX_ROWS  56
@@ -114,6 +115,8 @@ void card_big_btn(Card *c, const char *label, const float accent[4],
  * on a white plate with quiet zone, centered. Matrix is caller-owned
  * and only read during card_finish. */
 void card_qr(Card *c, const uint8_t *modules, int size);
+/* Rounded picture, caller-owned img. */
+void card_image(Card *c, cairo_surface_t *img);
 /* text_btn with an svg icon (asset path, drawn at text height) left of
  * the label — device lists. icon_path may be NULL. */
 void card_icon_text_btn(Card *c, const char *icon_path, const char *left,

@@ -321,6 +321,23 @@ static void rollback_blob(struct wlr_drm_backend *drm,
 	destroy_blob(drm, next);
 }
 
+static uint32_t drm_content_type(const struct wlr_output_state *base) {
+	if (!(base->committed & WLR_OUTPUT_STATE_CONTENT_TYPE)) {
+		return DRM_MODE_CONTENT_TYPE_GRAPHICS;
+	}
+	// wp_content_type_v1_type values
+	switch (base->content_type) {
+	case 1:
+		return DRM_MODE_CONTENT_TYPE_PHOTO;
+	case 2:
+		return DRM_MODE_CONTENT_TYPE_CINEMA;
+	case 3:
+		return DRM_MODE_CONTENT_TYPE_GAME;
+	default:
+		return DRM_MODE_CONTENT_TYPE_GRAPHICS;
+	}
+}
+
 bool drm_atomic_connector_prepare(struct wlr_drm_connector_state *state, bool modeset) {
 	struct wlr_drm_connector *conn = state->connector;
 	struct wlr_drm_backend *drm = conn->backend;
@@ -413,6 +430,9 @@ bool drm_atomic_connector_prepare(struct wlr_drm_connector_state *state, bool mo
 	state->vrr_enabled = vrr_enabled;
 	state->colorspace = colorspace;
 	state->hdr_output_metadata = hdr_output_metadata;
+	state->content_type = modeset || !conn->content_type_needs_modeset ?
+		drm_content_type(state->base) : conn->content_type;
+	state->content_type_deferred = false;
 	return true;
 }
 
@@ -438,6 +458,8 @@ void drm_atomic_connector_apply_commit(struct wlr_drm_connector_state *state) {
 	}
 
 	conn->colorspace = state->colorspace;
+	conn->content_type = state->content_type;
+	crtc->cursor_plane_on = state->active && drm_connector_is_cursor_visible(conn);
 }
 
 void drm_atomic_connector_rollback_commit(struct wlr_drm_connector_state *state) {
@@ -517,25 +539,7 @@ static void atomic_connector_add(struct atomic *atom,
 			DRM_MODE_LINK_STATUS_GOOD);
 	}
 	if (active && conn->props.content_type != 0) {
-		uint32_t drm_content_type = DRM_MODE_CONTENT_TYPE_GRAPHICS;
-		if (state->base->committed & WLR_OUTPUT_STATE_CONTENT_TYPE) {
-			// wp_content_type_v1_type: 0=none, 1=photo, 2=video, 3=game
-			switch (state->base->content_type) {
-			case 3: // WP_CONTENT_TYPE_V1_TYPE_GAME
-				drm_content_type = DRM_MODE_CONTENT_TYPE_GAME;
-				break;
-			case 2: // WP_CONTENT_TYPE_V1_TYPE_VIDEO
-				drm_content_type = DRM_MODE_CONTENT_TYPE_CINEMA;
-				break;
-			case 1: // WP_CONTENT_TYPE_V1_TYPE_PHOTO
-				drm_content_type = DRM_MODE_CONTENT_TYPE_PHOTO;
-				break;
-			default:
-				drm_content_type = DRM_MODE_CONTENT_TYPE_GRAPHICS;
-				break;
-			}
-		}
-		atomic_add(atom, conn->id, conn->props.content_type, drm_content_type);
+		atomic_add(atom, conn->id, conn->props.content_type, state->content_type);
 	}
 	if (modeset && active && conn->props.max_bpc != 0 && conn->max_bpc_bounds[1] != 0) {
 		atomic_add(atom, conn->id, conn->props.max_bpc, pick_max_bpc(conn, state->primary_fb));
@@ -585,7 +589,8 @@ static void atomic_connector_add(struct atomic *atom,
 					atomic_add(atom, crtc->cursor->id,
 						crtc->cursor->props.hotspot_y, conn->cursor_hotspot_y);
 				}
-			} else {
+			} else if (modeset || crtc->cursor_plane_on) {
+				// Idle planes' fake commits race flips
 				plane_disable(atom, crtc->cursor);
 			}
 		}
@@ -595,6 +600,36 @@ static void atomic_connector_add(struct atomic *atom,
 			plane_disable(atom, crtc->cursor);
 		}
 	}
+}
+
+// Gen9 i915 rewrites infoframes on modeset only
+static bool commit_deferring_content_types(struct wlr_drm_backend *drm,
+		const struct wlr_drm_device_state *state,
+		struct wlr_drm_page_flip *page_flip, uint32_t flags) {
+	bool deferred = false;
+	for (size_t i = 0; i < state->connectors_len; i++) {
+		struct wlr_drm_connector_state *conn_state = &state->connectors[i];
+		struct wlr_drm_connector *conn = conn_state->connector;
+		if (conn->props.content_type == 0 ||
+				conn_state->content_type == conn->content_type) {
+			continue;
+		}
+		conn_state->content_type = conn->content_type;
+		conn_state->content_type_deferred = true;
+		deferred = true;
+	}
+	if (!deferred) {
+		return false;
+	}
+
+	struct atomic atom;
+	atomic_begin(&atom);
+	for (size_t i = 0; i < state->connectors_len; i++) {
+		atomic_connector_add(&atom, &state->connectors[i], false);
+	}
+	bool ok = atomic_commit(&atom, drm, state, page_flip, flags);
+	atomic_finish(&atom);
+	return ok;
 }
 
 static bool atomic_device_commit(struct wlr_drm_backend *drm,
@@ -662,9 +697,16 @@ static bool atomic_device_commit(struct wlr_drm_backend *drm,
 		}
 	}
 
+	if (!ok && errno == EINVAL && !state->modeset) {
+		ok = commit_deferring_content_types(drm, state, page_flip, flags);
+	}
+
 out:
 	for (size_t i = 0; i < state->connectors_len; i++) {
 		struct wlr_drm_connector_state *conn_state = &state->connectors[i];
+		if (ok && conn_state->content_type_deferred) {
+			conn_state->connector->content_type_needs_modeset = true;
+		}
 		if (ok && !test_only) {
 			drm_atomic_connector_apply_commit(conn_state);
 		} else {

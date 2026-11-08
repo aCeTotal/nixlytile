@@ -369,11 +369,9 @@ osd_show_force(Monitor *m, const char *msg)
 void
 osd_show(Monitor *m, const char *msg)
 {
-	/* A game launch or game mode retunes VRR, refresh and modes across
-	 * every output — those toasts popped up on all the other monitors
-	 * while the game was starting.  No compositor messages from the Play
-	 * press until game mode ends. */
-	if (game_mode_active || game_mode_ultra || launchfx_active())
+	/* Silent in games and HTPC. */
+	if (game_mode_active || game_mode_ultra || launchfx_active()
+			|| htpc_mode_active)
 		return;
 	osd_show_force(m, msg);
 }
