@@ -20,31 +20,6 @@
             ];
           };
 
-          wlrootsLocal = pkgs.stdenv.mkDerivation {
-            pname = "wlroots";
-            version = "0.20.2";
-            src = ./wlroots;
-            nativeBuildInputs = with pkgs; [ meson ninja pkg-config wayland-scanner glslang ];
-            buildInputs = with pkgs; [
-              wayland wayland-protocols libdrm libxkbcommon pixman libinput
-              xwayland seatd libxcb libxcb-wm
-              libgbm hwdata libliftoff libdisplay-info lcms2 libxcb-errors
-              vulkan-loader vulkan-headers
-            ];
-            mesonFlags = [
-              # nixpkgs' meson hook defaults to --buildtype=plain, which passes
-              # no -O flag at all -> wlroots was built at -O0.
-              "--buildtype=release"
-              "-Dexamples=false"
-              "-Dxwayland=enabled"
-              "-Dbackends=drm,libinput"
-              "-Drenderers=vulkan"
-              "-Dallocators=gbm"
-            ];
-          };
-
-          wlrootsPc = "wlroots-0.20";
-
           buildTools = with pkgs; [
             gnumake
             stdenv.cc
@@ -53,7 +28,8 @@
             wayland
             wayland-scanner
             wayland-protocols
-            wlrootsLocal
+            glslang
+            hwdata
             libinput
             libxkbcommon
             tllist
@@ -62,8 +38,12 @@
             systemd
             libxcb
             libxcb-wm
+            libxcb-errors
             xwayland
             seatd
+            libgbm
+            libdisplay-info
+            vulkan-loader
             cairo
             librsvg
             gdk-pixbuf
@@ -78,17 +58,12 @@
             runtimeInputs = buildTools;
             text = ''
               set -euo pipefail
-              echo "Using wlroots pkg-config name: ${wlrootsPc} (${wlrootsLocal.version})"
               make clean
-              make \
-                PKG_CONFIG=pkg-config \
-                WLR_INCS="$(pkg-config --cflags ${wlrootsPc})" \
-                WLR_LIBS="$(pkg-config --libs ${wlrootsPc})" \
-                "$@"
+              make PKG_CONFIG=pkg-config "$@"
             '';
           };
         in {
-          inherit pkgs wlrootsPc wlrootsLocal buildTools buildScript;
+          inherit pkgs buildTools buildScript;
         };
     in {
       packages = forAllSystems (system:
@@ -99,6 +74,8 @@
             xwayland
             foot
             wl-clipboard
+            grim
+            slurp
           ];
           defaultPackage = pkgs.stdenv.mkDerivation {
             pname = "nixlytile";
@@ -110,13 +87,13 @@
               pkgs.wayland
               pkgs.wayland-scanner
               pkgs.wayland-protocols
+              pkgs.glslang
               pkgs.makeWrapper
               pkgs.addDriverRunpath
             ];
 
             buildInputs = [
               pkgs.wayland
-              ps.wlrootsLocal
               pkgs.libinput
               pkgs.libxkbcommon
               pkgs.fcft
@@ -125,7 +102,13 @@
               pkgs.libdrm
               pkgs.libxcb
               pkgs.libxcb-wm
+              pkgs.libxcb-errors
               pkgs.xwayland
+              pkgs.seatd
+              pkgs.libgbm
+              pkgs.libdisplay-info
+              pkgs.hwdata
+              pkgs.vulkan-loader
               pkgs.systemd
               pkgs.libglvnd
               pkgs.cairo
@@ -143,9 +126,7 @@
             buildPhase = ''
               runHook preBuild
               make clean
-              make \
-                WLR_INCS="$(${pkgs.pkg-config}/bin/pkg-config --cflags ${ps.wlrootsPc})" \
-                WLR_LIBS="$(${pkgs.pkg-config}/bin/pkg-config --libs ${ps.wlrootsPc})"
+              make -j$NIX_BUILD_CORES
               runHook postBuild
             '';
 
@@ -153,7 +134,7 @@
               runHook preInstall
               make PREFIX=$out MANDIR=$out/share/man DATADIR=$out/share install
               wrapProgram $out/bin/nixlytile \
-                --set WLR_RENDERER vulkan \
+                --set NIXLY_RENDERER vulkan \
                 --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps}
               runHook postInstall
             '';
@@ -183,8 +164,7 @@
           default = pkgs.mkShell {
             packages = ps.buildTools ++ [ ps.buildScript ];
             shellHook = ''
-              export WLR_PKG=${ps.wlrootsPc}
-              echo "nixlytile-build available (uses ${ps.wlrootsPc})"
+              echo "nixlytile-build available"
             '';
           };
         });

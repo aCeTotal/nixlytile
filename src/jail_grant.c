@@ -57,6 +57,6 @@ jail_grant_ok(int fd)
 	ans[n] = '\0';
 	if (strncmp(ans, "ok", 2) == 0)
 		return 1;
-	wlr_log(WLR_INFO, "jail_grant: %s", ans);
+	nx_log(NX_INFO, "jail_grant: %s", ans);
 	return 0;
 }

@@ -267,7 +267,7 @@ try_add_device(const char *path)
 		return;
 	}
 	wl_list_insert(&pads, &pad->link);
-	wlr_log(WLR_INFO, "remote_pad: added %s", path);
+	nx_log(NX_INFO, "remote_pad: added %s", path);
 }
 
 static int

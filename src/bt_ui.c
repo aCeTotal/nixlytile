@@ -48,7 +48,7 @@ bt_label_arm(uint64_t delay_ms)
 char bt_icon_path[PATH_MAX] = "images/svg/bluetooth_searching.svg";
 char bt_icon_loaded_path[PATH_MAX];
 int bt_icon_loaded_h, bt_icon_w, bt_icon_h;
-struct wlr_buffer *bt_icon_buf;
+struct nx_buffer *bt_icon_buf;
 static char bt_text[64];
 static BtDev bt_ui_devs[BT_DEV_MAX];
 static int bt_ui_ndevs;
@@ -147,7 +147,7 @@ void
 drop_bt_icon_buffer(void)
 {
 	if (bt_icon_buf) {
-		wlr_buffer_drop(bt_icon_buf);
+		nx_buffer_drop(bt_icon_buf);
 		bt_icon_buf = NULL;
 	}
 	bt_icon_loaded_h = 0;
@@ -160,7 +160,7 @@ ensure_bt_icon_buffer(int target_h)
 {
 	GdkPixbuf *pixbuf = NULL;
 	GError *gerr = NULL;
-	struct wlr_buffer *buf;
+	struct nx_buffer *buf;
 	int w = 0, h = 0;
 	char resolved[PATH_MAX];
 	const char *path = bt_icon_path;
@@ -206,7 +206,7 @@ renderbluetooth(StatusModule *module, int bar_height, const char *text)
 		if (module && module->tree) {
 			clearstatusmodule(module);
 			module->width = 0;
-			wlr_scene_node_set_enabled(&module->tree->node, 0);
+			nx_scene_node_set_enabled(&module->tree->node, 0);
 		}
 		return;
 	}

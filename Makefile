@@ -1,385 +1,135 @@
-.POSIX:
-.SUFFIXES:
-
 include config.mk
 
-SRC = src
+BUILD = build
+PROTO = $(BUILD)/protocols
 
-# flags for compiling
-CPPFLAGS_EXTRA = -I$(SRC) -I. -DWLR_USE_UNSTABLE -D_POSIX_C_SOURCE=200809L \
-	-DVERSION=\"$(VERSION)\" $(XWAYLAND)
-DEVCFLAGS = -g -Wpedantic -Wall -Wextra -Wdeclaration-after-statement \
-	-Wno-unused-parameter -Wshadow -Wunused-macros -Werror=strict-prototypes \
-	-Werror=implicit -Werror=return-type -Werror=incompatible-pointer-types \
-	-Wfloat-conversion
+PKGS = wayland-server wayland-client xkbcommon libinput libdrm libudev libseat gbm vulkan \
+	pixman-1 libdisplay-info xcb xcb-composite xcb-ewmh xcb-icccm xcb-randr \
+	xcb-render xcb-res xcb-xfixes xcb-errors fcft libsystemd cairo librsvg-2.0 gdk-pixbuf-2.0 \
+	glib-2.0 libqrencode
 
-# CFLAGS / LDFLAGS
-PKGS      = wayland-server xkbcommon libinput libdrm $(XLIBS) fcft pixman-1 libsystemd \
-            cairo librsvg-2.0 gdk-pixbuf-2.0 glib-2.0 libqrencode
-# quirc (QR decoding for hover-detect) ships no pkg-config file
-QUIRC_LIBS = -lquirc
-WP_INCS = -I$(shell $(PKG_CONFIG) --variable=prefix wayland-protocols 2>/dev/null)/include
-NLCFLAGS = `$(PKG_CONFIG) --cflags $(PKGS)` $(WLR_INCS) $(WP_INCS) $(CPPFLAGS_EXTRA) $(DEVCFLAGS) $(CFLAGS) $(OPTFLAGS)
-LDLIBS    = `$(PKG_CONFIG) --libs $(PKGS)` $(WLR_LIBS) $(QUIRC_LIBS) -lm -lpthread $(LIBS)
+WARNINGS = -Wpedantic -Wall -Wextra -Wno-unused-parameter -Wshadow -Wunused-macros \
+	-Werror=strict-prototypes -Werror=implicit -Werror=return-type \
+	-Werror=incompatible-pointer-types -Wfloat-conversion
 
-# Allow C99 style declarations in all modules
-MOD_CFLAGS = $(NLCFLAGS) -Wno-declaration-after-statement
+NXCFLAGS = $(shell $(PKG_CONFIG) --cflags $(PKGS)) -I. -Isrc -I$(BUILD) -I$(PROTO) \
+	-D_POSIX_C_SOURCE=200809L -DXWAYLAND -DVERSION=\"$(VERSION)\" -DXWAYLAND_PATH=\"$(XWAYLAND_PATH)\" \
+	-g $(OPTFLAGS) $(WARNINGS) $(CFLAGS)
+LDLIBS = $(shell $(PKG_CONFIG) --libs $(PKGS)) -lquirc -lm -lpthread $(LIBS)
 
-# Compositor module object files
-MOD_OBJS = globals.o client.o layout.o input.o output.o \
-           gamemode.o client_utils.o xrandr_primary.o gpu.o draw.o layer.o workspace.o anim.o span.o latch.o pace.o nstimer.o gamescan.o autolock.o dynrender.o ladder.o vrslink.o \
-           dwl_ipc.o dwl-ipc-unstable-v2-protocol.o window_ipc.o game_black.o \
-           config_parser.o config_loader.o monitors_conf.o monitor_setup.o \
-           input_conf.o bindings_conf.o statusbar_conf.o \
-           remote.o remote_pad.o remote_mouse.o \
-           apptoggle.o htpc_pad.o htpc_guide.o wsfreeze.o appreap.o procsnap.o pwaudible.o btidle.o mic_watch.o audio_watch.o audio_devices.o audio_meter.o gaming_conf.o mic_gate.o gshortcuts.o filechooser.o jail_grant.o \
-           statusbar.o tray.o statusbar_support.o terminfo.o launchfx.o wobble.o wobble_render.o column_focus.o diag.o fetch_async.o charge_limit.o fancontrol.o fanwatch.o \
-           fancurve.o fan_helper.o fan_ec.o fan_nvml.o \
-           diskwatch.o disk_helper.o disk_ui.o \
-           popup_card.o popup_extra.o \
-           netmon.o wifi_ctrl.o wifi_nm.o wifi_share.o qr_scan.o btmon.o bt_rssi.o bt_audio.o bt_caps.o text_entry.o net_ui.o bt_ui.o display_ui.o power_ui.o \
-           notify.o notify_ghost.o notifyd.o thumb.o wlsec.o lightsense.o presence.o powersave.o battwatch.o camwatch.o cpuclock.o instruments.o converge.o txn.o tilefill.o floatfit.o fshold.o spawn.o osd.o multigpu.o dwt.o launchboost.o overview.o ws_home.o \
-           voice.o default_app.o bufready.o rtsched.o gpuboost.o
+WAYLAND_SCANNER = $(shell $(PKG_CONFIG) --variable=wayland_scanner wayland-scanner)
+WP = $(shell $(PKG_CONFIG) --variable=pkgdatadir wayland-protocols)
+HWDATA = $(shell $(PKG_CONFIG) --variable=pkgdatadir hwdata)
 
-PROTO_HDRS = $(SRC)/cursor-shape-v1-protocol.h $(SRC)/pointer-constraints-unstable-v1-protocol.h \
-             $(SRC)/wlr-layer-shell-unstable-v1-protocol.h $(SRC)/wlr-output-power-management-unstable-v1-protocol.h \
-             $(SRC)/xdg-shell-protocol.h $(SRC)/content-type-v1-protocol.h $(SRC)/tearing-control-v1-protocol.h \
-             $(SRC)/tablet-v2-protocol.h $(SRC)/dwl-ipc-unstable-v2-protocol.h
+PROTOCOL_XMLS = \
+	$(WP)/stable/linux-dmabuf/linux-dmabuf-v1.xml \
+	$(WP)/stable/presentation-time/presentation-time.xml \
+	$(WP)/stable/tablet/tablet-v2.xml \
+	$(WP)/stable/viewporter/viewporter.xml \
+	$(WP)/stable/xdg-shell/xdg-shell.xml \
+	$(WP)/staging/alpha-modifier/alpha-modifier-v1.xml \
+	$(WP)/staging/color-management/color-management-v1.xml \
+	$(WP)/staging/color-representation/color-representation-v1.xml \
+	$(WP)/staging/commit-timing/commit-timing-v1.xml \
+	$(WP)/staging/content-type/content-type-v1.xml \
+	$(WP)/staging/cursor-shape/cursor-shape-v1.xml \
+	$(WP)/staging/ext-data-control/ext-data-control-v1.xml \
+	$(WP)/staging/ext-foreign-toplevel-list/ext-foreign-toplevel-list-v1.xml \
+	$(WP)/staging/ext-idle-notify/ext-idle-notify-v1.xml \
+	$(WP)/staging/ext-image-capture-source/ext-image-capture-source-v1.xml \
+	$(WP)/staging/ext-image-copy-capture/ext-image-copy-capture-v1.xml \
+	$(WP)/staging/ext-session-lock/ext-session-lock-v1.xml \
+	$(WP)/staging/fifo/fifo-v1.xml \
+	$(WP)/staging/fractional-scale/fractional-scale-v1.xml \
+	$(WP)/staging/linux-drm-syncobj/linux-drm-syncobj-v1.xml \
+	$(WP)/staging/security-context/security-context-v1.xml \
+	$(WP)/staging/single-pixel-buffer/single-pixel-buffer-v1.xml \
+	$(WP)/staging/tearing-control/tearing-control-v1.xml \
+	$(WP)/staging/xdg-activation/xdg-activation-v1.xml \
+	$(WP)/staging/xdg-dialog/xdg-dialog-v1.xml \
+	$(WP)/staging/xdg-system-bell/xdg-system-bell-v1.xml \
+	$(WP)/staging/xwayland-shell/xwayland-shell-v1.xml \
+	$(WP)/unstable/idle-inhibit/idle-inhibit-unstable-v1.xml \
+	$(WP)/unstable/keyboard-shortcuts-inhibit/keyboard-shortcuts-inhibit-unstable-v1.xml \
+	$(WP)/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml \
+	$(WP)/unstable/pointer-gestures/pointer-gestures-unstable-v1.xml \
+	$(WP)/unstable/primary-selection/primary-selection-unstable-v1.xml \
+	$(WP)/unstable/relative-pointer/relative-pointer-unstable-v1.xml \
+	$(WP)/unstable/text-input/text-input-unstable-v3.xml \
+	$(WP)/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml \
+	$(WP)/unstable/xdg-foreign/xdg-foreign-unstable-v2.xml \
+	$(WP)/unstable/xdg-output/xdg-output-unstable-v1.xml \
+	$(wildcard protocols/*.xml)
+CLIENT_PROTOCOLS = xdg-shell xdg-decoration-unstable-v1 xdg-activation-v1 linux-dmabuf-v1 \
+	linux-drm-syncobj-v1 presentation-time pointer-gestures-unstable-v1 \
+	relative-pointer-unstable-v1
 
-all: nixlytile
-nixlytile: nixlytile.o util.o $(MOD_OBJS)
-	$(CC) nixlytile.o util.o $(MOD_OBJS) $(MOD_CFLAGS) $(LDFLAGS) $(LDLIBS) -o $@
+PROTOCOLS = $(basename $(notdir $(PROTOCOL_XMLS)))
+PROTO_HDRS = $(PROTOCOLS:%=$(PROTO)/%-protocol.h) $(CLIENT_PROTOCOLS:%=$(PROTO)/%-client-protocol.h)
+PROTO_SRCS = $(PROTOCOLS:%=$(PROTO)/%-protocol.c)
+SHADERS = $(wildcard platform/vulkan/shaders/*.vert platform/vulkan/shaders/*.frag)
+SHADER_HDRS = $(SHADERS:%=$(BUILD)/%.h)
+PNPIDS = $(BUILD)/platform/drm/pnp_ids.c
+GENERATED = $(PROTO_HDRS) $(SHADER_HDRS)
 
-# Core compositor
-nixlytile.o: $(SRC)/nixlytile.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/diag.h config.mk $(PROTO_HDRS)
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-util.o: $(SRC)/util.c $(SRC)/util.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-diag.o: $(SRC)/diag.c $(SRC)/diag.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-spawn.o: $(SRC)/spawn.c $(SRC)/run_cmd.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-dwt.o: $(SRC)/dwt.c $(SRC)/dwt.h $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-launchboost.o: $(SRC)/launchboost.c $(SRC)/launchboost.h $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-overview.o: $(SRC)/overview.c $(SRC)/overview.h $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+HELPERS = src/nixly_fand.c src/nixly_diskd.c src/nixly_jaild.c src/jaild_attach.c
+SRCS = $(filter-out $(HELPERS),$(wildcard src/*.c)) $(shell find platform -name '*.c')
+OBJS = $(SRCS:%.c=$(BUILD)/%.o) $(PROTO_SRCS:%.c=%.o) $(PNPIDS:%.c=%.o)
 
-# Compositor modules
-globals.o: $(SRC)/globals.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/config.h config.mk $(PROTO_HDRS)
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-client.o: $(SRC)/client.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/diag.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-layout.o: $(SRC)/layout.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-input.o: $(SRC)/input.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-output.o: $(SRC)/output.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/diag.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-monitors_conf.o: $(SRC)/monitors_conf.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-monitor_setup.o: $(SRC)/monitor_setup.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-input_conf.o: $(SRC)/input_conf.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-bindings_conf.o: $(SRC)/bindings_conf.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-statusbar_conf.o: $(SRC)/statusbar_conf.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-gamemode.o: $(SRC)/gamemode.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-client_utils.o: $(SRC)/client_utils.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-xrandr_primary.o: $(SRC)/xrandr_primary.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-span.o: $(SRC)/span.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-latch.o: $(SRC)/latch.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-pace.o: $(SRC)/pace.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-nstimer.o: $(SRC)/nstimer.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-gamescan.o: $(SRC)/gamescan.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-autolock.o: $(SRC)/autolock.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-dynrender.o: $(SRC)/dynrender.c $(SRC)/nixlytile.h vrslayer/link.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-ladder.o: $(SRC)/ladder.c $(SRC)/nixlytile.h $(SRC)/diag.h vrslayer/link.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-vrslink.o: $(SRC)/vrslink.c $(SRC)/nixlytile.h vrslayer/link.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-gpu.o: $(SRC)/gpu.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-draw.o: $(SRC)/draw.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-layer.o: $(SRC)/layer.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-workspace.o: $(SRC)/workspace.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-ws_home.o: $(SRC)/ws_home.c $(SRC)/remote.h $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-anim.o: $(SRC)/anim.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/diag.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-notify.o: $(SRC)/notify.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-notify_ghost.o: $(SRC)/notify_ghost.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-notifyd.o: $(SRC)/notifyd.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/popup_card.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-thumb.o: $(SRC)/thumb.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-wlsec.o: $(SRC)/wlsec.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-lightsense.o: $(SRC)/lightsense.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-presence.o: $(SRC)/presence.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-powersave.o: $(SRC)/powersave.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-battwatch.o: $(SRC)/battwatch.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-camwatch.o: $(SRC)/camwatch.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-cpuclock.o: $(SRC)/cpuclock.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-instruments.o: $(SRC)/instruments.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-osd.o: $(SRC)/osd.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-multigpu.o: $(SRC)/multigpu.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-converge.o: $(SRC)/converge.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/diag.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-txn.o: $(SRC)/txn.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/diag.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-tilefill.o: $(SRC)/tilefill.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-floatfit.o: $(SRC)/floatfit.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-fshold.o: $(SRC)/fshold.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-dwl_ipc.o: $(SRC)/dwl_ipc.c $(SRC)/nixlytile.h $(SRC)/dwl-ipc-unstable-v2-protocol.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-window_ipc.o: $(SRC)/window_ipc.c $(SRC)/nixlytile.h $(SRC)/game_black.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-game_black.o: $(SRC)/game_black.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/game_black.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-config_parser.o: $(SRC)/config_parser.c $(SRC)/config_parser.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-config_loader.o: $(SRC)/config_loader.c $(SRC)/config_loader.h $(SRC)/config_parser.h $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-apptoggle.o: $(SRC)/apptoggle.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-htpc_pad.o: $(SRC)/htpc_pad.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-htpc_guide.o: $(SRC)/htpc_guide.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-appreap.o: $(SRC)/appreap.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/procsnap.h $(SRC)/pwaudible.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-procsnap.o: $(SRC)/procsnap.c $(SRC)/procsnap.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-pwaudible.o: $(SRC)/pwaudible.c $(SRC)/pwaudible.h $(SRC)/nixlytile.h $(SRC)/util.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-btidle.o: $(SRC)/btidle.c $(SRC)/nixlytile.h $(SRC)/netsys.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-bufready.o: $(SRC)/bufready.c $(SRC)/nixlytile.h $(SRC)/util.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-rtsched.o: $(SRC)/rtsched.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-gpuboost.o: $(SRC)/gpuboost.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-wsfreeze.o: $(SRC)/wsfreeze.c $(SRC)/nixlytile.h $(SRC)/client.h $(SRC)/util.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-remote.o: $(SRC)/remote.c $(SRC)/remote.h $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-remote_pad.o: $(SRC)/remote_pad.c $(SRC)/remote.h $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-remote_mouse.o: $(SRC)/remote_mouse.c $(SRC)/remote.h $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-mic_watch.o: $(SRC)/mic_watch.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-voice.o: $(SRC)/voice.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-default_app.o: $(SRC)/default_app.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-fetch_async.o: $(SRC)/fetch_async.c $(SRC)/fetch_async.h $(SRC)/nixlytile.h $(SRC)/util.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-charge_limit.o: $(SRC)/charge_limit.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-fancontrol.o: $(SRC)/fancontrol.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-fanwatch.o: $(SRC)/fanwatch.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-fancurve.o: $(SRC)/fancurve.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-fan_helper.o: $(SRC)/fan_helper.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-fan_ec.o: $(SRC)/fan_ec.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-fan_nvml.o: $(SRC)/fan_nvml.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+xml_of = $(filter %/$(1).xml,$(PROTOCOL_XMLS))
 
-# Root fan helper — standalone binary, no compositor deps
-nixly-fand: $(SRC)/nixly_fand.c
-	$(CC) -O2 -Wall -Wextra -o $@ $(SRC)/nixly_fand.c -ldl
+all: nixlytile nixly-fand nixly-diskd nixly-jaild
 
-diskwatch.o: $(SRC)/diskwatch.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-disk_helper.o: $(SRC)/disk_helper.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-disk_ui.o: $(SRC)/disk_ui.c $(SRC)/nixlytile.h $(SRC)/popup_card.h $(SRC)/netsys.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+nixlytile: $(OBJS)
+	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
 
-# Root disk helper — standalone binary, no compositor deps
-nixly-diskd: $(SRC)/nixly_diskd.c
-	$(CC) -O2 -Wall -Wextra -o $@ $(SRC)/nixly_diskd.c
+$(BUILD)/%.o: %.c | $(GENERATED)
+	@mkdir -p $(@D)
+	$(CC) $(CPPFLAGS) $(NXCFLAGS) -MMD -MP -o $@ -c $<
 
-filechooser.o: $(SRC)/filechooser.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-jail_grant.o: $(SRC)/jail_grant.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+$(PROTO)/%-protocol.o: $(PROTO)/%-protocol.c
+	$(CC) $(CPPFLAGS) $(NXCFLAGS) -o $@ -c $<
 
-# Root jail grant helper — standalone binary, no compositor deps
-nixly-jaild: $(SRC)/nixly_jaild.c $(SRC)/jaild_attach.c $(SRC)/jaild.h $(SRC)/priv_sock.h
-	$(CC) -O2 -Wall -Wextra -o $@ $(SRC)/nixly_jaild.c $(SRC)/jaild_attach.c
+$(PNPIDS:%.c=%.o): $(PNPIDS) | $(GENERATED)
+	$(CC) $(CPPFLAGS) $(NXCFLAGS) -o $@ -c $<
 
-netmon.o: $(SRC)/netmon.c $(SRC)/netsys.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+.SECONDEXPANSION:
+$(PROTO)/%-client-protocol.h: $$(call xml_of,$$*)
+	@mkdir -p $(@D)
+	$(WAYLAND_SCANNER) client-header $< $@
+$(PROTO)/%-protocol.h: $$(call xml_of,$$*)
+	@mkdir -p $(@D)
+	$(WAYLAND_SCANNER) server-header $< $@
+$(PROTO)/%-protocol.c: $$(call xml_of,$$*)
+	@mkdir -p $(@D)
+	$(WAYLAND_SCANNER) private-code $< $@
 
-wifi_ctrl.o: $(SRC)/wifi_ctrl.c $(SRC)/netsys.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+$(BUILD)/platform/vulkan/shaders/%.h: platform/vulkan/shaders/%
+	@mkdir -p $(@D)
+	glslang -V --quiet $< -o $@ --vn $(subst .,_,$*)_data
 
-wifi_nm.o: $(SRC)/wifi_nm.c $(SRC)/netsys.h $(SRC)/fetch_async.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+$(PNPIDS): platform/drm/pnp_ids.awk $(HWDATA)/pnp.ids
+	@mkdir -p $(@D)
+	awk -f platform/drm/pnp_ids.awk $(HWDATA)/pnp.ids > $@
 
-wifi_share.o: $(SRC)/wifi_share.c $(SRC)/netsys.h $(SRC)/run_cmd.h $(SRC)/util.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+src/config.h:
+	cp src/config.def.h $@
 
-qr_scan.o: $(SRC)/qr_scan.c $(SRC)/nixlytile.h $(SRC)/netsys.h $(SRC)/popup_card.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
+nixly-fand: src/nixly_fand.c
+	$(CC) -O2 -Wall -Wextra -o $@ src/nixly_fand.c -ldl
+nixly-diskd: src/nixly_diskd.c
+	$(CC) -O2 -Wall -Wextra -o $@ src/nixly_diskd.c
+nixly-jaild: src/nixly_jaild.c src/jaild_attach.c src/jaild.h src/priv_sock.h
+	$(CC) -O2 -Wall -Wextra -o $@ src/nixly_jaild.c src/jaild_attach.c
 
-btmon.o: $(SRC)/btmon.c $(SRC)/netsys.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-
-bt_rssi.o: $(SRC)/bt_rssi.c $(SRC)/netsys.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-
-bt_audio.o: $(SRC)/bt_audio.c $(SRC)/netsys.h $(SRC)/fetch_async.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-
-bt_caps.o: $(SRC)/bt_caps.c $(SRC)/netsys.h $(SRC)/fetch_async.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-
-text_entry.o: $(SRC)/text_entry.c $(SRC)/netsys.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-
-net_ui.o: $(SRC)/net_ui.c $(SRC)/nixlytile.h $(SRC)/netsys.h $(SRC)/popup_card.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-
-bt_ui.o: $(SRC)/bt_ui.c $(SRC)/nixlytile.h $(SRC)/netsys.h $(SRC)/popup_card.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-
-display_ui.o: $(SRC)/display_ui.c $(SRC)/nixlytile.h $(SRC)/popup_card.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-
-power_ui.o: $(SRC)/power_ui.c $(SRC)/nixlytile.h $(SRC)/popup_card.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-audio_meter.o: $(SRC)/audio_meter.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-audio_watch.o: $(SRC)/audio_watch.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-audio_devices.o: $(SRC)/audio_devices.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-gaming_conf.o: $(SRC)/gaming_conf.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-mic_gate.o: $(SRC)/mic_gate.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-gshortcuts.o: $(SRC)/gshortcuts.c $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-statusbar.o: $(SRC)/statusbar.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-tray.o: $(SRC)/tray.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-statusbar_support.o: $(SRC)/statusbar_support.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-popup_card.o: $(SRC)/popup_card.c $(SRC)/popup_card.h $(SRC)/nixlytile.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-popup_extra.o: $(SRC)/popup_extra.c $(SRC)/popup_card.h $(SRC)/nixlytile.h $(SRC)/netsys.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-terminfo.o: $(SRC)/terminfo.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-wobble.o: $(SRC)/wobble.c $(SRC)/wobble.h $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-wobble_render.o: $(SRC)/wobble_render.c $(SRC)/wobble.h $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-column_focus.o: $(SRC)/column_focus.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-launchfx.o: $(SRC)/launchfx.c $(SRC)/nixlytile.h $(SRC)/client.h
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-dwl-ipc-unstable-v2-protocol.o: $(SRC)/dwl-ipc-unstable-v2-protocol.c
-	$(CC) $(CPPFLAGS) $(MOD_CFLAGS) -o $@ -c $<
-# wayland-scanner generated protocol headers (output into src/)
-WAYLAND_SCANNER   = `$(PKG_CONFIG) --variable=wayland_scanner wayland-scanner`
-WAYLAND_PROTOCOLS = `$(PKG_CONFIG) --variable=pkgdatadir wayland-protocols`
-
-$(SRC)/cursor-shape-v1-protocol.h:
-	$(WAYLAND_SCANNER) enum-header \
-		$(WAYLAND_PROTOCOLS)/staging/cursor-shape/cursor-shape-v1.xml $@
-$(SRC)/pointer-constraints-unstable-v1-protocol.h:
-	$(WAYLAND_SCANNER) enum-header \
-		$(WAYLAND_PROTOCOLS)/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml $@
-$(SRC)/wlr-layer-shell-unstable-v1-protocol.h:
-	$(WAYLAND_SCANNER) enum-header \
-		protocols/wlr-layer-shell-unstable-v1.xml $@
-$(SRC)/wlr-output-power-management-unstable-v1-protocol.h:
-	$(WAYLAND_SCANNER) server-header \
-		protocols/wlr-output-power-management-unstable-v1.xml $@
-$(SRC)/xdg-shell-protocol.h:
-	$(WAYLAND_SCANNER) server-header \
-		$(WAYLAND_PROTOCOLS)/stable/xdg-shell/xdg-shell.xml $@
-$(SRC)/content-type-v1-protocol.h:
-	$(WAYLAND_SCANNER) server-header \
-		$(WAYLAND_PROTOCOLS)/staging/content-type/content-type-v1.xml $@
-$(SRC)/tearing-control-v1-protocol.h:
-	$(WAYLAND_SCANNER) server-header \
-		$(WAYLAND_PROTOCOLS)/staging/tearing-control/tearing-control-v1.xml $@
-$(SRC)/tablet-v2-protocol.h:
-	$(WAYLAND_SCANNER) server-header \
-		$(WAYLAND_PROTOCOLS)/stable/tablet/tablet-v2.xml $@
-$(SRC)/dwl-ipc-unstable-v2-protocol.h:
-	$(WAYLAND_SCANNER) server-header \
-		protocols/dwl-ipc-unstable-v2.xml $@
-$(SRC)/dwl-ipc-unstable-v2-protocol.c: $(SRC)/dwl-ipc-unstable-v2-protocol.h
-	$(WAYLAND_SCANNER) private-code \
-		protocols/dwl-ipc-unstable-v2.xml $@
-
-$(SRC)/config.h:
-	cp $(SRC)/config.def.h $@
 clean:
-	rm -f nixlytile nixly-fand nixly-diskd nixly-jaild *.o $(SRC)/*-protocol.h $(SRC)/*-protocol.c
+	rm -rf $(BUILD) nixlytile nixly-fand nixly-diskd nixly-jaild
 
-dist: clean
-	mkdir -p nixlytile-$(VERSION)
-	cp -R Makefile config.mk protocols \
-		nixlytile.1 nixlytile.desktop src \
-		nixlytile-$(VERSION)
-	tar -caf nixlytile-$(VERSION).tar.gz nixlytile-$(VERSION)
-	rm -rf nixlytile-$(VERSION)
-
-install: nixlytile nixly-fand nixly-diskd nixly-jaild
+install: all
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
-	rm -f $(DESTDIR)$(PREFIX)/bin/nixlytile
-	cp -f nixlytile $(DESTDIR)$(PREFIX)/bin
-	chmod 755 $(DESTDIR)$(PREFIX)/bin/nixlytile
-	cp -f nixly-fand $(DESTDIR)$(PREFIX)/bin
-	chmod 755 $(DESTDIR)$(PREFIX)/bin/nixly-fand
-	cp -f nixly-diskd $(DESTDIR)$(PREFIX)/bin
-	chmod 755 $(DESTDIR)$(PREFIX)/bin/nixly-diskd
-	cp -f nixly-jaild $(DESTDIR)$(PREFIX)/bin
-	chmod 755 $(DESTDIR)$(PREFIX)/bin/nixly-jaild
+	cp -f nixlytile nixly-fand nixly-diskd nixly-jaild $(DESTDIR)$(PREFIX)/bin
+	chmod 755 $(DESTDIR)$(PREFIX)/bin/nixlytile $(DESTDIR)$(PREFIX)/bin/nixly-fand \
+		$(DESTDIR)$(PREFIX)/bin/nixly-diskd $(DESTDIR)$(PREFIX)/bin/nixly-jaild
 	mkdir -p $(DESTDIR)$(DATADIR)/nixlytile/images
 	cp -r images/svg $(DESTDIR)$(DATADIR)/nixlytile/images/
 	mkdir -p $(DESTDIR)$(MANDIR)/man1
@@ -396,13 +146,16 @@ install: nixlytile nixly-fand nixly-diskd nixly-jaild
 	mkdir -p $(DESTDIR)$(DATADIR)/polkit-1/actions
 	cp -f org.nixlytile.jail-grant.policy $(DESTDIR)$(DATADIR)/polkit-1/actions/
 	chmod 644 $(DESTDIR)$(DATADIR)/polkit-1/actions/org.nixlytile.jail-grant.policy
+
 uninstall:
-	rm -f $(DESTDIR)$(PREFIX)/bin/nixlytile $(DESTDIR)$(MANDIR)/man1/nixlytile.1 \
+	rm -f $(DESTDIR)$(PREFIX)/bin/nixlytile $(DESTDIR)$(PREFIX)/bin/nixly-fand \
+		$(DESTDIR)$(PREFIX)/bin/nixly-diskd $(DESTDIR)$(PREFIX)/bin/nixly-jaild \
+		$(DESTDIR)$(MANDIR)/man1/nixlytile.1 \
 		$(DESTDIR)$(DATADIR)/wayland-sessions/nixlytile.desktop \
 		$(DESTDIR)$(DATADIR)/xdg-desktop-portal/portals/nixlytile.portal \
 		$(DESTDIR)$(DATADIR)/xdg-desktop-portal/nixlytile-portals.conf \
 		$(DESTDIR)$(DATADIR)/polkit-1/actions/org.nixlytile.jail-grant.policy
 
-.SUFFIXES: .c .o
-.c.o:
-	$(CC) $(CPPFLAGS) $(NLCFLAGS) -o $@ -c $<
+.PHONY: all clean install uninstall
+
+-include $(OBJS:.o=.d)

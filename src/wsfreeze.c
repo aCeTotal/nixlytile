@@ -167,7 +167,7 @@ wsf_outputs_dark(void)
 	wl_list_for_each(m, &mons, link) {
 		if (m->is_virtual)
 			continue;
-		if (m->wlr_output && m->wlr_output->enabled && !m->asleep)
+		if (m->nx_output && m->nx_output->enabled && !m->asleep)
 			return 0;
 	}
 	return 1;
@@ -229,7 +229,7 @@ wsf_thaw_group_at(int i)
 
 	for (j = 0; j < groups[i].n; j++)
 		kill(groups[i].pids[j], SIGCONT); /* ESRCH harmless */
-	wlr_log(WLR_INFO, "wsfreeze: thawed group leader=%d (%d pids)",
+	nx_log(NX_INFO, "wsfreeze: thawed group leader=%d (%d pids)",
 		(int)groups[i].leader, groups[i].n);
 	groups[i] = groups[--ngroups];
 }
@@ -284,7 +284,7 @@ wsf_freeze_group(pid_t leader)
 	}
 	if (g->n) {
 		ngroups++;
-		wlr_log(WLR_INFO, "wsfreeze: froze group leader=%d (%d pids)",
+		nx_log(NX_INFO, "wsfreeze: froze group leader=%d (%d pids)",
 			(int)leader, g->n);
 	}
 }

@@ -195,7 +195,7 @@ voice_launch(const char *path)
 	if (voice_jump(&names))
 		return;
 	if (!desktop_exec(path, exec, sizeof(exec))) {
-		wlr_log(WLR_ERROR, "voice: no Exec in %s", path);
+		nx_log(NX_ERROR, "voice: no Exec in %s", path);
 		return;
 	}
 	spawn_cmd(exec);
@@ -226,7 +226,7 @@ voice_dispatch(char *line)
 		c->run(arg);
 		return;
 	}
-	wlr_log(WLR_ERROR, "voice: unknown command '%s %s'", line, arg);
+	nx_log(NX_ERROR, "voice: unknown command '%s %s'", line, arg);
 }
 
 static void
@@ -321,7 +321,7 @@ voice_start_child(void *data)
 	close(pipefd[1]);
 	voice_fd = pipefd[0];
 	if (err) {
-		wlr_log(WLR_ERROR, "voice: cannot start %s: %s", VOICE_BIN, strerror(err));
+		nx_log(NX_ERROR, "voice: cannot start %s: %s", VOICE_BIN, strerror(err));
 		voice_lost();
 		return 0;
 	}

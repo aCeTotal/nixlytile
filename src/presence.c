@@ -25,7 +25,7 @@
  * presence_sample_once().  Visible idle-inhibitors (video players)
  * block save-entry.
  */
-#include <wlr/types/wlr_switch.h>
+#include "platform/input/device/switch.h"
 
 #include "nixlytile.h"
 
@@ -61,15 +61,15 @@ presence_active(void)
 static int
 pr_idle_inhibited(void)
 {
-	struct wlr_idle_inhibitor_v1 *inhibitor;
+	struct nx_idle_inhibitor_v1 *inhibitor;
 	int lx, ly;
 
 	wl_list_for_each(inhibitor, &idle_inhibit_mgr->inhibitors, link) {
-		struct wlr_surface *surface =
-			wlr_surface_get_root_surface(inhibitor->surface);
-		struct wlr_scene_tree *tree = surface->data;
+		struct nx_surface *surface =
+			nx_surface_get_root_surface(inhibitor->surface);
+		struct nx_scene_tree *tree = surface->data;
 
-		if (!tree || wlr_scene_node_coords(&tree->node, &lx, &ly))
+		if (!tree || nx_scene_node_coords(&tree->node, &lx, &ly))
 			return 1;
 	}
 	return 0;
@@ -111,7 +111,7 @@ pr_go_dark(void *data)
 	cpuclock_regime_dark_async();
 
 	pr_outputs_set(0);
-	wlr_log(WLR_INFO, "presence: nobody in front — full power save");
+	nx_log(NX_INFO, "presence: nobody in front — full power save");
 	return 0;
 }
 
@@ -149,7 +149,7 @@ pr_exit_save(void)
 	} else if (pr_saved_backlight > 0.0) {
 		set_backlight_percent(pr_saved_backlight);
 	}
-	wlr_log(WLR_INFO, "presence: someone's back — waking to lockscreen");
+	nx_log(NX_INFO, "presence: someone's back — waking to lockscreen");
 }
 
 /* One explicit grab (lightsense wants a fresh ambient sample) even
@@ -287,10 +287,10 @@ typedef struct {
 static void
 pr_switch_toggle(struct wl_listener *listener, void *data)
 {
-	struct wlr_switch_toggle_event *event = data;
+	struct nx_switch_toggle_event *event = data;
 
-	if (event->switch_type == WLR_SWITCH_TYPE_LID
-			&& event->switch_state == WLR_SWITCH_STATE_OFF)
+	if (event->switch_type == NX_SWITCH_TYPE_LID
+			&& event->switch_state == NX_SWITCH_STATE_OFF)
 		presence_note_input();
 }
 
@@ -306,11 +306,11 @@ pr_switch_destroy(struct wl_listener *listener, void *data)
 
 /* Opening the lid is presence. */
 void
-presence_watch_switch(struct wlr_input_device *device)
+presence_watch_switch(struct nx_input_device *device)
 {
 	PresenceSwitch *sw = ecalloc(1, sizeof(*sw));
 
-	LISTEN(&wlr_switch_from_input_device(device)->events.toggle,
+	LISTEN(&nx_switch_from_input_device(device)->events.toggle,
 			&sw->toggle, pr_switch_toggle);
 	LISTEN(&device->events.destroy, &sw->destroy, pr_switch_destroy);
 }

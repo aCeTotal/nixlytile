@@ -15,7 +15,7 @@ anchor(int pos, int span, int size, int how)
 void
 float_fit(Client *c)
 {
-	struct wlr_box g;
+	struct nx_box g;
 	int cw, ch;
 
 	if (!c->scene || !client_surface(c)->mapped)
@@ -42,7 +42,7 @@ float_fit(Client *c)
 }
 
 void
-float_set(Client *c, struct wlr_box want, int ax, int ay)
+float_set(Client *c, struct nx_box want, int ax, int ay)
 {
 	c->float_want = want;
 	c->float_ax = ax;

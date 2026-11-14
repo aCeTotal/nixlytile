@@ -30,19 +30,19 @@
 /* Same critically-damped feel as the client notification lane. */
 static const SpringParams SPRING_OSD = { 1.0, 1.0, 800.0 };
 
-/* Natural size per child buffer: the scene drops its wlr_buffer pointer
+/* Natural size per child buffer: the scene drops its nx_buffer pointer
  * as soon as the texture is uploaded, so the clip pass cannot read it. */
 #define OSD_MAX_KIDS 128
 
 typedef struct {
-	struct wlr_scene_buffer *sb;
+	struct nx_scene_buffer *sb;
 	int w, h;
 } ToastKid;
 
 typedef struct Toast {
 	struct wl_list link;
 	Monitor *m;
-	struct wlr_scene_tree *tree;
+	struct nx_scene_tree *tree;
 	ToastKid kid[OSD_MAX_KIDS];
 	int nkids;
 	int w, h;
@@ -61,8 +61,8 @@ static struct wl_list toasts = { &toasts, &toasts };
 static void
 osd_schedule(Monitor *m)
 {
-	if (m && m->wlr_output)
-		wlr_output_schedule_frame(m->wlr_output);
+	if (m && m->nx_output)
+		nx_output_schedule_frame(m->nx_output);
 }
 
 static void
@@ -71,7 +71,7 @@ toast_destroy(Toast *t)
 	if (t->timer)
 		wl_event_source_remove(t->timer);
 	if (t->tree)
-		wlr_scene_node_destroy(&t->tree->node);
+		nx_scene_node_destroy(&t->tree->node);
 	wl_list_remove(&t->link);
 	free(t);
 }
@@ -101,7 +101,7 @@ rounded_rect(cairo_t *cr, double x, double y, double w, double h, double r)
 
 /* Card background: dark translucent rounded rect, hairline border, and
  * an accent stripe hugging the left rounded edge. */
-static struct wlr_buffer *
+static struct nx_buffer *
 make_card_buffer(int w, int h)
 {
 	cairo_surface_t *cs;
@@ -150,12 +150,12 @@ make_card_buffer(int w, int h)
 	buf->drm_format = DRM_FORMAT_ARGB8888;
 	buf->stride = stride;
 	buf->owns_data = 1;
-	wlr_buffer_init(&buf->base, &pixman_buffer_impl, w, h);
+	nx_buffer_init(&buf->base, &pixman_buffer_impl, w, h);
 	return &buf->base;
 }
 
 static void
-toast_track(Toast *t, struct wlr_scene_buffer *sb, int w, int h)
+toast_track(Toast *t, struct nx_scene_buffer *sb, int w, int h)
 {
 	if (t->nkids >= OSD_MAX_KIDS)
 		return;
@@ -172,9 +172,9 @@ toast_build(Toast *t, const char *msg)
 {
 	tll(struct GlyphRun) glyphs = tll_init();
 	const struct fcft_glyph *glyph;
-	struct wlr_scene_buffer *scene_buf;
-	struct wlr_buffer *buffer;
-	struct wlr_scene_node *node, *tmp;
+	struct nx_scene_buffer *scene_buf;
+	struct nx_buffer *buffer;
+	struct nx_scene_node *node, *tmp;
 	uint32_t prev_cp = 0;
 	int pen_x = 0;
 	int min_y = INT_MAX, max_y = INT_MIN;
@@ -219,30 +219,30 @@ toast_build(Toast *t, const char *msg)
 	text_x = OSD_ACCENT_W + OSD_PAD_X;
 
 	wl_list_for_each_safe(node, tmp, &t->tree->children, link)
-		wlr_scene_node_destroy(node);
+		nx_scene_node_destroy(node);
 	t->nkids = 0;
 
 	buffer = card_shadow_buffer(t->w, t->h, OSD_RADIUS);
 	if (buffer) {
-		scene_buf = wlr_scene_buffer_create(t->tree, NULL);
+		scene_buf = nx_scene_buffer_create(t->tree, NULL);
 		if (scene_buf) {
-			wlr_scene_buffer_set_buffer(scene_buf, buffer);
-			wlr_scene_node_set_position(&scene_buf->node,
+			nx_scene_buffer_set_buffer(scene_buf, buffer);
+			nx_scene_node_set_position(&scene_buf->node,
 					-CARD_SHADOW_MARGIN, -CARD_SHADOW_MARGIN);
 			toast_track(t, scene_buf, buffer->width, buffer->height);
 		}
-		wlr_buffer_drop(buffer);
+		nx_buffer_drop(buffer);
 	}
 
 	buffer = make_card_buffer(t->w, t->h);
 	if (buffer) {
-		scene_buf = wlr_scene_buffer_create(t->tree, NULL);
+		scene_buf = nx_scene_buffer_create(t->tree, NULL);
 		if (scene_buf) {
-			wlr_scene_buffer_set_buffer(scene_buf, buffer);
-			wlr_scene_node_set_position(&scene_buf->node, 0, 0);
+			nx_scene_buffer_set_buffer(scene_buf, buffer);
+			nx_scene_node_set_position(&scene_buf->node, 0, 0);
 			toast_track(t, scene_buf, buffer->width, buffer->height);
 		}
-		wlr_buffer_drop(buffer);
+		nx_buffer_drop(buffer);
 	}
 
 	{
@@ -254,10 +254,10 @@ toast_build(Toast *t, const char *msg)
 			buffer = statusbar_buffer_from_glyph(glyph);
 			if (!buffer)
 				continue;
-			scene_buf = wlr_scene_buffer_create(t->tree, NULL);
+			scene_buf = nx_scene_buffer_create(t->tree, NULL);
 			if (scene_buf) {
-				wlr_scene_buffer_set_buffer(scene_buf, buffer);
-				wlr_scene_node_set_position(&scene_buf->node,
+				nx_scene_buffer_set_buffer(scene_buf, buffer);
+				nx_scene_node_set_position(&scene_buf->node,
 						text_x + it->item.pen_x + glyph->x,
 						origin_y - glyph->y);
 				toast_track(t, scene_buf, buffer->width,
@@ -281,23 +281,23 @@ toast_clip_to_mon(Toast *t, int x)
 	int i;
 
 	for (i = 0; i < t->nkids; i++) {
-		struct wlr_scene_buffer *sb = t->kid[i].sb;
+		struct nx_scene_buffer *sb = t->kid[i].sb;
 		int bw = t->kid[i].w, bh = t->kid[i].h;
 		int vis = lim - sb->node.x;
 
 		if (bw <= 0)
 			continue;
 		if (vis >= bw) {
-			wlr_scene_node_set_enabled(&sb->node, 1);
-			wlr_scene_buffer_set_source_box(sb, NULL);
-			wlr_scene_buffer_set_dest_size(sb, bw, bh);
+			nx_scene_node_set_enabled(&sb->node, 1);
+			nx_scene_buffer_set_source_box(sb, NULL);
+			nx_scene_buffer_set_dest_size(sb, bw, bh);
 		} else if (vis <= 0) {
-			wlr_scene_node_set_enabled(&sb->node, 0);
+			nx_scene_node_set_enabled(&sb->node, 0);
 		} else {
-			struct wlr_fbox src = { 0, 0, vis, bh };
-			wlr_scene_node_set_enabled(&sb->node, 1);
-			wlr_scene_buffer_set_source_box(sb, &src);
-			wlr_scene_buffer_set_dest_size(sb, vis, bh);
+			struct nx_fbox src = { 0, 0, vis, bh };
+			nx_scene_node_set_enabled(&sb->node, 1);
+			nx_scene_buffer_set_source_box(sb, &src);
+			nx_scene_buffer_set_dest_size(sb, vis, bh);
 		}
 	}
 }
@@ -309,7 +309,7 @@ osd_show_force(Monitor *m, const char *msg)
 {
 	Toast *t;
 
-	if (!m || !m->wlr_output || !msg || !*msg)
+	if (!m || !m->nx_output || !msg || !*msg)
 		return;
 
 	/* Swap content in place when a toast is already up on this monitor:
@@ -327,7 +327,7 @@ osd_show_force(Monitor *m, const char *msg)
 		if (t->timer)
 			wl_event_source_timer_update(t->timer, OSD_HOLD_MS);
 		/* Stay above the launch cover, which lives in the same layer. */
-		wlr_scene_node_raise_to_top(&t->tree->node);
+		nx_scene_node_raise_to_top(&t->tree->node);
 		toast_clip_to_mon(t, (int)t->x_f);
 		osd_schedule(m);
 		return;
@@ -337,13 +337,13 @@ osd_show_force(Monitor *m, const char *msg)
 	if (!t)
 		return;
 	t->m = m;
-	t->tree = wlr_scene_tree_create(layers[LyrOverlay]);
+	t->tree = nx_scene_tree_create(layers[LyrOverlay]);
 	if (!t->tree) {
 		free(t);
 		return;
 	}
 	if (!toast_build(t, msg)) {
-		wlr_scene_node_destroy(&t->tree->node);
+		nx_scene_node_destroy(&t->tree->node);
 		free(t);
 		return;
 	}
@@ -355,7 +355,7 @@ osd_show_force(Monitor *m, const char *msg)
 	t->x_vel = 0.0;
 	t->hiding = 0;
 	t->last_set_x = INT_MIN;
-	wlr_scene_node_set_position(&t->tree->node, t->off_x, t->slot_y);
+	nx_scene_node_set_position(&t->tree->node, t->off_x, t->slot_y);
 	toast_clip_to_mon(t, t->off_x);
 
 	t->timer = wl_event_loop_add_timer(event_loop, osd_hide_timeout, t);
@@ -387,7 +387,7 @@ osd_tick(Monitor *m, double dt, int *still)
 			continue;
 		if (spring_tick(&t->x_f, &t->x_vel, (double)t->target_x,
 				SPRING_OSD, dt)) {
-			wlr_scene_node_set_position(&t->tree->node,
+			nx_scene_node_set_position(&t->tree->node,
 					(int)t->x_f, t->slot_y);
 			toast_clip_to_mon(t, (int)t->x_f);
 			t->last_set_x = (int)t->x_f;
@@ -403,7 +403,7 @@ osd_tick(Monitor *m, double dt, int *still)
 		 * for the whole 3 s hold. */
 		if (t->last_set_x == t->target_x)
 			continue;
-		wlr_scene_node_set_position(&t->tree->node,
+		nx_scene_node_set_position(&t->tree->node,
 				t->target_x, t->slot_y);
 		toast_clip_to_mon(t, t->target_x);
 		t->last_set_x = t->target_x;

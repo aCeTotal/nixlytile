@@ -40,8 +40,8 @@
 typedef struct {
 	char name[64];
 	char label[128];
-	struct wlr_scene_tree *tree;  /* label box */
-	struct wlr_scene_rect *glow;  /* full-screen red wash */
+	struct nx_scene_tree *tree;  /* label box */
+	struct nx_scene_rect *glow;  /* full-screen red wash */
 	float glow_alpha;
 	int glow_target;              /* 1 while this screen is being dragged */
 } MonovlEntry;
@@ -58,8 +58,8 @@ monovl_monitor(const char *name)
 {
 	Monitor *m;
 	wl_list_for_each(m, &mons, link)
-		if (m->wlr_output && m->wlr_output->enabled &&
-		    strcmp(m->wlr_output->name, name) == 0)
+		if (m->nx_output && m->nx_output->enabled &&
+		    strcmp(m->nx_output->name, name) == 0)
 			return m;
 	return NULL;
 }
@@ -68,7 +68,7 @@ static void
 monovl_drop_label(MonovlEntry *e)
 {
 	if (e->tree) {
-		wlr_scene_node_destroy(&e->tree->node);
+		nx_scene_node_destroy(&e->tree->node);
 		e->tree = NULL;
 	}
 }
@@ -77,7 +77,7 @@ static void
 monovl_drop_glow(MonovlEntry *e)
 {
 	if (e->glow) {
-		wlr_scene_node_destroy(&e->glow->node);
+		nx_scene_node_destroy(&e->glow->node);
 		e->glow = NULL;
 	}
 	e->glow_alpha = 0.0f;
@@ -104,16 +104,16 @@ monovl_place_glow(MonovlEntry *e, Monitor *m)
 	float color[4] = { 0.85f, 0.10f, 0.12f, 0.0f };
 
 	if (!e->glow) {
-		e->glow = wlr_scene_rect_create(layers[LyrOverlay],
+		e->glow = nx_scene_rect_create(layers[LyrOverlay],
 			m->m.width, m->m.height, color);
 		if (!e->glow)
 			return;
 	}
-	wlr_scene_rect_set_size(e->glow, m->m.width, m->m.height);
-	wlr_scene_node_set_position(&e->glow->node, m->m.x, m->m.y);
+	nx_scene_rect_set_size(e->glow, m->m.width, m->m.height);
+	nx_scene_node_set_position(&e->glow->node, m->m.x, m->m.y);
 	color[3] = e->glow_alpha * MONOVL_GLOW_MAX;
-	wlr_scene_rect_set_color(e->glow, color);
-	wlr_scene_node_lower_to_bottom(&e->glow->node);
+	nx_scene_rect_set_color(e->glow, color);
+	nx_scene_node_lower_to_bottom(&e->glow->node);
 }
 
 /* Two rows: the label from nixlycc, then the connector this screen hangs off
@@ -137,14 +137,14 @@ monovl_place_label(MonovlEntry *e, Monitor *m)
 	box_w = wide + MONOVL_PADDING * 2;
 	box_h = row_h * 2 + MONOVL_PADDING;
 
-	e->tree = wlr_scene_tree_create(layers[LyrOverlay]);
+	e->tree = nx_scene_tree_create(layers[LyrOverlay]);
 	if (!e->tree)
 		return;
 
 	drawroundedrect(e->tree, 0, 0, box_w, box_h, monovl_box_bg);
 	tray_menu_draw_text(e->tree, e->label, MONOVL_PADDING, 0, box_h / 2, wide);
 	tray_menu_draw_text(e->tree, e->name, MONOVL_PADDING, box_h / 2, box_h / 2, wide);
-	wlr_scene_node_set_position(&e->tree->node,
+	nx_scene_node_set_position(&e->tree->node,
 		m->m.x + MONOVL_MARGIN, m->m.y + MONOVL_MARGIN);
 }
 
@@ -347,7 +347,7 @@ setup_monitor_overlay_watch(void)
 
 	monovl_inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
 	if (monovl_inotify_fd < 0) {
-		wlr_log(WLR_ERROR, "monitor_overlay: inotify_init failed: %s",
+		nx_log(NX_ERROR, "monitor_overlay: inotify_init failed: %s",
 			strerror(errno));
 		return;
 	}
@@ -355,7 +355,7 @@ setup_monitor_overlay_watch(void)
 	monovl_watch_wd = inotify_add_watch(monovl_inotify_fd, dir,
 		IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_MOVED_FROM);
 	if (monovl_watch_wd < 0) {
-		wlr_log(WLR_ERROR, "monitor_overlay: inotify_add_watch(%s) failed: %s",
+		nx_log(NX_ERROR, "monitor_overlay: inotify_add_watch(%s) failed: %s",
 			dir, strerror(errno));
 		close(monovl_inotify_fd);
 		monovl_inotify_fd = -1;
@@ -367,5 +367,5 @@ setup_monitor_overlay_watch(void)
 
 	/* nixlycc may already be showing the page when we start. */
 	monitor_overlay_update();
-	wlr_log(WLR_INFO, "monitor_overlay: watching %s", dir);
+	nx_log(NX_INFO, "monitor_overlay: watching %s", dir);
 }

@@ -21,11 +21,11 @@ xwayland_set_primary(Monitor *m)
 	const char *name;
 	int nout, i;
 
-	if (!xwayland || !m || !m->wlr_output)
+	if (!xwayland || !m || !m->nx_output)
 		return;
-	name = m->wlr_output->name;
+	name = m->nx_output->name;
 
-	xc = wlr_xwayland_get_xwm_connection(xwayland);
+	xc = nx_xwayland_get_xwm_connection(xwayland);
 	if (!xc)
 		return;
 	screen = xcb_setup_roots_iterator(xcb_get_setup(xc)).data;
@@ -51,7 +51,7 @@ xwayland_set_primary(Monitor *m)
 		if (len == (int)strlen(name) && !memcmp(oname, name, len)) {
 			xcb_randr_set_output_primary(xc, screen->root, outputs[i]);
 			xcb_flush(xc);
-			wlr_log(WLR_INFO, "Xwayland: RandR primary -> %s", name);
+			nx_log(NX_INFO, "Xwayland: RandR primary -> %s", name);
 			free(info);
 			break;
 		}

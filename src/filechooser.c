@@ -235,13 +235,13 @@ static const sd_bus_vtable fc_req_vtable[] = {
 static pid_t
 fc_parent_pid(const char *parent)
 {
-	struct wlr_xdg_foreign_exported *exported = NULL;
+	struct nx_xdg_foreign_exported *exported = NULL;
 	pid_t pid = 0;
 	uid_t uid;
 	gid_t gid;
 
 	if (strncmp(parent, FC_WAYLAND, strlen(FC_WAYLAND)) == 0)
-		exported = wlr_xdg_foreign_registry_find_by_handle(
+		exported = nx_xdg_foreign_registry_find_by_handle(
 			foreign_registry, parent + strlen(FC_WAYLAND));
 	if (!exported)
 		return client_get_pid(focustop(selmon));
@@ -320,7 +320,7 @@ filechooser_init(void)
 		return;
 	if (sd_bus_add_object_vtable(bus, &fc_slot, FC_OBJ_PATH, FC_IFACE,
 			fc_vtable, NULL) < 0)
-		wlr_log(WLR_ERROR, "filechooser: cannot export %s", FC_IFACE);
+		nx_log(NX_ERROR, "filechooser: cannot export %s", FC_IFACE);
 }
 
 void

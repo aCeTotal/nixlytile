@@ -76,7 +76,7 @@ setup_bindings_conf_watch(void)
 
 	bindingsconf_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
 	if (bindingsconf_fd < 0) {
-		wlr_log(WLR_ERROR, "bindings_conf: inotify_init failed: %s",
+		nx_log(NX_ERROR, "bindings_conf: inotify_init failed: %s",
 			strerror(errno));
 		return;
 	}
@@ -84,7 +84,7 @@ setup_bindings_conf_watch(void)
 	wd = inotify_add_watch(bindingsconf_fd, dir,
 		IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_DELETE_SELF);
 	if (wd < 0) {
-		wlr_log(WLR_INFO, "bindings_conf: no %s yet (%s)", dir, strerror(errno));
+		nx_log(NX_INFO, "bindings_conf: no %s yet (%s)", dir, strerror(errno));
 		close(bindingsconf_fd);
 		bindingsconf_fd = -1;
 		return;
@@ -97,5 +97,5 @@ setup_bindings_conf_watch(void)
 		bindingsconf_fd = -1;
 		return;
 	}
-	wlr_log(WLR_INFO, "bindings_conf: watching %s/%s", dir, BINDINGSCONF_NAME);
+	nx_log(NX_INFO, "bindings_conf: watching %s/%s", dir, BINDINGSCONF_NAME);
 }

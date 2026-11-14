@@ -8,13 +8,13 @@
 #include "nixlytile.h"
 
 typedef struct {
-	struct wlr_surface *surface;
+	struct nx_surface *surface;
 	struct wl_listener commit;
 	struct wl_listener destroy;
 } Watch;
 
 typedef struct {
-	struct wlr_surface *surface;
+	struct nx_surface *surface;
 	struct wl_event_source *source;
 	struct wl_listener destroy;
 	uint32_t seq;
@@ -37,7 +37,7 @@ hold_ready(int fd, uint32_t mask, void *data)
 {
 	Hold *h = data;
 
-	wlr_surface_unlock_cached(h->surface, h->seq);
+	nx_surface_unlock_cached(h->surface, h->seq);
 	hold_free(h);
 	return 0;
 }
@@ -52,13 +52,13 @@ hold_surface_destroy(struct wl_listener *listener, void *data)
 
 /* Pending GPU writes, or -1. */
 static int
-write_fence(struct wlr_buffer *buffer)
+write_fence(struct nx_buffer *buffer)
 {
-	struct wlr_dmabuf_attributes dmabuf;
+	struct nx_dmabuf_attributes dmabuf;
 	struct dma_buf_export_sync_file sync = { .flags = DMA_BUF_SYNC_READ, .fd = -1 };
 	struct pollfd p;
 
-	if (!wlr_buffer_get_dmabuf(buffer, &dmabuf))
+	if (!nx_buffer_get_dmabuf(buffer, &dmabuf))
 		return -1;
 	if (ioctl(dmabuf.fd[0], DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &sync) < 0)
 		return -1;
@@ -73,13 +73,13 @@ static void
 surface_commit(struct wl_listener *listener, void *data)
 {
 	Watch *w = wl_container_of(listener, w, commit);
-	struct wlr_surface *surface = w->surface;
+	struct nx_surface *surface = w->surface;
 	Hold *h;
 	int fence;
 
-	if (!(surface->pending.committed & WLR_SURFACE_STATE_BUFFER) || !surface->pending.buffer)
+	if (!(surface->pending.committed & NX_SURFACE_STATE_BUFFER) || !surface->pending.buffer)
 		return;
-	if (wlr_linux_drm_syncobj_v1_get_surface_state(surface))
+	if (nx_linux_drm_syncobj_v1_get_surface_state(surface))
 		return;
 	fence = write_fence(surface->pending.buffer);
 	if (fence < 0)
@@ -94,7 +94,7 @@ surface_commit(struct wl_listener *listener, void *data)
 	}
 	h->surface = surface;
 	h->fence = fence;
-	h->seq = wlr_surface_lock_pending(surface);
+	h->seq = nx_surface_lock_pending(surface);
 	h->destroy.notify = hold_surface_destroy;
 	wl_signal_add(&surface->events.destroy, &h->destroy);
 }
@@ -128,7 +128,7 @@ bufready_init(void)
 	wl_signal_add(&compositor->events.new_surface, &new_surface);
 }
 
-/* wlroots asserts on a live listener. */
+/* Compositor teardown asserts no listeners. */
 void
 bufready_finish(void)
 {

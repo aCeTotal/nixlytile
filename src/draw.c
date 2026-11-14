@@ -2,13 +2,13 @@
 #include "client.h"
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <wlr/render/dmabuf.h>
+#include "platform/render/dmabuf.h"
 
 void
-drawrect(struct wlr_scene_tree *parent, int x, int y,
+drawrect(struct nx_scene_tree *parent, int x, int y,
 		int width, int height, const float color[static 4])
 {
-	struct wlr_scene_rect *r;
+	struct nx_scene_rect *r;
 	float col[4];
 
 	if (!parent || width <= 0 || height <= 0)
@@ -19,13 +19,13 @@ drawrect(struct wlr_scene_tree *parent, int x, int y,
 	col[2] = color[2];
 	col[3] = color[3];
 
-	r = wlr_scene_rect_create(parent, width, height, col);
+	r = nx_scene_rect_create(parent, width, height, col);
 	if (r)
-		wlr_scene_node_set_position(&r->node, x, y);
+		nx_scene_node_set_position(&r->node, x, y);
 }
 
 void
-draw_border(struct wlr_scene_tree *parent, int x, int y,
+draw_border(struct nx_scene_tree *parent, int x, int y,
 		int w, int h, int thickness, const float color[static 4])
 {
 	drawrect(parent, x, y, w, thickness, color);
@@ -161,9 +161,9 @@ nixly_text_draw(pixman_image_t *dst, struct fcft_font *f, const char *s,
 }
 
 void
-pixman_buffer_destroy(struct wlr_buffer *wlr_buffer)
+pixman_buffer_destroy(struct nx_buffer *nx_buffer)
 {
-	struct PixmanBuffer *buf = wl_container_of(wlr_buffer, buf, base);
+	struct PixmanBuffer *buf = wl_container_of(nx_buffer, buf, base);
 
 	if (!buf)
 		return;
@@ -175,10 +175,10 @@ pixman_buffer_destroy(struct wlr_buffer *wlr_buffer)
 }
 
 bool
-pixman_buffer_begin_data_ptr_access(struct wlr_buffer *wlr_buffer, uint32_t flags,
+pixman_buffer_begin_data_ptr_access(struct nx_buffer *nx_buffer, uint32_t flags,
 		void **data, uint32_t *format, size_t *stride)
 {
-	struct PixmanBuffer *buf = wl_container_of(wlr_buffer, buf, base);
+	struct PixmanBuffer *buf = wl_container_of(nx_buffer, buf, base);
 
 	(void)flags;
 	if (!buf || !data || !format || !stride)
@@ -191,25 +191,25 @@ pixman_buffer_begin_data_ptr_access(struct wlr_buffer *wlr_buffer, uint32_t flag
 }
 
 void
-pixman_buffer_end_data_ptr_access(struct wlr_buffer *wlr_buffer)
+pixman_buffer_end_data_ptr_access(struct nx_buffer *nx_buffer)
 {
-	(void)wlr_buffer;
+	(void)nx_buffer;
 }
 
 bool
-pixman_buffer_get_dmabuf(struct wlr_buffer *wlr_buffer,
-		struct wlr_dmabuf_attributes *attribs)
+pixman_buffer_get_dmabuf(struct nx_buffer *nx_buffer,
+		struct nx_dmabuf_attributes *attribs)
 {
-	(void)wlr_buffer;
+	(void)nx_buffer;
 	(void)attribs;
 	return false;
 }
 
 bool
-pixman_buffer_get_shm(struct wlr_buffer *wlr_buffer,
-		struct wlr_shm_attributes *attribs)
+pixman_buffer_get_shm(struct nx_buffer *nx_buffer,
+		struct nx_shm_attributes *attribs)
 {
-	(void)wlr_buffer;
+	(void)nx_buffer;
 	(void)attribs;
 	return false;
 }
@@ -217,9 +217,9 @@ pixman_buffer_get_shm(struct wlr_buffer *wlr_buffer,
 /* ── CPU cursor buffer (Nvidia HW cursor plane) ──────────────────── */
 
 static void
-cpu_cursor_buffer_destroy_cb(struct wlr_buffer *wlr_buffer)
+cpu_cursor_buffer_destroy_cb(struct nx_buffer *nx_buffer)
 {
-	struct CpuCursorBuffer *buf = wl_container_of(wlr_buffer, buf, base);
+	struct CpuCursorBuffer *buf = wl_container_of(nx_buffer, buf, base);
 
 	if (buf->map && buf->map_size > 0)
 		munmap(buf->map, buf->map_size);
@@ -235,10 +235,10 @@ cpu_cursor_buffer_destroy_cb(struct wlr_buffer *wlr_buffer)
 }
 
 static bool
-cpu_cursor_buffer_get_dmabuf(struct wlr_buffer *wlr_buffer,
-		struct wlr_dmabuf_attributes *attribs)
+cpu_cursor_buffer_get_dmabuf(struct nx_buffer *nx_buffer,
+		struct nx_dmabuf_attributes *attribs)
 {
-	struct CpuCursorBuffer *buf = wl_container_of(wlr_buffer, buf, base);
+	struct CpuCursorBuffer *buf = wl_container_of(nx_buffer, buf, base);
 
 	if (buf->dmabuf_fd < 0)
 		return false;
@@ -256,10 +256,10 @@ cpu_cursor_buffer_get_dmabuf(struct wlr_buffer *wlr_buffer,
 }
 
 static bool
-cpu_cursor_buffer_begin_data_ptr_access(struct wlr_buffer *wlr_buffer,
+cpu_cursor_buffer_begin_data_ptr_access(struct nx_buffer *nx_buffer,
 		uint32_t flags, void **data, uint32_t *format, size_t *stride)
 {
-	struct CpuCursorBuffer *buf = wl_container_of(wlr_buffer, buf, base);
+	struct CpuCursorBuffer *buf = wl_container_of(nx_buffer, buf, base);
 	(void)flags;
 
 	if (!buf->map)
@@ -272,12 +272,12 @@ cpu_cursor_buffer_begin_data_ptr_access(struct wlr_buffer *wlr_buffer,
 }
 
 static void
-cpu_cursor_buffer_end_data_ptr_access(struct wlr_buffer *wlr_buffer)
+cpu_cursor_buffer_end_data_ptr_access(struct nx_buffer *nx_buffer)
 {
-	(void)wlr_buffer;
+	(void)nx_buffer;
 }
 
-static const struct wlr_buffer_impl cpu_cursor_buffer_impl = {
+static const struct nx_buffer_impl cpu_cursor_buffer_impl = {
 	.destroy = cpu_cursor_buffer_destroy_cb,
 	.get_dmabuf = cpu_cursor_buffer_get_dmabuf,
 	.begin_data_ptr_access = cpu_cursor_buffer_begin_data_ptr_access,
@@ -304,7 +304,7 @@ cpu_cursor_buffer_create(int drm_fd, uint32_t w, uint32_t h, int owns_fd)
 	create.height = h;
 	create.bpp = 32;
 	if (ioctl(drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &create) < 0) {
-		wlr_log(WLR_ERROR, "CPU cursor: DRM_IOCTL_MODE_CREATE_DUMB failed: %s",
+		nx_log(NX_ERROR, "CPU cursor: DRM_IOCTL_MODE_CREATE_DUMB failed: %s",
 			strerror(errno));
 		free(buf);
 		return NULL;
@@ -317,7 +317,7 @@ cpu_cursor_buffer_create(int drm_fd, uint32_t w, uint32_t h, int owns_fd)
 
 	map_req.handle = buf->gem_handle;
 	if (ioctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &map_req) < 0) {
-		wlr_log(WLR_ERROR, "CPU cursor: DRM_IOCTL_MODE_MAP_DUMB failed: %s",
+		nx_log(NX_ERROR, "CPU cursor: DRM_IOCTL_MODE_MAP_DUMB failed: %s",
 			strerror(errno));
 		goto fail;
 	}
@@ -326,13 +326,13 @@ cpu_cursor_buffer_create(int drm_fd, uint32_t w, uint32_t h, int owns_fd)
 			drm_fd, map_req.offset);
 	if (buf->map == MAP_FAILED) {
 		buf->map = NULL;
-		wlr_log(WLR_ERROR, "CPU cursor: mmap failed: %s", strerror(errno));
+		nx_log(NX_ERROR, "CPU cursor: mmap failed: %s", strerror(errno));
 		goto fail;
 	}
 
 	if (drmPrimeHandleToFD(drm_fd, buf->gem_handle,
 			DRM_CLOEXEC | DRM_RDWR, &prime_fd) < 0) {
-		wlr_log(WLR_ERROR, "CPU cursor: drmPrimeHandleToFD failed: %s",
+		nx_log(NX_ERROR, "CPU cursor: drmPrimeHandleToFD failed: %s",
 			strerror(errno));
 		goto fail;
 	}
@@ -340,9 +340,9 @@ cpu_cursor_buffer_create(int drm_fd, uint32_t w, uint32_t h, int owns_fd)
 
 	memset(buf->map, 0, buf->map_size);
 
-	wlr_buffer_init(&buf->base, &cpu_cursor_buffer_impl, (int)w, (int)h);
+	nx_buffer_init(&buf->base, &cpu_cursor_buffer_impl, (int)w, (int)h);
 
-	wlr_log(WLR_INFO, "CPU cursor buffer created: %ux%u stride=%u size=%zu",
+	nx_log(NX_INFO, "CPU cursor buffer created: %ux%u stride=%u size=%zu",
 		w, h, buf->stride, buf->map_size);
 	return buf;
 
@@ -364,14 +364,14 @@ cpu_cursor_buffer_destroy(struct CpuCursorBuffer *buf)
 {
 	if (!buf)
 		return;
-	wlr_buffer_drop(&buf->base);
+	nx_buffer_drop(&buf->base);
 }
 
 /* Cursor image cache + tracked surface for CPU-cursor mode (Nvidia) */
 static int    cursor_from_client;
 int           cursor_hidden_by_client;
 static char   cursor_cached_name[64];
-static struct wlr_surface *tracked_cursor_surface;
+static struct nx_surface *tracked_cursor_surface;
 static struct wl_listener  tracked_cursor_commit;
 static struct wl_listener  tracked_cursor_destroy;
 static int                 tracked_cursor_hx, tracked_cursor_hy;
@@ -380,7 +380,7 @@ static struct CpuCursorBuffer *cursor_shown_buf;
 /*
  * Pick the CPU cursor buffer to paint the next image into.
  *
- * wlr_cursor_set_buffer() returns early when buffer, hotspot and scale are all
+ * nx_cursor_set_buffer() returns early when buffer, hotspot and scale are all
  * unchanged, and the DRM backend copies (blits/renders) the cursor buffer at
  * set-time on multi-GPU and on the rendered-cursor path.  Painting a new image
  * into the one buffer we already handed over therefore never reaches the
@@ -406,7 +406,7 @@ static void
 cursor_commit_buffer(struct CpuCursorBuffer *buf, int32_t hx, int32_t hy)
 {
 	cursor_shown_buf = buf;
-	wlr_cursor_set_buffer(cursor, buf ? &buf->base : NULL, hx, hy, 1.0f);
+	nx_cursor_set_buffer(cursor, buf ? &buf->base : NULL, hx, hy, 1.0f);
 }
 
 static int cursor_paint_xcursor(const char *name);
@@ -445,7 +445,7 @@ cursor_clear_stale(struct CpuCursorBuffer *buf, uint32_t new_w, uint32_t new_h)
 }
 
 static void
-upload_cursor_surface(struct wlr_surface *surface, int hx, int hy)
+upload_cursor_surface(struct nx_surface *surface, int hx, int hy)
 {
 	struct CpuCursorBuffer *buf = cursor_back_buffer();
 	void *src_data;
@@ -459,17 +459,17 @@ upload_cursor_surface(struct wlr_surface *surface, int hx, int hy)
 	if (!buf)
 		return;
 
-	if (!wlr_buffer_begin_data_ptr_access(&surface->buffer->base,
-			WLR_BUFFER_DATA_PTR_ACCESS_READ,
+	if (!nx_buffer_begin_data_ptr_access(&surface->buffer->base,
+			NX_BUFFER_DATA_PTR_ACCESS_READ,
 			&src_data, &src_format, &src_stride)) {
 		/* The client often destroys the source wl_buffer right after
-		 * commit; the wlr_client_buffer then has no dmabuf/shm/data-ptr
+		 * commit; the nx_client_buffer then has no dmabuf/shm/data-ptr
 		 * left, so importing a fresh texture fails.  The texture created
 		 * at commit time survives, so prefer it. */
-		struct wlr_texture *tex = wlr_surface_get_texture(surface);
-		struct wlr_texture *own_tex = NULL;
+		struct nx_texture *tex = nx_surface_get_texture(surface);
+		struct nx_texture *own_tex = NULL;
 		if (!tex) {
-			own_tex = wlr_texture_from_buffer(drw,
+			own_tex = nx_texture_from_buffer(drw,
 				&surface->buffer->base);
 			tex = own_tex;
 		}
@@ -484,14 +484,14 @@ upload_cursor_surface(struct wlr_surface *surface, int hx, int hy)
 
 		cursor_clear_stale(buf, copy_w, copy_h);
 
-		if (!wlr_texture_read_pixels(tex,
-				&(struct wlr_texture_read_pixels_options){
+		if (!nx_texture_read_pixels(tex,
+				&(struct nx_texture_read_pixels_options){
 			.data = buf->map,
 			.format = DRM_FORMAT_ARGB8888,
 			.stride = buf->stride,
 			.src_box = { .width = copy_w, .height = copy_h },
 		})) {
-			wlr_texture_destroy(own_tex);
+			nx_texture_destroy(own_tex);
 			/* Buffer is blank now, but it is the back buffer — the
 			 * displayed image is untouched because we don't commit. */
 			game_log("CURSOR: client surface read_pixels failed "
@@ -499,7 +499,7 @@ upload_cursor_surface(struct wlr_surface *surface, int hx, int hy)
 			return;
 		}
 
-		wlr_texture_destroy(own_tex);
+		nx_texture_destroy(own_tex);
 	} else {
 		copy_w = MIN((uint32_t)surface->current.width, buf->width);
 		copy_h = MIN((uint32_t)surface->current.height, buf->height);
@@ -521,7 +521,7 @@ upload_cursor_surface(struct wlr_surface *surface, int hx, int hy)
 		}
 		opaque_known = 1;
 
-		wlr_buffer_end_data_ptr_access(&surface->buffer->base);
+		nx_buffer_end_data_ptr_access(&surface->buffer->base);
 	}
 
 	if (opaque_known)
@@ -542,20 +542,13 @@ tracked_cursor_handle_destroy(struct wl_listener *listener, void *data)
 	stop_tracking_cursor_surface();
 }
 
-/* The CPU-cursor path never calls wlr_cursor_set_surface(), which is the
- * only wlroots path that answers wl_surface.frame requests on cursor
- * surfaces (cursor_output_cursor_handle_output_commit).  Xwayland requests
- * a frame callback with every cursor image it attaches and defers ALL
- * further cursor updates until it fires — so without this, an Xwayland
- * game's first show/hide cycle works and every later "show" is silently
- * withheld by Xwayland: the pointer stays invisible for the rest of the
- * session (menus included).  Drain the callbacks ourselves. */
+/* CPU cursors drain frame callbacks themselves. */
 static void
-cursor_surface_send_frame_done(struct wlr_surface *surface)
+cursor_surface_send_frame_done(struct nx_surface *surface)
 {
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
-	wlr_surface_send_frame_done(surface, &now);
+	nx_surface_send_frame_done(surface, &now);
 }
 
 static void
@@ -581,14 +574,14 @@ static int
 cursor_paint_xcursor(const char *name)
 {
 	struct CpuCursorBuffer *buf;
-	struct wlr_xcursor *xcur;
-	struct wlr_xcursor_image *img;
+	struct nx_xcursor *xcur;
+	struct nx_xcursor_image *img;
 	uint32_t src_stride, copy_w, copy_h, y;
 	const uint8_t *src;
 	uint8_t *dst;
 
-	wlr_xcursor_manager_load(cursor_mgr, 1);
-	xcur = wlr_xcursor_manager_get_xcursor(cursor_mgr, name, 1);
+	nx_xcursor_manager_load(cursor_mgr, 1);
+	xcur = nx_xcursor_manager_get_xcursor(cursor_mgr, name, 1);
 	if (!xcur || xcur->image_count == 0)
 		return 0;
 
@@ -635,11 +628,11 @@ nixly_cursor_set_xcursor(const char *name)
 	stop_tracking_cursor_surface();
 
 	if (!cpu_cursor_active || !cursor_paint_xcursor(name))
-		wlr_cursor_set_xcursor(cursor, cursor_mgr, name);
+		nx_cursor_set_xcursor(cursor, cursor_mgr, name);
 }
 
 void
-nixly_cursor_set_client_surface(struct wlr_surface *surface, int hx, int hy)
+nixly_cursor_set_client_surface(struct nx_surface *surface, int hx, int hy)
 {
 	cursor_from_client = 1;
 	cursor_hidden_by_client = !surface;
@@ -648,7 +641,7 @@ nixly_cursor_set_client_surface(struct wlr_surface *surface, int hx, int hy)
 	stop_tracking_cursor_surface();
 
 	if (!cpu_cursor_active) {
-		wlr_cursor_set_surface(cursor, surface, hx, hy);
+		nx_cursor_set_surface(cursor, surface, hx, hy);
 		return;
 	}
 

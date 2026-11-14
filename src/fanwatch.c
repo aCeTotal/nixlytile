@@ -235,7 +235,7 @@ fanwatch_init(void)
 	fw_run = 1;
 	if (pthread_create(&fw_thread, NULL, fw_worker, NULL) != 0) {
 		fw_run = 0;
-		wlr_log(WLR_ERROR, "fanwatch: thread start failed — "
+		nx_log(NX_ERROR, "fanwatch: thread start failed — "
 			"fan module unavailable");
 	}
 }

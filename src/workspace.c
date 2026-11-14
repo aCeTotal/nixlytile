@@ -42,7 +42,7 @@ workspace_create(Monitor *m)
 	}
 	ws->mon = m;
 	ws->idx = m->next_ws_id++;
-	snprintf(ws->home, sizeof(ws->home), "%s", m->wlr_output->name);
+	snprintf(ws->home, sizeof(ws->home), "%s", m->nx_output->name);
 	wl_list_init(&ws->columns);
 	ws->n_columns = 0;
 	ws->scroll_x = ws->target_scroll_x = 0;
@@ -51,7 +51,7 @@ workspace_create(Monitor *m)
 	/* Scene tree parented under the tile layer.  In phase 3 this is
 	 * where we attach Y-offsets for vertical switch animation. */
 	if (layers[LyrTile])
-		ws->scene = wlr_scene_tree_create(layers[LyrTile]);
+		ws->scene = nx_scene_tree_create(layers[LyrTile]);
 
 	wl_list_insert(m->workspaces.prev, &ws->link);
 	m->n_workspaces++;
@@ -79,7 +79,7 @@ workspace_destroy(Workspace *ws)
 		column_destroy(col);
 
 	if (ws->scene)
-		wlr_scene_node_destroy(&ws->scene->node);
+		nx_scene_node_destroy(&ws->scene->node);
 
 	wl_list_remove(&ws->link);
 	if (ws->mon) {
@@ -610,8 +610,8 @@ monitor_active_ws(Monitor *m)
 			return ws;
 
 	if (m->active_ws)
-		wlr_log(WLR_ERROR, "active_ws not on %s — repairing",
-			m->wlr_output ? m->wlr_output->name : "?");
+		nx_log(NX_ERROR, "active_ws not on %s — repairing",
+			m->nx_output ? m->nx_output->name : "?");
 	m->active_ws = wl_list_empty(&m->workspaces) ? NULL
 		: wl_container_of(m->workspaces.next, ws, link);
 	m->prev_ws = NULL;
@@ -857,7 +857,7 @@ workspace_layout(Workspace *ws)
 		return;
 
 	m = ws->mon;
-	if (!m->wlr_output || !m->wlr_output->enabled)
+	if (!m->nx_output || !m->nx_output->enabled)
 		return;
 
 	gap = m->gaps ? (int)gappx : 0;
@@ -970,7 +970,7 @@ printstatus(void)
 		goto publish;
 
 	wl_list_for_each(m, &mons, link) {
-		if (!m->wlr_output)
+		if (!m->nx_output)
 			continue;
 		occ = sel = urg = 0;
 
@@ -997,23 +997,23 @@ printstatus(void)
 
 		c = focustop(m);
 		if (c) {
-			printf("%s title %s\n", m->wlr_output->name,
+			printf("%s title %s\n", m->nx_output->name,
 				client_get_title(c) ? client_get_title(c) : "");
-			printf("%s appid %s\n", m->wlr_output->name,
+			printf("%s appid %s\n", m->nx_output->name,
 				client_get_appid(c) ? client_get_appid(c) : "");
-			printf("%s fullscreen %d\n", m->wlr_output->name, c->isfullscreen);
-			printf("%s floating %d\n", m->wlr_output->name, c->isfloating);
+			printf("%s fullscreen %d\n", m->nx_output->name, c->isfullscreen);
+			printf("%s floating %d\n", m->nx_output->name, c->isfloating);
 		} else {
-			printf("%s title \n", m->wlr_output->name);
-			printf("%s appid \n", m->wlr_output->name);
-			printf("%s fullscreen 0\n", m->wlr_output->name);
-			printf("%s floating 0\n", m->wlr_output->name);
+			printf("%s title \n", m->nx_output->name);
+			printf("%s appid \n", m->nx_output->name);
+			printf("%s fullscreen 0\n", m->nx_output->name);
+			printf("%s floating 0\n", m->nx_output->name);
 		}
-		printf("%s selmon %u\n", m->wlr_output->name,
+		printf("%s selmon %u\n", m->nx_output->name,
 			m == selmon ? 1 : 0);
 		printf("%s tags %"PRIu32" %"PRIu32" %"PRIu32" %"PRIu32"\n",
-			m->wlr_output->name, occ, sel, sel, urg);
-		printf("%s layout %s\n", m->wlr_output->name,
+			m->nx_output->name, occ, sel, sel, urg);
+		printf("%s layout %s\n", m->nx_output->name,
 			(m->active_ws && m->active_ws->focused_col &&
 				m->active_ws->focused_col->fullscreen)
 				? "[F]" : "[]=");
@@ -1116,7 +1116,7 @@ resize_column_dir(const Arg *arg)
 	if (!arg || !selmon || !selmon->active_ws)
 		return;
 	col = selmon->active_ws->focused_col;
-	if (!col || !selmon->wlr_output->enabled)
+	if (!col || !selmon->nx_output->enabled)
 		return;
 
 	dir = arg->i >= 0 ? 1 : -1;
@@ -1438,8 +1438,8 @@ move_column_dir(const Arg *arg)
 	Column *cur, *neighbor;
 	Monitor *src_mon, *m_next;
 	Workspace *dst_ws;
-	struct wlr_output *next_out;
-	enum wlr_direction wdir;
+	struct nx_output *next_out;
+	enum nx_direction wdir;
 	Client *moved[64];
 	Client *focus_target = NULL;
 	int n = 0, i;
@@ -1470,15 +1470,15 @@ move_column_dir(const Arg *arg)
 		return;
 
 	/* At edge — try crossing to adjacent monitor. */
-	wdir = (arg->i > 0) ? WLR_DIRECTION_RIGHT : WLR_DIRECTION_LEFT;
-	next_out = wlr_output_layout_adjacent_output(output_layout, wdir,
-			selmon->wlr_output,
+	wdir = (arg->i > 0) ? NX_DIRECTION_RIGHT : NX_DIRECTION_LEFT;
+	next_out = nx_output_layout_adjacent_output(output_layout, wdir,
+			selmon->nx_output,
 			selmon->m.x + selmon->m.width / 2.0,
 			selmon->m.y + selmon->m.height / 2.0);
 	if (!next_out)
 		return;
 	m_next = next_out->data;
-	if (!m_next || !m_next->wlr_output->enabled || !m_next->active_ws)
+	if (!m_next || !m_next->nx_output->enabled || !m_next->active_ws)
 		return;
 	src_mon = selmon;
 	dst_ws = m_next->active_ws;
@@ -1701,7 +1701,7 @@ workspace_switch(Monitor *m, Workspace *target)
 	old_idx = m->active_ws ? m->active_ws->idx : 0;
 	new_idx = target->idx;
 	mon_h = m->m.height;
-	diag_logf("WS", "%s: %d -> %d", m->wlr_output->name, old_idx, new_idx);
+	diag_logf("WS", "%s: %d -> %d", m->nx_output->name, old_idx, new_idx);
 
 	/* Snap outgoing ws's camera fully to its target so its slide-out
 	 * renders at the same position the user just left.  Sync the float
@@ -1725,8 +1725,8 @@ workspace_switch(Monitor *m, Workspace *target)
 			m->ws_y_offset;
 
 	/* Force a frame so the anim tick advances soon. */
-	if (m->wlr_output)
-		wlr_output_schedule_frame(m->wlr_output);
+	if (m->nx_output)
+		nx_output_schedule_frame(m->nx_output);
 
 	refreshworkspacemodule(m);
 
@@ -1781,7 +1781,7 @@ monitor_apply_positions(Monitor *m)
 	int gap, ws_stride;
 	int vertical_anim;
 
-	if (!m || !m->wlr_output->enabled)
+	if (!m || !m->nx_output->enabled)
 		return;
 	/* Re-check gave-up clients. */
 	m->converge_dirty = 1;
@@ -1824,7 +1824,7 @@ monitor_apply_positions(Monitor *m)
 				wl_list_for_each(c, &col->clients, column_link) {
 					if (c->scene && c->scene->node.enabled
 							&& !c->isfloating)
-						wlr_scene_node_set_enabled(
+						nx_scene_node_set_enabled(
 							&c->scene->node, 0);
 				}
 			}
@@ -1844,7 +1844,7 @@ monitor_apply_positions(Monitor *m)
 					want = 0;
 				if (c->scene && !c->isfloating
 						&& c->scene->node.enabled != want)
-					wlr_scene_node_set_enabled(
+					nx_scene_node_set_enabled(
 						&c->scene->node, want);
 			}
 		}
@@ -1893,7 +1893,7 @@ monitor_apply_positions(Monitor *m)
 				sumw = (double)nc;
 
 			wl_list_for_each(c, &col->clients, column_link) {
-				struct wlr_box geo;
+				struct nx_box geo;
 				double w = c->col_weight > 0.0 ? c->col_weight : 1.0;
 				geo.x = col_x;
 				geo.y = col->y + y_cursor;
@@ -1926,22 +1926,22 @@ monitor_apply_positions(Monitor *m)
 			visible = 0;
 		if (!visible) {
 			if (c->scene->node.enabled)
-				wlr_scene_node_set_enabled(&c->scene->node, 0);
+				nx_scene_node_set_enabled(&c->scene->node, 0);
 			continue;
 		}
 
 		y_base = (bound->idx - (m->active_ws ? m->active_ws->idx : 0))
 				* ws_stride + (int)m->ws_y_offset;
 		if (!c->scene->node.enabled)
-			wlr_scene_node_set_enabled(&c->scene->node, 1);
-		wlr_scene_node_set_position(&c->scene->node,
+			nx_scene_node_set_enabled(&c->scene->node, 1);
+		nx_scene_node_set_position(&c->scene->node,
 				c->geom.x, c->geom.y + y_base);
 
 		/* Fullscreen slides over the bar. */
 		if (c->isfullscreen && c->scene_surface && !c->fsx_active) {
-			struct wlr_box wg;
+			struct nx_box wg;
 			client_get_clip(c, &wg);
-			wlr_scene_subsurface_tree_set_clip(
+			nx_scene_subsurface_tree_set_clip(
 					&c->scene_surface->node, &wg);
 		}
 	}

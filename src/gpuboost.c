@@ -58,7 +58,7 @@ write_mhz(const char *path, int mhz)
 	if (fd < 0)
 		return;
 	if (write(fd, buf, (size_t)n) != n)
-		wlr_log(WLR_DEBUG, "gpuboost: %s <- %d failed", path, mhz);
+		nx_log(NX_DEBUG, "gpuboost: %s <- %d failed", path, mhz);
 	close(fd);
 }
 
@@ -160,7 +160,7 @@ gpuboost_init(void)
 	snprintf(min_path, sizeof(min_path), "%s/%s", dir, k->min);
 	snprintf(marker_path, sizeof(marker_path), "%s/nixlytile-gpuboost", rt);
 	if (access(min_path, W_OK) != 0) {
-		wlr_log(WLR_INFO, "gpuboost: %s not writable", min_path);
+		nx_log(NX_INFO, "gpuboost: %s not writable", min_path);
 		return;
 	}
 	snprintf(path, sizeof(path), "%s/%s", dir, k->rpn);
@@ -182,7 +182,7 @@ gpuboost_init(void)
 		return;
 	pthread_detach(worker);
 	release_timer = wl_event_loop_add_timer(event_loop, release_cb, NULL);
-	wlr_log(WLR_INFO, "gpuboost: %s min %d -> %d MHz while animating",
+	nx_log(NX_INFO, "gpuboost: %s min %d -> %d MHz while animating",
 		k->driver, base_mhz, boost_mhz);
 }
 

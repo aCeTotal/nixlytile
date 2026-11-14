@@ -128,7 +128,7 @@ window-rule {
 // Wallpaper path.  Used by the default autostart's swaybg invocation.
 wallpaper "~/.nixlyos/wallpapers/beach.jpg"
 
-// Log verbosity for wlroots logs.  error | info | debug
+// Log verbosity.  error | info | debug
 log-level "debug"
 
 // Autostart — one process per entry.  Each gets its own pid so
@@ -173,9 +173,9 @@ bind "Mod+e"            "spawn" "dolphin"
 bind "Mod+Escape"       "spawn" "nixly-lockscreen"
 bind "Mod+F12"          "spawn" "nixly-lockscreen"
 bind "Mod+BackSpace"    "spawn" "brave"
-bind "Mod+s"            "spawn" "grimshot copy area"
-bind "Print"            "spawn" "grimshot copy area"
-bind "Shift+Print"      "spawn" "grimshot copy output"
+bind "Mod+s"            "spawn" "g=$(slurp) && grim -g \"$g\" - | wl-copy -t image/png"
+bind "Print"            "spawn" "g=$(slurp) && grim -g \"$g\" - | wl-copy -t image/png"
+bind "Shift+Print"      "spawn" "grim - | wl-copy -t image/png"
 
 // Window management
 bind "Mod+q"            "killclient"

@@ -2155,7 +2155,7 @@ card_finish(Card *c, CardResult *out)
 	buf->drm_format = DRM_FORMAT_ARGB8888;
 	buf->stride = stride;
 	buf->owns_data = 1;
-	wlr_buffer_init(&buf->base, &pixman_buffer_impl, w, h);
+	nx_buffer_init(&buf->base, &pixman_buffer_impl, w, h);
 
 	out->buf = &buf->base;
 	out->w = w;
@@ -2164,7 +2164,7 @@ card_finish(Card *c, CardResult *out)
 	return 0;
 }
 
-/* ── cairo surface → wlr_buffer ──────────────────────────────────── */
+/* ── cairo surface → nx_buffer ──────────────────────────────────── */
 
 /* Pixel allocation handed from cairo_buf_begin() to cairo_buf_finish()
  * via surface user data (no destroy func — ownership moves to the
@@ -2172,11 +2172,11 @@ card_finish(Card *c, CardResult *out)
 static cairo_user_data_key_t cairo_buf_data_key;
 
 /* Wrap a finished cairo surface's pixels in a PixmanBuffer-backed
- * wlr_buffer and destroy the surface.  cairo_buf_begin() allocates the
+ * nx_buffer and destroy the surface.  cairo_buf_begin() allocates the
  * pixel memory itself (create_for_data), so no copy happens here — the
  * old create + ecalloc + memcpy path moved the same ~w×h×4 bytes three
  * times per popup render. */
-static struct wlr_buffer *
+static struct nx_buffer *
 cairo_buf_finish(cairo_surface_t *cs)
 {
 	struct PixmanBuffer *buf;
@@ -2200,7 +2200,7 @@ cairo_buf_finish(cairo_surface_t *cs)
 	buf->drm_format = DRM_FORMAT_ARGB8888;
 	buf->stride = stride;
 	buf->owns_data = 1;
-	wlr_buffer_init(&buf->base, &pixman_buffer_impl, w, h);
+	nx_buffer_init(&buf->base, &pixman_buffer_impl, w, h);
 	return &buf->base;
 }
 
@@ -2234,7 +2234,7 @@ cairo_buf_begin(int w, int h, cairo_surface_t **out_cs)
 
 /* ── gauge fill buffer ───────────────────────────────────────────── */
 
-struct wlr_buffer *
+struct nx_buffer *
 card_fill_buffer(int w, int h, const float col[4])
 {
 	cairo_surface_t *cs;
@@ -2292,7 +2292,7 @@ card_meter_draw(cairo_t *cr, int w, int h, const float accent[4],
 	}
 }
 
-struct wlr_buffer *
+struct nx_buffer *
 card_meter_buffer(int w, int h, const float accent[4],
 		const float *hist, int nhist, int head, double phase)
 {
@@ -2313,7 +2313,7 @@ card_meter_raster_finish(MeterRaster *mr)
 
 	for (i = 0; i < 2; i++) {
 		if (mr->buf[i])
-			wlr_buffer_drop(mr->buf[i]);
+			nx_buffer_drop(mr->buf[i]);
 		mr->buf[i] = NULL;
 	}
 	mr->next = 0;
@@ -2326,14 +2326,14 @@ card_meter_raster_finish(MeterRaster *mr)
  * per-frame churn.  Draw with cairo directly over a persistent pixman
  * buffer's pixels instead; two buffers alternate because the scene may
  * still hold the previous frame's. */
-struct wlr_buffer *
+struct nx_buffer *
 card_meter_raster(MeterRaster *mr, int w, int h, const float accent[4],
 		const float *hist, int nhist, int head, double phase)
 {
 	struct PixmanBuffer *buf;
 	cairo_surface_t *cs;
 	cairo_t *cr;
-	struct wlr_buffer *out;
+	struct nx_buffer *out;
 
 	if (w <= 0 || h <= 0)
 		return NULL;
@@ -2351,7 +2351,7 @@ card_meter_raster(MeterRaster *mr, int w, int h, const float accent[4],
 		buf->drm_format = DRM_FORMAT_ARGB8888;
 		buf->stride = stride;
 		buf->owns_data = 1;
-		wlr_buffer_init(&buf->base, &pixman_buffer_impl, w, h);
+		nx_buffer_init(&buf->base, &pixman_buffer_impl, w, h);
 		mr->buf[mr->next] = &buf->base;
 	} else {
 		buf = wl_container_of(mr->buf[mr->next], buf, base);
@@ -2394,7 +2394,7 @@ spec_level(double ph, int i)
  * with frac (signal strength) so a weak link idles and a strong one is
  * lively. t is wall time in seconds; each frame is a pure function of
  * (t, frac) so the overlay needs no history state. */
-struct wlr_buffer *
+struct nx_buffer *
 card_spectrum_buffer(int w, int h, const float accent[4], double frac,
 		double t)
 {
@@ -2447,7 +2447,7 @@ card_spectrum_buffer(int w, int h, const float accent[4], double frac,
  * out so the translucent card body isn't darkened from behind. Buffer
  * is (w+2M)×(h+2M) with the card at (M,M); place the node at (-M,-M)
  * relative to the card. */
-struct wlr_buffer *
+struct nx_buffer *
 card_shadow_buffer(int w, int h, double radius)
 {
 	const int M = CARD_SHADOW_MARGIN;
@@ -2474,7 +2474,7 @@ card_shadow_buffer(int w, int h, double radius)
 	return cairo_buf_finish(cs);
 }
 
-struct wlr_buffer *
+struct nx_buffer *
 card_panel_buffer(int w, int h)
 {
 	cairo_surface_t *cs;
@@ -2494,7 +2494,7 @@ card_panel_buffer(int w, int h)
 	return cairo_buf_finish(cs);
 }
 
-struct wlr_buffer *
+struct nx_buffer *
 card_hover_buffer(int w, int h)
 {
 	cairo_surface_t *cs;
@@ -2509,7 +2509,7 @@ card_hover_buffer(int w, int h)
 	return cairo_buf_finish(cs);
 }
 
-struct wlr_buffer *
+struct nx_buffer *
 card_mark_buffer(int radio, int size, int state)
 {
 	cairo_surface_t *cs;
@@ -2551,7 +2551,7 @@ card_mark_buffer(int radio, int size, int state)
 	return cairo_buf_finish(cs);
 }
 
-struct wlr_buffer *
+struct nx_buffer *
 card_chevron_buffer(int size)
 {
 	cairo_surface_t *cs;
@@ -2584,11 +2584,11 @@ card_chevron_buffer(int size)
 static struct {
 	int w, h;
 	uint64_t used;
-	struct wlr_buffer *buf;
+	struct nx_buffer *buf;
 } shadow_cache[SHADOW_CACHE];
 static uint64_t shadow_cache_tick;
 
-static struct wlr_buffer *
+static struct nx_buffer *
 shadow_cached(int w, int h)
 {
 	int lru = 0;
@@ -2603,7 +2603,7 @@ shadow_cached(int w, int h)
 			lru = i;
 	}
 	if (shadow_cache[lru].buf)
-		wlr_buffer_drop(shadow_cache[lru].buf);
+		nx_buffer_drop(shadow_cache[lru].buf);
 	shadow_cache[lru].buf = card_shadow_buffer(w, h, 0);
 	shadow_cache[lru].w = w;
 	shadow_cache[lru].h = h;
@@ -2641,27 +2641,27 @@ view_anim_frame(PopupView *v, uint64_t now)
 	es = ease_out_cubic(ts);
 
 	if (v->content)
-		wlr_scene_node_set_position(&v->content->node, 0,
+		nx_scene_node_set_position(&v->content->node, 0,
 				-(int)lroundf(CARD_SLIDE_PX * (1.0f - e)));
-	wlr_scene_buffer_set_opacity(v->card, e);
+	nx_scene_buffer_set_opacity(v->card, e);
 	if (v->shadow)
-		wlr_scene_buffer_set_opacity(v->shadow, e);
+		nx_scene_buffer_set_opacity(v->shadow, e);
 
 	for (int i = 0; i < v->nfills; i++) {
-		struct wlr_scene_buffer *fb = v->fills[i];
+		struct nx_scene_buffer *fb = v->fills[i];
 		int fw = v->fill_w[i], fh = v->fill_h[i];
 		int rw;
 
 		if (!fb)
 			continue;
-		wlr_scene_buffer_set_opacity(fb, e);
+		nx_scene_buffer_set_opacity(fb, e);
 		rw = (int)lroundf(fw * es);
 		if (rw < 1)
 			rw = 1;
 		v->fill_disp_w[i] = rw;
-		wlr_scene_buffer_set_source_box(fb, &(struct wlr_fbox){
+		nx_scene_buffer_set_source_box(fb, &(struct nx_fbox){
 			.x = 0, .y = 0, .width = rw, .height = fh });
-		wlr_scene_buffer_set_dest_size(fb, rw, fh);
+		nx_scene_buffer_set_dest_size(fb, rw, fh);
 	}
 
 	if (t >= 1.0f && ts >= 1.0f) {
@@ -2679,7 +2679,7 @@ view_slider_frame(PopupView *v)
 	int still = 0;
 
 	for (int i = 0; i < v->nfills; i++) {
-		struct wlr_scene_buffer *fb = v->fills[i];
+		struct nx_scene_buffer *fb = v->fills[i];
 		int target = v->fill_w[i], disp = v->fill_disp_w[i];
 		int step;
 
@@ -2690,9 +2690,9 @@ view_slider_frame(PopupView *v)
 			step = target > disp ? 1 : -1;
 		disp += step;
 		v->fill_disp_w[i] = disp;
-		wlr_scene_buffer_set_source_box(fb, &(struct wlr_fbox){
+		nx_scene_buffer_set_source_box(fb, &(struct nx_fbox){
 			.x = 0, .y = 0, .width = disp, .height = v->fill_h[i] });
-		wlr_scene_buffer_set_dest_size(fb, disp, v->fill_h[i]);
+		nx_scene_buffer_set_dest_size(fb, disp, v->fill_h[i]);
 		if (disp != target)
 			still = 1;
 	}
@@ -2756,20 +2756,20 @@ anim_unregister(PopupView *v)
 }
 
 void
-popup_view_apply(PopupView *v, struct wlr_scene_tree *tree, CardResult *res)
+popup_view_apply(PopupView *v, struct nx_scene_tree *tree, CardResult *res)
 {
-	struct wlr_scene_node *node, *tmp;
+	struct nx_scene_node *node, *tmp;
 
 	if (!v || !tree || !res || !res->buf)
 		return;
 
 	if (!v->content || v->content->node.parent != tree) {
-		v->content = wlr_scene_tree_create(tree);
+		v->content = nx_scene_tree_create(tree);
 		if (!v->content)
 			return;
 	}
 	wl_list_for_each_safe(node, tmp, &v->content->children, link)
-		wlr_scene_node_destroy(node);
+		nx_scene_node_destroy(node);
 	v->card = NULL;
 	v->shadow = NULL;
 	memset(v->fills, 0, sizeof(v->fills));
@@ -2778,40 +2778,40 @@ popup_view_apply(PopupView *v, struct wlr_scene_tree *tree, CardResult *res)
 	/* drop shadow below the card so the popup floats (cached buffer —
 	 * not dropped here) */
 	{
-		struct wlr_buffer *sh = shadow_cached(res->w, res->h);
+		struct nx_buffer *sh = shadow_cached(res->w, res->h);
 
 		if (sh) {
-			v->shadow = wlr_scene_buffer_create(v->content, NULL);
+			v->shadow = nx_scene_buffer_create(v->content, NULL);
 			if (v->shadow) {
-				wlr_scene_buffer_set_buffer(v->shadow, sh);
-				wlr_scene_node_set_position(&v->shadow->node,
+				nx_scene_buffer_set_buffer(v->shadow, sh);
+				nx_scene_node_set_position(&v->shadow->node,
 						-CARD_SHADOW_MARGIN,
 						-CARD_SHADOW_MARGIN);
 			}
 		}
 	}
 
-	v->card = wlr_scene_buffer_create(v->content, NULL);
+	v->card = nx_scene_buffer_create(v->content, NULL);
 	if (v->card) {
-		wlr_scene_buffer_set_buffer(v->card, res->buf);
-		wlr_scene_node_set_position(&v->card->node, 0, 0);
+		nx_scene_buffer_set_buffer(v->card, res->buf);
+		nx_scene_node_set_position(&v->card->node, 0, 0);
 	}
 
 	for (int i = 0; i < res->nfills && i < CARD_MAX_FILLS; i++) {
 		CardFill *f = &res->fills[i];
 		int buf_w = f->full_w > f->w ? f->full_w : f->w;
-		struct wlr_buffer *fb = card_fill_buffer(buf_w, f->h, f->color);
-		struct wlr_scene_buffer *sb;
+		struct nx_buffer *fb = card_fill_buffer(buf_w, f->h, f->color);
+		struct nx_scene_buffer *sb;
 
 		if (!fb)
 			continue;
-		sb = wlr_scene_buffer_create(v->content, NULL);
+		sb = nx_scene_buffer_create(v->content, NULL);
 		if (sb) {
-			wlr_scene_buffer_set_buffer(sb, fb);
-			wlr_scene_node_set_position(&sb->node, f->x, f->y);
-			wlr_scene_buffer_set_source_box(sb, &(struct wlr_fbox){
+			nx_scene_buffer_set_buffer(sb, fb);
+			nx_scene_node_set_position(&sb->node, f->x, f->y);
+			nx_scene_buffer_set_source_box(sb, &(struct nx_fbox){
 				.x = 0, .y = 0, .width = f->w, .height = f->h });
-			wlr_scene_buffer_set_dest_size(sb, f->w, f->h);
+			nx_scene_buffer_set_dest_size(sb, f->w, f->h);
 			v->fills[v->nfills] = sb;
 			v->fill_w[v->nfills] = f->w;
 			v->fill_h[v->nfills] = f->h;
@@ -2819,12 +2819,12 @@ popup_view_apply(PopupView *v, struct wlr_scene_tree *tree, CardResult *res)
 			v->fill_disp_w[v->nfills] = f->w;
 			v->nfills++;
 		}
-		wlr_buffer_drop(fb);
+		nx_buffer_drop(fb);
 	}
 
 	v->w = res->w;
 	v->h = res->h;
-	wlr_buffer_drop(res->buf);
+	nx_buffer_drop(res->buf);
 	res->buf = NULL;
 
 	/* re-applied mid-animation: restore the current frame state so a
@@ -2865,9 +2865,9 @@ popup_view_drag_fill_frac(PopupView *v, int i, double frac)
 	target = fill_target_w(v, i, frac);
 	v->fill_w[i] = target;
 	v->fill_disp_w[i] = target;
-	wlr_scene_buffer_set_source_box(v->fills[i], &(struct wlr_fbox){
+	nx_scene_buffer_set_source_box(v->fills[i], &(struct nx_fbox){
 		.x = 0, .y = 0, .width = target, .height = v->fill_h[i] });
-	wlr_scene_buffer_set_dest_size(v->fills[i], target, v->fill_h[i]);
+	nx_scene_buffer_set_dest_size(v->fills[i], target, v->fill_h[i]);
 }
 
 void
@@ -2893,9 +2893,9 @@ popup_view_hide(PopupView *v)
 	v->render_sig = 0;
 	anim_unregister(v);
 	if (v->content)
-		wlr_scene_node_set_position(&v->content->node, 0, 0);
+		nx_scene_node_set_position(&v->content->node, 0, 0);
 	if (v->card)
-		wlr_scene_buffer_set_opacity(v->card, 1.0f);
+		nx_scene_buffer_set_opacity(v->card, 1.0f);
 	if (v->shadow)
-		wlr_scene_buffer_set_opacity(v->shadow, 1.0f);
+		nx_scene_buffer_set_opacity(v->shadow, 1.0f);
 }

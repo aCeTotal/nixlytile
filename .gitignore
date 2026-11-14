@@ -1,5 +1,6 @@
 # Build artifacts
 *.o
+build/
 nixlytile
 nixly-fand
 nixly-diskd
@@ -22,6 +23,7 @@ error*.log
 *.swp
 *.swo
 *~
+.clangd
 
 # Nix
 .direnv/
@@ -32,6 +34,8 @@ compile_commands.json
 
 # Misc
 -
+*.orig
+/$HOME/
 
 # Claude worktrees
 .claude/worktrees/

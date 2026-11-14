@@ -453,7 +453,7 @@ battwatch_init(void)
 	bw_run = 1;
 	if (pthread_create(&bw_thread, NULL, bw_worker, NULL) != 0) {
 		bw_run = 0;
-		wlr_log(WLR_ERROR, "battwatch: thread start failed — "
+		nx_log(NX_ERROR, "battwatch: thread start failed — "
 			"battery state unavailable");
 	}
 }

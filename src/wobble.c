@@ -19,46 +19,46 @@ enum WobbleState { WobbleDone, WobbleIdle, WobbleMoving };
 static int
 wobble_eligible(Client *c)
 {
-	struct wlr_surface *surf = client_surface(c);
+	struct nx_surface *surf = client_surface(c);
 
 	/* Only content the view reproduces. */
 	return c->isfloating && !c->isfullscreen && !c->frozen_buffer
 		&& surf && surf->buffer && surf->buffer->texture
 		&& surf->current.transform == WL_OUTPUT_TRANSFORM_NORMAL
-		&& !wlr_surface_get_image_description_v1_data(surf)
+		&& !nx_surface_get_image_description_v1_data(surf)
 		&& wl_list_empty(&surf->current.subsurfaces_above)
 		&& wl_list_empty(&surf->current.subsurfaces_below);
 }
 
 static bool
-wobble_rejects_input(struct wlr_scene_buffer *buffer, double *sx, double *sy)
+wobble_rejects_input(struct nx_scene_buffer *buffer, double *sx, double *sy)
 {
 	return false;
 }
 
 static void
-wobble_find_real(struct wlr_scene_buffer *buffer, int sx, int sy, void *out)
+wobble_find_real(struct nx_scene_buffer *buffer, int sx, int sy, void *out)
 {
-	*(struct wlr_scene_buffer **)out = buffer;
+	*(struct nx_scene_buffer **)out = buffer;
 }
 
 static float
-wobble_alpha(struct wlr_surface *surf)
+wobble_alpha(struct nx_surface *surf)
 {
-	const struct wlr_alpha_modifier_surface_v1_state *state =
-		wlr_alpha_modifier_v1_get_surface_state(surf);
+	const struct nx_alpha_modifier_surface_v1_state *state =
+		nx_alpha_modifier_v1_get_surface_state(surf);
 
 	return state ? (float)state->multiplier : 1.0f;
 }
 
-/* Runs after wlroots resets opacity. */
+/* Runs after the scene resets opacity. */
 static void
 wobble_commit(struct wl_listener *listener, void *data)
 {
 	Wobble *w = wl_container_of(listener, w, commit);
 
 	if (w->concealed)
-		wlr_scene_buffer_set_opacity(w->real, 0.0f);
+		nx_scene_buffer_set_opacity(w->real, 0.0f);
 }
 
 static void
@@ -66,12 +66,12 @@ wobble_conceal(Client *c, Wobble *w)
 {
 	int i;
 
-	wlr_scene_buffer_set_opacity(w->real, 0.0f);
+	nx_scene_buffer_set_opacity(w->real, 0.0f);
 	if (w->concealed)
 		return;
 	for (i = 0; i < 4; i++) {
 		w->border_enabled[i] = c->border[i]->node.enabled;
-		wlr_scene_node_set_enabled(&c->border[i]->node, 0);
+		nx_scene_node_set_enabled(&c->border[i]->node, 0);
 	}
 	w->concealed = 1;
 }
@@ -83,20 +83,20 @@ wobble_reveal(Client *c, Wobble *w)
 
 	if (!w->concealed)
 		return;
-	wlr_scene_buffer_set_opacity(w->real, wobble_alpha(client_surface(c)));
+	nx_scene_buffer_set_opacity(w->real, wobble_alpha(client_surface(c)));
 	for (i = 0; i < 4; i++)
-		wlr_scene_node_set_enabled(&c->border[i]->node, w->border_enabled[i]);
+		nx_scene_node_set_enabled(&c->border[i]->node, w->border_enabled[i]);
 }
 
 static Wobble *
-wobble_create(Client *c, struct wlr_scene_buffer *real)
+wobble_create(Client *c, struct nx_scene_buffer *real)
 {
 	Wobble *w = ecalloc(1, sizeof(*w));
 
 	w->real = real;
-	w->view = wlr_scene_buffer_create(c->scene, NULL);
+	w->view = nx_scene_buffer_create(c->scene, NULL);
 	w->view->point_accepts_input = wobble_rejects_input;
-	wlr_scene_node_place_below(&w->view->node, &c->scene_surface->node);
+	nx_scene_node_place_below(&w->view->node, &c->scene_surface->node);
 	w->commit.notify = wobble_commit;
 	wl_signal_add(&client_surface(c)->events.commit, &w->commit);
 	return w;
@@ -106,12 +106,12 @@ void
 wobble_grab(Client *c, double cursor_y)
 {
 	int height = c->geom.height - 2 * (int)c->bw;
-	struct wlr_scene_buffer *real = NULL;
+	struct nx_scene_buffer *real = NULL;
 	Wobble *w;
 
 	if (height <= 0 || !wobble_eligible(c))
 		return;
-	wlr_scene_node_for_each_buffer(&c->scene_surface->node, wobble_find_real, &real);
+	nx_scene_node_for_each_buffer(&c->scene_surface->node, wobble_find_real, &real);
 	if (!real)
 		return;
 	if (!c->wobble)
@@ -122,8 +122,8 @@ wobble_grab(Client *c, double cursor_y)
 	w->grab = MAX(0, MIN(WOBBLE_EDGES, w->grab));
 	w->last_x = c->geom.x;
 	w->last_y = c->geom.y;
-	if (c->mon && c->mon->wlr_output)
-		wlr_output_schedule_frame(c->mon->wlr_output);
+	if (c->mon && c->mon->nx_output)
+		nx_output_schedule_frame(c->mon->nx_output);
 }
 
 void
@@ -142,8 +142,8 @@ wobble_stop(Client *c)
 		return;
 	wobble_reveal(c, w);
 	wl_list_remove(&w->commit.link);
-	wlr_scene_node_destroy(&w->view->node);
-	wlr_swapchain_destroy(w->swapchain);
+	nx_scene_node_destroy(&w->view->node);
+	nx_swapchain_destroy(w->swapchain);
 	free(w);
 	c->wobble = NULL;
 }
@@ -214,7 +214,7 @@ wobble_step(Client *c, double dt)
 		return WobbleIdle;
 	if (!wobble_render(c, w))
 		return WobbleDone;
-	wlr_scene_buffer_set_opacity(w->view, wobble_alpha(client_surface(c)));
+	nx_scene_buffer_set_opacity(w->view, wobble_alpha(client_surface(c)));
 	wobble_conceal(c, w);
 	w->seq = client_surface(c)->current.seq;
 	return WobbleMoving;

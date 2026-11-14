@@ -136,7 +136,7 @@ apply_to_keyboards(void)
 	if (!kb_group)
 		return;
 
-	wlr_keyboard_set_repeat_info(&kb_group->wlr_group->keyboard, repeat_rate, repeat_delay);
+	nx_keyboard_set_repeat_info(&kb_group->nx_group->keyboard, repeat_rate, repeat_delay);
 
 	if (!inputconf_layout[0])
 		return;
@@ -172,7 +172,7 @@ apply_to_keyboards(void)
 		setgroupkeymap(keymap);
 		xkb_keymap_unref(keymap);
 	} else {
-		wlr_log(WLR_ERROR, "input_conf: layout \"%s\" did not compile", inputconf_layout);
+		nx_log(NX_ERROR, "input_conf: layout \"%s\" did not compile", inputconf_layout);
 	}
 	xkb_context_unref(context);
 }
@@ -203,7 +203,7 @@ input_conf_update(void)
 
 	apply_to_pointers();
 	apply_to_keyboards();
-	wlr_log(WLR_INFO, "input_conf: applied %s", INPUTCONF_PATH);
+	nx_log(NX_INFO, "input_conf: applied %s", INPUTCONF_PATH);
 }
 
 static int
@@ -239,7 +239,7 @@ setup_input_conf_watch(void)
 
 	inputconf_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
 	if (inputconf_fd < 0) {
-		wlr_log(WLR_ERROR, "input_conf: inotify_init failed: %s", strerror(errno));
+		nx_log(NX_ERROR, "input_conf: inotify_init failed: %s", strerror(errno));
 		return;
 	}
 
@@ -248,7 +248,7 @@ setup_input_conf_watch(void)
 	wd = inotify_add_watch(inputconf_fd, INPUTCONF_DIR,
 		IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_DELETE_SELF);
 	if (wd < 0) {
-		wlr_log(WLR_INFO, "input_conf: no %s yet (%s)", INPUTCONF_DIR, strerror(errno));
+		nx_log(NX_INFO, "input_conf: no %s yet (%s)", INPUTCONF_DIR, strerror(errno));
 		close(inputconf_fd);
 		inputconf_fd = -1;
 		return;
@@ -261,5 +261,5 @@ setup_input_conf_watch(void)
 		inputconf_fd = -1;
 		return;
 	}
-	wlr_log(WLR_INFO, "input_conf: watching %s", INPUTCONF_PATH);
+	nx_log(NX_INFO, "input_conf: watching %s", INPUTCONF_PATH);
 }

@@ -11,7 +11,7 @@
 
 char power_icon_path[PATH_MAX] = "images/svg/power.svg";
 
-static struct wlr_buffer *power_icon_buf;
+static struct nx_buffer *power_icon_buf;
 static int power_icon_w, power_icon_h;
 static int power_icon_loaded_h;
 static char power_icon_loaded_path[PATH_MAX];
@@ -20,7 +20,7 @@ void
 drop_power_icon_buffer(void)
 {
 	if (power_icon_buf) {
-		wlr_buffer_drop(power_icon_buf);
+		nx_buffer_drop(power_icon_buf);
 		power_icon_buf = NULL;
 	}
 	power_icon_loaded_h = 0;
@@ -33,7 +33,7 @@ ensure_power_icon_buffer(int target_h)
 {
 	GdkPixbuf *pixbuf = NULL;
 	GError *gerr = NULL;
-	struct wlr_buffer *buf;
+	struct nx_buffer *buf;
 	int w = 0, h = 0;
 	char resolved[PATH_MAX];
 	const char *path = power_icon_path;

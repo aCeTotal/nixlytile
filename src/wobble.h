@@ -1,14 +1,14 @@
 #ifndef WOBBLE_H
 #define WOBBLE_H
 
-#include <wlr/render/swapchain.h>
+#include "platform/render/swapchain.h"
 
 #define WOBBLE_EDGES 24 /* spring control edges */
 
 struct Wobble {
-	struct wlr_scene_buffer *view;   /* deformed window, one buffer */
-	struct wlr_scene_buffer *real;   /* client buffer, kept for input */
-	struct wlr_swapchain *swapchain;
+	struct nx_scene_buffer *view;   /* deformed window, one buffer */
+	struct nx_scene_buffer *real;   /* client buffer, kept for input */
+	struct nx_swapchain *swapchain;
 	struct wl_listener commit;
 	double off[2][WOBBLE_EDGES + 1]; /* x and y edge offsets */
 	double vel[2][WOBBLE_EDGES + 1];

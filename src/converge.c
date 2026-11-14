@@ -51,7 +51,7 @@ axis_settled(int committed, int box, int min)
 static int
 converge_candidate(Client *c, Monitor *m)
 {
-	struct wlr_surface *s;
+	struct nx_surface *s;
 
 	if (c->mon != m || !c->column || c->anim_active || c->fsx_active || m->txn_active ||
 			txn_owes(c))
@@ -202,12 +202,7 @@ clients_converge_tick(Monitor *m)
 			continue;
 		}
 
-		/* Re-drive.  Clearing last_configured_* and the outstanding-ack
-		 * serial is the point: those are the two dedups that swallow a
-		 * repeat of a size the client never actually reached.  If
-		 * wlroots still holds this size as the client's current one,
-		 * client_set_size sends nothing and the try count runs out into
-		 * the give-up branch above — no configure loop either way. */
+		/* Re-drive past both size dedups. */
 		c->last_configured_w = c->last_configured_h = 0;
 		c->resize = 0;
 		client_request_size(c, iw, ih);

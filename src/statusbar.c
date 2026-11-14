@@ -14,7 +14,7 @@
 void
 clearstatusmodule(StatusModule *module)
 {
-	struct wlr_scene_node *node, *tmp;
+	struct nx_scene_node *node, *tmp;
 
 	if (!module || !module->tree)
 		return;
@@ -22,7 +22,7 @@ clearstatusmodule(StatusModule *module)
 	wl_list_for_each_safe(node, tmp, &module->tree->children, link) {
 		if (module->bg && node == &module->bg->node)
 			continue;
-		wlr_scene_node_destroy(node);
+		nx_scene_node_destroy(node);
 	}
 }
 
@@ -30,20 +30,20 @@ void
 updatemodulebg(StatusModule *module, int width, int height,
 		const float color[static 4])
 {
-	struct wlr_scene_node *node, *tmp;
+	struct nx_scene_node *node, *tmp;
 	int radius, y, inset_top, inset_bottom, inset, start, h, w;
-	struct wlr_scene_rect *r;
+	struct nx_scene_rect *r;
 
 	if (!module || !module->tree || width <= 0 || height <= 0)
 		return;
 
-	if (!module->bg && !(module->bg = wlr_scene_tree_create(module->tree)))
+	if (!module->bg && !(module->bg = nx_scene_tree_create(module->tree)))
 		return;
-	wlr_scene_node_set_enabled(&module->bg->node, 1);
-	wlr_scene_node_set_position(&module->bg->node, 0, 0);
+	nx_scene_node_set_enabled(&module->bg->node, 1);
+	nx_scene_node_set_position(&module->bg->node, 0, 0);
 
 	wl_list_for_each_safe(node, tmp, &module->bg->children, link)
-		wlr_scene_node_destroy(node);
+		nx_scene_node_destroy(node);
 
 	radius = MIN(4, MIN(width, height) / 4);
 
@@ -68,13 +68,13 @@ updatemodulebg(StatusModule *module, int width, int height,
 			w = 0;
 
 		if (h > 0 && w > 0) {
-			r = wlr_scene_rect_create(module->bg, w, h, color);
+			r = nx_scene_rect_create(module->bg, w, h, color);
 			if (r)
-				wlr_scene_node_set_position(&r->node, inset, start);
+				nx_scene_node_set_position(&r->node, inset, start);
 		}
 	}
 
-	wlr_scene_node_lower_to_bottom(&module->bg->node);
+	nx_scene_node_lower_to_bottom(&module->bg->node);
 }
 
 void
@@ -87,7 +87,7 @@ renderclock(StatusModule *module, int bar_height, const char *text)
 
 void
 render_icon_label(StatusModule *module, int bar_height, const char *text,
-		int (*ensure_icon)(int target_h), struct wlr_buffer **icon_buf,
+		int (*ensure_icon)(int target_h), struct nx_buffer **icon_buf,
 		int *icon_w, int *icon_h, int min_text_w, int icon_gap,
 		const float *text_color)
 {
@@ -97,7 +97,7 @@ render_icon_label(StatusModule *module, int bar_height, const char *text,
 	int iw = 0, ih = 0;
 	int target_h;
 	int scaled_target_h;
-	struct wlr_scene_buffer *scene_buf;
+	struct nx_scene_buffer *scene_buf;
 	const float *fg = text_color ? text_color : statusbar_fg;
 
 	if (!module || !module->tree)
@@ -154,11 +154,11 @@ render_icon_label(StatusModule *module, int bar_height, const char *text,
 	x = padding;
 
 	if (iw > 0 && icon_buf && *icon_buf) {
-		scene_buf = wlr_scene_buffer_create(module->tree, NULL);
+		scene_buf = nx_scene_buffer_create(module->tree, NULL);
 		if (scene_buf) {
 			int icon_y = (bar_height - ih) / 2;
-			wlr_scene_buffer_set_buffer(scene_buf, *icon_buf);
-			wlr_scene_node_set_position(&scene_buf->node, x, icon_y);
+			nx_scene_buffer_set_buffer(scene_buf, *icon_buf);
+			nx_scene_node_set_position(&scene_buf->node, x, icon_y);
 		}
 		x += iw + (text_w > 0 ? icon_gap : padding);
 	}
@@ -174,10 +174,10 @@ render_icon_label(StatusModule *module, int bar_height, const char *text,
  * the same whitespace between these icons as between SNI icons. */
 void
 render_tray_icon_module(StatusModule *module, int bar_height,
-		int (*ensure_icon)(int target_h), struct wlr_buffer **icon_buf,
+		int (*ensure_icon)(int target_h), struct nx_buffer **icon_buf,
 		int *icon_w, int *icon_h)
 {
-	struct wlr_scene_buffer *scene_buf;
+	struct nx_scene_buffer *scene_buf;
 	int target_h, pad_l, pad_r, content_w;
 
 	if (!module || !module->tree)
@@ -191,7 +191,7 @@ render_tray_icon_module(StatusModule *module, int bar_height,
 	if (ensure_icon(target_h) != 0 || !*icon_buf
 			|| *icon_w <= 0 || *icon_h <= 0) {
 		module->width = 0;
-		wlr_scene_node_set_enabled(&module->tree->node, 0);
+		nx_scene_node_set_enabled(&module->tree->node, 0);
 		return;
 	}
 	/* Inset scan reads every icon pixel row — memoize per buffer: the
@@ -199,7 +199,7 @@ render_tray_icon_module(StatusModule *module, int bar_height,
 	 * pointer identity is stable for as long as the entry is cached. */
 	{
 		static struct {
-			struct wlr_buffer *buf;
+			struct nx_buffer *buf;
 			int icon_w, pad_l, pad_r;
 		} inset_cache[8];
 		static int inset_pos;
@@ -232,12 +232,12 @@ render_tray_icon_module(StatusModule *module, int bar_height,
 	/* A single failed load above disabled the node; nothing else turns
 	 * it back on, so the module stayed blank for the rest of the
 	 * session while its popup kept working. */
-	wlr_scene_node_set_enabled(&module->tree->node, 1);
+	nx_scene_node_set_enabled(&module->tree->node, 1);
 	updatemodulebg(module, module->width, bar_height, statusbar_bg);
-	scene_buf = wlr_scene_buffer_create(module->tree, NULL);
+	scene_buf = nx_scene_buffer_create(module->tree, NULL);
 	if (scene_buf) {
-		wlr_scene_buffer_set_buffer(scene_buf, *icon_buf);
-		wlr_scene_node_set_position(&scene_buf->node, -pad_l,
+		nx_scene_buffer_set_buffer(scene_buf, *icon_buf);
+		nx_scene_node_set_position(&scene_buf->node, -pad_l,
 				MAX(0, (bar_height - *icon_h) / 2));
 	}
 }
@@ -329,8 +329,8 @@ tray_render_label(StatusModule *module, const char *text, int x, int bar_height,
 {
 	tll(struct GlyphRun) glyphs = tll_init();
 	const struct fcft_glyph *glyph;
-	struct wlr_scene_buffer *scene_buf;
-	struct wlr_buffer *buffer;
+	struct nx_scene_buffer *scene_buf;
+	struct nx_buffer *buffer;
 	uint32_t prev_cp = 0;
 	int pen_x = 0;
 	int min_y = INT_MAX, max_y = INT_MIN;
@@ -447,10 +447,10 @@ tray_render_label(StatusModule *module, const char *text, int x, int bar_height,
 		if (!buffer)
 			continue;
 
-		scene_buf = wlr_scene_buffer_create(module->tree, NULL);
+		scene_buf = nx_scene_buffer_create(module->tree, NULL);
 		if (scene_buf) {
-			wlr_scene_buffer_set_buffer(scene_buf, buffer);
-			wlr_scene_node_set_position(&scene_buf->node,
+			nx_scene_buffer_set_buffer(scene_buf, buffer);
+			nx_scene_node_set_position(&scene_buf->node,
 					x + it->item.pen_x + glyph->x,
 					origin_y - glyph->y);
 		}
@@ -479,7 +479,7 @@ renderlight(StatusModule *module, int bar_height, const char *text)
 	if (!backlight_available) {
 		clearstatusmodule(module);
 		module->width = 0;
-		wlr_scene_node_set_enabled(&module->tree->node, 0);
+		nx_scene_node_set_enabled(&module->tree->node, 0);
 		return;
 	}
 
@@ -516,7 +516,7 @@ renderbattery(StatusModule *module, int bar_height, const char *text)
 		if (module && module->tree) {
 			clearstatusmodule(module);
 			module->width = 0;
-			wlr_scene_node_set_enabled(&module->tree->node, 0);
+			nx_scene_node_set_enabled(&module->tree->node, 0);
 		}
 		return;
 	}
@@ -549,7 +549,7 @@ rendermic(StatusModule *module, int bar_height, const char *text)
 		if (module && module->tree) {
 			clearstatusmodule(module);
 			module->width = 0;
-			wlr_scene_node_set_enabled(&module->tree->node, 0);
+			nx_scene_node_set_enabled(&module->tree->node, 0);
 		}
 		return;
 	}
@@ -563,7 +563,7 @@ void
 drop_cpu_icon_buffer(void)
 {
 	if (cpu_icon_buf) {
-		wlr_buffer_drop(cpu_icon_buf);
+		nx_buffer_drop(cpu_icon_buf);
 		cpu_icon_buf = NULL;
 	}
 	cpu_icon_loaded_h = 0;
@@ -576,7 +576,7 @@ ensure_cpu_icon_buffer(int target_h)
 {
 	GdkPixbuf *pixbuf = NULL;
 	GError *gerr = NULL;
-	struct wlr_buffer *buf;
+	struct nx_buffer *buf;
 	int w = 0, h = 0;
 	char resolved[PATH_MAX];
 	const char *path = cpu_icon_path;
@@ -595,7 +595,7 @@ ensure_cpu_icon_buffer(int target_h)
 		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
 		if (!pixbuf) {
 			if (gerr) {
-				wlr_log(WLR_ERROR, "cpu icon: failed to load '%s': %s",
+				nx_log(NX_ERROR, "cpu icon: failed to load '%s': %s",
 						path, gerr->message);
 				g_error_free(gerr);
 			}
@@ -620,7 +620,7 @@ void
 drop_clock_icon_buffer(void)
 {
 	if (clock_icon_buf) {
-		wlr_buffer_drop(clock_icon_buf);
+		nx_buffer_drop(clock_icon_buf);
 		clock_icon_buf = NULL;
 	}
 	clock_icon_loaded_h = 0;
@@ -633,7 +633,7 @@ ensure_clock_icon_buffer(int target_h)
 {
 	GdkPixbuf *pixbuf = NULL;
 	GError *gerr = NULL;
-	struct wlr_buffer *buf;
+	struct nx_buffer *buf;
 	int w = 0, h = 0;
 	char resolved[PATH_MAX];
 	const char *path = clock_icon_path;
@@ -652,7 +652,7 @@ ensure_clock_icon_buffer(int target_h)
 		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
 		if (!pixbuf) {
 			if (gerr) {
-				wlr_log(WLR_ERROR, "clock icon: failed to load '%s': %s",
+				nx_log(NX_ERROR, "clock icon: failed to load '%s': %s",
 						path, gerr->message);
 				g_error_free(gerr);
 			}
@@ -677,7 +677,7 @@ void
 drop_light_icon_buffer(void)
 {
 	if (light_icon_buf) {
-		wlr_buffer_drop(light_icon_buf);
+		nx_buffer_drop(light_icon_buf);
 		light_icon_buf = NULL;
 	}
 	light_icon_loaded_h = 0;
@@ -690,7 +690,7 @@ ensure_light_icon_buffer(int target_h)
 {
 	GdkPixbuf *pixbuf = NULL;
 	GError *gerr = NULL;
-	struct wlr_buffer *buf;
+	struct nx_buffer *buf;
 	int w = 0, h = 0;
 	char resolved[PATH_MAX];
 	const char *path = light_icon_path;
@@ -709,7 +709,7 @@ ensure_light_icon_buffer(int target_h)
 		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
 		if (!pixbuf) {
 			if (gerr) {
-				wlr_log(WLR_ERROR, "light icon: failed to load '%s': %s",
+				nx_log(NX_ERROR, "light icon: failed to load '%s': %s",
 						path, gerr->message);
 				g_error_free(gerr);
 			}
@@ -734,7 +734,7 @@ void
 drop_ram_icon_buffer(void)
 {
 	if (ram_icon_buf) {
-		wlr_buffer_drop(ram_icon_buf);
+		nx_buffer_drop(ram_icon_buf);
 		ram_icon_buf = NULL;
 	}
 	ram_icon_loaded_h = 0;
@@ -747,7 +747,7 @@ ensure_ram_icon_buffer(int target_h)
 {
 	GdkPixbuf *pixbuf = NULL;
 	GError *gerr = NULL;
-	struct wlr_buffer *buf;
+	struct nx_buffer *buf;
 	int w = 0, h = 0;
 	char resolved[PATH_MAX];
 	const char *path = ram_icon_path;
@@ -766,7 +766,7 @@ ensure_ram_icon_buffer(int target_h)
 		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
 		if (!pixbuf) {
 			if (gerr) {
-				wlr_log(WLR_ERROR, "ram icon: failed to load '%s': %s",
+				nx_log(NX_ERROR, "ram icon: failed to load '%s': %s",
 						path, gerr->message);
 				g_error_free(gerr);
 			}
@@ -791,7 +791,7 @@ void
 drop_volume_icon_buffer(void)
 {
 	if (volume_icon_buf) {
-		wlr_buffer_drop(volume_icon_buf);
+		nx_buffer_drop(volume_icon_buf);
 		volume_icon_buf = NULL;
 	}
 	volume_icon_loaded_h = 0;
@@ -804,7 +804,7 @@ ensure_volume_icon_buffer(int target_h)
 {
 	GdkPixbuf *pixbuf = NULL;
 	GError *gerr = NULL;
-	struct wlr_buffer *buf;
+	struct nx_buffer *buf;
 	int w = 0, h = 0;
 	char resolved[PATH_MAX];
 	const char *path = volume_icon_path;
@@ -823,7 +823,7 @@ ensure_volume_icon_buffer(int target_h)
 		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
 		if (!pixbuf) {
 			if (gerr) {
-				wlr_log(WLR_ERROR, "volume icon: failed to load '%s': %s",
+				nx_log(NX_ERROR, "volume icon: failed to load '%s': %s",
 						path, gerr->message);
 				g_error_free(gerr);
 			}
@@ -848,7 +848,7 @@ void
 drop_battery_icon_buffer(void)
 {
 	if (battery_icon_buf) {
-		wlr_buffer_drop(battery_icon_buf);
+		nx_buffer_drop(battery_icon_buf);
 		battery_icon_buf = NULL;
 	}
 	battery_icon_loaded_h = 0;
@@ -861,7 +861,7 @@ ensure_battery_icon_buffer(int target_h)
 {
 	GdkPixbuf *pixbuf = NULL;
 	GError *gerr = NULL;
-	struct wlr_buffer *buf;
+	struct nx_buffer *buf;
 	int w = 0, h = 0;
 	char resolved[PATH_MAX];
 	const char *path = battery_icon_path;
@@ -880,7 +880,7 @@ ensure_battery_icon_buffer(int target_h)
 		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
 		if (!pixbuf) {
 			if (gerr) {
-				wlr_log(WLR_ERROR, "battery icon: failed to load '%s': %s",
+				nx_log(NX_ERROR, "battery icon: failed to load '%s': %s",
 						path, gerr->message);
 				g_error_free(gerr);
 			}
@@ -905,7 +905,7 @@ void
 drop_mic_icon_buffer(void)
 {
 	if (mic_icon_buf) {
-		wlr_buffer_drop(mic_icon_buf);
+		nx_buffer_drop(mic_icon_buf);
 		mic_icon_buf = NULL;
 	}
 	mic_icon_loaded_h = 0;
@@ -918,7 +918,7 @@ ensure_mic_icon_buffer(int target_h)
 {
 	GdkPixbuf *pixbuf = NULL;
 	GError *gerr = NULL;
-	struct wlr_buffer *buf;
+	struct nx_buffer *buf;
 	int w = 0, h = 0;
 	char resolved[PATH_MAX];
 	const char *path = mic_icon_path;
@@ -937,7 +937,7 @@ ensure_mic_icon_buffer(int target_h)
 		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
 		if (!pixbuf) {
 			if (gerr) {
-				wlr_log(WLR_ERROR, "mic icon: failed to load '%s': %s",
+				nx_log(NX_ERROR, "mic icon: failed to load '%s': %s",
 						path, gerr->message);
 				g_error_free(gerr);
 			}
@@ -962,7 +962,7 @@ void
 drop_net_icon_buffer(void)
 {
 	if (net_icon_buf) {
-		wlr_buffer_drop(net_icon_buf);
+		nx_buffer_drop(net_icon_buf);
 		net_icon_buf = NULL;
 	}
 	net_icon_loaded_h = 0;
@@ -975,7 +975,7 @@ int
 load_net_icon_buffer(const char *path, int target_h)
 {
 	GError *gerr = NULL;
-	struct wlr_buffer *buf;
+	struct nx_buffer *buf;
 	int w = 0, h = 0;
 	GdkPixbuf *pixbuf = NULL;
 	char resolved[PATH_MAX];
@@ -993,7 +993,7 @@ load_net_icon_buffer(const char *path, int target_h)
 				&& strcmp(load_path, net_icon_wifi_100_resolved) == 0)) {
 		buf = statusbar_buffer_from_wifi100(target_h, &w, &h);
 		if (!buf) {
-			wlr_log(WLR_ERROR, "net icon: synth wifi_100 failed (path=%s resolved=%s)",
+			nx_log(NX_ERROR, "net icon: synth wifi_100 failed (path=%s resolved=%s)",
 					path, load_path);
 			return -1;
 		}
@@ -1005,7 +1005,7 @@ load_net_icon_buffer(const char *path, int target_h)
 		pixbuf = gdk_pixbuf_new_from_file(load_path, &gerr);
 		if (!pixbuf) {
 			if (gerr) {
-				wlr_log(WLR_ERROR, "net icon: failed to load '%s': %s", load_path, gerr->message);
+				nx_log(NX_ERROR, "net icon: failed to load '%s': %s", load_path, gerr->message);
 				g_error_free(gerr);
 			}
 			return -1;
@@ -1028,7 +1028,7 @@ done:
 	net_icon_h = h;
 	net_icon_loaded_h = target_h;
 	snprintf(net_icon_loaded_path, sizeof(net_icon_loaded_path), "%s", load_path);
-	wlr_log(WLR_INFO, "net icon: loaded %s (resolved=%s) w=%d h=%d target_h=%d",
+	nx_log(NX_INFO, "net icon: loaded %s (resolved=%s) w=%d h=%d target_h=%d",
 			path, load_path, net_icon_w, net_icon_h, target_h);
 	return 0;
 }
@@ -1108,7 +1108,7 @@ rendertray(Monitor *m, int bar_height)
 
 	x = padding;
 	wl_list_for_each(it, &tray_items, link) {
-		struct wlr_scene_buffer *scene_buf;
+		struct nx_scene_buffer *scene_buf;
 		int icon_y, content_w;
 
 		if (it->passive || !it->icon_buf || it->icon_w <= 0 || it->icon_h <= 0) {
@@ -1132,10 +1132,10 @@ rendertray(Monitor *m, int bar_height)
 		it->w = content_w + gap;
 		icon_y = MAX(0, (bar_height - it->icon_h) / 2);
 
-		scene_buf = wlr_scene_buffer_create(module->tree, NULL);
+		scene_buf = nx_scene_buffer_create(module->tree, NULL);
 		if (scene_buf) {
-			wlr_scene_buffer_set_buffer(scene_buf, it->icon_buf);
-			wlr_scene_node_set_position(&scene_buf->node,
+			nx_scene_buffer_set_buffer(scene_buf, it->icon_buf);
+			nx_scene_node_set_position(&scene_buf->node,
 					x - it->icon_pad_l, icon_y);
 		}
 
@@ -1150,7 +1150,7 @@ rendertray(Monitor *m, int bar_height)
 	module->width = count > 0 ? MAX(x - gap + padding, right_edge) : 0;
 	if (module->width > 0)
 		updatemodulebg(module, module->width, bar_height, statusbar_bg);
-	wlr_scene_node_set_enabled(&module->tree->node, module->width > 0);
+	nx_scene_node_set_enabled(&module->tree->node, module->width > 0);
 }
 
 int
@@ -1385,7 +1385,7 @@ kill_processes_with_name(const char *name)
 			if (kill(pid, SIGKILL) == 0) {
 				killed++;
 			} else {
-				wlr_log(WLR_ERROR, "cpu popup: kill %d (%s) failed: %s",
+				nx_log(NX_ERROR, "cpu popup: kill %d (%s) failed: %s",
 						pid, name, strerror(errno));
 			}
 		}
@@ -1559,7 +1559,7 @@ rendercpupopup(Monitor *m)
 	if (!statusfont.font || cpu_core_count <= 0) {
 		p->width = p->height = 0;
 		if (p->tree)
-			wlr_scene_node_set_enabled(&p->tree->node, 0);
+			nx_scene_node_set_enabled(&p->tree->node, 0);
 		p->visible = 0;
 		return;
 	}
@@ -1720,7 +1720,7 @@ cpu_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 				rel_y >= e->kill_y && rel_y < e->kill_y + e->kill_h) {
 			kill_processes_with_name(e->name);
 			if (kill(e->pid, SIGKILL) != 0 && errno != ESRCH)
-				wlr_log(WLR_ERROR, "cpu popup: kill %d failed: %s",
+				nx_log(NX_ERROR, "cpu popup: kill %d failed: %s",
 						e->pid, strerror(errno));
 			/* drop the row right away so the click visibly
 			 * removes the process from the list */
@@ -1950,7 +1950,7 @@ renderrampopup(Monitor *m)
 	if (!statusfont.font) {
 		p->width = p->height = 0;
 		if (p->tree)
-			wlr_scene_node_set_enabled(&p->tree->node, 0);
+			nx_scene_node_set_enabled(&p->tree->node, 0);
 		p->visible = 0;
 		return;
 	}
@@ -2128,7 +2128,7 @@ ram_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 				rel_y >= e->kill_y && rel_y < e->kill_y + e->kill_h) {
 			kill_processes_with_name(e->name);
 			if (kill(e->pid, SIGKILL) != 0 && errno != ESRCH)
-				wlr_log(WLR_ERROR, "ram popup: kill %d failed: %s",
+				nx_log(NX_ERROR, "ram popup: kill %d failed: %s",
 						e->pid, strerror(errno));
 			/* drop the row right away so the click visibly
 			 * removes the process from the list */
@@ -2291,7 +2291,7 @@ renderbatterypopup(Monitor *m)
 	if (!statusfont.font || !battery_available) {
 		p->width = p->height = 0;
 		if (p->tree)
-			wlr_scene_node_set_enabled(&p->tree->node, 0);
+			nx_scene_node_set_enabled(&p->tree->node, 0);
 		p->visible = 0;
 		return;
 	}
@@ -2435,7 +2435,7 @@ updatebatteryhover(Monitor *m, double cx, double cy)
 
 	if (!m || !m->showbar || !m->statusbar.battery.tree || !m->statusbar.battery_popup.tree || !battery_available) {
 		if (m && m->statusbar.battery_popup.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.battery_popup.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.battery_popup.tree->node, 0);
 			m->statusbar.battery_popup.visible = 0;
 		}
 		return;
@@ -2487,8 +2487,8 @@ updatebatteryhover(Monitor *m, double cx, double cy)
 			p->refresh_data = 1; /* Trigger immediate fetch when delay passes */
 		}
 		p->visible = 1;
-		wlr_scene_node_set_enabled(&p->tree->node, 1);
-		wlr_scene_node_set_position(&p->tree->node,
+		nx_scene_node_set_enabled(&p->tree->node, 1);
+		nx_scene_node_set_position(&p->tree->node,
 				popup_x, statusbar_popup_y(m));
 
 		/* Check if refresh is needed (every 500ms after delay) */
@@ -2537,7 +2537,7 @@ updatebatteryhover(Monitor *m, double cx, double cy)
 			p->last_render_ms = now;
 			/* first render establishes the real width — re-clamp so
 			 * the card never hangs past the screen edge */
-			wlr_scene_node_set_position(&p->tree->node,
+			nx_scene_node_set_position(&p->tree->node,
 					battery_popup_clamped_x(m, p),
 					statusbar_popup_y(m));
 		}
@@ -2549,7 +2549,7 @@ updatebatteryhover(Monitor *m, double cx, double cy)
 		p->hover_start_ms = 0;
 		p->btn_hover = -1;
 		popup_view_hide(&p->view);
-		wlr_scene_node_set_enabled(&p->tree->node, 0);
+		nx_scene_node_set_enabled(&p->tree->node, 0);
 	}
 }
 
@@ -2674,7 +2674,7 @@ battery_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 				err = errno;
 			}
 			if (n < 0) {
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"battery popup: writing '%s' to %s failed: %s",
 					name, path, strerror(err));
 				return 1;
@@ -2713,7 +2713,7 @@ updatehoverrects(StatusModule *module)
 		col[2] = statusbar_tag_hover_bg[2];
 		col[3] = statusbar_tag_hover_bg[3] *
 			module->hover_alpha[module->box_tag[n]];
-		wlr_scene_rect_set_color(module->hover_rect[n], col);
+		nx_scene_rect_set_color(module->hover_rect[n], col);
 	}
 }
 
@@ -2728,9 +2728,9 @@ renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 	int padding, inner, spacing, outer_pad;
 	int box_h, box_y, total_w = 0;
 	int x, count = 0, pos;
-	struct wlr_scene_buffer *scene_buf;
-	struct wlr_scene_rect *hrect;
-	struct wlr_buffer *buffer;
+	struct nx_scene_buffer *scene_buf;
+	struct nx_scene_rect *hrect;
+	struct nx_buffer *buffer;
 	struct { int tag; int active; } shown[TAGCOUNT];
 	int shown_count = 0, n;
 	uint64_t sig;
@@ -2871,19 +2871,19 @@ renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
 			col[1] = statusbar_tag_hover_bg[1];
 			col[2] = statusbar_tag_hover_bg[2];
 			col[3] = statusbar_tag_hover_bg[3] * module->hover_alpha[i];
-			hrect = wlr_scene_rect_create(module->tree, box_w, box_h,
+			hrect = nx_scene_rect_create(module->tree, box_w, box_h,
 					col);
 			if (hrect)
-				wlr_scene_node_set_position(&hrect->node, x, box_y);
+				nx_scene_node_set_position(&hrect->node, x, box_y);
 		}
 
 		/* Cache-owned buffer — no drop; the scene node holds a lock. */
 		buffer = statusbar_buffer_from_glyph(glyph);
 		if (buffer) {
-			scene_buf = wlr_scene_buffer_create(module->tree, NULL);
+			scene_buf = nx_scene_buffer_create(module->tree, NULL);
 			if (scene_buf) {
-				wlr_scene_buffer_set_buffer(scene_buf, buffer);
-				wlr_scene_node_set_position(&scene_buf->node,
+				nx_scene_buffer_set_buffer(scene_buf, buffer);
+				nx_scene_node_set_position(&scene_buf->node,
 						origin_x + glyph->x,
 						origin_y - glyph->y);
 			}
@@ -4199,92 +4199,92 @@ positionstatusmodules(Monitor *m)
 		 * tree's visibility and disables it once it is off-screen. */
 		if (m->statusbar.slot.height > 0) {
 			if (m->statusbar.tray_menu.tree) {
-				wlr_scene_node_set_enabled(
+				nx_scene_node_set_enabled(
 					&m->statusbar.tray_menu.tree->node, 0);
 				m->statusbar.tray_menu.visible = 0;
 			}
 			if (m->statusbar.cpu_popup.tree) {
-				wlr_scene_node_set_enabled(
+				nx_scene_node_set_enabled(
 					&m->statusbar.cpu_popup.tree->node, 0);
 				m->statusbar.cpu_popup.visible = 0;
 			}
 			if (m->statusbar.net_popup.tree) {
-				wlr_scene_node_set_enabled(
+				nx_scene_node_set_enabled(
 					&m->statusbar.net_popup.tree->node, 0);
 				m->statusbar.net_popup.visible = 0;
 			}
 			statusbar_anim_sync(m);
 			return;
 		}
-		wlr_scene_node_set_enabled(&m->statusbar.tree->node, 0);
+		nx_scene_node_set_enabled(&m->statusbar.tree->node, 0);
 		if (m->statusbar.tags.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.tags.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.tags.tree->node, 0);
 			m->statusbar.tags.x = 0;
 		}
 		if (m->statusbar.traylabel.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.traylabel.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.traylabel.tree->node, 0);
 			m->statusbar.traylabel.x = 0;
 		}
 		if (m->statusbar.tray_menu.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 0);
 			m->statusbar.tray_menu.visible = 0;
 		}
 		if (m->statusbar.cpu.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.cpu.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.cpu.tree->node, 0);
 			m->statusbar.cpu.x = 0;
 		}
 		if (m->statusbar.net.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.net.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.net.tree->node, 0);
 			m->statusbar.net.x = 0;
 		}
 		if (m->statusbar.bluetooth.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.bluetooth.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.bluetooth.tree->node, 0);
 			m->statusbar.bluetooth.x = 0;
 		}
 		if (m->statusbar.display.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.display.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.display.tree->node, 0);
 			m->statusbar.display.x = 0;
 		}
 		if (m->statusbar.battery.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.battery.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.battery.tree->node, 0);
 			m->statusbar.battery.x = 0;
 		}
 			if (m->statusbar.light.tree) {
-				wlr_scene_node_set_enabled(&m->statusbar.light.tree->node, 0);
+				nx_scene_node_set_enabled(&m->statusbar.light.tree->node, 0);
 				m->statusbar.light.x = 0;
 			}
 			if (m->statusbar.mic.tree) {
-				wlr_scene_node_set_enabled(&m->statusbar.mic.tree->node, 0);
+				nx_scene_node_set_enabled(&m->statusbar.mic.tree->node, 0);
 				m->statusbar.mic.x = 0;
 			}
 			if (m->statusbar.volume.tree) {
-				wlr_scene_node_set_enabled(&m->statusbar.volume.tree->node, 0);
+				nx_scene_node_set_enabled(&m->statusbar.volume.tree->node, 0);
 				m->statusbar.volume.x = 0;
 			}
 		if (m->statusbar.ram.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.ram.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.ram.tree->node, 0);
 			m->statusbar.ram.x = 0;
 		}
 		if (m->statusbar.clock.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.clock.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.clock.tree->node, 0);
 			m->statusbar.clock.x = 0;
 		}
 		if (m->statusbar.power.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.power.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.power.tree->node, 0);
 			m->statusbar.power.x = 0;
 		}
 		if (m->statusbar.cpu_popup.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
 			m->statusbar.cpu_popup.visible = 0;
 		}
 		if (m->statusbar.net_popup.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
 			m->statusbar.net_popup.visible = 0;
 		}
 		return;
 	}
 
-	wlr_scene_node_set_enabled(&m->statusbar.tree->node, 1);
+	nx_scene_node_set_enabled(&m->statusbar.tree->node, 1);
 
 	/* statusbar.conf drives everything from here: which modules show,
 	 * their side, their order (file order) and icons-only. A module the
@@ -4298,13 +4298,13 @@ positionstatusmodules(Monitor *m)
 		for (i = 0; i < (int)BARMOD_DEF_COUNT; i++) {
 			mod = barmod_at(m, i);
 			if (mod->tree)
-				wlr_scene_node_set_enabled(&mod->tree->node,
+				nx_scene_node_set_enabled(&mod->tree->node,
 					mod->width > 0 &&
 					barmod_find(barmod_defs[i].name) != NULL);
 		}
 		if (m->statusbar.cpu_popup.tree && m->statusbar.cpu.width > 0) {
 			if (!m->statusbar.cpu_popup.visible)
-				wlr_scene_node_set_enabled(
+				nx_scene_node_set_enabled(
 					&m->statusbar.cpu_popup.tree->node, 0);
 		}
 
@@ -4319,7 +4319,7 @@ positionstatusmodules(Monitor *m)
 			mod = barmod_by_name(m, cfg->name);
 			if (!mod || !mod->tree || mod->width <= 0)
 				continue;
-			wlr_scene_node_set_position(&mod->tree->node, x, 0);
+			nx_scene_node_set_position(&mod->tree->node, x, 0);
 			mod->x = x;
 			if (mod == &m->statusbar.traylabel) {
 				/* rendertray pads its trailing edge by
@@ -4350,7 +4350,7 @@ positionstatusmodules(Monitor *m)
 			if (!mod || !mod->tree || mod->width <= 0)
 				continue;
 			x -= mod->width;
-			wlr_scene_node_set_position(&mod->tree->node, x, 0);
+			nx_scene_node_set_position(&mod->tree->node, x, 0);
 			mod->x = x;
 			x -= spacing;
 		}
@@ -4382,12 +4382,12 @@ positionstatusmodules(Monitor *m)
 				continue;
 			if (mod->width <= 0 || mid_w <= 0 ||
 					right_start - left_end < mid_w) {
-				wlr_scene_node_set_enabled(&mod->tree->node, 0);
+				nx_scene_node_set_enabled(&mod->tree->node, 0);
 				continue;
 			}
-			wlr_scene_node_set_position(&mod->tree->node, mx, 0);
+			nx_scene_node_set_position(&mod->tree->node, mx, 0);
 			mod->x = mx;
-			wlr_scene_node_set_enabled(&mod->tree->node, 1);
+			nx_scene_node_set_enabled(&mod->tree->node, 1);
 			mx += mod->width + spacing;
 		}
 	}
@@ -4402,11 +4402,11 @@ positionstatusmodules(Monitor *m)
 				popup_x = max_x;
 			if (popup_x < 0)
 				popup_x = 0;
-			wlr_scene_node_set_position(&m->statusbar.cpu_popup.tree->node,
+			nx_scene_node_set_position(&m->statusbar.cpu_popup.tree->node,
 					popup_x, statusbar_popup_y(m));
 			m->statusbar.cpu_popup.refresh_data = 1;
 		} else {
-			wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
 			m->statusbar.cpu_popup.visible = 0;
 			m->statusbar.cpu_popup.refresh_data = 0;
 		}
@@ -4415,12 +4415,12 @@ positionstatusmodules(Monitor *m)
 		int pos_x = m->statusbar.net_popup.anchor_x;
 
 		if (m->statusbar.area.height > 0) {
-			wlr_scene_node_set_position(&m->statusbar.net_popup.tree->node,
+			nx_scene_node_set_position(&m->statusbar.net_popup.tree->node,
 					pos_x, statusbar_popup_y(m));
 			if (!m->statusbar.net_popup.visible)
-				wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
+				nx_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
 		} else {
-			wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
 			m->statusbar.net_popup.visible = 0;
 		}
 	}
@@ -4436,11 +4436,11 @@ positionstatusmodules(Monitor *m)
 				menu_x = 0;
 			m->statusbar.tray_menu.x = menu_x;
 			m->statusbar.tray_menu.y = statusbar_popup_y(m);
-			wlr_scene_node_set_position(&m->statusbar.tray_menu.tree->node,
+			nx_scene_node_set_position(&m->statusbar.tray_menu.tree->node,
 					m->statusbar.tray_menu.x, m->statusbar.tray_menu.y);
-			wlr_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 1);
+			nx_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 1);
 		} else {
-			wlr_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 0);
 			m->statusbar.tray_menu.visible = 0;
 		}
 	}
@@ -4566,7 +4566,7 @@ statusbar_anim_sync(Monitor *m)
 	int gap, bar_h, slide, offset, shown_x, shown_y, tile_top_with_bar;
 	double tile_top_now;
 
-	if (!m || !m->statusbar.tree || !m->wlr_output || !m->wlr_output->enabled)
+	if (!m || !m->statusbar.tree || !m->nx_output || !m->nx_output->enabled)
 		return;
 
 	gap = m->gaps ? (int)gappx : 0;
@@ -4598,17 +4598,17 @@ statusbar_anim_sync(Monitor *m)
 	if (offset > slide)
 		offset = slide;
 
-	wlr_scene_node_set_enabled(&m->statusbar.tree->node, 1);
-	wlr_scene_node_set_position(&m->statusbar.tree->node, shown_x,
+	nx_scene_node_set_enabled(&m->statusbar.tree->node, 1);
+	nx_scene_node_set_position(&m->statusbar.tree->node, shown_x,
 			offset < slide ? shown_y - offset
 					: shown_y - STATUSBAR_PARK_Y);
 }
 
 void
-layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_area)
+layoutstatusbar(Monitor *m, const struct nx_box *area, struct nx_box *client_area)
 {
 	int gap, bar_height;
-	struct wlr_box bar_area = {0};
+	struct nx_box bar_area = {0};
 
 	if (!m || !m->statusbar.tree || !area || !client_area)
 		return;
@@ -4659,7 +4659,7 @@ layoutstatusbar(Monitor *m, const struct wlr_box *area, struct wlr_box *client_a
 	 * changed or the bar was just re-shown. */
 	renderworkspaces(m, &m->statusbar.tags, bar_area.height);
 	diag_logf("BAR", "layout %s barh=%d tags_w=%d boxes=%d font=%d reshow=%d",
-		m->wlr_output->name, bar_area.height, m->statusbar.tags.width,
+		m->nx_output->name, bar_area.height, m->statusbar.tags.width,
 		m->statusbar.tags.box_count, statusfont.font ? 1 : 0,
 		m->statusbar.last_layout_h != bar_area.height);
 	if (m->statusbar.last_layout_h != bar_area.height) {
@@ -5488,7 +5488,7 @@ updatecpuhover(Monitor *m, double cx, double cy)
 
 	if (!m || !m->showbar || !m->statusbar.cpu.tree || !m->statusbar.cpu_popup.tree) {
 		if (m && m->statusbar.cpu_popup.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
 			m->statusbar.cpu_popup.visible = 0;
 			m->statusbar.cpu_popup.hover_idx = -1;
 		}
@@ -5547,8 +5547,8 @@ updatecpuhover(Monitor *m, double cx, double cy)
 			p->suppress_refresh_until_ms = now + 1000;
 		}
 		p->visible = 1;
-		wlr_scene_node_set_enabled(&p->tree->node, 1);
-		wlr_scene_node_set_position(&p->tree->node,
+		nx_scene_node_set_enabled(&p->tree->node, 1);
+		nx_scene_node_set_position(&p->tree->node,
 				popup_x, statusbar_popup_y(m));
 		new_hover = cpu_popup_hover_index(m, p);
 		stale_refresh = (p->last_fetch_ms == 0 ||
@@ -5568,7 +5568,7 @@ updatecpuhover(Monitor *m, double cx, double cy)
 			if (allow_render) {
 				p->hover_idx = new_hover;
 				rendercpupopup(m);
-				wlr_scene_node_set_position(&p->tree->node,
+				nx_scene_node_set_position(&p->tree->node,
 						cpu_popup_clamped_x(m, p),
 						statusbar_popup_y(m));
 			}
@@ -5579,7 +5579,7 @@ updatecpuhover(Monitor *m, double cx, double cy)
 		}
 	} else if (p->visible || p->hover_start_ms != 0) {
 		p->visible = 0;
-		wlr_scene_node_set_enabled(&p->tree->node, 0);
+		nx_scene_node_set_enabled(&p->tree->node, 0);
 		p->hover_idx = -1;
 		p->refresh_data = 0;
 		p->last_render_ms = 0;
@@ -5605,7 +5605,7 @@ updateramhover(Monitor *m, double cx, double cy)
 
 	if (!m || !m->showbar || !m->statusbar.ram.tree || !m->statusbar.ram_popup.tree) {
 		if (m && m->statusbar.ram_popup.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.ram_popup.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.ram_popup.tree->node, 0);
 			m->statusbar.ram_popup.visible = 0;
 			m->statusbar.ram_popup.hover_idx = -1;
 		}
@@ -5660,8 +5660,8 @@ updateramhover(Monitor *m, double cx, double cy)
 		}
 
 		p->visible = 1;
-		wlr_scene_node_set_enabled(&p->tree->node, 1);
-		wlr_scene_node_set_position(&p->tree->node,
+		nx_scene_node_set_enabled(&p->tree->node, 1);
+		nx_scene_node_set_position(&p->tree->node,
 				popup_x, statusbar_popup_y(m));
 		new_hover = ram_popup_hover_index(m, p);
 		stale_refresh = (p->last_fetch_ms == 0 ||
@@ -5675,7 +5675,7 @@ updateramhover(Monitor *m, double cx, double cy)
 		if (!was_visible || need_refresh) {
 			p->hover_idx = new_hover;
 			renderrampopup(m);
-			wlr_scene_node_set_position(&p->tree->node,
+			nx_scene_node_set_position(&p->tree->node,
 					ram_popup_clamped_x(m, p),
 					statusbar_popup_y(m));
 		} else if (new_hover != p->hover_idx) {
@@ -5694,7 +5694,7 @@ updateramhover(Monitor *m, double cx, double cy)
 		}
 	} else if (p->visible || p->hover_start_ms != 0) {
 		p->visible = 0;
-		wlr_scene_node_set_enabled(&p->tree->node, 0);
+		nx_scene_node_set_enabled(&p->tree->node, 0);
 		p->hover_idx = -1;
 		p->refresh_data = 0;
 		p->last_render_ms = 0;
@@ -5718,7 +5718,7 @@ updatenethover(Monitor *m, double cx, double cy)
 
 	if (!m || !m->showbar || !m->statusbar.net_popup.tree) {
 		if (m && m->statusbar.net_popup.tree) {
-			wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
 			m->statusbar.net_popup.visible = 0;
 		}
 		return;
@@ -5789,8 +5789,8 @@ updatenethover(Monitor *m, double cx, double cy)
 			set_status_task_due(refreshstatusnet, p->suppress_refresh_until_ms);
 		}
 		p->visible = 1;
-		wlr_scene_node_set_enabled(&p->tree->node, 1);
-		wlr_scene_node_set_position(&p->tree->node,
+		nx_scene_node_set_enabled(&p->tree->node, 1);
+		nx_scene_node_set_position(&p->tree->node,
 				p->anchor_x, statusbar_popup_y(m));
 		if (!was_visible) {
 			p->anchor_y = statusbar_popup_y(m);
@@ -5807,7 +5807,7 @@ updatenethover(Monitor *m, double cx, double cy)
 				if (p->anchor_x < 0)
 					p->anchor_x = 0;
 			}
-			wlr_scene_node_set_position(&p->tree->node,
+			nx_scene_node_set_position(&p->tree->node,
 					p->anchor_x, statusbar_popup_y(m));
 			popup_view_show(&p->view);
 		}
@@ -5829,7 +5829,7 @@ updatenethover(Monitor *m, double cx, double cy)
 		}
 		p->visible = 0;
 		p->outside_since_ms = 0;
-		wlr_scene_node_set_enabled(&p->tree->node, 0);
+		nx_scene_node_set_enabled(&p->tree->node, 0);
 		p->suppress_refresh_until_ms = 0;
 		p->hover_start_ms = 0;
 		p->btn_hover = -1;
@@ -5841,7 +5841,7 @@ updatenethover(Monitor *m, double cx, double cy)
 }
 
 static int
-popup_contains(Monitor *m, struct wlr_scene_tree *tree, int visible,
+popup_contains(Monitor *m, struct nx_scene_tree *tree, int visible,
 		int w, int h, double cx, double cy)
 {
 	int x0, y0;
@@ -5912,100 +5912,100 @@ initstatusbar(Monitor *m)
 
 	wl_list_init(&m->statusbar.tray_menu.entries);
 	m->showbar = htpc_mode_active ? 0 : 1;
-	m->statusbar.area = (struct wlr_box){0};
-	m->statusbar.tree = wlr_scene_tree_create(layers[LyrTop]);
+	m->statusbar.area = (struct nx_box){0};
+	m->statusbar.tree = nx_scene_tree_create(layers[LyrTop]);
 	if (m->statusbar.tree) {
-		m->statusbar.tags.tree = wlr_scene_tree_create(m->statusbar.tree);
+		m->statusbar.tags.tree = nx_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.tags.tree) {
-			m->statusbar.tags.bg = wlr_scene_tree_create(m->statusbar.tags.tree);
+			m->statusbar.tags.bg = nx_scene_tree_create(m->statusbar.tags.tree);
 			m->statusbar.tags.hover_tag = -1;
 			for (int i = 0; i < TAGCOUNT; i++)
 				m->statusbar.tags.hover_alpha[i] = 0.0f;
 		}
-		m->statusbar.traylabel.tree = wlr_scene_tree_create(m->statusbar.tree);
+		m->statusbar.traylabel.tree = nx_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.traylabel.tree)
-			m->statusbar.traylabel.bg = wlr_scene_tree_create(m->statusbar.traylabel.tree);
-		m->statusbar.terminfo.tree = wlr_scene_tree_create(m->statusbar.tree);
-		m->statusbar.tray_menu.tree = wlr_scene_tree_create(m->statusbar.tree);
+			m->statusbar.traylabel.bg = nx_scene_tree_create(m->statusbar.traylabel.tree);
+		m->statusbar.terminfo.tree = nx_scene_tree_create(m->statusbar.tree);
+		m->statusbar.tray_menu.tree = nx_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.tray_menu.tree) {
-			m->statusbar.tray_menu.bg = wlr_scene_tree_create(m->statusbar.tray_menu.tree);
+			m->statusbar.tray_menu.bg = nx_scene_tree_create(m->statusbar.tray_menu.tree);
 			m->statusbar.tray_menu.visible = 0;
-			wlr_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 0);
 		}
-		m->statusbar.cpu.tree = wlr_scene_tree_create(m->statusbar.tree);
+		m->statusbar.cpu.tree = nx_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.cpu.tree)
-			m->statusbar.cpu.bg = wlr_scene_tree_create(m->statusbar.cpu.tree);
-	m->statusbar.net.tree = wlr_scene_tree_create(m->statusbar.tree);
+			m->statusbar.cpu.bg = nx_scene_tree_create(m->statusbar.cpu.tree);
+	m->statusbar.net.tree = nx_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.net.tree) {
-		m->statusbar.net.bg = wlr_scene_tree_create(m->statusbar.net.tree);
+		m->statusbar.net.bg = nx_scene_tree_create(m->statusbar.net.tree);
 	}
-	m->statusbar.battery.tree = wlr_scene_tree_create(m->statusbar.tree);
+	m->statusbar.battery.tree = nx_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.battery.tree)
-		m->statusbar.battery.bg = wlr_scene_tree_create(m->statusbar.battery.tree);
-	m->statusbar.light.tree = wlr_scene_tree_create(m->statusbar.tree);
+		m->statusbar.battery.bg = nx_scene_tree_create(m->statusbar.battery.tree);
+	m->statusbar.light.tree = nx_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.light.tree)
-		m->statusbar.light.bg = wlr_scene_tree_create(m->statusbar.light.tree);
-	m->statusbar.mic.tree = wlr_scene_tree_create(m->statusbar.tree);
+		m->statusbar.light.bg = nx_scene_tree_create(m->statusbar.light.tree);
+	m->statusbar.mic.tree = nx_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.mic.tree)
-		m->statusbar.mic.bg = wlr_scene_tree_create(m->statusbar.mic.tree);
-	m->statusbar.volume.tree = wlr_scene_tree_create(m->statusbar.tree);
+		m->statusbar.mic.bg = nx_scene_tree_create(m->statusbar.mic.tree);
+	m->statusbar.volume.tree = nx_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.volume.tree)
-		m->statusbar.volume.bg = wlr_scene_tree_create(m->statusbar.volume.tree);
-	m->statusbar.disk.tree = wlr_scene_tree_create(m->statusbar.tree);
+		m->statusbar.volume.bg = nx_scene_tree_create(m->statusbar.volume.tree);
+	m->statusbar.disk.tree = nx_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.disk.tree)
-		m->statusbar.disk.bg = wlr_scene_tree_create(m->statusbar.disk.tree);
-	m->statusbar.bluetooth.tree = wlr_scene_tree_create(m->statusbar.tree);
+		m->statusbar.disk.bg = nx_scene_tree_create(m->statusbar.disk.tree);
+	m->statusbar.bluetooth.tree = nx_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.bluetooth.tree)
-		m->statusbar.bluetooth.bg = wlr_scene_tree_create(m->statusbar.bluetooth.tree);
-	m->statusbar.display.tree = wlr_scene_tree_create(m->statusbar.tree);
+		m->statusbar.bluetooth.bg = nx_scene_tree_create(m->statusbar.bluetooth.tree);
+	m->statusbar.display.tree = nx_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.display.tree)
-		m->statusbar.display.bg = wlr_scene_tree_create(m->statusbar.display.tree);
-	m->statusbar.ram.tree = wlr_scene_tree_create(m->statusbar.tree);
+		m->statusbar.display.bg = nx_scene_tree_create(m->statusbar.display.tree);
+	m->statusbar.ram.tree = nx_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.ram.tree)
-		m->statusbar.ram.bg = wlr_scene_tree_create(m->statusbar.ram.tree);
-	m->statusbar.clock.tree = wlr_scene_tree_create(m->statusbar.tree);
+		m->statusbar.ram.bg = nx_scene_tree_create(m->statusbar.ram.tree);
+	m->statusbar.clock.tree = nx_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.clock.tree)
-		m->statusbar.clock.bg = wlr_scene_tree_create(m->statusbar.clock.tree);
-	m->statusbar.power.tree = wlr_scene_tree_create(m->statusbar.tree);
+		m->statusbar.clock.bg = nx_scene_tree_create(m->statusbar.clock.tree);
+	m->statusbar.power.tree = nx_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.power.tree)
-		m->statusbar.power.bg = wlr_scene_tree_create(m->statusbar.power.tree);
-	m->statusbar.cpu_popup.tree = wlr_scene_tree_create(m->statusbar.tree);
+		m->statusbar.power.bg = nx_scene_tree_create(m->statusbar.power.tree);
+	m->statusbar.cpu_popup.tree = nx_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.cpu_popup.tree) {
-		m->statusbar.cpu_popup.bg = wlr_scene_tree_create(m->statusbar.cpu_popup.tree);
+		m->statusbar.cpu_popup.bg = nx_scene_tree_create(m->statusbar.cpu_popup.tree);
 		m->statusbar.cpu_popup.visible = 0;
 		m->statusbar.cpu_popup.hover_idx = -1;
 		m->statusbar.cpu_popup.refresh_data = 0;
 		m->statusbar.cpu_popup.last_fetch_ms = 0;
 		m->statusbar.cpu_popup.suppress_refresh_until_ms = 0;
-		wlr_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
+		nx_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
 	}
-	m->statusbar.ram_popup.tree = wlr_scene_tree_create(m->statusbar.tree);
+	m->statusbar.ram_popup.tree = nx_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.ram_popup.tree) {
-		m->statusbar.ram_popup.bg = wlr_scene_tree_create(m->statusbar.ram_popup.tree);
+		m->statusbar.ram_popup.bg = nx_scene_tree_create(m->statusbar.ram_popup.tree);
 		m->statusbar.ram_popup.visible = 0;
 		m->statusbar.ram_popup.hover_idx = -1;
 		m->statusbar.ram_popup.refresh_data = 0;
 		m->statusbar.ram_popup.last_fetch_ms = 0;
 		m->statusbar.ram_popup.suppress_refresh_until_ms = 0;
-		wlr_scene_node_set_enabled(&m->statusbar.ram_popup.tree->node, 0);
+		nx_scene_node_set_enabled(&m->statusbar.ram_popup.tree->node, 0);
 	}
-	m->statusbar.battery_popup.tree = wlr_scene_tree_create(m->statusbar.tree);
+	m->statusbar.battery_popup.tree = nx_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.battery_popup.tree) {
-		m->statusbar.battery_popup.bg = wlr_scene_tree_create(m->statusbar.battery_popup.tree);
+		m->statusbar.battery_popup.bg = nx_scene_tree_create(m->statusbar.battery_popup.tree);
 		m->statusbar.battery_popup.visible = 0;
 		m->statusbar.battery_popup.refresh_data = 0;
 		m->statusbar.battery_popup.last_fetch_ms = 0;
 		m->statusbar.battery_popup.last_render_ms = 0;
 		m->statusbar.battery_popup.suppress_refresh_until_ms = 0;
-		wlr_scene_node_set_enabled(&m->statusbar.battery_popup.tree->node, 0);
+		nx_scene_node_set_enabled(&m->statusbar.battery_popup.tree->node, 0);
 	}
-		m->statusbar.net_popup.tree = wlr_scene_tree_create(m->statusbar.tree);
+		m->statusbar.net_popup.tree = nx_scene_tree_create(m->statusbar.tree);
 		if (m->statusbar.net_popup.tree) {
-			m->statusbar.net_popup.bg = wlr_scene_tree_create(m->statusbar.net_popup.tree);
+			m->statusbar.net_popup.bg = nx_scene_tree_create(m->statusbar.net_popup.tree);
 			m->statusbar.net_popup.visible = 0;
 			m->statusbar.net_popup.btn_hover = -1;
 			m->statusbar.net_popup.nhits = 0;
-			wlr_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
+			nx_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
 		}
 		{
 			InfoPopup *info[8] = { &m->statusbar.clock_popup,
@@ -6014,14 +6014,14 @@ initstatusbar(Monitor *m)
 				&m->statusbar.bt_popup, &m->statusbar.display_popup,
 				&m->statusbar.power_popup };
 			for (int i = 0; i < 8; i++) {
-				info[i]->tree = wlr_scene_tree_create(m->statusbar.tree);
+				info[i]->tree = nx_scene_tree_create(m->statusbar.tree);
 				info[i]->visible = 0;
 				info[i]->hover_start_ms = 0;
 				info[i]->last_render_ms = 0;
 				info[i]->btn_hover = -1;
 				info[i]->nhits = 0;
 				if (info[i]->tree)
-					wlr_scene_node_set_enabled(&info[i]->tree->node, 0);
+					nx_scene_node_set_enabled(&info[i]->tree->node, 0);
 			}
 		}
 		{
@@ -6035,14 +6035,14 @@ initstatusbar(Monitor *m)
 				&m->statusbar.clock, &m->statusbar.power };
 			for (size_t i = 0; i < LENGTH(mods); i++)
 				if (mods[i]->tree)
-					wlr_scene_tree_set_opacity(mods[i]->tree,
+					nx_scene_tree_set_opacity(mods[i]->tree,
 							statusbar_opacity);
 		}
 	}
 	if (!m->modal.tree) {
-		m->modal.tree = wlr_scene_tree_create(layers[LyrTop]);
+		m->modal.tree = nx_scene_tree_create(layers[LyrTop]);
 		if (m->modal.tree) {
-			m->modal.bg = wlr_scene_tree_create(m->modal.tree);
+			m->modal.bg = nx_scene_tree_create(m->modal.tree);
 			m->modal.visible = 0;
 			m->modal.active_idx = -1;
 			for (int i = 0; i < 3; i++) {
@@ -6088,13 +6088,13 @@ initstatusbar(Monitor *m)
 		m->modal.git_results_path[i][0] = '\0';
 		m->modal.git_results_mtime[i] = 0;
 	}
-			wlr_scene_node_set_enabled(&m->modal.tree->node, 0);
+			nx_scene_node_set_enabled(&m->modal.tree->node, 0);
 		}
 	}
 	if (!m->nixpkgs.tree) {
-		m->nixpkgs.tree = wlr_scene_tree_create(layers[LyrTop]);
+		m->nixpkgs.tree = nx_scene_tree_create(layers[LyrTop]);
 		if (m->nixpkgs.tree) {
-			m->nixpkgs.bg = wlr_scene_tree_create(m->nixpkgs.tree);
+			m->nixpkgs.bg = nx_scene_tree_create(m->nixpkgs.tree);
 			m->nixpkgs.visible = 0;
 			m->nixpkgs.search[0] = '\0';
 			m->nixpkgs.search_len = 0;
@@ -6109,13 +6109,13 @@ initstatusbar(Monitor *m)
 			m->nixpkgs.row_highlight_count = 0;
 			for (int i = 0; i < MODAL_MAX_RESULTS; i++)
 				m->nixpkgs.row_highlights[i] = NULL;
-			wlr_scene_node_set_enabled(&m->nixpkgs.tree->node, 0);
+			nx_scene_node_set_enabled(&m->nixpkgs.tree->node, 0);
 		}
 	}
 	if (!m->sudo_popup.tree) {
-		m->sudo_popup.tree = wlr_scene_tree_create(layers[LyrTop]);
+		m->sudo_popup.tree = nx_scene_tree_create(layers[LyrTop]);
 		if (m->sudo_popup.tree) {
-			m->sudo_popup.bg = wlr_scene_tree_create(m->sudo_popup.tree);
+			m->sudo_popup.bg = nx_scene_tree_create(m->sudo_popup.tree);
 			m->sudo_popup.visible = 0;
 			m->sudo_popup.title[0] = '\0';
 			m->sudo_popup.password[0] = '\0';
@@ -6130,19 +6130,19 @@ initstatusbar(Monitor *m)
 			m->sudo_popup.sudo_fd = -1;
 			m->sudo_popup.sudo_event = NULL;
 			m->sudo_popup.wait_timer = NULL;
-			wlr_scene_node_set_enabled(&m->sudo_popup.tree->node, 0);
+			nx_scene_node_set_enabled(&m->sudo_popup.tree->node, 0);
 		}
 	}
 	if (!m->gamepad_menu.tree) {
 		/* Use LyrBlock to ensure guide popup is always on top of fullscreen */
-		m->gamepad_menu.tree = wlr_scene_tree_create(layers[LyrBlock]);
+		m->gamepad_menu.tree = nx_scene_tree_create(layers[LyrBlock]);
 		if (m->gamepad_menu.tree) {
 			m->gamepad_menu.bg = NULL;
 			m->gamepad_menu.visible = 0;
 			m->gamepad_menu.selected = 0;
 			/* htpc.c removed — gamepad guide menu left empty */
 		m->gamepad_menu.item_count = 0;
-			wlr_scene_node_set_enabled(&m->gamepad_menu.tree->node, 0);
+			nx_scene_node_set_enabled(&m->gamepad_menu.tree->node, 0);
 		}
 	}
 }
@@ -6184,15 +6184,15 @@ cleanupstatusbar(Monitor *m)
 	}
 
 	if (m->statusbar.tree)
-		wlr_scene_node_destroy(&m->statusbar.tree->node);
+		nx_scene_node_destroy(&m->statusbar.tree->node);
 	if (m->modal.tree)
-		wlr_scene_node_destroy(&m->modal.tree->node);
+		nx_scene_node_destroy(&m->modal.tree->node);
 	if (m->nixpkgs.tree)
-		wlr_scene_node_destroy(&m->nixpkgs.tree->node);
+		nx_scene_node_destroy(&m->nixpkgs.tree->node);
 	if (m->sudo_popup.tree)
-		wlr_scene_node_destroy(&m->sudo_popup.tree->node);
+		nx_scene_node_destroy(&m->sudo_popup.tree->node);
 	if (m->gamepad_menu.tree)
-		wlr_scene_node_destroy(&m->gamepad_menu.tree->node);
+		nx_scene_node_destroy(&m->gamepad_menu.tree->node);
 
 	m->statusbar.tree = NULL;
 	m->modal.tree = NULL;
@@ -6293,23 +6293,23 @@ statusbar_printstatus_legacy(void)
 				urg |= c->tags;
 		}
 		if ((c = focustop(m))) {
-			printf("%s title %s\n", m->wlr_output->name, client_get_title(c));
-			printf("%s appid %s\n", m->wlr_output->name, client_get_appid(c));
-			printf("%s fullscreen %d\n", m->wlr_output->name, c->isfullscreen);
-			printf("%s floating %d\n", m->wlr_output->name, c->isfloating);
+			printf("%s title %s\n", m->nx_output->name, client_get_title(c));
+			printf("%s appid %s\n", m->nx_output->name, client_get_appid(c));
+			printf("%s fullscreen %d\n", m->nx_output->name, c->isfullscreen);
+			printf("%s floating %d\n", m->nx_output->name, c->isfloating);
 			sel = c->tags;
 		} else {
-			printf("%s title \n", m->wlr_output->name);
-			printf("%s appid \n", m->wlr_output->name);
-			printf("%s fullscreen \n", m->wlr_output->name);
-			printf("%s floating \n", m->wlr_output->name);
+			printf("%s title \n", m->nx_output->name);
+			printf("%s appid \n", m->nx_output->name);
+			printf("%s fullscreen \n", m->nx_output->name);
+			printf("%s floating \n", m->nx_output->name);
 			sel = 0;
 		}
 
-		printf("%s selmon %u\n", m->wlr_output->name, m == selmon);
+		printf("%s selmon %u\n", m->nx_output->name, m == selmon);
 		printf("%s tags %"PRIu32" %"PRIu32" %"PRIu32" %"PRIu32"\n",
-			m->wlr_output->name, occ, m->tagset[m->seltags], sel, urg);
-		printf("%s layout %s\n", m->wlr_output->name, m->ltsymbol);
+			m->nx_output->name, occ, m->tagset[m->seltags], sel, urg);
+		printf("%s layout %s\n", m->nx_output->name, m->ltsymbol);
 	}
 	fflush(stdout);
 }

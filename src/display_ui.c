@@ -25,7 +25,7 @@
 char display_icon_path[PATH_MAX] = "images/svg/monitor.svg";
 char display_icon_loaded_path[PATH_MAX];
 int display_icon_loaded_h, display_icon_w, display_icon_h;
-struct wlr_buffer *display_icon_buf;
+struct nx_buffer *display_icon_buf;
 
 /* scale slider range: 50%..200%, 5% steps, default 100% */
 #define SCALE_MIN 0.5f
@@ -95,10 +95,10 @@ build_disp(void)
 	ndi = 0;
 	wl_list_for_each(m, &mons, link) {
 		DispInfo *d;
-		struct wlr_output_mode *mode;
+		struct nx_output_mode *mode;
 		RuntimeMonitorConfig *cfg;
 
-		if (!m->wlr_output || !m->wlr_output->enabled)
+		if (!m->nx_output || !m->nx_output->enabled)
 			continue;
 		/* Virtual (headless) outputs never appear here — parked or
 		 * carrying a live Moonlight session.  This popup configures
@@ -112,22 +112,22 @@ build_disp(void)
 		d = &di[ndi++];
 		memset(d, 0, sizeof(*d));
 		d->mon = m;
-		snprintf(d->name, sizeof(d->name), "%s", m->wlr_output->name);
-		mode = m->wlr_output->current_mode;
+		snprintf(d->name, sizeof(d->name), "%s", m->nx_output->name);
+		mode = m->nx_output->current_mode;
 		if (mode) {
 			d->w = mode->width;
 			d->h = mode->height;
 			d->hz = mode->refresh / 1000.0f;
 		} else {
 			/* custom modes have no current_mode entry */
-			d->w = m->wlr_output->width;
-			d->h = m->wlr_output->height;
-			d->hz = m->wlr_output->refresh > 0 ?
-				m->wlr_output->refresh / 1000.0f : 60.0f;
+			d->w = m->nx_output->width;
+			d->h = m->nx_output->height;
+			d->hz = m->nx_output->refresh > 0 ?
+				m->nx_output->refresh / 1000.0f : 60.0f;
 		}
-		d->scale = m->wlr_output->scale > 0.1f ?
-			m->wlr_output->scale : 1.0f;
-		d->transform = m->wlr_output->transform;
+		d->scale = m->nx_output->scale > 0.1f ?
+			m->nx_output->scale : 1.0f;
+		d->transform = m->nx_output->transform;
 		cfg = monconf_find(d->name);
 		if (cfg) {
 			d->grid_row = cfg->grid_row > 0 ? cfg->grid_row : 0;
@@ -155,25 +155,25 @@ build_disp(void)
 static void
 build_rates(const DispInfo *d)
 {
-	struct wlr_output_mode *mode;
+	struct nx_output_mode *mode;
 	int std_max = DISP_RATES_MAX - 2;   /* room for custom entries */
 	int have_paced = 0;
 	int i, j;
 
 	di_nrates = 0;
 	memset(di_rate_oc, 0, sizeof(di_rate_oc));
-	if (!d->mon || !d->mon->wlr_output)
+	if (!d->mon || !d->mon->nx_output)
 		return;
 	/* Divisor modes (pace.c) already give granular real rates — no
 	 * synthetic 120-cap/OC entries needed, so the full row is theirs. */
-	wl_list_for_each(mode, &d->mon->wlr_output->modes, link)
-		if (wlr_drm_connector_mode_pace_divisor(d->mon->wlr_output,
+	wl_list_for_each(mode, &d->mon->nx_output->modes, link)
+		if (nx_drm_connector_mode_pace_divisor(d->mon->nx_output,
 				mode)) {
 			have_paced = 1;
 			std_max = DISP_RATES_MAX;
 			break;
 		}
-	wl_list_for_each(mode, &d->mon->wlr_output->modes, link) {
+	wl_list_for_each(mode, &d->mon->nx_output->modes, link) {
 		float hz = mode->refresh / 1000.0f;
 
 		if (mode->width != d->w || mode->height != d->h)
@@ -312,16 +312,16 @@ monconf_write(void)
 static void
 disp_apply_scale(DispInfo *d, float sc)
 {
-	struct wlr_output_state st;
+	struct nx_output_state st;
 
 	d->scale = sc;
-	if (!d->mon || !d->mon->wlr_output)
+	if (!d->mon || !d->mon->nx_output)
 		return;
-	wlr_output_state_init(&st);
-	wlr_output_state_set_scale(&st, sc);
-	if (wlr_output_test_state(d->mon->wlr_output, &st))
-		wlr_output_commit_state(d->mon->wlr_output, &st);
-	wlr_output_state_finish(&st);
+	nx_output_state_init(&st);
+	nx_output_state_set_scale(&st, sc);
+	if (nx_output_test_state(d->mon->nx_output, &st))
+		nx_output_commit_state(d->mon->nx_output, &st);
+	nx_output_state_finish(&st);
 	monconf_apply_layout();
 }
 
@@ -331,7 +331,7 @@ void
 drop_display_icon_buffer(void)
 {
 	if (display_icon_buf) {
-		wlr_buffer_drop(display_icon_buf);
+		nx_buffer_drop(display_icon_buf);
 		display_icon_buf = NULL;
 	}
 	display_icon_loaded_h = 0;
@@ -344,7 +344,7 @@ ensure_display_icon_buffer(int target_h)
 {
 	GdkPixbuf *pixbuf = NULL;
 	GError *gerr = NULL;
-	struct wlr_buffer *buf;
+	struct nx_buffer *buf;
 	int w = 0, h = 0;
 	char resolved[PATH_MAX];
 	const char *path = display_icon_path;

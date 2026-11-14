@@ -26,15 +26,15 @@
 int game_span_auto = 0;
 
 /* Union of all enabled, non-mirror outputs in layout coordinates. */
-struct wlr_box
+struct nx_box
 span_geom(void)
 {
 	Monitor *m;
-	struct wlr_box box = {0};
+	struct nx_box box = {0};
 	int have = 0;
 
 	wl_list_for_each(m, &mons, link) {
-		if (!m->wlr_output || !m->wlr_output->enabled || m->is_mirror)
+		if (!m->nx_output || !m->nx_output->enabled || m->is_mirror)
 			continue;
 		if (m->m.width <= 0 || m->m.height <= 0)
 			continue;
@@ -67,7 +67,7 @@ span_available(void)
 	int n = 0;
 
 	wl_list_for_each(m, &mons, link)
-		if (m->wlr_output && m->wlr_output->enabled && !m->is_mirror)
+		if (m->nx_output && m->nx_output->enabled && !m->is_mirror)
 			n++;
 	return n >= 2;
 }
@@ -76,7 +76,7 @@ span_available(void)
  * single-monitor (mirror-aware) geometry.  Every place that applies
  * fullscreen geometry goes through this so span survives monitor
  * hotplug (updatemons), X11 configure requests and setfullscreen. */
-struct wlr_box
+struct nx_box
 client_fullscreen_geom(Client *c)
 {
 	if (c && c->isspanned && span_available())
@@ -112,8 +112,8 @@ span_release_other_outputs(Client *c)
 	Monitor *sm;
 
 	wl_list_for_each(sm, &mons, link) {
-		if (sm != c->mon && sm->wlr_output
-				&& sm->wlr_output->enabled && !sm->is_mirror) {
+		if (sm != c->mon && sm->nx_output
+				&& sm->nx_output->enabled && !sm->is_mirror) {
 			set_adaptive_sync(sm, 0);
 			disable_game_vrr(sm);
 		}
@@ -128,7 +128,7 @@ span_release_other_outputs(Client *c)
 int
 span_update_from_request(Client *c, int w, int h)
 {
-	struct wlr_box mon, sb;
+	struct nx_box mon, sb;
 	int wants;
 
 	if (!game_span_auto || !c->isfullscreen || !c->mon || c->span_manual)
@@ -146,14 +146,14 @@ span_update_from_request(Client *c, int w, int h)
 	if (wants == c->isspanned)
 		return 0;
 	c->isspanned = wants;
-	wlr_log(WLR_INFO, "span: %s appid='%s' requested=%dx%d mon=%dx%d span=%dx%d",
+	nx_log(NX_INFO, "span: %s appid='%s' requested=%dx%d mon=%dx%d span=%dx%d",
 		wants ? "ENTER" : "EXIT",
 		client_get_appid(c) ? client_get_appid(c) : "(null)",
 		w, h, mon.width, mon.height, sb.width, sb.height);
 	if (wants) {
 		Monitor *sm;
 		wl_list_for_each(sm, &mons, link)
-			if (sm->wlr_output && sm->wlr_output->enabled && !sm->is_mirror) {
+			if (sm->nx_output && sm->nx_output->enabled && !sm->is_mirror) {
 				set_adaptive_sync(sm, 1);
 				enable_game_vrr(sm);
 			}

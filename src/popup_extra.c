@@ -19,7 +19,7 @@
 /* ── live audio meter overlay (volume=0 / mic=1) ─────────────────── */
 
 typedef struct {
-	struct wlr_scene_buffer *node;   /* child of view content; reset on
+	struct nx_scene_buffer *node;   /* child of view content; reset on
 	                                  * every re-render (children are
 	                                  * destroyed by popup_view_apply) */
 	int x, y, w, h;                  /* rect from CardResult */
@@ -59,7 +59,7 @@ static void
 meter_overlay_draw(InfoPopup *p, int is_mic, double phase)
 {
 	MeterUI *mu = &meter_ui[is_mic];
-	struct wlr_buffer *buf;
+	struct nx_buffer *buf;
 	int muted = is_mic ? mic_muted : volume_muted;
 
 	/* Wait out the card show animation: extra children don't take part
@@ -67,9 +67,9 @@ meter_overlay_draw(InfoPopup *p, int is_mic, double phase)
 	if (mu->w <= 0 || !p->view.content || p->view.animating)
 		return;
 	if (!mu->node) {
-		mu->node = wlr_scene_buffer_create(p->view.content, NULL);
+		mu->node = nx_scene_buffer_create(p->view.content, NULL);
 		if (mu->node)
-			wlr_scene_node_set_position(&mu->node->node,
+			nx_scene_node_set_position(&mu->node->node,
 					mu->x, mu->y);
 	}
 	/* Persistent ping-pong raster: no per-frame alloc/memcpy, and the
@@ -79,7 +79,7 @@ meter_overlay_draw(InfoPopup *p, int is_mic, double phase)
 			(is_mic ? card_col_green : card_col_blue),
 			mu->hist, METER_HIST, mu->head, phase);
 	if (mu->node && buf)
-		wlr_scene_buffer_set_buffer(mu->node, buf);
+		nx_scene_buffer_set_buffer(mu->node, buf);
 }
 
 static void
@@ -283,8 +283,8 @@ meter_tick(void *data)
 	/* Drawing happens in meter_frame_tick (one exact-phase redraw per
 	 * displayed frame); here just keep the vblank chain alive in case
 	 * the self-sustaining damage loop ever breaks. */
-	if (m->wlr_output)
-		wlr_output_schedule_frame(m->wlr_output);
+	if (m->nx_output)
+		nx_output_schedule_frame(m->nx_output);
 	meter_timer_arm();
 	return 0;
 }
@@ -662,7 +662,7 @@ info_popup_hover(Monitor *m, StatusModule *mod, InfoPopup *p,
 
 	if (!m || !m->showbar || !mod->tree || !p->tree || mod->width <= 0) {
 		if (p->tree && p->visible) {
-			wlr_scene_node_set_enabled(&p->tree->node, 0);
+			nx_scene_node_set_enabled(&p->tree->node, 0);
 			p->visible = 0;
 			p->hover_start_ms = 0;
 			popup_view_hide(&p->view);
@@ -765,8 +765,8 @@ info_popup_hover(Monitor *m, StatusModule *mod, InfoPopup *p,
 					popup_x = 0;
 			}
 		}
-		wlr_scene_node_set_enabled(&p->tree->node, 1);
-		wlr_scene_node_set_position(&p->tree->node,
+		nx_scene_node_set_enabled(&p->tree->node, 1);
+		nx_scene_node_set_position(&p->tree->node,
 				popup_x, statusbar_popup_y(m));
 		if (!was_visible)
 			popup_view_show(&p->view);
@@ -791,7 +791,7 @@ info_popup_hover(Monitor *m, StatusModule *mod, InfoPopup *p,
 		p->last_render_ms = 0;
 		p->btn_hover = -1;
 		popup_view_hide(&p->view);
-		wlr_scene_node_set_enabled(&p->tree->node, 0);
+		nx_scene_node_set_enabled(&p->tree->node, 0);
 	} else if (p->hover_start_ms != 0) {
 		p->hover_start_ms = 0;
 	}
@@ -1166,7 +1166,7 @@ info_popups_hide(Monitor *m)
 		p->btn_hover = -1;
 		popup_view_hide(&p->view);
 		if (p->tree)
-			wlr_scene_node_set_enabled(&p->tree->node, 0);
+			nx_scene_node_set_enabled(&p->tree->node, 0);
 	}
 	if (sdrag.mon == m) {
 		sdrag.active = 0;

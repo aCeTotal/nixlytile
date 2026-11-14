@@ -30,13 +30,13 @@ mic_gate_setup(void)
 
 	fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
 	if (fd < 0) {
-		wlr_log_errno(WLR_ERROR, "mic gate: open %s", path);
+		nx_log_errno(NX_ERROR, "mic gate: open %s", path);
 		return;
 	}
 	if (fstat(fd, &st) < 0 ||
 			(st.st_size < (off_t)sizeof(*gate_word) &&
 			 ftruncate(fd, sizeof(*gate_word)) < 0)) {
-		wlr_log_errno(WLR_ERROR, "mic gate: size %s", path);
+		nx_log_errno(NX_ERROR, "mic gate: size %s", path);
 		close(fd);
 		return;
 	}
@@ -44,7 +44,7 @@ mic_gate_setup(void)
 		MAP_SHARED, fd, 0);
 	close(fd);
 	if (map == MAP_FAILED) {
-		wlr_log_errno(WLR_ERROR, "mic gate: mmap %s", path);
+		nx_log_errno(NX_ERROR, "mic gate: mmap %s", path);
 		return;
 	}
 	gate_word = map;

@@ -113,7 +113,7 @@ charge_limit_set(int pct)
 	charge_limit = pct;
 	cl_save();
 	if (cl_apply_sysfs(pct) != 0) {
-		wlr_log(WLR_ERROR,
+		nx_log(NX_ERROR,
 			"charge limit: writing %d%% to %s failed: %s",
 			pct, battery_device_dir, strerror(errno));
 		return -1;

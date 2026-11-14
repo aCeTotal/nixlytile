@@ -14,7 +14,7 @@
 
 #include <stdint.h>
 
-struct wlr_input_device;
+struct nx_input_device;
 
 /* Called for every key event.  Non-modifier keys arm the lockout; Shift /
  * Ctrl / Alt / Super / CapsLock do not, so Mod+drag with the touchpad keeps
@@ -22,6 +22,6 @@ struct wlr_input_device;
 void dwt_note_key(uint32_t keycode, int pressed);
 
 /* 1 when `dev` is a touchpad whose events should be swallowed right now. */
-int dwt_suppress(struct wlr_input_device *dev);
+int dwt_suppress(struct nx_input_device *dev);
 
 #endif /* DWT_H */

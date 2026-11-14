@@ -1,6 +1,6 @@
 /* nixlytile.c - Core compositor: setup, run, cleanup, main */
 #include "nixlytile.h"
-#include <wlr/render/vulkan.h>
+#include "platform/vulkan/vulkan.h"
 #include "client.h"
 #include "config_loader.h"
 #include "diag.h"
@@ -52,13 +52,13 @@ has_nixlytile_session_target(void)
 
 
 /* Forward declarations for pixman buffer impl (defined in draw.c) */
-void pixman_buffer_destroy(struct wlr_buffer *wlr_buffer);
-bool pixman_buffer_get_dmabuf(struct wlr_buffer *wlr_buffer, struct wlr_dmabuf_attributes *attribs);
-bool pixman_buffer_get_shm(struct wlr_buffer *wlr_buffer, struct wlr_shm_attributes *attribs);
-bool pixman_buffer_begin_data_ptr_access(struct wlr_buffer *wlr_buffer, uint32_t flags, void **data, uint32_t *format, size_t *stride);
-void pixman_buffer_end_data_ptr_access(struct wlr_buffer *wlr_buffer);
+void pixman_buffer_destroy(struct nx_buffer *nx_buffer);
+bool pixman_buffer_get_dmabuf(struct nx_buffer *nx_buffer, struct nx_dmabuf_attributes *attribs);
+bool pixman_buffer_get_shm(struct nx_buffer *nx_buffer, struct nx_shm_attributes *attribs);
+bool pixman_buffer_begin_data_ptr_access(struct nx_buffer *nx_buffer, uint32_t flags, void **data, uint32_t *format, size_t *stride);
+void pixman_buffer_end_data_ptr_access(struct nx_buffer *nx_buffer);
 
-const struct wlr_buffer_impl pixman_buffer_impl = {
+const struct nx_buffer_impl pixman_buffer_impl = {
 	.destroy = pixman_buffer_destroy,
 	.get_dmabuf = pixman_buffer_get_dmabuf,
 	.get_shm = pixman_buffer_get_shm,
@@ -264,7 +264,7 @@ const char *osk_layout_upper[OSK_ROWS][OSK_COLS] = {
 
 
 
-/* Send a Unicode character to the focused surface via wlr_seat */
+/* Send a Unicode character to the focused surface via nx_seat */
 
 
 
@@ -439,23 +439,6 @@ random_status_delay_ms(void)
  * Returns a value 0-100 indicating memory pressure (0=no pressure, 100=critical).
  */
 
-/*
- * Ultra Game Mode - Maximum performance when fullscreen game detected.
- *
- * This is an aggressive optimization mode that minimizes ALL compositor
- * overhead when a game is running fullscreen:
- *
- * 1. Stops ALL background timers (cache updates, status polling, wifi scans, etc.)
- * 2. Hides the statusbar completely
- * 3. Hides all popups and menus
- * 4. Disables compositor animations
- * 5. Direct scanout is automatically activated by wlroots when conditions are met
- * 6. Tearing is enabled for games that request it (lowest latency)
- *
- * The goal is minimal latency path - the game's buffer goes directly to display
- * without any compositor processing or system interrupts from background tasks.
- */
-
 /* Set GE-Proton as the default compatibility tool in Steam */
 void
 steam_set_ge_proton_default(void)
@@ -502,11 +485,11 @@ steam_set_ge_proton_default(void)
 	}
 
 	if (!ge_proton_name[0]) {
-		wlr_log(WLR_INFO, "No GE-Proton found in compatibilitytools.d");
+		nx_log(NX_INFO, "No GE-Proton found in compatibilitytools.d");
 		return;
 	}
 
-	wlr_log(WLR_INFO, "Setting %s as default Steam compatibility tool", ge_proton_name);
+	nx_log(NX_INFO, "Setting %s as default Steam compatibility tool", ge_proton_name);
 
 	/* Read current config.vdf */
 	snprintf(config_path, sizeof(config_path), "%s/.steam/steam/config/config.vdf", home);
@@ -517,7 +500,7 @@ steam_set_ge_proton_default(void)
 	}
 
 	if (!fp) {
-		wlr_log(WLR_ERROR, "Could not open Steam config.vdf");
+		nx_log(NX_ERROR, "Could not open Steam config.vdf");
 		return;
 	}
 
@@ -562,7 +545,7 @@ steam_set_ge_proton_default(void)
 							while (*p && *p != '"' && i < (int)sizeof(existing) - 1)
 								existing[i++] = *p++;
 							existing[i] = '\0';
-							wlr_log(WLR_INFO,
+							nx_log(NX_INFO,
 								"Steam already has compatibility tool '%s' "
 								"configured — preserving user choice",
 								existing);
@@ -600,7 +583,7 @@ steam_set_ge_proton_default(void)
 					if (fp) {
 						fputs(new_config, fp);
 						fclose(fp);
-						wlr_log(WLR_INFO, "Set %s as default Steam compatibility tool", ge_proton_name);
+						nx_log(NX_INFO, "Set %s as default Steam compatibility tool", ge_proton_name);
 					}
 					free(new_config);
 				}
@@ -750,7 +733,7 @@ static void close_logging(void);
 void
 cleanup(void)
 {
-	wlr_log(WLR_ERROR, "cleanup() called - starting cleanup sequence");
+	nx_log(NX_ERROR, "cleanup() called - starting cleanup sequence");
 	apptoggle_cleanup();
 	htpc_pad_cleanup();
 	remote_pad_cleanup();
@@ -769,7 +752,7 @@ cleanup(void)
 	window_ipc_finish();
 	cleanuplisteners();
 #ifdef XWAYLAND
-	wlr_xwayland_destroy(xwayland);
+	nx_xwayland_destroy(xwayland);
 	xwayland = NULL;
 #endif
 	/* Stop systemd target */
@@ -814,13 +797,12 @@ cleanup(void)
 	cpu_cursor_buffer_destroy(cpu_cursor_buf);
 	cpu_cursor_buf = NULL;
 	cpu_cursor_active = 0;
-	wlr_xcursor_manager_destroy(cursor_mgr);
+	nx_xcursor_manager_destroy(cursor_mgr);
 
 	destroykeyboardgroup(&kb_group->destroy, NULL);
 
-	/* If it's not destroyed manually, it will cause a use-after-free of wlr_seat.
-	 * Destroy it until it's fixed on the wlroots side */
-	wlr_backend_destroy(backend);
+	/* Manual destroy avoids seat use-after-free. */
+	nx_backend_destroy(backend);
 
 	wl_display_destroy(dpy);
 	/* handlesig() sjekker dpy før wl_display_terminate. Uten nulling her
@@ -830,7 +812,7 @@ cleanup(void)
 	dpy = NULL;
 	/* Destroy after the wayland display (when the monitors are already destroyed)
 	   to avoid destroying them with an invalid scene output. */
-	wlr_scene_node_destroy(&scene->tree.node);
+	nx_scene_node_destroy(&scene->tree.node);
 	close_logging();
 }
 
@@ -868,13 +850,13 @@ cleanuplisteners(void)
 	wl_list_remove(&start_drag.link);
 	wl_list_remove(&new_session_lock.link);
 	/* Registrert på text_input_mgr->events.new_text_input i setup().
-	 * Manglet her → wlr_text_input_v3 sin handle_display_destroy
+	 * Manglet her → nx_text_input_v3 sin handle_display_destroy
 	 * asserter på ikke-tom listener_list → SIGABRT ved shutdown
 	 * (observert i coredumps). */
 	wl_list_remove(&new_text_input.link);
 	bufready_finish();
 #ifdef XWAYLAND
-	/* Only added when wlr_xwayland_create() succeeded — the links are
+	/* Only added when nx_xwayland_create() succeeded — the links are
 	 * zeroed otherwise and wl_list_remove would crash the shutdown. */
 	if (xwayland) {
 		wl_list_remove(&new_xwayland_surface.link);
@@ -937,7 +919,7 @@ handlesig(int signo)
 	if (signo == SIGCHLD) {
 		while (waitpid(-1, NULL, WNOHANG) > 0);
 	} else if (signo == SIGINT) {
-		/* No quit()/wlr_log here — stdio locking inside a signal
+		/* No quit()/nx_log here — stdio locking inside a signal
 		 * handler can self-deadlock if the signal lands mid-log.
 		 * write() + wl_display_terminate only. */
 		write_all(STDERR_FILENO, "handlesig: SIGINT received, quitting\n", 37);
@@ -1011,7 +993,7 @@ handlefatalsig(int signo)
 void
 quit(const Arg *arg)
 {
-	wlr_log(WLR_ERROR, "quit() called - terminating display");
+	nx_log(NX_ERROR, "quit() called - terminating display");
 	wl_display_terminate(dpy);
 }
 
@@ -1106,7 +1088,7 @@ run(const char *startup_cmd)
 
 	/* Start the backend. This will enumerate outputs and inputs, become the DRM
 	 * master, etc */
-	if (!wlr_backend_start(backend))
+	if (!nx_backend_start(backend))
 		die("startup: backend_start");
 
 	/* Apply monitors.conf grid positions now that all monitors exist.
@@ -1265,14 +1247,14 @@ run(const char *startup_cmd)
 	{
 		Monitor *m;
 		wl_list_for_each(m, &mons, link) {
-			if (!m->wlr_output)
+			if (!m->nx_output)
 				continue;
 			game_log("MONITOR: name='%s' %dx%d@%.2fHz "
 				"vrr=%s ll_cursor=%s cpu_cursor=%s",
-				m->wlr_output->name,
+				m->nx_output->name,
 				m->m.width, m->m.height,
-				m->wlr_output->current_mode
-					? m->wlr_output->current_mode->refresh / 1000.0
+				m->nx_output->current_mode
+					? m->nx_output->current_mode->refresh / 1000.0
 					: 0.0,
 				m->vrr_capable ? "capable" : "no",
 				m->ll_cursor_active ? "active" : "no",
@@ -1309,9 +1291,9 @@ run(const char *startup_cmd)
 #define IOPRIO_PRIO_VALUE(cls, data)	(((cls) << 13) | (data))
 #endif
 		if (setpriority(PRIO_PROCESS, 0, -10) == 0)
-			wlr_log(WLR_INFO, "Compositor nice -10 (always-on responsiveness)");
+			nx_log(NX_INFO, "Compositor nice -10 (always-on responsiveness)");
 		else
-			wlr_log(WLR_INFO, "Compositor nice -10 failed (need CAP_SYS_NICE): %s",
+			nx_log(NX_INFO, "Compositor nice -10 failed (need CAP_SYS_NICE): %s",
 				strerror(errno));
 		syscall(__NR_ioprio_set, IOPRIO_WHO_PROCESS, 0,
 			IOPRIO_PRIO_VALUE(IOPRIO_CLASS_RT, 4));
@@ -1375,26 +1357,6 @@ run(const char *startup_cmd)
 /* Restore output to maximum refresh rate and disable VRR */
 
 /*
- * ============================================================================
- * HDR AND 10-BIT COLOR SUPPORT
- * ============================================================================
- *
- * This section handles:
- * - Detection of 10-bit and HDR capable monitors
- * - Setting optimal render format (XRGB2101010 for 10-bit, XRGB8888 for 8-bit)
- * - Configuring DRM connector properties for best color output:
- *   - max bpc: Maximum bits per channel (typically 8, 10, 12, or 16)
- *   - Colorspace/output_color_format: RGB 4:4:4 vs YCbCr 4:2:2/4:2:0
- *
- * Full HDR10 (PQ/BT.2020) runs on wlroots 0.20 color management:
- * color-management-v1 is advertised (Vulkan renderer required for the PQ
- * transforms), a fullscreen PQ+BT2020 client drives the output into HDR
- * (update_hdr_target in output.c), and the DRM backend then sets
- * HDR_OUTPUT_METADATA + Colorspace on the connector — which is also what
- * Sunshine's KMS capture reads to stream HDR to remote devices.
- */
-
-/*
  * Check if an output supports 10-bit or higher color depth.
  * This queries the DRM connector's max bpc property and supported formats.
  */
@@ -1452,14 +1414,14 @@ run(const char *startup_cmd)
 /* Best integer-multiple mode at res. */
 static VideoModeCandidate
 best_existing_video_mode(Monitor *m, float video_hz,
-		const struct wlr_output_mode *res)
+		const struct nx_output_mode *res)
 {
 	int width = res->width, height = res->height;
 	VideoModeCandidate best = { .score = -1.0f, .judder_ms = 999.0f };
 	VideoModeCandidate candidate;
-	struct wlr_output_mode *mode;
+	struct nx_output_mode *mode;
 
-	wl_list_for_each(mode, &m->wlr_output->modes, link) {
+	wl_list_for_each(mode, &m->nx_output->modes, link) {
 		if (mode->width != width || mode->height != height)
 			continue;
 
@@ -1485,7 +1447,7 @@ best_existing_video_mode(Monitor *m, float video_hz,
 		candidate.judder_ms = calculate_judder_ms(video_hz, mode_hz);
 		candidate.score = score_video_mode(1, video_hz, mode_hz, multiple);
 
-		wlr_log(WLR_DEBUG, "  Mode %dx%d %d.%03dHz: %dx mult, score=%.1f, judder=%.2fms",
+		nx_log(NX_DEBUG, "  Mode %dx%d %d.%03dHz: %dx mult, score=%.1f, judder=%.2fms",
 				width, height, mode->refresh / 1000, mode->refresh % 1000,
 				multiple, candidate.score, candidate.judder_ms);
 
@@ -1511,23 +1473,23 @@ find_best_video_mode(Monitor *m, float video_hz)
 {
 	VideoModeCandidate best = {0};
 	VideoModeCandidate candidate;
-	struct wlr_output_mode *mode, *native;
+	struct nx_output_mode *mode, *native;
 	int width, height;
 
 	best.score = -1.0f;
 	best.judder_ms = 999.0f;
 	best.target_hz = video_hz;
 
-	if (!m || !m->wlr_output || !m->wlr_output->current_mode || video_hz <= 0.0f)
+	if (!m || !m->nx_output || !m->nx_output->current_mode || video_hz <= 0.0f)
 		return best;
 
-	width = m->wlr_output->current_mode->width;
-	height = m->wlr_output->current_mode->height;
+	width = m->nx_output->current_mode->width;
+	height = m->nx_output->current_mode->height;
 
-	wlr_log(WLR_DEBUG, "Evaluating video modes for %.3f Hz on %s:", video_hz, m->wlr_output->name);
+	nx_log(NX_DEBUG, "Evaluating video modes for %.3f Hz on %s:", video_hz, m->nx_output->name);
 
 	/* Console UI: native if exact. */
-	native = m->console_mode_active ? bestmode(m->wlr_output) : NULL;
+	native = m->console_mode_active ? bestmode(m->nx_output) : NULL;
 	if (native) {
 		candidate = best_existing_video_mode(m, video_hz, native);
 		if (candidate.judder_ms < VIDEO_PERFECT_JUDDER_MS)
@@ -1552,7 +1514,7 @@ find_best_video_mode(Monitor *m, float video_hz)
 		candidate.judder_ms = 0.0f;
 		candidate.score = score_video_mode(3, video_hz, video_hz, 1);
 
-		wlr_log(WLR_DEBUG, "  VRR: score=%.1f (judder=0ms)", candidate.score);
+		nx_log(NX_DEBUG, "  VRR: score=%.1f (judder=0ms)", candidate.score);
 
 		if (candidate.score > best.score) {
 			best = candidate;
@@ -1561,7 +1523,7 @@ find_best_video_mode(Monitor *m, float video_hz)
 
 	/* Option 2: Scan existing modes for integer multiples */
 	candidate = best_existing_video_mode(m, video_hz,
-			m->wlr_output->current_mode);
+			m->nx_output->current_mode);
 	if (candidate.score > best.score) {
 		best = candidate;
 	}
@@ -1572,7 +1534,7 @@ find_best_video_mode(Monitor *m, float video_hz)
 	 * avviser). Tak = panelets høyeste mode i samme oppløsning — et
 	 * 300 Hz-panel kan ta 287.712 (12×23.976), ikke bare ≤240. */
 	float panel_max_hz = 0.0f;
-	wl_list_for_each(mode, &m->wlr_output->modes, link) {
+	wl_list_for_each(mode, &m->nx_output->modes, link) {
 		if (mode->width == width && mode->height == height &&
 		    mode->refresh / 1000.0f > panel_max_hz)
 			panel_max_hz = mode->refresh / 1000.0f;
@@ -1589,7 +1551,7 @@ find_best_video_mode(Monitor *m, float video_hz)
 
 		/* Check if we already found this rate in existing modes */
 		int found = 0;
-		wl_list_for_each(mode, &m->wlr_output->modes, link) {
+		wl_list_for_each(mode, &m->nx_output->modes, link) {
 			if (mode->width != width || mode->height != height)
 				continue;
 			float mode_hz = mode->refresh / 1000.0f;
@@ -1599,7 +1561,7 @@ find_best_video_mode(Monitor *m, float video_hz)
 			}
 		}
 
-		if (!found && wlr_output_is_drm(m->wlr_output)) {
+		if (!found && nx_output_is_drm(m->nx_output)) {
 			candidate.method = 2;
 			candidate.mode = NULL;
 			candidate.multiplier = mult;
@@ -1611,7 +1573,7 @@ find_best_video_mode(Monitor *m, float video_hz)
 			/* Slightly penalize CVT modes as they're less reliable */
 			candidate.score -= 5.0f;
 
-			wlr_log(WLR_DEBUG, "  CVT %.3fHz: %dx mult, score=%.1f (theoretical)",
+			nx_log(NX_DEBUG, "  CVT %.3fHz: %dx mult, score=%.1f (theoretical)",
 					target_display_hz, mult, candidate.score);
 
 			if (candidate.score > best.score) {
@@ -1627,7 +1589,7 @@ find_best_video_mode(Monitor *m, float video_hz)
 		case 2: method_str = "custom CVT"; break;
 		case 3: method_str = "VRR"; break;
 		}
-		wlr_log(WLR_DEBUG, "Best option: %s at %.3f Hz (%dx), score=%.1f, judder=%.2fms",
+		nx_log(NX_DEBUG, "Best option: %s at %.3f Hz (%dx), score=%.1f, judder=%.2fms",
 				method_str, best.actual_hz, best.multiplier, best.score, best.judder_ms);
 	}
 
@@ -1914,29 +1876,28 @@ static void
 enable_ntsync_env(void)
 {
 	if (access("/dev/ntsync", R_OK | W_OK) != 0) {
-		wlr_log(WLR_INFO, "ntsync: /dev/ntsync unavailable — Proton falls "
+		nx_log(NX_INFO, "ntsync: /dev/ntsync unavailable — Proton falls "
 			"back to fsync/esync (needs kernel 6.14+)");
 		return;
 	}
 
 	setenv("PROTON_USE_NTSYNC", "1", 0);
 	setenv("WINENTSYNC", "1", 0);
-	wlr_log(WLR_INFO, "ntsync: /dev/ntsync present, enabled for Proton and Wine");
+	nx_log(NX_INFO, "ntsync: /dev/ntsync present, enabled for Proton and Wine");
 }
 
 static void
-log_callback(enum wlr_log_importance importance, const char *fmt, va_list args)
+log_callback(enum nx_log_importance importance, const char *fmt, va_list args)
 {
-	/* WLR_ERROR always reaches the diag log (production has no wlroots log
-	 * file); rate-capped so a per-vblank error storm can't flood it. */
-	if (importance == WLR_ERROR) {
+	/* Rate-capped errors reach the diag log. */
+	if (importance == NX_ERROR) {
 		static time_t err_sec;
 		static int err_count;
 		struct timespec now;
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		if (now.tv_sec != err_sec) {
 			if (err_count > 8)
-				diag_logf("WLRERR", "(%d more errors suppressed this second)",
+				diag_logf("LOGERR", "(%d more errors suppressed this second)",
 					err_count - 8);
 			err_sec = now.tv_sec;
 			err_count = 0;
@@ -1947,7 +1908,7 @@ log_callback(enum wlr_log_importance importance, const char *fmt, va_list args)
 			va_copy(args_copy, args);
 			vsnprintf(msg, sizeof(msg), fmt, args_copy);
 			va_end(args_copy);
-			diag_logf("WLRERR", "%s", msg);
+			diag_logf("LOGERR", "%s", msg);
 		}
 	}
 
@@ -1961,9 +1922,9 @@ log_callback(enum wlr_log_importance importance, const char *fmt, va_list args)
 
 	const char *level = "???";
 	switch (importance) {
-	case WLR_ERROR: level = "ERROR"; break;
-	case WLR_INFO:  level = "INFO";  break;
-	case WLR_DEBUG: level = "DEBUG"; break;
+	case NX_ERROR: level = "ERROR"; break;
+	case NX_INFO:  level = "INFO";  break;
+	case NX_DEBUG: level = "DEBUG"; break;
 	default: break;
 	}
 
@@ -1980,7 +1941,7 @@ log_callback(enum wlr_log_importance importance, const char *fmt, va_list args)
 	fflush(log_file);
 	va_end(args_copy);
 
-	/* Always write to WLR_DEBUG.log (full debug capture) */
+	/* Always write to NX_DEBUG.log (full debug capture) */
 	if (debug_log_file) {
 		va_copy(args_copy, args);
 		fprintf(debug_log_file, "%s", prefix);
@@ -2464,7 +2425,7 @@ stall_watch_tick(void *data)
 			time_t t = time(NULL);
 			struct tm tm;
 			localtime_r(&t, &tm);
-			wlr_log(WLR_ERROR,
+			nx_log(NX_ERROR,
 				"STALL_WATCH: compositor thread blocked %llu ms "
 				"(ended %02d:%02d:%02d) — backtrace in errors.log, and "
 				"see the log lines just above for what ran",
@@ -2517,7 +2478,7 @@ stall_watch_start(void)
 			stall_watch_watchdog, NULL) != 0)
 		stall_watch_run = 0;
 
-	wlr_log(WLR_INFO,
+	nx_log(NX_INFO,
 		"STALL_WATCH enabled: >%llums stall → log + backtrace (errors.log)",
 		(unsigned long long)(STALL_WATCH_THRESHOLD_NS / 1000000ULL));
 }
@@ -2558,8 +2519,7 @@ init_logging(void)
 	/* Save original stderr before redirect */
 	log_stderr_fd = dup(STDERR_FILENO);
 
-	/* Open wlroots log file */
-	log_file = fopen(NIXLY_LOG_DIR "/wlroots.log", "we");
+	log_file = fopen(NIXLY_LOG_DIR "/nixlytile.log", "we");
 	if (log_file) {
 		struct timespec ts;
 		struct tm tm;
@@ -2572,13 +2532,13 @@ init_logging(void)
 	}
 
 	/* Open full debug log (always active, captures everything) */
-	debug_log_file = fopen(NIXLY_LOG_DIR "/WLR_DEBUG.log", "we");
+	debug_log_file = fopen(NIXLY_LOG_DIR "/NIXLY_DEBUG.log", "we");
 	if (debug_log_file) {
 		struct timespec ts;
 		struct tm tm;
 		clock_gettime(CLOCK_REALTIME, &ts);
 		localtime_r(&ts.tv_sec, &tm);
-		fprintf(debug_log_file, "=== WLR_DEBUG full log %04d-%02d-%02d %02d:%02d:%02d (PID %d) ===\n",
+		fprintf(debug_log_file, "=== NIXLY_DEBUG full log %04d-%02d-%02d %02d:%02d:%02d (PID %d) ===\n",
 			tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
 			tm.tm_hour, tm.tm_min, tm.tm_sec, getpid());
 		fflush(debug_log_file);
@@ -2671,7 +2631,7 @@ close_logging(void)
 		game_log_fd = -1;
 	}
 	if (debug_log_file) {
-		fprintf(debug_log_file, "=== WLR_DEBUG log ended ===\n");
+		fprintf(debug_log_file, "=== NIXLY_DEBUG log ended ===\n");
 		fclose(debug_log_file);
 		debug_log_file = NULL;
 	}
@@ -2686,11 +2646,7 @@ close_logging(void)
 	}
 }
 
-/* ── Client freeze watchdog ──────────────────────────────────────────
- * Ping every mapped managed client every 3 s.  A client that doesn't
- * pong within the shell ping timeout (5 s for xdg, wlroots-internal
- * 10 s for XWayland) gets ping_timeout → pingtimeoutnotify → SIGKILL,
- * so a frozen program can never wedge its tile or the session. */
+/* Kills clients that stop answering pings. */
 static struct wl_event_source *client_ping_timer;
 
 /* Grace window in which a recent buffer commit vouches for a client
@@ -2721,7 +2677,7 @@ client_ping_tick(void *data)
 	(void)data;
 
 	wl_list_for_each(c, &clients, link) {
-		struct wlr_surface *s = client_surface(c);
+		struct nx_surface *s = client_surface(c);
 		if (!s || !s->mapped || client_is_unmanaged(c))
 			continue;
 		/* Don't make the game service ping round-trips mid-session;
@@ -2740,16 +2696,13 @@ client_ping_tick(void *data)
 			continue;
 #ifdef XWAYLAND
 		if (client_is_x11(c)) {
-			/* wlroots sends the ping regardless of WM_PROTOCOLS, so a
-			 * client that never implemented _NET_WM_PING (GeForce NOW's
-			 * CEF window) times out the moment it goes idle and gets
-			 * SIGKILLed. Only ping clients that answer. */
+			/* Only ping clients that answer _NET_WM_PING. */
 			if (client_supports_net_wm_ping(c))
-				wlr_xwayland_surface_ping(c->surface.xwayland);
+				nx_xwayland_surface_ping(c->surface.xwayland);
 			continue;
 		}
 #endif
-		wlr_xdg_surface_ping(c->surface.xdg);
+		nx_xdg_surface_ping(c->surface.xdg);
 	}
 
 	wl_event_source_timer_update(client_ping_timer, 3000);
@@ -2778,7 +2731,7 @@ setup(void)
 
 	init_logging();
 	pthread_setname_np(pthread_self(), "nixlyOS");
-	wlr_log_init(WLR_DEBUG, log_callback);
+	nx_log_init(NX_DEBUG, log_callback);
 
 	/* Open /tmp/nixlytile-diag.log for detailed render/fullscreen/tile
 	 * diagnostics (freeze detection etc.). Always on; fresh each session. */
@@ -2844,18 +2797,15 @@ setup(void)
 	/* ~/.local/nixlyos/monitors.conf → inotify hot-reload (nixlycc GUI) */
 	setup_monitors_conf_watch();
 
-	/* Detect GPUs early — env vars (WLR_DRM_NO_ATOMIC, GBM_BACKEND etc.)
-	 * and WLR_DRM_DEVICES filtering must happen before backend creation.
+	/* Detect GPUs early — env vars (NIXLY_DRM_NO_ATOMIC, GBM_BACKEND etc.)
+	 * and NIXLY_DRM_DEVICES filtering must happen before backend creation.
 	 * Also sets up dGPU power management (D3cold prevention). */
 	detect_gpus();
 	filter_igpu_without_display();
 	dgpu_power_watchdog_start();
 
-	/* The backend is a wlroots feature which abstracts the underlying input and
-	 * output hardware. The autocreate option will choose the most suitable
-	 * backend based on the current environment, such as opening an X11 window
-	 * if an X11 server is running. */
-	if (!(backend = wlr_backend_autocreate(event_loop, &session)))
+	/* Picks the backend for this environment. */
+	if (!(backend = nx_backend_autocreate(event_loop, &session)))
 		die("couldn't create backend");
 
 	/* Virtual outputs for remote desktop.  Added before the renderer so
@@ -2863,12 +2813,12 @@ setup(void)
 	remote_backend_init(dpy, remote_outputs);
 
 	/* Initialize the scene graph used to lay out windows */
-	scene = wlr_scene_create();
-	root_bg = wlr_scene_rect_create(&scene->tree, 0, 0, rootcolor);
+	scene = nx_scene_create();
+	root_bg = nx_scene_rect_create(&scene->tree, 0, 0, rootcolor);
 	for (i = 0; i < NUM_LAYERS; i++)
-		layers[i] = wlr_scene_tree_create(&scene->tree);
-	drag_icon = wlr_scene_tree_create(&scene->tree);
-	wlr_scene_node_place_below(&drag_icon->node, &layers[LyrBlock]->node);
+		layers[i] = nx_scene_tree_create(&scene->tree);
+	drag_icon = nx_scene_tree_create(&scene->tree);
+	nx_scene_node_place_below(&drag_icon->node, &layers[LyrBlock]->node);
 
 	/* Renderer sets client shm formats. */
 	if (!(drw = gpu_renderer_create(backend)))
@@ -2880,9 +2830,9 @@ setup(void)
 	{
 		int is_nvidia = discrete_gpu_idx >= 0 &&
 			detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA;
-		drm_fd = wlr_renderer_get_drm_fd(drw);
+		drm_fd = nx_renderer_get_drm_fd(drw);
 		if (is_nvidia) {
-			wlr_log(WLR_INFO,
+			nx_log(NX_INFO,
 				"NVIDIA: renderer created (drm_fd=%d), "
 				"timeline=%d, backend_timeline=%d",
 				drm_fd,
@@ -2891,35 +2841,31 @@ setup(void)
 		}
 	}
 
-	/* Create shm, drm and linux_dmabuf interfaces by ourselves.
-	 * The simplest way is to call:
-	 *      wlr_renderer_init_wl_display(drw);
-	 * but we need to create the linux_dmabuf interface manually to integrate it
-	 * with wlr_scene. */
-	wlr_renderer_init_wl_shm(drw, dpy);
+	/* Created by hand so dmabuf reaches the scene. */
+	nx_renderer_init_wl_shm(drw, dpy);
 
-	if (wlr_renderer_get_texture_formats(drw, WLR_BUFFER_CAP_DMABUF)) {
-		wlr_drm_create(dpy, drw);
-		wlr_scene_set_linux_dmabuf_v1(scene,
-				wlr_linux_dmabuf_v1_create_with_renderer(dpy, 5, drw));
+	if (nx_renderer_get_texture_formats(drw, NX_BUFFER_CAP_DMABUF)) {
+		nx_drm_create(dpy, drw);
+		nx_scene_set_linux_dmabuf_v1(scene,
+				nx_linux_dmabuf_v1_create_with_renderer(dpy, 5, drw));
 	} else {
-		wlr_log(WLR_ERROR,
+		nx_log(NX_ERROR,
 			"Renderer has NO DMA-BUF support — "
 			"Xwayland zero-copy buffer sharing will not work");
 		if (discrete_gpu_idx >= 0) {
 			switch (detected_gpus[discrete_gpu_idx].vendor) {
 			case GPU_VENDOR_NVIDIA:
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"NVIDIA: check that nvidia-drm.modeset=1 is set "
 					"and the Nvidia EGL/GBM stack is installed");
 				break;
 			case GPU_VENDOR_AMD:
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"AMD: check that mesa is installed and "
 					"amdgpu kernel module is loaded");
 				break;
 			case GPU_VENDOR_INTEL:
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"Intel: check that mesa is installed and "
 					"i915/xe kernel module is loaded");
 				break;
@@ -2927,7 +2873,7 @@ setup(void)
 				break;
 			}
 		} else if (integrated_gpu_idx >= 0) {
-			wlr_log(WLR_ERROR,
+			nx_log(NX_ERROR,
 				"Using integrated GPU (%s) — ensure mesa/GL "
 				"libraries are installed",
 				detected_gpus[integrated_gpu_idx].driver);
@@ -2935,19 +2881,19 @@ setup(void)
 	}
 
 	g_explicit_sync_ok = 0;
-	if ((drm_fd = wlr_renderer_get_drm_fd(drw)) >= 0 && drw->features.timeline
+	if ((drm_fd = nx_renderer_get_drm_fd(drw)) >= 0 && drw->features.timeline
 			&& backend->features.timeline) {
-		wlr_linux_drm_syncobj_manager_v1_create(dpy, 1, drm_fd);
-		wlr_log(WLR_INFO, "Explicit sync (DRM syncobj) enabled");
+		nx_linux_drm_syncobj_manager_v1_create(dpy, 1, drm_fd);
+		nx_log(NX_INFO, "Explicit sync (DRM syncobj) enabled");
 		g_explicit_sync_ok = 1;
 	} else {
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"Explicit sync NOT available (drm_fd=%d, "
 			"renderer_timeline=%d, backend_timeline=%d)",
 			drm_fd, drw->features.timeline, backend->features.timeline);
 		if (discrete_gpu_idx >= 0 &&
 		    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA) {
-			wlr_log(WLR_ERROR,
+			nx_log(NX_ERROR,
 				"NVIDIA: without explicit sync, Xwayland apps may flicker. "
 				"Upgrade to Nvidia 555+ driver for DRM syncobj support.");
 		}
@@ -2972,9 +2918,9 @@ setup(void)
 	 *   10BIT   — HDR/10-bit render format supported by the renderer.
 	 */
 	{
-		const char *renderer_name = wlr_renderer_is_vk(drw) ? "Vulkan" : "GLES2";
+		const char *renderer_name = nx_renderer_is_vk(drw) ? "Vulkan" : "pixman";
 		int has_dmabuf =
-			wlr_renderer_get_texture_formats(drw, WLR_BUFFER_CAP_DMABUF) != NULL;
+			nx_renderer_get_texture_formats(drw, NX_BUFFER_CAP_DMABUF) != NULL;
 		const char *gpu_label = "unknown";
 		if (discrete_gpu_idx >= 0) {
 			switch (detected_gpus[discrete_gpu_idx].vendor) {
@@ -2991,7 +2937,7 @@ setup(void)
 			}
 		}
 
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"Gaming stack ready: gpu=%s renderer=%s esync=%s dmabuf=%s",
 			gpu_label,
 			renderer_name,
@@ -3002,7 +2948,7 @@ setup(void)
 		if (discrete_gpu_idx >= 0 &&
 		    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA) {
 			if (!g_explicit_sync_ok) {
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"NVIDIA: game performance will be degraded without "
 					"explicit sync. Check: 1) driver >= 555, "
 					"2) nvidia-drm.modeset=1, 3) nvidia-drm.fbdev=1");
@@ -3010,79 +2956,71 @@ setup(void)
 		}
 	}
 
-	/* Autocreates an allocator for us.
-	 * The allocator is the bridge between the renderer and the backend. It
-	 * handles the buffer creation, allowing wlroots to render onto the
-	 * screen */
-	if (!(alloc = wlr_allocator_autocreate(backend, drw)))
+	/* Allocates buffers the renderer draws into. */
+	if (!(alloc = nx_allocator_autocreate(backend, drw)))
 		die("couldn't create allocator");
 
-	/* This creates some hands-off wlroots interfaces. The compositor is
-	 * necessary for clients to allocate surfaces and the data device manager
-	 * handles the clipboard. Each of these wlroots interfaces has room for you
-	 * to dig your fingers in and play with their behavior if you want. Note that
-	 * the clients cannot set the selection directly without compositor approval,
-	 * see the setsel() function. */
-	compositor = wlr_compositor_create(dpy, 6, drw);
+	/* Surfaces and clipboard; see setsel(). */
+	compositor = nx_compositor_create(dpy, 6, drw);
 	bufready_init();
-	wlr_subcompositor_create(dpy);
-	wlr_data_device_manager_create(dpy);
+	nx_subcompositor_create(dpy);
+	nx_data_device_manager_create(dpy);
 	/* Capture and clipboard-history protocols: wlsec_privileged() keeps
 	 * them off the registry for everything but the allowlisted tools. */
-	wlsec_privileged(wlr_export_dmabuf_manager_v1_create(dpy)->global);
-	wlsec_privileged(wlr_screencopy_manager_v1_create(dpy)->global);
-	wlsec_privileged(wlr_data_control_manager_v1_create(dpy)->global);
-	ext_data_control_mgr = wlr_ext_data_control_manager_v1_create(dpy, 1);
+	wlsec_privileged(nx_export_dmabuf_manager_v1_create(dpy)->global);
+	wlsec_privileged(nx_screencopy_manager_v1_create(dpy)->global);
+	wlsec_privileged(nx_data_control_manager_v1_create(dpy)->global);
+	ext_data_control_mgr = nx_ext_data_control_manager_v1_create(dpy, 1);
 	wlsec_privileged(ext_data_control_mgr->global);
-	wlr_primary_selection_v1_device_manager_create(dpy);
-	wlr_viewporter_create(dpy);
-	wlr_single_pixel_buffer_manager_v1_create(dpy);
-	wlr_fractional_scale_manager_v1_create(dpy, 1);
-	wlr_presentation_create(dpy, backend, 2);
-	wlr_alpha_modifier_v1_create(dpy);
+	nx_primary_selection_v1_device_manager_create(dpy);
+	nx_viewporter_create(dpy);
+	nx_single_pixel_buffer_manager_v1_create(dpy);
+	nx_fractional_scale_manager_v1_create(dpy, 1);
+	nx_presentation_create(dpy, backend, 2);
+	nx_alpha_modifier_v1_create(dpy);
 	/* fifo-v1 + commit-timing-v1: lets Vulkan/EGL clients (Mesa WSI) pace
 	 * themselves on the display refresh and target a presentation time
 	 * instead of relying on frame callbacks. */
-	wlr_fifo_manager_v1_create(dpy, 1);
-	wlr_commit_timing_manager_v1_create(dpy, 1);
-	content_type_mgr = wlr_content_type_manager_v1_create(dpy, 1);
-	tearing_control_mgr = wlr_tearing_control_manager_v1_create(dpy, 1);
-	protocol_fixes = wlr_fixes_create(dpy, 1);
-	security_ctx_mgr = wlr_security_context_manager_v1_create(dpy);
+	nx_fifo_manager_v1_create(dpy, 1);
+	nx_commit_timing_manager_v1_create(dpy, 1);
+	content_type_mgr = nx_content_type_manager_v1_create(dpy, 1);
+	tearing_control_mgr = nx_tearing_control_manager_v1_create(dpy, 1);
+	protocol_fixes = nx_fixes_create(dpy, 1);
+	security_ctx_mgr = nx_security_context_manager_v1_create(dpy);
 	/* A sandbox must not be able to mint its own security contexts. */
 	wlsec_privileged(security_ctx_mgr->global);
-	xdg_dialog_mgr = wlr_xdg_wm_dialog_v1_create(dpy, 1);
-	system_bell = wlr_xdg_system_bell_v1_create(dpy, 1);
-	pointer_gestures = wlr_pointer_gestures_v1_create(dpy);
+	xdg_dialog_mgr = nx_xdg_wm_dialog_v1_create(dpy, 1);
+	system_bell = nx_xdg_system_bell_v1_create(dpy, 1);
+	pointer_gestures = nx_pointer_gestures_v1_create(dpy);
 
 	/* xdg-foreign v2 — cross-process window parenting (Firefox file dialogs) */
-	foreign_registry = wlr_xdg_foreign_registry_create(dpy);
-	xdg_foreign = wlr_xdg_foreign_v2_create(dpy, foreign_registry);
+	foreign_registry = nx_xdg_foreign_registry_create(dpy);
+	xdg_foreign = nx_xdg_foreign_v2_create(dpy, foreign_registry);
 
 	/* Keyboard shortcuts inhibitor — let fullscreen games capture all keys */
-	kb_shortcuts_inhibit_mgr = wlr_keyboard_shortcuts_inhibit_v1_create(dpy);
+	kb_shortcuts_inhibit_mgr = nx_keyboard_shortcuts_inhibit_v1_create(dpy);
 	wl_signal_add(&kb_shortcuts_inhibit_mgr->events.new_inhibitor,
 		&new_kb_shortcuts_inhibitor);
 
 	/* Foreign toplevel list — expose window list to external tools */
-	foreign_toplevel_list = wlr_ext_foreign_toplevel_list_v1_create(dpy, 1);
+	foreign_toplevel_list = nx_ext_foreign_toplevel_list_v1_create(dpy, 1);
 	wlsec_privileged(foreign_toplevel_list->global);
 
 	/* Modern screen capture (ext-image-copy-capture-v1) */
-	image_copy_capture_mgr = wlr_ext_image_copy_capture_manager_v1_create(dpy, 1);
+	image_copy_capture_mgr = nx_ext_image_copy_capture_manager_v1_create(dpy, 1);
 	wlsec_privileged(image_copy_capture_mgr->global);
-	wlsec_privileged(wlr_ext_output_image_capture_source_manager_v1_create(
+	wlsec_privileged(nx_ext_output_image_capture_source_manager_v1_create(
 			dpy, 1)->global);
 
 	/* Initializes the interface used to implement urgency hints */
-	activation = wlr_xdg_activation_v1_create(dpy);
+	activation = nx_xdg_activation_v1_create(dpy);
 	wl_signal_add(&activation->events.request_activate, &request_activate);
 
 	{
-		struct wlr_gamma_control_manager_v1 *gamma =
-			wlr_gamma_control_manager_v1_create(dpy);
+		struct nx_gamma_control_manager_v1 *gamma =
+			nx_gamma_control_manager_v1_create(dpy);
 
-		wlr_scene_set_gamma_control_manager_v1(scene, gamma);
+		nx_scene_set_gamma_control_manager_v1(scene, gamma);
 		wlsec_privileged(gamma->global);
 	}
 
@@ -3097,9 +3035,9 @@ setup(void)
 		size_t tfs_len = 0;
 		enum wp_color_manager_v1_primaries *pris = NULL;
 		size_t pris_len = 0;
-		tfs = wlr_color_manager_v1_transfer_function_list_from_renderer(drw, &tfs_len);
-		pris = wlr_color_manager_v1_primaries_list_from_renderer(drw, &pris_len);
-		struct wlr_color_manager_v1_options opts = {
+		tfs = nx_color_manager_v1_transfer_function_list_from_renderer(drw, &tfs_len);
+		pris = nx_color_manager_v1_primaries_list_from_renderer(drw, &pris_len);
+		struct nx_color_manager_v1_options opts = {
 			.features = {
 				.icc_v2_v4 = true,
 				.parametric = true,
@@ -3114,26 +3052,25 @@ setup(void)
 			.primaries = pris,
 			.primaries_len = pris_len,
 		};
-		color_mgr = wlr_color_manager_v1_create(dpy, 1, &opts);
+		color_mgr = nx_color_manager_v1_create(dpy, 1, &opts);
 		free(tfs);
 		free(pris);
-		wlr_scene_set_color_manager_v1(scene, color_mgr);
+		nx_scene_set_color_manager_v1(scene, color_mgr);
 	}
 
 	/* Color representation v1 — YCbCr coefficients, alpha modes */
-	color_repr_mgr = wlr_color_representation_manager_v1_create_with_renderer(
+	color_repr_mgr = nx_color_representation_manager_v1_create_with_renderer(
 		dpy, 1, drw);
 
-	power_mgr = wlr_output_power_manager_v1_create(dpy);
+	power_mgr = nx_output_power_manager_v1_create(dpy);
 	wlsec_privileged(power_mgr->global);
 	wl_signal_add(&power_mgr->events.set_mode, &output_power_mgr_set_mode);
 
-	/* Creates an output layout, which is a wlroots utility for working with an
-	 * arrangement of screens in a physical layout. */
-	output_layout = wlr_output_layout_create(dpy);
+	/* Physical arrangement of the screens. */
+	output_layout = nx_output_layout_create(dpy);
 	wl_signal_add(&output_layout->events.change, &layout_change);
 
-    wlr_xdg_output_manager_v1_create(dpy, output_layout);
+    nx_xdg_output_manager_v1_create(dpy, output_layout);
 
 	/* Configure a listener to be notified when new outputs are available on the
 	 * backend. */
@@ -3161,54 +3098,48 @@ setup(void)
 	 * Sets NIRI_SOCKET so children inherit the path. */
 	window_ipc_init(event_loop);
 
-	xdg_shell = wlr_xdg_shell_create(dpy, 6);
+	xdg_shell = nx_xdg_shell_create(dpy, 6);
 	/* Freeze watchdog: a pinged client has this long to pong before
 	 * ping_timeout fires and pingtimeoutnotify kills it. */
 	xdg_shell->ping_timeout = 5000;
 	wl_signal_add(&xdg_shell->events.new_toplevel, &new_xdg_toplevel);
 	wl_signal_add(&xdg_shell->events.new_popup, &new_xdg_popup);
 
-	layer_shell = wlr_layer_shell_v1_create(dpy, 3);
+	layer_shell = nx_layer_shell_v1_create(dpy, 3);
 	wl_signal_add(&layer_shell->events.new_surface, &new_layer_surface);
 
-	idle_notifier = wlr_idle_notifier_v1_create(dpy);
+	idle_notifier = nx_idle_notifier_v1_create(dpy);
 
-	idle_inhibit_mgr = wlr_idle_inhibit_v1_create(dpy);
+	idle_inhibit_mgr = nx_idle_inhibit_v1_create(dpy);
 	wl_signal_add(&idle_inhibit_mgr->events.new_inhibitor, &new_idle_inhibitor);
 
-	session_lock_mgr = wlr_session_lock_manager_v1_create(dpy);
+	session_lock_mgr = nx_session_lock_manager_v1_create(dpy);
 	/* Only the lock screen may cover the session with its own surface. */
 	wlsec_privileged(session_lock_mgr->global);
 	wl_signal_add(&session_lock_mgr->events.new_lock, &new_session_lock);
 	/* Black: matches the locker, so no grey flash before it maps. */
-	locked_bg = wlr_scene_rect_create(layers[LyrBlock], sgeom.width, sgeom.height,
+	locked_bg = nx_scene_rect_create(layers[LyrBlock], sgeom.width, sgeom.height,
 			(float [4]){0.0f, 0.0f, 0.0f, 1.0f});
-	wlr_scene_node_set_enabled(&locked_bg->node, 0);
+	nx_scene_node_set_enabled(&locked_bg->node, 0);
 
 	/* Use decoration protocols to negotiate server-side decorations */
-	wlr_server_decoration_manager_set_default_mode(
-			wlr_server_decoration_manager_create(dpy),
-			WLR_SERVER_DECORATION_MANAGER_MODE_SERVER);
-	xdg_decoration_mgr = wlr_xdg_decoration_manager_v1_create(dpy);
+	nx_server_decoration_manager_set_default_mode(
+			nx_server_decoration_manager_create(dpy),
+			NX_SERVER_DECORATION_MANAGER_MODE_SERVER);
+	xdg_decoration_mgr = nx_xdg_decoration_manager_v1_create(dpy);
 	wl_signal_add(&xdg_decoration_mgr->events.new_toplevel_decoration, &new_xdg_decoration);
 
-	pointer_constraints = wlr_pointer_constraints_v1_create(dpy);
+	pointer_constraints = nx_pointer_constraints_v1_create(dpy);
 	wl_signal_add(&pointer_constraints->events.new_constraint, &new_pointer_constraint);
 
-	relative_pointer_mgr = wlr_relative_pointer_manager_v1_create(dpy);
+	relative_pointer_mgr = nx_relative_pointer_manager_v1_create(dpy);
 
-	/*
-	 * Creates a cursor, which is a wlroots utility for tracking the cursor
-	 * image shown on screen.
-	 */
-	cursor = wlr_cursor_create();
-	wlr_cursor_attach_output_layout(cursor, output_layout);
+	/* Tracks the on-screen cursor image. */
+	cursor = nx_cursor_create();
+	nx_cursor_attach_output_layout(cursor, output_layout);
 
-	/* Creates an xcursor manager, another wlroots utility which loads up
-	 * Xcursor themes to source cursor images from and makes sure that cursor
-	 * images are available at all scale factors on the screen (necessary for
-	 * HiDPI support). Scaled cursors will be loaded with each output. */
-	cursor_mgr = wlr_xcursor_manager_create(NULL, 24);
+	/* Loads Xcursor themes at every scale. */
+	cursor_mgr = nx_xcursor_manager_create(NULL, 24);
 	setenv("XCURSOR_SIZE", "24", 1);
 
 	/* Initialize CPU cursor buffer for Nvidia HW cursor plane.
@@ -3233,7 +3164,7 @@ setup(void)
 				O_RDWR | O_CLOEXEC);
 			if (cdrm_fd >= 0) {
 				cdrm_owns = 1;
-				wlr_log(WLR_INFO,
+				nx_log(NX_INFO,
 					"NVIDIA: using iGPU card node %s for cursor dumb buffer",
 					detected_gpus[integrated_gpu_idx].card_path);
 			}
@@ -3246,7 +3177,7 @@ setup(void)
 				O_RDWR | O_CLOEXEC);
 			if (cdrm_fd >= 0) {
 				cdrm_owns = 1;
-				wlr_log(WLR_INFO,
+				nx_log(NX_INFO,
 					"NVIDIA: trying iGPU render node %s for cursor dumb buffer",
 					detected_gpus[integrated_gpu_idx].render_path);
 			}
@@ -3257,11 +3188,11 @@ setup(void)
 		 * is the Nvidia card node; on hybrid it's the iGPU.  We do
 		 * NOT own this FD (backend does). */
 		if (cdrm_fd < 0) {
-			int bfd = wlr_backend_get_drm_fd(backend);
+			int bfd = nx_backend_get_drm_fd(backend);
 			if (bfd >= 0) {
 				cdrm_fd = bfd;
 				cdrm_owns = 0;
-				wlr_log(WLR_INFO,
+				nx_log(NX_INFO,
 					"NVIDIA: using backend DRM fd %d for cursor dumb buffer",
 					bfd);
 			}
@@ -3274,7 +3205,7 @@ setup(void)
 				O_RDWR | O_CLOEXEC);
 			if (cdrm_fd >= 0) {
 				cdrm_owns = 1;
-				wlr_log(WLR_INFO,
+				nx_log(NX_INFO,
 					"NVIDIA: trying dGPU primary node %s for cursor dumb buffer",
 					detected_gpus[discrete_gpu_idx].card_path);
 			}
@@ -3282,7 +3213,7 @@ setup(void)
 
 		/* Last resort: renderer FD (render node) */
 		if (cdrm_fd < 0) {
-			cdrm_fd = wlr_renderer_get_drm_fd(drw);
+			cdrm_fd = nx_renderer_get_drm_fd(drw);
 			cdrm_owns = 0;
 		}
 
@@ -3296,31 +3227,29 @@ setup(void)
 			if (cpu_cursor_buf) {
 				cpu_cursor_active = 1;
 				/* Second buffer so cursor updates can alternate:
-				 * wlr_cursor_set_buffer() ignores a call whose
+				 * nx_cursor_set_buffer() ignores a call whose
 				 * buffer+hotspot+scale are unchanged, which would
 				 * drop content-only image changes. */
 				cpu_cursor_buf_b = cpu_cursor_buffer_create(cdrm_fd,
 					(uint32_t)cursor_w, (uint32_t)cursor_h, 0);
 				if (!cpu_cursor_buf_b)
-					wlr_log(WLR_ERROR,
+					nx_log(NX_ERROR,
 						"NVIDIA: second CPU cursor buffer failed; "
 						"cursor image updates may be dropped");
-				wlr_log(WLR_INFO,
+				nx_log(NX_INFO,
 					"NVIDIA: CPU cursor buffer enabled "
 					"(HW cursor plane with dumb buffer, %lux%lu)",
 					(unsigned long)cursor_w, (unsigned long)cursor_h);
 			} else {
 				if (cdrm_owns)
 					close(cdrm_fd);
-				/* Don't set WLR_NO_HARDWARE_CURSORS globally —
-				 * wlroots handles per-output fallback.  Non-Nvidia
-				 * outputs (Intel/AMD) still get native HW cursor. */
-				wlr_log(WLR_ERROR,
+				/* Fallback is per output, not global. */
+				nx_log(NX_ERROR,
 					"NVIDIA: CPU cursor buffer creation failed; "
 					"non-Nvidia outputs still use HW cursor");
 			}
 		} else {
-			wlr_log(WLR_ERROR,
+			nx_log(NX_ERROR,
 				"NVIDIA: no DRM fd for cursor buffer; "
 				"non-Nvidia outputs still use HW cursor");
 		}
@@ -3334,32 +3263,23 @@ setup(void)
 		else if (integrated_gpu_idx >= 0)
 			gpu = detected_gpus[integrated_gpu_idx].driver;
 		int has_dmabuf =
-			wlr_renderer_get_texture_formats(drw, WLR_BUFFER_CAP_DMABUF) != NULL;
-		game_log("RENDERER: gpu=%s renderer=GLES2 esync=%s dmabuf=%s "
+			nx_renderer_get_texture_formats(drw, NX_BUFFER_CAP_DMABUF) != NULL;
+		game_log("RENDERER: gpu=%s renderer=%s esync=%s dmabuf=%s "
 			"drm_fd=%d cpu_cursor=%s",
-			gpu,
+			gpu, nx_renderer_is_vk(drw) ? "Vulkan" : "pixman",
 			g_explicit_sync_ok ? "YES" : "NO",
 			has_dmabuf ? "YES" : "NO",
 			drm_fd, cpu_cursor_active ? "YES" : "NO");
 	}
 
-	/*
-	 * wlr_cursor *only* displays an image on screen. It does not move around
-	 * when the pointer moves. However, we can attach input devices to it, and
-	 * it will generate aggregate events for all of them. In these events, we
-	 * can choose how we want to process them, forwarding them to clients and
-	 * moving the cursor around. More detail on this process is described in
-	 * https://drewdevault.com/2018/07/17/Input-handling-in-wlroots.html
-	 *
-	 * And more comments are sprinkled throughout the notify functions above.
-	 */
+	/* Aggregated pointer events from all devices. */
 	wl_signal_add(&cursor->events.motion, &cursor_motion);
 	wl_signal_add(&cursor->events.motion_absolute, &cursor_motion_absolute);
 	wl_signal_add(&cursor->events.button, &cursor_button);
 	wl_signal_add(&cursor->events.axis, &cursor_axis);
 	wl_signal_add(&cursor->events.frame, &cursor_frame);
 
-	cursor_shape_mgr = wlr_cursor_shape_manager_v1_create(dpy, 1);
+	cursor_shape_mgr = nx_cursor_shape_manager_v1_create(dpy, 1);
 	wl_signal_add(&cursor_shape_mgr->events.request_set_shape, &request_set_cursor_shape);
 
 	/*
@@ -3369,30 +3289,30 @@ setup(void)
 	 * let us know when new input devices are available on the backend.
 	 */
 	wl_signal_add(&backend->events.new_input, &new_input_device);
-	virtual_keyboard_mgr = wlr_virtual_keyboard_manager_v1_create(dpy);
+	virtual_keyboard_mgr = nx_virtual_keyboard_manager_v1_create(dpy);
 	wlsec_privileged(virtual_keyboard_mgr->global);
 	wl_signal_add(&virtual_keyboard_mgr->events.new_virtual_keyboard,
 			&new_virtual_keyboard);
-	virtual_pointer_mgr = wlr_virtual_pointer_manager_v1_create(dpy);
+	virtual_pointer_mgr = nx_virtual_pointer_manager_v1_create(dpy);
 	wlsec_privileged(virtual_pointer_mgr->global);
     wl_signal_add(&virtual_pointer_mgr->events.new_virtual_pointer,
             &new_virtual_pointer);
-	text_input_mgr = wlr_text_input_manager_v3_create(dpy);
+	text_input_mgr = nx_text_input_manager_v3_create(dpy);
 	wl_signal_add(&text_input_mgr->events.new_text_input, &new_text_input);
 
-	seat = wlr_seat_create(dpy, "seat0");
+	seat = nx_seat_create(dpy, "seat0");
 	wl_signal_add(&seat->events.request_set_cursor, &request_cursor);
 	wl_signal_add(&seat->events.request_set_selection, &request_set_sel);
 	wl_signal_add(&seat->events.request_set_primary_selection, &request_set_psel);
 	wl_signal_add(&seat->events.request_start_drag, &request_start_drag);
 	wl_signal_add(&seat->events.start_drag, &start_drag);
 
-	tablet_v2_mgr = wlr_tablet_v2_create(dpy);
+	tablet_v2_mgr = nx_tablet_v2_create(dpy);
 
 	kb_group = createkeyboardgroup();
 	wl_list_init(&kb_group->destroy.link);
 
-	output_mgr = wlr_output_manager_v1_create(dpy);
+	output_mgr = nx_output_manager_v1_create(dpy);
 	wl_signal_add(&output_mgr->events.apply, &output_mgr_apply);
 	wl_signal_add(&output_mgr->events.test, &output_mgr_test);
 
@@ -3401,15 +3321,8 @@ setup(void)
 	 * compositor has Xwayland support */
 	unsetenv("DISPLAY");
 #ifdef XWAYLAND
-	/*
-	 * Xwayland binary auto-selection.
-	 *
-	 * wlroots uses the WLR_XWAYLAND env var to locate the Xwayland binary
-	 * (xwayland/server.c).  If the user hasn't set it, find the best
-	 * available binary automatically — preferring NixOS system path which
-	 * is always the most up-to-date.
-	 */
-	if (!getenv("WLR_XWAYLAND")) {
+	/* Prefer the NixOS system Xwayland. */
+	if (!getenv("NIXLY_XWAYLAND")) {
 		const char *xwl_paths[] = {
 			"/run/current-system/sw/bin/Xwayland",
 			NULL  /* PATH search handled below */
@@ -3459,16 +3372,16 @@ setup(void)
 		}
 
 		if (xwl_chosen) {
-			setenv("WLR_XWAYLAND", xwl_chosen, 1);
-			wlr_log(WLR_INFO, "Xwayland binary selected: %s", xwl_chosen);
+			setenv("NIXLY_XWAYLAND", xwl_chosen, 1);
+			nx_log(NX_INFO, "Xwayland binary selected: %s", xwl_chosen);
 		} else {
-			wlr_log(WLR_ERROR,
+			nx_log(NX_ERROR,
 				"Xwayland binary NOT FOUND — X11 apps will not work. "
 				"Install the xwayland package (NixOS: services.xserver.enable or "
 				"environment.systemPackages = [ pkgs.xwayland ])");
 		}
 	} else {
-		wlr_log(WLR_INFO, "Xwayland binary (user-set): %s", getenv("WLR_XWAYLAND"));
+		nx_log(NX_INFO, "Xwayland binary (user-set): %s", getenv("NIXLY_XWAYLAND"));
 	}
 
 	/* Nvidia Xwayland performance environment */
@@ -3485,12 +3398,12 @@ setup(void)
 	 * Initialise the XWayland X server.
 	 * It will be started when the first X client is started.
 	 */
-	if ((xwayland = wlr_xwayland_create(dpy, compositor, 1))) {
+	if ((xwayland = nx_xwayland_create(dpy, compositor))) {
 		wl_signal_add(&xwayland->events.ready, &xwayland_ready);
 		wl_signal_add(&xwayland->events.new_surface, &new_xwayland_surface);
 
 		setenv("DISPLAY", xwayland->display_name, 1);
-		wlr_log(WLR_INFO, "XWayland initialized (lazy mode), DISPLAY=%s",
+		nx_log(NX_INFO, "XWayland initialized (lazy mode), DISPLAY=%s",
 			xwayland->display_name);
 
 		/* Log GPU-specific Xwayland environment for diagnostics */
@@ -3498,43 +3411,43 @@ setup(void)
 		    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA) {
 			const char *gbm = getenv("GBM_BACKEND");
 			const char *glx = getenv("__GLX_VENDOR_LIBRARY_NAME");
-			const char *nomod = getenv("WLR_DRM_NO_MODIFIERS");
-			wlr_log(WLR_INFO,
+			const char *nomod = getenv("NIXLY_DRM_NO_MODIFIERS");
+			nx_log(NX_INFO,
 				"XWayland+NVIDIA: GBM_BACKEND=%s, __GLX_VENDOR_LIBRARY_NAME=%s, "
-				"WLR_DRM_NO_MODIFIERS=%s, cpu_cursor=%s",
+				"NIXLY_DRM_NO_MODIFIERS=%s, cpu_cursor=%s",
 				gbm ? gbm : "(unset)", glx ? glx : "(unset)",
 				nomod ? nomod : "(unset)",
 				cpu_cursor_active ? "active" : "inactive");
 		}
 	} else {
-		wlr_log(WLR_ERROR, "failed to setup XWayland X server, continuing without it");
+		nx_log(NX_ERROR, "failed to setup XWayland X server, continuing without it");
 		/* Vendor-specific troubleshooting hints */
 		if (discrete_gpu_idx >= 0) {
 			GpuInfo *dgpu = &detected_gpus[discrete_gpu_idx];
 			switch (dgpu->vendor) {
 			case GPU_VENDOR_NVIDIA:
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"NVIDIA: XWayland creation failed. Ensure: "
 					"(1) nvidia-drm.modeset=1 kernel parameter is set, "
 					"(2) nvidia-drm.fbdev=1 on kernel 6.11+, "
 					"(3) Nvidia driver >= 555 installed");
 				break;
 			case GPU_VENDOR_AMD:
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"AMD: XWayland creation failed. Check: "
 					"(1) amdgpu kernel module is loaded, "
 					"(2) /dev/dri/renderD* is accessible (user in 'render' group), "
 					"(3) mesa and xwayland packages are installed");
 				break;
 			case GPU_VENDOR_INTEL:
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"Intel: XWayland creation failed. Check: "
 					"(1) i915/xe kernel module is loaded, "
 					"(2) /dev/dri/renderD* is accessible (user in 'render' group), "
 					"(3) mesa and xwayland packages are installed");
 				break;
 			default:
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"XWayland creation failed with unknown GPU vendor. "
 					"Check /dev/dri/ devices exist and are accessible");
 				break;
@@ -3543,25 +3456,25 @@ setup(void)
 			GpuInfo *igpu = &detected_gpus[integrated_gpu_idx];
 			switch (igpu->vendor) {
 			case GPU_VENDOR_INTEL:
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"Intel iGPU only: XWayland creation failed. Check: "
 					"(1) i915/xe module loaded, (2) mesa/xwayland installed, "
 					"(3) /dev/dri/renderD* accessible");
 				break;
 			case GPU_VENDOR_AMD:
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"AMD APU only: XWayland creation failed. Check: "
 					"(1) amdgpu module loaded, (2) mesa/xwayland installed, "
 					"(3) /dev/dri/renderD* accessible");
 				break;
 			default:
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"XWayland creation failed. Check /dev/dri/ devices "
 					"and GPU driver modules");
 				break;
 			}
 		} else {
-			wlr_log(WLR_ERROR,
+			nx_log(NX_ERROR,
 				"No GPU detected — XWayland requires a functioning GPU. "
 				"Check that DRI kernel modules are loaded and /dev/dri/ "
 				"contains card and render nodes");
@@ -3570,9 +3483,9 @@ setup(void)
 
 	/* === Xwayland diagnostic summary === */
 	{
-		int has_dmabuf = wlr_renderer_get_texture_formats(drw, WLR_BUFFER_CAP_DMABUF) != NULL;
+		int has_dmabuf = nx_renderer_get_texture_formats(drw, NX_BUFFER_CAP_DMABUF) != NULL;
 		int has_sync = (drm_fd >= 0 && drw->features.timeline && backend->features.timeline);
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"=== Xwayland diagnostic summary === "
 			"GPUs=%d, discrete=%s, integrated=%s, "
 			"DMA-BUF=%s, explicit_sync=%s, "
@@ -3702,7 +3615,7 @@ spawn_cmd(const char *cmd)
 		if (selmon)
 			pending_launch_add(pid,
 				selmon->tagset[selmon->seltags],
-				selmon->wlr_output->name);
+				selmon->nx_output->name);
 		return pid;
 	}
 	if (pid < 0)
@@ -3905,7 +3818,7 @@ activatex11(struct wl_listener *listener, void *data)
 
 	/* Only "managed" windows can be activated */
 	if (!client_is_unmanaged(c))
-		wlr_xwayland_surface_activate(c->surface.xwayland, 1);
+		nx_xwayland_surface_activate(c->surface.xwayland, 1);
 }
 
 void
@@ -3921,9 +3834,9 @@ void
 configurex11(struct wl_listener *listener, void *data)
 {
 	Client *c = wl_container_of(listener, c, configure);
-	struct wlr_xwayland_surface_configure_event *event = data;
+	struct nx_xwayland_surface_configure_event *event = data;
 	if (!client_surface(c) || !client_surface(c)->mapped) {
-		wlr_xwayland_surface_configure(c->surface.xwayland,
+		nx_xwayland_surface_configure(c->surface.xwayland,
 				event->x, event->y, event->width, event->height);
 		return;
 	}
@@ -3939,13 +3852,13 @@ configurex11(struct wl_listener *listener, void *data)
 		 * det glir. Å sentrere her ville rykket det til midten midt
 		 * i animasjonen. */
 		if (c->is_notif) {
-			wlr_xwayland_surface_configure(c->surface.xwayland,
+			nx_xwayland_surface_configure(c->surface.xwayland,
 					c->geom.x, c->geom.y,
 					event->width, event->height);
 			return;
 		}
-		if (wlr_xwayland_surface_has_window_type(c->surface.xwayland,
-					WLR_XWAYLAND_NET_WM_WINDOW_TYPE_SPLASH))
+		if (nx_xwayland_surface_has_window_type(c->surface.xwayland,
+					NX_XWAYLAND_NET_WM_WINDOW_TYPE_SPLASH))
 			recenter = 1;
 		else if (!client_is_x11_popup(c) && event->x == 0 && event->y == 0
 				&& event->width > 0 && event->height > 0)
@@ -3954,7 +3867,7 @@ configurex11(struct wl_listener *listener, void *data)
 		if (recenter) {
 			int sx, sy;
 			Monitor *tm = NULL;
-			if (wlr_scene_node_coords(&c->scene->node, &sx, &sy))
+			if (nx_scene_node_coords(&c->scene->node, &sx, &sy))
 				tm = xytomon(sx + event->width / 2,
 						sy + event->height / 2);
 			if (!tm)
@@ -3963,14 +3876,14 @@ configurex11(struct wl_listener *listener, void *data)
 					&& event->height < tm->m.height) {
 				int cx = tm->m.x + (tm->m.width - event->width) / 2;
 				int cy = tm->m.y + (tm->m.height - event->height) / 2;
-				wlr_scene_node_set_position(&c->scene->node, cx, cy);
-				wlr_xwayland_surface_configure(c->surface.xwayland,
+				nx_scene_node_set_position(&c->scene->node, cx, cy);
+				nx_xwayland_surface_configure(c->surface.xwayland,
 						cx, cy, event->width, event->height);
 				return;
 			}
 		}
-		wlr_scene_node_set_position(&c->scene->node, event->x, event->y);
-		wlr_xwayland_surface_configure(c->surface.xwayland,
+		nx_scene_node_set_position(&c->scene->node, event->x, event->y);
+		nx_xwayland_surface_configure(c->surface.xwayland,
 				event->x, event->y, event->width, event->height);
 		return;
 	}
@@ -3994,17 +3907,17 @@ configurex11(struct wl_listener *listener, void *data)
 		 * for decides.  Bigger than the home monitor → span across all
 		 * outputs; normal single-monitor size → back to one screen. */
 		span_update_from_request(c, event->width, event->height);
-		struct wlr_box fsgeom = client_fullscreen_geom(c);
+		struct nx_box fsgeom = client_fullscreen_geom(c);
 		int gw = event->width;
 		int gh = event->height;
 
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"GAME_TRACE: configurex11 fullscreen "
 			"appid='%s' requested=%dx%d monitor=%dx%d mon='%s'",
 			client_get_appid(c) ? client_get_appid(c) : "(null)",
 			gw, gh,
 			fsgeom.width, fsgeom.height,
-			c->mon->wlr_output ? c->mon->wlr_output->name : "(null)");
+			c->mon->nx_output ? c->mon->nx_output->name : "(null)");
 
 		/* Requested smaller than monitor → accept and center */
 		if (gw < fsgeom.width || gh < fsgeom.height) {
@@ -4016,15 +3929,15 @@ configurex11(struct wl_listener *listener, void *data)
 			int dx = (fsgeom.width  - gw) / 2;
 			int dy = (fsgeom.height - gh) / 2;
 
-			wlr_log(WLR_INFO,
+			nx_log(NX_INFO,
 				"GAME_TRACE: configurex11 fullscreen centered "
 				"appid='%s' size=%dx%d offset=%d,%d xpos=%d,%d",
 				client_get_appid(c) ? client_get_appid(c) : "(null)",
 				gw, gh, dx, dy, cx, cy);
 
-			wlr_xwayland_surface_configure(c->surface.xwayland,
+			nx_xwayland_surface_configure(c->surface.xwayland,
 				cx, cy, gw, gh);
-			wlr_scene_node_set_position(&c->scene_surface->node,
+			nx_scene_node_set_position(&c->scene_surface->node,
 				dx, dy);
 
 			if (c->geom.width != fsgeom.width
@@ -4032,7 +3945,7 @@ configurex11(struct wl_listener *listener, void *data)
 					|| c->geom.x != fsgeom.x
 					|| c->geom.y != fsgeom.y) {
 				c->geom = fsgeom;
-				wlr_scene_node_set_position(&c->scene->node,
+				nx_scene_node_set_position(&c->scene->node,
 					fsgeom.x, fsgeom.y);
 			}
 
@@ -4043,12 +3956,12 @@ configurex11(struct wl_listener *listener, void *data)
 		}
 
 		/* Requested >= monitor size → standard fullscreen */
-		wlr_scene_node_set_position(&c->scene_surface->node, 0, 0);
+		nx_scene_node_set_position(&c->scene_surface->node, 0, 0);
 		if (c->geom.width != fsgeom.width || c->geom.height != fsgeom.height
 				|| c->geom.x != fsgeom.x || c->geom.y != fsgeom.y) {
 			resize(c, fsgeom, 0);
 		} else {
-			wlr_xwayland_surface_configure(c->surface.xwayland,
+			nx_xwayland_surface_configure(c->surface.xwayland,
 				fsgeom.x, fsgeom.y, fsgeom.width, fsgeom.height);
 		}
 
@@ -4059,7 +3972,7 @@ configurex11(struct wl_listener *listener, void *data)
 	if (!c->mon) {
 		/* mapnotify can leave a mapped client with no monitor when
 		 * none is available — honour the request without layout. */
-		wlr_xwayland_surface_configure(c->surface.xwayland,
+		nx_xwayland_surface_configure(c->surface.xwayland,
 				event->x, event->y, event->width, event->height);
 		return;
 	}
@@ -4077,7 +3990,7 @@ configurex11(struct wl_listener *listener, void *data)
 		 * from its host.
 		 */
 		if (c->isembedded) {
-			resize(c, (struct wlr_box){.x = bx, .y = by,
+			resize(c, (struct nx_box){.x = bx, .y = by,
 				.width = bw, .height = bh}, 0);
 			return;
 		}
@@ -4104,7 +4017,7 @@ configurex11(struct wl_listener *listener, void *data)
 			if (bh > mh) bh = mh;
 			bx = mx + (mw - bw) / 2;
 			by = my + (mh - bh) / 2;
-			resize(c, (struct wlr_box){.x = bx, .y = by,
+			resize(c, (struct nx_box){.x = bx, .y = by,
 				.width = bw, .height = bh}, 0);
 			return;
 		}
@@ -4127,7 +4040,7 @@ configurex11(struct wl_listener *listener, void *data)
 			if (bh > mh) bh = mh;
 			bx = mx + (mw - bw) / 2;
 			by = my + (mh - bh) / 2;
-			resize(c, (struct wlr_box){.x = bx, .y = by,
+			resize(c, (struct nx_box){.x = bx, .y = by,
 				.width = bw, .height = bh}, 0);
 			return;
 		}
@@ -4154,15 +4067,15 @@ configurex11(struct wl_listener *listener, void *data)
 			if (bx + bw > mx + mw) bx = mx + mw - bw;
 			if (by + bh > my + mh) by = my + mh - bh;
 			if (bx != old_bx || by != old_by)
-				wlr_log(WLR_INFO,
+				nx_log(NX_INFO,
 					"GAME_TRACE: configurex11 clamp appid='%s' "
 					"req=@%d,%d → @%d,%d (mon='%s' %dx%d@%d,%d)",
 					client_get_appid(c) ? client_get_appid(c) : "(null)",
 					old_bx, old_by, bx, by,
-					c->mon->wlr_output ? c->mon->wlr_output->name : "(null)",
+					c->mon->nx_output ? c->mon->nx_output->name : "(null)",
 					mw, mh, mx, my);
 		}
-		resize(c, (struct wlr_box){.x = bx, .y = by, .width = bw, .height = bh}, 0);
+		resize(c, (struct nx_box){.x = bx, .y = by, .width = bw, .height = bh}, 0);
 	} else {
 		/* A tiled window that reads as a game belongs in fullscreen,
 		 * not in the layout with gaps around it. */
@@ -4192,7 +4105,7 @@ configurex11(struct wl_listener *listener, void *data)
 		 * treats the window as normal and adopts the tile size. */
 		if (c->surface.xwayland->maximized_horz ||
 				c->surface.xwayland->maximized_vert)
-			wlr_xwayland_surface_set_maximized(c->surface.xwayland,
+			nx_xwayland_surface_set_maximized(c->surface.xwayland,
 					false, false);
 		/* No arrange(): the layout didn't change — denying a request
 		 * must not restart anims (a fighting client would freeze the
@@ -4204,21 +4117,21 @@ void
 minimizenotify(struct wl_listener *listener, void *data)
 {
 	Client *c = wl_container_of(listener, c, minimize);
-	struct wlr_xwayland_surface *xsurface = c->surface.xwayland;
-	struct wlr_xwayland_minimize_event *e = data;
+	struct nx_xwayland_surface *xsurface = c->surface.xwayland;
+	struct nx_xwayland_minimize_event *e = data;
 	int focused;
 
 	if (xsurface->surface == NULL || !xsurface->surface->mapped)
 		return;
 
 	focused = seat->keyboard_state.focused_surface == xsurface->surface;
-	wlr_xwayland_surface_set_minimized(xsurface, !focused && e->minimize);
+	nx_xwayland_surface_set_minimized(xsurface, !focused && e->minimize);
 }
 
 void
 createnotifyx11(struct wl_listener *listener, void *data)
 {
-	struct wlr_xwayland_surface *xsurface = data;
+	struct nx_xwayland_surface *xsurface = data;
 	Client *c;
 
 	/* Allocate a Client for this surface */
@@ -4254,7 +4167,7 @@ void
 sethints(struct wl_listener *listener, void *data)
 {
 	Client *c = wl_container_of(listener, c, set_hints);
-	struct wlr_surface *surface = client_surface(c);
+	struct nx_surface *surface = client_surface(c);
 	if (c == focustop(selmon) || !c->surface.xwayland->hints)
 		return;
 
@@ -4287,11 +4200,11 @@ setoverrideredirect(struct wl_listener *listener, void *data)
 void
 xwaylandready(struct wl_listener *listener, void *data)
 {
-	struct wlr_xcursor *xcursor;
+	struct nx_xcursor *xcursor;
 	xcb_connection_t *xc;
 	int err;
 
-	wlr_log(WLR_INFO, "XWayland server is ready (DISPLAY=%s)", xwayland->display_name);
+	nx_log(NX_INFO, "XWayland server is ready (DISPLAY=%s)", xwayland->display_name);
 
 	/* Verify XCB connection to the Xwayland server */
 	xc = xcb_connect(xwayland->display_name, NULL);
@@ -4322,7 +4235,7 @@ xwaylandready(struct wl_listener *listener, void *data)
 			err_desc = "unknown error";
 			break;
 		}
-		wlr_log(WLR_ERROR,
+		nx_log(NX_ERROR,
 			"XWayland: xcb_connect failed with code %d (%s) — "
 			"X11 apps will not work", err, err_desc);
 
@@ -4330,17 +4243,17 @@ xwaylandready(struct wl_listener *listener, void *data)
 		if (discrete_gpu_idx >= 0) {
 			switch (detected_gpus[discrete_gpu_idx].vendor) {
 			case GPU_VENDOR_NVIDIA:
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"NVIDIA: XCB connection failure may indicate "
 					"missing nvidia-drm.modeset=1 or broken EGL/GBM setup");
 				break;
 			case GPU_VENDOR_AMD:
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"AMD: XCB connection failure — check that mesa "
 					"and xwayland packages are installed correctly");
 				break;
 			case GPU_VENDOR_INTEL:
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"Intel: XCB connection failure — check that mesa "
 					"and xwayland packages are installed correctly");
 				break;
@@ -4362,11 +4275,11 @@ xwaylandready(struct wl_listener *listener, void *data)
 			xcb_query_extension_reply(xc, glx_cookie, NULL);
 		if (glx_reply) {
 			if (glx_reply->present) {
-				wlr_log(WLR_INFO,
+				nx_log(NX_INFO,
 					"XWayland: GLX extension is available — "
 					"OpenGL X11 apps (blender, freecad, etc.) should work");
 			} else {
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"XWayland: GLX extension NOT available — "
 					"OpenGL X11 apps (blender, freecad, etc.) will fail. "
 					"Install GPU GL/EGL libraries (mesa, nvidia-libs)");
@@ -4377,7 +4290,7 @@ xwaylandready(struct wl_listener *listener, void *data)
 
 	/* Intern Steam atoms on this temporary connection so we can read
 	 * STEAM_GAME / STEAM_OVERLAY / STEAM_BIGPICTURE later via the
-	 * wlr_xwayland XWM connection.  The atom IDs are server-global,
+	 * nx_xwayland XWM connection.  The atom IDs are server-global,
 	 * so they're valid on any connection to the same X server. */
 	{
 		xcb_intern_atom_cookie_t sg = xcb_intern_atom(xc, 0, 10, "STEAM_GAME");
@@ -4402,7 +4315,7 @@ xwaylandready(struct wl_listener *listener, void *data)
 			atom_steam_bigpicture = r->atom;
 			free(r);
 		}
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"XWayland: interned Steam atoms — "
 			"STEAM_GAME=%u STEAM_OVERLAY=%u STEAM_BIGPICTURE=%u",
 			atom_steam_game, atom_steam_overlay, atom_steam_bigpicture);
@@ -4411,7 +4324,7 @@ xwaylandready(struct wl_listener *listener, void *data)
 	xcb_disconnect(xc);
 
 	/* assign the one and only seat */
-	wlr_xwayland_set_seat(xwayland, seat);
+	nx_xwayland_set_seat(xwayland, seat);
 
 	/* Give Xwayland a RandR primary output from the start (the focused
 	 * monitor) so X11 apps launched before any game fullscreens don't
@@ -4419,10 +4332,10 @@ xwaylandready(struct wl_listener *listener, void *data)
 	xwayland_set_primary(selmon);
 
 	/* Set the default XWayland cursor to match the rest of dwl. */
-	wlr_xcursor_manager_load(cursor_mgr, 1);
-	if ((xcursor = wlr_xcursor_manager_get_xcursor(cursor_mgr, "default", 1)))
-		wlr_xwayland_set_cursor(xwayland,
-				wlr_xcursor_image_get_buffer(xcursor->images[0]),
+	nx_xcursor_manager_load(cursor_mgr, 1);
+	if ((xcursor = nx_xcursor_manager_get_xcursor(cursor_mgr, "default", 1)))
+		nx_xwayland_set_cursor(xwayland,
+				nx_xcursor_image_get_buffer(xcursor->images[0]),
 				xcursor->images[0]->hotspot_x, xcursor->images[0]->hotspot_y);
 
 	/* Log successful ready with vendor info */
@@ -4430,7 +4343,7 @@ xwaylandready(struct wl_listener *listener, void *data)
 		const char *gpu_info = "no discrete GPU";
 		if (discrete_gpu_idx >= 0)
 			gpu_info = detected_gpus[discrete_gpu_idx].driver;
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"XWayland ready: XCB verified, GPU=%s, DISPLAY=%s",
 			gpu_info, xwayland->display_name);
 	}
@@ -4466,7 +4379,7 @@ main(int argc, char *argv[])
 		if (c == 's')
 			startup_cmd = optarg;
 		else if (c == 'd')
-			log_level = WLR_DEBUG;
+			log_level = NX_DEBUG;
 		else if (c == 'v')
 			die("nixlytile " VERSION);
 		else
@@ -4475,9 +4388,7 @@ main(int argc, char *argv[])
 	if (optind < argc)
 		goto usage;
 
-	/* Load runtime config from ~/.config/nixlytile/config.kdl.  Must
-	 * happen before setup() so the xkb keymap / repeat rate / colors /
-	 * monitor rules / keybindings are visible to wlroots init. */
+	/* Config must precede setup(). */
 	load_config();
 
 	/* Load ~/.local/nixlyos/monitors.conf (nixlycc GUI) — must happen

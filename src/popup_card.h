@@ -3,7 +3,7 @@
  * Builds one ARGB buffer per popup (rounded translucent card, border,
  * header with icon + big value, gauge bar, key/value grid, sections,
  * buttons, mini calendar) with cairo + fcft, and presents it as a
- * single wlr_scene_buffer.  Show animation (fade + slide + gauge
+ * single nx_scene_buffer.  Show animation (fade + slide + gauge
  * sweep) runs on a timer that only exists while a popup is animating,
  * so idle cost is zero.
  */
@@ -12,7 +12,7 @@
 
 #include <stdint.h>
 #include <cairo/cairo.h>
-#include <wlr/types/wlr_scene.h>
+#include "platform/scene/scene.h"
 
 #define CARD_MAX_ROWS  56
 #define CARD_MAX_HITS  48
@@ -205,7 +205,7 @@ void card_curve(Card *c, const uint8_t *temps, const uint8_t *pcts, int n,
 		int sel, const float accent[4], int hit_id);
 
 typedef struct CardResult {
-	struct wlr_buffer *buf;
+	struct nx_buffer *buf;
 	int w, h;
 	CardHit hits[CARD_MAX_HITS];
 	int nhits;
@@ -216,7 +216,7 @@ typedef struct CardResult {
 } CardResult;
 
 /* Rasterize and free the card. Returns 0 on success; result owns buf
- * (drop with wlr_buffer_drop after handing to the scene). */
+ * (drop with nx_buffer_drop after handing to the scene). */
 int card_finish(Card *c, CardResult *out);
 /* card_finish with a content-change gate keyed on *sig (use
  * view.render_sig).  Returns 1 when the card is identical to the last
@@ -228,10 +228,10 @@ int card_finish_sig(Card *c, CardResult *out, uint32_t *sig);
 /* ── presenter ───────────────────────────────────────────────────── */
 
 typedef struct PopupView {
-	struct wlr_scene_tree *content;      /* child of the popup tree */
-	struct wlr_scene_buffer *shadow;
-	struct wlr_scene_buffer *card;
-	struct wlr_scene_buffer *fills[CARD_MAX_FILLS];
+	struct nx_scene_tree *content;      /* child of the popup tree */
+	struct nx_scene_buffer *shadow;
+	struct nx_scene_buffer *card;
+	struct nx_scene_buffer *fills[CARD_MAX_FILLS];
 	int fill_w[CARD_MAX_FILLS];      /* target (resting) fill width */
 	int fill_h[CARD_MAX_FILLS];
 	int fill_full_w[CARD_MAX_FILLS]; /* track width */
@@ -245,7 +245,7 @@ typedef struct PopupView {
 
 /* Render a finished card into the popup tree (replaces previous card
  * content). Does not touch animation state. */
-void popup_view_apply(PopupView *v, struct wlr_scene_tree *tree,
+void popup_view_apply(PopupView *v, struct nx_scene_tree *tree,
 		CardResult *res);
 /* Start the show animation (call on visibility 0 -> 1). */
 void popup_view_show(PopupView *v);
@@ -264,13 +264,13 @@ int card_text_width(const char *s);
 /* Shared card chrome for popups that render themselves (tray menus):
  * rounded translucent panel with hairline border, hover pill,
  * checkbox/radio marks and a submenu chevron in the card style. */
-struct wlr_buffer *card_panel_buffer(int w, int h);
+struct nx_buffer *card_panel_buffer(int w, int h);
 /* Soft floating drop shadow sized for a w×h card; buffer extends
  * CARD_SHADOW_MARGIN px on every side, position at (-margin,-margin).
  * radius = the card's corner radius (<= 0 for the default card radius). */
 #define CARD_SHADOW_MARGIN 24
-struct wlr_buffer *card_shadow_buffer(int w, int h, double radius);
-struct wlr_buffer *card_meter_buffer(int w, int h, const float accent[4],
+struct nx_buffer *card_shadow_buffer(int w, int h, double radius);
+struct nx_buffer *card_meter_buffer(int w, int h, const float accent[4],
 		const float *hist, int nhist, int head, double phase);
 /* Persistent ping-pong raster pair for the per-frame meter overlay:
  * card_meter_raster() draws directly into one of two pre-allocated
@@ -280,22 +280,22 @@ struct wlr_buffer *card_meter_buffer(int w, int h, const float accent[4],
  * previous frame's.  Free with card_meter_raster_finish() when the
  * meter goes away (also called internally on a size change). */
 typedef struct {
-	struct wlr_buffer *buf[2];
+	struct nx_buffer *buf[2];
 	int next;
 	int w, h;
 } MeterRaster;
-struct wlr_buffer *card_meter_raster(MeterRaster *mr, int w, int h,
+struct nx_buffer *card_meter_raster(MeterRaster *mr, int w, int h,
 		const float accent[4], const float *hist, int nhist, int head,
 		double phase);
 void card_meter_raster_finish(MeterRaster *mr);
 /* Spectrum-analyzer frame for the card_wave rect: bottom-aligned bars
  * whose envelope scales with frac, animated by t (seconds). */
-struct wlr_buffer *card_spectrum_buffer(int w, int h, const float accent[4],
+struct nx_buffer *card_spectrum_buffer(int w, int h, const float accent[4],
 		double frac, double t);
 /* Pill gauge fill, caller crops. */
-struct wlr_buffer *card_fill_buffer(int w, int h, const float col[4]);
-struct wlr_buffer *card_hover_buffer(int w, int h);
-struct wlr_buffer *card_mark_buffer(int radio, int size, int state);
-struct wlr_buffer *card_chevron_buffer(int size);
+struct nx_buffer *card_fill_buffer(int w, int h, const float col[4]);
+struct nx_buffer *card_hover_buffer(int w, int h);
+struct nx_buffer *card_mark_buffer(int radio, int size, int state);
+struct nx_buffer *card_chevron_buffer(int size);
 
 #endif

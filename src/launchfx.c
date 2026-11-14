@@ -52,10 +52,10 @@ static struct {
 	uint64_t orphan_ms;       /* when the tracked reaper died; 0 = alive */
 	uint64_t window_ms;       /* when the first game window mapped; 0 = none */
 	Monitor *mon;
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_buffer *dot;
-	struct wlr_scene_rect *black;
-	struct wlr_buffer *dot_buf;
+	struct nx_scene_tree *tree;
+	struct nx_scene_buffer *dot;
+	struct nx_scene_rect *black;
+	struct nx_buffer *dot_buf;
 	uint64_t start_ms;
 	struct wl_event_source *tick;
 	struct wl_event_source *watchdog;
@@ -73,7 +73,7 @@ static Client *fx_pending_fs;
 
 /* Black anti-aliased filled circle wrapped in a PixmanBuffer (cairo
  * ARGB32 and pixman a8r8g8b8 share layout, both premultiplied). */
-static struct wlr_buffer *
+static struct nx_buffer *
 make_dot_buffer(int d)
 {
 	cairo_surface_t *cs;
@@ -108,7 +108,7 @@ make_dot_buffer(int d)
 	buf->drm_format = DRM_FORMAT_ARGB8888;
 	buf->stride = stride;
 	buf->owns_data = 1;
-	wlr_buffer_init(&buf->base, &pixman_buffer_impl, d, d);
+	nx_buffer_init(&buf->base, &pixman_buffer_impl, d, d);
 	return &buf->base;
 }
 
@@ -124,17 +124,17 @@ fx_teardown(void)
 		fx.watchdog = NULL;
 	}
 	if (fx.tree) {
-		wlr_scene_node_destroy(&fx.tree->node);
+		nx_scene_node_destroy(&fx.tree->node);
 		fx.tree = NULL;
 	}
 	fx.dot = NULL;
 	fx.black = NULL;
 	if (fx.dot_buf) {
-		wlr_buffer_drop(fx.dot_buf);
+		nx_buffer_drop(fx.dot_buf);
 		fx.dot_buf = NULL;
 	}
-	if (fx.mon && fx.mon->wlr_output)
-		wlr_output_schedule_frame(fx.mon->wlr_output);
+	if (fx.mon && fx.mon->nx_output)
+		nx_output_schedule_frame(fx.mon->nx_output);
 	fx.active = 0;
 	fx.grown = 0;
 	fx.reveal_pending = 0;
@@ -172,12 +172,12 @@ fx_grow_complete(void)
 	if (!fx.mon)
 		return;
 	/* Crisp full-monitor rect replaces the scaled circle. */
-	fx.black = wlr_scene_rect_create(fx.tree,
+	fx.black = nx_scene_rect_create(fx.tree,
 			fx.mon->m.width, fx.mon->m.height, black_col);
 	if (fx.black)
-		wlr_scene_node_set_position(&fx.black->node, 0, 0);
+		nx_scene_node_set_position(&fx.black->node, 0, 0);
 	if (fx.dot) {
-		wlr_scene_node_destroy(&fx.dot->node);
+		nx_scene_node_destroy(&fx.dot->node);
 		fx.dot = NULL;
 	}
 	if (fx.tick) {
@@ -228,23 +228,23 @@ fx_tick_cb(void *data)
 
 		if (vw < di || vh < di) {
 			double s = (double)fx.dot_buf->width / (double)di;
-			struct wlr_fbox src = {
+			struct nx_fbox src = {
 				.x = (di - vw) / 2.0 * s,
 				.y = (di - vh) / 2.0 * s,
 				.width = vw * s,
 				.height = vh * s,
 			};
-			wlr_scene_buffer_set_source_box(fx.dot, &src);
+			nx_scene_buffer_set_source_box(fx.dot, &src);
 		} else {
-			wlr_scene_buffer_set_source_box(fx.dot, NULL);
+			nx_scene_buffer_set_source_box(fx.dot, NULL);
 		}
-		wlr_scene_buffer_set_dest_size(fx.dot, vw, vh);
-		wlr_scene_node_set_position(&fx.dot->node,
+		nx_scene_buffer_set_dest_size(fx.dot, vw, vh);
+		nx_scene_node_set_position(&fx.dot->node,
 				(fx.mon->m.width - vw) / 2,
 				(fx.mon->m.height - vh) / 2);
 	}
-	if (fx.mon->wlr_output)
-		wlr_output_schedule_frame(fx.mon->wlr_output);
+	if (fx.mon->nx_output)
+		nx_output_schedule_frame(fx.mon->nx_output);
 
 	if (t >= 1.0) {
 		fx_grow_complete();
@@ -330,14 +330,14 @@ fx_start_cover(Monitor *m)
 	fx.dot_buf = make_dot_buffer(FX_DOT_TEX);
 	if (!fx.dot_buf)
 		return 0;
-	fx.tree = wlr_scene_tree_create(layers[LyrOverlay]);
+	fx.tree = nx_scene_tree_create(layers[LyrOverlay]);
 	if (!fx.tree) {
-		wlr_buffer_drop(fx.dot_buf);
+		nx_buffer_drop(fx.dot_buf);
 		fx.dot_buf = NULL;
 		return 0;
 	}
-	wlr_scene_node_set_position(&fx.tree->node, fx.mon->m.x, fx.mon->m.y);
-	fx.dot = wlr_scene_buffer_create(fx.tree, fx.dot_buf);
+	nx_scene_node_set_position(&fx.tree->node, fx.mon->m.x, fx.mon->m.y);
+	fx.dot = nx_scene_buffer_create(fx.tree, fx.dot_buf);
 	if (!fx.dot) {
 		fx_teardown();
 		return 0;
@@ -367,7 +367,7 @@ launchfx_start(pid_t reaper)
 {
 	Client *fsc;
 
-	if (fx.active || !selmon || !selmon->wlr_output)
+	if (fx.active || !selmon || !selmon->nx_output)
 		return;
 
 	/* A fullscreen game is already on screen (e.g. Steam runs a setup
@@ -385,7 +385,7 @@ launchfx_start(pid_t reaper)
 	 * Steam's splash, install and Proton stages run for seconds before
 	 * the game exists, and a cover started here timed out and replayed
 	 * on top of them.  The cover starts at the fullscreen transition. */
-	wlr_log(WLR_INFO, "launchfx: Steam launch detected (reaper pid %d) — "
+	nx_log(NX_INFO, "launchfx: Steam launch detected (reaper pid %d) — "
 			"pre-boost; cover plays at the fullscreen transition",
 			(int)reaper);
 }
@@ -398,11 +398,11 @@ fx_move_cover(Monitor *m)
 	if (!fx.tree || !m || m == fx.mon)
 		return;
 	fx.mon = m;
-	wlr_scene_node_set_position(&fx.tree->node, m->m.x, m->m.y);
+	nx_scene_node_set_position(&fx.tree->node, m->m.x, m->m.y);
 	if (fx.black)
-		wlr_scene_rect_set_size(fx.black, m->m.width, m->m.height);
-	if (m->wlr_output)
-		wlr_output_schedule_frame(m->wlr_output);
+		nx_scene_rect_set_size(fx.black, m->m.width, m->m.height);
+	if (m->nx_output)
+		nx_output_schedule_frame(m->nx_output);
 }
 
 /* The cover trigger.  Called from setfullscreen() the moment a game takes
@@ -415,7 +415,7 @@ fx_move_cover(Monitor *m)
 void
 launchfx_fullscreen_starting(Client *c)
 {
-	if (!c || !c->mon || !c->mon->wlr_output)
+	if (!c || !c->mon || !c->mon->nx_output)
 		return;
 	if (!looks_like_game(c))
 		return;
@@ -436,8 +436,8 @@ launchfx_fullscreen_starting(Client *c)
 	if (!fx_start_cover(c->mon))
 		return;
 
-	wlr_log(WLR_INFO, "launchfx: game going fullscreen — cover on %s",
-			c->mon->wlr_output->name);
+	nx_log(NX_INFO, "launchfx: game going fullscreen — cover on %s",
+			c->mon->nx_output->name);
 }
 
 /* Kalles fra toppen av setfullscreen(c, 1) FØR noe state endres.
@@ -448,7 +448,7 @@ launchfx_fullscreen_starting(Client *c)
 int
 launchfx_defer_fullscreen(Client *c)
 {
-	if (!c || !c->mon || !c->mon->wlr_output)
+	if (!c || !c->mon || !c->mon->nx_output)
 		return 0;
 	if (!looks_like_game(c))
 		return 0;
@@ -551,14 +551,14 @@ launchfx_game_ready(void)
 void
 launchfx_note_commit(Client *c)
 {
-	struct wlr_surface *surf;
+	struct nx_surface *surf;
 
 	if (!fx.active || fx.content_seen || !c || !c->isfullscreen)
 		return;
 	if (!looks_like_game(c))
 		return;
 	surf = client_surface(c);
-	if (!surf || !(surf->current.committed & WLR_SURFACE_STATE_BUFFER))
+	if (!surf || !(surf->current.committed & NX_SURFACE_STATE_BUFFER))
 		return;
 	fx.content_seen = 1;
 }
@@ -756,7 +756,7 @@ launchfx_init(void)
 		pthread_attr_init(&attr);
 		pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 		if (pthread_create(&tid, &attr, fxw_worker, NULL) != 0)
-			wlr_log(WLR_ERROR, "launchfx: sweep thread start failed — "
+			nx_log(NX_ERROR, "launchfx: sweep thread start failed — "
 				"Play-press detection disabled");
 		pthread_attr_destroy(&attr);
 	}

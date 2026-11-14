@@ -43,8 +43,8 @@ struct wl_list notifs;
 static void
 notif_schedule(Monitor *m)
 {
-	if (m && m->wlr_output)
-		wlr_output_schedule_frame(m->wlr_output);
+	if (m && m->nx_output)
+		nx_output_schedule_frame(m->nx_output);
 }
 
 /* Klipp varselet mot sin egen skjermkant. Noden glir i globale
@@ -55,7 +55,7 @@ static void
 notif_clip_to_mon(Notif *n, int x)
 {
 	Client *c = n->c;
-	struct wlr_box clip;
+	struct nx_box clip;
 	int vis = n->m->m.x + n->m->m.width - x;
 	int w = c->geom.width;
 	int rw;
@@ -70,13 +70,10 @@ notif_clip_to_mon(Notif *n, int x)
 	client_get_clip(c, &clip);
 	if (clip.width > vis - (int)c->bw)
 		clip.width = MAX(vis - (int)c->bw, 0);
-	/* En TOM klippeboks får wlroots til å fjerne klippet og vise hele
-	 * surfacet — helt utenfor kanten betyr det at varselet dukker opp
-	 * i full bredde på naboskjermen. Bruk en boks langt utenfor
-	 * surfacet i stedet (samme triks som client_clip_to_usable). */
+	/* Tom boks slår av klippingen. */
 	if (clip.width <= 0 || clip.height <= 0)
-		clip = (struct wlr_box){ 1 << 20, 0, 1, 1 };
-	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+		clip = (struct nx_box){ 1 << 20, 0, 1, 1 };
+	nx_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
 
 	/* Unmanaged (override-redirect) klienter har ingen border-rekter. */
 	if (!c->border[0])
@@ -88,14 +85,14 @@ notif_clip_to_mon(Notif *n, int x)
 	}
 	/* border[0]/[1] = topp/bunn (0,·), [2] = venstre, [3] = høyre ved
 	 * x = w - bw. Kapp alt ved vis. */
-	wlr_scene_rect_set_size(c->border[0], vis, c->bw);
-	wlr_scene_rect_set_size(c->border[1], vis, c->bw);
-	wlr_scene_rect_set_size(c->border[2], MIN((int)c->bw, vis),
+	nx_scene_rect_set_size(c->border[0], vis, c->bw);
+	nx_scene_rect_set_size(c->border[1], vis, c->bw);
+	nx_scene_rect_set_size(c->border[2], MIN((int)c->bw, vis),
 			MAX(c->geom.height - 2 * (int)c->bw, 0));
 	rw = vis - (w - (int)c->bw);
 	if (rw < 0)
 		rw = 0;
-	wlr_scene_rect_set_size(c->border[3], rw,
+	nx_scene_rect_set_size(c->border[3], rw,
 			MAX(c->geom.height - 2 * (int)c->bw, 0));
 }
 
@@ -187,18 +184,18 @@ notif_monitor_for(Client *c)
 static int
 notif_is_menu(Client *c)
 {
-	static const enum wlr_xwayland_net_wm_window_type type[] = {
-		WLR_XWAYLAND_NET_WM_WINDOW_TYPE_MENU,
-		WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DROPDOWN_MENU,
-		WLR_XWAYLAND_NET_WM_WINDOW_TYPE_POPUP_MENU,
-		WLR_XWAYLAND_NET_WM_WINDOW_TYPE_COMBO,
-		WLR_XWAYLAND_NET_WM_WINDOW_TYPE_TOOLBAR,
-		WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DND,
+	static const enum nx_xwayland_net_wm_window_type type[] = {
+		NX_XWAYLAND_NET_WM_WINDOW_TYPE_MENU,
+		NX_XWAYLAND_NET_WM_WINDOW_TYPE_DROPDOWN_MENU,
+		NX_XWAYLAND_NET_WM_WINDOW_TYPE_POPUP_MENU,
+		NX_XWAYLAND_NET_WM_WINDOW_TYPE_COMBO,
+		NX_XWAYLAND_NET_WM_WINDOW_TYPE_TOOLBAR,
+		NX_XWAYLAND_NET_WM_WINDOW_TYPE_DND,
 	};
 	size_t i;
 
 	for (i = 0; i < LENGTH(type); i++)
-		if (wlr_xwayland_surface_has_window_type(c->surface.xwayland,
+		if (nx_xwayland_surface_has_window_type(c->surface.xwayland,
 					type[i]))
 			return 1;
 
@@ -206,7 +203,7 @@ notif_is_menu(Client *c)
 	 * Litt slark rundt boksen, siden en meny kan åpne seg opp/til
 	 * venstre når det ikke er plass under. */
 	if (client_is_unmanaged(c) && cursor) {
-		struct wlr_box b = c->geom;
+		struct nx_box b = c->geom;
 		int slack = 8;
 		if (cursor->x >= b.x - slack && cursor->x <= b.x + b.width + slack
 				&& cursor->y >= b.y - slack
@@ -259,16 +256,16 @@ notify_looks_like_notification(Client *c, Monitor **out)
 		 * fanger de som ikke er override-redirect. */
 		if (!c->isfloating)
 			return 0;
-		if (wlr_xwayland_surface_has_window_type(c->surface.xwayland,
-					WLR_XWAYLAND_NET_WM_WINDOW_TYPE_NOTIFICATION)
-				|| wlr_xwayland_surface_has_window_type(c->surface.xwayland,
-					WLR_XWAYLAND_NET_WM_WINDOW_TYPE_TOOLTIP))
+		if (nx_xwayland_surface_has_window_type(c->surface.xwayland,
+					NX_XWAYLAND_NET_WM_WINDOW_TYPE_NOTIFICATION)
+				|| nx_xwayland_surface_has_window_type(c->surface.xwayland,
+					NX_XWAYLAND_NET_WM_WINDOW_TYPE_TOOLTIP))
 			return 1;
 		/* Ellers: liten, flytende og uten input-modell = varsel.
 		 * ICCCM WM_HINTS input=False + ingen WM_TAKE_FOCUS er så nær
 		 * "vil ikke ha fokus" som X11 kommer for managed vinduer. */
-		return wlr_xwayland_surface_icccm_input_model(c->surface.xwayland)
-				== WLR_ICCCM_INPUT_MODEL_NONE;
+		return nx_xwayland_surface_icccm_input_model(c->surface.xwayland)
+				== NX_ICCCM_INPUT_MODEL_NONE;
 	}
 #endif
 
@@ -303,7 +300,7 @@ notif_wants_input(Client *c)
 	/* xdg-dialog-v1: klienten sier selv at dette er en dialog, ikke et
 	 * varsel. GTK4/libadwaita setter den på alle dialogene sine. */
 	if (!client_is_x11(c) && c->surface.xdg && c->surface.xdg->toplevel
-			&& wlr_xdg_dialog_v1_try_from_wlr_xdg_toplevel(
+			&& nx_xdg_dialog_v1_try_from_nx_xdg_toplevel(
 				c->surface.xdg->toplevel))
 		return 1;
 
@@ -348,7 +345,7 @@ notify_try_adopt(Client *c)
 	if (game_mode_active || htpc_mode_active) {
 		Monitor *alt = NULL, *it;
 		wl_list_for_each(it, &mons, link) {
-			if (it->wlr_output && it->wlr_output->enabled &&
+			if (it->nx_output && it->nx_output->enabled &&
 					!fullscreen_visible_on(it)) {
 				alt = it;
 				break;
@@ -383,7 +380,7 @@ notify_try_adopt(Client *c)
 	c->is_notif = 1;
 	c->geom.x = n->target_x;
 	c->geom.y = n->slot_y;
-	wlr_scene_node_set_position(&c->scene->node, n->off_x, n->slot_y);
+	nx_scene_node_set_position(&c->scene->node, n->off_x, n->slot_y);
 	notif_clip_to_mon(n, n->off_x);
 
 	if (!n->sticky) {
@@ -414,7 +411,7 @@ notify_start_offscreen(Client *c)
 	wl_list_for_each(n, &notifs, link) {
 		if (n->c != c)
 			continue;
-		wlr_scene_node_set_position(&c->scene->node, n->off_x, n->slot_y);
+		nx_scene_node_set_position(&c->scene->node, n->off_x, n->slot_y);
 		notif_clip_to_mon(n, n->off_x);
 		return;
 	}
@@ -460,7 +457,7 @@ notify_tick(Monitor *m, double dt, int *still)
 
 		if (spring_tick(&n->x_f, &n->x_vel, (double)n->target_x,
 				SPRING_NOTIF, dt)) {
-			wlr_scene_node_set_position(&n->c->scene->node,
+			nx_scene_node_set_position(&n->c->scene->node,
 					(int)n->x_f, n->slot_y);
 			notif_clip_to_mon(n, (int)n->x_f);
 			n->settled_applied = 0;
@@ -472,7 +469,7 @@ notify_tick(Monitor *m, double dt, int *still)
 		 * frame varselet står på skjermen (samme latch som osd_tick). */
 		if (!n->settled_applied) {
 			n->settled_applied = 1;
-			wlr_scene_node_set_position(&n->c->scene->node,
+			nx_scene_node_set_position(&n->c->scene->node,
 					n->target_x, n->slot_y);
 			notif_clip_to_mon(n, n->target_x);
 		}
@@ -481,7 +478,7 @@ notify_tick(Monitor *m, double dt, int *still)
 
 		/* Ute av syne: gjem noden og slipp slotten. Vinduet lever
 		 * videre — klienten eier det og river det ned selv. */
-		wlr_scene_node_set_enabled(&n->c->scene->node, 0);
+		nx_scene_node_set_enabled(&n->c->scene->node, 0);
 		n->c->is_notif = 0;
 		if (n->timer)
 			wl_event_source_remove(n->timer);

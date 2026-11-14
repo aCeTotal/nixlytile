@@ -23,15 +23,15 @@
 #define PACE_MAX_DIVISOR  4
 
 void
-pace_register_modes(struct wlr_output *output)
+pace_register_modes(struct nx_output *output)
 {
-	struct wlr_output_mode *mode, *top = NULL;
+	struct nx_output_mode *mode, *top = NULL;
 	int div;
 
-	if (!wlr_output_is_drm(output))
+	if (!nx_output_is_drm(output))
 		return;
 	wl_list_for_each(mode, &output->modes, link) {
-		if (wlr_drm_connector_mode_pace_divisor(output, mode))
+		if (nx_drm_connector_mode_pace_divisor(output, mode))
 			continue;
 		if (!top || mode->refresh > top->refresh)
 			top = mode;
@@ -50,7 +50,7 @@ pace_register_modes(struct wlr_output *output)
 				break;
 			}
 		if (!have)
-			wlr_drm_connector_add_paced_mode(output, top, div);
+			nx_drm_connector_add_paced_mode(output, top, div);
 	}
 }
 
@@ -77,15 +77,15 @@ pace_defer_frame(Monitor *m, int allow_tearing, uint64_t now_ns)
 
 	if (m->pace_fired || allow_tearing)
 		return 0;
-	div = wlr_drm_connector_mode_pace_divisor(m->wlr_output,
-			m->wlr_output->current_mode);
+	div = nx_drm_connector_mode_pace_divisor(m->nx_output,
+			m->nx_output->current_mode);
 	if (div < 2 || m->last_present_ns == 0 ||
-			m->wlr_output->current_mode->refresh <= 0)
+			m->nx_output->current_mode->refresh <= 0)
 		return 0;
 
 	/* Underlying scanout vblank interval: paced refresh × divisor. */
 	vb_ns = 1000000000000ULL /
-		((uint64_t)m->wlr_output->current_mode->refresh * div);
+		((uint64_t)m->nx_output->current_mode->refresh * div);
 
 	/* The flip must land on the Nth vblank after the last present: any
 	 * commit inside ((N-1)·vb, N·vb) does, since the fixed scanout

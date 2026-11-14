@@ -179,9 +179,9 @@ build_workspaces_changed(char **out_buf, size_t *out_len)
 	Monitor *m;
 	Workspace *ws;
 	wl_list_for_each(m, &mons, link) {
-		if (!m->wlr_output)
+		if (!m->nx_output)
 			continue;
-		const char *output_name = m->wlr_output->name ? m->wlr_output->name : "";
+		const char *output_name = m->nx_output->name ? m->nx_output->name : "";
 		char out_esc[128];
 		size_t out_esc_len = json_str_escape(out_esc, sizeof out_esc, output_name);
 		out_esc[out_esc_len] = 0;
@@ -258,7 +258,7 @@ build_workspaces_changed(char **out_buf, size_t *out_len)
 			 * workspace?" — a heap pointer here both leaked ASLR
 			 * layout to IPC clients and changed across restarts. */
 			uint32_t name_hash = 2166136261u;
-			for (const char *ch = m->wlr_output->name; *ch; ch++)
+			for (const char *ch = m->nx_output->name; *ch; ch++)
 				name_hash = (name_hash ^ (unsigned char)*ch) * 16777619u;
 			uint64_t synth_id = (uint64_t)0xFFFFFFFF00000000ULL
 				| (uint64_t)name_hash;
@@ -309,14 +309,14 @@ send_video_mode(NiriIpcClient *cl, Monitor *m)
 	int vrr = 0;
 	int n;
 
-	if (m && m->wlr_output && m->wlr_output->current_mode)
-		mhz = m->wlr_output->current_mode->refresh;
+	if (m && m->nx_output && m->nx_output->current_mode)
+		mhz = m->nx_output->current_mode->refresh;
 	if (m)
 		vrr = (m->vrr_active || m->vrr_pending == 1) ? 1 : 0;
 
 	n = snprintf(buf, sizeof buf,
 		"{\"Ok\":{\"VideoMode\":{\"output\":\"%s\",\"mhz\":%d,\"vrr\":%s}}}\n",
-		(m && m->wlr_output && m->wlr_output->name) ? m->wlr_output->name : "",
+		(m && m->nx_output && m->nx_output->name) ? m->nx_output->name : "",
 		mhz, vrr ? "true" : "false");
 	if (n > 0)
 		client_enqueue(cl, buf, (size_t)n);
@@ -336,7 +336,7 @@ send_outputs(NiriIpcClient *cl)
 
 	client_enqueue(cl, hdr, sizeof hdr - 1);
 	wl_list_for_each(m, &mons, link) {
-		struct wlr_output *o = m->wlr_output;
+		struct nx_output *o = m->nx_output;
 		if (!o || !o->name)
 			continue;
 		int w = o->width, h = o->height, mhz = 0;
@@ -515,8 +515,8 @@ handle_request_line(NiriIpcClient *cl, char *line)
 
 		Monitor *m = NULL, *it;
 		wl_list_for_each(it, &mons, link) {
-			if (it->wlr_output && it->wlr_output->name &&
-			    strcmp(it->wlr_output->name, name) == 0) {
+			if (it->nx_output && it->nx_output->name &&
+			    strcmp(it->nx_output->name, name) == 0) {
 				m = it;
 				break;
 			}
@@ -779,7 +779,7 @@ window_ipc_init(struct wl_event_loop *loop)
 
 	const char *xdg_rt = getenv("XDG_RUNTIME_DIR");
 	if (!xdg_rt) {
-		wlr_log(WLR_ERROR, "window_ipc: XDG_RUNTIME_DIR not set");
+		nx_log(NX_ERROR, "window_ipc: XDG_RUNTIME_DIR not set");
 		return;
 	}
 	snprintf(socket_path, sizeof socket_path,
@@ -791,14 +791,14 @@ window_ipc_init(struct wl_event_loop *loop)
 
 	listen_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
 	if (listen_fd < 0) {
-		wlr_log(WLR_ERROR, "window_ipc: socket: %s", strerror(errno));
+		nx_log(NX_ERROR, "window_ipc: socket: %s", strerror(errno));
 		return;
 	}
 
 	struct sockaddr_un addr = {0};
 	addr.sun_family = AF_UNIX;
 	if (strlen(socket_path) >= sizeof addr.sun_path) {
-		wlr_log(WLR_ERROR, "window_ipc: socket path too long");
+		nx_log(NX_ERROR, "window_ipc: socket path too long");
 		close(listen_fd);
 		listen_fd = -1;
 		return;
@@ -806,14 +806,14 @@ window_ipc_init(struct wl_event_loop *loop)
 	strcpy(addr.sun_path, socket_path);
 
 	if (bind(listen_fd, (struct sockaddr *)&addr, sizeof addr) < 0) {
-		wlr_log(WLR_ERROR, "window_ipc: bind %s: %s",
+		nx_log(NX_ERROR, "window_ipc: bind %s: %s",
 			socket_path, strerror(errno));
 		close(listen_fd);
 		listen_fd = -1;
 		return;
 	}
 	if (listen(listen_fd, 8) < 0) {
-		wlr_log(WLR_ERROR, "window_ipc: listen: %s", strerror(errno));
+		nx_log(NX_ERROR, "window_ipc: listen: %s", strerror(errno));
 		close(listen_fd);
 		unlink(socket_path);
 		listen_fd = -1;
@@ -831,7 +831,7 @@ window_ipc_init(struct wl_event_loop *loop)
 
 	/* Export NIRI_SOCKET so waybar's niri/workspaces module connects. */
 	setenv("NIRI_SOCKET", socket_path, 1);
-	wlr_log(WLR_INFO, "window_ipc: listening on %s", socket_path);
+	nx_log(NX_INFO, "window_ipc: listening on %s", socket_path);
 }
 
 void

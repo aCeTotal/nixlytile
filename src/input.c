@@ -172,7 +172,7 @@ getxkbrules(void)
 }
 
 int
-scrollsteps(const struct wlr_pointer_axis_event *event)
+scrollsteps(const struct nx_pointer_axis_event *event)
 {
 	int steps;
 
@@ -402,7 +402,7 @@ info_popup_under(Monitor *m, InfoPopup *p)
 }
 
 int
-handlestatusscroll(struct wlr_pointer_axis_event *event)
+handlestatusscroll(struct nx_pointer_axis_event *event)
 {
 	Monitor *m;
 	int lx, ly, steps;
@@ -470,12 +470,12 @@ handlestatusscroll(struct wlr_pointer_axis_event *event)
 void
 axisnotify(struct wl_listener *listener, void *data)
 {
-	struct wlr_pointer_axis_event *event = data;
+	struct nx_pointer_axis_event *event = data;
 
 	if (dwt_suppress(&event->pointer->base))
 		return;
 
-	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
+	nx_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
 	/* Scroll on a statusbar module adjusts brightness/mic/volume. */
 	if (handlestatusscroll(event))
@@ -486,9 +486,9 @@ axisnotify(struct wl_listener *listener, void *data)
 	 * column left.  Only fires on actual notch transitions
 	 * (scrollsteps debounces high-resolution wheel data). */
 	{
-		struct wlr_keyboard *kb = wlr_seat_get_keyboard(seat);
+		struct nx_keyboard *kb = nx_seat_get_keyboard(seat);
 		if (kb && event->orientation == WL_POINTER_AXIS_VERTICAL_SCROLL) {
-			uint32_t mods = wlr_keyboard_get_modifiers(kb);
+			uint32_t mods = nx_keyboard_get_modifiers(kb);
 			if (mods & modkey) {
 				int steps = scrollsteps(event);
 				if (steps != 0) {
@@ -500,7 +500,7 @@ axisnotify(struct wl_listener *listener, void *data)
 		}
 	}
 
-	wlr_seat_pointer_notify_axis(seat,
+	nx_seat_pointer_notify_axis(seat,
 			event->time_msec, event->orientation, event->delta,
 			event->delta_discrete, event->source, event->relative_direction);
 }
@@ -665,8 +665,8 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 void
 buttonpress(struct wl_listener *listener, void *data)
 {
-	struct wlr_pointer_button_event *event = data;
-	struct wlr_keyboard *keyboard;
+	struct nx_pointer_button_event *event = data;
+	struct nx_keyboard *keyboard;
 	uint32_t mods;
 	Client *c, *target = NULL;
 	const Button *b;
@@ -674,7 +674,7 @@ buttonpress(struct wl_listener *listener, void *data)
 	if (dwt_suppress(&event->pointer->base))
 		return;
 
-	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
+	nx_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
 	/* Push-to-talk on a mouse button (side/extra/…): unmute while held,
 	 * mute on release.  Runs before all other handling so it works over
@@ -742,7 +742,7 @@ buttonpress(struct wl_listener *listener, void *data)
 		 * AT a specific location — we must not yank the pointer
 		 * away to tile-center, that would lose the click target. */
 		{
-			struct wlr_surface *hit = NULL;
+			struct nx_surface *hit = NULL;
 			double hx = 0, hy = 0;
 			xytonode(cursor->x, cursor->y, &hit, &c, NULL, &hx, &hy);
 			/* CLICK probe: a press that resolves to no surface (or to
@@ -781,8 +781,8 @@ buttonpress(struct wl_listener *listener, void *data)
 		if (c && (!client_is_unmanaged(c) || client_wants_focus(c)))
 			focusclient(c, 0);
 
-		keyboard = wlr_seat_get_keyboard(seat);
-		mods = keyboard ? wlr_keyboard_get_modifiers(keyboard) : 0;
+		keyboard = nx_seat_get_keyboard(seat);
+		mods = keyboard ? nx_keyboard_get_modifiers(keyboard) : 0;
 		for (b = buttons; b < buttons + nbuttons; b++) {
 			if (CLEANMASK(mods) == CLEANMASK(b->mod) &&
 					event->button == b->button && b->func) {
@@ -833,7 +833,7 @@ buttonpress(struct wl_listener *listener, void *data)
 			converge_kick(NULL);
 			/* Tick starts the final txn. */
 			if (selmon)
-				wlr_output_schedule_frame(selmon->wlr_output);
+				nx_output_schedule_frame(selmon->nx_output);
 		}
 		if (!locked && cursor_mode == CurColResize) {
 			cursor_mode = CurNormal;
@@ -858,7 +858,7 @@ buttonpress(struct wl_listener *listener, void *data)
 					if (selmon != grabc->mon)
 						setmon(grabc, selmon, 0);
 					grabc->isfloating = 0;
-					wlr_scene_node_reparent(&grabc->scene->node,
+					nx_scene_node_reparent(&grabc->scene->node,
 							layers[LyrTile]);
 					workspace_drop_tile(selmon->active_ws,
 							grabc, cursor->x);
@@ -878,9 +878,9 @@ buttonpress(struct wl_listener *listener, void *data)
 	 * pointer focus that a button press has occurred */
 	{
 		Client *fc = NULL;
-		struct wlr_surface *fs = seat->pointer_state.focused_surface;
+		struct nx_surface *fs = seat->pointer_state.focused_surface;
 		if (fs)
-			toplevel_from_wlr_surface(fs, &fc, NULL);
+			toplevel_from_nx_surface(fs, &fc, NULL);
 		if (fc && event->state == WL_POINTER_BUTTON_STATE_PRESSED &&
 				(looks_like_game(fc) || is_game_content(fc)))
 			game_log("CURSOR_BUTTON: btn=%u appid='%s' pos=%.0f,%.0f "
@@ -890,27 +890,27 @@ buttonpress(struct wl_listener *listener, void *data)
 				cursor->x, cursor->y,
 				active_constraint ? "active" : "none");
 	}
-	wlr_seat_pointer_notify_button(seat,
+	nx_seat_pointer_notify_button(seat,
 			event->time_msec, event->button, event->state);
 }
 
 void
 chvt(const Arg *arg)
 {
-	wlr_session_change_vt(session, arg->ui);
+	nx_session_change_vt(session, arg->ui);
 }
 
 void
-createkeyboard(struct wlr_keyboard *keyboard)
+createkeyboard(struct nx_keyboard *keyboard)
 {
-	uint32_t locks = kb_group->wlr_group->keyboard.modifiers.locked;
+	uint32_t locks = kb_group->nx_group->keyboard.modifiers.locked;
 
 	/* Set the keymap to match the group keymap */
-	wlr_keyboard_set_keymap(keyboard, kb_group->wlr_group->keyboard.keymap);
-	wlr_keyboard_notify_modifiers(keyboard, 0, 0, locks, 0);
+	nx_keyboard_set_keymap(keyboard, kb_group->nx_group->keyboard.keymap);
+	nx_keyboard_notify_modifiers(keyboard, 0, 0, locks, 0);
 
 	/* Add the new keyboard to the group */
-	wlr_keyboard_group_add_keyboard(kb_group->wlr_group, keyboard);
+	nx_keyboard_group_add_keyboard(kb_group->nx_group, keyboard);
 }
 
 static uint32_t
@@ -925,11 +925,11 @@ numlockmask(struct xkb_keymap *keymap)
 void
 setgroupkeymap(struct xkb_keymap *keymap)
 {
-	struct wlr_keyboard *kb = &kb_group->wlr_group->keyboard;
-	struct wlr_keyboard_modifiers mods = kb->modifiers;
+	struct nx_keyboard *kb = &kb_group->nx_group->keyboard;
+	struct nx_keyboard_modifiers mods = kb->modifiers;
 
-	wlr_keyboard_set_keymap(kb, keymap);
-	wlr_keyboard_notify_modifiers(kb, mods.depressed, mods.latched,
+	nx_keyboard_set_keymap(kb, keymap);
+	nx_keyboard_notify_modifiers(kb, mods.depressed, mods.latched,
 			mods.locked, mods.group);
 }
 
@@ -941,8 +941,8 @@ createkeyboardgroup(void)
 	struct xkb_keymap *keymap;
 	struct xkb_rule_names names;
 
-	group->wlr_group = wlr_keyboard_group_create();
-	group->wlr_group->data = group;
+	group->nx_group = nx_keyboard_group_create();
+	group->nx_group->data = group;
 
 	/* Prepare an XKB keymap and assign it to the keyboard group. */
 	context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
@@ -956,33 +956,29 @@ createkeyboardgroup(void)
 		 * til) — die() ville drept hele sesjonen. Fall tilbake til
 		 * default-keymap; die kun hvis selv den feiler. */
 		struct xkb_rule_names def = {0};
-		wlr_log(WLR_ERROR, "failed to compile configured keymap, "
+		nx_log(NX_ERROR, "failed to compile configured keymap, "
 				"falling back to defaults");
 		if (!(keymap = xkb_keymap_new_from_names(context, &def,
 					XKB_KEYMAP_COMPILE_NO_FLAGS)))
 			die("failed to compile fallback keymap");
 	}
 
-	wlr_keyboard_set_keymap(&group->wlr_group->keyboard, keymap);
-	wlr_keyboard_notify_modifiers(&group->wlr_group->keyboard,
+	nx_keyboard_set_keymap(&group->nx_group->keyboard, keymap);
+	nx_keyboard_notify_modifiers(&group->nx_group->keyboard,
 			0, 0, numlockmask(keymap), 0);
 	xkb_keymap_unref(keymap);
 	xkb_context_unref(context);
 
-	wlr_keyboard_set_repeat_info(&group->wlr_group->keyboard, repeat_rate, repeat_delay);
+	nx_keyboard_set_repeat_info(&group->nx_group->keyboard, repeat_rate, repeat_delay);
 
 	/* Set up listeners for keyboard events */
-	LISTEN(&group->wlr_group->keyboard.events.key, &group->key, keypress);
-	LISTEN(&group->wlr_group->keyboard.events.modifiers, &group->modifiers, keypressmod);
+	LISTEN(&group->nx_group->keyboard.events.key, &group->key, keypress);
+	LISTEN(&group->nx_group->keyboard.events.modifiers, &group->modifiers, keypressmod);
 
 	group->key_repeat_source = wl_event_loop_add_timer(event_loop, keyrepeat, group);
 
-	/* A seat can only have one keyboard, but this is a limitation of the
-	 * Wayland protocol - not wlroots. We assign all connected keyboards to the
-	 * same wlr_keyboard_group, which provides a single wlr_keyboard interface for
-	 * all of them. Set this combined wlr_keyboard as the seat keyboard.
-	 */
-	wlr_seat_set_keyboard(seat, &group->wlr_group->keyboard);
+	/* One group keyboard serves the seat. */
+	nx_seat_set_keyboard(seat, &group->nx_group->keyboard);
 	return group;
 }
 
@@ -1028,57 +1024,57 @@ pointer_devices_prune(struct libinput_device *dev)
 
 static void gesture_swipe_begin(struct wl_listener *listener, void *data)
 {
-	struct wlr_pointer_swipe_begin_event *event = data;
-	wlr_pointer_gestures_v1_send_swipe_begin(pointer_gestures, seat,
+	struct nx_pointer_swipe_begin_event *event = data;
+	nx_pointer_gestures_v1_send_swipe_begin(pointer_gestures, seat,
 		event->time_msec, event->fingers);
 }
 
 static void gesture_swipe_update(struct wl_listener *listener, void *data)
 {
-	struct wlr_pointer_swipe_update_event *event = data;
-	wlr_pointer_gestures_v1_send_swipe_update(pointer_gestures, seat,
+	struct nx_pointer_swipe_update_event *event = data;
+	nx_pointer_gestures_v1_send_swipe_update(pointer_gestures, seat,
 		event->time_msec, event->dx, event->dy);
 }
 
 static void gesture_swipe_end(struct wl_listener *listener, void *data)
 {
-	struct wlr_pointer_swipe_end_event *event = data;
-	wlr_pointer_gestures_v1_send_swipe_end(pointer_gestures, seat,
+	struct nx_pointer_swipe_end_event *event = data;
+	nx_pointer_gestures_v1_send_swipe_end(pointer_gestures, seat,
 		event->time_msec, event->cancelled);
 }
 
 static void gesture_pinch_begin(struct wl_listener *listener, void *data)
 {
-	struct wlr_pointer_pinch_begin_event *event = data;
-	wlr_pointer_gestures_v1_send_pinch_begin(pointer_gestures, seat,
+	struct nx_pointer_pinch_begin_event *event = data;
+	nx_pointer_gestures_v1_send_pinch_begin(pointer_gestures, seat,
 		event->time_msec, event->fingers);
 }
 
 static void gesture_pinch_update(struct wl_listener *listener, void *data)
 {
-	struct wlr_pointer_pinch_update_event *event = data;
-	wlr_pointer_gestures_v1_send_pinch_update(pointer_gestures, seat,
+	struct nx_pointer_pinch_update_event *event = data;
+	nx_pointer_gestures_v1_send_pinch_update(pointer_gestures, seat,
 		event->time_msec, event->dx, event->dy, event->scale, event->rotation);
 }
 
 static void gesture_pinch_end(struct wl_listener *listener, void *data)
 {
-	struct wlr_pointer_pinch_end_event *event = data;
-	wlr_pointer_gestures_v1_send_pinch_end(pointer_gestures, seat,
+	struct nx_pointer_pinch_end_event *event = data;
+	nx_pointer_gestures_v1_send_pinch_end(pointer_gestures, seat,
 		event->time_msec, event->cancelled);
 }
 
 static void gesture_hold_begin(struct wl_listener *listener, void *data)
 {
-	struct wlr_pointer_hold_begin_event *event = data;
-	wlr_pointer_gestures_v1_send_hold_begin(pointer_gestures, seat,
+	struct nx_pointer_hold_begin_event *event = data;
+	nx_pointer_gestures_v1_send_hold_begin(pointer_gestures, seat,
 		event->time_msec, event->fingers);
 }
 
 static void gesture_hold_end(struct wl_listener *listener, void *data)
 {
-	struct wlr_pointer_hold_end_event *event = data;
-	wlr_pointer_gestures_v1_send_hold_end(pointer_gestures, seat,
+	struct nx_pointer_hold_end_event *event = data;
+	nx_pointer_gestures_v1_send_hold_end(pointer_gestures, seat,
 		event->time_msec, event->cancelled);
 }
 
@@ -1099,11 +1095,11 @@ static void gesture_listeners_destroy(struct wl_listener *listener, void *data)
 }
 
 void
-createpointer(struct wlr_pointer *pointer)
+createpointer(struct nx_pointer *pointer)
 {
 	struct libinput_device *device = NULL;
-	if (wlr_input_device_is_libinput(&pointer->base)
-			&& (device = wlr_libinput_get_device_handle(&pointer->base))) {
+	if (nx_input_device_is_libinput(&pointer->base)
+			&& (device = nx_libinput_get_device_handle(&pointer->base))) {
 
 		if (libinput_device_config_tap_get_finger_count(device)) {
 			libinput_device_config_tap_set_enabled(device, tap_to_click);
@@ -1147,7 +1143,7 @@ createpointer(struct wlr_pointer *pointer)
 		}
 	}
 
-	wlr_cursor_attach_input_device(cursor, &pointer->base);
+	nx_cursor_attach_input_device(cursor, &pointer->base);
 
 	/* Attach gesture listeners for touchpad swipe/pinch/hold forwarding */
 	{
@@ -1177,12 +1173,12 @@ createpointer(struct wlr_pointer *pointer)
 void
 newkbshortcutsinhibitor(struct wl_listener *listener, void *data)
 {
-	struct wlr_keyboard_shortcuts_inhibitor_v1 *inhibitor = data;
+	struct nx_keyboard_shortcuts_inhibitor_v1 *inhibitor = data;
 
 	/* Always honor the inhibitor — fullscreen games, remote desktop, VMs
 	 * need to capture compositor shortcuts like Alt+Tab. The inhibitor is
 	 * only active while the requesting surface has keyboard focus. */
-	wlr_keyboard_shortcuts_inhibitor_v1_activate(inhibitor);
+	nx_keyboard_shortcuts_inhibitor_v1_activate(inhibitor);
 }
 
 void
@@ -1192,7 +1188,7 @@ cursorwarptohint(void)
 	double sx = active_constraint->current.cursor_hint.x;
 	double sy = active_constraint->current.cursor_hint.y;
 
-	toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
+	toplevel_from_nx_surface(active_constraint->surface, &c, NULL);
 	/* Warped to another monitor on purpose: the hint would yank the
 	 * cursor straight back into the game. */
 	if (c && c->mon && xytomon(cursor->x, cursor->y) != c->mon)
@@ -1200,16 +1196,16 @@ cursorwarptohint(void)
 	if (c && active_constraint->current.cursor_hint.enabled) {
 		double off_x = c->scene_surface ? c->scene_surface->node.x : (int)c->bw;
 		double off_y = c->scene_surface ? c->scene_surface->node.y : (int)c->bw;
-		wlr_cursor_warp(cursor, NULL, sx + c->geom.x + off_x, sy + c->geom.y + off_y);
-		wlr_seat_pointer_warp(active_constraint->seat, sx, sy);
+		nx_cursor_warp(cursor, NULL, sx + c->geom.x + off_x, sy + c->geom.y + off_y);
+		nx_seat_pointer_warp(active_constraint->seat, sx, sy);
 	}
 }
 
 void
 checkconstraint(void)
 {
-	struct wlr_pointer_constraint_v1 *constraint;
-	struct wlr_surface *focused = seat->pointer_state.focused_surface;
+	struct nx_pointer_constraint_v1 *constraint;
+	struct nx_surface *focused = seat->pointer_state.focused_surface;
 
 	/* Already tracking the right constraint */
 	if (active_constraint && active_constraint->surface == focused)
@@ -1218,14 +1214,14 @@ checkconstraint(void)
 	/* Deactivate stale constraint (surface lost focus) */
 	if (active_constraint) {
 		Client *dc = NULL;
-		toplevel_from_wlr_surface(active_constraint->surface, &dc, NULL);
+		toplevel_from_nx_surface(active_constraint->surface, &dc, NULL);
 		if (dc && (looks_like_game(dc) || is_game_content(dc)))
 			game_log("CURSOR_CONSTRAINT: DEACTIVATE type=%s appid='%s'",
-				active_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED
+				active_constraint->type == NX_POINTER_CONSTRAINT_V1_LOCKED
 					? "lock" : "confine",
 				client_get_appid(dc) ? client_get_appid(dc) : "(null)");
 		cursorwarptohint();
-		wlr_pointer_constraint_v1_send_deactivated(active_constraint);
+		nx_pointer_constraint_v1_send_deactivated(active_constraint);
 		active_constraint = NULL;
 	}
 
@@ -1234,12 +1230,12 @@ checkconstraint(void)
 		wl_list_for_each(constraint, &pointer_constraints->constraints, link) {
 			if (constraint->surface == focused) {
 				active_constraint = constraint;
-				wlr_pointer_constraint_v1_send_activated(constraint);
+				nx_pointer_constraint_v1_send_activated(constraint);
 				Client *ac = NULL;
-				toplevel_from_wlr_surface(focused, &ac, NULL);
+				toplevel_from_nx_surface(focused, &ac, NULL);
 				if (ac && (looks_like_game(ac) || is_game_content(ac)))
 					game_log("CURSOR_CONSTRAINT: ACTIVATE type=%s appid='%s'",
-						constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED
+						constraint->type == NX_POINTER_CONSTRAINT_V1_LOCKED
 							? "lock" : "confine",
 						client_get_appid(ac) ? client_get_appid(ac) : "(null)");
 				return;
@@ -1251,10 +1247,10 @@ checkconstraint(void)
 void
 createpointerconstraint(struct wl_listener *listener, void *data)
 {
-	struct wlr_pointer_constraint_v1 *wlr_constraint = data;
+	struct nx_pointer_constraint_v1 *nx_constraint = data;
 	PointerConstraint *pointer_constraint = ecalloc(1, sizeof(*pointer_constraint));
-	pointer_constraint->constraint = wlr_constraint;
-	LISTEN(&wlr_constraint->events.destroy,
+	pointer_constraint->constraint = nx_constraint;
+	LISTEN(&nx_constraint->events.destroy,
 			&pointer_constraint->destroy, destroypointerconstraint);
 
 	/*
@@ -1265,12 +1261,12 @@ createpointerconstraint(struct wl_listener *listener, void *data)
 	 * focusclient/motionnotify already ran.
 	 */
 	Client *c = NULL;
-	toplevel_from_wlr_surface(wlr_constraint->surface, &c, NULL);
+	toplevel_from_nx_surface(nx_constraint->surface, &c, NULL);
 
 	if (c && (looks_like_game(c) || is_game_content(c)))
 		game_log("CURSOR_CONSTRAINT: CREATE type=%s appid='%s' "
 			"fullscreen=%d late_activate=%d",
-			wlr_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED
+			nx_constraint->type == NX_POINTER_CONSTRAINT_V1_LOCKED
 				? "lock" : "confine",
 			client_get_appid(c) ? client_get_appid(c) : "(null)",
 			c->isfullscreen,
@@ -1298,7 +1294,7 @@ cursorframe(struct wl_listener *listener, void *data)
 	 * multiple events together. For instance, two axis events may happen at the
 	 * same time, in which case a frame event won't be sent in between. */
 	/* Notify the client with pointer focus of the frame event. */
-	wlr_seat_pointer_notify_frame(seat);
+	nx_seat_pointer_notify_frame(seat);
 }
 
 void
@@ -1333,7 +1329,7 @@ destroykeyboardgroup(struct wl_listener *listener, void *data)
 	wl_list_remove(&group->key.link);
 	wl_list_remove(&group->modifiers.link);
 	wl_list_remove(&group->destroy.link);
-	wlr_keyboard_group_destroy(group->wlr_group);
+	nx_keyboard_group_destroy(group->nx_group);
 	free(group);
 }
 
@@ -1342,7 +1338,7 @@ destroykeyboardgroup(struct wl_listener *listener, void *data)
 static void
 tablettoolsetcursor(struct wl_listener *listener, void *data)
 {
-	struct wlr_tablet_v2_event_cursor *event = data;
+	struct nx_tablet_v2_event_cursor *event = data;
 	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
 		return;
 	if (event->seat_client == seat->pointer_state.focused_client)
@@ -1350,13 +1346,13 @@ tablettoolsetcursor(struct wl_listener *listener, void *data)
 				event->hotspot_x, event->hotspot_y);
 }
 
-static struct wlr_tablet_v2_tablet_tool *
-get_or_create_tool(struct wlr_tablet_tool *tool)
+static struct nx_tablet_v2_tablet_tool *
+get_or_create_tool(struct nx_tablet_tool *tool)
 {
-	struct wlr_tablet_v2_tablet_tool *v2 = tool->data;
+	struct nx_tablet_v2_tablet_tool *v2 = tool->data;
 	if (v2)
 		return v2;
-	v2 = wlr_tablet_tool_create(tablet_v2_mgr, seat, tool);
+	v2 = nx_tablet_tool_create(tablet_v2_mgr, seat, tool);
 	if (!v2)
 		return NULL;
 	tool->data = v2;
@@ -1367,102 +1363,100 @@ get_or_create_tool(struct wlr_tablet_tool *tool)
 static void
 tabletaxis(struct wl_listener *listener, void *data)
 {
-	struct wlr_tablet_tool_axis_event *ev = data;
-	struct wlr_tablet_v2_tablet *v2tab = ev->tablet->data;
-	struct wlr_tablet_v2_tablet_tool *v2tool = get_or_create_tool(ev->tool);
+	struct nx_tablet_tool_axis_event *ev = data;
+	struct nx_tablet_v2_tablet *v2tab = ev->tablet->data;
+	struct nx_tablet_v2_tablet_tool *v2tool = get_or_create_tool(ev->tool);
 	if (!v2tab || !v2tool)
 		return;
 
-	if (ev->updated_axes & (WLR_TABLET_TOOL_AXIS_X | WLR_TABLET_TOOL_AXIS_Y))
-		wlr_cursor_warp_absolute(cursor, &ev->tablet->base,
-				(ev->updated_axes & WLR_TABLET_TOOL_AXIS_X) ? ev->x : NAN,
-				(ev->updated_axes & WLR_TABLET_TOOL_AXIS_Y) ? ev->y : NAN);
+	if (ev->updated_axes & (NX_TABLET_TOOL_AXIS_X | NX_TABLET_TOOL_AXIS_Y))
+		nx_cursor_warp_absolute(cursor, &ev->tablet->base,
+				(ev->updated_axes & NX_TABLET_TOOL_AXIS_X) ? ev->x : NAN,
+				(ev->updated_axes & NX_TABLET_TOOL_AXIS_Y) ? ev->y : NAN);
 
-	struct wlr_surface *surface = NULL;
+	struct nx_surface *surface = NULL;
 	Client *c = NULL;
 	double sx, sy;
 	xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
 
 	if (surface && surface != v2tool->focused_surface) {
-		wlr_send_tablet_v2_tablet_tool_proximity_out(v2tool);
-		wlr_send_tablet_v2_tablet_tool_proximity_in(v2tool, v2tab, surface);
+		nx_send_tablet_v2_tablet_tool_proximity_out(v2tool);
+		nx_send_tablet_v2_tablet_tool_proximity_in(v2tool, v2tab, surface);
 	}
 
 	if (surface) {
-		wlr_send_tablet_v2_tablet_tool_motion(v2tool, sx, sy);
+		nx_send_tablet_v2_tablet_tool_motion(v2tool, sx, sy);
 
-		if (ev->updated_axes & WLR_TABLET_TOOL_AXIS_PRESSURE)
-			wlr_send_tablet_v2_tablet_tool_pressure(v2tool, ev->pressure);
-		if (ev->updated_axes & WLR_TABLET_TOOL_AXIS_DISTANCE)
-			wlr_send_tablet_v2_tablet_tool_distance(v2tool, ev->distance);
-		if (ev->updated_axes & (WLR_TABLET_TOOL_AXIS_TILT_X | WLR_TABLET_TOOL_AXIS_TILT_Y))
-			wlr_send_tablet_v2_tablet_tool_tilt(v2tool, ev->tilt_x, ev->tilt_y);
-		if (ev->updated_axes & WLR_TABLET_TOOL_AXIS_ROTATION)
-			wlr_send_tablet_v2_tablet_tool_rotation(v2tool, ev->rotation);
-		if (ev->updated_axes & WLR_TABLET_TOOL_AXIS_SLIDER)
-			wlr_send_tablet_v2_tablet_tool_slider(v2tool, ev->slider);
-		if (ev->updated_axes & WLR_TABLET_TOOL_AXIS_WHEEL)
-			wlr_send_tablet_v2_tablet_tool_wheel(v2tool, ev->wheel_delta, 0);
+		if (ev->updated_axes & NX_TABLET_TOOL_AXIS_PRESSURE)
+			nx_send_tablet_v2_tablet_tool_pressure(v2tool, ev->pressure);
+		if (ev->updated_axes & NX_TABLET_TOOL_AXIS_DISTANCE)
+			nx_send_tablet_v2_tablet_tool_distance(v2tool, ev->distance);
+		if (ev->updated_axes & (NX_TABLET_TOOL_AXIS_TILT_X | NX_TABLET_TOOL_AXIS_TILT_Y))
+			nx_send_tablet_v2_tablet_tool_tilt(v2tool, ev->tilt_x, ev->tilt_y);
+		if (ev->updated_axes & NX_TABLET_TOOL_AXIS_ROTATION)
+			nx_send_tablet_v2_tablet_tool_rotation(v2tool, ev->rotation);
+		if (ev->updated_axes & NX_TABLET_TOOL_AXIS_SLIDER)
+			nx_send_tablet_v2_tablet_tool_slider(v2tool, ev->slider);
+		if (ev->updated_axes & NX_TABLET_TOOL_AXIS_WHEEL)
+			nx_send_tablet_v2_tablet_tool_wheel(v2tool, ev->wheel_delta, 0);
 	}
 }
 
 static void
 tabletproximity(struct wl_listener *listener, void *data)
 {
-	struct wlr_tablet_tool_proximity_event *ev = data;
-	struct wlr_tablet_v2_tablet *v2tab = ev->tablet->data;
-	struct wlr_tablet_v2_tablet_tool *v2tool = get_or_create_tool(ev->tool);
+	struct nx_tablet_tool_proximity_event *ev = data;
+	struct nx_tablet_v2_tablet *v2tab = ev->tablet->data;
+	struct nx_tablet_v2_tablet_tool *v2tool = get_or_create_tool(ev->tool);
 	if (!v2tab || !v2tool)
 		return;
 
-	if (ev->state == WLR_TABLET_TOOL_PROXIMITY_IN) {
-		wlr_cursor_warp_absolute(cursor, &ev->tablet->base, ev->x, ev->y);
+	if (ev->state == NX_TABLET_TOOL_PROXIMITY_IN) {
+		nx_cursor_warp_absolute(cursor, &ev->tablet->base, ev->x, ev->y);
 
-		struct wlr_surface *surface = NULL;
+		struct nx_surface *surface = NULL;
 		double sx, sy;
 		xytonode(cursor->x, cursor->y, &surface, NULL, NULL, &sx, &sy);
 
 		if (surface)
-			wlr_send_tablet_v2_tablet_tool_proximity_in(v2tool, v2tab, surface);
+			nx_send_tablet_v2_tablet_tool_proximity_in(v2tool, v2tab, surface);
 	} else {
-		wlr_send_tablet_v2_tablet_tool_proximity_out(v2tool);
+		nx_send_tablet_v2_tablet_tool_proximity_out(v2tool);
 	}
 }
 
 static void
 tablettip(struct wl_listener *listener, void *data)
 {
-	struct wlr_tablet_tool_tip_event *ev = data;
-	struct wlr_tablet_v2_tablet_tool *v2tool = get_or_create_tool(ev->tool);
+	struct nx_tablet_tool_tip_event *ev = data;
+	struct nx_tablet_v2_tablet_tool *v2tool = get_or_create_tool(ev->tool);
 	if (!v2tool)
 		return;
 
-	if (ev->state == WLR_TABLET_TOOL_TIP_DOWN) {
-		wlr_send_tablet_v2_tablet_tool_down(v2tool);
-		wlr_tablet_tool_v2_start_implicit_grab(v2tool);
-	} else {
-		wlr_send_tablet_v2_tablet_tool_up(v2tool);
-	}
+	if (ev->state == NX_TABLET_TOOL_TIP_DOWN)
+		nx_send_tablet_v2_tablet_tool_down(v2tool);
+	else
+		nx_send_tablet_v2_tablet_tool_up(v2tool);
 }
 
 static void
 tabletbutton(struct wl_listener *listener, void *data)
 {
-	struct wlr_tablet_tool_button_event *ev = data;
-	struct wlr_tablet_v2_tablet_tool *v2tool = get_or_create_tool(ev->tool);
+	struct nx_tablet_tool_button_event *ev = data;
+	struct nx_tablet_v2_tablet_tool *v2tool = get_or_create_tool(ev->tool);
 	if (!v2tool)
 		return;
 
-	wlr_send_tablet_v2_tablet_tool_button(v2tool, ev->button,
+	nx_send_tablet_v2_tablet_tool_button(v2tool, ev->button,
 			(enum zwp_tablet_pad_v2_button_state)ev->state);
 }
 
 static void
 tabletpadbutton(struct wl_listener *listener, void *data)
 {
-	struct wlr_tablet_pad_button_event *ev = data;
+	struct nx_tablet_pad_button_event *ev = data;
 	TabletPad *tp = wl_container_of(listener, tp, button);
-	wlr_send_tablet_v2_tablet_pad_button(tp->v2, ev->button,
+	nx_send_tablet_v2_tablet_pad_button(tp->v2, ev->button,
 			ev->time_msec,
 			(enum zwp_tablet_pad_v2_button_state)ev->state);
 }
@@ -1470,20 +1464,20 @@ tabletpadbutton(struct wl_listener *listener, void *data)
 static void
 tabletpadring(struct wl_listener *listener, void *data)
 {
-	struct wlr_tablet_pad_ring_event *ev = data;
+	struct nx_tablet_pad_ring_event *ev = data;
 	TabletPad *tp = wl_container_of(listener, tp, ring);
-	wlr_send_tablet_v2_tablet_pad_ring(tp->v2, ev->ring, ev->position,
-			ev->source == WLR_TABLET_PAD_RING_SOURCE_FINGER,
+	nx_send_tablet_v2_tablet_pad_ring(tp->v2, ev->ring, ev->position,
+			ev->source == NX_TABLET_PAD_RING_SOURCE_FINGER,
 			ev->time_msec);
 }
 
 static void
 tabletpadstrip(struct wl_listener *listener, void *data)
 {
-	struct wlr_tablet_pad_strip_event *ev = data;
+	struct nx_tablet_pad_strip_event *ev = data;
 	TabletPad *tp = wl_container_of(listener, tp, strip);
-	wlr_send_tablet_v2_tablet_pad_strip(tp->v2, ev->strip, ev->position,
-			ev->source == WLR_TABLET_PAD_STRIP_SOURCE_FINGER,
+	nx_send_tablet_v2_tablet_pad_strip(tp->v2, ev->strip, ev->position,
+			ev->source == NX_TABLET_PAD_STRIP_SOURCE_FINGER,
 			ev->time_msec);
 }
 
@@ -1499,14 +1493,14 @@ tabletpaddestroy(struct wl_listener *listener, void *data)
 }
 
 static void
-createtablet(struct wlr_tablet *tablet)
+createtablet(struct nx_tablet *tablet)
 {
-	struct wlr_tablet_v2_tablet *v2 =
-		wlr_tablet_create(tablet_v2_mgr, seat, &tablet->base);
+	struct nx_tablet_v2_tablet *v2 =
+		nx_tablet_create(tablet_v2_mgr, seat, &tablet->base);
 	if (!v2)
 		return;
 	tablet->data = v2;
-	wlr_cursor_attach_input_device(cursor, &tablet->base);
+	nx_cursor_attach_input_device(cursor, &tablet->base);
 	LISTEN_STATIC(&tablet->events.axis, tabletaxis);
 	LISTEN_STATIC(&tablet->events.proximity, tabletproximity);
 	LISTEN_STATIC(&tablet->events.tip, tablettip);
@@ -1514,10 +1508,10 @@ createtablet(struct wlr_tablet *tablet)
 }
 
 static void
-createtabletpad(struct wlr_tablet_pad *pad)
+createtabletpad(struct nx_tablet_pad *pad)
 {
-	struct wlr_tablet_v2_tablet_pad *v2 =
-		wlr_tablet_pad_create(tablet_v2_mgr, seat, &pad->base);
+	struct nx_tablet_v2_tablet_pad *v2 =
+		nx_tablet_pad_create(tablet_v2_mgr, seat, &pad->base);
 	if (!v2)
 		return;
 	TabletPad *tp = ecalloc(1, sizeof(*tp));
@@ -1534,37 +1528,37 @@ inputdevice(struct wl_listener *listener, void *data)
 {
 	/* This event is raised by the backend when a new input device becomes
 	 * available. */
-	struct wlr_input_device *device = data;
+	struct nx_input_device *device = data;
 	uint32_t caps;
 
 	switch (device->type) {
-	case WLR_INPUT_DEVICE_KEYBOARD:
-		createkeyboard(wlr_keyboard_from_input_device(device));
+	case NX_INPUT_DEVICE_KEYBOARD:
+		createkeyboard(nx_keyboard_from_input_device(device));
 		break;
-	case WLR_INPUT_DEVICE_POINTER:
-		createpointer(wlr_pointer_from_input_device(device));
+	case NX_INPUT_DEVICE_POINTER:
+		createpointer(nx_pointer_from_input_device(device));
 		break;
-	case WLR_INPUT_DEVICE_TABLET:
-		createtablet(wlr_tablet_from_input_device(device));
+	case NX_INPUT_DEVICE_TABLET:
+		createtablet(nx_tablet_from_input_device(device));
 		break;
-	case WLR_INPUT_DEVICE_TABLET_PAD:
-		createtabletpad(wlr_tablet_pad_from_input_device(device));
+	case NX_INPUT_DEVICE_TABLET_PAD:
+		createtabletpad(nx_tablet_pad_from_input_device(device));
 		break;
-	case WLR_INPUT_DEVICE_SWITCH:
+	case NX_INPUT_DEVICE_SWITCH:
 		presence_watch_switch(device);
 		break;
 	default:
 		break;
 	}
 
-	/* We need to let the wlr_seat know what our capabilities are, which is
+	/* We need to let the nx_seat know what our capabilities are, which is
 	 * communiciated to the client. In dwl we always have a cursor, even if
 	 * there are no pointer devices, so we always include that capability. */
 	/* TODO do we actually require a cursor? */
 	caps = WL_SEAT_CAPABILITY_POINTER;
-	if (!wl_list_empty(&kb_group->wlr_group->devices))
+	if (!wl_list_empty(&kb_group->nx_group->devices))
 		caps |= WL_SEAT_CAPABILITY_KEYBOARD;
-	wlr_seat_set_capabilities(seat, caps);
+	nx_seat_set_capabilities(seat, caps);
 }
 
 int
@@ -1608,7 +1602,7 @@ binding_repeats(void (*func)(const Arg *))
 static int
 shortcuts_are_inhibited(void)
 {
-	struct wlr_keyboard_shortcuts_inhibitor_v1 *inhibitor;
+	struct nx_keyboard_shortcuts_inhibitor_v1 *inhibitor;
 	wl_list_for_each(inhibitor, &kb_shortcuts_inhibit_mgr->inhibitors, link) {
 		if (inhibitor->active &&
 		    inhibitor->surface == seat->keyboard_state.focused_surface)
@@ -1625,7 +1619,7 @@ shortcuts_are_inhibited(void)
 static int
 refocus_lost_keyboard(void)
 {
-	struct wlr_surface *surface = NULL, *kfocus;
+	struct nx_surface *surface = NULL, *kfocus;
 	Client *c = NULL, *kc = NULL;
 	LayerSurface *kl = NULL;
 	double sx, sy;
@@ -1635,7 +1629,7 @@ refocus_lost_keyboard(void)
 		return 0;
 
 	kfocus = seat->keyboard_state.focused_surface;
-	if (kfocus && toplevel_from_wlr_surface(kfocus, &kc, &kl) == LayerShell)
+	if (kfocus && toplevel_from_nx_surface(kfocus, &kc, &kl) == LayerShell)
 		return 0;
 	if (kc && client_is_unmanaged(kc))
 		return 0;
@@ -1662,7 +1656,7 @@ keypress(struct wl_listener *listener, void *data)
 	int i;
 	/* This event is raised when a key is pressed or released. */
 	KeyboardGroup *group = wl_container_of(listener, group, key);
-	struct wlr_keyboard_key_event *event = data;
+	struct nx_keyboard_key_event *event = data;
 
 	/*
 	 * Track input timestamp for latency measurement.
@@ -1682,18 +1676,18 @@ keypress(struct wl_listener *listener, void *data)
 	/* Get a list of keysyms based on the keymap for this keyboard */
 	const xkb_keysym_t *syms;
 	int nsyms = xkb_state_key_get_syms(
-			group->wlr_group->keyboard.xkb_state, keycode, &syms);
+			group->nx_group->keyboard.xkb_state, keycode, &syms);
 	/* Also get the base keysym (level 0, no modifiers applied) for shifted bindings */
-	struct xkb_keymap *keymap = group->wlr_group->keyboard.keymap;
+	struct xkb_keymap *keymap = group->nx_group->keyboard.keymap;
 	xkb_layout_index_t layout = xkb_state_key_get_layout(
-			group->wlr_group->keyboard.xkb_state, keycode);
+			group->nx_group->keyboard.xkb_state, keycode);
 	const xkb_keysym_t *level0_syms;
 	int nlevel0 = xkb_keymap_key_get_syms_by_level(keymap, keycode, layout, 0, &level0_syms);
 
 	int handled = 0;
-	uint32_t mods = wlr_keyboard_get_modifiers(&group->wlr_group->keyboard);
+	uint32_t mods = nx_keyboard_get_modifiers(&group->nx_group->keyboard);
 
-	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
+	nx_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
 	/* Push-to-talk fires on both press and release, before the lock and
 	 * shortcut-inhibitor checks so the bind works inside fullscreen
@@ -1715,8 +1709,8 @@ keypress(struct wl_listener *listener, void *data)
 	/* VT switching using raw evdev keycodes — always works regardless of
 	 * XKB keymap, screen lock state, or active popups/overlays. */
 	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED && session &&
-	    (mods & (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT)) ==
-	    (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT)) {
+	    (mods & (NX_MODIFIER_CTRL | NX_MODIFIER_ALT)) ==
+	    (NX_MODIFIER_CTRL | NX_MODIFIER_ALT)) {
 		unsigned int vt = 0;
 		if (event->keycode >= KEY_F1 && event->keycode <= KEY_F10)
 			vt = event->keycode - KEY_F1 + 1;
@@ -1725,7 +1719,7 @@ keypress(struct wl_listener *listener, void *data)
 		else if (event->keycode == KEY_F12)
 			vt = 12;
 		if (vt) {
-			wlr_session_change_vt(session, vt);
+			nx_session_change_vt(session, vt);
 			return;
 		}
 	}
@@ -1741,7 +1735,7 @@ keypress(struct wl_listener *listener, void *data)
 			char utf8[8] = "";
 
 			xkb_state_key_get_utf8(
-					group->wlr_group->keyboard.xkb_state,
+					group->nx_group->keyboard.xkb_state,
 					keycode, utf8, sizeof(utf8));
 			for (i = 0; i < nsyms; i++)
 				if (text_entry_key(syms[i], utf8))
@@ -1781,14 +1775,14 @@ keypress(struct wl_listener *listener, void *data)
 	{
 		int allow_repeat = 0;
 		if (handled && binding_repeats(last_keybinding_func)
-				&& group->wlr_group->keyboard.repeat_info.delay > 0)
+				&& group->nx_group->keyboard.repeat_info.delay > 0)
 			allow_repeat = 1;
 		if (allow_repeat) {
 			group->mods = mods;
 			group->keysyms = syms;
 			group->nsyms = nsyms;
 			wl_event_source_timer_update(group->key_repeat_source,
-					group->wlr_group->keyboard.repeat_info.delay);
+					group->nx_group->keyboard.repeat_info.delay);
 		} else {
 			group->nsyms = 0;
 			wl_event_source_timer_update(group->key_repeat_source, 0);
@@ -1804,14 +1798,14 @@ keypress(struct wl_listener *listener, void *data)
 	 * X11 client like Citrix wfica passes LeftWin straight into the remote
 	 * session and Windows pops the start menu on every Mod press. */
 	for (i = 0; i < nsyms; i++) {
-		if ((modkey == WLR_MODIFIER_LOGO &&
+		if ((modkey == NX_MODIFIER_LOGO &&
 		     (syms[i] == XKB_KEY_Super_L || syms[i] == XKB_KEY_Super_R)) ||
-		    (modkey == WLR_MODIFIER_ALT &&
+		    (modkey == NX_MODIFIER_ALT &&
 		     (syms[i] == XKB_KEY_Alt_L || syms[i] == XKB_KEY_Alt_R)))
 			return;
 	}
 
-	wlr_seat_set_keyboard(seat, &group->wlr_group->keyboard);
+	nx_seat_set_keyboard(seat, &group->nx_group->keyboard);
 
 	/* The enter after a refocus already carries this key as held, so
 	 * forwarding it too would double the press. */
@@ -1821,8 +1815,8 @@ keypress(struct wl_listener *listener, void *data)
 
 	/* Pass unhandled keycodes along to the client. */
 	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-		struct wlr_surface *focused = seat->keyboard_state.focused_surface;
-		wlr_log(WLR_DEBUG, "keypress: forwarding key %d to client, focused_surface=%p",
+		struct nx_surface *focused = seat->keyboard_state.focused_surface;
+		nx_log(NX_DEBUG, "keypress: forwarding key %d to client, focused_surface=%p",
 			event->keycode, (void*)focused);
 	}
 	/* Count keystrokes handed to the focused window (see the STALE
@@ -1831,7 +1825,7 @@ keypress(struct wl_listener *listener, void *data)
 	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED && selmon)
 		selmon->diag_focus_keys++;
 
-	wlr_seat_keyboard_notify_key(seat, event->time_msec,
+	nx_seat_keyboard_notify_key(seat, event->time_msec,
 			event->keycode, event->state);
 }
 
@@ -1839,11 +1833,11 @@ void
 keypressmod(struct wl_listener *listener, void *data)
 {
 	KeyboardGroup *group = wl_container_of(listener, group, modifiers);
-	struct wlr_keyboard_modifiers mods =
-		client_modifiers(&group->wlr_group->keyboard);
+	struct nx_keyboard_modifiers mods =
+		client_modifiers(&group->nx_group->keyboard);
 
-	wlr_seat_set_keyboard(seat, &group->wlr_group->keyboard);
-	wlr_seat_keyboard_notify_modifiers(seat, &mods);
+	nx_seat_set_keyboard(seat, &group->nx_group->keyboard);
+	nx_seat_keyboard_notify_modifiers(seat, &mods);
 }
 
 int
@@ -1851,11 +1845,11 @@ keyrepeat(void *data)
 {
 	KeyboardGroup *group = data;
 	int i;
-	if (!group->nsyms || group->wlr_group->keyboard.repeat_info.rate <= 0)
+	if (!group->nsyms || group->nx_group->keyboard.repeat_info.rate <= 0)
 		return 0;
 
 	wl_event_source_timer_update(group->key_repeat_source,
-			1000 / group->wlr_group->keyboard.repeat_info.rate);
+			1000 / group->nx_group->keyboard.repeat_info.rate);
 
 	for (i = 0; i < group->nsyms; i++)
 		keybinding(group->mods, group->keysyms[i]);
@@ -1866,21 +1860,17 @@ keyrepeat(void *data)
 void
 motionabsolute(struct wl_listener *listener, void *data)
 {
-	/* This event is forwarded by the cursor when a pointer emits an _absolute_
-	 * motion event, from 0..1 on each axis. This happens, for example, when
-	 * wlroots is running under a Wayland window rather than KMS+DRM, and you
-	 * move the mouse over the window. You could enter the window from any edge,
-	 * so we have to warp the mouse there. Also, some hardware emits these events. */
-	struct wlr_pointer_motion_absolute_event *event = data;
+	/* Absolute 0..1 motion, e.g. nested sessions. */
+	struct nx_pointer_motion_absolute_event *event = data;
 	double lx, ly, dx, dy;
 
 	if (dwt_suppress(&event->pointer->base))
 		return;
 
 	if (!event->time_msec) /* this is 0 with virtual pointers */
-		wlr_cursor_warp_absolute(cursor, &event->pointer->base, event->x, event->y);
+		nx_cursor_warp_absolute(cursor, &event->pointer->base, event->x, event->y);
 
-	wlr_cursor_absolute_to_layout_coords(cursor, &event->pointer->base, event->x, event->y, &lx, &ly);
+	nx_cursor_absolute_to_layout_coords(cursor, &event->pointer->base, event->x, event->y, &lx, &ly);
 	dx = lx - cursor->x;
 	dy = ly - cursor->y;
 	last_pointer_motion_ms = monotonic_msec();
@@ -1888,11 +1878,11 @@ motionabsolute(struct wl_listener *listener, void *data)
 }
 
 int
-subtree_bounds(LayoutNode *node, Monitor *m, struct wlr_box *out)
+subtree_bounds(LayoutNode *node, Monitor *m, struct nx_box *out)
 {
-	struct wlr_box lbox, rbox;
+	struct nx_box lbox, rbox;
 	int hasl, hasr, right, bottom;
-	struct wlr_box tmp;
+	struct nx_box tmp;
 
 	if (!out)
 		out = &tmp;
@@ -1932,12 +1922,12 @@ subtree_bounds(LayoutNode *node, Monitor *m, struct wlr_box *out)
 
 LayoutNode *
 closest_split_node(LayoutNode *client_node, int want_vert, double pointer,
-		double *out_ratio, struct wlr_box *out_box, double *out_dist)
+		double *out_ratio, struct nx_box *out_box, double *out_dist)
 {
 	LayoutNode *n = client_node ? client_node->split_node : NULL;
 	LayoutNode *best = NULL;
 	double best_dist = HUGE_VAL;
-	struct wlr_box box;
+	struct nx_box box;
 
 	while (n) {
 		if (!n->is_client_node && n->is_split_vertically == (unsigned int)want_vert) {
@@ -2086,7 +2076,7 @@ pick_resize_handle(const Client *c, double cx, double cy)
  *      behaviour for corner diagonals.
  *
  * Returns 1 when the cursor was warped directly — caller must skip
- * wlr_cursor_move(). Returns 0 to let the default motion path handle it.
+ * nx_cursor_move(). Returns 0 to let the default motion path handle it.
  */
 static int
 cursor_snap_across_dead_zone(double dx, double dy)
@@ -2100,7 +2090,7 @@ cursor_snap_across_dead_zone(double dx, double dy)
 	Monitor *cur_mon = xytomon(cursor->x, cursor->y);
 	if (!cur_mon)
 		return 0;
-	struct wlr_box *sb = &cur_mon->m;
+	struct nx_box *sb = &cur_mon->m;
 	if (sb->width <= 0 || sb->height <= 0)
 		return 0;
 
@@ -2121,10 +2111,10 @@ cursor_snap_across_dead_zone(double dx, double dy)
 		double best_gap = 1e30;
 		Monitor *m;
 		wl_list_for_each(m, &mons, link) {
-			if (!m->wlr_output->enabled || m->is_mirror || m->is_virtual
+			if (!m->nx_output->enabled || m->is_mirror || m->is_virtual
 					|| m == cur_mon)
 				continue;
-			struct wlr_box *db = &m->m;
+			struct nx_box *db = &m->m;
 			if (db->width <= 0 || db->height <= 0)
 				continue;
 			double gap;
@@ -2155,7 +2145,7 @@ cursor_snap_across_dead_zone(double dx, double dy)
 			if (new_x >= best->m.x + best->m.width)
 				new_x = best->m.x + best->m.width - 1;
 
-			wlr_cursor_warp(cursor, NULL, new_x, new_y);
+			nx_cursor_warp(cursor, NULL, new_x, new_y);
 			return 1;
 		}
 		/* No monitor in horizontal direction — fall through. */
@@ -2170,10 +2160,10 @@ cursor_snap_across_dead_zone(double dx, double dy)
 		double best_gap = 1e30;
 		Monitor *m;
 		wl_list_for_each(m, &mons, link) {
-			if (!m->wlr_output->enabled || m->is_mirror || m->is_virtual
+			if (!m->nx_output->enabled || m->is_mirror || m->is_virtual
 					|| m == cur_mon)
 				continue;
-			struct wlr_box *db = &m->m;
+			struct nx_box *db = &m->m;
 			if (db->width <= 0 || db->height <= 0)
 				continue;
 			double gap;
@@ -2202,7 +2192,7 @@ cursor_snap_across_dead_zone(double dx, double dy)
 			double cx = tx;
 			if (cx < sb->x) cx = sb->x;
 			if (cx >= sb->x + sb->width) cx = sb->x + sb->width - 1;
-			wlr_cursor_warp(cursor, NULL, cx, cy);
+			nx_cursor_warp(cursor, NULL, cx, cy);
 			return 1;
 		}
 
@@ -2220,14 +2210,14 @@ cursor_snap_across_dead_zone(double dx, double dy)
 		if (new_y >= best->m.y + best->m.height)
 			new_y = best->m.y + best->m.height - 1;
 
-		wlr_cursor_warp(cursor, NULL, new_x, new_y);
+		nx_cursor_warp(cursor, NULL, new_x, new_y);
 		return 1;
 	}
 
 	/* CASE 3: dead-zone fallback. Target doesn't land on any output (corner
 	 * diagonal past a gap). Snap to the nearest valid edge of a neighbouring
 	 * monitor in the dominant direction of motion. */
-	if (wlr_output_layout_output_at(output_layout, tx, ty))
+	if (nx_output_layout_output_at(output_layout, tx, ty))
 		return 0;
 
 	int prefer_horiz = fabs(dx) >= fabs(dy);
@@ -2237,9 +2227,9 @@ cursor_snap_across_dead_zone(double dx, double dy)
 	double snap_x = tx, snap_y = ty;
 
 	wl_list_for_each(m, &mons, link) {
-		if (!m->wlr_output->enabled || m->is_mirror || m->is_virtual)
+		if (!m->nx_output->enabled || m->is_mirror || m->is_virtual)
 			continue;
-		struct wlr_box *b = &m->m;
+		struct nx_box *b = &m->m;
 		if (b->width <= 0 || b->height <= 0)
 			continue;
 
@@ -2283,7 +2273,7 @@ cursor_snap_across_dead_zone(double dx, double dy)
 	if (!best)
 		return 0;
 
-	wlr_cursor_warp(cursor, NULL, snap_x, snap_y);
+	nx_cursor_warp(cursor, NULL, snap_x, snap_y);
 	return 1;
 }
 
@@ -2306,14 +2296,14 @@ drag_shared_edge(Column *col, Column *nbr, int w0, int nbr_w0, int delta)
 }
 
 void
-motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double dy,
+motionnotify(uint32_t time, struct nx_input_device *device, double dx, double dy,
 		double dx_unaccel, double dy_unaccel)
 {
 	int tiled = 0;
 	double sx = 0, sy = 0, sx_confined, sy_confined;
 	Client *c = NULL, *w = NULL;
 	LayerSurface *l = NULL;
-	struct wlr_surface *surface = NULL;
+	struct nx_surface *surface = NULL;
 	/*
 	 * Track input timestamp for mouse motion latency measurement.
 	 * Mouse input is most critical for competitive gaming.
@@ -2331,20 +2321,20 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		if (dbg_first_motion) {
 			dbg_first_motion = 0;
 			Monitor *dm = xytomon(cursor->x, cursor->y);
-			wlr_log(WLR_INFO, "DBG first-motion: cursor=(%.1f,%.1f) mon=%s "
+			nx_log(NX_INFO, "DBG first-motion: cursor=(%.1f,%.1f) mon=%s "
 				"hw_cursor=%s ll_cursor=%s cpu_cursor=%s scale=%.2f",
 				cursor->x, cursor->y,
-				dm && dm->wlr_output ? dm->wlr_output->name : "(none)",
-				dm && dm->wlr_output && dm->wlr_output->hardware_cursor ? "YES" : "NO",
+				dm && dm->nx_output ? dm->nx_output->name : "(none)",
+				dm && dm->nx_output && dm->nx_output->hardware_cursor ? "YES" : "NO",
 				dm && dm->ll_cursor_active ? "YES" : "NO",
 				cpu_cursor_active ? "YES" : "NO",
-				dm && dm->wlr_output ? dm->wlr_output->scale : 0.0);
+				dm && dm->nx_output ? dm->nx_output->scale : 0.0);
 		}
 
 		checkconstraint();
 
 		if (active_constraint && cursor_mode != CurResize && cursor_mode != CurMove) {
-			toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
+			toplevel_from_nx_surface(active_constraint->surface, &c, NULL);
 			if (c && active_constraint->surface == seat->pointer_state.focused_surface) {
 				/*
 				 * Convert cursor (layout coords) → surface-local coords.
@@ -2360,14 +2350,14 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 				 */
 				sx = cursor->x - c->geom.x - c->scene_surface->node.x;
 				sy = cursor->y - c->geom.y - c->scene_surface->node.y;
-				if (wlr_region_confine(&active_constraint->region, sx, sy,
+				if (nx_region_confine(&active_constraint->region, sx, sy,
 						sx + dx, sy + dy, &sx_confined, &sy_confined)) {
 					dx = sx_confined - sx;
 					dy = sy_confined - sy;
 				}
 
-				if (active_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED) {
-					wlr_relative_pointer_manager_v1_send_relative_motion(
+				if (active_constraint->type == NX_POINTER_CONSTRAINT_V1_LOCKED) {
+					nx_relative_pointer_manager_v1_send_relative_motion(
 							relative_pointer_mgr, seat,
 							(uint64_t)time * 1000,
 							raw_dx, raw_dy,
@@ -2382,7 +2372,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 							&& !exclusive_focus) {
 						Client *kc = NULL;
 						LayerSurface *kl = NULL;
-						if (toplevel_from_wlr_surface(
+						if (toplevel_from_nx_surface(
 								seat->keyboard_state.focused_surface,
 								&kc, &kl) != LayerShell
 								&& !(kc && client_is_unmanaged(kc))) {
@@ -2416,13 +2406,13 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		 * via DRM ioctl here, so every µs saved before this call reduces
 		 * visible cursor latency. */
 		if (!snapped)
-			wlr_cursor_move(cursor, device, dx, dy);
-		wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
+			nx_cursor_move(cursor, device, dx, dy);
+		nx_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
 		/* Confine cursor to monitor when a fullscreen game is present.
 		 * This prevents accidental mouse drift to other monitors during
 		 * fullscreen games. Keybind-based warping (focusmon/warptomonitor)
-		 * bypasses this because they use wlr_cursor_warp() directly and
+		 * bypasses this because they use nx_cursor_warp() directly and
 		 * change selmon before subsequent motionnotify calls.
 		 *
 		 * Only games: a fullscreen video (YouTube) or remote-desktop
@@ -2435,8 +2425,8 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 			if (fsc) {
 				/* Spanned game: the cursor may roam the whole span
 				 * (every monitor the game covers), not just selmon. */
-				struct wlr_box spanbox;
-				struct wlr_box *mb = &selmon->m;
+				struct nx_box spanbox;
+				struct nx_box *mb = &selmon->m;
 				if (fsc->isspanned) {
 					spanbox = client_fullscreen_geom(fsc);
 					mb = &spanbox;
@@ -2448,36 +2438,13 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 				if (cx >= mb->x + mb->width) { cx = mb->x + mb->width - 1; clamped = 1; }
 				if (cy >= mb->y + mb->height) { cy = mb->y + mb->height - 1; clamped = 1; }
 				if (clamped && (is_game_content(fsc) || looks_like_game(fsc)))
-					wlr_cursor_warp(cursor, NULL, cx, cy);
+					nx_cursor_warp(cursor, NULL, cx, cy);
 			}
 		}
 
-		/*
-		 * Force full damage on the monitor under the cursor when using
-		 * software cursor (no HW cursor plane).
-		 *
-		 * When the HW cursor plane isn't available (or fails silently),
-		 * wlroots falls back to software cursor — compositing the cursor
-		 * image into the framebuffer.  With multi-buffer swapchains
-		 * (double/triple buffering), each back buffer may still contain
-		 * the cursor from a previous position.  If the damage ring
-		 * doesn't cover those stale regions, old cursor images persist,
-		 * creating a visible trail of ghost copies.
-		 *
-		 * Atomic commit failures (EBUSY) make this worse: the failed
-		 * buffer is discarded, so the next buffer's age is off by one.
-		 *
-		 * When the HW cursor plane IS active, the cursor is on a
-		 * separate DRM plane and never composited into the framebuffer,
-		 * so no ghost trails or full damage are needed.  Forcing full
-		 * damage with HW cursor causes tearing-flip-triggered black
-		 * horizontal stripes in fullscreen games — each cursor motion
-		 * event forces a composited frame committed with tearing page
-		 * flip, and hundreds of those per second create multiple tear
-		 * lines within a single display refresh.
-		 */
+		/* Damage software cursors against ghost trails. */
 		Monitor *cm = xytomon(cursor->x, cursor->y);
-		if (cm && cm->scene_output && !cm->wlr_output->hardware_cursor) {
+		if (cm && cm->scene_output && !cm->nx_output->hardware_cursor) {
 			/* Damage only the union of the previous and current
 			 * cursor boxes (covers every back buffer's stale copy
 			 * via buffer-age damage accumulation) instead of the
@@ -2485,21 +2452,21 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 			 * composite per motion event, at mouse polling rate.
 			 * Rotated outputs keep the old full-damage path since
 			 * the cursor box would need transform math. */
-			if (cm->wlr_output->transform != WL_OUTPUT_TRANSFORM_NORMAL) {
-				wlr_damage_ring_add_whole(&cm->scene_output->damage_ring);
+			if (cm->nx_output->transform != WL_OUTPUT_TRANSFORM_NORMAL) {
+				nx_damage_ring_add_whole(&cm->scene_output->damage_ring);
 			} else {
-				struct wlr_output_cursor *oc;
-				struct wlr_box cur = {0};
-				wl_list_for_each(oc, &cm->wlr_output->cursors, link) {
+				struct nx_output_cursor *oc;
+				struct nx_box cur = {0};
+				wl_list_for_each(oc, &cm->nx_output->cursors, link) {
 					if (!oc->enabled || !oc->visible)
 						continue;
-					struct wlr_box b = {
+					struct nx_box b = {
 						.x = (int)oc->x - oc->hotspot_x,
 						.y = (int)oc->y - oc->hotspot_y,
 						.width = (int)oc->width + 1,
 						.height = (int)oc->height + 1,
 					};
-					if (wlr_box_empty(&cur)) {
+					if (nx_box_empty(&cur)) {
 						cur = b;
 					} else {
 						int x2 = cur.x + cur.width > b.x + b.width ?
@@ -2512,21 +2479,21 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 						cur.height = y2 - cur.y;
 					}
 				}
-				if (!wlr_box_empty(&cur)) {
-					wlr_damage_ring_add_box(&cm->scene_output->damage_ring, &cur);
-					if (!wlr_box_empty(&cm->swcur_prev_box))
-						wlr_damage_ring_add_box(&cm->scene_output->damage_ring,
+				if (!nx_box_empty(&cur)) {
+					nx_damage_ring_add_box(&cm->scene_output->damage_ring, &cur);
+					if (!nx_box_empty(&cm->swcur_prev_box))
+						nx_damage_ring_add_box(&cm->scene_output->damage_ring,
 								&cm->swcur_prev_box);
 					cm->swcur_prev_box = cur;
 				}
 			}
-			wlr_output_schedule_frame(cm->wlr_output);
+			nx_output_schedule_frame(cm->nx_output);
 		}
 
 		/* Relative pointer protocol — sent after the HW cursor plane
 		 * update so the visible cursor position changes before any
 		 * Wayland protocol I/O to clients. */
-		wlr_relative_pointer_manager_v1_send_relative_motion(
+		nx_relative_pointer_manager_v1_send_relative_motion(
 				relative_pointer_mgr, seat, (uint64_t)time * 1000,
 				raw_dx, raw_dy, dx_unaccel, dy_unaccel);
 
@@ -2539,7 +2506,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	}
 
 	/* Find the client under the pointer at the NEW cursor position.
-	 * Doing this after wlr_cursor_move() (instead of before) means the
+	 * Doing this after nx_cursor_move() (instead of before) means the
 	 * scene traversal doesn't block the HW cursor update. */
 	xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
 
@@ -2547,7 +2514,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	 * configurex11 offsets scene_surface to center games that render at
 	 * a smaller resolution than the monitor.  xytonode returns surface=NULL
 	 * when the cursor is in the resulting black bar area (fullscreen_bg is
-	 * a rect, not a wlr_surface).  Without this fallback, pointerfocus()
+	 * a rect, not a nx_surface).  Without this fallback, pointerfocus()
 	 * clears pointer focus and XWayland can't maintain pointer grab/lock,
 	 * breaking mouse input for the game.
 	 *
@@ -2576,7 +2543,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		}
 	}
 
-	/* The overview's thumbnails ARE wlr_scene_surfaces of the real
+	/* The overview's thumbnails ARE nx_scene_surfaces of the real
 	 * clients, so xytonode happily resolves a hover over a thumbnail to
 	 * that client — at scaled-down coordinates, which would hover-
 	 * highlight random widgets in a window the user is only looking at.
@@ -2606,7 +2573,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 
 	if (cursor_mode == CurPressed && !seat->drag
 			&& surface != seat->pointer_state.focused_surface
-			&& toplevel_from_wlr_surface(seat->pointer_state.focused_surface, &w, &l) >= 0) {
+			&& toplevel_from_nx_surface(seat->pointer_state.focused_surface, &w, &l) >= 0) {
 		c = w;
 		surface = seat->pointer_state.focused_surface;
 		sx = cursor->x - (l ? l->scene->node.x : w->geom.x);
@@ -2614,7 +2581,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	}
 
 	/* Update drag icon's position */
-	wlr_scene_node_set_position(&drag_icon->node, (int)round(cursor->x), (int)round(cursor->y));
+	nx_scene_node_set_position(&drag_icon->node, (int)round(cursor->x), (int)round(cursor->y));
 
 	/* Statusbar hover feedback (tag highlight, module popups).
 	 * Skip when far from the bar and no popup is open (popups need
@@ -2687,7 +2654,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	if (cursor_mode == CurMove) {
 		/* Move the grabbed client to the new position. */
 		if (grabc && grabc->isfloating) {
-			resize(grabc, (struct wlr_box){
+			resize(grabc, (struct nx_box){
 				.x = (int)round(cursor->x) - grabcx,
 				.y = (int)round(cursor->y) - grabcy,
 				.width = grabc->geom.width,
@@ -2765,7 +2732,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 			int minh = 1 + 2 * (int)grabc->bw;
 			int dw = (int)lround(dx_total);
 			int dh = (int)lround(dy_total);
-			struct wlr_box box = resize_start_box_f;
+			struct nx_box box = resize_start_box_f;
 
 			if (resize_dir_x) {
 				if (resize_dir_x > 0) {
@@ -2835,7 +2802,7 @@ motionrelative(struct wl_listener *listener, void *data)
 {
 	/* This event is forwarded by the cursor when a pointer emits a _relative_
 	 * pointer motion event (i.e. a delta) */
-	struct wlr_pointer_motion_event *event = data;
+	struct nx_pointer_motion_event *event = data;
 
 	if (dwt_suppress(&event->pointer->base))
 		return;
@@ -2913,7 +2880,7 @@ moveresize(const Arg *arg)
 		switch (cursor_mode) {
 		case CurMove:
 			{
-				struct wlr_box start_geom = grabc->geom;
+				struct nx_box start_geom = grabc->geom;
 				/* Track before floating. */
 				start_tile_drag(selmon, grabc);
 				/* Before arrange's internal motion. */
@@ -2927,7 +2894,7 @@ moveresize(const Arg *arg)
 			}
 		case CurResize:
 			{
-				struct wlr_box start_geom = grabc->geom;
+				struct nx_box start_geom = grabc->geom;
 				double start_x = cursor->x, start_y = cursor->y;
 				Column *col = grabc->column;
 				pick_resize_handle(grabc, cursor->x, cursor->y);
@@ -3037,8 +3004,8 @@ moveresize(const Arg *arg)
 				grabcx = (int)round(cursor->x);
 				grabcy = (int)round(cursor->y);
 
-				resize_start_box_v = (struct wlr_box){0};
-				resize_start_box_h = (struct wlr_box){0};
+				resize_start_box_v = (struct nx_box){0};
+				resize_start_box_h = (struct nx_box){0};
 				resize_start_box_f = grabc->geom;
 				resize_start_x = start_x;
 				resize_start_y = start_y;
@@ -3058,7 +3025,7 @@ moveresize(const Arg *arg)
 }
 
 void
-pointerfocus(Client *c, struct wlr_surface *surface, double sx, double sy,
+pointerfocus(Client *c, struct nx_surface *surface, double sx, double sy,
 		uint32_t time)
 {
 	struct timespec now;
@@ -3106,12 +3073,12 @@ pointerfocus(Client *c, struct wlr_surface *surface, double sx, double sy,
 	 * compare alone never re-fires, so a pointer-locked game keeps the
 	 * mouse but never gets the keyboard back.  Re-assert unless a layer
 	 * surface or an unmanaged client legitimately holds it. */
-	struct wlr_surface *kfocus = seat->keyboard_state.focused_surface;
+	struct nx_surface *kfocus = seat->keyboard_state.focused_surface;
 	Client *kc = NULL;
 	LayerSurface *kl = NULL;
 	int kb_stale = sloppyfocus && c && client_surface(c) != kfocus
 			&& !exclusive_focus
-			&& toplevel_from_wlr_surface(kfocus, &kc, &kl) != LayerShell
+			&& toplevel_from_nx_surface(kfocus, &kc, &kl) != LayerShell
 			&& !(kc && client_is_unmanaged(kc));
 
 	/* Resize grabs keep focus on the grabbed window. */
@@ -3127,7 +3094,7 @@ pointerfocus(Client *c, struct wlr_surface *surface, double sx, double sy,
 
 	/* If surface is NULL, clear pointer focus */
 	if (!surface) {
-		wlr_seat_pointer_notify_clear_focus(seat);
+		nx_seat_pointer_notify_clear_focus(seat);
 		return;
 	}
 
@@ -3146,11 +3113,9 @@ pointerfocus(Client *c, struct wlr_surface *surface, double sx, double sy,
 			cursor->x, cursor->y,
 			active_constraint ? "active" : "none");
 
-	/* Let the client know that the mouse cursor has entered one
-	 * of its surfaces, and make keyboard focus follow if desired.
-	 * wlroots makes this a no-op if surface is already focused */
-	wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
-	wlr_seat_pointer_notify_motion(seat, time, sx, sy);
+	/* No-op when already focused. */
+	nx_seat_pointer_notify_enter(seat, surface, sx, sy);
+	nx_seat_pointer_notify_motion(seat, time, sx, sy);
 
 	/* (Re-)activate pointer constraint if the newly focused surface has one.
 	 * This ensures games get their pointer lock/confine as soon as focus
@@ -3161,20 +3126,20 @@ pointerfocus(Client *c, struct wlr_surface *surface, double sx, double sy,
 void
 requeststartdrag(struct wl_listener *listener, void *data)
 {
-	struct wlr_seat_request_start_drag_event *event = data;
+	struct nx_seat_request_start_drag_event *event = data;
 
-	if (wlr_seat_validate_pointer_grab_serial(seat, event->origin,
+	if (nx_seat_validate_pointer_grab_serial(seat, event->origin,
 			event->serial))
-		wlr_seat_start_pointer_drag(seat, event->drag, event->serial);
+		nx_seat_start_pointer_drag(seat, event->drag, event->serial);
 	else
-		wlr_data_source_destroy(event->drag->source);
+		nx_data_source_destroy(event->drag->source);
 }
 
 void
 setcursor(struct wl_listener *listener, void *data)
 {
 	/* This event is raised by the seat when a client provides a cursor image */
-	struct wlr_seat_pointer_request_set_cursor_event *event = data;
+	struct nx_seat_pointer_request_set_cursor_event *event = data;
 	/* If we're "grabbing" the cursor, don't use the client's image, we will
 	 * restore it after "grabbing" sending a leave event, followed by a enter
 	 * event, which will result in the client requesting set the cursor surface */
@@ -3193,7 +3158,7 @@ setcursor(struct wl_listener *listener, void *data)
 void
 setcursorshape(struct wl_listener *listener, void *data)
 {
-	struct wlr_cursor_shape_manager_v1_request_set_shape_event *event = data;
+	struct nx_cursor_shape_manager_v1_request_set_shape_event *event = data;
 	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
 		return;
 	/* This can be sent by any client, so we check to make sure this one
@@ -3201,48 +3166,48 @@ setcursorshape(struct wl_listener *listener, void *data)
 	 * use the provided cursor shape. */
 	if (event->seat_client == seat->pointer_state.focused_client)
 		nixly_cursor_set_xcursor(
-				wlr_cursor_shape_v1_name(event->shape));
+				nx_cursor_shape_v1_name(event->shape));
 }
 
 void
 startdrag(struct wl_listener *listener, void *data)
 {
-	struct wlr_drag *drag = data;
+	struct nx_drag *drag = data;
 	if (!drag->icon)
 		return;
 
-	drag->icon->data = &wlr_scene_drag_icon_create(drag_icon, drag->icon)->node;
+	drag->icon->data = &nx_scene_drag_icon_create(drag_icon, drag->icon)->node;
 	LISTEN_STATIC(&drag->icon->events.destroy, destroydragicon);
 }
 
 void
 virtualkeyboard(struct wl_listener *listener, void *data)
 {
-	struct wlr_virtual_keyboard_v1 *kb = data;
+	struct nx_virtual_keyboard_v1 *kb = data;
 	/* virtual keyboards shouldn't share keyboard group */
 	KeyboardGroup *group = createkeyboardgroup();
 	/* Set the keymap to match the group keymap */
-	wlr_keyboard_set_keymap(&kb->keyboard, group->wlr_group->keyboard.keymap);
+	nx_keyboard_set_keymap(&kb->keyboard, group->nx_group->keyboard.keymap);
 	LISTEN(&kb->keyboard.base.events.destroy, &group->destroy, destroykeyboardgroup);
 
 	/* Add the new keyboard to the group */
-	wlr_keyboard_group_add_keyboard(group->wlr_group, &kb->keyboard);
+	nx_keyboard_group_add_keyboard(group->nx_group, &kb->keyboard);
 
 	/* IMPORTANT: Restore global keyboard group as seat keyboard.
 	 * createkeyboardgroup() sets seat keyboard to the new group, but for virtual
 	 * keyboards we must keep the global kb_group as seat keyboard to avoid
 	 * use-after-free when the virtual keyboard is destroyed */
-	wlr_seat_set_keyboard(seat, &kb_group->wlr_group->keyboard);
+	nx_seat_set_keyboard(seat, &kb_group->nx_group->keyboard);
 }
 
 void
 textinput_enable(struct wl_listener *listener, void *data)
 {
 	TextInput *ti_wrap = wl_container_of(listener, ti_wrap, enable);
-	struct wlr_text_input_v3 *ti = ti_wrap->text_input;
+	struct nx_text_input_v3 *ti = ti_wrap->text_input;
 	(void)data;
 
-	wlr_log(WLR_INFO, "Text input enabled for surface %p", (void*)ti->focused_surface);
+	nx_log(NX_INFO, "Text input enabled for surface %p", (void*)ti->focused_surface);
 	active_text_input = ti;
 
 }
@@ -3251,10 +3216,10 @@ void
 textinput_disable(struct wl_listener *listener, void *data)
 {
 	TextInput *ti_wrap = wl_container_of(listener, ti_wrap, disable);
-	struct wlr_text_input_v3 *ti = ti_wrap->text_input;
+	struct nx_text_input_v3 *ti = ti_wrap->text_input;
 	(void)data;
 
-	wlr_log(WLR_INFO, "Text input disabled");
+	nx_log(NX_INFO, "Text input disabled");
 	if (active_text_input == ti)
 		active_text_input = NULL;
 }
@@ -3271,10 +3236,10 @@ void
 textinput_destroy(struct wl_listener *listener, void *data)
 {
 	TextInput *ti_wrap = wl_container_of(listener, ti_wrap, destroy);
-	struct wlr_text_input_v3 *ti = ti_wrap->text_input;
+	struct nx_text_input_v3 *ti = ti_wrap->text_input;
 	(void)data;
 
-	wlr_log(WLR_INFO, "Text input destroyed");
+	nx_log(NX_INFO, "Text input destroyed");
 	if (active_text_input == ti)
 		active_text_input = NULL;
 
@@ -3290,11 +3255,11 @@ textinput_destroy(struct wl_listener *listener, void *data)
 void
 textinput(struct wl_listener *listener, void *data)
 {
-	struct wlr_text_input_v3 *ti = data;
+	struct nx_text_input_v3 *ti = data;
 	TextInput *ti_wrap;
 	(void)listener;
 
-	wlr_log(WLR_INFO, "New text input created");
+	nx_log(NX_INFO, "New text input created");
 
 	ti_wrap = ecalloc(1, sizeof(*ti_wrap));
 	ti_wrap->text_input = ti;
@@ -3309,29 +3274,29 @@ textinput(struct wl_listener *listener, void *data)
 
 	/* If a surface already has keyboard focus, send enter to this text input
 	 * but only if the text input belongs to the same client as the surface */
-	struct wlr_surface *focused = seat->keyboard_state.focused_surface;
+	struct nx_surface *focused = seat->keyboard_state.focused_surface;
 	if (focused) {
 		struct wl_client *ti_client = wl_resource_get_client(ti->resource);
 		struct wl_client *surface_client = wl_resource_get_client(focused->resource);
 		if (ti_client == surface_client) {
-			wlr_text_input_v3_send_enter(ti, focused);
+			nx_text_input_v3_send_enter(ti, focused);
 		}
 	}
 }
 
 void
-text_input_focus_change(struct wlr_surface *old, struct wlr_surface *new)
+text_input_focus_change(struct nx_surface *old, struct nx_surface *new)
 {
 	TextInput *ti_wrap;
 
 	wl_list_for_each(ti_wrap, &text_inputs, link) {
-		struct wlr_text_input_v3 *ti = ti_wrap->text_input;
+		struct nx_text_input_v3 *ti = ti_wrap->text_input;
 		if (!ti || !ti->resource)
 			continue;
 
 		/* Send leave if text input has any focused surface */
 		if (ti->focused_surface) {
-			wlr_text_input_v3_send_leave(ti);
+			nx_text_input_v3_send_leave(ti);
 		}
 
 		/* Send enter for new surface - only if text input belongs to same client */
@@ -3339,7 +3304,7 @@ text_input_focus_change(struct wlr_surface *old, struct wlr_surface *new)
 			struct wl_client *ti_client = wl_resource_get_client(ti->resource);
 			struct wl_client *surface_client = wl_resource_get_client(new->resource);
 			if (ti_client == surface_client) {
-				wlr_text_input_v3_send_enter(ti, new);
+				nx_text_input_v3_send_enter(ti, new);
 			}
 		}
 	}
@@ -3348,11 +3313,11 @@ text_input_focus_change(struct wlr_surface *old, struct wlr_surface *new)
 void
 virtualpointer(struct wl_listener *listener, void *data)
 {
-	struct wlr_virtual_pointer_v1_new_pointer_event *event = data;
-	struct wlr_input_device *device = &event->new_pointer->pointer.base;
+	struct nx_virtual_pointer_v1_new_pointer_event *event = data;
+	struct nx_input_device *device = &event->new_pointer->pointer.base;
 
-	wlr_cursor_attach_input_device(cursor, device);
+	nx_cursor_attach_input_device(cursor, device);
 	if (event->suggested_output)
-		wlr_cursor_map_input_to_output(cursor, device, event->suggested_output);
+		nx_cursor_map_input_to_output(cursor, device, event->suggested_output);
 }
 

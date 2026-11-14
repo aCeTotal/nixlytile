@@ -476,7 +476,7 @@ setup_statusbar_conf_watch(void)
 
 	statusbarconf_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
 	if (statusbarconf_fd < 0) {
-		wlr_log(WLR_ERROR, "statusbar_conf: inotify_init failed: %s",
+		nx_log(NX_ERROR, "statusbar_conf: inotify_init failed: %s",
 			strerror(errno));
 		return;
 	}
@@ -484,7 +484,7 @@ setup_statusbar_conf_watch(void)
 	wd = inotify_add_watch(statusbarconf_fd, sc_dir,
 		IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_DELETE_SELF);
 	if (wd < 0) {
-		wlr_log(WLR_INFO, "statusbar_conf: no %s yet (%s)", sc_dir,
+		nx_log(NX_INFO, "statusbar_conf: no %s yet (%s)", sc_dir,
 			strerror(errno));
 		close(statusbarconf_fd);
 		statusbarconf_fd = -1;
@@ -498,5 +498,5 @@ setup_statusbar_conf_watch(void)
 		statusbarconf_fd = -1;
 		return;
 	}
-	wlr_log(WLR_INFO, "statusbar_conf: watching %s", sc_path);
+	nx_log(NX_INFO, "statusbar_conf: watching %s", sc_path);
 }

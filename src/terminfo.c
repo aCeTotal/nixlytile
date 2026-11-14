@@ -265,7 +265,7 @@ ti_start(void)
 	pthread_attr_init(&attr);
 	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 	if (pthread_create(&tid, &attr, ti_worker, NULL) != 0)
-		wlr_log(WLR_ERROR, "terminfo: worker start failed — "
+		nx_log(NX_ERROR, "terminfo: worker start failed — "
 			"terminal context disabled");
 	pthread_attr_destroy(&attr);
 }
@@ -277,12 +277,12 @@ ti_start(void)
 static Client *
 focused_terminal(void)
 {
-	struct wlr_surface *surf = seat ? seat->keyboard_state.focused_surface : NULL;
+	struct nx_surface *surf = seat ? seat->keyboard_state.focused_surface : NULL;
 	Client *c = NULL;
 
 	if (!surf)
 		return NULL;
-	toplevel_from_wlr_surface(surf, &c, NULL);
+	toplevel_from_nx_surface(surf, &c, NULL);
 	if (c && !c->isfullscreen && is_terminal_client(c) &&
 			client_surface(c) && client_surface(c)->mapped)
 		return c;
@@ -309,7 +309,7 @@ renderterminfo(StatusModule *module, int bar_height, const char *text)
 	text_w = (bar_height > 0 && text) ? status_text_width(text) : 0;
 	if (text_w <= 0) {
 		module->width = 0;
-		wlr_scene_node_set_enabled(&module->tree->node, 0);
+		nx_scene_node_set_enabled(&module->tree->node, 0);
 		return;
 	}
 
@@ -317,7 +317,7 @@ renderterminfo(StatusModule *module, int bar_height, const char *text)
 	/* Same rounded card as the clock and the other right-hand modules. */
 	updatemodulebg(module, module->width, bar_height, statusbar_bg);
 	tray_render_label(module, text, padding, bar_height, statusbar_fg);
-	wlr_scene_node_set_enabled(&module->tree->node, 1);
+	nx_scene_node_set_enabled(&module->tree->node, 1);
 }
 
 void

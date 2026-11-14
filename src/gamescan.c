@@ -1,31 +1,5 @@
 #include "nixlytile.h"
 
-/*
- * Game-resolution modeset: guarantee direct scanout on buffer/mode size
- * mismatch.
- *
- * wlroots' scene scanout election handles a scaled buffer via primary-
- * plane scaling (src/dst viewport) — AMD and Intel accept that, so a
- * 1080p game buffer on a 1440p output still scans out there.  NVIDIA's
- * planes cannot scale: every fullscreen game rendering below the
- * desktop mode falls back to GPU composition, costing latency and
- * pacing.  The bulletproof fix is the console approach (gamescope on a
- * TV, X11 exclusive fullscreen): switch the output mode to the game's
- * resolution.  Buffer == mode → scanout everywhere, and the display's
- * own scaler does the upscale for free.
- *
- * Self-selecting: only engages when a fullscreen game has presented a
- * stable off-mode buffer size for ~2 s WITHOUT direct scanout engaging
- * — on AMD/Intel plane scaling usually wins first and nothing happens.
- * The stability window also rides out menus, loading screens and
- * dynamic-resolution churn.  A size that has no matching display mode,
- * or whose modeset fails, is remembered and never retried.  No OSD is
- * shown on entry (the OSD scene node would itself block scanout).
- *
- * Restored to bestmode() on fullscreen exit/unmap, same as console
- * mode.
- */
-
 #define GAMESCAN_STABLE_VBLANKS 120
 
 /* Per-vblank from rendermon while a fullscreen game is classified and
@@ -35,7 +9,7 @@
 void
 gamescan_tick(Monitor *m, Client *fc, int is_direct_scanout)
 {
-	struct wlr_surface *surf;
+	struct nx_surface *surf;
 	int bw, bh;
 
 	/* Not gated on gamescan_mode_active: a game changing its internal
@@ -61,9 +35,9 @@ gamescan_tick(Monitor *m, Client *fc, int is_direct_scanout)
 
 	/* Size matches the mode — scanout is blocked by something else
 	 * (cursor, OSD, format); a modeset cannot help. */
-	if (m->wlr_output->current_mode &&
-	    bw == m->wlr_output->current_mode->width &&
-	    bh == m->wlr_output->current_mode->height) {
+	if (m->nx_output->current_mode &&
+	    bw == m->nx_output->current_mode->width &&
+	    bh == m->nx_output->current_mode->height) {
 		m->gamescan_stable = 0;
 		return;
 	}
@@ -85,12 +59,12 @@ gamescan_tick(Monitor *m, Client *fc, int is_direct_scanout)
 void
 gamescan_apply(Monitor *m)
 {
-	struct wlr_output_mode *target;
-	struct wlr_output_state state;
-	struct wlr_output_configuration_v1 *config;
-	struct wlr_output_configuration_head_v1 *config_head;
+	struct nx_output_mode *target;
+	struct nx_output_state state;
+	struct nx_output_configuration_v1 *config;
+	struct nx_output_configuration_head_v1 *config_head;
 
-	if (!m || !m->wlr_output || !m->wlr_output->enabled)
+	if (!m || !m->nx_output || !m->nx_output->enabled)
 		return;
 	/* gamescan_mode_active does not block: a re-arm modeset (game
 	 * changed internal resolution mid-session) just switches again;
@@ -100,55 +74,55 @@ gamescan_apply(Monitor *m)
 		return;
 
 	/* Respect a user-pinned resolution (native pin doesn't count). */
-	if (monitor_mode_pinned(m->wlr_output))
+	if (monitor_mode_pinned(m->nx_output))
 		return;
 
-	target = find_mode(m->wlr_output, m->gamescan_w, m->gamescan_h, 0);
-	if (!target || target == m->wlr_output->current_mode) {
+	target = find_mode(m->nx_output, m->gamescan_w, m->gamescan_h, 0);
+	if (!target || target == m->nx_output->current_mode) {
 		m->gamescan_failed_w = m->gamescan_w;
 		m->gamescan_failed_h = m->gamescan_h;
 		return;
 	}
 
 	if (!m->gamescan_mode_active)
-		m->gamescan_original = m->wlr_output->current_mode;
+		m->gamescan_original = m->nx_output->current_mode;
 
-	wlr_output_state_init(&state);
-	wlr_output_state_set_mode(&state, target);
-	if (wlr_output_test_state(m->wlr_output, &state)
-	    && wlr_output_commit_state(m->wlr_output, &state)) {
+	nx_output_state_init(&state);
+	nx_output_state_set_mode(&state, target);
+	if (nx_output_test_state(m->nx_output, &state)
+	    && nx_output_commit_state(m->nx_output, &state)) {
 		m->gamescan_mode_active = 1;
 		/* Any autolock target was picked at the old resolution —
 		 * it is stale now (see autolock_apply_mode's guard). */
 		m->al_mode_pending = 0;
 		m->al_target_mode = NULL;
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"Game scanout mode: %s switched to %dx%d@%dmHz to match game buffer",
-			m->wlr_output->name, target->width, target->height,
+			m->nx_output->name, target->width, target->height,
 			target->refresh);
-		config = wlr_output_configuration_v1_create();
-		config_head = wlr_output_configuration_head_v1_create(
-				config, m->wlr_output);
+		config = nx_output_configuration_v1_create();
+		config_head = nx_output_configuration_head_v1_create(
+				config, m->nx_output);
 		config_head->state.mode = target;
-		wlr_output_manager_v1_set_configuration(output_mgr, config);
+		nx_output_manager_v1_set_configuration(output_mgr, config);
 		updatemons(NULL, NULL);
 	} else {
 		m->gamescan_original = NULL;
 		m->gamescan_failed_w = m->gamescan_w;
 		m->gamescan_failed_h = m->gamescan_h;
 	}
-	wlr_output_state_finish(&state);
+	nx_output_state_finish(&state);
 }
 
 void
 gamescan_restore(Monitor *m)
 {
-	struct wlr_output_mode *target;
-	struct wlr_output_state state;
-	struct wlr_output_configuration_v1 *config;
-	struct wlr_output_configuration_head_v1 *config_head;
+	struct nx_output_mode *target;
+	struct nx_output_state state;
+	struct nx_output_configuration_v1 *config;
+	struct nx_output_configuration_head_v1 *config_head;
 
-	if (!m || !m->wlr_output || !m->wlr_output->enabled)
+	if (!m || !m->nx_output || !m->nx_output->enabled)
 		return;
 	m->gamescan_pending = 0;
 	m->gamescan_stable = 0;
@@ -157,26 +131,26 @@ gamescan_restore(Monitor *m)
 	if (!m->gamescan_mode_active)
 		return;
 
-	target = bestmode(m->wlr_output);
+	target = bestmode(m->nx_output);
 	if (!target) {
 		m->gamescan_mode_active = 0;
 		m->gamescan_original = NULL;
 		return;
 	}
 
-	wlr_output_state_init(&state);
-	wlr_output_state_set_mode(&state, target);
-	if (wlr_output_test_state(m->wlr_output, &state)
-	    && wlr_output_commit_state(m->wlr_output, &state)) {
-		wlr_log(WLR_INFO,
+	nx_output_state_init(&state);
+	nx_output_state_set_mode(&state, target);
+	if (nx_output_test_state(m->nx_output, &state)
+	    && nx_output_commit_state(m->nx_output, &state)) {
+		nx_log(NX_INFO,
 			"Game scanout mode restored: %s → %dx%d@%dmHz",
-			m->wlr_output->name, target->width, target->height,
+			m->nx_output->name, target->width, target->height,
 			target->refresh);
-		config = wlr_output_configuration_v1_create();
-		config_head = wlr_output_configuration_head_v1_create(
-				config, m->wlr_output);
+		config = nx_output_configuration_v1_create();
+		config_head = nx_output_configuration_head_v1_create(
+				config, m->nx_output);
 		config_head->state.mode = target;
-		wlr_output_manager_v1_set_configuration(output_mgr, config);
+		nx_output_manager_v1_set_configuration(output_mgr, config);
 		{
 			char osd_msg[64];
 			snprintf(osd_msg, sizeof(osd_msg), "%dx%d @ %d Hz",
@@ -188,5 +162,5 @@ gamescan_restore(Monitor *m)
 	}
 	m->gamescan_mode_active = 0;
 	m->gamescan_original = NULL;
-	wlr_output_state_finish(&state);
+	nx_output_state_finish(&state);
 }

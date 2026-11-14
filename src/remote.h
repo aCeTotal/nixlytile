@@ -2,7 +2,7 @@
 #define NIXLYTILE_REMOTE_H
 
 #include <wayland-server-core.h>
-#include <wlr/backend/headless.h>
+#include "platform/backend/headless/headless.h"
 
 /* Parked geometry for idle virtual outputs, placed far off the physical layout */
 #define REMOTE_PARK_W    1280
@@ -26,7 +26,7 @@ typedef struct {
 } RemoteParams;
 
 /* Create the headless backend and its parked outputs.  Call after
- * wlr_backend_autocreate, before the backend is started. */
+ * nx_backend_autocreate, before the backend is started. */
 void remote_backend_init(struct wl_display *display, int n_outputs);
 
 /* Returns 0 on success, or a static error string. */

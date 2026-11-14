@@ -45,10 +45,10 @@ typedef struct NdToast {
 	struct wl_list link;
 	uint32_t id;
 	Monitor *m;
-	struct wlr_scene_tree *tree;
-	/* Natural size per child: the scene drops its wlr_buffer pointer on
+	struct nx_scene_tree *tree;
+	/* Natural size per child: the scene drops its nx_buffer pointer on
 	 * texture upload, so the clip pass cannot read it back. */
-	struct wlr_scene_buffer *shadow_sb, *card_sb;
+	struct nx_scene_buffer *shadow_sb, *card_sb;
 	int w, h;
 	int slot_y;
 	int target_x, off_x;
@@ -59,7 +59,7 @@ typedef struct NdToast {
 	NdActions actions;
 	/* Percent from "value", or -1. */
 	int progress;
-	struct wlr_scene_buffer *fill_sb;
+	struct nx_scene_buffer *fill_sb;
 	int fill_x, fill_h;
 	double fill_f, fill_vel, fill_target;
 	CardHit hits[ND_MAX_ACTIONS];
@@ -77,8 +77,8 @@ static uint32_t notifyd_next_id = 1;
 static void
 nd_schedule(Monitor *m)
 {
-	if (m && m->wlr_output)
-		wlr_output_schedule_frame(m->wlr_output);
+	if (m && m->nx_output)
+		nx_output_schedule_frame(m->nx_output);
 }
 
 static void
@@ -97,7 +97,7 @@ nd_toast_destroy(NdToast *t)
 	if (t->timer)
 		wl_event_source_remove(t->timer);
 	if (t->tree)
-		wlr_scene_node_destroy(&t->tree->node);
+		nx_scene_node_destroy(&t->tree->node);
 	if (t->img)
 		cairo_surface_destroy(t->img);
 	wl_list_remove(&t->link);
@@ -148,7 +148,7 @@ nd_free_slot_y(Monitor *m, int h)
 /* Klipp mot egen skjermkant under sliden (kopiert fra osd.c: barna er
  * uskalerte scene-buffere, 1:1 source-box-crop holder). */
 static void
-nd_clip_one(struct wlr_scene_buffer *sb, int bw, int bh, int lim)
+nd_clip_one(struct nx_scene_buffer *sb, int bw, int bh, int lim)
 {
 	int vis;
 
@@ -156,16 +156,16 @@ nd_clip_one(struct wlr_scene_buffer *sb, int bw, int bh, int lim)
 		return;
 	vis = lim - sb->node.x;
 	if (vis >= bw) {
-		wlr_scene_node_set_enabled(&sb->node, 1);
-		wlr_scene_buffer_set_source_box(sb, NULL);
-		wlr_scene_buffer_set_dest_size(sb, bw, bh);
+		nx_scene_node_set_enabled(&sb->node, 1);
+		nx_scene_buffer_set_source_box(sb, NULL);
+		nx_scene_buffer_set_dest_size(sb, bw, bh);
 	} else if (vis <= 0) {
-		wlr_scene_node_set_enabled(&sb->node, 0);
+		nx_scene_node_set_enabled(&sb->node, 0);
 	} else {
-		struct wlr_fbox src = { 0, 0, vis, bh };
-		wlr_scene_node_set_enabled(&sb->node, 1);
-		wlr_scene_buffer_set_source_box(sb, &src);
-		wlr_scene_buffer_set_dest_size(sb, vis, bh);
+		struct nx_fbox src = { 0, 0, vis, bh };
+		nx_scene_node_set_enabled(&sb->node, 1);
+		nx_scene_buffer_set_source_box(sb, &src);
+		nx_scene_buffer_set_dest_size(sb, vis, bh);
 	}
 }
 
@@ -176,13 +176,13 @@ nd_clip_fill(NdToast *t, int lim)
 	int w = MIN((int)lround(t->fill_f), lim - t->fill_x);
 
 	if (w <= 0) {
-		wlr_scene_node_set_enabled(&t->fill_sb->node, 0);
+		nx_scene_node_set_enabled(&t->fill_sb->node, 0);
 		return;
 	}
-	wlr_scene_node_set_enabled(&t->fill_sb->node, 1);
-	wlr_scene_buffer_set_source_box(t->fill_sb,
-			&(struct wlr_fbox){ 0, 0, w, t->fill_h });
-	wlr_scene_buffer_set_dest_size(t->fill_sb, w, t->fill_h);
+	nx_scene_node_set_enabled(&t->fill_sb->node, 1);
+	nx_scene_buffer_set_source_box(t->fill_sb,
+			&(struct nx_fbox){ 0, 0, w, t->fill_h });
+	nx_scene_buffer_set_dest_size(t->fill_sb, w, t->fill_h);
 }
 
 static void
@@ -399,18 +399,18 @@ static void
 nd_add_fill(NdToast *t, const CardResult *res)
 {
 	const CardFill *f = &res->fills[0];
-	struct wlr_buffer *fb;
+	struct nx_buffer *fb;
 
 	if (!res->nfills)
 		return;
 	fb = card_fill_buffer(f->full_w, f->h, f->color);
 	if (!fb)
 		return;
-	t->fill_sb = wlr_scene_buffer_create(t->tree, fb);
-	wlr_buffer_drop(fb);
+	t->fill_sb = nx_scene_buffer_create(t->tree, fb);
+	nx_buffer_drop(fb);
 	if (!t->fill_sb)
 		return;
-	wlr_scene_node_set_position(&t->fill_sb->node, f->x, f->y);
+	nx_scene_node_set_position(&t->fill_sb->node, f->x, f->y);
 	t->fill_x = f->x;
 	t->fill_h = f->h;
 	t->fill_target = f->w;
@@ -423,8 +423,8 @@ nd_build_card(NdToast *t, const char *app, const char *summary,
 {
 	Card *card = card_begin();
 	CardResult res;
-	struct wlr_scene_node *node, *tmp;
-	struct wlr_scene_buffer *sb;
+	struct nx_scene_node *node, *tmp;
+	struct nx_scene_buffer *sb;
 	char sub[48];
 	char title[96];
 	char pct[8];
@@ -462,30 +462,30 @@ nd_build_card(NdToast *t, const char *app, const char *summary,
 	nd_keep_hits(t, &res);
 
 	wl_list_for_each_safe(node, tmp, &t->tree->children, link)
-		wlr_scene_node_destroy(node);
+		nx_scene_node_destroy(node);
 	t->shadow_sb = t->card_sb = t->fill_sb = NULL;
 	{
-		struct wlr_buffer *shb = card_shadow_buffer(res.w, res.h, 0);
+		struct nx_buffer *shb = card_shadow_buffer(res.w, res.h, 0);
 
 		if (shb) {
-			sb = wlr_scene_buffer_create(t->tree, NULL);
+			sb = nx_scene_buffer_create(t->tree, NULL);
 			if (sb) {
-				wlr_scene_buffer_set_buffer(sb, shb);
-				wlr_scene_node_set_position(&sb->node,
+				nx_scene_buffer_set_buffer(sb, shb);
+				nx_scene_node_set_position(&sb->node,
 						-CARD_SHADOW_MARGIN,
 						-CARD_SHADOW_MARGIN);
 				t->shadow_sb = sb;
 			}
-			wlr_buffer_drop(shb);
+			nx_buffer_drop(shb);
 		}
 	}
-	sb = wlr_scene_buffer_create(t->tree, NULL);
+	sb = nx_scene_buffer_create(t->tree, NULL);
 	if (sb) {
-		wlr_scene_buffer_set_buffer(sb, res.buf);
-		wlr_scene_node_set_position(&sb->node, 0, 0);
+		nx_scene_buffer_set_buffer(sb, res.buf);
+		nx_scene_node_set_position(&sb->node, 0, 0);
 		t->card_sb = sb;
 	}
-	wlr_buffer_drop(res.buf);
+	nx_buffer_drop(res.buf);
 	nd_add_fill(t, &res);
 	t->w = res.w;
 	t->h = res.h;
@@ -501,7 +501,7 @@ nd_pick_mon(void)
 	if (!game_mode_active && !htpc_mode_active)
 		return selmon;
 	wl_list_for_each(it, &mons, link)
-		if (it->wlr_output && it->wlr_output->enabled
+		if (it->nx_output && it->nx_output->enabled
 				&& !fullscreen_visible_on(it))
 			return it;
 	return NULL;
@@ -536,10 +536,10 @@ nd_create(const NdMsg *p, Monitor *m, cairo_surface_t *img)
 	t->progress = p->progress;
 	t->seq = p->seq;
 	t->img = img;
-	t->tree = wlr_scene_tree_create(layers[LyrOverlay]);
+	t->tree = nx_scene_tree_create(layers[LyrOverlay]);
 	if (!t->tree || !nd_build_card(t, p->app, p->summary, p->body)) {
 		if (t->tree)
-			wlr_scene_node_destroy(&t->tree->node);
+			nx_scene_node_destroy(&t->tree->node);
 		if (img)
 			cairo_surface_destroy(img);
 		free(t);
@@ -549,7 +549,7 @@ nd_create(const NdMsg *p, Monitor *m, cairo_surface_t *img)
 	t->off_x = m->m.x + m->m.width + ND_GAP;
 	t->x_f = (double)t->off_x;
 	t->x_vel = 0.0;
-	wlr_scene_node_set_position(&t->tree->node, t->off_x, t->slot_y);
+	nx_scene_node_set_position(&t->tree->node, t->off_x, t->slot_y);
 	t->timer = wl_event_loop_add_timer(event_loop, nd_hide_timeout, t);
 	wl_list_insert(&nd_toasts, &t->link);
 	return t;
@@ -581,7 +581,7 @@ nd_present(NdToast *t, int32_t expire)
 	if (t->timer)
 		wl_event_source_timer_update(t->timer,
 				expire == 0 ? 0 : (int)hold);
-	wlr_scene_node_raise_to_top(&t->tree->node);
+	nx_scene_node_raise_to_top(&t->tree->node);
 	nd_clip_to_mon(t, (int)t->x_f);
 	nd_schedule(t->m);
 }
@@ -598,7 +598,7 @@ nd_show(const NdMsg *p, cairo_surface_t *img)
 			cairo_surface_destroy(img);
 		return;
 	}
-	if (!m || !m->wlr_output) {
+	if (!m || !m->nx_output) {
 		/* DND or no screen. */
 		if (img)
 			cairo_surface_destroy(img);
@@ -707,7 +707,7 @@ notifyd_bus_event(int fd, uint32_t mask, void *data)
 		return 0;
 
 	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR)) {
-		wlr_log(WLR_ERROR,
+		nx_log(NX_ERROR,
 				"notifyd: session bus hangup — disabling notifications");
 		if (notifyd_event) {
 			wl_event_source_remove(notifyd_event);
@@ -760,7 +760,7 @@ notifyd_init(void)
 
 	r = sd_bus_open_user(&notifyd_bus);
 	if (r < 0) {
-		wlr_log(WLR_ERROR, "notifyd: failed to connect to session bus: %s",
+		nx_log(NX_ERROR, "notifyd: failed to connect to session bus: %s",
 				strerror(-r));
 		notifyd_bus = NULL;
 		return;
@@ -776,7 +776,7 @@ notifyd_init(void)
 	r = sd_bus_request_name(notifyd_bus, "org.freedesktop.Notifications",
 			name_flags);
 	if (r < 0) {
-		wlr_log(WLR_ERROR, "notifyd: failed to request name: %s",
+		nx_log(NX_ERROR, "notifyd: failed to request name: %s",
 				strerror(-r));
 		goto fail;
 	}
@@ -816,7 +816,7 @@ notifyd_tick(Monitor *m, double dt, int *still)
 		if (t->fill_sb)
 			moving |= spring_tick(&t->fill_f, &t->fill_vel,
 					t->fill_target, SPRING_ND, dt);
-		wlr_scene_node_set_position(&t->tree->node,
+		nx_scene_node_set_position(&t->tree->node,
 				(int)t->x_f, t->slot_y);
 		nd_clip_to_mon(t, (int)t->x_f);
 		if (moving) {

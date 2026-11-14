@@ -37,7 +37,7 @@ static const char *const IPC_LAYOUT_NAMES[] = { "[]=", "[M]" };
 typedef struct DwlIpcOutput {
 	struct wl_list link;          /* in dwl_ipc_outputs */
 	struct wl_resource *resource; /* zdwl_ipc_output_v2 */
-	struct wlr_output *output;    /* associated wl_output */
+	struct nx_output *output;    /* associated wl_output */
 	uint32_t last_sig;            /* FNV of last published state — skips
 	                               * identical frames (printstatus fires on
 	                               * every title change) */
@@ -56,13 +56,13 @@ ipc_output_release(struct wl_client *client, struct wl_resource *res)
 }
 
 static Monitor *
-monitor_for_wlr_output(struct wlr_output *o)
+monitor_for_nx_output(struct nx_output *o)
 {
 	Monitor *m;
 	if (!o)
 		return NULL;
 	wl_list_for_each(m, &mons, link) {
-		if (m->wlr_output == o)
+		if (m->nx_output == o)
 			return m;
 	}
 	return NULL;
@@ -81,7 +81,7 @@ ipc_output_set_tags(struct wl_client *client, struct wl_resource *res,
 	(void)client; (void)toggle_tagset;
 	if (!out || !out->output)
 		return;
-	m = monitor_for_wlr_output(out->output);
+	m = monitor_for_nx_output(out->output);
 	if (!m)
 		return;
 
@@ -137,7 +137,7 @@ ipc_output_set_layout(struct wl_client *client, struct wl_resource *res,
 
 	if (!out || !out->output)
 		return;
-	m = monitor_for_wlr_output(out->output);
+	m = monitor_for_nx_output(out->output);
 	if (!m || !m->active_ws)
 		return;
 	col = m->active_ws->focused_col;
@@ -183,7 +183,7 @@ ipc_manager_get_output(struct wl_client *client, struct wl_resource *mgr_res,
 		uint32_t id, struct wl_resource *output_res)
 {
 	DwlIpcOutput *out;
-	struct wlr_output *wlr_out;
+	struct nx_output *nx_out;
 	(void)mgr_res;
 
 	/* plain calloc — ecalloc() die()s the whole compositor on OOM,
@@ -195,8 +195,8 @@ ipc_manager_get_output(struct wl_client *client, struct wl_resource *mgr_res,
 		return;
 	}
 
-	wlr_out = wlr_output_from_resource(output_res);
-	out->output = wlr_out;
+	nx_out = nx_output_from_resource(output_res);
+	out->output = nx_out;
 
 	out->resource = wl_resource_create(client,
 			&zdwl_ipc_output_v2_interface, 1, id);
@@ -279,7 +279,7 @@ dwl_ipc_publish(void)
 
 		if (!out->resource || !out->output)
 			continue;
-		m = monitor_for_wlr_output(out->output);
+		m = monitor_for_nx_output(out->output);
 		if (!m)
 			continue;
 

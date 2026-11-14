@@ -13,7 +13,7 @@ in_workspace(Client *c, Workspace *ws)
 
 /* Move ws, floats keep their offset. */
 static void
-carry_workspace(Workspace *ws, Monitor *dst, const struct wlr_box *from)
+carry_workspace(Workspace *ws, Monitor *dst, const struct nx_box *from)
 {
 	Client *c;
 
@@ -21,7 +21,7 @@ carry_workspace(Workspace *ws, Monitor *dst, const struct wlr_box *from)
 	wl_list_for_each(c, &clients, link) {
 		if (client_float_ws(c) != ws)
 			continue;
-		resize(c, (struct wlr_box){
+		resize(c, (struct nx_box){
 			.x = c->geom.x + dst->m.x - from->x,
 			.y = c->geom.y + dst->m.y - from->y,
 			.width = c->geom.width, .height = c->geom.height}, 0);
@@ -53,14 +53,14 @@ reclaim_from(Monitor *m, Monitor *src)
 	int moved = 0;
 
 	wl_list_for_each_safe(ws, tmp, &src->workspaces, link) {
-		if (strcmp(ws->home, m->wlr_output->name) || !workspace_has_clients(ws))
+		if (strcmp(ws->home, m->nx_output->name) || !workspace_has_clients(ws))
 			continue;
 		carry_workspace(ws, m, &src->m);
 		wl_list_for_each(c, &clients, link) {
 			if (!in_workspace(c, ws))
 				continue;
 			free(c->output);
-			if (!(c->output = strdup(m->wlr_output->name)))
+			if (!(c->output = strdup(m->nx_output->name)))
 				die("oom");
 		}
 		moved = 1;
@@ -83,7 +83,7 @@ monitor_reclaim_workspaces(Monitor *m)
 	if (REMOTE_PARKED(m))
 		return;
 	/* Floats clamp against m->w. */
-	wlr_output_layout_get_box(output_layout, m->wlr_output, &m->m);
+	nx_output_layout_get_box(output_layout, m->nx_output, &m->m);
 	m->w = m->m;
 	wl_list_for_each(src, &mons, link) {
 		if (src != m)

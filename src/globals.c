@@ -31,67 +31,67 @@ int monovl_watch_wd = -1;
 struct wl_event_source *monovl_watch_source = NULL;
 struct wl_display *dpy;
 struct wl_event_loop *event_loop;
-struct wlr_backend *backend;
-struct wlr_scene *scene;
-struct wlr_scene_tree *layers[NUM_LAYERS];
-struct wlr_scene_tree *drag_icon;
+struct nx_backend *backend;
+struct nx_scene *scene;
+struct nx_scene_tree *layers[NUM_LAYERS];
+struct nx_scene_tree *drag_icon;
 /* Map from ZWLR_LAYER_SHELL_* constants to Lyr* enum */
 const int layermap[] = { LyrBg, LyrBottom, LyrTop, LyrOverlay };
-struct wlr_renderer *drw;
-struct wlr_allocator *alloc;
-struct wlr_compositor *compositor;
-struct wlr_session *session;
+struct nx_renderer *drw;
+struct nx_allocator *alloc;
+struct nx_compositor *compositor;
+struct nx_session *session;
 struct StatusFont statusfont;
 int fcft_initialized;
 int has_nixlytile_session_target_cached = -1;
 
-struct wlr_xdg_shell *xdg_shell;
-struct wlr_xdg_activation_v1 *activation;
-struct wlr_xdg_decoration_manager_v1 *xdg_decoration_mgr;
+struct nx_xdg_shell *xdg_shell;
+struct nx_xdg_activation_v1 *activation;
+struct nx_xdg_decoration_manager_v1 *xdg_decoration_mgr;
 struct wl_list clients; /* tiling order */
 struct wl_list fstack;  /* focus order */
 struct wl_list closing_anims; /* ClosingAnim list — close-anim snapshots */
-struct wlr_idle_notifier_v1 *idle_notifier;
-struct wlr_idle_inhibit_manager_v1 *idle_inhibit_mgr;
-struct wlr_layer_shell_v1 *layer_shell;
-struct wlr_output_manager_v1 *output_mgr;
-struct wlr_content_type_manager_v1 *content_type_mgr;
-struct wlr_tearing_control_manager_v1 *tearing_control_mgr;
-struct wlr_virtual_keyboard_manager_v1 *virtual_keyboard_mgr;
-struct wlr_virtual_pointer_manager_v1 *virtual_pointer_mgr;
-struct wlr_tablet_manager_v2 *tablet_v2_mgr;
-struct wlr_text_input_manager_v3 *text_input_mgr;
-struct wlr_text_input_v3 *active_text_input;
+struct nx_idle_notifier_v1 *idle_notifier;
+struct nx_idle_inhibit_manager_v1 *idle_inhibit_mgr;
+struct nx_layer_shell_v1 *layer_shell;
+struct nx_output_manager_v1 *output_mgr;
+struct nx_content_type_manager_v1 *content_type_mgr;
+struct nx_tearing_control_manager_v1 *tearing_control_mgr;
+struct nx_virtual_keyboard_manager_v1 *virtual_keyboard_mgr;
+struct nx_virtual_pointer_manager_v1 *virtual_pointer_mgr;
+struct nx_tablet_manager_v2 *tablet_v2_mgr;
+struct nx_text_input_manager_v3 *text_input_mgr;
+struct nx_text_input_v3 *active_text_input;
 struct wl_list text_inputs; /* TextInput.link */
-struct wlr_cursor_shape_manager_v1 *cursor_shape_mgr;
-struct wlr_output_power_manager_v1 *power_mgr;
-struct wlr_color_manager_v1 *color_mgr;
-struct wlr_color_representation_manager_v1 *color_repr_mgr;
-struct wlr_keyboard_shortcuts_inhibit_manager_v1 *kb_shortcuts_inhibit_mgr;
-struct wlr_pointer_gestures_v1 *pointer_gestures;
-struct wlr_xdg_foreign_registry *foreign_registry;
-struct wlr_xdg_foreign_v2 *xdg_foreign;
-struct wlr_xdg_wm_dialog_v1 *xdg_dialog_mgr;
-struct wlr_ext_image_copy_capture_manager_v1 *image_copy_capture_mgr;
-struct wlr_security_context_manager_v1 *security_ctx_mgr;
-struct wlr_xdg_system_bell_v1 *system_bell;
-struct wlr_ext_foreign_toplevel_list_v1 *foreign_toplevel_list;
-struct wlr_ext_data_control_manager_v1 *ext_data_control_mgr;
-struct wlr_fixes *protocol_fixes;
+struct nx_cursor_shape_manager_v1 *cursor_shape_mgr;
+struct nx_output_power_manager_v1 *power_mgr;
+struct nx_color_manager_v1 *color_mgr;
+struct nx_color_representation_manager_v1 *color_repr_mgr;
+struct nx_keyboard_shortcuts_inhibit_manager_v1 *kb_shortcuts_inhibit_mgr;
+struct nx_pointer_gestures_v1 *pointer_gestures;
+struct nx_xdg_foreign_registry *foreign_registry;
+struct nx_xdg_foreign_v2 *xdg_foreign;
+struct nx_xdg_wm_dialog_v1 *xdg_dialog_mgr;
+struct nx_ext_image_copy_capture_manager_v1 *image_copy_capture_mgr;
+struct nx_security_context_manager_v1 *security_ctx_mgr;
+struct nx_xdg_system_bell_v1 *system_bell;
+struct nx_ext_foreign_toplevel_list_v1 *foreign_toplevel_list;
+struct nx_ext_data_control_manager_v1 *ext_data_control_mgr;
+struct nx_fixes *protocol_fixes;
 
-struct wlr_pointer_constraints_v1 *pointer_constraints;
-struct wlr_relative_pointer_manager_v1 *relative_pointer_mgr;
-struct wlr_pointer_constraint_v1 *active_constraint;
+struct nx_pointer_constraints_v1 *pointer_constraints;
+struct nx_relative_pointer_manager_v1 *relative_pointer_mgr;
+struct nx_pointer_constraint_v1 *active_constraint;
 
-struct wlr_cursor *cursor;
-struct wlr_xcursor_manager *cursor_mgr;
+struct nx_cursor *cursor;
+struct nx_xcursor_manager *cursor_mgr;
 
-struct wlr_scene_rect *root_bg;
-struct wlr_session_lock_manager_v1 *session_lock_mgr;
-struct wlr_scene_rect *locked_bg;
-struct wlr_session_lock_v1 *cur_lock;
+struct nx_scene_rect *root_bg;
+struct nx_session_lock_manager_v1 *session_lock_mgr;
+struct nx_scene_rect *locked_bg;
+struct nx_session_lock_v1 *cur_lock;
 
-struct wlr_seat *seat;
+struct nx_seat *seat;
 KeyboardGroup *kb_group;
 unsigned int cursor_mode;
 Client *grabc;
@@ -102,14 +102,14 @@ int resize_use_v, resize_use_h;
 uint32_t resize_last_time;
 double resize_last_x, resize_last_y;
 
-struct wlr_output_layout *output_layout;
-struct wlr_box sgeom;
+struct nx_output_layout *output_layout;
+struct nx_box sgeom;
 struct wl_list mons;
 Monitor *selmon;
 
-struct wlr_box resize_start_box_v;
-struct wlr_box resize_start_box_h;
-struct wlr_box resize_start_box_f;
+struct nx_box resize_start_box_v;
+struct nx_box resize_start_box_h;
+struct nx_box resize_start_box_f;
 double resize_start_x, resize_start_y;
 LayoutNode *resize_split_node;
 LayoutNode *resize_split_node_h;
@@ -225,7 +225,7 @@ struct wl_listener new_kb_shortcuts_inhibitor = {.notify = newkbshortcutsinhibit
 #ifdef XWAYLAND
 struct wl_listener new_xwayland_surface = {.notify = createnotifyx11};
 struct wl_listener xwayland_ready = {.notify = xwaylandready};
-struct wlr_xwayland *xwayland;
+struct nx_xwayland *xwayland;
 
 xcb_atom_t atom_steam_game;
 xcb_atom_t atom_steam_overlay;
@@ -233,8 +233,8 @@ xcb_atom_t atom_steam_bigpicture;
 xcb_atom_t atom_net_wm_ping;
 #endif
 
-#ifndef WLR_SILENCE
-#define WLR_SILENCE (WLR_ERROR - 1)
+#ifndef NX_SILENCE
+#define NX_SILENCE (NX_ERROR - 1)
 #endif
 
 /* configuration, allows nested code to access above variables */

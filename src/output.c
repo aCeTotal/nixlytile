@@ -13,7 +13,7 @@ static void schedule_edid_reprobe(Monitor *m);
  * caller here runs inside a layout signal emission where the remaining
  * listeners still hold that entry — so the drop waits for idle.  A stale
  * pointer is harmless: the lookup compares addresses, never derefs. */
-static struct wlr_output *layout_drop_queue[MAX_MONITORS];
+static struct nx_output *layout_drop_queue[MAX_MONITORS];
 static int layout_drop_n;
 static struct wl_event_source *layout_drop_source;
 
@@ -24,12 +24,12 @@ layout_drop_run(void *data)
 
 	layout_drop_source = NULL;
 	for (i = 0; i < layout_drop_n; i++)
-		wlr_output_layout_remove(output_layout, layout_drop_queue[i]);
+		nx_output_layout_remove(output_layout, layout_drop_queue[i]);
 	layout_drop_n = 0;
 }
 
 static void
-layout_drop(struct wlr_output *o)
+layout_drop(struct nx_output *o)
 {
 	if (!o || layout_drop_n >= MAX_MONITORS)
 		return;
@@ -56,8 +56,8 @@ cleanupmon(struct wl_listener *listener, void *data)
 
 	/* If a laptop display is being removed, clear is_mirror on any output
 	 * that was mirroring it so it becomes an independent display. */
-	if (strncmp(m->wlr_output->name, "eDP", 3) == 0 ||
-	    strncmp(m->wlr_output->name, "LVDS", 4) == 0) {
+	if (strncmp(m->nx_output->name, "eDP", 3) == 0 ||
+	    strncmp(m->nx_output->name, "LVDS", 4) == 0) {
 		Monitor *other;
 		wl_list_for_each(other, &mons, link) {
 			if (other->is_mirror)
@@ -68,7 +68,7 @@ cleanupmon(struct wl_listener *listener, void *data)
 	/* m->layers[i] are intentionally not unlinked */
 	for (i = 0; i < LENGTH(m->layers); i++) {
 		wl_list_for_each_safe(l, tmp, &m->layers[i], link)
-			wlr_layer_surface_v1_destroy(l->layer_surface);
+			nx_layer_surface_v1_destroy(l->layer_surface);
 	}
 
 	/* Purge in-flight close animations on the dying monitor —
@@ -82,7 +82,7 @@ cleanupmon(struct wl_listener *listener, void *data)
 				continue;
 			wl_list_remove(&ca->link);
 			if (ca->tree)
-				wlr_scene_node_destroy(&ca->tree->node);
+				nx_scene_node_destroy(&ca->tree->node);
 			free(ca);
 		}
 	}
@@ -94,18 +94,10 @@ cleanupmon(struct wl_listener *listener, void *data)
 	wl_list_remove(&m->request_state.link);
 	if (m->lock_surface)
 		destroylocksurface(&m->destroy_lock_surface, NULL);
-	m->wlr_output->data = NULL;
-	wlr_output_layout_remove(output_layout, m->wlr_output);
-	wlr_scene_output_destroy(m->scene_output);
+	m->nx_output->data = NULL;
+	nx_output_layout_remove(output_layout, m->nx_output);
+	nx_scene_output_destroy(m->scene_output);
 
-	if (m->toast_overlay_buf) {
-		cpu_cursor_buffer_destroy(m->toast_overlay_buf);
-		m->toast_overlay_buf = NULL;
-	}
-	if (m->toast_overlay_layer) {
-		wlr_output_layer_destroy(m->toast_overlay_layer);
-		m->toast_overlay_layer = NULL;
-	}
 	closemon(m, 1);
 	osd_purge_mon(m);
 	notifyd_purge_mon(m);
@@ -129,7 +121,7 @@ cleanupmon(struct wl_listener *listener, void *data)
 		wl_event_source_remove(m->edid_reprobe_timer);
 		m->edid_reprobe_timer = NULL;
 	}
-	wlr_scene_node_destroy(&m->fullscreen_bg->node);
+	nx_scene_node_destroy(&m->fullscreen_bg->node);
 	cleanupstatusbar(m);
 	free(m);
 
@@ -148,7 +140,7 @@ closemon(Monitor *m, int destroying)
 		Monitor *iter;
 		selmon = NULL;
 		wl_list_for_each(iter, &mons, link) {
-			if (iter->wlr_output->enabled && !iter->is_mirror
+			if (iter->nx_output->enabled && !iter->is_mirror
 					&& !REMOTE_PARKED(iter)) {
 				selmon = iter;
 				break;
@@ -164,7 +156,7 @@ closemon(Monitor *m, int destroying)
 	monitor_evacuate_workspaces(m, selmon);
 	wl_list_for_each(c, &clients, link) {
 		if (c->isfloating && c->geom.x > m->m.width)
-			resize(c, (struct wlr_box){.x = c->geom.x - m->w.width, .y = c->geom.y,
+			resize(c, (struct nx_box){.x = c->geom.x - m->w.width, .y = c->geom.y,
 					.width = c->geom.width, .height = c->geom.height}, 0);
 		if (c->mon == m)
 			setmon(c, dest, c->tags);
@@ -176,15 +168,15 @@ closemon(Monitor *m, int destroying)
 }
 
 static int
-mode_is_dci_4k(const struct wlr_output_mode *mode)
+mode_is_dci_4k(const struct nx_output_mode *mode)
 {
 	return mode && mode->width > 3840 && mode->height == 2160;
 }
 
-static struct wlr_output_mode *
-find_uhd_mode(struct wlr_output *output)
+static struct nx_output_mode *
+find_uhd_mode(struct nx_output *output)
 {
-	struct wlr_output_mode *mode, *best = NULL;
+	struct nx_output_mode *mode, *best = NULL;
 	wl_list_for_each(mode, &output->modes, link) {
 		if (mode->width != 3840 || mode->height != 2160)
 			continue;
@@ -194,10 +186,10 @@ find_uhd_mode(struct wlr_output *output)
 	return best;
 }
 
-struct wlr_output_mode *
-bestmode(struct wlr_output *output)
+struct nx_output_mode *
+bestmode(struct nx_output *output)
 {
-	struct wlr_output_mode *mode, *best = NULL;
+	struct nx_output_mode *mode, *best = NULL;
 	int best_area = 0, best_refresh = 0;
 
 	wl_list_for_each(mode, &output->modes, link) {
@@ -218,9 +210,9 @@ bestmode(struct wlr_output *output)
 	}
 
 	if (!best) {
-		best = wlr_output_preferred_mode(output);
+		best = nx_output_preferred_mode(output);
 		if (mode_is_dci_4k(best)) {
-			struct wlr_output_mode *uhd = find_uhd_mode(output);
+			struct nx_output_mode *uhd = find_uhd_mode(output);
 			if (uhd)
 				best = uhd;
 		}
@@ -238,10 +230,10 @@ bestmode(struct wlr_output *output)
  * rendering under native its direct scanout.  Only a mode that differs
  * from the panel's best mode is a deliberate choice worth protecting. */
 int
-monitor_mode_pinned(struct wlr_output *o)
+monitor_mode_pinned(struct nx_output *o)
 {
 	RuntimeMonitorConfig *rtcfg;
-	struct wlr_output_mode *best;
+	struct nx_output_mode *best;
 
 	if (!o)
 		return 0;
@@ -270,9 +262,9 @@ output_lock_max_refresh(void)
 	Monitor *m;
 
 	wl_list_for_each(m, &mons, link) {
-		struct wlr_output *o = m->wlr_output;
-		struct wlr_output_mode *target = NULL, *mode, *cur;
-		struct wlr_output_state st;
+		struct nx_output *o = m->nx_output;
+		struct nx_output_mode *target = NULL, *mode, *cur;
+		struct nx_output_state st;
 
 		if (!o || !o->enabled)
 			continue;
@@ -284,7 +276,7 @@ output_lock_max_refresh(void)
 			if (mode->width != cur->width ||
 					mode->height != cur->height)
 				continue;
-			if (wlr_drm_connector_mode_pace_divisor(o, mode))
+			if (nx_drm_connector_mode_pace_divisor(o, mode))
 				continue;
 			if (!target || mode->refresh > target->refresh)
 				target = mode;
@@ -292,25 +284,25 @@ output_lock_max_refresh(void)
 		if (!target || target == cur)
 			continue;
 
-		wlr_output_state_init(&st);
-		wlr_output_state_set_enabled(&st, 1);
-		wlr_output_state_set_mode(&st, target);
-		if (wlr_output_test_state(o, &st) &&
-				wlr_output_commit_state(o, &st)) {
-			wlr_log(WLR_INFO, "lock: %s → %dx%d@%d (max refresh)",
+		nx_output_state_init(&st);
+		nx_output_state_set_enabled(&st, 1);
+		nx_output_state_set_mode(&st, target);
+		if (nx_output_test_state(o, &st) &&
+				nx_output_commit_state(o, &st)) {
+			nx_log(NX_INFO, "lock: %s → %dx%d@%d (max refresh)",
 				o->name, target->width, target->height,
 				target->refresh / 1000);
 			invalidate_video_pacing(m);
 		}
-		wlr_output_state_finish(&st);
+		nx_output_state_finish(&st);
 	}
 	updatemons(NULL, NULL);
 }
 
-struct wlr_output_mode *
-find_mode(struct wlr_output *output, int width, int height, float refresh)
+struct nx_output_mode *
+find_mode(struct nx_output *output, int width, int height, float refresh)
 {
-	struct wlr_output_mode *mode, *best = NULL;
+	struct nx_output_mode *mode, *best = NULL;
 	int best_refresh = 0;
 
 	wl_list_for_each(mode, &output->modes, link) {
@@ -342,13 +334,13 @@ find_mode(struct wlr_output *output, int width, int height, float refresh)
 static void
 try_reapply_bestmode(Monitor *m)
 {
-	struct wlr_output *o;
-	struct wlr_output_mode *best;
-	struct wlr_output_state st;
+	struct nx_output *o;
+	struct nx_output_mode *best;
+	struct nx_output_state st;
 
-	if (!m || !m->wlr_output)
+	if (!m || !m->nx_output)
 		return;
-	o = m->wlr_output;
+	o = m->nx_output;
 
 	/* Respect a user-pinned resolution (native pin doesn't count). */
 	if (monitor_mode_pinned(o))
@@ -369,12 +361,12 @@ try_reapply_bestmode(Monitor *m)
 	if (o->current_mode == best)
 		return;
 
-	wlr_output_state_init(&st);
-	wlr_output_state_set_enabled(&st, 1);
-	wlr_output_state_set_mode(&st, best);
-	if (wlr_output_test_state(o, &st)) {
-		if (wlr_output_commit_state(o, &st)) {
-			wlr_log(WLR_INFO,
+	nx_output_state_init(&st);
+	nx_output_state_set_enabled(&st, 1);
+	nx_output_state_set_mode(&st, best);
+	if (nx_output_test_state(o, &st)) {
+		if (nx_output_commit_state(o, &st)) {
+			nx_log(NX_INFO,
 				"EDID re-probe: %s switched to %dx%d@%d (was %dx%d@%d)",
 				o->name,
 				best->width, best->height, best->refresh / 1000,
@@ -384,7 +376,7 @@ try_reapply_bestmode(Monitor *m)
 			updatemons(NULL, NULL);
 		}
 	}
-	wlr_output_state_finish(&st);
+	nx_output_state_finish(&st);
 }
 
 /* Escalating EDID re-probe schedule: 2s → 5s → 15s. Stops after 3 attempts
@@ -408,19 +400,19 @@ static int
 edid_reprobe_cb(void *data)
 {
 	Monitor *m = data;
-	struct wlr_output_mode *before;
+	struct nx_output_mode *before;
 
-	if (!m || !m->wlr_output)
+	if (!m || !m->nx_output)
 		return 0;
 
-	before = m->wlr_output->current_mode;
+	before = m->nx_output->current_mode;
 	try_reapply_bestmode(m);
 
 	/* EDID that settles late can also bring HDR/deep-color blocks the
 	 * initial probe never saw — re-evaluate caps each reprobe round. */
 	refresh_color_caps(m);
 
-	if (m->wlr_output->current_mode == before) {
+	if (m->nx_output->current_mode == before) {
 		m->edid_reprobe_stable_rounds++;
 	} else {
 		m->edid_reprobe_stable_rounds = 0;
@@ -441,8 +433,8 @@ find_laptop_monitor(void)
 {
 	Monitor *m;
 	wl_list_for_each(m, &mons, link) {
-		if (strncmp(m->wlr_output->name, "eDP", 3) == 0 ||
-		    strncmp(m->wlr_output->name, "LVDS", 4) == 0)
+		if (strncmp(m->nx_output->name, "eDP", 3) == 0 ||
+		    strncmp(m->nx_output->name, "LVDS", 4) == 0)
 			return m;
 	}
 	return NULL;
@@ -462,8 +454,8 @@ static void restart_wallpaper(void) { /* wallpaper removed */ }
 static double
 monitor_physical_diagonal(Monitor *m)
 {
-	int pw = m->wlr_output->phys_width;
-	int ph = m->wlr_output->phys_height;
+	int pw = m->nx_output->phys_width;
+	int ph = m->nx_output->phys_height;
 	if (pw <= 0 || ph <= 0)
 		return 0.0;
 	return sqrt((double)pw * pw + (double)ph * ph);
@@ -472,9 +464,9 @@ monitor_physical_diagonal(Monitor *m)
 void
 monitor_effective_size(Monitor *m, int *w, int *h)
 {
-	enum wl_output_transform t = m->wlr_output->transform;
-	int mw = m->wlr_output->width;
-	int mh = m->wlr_output->height;
+	enum wl_output_transform t = m->nx_output->transform;
+	int mw = m->nx_output->width;
+	int mh = m->nx_output->height;
 
 	if (t == WL_OUTPUT_TRANSFORM_90 || t == WL_OUTPUT_TRANSFORM_270 ||
 	    t == WL_OUTPUT_TRANSFORM_FLIPPED_90 || t == WL_OUTPUT_TRANSFORM_FLIPPED_270) {
@@ -497,8 +489,8 @@ typedef struct {
 static void
 build_edid_key(Monitor *m, char *buf, size_t len)
 {
-	const char *model = m->wlr_output->model ? m->wlr_output->model : "unknown";
-	const char *serial = m->wlr_output->serial ? m->wlr_output->serial : "none";
+	const char *model = m->nx_output->model ? m->nx_output->model : "unknown";
+	const char *serial = m->nx_output->serial ? m->nx_output->serial : "none";
 	int w, h;
 	monitor_effective_size(m, &w, &h);
 	double diag = monitor_physical_diagonal(m);
@@ -557,14 +549,14 @@ auto_arrange_monitors(void)
 
 	/* Phase 1: Collect enabled, non-mirror monitors */
 	wl_list_for_each(m, &mons, link) {
-		if (m->wlr_output->enabled && !m->is_mirror && !m->is_virtual
+		if (m->nx_output->enabled && !m->is_mirror && !m->is_virtual
 				&& n < MAX_MONITORS) {
 			MonitorProbe *p = &probes[n];
 			p->mon = m;
 			monitor_effective_size(m, &p->eff_w, &p->eff_h);
 			p->phys_diag = monitor_physical_diagonal(m);
-			p->phys_w = m->wlr_output->phys_width;
-			p->phys_h = m->wlr_output->phys_height;
+			p->phys_w = m->nx_output->phys_width;
+			p->phys_h = m->nx_output->phys_height;
 			build_edid_key(m, p->edid_key, sizeof(p->edid_key));
 			n++;
 		}
@@ -577,12 +569,12 @@ auto_arrange_monitors(void)
 
 	/* Single monitor: trivial case */
 	if (n == 1) {
-		wlr_output_layout_add(output_layout, probes[0].mon->wlr_output, 0, 0);
-		wlr_log(WLR_INFO, "Auto-arrange: %s (%s) at (0, 0) [%dx%d] [CENTER]",
-			probes[0].mon->wlr_output->name, probes[0].edid_key,
+		nx_output_layout_add(output_layout, probes[0].mon->nx_output, 0, 0);
+		nx_log(NX_INFO, "Auto-arrange: %s (%s) at (0, 0) [%dx%d] [CENTER]",
+			probes[0].mon->nx_output->name, probes[0].edid_key,
 			probes[0].eff_w, probes[0].eff_h);
 		selmon = probes[0].mon;
-		wlr_cursor_warp_closest(cursor, NULL,
+		nx_cursor_warp_closest(cursor, NULL,
 			probes[0].eff_w / 2, probes[0].eff_h / 2);
 		arranging_monitors = 0;
 		return;
@@ -590,7 +582,7 @@ auto_arrange_monitors(void)
 
 	/* Phase 2: Temporary auto-placement for probing */
 	for (int i = 0; i < n; i++)
-		wlr_output_layout_add_auto(output_layout, probes[i].mon->wlr_output);
+		nx_output_layout_add_auto(output_layout, probes[i].mon->nx_output);
 
 	/* Find start/center monitor: biggest EDID physical diagonal */
 	int start_idx = find_center_monitor(probes, n);
@@ -607,12 +599,12 @@ auto_arrange_monitors(void)
 	/* Walk LEFT from start monitor */
 	Monitor *cur = probes[start_idx].mon;
 	while (left_n < n - 1) {
-		struct wlr_box box;
-		wlr_output_layout_get_box(output_layout, cur->wlr_output, &box);
+		struct nx_box box;
+		nx_output_layout_get_box(output_layout, cur->nx_output, &box);
 		if (box.width <= 0)
 			break;
 		int mid_y = box.y + box.height / 2;
-		struct wlr_output *o = wlr_output_layout_output_at(
+		struct nx_output *o = nx_output_layout_output_at(
 			output_layout, box.x - 1, mid_y);
 		if (!o || !o->data)
 			break;
@@ -632,12 +624,12 @@ auto_arrange_monitors(void)
 	/* Walk RIGHT from start monitor */
 	cur = probes[start_idx].mon;
 	while (right_n < n - 1) {
-		struct wlr_box box;
-		wlr_output_layout_get_box(output_layout, cur->wlr_output, &box);
+		struct nx_box box;
+		nx_output_layout_get_box(output_layout, cur->nx_output, &box);
 		if (box.width <= 0)
 			break;
 		int mid_y = box.y + box.height / 2;
-		struct wlr_output *o = wlr_output_layout_output_at(
+		struct nx_output *o = nx_output_layout_output_at(
 			output_layout, box.x + box.width, mid_y);
 		if (!o || !o->data)
 			break;
@@ -674,9 +666,9 @@ auto_arrange_monitors(void)
 			ordered[ordered_n++] = probes[i].mon;
 	}
 
-	wlr_log(WLR_INFO, "Auto-arrange: probe sweep from %s: "
+	nx_log(NX_INFO, "Auto-arrange: probe sweep from %s: "
 		"%d left, %d right, %d total",
-		probes[start_idx].mon->wlr_output->name,
+		probes[start_idx].mon->nx_output->name,
 		left_n, right_n, ordered_n);
 
 	/* Phase 4: Compute positions */
@@ -711,12 +703,12 @@ auto_arrange_monitors(void)
 
 	/* Phase 5: Apply positions */
 	for (int i = 0; i < ordered_n; i++) {
-		wlr_output_layout_add(output_layout, ordered[i]->wlr_output,
+		nx_output_layout_add(output_layout, ordered[i]->nx_output,
 			pos_x[i], pos_y[i]);
 		char key[256];
 		build_edid_key(ordered[i], key, sizeof(key));
-		wlr_log(WLR_INFO, "Auto-arrange: %s (%s) at (%d, %d) [%dx%d]%s",
-			ordered[i]->wlr_output->name, key,
+		nx_log(NX_INFO, "Auto-arrange: %s (%s) at (%d, %d) [%dx%d]%s",
+			ordered[i]->nx_output->name, key,
 			pos_x[i], pos_y[i], eff_w[i], eff_h[i],
 			i == center_pos ? " [CENTER]" : "");
 	}
@@ -725,7 +717,7 @@ auto_arrange_monitors(void)
 	selmon = ordered[center_pos];
 	int cx = pos_x[center_pos] + eff_w[center_pos] / 2;
 	int cy = pos_y[center_pos] + eff_h[center_pos] / 2;
-	wlr_cursor_warp_closest(cursor, NULL, cx, cy);
+	nx_cursor_warp_closest(cursor, NULL, cx, cy);
 
 	arranging_monitors = 0;
 }
@@ -744,7 +736,7 @@ warp_cursor_to_startup_monitor(void)
 	int n = 0;
 
 	wl_list_for_each(m, &mons, link) {
-		if (m->wlr_output->enabled && !m->is_mirror && n < MAX_MONITORS)
+		if (m->nx_output->enabled && !m->is_mirror && n < MAX_MONITORS)
 			list[n++] = m;
 	}
 
@@ -783,11 +775,11 @@ warp_cursor_to_startup_monitor(void)
 	}
 
 	selmon = best;
-	wlr_cursor_warp_closest(cursor, NULL,
+	nx_cursor_warp_closest(cursor, NULL,
 		best->m.x + best->m.width / 2,
 		best->m.y + best->m.height / 2);
-	wlr_log(WLR_INFO, "Startup cursor → monitor '%s' (%dx%d @ %d,%d)",
-		best->wlr_output->name,
+	nx_log(NX_INFO, "Startup cursor → monitor '%s' (%dx%d @ %d,%d)",
+		best->nx_output->name,
 		best->m.width, best->m.height, best->m.x, best->m.y);
 }
 
@@ -796,39 +788,39 @@ createmon(struct wl_listener *listener, void *data)
 {
 	/* This event is raised by the backend when a new output (aka a display or
 	 * monitor) becomes available. */
-	struct wlr_output *wlr_output = data;
+	struct nx_output *nx_output = data;
 	const MonitorRule *r;
 	RuntimeMonitorConfig *rtcfg;
 	size_t i;
-	struct wlr_output_state state;
-	struct wlr_output_mode *mode;
+	struct nx_output_state state;
+	struct nx_output_mode *mode;
 	Monitor *m;
 	Client *c;
 	int use_runtime_config = 0;
 
 	/* Log multi-GPU topology for diagnostics */
-	if (wlr_output_is_drm(wlr_output)) {
-		struct wlr_backend *parent =
-			wlr_drm_backend_get_parent(wlr_output->backend);
+	if (nx_output_is_drm(nx_output)) {
+		struct nx_backend *parent =
+			nx_drm_backend_get_parent(nx_output->backend);
 		if (parent) {
-			wlr_log(WLR_INFO, "Output %s is on secondary GPU (multi-GPU / mgpu)",
-				wlr_output->name);
+			nx_log(NX_INFO, "Output %s is on secondary GPU (multi-GPU / mgpu)",
+				nx_output->name);
 		}
 	}
 
-	if (!wlr_output_init_render(wlr_output, alloc, drw)) {
-		wlr_log(WLR_ERROR, "Failed to init render for output %s — "
-			"allocator/renderer buffer caps mismatch", wlr_output->name);
+	if (!nx_output_init_render(nx_output, alloc, drw)) {
+		nx_log(NX_ERROR, "Failed to init render for output %s — "
+			"allocator/renderer buffer caps mismatch", nx_output->name);
 		return;
 	}
 
 	/* Divisor modes for fast panels (300 Hz → 150/100/75) must exist
 	 * before any mode lookup below or in monitors.conf apply. */
-	pace_register_modes(wlr_output);
+	pace_register_modes(nx_output);
 
-	m = wlr_output->data = ecalloc(1, sizeof(*m));
-	m->wlr_output = wlr_output;
-	if (wlr_output_is_headless(wlr_output)) {
+	m = nx_output->data = ecalloc(1, sizeof(*m));
+	m->nx_output = nx_output;
+	if (nx_output_is_headless(nx_output)) {
 		static int last_virt_idx;
 		m->is_virtual = 1;
 		m->virt_idx = ++last_virt_idx;
@@ -842,7 +834,7 @@ createmon(struct wl_listener *listener, void *data)
 	 * successful commit below — the two bail-out paths (config-
 	 * disabled output, commit failure) free(m) and would leak them. */
 
-	wlr_output_state_init(&state);
+	nx_output_state_init(&state);
 	/* Initialize monitor state using configured rules */
 	m->gaps = gaps;
 
@@ -859,25 +851,25 @@ createmon(struct wl_listener *listener, void *data)
 		snprintf(m->ltsymbol, sizeof(m->ltsymbol), "%s", m->lt[m->sellt]->symbol);
 		m->m.x = REMOTE_PARK_X + REMOTE_PARK_STEP * (m->virt_idx - 1);
 		m->m.y = 0;
-		wlr_output_state_set_custom_mode(&state, REMOTE_PARK_W,
+		nx_output_state_set_custom_mode(&state, REMOTE_PARK_W,
 			REMOTE_PARK_H, REMOTE_PARK_HZ * 1000);
-		wlr_output_state_set_scale(&state, 1.0f);
+		nx_output_state_set_scale(&state, 1.0f);
 	}
 
 	/* First check runtime monitor configuration */
-	rtcfg = m->is_virtual ? NULL : find_monitor_config(wlr_output->name);
+	rtcfg = m->is_virtual ? NULL : find_monitor_config(nx_output->name);
 	if (rtcfg) {
 		use_runtime_config = 1;
-		wlr_log(WLR_INFO, "Using runtime config for monitor %s", wlr_output->name);
+		nx_log(NX_INFO, "Using runtime config for monitor %s", nx_output->name);
 
 		/* Check if monitor is disabled */
 		if (!rtcfg->enabled) {
-			wlr_log(WLR_INFO, "Monitor %s is disabled in config", wlr_output->name);
-			wlr_output_state_set_enabled(&state, 0);
-			wlr_output_commit_state(wlr_output, &state);
-			wlr_output_state_finish(&state);
+			nx_log(NX_INFO, "Monitor %s is disabled in config", nx_output->name);
+			nx_output_state_set_enabled(&state, 0);
+			nx_output_commit_state(nx_output, &state);
+			nx_output_state_finish(&state);
 			free(m);
-			wlr_output->data = NULL;
+			nx_output->data = NULL;
 			return;
 		}
 
@@ -887,8 +879,8 @@ createmon(struct wl_listener *listener, void *data)
 		m->lt[0] = &layouts[0];
 		m->lt[1] = &layouts[nlayouts > 1 ? 1 : 0];
 		snprintf(m->ltsymbol, sizeof(m->ltsymbol), "%s", m->lt[m->sellt]->symbol);
-		wlr_output_state_set_scale(&state, rtcfg->scale);
-		wlr_output_state_set_transform(&state, rtcfg->transform);
+		nx_output_state_set_scale(&state, rtcfg->scale);
+		nx_output_state_set_transform(&state, rtcfg->transform);
 
 		/* Position will be calculated after mode is set */
 		m->m.x = -1;
@@ -896,28 +888,28 @@ createmon(struct wl_listener *listener, void *data)
 
 		/* Find mode if resolution is specified */
 		if (rtcfg->width > 0 && rtcfg->height > 0) {
-			mode = find_mode(wlr_output, rtcfg->width, rtcfg->height, rtcfg->refresh);
+			mode = find_mode(nx_output, rtcfg->width, rtcfg->height, rtcfg->refresh);
 			if (mode) {
-				wlr_output_state_set_mode(&state, mode);
-				wlr_log(WLR_INFO, "Set mode %dx%d@%d for %s",
-					mode->width, mode->height, mode->refresh / 1000, wlr_output->name);
+				nx_output_state_set_mode(&state, mode);
+				nx_log(NX_INFO, "Set mode %dx%d@%d for %s",
+					mode->width, mode->height, mode->refresh / 1000, nx_output->name);
 			} else {
-				wlr_log(WLR_ERROR, "Mode %dx%d not found for %s, using auto",
-					rtcfg->width, rtcfg->height, wlr_output->name);
-				if ((mode = bestmode(wlr_output)))
-					wlr_output_state_set_mode(&state, mode);
+				nx_log(NX_ERROR, "Mode %dx%d not found for %s, using auto",
+					rtcfg->width, rtcfg->height, nx_output->name);
+				if ((mode = bestmode(nx_output)))
+					nx_output_state_set_mode(&state, mode);
 			}
 		} else {
 			/* Auto mode - pick best */
-			if ((mode = bestmode(wlr_output)))
-				wlr_output_state_set_mode(&state, mode);
+			if ((mode = bestmode(nx_output)))
+				nx_output_state_set_mode(&state, mode);
 		}
 	}
 
 	/* Fall back to compile-time monrules if no runtime config */
 	if (!use_runtime_config) {
 		for (r = monrules; r < monrules + nmonrules; r++) {
-			if (!r->name || strstr(wlr_output->name, r->name)) {
+			if (!r->name || strstr(nx_output->name, r->name)) {
 				m->m.x = r->x;
 				m->m.y = r->y;
 				m->mfact = r->mfact;
@@ -925,14 +917,14 @@ createmon(struct wl_listener *listener, void *data)
 				m->lt[0] = r->lt;
 				m->lt[1] = &layouts[nlayouts > 1 && r->lt != &layouts[1]];
 				snprintf(m->ltsymbol, sizeof(m->ltsymbol), "%s", m->lt[m->sellt]->symbol);
-				wlr_output_state_set_transform(&state, r->rr);
+				nx_output_state_set_transform(&state, r->rr);
 				break;
 			}
 		}
 
 		/* Pick best mode (highest area, highest refresh, ≤4K UHD). */
-		if ((mode = bestmode(wlr_output)))
-			wlr_output_state_set_mode(&state, mode);
+		if ((mode = bestmode(nx_output)))
+			nx_output_state_set_mode(&state, mode);
 
 		/* Niri-style: scale = 1.0 by default (no auto-scaling).
 		 * User overrides per-output by setting `scale` in the
@@ -940,75 +932,75 @@ createmon(struct wl_listener *listener, void *data)
 		{
 			float scale = 1.0f;
 			for (r = monrules; r < monrules + nmonrules; r++) {
-				if (!r->name || strstr(wlr_output->name, r->name)) {
+				if (!r->name || strstr(nx_output->name, r->name)) {
 					if (r->scale > 0.0f)
 						scale = r->scale;
 					break;
 				}
 			}
-			wlr_output_state_set_scale(&state, scale);
+			nx_output_state_set_scale(&state, scale);
 		}
 	}
 
 	/* Set up event listeners */
-	LISTEN(&wlr_output->events.frame, &m->frame, rendermon);
-	LISTEN(&wlr_output->events.destroy, &m->destroy, cleanupmon);
-	LISTEN(&wlr_output->events.request_state, &m->request_state, requestmonstate);
-	LISTEN(&wlr_output->events.present, &m->present, outputpresent);
+	LISTEN(&nx_output->events.frame, &m->frame, rendermon);
+	LISTEN(&nx_output->events.destroy, &m->destroy, cleanupmon);
+	LISTEN(&nx_output->events.request_state, &m->request_state, requestmonstate);
+	LISTEN(&nx_output->events.present, &m->present, outputpresent);
 
 	/* Find laptop monitor for mode fallback: if the best mode on an external
 	 * display fails (bandwidth exceeded), try the laptop's resolution. */
 	Monitor *laptop = NULL;
-	if (!use_runtime_config && is_external_connector(wlr_output->name))
+	if (!use_runtime_config && is_external_connector(nx_output->name))
 		laptop = find_laptop_monitor();
 
-	wlr_output_state_set_enabled(&state, 1);
+	nx_output_state_set_enabled(&state, 1);
 
 	/* Test the state before committing to avoid GPU hangs.
 	 * If the best mode fails (bandwidth exceeded), fall back to
 	 * the laptop's resolution, then the output's preferred mode. */
-	if (!wlr_output_test_state(wlr_output, &state)) {
-		wlr_log(WLR_INFO, "Mode test failed for %s, trying fallback modes",
-			wlr_output->name);
+	if (!nx_output_test_state(nx_output, &state)) {
+		nx_log(NX_INFO, "Mode test failed for %s, trying fallback modes",
+			nx_output->name);
 
-		if (laptop && laptop->wlr_output->current_mode) {
-			mode = find_mode(wlr_output,
-				laptop->wlr_output->current_mode->width,
-				laptop->wlr_output->current_mode->height, 0);
+		if (laptop && laptop->nx_output->current_mode) {
+			mode = find_mode(nx_output,
+				laptop->nx_output->current_mode->width,
+				laptop->nx_output->current_mode->height, 0);
 			if (mode) {
-				wlr_output_state_set_mode(&state, mode);
-				wlr_log(WLR_INFO, "Trying laptop resolution %dx%d for %s",
-					mode->width, mode->height, wlr_output->name);
+				nx_output_state_set_mode(&state, mode);
+				nx_log(NX_INFO, "Trying laptop resolution %dx%d for %s",
+					mode->width, mode->height, nx_output->name);
 			}
 		}
 
-		if (!wlr_output_test_state(wlr_output, &state)) {
-			mode = wlr_output_preferred_mode(wlr_output);
+		if (!nx_output_test_state(nx_output, &state)) {
+			mode = nx_output_preferred_mode(nx_output);
 			if (mode_is_dci_4k(mode)) {
-				struct wlr_output_mode *uhd = find_uhd_mode(wlr_output);
+				struct nx_output_mode *uhd = find_uhd_mode(nx_output);
 				if (uhd)
 					mode = uhd;
 			}
 			if (mode) {
-				wlr_output_state_set_mode(&state, mode);
-				wlr_log(WLR_INFO, "Trying preferred mode for %s", wlr_output->name);
+				nx_output_state_set_mode(&state, mode);
+				nx_log(NX_INFO, "Trying preferred mode for %s", nx_output->name);
 			}
 		}
 	}
 
-	if (!wlr_output_commit_state(wlr_output, &state)) {
-		wlr_log(WLR_ERROR, "Failed to commit output state for %s, disabling",
-			wlr_output->name);
-		wlr_output_state_finish(&state);
+	if (!nx_output_commit_state(nx_output, &state)) {
+		nx_log(NX_ERROR, "Failed to commit output state for %s, disabling",
+			nx_output->name);
+		nx_output_state_finish(&state);
 		wl_list_remove(&m->frame.link);
 		wl_list_remove(&m->destroy.link);
 		wl_list_remove(&m->request_state.link);
 		wl_list_remove(&m->present.link);
 		free(m);
-		wlr_output->data = NULL;
+		nx_output->data = NULL;
 		return;
 	}
-	wlr_output_state_finish(&state);
+	nx_output_state_finish(&state);
 
 	initstatusbar(m);
 	monitor_init_workspaces(m);
@@ -1023,23 +1015,21 @@ createmon(struct wl_listener *listener, void *data)
 	m->game_vrr_last_fps = 0.0f;
 	m->game_vrr_last_change_ns = 0;
 	m->game_vrr_stable_frames = 0;
-	if (wlr_output_is_drm(wlr_output)) {
-		struct wlr_output_state vrr_test;
-		wlr_output_state_init(&vrr_test);
-		wlr_output_state_set_adaptive_sync_enabled(&vrr_test, 1);
-		if (wlr_output_test_state(wlr_output, &vrr_test)) {
+	if (nx_output_is_drm(nx_output)) {
+		struct nx_output_state vrr_test;
+		nx_output_state_init(&vrr_test);
+		nx_output_state_set_adaptive_sync_enabled(&vrr_test, 1);
+		if (nx_output_test_state(nx_output, &vrr_test)) {
 			m->vrr_capable = 1;
-			wlr_log(WLR_DEBUG, "Monitor %s supports VRR/Adaptive Sync", wlr_output->name);
+			nx_log(NX_DEBUG, "Monitor %s supports VRR/Adaptive Sync", nx_output->name);
 		}
-		wlr_output_state_finish(&vrr_test);
+		nx_output_state_finish(&vrr_test);
 	}
 
 	/* Low-latency cursor: discover cursor DRM plane for direct atomic commits */
 	ll_cursor_init(m);
 
-	/* Gaming capability profile: vendor, overlay planes, LFC, explicit sync.
-	 * Populated once here; consumed by update_game_vrr (LFC warning),
-	 * toast/OSD overlay promotion, and various diagnostic logs. */
+	/* Gaming capability profile. */
 	memset(&m->gcaps, 0, sizeof(m->gcaps));
 	m->gcaps.explicit_sync_ready = g_explicit_sync_ok;
 	if (discrete_gpu_idx >= 0) {
@@ -1053,60 +1043,15 @@ createmon(struct wl_listener *listener, void *data)
 	                       m->gcaps.vendor == GPU_VENDOR_INTEL);
 	m->gcaps.prefers_vulkan = (m->gcaps.vendor == GPU_VENDOR_NVIDIA);
 
-	/* Overlay-plane probe: try to attach a dummy layer to a test state.
-	 * NVIDIA's proprietary driver exposes only primary+cursor planes today,
-	 * so this will reject; AMD/Intel typically accept the probe.
-	 * Failure here is expected and non-fatal. */
-	m->gcaps.overlay_planes_supported = 0;
-	if (wlr_output_is_drm(wlr_output)) {
-		const struct wlr_drm_format_set *primary_formats =
-			wlr_output_get_primary_formats(wlr_output, WLR_BUFFER_CAP_DMABUF);
-		const struct wlr_drm_format *probe_fmt = NULL;
-		if (primary_formats) {
-			probe_fmt = wlr_drm_format_set_get(primary_formats, DRM_FORMAT_ARGB8888);
-			if (!probe_fmt)
-				probe_fmt = wlr_drm_format_set_get(primary_formats, DRM_FORMAT_XRGB8888);
-			if (!probe_fmt && primary_formats->len > 0)
-				probe_fmt = &primary_formats->formats[0];
-		}
-		if (probe_fmt) {
-			struct wlr_buffer *probe_buf =
-				wlr_allocator_create_buffer(alloc, 64, 64, probe_fmt);
-			if (probe_buf) {
-				struct wlr_output_layer *probe_layer =
-					wlr_output_layer_create(wlr_output);
-				if (probe_layer) {
-					struct wlr_output_state probe_state;
-					struct wlr_output_layer_state layer_state = {
-						.layer = probe_layer,
-						.buffer = probe_buf,
-						.src_box = { .x = 0, .y = 0, .width = 64, .height = 64 },
-						.dst_box = { .x = 0, .y = 0, .width = 64, .height = 64 },
-					};
-					wlr_output_state_init(&probe_state);
-					wlr_output_state_set_layers(&probe_state, &layer_state, 1);
-					if (wlr_output_test_state(wlr_output, &probe_state) &&
-					    layer_state.accepted) {
-						m->gcaps.overlay_planes_supported = 1;
-					}
-					wlr_output_state_finish(&probe_state);
-					wlr_output_layer_destroy(probe_layer);
-				}
-				wlr_buffer_drop(probe_buf);
-			}
-		}
-	}
-
 	{
 		const char *vendor_str =
 			m->gcaps.vendor == GPU_VENDOR_NVIDIA ? "NVIDIA" :
 			m->gcaps.vendor == GPU_VENDOR_AMD ? "AMD" :
 			m->gcaps.vendor == GPU_VENDOR_INTEL ? "Intel" : "unknown";
-		wlr_log(WLR_INFO,
-			"Monitor %s gaming caps: vendor=%s overlay_planes=%s "
+		nx_log(NX_INFO,
+			"Monitor %s gaming caps: vendor=%s overlay_planes=NO "
 			"esync=%s vulkan_pref=%s lfc=%s",
-			wlr_output->name, vendor_str,
-			m->gcaps.overlay_planes_supported ? "YES" : "NO",
+			nx_output->name, vendor_str,
 			m->gcaps.explicit_sync_ready ? "YES" : "NO",
 			m->gcaps.prefers_vulkan ? "YES" : "NO",
 			m->gcaps.has_hw_lfc ? "HW" : "none");
@@ -1136,8 +1081,8 @@ createmon(struct wl_listener *listener, void *data)
 	 *
 	 */
 	/* updatemons() will resize and set correct position */
-	m->fullscreen_bg = wlr_scene_rect_create(layers[LyrFS], 0, 0, fullscreen_bg);
-	wlr_scene_node_set_enabled(&m->fullscreen_bg->node, 0);
+	m->fullscreen_bg = nx_scene_rect_create(layers[LyrFS], 0, 0, fullscreen_bg);
+	nx_scene_node_set_enabled(&m->fullscreen_bg->node, 0);
 
 	/* Adds this to the output layout in the order it was configured.
 	 *
@@ -1145,22 +1090,22 @@ createmon(struct wl_listener *listener, void *data)
 	 * display, which Wayland clients can see to find out information about the
 	 * output (such as DPI, scale factor, manufacturer, etc).
 	 */
-	m->scene_output = wlr_scene_output_create(scene, wlr_output);
+	m->scene_output = nx_scene_output_create(scene, nx_output);
 
 	/* If runtime config placed this monitor explicitly, use that position.
 	 * If monitors.conf has a grid entry for it, grid layout positions all
 	 * monitors. Otherwise auto_arrange_monitors() positions them. */
 	{
-		RuntimeMonitorConfig *mc = monconf_find(wlr_output->name);
+		RuntimeMonitorConfig *mc = monconf_find(nx_output->name);
 		if (REMOTE_PARKED(m)) {
 			/* Never in the layout: as a client-visible phantom output
 			 * it collects swaybg/waybar surfaces and shrinks the
 			 * launcher, which sizes itself off the smallest output. */
 			remote_hide_parked(m);
 		} else if (m->m.x != -1 && m->m.y != -1) {
-			wlr_output_layout_add(output_layout, wlr_output, m->m.x, m->m.y);
+			nx_output_layout_add(output_layout, nx_output, m->m.x, m->m.y);
 		} else if (mc && mc->grid_col >= 0) {
-			wlr_output_layout_add_auto(output_layout, wlr_output);
+			nx_output_layout_add_auto(output_layout, nx_output);
 			monconf_apply_layout();
 		} else {
 			auto_arrange_monitors();
@@ -1168,13 +1113,11 @@ createmon(struct wl_listener *listener, void *data)
 	}
 
 	wl_list_for_each(c, &clients, link) {
-		if (c->output && strcmp(wlr_output->name, c->output) == 0)
+		if (c->output && strcmp(nx_output->name, c->output) == 0)
 			c->mon = m;
 	}
 
-	/* Initialize HDR and 10-bit color settings.
-	 * Skip on mirrored outputs - the legacy DRM ioctls (drmModeConnectorSetProperty)
-	 * can conflict with wlroots' atomic modesetting and cause GPU hangs. */
+	/* Mirrors skip legacy color ioctls. */
 	if (!m->is_mirror)
 		init_monitor_color_settings(m);
 
@@ -1183,22 +1126,22 @@ createmon(struct wl_listener *listener, void *data)
 	/* Restart swaybg so it discovers the new output and shows wallpaper
 	 * on all screens. swaybg sometimes fails to create a surface for
 	 * outputs that appear after it has already started. */
-	if (is_external_connector(wlr_output->name))
+	if (is_external_connector(nx_output->name))
 		restart_wallpaper();
 
 }
 
-struct wlr_box
+struct nx_box
 fullscreen_mirror_geom(Monitor *m)
 {
 	Monitor *laptop, *other;
 
 	/* If this monitor is the laptop and has an external mirror,
 	 * use the external's geometry so fullscreen video fills the TV. */
-	if (!m->is_mirror && (strncmp(m->wlr_output->name, "eDP", 3) == 0 ||
-	    strncmp(m->wlr_output->name, "LVDS", 4) == 0)) {
+	if (!m->is_mirror && (strncmp(m->nx_output->name, "eDP", 3) == 0 ||
+	    strncmp(m->nx_output->name, "LVDS", 4) == 0)) {
 		wl_list_for_each(other, &mons, link) {
-			if (other->is_mirror && other->wlr_output->enabled)
+			if (other->is_mirror && other->nx_output->enabled)
 				return other->m;
 		}
 	}
@@ -1229,8 +1172,8 @@ togglemirror(const Arg *arg)
 	/* Find the external monitor */
 	ext = NULL;
 	wl_list_for_each(m, &mons, link) {
-		if (m != laptop && m->wlr_output->enabled &&
-		    is_external_connector(m->wlr_output->name)) {
+		if (m != laptop && m->nx_output->enabled &&
+		    is_external_connector(m->nx_output->name)) {
 			ext = m;
 			break;
 		}
@@ -1241,12 +1184,12 @@ togglemirror(const Arg *arg)
 	if (ext->is_mirror) {
 		/* Switch from mirror to independent */
 		ext->is_mirror = 0;
-		wlr_output_layout_remove(output_layout, ext->wlr_output);
-		wlr_output_layout_add_auto(output_layout, ext->wlr_output);
+		nx_output_layout_remove(output_layout, ext->nx_output);
+		nx_output_layout_add_auto(output_layout, ext->nx_output);
 
 		/* Restore clients that belong to this monitor */
 		wl_list_for_each(c, &clients, link) {
-			if (c->output && strcmp(ext->wlr_output->name, c->output) == 0
+			if (c->output && strcmp(ext->nx_output->name, c->output) == 0
 					&& c->mon != ext)
 				setmon(c, ext, c->tags);
 		}
@@ -1254,12 +1197,12 @@ togglemirror(const Arg *arg)
 		if (!selmon || selmon == laptop)
 			selmon = ext;
 
-		wlr_log(WLR_INFO, "Mirror off: %s is now independent",
-			ext->wlr_output->name);
+		nx_log(NX_INFO, "Mirror off: %s is now independent",
+			ext->nx_output->name);
 	} else {
 		/* Switch from independent to mirror */
-		struct wlr_box laptop_box;
-		wlr_output_layout_get_box(output_layout, laptop->wlr_output, &laptop_box);
+		struct nx_box laptop_box;
+		nx_output_layout_get_box(output_layout, laptop->nx_output, &laptop_box);
 
 		/* Move clients from external to laptop */
 		wl_list_for_each(c, &clients, link) {
@@ -1268,8 +1211,8 @@ togglemirror(const Arg *arg)
 		}
 
 		ext->is_mirror = 1;
-		wlr_output_layout_remove(output_layout, ext->wlr_output);
-		wlr_output_layout_add(output_layout, ext->wlr_output,
+		nx_output_layout_remove(output_layout, ext->nx_output);
+		nx_output_layout_add(output_layout, ext->nx_output,
 			laptop_box.x, laptop_box.y);
 		ext->m.x = laptop_box.x;
 		ext->m.y = laptop_box.y;
@@ -1277,8 +1220,8 @@ togglemirror(const Arg *arg)
 		if (selmon == ext)
 			selmon = laptop;
 
-		wlr_log(WLR_INFO, "Mirror on: %s now mirrors %s at (%d,%d)",
-			ext->wlr_output->name, laptop->wlr_output->name,
+		nx_log(NX_INFO, "Mirror on: %s now mirrors %s at (%d,%d)",
+			ext->nx_output->name, laptop->nx_output->name,
 			laptop_box.x, laptop_box.y);
 	}
 
@@ -1292,65 +1235,65 @@ togglemirror(const Arg *arg)
 }
 
 Monitor *
-dirtomon(enum wlr_direction dir)
+dirtomon(enum nx_direction dir)
 {
-	struct wlr_output *next;
+	struct nx_output *next;
 	/* Alle skjermer disabled/frakoblet (TV avslått) → selmon NULL.
 	 * Gamepad/tastatur-navigasjon må ikke deref'e den. */
-	if (!selmon || !selmon->wlr_output)
+	if (!selmon || !selmon->nx_output)
 		return selmon;
-	if (!wlr_output_layout_get(output_layout, selmon->wlr_output))
+	if (!nx_output_layout_get(output_layout, selmon->nx_output))
 		return selmon;
-	if ((next = wlr_output_layout_adjacent_output(output_layout,
-			dir, selmon->wlr_output, selmon->m.x, selmon->m.y))
+	if ((next = nx_output_layout_adjacent_output(output_layout,
+			dir, selmon->nx_output, selmon->m.x, selmon->m.y))
 			&& !REMOTE_PARKED((Monitor *)next->data))
 		return next->data;
-	if ((next = wlr_output_layout_farthest_output(output_layout,
-			dir ^ (WLR_DIRECTION_LEFT|WLR_DIRECTION_RIGHT),
-			selmon->wlr_output, selmon->m.x, selmon->m.y))
+	if ((next = nx_output_layout_farthest_output(output_layout,
+			dir ^ (NX_DIRECTION_LEFT|NX_DIRECTION_RIGHT),
+			selmon->nx_output, selmon->m.x, selmon->m.y))
 			&& !REMOTE_PARKED((Monitor *)next->data))
 		return next->data;
 	return selmon;
 }
 
 struct gpu_reset_cleanup {
-	struct wlr_renderer *renderer;
-	struct wlr_allocator *allocator;
+	struct nx_renderer *renderer;
+	struct nx_allocator *allocator;
 };
 
 static void
 gpu_reset_idle_destroy(void *data)
 {
 	struct gpu_reset_cleanup *c = data;
-	wlr_allocator_destroy(c->allocator);
-	wlr_renderer_destroy(c->renderer);
+	nx_allocator_destroy(c->allocator);
+	nx_renderer_destroy(c->renderer);
 	free(c);
 }
 
 void
 gpureset(struct wl_listener *listener, void *data)
 {
-	struct wlr_renderer *old_drw = drw;
-	struct wlr_allocator *old_alloc = alloc;
+	struct nx_renderer *old_drw = drw;
+	struct nx_allocator *old_alloc = alloc;
 	struct gpu_reset_cleanup *cleanup;
 	Monitor *m;
 
 	if (!(drw = gpu_renderer_create(backend)))
 		die("couldn't recreate renderer");
 
-	if (!(alloc = wlr_allocator_autocreate(backend, drw)))
+	if (!(alloc = nx_allocator_autocreate(backend, drw)))
 		die("couldn't recreate allocator");
 
 	wl_list_remove(&gpu_reset.link);
 	wl_signal_add(&drw->events.lost, &gpu_reset);
 
-	wlr_compositor_set_renderer(compositor, drw);
+	nx_compositor_set_renderer(compositor, drw);
 
 	/* Fire destroy signal on old_drw NOW (without freeing it). This drops
 	 * all stale texture references held by client_buffer/scene_buffer/
 	 * cursor (their renderer_destroy listeners null their texture
-	 * pointers). Otherwise the next rendermon -> wlr_scene_output_build_state
-	 * walks scene_buffers that still cache wlr_vk_texture pointers whose
+	 * pointers). Otherwise the next rendermon -> nx_scene_output_build_state
+	 * walks scene_buffers that still cache nx_vk_texture pointers whose
 	 * ->renderer field is old_drw; render_pass_add_texture then trips
 	 *     assert(texture->renderer == renderer)
 	 * because the pass uses the new renderer. This is the Intel Arc / ANV
@@ -1359,27 +1302,27 @@ gpureset(struct wl_listener *listener, void *data)
 	 *
 	 * Safe: listeners self-detach in their callbacks, leaving
 	 * events.destroy.listener_list empty before the idle callback runs
-	 * wlr_renderer_destroy (which re-emits on an empty list and then
+	 * nx_renderer_destroy (which re-emits on an empty list and then
 	 * asserts emptiness — both fine). */
 	wl_signal_emit_mutable(&old_drw->events.destroy, old_drw);
 
 	wl_list_for_each(m, &mons, link) {
-		wlr_output_init_render(m->wlr_output, alloc, drw);
-		wlr_output_schedule_frame(m->wlr_output);
+		nx_output_init_render(m->nx_output, alloc, drw);
+		nx_output_schedule_frame(m->nx_output);
 	}
 
 	/* Defer free of old renderer/allocator. We are called synchronously
 	 * from wl_signal_emit_mutable inside render_pass_submit (Vulkan
 	 * VK_ERROR_DEVICE_LOST path). The caller still holds a locked buffer
-	 * from the old swapchain, and the in-flight wlr_output_test_state /
+	 * from the old swapchain, and the in-flight nx_output_test_state /
 	 * output_ensure_buffer frame has not unwound yet. Freeing old_drw
 	 * synchronously would tear down vk objects still referenced by that
 	 * locked buffer. The idle callback runs after the event loop unwinds
 	 * the current dispatch, by which point those references are released. */
 	cleanup = calloc(1, sizeof(*cleanup));
 	if (!cleanup) {
-		wlr_allocator_destroy(old_alloc);
-		wlr_renderer_destroy(old_drw);
+		nx_allocator_destroy(old_alloc);
+		nx_renderer_destroy(old_drw);
 		return;
 	}
 	cleanup->renderer = old_drw;
@@ -1390,71 +1333,69 @@ gpureset(struct wl_listener *listener, void *data)
 void
 outputmgrapply(struct wl_listener *listener, void *data)
 {
-	struct wlr_output_configuration_v1 *config = data;
+	struct nx_output_configuration_v1 *config = data;
 	outputmgrapplyortest(config, 0);
 }
 
 void
-outputmgrapplyortest(struct wlr_output_configuration_v1 *config, int test)
+outputmgrapplyortest(struct nx_output_configuration_v1 *config, int test)
 {
 	/*
-	 * Called when a client such as wlr-randr requests a change in output
+	 * Called when a client such as nx-randr requests a change in output
 	 * configuration. This is only one way that the layout can be changed,
 	 * so any Monitor information should be updated by updatemons() after an
 	 * output_layout.change event, not here.
 	 */
-	struct wlr_output_configuration_head_v1 *config_head;
+	struct nx_output_configuration_head_v1 *config_head;
 	int ok = 1;
 
 	wl_list_for_each(config_head, &config->heads, link) {
-		struct wlr_output *wlr_output = config_head->state.output;
-		Monitor *m = wlr_output->data;
-		struct wlr_output_state state;
+		struct nx_output *nx_output = config_head->state.output;
+		Monitor *m = nx_output->data;
+		struct nx_output_state state;
 
-		/* Ensure displays previously disabled by wlr-output-power-management-v1
+		/* Ensure displays previously disabled by nx-output-power-management-v1
 		 * are properly handled*/
 		m->asleep = 0;
 		/* See powermgrsetmode: un-wedge a frame_scheduled left over
 		 * from a schedule_frame issued while the output was off. */
 		m->frame_scheduled = 0;
 
-		wlr_output_state_init(&state);
-		wlr_output_state_set_enabled(&state, config_head->state.enabled);
+		nx_output_state_init(&state);
+		nx_output_state_set_enabled(&state, config_head->state.enabled);
 		if (!config_head->state.enabled)
 			goto apply_or_test;
 
 		if (config_head->state.mode)
-			wlr_output_state_set_mode(&state, config_head->state.mode);
+			nx_output_state_set_mode(&state, config_head->state.mode);
 		else
-			wlr_output_state_set_custom_mode(&state,
+			nx_output_state_set_custom_mode(&state,
 					config_head->state.custom_mode.width,
 					config_head->state.custom_mode.height,
 					config_head->state.custom_mode.refresh);
 
-		wlr_output_state_set_transform(&state, config_head->state.transform);
-		wlr_output_state_set_scale(&state, config_head->state.scale);
-		wlr_output_state_set_adaptive_sync_enabled(&state,
+		nx_output_state_set_transform(&state, config_head->state.transform);
+		nx_output_state_set_scale(&state, config_head->state.scale);
+		nx_output_state_set_adaptive_sync_enabled(&state,
 				config_head->state.adaptive_sync_enabled);
 
 apply_or_test:
-		ok &= test ? wlr_output_test_state(wlr_output, &state)
-				: wlr_output_commit_state(wlr_output, &state);
+		ok &= test ? nx_output_test_state(nx_output, &state)
+				: nx_output_commit_state(nx_output, &state);
 
-		/* Don't move monitors if position wouldn't change. This avoids
-		 * wlroots marking the output as manually configured.
-		 * wlr_output_layout_add does not like disabled outputs */
-		if (!test && wlr_output->enabled && (m->m.x != config_head->state.x || m->m.y != config_head->state.y))
-			wlr_output_layout_add(output_layout, wlr_output,
+		/* Only move enabled outputs that changed. */
+		if (!test && nx_output->enabled && (m->m.x != config_head->state.x || m->m.y != config_head->state.y))
+			nx_output_layout_add(output_layout, nx_output,
 					config_head->state.x, config_head->state.y);
 
-		wlr_output_state_finish(&state);
+		nx_output_state_finish(&state);
 	}
 
 	if (ok)
-		wlr_output_configuration_v1_send_succeeded(config);
+		nx_output_configuration_v1_send_succeeded(config);
 	else
-		wlr_output_configuration_v1_send_failed(config);
-	wlr_output_configuration_v1_destroy(config);
+		nx_output_configuration_v1_send_failed(config);
+	nx_output_configuration_v1_destroy(config);
 
 	/* https://codeberg.org/dwl/dwl/issues/577 */
 	updatemons(NULL, NULL);
@@ -1463,16 +1404,16 @@ apply_or_test:
 void
 outputmgrtest(struct wl_listener *listener, void *data)
 {
-	struct wlr_output_configuration_v1 *config = data;
+	struct nx_output_configuration_v1 *config = data;
 	outputmgrapplyortest(config, 1);
 }
 
-/* DPMS an output on/off.  Shared by the wlr-output-power protocol and
+/* DPMS an output on/off.  Shared by the nx-output-power protocol and
  * remote mode, which blanks the physical screens while streaming. */
 void
 monitor_set_power(Monitor *m, int on)
 {
-	struct wlr_output_state state = {0};
+	struct nx_output_state state = {0};
 
 	if (!m)
 		return;
@@ -1483,11 +1424,11 @@ monitor_set_power(Monitor *m, int on)
 	 * state synchronously so the next wake re-evaluates from scratch
 	 * rather than coming back with stale hdr_active=1. */
 	if (!on && m->hdr_active) {
-		wlr_output_state_set_render_format(&state,
+		nx_output_state_set_render_format(&state,
 			m->render_10bit_active ?
 			DRM_FORMAT_XRGB2101010 : DRM_FORMAT_XRGB8888);
-		wlr_output_state_set_image_description(&state, NULL);
-		wlr_output_lock_software_cursors(m->wlr_output, false);
+		nx_output_state_set_image_description(&state, NULL);
+		nx_output_lock_software_cursors(m->nx_output, false);
 		m->hdr_active = 0;
 		m->hdr_render_format = 0;
 		m->hdr_driver_client = NULL;
@@ -1497,8 +1438,8 @@ monitor_set_power(Monitor *m, int on)
 		m->hdr_commit_fail_count = 0;
 	}
 
-	wlr_output_state_set_enabled(&state, on);
-	wlr_output_commit_state(m->wlr_output, &state);
+	nx_output_state_set_enabled(&state, on);
+	nx_output_commit_state(m->nx_output, &state);
 
 	m->asleep = !on;
 	/* A schedule_frame issued while the output was off emits no frame
@@ -1513,7 +1454,7 @@ monitor_set_power(Monitor *m, int on)
 void
 powermgrsetmode(struct wl_listener *listener, void *data)
 {
-	struct wlr_output_power_v1_set_mode_event *event = data;
+	struct nx_output_power_v1_set_mode_event *event = data;
 
 	monitor_set_power(event->output->data, event->mode);
 }
@@ -1525,10 +1466,10 @@ powermgrsetmode(struct wl_listener *listener, void *data)
 static inline void
 request_frame(Monitor *m)
 {
-	if (!m || !m->wlr_output || m->frame_scheduled)
+	if (!m || !m->nx_output || m->frame_scheduled)
 		return;
 	m->frame_scheduled = 1;
-	wlr_output_schedule_frame(m->wlr_output);
+	nx_output_schedule_frame(m->nx_output);
 }
 
 static int
@@ -1546,7 +1487,7 @@ fd_pacer_cb(void *data)
 	Monitor *m = data;
 
 	/* Another commit owns this vblank */
-	if (m->latch_armed || m->pace_armed || m->wlr_output->frame_pending)
+	if (m->latch_armed || m->pace_armed || m->nx_output->frame_pending)
 		return 0;
 	m->fd_pacer_fired = 1;
 	rendermon(&m->frame, NULL);
@@ -1571,10 +1512,10 @@ pace_frame_done_chain(Monitor *m, uint64_t now_ns)
 	uint64_t iv = m->present_interval_ns;
 	uint64_t base, k;
 
-	if (!iv && m->wlr_output->current_mode &&
-			m->wlr_output->current_mode->refresh > 0)
+	if (!iv && m->nx_output->current_mode &&
+			m->nx_output->current_mode->refresh > 0)
 		iv = 1000000000000ULL /
-			(uint64_t)m->wlr_output->current_mode->refresh;
+			(uint64_t)m->nx_output->current_mode->refresh;
 	if (!iv)
 		iv = 16666667ULL;
 	base = m->last_present_ns ? m->last_present_ns : now_ns;
@@ -1585,16 +1526,16 @@ pace_frame_done_chain(Monitor *m, uint64_t now_ns)
 }
 
 static void
-hidden_frame_done_iter(struct wlr_surface *surface, int sx, int sy, void *data)
+hidden_frame_done_iter(struct nx_surface *surface, int sx, int sy, void *data)
 {
 	(void)sx; (void)sy;
-	wlr_surface_send_frame_done(surface, data);
+	nx_surface_send_frame_done(surface, data);
 	/* A starved surface is never sampled by build_state, so the scene
 	 * path never clears its fifo-v1 barrier — the client's commits sit
 	 * behind the 100 ms protocol timeout (~10 fps) and it runs out of
 	 * buffers (Chromium video renders through fifo).  Latch explicitly
 	 * whenever we drip; no-op for surfaces without fifo state. */
-	wlr_fifo_v1_surface_latched(surface);
+	nx_fifo_v1_surface_latched(surface);
 }
 
 /* Release a client's queued frame callbacks right now.  Called on focus
@@ -1607,35 +1548,35 @@ hidden_frame_done_iter(struct wlr_surface *surface, int sx, int sy, void *data)
 void
 client_kick_frame_done(Client *c)
 {
-	struct wlr_surface *s = c ? client_surface(c) : NULL;
+	struct nx_surface *s = c ? client_surface(c) : NULL;
 	struct timespec now;
 
 	if (!s || !s->mapped)
 		return;
 	clock_gettime(CLOCK_MONOTONIC, &now);
-	wlr_surface_for_each_surface(s, hidden_frame_done_iter, &now);
+	nx_surface_for_each_surface(s, hidden_frame_done_iter, &now);
 }
 
 /* Per-buffer drip for VISIBLE clients: a scene buffer whose visible
  * region is empty (video subsurface fully covered by its parent's
  * opaque region, tile clipped out by the off-viewport sentinel clip)
- * is skipped by wlr_scene_output_send_frame_done AND never sampled →
+ * is skipped by nx_scene_output_send_frame_done AND never sampled →
  * no frame callbacks, no fifo latch.  Chromium's video lives in
  * exactly such a subsurface; starving it stalls playback and can wedge
  * the whole window (buffer exhaustion).  Feed those surfaces directly. */
 static void
-culled_buffer_drip_iter(struct wlr_scene_buffer *buf, int sx, int sy, void *data)
+culled_buffer_drip_iter(struct nx_scene_buffer *buf, int sx, int sy, void *data)
 {
-	struct wlr_scene_surface *ss;
+	struct nx_scene_surface *ss;
 	(void)sx; (void)sy;
 	if (!buf || !buf->node.enabled ||
-			!pixman_region32_empty(&buf->node.WLR_PRIVATE.visible))
+			!pixman_region32_empty(&buf->node.visible))
 		return;
-	ss = wlr_scene_surface_try_from_buffer(buf);
+	ss = nx_scene_surface_try_from_buffer(buf);
 	if (!ss)
 		return;
-	wlr_surface_send_frame_done(ss->surface, data);
-	wlr_fifo_v1_surface_latched(ss->surface);
+	nx_surface_send_frame_done(ss->surface, data);
+	nx_fifo_v1_surface_latched(ss->surface);
 }
 
 void
@@ -1653,27 +1594,23 @@ monitor_wake(Monitor *m)
  */
 #define HDR_THROTTLE_NS 500000000ULL
 
-/*
- * Iterator state for hdr_surface_walk(). We can't return early from the
- * wlroots surface-tree walker, so we accumulate the first PQ+BT2020 hit
- * here and let the walker run to completion.
- */
+/* The walker cannot stop early. */
 struct hdr_surface_walk_ctx {
-	struct wlr_surface *found;  /* first surface with PQ+BT2020, or NULL */
+	struct nx_surface *found;  /* first surface with PQ+BT2020, or NULL */
 };
 
 static void
-hdr_surface_walk(struct wlr_surface *surface, int sx, int sy, void *data)
+hdr_surface_walk(struct nx_surface *surface, int sx, int sy, void *data)
 {
 	struct hdr_surface_walk_ctx *ctx = data;
-	const struct wlr_image_description_v1_data *desc;
+	const struct nx_image_description_v1_data *desc;
 
 	(void)sx;
 	(void)sy;
 
 	if (ctx->found)
 		return;
-	desc = wlr_surface_get_image_description_v1_data(surface);
+	desc = nx_surface_get_image_description_v1_data(surface);
 	if (!desc)
 		return;
 	if (desc->tf_named != WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ)
@@ -1701,10 +1638,10 @@ hdr_surface_walk(struct wlr_surface *surface, int sx, int sy, void *data)
  * subsurface; the parent stays sRGB.
  */
 static Client *
-hdr_driver_for(Monitor *m, struct wlr_surface **out_pq_surface)
+hdr_driver_for(Monitor *m, struct nx_surface **out_pq_surface)
 {
 	Client *c;
-	struct wlr_surface *surface;
+	struct nx_surface *surface;
 	struct hdr_surface_walk_ctx ctx = { .found = NULL };
 
 	if (out_pq_surface)
@@ -1743,7 +1680,7 @@ hdr_driver_for(Monitor *m, struct wlr_surface **out_pq_surface)
 			return c;
 	}
 
-	wlr_surface_for_each_surface(surface, hdr_surface_walk, &ctx);
+	nx_surface_for_each_surface(surface, hdr_surface_walk, &ctx);
 	m->hdr_probe_surface = surface;
 	m->hdr_probe_found = ctx.found != NULL;
 	m->hdr_probe_ns = now;
@@ -1758,7 +1695,7 @@ hdr_driver_for(Monitor *m, struct wlr_surface **out_pq_surface)
 /*
  * Compute target HDR state for this monitor and set entry/exit pending
  * flags. Called once per rendermon iteration before commit. The actual
- * wlr_output_state mutation happens later inside commit_output_frame so
+ * nx_output_state mutation happens later inside commit_output_frame so
  * the change rides on a single atomic commit with the buffer.
  *
  * Throttle: any transition is suppressed if a transition in the other
@@ -1780,7 +1717,7 @@ hdr_globally_disabled(void)
 		const char *v = getenv("NIXLY_DISABLE_HDR");
 		cached = (v && v[0] && v[0] != '0') ? 1 : 0;
 		if (cached)
-			wlr_log(WLR_INFO,
+			nx_log(NX_INFO,
 				"NIXLY_DISABLE_HDR set — HDR pipeline disabled");
 	}
 	return cached;
@@ -1790,8 +1727,8 @@ static void
 update_hdr_target(Monitor *m, uint64_t now_ns)
 {
 	Client *driver;
-	struct wlr_surface *pq_surface = NULL;
-	const struct wlr_image_description_v1_data *cm;
+	struct nx_surface *pq_surface = NULL;
+	const struct nx_image_description_v1_data *cm;
 
 	if (!m || !m->hdr_capable)
 		return;
@@ -1811,10 +1748,10 @@ update_hdr_target(Monitor *m, uint64_t now_ns)
 	 * TV releases HDR_OUTPUT_METADATA and SDR fallback gets a chance. */
 	if (m->hdr_active && m->hdr_last_commit_ok_ns > 0 &&
 	    now_ns - m->hdr_last_commit_ok_ns > HDR_WATCHDOG_NS) {
-		wlr_log(WLR_ERROR,
+		nx_log(NX_ERROR,
 			"HDR watchdog: %s no successful commit in %llu ms — "
 			"forcing HDR exit",
-			m->wlr_output->name,
+			m->nx_output->name,
 			(unsigned long long)((now_ns - m->hdr_last_commit_ok_ns)
 				/ 1000000ULL));
 		m->hdr_exit_pending = 1;
@@ -1828,9 +1765,9 @@ update_hdr_target(Monitor *m, uint64_t now_ns)
 			return;
 		memset(&m->hdr_pending_desc, 0, sizeof(m->hdr_pending_desc));
 		m->hdr_pending_desc.transfer_function =
-			WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ;
+			NX_COLOR_TRANSFER_FUNCTION_ST2084_PQ;
 		m->hdr_pending_desc.primaries =
-			WLR_COLOR_NAMED_PRIMARIES_BT2020;
+			NX_COLOR_NAMED_PRIMARIES_BT2020;
 		m->hdr_pending_desc.mastering_luminance.min = 0.005;
 		m->hdr_pending_desc.mastering_luminance.max = 1000.0;
 		m->hdr_pending_desc.max_cll = 1000.0;
@@ -1852,15 +1789,15 @@ update_hdr_target(Monitor *m, uint64_t now_ns)
 
 		/* pq_surface may be a subsurface; pull mastering metadata from
 		 * the actual PQ-tagged surface, not the toplevel. */
-		cm = wlr_surface_get_image_description_v1_data(pq_surface);
+		cm = nx_surface_get_image_description_v1_data(pq_surface);
 		if (!cm)
 			return;
 
 		memset(&m->hdr_pending_desc, 0, sizeof(m->hdr_pending_desc));
 		m->hdr_pending_desc.transfer_function =
-			WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ;
+			NX_COLOR_TRANSFER_FUNCTION_ST2084_PQ;
 		m->hdr_pending_desc.primaries =
-			WLR_COLOR_NAMED_PRIMARIES_BT2020;
+			NX_COLOR_NAMED_PRIMARIES_BT2020;
 		if (cm->has_mastering_display_primaries)
 			m->hdr_pending_desc.mastering_display_primaries =
 				cm->mastering_display_primaries;
@@ -1900,45 +1837,45 @@ pick_hdr_render_format(Monitor *m)
 		DRM_FORMAT_ARGB2101010,
 		DRM_FORMAT_XBGR16161616F,
 	};
-	const struct wlr_drm_format_set *formats;
+	const struct nx_drm_format_set *formats;
 	size_t i;
 
-	formats = wlr_output_get_primary_formats(m->wlr_output,
-		WLR_BUFFER_CAP_DMABUF);
+	formats = nx_output_get_primary_formats(m->nx_output,
+		NX_BUFFER_CAP_DMABUF);
 	if (!formats)
 		return DRM_FORMAT_XBGR2101010;
 	for (i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
-		if (wlr_drm_format_set_get(formats, candidates[i]))
+		if (nx_drm_format_set_get(formats, candidates[i]))
 			return candidates[i];
 	}
-	wlr_log(WLR_INFO,
+	nx_log(NX_INFO,
 		"%s: no 10-bit/FP16 primary plane format — HDR with 8-bit scanout",
-		m->wlr_output->name);
+		m->nx_output->name);
 	return 0;
 }
 
 /*
- * Mutate wlr_output_state to carry an HDR enter or exit transition.
+ * Mutate nx_output_state to carry an HDR enter or exit transition.
  * Called from inside commit_output_frame so the format swap + image
  * description ride on a single atomic commit with the rendered buffer.
  */
 static void
-apply_pending_hdr_state(Monitor *m, struct wlr_output_state *state)
+apply_pending_hdr_state(Monitor *m, struct nx_output_state *state)
 {
 	if (m->hdr_entry_pending) {
 		m->hdr_render_format = pick_hdr_render_format(m);
 		if (m->hdr_render_format)
-			wlr_output_state_set_render_format(state,
+			nx_output_state_set_render_format(state,
 				m->hdr_render_format);
-		wlr_output_state_set_image_description(state,
+		nx_output_state_set_image_description(state,
 			&m->hdr_pending_desc);
 	} else if (m->hdr_exit_pending) {
 		/* Restore prior render format. If 10-bit was active before
 		 * HDR took over we keep 10-bit; otherwise default to 8-bit. */
 		uint32_t restore_fmt = m->render_10bit_active ?
 			DRM_FORMAT_XRGB2101010 : DRM_FORMAT_XRGB8888;
-		wlr_output_state_set_render_format(state, restore_fmt);
-		wlr_output_state_set_image_description(state, NULL);
+		nx_output_state_set_render_format(state, restore_fmt);
+		nx_output_state_set_image_description(state, NULL);
 	}
 }
 
@@ -1963,14 +1900,14 @@ finalize_hdr_transition(Monitor *m, int commit_ok, uint64_t now_ns)
 			 * blinding white blob. Force SW cursor so the cursor
 			 * goes through scene composition with the configured
 			 * sRGB→PQ transform. */
-			wlr_output_lock_software_cursors(m->wlr_output, true);
-			wlr_log(WLR_INFO,
+			nx_output_lock_software_cursors(m->nx_output, true);
+			nx_log(NX_INFO,
 				"HDR enabled on %s: PQ+BT2020, render_format=0x%x",
-				m->wlr_output->name, m->hdr_render_format);
+				m->nx_output->name, m->hdr_render_format);
 		} else {
-			wlr_log(WLR_ERROR,
+			nx_log(NX_ERROR,
 				"HDR enter commit failed on %s — staying SDR",
-				m->wlr_output->name);
+				m->nx_output->name);
 			m->hdr_render_format = 0;
 			m->hdr_driver_client = NULL;
 			/* Throttle the re-attempt: without this stamp the entry
@@ -1988,8 +1925,8 @@ finalize_hdr_transition(Monitor *m, int commit_ok, uint64_t now_ns)
 			m->hdr_driver_client = NULL;
 			m->hdr_last_commit_ok_ns = 0;
 			m->hdr_commit_fail_count = 0;
-			wlr_output_lock_software_cursors(m->wlr_output, false);
-			wlr_log(WLR_INFO, "HDR disabled on %s", m->wlr_output->name);
+			nx_output_lock_software_cursors(m->nx_output, false);
+			nx_log(NX_INFO, "HDR disabled on %s", m->nx_output->name);
 		}
 	}
 }
@@ -2206,8 +2143,8 @@ calculate_frame_repeat(Monitor *m, int is_game, int allow_tearing)
 
 	if (m->present_interval_ns > 0)
 		display_hz = 1000000000.0f / (float)m->present_interval_ns;
-	else if (m->wlr_output->current_mode)
-		display_hz = (float)m->wlr_output->current_mode->refresh / 1000.0f;
+	else if (m->nx_output->current_mode)
+		display_hz = (float)m->nx_output->current_mode->refresh / 1000.0f;
 
 	if (game_fps < 5.0f || display_hz < 30.0f)
 		goto apply;
@@ -2280,7 +2217,7 @@ apply:
 			} else if (best_n == 1 && m->frame_repeat_enabled) {
 				m->frame_repeat_enabled = 0;
 			}
-			wlr_log(WLR_DEBUG, "Frame repeat %dx → %dx (%.1f FPS @ %.0f Hz)",
+			nx_log(NX_DEBUG, "Frame repeat %dx → %dx (%.1f FPS @ %.0f Hz)",
 				m->frame_repeat_count, best_n, game_fps, display_hz);
 			m->frame_repeat_count = best_n;
 			m->frame_repeat_current = 0;
@@ -2307,75 +2244,23 @@ apply:
 }
 
 static void
-commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearing,
+commit_output_frame(Monitor *m, struct nx_output_state *state, int allow_tearing,
 	int use_frame_pacing, uint64_t frame_start_ns)
 {
 	uint64_t commit_end_ns;
-	/* Overlay plane layer states — kept on the stack for the entire
-	 * commit lifetime because wlr_output_state_set_layers stores a
-	 * pointer into state->layers and the array must stay valid across
-	 * the possible commit retry below. */
-	struct wlr_output_layer_state overlay_layer_states[1];
-	size_t overlay_layer_count = 0;
 
 	m->frames_since_content_change = 0;
 
-	/* Toast overlay-plane promotion.
-	 *
-	 * If the toast is flagged active on an overlay plane, build a
-	 * layer state for it and attach to the commit. This runs on every
-	 * frame the toast is alive; the buffer contents are static, so we
-	 * just keep handing the backend the same buffer pointer.
-	 *
-	 * Skip overlay-plane promotion while HDR is active — the overlay
-	 * plane has no per-plane colorspace conversion, so an sRGB toast
-	 * shown on a PQ-configured display would be blindingly bright.
-	 * hdr_driver_for() also already gates HDR-on when toast_visible,
-	 * but the overlay-plane buffer can outlive the visibility flag. */
-	if (m->toast_overlay_active && m->toast_overlay_layer &&
-	    m->toast_overlay_buf && !m->hdr_active) {
-		overlay_layer_states[0] = (struct wlr_output_layer_state){
-			.layer = m->toast_overlay_layer,
-			.buffer = &m->toast_overlay_buf->base,
-			.src_box = {
-				.x = 0, .y = 0,
-				.width = m->toast_overlay_dst.width,
-				.height = m->toast_overlay_dst.height,
-			},
-			.dst_box = m->toast_overlay_dst,
-		};
-		overlay_layer_count = 1;
-		m->toast_overlay_disabled_sent = 0;
-	} else if (m->toast_overlay_layer && !m->toast_overlay_active &&
-	           !m->toast_overlay_disabled_sent) {
-		/* Toast was active but has been hidden — send a disable
-		 * layer state (buffer = NULL) so the plane is torn down.
-		 * One-shot: without the latch this state is attached to
-		 * every commit forever, paying the backend's per-layer
-		 * test/assign cost each vblank. Cleared on commit failure
-		 * below so the teardown retries. */
-		overlay_layer_states[0] = (struct wlr_output_layer_state){
-			.layer = m->toast_overlay_layer,
-			.buffer = NULL,
-		};
-		overlay_layer_count = 1;
-		m->toast_overlay_disabled_sent = 1;
-	}
-	if (overlay_layer_count > 0) {
-		wlr_output_state_set_layers(state, overlay_layer_states,
-			overlay_layer_count);
-	}
-
-	if (allow_tearing && wlr_output_is_drm(m->wlr_output))
+	if (allow_tearing && nx_output_is_drm(m->nx_output))
 		state->tearing_page_flip = true;
 
 	/* Apply deferred VRR state change.  Piggybacking on the buffer
 	 * commit keeps it non-blocking (the DRM backend sets NONBLOCK when
-	 * WLR_OUTPUT_STATE_BUFFER is present). */
+	 * NX_OUTPUT_STATE_BUFFER is present). */
 	if (m->vrr_pending == 1) {
-		wlr_output_state_set_adaptive_sync_enabled(state, true);
+		nx_output_state_set_adaptive_sync_enabled(state, true);
 	} else if (m->vrr_pending == -1) {
-		wlr_output_state_set_adaptive_sync_enabled(state, false);
+		nx_output_state_set_adaptive_sync_enabled(state, false);
 	}
 
 	/* HDR enter/exit: apply render_format + image_description on the same
@@ -2387,15 +2272,11 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 		apply_pending_hdr_state(m, state);
 
 	int hdr_commit_ok = 0;
-	/* Clear errno so a commit that fails BEFORE any syscall (e.g. a
-	 * wlroots pre-flight reject logged only at DEBUG) reads as errno=0
-	 * instead of a stale EAGAIN from the event loop — the stale value
-	 * misclassified a permanent reject as "transient pageflip stuck"
-	 * and locked fullscreen video at 1 fps. */
+	/* Pre-syscall rejects must read errno=0. */
 	errno = 0;
-	if (!wlr_output_commit_state(m->wlr_output, state)) {
+	if (!nx_output_commit_state(m->nx_output, state)) {
 		/* drmModeAtomicCommit sets errno on the failing atomic commit;
-		 * capture it before any wlr_log/retry clobbers it so the real
+		 * capture it before any nx_log/retry clobbers it so the real
 		 * KMS reject reason (EINVAL/EBUSY/ENOSPC/...) lands in diag.log. */
 		int commit_errno = errno;
 		int committed = 0;
@@ -2403,10 +2284,10 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 		/* If VRR was piggybacked and commit failed, the driver may
 		 * have rejected the adaptive_sync property.  Strip VRR and
 		 * retry buffer-only so the frame isn't lost. */
-		if (m->vrr_pending && (state->committed & WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED)) {
-			state->committed &= ~WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED;
-			wlr_log(WLR_DEBUG, "VRR commit rejected on %s, retrying buffer-only",
-				m->wlr_output->name);
+		if (m->vrr_pending && (state->committed & NX_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED)) {
+			state->committed &= ~NX_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED;
+			nx_log(NX_DEBUG, "VRR commit rejected on %s, retrying buffer-only",
+				m->nx_output->name);
 			/* The failure may have been caused by something else in
 			 * this commit (e.g. the tearing flip) — keep vrr_pending
 			 * so the change retries on the next frame instead of
@@ -2414,9 +2295,9 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 			 * give up after 3 strips so a hard driver rejection
 			 * doesn't cost a failed commit every frame. */
 			if (++m->vrr_pending_tries >= 3) {
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"VRR change rejected %d times on %s — giving up",
-					m->vrr_pending_tries, m->wlr_output->name);
+					m->vrr_pending_tries, m->nx_output->name);
 				/* Was this a video-VRR enable? Then fall back to a
 				 * fixed multiple mode instead of leaving the panel on
 				 * the desktop rate (pulldown judder). Deferred to
@@ -2434,7 +2315,7 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 				m->vrr_pending_tries = 0;
 			}
 			errno = 0;
-			committed = wlr_output_commit_state(m->wlr_output, state);
+			committed = nx_output_commit_state(m->nx_output, state);
 			if (!committed)
 				commit_errno = errno;
 		}
@@ -2442,11 +2323,11 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 		if (!committed && allow_tearing) {
 			state->tearing_page_flip = false;
 			errno = 0;
-			committed = wlr_output_commit_state(m->wlr_output, state);
+			committed = nx_output_commit_state(m->nx_output, state);
 			if (!committed) {
 				commit_errno = errno;
-				wlr_log(WLR_ERROR, "Output commit failed on %s (non-tearing retry)",
-					m->wlr_output->name);
+				nx_log(NX_ERROR, "Output commit failed on %s (non-tearing retry)",
+					m->nx_output->name);
 			}
 		}
 
@@ -2455,11 +2336,7 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 			/* Force full damage — the failed commit's buffer was
 			 * never displayed, so the swapchain's next buffer has
 			 * stale content from 2+ frames ago. */
-			wlr_damage_ring_add_whole(&m->scene_output->damage_ring);
-
-			/* Toast-plane teardown rode on this commit and was
-			 * lost — retry it on the next one. */
-			m->toast_overlay_disabled_sent = 0;
+			nx_damage_ring_add_whole(&m->scene_output->damage_ring);
 
 			m->commit_failures++;
 
@@ -2471,10 +2348,10 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 			if (m->hdr_active && !m->hdr_exit_pending) {
 				m->hdr_commit_fail_count++;
 				if (m->hdr_commit_fail_count >= HDR_COMMIT_FAIL_THRESHOLD) {
-					wlr_log(WLR_ERROR,
+					nx_log(NX_ERROR,
 						"%s: %u consecutive HDR commit failures — "
 						"forcing HDR exit",
-						m->wlr_output->name,
+						m->nx_output->name,
 						m->hdr_commit_fail_count);
 					m->hdr_exit_pending = 1;
 					request_frame(m);
@@ -2484,8 +2361,8 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 			int transient = (commit_errno == EAGAIN || commit_errno == EBUSY);
 
 			if (m->commit_failures <= 3) {
-				wlr_log(WLR_ERROR, "Output commit failed on %s (n=%u)",
-					m->wlr_output->name, m->commit_failures);
+				nx_log(NX_ERROR, "Output commit failed on %s (n=%u)",
+					m->nx_output->name, m->commit_failures);
 				request_frame(m);
 			} else if (transient && m->commit_failures <= 12) {
 				/* EAGAIN/EBUSY = a flip is still in flight in the
@@ -2520,7 +2397,7 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 					 * fullscreen client scanout buffer. Two independent
 					 * faults keep the storm alive and BOTH must be cleared:
 					 *
-					 * 1. wlr_scene re-elects the same wedged client buffer
+					 * 1. nx_scene re-elects the same wedged client buffer
 					 *    for direct scanout every vblank, so even a good
 					 *    reset is undone on the next frame. Turn scene-wide
 					 *    direct scanout OFF and hold it for the rest of the
@@ -2544,7 +2421,7 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 						(m->last_scanout_rearm_ns &&
 						 now - m->last_scanout_rearm_ns < 30000000000ULL)
 							? (int)(1u << 30) : 600;
-					scene->WLR_PRIVATE.direct_scanout = false;
+					scene->direct_scanout = false;
 
 					/* 2. The kernel rejects every new NONBLOCK flip with
 					 *    EAGAIN while the previous flip is pending, and a
@@ -2568,43 +2445,42 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 					 *    the flag clears on the next good commit. */
 					if ((!m->transient_reset_done ||
 					     now - m->last_transient_reset_ns > 1000000000ULL) &&
-					    m->wlr_output->current_mode) {
+					    m->nx_output->current_mode) {
 						m->last_transient_reset_ns = now;
 						if (!m->transient_reset_done) {
 							m->transient_reset_done = 1;
-							wlr_log(WLR_ERROR,
+							nx_log(NX_ERROR,
 								"%s: %u transient commit failures "
 								"(pageflip stuck) — disabling scanout + "
 								"blocking-modeset CRTC reset (retry @1Hz until drained)",
-								m->wlr_output->name, m->commit_failures);
+								m->nx_output->name, m->commit_failures);
 							diag_logf("COMMITFAIL",
 								"%s: %u transient commit failures (errno=%d %s) — "
 								"pending pageflip stuck; disabling direct scanout + "
 								"blocking-modeset reset with fresh GPU buffer, retry "
 								"@1Hz until drained (no format fallback: not a KMS reject).",
-								m->wlr_output->name, m->commit_failures,
+								m->nx_output->name, m->commit_failures,
 								commit_errno, strerror(commit_errno));
 						}
-						struct wlr_scene_output_state_options ropts = {0};
-						struct wlr_output_state rs;
+						struct nx_output_state rs;
 						int r_build = 0, r_test = 0, r_commit = 0;
 						int r_errno = 0;
 						uint64_t drain_t0 = get_time_ns();
-						wlr_output_state_init(&rs);
-						r_build = wlr_scene_output_build_state(
-							m->scene_output, &rs, &ropts);
+						nx_output_state_init(&rs);
+						r_build = nx_scene_output_build_state(
+							m->scene_output, &rs);
 						if (r_build) {
-							wlr_output_state_set_mode(&rs,
-								m->wlr_output->current_mode);
-							r_test = wlr_output_test_state(
-								m->wlr_output, &rs);
+							nx_output_state_set_mode(&rs,
+								m->nx_output->current_mode);
+							r_test = nx_output_test_state(
+								m->nx_output, &rs);
 							if (r_test)
-								r_commit = wlr_output_commit_state(
-									m->wlr_output, &rs);
+								r_commit = nx_output_commit_state(
+									m->nx_output, &rs);
 							if (!r_commit)
 								r_errno = errno;
 						}
-						wlr_output_state_finish(&rs);
+						nx_output_state_finish(&rs);
 						/* Every drain outcome is logged: a silently
 						 * failing drain (build/test reject) previously
 						 * looked identical to a succeeding one, hiding
@@ -2612,7 +2488,7 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 						diag_logf("COMMITFAIL",
 							"%s: drain build=%d test=%d commit=%d "
 							"errno=%d took=%ums (streak=%u)",
-							m->wlr_output->name, r_build, r_test,
+							m->nx_output->name, r_build, r_test,
 							r_commit, r_errno,
 							(unsigned)((get_time_ns() - drain_t0)
 								/ 1000000ULL),
@@ -2626,13 +2502,12 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 					    m->commit_failures % 60 == 5) {
 						diag_logf("COMMITFAIL",
 							"%s: EAGAIN state committed=0x%x "
-							"buffer=%d adaptive=%d layers=%d "
+							"buffer=%d adaptive=%d layers=0 "
 							"tearing=%d (streak=%u)",
-							m->wlr_output->name,
+							m->nx_output->name,
 							(unsigned)state->committed,
-							!!(state->committed & WLR_OUTPUT_STATE_BUFFER),
-							!!(state->committed & WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED),
-							(int)state->layers_len,
+							!!(state->committed & NX_OUTPUT_STATE_BUFFER),
+							!!(state->committed & NX_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED),
 							state->tearing_page_flip,
 							m->commit_failures);
 					}
@@ -2646,16 +2521,16 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 					 * frame goes through GPU composition, force XRGB8888
 					 * for a fresh swapchain, and drop compositor
 					 * RT-priority so user-space can still preempt. */
-					wlr_log(WLR_ERROR,
+					nx_log(NX_ERROR,
 						"%s: %u consecutive commit failures — "
 						"disabling direct scanout, falling back "
 						"to GPU composition + XRGB8888",
-						m->wlr_output->name, m->commit_failures);
+						m->nx_output->name, m->commit_failures);
 					diag_logf("COMMITFAIL",
 						"%s: %u consecutive output commit failures (errno=%d %s) — "
 						"forcing GPU composition + XRGB8888. Likely KMS rejected the "
 						"buffer format/modifier (e.g. 10-bit CCS without ReBAR).",
-						m->wlr_output->name, m->commit_failures,
+						m->nx_output->name, m->commit_failures,
 						commit_errno, strerror(commit_errno));
 					m->scanout_blacklist = 1;
 					m->diag_scanout_falls++;
@@ -2668,7 +2543,7 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 					m->scanout_cooldown = 1u << 30;
 
 					/* scanout_blacklist alone only relabels stats — it
-					 * does NOT stop wlr_scene re-electing the fullscreen
+					 * does NOT stop nx_scene re-electing the fullscreen
 					 * client buffer for direct scanout.  That buffer's
 					 * atomic test passes but the real pageflip keeps
 					 * failing (test/commit divergence, e.g. i915 10-bit
@@ -2677,29 +2552,22 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 					 * Turn off scene-wide direct-scanout election to force
 					 * GPU composition into the compositor's own swapchain,
 					 * which commits.  Restored on the next good commit. */
-					scene->WLR_PRIVATE.direct_scanout = false;
+					scene->direct_scanout = false;
 
-					/* Force fresh XRGB8888 swapchain. Carry the current
-					 * mode: a render-format-only state (no mode) is rejected
-					 * by the i915 atomic test, so the commit was silently
-					 * skipped and the swapchain stayed 10-bit — the exact
-					 * format KMS keeps rejecting → freeze loop. Re-passing the
-					 * SAME current_mode is a no-op modeset in wlroots (no
-					 * NVIDIA stall) but makes the state pass the test. Also
-					 * clear render_10bit_active so nothing re-elects 10-bit. */
-					struct wlr_output_state fb;
-					wlr_output_state_init(&fb);
-					wlr_output_state_set_render_format(&fb, DRM_FORMAT_XRGB8888);
-					if (m->wlr_output->current_mode)
-						wlr_output_state_set_mode(&fb, m->wlr_output->current_mode);
-					if (wlr_output_test_state(m->wlr_output, &fb) &&
-					    wlr_output_commit_state(m->wlr_output, &fb))
+					/* 8-bit fallback, keeping the current mode. */
+					struct nx_output_state fb;
+					nx_output_state_init(&fb);
+					nx_output_state_set_render_format(&fb, DRM_FORMAT_XRGB8888);
+					if (m->nx_output->current_mode)
+						nx_output_state_set_mode(&fb, m->nx_output->current_mode);
+					if (nx_output_test_state(m->nx_output, &fb) &&
+					    nx_output_commit_state(m->nx_output, &fb))
 						m->render_10bit_active = 0;
-					wlr_output_state_finish(&fb);
+					nx_output_state_finish(&fb);
 
 					if (compositor_rt_applied) {
 						compositor_rt_suspend();
-						wlr_log(WLR_ERROR,
+						nx_log(NX_ERROR,
 							"RT scheduling dropped after %u commit failures",
 							m->commit_failures);
 					}
@@ -2713,14 +2581,14 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 					 * rate-limit frame scheduling to ~60 Hz and log
 					 * once per second so we don't melt the event loop. */
 					if (m->commit_failures % 60 == 0) {
-						wlr_log(WLR_ERROR,
+						nx_log(NX_ERROR,
 							"%s: %u commit failures (still retrying)",
-							m->wlr_output->name, m->commit_failures);
+							m->nx_output->name, m->commit_failures);
 						diag_logf("COMMITFAIL",
 							"%s: %u commit failures AFTER fallback (errno=%d %s) — "
 							"GPU-composited XRGB8888 commit still rejected; "
 							"fallback insufficient for this failure mode.",
-							m->wlr_output->name, m->commit_failures,
+							m->nx_output->name, m->commit_failures,
 							commit_errno, strerror(commit_errno));
 					}
 					if (now - m->last_commit_fail_ns > 16000000ULL) {
@@ -2739,14 +2607,14 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 				 * so we don't re-elect the client buffer KMS keeps
 				 * rejecting and flap back into the freeze. */
 				if (--m->scanout_cooldown <= 0) {
-					scene->WLR_PRIVATE.direct_scanout = true;
+					scene->direct_scanout = true;
 					m->scanout_blacklist = 0;
 					m->scanout_cooldown = 0;
 					m->diag_scanout_rearms++;
 					m->last_scanout_rearm_ns = get_time_ns();
 					diag_logf("SCANOUT",
 						"%s: cooldown drained — re-arming direct scanout",
-						m->wlr_output->name);
+						m->nx_output->name);
 				}
 			}
 			hdr_commit_ok = 1;
@@ -2757,14 +2625,14 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 		m->transient_reset_done = 0;
 		if (m->scanout_blacklist) {
 			if (--m->scanout_cooldown <= 0) {
-				scene->WLR_PRIVATE.direct_scanout = true;
+				scene->direct_scanout = true;
 				m->scanout_blacklist = 0;
 				m->scanout_cooldown = 0;
 				m->diag_scanout_rearms++;
 				m->last_scanout_rearm_ns = get_time_ns();
 				diag_logf("SCANOUT",
 					"%s: cooldown drained — re-arming direct scanout",
-					m->wlr_output->name);
+					m->nx_output->name);
 			}
 		}
 		hdr_commit_ok = 1;
@@ -2783,9 +2651,9 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 	/* Finalize deferred VRR state after commit.  Check actual hardware
 	 * status to confirm the change took effect. */
 	if (m->vrr_pending == 1) {
-		if (m->wlr_output->adaptive_sync_status == WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED) {
-			struct wlr_output_configuration_v1 *vrr_config;
-			struct wlr_output_configuration_head_v1 *vrr_head;
+		if (m->nx_output->adaptive_sync_status == NX_OUTPUT_ADAPTIVE_SYNC_ENABLED) {
+			struct nx_output_configuration_v1 *vrr_config;
+			struct nx_output_configuration_head_v1 *vrr_head;
 
 			if (m->vrr_pending_game) {
 				/* Game VRR: game_vrr_active was already set
@@ -2793,32 +2661,32 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 				 * raise the video-VRR flags. */
 				m->vrr_pending = 0;
 				m->vrr_pending_game = 0;
-				wlr_log(WLR_DEBUG, "Game VRR verified active on %s",
-						m->wlr_output->name);
+				nx_log(NX_DEBUG, "Game VRR verified active on %s",
+						m->nx_output->name);
 			} else {
 				m->vrr_active = 1;
 				m->vrr_target_hz = m->vrr_pending_hz;
 				m->vrr_pending = 0;
-				wlr_log(WLR_DEBUG, "VRR enabled for %.3f Hz video on %s",
-						m->vrr_pending_hz, m->wlr_output->name);
+				nx_log(NX_DEBUG, "VRR enabled for %.3f Hz video on %s",
+						m->vrr_pending_hz, m->nx_output->name);
 			}
 
-			vrr_config = wlr_output_configuration_v1_create();
-			vrr_head = wlr_output_configuration_head_v1_create(vrr_config, m->wlr_output);
+			vrr_config = nx_output_configuration_v1_create();
+			vrr_head = nx_output_configuration_head_v1_create(vrr_config, m->nx_output);
 			vrr_head->state.adaptive_sync_enabled = 1;
-			wlr_output_manager_v1_set_configuration(output_mgr, vrr_config);
+			nx_output_manager_v1_set_configuration(output_mgr, vrr_config);
 		} else if (m->vrr_pending_game) {
-			wlr_log(WLR_ERROR, "Game VRR enable failed on %s (hw rejected)",
-					m->wlr_output->name);
+			nx_log(NX_ERROR, "Game VRR enable failed on %s (hw rejected)",
+					m->nx_output->name);
 			/* Roll back the optimistic flag; the game runs at the
 			 * fixed mode with frame-repeat/autolock pacing. */
 			m->game_vrr_active = 0;
 			m->vrr_pending = 0;
 			m->vrr_pending_game = 0;
 		} else {
-			wlr_log(WLR_ERROR, "VRR enable failed on %s (hw rejected) — "
+			nx_log(NX_ERROR, "VRR enable failed on %s (hw rejected) — "
 					"falling back to fixed multiple mode",
-					m->wlr_output->name);
+					m->nx_output->name);
 			/* Without this fallback the panel silently stays on its
 			 * desktop mode (e.g. 60 Hz for 23.976 video = 3:2 pulldown
 			 * judder for the rest of the film). Mark VRR unusable and
@@ -2830,24 +2698,24 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 			request_frame(m);
 		}
 	} else if (m->vrr_pending == -1) {
-		if (m->wlr_output->adaptive_sync_status == WLR_OUTPUT_ADAPTIVE_SYNC_DISABLED) {
-			struct wlr_output_configuration_v1 *vrr_config;
-			struct wlr_output_configuration_head_v1 *vrr_head;
+		if (m->nx_output->adaptive_sync_status == NX_OUTPUT_ADAPTIVE_SYNC_DISABLED) {
+			struct nx_output_configuration_v1 *vrr_config;
+			struct nx_output_configuration_head_v1 *vrr_head;
 
 			m->vrr_active = 0;
 			m->vrr_target_hz = 0.0f;
 			m->vrr_pending = 0;
 			m->vrr_pending_game = 0;
 
-			vrr_config = wlr_output_configuration_v1_create();
-			vrr_head = wlr_output_configuration_head_v1_create(vrr_config, m->wlr_output);
+			vrr_config = nx_output_configuration_v1_create();
+			vrr_head = nx_output_configuration_head_v1_create(vrr_config, m->nx_output);
 			vrr_head->state.adaptive_sync_enabled = 0;
-			wlr_output_manager_v1_set_configuration(output_mgr, vrr_config);
+			nx_output_manager_v1_set_configuration(output_mgr, vrr_config);
 
-			wlr_log(WLR_DEBUG, "VRR disabled on %s", m->wlr_output->name);
+			nx_log(NX_DEBUG, "VRR disabled on %s", m->nx_output->name);
 		} else {
-			wlr_log(WLR_ERROR, "VRR disable failed on %s (hw rejected)",
-					m->wlr_output->name);
+			nx_log(NX_ERROR, "VRR disable failed on %s (hw rejected)",
+					m->nx_output->name);
 			m->vrr_pending = 0;
 			m->vrr_pending_game = 0;
 		}
@@ -2879,11 +2747,9 @@ commit_output_frame(Monitor *m, struct wlr_output_state *state, int allow_tearin
 	}
 }
 
-/* XLEAK companion: dump every scene buffer's effective placement for a
- * client whose geometry crosses its monitor edge — shows whether the
- * wlroots-side clip (position + dest size) actually bounds the buffer. */
+/* XLEAK: logs each buffer's clipped placement. */
 static void
-diag_leak_buffer_iter(struct wlr_scene_buffer *buf, int sx, int sy, void *data)
+diag_leak_buffer_iter(struct nx_scene_buffer *buf, int sx, int sy, void *data)
 {
 	Client *ac = data;
 	if (!buf)
@@ -2912,10 +2778,10 @@ struct xpaint_scan {
 };
 
 static void
-diag_xpaint_buffer_iter(struct wlr_scene_buffer *buf, int sx, int sy, void *data)
+diag_xpaint_buffer_iter(struct nx_scene_buffer *buf, int sx, int sy, void *data)
 {
 	struct xpaint_scan *s = data;
-	struct wlr_box b, vis;
+	struct nx_box b, vis;
 	int w, h;
 
 	if (!buf)
@@ -2926,17 +2792,17 @@ diag_xpaint_buffer_iter(struct wlr_scene_buffer *buf, int sx, int sy, void *data
 			: (buf->buffer ? buf->buffer->height : 0);
 	if (w <= 0 || h <= 0)
 		return;
-	b = (struct wlr_box){ sx, sy, w, h };
-	if (!wlr_box_intersection(&vis, &b, &s->m->m))
+	b = (struct nx_box){ sx, sy, w, h };
+	if (!nx_box_intersection(&vis, &b, &s->m->m))
 		return;
 	if (s->now - s->m->diag_xpaint_ns < 250000000ULL)
 		return;
 	s->m->diag_xpaint_ns = s->now;
 	diag_logf("XPAINT",
 		"%s FOREIGN buffer '%s' (owner=%s) %dx%d@%d,%d visible %dx%d@%d,%d",
-		s->m->wlr_output->name, s->label,
-		s->owner && s->owner->wlr_output
-			? s->owner->wlr_output->name : "?",
+		s->m->nx_output->name, s->label,
+		s->owner && s->owner->nx_output
+			? s->owner->nx_output->name : "?",
 		w, h, sx, sy, vis.width, vis.height, vis.x, vis.y);
 }
 
@@ -2963,26 +2829,26 @@ diag_xpaint_audit(Monitor *m, uint64_t now)
 		 * snapshot — everything that can carry tile content. */
 		s.owner = ac->mon;
 		s.label = client_get_appid(ac) ? client_get_appid(ac) : "(null)";
-		wlr_scene_node_for_each_buffer(&ac->scene->node,
+		nx_scene_node_for_each_buffer(&ac->scene->node,
 				diag_xpaint_buffer_iter, &s);
 		/* Border rects are not buffers — check them directly. */
 		for (i = 0; i < 4; i++) {
-			struct wlr_box b, vis;
+			struct nx_box b, vis;
 			if (!ac->border[i] || !ac->border[i]->node.enabled)
 				continue;
-			b = (struct wlr_box){
+			b = (struct nx_box){
 				ac->scene->node.x + ac->border[i]->node.x,
 				ac->scene->node.y + ac->border[i]->node.y,
 				ac->border[i]->width, ac->border[i]->height };
-			if (!wlr_box_intersection(&vis, &b, &m->m))
+			if (!nx_box_intersection(&vis, &b, &m->m))
 				continue;
 			if (now - m->diag_xpaint_ns < 250000000ULL)
 				continue;
 			m->diag_xpaint_ns = now;
 			diag_logf("XPAINT",
 				"%s FOREIGN border[%d] '%s' (owner=%s) %dx%d@%d,%d",
-				m->wlr_output->name, i, s.label,
-				ac->mon->wlr_output ? ac->mon->wlr_output->name : "?",
+				m->nx_output->name, i, s.label,
+				ac->mon->nx_output ? ac->mon->nx_output->name : "?",
 				b.width, b.height, b.x, b.y);
 		}
 	}
@@ -2991,7 +2857,7 @@ diag_xpaint_audit(Monitor *m, uint64_t now)
 			continue;
 		s.owner = ca->mon;
 		s.label = "close-anim";
-		wlr_scene_node_for_each_buffer(&ca->tree->node,
+		nx_scene_node_for_each_buffer(&ca->tree->node,
 				diag_xpaint_buffer_iter, &s);
 	}
 }
@@ -3015,10 +2881,10 @@ rendermon_prologue(Monitor *m, uint64_t frame_start_ns)
 	 * (large gap, small last_commit → build/apply/keybind work). */
 	{
 		int was_animating = m->anim_was_active;
-		if (was_animating && m->last_frame_ns && m->wlr_output &&
-				m->wlr_output->refresh > 0) {
+		if (was_animating && m->last_frame_ns && m->nx_output &&
+				m->nx_output->refresh > 0) {
 			uint64_t nominal = 1000000000ULL /
-				(uint64_t)(m->wlr_output->refresh / 1000);
+				(uint64_t)(m->nx_output->refresh / 1000);
 			uint64_t gap = frame_start_ns - m->last_frame_ns;
 			if (nominal > 0 && gap > nominal * 5 / 2)
 				/* frame = whole previous pass (entry→commit end);
@@ -3029,7 +2895,7 @@ rendermon_prologue(Monitor *m, uint64_t frame_start_ns)
 				diag_logf("ANIMHITCH",
 					"%s gap=%.2fms nominal=%.2fms frame=%.2fms "
 					"build=%.2fms flip=%.2fms",
-					m->wlr_output->name,
+					m->nx_output->name,
 					gap / 1e6, nominal / 1e6,
 					m->last_commit_duration_ns / 1e6,
 					m->last_build_ns / 1e6,
@@ -3055,8 +2921,8 @@ rendermon_prologue(Monitor *m, uint64_t frame_start_ns)
 			 * eats the slide and it reads as a snap.  Anything beyond
 			 * a few missed vblanks means "idle", not "animating":
 			 * restart at one nominal frame. */
-			double frame_s = (m->wlr_output && m->wlr_output->refresh > 0)
-					? 1000.0 / (double)m->wlr_output->refresh
+			double frame_s = (m->nx_output && m->nx_output->refresh > 0)
+					? 1000.0 / (double)m->nx_output->refresh
 					: 0.016;
 			double idle_gap = 3.0 * frame_s;
 			if (idle_gap < 0.034)
@@ -3084,8 +2950,8 @@ rendermon_prologue(Monitor *m, uint64_t frame_start_ns)
 		 * schedule the next vblank when something is still moving. */
 		if (still)
 			gpuboost_kick(frame_start_ns);
-		if (still && m->wlr_output)
-			wlr_output_schedule_frame(m->wlr_output);
+		if (still && m->nx_output)
+			nx_output_schedule_frame(m->nx_output);
 	}
 
 	/* Audio-meter overlay: one exact-phase redraw per displayed frame
@@ -3103,8 +2969,7 @@ void
 rendermon(struct wl_listener *listener, void *data)
 {
 	Monitor *m = wl_container_of(listener, m, frame);
-	struct wlr_scene_output_state_options opts = {0};
-	struct wlr_output_state state;
+	struct nx_output_state state;
 	struct timespec now;
 	uint64_t frame_start_ns;
 	int needs_frame = 0;
@@ -3138,7 +3003,7 @@ rendermon(struct wl_listener *listener, void *data)
 	 * scanout for the game on monitor B — and B's re-arm would silently
 	 * undo A's hold.  Re-derive the flag from THIS monitor's holds
 	 * before building its frame. */
-	scene->WLR_PRIVATE.direct_scanout =
+	scene->direct_scanout =
 		!m->scanout_blacklist && !m->sw_cursor_scanout_hold;
 
 	classify_fullscreen_content(m, &is_game, &is_video, &allow_tearing);
@@ -3191,27 +3056,22 @@ rendermon(struct wl_listener *listener, void *data)
 			autolock_apply_mode(m);
 	}
 
-	/* A 10-bit render format is a direct-scanout blocker: the game's
-	 * 8-bit client buffer doesn't match the 10-bit swapchain, so wlroots
-	 * falls back to GPU composition every frame.  Scanout is the single
-	 * biggest win for game latency/pacing — drop to 8-bit while a
-	 * fullscreen game is up and restore 10-bit when it leaves.  Games
-	 * render 8-bit anyway, so nothing is lost visually. */
+	/* Games drop to 8-bit for scanout. */
 	if (is_game && m->render_10bit_active) {
-		struct wlr_output_state fmt;
-		wlr_output_state_init(&fmt);
-		wlr_output_state_set_render_format(&fmt, DRM_FORMAT_XRGB8888);
-		if (m->wlr_output->current_mode)
-			wlr_output_state_set_mode(&fmt, m->wlr_output->current_mode);
-		if (wlr_output_test_state(m->wlr_output, &fmt) &&
-				wlr_output_commit_state(m->wlr_output, &fmt)) {
+		struct nx_output_state fmt;
+		nx_output_state_init(&fmt);
+		nx_output_state_set_render_format(&fmt, DRM_FORMAT_XRGB8888);
+		if (m->nx_output->current_mode)
+			nx_output_state_set_mode(&fmt, m->nx_output->current_mode);
+		if (nx_output_test_state(m->nx_output, &fmt) &&
+				nx_output_commit_state(m->nx_output, &fmt)) {
 			m->render_10bit_active = 0;
 			m->game_dropped_10bit = 1;
-			wlr_log(WLR_INFO,
+			nx_log(NX_INFO,
 				"Dropped 10-bit render on %s for game direct scanout",
-				m->wlr_output->name);
+				m->nx_output->name);
 		}
-		wlr_output_state_finish(&fmt);
+		nx_output_state_finish(&fmt);
 	} else if (!is_game && m->game_dropped_10bit) {
 		m->game_dropped_10bit = 0;
 		enable_10bit_rendering(m);
@@ -3231,7 +3091,7 @@ rendermon(struct wl_listener *listener, void *data)
 		Client *fc = fullscreen_visible_on(m);
 		const char *appid = fc ? client_get_appid(fc) : NULL;
 		unsigned long long presents = m->frames_presented - m->diag_presented0;
-		struct wlr_box fcnat = {0};
+		struct nx_box fcnat = {0};
 		if (fc)
 			client_get_geometry(fc, &fcnat);
 
@@ -3242,7 +3102,7 @@ rendermon(struct wl_listener *listener, void *data)
 			"scanout=%d hdr=%d 10bit=%d "
 			"commit_fail=%u commitfail_ev=%u scanout_fall=%u scanout_rearm=%u "
 			"scanout_bl=%d scene_fail=%d geom=%dx%d@%d,%d surf=%dx%d mm=%dx%d@%d,%d",
-			m->wlr_output->name, appid ? appid : "-",
+			m->nx_output->name, appid ? appid : "-",
 			is_game ? "game" : (is_video ? "video" : "-"),
 			m->diag_vblanks, m->diag_builds, m->diag_idle_skips,
 			m->diag_commits_in, presents,
@@ -3280,7 +3140,7 @@ rendermon(struct wl_listener *listener, void *data)
 			diag_logf("FREEZE",
 				"%s fs=%s presents=0 over ~1s — CAUSE: %s "
 				"(vblanks=%u builds=%u idle_skip=%u client_commits=%u)",
-				m->wlr_output->name, appid ? appid : "?", cause,
+				m->nx_output->name, appid ? appid : "?", cause,
 				m->diag_vblanks, m->diag_builds, m->diag_idle_skips,
 				m->diag_commits_in);
 		}
@@ -3292,19 +3152,19 @@ rendermon(struct wl_listener *listener, void *data)
 		 * switch workspace and back" report.  Silent on an idle
 		 * desktop: no keys delivered, nothing logged. */
 		if (m->diag_focus_keys > 0 && m->diag_focus_commits == 0) {
-			struct wlr_surface *fsurf = seat
+			struct nx_surface *fsurf = seat
 				? seat->keyboard_state.focused_surface : NULL;
 			Client *kc = NULL;
 
 			if (fsurf)
-				toplevel_from_wlr_surface(fsurf, &kc, NULL);
+				toplevel_from_nx_surface(fsurf, &kc, NULL);
 			if (kc && kc->mon == m)
 				diag_logf("STALE",
 					"%s appid='%s' keys=%u commits=0 over ~1s — "
 					"camera_anim=%d frozen=%d node_enabled=%d "
 					"anim_drip=%d size_pending=%d fps_cap=%d "
 					"focustop_match=%d builds=%u",
-					m->wlr_output->name,
+					m->nx_output->name,
 					client_get_appid(kc) ? client_get_appid(kc) : "(null)",
 					m->diag_focus_keys,
 					m->camera_anim_active,
@@ -3342,7 +3202,7 @@ rendermon(struct wl_listener *listener, void *data)
 					"mon=[%d..%d] "
 					"col=%d float=%d fs=%d notif=%d area_clipped=%d "
 					"anim=%d scene@%d,%d",
-					m->wlr_output->name,
+					m->nx_output->name,
 					client_get_appid(ac) ? client_get_appid(ac) : "(null)",
 					ac->geom.width, ac->geom.height,
 					ac->geom.x, ac->geom.y,
@@ -3353,7 +3213,7 @@ rendermon(struct wl_listener *listener, void *data)
 					ac->area_clipped, ac->anim_active,
 					ac->scene->node.x, ac->scene->node.y);
 				if (ac->scene_surface)
-					wlr_scene_node_for_each_buffer(
+					nx_scene_node_for_each_buffer(
 						&ac->scene_surface->node,
 						diag_leak_buffer_iter, ac);
 			}
@@ -3373,7 +3233,7 @@ rendermon(struct wl_listener *listener, void *data)
 	}
 
 	/* Decide if this monitor should enter/exit HDR this frame. The actual
-	 * wlr_output_state mutation happens inside commit_output_frame so the
+	 * nx_output_state mutation happens inside commit_output_frame so the
 	 * transition rides on the same atomic commit as the rendered buffer. */
 	update_hdr_target(m, frame_start_ns);
 
@@ -3390,7 +3250,7 @@ rendermon(struct wl_listener *listener, void *data)
 	 */
 	if (is_video && !is_game && m->video_cadence_active && !m->vrr_active) {
 		/* Cadence "hold" removed: it skipped build_state on no-new-content
-		 * vblanks (wlr_scene_output_needs_frame) as a power optimisation,
+		 * vblanks (nx_scene_output_needs_frame) as a power optimisation,
 		 * but that never sampled the fullscreen surface, dropping its
 		 * wp_presentation feedback → feedback-driven clients (browsers/
 		 * YouTube, eframe/nixlymedia) starved and froze at ~3 fps
@@ -3410,34 +3270,13 @@ rendermon(struct wl_listener *listener, void *data)
 		}
 		/* Force full damage so the desktop renders immediately
 		 * instead of potentially getting an empty build_state */
-		wlr_damage_ring_add_whole(&m->scene_output->damage_ring);
-		wlr_log(WLR_DEBUG, "Video cadence deactivated");
+		nx_damage_ring_add_whole(&m->scene_output->damage_ring);
+		nx_log(NX_DEBUG, "Video cadence deactivated");
 		/* VRR disable is deferred via vrr_pending — it will
 		 * piggyback on the next frame commit (non-blocking). */
 	}
 
-	/*
-	 * Build output state. This determines if we actually need to render.
-	 * wlr_scene handles damage tracking and direct scanout optimization.
-	 *
-	 * When a fullscreen window covers the entire output and its buffer
-	 * is compatible (DMA-BUF, correct size/format), wlroots will
-	 * automatically use direct scanout - bypassing GPU composition entirely.
-	 * This gives optimal frame pacing for games and video.
-	 */
-	/* Fullscreen game: the pointer must ALWAYS be visible.  The HW
-	 * cursor plane can be claimed at set-time yet never reach the
-	 * screen (NVIDIA dumb-buffer passthrough, cross-GPU imports,
-	 * cursor state riding failed commits), and direct scanout skips
-	 * composited software cursors entirely — both make the pointer
-	 * silently invisible exactly when a game is fullscreen.  Lock
-	 * software cursors while a fullscreen game is visible: the cursor
-	 * is composited into every frame, and wlroots refuses direct
-	 * scanout while a visible software cursor exists, so the pointer
-	 * cannot vanish.  A game that hides its cursor (NULL surface)
-	 * disables the wlr cursor → no visible software cursor → the
-	 * scanout fast path returns for pointer-locked play.  Unlocked
-	 * when the game leaves so the desktop gets its HW plane back. */
+	/* Keeps the game pointer visible. */
 	int game_visible;
 	/* Computed once per pass: reused by the game cursor lock below and
 	 * the frame-done drip near the end — it walks all clients, so the
@@ -3459,37 +3298,26 @@ rendermon(struct wl_listener *listener, void *data)
 		game_visible = is_game;
 		if (!game_visible && vis_fsc && looks_like_game(vis_fsc))
 			game_visible = 1;
-		/* Only force software cursors when the HW cursor plane can't
-		 * be trusted: no plane at all (input.c:2359 uses the same
-		 * signal), or an NVIDIA output — NVIDIA has shipped drivers
-		 * where set_cursor reports success but the plane shows nothing
-		 * above direct scanout, so there the blanket lock stays as the
-		 * guarantee that the pointer exists in games.  On AMD/Intel
-		 * with a working plane the cursor rides its own DRM plane and
-		 * stays visible above scanout, so the lock only cost full GPU
-		 * composition of every game frame for nothing.  If the plane
-		 * fails later, wlroots falls back to a software cursor by
-		 * itself, the sw-cursor scanout hold below catches it, and
-		 * this lock engages on the next pass. */
+		/* Lock only where the plane is untrusted. */
 		if (game_visible && !m->game_cursor_swlock &&
-				(!m->wlr_output->hardware_cursor ||
+				(!m->nx_output->hardware_cursor ||
 				 m->gcaps.vendor == GPU_VENDOR_NVIDIA ||
 				 m->gcaps.vendor == GPU_VENDOR_UNKNOWN)) {
 			m->game_cursor_swlock = 1;
-			wlr_output_lock_software_cursors(m->wlr_output, true);
+			nx_output_lock_software_cursors(m->nx_output, true);
 			diag_logf("CURSOR", "%s: fullscreen game — forcing software cursor",
-				m->wlr_output->name);
+				m->nx_output->name);
 		} else if (!game_visible && m->game_cursor_swlock) {
 			m->game_cursor_swlock = 0;
-			wlr_output_lock_software_cursors(m->wlr_output, false);
+			nx_output_lock_software_cursors(m->nx_output, false);
 			diag_logf("CURSOR", "%s: game gone — hardware cursor allowed again",
-				m->wlr_output->name);
+				m->nx_output->name);
 		}
 	}
 
-	/* Software cursor vs direct scanout: wlr_scene draws software
+	/* Software cursor vs direct scanout: nx_scene draws software
 	 * cursors ONLY on the composited path
-	 * (wlr_output_add_software_cursors_to_render_pass) — the direct
+	 * (nx_output_add_software_cursors_to_render_pass) — the direct
 	 * scanout path returns before it.  On outputs without a working HW
 	 * cursor plane (NVIDIA, HDR's lock_software_cursors), a fullscreen
 	 * game electing scanout makes the pointer invisible: it shows for
@@ -3501,10 +3329,10 @@ rendermon(struct wl_listener *listener, void *data)
 	 * keep the scanout fast path. */
 	{
 		int sw_cursor_visible = 0;
-		struct wlr_output_cursor *oc;
-		wl_list_for_each(oc, &m->wlr_output->cursors, link) {
+		struct nx_output_cursor *oc;
+		wl_list_for_each(oc, &m->nx_output->cursors, link) {
 			if (oc->enabled && oc->visible && oc->texture &&
-					oc != m->wlr_output->hardware_cursor) {
+					oc != m->nx_output->hardware_cursor) {
 				sw_cursor_visible = 1;
 				break;
 			}
@@ -3519,20 +3347,20 @@ rendermon(struct wl_listener *listener, void *data)
 				frame_start_ns / 1000000 - last_pointer_motion_ms > 3000)
 			sw_cursor_visible = 0;
 		if (sw_cursor_visible) {
-			if (scene->WLR_PRIVATE.direct_scanout) {
+			if (scene->direct_scanout) {
 				m->sw_cursor_scanout_hold = 1;
-				scene->WLR_PRIVATE.direct_scanout = false;
+				scene->direct_scanout = false;
 				diag_logf("SCANOUT",
 					"%s: software cursor visible — holding direct scanout off",
-					m->wlr_output->name);
+					m->nx_output->name);
 			}
 		} else if (m->sw_cursor_scanout_hold) {
 			m->sw_cursor_scanout_hold = 0;
 			if (!m->scanout_blacklist) {
-				scene->WLR_PRIVATE.direct_scanout = true;
+				scene->direct_scanout = true;
 				diag_logf("SCANOUT",
 					"%s: software cursor gone — releasing scanout hold",
-					m->wlr_output->name);
+					m->nx_output->name);
 			}
 		}
 	}
@@ -3549,9 +3377,9 @@ rendermon(struct wl_listener *listener, void *data)
 	    !m->hdr_entry_pending && !m->hdr_exit_pending) {
 		Client *gc = vis_fsc;  /* not focustop — the VRR skip must
 					* track the game's own buffer */
-		struct wlr_surface *gsurf = gc ? client_surface(gc) : NULL;
-		struct wlr_buffer *gbuf = gsurf
-			? (struct wlr_buffer *)gsurf->buffer : NULL;
+		struct nx_surface *gsurf = gc ? client_surface(gc) : NULL;
+		struct nx_buffer *gbuf = gsurf
+			? (struct nx_buffer *)gsurf->buffer : NULL;
 		if (gbuf && gbuf == gc->game_last_buffer &&
 		    m->vrr_overlay_skips < 3) {
 			m->vrr_overlay_skips++;
@@ -3582,12 +3410,10 @@ rendermon(struct wl_listener *listener, void *data)
 		 * which wakes rendermon on the vblank grid without forcing a
 		 * build.  The historical ~3 fps "YouTube froze" failure was
 		 * chain starvation, not feedback loss — the pacer serves it. */
-		if (!wlr_scene_output_needs_frame(m->scene_output) &&
+		if (!nx_scene_output_needs_frame(m->scene_output) &&
 		    !m->unsampled_buffer &&
 		    !m->vrr_pending &&
-		    !m->hdr_entry_pending && !m->hdr_exit_pending &&
-		    !(m->toast_overlay_layer && !m->toast_overlay_active &&
-		      !m->toast_overlay_disabled_sent)) {
+		    !m->hdr_entry_pending && !m->hdr_exit_pending) {
 			m->diag_idle_skips++;
 			m->frames_since_content_change++;
 			m->last_frame_ns = frame_start_ns;
@@ -3598,7 +3424,7 @@ rendermon(struct wl_listener *listener, void *data)
 
 		m->diag_builds++;
 		m->unsampled_buffer = 0;
-		wlr_output_state_init(&state);
+		nx_output_state_init(&state);
 		/* HDR enter/exit must be in the state BEFORE build_state: the
 		 * scene reads the pending image description to pick the render
 		 * color transform, and the pending render format to size the
@@ -3614,8 +3440,8 @@ rendermon(struct wl_listener *listener, void *data)
 			write_all(STDERR_FILENO, "TS:scene-build>\n", 16);
 		{
 			uint64_t build0 = get_time_ns();
-			needs_frame = wlr_scene_output_build_state(m->scene_output,
-					&state, &opts);
+			needs_frame = nx_scene_output_build_state(m->scene_output,
+					&state);
 			m->last_build_ns = get_time_ns() - build0;
 		}
 		if (m->tag_switch_debug > 0)
@@ -3625,23 +3451,23 @@ rendermon(struct wl_listener *listener, void *data)
 		 * support the 10-bit render format at composition time (e.g. NVIDIA).
 		 * Fall back to 8-bit and retry. */
 		if (!needs_frame && m->render_10bit_active) {
-			struct wlr_output_state fb;
-			wlr_output_state_finish(&state);
-			wlr_log(WLR_INFO, "Scene build failed with 10-bit on %s, falling back to 8-bit",
-				m->wlr_output->name);
-			wlr_output_state_init(&fb);
-			wlr_output_state_set_render_format(&fb, DRM_FORMAT_XRGB8888);
-			if (m->wlr_output->current_mode)
-				wlr_output_state_set_mode(&fb, m->wlr_output->current_mode);
-			if (wlr_output_test_state(m->wlr_output, &fb) &&
-			    wlr_output_commit_state(m->wlr_output, &fb)) {
+			struct nx_output_state fb;
+			nx_output_state_finish(&state);
+			nx_log(NX_INFO, "Scene build failed with 10-bit on %s, falling back to 8-bit",
+				m->nx_output->name);
+			nx_output_state_init(&fb);
+			nx_output_state_set_render_format(&fb, DRM_FORMAT_XRGB8888);
+			if (m->nx_output->current_mode)
+				nx_output_state_set_mode(&fb, m->nx_output->current_mode);
+			if (nx_output_test_state(m->nx_output, &fb) &&
+			    nx_output_commit_state(m->nx_output, &fb)) {
 				m->render_10bit_active = 0;
-				wlr_log(WLR_INFO, "Switched to 8-bit rendering on %s", m->wlr_output->name);
+				nx_log(NX_INFO, "Switched to 8-bit rendering on %s", m->nx_output->name);
 			}
-			wlr_output_state_finish(&fb);
+			nx_output_state_finish(&fb);
 			/* Retry scene build with new format */
-			wlr_output_state_init(&state);
-			needs_frame = wlr_scene_output_build_state(m->scene_output, &state, &opts);
+			nx_output_state_init(&state);
+			needs_frame = nx_scene_output_build_state(m->scene_output, &state);
 		}
 
 		/*
@@ -3653,33 +3479,33 @@ rendermon(struct wl_listener *listener, void *data)
 		 * instead of stalling with a black screen.
 		 */
 		if (!needs_frame) {
-			wlr_output_state_finish(&state);
+			nx_output_state_finish(&state);
 
 			m->scene_build_failures++;
 			if (m->scene_build_failures <= 3) {
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"Scene build failed on %s (attempt %d), "
 					"forcing XRGB8888 and retrying",
-					m->wlr_output->name, m->scene_build_failures);
+					m->nx_output->name, m->scene_build_failures);
 
 				/* Force a fresh swapchain with XRGB8888 */
-				struct wlr_output_state fb;
-				wlr_output_state_init(&fb);
-				wlr_output_state_set_render_format(&fb, DRM_FORMAT_XRGB8888);
-				if (m->wlr_output->current_mode)
-					wlr_output_state_set_mode(&fb, m->wlr_output->current_mode);
+				struct nx_output_state fb;
+				nx_output_state_init(&fb);
+				nx_output_state_set_render_format(&fb, DRM_FORMAT_XRGB8888);
+				if (m->nx_output->current_mode)
+					nx_output_state_set_mode(&fb, m->nx_output->current_mode);
 				if (m->tag_switch_debug > 0)
 					write_all(STDERR_FILENO, "TS:recovery-modeset>\n", 21);
-				if (wlr_output_test_state(m->wlr_output, &fb))
-					wlr_output_commit_state(m->wlr_output, &fb);
+				if (nx_output_test_state(m->nx_output, &fb))
+					nx_output_commit_state(m->nx_output, &fb);
 				if (m->tag_switch_debug > 0)
 					write_all(STDERR_FILENO, "TS:recovery-modeset<\n", 21);
-				wlr_output_state_finish(&fb);
+				nx_output_state_finish(&fb);
 			} else if (m->scene_build_failures == 4) {
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"Scene build persistently failing on %s — "
 					"check GPU driver and Vulkan/GPU libraries",
-					m->wlr_output->name);
+					m->nx_output->name);
 			}
 
 			request_frame(m);
@@ -3697,9 +3523,9 @@ rendermon(struct wl_listener *listener, void *data)
 	/*
 	 * Detect direct scanout: if the output buffer is a client buffer
 	 * (not from the compositor's swapchain), direct scanout is active.
-	 * wlr_client_buffer_get() returns non-NULL only for client buffers.
+	 * nx_client_buffer_get() returns non-NULL only for client buffers.
 	 */
-	if (needs_frame && state.buffer && wlr_client_buffer_get(state.buffer) &&
+	if (needs_frame && state.buffer && nx_client_buffer_get(state.buffer) &&
 	    !m->scanout_blacklist) {
 		is_direct_scanout = 1;
 	}
@@ -3712,12 +3538,12 @@ rendermon(struct wl_listener *listener, void *data)
 	if (is_direct_scanout && !m->direct_scanout_active) {
 		m->direct_scanout_active = 1;
 		m->frame_pacing_active = 1; /* Enable frame pacing for direct scanout */
-		wlr_log(WLR_DEBUG, "Direct scanout activated on %s - frame pacing enabled",
-			m->wlr_output->name);
+		nx_log(NX_DEBUG, "Direct scanout activated on %s - frame pacing enabled",
+			m->nx_output->name);
 	} else if (!is_direct_scanout && m->direct_scanout_active) {
 		m->direct_scanout_active = 0;
-		wlr_log(WLR_INFO, "Direct scanout deactivated on %s - stats: %lu presented, %lu dropped, %lu held",
-			m->wlr_output->name, m->frames_presented, m->frames_dropped, m->frames_held);
+		nx_log(NX_INFO, "Direct scanout deactivated on %s - stats: %lu presented, %lu dropped, %lu held",
+			m->nx_output->name, m->frames_presented, m->frames_dropped, m->frames_held);
 		/* Keep frame_pacing_active if game or video cadence is active */
 		if (!is_game && !m->video_cadence_active) {
 			m->frame_pacing_active = 0;
@@ -3763,16 +3589,16 @@ rendermon(struct wl_listener *listener, void *data)
 			#undef ADD_BLOCKER
 
 			if (blocker_count > 0) {
-				wlr_log(WLR_INFO,
+				nx_log(NX_INFO,
 					"Direct scanout blocked on %s by: %s "
 					"(fullscreen game detected — expect GPU composition cost)",
-					m->wlr_output->name, blockers);
+					m->nx_output->name, blockers);
 			} else {
-				wlr_log(WLR_INFO,
+				nx_log(NX_INFO,
 					"Direct scanout blocked on %s — no nixlytile-owned blockers. "
 					"Possible cause: buffer format/size mismatch, color transform, "
 					"or hardware rejection. Check client buffer parameters.",
-					m->wlr_output->name);
+					m->nx_output->name);
 			}
 			m->scanout_diag_warn_ns = frame_start_ns;
 		}
@@ -3786,17 +3612,17 @@ rendermon(struct wl_listener *listener, void *data)
 		if (!allow_tearing) {
 			if (!m->frame_pacing_active) {
 				m->frame_pacing_active = 1;
-				wlr_log(WLR_DEBUG, "Frame pacing enabled for fullscreen game on %s",
-					m->wlr_output->name);
+				nx_log(NX_DEBUG, "Frame pacing enabled for fullscreen game on %s",
+					m->nx_output->name);
 			}
 			use_frame_pacing = 1;
 		}
 		/* New buffers only, tearing included. */
 		if (needs_frame) {
 			Client *gc = vis_fsc;
-			struct wlr_surface *gsurf = gc ? client_surface(gc) : NULL;
-			struct wlr_buffer *gbuf = gsurf
-				? (struct wlr_buffer *)gsurf->buffer : NULL;
+			struct nx_surface *gsurf = gc ? client_surface(gc) : NULL;
+			struct nx_buffer *gbuf = gsurf
+				? (struct nx_buffer *)gsurf->buffer : NULL;
 			if (gbuf && gbuf != gc->game_last_buffer) {
 				gc->game_last_buffer = gbuf;
 				track_game_frame_pacing(m, frame_start_ns);
@@ -3831,13 +3657,13 @@ rendermon(struct wl_listener *listener, void *data)
 		m->frame_repeat_candidate = 0;
 		m->frame_repeat_candidate_age = 0;
 		m->adaptive_pacing_enabled = 0;
-		wlr_log(WLR_DEBUG, "Frame repeat disabled - VRR active or tearing enabled");
+		nx_log(NX_DEBUG, "Frame repeat disabled - VRR active or tearing enabled");
 	}
 
 	if (is_game)
-		wlr_output_state_set_content_type(&state, WP_CONTENT_TYPE_V1_TYPE_GAME);
+		nx_output_state_set_content_type(&state, WP_CONTENT_TYPE_V1_TYPE_GAME);
 	else if (is_video || m->hdr_active)
-		wlr_output_state_set_content_type(&state, WP_CONTENT_TYPE_V1_TYPE_VIDEO);
+		nx_output_state_set_content_type(&state, WP_CONTENT_TYPE_V1_TYPE_VIDEO);
 
 	if (needs_frame) {
 		if (m->tag_switch_debug > 0)
@@ -3863,7 +3689,7 @@ rendermon(struct wl_listener *listener, void *data)
 		}
 	}
 
-	wlr_output_state_finish(&state);
+	nx_output_state_finish(&state);
 	m->last_frame_ns = frame_start_ns;
 
 	if (m->tag_switch_debug > 0)
@@ -3889,8 +3715,8 @@ frame_done:
 
 		if (m->present_interval_ns > 0)
 			display_hz = 1000000000.0f / (float)m->present_interval_ns;
-		else if (m->wlr_output->current_mode)
-			display_hz = (float)m->wlr_output->current_mode->refresh / 1000.0f;
+		else if (m->nx_output->current_mode)
+			display_hz = (float)m->nx_output->current_mode->refresh / 1000.0f;
 
 		if (!m->game_vrr_active && !allow_tearing && display_hz >= 30.0f) {
 			/* Autolock rounds up, manual nearest. */
@@ -4002,7 +3828,7 @@ frame_done:
 
 	/* Mapped-but-hidden surfaces (fullscreen client bound to an
 	 * inactive workspace, tiles behind a fullscreen client) are
-	 * skipped by wlr_scene_output_send_frame_done below — drip
+	 * skipped by nx_scene_output_send_frame_done below — drip
 	 * frame_done to them at ~1 Hz so a render thread blocked on a
 	 * frame callback drains no matter how long it stays hidden.
 	 * Only surfaces that actually requested a callback get one. */
@@ -4011,22 +3837,13 @@ frame_done:
 	{
 		Client *hc, *fsc = vis_fsc;
 		wl_list_for_each(hc, &clients, link) {
-			struct wlr_surface *hs;
+			struct nx_surface *hs;
 			int starved;
 			if (hc->mon != m || !hc->scene)
 				continue;
-			/* Starved of frame_done despite an enabled root node:
-			 * frozen clients (scene_surface disabled, only the
-			 * snapshot renders) and clients fully occluded by a
-			 * fullscreen client (zero visible region → wlroots
-			 * silently drops their callbacks). */
-			/* Cheapest checks first — this runs for every client on
-			 * the monitor every pass. */
+			/* Starved of frame_done; cheapest checks first. */
 			starved = !hc->scene->node.enabled
-					/* Overview hides the tile/float layers so
-					 * only the mirrors show: the client's own
-					 * node is still enabled but has no visible
-					 * region, so wlroots drops its callbacks. */
+					/* Overview shows only the mirrors. */
 					|| overview_is_open()
 					|| hc->frozen_buffer
 					/* Slide started with no snapshot-able content
@@ -4039,12 +3856,7 @@ frame_done:
 					 * so it cannot converge.  Drip regardless
 					 * of why it is otherwise invisible. */
 					|| client_size_pending(hc)
-					/* Column-maximize (Mod+F): neighbour tiles are
-					 * pushed off-viewport / fully covered — enabled
-					 * scene node but zero visible region, so wlroots
-					 * drops their callbacks.  Without the drip their
-					 * toolkits block on frame callbacks and can't ack
-					 * or commit any pending resize while covered. */
+					/* Mod+F covers the neighbour tiles. */
 					|| (hc->column && hc->column->ws &&
 						hc->column->ws->focused_col &&
 						hc->column->ws->focused_col->fullscreen &&
@@ -4060,42 +3872,26 @@ frame_done:
 				 * slide is ~150 ms. */
 				if (!m->camera_anim_active && hc->scene->node.enabled
 						&& hc->scene_surface) {
-					struct wlr_surface *vs = client_surface(hc);
+					struct nx_surface *vs = client_surface(hc);
 					/* The walk visits every node of the
 					 * subsurface tree.  A client with no
 					 * subsurfaces and no area clip has exactly
 					 * one buffer — the toplevel's own, which is
 					 * visible here and already served by
-					 * wlr_scene_output_send_frame_done — so the
+					 * nx_scene_output_send_frame_done — so the
 					 * walk cannot find a culled buffer: skip it
 					 * (the common case for every plain tile). */
 					if (vs && vs->mapped &&
 							(hc->area_clipped ||
 							 !wl_list_empty(&vs->current.subsurfaces_below) ||
 							 !wl_list_empty(&vs->current.subsurfaces_above)))
-						wlr_scene_node_for_each_buffer(
+						nx_scene_node_for_each_buffer(
 							&hc->scene_surface->node,
 							culled_buffer_drip_iter, &now);
 				}
 				continue;
 			}
-			/* FROZEN clients drip every vblank, not at 1 Hz: a size
-			 * anim (Mod+F maximize) configures the final size at anim
-			 * start and waits for the client to commit it — but the
-			 * disabled live surface gets no frame callbacks from
-			 * wlroots, so the client won't render the new size until
-			 * a callback arrives.  At 1 Hz the early-unfreeze never
-			 * fires mid-anim and the content visibly lags (or worse:
-			 * on an idle desktop only the 1 Hz heartbeat drives this,
-			 * and a client needing several callbacks to relayout
-			 * looks stuck until a ws switch forces damage).
-			 *
-			 * Exception: during a camera slide the whole point of the
-			 * frame_done throttle (see below) is that heavy clients
-			 * pause rendering — a frozen X11 Blender dripped every
-			 * vblank here would keep racing the compositor for the
-			 * GPU.  Its snapshot needs no repaint; size-pending
-			 * clients still drip so pending configures converge. */
+			/* Frozen clients drip every vblank. */
 			{
 				/* anim_drip: content-less tile mid-slide — must
 				 * drip every vblank PRECISELY during the camera
@@ -4111,7 +3907,7 @@ frame_done:
 			hs = client_surface(hc);
 			if (!hs || !hs->mapped)
 				continue;
-			wlr_surface_for_each_surface(hs, hidden_frame_done_iter,
+			nx_surface_for_each_surface(hs, hidden_frame_done_iter,
 					&now);
 		}
 		if (hidden_due)
@@ -4179,9 +3975,9 @@ frame_done:
 
 		if (foc && foc->scene && foc->scene->node.enabled &&
 				client_surface(foc)) {
-			struct wlr_surface *fs = client_surface(foc);
+			struct nx_surface *fs = client_surface(foc);
 			if (fs->mapped)
-				wlr_surface_for_each_surface(fs,
+				nx_surface_for_each_surface(fs,
 					hidden_frame_done_iter, &now);
 		}
 		/* A keyboard-focused layer surface (launcher, fuzzel) is the
@@ -4189,15 +3985,15 @@ frame_done:
 		 * vblank, not at the unfocused cap (2 Hz on battery made its
 		 * page switches take seconds). */
 		if (efl && efl->mapped && efl->layer_surface->surface->mapped)
-			wlr_surface_for_each_surface(
+			nx_surface_for_each_surface(
 				efl->layer_surface->surface,
 				hidden_frame_done_iter, &now);
 		if (frame_start_ns - m->unfocused_done_ns >= interval) {
-			wlr_scene_output_send_frame_done(m->scene_output, &now);
+			nx_scene_output_send_frame_done(m->scene_output, &now);
 			m->unfocused_done_ns = frame_start_ns;
 		}
 	} else {
-		wlr_scene_output_send_frame_done(m->scene_output, &now);
+		nx_scene_output_send_frame_done(m->scene_output, &now);
 	}
 
 	/*
@@ -4213,7 +4009,7 @@ frame_done:
 	 * latched (the UI heartbeat rate).  The lockscreen starved the same
 	 * way (~11 fps once the chain went cold).
 	 *
-	 * request_frame() can't sustain the chain: wlr_output_schedule_frame
+	 * request_frame() can't sustain the chain: nx_output_schedule_frame
 	 * marks the output needs_frame, forcing a full build+commit on the
 	 * next pass — a pageflip every vblank regardless of content (the old
 	 * behaviour).  Instead arm fd_pacer on the vblank grid: the paced
@@ -4228,7 +4024,7 @@ void
 outputpresent(struct wl_listener *listener, void *data)
 {
 	Monitor *m = wl_container_of(listener, m, present);
-	struct wlr_output_event_present *event = data;
+	struct nx_output_event_present *event = data;
 	uint64_t present_ns;
 
 	if (!event || !event->presented)
@@ -4252,10 +4048,10 @@ outputpresent(struct wl_listener *listener, void *data)
 		uint64_t interval = present_ns - m->last_present_ns;
 		uint64_t mode_iv = 0;
 
-		if (m->wlr_output->current_mode &&
-				m->wlr_output->current_mode->refresh > 0)
+		if (m->nx_output->current_mode &&
+				m->nx_output->current_mode->refresh > 0)
 			mode_iv = 1000000000000ULL /
-				(uint64_t)m->wlr_output->current_mode->refresh;
+				(uint64_t)m->nx_output->current_mode->refresh;
 		/* Sanity check: 1-100 ms and within [0.5, 1.5]× the mode's
 		 * vblank interval (fractional rates like 59.94 still pass). */
 		if (interval > 1000000 && interval < 100000000 &&
@@ -4308,10 +4104,10 @@ outputpresent(struct wl_listener *listener, void *data)
 void
 requestmonstate(struct wl_listener *listener, void *data)
 {
-	struct wlr_output_event_request_state *event = data;
+	struct nx_output_event_request_state *event = data;
 	Monitor *m;
 
-	wlr_output_commit_state(event->output, event->state);
+	nx_output_commit_state(event->output, event->state);
 
 	/* A request_state event commonly fires when the backend learns of new
 	 * modes (EDID arrived after createmon, e.g. TV woke up from standby).
@@ -4329,13 +4125,11 @@ requestmonstate(struct wl_listener *listener, void *data)
 
 	/* Late EDID may have brought the fast native mode the divisor
 	 * modes derive from. Idempotent. */
-	pace_register_modes(m->wlr_output);
+	pace_register_modes(m->nx_output);
 
 	try_reapply_bestmode(m);
 
-	/* Late EDID may also have flipped HDR/10-bit capability (UHD Color
-	 * toggled on the TV, full EDID after HDMI handshake). Pick up the
-	 * refreshed wlroots caps and auto-upgrade. */
+	/* Late EDID may flip HDR caps. */
 	refresh_color_caps(m);
 
 	updatemons(NULL, NULL);
@@ -4344,9 +4138,9 @@ requestmonstate(struct wl_listener *listener, void *data)
 void
 set_adaptive_sync(Monitor *m, int enable)
 {
-	enum wlr_output_adaptive_sync_status expected;
+	enum nx_output_adaptive_sync_status expected;
 
-	if (!m || !m->wlr_output || !m->wlr_output->enabled
+	if (!m || !m->nx_output || !m->nx_output->enabled
 			|| !fullscreen_adaptive_sync_enabled
 			|| !m->vrr_capable)
 		return;
@@ -4358,9 +4152,9 @@ set_adaptive_sync(Monitor *m, int enable)
 	 * finalize step in commit_output_frame verifies hardware state and
 	 * broadcasts to output_mgr. */
 	expected = enable
-		? WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED
-		: WLR_OUTPUT_ADAPTIVE_SYNC_DISABLED;
-	if (m->wlr_output->adaptive_sync_status == expected
+		? NX_OUTPUT_ADAPTIVE_SYNC_ENABLED
+		: NX_OUTPUT_ADAPTIVE_SYNC_DISABLED;
+	if (m->nx_output->adaptive_sync_status == expected
 			&& m->vrr_pending == 0)
 		return;
 	m->vrr_pending = enable ? 1 : -1;
@@ -4379,24 +4173,24 @@ enable_game_vrr(Monitor *m)
 	if (!m->vrr_capable) {
 		diag_logf("GVRR", "%s: blocked — output not VRR-capable "
 			"(DRM adaptive-sync test failed at startup)",
-			m->wlr_output->name);
+			m->nx_output->name);
 		return;
 	}
 
 	/* A paced divisor mode (pace.c) IS the user's fixed-rate pin: VRR
 	 * would flip on the ms-granular pace timer instead of the vblank
 	 * grid — jitter and VRR flicker for nothing. */
-	if (wlr_drm_connector_mode_pace_divisor(m->wlr_output,
-			m->wlr_output->current_mode) >= 2) {
+	if (nx_drm_connector_mode_pace_divisor(m->nx_output,
+			m->nx_output->current_mode) >= 2) {
 		diag_logf("GVRR", "%s: blocked — paced divisor mode active",
-			m->wlr_output->name);
+			m->nx_output->name);
 		return;
 	}
 
 	if (!fullscreen_adaptive_sync_enabled) {
 		diag_logf("GVRR", "%s: blocked — disabled by user setting",
-			m->wlr_output->name);
-		wlr_log(WLR_DEBUG, "Game VRR: disabled by user setting");
+			m->nx_output->name);
+		nx_log(NX_DEBUG, "Game VRR: disabled by user setting");
 		return;
 	}
 
@@ -4409,8 +4203,8 @@ enable_game_vrr(Monitor *m)
 	m->game_vrr_last_fps = 0.0f;
 	m->game_vrr_last_change_ns = get_time_ns();
 	m->game_vrr_stable_frames = 0;
-	if (m->wlr_output->adaptive_sync_status
-			!= WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED) {
+	if (m->nx_output->adaptive_sync_status
+			!= NX_OUTPUT_ADAPTIVE_SYNC_ENABLED) {
 		m->vrr_pending = 1;
 		m->vrr_pending_hz = 0.0f;
 		m->vrr_pending_game = 1;
@@ -4419,8 +4213,8 @@ enable_game_vrr(Monitor *m)
 	}
 
 	show_hz_osd(m, "Game VRR Enabled");
-	diag_logf("GVRR", "%s: enabled (deferred commit)", m->wlr_output->name);
-	wlr_log(WLR_DEBUG, "Game VRR enabled on %s", m->wlr_output->name);
+	diag_logf("GVRR", "%s: enabled (deferred commit)", m->nx_output->name);
+	nx_log(NX_DEBUG, "Game VRR enabled on %s", m->nx_output->name);
 }
 
 void
@@ -4434,16 +4228,16 @@ disable_game_vrr(Monitor *m)
 	if (m->vrr_pending == 1 && m->vrr_pending_game) {
 		m->vrr_pending = 0;
 		m->vrr_pending_game = 0;
-	} else if (m->wlr_output && m->wlr_output->adaptive_sync_status
-			!= WLR_OUTPUT_ADAPTIVE_SYNC_DISABLED) {
+	} else if (m->nx_output && m->nx_output->adaptive_sync_status
+			!= NX_OUTPUT_ADAPTIVE_SYNC_DISABLED) {
 		m->vrr_pending = -1;
 		m->vrr_pending_hz = 0.0f;
 		m->vrr_pending_game = 1;
 		m->vrr_pending_tries = 0;
 		request_frame(m);
 	}
-	wlr_log(WLR_DEBUG, "Game VRR disable scheduled on %s (was targeting %.1f FPS)",
-		m->wlr_output->name, m->game_vrr_target_fps);
+	nx_log(NX_DEBUG, "Game VRR disable scheduled on %s (was targeting %.1f FPS)",
+		m->nx_output->name, m->game_vrr_target_fps);
 
 	m->game_vrr_active = 0;
 	m->game_vrr_target_fps = 0.0f;
@@ -4478,11 +4272,11 @@ update_game_vrr(Monitor *m, float current_fps)
 	 * Rate-limited to once per 10s per monitor. */
 	if (!m->gcaps.has_hw_lfc && current_fps > 0.0f && current_fps < 40.0f) {
 		if (now_ns - m->game_vrr_lfc_warn_ns > 10ULL * 1000000000ULL) {
-			wlr_log(WLR_INFO,
+			nx_log(NX_INFO,
 				"VRR/LFC: game FPS %.1f on %s is below typical VRR "
 				"minimum (~48 Hz) and vendor has no hardware LFC. "
 				"Display may flicker or fall out of VRR range.",
-				current_fps, m->wlr_output->name);
+				current_fps, m->nx_output->name);
 			m->game_vrr_lfc_warn_ns = now_ns;
 		}
 	}
@@ -4492,8 +4286,8 @@ update_game_vrr(Monitor *m, float current_fps)
 		return;
 
 	/* Get display's maximum refresh rate */
-	if (m->wlr_output->current_mode) {
-		display_max_hz = (float)m->wlr_output->current_mode->refresh / 1000.0f;
+	if (m->nx_output->current_mode) {
+		display_max_hz = (float)m->nx_output->current_mode->refresh / 1000.0f;
 	} else {
 		display_max_hz = 60.0f;
 	}
@@ -4506,7 +4300,7 @@ update_game_vrr(Monitor *m, float current_fps)
 			m->game_vrr_stable_frames = 0;
 			snprintf(osd_msg, sizeof(osd_msg), "VRR: %.0f Hz (full)", display_max_hz);
 			show_hz_osd(m, osd_msg);
-			wlr_log(WLR_DEBUG, "Game VRR: back to full refresh %.1f Hz", display_max_hz);
+			nx_log(NX_DEBUG, "Game VRR: back to full refresh %.1f Hz", display_max_hz);
 		}
 		return;
 	}
@@ -4558,14 +4352,14 @@ update_game_vrr(Monitor *m, float current_fps)
 
 	snprintf(osd_msg, sizeof(osd_msg), "VRR: %.0f Hz", current_fps);
 	show_hz_osd(m, osd_msg);
-	wlr_log(WLR_DEBUG, "Game VRR: adjusted to %.1f FPS on %s",
-		current_fps, m->wlr_output->name);
+	nx_log(NX_DEBUG, "Game VRR: adjusted to %.1f FPS on %s",
+		current_fps, m->nx_output->name);
 }
 
 /* Walker for is_video_content(): stop at the first surface in the tree
  * tagged wp_content_type_v1 VIDEO. */
 static void
-video_content_walk(struct wlr_surface *surface, int sx, int sy, void *data)
+video_content_walk(struct nx_surface *surface, int sx, int sy, void *data)
 {
 	int *found = data;
 
@@ -4574,7 +4368,7 @@ video_content_walk(struct wlr_surface *surface, int sx, int sy, void *data)
 
 	if (*found)
 		return;
-	if (wlr_surface_get_content_type_v1(content_type_mgr, surface)
+	if (nx_surface_get_content_type_v1(content_type_mgr, surface)
 			== WP_CONTENT_TYPE_V1_TYPE_VIDEO)
 		*found = 1;
 }
@@ -4582,7 +4376,7 @@ video_content_walk(struct wlr_surface *surface, int sx, int sy, void *data)
 int
 is_video_content(Client *c)
 {
-	struct wlr_surface *surface;
+	struct nx_surface *surface;
 	int found = 0;
 	uint64_t now;
 
@@ -4605,7 +4399,7 @@ is_video_content(Client *c)
 	/* Players commonly tag only the video subsurface (mpv-in-subsurface,
 	 * UI in the parent — e.g. nixlymedia), so walk the whole tree
 	 * instead of just the toplevel. */
-	wlr_surface_for_each_surface(surface, video_content_walk, &found);
+	nx_surface_for_each_surface(surface, video_content_walk, &found);
 
 	c->video_content_verdict = found;
 	c->video_content_ms = now ? now : 1;
@@ -4615,7 +4409,7 @@ is_video_content(Client *c)
 int
 is_game_content(Client *c)
 {
-	struct wlr_surface *surface;
+	struct nx_surface *surface;
 	enum wp_content_type_v1_type content_type;
 
 	if (!c || !content_type_mgr)
@@ -4631,14 +4425,14 @@ is_game_content(Client *c)
 	if (!surface)
 		return 0;
 
-	content_type = wlr_surface_get_content_type_v1(content_type_mgr, surface);
+	content_type = nx_surface_get_content_type_v1(content_type_mgr, surface);
 	return content_type == WP_CONTENT_TYPE_V1_TYPE_GAME;
 }
 
 int
 client_wants_tearing(Client *c)
 {
-	struct wlr_surface *surface;
+	struct nx_surface *surface;
 	enum wp_tearing_control_v1_presentation_hint hint;
 
 	if (!c || !tearing_control_mgr)
@@ -4653,7 +4447,7 @@ client_wants_tearing(Client *c)
 	if (!surface)
 		return 0;
 
-	hint = wlr_tearing_control_manager_v1_surface_hint_from_surface(
+	hint = nx_tearing_control_manager_v1_surface_hint_from_surface(
 			tearing_control_mgr, surface);
 
 	return hint == WP_TEARING_CONTROL_V1_PRESENTATION_HINT_ASYNC;
@@ -4682,7 +4476,7 @@ is_standard_video_rate(float hz)
 void
 set_video_refresh_rate(Monitor *m, Client *c)
 {
-	if (!m || !m->wlr_output || !m->wlr_output->enabled || !c)
+	if (!m || !m->nx_output || !m->nx_output->enabled || !c)
 		return;
 
 	/* Don't re-detect if already active */
@@ -4698,8 +4492,8 @@ set_video_refresh_rate(Monitor *m, Client *c)
 	c->frame_time_count = 0;
 	c->detected_video_hz = 0.0f;
 
-	wlr_log(WLR_DEBUG, "Video content detected on %s, starting frame rate detection",
-			m->wlr_output->name);
+	nx_log(NX_DEBUG, "Video content detected on %s, starting frame rate detection",
+			m->nx_output->name);
 
 	/* Schedule video check to detect fps and set appropriate mode */
 	schedule_video_check(500);
@@ -4708,12 +4502,12 @@ set_video_refresh_rate(Monitor *m, Client *c)
 void
 restore_max_refresh_rate(Monitor *m)
 {
-	struct wlr_output_mode *max_mode;
-	struct wlr_output_state state;
-	struct wlr_output_configuration_v1 *config;
-	struct wlr_output_configuration_head_v1 *config_head;
+	struct nx_output_mode *max_mode;
+	struct nx_output_state state;
+	struct nx_output_configuration_v1 *config;
+	struct nx_output_configuration_head_v1 *config_head;
 
-	if (!m || !m->wlr_output || !m->wlr_output->enabled)
+	if (!m || !m->nx_output || !m->nx_output->enabled)
 		return;
 
 	/* Disable VRR if active */
@@ -4734,45 +4528,45 @@ restore_max_refresh_rate(Monitor *m)
 	 * bandwidth/chroma choice) for 4K@120 forever. */
 	max_mode = NULL;
 	{
-		RuntimeMonitorConfig *rtcfg = find_monitor_config(m->wlr_output->name);
+		RuntimeMonitorConfig *rtcfg = find_monitor_config(m->nx_output->name);
 		if (rtcfg && rtcfg->width > 0 && rtcfg->height > 0)
-			max_mode = find_mode(m->wlr_output, rtcfg->width,
+			max_mode = find_mode(m->nx_output, rtcfg->width,
 					rtcfg->height, rtcfg->refresh);
 	}
 	/* Console UI keeps its mode. */
 	if (!max_mode && m->console_mode_active)
-		max_mode = find_mode(m->wlr_output, CONSOLE_MODE_WIDTH,
+		max_mode = find_mode(m->nx_output, CONSOLE_MODE_WIDTH,
 				CONSOLE_MODE_HEIGHT, 0);
 	if (!max_mode)
-		max_mode = bestmode(m->wlr_output);
+		max_mode = bestmode(m->nx_output);
 	if (!max_mode)
 		return;
 
 	/* Video kjørte allerede på maks-moden (kilde-fps matchet panelet, eller
 	 * VRR gjorde jobben uten modebytte). Ikke commit den på nytt — det er
 	 * et modeset uten endring, og på eDP/HDMI kan det blanke skjermen. */
-	if (m->wlr_output->current_mode == max_mode) {
+	if (m->nx_output->current_mode == max_mode) {
 		m->video_mode_active = 0;
 		m->original_mode = NULL;
 		return;
 	}
 
-	wlr_log(WLR_DEBUG, "Restoring %s to max mode: %dx%d@%dmHz",
-			m->wlr_output->name, max_mode->width, max_mode->height,
+	nx_log(NX_DEBUG, "Restoring %s to max mode: %dx%d@%dmHz",
+			m->nx_output->name, max_mode->width, max_mode->height,
 			max_mode->refresh);
 
 	/* Apply the mode */
-	wlr_output_state_init(&state);
-	wlr_output_state_set_mode(&state, max_mode);
-	if (wlr_output_commit_state(m->wlr_output, &state)) {
+	nx_output_state_init(&state);
+	nx_output_state_set_mode(&state, max_mode);
+	if (nx_output_commit_state(m->nx_output, &state)) {
 		m->video_mode_active = 0;
 		m->original_mode = NULL;
 
 		/* Broadcast change to output manager */
-		config = wlr_output_configuration_v1_create();
-		config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+		config = nx_output_configuration_v1_create();
+		config_head = nx_output_configuration_head_v1_create(config, m->nx_output);
 		config_head->state.mode = max_mode;
-		wlr_output_manager_v1_set_configuration(output_mgr, config);
+		nx_output_manager_v1_set_configuration(output_mgr, config);
 
 		/* Show OSD notification */
 		{
@@ -4782,16 +4576,16 @@ restore_max_refresh_rate(Monitor *m)
 			show_hz_osd(m, osd_msg);
 		}
 	}
-	wlr_output_state_finish(&state);
+	nx_output_state_finish(&state);
 }
 
 /* Console-mode auto-resolution: when Steam Big Picture or a retro emulator
  * goes fullscreen, drop a sub-4K@60 display to 1080p best-refresh so the
  * couch UX is smooth. Restore bestmode on fullscreen exit. */
 static int
-output_has_4k_60hz(struct wlr_output *output)
+output_has_4k_60hz(struct nx_output *output)
 {
-	struct wlr_output_mode *mode;
+	struct nx_output_mode *mode;
 	wl_list_for_each(mode, &output->modes, link) {
 		/* >= 59000: TVs advertising 59.94 Hz (59940 mHz) as their only
 		 * 4K mode failed the exact-60000 test and were silently dropped
@@ -4825,12 +4619,12 @@ client_wants_console_mode(Client *c)
 void
 apply_console_mode(Monitor *m, Client *c)
 {
-	struct wlr_output_mode *target;
-	struct wlr_output_state state;
-	struct wlr_output_configuration_v1 *config;
-	struct wlr_output_configuration_head_v1 *config_head;
+	struct nx_output_mode *target;
+	struct nx_output_state state;
+	struct nx_output_configuration_v1 *config;
+	struct nx_output_configuration_head_v1 *config_head;
 
-	if (!m || !m->wlr_output || !m->wlr_output->enabled || !c)
+	if (!m || !m->nx_output || !m->nx_output->enabled || !c)
 		return;
 	if (m->console_mode_active)
 		return;
@@ -4838,40 +4632,40 @@ apply_console_mode(Monitor *m, Client *c)
 		return;
 
 	/* Respect a user-pinned resolution (native pin doesn't count). */
-	if (monitor_mode_pinned(m->wlr_output))
+	if (monitor_mode_pinned(m->nx_output))
 		return;
 
 	/* Monitor already does 4K@60+ — leave native mode. */
-	if (output_has_4k_60hz(m->wlr_output))
+	if (output_has_4k_60hz(m->nx_output))
 		return;
 
-	target = find_mode(m->wlr_output, CONSOLE_MODE_WIDTH,
+	target = find_mode(m->nx_output, CONSOLE_MODE_WIDTH,
 			CONSOLE_MODE_HEIGHT, 0);
 	if (!target)
 		return;
 	/* Already there: restore still owed. */
-	if (m->wlr_output->current_mode == target) {
-		m->console_mode_active = target != bestmode(m->wlr_output);
+	if (m->nx_output->current_mode == target) {
+		m->console_mode_active = target != bestmode(m->nx_output);
 		return;
 	}
 
-	m->console_mode_original = m->wlr_output->current_mode;
+	m->console_mode_original = m->nx_output->current_mode;
 
-	wlr_output_state_init(&state);
-	wlr_output_state_set_mode(&state, target);
-	if (wlr_output_test_state(m->wlr_output, &state)
-	    && wlr_output_commit_state(m->wlr_output, &state)) {
+	nx_output_state_init(&state);
+	nx_output_state_set_mode(&state, target);
+	if (nx_output_test_state(m->nx_output, &state)
+	    && nx_output_commit_state(m->nx_output, &state)) {
 		m->console_mode_active = 1;
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"Console mode: %s switched to %dx%d@%dmHz for '%s'",
-			m->wlr_output->name, target->width, target->height,
+			m->nx_output->name, target->width, target->height,
 			target->refresh,
 			client_get_appid(c) ? client_get_appid(c) : "(null)");
-		config = wlr_output_configuration_v1_create();
-		config_head = wlr_output_configuration_head_v1_create(
-				config, m->wlr_output);
+		config = nx_output_configuration_v1_create();
+		config_head = nx_output_configuration_head_v1_create(
+				config, m->nx_output);
 		config_head->state.mode = target;
-		wlr_output_manager_v1_set_configuration(output_mgr, config);
+		nx_output_manager_v1_set_configuration(output_mgr, config);
 		{
 			char osd_msg[64];
 			snprintf(osd_msg, sizeof(osd_msg), "%dx%d @ %d Hz",
@@ -4883,42 +4677,42 @@ apply_console_mode(Monitor *m, Client *c)
 	} else {
 		m->console_mode_original = NULL;
 	}
-	wlr_output_state_finish(&state);
+	nx_output_state_finish(&state);
 }
 
 void
 restore_console_mode(Monitor *m)
 {
-	struct wlr_output_mode *target;
-	struct wlr_output_state state;
-	struct wlr_output_configuration_v1 *config;
-	struct wlr_output_configuration_head_v1 *config_head;
+	struct nx_output_mode *target;
+	struct nx_output_state state;
+	struct nx_output_configuration_v1 *config;
+	struct nx_output_configuration_head_v1 *config_head;
 
-	if (!m || !m->wlr_output || !m->wlr_output->enabled)
+	if (!m || !m->nx_output || !m->nx_output->enabled)
 		return;
 	if (!m->console_mode_active)
 		return;
 
-	target = bestmode(m->wlr_output);
-	if (!target || m->wlr_output->current_mode == target) {
+	target = bestmode(m->nx_output);
+	if (!target || m->nx_output->current_mode == target) {
 		m->console_mode_active = 0;
 		m->console_mode_original = NULL;
 		return;
 	}
 
-	wlr_output_state_init(&state);
-	wlr_output_state_set_mode(&state, target);
-	if (wlr_output_test_state(m->wlr_output, &state)
-	    && wlr_output_commit_state(m->wlr_output, &state)) {
-		wlr_log(WLR_INFO,
+	nx_output_state_init(&state);
+	nx_output_state_set_mode(&state, target);
+	if (nx_output_test_state(m->nx_output, &state)
+	    && nx_output_commit_state(m->nx_output, &state)) {
+		nx_log(NX_INFO,
 			"Console mode restored: %s → %dx%d@%dmHz",
-			m->wlr_output->name, target->width, target->height,
+			m->nx_output->name, target->width, target->height,
 			target->refresh);
-		config = wlr_output_configuration_v1_create();
-		config_head = wlr_output_configuration_head_v1_create(
-				config, m->wlr_output);
+		config = nx_output_configuration_v1_create();
+		config_head = nx_output_configuration_head_v1_create(
+				config, m->nx_output);
 		config_head->state.mode = target;
-		wlr_output_manager_v1_set_configuration(output_mgr, config);
+		nx_output_manager_v1_set_configuration(output_mgr, config);
 		{
 			char osd_msg[64];
 			snprintf(osd_msg, sizeof(osd_msg), "%dx%d @ %d Hz",
@@ -4930,43 +4724,43 @@ restore_console_mode(Monitor *m)
 	}
 	m->console_mode_active = 0;
 	m->console_mode_original = NULL;
-	wlr_output_state_finish(&state);
+	nx_output_state_finish(&state);
 }
 
 int
 detect_10bit_support(Monitor *m)
 {
-	const struct wlr_drm_format_set *formats;
-	const struct wlr_drm_format *fmt;
+	const struct nx_drm_format_set *formats;
+	const struct nx_drm_format *fmt;
 	int has_10bit = 0;
 
-	if (!m || !m->wlr_output)
+	if (!m || !m->nx_output)
 		return 0;
 
 	/* Check primary plane formats for 10-bit support */
-	formats = wlr_output_get_primary_formats(m->wlr_output, WLR_BUFFER_CAP_DMABUF);
+	formats = nx_output_get_primary_formats(m->nx_output, NX_BUFFER_CAP_DMABUF);
 	if (formats) {
 		/* Look for XRGB2101010 or XBGR2101010 (10-bit RGB formats) */
-		fmt = wlr_drm_format_set_get(formats, DRM_FORMAT_XRGB2101010);
+		fmt = nx_drm_format_set_get(formats, DRM_FORMAT_XRGB2101010);
 		if (fmt) {
 			has_10bit = 1;
-			wlr_log(WLR_INFO, "Monitor %s supports DRM_FORMAT_XRGB2101010 (10-bit)",
-				m->wlr_output->name);
+			nx_log(NX_INFO, "Monitor %s supports DRM_FORMAT_XRGB2101010 (10-bit)",
+				m->nx_output->name);
 		}
 
-		fmt = wlr_drm_format_set_get(formats, DRM_FORMAT_XBGR2101010);
+		fmt = nx_drm_format_set_get(formats, DRM_FORMAT_XBGR2101010);
 		if (fmt) {
 			has_10bit = 1;
-			wlr_log(WLR_INFO, "Monitor %s supports DRM_FORMAT_XBGR2101010 (10-bit)",
-				m->wlr_output->name);
+			nx_log(NX_INFO, "Monitor %s supports DRM_FORMAT_XBGR2101010 (10-bit)",
+				m->nx_output->name);
 		}
 
 		/* Also check for ARGB2101010 (10-bit with alpha) */
-		fmt = wlr_drm_format_set_get(formats, DRM_FORMAT_ARGB2101010);
+		fmt = nx_drm_format_set_get(formats, DRM_FORMAT_ARGB2101010);
 		if (fmt) {
 			has_10bit = 1;
-			wlr_log(WLR_INFO, "Monitor %s supports DRM_FORMAT_ARGB2101010 (10-bit+alpha)",
-				m->wlr_output->name);
+			nx_log(NX_INFO, "Monitor %s supports DRM_FORMAT_ARGB2101010 (10-bit+alpha)",
+				m->nx_output->name);
 		}
 	}
 
@@ -5017,14 +4811,14 @@ ll_cursor_init(Monitor *m)
 	m->ll_cursor_prop_y = 0;
 	m->ll_cursor_active = 0;
 
-	if (!m->wlr_output || !wlr_output_is_drm(m->wlr_output))
+	if (!m->nx_output || !nx_output_is_drm(m->nx_output))
 		return;
 
-	drm_fd = wlr_backend_get_drm_fd(m->wlr_output->backend);
+	drm_fd = nx_backend_get_drm_fd(m->nx_output->backend);
 	if (drm_fd < 0)
 		return;
 
-	conn_id = wlr_drm_connector_get_id(m->wlr_output);
+	conn_id = nx_drm_connector_get_id(m->nx_output);
 	if (conn_id == 0)
 		return;
 
@@ -5104,7 +4898,7 @@ ll_cursor_init(Monitor *m)
 	drmModeFreePlaneResources(planes);
 
 	if (!m->ll_cursor_plane_id) {
-		wlr_log(WLR_DEBUG, "No cursor plane found for %s", m->wlr_output->name);
+		nx_log(NX_DEBUG, "No cursor plane found for %s", m->nx_output->name);
 		return;
 	}
 
@@ -5113,7 +4907,7 @@ ll_cursor_init(Monitor *m)
 	m->ll_cursor_prop_y = ll_find_plane_prop(drm_fd, m->ll_cursor_plane_id, "CRTC_Y");
 
 	if (!m->ll_cursor_prop_x || !m->ll_cursor_prop_y) {
-		wlr_log(WLR_DEBUG, "Cursor plane %u missing CRTC_X/Y properties",
+		nx_log(NX_DEBUG, "Cursor plane %u missing CRTC_X/Y properties",
 			m->ll_cursor_plane_id);
 		m->ll_cursor_plane_id = 0;
 		return;
@@ -5123,8 +4917,8 @@ ll_cursor_init(Monitor *m)
 	m->ll_cursor_crtc_id = crtc_id;
 	m->ll_cursor_active = 1;
 
-	wlr_log(WLR_INFO, "Low-latency cursor enabled for %s (plane %u, crtc %u)",
-		m->wlr_output->name, m->ll_cursor_plane_id, m->ll_cursor_crtc_id);
+	nx_log(NX_INFO, "Low-latency cursor enabled for %s (plane %u, crtc %u)",
+		m->nx_output->name, m->ll_cursor_plane_id, m->ll_cursor_crtc_id);
 }
 
 void
@@ -5136,7 +4930,7 @@ ll_cursor_move(Monitor *m, int x, int y)
 		return;
 
 	/* Only update if HW cursor is actually engaged */
-	if (!m->wlr_output->hardware_cursor)
+	if (!m->nx_output->hardware_cursor)
 		return;
 
 	req = drmModeAtomicAlloc();
@@ -5176,27 +4970,26 @@ set_drm_color_properties(Monitor *m, int max_bpc)
 	int i;
 	int success = 0;
 
-	if (!m || !m->wlr_output || !wlr_output_is_drm(m->wlr_output))
+	if (!m || !m->nx_output || !nx_output_is_drm(m->nx_output))
 		return 0;
 
 	/* Get DRM fd from renderer */
-	drm_fd = wlr_renderer_get_drm_fd(drw);
+	drm_fd = nx_renderer_get_drm_fd(drw);
 	if (drm_fd < 0) {
-		wlr_log(WLR_DEBUG, "Cannot get DRM fd for color properties");
+		nx_log(NX_DEBUG, "Cannot get DRM fd for color properties");
 		return 0;
 	}
 
-	/* Get connector ID from wlroots */
-	conn_id = wlr_drm_connector_get_id(m->wlr_output);
+	conn_id = nx_drm_connector_get_id(m->nx_output);
 	if (conn_id == 0) {
-		wlr_log(WLR_DEBUG, "Cannot get DRM connector ID for %s", m->wlr_output->name);
+		nx_log(NX_DEBUG, "Cannot get DRM connector ID for %s", m->nx_output->name);
 		return 0;
 	}
 
 	/* Get connector to access properties */
 	conn = drmModeGetConnector(drm_fd, conn_id);
 	if (!conn) {
-		wlr_log(WLR_DEBUG, "Cannot get DRM connector %u", conn_id);
+		nx_log(NX_DEBUG, "Cannot get DRM connector %u", conn_id);
 		return 0;
 	}
 
@@ -5219,13 +5012,13 @@ set_drm_color_properties(Monitor *m, int max_bpc)
 
 				if (drmModeConnectorSetProperty(drm_fd, conn_id,
 						conn->props[i], max_bpc) == 0) {
-					wlr_log(WLR_INFO, "Set max bpc to %d for %s (supports %lu-%lu)",
-						max_bpc, m->wlr_output->name, min_bpc, max_supported_bpc);
+					nx_log(NX_INFO, "Set max bpc to %d for %s (supports %lu-%lu)",
+						max_bpc, m->nx_output->name, min_bpc, max_supported_bpc);
 					m->max_bpc = max_bpc;
 					success = 1;
 				} else {
-					wlr_log(WLR_ERROR, "Failed to set max bpc to %d for %s",
-						max_bpc, m->wlr_output->name);
+					nx_log(NX_ERROR, "Failed to set max bpc to %d for %s",
+						max_bpc, m->nx_output->name);
 				}
 			}
 			drmModeFreeProperty(prop);
@@ -5259,8 +5052,8 @@ set_drm_color_properties(Monitor *m, int max_bpc)
 
 				if (drmModeConnectorSetProperty(drm_fd, conn_id,
 						conn->props[i], rgb_value) == 0) {
-					wlr_log(WLR_INFO, "Set colorspace to RGB for %s",
-						m->wlr_output->name);
+					nx_log(NX_INFO, "Set colorspace to RGB for %s",
+						m->nx_output->name);
 				}
 			}
 			drmModeFreeProperty(prop);
@@ -5273,24 +5066,7 @@ set_drm_color_properties(Monitor *m, int max_bpc)
 	return success;
 }
 
-/*
- * Force HDMI output to full-range RGB.
- *
- * 4K TVs frequently default to HDMI Limited Range (16-235) quantization,
- * which crushes black to ~16/255 gray. Setting the Intel/AMD "Broadcast
- * RGB" connector property to "Full" forces the driver to emit an AVI
- * InfoFrame with Q=1 (Full Range) and map framebuffer 0..255 directly to
- * the HDMI signal — so compositor-drawn black reaches the TV as real 0.
- *
- * Safe alongside wlroots 0.20 atomic state: wlroots does not touch this
- * property, unlike "max bpc" / "Colorspace". No-op on non-HDMI outputs
- * or drivers that don't expose the property.
- *
- * Also probes "output format" (Intel) / "HDMI Output Colorimetry" to
- * force RGB over YCbCr where the driver would otherwise downgrade to
- * YCbCr 4:2:0 on high-bandwidth HDMI modes (another source of crushed
- * blacks since YCbCr has its own limited range).
- */
+/* Forces full-range RGB on HDMI. */
 void
 force_hdmi_full_range(Monitor *m)
 {
@@ -5299,11 +5075,11 @@ force_hdmi_full_range(Monitor *m)
 	drmModeConnector *conn;
 	int i;
 
-	if (!m || !m->wlr_output || !wlr_output_is_drm(m->wlr_output))
+	if (!m || !m->nx_output || !nx_output_is_drm(m->nx_output))
 		return;
 
 	/* Skip secondary-GPU outputs: renderer fd belongs to primary GPU */
-	if (wlr_drm_backend_get_parent(m->wlr_output->backend))
+	if (nx_drm_backend_get_parent(m->nx_output->backend))
 		return;
 
 	/*
@@ -5314,11 +5090,11 @@ force_hdmi_full_range(Monitor *m)
 	 * crushing black to grey. Name-based gate ("HDMI*") missed that case.
 	 */
 
-	drm_fd = wlr_renderer_get_drm_fd(drw);
+	drm_fd = nx_renderer_get_drm_fd(drw);
 	if (drm_fd < 0)
 		return;
 
-	conn_id = wlr_drm_connector_get_id(m->wlr_output);
+	conn_id = nx_drm_connector_get_id(m->nx_output);
 	if (conn_id == 0)
 		return;
 
@@ -5345,13 +5121,13 @@ force_hdmi_full_range(Monitor *m)
 			if (full_value != (uint64_t)-1) {
 				if (drmModeConnectorSetProperty(drm_fd, conn_id,
 						conn->props[i], full_value) == 0)
-					wlr_log(WLR_INFO,
+					nx_log(NX_INFO,
 						"HDMI: forced full-range RGB on %s",
-						m->wlr_output->name);
+						m->nx_output->name);
 				else
-					wlr_log(WLR_DEBUG,
+					nx_log(NX_DEBUG,
 						"HDMI: failed to set Broadcast RGB=Full on %s",
-						m->wlr_output->name);
+						m->nx_output->name);
 			}
 		}
 		/* "output format" (Intel TGL+): RGB / YCbCr 4:4:4 / 4:2:2 / 4:2:0 */
@@ -5368,9 +5144,9 @@ force_hdmi_full_range(Monitor *m)
 			if (rgb_value != (uint64_t)-1) {
 				if (drmModeConnectorSetProperty(drm_fd, conn_id,
 						conn->props[i], rgb_value) == 0)
-					wlr_log(WLR_INFO,
+					nx_log(NX_INFO,
 						"HDMI: forced RGB output format on %s",
-						m->wlr_output->name);
+						m->nx_output->name);
 			}
 		}
 
@@ -5383,19 +5159,19 @@ force_hdmi_full_range(Monitor *m)
 int
 enable_10bit_rendering(Monitor *m)
 {
-	struct wlr_output_state state;
+	struct nx_output_state state;
 	int success = 0;
 
-	if (!m || !m->wlr_output || !m->wlr_output->enabled)
+	if (!m || !m->nx_output || !m->nx_output->enabled)
 		return 0;
 
 	if (!m->supports_10bit) {
-		wlr_log(WLR_DEBUG, "Monitor %s does not support 10-bit", m->wlr_output->name);
+		nx_log(NX_DEBUG, "Monitor %s does not support 10-bit", m->nx_output->name);
 		return 0;
 	}
 
 	if (m->render_10bit_active) {
-		wlr_log(WLR_DEBUG, "10-bit already active on %s", m->wlr_output->name);
+		nx_log(NX_DEBUG, "10-bit already active on %s", m->nx_output->name);
 		return 1;
 	}
 
@@ -5403,50 +5179,49 @@ enable_10bit_rendering(Monitor *m)
 	 * XRGB2101010 here would clobber the XBGR2101010+image_description
 	 * state and tear the TV out of HDR mode. */
 	if (m->hdr_active || m->hdr_entry_pending) {
-		wlr_log(WLR_DEBUG,
+		nx_log(NX_DEBUG,
 			"10-bit auto-enable skipped on %s — HDR owns render format",
-			m->wlr_output->name);
+			m->nx_output->name);
 		return 0;
 	}
 
-	wlr_output_state_init(&state);
-	wlr_output_state_set_render_format(&state, DRM_FORMAT_XRGB2101010);
+	nx_output_state_init(&state);
+	nx_output_state_set_render_format(&state, DRM_FORMAT_XRGB2101010);
 
 	/* Preserve current mode so we don't reset to preferred/default mode */
-	if (m->wlr_output->current_mode)
-		wlr_output_state_set_mode(&state, m->wlr_output->current_mode);
+	if (m->nx_output->current_mode)
+		nx_output_state_set_mode(&state, m->nx_output->current_mode);
 
-	if (wlr_output_test_state(m->wlr_output, &state)) {
-		if (wlr_output_commit_state(m->wlr_output, &state)) {
+	if (nx_output_test_state(m->nx_output, &state)) {
+		if (nx_output_commit_state(m->nx_output, &state)) {
 			m->render_10bit_active = 1;
 			success = 1;
-			wlr_log(WLR_INFO, "Enabled 10-bit rendering on %s", m->wlr_output->name);
+			nx_log(NX_INFO, "Enabled 10-bit rendering on %s", m->nx_output->name);
 
-			/* wlroots 0.20 sets max_bpc automatically via atomic commits
-			 * based on the render format (pick_max_bpc in atomic.c) */
+			/* max_bpc follows the render format. */
 
 			/* toast removed */
 		} else {
-			wlr_log(WLR_ERROR, "Failed to commit 10-bit state on %s, falling back to 8-bit",
-				m->wlr_output->name);
+			nx_log(NX_ERROR, "Failed to commit 10-bit state on %s, falling back to 8-bit",
+				m->nx_output->name);
 		}
 	} else {
-		wlr_log(WLR_INFO, "10-bit render format not supported by backend on %s, using 8-bit",
-			m->wlr_output->name);
+		nx_log(NX_INFO, "10-bit render format not supported by backend on %s, using 8-bit",
+			m->nx_output->name);
 	}
 
-	wlr_output_state_finish(&state);
+	nx_output_state_finish(&state);
 
 	/* If 10-bit failed, explicitly ensure 8-bit format is active */
 	if (!success) {
-		struct wlr_output_state fallback;
-		wlr_output_state_init(&fallback);
-		wlr_output_state_set_render_format(&fallback, DRM_FORMAT_XRGB8888);
-		if (m->wlr_output->current_mode)
-			wlr_output_state_set_mode(&fallback, m->wlr_output->current_mode);
-		if (wlr_output_test_state(m->wlr_output, &fallback))
-			wlr_output_commit_state(m->wlr_output, &fallback);
-		wlr_output_state_finish(&fallback);
+		struct nx_output_state fallback;
+		nx_output_state_init(&fallback);
+		nx_output_state_set_render_format(&fallback, DRM_FORMAT_XRGB8888);
+		if (m->nx_output->current_mode)
+			nx_output_state_set_mode(&fallback, m->nx_output->current_mode);
+		if (nx_output_test_state(m->nx_output, &fallback))
+			nx_output_commit_state(m->nx_output, &fallback);
+		nx_output_state_finish(&fallback);
 		m->render_10bit_active = 0;
 	}
 
@@ -5461,27 +5236,27 @@ enable_10bit_rendering(Monitor *m)
 static int
 should_skip_auto_10bit(Monitor *m)
 {
-	if (wlr_output_is_drm(m->wlr_output) &&
-	    wlr_drm_backend_get_parent(m->wlr_output->backend)) {
-		wlr_log(WLR_INFO, "Monitor %s is on secondary GPU, "
+	if (nx_output_is_drm(m->nx_output) &&
+	    nx_drm_backend_get_parent(m->nx_output->backend)) {
+		nx_log(NX_INFO, "Monitor %s is on secondary GPU, "
 			"skipping 10-bit to avoid cross-GPU format issues",
-			m->wlr_output->name);
+			m->nx_output->name);
 		return 1;
 	}
-	if (strncmp(m->wlr_output->name, "eDP", 3) == 0 ||
-	    strncmp(m->wlr_output->name, "LVDS", 4) == 0 ||
-	    strncmp(m->wlr_output->name, "DSI", 3) == 0) {
-		wlr_log(WLR_INFO, "Monitor %s: skipping auto 10-bit on "
+	if (strncmp(m->nx_output->name, "eDP", 3) == 0 ||
+	    strncmp(m->nx_output->name, "LVDS", 4) == 0 ||
+	    strncmp(m->nx_output->name, "DSI", 3) == 0) {
+		nx_log(NX_INFO, "Monitor %s: skipping auto 10-bit on "
 			"internal panel (avoids i915 CCS async-flip stall)",
-			m->wlr_output->name);
+			m->nx_output->name);
 		return 1;
 	}
 	if (discrete_gpu_idx >= 0 &&
 	    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA &&
 	    (integrated_gpu_idx < 0 || nvidia_render_primary)) {
-		wlr_log(WLR_INFO, "Monitor %s: skipping auto 10-bit on "
+		nx_log(NX_INFO, "Monitor %s: skipping auto 10-bit on "
 			"Nvidia-primary GPU to avoid format issues",
-			m->wlr_output->name);
+			m->nx_output->name);
 		return 1;
 	}
 	return 0;
@@ -5490,7 +5265,7 @@ should_skip_auto_10bit(Monitor *m)
 void
 init_monitor_color_settings(Monitor *m)
 {
-	if (!m || !m->wlr_output)
+	if (!m || !m->nx_output)
 		return;
 
 	/* Detect capabilities */
@@ -5498,22 +5273,17 @@ init_monitor_color_settings(Monitor *m)
 	m->render_10bit_active = 0;
 	m->max_bpc = 8;  /* Default */
 
-	/* HDR capability: wlroots 0.20 advertises PQ + BT2020 in
-	 * supported_transfer_functions / supported_primaries after parsing the
-	 * EDID HDR static metadata block. We require BOTH for HDR10 — PQ alone
-	 * with sRGB primaries is meaningless. Skip secondary-GPU outputs because
-	 * the swapchain format must survive cross-GPU mgpu_formats intersection
-	 * (same reason 10-bit is skipped on secondary GPUs below). */
+	/* HDR10 needs PQ and BT2020 primaries. */
 	int secondary_gpu = 0;
-	if (wlr_output_is_drm(m->wlr_output) &&
-	    wlr_drm_backend_get_parent(m->wlr_output->backend))
+	if (nx_output_is_drm(m->nx_output) &&
+	    nx_drm_backend_get_parent(m->nx_output->backend))
 		secondary_gpu = 1;
 
 	m->hdr_capable = (!secondary_gpu &&
-		(m->wlr_output->supported_transfer_functions &
-			WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ) &&
-		(m->wlr_output->supported_primaries &
-			WLR_COLOR_NAMED_PRIMARIES_BT2020)) ? 1 : 0;
+		(m->nx_output->supported_transfer_functions &
+			NX_COLOR_TRANSFER_FUNCTION_ST2084_PQ) &&
+		(m->nx_output->supported_primaries &
+			NX_COLOR_NAMED_PRIMARIES_BT2020)) ? 1 : 0;
 	m->hdr_active = 0;
 	m->hdr_driver_client = NULL;
 	m->hdr_render_format = 0;
@@ -5525,13 +5295,13 @@ init_monitor_color_settings(Monitor *m)
 	m->hdr_commit_fail_count = 0;
 	memset(&m->hdr_pending_desc, 0, sizeof(m->hdr_pending_desc));
 
-	wlr_log(WLR_INFO,
+	nx_log(NX_INFO,
 		"Monitor %s: 10-bit=%s, HDR=%s (tf=0x%x primaries=0x%x)%s",
-		m->wlr_output->name,
+		m->nx_output->name,
 		m->supports_10bit ? "yes" : "no",
 		m->hdr_capable ? "yes" : "no",
-		m->wlr_output->supported_transfer_functions,
-		m->wlr_output->supported_primaries,
+		m->nx_output->supported_transfer_functions,
+		m->nx_output->supported_primaries,
 		secondary_gpu ? " [secondary GPU, HDR skipped]" : "");
 
 	/* Diagnostic: when EDID claims HDR but the kernel/driver doesn't expose
@@ -5541,9 +5311,9 @@ init_monitor_color_settings(Monitor *m)
 	 * picture looks wrong. Log a clear warning so the user can correlate
 	 * "HDR=yes but TV badge never lights up" with a driver gap rather than
 	 * a compositor bug. */
-	if (m->hdr_capable && wlr_output_is_drm(m->wlr_output)) {
-		int drm_fd = wlr_renderer_get_drm_fd(drw);
-		uint32_t conn_id = wlr_drm_connector_get_id(m->wlr_output);
+	if (m->hdr_capable && nx_output_is_drm(m->nx_output)) {
+		int drm_fd = nx_renderer_get_drm_fd(drw);
+		uint32_t conn_id = nx_drm_connector_get_id(m->nx_output);
 		if (drm_fd >= 0 && conn_id != 0) {
 			drmModeConnector *conn = drmModeGetConnector(drm_fd, conn_id);
 			if (conn) {
@@ -5561,11 +5331,11 @@ init_monitor_color_settings(Monitor *m)
 				}
 				drmModeFreeConnector(conn);
 				if (!has_hdr_meta || !has_colorspace) {
-					wlr_log(WLR_ERROR,
+					nx_log(NX_ERROR,
 						"HDR EDID present on %s but DRM connector "
 						"lacks %s%s%s — kernel/driver gap. HDR mode "
 						"will commit but TV won't switch to HDR.",
-						m->wlr_output->name,
+						m->nx_output->name,
 						!has_hdr_meta ? "HDR_OUTPUT_METADATA" : "",
 						(!has_hdr_meta && !has_colorspace) ? " and " : "",
 						!has_colorspace ? "Colorspace" : "");
@@ -5577,74 +5347,43 @@ init_monitor_color_settings(Monitor *m)
 	/* Force HDMI full-range RGB so black stays black on 4K TVs */
 	force_hdmi_full_range(m);
 
-	/*
-	 * Automatically enable 10-bit rendering if supported.
-	 * This provides smoother gradients and better color accuracy.
-	 *
-	 * Skip on secondary GPU outputs (multi-GPU / mgpu): the render format
-	 * must survive cross-GPU format negotiation (mgpu_formats intersection).
-	 * XRGB2101010 modifiers rarely intersect between Intel and Nvidia,
-	 * causing swapchain creation to fail → permanent black screen.
-	 *
-	 * The old set_drm_color_properties() legacy DRM calls that used to
-	 * follow this have been removed: wlroots 0.20 manages "max bpc"
-	 * automatically via pick_max_bpc() in atomic commits.  The legacy
-	 * calls corrupted wlroots' internal atomic state and caused EPERM
-	 * on subsequent mode changes.
-	 */
+	/* Auto 10-bit, except on secondary GPUs. */
 	if (m->supports_10bit && !should_skip_auto_10bit(m))
 		enable_10bit_rendering(m);
-
-	/*
-	 * wlroots 0.20 manages "max bpc" and "Colorspace" DRM connector
-	 * properties automatically via atomic commits (see atomic.c
-	 * pick_max_bpc / colorspace handling). Setting them behind its back
-	 * with legacy drmModeConnectorSetProperty corrupts the internal
-	 * state and causes subsequent mode changes to fail.
-	 */
 }
 
-/* Re-evaluate display color capabilities after the EDID changed underneath
- * us mid-session — TV woke up, user toggled "UHD Color"/Enhanced HDMI, AVR
- * finished its handshake. wlroots re-parses the EDID and updates
- * supported_transfer_functions/supported_primaries; this picks up the new
- * values without tearing down the Monitor. Unlike init_monitor_color_settings
- * it must NOT reset live HDR/10-bit state — it only reacts to capability
- * transitions:
- *   caps appeared  → auto-enable 10-bit; update_hdr_target enters HDR on the
- *                    next vblank if a PQ fullscreen client is present
- *   caps vanished  → queue HDR exit */
+/* Reacts to mid-session EDID capability changes. */
 void
 refresh_color_caps(Monitor *m)
 {
 	int secondary_gpu, hdr_now, tenbit_now;
 
-	if (!m || !m->wlr_output || !m->wlr_output->enabled || m->is_mirror)
+	if (!m || !m->nx_output || !m->nx_output->enabled || m->is_mirror)
 		return;
 
 	secondary_gpu = 0;
-	if (wlr_output_is_drm(m->wlr_output) &&
-	    wlr_drm_backend_get_parent(m->wlr_output->backend))
+	if (nx_output_is_drm(m->nx_output) &&
+	    nx_drm_backend_get_parent(m->nx_output->backend))
 		secondary_gpu = 1;
 
 	hdr_now = (!secondary_gpu &&
-		(m->wlr_output->supported_transfer_functions &
-			WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ) &&
-		(m->wlr_output->supported_primaries &
-			WLR_COLOR_NAMED_PRIMARIES_BT2020)) ? 1 : 0;
+		(m->nx_output->supported_transfer_functions &
+			NX_COLOR_TRANSFER_FUNCTION_ST2084_PQ) &&
+		(m->nx_output->supported_primaries &
+			NX_COLOR_NAMED_PRIMARIES_BT2020)) ? 1 : 0;
 	tenbit_now = detect_10bit_support(m);
 
 	if (hdr_now == m->hdr_capable && tenbit_now == m->supports_10bit)
 		return;
 
-	wlr_log(WLR_INFO,
+	nx_log(NX_INFO,
 		"Monitor %s: display caps changed — 10-bit %s→%s, HDR %s→%s "
 		"(tf=0x%x primaries=0x%x)",
-		m->wlr_output->name,
+		m->nx_output->name,
 		m->supports_10bit ? "yes" : "no", tenbit_now ? "yes" : "no",
 		m->hdr_capable ? "yes" : "no", hdr_now ? "yes" : "no",
-		m->wlr_output->supported_transfer_functions,
-		m->wlr_output->supported_primaries);
+		m->nx_output->supported_transfer_functions,
+		m->nx_output->supported_primaries);
 
 	m->supports_10bit = tenbit_now;
 	m->hdr_capable = hdr_now;
@@ -5668,8 +5407,8 @@ refresh_color_caps(Monitor *m)
 void
 track_client_frame(Client *c)
 {
-	struct wlr_surface *surface;
-	struct wlr_buffer *current_buffer;
+	struct nx_surface *surface;
+	struct nx_buffer *current_buffer;
 	uint64_t now;
 	static int log_count = 0;
 
@@ -5686,10 +5425,10 @@ track_client_frame(Client *c)
 	 * per video frame. By tracking buffer changes, we measure actual
 	 * content updates rather than compositor refresh rate.
 	 *
-	 * We use the wlr_client_buffer pointer as an opaque identifier - when
+	 * We use the nx_client_buffer pointer as an opaque identifier - when
 	 * a new buffer is attached, the pointer changes.
 	 */
-	current_buffer = (struct wlr_buffer *)surface->buffer;
+	current_buffer = (struct nx_buffer *)surface->buffer;
 	if (current_buffer == c->last_buffer)
 		return;
 
@@ -5700,7 +5439,7 @@ track_client_frame(Client *c)
 	if (c->frame_time_count > 0 && log_count < 20) {
 		int prev_idx = (c->frame_time_idx - 1 + 32) % 32;
 		uint64_t interval = now - c->frame_times[prev_idx];
-		wlr_log(WLR_INFO, "Frame buffer change: interval=%lums (%.1f fps)",
+		nx_log(NX_INFO, "Frame buffer change: interval=%lums (%.1f fps)",
 				(unsigned long)interval, 1000.0 / interval);
 		log_count++;
 	}
@@ -5756,7 +5495,7 @@ detect_video_framerate(Client *c)
 
 	/* If standard deviation is more than 30% of mean, not stable enough */
 	if (stddev > avg_interval * 0.30) {
-		wlr_log(WLR_DEBUG, "Frame rate detection: stddev=%.2f (%.1f%%) too high for avg_interval=%.2fms",
+		nx_log(NX_DEBUG, "Frame rate detection: stddev=%.2f (%.1f%%) too high for avg_interval=%.2fms",
 				stddev, (stddev / avg_interval) * 100.0, avg_interval);
 		return 0.0f;
 	}
@@ -5764,7 +5503,7 @@ detect_video_framerate(Client *c)
 	/* Calculate exact Hz from average interval */
 	exact_hz = 1000.0 / avg_interval;
 
-	wlr_log(WLR_DEBUG, "Frame rate detection: avg_interval=%.3fms -> %.3f Hz (stddev=%.2f)",
+	nx_log(NX_DEBUG, "Frame rate detection: avg_interval=%.3fms -> %.3f Hz (stddev=%.2f)",
 			avg_interval, exact_hz, stddev);
 
 	/*
@@ -5810,7 +5549,7 @@ detect_video_framerate(Client *c)
 
 	/* If not a standard rate but stable, return the exact measured value */
 	if (exact_hz >= 10.0 && exact_hz <= 240.0) {
-		wlr_log(WLR_DEBUG, "Non-standard framerate detected: %.3f Hz", exact_hz);
+		nx_log(NX_DEBUG, "Non-standard framerate detected: %.3f Hz", exact_hz);
 		return (float)exact_hz;
 	}
 
@@ -5879,20 +5618,20 @@ score_video_mode(int method, float video_hz, float display_hz, int multiplier)
 	return score;
 }
 
-struct wlr_output_mode *
+struct nx_output_mode *
 find_video_friendly_mode(Monitor *m, float target_hz)
 {
-	struct wlr_output_mode *mode, *best = NULL;
+	struct nx_output_mode *mode, *best = NULL;
 	int width, height;
 	float best_diff = 999.0f;
 
-	if (!m || !m->wlr_output || !m->wlr_output->current_mode || target_hz <= 0.0f)
+	if (!m || !m->nx_output || !m->nx_output->current_mode || target_hz <= 0.0f)
 		return NULL;
 
-	width = m->wlr_output->current_mode->width;
-	height = m->wlr_output->current_mode->height;
+	width = m->nx_output->current_mode->width;
+	height = m->nx_output->current_mode->height;
 
-	wl_list_for_each(mode, &m->wlr_output->modes, link) {
+	wl_list_for_each(mode, &m->nx_output->modes, link) {
 		/* Must match current resolution */
 		if (mode->width != width || mode->height != height)
 			continue;
@@ -5921,11 +5660,11 @@ find_video_friendly_mode(Monitor *m, float target_hz)
 int
 enable_vrr_video_mode(Monitor *m, float video_hz)
 {
-	if (!m || !m->wlr_output || !m->wlr_output->enabled)
+	if (!m || !m->nx_output || !m->nx_output->enabled)
 		return 0;
 
 	if (!m->vrr_capable) {
-		wlr_log(WLR_DEBUG, "Monitor %s does not support VRR", m->wlr_output->name);
+		nx_log(NX_DEBUG, "Monitor %s does not support VRR", m->nx_output->name);
 		return 0;
 	}
 
@@ -5935,7 +5674,7 @@ enable_vrr_video_mode(Monitor *m, float video_hz)
 		return 0;
 
 	if (!fullscreen_adaptive_sync_enabled) {
-		wlr_log(WLR_DEBUG, "Adaptive sync disabled by user");
+		nx_log(NX_DEBUG, "Adaptive sync disabled by user");
 		return 0;
 	}
 
@@ -5943,15 +5682,15 @@ enable_vrr_video_mode(Monitor *m, float video_hz)
 	 * driver LFC the panel drops out of VRR mid-playback (flicker, lag
 	 * spikes) — refuse, so callers fall through to a fixed mode. */
 	if (video_hz > 0.0f && video_hz < VRR_MIN_SAFE_HZ && !m->gcaps.has_hw_lfc) {
-		wlr_log(WLR_DEBUG,
+		nx_log(NX_DEBUG,
 			"VRR declined for %.3f Hz on %s: below %.0f Hz and no hardware LFC",
-			video_hz, m->wlr_output->name, VRR_MIN_SAFE_HZ);
+			video_hz, m->nx_output->name, VRR_MIN_SAFE_HZ);
 		return 0;
 	}
 
 	/* Save original mode before first switch. */
 	if (!m->video_mode_active && !m->vrr_active)
-		m->original_mode = m->wlr_output->current_mode;
+		m->original_mode = m->nx_output->current_mode;
 
 	/* Defer the actual DRM commit to the next rendermon() frame commit.
 	 * A standalone adaptive_sync commit (no buffer) is BLOCKING in the
@@ -5963,15 +5702,15 @@ enable_vrr_video_mode(Monitor *m, float video_hz)
 	m->vrr_pending_game = 0;
 	request_frame(m);
 
-	wlr_log(WLR_DEBUG, "VRR enable deferred for %.3f Hz video on %s",
-			video_hz, m->wlr_output->name);
+	nx_log(NX_DEBUG, "VRR enable deferred for %.3f Hz video on %s",
+			video_hz, m->nx_output->name);
 	return 1;
 }
 
 void
 disable_vrr_video_mode(Monitor *m)
 {
-	if (!m || !m->wlr_output || !m->wlr_output->enabled)
+	if (!m || !m->nx_output || !m->nx_output->enabled)
 		return;
 
 	if (!m->vrr_active && m->vrr_pending != 1) {
@@ -5986,36 +5725,36 @@ disable_vrr_video_mode(Monitor *m)
 	m->vrr_pending_game = 0;
 	request_frame(m);
 
-	wlr_log(WLR_DEBUG, "VRR disable deferred on %s", m->wlr_output->name);
+	nx_log(NX_DEBUG, "VRR disable deferred on %s", m->nx_output->name);
 }
 
 int
 apply_best_video_mode(Monitor *m, float video_hz)
 {
 	VideoModeCandidate best;
-	struct wlr_output_state state;
-	struct wlr_output_configuration_v1 *config;
-	struct wlr_output_configuration_head_v1 *config_head;
+	struct nx_output_state state;
+	struct nx_output_configuration_v1 *config;
+	struct nx_output_configuration_head_v1 *config_head;
 	drmModeModeInfo drm_mode;
-	struct wlr_output_mode *new_mode;
+	struct nx_output_mode *new_mode;
 	char osd_msg[64];
 	int success = 0;
 
-	if (!m || !m->wlr_output || !m->wlr_output->enabled || video_hz <= 0.0f)
+	if (!m || !m->nx_output || !m->nx_output->enabled || video_hz <= 0.0f)
 		return 0;
 
 	/* Find the best option using scoring system */
 	best = find_best_video_mode(m, video_hz);
 
 	if (best.score <= 0) {
-		wlr_log(WLR_ERROR, "No suitable video mode found for %.3f Hz", video_hz);
+		nx_log(NX_ERROR, "No suitable video mode found for %.3f Hz", video_hz);
 		show_hz_osd(m, "No compatible mode");
 		return 0;
 	}
 
 	/* Save original mode before first switch */
 	if (!m->video_mode_active && !m->vrr_active)
-		m->original_mode = m->wlr_output->current_mode;
+		m->original_mode = m->nx_output->current_mode;
 
 	switch (best.method) {
 	case 3: /* VRR - best option */
@@ -6024,7 +5763,7 @@ apply_best_video_mode(Monitor *m, float video_hz)
 
 	case 1: /* Existing mode */
 		if (!best.mode) {
-			wlr_log(WLR_ERROR, "Best method is existing mode but no mode set");
+			nx_log(NX_ERROR, "Best method is existing mode but no mode set");
 			break;
 		}
 
@@ -6034,27 +5773,27 @@ apply_best_video_mode(Monitor *m, float video_hz)
 		 * commit av gjeldende mode kan slå ut i full modeset i DRM-
 		 * backenden — svart skjerm mens linken re-syncer, helt uten
 		 * grunn. Marker eierskap og la panelet stå. */
-		if (m->wlr_output->current_mode == best.mode) {
+		if (m->nx_output->current_mode == best.mode) {
 			m->video_mode_active = 1;
 			success = 1;
-			wlr_log(WLR_DEBUG, "Mode %d.%03d Hz already active on %s — no commit",
+			nx_log(NX_DEBUG, "Mode %d.%03d Hz already active on %s — no commit",
 					best.mode->refresh / 1000, best.mode->refresh % 1000,
-					m->wlr_output->name);
+					m->nx_output->name);
 			break;
 		}
 
-		wlr_output_state_init(&state);
-		wlr_output_state_set_mode(&state, best.mode);
+		nx_output_state_init(&state);
+		nx_output_state_set_mode(&state, best.mode);
 
-		if (wlr_output_test_state(m->wlr_output, &state) &&
-		    wlr_output_commit_state(m->wlr_output, &state)) {
+		if (nx_output_test_state(m->nx_output, &state) &&
+		    nx_output_commit_state(m->nx_output, &state)) {
 			m->video_mode_active = 1;
 			success = 1;
 
-			config = wlr_output_configuration_v1_create();
-			config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+			config = nx_output_configuration_v1_create();
+			config_head = nx_output_configuration_head_v1_create(config, m->nx_output);
 			config_head->state.mode = best.mode;
-			wlr_output_manager_v1_set_configuration(output_mgr, config);
+			nx_output_manager_v1_set_configuration(output_mgr, config);
 
 			/* Show OSD */
 			if (best.multiplier > 1) {
@@ -6067,36 +5806,36 @@ apply_best_video_mode(Monitor *m, float video_hz)
 			}
 			show_hz_osd(m, osd_msg);
 
-			wlr_log(WLR_DEBUG, "Applied existing mode %d.%03d Hz for %.3f Hz video",
+			nx_log(NX_DEBUG, "Applied existing mode %d.%03d Hz for %.3f Hz video",
 					best.mode->refresh / 1000, best.mode->refresh % 1000, video_hz);
 		}
-		wlr_output_state_finish(&state);
+		nx_output_state_finish(&state);
 		break;
 
 	case 2: { /* Custom mode (scaled from real timings, CVT as fallback) */
 		drmModeModeInfo base;
 		int have_base;
 		float panel_max_hz = 0.0f;
-		struct wlr_output_mode *it;
+		struct nx_output_mode *it;
 		int mult;
 		float applied_hz = 0.0f;
 
-		if (!wlr_output_is_drm(m->wlr_output)) {
-			wlr_log(WLR_ERROR, "Custom mode requires DRM output");
+		if (!nx_output_is_drm(m->nx_output)) {
+			nx_log(NX_ERROR, "Custom mode requires DRM output");
 			break;
 		}
 		/* current_mode kan være NULL (custom mode / output i limbo
 		 * under hotplug) — vi trenger bredde/høyde/timings derfra. */
-		if (!m->wlr_output->current_mode) {
-			wlr_log(WLR_ERROR, "Custom mode: no current mode on %s",
-					m->wlr_output->name);
+		if (!m->nx_output->current_mode) {
+			nx_log(NX_ERROR, "Custom mode: no current mode on %s",
+					m->nx_output->name);
 			break;
 		}
 
-		have_base = drm_mode_timings(m, m->wlr_output->current_mode, &base);
-		wl_list_for_each(it, &m->wlr_output->modes, link) {
-			if (it->width == m->wlr_output->current_mode->width &&
-			    it->height == m->wlr_output->current_mode->height &&
+		have_base = drm_mode_timings(m, m->nx_output->current_mode, &base);
+		wl_list_for_each(it, &m->nx_output->modes, link) {
+			if (it->width == m->nx_output->current_mode->width &&
+			    it->height == m->nx_output->current_mode->height &&
 			    it->refresh / 1000.0f > panel_max_hz)
 				panel_max_hz = it->refresh / 1000.0f;
 		}
@@ -6121,40 +5860,40 @@ apply_best_video_mode(Monitor *m, float video_hz)
 					generate_scaled_mode(&drm_mode, &base, target);
 				} else {
 					generate_cvt_mode(&drm_mode,
-							m->wlr_output->current_mode->width,
-							m->wlr_output->current_mode->height,
+							m->nx_output->current_mode->width,
+							m->nx_output->current_mode->height,
 							target);
 				}
 
-				new_mode = wlr_drm_connector_add_mode(m->wlr_output, &drm_mode);
+				new_mode = nx_drm_connector_add_mode(m->nx_output, &drm_mode);
 				if (!new_mode) {
-					wlr_log(WLR_DEBUG, "add_mode failed: %s %.3f Hz",
+					nx_log(NX_DEBUG, "add_mode failed: %s %.3f Hz",
 							tries == 0 ? "scaled" : "CVT", target);
 					continue;
 				}
 
-				wlr_output_state_init(&state);
-				wlr_output_state_set_mode(&state, new_mode);
-				if (wlr_output_test_state(m->wlr_output, &state) &&
-				    wlr_output_commit_state(m->wlr_output, &state)) {
+				nx_output_state_init(&state);
+				nx_output_state_set_mode(&state, new_mode);
+				if (nx_output_test_state(m->nx_output, &state) &&
+				    nx_output_commit_state(m->nx_output, &state)) {
 					m->video_mode_active = 1;
 					success = 1;
 					applied_hz = new_mode->refresh / 1000.0f;
 					best.multiplier = mult;
 
-					config = wlr_output_configuration_v1_create();
-					config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+					config = nx_output_configuration_v1_create();
+					config_head = nx_output_configuration_head_v1_create(config, m->nx_output);
 					config_head->state.mode = new_mode;
-					wlr_output_manager_v1_set_configuration(output_mgr, config);
+					nx_output_manager_v1_set_configuration(output_mgr, config);
 
-					wlr_log(WLR_INFO, "Applied %s mode %.3f Hz for %.3f Hz video (%dx)",
+					nx_log(NX_INFO, "Applied %s mode %.3f Hz for %.3f Hz video (%dx)",
 							tries == 0 ? "scaled" : "CVT",
 							applied_hz, video_hz, mult);
 				} else {
-					wlr_log(WLR_DEBUG, "test/commit failed: %s %.3f Hz",
+					nx_log(NX_DEBUG, "test/commit failed: %s %.3f Hz",
 							tries == 0 ? "scaled" : "CVT", target);
 				}
-				wlr_output_state_finish(&state);
+				nx_output_state_finish(&state);
 			}
 		}
 
@@ -6177,7 +5916,7 @@ apply_best_video_mode(Monitor *m, float video_hz)
 	}
 
 	if (!success) {
-		wlr_log(WLR_ERROR, "Failed to apply best video mode (method=%d, hz=%.3f)",
+		nx_log(NX_ERROR, "Failed to apply best video mode (method=%d, hz=%.3f)",
 				best.method, best.actual_hz);
 	}
 
@@ -6187,10 +5926,10 @@ apply_best_video_mode(Monitor *m, float video_hz)
 int
 set_custom_video_mode(Monitor *m, float exact_hz)
 {
-	struct wlr_output_state state;
-	struct wlr_output_configuration_v1 *config;
-	struct wlr_output_configuration_head_v1 *config_head;
-	struct wlr_output_mode *new_mode, *friendly_mode;
+	struct nx_output_state state;
+	struct nx_output_configuration_v1 *config;
+	struct nx_output_configuration_head_v1 *config_head;
+	struct nx_output_mode *new_mode, *friendly_mode;
 	drmModeModeInfo drm_mode;
 	int width, height;
 	float actual_hz;
@@ -6198,7 +5937,7 @@ set_custom_video_mode(Monitor *m, float exact_hz)
 	int success = 0;
 	char osd_msg[64];
 
-	if (!m || !m->wlr_output || !m->wlr_output->enabled || !m->wlr_output->current_mode)
+	if (!m || !m->nx_output || !m->nx_output->enabled || !m->nx_output->current_mode)
 		return 0;
 
 	if (exact_hz <= 0.0f)
@@ -6210,22 +5949,22 @@ set_custom_video_mode(Monitor *m, float exact_hz)
 	 * refresh rates at all. This is how high-end displays handle video.
 	 */
 	if (m->vrr_capable && enable_vrr_video_mode(m, exact_hz)) {
-		wlr_log(WLR_DEBUG, "Using VRR for %.3f Hz video - optimal solution", exact_hz);
+		nx_log(NX_DEBUG, "Using VRR for %.3f Hz video - optimal solution", exact_hz);
 		return 1;
 	}
 
 	/* Check if this is a DRM output - needed for mode switching */
-	if (!wlr_output_is_drm(m->wlr_output)) {
-		wlr_log(WLR_INFO, "Output is not DRM, cannot change mode");
+	if (!nx_output_is_drm(m->nx_output)) {
+		nx_log(NX_INFO, "Output is not DRM, cannot change mode");
 		return 0;
 	}
 
 	/* Save original mode before first switch */
 	if (!m->video_mode_active)
-		m->original_mode = m->wlr_output->current_mode;
+		m->original_mode = m->nx_output->current_mode;
 
-	width = m->wlr_output->current_mode->width;
-	height = m->wlr_output->current_mode->height;
+	width = m->nx_output->current_mode->width;
+	height = m->nx_output->current_mode->height;
 
 	/*
 	 * PRIORITY 2: Check if there's an existing mode that's a multiple of video Hz.
@@ -6233,22 +5972,22 @@ set_custom_video_mode(Monitor *m, float exact_hz)
 	 */
 	friendly_mode = find_video_friendly_mode(m, exact_hz);
 	if (friendly_mode) {
-		wlr_output_state_init(&state);
-		wlr_output_state_set_mode(&state, friendly_mode);
+		nx_output_state_init(&state);
+		nx_output_state_set_mode(&state, friendly_mode);
 
-		if (wlr_output_test_state(m->wlr_output, &state)) {
-			if (wlr_output_commit_state(m->wlr_output, &state)) {
+		if (nx_output_test_state(m->nx_output, &state)) {
+			if (nx_output_commit_state(m->nx_output, &state)) {
 				success = 1;
 				m->video_mode_active = 1;
 				actual_hz = friendly_mode->refresh / 1000.0f;
 				multiplier = (int)(actual_hz / exact_hz + 0.5f);
 
-				config = wlr_output_configuration_v1_create();
-				config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+				config = nx_output_configuration_v1_create();
+				config_head = nx_output_configuration_head_v1_create(config, m->nx_output);
 				config_head->state.mode = friendly_mode;
-				wlr_output_manager_v1_set_configuration(output_mgr, config);
+				nx_output_manager_v1_set_configuration(output_mgr, config);
 
-				wlr_log(WLR_DEBUG, "Using existing mode %d.%03d Hz for %.3f Hz video (%dx)",
+				nx_log(NX_DEBUG, "Using existing mode %d.%03d Hz for %.3f Hz video (%dx)",
 						friendly_mode->refresh / 1000, friendly_mode->refresh % 1000,
 						exact_hz, multiplier);
 
@@ -6258,11 +5997,11 @@ set_custom_video_mode(Monitor *m, float exact_hz)
 						multiplier, exact_hz);
 				show_hz_osd(m, osd_msg);
 
-				wlr_output_state_finish(&state);
+				nx_output_state_finish(&state);
 				return 1;
 			}
 		}
-		wlr_output_state_finish(&state);
+		nx_output_state_finish(&state);
 	}
 
 	/*
@@ -6274,7 +6013,7 @@ set_custom_video_mode(Monitor *m, float exact_hz)
 		multiplier = (int)ceilf(48.0f / exact_hz);
 	}
 
-	wlr_log(WLR_DEBUG, "Video mode: no VRR, no friendly mode, trying CVT at %dx multiplier",
+	nx_log(NX_DEBUG, "Video mode: no VRR, no friendly mode, trying CVT at %dx multiplier",
 			multiplier);
 
 	for (; multiplier <= 8 && !success; multiplier++) {
@@ -6284,45 +6023,45 @@ set_custom_video_mode(Monitor *m, float exact_hz)
 		if (actual_hz > 300.0f)
 			break;
 
-		wlr_log(WLR_DEBUG, "Video mode: trying %.3f Hz -> %.3f Hz (%dx multiplier)",
+		nx_log(NX_DEBUG, "Video mode: trying %.3f Hz -> %.3f Hz (%dx multiplier)",
 				exact_hz, actual_hz, multiplier);
 
 		/* Generate CVT mode with exact timing parameters */
 		generate_cvt_mode(&drm_mode, width, height, actual_hz);
 
 		/* Add custom mode to DRM connector */
-		new_mode = wlr_drm_connector_add_mode(m->wlr_output, &drm_mode);
+		new_mode = nx_drm_connector_add_mode(m->nx_output, &drm_mode);
 		if (!new_mode) {
-			wlr_log(WLR_DEBUG, "wlr_drm_connector_add_mode failed for %.3f Hz", actual_hz);
+			nx_log(NX_DEBUG, "nx_drm_connector_add_mode failed for %.3f Hz", actual_hz);
 			continue;
 		}
 
-		wlr_log(WLR_DEBUG, "Added custom mode: %dx%d@%d mHz",
+		nx_log(NX_DEBUG, "Added custom mode: %dx%d@%d mHz",
 				new_mode->width, new_mode->height, new_mode->refresh);
 
 		/* Try to apply the new mode */
-		wlr_output_state_init(&state);
-		wlr_output_state_set_mode(&state, new_mode);
+		nx_output_state_init(&state);
+		nx_output_state_set_mode(&state, new_mode);
 
-		if (wlr_output_test_state(m->wlr_output, &state)) {
-			if (wlr_output_commit_state(m->wlr_output, &state)) {
+		if (nx_output_test_state(m->nx_output, &state)) {
+			if (nx_output_commit_state(m->nx_output, &state)) {
 				success = 1;
 				m->video_mode_active = 1;
 
-				config = wlr_output_configuration_v1_create();
-				config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+				config = nx_output_configuration_v1_create();
+				config_head = nx_output_configuration_head_v1_create(config, m->nx_output);
 				config_head->state.mode = new_mode;
-				wlr_output_manager_v1_set_configuration(output_mgr, config);
+				nx_output_manager_v1_set_configuration(output_mgr, config);
 
-				wlr_log(WLR_DEBUG, "Custom mode %.3f Hz applied for %.3f Hz video (%dx)",
+				nx_log(NX_DEBUG, "Custom mode %.3f Hz applied for %.3f Hz video (%dx)",
 						actual_hz, exact_hz, multiplier);
 			} else {
-				wlr_log(WLR_DEBUG, "wlr_output_commit_state failed for %.3f Hz", actual_hz);
+				nx_log(NX_DEBUG, "nx_output_commit_state failed for %.3f Hz", actual_hz);
 			}
 		} else {
-			wlr_log(WLR_DEBUG, "wlr_output_test_state failed for %.3f Hz", actual_hz);
+			nx_log(NX_DEBUG, "nx_output_test_state failed for %.3f Hz", actual_hz);
 		}
-		wlr_output_state_finish(&state);
+		nx_output_state_finish(&state);
 	}
 
 	/* Show OSD notification */
@@ -6340,7 +6079,7 @@ set_custom_video_mode(Monitor *m, float exact_hz)
 		}
 		show_hz_osd(m, osd_msg);
 	} else {
-		wlr_log(WLR_ERROR, "Failed to set video mode for %.3f Hz (VRR: %s, no friendly modes)",
+		nx_log(NX_ERROR, "Failed to set video mode for %.3f Hz (VRR: %s, no friendly modes)",
 				exact_hz, m->vrr_capable ? "unavailable" : "not supported");
 	}
 
@@ -6409,12 +6148,12 @@ invalidate_video_pacing(Monitor *m)
 			m->vrr_pending_game = 0;
 			m->game_vrr_active = 0;
 		}
-		wlr_log(WLR_DEBUG, "Pending VRR enable cancelled (tag switch)");
+		nx_log(NX_DEBUG, "Pending VRR enable cancelled (tag switch)");
 	}
 	if (m->vrr_active) {
 		m->vrr_pending = -1;
 		m->vrr_pending_game = 0;
-		wlr_log(WLR_DEBUG, "VRR disable scheduled (tag switch)");
+		nx_log(NX_DEBUG, "VRR disable scheduled (tag switch)");
 	}
 
 	/* Deactivate Bresenham video cadence immediately */
@@ -6422,7 +6161,7 @@ invalidate_video_pacing(Monitor *m)
 		m->video_cadence_active = 0;
 		m->video_cadence_counter = 0;
 		m->video_cadence_accum = 0.0f;
-		wlr_log(WLR_DEBUG, "Video cadence invalidated (tag switch)");
+		nx_log(NX_DEBUG, "Video cadence invalidated (tag switch)");
 	}
 
 	/* Clear video-specific frame pacing (but not game pacing) */
@@ -6441,7 +6180,7 @@ invalidate_video_pacing(Monitor *m)
 	 * builds a complete frame (desktop content) instead of
 	 * potentially finding no damage and skipping the commit. */
 	if (m->scene_output)
-		wlr_damage_ring_add_whole(&m->scene_output->damage_ring);
+		nx_damage_ring_add_whole(&m->scene_output->damage_ring);
 
 	/* Ensure rendermon fires promptly even if no pageflip is
 	 * pending (e.g. last rendermon was a cadence hold that
@@ -6499,7 +6238,7 @@ hide_hz_osd(Monitor *m)
 		return;
 
 	m->hz_osd_visible = 0;
-	wlr_scene_node_set_enabled(&m->hz_osd_tree->node, 0);
+	nx_scene_node_set_enabled(&m->hz_osd_tree->node, 0);
 }
 
 void
@@ -6516,8 +6255,8 @@ show_hz_osd_orig(Monitor *m, const char *msg)
 {
 	tll(struct GlyphRun) glyphs = tll_init();
 	const struct fcft_glyph *glyph;
-	struct wlr_scene_buffer *scene_buf;
-	struct wlr_buffer *buffer;
+	struct nx_scene_buffer *scene_buf;
+	struct nx_buffer *buffer;
 	uint32_t prev_cp = 0;
 	int pen_x = 0;
 	int min_y = INT_MAX, max_y = INT_MIN;
@@ -6534,14 +6273,14 @@ show_hz_osd_orig(Monitor *m, const char *msg)
 	 * scanout, forcing GPU composition for the 3-second OSD duration.
 	 * Log the message instead so it's still visible in debug output. */
 	if (m->direct_scanout_active) {
-		wlr_log(WLR_INFO, "OSD suppressed (scanout active on %s): %s",
-			m->wlr_output->name, msg);
+		nx_log(NX_INFO, "OSD suppressed (scanout active on %s): %s",
+			m->nx_output->name, msg);
 		return;
 	}
 
 	/* Create tree if needed */
 	if (!m->hz_osd_tree) {
-		m->hz_osd_tree = wlr_scene_tree_create(layers[LyrOverlay]);
+		m->hz_osd_tree = nx_scene_tree_create(layers[LyrOverlay]);
 		if (!m->hz_osd_tree)
 			return;
 		m->hz_osd_bg = NULL;
@@ -6586,13 +6325,13 @@ show_hz_osd_orig(Monitor *m, const char *msg)
 	osd_y = m->m.y + (m->m.height - box_height) / 2;
 
 	/* Clear old children */
-	struct wlr_scene_node *node, *tmp;
+	struct nx_scene_node *node, *tmp;
 	wl_list_for_each_safe(node, tmp, &m->hz_osd_tree->children, link)
-		wlr_scene_node_destroy(node);
+		nx_scene_node_destroy(node);
 	m->hz_osd_bg = NULL;
 
 	/* Create background */
-	m->hz_osd_bg = wlr_scene_tree_create(m->hz_osd_tree);
+	m->hz_osd_bg = nx_scene_tree_create(m->hz_osd_tree);
 	if (m->hz_osd_bg)
 		drawrect(m->hz_osd_bg, 0, 0, box_width, box_height, osd_bg);
 
@@ -6607,10 +6346,10 @@ show_hz_osd_orig(Monitor *m, const char *msg)
 			if (!buffer)
 				continue;
 
-			scene_buf = wlr_scene_buffer_create(m->hz_osd_tree, NULL);
+			scene_buf = nx_scene_buffer_create(m->hz_osd_tree, NULL);
 			if (scene_buf) {
-				wlr_scene_buffer_set_buffer(scene_buf, buffer);
-				wlr_scene_node_set_position(&scene_buf->node,
+				nx_scene_buffer_set_buffer(scene_buf, buffer);
+				nx_scene_node_set_position(&scene_buf->node,
 						padding + it->item.pen_x + glyph->x,
 						origin_y - glyph->y);
 			}
@@ -6620,8 +6359,8 @@ show_hz_osd_orig(Monitor *m, const char *msg)
 	tll_free(glyphs);
 
 	/* Position and show */
-	wlr_scene_node_set_position(&m->hz_osd_tree->node, osd_x, osd_y);
-	wlr_scene_node_set_enabled(&m->hz_osd_tree->node, 1);
+	nx_scene_node_set_position(&m->hz_osd_tree->node, osd_x, osd_y);
+	nx_scene_node_set_enabled(&m->hz_osd_tree->node, 1);
 	m->hz_osd_visible = 1;
 
 	/* Schedule auto-hide after 3 seconds */
@@ -6639,14 +6378,14 @@ testhzosd(const Arg *arg)
 	char osd_msg[64];
 	int refresh_mhz;
 
-	if (!m || !m->wlr_output)
+	if (!m || !m->nx_output)
 		return;
 
 	/* Use current_mode->refresh for accurate active refresh rate */
-	if (m->wlr_output->current_mode)
-		refresh_mhz = m->wlr_output->current_mode->refresh;
+	if (m->nx_output->current_mode)
+		refresh_mhz = m->nx_output->current_mode->refresh;
 	else
-		refresh_mhz = m->wlr_output->refresh;
+		refresh_mhz = m->nx_output->refresh;
 
 	snprintf(osd_msg, sizeof(osd_msg), "%d.%03d Hz",
 			refresh_mhz / 1000, refresh_mhz % 1000);
@@ -6725,7 +6464,7 @@ generate_cvt_mode(drmModeModeInfo *mode, int hdisplay, int vdisplay, float vrefr
 	snprintf(mode->name, sizeof(mode->name), "%dx%d@%.2f",
 			hdisplay, vdisplay, vrefresh);
 
-	wlr_log(WLR_DEBUG, "CVT-RB mode: %s clock=%d htotal=%d vtotal=%d",
+	nx_log(NX_DEBUG, "CVT-RB mode: %s clock=%d htotal=%d vtotal=%d",
 			mode->name, mode->clock, h_total, v_total);
 	(void)v_back_porch;
 }
@@ -6749,22 +6488,17 @@ generate_fixed_mode(drmModeModeInfo *mode, const drmModeModeInfo *base, int vref
 			mode->hdisplay, mode->vdisplay, vrefresh);
 }
 
-/* Mirror of vendored wlroots' struct wlr_drm_mode (backend/drm/drm.h,
- * private header, not installed): a wlr_output_mode on a DRM output is
- * the first member, followed by the kernel modeline. Lets us read the
- * REAL timings of the mode the panel is running — CVT-guessing timings
- * for an eDP/DP panel with fixed horizontal frequency produces modes the
- * panel rejects. */
+/* Mirrors struct nx_drm_mode's leading fields. */
 struct nixly_drm_mode {
-	struct wlr_output_mode wlr_mode;
+	struct nx_output_mode nx_mode;
 	drmModeModeInfo drm_mode;
 };
 
 /* Real kernel timings for a mode on a DRM output. 0 if unavailable. */
 int
-drm_mode_timings(Monitor *m, struct wlr_output_mode *mode, drmModeModeInfo *out)
+drm_mode_timings(Monitor *m, struct nx_output_mode *mode, drmModeModeInfo *out)
 {
-	if (!m || !m->wlr_output || !mode || !wlr_output_is_drm(m->wlr_output))
+	if (!m || !m->nx_output || !mode || !nx_output_is_drm(m->nx_output))
 		return 0;
 	*out = ((struct nixly_drm_mode *)mode)->drm_mode;
 	return out->htotal > 0 && out->vtotal > 0 && out->clock > 0;
@@ -6800,10 +6534,10 @@ void
 setcustomhz(const Arg *arg)
 {
 	Monitor *m = selmon;
-	struct wlr_output_state state;
-	struct wlr_output_configuration_v1 *config;
-	struct wlr_output_configuration_head_v1 *config_head;
-	struct wlr_output_mode *new_mode, *current;
+	struct nx_output_state state;
+	struct nx_output_configuration_v1 *config;
+	struct nx_output_configuration_head_v1 *config_head;
+	struct nx_output_mode *new_mode, *current;
 	drmModeModeInfo drm_mode, base_drm_mode;
 	int width, height;
 	float actual_hz, target_hz;
@@ -6811,15 +6545,15 @@ setcustomhz(const Arg *arg)
 	char osd_msg[64];
 	int success = 0;
 
-	if (!m || !m->wlr_output || !m->wlr_output->enabled || !m->wlr_output->current_mode)
+	if (!m || !m->nx_output || !m->nx_output->enabled || !m->nx_output->current_mode)
 		return;
 
 	if (arg->f <= 0)
 		return;
 
 	/* Check if this is a DRM output - only DRM supports custom modes */
-	if (!wlr_output_is_drm(m->wlr_output)) {
-		wlr_log(WLR_DEBUG, "Output is not DRM, cannot add custom mode");
+	if (!nx_output_is_drm(m->nx_output)) {
+		nx_log(NX_DEBUG, "Output is not DRM, cannot add custom mode");
 		snprintf(osd_msg, sizeof(osd_msg), "Not DRM output");
 		show_hz_osd(m, osd_msg);
 		return;
@@ -6827,15 +6561,15 @@ setcustomhz(const Arg *arg)
 
 	/* Save original mode before first switch */
 	if (!m->video_mode_active)
-		m->original_mode = m->wlr_output->current_mode;
+		m->original_mode = m->nx_output->current_mode;
 
-	current = m->wlr_output->current_mode;
+	current = m->nx_output->current_mode;
 	width = current->width;
 	height = current->height;
 	target_hz = arg->f;
 
 	/*
-	 * Build base DRM mode from current wlr_output_mode.
+	 * Build base DRM mode from current nx_output_mode.
 	 * This preserves the timing parameters that the display already accepts.
 	 */
 	memset(&base_drm_mode, 0, sizeof(base_drm_mode));
@@ -6845,8 +6579,8 @@ setcustomhz(const Arg *arg)
 	base_drm_mode.clock = (uint32_t)((uint64_t)current->refresh * width * height / 1000000);
 
 	/* Try to get actual DRM timings from preferred mode */
-	struct wlr_output_mode *pref;
-	wl_list_for_each(pref, &m->wlr_output->modes, link) {
+	struct nx_output_mode *pref;
+	wl_list_for_each(pref, &m->nx_output->modes, link) {
 		if (pref->width == width && pref->height == height && pref->preferred) {
 			/* Use preferred mode timings as base - these are EDID-verified */
 			base_drm_mode.clock = (uint32_t)((uint64_t)pref->refresh * width * height / 1000000);
@@ -6867,7 +6601,7 @@ setcustomhz(const Arg *arg)
 			base_drm_mode.vsync_start = height + 3;
 			base_drm_mode.vsync_end = base_drm_mode.vsync_start + 5;
 			base_drm_mode.flags = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_PVSYNC;
-			wlr_log(WLR_INFO, "Using preferred mode as base: %dx%d htotal=%d vtotal=%d",
+			nx_log(NX_INFO, "Using preferred mode as base: %dx%d htotal=%d vtotal=%d",
 					width, height, base_drm_mode.htotal, base_drm_mode.vtotal);
 			break;
 		}
@@ -6876,7 +6610,7 @@ setcustomhz(const Arg *arg)
 	/* If no preferred mode found, generate CVT timings as base */
 	if (base_drm_mode.htotal == 0) {
 		generate_cvt_mode(&base_drm_mode, width, height, (float)base_drm_mode.vrefresh);
-		wlr_log(WLR_DEBUG, "Generated CVT base mode: %dx%d htotal=%d vtotal=%d",
+		nx_log(NX_DEBUG, "Generated CVT base mode: %dx%d htotal=%d vtotal=%d",
 				width, height, base_drm_mode.htotal, base_drm_mode.vtotal);
 	}
 
@@ -6900,48 +6634,48 @@ setcustomhz(const Arg *arg)
 		if (actual_hz > 300.0f)
 			break;
 
-		wlr_log(WLR_DEBUG, "Fixed mode: trying %.3f Hz -> %d Hz (%dx multiplier)",
+		nx_log(NX_DEBUG, "Fixed mode: trying %.3f Hz -> %d Hz (%dx multiplier)",
 				target_hz, target_vrefresh, multiplier);
 
 		/* Generate fixed mode - only changes clock, preserves all timings */
 		generate_fixed_mode(&drm_mode, &base_drm_mode, target_vrefresh);
 
-		wlr_log(WLR_DEBUG, "Fixed mode params: clock=%d htotal=%d vtotal=%d vrefresh=%d",
+		nx_log(NX_DEBUG, "Fixed mode params: clock=%d htotal=%d vtotal=%d vrefresh=%d",
 				drm_mode.clock, drm_mode.htotal, drm_mode.vtotal, drm_mode.vrefresh);
 
 		/* Add custom mode to DRM connector */
-		new_mode = wlr_drm_connector_add_mode(m->wlr_output, &drm_mode);
+		new_mode = nx_drm_connector_add_mode(m->nx_output, &drm_mode);
 		if (!new_mode) {
-			wlr_log(WLR_DEBUG, "wlr_drm_connector_add_mode failed for fixed %d Hz", target_vrefresh);
+			nx_log(NX_DEBUG, "nx_drm_connector_add_mode failed for fixed %d Hz", target_vrefresh);
 			continue;
 		}
 
-		wlr_log(WLR_DEBUG, "Added fixed mode: %dx%d@%d mHz",
+		nx_log(NX_DEBUG, "Added fixed mode: %dx%d@%d mHz",
 				new_mode->width, new_mode->height, new_mode->refresh);
 
 		/* Try to apply the new mode */
-		wlr_output_state_init(&state);
-		wlr_output_state_set_mode(&state, new_mode);
+		nx_output_state_init(&state);
+		nx_output_state_set_mode(&state, new_mode);
 
-		if (wlr_output_test_state(m->wlr_output, &state)) {
-			if (wlr_output_commit_state(m->wlr_output, &state)) {
+		if (nx_output_test_state(m->nx_output, &state)) {
+			if (nx_output_commit_state(m->nx_output, &state)) {
 				success = 1;
 				m->video_mode_active = 1;
 
-				config = wlr_output_configuration_v1_create();
-				config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+				config = nx_output_configuration_v1_create();
+				config_head = nx_output_configuration_head_v1_create(config, m->nx_output);
 				config_head->state.mode = new_mode;
-				wlr_output_manager_v1_set_configuration(output_mgr, config);
+				nx_output_manager_v1_set_configuration(output_mgr, config);
 
-				wlr_log(WLR_DEBUG, "Fixed mode %d Hz applied (%dx %.3f fps)",
+				nx_log(NX_DEBUG, "Fixed mode %d Hz applied (%dx %.3f fps)",
 						target_vrefresh, multiplier, target_hz);
 			} else {
-				wlr_log(WLR_DEBUG, "wlr_output_commit_state failed for fixed %d Hz", target_vrefresh);
+				nx_log(NX_DEBUG, "nx_output_commit_state failed for fixed %d Hz", target_vrefresh);
 			}
 		} else {
-			wlr_log(WLR_DEBUG, "wlr_output_test_state failed for fixed %d Hz", target_vrefresh);
+			nx_log(NX_DEBUG, "nx_output_test_state failed for fixed %d Hz", target_vrefresh);
 		}
-		wlr_output_state_finish(&state);
+		nx_output_state_finish(&state);
 	}
 
 	/*
@@ -6959,62 +6693,62 @@ setcustomhz(const Arg *arg)
 			if (actual_hz > 300.0f)
 				break;
 
-			wlr_log(WLR_DEBUG, "CVT fallback: trying %.3f Hz -> %.3f Hz (%dx multiplier)",
+			nx_log(NX_DEBUG, "CVT fallback: trying %.3f Hz -> %.3f Hz (%dx multiplier)",
 					target_hz, actual_hz, multiplier);
 
 			generate_cvt_mode(&drm_mode, width, height, actual_hz);
 
-			new_mode = wlr_drm_connector_add_mode(m->wlr_output, &drm_mode);
+			new_mode = nx_drm_connector_add_mode(m->nx_output, &drm_mode);
 			if (!new_mode) {
-				wlr_log(WLR_DEBUG, "wlr_drm_connector_add_mode failed for CVT %.3f Hz", actual_hz);
+				nx_log(NX_DEBUG, "nx_drm_connector_add_mode failed for CVT %.3f Hz", actual_hz);
 				continue;
 			}
 
-			wlr_output_state_init(&state);
-			wlr_output_state_set_mode(&state, new_mode);
+			nx_output_state_init(&state);
+			nx_output_state_set_mode(&state, new_mode);
 
-			if (wlr_output_test_state(m->wlr_output, &state)) {
-				if (wlr_output_commit_state(m->wlr_output, &state)) {
+			if (nx_output_test_state(m->nx_output, &state)) {
+				if (nx_output_commit_state(m->nx_output, &state)) {
 					success = 1;
 					m->video_mode_active = 1;
 
-					config = wlr_output_configuration_v1_create();
-					config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+					config = nx_output_configuration_v1_create();
+					config_head = nx_output_configuration_head_v1_create(config, m->nx_output);
 					config_head->state.mode = new_mode;
-					wlr_output_manager_v1_set_configuration(output_mgr, config);
+					nx_output_manager_v1_set_configuration(output_mgr, config);
 
-					wlr_log(WLR_DEBUG, "CVT mode %.3f Hz applied (%dx %.3f fps)",
+					nx_log(NX_DEBUG, "CVT mode %.3f Hz applied (%dx %.3f fps)",
 							actual_hz, multiplier, target_hz);
 				}
 			}
-			wlr_output_state_finish(&state);
+			nx_output_state_finish(&state);
 		}
 	}
 
 	/* Fallback: Find existing mode that's a multiple of target Hz */
 	if (!success) {
-		struct wlr_output_mode *video_mode = find_video_friendly_mode(m, target_hz);
+		struct nx_output_mode *video_mode = find_video_friendly_mode(m, target_hz);
 
-		if (video_mode && video_mode != m->wlr_output->current_mode) {
-			wlr_output_state_init(&state);
-			wlr_output_state_set_mode(&state, video_mode);
+		if (video_mode && video_mode != m->nx_output->current_mode) {
+			nx_output_state_init(&state);
+			nx_output_state_set_mode(&state, video_mode);
 
-			if (wlr_output_commit_state(m->wlr_output, &state)) {
+			if (nx_output_commit_state(m->nx_output, &state)) {
 				success = 1;
 				m->video_mode_active = 1;
 				actual_hz = video_mode->refresh / 1000.0f;
 				multiplier = (int)(actual_hz / target_hz + 0.5f);
 
-				config = wlr_output_configuration_v1_create();
-				config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+				config = nx_output_configuration_v1_create();
+				config_head = nx_output_configuration_head_v1_create(config, m->nx_output);
 				config_head->state.mode = video_mode;
-				wlr_output_manager_v1_set_configuration(output_mgr, config);
+				nx_output_manager_v1_set_configuration(output_mgr, config);
 
-				wlr_log(WLR_DEBUG, "Fallback mode %d.%03d Hz applied (%dx %.3f Hz)",
+				nx_log(NX_DEBUG, "Fallback mode %d.%03d Hz applied (%dx %.3f Hz)",
 						video_mode->refresh / 1000, video_mode->refresh % 1000,
 						multiplier, target_hz);
 			}
-			wlr_output_state_finish(&state);
+			nx_output_state_finish(&state);
 		}
 	}
 
@@ -7029,14 +6763,14 @@ setcustomhz(const Arg *arg)
 					actual_mhz / 1000, actual_mhz % 1000);
 		}
 	} else {
-		wlr_log(WLR_ERROR, "Failed to set video Hz for %.3f fps (all methods failed)", target_hz);
+		nx_log(NX_ERROR, "Failed to set video Hz for %.3f fps (all methods failed)", target_hz);
 
 		/* Restore original mode */
 		if (m->original_mode) {
-			wlr_output_state_init(&state);
-			wlr_output_state_set_mode(&state, m->original_mode);
-			wlr_output_commit_state(m->wlr_output, &state);
-			wlr_output_state_finish(&state);
+			nx_output_state_init(&state);
+			nx_output_state_set_mode(&state, m->original_mode);
+			nx_output_commit_state(m->nx_output, &state);
+			nx_output_state_finish(&state);
 		}
 
 		snprintf(osd_msg, sizeof(osd_msg), "FAILED: %.0f fps", target_hz);
@@ -7085,10 +6819,10 @@ check_fullscreen_video(void)
 		if (c->frame_time_count >= 8)
 			hz = detect_video_framerate(c);
 
-		wlr_log(WLR_DEBUG, "check_fullscreen_video: monitor=%s is_video=%d "
+		nx_log(NX_DEBUG, "check_fullscreen_video: monitor=%s is_video=%d "
 				"frame_count=%d hz=%.3f detected_hz=%.3f phase=%d retries=%d "
 				"video_mode_active=%d vrr_active=%d",
-				m->wlr_output->name, is_video, c->frame_time_count, hz,
+				m->nx_output->name, is_video, c->frame_time_count, hz,
 				c->detected_video_hz, c->video_detect_phase, c->video_detect_retries,
 				m->video_mode_active, m->vrr_active);
 
@@ -7116,8 +6850,8 @@ check_fullscreen_video(void)
 				float display_hz = 0.0f;
 				if (m->present_interval_ns > 0)
 					display_hz = 1000000000.0f / (float)m->present_interval_ns;
-				else if (m->wlr_output->current_mode)
-					display_hz = m->wlr_output->current_mode->refresh / 1000.0f;
+				else if (m->nx_output->current_mode)
+					display_hz = m->nx_output->current_mode->refresh / 1000.0f;
 				if (display_hz > 0.0f) {
 					float ratio = display_hz / c->detected_video_hz;
 					if (ratio >= 1.5f) {
@@ -7131,7 +6865,7 @@ check_fullscreen_video(void)
 						m->video_cadence_current_n = m->video_cadence_base;
 						m->video_cadence_counter = 0;
 						m->video_cadence_active = 1;
-						wlr_log(WLR_DEBUG,
+						nx_log(NX_DEBUG,
 							"Video cadence re-established: %.0f fps base=%d frac=%.3f @ %.0f Hz",
 							c->detected_video_hz, m->video_cadence_base,
 							m->video_cadence_frac, display_hz);
@@ -7197,10 +6931,10 @@ check_fullscreen_video(void)
 						else
 							use_hz = (float)raw_hz;
 
-						wlr_log(WLR_DEBUG, "Estimated framerate %.3f Hz (raw ~%.1f Hz) on %s",
-								use_hz, raw_hz, m->wlr_output->name);
+						nx_log(NX_DEBUG, "Estimated framerate %.3f Hz (raw ~%.1f Hz) on %s",
+								use_hz, raw_hz, m->nx_output->name);
 					} else {
-						wlr_log(WLR_DEBUG, "Measured Hz (~%.1f) outside video range", raw_hz);
+						nx_log(NX_DEBUG, "Measured Hz (~%.1f) outside video range", raw_hz);
 					}
 				}
 			}
@@ -7240,8 +6974,8 @@ check_fullscreen_video(void)
 				if (is_video && !m->video_mode_active && !m->vrr_active
 						&& is_standard_video_rate(use_hz)
 						&& apply_best_video_mode(m, use_hz)) {
-					wlr_log(WLR_DEBUG, "Video %.3f Hz on %s: display matched",
-							use_hz, m->wlr_output->name);
+					nx_log(NX_DEBUG, "Video %.3f Hz on %s: display matched",
+							use_hz, m->nx_output->name);
 				} else if (m->vrr_capable && !is_browser_client(c)
 						&& enable_vrr_video_mode(m, use_hz)) {
 					/* Browser guard mirrors setfullscreen()'s VRR rule:
@@ -7249,8 +6983,8 @@ check_fullscreen_video(void)
 					 * HDMI VRR toggle blocks the compositor mid-commit —
 					 * "fullscreen YouTube froze".  Browsers fall through
 					 * to the cadence path, which never touches the link. */
-					wlr_log(WLR_DEBUG, "Video %.3f Hz on %s: using VRR",
-							use_hz, m->wlr_output->name);
+					nx_log(NX_DEBUG, "Video %.3f Hz on %s: using VRR",
+							use_hz, m->nx_output->name);
 				} else {
 					/*
 					 * Bresenham cadence for compositor-side pacing.
@@ -7268,8 +7002,8 @@ check_fullscreen_video(void)
 					float display_hz = 0.0f;
 					if (m->present_interval_ns > 0)
 						display_hz = 1000000000.0f / (float)m->present_interval_ns;
-					else if (m->wlr_output->current_mode)
-						display_hz = m->wlr_output->current_mode->refresh / 1000.0f;
+					else if (m->nx_output->current_mode)
+						display_hz = m->nx_output->current_mode->refresh / 1000.0f;
 
 					if (display_hz > 0.0f && use_hz > 0.0f) {
 						float ratio = display_hz / use_hz;
@@ -7286,8 +7020,8 @@ check_fullscreen_video(void)
 						}
 					}
 
-					wlr_log(WLR_DEBUG, "Video %.3f Hz on %s: cadence base=%d frac=%.3f @ %.0f Hz",
-							use_hz, m->wlr_output->name,
+					nx_log(NX_DEBUG, "Video %.3f Hz on %s: cadence base=%d frac=%.3f @ %.0f Hz",
+							use_hz, m->nx_output->name,
 							m->video_cadence_base, m->video_cadence_frac, display_hz);
 				}
 				continue;
@@ -7329,20 +7063,14 @@ check_fullscreen_video(void)
 void
 updatemons(struct wl_listener *listener, void *data)
 {
-	/*
-	 * Called whenever the output layout changes: adding or removing a
-	 * monitor, changing an output's mode or position, etc. This is where
-	 * the change officially happens and we update geometry, window
-	 * positions, focus, and the stored configuration in wlroots'
-	 * output-manager implementation.
-	 */
+	/* Applies every output layout change. */
 	static int in_updatemons;
-	struct wlr_output_configuration_v1 *config;
+	struct nx_output_configuration_v1 *config;
 	Client *c;
-	struct wlr_output_configuration_head_v1 *config_head;
+	struct nx_output_configuration_head_v1 *config_head;
 	Monitor *m, *mtmp;
 
-	/* Recursion guard: wlr_output_layout_remove / _add_auto below fires
+	/* Recursion guard: nx_output_layout_remove / _add_auto below fires
 	 * output_layout.events.change, which re-enters this listener. Outer
 	 * iteration would then observe mutations from the nested call. */
 	if (in_updatemons)
@@ -7369,48 +7097,48 @@ updatemons(struct wl_listener *listener, void *data)
 		}
 	}
 
-	config = wlr_output_configuration_v1_create();
+	config = nx_output_configuration_v1_create();
 
 	/* First remove from the layout the disabled monitors */
 	wl_list_for_each_safe(m, mtmp, &mons, link) {
-		if (!m->wlr_output || m->wlr_output->enabled || m->asleep)
+		if (!m->nx_output || m->nx_output->enabled || m->asleep)
 			continue;
-		config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+		config_head = nx_output_configuration_head_v1_create(config, m->nx_output);
 		config_head->state.enabled = 0;
 		/* Out of the layout so the cursor can't enter it — deferred,
 		 * because updatemons runs from the layout's own change signal
 		 * and freeing an entry there strands the remaining listeners. */
-		layout_drop(m->wlr_output);
+		layout_drop(m->nx_output);
 		closemon(m, 0);
-		m->m = m->w = (struct wlr_box){0};
+		m->m = m->w = (struct nx_box){0};
 	}
 	/* Insert outputs that need to */
 	wl_list_for_each_safe(m, mtmp, &mons, link) {
-		if (!m->wlr_output || !m->wlr_output->enabled)
+		if (!m->nx_output || !m->nx_output->enabled)
 			continue;
 		/* Parked outputs were left out by createmon; removing one here
 		 * would free the layout entry mid-signal and crash the add. */
 		if (REMOTE_PARKED(m))
 			continue;
-		if (!wlr_output_layout_get(output_layout, m->wlr_output))
-			wlr_output_layout_add_auto(output_layout, m->wlr_output);
+		if (!nx_output_layout_get(output_layout, m->nx_output))
+			nx_output_layout_add_auto(output_layout, m->nx_output);
 	}
 
 	/* Return workspaces and clients home. */
 	wl_list_for_each(m, &mons, link) {
-		if (!m->wlr_output->enabled || m->is_mirror)
+		if (!m->nx_output->enabled || m->is_mirror)
 			continue;
 		monitor_reclaim_workspaces(m);
 		wl_list_for_each(c, &clients, link) {
 			if (c->output && c->mon != m
-					&& strcmp(m->wlr_output->name, c->output) == 0) {
-				wlr_log(WLR_INFO,
+					&& strcmp(m->nx_output->name, c->output) == 0) {
+				nx_log(NX_INFO,
 					"GAME_TRACE: updatemons direct c->mon reassign "
 					"appid='%s' old='%s' → new='%s' isfullscreen=%d "
 					"geom=%dx%d@%d,%d c->output='%s'",
 					client_get_appid(c) ? client_get_appid(c) : "(null)",
-					c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)",
-					m->wlr_output->name,
+					c->mon && c->mon->nx_output ? c->mon->nx_output->name : "(null)",
+					m->nx_output->name,
 					c->isfullscreen,
 					c->geom.width, c->geom.height, c->geom.x, c->geom.y,
 					c->output);
@@ -7437,32 +7165,32 @@ updatemons(struct wl_listener *listener, void *data)
 	}
 
 	/* Now that we update the output layout we can get its box */
-	wlr_output_layout_get_box(output_layout, NULL, &sgeom);
+	nx_output_layout_get_box(output_layout, NULL, &sgeom);
 
-	wlr_scene_node_set_position(&root_bg->node, sgeom.x, sgeom.y);
-	wlr_scene_rect_set_size(root_bg, sgeom.width, sgeom.height);
+	nx_scene_node_set_position(&root_bg->node, sgeom.x, sgeom.y);
+	nx_scene_rect_set_size(root_bg, sgeom.width, sgeom.height);
 
 	/* Make sure the clients are hidden when dwl is locked */
-	wlr_scene_node_set_position(&locked_bg->node, sgeom.x, sgeom.y);
-	wlr_scene_rect_set_size(locked_bg, sgeom.width, sgeom.height);
+	nx_scene_node_set_position(&locked_bg->node, sgeom.x, sgeom.y);
+	nx_scene_rect_set_size(locked_bg, sgeom.width, sgeom.height);
 
 	wl_list_for_each(m, &mons, link) {
-		if (!m->wlr_output->enabled || REMOTE_PARKED(m))
+		if (!m->nx_output->enabled || REMOTE_PARKED(m))
 			continue;
-		config_head = wlr_output_configuration_head_v1_create(config, m->wlr_output);
+		config_head = nx_output_configuration_head_v1_create(config, m->nx_output);
 
 		/* Get the effective monitor geometry to use for surfaces */
-		wlr_output_layout_get_box(output_layout, m->wlr_output, &m->m);
+		nx_output_layout_get_box(output_layout, m->nx_output, &m->m);
 		m->w = m->m;
-		wlr_scene_output_set_position(m->scene_output, m->m.x, m->m.y);
+		nx_scene_output_set_position(m->scene_output, m->m.x, m->m.y);
 
-		wlr_scene_node_set_position(&m->fullscreen_bg->node, m->m.x, m->m.y);
-		wlr_scene_rect_set_size(m->fullscreen_bg, m->m.width, m->m.height);
+		nx_scene_node_set_position(&m->fullscreen_bg->node, m->m.x, m->m.y);
+		nx_scene_rect_set_size(m->fullscreen_bg, m->m.width, m->m.height);
 
 		if (m->lock_surface) {
-			struct wlr_scene_tree *scene_tree = m->lock_surface->surface->data;
-			wlr_scene_node_set_position(&scene_tree->node, m->m.x, m->m.y);
-			wlr_session_lock_surface_v1_configure(m->lock_surface, m->m.width, m->m.height);
+			struct nx_scene_tree *scene_tree = m->lock_surface->surface->data;
+			nx_scene_node_set_position(&scene_tree->node, m->m.x, m->m.y);
+			nx_session_lock_surface_v1_configure(m->lock_surface, m->m.width, m->m.height);
 		}
 
 		/* Calculate the effective monitor geometry to use for clients */
@@ -7485,16 +7213,16 @@ updatemons(struct wl_listener *listener, void *data)
 		 */
 		wl_list_for_each(c, &clients, link) {
 			if (c->mon == m && c->isfullscreen) {
-				struct wlr_box fsgeom = client_fullscreen_geom(c);
+				struct nx_box fsgeom = client_fullscreen_geom(c);
 				if (c->geom.width != fsgeom.width ||
 				    c->geom.height != fsgeom.height ||
 				    c->geom.x != fsgeom.x ||
 				    c->geom.y != fsgeom.y) {
-					wlr_log(WLR_INFO,
+					nx_log(NX_INFO,
 						"GAME_TRACE: updatemons fullscreen resize "
 						"appid='%s' mon='%s' %dx%d@%d,%d → %dx%d@%d,%d",
 						client_get_appid(c) ? client_get_appid(c) : "(null)",
-						m->wlr_output->name,
+						m->nx_output->name,
 						c->geom.width, c->geom.height, c->geom.x, c->geom.y,
 						fsgeom.width, fsgeom.height, fsgeom.x, fsgeom.y);
 					resize(c, fsgeom, 0);
@@ -7514,11 +7242,11 @@ updatemons(struct wl_listener *listener, void *data)
 			selmon = m;
 	}
 
-	if (holdm && holdm->wlr_output && holdm->wlr_output->enabled)
-		wlr_cursor_warp_closest(cursor, NULL,
+	if (holdm && holdm->nx_output && holdm->nx_output->enabled)
+		nx_cursor_warp_closest(cursor, NULL,
 				holdm->m.x + hold_dx, holdm->m.y + hold_dy);
 
-	if (selmon && selmon->wlr_output->enabled) {
+	if (selmon && selmon->nx_output->enabled) {
 		wl_list_for_each(c, &clients, link) {
 			if (!c->mon && client_surface(c)->mapped)
 				setmon(c, selmon, c->tags);
@@ -7529,7 +7257,7 @@ updatemons(struct wl_listener *listener, void *data)
 		focusclient(focustop(selmon), holdm ? 0 : 1);
 		if (selmon->lock_surface) {
 			client_notify_enter(selmon->lock_surface->surface,
-					wlr_seat_get_keyboard(seat));
+					nx_seat_get_keyboard(seat));
 			client_activate_surface(selmon->lock_surface->surface, 1);
 		}
 	}
@@ -7539,9 +7267,9 @@ updatemons(struct wl_listener *listener, void *data)
 	 * Move the cursor image where it used to be. It does not generate a
 	 * wl_pointer.motion event for the clients, it's only the image what it's
 	 * at the wrong position after all. */
-	wlr_cursor_move(cursor, NULL, 0, 0);
+	nx_cursor_move(cursor, NULL, 0, 0);
 
-	wlr_output_manager_v1_set_configuration(output_mgr, config);
+	nx_output_manager_v1_set_configuration(output_mgr, config);
 
 	/* Screens moved or came and went — keep the nixlycc ID boxes on them. */
 	monitor_overlay_update();
@@ -7556,28 +7284,28 @@ updatemons(struct wl_listener *listener, void *data)
 Monitor *
 xytomon(double x, double y)
 {
-	struct wlr_output *o = wlr_output_layout_output_at(output_layout, x, y);
+	struct nx_output *o = nx_output_layout_output_at(output_layout, x, y);
 	return o ? o->data : NULL;
 }
 
 void
-xytonode(double x, double y, struct wlr_surface **psurface,
+xytonode(double x, double y, struct nx_surface **psurface,
 		Client **pc, LayerSurface **pl, double *nx, double *ny)
 {
-	struct wlr_scene_node *node, *pnode;
-	struct wlr_surface *surface = NULL;
+	struct nx_scene_node *node, *pnode;
+	struct nx_surface *surface = NULL;
 	Client *c = NULL;
 	LayerSurface *l = NULL;
 	int layer;
 
 	for (layer = NUM_LAYERS - 1; !surface && layer >= 0; layer--) {
-		if (!(node = wlr_scene_node_at(&layers[layer]->node, x, y, nx, ny)))
+		if (!(node = nx_scene_node_at(&layers[layer]->node, x, y, nx, ny)))
 			continue;
 
-		if (node->type == WLR_SCENE_NODE_BUFFER) {
-			struct wlr_scene_surface *scene_surface =
-				wlr_scene_surface_try_from_buffer(
-						wlr_scene_buffer_from_node(node));
+		if (node->type == NX_SCENE_NODE_BUFFER) {
+			struct nx_scene_surface *scene_surface =
+				nx_scene_surface_try_from_buffer(
+						nx_scene_buffer_from_node(node));
 			if (scene_surface)
 				surface = scene_surface->surface;
 		}

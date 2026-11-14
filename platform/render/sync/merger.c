@@ -1,0 +1,131 @@
+#include <assert.h>
+#include <linux/sync_file.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#include <wayland-util.h>
+#include <xf86drm.h>
+#include "platform/log/log.h"
+#include "platform/render/drm_syncobj.h"
+#include "platform/render/drm_syncobj_merger.h"
+
+static int sync_file_merge(int fd1, int fd2) {
+	// Kernel prunes signalled fences
+	struct sync_merge_data merge_data = { .fd2 = fd2 };
+	if (ioctl(fd1, SYNC_IOC_MERGE, &merge_data) < 0) {
+		nx_log_errno(NX_ERROR, "ioctl(SYNC_IOC_MERGE) failed");
+		return -1;
+	}
+
+	return merge_data.fence;
+}
+
+struct nx_drm_syncobj_merger *nx_drm_syncobj_merger_create(
+		struct nx_drm_syncobj_timeline *dst_timeline, uint64_t dst_point) {
+	struct nx_drm_syncobj_merger *merger = calloc(1, sizeof(*merger));
+	if (merger == NULL) {
+		return NULL;
+	}
+	merger->n_ref = 1;
+	merger->dst_timeline = nx_drm_syncobj_timeline_ref(dst_timeline);
+	merger->dst_point = dst_point;
+	merger->sync_fd = -1;
+	return merger;
+}
+
+struct nx_drm_syncobj_merger *nx_drm_syncobj_merger_ref(
+		struct nx_drm_syncobj_merger *merger) {
+	assert(merger->n_ref > 0);
+	merger->n_ref++;
+	return merger;
+}
+
+void nx_drm_syncobj_merger_unref(struct nx_drm_syncobj_merger *merger) {
+	if (merger == NULL) {
+		return;
+	}
+	assert(merger->n_ref > 0);
+	merger->n_ref--;
+	if (merger->n_ref > 0) {
+		return;
+	}
+
+	if (merger->sync_fd != -1) {
+		nx_drm_syncobj_timeline_import_sync_file(merger->dst_timeline,
+			merger->dst_point, merger->sync_fd);
+		close(merger->sync_fd);
+	} else {
+		nx_drm_syncobj_timeline_signal(merger->dst_timeline, merger->dst_point);
+	}
+	nx_drm_syncobj_timeline_unref(merger->dst_timeline);
+	free(merger);
+}
+
+/* Takes ownership of fd */
+static bool merger_add_sync_file(struct nx_drm_syncobj_merger *merger,
+		int fd) {
+	if (merger->sync_fd == -1) {
+		merger->sync_fd = fd;
+		return fd != -1;
+	}
+
+	int merged = sync_file_merge(merger->sync_fd, fd);
+	close(fd);
+	if (merged < 0) {
+		return false;
+	}
+	close(merger->sync_fd);
+	merger->sync_fd = merged;
+	return true;
+}
+
+static bool merger_add_exportable(struct nx_drm_syncobj_merger *merger,
+		struct nx_drm_syncobj_timeline *src_timeline, uint64_t src_point) {
+	int new_sync = nx_drm_syncobj_timeline_export_sync_file(src_timeline, src_point);
+	return merger_add_sync_file(merger, new_sync);
+}
+
+struct export_waiter {
+	struct nx_drm_syncobj_timeline_waiter waiter;
+	struct nx_drm_syncobj_merger *merger;
+	struct nx_drm_syncobj_timeline *src_timeline;
+	uint64_t src_point;
+};
+
+static void export_waiter_handle_ready(struct nx_drm_syncobj_timeline_waiter *waiter) {
+	struct export_waiter *add = wl_container_of(waiter, add, waiter);
+	merger_add_exportable(add->merger, add->src_timeline, add->src_point);
+	nx_drm_syncobj_merger_unref(add->merger);
+	nx_drm_syncobj_timeline_unref(add->src_timeline);
+	nx_drm_syncobj_timeline_waiter_finish(&add->waiter);
+	free(add);
+}
+
+bool nx_drm_syncobj_merger_add(struct nx_drm_syncobj_merger *merger,
+		struct nx_drm_syncobj_timeline *src_timeline, uint64_t src_point,
+		struct wl_event_loop *loop) {
+	assert(loop != NULL);
+	bool exportable = false;
+	int flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE;
+	if (!nx_drm_syncobj_timeline_check(src_timeline, src_point, flags, &exportable)) {
+		return false;
+	}
+	if (exportable) {
+		return merger_add_exportable(merger, src_timeline, src_point);
+	}
+	struct export_waiter *add = calloc(1, sizeof(*add));
+	if (add == NULL) {
+		return false;
+	}
+	if (!nx_drm_syncobj_timeline_waiter_init(&add->waiter, src_timeline, src_point,
+			flags, loop, export_waiter_handle_ready)) {
+		free(add);
+		return false;
+	}
+	add->merger = merger;
+	add->src_timeline = nx_drm_syncobj_timeline_ref(src_timeline);
+	add->src_point = src_point;
+	merger->n_ref++;
+	return true;
+}

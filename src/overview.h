@@ -8,7 +8,7 @@
  * shell is sitting in ssh.  Arrows pick a tile across all rows, Enter
  * zooms into it, Escape returns to where you were.
  *
- * The thumbnails are wlr_scene_surface mirrors of the live client
+ * The thumbnails are nx_scene_surface mirrors of the live client
  * surfaces (the same trick instruments.c uses for cockpit displays) — no
  * capture, no copy, and clients parked on an inactive workspace still
  * show their last frame.  The zoom is a single spring driving every

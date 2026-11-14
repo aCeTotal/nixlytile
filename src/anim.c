@@ -3,41 +3,25 @@
 #include "diag.h"
 #include "overview.h"
 
-/*
- * Apply a (sx, sy) visual scale to every scene_buffer beneath a
- * client's surface tree.  Each buffer's dest_size is set to
- * natural × scale, so wlroots renders the existing buffer scaled to
- * the desired box without waiting for the client to commit a new
- * buffer at the new size.
- *
- * Used during column-fullscreen / size transitions so that the
- * window CONTENT scales smoothly in realtime even before the client
- * has acknowledged our configure event with a new buffer.  Once the
- * client commits at the target size, scale → 1.0 naturally.
- *
- * Subsurfaces get the same scale factor (their positions are not
- * adjusted).  For most apps without complex relative-positioned
- * subsurfaces (browsers, terminals, games), this is visually
- * indistinguishable from a true uniform scale.
- */
+/* Scales buffers before the client catches up. */
 struct scale_ctx {
 	double scale[2];
-	struct wlr_surface *root;   /* the client's toplevel surface */
+	struct nx_surface *root;   /* the client's toplevel surface */
 	int box_w, box_h;           /* target inner box */
 };
 
 static void
-scene_buffer_scale_iter(struct wlr_scene_buffer *buf, int sx, int sy, void *data)
+scene_buffer_scale_iter(struct nx_scene_buffer *buf, int sx, int sy, void *data)
 {
 	struct scale_ctx *ctx = data;
-	struct wlr_scene_surface *ss;
+	struct nx_scene_surface *ss;
 	int w, h;
 
 	(void)sx; (void)sy;
 	if (!buf || !buf->buffer)
 		return;
 
-	ss = wlr_scene_surface_try_from_buffer(buf);
+	ss = nx_scene_surface_try_from_buffer(buf);
 	if (ss && ss->surface == ctx->root) {
 		/* Root surface: the window-geometry clip has already trimmed
 		 * the CSD margin off the buffer, so the tile's inner box IS
@@ -61,7 +45,7 @@ scene_buffer_scale_iter(struct wlr_scene_buffer *buf, int sx, int sy, void *data
 	}
 	if (w <= 0 || h <= 0)
 		return;
-	wlr_scene_buffer_set_dest_size(buf, w, h);
+	nx_scene_buffer_set_dest_size(buf, w, h);
 }
 
 void
@@ -93,7 +77,7 @@ client_scale_to_box(Client *c, int box_w, int box_h)
 	ctx.box_w = box_w;
 	ctx.box_h = box_h;
 
-	wlr_scene_node_for_each_buffer(&c->scene_surface->node,
+	nx_scene_node_for_each_buffer(&c->scene_surface->node,
 			scene_buffer_scale_iter, &ctx);
 }
 
@@ -141,10 +125,10 @@ static const SpringParams SPRING_FULLSCREEN = { 1.0, 1.0, 1000.0 };
 #define FSX_SPAN 1000.0
 
 /* Largest aw:ah box centered in `in`. */
-static struct wlr_box
-fit_box(int aw, int ah, struct wlr_box in)
+static struct nx_box
+fit_box(int aw, int ah, struct nx_box in)
 {
-	struct wlr_box b;
+	struct nx_box b;
 	double s;
 
 	if (aw <= 0 || ah <= 0)
@@ -164,9 +148,9 @@ lerp_px(int a, int b, double t)
 }
 
 void
-client_start_fs_transition(Client *c, struct wlr_box from)
+client_start_fs_transition(Client *c, struct nx_box from)
 {
-	if (wlr_box_empty(&from))
+	if (nx_box_empty(&from))
 		return;
 	c->fsx_from = from;
 	c->fsx_p = 0.0;
@@ -176,9 +160,9 @@ client_start_fs_transition(Client *c, struct wlr_box from)
 
 /* Content zooms undistorted between boxes. */
 void
-client_fs_transition_apply(Client *c, struct wlr_box to)
+client_fs_transition_apply(Client *c, struct nx_box to)
 {
-	struct wlr_box start, box, clip;
+	struct nx_box start, box, clip;
 	double t = c->fsx_p / FSX_SPAN;
 	int cw, ch, x1, y1;
 
@@ -196,7 +180,7 @@ client_fs_transition_apply(Client *c, struct wlr_box to)
 	client_get_clip(c, &clip);
 	clip.width = cw;
 	clip.height = ch;
-	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+	nx_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
 }
 
 static void
@@ -208,7 +192,7 @@ fs_transition_end(Client *c)
 	if (c->isfullscreen) {
 		client_apply_scene_geom(c, client_fullscreen_geom(c));
 	} else {
-		wlr_scene_node_reparent(&c->scene->node,
+		nx_scene_node_reparent(&c->scene->node,
 				layers[c->isfloating ? LyrFloat : LyrTile]);
 	}
 	arrange(c->mon);
@@ -311,9 +295,9 @@ spring_tick(double *pos, double *vel, double target, SpringParams sp, double dt)
 
 /* Floating geometry spring, content-synced. */
 void
-client_set_target_geom(Client *c, struct wlr_box g)
+client_set_target_geom(Client *c, struct nx_box g)
 {
-	struct wlr_box from;
+	struct nx_box from;
 
 	if (!c)
 		return;
@@ -335,7 +319,7 @@ client_set_target_geom(Client *c, struct wlr_box g)
 
 	/* Mid-anim arrange keeps the anim alive. */
 	from = c->float_want_set ? c->float_want : c->geom;
-	if (wlr_box_equal(&from, &g))
+	if (nx_box_equal(&from, &g))
 		return;
 
 	if (!c->anim_active) {
@@ -383,10 +367,10 @@ animcommitnotify(struct wl_listener *listener, void *data)
 		track_client_frame(c);
 	/* X11 mirror of commitnotify bookkeeping. */
 	if (c->mon && client_is_x11(c)) {
-		struct wlr_surface *cs = client_surface(c);
+		struct nx_surface *cs = client_surface(c);
 
 		c->mon->diag_commits_in++;
-		if (cs && (cs->current.committed & WLR_SURFACE_STATE_BUFFER)) {
+		if (cs && (cs->current.committed & NX_SURFACE_STATE_BUFFER)) {
 			c->mon->unsampled_buffer = 1;
 			c->last_buffer_commit_ms = monotonic_msec();
 			dynrender_committed(c);
@@ -427,7 +411,7 @@ clients_anim_tick(Monitor *m, double dt)
 	int active = 0;
 
 	wl_list_for_each(c, &clients, link) {
-		struct wlr_box g;
+		struct nx_box g;
 		int moved = 0;
 
 		if (c->mon != m || !c->anim_active)
@@ -481,13 +465,13 @@ clients_anim_tick(Monitor *m, double dt)
  * anim, "lightening" again on unfreeze.  Disabling scene_surface
  * keeps the visible result identical pre- and post-anim.
  *
- * Lock/unlock is handled internally by wlr_scene_buffer_create /
+ * Lock/unlock is handled internally by nx_scene_buffer_create /
  * scene_node_destroy — no manual buffer_lock needed.
  */
 void
 client_freeze(Client *c)
 {
-	struct wlr_surface *surface;
+	struct nx_surface *surface;
 
 	if (!c || c->frozen_buffer || !c->scene)
 		return;
@@ -505,20 +489,20 @@ client_freeze(Client *c)
 		return;
 	}
 
-	c->frozen_buffer = wlr_scene_buffer_create(c->scene,
+	c->frozen_buffer = nx_scene_buffer_create(c->scene,
 			&surface->buffer->base);
 	if (!c->frozen_buffer)
 		return;
 	c->frozen_buf_w = surface->buffer->base.width;
 	c->frozen_buf_h = surface->buffer->base.height;
 
-	wlr_scene_node_set_position(&c->frozen_buffer->node, c->bw, c->bw);
-	wlr_scene_buffer_set_dest_size(c->frozen_buffer,
+	nx_scene_node_set_position(&c->frozen_buffer->node, c->bw, c->bw);
+	nx_scene_buffer_set_dest_size(c->frozen_buffer,
 			c->geom.width - 2 * c->bw,
 			c->geom.height - 2 * c->bw);
 
 	if (c->scene_surface)
-		wlr_scene_node_set_enabled(&c->scene_surface->node, 0);
+		nx_scene_node_set_enabled(&c->scene_surface->node, 0);
 
 	/* Crop the fresh snapshot NOW.  Freeze runs at the END of the anim
 	 * tick, after this frame's clip pass — a tile straddling (or scrolled
@@ -542,11 +526,11 @@ client_unfreeze(Client *c)
 {
 	if (!c || !c->frozen_buffer)
 		return;
-	/* scene_node_destroy releases the wlr_buffer lock for us. */
-	wlr_scene_node_destroy(&c->frozen_buffer->node);
+	/* scene_node_destroy releases the nx_buffer lock for us. */
+	nx_scene_node_destroy(&c->frozen_buffer->node);
 	c->frozen_buffer = NULL;
 	if (c->scene_surface)
-		wlr_scene_node_set_enabled(&c->scene_surface->node, 1);
+		nx_scene_node_set_enabled(&c->scene_surface->node, 1);
 
 	diag_logf("TILE", "UNFREEZE appid='%s' (live surface re-enabled)",
 		client_get_appid(c) ? client_get_appid(c) : "(null)");
@@ -626,7 +610,7 @@ monitor_unfreeze_clients(Monitor *m, int include_x11, int include_wayland)
 		int inner_h = c->geom.height - 2 * c->bw;
 		if (inner_w < 1) inner_w = 1;
 		if (inner_h < 1) inner_h = 1;
-		wlr_scene_buffer_set_dest_size(c->frozen_buffer,
+		nx_scene_buffer_set_dest_size(c->frozen_buffer,
 				inner_w, inner_h);
 		client_unfreeze(c);
 	}
@@ -861,13 +845,13 @@ monitor_anim_tick(Monitor *m, double dt)
  * the scale path entirely and rely on opacity.  Visually identical
  * to Niri for the common case (no per-app scale on open). */
 static void
-scene_buffer_opacity_iter(struct wlr_scene_buffer *buf, int sx, int sy, void *data)
+scene_buffer_opacity_iter(struct nx_scene_buffer *buf, int sx, int sy, void *data)
 {
 	double *alpha = data;
 	(void)sx; (void)sy;
 	if (!buf)
 		return;
-	wlr_scene_buffer_set_opacity(buf, (float)*alpha);
+	nx_scene_buffer_set_opacity(buf, (float)*alpha);
 }
 
 void
@@ -887,7 +871,7 @@ client_apply_open_anim(Client *c)
 		alpha = 1.0;
 	}
 
-	wlr_scene_node_for_each_buffer(&c->scene_surface->node,
+	nx_scene_node_for_each_buffer(&c->scene_surface->node,
 			scene_buffer_opacity_iter, &alpha);
 }
 
@@ -908,10 +892,10 @@ client_start_open_anim(Client *c)
  * then free.  Survives the underlying Client destruction.
  */
 void
-anim_spawn_close(Monitor *m, struct wlr_buffer *buffer, struct wlr_box geom)
+anim_spawn_close(Monitor *m, struct nx_buffer *buffer, struct nx_box geom)
 {
 	ClosingAnim *a;
-	struct wlr_scene_tree *parent;
+	struct nx_scene_tree *parent;
 
 	if (!buffer || geom.width <= 0 || geom.height <= 0)
 		return;
@@ -929,14 +913,14 @@ anim_spawn_close(Monitor *m, struct wlr_buffer *buffer, struct wlr_box geom)
 	a->progress = 1.0;
 	a->vel = 0.0;
 
-	a->tree = wlr_scene_tree_create(parent);
+	a->tree = nx_scene_tree_create(parent);
 	if (!a->tree) {
 		free(a);
 		return;
 	}
-	a->buffer = wlr_scene_buffer_create(a->tree, buffer);
+	a->buffer = nx_scene_buffer_create(a->tree, buffer);
 	if (!a->buffer) {
-		wlr_scene_node_destroy(&a->tree->node);
+		nx_scene_node_destroy(&a->tree->node);
 		free(a);
 		return;
 	}
@@ -945,16 +929,16 @@ anim_spawn_close(Monitor *m, struct wlr_buffer *buffer, struct wlr_box geom)
 	 * the monitor edge otherwise paints its hidden part across the
 	 * neighbouring output for the duration of the fade. */
 	if (m) {
-		struct wlr_box vis;
-		if (!wlr_box_intersection(&vis, &geom, &m->w)) {
-			wlr_scene_node_destroy(&a->tree->node);
+		struct nx_box vis;
+		if (!nx_box_intersection(&vis, &geom, &m->w)) {
+			nx_scene_node_destroy(&a->tree->node);
 			free(a);
 			return;
 		}
 		if (vis.x != geom.x || vis.y != geom.y ||
 				vis.width != geom.width ||
 				vis.height != geom.height) {
-			struct wlr_fbox src = {
+			struct nx_fbox src = {
 				.x = (double)(vis.x - geom.x) * buffer->width
 						/ geom.width,
 				.y = (double)(vis.y - geom.y) * buffer->height
@@ -964,21 +948,21 @@ anim_spawn_close(Monitor *m, struct wlr_buffer *buffer, struct wlr_box geom)
 				.height = (double)vis.height * buffer->height
 						/ geom.height,
 			};
-			wlr_scene_buffer_set_source_box(a->buffer, &src);
+			nx_scene_buffer_set_source_box(a->buffer, &src);
 		}
-		wlr_scene_node_set_position(&a->tree->node, vis.x, vis.y);
-		wlr_scene_buffer_set_dest_size(a->buffer, vis.width, vis.height);
+		nx_scene_node_set_position(&a->tree->node, vis.x, vis.y);
+		nx_scene_buffer_set_dest_size(a->buffer, vis.width, vis.height);
 	} else {
-		wlr_scene_node_set_position(&a->tree->node, geom.x, geom.y);
-		wlr_scene_buffer_set_dest_size(a->buffer, geom.width, geom.height);
+		nx_scene_node_set_position(&a->tree->node, geom.x, geom.y);
+		nx_scene_buffer_set_dest_size(a->buffer, geom.width, geom.height);
 	}
-	wlr_scene_buffer_set_opacity(a->buffer, 1.0f);
+	nx_scene_buffer_set_opacity(a->buffer, 1.0f);
 
 	wl_list_insert(&closing_anims, &a->link);
 
 	/* Make sure the next vblank fires the anim tick. */
-	if (m && m->wlr_output && !m->frame_scheduled) {
-		wlr_output_schedule_frame(m->wlr_output);
+	if (m && m->nx_output && !m->frame_scheduled) {
+		nx_output_schedule_frame(m->nx_output);
 		m->frame_scheduled = 1;
 	}
 }
@@ -1000,13 +984,13 @@ closing_anims_tick(Monitor *m, double dt, int *still)
 		if (a->progress <= 0.02 && fabs(a->vel) < 1.0) {
 			wl_list_remove(&a->link);
 			if (a->tree)
-				wlr_scene_node_destroy(&a->tree->node);
+				nx_scene_node_destroy(&a->tree->node);
 			free(a);
 			continue;
 		}
 		/* Opacity-only close fade: no scale → no subsurface
 		 * artifacts.  Position unchanged from snapshot geom. */
-		wlr_scene_buffer_set_opacity(a->buffer,
+		nx_scene_buffer_set_opacity(a->buffer,
 				(float)a->progress);
 		if (still && moving)
 			*still = 1;

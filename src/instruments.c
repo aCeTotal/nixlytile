@@ -32,11 +32,11 @@
  */
 struct Mirror {
 	struct wl_list link;
-	struct wlr_scene_surface *scene;
+	struct nx_scene_surface *scene;
 };
 
 static struct wl_list mirrors;             /* struct Mirror */
-static struct wlr_scene_tree *mirror_tree;
+static struct nx_scene_tree *mirror_tree;
 static struct wl_event_source *plan_timer;
 static time_t plan_mtime;
 
@@ -59,8 +59,8 @@ monitor_named(const char *name)
 	if (!name || !*name)
 		return NULL;
 	wl_list_for_each(m, &mons, link) {
-		if (m->wlr_output && m->wlr_output->name
-				&& !strcmp(m->wlr_output->name, name))
+		if (m->nx_output && m->nx_output->name
+				&& !strcmp(m->nx_output->name, name))
 			return m;
 	}
 	return NULL;
@@ -92,8 +92,8 @@ instruments_place(Client *c)
 		return;
 	c->bw = 0;
 	c->geom = c->mon->m;
-	wlr_scene_node_reparent(&c->scene->node, layers[LyrOverlay]);
-	wlr_scene_node_raise_to_top(&c->scene->node);
+	nx_scene_node_reparent(&c->scene->node, layers[LyrOverlay]);
+	nx_scene_node_raise_to_top(&c->scene->node);
 	resize(c, c->geom, 1);
 }
 
@@ -107,7 +107,7 @@ instruments_try_adopt(Client *c)
 		return 0;
 	m = monitor_named(connector);
 	if (!m) {
-		wlr_log(WLR_ERROR, "instruments: no output named '%s' — "
+		nx_log(NX_ERROR, "instruments: no output named '%s' — "
 			"leaving the dcspit window to the normal layout", connector);
 		return 0;
 	}
@@ -119,10 +119,10 @@ instruments_try_adopt(Client *c)
 	setmon(c, m, 0);
 	instruments_place(c);
 	/* instruments_update() decides visibility, including the game-screen rule. */
-	wlr_scene_node_set_enabled(&c->scene->node, 0);
+	nx_scene_node_set_enabled(&c->scene->node, 0);
 	instruments_update();
-	wlr_log(WLR_INFO, "instruments: '%s' claims output %s", client_get_appid(c),
-		m->wlr_output->name);
+	nx_log(NX_INFO, "instruments: '%s' claims output %s", client_get_appid(c),
+		m->nx_output->name);
 	return 1;
 }
 
@@ -152,7 +152,7 @@ mirrors_clear(void)
 	wl_list_for_each_safe(mir, tmp, &mirrors, link) {
 		/* Destroying the node is enough; the surface itself is the game's. */
 		if (mir->scene)
-			wlr_scene_node_destroy(&mir->scene->buffer->node);
+			nx_scene_node_destroy(&mir->scene->buffer->node);
 		wl_list_remove(&mir->link);
 		free(mir);
 	}
@@ -162,9 +162,9 @@ static void
 mirror_add(Monitor *m, const char *name, int sx, int sy, int sw, int sh,
 		int dx, int dy, int dw, int dh)
 {
-	struct wlr_surface *surface;
-	struct wlr_scene_surface *mirror;
-	struct wlr_fbox src;
+	struct nx_surface *surface;
+	struct nx_scene_surface *mirror;
+	struct nx_fbox src;
 	struct Mirror *mir;
 
 	if (!game_mode_client || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0)
@@ -173,11 +173,11 @@ mirror_add(Monitor *m, const char *name, int sx, int sy, int sw, int sh,
 	if (!surface)
 		return;
 	if (!mirror_tree) {
-		mirror_tree = wlr_scene_tree_create(layers[LyrOverlay]);
+		mirror_tree = nx_scene_tree_create(layers[LyrOverlay]);
 		if (!mirror_tree)
 			return;
 	}
-	mirror = wlr_scene_surface_create(mirror_tree, surface);
+	mirror = nx_scene_surface_create(mirror_tree, surface);
 	if (!mirror)
 		return;
 
@@ -185,19 +185,19 @@ mirror_add(Monitor *m, const char *name, int sx, int sy, int sw, int sh,
 	src.y = sy;
 	src.width = sw;
 	src.height = sh;
-	wlr_scene_buffer_set_source_box(mirror->buffer, &src);
-	wlr_scene_buffer_set_dest_size(mirror->buffer, dw, dh);
-	wlr_scene_node_set_position(&mirror->buffer->node, m->m.x + dx, m->m.y + dy);
+	nx_scene_buffer_set_source_box(mirror->buffer, &src);
+	nx_scene_buffer_set_dest_size(mirror->buffer, dw, dh);
+	nx_scene_node_set_position(&mirror->buffer->node, m->m.x + dx, m->m.y + dy);
 
 	mir = calloc(1, sizeof(*mir));
 	if (!mir) {
-		wlr_scene_node_destroy(&mirror->buffer->node);
+		nx_scene_node_destroy(&mirror->buffer->node);
 		return;
 	}
 	mir->scene = mirror;
 	wl_list_insert(&mirrors, &mir->link);
-	wlr_log(WLR_INFO, "instruments: mirroring %s %dx%d+%d+%d → %s +%d+%d",
-		name, sw, sh, sx, sy, m->wlr_output->name, dx, dy);
+	nx_log(NX_INFO, "instruments: mirroring %s %dx%d+%d+%d → %s +%d+%d",
+		name, sw, sh, sx, sy, m->nx_output->name, dx, dy);
 }
 
 /* dcspitd's plan file: `game W H`, `screen NAME`, `viewport NAME src .. dst ..` */
@@ -225,7 +225,7 @@ mirrors_build(void)
 		if (sscanf(line, "screen %127s", name) == 1) {
 			m = monitor_named(name);
 			if (m && !instruments_allowed_on(m)) {
-				wlr_log(WLR_INFO, "instruments: %s renders the game, "
+				nx_log(NX_INFO, "instruments: %s renders the game, "
 					"skipping its viewports", name);
 				m = NULL;
 			}
@@ -241,7 +241,7 @@ mirrors_build(void)
 
 	/* The cockpit displays go on top of the instrument window. */
 	if (mirror_tree)
-		wlr_scene_node_raise_to_top(&mirror_tree->node);
+		nx_scene_node_raise_to_top(&mirror_tree->node);
 }
 
 /* Re-read the plan when dcspitd rewrites it: layout saved, aircraft changed. */
@@ -282,7 +282,7 @@ instruments_update(void)
 		int visible = show && instruments_allowed_on(c->mon);
 		if (visible)
 			instruments_place(c);
-		wlr_scene_node_set_enabled(&c->scene->node, visible);
+		nx_scene_node_set_enabled(&c->scene->node, visible);
 	}
 
 	plan_mtime = 0;

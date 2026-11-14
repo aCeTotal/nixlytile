@@ -444,7 +444,7 @@ render_hidden_view(Card *card, int hot)
 
 #define SPEC_TICK_MS 33
 
-static struct wlr_scene_buffer *spec_node;   /* child of view content;
+static struct nx_scene_buffer *spec_node;   /* child of view content;
                                               * reset on every re-render */
 static int spec_x, spec_y, spec_w, spec_h;
 static double spec_frac;
@@ -452,8 +452,8 @@ static const float *spec_accent;
 static struct wl_event_source *spec_timer;
 /* Ping-pong frame buffers: the 33ms tick used to route every frame
  * through card_spectrum_buffer (cairo surface create + ecalloc + full
- * copy + wlr buffer create, then drop).  Instead two persistent
- * pixman-backed wlr_buffers are drawn in place with cairo and reused
+ * copy + nx buffer create, then drop).  Instead two persistent
+ * pixman-backed nx_buffers are drawn in place with cairo and reused
  * across ticks; two alternate so a frame the scene may still be
  * presenting is never scribbled.  Dropped when the overlay closes. */
 static struct PixmanBuffer *spec_bufs[2];
@@ -468,7 +468,7 @@ spec_bufs_drop(void)
 
 	for (i = 0; i < 2; i++) {
 		if (spec_bufs[i]) {
-			wlr_buffer_drop(&spec_bufs[i]->base);
+			nx_buffer_drop(&spec_bufs[i]->base);
 			spec_bufs[i] = NULL;
 		}
 	}
@@ -494,7 +494,7 @@ spec_buf_acquire(int w, int h)
 		b->drm_format = DRM_FORMAT_ARGB8888;
 		b->stride = stride;
 		b->owns_data = 1;
-		wlr_buffer_init(&b->base, &pixman_buffer_impl, w, h);
+		nx_buffer_init(&b->base, &pixman_buffer_impl, w, h);
 		spec_bufs[spec_buf_flip] = b;
 	}
 	spec_buf_flip ^= 1;
@@ -542,9 +542,9 @@ spec_overlay_draw(NetPopup *p)
 	if (spec_w <= 0 || !p->view.content || p->view.animating)
 		return;
 	if (!spec_node) {
-		spec_node = wlr_scene_buffer_create(p->view.content, NULL);
+		spec_node = nx_scene_buffer_create(p->view.content, NULL);
 		if (spec_node)
-			wlr_scene_node_set_position(&spec_node->node,
+			nx_scene_node_set_position(&spec_node->node,
 					spec_x, spec_y);
 	}
 	if (!spec_node)
@@ -601,7 +601,7 @@ spec_overlay_draw(NetPopup *p)
 	cairo_destroy(cr);
 	cairo_surface_flush(cs);
 	cairo_surface_destroy(cs);
-	wlr_scene_buffer_set_buffer(spec_node, &pb->base);
+	nx_scene_buffer_set_buffer(spec_node, &pb->base);
 }
 
 /* ~30 fps heartbeat; stops itself the moment no net popup is visible
@@ -626,8 +626,8 @@ spec_tick(void *data)
 		return 0;   /* stays disarmed until the next popup render */
 	}
 	spec_overlay_draw(p);
-	if (pm->wlr_output)
-		wlr_output_schedule_frame(pm->wlr_output);
+	if (pm->nx_output)
+		nx_output_schedule_frame(pm->nx_output);
 	wl_event_source_timer_update(spec_timer, SPEC_TICK_MS);
 	return 0;
 }
@@ -659,7 +659,7 @@ rendernetpopup(Monitor *m)
 	p = &m->statusbar.net_popup;
 	if (!statusfont.font) {
 		p->width = p->height = 0;
-		wlr_scene_node_set_enabled(&p->tree->node, 0);
+		nx_scene_node_set_enabled(&p->tree->node, 0);
 		p->visible = 0;
 		return;
 	}

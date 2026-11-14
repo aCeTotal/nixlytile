@@ -11,7 +11,7 @@
 .Op Fl s Ar startup command
 .Sh DESCRIPTION
 .Nm
-is a tiling Wayland compositor based on wlroots.
+is a tiling Wayland compositor.
 .Pp
 When given the
 .Fl v
@@ -23,7 +23,7 @@ When given the
 .Fl d
 option,
 .Nm
-enables full wlroots logging, including debug information.
+enables full logging, including debug information.
 .Pp
 When given the
 .Fl s
@@ -215,10 +215,10 @@ are stored.
 .It Ev XDG_CONFIG_DIR
 A directory containing configuration of various programs and
 libraries, including libxkbcommon.
-.It Ev DISPLAY , WAYLAND_DISPLAY , WAYLAND_SOCKET
-Tell how to connect to an underlying X11 or Wayland server.
-.It Ev WLR_*
-Various variables specific to wlroots.
+.It Ev WAYLAND_DISPLAY , WAYLAND_SOCKET
+Tell how to connect to an underlying Wayland server.
+.It Ev NIXLY_*
+Platform tuning and debugging variables.
 .It Ev XKB_* , XLOCALEDIR , XCOMPOSEFILE
 Various variables specific to libxkbcommon.
 .It Ev XCURSOR_PATH

@@ -55,86 +55,85 @@
 #include "popup_card.h"
 #include <unistd.h>
 #include <wayland-server-core.h>
-#include <wlr/backend.h>
-#include <wlr/backend/libinput.h>
-#include <wlr/render/allocator.h>
-#include <wlr/render/wlr_renderer.h>
-#include <wlr/render/drm_format_set.h>
-#include <wlr/interfaces/wlr_buffer.h>
-#include <wlr/interfaces/wlr_keyboard.h>
-#include <wlr/types/wlr_buffer.h>
-#include <wlr/types/wlr_alpha_modifier_v1.h>
-#include <wlr/types/wlr_commit_timing_v1.h>
-#include <wlr/types/wlr_compositor.h>
-#include <wlr/types/wlr_content_type_v1.h>
-#include <wlr/types/wlr_fifo_v1.h>
-#include <wlr/types/wlr_cursor.h>
-#include <wlr/types/wlr_cursor_shape_v1.h>
-#include <wlr/types/wlr_data_control_v1.h>
-#include <wlr/types/wlr_data_device.h>
-#include <wlr/types/wlr_drm.h>
-#include <wlr/backend/drm.h>
-#include <wlr/types/wlr_export_dmabuf_v1.h>
-#include <wlr/types/wlr_fractional_scale_v1.h>
-#include <wlr/types/wlr_gamma_control_v1.h>
-#include <wlr/types/wlr_idle_inhibit_v1.h>
-#include <wlr/types/wlr_idle_notify_v1.h>
-#include <wlr/types/wlr_input_device.h>
-#include <wlr/types/wlr_keyboard.h>
-#include <wlr/types/wlr_keyboard_group.h>
-#include <wlr/types/wlr_layer_shell_v1.h>
-#include <wlr/types/wlr_linux_dmabuf_v1.h>
-#include <wlr/types/wlr_linux_drm_syncobj_v1.h>
-#include <wlr/types/wlr_output.h>
-#include <wlr/types/wlr_output_layer.h>
-#include <wlr/types/wlr_output_layout.h>
-#include <wlr/types/wlr_output_management_v1.h>
-#include <wlr/types/wlr_output_power_management_v1.h>
-#include <wlr/types/wlr_pointer.h>
-#include <wlr/types/wlr_pointer_constraints_v1.h>
-#include <wlr/types/wlr_presentation_time.h>
-#include <wlr/types/wlr_primary_selection.h>
-#include <wlr/types/wlr_primary_selection_v1.h>
-#include <wlr/types/wlr_relative_pointer_v1.h>
-#include <wlr/types/wlr_scene.h>
-#include <wlr/types/wlr_screencopy_v1.h>
-#include <wlr/types/wlr_seat.h>
-#include <wlr/types/wlr_server_decoration.h>
-#include <wlr/types/wlr_session_lock_v1.h>
-#include <wlr/types/wlr_single_pixel_buffer_v1.h>
-#include <wlr/types/wlr_subcompositor.h>
-#include <wlr/types/wlr_tearing_control_v1.h>
-#include <wlr/types/wlr_text_input_v3.h>
-#include <wlr/types/wlr_viewporter.h>
-#include <wlr/types/wlr_virtual_keyboard_v1.h>
-#include <wlr/types/wlr_virtual_pointer_v1.h>
-#include <wlr/types/wlr_tablet_tool.h>
-#include <wlr/types/wlr_tablet_pad.h>
-#include <wlr/types/wlr_tablet_v2.h>
-#include <wlr/types/wlr_color_management_v1.h>
-#include <wlr/types/wlr_color_representation_v1.h>
-#include <wlr/types/wlr_ext_data_control_v1.h>
-#include <wlr/types/wlr_ext_foreign_toplevel_list_v1.h>
-#include <wlr/types/wlr_ext_image_capture_source_v1.h>
-#include <wlr/types/wlr_ext_image_copy_capture_v1.h>
-#include <wlr/types/wlr_fixes.h>
-#include <wlr/types/wlr_keyboard_shortcuts_inhibit_v1.h>
-#include <wlr/types/wlr_pointer_gestures_v1.h>
-#include <wlr/types/wlr_security_context_v1.h>
-#include <wlr/types/wlr_xcursor_manager.h>
-#include <wlr/types/wlr_xdg_activation_v1.h>
-#include <wlr/types/wlr_xdg_decoration_v1.h>
-#include <wlr/types/wlr_xdg_dialog_v1.h>
-#include <wlr/types/wlr_xdg_foreign_registry.h>
-#include <wlr/types/wlr_xdg_foreign_v2.h>
-#include <wlr/types/wlr_xdg_output_v1.h>
-#include <wlr/types/wlr_xdg_shell.h>
-#include <wlr/types/wlr_xdg_system_bell_v1.h>
-#include <wlr/util/log.h>
-#include <wlr/util/region.h>
+#include "platform/backend/backend.h"
+#include "platform/input/libinput/libinput_backend.h"
+#include "platform/render/allocator/allocator.h"
+#include "platform/render/renderer.h"
+#include "platform/render/drm_format_set.h"
+#include "platform/buffer/buffer_interface.h"
+#include "platform/input/keyboard/keyboard_interface.h"
+#include "platform/buffer/buffer.h"
+#include "platform/surface/alpha_modifier.h"
+#include "platform/surface/commit_timing.h"
+#include "platform/surface/compositor.h"
+#include "platform/surface/content_type.h"
+#include "platform/surface/fifo.h"
+#include "platform/input/cursor/cursor.h"
+#include "platform/input/cursor/cursor_shape.h"
+#include "platform/clipboard/control/data_control_v1.h"
+#include "platform/clipboard/data_device/data_device.h"
+#include "platform/buffer/wl_drm.h"
+#include "platform/drm/drm.h"
+#include "platform/capture/export_dmabuf.h"
+#include "platform/surface/fractional_scale.h"
+#include "platform/output/gamma_control.h"
+#include "platform/shell/idle/idle_inhibit.h"
+#include "platform/shell/idle/idle_notify.h"
+#include "platform/input/device/input_device.h"
+#include "platform/input/keyboard/keyboard.h"
+#include "platform/input/keyboard/group.h"
+#include "platform/shell/layer/layer_shell.h"
+#include "platform/buffer/linux_dmabuf.h"
+#include "platform/surface/syncobj.h"
+#include "platform/output/output.h"
+#include "platform/output/layout.h"
+#include "platform/output/management.h"
+#include "platform/output/power.h"
+#include "platform/input/pointer/pointer.h"
+#include "platform/input/pointer/constraints.h"
+#include "platform/output/presentation.h"
+#include "platform/clipboard/primary/primary_selection.h"
+#include "platform/clipboard/primary/primary_selection_v1.h"
+#include "platform/input/pointer/relative.h"
+#include "platform/scene/scene.h"
+#include "platform/capture/screencopy.h"
+#include "platform/input/seat/seat.h"
+#include "platform/shell/window/server_decoration.h"
+#include "platform/shell/lock/session_lock.h"
+#include "platform/buffer/single_pixel.h"
+#include "platform/surface/subcompositor.h"
+#include "platform/surface/tearing_control.h"
+#include "platform/input/keyboard/text_input.h"
+#include "platform/surface/viewporter.h"
+#include "platform/input/keyboard/virtual_keyboard.h"
+#include "platform/input/pointer/virtual_pointer.h"
+#include "platform/input/tablet/tool_device.h"
+#include "platform/input/tablet/pad_device.h"
+#include "platform/input/tablet/tablet_v2.h"
+#include "platform/surface/color_management.h"
+#include "platform/surface/color_representation.h"
+#include "platform/clipboard/control/ext_data_control.h"
+#include "platform/shell/foreign/toplevel_list.h"
+#include "platform/capture/source/source.h"
+#include "platform/capture/image_copy.h"
+#include "platform/surface/fixes.h"
+#include "platform/input/keyboard/shortcuts_inhibit.h"
+#include "platform/input/pointer/gestures.h"
+#include "platform/client/security_context.h"
+#include "platform/input/xcursor/manager.h"
+#include "platform/shell/window/xdg_activation.h"
+#include "platform/shell/window/xdg_decoration.h"
+#include "platform/shell/window/xdg_dialog.h"
+#include "platform/shell/foreign/registry.h"
+#include "platform/shell/foreign/xdg_foreign.h"
+#include "platform/output/xdg_output.h"
+#include "platform/shell/xdg/xdg_shell.h"
+#include "platform/shell/window/system_bell.h"
+#include "platform/log/log.h"
+#include "platform/geometry/region.h"
 #include <xkbcommon/xkbcommon.h>
 #ifdef XWAYLAND
-#include <wlr/xwayland.h>
+#include "platform/xwayland/xwayland.h"
 #include <xcb/xcb.h>
 #include <xcb/xcb_icccm.h>
 #endif
@@ -158,7 +157,7 @@
 #define MIN(A, B)               ((A) < (B) ? (A) : (B))
 #endif
 #define UNUSED __attribute__((unused))
-#define CLEANMASK(mask)         (mask & ~(WLR_MODIFIER_CAPS | WLR_MODIFIER_MOD2))
+#define CLEANMASK(mask)         (mask & ~(NX_MODIFIER_CAPS | NX_MODIFIER_MOD2))
 #define VISIBLEON(C, M)         ((M) && (C)->mon == (M) && (((C)->tags & (M)->tagset[(M)->seltags]) || (C)->issticky))
 #define LENGTH(X)               (sizeof X / sizeof X[0])
 #define END(A)                  ((A) + LENGTH(A))
@@ -195,8 +194,8 @@
 #define OSK_DPAD_INITIAL_DELAY 400
 #define OSK_DPAD_REPEAT_RATE 50
 
-#ifndef WLR_SILENCE
-#define WLR_SILENCE (WLR_ERROR - 1)
+#ifndef NX_SILENCE
+#define NX_SILENCE (NX_ERROR - 1)
 #endif
 
 /* ── runtime config constants ─────────────────────────────────────── */
@@ -256,12 +255,9 @@ typedef enum {
 	GPU_VENDOR_NVIDIA
 } GpuVendor;
 
-/* Per-monitor gaming capability profile. Populated once during createmon
- * after the initial output commit, and used to select vendor-aware code
- * paths at runtime (overlay plane promotion, LFC, explicit sync hints). */
+/* Per-monitor gaming capability profile. */
 typedef struct {
 	GpuVendor vendor;          /* GPU vendor backing this output */
-	int overlay_planes_supported; /* KMS exposes additional plane(s) we can use */
 	int explicit_sync_ready;   /* Global DRM syncobj timeline manager is active */
 	int has_hw_lfc;            /* Driver provides Low Framerate Compensation */
 	int prefers_vulkan;        /* Vendor gives best gaming perf on Vulkan renderer */
@@ -363,16 +359,16 @@ typedef struct {
 extern const FuncEntry func_table[];
 MonitorPosition config_parse_monitor_position(const char *pos);
 xkb_keysym_t config_parse_keysym(const char *name);
-extern const struct wlr_buffer_impl pixman_buffer_impl;
+extern const struct nx_buffer_impl pixman_buffer_impl;
 
 typedef struct {
-	struct wlr_pointer_constraint_v1 *constraint;
+	struct nx_pointer_constraint_v1 *constraint;
 	struct wl_listener destroy;
 } PointerConstraint;
 
 typedef struct {
-	struct wlr_tablet_pad *pad;
-	struct wlr_tablet_v2_tablet_pad *v2;
+	struct nx_tablet_pad *pad;
+	struct nx_tablet_v2_tablet_pad *v2;
 	struct wl_listener button;
 	struct wl_listener ring;
 	struct wl_listener strip;
@@ -380,8 +376,8 @@ typedef struct {
 } TabletPad;
 
 typedef struct {
-	struct wlr_scene_tree *scene;
-	struct wlr_session_lock_v1 *lock;
+	struct nx_scene_tree *scene;
+	struct nx_session_lock_v1 *lock;
 	struct wl_listener new_surface;
 	struct wl_listener unlock;
 	struct wl_listener destroy;
@@ -405,8 +401,8 @@ struct StatusFont {
  * / gamepad types removed — those modules are gone. */
 #if 1
 struct StatusModule {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *bg;
+	struct nx_scene_tree *tree;
+	struct nx_scene_tree *bg;
 	int width;
 	int x;
 	int box_x[MAX_TAGS];
@@ -418,7 +414,7 @@ struct StatusModule {
 	float hover_alpha[MAX_TAGS];
 	/* persistent per-box hover highlight rects (tags module): retinted
 	 * in place during the hover fade so the digit textures survive. */
-	struct wlr_scene_rect *hover_rect[MAX_TAGS];
+	struct nx_scene_rect *hover_rect[MAX_TAGS];
 	/* render dedup — per monitor, NOT global: a shared cache is
 	 * consumed by the first monitor in the loop and leaves modules
 	 * on monitors 2..N stale forever. */
@@ -443,8 +439,8 @@ typedef struct {
 } CpuProcEntry;
 
 typedef struct {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *bg;
+	struct nx_scene_tree *tree;
+	struct nx_scene_tree *bg;
 	int width;
 	int height;
 	int visible;
@@ -470,8 +466,8 @@ typedef struct {
 } RamProcEntry;
 
 typedef struct {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *bg;
+	struct nx_scene_tree *tree;
+	struct nx_scene_tree *bg;
 	int width;
 	int height;
 	int visible;
@@ -487,8 +483,8 @@ typedef struct {
 } RamPopup;
 
 typedef struct {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *bg;
+	struct nx_scene_tree *tree;
+	struct nx_scene_tree *bg;
 	int width;
 	int height;
 	int visible;
@@ -582,8 +578,8 @@ void presence_camera_frame(const CamSnapshot *s);
 void lightsense_camera_frame(const CamSnapshot *s);
 
 typedef struct {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *bg;
+	struct nx_scene_tree *tree;
+	struct nx_scene_tree *bg;
 	int width;
 	int height;
 	int visible;
@@ -602,7 +598,7 @@ typedef struct {
 /* Hover popup (clock / volume / mic / light).  Volume/mic carry
  * interactive hits: device rows and the gauge-as-slider. */
 typedef struct {
-	struct wlr_scene_tree *tree;
+	struct nx_scene_tree *tree;
 	int width;
 	int height;
 	int visible;
@@ -730,8 +726,8 @@ typedef struct TrayMenuEntry {
 } TrayMenuEntry;
 
 typedef struct {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *bg;
+	struct nx_scene_tree *tree;
+	struct nx_scene_tree *bg;
 	int width;
 	int height;
 	int visible;
@@ -741,16 +737,16 @@ typedef struct {
 	char menu_path[128];
 	struct wl_list entries;
 	TrayMenuEntry *hover;   /* entry under the cursor (hover highlight) */
-	struct wlr_scene_buffer *hover_rect; /* persistent pill highlight; moved on hover */
+	struct nx_scene_buffer *hover_rect; /* persistent pill highlight; moved on hover */
 } TrayMenu;
 
 struct StatusBar {
-	struct wlr_scene_tree *tree;
-	struct wlr_box area;
+	struct nx_scene_tree *tree;
+	struct nx_box area;
 	/* Where the bar sits when fully shown. Kept while hidden too — the
 	 * slide-out/-in animation needs the slot it travels to and from
 	 * (statusbar_anim_sync). width/height 0 = never laid out yet. */
-	struct wlr_box slot;
+	struct nx_box slot;
 	int last_layout_h; /* bar height at last full module render; 0 = force */
 	StatusModule clock;
 	StatusModule cpu;
@@ -804,7 +800,7 @@ struct TrayItem {
 	int icon_h;
 	int icon_pad_l; /* fully transparent columns at the icon's left edge */
 	int icon_pad_r; /* ...and at its right edge */
-	struct wlr_buffer *icon_buf;
+	struct nx_buffer *icon_buf;
 	struct wl_list link;
 };
 
@@ -812,7 +808,7 @@ struct TrayItem {
 
 /* ── buffer types ──────────────────────────────────────────────────── */
 struct PixmanBuffer {
-	struct wlr_buffer base;
+	struct nx_buffer base;
 	pixman_image_t *image;
 	void *data;
 	uint32_t drm_format;
@@ -820,15 +816,13 @@ struct PixmanBuffer {
 	int owns_data;
 };
 
-/* CPU-backed cursor buffer for Nvidia HW cursor plane.
- * Wraps a dumb DRM buffer in a wlr_buffer so wlroots can
- * place it on the cursor plane without GBM allocation. */
+/* Dumb-buffer cursor for the Nvidia plane. */
 struct CpuCursorBuffer {
-	struct wlr_buffer base;       /* wlr_buffer interface */
+	struct nx_buffer base;       /* nx_buffer interface */
 	int drm_fd;                   /* DRM fd used for dumb buffer ops */
 	int owns_drm_fd;              /* 1 if we opened drm_fd ourselves */
 	uint32_t gem_handle;          /* GEM handle from dumb create */
-	int dmabuf_fd;                /* DMA-BUF fd for wlroots import */
+	int dmabuf_fd;                /* DMA-BUF fd for import */
 	uint32_t width;               /* Buffer width */
 	uint32_t height;              /* Buffer height */
 	uint32_t stride;              /* Row stride in bytes */
@@ -844,15 +838,15 @@ struct CpuSample {
 
 #if 1
 typedef struct {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *bg;
+	struct nx_scene_tree *tree;
+	struct nx_scene_tree *bg;
 	int visible;
 	int x, y, width, height;
 	int active_idx;
 	char search[3][256];
 	int search_len[3];
 	char search_rendered[3][256];
-	struct wlr_scene_tree *search_field_tree;
+	struct nx_scene_tree *search_field_tree;
 	struct wl_event_source *render_timer;
 	int render_pending;
 	int result_count[3];
@@ -882,10 +876,10 @@ typedef struct {
 	char git_search_buf[4096];
 	int git_search_done;
 	char git_search_last[256];
-	struct wlr_scene_tree *results_tree;
+	struct nx_scene_tree *results_tree;
 	int last_scroll;
 	int last_selected;
-	struct wlr_scene_rect *row_highlights[MODAL_MAX_RESULTS];
+	struct nx_scene_rect *row_highlights[MODAL_MAX_RESULTS];
 	int row_highlight_count;
 } ModalOverlay;
 
@@ -898,22 +892,22 @@ typedef struct {
 } NixpkgEntry;
 
 typedef struct {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *bg;
+	struct nx_scene_tree *tree;
+	struct nx_scene_tree *bg;
 	int visible;
 	int x, y, width, height;
 	char search[256];
 	int search_len;
 	char search_rendered[256];
-	struct wlr_scene_tree *search_field_tree;
+	struct nx_scene_tree *search_field_tree;
 	int result_count;
 	int result_indices[MODAL_MAX_RESULTS];
 	int selected;
 	int scroll;
-	struct wlr_scene_tree *results_tree;
+	struct nx_scene_tree *results_tree;
 	int last_scroll;
 	int last_selected;
-	struct wlr_scene_rect *row_highlights[MODAL_MAX_RESULTS];
+	struct nx_scene_rect *row_highlights[MODAL_MAX_RESULTS];
 	int row_highlight_count;
 } NixpkgsOverlay;
 
@@ -926,8 +920,8 @@ typedef struct {
 } DesktopEntry;
 
 typedef struct {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *bg;
+	struct nx_scene_tree *tree;
+	struct nx_scene_tree *bg;
 	int visible;
 	int width, height;
 	char title[128];
@@ -946,8 +940,8 @@ typedef struct {
 } SudoPopup;
 
 typedef struct {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *bg;
+	struct nx_scene_tree *tree;
+	struct nx_scene_tree *bg;
 	int visible;
 	int width, height;
 	int sel_row, sel_col;
@@ -958,7 +952,7 @@ typedef struct {
 	int input_cursor;
 	void (*callback)(const char *text, void *data);
 	void *callback_data;
-	struct wlr_surface *target_surface;
+	struct nx_surface *target_surface;
 } OnScreenKeyboard;
 
 /* ── monitor setup popup ──────────────────────────────────────────── */
@@ -990,13 +984,13 @@ typedef struct {
 	/* Box geometry in popup (computed) */
 	int box_x, box_y, box_w, box_h;
 	/* Persistent scene subtree for this box (used for instant drag) */
-	struct wlr_scene_tree *box_tree;
+	struct nx_scene_tree *box_tree;
 } SetupMonitorEntry;
 
 typedef struct {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *bg;
-	struct wlr_scene_tree *label_trees[MAX_SETUP_MONITORS]; /* on-screen labels */
+	struct nx_scene_tree *tree;
+	struct nx_scene_tree *bg;
+	struct nx_scene_tree *label_trees[MAX_SETUP_MONITORS]; /* on-screen labels */
 	int visible;
 	int x, y, width, height;
 	SetupMonitorEntry entries[MAX_SETUP_MONITORS];
@@ -1014,7 +1008,7 @@ typedef struct {
 	int drag_insert_after;  /* row/col after which to insert */
 	int drag_saved_col[MAX_SETUP_MONITORS]; /* grid cols at drag start */
 	int drag_saved_row[MAX_SETUP_MONITORS]; /* grid rows at drag start */
-	struct wlr_scene_tree *drop_indicator;
+	struct nx_scene_tree *drop_indicator;
 	/* Animation timer */
 	struct wl_event_source *anim_timer;
 	int animating;
@@ -1032,9 +1026,9 @@ typedef struct {
 
 /* ── gamepad types ─────────────────────────────────────────────────── */
 typedef struct {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_tree *bg;
-	struct wlr_scene_tree *dim;
+	struct nx_scene_tree *tree;
+	struct nx_scene_tree *bg;
+	struct nx_scene_tree *dim;
 	int visible;
 	int x, y;
 	int width, height;
@@ -1089,24 +1083,22 @@ typedef struct {
 	unsigned int type; /* XDGShell or X11* */
 
 	Monitor *mon;
-	struct wlr_scene_tree *scene;
-	struct wlr_scene_rect *border[4];
-	struct wlr_scene_rect *fill[2];
-	struct wlr_scene_tree *scene_surface;
+	struct nx_scene_tree *scene;
+	struct nx_scene_rect *border[4];
+	struct nx_scene_rect *fill[2];
+	struct nx_scene_tree *scene_surface;
 	struct wl_list link;
 	struct wl_list flink;
-	struct wlr_box geom;
-	struct wlr_box prev;
-	struct wlr_box bounds;
+	struct nx_box geom;
+	struct nx_box prev;
+	struct nx_box bounds;
 	union {
-		struct wlr_xdg_surface *xdg;
-		struct wlr_xwayland_surface *xwayland;
+		struct nx_xdg_surface *xdg;
+		struct nx_xwayland_surface *xwayland;
 	} surface;
-	struct wlr_xdg_toplevel_decoration_v1 *decoration;
+	struct nx_xdg_toplevel_decoration_v1 *decoration;
 	struct wl_listener commit;
-	/* Post-scene commit hook (both XDG and X11): registered in mapnotify
-	 * AFTER the scene surface, so it runs after wlroots' own commit
-	 * handler and can re-pin anim scaling that handler just reset. */
+	/* Re-pins anim scaling after scene commits. */
 	struct wl_listener anim_commit;
 	struct wl_listener map;
 	struct wl_listener maximize;
@@ -1178,20 +1170,20 @@ typedef struct {
 	int ping_misses;
 	uint32_t resize;
 	int pending_resize_w, pending_resize_h;
-	struct wlr_box old_geom;
+	struct nx_box old_geom;
 	char *output;
 	uint64_t frame_times[32];
 	int frame_time_idx;
 	int frame_time_count;
 	float detected_video_hz;
-	struct wlr_buffer *last_buffer;
+	struct nx_buffer *last_buffer;
 	/* Separate change-tracker for the game frame-pacing path: last_buffer
 	 * is consumed by video detection at commit time (commitnotify), so
 	 * rendermon needs its own pointer to see the same buffer change. */
-	struct wlr_buffer *game_last_buffer;
+	struct nx_buffer *game_last_buffer;
 	int video_detect_retries;
 	int video_detect_phase;
-	struct wlr_ext_foreign_toplevel_handle_v1 *foreign_toplevel_handle;
+	struct nx_ext_foreign_toplevel_handle_v1 *foreign_toplevel_handle;
 #ifdef XWAYLAND
 	uint32_t steam_game_id;     /* STEAM_GAME AppID (0 = not a Steam game) */
 	int is_steam_overlay;       /* STEAM_OVERLAY == 1 */
@@ -1217,7 +1209,7 @@ typedef struct {
 	 * target_geom is what the layout wants; geom is what's currently
 	 * shown (moves toward target each anim tick).  When unset
 	 * (anim_active = 0) the client snaps directly via resize(). */
-	struct wlr_box target_geom;
+	struct nx_box target_geom;
 	int anim_active;              /* 1 = geom is animating toward target */
 	/* Spring state for geom animation (column-fullscreen toggle,
 	 * preset-width switch).  Live position is double-precision so
@@ -1247,11 +1239,7 @@ typedef struct {
 	 * (XWayland has no ack to gate on).  Dropped intermediates are
 	 * kept in pending_resize_w/h and flushed on button release. */
 	uint32_t x11_cfg_ms;
-	/* Last scene-node position pushed to wlroots.  Tracked separately
-	 * from c->geom because callers sometimes pre-modify c->geom and
-	 * then invoke resize() with the same value — pos_changed would
-	 * miss the update and leave the scene node at its previous
-	 * position (notably the (0,0) default for newly mapped windows). */
+	/* Last position pushed to the scene node. */
 	int last_pos_x, last_pos_y;
 	/* Anim-time snapshot: while a workspace anim is running we
 	 * replace the live surface tree with a static scene_buffer
@@ -1259,11 +1247,8 @@ typedef struct {
 	 * games) can't disturb us with mid-anim commits or render
 	 * stalls — we just blit the cached texture at each new
 	 * position.  Restored at anim end. */
-	struct wlr_scene_buffer *frozen_buffer;
-	/* Snapshot pixel size, cached at freeze.  frozen_buffer->buffer
-	 * goes NULL the moment the client releases the snapshotted
-	 * wlr_buffer (first commit after freeze — wlroots keeps only the
-	 * texture), so the clip path must not read dims from it. */
+	struct nx_scene_buffer *frozen_buffer;
+	/* Snapshot size; the buffer may vanish. */
 	int frozen_buf_w, frozen_buf_h;
 	/* Freeze wanted a snapshot but the surface had no buffer (X11
 	 * client that sat hidden on an inactive workspace — Steam).  The
@@ -1280,7 +1265,7 @@ typedef struct {
 	int open_anim_active;
 	/* Fullscreen zoom in or out. */
 	int fsx_active;
-	struct wlr_box fsx_from;
+	struct nx_box fsx_from;
 	double fsx_p, fsx_v;
 	/* Adoptert av varselbanen (notify.c): står i høyre marg og skal
 	 * ikke sentreres av mapnotify/configurex11. Nullstilles når den har
@@ -1298,7 +1283,7 @@ typedef struct {
 	int conv_seen_w, conv_seen_h;  /* last committed size seen by animcommitnotify
 	                                * (size-change edge → converge_kick) */
 	/* Tile transaction state, see txn.c. */
-	struct wlr_box tile_target, tile_shown, tile_txn;
+	struct nx_box tile_target, tile_shown, tile_txn;
 	int tile_ox, tile_oy;         /* live camera offset */
 	uint64_t tile_ws_id;          /* workspace of tile_shown; 0 = unplaced */
 	uint32_t tile_pass;
@@ -1309,7 +1294,7 @@ typedef struct {
 	uint64_t txn_sent_ns;
 	struct wl_listener txn_commit;
 	/* Floating box follows content, see floatfit.c. */
-	struct wlr_box float_want;
+	struct nx_box float_want;
 	int float_ax, float_ay, float_want_set;
 	/* Fullscreen switch awaiting content, see fshold.c. */
 	int fs_hold;                  /* FS_ENTERING or FS_LEAVING */
@@ -1343,9 +1328,9 @@ typedef struct {
 typedef struct ClosingAnim {
 	struct wl_list link;
 	Monitor *mon;
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_buffer *buffer;
-	struct wlr_box geom;
+	struct nx_scene_tree *tree;
+	struct nx_scene_buffer *buffer;
+	struct nx_box geom;
 	int natural_w, natural_h;
 	double progress;
 	double vel;
@@ -1364,7 +1349,7 @@ struct LayoutNode {
 
 /* ── keyboard / text input ─────────────────────────────────────────── */
 typedef struct {
-	struct wlr_keyboard_group *wlr_group;
+	struct nx_keyboard_group *nx_group;
 	int nsyms;
 	const xkb_keysym_t *keysyms;
 	uint32_t mods;
@@ -1375,7 +1360,7 @@ typedef struct {
 } KeyboardGroup;
 
 typedef struct {
-	struct wlr_text_input_v3 *text_input;
+	struct nx_text_input_v3 *text_input;
 	struct wl_list link;
 	struct wl_listener enable;
 	struct wl_listener disable;
@@ -1389,12 +1374,12 @@ typedef struct {
 	unsigned int type; /* LayerShell */
 
 	Monitor *mon;
-	struct wlr_scene_tree *scene;
-	struct wlr_scene_tree *popups;
-	struct wlr_scene_layer_surface_v1 *scene_layer;
+	struct nx_scene_tree *scene;
+	struct nx_scene_tree *popups;
+	struct nx_scene_layer_surface_v1 *scene_layer;
 	struct wl_list link;
 	int mapped;
-	struct wlr_layer_surface_v1 *layer_surface;
+	struct nx_layer_surface_v1 *layer_surface;
 
 	struct wl_listener destroy;
 	struct wl_listener unmap;
@@ -1441,7 +1426,7 @@ struct Column {
 struct Workspace {
 	struct wl_list link;          /* link in Monitor.workspaces (head→tail = top→bottom) */
 	struct wl_list columns;       /* Column.link */
-	struct wlr_scene_tree *scene; /* parent for all columns/clients in this ws */
+	struct nx_scene_tree *scene; /* parent for all columns/clients in this ws */
 	uint64_t window_id;             /* globally-unique id for Niri-IPC clients */
 	int idx;                      /* stable id per monitor (auto-increment) */
 	int scroll_x;                 /* camera offset within row (int snapshot of _f) */
@@ -1513,16 +1498,16 @@ struct DynRender {
 /* ── monitor ───────────────────────────────────────────────────────── */
 struct Monitor {
 	struct wl_list link;
-	struct wlr_output *wlr_output;
-	struct wlr_scene_output *scene_output;
-	struct wlr_scene_rect *fullscreen_bg;
+	struct nx_output *nx_output;
+	struct nx_scene_output *scene_output;
+	struct nx_scene_rect *fullscreen_bg;
 	struct wl_listener frame;
 	struct wl_listener destroy;
 	struct wl_listener request_state;
 	struct wl_listener destroy_lock_surface;
-	struct wlr_session_lock_surface_v1 *lock_surface;
-	struct wlr_box m;
-	struct wlr_box w;
+	struct nx_session_lock_surface_v1 *lock_surface;
+	struct nx_box m;
+	struct nx_box w;
 	struct wl_list layers[4];
 	const Layout *lt[2];
 	int gaps;
@@ -1540,10 +1525,10 @@ struct Monitor {
 	int virt_idx;   /* 1-based index among virtual outputs */
 	int hdr_force;  /* Drive output into HDR regardless of client content */
 	LayoutNode *root[MAX_TAGS];
-	struct wlr_output_mode *original_mode;
+	struct nx_output_mode *original_mode;
 	int video_mode_active;
 	int console_mode_active;
-	struct wlr_output_mode *console_mode_original;
+	struct nx_output_mode *console_mode_original;
 	int vrr_capable;
 	int vrr_active;
 	float vrr_target_hz;
@@ -1576,8 +1561,8 @@ struct Monitor {
 	uint32_t diag_scanout_rearms; /* direct scanout re-armed (cooldown drained) since last heartbeat */
 	uint64_t diag_xpaint_ns;      /* last XPAINT cross-monitor paint log timestamp */
 	uint64_t diag_xpaint_walk_ns; /* last XPAINT scene-walk (rate-limits the audit) */
-	struct wlr_scene_tree *hz_osd_tree;
-	struct wlr_scene_tree *hz_osd_bg;
+	struct nx_scene_tree *hz_osd_tree;
+	struct nx_scene_tree *hz_osd_bg;
 	int hz_osd_visible;
 	uint64_t last_frame_ns;
 	uint64_t last_commit_duration_ns;
@@ -1587,23 +1572,15 @@ struct Monitor {
 	int frames_since_content_change;
 	int direct_scanout_active;
 	int direct_scanout_notified;
-	struct wlr_scene_tree *toast_tree;
+	struct nx_scene_tree *toast_tree;
 	struct wl_event_source *toast_timer;
 	int toast_visible;
-	/* Toast overlay-plane promotion (used when gcaps.overlay_planes_supported
-	 * and a fullscreen game is direct-scanning out). The dumb-buffer path
-	 * coexists with scanout by riding on a dedicated overlay plane. */
-	struct CpuCursorBuffer *toast_overlay_buf;
-	struct wlr_output_layer *toast_overlay_layer;
-	int toast_overlay_active;
-	int toast_overlay_disabled_sent;
-	struct wlr_box toast_overlay_dst;
 	struct wl_listener present;
 	uint64_t last_present_ns;
 	uint64_t present_interval_ns;
 	uint64_t target_present_ns;
 	/* Previous software-cursor box (buffer coords) for targeted damage */
-	struct wlr_box swcur_prev_box;
+	struct nx_box swcur_prev_box;
 	/* Late-latch commit deferral (latch.c) */
 	NsTimer *latch_timer;
 	int latch_armed;                    /* timer pending for this vblank */
@@ -1617,7 +1594,7 @@ struct Monitor {
 	 * screen) is up and a vblank had nothing new to commit, rendermon
 	 * skips build+commit and this timer sustains the frame_done chain on
 	 * the vblank grid instead (request_frame would force a full build —
-	 * wlr_output_schedule_frame sets needs_frame). */
+	 * nx_output_schedule_frame sets needs_frame). */
 	NsTimer *fd_pacer;
 	int fd_pacer_fired;                 /* rendermon re-entered via pacer */
 	int vrr_overlay_skips;              /* consecutive OSD-only build skips under VRR */
@@ -1627,7 +1604,7 @@ struct Monitor {
 	int gamescan_pending;               /* modeset decided, applied top of next rendermon */
 	int gamescan_mode_active;           /* output currently on the game's mode */
 	int gamescan_failed_w, gamescan_failed_h; /* size with no mode / failed commit */
-	struct wlr_output_mode *gamescan_original;
+	struct nx_output_mode *gamescan_original;
 	/* Auto FPS lock (autolock.c) */
 	uint64_t al_sec_start_ns;           /* current 1 s sample bucket start */
 	uint64_t al_worst[16];              /* largest game intervals this second, desc */
@@ -1647,8 +1624,8 @@ struct Monitor {
 	int al_failed_raise_fps;            /* raise the game couldn't hold */
 	uint64_t al_failed_raise_ns;
 	int al_mode_pending;                /* modeset decided, applied top of rendermon */
-	struct wlr_output_mode *al_target_mode;
-	struct wlr_output_mode *al_failed_mode;
+	struct nx_output_mode *al_target_mode;
+	struct nx_output_mode *al_failed_mode;
 	int al_mode_active;                 /* output on an autolock-chosen refresh */
 	uint64_t al_last_modeset_ns;
 	DynRender dr;
@@ -1768,7 +1745,7 @@ struct Monitor {
 	int edid_reprobe_stable_rounds;     /* consecutive rounds where bestmode == current */
 	int frame_scheduled;                /* 1 = schedule_frame already called this cycle */
 	GamingCaps gcaps;                   /* vendor/capability profile for this output */
-	/* Low-latency cursor plane (direct DRM atomic, bypasses wlroots) */
+	/* Low-latency cursor plane via direct DRM. */
 	int ll_cursor_fd;            /* DRM fd for cursor commits (-1 = disabled) */
 	uint32_t ll_cursor_plane_id; /* DRM plane ID for cursor */
 	uint32_t ll_cursor_crtc_id;  /* DRM CRTC ID */
@@ -1789,7 +1766,7 @@ struct Monitor {
 	uint64_t hdr_last_exit_ns;
 	int hdr_entry_pending;
 	int hdr_exit_pending;
-	struct wlr_output_image_description hdr_pending_desc;
+	struct nx_output_image_description hdr_pending_desc;
 	/* HDR runtime safety nets:
 	 *   hdr_last_commit_ok_ns: last successful commit while hdr_active.
 	 *     If too long without a successful commit, the driver/client is
@@ -1839,7 +1816,7 @@ struct Monitor {
 	 * m->w directly snaps every tile.  Spring it so the edge facing
 	 * the toggling layer slides smoothly while the opposite edge
 	 * stays locked. */
-	struct wlr_box w_target;
+	struct nx_box w_target;
 	double w_x_f, w_y_f, w_w_f, w_h_f;
 	double w_x_vel, w_y_vel, w_w_vel, w_h_vel;
 	int w_initialized;
@@ -1962,60 +1939,60 @@ extern int status_stdout_enabled;
 extern void *exclusive_focus;
 extern struct wl_display *dpy;
 extern struct wl_event_loop *event_loop;
-extern struct wlr_backend *backend;
-extern struct wlr_scene *scene;
-extern struct wlr_scene_tree *layers[];
-extern struct wlr_scene_tree *drag_icon;
-extern struct wlr_renderer *drw;
-extern struct wlr_allocator *alloc;
-extern struct wlr_compositor *compositor;
-extern struct wlr_session *session;
+extern struct nx_backend *backend;
+extern struct nx_scene *scene;
+extern struct nx_scene_tree *layers[];
+extern struct nx_scene_tree *drag_icon;
+extern struct nx_renderer *drw;
+extern struct nx_allocator *alloc;
+extern struct nx_compositor *compositor;
+extern struct nx_session *session;
 extern struct StatusFont statusfont;
 extern int fcft_initialized;
 extern int has_nixlytile_session_target_cached;
-extern struct wlr_xdg_shell *xdg_shell;
-extern struct wlr_xdg_activation_v1 *activation;
-extern struct wlr_xdg_decoration_manager_v1 *xdg_decoration_mgr;
+extern struct nx_xdg_shell *xdg_shell;
+extern struct nx_xdg_activation_v1 *activation;
+extern struct nx_xdg_decoration_manager_v1 *xdg_decoration_mgr;
 extern struct wl_list clients;
 extern struct wl_list fstack;
 extern struct wl_list closing_anims; /* ClosingAnim.link */
-extern struct wlr_idle_notifier_v1 *idle_notifier;
-extern struct wlr_idle_inhibit_manager_v1 *idle_inhibit_mgr;
-extern struct wlr_layer_shell_v1 *layer_shell;
-extern struct wlr_output_manager_v1 *output_mgr;
-extern struct wlr_content_type_manager_v1 *content_type_mgr;
-extern struct wlr_tearing_control_manager_v1 *tearing_control_mgr;
-extern struct wlr_virtual_keyboard_manager_v1 *virtual_keyboard_mgr;
-extern struct wlr_virtual_pointer_manager_v1 *virtual_pointer_mgr;
-extern struct wlr_tablet_manager_v2 *tablet_v2_mgr;
-extern struct wlr_text_input_manager_v3 *text_input_mgr;
-extern struct wlr_text_input_v3 *active_text_input;
+extern struct nx_idle_notifier_v1 *idle_notifier;
+extern struct nx_idle_inhibit_manager_v1 *idle_inhibit_mgr;
+extern struct nx_layer_shell_v1 *layer_shell;
+extern struct nx_output_manager_v1 *output_mgr;
+extern struct nx_content_type_manager_v1 *content_type_mgr;
+extern struct nx_tearing_control_manager_v1 *tearing_control_mgr;
+extern struct nx_virtual_keyboard_manager_v1 *virtual_keyboard_mgr;
+extern struct nx_virtual_pointer_manager_v1 *virtual_pointer_mgr;
+extern struct nx_tablet_manager_v2 *tablet_v2_mgr;
+extern struct nx_text_input_manager_v3 *text_input_mgr;
+extern struct nx_text_input_v3 *active_text_input;
 extern struct wl_list text_inputs;
-extern struct wlr_cursor_shape_manager_v1 *cursor_shape_mgr;
-extern struct wlr_output_power_manager_v1 *power_mgr;
-extern struct wlr_color_manager_v1 *color_mgr;
-extern struct wlr_color_representation_manager_v1 *color_repr_mgr;
-extern struct wlr_keyboard_shortcuts_inhibit_manager_v1 *kb_shortcuts_inhibit_mgr;
-extern struct wlr_pointer_gestures_v1 *pointer_gestures;
-extern struct wlr_xdg_foreign_registry *foreign_registry;
-extern struct wlr_xdg_foreign_v2 *xdg_foreign;
-extern struct wlr_xdg_wm_dialog_v1 *xdg_dialog_mgr;
-extern struct wlr_ext_image_copy_capture_manager_v1 *image_copy_capture_mgr;
-extern struct wlr_security_context_manager_v1 *security_ctx_mgr;
-extern struct wlr_xdg_system_bell_v1 *system_bell;
-extern struct wlr_ext_foreign_toplevel_list_v1 *foreign_toplevel_list;
-extern struct wlr_ext_data_control_manager_v1 *ext_data_control_mgr;
-extern struct wlr_fixes *protocol_fixes;
-extern struct wlr_pointer_constraints_v1 *pointer_constraints;
-extern struct wlr_relative_pointer_manager_v1 *relative_pointer_mgr;
-extern struct wlr_pointer_constraint_v1 *active_constraint;
-extern struct wlr_cursor *cursor;
-extern struct wlr_xcursor_manager *cursor_mgr;
-extern struct wlr_scene_rect *root_bg;
-extern struct wlr_session_lock_manager_v1 *session_lock_mgr;
-extern struct wlr_scene_rect *locked_bg;
-extern struct wlr_session_lock_v1 *cur_lock;
-extern struct wlr_seat *seat;
+extern struct nx_cursor_shape_manager_v1 *cursor_shape_mgr;
+extern struct nx_output_power_manager_v1 *power_mgr;
+extern struct nx_color_manager_v1 *color_mgr;
+extern struct nx_color_representation_manager_v1 *color_repr_mgr;
+extern struct nx_keyboard_shortcuts_inhibit_manager_v1 *kb_shortcuts_inhibit_mgr;
+extern struct nx_pointer_gestures_v1 *pointer_gestures;
+extern struct nx_xdg_foreign_registry *foreign_registry;
+extern struct nx_xdg_foreign_v2 *xdg_foreign;
+extern struct nx_xdg_wm_dialog_v1 *xdg_dialog_mgr;
+extern struct nx_ext_image_copy_capture_manager_v1 *image_copy_capture_mgr;
+extern struct nx_security_context_manager_v1 *security_ctx_mgr;
+extern struct nx_xdg_system_bell_v1 *system_bell;
+extern struct nx_ext_foreign_toplevel_list_v1 *foreign_toplevel_list;
+extern struct nx_ext_data_control_manager_v1 *ext_data_control_mgr;
+extern struct nx_fixes *protocol_fixes;
+extern struct nx_pointer_constraints_v1 *pointer_constraints;
+extern struct nx_relative_pointer_manager_v1 *relative_pointer_mgr;
+extern struct nx_pointer_constraint_v1 *active_constraint;
+extern struct nx_cursor *cursor;
+extern struct nx_xcursor_manager *cursor_mgr;
+extern struct nx_scene_rect *root_bg;
+extern struct nx_session_lock_manager_v1 *session_lock_mgr;
+extern struct nx_scene_rect *locked_bg;
+extern struct nx_session_lock_v1 *cur_lock;
+extern struct nx_seat *seat;
 extern KeyboardGroup *kb_group;
 extern unsigned int cursor_mode;
 extern Client *grabc;
@@ -2025,13 +2002,13 @@ extern double resize_start_ratio_v, resize_start_ratio_h;
 extern int resize_use_v, resize_use_h;
 extern uint32_t resize_last_time;
 extern double resize_last_x, resize_last_y;
-extern struct wlr_output_layout *output_layout;
-extern struct wlr_box sgeom;
+extern struct nx_output_layout *output_layout;
+extern struct nx_box sgeom;
 extern struct wl_list mons;
 extern Monitor *selmon;
-extern struct wlr_box resize_start_box_v;
-extern struct wlr_box resize_start_box_h;
-extern struct wlr_box resize_start_box_f;
+extern struct nx_box resize_start_box_v;
+extern struct nx_box resize_start_box_h;
+extern struct nx_box resize_start_box_f;
 extern double resize_start_x, resize_start_y;
 extern LayoutNode *resize_split_node;
 extern LayoutNode *resize_split_node_h;
@@ -2245,30 +2222,30 @@ extern char volume_icon_loaded_path[PATH_MAX];
 extern char clock_icon_path[PATH_MAX];
 extern char clock_icon_loaded_path[PATH_MAX];
 extern int net_icon_loaded_h, net_icon_w, net_icon_h;
-extern struct wlr_buffer *net_icon_buf;
+extern struct nx_buffer *net_icon_buf;
 extern int clock_icon_loaded_h, clock_icon_w, clock_icon_h;
-extern struct wlr_buffer *clock_icon_buf;
+extern struct nx_buffer *clock_icon_buf;
 extern int cpu_icon_loaded_h, cpu_icon_w, cpu_icon_h;
-extern struct wlr_buffer *cpu_icon_buf;
+extern struct nx_buffer *cpu_icon_buf;
 extern int light_icon_loaded_h, light_icon_w, light_icon_h;
-extern struct wlr_buffer *light_icon_buf;
+extern struct nx_buffer *light_icon_buf;
 extern int ram_icon_loaded_h, ram_icon_w, ram_icon_h;
-extern struct wlr_buffer *ram_icon_buf;
+extern struct nx_buffer *ram_icon_buf;
 extern int battery_icon_loaded_h, battery_icon_w, battery_icon_h;
-extern struct wlr_buffer *battery_icon_buf;
+extern struct nx_buffer *battery_icon_buf;
 extern int mic_icon_loaded_h, mic_icon_w, mic_icon_h;
-extern struct wlr_buffer *mic_icon_buf;
+extern struct nx_buffer *mic_icon_buf;
 extern int volume_icon_loaded_h, volume_icon_w, volume_icon_h;
-extern struct wlr_buffer *volume_icon_buf;
+extern struct nx_buffer *volume_icon_buf;
 extern char disk_icon_path[PATH_MAX];
 extern char bt_icon_path[PATH_MAX];
 extern char bt_icon_loaded_path[PATH_MAX];
 extern int bt_icon_loaded_h, bt_icon_w, bt_icon_h;
-extern struct wlr_buffer *bt_icon_buf;
+extern struct nx_buffer *bt_icon_buf;
 extern char display_icon_path[PATH_MAX];
 extern char display_icon_loaded_path[PATH_MAX];
 extern int display_icon_loaded_h, display_icon_w, display_icon_h;
-extern struct wlr_buffer *display_icon_buf;
+extern struct nx_buffer *display_icon_buf;
 extern unsigned long long net_prev_rx;
 extern unsigned long long net_prev_tx;
 extern struct timespec net_prev_ts;
@@ -2317,7 +2294,7 @@ extern NixpkgEntry nixpkg_entries[];
 extern int nixpkg_entry_count;
 extern int nixpkg_entries_loaded;
 extern char nixpkgs_cache_path[PATH_MAX];
-extern struct wlr_buffer *nixpkg_ok_icon_buf;
+extern struct nx_buffer *nixpkg_ok_icon_buf;
 extern int nixpkg_ok_icon_height;
 extern const uint32_t cpu_popup_refresh_interval_ms;
 extern const uint32_t ram_popup_refresh_interval_ms;
@@ -2363,7 +2340,7 @@ extern struct wl_listener new_kb_shortcuts_inhibitor;
 #ifdef XWAYLAND
 extern struct wl_listener new_xwayland_surface;
 extern struct wl_listener xwayland_ready;
-extern struct wlr_xwayland *xwayland;
+extern struct nx_xwayland *xwayland;
 
 /* Steam X11 atoms — interned in xwaylandready() */
 extern xcb_atom_t atom_steam_game;       /* STEAM_GAME (Cardinal: AppID) */
@@ -2378,34 +2355,34 @@ extern const int layermap[];
 /* ── function declarations ─────────────────────────────────────────── */
 
 /* draw.c */
-void drawrect(struct wlr_scene_tree *parent, int x, int y,
+void drawrect(struct nx_scene_tree *parent, int x, int y,
 		int width, int height, const float color[static 4]);
-void drawhoverrect(struct wlr_scene_tree *parent, int x, int y,
+void drawhoverrect(struct nx_scene_tree *parent, int x, int y,
 		int width, int height, const float color[static 4], float fade);
-void draw_border(struct wlr_scene_tree *parent, int x, int y,
+void draw_border(struct nx_scene_tree *parent, int x, int y,
 		int w, int h, int thickness, const float color[static 4]);
-void drawroundedrect(struct wlr_scene_tree *parent, int x, int y,
+void drawroundedrect(struct nx_scene_tree *parent, int x, int y,
 		int width, int height, const float color[static 4]);
 int nixly_text_width(struct fcft_font *f, const char *s);
 int nixly_text_draw(pixman_image_t *dst, struct fcft_font *f, const char *s,
 		int x, int baseline, const float color[static 4], int max_w);
 #if 1
-struct wlr_buffer *statusbar_buffer_from_argb32(const uint32_t *data, int width, int height);
-struct wlr_buffer *statusbar_buffer_from_argb32_raw(const uint32_t *data, int width, int height);
-struct wlr_buffer *statusbar_scaled_buffer_from_argb32(const uint32_t *data,
+struct nx_buffer *statusbar_buffer_from_argb32(const uint32_t *data, int width, int height);
+struct nx_buffer *statusbar_buffer_from_argb32_raw(const uint32_t *data, int width, int height);
+struct nx_buffer *statusbar_scaled_buffer_from_argb32(const uint32_t *data,
 		int width, int height, int target_h);
-struct wlr_buffer *statusbar_scaled_buffer_from_argb32_raw(const uint32_t *data,
+struct nx_buffer *statusbar_scaled_buffer_from_argb32_raw(const uint32_t *data,
 		int width, int height, int target_h);
-/* Returns a CACHE-OWNED buffer: do not wlr_buffer_drop() it — attach it
+/* Returns a CACHE-OWNED buffer: do not nx_buffer_drop() it — attach it
  * to a scene node (which locks it) and leave the reference alone. */
-struct wlr_buffer *statusbar_buffer_from_glyph(const struct fcft_glyph *glyph);
+struct nx_buffer *statusbar_buffer_from_glyph(const struct fcft_glyph *glyph);
 void statusbar_glyph_cache_flush(void);
-struct wlr_buffer *statusbar_buffer_from_pixbuf(GdkPixbuf *pixbuf, int target_h, int *out_w, int *out_h);
-struct wlr_buffer *statusbar_buffer_from_wifi100(int target_h, int *out_w, int *out_h);
+struct nx_buffer *statusbar_buffer_from_pixbuf(GdkPixbuf *pixbuf, int target_h, int *out_w, int *out_h);
+struct nx_buffer *statusbar_buffer_from_wifi100(int target_h, int *out_w, int *out_h);
 void recolor_wifi100_pixbuf(GdkPixbuf *pixbuf);
 int tray_load_svg_pixbuf(const char *path, int desired_h, GdkPixbuf **out_pixbuf);
 void tray_measure_icon_insets(TrayItem *it);
-void statusbar_buffer_insets(struct wlr_buffer *buf, int icon_w, int *pad_l, int *pad_r);
+void statusbar_buffer_insets(struct nx_buffer *buf, int icon_w, int *pad_l, int *pad_r);
 int has_svg_extension(const char *path);
 int pathisdir(const char *path);
 int strip_symbolic_suffix(const char *name, char *out, size_t outlen);
@@ -2422,7 +2399,7 @@ void fix_tray_argb32(uint32_t *pixels, size_t count, int use_rgba_order);
 struct CpuCursorBuffer *cpu_cursor_buffer_create(int drm_fd, uint32_t w, uint32_t h, int owns_fd);
 void cpu_cursor_buffer_destroy(struct CpuCursorBuffer *buf);
 void nixly_cursor_set_xcursor(const char *name);
-void nixly_cursor_set_client_surface(struct wlr_surface *surface, int hx, int hy);
+void nixly_cursor_set_client_surface(struct nx_surface *surface, int hx, int hy);
 int resolve_asset_path(const char *path, char *out, size_t len);
 
 /* Pending launch tracking — remember tag/monitor at launch time so
@@ -2444,7 +2421,7 @@ void normalize_proc_name(char *name);
 pid_t client_get_pid(Client *c);
 
 /* client.c */
-void applybounds(Client *c, struct wlr_box *bbox);
+void applybounds(Client *c, struct nx_box *bbox);
 void applyrules(Client *c);
 void createnotify(struct wl_listener *listener, void *data);
 void destroynotify(struct wl_listener *listener, void *data);
@@ -2466,9 +2443,9 @@ int game_promote_fullscreen(Client *c, int cw, int ch);
 void setsticky(Client *c, int sticky);
 void togglefullscreen(const Arg *arg);
 void togglefullscreenadaptivesync(const Arg *arg);
-struct wlr_box fullscreen_mirror_geom(Monitor *m);
+struct nx_box fullscreen_mirror_geom(Monitor *m);
 /* span.c — fullscreen across all outputs (multi-monitor gaming) */
-struct wlr_box span_geom(void);
+struct nx_box span_geom(void);
 int span_available(void);
 
 /* latch.c */
@@ -2476,7 +2453,7 @@ int latch_defer_frame(Monitor *m, int is_game, int allow_tearing, uint64_t now_n
 void latch_track_draw(Monitor *m, uint64_t draw_ns);
 
 /* pace.c — paced virtual refresh modes (every-Nth-vblank commit) */
-void pace_register_modes(struct wlr_output *output);
+void pace_register_modes(struct nx_output *output);
 int pace_defer_frame(Monitor *m, int allow_tearing, uint64_t now_ns);
 extern int game_late_latch_enabled;
 extern int game_auto_fps_lock_enabled; /* config `game-auto-fps-lock`: auto lock + refresh match */
@@ -2518,7 +2495,7 @@ void vrslink_idle(struct vrs_link *page);
 void vrslink_setup(void);
 void vrslink_cleanup(void);
 
-struct wlr_box client_fullscreen_geom(Client *c);
+struct nx_box client_fullscreen_geom(Client *c);
 Client *spanned_fullscreen_client(void);
 void togglegamespan(const Arg *arg);
 int span_update_from_request(Client *c, int w, int h);
@@ -2527,7 +2504,7 @@ void togglemirror(const Arg *arg);
 void togglesticky(const Arg *arg);
 void updatetitle(struct wl_listener *listener, void *data);
 void urgent(struct wl_listener *listener, void *data);
-void pointerfocus(Client *c, struct wlr_surface *surface,
+void pointerfocus(Client *c, struct nx_surface *surface,
 		double sx, double sy, uint32_t time);
 void warpcursor(const Client *c);
 Client *find_client_by_app_id(const char *app_id);
@@ -2541,9 +2518,9 @@ void maximizenotify(struct wl_listener *listener, void *data);
 void fullscreennotify(struct wl_listener *listener, void *data);
 void setpsel(struct wl_listener *listener, void *data);
 void setsel(struct wl_listener *listener, void *data);
-void resize(Client *c, struct wlr_box geo, int interact);
-void client_place(Client *c, struct wlr_box geo);
-void client_apply_scene_geom(Client *c, struct wlr_box geo);
+void resize(Client *c, struct nx_box geo, int interact);
+void client_place(Client *c, struct nx_box geo);
+void client_apply_scene_geom(Client *c, struct nx_box geo);
 void client_set_border_size(Client *c, int w, int h);
 void client_clip_to_usable(Client *c);
 void client_request_size(Client *c, int w, int h);
@@ -2554,7 +2531,7 @@ enum { ANCHOR_START, ANCHOR_END, ANCHOR_MID };
 /* Fullscreen transition in flight. */
 enum { FS_SETTLED, FS_ENTERING, FS_LEAVING, FS_REVERTING };
 /* floatfit.c */
-void float_set(Client *c, struct wlr_box want, int ax, int ay);
+void float_set(Client *c, struct nx_box want, int ax, int ay);
 void float_fit(Client *c);
 /* fshold.c */
 void fullscreen_request(Client *c, int on);
@@ -2563,7 +2540,7 @@ int fshold_tick(Monitor *m);
 void fshold_cancel(Client *c);
 void fshold_forget(Client *c);
 /* txn.c */
-void txn_set_target(Client *c, struct wlr_box box, int ox, int oy);
+void txn_set_target(Client *c, struct nx_box box, int ox, int oy);
 void txn_place(Monitor *m);
 int txn_tick(Monitor *m);
 int txn_owes(Client *c);
@@ -2714,14 +2691,14 @@ void gpuboost_kick(uint64_t now_ns);
 void gpuboost_finish(void);
 
 int monitor_anim_tick(Monitor *m, double dt);
-void client_set_target_geom(Client *c, struct wlr_box g);
+void client_set_target_geom(Client *c, struct nx_box g);
 void client_scale_to_box(Client *c, int box_w, int box_h);
-void client_start_fs_transition(Client *c, struct wlr_box from);
-void client_fs_transition_apply(Client *c, struct wlr_box to);
+void client_start_fs_transition(Client *c, struct nx_box from);
+void client_fs_transition_apply(Client *c, struct nx_box to);
 void client_freeze(Client *c);
 void client_unfreeze(Client *c);
 void client_start_open_anim(Client *c);
-void anim_spawn_close(Monitor *m, struct wlr_buffer *buffer, struct wlr_box geom);
+void anim_spawn_close(Monitor *m, struct nx_buffer *buffer, struct nx_box geom);
 void closing_anims_tick(Monitor *m, double dt, int *still);
 
 /* wobble.c */
@@ -2737,7 +2714,7 @@ void focus_column_dir(const Arg *arg);
 /* layout.c */
 void arrange(Monitor *m);
 void arrangelayer(Monitor *m, struct wl_list *list,
-		struct wlr_box *usable_area, int exclusive);
+		struct nx_box *usable_area, int exclusive);
 void arrangelayers(Monitor *m);
 void tile(Monitor *m);
 void monocle(Monitor *m);
@@ -2759,7 +2736,7 @@ void buttonpress(struct wl_listener *listener, void *data);
 void input_column_gone(Column *col);
 void input_client_gone(Client *c);
 void chvt(const Arg *arg);
-void createkeyboard(struct wlr_keyboard *keyboard);
+void createkeyboard(struct nx_keyboard *keyboard);
 KeyboardGroup *createkeyboardgroup(void);
 void destroykeyboardgroup(struct wl_listener *listener, void *data);
 void inputdevice(struct wl_listener *listener, void *data);
@@ -2768,7 +2745,7 @@ void keypress(struct wl_listener *listener, void *data);
 void keypressmod(struct wl_listener *listener, void *data);
 int keyrepeat(void *data);
 void setgroupkeymap(struct xkb_keymap *keymap);
-void createpointer(struct wlr_pointer *pointer);
+void createpointer(struct nx_pointer *pointer);
 void newkbshortcutsinhibitor(struct wl_listener *listener, void *data);
 void createpointerconstraint(struct wl_listener *listener, void *data);
 void destroypointerconstraint(struct wl_listener *listener, void *data);
@@ -2776,7 +2753,7 @@ void checkconstraint(void);
 void cursorframe(struct wl_listener *listener, void *data);
 void cursorwarptohint(void);
 void motionabsolute(struct wl_listener *listener, void *data);
-void motionnotify(uint32_t time, struct wlr_input_device *device, double sx,
+void motionnotify(uint32_t time, struct nx_input_device *device, double sx,
 		double sy, double sx_unaccel, double sy_unaccel);
 void motionrelative(struct wl_listener *listener, void *data);
 void setcursor(struct wl_listener *listener, void *data);
@@ -2787,31 +2764,31 @@ void destroydragicon(struct wl_listener *listener, void *data);
 void virtualkeyboard(struct wl_listener *listener, void *data);
 void virtualpointer(struct wl_listener *listener, void *data);
 void textinput(struct wl_listener *listener, void *data);
-void text_input_focus_change(struct wlr_surface *old, struct wlr_surface *new);
+void text_input_focus_change(struct nx_surface *old, struct nx_surface *new);
 const char *pick_resize_handle(const Client *c, double cx, double cy);
 const char *resize_cursor_from_dirs(int dx, int dy);
 LayoutNode *closest_split_node(LayoutNode *client_node, int want_vert,
-		double pointer, double *out_ratio, struct wlr_box *out_box,
+		double pointer, double *out_ratio, struct nx_box *out_box,
 		double *out_dist);
 void apply_resize_axis_choice(void);
 int resize_should_update(uint32_t time);
 void applyxkbdefaultsfromsystem(struct xkb_rule_names *names);
 struct xkb_rule_names getxkbrules(void);
-int handlestatusscroll(struct wlr_pointer_axis_event *event);
-int scrollsteps(const struct wlr_pointer_axis_event *event);
+int handlestatusscroll(struct nx_pointer_axis_event *event);
+int scrollsteps(const struct nx_pointer_axis_event *event);
 
 /* output.c */
 void createmon(struct wl_listener *listener, void *data);
 void cleanupmon(struct wl_listener *listener, void *data);
 void closemon(Monitor *m, int destroying);
-Monitor *dirtomon(enum wlr_direction dir);
+Monitor *dirtomon(enum nx_direction dir);
 Monitor *xytomon(double x, double y);
-void xytonode(double x, double y, struct wlr_surface **psurface,
+void xytonode(double x, double y, struct nx_surface **psurface,
 		Client **pc, LayerSurface **pl, double *nx, double *ny);
 void rendermon(struct wl_listener *listener, void *data);
 void outputpresent(struct wl_listener *listener, void *data);
 void outputmgrapply(struct wl_listener *listener, void *data);
-void outputmgrapplyortest(struct wlr_output_configuration_v1 *config, int test);
+void outputmgrapplyortest(struct nx_output_configuration_v1 *config, int test);
 void outputmgrtest(struct wl_listener *listener, void *data);
 void powermgrsetmode(struct wl_listener *listener, void *data);
 void monitor_set_power(Monitor *m, int on);
@@ -2850,7 +2827,7 @@ int apply_best_video_mode(Monitor *m, float video_hz);
 
 typedef struct {
 	int method;
-	struct wlr_output_mode *mode;
+	struct nx_output_mode *mode;
 	int multiplier;
 	float target_hz;
 	float actual_hz;
@@ -2858,19 +2835,19 @@ typedef struct {
 	float judder_ms;
 } VideoModeCandidate;
 VideoModeCandidate find_best_video_mode(Monitor *m, float video_hz);
-struct wlr_output_mode *find_mode(struct wlr_output *output, int width, int height, float refresh);
+struct nx_output_mode *find_mode(struct nx_output *output, int width, int height, float refresh);
 float score_video_mode(int method, float video_hz, float display_hz, int multiplier);
 float calculate_judder_ms(float video_hz, float display_hz);
 void generate_cvt_mode(drmModeModeInfo *mode, int hdisplay, int vdisplay, float vrefresh);
 void generate_scaled_mode(drmModeModeInfo *mode, const drmModeModeInfo *base, float target_hz);
-int drm_mode_timings(Monitor *m, struct wlr_output_mode *mode, drmModeModeInfo *out);
+int drm_mode_timings(Monitor *m, struct nx_output_mode *mode, drmModeModeInfo *out);
 void show_hz_osd(Monitor *m, const char *msg);
 void hide_hz_osd(Monitor *m);
 int hz_osd_timeout(void *data);
 void testhzosd(const Arg *arg);
 void setcustomhz(const Arg *arg);
-struct wlr_output_mode *bestmode(struct wlr_output *output);
-int monitor_mode_pinned(struct wlr_output *output);
+struct nx_output_mode *bestmode(struct nx_output *output);
+int monitor_mode_pinned(struct nx_output *output);
 RuntimeMonitorConfig *find_monitor_config(const char *name);
 void calculate_monitor_position(Monitor *m, RuntimeMonitorConfig *cfg, int *out_x, int *out_y);
 void monitor_effective_size(Monitor *m, int *w, int *h);
@@ -2932,8 +2909,8 @@ void statusbar_force_refresh(Monitor *m);
 #if 1
 void initstatusbar(Monitor *m);
 void cleanupstatusbar(Monitor *m);
-void layoutstatusbar(Monitor *m, const struct wlr_box *area,
-		struct wlr_box *client_area);
+void layoutstatusbar(Monitor *m, const struct nx_box *area,
+		struct nx_box *client_area);
 void positionstatusmodules(Monitor *m);
 void printstatus(void);
 void renderclock(StatusModule *module, int bar_height, const char *text);
@@ -2945,7 +2922,7 @@ void rendermic(StatusModule *module, int bar_height, const char *text);
 void rendercpu(StatusModule *module, int bar_height, const char *text);
 void renderram(StatusModule *module, int bar_height, const char *text);
 void render_icon_label(StatusModule *module, int bar_height, const char *text,
-		int (*ensure_icon)(int target_h), struct wlr_buffer **icon_buf,
+		int (*ensure_icon)(int target_h), struct nx_buffer **icon_buf,
 		int *icon_w, int *icon_h, int min_text_w, int icon_gap,
 		const float *text_color);
 void client_kick_frame_done(Client *c);
@@ -3025,7 +3002,7 @@ void net_popup_track_hover(Monitor *m, double cx, double cy);
 int net_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 void rendernetpopup(Monitor *m);
 void render_tray_icon_module(StatusModule *module, int bar_height,
-		int (*ensure_icon)(int target_h), struct wlr_buffer **icon_buf,
+		int (*ensure_icon)(int target_h), struct nx_buffer **icon_buf,
 		int *icon_w, int *icon_h);
 void renderbluetooth(StatusModule *module, int bar_height, const char *text);
 void render_bt_popup(Monitor *m);
@@ -3277,7 +3254,7 @@ void tray_menu_hide_all(void);
 int tray_item_get_menu_path(TrayItem *it);
 int tray_menu_open_at(Monitor *m, TrayItem *it, int icon_x);
 void tray_menu_render(Monitor *m);
-void tray_menu_draw_text(struct wlr_scene_tree *tree, const char *text, int x, int y, int row_h,
+void tray_menu_draw_text(struct nx_scene_tree *tree, const char *text, int x, int y, int row_h,
 		int max_w);
 TrayMenuEntry *tray_menu_entry_at(Monitor *m, int lx, int ly);
 void tray_menu_update_hover(Monitor *m, double cx, double cy);
@@ -3323,7 +3300,7 @@ Monitor *sudo_popup_visible_monitor(void);
 void sudo_popup_execute(Monitor *m);
 int sudo_popup_cb(int fd, uint32_t mask, void *data);
 int sudo_popup_wait_timer(void *data);
-void osk_show(Monitor *m, struct wlr_surface *target);
+void osk_show(Monitor *m, struct nx_surface *target);
 void osk_hide(Monitor *m);
 void osk_hide_all(void);
 void osk_render(Monitor *m);
@@ -3423,7 +3400,7 @@ void detect_gpus(void);
 void filter_igpu_without_display(void);
 void dgpu_assert_power_on(GpuInfo *gpu);
 void dgpu_power_watchdog_start(void);
-struct wlr_renderer *gpu_renderer_create(struct wlr_backend *b);
+struct nx_renderer *gpu_renderer_create(struct nx_backend *b);
 int should_use_dgpu(const char *cmd);
 void set_dgpu_env(void);
 void set_steam_env(void);
@@ -3521,7 +3498,7 @@ void presence_init(void);
 int presence_active(void);
 void presence_note_input(void);
 void presence_sample_once(void);
-void presence_watch_switch(struct wlr_input_device *device);
+void presence_watch_switch(struct nx_input_device *device);
 
 /* lightsense.c — webcam-based auto brightness (Auto/Manual modes) */
 extern int light_auto_mode;
@@ -3720,7 +3697,7 @@ void locksession(struct wl_listener *listener, void *data);
 void unlocksession(struct wl_listener *listener, void *data);
 void createidleinhibitor(struct wl_listener *listener, void *data);
 void destroyidleinhibitor(struct wl_listener *listener, void *data);
-void checkidleinhibitor(struct wlr_surface *exclude);
+void checkidleinhibitor(struct nx_surface *exclude);
 
 /* nixlytile.c (core) */
 void setup(void);
@@ -3797,7 +3774,7 @@ void apply_startup_defaults(void);
 void statusbar_anim_sync(Monitor *m);
 int has_nixlytile_session_target(void);
 int node_contains_client(LayoutNode *node, Client *c);
-int subtree_bounds(LayoutNode *node, Monitor *m, struct wlr_box *out);
+int subtree_bounds(LayoutNode *node, Monitor *m, struct nx_box *out);
 LayoutNode *ancestor_split(LayoutNode *node, int want_vert);
 
 #if 0 /* btrtile.c removed */
@@ -3806,7 +3783,7 @@ void btrtile_remove(LayoutNode **root, Client *c);
 void remove_client(Monitor *m, Client *c);
 void destroy_tree(Monitor *m);
 void init_tree(Monitor *m);
-void btrtile_apply(LayoutNode *root, struct wlr_box area, Monitor *m);
+void btrtile_apply(LayoutNode *root, struct nx_box area, Monitor *m);
 LayoutNode *btrtile_find(LayoutNode *root, Client *c);
 LayoutNode *btrtile_focus_dir(LayoutNode *root, Client *current, int dir);
 void btrtile_swap(LayoutNode *a, LayoutNode *b);
@@ -3848,7 +3825,7 @@ void xwaylandready(struct wl_listener *listener, void *data);
 #define SCREENSHOT_DRAGGING  3
 extern int screenshot_mode;
 void screenshot_begin(const Arg *arg);
-void screenshot_capture_frame(Monitor *m, struct wlr_buffer *buffer);
+void screenshot_capture_frame(Monitor *m, struct nx_buffer *buffer);
 void screenshot_handle_button(uint32_t button, uint32_t state, uint32_t time_msec);
 void screenshot_handle_motion(void);
 void screenshot_handle_key(xkb_keysym_t sym);

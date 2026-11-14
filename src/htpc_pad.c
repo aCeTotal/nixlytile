@@ -151,7 +151,7 @@ try_add_device(const char *path)
 	/* Hotplug while the guide menu is open: join the active grab. */
 	if (pads_grabbed)
 		ioctl(fd, EVIOCGRAB, (void *)1);
-	wlr_log(WLR_INFO, "htpc_pad: gamepad added %s", path);
+	nx_log(NX_INFO, "htpc_pad: gamepad added %s", path);
 }
 
 static int
@@ -214,7 +214,7 @@ htpc_pad_setup(void)
 	}
 	scan_devices();
 	pad_inited = 1;
-	wlr_log(WLR_INFO, "htpc_pad: setup done");
+	nx_log(NX_INFO, "htpc_pad: setup done");
 }
 
 void

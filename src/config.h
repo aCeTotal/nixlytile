@@ -69,7 +69,7 @@ int lock_cursor = 0;	/* 1: lock cursor, 0: don't lock */
 #define TAGCOUNT (9)
 
 /* logging */
-int log_level = WLR_DEBUG;
+int log_level = NX_DEBUG;
 
 /* nixlytile mode */
 int nixlytile_mode = 1;
@@ -156,14 +156,14 @@ LIBINPUT_CONFIG_TAP_MAP_LMR -- 1/2/3 finger tap maps to left/middle/right
 */
 enum libinput_config_tap_button_map button_map = LIBINPUT_CONFIG_TAP_MAP_LRM;
 
-/* If you want to use the windows key for MODKEY, use WLR_MODIFIER_LOGO */
+/* If you want to use the windows key for MODKEY, use NX_MODIFIER_LOGO */
 /* Default modifier keys - used in compile-time key definitions */
-#define MODKEY WLR_MODIFIER_LOGO
-#define MONITORKEY WLR_MODIFIER_CTRL
+#define MODKEY NX_MODIFIER_LOGO
+#define MONITORKEY NX_MODIFIER_CTRL
 
 /* Runtime modifier keys - can be overridden by config file */
-unsigned int modkey = WLR_MODIFIER_LOGO;
-unsigned int monitorkey = WLR_MODIFIER_CTRL;
+unsigned int modkey = NX_MODIFIER_LOGO;
+unsigned int monitorkey = NX_MODIFIER_CTRL;
 
 /* helper for spawning shell commands in the pre dwm-5.0 fashion */
 #define SHCMD(cmd) { .v = (const char*[]){ "/bin/sh", "-c", cmd, NULL } }
@@ -179,8 +179,8 @@ const char *apptogglecmd[] = { "apptoggle", NULL };
 const char *lockcmd[] = { "nixly-lockscreen", NULL };
 const char *netcmd[] = { "nm-connection-editor", NULL };
 const char *pavucontrolcmd[] = { "pavucontrol", NULL };
-const char *screenshotcmd[] = { "grimshot", "copy", "area", NULL };
-const char *screenshotscreencmd[] = { "grimshot", "copy", "output", NULL };
+const char *screenshotcmd[] = { "/bin/sh", "-c", "g=$(slurp) && grim -g \"$g\" - | wl-copy -t image/png", NULL };
+const char *screenshotscreencmd[] = { "/bin/sh", "-c", "grim - | wl-copy -t image/png", NULL };
 
 /* Wallpaper path - can be overridden by config file */
 char wallpaper_path[PATH_MAX] = "$HOME/.nixlyos/wallpapers/beach.jpg";
@@ -212,7 +212,7 @@ size_t runtime_keys_count = 0;
 const Key default_keys[] = {
 	/* Window management */
 	{ MODKEY,                    XKB_KEY_q,          killclient,        {0} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Q,          quit,              {0} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_Q,          quit,              {0} },
 	{ MODKEY,                    XKB_KEY_f,          maximize_column,   {0} },
 	{ MODKEY,                    XKB_KEY_b,          togglestatusbar,   {0} },
 
@@ -229,28 +229,28 @@ const Key default_keys[] = {
 	{ MODKEY,                    XKB_KEY_Down,       focus_workspace_dir,         {.i = +1} },
 
 	/* Window movement */
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_H,          move_column_dir,             {.i = -1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_L,          move_column_dir,             {.i = +1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_J,          move_window_in_column_dir,   {.i = +1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_K,          move_window_in_column_dir,   {.i = -1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Left,       move_column_dir,             {.i = -1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Right,      move_column_dir,             {.i = +1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Up,         move_window_in_column_dir,   {.i = -1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Down,       move_window_in_column_dir,   {.i = +1} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_H,          move_column_dir,             {.i = -1} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_L,          move_column_dir,             {.i = +1} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_J,          move_window_in_column_dir,   {.i = +1} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_K,          move_window_in_column_dir,   {.i = -1} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_Left,       move_column_dir,             {.i = -1} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_Right,      move_column_dir,             {.i = +1} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_Up,         move_window_in_column_dir,   {.i = -1} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_Down,       move_window_in_column_dir,   {.i = +1} },
 
 	/* Column width / consume / expel */
 	{ MODKEY,                    XKB_KEY_r,          switch_preset_column_width,  {0} },
 	{ MODKEY,                    XKB_KEY_a,          swap_window_dir,             {.i = -1} },
 	{ MODKEY,                    XKB_KEY_d,          swap_window_dir,             {.i = +1} },
 	{ MODKEY,                    XKB_KEY_x,          expel_window_from_column,    {0} },
-	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Left,       switch_preset_column_width,  {0} },
-	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Right,      switch_preset_column_width,  {0} },
-	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Up,         center_column,               {0} },
-	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Down,       maximize_column,             {0} },
+	{ MODKEY|NX_MODIFIER_CTRL,  XKB_KEY_Left,       switch_preset_column_width,  {0} },
+	{ MODKEY|NX_MODIFIER_CTRL,  XKB_KEY_Right,      switch_preset_column_width,  {0} },
+	{ MODKEY|NX_MODIFIER_CTRL,  XKB_KEY_Up,         center_column,               {0} },
+	{ MODKEY|NX_MODIFIER_CTRL,  XKB_KEY_Down,       maximize_column,             {0} },
 
 	/* Applications */
 	{ MODKEY,                    XKB_KEY_Return,     spawn,          {.v = alacrittycmd} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Return,     spawn,          {.v = termcmd} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_Return,     spawn,          {.v = termcmd} },
 	{ MODKEY,                    XKB_KEY_p,          spawn,          {.v = apptogglecmd} },
 	{ MODKEY,                    XKB_KEY_g,          spawn,          {.v = fuzzelcmd} },
 	{ MODKEY,                    XKB_KEY_i,          spawn,          {.v = fuzzelcmd} },
@@ -260,7 +260,7 @@ const Key default_keys[] = {
 	{ MODKEY,                    XKB_KEY_BackSpace,  spawn,          {.v = browsercmd} },
 	{ MODKEY,                    XKB_KEY_s,          spawn,          {.v = screenshotcmd} },
 	{ 0,                         XKB_KEY_Print,      spawn,          {.v = screenshotcmd} },
-	{ WLR_MODIFIER_SHIFT,        XKB_KEY_Print,      spawn,          {.v = screenshotscreencmd} },
+	{ NX_MODIFIER_SHIFT,        XKB_KEY_Print,      spawn,          {.v = screenshotscreencmd} },
 
 	/* Workspaces */
 	{ MODKEY,                    XKB_KEY_1,          focus_workspace_n, {.i = 0} },
@@ -274,35 +274,35 @@ const Key default_keys[] = {
 	{ MODKEY,                    XKB_KEY_9,          focus_workspace_n, {.i = 8} },
 	{ MODKEY,                    XKB_KEY_0,          focus_workspace_n, {.i = 9} },
 
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_1,          move_client_to_ws_n, {.i = 0} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_2,          move_client_to_ws_n, {.i = 1} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_3,          move_client_to_ws_n, {.i = 2} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_4,          move_client_to_ws_n, {.i = 3} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_5,          move_client_to_ws_n, {.i = 4} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_6,          move_client_to_ws_n, {.i = 5} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_7,          move_client_to_ws_n, {.i = 6} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_8,          move_client_to_ws_n, {.i = 7} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_9,          move_client_to_ws_n, {.i = 8} },
-	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_0,          move_client_to_ws_n, {.i = 9} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_1,          move_client_to_ws_n, {.i = 0} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_2,          move_client_to_ws_n, {.i = 1} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_3,          move_client_to_ws_n, {.i = 2} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_4,          move_client_to_ws_n, {.i = 3} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_5,          move_client_to_ws_n, {.i = 4} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_6,          move_client_to_ws_n, {.i = 5} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_7,          move_client_to_ws_n, {.i = 6} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_8,          move_client_to_ws_n, {.i = 7} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_9,          move_client_to_ws_n, {.i = 8} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_0,          move_client_to_ws_n, {.i = 9} },
 
 	/* Alt + H/J/K/L or arrows: move tile within current workspace. */
-	{ WLR_MODIFIER_ALT,          XKB_KEY_h,          move_column_dir,            {.i = -1} },
-	{ WLR_MODIFIER_ALT,          XKB_KEY_l,          move_column_dir,            {.i = +1} },
-	{ WLR_MODIFIER_ALT,          XKB_KEY_Left,       move_column_dir,            {.i = -1} },
-	{ WLR_MODIFIER_ALT,          XKB_KEY_Right,      move_column_dir,            {.i = +1} },
-	{ WLR_MODIFIER_ALT,          XKB_KEY_k,          move_window_in_column_dir,  {.i = -1} },
-	{ WLR_MODIFIER_ALT,          XKB_KEY_j,          move_window_in_column_dir,  {.i = +1} },
-	{ WLR_MODIFIER_ALT,          XKB_KEY_Up,         move_window_in_column_dir,  {.i = -1} },
-	{ WLR_MODIFIER_ALT,          XKB_KEY_Down,       move_window_in_column_dir,  {.i = +1} },
+	{ NX_MODIFIER_ALT,          XKB_KEY_h,          move_column_dir,            {.i = -1} },
+	{ NX_MODIFIER_ALT,          XKB_KEY_l,          move_column_dir,            {.i = +1} },
+	{ NX_MODIFIER_ALT,          XKB_KEY_Left,       move_column_dir,            {.i = -1} },
+	{ NX_MODIFIER_ALT,          XKB_KEY_Right,      move_column_dir,            {.i = +1} },
+	{ NX_MODIFIER_ALT,          XKB_KEY_k,          move_window_in_column_dir,  {.i = -1} },
+	{ NX_MODIFIER_ALT,          XKB_KEY_j,          move_window_in_column_dir,  {.i = +1} },
+	{ NX_MODIFIER_ALT,          XKB_KEY_Up,         move_window_in_column_dir,  {.i = -1} },
+	{ NX_MODIFIER_ALT,          XKB_KEY_Down,       move_window_in_column_dir,  {.i = +1} },
 
 	{ MODKEY,                    XKB_KEY_Tab,        focus_last_workspace, {0} },
 
 	/* Monitor navigation */
-	{ MODKEY,                    XKB_KEY_comma,      focusmon,       {.i = WLR_DIRECTION_LEFT} },
-	{ MODKEY,                    XKB_KEY_period,     focusmon,       {.i = WLR_DIRECTION_RIGHT} },
+	{ MODKEY,                    XKB_KEY_comma,      focusmon,       {.i = NX_DIRECTION_LEFT} },
+	{ MODKEY,                    XKB_KEY_period,     focusmon,       {.i = NX_DIRECTION_RIGHT} },
 
-	{ WLR_MODIFIER_CTRL|WLR_MODIFIER_ALT,XKB_KEY_Terminate_Server, quit, {0} },
-#define CHVT(n) { WLR_MODIFIER_CTRL|WLR_MODIFIER_ALT,XKB_KEY_XF86Switch_VT_##n, chvt, {.ui = (n)} }
+	{ NX_MODIFIER_CTRL|NX_MODIFIER_ALT,XKB_KEY_Terminate_Server, quit, {0} },
+#define CHVT(n) { NX_MODIFIER_CTRL|NX_MODIFIER_ALT,XKB_KEY_XF86Switch_VT_##n, chvt, {.ui = (n)} }
 	CHVT(1), CHVT(2), CHVT(3), CHVT(4), CHVT(5), CHVT(6),
 	CHVT(7), CHVT(8), CHVT(9), CHVT(10), CHVT(11), CHVT(12),
 };

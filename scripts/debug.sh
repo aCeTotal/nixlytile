@@ -16,17 +16,13 @@ mkdir -p "$REPORT"
 
 # --- pick backend: nested if a display exists, else real DRM/TTY ---
 if [ -n "${WAYLAND_DISPLAY:-}" ]; then
-	export WLR_BACKENDS=wayland; MODE="nested-wayland"
-elif [ -n "${DISPLAY:-}" ]; then
-	export WLR_BACKENDS=x11; MODE="nested-x11"
+	export NIXLY_BACKENDS=wayland; MODE="nested-wayland"
 else
 	MODE="drm-tty"
 fi
 
 # --- max verbosity + crash capture ---
-export WLR_DEBUG=1                             # wlroots verbose logging
-export NIXLY_DEBUG=1                           # enable nixlytile's own log files (wlroots.log/WLR_DEBUG.log)
-export WLR_RENDERER=gles2                      # raw binary links gles2-only wlroots; ignore any global vulkan sessionVar
+export NIXLY_DEBUG=1                           # enables the /tmp/nixlytile logs
 ulimit -c unlimited                            # allow core dumps
 START_TS="$(date '+%Y-%m-%d %H:%M:%S')"        # for coredumpctl --since
 
@@ -39,13 +35,13 @@ echo "start:   $START_TS"
 echo "-> launching (quit compositor to finish)..."
 echo
 
-# Run with -d (WLR_DEBUG log level). Tee combined stdout+stderr to session log.
+# -d: debug log level
 "$BIN" -d "$@" > >(tee "$SESSLOG") 2>&1
 EXIT=$?
 END_TS="$(date '+%Y-%m-%d %H:%M:%S')"
 
 # --- snapshot the compositor's own logs ---
-for f in wlroots WLR_DEBUG xwayland diagnostics audio errors game_debug; do
+for f in nixlytile NIXLY_DEBUG xwayland diagnostics audio errors game_debug; do
 	[ -f "$LOGDIR/$f.log" ] && cp "$LOGDIR/$f.log" "$REPORT/$f.log"
 done
 
@@ -57,7 +53,7 @@ done
 	echo; echo "--- uname ---"; uname -a
 	echo; echo "--- gpu (drm) ---"; lspci -nnk 2>/dev/null | grep -iA3 'vga\|3d\|display'
 	echo; echo "--- versions ---"
-	for p in wlroots-0.19 wlroots wayland-server pixman-1; do
+	for p in wayland-server pixman-1; do
 		v=$(pkg-config --modversion "$p" 2>/dev/null) && echo "$p = $v"
 	done
 	command -v glxinfo >/dev/null && { echo; echo "--- mesa ---"; glxinfo -B 2>/dev/null | grep -i 'opengl\|device\|vendor'; }

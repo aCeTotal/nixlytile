@@ -29,15 +29,15 @@ typedef struct {
 	Workspace *ws;
 
 	/* Where the tile really is on screen right now (zoom origin). */
-	struct wlr_box live;
+	struct nx_box live;
 	/* Where it belongs in the grid (zoom target). */
-	struct wlr_box slot;
+	struct nx_box slot;
 
-	struct wlr_scene_tree      *tree;   /* per-cell: header + thumb + sel */
-	struct wlr_scene_surface   *thumb;  /* mirror of the live surface */
-	struct wlr_scene_rect      *ghost;  /* stand-in when there is no buffer */
-	struct wlr_scene_buffer    *header; /* rendered label card */
-	struct wlr_scene_rect      *sel[4]; /* selection border */
+	struct nx_scene_tree      *tree;   /* per-cell: header + thumb + sel */
+	struct nx_scene_surface   *thumb;  /* mirror of the live surface */
+	struct nx_scene_rect      *ghost;  /* stand-in when there is no buffer */
+	struct nx_scene_buffer    *header; /* rendered label card */
+	struct nx_scene_rect      *sel[4]; /* selection border */
 
 	int header_w, header_h;
 	int row;                            /* index of the workspace row */
@@ -47,8 +47,8 @@ static struct {
 	int open;                 /* 1 while the overview owns the screen */
 	int closing;              /* animating back out */
 	Monitor *mon;
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_rect *backdrop;
+	struct nx_scene_tree *tree;
+	struct nx_scene_rect *backdrop;
 
 	Cell *cells;
 	int n_cells;
@@ -194,7 +194,7 @@ ssh_target(pid_t pid, char *out, size_t sz)
 
 /* ── label card ─────────────────────────────────────────────────────── */
 
-static struct wlr_buffer *
+static struct nx_buffer *
 header_buffer(Cell *cell, int w, int h)
 {
 	struct PixmanBuffer *buf;
@@ -267,7 +267,7 @@ header_buffer(Cell *cell, int w, int h)
 	buf->drm_format = DRM_FORMAT_ARGB8888;
 	buf->stride = stride;
 	buf->owns_data = 1;
-	wlr_buffer_init(&buf->base, &pixman_buffer_impl, w, h);
+	nx_buffer_init(&buf->base, &pixman_buffer_impl, w, h);
 	return &buf->base;
 }
 
@@ -276,10 +276,10 @@ header_buffer(Cell *cell, int w, int h)
 /* Absolute on-screen rectangle of c right now, including the vertical
  * offset of the workspace it lives on.  This is the zoom origin, so a
  * tile two workspaces down flies in from below instead of appearing. */
-static struct wlr_box
+static struct nx_box
 cell_live_box(Monitor *m, Client *c, Workspace *ws)
 {
-	struct wlr_box b = c->geom;
+	struct nx_box b = c->geom;
 	int active_idx = m->active_ws ? m->active_ws->idx : 0;
 
 	b.y += (ws->idx - active_idx) * m->m.height + (int)m->ws_y_offset;
@@ -388,7 +388,7 @@ layout_cells(void)
 static void
 cell_apply(Cell *cell, double t)
 {
-	struct wlr_box b;
+	struct nx_box b;
 	int hx, hy;
 
 	b.x      = lerp_i(cell->live.x,      cell->slot.x,      t);
@@ -399,14 +399,14 @@ cell_apply(Cell *cell, double t)
 	if (b.height < 1) b.height = 1;
 
 	if (cell->thumb) {
-		wlr_scene_buffer_set_dest_size(cell->thumb->buffer,
+		nx_scene_buffer_set_dest_size(cell->thumb->buffer,
 				b.width, b.height);
-		wlr_scene_node_set_position(&cell->thumb->buffer->node,
+		nx_scene_node_set_position(&cell->thumb->buffer->node,
 				b.x, b.y);
 	}
 	if (cell->ghost) {
-		wlr_scene_rect_set_size(cell->ghost, b.width, b.height);
-		wlr_scene_node_set_position(&cell->ghost->node, b.x, b.y);
+		nx_scene_rect_set_size(cell->ghost, b.width, b.height);
+		nx_scene_node_set_position(&cell->ghost->node, b.x, b.y);
 	}
 
 	/* Header rides above the thumbnail and fades in with the zoom —
@@ -414,29 +414,29 @@ cell_apply(Cell *cell, double t)
 	if (cell->header) {
 		hx = b.x;
 		hy = b.y - cell->header_h;
-		wlr_scene_node_set_position(&cell->header->node, hx, hy);
-		wlr_scene_buffer_set_opacity(cell->header, (float)(t * t));
-		wlr_scene_node_set_enabled(&cell->header->node, t > 0.02);
+		nx_scene_node_set_position(&cell->header->node, hx, hy);
+		nx_scene_buffer_set_opacity(cell->header, (float)(t * t));
+		nx_scene_node_set_enabled(&cell->header->node, t > 0.02);
 	}
 
 	if (cell->sel[0]) {
 		int on = (cell == &ov.cells[ov.sel]) && t > 0.5;
 		int i;
 		for (i = 0; i < 4; i++)
-			wlr_scene_node_set_enabled(&cell->sel[i]->node, on);
+			nx_scene_node_set_enabled(&cell->sel[i]->node, on);
 		if (on) {
 			int w = b.width  + 2 * OV_SEL_BORDER;
 			int h = b.height + 2 * OV_SEL_BORDER;
 			int x = b.x - OV_SEL_BORDER, y = b.y - OV_SEL_BORDER;
-			wlr_scene_rect_set_size(cell->sel[0], w, OV_SEL_BORDER);
-			wlr_scene_node_set_position(&cell->sel[0]->node, x, y);
-			wlr_scene_rect_set_size(cell->sel[1], w, OV_SEL_BORDER);
-			wlr_scene_node_set_position(&cell->sel[1]->node, x,
+			nx_scene_rect_set_size(cell->sel[0], w, OV_SEL_BORDER);
+			nx_scene_node_set_position(&cell->sel[0]->node, x, y);
+			nx_scene_rect_set_size(cell->sel[1], w, OV_SEL_BORDER);
+			nx_scene_node_set_position(&cell->sel[1]->node, x,
 					y + h - OV_SEL_BORDER);
-			wlr_scene_rect_set_size(cell->sel[2], OV_SEL_BORDER, h);
-			wlr_scene_node_set_position(&cell->sel[2]->node, x, y);
-			wlr_scene_rect_set_size(cell->sel[3], OV_SEL_BORDER, h);
-			wlr_scene_node_set_position(&cell->sel[3]->node,
+			nx_scene_rect_set_size(cell->sel[2], OV_SEL_BORDER, h);
+			nx_scene_node_set_position(&cell->sel[2]->node, x, y);
+			nx_scene_rect_set_size(cell->sel[3], OV_SEL_BORDER, h);
+			nx_scene_node_set_position(&cell->sel[3]->node,
 					x + w - OV_SEL_BORDER, y);
 		}
 	}
@@ -448,15 +448,15 @@ apply_all(void)
 	int i;
 
 	if (ov.backdrop) {
-		wlr_scene_rect_set_size(ov.backdrop, ov.mon->m.width,
+		nx_scene_rect_set_size(ov.backdrop, ov.mon->m.width,
 				ov.mon->m.height);
-		wlr_scene_node_set_position(&ov.backdrop->node,
+		nx_scene_node_set_position(&ov.backdrop->node,
 				ov.mon->m.x, ov.mon->m.y);
 		/* Dim behind, but hard enough that the real windows do not
 		 * ghost through their own thumbnails — the mirrors sit
 		 * directly on top of them at t=0 and drift away as the zoom
 		 * proceeds, so any transparency here reads as a double image. */
-		wlr_scene_rect_set_color(ov.backdrop, (float[4]){
+		nx_scene_rect_set_color(ov.backdrop, (float[4]){
 				0.04f, 0.05f, 0.07f, (float)(0.95 * ov.t) });
 	}
 	for (i = 0; i < ov.n_cells; i++)
@@ -468,14 +468,14 @@ overview_teardown(void)
 {
 	/* Real windows come back the moment the mirrors are gone. */
 	if (layers[LyrTile])
-		wlr_scene_node_set_enabled(&layers[LyrTile]->node, 1);
+		nx_scene_node_set_enabled(&layers[LyrTile]->node, 1);
 	if (layers[LyrFloat])
-		wlr_scene_node_set_enabled(&layers[LyrFloat]->node, 1);
+		nx_scene_node_set_enabled(&layers[LyrFloat]->node, 1);
 	if (ov.tree) {
 		/* One destroy takes the mirrors, headers, rects and backdrop —
 		 * the mirrored SURFACES belong to the clients and are
 		 * untouched. */
-		wlr_scene_node_destroy(&ov.tree->node);
+		nx_scene_node_destroy(&ov.tree->node);
 		ov.tree = NULL;
 	}
 	free(ov.cells);
@@ -547,17 +547,17 @@ build_scene(void)
 	static const float ghost_col[4] = { 0.13f, 0.14f, 0.17f, 1.0f };
 	int i, j;
 
-	ov.tree = wlr_scene_tree_create(layers[LyrOverlay]);
+	ov.tree = nx_scene_tree_create(layers[LyrOverlay]);
 	if (!ov.tree)
 		return;
 
-	ov.backdrop = wlr_scene_rect_create(ov.tree, 1, 1,
+	ov.backdrop = nx_scene_rect_create(ov.tree, 1, 1,
 			(float[4]){ 0.04f, 0.05f, 0.07f, 0.0f });
 
 	for (i = 0; i < ov.n_cells; i++) {
 		Cell *cell = &ov.cells[i];
-		struct wlr_surface *surf = client_surface(cell->c);
-		struct wlr_buffer *hb;
+		struct nx_surface *surf = client_surface(cell->c);
+		struct nx_buffer *hb;
 
 		/* A client parked on an inactive workspace keeps its last
 		 * buffer, so the mirror shows real content.  One that never
@@ -565,9 +565,9 @@ build_scene(void)
 		 * give it a flat card so the slot is still selectable rather
 		 * than an invisible hole in the grid. */
 		if (surf && surf->buffer)
-			cell->thumb = wlr_scene_surface_create(ov.tree, surf);
+			cell->thumb = nx_scene_surface_create(ov.tree, surf);
 		if (!cell->thumb)
-			cell->ghost = wlr_scene_rect_create(ov.tree, 1, 1,
+			cell->ghost = nx_scene_rect_create(ov.tree, 1, 1,
 					ghost_col);
 
 		/* Header spans exactly its thumbnail — layout_cells() has
@@ -580,15 +580,15 @@ build_scene(void)
 		cell->header_h = OV_HEADER_H - 6;
 		hb = header_buffer(cell, cell->header_w, cell->header_h);
 		if (hb) {
-			cell->header = wlr_scene_buffer_create(ov.tree, hb);
-			wlr_buffer_drop(hb);
+			cell->header = nx_scene_buffer_create(ov.tree, hb);
+			nx_buffer_drop(hb);
 		}
 
 		for (j = 0; j < 4; j++) {
-			cell->sel[j] = wlr_scene_rect_create(ov.tree, 1, 1,
+			cell->sel[j] = nx_scene_rect_create(ov.tree, 1, 1,
 					sel_col);
 			if (cell->sel[j])
-				wlr_scene_node_set_enabled(&cell->sel[j]->node, 0);
+				nx_scene_node_set_enabled(&cell->sel[j]->node, 0);
 		}
 	}
 }
@@ -631,8 +631,8 @@ overview_open(Monitor *m)
 	 * per-client nodes, so an arrange() mid-overview can't bring them
 	 * back.  Restored in overview_teardown, i.e. when the mirrors land
 	 * back on the real windows. */
-	wlr_scene_node_set_enabled(&layers[LyrTile]->node, 0);
-	wlr_scene_node_set_enabled(&layers[LyrFloat]->node, 0);
+	nx_scene_node_set_enabled(&layers[LyrTile]->node, 0);
+	nx_scene_node_set_enabled(&layers[LyrFloat]->node, 0);
 	apply_all();
 	monitor_wake(m);
 }
@@ -756,7 +756,7 @@ overview_handle_key(uint32_t mods, xkb_keysym_t sym)
 	 * to the grid — otherwise the very chord that opened the overview
 	 * (Super+O) would be swallowed here and only Escape could close it.
 	 * The grid's own keys are all unmodified, so nothing is lost. */
-	if (mods & (WLR_MODIFIER_LOGO | WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT))
+	if (mods & (NX_MODIFIER_LOGO | NX_MODIFIER_CTRL | NX_MODIFIER_ALT))
 		return 0;
 
 	/* Bare modifier presses carry no intent; let them pass so the mask

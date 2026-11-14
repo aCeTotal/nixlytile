@@ -24,7 +24,7 @@
 static float
 refresh_hz(Monitor *m)
 {
-	return (float)m->wlr_output->refresh / 1000.0f;
+	return (float)m->nx_output->refresh / 1000.0f;
 }
 
 /* Mode refresh over present timing. */
@@ -103,7 +103,7 @@ set_rung(Monitor *m, int rung, uint64_t now)
 	d->calm_ns = now;
 	d->fresh = 1;
 	memset(d->miss_ns, 0, sizeof(d->miss_ns));
-	diag_logf("DYNR", "%s: %.1f fps", m->wlr_output->name, rung_fps(m, rung));
+	diag_logf("DYNR", "%s: %.1f fps", m->nx_output->name, rung_fps(m, rung));
 }
 
 static int

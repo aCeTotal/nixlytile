@@ -809,7 +809,7 @@ diskwatch_init(void)
 	dw_run = 1;
 	if (pthread_create(&dw_thread, NULL, dw_worker, NULL) != 0) {
 		dw_run = 0;
-		wlr_log(WLR_ERROR, "diskwatch: thread start failed — "
+		nx_log(NX_ERROR, "diskwatch: thread start failed — "
 				"disk module unavailable");
 	}
 }

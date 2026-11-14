@@ -33,8 +33,8 @@ static char qs_psk[80];
 static int qs_hidden;
 
 /* popup */
-static struct wlr_scene_tree *qs_tree;
-static struct wlr_scene_buffer *qs_buf;
+static struct nx_scene_tree *qs_tree;
+static struct nx_scene_buffer *qs_buf;
 static int qs_x, qs_y, qs_w, qs_h;
 static int qs_hot;
 
@@ -43,7 +43,7 @@ qs_popup_hide(void)
 {
 	if (!qs_tree)
 		return;
-	wlr_scene_node_destroy(&qs_tree->node);
+	nx_scene_node_destroy(&qs_tree->node);
 	qs_tree = NULL;
 	qs_buf = NULL;
 	qs_w = qs_h = 0;
@@ -67,19 +67,19 @@ qs_popup_render(void)
 	if (card_finish(card, &res) != 0)
 		return;
 	if (!qs_tree) {
-		qs_tree = wlr_scene_tree_create(layers[LyrOverlay]);
+		qs_tree = nx_scene_tree_create(layers[LyrOverlay]);
 		if (!qs_tree) {
-			wlr_buffer_drop(res.buf);
+			nx_buffer_drop(res.buf);
 			return;
 		}
-		qs_buf = wlr_scene_buffer_create(qs_tree, NULL);
+		qs_buf = nx_scene_buffer_create(qs_tree, NULL);
 	}
 	if (qs_buf)
-		wlr_scene_buffer_set_buffer(qs_buf, res.buf);
-	wlr_buffer_drop(res.buf);
+		nx_scene_buffer_set_buffer(qs_buf, res.buf);
+	nx_buffer_drop(res.buf);
 	qs_w = res.w;
 	qs_h = res.h;
-	wlr_scene_node_set_position(&qs_tree->node, qs_x, qs_y);
+	nx_scene_node_set_position(&qs_tree->node, qs_x, qs_y);
 }
 
 static void
@@ -98,10 +98,10 @@ qs_popup_show(void)
 			qs_x = m->m.x + m->m.width - qs_w;
 		if (qs_y + qs_h > m->m.y + m->m.height)
 			qs_y = m->m.y + m->m.height - qs_h;
-		wlr_scene_node_set_position(&qs_tree->node, qs_x, qs_y);
+		nx_scene_node_set_position(&qs_tree->node, qs_x, qs_y);
 	}
-	if (m && m->wlr_output)
-		wlr_output_schedule_frame(m->wlr_output);
+	if (m && m->nx_output)
+		nx_output_schedule_frame(m->nx_output);
 }
 
 /* Oversized fields mean bogus QR. */
@@ -211,10 +211,10 @@ qs_decode(const uint8_t *px, int w, int h)
 static int
 qs_idle(void *data)
 {
-	struct wlr_surface *surface = NULL;
+	struct nx_surface *surface = NULL;
 	Client *c = NULL;
-	struct wlr_client_buffer *cb;
-	struct wlr_texture *tex;
+	struct nx_client_buffer *cb;
+	struct nx_texture *tex;
 	double sx = 0, sy = 0;
 	int bx, by, r, x0, y0, w, h;
 	uint32_t fmt;
@@ -249,15 +249,15 @@ qs_idle(void *data)
 	if (w < 64 || h < 64)
 		return 0;
 
-	fmt = wlr_texture_preferred_read_format(tex);
+	fmt = nx_texture_preferred_read_format(tex);
 	if (fmt != DRM_FORMAT_XRGB8888 && fmt != DRM_FORMAT_ARGB8888 &&
 			fmt != DRM_FORMAT_XBGR8888 && fmt != DRM_FORMAT_ABGR8888)
 		fmt = DRM_FORMAT_ARGB8888;
 	px = malloc((size_t)w * h * 4);
 	if (!px)
 		return 0;
-	if (!wlr_texture_read_pixels(tex,
-			&(struct wlr_texture_read_pixels_options){
+	if (!nx_texture_read_pixels(tex,
+			&(struct nx_texture_read_pixels_options){
 				.data = px,
 				.format = fmt,
 				.stride = (uint32_t)w * 4,
@@ -297,15 +297,15 @@ qr_scan_motion(uint32_t time)
 			if (hot != qs_hot) {
 				qs_hot = hot;
 				qs_popup_render();
-				if (selmon && selmon->wlr_output)
-					wlr_output_schedule_frame(
-							selmon->wlr_output);
+				if (selmon && selmon->nx_output)
+					nx_output_schedule_frame(
+							selmon->nx_output);
 			}
 			return;
 		}
 		qs_popup_hide();
-		if (selmon && selmon->wlr_output)
-			wlr_output_schedule_frame(selmon->wlr_output);
+		if (selmon && selmon->nx_output)
+			nx_output_schedule_frame(selmon->nx_output);
 	}
 	if (fabs(cursor->x - qs_scan_x) < QS_JITTER_PX &&
 			fabs(cursor->y - qs_scan_y) < QS_JITTER_PX)

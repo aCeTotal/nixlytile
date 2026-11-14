@@ -119,7 +119,7 @@ frame_shm_open(void)
 void
 multigpu_publish(Monitor *m, uint64_t present_ns)
 {
-	const struct wlr_output_mode *mode = m->wlr_output->current_mode;
+	const struct nx_output_mode *mode = m->nx_output->current_mode;
 
 	if (m != selmon || frame_shm_failed || (!frame_shm && !frame_shm_open()))
 		return;

@@ -125,7 +125,7 @@ load_monitors_conf(void)
 	}
 	fclose(fp);
 
-	wlr_log(WLR_INFO, "monitors.conf: loaded %d entries from %s",
+	nx_log(NX_INFO, "monitors.conf: loaded %d entries from %s",
 		monconf_monitor_count, monconf_path_cached);
 	return monconf_monitor_count;
 }
@@ -146,46 +146,40 @@ monconf_find(const char *name)
  * custom modeline (custom_mhz > 0) or a listed mode. */
 static int
 monconf_commit_mode(Monitor *m, RuntimeMonitorConfig *cfg,
-		struct wlr_output_mode *mode, int custom_mhz)
+		struct nx_output_mode *mode, int custom_mhz)
 {
-	struct wlr_output_state st;
+	struct nx_output_state st;
 	int ok;
 
-	wlr_output_state_init(&st);
-	wlr_output_state_set_enabled(&st, 1);
-	wlr_output_state_set_transform(&st, cfg->transform);
+	nx_output_state_init(&st);
+	nx_output_state_set_enabled(&st, 1);
+	nx_output_state_set_transform(&st, cfg->transform);
 	if (cfg->scale >= 0.5f && cfg->scale <= 4.0f)
-		wlr_output_state_set_scale(&st, cfg->scale);
+		nx_output_state_set_scale(&st, cfg->scale);
 	if (custom_mhz > 0)
-		wlr_output_state_set_custom_mode(&st, cfg->width, cfg->height,
+		nx_output_state_set_custom_mode(&st, cfg->width, cfg->height,
 			custom_mhz);
 	else if (mode)
-		wlr_output_state_set_mode(&st, mode);
-	ok = wlr_output_test_state(m->wlr_output, &st) &&
-		wlr_output_commit_state(m->wlr_output, &st);
-	wlr_output_state_finish(&st);
+		nx_output_state_set_mode(&st, mode);
+	ok = nx_output_test_state(m->nx_output, &st) &&
+		nx_output_commit_state(m->nx_output, &st);
+	nx_output_state_finish(&st);
 	return ok;
 }
 
-/* Rate not in the EDID list (120 Hz cap / overclock): register a real
- * DRM mode and commit it like any listed mode.  Same machinery as the
- * video-rate switcher in output.c — scaled-from-base timings keep the
- * panel's horizontal frequency (fixed-hfreq eDP rejects the naive
- * clock-only rescale wlroots does for set_custom_mode), CVT as second
- * try.  Non-DRM backends (nested/headless) keep the wlroots custom
- * path. */
+/* Commits off-list rates as real modes. */
 static int
 monconf_commit_custom(Monitor *m, RuntimeMonitorConfig *cfg)
 {
 	drmModeModeInfo base, gen;
-	struct wlr_output_mode *base_mode, *new_mode;
+	struct nx_output_mode *base_mode, *new_mode;
 	int tries;
 
-	if (!wlr_output_is_drm(m->wlr_output))
+	if (!nx_output_is_drm(m->nx_output))
 		return monconf_commit_mode(m, cfg, NULL,
 				(int)(cfg->refresh * 1000.0f + 0.5f));
 
-	base_mode = find_mode(m->wlr_output, cfg->width, cfg->height, 0);
+	base_mode = find_mode(m->nx_output, cfg->width, cfg->height, 0);
 	for (tries = 0; tries < 2; tries++) {
 		if (tries == 0) {
 			if (!base_mode ||
@@ -196,7 +190,7 @@ monconf_commit_custom(Monitor *m, RuntimeMonitorConfig *cfg)
 			generate_cvt_mode(&gen, cfg->width, cfg->height,
 					cfg->refresh);
 		}
-		new_mode = wlr_drm_connector_add_mode(m->wlr_output, &gen);
+		new_mode = nx_drm_connector_add_mode(m->nx_output, &gen);
 		if (!new_mode)
 			continue;
 		if (monconf_commit_mode(m, cfg, new_mode, 0))
@@ -212,19 +206,19 @@ monconf_apply_modes(void)
 	Monitor *m;
 	wl_list_for_each(m, &mons, link) {
 		RuntimeMonitorConfig *cfg;
-		struct wlr_output_mode *mode;
+		struct nx_output_mode *mode;
 
-		if (!m->wlr_output)
+		if (!m->nx_output)
 			continue;
-		cfg = monconf_find(m->wlr_output->name);
+		cfg = monconf_find(m->nx_output->name);
 		if (!cfg)
 			continue;
 
 		if (cfg->width > 0 && cfg->height > 0)
-			mode = find_mode(m->wlr_output, cfg->width, cfg->height,
+			mode = find_mode(m->nx_output, cfg->width, cfg->height,
 				cfg->refresh);
 		else
-			mode = bestmode(m->wlr_output);
+			mode = bestmode(m->nx_output);
 		/* Requested rate isn't in the EDID list (120 Hz cap on a
 		 * faster panel, or an overclock on a slow one): register and
 		 * commit it as a real mode — clients see it like any other.
@@ -234,18 +228,18 @@ monconf_apply_modes(void)
 				(!mode || fabsf(mode->refresh / 1000.0f -
 					cfg->refresh) > 1.0f)) {
 			if (monconf_commit_custom(m, cfg)) {
-				wlr_log(WLR_INFO,
+				nx_log(NX_INFO,
 					"monitors.conf: %s custom mode %dx%d@%.3f",
-					m->wlr_output->name, cfg->width,
+					m->nx_output->name, cfg->width,
 					cfg->height, cfg->refresh);
 				continue;
 			}
-			mode = find_mode(m->wlr_output, cfg->width,
+			mode = find_mode(m->nx_output, cfg->width,
 					cfg->height, 0);
-			wlr_log(WLR_INFO,
+			nx_log(NX_INFO,
 				"monitors.conf: %s custom %.3f Hz failed, "
 				"falling back to %d mHz",
-				m->wlr_output->name, cfg->refresh,
+				m->nx_output->name, cfg->refresh,
 				mode ? mode->refresh : 0);
 		}
 		monconf_commit_mode(m, cfg, mode, 0);
@@ -258,13 +252,13 @@ monconf_apply_modes(void)
 	for (int i = 0; i < monconf_monitor_count; i++) {
 		int found = 0;
 		wl_list_for_each(m, &mons, link)
-			if (m->wlr_output && strcmp(m->wlr_output->name,
+			if (m->nx_output && strcmp(m->nx_output->name,
 					monconf_monitors[i].name) == 0) {
 				found = 1;
 				break;
 			}
 		if (!found)
-			wlr_log(WLR_INFO, "monitors.conf: entry '%s' matches no "
+			nx_log(NX_INFO, "monitors.conf: entry '%s' matches no "
 				"connected output (stale connector name?)",
 				monconf_monitors[i].name);
 	}
@@ -290,9 +284,9 @@ monconf_apply_layout(void)
 	wl_list_for_each(m, &mons, link) {
 		RuntimeMonitorConfig *cfg;
 		int w, h;
-		if (!m->wlr_output || !m->wlr_output->enabled || m->is_virtual)
+		if (!m->nx_output || !m->nx_output->enabled || m->is_virtual)
 			continue;
-		cfg = monconf_find(m->wlr_output->name);
+		cfg = monconf_find(m->nx_output->name);
 		if (!cfg || cfg->grid_col < 0 || cfg->grid_row < 0 ||
 		    cfg->grid_col >= MAX_MONITORS || cfg->grid_row >= MAX_MONITORS)
 			continue;
@@ -322,9 +316,9 @@ monconf_apply_layout(void)
 		RuntimeMonitorConfig *cfg;
 		int w, h, x, y;
 		/* a virtual output is parked off-layout, never a grid cell */
-		if (!m->wlr_output || !m->wlr_output->enabled || m->is_virtual)
+		if (!m->nx_output || !m->nx_output->enabled || m->is_virtual)
 			continue;
-		cfg = monconf_find(m->wlr_output->name);
+		cfg = monconf_find(m->nx_output->name);
 		if (!cfg || cfg->grid_col < 0 || cfg->grid_row < 0 ||
 		    cfg->grid_col >= MAX_MONITORS || cfg->grid_row >= MAX_MONITORS)
 			continue;
@@ -333,9 +327,9 @@ monconf_apply_layout(void)
 		monitor_effective_size(m, &w, &h);
 		x = col_x[cfg->grid_col] + (col_w[cfg->grid_col] - w) / 2;
 		y = row_y[cfg->grid_row] + (row_h[cfg->grid_row] - h) / 2;
-		wlr_output_layout_add(output_layout, m->wlr_output, x, y);
-		wlr_log(WLR_INFO, "monitors.conf: %s grid=%d,%d → (%d,%d) [%dx%d]",
-			m->wlr_output->name, cfg->grid_col, cfg->grid_row, x, y, w, h);
+		nx_output_layout_add(output_layout, m->nx_output, x, y);
+		nx_log(NX_INFO, "monitors.conf: %s grid=%d,%d → (%d,%d) [%dx%d]",
+			m->nx_output->name, cfg->grid_col, cfg->grid_row, x, y, w, h);
 		placed++;
 	}
 
@@ -348,14 +342,14 @@ monconf_apply_layout(void)
 	 * A cycle (A↔B) has no root; those entries are skipped. */
 	wl_list_for_each(m, &mons, link) {
 		RuntimeMonitorConfig *cfg;
-		struct wlr_output_layout_output *lo;
+		struct nx_output_layout_output *lo;
 		Monitor *src = NULL, *cand;
 		const char *tgt;
 		int hops;
 
-		if (!m->wlr_output || !m->wlr_output->enabled || m->is_virtual)
+		if (!m->nx_output || !m->nx_output->enabled || m->is_virtual)
 			continue;
-		cfg = monconf_find(m->wlr_output->name);
+		cfg = monconf_find(m->nx_output->name);
 		if (!cfg || !cfg->mirror[0])
 			continue;
 
@@ -365,34 +359,34 @@ monconf_apply_layout(void)
 
 			src = NULL;
 			wl_list_for_each(cand, &mons, link) {
-				if (cand->wlr_output &&
-				    cand->wlr_output->enabled &&
-				    strcmp(cand->wlr_output->name, tgt) == 0) {
+				if (cand->nx_output &&
+				    cand->nx_output->enabled &&
+				    strcmp(cand->nx_output->name, tgt) == 0) {
 					src = cand;
 					break;
 				}
 			}
 			if (!src || src == m)
 				break;
-			scfg = monconf_find(src->wlr_output->name);
+			scfg = monconf_find(src->nx_output->name);
 			if (!scfg || !scfg->mirror[0])
 				break;   /* non-mirror root found */
 			tgt = scfg->mirror;
 		}
 		if (!src || src == m || hops >= MAX_MONITORS) {
 			if (src == m || hops >= MAX_MONITORS)
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"monitors.conf: mirror cycle via %s, "
-					"skipping", m->wlr_output->name);
+					"skipping", m->nx_output->name);
 			continue;
 		}
-		lo = wlr_output_layout_get(output_layout, src->wlr_output);
+		lo = nx_output_layout_get(output_layout, src->nx_output);
 		if (!lo)
 			continue;
 
-		wlr_output_layout_add(output_layout, m->wlr_output, lo->x, lo->y);
-		wlr_log(WLR_INFO, "monitors.conf: %s mirrors %s → (%d,%d)",
-			m->wlr_output->name, cfg->mirror, lo->x, lo->y);
+		nx_output_layout_add(output_layout, m->nx_output, lo->x, lo->y);
+		nx_log(NX_INFO, "monitors.conf: %s mirrors %s → (%d,%d)",
+			m->nx_output->name, cfg->mirror, lo->x, lo->y);
 		placed++;
 	}
 
@@ -454,7 +448,7 @@ setup_monitors_conf_watch(void)
 
 	monconf_inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
 	if (monconf_inotify_fd < 0) {
-		wlr_log(WLR_ERROR, "monitors.conf: inotify_init failed: %s",
+		nx_log(NX_ERROR, "monitors.conf: inotify_init failed: %s",
 			strerror(errno));
 		return;
 	}
@@ -462,7 +456,7 @@ setup_monitors_conf_watch(void)
 	monconf_watch_wd = inotify_add_watch(monconf_inotify_fd, dir,
 		IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE);
 	if (monconf_watch_wd < 0) {
-		wlr_log(WLR_ERROR, "monitors.conf: inotify_add_watch(%s) failed: %s",
+		nx_log(NX_ERROR, "monitors.conf: inotify_add_watch(%s) failed: %s",
 			dir, strerror(errno));
 		close(monconf_inotify_fd);
 		monconf_inotify_fd = -1;
@@ -471,5 +465,5 @@ setup_monitors_conf_watch(void)
 
 	monconf_watch_source = wl_event_loop_add_fd(event_loop,
 		monconf_inotify_fd, WL_EVENT_READABLE, monconf_watch_cb, NULL);
-	wlr_log(WLR_INFO, "monitors.conf: watching %s", dir);
+	nx_log(NX_INFO, "monitors.conf: watching %s", dir);
 }

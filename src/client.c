@@ -174,7 +174,7 @@ client_has_fullscreen_ancestor(Client *c)
 }
 
 void
-applybounds(Client *c, struct wlr_box *bbox)
+applybounds(Client *c, struct nx_box *bbox)
 {
 	/* set minimum possible */
 	c->geom.width = MAX(1 + 2 * (int)c->bw, c->geom.width);
@@ -204,14 +204,14 @@ applyrules(Client *c)
 	appid = client_get_appid(c);
 	title = client_get_title(c);
 
-	wlr_log(WLR_INFO,
+	nx_log(NX_INFO,
 		"GAME_TRACE: applyrules enter appid='%s' title='%s' pid=%d "
 		"geom=%dx%d selmon='%s'",
 		appid ? appid : "(null)",
 		title ? title : "(null)",
 		(int)client_get_pid(c),
 		c->geom.width, c->geom.height,
-		selmon && selmon->wlr_output ? selmon->wlr_output->name : "(null)");
+		selmon && selmon->nx_output ? selmon->nx_output->name : "(null)");
 
 	int float_ruled = 0;
 	const Rule *rule_list = runtime_rules_count > 0 ? runtime_rules : rules;
@@ -275,14 +275,14 @@ applyrules(Client *c)
 				newtags = launch_tags;
 				if (launch_output[0]) {
 					wl_list_for_each(m, &mons, link) {
-						if (strcmp(m->wlr_output->name, launch_output) == 0) {
+						if (strcmp(m->nx_output->name, launch_output) == 0) {
 							mon = m;
 							mon_explicit = 1;
 							break;
 						}
 					}
 				}
-				wlr_log(WLR_INFO,
+				nx_log(NX_INFO,
 					"applyrules: pending launch matched pid %d → "
 					"tags=0x%x output=%s",
 					(int)cpid, newtags, launch_output);
@@ -305,11 +305,11 @@ applyrules(Client *c)
 			if (sc != c && sc->mon && is_steam_client(sc)) {
 				mon = sc->mon;
 				mon_explicit = 1;
-				wlr_log(WLR_INFO,
+				nx_log(NX_INFO,
 					"applyrules: Steam-game fallback → "
 					"placing pid=%d on Steam's monitor '%s'",
 					(int)client_get_pid(c),
-					mon->wlr_output ? mon->wlr_output->name : "(null)");
+					mon->nx_output ? mon->nx_output->name : "(null)");
 				break;
 			}
 		}
@@ -323,9 +323,9 @@ applyrules(Client *c)
 	/* Default tiling: main app windows tile (resizable XDG / X11
 	 * NORMAL).  Splash, dialog, utility, fixed-size etc. auto-float
 	 * via the rule-match check above. */
-	wlr_log(WLR_INFO,
+	nx_log(NX_INFO,
 		"GAME_TRACE: applyrules exit → mon='%s' newtags=0x%x isfloating=%d",
-		mon && mon->wlr_output ? mon->wlr_output->name : "(null)",
+		mon && mon->nx_output ? mon->nx_output->name : "(null)",
 		newtags, c->isfloating);
 	setmon(c, mon, newtags);
 }
@@ -339,11 +339,11 @@ commitnotify(struct wl_listener *listener, void *data)
 	 * detector tell a client-side stall (0 commits) from a compositor-side
 	 * stall (client committing but nothing presented). */
 	if (c->mon) {
-		struct wlr_surface *cs = client_surface(c);
+		struct nx_surface *cs = client_surface(c);
 
 		c->mon->diag_commits_in++;
 		/* Sample new buffers: explicit-sync release. */
-		if (cs && (cs->current.committed & WLR_SURFACE_STATE_BUFFER)) {
+		if (cs && (cs->current.committed & NX_SURFACE_STATE_BUFFER)) {
 			c->mon->unsampled_buffer = 1;
 			c->last_buffer_commit_ms = monotonic_msec();
 			c->ping_misses = 0;
@@ -361,12 +361,12 @@ commitnotify(struct wl_listener *listener, void *data)
 	if (c->surface.xdg->initial_commit) {
 		applyrules(c);
 		if (c->mon) {
-			client_set_scale(client_surface(c), c->mon->wlr_output->scale);
+			client_set_scale(client_surface(c), c->mon->nx_output->scale);
 		}
 		setmon(c, NULL, 0);
 
-		wlr_xdg_toplevel_set_wm_capabilities(c->surface.xdg->toplevel,
-				WLR_XDG_TOPLEVEL_WM_CAPABILITIES_FULLSCREEN);
+		nx_xdg_toplevel_set_wm_capabilities(c->surface.xdg->toplevel,
+				NX_XDG_TOPLEVEL_WM_CAPABILITIES_FULLSCREEN);
 		if (c->decoration)
 			requestdecorationmode(&c->set_decoration_mode, c->decoration);
 
@@ -376,10 +376,10 @@ commitnotify(struct wl_listener *listener, void *data)
 
 			workspace_new_column_inner_size(client_target_ws(c), (int)c->bw, &w, &h);
 			if (!c->isfloating && w > 100 && h > 100)
-				wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel,
+				nx_xdg_toplevel_set_size(c->surface.xdg->toplevel,
 						w, h);
 			else
-				wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel,
+				nx_xdg_toplevel_set_size(c->surface.xdg->toplevel,
 						0, 0);
 		}
 		return;
@@ -410,24 +410,16 @@ commitnotify(struct wl_listener *listener, void *data)
 	if (c->fsx_active)
 		return;
 
-	/* Refresh the surface clip when the xdg window-geometry OFFSET
-	 * changes without a size change.  Chrome drops its CSD shadow
-	 * margin when it acks fullscreen: geometry goes (10,11)→(0,0) but
-	 * the buffer stays monitor-sized, so resize()'s no-change fast-path
-	 * never re-runs and a stale clip keeps cropping the shadow-less
-	 * buffer — visible as a wallpaper strip at the top/left of
-	 * fullscreen video.  Column tiles are excluded (their clip is owned
-	 * by client_clip_to_usable).  wlroots dedups equal clip boxes, so
-	 * this is free on the common no-change commit. */
+	/* Geometry offset changes refresh the clip. */
 	if (!c->column && c->scene_surface) {
 		if (c->is_notif) {
 			/* Varsel under slide: klippet eies av notify.c og er
 			 * klemt mot skjermkanten — ikke gjenopprett full bredde. */
 			notify_refresh_clip(c);
 		} else {
-			struct wlr_box fresh_clip;
+			struct nx_box fresh_clip;
 			client_get_clip(c, &fresh_clip);
-			wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node,
+			nx_scene_subsurface_tree_set_clip(&c->scene_surface->node,
 					&fresh_clip);
 		}
 	} else if (c->column && c->scene_surface) {
@@ -469,7 +461,7 @@ void
 createnotify(struct wl_listener *listener, void *data)
 {
 	/* This event is raised when a client creates a new toplevel (application window). */
-	struct wlr_xdg_toplevel *toplevel = data;
+	struct nx_xdg_toplevel *toplevel = data;
 	Client *c = NULL;
 
 	/* Allocate a Client for this surface */
@@ -517,14 +509,14 @@ pingtimeoutnotify(struct wl_listener *listener, void *data)
 	 * has gone silent across PING_MISS_LIMIT rounds; any buffer commit
 	 * resets the count. */
 	if (++c->ping_misses < PING_MISS_LIMIT) {
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"Freeze watchdog: '%s' (pid %d) missed ping %d/%d",
 			client_get_appid(c) ? client_get_appid(c) : "(null)",
 			(int)pid, c->ping_misses, PING_MISS_LIMIT);
 		return;
 	}
 
-	wlr_log(WLR_ERROR,
+	nx_log(NX_ERROR,
 		"Freeze watchdog: '%s' (pid %d) unresponsive to ping — killing",
 		client_get_appid(c) ? client_get_appid(c) : "(null)", (int)pid);
 	if (pid > 1)
@@ -584,7 +576,7 @@ destroynotify(struct wl_listener *listener, void *data)
 void
 focusclient(Client *c, int lift)
 {
-	struct wlr_surface *old = seat->keyboard_state.focused_surface;
+	struct nx_surface *old = seat->keyboard_state.focused_surface;
 	int unused_lx, unused_ly, old_client_type;
 	Client *old_c = NULL;
 	LayerSurface *old_l = NULL;
@@ -605,15 +597,15 @@ focusclient(Client *c, int lift)
 
 	/* Raise client in stacking order if requested */
 	if (c && lift)
-		wlr_scene_node_raise_to_top(&c->scene->node);
+		nx_scene_node_raise_to_top(&c->scene->node);
 
 	if (c && client_surface(c) == old)
 		return;
 
-	if ((old_client_type = toplevel_from_wlr_surface(old, &old_c, &old_l)) == XDGShell) {
-		struct wlr_xdg_popup *popup, *tmp;
+	if ((old_client_type = toplevel_from_nx_surface(old, &old_c, &old_l)) == XDGShell) {
+		struct nx_xdg_popup *popup, *tmp;
 		wl_list_for_each_safe(popup, tmp, &old_c->surface.xdg->popups, link)
-			wlr_xdg_popup_destroy(popup);
+			nx_xdg_popup_destroy(popup);
 	}
 
 	/* Put the new client atop the focus stack and select its monitor */
@@ -650,7 +642,7 @@ focusclient(Client *c, int lift)
 		/* If an overlay is focused, don't focus or activate the client,
 		 * but only update its position in fstack to render its border with focuscolor
 		 * and focus it after the overlay is closed. */
-		if (old_client_type == LayerShell && wlr_scene_node_coords(
+		if (old_client_type == LayerShell && nx_scene_node_coords(
 					&old_l->scene->node, &unused_lx, &unused_ly)
 				&& old_l->layer_surface->current.layer >= ZWLR_LAYER_SHELL_V1_LAYER_TOP) {
 			return;
@@ -671,7 +663,7 @@ focusclient(Client *c, int lift)
 
 	if (!c) {
 		/* With no client, all we have left is to clear focus */
-		wlr_seat_keyboard_notify_clear_focus(seat);
+		nx_seat_keyboard_notify_clear_focus(seat);
 		/* Notify text inputs about focus loss */
 		text_input_focus_change(old, NULL);
 		/* Focus is cleared only NOW — refreshing before this point
@@ -684,9 +676,9 @@ focusclient(Client *c, int lift)
 	/* Change cursor surface */
 	motionnotify(0, NULL, 0, 0, 0, 0);
 
-	/* Have a client, so focus its top-level wlr_surface */
-	struct wlr_keyboard *kb = wlr_seat_get_keyboard(seat);
-	wlr_log(WLR_INFO, "focusclient: giving keyboard focus to '%s', keyboard=%p",
+	/* Have a client, so focus its top-level nx_surface */
+	struct nx_keyboard *kb = nx_seat_get_keyboard(seat);
+	nx_log(NX_INFO, "focusclient: giving keyboard focus to '%s', keyboard=%p",
 		client_get_appid(c) ? client_get_appid(c) : "(null)", (void*)kb);
 	client_notify_enter(client_surface(c), kb);
 
@@ -725,7 +717,7 @@ focusmon(const Arg *arg)
 	if (nmons && selmon) {
 		do /* don't switch to disabled mons */
 			selmon = dirtomon(arg->i);
-		while (selmon && !selmon->wlr_output->enabled && i++ < nmons);
+		while (selmon && !selmon->nx_output->enabled && i++ < nmons);
 	}
 	focusclient(focustop(selmon), 1);
 }
@@ -742,14 +734,14 @@ warptomonitor(const Arg *arg)
 	m = selmon;
 	do
 		m = dirtomon(arg->i);
-	while (m && !m->wlr_output->enabled && i++ < nmons);
+	while (m && !m->nx_output->enabled && i++ < nmons);
 	if (!m)
 		return;
 
-	if (m && m->wlr_output->enabled) {
+	if (m && m->nx_output->enabled) {
 		selmon = m;
 		/* Warp cursor to center of monitor */
-		wlr_cursor_warp(cursor, NULL,
+		nx_cursor_warp(cursor, NULL,
 			m->m.x + m->m.width / 2,
 			m->m.y + m->m.height / 2);
 		focusclient(focustop(selmon), 1);
@@ -785,7 +777,7 @@ tagtomonitornum(const Arg *arg)
 
 	setmon(sel, target, 0);
 	free(sel->output);
-	if (!(sel->output = strdup(sel->mon->wlr_output->name)))
+	if (!(sel->output = strdup(sel->mon->nx_output->name)))
 		die("oom");
 }
 
@@ -831,19 +823,19 @@ fullscreennotify(struct wl_listener *listener, void *data)
 {
 	Client *c = wl_container_of(listener, c, fullscreen);
 	int want = client_wants_fullscreen(c);
-	wlr_log(WLR_INFO,
+	nx_log(NX_INFO,
 		"GAME_TRACE: fullscreennotify appid='%s' type=%s want=%d was=%d "
 		"c->mon='%s'",
 		client_get_appid(c) ? client_get_appid(c) : "(null)",
 		c->type == X11 ? "X11" : "XDG",
 		want, c->isfullscreen,
-		c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)");
+		c->mon && c->mon->nx_output ? c->mon->nx_output->name : "(null)");
 
 	/* Window-rule `fullscreen false`: refuse the client's fullscreen
 	 * request and tell it so (clears _NET_WM_STATE_FULLSCREEN /
 	 * xdg fullscreen state), keeping the window tiled. */
 	if (want && !c->isfullscreen && client_rule_nofullscreen(c)) {
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"GAME_TRACE: fullscreennotify blocked by rule "
 			"`fullscreen false` for '%s'",
 			client_get_appid(c) ? client_get_appid(c) : "(null)");
@@ -858,7 +850,7 @@ fullscreennotify(struct wl_listener *listener, void *data)
 	 * The user can still toggle fullscreen via keybinding.
 	 */
 	if (!want && c->isfullscreen && (is_game_content(c) || looks_like_game(c))) {
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"GAME_TRACE: fullscreennotify ignoring client unfullscreen "
 			"for game '%s'",
 			client_get_appid(c) ? client_get_appid(c) : "(null)");
@@ -871,7 +863,7 @@ fullscreennotify(struct wl_listener *listener, void *data)
 	 * chosen resolution via configurex11.
 	 */
 	if (want && c->isfullscreen && (is_game_content(c) || looks_like_game(c))) {
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"GAME_TRACE: fullscreennotify already fullscreen for "
 			"game '%s' — confirming without resize",
 			client_get_appid(c) ? client_get_appid(c) : "(null)");
@@ -902,7 +894,7 @@ fullscreennotify(struct wl_listener *listener, void *data)
 		if (cw > 0 && ch > 0
 				&& ((cw <= 1280 && ch <= 800)
 					|| (cw < mw / 3 && ch < mh / 3))) {
-			wlr_log(WLR_INFO,
+			nx_log(NX_INFO,
 				"GAME_TRACE: fullscreennotify blocking splash "
 				"fullscreen for '%s' %dx%d (cap 1280x800)",
 				client_get_appid(c) ? client_get_appid(c) : "(null)",
@@ -925,8 +917,8 @@ fullscreennotify(struct wl_listener *listener, void *data)
 			client_get_appid(c) ? client_get_appid(c) : "(null)",
 			client_get_title(c) ? client_get_title(c) : "(null)",
 			c->geom.width, c->geom.height,
-			c->mon && c->mon->wlr_output
-				? c->mon->wlr_output->name : "(null)");
+			c->mon && c->mon->nx_output
+				? c->mon->nx_output->name : "(null)");
 	fullscreen_request(c, want);
 }
 
@@ -960,7 +952,7 @@ killclient_force(void *data)
 			continue;
 		if (!client_surface(c) || !client_surface(c)->mapped)
 			return 0;
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"killclient: '%s' (pid %d) ignored close — SIGKILL",
 			client_get_appid(c) ? client_get_appid(c) : "(null)",
 			(int)pid);
@@ -978,13 +970,13 @@ killclient(const Arg *arg)
 	 * workspace (in workspace mode every client matches VISIBLEON), and
 	 * the old ws guard then turned the keybind into a no-op — the
 	 * "nothing happens" case. */
-	struct wlr_surface *surf = seat ? seat->keyboard_state.focused_surface : NULL;
+	struct nx_surface *surf = seat ? seat->keyboard_state.focused_surface : NULL;
 	Client *sel = NULL;
 	pid_t pid;
 
 	(void)arg;
 	if (surf)
-		toplevel_from_wlr_surface(surf, &sel, NULL);
+		toplevel_from_nx_surface(surf, &sel, NULL);
 	if (!sel || !client_surface(sel) || !client_surface(sel)->mapped) {
 		sel = focustop(selmon);
 		if (sel && selmon && selmon->active_ws && sel->column &&
@@ -1022,63 +1014,59 @@ mapnotify(struct wl_listener *listener, void *data)
 
 	/* Create scene tree for this client and its border */
 	{
-		struct wlr_surface *surf = client_surface(c);
+		struct nx_surface *surf = client_surface(c);
 		if (!surf) {
-			wlr_log(WLR_ERROR,
+			nx_log(NX_ERROR,
 				"mapnotify: client_surface() returned NULL — "
 				"surface may have been destroyed before mapping");
 #ifdef XWAYLAND
 			if (c->type == X11 && c->surface.xwayland)
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"  X11 client class='%s' — check Xwayland log for errors",
 					c->surface.xwayland->class ? c->surface.xwayland->class : "(null)");
 #endif
 			return;
 		}
 
-		c->scene = wlr_scene_tree_create(layers[LyrTile]);
+		c->scene = nx_scene_tree_create(layers[LyrTile]);
 		if (!c->scene) {
-			wlr_log(WLR_ERROR,
-				"mapnotify: wlr_scene_tree_create() failed — "
+			nx_log(NX_ERROR,
+				"mapnotify: nx_scene_tree_create() failed — "
 				"out of memory or scene graph error");
 			return;
 		}
 		surf->data = c->scene;
 
 		/* Enabled later by a call to arrange() */
-		wlr_scene_node_set_enabled(&c->scene->node, client_is_unmanaged(c));
+		nx_scene_node_set_enabled(&c->scene->node, client_is_unmanaged(c));
 
 		c->scene_surface = c->type == XDGShell
-				? wlr_scene_xdg_surface_create(c->scene, c->surface.xdg)
-				: wlr_scene_subsurface_tree_create(c->scene, client_surface(c));
+				? nx_scene_xdg_surface_create(c->scene, c->surface.xdg)
+				: nx_scene_subsurface_tree_create(c->scene, client_surface(c));
 		if (!c->scene_surface) {
-			wlr_log(WLR_ERROR,
+			nx_log(NX_ERROR,
 				"mapnotify: scene surface creation failed — "
 				"DMA-BUF or buffer import error. Check GPU driver and "
 				"/dev/dri/ permissions");
 			surf->data = NULL;
-			wlr_scene_node_destroy(&c->scene->node);
+			nx_scene_node_destroy(&c->scene->node);
 			c->scene = NULL;
 			return;
 		}
 		c->scene->node.data = c->scene_surface->node.data = c;
 
-		/* Must be registered AFTER the scene surface above: wlroots'
-		 * commit handler resets buffer dest_size to natural size every
-		 * commit, and this hook (running later in signal order) re-pins
-		 * the anim scaling so mid-anim commits can't overshoot the
-		 * lerped box.  Removed in unmapnotify (X11 can remap). */
+		/* Registered after the scene surface hook. */
 		LISTEN(&surf->events.commit, &c->anim_commit, animcommitnotify);
 		LISTEN(&surf->events.client_commit, &c->txn_commit, txncommitnotify);
 	}
 
 	/* Register with ext-foreign-toplevel-list for external tool visibility */
 	if (foreign_toplevel_list) {
-		struct wlr_ext_foreign_toplevel_handle_v1_state ftstate = {
+		struct nx_ext_foreign_toplevel_handle_v1_state ftstate = {
 			.title = client_get_title(c),
 			.app_id = client_get_appid(c),
 		};
-		c->foreign_toplevel_handle = wlr_ext_foreign_toplevel_handle_v1_create(
+		c->foreign_toplevel_handle = nx_ext_foreign_toplevel_handle_v1_create(
 			foreign_toplevel_list, &ftstate);
 	}
 
@@ -1112,8 +1100,8 @@ mapnotify(struct wl_listener *listener, void *data)
 				goto notif_placed;
 #ifdef XWAYLAND
 			if (c->surface.xwayland &&
-					wlr_xwayland_surface_has_window_type(c->surface.xwayland,
-						WLR_XWAYLAND_NET_WM_WINDOW_TYPE_SPLASH))
+					nx_xwayland_surface_has_window_type(c->surface.xwayland,
+						NX_XWAYLAND_NET_WM_WINDOW_TYPE_SPLASH))
 				center = 1;
 #endif
 			if (!center && !client_is_x11_popup(c) &&
@@ -1138,30 +1126,30 @@ mapnotify(struct wl_listener *listener, void *data)
 
 notif_placed:
 		/* Unmanaged clients always are floating */
-		wlr_scene_node_reparent(&c->scene->node,
+		nx_scene_node_reparent(&c->scene->node,
 			layers[client_has_fullscreen_ancestor(c) ? LyrFS : LyrFloat]);
 		if (!c->is_notif)
-			wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
+			nx_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
 		client_set_size(c, c->geom.width, c->geom.height);
 		if (client_wants_focus(c)) {
-			wlr_log(WLR_INFO, "mapnotify: unmanaged client wants focus, setting exclusive_focus");
+			nx_log(NX_INFO, "mapnotify: unmanaged client wants focus, setting exclusive_focus");
 			focusclient(c, 1);
 			exclusive_focus = c;
 		} else {
-			wlr_log(WLR_INFO, "mapnotify: unmanaged client mapped but doesn't want focus");
+			nx_log(NX_INFO, "mapnotify: unmanaged client mapped but doesn't want focus");
 		}
 		goto unset_fullscreen;
 	}
 
 	for (i = 0; i < 4; i++) {
-		c->border[i] = wlr_scene_rect_create(c->scene, 0, 0,
+		c->border[i] = nx_scene_rect_create(c->scene, 0, 0,
 				c->isurgent ? urgentcolor : bordercolor);
 		c->border[i]->node.data = c;
 	}
 	tilefill_create(c);
 
 	/* Initialize client geometry with room for border */
-	client_set_tiled(c, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
+	client_set_tiled(c, NX_EDGE_TOP | NX_EDGE_BOTTOM | NX_EDGE_LEFT | NX_EDGE_RIGHT);
 	c->geom.width += 2 * c->bw;
 	c->geom.height += 2 * c->bw;
 
@@ -1172,16 +1160,16 @@ notif_placed:
 	/* Debug: log client app_id */
 	if (c->type == XDGShell && c->surface.xdg && c->surface.xdg->toplevel) {
 		const char *aid = c->surface.xdg->toplevel->app_id;
-		wlr_log(WLR_INFO, "mapnotify: XDG client mapped, app_id='%s'", aid ? aid : "(null)");
+		nx_log(NX_INFO, "mapnotify: XDG client mapped, app_id='%s'", aid ? aid : "(null)");
 	}
 #ifdef XWAYLAND
 	if (c->type == X11 && c->surface.xwayland) {
 		const char *cls = c->surface.xwayland->class;
-		wlr_log(WLR_INFO, "mapnotify: X11 client mapped, class='%s'", cls ? cls : "(null)");
+		nx_log(NX_INFO, "mapnotify: X11 client mapped, class='%s'", cls ? cls : "(null)");
 	}
 #endif
 
-	wlr_log(WLR_INFO,
+	nx_log(NX_INFO,
 		"GAME_TRACE: mapnotify enter appid='%s' pid=%d type=%s initial=%dx%d "
 		"isfloating=%d isfullscreen=%d selmon='%s'",
 		client_get_appid(c) ? client_get_appid(c) : "(null)",
@@ -1189,7 +1177,7 @@ notif_placed:
 		c->type == X11 ? "X11" : "XDG",
 		initial_w, initial_h,
 		c->isfloating, c->isfullscreen,
-		selmon && selmon->wlr_output ? selmon->wlr_output->name : "(null)");
+		selmon && selmon->nx_output ? selmon->nx_output->name : "(null)");
 
 	/*
 	 * Pre-detect main game windows BEFORE applyrules/setmon. This avoids
@@ -1329,12 +1317,12 @@ notif_placed:
 					+ pre_target_mon->m.x;
 				c->geom.y = (mon_h - initial_h) / 2
 					+ pre_target_mon->m.y;
-				wlr_log(WLR_INFO,
+				nx_log(NX_INFO,
 					"GAME_TRACE: game splash appid='%s' "
 					"mon='%s' %dx%d centered@%d,%d",
 					aid ? aid : "(null)",
-					pre_target_mon->wlr_output
-						? pre_target_mon->wlr_output->name
+					pre_target_mon->nx_output
+						? pre_target_mon->nx_output->name
 						: "(null)",
 					initial_w, initial_h,
 					c->geom.x, c->geom.y);
@@ -1347,8 +1335,8 @@ notif_placed:
 					client_is_x11(c) ? "X11" : "XDG",
 					initial_w, initial_h,
 					c->geom.x, c->geom.y,
-					pre_target_mon->wlr_output
-						? pre_target_mon->wlr_output->name : "(null)",
+					pre_target_mon->nx_output
+						? pre_target_mon->nx_output->name : "(null)",
 					c->steam_game_id, is_confirmed_steam_game,
 					thresh_w, thresh_h,
 					(int)client_get_pid(c));
@@ -1370,7 +1358,7 @@ notif_placed:
 				 * fullscreennotify().
 				 */
 				pre_target_mon = NULL;
-				wlr_log(WLR_INFO,
+				nx_log(NX_INFO,
 					"GAME_TRACE: wine-only heuristic, not "
 					"pre-fullscreening appid='%s' initial=%dx%d",
 					aid ? aid : "(null)", initial_w, initial_h);
@@ -1392,12 +1380,12 @@ notif_placed:
 				pre_fullscreen_game = 1;
 				c->isfullscreen = 1;
 				c->isfloating = 0;
-				wlr_log(WLR_INFO,
+				nx_log(NX_INFO,
 					"GAME_TRACE: pre-fullscreen "
 					"appid='%s' mon='%s' initial=%dx%d",
 					aid ? aid : "(null)",
-					pre_target_mon->wlr_output
-						? pre_target_mon->wlr_output->name
+					pre_target_mon->nx_output
+						? pre_target_mon->nx_output->name
 						: "(null)",
 					initial_w, initial_h);
 				game_log("GAME_MAP: appid='%s' title='%s' "
@@ -1408,8 +1396,8 @@ notif_placed:
 					client_get_title(c) ? client_get_title(c) : "(null)",
 					client_is_x11(c) ? "X11" : "XDG",
 					initial_w, initial_h,
-					pre_target_mon->wlr_output
-						? pre_target_mon->wlr_output->name : "(null)",
+					pre_target_mon->nx_output
+						? pre_target_mon->nx_output->name : "(null)",
 					c->steam_game_id, is_confirmed_steam_game,
 					thresh_w, thresh_h,
 					(int)client_get_pid(c));
@@ -1427,10 +1415,10 @@ notif_placed:
 		 * the game into a floating state. */
 		setmon(c, pre_target_mon, pre_target_mon->tagset[pre_target_mon->seltags]);
 	} else if ((p = client_get_parent(c))) {
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"GAME_TRACE: mapnotify parent-path parent_appid='%s' parent_mon='%s'",
 			client_get_appid(p) ? client_get_appid(p) : "(null)",
-			p->mon && p->mon->wlr_output ? p->mon->wlr_output->name : "(null)");
+			p->mon && p->mon->nx_output ? p->mon->nx_output->name : "(null)");
 		/* Default: tile transient children alongside the parent.
 		 * Browser file-pickers / "open" dialogs / Electron sub-windows
 		 * are large interactive windows that need full tile space — a
@@ -1450,23 +1438,23 @@ notif_placed:
 		}
 		setmon(c, p->mon ? p->mon : selmon, p->tags);
 	} else {
-		wlr_log(WLR_INFO, "GAME_TRACE: mapnotify applyrules-path (no parent)");
+		nx_log(NX_INFO, "GAME_TRACE: mapnotify applyrules-path (no parent)");
 		applyrules(c);
 	}
 	/* Ensure client has a valid monitor. If selmon is NULL (all outputs
 	 * disconnected), the client can't be displayed - clean up and return. */
 	if (!c->mon) {
-		wlr_log(WLR_ERROR, "mapnotify: client '%s' has no monitor, assigning to selmon",
+		nx_log(NX_ERROR, "mapnotify: client '%s' has no monitor, assigning to selmon",
 			client_get_appid(c) ? client_get_appid(c) : "(unknown)");
 		if (selmon) {
 			setmon(c, selmon, 0);
 		} else {
-			wlr_log(WLR_ERROR, "mapnotify: no monitor available, client cannot be displayed");
+			nx_log(NX_ERROR, "mapnotify: no monitor available, client cannot be displayed");
 			return;
 		}
 	}
 	free(c->output);
-	c->output = strdup(c->mon->wlr_output->name);
+	c->output = strdup(c->mon->nx_output->name);
 	if (c->output == NULL)
 		die("oom");
 
@@ -1509,9 +1497,9 @@ notif_placed:
 	 * resolution for any subsequent configure requests from the game.
 	 */
 	if (pre_fullscreen_game) {
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"GAME_TRACE: pre-fullscreen game ready c->mon='%s' geom=%dx%d@%d,%d",
-			c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)",
+			c->mon && c->mon->nx_output ? c->mon->nx_output->name : "(null)",
 			c->geom.width, c->geom.height, c->geom.x, c->geom.y);
 		/* Mapped onto an inactive rule workspace: stays hidden there,
 		 * the active app keeps focus. */
@@ -1531,8 +1519,8 @@ notif_placed:
 		 *
 		 * Return instead of goto unset_fullscreen: we don't want
 		 * a splash to unfullscreen any running game. */
-		wlr_scene_node_set_enabled(&c->scene->node, 1);
-		wlr_scene_node_reparent(&c->scene->node, layers[LyrOverlay]);
+		nx_scene_node_set_enabled(&c->scene->node, 1);
+		nx_scene_node_reparent(&c->scene->node, layers[LyrOverlay]);
 		resize(c, c->geom, 1);
 		focusclient(c, 1);
 		printstatus();
@@ -1553,8 +1541,8 @@ notif_placed:
 	 * et varsel skal være synlig over et fullskjermsvindu. Ingen
 	 * focusclient: varselet skal ikke stjele tastaturet. */
 	if (notify_try_adopt(c)) {
-		wlr_scene_node_set_enabled(&c->scene->node, 1);
-		wlr_scene_node_reparent(&c->scene->node, layers[LyrOverlay]);
+		nx_scene_node_set_enabled(&c->scene->node, 1);
+		nx_scene_node_reparent(&c->scene->node, layers[LyrOverlay]);
 		resize(c, c->geom, 1);
 		notify_start_offscreen(c);
 		/* Unntaket fra "ingen focusclient": en passordboks venter på
@@ -1573,16 +1561,16 @@ notif_placed:
 		int small_w = initial_w > 0 && initial_w < (mon_w * 3) / 4;
 		int small_h = initial_h > 0 && initial_h < (mon_h * 3) / 4;
 
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"GAME_TRACE: game detected appid='%s' c->mon='%s' mon=%dx%d@%d,%d "
 			"initial=%dx%d small=%d,%d",
 			client_get_appid(c) ? client_get_appid(c) : "(null)",
-			c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)",
+			c->mon && c->mon->nx_output ? c->mon->nx_output->name : "(null)",
 			mon_w, mon_h, c->mon->m.x, c->mon->m.y,
 			initial_w, initial_h, small_w, small_h);
 
 		if (small_w && small_h) {
-			wlr_log(WLR_INFO, "Game splash/logo detected: '%s' %dx%d, centering",
+			nx_log(NX_INFO, "Game splash/logo detected: '%s' %dx%d, centering",
 				client_get_appid(c) ? client_get_appid(c) : "(unknown)",
 				initial_w, initial_h);
 			c->isfloating = 1;
@@ -1590,7 +1578,7 @@ notif_placed:
 			c->geom.height = initial_h;
 			c->geom.x = (mon_w - initial_w) / 2 + c->mon->m.x;
 			c->geom.y = (mon_h - initial_h) / 2 + c->mon->m.y;
-			wlr_scene_node_reparent(&c->scene->node, layers[LyrFloat]);
+			nx_scene_node_reparent(&c->scene->node, layers[LyrFloat]);
 			resize(c, c->geom, 1);
 			focusclient(c, 1);
 			printstatus();
@@ -1598,13 +1586,13 @@ notif_placed:
 		}
 
 		/* Main game window → direct true fullscreen, no delay. */
-		wlr_log(WLR_INFO, "Game main window detected: '%s' %dx%d — true fullscreen",
+		nx_log(NX_INFO, "Game main window detected: '%s' %dx%d — true fullscreen",
 			client_get_appid(c) ? client_get_appid(c) : "(unknown)",
 			initial_w, initial_h);
 		setfullscreen(c, 1);
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"GAME_TRACE: after setfullscreen c->mon='%s' geom=%dx%d@%d,%d",
-			c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)",
+			c->mon && c->mon->nx_output ? c->mon->nx_output->name : "(null)",
 			c->geom.width, c->geom.height, c->geom.x, c->geom.y);
 		focusclient(c, 1);
 		printstatus();
@@ -1636,7 +1624,7 @@ notif_placed:
 			c->geom.x = c->mon->m.x + (mw - gw) / 2;
 			c->geom.y = c->mon->m.y + (mh - gh) / 2;
 		}
-		wlr_scene_node_reparent(&c->scene->node, layers[LyrFloat]);
+		nx_scene_node_reparent(&c->scene->node, layers[LyrFloat]);
 		resize(c, c->geom, 1);
 	}
 
@@ -1668,7 +1656,7 @@ unset_fullscreen:
 			if (c->isfullscreen && client_is_forced_fullscreen_appid(old_appid))
 				continue;
 			if (new_appid && old_appid && strcmp(new_appid, old_appid) == 0) {
-				wlr_log(WLR_INFO,
+				nx_log(NX_INFO,
 					"GAME_TRACE: unset_fullscreen skip same-app '%s'",
 					new_appid);
 				continue;
@@ -1712,12 +1700,12 @@ maximizenotify(struct wl_listener *listener, void *data)
 	 * Since xdg-shell protocol v5 we should ignore request of unsupported
 	 * capabilities, just schedule a empty configure when the client uses <5
 	 * protocol version
-	 * wlr_xdg_surface_schedule_configure() is used to send an empty reply. */
+	 * nx_xdg_surface_schedule_configure() is used to send an empty reply. */
 	Client *c = wl_container_of(listener, c, maximize);
 	if (c->surface.xdg->initialized
 			&& wl_resource_get_version(c->surface.xdg->toplevel->resource)
 					< XDG_TOPLEVEL_WM_CAPABILITIES_SINCE_VERSION)
-		wlr_xdg_surface_schedule_configure(c->surface.xdg);
+		nx_xdg_surface_schedule_configure(c->surface.xdg);
 }
 
 void
@@ -1757,7 +1745,7 @@ client_send_configure_only(Client *c, int w, int h)
 }
 
 /*
- * Size the four border rects for a WxH box.  wlr_scene_rect_set_size
+ * Size the four border rects for a WxH box.  nx_scene_rect_set_size
  * asserts size >= 0, so a degenerate geom aborts the whole compositor:
  * Wine apps (Gaea) map a 0x0 toplevel and request fullscreen on it, and
  * H - 2*bw is then negative.  Clamp instead of dying — a zero-size rect
@@ -1776,10 +1764,10 @@ client_set_border_size(Client *c, int w, int h)
 		w = 0;
 	if (side_h < 0)
 		side_h = 0;
-	wlr_scene_rect_set_size(c->border[0], w, c->bw);
-	wlr_scene_rect_set_size(c->border[1], w, c->bw);
-	wlr_scene_rect_set_size(c->border[2], c->bw, side_h);
-	wlr_scene_rect_set_size(c->border[3], c->bw, side_h);
+	nx_scene_rect_set_size(c->border[0], w, c->bw);
+	nx_scene_rect_set_size(c->border[1], w, c->bw);
+	nx_scene_rect_set_size(c->border[2], c->bw, side_h);
+	nx_scene_rect_set_size(c->border[3], c->bw, side_h);
 }
 
 /*
@@ -1798,19 +1786,19 @@ client_set_border_size(Client *c, int w, int h)
  * anim end), natural matches geo and scale becomes 1.0 → crisp.
  */
 void
-client_apply_scene_geom(Client *c, struct wlr_box geo)
+client_apply_scene_geom(Client *c, struct nx_box geo)
 {
 	if (!c || !c->scene || !client_surface(c) || !client_surface(c)->mapped)
 		return;
 
 	c->geom = geo;
 
-	wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
-	wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
+	nx_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
+	nx_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
 	client_set_border_size(c, c->geom.width, c->geom.height);
-	wlr_scene_node_set_position(&c->border[1]->node, 0, c->geom.height - c->bw);
-	wlr_scene_node_set_position(&c->border[2]->node, 0, c->bw);
-	wlr_scene_node_set_position(&c->border[3]->node, c->geom.width - c->bw, c->bw);
+	nx_scene_node_set_position(&c->border[1]->node, 0, c->geom.height - c->bw);
+	nx_scene_node_set_position(&c->border[2]->node, 0, c->bw);
+	nx_scene_node_set_position(&c->border[3]->node, c->geom.width - c->bw, c->bw);
 
 	/* Visual scale: stretch the current surface buffer to the new
 	 * geo box.  Done unconditionally — for static clients geo == the
@@ -1818,7 +1806,7 @@ client_apply_scene_geom(Client *c, struct wlr_box geo)
 	 * happens.  Only matters during transitions when natural lags
 	 * behind geo (or vice versa). */
 	{
-		struct wlr_box natural;
+		struct nx_box natural;
 		client_get_geometry(c, &natural);
 		if (natural.width > 0 && natural.height > 0 &&
 				geo.width > 0 && geo.height > 0)
@@ -1832,31 +1820,31 @@ client_apply_scene_geom(Client *c, struct wlr_box geo)
 static void
 client_clip_reset(Client *c)
 {
-	struct wlr_box clip;
+	struct nx_box clip;
 	int i;
 
 	c->area_clipped = 0;
 
 	client_get_clip(c, &clip);
-	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+	nx_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
 
 	client_set_border_size(c, c->geom.width, c->geom.height);
-	wlr_scene_node_set_position(&c->border[0]->node, 0, 0);
-	wlr_scene_node_set_position(&c->border[1]->node, 0, c->geom.height - c->bw);
-	wlr_scene_node_set_position(&c->border[2]->node, 0, c->bw);
-	wlr_scene_node_set_position(&c->border[3]->node, c->geom.width - c->bw, c->bw);
+	nx_scene_node_set_position(&c->border[0]->node, 0, 0);
+	nx_scene_node_set_position(&c->border[1]->node, 0, c->geom.height - c->bw);
+	nx_scene_node_set_position(&c->border[2]->node, 0, c->bw);
+	nx_scene_node_set_position(&c->border[3]->node, c->geom.width - c->bw, c->bw);
 	for (i = 0; i < 4; i++)
-		wlr_scene_node_set_enabled(&c->border[i]->node, 1);
+		nx_scene_node_set_enabled(&c->border[i]->node, 1);
 
 	if (c->frozen_buffer) {
 		int inner_w = c->geom.width  - 2 * c->bw;
 		int inner_h = c->geom.height - 2 * c->bw;
 		if (inner_w < 1) inner_w = 1;
 		if (inner_h < 1) inner_h = 1;
-		wlr_scene_buffer_set_source_box(c->frozen_buffer, NULL);
-		wlr_scene_buffer_set_dest_size(c->frozen_buffer, inner_w, inner_h);
-		wlr_scene_node_set_position(&c->frozen_buffer->node, c->bw, c->bw);
-		wlr_scene_node_set_enabled(&c->frozen_buffer->node, 1);
+		nx_scene_buffer_set_source_box(c->frozen_buffer, NULL);
+		nx_scene_buffer_set_dest_size(c->frozen_buffer, inner_w, inner_h);
+		nx_scene_node_set_position(&c->frozen_buffer->node, c->bw, c->bw);
+		nx_scene_node_set_enabled(&c->frozen_buffer->node, 1);
 	}
 }
 
@@ -1871,7 +1859,7 @@ client_clip_reset(Client *c)
 void
 client_clip_to_usable(Client *c)
 {
-	struct wlr_box area;
+	struct nx_box area;
 	int ax0, ay0, ax1, ay1;   /* usable area, client-tree-local coords */
 	int box_clip;
 	int nat_w, nat_h;
@@ -1911,19 +1899,10 @@ client_clip_to_usable(Client *c)
 		if (c->area_clipped) {
 			client_clip_reset(c);
 		} else {
-			/* The xdg window-geometry OFFSET can change on any
-			 * commit without a size change (GTK shrinks its CSD
-			 * shadow when the window is tiled/unfocused: geometry
-			 * (25,25)→(20,20)).  The scene xdg helper follows the
-			 * new offset immediately, but a clip taken at the old
-			 * offset keeps cropping at the old origin — the window
-			 * frame loses its first pixels and the content sits
-			 * inset from the tile border by exactly the offset
-			 * delta.  Refresh unconditionally; wlroots dedups
-			 * equal clip boxes so the no-change commit is free. */
-			struct wlr_box fresh;
+			/* Offset may change without a resize. */
+			struct nx_box fresh;
 			client_get_clip(c, &fresh);
-			wlr_scene_subsurface_tree_set_clip(
+			nx_scene_subsurface_tree_set_clip(
 					&c->scene_surface->node, &fresh);
 		}
 		return;
@@ -1935,7 +1914,7 @@ client_clip_to_usable(Client *c)
 	 *    area, both in surface-local coords.  Surface pixel s maps to
 	 *    output geom.{x,y}+bw+s, so the usable area shifts by that. */
 	{
-		struct wlr_box wgeom, clip;
+		struct nx_box wgeom, clip;
 		int su_x0, su_y0, su_x1, su_y1;
 		int cx0, cy0, cx1, cy1;
 
@@ -1967,19 +1946,17 @@ client_clip_to_usable(Client *c)
 		cy1 = MIN(wgeom.y + wgeom.height, su_y1);
 
 		if (cx1 > cx0 && cy1 > cy0)
-			clip = (struct wlr_box){ cx0, cy0, cx1 - cx0, cy1 - cy0 };
+			clip = (struct nx_box){ cx0, cy0, cx1 - cx0, cy1 - cy0 };
 		else
-			/* No overlap: a non-empty box far off the surface makes
-			 * wlroots disable the buffer node (empty clip would instead
-			 * DISABLE clipping and show the whole surface). */
-			clip = (struct wlr_box){ 1 << 20, 0, 1, 1 };
-		wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+			/* An empty box would disable clipping. */
+			clip = (struct nx_box){ 1 << 20, 0, 1, 1 };
+		nx_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
 	}
 
 	/* ── Borders: crop each rect to the usable area; hide if fully out. */
 	{
 		int W = c->geom.width, H = c->geom.height, bw = (int)c->bw;
-		struct wlr_box b[4] = {
+		struct nx_box b[4] = {
 			{ 0,      0,      W,  bw },          /* top */
 			{ 0,      H - bw, W,  bw },          /* bottom */
 			{ 0,      bw,     bw, H - 2 * bw },  /* left */
@@ -1991,26 +1968,18 @@ client_clip_to_usable(Client *c)
 			int ix1 = MIN(b[i].x + b[i].width,  ax1);
 			int iy1 = MIN(b[i].y + b[i].height, ay1);
 			if (ix1 > ix0 && iy1 > iy0) {
-				wlr_scene_rect_set_size(c->border[i],
+				nx_scene_rect_set_size(c->border[i],
 						ix1 - ix0, iy1 - iy0);
-				wlr_scene_node_set_position(&c->border[i]->node,
+				nx_scene_node_set_position(&c->border[i]->node,
 						ix0, iy0);
-				wlr_scene_node_set_enabled(&c->border[i]->node, 1);
+				nx_scene_node_set_enabled(&c->border[i]->node, 1);
 			} else {
-				wlr_scene_node_set_enabled(&c->border[i]->node, 0);
+				nx_scene_node_set_enabled(&c->border[i]->node, 0);
 			}
 		}
 	}
 
-	/* ── Frozen snapshot (present during anims): crop the source rect
-	 *    to the visible slice of the inner box.  Dims come from the
-	 *    cached frozen_buf_w/h, NOT frozen_buffer->buffer — wlroots
-	 *    nulls that pointer as soon as the client releases the
-	 *    snapshotted buffer (first commit after freeze) while the
-	 *    texture keeps rendering.  Gating on it froze this whole
-	 *    branch, so a snapshot disabled at freeze time (tile of an
-	 *    incoming workspace, still off-screen) never re-enabled and
-	 *    the tile slid in empty (Steam/Citrix on every ws switch). */
+	/* Frozen snapshot: crop to the visible slice. */
 	if (c->frozen_buffer && c->frozen_buf_w > 0 && c->frozen_buf_h > 0) {
 		int bw = (int)c->bw;
 		int vx0 = MAX(bw, ax0);
@@ -2020,20 +1989,20 @@ client_clip_to_usable(Client *c)
 		if (iw > 0 && ih > 0 && vx1 > vx0 && vy1 > vy0) {
 			double sw = c->frozen_buf_w;
 			double sh = c->frozen_buf_h;
-			struct wlr_fbox src = {
+			struct nx_fbox src = {
 				.x = (double)(vx0 - bw) / iw * sw,
 				.y = (double)(vy0 - bw) / ih * sh,
 				.width  = (double)(vx1 - vx0) / iw * sw,
 				.height = (double)(vy1 - vy0) / ih * sh,
 			};
-			wlr_scene_buffer_set_source_box(c->frozen_buffer, &src);
-			wlr_scene_buffer_set_dest_size(c->frozen_buffer,
+			nx_scene_buffer_set_source_box(c->frozen_buffer, &src);
+			nx_scene_buffer_set_dest_size(c->frozen_buffer,
 					vx1 - vx0, vy1 - vy0);
-			wlr_scene_node_set_position(&c->frozen_buffer->node,
+			nx_scene_node_set_position(&c->frozen_buffer->node,
 					vx0, vy0);
-			wlr_scene_node_set_enabled(&c->frozen_buffer->node, 1);
+			nx_scene_node_set_enabled(&c->frozen_buffer->node, 1);
 		} else {
-			wlr_scene_node_set_enabled(&c->frozen_buffer->node, 0);
+			nx_scene_node_set_enabled(&c->frozen_buffer->node, 0);
 		}
 	}
 }
@@ -2045,7 +2014,7 @@ client_clip_to_usable(Client *c)
 void
 client_request_size(Client *c, int w, int h)
 {
-	/* negative size aborts wlroots */
+	/* Negative sizes trip assertions. */
 	if (w < 1) w = 1;
 	if (h < 1) h = 1;
 	/* Every outgoing configure re-arms the convergence watchdog. */
@@ -2105,14 +2074,14 @@ client_flush_pending_size(Client *c)
 
 /* Scene placement only, no configure. */
 void
-client_place(Client *c, struct wlr_box geo)
+client_place(Client *c, struct nx_box geo)
 {
-	struct wlr_box clip;
+	struct nx_box clip;
 
 	c->geom = geo;
 	/* last_pos: callers may pre-set geom. */
 	if (c->last_pos_x != geo.x || c->last_pos_y != geo.y) {
-		wlr_scene_node_set_position(&c->scene->node, geo.x, geo.y);
+		nx_scene_node_set_position(&c->scene->node, geo.x, geo.y);
 		c->last_pos_x = geo.x;
 		c->last_pos_y = geo.y;
 	}
@@ -2122,20 +2091,20 @@ client_place(Client *c, struct wlr_box geo)
 	}
 	c->last_size_w = geo.width;
 	c->last_size_h = geo.height;
-	wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
+	nx_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
 	client_set_border_size(c, geo.width, geo.height);
-	wlr_scene_node_set_position(&c->border[1]->node, 0, geo.height - c->bw);
-	wlr_scene_node_set_position(&c->border[2]->node, 0, c->bw);
-	wlr_scene_node_set_position(&c->border[3]->node, geo.width - c->bw, c->bw);
+	nx_scene_node_set_position(&c->border[1]->node, 0, geo.height - c->bw);
+	nx_scene_node_set_position(&c->border[2]->node, 0, c->bw);
+	nx_scene_node_set_position(&c->border[3]->node, geo.width - c->bw, c->bw);
 	client_get_clip(c, &clip);
-	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+	nx_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
 	client_clip_to_usable(c);
 }
 
 void
-resize(Client *c, struct wlr_box geo, int interact)
+resize(Client *c, struct nx_box geo, int interact)
 {
-	struct wlr_box *bbox;
+	struct nx_box *bbox;
 
 	if (!c->mon || !client_surface(c)->mapped)
 		return;
@@ -2179,7 +2148,7 @@ setfloating(Client *c, int floating)
 		return;
 	if (floating && (!was || !c->float_ws || c->float_ws->mon != c->mon))
 		c->float_ws = c->mon->active_ws;
-	wlr_scene_node_reparent(&c->scene->node, layers[c->isfullscreen ||
+	nx_scene_node_reparent(&c->scene->node, layers[c->isfullscreen ||
 			client_has_fullscreen_ancestor(c) ? LyrFS
 			: c->isfloating ? LyrFloat : LyrTile]);
 	/* Workspace attachment follows tileable state */
@@ -2206,7 +2175,7 @@ void
 setfullscreen(Client *c, int fullscreen)
 {
 	int was = c->isfullscreen;
-	struct wlr_box fsx_from = c->geom;
+	struct nx_box fsx_from = c->geom;
 	Workspace *prev_fs_ws = c->fs_ws;
 	int told = fullscreen ? FS_ENTERING : FS_LEAVING;
 
@@ -2230,12 +2199,12 @@ setfullscreen(Client *c, int fullscreen)
 	if (!fullscreen)
 		launchfx_forget_client(c);
 
-	wlr_log(WLR_INFO,
+	nx_log(NX_INFO,
 		"GAME_TRACE: setfullscreen enter appid='%s' want=%d was=%d "
 		"c->mon='%s' geom=%dx%d@%d,%d",
 		client_get_appid(c) ? client_get_appid(c) : "(null)",
 		fullscreen, c->isfullscreen,
-		c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)",
+		c->mon && c->mon->nx_output ? c->mon->nx_output->name : "(null)",
 		c->geom.width, c->geom.height, c->geom.x, c->geom.y);
 
 	c->isfullscreen = fullscreen;
@@ -2245,7 +2214,7 @@ setfullscreen(Client *c, int fullscreen)
 			"ack_pending=%u last_cfg=%dx%d",
 			fullscreen ? "ENTER" : "EXIT",
 			client_get_appid(c) ? client_get_appid(c) : "(null)",
-			c->mon && c->mon->wlr_output ? c->mon->wlr_output->name : "(null)",
+			c->mon && c->mon->nx_output ? c->mon->nx_output->name : "(null)",
 			c->geom.width, c->geom.height, c->geom.x, c->geom.y,
 			c->resize, c->last_configured_w, c->last_configured_h);
 
@@ -2274,7 +2243,7 @@ setfullscreen(Client *c, int fullscreen)
 		c->fs_col_idx = -1;
 	}
 	if (!c->mon || !client_surface(c)->mapped) {
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"GAME_TRACE: setfullscreen early-return mon=%p mapped=%d",
 			(void*)c->mon,
 			client_surface(c) ? client_surface(c)->mapped : -1);
@@ -2299,24 +2268,24 @@ setfullscreen(Client *c, int fullscreen)
 	 * later.  Zeroing here lets the size ride the same configure, so
 	 * the window goes straight to fullscreen in one step. */
 	c->resize = 0;
-	wlr_scene_node_reparent(&c->scene->node, layers[c->isfullscreen
+	nx_scene_node_reparent(&c->scene->node, layers[c->isfullscreen
 			? LyrFS : c->isfloating ? LyrFloat : LyrTile]);
 
 	/* Reparent floating children to match parent's layer */
 	{
 		Client *child;
-		struct wlr_scene_tree *target = layers[fullscreen ? LyrFS : LyrFloat];
+		struct nx_scene_tree *target = layers[fullscreen ? LyrFS : LyrFloat];
 		wl_list_for_each(child, &clients, link) {
 			if (child != c && child->isfloating && !child->isfullscreen
 					&& client_get_parent(child) == c
 					&& child->scene->node.parent != target) {
-				wlr_scene_node_reparent(&child->scene->node, target);
+				nx_scene_node_reparent(&child->scene->node, target);
 			}
 		}
 	}
 
 	if (fullscreen) {
-		struct wlr_box fsgeom;
+		struct nx_box fsgeom;
 
 		c->prev = c->geom;
 		/* Console mode before first configure. */
@@ -2329,19 +2298,17 @@ setfullscreen(Client *c, int fullscreen)
 		 * the animation lands right before the game comes up. */
 		if (!was && !hidden_fs)
 			launchfx_fullscreen_starting(c);
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"GAME_TRACE: setfullscreen resize mon='%s' target=%dx%d@%d,%d "
 			"(c->mon->m=%dx%d@%d,%d)",
-			c->mon->wlr_output->name,
+			c->mon->nx_output->name,
 			fsgeom.width, fsgeom.height, fsgeom.x, fsgeom.y,
 			c->mon->m.width, c->mon->m.height, c->mon->m.x, c->mon->m.y);
 		/* X11 games read modes/desktop size from the RandR primary
 		 * output — point it at the monitor the game fullscreens on. */
 		if (client_is_x11(c) && !hidden_fs)
 			xwayland_set_primary(c->mon);
-		/* Every fullscreen client takes the full output rect (m->m,
-		 * via fsgeom): no border, covers the statusbar, and gives
-		 * wlroots the geometry it needs for direct scanout. */
+		/* Fullscreen takes the whole output rect. */
 		resize(c, fsgeom, 0);
 		/* Cancel any in-flight geometry anim.  After the detach above
 		 * nothing updates target_geom for this client again, so a live
@@ -2384,28 +2351,15 @@ setfullscreen(Client *c, int fullscreen)
 			if (c->isspanned) {
 				Monitor *sm;
 				wl_list_for_each(sm, &mons, link)
-					if (sm != c->mon && sm->wlr_output
-							&& sm->wlr_output->enabled && !sm->is_mirror)
+					if (sm != c->mon && sm->nx_output
+							&& sm->nx_output->enabled && !sm->is_mirror)
 						set_adaptive_sync(sm, 1);
 			}
 		} else if (!hidden_fs && (_is_retro || _is_browser)
-				&& c->mon && c->mon->wlr_output
+				&& c->mon && c->mon->nx_output
 				&& !c->mon->retro_scanout_lock) {
-			/* Lock attach_render so wlroots picks GPU composition
-			 * instead of direct scanout.
-			 *
-			 * Retro: Retroarch buffer modifiers (e.g. 10-bit Y-tiled
-			 * CCS) can be rejected by the kernel on commit, producing
-			 * visible black frames before the commit_failures fallback.
-			 *
-			 * Browser: Chrome delegates fullscreen video to a
-			 * wl_subsurface hinted for a hardware overlay plane,
-			 * punching a transparent hole in its main buffer.  Direct
-			 * scanout of that main buffer drops the subsurface, so the
-			 * video area shows black while the rest of the desktop keeps
-			 * responding — "can't show YouTube video in fullscreen".
-			 * Forcing composition blends the subsurface back in. */
-			wlr_output_lock_attach_render(c->mon->wlr_output, true);
+			/* Retro and browser video need composition. */
+			nx_output_lock_attach_render(c->mon->nx_output, true);
 			c->mon->retro_scanout_lock = 1;
 		}
 		/* Reset frame tracking and video detection state */
@@ -2424,8 +2378,8 @@ setfullscreen(Client *c, int fullscreen)
 				if (c->isspanned) {
 					Monitor *sm;
 					wl_list_for_each(sm, &mons, link)
-						if (sm != c->mon && sm->wlr_output
-								&& sm->wlr_output->enabled && !sm->is_mirror)
+						if (sm != c->mon && sm->nx_output
+								&& sm->nx_output->enabled && !sm->is_mirror)
 							enable_game_vrr(sm);
 				}
 			} else {
@@ -2441,15 +2395,15 @@ setfullscreen(Client *c, int fullscreen)
 	} else {
 		if (fs_anim && !c->isfloating && c->column) {
 			client_start_fs_transition(c, fsx_from);
-			wlr_scene_node_reparent(&c->scene->node, layers[LyrFS]);
+			nx_scene_node_reparent(&c->scene->node, layers[LyrFS]);
 		}
 		/* restore previous size only for floating windows since their
 		 * positions are set by the user. Tiled windows will be positioned
 		 * by the layout system in arrange(). */
 		if (c->isfloating)
 			client_set_target_geom(c, c->prev);
-		if (c->mon && c->mon->wlr_output && c->mon->retro_scanout_lock) {
-			wlr_output_lock_attach_render(c->mon->wlr_output, false);
+		if (c->mon && c->mon->nx_output && c->mon->retro_scanout_lock) {
+			nx_output_lock_attach_render(c->mon->nx_output, false);
 			c->mon->retro_scanout_lock = 0;
 		}
 		/* End of a fullscreen commit-fail scanout fallback (e.g.
@@ -2461,7 +2415,7 @@ setfullscreen(Client *c, int fullscreen)
 			c->mon->scanout_cooldown = 1;
 			diag_logf("SCANOUT", "%s: fullscreen exit — re-arming "
 				"direct scanout on next commit",
-				c->mon->wlr_output ? c->mon->wlr_output->name : "(null)");
+				c->mon->nx_output ? c->mon->nx_output->name : "(null)");
 		}
 		set_adaptive_sync(c->mon, 0);
 		/* Disable game VRR when exiting fullscreen */
@@ -2470,8 +2424,8 @@ setfullscreen(Client *c, int fullscreen)
 		if (c->isspanned) {
 			Monitor *sm;
 			wl_list_for_each(sm, &mons, link) {
-				if (sm != c->mon && sm->wlr_output
-						&& sm->wlr_output->enabled && !sm->is_mirror) {
+				if (sm != c->mon && sm->nx_output
+						&& sm->nx_output->enabled && !sm->is_mirror) {
 					set_adaptive_sync(sm, 0);
 					disable_game_vrr(sm);
 				}
@@ -2521,12 +2475,12 @@ setmon(Client *c, Monitor *m, uint32_t newtags)
 
 	if (oldmon == m)
 		return;
-	wlr_log(WLR_INFO,
+	nx_log(NX_INFO,
 		"GAME_TRACE: setmon appid='%s' old='%s' → new='%s' "
 		"isfullscreen=%d isfloating=%d geom=%dx%d@%d,%d newtags=0x%x",
 		client_get_appid(c) ? client_get_appid(c) : "(null)",
-		oldmon && oldmon->wlr_output ? oldmon->wlr_output->name : "(null)",
-		m && m->wlr_output ? m->wlr_output->name : "(null)",
+		oldmon && oldmon->nx_output ? oldmon->nx_output->name : "(null)",
+		m && m->nx_output ? m->nx_output->name : "(null)",
 		c->isfullscreen, c->isfloating,
 		c->geom.width, c->geom.height, c->geom.x, c->geom.y,
 		newtags);
@@ -2581,8 +2535,8 @@ htpc_ws_refresh_fx(Monitor *m)
 	if (!htpc_mode_active || !m || !m->active_ws)
 		return;
 
-	if (m->wlr_output && m->retro_scanout_lock) {
-		wlr_output_lock_attach_render(m->wlr_output, false);
+	if (m->nx_output && m->retro_scanout_lock) {
+		nx_output_lock_attach_render(m->nx_output, false);
 		m->retro_scanout_lock = 0;
 	}
 	set_adaptive_sync(m, 0);
@@ -2608,23 +2562,17 @@ htpc_ws_refresh_fx(Monitor *m)
 void
 setpsel(struct wl_listener *listener, void *data)
 {
-	/* This event is raised by the seat when a client wants to set the selection,
-	 * usually when the user copies something. wlroots allows compositors to
-	 * ignore such requests if they so choose, but in dwl we always honor them
-	 */
-	struct wlr_seat_request_set_primary_selection_event *event = data;
-	wlr_seat_set_primary_selection(seat, event->source, event->serial);
+	/* Always honor selection requests. */
+	struct nx_seat_request_set_primary_selection_event *event = data;
+	nx_seat_set_primary_selection(seat, event->source, event->serial);
 }
 
 void
 setsel(struct wl_listener *listener, void *data)
 {
-	/* This event is raised by the seat when a client wants to set the selection,
-	 * usually when the user copies something. wlroots allows compositors to
-	 * ignore such requests if they so choose, but in dwl we always honor them
-	 */
-	struct wlr_seat_request_set_selection_event *event = data;
-	wlr_seat_set_selection(seat, event->source, event->serial);
+	/* Always honor selection requests. */
+	struct nx_seat_request_set_selection_event *event = data;
+	nx_seat_set_selection(seat, event->source, event->serial);
 }
 
 void
@@ -2653,7 +2601,7 @@ tagmon(const Arg *arg)
 		return;
 	setmon(sel, dirtomon(arg->i), 0);
 	free(sel->output);
-	if (!(sel->output = strdup(sel->mon->wlr_output->name)))
+	if (!(sel->output = strdup(sel->mon->nx_output->name)))
 		die("oom");
 }
 
@@ -2734,15 +2682,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 	}
 	input_client_gone(c);
 
-	/* Velg managed/unmanaged-gren ut fra FAKTISK listemedlemskap, ikke
-	 * client_is_unmanaged(): ved override_redirect-toggle har wlroots
-	 * allerede flippet flagget når setoverrideredirect kaller oss
-	 * manuelt — flagget beskriver NY tilstand mens listemedlemskapet
-	 * ble bestemt av GAMMEL. Feil gren ga enten wl_list_remove på
-	 * aldri-innsatt link (NULL-deref) eller klient frigjort mens den
-	 * fortsatt sto i clients/fstack (UAF). wl_list_remove NULLer
-	 * next/prev og ecalloc starter NULL, så next != NULL er presist
-	 * "står i clients-lista". */
+	/* Velg gren etter faktisk listemedlemskap. */
 	if (c->link.next == NULL) {
 		if (c == exclusive_focus) {
 			exclusive_focus = NULL;
@@ -2768,7 +2708,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 		 * then animate scale 1→0.5 + opacity 1→0.  Skip for floating /
 		 * fullscreen (Niri only animates tiles closing). */
 		if (!c->isfullscreen && !c->isfloating && unmap_mon) {
-			struct wlr_surface *surf = client_surface(c);
+			struct nx_surface *surf = client_surface(c);
 			if (surf && surf->buffer)
 				anim_spawn_close(unmap_mon, &surf->buffer->base,
 						c->geom);
@@ -2779,7 +2719,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 		overview_purge_client(c);
 		/* Critical: unfreeze BEFORE destroying the scene tree, else
 		 * the snapshot scene_buffer's parent vanishes and we leak
-		 * a wlr_buffer lock. */
+		 * a nx_buffer lock. */
 		client_unfreeze(c);
 		workspace_detach_client(c);
 		/* fs_ws-workspacen destroyes av kompaksjonen under, og
@@ -2806,7 +2746,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 		 * synlige scene-noden og dereffer c->mon (= NULL) → SEGV
 		 * (Steam-vindu som unmapper under oppstart trigget dette). */
 		if (c->scene)
-			wlr_scene_node_set_enabled(&c->scene->node, 0);
+			nx_scene_node_set_enabled(&c->scene->node, 0);
 		setmon(c, NULL, 0);
 
 		/* Close any gap left by an emptied workspace: if active_ws (or
@@ -2858,7 +2798,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 		selmon->classify_cache_client = NULL;
 
 	if (c->foreign_toplevel_handle) {
-		wlr_ext_foreign_toplevel_handle_v1_destroy(c->foreign_toplevel_handle);
+		nx_ext_foreign_toplevel_handle_v1_destroy(c->foreign_toplevel_handle);
 		c->foreign_toplevel_handle = NULL;
 	}
 
@@ -2893,21 +2833,21 @@ unmapnotify(struct wl_listener *listener, void *data)
 	 * commitnotify AFTER this handler), and commitnotify's clip path
 	 * only guards on c->scene_surface being non-NULL — a dangling
 	 * pointer there walks the freed scene tree and trips the
-	 * assert(found) in wlr_scene_subsurface_tree_set_clip (crash).
+	 * assert(found) in nx_scene_subsurface_tree_set_clip (crash).
 	 * mapnotify recreates both unconditionally on remap.
 	 * Also clear surface->data (set to c->scene in mapnotify): the
 	 * wl_surface and any idle inhibitor on it outlive the scene tree
 	 * (Electron apps hold inhibitors across unmap), and
 	 * checkidleinhibitor reads surface->data as a scene tree — a
-	 * stale pointer there SEGVs in wlr_scene_node_coords on the
+	 * stale pointer there SEGVs in nx_scene_node_coords on the
 	 * next arrange(). */
 	{
-		struct wlr_surface *unmap_surf = client_surface(c);
+		struct nx_surface *unmap_surf = client_surface(c);
 		if (unmap_surf && unmap_surf->data == c->scene)
 			unmap_surf->data = NULL;
 	}
 	if (c->scene)
-		wlr_scene_node_destroy(&c->scene->node);
+		nx_scene_node_destroy(&c->scene->node);
 	c->scene = NULL;
 	c->scene_surface = NULL;
 	c->fill[0] = c->fill[1] = NULL;
@@ -2943,7 +2883,7 @@ game_promote_fullscreen(Client *c, int cw, int ch)
 	if (client_rule_nofullscreen(c) || !looks_like_game(c))
 		return 0;
 
-	wlr_log(WLR_INFO, "GAME_TRACE: late promote to fullscreen '%s' %dx%d",
+	nx_log(NX_INFO, "GAME_TRACE: late promote to fullscreen '%s' %dx%d",
 		client_get_appid(c) ? client_get_appid(c) : "(null)", cw, ch);
 	c->is_game_splash = 0;
 	setfullscreen(c, 1);
@@ -2964,11 +2904,11 @@ updatetitle(struct wl_listener *listener, void *data)
 	if (is_retro_emulator_client(c))
 		schedule_game_mode_update();
 	if (c->foreign_toplevel_handle) {
-		struct wlr_ext_foreign_toplevel_handle_v1_state ftstate = {
+		struct nx_ext_foreign_toplevel_handle_v1_state ftstate = {
 			.title = client_get_title(c),
 			.app_id = client_get_appid(c),
 		};
-		wlr_ext_foreign_toplevel_handle_v1_update_state(
+		nx_ext_foreign_toplevel_handle_v1_update_state(
 			c->foreign_toplevel_handle, &ftstate);
 	}
 }
@@ -2976,9 +2916,9 @@ updatetitle(struct wl_listener *listener, void *data)
 void
 urgent(struct wl_listener *listener, void *data)
 {
-	struct wlr_xdg_activation_v1_request_activate_event *event = data;
+	struct nx_xdg_activation_v1_request_activate_event *event = data;
 	Client *c = NULL;
-	toplevel_from_wlr_surface(event->surface, &c, NULL);
+	toplevel_from_nx_surface(event->surface, &c, NULL);
 	if (!c || c == focustop(selmon))
 		return;
 
@@ -3114,7 +3054,7 @@ warpcursor(const Client *c)
 	/* Always warp to the exact center of the selected tile, even if
 	 * the cursor is already inside it.  Niri-style: every focus
 	 * change re-centers the pointer on the new tile. */
-	wlr_cursor_warp_closest(cursor, NULL, target_x, target_y);
+	nx_cursor_warp_closest(cursor, NULL, target_x, target_y);
 }
 
 void

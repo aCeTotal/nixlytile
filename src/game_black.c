@@ -44,13 +44,13 @@ game_black_client(void)
 }
 
 static int
-box_has_content(struct wlr_texture *tex, uint32_t fmt, int x0, int y0,
+box_has_content(struct nx_texture *tex, uint32_t fmt, int x0, int y0,
 		int w, int h, unsigned char *px)
 {
 	int i, n;
 
-	if (!wlr_texture_read_pixels(tex,
-			&(struct wlr_texture_read_pixels_options){
+	if (!nx_texture_read_pixels(tex,
+			&(struct nx_texture_read_pixels_options){
 				.data = px,
 				.format = fmt,
 				.stride = (uint32_t)w * 4,
@@ -72,9 +72,9 @@ int
 game_black_state(const char **out_appid)
 {
 	Client *c = game_black_client();
-	struct wlr_surface *surface;
-	struct wlr_client_buffer *cb;
-	struct wlr_texture *tex;
+	struct nx_surface *surface;
+	struct nx_client_buffer *cb;
+	struct nx_texture *tex;
 	unsigned char *px;
 	uint32_t fmt;
 	int gx, gy, content = 0;
@@ -91,7 +91,7 @@ game_black_state(const char **out_appid)
 	if ((int)tex->width < GB_BOX || (int)tex->height < GB_BOX)
 		return GB_NOBUFFER;
 
-	fmt = wlr_texture_preferred_read_format(tex);
+	fmt = nx_texture_preferred_read_format(tex);
 	if (fmt != DRM_FORMAT_XRGB8888 && fmt != DRM_FORMAT_ARGB8888 &&
 			fmt != DRM_FORMAT_XBGR8888 && fmt != DRM_FORMAT_ABGR8888)
 		fmt = DRM_FORMAT_ARGB8888;

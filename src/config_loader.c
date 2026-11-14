@@ -89,29 +89,29 @@ mod_from_token(const char *tok)
 {
 	if (!strcasecmp(tok, "Mod") || !strcasecmp(tok, "Super") ||
 	    !strcasecmp(tok, "Logo") || !strcasecmp(tok, "Win"))
-		return modkey ? modkey : WLR_MODIFIER_LOGO;
+		return modkey ? modkey : NX_MODIFIER_LOGO;
 	if (!strcasecmp(tok, "MonitorMod") || !strcasecmp(tok, "MonKey"))
-		return monitorkey ? monitorkey : WLR_MODIFIER_CTRL;
-	if (!strcasecmp(tok, "Shift")) return WLR_MODIFIER_SHIFT;
-	if (!strcasecmp(tok, "Ctrl") || !strcasecmp(tok, "Control")) return WLR_MODIFIER_CTRL;
-	if (!strcasecmp(tok, "Alt") || !strcasecmp(tok, "Mod1")) return WLR_MODIFIER_ALT;
-	if (!strcasecmp(tok, "Caps")) return WLR_MODIFIER_CAPS;
-	if (!strcasecmp(tok, "Mod2")) return WLR_MODIFIER_MOD2;
-	if (!strcasecmp(tok, "Mod3")) return WLR_MODIFIER_MOD3;
-	if (!strcasecmp(tok, "Mod5")) return WLR_MODIFIER_MOD5;
+		return monitorkey ? monitorkey : NX_MODIFIER_CTRL;
+	if (!strcasecmp(tok, "Shift")) return NX_MODIFIER_SHIFT;
+	if (!strcasecmp(tok, "Ctrl") || !strcasecmp(tok, "Control")) return NX_MODIFIER_CTRL;
+	if (!strcasecmp(tok, "Alt") || !strcasecmp(tok, "Mod1")) return NX_MODIFIER_ALT;
+	if (!strcasecmp(tok, "Caps")) return NX_MODIFIER_CAPS;
+	if (!strcasecmp(tok, "Mod2")) return NX_MODIFIER_MOD2;
+	if (!strcasecmp(tok, "Mod3")) return NX_MODIFIER_MOD3;
+	if (!strcasecmp(tok, "Mod5")) return NX_MODIFIER_MOD5;
 	return 0;
 }
 
 static unsigned int
 parse_modkey_name(const char *s)
 {
-	if (!s) return WLR_MODIFIER_LOGO;
+	if (!s) return NX_MODIFIER_LOGO;
 	if (!strcasecmp(s, "Super") || !strcasecmp(s, "Logo") || !strcasecmp(s, "Win"))
-		return WLR_MODIFIER_LOGO;
-	if (!strcasecmp(s, "Alt") || !strcasecmp(s, "Mod1")) return WLR_MODIFIER_ALT;
-	if (!strcasecmp(s, "Ctrl") || !strcasecmp(s, "Control")) return WLR_MODIFIER_CTRL;
-	if (!strcasecmp(s, "Shift")) return WLR_MODIFIER_SHIFT;
-	return WLR_MODIFIER_LOGO;
+		return NX_MODIFIER_LOGO;
+	if (!strcasecmp(s, "Alt") || !strcasecmp(s, "Mod1")) return NX_MODIFIER_ALT;
+	if (!strcasecmp(s, "Ctrl") || !strcasecmp(s, "Control")) return NX_MODIFIER_CTRL;
+	if (!strcasecmp(s, "Shift")) return NX_MODIFIER_SHIFT;
+	return NX_MODIFIER_LOGO;
 }
 
 /* Parses "Mod+Shift+H" / "Ctrl+Alt+F1" → modmask + keysym. */
@@ -278,10 +278,10 @@ static unsigned int
 parse_direction(const char *s, long fallback)
 {
 	if (!s) return (unsigned int)fallback;
-	if (!strcasecmp(s, "left"))  return WLR_DIRECTION_LEFT;
-	if (!strcasecmp(s, "right")) return WLR_DIRECTION_RIGHT;
-	if (!strcasecmp(s, "up"))    return WLR_DIRECTION_UP;
-	if (!strcasecmp(s, "down"))  return WLR_DIRECTION_DOWN;
+	if (!strcasecmp(s, "left"))  return NX_DIRECTION_LEFT;
+	if (!strcasecmp(s, "right")) return NX_DIRECTION_RIGHT;
+	if (!strcasecmp(s, "up"))    return NX_DIRECTION_UP;
+	if (!strcasecmp(s, "down"))  return NX_DIRECTION_DOWN;
 	return (unsigned int)fallback;
 }
 
@@ -619,7 +619,7 @@ apply_bind(const KdlNode *n)
 	case A_TAGN: {
 		long li = 0; kdl_arg_int(n, 2, &li);
 		if (li < 0 || li > 31) {
-			wlr_log(WLR_ERROR,
+			nx_log(NX_ERROR,
 				"config: tag index %ld out of range (0-31), bind skipped", li);
 			return;
 		}
@@ -692,7 +692,7 @@ hotapply_libinput(void)
 static void
 hotapply_keyboard(void)
 {
-	if (!kb_group || !kb_group->wlr_group) return;
+	if (!kb_group || !kb_group->nx_group) return;
 	struct xkb_context *ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
 	if (!ctx) return;
 	struct xkb_rule_names names = getxkbrules();
@@ -703,7 +703,7 @@ hotapply_keyboard(void)
 		xkb_keymap_unref(km);
 	}
 	xkb_context_unref(ctx);
-	wlr_keyboard_set_repeat_info(&kb_group->wlr_group->keyboard,
+	nx_keyboard_set_repeat_info(&kb_group->nx_group->keyboard,
 		repeat_rate, repeat_delay);
 }
 
@@ -712,40 +712,40 @@ hotapply_monitors(void)
 {
 	Monitor *m;
 	wl_list_for_each(m, &mons, link) {
-		if (!m->wlr_output) continue;
-		RuntimeMonitorConfig *cfg = find_monitor_config(m->wlr_output->name);
-		struct wlr_output_state st;
-		wlr_output_state_init(&st);
+		if (!m->nx_output) continue;
+		RuntimeMonitorConfig *cfg = find_monitor_config(m->nx_output->name);
+		struct nx_output_state st;
+		nx_output_state_init(&st);
 		if (cfg) {
 			if (!cfg->enabled) {
-				wlr_output_state_set_enabled(&st, 0);
-				wlr_output_commit_state(m->wlr_output, &st);
-				wlr_output_state_finish(&st);
+				nx_output_state_set_enabled(&st, 0);
+				nx_output_commit_state(m->nx_output, &st);
+				nx_output_state_finish(&st);
 				continue;
 			}
-			wlr_output_state_set_enabled(&st, 1);
-			wlr_output_state_set_scale(&st, cfg->scale);
-			wlr_output_state_set_transform(&st, cfg->transform);
+			nx_output_state_set_enabled(&st, 1);
+			nx_output_state_set_scale(&st, cfg->scale);
+			nx_output_state_set_transform(&st, cfg->transform);
 			if (cfg->width > 0 && cfg->height > 0) {
-				struct wlr_output_mode *mode = find_mode(m->wlr_output,
+				struct nx_output_mode *mode = find_mode(m->nx_output,
 					cfg->width, cfg->height, cfg->refresh);
-				if (mode) wlr_output_state_set_mode(&st, mode);
+				if (mode) nx_output_state_set_mode(&st, mode);
 			} else {
-				struct wlr_output_mode *mode = bestmode(m->wlr_output);
-				if (mode) wlr_output_state_set_mode(&st, mode);
+				struct nx_output_mode *mode = bestmode(m->nx_output);
+				if (mode) nx_output_state_set_mode(&st, mode);
 			}
 			m->mfact = cfg->mfact;
 			m->nmaster = cfg->nmaster;
 		} else {
 			/* Undefined monitor: auto highest mode + default scale. */
-			wlr_output_state_set_enabled(&st, 1);
-			wlr_output_state_set_scale(&st, 1.0f);
-			struct wlr_output_mode *mode = bestmode(m->wlr_output);
-			if (mode) wlr_output_state_set_mode(&st, mode);
+			nx_output_state_set_enabled(&st, 1);
+			nx_output_state_set_scale(&st, 1.0f);
+			struct nx_output_mode *mode = bestmode(m->nx_output);
+			if (mode) nx_output_state_set_mode(&st, mode);
 		}
-		if (wlr_output_test_state(m->wlr_output, &st))
-			wlr_output_commit_state(m->wlr_output, &st);
-		wlr_output_state_finish(&st);
+		if (nx_output_test_state(m->nx_output, &st))
+			nx_output_commit_state(m->nx_output, &st);
+		nx_output_state_finish(&st);
 	}
 	/* Trigger relayout. */
 	wl_signal_emit_mutable(&output_layout->events.change, output_layout);
@@ -755,13 +755,13 @@ static void
 hotapply_appearance(void)
 {
 	if (root_bg) {
-		wlr_scene_rect_set_color(root_bg, rootcolor);
+		nx_scene_rect_set_color(root_bg, rootcolor);
 	}
 	Client *c;
 	wl_list_for_each(c, &clients, link) {
 		for (int i = 0; i < 4; i++) {
 			if (c->border[i])
-				wlr_scene_rect_set_color(c->border[i],
+				nx_scene_rect_set_color(c->border[i],
 					c == focustop(selmon) ? focuscolor : bordercolor);
 		}
 	}
@@ -990,9 +990,9 @@ apply_doc(const KdlDoc *doc, int initial)
 			apply_autostart(n, autostart_cmds, &autostart_n);
 		} else if (!strcmp(n->name, "log-level")) {
 			if (kdl_arg_string(n, 0, &s)) {
-				if (!strcasecmp(s, "error"))       log_level = WLR_ERROR;
-				else if (!strcasecmp(s, "info"))   log_level = WLR_INFO;
-				else if (!strcasecmp(s, "debug"))  log_level = WLR_DEBUG;
+				if (!strcasecmp(s, "error"))       log_level = NX_ERROR;
+				else if (!strcasecmp(s, "info"))   log_level = NX_INFO;
+				else if (!strcasecmp(s, "debug"))  log_level = NX_DEBUG;
 			}
 		} else if (!strcmp(n->name, "lock-cursor")) {
 			int b; if (kdl_arg_bool(n, 0, &b)) lock_cursor = b;

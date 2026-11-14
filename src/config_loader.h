@@ -4,9 +4,7 @@
 
 #include <stddef.h>
 
-/* Returns 1 if a config file was found and parsed; 0 if not present or
- * parse error (defaults remain). Path used is logged. Safe to call before
- * setup() — does NOT touch wlroots state. */
+/* Returns 1 if parsed; safe before setup(). */
 int load_config(void);
 
 /* Reload config from disk and hot-apply to running state (xkb keymap,

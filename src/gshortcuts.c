@@ -100,14 +100,14 @@ gs_parse_trigger(const char *trigger, uint32_t *out_mods, xkb_keysym_t *out_sym)
 	for (tok = strtok_r(buf, "+", &save); tok;
 			tok = strtok_r(NULL, "+", &save)) {
 		if (!strcasecmp(tok, "ctrl") || !strcasecmp(tok, "control"))
-			mods |= WLR_MODIFIER_CTRL;
+			mods |= NX_MODIFIER_CTRL;
 		else if (!strcasecmp(tok, "alt"))
-			mods |= WLR_MODIFIER_ALT;
+			mods |= NX_MODIFIER_ALT;
 		else if (!strcasecmp(tok, "shift"))
-			mods |= WLR_MODIFIER_SHIFT;
+			mods |= NX_MODIFIER_SHIFT;
 		else if (!strcasecmp(tok, "logo") || !strcasecmp(tok, "super")
 				|| !strcasecmp(tok, "meta") || !strcasecmp(tok, "win"))
-			mods |= WLR_MODIFIER_LOGO;
+			mods |= NX_MODIFIER_LOGO;
 		else
 			sym = xkb_keysym_from_name(tok,
 				XKB_KEYSYM_CASE_INSENSITIVE);
@@ -336,7 +336,7 @@ gs_create_session(sd_bus_message *m, void *userdata, sd_bus_error *err)
 	}
 	wl_list_insert(&gs_sessions, &sess->link);
 
-	wlr_log(WLR_INFO, "gshortcuts: session %s for app '%s'",
+	nx_log(NX_INFO, "gshortcuts: session %s for app '%s'",
 		session_handle, app_id);
 	return sd_bus_reply_method_return(m, "ua{sv}", 0, 0);
 }
@@ -421,13 +421,13 @@ gs_trigger_string(uint32_t mods, xkb_keysym_t sym, char *buf, size_t len)
 	char name[64];
 
 	buf[0] = '\0';
-	if (mods & WLR_MODIFIER_CTRL)
+	if (mods & NX_MODIFIER_CTRL)
 		strncat(buf, "CTRL+", len - strlen(buf) - 1);
-	if (mods & WLR_MODIFIER_ALT)
+	if (mods & NX_MODIFIER_ALT)
 		strncat(buf, "ALT+", len - strlen(buf) - 1);
-	if (mods & WLR_MODIFIER_SHIFT)
+	if (mods & NX_MODIFIER_SHIFT)
 		strncat(buf, "SHIFT+", len - strlen(buf) - 1);
-	if (mods & WLR_MODIFIER_LOGO)
+	if (mods & NX_MODIFIER_LOGO)
 		strncat(buf, "LOGO+", len - strlen(buf) - 1);
 	if (xkb_keysym_get_name(sym, name, sizeof(name)) <= 0)
 		snprintf(name, sizeof(name), "0x%x", sym);
@@ -578,7 +578,7 @@ gs_bind_shortcuts(sd_bus_message *m, void *userdata, sd_bus_error *err)
 			sc->description = desc;
 			wl_list_insert(sess->shortcuts.prev, &sc->link);
 			gs_resolve(sess, sc, pref);
-			wlr_log(WLR_INFO, "gshortcuts: bind '%s' (%s) -> %s",
+			nx_log(NX_INFO, "gshortcuts: bind '%s' (%s) -> %s",
 				sc->id, sess->app_id,
 				sc->trigger ? sc->trigger : "(unbound)");
 		} else {
@@ -724,7 +724,7 @@ gshortcuts_handle_key(uint32_t mods, uint32_t keycode,
 		free(gs_capture_sc->trigger);
 		gs_capture_sc->trigger = strdup(trig);
 		gs_conf_store(gs_capture_sess->app_id, gs_capture_sc->id, trig);
-		wlr_log(WLR_INFO, "gshortcuts: captured '%s' (%s) -> %s",
+		nx_log(NX_INFO, "gshortcuts: captured '%s' (%s) -> %s",
 			gs_capture_sc->id, gs_capture_sess->app_id, trig);
 		gs_capture_next(gs_capture_sc);
 		return 1;
@@ -828,7 +828,7 @@ gs_bus_event(int fd, uint32_t mask, void *data)
 
 	(void)fd;
 	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR)) {
-		wlr_log(WLR_ERROR, "gshortcuts: session bus hangup — disabling");
+		nx_log(NX_ERROR, "gshortcuts: session bus hangup — disabling");
 		if (gs_bus_source) {
 			wl_event_source_remove(gs_bus_source);
 			gs_bus_source = NULL;
@@ -860,7 +860,7 @@ gshortcuts_init(void)
 
 	r = sd_bus_open_user(&gs_bus);
 	if (r < 0) {
-		wlr_log(WLR_ERROR, "gshortcuts: no session bus: %s",
+		nx_log(NX_ERROR, "gshortcuts: no session bus: %s",
 			strerror(-r));
 		gs_bus = NULL;
 		return;
@@ -872,7 +872,7 @@ gshortcuts_init(void)
 	r = sd_bus_request_name(gs_bus, GS_BUS_NAME,
 		SD_BUS_NAME_ALLOW_REPLACEMENT | SD_BUS_NAME_REPLACE_EXISTING);
 	if (r < 0) {
-		wlr_log(WLR_ERROR, "gshortcuts: cannot own %s: %s",
+		nx_log(NX_ERROR, "gshortcuts: cannot own %s: %s",
 			GS_BUS_NAME, strerror(-r));
 		goto fail;
 	}
@@ -900,7 +900,7 @@ gshortcuts_init(void)
 				gsconf_inotify_event, NULL);
 	}
 
-	wlr_log(WLR_INFO, "gshortcuts: GlobalShortcuts portal backend up (%s)",
+	nx_log(NX_INFO, "gshortcuts: GlobalShortcuts portal backend up (%s)",
 		GS_BUS_NAME);
 	return;
 fail:

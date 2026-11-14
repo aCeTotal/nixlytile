@@ -186,7 +186,7 @@ vrslink_setup(void)
 	if (bind(listen_fd, (struct sockaddr *)&addr,
 			(socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + n)) < 0
 			|| listen(listen_fd, VRSLINK_BACKLOG) < 0) {
-		wlr_log(WLR_ERROR, "vrslink: %s", strerror(errno));
+		nx_log(NX_ERROR, "vrslink: %s", strerror(errno));
 		close(listen_fd);
 		listen_fd = -1;
 		return;

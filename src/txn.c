@@ -13,7 +13,7 @@ txn_owes(Client *c)
 }
 
 static int
-same_size(struct wlr_box a, struct wlr_box b)
+same_size(struct nx_box a, struct nx_box b)
 {
 	return a.width == b.width && a.height == b.height;
 }
@@ -26,19 +26,19 @@ in_pass(Client *c, Monitor *m)
 }
 
 static int
-on_screen(Client *c, struct wlr_box b)
+on_screen(Client *c, struct nx_box b)
 {
-	struct wlr_box out;
+	struct nx_box out;
 
 	b.x += c->tile_ox;
 	b.y += c->tile_oy;
-	return wlr_box_intersection(&out, &b, &c->mon->m);
+	return nx_box_intersection(&out, &b, &c->mon->m);
 }
 
 static void
 show(Client *c)
 {
-	struct wlr_box g = c->tile_shown;
+	struct nx_box g = c->tile_shown;
 
 	g.x += c->tile_ox;
 	g.y += c->tile_oy;
@@ -60,7 +60,7 @@ send_size(Client *c, int w, int h)
 		return;
 	}
 #endif
-	c->txn_serial = wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel, w, h);
+	c->txn_serial = nx_xdg_toplevel_set_size(c->surface.xdg->toplevel, w, h);
 	c->resize = c->txn_serial;
 }
 
@@ -68,7 +68,7 @@ send_size(Client *c, int w, int h)
 static void
 pending_size(Client *c, int *w, int *h)
 {
-	struct wlr_surface *s = client_surface(c);
+	struct nx_surface *s = client_surface(c);
 
 	*w = s->pending.width;
 	*h = s->pending.height;
@@ -94,7 +94,7 @@ content_size(Client *c, int *w, int *h)
 
 /* Returns 1 if a render is owed. */
 static int
-configure(Client *c, struct wlr_box box)
+configure(Client *c, struct nx_box box)
 {
 	int w = MAX(box.width - 2 * (int)c->bw, 1);
 	int h = MAX(box.height - 2 * (int)c->bw, 1);
@@ -120,7 +120,7 @@ loose(Monitor *m)
 }
 
 static int
-fits(Client *c, struct wlr_box box)
+fits(Client *c, struct nx_box box)
 {
 	int cw, ch;
 
@@ -140,7 +140,7 @@ chase(Client *c)
 
 /* Late clients: one configure in flight. */
 static void
-catch_up(Client *c, struct wlr_box box)
+catch_up(Client *c, struct nx_box box)
 {
 	if (!txn_owes(c))
 		configure(c, box);
@@ -228,13 +228,13 @@ settle(Monitor *m)
 		if (c->mon != m || !c->txn_locked)
 			continue;
 		c->txn_locked = 0;
-		wlr_surface_unlock_cached(client_surface(c), c->txn_lock_seq);
+		nx_surface_unlock_cached(client_surface(c), c->txn_lock_seq);
 	}
-	wlr_output_schedule_frame(m->wlr_output);
+	nx_output_schedule_frame(m->nx_output);
 }
 
 void
-txn_set_target(Client *c, struct wlr_box box, int ox, int oy)
+txn_set_target(Client *c, struct nx_box box, int ox, int oy)
 {
 	uint64_t ws_id = c->column->ws->window_id;
 	int bw = (int)c->bw;
@@ -251,7 +251,7 @@ txn_set_target(Client *c, struct wlr_box box, int ox, int oy)
 	/* Already on screen: resize like any tile. */
 	if (c->last_size_w && cw > 0 && ch > 0 &&
 			(cw != box.width - 2 * bw || ch != box.height - 2 * bw)) {
-		c->tile_shown = (struct wlr_box){ c->geom.x - ox, c->geom.y - oy,
+		c->tile_shown = (struct nx_box){ c->geom.x - ox, c->geom.y - oy,
 				cw + 2 * bw, ch + 2 * bw };
 		return;
 	}
@@ -307,17 +307,17 @@ txn_forget(Client *c)
 	if (!c->txn_locked)
 		return;
 	c->txn_locked = 0;
-	wlr_surface_unlock_cached(client_surface(c), c->txn_lock_seq);
+	nx_surface_unlock_cached(client_surface(c), c->txn_lock_seq);
 }
 
 void
 txncommitnotify(struct wl_listener *listener, void *data)
 {
 	Client *c = wl_container_of(listener, c, txn_commit);
-	struct wlr_box box;
+	struct nx_box box;
 
 	/* Held or about to apply: next content. */
-	if (client_surface(c)->pending.committed & WLR_SURFACE_STATE_BUFFER)
+	if (client_surface(c)->pending.committed & NX_SURFACE_STATE_BUFFER)
 		pending_size(c, &c->content_w, &c->content_h);
 	if (fshold_commit(c))
 		return;
@@ -331,7 +331,7 @@ txncommitnotify(struct wl_listener *listener, void *data)
 			settle(c->mon);
 			return;
 		}
-		c->txn_lock_seq = wlr_surface_lock_pending(client_surface(c));
+		c->txn_lock_seq = nx_surface_lock_pending(client_surface(c));
 		c->txn_locked = 1;
 		return;
 	}

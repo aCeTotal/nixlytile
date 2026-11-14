@@ -31,7 +31,7 @@
 static const char *dk_fs_names[6] =
 	{ "ext4", "btrfs", "xfs", "vfat", "exfat", "ntfs" };
 
-static struct wlr_buffer *disk_icon_buf;
+static struct nx_buffer *disk_icon_buf;
 static int disk_icon_w, disk_icon_h;
 static int disk_icon_loaded_h;
 static char disk_icon_loaded_path[PATH_MAX];
@@ -58,7 +58,7 @@ static void
 drop_disk_icon_buffer(void)
 {
 	if (disk_icon_buf) {
-		wlr_buffer_drop(disk_icon_buf);
+		nx_buffer_drop(disk_icon_buf);
 		disk_icon_buf = NULL;
 	}
 	disk_icon_loaded_h = 0;
@@ -71,7 +71,7 @@ ensure_disk_icon_buffer(int target_h)
 {
 	GdkPixbuf *pixbuf = NULL;
 	GError *gerr = NULL;
-	struct wlr_buffer *buf;
+	struct nx_buffer *buf;
 	int w = 0, h = 0;
 	char resolved[PATH_MAX];
 	const char *path = disk_icon_path;

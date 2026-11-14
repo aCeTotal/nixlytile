@@ -124,7 +124,7 @@ remote_mouse_axis(int code, double value)
 void
 remote_mouse_click(int right, int pressed)
 {
-	struct wlr_pointer_button_event ev = {0};
+	struct nx_pointer_button_event ev = {0};
 
 	if (mouse_blocked())
 		return;
@@ -135,7 +135,7 @@ remote_mouse_click(int right, int pressed)
 	ev.time_msec = (uint32_t)(now_ns() / 1000000ULL);
 
 	buttonpress(NULL, &ev);
-	wlr_seat_pointer_notify_frame(seat);
+	nx_seat_pointer_notify_frame(seat);
 }
 
 void

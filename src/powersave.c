@@ -52,7 +52,7 @@ static void
 ps_engage(void)
 {
 	powersave_reassert();
-	wlr_log(WLR_INFO, "powersave: on battery — max saving engaged");
+	nx_log(NX_INFO, "powersave: on battery — max saving engaged");
 }
 
 /* Wall power: quiet, games boost. */
@@ -60,7 +60,7 @@ static void
 ps_wall_power(void)
 {
 	powersave_reassert();
-	wlr_log(WLR_INFO, "powersave: on wall power — quiet profile");
+	nx_log(NX_INFO, "powersave: on wall power — quiet profile");
 }
 
 /* Called from battwatch's event-loop callback whenever the published

@@ -237,7 +237,7 @@ camwatch_init(void)
 	cw_run = 1;
 	if (pthread_create(&cw_thread, NULL, cw_worker, NULL) != 0) {
 		cw_run = 0;
-		wlr_log(WLR_ERROR, "camwatch: thread start failed — "
+		nx_log(NX_ERROR, "camwatch: thread start failed — "
 			"presence and auto-brightness unavailable");
 	}
 }

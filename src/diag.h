@@ -4,7 +4,7 @@
  * Writes detailed render / fullscreen / tile diagnostics to
  * /tmp/nixlytile-diag.log (truncated fresh each session).  Purpose: answer
  * "why did the tile / fullscreen freeze or not work" without needing
- * WLR_DEBUG — a per-monitor render-state heartbeat, a freeze detector that
+ * NX_DEBUG — a per-monitor render-state heartbeat, a freeze detector that
  * names the likely cause, and discrete transition events (fullscreen
  * enter/exit, tile freeze/unfreeze, commit/scene-build failures).
  */

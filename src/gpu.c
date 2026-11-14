@@ -75,23 +75,23 @@ dgpu_hold_awake(GpuInfo *dgpu)
 		return;
 	dgpu_render_fd = open(dgpu->render_path, O_RDWR);
 	if (dgpu_render_fd >= 0)
-		wlr_log(WLR_INFO, "dGPU: holding %s open (fd=%d) to prevent D3cold",
+		nx_log(NX_INFO, "dGPU: holding %s open (fd=%d) to prevent D3cold",
 			dgpu->render_path, dgpu_render_fd);
 	else
-		wlr_log(WLR_ERROR, "dGPU: failed to open %s: %s",
+		nx_log(NX_ERROR, "dGPU: failed to open %s: %s",
 			dgpu->render_path, strerror(errno));
 }
 
 /* NVIDIA's ICD would wake the dGPU. */
-struct wlr_renderer *
-gpu_renderer_create(struct wlr_backend *b)
+struct nx_renderer *
+gpu_renderer_create(struct nx_backend *b)
 {
-	struct wlr_renderer *r;
+	struct nx_renderer *r;
 
 	if (!dgpu_may_sleep)
-		return wlr_renderer_autocreate(b);
+		return nx_renderer_autocreate(b);
 	setenv("VK_LOADER_DRIVERS_DISABLE", "*nvidia*", 1);
-	r = wlr_renderer_autocreate(b);
+	r = nx_renderer_autocreate(b);
 	unsetenv("VK_LOADER_DRIVERS_DISABLE");
 	return r;
 }
@@ -119,7 +119,7 @@ detect_gpus(void)
 
 	dri_dir = opendir("/sys/class/drm");
 	if (!dri_dir) {
-		wlr_log(WLR_ERROR, "Failed to open /sys/class/drm for GPU detection");
+		nx_log(NX_ERROR, "Failed to open /sys/class/drm for GPU detection");
 		return;
 	}
 
@@ -251,26 +251,26 @@ detect_gpus(void)
 			gpu->is_discrete = 0;
 		}
 
-		wlr_log(WLR_INFO, "GPU %d: %s [%s] driver=%s discrete=%d pci=%s",
+		nx_log(NX_INFO, "GPU %d: %s [%s] driver=%s discrete=%d pci=%s",
 			detected_gpu_count, gpu->card_path, gpu->render_path,
 			gpu->driver, gpu->is_discrete, gpu->pci_slot);
 
 		/* Validate render node exists and is accessible */
 		if (gpu->render_path[0]) {
 			if (access(gpu->render_path, F_OK) != 0) {
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"GPU %d: render node %s does NOT exist — "
 					"check that kernel module '%s' is loaded correctly",
 					detected_gpu_count, gpu->render_path, gpu->driver);
 			} else if (access(gpu->render_path, R_OK | W_OK) != 0) {
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"GPU %d: render node %s is not accessible (permission denied) — "
 					"add your user to the 'render' and/or 'video' group: "
 					"sudo usermod -aG render,video $USER",
 					detected_gpu_count, gpu->render_path);
 			}
 		} else {
-			wlr_log(WLR_ERROR,
+			nx_log(NX_ERROR,
 				"GPU %d: no render node found for %s — "
 				"check that kernel module '%s' is loaded and "
 				"/dev/dri/renderD* devices exist",
@@ -280,7 +280,7 @@ detect_gpus(void)
 		/* Validate card node accessibility */
 		if (access(gpu->card_path, F_OK) == 0 &&
 		    access(gpu->card_path, R_OK | W_OK) != 0) {
-			wlr_log(WLR_ERROR,
+			nx_log(NX_ERROR,
 				"GPU %d: card node %s is not accessible (permission denied) — "
 				"check that a session manager (logind/seatd) is running and "
 				"your user is in the 'video' group",
@@ -320,10 +320,10 @@ detect_gpus(void)
 
 	if (discrete_gpu_idx >= 0) {
 		GpuInfo *dgpu = &detected_gpus[discrete_gpu_idx];
-		wlr_log(WLR_INFO, "Selected discrete GPU: card%d (%s) driver=%s",
+		nx_log(NX_INFO, "Selected discrete GPU: card%d (%s) driver=%s",
 			dgpu->card_index, dgpu->pci_slot, dgpu->driver);
 	} else {
-		wlr_log(WLR_INFO, "No discrete GPU detected");
+		nx_log(NX_INFO, "No discrete GPU detected");
 	}
 
 	if (discrete_gpu_idx >= 0) {
@@ -331,7 +331,7 @@ detect_gpus(void)
 
 		dgpu_may_sleep = dgpu_is_offload_only(dgpu);
 		if (dgpu_may_sleep)
-			wlr_log(WLR_INFO, "dGPU: offload only, runtime suspend allowed");
+			nx_log(NX_INFO, "dGPU: offload only, runtime suspend allowed");
 		else
 			dgpu_hold_awake(dgpu);
 
@@ -378,9 +378,9 @@ detect_gpus(void)
 							nv_ver[--n] = '\0';
 						int major = atoi(nv_ver);
 						dgpu->driver_version = major;
-						wlr_log(WLR_INFO, "NVIDIA: driver version %s (major=%d)", nv_ver, major);
+						nx_log(NX_INFO, "NVIDIA: driver version %s (major=%d)", nv_ver, major);
 						if (major > 0 && major < 555) {
-							wlr_log(WLR_ERROR,
+							nx_log(NX_ERROR,
 								"NVIDIA: driver %s is too old for explicit sync. "
 								"Xwayland WILL flicker. Upgrade to 555+ for proper "
 								"Wayland/Xwayland support.", nv_ver);
@@ -389,17 +389,17 @@ detect_gpus(void)
 							 * displays these would degrade the iGPU path. */
 							if (gpu_has_connected_display(dgpu->card_index) ||
 							    integrated_gpu_idx < 0) {
-								setenv("WLR_DRM_NO_ATOMIC", "1", 0);
-								setenv("WLR_DRM_NO_MODIFIERS", "1", 0);
+								setenv("NIXLY_DRM_NO_ATOMIC", "1", 0);
+								setenv("NIXLY_DRM_NO_MODIFIERS", "1", 0);
 							} else {
-								wlr_log(WLR_INFO,
-									"NVIDIA: skipping WLR_DRM_NO_ATOMIC/NO_MODIFIERS — "
+								nx_log(NX_INFO,
+									"NVIDIA: skipping NIXLY_DRM_NO_ATOMIC/NO_MODIFIERS — "
 									"iGPU handles displays, no NVIDIA DRM involvement");
 							}
 						}
 					}
 				} else if (strcmp(dgpu->driver, "nvidia") == 0) {
-					wlr_log(WLR_ERROR,
+					nx_log(NX_ERROR,
 						"NVIDIA: could not read driver version from "
 						"/sys/module/nvidia/version — ensure nvidia-drm.modeset=1 "
 						"kernel parameter is set");
@@ -416,7 +416,7 @@ detect_gpus(void)
 						int kmaj = 0, kmin = 0;
 						sscanf(uts.release, "%d.%d", &kmaj, &kmin);
 						if (kmaj > 6 || (kmaj == 6 && kmin >= 11)) {
-							wlr_log(WLR_ERROR,
+							nx_log(NX_ERROR,
 								"NVIDIA: nvidia-drm.fbdev=1 recommended on kernel %d.%d "
 								"(driver %d). Add 'nvidia-drm.fbdev=1' to kernel parameters "
 								"for better scanout performance.",
@@ -438,14 +438,14 @@ detect_gpus(void)
 						while (gn > 0 && (gsp_val[gn-1] == '\n' || gsp_val[gn-1] == ' '))
 							gsp_val[--gn] = '\0';
 						if (strcmp(gsp_val, "1") == 0 || strcmp(gsp_val, "Y") == 0) {
-							wlr_log(WLR_INFO, "NVIDIA: GSP firmware enabled (good)");
+							nx_log(NX_INFO, "NVIDIA: GSP firmware enabled (good)");
 						} else if (dgpu->driver_version >= 560) {
-							wlr_log(WLR_INFO,
+							nx_log(NX_INFO,
 								"NVIDIA: GSP firmware disabled (NVreg_EnableGpuFirmware=%s). "
 								"GSP is recommended for driver %d+ for improved performance "
 								"and power management.", gsp_val, dgpu->driver_version);
 						} else {
-							wlr_log(WLR_INFO, "NVIDIA: GSP firmware status: %s", gsp_val);
+							nx_log(NX_INFO, "NVIDIA: GSP firmware status: %s", gsp_val);
 						}
 					}
 				}
@@ -463,10 +463,10 @@ detect_gpus(void)
 						while (pn > 0 && (pvm_val[pn-1] == '\n' || pvm_val[pn-1] == ' '))
 							pvm_val[--pn] = '\0';
 						if (strcmp(pvm_val, "1") == 0 || strcmp(pvm_val, "Y") == 0) {
-							wlr_log(WLR_INFO,
+							nx_log(NX_INFO,
 								"NVIDIA: NVreg_PreserveVideoMemoryAllocations=1 (suspend/resume safe)");
 						} else {
-							wlr_log(WLR_INFO,
+							nx_log(NX_INFO,
 								"NVIDIA: NVreg_PreserveVideoMemoryAllocations=%s — "
 								"set to 1 and enable nvidia-suspend/resume systemd services "
 								"for proper suspend/resume support.", pvm_val);
@@ -485,19 +485,19 @@ detect_gpus(void)
 					while (n > 0 && (dpm_val[n-1] == '\n' || dpm_val[n-1] == ' '))
 						dpm_val[--n] = '\0';
 					if (strstr(dpm_val, "2") || strstr(dpm_val, "0x02")) {
-						wlr_log(WLR_ERROR,
+						nx_log(NX_ERROR,
 							"NVIDIA: WARNING — NVreg_DynamicPowerManagement=%s (fine-grained). "
 							"This allows the driver to independently power off the dGPU. "
 							"Set nvidia.NVreg_DynamicPowerManagement=0x00 in boot params to disable.",
 							dpm_val);
 					} else {
-						wlr_log(WLR_INFO, "NVIDIA: NVreg_DynamicPowerManagement=%s", dpm_val);
+						nx_log(NX_INFO, "NVIDIA: NVreg_DynamicPowerManagement=%s", dpm_val);
 					}
 				}
 			}
 		}
 
-		wlr_log(WLR_INFO, "dGPU: D3cold prevention active — power/control=on + render node held open");
+		nx_log(NX_INFO, "dGPU: D3cold prevention active — power/control=on + render node held open");
 	}
 
 	/* Vendor-specific kernel module validation */
@@ -506,14 +506,14 @@ detect_gpus(void)
 		switch (gpu->vendor) {
 		case GPU_VENDOR_NVIDIA:
 			if (!validate_kernel_module("nvidia_drm")) {
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"GPU %d (NVIDIA): nvidia_drm kernel module is NOT loaded — "
 					"DRM/KMS will not work. Load it with: "
 					"modprobe nvidia_drm modeset=1",
 					gpu->card_index);
 			} else if (!check_module_param("nvidia_drm", "modeset", "Y") &&
 			           !check_module_param("nvidia_drm", "modeset", "1")) {
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"GPU %d (NVIDIA): nvidia_drm.modeset is NOT enabled — "
 					"Wayland requires modesetting. Add "
 					"'nvidia-drm.modeset=1' to kernel parameters",
@@ -522,7 +522,7 @@ detect_gpus(void)
 			break;
 		case GPU_VENDOR_INTEL:
 			if (!validate_kernel_module("i915") && !validate_kernel_module("xe")) {
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"GPU %d (Intel): neither i915 nor xe kernel module is loaded — "
 					"Intel GPU will not function. Check kernel config or "
 					"load module: modprobe i915",
@@ -531,7 +531,7 @@ detect_gpus(void)
 			break;
 		case GPU_VENDOR_AMD:
 			if (!validate_kernel_module("amdgpu")) {
-				wlr_log(WLR_ERROR,
+				nx_log(NX_ERROR,
 					"GPU %d (AMD): amdgpu kernel module is NOT loaded — "
 					"AMD GPU will not function. Load it with: "
 					"modprobe amdgpu",
@@ -588,17 +588,7 @@ gpu_has_connected_display(int card_index)
 	return 0;
 }
 
-/*
- * Exclude integrated GPUs from wlroots when they have no connected display.
- *
- * Sets WLR_DRM_DEVICES to include only GPUs that either:
- *   - are discrete (dGPU), or
- *   - have at least one connected display
- *
- * Must be called after detect_gpus() and before wlr_backend_autocreate().
- * When iGPU has a display connected (e.g. motherboard output), it is kept
- * and gets full control — no conflicts with dGPU.
- */
+/* Drops display-less iGPUs from NIXLY_DRM_DEVICES. */
 void
 filter_igpu_without_display(void)
 {
@@ -609,14 +599,10 @@ filter_igpu_without_display(void)
 		return;
 
 	/* Don't override explicit user setting */
-	if (getenv("WLR_DRM_DEVICES"))
+	if (getenv("NIXLY_DRM_DEVICES"))
 		return;
 
-	/* reverseSync: force the Nvidia dGPU first in WLR_DRM_DEVICES so wlroots
-	 * uses it as the primary renderer; remaining GPUs (the iGPU driving the
-	 * panel) stay as secondary output sinks.  wlroots renders the whole
-	 * session on Nvidia and copies the final framebuffer to the iGPU output —
-	 * no per-game cross-GPU buffer copy like the offload path. */
+	/* reverseSync: Nvidia renders, iGPU scans out. */
 	if (nvidia_render_primary &&
 	    discrete_gpu_idx >= 0 &&
 	    detected_gpus[discrete_gpu_idx].vendor == GPU_VENDOR_NVIDIA &&
@@ -631,28 +617,14 @@ filter_igpu_without_display(void)
 			strncat(devices, detected_gpus[i].card_path,
 				sizeof(devices) - strlen(devices) - 1);
 		}
-		setenv("WLR_DRM_DEVICES", devices, 1);
-		wlr_log(WLR_INFO,
-			"reverseSync: Nvidia-primary render, WLR_DRM_DEVICES=%s",
+		setenv("NIXLY_DRM_DEVICES", devices, 1);
+		nx_log(NX_INFO,
+			"reverseSync: Nvidia-primary render, NIXLY_DRM_DEVICES=%s",
 			devices);
 		return;
 	}
 
-	/* Default (offload) mode on a hybrid system with an integrated GPU:
-	 * force the iGPU first in WLR_DRM_DEVICES so wlroots uses it as the
-	 * primary renderer/display.  Without an explicit order wlroots picks
-	 * the primary from non-deterministic udev order; on muxless Intel+Nvidia
-	 * laptops the Nvidia dGPU (no usable CRTC) sometimes wins → black screen
-	 * at boot (intermittent).  Keep the remaining GPUs (dGPU for offload)
-	 * after the iGPU.  card_path is resolved per-boot by detect_gpus(), so
-	 * this stays correct even if card numbers swap across boots.
-	 *
-	 * Only include extra GPUs that actually have a connected display:
-	 * a display-less dGPU as a secondary DRM device gives wlroots a
-	 * backend with zero connectors to init a renderer/allocator on
-	 * (broken on Nvidia proprietary) → black screen.  Offload clients
-	 * reach the dGPU via render nodes; it doesn't need to be a wlroots
-	 * backend for that. */
+	/* Offload: iGPU first, then dGPUs with displays. */
 	if (integrated_gpu_idx >= 0 &&
 	    detected_gpus[integrated_gpu_idx].card_path[0]) {
 		char devices[512];
@@ -662,9 +634,9 @@ filter_igpu_without_display(void)
 			if (i == integrated_gpu_idx || !detected_gpus[i].card_path[0])
 				continue;
 			if (!gpu_has_connected_display(detected_gpus[i].card_index)) {
-				wlr_log(WLR_INFO,
+				nx_log(NX_INFO,
 					"Hybrid: card%d (%s) has no connected display — "
-					"excluding from wlroots backend",
+					"excluding from nixlytile backend",
 					detected_gpus[i].card_index,
 					detected_gpus[i].driver);
 				continue;
@@ -673,9 +645,9 @@ filter_igpu_without_display(void)
 			strncat(devices, detected_gpus[i].card_path,
 				sizeof(devices) - strlen(devices) - 1);
 		}
-		setenv("WLR_DRM_DEVICES", devices, 1);
-		wlr_log(WLR_INFO,
-			"Hybrid: iGPU-primary, WLR_DRM_DEVICES=%s", devices);
+		setenv("NIXLY_DRM_DEVICES", devices, 1);
+		nx_log(NX_INFO,
+			"Hybrid: iGPU-primary, NIXLY_DRM_DEVICES=%s", devices);
 		return;
 	}
 
@@ -689,7 +661,7 @@ filter_igpu_without_display(void)
 	if (gpus_with_display == 0 || gpus_with_display == detected_gpu_count)
 		return;
 
-	/* Build WLR_DRM_DEVICES including only GPUs with connected displays.
+	/* Build NIXLY_DRM_DEVICES including only GPUs with connected displays.
 	 * This ensures:
 	 *   - iGPU without display → excluded (dGPU handles all screens)
 	 *   - dGPU without display → excluded (iGPU has full control, no conflicts)
@@ -699,9 +671,9 @@ filter_igpu_without_display(void)
 
 	for (i = 0; i < detected_gpu_count; i++) {
 		if (!gpu_has_connected_display(detected_gpus[i].card_index)) {
-			wlr_log(WLR_INFO,
+			nx_log(NX_INFO,
 				"GPU card%d (%s, %s) has no connected display — "
-				"excluding from wlroots backend",
+				"excluding from nixlytile backend",
 				detected_gpus[i].card_index, detected_gpus[i].driver,
 				detected_gpus[i].is_discrete ? "dGPU" : "iGPU");
 			continue;
@@ -714,8 +686,8 @@ filter_igpu_without_display(void)
 	}
 
 	if (devices[0] != '\0') {
-		setenv("WLR_DRM_DEVICES", devices, 1);
-		wlr_log(WLR_INFO, "WLR_DRM_DEVICES=%s (GPUs without display excluded)",
+		setenv("NIXLY_DRM_DEVICES", devices, 1);
+		nx_log(NX_INFO, "NIXLY_DRM_DEVICES=%s (GPUs without display excluded)",
 			devices);
 	}
 }
@@ -817,7 +789,7 @@ dgpu_power_watchdog_tick(void *data)
 
 		/* Verify the render node fd is still open */
 		if (dgpu_render_fd >= 0 && fcntl(dgpu_render_fd, F_GETFD) < 0) {
-			wlr_log(WLR_ERROR, "dGPU: render node fd lost, re-opening %s",
+			nx_log(NX_ERROR, "dGPU: render node fd lost, re-opening %s",
 				dgpu->render_path);
 			dgpu_render_fd = open(dgpu->render_path, O_RDWR);
 		}
@@ -911,9 +883,9 @@ set_dgpu_env(void)
 			setenv("QT_QPA_PLATFORM", "xcb", 1);
 			setenv("GDK_BACKEND", "x11", 1);
 
-			wlr_log(WLR_INFO, "NVIDIA: hybrid mode (iGPU + dGPU), PRIME offload enabled");
+			nx_log(NX_INFO, "NVIDIA: hybrid mode (iGPU + dGPU), PRIME offload enabled");
 		} else {
-			wlr_log(WLR_INFO, "NVIDIA: single-GPU mode, PRIME offload skipped");
+			nx_log(NX_INFO, "NVIDIA: single-GPU mode, PRIME offload skipped");
 		}
 
 		/* DRI_PRIME for nouveau (doesn't use PRIME offload vars) */
@@ -984,23 +956,23 @@ set_dgpu_env(void)
 
 		/* Version-based diagnostics */
 		if (dgpu->driver_version > 0 && dgpu->driver_version < 570) {
-			wlr_log(WLR_INFO,
+			nx_log(NX_INFO,
 				"NVIDIA: driver %d < 570 — consider adding 'nvidia-drm.fbdev=1' "
 				"to kernel parameters for better scanout performance.",
 				dgpu->driver_version);
 		}
 		if (dgpu->driver_version >= 565) {
-			wlr_log(WLR_INFO,
+			nx_log(NX_INFO,
 				"NVIDIA: driver %d — GLX_EXT_buffer_age re-enabled (good for compositors)",
 				dgpu->driver_version);
 		}
 
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"NVIDIA: compositor env set — GBM_BACKEND=nvidia-drm, "
 			"__GLX_VENDOR_LIBRARY_NAME=nvidia (CPU cursor buffer for HW cursor)"
 			"%s",
 			dgpu->driver_version > 0 && dgpu->driver_version < 555
-				? ", WLR_DRM_NO_MODIFIERS=1 (old driver)" : "");
+				? ", NIXLY_DRM_NO_MODIFIERS=1 (old driver)" : "");
 
 		break;
 

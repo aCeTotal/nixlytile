@@ -116,7 +116,7 @@ perform_toggle(void)
 		current_pid = pid;
 		current_app = next_app;
 	}
-	wlr_log(WLR_INFO, "apptoggle: spawn '%s' pid=%d", next_cmd, (int)pid);
+	nx_log(NX_INFO, "apptoggle: spawn '%s' pid=%d", next_cmd, (int)pid);
 }
 
 static int
@@ -125,7 +125,7 @@ gamepad_event_cb(int fd, uint32_t mask, void *data)
 	GamepadDev *gp = data;
 
 	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR)) {
-		wlr_log(WLR_INFO, "apptoggle: gamepad gone %s", gp->path);
+		nx_log(NX_INFO, "apptoggle: gamepad gone %s", gp->path);
 		remove_device(gp);
 		return 0;
 	}
@@ -145,7 +145,7 @@ gamepad_event_cb(int fd, uint32_t mask, void *data)
 			perform_toggle();
 	}
 	if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
-		wlr_log(WLR_INFO, "apptoggle: read err on %s, dropping", gp->path);
+		nx_log(NX_INFO, "apptoggle: read err on %s, dropping", gp->path);
 		remove_device(gp);
 	}
 	return 0;
@@ -184,7 +184,7 @@ try_add_device(const char *path)
 		return;
 	}
 	wl_list_insert(&gamepads_list, &gp->link);
-	wlr_log(WLR_INFO, "apptoggle: gamepad added %s", path);
+	nx_log(NX_INFO, "apptoggle: gamepad added %s", path);
 }
 
 static int
@@ -264,7 +264,7 @@ apptoggle_setup(void)
 	}
 	scan_devices();
 	apptoggle_inited = 1;
-	wlr_log(WLR_INFO, "apptoggle: setup done (tracked pid=%d app=%d)",
+	nx_log(NX_INFO, "apptoggle: setup done (tracked pid=%d app=%d)",
 		(int)current_pid, (int)current_app);
 }
 

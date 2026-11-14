@@ -6,7 +6,7 @@
 
 /* Box the client gets after switching; 0 if unknown. */
 static int
-switch_box(Client *c, int on, struct wlr_box *box)
+switch_box(Client *c, int on, struct nx_box *box)
 {
 	int w, h;
 
@@ -19,7 +19,7 @@ switch_box(Client *c, int on, struct wlr_box *box)
 		return 0;
 	workspace_new_column_inner_size(c->fs_ws && c->fs_ws->mon == c->mon
 			? c->fs_ws : c->mon->active_ws, (int)borderpx, &w, &h);
-	*box = (struct wlr_box){ 0, 0, w + 2 * (int)borderpx, h + 2 * (int)borderpx };
+	*box = (struct nx_box){ 0, 0, w + 2 * (int)borderpx, h + 2 * (int)borderpx };
 	return w > 0 && h > 0;
 }
 
@@ -51,7 +51,7 @@ tell(Client *c, int on, int w, int h)
 		return;
 	}
 #endif
-	c->fs_serial = c->resize = wlr_xdg_toplevel_set_size(
+	c->fs_serial = c->resize = nx_xdg_toplevel_set_size(
 			c->surface.xdg->toplevel, w, h);
 }
 
@@ -68,7 +68,7 @@ apply(Client *c)
 void
 fullscreen_request(Client *c, int on)
 {
-	struct wlr_box box;
+	struct nx_box box;
 	int bw = on ? 0 : (int)borderpx;
 	int cw, ch;
 
@@ -99,7 +99,7 @@ fullscreen_request(Client *c, int on)
 	c->fs_hold = c->fs_told = on ? FS_ENTERING : FS_LEAVING;
 	client_set_bounds(c, box.width, box.height);
 	tell(c, on, box.width - 2 * bw, box.height - 2 * bw);
-	wlr_output_schedule_frame(c->mon->wlr_output);
+	nx_output_schedule_frame(c->mon->nx_output);
 }
 
 /* Returns 1 when the commit switched fullscreen. */

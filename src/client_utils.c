@@ -260,7 +260,7 @@ client_hidden_map(Client *c)
 pid_t
 client_get_pid(Client *c)
 {
-	struct wlr_surface *surface;
+	struct nx_surface *surface;
 	struct wl_client *wl_client;
 	pid_t pid = 0;
 	uid_t uid;
@@ -304,11 +304,11 @@ steam_launch_bigpicture(void)
 
 	/* Check if Steam is already running */
 	if (is_process_running("steam")) {
-		wlr_log(WLR_INFO, "Steam already running, not launching again");
+		nx_log(NX_INFO, "Steam already running, not launching again");
 		return;
 	}
 
-	wlr_log(WLR_INFO, "Launching Steam Big Picture mode");
+	nx_log(NX_INFO, "Launching Steam Big Picture mode");
 
 	pid = fork();
 	if (pid == 0) {
@@ -340,7 +340,7 @@ steam_kill(void)
 		return;
 	}
 
-	wlr_log(WLR_INFO, "Killing Steam process");
+	nx_log(NX_INFO, "Killing Steam process");
 
 	/* Use pkill to kill all steam processes */
 	{
@@ -383,7 +383,7 @@ read_steam_properties(Client *c)
 	if (!c || c->type != X11 || !c->surface.xwayland)
 		return;
 
-	xc = wlr_xwayland_get_xwm_connection(xwayland);
+	xc = nx_xwayland_get_xwm_connection(xwayland);
 	if (!xc)
 		return;
 
@@ -443,7 +443,7 @@ read_steam_properties(Client *c)
 	}
 
 	if (c->steam_game_id || c->is_steam_overlay || c->is_steam_bigpicture) {
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"Steam X11 props: appid='%s' STEAM_GAME=%u "
 			"OVERLAY=%d BIGPICTURE=%d",
 			client_get_appid(c) ? client_get_appid(c) : "(null)",
@@ -697,7 +697,7 @@ is_steam_game(Client *c)
 			c->launcher_child_verdict =
 				is_game_launcher_child(pid) ? 1 : -1;
 		if (c->launcher_child_verdict > 0) {
-			wlr_log(WLR_INFO, "Detected Steam game: app_id='%s', pid=%d",
+			nx_log(NX_INFO, "Detected Steam game: app_id='%s', pid=%d",
 				app_id ? app_id : "(null)", pid);
 			return 1;
 		}
@@ -828,7 +828,7 @@ looks_like_game_uncached(Client *c)
 			c->game_runtime_verdict =
 				is_game_runtime_child(pid) ? 1 : -1;
 			if (c->game_runtime_verdict > 0)
-				wlr_log(WLR_INFO,
+				nx_log(NX_INFO,
 					"Detected game via launcher ancestry: "
 					"app_id='%s', pid=%d",
 					app ? app : "(null)", pid);

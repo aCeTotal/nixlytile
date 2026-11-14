@@ -7,7 +7,7 @@
  * that they will simply compile out if the chosen #defines leave them unused.
  */
 
-/* wlroots 0.20 no longer exposes server-header macros via its public headers */
+/* Fallbacks for missing protocol macros. */
 #ifndef XDG_TOPLEVEL_CONFIGURE_BOUNDS_SINCE_VERSION
 #define XDG_TOPLEVEL_CONFIGURE_BOUNDS_SINCE_VERSION 4
 #endif
@@ -28,7 +28,7 @@ client_is_x11(Client *c)
 	return 0;
 }
 
-static inline struct wlr_surface *
+static inline struct nx_surface *
 client_surface(Client *c)
 {
 #ifdef XWAYLAND
@@ -39,56 +39,56 @@ client_surface(Client *c)
 }
 
 static inline int
-toplevel_from_wlr_surface(struct wlr_surface *s, Client **pc, LayerSurface **pl)
+toplevel_from_nx_surface(struct nx_surface *s, Client **pc, LayerSurface **pl)
 {
-	struct wlr_xdg_surface *xdg_surface, *tmp_xdg_surface;
-	struct wlr_surface *root_surface;
-	struct wlr_layer_surface_v1 *layer_surface;
+	struct nx_xdg_surface *xdg_surface, *tmp_xdg_surface;
+	struct nx_surface *root_surface;
+	struct nx_layer_surface_v1 *layer_surface;
 	Client *c = NULL;
 	LayerSurface *l = NULL;
 	int type = -1;
 #ifdef XWAYLAND
-	struct wlr_xwayland_surface *xsurface;
+	struct nx_xwayland_surface *xsurface;
 #endif
 
 	if (!s)
 		return -1;
-	root_surface = wlr_surface_get_root_surface(s);
+	root_surface = nx_surface_get_root_surface(s);
 
 #ifdef XWAYLAND
-	if ((xsurface = wlr_xwayland_surface_try_from_wlr_surface(root_surface))) {
+	if ((xsurface = nx_xwayland_surface_try_from_nx_surface(root_surface))) {
 		c = xsurface->data;
 		type = c->type;
 		goto end;
 	}
 #endif
 
-	if ((layer_surface = wlr_layer_surface_v1_try_from_wlr_surface(root_surface))) {
+	if ((layer_surface = nx_layer_surface_v1_try_from_nx_surface(root_surface))) {
 		l = layer_surface->data;
 		type = LayerShell;
 		goto end;
 	}
 
-	xdg_surface = wlr_xdg_surface_try_from_wlr_surface(root_surface);
+	xdg_surface = nx_xdg_surface_try_from_nx_surface(root_surface);
 	while (xdg_surface) {
 		tmp_xdg_surface = NULL;
 		switch (xdg_surface->role) {
-		case WLR_XDG_SURFACE_ROLE_POPUP:
+		case NX_XDG_SURFACE_ROLE_POPUP:
 			if (!xdg_surface->popup || !xdg_surface->popup->parent)
 				return -1;
 
-			tmp_xdg_surface = wlr_xdg_surface_try_from_wlr_surface(xdg_surface->popup->parent);
+			tmp_xdg_surface = nx_xdg_surface_try_from_nx_surface(xdg_surface->popup->parent);
 
 			if (!tmp_xdg_surface)
-				return toplevel_from_wlr_surface(xdg_surface->popup->parent, pc, pl);
+				return toplevel_from_nx_surface(xdg_surface->popup->parent, pc, pl);
 
 			xdg_surface = tmp_xdg_surface;
 			break;
-		case WLR_XDG_SURFACE_ROLE_TOPLEVEL:
+		case NX_XDG_SURFACE_ROLE_TOPLEVEL:
 			c = xdg_surface->data;
 			type = c->type;
 			goto end;
-		case WLR_XDG_SURFACE_ROLE_NONE:
+		case NX_XDG_SURFACE_ROLE_NONE:
 			return -1;
 		}
 	}
@@ -103,21 +103,21 @@ end:
 
 /* The others */
 static inline void
-client_activate_surface(struct wlr_surface *s, int activated)
+client_activate_surface(struct nx_surface *s, int activated)
 {
-	struct wlr_xdg_toplevel *toplevel;
+	struct nx_xdg_toplevel *toplevel;
 #ifdef XWAYLAND
-	struct wlr_xwayland_surface *surface;
-	if ((surface = wlr_xwayland_surface_try_from_wlr_surface(s))) {
+	struct nx_xwayland_surface *surface;
+	if ((surface = nx_xwayland_surface_try_from_nx_surface(s))) {
 		if (activated && surface->minimized)
-			wlr_xwayland_surface_set_minimized(surface, false);
+			nx_xwayland_surface_set_minimized(surface, false);
 
-		wlr_xwayland_surface_activate(surface, activated);
+		nx_xwayland_surface_activate(surface, activated);
 		return;
 	}
 #endif
-	if ((toplevel = wlr_xdg_toplevel_try_from_wlr_surface(s)))
-		wlr_xdg_toplevel_set_activated(toplevel, activated);
+	if ((toplevel = nx_xdg_toplevel_try_from_nx_surface(s)))
+		nx_xdg_toplevel_set_activated(toplevel, activated);
 }
 
 static inline uint32_t
@@ -132,7 +132,7 @@ client_set_bounds(Client *c, int32_t width, int32_t height)
 			&& (c->bounds.width != width || c->bounds.height != height)) {
 		c->bounds.width = width;
 		c->bounds.height = height;
-		return wlr_xdg_toplevel_set_bounds(c->surface.xdg->toplevel, width, height);
+		return nx_xdg_toplevel_set_bounds(c->surface.xdg->toplevel, width, height);
 	}
 	return 0;
 }
@@ -148,9 +148,9 @@ client_get_appid(Client *c)
 }
 
 static inline void
-client_get_clip(Client *c, struct wlr_box *clip)
+client_get_clip(Client *c, struct nx_box *clip)
 {
-	*clip = (struct wlr_box){
+	*clip = (struct nx_box){
 		.x = 0,
 		.y = 0,
 		.width = c->geom.width - 2 * (int)c->bw,
@@ -167,7 +167,7 @@ client_get_clip(Client *c, struct wlr_box *clip)
 }
 
 static inline void
-client_get_geometry(Client *c, struct wlr_box *geom)
+client_get_geometry(Client *c, struct nx_box *geom)
 {
 #ifdef XWAYLAND
 	if (client_is_x11(c)) {
@@ -183,7 +183,7 @@ client_get_geometry(Client *c, struct wlr_box *geom)
 
 /* Size the client has actually COMMITTED — unlike client_get_geometry,
  * which for X11 returns xsurface->width/height, overwritten synchronously
- * by wlr_xwayland_surface_configure with the size we just REQUESTED.
+ * by nx_xwayland_surface_configure with the size we just REQUESTED.
  * Scaling, box-clipping and "has the client caught up" checks need the
  * committed truth, or they compare a value against itself. */
 static inline void
@@ -191,7 +191,7 @@ client_get_committed_size(Client *c, int *w, int *h)
 {
 #ifdef XWAYLAND
 	if (client_is_x11(c)) {
-		struct wlr_surface *s = client_surface(c);
+		struct nx_surface *s = client_surface(c);
 		*w = s ? s->current.width : 0;
 		*h = s ? s->current.height : 0;
 		return;
@@ -205,9 +205,9 @@ client_get_committed_size(Client *c, int *w, int *h)
 static inline int
 client_commit_answers(Client *c, uint32_t serial, int w, int h)
 {
-	struct wlr_surface *s = client_surface(c);
+	struct nx_surface *s = client_surface(c);
 
-	if (!(s->pending.committed & WLR_SURFACE_STATE_BUFFER))
+	if (!(s->pending.committed & NX_SURFACE_STATE_BUFFER))
 		return 0;
 #ifdef XWAYLAND
 	if (client_is_x11(c))
@@ -236,7 +236,7 @@ client_get_min_size(Client *c, int *w, int *h)
 	}
 #endif
 	if (c->surface.xdg->toplevel) {
-		struct wlr_xdg_toplevel_state *st =
+		struct nx_xdg_toplevel_state *st =
 				&c->surface.xdg->toplevel->current;
 		*w = st->min_width  > 0 ? st->min_width  : 0;
 		*h = st->min_height > 0 ? st->min_height : 0;
@@ -250,7 +250,7 @@ client_set_resizing(Client *c, int resizing)
 	if (client_is_x11(c))
 		return;
 #endif
-	wlr_xdg_toplevel_set_resizing(c->surface.xdg->toplevel, resizing);
+	nx_xdg_toplevel_set_resizing(c->surface.xdg->toplevel, resizing);
 }
 
 static inline Client *
@@ -260,12 +260,12 @@ client_get_parent(Client *c)
 #ifdef XWAYLAND
 	if (client_is_x11(c)) {
 		if (c->surface.xwayland->parent)
-			toplevel_from_wlr_surface(c->surface.xwayland->parent->surface, &p, NULL);
+			toplevel_from_nx_surface(c->surface.xwayland->parent->surface, &p, NULL);
 		return p;
 	}
 #endif
 	if (c->surface.xdg->toplevel->parent)
-		toplevel_from_wlr_surface(c->surface.xdg->toplevel->parent->base->surface, &p, NULL);
+		toplevel_from_nx_surface(c->surface.xdg->toplevel->parent->base->surface, &p, NULL);
 	return p;
 }
 
@@ -286,7 +286,7 @@ client_has_children(Client *c)
 static inline int
 client_supports_net_wm_ping(Client *c)
 {
-	struct wlr_xwayland_surface *s = c->surface.xwayland;
+	struct nx_xwayland_surface *s = c->surface.xwayland;
 	size_t i;
 
 	if (!atom_net_wm_ping || !s)
@@ -313,15 +313,15 @@ client_is_float_type(Client *c)
 {
 #ifdef XWAYLAND
 	if (client_is_x11(c)) {
-		struct wlr_xwayland_surface *surface = c->surface.xwayland;
+		struct nx_xwayland_surface *surface = c->surface.xwayland;
 		if (surface->modal)
 			return 1;
 
 		/* Float for explicit non-app window types */
-		if (wlr_xwayland_surface_has_window_type(surface, WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DIALOG)
-				|| wlr_xwayland_surface_has_window_type(surface, WLR_XWAYLAND_NET_WM_WINDOW_TYPE_SPLASH)
-				|| wlr_xwayland_surface_has_window_type(surface, WLR_XWAYLAND_NET_WM_WINDOW_TYPE_TOOLBAR)
-				|| wlr_xwayland_surface_has_window_type(surface, WLR_XWAYLAND_NET_WM_WINDOW_TYPE_UTILITY)) {
+		if (nx_xwayland_surface_has_window_type(surface, NX_XWAYLAND_NET_WM_WINDOW_TYPE_DIALOG)
+				|| nx_xwayland_surface_has_window_type(surface, NX_XWAYLAND_NET_WM_WINDOW_TYPE_SPLASH)
+				|| nx_xwayland_surface_has_window_type(surface, NX_XWAYLAND_NET_WM_WINDOW_TYPE_TOOLBAR)
+				|| nx_xwayland_surface_has_window_type(surface, NX_XWAYLAND_NET_WM_WINDOW_TYPE_UTILITY)) {
 			return 1;
 		}
 
@@ -351,7 +351,7 @@ client_is_float_type(Client *c)
 	 * a parent but are clearly not meant to be tiled.
 	 * Parent windows are handled in mapnotify via client_get_parent(). */
 	if (c->type == XDGShell && c->surface.xdg && c->surface.xdg->toplevel) {
-		struct wlr_xdg_toplevel_state *st = &c->surface.xdg->toplevel->current;
+		struct nx_xdg_toplevel_state *st = &c->surface.xdg->toplevel->current;
 		if (st->min_width > 0 && st->min_height > 0 &&
 				st->max_width > 0 && st->max_height > 0 &&
 				st->max_width == st->min_width &&
@@ -367,12 +367,12 @@ client_is_rendered_on_mon(Client *c, Monitor *m)
 	/* This is needed for when you don't want to check formal assignment,
 	 * but rather actual displaying of the pixels.
 	 * Usually VISIBLEON suffices and is also faster. */
-	struct wlr_surface_output *s;
+	struct nx_surface_output *s;
 	int unused_lx, unused_ly;
-	if (!wlr_scene_node_coords(&c->scene->node, &unused_lx, &unused_ly))
+	if (!nx_scene_node_coords(&c->scene->node, &unused_lx, &unused_ly))
 		return 0;
 	wl_list_for_each(s, &client_surface(c)->current_outputs, link)
-		if (s->output == m->wlr_output)
+		if (s->output == m->nx_output)
 			return 1;
 	return 0;
 }
@@ -421,34 +421,34 @@ client_is_x11_popup(Client *c)
 {
 #ifdef XWAYLAND
 	if (client_is_x11(c))
-		return wlr_xwayland_surface_has_window_type(c->surface.xwayland,
-					WLR_XWAYLAND_NET_WM_WINDOW_TYPE_MENU)
-			|| wlr_xwayland_surface_has_window_type(c->surface.xwayland,
-					WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DROPDOWN_MENU)
-			|| wlr_xwayland_surface_has_window_type(c->surface.xwayland,
-					WLR_XWAYLAND_NET_WM_WINDOW_TYPE_POPUP_MENU)
-			|| wlr_xwayland_surface_has_window_type(c->surface.xwayland,
-					WLR_XWAYLAND_NET_WM_WINDOW_TYPE_TOOLTIP)
-			|| wlr_xwayland_surface_has_window_type(c->surface.xwayland,
-					WLR_XWAYLAND_NET_WM_WINDOW_TYPE_COMBO)
-			|| wlr_xwayland_surface_has_window_type(c->surface.xwayland,
-					WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DND);
+		return nx_xwayland_surface_has_window_type(c->surface.xwayland,
+					NX_XWAYLAND_NET_WM_WINDOW_TYPE_MENU)
+			|| nx_xwayland_surface_has_window_type(c->surface.xwayland,
+					NX_XWAYLAND_NET_WM_WINDOW_TYPE_DROPDOWN_MENU)
+			|| nx_xwayland_surface_has_window_type(c->surface.xwayland,
+					NX_XWAYLAND_NET_WM_WINDOW_TYPE_POPUP_MENU)
+			|| nx_xwayland_surface_has_window_type(c->surface.xwayland,
+					NX_XWAYLAND_NET_WM_WINDOW_TYPE_TOOLTIP)
+			|| nx_xwayland_surface_has_window_type(c->surface.xwayland,
+					NX_XWAYLAND_NET_WM_WINDOW_TYPE_COMBO)
+			|| nx_xwayland_surface_has_window_type(c->surface.xwayland,
+					NX_XWAYLAND_NET_WM_WINDOW_TYPE_DND);
 #endif
 	return 0;
 }
 
 static inline int
-keycode_is_modkey(struct wlr_keyboard *kb, uint32_t keycode)
+keycode_is_modkey(struct nx_keyboard *kb, uint32_t keycode)
 {
 	const xkb_keysym_t *syms;
 	int nsyms, i;
 
 	nsyms = xkb_state_key_get_syms(kb->xkb_state, keycode + 8, &syms);
 	for (i = 0; i < nsyms; i++) {
-		if (modkey == WLR_MODIFIER_LOGO &&
+		if (modkey == NX_MODIFIER_LOGO &&
 				(syms[i] == XKB_KEY_Super_L || syms[i] == XKB_KEY_Super_R))
 			return 1;
-		if (modkey == WLR_MODIFIER_ALT &&
+		if (modkey == NX_MODIFIER_ALT &&
 				(syms[i] == XKB_KEY_Alt_L || syms[i] == XKB_KEY_Alt_R))
 			return 1;
 	}
@@ -456,10 +456,10 @@ keycode_is_modkey(struct wlr_keyboard *kb, uint32_t keycode)
 }
 
 /* Modifiers as clients see them. */
-static inline struct wlr_keyboard_modifiers
-client_modifiers(const struct wlr_keyboard *kb)
+static inline struct nx_keyboard_modifiers
+client_modifiers(const struct nx_keyboard *kb)
 {
-	struct wlr_keyboard_modifiers m = kb->modifiers;
+	struct nx_keyboard_modifiers m = kb->modifiers;
 	xkb_mod_index_t idx = kb->mod_indexes[__builtin_ctz(modkey)];
 	xkb_mod_mask_t mask;
 
@@ -473,14 +473,14 @@ client_modifiers(const struct wlr_keyboard *kb)
 }
 
 static inline void
-client_notify_enter(struct wlr_surface *s, struct wlr_keyboard *kb)
+client_notify_enter(struct nx_surface *s, struct nx_keyboard *kb)
 {
-	struct wlr_keyboard_modifiers mods;
-	uint32_t held[WLR_KEYBOARD_KEYS_CAP];
+	struct nx_keyboard_modifiers mods;
+	uint32_t held[NX_KEYBOARD_KEYS_CAP];
 	size_t i, n = 0;
 
 	if (!kb) {
-		wlr_seat_keyboard_notify_enter(seat, s, NULL, 0, NULL);
+		nx_seat_keyboard_notify_enter(seat, s, NULL, 0, NULL);
 		return;
 	}
 
@@ -490,7 +490,7 @@ client_notify_enter(struct wlr_surface *s, struct wlr_keyboard *kb)
 			held[n++] = kb->keycodes[i];
 
 	mods = client_modifiers(kb);
-	wlr_seat_keyboard_notify_enter(seat, s, held, n, &mods);
+	nx_seat_keyboard_notify_enter(seat, s, held, n, &mods);
 }
 
 static inline void
@@ -498,11 +498,11 @@ client_send_close(Client *c)
 {
 #ifdef XWAYLAND
 	if (client_is_x11(c)) {
-		wlr_xwayland_surface_close(c->surface.xwayland);
+		nx_xwayland_surface_close(c->surface.xwayland);
 		return;
 	}
 #endif
-	wlr_xdg_toplevel_send_close(c->surface.xdg->toplevel);
+	nx_xdg_toplevel_send_close(c->surface.xdg->toplevel);
 }
 
 static inline void
@@ -510,7 +510,7 @@ client_set_border_color(Client *c, const float color[static 4])
 {
 	int i;
 	for (i = 0; i < 4; i++)
-		wlr_scene_rect_set_color(c->border[i], color);
+		nx_scene_rect_set_color(c->border[i], color);
 }
 
 static inline void
@@ -518,18 +518,18 @@ client_set_fullscreen(Client *c, int fullscreen)
 {
 #ifdef XWAYLAND
 	if (client_is_x11(c)) {
-		wlr_xwayland_surface_set_fullscreen(c->surface.xwayland, fullscreen);
+		nx_xwayland_surface_set_fullscreen(c->surface.xwayland, fullscreen);
 		return;
 	}
 #endif
-	wlr_xdg_toplevel_set_fullscreen(c->surface.xdg->toplevel, fullscreen);
+	nx_xdg_toplevel_set_fullscreen(c->surface.xdg->toplevel, fullscreen);
 }
 
 static inline void
-client_set_scale(struct wlr_surface *s, float scale)
+client_set_scale(struct nx_surface *s, float scale)
 {
-	wlr_fractional_scale_v1_notify_scale(s, scale);
-	wlr_surface_set_preferred_buffer_scale(s, (int32_t)ceilf(scale));
+	nx_fractional_scale_v1_notify_scale(s, scale);
+	nx_surface_set_preferred_buffer_scale(s, (int32_t)ceilf(scale));
 }
 
 static inline uint32_t
@@ -537,7 +537,7 @@ client_set_size(Client *c, uint32_t width, uint32_t height)
 {
 #ifdef XWAYLAND
 	if (client_is_x11(c)) {
-		wlr_xwayland_surface_configure(c->surface.xwayland,
+		nx_xwayland_surface_configure(c->surface.xwayland,
 				c->geom.x + c->bw, c->geom.y + c->bw, width, height);
 		return 0;
 	}
@@ -545,7 +545,7 @@ client_set_size(Client *c, uint32_t width, uint32_t height)
 	if ((int32_t)width == c->surface.xdg->toplevel->current.width
 			&& (int32_t)height == c->surface.xdg->toplevel->current.height)
 		return 0;
-	return wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel, (int32_t)width, (int32_t)height);
+	return nx_xdg_toplevel_set_size(c->surface.xdg->toplevel, (int32_t)width, (int32_t)height);
 }
 
 /* Sync X11 root coords, keep requested size. */
@@ -585,9 +585,9 @@ client_set_tiled(Client *c, uint32_t edges)
 #endif
 	if (wl_resource_get_version(c->surface.xdg->toplevel->resource)
 			>= XDG_TOPLEVEL_STATE_TILED_RIGHT_SINCE_VERSION) {
-		wlr_xdg_toplevel_set_tiled(c->surface.xdg->toplevel, edges);
+		nx_xdg_toplevel_set_tiled(c->surface.xdg->toplevel, edges);
 	} else {
-		wlr_xdg_toplevel_set_maximized(c->surface.xdg->toplevel, edges != WLR_EDGE_NONE);
+		nx_xdg_toplevel_set_maximized(c->surface.xdg->toplevel, edges != NX_EDGE_NONE);
 	}
 }
 
@@ -601,7 +601,7 @@ client_set_suspended(Client *c, int suspended)
 	if (c->suspended == suspended)
 		return;
 	c->suspended = suspended;
-	wlr_xdg_toplevel_set_suspended(c->surface.xdg->toplevel, suspended);
+	nx_xdg_toplevel_set_suspended(c->surface.xdg->toplevel, suspended);
 }
 
 static inline int
@@ -609,8 +609,8 @@ client_wants_focus(Client *c)
 {
 #ifdef XWAYLAND
 	return client_is_unmanaged(c)
-		&& wlr_xwayland_surface_override_redirect_wants_focus(c->surface.xwayland)
-		&& wlr_xwayland_surface_icccm_input_model(c->surface.xwayland) != WLR_ICCCM_INPUT_MODEL_NONE;
+		&& nx_xwayland_surface_override_redirect_wants_focus(c->surface.xwayland)
+		&& nx_xwayland_surface_icccm_input_model(c->surface.xwayland) != NX_ICCCM_INPUT_MODEL_NONE;
 #endif
 	return 0;
 }

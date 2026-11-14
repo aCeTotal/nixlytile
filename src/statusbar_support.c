@@ -111,35 +111,35 @@ char clock_icon_loaded_path[PATH_MAX];
 int net_icon_loaded_h;
 int net_icon_w;
 int net_icon_h;
-struct wlr_buffer *net_icon_buf;
+struct nx_buffer *net_icon_buf;
 int clock_icon_loaded_h;
 int clock_icon_w;
 int clock_icon_h;
-struct wlr_buffer *clock_icon_buf;
+struct nx_buffer *clock_icon_buf;
 int cpu_icon_loaded_h;
 int cpu_icon_w;
 int cpu_icon_h;
-struct wlr_buffer *cpu_icon_buf;
+struct nx_buffer *cpu_icon_buf;
 int light_icon_loaded_h;
 int light_icon_w;
 int light_icon_h;
-struct wlr_buffer *light_icon_buf;
+struct nx_buffer *light_icon_buf;
 int ram_icon_loaded_h;
 int ram_icon_w;
 int ram_icon_h;
-struct wlr_buffer *ram_icon_buf;
+struct nx_buffer *ram_icon_buf;
 int battery_icon_loaded_h;
 int battery_icon_w;
 int battery_icon_h;
-struct wlr_buffer *battery_icon_buf;
+struct nx_buffer *battery_icon_buf;
 int mic_icon_loaded_h;
 int mic_icon_w;
 int mic_icon_h;
-struct wlr_buffer *mic_icon_buf;
+struct nx_buffer *mic_icon_buf;
 int volume_icon_loaded_h;
 int volume_icon_w;
 int volume_icon_h;
-struct wlr_buffer *volume_icon_buf;
+struct nx_buffer *volume_icon_buf;
 char disk_icon_path[PATH_MAX] = "images/svg/disk.svg";
 unsigned long long net_prev_rx;
 unsigned long long net_prev_tx;
@@ -183,10 +183,10 @@ int cpu_core_count;
 
 /* ── draw helpers (drawhoverrect / drawroundedrect) ──────────────── */
 void
-drawhoverrect(struct wlr_scene_tree *parent, int x, int y,
+drawhoverrect(struct nx_scene_tree *parent, int x, int y,
 		int width, int height, const float color[static 4], float fade)
 {
-	struct wlr_scene_rect *r;
+	struct nx_scene_rect *r;
 	float col[4];
 
 	if (!parent || width <= 0 || height <= 0)
@@ -202,17 +202,17 @@ drawhoverrect(struct wlr_scene_tree *parent, int x, int y,
 	col[2] = color[2];
 	col[3] = color[3] * fade;
 
-	r = wlr_scene_rect_create(parent, width, height, col);
+	r = nx_scene_rect_create(parent, width, height, col);
 	if (r)
-		wlr_scene_node_set_position(&r->node, x, y);
+		nx_scene_node_set_position(&r->node, x, y);
 }
 
 void
-drawroundedrect(struct wlr_scene_tree *parent, int x, int y,
+drawroundedrect(struct nx_scene_tree *parent, int x, int y,
 		int width, int height, const float color[static 4])
 {
 	int radius, yy, inset_top, inset_bottom, inset, start, h, w;
-	struct wlr_scene_rect *r;
+	struct nx_scene_rect *r;
 
 	if (!parent || width <= 0 || height <= 0)
 		return;
@@ -237,30 +237,20 @@ drawroundedrect(struct wlr_scene_tree *parent, int x, int y,
 		h = yy - start;
 		w = width - 2 * inset;
 		if (h > 0 && w > 0) {
-			r = wlr_scene_rect_create(parent, w, h, color);
+			r = nx_scene_rect_create(parent, w, h, color);
 			if (r)
-				wlr_scene_node_set_position(&r->node, x + inset, y + start);
+				nx_scene_node_set_position(&r->node, x + inset, y + start);
 		}
 	}
 }
 
 /* ── icon/font buffer + asset-path helpers ───────────────────────── */
-/* ── glyph → wlr_buffer cache ───────────────────────────────────────
- * This used to allocate + composite a fresh wlr_buffer per glyph per
- * render: a 60-char title = 60 allocations and 60 GPU texture uploads
- * on every re-render, and wlroots could never reuse a texture.  fcft
- * already caches the rasterized glyph; cache the wrapped wlr_buffer
- * too, keyed on (glyph, fg color).  The cache owns the buffer's
- * creator reference — callers must NOT wlr_buffer_drop() the result;
- * scene nodes take their own locks.  Direct-mapped: a collision drops
- * the old entry (its buffer lives on until the last scene node
- * unlocks it).  Flush whenever an fcft font is destroyed — the glyph
- * pointers key the table and a new font may reuse the addresses. */
+/* Glyph buffers cached by glyph and color. */
 #define GLYPH_BUF_CACHE 1024
 static struct {
 	const struct fcft_glyph *glyph;
 	uint32_t fg;
-	struct wlr_buffer *buf;
+	struct nx_buffer *buf;
 } glyph_buf_cache[GLYPH_BUF_CACHE];
 
 void
@@ -270,13 +260,13 @@ statusbar_glyph_cache_flush(void)
 
 	for (i = 0; i < GLYPH_BUF_CACHE; i++) {
 		if (glyph_buf_cache[i].buf)
-			wlr_buffer_drop(glyph_buf_cache[i].buf);
+			nx_buffer_drop(glyph_buf_cache[i].buf);
 		glyph_buf_cache[i].glyph = NULL;
 		glyph_buf_cache[i].buf = NULL;
 	}
 }
 
-struct wlr_buffer *
+struct nx_buffer *
 statusbar_buffer_from_glyph(const struct fcft_glyph *glyph)
 {
 	pixman_image_t *dst, *solid = NULL;
@@ -349,10 +339,10 @@ statusbar_buffer_from_glyph(const struct fcft_glyph *glyph)
 	buf->drm_format = DRM_FORMAT_ARGB8888;
 	buf->stride = stride;
 	buf->owns_data = 1;
-	wlr_buffer_init(&buf->base, &pixman_buffer_impl, width, height);
+	nx_buffer_init(&buf->base, &pixman_buffer_impl, width, height);
 
 	if (glyph_buf_cache[slot].buf)
-		wlr_buffer_drop(glyph_buf_cache[slot].buf);
+		nx_buffer_drop(glyph_buf_cache[slot].buf);
 	glyph_buf_cache[slot].glyph = glyph;
 	glyph_buf_cache[slot].fg = fgkey;
 	glyph_buf_cache[slot].buf = &buf->base;
@@ -584,7 +574,7 @@ tray_consider_icon(const char *path, int size_hint, int desired_h,
 	}
 }
 
-struct wlr_buffer *
+struct nx_buffer *
 statusbar_buffer_from_pixbuf(GdkPixbuf *pixbuf, int target_h, int *out_w, int *out_h)
 {
 	GdkPixbuf *scaled = NULL;
@@ -592,7 +582,7 @@ statusbar_buffer_from_pixbuf(GdkPixbuf *pixbuf, int target_h, int *out_w, int *o
 	int w, h, nchan, stride;
 	uint8_t *argb = NULL;
 	size_t bufsize;
-	struct wlr_buffer *buf = NULL;
+	struct nx_buffer *buf = NULL;
 
 	if (!pixbuf)
 		return NULL;
@@ -722,7 +712,7 @@ recolor_wifi100_pixbuf(GdkPixbuf *pixbuf)
 	}
 }
 
-struct wlr_buffer *
+struct nx_buffer *
 statusbar_buffer_from_wifi100(int target_h, int *out_w, int *out_h)
 {
 	struct {
@@ -742,7 +732,7 @@ statusbar_buffer_from_wifi100(int target_h, int *out_w, int *out_h)
 	const int base_h = 64;
 	int target_w, target_h_final;
 	uint32_t *buf = NULL;
-	struct wlr_buffer *wb = NULL;
+	struct nx_buffer *wb = NULL;
 
 	target_h_final = (target_h > 0) ? target_h : base_h;
 	if (target_h_final <= 0)
@@ -809,7 +799,7 @@ tray_load_svg_pixbuf(const char *path, int desired_h, GdkPixbuf **out_pixbuf)
 
 		if (!g_file_get_contents(path, &data, &len, &gerr) || !data || len == 0) {
 			if (gerr) {
-				wlr_log(WLR_ERROR, "tray: failed to read SVG '%s': %s",
+				nx_log(NX_ERROR, "tray: failed to read SVG '%s': %s",
 						path, gerr->message);
 				g_error_free(gerr);
 			}
@@ -822,7 +812,7 @@ tray_load_svg_pixbuf(const char *path, int desired_h, GdkPixbuf **out_pixbuf)
 	}
 	if (!handle) {
 		if (gerr) {
-			wlr_log(WLR_ERROR, "tray: failed to parse SVG '%s': %s",
+			nx_log(NX_ERROR, "tray: failed to parse SVG '%s': %s",
 					path, gerr->message);
 			g_error_free(gerr);
 		}
@@ -869,7 +859,7 @@ tray_load_svg_pixbuf(const char *path, int desired_h, GdkPixbuf **out_pixbuf)
 		};
 		if (!rsvg_handle_render_document(handle, cr, &viewport, &gerr)) {
 			if (gerr) {
-				wlr_log(WLR_ERROR, "tray: failed to render SVG '%s': %s",
+				nx_log(NX_ERROR, "tray: failed to render SVG '%s': %s",
 						path, gerr->message);
 				g_error_free(gerr);
 				gerr = NULL;
@@ -890,7 +880,7 @@ out:
 	if (handle)
 		g_object_unref(handle);
 	if (!pixbuf && gerr) {
-		wlr_log(WLR_ERROR, "tray: failed to load SVG '%s': %s",
+		nx_log(NX_ERROR, "tray: failed to load SVG '%s': %s",
 				path, gerr->message);
 	}
 	if (gerr)
@@ -929,7 +919,7 @@ fix_tray_argb32(uint32_t *pixels, size_t count, int use_rgba_order)
 			b = p8[3];
 		}
 
-		/* Premultiply for pixman/wlroots */
+		/* Premultiply alpha for pixman. */
 		if (a != 0 && a != 255) {
 			r = (uint8_t)((r * a + 127) / 255);
 			g = (uint8_t)((g * a + 127) / 255);
@@ -952,7 +942,7 @@ init_net_icon_paths(void)
 	resolve_asset_path(net_icon_no_conn, net_icon_no_conn_resolved, sizeof(net_icon_no_conn_resolved));
 	if (net_icon_no_conn_resolved[0])
 		snprintf(net_icon_path, sizeof(net_icon_path), "%s", net_icon_no_conn_resolved);
-	wlr_log(WLR_INFO, "net icon paths: wifi100=%s wifi75=%s wifi50=%s wifi25=%s eth=%s noconn=%s",
+	nx_log(NX_INFO, "net icon paths: wifi100=%s wifi75=%s wifi50=%s wifi25=%s eth=%s noconn=%s",
 			net_icon_wifi_100_resolved[0] ? net_icon_wifi_100_resolved : net_icon_wifi_100,
 			net_icon_wifi_75_resolved[0] ? net_icon_wifi_75_resolved : net_icon_wifi_75,
 			net_icon_wifi_50_resolved[0] ? net_icon_wifi_50_resolved : net_icon_wifi_50,
@@ -961,7 +951,7 @@ init_net_icon_paths(void)
 			net_icon_no_conn_resolved[0] ? net_icon_no_conn_resolved : net_icon_no_conn);
 }
 
-struct wlr_buffer *
+struct nx_buffer *
 statusbar_scaled_buffer_from_argb32_ex(const uint32_t *data, int width, int height,
 		int target_h, int fix_format)
 {
@@ -1035,7 +1025,7 @@ statusbar_scaled_buffer_from_argb32_ex(const uint32_t *data, int width, int heig
 	buf->drm_format = DRM_FORMAT_ARGB8888;
 	buf->stride = (int)dst_stride;
 	buf->owns_data = 1;
-	wlr_buffer_init(&buf->base, &pixman_buffer_impl, target_w, target_h);
+	nx_buffer_init(&buf->base, &pixman_buffer_impl, target_w, target_h);
 	return &buf->base;
 
 fail:
@@ -1048,19 +1038,19 @@ fail:
 	return NULL;
 }
 
-struct wlr_buffer *
+struct nx_buffer *
 statusbar_scaled_buffer_from_argb32(const uint32_t *data, int width, int height, int target_h)
 {
 	return statusbar_scaled_buffer_from_argb32_ex(data, width, height, target_h, 1);
 }
 
-struct wlr_buffer *
+struct nx_buffer *
 statusbar_scaled_buffer_from_argb32_raw(const uint32_t *data, int width, int height, int target_h)
 {
 	return statusbar_scaled_buffer_from_argb32_ex(data, width, height, target_h, 0);
 }
 
-struct wlr_buffer *
+struct nx_buffer *
 statusbar_buffer_from_argb32_raw(const uint32_t *data, int width, int height)
 {
 	pixman_image_t *dst;
@@ -1097,11 +1087,11 @@ statusbar_buffer_from_argb32_raw(const uint32_t *data, int width, int height)
 	buf->drm_format = DRM_FORMAT_ARGB8888;
 	buf->stride = (int)stride;
 	buf->owns_data = 1;
-	wlr_buffer_init(&buf->base, &pixman_buffer_impl, width, height);
+	nx_buffer_init(&buf->base, &pixman_buffer_impl, width, height);
 	return &buf->base;
 }
 
-struct wlr_buffer *
+struct nx_buffer *
 statusbar_buffer_from_argb32(const uint32_t *data, int width, int height)
 {
 	pixman_image_t *dst;
@@ -1150,7 +1140,7 @@ statusbar_buffer_from_argb32(const uint32_t *data, int width, int height)
 	buf->drm_format = DRM_FORMAT_ARGB8888;
 	buf->stride = (int)stride;
 	buf->owns_data = 1;
-	wlr_buffer_init(&buf->base, &pixman_buffer_impl, width, height);
+	nx_buffer_init(&buf->base, &pixman_buffer_impl, width, height);
 
 	return &buf->base;
 }

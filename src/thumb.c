@@ -87,7 +87,7 @@ thumb_worker(void *arg)
 
 	j->img = thumb_load(j->path);
 	if (write(thumb_pipe[1], &j, sizeof(j)) != sizeof(j))
-		wlr_log(WLR_ERROR, "thumb: lost result for %s", j->path);
+		nx_log(NX_ERROR, "thumb: lost result for %s", j->path);
 	return NULL;
 }
 

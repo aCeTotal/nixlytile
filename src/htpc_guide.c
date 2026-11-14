@@ -48,7 +48,7 @@ static const char *app_name[GUIDE_N] = {
 /* Autostart boots nixlymedia. */
 #define GUIDE_BOOT 3
 
-static struct wlr_scene_tree *menu_tree;
+static struct nx_scene_tree *menu_tree;
 static Monitor *menu_mon;
 static int menu_sel;
 static int menu_current = GUIDE_BOOT;
@@ -112,7 +112,7 @@ guide_rounded_rect(cairo_t *cr, double x, double y, double w, double h,
 }
 
 /* Card background with the selected row highlighted. */
-static struct wlr_buffer *
+static struct nx_buffer *
 guide_card_buffer(int w, int h, int sel)
 {
 	cairo_surface_t *cs;
@@ -159,7 +159,7 @@ guide_card_buffer(int w, int h, int sel)
 	buf->drm_format = DRM_FORMAT_ARGB8888;
 	buf->stride = stride;
 	buf->owns_data = 1;
-	wlr_buffer_init(&buf->base, &pixman_buffer_impl, w, h);
+	nx_buffer_init(&buf->base, &pixman_buffer_impl, w, h);
 	return &buf->base;
 }
 
@@ -188,12 +188,12 @@ guide_text_width(const char *s)
 }
 
 static void
-guide_draw_text(struct wlr_scene_tree *tree, const char *s, int x, int y)
+guide_draw_text(struct nx_scene_tree *tree, const char *s, int x, int y)
 {
 	const struct fcft_glyph *glyph;
 	struct fcft_font *f = guide_font();
-	struct wlr_scene_buffer *sb;
-	struct wlr_buffer *buffer;
+	struct nx_scene_buffer *sb;
+	struct nx_buffer *buffer;
 	uint32_t prev_cp = 0;
 	int pen_x = 0;
 
@@ -210,10 +210,10 @@ guide_draw_text(struct wlr_scene_tree *tree, const char *s, int x, int y)
 			/* Cache-owned buffer — no drop; scene node locks it. */
 			buffer = statusbar_buffer_from_glyph(glyph);
 			if (buffer) {
-				sb = wlr_scene_buffer_create(tree, NULL);
+				sb = nx_scene_buffer_create(tree, NULL);
 				if (sb) {
-					wlr_scene_buffer_set_buffer(sb, buffer);
-					wlr_scene_node_set_position(&sb->node,
+					nx_scene_buffer_set_buffer(sb, buffer);
+					nx_scene_node_set_position(&sb->node,
 							x + pen_x + glyph->x,
 							y - glyph->y);
 				}
@@ -228,9 +228,9 @@ guide_draw_text(struct wlr_scene_tree *tree, const char *s, int x, int y)
 static void
 guide_menu_build(void)
 {
-	struct wlr_scene_buffer *sb;
-	struct wlr_buffer *buffer;
-	struct wlr_scene_node *node, *tmp;
+	struct nx_scene_buffer *sb;
+	struct nx_buffer *buffer;
+	struct nx_scene_node *node, *tmp;
 	struct fcft_font *f = guide_font();
 	int i, w, text_h;
 
@@ -238,7 +238,7 @@ guide_menu_build(void)
 		return;
 
 	wl_list_for_each_safe(node, tmp, &menu_tree->children, link)
-		wlr_scene_node_destroy(node);
+		nx_scene_node_destroy(node);
 
 	card_w = menu_mon->m.width * 22 / 100;
 	for (i = 0; i < GUIDE_N; i++) {
@@ -250,10 +250,10 @@ guide_menu_build(void)
 
 	buffer = guide_card_buffer(card_w, card_h, menu_sel);
 	if (buffer) {
-		sb = wlr_scene_buffer_create(menu_tree, NULL);
+		sb = nx_scene_buffer_create(menu_tree, NULL);
 		if (sb)
-			wlr_scene_buffer_set_buffer(sb, buffer);
-		wlr_buffer_drop(buffer);
+			nx_scene_buffer_set_buffer(sb, buffer);
+		nx_buffer_drop(buffer);
 	}
 
 	/* Baseline roughly centered in each row. */
@@ -271,12 +271,12 @@ guide_menu_place(void)
 {
 	if (!menu_tree || !menu_mon)
 		return;
-	wlr_scene_node_set_position(&menu_tree->node,
+	nx_scene_node_set_position(&menu_tree->node,
 			menu_mon->m.x + (menu_mon->m.width - card_w) / 2,
 			menu_mon->m.y + (menu_mon->m.height - card_h) / 2);
-	wlr_scene_node_raise_to_top(&menu_tree->node);
-	if (menu_mon->wlr_output)
-		wlr_output_schedule_frame(menu_mon->wlr_output);
+	nx_scene_node_raise_to_top(&menu_tree->node);
+	if (menu_mon->nx_output)
+		nx_output_schedule_frame(menu_mon->nx_output);
 }
 
 void
@@ -286,12 +286,12 @@ htpc_guide_close(void)
 
 	if (!menu_tree)
 		return;
-	wlr_scene_node_destroy(&menu_tree->node);
+	nx_scene_node_destroy(&menu_tree->node);
 	menu_tree = NULL;
 	menu_mon = NULL;
 	htpc_pad_grab(0);
-	if (m && m->wlr_output)
-		wlr_output_schedule_frame(m->wlr_output);
+	if (m && m->nx_output)
+		nx_output_schedule_frame(m->nx_output);
 }
 
 static void
@@ -301,7 +301,7 @@ guide_open(void)
 		return;
 	menu_mon = selmon;
 	menu_sel = menu_current;
-	menu_tree = wlr_scene_tree_create(layers[LyrOverlay]);
+	menu_tree = nx_scene_tree_create(layers[LyrOverlay]);
 	if (!menu_tree) {
 		menu_mon = NULL;
 		return;

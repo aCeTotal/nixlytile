@@ -16,10 +16,10 @@ typedef struct {
 } Seek;
 
 /* Settled screen box. */
-static struct wlr_box
+static struct nx_box
 column_box(const Workspace *ws, const Column *col)
 {
-	return (struct wlr_box){
+	return (struct nx_box){
 		.x = ws->mon->w.x + col->target_x - ws->target_scroll_x,
 		.y = ws->mon->w.y,
 		.width = col->target_width,
@@ -30,7 +30,7 @@ column_box(const Workspace *ws, const Column *col)
 static Stop
 column_stop(const Workspace *ws, Column *col)
 {
-	struct wlr_box box = column_box(ws, col);
+	struct nx_box box = column_box(ws, col);
 	Client *c = wl_container_of(col->clients.next, c, column_link);
 
 	return (Stop){ c, box.x + box.width / 2.0, box.y + box.height / 2.0 };
@@ -62,9 +62,9 @@ floats_free(Monitor *m, Client *c)
 	if (!ws)
 		return 1;
 	wl_list_for_each(col, &ws->columns, link) {
-		struct wlr_box box = column_box(ws, col);
+		struct nx_box box = column_box(ws, col);
 
-		if (wlr_box_intersects(&box, &c->geom))
+		if (nx_box_intersects(&box, &c->geom))
 			return 0;
 	}
 	return 1;
@@ -126,13 +126,13 @@ current_stop(Monitor *m, int dir)
 static Monitor *
 adjacent_mon(Monitor *m, int dir)
 {
-	struct wlr_output *out = wlr_output_layout_adjacent_output(output_layout,
-			dir > 0 ? WLR_DIRECTION_RIGHT : WLR_DIRECTION_LEFT,
-			m->wlr_output, m->m.x + m->m.width / 2.0,
+	struct nx_output *out = nx_output_layout_adjacent_output(output_layout,
+			dir > 0 ? NX_DIRECTION_RIGHT : NX_DIRECTION_LEFT,
+			m->nx_output, m->m.x + m->m.width / 2.0,
 			m->m.y + m->m.height / 2.0);
 	Monitor *next = out ? out->data : NULL;
 
-	return next && next->wlr_output->enabled ? next : NULL;
+	return next && next->nx_output->enabled ? next : NULL;
 }
 
 static void
@@ -155,7 +155,7 @@ static void
 land_empty(Monitor *m)
 {
 	selmon = m;
-	wlr_cursor_warp(cursor, NULL, m->m.x + m->m.width / 2.0,
+	nx_cursor_warp(cursor, NULL, m->m.x + m->m.width / 2.0,
 			m->m.y + m->m.height / 2.0);
 	focusclient(focustop(m), 0);
 	motionnotify(0, NULL, 0, 0, 0, 0);

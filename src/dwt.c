@@ -38,7 +38,7 @@ dwt_note_key(uint32_t keycode, int pressed)
 }
 
 int
-dwt_suppress(struct wlr_input_device *dev)
+dwt_suppress(struct nx_input_device *dev)
 {
 	struct libinput_device *ldev;
 
@@ -54,9 +54,9 @@ dwt_suppress(struct wlr_input_device *dev)
 
 	/* Touchpads are the only pointers libinput gives a gesture
 	 * capability to — mice and trackpoints are unaffected. */
-	if (!wlr_input_device_is_libinput(dev))
+	if (!nx_input_device_is_libinput(dev))
 		return 0;
-	if (!(ldev = wlr_libinput_get_device_handle(dev)))
+	if (!(ldev = nx_libinput_get_device_handle(dev)))
 		return 0;
 	return libinput_device_has_capability(ldev, LIBINPUT_DEVICE_CAP_GESTURE);
 }

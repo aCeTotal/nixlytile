@@ -6,22 +6,22 @@
 #include <stdlib.h>
 
 typedef struct {
-	struct wlr_render_pass *pass;
-	struct wlr_render_texture_options tex;
-	struct wlr_fbox src;
+	struct nx_render_pass *pass;
+	struct nx_render_texture_options tex;
+	struct nx_fbox src;
 	double scale, pad, height;       /* logical px */
 	int width_px, max_x;
 } WobblePaint;
 
 /* Window geometry crop, buffer px. */
-static struct wlr_fbox
-wobble_source(Client *c, struct wlr_surface *surf)
+static struct nx_fbox
+wobble_source(Client *c, struct nx_surface *surf)
 {
-	struct wlr_fbox src;
-	struct wlr_box geo;
+	struct nx_fbox src;
+	struct nx_box geo;
 	double x0, y0, x1, y1, sx, sy;
 
-	wlr_surface_get_buffer_source_box(surf, &src);
+	nx_surface_get_buffer_source_box(surf, &src);
 	if (client_is_x11(c) || surf->current.width <= 0 || surf->current.height <= 0)
 		return src;
 	client_get_geometry(c, &geo);
@@ -33,7 +33,7 @@ wobble_source(Client *c, struct wlr_surface *surf)
 		return src;
 	sx = src.width / surf->current.width;
 	sy = src.height / surf->current.height;
-	return (struct wlr_fbox){ src.x + x0 * sx, src.y + y0 * sy,
+	return (struct nx_fbox){ src.x + x0 * sx, src.y + y0 * sy,
 		(x1 - x0) * sx, (y1 - y0) * sy };
 }
 
@@ -57,27 +57,27 @@ wobble_paint_band(const Wobble *w, WobblePaint *p, int i)
 
 		if (y1 <= y0)
 			continue;
-		p->tex.src_box = (struct wlr_fbox){ p->src.x, src_y + src_h * j / runs,
+		p->tex.src_box = (struct nx_fbox){ p->src.x, src_y + src_h * j / runs,
 			p->src.width, src_h / runs };
-		p->tex.dst_box = (struct wlr_box){
+		p->tex.dst_box = (struct nx_box){
 			MIN(p->max_x, (int)lround(from + (to - from) * (j + 0.5) / runs)),
 			y0, p->width_px, y1 - y0 };
-		wlr_render_pass_add_texture(p->pass, &p->tex);
+		nx_render_pass_add_texture(p->pass, &p->tex);
 	}
 }
 
 static int
-wobble_draw(Client *c, Wobble *w, struct wlr_buffer *buffer)
+wobble_draw(Client *c, Wobble *w, struct nx_buffer *buffer)
 {
-	struct wlr_surface *surf = client_surface(c);
-	struct wlr_linux_drm_syncobj_surface_v1_state *sync =
-		wlr_linux_drm_syncobj_v1_get_surface_state(surf);
-	double scale = c->mon->wlr_output->scale;
+	struct nx_surface *surf = client_surface(c);
+	struct nx_linux_drm_syncobj_surface_v1_state *sync =
+		nx_linux_drm_syncobj_v1_get_surface_state(surf);
+	double scale = c->mon->nx_output->scale;
 	WobblePaint p = {
 		.tex = {
 			.texture = surf->buffer->texture,
-			.filter_mode = WLR_SCALE_FILTER_BILINEAR,
-			.blend_mode = WLR_RENDER_BLEND_MODE_NONE,
+			.filter_mode = NX_SCALE_FILTER_BILINEAR,
+			.blend_mode = NX_RENDER_BLEND_MODE_NONE,
 			.wait_timeline = sync ? sync->acquire_timeline : NULL,
 			.wait_point = sync ? sync->acquire_point : 0,
 		},
@@ -90,53 +90,53 @@ wobble_draw(Client *c, Wobble *w, struct wlr_buffer *buffer)
 	int i;
 
 	p.max_x = buffer->width - p.width_px;
-	p.pass = wlr_renderer_begin_buffer_pass(drw, buffer, NULL);
+	p.pass = nx_renderer_begin_buffer_pass(drw, buffer, NULL);
 	if (!p.pass)
 		return 0;
-	wlr_render_pass_add_rect(p.pass, &(struct wlr_render_rect_options){
+	nx_render_pass_add_rect(p.pass, &(struct nx_render_rect_options){
 		.box = { .width = buffer->width, .height = buffer->height },
-		.blend_mode = WLR_RENDER_BLEND_MODE_NONE,
+		.blend_mode = NX_RENDER_BLEND_MODE_NONE,
 	});
 	for (i = 0; i < WOBBLE_EDGES; i++)
 		wobble_paint_band(w, &p, i);
-	return wlr_render_pass_submit(p.pass);
+	return nx_render_pass_submit(p.pass);
 }
 
 /* GBM picks a renderable modifier. */
-static const struct wlr_drm_format *
+static const struct nx_drm_format *
 wobble_format(void)
 {
-	const struct wlr_drm_format_set *formats =
-		wlr_renderer_get_texture_formats(drw, WLR_BUFFER_CAP_DMABUF);
+	const struct nx_drm_format_set *formats =
+		nx_renderer_get_texture_formats(drw, NX_BUFFER_CAP_DMABUF);
 
-	return formats ? wlr_drm_format_set_get(formats, DRM_FORMAT_ARGB8888) : NULL;
+	return formats ? nx_drm_format_set_get(formats, DRM_FORMAT_ARGB8888) : NULL;
 }
 
-static struct wlr_buffer *
+static struct nx_buffer *
 wobble_acquire(Wobble *w, int width, int height)
 {
-	const struct wlr_drm_format *format;
+	const struct nx_drm_format *format;
 
 	if (w->swapchain && w->swapchain->width == width
 			&& w->swapchain->height == height)
-		return wlr_swapchain_acquire(w->swapchain);
-	wlr_swapchain_destroy(w->swapchain);
+		return nx_swapchain_acquire(w->swapchain);
+	nx_swapchain_destroy(w->swapchain);
 	w->swapchain = NULL;
 	format = wobble_format();
 	if (format)
-		w->swapchain = wlr_swapchain_create(alloc, width, height, format);
-	return w->swapchain ? wlr_swapchain_acquire(w->swapchain) : NULL;
+		w->swapchain = nx_swapchain_create(alloc, width, height, format);
+	return w->swapchain ? nx_swapchain_acquire(w->swapchain) : NULL;
 }
 
 int
 wobble_render(Client *c, Wobble *w)
 {
-	double scale = c->mon->wlr_output->scale;
+	double scale = c->mon->nx_output->scale;
 	int bw = (int)c->bw;
 	int pad = (int)ceil(w->cap);
 	int width = c->geom.width - 2 * bw + 2 * pad;
 	int height = c->geom.height - 2 * bw + 2 * pad;
-	struct wlr_buffer *buffer = wobble_acquire(w,
+	struct nx_buffer *buffer = wobble_acquire(w,
 			(int)ceil(width * scale), (int)ceil(height * scale));
 	int drawn;
 
@@ -144,11 +144,11 @@ wobble_render(Client *c, Wobble *w)
 		return 0;
 	drawn = wobble_draw(c, w, buffer);
 	if (drawn)
-		wlr_scene_buffer_set_buffer(w->view, buffer);
-	wlr_buffer_unlock(buffer);
+		nx_scene_buffer_set_buffer(w->view, buffer);
+	nx_buffer_unlock(buffer);
 	if (!drawn)
 		return 0;
-	wlr_scene_buffer_set_dest_size(w->view, width, height);
-	wlr_scene_node_set_position(&w->view->node, bw - pad, bw - pad);
+	nx_scene_buffer_set_dest_size(w->view, width, height);
+	nx_scene_node_set_position(&w->view->node, bw - pad, bw - pad);
 	return 1;
 }

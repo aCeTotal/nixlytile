@@ -8,8 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <wlr/backend/headless.h>
-#include <wlr/backend/multi.h>
+#include "platform/backend/headless/headless.h"
+#include "platform/backend/multi.h"
 
 #include "nixlytile.h"
 #include "client.h"
@@ -18,7 +18,7 @@
 int remote_outputs = 1;
 int remote_mouse_speed = 1200;
 
-static struct wlr_backend *headless;
+static struct nx_backend *headless;
 static int active_sessions;
 
 /* Physical monitors blanked by remote_start, in the order we took them */
@@ -39,34 +39,34 @@ remote_backend_init(struct wl_display *display, int n_outputs)
 {
 	int i;
 
-	if (!backend || !wlr_backend_is_multi(backend))
+	if (!backend || !nx_backend_is_multi(backend))
 		return;
 	/* `remote { outputs 0 }` means none: no headless backend, no parked
 	 * output anywhere in the compositor.  Remote sessions are then
 	 * unavailable until it is raised again. */
 	if (n_outputs < 1) {
-		wlr_log(WLR_INFO, "remote: disabled (outputs 0)");
+		nx_log(NX_INFO, "remote: disabled (outputs 0)");
 		return;
 	}
 	if (n_outputs > REMOTE_MAX_OUTPUTS)
 		n_outputs = REMOTE_MAX_OUTPUTS;
 
-	if (!(headless = wlr_headless_backend_create(wl_display_get_event_loop(display)))) {
-		wlr_log(WLR_ERROR, "remote: failed to create headless backend");
+	if (!(headless = nx_headless_backend_create(wl_display_get_event_loop(display)))) {
+		nx_log(NX_ERROR, "remote: failed to create headless backend");
 		return;
 	}
-	if (!wlr_multi_backend_add(backend, headless)) {
-		wlr_log(WLR_ERROR, "remote: failed to add headless backend");
-		wlr_backend_destroy(headless);
+	if (!nx_multi_backend_add(backend, headless)) {
+		nx_log(NX_ERROR, "remote: failed to add headless backend");
+		nx_backend_destroy(headless);
 		headless = NULL;
 		return;
 	}
 
 	for (i = 0; i < n_outputs; i++) {
-		if (!wlr_headless_add_output(headless, REMOTE_PARK_W, REMOTE_PARK_H))
-			wlr_log(WLR_ERROR, "remote: failed to add virtual output %d", i + 1);
+		if (!nx_headless_add_output(headless, REMOTE_PARK_W, REMOTE_PARK_H))
+			nx_log(NX_ERROR, "remote: failed to add virtual output %d", i + 1);
 	}
-	wlr_log(WLR_INFO, "remote: %d virtual output(s) parked", n_outputs);
+	nx_log(NX_INFO, "remote: %d virtual output(s) parked", n_outputs);
 }
 
 static Monitor *
@@ -89,7 +89,7 @@ collect_physical(Monitor **out, int max)
 	int n = 0, i, j;
 
 	wl_list_for_each(m, &mons, link) {
-		if (m->is_virtual || m->is_mirror || !m->wlr_output->enabled)
+		if (m->is_virtual || m->is_mirror || !m->nx_output->enabled)
 			continue;
 		if (n < max)
 			out[n++] = m;
@@ -123,7 +123,7 @@ record_clients(void)
 				row_i = 0;
 				wl_list_for_each(c, &col->clients, column_link) {
 					snprintf(c->rst_out, sizeof(c->rst_out), "%s",
-						m->wlr_output->name);
+						m->nx_output->name);
 					c->rst_ws = ws_i;
 					c->rst_col = col_i;
 					c->rst_row = row_i++;
@@ -149,28 +149,28 @@ clear_records(void)
 static void
 configure_output(Monitor *m, const RemoteParams *p)
 {
-	struct wlr_output_state state;
+	struct nx_output_state state;
 	double scale = p->scale > 0.0 ? p->scale : 1.0;
 
 	if (scale < 0.5) scale = 0.5;
 	if (scale > 4.0) scale = 4.0;
 
-	wlr_output_state_init(&state);
-	wlr_output_state_set_enabled(&state, 1);
+	nx_output_state_init(&state);
+	nx_output_state_set_enabled(&state, 1);
 	/* mHz: the headless frame timer paces exactly at the client's fps */
-	wlr_output_state_set_custom_mode(&state, p->width, p->height,
+	nx_output_state_set_custom_mode(&state, p->width, p->height,
 		p->fps > 0 ? p->fps * 1000 : REMOTE_PARK_HZ * 1000);
-	wlr_output_state_set_scale(&state, (float)scale);
+	nx_output_state_set_scale(&state, (float)scale);
 
-	if (!wlr_output_commit_state(m->wlr_output, &state))
-		wlr_log(WLR_ERROR, "remote: commit failed for %s",
-			m->wlr_output->name);
-	wlr_output_state_finish(&state);
+	if (!nx_output_commit_state(m->nx_output, &state))
+		nx_log(NX_ERROR, "remote: commit failed for %s",
+			m->nx_output->name);
+	nx_output_state_finish(&state);
 
 	/* Claimed by a session: back in the layout, visible to clients */
-	if (!wlr_output_layout_get(output_layout, m->wlr_output))
-		wlr_output_layout_add_auto(output_layout, m->wlr_output);
-	wlr_output_create_global(m->wlr_output, dpy);
+	if (!nx_output_layout_get(output_layout, m->nx_output))
+		nx_output_layout_add_auto(output_layout, m->nx_output);
+	nx_output_create_global(m->nx_output, dpy);
 
 	m->asleep = 0;
 	m->frame_scheduled = 0;
@@ -180,35 +180,35 @@ configure_output(Monitor *m, const RemoteParams *p)
 void
 remote_hide_parked(Monitor *m)
 {
-	if (!m || !m->wlr_output)
+	if (!m || !m->nx_output)
 		return;
 
-	wlr_output_layout_remove(output_layout, m->wlr_output);
-	wlr_output_destroy_global(m->wlr_output);
+	nx_output_layout_remove(output_layout, m->nx_output);
+	nx_output_destroy_global(m->nx_output);
 
 	m->m.x = REMOTE_PARK_X + REMOTE_PARK_STEP * (m->virt_idx - 1);
 	m->m.y = 0;
-	m->m.width = m->wlr_output->width;
-	m->m.height = m->wlr_output->height;
+	m->m.width = m->nx_output->width;
+	m->m.height = m->nx_output->height;
 	m->w = m->m;
 	/* At 0,0 it hijacks pacing */
-	wlr_scene_output_set_position(m->scene_output, m->m.x, m->m.y);
+	nx_scene_output_set_position(m->scene_output, m->m.x, m->m.y);
 }
 
 static void
 park_output(Monitor *m)
 {
-	struct wlr_output_state state;
+	struct nx_output_state state;
 
 	m->hdr_force = 0;
 
-	wlr_output_state_init(&state);
-	wlr_output_state_set_enabled(&state, 1);
-	wlr_output_state_set_custom_mode(&state, REMOTE_PARK_W, REMOTE_PARK_H,
+	nx_output_state_init(&state);
+	nx_output_state_set_enabled(&state, 1);
+	nx_output_state_set_custom_mode(&state, REMOTE_PARK_W, REMOTE_PARK_H,
 		REMOTE_PARK_HZ * 1000);
-	wlr_output_state_set_scale(&state, 1.0f);
-	wlr_output_commit_state(m->wlr_output, &state);
-	wlr_output_state_finish(&state);
+	nx_output_state_set_scale(&state, 1.0f);
+	nx_output_commit_state(m->nx_output, &state);
+	nx_output_state_finish(&state);
 
 	remote_hide_parked(m);
 }
@@ -275,7 +275,7 @@ remote_start(const RemoteParams *p)
 
 	record_clients();
 	snprintf(prev_selmon, sizeof(prev_selmon), "%s",
-		selmon && selmon->wlr_output ? selmon->wlr_output->name : "");
+		selmon && selmon->nx_output ? selmon->nx_output->name : "");
 
 	active_sessions = 1;
 	configure_output(m, p);
@@ -309,8 +309,8 @@ remote_start(const RemoteParams *p)
 	focusclient(focustop(m), 1);
 	printstatus();
 
-	wlr_log(WLR_INFO, "remote: started %dx%d@%d hdr=%d scale=%.2f on %s",
-		p->width, p->height, p->fps, p->hdr, p->scale, m->wlr_output->name);
+	nx_log(NX_INFO, "remote: started %dx%d@%d hdr=%d scale=%.2f on %s",
+		p->width, p->height, p->fps, p->hdr, p->scale, m->nx_output->name);
 	return NULL;
 }
 
@@ -324,7 +324,7 @@ restore_target(Client *c)
 
 	wl_list_for_each(m, &mons, link) {
 		if (!m->is_virtual && c->rst_out[0]
-				&& !strcmp(m->wlr_output->name, c->rst_out)) {
+				&& !strcmp(m->nx_output->name, c->rst_out)) {
 			home = m;
 			break;
 		}
@@ -457,14 +457,14 @@ remote_stop(int output)
 
 	wl_list_for_each(m, &mons, link) {
 		if (!m->is_virtual && prev_selmon[0]
-				&& !strcmp(m->wlr_output->name, prev_selmon)) {
+				&& !strcmp(m->nx_output->name, prev_selmon)) {
 			home = m;
 			break;
 		}
 	}
 	if (!home) {
 		wl_list_for_each(m, &mons, link) {
-			if (!m->is_virtual && m->wlr_output->enabled) {
+			if (!m->is_virtual && m->nx_output->enabled) {
 				home = m;
 				break;
 			}
@@ -479,6 +479,6 @@ remote_stop(int output)
 	focusclient(focustop(selmon), 1);
 	printstatus();
 
-	wlr_log(WLR_INFO, "remote: stopped, desktop restored");
+	nx_log(NX_INFO, "remote: stopped, desktop restored");
 	return NULL;
 }

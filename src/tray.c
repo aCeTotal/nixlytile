@@ -37,7 +37,7 @@ typedef struct {
 	int passive;
 	int icon_valid;              /* icon_* fields below carry a result */
 	int icon_failed;
-	struct wlr_buffer *icon_buf; /* ownership moves to the main thread */
+	struct nx_buffer *icon_buf; /* ownership moves to the main thread */
 	int icon_w, icon_h;
 	int icon_pad_l, icon_pad_r;
 	/* menu open result */
@@ -152,7 +152,7 @@ tw_post_event(TwEvent *ev)
 
 /* Publish one worker item's current state to the main thread.  With
  * take_icon the freshly loaded icon buffer moves into the event — after
- * that only the main thread ever touches it (wlr_buffer refcounting is
+ * that only the main thread ever touches it (nx_buffer refcounting is
  * not thread-safe, so ownership transfer instead of sharing). */
 static void
 tw_post_upsert(TrayItem *wit, int take_icon)
@@ -189,7 +189,7 @@ static const float tray_menu_fg_disabled[] = {0.45f, 0.47f, 0.51f, 1.0f};
  * different whitespace between them. Measure the transparent border once per
  * load so rendertray can space by visible content instead. */
 void
-statusbar_buffer_insets(struct wlr_buffer *buf, int icon_w,
+statusbar_buffer_insets(struct nx_buffer *buf, int icon_w,
 		int *pad_l, int *pad_r)
 {
 	void *data = NULL;
@@ -205,8 +205,8 @@ statusbar_buffer_insets(struct wlr_buffer *buf, int icon_w,
 	bh = buf->height;
 	if (bw <= 0 || bh <= 0)
 		return;
-	if (!wlr_buffer_begin_data_ptr_access(buf,
-			WLR_BUFFER_DATA_PTR_ACCESS_READ, &data, &format, &stride))
+	if (!nx_buffer_begin_data_ptr_access(buf,
+			NX_BUFFER_DATA_PTR_ACCESS_READ, &data, &format, &stride))
 		return;
 
 	if (data && format == DRM_FORMAT_ARGB8888) {
@@ -234,7 +234,7 @@ statusbar_buffer_insets(struct wlr_buffer *buf, int icon_w,
 			}
 		}
 	}
-	wlr_buffer_end_data_ptr_access(buf);
+	nx_buffer_end_data_ptr_access(buf);
 
 	if (first < 0 || last < first)
 		return;
@@ -260,7 +260,7 @@ int
 tray_load_icon_file(TrayItem *it, const char *path, int desired_h)
 {
 	GError *gerr = NULL;
-	struct wlr_buffer *buf;
+	struct nx_buffer *buf;
 	int w = 0, h = 0;
 	GdkPixbuf *pixbuf = NULL;
 
@@ -271,7 +271,7 @@ tray_load_icon_file(TrayItem *it, const char *path, int desired_h)
 		if (tray_load_svg_pixbuf(path, desired_h, &pixbuf) != 0) {
 			pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
 			if (!pixbuf && gerr) {
-				wlr_log(WLR_ERROR, "tray: failed to load icon '%s': %s", path, gerr->message);
+				nx_log(NX_ERROR, "tray: failed to load icon '%s': %s", path, gerr->message);
 				g_error_free(gerr);
 				gerr = NULL;
 			}
@@ -282,7 +282,7 @@ tray_load_icon_file(TrayItem *it, const char *path, int desired_h)
 		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
 		if (!pixbuf) {
 			if (gerr) {
-				wlr_log(WLR_ERROR, "tray: failed to load icon '%s': %s", path, gerr->message);
+				nx_log(NX_ERROR, "tray: failed to load icon '%s': %s", path, gerr->message);
 				g_error_free(gerr);
 				gerr = NULL;
 			}
@@ -299,7 +299,7 @@ tray_load_icon_file(TrayItem *it, const char *path, int desired_h)
 		return -1;
 
 	if (it->icon_buf)
-		wlr_buffer_drop(it->icon_buf);
+		nx_buffer_drop(it->icon_buf);
 	it->icon_buf = buf;
 	it->icon_w = w;
 	it->icon_h = h;
@@ -643,7 +643,7 @@ tray_get_string_property(TrayItem *it, const char *prop, char *out, size_t outle
 		if (r >= 0)
 			break;
 		if (r == -ETIMEDOUT) {
-			wlr_log(WLR_ERROR, "tray: %s svarer ikke (Get %s) — later item",
+			nx_log(NX_ERROR, "tray: %s svarer ikke (Get %s) — later item",
 					it->service, prop);
 			it->unresponsive = 1;
 			it->unresponsive_ms = monotonic_msec();
@@ -809,7 +809,7 @@ tw_item_load_icon(TrayItem *it)
 
 	if (best_data && best_w > 0 && best_h > 0) {
 		int target_h = (desired_h > 0) ? desired_h : best_h;
-		struct wlr_buffer *buf = NULL;
+		struct nx_buffer *buf = NULL;
 
 		if (best_h > target_h && target_h > 0)
 			buf = statusbar_scaled_buffer_from_argb32(best_data, best_w, best_h, target_h);
@@ -817,7 +817,7 @@ tw_item_load_icon(TrayItem *it)
 			buf = statusbar_buffer_from_argb32(best_data, best_w, best_h);
 		if (buf) {
 			if (it->icon_buf)
-				wlr_buffer_drop(it->icon_buf);
+				nx_buffer_drop(it->icon_buf);
 			it->icon_buf = buf;
 			if (target_h > 0 && best_h > target_h) {
 				it->icon_w = (int)lround(((double)best_w * (double)target_h) / (double)best_h);
@@ -1009,12 +1009,12 @@ tray_menu_clear(TrayMenu *menu)
 	menu->visible = 0;
 	menu->hover = NULL;
 	if (menu->hover_rect)
-		wlr_scene_node_set_enabled(&menu->hover_rect->node, 0);
+		nx_scene_node_set_enabled(&menu->hover_rect->node, 0);
 	menu->service[0] = '\0';
 	menu->menu_path[0] = '\0';
 
 	if (menu->tree)
-		wlr_scene_node_set_enabled(&menu->tree->node, 0);
+		nx_scene_node_set_enabled(&menu->tree->node, 0);
 }
 
 void
@@ -1088,12 +1088,12 @@ tray_item_get_menu_path(TrayItem *it)
 			sd_bus_error_free(&err);
 			return 0;
 		}
-		wlr_log(WLR_ERROR, "tray: service %s Menu property empty/invalid", it->service);
+		nx_log(NX_ERROR, "tray: service %s Menu property empty/invalid", it->service);
 		sd_bus_message_unref(reply);
 	}
 
 	sd_bus_error_free(&err);
-	wlr_log(WLR_ERROR, "tray: failed to get Menu property for %s: %s",
+	nx_log(NX_ERROR, "tray: failed to get Menu property for %s: %s",
 			it->service, strerror(-r));
 	return -1;
 }
@@ -1284,13 +1284,13 @@ tray_menu_parse_node_body(sd_bus_message *msg, TrayMenu *menu, int depth, int ma
 }
 
 void
-tray_menu_draw_text(struct wlr_scene_tree *tree, const char *text, int x, int y, int row_h,
+tray_menu_draw_text(struct nx_scene_tree *tree, const char *text, int x, int y, int row_h,
 		int max_w)
 {
 	tll(struct GlyphRun) glyphs = tll_init();
 	const struct fcft_glyph *glyph;
-	struct wlr_scene_buffer *scene_buf;
-	struct wlr_buffer *buffer;
+	struct nx_scene_buffer *scene_buf;
+	struct nx_buffer *buffer;
 	uint32_t prev_cp = 0;
 	int pen_x = 0;
 	int min_y = INT_MAX, max_y = INT_MIN;
@@ -1391,10 +1391,10 @@ tray_menu_draw_text(struct wlr_scene_tree *tree, const char *text, int x, int y,
 			if (!buffer)
 				continue;
 
-			scene_buf = wlr_scene_buffer_create(tree, NULL);
+			scene_buf = nx_scene_buffer_create(tree, NULL);
 			if (scene_buf) {
-				wlr_scene_buffer_set_buffer(scene_buf, buffer);
-				wlr_scene_node_set_position(&scene_buf->node,
+				nx_scene_buffer_set_buffer(scene_buf, buffer);
+				nx_scene_node_set_position(&scene_buf->node,
 						x + it->item.pen_x + glyph->x,
 						origin_y - glyph->y);
 			}
@@ -1408,7 +1408,7 @@ void
 tray_menu_render(Monitor *m)
 {
 	TrayMenu *menu;
-	struct wlr_scene_node *node, *tmp;
+	struct nx_scene_node *node, *tmp;
 	TrayMenuEntry *entry;
 	int padding, line_spacing, indent_w, mark_sz;
 	int max_width = 0;
@@ -1431,12 +1431,12 @@ tray_menu_render(Monitor *m)
 			continue;
 		if (menu->hover_rect && node == &menu->hover_rect->node)
 			continue;
-		wlr_scene_node_destroy(node);
+		nx_scene_node_destroy(node);
 	}
 
 	if (!statusfont.font || wl_list_empty(&menu->entries)) {
 		menu->width = menu->height = 0;
-		wlr_scene_node_set_enabled(&menu->tree->node, 0);
+		nx_scene_node_set_enabled(&menu->tree->node, 0);
 		menu->visible = 0;
 		return;
 	}
@@ -1465,38 +1465,38 @@ tray_menu_render(Monitor *m)
 	menu->width = max_width;
 	menu->height = total_height;
 
-	if (!menu->bg && !(menu->bg = wlr_scene_tree_create(menu->tree)))
+	if (!menu->bg && !(menu->bg = nx_scene_tree_create(menu->tree)))
 		return;
-	wlr_scene_node_set_enabled(&menu->bg->node, 1);
-	wlr_scene_node_set_position(&menu->bg->node, 0, 0);
+	nx_scene_node_set_enabled(&menu->bg->node, 1);
+	nx_scene_node_set_position(&menu->bg->node, 0, 0);
 	wl_list_for_each_safe(node, tmp, &menu->bg->children, link)
-		wlr_scene_node_destroy(node);
+		nx_scene_node_destroy(node);
 	/* Same rounded translucent card as the module popups */
 	{
-		struct wlr_buffer *shb = card_shadow_buffer(menu->width,
+		struct nx_buffer *shb = card_shadow_buffer(menu->width,
 				menu->height, 0);
-		struct wlr_buffer *pb;
+		struct nx_buffer *pb;
 
 		card_at(m, m->statusbar.area.x + menu->x,
 				m->statusbar.area.y + menu->y);
 		pb = card_panel_buffer(menu->width, menu->height);
-		struct wlr_scene_buffer *sb;
+		struct nx_scene_buffer *sb;
 
 		if (shb) {
-			sb = wlr_scene_buffer_create(menu->bg, NULL);
+			sb = nx_scene_buffer_create(menu->bg, NULL);
 			if (sb) {
-				wlr_scene_buffer_set_buffer(sb, shb);
-				wlr_scene_node_set_position(&sb->node,
+				nx_scene_buffer_set_buffer(sb, shb);
+				nx_scene_node_set_position(&sb->node,
 						-CARD_SHADOW_MARGIN,
 						-CARD_SHADOW_MARGIN);
 			}
-			wlr_buffer_drop(shb);
+			nx_buffer_drop(shb);
 		}
 		if (pb) {
-			sb = wlr_scene_buffer_create(menu->bg, NULL);
+			sb = nx_scene_buffer_create(menu->bg, NULL);
 			if (sb)
-				wlr_scene_buffer_set_buffer(sb, pb);
-			wlr_buffer_drop(pb);
+				nx_scene_buffer_set_buffer(sb, pb);
+			nx_buffer_drop(pb);
 		}
 	}
 
@@ -1505,22 +1505,22 @@ tray_menu_render(Monitor *m)
 	 * full re-render.  Recreated per render since its size depends on
 	 * the menu width. */
 	if (menu->hover_rect) {
-		wlr_scene_node_destroy(&menu->hover_rect->node);
+		nx_scene_node_destroy(&menu->hover_rect->node);
 		menu->hover_rect = NULL;
 	}
 	{
-		struct wlr_buffer *hb = card_hover_buffer(menu->width - 12,
+		struct nx_buffer *hb = card_hover_buffer(menu->width - 12,
 				row_h - 2);
 
 		if (hb) {
-			menu->hover_rect = wlr_scene_buffer_create(menu->tree,
+			menu->hover_rect = nx_scene_buffer_create(menu->tree,
 					NULL);
 			if (menu->hover_rect) {
-				wlr_scene_buffer_set_buffer(menu->hover_rect, hb);
-				wlr_scene_node_set_enabled(
+				nx_scene_buffer_set_buffer(menu->hover_rect, hb);
+				nx_scene_node_set_enabled(
 						&menu->hover_rect->node, 0);
 			}
-			wlr_buffer_drop(hb);
+			nx_buffer_drop(hb);
 		}
 	}
 
@@ -1541,42 +1541,42 @@ tray_menu_render(Monitor *m)
 			}
 
 			if (entry == menu->hover && entry->enabled && menu->hover_rect) {
-				wlr_scene_node_set_position(&menu->hover_rect->node,
+				nx_scene_node_set_position(&menu->hover_rect->node,
 						6, y + 1);
-				wlr_scene_node_set_enabled(&menu->hover_rect->node, 1);
+				nx_scene_node_set_enabled(&menu->hover_rect->node, 1);
 			}
 
 			if (entry->toggle_type) {
-				struct wlr_buffer *mb = card_mark_buffer(
+				struct nx_buffer *mb = card_mark_buffer(
 						entry->toggle_type == 2, mark_sz,
 						entry->toggle_state);
-				struct wlr_scene_buffer *sb;
+				struct nx_scene_buffer *sb;
 
 				if (mb) {
-					sb = wlr_scene_buffer_create(menu->tree, NULL);
+					sb = nx_scene_buffer_create(menu->tree, NULL);
 					if (sb) {
-						wlr_scene_buffer_set_buffer(sb, mb);
-						wlr_scene_node_set_position(&sb->node,
+						nx_scene_buffer_set_buffer(sb, mb);
+						nx_scene_node_set_position(&sb->node,
 								x, y + (row - mark_sz) / 2);
 					}
-					wlr_buffer_drop(mb);
+					nx_buffer_drop(mb);
 				}
 				x += mark_sz + 8;
 			}
 
 			if (entry->has_submenu) {
-				struct wlr_buffer *cb = card_chevron_buffer(mark_sz);
-				struct wlr_scene_buffer *sb;
+				struct nx_buffer *cb = card_chevron_buffer(mark_sz);
+				struct nx_scene_buffer *sb;
 
 				if (cb) {
-					sb = wlr_scene_buffer_create(menu->tree, NULL);
+					sb = nx_scene_buffer_create(menu->tree, NULL);
 					if (sb) {
-						wlr_scene_buffer_set_buffer(sb, cb);
-						wlr_scene_node_set_position(&sb->node,
+						nx_scene_buffer_set_buffer(sb, cb);
+						nx_scene_node_set_position(&sb->node,
 								menu->width - padding - mark_sz,
 								y + (row - mark_sz) / 2);
 					}
-					wlr_buffer_drop(cb);
+					nx_buffer_drop(cb);
 				}
 			}
 
@@ -1676,7 +1676,7 @@ tw_menu_fetch(TrayItem *wit, void *mon, int icon_x)
 	goto post;
 
 fail:
-	wlr_log(WLR_ERROR, "tray: GetLayout failed for %s%s: %s",
+	nx_log(NX_ERROR, "tray: GetLayout failed for %s%s: %s",
 			wit->service, wit->menu, err.message ? err.message : strerror(-r));
 	{
 		TrayMenuEntry *e, *tmp;
@@ -1856,11 +1856,11 @@ tray_menu_update_hover(Monitor *m, double cx, double cy)
 	if (!menu->hover_rect)
 		return;
 	if (entry) {
-		wlr_scene_node_set_position(&menu->hover_rect->node,
+		nx_scene_node_set_position(&menu->hover_rect->node,
 				6, entry->y + 1);
-		wlr_scene_node_set_enabled(&menu->hover_rect->node, 1);
+		nx_scene_node_set_enabled(&menu->hover_rect->node, 1);
 	} else {
-		wlr_scene_node_set_enabled(&menu->hover_rect->node, 0);
+		nx_scene_node_set_enabled(&menu->hover_rect->node, 0);
 	}
 }
 
@@ -1923,7 +1923,7 @@ out:
 		sd_bus_message_unref(reply);
 	sd_bus_error_free(&err);
 	if (r < 0)
-		wlr_log(WLR_ERROR, "tray: menu Event failed for %s%s: %s",
+		nx_log(NX_ERROR, "tray: menu Event failed for %s%s: %s",
 				cmd->service, cmd->menu_path, strerror(-r));
 }
 
@@ -1997,14 +1997,14 @@ tray_add_item(const char *service, const char *path, int emit_signals)
 			int same_path = strcmp(it->path, other->path) == 0 &&
 				strcmp(it->path, "/StatusNotifierItem") != 0;
 			if (same_id || same_path) {
-				wlr_log(WLR_INFO, "tray: dropping duplicate %s%s (replaced by %s)",
+				nx_log(NX_INFO, "tray: dropping duplicate %s%s (replaced by %s)",
 						other->service, other->path, service);
 				tray_remove_item(other->service);
 			}
 		}
 	}
 	wl_list_insert(&tw_items, &it->link);
-	wlr_log(WLR_INFO, "tray: registered %s%s%s", service, path,
+	nx_log(NX_INFO, "tray: registered %s%s%s", service, path,
 			it->passive ? " (passive)" : "");
 
 	/* Eager fetch: rendertray used to load icons lazily on the main
@@ -2181,7 +2181,7 @@ tray_item_new_icon(sd_bus_message *m, void *userdata, sd_bus_error *ret_error)
 	wl_list_for_each(it, &tw_items, link) {
 		if (sender && it->service[0] && strcmp(it->service, sender) == 0) {
 			if (it->icon_buf) {
-				wlr_buffer_drop(it->icon_buf);
+				nx_buffer_drop(it->icon_buf);
 				it->icon_buf = NULL;
 			}
 			it->icon_tried = 0;
@@ -2282,7 +2282,7 @@ tw_apply_upsert(TwEvent *ev)
 	it->passive = ev->passive;
 	if (ev->icon_valid) {
 		if (it->icon_buf)
-			wlr_buffer_drop(it->icon_buf);
+			nx_buffer_drop(it->icon_buf);
 		it->icon_buf = ev->icon_buf; /* ownership taken */
 		ev->icon_buf = NULL;
 		it->icon_w = ev->icon_w;
@@ -2314,7 +2314,7 @@ tw_apply_remove(const char *service)
 		if (strcmp(it->service, service) == 0) {
 			wl_list_remove(&it->link);
 			if (it->icon_buf)
-				wlr_buffer_drop(it->icon_buf);
+				nx_buffer_drop(it->icon_buf);
 			free(it);
 			return 1;
 		}
@@ -2383,8 +2383,8 @@ tw_apply_menu(TwEvent *ev)
 
 	menu->x = desired_x;
 	menu->y = statusbar_popup_y(m);
-	wlr_scene_node_set_position(&menu->tree->node, menu->x, menu->y);
-	wlr_scene_node_set_enabled(&menu->tree->node, 1);
+	nx_scene_node_set_position(&menu->tree->node, menu->x, menu->y);
+	nx_scene_node_set_enabled(&menu->tree->node, 1);
 	menu->visible = 1;
 }
 
@@ -2398,7 +2398,7 @@ tw_event_free(TwEvent *ev)
 		free(e);
 	}
 	if (ev->icon_buf)
-		wlr_buffer_drop(ev->icon_buf);
+		nx_buffer_drop(ev->icon_buf);
 	free(ev);
 }
 
@@ -2466,7 +2466,7 @@ tw_bus_setup(void)
 
 	r = sd_bus_open_user(&tray_bus);
 	if (r < 0) {
-		wlr_log(WLR_ERROR, "tray: failed to connect to session bus: %s", strerror(-r));
+		nx_log(NX_ERROR, "tray: failed to connect to session bus: %s", strerror(-r));
 		tray_bus = NULL;
 		return -1;
 	}
@@ -2480,7 +2480,7 @@ tw_bus_setup(void)
 
 	r = sd_bus_request_name(tray_bus, "org.kde.StatusNotifierWatcher", name_flags);
 	if (r < 0) {
-		wlr_log(WLR_ERROR, "tray: failed to acquire watcher name: %s", strerror(-r));
+		nx_log(NX_ERROR, "tray: failed to acquire watcher name: %s", strerror(-r));
 		goto fail;
 	}
 	/* Some implementations also look for the freedesktop alias */
@@ -2540,7 +2540,7 @@ fail:
 static void
 tw_bus_lost(void)
 {
-	wlr_log(WLR_ERROR, "tray: session bus hangup — disabling tray");
+	nx_log(NX_ERROR, "tray: session bus hangup — disabling tray");
 	if (tray_vtable_slot)
 		sd_bus_slot_unref(tray_vtable_slot);
 	tray_vtable_slot = NULL;
@@ -2587,7 +2587,7 @@ tw_do_activate(TwCmd *cmd)
 		tw_menu_fetch(wit, NULL, 0);
 		return;
 	}
-	wlr_log(WLR_ERROR, "tray: %s %s failed on %s: %s",
+	nx_log(NX_ERROR, "tray: %s %s failed on %s: %s",
 			cmd->method, wit->service, item_path, strerror(-r));
 }
 
@@ -2746,7 +2746,7 @@ tray_init(void)
 	tw_run = 1;
 	if (pthread_create(&tw_thread, NULL, tw_worker, NULL) != 0) {
 		tw_run = 0;
-		wlr_log(WLR_ERROR, "tray: worker thread start failed — "
+		nx_log(NX_ERROR, "tray: worker thread start failed — "
 			"tray unavailable");
 	}
 }
@@ -2765,7 +2765,7 @@ tray_remove_item(const char *service)
 		if (strcmp(it->service, service) == 0) {
 			wl_list_remove(&it->link);
 			if (it->icon_buf)
-				wlr_buffer_drop(it->icon_buf);
+				nx_buffer_drop(it->icon_buf);
 			free(it);
 			tw_post_event(tw_event_new(TW_EV_REMOVE, service));
 			sd_bus_emit_signal(tray_bus, NULL, "/StatusNotifierWatcher",

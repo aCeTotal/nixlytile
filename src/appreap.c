@@ -152,11 +152,11 @@ act(Root *r, Verdict v, uint64_t now)
 	if (v == VERDICT_SPARE)
 		return REAP_RECHECK_MS;
 	if (r->phase == ROOT_TERMINATED) {
-		wlr_log(WLR_INFO, "appreap: killing pid %d", (int)r->pid);
+		nx_log(NX_INFO, "appreap: killing pid %d", (int)r->pid);
 		signal_tree(r->pid, SIGKILL);
 		return 0;
 	}
-	wlr_log(WLR_INFO, "appreap: ending windowless pid %d", (int)r->pid);
+	nx_log(NX_INFO, "appreap: ending windowless pid %d", (int)r->pid);
 	signal_tree(r->pid, SIGTERM);
 	r->phase = ROOT_TERMINATED;
 	r->term_ms = now;

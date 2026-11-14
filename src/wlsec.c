@@ -18,7 +18,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <wayland-server-core.h>
-#include <wlr/types/wlr_security_context_v1.h>
+#include "platform/client/security_context.h"
 
 #include "nixlytile.h"
 
@@ -181,7 +181,7 @@ wlsec_client_allowed(const struct wl_client *client)
 	}
 
 	/* A sandboxed client is never trusted, whatever binary it runs. */
-	if (security_ctx_mgr && wlr_security_context_manager_v1_lookup_client(
+	if (security_ctx_mgr && nx_security_context_manager_v1_lookup_client(
 			security_ctx_mgr, client)) {
 		allowed = 0;
 	} else {

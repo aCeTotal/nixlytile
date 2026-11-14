@@ -13,7 +13,7 @@ arrange(Monitor *m)
 	Client *c, *fsc;
 	int covers_full_screen = 0;
 
-	if (!m->wlr_output->enabled)
+	if (!m->nx_output->enabled)
 		return;
 
 	/*
@@ -57,24 +57,7 @@ arrange(Monitor *m)
 				vis = 0;
 			if (client_float_ws(c) && client_float_ws(c) != m->active_ws)
 				vis = 0;
-			/*
-			 * A fullscreen client owns the active workspace
-			 * exclusively: disable every OTHER client on this
-			 * monitor so nothing of a neighbour tile can show and
-			 * nothing else is hit-testable by the pointer.  This
-			 * holds for BOTH Wayland and XWayland and does NOT
-			 * depend on the fullscreen surface geometrically
-			 * covering the whole output — a regular app fullscreened
-			 * to the usable area (m->w, waybar kept) still hides its
-			 * neighbours; fullscreen_bg (below) paints the rest
-			 * black.  When the surface DOES cover the output
-			 * (covers_full_screen), this also gives wlroots the
-			 * single-buffer scene it needs for direct scanout.
-			 *
-			 * We ONLY touch clients on THIS monitor — global layer
-			 * nodes are shared across all monitors and must not be
-			 * disabled here, or every other monitor goes black.
-			 */
+			/* Fullscreen hides this monitor's other clients. */
 			if (fsc && c != fsc && !fsc->fsx_active) {
 				/* Keep descendants (dialogs, popups) and same-app
 				 * helpers (game splashes, launchers) visible on top;
@@ -82,7 +65,7 @@ arrange(Monitor *m)
 				if (!client_is_fs_companion(c, fsc))
 					vis = 0;
 			}
-			wlr_scene_node_set_enabled(&c->scene->node, vis);
+			nx_scene_node_set_enabled(&c->scene->node, vis);
 			client_set_suspended(c, !vis);
 		}
 	}
@@ -91,7 +74,7 @@ arrange(Monitor *m)
 	 * fullscreen_bg is per-monitor: show it when a fullscreen window
 	 * doesn't fill the entire screen (letterboxed games, etc.).
 	 */
-	wlr_scene_node_set_enabled(&m->fullscreen_bg->node,
+	nx_scene_node_set_enabled(&m->fullscreen_bg->node,
 		fsc && !covers_full_screen && !fsc->fsx_active);
 
 	if (fsc) {
@@ -117,11 +100,11 @@ arrange(Monitor *m)
 				|| c->scene->node.parent == layers[LyrFS])
 			continue;
 
-		struct wlr_scene_tree *target = c->isfloating
+		struct nx_scene_tree *target = c->isfloating
 				? layers[LyrFloat]
 				: layers[LyrTile];
 		if (target && c->scene->node.parent != target)
-			wlr_scene_node_reparent(&c->scene->node, target);
+			nx_scene_node_reparent(&c->scene->node, target);
 	}
 
 	/* Workspace layout (replaces tile/monocle/btrtile) */
@@ -144,24 +127,24 @@ arrange(Monitor *m)
 	 * but ws->scroll_x not yet moved) produces no scene damage →
 	 * rendermon never runs → animation never starts → user perceives
 	 * "stiff" instant snaps instead of smooth motion. */
-	if (m->wlr_output && !m->frame_scheduled) {
-		wlr_output_schedule_frame(m->wlr_output);
+	if (m->nx_output && !m->frame_scheduled) {
+		nx_output_schedule_frame(m->nx_output);
 		m->frame_scheduled = 1;
 	}
 }
 
 void
-arrangelayer(Monitor *m, struct wl_list *list, struct wlr_box *usable_area, int exclusive)
+arrangelayer(Monitor *m, struct wl_list *list, struct nx_box *usable_area, int exclusive)
 {
 	LayerSurface *l;
-	struct wlr_box full_area = m->m;
+	struct nx_box full_area = m->m;
 
 	/* Niri parity: layer-shell surfaces (waybar) get the FULL monitor
 	 * rect.  Visual gap around waybar is done by waybar's CSS margin,
 	 * not by compositor inset (Niri behavior).  Doing inset here makes
 	 * waybar narrower than its Niri counterpart. */
 	wl_list_for_each(l, list, link) {
-		struct wlr_layer_surface_v1 *layer_surface = l->layer_surface;
+		struct nx_layer_surface_v1 *layer_surface = l->layer_surface;
 
 		if (!layer_surface->initialized)
 			continue;
@@ -169,8 +152,8 @@ arrangelayer(Monitor *m, struct wl_list *list, struct wlr_box *usable_area, int 
 		if (exclusive != (layer_surface->current.exclusive_zone > 0))
 			continue;
 
-		wlr_scene_layer_surface_v1_configure(l->scene_layer, &full_area, usable_area);
-		wlr_scene_node_set_position(&l->popups->node, l->scene->node.x, l->scene->node.y);
+		nx_scene_layer_surface_v1_configure(l->scene_layer, &full_area, usable_area);
+		nx_scene_node_set_position(&l->popups->node, l->scene->node.x, l->scene->node.y);
 	}
 }
 
@@ -178,16 +161,16 @@ void
 arrangelayers(Monitor *m)
 {
 	int i;
-	struct wlr_box usable_area = m->m;
-	struct wlr_box client_area;
-	struct wlr_box old_w;
+	struct nx_box usable_area = m->m;
+	struct nx_box client_area;
+	struct nx_box old_w;
 	LayerSurface *l;
 	int gap = (m->gaps && gappx > 0) ? (int)gappx : 0;
 	uint32_t layers_above_shell[] = {
 		ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY,
 		ZWLR_LAYER_SHELL_V1_LAYER_TOP,
 	};
-	if (!m->wlr_output->enabled)
+	if (!m->nx_output->enabled)
 		return;
 
 	/* m->w must always mirror the tile-area springs.  updatemons
@@ -212,7 +195,7 @@ arrangelayers(Monitor *m)
 	/* Reserve space for the embedded status bar at the top, then let
 	 * tiles fill what remains below it. */
 	{
-		struct wlr_box below_bar = usable_area;
+		struct nx_box below_bar = usable_area;
 		layoutstatusbar(m, &usable_area, &below_bar);
 		usable_area = below_bar;
 	}
@@ -231,7 +214,7 @@ arrangelayers(Monitor *m)
 
 	client_area = usable_area;
 
-	if (!wlr_box_equal(&client_area, &old_w)) {
+	if (!nx_box_equal(&client_area, &old_w)) {
 		/* Set the target tile-area.  m->w springs toward this each
 		 * frame in monitor_anim_tick so a waybar toggle slides the
 		 * top edge of every tile smoothly while the bottom stays
@@ -262,7 +245,7 @@ arrangelayers(Monitor *m)
 			/* Deactivate the focused client. */
 			focusclient(NULL, 0);
 			exclusive_focus = l;
-			client_notify_enter(l->layer_surface->surface, wlr_seat_get_keyboard(seat));
+			client_notify_enter(l->layer_surface->surface, nx_seat_get_keyboard(seat));
 			return;
 		}
 	}
@@ -292,7 +275,7 @@ monocle(Monitor *m)
 	if (n)
 		snprintf(m->ltsymbol, LENGTH(m->ltsymbol), "[%d]", n);
 	if ((c = focustop(m)))
-		wlr_scene_node_raise_to_top(&c->scene->node);
+		nx_scene_node_raise_to_top(&c->scene->node);
 }
 
 void
@@ -347,7 +330,7 @@ tile(Monitor *m)
 				continue;
 			r = n - i;
 			w = (m->w.width - mx - gappx * e - gappx * e * (r - 1)) / r;
-			resize(c, (struct wlr_box){.x = m->w.x + mx, .y = m->w.y + gappx * e,
+			resize(c, (struct nx_box){.x = m->w.x + mx, .y = m->w.y + gappx * e,
 				.width = w, .height = m->w.height - 2 * gappx * e}, 0);
 			mx += c->geom.width + gappx * e;
 			i++;
@@ -364,13 +347,13 @@ tile(Monitor *m)
 		if (i < m->nmaster) {
 			r = MIN(n, m->nmaster) - i;
 			h = (m->w.height - my - gappx * e - gappx * e * (r - 1)) / r;
-			resize(c, (struct wlr_box){.x = m->w.x + gappx * e, .y = m->w.y + my,
+			resize(c, (struct nx_box){.x = m->w.x + gappx * e, .y = m->w.y + my,
 				.width = mw - 2 * gappx * e, .height = h}, 0);
 			my += c->geom.height + gappx * e;
 		} else {
 			r = n - i;
 			h = (m->w.height - ty - gappx * e - gappx * e * (r - 1)) / r;
-			resize(c, (struct wlr_box){.x = m->w.x + mw, .y = m->w.y + ty,
+			resize(c, (struct nx_box){.x = m->w.x + mw, .y = m->w.y + ty,
 				.width = m->w.width - mw - gappx * e, .height = h}, 0);
 			ty += c->geom.height + gappx * e;
 		}

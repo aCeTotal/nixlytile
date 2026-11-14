@@ -50,7 +50,7 @@ gametune_unit_present(void)
 	};
 	present = run_cmd(argv) == 0;
 	if (!present)
-		wlr_log(WLR_ERROR, "gametune: nixly-gametune.service is not installed — "
+		nx_log(NX_ERROR, "gametune: nixly-gametune.service is not installed — "
 			"C-state latency, CPU/GPU power limits and I/O tuning will NOT be "
 			"applied. Enable the nixlytile NixOS module (nixosModules.default).");
 	return present;
@@ -73,10 +73,10 @@ gametune_start(void)
 		"systemctl", "start", "--no-block", "nixly-gametune.service", NULL
 	};
 	if (run_cmd(argv) != 0)
-		wlr_log(WLR_ERROR, "gametune: failed to start nixly-gametune.service "
+		nx_log(NX_ERROR, "gametune: failed to start nixly-gametune.service "
 			"(polkit rule missing? user must be in the 'gamemode' group)");
 	else
-		wlr_log(WLR_INFO, "gametune: nixly-gametune.service started");
+		nx_log(NX_INFO, "gametune: nixly-gametune.service started");
 }
 
 static void
@@ -91,7 +91,7 @@ gametune_stop(void)
 		"systemctl", "stop", "--no-block", "nixly-gametune.service", NULL
 	};
 	run_cmd(argv);
-	wlr_log(WLR_INFO, "gametune: nixly-gametune.service stopped");
+	nx_log(NX_INFO, "gametune: nixly-gametune.service stopped");
 }
 
 /*
@@ -111,7 +111,7 @@ game_oom_protect(pid_t pid)
 	snprintf(unit, sizeof(unit), "nixly-gameprio@%d.service", (int)pid);
 	const char *const argv[] = { "systemctl", "start", "--no-block", unit, NULL };
 	if (run_cmd(argv) != 0)
-		wlr_log(WLR_ERROR, "gametune: failed to start %s — game stays "
+		nx_log(NX_ERROR, "gametune: failed to start %s — game stays "
 			"unprotected from the OOM killer", unit);
 	else
 		game_mode_oom_applied = 1;
@@ -251,7 +251,7 @@ game_policy_repair(pid_t pid)
 	}
 	closedir(d);
 	if (fixed)
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"Game priority: lifted %d SCHED_IDLE/BATCH tasks to SCHED_OTHER for PID %d",
 			fixed, pid);
 }
@@ -270,9 +270,9 @@ apply_game_priority(pid_t pid)
 	 */
 	if (setpriority(PRIO_PROCESS, pid, -10) == 0) {
 		game_mode_nice_applied = 1;
-		wlr_log(WLR_INFO, "Game priority: set nice=-10 for PID %d", pid);
+		nx_log(NX_INFO, "Game priority: set nice=-10 for PID %d", pid);
 	} else {
-		wlr_log(WLR_INFO, "Game priority: setpriority failed for PID %d: %s",
+		nx_log(NX_INFO, "Game priority: setpriority failed for PID %d: %s",
 			pid, strerror(errno));
 	}
 
@@ -286,9 +286,9 @@ apply_game_priority(pid_t pid)
 	if (syscall(__NR_ioprio_set, IOPRIO_WHO_PROCESS, pid,
 		    IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 0)) == 0) {
 		game_mode_ioclass_applied = 1;
-		wlr_log(WLR_INFO, "Game priority: set ioprio BE/0 for PID %d", pid);
+		nx_log(NX_INFO, "Game priority: set ioprio BE/0 for PID %d", pid);
 	} else {
-		wlr_log(WLR_INFO, "Game priority: ioprio_set failed for PID %d: %s",
+		nx_log(NX_INFO, "Game priority: ioprio_set failed for PID %d: %s",
 			pid, strerror(errno));
 	}
 
@@ -321,7 +321,7 @@ restore_game_priority(pid_t pid)
 	if (game_mode_nice_applied) {
 		setpriority(PRIO_PROCESS, pid, 0);
 		game_mode_nice_applied = 0;
-		wlr_log(WLR_INFO, "Game priority: restored nice=0 for PID %d", pid);
+		nx_log(NX_INFO, "Game priority: restored nice=0 for PID %d", pid);
 	}
 
 	/* Restore I/O priority to best-effort class, priority 4 (normal) */
@@ -329,7 +329,7 @@ restore_game_priority(pid_t pid)
 		syscall(__NR_ioprio_set, IOPRIO_WHO_PROCESS, pid,
 			IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 4));
 		game_mode_ioclass_applied = 0;
-		wlr_log(WLR_INFO, "Game priority: restored ioprio BE/4 for PID %d", pid);
+		nx_log(NX_INFO, "Game priority: restored ioprio BE/4 for PID %d", pid);
 	}
 
 	/* Per-thread restore, mirroring the per-thread apply */
@@ -366,7 +366,7 @@ apply_power_profile_performance(void)
 	if (ppd_applied)
 		return;
 	if (!ppd_available()) {
-		wlr_log(WLR_INFO, "PPD: powerprofilesctl not available, skipping");
+		nx_log(NX_INFO, "PPD: powerprofilesctl not available, skipping");
 		return;
 	}
 
@@ -386,17 +386,17 @@ apply_power_profile_performance(void)
 
 	/* Switch to performance — only if not already there */
 	if (strcmp(ppd_saved_profile, "performance") == 0) {
-		wlr_log(WLR_INFO, "PPD: already on performance, no change");
+		nx_log(NX_INFO, "PPD: already on performance, no change");
 		ppd_applied = 1;
 		return;
 	}
 
 	if (system("powerprofilesctl set performance 2>/dev/null") == 0) {
 		ppd_applied = 1;
-		wlr_log(WLR_INFO, "PPD: profile %s → performance",
+		nx_log(NX_INFO, "PPD: profile %s → performance",
 			ppd_saved_profile[0] ? ppd_saved_profile : "?");
 	} else {
-		wlr_log(WLR_INFO, "PPD: set performance failed");
+		nx_log(NX_INFO, "PPD: set performance failed");
 	}
 }
 
@@ -413,7 +413,7 @@ restore_power_profile(void)
 			"powerprofilesctl set %s 2>/dev/null",
 			ppd_saved_profile);
 		if (system(cmd) == 0)
-			wlr_log(WLR_INFO, "PPD: restored profile → %s", ppd_saved_profile);
+			nx_log(NX_INFO, "PPD: restored profile → %s", ppd_saved_profile);
 	}
 	ppd_applied = 0;
 	ppd_saved_profile[0] = '\0';
@@ -538,7 +538,7 @@ lower_competing_processes(pid_t game_pid)
 	}
 	closedir(dir);
 
-	wlr_log(WLR_INFO, "CPU isolate: SCHED_IDLE applied to %d processes",
+	nx_log(NX_INFO, "CPU isolate: SCHED_IDLE applied to %d processes",
 		lowered_pid_count);
 }
 
@@ -554,7 +554,7 @@ restore_competing_processes(void)
 	for (i = 0; i < lowered_pid_count; i++)
 		sched_setscheduler(lowered_pids[i], SCHED_OTHER, &sp);
 
-	wlr_log(WLR_INFO, "CPU isolate: restored %d processes to SCHED_OTHER",
+	nx_log(NX_INFO, "CPU isolate: restored %d processes to SCHED_OTHER",
 		lowered_pid_count);
 	lowered_pid_count = 0;
 }
@@ -754,7 +754,7 @@ reclaim_frozen_memory(void)
 		syscall(__NR_process_madvise, pidfd, &iov, (size_t)1, MADV_PAGEOUT, (unsigned int)0);
 		close(pidfd);
 	}
-	wlr_log(WLR_INFO, "Reclaimed memory from %d frozen processes", frozen_pid_count);
+	nx_log(NX_INFO, "Reclaimed memory from %d frozen processes", frozen_pid_count);
 }
 
 /*
@@ -874,7 +874,7 @@ freeze_background_processes(void)
 	}
 
 	closedir(dir);
-	wlr_log(WLR_INFO, "Froze %d background processes for game mode", frozen_pid_count);
+	nx_log(NX_INFO, "Froze %d background processes for game mode", frozen_pid_count);
 
 	/* Push frozen process pages to swap to free physical RAM */
 	if (frozen_pid_count > 0)
@@ -897,7 +897,7 @@ unfreeze_background_processes(void)
 		kill(frozen_pids[i], SIGCONT);  /* ESRCH if exited - harmless */
 	}
 
-	wlr_log(WLR_INFO, "Unfroze %d background processes", frozen_pid_count);
+	nx_log(NX_INFO, "Unfroze %d background processes", frozen_pid_count);
 	frozen_pid_count = 0;
 }
 
@@ -1108,7 +1108,7 @@ apply_cpu_affinity(pid_t game_pid)
 	if (gm_vcache_set(&vset)) {
 		set_process_affinity_all_threads(game_pid, &vset);
 		game_mode_affinity_applied = 1;
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"CPU affinity: game PID %d → V-Cache CCD (%d of %ld CPUs)",
 			game_pid, CPU_COUNT(&vset), ncores);
 		return;
@@ -1135,7 +1135,7 @@ apply_cpu_affinity(pid_t game_pid)
 	set_process_affinity_all_threads(game_pid, &all_set);
 
 	game_mode_affinity_applied = 1;
-	wlr_log(WLR_INFO, "CPU affinity: game PID %d → all %ld CPUs", game_pid, ncores);
+	nx_log(NX_INFO, "CPU affinity: game PID %d → all %ld CPUs", game_pid, ncores);
 }
 
 void
@@ -1152,7 +1152,7 @@ restore_cpu_affinity(pid_t game_pid)
 		set_process_affinity_all_threads(game_pid, &all_set);
 
 	game_mode_affinity_applied = 0;
-	wlr_log(WLR_INFO, "CPU affinity: restored to all cores");
+	nx_log(NX_INFO, "CPU affinity: restored to all cores");
 }
 
 /*
@@ -1173,7 +1173,7 @@ apply_raw_input(void)
 	}
 	pthread_mutex_unlock(&pointer_devices_lock);
 	game_mode_raw_input_applied = 1;
-	wlr_log(WLR_INFO, "Raw input: disabled pointer acceleration (%d devices)", pointer_device_count);
+	nx_log(NX_INFO, "Raw input: disabled pointer acceleration (%d devices)", pointer_device_count);
 }
 
 void
@@ -1189,7 +1189,7 @@ restore_raw_input(void)
 	}
 	pthread_mutex_unlock(&pointer_devices_lock);
 	game_mode_raw_input_applied = 0;
-	wlr_log(WLR_INFO, "Raw input: restored pointer acceleration profile");
+	nx_log(NX_INFO, "Raw input: restored pointer acceleration profile");
 }
 
 /*
@@ -1332,7 +1332,7 @@ nvidia_detect_smi_index(GpuInfo *gpu)
 		/* nvidia-smi returns e.g. "00000000:01:00.0", our pci_slot is "0000:01:00.0" */
 		if (strstr(buf, gpu->pci_slot)) {
 			nv_gpu_index = i;
-			wlr_log(WLR_INFO, "NVIDIA: PCI %s → nvidia-smi GPU index %d", gpu->pci_slot, i);
+			nx_log(NX_INFO, "NVIDIA: PCI %s → nvidia-smi GPU index %d", gpu->pci_slot, i);
 			return;
 		}
 	}
@@ -1357,7 +1357,7 @@ apply_nvidia_gpu_power(GpuInfo *gpu)
 			nv_persistence_was_off = 1;
 			snprintf(args, sizeof(args), "-i %d -pm 1", nv_gpu_index);
 			nvidia_smi_run(args, NULL, 0);
-			wlr_log(WLR_INFO, "NVIDIA: persistence mode enabled");
+			nx_log(NX_INFO, "NVIDIA: persistence mode enabled");
 		}
 	}
 
@@ -1374,7 +1374,7 @@ apply_nvidia_gpu_power(GpuInfo *gpu)
 		if (dot) *dot = '\0';
 		snprintf(args, sizeof(args), "-i %d --power-limit=%s", nv_gpu_index, buf);
 		if (nvidia_smi_run(args, NULL, 0) == 0)
-			wlr_log(WLR_INFO, "NVIDIA: power limit → %s W (was %s)", buf, nv_saved_power_limit);
+			nx_log(NX_INFO, "NVIDIA: power limit → %s W (was %s)", buf, nv_saved_power_limit);
 	}
 
 	/*
@@ -1388,7 +1388,7 @@ apply_nvidia_gpu_power(GpuInfo *gpu)
 				buf, buf) < (int)sizeof(args) &&
 				nvidia_smi_run(args, NULL, 0) == 0) {
 			nv_clocks_locked = 1;
-			wlr_log(WLR_INFO, "NVIDIA: GPU clocks locked → %s MHz", buf);
+			nx_log(NX_INFO, "NVIDIA: GPU clocks locked → %s MHz", buf);
 		}
 	}
 
@@ -1402,13 +1402,13 @@ apply_nvidia_gpu_power(GpuInfo *gpu)
 		if (snprintf(args, sizeof(args), "-i %d -lmc %s,%s", nv_gpu_index,
 				buf, buf) < (int)sizeof(args) &&
 				nvidia_smi_run(args, NULL, 0) == 0)
-			wlr_log(WLR_INFO, "NVIDIA: memory clocks locked → %s MHz", buf);
+			nx_log(NX_INFO, "NVIDIA: memory clocks locked → %s MHz", buf);
 	}
 
 	/* 5. Pin power unless offload-only. */
 	if (!dgpu_may_sleep) {
 		dgpu_assert_power_on(gpu);
-		wlr_log(WLR_INFO, "NVIDIA: PCI power/control=on re-asserted for game mode");
+		nx_log(NX_INFO, "NVIDIA: PCI power/control=on re-asserted for game mode");
 	}
 
 	/*
@@ -1435,9 +1435,9 @@ apply_nvidia_gpu_power(GpuInfo *gpu)
 		FILE *fp = popen(nv_settings_cmd, "r");
 		if (fp) {
 			if (pclose(fp) == 0)
-				wlr_log(WLR_INFO, "NVIDIA: PowerMizer → prefer max performance (via nvidia-settings)");
+				nx_log(NX_INFO, "NVIDIA: PowerMizer → prefer max performance (via nvidia-settings)");
 			else
-				wlr_log(WLR_INFO, "NVIDIA: nvidia-settings unavailable (pure Wayland) — using nvidia-smi only");
+				nx_log(NX_INFO, "NVIDIA: nvidia-settings unavailable (pure Wayland) — using nvidia-smi only");
 		}
 	}
 
@@ -1455,14 +1455,14 @@ apply_nvidia_gpu_power(GpuInfo *gpu)
 			if (n > 0) {
 				pat_val[n] = '\0';
 				if (pat_val[0] == '0')
-					wlr_log(WLR_INFO, "NVIDIA: WARNING — NVreg_UsePageAttributeTable=0 "
+					nx_log(NX_INFO, "NVIDIA: WARNING — NVreg_UsePageAttributeTable=0 "
 						"(set nvidia.NVreg_UsePageAttributeTable=1 in boot params for better perf)");
 			}
 		}
 	}
 
 	nv_power_applied = 1;
-	wlr_log(WLR_INFO, "NVIDIA: card%d (%s, smi-idx=%d) — full performance mode active",
+	nx_log(NX_INFO, "NVIDIA: card%d (%s, smi-idx=%d) — full performance mode active",
 		gpu->card_index, gpu->pci_slot, nv_gpu_index);
 }
 
@@ -1480,7 +1480,7 @@ restore_nvidia_gpu_power(void)
 		snprintf(args, sizeof(args), "-i %d -rmc", nv_gpu_index);
 		nvidia_smi_run(args, NULL, 0);
 		nv_clocks_locked = 0;
-		wlr_log(WLR_INFO, "NVIDIA: GPU/memory clock locks released");
+		nx_log(NX_INFO, "NVIDIA: GPU/memory clock locks released");
 	}
 
 	/* Restore power limit */
@@ -1492,7 +1492,7 @@ restore_nvidia_gpu_power(void)
 		if (dot) *dot = '\0';
 		snprintf(args, sizeof(args), "-i %d --power-limit=%s", nv_gpu_index, pl_copy);
 		nvidia_smi_run(args, NULL, 0);
-		wlr_log(WLR_INFO, "NVIDIA: power limit restored → %s W", pl_copy);
+		nx_log(NX_INFO, "NVIDIA: power limit restored → %s W", pl_copy);
 		nv_saved_power_limit[0] = '\0';
 	}
 
@@ -1501,7 +1501,7 @@ restore_nvidia_gpu_power(void)
 		snprintf(args, sizeof(args), "-i %d -pm 0", nv_gpu_index);
 		nvidia_smi_run(args, NULL, 0);
 		nv_persistence_was_off = 0;
-		wlr_log(WLR_INFO, "NVIDIA: persistence mode restored (off)");
+		nx_log(NX_INFO, "NVIDIA: persistence mode restored (off)");
 	}
 
 	/* PCI power policy stays startup's. */
@@ -1517,7 +1517,7 @@ restore_nvidia_gpu_power(void)
 	}
 
 	nv_power_applied = 0;
-	wlr_log(WLR_INFO, "NVIDIA: performance mode deactivated — defaults restored");
+	nx_log(NX_INFO, "NVIDIA: performance mode deactivated — defaults restored");
 }
 
 /* Nvidia apply/restore run synchronously on the gm-bg worker thread.
@@ -1576,7 +1576,7 @@ apply_gpu_power_state(void)
 			}
 		}
 
-		wlr_log(WLR_INFO, "GPU power: AMD card%d → high perf + 3D profile", gpu->card_index);
+		nx_log(NX_INFO, "GPU power: AMD card%d → high perf + 3D profile", gpu->card_index);
 
 	} else if (gpu->vendor == GPU_VENDOR_NVIDIA) {
 		apply_nvidia_gpu_power(gpu);
@@ -1599,7 +1599,7 @@ apply_gpu_power_state(void)
 					if (max_freq[n - 1] == '\n') max_freq[n - 1] = '\0';
 					sched_save_and_write(gpu_intel_min_path, max_freq,
 						gpu_saved_intel_min, sizeof(gpu_saved_intel_min));
-					wlr_log(WLR_INFO, "GPU power: Intel card%d → min_freq=%s MHz",
+					nx_log(NX_INFO, "GPU power: Intel card%d → min_freq=%s MHz",
 						gpu->card_index, max_freq);
 				}
 			}
@@ -1612,17 +1612,17 @@ restore_gpu_power_state(void)
 {
 	if (gpu_saved_perf_level[0]) {
 		sched_restore(gpu_power_perf_path, gpu_saved_perf_level);
-		wlr_log(WLR_INFO, "GPU power: AMD perf level restored");
+		nx_log(NX_INFO, "GPU power: AMD perf level restored");
 	}
 	if (gpu_saved_power_profile[0]) {
 		write_file_str(gpu_power_profile_path, gpu_saved_power_profile);
 		gpu_saved_power_profile[0] = '\0';
-		wlr_log(WLR_INFO, "GPU power: AMD power profile restored");
+		nx_log(NX_INFO, "GPU power: AMD power profile restored");
 	}
 	restore_nvidia_gpu_power(); /* no-op unless nv_power_applied */
 	if (gpu_saved_intel_min[0]) {
 		sched_restore(gpu_intel_min_path, gpu_saved_intel_min);
-		wlr_log(WLR_INFO, "GPU power: Intel min freq restored");
+		nx_log(NX_INFO, "GPU power: Intel min freq restored");
 	}
 }
 
@@ -1702,13 +1702,13 @@ apply_gpu_sched_priority(pid_t pid)
 		 */
 		int target_fd_num = find_process_drm_fd(pid);
 		if (target_fd_num < 0) {
-			wlr_log(WLR_INFO, "GPU sched: no DRM fd found for PID %d", pid);
+			nx_log(NX_INFO, "GPU sched: no DRM fd found for PID %d", pid);
 			return;
 		}
 
 		int pidfd = syscall(__NR_pidfd_open, pid, 0);
 		if (pidfd < 0) {
-			wlr_log(WLR_INFO, "GPU sched: pidfd_open failed for PID %d: %s",
+			nx_log(NX_INFO, "GPU sched: pidfd_open failed for PID %d: %s",
 				pid, strerror(errno));
 			return;
 		}
@@ -1716,15 +1716,15 @@ apply_gpu_sched_priority(pid_t pid)
 		int local_fd = syscall(__NR_pidfd_getfd, pidfd, target_fd_num, 0);
 		close(pidfd);
 		if (local_fd < 0) {
-			wlr_log(WLR_INFO, "GPU sched: pidfd_getfd failed for PID %d fd %d: %s",
+			nx_log(NX_INFO, "GPU sched: pidfd_getfd failed for PID %d fd %d: %s",
 				pid, target_fd_num, strerror(errno));
 			return;
 		}
 
 		/* Get compositor's DRM master fd from the renderer */
-		int drm_master_fd = wlr_renderer_get_drm_fd(drw);
+		int drm_master_fd = nx_renderer_get_drm_fd(drw);
 		if (drm_master_fd < 0) {
-			wlr_log(WLR_INFO, "GPU sched: cannot get DRM master fd");
+			nx_log(NX_INFO, "GPU sched: cannot get DRM master fd");
 			close(local_fd);
 			return;
 		}
@@ -1740,16 +1740,16 @@ apply_gpu_sched_priority(pid_t pid)
 		if (drmIoctl(drm_master_fd, DRM_IOCTL_AMDGPU_SCHED, &sched) == 0) {
 			gpu_sched_applied = 1;
 			gpu_sched_local_fd = local_fd;  /* keep alive until restore */
-			wlr_log(WLR_INFO, "GPU sched: AMD process priority → VERY_HIGH (VRAM prio) for PID %d", pid);
+			nx_log(NX_INFO, "GPU sched: AMD process priority → VERY_HIGH (VRAM prio) for PID %d", pid);
 		} else {
 			/* VERY_HIGH may require CAP_SYS_NICE; fall back to HIGH */
 			sched.in.priority = AMDGPU_CTX_PRIORITY_HIGH;
 			if (drmIoctl(drm_master_fd, DRM_IOCTL_AMDGPU_SCHED, &sched) == 0) {
 				gpu_sched_applied = 1;
 				gpu_sched_local_fd = local_fd;
-				wlr_log(WLR_INFO, "GPU sched: AMD process priority → HIGH (VERY_HIGH denied) for PID %d", pid);
+				nx_log(NX_INFO, "GPU sched: AMD process priority → HIGH (VERY_HIGH denied) for PID %d", pid);
 			} else {
-				wlr_log(WLR_INFO, "GPU sched: AMDGPU_SCHED ioctl failed: %s", strerror(errno));
+				nx_log(NX_INFO, "GPU sched: AMDGPU_SCHED ioctl failed: %s", strerror(errno));
 				close(local_fd);
 			}
 		}
@@ -1763,7 +1763,7 @@ apply_gpu_sched_priority(pid_t pid)
 		 * or nice < 0).  Log that we're relying on this mechanism.
 		 */
 		gpu_sched_applied = 1;
-		wlr_log(WLR_INFO, "GPU sched: Intel — relying on nice=-10 for elevated GPU context priority");
+		nx_log(NX_INFO, "GPU sched: Intel — relying on nice=-10 for elevated GPU context priority");
 	}
 }
 
@@ -1778,7 +1778,7 @@ restore_gpu_sched_priority(pid_t pid)
 		GpuInfo *gpu = &detected_gpus[gpu_idx];
 
 		if (gpu->vendor == GPU_VENDOR_AMD && gpu_sched_local_fd >= 0) {
-			int drm_master_fd = wlr_renderer_get_drm_fd(drw);
+			int drm_master_fd = nx_renderer_get_drm_fd(drw);
 			if (drm_master_fd >= 0) {
 				union drm_amdgpu_sched sched = {0};
 				sched.in.op = AMDGPU_SCHED_OP_PROCESS_PRIORITY_OVERRIDE;
@@ -1788,7 +1788,7 @@ restore_gpu_sched_priority(pid_t pid)
 			}
 			close(gpu_sched_local_fd);
 			gpu_sched_local_fd = -1;
-			wlr_log(WLR_INFO, "GPU sched: AMD process priority → NORMAL for PID %d", pid);
+			nx_log(NX_INFO, "GPU sched: AMD process priority → NORMAL for PID %d", pid);
 		}
 	}
 
@@ -2040,17 +2040,17 @@ retro_blocks_game(Client *c)
 void
 retro_content_reclass(Monitor *m, Client *c, int game_now)
 {
-	if (!m || !m->wlr_output || !is_retro_emulator_client(c))
+	if (!m || !m->nx_output || !is_retro_emulator_client(c))
 		return;
 	if (game_now) {
 		if (m->retro_scanout_lock) {
-			wlr_output_lock_attach_render(m->wlr_output, false);
+			nx_output_lock_attach_render(m->nx_output, false);
 			m->retro_scanout_lock = 0;
 		}
 		set_adaptive_sync(m, 1);
 	} else {
 		if (!m->retro_scanout_lock) {
-			wlr_output_lock_attach_render(m->wlr_output, true);
+			nx_output_lock_attach_render(m->nx_output, true);
 			m->retro_scanout_lock = 1;
 		}
 		set_adaptive_sync(m, 0);
@@ -2060,10 +2060,10 @@ retro_content_reclass(Monitor *m, Client *c, int game_now)
 	 * new one (autolock's low ring spans 45 s). */
 	autolock_reset(m);
 	schedule_game_mode_update();
-	wlr_log(WLR_INFO, "retro reclass: %s → %s on %s",
+	nx_log(NX_INFO, "retro reclass: %s → %s on %s",
 		client_get_appid(c) ? client_get_appid(c) : "?",
 		game_now ? "content (game path)" : "menu (native)",
-		m->wlr_output->name);
+		m->nx_output->name);
 }
 
 /* ── menu max-refresh hold (RetroArch / nixlymedia) ──────────────── */
@@ -2074,12 +2074,12 @@ retro_content_reclass(Monitor *m, Client *c, int game_now)
  * the output) or video plays (the cadence path owns the refresh rate),
  * restoring the mode that was active before. */
 static Monitor *menuhz_mon;
-static struct wlr_output_mode *menuhz_saved;
+static struct nx_output_mode *menuhz_saved;
 static struct wl_event_source *menuhz_timer;
 /* Mode the output rejected — without this memory the 1 s re-check
  * retried the same failing modeset forever (HDMI retrain/blank loop
  * in every menu on TVs whose max mode fails link training). */
-static struct wlr_output_mode *menuhz_failed;
+static struct nx_output_mode *menuhz_failed;
 
 static int
 menu_maxhz_client(Client *c)
@@ -2099,43 +2099,43 @@ menu_maxhz_client(Client *c)
 }
 
 static int
-same_resolution(struct wlr_output_mode *a, struct wlr_output_mode *b)
+same_resolution(struct nx_output_mode *a, struct nx_output_mode *b)
 {
 	return a && b && a->width == b->width && a->height == b->height;
 }
 
 static void
-menuhz_commit(Monitor *m, struct wlr_output_mode *mode)
+menuhz_commit(Monitor *m, struct nx_output_mode *mode)
 {
-	struct wlr_output_state st;
+	struct nx_output_state st;
 
-	if (!m || !m->wlr_output || !mode ||
-			m->wlr_output->current_mode == mode)
+	if (!m || !m->nx_output || !mode ||
+			m->nx_output->current_mode == mode)
 		return;
-	wlr_output_state_init(&st);
-	wlr_output_state_set_mode(&st, mode);
-	if (wlr_output_test_state(m->wlr_output, &st)
-			&& wlr_output_commit_state(m->wlr_output, &st)) {
-		wlr_log(WLR_INFO, "menuhz: %s → %dx%d@%dmHz",
-				m->wlr_output->name, mode->width, mode->height,
+	nx_output_state_init(&st);
+	nx_output_state_set_mode(&st, mode);
+	if (nx_output_test_state(m->nx_output, &st)
+			&& nx_output_commit_state(m->nx_output, &st)) {
+		nx_log(NX_INFO, "menuhz: %s → %dx%d@%dmHz",
+				m->nx_output->name, mode->width, mode->height,
 				mode->refresh);
 		/* Same broadcast as every other modeset path — without it
 		 * output-management clients (nixlycc) show a stale mode. */
-		struct wlr_output_configuration_v1 *config =
-			wlr_output_configuration_v1_create();
-		struct wlr_output_configuration_head_v1 *config_head =
-			wlr_output_configuration_head_v1_create(config,
-					m->wlr_output);
+		struct nx_output_configuration_v1 *config =
+			nx_output_configuration_v1_create();
+		struct nx_output_configuration_head_v1 *config_head =
+			nx_output_configuration_head_v1_create(config,
+					m->nx_output);
 		config_head->state.mode = mode;
-		wlr_output_manager_v1_set_configuration(output_mgr, config);
+		nx_output_manager_v1_set_configuration(output_mgr, config);
 		updatemons(NULL, NULL);
 	} else {
-		wlr_log(WLR_ERROR, "menuhz: %s rejected %dx%d@%dmHz",
-				m->wlr_output->name, mode->width, mode->height,
+		nx_log(NX_ERROR, "menuhz: %s rejected %dx%d@%dmHz",
+				m->nx_output->name, mode->width, mode->height,
 				mode->refresh);
 		menuhz_failed = mode;
 	}
-	wlr_output_state_finish(&st);
+	nx_output_state_finish(&st);
 }
 
 /* Monitor is being destroyed: drop the menu-refresh hold statics so the
@@ -2169,34 +2169,34 @@ menu_maxhz_update(void)
 				&& !menuhz_mon->video_mode_active
 				&& !menuhz_mon->vrr_active
 				&& same_resolution(menuhz_saved,
-					menuhz_mon->wlr_output->current_mode))
+					menuhz_mon->nx_output->current_mode))
 			menuhz_commit(menuhz_mon, menuhz_saved);
 		menuhz_mon = want;
 		menuhz_saved = NULL;
 		menuhz_failed = NULL;
-		if (want && want->wlr_output && want->wlr_output->current_mode) {
-			struct wlr_output_mode *cur =
-				want->wlr_output->current_mode;
-			struct wlr_output_mode *max =
-				find_mode(want->wlr_output,
+		if (want && want->nx_output && want->nx_output->current_mode) {
+			struct nx_output_mode *cur =
+				want->nx_output->current_mode;
+			struct nx_output_mode *max =
+				find_mode(want->nx_output,
 						cur->width, cur->height, 0);
 
 			menuhz_saved = cur;
-			wlr_log(WLR_INFO, "menuhz: hold on %s (%s), cur "
+			nx_log(NX_INFO, "menuhz: hold on %s (%s), cur "
 					"%dx%d@%dmHz, max at this res %dmHz",
-					want->wlr_output->name,
+					want->nx_output->name,
 					f && client_get_appid(f)
 						? client_get_appid(f) : "?",
 					cur->width, cur->height, cur->refresh,
 					max ? max->refresh : 0);
 		}
 	}
-	if (menuhz_mon && menuhz_mon->wlr_output &&
+	if (menuhz_mon && menuhz_mon->nx_output &&
 			!menuhz_mon->video_mode_active && !menuhz_mon->vrr_active &&
-			menuhz_mon->wlr_output->current_mode) {
-		struct wlr_output_mode *cur =
-			menuhz_mon->wlr_output->current_mode;
-		struct wlr_output_mode *max = find_mode(menuhz_mon->wlr_output,
+			menuhz_mon->nx_output->current_mode) {
+		struct nx_output_mode *cur =
+			menuhz_mon->nx_output->current_mode;
+		struct nx_output_mode *max = find_mode(menuhz_mon->nx_output,
 				cur->width, cur->height, 0);
 
 		if (max && max != cur && max != menuhz_failed)
@@ -2242,7 +2242,7 @@ static int gm_bg_wake;
 static void
 gm_ultra_exit(pid_t pid)
 {
-	wlr_log(WLR_INFO, "gm-bg: exiting ultra (pid=%d)", pid);
+	nx_log(NX_INFO, "gm-bg: exiting ultra (pid=%d)", pid);
 	restore_competing_processes();
 	restore_gpu_power_state();
 	restore_raw_input();
@@ -2255,7 +2255,7 @@ gm_ultra_exit(pid_t pid)
 	unfreeze_background_processes();
 	restore_power_profile();
 	fan_boost_deactivate();
-	wlr_log(WLR_INFO, "gm-bg: ultra exit complete");
+	nx_log(NX_INFO, "gm-bg: ultra exit complete");
 }
 
 static void *
@@ -2277,7 +2277,7 @@ gm_bg_worker_func(void *arg)
 
 		if (want && !have) {
 			/* Entering ultra — heavy system tuning */
-			wlr_log(WLR_INFO, "gm-bg: entering ultra (pid=%d)", pid);
+			nx_log(NX_INFO, "gm-bg: entering ultra (pid=%d)", pid);
 			fan_boost_activate();
 			apply_power_profile_performance();
 			freeze_background_processes();
@@ -2294,7 +2294,7 @@ gm_bg_worker_func(void *arg)
 				apply_gpu_sched_priority(pid);
 				lower_competing_processes(pid);
 			}
-			wlr_log(WLR_INFO, "gm-bg: ultra enter complete");
+			nx_log(NX_INFO, "gm-bg: ultra enter complete");
 		} else if (!want && have) {
 			gm_ultra_exit(pid);
 		}
@@ -2450,7 +2450,7 @@ update_game_mode(void)
 		 * ENTERING ULTRA GAME MODE
 		 * Maximum performance - stop everything non-essential
 		 */
-		wlr_log(WLR_INFO, "ULTRA GAME MODE ACTIVATED - maximum performance, minimal latency");
+		nx_log(NX_INFO, "ULTRA GAME MODE ACTIVATED - maximum performance, minimal latency");
 
 		/* The cover normally started at the fullscreen transition in
 		 * setfullscreen(); this is the backstop for games that reach
@@ -2532,7 +2532,7 @@ update_game_mode(void)
 			if (gm_core_split(&comp_set, &game_set) &&
 			    sched_setaffinity(0, sizeof(comp_set), &comp_set) == 0) {
 				compositor_pin_applied = 1;
-				wlr_log(WLR_INFO, "Compositor pinned to %d CPU(s) of physical core 0",
+				nx_log(NX_INFO, "Compositor pinned to %d CPU(s) of physical core 0",
 					CPU_COUNT(&comp_set));
 			}
 		}
@@ -2569,14 +2569,14 @@ update_game_mode(void)
 		 * ENTERING REGULAR GAME MODE (non-game fullscreen like video)
 		 * Less aggressive - just pause some background tasks
 		 */
-		wlr_log(WLR_INFO, "Game mode activated (non-game fullscreen) - pausing background tasks");
+		nx_log(NX_INFO, "Game mode activated (non-game fullscreen) - pausing background tasks");
 
 
 	} else if (!game_mode_active && was_active) {
 		/*
 		 * EXITING GAME MODE - restore everything
 		 */
-		wlr_log(WLR_INFO, "Game mode deactivated - restoring normal operation");
+		nx_log(NX_INFO, "Game mode deactivated - restoring normal operation");
 
 		/* Restore additional timers if we were in ultra mode */
 		if (was_ultra) {
@@ -2623,7 +2623,7 @@ update_game_mode(void)
 			if (fan_thermal_timer)
 				wl_event_source_timer_update(fan_thermal_timer, 1000);
 
-			wlr_log(WLR_INFO, "Ultra game mode deactivated - full system restored");
+			nx_log(NX_INFO, "Ultra game mode deactivated - full system restored");
 
 		} else {
 			/*

@@ -174,14 +174,14 @@ al_render_p90(Monitor *m)
 static int
 al_max_display_fps(Monitor *m)
 {
-	struct wlr_output_mode *mode;
+	struct nx_output_mode *mode;
 	int max_hz = 0;
 
-	wl_list_for_each(mode, &m->wlr_output->modes, link)
+	wl_list_for_each(mode, &m->nx_output->modes, link)
 		if (mode->refresh / 1000 > max_hz)
 			max_hz = mode->refresh / 1000;
-	if (max_hz == 0 && m->wlr_output->current_mode)
-		max_hz = m->wlr_output->current_mode->refresh / 1000;
+	if (max_hz == 0 && m->nx_output->current_mode)
+		max_hz = m->nx_output->current_mode->refresh / 1000;
 	return max_hz;
 }
 
@@ -206,8 +206,8 @@ al_margined(int cand)
 static void
 al_set_lock(Monitor *m, int fps, uint64_t now_ns, const char *why)
 {
-	wlr_log(WLR_INFO, "Auto FPS lock on %s: %d → %d FPS (%s)",
-		m->wlr_output->name, m->al_lock_fps, fps, why);
+	nx_log(NX_INFO, "Auto FPS lock on %s: %d → %d FPS (%s)",
+		m->nx_output->name, m->al_lock_fps, fps, why);
 	m->al_lock_fps = fps;
 	m->al_lock_since_ns = now_ns;
 	m->al_candidate_fps = 0;
@@ -220,11 +220,11 @@ al_set_lock(Monitor *m, int fps, uint64_t now_ns, const char *why)
 static void
 al_consider_modeset(Monitor *m, uint64_t now_ns)
 {
-	struct wlr_output_mode *mode, *cur, *best = NULL;
+	struct nx_output_mode *mode, *cur, *best = NULL;
 	float hz, eff, err;
 	int n, lock = m->al_lock_fps;
 
-	cur = m->wlr_output->current_mode;
+	cur = m->nx_output->current_mode;
 	if (!cur || lock <= 0)
 		return;
 	if (now_ns - m->al_lock_since_ns < AL_MODE_STABLE_NS)
@@ -234,7 +234,7 @@ al_consider_modeset(Monitor *m, uint64_t now_ns)
 		return;
 
 	/* Respect a user-pinned refresh rate (native pin doesn't count). */
-	if (monitor_mode_pinned(m->wlr_output))
+	if (monitor_mode_pinned(m->nx_output))
 		return;
 
 	/* Current mode already an exact multiple → nothing to gain. */
@@ -244,7 +244,7 @@ al_consider_modeset(Monitor *m, uint64_t now_ns)
 			<= AL_MODE_EXACT_ERR)
 		return;
 
-	wl_list_for_each(mode, &m->wlr_output->modes, link) {
+	wl_list_for_each(mode, &m->nx_output->modes, link) {
 		if (mode->width != cur->width || mode->height != cur->height)
 			continue;
 		if (mode == m->al_failed_mode)
@@ -309,8 +309,8 @@ autolock_tick(Monitor *m, int allow_tearing, uint64_t now_ns)
 		float hz = 0.0f;
 		if (m->present_interval_ns > 0)
 			hz = 1000000000.0f / (float)m->present_interval_ns;
-		else if (m->wlr_output->current_mode)
-			hz = (float)m->wlr_output->current_mode->refresh / 1000.0f;
+		else if (m->nx_output->current_mode)
+			hz = (float)m->nx_output->current_mode->refresh / 1000.0f;
 		if (hz >= 30.0f) {
 			int n = (int)ceilf(hz / (float)m->al_lock_fps - 0.02f);
 			if (n < 1)
@@ -383,46 +383,46 @@ autolock_tick(Monitor *m, int allow_tearing, uint64_t now_ns)
 void
 autolock_apply_mode(Monitor *m)
 {
-	struct wlr_output_mode *target;
-	struct wlr_output_state state;
-	struct wlr_output_configuration_v1 *config;
-	struct wlr_output_configuration_head_v1 *config_head;
+	struct nx_output_mode *target;
+	struct nx_output_state state;
+	struct nx_output_configuration_v1 *config;
+	struct nx_output_configuration_head_v1 *config_head;
 
-	if (!m || !m->wlr_output || !m->wlr_output->enabled)
+	if (!m || !m->nx_output || !m->nx_output->enabled)
 		return;
 	target = m->al_target_mode;
 	m->al_target_mode = NULL;
-	if (!target || target == m->wlr_output->current_mode)
+	if (!target || target == m->nx_output->current_mode)
 		return;
 	/* Stale target: gamescan switched the resolution on this same
 	 * vblank (it runs first in rendermon).  Committing a mode picked
 	 * for the old resolution would silently revert the game's
 	 * resolution switch; drop it and let the lock re-derive a target
 	 * at the new resolution. */
-	if (m->wlr_output->current_mode
-			&& (target->width != m->wlr_output->current_mode->width
-			|| target->height != m->wlr_output->current_mode->height))
+	if (m->nx_output->current_mode
+			&& (target->width != m->nx_output->current_mode->width
+			|| target->height != m->nx_output->current_mode->height))
 		return;
-	wlr_output_state_init(&state);
-	wlr_output_state_set_mode(&state, target);
-	if (wlr_output_test_state(m->wlr_output, &state)
-	    && wlr_output_commit_state(m->wlr_output, &state)) {
+	nx_output_state_init(&state);
+	nx_output_state_set_mode(&state, target);
+	if (nx_output_test_state(m->nx_output, &state)
+	    && nx_output_commit_state(m->nx_output, &state)) {
 		m->al_mode_active = 1;
 		m->al_last_modeset_ns = get_time_ns();
-		wlr_log(WLR_INFO,
+		nx_log(NX_INFO,
 			"Auto FPS lock: %s switched to %dx%d@%dmHz (exact multiple of %d FPS)",
-			m->wlr_output->name, target->width, target->height,
+			m->nx_output->name, target->width, target->height,
 			target->refresh, m->al_lock_fps);
-		config = wlr_output_configuration_v1_create();
-		config_head = wlr_output_configuration_head_v1_create(
-				config, m->wlr_output);
+		config = nx_output_configuration_v1_create();
+		config_head = nx_output_configuration_head_v1_create(
+				config, m->nx_output);
 		config_head->state.mode = target;
-		wlr_output_manager_v1_set_configuration(output_mgr, config);
+		nx_output_manager_v1_set_configuration(output_mgr, config);
 		updatemons(NULL, NULL);
 	} else {
 		m->al_failed_mode = target;
 	}
-	wlr_output_state_finish(&state);
+	nx_output_state_finish(&state);
 }
 
 /* Fullscreen enter/exit: clear all state; restore the refresh if we
@@ -430,10 +430,10 @@ autolock_apply_mode(Monitor *m)
 void
 autolock_reset(Monitor *m)
 {
-	struct wlr_output_mode *target;
-	struct wlr_output_state state;
-	struct wlr_output_configuration_v1 *config;
-	struct wlr_output_configuration_head_v1 *config_head;
+	struct nx_output_mode *target;
+	struct nx_output_state state;
+	struct nx_output_configuration_v1 *config;
+	struct nx_output_configuration_head_v1 *config_head;
 	int restore;
 
 	if (!m)
@@ -463,24 +463,24 @@ autolock_reset(Monitor *m)
 	m->al_mode_active = 0;
 	m->al_last_modeset_ns = 0;
 
-	if (!restore || !m->wlr_output || !m->wlr_output->enabled)
+	if (!restore || !m->nx_output || !m->nx_output->enabled)
 		return;
-	target = bestmode(m->wlr_output);
-	if (!target || target == m->wlr_output->current_mode)
+	target = bestmode(m->nx_output);
+	if (!target || target == m->nx_output->current_mode)
 		return;
 
-	wlr_output_state_init(&state);
-	wlr_output_state_set_mode(&state, target);
-	if (wlr_output_test_state(m->wlr_output, &state)
-	    && wlr_output_commit_state(m->wlr_output, &state)) {
-		wlr_log(WLR_INFO, "Auto FPS lock: %s restored to %dx%d@%dmHz",
-			m->wlr_output->name, target->width, target->height,
+	nx_output_state_init(&state);
+	nx_output_state_set_mode(&state, target);
+	if (nx_output_test_state(m->nx_output, &state)
+	    && nx_output_commit_state(m->nx_output, &state)) {
+		nx_log(NX_INFO, "Auto FPS lock: %s restored to %dx%d@%dmHz",
+			m->nx_output->name, target->width, target->height,
 			target->refresh);
-		config = wlr_output_configuration_v1_create();
-		config_head = wlr_output_configuration_head_v1_create(
-				config, m->wlr_output);
+		config = nx_output_configuration_v1_create();
+		config_head = nx_output_configuration_head_v1_create(
+				config, m->nx_output);
 		config_head->state.mode = target;
-		wlr_output_manager_v1_set_configuration(output_mgr, config);
+		nx_output_manager_v1_set_configuration(output_mgr, config);
 		{
 			char osd_msg[64];
 			snprintf(osd_msg, sizeof(osd_msg), "%dx%d @ %d Hz",
@@ -490,5 +490,5 @@ autolock_reset(Monitor *m)
 		}
 		updatemons(NULL, NULL);
 	}
-	wlr_output_state_finish(&state);
+	nx_output_state_finish(&state);
 }

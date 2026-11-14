@@ -99,13 +99,13 @@ parse_bind(const char *value, struct bind *b)
 	for (tok = strtok_r(buf, "+", &save); tok;
 			tok = strtok_r(NULL, "+", &save)) {
 		if (strcmp(tok, "ctrl") == 0)
-			b->mods |= WLR_MODIFIER_CTRL;
+			b->mods |= NX_MODIFIER_CTRL;
 		else if (strcmp(tok, "alt") == 0)
-			b->mods |= WLR_MODIFIER_ALT;
+			b->mods |= NX_MODIFIER_ALT;
 		else if (strcmp(tok, "shift") == 0)
-			b->mods |= WLR_MODIFIER_SHIFT;
+			b->mods |= NX_MODIFIER_SHIFT;
 		else if (strcmp(tok, "super") == 0)
-			b->mods |= WLR_MODIFIER_LOGO;
+			b->mods |= NX_MODIFIER_LOGO;
 		else if (strncmp(tok, "mouse:", 6) == 0)
 			b->button = (uint32_t)strtoul(tok + 6, NULL, 0);
 		else if (strncmp(tok, "key:", 4) == 0)
@@ -175,7 +175,7 @@ gaming_conf_load(void)
 		fclose(fp);
 	}
 	apply_gate();
-	wlr_log(WLR_INFO, "gaming.conf: %zu mic bind(s), dynamic rendering %s",
+	nx_log(NX_INFO, "gaming.conf: %zu mic bind(s), dynamic rendering %s",
 		nbinds, dynamic_render_enabled ? "on" : "off");
 }
 
@@ -238,8 +238,8 @@ ptt_handle_key(uint32_t mods, uint32_t keycode, const xkb_keysym_t *syms,
 void
 ptt_handle_button(uint32_t button, int pressed)
 {
-	struct wlr_keyboard *kb = wlr_seat_get_keyboard(seat);
-	uint32_t mods = kb ? wlr_keyboard_get_modifiers(kb) : 0;
+	struct nx_keyboard *kb = nx_seat_get_keyboard(seat);
+	uint32_t mods = kb ? nx_keyboard_get_modifiers(kb) : 0;
 	int changed = 0;
 	size_t i;
 
@@ -294,7 +294,7 @@ gaming_conf_setup(void)
 
 	gamingconf_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
 	if (gamingconf_fd < 0) {
-		wlr_log(WLR_ERROR, "gaming.conf: inotify_init failed: %s",
+		nx_log(NX_ERROR, "gaming.conf: inotify_init failed: %s",
 			strerror(errno));
 		return;
 	}
@@ -302,7 +302,7 @@ gaming_conf_setup(void)
 	wd = inotify_add_watch(gamingconf_fd, gamingconf_dir,
 		IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE);
 	if (wd < 0) {
-		wlr_log(WLR_ERROR, "gaming.conf: inotify_add_watch(%s) failed: %s",
+		nx_log(NX_ERROR, "gaming.conf: inotify_add_watch(%s) failed: %s",
 			gamingconf_dir, strerror(errno));
 		close(gamingconf_fd);
 		gamingconf_fd = -1;
@@ -311,7 +311,7 @@ gaming_conf_setup(void)
 
 	gamingconf_source = wl_event_loop_add_fd(event_loop, gamingconf_fd,
 		WL_EVENT_READABLE, gamingconf_readable, NULL);
-	wlr_log(WLR_INFO, "gaming.conf: watching %s", gamingconf_path);
+	nx_log(NX_INFO, "gaming.conf: watching %s", gamingconf_path);
 }
 
 void
