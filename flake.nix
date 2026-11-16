@@ -51,6 +51,30 @@
             vulkan-headers
             qrencode
             quirc
+            libjpeg_turbo
+          ];
+
+          gazeModel = name: hash: pkgs.fetchurl {
+            url = "https://github.com/google/mediapipe/raw/v0.8.9/mediapipe/modules/${name}";
+            inherit hash;
+          };
+
+          gazeModels = pkgs.linkFarm "nixlytile-gaze-models" [
+            {
+              name = "face_detection_short_range.tflite";
+              path = gazeModel "face_detection/face_detection_short_range.tflite"
+                "sha256-O8GC658zkl2eWLXI1ZMIp2D0reqPKCNw5CjFEhLCZjM=";
+            }
+            {
+              name = "face_landmark.tflite";
+              path = gazeModel "face_landmark/face_landmark.tflite"
+                "sha256-xgP6YUkhmj6Uh9yavXoMJEdMdyYyc9JIaDeM30CqJtE=";
+            }
+            {
+              name = "iris_landmark.tflite";
+              path = gazeModel "iris_landmark/iris_landmark.tflite"
+                "sha256-0XRNKgnCX1AdOeuk+v9H5T7MqIUsXOGbzo7qw5NXUh8=";
+            }
           ];
 
           buildScript = pkgs.writeShellApplication {
@@ -59,11 +83,11 @@
             text = ''
               set -euo pipefail
               make clean
-              make PKG_CONFIG=pkg-config "$@"
+              make PKG_CONFIG=pkg-config GAZE_MODEL_DIR=${gazeModels} "$@"
             '';
           };
         in {
-          inherit pkgs buildTools buildScript;
+          inherit pkgs buildTools buildScript gazeModels;
         };
     in {
       packages = forAllSystems (system:
@@ -71,6 +95,7 @@
           ps = perSystem system;
           pkgs = ps.pkgs;
           runtimeDeps = with pkgs; [
+            matugen
             xwayland
             foot
             wl-clipboard
@@ -118,6 +143,7 @@
               pkgs.vulkan-headers
               pkgs.qrencode
               pkgs.quirc
+              pkgs.libjpeg_turbo
             ];
 
             makeFlags = [ "PKG_CONFIG=${pkgs.pkg-config}/bin/pkg-config" ];
@@ -126,7 +152,9 @@
             buildPhase = ''
               runHook preBuild
               make clean
-              make -j$NIX_BUILD_CORES
+              make -j$NIX_BUILD_CORES \
+                ICON_FONT_DIR=${pkgs.nerd-fonts.symbols-only}/share/fonts \
+                GAZE_MODEL_DIR=${ps.gazeModels}
               runHook postBuild
             '';
 

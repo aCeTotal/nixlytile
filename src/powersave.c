@@ -5,12 +5,11 @@
  * Shared with powersave_clock_cap() so launchboost.c restores exactly what
  * powersave_reassert() set. */
 #define PS_BATTERY_CAP 0.6
+#define PS_AC_BRIGHTNESS 60.0
 
 static int ps_engaged = -1;     /* -1 unknown → first event always applies */
 
-/* Re-apply whatever clock regime the power state calls for.  Called
- * internally and by presence.c when leaving its (deeper) save mode, so
- * waking on battery lands back on the battery cap, not full clocks. */
+/* Re-applies the power state's regime. */
 void
 powersave_reassert(void)
 {
@@ -63,8 +62,25 @@ ps_wall_power(void)
 	nx_log(NX_INFO, "powersave: on wall power — quiet profile");
 }
 
-/* Called from battwatch's event-loop callback whenever the published
- * battery snapshot changes (and once at startup). */
+/* Any thread: sysfs regime only. */
+void
+powersave_battery_reassert_async(void)
+{
+	if (ps_engaged == 1)
+		cpuclock_regime_battery_async(PS_BATTERY_CAP);
+}
+
+static void
+pin_ac_brightness(void)
+{
+	if (!backlight_available || set_backlight_percent(PS_AC_BRIGHTNESS) != 0)
+		return;
+	light_last_percent = PS_AC_BRIGHTNESS;
+	light_cached_percent = PS_AC_BRIGHTNESS;
+	refreshstatuslight();
+}
+
+/* Battwatch snapshot changed. */
 void
 powersave_battery_event(void)
 {
@@ -79,11 +95,10 @@ powersave_battery_event(void)
 	if (on_bat && ps_engaged != 1) {
 		ps_engaged = 1;
 		ps_engage();
-		lightsense_power_event(0);
 	} else if (!on_bat && ps_engaged != 0) {
 		ps_engaged = 0;
 		ps_wall_power();
-		lightsense_power_event(1);
+		pin_ac_brightness();
 	}
 }
 

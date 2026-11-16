@@ -5,15 +5,16 @@ PROTO = $(BUILD)/protocols
 
 PKGS = wayland-server wayland-client xkbcommon libinput libdrm libudev libseat gbm vulkan \
 	pixman-1 libdisplay-info xcb xcb-composite xcb-ewmh xcb-icccm xcb-randr \
-	xcb-render xcb-res xcb-xfixes xcb-errors fcft libsystemd cairo librsvg-2.0 gdk-pixbuf-2.0 \
-	glib-2.0 libqrencode
+	xcb-render xcb-res xcb-xfixes xcb-errors fcft fontconfig libsystemd cairo librsvg-2.0 gdk-pixbuf-2.0 \
+	glib-2.0 libqrencode libturbojpeg
 
 WARNINGS = -Wpedantic -Wall -Wextra -Wno-unused-parameter -Wshadow -Wunused-macros \
 	-Werror=strict-prototypes -Werror=implicit -Werror=return-type \
 	-Werror=incompatible-pointer-types -Wfloat-conversion
 
 NXCFLAGS = $(shell $(PKG_CONFIG) --cflags $(PKGS)) -I. -Isrc -I$(BUILD) -I$(PROTO) \
-	-D_POSIX_C_SOURCE=200809L -DXWAYLAND -DVERSION=\"$(VERSION)\" -DXWAYLAND_PATH=\"$(XWAYLAND_PATH)\" \
+	-D_POSIX_C_SOURCE=200809L -DXWAYLAND -DVERSION=\"$(VERSION)\" -DXWAYLAND_PATH=\"$(XWAYLAND_PATH)\" -DICON_FONT_DIR=\"$(ICON_FONT_DIR)\" \
+	-DGAZE_MODEL_DIR=\"$(GAZE_MODEL_DIR)\" \
 	-g $(OPTFLAGS) $(WARNINGS) $(CFLAGS)
 LDLIBS = $(shell $(PKG_CONFIG) --libs $(PKGS)) -lquirc -lm -lpthread $(LIBS)
 
@@ -73,7 +74,7 @@ PNPIDS = $(BUILD)/platform/drm/pnp_ids.c
 GENERATED = $(PROTO_HDRS) $(SHADER_HDRS)
 
 HELPERS = src/nixly_fand.c src/nixly_diskd.c src/nixly_jaild.c src/jaild_attach.c
-SRCS = $(filter-out $(HELPERS),$(wildcard src/*.c)) $(shell find platform -name '*.c')
+SRCS = $(filter-out $(HELPERS),$(wildcard src/*.c src/*/*.c)) $(shell find platform -name '*.c')
 OBJS = $(SRCS:%.c=$(BUILD)/%.o) $(PROTO_SRCS:%.c=%.o) $(PNPIDS:%.c=%.o)
 
 xml_of = $(filter %/$(1).xml,$(PROTOCOL_XMLS))
@@ -132,6 +133,7 @@ install: all
 		$(DESTDIR)$(PREFIX)/bin/nixly-diskd $(DESTDIR)$(PREFIX)/bin/nixly-jaild
 	mkdir -p $(DESTDIR)$(DATADIR)/nixlytile/images
 	cp -r images/svg $(DESTDIR)$(DATADIR)/nixlytile/images/
+	cp -r theme $(DESTDIR)$(DATADIR)/nixlytile/
 	mkdir -p $(DESTDIR)$(MANDIR)/man1
 	cp -f nixlytile.1 $(DESTDIR)$(MANDIR)/man1
 	chmod 644 $(DESTDIR)$(MANDIR)/man1/nixlytile.1
@@ -155,6 +157,7 @@ uninstall:
 		$(DESTDIR)$(DATADIR)/xdg-desktop-portal/portals/nixlytile.portal \
 		$(DESTDIR)$(DATADIR)/xdg-desktop-portal/nixlytile-portals.conf \
 		$(DESTDIR)$(DATADIR)/polkit-1/actions/org.nixlytile.jail-grant.policy
+	rm -rf $(DESTDIR)$(DATADIR)/nixlytile/theme
 
 .PHONY: all clean install uninstall
 

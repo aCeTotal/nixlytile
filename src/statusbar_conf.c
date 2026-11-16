@@ -29,7 +29,7 @@
 
 #define STATUSBARCONF_NAME "statusbar.conf"
 
-static double sc_brightness = -1.0;   /* -1 = auto */
+static double sc_brightness = -1.0;   /* -1 = unset */
 static double sc_volume = -1.0;       /* -1 = unset, use built-in default */
 static double sc_mic = -1.0;
 static int sc_chargelimit = -1;
@@ -113,7 +113,7 @@ static const char sc_seed[] =
 "module \"power\"        \"right\"\n"
 "\n"
 "// Persistent levels — rewritten by nixlytile on every manual change and\n"
-"// restored at the next login. brightness -1 = automatic (webcam ambient).\n"
+"// restored at the next login. brightness -1 = default (40).\n"
 "chargelimit 80\n"
 "brightness -1.0\n"
 "volume 80.0\n"
@@ -405,10 +405,7 @@ barmod_find(const char *name)
 	return NULL;
 }
 
-/* External edit of statusbar.conf: re-read, push changed levels to the
- * hardware/PipeWire through the same setters manual changes use (they
- * save again — one guarded self-write, no loop), and re-render/relayout
- * the bar for module/order/icons-only changes. */
+/* Applies external statusbar.conf edits live. */
 static void
 sc_apply_external(void)
 {
@@ -418,18 +415,11 @@ sc_apply_external(void)
 	sc_parse();
 	sc_last_write_hash = sc_hash_file(sc_path);
 
-	if (sc_brightness != ob) {
-		if (sc_brightness >= 0.0) {
-			light_mode_set_manual(sc_brightness);
-			if (backlight_available &&
-					set_backlight_percent(sc_brightness) == 0) {
-				light_last_percent = sc_brightness;
-				light_cached_percent = sc_brightness;
-				refreshstatuslight();
-			}
-		} else {
-			light_mode_set_auto();
-		}
+	if (sc_brightness != ob && sc_brightness >= 0.0 && backlight_available &&
+			set_backlight_percent(sc_brightness) == 0) {
+		light_last_percent = sc_brightness;
+		light_cached_percent = sc_brightness;
+		refreshstatuslight();
 	}
 	if (sc_volume != ov && sc_volume >= 0.0)
 		set_pipewire_volume(sc_volume);

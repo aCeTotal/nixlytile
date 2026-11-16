@@ -276,6 +276,7 @@ typedef struct TrayMenuEntry TrayMenuEntry;
 typedef struct TrayItem TrayItem;
 typedef struct NsTimer NsTimer;
 typedef struct DynRender DynRender;
+typedef struct Foveation Foveation;
 struct vrs_link;
 
 /* ── basic types ───────────────────────────────────────────────────── */
@@ -397,33 +398,102 @@ struct StatusFont {
 	int height;
 };
 
-/* status bar / tray / network / popup / nixpkgs / launcher / monitor-popup
- * / gamepad types removed — those modules are gone. */
 #if 1
+#define BAR_FONT_RATIO 0.5
+#define BAR_ICON_RATIO 0.64
+#define BAR_TRAY_ICON_RATIO 0.6
+#define BAR_ICON_GAP 7
+#define BAR_TEXT_PAD 10
+#define BAR_ICON_PAD 7
+#define BAR_INSET 4
+#define BAR_SIDE_RUNS 3
+#define BARMOD_MAX 24
+
+enum { BAR_LEFT, BAR_MIDDLE, BAR_RIGHT, BAR_SIDES };
+
+/* Islands first, then two overlays. */
+enum {
+	PILL_HOVER = BAR_SIDES * BAR_SIDE_RUNS,
+	PILL_WS,
+	BAR_PILLS,
+};
+
+/* Nerd Font bar glyphs. */
+enum {
+	GLYPH_CPU = 0xF04C5,
+	GLYPH_RAM = 0xF035B,
+	GLYPH_LIGHT = 0xF00DF,
+	GLYPH_CLOCK = 0xF0150,
+	GLYPH_DISK = 0xF02CA,
+	GLYPH_DISPLAY = 0xF0379,
+	GLYPH_POWER = 0xF0425,
+	GLYPH_TERMINAL = 0xF018D,
+	GLYPH_SSH = 0xF08C0,
+	GLYPH_NET_OFF = 0xF092E,
+	GLYPH_BATTERY_UNKNOWN = 0xF0091,
+};
+
+enum icon_tone { TONE_ACCENT, TONE_WARN, TONE_CRIT };
+
+typedef struct {
+	const char *svg;
+	uint32_t cp;
+	enum icon_tone tone;
+} IconGlyph;
+
+typedef struct {
+	uint32_t icon;
+	const float *icon_fg;
+	const char *text;
+	const float *text_fg;
+} BarLabel;
+
+#define FNV_OFFSET 1469598103934665603ULL
+#define FNV_PRIME 1099511628211ULL
+
+static inline uint64_t
+sig_mix(uint64_t sig, uint64_t v)
+{
+	return (sig ^ v) * FNV_PRIME;
+}
+
+typedef struct {
+	int x, y, w, h;
+} BarSpan;
+
+/* Wallpaper luminance under the bar. */
+typedef struct {
+	float y_hi;
+	int valid;
+} Backdrop;
+
+/* Capsule: disc caps around rect. */
+typedef struct {
+	struct nx_scene_tree *tree;
+	struct nx_scene_buffer *cap_l, *cap_r;
+	struct nx_scene_rect *mid, *edge_t, *edge_b;
+	const float *fill, *edge;
+	int cap_h, y;
+	double x, w, vx, vw, a;
+	int tx, tw;
+	double ta;
+} BarPill;
+
 struct StatusModule {
 	struct nx_scene_tree *tree;
-	struct nx_scene_tree *bg;
+	struct nx_scene_buffer *content;
 	int width;
 	int x;
 	int box_x[MAX_TAGS];
 	int box_w[MAX_TAGS];
 	int box_tag[MAX_TAGS];
 	int box_count;
-	uint32_t tagmask;
-	int hover_tag;
-	float hover_alpha[MAX_TAGS];
-	/* persistent per-box hover highlight rects (tags module): retinted
-	 * in place during the hover fade so the digit textures survive. */
-	struct nx_scene_rect *hover_rect[MAX_TAGS];
-	/* render dedup — per monitor, NOT global: a shared cache is
-	 * consumed by the first monitor in the loop and leaves modules
-	 * on monitors 2..N stale forever. */
+	int active_box;
+	int placed;
+	/* Per monitor render dedup. */
 	char last_render_text[64];
 	int last_render_h;
-	/* workspace-row dedup (tags module): hash of everything the row
-	 * draws, so an unchanged row is never re-rasterized. */
 	uint64_t render_sig;
-	/* statusbar.conf: show only the icon, no text/percent. */
 	int icons_only;
 };
 
@@ -554,28 +624,6 @@ int battwatch_get(BattSnapshot *out);
 void battwatch_refresh(void);
 void powersave_battery_event(void);
 void statusbar_battery_event(void);
-
-/* camwatch.c — one webcam frame reduced to mean luma plus a grid of
- * block means, grabbed on a worker thread (a V4L2 grab blocks for
- * hundreds of ms and must never run on the compositor thread).
- * presence.c reads the grid for motion, lightsense.c the mean for
- * ambient light. */
-#define CAM_GRID_W 8
-#define CAM_GRID_H 6
-#define CAM_NBLOCKS (CAM_GRID_W * CAM_GRID_H)
-
-typedef struct {
-	int valid;                       /* a frame was decoded */
-	int mean;                        /* mean luma, 0-255 */
-	unsigned char grid[CAM_NBLOCKS];
-	uint64_t stamp_ms;               /* 0 = no frame published yet */
-} CamSnapshot;
-
-void camwatch_init(void);
-int camwatch_get(CamSnapshot *out);
-void camwatch_request(void);
-void presence_camera_frame(const CamSnapshot *s);
-void lightsense_camera_frame(const CamSnapshot *s);
 
 typedef struct {
 	struct nx_scene_tree *tree;
@@ -748,6 +796,10 @@ struct StatusBar {
 	 * (statusbar_anim_sync). width/height 0 = never laid out yet. */
 	struct nx_box slot;
 	int last_layout_h; /* bar height at last full module render; 0 = force */
+	BarPill pill[BAR_PILLS];
+	StatusModule *placed[BARMOD_MAX];
+	int nplaced;
+	int pills_settled;
 	StatusModule clock;
 	StatusModule cpu;
 	StatusModule battery;
@@ -1468,18 +1520,13 @@ typedef struct {
 
 #define DR_WORK_SLOTS 16
 #define DR_MISS_SLOTS 4
-#define DR_BUDGET_MAX 0.85f
 
 /* Dynamic rendering rate ladder state. */
 struct DynRender {
-	struct vrs_link *link;
 	Client *game;
-	unsigned int link_gen;
 	int owner;                  /* drives the frame_done gate */
 	int rung;                   /* 0 = fastest rate */
-	int budget_rung;            /* raise target while preparing */
 	int fresh;                  /* frame latched since release */
-	float budget_frac;          /* GPU share of interval */
 	uint64_t released_ns;
 	uint64_t work[DR_WORK_SLOTS];   /* release → buffer commit */
 	int work_idx, work_n;
@@ -1487,12 +1534,16 @@ struct DynRender {
 	int miss_idx;
 	uint64_t calm_ns;           /* last miss or rung change */
 	uint64_t eval_ns;
-	uint64_t prepare_ns;        /* raise preparation began */
-	uint32_t level_seen;
-	uint64_t level_rise_ns;     /* layer last coarsened */
 	uint64_t raise_ns;
 	uint64_t hold_ns;           /* no raise before this */
 	uint64_t backoff_ns;
+};
+
+/* Foveated game's VRS page. */
+struct Foveation {
+	struct vrs_link *page;
+	Client *game;
+	unsigned int gen;
 };
 
 /* ── monitor ───────────────────────────────────────────────────────── */
@@ -1629,6 +1680,7 @@ struct Monitor {
 	int al_mode_active;                 /* output on an autolock-chosen refresh */
 	uint64_t al_last_modeset_ns;
 	DynRender dr;
+	Foveation fov;
 	int pending_game_frame;
 	uint64_t game_frame_submit_ns;
 	uint64_t game_frame_intervals[16];
@@ -1843,35 +1895,25 @@ extern float bordercolor[];
 extern float focuscolor[];
 extern float urgentcolor[];
 extern unsigned int statusbar_height;
-extern unsigned int statusbar_module_spacing;
-extern unsigned int statusbar_module_padding;
-extern unsigned int statusbar_icon_text_gap;
-extern unsigned int statusbar_icon_text_gap_volume;
-extern unsigned int statusbar_icon_text_gap_microphone;
-extern unsigned int statusbar_icon_text_gap_cpu;
-extern unsigned int statusbar_icon_text_gap_ram;
-extern unsigned int statusbar_icon_text_gap_light;
-extern unsigned int statusbar_icon_text_gap_battery;
-extern unsigned int statusbar_icon_text_gap_clock;
 extern unsigned int statusbar_top_gap;
 extern float statusbar_fg[];
-extern float statusbar_bg[];
-extern float statusbar_opacity;
+extern float statusbar_dim_fg[];
+extern float statusbar_icon_fg[];
+extern float statusbar_ok_fg[];
+extern float statusbar_warn_fg[];
+extern float statusbar_crit_fg[];
+extern float statusbar_island_bg[];
+extern float statusbar_island_edge[];
+extern float statusbar_hover_bg[];
+extern float statusbar_ws_active_bg[];
+extern float statusbar_ws_active_fg[];
 extern float statusbar_popup_bg[];
-extern float statusbar_volume_muted_fg[];
-extern float statusbar_mic_muted_fg[];
-extern float statusbar_tag_bg[];
-extern float statusbar_tag_active_bg[];
-extern float statusbar_tag_hover_bg[];
-extern int statusbar_hover_fade_ms;
 extern int statusbar_tray_force_rgba;
 extern const char *statusbar_fonts[8];
 extern const char *statusbar_font_attributes;
 extern int statusbar_font_spacing;
 extern int statusbar_font_force_color;
 extern enum fcft_subpixel statusbar_font_subpixel;
-extern int statusbar_workspace_padding;
-extern int statusbar_workspace_spacing;
 extern int statusbar_thumb_height;
 extern int statusbar_thumb_gap;
 extern float statusbar_thumb_window[];
@@ -2064,7 +2106,6 @@ extern struct wl_event_source *monovl_watch_source;
 #if 1
 extern struct wl_event_source *status_timer;
 extern struct wl_event_source *status_cpu_timer;
-extern struct wl_event_source *status_hover_timer;
 extern struct wl_event_source *cache_update_timer;
 extern struct wl_event_source *nixpkgs_cache_timer;
 extern int cache_update_phase;
@@ -2206,46 +2247,16 @@ extern int net_available;
 
 /* icon paths + buffers */
 extern char net_icon_path[PATH_MAX];
-extern char net_icon_loaded_path[PATH_MAX];
 extern char cpu_icon_path[PATH_MAX];
-extern char cpu_icon_loaded_path[PATH_MAX];
 extern char light_icon_path[PATH_MAX];
-extern char light_icon_loaded_path[PATH_MAX];
 extern char ram_icon_path[PATH_MAX];
-extern char ram_icon_loaded_path[PATH_MAX];
 extern char battery_icon_path[PATH_MAX];
-extern char battery_icon_loaded_path[PATH_MAX];
 extern char mic_icon_path[PATH_MAX];
-extern char mic_icon_loaded_path[PATH_MAX];
 extern char volume_icon_path[PATH_MAX];
-extern char volume_icon_loaded_path[PATH_MAX];
 extern char clock_icon_path[PATH_MAX];
-extern char clock_icon_loaded_path[PATH_MAX];
-extern int net_icon_loaded_h, net_icon_w, net_icon_h;
-extern struct nx_buffer *net_icon_buf;
-extern int clock_icon_loaded_h, clock_icon_w, clock_icon_h;
-extern struct nx_buffer *clock_icon_buf;
-extern int cpu_icon_loaded_h, cpu_icon_w, cpu_icon_h;
-extern struct nx_buffer *cpu_icon_buf;
-extern int light_icon_loaded_h, light_icon_w, light_icon_h;
-extern struct nx_buffer *light_icon_buf;
-extern int ram_icon_loaded_h, ram_icon_w, ram_icon_h;
-extern struct nx_buffer *ram_icon_buf;
-extern int battery_icon_loaded_h, battery_icon_w, battery_icon_h;
-extern struct nx_buffer *battery_icon_buf;
-extern int mic_icon_loaded_h, mic_icon_w, mic_icon_h;
-extern struct nx_buffer *mic_icon_buf;
-extern int volume_icon_loaded_h, volume_icon_w, volume_icon_h;
-extern struct nx_buffer *volume_icon_buf;
 extern char disk_icon_path[PATH_MAX];
 extern char bt_icon_path[PATH_MAX];
-extern char bt_icon_loaded_path[PATH_MAX];
-extern int bt_icon_loaded_h, bt_icon_w, bt_icon_h;
-extern struct nx_buffer *bt_icon_buf;
 extern char display_icon_path[PATH_MAX];
-extern char display_icon_loaded_path[PATH_MAX];
-extern int display_icon_loaded_h, display_icon_w, display_icon_h;
-extern struct nx_buffer *display_icon_buf;
 extern unsigned long long net_prev_rx;
 extern unsigned long long net_prev_tx;
 extern struct timespec net_prev_ts;
@@ -2298,7 +2309,6 @@ extern struct nx_buffer *nixpkg_ok_icon_buf;
 extern int nixpkg_ok_icon_height;
 extern const uint32_t cpu_popup_refresh_interval_ms;
 extern const uint32_t ram_popup_refresh_interval_ms;
-extern const double status_icon_scale;
 #endif
 
 /* runtime fonts */
@@ -2371,15 +2381,11 @@ struct nx_buffer *statusbar_buffer_from_argb32(const uint32_t *data, int width, 
 struct nx_buffer *statusbar_buffer_from_argb32_raw(const uint32_t *data, int width, int height);
 struct nx_buffer *statusbar_scaled_buffer_from_argb32(const uint32_t *data,
 		int width, int height, int target_h);
-struct nx_buffer *statusbar_scaled_buffer_from_argb32_raw(const uint32_t *data,
-		int width, int height, int target_h);
 /* Returns a CACHE-OWNED buffer: do not nx_buffer_drop() it — attach it
  * to a scene node (which locks it) and leave the reference alone. */
 struct nx_buffer *statusbar_buffer_from_glyph(const struct fcft_glyph *glyph);
 void statusbar_glyph_cache_flush(void);
 struct nx_buffer *statusbar_buffer_from_pixbuf(GdkPixbuf *pixbuf, int target_h, int *out_w, int *out_h);
-struct nx_buffer *statusbar_buffer_from_wifi100(int target_h, int *out_w, int *out_h);
-void recolor_wifi100_pixbuf(GdkPixbuf *pixbuf);
 int tray_load_svg_pixbuf(const char *path, int desired_h, GdkPixbuf **out_pixbuf);
 void tray_measure_icon_insets(TrayItem *it);
 void statusbar_buffer_insets(struct nx_buffer *buf, int icon_w, int *pad_l, int *pad_r);
@@ -2476,7 +2482,6 @@ void dynrender_committed(Client *c);
 void dynrender_release(Monitor *m, uint64_t now);
 int dynrender_vblanks(Monitor *m);
 uint64_t dynrender_interval_ns(Monitor *m);
-void dynrender_link_closed(const struct vrs_link *page);
 const char *dynrender_diag(Monitor *m);
 
 /* ladder.c — perfect-match fps ladder */
@@ -2487,10 +2492,14 @@ void ladder_start(Monitor *m, uint64_t now);
 void ladder_tick(Monitor *m, uint64_t now);
 void ladder_missed(Monitor *m, uint64_t now);
 
+/* foveation.c — game VRS page lifecycle */
+void foveation_update(Monitor *m, Client *game);
+void foveation_page_closed(const struct vrs_link *page);
+
 /* vrslink.c — VRS layer link server */
 extern unsigned int vrslink_generation;
 struct vrs_link *vrslink_for_pid(pid_t pid);
-void vrslink_target(struct vrs_link *page, uint64_t interval_ns, uint64_t budget_ns);
+void vrslink_publish(struct vrs_link *page, uint32_t focus);
 void vrslink_idle(struct vrs_link *page);
 void vrslink_setup(void);
 void vrslink_cleanup(void);
@@ -2880,7 +2889,6 @@ void setup_bindings_conf_watch(void);
  * mic levels. Levels save on every manual change and restore at login;
  * external edits of both levels and layout apply live. brightness -1 =
  * auto. */
-#define BARMOD_MAX 24
 typedef struct {
 	char name[24];
 	int side;        /* 0 = left, 1 = middle, 2 = right */
@@ -2913,6 +2921,40 @@ void layoutstatusbar(Monitor *m, const struct nx_box *area,
 		struct nx_box *client_area);
 void positionstatusmodules(Monitor *m);
 void printstatus(void);
+void bar_color_premul(const float c[static 4], float a, float out[static 4]);
+struct PixmanBuffer *bar_canvas_new(int w, int h);
+struct fcft_font *bar_font_get(int bar_h);
+int bar_icon_width(int bar_h, uint32_t cp);
+struct nx_buffer *bar_label_buffer(const BarLabel *l, int h);
+struct nx_buffer *bar_disc_buffer(int d, const float fill[static 4],
+		const float edge[static 4]);
+void bar_pills_init(StatusBar *bar);
+int bar_pill_target(BarPill *p, Monitor *m, const BarSpan *s);
+void bar_pill_hide(BarPill *p, Monitor *m);
+void bar_pill_settle(BarPill *p);
+void bar_pills_invalidate(StatusBar *bar);
+int statusbar_anim_tick(Monitor *m, double dt);
+int bar_module_attach(StatusModule *mod, struct nx_buffer *buf);
+void bar_module_draw(StatusModule *mod, int bar_h, const BarLabel *l);
+void bar_module_clear(StatusModule *mod);
+const float *bar_icon_color(const float *text_fg);
+uint32_t icon_glyph_cp(const char *path);
+const IconGlyph *icon_glyph_for(const char *path);
+const struct fcft_glyph *bar_glyph_px(uint32_t cp, int px);
+uint32_t bar_battery_glyph(double percent, int charging);
+void bar_layout_modules(Monitor *m);
+int bar_module_hit(const StatusModule *mod, int lx);
+int bar_ws_cell(const StatusModule *tags, int local);
+TrayItem *bar_tray_item_at(int local);
+void statusbar_hover_update(Monitor *m, double cx, double cy);
+void statusbar_hover_focus(Monitor *m);
+int statusbar_hover_lit(Monitor *m);
+StatusModule *barmod_by_name(Monitor *m, const char *name);
+int theme_apply(void);
+void theme_set_backdrop(const Backdrop *b);
+void theme_wallpaper_update(void);
+void wallpaper_sync(void);
+void hotapply_appearance(void);
 void renderclock(StatusModule *module, int bar_height, const char *text);
 void renderlight(StatusModule *module, int bar_height, const char *text);
 void rendernet(StatusModule *module, int bar_height, const char *text);
@@ -2921,16 +2963,8 @@ void rendervolume(StatusModule *module, int bar_height, const char *text);
 void rendermic(StatusModule *module, int bar_height, const char *text);
 void rendercpu(StatusModule *module, int bar_height, const char *text);
 void renderram(StatusModule *module, int bar_height, const char *text);
-void render_icon_label(StatusModule *module, int bar_height, const char *text,
-		int (*ensure_icon)(int target_h), struct nx_buffer **icon_buf,
-		int *icon_w, int *icon_h, int min_text_w, int icon_gap,
-		const float *text_color);
 void client_kick_frame_done(Client *c);
-void updatemodulebg(StatusModule *module, int width, int height,
-		const float color[static 4]);
 void renderworkspaces(Monitor *m, StatusModule *module, int bar_height);
-int tray_render_label(StatusModule *module, const char *text, int x, int bar_height,
-		const float color[static 4]);
 void rendertray(Monitor *m, int bar_height);
 void refreshstatusclock(void);
 void refreshstatuslight(void);
@@ -2953,7 +2987,6 @@ uint32_t random_status_delay_ms(void);
 double volume_last_for_type(int is_headset);
 void volume_cache_store(int is_headset, double level, int muted, uint64_t now);
 int status_should_render(StatusModule *module, int barh, const char *text);
-void clearstatusmodule(StatusModule *module);
 void initial_status_refresh(void);
 void schedule_status_timer(void);
 void schedule_next_status_refresh(void);
@@ -2962,23 +2995,7 @@ int status_task_hover_active(void (*fn)(void));
 void netlink_monitor_setup(void);
 void trigger_status_task_now(void (*fn)(void));
 void set_status_task_due(void (*fn)(void), uint64_t due_ms);
-void schedule_hover_timer(void);
-int ensure_cpu_icon_buffer(int target_h);
-void drop_cpu_icon_buffer(void);
-int ensure_light_icon_buffer(int target_h);
-void drop_light_icon_buffer(void);
-int ensure_ram_icon_buffer(int target_h);
-void drop_ram_icon_buffer(void);
-int ensure_battery_icon_buffer(int target_h);
-void drop_battery_icon_buffer(void);
-int ensure_clock_icon_buffer(int target_h);
-void drop_clock_icon_buffer(void);
-int ensure_mic_icon_buffer(int target_h);
-void drop_mic_icon_buffer(void);
-void drop_net_icon_buffer(void);
 void init_net_icon_paths(void);
-int ensure_volume_icon_buffer(int target_h);
-void drop_volume_icon_buffer(void);
 void rendercpupopup(Monitor *m);
 void renderrampopup(Monitor *m);
 void renderbatterypopup(Monitor *m);
@@ -2996,36 +3013,24 @@ int read_top_ram_processes(RamPopup *p);
 int ram_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 /* read_battery_info is file-local to statusbar.c (static) */
 int battery_popup_clamped_x(Monitor *m, BatteryPopup *p);
-void updatetaghover(Monitor *m, double cx, double cy);
 void updatenethover(Monitor *m, double cx, double cy);
 void net_popup_track_hover(Monitor *m, double cx, double cy);
 int net_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 void rendernetpopup(Monitor *m);
-void render_tray_icon_module(StatusModule *module, int bar_height,
-		int (*ensure_icon)(int target_h), struct nx_buffer **icon_buf,
-		int *icon_w, int *icon_h);
 void renderbluetooth(StatusModule *module, int bar_height, const char *text);
 void render_bt_popup(Monitor *m);
 void bt_popup_opened(void);
 int bt_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
-int ensure_bt_icon_buffer(int target_h);
-void drop_bt_icon_buffer(void);
-int ensure_net_icon_buffer(int target_h);
 void renderdisplays(StatusModule *module, int bar_height, const char *text);
 void render_display_popup(Monitor *m);
 int display_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 void display_drag_motion(Monitor *m, double cx);
 void display_drag_release(void);
 InfoPopup *display_drag_popup(void);
-int ensure_display_icon_buffer(int target_h);
-void drop_display_icon_buffer(void);
 /* power_ui.c — power icon module + Logout/Lock/Reboot/Shutdown popup */
 void renderpower(StatusModule *module, int bar_height, const char *text);
 void render_power_popup(Monitor *m);
 int power_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
-int ensure_power_icon_buffer(int target_h);
-void drop_power_icon_buffer(void);
-extern char power_icon_path[PATH_MAX];
 void format_speed(double bps, char *out, size_t len);
 int localip(const char *iface, char *out, size_t len);
 const char *wifi_icon_for_quality(double quality_pct);
@@ -3119,7 +3124,6 @@ void fanwatch_set_auto(int flat);
 void fanwatch_set_curve(int flat, const FanCurve *c);
 void fanwatch_set_boost(int on);
 void fanwatch_set_game(int on);
-/* fan_boost_activate/deactivate are file-local (static) in gamemode.c */
 
 /* ── disk module ─────────────────────────────────────────────────────
  * diskwatch.c samples /sys/block + /run/udev/data + statfs on a worker
@@ -3203,7 +3207,6 @@ int disk_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 void disk_popup_entry_changed(void);
 int updatestatuscpu(void *data);
 int updatestatusclock(void *data);
-int updatehoverfade(void *data);
 int readcpustats(struct CpuSample *out, int maxcount);
 int set_backlight_percent(double percent);
 int set_backlight_relative(double delta_percent);
@@ -3401,8 +3404,9 @@ void filter_igpu_without_display(void);
 void dgpu_assert_power_on(GpuInfo *gpu);
 void dgpu_power_watchdog_start(void);
 struct nx_renderer *gpu_renderer_create(struct nx_backend *b);
+GpuVendor output_gpu_vendor(struct nx_output *o);
 int should_use_dgpu(const char *cmd);
-void set_dgpu_env(void);
+const char *steam_binary(void);
 void set_steam_env(void);
 
 
@@ -3480,7 +3484,6 @@ void cpuclock_epp(const char *epp);
 /* Battery saves, AC stays quiet. */
 void cpuclock_regime_battery_async(double cap);
 void cpuclock_regime_ac_async(void);
-void cpuclock_regime_dark_async(void);
 void output_lock_max_refresh(void);
 int power_profile_get(char *buf, size_t len);
 int power_profile_set(const char *value);
@@ -3490,25 +3493,8 @@ void power_profile_high(void);
 /* powersave.c — max battery saving while discharging (laptops) */
 void powersave_init(void);
 void powersave_reassert(void);
+void powersave_battery_reassert_async(void);
 double powersave_clock_cap(void);
-
-/* presence.c — webcam presence watch → full power save (laptops) */
-extern uint64_t last_key_activity_ms;
-void presence_init(void);
-int presence_active(void);
-void presence_note_input(void);
-void presence_sample_once(void);
-void presence_watch_switch(struct nx_input_device *device);
-
-/* lightsense.c — webcam-based auto brightness (Auto/Manual modes) */
-extern int light_auto_mode;
-extern double light_manual_value;
-extern int light_ambient_luma;
-void lightsense_init(void);
-void lightsense_sample_now(void);
-void lightsense_power_event(int on_ac);
-void light_mode_set_manual(double value);
-void light_mode_set_auto(void);
 
 /* audio_meter.c — pw-record peak capture for the popup live meters */
 void audio_meter_start(int mic);
@@ -3541,12 +3527,6 @@ void apply_cpu_affinity(pid_t game_pid);
 void restore_cpu_affinity(pid_t game_pid);
 void apply_raw_input(void);
 void restore_raw_input(void);
-void apply_gpu_power_state(void);
-void restore_gpu_power_state(void);
-void apply_gpu_sched_priority(pid_t pid);
-void restore_gpu_sched_priority(pid_t pid);
-void apply_power_profile_performance(void);
-void restore_power_profile(void);
 void lower_competing_processes(pid_t game_pid);
 void restore_competing_processes(void);
 /* client_utils.c */
@@ -3616,9 +3596,30 @@ int app_names_match(const AppNames *a, const char *app_id);
 void audio_watch_setup(void);
 void audio_watch_cleanup(void);
 
-/* gaming_conf.c — mic binds, dynamic rendering */
+/* gaming_conf.c — gaming.conf keys, live reload */
+struct vrs_zones {
+	uint32_t fovea, blend, quality;     /* vrs_link units */
+};
+extern struct vrs_zones vrs_zones;
 void gaming_conf_setup(void);
 void gaming_conf_cleanup(void);
+
+/* mic_bind.c — push-to-talk/mute binds */
+void mic_bind_clear(void);
+void mic_bind_parse(const char *key, const char *value);
+void mic_bind_apply(void);
+
+/* gaze/ — webcam gaze drives foveation */
+void gaze_setup(void);
+void gaze_cleanup(void);
+void gaze_conf_reset(void);
+int gaze_conf_parse(const char *key, const char *value);
+uint32_t gaze_focus(Monitor *m, Client *game);
+void gazecalibrate(const Arg *arg);
+size_t mic_bind_count(void);
+void ptt_handle_key(uint32_t mods, uint32_t keycode, const xkb_keysym_t *syms,
+	int nsyms, const xkb_keysym_t *level0_syms, int nlevel0, int pressed);
+void ptt_handle_button(uint32_t button, int pressed);
 
 /* mic_gate.c — nixly-gate bits */
 enum { MIC_GATE_TALK = 1u << 0, MIC_GATE_VOIP = 1u << 1 };
@@ -3636,9 +3637,6 @@ sd_bus *portal_bus(void);
 int gshortcuts_handle_key(uint32_t mods, uint32_t keycode,
 	const xkb_keysym_t *syms, int nsyms,
 	const xkb_keysym_t *level0_syms, int nlevel0, int pressed);
-void ptt_handle_key(uint32_t mods, uint32_t keycode, const xkb_keysym_t *syms,
-	int nsyms, const xkb_keysym_t *level0_syms, int nlevel0, int pressed);
-void ptt_handle_button(uint32_t button, int pressed);
 
 /* filechooser.c — FileChooser portal, jail grants */
 void filechooser_init(void);
@@ -3772,6 +3770,7 @@ uint64_t monotonic_msec(void);
 void ensure_shell_env(void);
 void apply_startup_defaults(void);
 void statusbar_anim_sync(Monitor *m);
+void statusbar_repaint(Monitor *m);
 int has_nixlytile_session_target(void);
 int node_contains_client(LayoutNode *node, Client *c);
 int subtree_bounds(LayoutNode *node, Monitor *m, struct nx_box *out);

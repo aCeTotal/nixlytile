@@ -246,7 +246,7 @@ adjust_backlight_by_steps(int steps)
 			percent = 100.0;
 		light_last_percent = percent;
 		light_cached_percent = percent;
-		light_mode_set_manual(percent);
+		status_conf_update("brightness", percent);
 		refreshstatuslight();
 		return 1;
 	}
@@ -262,13 +262,13 @@ adjust_backlight_by_steps(int steps)
 		if (set_backlight_percent(target) != 0) {
 			light_last_percent = target;
 			light_cached_percent = target;
-			light_mode_set_manual(target);
+			status_conf_update("brightness", target);
 			refreshstatuslight();
 			return 1;
 		}
 		light_last_percent = target;
 		light_cached_percent = target;
-		light_mode_set_manual(target);
+		status_conf_update("brightness", target);
 	}
 
 	refreshstatuslight();
@@ -401,6 +401,34 @@ info_popup_under(Monitor *m, InfoPopup *p)
 		cursor->y >= y0 && cursor->y < y0 + p->height;
 }
 
+#define WS_SCROLL_NOTCH 120.0
+#define WS_SCROLL_STRIDE 50.0
+#define WS_SCROLL_IDLE_MS 400
+
+/* One workspace per notch. */
+static int
+workspace_scroll_dir(const struct nx_pointer_axis_event *event)
+{
+	static double acc;
+	static uint32_t last_ms;
+	double unit = event->delta_discrete
+		? event->delta_discrete / WS_SCROLL_NOTCH
+		: event->delta / WS_SCROLL_STRIDE;
+	int dir;
+
+	if (event->time_msec - last_ms > WS_SCROLL_IDLE_MS || (acc > 0) != (unit > 0))
+		acc = 0;
+	last_ms = event->time_msec;
+	acc += unit;
+	if (fabs(acc) < 1.0)
+		return 0;
+	dir = acc > 0 ? 1 : -1;
+	acc = 0;
+	if (event->relative_direction == WL_POINTER_AXIS_RELATIVE_DIRECTION_INVERTED)
+		dir = -dir;
+	return dir;
+}
+
 int
 handlestatusscroll(struct nx_pointer_axis_event *event)
 {
@@ -446,23 +474,19 @@ handlestatusscroll(struct nx_pointer_axis_event *event)
 		return statusbar_popup_at(m, cursor->x, cursor->y);
 	}
 
-	if (m->statusbar.light.width > 0 &&
-			lx >= m->statusbar.light.x &&
-			lx < m->statusbar.light.x + m->statusbar.light.width) {
+	if (bar_module_hit(&m->statusbar.tags, lx)) {
+		int dir = workspace_scroll_dir(event);
+
+		if (dir)
+			focus_workspace_dir(&(Arg){ .i = dir });
+		return 1;
+	}
+	if (bar_module_hit(&m->statusbar.light, lx))
 		return adjust_backlight_by_steps(steps);
-	}
-
-	if (m->statusbar.mic.width > 0 &&
-			lx >= m->statusbar.mic.x &&
-			lx < m->statusbar.mic.x + m->statusbar.mic.width) {
+	if (bar_module_hit(&m->statusbar.mic, lx))
 		return adjust_mic_by_steps(steps);
-	}
-
-	if (m->statusbar.volume.width > 0 &&
-			lx >= m->statusbar.volume.x &&
-			lx < m->statusbar.volume.x + m->statusbar.volume.width) {
+	if (bar_module_hit(&m->statusbar.volume, lx))
 		return adjust_volume_by_steps(steps);
-	}
 
 	return 0;
 }
@@ -503,6 +527,52 @@ axisnotify(struct wl_listener *listener, void *data)
 	nx_seat_pointer_notify_axis(seat,
 			event->time_msec, event->orientation, event->delta,
 			event->delta_discrete, event->source, event->relative_direction);
+}
+
+/* Right menu, left Activate. */
+static void
+tray_click(Monitor *m, TrayItem *it, uint32_t button)
+{
+	StatusModule *tray = &m->statusbar.traylabel;
+	int sx = m->statusbar.area.x + tray->x + it->x;
+	int sy = m->statusbar.area.y + m->statusbar.area.height;
+	int anchor = tray->x + it->x + it->w / 2;
+
+	if (button == BTN_RIGHT) {
+		if (!tray_menu_open_at(m, it, anchor))
+			tray_item_activate(it, button, 1, sx, sy);
+		return;
+	}
+	if (tray_item_activate(it, button, 0, sx, sy) != 0 && button == BTN_LEFT)
+		tray_menu_open_at(m, it, anchor);
+	else
+		tray_menu_hover_suppress();
+}
+
+static Workspace *
+workspace_at(Monitor *m, int pos)
+{
+	Workspace *ws;
+
+	wl_list_for_each(ws, &m->workspaces, link)
+		if (pos-- == 0)
+			return ws;
+	return NULL;
+}
+
+/* Clicked workspace cell, module-local x. */
+static void
+switch_to_cell(Monitor *m, int local)
+{
+	StatusModule *tags = &m->statusbar.tags;
+	int i = bar_ws_cell(tags, local);
+	Workspace *ws = i < 0 ? NULL : workspace_at(m, tags->box_tag[i]);
+
+	if (!ws)
+		return;
+	workspace_switch(m, ws);
+	arrange(m);
+	printstatus();
 }
 
 /* Returns 1 if click was handled by a statusbar module */
@@ -576,43 +646,21 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 		return 0;
 
 	/* System-tray (SNI) item click → activate / context menu */
-	if (tray->width > 0 && lx >= tray->x && lx < tray->x + tray->width) {
-		TrayItem *it;
-		int local = lx - tray->x;
-		wl_list_for_each(it, &tray_items, link) {
-			if (it->w > 0 && local >= it->x && local < it->x + it->w) {
-				int sx = m->statusbar.area.x + tray->x + it->x;
-				int sy = m->statusbar.area.y + m->statusbar.area.height;
-				/* Right click → compositor-rendered dbusmenu dropdown
-				 * under the icon; fall back to the item's own
-				 * ContextMenu if the app exposes no dbusmenu.  Left
-				 * click → SNI Activate so the app raises its window;
-				 * menu-only items (no Activate) fall back to the
-				 * dropdown. */
-				if (button == BTN_RIGHT) {
-					if (tray_menu_open_at(m, it, tray->x + it->x + it->w / 2))
-						return 1;
-					tray_item_activate(it, button, 1, sx, sy);
-					return 1;
-				}
-				if (tray_item_activate(it, button, 0, sx, sy) != 0 &&
-						button == BTN_LEFT)
-					tray_menu_open_at(m, it, tray->x + it->x + it->w / 2);
-				else
-					tray_menu_hover_suppress();
-				return 1;
-			}
-		}
+	if (bar_module_hit(tray, lx)) {
+		TrayItem *it = bar_tray_item_at(lx - tray->x);
+
+		if (it)
+			tray_click(m, it, button);
 		return 1;
 	}
 
-	if (cpu->width > 0 && lx >= cpu->x && lx < cpu->x + cpu->width) {
+	if (bar_module_hit(cpu, lx)) {
 		Arg arg = { .v = btopcmd };
 		spawn(&arg);
 		return 1;
 	}
 
-	if (mic->width > 0 && lx >= mic->x && lx < mic->x + mic->width) {
+	if (bar_module_hit(mic, lx)) {
 		if (button == BTN_LEFT) {
 			toggle_pipewire_mic_mute();
 			/* open popup shows Live/Muted — refresh it now, not on
@@ -626,7 +674,7 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 		return 1;
 	}
 
-	if (vol->width > 0 && lx >= vol->x && lx < vol->x + vol->width) {
+	if (bar_module_hit(vol, lx)) {
 		if (button == BTN_LEFT) {
 			toggle_pipewire_mute();
 			m->statusbar.volume_popup.last_render_ms = 0;
@@ -638,28 +686,10 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 		return 1;
 	}
 
-	if (button == BTN_LEFT && lx < tags->width) {
-		for (int i = 0; i < tags->box_count; i++) {
-			int bx = tags->box_x[i];
-			int bw = tags->box_w[i];
-			if (lx >= bx && lx < bx + bw) {
-				/* box_tag holds the workspace's position in
-				 * m->workspaces (see renderworkspaces) */
-				Workspace *ws;
-				int pos = 0;
-				wl_list_for_each(ws, &m->workspaces, link) {
-					if (pos++ == tags->box_tag[i]) {
-						workspace_switch(m, ws);
-						arrange(m);
-						printstatus();
-						break;
-					}
-				}
-				return 1;
-			}
-		}
-	}
-	return 0;
+	if (button != BTN_LEFT || !bar_module_hit(tags, lx))
+		return 0;
+	switch_to_cell(m, lx - tags->x);
+	return 1;
 }
 
 void
@@ -874,22 +904,7 @@ buttonpress(struct wl_listener *listener, void *data)
 		cursor_mode = CurNormal;
 		break;
 	}
-	/* If the event wasn't handled by the compositor, notify the client with
-	 * pointer focus that a button press has occurred */
-	{
-		Client *fc = NULL;
-		struct nx_surface *fs = seat->pointer_state.focused_surface;
-		if (fs)
-			toplevel_from_nx_surface(fs, &fc, NULL);
-		if (fc && event->state == WL_POINTER_BUTTON_STATE_PRESSED &&
-				(looks_like_game(fc) || is_game_content(fc)))
-			game_log("CURSOR_BUTTON: btn=%u appid='%s' pos=%.0f,%.0f "
-				"constraint=%s",
-				event->button,
-				client_get_appid(fc) ? client_get_appid(fc) : "(null)",
-				cursor->x, cursor->y,
-				active_constraint ? "active" : "none");
-	}
+	/* Unhandled: forward to client. */
 	nx_seat_pointer_notify_button(seat,
 			event->time_msec, event->button, event->state);
 }
@@ -1544,9 +1559,6 @@ inputdevice(struct wl_listener *listener, void *data)
 	case NX_INPUT_DEVICE_TABLET_PAD:
 		createtabletpad(nx_tablet_pad_from_input_device(device));
 		break;
-	case NX_INPUT_DEVICE_SWITCH:
-		presence_watch_switch(device);
-		break;
 	default:
 		break;
 	}
@@ -1666,8 +1678,6 @@ keypress(struct wl_listener *listener, void *data)
 		selmon->last_input_ns = get_time_ns();
 	}
 
-	last_key_activity_ms = monotonic_msec();
-	presence_note_input();
 	dwt_note_key(event->keycode,
 			event->state == WL_KEYBOARD_KEY_STATE_PRESSED);
 
@@ -2583,22 +2593,17 @@ motionnotify(uint32_t time, struct nx_input_device *device, double dx, double dy
 	/* Update drag icon's position */
 	nx_scene_node_set_position(&drag_icon->node, (int)round(cursor->x), (int)round(cursor->y));
 
-	/* Statusbar hover feedback (tag highlight, module popups).
-	 * Skip when far from the bar and no popup is open (popups need
-	 * hover tracking to close).  Throttled to ~125 Hz — highlights
-	 * don't need 1 kHz updates. */
+	/* Bar hover, 125 Hz throttle. */
 	{
-		/* Hover on the bar under the CURSOR, not selmon: without
-		 * sloppyfocus selmon stays behind when the pointer crosses
-		 * to another monitor's bar. */
+		/* Bar under cursor, not selmon. */
 		Monitor *hm = xytomon(cursor->x, cursor->y);
 
 		if (!hm)
 			hm = selmon;
+		if (hm)
+			statusbar_hover_focus(hm);
 		if (hm && hm->showbar && hm->statusbar.area.height > 0) {
-			/* fullscreen_visible_on, not focustop: a fullscreen
-			 * client bound to an INACTIVE workspace must not block
-			 * bar hover on the active one. */
+			/* Inactive-workspace fullscreen never blocks. */
 			Client *fs = fullscreen_visible_on(hm);
 			int any_popup_open =
 				hm->statusbar.cpu_popup.visible ||
@@ -2610,22 +2615,21 @@ motionnotify(uint32_t time, struct nx_input_device *device, double dx, double dy
 			int near_bar = (cursor->y >= hm->statusbar.area.y &&
 				cursor->y <= hm->statusbar.area.y +
 					hm->statusbar.area.height + 500);
+			int hover_lit = statusbar_hover_lit(hm);
 
-			if (!fs && (near_bar || any_popup_open)) {
+			if (!fs && (near_bar || any_popup_open || hover_lit)) {
 				static uint32_t last_hover_ms;
 				if (!time || time - last_hover_ms >= 8) {
 					if (time) last_hover_ms = time;
-					updatetaghover(hm, cursor->x, cursor->y);
 					updatecpuhover(hm, cursor->x, cursor->y);
 					updateramhover(hm, cursor->x, cursor->y);
 					updatebatteryhover(hm, cursor->x, cursor->y);
 					updatenethover(hm, cursor->x, cursor->y);
 					updateinfopopups(hm, cursor->x, cursor->y);
 					tray_menu_update_hover(hm, cursor->x, cursor->y);
+					statusbar_hover_update(hm, cursor->x, cursor->y);
 				} else {
-					/* Throttled: if this was the burst's last
-					 * event, hover state is stale where the
-					 * cursor came to rest — re-poll shortly. */
+					/* Re-poll where the burst ends. */
 					schedule_popup_delay(10);
 				}
 			}
@@ -2641,7 +2645,6 @@ motionnotify(uint32_t time, struct nx_input_device *device, double dx, double dy
 
 	tiled = grabc && !grabc->isfloating && !grabc->isfullscreen;
 	last_pointer_motion_ms = monotonic_msec();
-	presence_note_input();
 	if (cursor_mode == CurColResize) {
 		if (grab_resize_col && grab_resize_nbr && selmon &&
 				drag_shared_edge(grab_resize_col, grab_resize_nbr,

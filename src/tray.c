@@ -603,6 +603,7 @@ tray_find_icon_path(const char *name, const char *theme_path, int desired_h,
  * nødvendigvis NewIcon/NewStatus etterpå, så uten timet re-probe blir
  * ikonet borte for alltid (blueman-applet-symptomet). */
 #define TRAY_UNRESPONSIVE_RETRY_MS 5000
+#define TRAY_ICON_MIN_PX 12
 
 static int
 tray_item_in_backoff(TrayItem *it)
@@ -626,6 +627,7 @@ tray_get_string_property(TrayItem *it, const char *prop, char *out, size_t outle
 	sd_bus_error err = SD_BUS_ERROR_NULL;
 	const char *val = NULL;
 	int r = -1;
+	int found = 0;
 
 	if (!tray_bus || !it || !prop)
 		return -1;
@@ -656,13 +658,14 @@ tray_get_string_property(TrayItem *it, const char *prop, char *out, size_t outle
 		goto out;
 	if (sd_bus_message_read(reply, "s", &val) < 0)
 		goto out;
-	if (val && *val && out && outlen > 0)
+	found = val && *val;
+	if (found && out && outlen > 0)
 		snprintf(out, outlen, "%s", val);
 
 out:
 	sd_bus_error_free(&err);
 	sd_bus_message_unref(reply);
-	return (val && *val) ? 0 : -1;
+	return found ? 0 : -1;
 }
 
 /* Worker side: tray_find_icon_path filtered through the negative cache,
@@ -693,7 +696,8 @@ tw_item_load_icon(TrayItem *it)
 	sd_bus_error err = SD_BUS_ERROR_NULL;
 	const void *best_data = NULL;
 	size_t best_len = 0;
-	int desired_h = statusbar_height > 0 ? MAX(12, (int)statusbar_height - 4) : 24;
+	int desired_h = MAX(TRAY_ICON_MIN_PX,
+			(int)lround(statusbar_height * BAR_TRAY_ICON_RATIO));
 	int best_score = INT_MAX;
 	int best_w = 0, best_h = 0;
 	int r;
@@ -990,6 +994,20 @@ tray_sanitize_label(const char *src, char *dst, size_t len)
 	dst[di] = '\0';
 }
 
+/* Free every node and texture. */
+static void
+tray_menu_drop_nodes(TrayMenu *menu)
+{
+	struct nx_scene_node *node, *tmp;
+
+	menu->bg = NULL;
+	menu->hover_rect = NULL;
+	if (!menu->tree)
+		return;
+	wl_list_for_each_safe(node, tmp, &menu->tree->children, link)
+		nx_scene_node_destroy(node);
+}
+
 void
 tray_menu_clear(TrayMenu *menu)
 {
@@ -1008,8 +1026,7 @@ tray_menu_clear(TrayMenu *menu)
 	menu->x = menu->y = 0;
 	menu->visible = 0;
 	menu->hover = NULL;
-	if (menu->hover_rect)
-		nx_scene_node_set_enabled(&menu->hover_rect->node, 0);
+	tray_menu_drop_nodes(menu);
 	menu->service[0] = '\0';
 	menu->menu_path[0] = '\0';
 
@@ -1408,7 +1425,6 @@ void
 tray_menu_render(Monitor *m)
 {
 	TrayMenu *menu;
-	struct nx_scene_node *node, *tmp;
 	TrayMenuEntry *entry;
 	int padding, line_spacing, indent_w, mark_sz;
 	int max_width = 0;
@@ -1426,13 +1442,7 @@ tray_menu_render(Monitor *m)
 	if (mark_sz < 10)
 		mark_sz = 10;
 
-	wl_list_for_each_safe(node, tmp, &menu->tree->children, link) {
-		if (menu->bg && node == &menu->bg->node)
-			continue;
-		if (menu->hover_rect && node == &menu->hover_rect->node)
-			continue;
-		nx_scene_node_destroy(node);
-	}
+	tray_menu_drop_nodes(menu);
 
 	if (!statusfont.font || wl_list_empty(&menu->entries)) {
 		menu->width = menu->height = 0;
@@ -1465,49 +1475,11 @@ tray_menu_render(Monitor *m)
 	menu->width = max_width;
 	menu->height = total_height;
 
-	if (!menu->bg && !(menu->bg = nx_scene_tree_create(menu->tree)))
+	/* Card goes here once placed. */
+	if (!(menu->bg = nx_scene_tree_create(menu->tree)))
 		return;
-	nx_scene_node_set_enabled(&menu->bg->node, 1);
-	nx_scene_node_set_position(&menu->bg->node, 0, 0);
-	wl_list_for_each_safe(node, tmp, &menu->bg->children, link)
-		nx_scene_node_destroy(node);
-	/* Same rounded translucent card as the module popups */
-	{
-		struct nx_buffer *shb = card_shadow_buffer(menu->width,
-				menu->height, 0);
-		struct nx_buffer *pb;
 
-		card_at(m, m->statusbar.area.x + menu->x,
-				m->statusbar.area.y + menu->y);
-		pb = card_panel_buffer(menu->width, menu->height);
-		struct nx_scene_buffer *sb;
-
-		if (shb) {
-			sb = nx_scene_buffer_create(menu->bg, NULL);
-			if (sb) {
-				nx_scene_buffer_set_buffer(sb, shb);
-				nx_scene_node_set_position(&sb->node,
-						-CARD_SHADOW_MARGIN,
-						-CARD_SHADOW_MARGIN);
-			}
-			nx_buffer_drop(shb);
-		}
-		if (pb) {
-			sb = nx_scene_buffer_create(menu->bg, NULL);
-			if (sb)
-				nx_scene_buffer_set_buffer(sb, pb);
-			nx_buffer_drop(pb);
-		}
-	}
-
-	/* Persistent hover pill: text nodes are recreated after it each
-	 * render, so it stays below the labels; hover moves it without a
-	 * full re-render.  Recreated per render since its size depends on
-	 * the menu width. */
-	if (menu->hover_rect) {
-		nx_scene_node_destroy(&menu->hover_rect->node);
-		menu->hover_rect = NULL;
-	}
+	/* Hover pill below the labels. */
 	{
 		struct nx_buffer *hb = card_hover_buffer(menu->width - 12,
 				row_h - 2);
@@ -1598,6 +1570,24 @@ tray_menu_render(Monitor *m)
 			y += row;
 		}
 	}
+}
+
+/* Backdrop alpha depends on placement. */
+static void
+tray_menu_draw_card(Monitor *m, TrayMenu *menu)
+{
+	struct nx_buffer *pb;
+
+	if (!menu->bg)
+		return;
+	card_shadow_create(menu->bg, menu->width, menu->height);
+	card_at(m, m->statusbar.area.x + menu->x,
+			m->statusbar.area.y + menu->y);
+	pb = card_panel_buffer(menu->width, menu->height);
+	if (!pb)
+		return;
+	nx_scene_buffer_create(menu->bg, pb);
+	nx_buffer_drop(pb);
 }
 
 /* Worker side: fetch one item's dbusmenu layout and post the parsed
@@ -1773,18 +1763,9 @@ tray_menu_update_hover(Monitor *m, double cx, double cy)
 	blx = (int)floor(cx) - m->statusbar.area.x;
 	bly = (int)floor(cy) - m->statusbar.area.y;
 
-	if (m->showbar && tray->width > 0 && bly >= 0 &&
-			bly < m->statusbar.area.height &&
-			blx >= tray->x && blx < tray->x + tray->width) {
-		TrayItem *it;
-		int local = blx - tray->x;
-
-		wl_list_for_each(it, &tray_items, link)
-			if (it->w > 0 && local >= it->x && local < it->x + it->w) {
-				over = it;
-				break;
-			}
-	}
+	if (m->showbar && bly >= 0 && bly < m->statusbar.area.height
+			&& bar_module_hit(tray, blx))
+		over = bar_tray_item_at(blx - tray->x);
 
 	if (over) {
 		uint64_t now = monotonic_msec();
@@ -2383,6 +2364,7 @@ tw_apply_menu(TwEvent *ev)
 
 	menu->x = desired_x;
 	menu->y = statusbar_popup_y(m);
+	tray_menu_draw_card(m, menu);
 	nx_scene_node_set_position(&menu->tree->node, menu->x, menu->y);
 	nx_scene_node_set_enabled(&menu->tree->node, 1);
 	menu->visible = 1;

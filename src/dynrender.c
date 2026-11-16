@@ -1,44 +1,9 @@
 #include "nixlytile.h"
-#include "vrslayer/link.h"
 
 #define DR_MISS_LIMIT       3
 #define DR_MISS_WINDOW_NS   1000000000ULL
-#define NS_PER_MS           1e6f
 
 int dynamic_render_enabled = 1;
-
-/* Manual caps still get VRS. */
-static void
-publish(Monitor *m)
-{
-	DynRender *d = &m->dr;
-	uint64_t interval = d->owner ? rung_interval(m, d->budget_rung)
-		: m->fps_limit_interval_ns;
-
-	if (!d->link)
-		return;
-	vrslink_target(d->link, interval, (uint64_t)((float)interval * d->budget_frac));
-}
-
-static void
-unlink_game(DynRender *d)
-{
-	if (d->link)
-		vrslink_idle(d->link);
-	d->link = NULL;
-	d->game = NULL;
-	d->owner = 0;
-}
-
-static void
-track_level(DynRender *d, uint64_t now)
-{
-	uint32_t level = d->link ? atomic_load(&d->link->level) : 0;
-
-	if (level > d->level_seen)
-		d->level_rise_ns = now;
-	d->level_seen = level;
-}
 
 /* NULL game: none qualifies. */
 void
@@ -47,26 +12,21 @@ dynrender_tick(Monitor *m, Client *game, uint64_t now)
 	DynRender *d = &m->dr;
 	int capped = fps_limit_enabled && fps_limit_value > 0;
 
-	if (!dynamic_render_enabled || !game || !rung_vblank_ns(m)) {
-		unlink_game(d);
-		return;
-	}
-	if (game != d->game || d->link_gen != vrslink_generation) {
-		unlink_game(d);
+	if (!dynamic_render_enabled || !rung_vblank_ns(m))
+		game = NULL;
+	if (game != d->game) {
 		d->game = game;
-		d->link = vrslink_for_pid(client_get_pid(game));
-		d->link_gen = vrslink_generation;
-		d->budget_frac = DR_BUDGET_MAX;
+		d->owner = 0;
 	}
+	if (!game)
+		return;
 	if (!capped && !d->owner) {
 		autolock_reset(m);
 		ladder_start(m, now);
 	}
 	d->owner = !capped;
-	track_level(d, now);
 	if (d->owner)
 		ladder_tick(m, now);
-	publish(m);
 }
 
 void
@@ -121,30 +81,13 @@ dynrender_interval_ns(Monitor *m)
 	return rung_interval(m, m->dr.rung);
 }
 
-void
-dynrender_link_closed(const struct vrs_link *page)
-{
-	Monitor *m;
-
-	wl_list_for_each(m, &mons, link)
-		if (m->dr.link == page)
-			m->dr.link = NULL;
-}
-
 const char *
 dynrender_diag(Monitor *m)
 {
 	static char buf[64];
-	const struct vrs_link *l = m->dr.link;
 
-	if (!m->dr.owner) {
-		snprintf(buf, sizeof(buf), "dr=-");
-		return buf;
-	}
-	snprintf(buf, sizeof(buf), "dr=%.0f lvl=%u gpu=%.1f/%.1f",
-		rung_fps(m, m->dr.rung),
-		l ? atomic_load(&l->level) : 0,
-		l ? (float)atomic_load(&l->gpu_ns) / NS_PER_MS : 0.0f,
-		l ? (float)atomic_load(&l->budget_ns) / NS_PER_MS : 0.0f);
+	if (!m->dr.owner)
+		return "dr=-";
+	snprintf(buf, sizeof(buf), "dr=%.0f", rung_fps(m, m->dr.rung));
 	return buf;
 }

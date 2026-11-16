@@ -209,14 +209,8 @@ power_profile_low(void)
 		write_str(path, "balanced");
 }
 
-/* ── async regime worker ─────────────────────────────────────────────
- * A full regime switch is ~100+ sysfs syscalls (per-policy governor +
- * EPP + cap writes, EC platform-profile write measured at ~100 ms) and
- * used to run on the compositor thread — landing exactly on unlock/
- * wake/AC-plug, where the stall is maximally visible.  Serialize the
- * writes on one worker with a latest-wins mailbox: rapid transitions
- * can't interleave their sysfs writes out of order. */
-enum cc_job { CC_NONE = -1, CC_BATTERY, CC_AC, CC_DARK };
+/* Off-thread, latest-wins regime writes. */
+enum cc_job { CC_NONE = -1, CC_BATTERY, CC_AC };
 
 static pthread_mutex_t cc_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cc_cond = PTHREAD_COND_INITIALIZER;
@@ -238,10 +232,6 @@ cc_apply(int job, double cap)
 		power_profile_high();
 		cpuclock_epp("performance");
 		cpuclock_boost(1);
-		cpuclock_cap(cap);
-		break;
-	case CC_DARK:
-		cpuclock_boost(0);
 		cpuclock_cap(cap);
 		break;
 	}
@@ -303,12 +293,6 @@ void
 cpuclock_regime_ac_async(void)
 {
 	cc_submit(CC_AC, 1.0);
-}
-
-void
-cpuclock_regime_dark_async(void)
-{
-	cc_submit(CC_DARK, 0.0);
 }
 
 /* Fastest firmware profile. */

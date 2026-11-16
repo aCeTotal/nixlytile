@@ -65,8 +65,34 @@ restore_all() {
 
 # ---------------------------------------------------------------------- CPU
 
+# A system battery, not a peripheral's.
+is_laptop() {
+	local supply
+	for supply in "${ROOT}"/sys/class/power_supply/*; do
+		[ "$(cat "$supply/type" 2>/dev/null)" = Battery ] &&
+			[ "$(cat "$supply/scope" 2>/dev/null)" != Device ] && return 0
+	done
+	return 1
+}
+
+# Laptop with no mains or USB supply online.
+on_battery() {
+	local supply
+	is_laptop || return 1
+	for supply in "${ROOT}"/sys/class/power_supply/*; do
+		case "$(cat "$supply/type" 2>/dev/null)" in Mains|USB) ;; *) continue ;; esac
+		[ "$(cat "$supply/online" 2>/dev/null)" = 1 ] && return 1
+	done
+	return 0
+}
+
 tune_cpu() {
 	local policy name driver govs
+
+	if on_battery; then
+		log "cpu: on battery, power limits left to firmware and game"
+		return 0
+	fi
 
 	for policy in "${ROOT}"/sys/devices/system/cpu/cpufreq/policy*; do
 		[ -d "$policy" ] || continue
@@ -112,6 +138,14 @@ tune_cpu() {
 			;;
 		esac
 	fi
+
+	# MSI laptops: turbo raises the power limits.
+	case "$(cat "${ROOT}/sys/devices/platform/msi-ec/available_shift_modes" 2>/dev/null)" in
+	*turbo*)
+		save_and_set msi-shift-mode \
+			"${ROOT}/sys/devices/platform/msi-ec/shift_mode" turbo
+		;;
+	esac
 
 	# AMD X3D dual-CCD: bias the scheduler's core ranking toward the
 	# V-Cache CCD (amd_3d_vcache driver; the glob matches nothing on every
@@ -204,6 +238,10 @@ tune_kernel() {
 	else
 		save_and_set swappiness "${ROOT}/proc/sys/vm/swappiness" 10
 	fi
+
+	# Deep reclaim headroom only while gaming.
+	save_and_set min-free "${ROOT}/proc/sys/vm/min_free_kbytes" 131072
+	save_and_set watermark-scale "${ROOT}/proc/sys/vm/watermark_scale_factor" 125
 
 	# Proactive compaction causes multi-millisecond allocation stalls.
 	[ -f "${ROOT}/proc/sys/vm/compaction_proactiveness" ] &&
@@ -399,6 +437,8 @@ gpumax_nvidia() {
 do_gpumax() {
 	local card driver
 
+	is_laptop && return 0
+
 	for card in "${ROOT}"/sys/class/drm/card*; do
 		[ -e "$card/device/driver" ] || continue
 		case "$(basename "$card")" in *-*) continue;; esac  # skip connectors
@@ -410,15 +450,38 @@ do_gpumax() {
 	done
 }
 
+# Intel iGPUs always sit at 00:02.0; amdgpu hides board_info on APUs.
+is_igpu() {
+	local dev=$1
+	[ "$(basename "$(readlink -f "$dev")")" = 0000:00:02.0 ] && return 0
+	[ "$(basename "$(readlink -f "$dev/driver")")" = amdgpu ] && [ ! -e "$dev/board_info" ]
+}
+
 tune_gpu() {
-	local card dev driver
+	local card dev driver dgpu=0
+	local -a cards=()
+
+	if on_battery; then
+		log "gpu: on battery, power limits left to firmware and game"
+		return 0
+	fi
 
 	for card in "${ROOT}"/sys/class/drm/card*; do
 		[ -e "$card/device/driver" ] || continue
 		case "$(basename "$card")" in *-*) continue;; esac  # skip connectors
+		cards+=("$card")
+		is_igpu "$card/device" || dgpu=1
+	done
 
+	for card in "${cards[@]}"; do
 		dev=$card/device
 		driver=$(basename "$(readlink -f "$dev/driver")")
+
+		# A pinned iGPU takes package power from the dGPU games run on.
+		if [ "$dgpu" = 1 ] && is_igpu "$dev"; then
+			log "gpu $(basename "$card"): integrated beside a dGPU, left alone"
+			continue
+		fi
 
 		case "$driver" in
 		amdgpu)         tune_gpu_amd "$dev" "$(basename "$card")" ;;
@@ -661,7 +724,10 @@ do_daemon() {
 	trap 'do_restore; exit 0' TERM INT
 	do_apply
 
-	if [ -w /dev/cpu_dma_latency ]; then
+	# Idle cores give their power budget to the busy ones on a laptop.
+	if is_laptop; then
+		log "laptop: C-states left alone"
+	elif [ -w /dev/cpu_dma_latency ]; then
 		exec 9<>/dev/cpu_dma_latency
 		printf '\x00\x00\x00\x00' >&9
 		log "holding /dev/cpu_dma_latency at 0 us (no deep C-states)"

@@ -46,16 +46,16 @@ cleanupmon(struct wl_listener *listener, void *data)
 	LayerSurface *l, *tmp;
 	size_t i;
 
-	/* The overview's scene tree and its geometry are anchored to this
-	 * monitor — drop it before m goes away. */
+	/* Overview anchors to this monitor. */
 	overview_purge_mon(m);
 
-	/* Menu-refresh hold statics point here; the 1 s timer must never
-	 * dereference the freed Monitor. */
+	/* Menu-hz statics point here. */
 	menuhz_forget(m);
 
-	/* If a laptop display is being removed, clear is_mirror on any output
-	 * that was mirroring it so it becomes an independent display. */
+	/* Release its foveation page. */
+	foveation_update(m, NULL);
+
+	/* Laptop panel gone: unmirror others. */
 	if (strncmp(m->nx_output->name, "eDP", 3) == 0 ||
 	    strncmp(m->nx_output->name, "LVDS", 4) == 0) {
 		Monitor *other;
@@ -71,10 +71,7 @@ cleanupmon(struct wl_listener *listener, void *data)
 			nx_layer_surface_v1_destroy(l->layer_surface);
 	}
 
-	/* Purge in-flight close animations on the dying monitor —
-	 * closing_anims_tick only processes entries for live monitors,
-	 * so orphans would keep their snapshot buffer locked and their
-	 * scene node visible forever. */
+	/* Orphaned close anims would leak. */
 	{
 		ClosingAnim *ca, *ca_tmp;
 		wl_list_for_each_safe(ca, ca_tmp, &closing_anims, link) {
@@ -1032,13 +1029,7 @@ createmon(struct wl_listener *listener, void *data)
 	/* Gaming capability profile. */
 	memset(&m->gcaps, 0, sizeof(m->gcaps));
 	m->gcaps.explicit_sync_ready = g_explicit_sync_ok;
-	if (discrete_gpu_idx >= 0) {
-		m->gcaps.vendor = detected_gpus[discrete_gpu_idx].vendor;
-	} else if (integrated_gpu_idx >= 0) {
-		m->gcaps.vendor = detected_gpus[integrated_gpu_idx].vendor;
-	} else {
-		m->gcaps.vendor = GPU_VENDOR_UNKNOWN;
-	}
+	m->gcaps.vendor = output_gpu_vendor(nx_output);
 	m->gcaps.has_hw_lfc = (m->gcaps.vendor == GPU_VENDOR_AMD ||
 	                       m->gcaps.vendor == GPU_VENDOR_INTEL);
 	m->gcaps.prefers_vulkan = (m->gcaps.vendor == GPU_VENDOR_NVIDIA);
@@ -1265,9 +1256,14 @@ static void
 gpu_reset_idle_destroy(void *data)
 {
 	struct gpu_reset_cleanup *c = data;
+	Monitor *m;
+
 	nx_allocator_destroy(c->allocator);
 	nx_renderer_destroy(c->renderer);
 	free(c);
+	/* Bar textures died with renderer. */
+	wl_list_for_each(m, &mons, link)
+		statusbar_repaint(m);
 }
 
 void
@@ -2934,6 +2930,8 @@ rendermon_prologue(Monitor *m, uint64_t frame_start_ns)
 		still = monitor_anim_tick(m, dt);
 		if (txn_tick(m))
 			still = 1;
+		if (statusbar_anim_tick(m, dt))
+			still = 1;
 		if (fshold_tick(m))
 			still = 1;
 		/* Size-convergence watchdog: re-drive any tile whose committed
@@ -3696,6 +3694,8 @@ rendermon(struct wl_listener *listener, void *data)
 		m->tag_switch_debug--;
 
 frame_done:
+	/* Emulated VRAM breaks under VRS. */
+	foveation_update(m, is_game && !self_paced ? vis_fsc : NULL);
 	dynrender_tick(m, is_game && !allow_tearing && !self_paced
 		? vis_fsc : NULL, frame_start_ns);
 	/* frame_done gate caps game fps. */
@@ -3850,6 +3850,8 @@ frame_done:
 					 * (hidden X11 client, e.g. Steam) — see
 					 * anim_drip in monitor_freeze_clients. */
 					|| hc->anim_drip
+					/* Opening window paints mid-slide. */
+					|| (m->camera_anim_active && hc->open_anim_active)
 					|| (fsc && hc != fsc)
 					/* Owes us a commit at its tile size: it
 					 * cannot repaint without a frame callback,
@@ -3898,7 +3900,7 @@ frame_done:
 				 * anim (the withhold below blocks its first
 				 * paint otherwise). */
 				int vblank_drip = client_size_pending(hc) ||
-						hc->anim_drip ||
+						hc->anim_drip || hc->open_anim_active ||
 						(hc->frozen_buffer &&
 						 !m->camera_anim_active);
 				if (!vblank_drip && !hidden_due)
@@ -7099,17 +7101,16 @@ updatemons(struct wl_listener *listener, void *data)
 
 	config = nx_output_configuration_v1_create();
 
-	/* First remove from the layout the disabled monitors */
+	/* Disabled monitors leave first. */
 	wl_list_for_each_safe(m, mtmp, &mons, link) {
 		if (!m->nx_output || m->nx_output->enabled || m->asleep)
 			continue;
 		config_head = nx_output_configuration_head_v1_create(config, m->nx_output);
 		config_head->state.enabled = 0;
-		/* Out of the layout so the cursor can't enter it — deferred,
-		 * because updatemons runs from the layout's own change signal
-		 * and freeing an entry there strands the remaining listeners. */
+		/* Deferred; mid-signal removal strands listeners. */
 		layout_drop(m->nx_output);
 		closemon(m, 0);
+		foveation_update(m, NULL);
 		m->m = m->w = (struct nx_box){0};
 	}
 	/* Insert outputs that need to */
@@ -7277,6 +7278,7 @@ updatemons(struct wl_listener *listener, void *data)
 	/* Output set changed (DPMS, hotplug): the HTPC session freezer needs
 	 * to re-evaluate dark/awake. */
 	wsfreeze_poke();
+	theme_wallpaper_update();
 
 	in_updatemons = 0;
 }

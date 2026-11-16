@@ -17,7 +17,8 @@ static const uint32_t SUPPORTED_OUTPUT_STATE =
 	NX_OUTPUT_STATE_MODE |
 	NX_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED |
 	NX_OUTPUT_STATE_WAIT_TIMELINE |
-	NX_OUTPUT_STATE_SIGNAL_TIMELINE;
+	NX_OUTPUT_STATE_SIGNAL_TIMELINE |
+	NX_OUTPUT_STATE_CONTENT_TYPE;
 
 // The host neither scales nor crops.
 static bool buffer_fits_output(struct nx_output *nx_output,

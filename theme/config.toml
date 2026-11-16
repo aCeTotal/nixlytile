@@ -1,0 +1,45 @@
+# Seeds pick hue only.
+[config.custom_colors]
+red = { color = "#e5534b", blend = true }
+green = { color = "#57ab5a", blend = true }
+yellow = { color = "#cca42a", blend = true }
+blue = { color = "#539bf5", blend = true }
+magenta = { color = "#c25bc9", blend = true }
+cyan = { color = "#39c5cf", blend = true }
+
+[templates.nixlytile]
+input_path = "nixlytile.conf"
+output_path = "~/.local/state/nixly-theme/nixlytile.conf"
+
+[templates.alacritty]
+input_path = "alacritty.toml"
+output_path = "~/.local/state/nixly-theme/alacritty.toml"
+
+[templates.foot]
+input_path = "foot.ini"
+output_path = "~/.local/state/nixly-theme/foot.ini"
+
+# Theme flip makes GTK reload.
+[templates.gtk]
+input_path = "gtk.css"
+output_path = "~/.local/state/nixly-theme/gtk.css"
+post_hook = '''k=/org/gnome/desktop/interface/gtk-theme; [ "$(dconf read $k)" = "'nixly-a'" ] && t=nixly-b || t=nixly-a; dconf write $k "'$t'" || true'''
+
+[templates.kdeglobals]
+input_path = "kdeglobals-colors"
+output_path = "~/.local/state/nixly-theme/kdeglobals-colors"
+post_hook = "dbus-send --session --type=signal /KGlobalSettings org.kde.KGlobalSettings.notifyChange int32:0 int32:0"
+
+[templates.fuzzel]
+input_path = "fuzzel.ini"
+output_path = "~/.local/state/nixly-theme/fuzzel.ini"
+
+[templates.mpv]
+input_path = "mpv.conf"
+output_path = "~/.local/state/nixly-theme/mpv.conf"
+
+# btop only reads themes dir.
+[templates.btop]
+input_path = "btop.theme"
+output_path = "~/.config/btop/themes/nixly.theme"
+post_hook = "pkill -USR2 -x btop || true"

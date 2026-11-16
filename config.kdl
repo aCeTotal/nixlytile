@@ -125,7 +125,7 @@ window-rule {
     monitor  -1
 }
 
-// Wallpaper path.  Used by the default autostart's swaybg invocation.
+// Wallpaper; nixlytile shows it and themes from it.
 wallpaper "~/.nixlyos/wallpapers/beach.jpg"
 
 // Log verbosity.  error | info | debug
@@ -133,7 +133,6 @@ log-level "debug"
 
 // Autostart — one process per entry.  Each gets its own pid so
 // hot-reload can SIGTERM removed entries and spawn newly added ones.
-autostart "swaybg -i \"$HOME/.nixlyos/wallpapers/beach.jpg\" -m fill"
 autostart "$HOME/.local/bin/niri-set-max-mode.sh --watch"
 autostart "nm-applet --indicator"
 autostart "blueman-applet"
@@ -154,7 +153,8 @@ autostart "nixlymedia"
 //
 // Action list:
 //   quit  killclient  spawn  togglefullscreen
-//   togglestatusbar  togglegaps  togglemultigpu  focus-column-dir  focus-workspace-dir
+//   togglestatusbar  togglegaps  togglemultigpu  gazecalibrate  focus-column-dir
+//   focus-workspace-dir
 //   focus-workspace-n  focus-window-in-column-dir  focus-last-workspace
 //   move-column-dir  move-window-in-column-dir  move-client-to-ws-dir
 //   move-client-to-ws-n  swap-window-dir  expel-window-from-column
@@ -184,6 +184,7 @@ bind "Mod+f"            "maximize-column"
 bind "Mod+Shift+F"      "togglefullscreen"
 bind "Mod+b"            "togglestatusbar"
 bind "Mod+Shift+M"      "togglemultigpu"
+bind "Mod+Shift+G"      "gazecalibrate"
 
 // Focus navigation
 bind "Mod+h"            "focus-column-dir"             -1

@@ -23,9 +23,6 @@
 #define DISP_RATES_MAX 6   /* 4 EDID rates + custom 120-cap / OC entries */
 
 char display_icon_path[PATH_MAX] = "images/svg/monitor.svg";
-char display_icon_loaded_path[PATH_MAX];
-int display_icon_loaded_h, display_icon_w, display_icon_h;
-struct nx_buffer *display_icon_buf;
 
 /* scale slider range: 50%..200%, 5% steps, default 100% */
 #define SCALE_MIN 0.5f
@@ -325,67 +322,12 @@ disp_apply_scale(DispInfo *d, float sc)
 	monconf_apply_layout();
 }
 
-/* ── icon ────────────────────────────────────────────────────────── */
-
-void
-drop_display_icon_buffer(void)
-{
-	if (display_icon_buf) {
-		nx_buffer_drop(display_icon_buf);
-		display_icon_buf = NULL;
-	}
-	display_icon_loaded_h = 0;
-	display_icon_w = display_icon_h = 0;
-	display_icon_loaded_path[0] = '\0';
-}
-
-int
-ensure_display_icon_buffer(int target_h)
-{
-	GdkPixbuf *pixbuf = NULL;
-	GError *gerr = NULL;
-	struct nx_buffer *buf;
-	int w = 0, h = 0;
-	char resolved[PATH_MAX];
-	const char *path = display_icon_path;
-
-	if (target_h <= 0)
-		return -1;
-	if (resolve_asset_path(display_icon_path, resolved,
-				sizeof(resolved)) == 0 && resolved[0])
-		path = resolved;
-	if (display_icon_buf && display_icon_loaded_h == target_h &&
-			strncmp(display_icon_loaded_path, path,
-				sizeof(display_icon_loaded_path)) == 0)
-		return 0;
-	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
-		if (!pixbuf) {
-			if (gerr)
-				g_error_free(gerr);
-			return -1;
-		}
-	}
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-	drop_display_icon_buffer();
-	display_icon_buf = buf;
-	display_icon_w = w;
-	display_icon_h = h;
-	display_icon_loaded_h = target_h;
-	snprintf(display_icon_loaded_path, sizeof(display_icon_loaded_path),
-			"%s", path);
-	return 0;
-}
-
 void
 renderdisplays(StatusModule *module, int bar_height, const char *text)
 {
 	(void)text;
-	render_tray_icon_module(module, bar_height,
-			ensure_display_icon_buffer, &display_icon_buf,
-			&display_icon_w, &display_icon_h);
+	bar_module_draw(module, bar_height, &(BarLabel){
+		.icon = GLYPH_DISPLAY, .icon_fg = statusbar_icon_fg });
 }
 
 /* ── popup ───────────────────────────────────────────────────────── */

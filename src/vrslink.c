@@ -5,10 +5,13 @@
 
 #define VRSLINK_PEERS   32
 #define VRSLINK_BACKLOG 8
+#define VRSLINK_DRAIN   64
+#define VRSLINK_MEMFD   "nixly-vrs"
 
 struct vrs_peer {
 	int fd;
 	pid_t pid;
+	unsigned int opened;        /* newest wins on pid reuse */
 	struct vrs_link *page;
 	struct wl_event_source *source;
 };
@@ -21,7 +24,9 @@ unsigned int vrslink_generation;
 static void
 peer_close(struct vrs_peer *p)
 {
-	dynrender_link_closed(p->page);
+	if (p->fd < 0)
+		return;
+	foveation_page_closed(p->page);
 	wl_event_source_remove(p->source);
 	munmap(p->page, sizeof(*p->page));
 	close(p->fd);
@@ -30,16 +35,16 @@ peer_close(struct vrs_peer *p)
 }
 
 static int
-peer_readable(int fd, uint32_t mask, void *data)
+peer_readable(int fd, uint32_t mask, void *peer)
 {
-	char sink[64];
+	char sink[VRSLINK_DRAIN];
 	ssize_t n;
 
 	while ((n = read(fd, sink, sizeof(sink))) > 0)
 		;
 	if (n < 0 && errno == EAGAIN)
 		return 0;
-	peer_close(data);
+	peer_close(peer);
 	return 0;
 }
 
@@ -69,18 +74,15 @@ send_fd(int sock, int fd)
 
 /* Sealed against peer shrinking. */
 static struct vrs_link *
-page_create(int *memfd)
+page_create(int memfd)
 {
 	struct vrs_link *page;
 
-	*memfd = memfd_create("nixly-vrs", MFD_CLOEXEC | MFD_ALLOW_SEALING);
-	if (*memfd < 0)
-		return NULL;
-	if (ftruncate(*memfd, sizeof(*page)) < 0 || fcntl(*memfd, F_ADD_SEALS,
+	if (ftruncate(memfd, sizeof(*page)) < 0 || fcntl(memfd, F_ADD_SEALS,
 			F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL) < 0)
 		return NULL;
 	page = mmap(NULL, sizeof(*page), PROT_READ | PROT_WRITE, MAP_SHARED,
-		*memfd, 0);
+		memfd, 0);
 	if (page == MAP_FAILED)
 		return NULL;
 	page->magic = VRS_LINK_MAGIC;
@@ -91,8 +93,8 @@ page_create(int *memfd)
 static void
 peer_open(struct vrs_peer *p, int conn, pid_t pid)
 {
-	int memfd = -1;
-	struct vrs_link *page = page_create(&memfd);
+	int memfd = memfd_create(VRSLINK_MEMFD, MFD_CLOEXEC | MFD_ALLOW_SEALING);
+	struct vrs_link *page = memfd >= 0 ? page_create(memfd) : NULL;
 	struct wl_event_source *source = page && send_fd(conn, memfd)
 		? wl_event_loop_add_fd(event_loop, conn, WL_EVENT_READABLE, peer_readable, p)
 		: NULL;
@@ -107,84 +109,105 @@ peer_open(struct vrs_peer *p, int conn, pid_t pid)
 	}
 	p->fd = conn;
 	p->pid = pid;
+	p->opened = ++vrslink_generation;
 	p->page = page;
 	p->source = source;
-	vrslink_generation++;
 }
 
 static struct vrs_peer *
 free_peer(void)
 {
-	int i;
+	int i = 0;
 
-	for (i = 0; i < VRSLINK_PEERS; i++)
-		if (peers[i].fd < 0)
-			return &peers[i];
-	return NULL;
+	while (i < VRSLINK_PEERS && peers[i].fd >= 0)
+		i++;
+	return i < VRSLINK_PEERS ? &peers[i] : NULL;
 }
 
-static int
-listen_readable(int fd, uint32_t mask, void *data)
+/* Same user only. */
+static void
+peer_accept(int conn)
 {
 	struct ucred cred;
 	socklen_t len = sizeof(cred);
-	struct vrs_peer *p;
+	struct vrs_peer *p = free_peer();
+
+	if (!p || getsockopt(conn, SOL_SOCKET, SO_PEERCRED, &cred, &len) < 0
+			|| cred.uid != getuid()) {
+		close(conn);
+		return;
+	}
+	peer_open(p, conn, cred.pid);
+}
+
+static int
+listen_readable(int fd, uint32_t mask, void *unused)
+{
 	int conn;
 
-	while ((conn = accept4(fd, NULL, NULL,
-			SOCK_NONBLOCK | SOCK_CLOEXEC)) >= 0) {
-		p = free_peer();
-		if (!p || getsockopt(conn, SOL_SOCKET, SO_PEERCRED, &cred,
-				&len) < 0 || cred.uid != getuid()) {
-			close(conn);
-			continue;
-		}
-		peer_open(p, conn, cred.pid);
-	}
+	while ((conn = accept4(fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC)) >= 0)
+		peer_accept(conn);
 	return 0;
 }
 
-void
-vrslink_target(struct vrs_link *page, uint64_t interval_ns, uint64_t budget_ns)
+/* Unchanged: cache line stays shared. */
+static void
+store_changed(_Atomic uint32_t *field, uint32_t value)
 {
-	atomic_store(&page->interval_ns, (uint32_t)interval_ns);
-	atomic_store(&page->budget_ns, (uint32_t)budget_ns);
-	atomic_store(&page->active, interval_ns > 0);
+	if (atomic_load_explicit(field, memory_order_relaxed) != value)
+		atomic_store(field, value);
 }
 
+/* Zones land before active. */
+void
+vrslink_publish(struct vrs_link *page, uint32_t focus)
+{
+	store_changed(&page->focus, focus);
+	store_changed(&page->fovea, vrs_zones.fovea);
+	store_changed(&page->blend, vrs_zones.blend);
+	store_changed(&page->quality, vrs_zones.quality);
+	store_changed(&page->active, 1);
+}
+
+/* Inactive pages render native. */
 void
 vrslink_idle(struct vrs_link *page)
 {
-	atomic_store(&page->active, 0);
+	store_changed(&page->active, 0);
+}
+
+/* Live pid peer, opened later. */
+static int
+newer(const struct vrs_peer *p, const struct vrs_peer *best, pid_t pid)
+{
+	return p->fd >= 0 && p->pid == pid
+		&& (!best || (int)(p->opened - best->opened) > 0);
 }
 
 struct vrs_link *
 vrslink_for_pid(pid_t pid)
 {
+	struct vrs_peer *best = NULL;
 	int i;
 
 	for (i = 0; i < VRSLINK_PEERS; i++)
-		if (peers[i].fd >= 0 && peers[i].pid == pid)
-			return peers[i].page;
-	return NULL;
+		best = newer(&peers[i], best, pid) ? &peers[i] : best;
+	return best ? best->page : NULL;
 }
 
 /* Abstract socket: reachable inside pressure-vessel. */
 void
 vrslink_setup(void)
 {
-	struct sockaddr_un addr = { .sun_family = AF_UNIX };
-	int i, n;
+	struct vrs_link_address a = vrs_link_address();
+	int i;
 
 	for (i = 0; i < VRSLINK_PEERS; i++)
 		peers[i].fd = -1;
-	n = snprintf(addr.sun_path + 1, sizeof(addr.sun_path) - 1,
-		VRS_LINK_SOCKET, (unsigned int)getuid());
 	listen_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
 	if (listen_fd < 0)
 		return;
-	if (bind(listen_fd, (struct sockaddr *)&addr,
-			(socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + n)) < 0
+	if (bind(listen_fd, (struct sockaddr *)&a.addr, a.len) < 0
 			|| listen(listen_fd, VRSLINK_BACKLOG) < 0) {
 		nx_log(NX_ERROR, "vrslink: %s", strerror(errno));
 		close(listen_fd);
@@ -201,8 +224,7 @@ vrslink_cleanup(void)
 	int i;
 
 	for (i = 0; i < VRSLINK_PEERS; i++)
-		if (peers[i].fd >= 0)
-			peer_close(&peers[i]);
+		peer_close(&peers[i]);
 	if (listen_source)
 		wl_event_source_remove(listen_source);
 	if (listen_fd >= 0)

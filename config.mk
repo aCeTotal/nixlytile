@@ -9,6 +9,12 @@ DATADIR = $(PREFIX)/share
 
 XWAYLAND_PATH = `$(PKG_CONFIG) --variable=xwayland xwayland`
 
+# Extra font dir for bar icons; empty uses system fonts.
+ICON_FONT_DIR =
+
+# Gaze tracking model directory.
+GAZE_MODEL_DIR = $(DATADIR)/nixlytile/gaze
+
 OPTFLAGS = -O3
 
 CC = cc

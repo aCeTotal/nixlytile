@@ -16,12 +16,8 @@
 #define CARD_METER_H  44
 #define CARD_TICON(h) ((h) + 6)        /* CROW_TEXT row icon size */
 #define CARD_TICON_BIG(h) ((h) + 14)   /* big list-row icon size */
-#define CARD_BG_R     0.055
-#define CARD_BG_G     0.060
-#define CARD_BG_B     0.075
 #define CARD_BG_A     0.93
 #define CARD_BG_A_TILE 0.99   /* backdrop when windows sit under the popup */
-#define CARD_BORDER_A 0.09
 #define CARD_MIN_W    250
 
 /* show animation */
@@ -30,13 +26,15 @@
 #define CARD_SWEEP_DELAY 40
 #define CARD_SWEEP_MS    300
 
-const float card_col_fg[4]     = {0.92f, 0.93f, 0.95f, 1.0f};
-const float card_col_dim[4]    = {0.62f, 0.64f, 0.68f, 1.0f};
-const float card_col_faint[4]  = {0.45f, 0.47f, 0.51f, 1.0f};
-const float card_col_green[4]  = {0.60f, 0.78f, 0.47f, 1.0f};
-const float card_col_yellow[4] = {0.90f, 0.75f, 0.48f, 1.0f};
-const float card_col_red[4]    = {1.00f, 0.42f, 0.42f, 1.0f};
-const float card_col_blue[4]   = {0.38f, 0.69f, 0.94f, 1.0f};
+float card_col_bg[4]     = {0.055f, 0.060f, 0.075f, 1.0f};
+float card_col_edge[4]   = {1.0f, 1.0f, 1.0f, 0.09f};
+float card_col_fg[4]     = {0.92f, 0.93f, 0.95f, 1.0f};
+float card_col_dim[4]    = {0.62f, 0.64f, 0.68f, 1.0f};
+float card_col_faint[4]  = {0.45f, 0.47f, 0.51f, 1.0f};
+float card_col_green[4]  = {0.60f, 0.78f, 0.47f, 1.0f};
+float card_col_yellow[4] = {0.90f, 0.75f, 0.48f, 1.0f};
+float card_col_red[4]    = {1.00f, 0.42f, 0.42f, 1.0f};
+float card_col_blue[4]   = {0.38f, 0.69f, 0.94f, 1.0f};
 
 /* ── fonts ───────────────────────────────────────────────────────── */
 
@@ -1008,13 +1006,51 @@ static struct {
 } icon_cache[ICON_CACHE];
 static uint64_t icon_cache_tick;
 
+#define ICON_GLYPH_SCALE 0.9
+
+static const float *
+tone_color(enum icon_tone tone)
+{
+	static const float *const tones[] = {
+		[TONE_ACCENT] = card_col_blue,
+		[TONE_WARN] = card_col_yellow,
+		[TONE_CRIT] = card_col_red,
+	};
+
+	return tones[tone];
+}
+
+/* Theme-tinted glyph; 0 when the font lacks it. */
+static int
+draw_glyph_icon(cairo_t *cr, const IconGlyph *ig, const BarSpan *box)
+{
+	const struct fcft_glyph *g = bar_glyph_px(ig->cp,
+			(int)lround(box->w * ICON_GLYPH_SCALE));
+	const float *col = tone_color(ig->tone);
+	cairo_surface_t *mask;
+
+	if (!g || pixman_image_get_format(g->pix) != PIXMAN_a8)
+		return 0;
+	mask = cairo_image_surface_create_for_data(
+			(unsigned char *)pixman_image_get_data(g->pix), CAIRO_FORMAT_A8,
+			g->width, g->height, pixman_image_get_stride(g->pix));
+	cairo_set_source_rgba(cr, col[0], col[1], col[2], col[3]);
+	cairo_mask_surface(cr, mask, box->x + (box->w - g->width) / 2,
+			box->y + (box->h - g->height) / 2);
+	cairo_surface_destroy(mask);
+	return 1;
+}
+
 static void
 draw_icon(cairo_t *cr, const char *path, int x, int y, int size)
 {
+	const IconGlyph *ig = icon_glyph_for(path);
 	char resolved[PATH_MAX];
 	cairo_surface_t *surf = NULL;
 	int lru = 0;
 
+	if (ig && draw_glyph_icon(cr, ig, &(BarSpan){ x, y, size, size }))
+		return;
 	if (resolve_asset_path(path, resolved, sizeof(resolved)) != 0)
 		return;
 
@@ -1280,11 +1316,12 @@ card_finish(Card *c, CardResult *out)
 
 	/* card body + hairline border */
 	rounded(cr, 0.5, 0.5, w - 1.0, h - 1.0, CARD_RADIUS);
-	cairo_set_source_rgba(cr, CARD_BG_R, CARD_BG_G, CARD_BG_B,
+	cairo_set_source_rgba(cr, card_col_bg[0], card_col_bg[1], card_col_bg[2],
 			card_bg_a(w, h));
 	card_at_valid = 0;
 	cairo_fill_preserve(cr);
-	cairo_set_source_rgba(cr, 1, 1, 1, CARD_BORDER_A);
+	cairo_set_source_rgba(cr, card_col_edge[0], card_col_edge[1],
+			card_col_edge[2], card_col_edge[3]);
 	cairo_set_line_width(cr, 1.0);
 	cairo_stroke(cr);
 
@@ -2441,28 +2478,18 @@ card_spectrum_buffer(int w, int h, const float accent[4], double frac,
 	return cairo_buf_finish(cs);
 }
 
-/* Soft drop shadow for a w×h card: layered rounded rects approximate a
- * gaussian falloff, biased slightly downward so the card reads as
- * floating above the content behind it. The card's own rect is punched
- * out so the translucent card body isn't darkened from behind. Buffer
- * is (w+2M)×(h+2M) with the card at (M,M); place the node at (-M,-M)
- * relative to the card. */
-struct nx_buffer *
-card_shadow_buffer(int w, int h, double radius)
+#define SHADOW_YOFF 6
+
+/* Layered falloff, card punched out. */
+static void
+shadow_draw(cairo_t *cr, int w, int h, double radius)
 {
 	const int M = CARD_SHADOW_MARGIN;
-	const double yoff = 6.0;
-	cairo_surface_t *cs;
-	cairo_t *cr = cairo_buf_begin(w + 2 * M, h + 2 * M, &cs);
 
-	if (!cr)
-		return NULL;
-	if (radius <= 0.0)
-		radius = CARD_RADIUS;
 	for (int i = M; i >= 1; i--) {
 		double a = 0.046 * (1.0 - (double)i / (M + 1));
 
-		rounded(cr, M - i, M - i + yoff, w + 2 * i, h + 2 * i,
+		rounded(cr, M - i, M - i + SHADOW_YOFF, w + 2 * i, h + 2 * i,
 				radius + i);
 		cairo_set_source_rgba(cr, 0, 0, 0, a);
 		cairo_fill(cr);
@@ -2470,6 +2497,18 @@ card_shadow_buffer(int w, int h, double radius)
 	cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
 	rounded(cr, M + 0.5, M + 0.5, w - 1.0, h - 1.0, radius);
 	cairo_fill(cr);
+}
+
+struct nx_buffer *
+card_shadow_buffer(int w, int h, double radius)
+{
+	const int M = CARD_SHADOW_MARGIN;
+	cairo_surface_t *cs;
+	cairo_t *cr = cairo_buf_begin(w + 2 * M, h + 2 * M, &cs);
+
+	if (!cr)
+		return NULL;
+	shadow_draw(cr, w, h, radius > 0.0 ? radius : CARD_RADIUS);
 	cairo_destroy(cr);
 	return cairo_buf_finish(cs);
 }
@@ -2483,11 +2522,12 @@ card_panel_buffer(int w, int h)
 	if (!cr)
 		return NULL;
 	rounded(cr, 0.5, 0.5, w - 1.0, h - 1.0, CARD_RADIUS);
-	cairo_set_source_rgba(cr, CARD_BG_R, CARD_BG_G, CARD_BG_B,
+	cairo_set_source_rgba(cr, card_col_bg[0], card_col_bg[1], card_col_bg[2],
 			card_bg_a(w, h));
 	card_at_valid = 0;
 	cairo_fill_preserve(cr);
-	cairo_set_source_rgba(cr, 1, 1, 1, CARD_BORDER_A);
+	cairo_set_source_rgba(cr, card_col_edge[0], card_col_edge[1],
+			card_col_edge[2], card_col_edge[3]);
 	cairo_set_line_width(cr, 1.0);
 	cairo_stroke(cr);
 	cairo_destroy(cr);
@@ -2534,7 +2574,8 @@ card_mark_buffer(int radio, int size, int state)
 		cairo_set_source_rgba(cr, card_col_blue[0], card_col_blue[1],
 				card_col_blue[2], 0.9);
 		cairo_fill(cr);
-		cairo_set_source_rgba(cr, CARD_BG_R, CARD_BG_G, CARD_BG_B, 1.0);
+		cairo_set_source_rgba(cr, card_col_bg[0], card_col_bg[1],
+				card_col_bg[2], 1.0);
 		cairo_set_line_width(cr, 1.8);
 		cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
 		cairo_move_to(cr, s * 0.25, s * 0.55);
@@ -2572,43 +2613,69 @@ card_chevron_buffer(int size)
 	return cairo_buf_finish(cs);
 }
 
-/* ── shadow cache ────────────────────────────────────────────────── */
+/* Past these, rows and columns repeat. */
+#define SHADOW_SIDE (CARD_SHADOW_MARGIN + (int)CARD_RADIUS + 1)
+#define SHADOW_TOP  (CARD_SHADOW_MARGIN + (int)CARD_RADIUS + SHADOW_YOFF)
+#define SHADOW_GRID 3
+#define SHADOW_CENTRE (SHADOW_GRID + 1) /* cleared, never drawn */
 
-/* The shadow depends only on card size, but popups re-render their card
- * on every data refresh; the 24-layer falloff over (w+48)×(h+48) px is
- * the most expensive part of a re-render, so cache it per size. Cached
- * buffers hold their init reference until evicted — the returned buffer
- * is borrowed and must NOT be dropped by the caller. */
-#define SHADOW_CACHE 8
+static struct nx_buffer *shadow_tiles[SHADOW_GRID * SHADOW_GRID];
 
-static struct {
-	int w, h;
-	uint64_t used;
-	struct nx_buffer *buf;
-} shadow_cache[SHADOW_CACHE];
-static uint64_t shadow_cache_tick;
-
+/* Grid cell i of the smallest shadow. */
 static struct nx_buffer *
-shadow_cached(int w, int h)
+shadow_tile(int i)
 {
-	int lru = 0;
+	const int M = CARD_SHADOW_MARGIN;
+	const int x[SHADOW_GRID] = { 0, SHADOW_SIDE, SHADOW_SIDE + 1 };
+	const int y[SHADOW_GRID] = { 0, SHADOW_TOP, SHADOW_TOP + 1 };
+	const int w[SHADOW_GRID] = { SHADOW_SIDE, 1, SHADOW_SIDE };
+	const int h[SHADOW_GRID] = { SHADOW_TOP, 1, SHADOW_SIDE };
+	int col = i % SHADOW_GRID, row = i / SHADOW_GRID;
+	cairo_surface_t *cs;
+	cairo_t *cr;
 
-	for (int i = 0; i < SHADOW_CACHE; i++) {
-		if (shadow_cache[i].buf && shadow_cache[i].w == w &&
-				shadow_cache[i].h == h) {
-			shadow_cache[i].used = ++shadow_cache_tick;
-			return shadow_cache[i].buf;
-		}
-		if (shadow_cache[i].used < shadow_cache[lru].used)
-			lru = i;
+	if (shadow_tiles[i])
+		return shadow_tiles[i];
+	cr = cairo_buf_begin(w[col], h[row], &cs);
+	if (!cr)
+		return NULL;
+	cairo_translate(cr, -x[col], -y[row]);
+	shadow_draw(cr, 2 * SHADOW_SIDE + 1 - 2 * M,
+			SHADOW_TOP + SHADOW_SIDE + 1 - 2 * M, CARD_RADIUS);
+	cairo_destroy(cr);
+	shadow_tiles[i] = cairo_buf_finish(cs);
+	return shadow_tiles[i];
+}
+
+struct nx_scene_tree *
+card_shadow_create(struct nx_scene_tree *parent, int w, int h)
+{
+	const int M = CARD_SHADOW_MARGIN;
+	const int x[SHADOW_GRID] = { -M, SHADOW_SIDE - M, w + M - SHADOW_SIDE };
+	const int y[SHADOW_GRID] = { -M, SHADOW_TOP - M, h + M - SHADOW_SIDE };
+	const int dw[SHADOW_GRID] = { SHADOW_SIDE, w + 2 * M - 2 * SHADOW_SIDE,
+			SHADOW_SIDE };
+	const int dh[SHADOW_GRID] = { SHADOW_TOP, h + 2 * M - SHADOW_TOP - SHADOW_SIDE,
+			SHADOW_SIDE };
+	struct nx_scene_tree *tree = nx_scene_tree_create(parent);
+
+	if (!tree)
+		return NULL;
+	for (int i = 0; i < (int)LENGTH(shadow_tiles); i++) {
+		struct nx_buffer *tile;
+		struct nx_scene_buffer *sb;
+
+		if (i == SHADOW_CENTRE || !(tile = shadow_tile(i)))
+			continue;
+		sb = nx_scene_buffer_create(tree, tile);
+		if (!sb)
+			continue;
+		nx_scene_node_set_position(&sb->node, x[i % SHADOW_GRID],
+				y[i / SHADOW_GRID]);
+		nx_scene_buffer_set_dest_size(sb, dw[i % SHADOW_GRID],
+				dh[i / SHADOW_GRID]);
 	}
-	if (shadow_cache[lru].buf)
-		nx_buffer_drop(shadow_cache[lru].buf);
-	shadow_cache[lru].buf = card_shadow_buffer(w, h, 0);
-	shadow_cache[lru].w = w;
-	shadow_cache[lru].h = h;
-	shadow_cache[lru].used = ++shadow_cache_tick;
-	return shadow_cache[lru].buf;
+	return tree;
 }
 
 /* ── presenter + animation ───────────────────────────────────────── */
@@ -2645,7 +2712,7 @@ view_anim_frame(PopupView *v, uint64_t now)
 				-(int)lroundf(CARD_SLIDE_PX * (1.0f - e)));
 	nx_scene_buffer_set_opacity(v->card, e);
 	if (v->shadow)
-		nx_scene_buffer_set_opacity(v->shadow, e);
+		nx_scene_tree_set_opacity(v->shadow, e);
 
 	for (int i = 0; i < v->nfills; i++) {
 		struct nx_scene_buffer *fb = v->fills[i];
@@ -2755,6 +2822,17 @@ anim_unregister(PopupView *v)
 	}
 }
 
+/* Content children were destroyed. */
+static void
+view_forget_nodes(PopupView *v)
+{
+	v->card = NULL;
+	v->shadow = NULL;
+	v->overlay = NULL;
+	memset(v->fills, 0, sizeof(v->fills));
+	v->nfills = 0;
+}
+
 void
 popup_view_apply(PopupView *v, struct nx_scene_tree *tree, CardResult *res)
 {
@@ -2770,27 +2848,9 @@ popup_view_apply(PopupView *v, struct nx_scene_tree *tree, CardResult *res)
 	}
 	wl_list_for_each_safe(node, tmp, &v->content->children, link)
 		nx_scene_node_destroy(node);
-	v->card = NULL;
-	v->shadow = NULL;
-	memset(v->fills, 0, sizeof(v->fills));
-	v->nfills = 0;
+	view_forget_nodes(v);
 
-	/* drop shadow below the card so the popup floats (cached buffer —
-	 * not dropped here) */
-	{
-		struct nx_buffer *sh = shadow_cached(res->w, res->h);
-
-		if (sh) {
-			v->shadow = nx_scene_buffer_create(v->content, NULL);
-			if (v->shadow) {
-				nx_scene_buffer_set_buffer(v->shadow, sh);
-				nx_scene_node_set_position(&v->shadow->node,
-						-CARD_SHADOW_MARGIN,
-						-CARD_SHADOW_MARGIN);
-			}
-		}
-	}
-
+	v->shadow = card_shadow_create(v->content, res->w, res->h);
 	v->card = nx_scene_buffer_create(v->content, NULL);
 	if (v->card) {
 		nx_scene_buffer_set_buffer(v->card, res->buf);
@@ -2881,21 +2941,27 @@ popup_view_show(PopupView *v)
 	anim_register(v);
 }
 
+/* Live overlay node; joins once the card settles. */
+struct nx_scene_buffer *
+popup_view_overlay(PopupView *v, int x, int y)
+{
+	if (!v->content || v->animating)
+		return NULL;
+	if (!v->overlay && (v->overlay = nx_scene_buffer_create(v->content, NULL)))
+		nx_scene_node_set_position(&v->overlay->node, x, y);
+	return v->overlay;
+}
 void
 popup_view_hide(PopupView *v)
 {
 	if (!v)
 		return;
 	v->animating = 0;
-	/* Force a real render on next show — guards against any teardown
-	 * of the scene content while hidden (costs one extra raster per
-	 * popup-open, nothing more). */
+	/* Next show must re-render. */
 	v->render_sig = 0;
 	anim_unregister(v);
 	if (v->content)
-		nx_scene_node_set_position(&v->content->node, 0, 0);
-	if (v->card)
-		nx_scene_buffer_set_opacity(v->card, 1.0f);
-	if (v->shadow)
-		nx_scene_buffer_set_opacity(v->shadow, 1.0f);
+		nx_scene_node_destroy(&v->content->node);
+	v->content = NULL;
+	view_forget_nodes(v);
 }

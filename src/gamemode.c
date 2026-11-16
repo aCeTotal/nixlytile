@@ -7,10 +7,6 @@
 /* pidfd for the ultra-mode keepalive check (PID-reuse safe) */
 static int game_keepalive_pidfd = -1;
 
-/* fancontrol.c removed; fan_boost_*_ stubs */
-static inline void fan_boost_activate(void) { }
-static inline void fan_boost_deactivate(void) { }
-
 /*
  * ioprio constants (not always available in headers)
  */
@@ -59,16 +55,13 @@ gametune_unit_present(void)
 static void
 gametune_start(void)
 {
-	if (!gametune_unit_present())
-		return;
 	if (!gametune_active)
 		fanwatch_set_game(1);
 	gametune_active = 1;
+	if (!gametune_unit_present())
+		return;
 
-	/* No gametune_active short-circuit: the daemon can restore and exit
-	 * behind our back (watchdog, crash), and `systemctl start` on an
-	 * already-active unit is a no-op — always re-assert. */
-
+	/* Re-assert: daemon may have exited. */
 	static const char *const argv[] = {
 		"systemctl", "start", "--no-block", "nixly-gametune.service", NULL
 	};
@@ -86,11 +79,16 @@ gametune_stop(void)
 		return;
 	gametune_active = 0;
 	fanwatch_set_game(0);
+	if (!gametune_unit_present())
+		return;
 
+	/* Blocks until restore finishes. */
 	static const char *const argv[] = {
-		"systemctl", "stop", "--no-block", "nixly-gametune.service", NULL
+		"systemctl", "stop", "nixly-gametune.service", NULL
 	};
 	run_cmd(argv);
+	/* Restore may hold AC values. */
+	powersave_battery_reassert_async();
 	nx_log(NX_INFO, "gametune: nixly-gametune.service stopped");
 }
 
@@ -131,11 +129,10 @@ game_oom_unprotect(pid_t pid)
 	run_cmd(argv);
 }
 
-/* Pre-launch boost: launchfx detects the Steam Play press seconds
- * before any window exists.  Killing C-state wakeup latency this early makes
- * Proton setup / shader compilation / asset load run without idle-exit
- * stalls; ultra game mode takes ownership when the game window maps. */
+/* Play-press tuning until ultra. */
 static int prelaunch_boost_active;
+static struct wl_event_source *prelaunch_retry;
+#define PRELAUNCH_SETTLE_MS 250
 
 /* fx_track_start runs on the main loop while the 16 ms cover animation
  * ticks; the two systemctl invocations in gametune_start block 50-300 ms,
@@ -170,16 +167,32 @@ game_prelaunch_boost(void)
 		gametune_start();
 }
 
+static int
+prelaunch_retry_cb(void *data)
+{
+	(void)data;
+	game_prelaunch_release();
+	return 0;
+}
+
 void
 game_prelaunch_release(void)
 {
 	pthread_t t;
+	int hold = launchfx_cover_headstart_remaining();
 
 	if (!prelaunch_boost_active)
 		return;
+	/* Ultra imminent; recheck after it. */
+	if (hold > 0) {
+		if (!prelaunch_retry)
+			prelaunch_retry = wl_event_loop_add_timer(event_loop, prelaunch_retry_cb, NULL);
+		if (prelaunch_retry)
+			wl_event_source_timer_update(prelaunch_retry, hold + PRELAUNCH_SETTLE_MS);
+		return;
+	}
 	prelaunch_boost_active = 0;
-	/* Ultra game mode owns the tuning while active — don't fight it.
-	 * Only release when the launch never reached game mode (abort). */
+	/* Ultra mode owns tuning now. */
 	if (game_mode_ultra)
 		return;
 	if (pthread_create(&t, NULL, prelaunch_stop_thread, NULL) == 0)
@@ -338,85 +351,27 @@ restore_game_priority(pid_t pid)
 	game_oom_unprotect(pid);
 }
 
-/*
- * power-profiles-daemon integration (CachyOS game-performance equivalent).
- * Switches the system platform power profile to "performance" — affects ACPI
- * platform_profile (laptop firmware) AND CPU EPP/governor hints AND
- * vendor-agnostic GPU power hints. Restored on game-mode exit.
- */
-static char ppd_saved_profile[64] = "";
-static int  ppd_applied = 0;
-
+/* Session plumbing games block on. */
 static int
-ppd_available(void)
+essential_process(const char *comm)
 {
-	/* Availability can't change mid-session; probe once. */
-	static int avail = -1;
-	if (avail < 0)
-		avail = system("command -v powerprofilesctl >/dev/null 2>&1") == 0;
-	return avail;
-}
+	static const char *const prefix[] = {
+		"nixly", "Xwayland", "xwayland", "pipewire", "wireplumber", "pulseaudio",
+		"dbus-", "xdg-", "systemd", "gvfs", "at-spi", "gnome-keyring", "gcr-",
+		"ssh-agent", "sshd", "polkit", "fusermount", "wine",
+	};
+	static const char *const exact[] = { "bash", "zsh", "fish", "sh", "dash" };
+	size_t n = strlen(comm);
 
-void
-apply_power_profile_performance(void)
-{
-	FILE *fp;
-	char buf[128];
-
-	if (ppd_applied)
-		return;
-	if (!ppd_available()) {
-		nx_log(NX_INFO, "PPD: powerprofilesctl not available, skipping");
-		return;
-	}
-
-	/* Save current profile */
-	ppd_saved_profile[0] = '\0';
-	fp = popen("powerprofilesctl get 2>/dev/null", "r");
-	if (fp) {
-		if (fgets(buf, sizeof(buf), fp)) {
-			char *nl = strchr(buf, '\n');
-			if (nl) *nl = '\0';
-			if (snprintf(ppd_saved_profile, sizeof(ppd_saved_profile), "%s", buf)
-					>= (int)sizeof(ppd_saved_profile))
-				ppd_saved_profile[0] = '\0';
-		}
-		pclose(fp);
-	}
-
-	/* Switch to performance — only if not already there */
-	if (strcmp(ppd_saved_profile, "performance") == 0) {
-		nx_log(NX_INFO, "PPD: already on performance, no change");
-		ppd_applied = 1;
-		return;
-	}
-
-	if (system("powerprofilesctl set performance 2>/dev/null") == 0) {
-		ppd_applied = 1;
-		nx_log(NX_INFO, "PPD: profile %s → performance",
-			ppd_saved_profile[0] ? ppd_saved_profile : "?");
-	} else {
-		nx_log(NX_INFO, "PPD: set performance failed");
-	}
-}
-
-void
-restore_power_profile(void)
-{
-	char cmd[128];
-
-	if (!ppd_applied)
-		return;
-
-	if (ppd_saved_profile[0] && strcmp(ppd_saved_profile, "performance") != 0) {
-		snprintf(cmd, sizeof(cmd),
-			"powerprofilesctl set %s 2>/dev/null",
-			ppd_saved_profile);
-		if (system(cmd) == 0)
-			nx_log(NX_INFO, "PPD: restored profile → %s", ppd_saved_profile);
-	}
-	ppd_applied = 0;
-	ppd_saved_profile[0] = '\0';
+	if (n > 4 && !strcmp(comm + n - 4, ".exe"))
+		return 1;
+	for (size_t i = 0; i < LENGTH(prefix); i++)
+		if (!strncmp(comm, prefix[i], strlen(prefix[i])))
+			return 1;
+	for (size_t i = 0; i < LENGTH(exact); i++)
+		if (!strcmp(comm, exact[i]))
+			return 1;
+	return 0;
 }
 
 /*
@@ -450,19 +405,6 @@ lower_competing_processes(pid_t game_pid)
 	uid_t our_uid = getuid();
 	pid_t our_pid = getpid();
 	pid_t pid;
-	int i;
-
-	static const char *whitelist[] = {
-		"nixlytile", "Xwayland", "xwayland",
-		"pipewire", "pipewire-pulse", "wireplumber", "pulseaudio",
-		"dbus-daemon", "dbus-broker",
-		"systemd", "systemd-logind", "systemd-userdbd",
-		"sshd",
-		"bash", "zsh", "fish", "sh", "dash",
-		"gnome-keyring", "gcr-ssh-agent", "ssh-agent",
-		"gamemoded", "nixly-voice",
-		NULL
-	};
 
 	lowered_pid_count = 0;
 
@@ -498,7 +440,6 @@ lower_competing_processes(pid_t game_pid)
 		if (!is_our_uid)
 			continue;
 
-		/* Comm whitelist */
 		snprintf(path, sizeof(path), "/proc/%d/comm", pid);
 		fp = fopen(path, "r");
 		if (!fp)
@@ -510,14 +451,7 @@ lower_competing_processes(pid_t game_pid)
 		}
 		fclose(fp);
 
-		int whitelisted = 0;
-		for (i = 0; whitelist[i]; i++) {
-			if (strcmp(comm, whitelist[i]) == 0) {
-				whitelisted = 1;
-				break;
-			}
-		}
-		if (whitelisted)
+		if (essential_process(comm))
 			continue;
 
 		/* Don't touch protected ancestry (Steam tree) or game subtree */
@@ -774,7 +708,6 @@ freeze_background_processes(void)
 	uid_t our_uid = getuid();
 	pid_t our_pid = getpid();
 	pid_t pid;
-	int i;
 
 	/* Whitelist of process comm names that should never be frozen.
 	 * Steam/Discord subtrees are protected by has_protected_ancestor().
@@ -782,18 +715,6 @@ freeze_background_processes(void)
 	 * systemd manager, sshd session processes or interactive shells
 	 * freezes SSH sessions and stalls user-unit management for the
 	 * whole game. */
-	static const char *whitelist[] = {
-		"nixlytile", "Xwayland", "xwayland",
-		"pipewire", "wireplumber", "pulseaudio", "pipewire-pulse",
-		"dbus-daemon", "dbus-broker",
-		"systemd", "systemd-logind", "systemd-userdbd",
-		"sshd",
-		"bash", "zsh", "fish", "sh", "dash",
-		"gnome-keyring", "gcr-ssh-agent", "ssh-agent",
-		"gamemoded", "nixly-voice",
-		NULL
-	};
-
 	/* Reset state for idempotent re-entry */
 	frozen_pid_count = 0;
 
@@ -842,15 +763,7 @@ freeze_background_processes(void)
 		}
 		fclose(fp);
 
-		/* Check whitelist */
-		int whitelisted = 0;
-		for (i = 0; whitelist[i]; i++) {
-			if (strcmp(comm, whitelist[i]) == 0) {
-				whitelisted = 1;
-				break;
-			}
-		}
-		if (whitelisted)
+		if (essential_process(comm))
 			continue;
 
 		/* Don't freeze any process in a Steam/Discord subtree */
@@ -1193,451 +1106,8 @@ restore_raw_input(void)
 }
 
 /*
- * Save-then-write helper for sysfs knobs we can restore afterwards.
- * Only the GPU power paths use it now — the /proc/sys users (scheduler
- * granularity, dirty ratios, MGLRU, split_lock, watchdog, swappiness) were
- * removed: those files are root-owned and every write failed with EACCES.
- * See gametune_start() for what replaced them.
- */
-static void
-sched_save_and_write(const char *path, const char *value, char *save_buf, size_t save_len)
-{
-	int fd;
-	ssize_t n;
-
-	/* Save current value */
-	fd = open(path, O_RDONLY);
-	if (fd >= 0) {
-		n = read(fd, save_buf, save_len - 1);
-		close(fd);
-		if (n > 0) {
-			save_buf[n] = '\0';
-			if (n > 0 && save_buf[n - 1] == '\n') save_buf[n - 1] = '\0';
-		}
-	}
-
-	write_file_str(path, value);
-}
-
-static void
-sched_restore(const char *path, char *save_buf)
-{
-	if (save_buf[0]) {
-		write_file_str(path, save_buf);
-		save_buf[0] = '\0';
-	}
-}
-
-/*
- * GPU Power State — Force maximum GPU performance.
- * For AMD: set power_dma_perf_level to "high" and use VR power profile.
- * For Intel: set min_freq to max_freq.
- */
-static char gpu_saved_perf_level[32] = "";
-static char gpu_saved_power_profile[32] = "";
-static char gpu_power_perf_path[128] = "";
-static char gpu_power_profile_path[128] = "";
-static char gpu_intel_min_path[128] = "";
-static char gpu_saved_intel_min[32] = "";
-
-/* NVIDIA state */
-static int nv_clocks_locked = 0;
-static int nv_persistence_was_off = 0;
-static int nv_power_applied = 0;
-static char nv_saved_power_limit[32] = "";
-static int nv_gpu_index = 0;  /* nvidia-smi GPU index (auto-detected) */
-
-/*
- * Run nvidia-smi with given args. Returns 0 on success.
- * Optionally captures first line of stdout into out_buf.
- *
- * pclose() is unreliable here: handlesig() reaps with waitpid(-1, WNOHANG)
- * on every SIGCHLD, so it races popen's child and pclose() then returns -1
- * with ECHILD even though the command ran fine.  Every caller gates its
- * tuning step on this return value, so treating "status unknown" as failure
- * silently skipped GPU clock locks, power limits and persistence mode.
- * ECHILD therefore means success-unknown, not failure.
- */
-static int
-nvidia_smi_run(const char *args, char *out_buf, size_t out_len)
-{
-	char cmd[256];
-	FILE *fp;
-	int ret;
-
-	snprintf(cmd, sizeof(cmd), "nvidia-smi %s 2>/dev/null", args);
-	fp = popen(cmd, "r");
-	if (!fp) return -1;
-
-	if (out_buf && out_len > 0) {
-		out_buf[0] = '\0';
-		if (fgets(out_buf, out_len, fp)) {
-			/* Strip trailing whitespace/newline */
-			size_t len = strlen(out_buf);
-			while (len > 0 && (out_buf[len - 1] == '\n' || out_buf[len - 1] == '\r'
-					|| out_buf[len - 1] == ' '))
-				out_buf[--len] = '\0';
-		}
-	}
-
-	ret = pclose(fp);
-	if (ret == -1) {
-		/* Child already reaped by the SIGCHLD handler. For queries the
-		 * captured output tells us whether it worked; for setters we
-		 * have nothing to go on, so assume it ran. */
-		if (out_buf && out_len > 0)
-			return out_buf[0] != '\0' ? 0 : -1;
-		return 0;
-	}
-	return WIFEXITED(ret) ? WEXITSTATUS(ret) : -1;
-}
-
-/*
- * Query a single nvidia-smi CSV field for GPU at nv_gpu_index.
- * Returns 0 on success, result in out_buf.
- */
-static int
-nvidia_smi_query(const char *field, char *out_buf, size_t out_len)
-{
-	char args[256];
-	snprintf(args, sizeof(args),
-		"-i %d --query-gpu=%s --format=csv,noheader,nounits",
-		nv_gpu_index, field);
-	return nvidia_smi_run(args, out_buf, out_len);
-}
-
-/*
- * Detect which nvidia-smi GPU index corresponds to our detected GPU.
- * nvidia-smi and DRM card indices can differ on multi-GPU systems.
- */
-static void
-nvidia_detect_smi_index(GpuInfo *gpu)
-{
-	char buf[256], args[256];
-	int i;
-	/* PCI slot → smi index mapping can't change while running; the
-	 * probe costs up to 8 popen(nvidia-smi) calls, so do it once. */
-	static int detected = 0;
-
-	if (detected)
-		return;
-	detected = 1;
-
-	/* Query PCI bus ID for each nvidia-smi GPU and match against our PCI slot */
-	for (i = 0; i < 8; i++) {
-		snprintf(args, sizeof(args),
-			"-i %d --query-gpu=pci.bus_id --format=csv,noheader", i);
-		if (nvidia_smi_run(args, buf, sizeof(buf)) != 0)
-			break;
-		/* nvidia-smi returns e.g. "00000000:01:00.0", our pci_slot is "0000:01:00.0" */
-		if (strstr(buf, gpu->pci_slot)) {
-			nv_gpu_index = i;
-			nx_log(NX_INFO, "NVIDIA: PCI %s → nvidia-smi GPU index %d", gpu->pci_slot, i);
-			return;
-		}
-	}
-	/* Fallback: assume index 0 (most common single-GPU setup) */
-	nv_gpu_index = 0;
-}
-
-static void
-apply_nvidia_gpu_power(GpuInfo *gpu)
-{
-	char buf[128], args[256];
-
-	/* Auto-detect correct nvidia-smi GPU index */
-	nvidia_detect_smi_index(gpu);
-
-	/*
-	 * 1. Enable persistence mode — keeps driver loaded between GPU tasks,
-	 *    eliminates ~1-2s initialization delay on each GPU operation.
-	 */
-	if (nvidia_smi_query("persistence_mode", buf, sizeof(buf)) == 0) {
-		if (strstr(buf, "Disabled") || strcmp(buf, "Off") == 0) {
-			nv_persistence_was_off = 1;
-			snprintf(args, sizeof(args), "-i %d -pm 1", nv_gpu_index);
-			nvidia_smi_run(args, NULL, 0);
-			nx_log(NX_INFO, "NVIDIA: persistence mode enabled");
-		}
-	}
-
-	/*
-	 * 2. Set power limit to maximum allowed TDP.
-	 *    More power = higher sustained boost clocks.
-	 */
-	if (nvidia_smi_query("power.limit", buf, sizeof(buf)) == 0) {
-		strncpy(nv_saved_power_limit, buf, sizeof(nv_saved_power_limit) - 1);
-		nv_saved_power_limit[sizeof(nv_saved_power_limit) - 1] = '\0';
-	}
-	if (nvidia_smi_query("power.max_limit", buf, sizeof(buf)) == 0 && buf[0]) {
-		char *dot = strchr(buf, '.');
-		if (dot) *dot = '\0';
-		snprintf(args, sizeof(args), "-i %d --power-limit=%s", nv_gpu_index, buf);
-		if (nvidia_smi_run(args, NULL, 0) == 0)
-			nx_log(NX_INFO, "NVIDIA: power limit → %s W (was %s)", buf, nv_saved_power_limit);
-	}
-
-	/*
-	 * 3. Lock GPU clocks to maximum boost frequency.
-	 *    Prevents clock fluctuation and ensures max performance.
-	 */
-	if (nvidia_smi_query("clocks.max.graphics", buf, sizeof(buf)) == 0 && buf[0]) {
-		char *dot = strchr(buf, '.');
-		if (dot) *dot = '\0';
-		if (snprintf(args, sizeof(args), "-i %d -lgc %s,%s", nv_gpu_index,
-				buf, buf) < (int)sizeof(args) &&
-				nvidia_smi_run(args, NULL, 0) == 0) {
-			nv_clocks_locked = 1;
-			nx_log(NX_INFO, "NVIDIA: GPU clocks locked → %s MHz", buf);
-		}
-	}
-
-	/*
-	 * 4. Lock memory clocks to maximum frequency.
-	 *    Prevents VRAM clock downshifting during gameplay.
-	 */
-	if (nvidia_smi_query("clocks.max.memory", buf, sizeof(buf)) == 0 && buf[0]) {
-		char *dot = strchr(buf, '.');
-		if (dot) *dot = '\0';
-		if (snprintf(args, sizeof(args), "-i %d -lmc %s,%s", nv_gpu_index,
-				buf, buf) < (int)sizeof(args) &&
-				nvidia_smi_run(args, NULL, 0) == 0)
-			nx_log(NX_INFO, "NVIDIA: memory clocks locked → %s MHz", buf);
-	}
-
-	/* 5. Pin power unless offload-only. */
-	if (!dgpu_may_sleep) {
-		dgpu_assert_power_on(gpu);
-		nx_log(NX_INFO, "NVIDIA: PCI power/control=on re-asserted for game mode");
-	}
-
-	/*
-	 * 6. Set compute mode to DEFAULT to allow concurrent graphics + compute.
-	 *    Some systems set exclusive mode which can interfere with games.
-	 */
-	snprintf(args, sizeof(args), "-i %d -c DEFAULT", nv_gpu_index);
-	nvidia_smi_run(args, NULL, 0);
-
-	/*
-	 * 7. Set GPU performance preference via nvidia-settings (requires XWayland).
-	 *    PowerMizer mode 1 = "Prefer Maximum Performance".
-	 *    Also set performance level hint and disable GPU scaling to reduce overhead.
-	 *    Note: nvidia-settings silently fails on pure Wayland — harmless.
-	 */
-	{
-		char nv_settings_cmd[512];
-		snprintf(nv_settings_cmd, sizeof(nv_settings_cmd),
-			"nvidia-settings"
-			" -a '[gpu:%d]/GPUPowerMizerMode=1'"
-			" -a '[gpu:%d]/GpuPowerMizerDefaultMode=1'"
-			" 2>/dev/null",
-			nv_gpu_index, nv_gpu_index);
-		FILE *fp = popen(nv_settings_cmd, "r");
-		if (fp) {
-			if (pclose(fp) == 0)
-				nx_log(NX_INFO, "NVIDIA: PowerMizer → prefer max performance (via nvidia-settings)");
-			else
-				nx_log(NX_INFO, "NVIDIA: nvidia-settings unavailable (pure Wayland) — using nvidia-smi only");
-		}
-	}
-
-	/*
-	 * 8. NVIDIA kernel module parameters for performance.
-	 *    NVreg_UsePageAttributeTable=1 improves memory mapping performance.
-	 *    These are read-only after boot, so just log the current state.
-	 */
-	{
-		char pat_val[8] = "";
-		int fd = open("/sys/module/nvidia/parameters/NVreg_UsePageAttributeTable", O_RDONLY);
-		if (fd >= 0) {
-			ssize_t n = read(fd, pat_val, sizeof(pat_val) - 1);
-			close(fd);
-			if (n > 0) {
-				pat_val[n] = '\0';
-				if (pat_val[0] == '0')
-					nx_log(NX_INFO, "NVIDIA: WARNING — NVreg_UsePageAttributeTable=0 "
-						"(set nvidia.NVreg_UsePageAttributeTable=1 in boot params for better perf)");
-			}
-		}
-	}
-
-	nv_power_applied = 1;
-	nx_log(NX_INFO, "NVIDIA: card%d (%s, smi-idx=%d) — full performance mode active",
-		gpu->card_index, gpu->pci_slot, nv_gpu_index);
-}
-
-static void
-restore_nvidia_gpu_power(void)
-{
-	char args[256];
-
-	if (!nv_power_applied) return;
-
-	/* Reset GPU clock lock */
-	if (nv_clocks_locked) {
-		snprintf(args, sizeof(args), "-i %d -rgc", nv_gpu_index);
-		nvidia_smi_run(args, NULL, 0);
-		snprintf(args, sizeof(args), "-i %d -rmc", nv_gpu_index);
-		nvidia_smi_run(args, NULL, 0);
-		nv_clocks_locked = 0;
-		nx_log(NX_INFO, "NVIDIA: GPU/memory clock locks released");
-	}
-
-	/* Restore power limit */
-	if (nv_saved_power_limit[0]) {
-		char pl_copy[32];
-		strncpy(pl_copy, nv_saved_power_limit, sizeof(pl_copy) - 1);
-		pl_copy[sizeof(pl_copy) - 1] = '\0';
-		char *dot = strchr(pl_copy, '.');
-		if (dot) *dot = '\0';
-		snprintf(args, sizeof(args), "-i %d --power-limit=%s", nv_gpu_index, pl_copy);
-		nvidia_smi_run(args, NULL, 0);
-		nx_log(NX_INFO, "NVIDIA: power limit restored → %s W", pl_copy);
-		nv_saved_power_limit[0] = '\0';
-	}
-
-	/* Restore persistence mode */
-	if (nv_persistence_was_off) {
-		snprintf(args, sizeof(args), "-i %d -pm 0", nv_gpu_index);
-		nvidia_smi_run(args, NULL, 0);
-		nv_persistence_was_off = 0;
-		nx_log(NX_INFO, "NVIDIA: persistence mode restored (off)");
-	}
-
-	/* PCI power policy stays startup's. */
-
-	/* Restore PowerMizer to adaptive mode (nvidia-settings, silent fail on Wayland) */
-	{
-		char nv_settings_cmd[256];
-		snprintf(nv_settings_cmd, sizeof(nv_settings_cmd),
-			"nvidia-settings -a '[gpu:%d]/GPUPowerMizerMode=0' 2>/dev/null",
-			nv_gpu_index);
-		FILE *fp = popen(nv_settings_cmd, "r");
-		if (fp) pclose(fp);
-	}
-
-	nv_power_applied = 0;
-	nx_log(NX_INFO, "NVIDIA: performance mode deactivated — defaults restored");
-}
-
-/* Nvidia apply/restore run synchronously on the gm-bg worker thread.
- * They used to spawn extra detached threads, but apply/restore_gpu_power_state
- * are only ever called from the worker — the extra threads just created a
- * race where restore saw nv_power_applied==0 while apply was still running,
- * leaving clocks locked at max permanently. */
-
-void
-apply_gpu_power_state(void)
-{
-	int gpu_idx = discrete_gpu_idx >= 0 ? discrete_gpu_idx : 0;
-	if (gpu_idx >= detected_gpu_count) return;
-	GpuInfo *gpu = &detected_gpus[gpu_idx];
-
-	if (gpu->vendor == GPU_VENDOR_AMD) {
-		/* AMD: Force high performance DPM level */
-		snprintf(gpu_power_perf_path, sizeof(gpu_power_perf_path),
-			"/sys/class/drm/card%d/device/power_dpm_force_performance_level",
-			gpu->card_index);
-
-		sched_save_and_write(gpu_power_perf_path, "high",
-			gpu_saved_perf_level, sizeof(gpu_saved_perf_level));
-
-		/* AMD: Set power profile to VR/3D compute for max clocks */
-		snprintf(gpu_power_profile_path, sizeof(gpu_power_profile_path),
-			"/sys/class/drm/card%d/device/pp_power_profile_mode", gpu->card_index);
-		{
-			int fd = open(gpu_power_profile_path, O_RDONLY);
-			if (fd >= 0) {
-				char buf[512];
-				ssize_t n = read(fd, buf, sizeof(buf) - 1);
-				close(fd);
-				if (n > 0) {
-					buf[n] = '\0';
-					/* Find current active profile (line with * at end) */
-					char *line = buf;
-					while (line && *line) {
-						char *nl = strchr(line, '\n');
-						if (nl) *nl = '\0';
-						if (strchr(line, '*')) {
-							while (*line == ' ') line++;
-							/* Profile index only. */
-							if (snprintf(gpu_saved_power_profile,
-									sizeof(gpu_saved_power_profile), "%.*s",
-									(int)strcspn(line, " "), line)
-									>= (int)sizeof(gpu_saved_power_profile))
-								gpu_saved_power_profile[0] = '\0';
-							break;
-						}
-						line = nl ? nl + 1 : NULL;
-					}
-				}
-				/* 3 = 3D_FULL_SCREEN. */
-				write_file_str(gpu_power_profile_path, "3");
-			}
-		}
-
-		nx_log(NX_INFO, "GPU power: AMD card%d → high perf + 3D profile", gpu->card_index);
-
-	} else if (gpu->vendor == GPU_VENDOR_NVIDIA) {
-		apply_nvidia_gpu_power(gpu);
-
-	} else if (gpu->vendor == GPU_VENDOR_INTEL) {
-		/* Intel: Set min frequency to max frequency */
-		snprintf(gpu_intel_min_path, sizeof(gpu_intel_min_path),
-			"/sys/class/drm/card%d/gt_min_freq_mhz", gpu->card_index);
-		{
-			char max_path[128];
-			snprintf(max_path, sizeof(max_path),
-				"/sys/class/drm/card%d/gt_max_freq_mhz", gpu->card_index);
-			char max_freq[32] = "";
-			int fd = open(max_path, O_RDONLY);
-			if (fd >= 0) {
-				ssize_t n = read(fd, max_freq, sizeof(max_freq) - 1);
-				close(fd);
-				if (n > 0) {
-					max_freq[n] = '\0';
-					if (max_freq[n - 1] == '\n') max_freq[n - 1] = '\0';
-					sched_save_and_write(gpu_intel_min_path, max_freq,
-						gpu_saved_intel_min, sizeof(gpu_saved_intel_min));
-					nx_log(NX_INFO, "GPU power: Intel card%d → min_freq=%s MHz",
-						gpu->card_index, max_freq);
-				}
-			}
-		}
-	}
-}
-
-void
-restore_gpu_power_state(void)
-{
-	if (gpu_saved_perf_level[0]) {
-		sched_restore(gpu_power_perf_path, gpu_saved_perf_level);
-		nx_log(NX_INFO, "GPU power: AMD perf level restored");
-	}
-	if (gpu_saved_power_profile[0]) {
-		write_file_str(gpu_power_profile_path, gpu_saved_power_profile);
-		gpu_saved_power_profile[0] = '\0';
-		nx_log(NX_INFO, "GPU power: AMD power profile restored");
-	}
-	restore_nvidia_gpu_power(); /* no-op unless nv_power_applied */
-	if (gpu_saved_intel_min[0]) {
-		sched_restore(gpu_intel_min_path, gpu_saved_intel_min);
-		nx_log(NX_INFO, "GPU power: Intel min freq restored");
-	}
-}
-
-/*
- * GPU Scheduling Priority — Boost game process GPU context priority.
- *
- * AMD (amdgpu): Use DRM_IOCTL_AMDGPU_SCHED to set process-level GPU
- * scheduling priority override.  Requires DRM master (compositor has it).
- * We duplicate the game's DRM fd via pidfd_getfd() and issue the ioctl.
- *
- * Intel (i915/xe): No cross-process GPU priority ioctl exists.  The nice
- * value we already set (-10) causes Mesa/ANV to request elevated GPU
- * context priority automatically when the game creates its GPU contexts.
- *
- * The boost is best-effort — failures are logged but not fatal.
+ * AMD alone can raise another process's GPU queue priority
+ * (DRM_IOCTL_AMDGPU_SCHED), and only on a DRM master fd.
  */
 #include <libdrm/amdgpu_drm.h>
 
@@ -1645,154 +1115,118 @@ restore_gpu_power_state(void)
 #define __NR_pidfd_getfd 438
 #endif
 
-static int gpu_sched_applied = 0;
-static int gpu_sched_local_fd = -1;  /* duplicated DRM fd from game process */
+static int gpu_sched_local_fd = -1;  /* game DRM fd, while boosted */
+static int gpu_sched_master_fd = -1;
 
-/*
- * Find the game process's DRM render node fd by scanning /proc/<pid>/fd/.
- * Returns the fd number (in the target process's fd table), or -1.
- */
+static const GpuInfo *
+game_gpu(void)
+{
+	int idx = discrete_gpu_idx >= 0 ? discrete_gpu_idx : 0;
+
+	return idx < detected_gpu_count ? &detected_gpus[idx] : NULL;
+}
+
+/* Game's fd for GPU, or -1. */
 static int
-find_process_drm_fd(pid_t pid)
+find_process_drm_fd(pid_t pid, const GpuInfo *gpu)
 {
 	char dir_path[64], target[256];
 	DIR *d;
 	struct dirent *ent;
 	ssize_t len;
+	int found = -1;
 
 	snprintf(dir_path, sizeof(dir_path), "/proc/%d/fd", pid);
 	d = opendir(dir_path);
 	if (!d)
 		return -1;
-
-	while ((ent = readdir(d)) != NULL) {
-		if (ent->d_name[0] == '.')
-			continue;
-		len = readlinkat(dirfd(d), ent->d_name, target, sizeof(target) - 1);
+	while (found < 0 && (ent = readdir(d)) != NULL) {
+		len = ent->d_name[0] == '.' ? -1 :
+			readlinkat(dirfd(d), ent->d_name, target, sizeof(target) - 1);
 		if (len <= 0)
 			continue;
 		target[len] = '\0';
-		/* Match /dev/dri/renderD* or /dev/dri/card* */
-		if (strstr(target, "/dev/dri/")) {
-			int fd_num = atoi(ent->d_name);
-			closedir(d);
-			return fd_num;
-		}
+		if (!strcmp(target, gpu->render_path) || !strcmp(target, gpu->card_path))
+			found = atoi(ent->d_name);
 	}
 	closedir(d);
+	return found;
+}
+
+/* Backend-owned AMD master fd. */
+static int
+game_gpu_master_fd(void)
+{
+	const GpuInfo *gpu = game_gpu();
+	struct stat want, have;
+	Monitor *m;
+
+	if (!gpu || gpu->vendor != GPU_VENDOR_AMD || stat(gpu->card_path, &want) < 0)
+		return -1;
+	wl_list_for_each(m, &mons, link) {
+		int fd = m->nx_output ? nx_backend_get_drm_fd(m->nx_output->backend) : -1;
+
+		if (fd >= 0 && fstat(fd, &have) == 0 && have.st_rdev == want.st_rdev)
+			return fd;
+	}
 	return -1;
 }
 
-void
-apply_gpu_sched_priority(pid_t pid)
+static int
+sched_override(int master_fd, int fd, int32_t priority)
 {
-	int gpu_idx = discrete_gpu_idx >= 0 ? discrete_gpu_idx : 0;
-	if (gpu_idx >= detected_gpu_count || pid <= 1)
-		return;
+	union drm_amdgpu_sched sched = {0};
 
-	GpuInfo *gpu = &detected_gpus[gpu_idx];
-
-	if (gpu->vendor == GPU_VENDOR_AMD) {
-		/*
-		 * AMD: Use DRM_IOCTL_AMDGPU_SCHED to override the game's GPU
-		 * scheduling priority.  Steps:
-		 * 1. Find the game's DRM fd number via /proc/<pid>/fd
-		 * 2. Duplicate it into our process via pidfd_getfd()
-		 * 3. Issue PROCESS_PRIORITY_OVERRIDE on the compositor's DRM fd
-		 */
-		int target_fd_num = find_process_drm_fd(pid);
-		if (target_fd_num < 0) {
-			nx_log(NX_INFO, "GPU sched: no DRM fd found for PID %d", pid);
-			return;
-		}
-
-		int pidfd = syscall(__NR_pidfd_open, pid, 0);
-		if (pidfd < 0) {
-			nx_log(NX_INFO, "GPU sched: pidfd_open failed for PID %d: %s",
-				pid, strerror(errno));
-			return;
-		}
-
-		int local_fd = syscall(__NR_pidfd_getfd, pidfd, target_fd_num, 0);
-		close(pidfd);
-		if (local_fd < 0) {
-			nx_log(NX_INFO, "GPU sched: pidfd_getfd failed for PID %d fd %d: %s",
-				pid, target_fd_num, strerror(errno));
-			return;
-		}
-
-		/* Get compositor's DRM master fd from the renderer */
-		int drm_master_fd = nx_renderer_get_drm_fd(drw);
-		if (drm_master_fd < 0) {
-			nx_log(NX_INFO, "GPU sched: cannot get DRM master fd");
-			close(local_fd);
-			return;
-		}
-
-		/* VERY_HIGH gives the game queue precedence AND VRAM eviction
-		 * priority — kernel evicts other clients' BOs to GTT/system RAM
-		 * before the game's, mirroring SteamOS gamescope behavior. */
-		union drm_amdgpu_sched sched = {0};
-		sched.in.op = AMDGPU_SCHED_OP_PROCESS_PRIORITY_OVERRIDE;
-		sched.in.fd = local_fd;
-		sched.in.priority = AMDGPU_CTX_PRIORITY_VERY_HIGH;
-
-		if (drmIoctl(drm_master_fd, DRM_IOCTL_AMDGPU_SCHED, &sched) == 0) {
-			gpu_sched_applied = 1;
-			gpu_sched_local_fd = local_fd;  /* keep alive until restore */
-			nx_log(NX_INFO, "GPU sched: AMD process priority → VERY_HIGH (VRAM prio) for PID %d", pid);
-		} else {
-			/* VERY_HIGH may require CAP_SYS_NICE; fall back to HIGH */
-			sched.in.priority = AMDGPU_CTX_PRIORITY_HIGH;
-			if (drmIoctl(drm_master_fd, DRM_IOCTL_AMDGPU_SCHED, &sched) == 0) {
-				gpu_sched_applied = 1;
-				gpu_sched_local_fd = local_fd;
-				nx_log(NX_INFO, "GPU sched: AMD process priority → HIGH (VERY_HIGH denied) for PID %d", pid);
-			} else {
-				nx_log(NX_INFO, "GPU sched: AMDGPU_SCHED ioctl failed: %s", strerror(errno));
-				close(local_fd);
-			}
-		}
-
-	} else if (gpu->vendor == GPU_VENDOR_INTEL) {
-		/*
-		 * Intel (i915/xe): No cross-process priority ioctl.
-		 * The nice=-10 we set in apply_game_priority() causes Mesa's ANV
-		 * driver to automatically request I915_CONTEXT_PARAM_PRIORITY > 0
-		 * when the game creates GPU contexts (if the process has CAP_SYS_NICE
-		 * or nice < 0).  Log that we're relying on this mechanism.
-		 */
-		gpu_sched_applied = 1;
-		nx_log(NX_INFO, "GPU sched: Intel — relying on nice=-10 for elevated GPU context priority");
-	}
+	sched.in.op = AMDGPU_SCHED_OP_PROCESS_PRIORITY_OVERRIDE;
+	sched.in.fd = fd;
+	sched.in.priority = priority;
+	return drmIoctl(master_fd, DRM_IOCTL_AMDGPU_SCHED, &sched);
 }
 
-void
-restore_gpu_sched_priority(pid_t pid)
+/* Our dup of game fd. */
+static int
+borrow_drm_fd(pid_t pid, const GpuInfo *gpu)
 {
-	if (!gpu_sched_applied)
+	int num = find_process_drm_fd(pid, gpu), pidfd, fd;
+
+	if (num < 0)
+		return -1;
+	pidfd = (int)syscall(__NR_pidfd_open, pid, 0);
+	if (pidfd < 0)
+		return -1;
+	fd = (int)syscall(__NR_pidfd_getfd, pidfd, num, 0);
+	close(pidfd);
+	return fd;
+}
+
+/* VERY_HIGH wins eviction; HIGH fallback. */
+static void
+apply_gpu_sched_priority(pid_t pid, int master_fd)
+{
+	const GpuInfo *gpu = game_gpu();
+	int fd = master_fd >= 0 && gpu && pid > 1 ? borrow_drm_fd(pid, gpu) : -1;
+
+	if (fd < 0)
 		return;
-
-	int gpu_idx = discrete_gpu_idx >= 0 ? discrete_gpu_idx : 0;
-	if (gpu_idx < detected_gpu_count) {
-		GpuInfo *gpu = &detected_gpus[gpu_idx];
-
-		if (gpu->vendor == GPU_VENDOR_AMD && gpu_sched_local_fd >= 0) {
-			int drm_master_fd = nx_renderer_get_drm_fd(drw);
-			if (drm_master_fd >= 0) {
-				union drm_amdgpu_sched sched = {0};
-				sched.in.op = AMDGPU_SCHED_OP_PROCESS_PRIORITY_OVERRIDE;
-				sched.in.fd = gpu_sched_local_fd;
-				sched.in.priority = AMDGPU_CTX_PRIORITY_NORMAL;
-				drmIoctl(drm_master_fd, DRM_IOCTL_AMDGPU_SCHED, &sched);
-			}
-			close(gpu_sched_local_fd);
-			gpu_sched_local_fd = -1;
-			nx_log(NX_INFO, "GPU sched: AMD process priority → NORMAL for PID %d", pid);
-		}
+	if (sched_override(master_fd, fd, AMDGPU_CTX_PRIORITY_VERY_HIGH) < 0 &&
+	    sched_override(master_fd, fd, AMDGPU_CTX_PRIORITY_HIGH) < 0) {
+		nx_log(NX_INFO, "GPU sched: AMDGPU_SCHED failed: %s", strerror(errno));
+		close(fd);
+		return;
 	}
+	gpu_sched_local_fd = fd;
+	gpu_sched_master_fd = master_fd;
+	nx_log(NX_INFO, "GPU sched: raised AMD queue priority for PID %d", pid);
+}
 
-	gpu_sched_applied = 0;
+static void
+restore_gpu_sched_priority(void)
+{
+	if (gpu_sched_local_fd < 0)
+		return;
+	sched_override(gpu_sched_master_fd, gpu_sched_local_fd, AMDGPU_CTX_PRIORITY_NORMAL);
+	close(gpu_sched_local_fd);
+	gpu_sched_local_fd = -1;
 }
 
 /*
@@ -2230,32 +1664,83 @@ static pthread_t gm_bg_thread;
 static pthread_mutex_t gm_bg_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t gm_bg_cond = PTHREAD_COND_INITIALIZER;
 static int gm_bg_alive;
-static int gm_bg_desired_ultra;
-static int gm_bg_applied_ultra;
-static pid_t gm_bg_pid;
 static int gm_bg_wake;
+static int gm_bg_desired_ultra;     /* posted, under gm_bg_mutex */
+static pid_t gm_bg_pid;
+static int gm_bg_master_fd = -1;
+static int gm_bg_applied_ultra;     /* worker-owned */
+static pid_t gm_bg_applied_pid;
 
-/* Full ultra-mode teardown.  Called from the worker's exit branch and
- * from gm_bg_cleanup() on compositor shutdown — without the latter,
- * IRQ affinity, I/O scheduler, THP, swappiness, sched tuning and GPU
- * clock locks would persist system-wide until reboot. */
+/* Game boosts come first. */
+static void
+boost_game(pid_t pid, int master_fd)
+{
+	if (pid <= 1)
+		return;
+	apply_game_priority(pid);
+	apply_cpu_affinity(pid);
+	apply_gpu_sched_priority(pid, master_fd);
+}
+
+static void
+unboost_game(pid_t pid)
+{
+	restore_gpu_sched_priority();
+	if (pid <= 1)
+		return;
+	restore_cpu_affinity(pid);
+	restore_game_priority(pid);
+}
+
+static void
+gm_ultra_enter(pid_t pid, int master_fd)
+{
+	nx_log(NX_INFO, "gm-bg: entering ultra (pid=%d)", pid);
+	boost_game(pid, master_fd);
+	gametune_start();
+	apply_raw_input();
+	freeze_background_processes();
+	if (pid > 1)
+		lower_competing_processes(pid);
+	nx_log(NX_INFO, "gm-bg: ultra enter complete");
+}
+
+/* Teardown, also at compositor exit. */
 static void
 gm_ultra_exit(pid_t pid)
 {
 	nx_log(NX_INFO, "gm-bg: exiting ultra (pid=%d)", pid);
 	restore_competing_processes();
-	restore_gpu_power_state();
 	restore_raw_input();
-	if (pid > 1) {
-		restore_cpu_affinity(pid);
-		restore_gpu_sched_priority(pid);
-		restore_game_priority(pid);
-	}
+	unboost_game(pid);
 	gametune_stop();
 	unfreeze_background_processes();
-	restore_power_profile();
-	fan_boost_deactivate();
 	nx_log(NX_INFO, "gm-bg: ultra exit complete");
+}
+
+/* New game while ultra stays. */
+static void
+gm_ultra_retarget(pid_t pid, int master_fd)
+{
+	nx_log(NX_INFO, "gm-bg: ultra moves from pid %d to %d", gm_bg_applied_pid, pid);
+	restore_competing_processes();
+	unboost_game(gm_bg_applied_pid);
+	boost_game(pid, master_fd);
+	if (pid > 1)
+		lower_competing_processes(pid);
+}
+
+static void
+gm_bg_apply(int want, pid_t pid, int master_fd)
+{
+	if (want && !gm_bg_applied_ultra)
+		gm_ultra_enter(pid, master_fd);
+	else if (want && pid != gm_bg_applied_pid)
+		gm_ultra_retarget(pid, master_fd);
+	else if (!want && gm_bg_applied_ultra)
+		gm_ultra_exit(gm_bg_applied_pid);
+	gm_bg_applied_ultra = want;
+	gm_bg_applied_pid = want ? pid : 0;
 }
 
 static void *
@@ -2264,46 +1749,21 @@ gm_bg_worker_func(void *arg)
 	(void)arg;
 	pthread_mutex_lock(&gm_bg_mutex);
 	while (gm_bg_alive) {
+		int want, master_fd;
+		pid_t pid;
+
 		while (!gm_bg_wake && gm_bg_alive)
 			pthread_cond_wait(&gm_bg_cond, &gm_bg_mutex);
 		if (!gm_bg_alive)
 			break;
-
 		gm_bg_wake = 0;
-		int want = gm_bg_desired_ultra;
-		int have = gm_bg_applied_ultra;
-		pid_t pid = gm_bg_pid;
+		want = gm_bg_desired_ultra;
+		pid = gm_bg_pid;
+		master_fd = gm_bg_master_fd;
 		pthread_mutex_unlock(&gm_bg_mutex);
-
-		if (want && !have) {
-			/* Entering ultra — heavy system tuning */
-			nx_log(NX_INFO, "gm-bg: entering ultra (pid=%d)", pid);
-			fan_boost_activate();
-			apply_power_profile_performance();
-			freeze_background_processes();
-			/* Root-only knobs (C-state QoS, swappiness, memory
-			 * compaction) go through nixly-gametune.service; the
-			 * rest — THP, watchdog, split_lock, io scheduler,
-			 * governor, IRQ affinity — is static system config. */
-			gametune_start();
-			apply_raw_input();
-			apply_gpu_power_state();
-			if (pid > 1) {
-				apply_game_priority(pid);
-				apply_cpu_affinity(pid);
-				apply_gpu_sched_priority(pid);
-				lower_competing_processes(pid);
-			}
-			nx_log(NX_INFO, "gm-bg: ultra enter complete");
-		} else if (!want && have) {
-			gm_ultra_exit(pid);
-		}
-
+		gm_bg_apply(want, pid, master_fd);
 		pthread_mutex_lock(&gm_bg_mutex);
-		gm_bg_applied_ultra = want;
-
-		/* Re-check: desired may have changed while we worked */
-		if (gm_bg_desired_ultra != want)
+		if (gm_bg_desired_ultra != want || gm_bg_pid != pid)
 			gm_bg_wake = 1;
 	}
 	pthread_mutex_unlock(&gm_bg_mutex);
@@ -2313,9 +1773,12 @@ gm_bg_worker_func(void *arg)
 static void
 gm_bg_post(int ultra, pid_t pid)
 {
+	int master_fd = ultra ? game_gpu_master_fd() : -1;
+
 	pthread_mutex_lock(&gm_bg_mutex);
 	gm_bg_desired_ultra = ultra;
 	gm_bg_pid = pid;
+	gm_bg_master_fd = master_fd;
 	gm_bg_wake = 1;
 	pthread_cond_signal(&gm_bg_cond);
 	pthread_mutex_unlock(&gm_bg_mutex);
@@ -2337,11 +1800,8 @@ gm_bg_cleanup(void)
 	pthread_cond_signal(&gm_bg_cond);
 	pthread_mutex_unlock(&gm_bg_mutex);
 	pthread_join(gm_bg_thread, NULL);
-
-	/* Full system-tuning restore on compositor exit — the worker has
-	 * been joined, so this runs race-free. */
 	if (gm_bg_applied_ultra)
-		gm_ultra_exit(gm_bg_pid);
+		gm_ultra_exit(gm_bg_applied_pid);
 }
 
 static struct wl_event_source *game_mode_debounce_timer;
@@ -2367,12 +1827,30 @@ schedule_game_mode_update(void)
 		wl_event_source_timer_update(game_mode_debounce_timer, 50);
 }
 
+/* Running game beats other fullscreen. */
+static Client *
+fullscreen_focus_client(void)
+{
+	Client *c, *first = NULL;
+
+	wl_list_for_each(c, &clients, link) {
+		if (!c->isfullscreen || !client_surface(c)->mapped || !VISIBLEON(c, c->mon) ||
+		    (c->fs_ws && c->fs_ws != c->mon->active_ws))
+			continue;
+		if (c == game_mode_client ||
+		    (!is_steam_client(c) && !is_steam_popup(c) && looks_like_game(c)))
+			return c;
+		first = first ? first : c;
+	}
+	return first;
+}
+
 void
 update_game_mode(void)
 {
 	int was_active = game_mode_active;
 	int was_ultra = game_mode_ultra;
-	Client *c = get_fullscreen_client();
+	Client *c = fullscreen_focus_client();
 	Monitor *m;
 	int is_game = 0;
 	int retro_menu = 0;

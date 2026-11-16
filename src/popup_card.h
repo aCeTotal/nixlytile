@@ -19,14 +19,16 @@
 #define CARD_MAX_FILLS 6
 #define CARD_MAX_BTN   6
 
-/* Accent palette (RGBA, non-premultiplied float) */
-extern const float card_col_fg[4];       /* primary text */
-extern const float card_col_dim[4];      /* labels / secondary */
-extern const float card_col_faint[4];    /* section caps labels */
-extern const float card_col_green[4];
-extern const float card_col_yellow[4];
-extern const float card_col_red[4];
-extern const float card_col_blue[4];
+/* Card palette, recoloured by theme.c. */
+extern float card_col_bg[4];
+extern float card_col_edge[4];
+extern float card_col_fg[4];
+extern float card_col_dim[4];
+extern float card_col_faint[4];
+extern float card_col_green[4];
+extern float card_col_yellow[4];
+extern float card_col_red[4];
+extern float card_col_blue[4];
 
 typedef struct CardHit {
 	int x, y, w, h;
@@ -229,8 +231,9 @@ int card_finish_sig(Card *c, CardResult *out, uint32_t *sig);
 
 typedef struct PopupView {
 	struct nx_scene_tree *content;      /* child of the popup tree */
-	struct nx_scene_buffer *shadow;
+	struct nx_scene_tree *shadow;
 	struct nx_scene_buffer *card;
+	struct nx_scene_buffer *overlay;    /* live meter/spectrum frame */
 	struct nx_scene_buffer *fills[CARD_MAX_FILLS];
 	int fill_w[CARD_MAX_FILLS];      /* target (resting) fill width */
 	int fill_h[CARD_MAX_FILLS];
@@ -249,8 +252,9 @@ void popup_view_apply(PopupView *v, struct nx_scene_tree *tree,
 		CardResult *res);
 /* Start the show animation (call on visibility 0 -> 1). */
 void popup_view_show(PopupView *v);
-/* Stop animating + reset (call when the popup is hidden). */
+/* Stop animating, free all nodes. */
 void popup_view_hide(PopupView *v);
+struct nx_scene_buffer *popup_view_overlay(PopupView *v, int x, int y);
 /* Ease fill i to `frac` of its track width (slider feedback). */
 void popup_view_set_fill_frac(PopupView *v, int i, double frac);
 /* Move fill i to `frac` immediately — pointer drags, where the fill
@@ -270,6 +274,9 @@ struct nx_buffer *card_panel_buffer(int w, int h);
  * radius = the card's corner radius (<= 0 for the default card radius). */
 #define CARD_SHADOW_MARGIN 24
 struct nx_buffer *card_shadow_buffer(int w, int h, double radius);
+/* Nine-slice card shadow subtree. */
+struct nx_scene_tree *card_shadow_create(struct nx_scene_tree *parent,
+		int w, int h);
 struct nx_buffer *card_meter_buffer(int w, int h, const float accent[4],
 		const float *hist, int nhist, int head, double phase);
 /* Persistent ping-pong raster pair for the per-frame meter overlay:

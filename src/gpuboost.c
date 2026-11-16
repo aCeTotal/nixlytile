@@ -119,6 +119,11 @@ release_cb(void *data)
 	uint64_t idle = get_time_ns() - last_kick_ns;
 
 	(void)data;
+	/* Keep game tuning's clock floor. */
+	if (game_mode_ultra) {
+		boosted = 0;
+		return 0;
+	}
 	if (idle < GPUBOOST_HOLD_NS) {
 		wl_event_source_timer_update(release_timer,
 			(int)((GPUBOOST_HOLD_NS - idle) / 1000000ULL) + 1);
@@ -189,7 +194,7 @@ gpuboost_init(void)
 void
 gpuboost_kick(uint64_t now_ns)
 {
-	if (!release_timer)
+	if (!release_timer || game_mode_ultra)
 		return;
 	last_kick_ns = now_ns;
 	if (boosted)

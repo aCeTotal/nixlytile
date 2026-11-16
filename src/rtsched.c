@@ -19,6 +19,8 @@ compositor_rt_on(void)
 		return;
 	if (sched_setscheduler(0, SCHED_RR | SCHED_RESET_ON_FORK, &sp) != 0) {
 		nx_log(NX_INFO, "Compositor RT priority failed: %s", strerror(errno));
+		sp.sched_priority = 0;
+		sched_setscheduler(0, SCHED_OTHER | SCHED_RESET_ON_FORK, &sp);
 		return;
 	}
 	compositor_rt_applied = 1;

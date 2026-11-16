@@ -14,14 +14,10 @@
 #define METER_HIST     128
 #define METER_TICK_MS  16   /* draw rate (~60 fps) */
 #define METER_PUSH_MS  33   /* history sample period */
-#define LIGHT_MODE_HIT_BASE 200
 
 /* ── live audio meter overlay (volume=0 / mic=1) ─────────────────── */
 
 typedef struct {
-	struct nx_scene_buffer *node;   /* child of view content; reset on
-	                                  * every re-render (children are
-	                                  * destroyed by popup_view_apply) */
 	int x, y, w, h;                  /* rect from CardResult */
 	float hist[METER_HIST];
 	int head;
@@ -52,34 +48,25 @@ meter_phase(uint64_t now)
 	return ph > 2.0 ? 2.0 : ph;
 }
 
-/* (Re)create the overlay node and swap in a freshly drawn frame. Safe
- * to call right after a card re-render so the meter never drops out for
- * a frame. */
+/* Redraw the live meter. */
 static void
 meter_overlay_draw(InfoPopup *p, int is_mic, double phase)
 {
 	MeterUI *mu = &meter_ui[is_mic];
+	struct nx_scene_buffer *ov;
 	struct nx_buffer *buf;
 	int muted = is_mic ? mic_muted : volume_muted;
 
-	/* Wait out the card show animation: extra children don't take part
-	 * in its fade, so the meter joins once the card has settled. */
-	if (mu->w <= 0 || !p->view.content || p->view.animating)
+	if (mu->w <= 0 || !(ov = popup_view_overlay(&p->view, mu->x, mu->y)))
 		return;
-	if (!mu->node) {
-		mu->node = nx_scene_buffer_create(p->view.content, NULL);
-		if (mu->node)
-			nx_scene_node_set_position(&mu->node->node,
-					mu->x, mu->y);
-	}
 	/* Persistent ping-pong raster: no per-frame alloc/memcpy, and the
 	 * returned buffer stays owned by mu->raster — no drop here. */
 	buf = card_meter_raster(&mu->raster, mu->w, mu->h,
 			muted == 1 ? card_col_red :
 			(is_mic ? card_col_green : card_col_blue),
 			mu->hist, METER_HIST, mu->head, phase);
-	if (mu->node && buf)
-		nx_scene_buffer_set_buffer(mu->node, buf);
+	if (buf)
+		nx_scene_buffer_set_buffer(ov, buf);
 }
 
 static void
@@ -196,7 +183,7 @@ slider_commit(void)
 		refreshstatusmic();
 	} else if (sdrag.active == 3) {
 		set_backlight_percent(pct);
-		light_mode_set_manual(pct);
+		status_conf_update("brightness", pct);
 		refreshstatuslight();
 	}
 }
@@ -248,7 +235,6 @@ meter_tick(void *data)
 		audio_meter_stop();
 		memset(meter_ui[0].hist, 0, sizeof(meter_ui[0].hist));
 		memset(meter_ui[1].hist, 0, sizeof(meter_ui[1].hist));
-		meter_ui[0].node = meter_ui[1].node = NULL;
 		card_meter_raster_finish(&meter_ui[0].raster);
 		card_meter_raster_finish(&meter_ui[1].raster);
 		meter_pend = 0.0f;
@@ -519,9 +505,7 @@ render_audio_popup(Monitor *m, InfoPopup *p, int is_mic)
 	p->width = p->view.w;
 	p->height = p->view.h;
 
-	/* apply destroyed the previous overlay with the old card content;
-	 * redraw right away so the meter never blinks out for a frame */
-	meter_ui[is_mic].node = NULL;
+	/* Redraw the overlay apply destroyed. */
 	meter_ui[is_mic].x = res.meter_x;
 	meter_ui[is_mic].y = res.meter_y;
 	meter_ui[is_mic].w = res.meter_w;
@@ -613,19 +597,7 @@ render_light_popup(Monitor *m)
 				snprintf(dev, sizeof(dev), "%s", slash + 1);
 		}
 	}
-	card_kv2(card, "Device", dev[0] ? dev : "--", NULL, "Ambient",
-			light_ambient_luma < 0 ? "--" :
-			light_ambient_luma <= 25 ? "Dark" :
-			light_ambient_luma <= 85 ? "Dim" :
-			light_ambient_luma <= 150 ? "Normal" : "Bright", NULL);
-
-	{
-		static const char *labels[2] = { "Auto", "Manual" };
-
-		card_section(card, "MODE");
-		card_buttons(card, labels, NULL, 2, light_auto_mode ? 0 : 1,
-				p->btn_hover, LIGHT_MODE_HIT_BASE);
-	}
+	card_kv2(card, "Device", dev[0] ? dev : "--", NULL, NULL, NULL, NULL);
 
 	{
 		int cf = card_finish_sig(card, &res, &p->view.render_sig);
@@ -660,7 +632,7 @@ info_popup_hover(Monitor *m, StatusModule *mod, InfoPopup *p,
 	int popup_x;
 	uint64_t now = monotonic_msec();
 
-	if (!m || !m->showbar || !mod->tree || !p->tree || mod->width <= 0) {
+	if (!m || !m->showbar || !mod->tree || !p->tree || !mod->placed) {
 		if (p->tree && p->visible) {
 			nx_scene_node_set_enabled(&p->tree->node, 0);
 			p->visible = 0;
@@ -693,8 +665,7 @@ info_popup_hover(Monitor *m, StatusModule *mod, InfoPopup *p,
 			popup_x = 0;
 	}
 
-	if (lx >= mod->x && lx < mod->x + mod->width &&
-			ly >= 0 && ly < m->statusbar.area.height)
+	if (bar_module_hit(mod, lx) && ly >= 0 && ly < m->statusbar.area.height)
 		inside = 1;
 	else if (p->visible && p->width > 0 && p->height > 0 &&
 			lx >= popup_x && lx < popup_x + p->width &&
@@ -997,33 +968,6 @@ light_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 		return 1;
 	}
 
-	/* Auto/Manual mode buttons */
-	for (int i = 0; i < p->nhits; i++) {
-		CardHit *h = &p->hits[i];
-
-		if (h->id < LIGHT_MODE_HIT_BASE || h->id > LIGHT_MODE_HIT_BASE + 1)
-			continue;
-		if (rel_x < h->x || rel_x >= h->x + h->w ||
-				rel_y < h->y || rel_y >= h->y + h->h)
-			continue;
-		if (h->id == LIGHT_MODE_HIT_BASE) {
-			light_mode_set_auto();
-		} else {
-			/* restore the remembered manual level; none stored →
-			 * lock the current one */
-			double v = light_manual_value >= 0.0 ?
-				light_manual_value : backlight_percent();
-
-			light_mode_set_manual(v);
-			if (v >= 0.0 && set_backlight_percent(v) == 0) {
-				light_last_percent = v;
-				light_cached_percent = v;
-				refreshstatuslight();
-			}
-		}
-		p->last_render_ms = 0;
-		return 1;
-	}
 	/* swallow clicks on the card body */
 	return 1;
 }

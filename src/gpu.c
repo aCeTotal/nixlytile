@@ -96,6 +96,38 @@ gpu_renderer_create(struct nx_backend *b)
 	return r;
 }
 
+#define INTEL_IGPU_SLOT "0000:00:02.0"
+#define AMD_APU_BRIDGE "/0000:00:08.1/"
+
+/* Zen APUs sit behind 00:08.1. */
+static int
+amd_is_integrated(int card_num, const char *slot)
+{
+	char path[64], real[PATH_MAX];
+
+	if (strncmp(slot, "0000:00:", 8) == 0)
+		return 1;
+	snprintf(path, sizeof(path), "/sys/class/drm/card%d/device", card_num);
+	return realpath(path, real) && strstr(real, AMD_APU_BRIDGE);
+}
+
+/* GPU vendor driving this output. */
+GpuVendor
+output_gpu_vendor(struct nx_output *o)
+{
+	struct stat have, want;
+	int fd = nx_backend_get_drm_fd(o->backend);
+	int i;
+
+	if (fd < 0 || fstat(fd, &have) < 0)
+		return GPU_VENDOR_UNKNOWN;
+	for (i = 0; i < detected_gpu_count; i++) {
+		if (stat(detected_gpus[i].card_path, &want) == 0 && want.st_rdev == have.st_rdev)
+			return detected_gpus[i].vendor;
+	}
+	return GPU_VENDOR_UNKNOWN;
+}
+
 void
 detect_gpus(void)
 {
@@ -218,34 +250,10 @@ detect_gpus(void)
 			gpu->is_discrete = 1;
 		} else if (strcmp(gpu->driver, "amdgpu") == 0 || strcmp(gpu->driver, "radeon") == 0) {
 			gpu->vendor = GPU_VENDOR_AMD;
-			/* Check if integrated (APU) or discrete - look at device class or boot_vga */
-			snprintf(path, sizeof(path), "/sys/class/drm/card%d/device/boot_vga", card_num);
-			f = fopen(path, "r");
-			if (f) {
-				int boot_vga = 0;
-				if (fscanf(f, "%d", &boot_vga) == 1) {
-					/* boot_vga=1 typically means primary/integrated on laptops */
-					/* But for AMD, we also check if another GPU exists */
-					gpu->is_discrete = !boot_vga;
-				}
-				fclose(f);
-			} else {
-				/* If no boot_vga, assume discrete */
-				gpu->is_discrete = 1;
-			}
+			gpu->is_discrete = !amd_is_integrated(card_num, gpu->pci_slot);
 		} else if (strcmp(gpu->driver, "i915") == 0 || strcmp(gpu->driver, "xe") == 0) {
 			gpu->vendor = GPU_VENDOR_INTEL;
-			/* Check boot_vga to distinguish Intel iGPU (HD 630, UHD 770)
-			 * from discrete Intel Arc (A770, A750, etc.).
-			 * boot_vga=1 → primary/integrated, boot_vga=0 → discrete */
-			snprintf(path, sizeof(path), "/sys/class/drm/card%d/device/boot_vga", card_num);
-			f = fopen(path, "r");
-			if (f) {
-				int boot_vga = 0;
-				if (fscanf(f, "%d", &boot_vga) == 1)
-					gpu->is_discrete = !boot_vga;
-				fclose(f);
-			}
+			gpu->is_discrete = strcmp(gpu->pci_slot, INTEL_IGPU_SLOT) != 0;
 		} else {
 			gpu->vendor = GPU_VENDOR_UNKNOWN;
 			gpu->is_discrete = 0;
@@ -300,21 +308,8 @@ detect_gpus(void)
 			    (gpu->vendor == GPU_VENDOR_NVIDIA && detected_gpus[discrete_gpu_idx].vendor != GPU_VENDOR_NVIDIA)) {
 				discrete_gpu_idx = i;
 			}
-		} else {
-			if (integrated_gpu_idx < 0)
-				integrated_gpu_idx = i;
-		}
-	}
-
-	/* If AMD GPU was marked as not-discrete but no other integrated exists, it might be wrong */
-	if (discrete_gpu_idx < 0 && detected_gpu_count > 1) {
-		/* Multiple GPUs but none marked discrete - pick non-Intel as discrete */
-		for (i = 0; i < detected_gpu_count; i++) {
-			if (detected_gpus[i].vendor != GPU_VENDOR_INTEL) {
-				discrete_gpu_idx = i;
-				detected_gpus[i].is_discrete = 1;
-				break;
-			}
+		} else if (integrated_gpu_idx < 0 && gpu->vendor != GPU_VENDOR_UNKNOWN) {
+			integrated_gpu_idx = i;
 		}
 	}
 
@@ -821,278 +816,20 @@ dgpu_power_watchdog_start(void)
 	}
 }
 
-int
-should_use_dgpu(const char *cmd)
-{
-	const char *base;
-	int i;
-
-	if (!cmd)
-		return 0;
-
-	/* Get basename of command */
-	base = strrchr(cmd, '/');
-	base = base ? base + 1 : cmd;
-
-	for (i = 0; dgpu_programs[i]; i++) {
-		if (strcasecmp(base, dgpu_programs[i]) == 0)
-			return 1;
-		/* Also check if command contains the program name (for wrappers) */
-		if (strcasestr(cmd, dgpu_programs[i]))
-			return 1;
-	}
-	return 0;
-}
-
-void
-set_dgpu_env(void)
-{
-	GpuInfo *dgpu;
-
-	/* No discrete GPU detected - nothing to do */
-	if (discrete_gpu_idx < 0 || discrete_gpu_idx >= detected_gpu_count)
-		return;
-
-	dgpu = &detected_gpus[discrete_gpu_idx];
-
-	switch (dgpu->vendor) {
-	case GPU_VENDOR_NVIDIA:
-		/* GLX vendor — always needed so GLX uses NVIDIA */
-		setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 1);
-		setenv("__VK_LAYER_NV_optimus", "NVIDIA_only", 1);
-
-		/* GBM backend — helps libgbm find NVIDIA's implementation */
-		setenv("GBM_BACKEND", "nvidia-drm", 0);
-
-		/* PRIME render offload — ONLY for hybrid (iGPU + dGPU) systems.
-		 * On NVIDIA-only, these cause Xwayland EGL init to fail. */
-		if (integrated_gpu_idx >= 0) {
-			setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 1);
-			setenv("__NV_PRIME_RENDER_OFFLOAD_PROVIDER", "NVIDIA-G0", 1);
-			if (dgpu->pci_slot_underscore[0])
-				setenv("DRI_PRIME", dgpu->pci_slot_underscore, 1);
-			else
-				setenv("DRI_PRIME", "1", 1);
-
-			/* Force Qt/GTK apps through Xwayland when PRIME offload
-			 * is active.  Qt6's wayland-egl plugin cannot create a
-			 * valid EGLConfig with the NVIDIA PRIME env vars, causing
-			 * a SIGSEGV in QEGLPlatformContext (FreeCAD, KiCad, etc.).
-			 * Games don't use QT_QPA_PLATFORM, so this is harmless
-			 * for them — they go via Xwayland/gamescope anyway. */
-			setenv("QT_QPA_PLATFORM", "xcb", 1);
-			setenv("GDK_BACKEND", "x11", 1);
-
-			nx_log(NX_INFO, "NVIDIA: hybrid mode (iGPU + dGPU), PRIME offload enabled");
-		} else {
-			nx_log(NX_INFO, "NVIDIA: single-GPU mode, PRIME offload skipped");
-		}
-
-		/* DRI_PRIME for nouveau (doesn't use PRIME offload vars) */
-		if (strcmp(dgpu->driver, "nouveau") == 0 && integrated_gpu_idx >= 0) {
-			if (dgpu->pci_slot_underscore[0])
-				setenv("DRI_PRIME", dgpu->pci_slot_underscore, 1);
-			else
-				setenv("DRI_PRIME", "1", 1);
-		}
-
-		/*
-		 * NVIDIA frame pacing & performance environment variables.
-		 * These are critical for optimal game performance under Wayland.
-		 */
-
-		/* Limit pre-rendered frames to 1 — minimizes input latency.
-		 * The compositor handles vsync/frame pacing, so deep queuing
-		 * only adds lag without benefit. */
-		setenv("__GL_MaxFramesAllowed", "1", 0);
-
-		/* Disable driver-side vsync — the Wayland compositor handles
-		 * presentation timing. Double-vsync causes input lag. */
-		setenv("__GL_SYNC_TO_VBLANK", "0", 0);
-
-		/* Allow G-Sync/VRR — the compositor enables adaptive sync
-		 * for fullscreen games automatically. */
-		setenv("__GL_GSYNC_ALLOWED", "1", 0);
-		setenv("__GL_VRR_ALLOWED", "1", 0);
-
-		/* Don't yield CPU while waiting for GPU — reduces latency
-		 * at the cost of slightly higher CPU usage. */
-		setenv("__GL_YIELD", "NOTHING", 0);
-
-		/* Enable threaded OpenGL optimizations — offloads GL work
-		 * to a separate thread for better CPU utilization. */
-		setenv("__GL_THREADED_OPTIMIZATIONS", "1", 0);
-
-		/* Persistent shader cache — avoid re-compilation stutters.
-		 * Don't clean up old shaders to keep cache warm. */
-		setenv("__GL_SHADER_DISK_CACHE", "1", 0);
-		setenv("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP", "1", 0);
-
-		/* Use direct rendering for lowest latency (skip composition queue) */
-		setenv("__GL_ALLOW_UNOFFICIAL_PROTOCOL", "1", 0);
-
-		/* Xwayland / EGL session type — ensures X11 and Wayland clients
-		 * correctly identify the session as Wayland. */
-		setenv("XDG_SESSION_TYPE", "wayland", 0);
-
-		/* VA-API hardware video decode via Nvidia */
-		setenv("LIBVA_DRIVER_NAME", "nvidia", 0);
-		setenv("NVD_BACKEND", "direct", 0);
-		setenv("VDPAU_DRIVER", "nvidia", 0);
-
-		/* Ensure direct rendering (not indirect/software) */
-		setenv("LIBGL_ALWAYS_INDIRECT", "0", 0);
-
-		/* Nvidia experimental performance strategy */
-		setenv("__GL_ExperimentalPerfStrategy", "1", 0);
-
-		/* Allow FXAA if app requests it */
-		setenv("__GL_ALLOW_FXAA_USAGE", "1", 0);
-
-		/* Nvidia image sharpening — let apps control this */
-		setenv("__GL_SHARPEN_ENABLE", "0", 0);
-		setenv("__GL_SHARPEN_VALUE", "0", 0);
-		setenv("__GL_SHARPEN_IGNORE_FILM_GRAIN", "0", 0);
-
-		/* Version-based diagnostics */
-		if (dgpu->driver_version > 0 && dgpu->driver_version < 570) {
-			nx_log(NX_INFO,
-				"NVIDIA: driver %d < 570 — consider adding 'nvidia-drm.fbdev=1' "
-				"to kernel parameters for better scanout performance.",
-				dgpu->driver_version);
-		}
-		if (dgpu->driver_version >= 565) {
-			nx_log(NX_INFO,
-				"NVIDIA: driver %d — GLX_EXT_buffer_age re-enabled (good for compositors)",
-				dgpu->driver_version);
-		}
-
-		nx_log(NX_INFO,
-			"NVIDIA: compositor env set — GBM_BACKEND=nvidia-drm, "
-			"__GLX_VENDOR_LIBRARY_NAME=nvidia (CPU cursor buffer for HW cursor)"
-			"%s",
-			dgpu->driver_version > 0 && dgpu->driver_version < 555
-				? ", NIXLY_DRM_NO_MODIFIERS=1 (old driver)" : "");
-
-		break;
-
-	case GPU_VENDOR_AMD:
-		/* DRI_PRIME with specific PCI device for AMD */
-		if (dgpu->pci_slot_underscore[0])
-			setenv("DRI_PRIME", dgpu->pci_slot_underscore, 1);
-		else
-			setenv("DRI_PRIME", "1", 1);
-		/* AMD Vulkan driver selection */
-		setenv("AMD_VULKAN_ICD", "RADV", 1);
-		break;
-
-	case GPU_VENDOR_INTEL:
-	case GPU_VENDOR_UNKNOWN:
-	default:
-		/* Generic DRI_PRIME for other cases */
-		if (dgpu->pci_slot_underscore[0])
-			setenv("DRI_PRIME", dgpu->pci_slot_underscore, 1);
-		else
-			setenv("DRI_PRIME", "1", 1);
-		break;
-	}
-
-	/* Vulkan device selection - prefer discrete GPU.
-	 *
-	 * Multiple layers of selection to guarantee dGPU usage:
-	 *
-	 * 1) VK_LOADER_DRIVERS_SELECT — modern Vulkan loader (1.3.234+)
-	 *    filters ICD files by filename glob.
-	 *
-	 * 2) MESA_VK_DEVICE_SELECT — Mesa's VkLayer_MESA_device_select
-	 *    implicit layer, selects device by PCI vendor:device ID.
-	 *    Without this, the layer defaults to boot_vga (= iGPU).
-	 *
-	 * 3) DXVK_FILTER_DEVICE_NAME — DXVK/Proton device selection by
-	 *    name substring.  Guarantees Proton games use the dGPU.
-	 */
-	switch (dgpu->vendor) {
-	case GPU_VENDOR_NVIDIA:
-		setenv("VK_LOADER_DRIVERS_SELECT", "nvidia*", 1);
-		/* PCI vendor 0x10de = NVIDIA */
-		setenv("MESA_VK_DEVICE_SELECT", "10de:", 1);
-		setenv("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", "1", 1);
-		setenv("DXVK_FILTER_DEVICE_NAME", "NVIDIA", 1);
-		/* Ensure Proton exposes NVIDIA GPU to games */
-		setenv("PROTON_HIDE_NVIDIA_GPU", "0", 1);
-		setenv("PROTON_ENABLE_NVAPI", "1", 1);
-		setenv("DXVK_ENABLE_NVAPI", "1", 1);
-
-		/* CUDA / NVENC / NVDEC routing — Blender, PyTorch, ffmpeg
-		 * with -hwaccel cuda, OBS NVENC, etc. PCI_BUS_ID order makes
-		 * device 0 deterministic on multi-GPU systems. */
-		setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID", 0);
-		setenv("CUDA_VISIBLE_DEVICES", "0", 0);
-		setenv("NVIDIA_VISIBLE_DEVICES", "all", 0);
-		setenv("NVIDIA_DRIVER_CAPABILITIES", "all", 0);
-		break;
-	case GPU_VENDOR_AMD:
-		setenv("VK_LOADER_DRIVERS_SELECT", "radeon*,amd*", 1);
-		/* PCI vendor 0x1002 = AMD */
-		setenv("MESA_VK_DEVICE_SELECT", "1002:", 1);
-		setenv("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", "1", 1);
-		setenv("DXVK_FILTER_DEVICE_NAME", "AMD", 1);
-
-		/* ROCm / HIP routing — Blender HIP backend, PyTorch ROCm,
-		 * llama.cpp HIP build, etc. Index 0 = first ROCm-capable
-		 * device, which the kernel orders dGPU before iGPU. */
-		setenv("HIP_VISIBLE_DEVICES", "0", 0);
-		setenv("ROCR_VISIBLE_DEVICES", "0", 0);
-		break;
-	default:
-		setenv("VK_LOADER_DRIVERS_SELECT", "nvidia*,radeon*,amd*", 1);
-		break;
-	}
-}
-
 void
 set_steam_env(void)
 {
 	GpuInfo *dgpu;
 
-	/*
-	 * Steam runs inside a bwrap FHS sandbox.  set_dgpu_env() sets vars
-	 * that BREAK Steam's CEF/runtime in the sandbox:
-	 *   - GBM_BACKEND=nvidia-drm   → Steam runtime libgbm can't load it
-	 *   - __GLX_VENDOR_LIBRARY_NAME=nvidia → wrong libGLX in sandbox
-	 *   - LIBVA_DRIVER_NAME / VDPAU_DRIVER / NVD_BACKEND → media decode
-	 *   - QT_QPA_PLATFORM=xcb / GDK_BACKEND=x11 → not needed
-	 *
-	 * Goal: set ONLY vars that are inert for Steam UI but propagate to
-	 * Proton/Wine game children, so games run on the dGPU while Steam
-	 * itself starts cleanly.
-	 *
-	 * Safe vars below activate when *games* (not Steam UI) request them:
-	 *   - __NV_PRIME_RENDER_OFFLOAD: only triggers if app explicitly
-	 *     uses Nvidia GLX; Steam UI ignores it.
-	 *   - VK_LOADER_DRIVERS_SELECT / MESA_VK_DEVICE_SELECT: filter
-	 *     Vulkan ICDs/devices; Steam UI doesn't use Vulkan.
-	 *   - DXVK_* / PROTON_*: Proton/Wine-only; ignored by Steam.
-	 *   - DRI_PRIME: harmless on Nvidia proprietary (Mesa-only).
-	 */
-
-	/* Audio: ensure games use PipeWire */
+	/* Loader only: GLX/GBM/VA-API break CEF. */
 	setenv("SDL_AUDIODRIVER", "pipewire,pulseaudio,alsa", 0);
 	if (!getenv("XDG_RUNTIME_DIR")) {
 		char runtime_dir[256];
 		snprintf(runtime_dir, sizeof(runtime_dir), "/run/user/%d", getuid());
 		setenv("XDG_RUNTIME_DIR", runtime_dir, 1);
 	}
-	setenv("PULSE_LATENCY_MSEC", "60", 0);
 
-	/* Steam CEF/webhelper rescue flags — without these, the Chromium GPU
-	 * process inside Steam's bwrap FHS sandbox crashes on Nvidia (exit
-	 * code 1002) and after 9 retries Steam disables GPU AND sandbox in
-	 * Local State, then later sessions fail to load UI files at all
-	 * ("bIsLocalFileRequest || bIsLocalFileRequestAllowed" check).
-	 *
-	 * These vars do NOT touch GBM_BACKEND/GLX vendor/VA-API (kept
-	 * skipped above) — they only adjust Steam's internal CEF wiring. */
+	/* Keeps sandboxed CEF alive. */
 	setenv("STEAM_FORCE_DESKTOPUI_SCALING", "1", 1);
 	setenv("STEAM_RUNTIME_PREFER_HOST_LIBRARIES", "1", 1);
 	setenv("STEAM_DISABLE_GPU_BLOCKLIST", "1", 1);
@@ -1111,24 +848,19 @@ set_steam_env(void)
 
 	switch (dgpu->vendor) {
 	case GPU_VENDOR_NVIDIA:
-		/* PRIME offload — only kicks in for apps that explicitly
-		 * request Nvidia GLX. Steam UI uses default (iGPU) GLX. */
+		/* Offload where games want NVIDIA GLX. */
 		setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 1);
 		setenv("__NV_PRIME_RENDER_OFFLOAD_PROVIDER", "NVIDIA-G0", 1);
-		/* Vulkan device selection — Steam UI doesn't use Vulkan */
+		unsetenv("VK_DRIVER_FILES");
+		unsetenv("__EGL_VENDOR_LIBRARY_FILENAMES");
 		setenv("VK_LOADER_DRIVERS_SELECT", "nvidia*", 1);
-		setenv("MESA_VK_DEVICE_SELECT", "10de:", 1);
-		setenv("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", "1", 1);
 		setenv("DXVK_FILTER_DEVICE_NAME", "NVIDIA", 1);
-		/* Proton/DXVK — inert for Steam, used by games */
 		setenv("PROTON_HIDE_NVIDIA_GPU", "0", 1);
 		setenv("PROTON_ENABLE_NVAPI", "1", 1);
 		setenv("DXVK_ENABLE_NVAPI", "1", 1);
-		/* CUDA/NVENC routing for game children */
 		setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID", 0);
 		setenv("CUDA_VISIBLE_DEVICES", "0", 0);
-		/* CEF on Nvidia: ANGLE+Vulkan path is more stable than GLX
-		 * inside bwrap. Without this, GPU process aborts on init. */
+		/* Vulkan ANGLE keeps CEF alive. */
 		setenv("STEAM_CEF_GPU_ARGS",
 			"--use-angle=vulkan "
 			"--enable-features=Vulkan,UseSkiaRenderer", 1);
@@ -1140,9 +872,6 @@ set_steam_env(void)
 			setenv("DRI_PRIME", "1", 1);
 		setenv("AMD_VULKAN_ICD", "RADV", 1);
 		setenv("VK_LOADER_DRIVERS_SELECT", "radeon*,amd*", 1);
-		setenv("MESA_VK_DEVICE_SELECT", "1002:", 1);
-		setenv("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", "1", 1);
-		setenv("DXVK_FILTER_DEVICE_NAME", "AMD", 1);
 		setenv("HIP_VISIBLE_DEVICES", "0", 0);
 		setenv("ROCR_VISIBLE_DEVICES", "0", 0);
 		break;

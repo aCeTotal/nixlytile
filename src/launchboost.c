@@ -1,16 +1,9 @@
-/*
- * launchboost.c — full clocks for the first seconds of an app launch.
- * See launchboost.h.
- */
 #include <pthread.h>
 
 #include "nixlytile.h"
 #include "launchboost.h"
 
-/* Long enough to cover exec + dynamic linking + toolkit init + first
- * paint (measured: ~550ms for Thunar, ~180ms for Alacritty on AC), with
- * room for a cold binary.  Short enough that a mistimed kick costs a
- * negligible amount of battery. */
+/* Covers exec through first paint. */
 #define LB_BOOST_MS 2500
 
 static pthread_mutex_t lb_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -18,6 +11,7 @@ static pthread_cond_t  lb_cond = PTHREAD_COND_INITIALIZER;
 static uint64_t lb_deadline_ms;   /* 0 = no boost requested */
 static int lb_boosted;
 static int lb_running;
+static struct wl_listener lb_client_created;
 
 static void *
 lb_worker(void *arg)
@@ -42,9 +36,7 @@ lb_worker(void *arg)
 				pthread_mutex_lock(&lb_lock);
 			}
 			{
-				/* Re-check on wake: a kick that lands while we
-				 * sleep pushes lb_deadline_ms further out and
-				 * the loop simply sleeps again. */
+				/* Later kicks extend the sleep. */
 				struct timespec ts;
 				uint64_t wait = deadline - now;
 				clock_gettime(CLOCK_REALTIME, &ts);
@@ -59,10 +51,7 @@ lb_worker(void *arg)
 			continue;
 		}
 
-		/* Window elapsed — hand the cap back to whatever the power
-		 * state says it should be.  Only the cap: the governor, EPP,
-		 * turbo and platform profile were never touched, so there is
-		 * nothing else to undo and no way to fight powersave.c. */
+		/* Restore the power-state cap. */
 		lb_deadline_ms = 0;
 		if (lb_boosted) {
 			lb_boosted = 0;
@@ -73,6 +62,15 @@ lb_worker(void *arg)
 	}
 	pthread_mutex_unlock(&lb_lock);
 	return NULL;
+}
+
+/* Covers launches from terminals too. */
+static void
+client_created(struct wl_listener *listener, void *data)
+{
+	(void)listener;
+	(void)data;
+	launchboost_kick();
 }
 
 void
@@ -88,6 +86,8 @@ launchboost_init(void)
 	if (pthread_create(&tid, &attr, lb_worker, NULL) == 0)
 		lb_running = 1;
 	pthread_attr_destroy(&attr);
+	lb_client_created.notify = client_created;
+	wl_display_add_client_created_listener(dpy, &lb_client_created);
 }
 
 void
@@ -95,8 +95,7 @@ launchboost_kick(void)
 {
 	if (!lb_running)
 		return;
-	/* Nothing to release on wall power — the cap is already 1.0, and
-	 * writing it again would be ~20 pointless sysfs stores per launch. */
+	/* Uncapped already on wall power. */
 	if (powersave_clock_cap() >= 1.0)
 		return;
 

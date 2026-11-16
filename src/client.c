@@ -370,7 +370,10 @@ commitnotify(struct wl_listener *listener, void *data)
 		if (c->decoration)
 			requestdecorationmode(&c->set_decoration_mode, c->decoration);
 
-		/* Pre-configure at final tile size. */
+		/* Full states first: one paint. */
+		client_set_tiled(c, NX_EDGE_TOP | NX_EDGE_BOTTOM | NX_EDGE_LEFT | NX_EDGE_RIGHT);
+		if (!c->isfloating)
+			nx_xdg_toplevel_set_activated(c->surface.xdg->toplevel, true);
 		{
 			int w = 0, h = 0;
 

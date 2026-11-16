@@ -228,6 +228,7 @@ static const ActionEntry actions[] = {
 	{ "togglegamespan",               togglegamespan,               A_NONE },
 	{ "togglestatusbar",              togglestatusbar,              A_NONE },
 	{ "togglemultigpu",               togglemultigpu,               A_NONE },
+	{ "gazecalibrate",                gazecalibrate,                A_NONE },
 	{ "toggle-overview",              overview_toggle,              A_NONE },
 	{ "togglegaps",                   togglegaps,                   A_NONE },
 
@@ -751,7 +752,7 @@ hotapply_monitors(void)
 	wl_signal_emit_mutable(&output_layout->events.change, output_layout);
 }
 
-static void
+void
 hotapply_appearance(void)
 {
 	if (root_bg) {
@@ -765,7 +766,8 @@ hotapply_appearance(void)
 					c == focustop(selmon) ? focuscolor : bordercolor);
 		}
 	}
-	arrange(selmon);
+	if (selmon)
+		arrange(selmon);
 }
 
 /* Autostart: diff old vs new lists.  Identical commands keep running;
@@ -1108,6 +1110,8 @@ reload_config(void)
 	hotapply_libinput();
 	hotapply_monitors();
 	hotapply_appearance();
+	theme_apply();
+	wallpaper_sync();
 
 	fprintf(stderr, "nixlytile: reloaded %s\n", nixlytile_config_path);
 	return 1;

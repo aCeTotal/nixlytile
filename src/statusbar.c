@@ -7,239 +7,192 @@
 
 /* battery popup: hit ids 0-2 are the power-profile buttons */
 #define CHARGE_LIMIT_HIT_BASE 10
-/* Gap between SNI tray icons AND between the tray cluster's icon-only
- * modules (net/bluetooth/display) — keep the two in sync. */
-#define TRAY_ICON_GAP 14
+#define BATTERY_LOW_PCT 15.0
+#define BATTERY_WARN_PCT 30.0
+#define TRAY_ICON_RETRY_MS 10000
+#define POPUP_DROP 6
 
-void
-clearstatusmodule(StatusModule *module)
+static int battery_charging;
+
+static void
+clear_children(StatusModule *module)
 {
 	struct nx_scene_node *node, *tmp;
 
-	if (!module || !module->tree)
-		return;
-
-	wl_list_for_each_safe(node, tmp, &module->tree->children, link) {
-		if (module->bg && node == &module->bg->node)
-			continue;
+	wl_list_for_each_safe(node, tmp, &module->tree->children, link)
 		nx_scene_node_destroy(node);
-	}
+	module->content = NULL;
 }
 
-void
-updatemodulebg(StatusModule *module, int width, int height,
-		const float color[static 4])
+/* Icon tinted to match the text state. */
+static BarLabel
+plain_label(uint32_t icon, const char *text, const float *fg)
 {
-	struct nx_scene_node *node, *tmp;
-	int radius, y, inset_top, inset_bottom, inset, start, h, w;
-	struct nx_scene_rect *r;
-
-	if (!module || !module->tree || width <= 0 || height <= 0)
-		return;
-
-	if (!module->bg && !(module->bg = nx_scene_tree_create(module->tree)))
-		return;
-	nx_scene_node_set_enabled(&module->bg->node, 1);
-	nx_scene_node_set_position(&module->bg->node, 0, 0);
-
-	wl_list_for_each_safe(node, tmp, &module->bg->children, link)
-		nx_scene_node_destroy(node);
-
-	radius = MIN(4, MIN(width, height) / 4);
-
-	y = 0;
-	while (y < height) {
-		inset_top = radius ? MAX(0, radius - y) : 0;
-		inset_bottom = radius ? MAX(0, radius - ((height - 1) - y)) : 0;
-		inset = MAX(inset_top, inset_bottom);
-		start = y;
-
-		while (y < height) {
-			inset_top = radius ? MAX(0, radius - y) : 0;
-			inset_bottom = radius ? MAX(0, radius - ((height - 1) - y)) : 0;
-			if (MAX(inset_top, inset_bottom) != inset)
-				break;
-			y++;
-		}
-
-		h = y - start;
-		w = width - 2 * inset;
-		if (w < 0)
-			w = 0;
-
-		if (h > 0 && w > 0) {
-			r = nx_scene_rect_create(module->bg, w, h, color);
-			if (r)
-				nx_scene_node_set_position(&r->node, inset, start);
-		}
-	}
-
-	nx_scene_node_lower_to_bottom(&module->bg->node);
+	return (BarLabel){ icon, bar_icon_color(fg), text, fg };
 }
 
 void
 renderclock(StatusModule *module, int bar_height, const char *text)
 {
-	render_icon_label(module, bar_height, text,
-			ensure_clock_icon_buffer, &clock_icon_buf, &clock_icon_w, &clock_icon_h,
-			0, statusbar_icon_text_gap_clock, statusbar_fg);
+	BarLabel l = plain_label(GLYPH_CLOCK, text, statusbar_fg);
+
+	bar_module_draw(module, bar_height, &l);
 }
 
 void
-render_icon_label(StatusModule *module, int bar_height, const char *text,
-		int (*ensure_icon)(int target_h), struct nx_buffer **icon_buf,
-		int *icon_w, int *icon_h, int min_text_w, int icon_gap,
-		const float *text_color)
+rendercpu(StatusModule *module, int bar_height, const char *text)
 {
-	int padding = statusbar_module_padding;
-	int text_w = 0;
-	int x;
-	int iw = 0, ih = 0;
-	int target_h;
-	int scaled_target_h;
-	struct nx_scene_buffer *scene_buf;
-	const float *fg = text_color ? text_color : statusbar_fg;
+	BarLabel l = plain_label(GLYPH_CPU, text, statusbar_fg);
 
-	if (!module || !module->tree)
-		return;
-
-	/* statusbar.conf icons-only: keep the icon, drop the text (and the
-	 * reserved min text width some modules use against jitter). */
-	if (module->icons_only) {
-		text = NULL;
-		min_text_w = 0;
-	}
-
-	clearstatusmodule(module);
-
-	if (bar_height <= 0) {
-		module->width = 0;
-		return;
-	}
-
-	target_h = bar_height - 2 * padding;
-	if (target_h <= 0)
-		target_h = bar_height;
-	scaled_target_h = target_h;
-	if (status_icon_scale > 0.0) {
-		double scaled = (double)target_h * status_icon_scale;
-		if (scaled > (double)INT_MAX)
-			scaled = (double)INT_MAX;
-		scaled_target_h = (int)lround(scaled);
-		if (scaled_target_h <= 0)
-			scaled_target_h = target_h;
-	}
-
-	if (ensure_icon && icon_buf && icon_w && icon_h
-			&& ensure_icon(scaled_target_h) == 0
-			&& *icon_buf && *icon_w > 0 && *icon_h > 0) {
-		iw = *icon_w;
-		ih = *icon_h;
-	}
-
-	if (text && *text)
-		text_w = status_text_width(text);
-	if (min_text_w > text_w)
-		text_w = min_text_w;
-	if (icon_gap <= 0)
-		icon_gap = statusbar_icon_text_gap;
-
-	module->width = 2 * padding + text_w;
-	if (iw > 0)
-		module->width += iw + (text_w > 0 ? icon_gap : padding);
-	if (module->width < 2 * padding)
-		module->width = 2 * padding;
-
-	updatemodulebg(module, module->width, bar_height, statusbar_bg);
-	x = padding;
-
-	if (iw > 0 && icon_buf && *icon_buf) {
-		scene_buf = nx_scene_buffer_create(module->tree, NULL);
-		if (scene_buf) {
-			int icon_y = (bar_height - ih) / 2;
-			nx_scene_buffer_set_buffer(scene_buf, *icon_buf);
-			nx_scene_node_set_position(&scene_buf->node, x, icon_y);
-		}
-		x += iw + (text_w > 0 ? icon_gap : padding);
-	}
-
-	if (text_w > 0)
-		tray_render_label(module, text, x, bar_height, fg);
+	bar_module_draw(module, bar_height, &l);
 }
 
-/* Icon-only module drawn like an SNI tray item: same icon target size as
- * rendertray, no label.  Module width is the icon's VISIBLE content width
- * (transparent SVG margins measured off, like rendertray does via
- * tray_measure_icon_insets) so the layout's TRAY_ICON_GAP advance gives
- * the same whitespace between these icons as between SNI icons. */
 void
-render_tray_icon_module(StatusModule *module, int bar_height,
-		int (*ensure_icon)(int target_h), struct nx_buffer **icon_buf,
-		int *icon_w, int *icon_h)
+renderram(StatusModule *module, int bar_height, const char *text)
+{
+	BarLabel l = plain_label(GLYPH_RAM, text, statusbar_fg);
+
+	bar_module_draw(module, bar_height, &l);
+}
+
+void
+renderlight(StatusModule *module, int bar_height, const char *text)
+{
+	BarLabel l = plain_label(GLYPH_LIGHT, text, statusbar_fg);
+
+	if (!backlight_available) {
+		bar_module_clear(module);
+		return;
+	}
+	bar_module_draw(module, bar_height, &l);
+}
+
+void
+rendernet(StatusModule *module, int bar_height, const char *text)
+{
+	uint32_t glyph = icon_glyph_cp(net_icon_path);
+	BarLabel l = plain_label(glyph, NULL,
+			glyph == GLYPH_NET_OFF ? statusbar_crit_fg : statusbar_fg);
+
+	(void)text;
+	bar_module_draw(module, bar_height, &l);
+}
+
+static const float *
+battery_color(double percent)
+{
+	if (battery_charging)
+		return statusbar_ok_fg;
+	if (percent >= 0.0 && percent <= BATTERY_LOW_PCT)
+		return statusbar_crit_fg;
+	if (percent >= 0.0 && percent <= BATTERY_WARN_PCT)
+		return statusbar_warn_fg;
+	return statusbar_fg;
+}
+
+/* Charging tints only the icon. */
+void
+renderbattery(StatusModule *module, int bar_height, const char *text)
+{
+	const float *fg = battery_color(battery_last_percent);
+	BarLabel l = plain_label(bar_battery_glyph(battery_last_percent,
+			battery_charging), text, battery_charging ? statusbar_fg : fg);
+
+	if (!battery_available) {
+		bar_module_clear(module);
+		return;
+	}
+	l.icon_fg = bar_icon_color(fg);
+	bar_module_draw(module, bar_height, &l);
+}
+
+void
+rendervolume(StatusModule *module, int bar_height, const char *text)
+{
+	BarLabel l = plain_label(icon_glyph_cp(volume_icon_path), text,
+			volume_text_color ? volume_text_color : statusbar_fg);
+
+	bar_module_draw(module, bar_height, &l);
+}
+
+void
+rendermic(StatusModule *module, int bar_height, const char *text)
+{
+	BarLabel l = plain_label(icon_glyph_cp(mic_icon_path), text,
+			mic_text_color ? mic_text_color : statusbar_fg);
+
+	if (!mic_available) {
+		bar_module_clear(module);
+		return;
+	}
+	bar_module_draw(module, bar_height, &l);
+}
+
+/* Retry icon-less items every 10 s. */
+static void
+tray_retry_icons(void)
+{
+	uint64_t now_ms = monotonic_msec();
+	TrayItem *it;
+
+	wl_list_for_each(it, &tray_items, link) {
+		if (it->passive || it->icon_buf)
+			continue;
+		if (it->icon_tried && (!it->icon_failed ||
+				now_ms < it->icon_retry_not_before_ms))
+			continue;
+		it->icon_tried = 0;
+		it->icon_failed = 0;
+		tray_item_load_icon(it);
+		if (it->icon_failed)
+			it->icon_retry_not_before_ms = now_ms + TRAY_ICON_RETRY_MS;
+	}
+}
+
+typedef struct {
+	StatusModule *module;
+	int x, h;
+} TrayPen;
+
+/* One padded hit cell at the pen. */
+static void
+tray_place_item(TrayPen *pen, TrayItem *it)
 {
 	struct nx_scene_buffer *scene_buf;
-	int target_h, pad_l, pad_r, content_w;
+	int content_w;
 
-	if (!module || !module->tree)
+	it->x = pen->x;
+	it->w = 0;
+	if (it->passive || !it->icon_buf || it->icon_w <= 0 || it->icon_h <= 0)
 		return;
-	clearstatusmodule(module);
-	if (bar_height <= 0) {
-		module->width = 0;
+	/* Space by visible ink. */
+	content_w = it->icon_w - it->icon_pad_l - it->icon_pad_r;
+	if (content_w <= 0)
+		content_w = it->icon_w;
+	it->w = content_w + 2 * BAR_ICON_PAD;
+	pen->x += it->w;
+	scene_buf = nx_scene_buffer_create(pen->module->tree, NULL);
+	if (!scene_buf)
 		return;
-	}
-	target_h = MAX(12, bar_height - 4);
-	if (ensure_icon(target_h) != 0 || !*icon_buf
-			|| *icon_w <= 0 || *icon_h <= 0) {
-		module->width = 0;
-		nx_scene_node_set_enabled(&module->tree->node, 0);
-		return;
-	}
-	/* Inset scan reads every icon pixel row — memoize per buffer: the
-	 * ensure_* caches keep one buffer per (path, height) alive, so
-	 * pointer identity is stable for as long as the entry is cached. */
-	{
-		static struct {
-			struct nx_buffer *buf;
-			int icon_w, pad_l, pad_r;
-		} inset_cache[8];
-		static int inset_pos;
-		int ci, hit = 0;
+	nx_scene_buffer_set_buffer(scene_buf, it->icon_buf);
+	nx_scene_node_set_position(&scene_buf->node,
+			it->x + BAR_ICON_PAD - it->icon_pad_l,
+			MAX(0, (pen->h - it->icon_h) / 2));
+}
 
-		for (ci = 0; ci < 8; ci++) {
-			if (inset_cache[ci].buf == *icon_buf &&
-					inset_cache[ci].icon_w == *icon_w) {
-				pad_l = inset_cache[ci].pad_l;
-				pad_r = inset_cache[ci].pad_r;
-				hit = 1;
-				break;
-			}
-		}
-		if (!hit) {
-			statusbar_buffer_insets(*icon_buf, *icon_w, &pad_l, &pad_r);
-			inset_cache[inset_pos].buf = *icon_buf;
-			inset_cache[inset_pos].icon_w = *icon_w;
-			inset_cache[inset_pos].pad_l = pad_l;
-			inset_cache[inset_pos].pad_r = pad_r;
-			inset_pos = (inset_pos + 1) % 8;
-		}
-	}
-	content_w = *icon_w - pad_l - pad_r;
-	if (content_w <= 0) {
-		content_w = *icon_w;
-		pad_l = 0;
-	}
-	module->width = content_w;
-	/* A single failed load above disabled the node; nothing else turns
-	 * it back on, so the module stayed blank for the rest of the
-	 * session while its popup kept working. */
-	nx_scene_node_set_enabled(&module->tree->node, 1);
-	updatemodulebg(module, module->width, bar_height, statusbar_bg);
-	scene_buf = nx_scene_buffer_create(module->tree, NULL);
-	if (scene_buf) {
-		nx_scene_buffer_set_buffer(scene_buf, *icon_buf);
-		nx_scene_node_set_position(&scene_buf->node, -pad_l,
-				MAX(0, (bar_height - *icon_h) / 2));
-	}
+void
+rendertray(Monitor *m, int bar_height)
+{
+	TrayPen pen = { &m->statusbar.traylabel, 0, bar_height };
+	TrayItem *it;
+
+	if (!pen.module->tree)
+		return;
+	tray_retry_icons();
+	clear_children(pen.module);
+	wl_list_for_each(it, &tray_items, link)
+		tray_place_item(&pen, it);
+	pen.module->width = pen.x;
 }
 
 int
@@ -321,836 +274,6 @@ status_text_width(const char *text)
 	}
 
 	return pen_x;
-}
-
-int
-tray_render_label(StatusModule *module, const char *text, int x, int bar_height,
-		const float color[static 4])
-{
-	tll(struct GlyphRun) glyphs = tll_init();
-	const struct fcft_glyph *glyph;
-	struct nx_scene_buffer *scene_buf;
-	struct nx_buffer *buffer;
-	uint32_t prev_cp = 0;
-	int pen_x = 0;
-	int min_y = INT_MAX, max_y = INT_MIN;
-	int text_width, text_height, origin_y;
-	size_t i;
-	const float *prev_fg = statusbar_fg_override;
-
-	if (!module || !module->tree || !text || !*text || bar_height <= 0)
-		return 0;
-
-	statusbar_fg_override = color;
-	if (!statusfont.font) {
-		int w = status_text_width(text);
-		if (w <= 0)
-			w = statusbar_font_spacing;
-		statusbar_fg_override = prev_fg;
-		return w;
-	}
-
-	for (i = 0; text[i]; ) {
-		long kern_x = 0, kern_y = 0;
-		uint32_t cp;
-		unsigned char c = (unsigned char)text[i];
-
-		/* Decode UTF-8 to Unicode codepoint */
-		if ((c & 0x80) == 0) {
-			/* ASCII (0xxxxxxx) */
-			cp = c;
-			i += 1;
-		} else if ((c & 0xE0) == 0xC0) {
-			/* 2-byte sequence (110xxxxx 10xxxxxx).
-			 * Rykk kun forbi bytes som finnes — trunkert sekvens
-			 * må ikke hoppe forbi NUL (OOB-les). */
-			cp = (c & 0x1F) << 6;
-			i += 1;
-			if (text[i]) {
-				cp |= ((unsigned char)text[i] & 0x3F);
-				i += 1;
-			}
-		} else if ((c & 0xF0) == 0xE0) {
-			/* 3-byte sequence (1110xxxx 10xxxxxx 10xxxxxx) */
-			cp = (c & 0x0F) << 12;
-			i += 1;
-			if (text[i]) {
-				cp |= ((unsigned char)text[i] & 0x3F) << 6;
-				i += 1;
-				if (text[i]) {
-					cp |= ((unsigned char)text[i] & 0x3F);
-					i += 1;
-				}
-			}
-		} else if ((c & 0xF8) == 0xF0) {
-			/* 4-byte sequence (11110xxx 10xxxxxx 10xxxxxx 10xxxxxx) */
-			cp = (c & 0x07) << 18;
-			i += 1;
-			if (text[i]) {
-				cp |= ((unsigned char)text[i] & 0x3F) << 12;
-				i += 1;
-				if (text[i]) {
-					cp |= ((unsigned char)text[i] & 0x3F) << 6;
-					i += 1;
-					if (text[i]) {
-						cp |= ((unsigned char)text[i] & 0x3F);
-						i += 1;
-					}
-				}
-			}
-		} else {
-			/* Invalid UTF-8, skip byte */
-			i += 1;
-			continue;
-		}
-
-		if (prev_cp)
-			fcft_kerning(statusfont.font, prev_cp, cp, &kern_x, &kern_y);
-		pen_x += (int)kern_x;
-
-		glyph = fcft_rasterize_char_utf32(statusfont.font, cp,
-				statusbar_font_subpixel);
-		if (glyph && glyph->pix) {
-			tll_push_back(glyphs, ((struct GlyphRun){
-				.glyph = glyph,
-				.pen_x = pen_x,
-				.codepoint = cp,
-			}));
-			if (-glyph->y < min_y)
-				min_y = -glyph->y;
-			if (-glyph->y + glyph->height > max_y)
-				max_y = -glyph->y + glyph->height;
-			pen_x += glyph->advance.x;
-			if (text[i])
-				pen_x += statusbar_font_spacing;
-		}
-		prev_cp = cp;
-	}
-
-	if (tll_length(glyphs) == 0) {
-		tll_free(glyphs);
-		statusbar_fg_override = prev_fg;
-		return 0;
-	}
-
-	/* pen_x already holds the exact advance from the glyph loop —
-	 * status_text_width() would re-walk the string and redo kerning
-	 * and glyph-cache lookups for the same value. */
-	text_width = pen_x;
-	text_height = max_y - min_y;
-	origin_y = (bar_height - text_height) / 2 - min_y;
-
-	tll_foreach(glyphs, it) {
-		glyph = it->item.glyph;
-		/* Cache-owned buffer — no drop; the scene node holds a lock. */
-		buffer = statusbar_buffer_from_glyph(glyph);
-		if (!buffer)
-			continue;
-
-		scene_buf = nx_scene_buffer_create(module->tree, NULL);
-		if (scene_buf) {
-			nx_scene_buffer_set_buffer(scene_buf, buffer);
-			nx_scene_node_set_position(&scene_buf->node,
-					x + it->item.pen_x + glyph->x,
-					origin_y - glyph->y);
-		}
-	}
-
-	tll_free(glyphs);
-	statusbar_fg_override = prev_fg;
-	return text_width;
-}
-
-void
-rendercpu(StatusModule *module, int bar_height, const char *text)
-{
-	render_icon_label(module, bar_height, text,
-			ensure_cpu_icon_buffer, &cpu_icon_buf, &cpu_icon_w, &cpu_icon_h,
-			0, statusbar_icon_text_gap_cpu, statusbar_fg);
-}
-
-void
-renderlight(StatusModule *module, int bar_height, const char *text)
-{
-	if (!module || !module->tree) {
-		return;
-	}
-
-	if (!backlight_available) {
-		clearstatusmodule(module);
-		module->width = 0;
-		nx_scene_node_set_enabled(&module->tree->node, 0);
-		return;
-	}
-
-	render_icon_label(module, bar_height, text,
-			ensure_light_icon_buffer, &light_icon_buf, &light_icon_w, &light_icon_h,
-			0, statusbar_icon_text_gap_light, statusbar_fg);
-}
-
-void
-rendernet(StatusModule *module, int bar_height, const char *text)
-{
-	/* Icon-only module; `text` is a change-key, never drawn. */
-	(void)text;
-	render_tray_icon_module(module, bar_height,
-			ensure_net_icon_buffer, &net_icon_buf,
-			&net_icon_w, &net_icon_h);
-	{
-		static int last_blank = -1;
-		int blank = module && module->width <= 0;
-		if (blank != last_blank) {
-			last_blank = blank;
-			diag_logf("BAR", "net module %s icon='%s' barh=%d w=%d h=%d",
-					blank ? "BLANK" : "ok",
-					net_icon_path, bar_height,
-					net_icon_w, net_icon_h);
-		}
-	}
-}
-
-void
-renderbattery(StatusModule *module, int bar_height, const char *text)
-{
-	if (!battery_available) {
-		if (module && module->tree) {
-			clearstatusmodule(module);
-			module->width = 0;
-			nx_scene_node_set_enabled(&module->tree->node, 0);
-		}
-		return;
-	}
-
-	render_icon_label(module, bar_height, text,
-			ensure_battery_icon_buffer, &battery_icon_buf, &battery_icon_w, &battery_icon_h,
-			0, statusbar_icon_text_gap_battery, statusbar_fg);
-}
-
-void
-renderram(StatusModule *module, int bar_height, const char *text)
-{
-	render_icon_label(module, bar_height, text,
-			ensure_ram_icon_buffer, &ram_icon_buf, &ram_icon_w, &ram_icon_h,
-			0, statusbar_icon_text_gap_ram, statusbar_fg);
-}
-
-void
-rendervolume(StatusModule *module, int bar_height, const char *text)
-{
-	render_icon_label(module, bar_height, text,
-			ensure_volume_icon_buffer, &volume_icon_buf, &volume_icon_w, &volume_icon_h,
-			0, statusbar_icon_text_gap_volume, volume_text_color);
-}
-
-void
-rendermic(StatusModule *module, int bar_height, const char *text)
-{
-	if (!mic_available) {
-		if (module && module->tree) {
-			clearstatusmodule(module);
-			module->width = 0;
-			nx_scene_node_set_enabled(&module->tree->node, 0);
-		}
-		return;
-	}
-
-	render_icon_label(module, bar_height, text,
-			ensure_mic_icon_buffer, &mic_icon_buf, &mic_icon_w, &mic_icon_h,
-			0, statusbar_icon_text_gap_microphone, mic_text_color);
-}
-
-void
-drop_cpu_icon_buffer(void)
-{
-	if (cpu_icon_buf) {
-		nx_buffer_drop(cpu_icon_buf);
-		cpu_icon_buf = NULL;
-	}
-	cpu_icon_loaded_h = 0;
-	cpu_icon_w = cpu_icon_h = 0;
-	cpu_icon_loaded_path[0] = '\0';
-}
-
-int
-ensure_cpu_icon_buffer(int target_h)
-{
-	GdkPixbuf *pixbuf = NULL;
-	GError *gerr = NULL;
-	struct nx_buffer *buf;
-	int w = 0, h = 0;
-	char resolved[PATH_MAX];
-	const char *path = cpu_icon_path;
-
-	if (target_h <= 0)
-		return -1;
-
-	if (resolve_asset_path(cpu_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
-		path = resolved;
-
-	if (cpu_icon_buf && cpu_icon_loaded_h == target_h &&
-			strncmp(cpu_icon_loaded_path, path, sizeof(cpu_icon_loaded_path)) == 0)
-		return 0;
-
-	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
-		if (!pixbuf) {
-			if (gerr) {
-				nx_log(NX_ERROR, "cpu icon: failed to load '%s': %s",
-						path, gerr->message);
-				g_error_free(gerr);
-			}
-			return -1;
-		}
-	}
-
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-
-	drop_cpu_icon_buffer();
-	cpu_icon_buf = buf;
-	cpu_icon_w = w;
-	cpu_icon_h = h;
-	cpu_icon_loaded_h = target_h;
-	snprintf(cpu_icon_loaded_path, sizeof(cpu_icon_loaded_path), "%s", path);
-	return 0;
-}
-
-void
-drop_clock_icon_buffer(void)
-{
-	if (clock_icon_buf) {
-		nx_buffer_drop(clock_icon_buf);
-		clock_icon_buf = NULL;
-	}
-	clock_icon_loaded_h = 0;
-	clock_icon_w = clock_icon_h = 0;
-	clock_icon_loaded_path[0] = '\0';
-}
-
-int
-ensure_clock_icon_buffer(int target_h)
-{
-	GdkPixbuf *pixbuf = NULL;
-	GError *gerr = NULL;
-	struct nx_buffer *buf;
-	int w = 0, h = 0;
-	char resolved[PATH_MAX];
-	const char *path = clock_icon_path;
-
-	if (target_h <= 0)
-		return -1;
-
-	if (resolve_asset_path(clock_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
-		path = resolved;
-
-	if (clock_icon_buf && clock_icon_loaded_h == target_h &&
-			strncmp(clock_icon_loaded_path, path, sizeof(clock_icon_loaded_path)) == 0)
-		return 0;
-
-	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
-		if (!pixbuf) {
-			if (gerr) {
-				nx_log(NX_ERROR, "clock icon: failed to load '%s': %s",
-						path, gerr->message);
-				g_error_free(gerr);
-			}
-			return -1;
-		}
-	}
-
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-
-	drop_clock_icon_buffer();
-	clock_icon_buf = buf;
-	clock_icon_w = w;
-	clock_icon_h = h;
-	clock_icon_loaded_h = target_h;
-	snprintf(clock_icon_loaded_path, sizeof(clock_icon_loaded_path), "%s", path);
-	return 0;
-}
-
-void
-drop_light_icon_buffer(void)
-{
-	if (light_icon_buf) {
-		nx_buffer_drop(light_icon_buf);
-		light_icon_buf = NULL;
-	}
-	light_icon_loaded_h = 0;
-	light_icon_w = light_icon_h = 0;
-	light_icon_loaded_path[0] = '\0';
-}
-
-int
-ensure_light_icon_buffer(int target_h)
-{
-	GdkPixbuf *pixbuf = NULL;
-	GError *gerr = NULL;
-	struct nx_buffer *buf;
-	int w = 0, h = 0;
-	char resolved[PATH_MAX];
-	const char *path = light_icon_path;
-
-	if (target_h <= 0)
-		return -1;
-
-	if (resolve_asset_path(light_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
-		path = resolved;
-
-	if (light_icon_buf && light_icon_loaded_h == target_h &&
-			strncmp(light_icon_loaded_path, path, sizeof(light_icon_loaded_path)) == 0)
-		return 0;
-
-	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
-		if (!pixbuf) {
-			if (gerr) {
-				nx_log(NX_ERROR, "light icon: failed to load '%s': %s",
-						path, gerr->message);
-				g_error_free(gerr);
-			}
-			return -1;
-		}
-	}
-
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-
-	drop_light_icon_buffer();
-	light_icon_buf = buf;
-	light_icon_w = w;
-	light_icon_h = h;
-	light_icon_loaded_h = target_h;
-	snprintf(light_icon_loaded_path, sizeof(light_icon_loaded_path), "%s", path);
-	return 0;
-}
-
-void
-drop_ram_icon_buffer(void)
-{
-	if (ram_icon_buf) {
-		nx_buffer_drop(ram_icon_buf);
-		ram_icon_buf = NULL;
-	}
-	ram_icon_loaded_h = 0;
-	ram_icon_w = ram_icon_h = 0;
-	ram_icon_loaded_path[0] = '\0';
-}
-
-int
-ensure_ram_icon_buffer(int target_h)
-{
-	GdkPixbuf *pixbuf = NULL;
-	GError *gerr = NULL;
-	struct nx_buffer *buf;
-	int w = 0, h = 0;
-	char resolved[PATH_MAX];
-	const char *path = ram_icon_path;
-
-	if (target_h <= 0)
-		return -1;
-
-	if (resolve_asset_path(ram_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
-		path = resolved;
-
-	if (ram_icon_buf && ram_icon_loaded_h == target_h &&
-			strncmp(ram_icon_loaded_path, path, sizeof(ram_icon_loaded_path)) == 0)
-		return 0;
-
-	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
-		if (!pixbuf) {
-			if (gerr) {
-				nx_log(NX_ERROR, "ram icon: failed to load '%s': %s",
-						path, gerr->message);
-				g_error_free(gerr);
-			}
-			return -1;
-		}
-	}
-
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-
-	drop_ram_icon_buffer();
-	ram_icon_buf = buf;
-	ram_icon_w = w;
-	ram_icon_h = h;
-	ram_icon_loaded_h = target_h;
-	snprintf(ram_icon_loaded_path, sizeof(ram_icon_loaded_path), "%s", path);
-	return 0;
-}
-
-void
-drop_volume_icon_buffer(void)
-{
-	if (volume_icon_buf) {
-		nx_buffer_drop(volume_icon_buf);
-		volume_icon_buf = NULL;
-	}
-	volume_icon_loaded_h = 0;
-	volume_icon_w = volume_icon_h = 0;
-	volume_icon_loaded_path[0] = '\0';
-}
-
-int
-ensure_volume_icon_buffer(int target_h)
-{
-	GdkPixbuf *pixbuf = NULL;
-	GError *gerr = NULL;
-	struct nx_buffer *buf;
-	int w = 0, h = 0;
-	char resolved[PATH_MAX];
-	const char *path = volume_icon_path;
-
-	if (target_h <= 0)
-		return -1;
-
-	if (resolve_asset_path(volume_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
-		path = resolved;
-
-	if (volume_icon_buf && volume_icon_loaded_h == target_h &&
-			strncmp(volume_icon_loaded_path, path, sizeof(volume_icon_loaded_path)) == 0)
-		return 0;
-
-	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
-		if (!pixbuf) {
-			if (gerr) {
-				nx_log(NX_ERROR, "volume icon: failed to load '%s': %s",
-						path, gerr->message);
-				g_error_free(gerr);
-			}
-			return -1;
-		}
-	}
-
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-
-	drop_volume_icon_buffer();
-	volume_icon_buf = buf;
-	volume_icon_w = w;
-	volume_icon_h = h;
-	volume_icon_loaded_h = target_h;
-	snprintf(volume_icon_loaded_path, sizeof(volume_icon_loaded_path), "%s", path);
-	return 0;
-}
-
-void
-drop_battery_icon_buffer(void)
-{
-	if (battery_icon_buf) {
-		nx_buffer_drop(battery_icon_buf);
-		battery_icon_buf = NULL;
-	}
-	battery_icon_loaded_h = 0;
-	battery_icon_w = battery_icon_h = 0;
-	battery_icon_loaded_path[0] = '\0';
-}
-
-int
-ensure_battery_icon_buffer(int target_h)
-{
-	GdkPixbuf *pixbuf = NULL;
-	GError *gerr = NULL;
-	struct nx_buffer *buf;
-	int w = 0, h = 0;
-	char resolved[PATH_MAX];
-	const char *path = battery_icon_path;
-
-	if (target_h <= 0)
-		return -1;
-
-	if (resolve_asset_path(battery_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
-		path = resolved;
-
-	if (battery_icon_buf && battery_icon_loaded_h == target_h &&
-			strncmp(battery_icon_loaded_path, path, sizeof(battery_icon_loaded_path)) == 0)
-		return 0;
-
-	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
-		if (!pixbuf) {
-			if (gerr) {
-				nx_log(NX_ERROR, "battery icon: failed to load '%s': %s",
-						path, gerr->message);
-				g_error_free(gerr);
-			}
-			return -1;
-		}
-	}
-
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-
-	drop_battery_icon_buffer();
-	battery_icon_buf = buf;
-	battery_icon_w = w;
-	battery_icon_h = h;
-	battery_icon_loaded_h = target_h;
-	snprintf(battery_icon_loaded_path, sizeof(battery_icon_loaded_path), "%s", path);
-	return 0;
-}
-
-void
-drop_mic_icon_buffer(void)
-{
-	if (mic_icon_buf) {
-		nx_buffer_drop(mic_icon_buf);
-		mic_icon_buf = NULL;
-	}
-	mic_icon_loaded_h = 0;
-	mic_icon_w = mic_icon_h = 0;
-	mic_icon_loaded_path[0] = '\0';
-}
-
-int
-ensure_mic_icon_buffer(int target_h)
-{
-	GdkPixbuf *pixbuf = NULL;
-	GError *gerr = NULL;
-	struct nx_buffer *buf;
-	int w = 0, h = 0;
-	char resolved[PATH_MAX];
-	const char *path = mic_icon_path;
-
-	if (target_h <= 0)
-		return -1;
-
-	if (resolve_asset_path(mic_icon_path, resolved, sizeof(resolved)) == 0 && resolved[0])
-		path = resolved;
-
-	if (mic_icon_buf && mic_icon_loaded_h == target_h &&
-			strncmp(mic_icon_loaded_path, path, sizeof(mic_icon_loaded_path)) == 0)
-		return 0;
-
-	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
-		if (!pixbuf) {
-			if (gerr) {
-				nx_log(NX_ERROR, "mic icon: failed to load '%s': %s",
-						path, gerr->message);
-				g_error_free(gerr);
-			}
-			return -1;
-		}
-	}
-
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-
-	drop_mic_icon_buffer();
-	mic_icon_buf = buf;
-	mic_icon_w = w;
-	mic_icon_h = h;
-	mic_icon_loaded_h = target_h;
-	snprintf(mic_icon_loaded_path, sizeof(mic_icon_loaded_path), "%s", path);
-	return 0;
-}
-
-void
-drop_net_icon_buffer(void)
-{
-	if (net_icon_buf) {
-		nx_buffer_drop(net_icon_buf);
-		net_icon_buf = NULL;
-	}
-	net_icon_loaded_h = 0;
-	net_icon_loaded_path[0] = '\0';
-	net_icon_w = 0;
-	net_icon_h = 0;
-}
-
-int
-load_net_icon_buffer(const char *path, int target_h)
-{
-	GError *gerr = NULL;
-	struct nx_buffer *buf;
-	int w = 0, h = 0;
-	GdkPixbuf *pixbuf = NULL;
-	char resolved[PATH_MAX];
-	const char *load_path = path;
-
-	if (!path || !*path || target_h <= 0)
-		return -1;
-
-	if (resolve_asset_path(path, resolved, sizeof(resolved)) == 0)
-		load_path = resolved;
-
-	/* For the 100% icon, synthesize the bars to avoid theme tinting entirely */
-	if (strcmp(path, net_icon_wifi_100) == 0
-			|| (net_icon_wifi_100_resolved[0]
-				&& strcmp(load_path, net_icon_wifi_100_resolved) == 0)) {
-		buf = statusbar_buffer_from_wifi100(target_h, &w, &h);
-		if (!buf) {
-			nx_log(NX_ERROR, "net icon: synth wifi_100 failed (path=%s resolved=%s)",
-					path, load_path);
-			return -1;
-		}
-		snprintf(net_icon_loaded_path, sizeof(net_icon_loaded_path), "%s", load_path);
-		goto done;
-	}
-
-	if (tray_load_svg_pixbuf(load_path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(load_path, &gerr);
-		if (!pixbuf) {
-			if (gerr) {
-				nx_log(NX_ERROR, "net icon: failed to load '%s': %s", load_path, gerr->message);
-				g_error_free(gerr);
-			}
-			return -1;
-		}
-	} else if (strcmp(path, net_icon_wifi_100) == 0
-			|| (net_icon_wifi_100_resolved[0]
-					&& strcmp(load_path, net_icon_wifi_100_resolved) == 0)) {
-		/* Some themes tint this asset; normalize to expected green */
-		recolor_wifi100_pixbuf(pixbuf);
-	}
-
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-
-done:
-	drop_net_icon_buffer();
-	net_icon_buf = buf;
-	net_icon_w = w;
-	net_icon_h = h;
-	net_icon_loaded_h = target_h;
-	snprintf(net_icon_loaded_path, sizeof(net_icon_loaded_path), "%s", load_path);
-	nx_log(NX_INFO, "net icon: loaded %s (resolved=%s) w=%d h=%d target_h=%d",
-			path, load_path, net_icon_w, net_icon_h, target_h);
-	return 0;
-}
-
-int
-ensure_net_icon_buffer(int target_h)
-{
-	if (target_h <= 0)
-		return -1;
-
-	if (net_icon_buf && net_icon_loaded_h == target_h &&
-			strncmp(net_icon_loaded_path, net_icon_path, sizeof(net_icon_loaded_path)) == 0)
-		return 0;
-
-	if (load_net_icon_buffer(net_icon_path, target_h) == 0)
-		return 0;
-
-	/* fallback to offline icon if the requested asset is missing */
-	if (strcmp(net_icon_path, net_icon_no_conn) != 0)
-		return load_net_icon_buffer(net_icon_no_conn, target_h);
-
-	return -1;
-}
-
-/* Render the SNI system-tray items (real icons) into the traylabel module.
- * Each TrayItem's loaded icon_buf is drawn left-to-right; it->x / it->w are
- * recorded (relative to the module) for click hit-testing. */
-void
-rendertray(Monitor *m, int bar_height)
-{
-	StatusModule *module;
-	TrayItem *it;
-	int padding, gap, x, count = 0, right_edge = 0;
-
-	if (!m || !m->statusbar.traylabel.tree)
-		return;
-
-	module = &m->statusbar.traylabel;
-	clearstatusmodule(module);
-	module->width = 0;
-	module->x = 0;
-
-	padding = statusbar_module_padding / 2;
-	if (padding < 1)
-		padding = 1;
-	gap = TRAY_ICON_GAP;
-
-	/* First pass: load icons.  Advance is per-icon width + gap, so the
-	 * whitespace between two neighbours is always exactly `gap`.  A fixed
-	 * slot (widest icon) instead gives even CENTER distance, which reads
-	 * as uneven spacing the moment the icons differ in width. */
-	wl_list_for_each(it, &tray_items, link) {
-		if (it->passive)
-			continue;
-		if (!it->icon_buf) {
-			/* Retry: the item may have registered before its icon
-			 * properties were ready (SNI startup race).  NewIcon
-			 * signals clear the failed-latch when the app publishes
-			 * an icon; this timed retry is only the safety net.
-			 * Unconditional retry here would re-run the full icon
-			 * theme scan (potentially 1e5 stat() calls) plus D-Bus
-			 * round-trips on EVERY layout pass for a permanently
-			 * icon-less item. */
-			uint64_t now_ms = monotonic_msec();
-			if (!it->icon_tried ||
-			    (it->icon_failed &&
-			     now_ms >= it->icon_retry_not_before_ms)) {
-				it->icon_tried = 0;
-				it->icon_failed = 0;
-				tray_item_load_icon(it);
-				if (it->icon_failed)
-					it->icon_retry_not_before_ms =
-						now_ms + 10000;
-			}
-		}
-	}
-
-	x = padding;
-	wl_list_for_each(it, &tray_items, link) {
-		struct nx_scene_buffer *scene_buf;
-		int icon_y, content_w;
-
-		if (it->passive || !it->icon_buf || it->icon_w <= 0 || it->icon_h <= 0) {
-			it->x = x;
-			it->w = 0;
-			continue;
-		}
-
-		/* Space by visible content, not buffer width: the icons carry
-		 * different amounts of transparent margin (tray_measure_icon_insets),
-		 * so buffer-width spacing reads as uneven gaps. */
-		content_w = it->icon_w - it->icon_pad_l - it->icon_pad_r;
-		if (content_w <= 0)
-			content_w = it->icon_w;
-		/* x tracks the content edge, the buffer is drawn pad_l to its left:
-		 * keep the first buffer inside the module. */
-		if (count == 0 && x < it->icon_pad_l)
-			x = it->icon_pad_l;
-
-		it->x = x;
-		it->w = content_w + gap;
-		icon_y = MAX(0, (bar_height - it->icon_h) / 2);
-
-		scene_buf = nx_scene_buffer_create(module->tree, NULL);
-		if (scene_buf) {
-			nx_scene_buffer_set_buffer(scene_buf, it->icon_buf);
-			nx_scene_node_set_position(&scene_buf->node,
-					x - it->icon_pad_l, icon_y);
-		}
-
-		right_edge = MAX(right_edge, x - it->icon_pad_l + it->icon_w);
-		x += it->w;
-		count++;
-	}
-
-	/* Drop the gap trailing the last icon so the module has the same
-	 * padding on both sides.  right_edge keeps the last buffer's transparent
-	 * margin inside the module background. */
-	module->width = count > 0 ? MAX(x - gap + padding, right_edge) : 0;
-	if (module->width > 0)
-		updatemodulebg(module, module->width, bar_height, statusbar_bg);
-	nx_scene_node_set_enabled(&module->tree->node, module->width > 0);
 }
 
 int
@@ -2457,10 +1580,8 @@ updatebatteryhover(Monitor *m, double cx, double cy)
 	}
 
 	/* Check if hovering over battery module */
-	if (lx >= m->statusbar.battery.x &&
-			lx < m->statusbar.battery.x + m->statusbar.battery.width &&
-			ly >= 0 && ly < m->statusbar.area.height &&
-			m->statusbar.battery.width > 0) {
+	if (bar_module_hit(&m->statusbar.battery, lx) &&
+			ly >= 0 && ly < m->statusbar.area.height) {
 		inside = 1;
 	} else if (popup_hover) {
 		inside = 1;
@@ -2690,221 +1811,6 @@ battery_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 	}
 
 	return 1; /* click landed inside the popup — always consume */
-}
-
-/* Retint the persistent hover rects in place: hover_alpha is deliberately
- * NOT part of the render signature, so a fade tick never tears down and
- * re-rasterizes the tag digits (visible as numberless boxes). */
-static void
-updatehoverrects(StatusModule *module)
-{
-	int n;
-
-	if (!module || !module->tree)
-		return;
-
-	for (n = 0; n < module->box_count; n++) {
-		float col[4];
-
-		if (!module->hover_rect[n])
-			continue;
-		col[0] = statusbar_tag_hover_bg[0];
-		col[1] = statusbar_tag_hover_bg[1];
-		col[2] = statusbar_tag_hover_bg[2];
-		col[3] = statusbar_tag_hover_bg[3] *
-			module->hover_alpha[module->box_tag[n]];
-		nx_scene_rect_set_color(module->hover_rect[n], col);
-	}
-}
-
-void
-renderworkspaces(Monitor *m, StatusModule *module, int bar_height)
-{
-	Workspace *ws;
-	Client *c;
-	Workspace *ws_at[TAGCOUNT];
-	int ws_count = 0;
-	uint32_t fs_occ = 0;
-	int padding, inner, spacing, outer_pad;
-	int box_h, box_y, total_w = 0;
-	int x, count = 0, pos;
-	struct nx_scene_buffer *scene_buf;
-	struct nx_scene_rect *hrect;
-	struct nx_buffer *buffer;
-	struct { int tag; int active; } shown[TAGCOUNT];
-	int shown_count = 0, n;
-	uint64_t sig;
-
-	if (!m || !module || !module->tree)
-		return;
-	if (!statusfont.font || bar_height <= 0) {
-		module->width = 0;
-		return;
-	}
-
-	padding = statusbar_module_padding;
-	inner = statusbar_workspace_padding;
-	spacing = statusbar_workspace_spacing;
-	/* give the module a little extra padding so bg extends past boxes */
-	outer_pad = padding + spacing + 6;
-	if (module->hover_tag < -1 || module->hover_tag >= TAGCOUNT)
-		module->hover_tag = -1;
-
-	box_h = MAX(1, MIN(bar_height - 2, statusfont.height + inner * 2 + 2));
-	box_y = (bar_height - box_h) / 2;
-
-	/* One box per Niri-style workspace, in stack order.  Shown when the
-	 * workspace has content (tiles or a fullscreen client) or is active.
-	 * box_tag stores the workspace's position in m->workspaces.  The
-	 * fullscreen check is a single pass over clients into a bitmap —
-	 * the old per-workspace client walk was O(workspaces x clients). */
-	wl_list_for_each(ws, &m->workspaces, link) {
-		if (ws_count >= TAGCOUNT)
-			break;
-		ws_at[ws_count++] = ws;
-	}
-	wl_list_for_each(c, &clients, link) {
-		if (!c->fs_ws)
-			continue;
-		for (n = 0; n < ws_count; n++) {
-			if (ws_at[n] == c->fs_ws) {
-				fs_occ |= 1u << n;
-				break;
-			}
-		}
-	}
-	for (pos = 0; pos < ws_count; pos++) {
-		int active = (ws_at[pos] == m->active_ws);
-		int occupied = workspace_has_clients(ws_at[pos]) ||
-			(fs_occ & (1u << pos)) != 0;
-
-		if (!occupied && !active && pos != 0)
-			continue;
-
-		shown[shown_count].tag = pos;
-		shown[shown_count].active = active;
-		shown_count++;
-	}
-
-	/* Hash of everything the row will draw.  arrangelayers runs on every
-	 * layer-surface commit and on every frame of the bar's slide, and a
-	 * re-render tears down the digit textures and uploads new ones — the
-	 * boxes are scene rects and come back instantly, the digits do not,
-	 * so a redundant re-render shows numberless boxes for a few frames.
-	 * Identical hash means the row on screen is already the right one. */
-	sig = 1469598103934665603ULL;
-#define SIG_MIX(v) do { sig = (sig ^ (uint64_t)(int64_t)(v)) * 1099511628211ULL; } while (0)
-	SIG_MIX(bar_height);
-	SIG_MIX(box_h);
-	SIG_MIX(box_y);
-	SIG_MIX(statusfont.height);
-	SIG_MIX(inner);
-	SIG_MIX(spacing);
-	SIG_MIX(outer_pad);
-	SIG_MIX(shown_count);
-	/* hover_alpha is intentionally NOT mixed in: the fade retints the
-	 * persistent hover rects via updatehoverrects() so a fade tick never
-	 * invalidates the row and re-rasterizes the digits. */
-	for (n = 0; n < shown_count; n++) {
-		SIG_MIX(shown[n].tag);
-		SIG_MIX(shown[n].active);
-	}
-	for (n = 0; n < 4; n++) {
-		SIG_MIX(lround(statusbar_tag_bg[n] * 255.0f));
-		SIG_MIX(lround(statusbar_tag_active_bg[n] * 255.0f));
-		SIG_MIX(lround(statusbar_tag_hover_bg[n] * 255.0f));
-	}
-#undef SIG_MIX
-
-	if (sig == module->render_sig && module->width > 0)
-		return;
-	module->render_sig = sig;
-
-	module->box_count = 0;
-	module->tagmask = 0;
-	clearstatusmodule(module);
-	x = outer_pad;
-
-	for (n = 0; n < shown_count; n++) {
-		const struct fcft_glyph *glyph;
-		int min_x, max_x, min_y, max_y;
-		int text_w, text_h, box_w;
-		int origin_x, origin_y;
-		const float *bgcol;
-		int active = shown[n].active;
-		int i = shown[n].tag;
-
-		if (count > 0) {
-			x += spacing;
-			total_w += spacing;
-		}
-
-		glyph = fcft_rasterize_char_utf32(statusfont.font,
-				(uint32_t)('1' + i), statusbar_font_subpixel);
-		if (!glyph || !glyph->pix) {
-			continue;
-		}
-
-		min_x = glyph->x;
-		max_x = glyph->x + glyph->width;
-		min_y = -glyph->y;
-		max_y = -glyph->y + glyph->height;
-		text_w = max_x - min_x;
-		text_h = max_y - min_y;
-		box_w = text_w + inner * 2;
-		origin_x = x + (box_w - text_w) / 2 - min_x;
-		origin_y = box_y + (box_h - text_h) / 2 - min_y;
-
-		bgcol = statusbar_tag_bg;
-		if (active)
-			bgcol = statusbar_tag_active_bg;
-
-		drawrect(module->tree, x, box_y, box_w, box_h, bgcol);
-
-		/* Persistent hover highlight — created even at alpha 0 so the
-		 * fade can retint it in place without re-rendering the row. */
-		hrect = NULL;
-		if (!active) {
-			float col[4];
-
-			col[0] = statusbar_tag_hover_bg[0];
-			col[1] = statusbar_tag_hover_bg[1];
-			col[2] = statusbar_tag_hover_bg[2];
-			col[3] = statusbar_tag_hover_bg[3] * module->hover_alpha[i];
-			hrect = nx_scene_rect_create(module->tree, box_w, box_h,
-					col);
-			if (hrect)
-				nx_scene_node_set_position(&hrect->node, x, box_y);
-		}
-
-		/* Cache-owned buffer — no drop; the scene node holds a lock. */
-		buffer = statusbar_buffer_from_glyph(glyph);
-		if (buffer) {
-			scene_buf = nx_scene_buffer_create(module->tree, NULL);
-			if (scene_buf) {
-				nx_scene_buffer_set_buffer(scene_buf, buffer);
-				nx_scene_node_set_position(&scene_buf->node,
-						origin_x + glyph->x,
-						origin_y - glyph->y);
-			}
-		}
-
-		x += box_w;
-		total_w += box_w;
-		if (module->box_count < TAGCOUNT) {
-			int idx = module->box_count;
-			module->box_x[idx] = outer_pad + total_w - box_w;
-			module->box_w[idx] = box_w;
-			module->box_tag[idx] = i;
-			module->hover_rect[idx] = hrect;
-			module->tagmask |= (1u << i);
-			module->box_count++;
-		}
-		count++;
-	}
-
-	module->width = total_w + outer_pad * 2;
-	updatemodulebg(module, module->width, bar_height, statusbar_tag_bg);
 }
 
 int
@@ -4126,7 +3032,7 @@ barmod_at(Monitor *m, int i)
 	return (StatusModule *)((char *)&m->statusbar + barmod_defs[i].off);
 }
 
-static StatusModule *
+StatusModule *
 barmod_by_name(Monitor *m, const char *name)
 {
 	size_t i;
@@ -4183,217 +3089,80 @@ statusbar_conf_changed(void)
 		positionstatusmodules(m);
 }
 
+static void
+hide_modules(Monitor *m)
+{
+	for (size_t i = 0; i < BARMOD_DEF_COUNT; i++) {
+		StatusModule *mod = barmod_at(m, (int)i);
+
+		if (mod->tree)
+			nx_scene_node_set_enabled(&mod->tree->node, 0);
+		mod->x = 0;
+		mod->placed = 0;
+	}
+	m->statusbar.nplaced = 0;
+}
+
+/* Close every popup and free its nodes. */
+static void
+close_popups(Monitor *m)
+{
+	StatusBar *bar = &m->statusbar;
+	const struct {
+		int *visible;
+		struct nx_scene_tree *tree;
+		PopupView *view;
+	} cards[] = {
+		{ &bar->cpu_popup.visible, bar->cpu_popup.tree, &bar->cpu_popup.view },
+		{ &bar->ram_popup.visible, bar->ram_popup.tree, &bar->ram_popup.view },
+		{ &bar->battery_popup.visible, bar->battery_popup.tree,
+			&bar->battery_popup.view },
+		{ &bar->net_popup.visible, bar->net_popup.tree, &bar->net_popup.view },
+	};
+
+	tray_menu_hide(m);
+	info_popups_hide(m);
+	for (size_t i = 0; i < LENGTH(cards); i++) {
+		*cards[i].visible = 0;
+		if (cards[i].tree)
+			nx_scene_node_set_enabled(&cards[i].tree->node, 0);
+		popup_view_hide(cards[i].view);
+	}
+}
+
 void
 positionstatusmodules(Monitor *m)
 {
-	int x, spacing, left_end;
-
 	if (!m || !m->statusbar.tree)
 		return;
 
 	if (!m->showbar || !m->statusbar.area.width || !m->statusbar.area.height) {
-		/* Bar toggled off but already laid out once: it is sliding out
-		 * with the tile edge. Tear down popups and menus, but leave the
-		 * bar's own nodes alone — blanking the modules mid-slide would
-		 * show an empty bar gliding off. statusbar_anim_sync owns the
-		 * tree's visibility and disables it once it is off-screen. */
+		close_popups(m);
+		/* Sliding out keeps the modules. */
 		if (m->statusbar.slot.height > 0) {
-			if (m->statusbar.tray_menu.tree) {
-				nx_scene_node_set_enabled(
-					&m->statusbar.tray_menu.tree->node, 0);
-				m->statusbar.tray_menu.visible = 0;
-			}
-			if (m->statusbar.cpu_popup.tree) {
-				nx_scene_node_set_enabled(
-					&m->statusbar.cpu_popup.tree->node, 0);
-				m->statusbar.cpu_popup.visible = 0;
-			}
-			if (m->statusbar.net_popup.tree) {
-				nx_scene_node_set_enabled(
-					&m->statusbar.net_popup.tree->node, 0);
-				m->statusbar.net_popup.visible = 0;
-			}
 			statusbar_anim_sync(m);
 			return;
 		}
 		nx_scene_node_set_enabled(&m->statusbar.tree->node, 0);
-		if (m->statusbar.tags.tree) {
-			nx_scene_node_set_enabled(&m->statusbar.tags.tree->node, 0);
-			m->statusbar.tags.x = 0;
-		}
-		if (m->statusbar.traylabel.tree) {
-			nx_scene_node_set_enabled(&m->statusbar.traylabel.tree->node, 0);
-			m->statusbar.traylabel.x = 0;
-		}
-		if (m->statusbar.tray_menu.tree) {
-			nx_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 0);
-			m->statusbar.tray_menu.visible = 0;
-		}
-		if (m->statusbar.cpu.tree) {
-			nx_scene_node_set_enabled(&m->statusbar.cpu.tree->node, 0);
-			m->statusbar.cpu.x = 0;
-		}
-		if (m->statusbar.net.tree) {
-			nx_scene_node_set_enabled(&m->statusbar.net.tree->node, 0);
-			m->statusbar.net.x = 0;
-		}
-		if (m->statusbar.bluetooth.tree) {
-			nx_scene_node_set_enabled(&m->statusbar.bluetooth.tree->node, 0);
-			m->statusbar.bluetooth.x = 0;
-		}
-		if (m->statusbar.display.tree) {
-			nx_scene_node_set_enabled(&m->statusbar.display.tree->node, 0);
-			m->statusbar.display.x = 0;
-		}
-		if (m->statusbar.battery.tree) {
-			nx_scene_node_set_enabled(&m->statusbar.battery.tree->node, 0);
-			m->statusbar.battery.x = 0;
-		}
-			if (m->statusbar.light.tree) {
-				nx_scene_node_set_enabled(&m->statusbar.light.tree->node, 0);
-				m->statusbar.light.x = 0;
-			}
-			if (m->statusbar.mic.tree) {
-				nx_scene_node_set_enabled(&m->statusbar.mic.tree->node, 0);
-				m->statusbar.mic.x = 0;
-			}
-			if (m->statusbar.volume.tree) {
-				nx_scene_node_set_enabled(&m->statusbar.volume.tree->node, 0);
-				m->statusbar.volume.x = 0;
-			}
-		if (m->statusbar.ram.tree) {
-			nx_scene_node_set_enabled(&m->statusbar.ram.tree->node, 0);
-			m->statusbar.ram.x = 0;
-		}
-		if (m->statusbar.clock.tree) {
-			nx_scene_node_set_enabled(&m->statusbar.clock.tree->node, 0);
-			m->statusbar.clock.x = 0;
-		}
-		if (m->statusbar.power.tree) {
-			nx_scene_node_set_enabled(&m->statusbar.power.tree->node, 0);
-			m->statusbar.power.x = 0;
-		}
-		if (m->statusbar.cpu_popup.tree) {
-			nx_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
-			m->statusbar.cpu_popup.visible = 0;
-		}
-		if (m->statusbar.net_popup.tree) {
-			nx_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
-			m->statusbar.net_popup.visible = 0;
-		}
+		hide_modules(m);
 		return;
 	}
 
 	nx_scene_node_set_enabled(&m->statusbar.tree->node, 1);
-
-	/* statusbar.conf drives everything from here: which modules show,
-	 * their side, their order (file order) and icons-only. A module the
-	 * file does not list stays disabled. */
 	barmod_sync_flags(m);
-	{
-		int i, right_start, mid_w, mid_n, mx;
-		const BarModCfg *cfg;
-		StatusModule *mod;
+	if (m->statusbar.cpu_popup.tree && !m->statusbar.cpu_popup.visible)
+		nx_scene_node_set_enabled(&m->statusbar.cpu_popup.tree->node, 0);
+	bar_layout_modules(m);
+	/* Only placed modules show. */
+	for (size_t i = 0; i < BARMOD_DEF_COUNT; i++) {
+		StatusModule *mod = barmod_at(m, (int)i);
 
-		for (i = 0; i < (int)BARMOD_DEF_COUNT; i++) {
-			mod = barmod_at(m, i);
-			if (mod->tree)
-				nx_scene_node_set_enabled(&mod->tree->node,
-					mod->width > 0 &&
-					barmod_find(barmod_defs[i].name) != NULL);
-		}
-		if (m->statusbar.cpu_popup.tree && m->statusbar.cpu.width > 0) {
-			if (!m->statusbar.cpu_popup.visible)
-				nx_scene_node_set_enabled(
-					&m->statusbar.cpu_popup.tree->node, 0);
-		}
-
-		spacing = statusbar_module_spacing;
-
-		/* Left group, file order. */
-		x = 0;
-		for (i = 0; i < barmod_count(); i++) {
-			cfg = barmod_get(i);
-			if (cfg->side != 0)
-				continue;
-			mod = barmod_by_name(m, cfg->name);
-			if (!mod || !mod->tree || mod->width <= 0)
-				continue;
-			nx_scene_node_set_position(&mod->tree->node, x, 0);
-			mod->x = x;
-			if (mod == &m->statusbar.traylabel) {
-				/* rendertray pads its trailing edge by
-				 * module_padding/2; subtract it so the gap to
-				 * the next icon-only module is exactly
-				 * TRAY_ICON_GAP. */
-				int tray_pad = statusbar_module_padding / 2;
-				if (tray_pad < 1)
-					tray_pad = 1;
-				x += mod->width + TRAY_ICON_GAP - tray_pad;
-			} else if (mod == &m->statusbar.net ||
-					mod == &m->statusbar.bluetooth) {
-				/* tray cluster: spaced like the SNI icons */
-				x += mod->width + TRAY_ICON_GAP;
-			} else {
-				x += mod->width + spacing;
-			}
-		}
-		left_end = x;
-
-		/* Right group, file order left→right, placed from the edge. */
-		x = m->statusbar.area.width;
-		for (i = barmod_count() - 1; i >= 0; i--) {
-			cfg = barmod_get(i);
-			if (cfg->side != 2)
-				continue;
-			mod = barmod_by_name(m, cfg->name);
-			if (!mod || !mod->tree || mod->width <= 0)
-				continue;
-			x -= mod->width;
-			nx_scene_node_set_position(&mod->tree->node, x, 0);
-			mod->x = x;
-			x -= spacing;
-		}
-		right_start = x + spacing;
-		if (right_start > m->statusbar.area.width)
-			right_start = m->statusbar.area.width;
-
-		/* Middle group: centered in the free span; hidden when it does
-		 * not fit (same rule the window-title always had). */
-		mid_w = 0;
-		mid_n = 0;
-		for (i = 0; i < barmod_count(); i++) {
-			cfg = barmod_get(i);
-			if (cfg->side != 1)
-				continue;
-			mod = barmod_by_name(m, cfg->name);
-			if (!mod || !mod->tree || mod->width <= 0)
-				continue;
-			mid_w += mod->width + (mid_n > 0 ? spacing : 0);
-			mid_n++;
-		}
-		mx = left_end + (right_start - left_end - mid_w) / 2;
-		for (i = 0; i < barmod_count(); i++) {
-			cfg = barmod_get(i);
-			if (cfg->side != 1)
-				continue;
-			mod = barmod_by_name(m, cfg->name);
-			if (!mod || !mod->tree)
-				continue;
-			if (mod->width <= 0 || mid_w <= 0 ||
-					right_start - left_end < mid_w) {
-				nx_scene_node_set_enabled(&mod->tree->node, 0);
-				continue;
-			}
-			nx_scene_node_set_position(&mod->tree->node, mx, 0);
-			mod->x = mx;
-			nx_scene_node_set_enabled(&mod->tree->node, 1);
-			mx += mod->width + spacing;
-		}
+		if (mod->tree)
+			nx_scene_node_set_enabled(&mod->tree->node, mod->placed);
 	}
 
 	if (m->statusbar.cpu_popup.tree) {
-		if (m->statusbar.cpu.width > 0 && m->statusbar.area.height > 0) {
+		if (m->statusbar.cpu.placed && m->statusbar.area.height > 0) {
 			int popup_x = m->statusbar.cpu.x;
 			int max_x = m->statusbar.area.width - m->statusbar.cpu_popup.width;
 			if (max_x < 0)
@@ -4488,22 +3257,15 @@ popup_delay_timeout(void *data)
 	Monitor *m;
 	(void)data;
 
-	/* Full hover re-poll for the bar under the cursor: motionnotify's
-	 * 8ms throttle can drop the burst's last event, leaving the module
-	 * under the resting cursor without hover state (popup never shows).
-	 * The throttled path schedules this timeout to catch up. */
+	/* Catch up the throttled last motion. */
 	m = xytomon(cursor->x, cursor->y);
-	if (m && m->showbar) {
-		/* fullscreen_visible_on, not focustop: a fullscreen client
-		 * bound to an INACTIVE workspace must not block bar hover. */
-		if (!fullscreen_visible_on(m)) {
-			updatecpuhover(m, cursor->x, cursor->y);
-			updateramhover(m, cursor->x, cursor->y);
-			updatebatteryhover(m, cursor->x, cursor->y);
-			updatenethover(m, cursor->x, cursor->y);
-			updateinfopopups(m, cursor->x, cursor->y);
-			tray_menu_update_hover(m, cursor->x, cursor->y);
-		}
+	if (m && m->showbar && !fullscreen_visible_on(m)) {
+		updatecpuhover(m, cursor->x, cursor->y);
+		updateramhover(m, cursor->x, cursor->y);
+		updatebatteryhover(m, cursor->x, cursor->y);
+		updatenethover(m, cursor->x, cursor->y);
+		updateinfopopups(m, cursor->x, cursor->y);
+		tray_menu_update_hover(m, cursor->x, cursor->y);
 	}
 
 	wl_list_for_each(m, &mons, link) {
@@ -4528,6 +3290,9 @@ popup_delay_timeout(void *data)
 			renderbatterypopup(m);
 		}
 	}
+	m = xytomon(cursor->x, cursor->y);
+	if (m && m->showbar)
+		statusbar_hover_update(m, cursor->x, cursor->y);
 	return 0;
 }
 
@@ -4616,16 +3381,11 @@ layoutstatusbar(Monitor *m, const struct nx_box *area, struct nx_box *client_are
 	if (!m->showbar) {
 		hidetagthumbnail(m);
 		*client_area = *area;
-		/* Arm a full module re-render for the re-show layout: buffer
-		 * nodes can lose their contents while the bar is away (scene
-		 * cleanup on any disabled subtree), and the change-gated
-		 * refresh paths never repaint unchanged text — so repaint
-		 * everything the moment the bar comes back instead of trusting
-		 * the parked content to have survived. */
+		/* Full repaint on re-show. */
 		m->statusbar.last_layout_h = 0;
 		m->statusbar.tags.render_sig = 0;
-		/* Node stays in the scene and slides out with the tile edge —
-		 * statusbar_anim_sync parks it once it is fully off-screen. */
+		m->statusbar.pills_settled = 0;
+		bar_pill_hide(&m->statusbar.pill[PILL_HOVER], m);
 		statusbar_anim_sync(m);
 		return;
 	}
@@ -4645,18 +3405,10 @@ layoutstatusbar(Monitor *m, const struct nx_box *area, struct nx_box *client_are
 
 	m->statusbar.area = bar_area;
 	m->statusbar.slot = bar_area;
-	/* Position comes from the slide state, not straight from bar_area:
-	 * on re-show the bar starts off-screen and rides the tile-area
-	 * spring back down. */
+	/* Position rides the slide spring. */
 	statusbar_anim_sync(m);
 
-	/* Tags reflect occupancy/focus which changes with every arrange —
-	 * always re-render.  The other modules only depend on bar height
-	 * and their own text; their refresh paths (2 s cpu tick, 45 s icon
-	 * tick, volume/net events) re-render on content change, so a full
-	 * re-rasterization here on EVERY arrangelayers (each layer-surface
-	 * commit!) is wasted work unless the height
-	 * changed or the bar was just re-shown. */
+	/* Others re-render only on height change. */
 	renderworkspaces(m, &m->statusbar.tags, bar_area.height);
 	diag_logf("BAR", "layout %s barh=%d tags_w=%d boxes=%d font=%d reshow=%d",
 		m->nx_output->name, bar_area.height, m->statusbar.tags.width,
@@ -4700,11 +3452,7 @@ layoutstatusbar(Monitor *m, const struct nx_box *area, struct nx_box *client_are
 			m->statusbar.terminfo.last_render_text[0] = '\0';
 			refreshstatusterminfo();
 		}
-		/* Open popups re-anchor with the bar; full card re-raster is
-		 * only needed here on a geometry change — content refresh has
-		 * its own 2 s timer.  Outside this gate an animating layer
-		 * client (notification, OSD) commit-storms arrangelayers and
-		 * re-rastered both cards per commit. */
+		/* Re-anchor open popups. */
 		if (m->statusbar.cpu_popup.tree && m->statusbar.cpu_popup.visible)
 			rendercpupopup(m);
 		if (m->statusbar.net_popup.tree && m->statusbar.net_popup.visible)
@@ -4802,6 +3550,9 @@ refreshstatusbattery(void)
 	int barh;
 	double percent, display;
 	const char *icon = battery_icon_100;
+	BattSnapshot snap;
+	int charging = battwatch_get(&snap) && !strcmp(snap.status, "Charging");
+	int force_render = charging != battery_charging;
 
 	percent = battery_percent();
 	display = percent;
@@ -4836,12 +3587,14 @@ refreshstatusbattery(void)
 	if (strncmp(battery_icon_path, icon, sizeof(battery_icon_path)) != 0) {
 		snprintf(battery_icon_path, sizeof(battery_icon_path), "%s", icon);
 	}
+	battery_charging = charging;
 
 	wl_list_for_each(m, &mons, link) {
 		if (!m->statusbar.battery.tree)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		if (status_should_render(&m->statusbar.battery, barh, battery_text)) {
+		if (status_should_render(&m->statusbar.battery, barh, battery_text)
+				|| force_render) {
 			renderbattery(&m->statusbar.battery, barh, battery_text);
 			positionstatusmodules(m);
 		}
@@ -5005,7 +3758,7 @@ refreshstatusvolume(void)
 		force_render = 1;
 	}
 
-	volume_text_color = use_muted_color ? statusbar_volume_muted_fg : statusbar_fg;
+	volume_text_color = use_muted_color ? statusbar_crit_fg : statusbar_fg;
 	if (use_muted_color != volume_last_color_is_muted) {
 		force_render = 1;
 	}
@@ -5105,7 +3858,7 @@ refreshstatusmic(void)
 		force_render = 1;
 	}
 
-	mic_text_color = use_muted_color ? statusbar_mic_muted_fg : statusbar_fg;
+	mic_text_color = use_muted_color ? statusbar_crit_fg : statusbar_fg;
 	if (use_muted_color != mic_last_color_is_muted) {
 		force_render = 1;
 		mic_last_color_is_muted = use_muted_color;
@@ -5168,15 +3921,9 @@ refreshstatustags(void)
 			continue;
 		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
 		renderworkspaces(m, &m->statusbar.tags, barh);
-		/* Re-render rather than blank: blanking left the tray gone until
-		 * the 45 s icon tick, and with the bar hidden that gap outlives
-		 * the re-show — the bar would come back without its tray. */
+		/* Re-render, never blank the tray. */
 		if (m->statusbar.traylabel.tree)
 			rendertray(m, barh);
-		m->statusbar.tags.hover_tag = -1;
-		for (int i = 0; i < TAGCOUNT; i++)
-			m->statusbar.tags.hover_alpha[i] = 0.0f;
-		updatehoverrects(&m->statusbar.tags);
 		positionstatusmodules(m);
 	}
 }
@@ -5421,57 +4168,6 @@ updatestatuscpu(void *data)
 	return 0;
 }
 
-int
-updatehoverfade(void *data)
-{
-	int need_more = 0;
-	Monitor *mon;
-	float step;
-
-	(void)data;
-
-	if (statusbar_hover_fade_ms <= 0)
-		return 0;
-
-	step = 16.0f / (float)statusbar_hover_fade_ms;
-
-	wl_list_for_each(mon, &mons, link) {
-		Monitor *m = mon;
-		int barh;
-		if (!m->showbar || !m->statusbar.tags.tree)
-			continue;
-		if (m->statusbar.tags.hover_tag < 0 && m->statusbar.tags.tagmask == 0)
-			continue;
-
-		for (int i = 0; i < TAGCOUNT; i++) {
-			float target = (m->statusbar.tags.hover_tag == i) ? 1.0f : 0.0f;
-			float alpha = m->statusbar.tags.hover_alpha[i];
-			if (target > alpha) {
-				alpha += step;
-				if (alpha > target)
-					alpha = target;
-			} else if (target < alpha) {
-				alpha -= step;
-				if (alpha < target)
-					alpha = target;
-			}
-			if (alpha != m->statusbar.tags.hover_alpha[i])
-				need_more = 1;
-			m->statusbar.tags.hover_alpha[i] = alpha;
-		}
-
-		barh = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-		renderworkspaces(m, &m->statusbar.tags, barh);
-		updatehoverrects(&m->statusbar.tags);
-		positionstatusmodules(m);
-	}
-
-	if (need_more && status_hover_timer)
-		wl_event_source_timer_update(status_hover_timer, 16);
-
-	return 0;
-}
-
 void
 updatecpuhover(Monitor *m, double cx, double cy)
 {
@@ -5518,10 +4214,8 @@ updatecpuhover(Monitor *m, double cx, double cy)
 		popup_hover = 1;
 	}
 
-	if (lx >= m->statusbar.cpu.x &&
-			lx < m->statusbar.cpu.x + m->statusbar.cpu.width &&
-			ly >= 0 && ly < m->statusbar.area.height &&
-			m->statusbar.cpu.width > 0) {
+	if (bar_module_hit(&m->statusbar.cpu, lx) &&
+			ly >= 0 && ly < m->statusbar.area.height) {
 		inside = 1;
 	} else if (popup_hover) {
 		inside = 1;
@@ -5635,10 +4329,8 @@ updateramhover(Monitor *m, double cx, double cy)
 		popup_hover = 1;
 	}
 
-	if (lx >= m->statusbar.ram.x &&
-			lx < m->statusbar.ram.x + m->statusbar.ram.width &&
-			ly >= 0 && ly < m->statusbar.area.height &&
-			m->statusbar.ram.width > 0) {
+	if (bar_module_hit(&m->statusbar.ram, lx) &&
+			ly >= 0 && ly < m->statusbar.area.height) {
 		inside = 1;
 	} else if (popup_hover) {
 		inside = 1;
@@ -5726,8 +4418,8 @@ updatenethover(Monitor *m, double cx, double cy)
 
 	p = &m->statusbar.net_popup;
 
-	/* Anchor on the net module itself */
-	p->anchor_w = m->statusbar.net.width;
+	/* Anchor on the placed net module. */
+	p->anchor_w = m->statusbar.net.placed ? m->statusbar.net.width : 0;
 	if (p->anchor_w > 0) {
 		p->anchor_x = m->statusbar.net.x;
 		if (p->width > 0 && m->statusbar.area.width > 0) {
@@ -5915,60 +4607,14 @@ initstatusbar(Monitor *m)
 	m->statusbar.area = (struct nx_box){0};
 	m->statusbar.tree = nx_scene_tree_create(layers[LyrTop]);
 	if (m->statusbar.tree) {
-		m->statusbar.tags.tree = nx_scene_tree_create(m->statusbar.tree);
-		if (m->statusbar.tags.tree) {
-			m->statusbar.tags.bg = nx_scene_tree_create(m->statusbar.tags.tree);
-			m->statusbar.tags.hover_tag = -1;
-			for (int i = 0; i < TAGCOUNT; i++)
-				m->statusbar.tags.hover_alpha[i] = 0.0f;
-		}
-		m->statusbar.traylabel.tree = nx_scene_tree_create(m->statusbar.tree);
-		if (m->statusbar.traylabel.tree)
-			m->statusbar.traylabel.bg = nx_scene_tree_create(m->statusbar.traylabel.tree);
-		m->statusbar.terminfo.tree = nx_scene_tree_create(m->statusbar.tree);
+		for (size_t i = 0; i < BARMOD_DEF_COUNT; i++)
+			barmod_at(m, (int)i)->tree =
+				nx_scene_tree_create(m->statusbar.tree);
+		bar_pills_init(&m->statusbar);
+		m->statusbar.tags.active_box = -1;
 		m->statusbar.tray_menu.tree = nx_scene_tree_create(m->statusbar.tree);
-		if (m->statusbar.tray_menu.tree) {
-			m->statusbar.tray_menu.bg = nx_scene_tree_create(m->statusbar.tray_menu.tree);
-			m->statusbar.tray_menu.visible = 0;
+		if (m->statusbar.tray_menu.tree)
 			nx_scene_node_set_enabled(&m->statusbar.tray_menu.tree->node, 0);
-		}
-		m->statusbar.cpu.tree = nx_scene_tree_create(m->statusbar.tree);
-		if (m->statusbar.cpu.tree)
-			m->statusbar.cpu.bg = nx_scene_tree_create(m->statusbar.cpu.tree);
-	m->statusbar.net.tree = nx_scene_tree_create(m->statusbar.tree);
-	if (m->statusbar.net.tree) {
-		m->statusbar.net.bg = nx_scene_tree_create(m->statusbar.net.tree);
-	}
-	m->statusbar.battery.tree = nx_scene_tree_create(m->statusbar.tree);
-	if (m->statusbar.battery.tree)
-		m->statusbar.battery.bg = nx_scene_tree_create(m->statusbar.battery.tree);
-	m->statusbar.light.tree = nx_scene_tree_create(m->statusbar.tree);
-	if (m->statusbar.light.tree)
-		m->statusbar.light.bg = nx_scene_tree_create(m->statusbar.light.tree);
-	m->statusbar.mic.tree = nx_scene_tree_create(m->statusbar.tree);
-	if (m->statusbar.mic.tree)
-		m->statusbar.mic.bg = nx_scene_tree_create(m->statusbar.mic.tree);
-	m->statusbar.volume.tree = nx_scene_tree_create(m->statusbar.tree);
-	if (m->statusbar.volume.tree)
-		m->statusbar.volume.bg = nx_scene_tree_create(m->statusbar.volume.tree);
-	m->statusbar.disk.tree = nx_scene_tree_create(m->statusbar.tree);
-	if (m->statusbar.disk.tree)
-		m->statusbar.disk.bg = nx_scene_tree_create(m->statusbar.disk.tree);
-	m->statusbar.bluetooth.tree = nx_scene_tree_create(m->statusbar.tree);
-	if (m->statusbar.bluetooth.tree)
-		m->statusbar.bluetooth.bg = nx_scene_tree_create(m->statusbar.bluetooth.tree);
-	m->statusbar.display.tree = nx_scene_tree_create(m->statusbar.tree);
-	if (m->statusbar.display.tree)
-		m->statusbar.display.bg = nx_scene_tree_create(m->statusbar.display.tree);
-	m->statusbar.ram.tree = nx_scene_tree_create(m->statusbar.tree);
-	if (m->statusbar.ram.tree)
-		m->statusbar.ram.bg = nx_scene_tree_create(m->statusbar.ram.tree);
-	m->statusbar.clock.tree = nx_scene_tree_create(m->statusbar.tree);
-	if (m->statusbar.clock.tree)
-		m->statusbar.clock.bg = nx_scene_tree_create(m->statusbar.clock.tree);
-	m->statusbar.power.tree = nx_scene_tree_create(m->statusbar.tree);
-	if (m->statusbar.power.tree)
-		m->statusbar.power.bg = nx_scene_tree_create(m->statusbar.power.tree);
 	m->statusbar.cpu_popup.tree = nx_scene_tree_create(m->statusbar.tree);
 	if (m->statusbar.cpu_popup.tree) {
 		m->statusbar.cpu_popup.bg = nx_scene_tree_create(m->statusbar.cpu_popup.tree);
@@ -6023,20 +4669,6 @@ initstatusbar(Monitor *m)
 				if (info[i]->tree)
 					nx_scene_node_set_enabled(&info[i]->tree->node, 0);
 			}
-		}
-		{
-			StatusModule *mods[] = { &m->statusbar.tags,
-				&m->statusbar.traylabel, &m->statusbar.terminfo,
-				&m->statusbar.cpu, &m->statusbar.net,
-				&m->statusbar.battery, &m->statusbar.light,
-				&m->statusbar.mic, &m->statusbar.volume,
-				&m->statusbar.disk, &m->statusbar.bluetooth,
-				&m->statusbar.display, &m->statusbar.ram,
-				&m->statusbar.clock, &m->statusbar.power };
-			for (size_t i = 0; i < LENGTH(mods); i++)
-				if (mods[i]->tree)
-					nx_scene_tree_set_opacity(mods[i]->tree,
-							statusbar_opacity);
 		}
 	}
 	if (!m->modal.tree) {
@@ -6147,11 +4779,7 @@ initstatusbar(Monitor *m)
 	}
 }
 
-/* Tear down everything initstatusbar hung off the *global* layer trees.
- * layers[LyrTop]/[LyrBlock] outlive the monitor, so without this a
- * destroyed output (Nvidia hotplug/suspend re-enumerates its outputs)
- * leaves its bar behind as a frozen copy in layout space — the new
- * monitor's bar just gets drawn on top of the corpse. */
+/* Free nodes on global layers. */
 void
 cleanupstatusbar(Monitor *m)
 {
@@ -6159,21 +4787,22 @@ cleanupstatusbar(Monitor *m)
 		return;
 
 	tray_menu_clear(&m->statusbar.tray_menu);
-	m->statusbar.tray_menu.hover_rect = NULL;
 
-	/* Popup card views hold scene pointers into the statusbar tree and
-	 * may sit on the show-animation timer list — detach before the tree
-	 * (and every node in it) is destroyed. */
+	/* Detach views before the tree dies. */
 	{
-		PopupView *views[8] = { &m->statusbar.cpu_popup.view,
+		PopupView *views[] = { &m->statusbar.cpu_popup.view,
 			&m->statusbar.ram_popup.view,
 			&m->statusbar.battery_popup.view,
 			&m->statusbar.net_popup.view,
 			&m->statusbar.clock_popup.view,
 			&m->statusbar.volume_popup.view,
 			&m->statusbar.mic_popup.view,
-			&m->statusbar.light_popup.view };
-		for (int i = 0; i < 8; i++) {
+			&m->statusbar.light_popup.view,
+			&m->statusbar.disk_popup.view,
+			&m->statusbar.bt_popup.view,
+			&m->statusbar.display_popup.view,
+			&m->statusbar.power_popup.view };
+		for (size_t i = 0; i < LENGTH(views); i++) {
 			popup_view_hide(views[i]);
 			memset(views[i], 0, sizeof(*views[i]));
 		}
@@ -6181,6 +4810,10 @@ cleanupstatusbar(Monitor *m)
 		m->statusbar.volume_popup.tree = NULL;
 		m->statusbar.mic_popup.tree = NULL;
 		m->statusbar.light_popup.tree = NULL;
+		m->statusbar.disk_popup.tree = NULL;
+		m->statusbar.bt_popup.tree = NULL;
+		m->statusbar.display_popup.tree = NULL;
+		m->statusbar.power_popup.tree = NULL;
 	}
 
 	if (m->statusbar.tree)
@@ -6199,78 +4832,6 @@ cleanupstatusbar(Monitor *m)
 	m->nixpkgs.tree = NULL;
 	m->sudo_popup.tree = NULL;
 	m->gamepad_menu.tree = NULL;
-}
-
-void
-updatetaghover(Monitor *m, double cx, double cy)
-{
-	StatusModule *tags;
-	int lx, ly, hover = -1;
-	int bar_h;
-
-	if (!m || !m->showbar)
-		return;
-
-	tags = &m->statusbar.tags;
-	if (!tags->tree || m->statusbar.area.width <= 0 || m->statusbar.area.height <= 0)
-		return;
-
-	lx = (int)floor(cx) - m->statusbar.area.x;
-	ly = (int)floor(cy) - m->statusbar.area.y;
-	if (lx >= 0 && ly >= 0 && lx < m->statusbar.area.width && ly < m->statusbar.area.height
-			&& lx < tags->width) {
-		for (int i = 0; i < tags->box_count; i++) {
-			if (lx >= tags->box_x[i] && lx < tags->box_x[i] + tags->box_w[i]) {
-				hover = tags->box_tag[i];
-				break;
-			}
-		}
-	}
-
-	if (hover == tags->hover_tag)
-		return;
-
-	tags->hover_tag = hover;
-	bar_h = m->statusbar.area.height ? m->statusbar.area.height : (int)statusbar_height;
-	if (statusbar_hover_fade_ms <= 0) {
-		for (int i = 0; i < TAGCOUNT; i++)
-			tags->hover_alpha[i] = (tags->hover_tag == i) ? 1.0f : 0.0f;
-		renderworkspaces(m, tags, bar_h);
-		updatehoverrects(tags);
-		positionstatusmodules(m);
-		return;
-	}
-
-	renderworkspaces(m, tags, bar_h);
-	positionstatusmodules(m);
-	if (status_hover_timer)
-		wl_event_source_timer_update(status_hover_timer, 0);
-	else
-		schedule_hover_timer();
-}
-
-void
-schedule_hover_timer(void)
-{
-	Monitor *mon;
-
-	if (!status_hover_timer)
-		return;
-
-	wl_list_for_each(mon, &mons, link) {
-		Monitor *m = mon;
-		int active = (m->statusbar.tags.hover_tag >= 0);
-		for (int i = 0; i < TAGCOUNT && !active; i++) {
-			if (m->statusbar.tags.hover_alpha[i] > 0.0f) {
-				active = 1;
-				break;
-			}
-		}
-		if (active) {
-			wl_event_source_timer_update(status_hover_timer, 16);
-			return;
-		}
-	}
 }
 
 /* Legacy stdout status printer (for external bars). The embedded bar
@@ -6359,6 +4920,21 @@ statusbar_force_refresh(Monitor *m)
 	schedule_status_timer();
 }
 
+/* Re-rasterize everything the bar drew. */
+void
+statusbar_repaint(Monitor *m)
+{
+	StatusBar *bar = &m->statusbar;
+
+	bar->last_layout_h = 0;
+	for (size_t i = 0; i < BARMOD_DEF_COUNT; i++)
+		barmod_at(m, (int)i)->render_sig = 0;
+	bar_pills_invalidate(bar);
+	bar_pill_hide(&bar->pill[PILL_HOVER], m);
+	close_popups(m);
+	arrangelayers(m);
+}
+
 void
 togglestatusbar(const Arg *arg)
 {
@@ -6376,14 +4952,11 @@ togglestatusbar(const Arg *arg)
 }
 
 
-/* Anchor for every bar popup/dropdown: not flush against the bar, but at
- * the top edge of the tiles below it (bar bottom + the outer tile gap).
- * Hover keep-alive rects still start at the bar bottom so the cursor can
- * cross the gap strip without the popup closing. */
+/* Popups clear the bar and its gap. */
 int
 statusbar_popup_y(Monitor *m)
 {
 	int gap = (m->gaps && gappx > 0) ? (int)gappx : 0;
 
-	return m->statusbar.area.height + gap;
+	return m->statusbar.area.height + gap + POPUP_DROP;
 }

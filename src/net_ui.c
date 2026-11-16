@@ -444,8 +444,6 @@ render_hidden_view(Card *card, int hot)
 
 #define SPEC_TICK_MS 33
 
-static struct nx_scene_buffer *spec_node;   /* child of view content;
-                                              * reset on every re-render */
 static int spec_x, spec_y, spec_w, spec_h;
 static double spec_frac;
 static const float *spec_accent;
@@ -524,12 +522,11 @@ spec_rounded(cairo_t *cr, double x, double y, double w, double h, double r)
 	cairo_close_path(cr);
 }
 
-/* (Re)create the overlay node and swap in a freshly drawn frame. Safe
- * to call right after a card re-render so the spectrum never drops out
- * for a frame. */
+/* Redraw the live spectrum. */
 static void
 spec_overlay_draw(NetPopup *p)
 {
+	struct nx_scene_buffer *ov;
 	struct PixmanBuffer *pb;
 	cairo_surface_t *cs;
 	cairo_t *cr;
@@ -537,17 +534,7 @@ spec_overlay_draw(NetPopup *p)
 	int nbars, i;
 	double base, frac, t;
 
-	/* Wait out the card show animation: extra children don't take part
-	 * in its fade, so the spectrum joins once the card has settled. */
-	if (spec_w <= 0 || !p->view.content || p->view.animating)
-		return;
-	if (!spec_node) {
-		spec_node = nx_scene_buffer_create(p->view.content, NULL);
-		if (spec_node)
-			nx_scene_node_set_position(&spec_node->node,
-					spec_x, spec_y);
-	}
-	if (!spec_node)
+	if (spec_w <= 0 || !(ov = popup_view_overlay(&p->view, spec_x, spec_y)))
 		return;
 	pb = spec_buf_acquire(spec_w, spec_h);
 	cs = cairo_image_surface_create_for_data(pb->data,
@@ -601,7 +588,7 @@ spec_overlay_draw(NetPopup *p)
 	cairo_destroy(cr);
 	cairo_surface_flush(cs);
 	cairo_surface_destroy(cs);
-	nx_scene_buffer_set_buffer(spec_node, &pb->base);
+	nx_scene_buffer_set_buffer(ov, &pb->base);
 }
 
 /* ~30 fps heartbeat; stops itself the moment no net popup is visible
@@ -621,7 +608,6 @@ spec_tick(void *data)
 		}
 	}
 	if (!p || spec_w <= 0) {
-		spec_node = NULL;
 		spec_bufs_drop();
 		return 0;   /* stays disarmed until the next popup render */
 	}
@@ -863,9 +849,7 @@ finish:
 	p->width = p->view.w;
 	p->height = p->view.h;
 
-	/* apply destroyed the previous overlay with the old card content;
-	 * redraw right away so the spectrum never blinks out for a frame */
-	spec_node = NULL;
+	/* Redraw the overlay apply destroyed. */
 	spec_x = res.wave_x;
 	spec_y = res.wave_y;
 	spec_w = res.wave_w;

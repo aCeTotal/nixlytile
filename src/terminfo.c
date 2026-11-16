@@ -16,6 +16,13 @@
 #define TI_PATH_TAIL  46
 #define TI_SSH_SHOWN  100
 
+enum ti_kind { TI_CWD, TI_SSH };
+
+typedef struct {
+	enum ti_kind kind;
+	char text[128];
+} TiInfo;
+
 int
 is_terminal_client(Client *c)
 {
@@ -121,14 +128,17 @@ ssh_target(pid_t pid, char *out, size_t n)
  * readlink of a cwd on a dead network mount (NFS/sshfs) can block
  * uninterruptibly — that must never stall the compositor thread. */
 static void
-terminfo_collect(pid_t cur, char *out, size_t n)
+terminfo_collect(pid_t cur, TiInfo *info)
 {
 	char comm[64], target[128], cwd[PATH_MAX], path[64];
+	char *out = info->text;
+	size_t n = sizeof(info->text);
 	pid_t next, deepest;
 	ssize_t l;
 	int depth;
 
 	out[0] = '\0';
+	info->kind = TI_CWD;
 	if (cur <= 1)
 		return;
 
@@ -144,7 +154,8 @@ terminfo_collect(pid_t cur, char *out, size_t n)
 		proc_comm(cur, comm, sizeof(comm));
 		if (strcmp(comm, "ssh") == 0 &&
 				ssh_target(cur, target, sizeof(target))) {
-			snprintf(out, n, "ssh %.*s", TI_SSH_SHOWN, target);
+			info->kind = TI_SSH;
+			snprintf(out, n, "%.*s", TI_SSH_SHOWN, target);
 			return;
 		}
 	}
@@ -181,8 +192,8 @@ terminfo_collect(pid_t cur, char *out, size_t n)
 
 static pthread_mutex_t ti_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t ti_wake = PTHREAD_COND_INITIALIZER;
-static char ti_text[128];          /* published result */
-static pid_t ti_text_pid;          /* pid ti_text belongs to */
+static TiInfo ti_info;             /* published result */
+static pid_t ti_text_pid;          /* pid ti_info belongs to */
 static pid_t ti_pid;               /* pid to inspect; 0 = no terminal */
 static int ti_pipe[2] = { -1, -1 };
 static int ti_started;
@@ -190,7 +201,7 @@ static int ti_started;
 static void *
 ti_worker(void *arg)
 {
-	char local[128];
+	TiInfo local;
 
 	(void)arg;
 	pthread_setname_np(pthread_self(), "nixly-terminfo");
@@ -203,17 +214,16 @@ ti_worker(void *arg)
 		pid = ti_pid;
 		pthread_mutex_unlock(&ti_lock);
 
-		local[0] = '\0';
+		local = (TiInfo){ 0 };
 		if (pid > 1)
-			terminfo_collect(pid, local, sizeof(local));
+			terminfo_collect(pid, &local);
 
-		/* Publish the pid WITH the text: the main thread refuses to
-		 * draw one terminal's cwd under another's selection, so the
-		 * pid must travel with the string it belongs to. */
+		/* Pid travels with its text. */
 		pthread_mutex_lock(&ti_lock);
-		changed = (pid != ti_text_pid || strcmp(local, ti_text) != 0);
+		changed = pid != ti_text_pid || local.kind != ti_info.kind
+			|| strcmp(local.text, ti_info.text) != 0;
 		ti_text_pid = pid;
-		snprintf(ti_text, sizeof(ti_text), "%s", local);
+		ti_info = local;
 		pthread_mutex_unlock(&ti_lock);
 		if (changed)
 			(void)!write(ti_pipe[1], "t", 1);
@@ -296,42 +306,32 @@ terminfo_wants_fast_poll(void)
 }
 
 static void
-renderterminfo(StatusModule *module, int bar_height, const char *text)
+renderterminfo(StatusModule *module, int bar_height, const TiInfo *info)
 {
-	int padding = statusbar_module_padding;
-	int text_w;
-
-	if (!module || !module->tree)
-		return;
-
-	clearstatusmodule(module);
-
-	text_w = (bar_height > 0 && text) ? status_text_width(text) : 0;
-	if (text_w <= 0) {
-		module->width = 0;
-		nx_scene_node_set_enabled(&module->tree->node, 0);
+	if (!info->text[0]) {
+		bar_module_clear(module);
 		return;
 	}
-
-	module->width = text_w + 2 * padding;
-	/* Same rounded card as the clock and the other right-hand modules. */
-	updatemodulebg(module, module->width, bar_height, statusbar_bg);
-	tray_render_label(module, text, padding, bar_height, statusbar_fg);
-	nx_scene_node_set_enabled(&module->tree->node, 1);
+	bar_module_draw(module, bar_height, &(BarLabel){
+		.icon = info->kind == TI_SSH ? GLYPH_SSH : GLYPH_TERMINAL,
+		.icon_fg = statusbar_icon_fg,
+		.text = info->text,
+		.text_fg = statusbar_fg,
+	});
 }
 
 void
 refreshstatusterminfo(void)
 {
-	char text[128];
+	static const TiInfo none;
+	TiInfo shown = { 0 };
 	Monitor *m;
 	Client *c;
 	int barh;
 
 	ti_start();
 
-	/* Hand the worker the focused terminal's pid; render whatever it
-	 * last published (at most TI_POLL_MS stale). */
+	/* Worker reads /proc, we render. */
 	c = focused_terminal();
 	{
 		pid_t want = c ? client_get_pid(c) : 0;
@@ -339,33 +339,27 @@ refreshstatusterminfo(void)
 		pthread_mutex_lock(&ti_lock);
 		if (ti_pid != want) {
 			ti_pid = want;
-			/* New selection: don't make it wait out the poll
-			 * interval — the box must track focus, not a timer. */
+			/* Wake worker on new focus. */
 			pthread_cond_signal(&ti_wake);
 		}
-		/* Only draw text the worker collected for THIS terminal;
-		 * the previous one's cwd under a new selection is exactly the
-		 * "box lags behind" symptom. */
+		/* Only this terminal's text. */
 		if (c && ti_text_pid == want)
-			snprintf(text, sizeof(text), "%s", ti_text);
-		else
-			text[0] = '\0';
+			shown = ti_info;
 		pthread_mutex_unlock(&ti_lock);
 	}
 
 	wl_list_for_each(m, &mons, link) {
-		const char *t = (m == selmon) ? text : "";
+		const TiInfo *t = m == selmon ? &shown : &none;
 
 		if (!m->statusbar.terminfo.tree)
 			continue;
-		/* Hidden and staying hidden: skip — status_should_render
-		 * treats a cached empty string as "always render". */
-		if (!*t && m->statusbar.terminfo.width == 0)
+		/* Skip hidden-and-staying-hidden. */
+		if (!t->text[0] && m->statusbar.terminfo.width == 0)
 			continue;
 		barh = m->statusbar.area.height
 			? m->statusbar.area.height : (int)statusbar_height;
-		if (status_should_render(&m->statusbar.terminfo, barh, t)
-				|| (!*t && m->statusbar.terminfo.width > 0)) {
+		if (status_should_render(&m->statusbar.terminfo, barh, t->text)
+				|| (!t->text[0] && m->statusbar.terminfo.width > 0)) {
 			renderterminfo(&m->statusbar.terminfo, barh, t);
 			positionstatusmodules(m);
 		}

@@ -1,6 +1,5 @@
-/* gaming.conf: mic binds, dynamic rendering. */
-
 #include "nixlytile.h"
+#include "vrslayer/link.h"
 
 #include <errno.h>
 #include <pwd.h>
@@ -13,36 +12,27 @@
 
 #define GAMINGCONF_NAME "gaming.conf"
 #define DYNAMIC_RENDER_KEY "dynamic-render"
+#define FOVEA_MIN_PCT 5
+#define FOVEA_DEFAULT_PCT 40
+#define BLEND_DEFAULT_PCT 15
+#define QUALITY_DEFAULT 0
+#define ZONE_MAX_PCT 100
+#define PERMILLE_PER_PCT (VRS_SIZE_UNIT / 100u)
 
-enum bind_role { BIND_TALK, BIND_VOIP };
+struct vrs_zones vrs_zones;
 
-static const struct {
+/* Sizes: percent of screen height. */
+struct zone_key {
 	const char *key;
-	enum bind_role role;
-} bind_keys[] = {
-	{ "ptt-bind", BIND_TALK },
-	{ "ptm-bind", BIND_VOIP },
+	uint32_t *value;
+	long min, max, scale;
 };
 
-/* Either keysym or button is set; held is the code holding it. */
-struct bind {
-	enum bind_role role;
-	uint32_t mods;
-	xkb_keysym_t keysym;
-	uint32_t button;
-	uint32_t held;
+static const struct zone_key zone_keys[] = {
+	{ "fovea-size", &vrs_zones.fovea, FOVEA_MIN_PCT, ZONE_MAX_PCT, PERMILLE_PER_PCT },
+	{ "blend-size", &vrs_zones.blend, 0, ZONE_MAX_PCT, PERMILLE_PER_PCT },
+	{ "periphery-quality", &vrs_zones.quality, 0, VRS_QUALITY_MAX, 1 },
 };
-
-struct keypress {
-	uint32_t mods;
-	const xkb_keysym_t *syms;
-	int nsyms;
-	const xkb_keysym_t *level0_syms;
-	int nlevel0;
-};
-
-static struct bind *binds;
-static size_t nbinds, capbinds;
 
 static char gamingconf_dir[PATH_MAX];
 static char gamingconf_path[PATH_MAX];
@@ -66,78 +56,16 @@ gamingconf_resolve_paths(void)
 		"%s/.local/nixlyos/" GAMINGCONF_NAME, home);
 }
 
-/* Push-to-mute opens the mic but closes Discord. */
+/* Clamps; garbage keeps the default. */
 static void
-apply_gate(void)
+set_zone(const struct zone_key *z, const char *value)
 {
-	int has_talk = 0, talking = 0, muting = 0;
-	uint32_t closed = 0;
-	size_t i;
+	char *end;
+	long v = strtol(value, &end, 10);
 
-	for (i = 0; i < nbinds; i++) {
-		if (binds[i].role == BIND_TALK) {
-			has_talk = 1;
-			talking |= binds[i].held != 0;
-			continue;
-		}
-		muting |= binds[i].held != 0;
-	}
-	if (has_talk && !talking && !muting)
-		closed |= MIC_GATE_TALK;
-	if (muting)
-		closed |= MIC_GATE_VOIP;
-	mic_gate_set(closed);
-}
-
-static int
-parse_bind(const char *value, struct bind *b)
-{
-	char buf[128];
-	char *tok, *save = NULL;
-
-	snprintf(buf, sizeof(buf), "%s", value);
-	for (tok = strtok_r(buf, "+", &save); tok;
-			tok = strtok_r(NULL, "+", &save)) {
-		if (strcmp(tok, "ctrl") == 0)
-			b->mods |= NX_MODIFIER_CTRL;
-		else if (strcmp(tok, "alt") == 0)
-			b->mods |= NX_MODIFIER_ALT;
-		else if (strcmp(tok, "shift") == 0)
-			b->mods |= NX_MODIFIER_SHIFT;
-		else if (strcmp(tok, "super") == 0)
-			b->mods |= NX_MODIFIER_LOGO;
-		else if (strncmp(tok, "mouse:", 6) == 0)
-			b->button = (uint32_t)strtoul(tok + 6, NULL, 0);
-		else if (strncmp(tok, "key:", 4) == 0)
-			b->keysym = (xkb_keysym_t)strtoul(tok + 4, NULL, 0);
-		else
-			b->keysym = xkb_keysym_from_name(tok,
-				XKB_KEYSYM_CASE_INSENSITIVE);
-	}
-	if (b->button) {
-		b->keysym = XKB_KEY_NoSymbol;
-		return 1;
-	}
-	b->keysym = xkb_keysym_to_lower(b->keysym);
-	return b->keysym != XKB_KEY_NoSymbol;
-}
-
-static void
-add_bind(enum bind_role role, const char *value)
-{
-	struct bind b = { .role = role, .keysym = XKB_KEY_NoSymbol };
-	struct bind *grown;
-
-	if (!parse_bind(value, &b))
+	if (end == value || *end)
 		return;
-	if (nbinds == capbinds) {
-		size_t cap = capbinds ? capbinds * 2 : 4;
-		if (!(grown = realloc(binds, cap * sizeof(*binds))))
-			return;
-		binds = grown;
-		capbinds = cap;
-	}
-	binds[nbinds++] = b;
+	*z->value = (uint32_t)(MIN(MAX(v, z->min), z->max) * z->scale);
 }
 
 static void
@@ -153,9 +81,12 @@ add_line(char *line)
 		dynamic_render_enabled = strcmp(eq + 1, "0") != 0;
 		return;
 	}
-	for (i = 0; i < LENGTH(bind_keys); i++)
-		if (strcmp(line, bind_keys[i].key) == 0)
-			add_bind(bind_keys[i].role, eq + 1);
+	if (gaze_conf_parse(line, eq + 1))
+		return;
+	mic_bind_parse(line, eq + 1);
+	for (i = 0; i < LENGTH(zone_keys); i++)
+		if (strcmp(line, zone_keys[i].key) == 0)
+			set_zone(&zone_keys[i], eq + 1);
 }
 
 static void
@@ -164,8 +95,14 @@ gaming_conf_load(void)
 	char line[256];
 	FILE *fp;
 
-	nbinds = 0;
+	mic_bind_clear();
+	gaze_conf_reset();
 	dynamic_render_enabled = 1;
+	vrs_zones = (struct vrs_zones){
+		.fovea = FOVEA_DEFAULT_PCT * PERMILLE_PER_PCT,
+		.blend = BLEND_DEFAULT_PCT * PERMILLE_PER_PCT,
+		.quality = QUALITY_DEFAULT,
+	};
 	fp = fopen(gamingconf_path, "r");
 	if (fp) {
 		while (fgets(line, sizeof(line), fp)) {
@@ -174,88 +111,12 @@ gaming_conf_load(void)
 		}
 		fclose(fp);
 	}
-	apply_gate();
-	nx_log(NX_INFO, "gaming.conf: %zu mic bind(s), dynamic rendering %s",
-		nbinds, dynamic_render_enabled ? "on" : "off");
-}
-
-static int
-key_matches(const struct bind *b, const struct keypress *kp)
-{
-	int i;
-
-	if (b->keysym == XKB_KEY_NoSymbol ||
-			CLEANMASK(kp->mods) != CLEANMASK(b->mods))
-		return 0;
-	for (i = 0; i < kp->nsyms + kp->nlevel0; i++) {
-		xkb_keysym_t sym = i < kp->nsyms ? kp->syms[i]
-			: kp->level0_syms[i - kp->nsyms];
-		if (xkb_keysym_to_lower(sym) == b->keysym)
-			return 1;
-	}
-	return 0;
-}
-
-/* Release matches the holding code, so modifiers may lift first. */
-static void
-release_code(uint32_t code)
-{
-	int changed = 0;
-	size_t i;
-
-	for (i = 0; i < nbinds; i++) {
-		if (binds[i].held != code)
-			continue;
-		binds[i].held = 0;
-		changed = 1;
-	}
-	if (changed)
-		apply_gate();
-}
-
-void
-ptt_handle_key(uint32_t mods, uint32_t keycode, const xkb_keysym_t *syms,
-	int nsyms, const xkb_keysym_t *level0_syms, int nlevel0, int pressed)
-{
-	struct keypress kp = { mods, syms, nsyms, level0_syms, nlevel0 };
-	int changed = 0;
-	size_t i;
-
-	if (!pressed) {
-		release_code(keycode);
-		return;
-	}
-	for (i = 0; i < nbinds; i++) {
-		if (binds[i].held || !key_matches(&binds[i], &kp))
-			continue;
-		binds[i].held = keycode;
-		changed = 1;
-	}
-	if (changed)
-		apply_gate();
-}
-
-void
-ptt_handle_button(uint32_t button, int pressed)
-{
-	struct nx_keyboard *kb = nx_seat_get_keyboard(seat);
-	uint32_t mods = kb ? nx_keyboard_get_modifiers(kb) : 0;
-	int changed = 0;
-	size_t i;
-
-	if (!pressed) {
-		release_code(button);
-		return;
-	}
-	for (i = 0; i < nbinds; i++) {
-		if (binds[i].held || binds[i].button != button ||
-				CLEANMASK(mods) != CLEANMASK(binds[i].mods))
-			continue;
-		binds[i].held = button;
-		changed = 1;
-	}
-	if (changed)
-		apply_gate();
+	mic_bind_apply();
+	nx_log(NX_INFO, "gaming.conf: %zu mic bind(s), dynamic rendering %s, "
+		"fovea %u%%, blend %u%%, periphery quality %u",
+		mic_bind_count(), dynamic_render_enabled ? "on" : "off",
+		vrs_zones.fovea / PERMILLE_PER_PCT, vrs_zones.blend / PERMILLE_PER_PCT,
+		vrs_zones.quality);
 }
 
 static int
@@ -325,7 +186,5 @@ gaming_conf_cleanup(void)
 		close(gamingconf_fd);
 		gamingconf_fd = -1;
 	}
-	free(binds);
-	binds = NULL;
-	nbinds = capbinds = 0;
+	mic_bind_clear();
 }

@@ -1,0 +1,57 @@
+[colors.primary]
+background = "{{colors.surface.dark.hex}}"
+foreground = "{{colors.on_surface.dark.hex}}"
+dim_foreground = "{{colors.on_surface_variant.dark.hex}}"
+bright_foreground = "{{colors.on_surface.dark.hex}}"
+
+[colors.cursor]
+text = "{{colors.surface.dark.hex}}"
+cursor = "{{colors.primary.dark.hex}}"
+
+[colors.vi_mode_cursor]
+text = "{{colors.surface.dark.hex}}"
+cursor = "{{colors.secondary.dark.hex}}"
+
+[colors.search.matches]
+foreground = "{{colors.on_tertiary_container.dark.hex}}"
+background = "{{colors.tertiary_container.dark.hex}}"
+
+[colors.search.focused_match]
+foreground = "{{colors.on_primary.dark.hex}}"
+background = "{{colors.primary.dark.hex}}"
+
+[colors.footer_bar]
+foreground = "{{colors.on_surface_variant.dark.hex}}"
+background = "{{colors.surface_container_high.dark.hex}}"
+
+[colors.hints.start]
+foreground = "{{colors.on_primary.dark.hex}}"
+background = "{{colors.primary.dark.hex}}"
+
+[colors.hints.end]
+foreground = "{{colors.on_secondary_container.dark.hex}}"
+background = "{{colors.secondary_container.dark.hex}}"
+
+[colors.selection]
+text = "{{colors.on_secondary_container.dark.hex}}"
+background = "{{colors.secondary_container.dark.hex}}"
+
+[colors.normal]
+black = "{{colors.surface_container_highest.dark.hex}}"
+red = "{{colors.red.dark.hex}}"
+green = "{{colors.green.dark.hex}}"
+yellow = "{{colors.yellow.dark.hex}}"
+blue = "{{colors.blue.dark.hex}}"
+magenta = "{{colors.magenta.dark.hex}}"
+cyan = "{{colors.cyan.dark.hex}}"
+white = "{{colors.on_surface_variant.dark.hex}}"
+
+[colors.bright]
+black = "{{colors.outline.dark.hex}}"
+red = "{{colors.on_red_container.dark.hex}}"
+green = "{{colors.on_green_container.dark.hex}}"
+yellow = "{{colors.on_yellow_container.dark.hex}}"
+blue = "{{colors.on_blue_container.dark.hex}}"
+magenta = "{{colors.on_magenta_container.dark.hex}}"
+cyan = "{{colors.on_cyan_container.dark.hex}}"
+white = "{{colors.on_surface.dark.hex}}"

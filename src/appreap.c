@@ -241,7 +241,7 @@ appreap_track(Client *c)
 	}
 	if (nroots >= REAP_MAX_ROOTS || comm_in(p.comm, display_comms))
 		return;
-	if (is_voice(p.comm) || is_service(pid))
+	if (is_voice(p.comm) || is_service(pid) || is_game_runtime_child(pid))
 		return;
 	roots[nroots++] = (Root){ .pid = pid, .start = p.start };
 }

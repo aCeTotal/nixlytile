@@ -17,40 +17,29 @@ float rootcolor[]             = COLOR(0x222222ff);
 float bordercolor[]           = COLOR(0x595959ff); /* Niri inactive */
 float focuscolor[]            = COLOR(0x00beffff); /* Niri active */
 float urgentcolor[]           = COLOR(0xff0000ff);
-unsigned int statusbar_height = 26;
-unsigned int statusbar_module_spacing = 10;
-unsigned int statusbar_module_padding = 8;
-unsigned int statusbar_icon_text_gap = 6; /* gap between icon and text */
-unsigned int statusbar_icon_text_gap_volume = 10;
-unsigned int statusbar_icon_text_gap_microphone = 8;
-unsigned int statusbar_icon_text_gap_cpu = 6;
-unsigned int statusbar_icon_text_gap_ram = 6;
-unsigned int statusbar_icon_text_gap_light = 6;
-unsigned int statusbar_icon_text_gap_battery = 2; /* slightly tighter */
-unsigned int statusbar_icon_text_gap_clock = 6;
-unsigned int statusbar_top_gap = 3;
-float statusbar_fg[]          = COLOR(0xffffffff);
-float statusbar_bg[]          = COLOR(0x00000016);
-float statusbar_opacity        = 0.4f; /* bar modules, not popups */
+unsigned int statusbar_height = 30;
+unsigned int statusbar_top_gap = 4;
+float statusbar_fg[]          = COLOR(0xe9ecf2ff);
+float statusbar_dim_fg[]      = COLOR(0x7d8597ff);
+float statusbar_icon_fg[]     = COLOR(0x9bb6ffff);
+float statusbar_ok_fg[]       = COLOR(0x7fdca4ff);
+float statusbar_warn_fg[]     = COLOR(0xf3c26bff);
+float statusbar_crit_fg[]     = COLOR(0xff6b7dff);
+float statusbar_island_bg[]   = COLOR(0x11141be0);
+float statusbar_island_edge[] = COLOR(0x2c303bff);
+float statusbar_hover_bg[]    = COLOR(0x2a2f3bff);
+float statusbar_ws_active_bg[] = COLOR(0x0f6c91ff);
+float statusbar_ws_active_fg[] = COLOR(0xe9ecf2ff);
 float statusbar_popup_bg[]    = COLOR(0x00000080); /* ~50% */
-float statusbar_volume_muted_fg[] = COLOR(0xff4c4cff);
-float statusbar_mic_muted_fg[] = COLOR(0xff4c4cff);
-float statusbar_tag_bg[]      = COLOR(0x00000033);
-float statusbar_tag_active_bg[] = COLOR(0x1565c0ff);
-float statusbar_tag_hover_bg[] = COLOR(0x66b3ffaa);
-int statusbar_hover_fade_ms   = 0;
 int statusbar_tray_force_rgba = 0; /* 1: force RGBA decode for all tray icons (last-resort for apps that send RGBA) */
 const char *statusbar_fonts[8] = {
-	"monospace:size=16:weight=Bold",
-	"monospace:size=16",
-	NULL, NULL, NULL, NULL, NULL, NULL
+	"JetBrainsMono Nerd Font Propo:size=16:weight=SemiBold",
+	NULL, NULL, NULL, NULL, NULL, NULL, NULL
 };
 const char *statusbar_font_attributes = NULL;
 int statusbar_font_spacing = 0;
 int statusbar_font_force_color = 1;
 enum fcft_subpixel statusbar_font_subpixel = FCFT_SUBPIXEL_DEFAULT;
-int statusbar_workspace_padding = 8;
-int statusbar_workspace_spacing = 4;
 int statusbar_thumb_height = 40;
 int statusbar_thumb_gap = 2;
 float statusbar_thumb_window[] = COLOR(0xffffff55);
@@ -188,7 +177,6 @@ char wallpaper_path[PATH_MAX] = "$HOME/.nixlyos/wallpapers/beach.jpg";
 /* Startup matches Niri spawn-at-startup list.  Waybar uses the
  * nixlytile-specific config (dwl/tags + matching style.css). */
 char autostart_cmd[4096] =
-	"swaybg -i \"$HOME/.nixlyos/wallpapers/beach.jpg\" -m fill & "
 	"\"$HOME/.local/bin/niri-set-max-mode.sh\" --watch & "
 	"waybar <&- & "
 	"xwayland-satellite & "

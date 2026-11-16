@@ -31,11 +31,6 @@
 static const char *dk_fs_names[6] =
 	{ "ext4", "btrfs", "xfs", "vfat", "exfat", "ntfs" };
 
-static struct nx_buffer *disk_icon_buf;
-static int disk_icon_w, disk_icon_h;
-static int disk_icon_loaded_h;
-static char disk_icon_loaded_path[PATH_MAX];
-
 static DiskSnapshot dsnap;
 
 /* Format-view state — one at a time, popup-global like the net UI. */
@@ -51,60 +46,6 @@ static struct {
 	int del_armed;          /* partition index armed for delete, -1 */
 	char pending_open[40];  /* device waiting for its mount → xdg-open */
 } dview = { .size_frac = 1.0, .del_armed = -1 };
-
-/* ── bar icon ────────────────────────────────────────────────────── */
-
-static void
-drop_disk_icon_buffer(void)
-{
-	if (disk_icon_buf) {
-		nx_buffer_drop(disk_icon_buf);
-		disk_icon_buf = NULL;
-	}
-	disk_icon_loaded_h = 0;
-	disk_icon_w = disk_icon_h = 0;
-	disk_icon_loaded_path[0] = '\0';
-}
-
-static int
-ensure_disk_icon_buffer(int target_h)
-{
-	GdkPixbuf *pixbuf = NULL;
-	GError *gerr = NULL;
-	struct nx_buffer *buf;
-	int w = 0, h = 0;
-	char resolved[PATH_MAX];
-	const char *path = disk_icon_path;
-
-	if (target_h <= 0)
-		return -1;
-	if (resolve_asset_path(disk_icon_path, resolved,
-				sizeof(resolved)) == 0 && resolved[0])
-		path = resolved;
-	if (disk_icon_buf && disk_icon_loaded_h == target_h &&
-			strncmp(disk_icon_loaded_path, path,
-				sizeof(disk_icon_loaded_path)) == 0)
-		return 0;
-	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
-		if (!pixbuf) {
-			if (gerr)
-				g_error_free(gerr);
-			return -1;
-		}
-	}
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-	drop_disk_icon_buffer();
-	disk_icon_buf = buf;
-	disk_icon_w = w;
-	disk_icon_h = h;
-	disk_icon_loaded_h = target_h;
-	snprintf(disk_icon_loaded_path, sizeof(disk_icon_loaded_path),
-			"%s", path);
-	return 0;
-}
 
 /* ── formatting helpers ──────────────────────────────────────────── */
 
@@ -153,9 +94,9 @@ renderdisk(StatusModule *module, int bar_height, const char *text)
 
 	(void)text;
 	dk_free_text(free_txt, sizeof(free_txt));
-	render_icon_label(module, bar_height, free_txt,
-			ensure_disk_icon_buffer, &disk_icon_buf,
-			&disk_icon_w, &disk_icon_h, 0, 0, statusbar_fg);
+	bar_module_draw(module, bar_height, &(BarLabel){
+		.icon = GLYPH_DISK, .icon_fg = statusbar_icon_fg,
+		.text = free_txt, .text_fg = statusbar_fg });
 }
 
 static int

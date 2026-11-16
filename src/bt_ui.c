@@ -46,9 +46,6 @@ bt_label_arm(uint64_t delay_ms)
 }
 
 char bt_icon_path[PATH_MAX] = "images/svg/bluetooth_searching.svg";
-char bt_icon_loaded_path[PATH_MAX];
-int bt_icon_loaded_h, bt_icon_w, bt_icon_h;
-struct nx_buffer *bt_icon_buf;
 static char bt_text[64];
 static BtDev bt_ui_devs[BT_DEV_MAX];
 static int bt_ui_ndevs;
@@ -144,57 +141,6 @@ bt_batt_svg(int pct)
 }
 
 void
-drop_bt_icon_buffer(void)
-{
-	if (bt_icon_buf) {
-		nx_buffer_drop(bt_icon_buf);
-		bt_icon_buf = NULL;
-	}
-	bt_icon_loaded_h = 0;
-	bt_icon_w = bt_icon_h = 0;
-	bt_icon_loaded_path[0] = '\0';
-}
-
-int
-ensure_bt_icon_buffer(int target_h)
-{
-	GdkPixbuf *pixbuf = NULL;
-	GError *gerr = NULL;
-	struct nx_buffer *buf;
-	int w = 0, h = 0;
-	char resolved[PATH_MAX];
-	const char *path = bt_icon_path;
-
-	if (target_h <= 0)
-		return -1;
-	if (resolve_asset_path(bt_icon_path, resolved, sizeof(resolved)) == 0
-			&& resolved[0])
-		path = resolved;
-	if (bt_icon_buf && bt_icon_loaded_h == target_h &&
-			strncmp(bt_icon_loaded_path, path,
-				sizeof(bt_icon_loaded_path)) == 0)
-		return 0;
-	if (tray_load_svg_pixbuf(path, target_h, &pixbuf) != 0) {
-		pixbuf = gdk_pixbuf_new_from_file(path, &gerr);
-		if (!pixbuf) {
-			if (gerr)
-				g_error_free(gerr);
-			return -1;
-		}
-	}
-	buf = statusbar_buffer_from_pixbuf(pixbuf, target_h, &w, &h);
-	if (!buf)
-		return -1;
-	drop_bt_icon_buffer();
-	bt_icon_buf = buf;
-	bt_icon_w = w;
-	bt_icon_h = h;
-	bt_icon_loaded_h = target_h;
-	snprintf(bt_icon_loaded_path, sizeof(bt_icon_loaded_path), "%s", path);
-	return 0;
-}
-
-void
 renderbluetooth(StatusModule *module, int bar_height, const char *text)
 {
 	BtAdapter a;
@@ -203,22 +149,16 @@ renderbluetooth(StatusModule *module, int bar_height, const char *text)
 	if (btidle_dormant()) {
 		a.powered = 1;
 	} else if (!a.present) {
-		if (module && module->tree) {
-			clearstatusmodule(module);
-			module->width = 0;
-			nx_scene_node_set_enabled(&module->tree->node, 0);
-		}
+		bar_module_clear(module);
 		return;
 	}
 	(void)text;
-	/* searching = default (powered); disabled variant when the radio
-	 * is off — ensure_bt_icon_buffer reloads on path change */
 	snprintf(bt_icon_path, sizeof(bt_icon_path), "%s", a.powered ?
 			"images/svg/bluetooth_searching.svg" :
 			"images/svg/bluetooth_disabled.svg");
-	render_tray_icon_module(module, bar_height,
-			ensure_bt_icon_buffer, &bt_icon_buf,
-			&bt_icon_w, &bt_icon_h);
+	bar_module_draw(module, bar_height, &(BarLabel){
+		.icon = icon_glyph_cp(bt_icon_path),
+		.icon_fg = a.powered ? statusbar_icon_fg : statusbar_dim_fg });
 }
 
 /* Popup just became visible: kick off discovery so the NEARBY list

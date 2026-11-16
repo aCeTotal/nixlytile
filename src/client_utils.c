@@ -314,21 +314,9 @@ steam_launch_bigpicture(void)
 	if (pid == 0) {
 		setsid();
 		fork_detach();
-		/* Hybrid: propagate dGPU env to Steam's Proton children.
-		 * set_steam_env() sets only bwrap-safe vars (Vulkan device
-		 * selection + Proton flags). Skips GBM_BACKEND / GLX vendor
-		 * / VA-API which break Steam CEF in bwrap FHS sandbox. */
 		if (integrated_gpu_idx >= 0 && discrete_gpu_idx >= 0)
 			set_steam_env();
-		{
-			const char *steam_bin = "steam";
-			if (access("/etc/profiles/per-user/total/bin/nixly_steam", X_OK) == 0)
-				steam_bin = "nixly_steam";
-			else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
-				steam_bin = "nixly_steam";
-			execlp(steam_bin, steam_bin, "-bigpicture",
-				"steam://open/games", (char *)NULL);
-		}
+		execlp(steam_binary(), steam_binary(), "-bigpicture", "steam://open/games", (char *)NULL);
 		_exit(127);
 	}
 }

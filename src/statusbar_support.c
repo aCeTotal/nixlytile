@@ -6,10 +6,11 @@
 #include "nixlytile.h"
 #include "client.h"
 
+#include <fontconfig/fontconfig.h>
+
 /* ── statusbar / tray / net global state ─────────────────────────── */
 struct wl_event_source *status_timer;
 struct wl_event_source *status_cpu_timer;
-struct wl_event_source *status_hover_timer;
 StatusRefreshTask status_tasks[STATUS_TASKS_COUNT] = {
 	{ refreshstatuscpu, 0 },
 	{ refreshstatusram, 0 },
@@ -24,7 +25,6 @@ StatusRefreshTask status_tasks[STATUS_TASKS_COUNT] = {
 	{ refreshstatusbluetooth, 0 },
 };
 int status_rng_seeded;
-const double status_icon_scale = 2.0;
 int tray_anchor_x = -1;
 int tray_anchor_y = -1;
 uint64_t tray_anchor_time_ms;
@@ -67,21 +67,14 @@ char net_prev_iface[64] = {0};
 int net_is_wireless;
 int net_available;
 char net_icon_path[PATH_MAX] = "images/svg/no_connection.svg";
-char net_icon_loaded_path[PATH_MAX];
 char cpu_icon_path[PATH_MAX] = "images/svg/cpu.svg";
-char cpu_icon_loaded_path[PATH_MAX];
 const uint32_t cpu_popup_refresh_interval_ms = 2000;
 const uint32_t ram_popup_refresh_interval_ms = 2000;
 char light_icon_path[PATH_MAX] = "images/svg/light.svg";
-char light_icon_loaded_path[PATH_MAX];
 char ram_icon_path[PATH_MAX] = "images/svg/ram.svg";
-char ram_icon_loaded_path[PATH_MAX];
 char battery_icon_path[PATH_MAX] = "images/svg/battery-100.svg";
-char battery_icon_loaded_path[PATH_MAX];
 char mic_icon_path[PATH_MAX] = "images/svg/microphone.svg";
-char mic_icon_loaded_path[PATH_MAX];
 char volume_icon_path[PATH_MAX] = "images/svg/speaker_100.svg";
-char volume_icon_loaded_path[PATH_MAX];
 const char net_icon_no_conn[] = "images/svg/no_connection.svg";
 const char net_icon_eth[] = "images/svg/ethernet.svg";
 const char net_icon_wifi_100[] = "images/svg/wifi_100.svg";
@@ -107,39 +100,6 @@ char net_icon_wifi_25_resolved[PATH_MAX];
 char net_icon_eth_resolved[PATH_MAX];
 char net_icon_no_conn_resolved[PATH_MAX];
 char clock_icon_path[PATH_MAX] = "images/svg/clock.svg";
-char clock_icon_loaded_path[PATH_MAX];
-int net_icon_loaded_h;
-int net_icon_w;
-int net_icon_h;
-struct nx_buffer *net_icon_buf;
-int clock_icon_loaded_h;
-int clock_icon_w;
-int clock_icon_h;
-struct nx_buffer *clock_icon_buf;
-int cpu_icon_loaded_h;
-int cpu_icon_w;
-int cpu_icon_h;
-struct nx_buffer *cpu_icon_buf;
-int light_icon_loaded_h;
-int light_icon_w;
-int light_icon_h;
-struct nx_buffer *light_icon_buf;
-int ram_icon_loaded_h;
-int ram_icon_w;
-int ram_icon_h;
-struct nx_buffer *ram_icon_buf;
-int battery_icon_loaded_h;
-int battery_icon_w;
-int battery_icon_h;
-struct nx_buffer *battery_icon_buf;
-int mic_icon_loaded_h;
-int mic_icon_w;
-int mic_icon_h;
-struct nx_buffer *mic_icon_buf;
-int volume_icon_loaded_h;
-int volume_icon_w;
-int volume_icon_h;
-struct nx_buffer *volume_icon_buf;
 char disk_icon_path[PATH_MAX] = "images/svg/disk.svg";
 unsigned long long net_prev_rx;
 unsigned long long net_prev_tx;
@@ -648,136 +608,6 @@ out:
 	return buf;
 }
 
-void
-recolor_wifi100_pixbuf(GdkPixbuf *pixbuf)
-{
-	int w, h, nchan, stride;
-	guchar *pixels;
-	double fx, fy;
-	int has_alpha;
-	struct Rect {
-		double x, y, w, h;
-		uint8_t r, g, b;
-	};
-	static const struct Rect rects[] = {
-		{ 6, 38, 10, 20, 0x82, 0xCC, 0x00 }, /* bar 1 main */
-		{ 14, 38,  2, 20, 0x5E, 0x9E, 0x00 }, /* bar 1 stripe */
-		{ 20, 30, 10, 28, 0x82, 0xCC, 0x00 }, /* bar 2 main */
-		{ 28, 30,  2, 28, 0x5E, 0x9E, 0x00 }, /* bar 2 stripe */
-		{ 34, 22, 10, 36, 0x82, 0xCC, 0x00 }, /* bar 3 main */
-		{ 42, 22,  2, 36, 0x5E, 0x9E, 0x00 }, /* bar 3 stripe */
-		{ 48, 14, 10, 44, 0x82, 0xCC, 0x00 }, /* bar 4 main */
-		{ 56, 14,  2, 44, 0x5E, 0x9E, 0x00 }, /* bar 4 stripe */
-	};
-
-	if (!pixbuf)
-		return;
-	nchan = gdk_pixbuf_get_n_channels(pixbuf);
-	if (nchan < 3)
-		return;
-	w = gdk_pixbuf_get_width(pixbuf);
-	h = gdk_pixbuf_get_height(pixbuf);
-	if (w <= 0 || h <= 0)
-		return;
-	stride = gdk_pixbuf_get_rowstride(pixbuf);
-	pixels = gdk_pixbuf_get_pixels(pixbuf);
-	if (!pixels)
-		return;
-	has_alpha = gdk_pixbuf_get_has_alpha(pixbuf);
-	fx = (double)w / 64.0;
-	fy = (double)h / 64.0;
-
-	for (size_t i = 0; i < LENGTH(rects); i++) {
-		int rx = (int)lround(rects[i].x * fx);
-		int ry = (int)lround(rects[i].y * fy);
-		int rw = (int)lround(rects[i].w * fx);
-		int rh = (int)lround(rects[i].h * fy);
-		if (rx < 0) rx = 0;
-		if (ry < 0) ry = 0;
-		if (rw < 1) rw = 1;
-		if (rh < 1) rh = 1;
-		if (rx + rw > w) rw = w - rx;
-		if (ry + rh > h) rh = h - ry;
-		for (int y = ry; y < ry + rh; y++) {
-			guchar *row = pixels + (size_t)y * (size_t)stride;
-			for (int x = rx; x < rx + rw; x++) {
-				guchar *p = row + (size_t)x * (size_t)nchan;
-				p[0] = rects[i].r;
-				p[1] = rects[i].g;
-				p[2] = rects[i].b;
-				if (has_alpha && nchan >= 4)
-					p[3] = 255;
-			}
-		}
-	}
-}
-
-struct nx_buffer *
-statusbar_buffer_from_wifi100(int target_h, int *out_w, int *out_h)
-{
-	struct {
-		int x, y, w, h;
-		uint8_t r, g, b;
-	} bars[] = {
-		{6, 38, 10, 20, 0x82, 0xCC, 0x00}, /* bar 1 main */
-		{14, 38, 2, 20, 0x5E, 0x9E, 0x00}, /* bar 1 stripe */
-		{20, 30, 10, 28, 0x82, 0xCC, 0x00}, /* bar 2 main */
-		{28, 30, 2, 28, 0x5E, 0x9E, 0x00}, /* bar 2 stripe */
-		{34, 22, 10, 36, 0x82, 0xCC, 0x00}, /* bar 3 main */
-		{42, 22, 2, 36, 0x5E, 0x9E, 0x00}, /* bar 3 stripe */
-		{48, 14, 10, 44, 0x82, 0xCC, 0x00}, /* bar 4 main */
-		{56, 14, 2, 44, 0x5E, 0x9E, 0x00}, /* bar 4 stripe */
-	};
-	const int base_w = 64;
-	const int base_h = 64;
-	int target_w, target_h_final;
-	uint32_t *buf = NULL;
-	struct nx_buffer *wb = NULL;
-
-	target_h_final = (target_h > 0) ? target_h : base_h;
-	if (target_h_final <= 0)
-		return NULL;
-	target_w = (int)lround(((double)base_w * (double)target_h_final) / (double)base_h);
-	if (target_w <= 0)
-		target_w = 1;
-
-	buf = calloc(1, (size_t)base_w * (size_t)base_h * sizeof(uint32_t));
-	if (!buf)
-		return NULL;
-
-	for (size_t i = 0; i < LENGTH(bars); i++) {
-		int rx = bars[i].x;
-		int ry = bars[i].y;
-		int rw = bars[i].w;
-		int rh = bars[i].h;
-		if (rx < 0) rx = 0;
-		if (ry < 0) ry = 0;
-		if (rw < 1) rw = 1;
-		if (rh < 1) rh = 1;
-		if (rx + rw > base_w) rw = base_w - rx;
-		if (ry + rh > base_h) rh = base_h - ry;
-		for (int y = ry; y < ry + rh; y++) {
-			for (int x = rx; x < rx + rw; x++) {
-				size_t idx = (size_t)y * (size_t)base_w + (size_t)x;
-				buf[idx] = ((uint32_t)0xFF << 24)
-						| ((uint32_t)bars[i].r << 16)
-						| ((uint32_t)bars[i].g << 8)
-						| (uint32_t)bars[i].b;
-			}
-		}
-	}
-
-	wb = statusbar_scaled_buffer_from_argb32_raw((const uint32_t *)buf, base_w, base_h, target_h_final);
-	free(buf);
-	if (wb) {
-		if (out_w)
-			*out_w = target_w;
-		if (out_h)
-			*out_h = target_h_final;
-	}
-	return wb;
-}
-
 int
 tray_load_svg_pixbuf(const char *path, int desired_h, GdkPixbuf **out_pixbuf)
 {
@@ -952,8 +782,8 @@ init_net_icon_paths(void)
 }
 
 struct nx_buffer *
-statusbar_scaled_buffer_from_argb32_ex(const uint32_t *data, int width, int height,
-		int target_h, int fix_format)
+statusbar_scaled_buffer_from_argb32(const uint32_t *data, int width, int height,
+		int target_h)
 {
 	pixman_image_t *src = NULL, *dst = NULL;
 	struct PixmanBuffer *buf;
@@ -981,17 +811,15 @@ statusbar_scaled_buffer_from_argb32_ex(const uint32_t *data, int width, int heig
 		goto fail;
 	memcpy(src_copy, data, src_size);
 
-	if (fix_format) {
-		fix_tray_argb32((uint32_t *)src_copy, (size_t)width * (size_t)height, 0);
+	fix_tray_argb32((uint32_t *)src_copy, (size_t)width * (size_t)height, 0);
 
-		/* If the first pass produced fully transparent data, retry assuming RGBA order */
-		size_t alpha_sum = 0;
-		for (size_t n = 0; n < (size_t)width * (size_t)height; n++)
-			alpha_sum += ((const uint32_t *)src_copy)[n] >> 24;
-		if (alpha_sum == 0) {
-			memcpy(src_copy, data, src_size);
-			fix_tray_argb32((uint32_t *)src_copy, (size_t)width * (size_t)height, 1);
-		}
+	/* All transparent: retry as RGBA. */
+	size_t alpha_sum = 0;
+	for (size_t n = 0; n < (size_t)width * (size_t)height; n++)
+		alpha_sum += ((const uint32_t *)src_copy)[n] >> 24;
+	if (alpha_sum == 0) {
+		memcpy(src_copy, data, src_size);
+		fix_tray_argb32((uint32_t *)src_copy, (size_t)width * (size_t)height, 1);
 	}
 
 	src = pixman_image_create_bits_no_clear(PIXMAN_a8r8g8b8, width, height,
@@ -1036,18 +864,6 @@ fail:
 	free(src_copy);
 	free(dst_copy);
 	return NULL;
-}
-
-struct nx_buffer *
-statusbar_scaled_buffer_from_argb32(const uint32_t *data, int width, int height, int target_h)
-{
-	return statusbar_scaled_buffer_from_argb32_ex(data, width, height, target_h, 1);
-}
-
-struct nx_buffer *
-statusbar_scaled_buffer_from_argb32_raw(const uint32_t *data, int width, int height, int target_h)
-{
-	return statusbar_scaled_buffer_from_argb32_ex(data, width, height, target_h, 0);
 }
 
 struct nx_buffer *
@@ -1110,7 +926,7 @@ statusbar_buffer_from_argb32(const uint32_t *data, int width, int height)
 	memcpy(copy, data, size);
 	fix_tray_argb32((uint32_t *)copy, (size_t)width * (size_t)height, 0);
 
-	/* If the first pass produced fully transparent data, retry assuming RGBA order */
+	/* All transparent: retry as RGBA. */
 	{
 		size_t alpha_sum = 0;
 		for (size_t n = 0; n < (size_t)width * (size_t)height; n++)
@@ -1169,6 +985,9 @@ loadstatusfont(void)
 	if (count == 0)
 		return 0;
 
+	/* Packaged icon font, when built with one. */
+	if (*ICON_FONT_DIR)
+		FcConfigAppFontAddDir(NULL, (const FcChar8 *)ICON_FONT_DIR);
 	statusfont.font = fcft_from_name(count, fonts, statusbar_font_attributes);
 	if (!statusfont.font)
 		return 0;
@@ -1318,9 +1137,7 @@ apply_startup_defaults(void)
 	static int audio_applied = 0;
 	static int mic_applied = 0;
 	static int audio_tries = 0;
-	/* Saved levels from status.nix win over the built-in defaults, so a
-	 * reboot lands on yesterday's brightness/volume/mic. brightness -1
-	 * means auto — lightsense starts its ambient loop from 40. */
+	/* Saved levels beat built-in defaults. */
 	const double light_default =
 		status_conf_brightness() >= 0.0 ? status_conf_brightness() : 40.0;
 	const double speaker_default =

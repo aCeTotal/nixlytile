@@ -12,8 +12,6 @@
 #include "platform/os/fd.h"
 #include "platform/xwayland/server/server.h"
 
-#define TERMINATE_DELAY "10" // idle seconds before exit
-
 static const char *xwayland_binary(void) {
 	const char *path = getenv("NIXLY_XWAYLAND");
 	if (path == NULL) {
@@ -58,7 +56,6 @@ noreturn static void exec_xwayland(struct nx_xwayland_server *server,
 
 	char *argv[] = {
 		"Xwayland", server->display_name, "-rootless", "-core",
-		"-terminate", TERMINATE_DELAY,
 		"-listenfd", listenfd0, "-listenfd", listenfd1,
 		"-displayfd", displayfd,
 		"-wm", wmfd,

@@ -8,6 +8,9 @@
 #include "remote.h"
 #include "netsys.h"
 #include <execinfo.h>
+#include <malloc.h>
+
+#define MMAP_THRESHOLD_BYTES (128 * 1024)
 
 static int
 sigusr1_reload(int signo, void *data)
@@ -741,6 +744,7 @@ cleanup(void)
 	voice_stop();
 	audio_watch_cleanup();
 	gaming_conf_cleanup();
+	gaze_cleanup();
 	vrslink_cleanup();
 	mic_gate_cleanup();
 	filechooser_cleanup();
@@ -1061,22 +1065,6 @@ run(const char *startup_cmd)
 	 * value the session already set. */
 	setenv("XDG_CURRENT_DESKTOP", "nixlytile", 0);
 
-	/* Pre-launch the nixly_launcher daemon (appd) directly — bypasses
-	 * the autostart shell so the daemon's heavy startup (icon scan, app
-	 * indexing) overlaps with backend bring-up instead of running
-	 * serialised after waybar etc.  appd will block on
-	 * Connection::connect_to_env until the socket accepts clients,
-	 * which happens once the wl_display dispatch loop runs in run(). */
-	{
-		pid_t appd_pid = fork();
-		if (appd_pid == 0) {
-			setsid();
-			fork_detach();
-			execlp("appd", "appd", (char *)NULL);
-			_exit(127);
-		}
-	}
-
 	/* Prime the XKB system-defaults cache (may popen localectl → D-Bus
 	 * round trip with service activation) now, before the event loop —
 	 * so a later keyboard hotplug or config reload never pays it on the
@@ -1120,6 +1108,9 @@ run(const char *startup_cmd)
 
 	/* ~/.local/nixlyos/bindings.conf → user keybindings, reloaded on save. */
 	setup_bindings_conf_watch();
+
+	/* Needs WAYLAND_DISPLAY and outputs. */
+	wallpaper_sync();
 
 	/* ~/.local/nixlyos/statusbar.conf → bar layout + persistent charge
 	 * limit / brightness / volume / mic; external edits apply live. */
@@ -1282,21 +1273,15 @@ run(const char *startup_cmd)
 	mic_gate_setup();
 	gaming_conf_setup();
 	vrslink_setup();
+	gaze_setup();
 
 	/* RR preempts CPU hogs; nice is fallback. */
 	{
-#ifndef IOPRIO_CLASS_RT
-#define IOPRIO_CLASS_RT			1
-#define IOPRIO_WHO_PROCESS		1
-#define IOPRIO_PRIO_VALUE(cls, data)	(((cls) << 13) | (data))
-#endif
 		if (setpriority(PRIO_PROCESS, 0, -10) == 0)
 			nx_log(NX_INFO, "Compositor nice -10 (always-on responsiveness)");
 		else
 			nx_log(NX_INFO, "Compositor nice -10 failed (need CAP_SYS_NICE): %s",
 				strerror(errno));
-		syscall(__NR_ioprio_set, IOPRIO_WHO_PROCESS, 0,
-			IOPRIO_PRIO_VALUE(IOPRIO_CLASS_RT, 4));
 		compositor_rt_on();
 	}
 
@@ -2729,6 +2714,10 @@ setup(void)
 			sigaction(fatal_sig[i], &fsa, NULL);
 	}
 
+	/* Children inherit these from posix_spawn. */
+	ensure_nix_paths();
+	prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
+
 	init_logging();
 	pthread_setname_np(pthread_self(), "nixlyOS");
 	nx_log_init(NX_DEBUG, log_callback);
@@ -2759,7 +2748,6 @@ setup(void)
 	wl_list_init(&tray_items);
 	status_timer = wl_event_loop_add_timer(event_loop, updatestatusclock, NULL);
 	status_cpu_timer = wl_event_loop_add_timer(event_loop, updatestatuscpu, NULL);
-	status_hover_timer = wl_event_loop_add_timer(event_loop, updatehoverfade, NULL);
 	client_ping_timer = wl_event_loop_add_timer(event_loop, client_ping_tick, NULL);
 	if (client_ping_timer)
 		wl_event_source_timer_update(client_ping_timer, 3000);
@@ -2771,13 +2759,8 @@ setup(void)
 	netmon_init();
 	wifi_ctrl_init();
 	btmon_init();
-	/* Laptop-only sensors. On the HTPC they watch hardware that is not
-	 * there and feed a hidden bar, and the timer-driven ones fire on the
-	 * compositor thread — jitter between frames for no output. */
+	/* Laptop-only sensors. */
 	if (!htpc_mode_active) {
-		camwatch_init();
-		lightsense_init();
-		presence_init();
 		battwatch_init();
 		fanwatch_init();
 	}
@@ -3510,8 +3493,6 @@ setup(void)
 		init_status_refresh_tasks();
 		schedule_next_status_refresh();
 	}
-	if (status_hover_timer)
-		wl_event_source_timer_update(status_hover_timer, 0);
 }
 
 /* Detect all GPUs in the system */
@@ -3521,8 +3502,17 @@ const char *dgpu_programs[] = {
 	/* Game launchers + runtimes */
 	"steam", "gamescope", "mangohud",
 	"wine", "wine64", "proton",
-	"lutris", "heroic", "bottles",
+	"lutris", "heroic", "bottles", "itch", "prismlauncher", "minecraft-launcher",
 	"vkcube", "vulkaninfo", "glxgears", "glxinfo",
+
+	/* Emulators */
+	"retroarch", "dolphin-emu", "pcsx2", "pcsx2-qt", "rpcs3", "ryujinx", "cemu",
+	"ppsspp", "ppssppsdl", "ppssppqt", "duckstation", "duckstation-qt", "xemu",
+	"melonds", "azahar", "citra", "flycast", "mgba", "mgba-qt", "shadps4",
+
+	/* Browsers + players (video decode) */
+	"brave", "firefox", "chromium", "google-chrome-stable", "discord",
+	"mpv", "vlc", "celluloid", "totem", "haruna", "kodi",
 
 	/* 3D / DCC */
 	"blender", "freecad", "openscad", "kicad",
@@ -3587,131 +3577,6 @@ const char *dgpu_programs[] = {
  * - Uses content-type game hint
  * - Requests tearing (for low latency)
  */
-
-/*
- * Fork and exec a shell command string with full child cleanup.
- * Used by spawn() so every child gets the
- * same treatment: stdin → /dev/null, fresh
- * session, default signal handlers, ambient caps dropped, all
- * inherited compositor FDs (DRM master, PipeWire, epoll) closed,
- * $HOME as CWD, session env preserved. Returns child pid (parent)
- * or -1 on fork failure. Never returns in the child.
- */
-pid_t
-spawn_cmd(const char *cmd)
-{
-	pid_t pid;
-
-	if (!cmd || !cmd[0])
-		return -1;
-
-	/* Before the fork: the child needs the clocks from its very first
-	 * instruction, and on battery the 60% cap is still in place until the
-	 * boost worker lifts it. */
-	launchboost_kick();
-
-	pid = fork();
-	if (pid > 0) {
-		if (selmon)
-			pending_launch_add(pid,
-				selmon->tagset[selmon->seltags],
-				selmon->nx_output->name);
-		return pid;
-	}
-	if (pid < 0)
-		return -1;
-
-	/* Child */
-	{
-		int devnull = open("/dev/null", O_RDWR);
-		if (devnull >= 0) {
-			dup2(devnull, STDIN_FILENO);
-			if (devnull > STDERR_FILENO)
-				close(devnull);
-		}
-	}
-
-	setsid();
-	signal(SIGCHLD, SIG_DFL);
-	signal(SIGINT, SIG_DFL);
-	signal(SIGTERM, SIG_DFL);
-	signal(SIGPIPE, SIG_DFL);
-	prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
-
-	syscall(SYS_close_range, 3, ~0U, 0);
-
-	{
-		const char *home = getenv("HOME");
-		/* Never inherit the compositor cwd. */
-		if ((!home || !*home || chdir(home) != 0) && chdir("/") != 0)
-			_exit(127);
-	}
-
-	ensure_nix_paths();
-
-	const char *user_shell = getenv("SHELL");
-	if (!user_shell || !user_shell[0])
-		user_shell = "/bin/sh";
-
-	char cmd_str[4096];
-	snprintf(cmd_str, sizeof(cmd_str), "%s", cmd);
-
-	if (is_steam_cmd(cmd_str)) {
-		const char *steam_bin = "steam";
-		/* Games launch by steam:// URI. */
-		const char *uri = strstr(cmd, "steam://");
-		if (access("/etc/profiles/per-user/total/bin/nixly_steam", X_OK) == 0)
-			steam_bin = "nixly_steam";
-		else if (access("/run/current-system/sw/bin/nixly_steam", X_OK) == 0)
-			steam_bin = "nixly_steam";
-		snprintf(cmd_str, sizeof(cmd_str), "%s%s%s", steam_bin, uri ? " " : "", uri ? uri : "");
-	} else if (should_use_dgpu(cmd_str) && integrated_gpu_idx >= 0) {
-		set_dgpu_env();
-	}
-
-	{
-		int has_meta = 0;
-		for (const char *p = cmd_str; *p; p++) {
-			if (*p == '|' || *p == '&' ||
-			    *p == ';' || *p == '$' ||
-			    *p == '`' || *p == '(' ||
-			    *p == ')' || *p == '>' ||
-			    *p == '<' || *p == '{' ||
-			    *p == '}' || *p == '~' ||
-			    *p == '*' || *p == '?' ||
-			    *p == '[' || *p == ']' ||
-			    *p == '\'' || *p == '"' ||
-			    *p == '\\') {
-				has_meta = 1;
-				break;
-			}
-		}
-
-		if (!has_meta) {
-			char buf[4096];
-			char *argv[64];
-			int argc = 0;
-			char *s, *tok, *sv = NULL;
-
-			snprintf(buf, sizeof(buf), "%s", cmd_str);
-			for (s = buf; argc < 63; s = NULL) {
-				tok = strtok_r(s, " \t", &sv);
-				if (!tok)
-					break;
-				argv[argc++] = tok;
-			}
-			argv[argc] = NULL;
-
-			if (argc > 0)
-				execvp(argv[0], argv);
-		}
-
-		char wrapper[8192];
-		snprintf(wrapper, sizeof(wrapper), "exec %s", cmd_str);
-		execl(user_shell, user_shell, "-c", wrapper, NULL);
-	}
-	_exit(127);
-}
 
 void
 spawn(const Arg *arg)
@@ -4355,6 +4220,9 @@ main(int argc, char *argv[])
 {
 	const char *startup_cmd = NULL;
 	int c;
+
+	/* Fixed threshold: big frees unmap. */
+	mallopt(M_MMAP_THRESHOLD, MMAP_THRESHOLD_BYTES);
 
 	/* The display manager may run under SCHED_IDLE/BATCH (ananicy's
 	 * cachyos rules classify sddm as BG_CPUIO) and the session inherits
