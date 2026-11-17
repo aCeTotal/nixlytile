@@ -8,6 +8,7 @@
 #include "platform/scene/render/frame.h"
 
 struct entry_target {
+	int x, y; // logical, output-local
 	struct nx_box box;
 	pixman_region32_t clip;
 	pixman_region32_t translucent;
@@ -16,6 +17,7 @@ struct entry_target {
 
 static void render_rect(const struct render_data *data,
 		const struct nx_scene_rect *scene_rect, const struct entry_target *target) {
+	const struct nx_scene_rect_shape *shape = &scene_rect->shape;
 	nx_render_pass_add_rect(data->render_pass, &(struct nx_render_rect_options){
 		.box = target->box,
 		.color = {
@@ -25,7 +27,20 @@ static void render_rect(const struct render_data *data,
 			.a = scene_rect->color[3] * target->opacity,
 		},
 		.clip = &target->clip,
+		.corner_radius = (float)shape->radius * data->scale,
+		.softness = (float)shape->softness * data->scale,
+		.border = (float)shape->border * data->scale,
 	});
+}
+
+// Rounded clip in buffer pixels.
+static struct nx_box output_corner_box(const struct render_data *data,
+		const struct nx_scene_buffer *scene_buffer, const struct entry_target *target) {
+	struct nx_box box = scene_buffer->corner_box;
+	box.x += target->x;
+	box.y += target->y;
+	scene_transform_output_box(&box, data);
+	return box;
 }
 
 // Cheaper than sampling a texture.
@@ -42,6 +57,8 @@ static void render_single_pixel(const struct render_data *data,
 				scene_buffer->opacity * target->opacity,
 		},
 		.clip = &target->clip,
+		.corner_box = output_corner_box(data, scene_buffer, target),
+		.corner_radius = (float)scene_buffer->corner_radius * data->scale,
 	});
 }
 
@@ -86,6 +103,8 @@ static bool render_texture(const struct render_data *data,
 		.color_encoding = scene_buffer->color_encoding,
 		.color_range = scene_buffer->color_range,
 		.luminance_multiplier = &luminance_multiplier,
+		.corner_box = output_corner_box(data, scene_buffer, target),
+		.corner_radius = (float)scene_buffer->corner_radius * data->scale,
 		.wait_timeline = scene_buffer->wait_timeline,
 		.wait_point = scene_buffer->wait_point,
 	});
@@ -141,15 +160,15 @@ void scene_entry_render(const struct render_list_entry *entry,
 		return;
 	}
 
-	int x = entry->x - data->logical.x;
-	int y = entry->y - data->logical.y;
-	target.box = (struct nx_box){ .x = x, .y = y };
+	target.x = entry->x - data->logical.x;
+	target.y = entry->y - data->logical.y;
+	target.box = (struct nx_box){ .x = target.x, .y = target.y };
 	scene_node_get_size(node, &target.box.width, &target.box.height);
 	scene_transform_output_box(&target.box, data);
 
 	pixman_region32_init(&target.translucent);
 	if (entry->opacity == 1) {
-		scene_node_opaque_region(node, x, y, &target.translucent);
+		scene_node_opaque_region(node, target.x, target.y, &target.translucent);
 		scene_logical_to_buffer(&target.translucent, data);
 	}
 	pixman_region32_subtract(&target.translucent, &target.clip, &target.translucent);

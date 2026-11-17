@@ -9,7 +9,7 @@ layout(location = 0) out vec4 out_color;
 
 // Matches struct nx_vk_frag_output_pcr_data.
 layout(push_constant, row_major) uniform UBO {
-	layout(offset = 48) mat4 matrix;
+	layout(offset = 48) mat3 matrix;
 	float lut_3d_offset;
 	float lut_3d_scale;
 } data;
@@ -70,7 +70,7 @@ void main() {
 		rgb = in_color.rgb / alpha;
 	}
 
-	rgb = mat3(data.matrix) * rgb;
+	rgb = data.matrix * rgb;
 
 	if (OUTPUT_TRANSFORM != OUTPUT_TRANSFORM_IDENTITY) {
 		rgb = max(rgb, vec3(0));

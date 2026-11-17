@@ -3054,9 +3054,11 @@ barmod_sync_flags(Monitor *m)
 		const BarModCfg *cfg = barmod_find(barmod_defs[i].name);
 		StatusModule *mod = barmod_at(m, (int)i);
 		int io = cfg ? cfg->icons_only : 0;
+		double tint = cfg ? bar_tint_drift(barmod_slot(cfg), barmod_count()) : 0.0;
 
-		if (mod->icons_only != io) {
+		if (mod->icons_only != io || mod->tint != tint) {
 			mod->icons_only = io;
+			mod->tint = tint;
 			mod->last_render_text[0] = '\0';
 			mod->last_render_h = 0;
 		}

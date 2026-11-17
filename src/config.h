@@ -223,8 +223,8 @@ const Key default_keys[] = {
 	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_K,          move_window_in_column_dir,   {.i = -1} },
 	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_Left,       move_column_dir,             {.i = -1} },
 	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_Right,      move_column_dir,             {.i = +1} },
-	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_Up,         move_window_in_column_dir,   {.i = -1} },
-	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_Down,       move_window_in_column_dir,   {.i = +1} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_Up,         move_client_to_ws_dir,       {.i = -1} },
+	{ MODKEY|NX_MODIFIER_SHIFT, XKB_KEY_Down,       move_client_to_ws_dir,       {.i = +1} },
 
 	/* Column width / consume / expel */
 	{ MODKEY,                    XKB_KEY_r,          switch_preset_column_width,  {0} },

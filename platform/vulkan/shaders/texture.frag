@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 layout(set = 0, binding = 0) uniform sampler2D tex;
 
@@ -7,9 +8,11 @@ layout(location = 0) out vec4 out_color;
 
 // Matches struct nx_vk_frag_texture_pcr_data.
 layout(push_constant, row_major) uniform UBO {
-	layout(offset = 48) mat4 matrix;
+	layout(offset = 48) mat3 matrix;
+	vec4 corner_box;
 	float alpha;
 	float luminance_multiplier;
+	float corner_radius;
 } data;
 
 layout (constant_id = 0) const int TEXTURE_TRANSFORM = 0;
@@ -57,6 +60,8 @@ vec3 bt1886_color_to_linear(vec3 color) {
 	return (L - Lmin) / (Lmax - Lmin);
 }
 
+#include "rounded_box.glsl"
+
 void main() {
 	vec4 in_color = textureLod(tex, uv, 0);
 
@@ -84,10 +89,15 @@ void main() {
 
 	rgb *= data.luminance_multiplier;
 
-	rgb = mat3(data.matrix) * rgb;
+	rgb = data.matrix * rgb;
 
 	// Back to premultiplied alpha.
 	out_color = vec4(rgb * alpha, alpha);
 
 	out_color *= data.alpha;
+
+	if (data.corner_radius > 0) {
+		float d = rounded_box(gl_FragCoord.xy, data.corner_box, data.corner_radius);
+		out_color *= clamp(0.5 - d, 0.0, 1.0);
+	}
 }

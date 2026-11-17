@@ -88,14 +88,26 @@ struct nx_vk_vert_pcr_data {
 
 // Layout matches shaders/texture.frag.
 struct nx_vk_frag_texture_pcr_data {
-	float matrix[4][4]; // 3x3 used
+	float matrix[3][4]; // std430 mat3 rows
+	float corner_box[4]; // centre, half size
 	float alpha;
 	float luminance_multiplier;
+	float corner_radius;
+	float padding;
+};
+
+// Layout matches shaders/quad.frag.
+struct nx_vk_frag_quad_pcr_data {
+	float color[4];
+	float corner_box[4]; // centre, half size
+	float corner_radius;
+	float softness;
+	float border;
 };
 
 // Layout matches shaders/output.frag.
 struct nx_vk_frag_output_pcr_data {
-	float matrix[4][4]; // 3x3 used
+	float matrix[3][4]; // std430 mat3 rows
 	float lut_3d_offset;
 	float lut_3d_scale;
 };

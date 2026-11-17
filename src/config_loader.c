@@ -12,7 +12,7 @@
 #include "config_parser.h"
 #include "remote.h"
 #include "config_loader.h"
-#include "overview.h"
+#include "overview/overview.h"
 
 #include <ctype.h>
 #include <errno.h>

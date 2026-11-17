@@ -1,7 +1,7 @@
 #include "nixlytile.h"
 #include "client.h"
 #include "diag.h"
-#include "overview.h"
+#include "overview/overview.h"
 #include "remote.h"
 
 static int idle_heartbeat_cb(void *data);

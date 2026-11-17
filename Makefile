@@ -105,7 +105,7 @@ $(PROTO)/%-protocol.c: $$(call xml_of,$$*)
 	@mkdir -p $(@D)
 	$(WAYLAND_SCANNER) private-code $< $@
 
-$(BUILD)/platform/vulkan/shaders/%.h: platform/vulkan/shaders/%
+$(BUILD)/platform/vulkan/shaders/%.h: platform/vulkan/shaders/% platform/vulkan/shaders/rounded_box.glsl
 	@mkdir -p $(@D)
 	glslang -V --quiet $< -o $@ --vn $(subst .,_,$*)_data
 

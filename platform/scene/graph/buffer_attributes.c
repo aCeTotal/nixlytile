@@ -67,6 +67,23 @@ void nx_scene_buffer_set_opacity(struct nx_scene_buffer *scene_buffer,
 	scene_node_update(&scene_buffer->node, NULL);
 }
 
+void nx_scene_buffer_set_corner_clip(struct nx_scene_buffer *scene_buffer,
+		const struct nx_box *box, int radius) {
+	static const struct nx_box disabled = {0};
+	if (nx_box_empty(box) || radius <= 0) {
+		box = &disabled;
+		radius = 0;
+	}
+	if (scene_buffer->corner_radius == radius &&
+			nx_box_equal(&scene_buffer->corner_box, box)) {
+		return;
+	}
+
+	scene_buffer->corner_box = *box;
+	scene_buffer->corner_radius = radius;
+	scene_node_update(&scene_buffer->node, NULL);
+}
+
 void nx_scene_buffer_set_transfer_function(struct nx_scene_buffer *scene_buffer,
 		enum nx_color_transfer_function transfer_function) {
 	if (scene_buffer->transfer_function == transfer_function) {

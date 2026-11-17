@@ -1,7 +1,7 @@
 #include "nixlytile.h"
 #include "client.h"
 #include "diag.h"
-#include "overview.h"
+#include "overview/overview.h"
 #include <pthread.h>
 
 /* ── Pending launch tracking ──────────────────────────────────────────
@@ -471,7 +471,7 @@ createnotify(struct wl_listener *listener, void *data)
 	c = toplevel->base->data = ecalloc(1, sizeof(*c));
 	c->surface.xdg = toplevel->base;
 	c->bw = borderpx;
-	c->fs_col_idx = -1;
+	c->fs_col.idx = -1;
 
 	LISTEN(&toplevel->base->surface->events.commit, &c->commit, commitnotify);
 	LISTEN(&toplevel->base->surface->events.map, &c->map, mapnotify);
@@ -2213,29 +2213,17 @@ setfullscreen(Client *c, int fullscreen)
 			c->geom.width, c->geom.height, c->geom.x, c->geom.y,
 			c->resize, c->last_configured_w, c->last_configured_h);
 
-	/* Bind the fullscreen window to the workspace it was fullscreened on.
-	 * Visibility, cursor confinement and exclusive focus key off this so
-	 * switching to another workspace hides the game instead of leaving it
-	 * stuck on screen (tags don't change on a Niri-style ws switch). */
+	/* Fullscreen binds to its workspace. */
 	c->fs_ws = fs_target;
 
-	/* Detach from column when entering fullscreen so the row reflows.
-	 * Reattach when leaving (if still tile-able).  Do this early so the
-	 * arrange() at the bottom sees the right column state. */
+	/* Hold, then restore, the column. */
 	if (!was && fullscreen) {
-		/* Remember the slot so leaving fullscreen doesn't shuffle the
-		 * row: the column dies here, and a plain reattach lands right
-		 * of whatever column holds focus meanwhile. */
-		c->fs_col_idx = column_index(c->column);
+		column_hold(c);
 		workspace_detach_client(c);
 	} else if (was && !fullscreen && !c->isfloating
 			&& !client_is_unmanaged(c) && c->mon && c->mon->active_ws) {
-		/* Reattach to the workspace it was fullscreened on, not
-		 * whichever workspace happens to be active. */
-		workspace_attach_client(prev_fs_ws && prev_fs_ws->mon == c->mon
-				? prev_fs_ws : c->mon->active_ws, c);
-		column_move_to_index(c->column, c->fs_col_idx);
-		c->fs_col_idx = -1;
+		column_restore(c, prev_fs_ws && prev_fs_ws->mon == c->mon
+				? prev_fs_ws : c->mon->active_ws);
 	}
 	if (!c->mon || !client_surface(c)->mapped) {
 		nx_log(NX_INFO,
@@ -2695,17 +2683,18 @@ unmapnotify(struct wl_listener *listener, void *data)
 		if (!c->scene)
 			return;
 		wobble_stop(c);
+		/* Overview goes first. */
+		overview_purge_client(c);
 		/* Only tiles fade out. */
 		if (!c->isfullscreen && !c->isfloating)
 			anim_spawn_close(c);
-		/* Overview mirrors go first. */
-		overview_purge_client(c);
 		/* Unfreeze before scene teardown. */
 		client_unfreeze(c);
 		morph_end(c);
 		workspace_detach_client(c);
 		/* Clear fs_ws: avoids UAF. */
 		c->fs_ws = NULL;
+		c->fs_col.home = NULL;
 		c->float_ws = NULL;
 		wl_list_remove(&c->link);
 		wl_list_remove(&c->flink);

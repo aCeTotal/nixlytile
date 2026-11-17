@@ -3,7 +3,7 @@
 #include "netsys.h"
 #include "diag.h"
 #include "dwt.h"
-#include "overview.h"
+#include "overview/overview.h"
 
 static void (*last_keybinding_func)(const Arg *);
 
@@ -725,8 +725,7 @@ buttonpress(struct wl_listener *listener, void *data)
 		if (locked)
 			break;
 
-		/* The overview owns the screen; a click must not fall through
-		 * to a thumbnail (see the gate in motionnotify). */
+		/* Overview is keyboard-only. */
 		if (overview_is_open())
 			return;
 
@@ -1573,23 +1572,20 @@ inputdevice(struct wl_listener *listener, void *data)
 	nx_seat_set_capabilities(seat, caps);
 }
 
+/* Overview steers bound moves. */
 int
 keybinding(uint32_t mods, xkb_keysym_t sym)
 {
-	/*
-	 * Here we handle compositor keybindings. This is when the compositor is
-	 * processing keys, rather than passing them on to the client for its own
-	 * processing.
-	 */
 	size_t i;
 	for (i = 0; i < keys_count; i++) {
 		const Key *k = &keys[i];
-		if (CLEANMASK(mods) == CLEANMASK(k->mod)
-				&& sym == k->keysym && k->func) {
-			last_keybinding_func = k->func;
+		if (CLEANMASK(mods) != CLEANMASK(k->mod)
+				|| sym != k->keysym || !k->func)
+			continue;
+		last_keybinding_func = k->func;
+		if (!overview_bind(k))
 			k->func(&k->arg);
-			return 1;
-		}
+		return 1;
 	}
 	return 0;
 }
@@ -2557,11 +2553,7 @@ motionnotify(uint32_t time, struct nx_input_device *device, double dx, double dy
 		}
 	}
 
-	/* The overview's thumbnails ARE nx_scene_surfaces of the real
-	 * clients, so xytonode happily resolves a hover over a thumbnail to
-	 * that client — at scaled-down coordinates, which would hover-
-	 * highlight random widgets in a window the user is only looking at.
-	 * The overview is keyboard-driven; give it no pointer at all. */
+	/* Overview is keyboard-only. */
 	if (overview_is_open()) {
 		c = NULL;
 		surface = NULL;

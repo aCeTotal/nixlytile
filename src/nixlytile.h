@@ -496,6 +496,7 @@ struct StatusModule {
 	int last_render_h;
 	uint64_t render_sig;
 	int icons_only;
+	double tint;          /* icon hue offset, degrees */
 };
 
 typedef struct {
@@ -1251,7 +1252,12 @@ typedef struct {
 	struct wl_listener ping_timeout; /* freeze watchdog: unresponsive → kill */
 	Workspace *fs_ws;             /* workspace fullscreened on; NULL = not fs / unbound (always visible) */
 	Workspace *float_ws;          /* workspace floated on; NULL = unbound */
-	int fs_col_idx;               /* column slot held before fullscreen; -1 = none */
+	struct {
+		int idx;              /* row slot; -1 = none */
+		Column *home;         /* shared column left behind */
+		int stack_idx;
+		int maximized, width_idx, width_px;
+	} fs_col;                     /* column before fullscreen */
 	int rule_ws;                  /* window-rule `workspace N` (1-based); 0 = none */
 
 	/* Remote-mode restore slot: where this client sat before streaming */
@@ -2583,6 +2589,7 @@ int snapshot_opaque(Snapshot *s);
 void snapshot_fit_crisp(Snapshot *s, struct nx_box box, struct nx_box area);
 void snapshot_fit_cover(Snapshot *s, struct nx_box box, struct nx_box area);
 void snapshot_destroy(Snapshot *s);
+void snapshot_round(Snapshot *s, int radius);
 /* morph.c */
 void morph_expect(Client *c);
 void morph_track(Client *c);
@@ -2652,6 +2659,13 @@ void column_remove_client(Client *c);
 int column_index(Column *col);
 int column_min_width(Column *col);
 void column_move_to_index(Column *col, int idx);
+int column_shift(Column *col, int dir);
+int column_shift_client(Client *c, int dir);
+struct nx_box tile_rest_box(Client *c);
+void column_hold(Client *c);
+void column_restore(Client *c, Workspace *ws);
+struct nx_box column_restore_box(Client *c, Workspace *ws);
+struct nx_box monitor_rest_area(Monitor *m);
 void monitor_init_workspaces(Monitor *m);
 void monitor_cleanup_workspaces(Monitor *m);
 void monitor_compact_workspaces(Monitor *m);
@@ -2671,6 +2685,9 @@ void workspace_layout(Workspace *ws);
 void monitor_apply_positions(Monitor *m);
 void workspace_switch(Monitor *m, Workspace *target);
 void workspace_focus_dir(Monitor *m, int dir);
+Workspace *workspace_neighbour(Client *c, int dir);
+int workspace_holds_only(Workspace *ws, Client *c);
+void focus_first_in_workspace(Workspace *ws);
 void focus_workspace_dir(const Arg *arg);
 void move_column_dir(const Arg *arg);
 void move_client_to_ws_dir(const Arg *arg);
@@ -2949,6 +2966,7 @@ void status_conf_update(const char *key, double value);
 int barmod_count(void);
 const BarModCfg *barmod_get(int i);
 const BarModCfg *barmod_find(const char *name);
+int barmod_slot(const BarModCfg *cfg);
 void statusbar_conf_changed(void);   /* statusbar.c: re-render + relayout */
 void setup_statusbar_conf_watch(void);
 void monitor_overlay_update(void);
@@ -2985,6 +3003,8 @@ int bar_module_attach(StatusModule *mod, struct nx_buffer *buf);
 void bar_module_draw(StatusModule *mod, int bar_h, const BarLabel *l);
 void bar_module_clear(StatusModule *mod);
 const float *bar_icon_color(const float *text_fg);
+double bar_tint_drift(int slot, int slots);
+void bar_tint(const float base[static 4], double deg, float out[static 4]);
 uint32_t icon_glyph_cp(const char *path);
 const IconGlyph *icon_glyph_for(const char *path);
 const struct fcft_glyph *bar_glyph_px(uint32_t cp, int px);
@@ -3026,6 +3046,12 @@ void refreshstatusicons(void);
 void refreshstatusterminfo(void);   /* terminfo.c */
 int is_terminal_client(Client *c);  /* terminfo.c */
 int terminfo_wants_fast_poll(void); /* terminfo.c */
+enum ti_kind { TI_CWD, TI_SSH };
+typedef struct {
+	enum ti_kind kind;
+	char text[128];
+} TiInfo;
+void terminfo_collect(pid_t cur, TiInfo *info);
 void refreshstatustags(void);
 void refreshworkspacemodule(Monitor *m);
 void init_status_refresh_tasks(void);

@@ -246,7 +246,7 @@ int runtime_fonts_set = 0;
 /* attempt to encapsulate suck into one file */
 
 /* configuration, allows nested code to access above variables */
-#include "overview.h"
+#include "overview/overview.h"
 #include "config.h"
 
 const size_t nrules = LENGTH(rules);

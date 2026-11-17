@@ -31,11 +31,18 @@ static bool scene_buffer_is_black_opaque(struct nx_scene_buffer *scene_buffer) {
 		scene_buffer->single_pixel_buffer_color[1] == 0 &&
 		scene_buffer->single_pixel_buffer_color[2] == 0 &&
 		scene_buffer->single_pixel_buffer_color[3] == UINT32_MAX &&
-		scene_buffer->opacity == 1.0;
+		scene_buffer->opacity == 1.0 &&
+		scene_buffer->corner_radius == 0;
+}
+
+static bool scene_rect_is_black_opaque(struct nx_scene_rect *scene_rect) {
+	static const float black[4] = { 0.f, 0.f, 0.f, 1.f };
+	const struct nx_scene_rect_shape *shape = &scene_rect->shape;
+	return memcmp(scene_rect->color, black, sizeof(black)) == 0 &&
+		shape->radius == 0 && shape->softness == 0 && shape->border == 0;
 }
 
 static bool scene_node_is_opaque_black(struct nx_scene_node *node, float opacity) {
-	static const float black[4] = { 0.f, 0.f, 0.f, 1.f };
 	if (opacity != 1) {
 		return false;
 	}
@@ -44,7 +51,7 @@ static bool scene_node_is_opaque_black(struct nx_scene_node *node, float opacity
 	case NX_SCENE_NODE_TREE:
 		return false;
 	case NX_SCENE_NODE_RECT:
-		return memcmp(nx_scene_rect_from_node(node)->color, black, sizeof(black)) == 0;
+		return scene_rect_is_black_opaque(nx_scene_rect_from_node(node));
 	case NX_SCENE_NODE_BUFFER:
 		return scene_buffer_is_black_opaque(nx_scene_buffer_from_node(node));
 	}

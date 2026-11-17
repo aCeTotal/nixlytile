@@ -43,3 +43,14 @@ void nx_scene_rect_set_color(struct nx_scene_rect *rect, const float color[stati
 	memcpy(rect->color, color, sizeof(rect->color));
 	scene_node_update(&rect->node, NULL);
 }
+
+void nx_scene_rect_set_shape(struct nx_scene_rect *rect,
+		const struct nx_scene_rect_shape *shape) {
+	if (memcmp(&rect->shape, shape, sizeof(rect->shape)) == 0) {
+		return;
+	}
+
+	assert(shape->radius >= 0 && shape->softness >= 0 && shape->border >= 0);
+	rect->shape = *shape;
+	scene_node_update(&rect->node, NULL);
+}

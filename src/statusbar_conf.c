@@ -405,6 +405,13 @@ barmod_find(const char *name)
 	return NULL;
 }
 
+/* Position in bar order. */
+int
+barmod_slot(const BarModCfg *cfg)
+{
+	return (int)(cfg - sc_mods);
+}
+
 /* Applies external statusbar.conf edits live. */
 static void
 sc_apply_external(void)

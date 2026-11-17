@@ -8,8 +8,6 @@
 static int
 switch_box(Client *c, int on, struct nx_box *box)
 {
-	int w, h;
-
 	if (on) {
 		*box = client_fullscreen_geom(c);
 		return 1;
@@ -17,10 +15,9 @@ switch_box(Client *c, int on, struct nx_box *box)
 	/* Floating exits animate in step with content. */
 	if (c->isfloating)
 		return 0;
-	workspace_new_column_inner_size(c->fs_ws && c->fs_ws->mon == c->mon
-			? c->fs_ws : c->mon->active_ws, (int)borderpx, &w, &h);
-	*box = (struct nx_box){ 0, 0, w + 2 * (int)borderpx, h + 2 * (int)borderpx };
-	return w > 0 && h > 0;
+	*box = column_restore_box(c, c->fs_ws && c->fs_ws->mon == c->mon
+			? c->fs_ws : c->mon->active_ws);
+	return box->width > 2 * (int)borderpx && box->height > 2 * (int)borderpx;
 }
 
 /* Games keep their launch cover and rules. */

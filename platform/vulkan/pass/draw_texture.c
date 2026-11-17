@@ -72,7 +72,8 @@ static struct nx_vk_pipeline_key pipeline_key(const struct texture_draw *draw,
 			.filter_mode = options->filter_mode,
 		},
 		.texture_transform = transform,
-		.blend_mode = !texture->has_alpha && draw->alpha == 1.0 ?
+		.blend_mode = !texture->has_alpha && draw->alpha == 1.0 &&
+				options->corner_radius <= 0 ?
 			NX_RENDER_BLEND_MODE_NONE : options->blend_mode,
 	};
 }
@@ -109,8 +110,10 @@ static void push_constants(struct nx_vk_render_pass *pass, const struct texture_
 		.alpha = draw->alpha,
 		.luminance_multiplier = options->luminance_multiplier != NULL ?
 			*options->luminance_multiplier : 1,
+		.corner_radius = options->corner_radius,
 	};
 	vulkan_encode_color_matrix(color_matrix, frag_pcr_data.matrix);
+	vulkan_encode_corner_box(&options->corner_box, 0, frag_pcr_data.corner_box);
 
 	VkCommandBuffer cb = pass->command_buffer->vk;
 	vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT, 0,

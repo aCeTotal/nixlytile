@@ -1,5 +1,6 @@
 #include "nixlytile.h"
 #include "fetch_async.h"
+#include "overview/overview.h"
 
 #include <errno.h>
 #include <sys/stat.h>
@@ -26,6 +27,7 @@ typedef struct {
 	Geom geom;
 	Backdrop backdrop;
 	int saved;
+	struct nx_buffer *blur;
 } Job;
 
 static int job_pipe[2] = { -1, -1 };
@@ -144,6 +146,7 @@ analyse(void *arg)
 		g_object_unref(raw);
 	if (pb) {
 		measure(job, pb);
+		job->blur = overview_blur(pb);
 		job->saved = gdk_pixbuf_save(pb, job->sample, "png", NULL, NULL);
 		g_object_unref(pb);
 	}
@@ -211,6 +214,7 @@ job_done(int fd, uint32_t mask, void *data)
 	if (read(fd, &job, sizeof(job)) != sizeof(job))
 		return 0;
 	theme_set_backdrop(&job->backdrop);
+	overview_set_backdrop(job->blur);
 	if ((!stamp_current() || !theme_apply()) && !generate(job))
 		theme_apply();
 	free(job);

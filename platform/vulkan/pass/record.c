@@ -1,3 +1,4 @@
+#include <math.h>
 #include <string.h>
 #include <vulkan/vulkan.h>
 #include "platform/geometry/matrix.h"
@@ -19,14 +20,22 @@ void vulkan_pack_proj_matrix(const float mat3[static 9], float packed[static 6])
 	memcpy(packed, mat3, 6 * sizeof(float));
 }
 
-void vulkan_encode_color_matrix(const float mat3[static 9], float mat4[4][4]) {
-	float padded[4][4] = {
+void vulkan_encode_color_matrix(const float mat3[static 9], float rows[3][4]) {
+	float padded[3][4] = {
 		{ mat3[0], mat3[1], mat3[2], 0 },
 		{ mat3[3], mat3[4], mat3[5], 0 },
 		{ mat3[6], mat3[7], mat3[8], 0 },
-		{ 0, 0, 0, 0 },
 	};
-	memcpy(mat4, padded, sizeof(padded));
+	memcpy(rows, padded, sizeof(padded));
+}
+
+void vulkan_encode_corner_box(const struct nx_box *box, float inset, float dst[static 4]) {
+	float half_width = (float)box->width / 2;
+	float half_height = (float)box->height / 2;
+	dst[0] = (float)box->x + half_width;
+	dst[1] = (float)box->y + half_height;
+	dst[2] = fmaxf(half_width - inset, 0);
+	dst[3] = fmaxf(half_height - inset, 0);
 }
 
 void vulkan_pass_clip_region(pixman_region32_t *clip, const pixman_region32_t *bounds,

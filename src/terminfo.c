@@ -16,13 +16,6 @@
 #define TI_PATH_TAIL  46
 #define TI_SSH_SHOWN  100
 
-enum ti_kind { TI_CWD, TI_SSH };
-
-typedef struct {
-	enum ti_kind kind;
-	char text[128];
-} TiInfo;
-
 int
 is_terminal_client(Client *c)
 {
@@ -124,10 +117,8 @@ ssh_target(pid_t pid, char *out, size_t n)
 	return 0;
 }
 
-/* Runs on the ti_worker thread only: every step is /proc I/O, and the
- * readlink of a cwd on a dead network mount (NFS/sshfs) can block
- * uninterruptibly — that must never stall the compositor thread. */
-static void
+/* Worker threads only: may block. */
+void
 terminfo_collect(pid_t cur, TiInfo *info)
 {
 	char comm[64], target[128], cwd[PATH_MAX], path[64];

@@ -133,21 +133,20 @@ column_destroy(Column *col)
 	if (!col)
 		return;
 
-	/* Clear any in-flight mouse column-resize referencing this column
-	 * — the next motion event would write into freed memory. */
+	/* Drop in-flight resize refs. */
 	input_column_gone(col);
 
-	/* Detach any remaining clients (shouldn't normally happen — caller
-	 * should remove clients before destroying the column). */
+	/* Orphaned clients lose column. */
 	wl_list_for_each_safe(c, ctmp, &col->clients, column_link) {
 		wl_list_remove(&c->column_link);
 		c->column = NULL;
 	}
+	/* Fullscreen tiles rebuild their own. */
+	wl_list_for_each(c, &clients, link)
+		if (c->fs_col.home == col)
+			c->fs_col.home = NULL;
 
-	/* When a focused column dies, move focus to its LEFT neighbor
-	 * (Niri-style: closing a tile pulls the spotlight one column
-	 * left).  If there's no left neighbor (focused was the leftmost),
-	 * fall back to the right neighbor; if neither, NULL. */
+	/* Focus moves left, else right. */
 	if (col->ws && col->ws->focused_col == col) {
 		Column *neighbor = NULL;
 		if (col->link.prev != &col->ws->columns)
@@ -346,6 +345,62 @@ workspace_detach_client(Client *c)
 		refreshworkspacemodule(ws->mon);
 }
 
+/* Remember c's column before fullscreen. */
+void
+column_hold(Client *c)
+{
+	Column *col = c->column;
+	Client *it;
+
+	c->fs_col.idx = column_index(col);
+	c->fs_col.home = NULL;
+	if (!col)
+		return;
+	if (col->n_clients > 1)
+		c->fs_col.home = col;
+	c->fs_col.maximized = col->fullscreen;
+	c->fs_col.width_idx = col->width_idx;
+	c->fs_col.width_px = col->width_px_override;
+	c->fs_col.stack_idx = 0;
+	wl_list_for_each(it, &col->clients, column_link) {
+		if (it == c)
+			break;
+		c->fs_col.stack_idx++;
+	}
+}
+
+static void
+rejoin(Client *c, Column *col)
+{
+	column_add_client(col, c);
+	for (int k = col->n_clients - 1; k > c->fs_col.stack_idx; k--)
+		column_shift_client(c, -1);
+	col->ws->focused_col = col;
+	refreshworkspacemodule(col->ws->mon);
+}
+
+/* Back where column_hold saw it. */
+void
+column_restore(Client *c, Workspace *ws)
+{
+	Column *home = c->fs_col.home;
+	int idx = c->fs_col.idx;
+
+	c->fs_col.home = NULL;
+	c->fs_col.idx = -1;
+	if (home && home->ws == ws) {
+		rejoin(c, home);
+		return;
+	}
+	workspace_attach_client(ws, c);
+	if (idx < 0)
+		return;
+	column_move_to_index(c->column, idx);
+	c->column->fullscreen = c->fs_col.maximized;
+	c->column->width_idx = c->fs_col.width_idx;
+	c->column->width_px_override = c->fs_col.width_px;
+}
+
 /* Move a column to another workspace, clients and stacking intact.
  * Appends at the end so source order is preserved across repeated calls. */
 void
@@ -526,19 +581,33 @@ workspace_focus_client(Client *c)
  *   and writes them to client geometry / scene positions.  Called
  *   every frame from the rendermon path.
  */
-/* Tiles or bound detached clients. */
-int
-workspace_has_clients(Workspace *ws)
+/* Bound fullscreen or floating clients. */
+static int
+holds_untiled(Workspace *ws)
 {
 	Client *c;
-	if (!ws)
-		return 0;
-	if (ws->n_columns > 0)
-		return 1;
+
 	wl_list_for_each(c, &clients, link)
 		if ((c->isfullscreen && c->fs_ws == ws) || client_float_ws(c) == ws)
 			return 1;
 	return 0;
+}
+
+/* Tiles or bound detached clients. */
+int
+workspace_has_clients(Workspace *ws)
+{
+	if (!ws)
+		return 0;
+	return ws->n_columns > 0 || holds_untiled(ws);
+}
+
+/* Only tile c lives here. */
+int
+workspace_holds_only(Workspace *ws, Client *c)
+{
+	return ws->n_columns == 1 && c->column->n_clients == 1
+			&& !holds_untiled(ws);
 }
 
 /* Workspace a floating window lives on; NULL = shown everywhere. */
@@ -796,6 +865,13 @@ flex_column_width(Workspace *ws, int mon_w, int gap, int n_new)
 	return fit;
 }
 
+/* Tile area once springs settle. */
+struct nx_box
+monitor_rest_area(Monitor *m)
+{
+	return m->w_initialized ? m->w_target : m->w;
+}
+
 /* Inner size of a new default column. */
 void
 workspace_new_column_inner_size(Workspace *ws, int bw, int *out_w, int *out_h)
@@ -810,8 +886,8 @@ workspace_new_column_inner_size(Workspace *ws, int bw, int *out_w, int *out_h)
 
 	m = ws->mon;
 	gap = m->gaps ? (int)gappx : 0;
-	mon_w = m->w_initialized ? m->w_target.width : m->w.width;
-	mon_h = m->w_initialized ? m->w_target.height : m->w.height;
+	mon_w = monitor_rest_area(m).width;
+	mon_h = monitor_rest_area(m).height;
 	if (mon_w <= 0 || mon_h <= 0) {
 		mon_w = m->m.width - 2 * gap;
 		mon_h = m->m.height - 2 * gap;
@@ -861,13 +937,8 @@ workspace_layout(Workspace *ws)
 		return;
 
 	gap = m->gaps ? (int)gappx : 0;
-	/* Use TARGET tile area for size calculations.  m->w may be
-	 * mid-spring (waybar toggle) — using the lerped value here
-	 * would snap col->target_width/height to an intermediate state,
-	 * preventing the size spring from converging on the final
-	 * value as m->w settles. */
-	mon_w = m->w_initialized ? m->w_target.width : m->w.width;
-	mon_h = m->w_initialized ? m->w_target.height : m->w.height;
+	mon_w = monitor_rest_area(m).width;
+	mon_h = monitor_rest_area(m).height;
 	if (mon_w < 0) mon_w = 0;
 	if (mon_h < 0) mon_h = 0;
 
@@ -1121,7 +1192,7 @@ resize_column_dir(const Arg *arg)
 
 	dir = arg->i >= 0 ? 1 : -1;
 
-	mon_w = selmon->w_initialized ? selmon->w_target.width : selmon->w.width;
+	mon_w = monitor_rest_area(selmon).width;
 	if (mon_w < 1)
 		mon_w = selmon->w.width;
 	step = mon_w / 20;
@@ -1298,35 +1369,42 @@ expel_window_from_column(const Arg *arg)
 	arrange(selmon);
 }
 
-/* Move focused window up/down within its column (or across columns). */
+/* Swap link with its neighbour. */
+static int
+list_shift(struct wl_list *link, struct wl_list *head, int dir)
+{
+	struct wl_list *next = dir > 0 ? link->next : link->prev;
+
+	if (!dir || next == head)
+		return 0;
+	wl_list_remove(link);
+	wl_list_insert(dir > 0 ? next : next->prev, link);
+	return 1;
+}
+
+int
+column_shift_client(Client *c, int dir)
+{
+	return list_shift(&c->column_link, &c->column->clients, dir);
+}
+
+int
+column_shift(Column *col, int dir)
+{
+	return list_shift(&col->link, &col->ws->columns, dir);
+}
+
+/* Move window within its column. */
 void
 move_window_in_column_dir(const Arg *arg)
 {
-	Column *col;
 	Client *c;
-	struct wl_list *target_link;
-	(void)arg;
+
 	if (!arg || !selmon || !selmon->active_ws)
 		return;
 	c = focustop(selmon);
-	if (!c || !c->column)
+	if (!c || !c->column || !column_shift_client(c, arg->i))
 		return;
-	col = c->column;
-	if (col->n_clients < 2)
-		return;
-	if (arg->i > 0) {
-		if (c->column_link.next == &col->clients)
-			return;
-		target_link = c->column_link.next->next;
-		wl_list_remove(&c->column_link);
-		wl_list_insert(target_link->prev, &c->column_link);
-	} else {
-		if (c->column_link.prev == &col->clients)
-			return;
-		target_link = c->column_link.prev;
-		wl_list_remove(&c->column_link);
-		wl_list_insert(target_link->prev, &c->column_link);
-	}
 	arrange(selmon);
 }
 
@@ -1358,49 +1436,31 @@ focus_window_in_column_dir(const Arg *arg)
 		focusclient(target, 1);
 }
 
-/* ── keybind wrappers (phase 5) ──────────────────────────────────────
- * These match the (const Arg *) signature used by the keybind table.
- * Direction sign: +1 = down/right, −1 = up/left.
- */
-/* After landing on a workspace, restore keyboard focus to its
- * remembered column (workspace.focused_col).  lift=0: do NOT warp
- * cursor — the workspace slide animation is still in flight, warping
- * to the new ws's tile mid-anim makes the cursor jump ahead of the
- * visible workspace, creating a visible glitch.  Cursor stays put;
- * once the slide settles, sloppy-focus picks up whatever tile is
- * under the cursor at its current screen position. */
-static void
+/* Refocus remembered column, no warp. */
+void
 focus_first_in_workspace(Workspace *ws)
 {
 	Column *col;
-	Client *c;
+	Client *c, *fsc;
 
 	if (!ws)
 		return;
 
-	/* A fullscreen client bound to this workspace owns focus
-	 * exclusively — don't hand it to a tile behind it.  Lift so the
-	 * cursor warps onto it: selecting this tag gives the fullscreen
-	 * client mouse + keyboard focus (gamepads feed it via evdev). */
-	if (ws->mon) {
-		Client *fsc = fullscreen_visible_on(ws->mon);
-		if (fsc && fsc->fs_ws == ws) {
-			exclusive_focus = NULL;
-			focusclient(fsc, 1);
-			return;
-		}
+	/* Bound fullscreen client owns focus. */
+	fsc = ws->mon ? fullscreen_visible_on(ws->mon) : NULL;
+	if (fsc && fsc->fs_ws == ws) {
+		exclusive_focus = NULL;
+		focusclient(fsc, 1);
+		return;
 	}
 
 	col = ws->focused_col;
+	/* Empty workspace drops focus. */
+	if ((!col || wl_list_empty(&col->clients)) && wl_list_empty(&ws->columns)) {
+		focusclient(NULL, 0);
+		return;
+	}
 	if (!col || wl_list_empty(&col->clients)) {
-		if (wl_list_empty(&ws->columns)) {
-			/* Empty workspace: clear keyboard focus.  Leaving it
-			 * on the previous ws's (now hidden) client — e.g. a
-			 * fullscreen video — sends every keystroke to an
-			 * invisible surface and reads as a frozen desktop. */
-			focusclient(NULL, 0);
-			return;
-		}
 		col = wl_container_of(ws->columns.next, col, link);
 		ws->focused_col = col;
 	}
@@ -1427,15 +1487,12 @@ focus_workspace_dir(const Arg *arg)
 	printstatus();
 }
 
-/* Move focused column left/right by swapping list order.  At the workspace
- * edge, cross to the adjacent monitor (treats the whole multi-monitor row
- * as one continuous tile strip).  Multi-client columns are preserved
- * across the hop. */
+/* Move column; edges cross monitors. */
 void
 move_column_dir(const Arg *arg)
 {
 	Workspace *ws;
-	Column *cur, *neighbor;
+	Column *cur;
 	Monitor *src_mon, *m_next;
 	Workspace *dst_ws;
 	struct nx_output *next_out;
@@ -1452,17 +1509,7 @@ move_column_dir(const Arg *arg)
 	if (!cur)
 		return;
 
-	if (arg->i > 0 && cur->link.next != &ws->columns) {
-		neighbor = wl_container_of(cur->link.next, neighbor, link);
-		wl_list_remove(&cur->link);
-		wl_list_insert(&neighbor->link, &cur->link);
-		arrange(selmon);
-		return;
-	}
-	if (arg->i < 0 && cur->link.prev != &ws->columns) {
-		neighbor = wl_container_of(cur->link.prev, neighbor, link);
-		wl_list_remove(&cur->link);
-		wl_list_insert(neighbor->link.prev, &cur->link);
+	if (column_shift(cur, arg->i)) {
 		arrange(selmon);
 		return;
 	}
@@ -1638,31 +1685,33 @@ move_client_to_ws_n(const Arg *arg)
 	focusclient(c, 1);
 }
 
-/* Move focused client to the workspace above/below.  Creates a new
- * workspace if moving past the last one. */
+/* Next workspace; may create one. */
+Workspace *
+workspace_neighbour(Client *c, int dir)
+{
+	Workspace *ws = c->column->ws, *next;
+	struct wl_list *link = dir > 0 ? ws->link.next : ws->link.prev;
+
+	if (link != &ws->mon->workspaces)
+		return wl_container_of(link, next, link);
+	if (dir <= 0 || workspace_holds_only(ws, c))
+		return NULL;
+	return workspace_create(ws->mon);
+}
+
+/* Move window up/down a workspace. */
 void
 move_client_to_ws_dir(const Arg *arg)
 {
-	Workspace *cur, *target = NULL;
+	Workspace *target;
 	Client *c;
 
-	if (!arg || !selmon || !(cur = monitor_active_ws(selmon)))
+	if (!arg || !selmon || !monitor_active_ws(selmon))
 		return;
-
 	c = focustop(selmon);
-	if (!c || c->isfloating || c->isfullscreen)
+	if (!c || !c->column || c->isfloating || c->isfullscreen)
 		return;
-
-	if (arg->i > 0) {
-		if (cur->link.next != &selmon->workspaces)
-			target = wl_container_of(cur->link.next, target, link);
-		else
-			target = workspace_create(selmon);
-	} else {
-		if (cur->link.prev != &selmon->workspaces)
-			target = wl_container_of(cur->link.prev, target, link);
-	}
-	if (!target)
+	if (!(target = workspace_neighbour(c, arg->i)))
 		return;
 
 	workspace_detach_client(c);
@@ -1788,6 +1837,58 @@ client_weight(Client *c)
 	return c->col_weight > 0.0 ? c->col_weight : 1.0;
 }
 
+/* Settled tile box, workspace-relative. */
+struct nx_box
+tile_rest_box(Client *c)
+{
+	Column *col = c->column;
+	Monitor *m = col->ws->mon;
+	int gap = m->gaps ? (int)gappx : 0;
+	int avail = monitor_rest_area(m).height - gap * (col->n_clients - 1);
+	double sumw = 0.0, top = 0.0;
+	Client *it;
+	int j = 0;
+
+	wl_list_for_each(it, &col->clients, column_link)
+		sumw += client_weight(it);
+	wl_list_for_each(it, &col->clients, column_link) {
+		double bottom = top + SHARE_SPAN * client_weight(it) / sumw;
+
+		if (it == c)
+			return (struct nx_box){ col->target_x,
+					share_edge(top, avail) + gap * j, col->target_width,
+					share_edge(bottom, avail) - share_edge(top, avail) };
+		top = bottom;
+		j++;
+	}
+	return (struct nx_box){ 0 };
+}
+
+/* Size column_restore will give. */
+struct nx_box
+column_restore_box(Client *c, Workspace *ws)
+{
+	struct nx_box area = monitor_rest_area(ws->mon);
+	int gap = ws->mon->gaps ? (int)gappx : 0;
+	Column *home = c->fs_col.home;
+	Column shape = { .width_idx = -1 };
+	int n, avail;
+
+	if (home && home->ws == ws) {
+		n = home->n_clients + 1;
+		avail = area.height - gap * (n - 1);
+		return (struct nx_box){ 0, 0, home->target_width,
+				share_edge(SHARE_SPAN * (c->fs_col.stack_idx + 1) / n, avail)
+				- share_edge(SHARE_SPAN * c->fs_col.stack_idx / n, avail) };
+	}
+	if (c->fs_col.idx >= 0)
+		shape = (Column){ .fullscreen = c->fs_col.maximized,
+				.width_idx = c->fs_col.width_idx,
+				.width_px_override = c->fs_col.width_px };
+	return (struct nx_box){ 0, 0, column_target_width_px(&shape, area.width,
+			flex_column_width(ws, area.width, gap, 1)), area.height };
+}
+
 static void
 place_column(Column *col, int ox, int oy)
 {
@@ -1797,7 +1898,7 @@ place_column(Column *col, int ox, int oy)
 	int col_w = (int)lround(col->x_f + col->width_f) - col_x;
 	int spaces = gap * (col->n_clients - 1);
 	int avail = m->w.height - spaces;
-	int final_avail = (m->w_initialized ? m->w_target.height : m->w.height) - spaces;
+	int final_avail = monitor_rest_area(m).height - spaces;
 	double sumw = 0.0, top = 0.0, final_top = 0.0;
 	int j = 0;
 	Client *c;

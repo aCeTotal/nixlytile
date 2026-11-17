@@ -50,7 +50,8 @@ static bool scene_entry_scanout_eligible(const struct render_list_entry *entry,
 	}
 
 	struct nx_scene_buffer *buffer = nx_scene_buffer_from_node(node);
-	if (buffer->buffer == NULL || buffer->transform != data->transform) {
+	if (buffer->buffer == NULL || buffer->transform != data->transform ||
+			buffer->corner_radius > 0) {
 		return false;
 	}
 

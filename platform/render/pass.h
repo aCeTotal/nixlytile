@@ -51,6 +51,8 @@ struct nx_render_texture_options {
 	enum nx_color_encoding color_encoding; // YCbCr to RGB matrix
 	enum nx_color_range color_range;
 	const float *luminance_multiplier; // NULL means 1.0
+	struct nx_box corner_box; // rounded clip, buffer pixels
+	float corner_radius; // 0 disables the clip
 
 	/* Awaited before sampling, needs features.timeline */
 	struct nx_drm_syncobj_timeline *wait_timeline;
@@ -70,6 +72,10 @@ struct nx_render_rect_options {
 	struct nx_render_color color;
 	const pixman_region32_t *clip; // NULL disables clipping
 	enum nx_render_blend_mode blend_mode;
+	struct nx_box corner_box; // empty means the rect box
+	float corner_radius;
+	float softness; // feathered edge width
+	float border; // outline width, 0 fills
 };
 
 void nx_render_pass_add_rect(struct nx_render_pass *render_pass,

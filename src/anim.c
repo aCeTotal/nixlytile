@@ -1,7 +1,7 @@
 #include "nixlytile.h"
 #include "client.h"
 #include "diag.h"
-#include "overview.h"
+#include "overview/overview.h"
 
 /* Scales buffers before the client catches up. */
 struct scale_ctx {

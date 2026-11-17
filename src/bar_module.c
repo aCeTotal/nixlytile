@@ -82,6 +82,7 @@ bar_module_draw(StatusModule *mod, int bar_h, const BarLabel *l)
 {
 	BarLabel shown = *l;
 	struct nx_buffer *buf;
+	float tinted[4];
 	uint64_t sig;
 	int pad;
 
@@ -89,6 +90,11 @@ bar_module_draw(StatusModule *mod, int bar_h, const BarLabel *l)
 		return;
 	if (mod->icons_only && bar_icon_width(bar_h, shown.icon))
 		shown.text = NULL;
+	/* Resting icons drift in hue. */
+	if (shown.icon_fg == statusbar_icon_fg) {
+		bar_tint(statusbar_icon_fg, mod->tint, tinted);
+		shown.icon_fg = tinted;
+	}
 	sig = label_sig(&shown, bar_h);
 	if (sig == mod->render_sig && mod->content && mod->width > 0)
 		return;

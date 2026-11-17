@@ -8,8 +8,11 @@
 static_assert(sizeof(struct nx_vk_vert_pcr_data) == 48,
 	"Shaders expect fragment push constants at offset 48");
 static_assert(sizeof(struct nx_vk_vert_pcr_data) +
-	sizeof(struct nx_vk_frag_texture_pcr_data) < 128,
+	sizeof(struct nx_vk_frag_texture_pcr_data) <= 128,
 	"Expected to need <= 128 bytes of push constants");
+static_assert(sizeof(struct nx_vk_frag_quad_pcr_data) <=
+	sizeof(struct nx_vk_frag_texture_pcr_data),
+	"The fragment range covers both shaders");
 
 // Set and pipeline layouts.
 static bool init_tex_layouts(VkDevice dev, struct nx_vk_pipeline_layout *layout) {

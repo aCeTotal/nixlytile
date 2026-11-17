@@ -39,7 +39,9 @@ static inline void vulkan_write_rect(float dst[static 4], const pixman_box32_t *
 void vulkan_pass_project_box(struct nx_vk_render_pass *pass, const struct nx_box *box,
 	enum wl_output_transform transform, float matrix[static 9]);
 void vulkan_pack_proj_matrix(const float mat3[static 9], float packed[static 6]);
-void vulkan_encode_color_matrix(const float mat3[static 9], float mat4[4][4]);
+void vulkan_encode_color_matrix(const float mat3[static 9], float rows[3][4]);
+// Centre and inset half size.
+void vulkan_encode_corner_box(const struct nx_box *box, float inset, float dst[static 4]);
 
 // Box clipped to optional bounds.
 void vulkan_pass_clip_region(pixman_region32_t *clip, const pixman_region32_t *bounds,

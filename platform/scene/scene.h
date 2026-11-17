@@ -111,10 +111,17 @@ struct nx_scene_surface {
 	};
 };
 
+struct nx_scene_rect_shape {
+	int radius; // corner radius
+	int softness; // feathered edge width
+	int border; // outline width, 0 fills
+};
+
 struct nx_scene_rect {
 	struct nx_scene_node node;
 	int width, height;
 	float color[4]; // premultiplied
+	struct nx_scene_rect_shape shape;
 };
 
 struct nx_scene_outputs_update_event {
@@ -152,6 +159,8 @@ struct nx_scene_buffer {
 	struct nx_scene_output *primary_output; // most visible area, or NULL
 
 	float opacity;
+	struct nx_box corner_box; // node-local rounded clip
+	int corner_radius; // 0 disables
 	struct nx_fbox src_box; // empty samples everything
 	int dst_width, dst_height; // zero means buffer size
 	enum wl_output_transform transform;
@@ -261,6 +270,8 @@ struct nx_scene_rect *nx_scene_rect_create(struct nx_scene_tree *parent,
 	int width, int height, const float color[static 4]);
 void nx_scene_rect_set_size(struct nx_scene_rect *rect, int width, int height);
 void nx_scene_rect_set_color(struct nx_scene_rect *rect, const float color[static 4]);
+void nx_scene_rect_set_shape(struct nx_scene_rect *rect,
+	const struct nx_scene_rect_shape *shape);
 
 // A NULL buffer hides the node.
 struct nx_scene_buffer *nx_scene_buffer_create(struct nx_scene_tree *parent,
@@ -280,6 +291,9 @@ void nx_scene_buffer_set_transform(struct nx_scene_buffer *scene_buffer,
 	enum wl_output_transform transform);
 void nx_scene_buffer_set_opacity(struct nx_scene_buffer *scene_buffer,
 	float opacity);
+// Empty or radius 0 disables.
+void nx_scene_buffer_set_corner_clip(struct nx_scene_buffer *scene_buffer,
+	const struct nx_box *box, int radius);
 void nx_scene_buffer_set_transfer_function(struct nx_scene_buffer *scene_buffer,
 	enum nx_color_transfer_function transfer_function);
 void nx_scene_buffer_set_primaries(struct nx_scene_buffer *scene_buffer,

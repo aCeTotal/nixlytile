@@ -11,7 +11,7 @@ struct rect_batch {
 	struct nx_box box;
 	const pixman_box32_t *rects;
 	int len;
-	float color[4]; // linear, premultiplied
+	struct nx_vk_frag_quad_pcr_data frag; // colour linear, premultiplied
 };
 
 static const struct nx_vk_pipeline_key quad_pipeline_key = {
@@ -59,7 +59,7 @@ static void blend_rects(struct nx_vk_render_pass *pass, const struct rect_batch 
 	vkCmdPushConstants(cb, pipe->layout->vk, VK_SHADER_STAGE_VERTEX_BIT, 0,
 		sizeof(vert_pcr_data), &vert_pcr_data);
 	vkCmdPushConstants(cb, pipe->layout->vk, VK_SHADER_STAGE_FRAGMENT_BIT,
-		sizeof(vert_pcr_data), sizeof(batch->color), batch->color);
+		sizeof(vert_pcr_data), sizeof(batch->frag), &batch->frag);
 	vulkan_pass_draw_instances(pass, &span, batch->len);
 }
 
@@ -68,7 +68,8 @@ static void clear_rects(struct nx_vk_render_pass *pass, const struct rect_batch 
 		.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
 		.colorAttachment = 0,
 		.clearValue.color.float32 = {
-			batch->color[0], batch->color[1], batch->color[2], batch->color[3],
+			batch->frag.color[0], batch->frag.color[1],
+			batch->frag.color[2], batch->frag.color[3],
 		},
 	};
 	VkClearRect clear_rect = {
@@ -104,21 +105,33 @@ void vulkan_render_pass_add_rect(struct nx_render_pass *nx_pass,
 	// Shaders blend in linear space.
 	const struct nx_render_color *color = &options->color;
 	struct rect_batch batch = {
-		.color = {
-			color_to_linear_premult(color->r, color->a),
-			color_to_linear_premult(color->g, color->a),
-			color_to_linear_premult(color->b, color->a),
-			color->a,
+		.frag = {
+			.color = {
+				color_to_linear_premult(color->r, color->a),
+				color_to_linear_premult(color->g, color->a),
+				color_to_linear_premult(color->b, color->a),
+				color->a,
+			},
+			.corner_radius = options->corner_radius,
+			.softness = options->softness,
+			.border = options->border,
 		},
 	};
 	nx_render_rect_options_get_box(options, pass->render_buffer->nx_buffer, &batch.box);
+	vulkan_encode_corner_box(nx_box_empty(&options->corner_box) ?
+		&batch.box : &options->corner_box, options->softness, batch.frag.corner_box);
+
+	// Shaped edges always blend.
+	bool shaped = options->corner_radius > 0 || options->softness > 0 || options->border > 0;
+	enum nx_render_blend_mode blend_mode = shaped ?
+		NX_RENDER_BLEND_MODE_PREMULTIPLIED : options->blend_mode;
 
 	pixman_region32_t clip;
 	vulkan_pass_clip_region(&clip, options->clip, &batch.box);
 	batch.rects = pixman_region32_rectangles(&clip, &batch.len);
 
 	if (batch.len > 0) {
-		draw_rects(pass, &batch, options->blend_mode);
+		draw_rects(pass, &batch, blend_mode);
 	}
 	pixman_region32_fini(&clip);
 }

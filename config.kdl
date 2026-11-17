@@ -153,8 +153,8 @@ autostart "nixlymedia"
 //
 // Action list:
 //   quit  killclient  spawn  togglefullscreen
-//   togglestatusbar  togglegaps  togglemultigpu  gazecalibrate  focus-column-dir
-//   focus-workspace-dir
+//   togglestatusbar  togglegaps  togglemultigpu  gazecalibrate  toggle-overview
+//   focus-column-dir  focus-workspace-dir
 //   focus-workspace-n  focus-window-in-column-dir  focus-last-workspace
 //   move-column-dir  move-window-in-column-dir  move-client-to-ws-dir
 //   move-client-to-ws-n  swap-window-dir  expel-window-from-column
@@ -183,6 +183,7 @@ bind "Mod+Shift+Q"      "quit"
 bind "Mod+f"            "maximize-column"
 bind "Mod+Shift+F"      "togglefullscreen"
 bind "Mod+b"            "togglestatusbar"
+bind "Mod+o"            "toggle-overview"
 bind "Mod+Shift+M"      "togglemultigpu"
 bind "Mod+Shift+G"      "gazecalibrate"
 
@@ -203,8 +204,8 @@ bind "Mod+Shift+J"      "move-window-in-column-dir"    1
 bind "Mod+Shift+K"      "move-window-in-column-dir"    -1
 bind "Mod+Shift+Left"   "move-column-dir"              -1
 bind "Mod+Shift+Right"  "move-column-dir"              1
-bind "Mod+Shift+Up"     "move-window-in-column-dir"    -1
-bind "Mod+Shift+Down"   "move-window-in-column-dir"    1
+bind "Mod+Shift+Up"     "move-client-to-ws-dir"        -1
+bind "Mod+Shift+Down"   "move-client-to-ws-dir"        1
 
 // Alt-direction: move tile within current workspace
 bind "Alt+h"            "move-column-dir"              -1

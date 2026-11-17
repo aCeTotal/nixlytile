@@ -12,6 +12,7 @@ struct Snapshot {
 	struct nx_scene_tree *tree;
 	int w, h;
 	int opaque;
+	int radius;
 	int n, cap;
 	Part *part;
 };
@@ -194,15 +195,29 @@ place(Part *p, struct nx_box r, struct nx_box v)
 	pixman_region32_fini(&opaque);
 }
 
+/* Rounds buffers to the window. */
+static void
+round_part(Part *p, struct nx_box window, int radius)
+{
+	struct nx_box clip;
+
+	if (p->node->type != NX_SCENE_NODE_BUFFER)
+		return;
+	clip = (struct nx_box){ window.x - p->node->x, window.y - p->node->y,
+			window.width, window.height };
+	nx_scene_buffer_set_corner_clip(nx_scene_buffer_from_node(p->node), &clip, radius);
+}
+
 /* Stretches into box, crops to area. */
 void
 snapshot_fit(Snapshot *s, struct nx_box box, struct nx_box area)
 {
 	double sx = (double)box.width / s->w;
 	double sy = (double)box.height / s->h;
-	struct nx_box r, v;
+	struct nx_box r, v, window = { 0 };
 	int i;
 
+	nx_box_intersection(&window, &box, &area);
 	for (i = 0; i < s->n; i++) {
 		Part *p = &s->part[i];
 
@@ -217,7 +232,14 @@ snapshot_fit(Snapshot *s, struct nx_box box, struct nx_box area)
 		}
 		nx_scene_node_set_enabled(p->node, 1);
 		place(p, r, v);
+		round_part(p, window, s->radius);
 	}
+}
+
+void
+snapshot_round(Snapshot *s, int radius)
+{
+	s->radius = radius;
 }
 
 void
