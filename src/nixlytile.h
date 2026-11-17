@@ -2579,6 +2579,7 @@ void snapshot_fit(Snapshot *s, struct nx_box box, struct nx_box area);
 void snapshot_set_alpha(Snapshot *s, float alpha);
 struct nx_scene_node *snapshot_node(Snapshot *s);
 int snapshot_covers(Snapshot *s, struct nx_box box);
+int snapshot_opaque(Snapshot *s);
 void snapshot_fit_crisp(Snapshot *s, struct nx_box box, struct nx_box area);
 void snapshot_fit_cover(Snapshot *s, struct nx_box box, struct nx_box area);
 void snapshot_destroy(Snapshot *s);
@@ -2592,7 +2593,6 @@ int morph_tick(Monitor *m, double dt);
 /* answer.c */
 void answer_note(Client *c);
 int answer_settled(Client *c, uint64_t now);
-int answer_pending(Monitor *m);
 /* tilefill.c */
 void tilefill_create(Client *c);
 void tilefill_update(Client *c);

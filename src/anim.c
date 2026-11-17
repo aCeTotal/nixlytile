@@ -639,13 +639,11 @@ monitor_anim_tick(Monitor *m, double dt)
 	Workspace *ws;
 	int close_still = 0;
 	int vertical_anim;
-	double ldt;
 
 	if (!m)
 		return 0;
 
 	/* Layout springs tick before placement. */
-	ldt = answer_pending(m) ? 0.0 : dt;
 	m->tile_spring = 0;
 	if (m->active_ws) {
 		ws = m->active_ws;
@@ -654,7 +652,7 @@ monitor_anim_tick(Monitor *m, double dt)
 			ws->scroll_x_f = (double)ws->scroll_x;
 		if (spring_tick(&ws->scroll_x_f, &ws->scroll_x_vel,
 				(double)ws->target_scroll_x,
-				SPRING_HORIZONTAL, ldt)) {
+				SPRING_HORIZONTAL, dt)) {
 			active = 1;
 			slide = 1;
 		}
@@ -671,13 +669,13 @@ monitor_anim_tick(Monitor *m, double dt)
 	if (m->w_initialized) {
 		int moved_pos = 0, moved_size = 0;
 		moved_pos  |= spring_tick(&m->w_x_f, &m->w_x_vel,
-				(double)m->w_target.x, SPRING_WINDOW, ldt);
+				(double)m->w_target.x, SPRING_WINDOW, dt);
 		moved_pos  |= spring_tick(&m->w_y_f, &m->w_y_vel,
-				(double)m->w_target.y, SPRING_WINDOW, ldt);
+				(double)m->w_target.y, SPRING_WINDOW, dt);
 		moved_size |= spring_tick(&m->w_w_f, &m->w_w_vel,
-				(double)m->w_target.width, SPRING_WINDOW, ldt);
+				(double)m->w_target.width, SPRING_WINDOW, dt);
 		moved_size |= spring_tick(&m->w_h_f, &m->w_h_vel,
-				(double)m->w_target.height, SPRING_WINDOW, ldt);
+				(double)m->w_target.height, SPRING_WINDOW, dt);
 		if (moved_pos || moved_size) {
 			active = 1;
 			/* Far edge rounds: no jitter. */
@@ -704,13 +702,13 @@ monitor_anim_tick(Monitor *m, double dt)
 			wl_list_for_each(col, &wsi->columns, link) {
 				if (spring_tick(&col->x_f, &col->x_vel,
 						(double)col->target_x,
-						SPRING_COLUMN, ldt))
+						SPRING_COLUMN, dt))
 					active = slide = 1;
 				col->x = (int)col->x_f;
 				if (spring_tick(&col->width_f,
 						&col->width_vel,
 						(double)col->target_width,
-						SPRING_COLUMN, ldt)) {
+						SPRING_COLUMN, dt)) {
 					active = 1;
 					size_anim = 1;
 					m->tile_spring = 1;
@@ -718,7 +716,7 @@ monitor_anim_tick(Monitor *m, double dt)
 				/* Far edge rounds: no jitter. */
 				col->width = (int)(col->x_f + col->width_f)
 						- col->x;
-				if (shares_tick(col, ldt))
+				if (shares_tick(col, dt))
 					active = size_anim = m->tile_spring = 1;
 			}
 		}

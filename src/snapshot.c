@@ -11,6 +11,7 @@ typedef struct {
 struct Snapshot {
 	struct nx_scene_tree *tree;
 	int w, h;
+	int opaque;
 	int n, cap;
 	Part *part;
 };
@@ -126,6 +127,20 @@ walk(Snapshot *s, struct nx_scene_tree *tree, Pen pen)
 	}
 }
 
+/* One opaque part hides all below. */
+static int
+opaque_cover(Snapshot *s)
+{
+	Part *p;
+
+	for (p = s->part; p < s->part + s->n; p++)
+		if (p->opaque && p->rect.x <= 0 && p->rect.y <= 0 &&
+				p->rect.x + p->rect.width >= s->w &&
+				p->rect.y + p->rect.height >= s->h)
+			return 1;
+	return 0;
+}
+
 /* Copies src at its natural box. */
 Snapshot *
 snapshot_take(struct nx_scene_tree *parent, struct nx_scene_tree *src,
@@ -141,6 +156,7 @@ snapshot_take(struct nx_scene_tree *parent, struct nx_scene_tree *src,
 	s->w = MAX(natural.width, 1);
 	s->h = MAX(natural.height, 1);
 	walk(s, src, (Pen){ -natural.x, -natural.y, 1.0f });
+	s->opaque = opaque_cover(s);
 	return s;
 }
 
@@ -224,6 +240,12 @@ snapshot_destroy(Snapshot *s)
 	nx_scene_node_destroy(&s->tree->node);
 	free(s->part);
 	free(s);
+}
+
+int
+snapshot_opaque(Snapshot *s)
+{
+	return s->opaque;
 }
 
 int

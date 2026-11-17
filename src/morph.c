@@ -123,8 +123,21 @@ morph_track(Client *c)
 static void
 stack(Client *c, Snapshot *bottom, Snapshot *top)
 {
+	nx_scene_node_set_enabled(snapshot_node(bottom), 1);
+	nx_scene_node_set_enabled(snapshot_node(top), 1);
 	nx_scene_node_place_above(snapshot_node(bottom), &c->scene_surface->node);
 	nx_scene_node_place_above(snapshot_node(top), snapshot_node(bottom));
+}
+
+/* Translucent layers never overlap. */
+static void
+show_only(Client *c, Snapshot *shown, Snapshot *hidden)
+{
+	nx_scene_node_set_enabled(snapshot_node(hidden), 0);
+	nx_scene_node_set_enabled(snapshot_node(shown), 1);
+	nx_scene_node_place_above(snapshot_node(shown), &c->scene_surface->node);
+	snapshot_fit_cover(shown, inner(c), visible_area(c));
+	snapshot_set_alpha(shown, 1.0f);
 }
 
 void
@@ -140,8 +153,16 @@ morph_fit(Client *c)
 	box = inner(c);
 	area = visible_area(c);
 	if (!from) {
+		nx_scene_node_set_enabled(snapshot_node(live), 1);
 		nx_scene_node_place_above(snapshot_node(live), &c->scene_surface->node);
 		snapshot_fit_cover(live, box, area);
+		return;
+	}
+	if (!snapshot_opaque(live) || !snapshot_opaque(from)) {
+		if (c->morph_fade > 0.0)
+			show_only(c, live, from);
+		else
+			show_only(c, from, live);
 		return;
 	}
 	t = (float)(c->morph_fade / PROGRESS_SPAN);

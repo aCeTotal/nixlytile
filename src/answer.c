@@ -2,8 +2,6 @@
 #include "nixlytile.h"
 #include "client.h"
 
-/* Layout waits this long for content. */
-#define WAIT_NS 150000000ULL
 /* Unanswered configures fade anyway. */
 #define ANSWER_TIMEOUT_NS 300000000ULL
 /* Placeholders repaint within this. */
@@ -56,19 +54,5 @@ answer_settled(Client *c, uint64_t now)
 	}
 	if (now - c->morph_expect_ns >= ANSWER_TIMEOUT_NS)
 		return c->morph_answered = 1;
-	return 0;
-}
-
-/* Layout holds while content renders. */
-int
-answer_pending(Monitor *m)
-{
-	Client *c;
-	uint64_t now = get_time_ns();
-
-	wl_list_for_each(c, &clients, link)
-		if (c->mon == m && c->morph_from && !answer_settled(c, now) &&
-				now - c->morph_expect_ns < WAIT_NS)
-			return 1;
 	return 0;
 }
