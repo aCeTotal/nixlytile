@@ -1772,13 +1772,68 @@ workspace_focus_dir(Monitor *m, int dir)
 		workspace_switch(m, target);
 }
 
+/* Height shares spring in ten-thousandths. */
+#define SHARE_SPAN 10000.0
+
+static int
+share_edge(double share, int avail)
+{
+	return (int)lround(share * avail / SHARE_SPAN);
+}
+
+/* Non-positive weight counts one. */
+static double
+client_weight(Client *c)
+{
+	return c->col_weight > 0.0 ? c->col_weight : 1.0;
+}
+
+static void
+place_column(Column *col, int ox, int oy)
+{
+	Monitor *m = col->ws->mon;
+	int gap = m->gaps ? (int)gappx : 0;
+	int col_x = (int)lround(col->x_f);
+	int col_w = (int)lround(col->x_f + col->width_f) - col_x;
+	int spaces = gap * (col->n_clients - 1);
+	int avail = m->w.height - spaces;
+	int final_avail = (m->w_initialized ? m->w_target.height : m->w.height) - spaces;
+	double sumw = 0.0, top = 0.0, final_top = 0.0;
+	int j = 0;
+	Client *c;
+
+	wl_list_for_each(c, &col->clients, column_link)
+		sumw += client_weight(c);
+	wl_list_for_each(c, &col->clients, column_link) {
+		double share = SHARE_SPAN * client_weight(c) / sumw;
+		int y0 = share_edge(top, avail);
+		int y1;
+
+		c->tile_share_t = share;
+		/* Fresh tiles and drags snap. */
+		if (c->tile_ws_id != col->ws->window_id || live_resize_active()) {
+			c->tile_share = share;
+			c->tile_share_v = 0.0;
+		}
+		y1 = share_edge(top + c->tile_share, avail);
+		c->tile_final = (struct nx_box){ 0, 0, col->target_width,
+				share_edge(final_top + share, final_avail) -
+				share_edge(final_top, final_avail) };
+		txn_set_target(c, (struct nx_box){ col_x, col->y + y0 + gap * j,
+				col_w, y1 - y0 }, ox, oy);
+		top += c->tile_share;
+		final_top += share;
+		j++;
+	}
+}
+
 void
 monitor_apply_positions(Monitor *m)
 {
 	Workspace *ws;
 	Column *col;
 	Client *c;
-	int gap, ws_stride;
+	int ws_stride;
 	int vertical_anim;
 
 	if (!m || !m->nx_output->enabled)
@@ -1787,7 +1842,6 @@ monitor_apply_positions(Monitor *m)
 	m->converge_dirty = 1;
 	m->tile_pass++;
 
-	gap = m->gaps ? (int)gappx : 0;
 	ws_stride = m->m.height;
 	vertical_anim = (fabs(m->ws_y_offset) > 0.5);
 
@@ -1874,38 +1928,9 @@ monitor_apply_positions(Monitor *m)
 				? ws->scroll_x_f : (double)row_scroll);
 		oy = m->w.y + ws_y_base;
 
-		wl_list_for_each(col, &ws->columns, link) {
-			/* Edges rounded independently: no jitter. */
-			int col_x = (int)lround(col->x_f);
-			int col_w = (int)lround(col->x_f + col->width_f) - col_x;
-			int nc = col->n_clients;
-			int j = 0;
-			int avail, y_cursor = 0;
-			double sumw = 0.0;
-
-			if (nc == 0)
-				continue;
-			/* Weighted heights, weight <= 0 means 1. */
-			avail = m->w.height - gap * (nc - 1);
-			wl_list_for_each(c, &col->clients, column_link)
-				sumw += c->col_weight > 0.0 ? c->col_weight : 1.0;
-			if (sumw <= 0.0)
-				sumw = (double)nc;
-
-			wl_list_for_each(c, &col->clients, column_link) {
-				struct nx_box geo;
-				double w = c->col_weight > 0.0 ? c->col_weight : 1.0;
-				geo.x = col_x;
-				geo.y = col->y + y_cursor;
-				geo.width = col_w;
-				geo.height = (j == nc - 1)
-					? (avail - y_cursor + gap * j)
-					: (int)((double)avail * w / sumw);
-				txn_set_target(c, geo, ox, oy);
-				y_cursor += geo.height + gap;
-				j++;
-			}
-		}
+		wl_list_for_each(col, &ws->columns, link)
+			place_column(col, ox, oy);
+		closing_anims_place(ws, ox, oy);
 	}
 	txn_place(m);
 

@@ -2,16 +2,6 @@
 #include "client.h"
 #include "diag.h"
 
-/* Max wait for slow clients. */
-#define TXN_TIMEOUT_NS 200000000ULL
-
-/* Render owed, not yet presumed lost. */
-int
-txn_owes(Client *c)
-{
-	return c->txn_owed && get_time_ns() - c->txn_sent_ns < TXN_TIMEOUT_NS;
-}
-
 static int
 same_size(struct nx_box a, struct nx_box b)
 {
@@ -25,15 +15,8 @@ in_pass(Client *c, Monitor *m)
 			c->tile_pass == m->tile_pass;
 }
 
-static int
-on_screen(Client *c, struct nx_box b)
-{
-	struct nx_box out;
-
-	b.x += c->tile_ox;
-	b.y += c->tile_oy;
-	return nx_box_intersection(&out, &b, &c->mon->m);
-}
+/* How a pass steers tile sizes. */
+enum steer { STEER_AIM, STEER_CHASE, STEER_HOLD };
 
 static void
 show(Client *c)
@@ -47,103 +30,35 @@ show(Client *c)
 		return;
 	}
 	client_place(c, g);
-	if (!c->in_txn && !txn_owes(c) && !c->mon->anim_was_active)
+	if (!c->in_txn && !tile_owes(c) && !c->mon->anim_was_active)
 		client_flush_x11_pos(c);
 }
 
+/* Held tiles keep size, not position. */
 static void
-send_size(Client *c, int w, int h)
+hold(Client *c)
 {
-#ifdef XWAYLAND
-	if (client_is_x11(c)) {
-		client_set_size(c, (uint32_t)w, (uint32_t)h);
+	c->tile_shown.x = c->tile_target.x;
+	c->tile_shown.y = c->tile_target.y;
+}
+
+/* First placement asks for its box. */
+static void
+place_fresh(Client *c)
+{
+	c->tile_fresh = 0;
+	c->txn_late = !tile_meets(c, c->tile_shown);
+	if (!c->txn_late)
 		return;
-	}
-#endif
-	c->txn_serial = nx_xdg_toplevel_set_size(c->surface.xdg->toplevel, w, h);
-	c->resize = c->txn_serial;
-}
-
-/* Size of the commit being made. */
-static void
-pending_size(Client *c, int *w, int *h)
-{
-	struct nx_surface *s = client_surface(c);
-
-	*w = s->pending.width;
-	*h = s->pending.height;
-#ifdef XWAYLAND
-	if (client_is_x11(c))
-		return;
-#endif
-	if (c->surface.xdg->pending.geometry.width > 0) {
-		*w = c->surface.xdg->pending.geometry.width;
-		*h = c->surface.xdg->pending.geometry.height;
-	}
-}
-
-/* Newest content: held or committed. */
-static void
-content_size(Client *c, int *w, int *h)
-{
-	*w = c->content_w;
-	*h = c->content_h;
-	if (!*w)
-		client_get_committed_size(c, w, h);
-}
-
-/* Returns 1 if a render is owed. */
-static int
-configure(Client *c, struct nx_box box)
-{
-	int w = MAX(box.width - 2 * (int)c->bw, 1);
-	int h = MAX(box.height - 2 * (int)c->bw, 1);
-	int cw, ch;
-
-	content_size(c, &cw, &ch);
-	client_set_bounds(c, box.width, box.height);
-	c->txn_w = c->pending_resize_w = c->last_configured_w = w;
-	c->txn_h = c->pending_resize_h = c->last_configured_h = h;
-	send_size(c, w, h);
-	converge_kick(c);
-	c->txn_sent_ns = get_time_ns();
-	c->txn_owed = cw != w || ch != h;
-	return c->txn_owed;
-}
-
-/* Drag or spring: no hold. */
-static int
-loose(Monitor *m)
-{
-	return !m->txn_active && (m->tile_spring ||
-			cursor_mode == CurResize || cursor_mode == CurColResize);
-}
-
-static int
-fits(Client *c, struct nx_box box)
-{
-	int cw, ch;
-
-	content_size(c, &cw, &ch);
-	return cw == box.width - 2 * (int)c->bw &&
-			ch == box.height - 2 * (int)c->bw;
-}
-
-/* Box tracks target; content follows. */
-static void
-chase(Client *c)
-{
-	c->tile_shown = c->tile_target;
-	if (!txn_owes(c) && !c->fs_hold && !fits(c, c->tile_target))
-		configure(c, c->tile_target);
+	tile_configure(c, c->tile_shown);
 }
 
 /* Late clients: one configure in flight. */
 static void
 catch_up(Client *c, struct nx_box box)
 {
-	if (!txn_owes(c))
-		configure(c, box);
+	if (!tile_owes(c))
+		tile_configure(c, box);
 }
 
 static int
@@ -152,7 +67,7 @@ waiting(Monitor *m)
 	Client *c;
 
 	wl_list_for_each(c, &clients, link)
-		if (c->mon == m && c->txn_wait)
+		if (c->mon == m && (c->txn_wait || c->txn_settles))
 			return 1;
 	return 0;
 }
@@ -179,7 +94,9 @@ apply(Monitor *m)
 		if (c->mon != m || !c->in_txn)
 			continue;
 		c->in_txn = 0;
-		c->tile_shown = c->tile_txn;
+		c->txn_settles = 0;
+		c->tile_shown.width = c->tile_txn.width;
+		c->tile_shown.height = c->tile_txn.height;
 		if (c->txn_wait)
 			diag_logf("TILE", "TXN-TIMEOUT appid='%s' owed=%dx%d",
 				client_get_appid(c) ? client_get_appid(c) : "(null)",
@@ -205,19 +122,19 @@ begin(Monitor *m)
 		c->tile_txn = c->tile_target;
 		if (same_size(c->tile_txn, c->tile_shown) || c->fs_hold)
 			continue;
-		if (c->txn_late || (!on_screen(c, c->tile_shown) &&
-				!on_screen(c, c->tile_txn))) {
+		if (c->txn_late || (!tile_on_screen(c, c->tile_shown) &&
+				!tile_on_screen(c, c->tile_txn))) {
 			catch_up(c, c->tile_txn);
 			continue;
 		}
-		c->txn_wait = configure(c, c->tile_txn);
+		c->txn_wait = tile_configure(c, c->tile_txn);
 		wait |= c->txn_wait;
 	}
 	if (!wait)
 		apply(m);
 }
 
-/* Show finished boxes; next starts on vblank. */
+/* Show boxes; next on vblank. */
 static void
 settle(Monitor *m)
 {
@@ -247,8 +164,8 @@ txn_set_target(Client *c, struct nx_box box, int ox, int oy)
 	if (c->tile_ws_id == ws_id)
 		return;
 	c->tile_ws_id = ws_id;
-	content_size(c, &cw, &ch);
-	/* Already on screen: resize like any tile. */
+	tile_content(c, &cw, &ch);
+	/* On screen: resize normally. */
 	if (c->last_size_w && cw > 0 && ch > 0 &&
 			(cw != box.width - 2 * bw || ch != box.height - 2 * bw)) {
 		c->tile_shown = (struct nx_box){ c->geom.x - ox, c->geom.y - oy,
@@ -262,38 +179,56 @@ txn_set_target(Client *c, struct nx_box box, int ox, int oy)
 void
 txn_place(Monitor *m)
 {
+	static void (*const steer[])(Client *) = {
+		[STEER_AIM] = tile_aim,
+		[STEER_CHASE] = tile_chase,
+		[STEER_HOLD] = hold,
+	};
+	enum steer mode = STEER_AIM;
 	Client *c;
-	int cw, ch;
-	int drag = loose(m);
-	int hold = !drag && (m->txn_active || needed(m));
 
+	if (!m->txn_active && live_resize_active())
+		mode = STEER_CHASE;
+	else if (!m->tile_spring && (m->txn_active || needed(m)))
+		mode = STEER_HOLD;
 	wl_list_for_each(c, &clients, link) {
 		if (!in_pass(c, m))
 			continue;
-		if (c->tile_fresh) {
-			c->tile_fresh = 0;
-			content_size(c, &cw, &ch);
-			c->txn_late = cw != c->tile_shown.width - 2 * (int)c->bw ||
-					ch != c->tile_shown.height - 2 * (int)c->bw;
-			if (c->txn_late)
-				configure(c, c->tile_shown);
-		} else if (drag) {
-			chase(c);
-		} else if (!hold) {
-			c->tile_shown = c->tile_target;
-		}
+		if (c->tile_fresh)
+			place_fresh(c);
+		else
+			steer[mode](c);
 		show(c);
 	}
+}
+
+/* Paced sizes go out without motion. */
+static int
+drag_tick(Monitor *m)
+{
+	Client *c;
+	int lag = 0;
+
+	wl_list_for_each(c, &clients, link) {
+		if (!in_pass(c, m) || c->tile_fresh)
+			continue;
+		tile_follow(c, c->tile_shown);
+		lag |= x11_paced(c) && !tile_fits(c, c->tile_shown);
+	}
+	return lag;
 }
 
 int
 txn_tick(Monitor *m)
 {
-	if (m->txn_active && (!waiting(m) ||
+	if (m->txn_active && (!waiting(m) || m->tile_spring ||
+			live_resize_active() ||
 			get_time_ns() - m->txn_start_ns >= TXN_TIMEOUT_NS))
 		settle(m);
+	if (live_resize_active())
+		return drag_tick(m);
 	/* Begin on vblank: freshest target. */
-	if (!m->txn_active && !loose(m) && needed(m))
+	if (!m->txn_active && !m->tile_spring && needed(m))
 		begin(m);
 	return m->txn_active;
 }
@@ -303,11 +238,48 @@ txn_forget(Client *c)
 {
 	c->tile_ws_id = 0;
 	c->in_txn = c->txn_wait = c->txn_late = c->txn_owed = 0;
+	c->txn_settles = 0;
+	c->txn_w = c->txn_h = 0;
 	c->content_w = c->content_h = 0;
 	if (!c->txn_locked)
 		return;
 	c->txn_locked = 0;
 	nx_surface_unlock_cached(client_surface(c), c->txn_lock_seq);
+}
+
+/* Last answer settles once applied. */
+void
+txn_applied(Client *c)
+{
+	if (!c->txn_settles)
+		return;
+	c->txn_settles = 0;
+	if (c->mon && c->mon->txn_active && !waiting(c->mon))
+		settle(c->mon);
+}
+
+/* Last answer settles, others lock. */
+static void
+waiter_answered(Client *c)
+{
+	c->txn_wait = 0;
+	if (!waiting(c->mon)) {
+		c->txn_settles = 1;
+		return;
+	}
+	c->txn_lock_seq = nx_surface_lock_pending(client_surface(c));
+	c->txn_locked = 1;
+}
+
+/* Box a late client meets. */
+static struct nx_box
+resync_box(Client *c)
+{
+	if (c->in_txn)
+		return c->tile_txn;
+	if (live_resize_active())
+		return c->tile_shown;
+	return c->tile_final;
 }
 
 void
@@ -316,9 +288,9 @@ txncommitnotify(struct wl_listener *listener, void *data)
 	Client *c = wl_container_of(listener, c, txn_commit);
 	struct nx_box box;
 
-	/* Held or about to apply: next content. */
+	/* Next content, held or applying. */
 	if (client_surface(c)->pending.committed & NX_SURFACE_STATE_BUFFER)
-		pending_size(c, &c->content_w, &c->content_h);
+		tile_pending_size(c, &c->content_w, &c->content_h);
 	if (fshold_commit(c))
 		return;
 	if (!c->txn_owed ||
@@ -326,19 +298,18 @@ txncommitnotify(struct wl_listener *listener, void *data)
 		return;
 	c->txn_owed = 0;
 	if (c->txn_wait) {
-		c->txn_wait = 0;
-		if (!waiting(c->mon)) {
-			settle(c->mon);
-			return;
-		}
-		c->txn_lock_seq = nx_surface_lock_pending(client_surface(c));
-		c->txn_locked = 1;
+		waiter_answered(c);
 		return;
 	}
-	/* Late or loose: resync to the box. */
-	box = c->in_txn ? c->tile_txn : c->tile_shown;
-	c->txn_late = c->content_w != box.width - 2 * (int)c->bw ||
-			c->content_h != box.height - 2 * (int)c->bw;
-	if (c->txn_late)
-		configure(c, box);
+	box = resync_box(c);
+	c->txn_late = !tile_meets(c, box);
+	tile_follow(c, box);
+}
+
+/* Tile size belongs to txn now. */
+int
+txn_owns(Client *c)
+{
+	return c->in_txn || c->morph_live || tile_owes(c) ||
+			(c->mon && c->mon->tile_spring) || live_resize_active();
 }

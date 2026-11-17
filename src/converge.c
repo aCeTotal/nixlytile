@@ -1,64 +1,31 @@
-/*
- * converge.c — size-convergence watchdog.
- *
- * The layout drives tile sizes through a chain of dedups: resize()'s
- * no-change fast-path, client_request_size's last_configured_* compare,
- * the xdg ack gate (one configure in flight), and X11 drag pacing.  Each
- * one assumes the previous configure landed.  When one doesn't — an anim
- * cancelled mid-flight, an ack that never came because the client was
- * starved of frame callbacks, a client that reasserted its own size —
- * every layer downstream treats the wrong size as current and nothing
- * re-drives it.  The tile then stays stretched/cropped until unrelated
- * layout numbers change (open a window, switch workspace), which is
- * exactly the "frozen tile that unfreezes when I create a new tile"
- * symptom.
- *
- * This pass runs once per rendered frame and closes that hole: any tile
- * whose COMMITTED size disagrees with its box for longer than the grace
- * window gets the configure re-sent with every dedup bypassed.  A client
- * that cannot comply (declared minimum larger than the tile) is detected
- * via its min size and counted as converged, so it is never re-driven in
- * a loop; anything else that refuses after CONVERGE_MAX_TRIES is left
- * cropped to its box.
- */
+/* Re-drives tiles whose size drifted. */
 #include "nixlytile.h"
 #include "client.h"
 #include "diag.h"
 
-/* Time a client gets to ack + commit a configure before we assume the
- * configure was lost.  Comfortably above a slow toolkit's relayout, well
- * below "the user notices". */
+/* Time to answer a configure. */
 #define CONVERGE_GRACE_MS  150
 /* Re-sends before cropping for good. */
 #define CONVERGE_MAX_TRIES 4
 
-/* One axis is settled when the client committed the box — or, for a box
- * smaller than the client's declared minimum, when it committed that
- * minimum instead.  A client that honours its own minimum can never
- * reach the box, so counting that as a mismatch would re-drive it on
- * every resize; a client that ignores its minimum (Qt does) commits the
- * box and settles on the first branch. */
+/* Box ±1 px, or minimum. */
 static int
 axis_settled(int committed, int box, int min)
 {
-	return committed == box || (min > 0 && box < min && committed == min);
+	return abs(committed - box) <= SIZE_SLACK_PX ||
+			(min > 0 && box < min && committed == min);
 }
 
-/* A tile this pass owns.  Excludes everything whose size is legitimately
- * not the box right now: animating tiles (the anim settle sends the
- * authoritative resize), live drags (the pointer owns the size), and
- * floating/fullscreen clients (placed deliberately, not tiled). */
+/* Tiles this pass may re-drive. */
 static int
 converge_candidate(Client *c, Monitor *m)
 {
 	struct nx_surface *s;
 
 	if (c->mon != m || !c->column || c->anim_active || c->fsx_active || m->txn_active ||
-			txn_owes(c))
+			txn_owns(c))
 		return 0;
 	if (c->isfloating || c->isfullscreen)
-		return 0;
-	if (cursor_mode == CurResize || cursor_mode == CurColResize)
 		return 0;
 	s = client_surface(c);
 	if (!s || !s->mapped || !c->scene_surface)
@@ -66,17 +33,12 @@ converge_candidate(Client *c, Monitor *m)
 	return c->geom.width > 2 * (int)c->bw && c->geom.height > 2 * (int)c->bw;
 }
 
-/* True while a client still owes us a commit at its tile size.  Used by
- * the frame-done drip in rendermon: a client that can't repaint can't
- * converge, so it must keep getting frame callbacks even while it is
- * covered or off-viewport.  A client we already gave up on is excluded:
- * it will never commit that size, and dripping it every vblank forever
- * is pure overhead. */
+/* Owes a resized commit. */
 int
 client_size_pending(Client *c)
 {
 	return c && ((c->converge_since != 0 && !c->converge_gave_up) ||
-			txn_owes(c));
+			tile_owes(c) || c->fs_hold != FS_SETTLED || c->morph_live);
 }
 
 /* Give-up is latched against the box it was reached at.  A different box
@@ -130,15 +92,11 @@ clients_converge_tick(Monitor *m)
 		int nw, nh, iw, ih, min_w, min_h;
 
 		if (!converge_candidate(c, m)) {
-			/* Not ours right now (animating, dragging, floating).
-			 * Keep a latched give-up: the anim that runs on every
-			 * focus switch would otherwise clear it and re-run the
-			 * whole 4-configure burst against a client that already
-			 * proved it cannot comply. */
+			/* Keep latched give-ups. */
 			if (!c->converge_gave_up)
 				converge_clear(c);
 			/* Re-check once the owed render lapses. */
-			pending |= c->mon == m && txn_owes(c);
+			pending |= c->mon == m && tile_owes(c);
 			continue;
 		}
 

@@ -72,17 +72,7 @@ cleanupmon(struct wl_listener *listener, void *data)
 	}
 
 	/* Orphaned close anims would leak. */
-	{
-		ClosingAnim *ca, *ca_tmp;
-		wl_list_for_each_safe(ca, ca_tmp, &closing_anims, link) {
-			if (ca->mon != m)
-				continue;
-			wl_list_remove(&ca->link);
-			if (ca->tree)
-				nx_scene_node_destroy(&ca->tree->node);
-			free(ca);
-		}
-	}
+	closing_anims_drop(m);
 
 	wl_list_remove(&m->destroy.link);
 	wl_list_remove(&m->frame.link);
@@ -2849,11 +2839,11 @@ diag_xpaint_audit(Monitor *m, uint64_t now)
 		}
 	}
 	wl_list_for_each(ca, &closing_anims, link) {
-		if (ca->mon == m || !ca->tree || !ca->tree->node.enabled)
+		if (ca->mon == m || !snapshot_node(ca->snap)->enabled)
 			continue;
 		s.owner = ca->mon;
 		s.label = "close-anim";
-		nx_scene_node_for_each_buffer(&ca->tree->node,
+		nx_scene_node_for_each_buffer(snapshot_node(ca->snap),
 				diag_xpaint_buffer_iter, &s);
 	}
 }
@@ -2899,57 +2889,46 @@ rendermon_prologue(Monitor *m, uint64_t frame_start_ns)
 		}
 	}
 
-	/* ── Niri-style workspace animation tick ─────────────────────── */
 	{
 		double dt;
-		int still;
+		int still, layout;
 		if (m->last_anim_ns == 0)
 			m->last_anim_ns = frame_start_ns;
 		dt = (double)(frame_start_ns - m->last_anim_ns) / 1e9;
 		m->last_anim_ns = frame_start_ns;
 		if (dt < 0.0) dt = 0.0;
 		{
-			/* Idle-gap reset: dt is measured from the LAST rendered
-			 * frame, so the first tick of an animation started on an
-			 * idle output gets a stale clock.  The 1800-stiffness
-			 * springs (ws switch, tile scroll) cover ~50 % of their
-			 * travel in 40 ms and ~98 % in 100 ms — a fat first tick
-			 * eats the slide and it reads as a snap.  Anything beyond
-			 * a few missed vblanks means "idle", not "animating":
-			 * restart at one nominal frame. */
+			/* Stale or first tick: one frame. */
 			double frame_s = (m->nx_output && m->nx_output->refresh > 0)
 					? 1000.0 / (double)m->nx_output->refresh
 					: 0.016;
 			double idle_gap = 3.0 * frame_s;
 			if (idle_gap < 0.034)
 				idle_gap = 0.034;
-			if (dt > idle_gap)
+			if (dt > idle_gap || (!m->ticking && dt > frame_s))
 				dt = frame_s;
 		}
 
 		still = monitor_anim_tick(m, dt);
+		layout = m->layout_anim;
 		if (txn_tick(m))
-			still = 1;
+			still = layout = 1;
+		if (morph_tick(m, dt))
+			still = layout = 1;
+		/* Layout motion: bystanders stop rendering. */
+		m->withhold_frames = layout && !live_resize_active();
 		if (statusbar_anim_tick(m, dt))
 			still = 1;
 		if (fshold_tick(m))
 			still = 1;
-		/* Size-convergence watchdog: re-drive any tile whose committed
-		 * size drifted away from its box (see converge.c).  Runs after
-		 * the anim tick so a tile that settled this frame is judged on
-		 * its final geometry, and keeps the vblank chain alive while
-		 * anything is still un-converged — otherwise an idle output
-		 * would only re-check at the 1 Hz heartbeat. */
+		/* Re-drive drifted tile sizes. */
 		if (clients_converge_tick(m))
 			still = 1;
-		/* monitor_anim_tick already called monitor_apply_positions
-		 * internally to keep target_geom in lock-step with the
-		 * just-ticked scroll/col springs.  Here we only need to
-		 * schedule the next vblank when something is still moving. */
 		if (still)
 			gpuboost_kick(frame_start_ns);
 		if (still && m->nx_output)
 			nx_output_schedule_frame(m->nx_output);
+		m->ticking = still;
 	}
 
 	/* Audio-meter overlay: one exact-phase redraw per displayed frame
@@ -3159,13 +3138,13 @@ rendermon(struct wl_listener *listener, void *data)
 			if (kc && kc->mon == m)
 				diag_logf("STALE",
 					"%s appid='%s' keys=%u commits=0 over ~1s — "
-					"camera_anim=%d frozen=%d node_enabled=%d "
+					"withhold=%d frozen=%d node_enabled=%d "
 					"anim_drip=%d size_pending=%d fps_cap=%d "
 					"focustop_match=%d builds=%u",
 					m->nx_output->name,
 					client_get_appid(kc) ? client_get_appid(kc) : "(null)",
 					m->diag_focus_keys,
-					m->camera_anim_active,
+					m->withhold_frames,
 					kc->frozen_buffer ? 1 : 0,
 					kc->scene ? kc->scene->node.enabled : -1,
 					kc->anim_drip, client_size_pending(kc),
@@ -3846,17 +3825,12 @@ frame_done:
 					/* Overview shows only the mirrors. */
 					|| overview_is_open()
 					|| hc->frozen_buffer
-					/* Slide started with no snapshot-able content
-					 * (hidden X11 client, e.g. Steam) — see
-					 * anim_drip in monitor_freeze_clients. */
+					/* Snapshot-less slides still paint. */
 					|| hc->anim_drip
 					/* Opening window paints mid-slide. */
-					|| (m->camera_anim_active && hc->open_anim_active)
+					|| (m->withhold_frames && hc->open_anim_active)
 					|| (fsc && hc != fsc)
-					/* Owes us a commit at its tile size: it
-					 * cannot repaint without a frame callback,
-					 * so it cannot converge.  Drip regardless
-					 * of why it is otherwise invisible. */
+					/* Owed commits need callbacks. */
 					|| client_size_pending(hc)
 					/* Mod+F covers the neighbour tiles. */
 					|| (hc->column && hc->column->ws &&
@@ -3864,25 +3838,11 @@ frame_done:
 						hc->column->ws->focused_col->fullscreen &&
 						hc->column != hc->column->ws->focused_col);
 			if (!starved) {
-				/* Visible client: the scene path serves every
-				 * buffer that has a visible region — but culled
-				 * buffers (Chromium's video subsurface under an
-				 * opaque parent, sentinel-clipped off-viewport
-				 * tiles) get nothing there.  Drip those directly.
-				 * Skipped mid-slide: the camera-anim withhold
-				 * below deliberately pauses clients, and the
-				 * slide is ~150 ms. */
-				if (!m->camera_anim_active && hc->scene->node.enabled
+				/* Culled buffers miss the scene send. */
+				if (!m->withhold_frames && hc->scene->node.enabled
 						&& hc->scene_surface) {
 					struct nx_surface *vs = client_surface(hc);
-					/* The walk visits every node of the
-					 * subsurface tree.  A client with no
-					 * subsurfaces and no area clip has exactly
-					 * one buffer — the toplevel's own, which is
-					 * visible here and already served by
-					 * nx_scene_output_send_frame_done — so the
-					 * walk cannot find a culled buffer: skip it
-					 * (the common case for every plain tile). */
+					/* Single-buffer tiles skip walk. */
 					if (vs && vs->mapped &&
 							(hc->area_clipped ||
 							 !wl_list_empty(&vs->current.subsurfaces_below) ||
@@ -3893,16 +3853,12 @@ frame_done:
 				}
 				continue;
 			}
-			/* Frozen clients drip every vblank. */
+			/* Owed clients drip every vblank. */
 			{
-				/* anim_drip: content-less tile mid-slide — must
-				 * drip every vblank PRECISELY during the camera
-				 * anim (the withhold below blocks its first
-				 * paint otherwise). */
 				int vblank_drip = client_size_pending(hc) ||
 						hc->anim_drip || hc->open_anim_active ||
 						(hc->frozen_buffer &&
-						 !m->camera_anim_active);
+						 !m->withhold_frames);
 				if (!vblank_drip && !hidden_due)
 					continue;
 			}
@@ -3916,57 +3872,11 @@ frame_done:
 			m->hidden_done_ns = frame_start_ns;
 	}
 
-	/*
-	 * Send frame_done to clients.
-	 *
-	 * This is critical for proper frame pacing:
-	 * - Video players use this to time their next frame submission
-	 * - Games use this to know when to start rendering the next frame
-	 * - The timestamp should reflect when the frame opportunity occurred
-	 *
-	 * We always send this, even if we didn't commit, because clients
-	 * need to know a vblank occurred for proper timing.
-	 *
-	 * Exception: while a camera slide is in flight (tile-select scroll,
-	 * ws switch), withhold frame_done so heavy visible clients (Blender
-	 * playing an animation) pause their render loop for the slide's
-	 * ~150ms instead of racing the compositor for the GPU — measured as
-	 * pageflips locked to the client's frame cadence (~10ms gaps on a
-	 * 3.33ms panel, ANIMHITCH) whenever a heavy tile was on screen.
-	 * The slide only translates existing buffers, so no client repaint
-	 * can improve it.  Callbacks queue in the surface and flush on the
-	 * first frame after settle.  Fullscreen video/games keep their
-	 * pacing, and the 1 Hz hidden_due flush bounds starvation during a
-	 * continuous Mod+scroll column cycle.  The drip block above still
-	 * serves size-pending/frozen clients every vblank regardless. */
-	if (m->camera_anim_active && !is_video && !is_game && !hidden_due) {
-		/* slide in flight — withhold (see comment above) */
+	/* Layout motion frees the GPU. */
+	if (m->withhold_frames && !is_video && !is_game && !hidden_due && !locked) {
 	} else if (focus_power_save && unfocused_fps_cap > 0 && !is_game &&
-			!is_video && !m->camera_anim_active && !locked) {
-		/* !locked: the session-lock surface is neither a focused
-		 * toplevel nor an exclusive layer surface, so under this
-		 * throttle it only got the blanket frame_done at
-		 * unfocused_fps_cap — the lockscreen animated at ~5 fps.
-		 * While locked everything else is hidden anyway; the blanket
-		 * send below serves the lock surface every vblank. */
-		/*
-		 * Focus-based power saving on the desktop: the focused window is
-		 * the only one that needs to render every vblank.  Unfocused but
-		 * still-visible tiles (Niri columns side by side, a window behind
-		 * a floating one) are throttled to unfocused_fps_cap — static UI
-		 * looks identical, a background video degrades to a low frame
-		 * rate instead of costing a full render every vblank.  Hidden and
-		 * occluded surfaces are already dripped at ~1 Hz above; fullscreen
-		 * game/video keep their own full pacing via the branches around
-		 * this one.
-		 *
-		 * Mechanism: serve the focused client every vblank directly, and
-		 * run the blanket scene send (which honours occlusion) only once
-		 * per throttle interval to catch the unfocused-visible ones.  A
-		 * blanket send to a client that already got its callback this
-		 * frame is a no-op, so the double-serve on throttle vblanks is
-		 * harmless.
-		 */
+			!is_video && !m->withhold_frames && !locked) {
+		/* Throttle unfocused; lock exempt. */
 		int cap = unfocused_fps_cap < 1 ? 1 : unfocused_fps_cap;
 		uint64_t interval = 1000000000ULL / (uint64_t)cap;
 		Client *foc = focustop(m);

@@ -434,7 +434,7 @@ commitnotify(struct wl_listener *listener, void *data)
 			int ih = c->geom.height - 2 * (int)c->bw;
 			int nw, nh;
 			client_get_committed_size(c, &nw, &nh);
-			if (!c->in_txn && iw > 0 && ih > 0 && nw > 0 && nh > 0 &&
+			if (!txn_owns(c) && iw > 0 && ih > 0 && nw > 0 && nh > 0 &&
 					(nw != iw || nh != ih))
 				client_request_size(c, iw, ih);
 		}
@@ -1871,10 +1871,9 @@ client_clip_to_usable(Client *c)
 
 	if (!c || !c->mon || !c->scene || !c->scene_surface)
 		return;
+	morph_fit(c);
 	tilefill_update(c);
-	/* Only tiled column clients scroll into the margin.  Floating and
-	 * fullscreen surfaces are placed deliberately and must render where
-	 * they're put. */
+	/* Only column tiles scroll. */
 	if (c->isfloating || c->isfullscreen || !c->column) {
 		if (c->area_clipped)
 			client_clip_reset(c);
@@ -2010,9 +2009,6 @@ client_clip_to_usable(Client *c)
 	}
 }
 
-/* X11 has no ack: pace drags. */
-#define X11_RESIZE_PACE_MS 40
-
 /* Paced size request: one configure in flight. */
 void
 client_request_size(Client *c, int w, int h)
@@ -2020,27 +2016,23 @@ client_request_size(Client *c, int w, int h)
 	/* Negative sizes trip assertions. */
 	if (w < 1) w = 1;
 	if (h < 1) h = 1;
-	/* Every outgoing configure re-arms the convergence watchdog. */
+	/* Configures re-arm the watchdog. */
 	converge_kick(c);
 	if (w == c->last_configured_w && h == c->last_configured_h)
 		return;
 #ifdef XWAYLAND
 	if (client_is_x11(c)) {
-		uint32_t now = (uint32_t)monotonic_msec();
-		int live = (cursor_mode == CurResize ||
-				cursor_mode == CurColResize);
 		int nw, nh;
 
 		c->pending_resize_w = w;
 		c->pending_resize_h = h;
 		/* A caught-up commit stands in for an ack. */
 		client_get_committed_size(c, &nw, &nh);
-		if (live && c->x11_cfg_ms &&
-				now - c->x11_cfg_ms < X11_RESIZE_PACE_MS &&
+		if (live_resize_active() && x11_paced(c) &&
 				(nw != c->last_configured_w ||
 				 nh != c->last_configured_h))
 			return;
-		c->x11_cfg_ms = now;
+		c->x11_cfg_ms = (uint32_t)monotonic_msec();
 		c->last_configured_w = w;
 		c->last_configured_h = h;
 		client_set_size(c, w, h);
@@ -2326,6 +2318,7 @@ setfullscreen(Client *c, int fullscreen)
 		c->geom_fh = (double)c->geom.height;
 		c->geom_vx = c->geom_vy = c->geom_vw = c->geom_vh = 0.0;
 		client_unfreeze(c);
+		morph_end(c);
 		if (fs_anim)
 			client_start_fs_transition(c, fsx_from);
 		/* Leaving fullscreen animates from here. */
@@ -2698,38 +2691,20 @@ unmapnotify(struct wl_listener *listener, void *data)
 		}
 	} else {
 		Monitor *unmap_mon = c->mon;
-		/* mapnotify has early failure paths (NULL surface, scene
-		 * tree / scene surface creation failure) that return before
-		 * inserting into the clients/flink lists.  c->scene == NULL
-		 * identifies that state — running the full teardown here
-		 * would wl_list_remove() zeroed links and crash. */
+		/* No scene: map failed early. */
 		if (!c->scene)
 			return;
 		wobble_stop(c);
-		/* Niri-style close anim: snapshot the surface's last buffer
-		 * into an independent scene tree that survives Client teardown,
-		 * then animate scale 1→0.5 + opacity 1→0.  Skip for floating /
-		 * fullscreen (Niri only animates tiles closing). */
-		if (!c->isfullscreen && !c->isfloating && unmap_mon) {
-			struct nx_surface *surf = client_surface(c);
-			if (surf && surf->buffer)
-				anim_spawn_close(unmap_mon, &surf->buffer->base,
-						c->geom);
-		}
-		/* A thumbnail of this client may be on screen right now; the
-		 * mirror node does not keep the surface alive, so the overview
-		 * has to go before the surface does. */
+		/* Only tiles fade out. */
+		if (!c->isfullscreen && !c->isfloating)
+			anim_spawn_close(c);
+		/* Overview mirrors go first. */
 		overview_purge_client(c);
-		/* Critical: unfreeze BEFORE destroying the scene tree, else
-		 * the snapshot scene_buffer's parent vanishes and we leak
-		 * a nx_buffer lock. */
+		/* Unfreeze before scene teardown. */
 		client_unfreeze(c);
+		morph_end(c);
 		workspace_detach_client(c);
-		/* fs_ws-workspacen destroyes av kompaksjonen under, og
-		 * workspace_destroy sin fs_ws-nullstilling itererer bare
-		 * clients-lista — som vi fjernes fra her. Uten NULL her
-		 * dereferer fullscreen_assign_ws freed workspace ved
-		 * X11 unmap→remap (DXVK alt-tab o.l.) → UAF. */
+		/* Clear fs_ws: avoids UAF. */
 		c->fs_ws = NULL;
 		c->float_ws = NULL;
 		wl_list_remove(&c->link);

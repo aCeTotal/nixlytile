@@ -144,9 +144,11 @@ static bool init_logical_device(struct nx_vk_device *dev, struct extension_list 
 	if (queue_next && (res == VK_ERROR_NOT_PERMITTED_EXT ||
 			res == VK_ERROR_INITIALIZATION_FAILED)) {
 		// Drivers may deny high priority.
-		nx_log(NX_DEBUG, "Failed to obtain a high-priority device queue, "
-			"falling back to regular queue priority");
+		nx_log(NX_ERROR, "High-priority GPU queue denied (needs CAP_SYS_NICE), "
+			"clients will delay compositor frames");
 		res = create_logical_device(dev, extensions, NULL);
+	} else if (queue_next && res == VK_SUCCESS) {
+		nx_log(NX_INFO, "High-priority GPU queue granted");
 	}
 	if (res != VK_SUCCESS) {
 		nx_vk_error("Failed to create vulkan device", res);

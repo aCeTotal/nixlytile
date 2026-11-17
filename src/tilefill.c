@@ -35,7 +35,8 @@ tilefill_update(Client *c)
 	int bw = (int)c->bw;
 	int iw = c->geom.width - 2 * bw;
 	int ih = c->geom.height - 2 * bw;
-	int frozen = c->frozen_buffer && c->frozen_buffer->node.enabled;
+	int frozen = (c->frozen_buffer && c->frozen_buffer->node.enabled) ||
+			c->morph_live;
 	int nw, nh;
 	struct nx_box area = c->mon->w;
 

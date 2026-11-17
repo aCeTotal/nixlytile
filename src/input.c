@@ -1695,7 +1695,7 @@ keypress(struct wl_listener *listener, void *data)
 	int nlevel0 = xkb_keymap_key_get_syms_by_level(keymap, keycode, layout, 0, &level0_syms);
 
 	int handled = 0;
-	uint32_t mods = nx_keyboard_get_modifiers(&group->nx_group->keyboard);
+	uint32_t mods = binding_mods(&group->nx_group->keyboard);
 
 	nx_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
@@ -1781,6 +1781,10 @@ keypress(struct wl_listener *listener, void *data)
 			}
 		}
 	}
+	if (!handled && !locked && nsyms > 0 &&
+			event->state == WL_KEYBOARD_KEY_STATE_PRESSED)
+		(shortcuts_are_inhibited() ? binding_inhibited
+				: binding_unbound)(mods, syms[0]);
 
 	{
 		int allow_repeat = 0;

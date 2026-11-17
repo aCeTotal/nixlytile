@@ -118,11 +118,8 @@ static const SpringParams SPRING_COLUMN     = { 1.0, 1.0, 1800.0 };
  * compositor-side share of "nothing opens instantly".  4900 (ω=70) keeps
  * the fade visible but puts it under human reaction time. */
 static const SpringParams SPRING_OPEN       = { 1.0, 0.9, 4900.0 }; /* slight overshoot for life */
-static const SpringParams SPRING_CLOSE      = { 1.0, 1.0,  900.0 };
 /* Settles in ~200 ms, no overshoot. */
 static const SpringParams SPRING_FULLSCREEN = { 1.0, 1.0, 1000.0 };
-/* Per-mille: settle thresholds are pixel-sized. */
-#define FSX_SPAN 1000.0
 
 /* Largest aw:ah box centered in `in`. */
 static struct nx_box
@@ -163,7 +160,7 @@ void
 client_fs_transition_apply(Client *c, struct nx_box to)
 {
 	struct nx_box start, box, clip;
-	double t = c->fsx_p / FSX_SPAN;
+	double t = c->fsx_p / PROGRESS_SPAN;
 	int cw, ch, x1, y1;
 
 	client_get_committed_size(c, &cw, &ch);
@@ -211,7 +208,7 @@ fs_transitions_tick(Monitor *m, double dt)
 			c->fsx_active = 0;
 			continue;
 		}
-		if (!spring_tick(&c->fsx_p, &c->fsx_v, FSX_SPAN,
+		if (!spring_tick(&c->fsx_p, &c->fsx_v, PROGRESS_SPAN,
 				SPRING_FULLSCREEN, dt)) {
 			fs_transition_end(c);
 			continue;
@@ -332,8 +329,21 @@ client_set_target_geom(Client *c, struct nx_box g)
 	c->anim_active = 1;
 }
 
-/* Pointer drags a tile edge. */
+/* Stacked tiles' height shares. */
 static int
+shares_tick(Column *col, double dt)
+{
+	Client *c;
+	int moved = 0;
+
+	wl_list_for_each(c, &col->clients, column_link)
+		moved |= spring_tick(&c->tile_share, &c->tile_share_v,
+				c->tile_share_t, SPRING_COLUMN, dt);
+	return moved;
+}
+
+/* Pointer drags a tile edge. */
+int
 live_resize_active(void)
 {
 	return cursor_mode == CurResize || cursor_mode == CurColResize;
@@ -347,9 +357,9 @@ animcommitnotify(struct wl_listener *listener, void *data)
 
 	(void)data;
 	launchfx_note_commit(c);
-	/* Wake the size-convergence watchdog only when the COMMITTED size
-	 * changed — kicking on every commit would keep its per-frame client
-	 * walk alive for the whole lifetime of any animating/video client. */
+	morph_commit(c);
+	txn_applied(c);
+	/* Kick converge on size change. */
 	{
 		int cw = 0, ch = 0;
 		client_get_committed_size(c, &cw, &ch);
@@ -389,7 +399,7 @@ animcommitnotify(struct wl_listener *listener, void *data)
 		iw = c->geom.width  - 2 * (int)c->bw;
 		ih = c->geom.height - 2 * (int)c->bw;
 		client_clip_to_usable(c);
-		if (!c->in_txn && iw > 0 && ih > 0 && nw > 0 && nh > 0 &&
+		if (!txn_owns(c) && iw > 0 && ih > 0 && nw > 0 && nh > 0 &&
 				(nw != iw || nh != ih))
 			client_request_size(c, iw, ih);
 		return;
@@ -473,7 +483,7 @@ client_freeze(Client *c)
 {
 	struct nx_surface *surface;
 
-	if (!c || c->frozen_buffer || !c->scene)
+	if (!c || c->frozen_buffer || c->morph_live || !c->scene)
 		return;
 	surface = client_surface(c);
 	if (!surface || !surface->mapped)
@@ -575,12 +585,7 @@ monitor_freeze_clients(Monitor *m, int include_x11, int include_wayland)
 			continue;
 		if (client_surface(c)->mapped)
 			client_freeze(c);
-		/* No snapshot (unmapped, or mapped with no buffer — the
-		 * FREEZE-SKIP case: X11 client that sat hidden on an inactive
-		 * workspace, typically Steam): its tile slides in empty.  Flag
-		 * it so rendermon drips frame_done every vblank through the
-		 * camera-anim withhold — the client can then paint in step
-		 * with the slide instead of popping in after settle. */
+		/* Empty tiles drip through withhold. */
 		if (!c->frozen_buffer)
 			c->anim_drip = 1;
 	}
@@ -594,8 +599,7 @@ monitor_unfreeze_clients(Monitor *m, int include_x11, int include_wayland)
 		int is_x11;
 		if (c->mon != m)
 			continue;
-		/* Anim over — the camera-anim withhold is gone, normal
-		 * frame_done flow resumes. */
+		/* Anim over: normal frame_done. */
 		c->anim_drip = 0;
 		if (!c->frozen_buffer)
 			continue;
@@ -631,22 +635,18 @@ monitor_anim_tick(Monitor *m, double dt)
 {
 	int active = 0;
 	int size_anim = 0;            /* freeze only when REAL size change in flight */
-	int camera_anim = 0;          /* scroll_x / ws_y spring moving this frame */
+	int slide = 0;
 	Workspace *ws;
 	int close_still = 0;
 	int vertical_anim;
+	double ldt;
 
 	if (!m)
 		return 0;
 
-	/* ── Step 1: tick all parameter springs (scroll, ws_y, col->x). ─
-	 *   These feed monitor_apply_positions to recompute target_geom
-	 *   for each client BEFORE the per-client clients_anim_tick uses
-	 *   those targets.  Without this ordering the client spring snaps
-	 *   x/y to a stale (one-frame-old) target while width animates,
-	 *   so an "anchored" edge against the screen wobbles instead of
-	 *   staying locked. */
-
+	/* Layout springs tick before placement. */
+	ldt = answer_pending(m) ? 0.0 : dt;
+	m->tile_spring = 0;
 	if (m->active_ws) {
 		ws = m->active_ws;
 		if (ws->scroll_x_f == 0.0 && ws->scroll_x_vel == 0.0 &&
@@ -654,9 +654,9 @@ monitor_anim_tick(Monitor *m, double dt)
 			ws->scroll_x_f = (double)ws->scroll_x;
 		if (spring_tick(&ws->scroll_x_f, &ws->scroll_x_vel,
 				(double)ws->target_scroll_x,
-				SPRING_HORIZONTAL, dt)) {
+				SPRING_HORIZONTAL, ldt)) {
 			active = 1;
-			camera_anim = 1;
+			slide = 1;
 		}
 		ws->scroll_x = (int)ws->scroll_x_f;
 	}
@@ -664,31 +664,23 @@ monitor_anim_tick(Monitor *m, double dt)
 	if (spring_tick(&m->ws_y_offset, &m->ws_y_vel, 0.0,
 			SPRING_WS_SWITCH, dt)) {
 		active = 1;
-		camera_anim = 1;
+		slide = 1;
 	}
 
-	/* Tile-area spring (m->w).  When waybar (un)mounts or changes
-	 * its exclusive zone, m->w_target shifts but m->w lerps —
-	 * tile edges facing the change slide, opposite edges stay
-	 * locked because the corresponding (y, height) springs use
-	 * IDENTICAL parameters so their sum stays constant. */
+	/* Tile area springs with bar. */
 	if (m->w_initialized) {
 		int moved_pos = 0, moved_size = 0;
 		moved_pos  |= spring_tick(&m->w_x_f, &m->w_x_vel,
-				(double)m->w_target.x, SPRING_WINDOW, dt);
+				(double)m->w_target.x, SPRING_WINDOW, ldt);
 		moved_pos  |= spring_tick(&m->w_y_f, &m->w_y_vel,
-				(double)m->w_target.y, SPRING_WINDOW, dt);
+				(double)m->w_target.y, SPRING_WINDOW, ldt);
 		moved_size |= spring_tick(&m->w_w_f, &m->w_w_vel,
-				(double)m->w_target.width, SPRING_WINDOW, dt);
+				(double)m->w_target.width, SPRING_WINDOW, ldt);
 		moved_size |= spring_tick(&m->w_h_f, &m->w_h_vel,
-				(double)m->w_target.height, SPRING_WINDOW, dt);
+				(double)m->w_target.height, SPRING_WINDOW, ldt);
 		if (moved_pos || moved_size) {
 			active = 1;
-			/* Derive width/height from the rounded FAR edge, not
-			 * from independent truncation: y and height springs are
-			 * symmetric so y_f + h_f is constant during a statusbar
-			 * toggle, but (int)y_f + (int)h_f jitters ±1px — the
-			 * bottom edge of every tile visibly wobbles. */
+			/* Far edge rounds: no jitter. */
 			m->w.x = (int)m->w_x_f;
 			m->w.y = (int)m->w_y_f;
 			m->w.width = (int)(m->w_x_f + m->w_w_f) - m->w.x;
@@ -698,12 +690,11 @@ monitor_anim_tick(Monitor *m, double dt)
 			statusbar_anim_sync(m);
 		}
 		if (moved_size)
-			size_anim = 1;
+			size_anim = m->tile_spring = 1;
 	}
 
 	vertical_anim = (fabs(m->ws_y_offset) > 0.5 ||
 			fabs(m->ws_y_vel) > 0.5);
-	m->tile_spring = 0;
 	{
 		Workspace *wsi;
 		Column *col;
@@ -713,22 +704,22 @@ monitor_anim_tick(Monitor *m, double dt)
 			wl_list_for_each(col, &wsi->columns, link) {
 				if (spring_tick(&col->x_f, &col->x_vel,
 						(double)col->target_x,
-						SPRING_COLUMN, dt))
-					active = 1;
+						SPRING_COLUMN, ldt))
+					active = slide = 1;
 				col->x = (int)col->x_f;
 				if (spring_tick(&col->width_f,
 						&col->width_vel,
 						(double)col->target_width,
-						SPRING_COLUMN, dt)) {
+						SPRING_COLUMN, ldt)) {
 					active = 1;
 					size_anim = 1;
 					m->tile_spring = 1;
 				}
-				/* Far-edge rounding (same as m->w above): x and
-				 * width springs cancel exactly on a locked right
-				 * edge, but (int)x_f + (int)width_f jitters ±1px. */
+				/* Far edge rounds: no jitter. */
 				col->width = (int)(col->x_f + col->width_f)
 						- col->x;
+				if (shares_tick(col, ldt))
+					active = size_anim = m->tile_spring = 1;
 			}
 		}
 	}
@@ -738,15 +729,11 @@ monitor_anim_tick(Monitor *m, double dt)
 		size_anim = 1;
 	}
 
-	/* ── Step 2: recompute target_geom only if a parameter spring
-	 *   moved this frame (otherwise target_geom from the last
-	 *   arrange() call is still authoritative — saves a full
-	 *   per-client walk on idle frames). */
+	/* Placement follows moved springs. */
 	if (active)
 		monitor_apply_positions(m);
 
-	/* ── Step 3: per-client spring (size anim only) reads the fresh
-	 *   target_geom written by step 2. */
+	/* Floating springs read fresh targets. */
 	if (clients_anim_tick(m, dt)) {
 		active = 1;
 		size_anim = 1;
@@ -805,23 +792,14 @@ monitor_anim_tick(Monitor *m, double dt)
 
 	/* Snapshot X11 on pure slides only. */
 	{
-		int pos_only = active && !size_anim;
+		int pos_only = slide && !size_anim;
 		if (pos_only && !m->pos_anim_was_active)
 			monitor_freeze_clients(m, /*x11=*/1, /*wl=*/0);
 		if (!pos_only && m->pos_anim_was_active)
 			monitor_unfreeze_clients(m, /*x11=*/1, /*wl=*/0);
 		m->pos_anim_was_active = pos_only;
 	}
-	/* Pure slides pause client rendering. */
-	m->camera_anim_active = camera_anim && !size_anim &&
-			!live_resize_active() && !m->txn_active;
-
-	/* Anim over: flush the position to every X11 client this monitor
-	 * moved.  A camera slide / column reflow with no size change never
-	 * reconfigures them (see client_flush_x11_pos), and the per-client
-	 * settle above only covers clients that had anim_active — column
-	 * clients moving at unchanged size take client_set_target_geom's
-	 * anim_active = 0 branch and never get there. */
+	/* Settled: flush X11 positions. */
 	if (m->anim_was_active && !active) {
 		Client *c;
 		wl_list_for_each(c, &clients, link)
@@ -830,20 +808,12 @@ monitor_anim_tick(Monitor *m, double dt)
 	}
 
 	m->anim_was_active = active;
+	m->layout_anim = slide || m->tile_spring || close_still;
 	m->size_anim_was_active = size_anim;
 	return active;
 }
 
-/* ── Niri-style open anim ────────────────────────────────────────────
- * Per-buffer scale + opacity applied to live surface.  Animates
- * scale 0.5→1.0 and alpha 0→1 over ~250ms.  Center pivot so the
- * window grows from its geometric center, not the top-left.
- */
-/* Niri-style open: opacity fade only.  Scaling subsurfaces via
- * per-buffer dest_size produces artifacts (subsurfaces stay anchored
- * at their natural positions while their content shrinks) — drop
- * the scale path entirely and rely on opacity.  Visually identical
- * to Niri for the common case (no per-app scale on open). */
+/* Open anim: opacity only. */
 static void
 scene_buffer_opacity_iter(struct nx_scene_buffer *buf, int sx, int sy, void *data)
 {
@@ -884,115 +854,4 @@ client_start_open_anim(Client *c)
 	c->open_progress_vel = 0.0;
 	c->open_anim_active = 1;
 	client_apply_open_anim(c);
-}
-
-/* ── Niri-style close anim ───────────────────────────────────────────
- * On unmap, snapshot the client's last buffer to an independent
- * scene tree.  Animate scale 1.0→0.5 + opacity 1→0 over ~200ms,
- * then free.  Survives the underlying Client destruction.
- */
-void
-anim_spawn_close(Monitor *m, struct nx_buffer *buffer, struct nx_box geom)
-{
-	ClosingAnim *a;
-	struct nx_scene_tree *parent;
-
-	if (!buffer || geom.width <= 0 || geom.height <= 0)
-		return;
-	parent = layers[LyrFloat];
-	if (!parent)
-		return;
-
-	a = ecalloc(1, sizeof(*a));
-	if (!a)
-		return;
-	a->mon = m;
-	a->geom = geom;
-	a->natural_w = buffer->width;
-	a->natural_h = buffer->height;
-	a->progress = 1.0;
-	a->vel = 0.0;
-
-	a->tree = nx_scene_tree_create(parent);
-	if (!a->tree) {
-		free(a);
-		return;
-	}
-	a->buffer = nx_scene_buffer_create(a->tree, buffer);
-	if (!a->buffer) {
-		nx_scene_node_destroy(&a->tree->node);
-		free(a);
-		return;
-	}
-	/* Crop to the monitor's usable area, like client_clip_to_usable does
-	 * for the live tile: a tile closing while partially scrolled past
-	 * the monitor edge otherwise paints its hidden part across the
-	 * neighbouring output for the duration of the fade. */
-	if (m) {
-		struct nx_box vis;
-		if (!nx_box_intersection(&vis, &geom, &m->w)) {
-			nx_scene_node_destroy(&a->tree->node);
-			free(a);
-			return;
-		}
-		if (vis.x != geom.x || vis.y != geom.y ||
-				vis.width != geom.width ||
-				vis.height != geom.height) {
-			struct nx_fbox src = {
-				.x = (double)(vis.x - geom.x) * buffer->width
-						/ geom.width,
-				.y = (double)(vis.y - geom.y) * buffer->height
-						/ geom.height,
-				.width  = (double)vis.width * buffer->width
-						/ geom.width,
-				.height = (double)vis.height * buffer->height
-						/ geom.height,
-			};
-			nx_scene_buffer_set_source_box(a->buffer, &src);
-		}
-		nx_scene_node_set_position(&a->tree->node, vis.x, vis.y);
-		nx_scene_buffer_set_dest_size(a->buffer, vis.width, vis.height);
-	} else {
-		nx_scene_node_set_position(&a->tree->node, geom.x, geom.y);
-		nx_scene_buffer_set_dest_size(a->buffer, geom.width, geom.height);
-	}
-	nx_scene_buffer_set_opacity(a->buffer, 1.0f);
-
-	wl_list_insert(&closing_anims, &a->link);
-
-	/* Make sure the next vblank fires the anim tick. */
-	if (m && m->nx_output && !m->frame_scheduled) {
-		nx_output_schedule_frame(m->nx_output);
-		m->frame_scheduled = 1;
-	}
-}
-
-void
-closing_anims_tick(Monitor *m, double dt, int *still)
-{
-	ClosingAnim *a, *tmp;
-
-	if (still) *still = 0;
-	if (!m)
-		return;
-
-	wl_list_for_each_safe(a, tmp, &closing_anims, link) {
-		if (a->mon != m)
-			continue;
-		int moving = spring_tick(&a->progress, &a->vel, 0.0,
-				SPRING_CLOSE, dt);
-		if (a->progress <= 0.02 && fabs(a->vel) < 1.0) {
-			wl_list_remove(&a->link);
-			if (a->tree)
-				nx_scene_node_destroy(&a->tree->node);
-			free(a);
-			continue;
-		}
-		/* Opacity-only close fade: no scale → no subsurface
-		 * artifacts.  Position unchanged from snapshot geom. */
-		nx_scene_buffer_set_opacity(a->buffer,
-				(float)a->progress);
-		if (still && moving)
-			*still = 1;
-	}
 }

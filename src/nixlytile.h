@@ -269,6 +269,7 @@ typedef struct Monitor Monitor;
 typedef struct Wobble Wobble;
 typedef struct Workspace Workspace;
 typedef struct Column Column;
+typedef struct Snapshot Snapshot;
 typedef struct StatusBar StatusBar;
 typedef struct StatusModule StatusModule;
 typedef struct GamepadDevice GamepadDevice;
@@ -1302,16 +1303,9 @@ typedef struct {
 	struct nx_scene_buffer *frozen_buffer;
 	/* Snapshot size; the buffer may vanish. */
 	int frozen_buf_w, frozen_buf_h;
-	/* Freeze wanted a snapshot but the surface had no buffer (X11
-	 * client that sat hidden on an inactive workspace — Steam).  The
-	 * tile renders empty until the client paints, so rendermon drips
-	 * frame_done every vblank DURING the slide (bypassing the
-	 * camera-anim withhold) to let it appear in step with the anim.
-	 * Cleared when the pos anim ends. */
+	/* Empty tile drips during slides. */
 	int anim_drip;
-	/* ── Niri-style open anim (scale + fade) ───────────────────────
-	 * open_progress: 0.0 at map → animates to 1.0.  Scale lerps
-	 * 0.5→1.0, opacity 0→1.  Active when open_progress < 1.0. */
+	/* Open fade progress, 0 to 1. */
 	double open_progress;
 	double open_progress_vel;
 	int open_anim_active;
@@ -1339,12 +1333,21 @@ typedef struct {
 	int tile_ox, tile_oy;         /* live camera offset */
 	uint64_t tile_ws_id;          /* workspace of tile_shown; 0 = unplaced */
 	uint32_t tile_pass;
-	int tile_fresh, in_txn, txn_wait, txn_late, txn_owed, txn_locked;
+	int tile_fresh, in_txn, txn_wait, txn_late, txn_owed, txn_locked, txn_settles;
 	int txn_w, txn_h;
 	int content_w, content_h;      /* newest committed or held size */
+	struct nx_box tile_final;      /* size once springs settle */
+	double tile_share, tile_share_v, tile_share_t; /* column height share */
 	uint32_t txn_serial, txn_lock_seq;
 	uint64_t txn_sent_ns;
 	struct wl_listener txn_commit;
+	/* Resize presentation, see morph.c. */
+	Snapshot *morph_from, *morph_live;
+	double morph_fade, morph_fade_v;
+	uint32_t morph_serial;
+	int morph_w, morph_h, morph_matched, morph_answered, morph_stretch;
+	int morph_two_phase;           /* answers with a placeholder first */
+	uint64_t morph_expect_ns, morph_match_ns, morph_settled_ns;
 	/* Floating box follows content, see floatfit.c. */
 	struct nx_box float_want;
 	int float_ax, float_ay, float_want_set;
@@ -1372,18 +1375,13 @@ typedef struct {
 	int converge_applied_nat_w, converge_applied_nat_h;
 } Client;
 
-/* ── Standalone close anim ───────────────────────────────────────────
- * When a client unmaps, we snapshot its last buffer into an independent
- * scene_buffer (parented under layers[LyrFloat]), then animate
- * scale 1→0.5 + opacity 1→0 over ~200ms.  Decoupled from Client so the
- * underlying surface/Client lifecycle can complete normally. */
+/* Closed tile fading in place. */
 typedef struct ClosingAnim {
 	struct wl_list link;
 	Monitor *mon;
-	struct nx_scene_tree *tree;
-	struct nx_scene_buffer *buffer;
-	struct nx_box geom;
-	int natural_w, natural_h;
+	Snapshot *snap;
+	uint64_t ws_id;
+	struct nx_box spot;           /* workspace-relative */
 	double progress;
 	double vel;
 } ClosingAnim;
@@ -1856,9 +1854,11 @@ struct Monitor {
 	int size_anim_was_active;     /* edge-detection: freeze only on SIZE anims */
 	int pos_anim_was_active;      /* edge-detection: X11 freeze on PURE pos anims */
 	int converge_dirty;           /* something to (re)check — see converge_kick() */
-	int camera_anim_active;       /* camera in flight (scroll_x / ws_y spring) — gates frame_done throttle */
+	int withhold_frames;          /* bystanders get no frame_done */
+	int layout_anim;              /* tiles moving, resizing or closing */
+	int ticking;                  /* last prologue still animating */
 	int txn_active;               /* tile transaction awaiting commits */
-	int tile_spring;              /* column width spring moving */
+	int tile_spring;              /* any tile-size spring moving */
 	uint64_t txn_start_ns;
 	uint32_t tile_pass;           /* monitor_apply_positions generation */
 	int sw_cursor_scanout_hold;   /* we disabled scanout election for a visible software cursor */
@@ -2539,6 +2539,10 @@ void client_send_configure_only(Client *c, int w, int h);
 enum { ANCHOR_START, ANCHOR_END, ANCHOR_MID };
 /* Fullscreen transition in flight. */
 enum { FS_SETTLED, FS_ENTERING, FS_LEAVING, FS_REVERTING };
+/* Max wait for slow clients. */
+#define TXN_TIMEOUT_NS 200000000ULL
+/* Sizes this close count as met. */
+#define SIZE_SLACK_PX 1
 /* floatfit.c */
 void float_set(Client *c, struct nx_box want, int ax, int ay);
 void float_fit(Client *c);
@@ -2548,13 +2552,47 @@ int fshold_commit(Client *c);
 int fshold_tick(Monitor *m);
 void fshold_cancel(Client *c);
 void fshold_forget(Client *c);
+/* tilesize.c */
+int tile_owes(Client *c);
+int tile_on_screen(Client *c, struct nx_box b);
+void tile_pending_size(Client *c, int *w, int *h);
+void tile_content(Client *c, int *w, int *h);
+int tile_configure(Client *c, struct nx_box box);
+int tile_fits(Client *c, struct nx_box box);
+int tile_meets(Client *c, struct nx_box box);
+int x11_paced(Client *c);
+void tile_follow(Client *c, struct nx_box box);
+void tile_chase(Client *c);
+void tile_aim(Client *c);
 /* txn.c */
 void txn_set_target(Client *c, struct nx_box box, int ox, int oy);
 void txn_place(Monitor *m);
 int txn_tick(Monitor *m);
-int txn_owes(Client *c);
 void txn_forget(Client *c);
+void txn_applied(Client *c);
+int txn_owns(Client *c);
 void txncommitnotify(struct wl_listener *listener, void *data);
+/* snapshot.c */
+Snapshot *snapshot_take(struct nx_scene_tree *parent, struct nx_scene_tree *src,
+		struct nx_box natural);
+void snapshot_fit(Snapshot *s, struct nx_box box, struct nx_box area);
+void snapshot_set_alpha(Snapshot *s, float alpha);
+struct nx_scene_node *snapshot_node(Snapshot *s);
+int snapshot_covers(Snapshot *s, struct nx_box box);
+void snapshot_fit_crisp(Snapshot *s, struct nx_box box, struct nx_box area);
+void snapshot_fit_cover(Snapshot *s, struct nx_box box, struct nx_box area);
+void snapshot_destroy(Snapshot *s);
+/* morph.c */
+void morph_expect(Client *c);
+void morph_track(Client *c);
+void morph_fit(Client *c);
+void morph_commit(Client *c);
+void morph_end(Client *c);
+int morph_tick(Monitor *m, double dt);
+/* answer.c */
+void answer_note(Client *c);
+int answer_settled(Client *c, uint64_t now);
+int answer_pending(Monitor *m);
 /* tilefill.c */
 void tilefill_create(Client *c);
 void tilefill_update(Client *c);
@@ -2666,6 +2704,8 @@ void window_ipc_publish_workspace_activated(void);
 
 /* anim.c */
 int anim_tick(double *current, double target, double rate, double dt);
+/* Progress springs: pixel-sized thresholds. */
+#define PROGRESS_SPAN 1000.0
 int spring_tick(double *pos, double *vel, double target, SpringParams sp, double dt);
 
 /* notify.c */
@@ -2700,6 +2740,7 @@ void gpuboost_kick(uint64_t now_ns);
 void gpuboost_finish(void);
 
 int monitor_anim_tick(Monitor *m, double dt);
+int live_resize_active(void);
 void client_set_target_geom(Client *c, struct nx_box g);
 void client_scale_to_box(Client *c, int box_w, int box_h);
 void client_start_fs_transition(Client *c, struct nx_box from);
@@ -2707,7 +2748,9 @@ void client_fs_transition_apply(Client *c, struct nx_box to);
 void client_freeze(Client *c);
 void client_unfreeze(Client *c);
 void client_start_open_anim(Client *c);
-void anim_spawn_close(Monitor *m, struct nx_buffer *buffer, struct nx_box geom);
+void anim_spawn_close(Client *c);
+void closing_anims_place(Workspace *ws, int ox, int oy);
+void closing_anims_drop(Monitor *m);
 void closing_anims_tick(Monitor *m, double dt, int *still);
 
 /* wobble.c */
@@ -2750,6 +2793,10 @@ KeyboardGroup *createkeyboardgroup(void);
 void destroykeyboardgroup(struct wl_listener *listener, void *data);
 void inputdevice(struct wl_listener *listener, void *data);
 int keybinding(uint32_t mods, xkb_keysym_t sym);
+/* keymods.c */
+uint32_t binding_mods(struct nx_keyboard *kb);
+void binding_inhibited(uint32_t mods, xkb_keysym_t sym);
+void binding_unbound(uint32_t mods, xkb_keysym_t sym);
 void keypress(struct wl_listener *listener, void *data);
 void keypressmod(struct wl_listener *listener, void *data);
 int keyrepeat(void *data);
