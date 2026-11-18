@@ -9,6 +9,8 @@ static int edid_reprobe_cb(void *data);
 static void try_reapply_bestmode(Monitor *m);
 static void schedule_edid_reprobe(Monitor *m);
 
+#define BATTERY_MIN_MHZ 59000
+
 /* Layout entries queued for removal.  Dropping one frees it, and every
  * caller here runs inside a layout signal emission where the remaining
  * listeners still hold that entry — so the drop waits for idle.  A stale
@@ -240,50 +242,95 @@ monitor_mode_pinned(struct nx_output *o)
 	return 0;
 }
 
-/* Lockscreen always runs at the panel's maximum refresh: switch every
- * output to the highest-refresh mode at its current resolution (real
- * scanout modes only — paced divisor modes are virtual and slower). */
+/* Real scanout modes; paced divisors are virtual. */
+struct refresh_span {
+	struct nx_output_mode *fast;
+	struct nx_output_mode *slow;    /* slowest at 60 Hz or above */
+};
+
+static struct refresh_span
+refresh_span(struct nx_output *o, int width, int height)
+{
+	struct refresh_span span = { NULL, NULL };
+	struct nx_output_mode *mode;
+
+	wl_list_for_each(mode, &o->modes, link) {
+		if (mode->width != width || mode->height != height ||
+				nx_drm_connector_mode_pace_divisor(o, mode))
+			continue;
+		if (!span.fast || mode->refresh > span.fast->refresh)
+			span.fast = mode;
+		if (mode->refresh >= BATTERY_MIN_MHZ &&
+				(!span.slow || mode->refresh < span.slow->refresh))
+			span.slow = mode;
+	}
+	return span;
+}
+
+static struct refresh_span
+current_span(Monitor *m)
+{
+	struct nx_output *o = m->nx_output;
+	struct refresh_span none = { NULL, NULL };
+
+	if (!o || !o->enabled || !o->current_mode)
+		return none;
+	return refresh_span(o, o->current_mode->width, o->current_mode->height);
+}
+
+static void
+commit_refresh(Monitor *m, struct nx_output_mode *target, const char *why)
+{
+	struct nx_output *o = m->nx_output;
+	struct nx_output_state st;
+
+	if (!target || target == o->current_mode)
+		return;
+	nx_output_state_init(&st);
+	nx_output_state_set_enabled(&st, 1);
+	nx_output_state_set_mode(&st, target);
+	if (nx_output_test_state(o, &st) && nx_output_commit_state(o, &st)) {
+		nx_log(NX_INFO, "%s: %s → %dx%d@%d", why, o->name,
+			target->width, target->height, target->refresh / 1000);
+		invalidate_video_pacing(m);
+	}
+	nx_output_state_finish(&st);
+}
+
+/* Lockscreen animates at max refresh. */
 void
 output_lock_max_refresh(void)
 {
 	Monitor *m;
 
-	wl_list_for_each(m, &mons, link) {
-		struct nx_output *o = m->nx_output;
-		struct nx_output_mode *target = NULL, *mode, *cur;
-		struct nx_output_state st;
-
-		if (!o || !o->enabled)
-			continue;
-		cur = o->current_mode;
-		if (!cur)
-			continue;
-
-		wl_list_for_each(mode, &o->modes, link) {
-			if (mode->width != cur->width ||
-					mode->height != cur->height)
-				continue;
-			if (nx_drm_connector_mode_pace_divisor(o, mode))
-				continue;
-			if (!target || mode->refresh > target->refresh)
-				target = mode;
-		}
-		if (!target || target == cur)
-			continue;
-
-		nx_output_state_init(&st);
-		nx_output_state_set_enabled(&st, 1);
-		nx_output_state_set_mode(&st, target);
-		if (nx_output_test_state(o, &st) &&
-				nx_output_commit_state(o, &st)) {
-			nx_log(NX_INFO, "lock: %s → %dx%d@%d (max refresh)",
-				o->name, target->width, target->height,
-				target->refresh / 1000);
-			invalidate_video_pacing(m);
-		}
-		nx_output_state_finish(&st);
-	}
+	wl_list_for_each(m, &mons, link)
+		commit_refresh(m, current_span(m).fast, "lock");
 	updatemons(NULL, NULL);
+}
+
+/* 60 Hz on battery; lock keeps max. */
+void
+output_battery_refresh(void)
+{
+	Monitor *m;
+
+	if (locked)
+		return;
+	wl_list_for_each(m, &mons, link)
+		commit_refresh(m, current_span(m).slow, "battery");
+	updatemons(NULL, NULL);
+}
+
+/* bestmode, but 60 Hz on battery. */
+struct nx_output_mode *
+restmode(struct nx_output *o)
+{
+	struct nx_output_mode *best = bestmode(o), *slow;
+
+	if (!best || !powersave_on_battery())
+		return best;
+	slow = refresh_span(o, best->width, best->height).slow;
+	return slow ? slow : best;
 }
 
 struct nx_output_mode *

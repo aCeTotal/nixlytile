@@ -6,32 +6,27 @@
  * powersave_reassert() set. */
 #define PS_BATTERY_CAP 0.6
 #define PS_AC_BRIGHTNESS 60.0
+#define PS_BATTERY_BRIGHTNESS 26.0
+#define PS_SETTLE_MS 3000
 
 static int ps_engaged = -1;     /* -1 unknown → first event always applies */
+static int ps_settling;
+static struct wl_event_source *ps_settle;
 
 /* Re-applies the power state's regime. */
 void
 powersave_reassert(void)
 {
-	/* The sysfs regime (profile + governor + EPP + cap — ~100+ writes,
-	 * the EC profile alone ~100 ms) runs on cpuclock.c's worker; only
-	 * the modeset and the fps-cap flag stay on the compositor thread. */
+	/* Sysfs writes run on cpuclock's worker. */
 	if (ps_engaged == 1) {
-		cpuclock_regime_battery_async(PS_BATTERY_CAP);
-					/* mild cap: powersave governor + EPP
-					 * already idle the clocks down; 0.35
-					 * (1.29 GHz ceiling) made everything
-					 * crawl while saving almost nothing —
-					 * idle draw is panel/platform-bound */
-		unfocused_fps_cap = 20; /* visible background tiles stay watchable —
-					 * 2 froze a side-by-side video outright,
-					 * which reads as a broken compositor rather
-					 * than as power saving */
-	} else {
-		if (!game_mode_active)
-			cpuclock_regime_ac_async();
-		unfocused_fps_cap = 0;  /* no throttle on wall power */
+		cpuclock_regime_battery_async(PS_BATTERY_CAP); /* 0.35 crawled, saved nothing */
+		unfocused_fps_cap = 20; /* 2 froze background video */
+		output_battery_refresh();
+		return;
 	}
+	if (!game_mode_active)
+		cpuclock_regime_ac_async();
+	unfocused_fps_cap = 0;
 	monconf_apply_modes();
 	updatemons(NULL, NULL);
 }
@@ -47,10 +42,28 @@ powersave_clock_cap(void)
 	return ps_engaged == 1 ? PS_BATTERY_CAP : 1.0;
 }
 
+int
+powersave_on_battery(void)
+{
+	return ps_engaged == 1;
+}
+
+static void
+set_brightness(double percent)
+{
+	if (!backlight_available || set_backlight_percent(percent) != 0)
+		return;
+	light_last_percent = percent;
+	light_cached_percent = percent;
+	refreshstatuslight();
+}
+
 static void
 ps_engage(void)
 {
 	powersave_reassert();
+	if (backlight_available && backlight_percent() > PS_BATTERY_BRIGHTNESS)
+		set_brightness(PS_BATTERY_BRIGHTNESS);
 	nx_log(NX_INFO, "powersave: on battery — max saving engaged");
 }
 
@@ -59,6 +72,7 @@ static void
 ps_wall_power(void)
 {
 	powersave_reassert();
+	set_brightness(PS_AC_BRIGHTNESS);
 	nx_log(NX_INFO, "powersave: on wall power — quiet profile");
 }
 
@@ -70,36 +84,66 @@ powersave_battery_reassert_async(void)
 		cpuclock_regime_battery_async(PS_BATTERY_CAP);
 }
 
-static void
-pin_ac_brightness(void)
+static int
+on_battery_now(void)
 {
-	if (!backlight_available || set_backlight_percent(PS_AC_BRIGHTNESS) != 0)
+	BattSnapshot s;
+
+	if (!battwatch_get(&s) || !s.available)
+		return 0;
+	if (s.source == POWER_UNKNOWN)
+		return strncmp(s.status, "Discharging", 11) == 0;
+	return s.source == POWER_BATTERY;
+}
+
+static int
+ps_settled(void *data)
+{
+	(void)data;
+	ps_settling = 0;
+	if (ps_engaged == 1 || !on_battery_now())
+		return 0;
+	ps_engaged = 1;
+	ps_engage();
+	return 0;
+}
+
+/* Charger dropouts under load last ~1 s. */
+static void
+ps_settle_arm(void)
+{
+	if (ps_engaged == 1 || ps_settling)
 		return;
-	light_last_percent = PS_AC_BRIGHTNESS;
-	light_cached_percent = PS_AC_BRIGHTNESS;
-	refreshstatuslight();
+	if (!ps_settle)
+		ps_settle = wl_event_loop_add_timer(event_loop, ps_settled, NULL);
+	if (!ps_settle)
+		return;
+	ps_settling = 1;
+	wl_event_source_timer_update(ps_settle, PS_SETTLE_MS);
+}
+
+static void
+ps_settle_disarm(void)
+{
+	if (!ps_settling)
+		return;
+	ps_settling = 0;
+	wl_event_source_timer_update(ps_settle, 0);
 }
 
 /* Battwatch snapshot changed. */
 void
 powersave_battery_event(void)
 {
-	BattSnapshot s;
-	int on_bat;
-
-	if (!battwatch_get(&s))
+	if (on_battery_now()) {
+		ps_settle_arm();
 		return;
-	on_bat = s.available && (s.source == POWER_UNKNOWN ?
-		strncmp(s.status, "Discharging", 11) == 0 :
-		s.source == POWER_BATTERY);
-	if (on_bat && ps_engaged != 1) {
-		ps_engaged = 1;
-		ps_engage();
-	} else if (!on_bat && ps_engaged != 0) {
-		ps_engaged = 0;
-		ps_wall_power();
-		pin_ac_brightness();
 	}
+	ps_settle_disarm();
+	if (ps_engaged == 0)
+		return;
+	ps_engaged = 0;
+	ps_wall_power();
 }
 
 void

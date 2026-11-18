@@ -2810,10 +2810,16 @@ KeyboardGroup *createkeyboardgroup(void);
 void destroykeyboardgroup(struct wl_listener *listener, void *data);
 void inputdevice(struct wl_listener *listener, void *data);
 int keybinding(uint32_t mods, xkb_keysym_t sym);
+const Key *key_lookup(uint32_t mods, xkb_keysym_t sym);
+void key_run(const Key *k);
+void key_deliver(KeyboardGroup *group, const struct nx_keyboard_key_event *event);
 /* keymods.c */
 uint32_t binding_mods(struct nx_keyboard *kb);
 void binding_inhibited(uint32_t mods, xkb_keysym_t sym);
 void binding_unbound(uint32_t mods, xkb_keysym_t sym);
+void modkey_settle(KeyboardGroup *group, const struct nx_keyboard_key_event *event);
+int modkey_hold(KeyboardGroup *group, const struct nx_keyboard_key_event *event,
+		uint32_t mods);
 void keypress(struct wl_listener *listener, void *data);
 void keypressmod(struct wl_listener *listener, void *data);
 int keyrepeat(void *data);
@@ -3558,6 +3564,8 @@ void cpuclock_epp(const char *epp);
 void cpuclock_regime_battery_async(double cap);
 void cpuclock_regime_ac_async(void);
 void output_lock_max_refresh(void);
+void output_battery_refresh(void);
+struct nx_output_mode *restmode(struct nx_output *o);
 int power_profile_get(char *buf, size_t len);
 int power_profile_set(const char *value);
 void power_profile_low(void);
@@ -3568,6 +3576,7 @@ void powersave_init(void);
 void powersave_reassert(void);
 void powersave_battery_reassert_async(void);
 double powersave_clock_cap(void);
+int powersave_on_battery(void);
 
 /* audio_meter.c — pw-record peak capture for the popup live meters */
 void audio_meter_start(int mic);

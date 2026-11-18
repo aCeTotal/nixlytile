@@ -160,7 +160,7 @@ launch_line(const char *cmd, char *out, size_t len)
 pid_t
 spawn_cmd(const char *cmd)
 {
-	char line[CMD_MAX], words[CMD_MAX], script[CMD_MAX + 8];
+	char line[CMD_MAX], words[CMD_MAX];
 	char *argv[WORDS_MAX];
 	const char *shell = getenv("SHELL");
 	SpawnOpts o = { -1 };
@@ -174,9 +174,8 @@ spawn_cmd(const char *cmd)
 	if (!shell_meta(line) && split_words(words, argv) > 0)
 		pid = spawn_child(argv, &o);
 	if (pid < 0) {
-		char *sh_argv[] = { (char *)(shell && *shell ? shell : "/bin/sh"), "-c", script, NULL };
+		char *sh_argv[] = { (char *)(shell && *shell ? shell : "/bin/sh"), "-c", line, NULL };
 
-		snprintf(script, sizeof(script), "exec %s", line);
 		pid = spawn_child(sh_argv, &o);
 	}
 	if (pid > 0 && selmon)

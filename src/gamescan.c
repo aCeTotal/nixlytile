@@ -69,7 +69,7 @@ gamescan_apply(Monitor *m)
 	/* gamescan_mode_active does not block: a re-arm modeset (game
 	 * changed internal resolution mid-session) just switches again;
 	 * gamescan_original keeps pointing at the pre-game mode and
-	 * restore-on-exit uses bestmode() regardless. */
+	 * restore-on-exit uses restmode() regardless. */
 	if (m->gamescan_w <= 0 || m->gamescan_h <= 0)
 		return;
 
@@ -131,7 +131,7 @@ gamescan_restore(Monitor *m)
 	if (!m->gamescan_mode_active)
 		return;
 
-	target = bestmode(m->nx_output);
+	target = restmode(m->nx_output);
 	if (!target) {
 		m->gamescan_mode_active = 0;
 		m->gamescan_original = NULL;

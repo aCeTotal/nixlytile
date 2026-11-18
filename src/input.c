@@ -1572,22 +1572,37 @@ inputdevice(struct wl_listener *listener, void *data)
 	nx_seat_set_capabilities(seat, caps);
 }
 
-/* Overview steers bound moves. */
-int
-keybinding(uint32_t mods, xkb_keysym_t sym)
+const Key *
+key_lookup(uint32_t mods, xkb_keysym_t sym)
 {
 	size_t i;
 	for (i = 0; i < keys_count; i++) {
 		const Key *k = &keys[i];
-		if (CLEANMASK(mods) != CLEANMASK(k->mod)
-				|| sym != k->keysym || !k->func)
-			continue;
-		last_keybinding_func = k->func;
-		if (!overview_bind(k))
-			k->func(&k->arg);
-		return 1;
+		if (CLEANMASK(mods) == CLEANMASK(k->mod)
+				&& sym == k->keysym && k->func)
+			return k;
 	}
-	return 0;
+	return NULL;
+}
+
+/* Overview steers bound moves. */
+void
+key_run(const Key *k)
+{
+	last_keybinding_func = k->func;
+	if (!overview_bind(k))
+		k->func(&k->arg);
+}
+
+int
+keybinding(uint32_t mods, xkb_keysym_t sym)
+{
+	const Key *k = key_lookup(mods, sym);
+
+	if (!k)
+		return 0;
+	key_run(k);
+	return 1;
 }
 
 /* Only directional navigation makes sense on key-repeat.  Everything else
@@ -1658,6 +1673,30 @@ refocus_lost_keyboard(void)
 	return 1;
 }
 
+/* Forward key to focused client. */
+void
+key_deliver(KeyboardGroup *group, const struct nx_keyboard_key_event *event)
+{
+	nx_seat_set_keyboard(seat, &group->nx_group->keyboard);
+
+	/* Refocus enter already holds it. */
+	if (refocus_lost_keyboard()
+			&& event->state == WL_KEYBOARD_KEY_STATE_PRESSED)
+		return;
+
+	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+		struct nx_surface *focused = seat->keyboard_state.focused_surface;
+		nx_log(NX_DEBUG, "keypress: forwarding key %d to client, focused_surface=%p",
+			event->keycode, (void*)focused);
+	}
+	/* Feeds the STALE detector. */
+	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED && selmon)
+		selmon->diag_focus_keys++;
+
+	nx_seat_keyboard_notify_key(seat, event->time_msec,
+			event->keycode, event->state);
+}
+
 void
 keypress(struct wl_listener *listener, void *data)
 {
@@ -1676,6 +1715,7 @@ keypress(struct wl_listener *listener, void *data)
 
 	dwt_note_key(event->keycode,
 			event->state == WL_KEYBOARD_KEY_STATE_PRESSED);
+	modkey_settle(group, event);
 
 	/* Translate libinput keycode -> xkbcommon */
 	uint32_t keycode = event->keycode + 8;
@@ -1775,6 +1815,8 @@ keypress(struct wl_listener *listener, void *data)
 				for (i = 0; i < nlevel0; i++)
 					handled = keybinding(mods, level0_syms[i]) || handled;
 			}
+			if (!handled)
+				handled = modkey_hold(group, event, mods);
 		}
 	}
 	if (!handled && !locked && nsyms > 0 &&
@@ -1815,28 +1857,7 @@ keypress(struct wl_listener *listener, void *data)
 			return;
 	}
 
-	nx_seat_set_keyboard(seat, &group->nx_group->keyboard);
-
-	/* The enter after a refocus already carries this key as held, so
-	 * forwarding it too would double the press. */
-	if (refocus_lost_keyboard()
-			&& event->state == WL_KEYBOARD_KEY_STATE_PRESSED)
-		return;
-
-	/* Pass unhandled keycodes along to the client. */
-	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-		struct nx_surface *focused = seat->keyboard_state.focused_surface;
-		nx_log(NX_DEBUG, "keypress: forwarding key %d to client, focused_surface=%p",
-			event->keycode, (void*)focused);
-	}
-	/* Count keystrokes handed to the focused window (see the STALE
-	 * detector in the rendermon heartbeat: keys in, zero commits out
-	 * is a client starved of frame callbacks). */
-	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED && selmon)
-		selmon->diag_focus_keys++;
-
-	nx_seat_keyboard_notify_key(seat, event->time_msec,
-			event->keycode, event->state);
+	key_deliver(group, event);
 }
 
 void

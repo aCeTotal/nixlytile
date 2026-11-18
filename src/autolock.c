@@ -465,7 +465,7 @@ autolock_reset(Monitor *m)
 
 	if (!restore || !m->nx_output || !m->nx_output->enabled)
 		return;
-	target = bestmode(m->nx_output);
+	target = restmode(m->nx_output);
 	if (!target || target == m->nx_output->current_mode)
 		return;
 
