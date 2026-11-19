@@ -4,8 +4,9 @@
 #include "diag.h"
 #include "dwt.h"
 #include "overview/overview.h"
+#include "platform/input/keyboard/keyboard_state.h"
 
-static void (*last_keybinding_func)(const Arg *);
+static const Key *last_key;
 
 /* btrtile.c removed — local stubs to keep input.c compiling */
 static int resizing_from_mouse = 0;
@@ -1589,7 +1590,7 @@ key_lookup(uint32_t mods, xkb_keysym_t sym)
 void
 key_run(const Key *k)
 {
-	last_keybinding_func = k->func;
+	last_key = k;
 	if (!overview_bind(k))
 		k->func(&k->arg);
 }
@@ -1620,6 +1621,20 @@ binding_repeats(void (*func)(const Arg *))
 		|| func == move_client_to_ws_dir
 		|| func == swap_window_dir
 		|| func == resize_column_dir;
+}
+
+/* Arm or drop a held bind's repeat. */
+void
+key_repeat_bind(KeyboardGroup *group, const Key *k, uint32_t mods)
+{
+	int32_t delay = group->nx_group->keyboard.repeat_info.delay;
+	int repeats = k && binding_repeats(k->func) && delay > 0;
+
+	group->mods = mods;
+	group->keysym = repeats ? k->keysym : XKB_KEY_NoSymbol;
+	group->repeating = repeats;
+	wl_event_source_timer_update(group->key_repeat_source,
+			repeats ? delay : 0);
 }
 
 static int
@@ -1673,6 +1688,31 @@ refocus_lost_keyboard(void)
 	return 1;
 }
 
+/* Overview grid takes unmodified keys. */
+static int
+overview_feed(KeyboardGroup *group, uint32_t keycode, uint32_t mods)
+{
+	const xkb_keysym_t *syms;
+	int i, n, fed = 0;
+
+	n = xkb_state_key_get_syms(group->nx_group->keyboard.xkb_state,
+			keycode + EVDEV_XKB_OFFSET, &syms);
+	for (i = 0; i < n; i++)
+		fed = overview_handle_key(mods, syms[i]) || fed;
+	return fed;
+}
+
+/* Held key replays as unbound. */
+void
+key_replay(KeyboardGroup *group, const struct nx_keyboard_key_event *event,
+		uint32_t mods)
+{
+	if (!locked && overview_is_open()
+			&& overview_feed(group, event->keycode, mods))
+		return;
+	key_deliver(group, event);
+}
+
 /* Forward key to focused client. */
 void
 key_deliver(KeyboardGroup *group, const struct nx_keyboard_key_event *event)
@@ -1715,7 +1755,7 @@ keypress(struct wl_listener *listener, void *data)
 
 	dwt_note_key(event->keycode,
 			event->state == WL_KEYBOARD_KEY_STATE_PRESSED);
-	modkey_settle(group, event);
+	int deferred = modkey_settle(group, event);
 
 	/* Translate libinput keycode -> xkbcommon */
 	uint32_t keycode = event->keycode + 8;
@@ -1773,10 +1813,8 @@ keypress(struct wl_listener *listener, void *data)
 	/* Popup text entry (wifi SSID / passphrase): while active, keys go
 	 * to the entry buffer instead of bindings or clients. */
 	if (!locked && text_entry_active()) {
-		/* disarm any in-flight binding repeat — its release will be
-		 * swallowed here and would otherwise repeat forever */
-		group->nsyms = 0;
-		wl_event_source_timer_update(group->key_repeat_source, 0);
+		/* Entry swallows the repeat's release. */
+		key_repeat_bind(group, NULL, 0);
 		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 			char utf8[8] = "";
 
@@ -1790,22 +1828,16 @@ keypress(struct wl_listener *listener, void *data)
 		return;
 	}
 
-	/* On _press_ if there is no active screen locker,
-	 * attempt to process a compositor keybinding. */
-	/* The overview is modal: while it is up, arrows/Enter/Escape drive
-	 * the grid and nothing else reaches a client.  Modified chords fall
-	 * through to the bind table below, so Super+O closes it again. */
+	/* Overview is modal; chords fall through. */
 	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED
-			&& overview_is_open()) {
-		for (i = 0; i < nsyms; i++)
-			handled = overview_handle_key(mods, syms[i]) || handled;
-		if (handled)
-			return;
-	}
+			&& overview_is_open()
+			&& (modkey_hold(group, event, mods)
+				|| overview_feed(group, event->keycode, mods)))
+		return;
 
 	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 		if (!shortcuts_are_inhibited()) {
-			last_keybinding_func = NULL;
+			last_key = NULL;
 			for (i = 0; i < nsyms; i++)
 				handled = keybinding(mods, syms[i]) || handled;
 			/* Layout-agnostic match: also try unshifted (level-0) keysyms so
@@ -1824,24 +1856,11 @@ keypress(struct wl_listener *listener, void *data)
 		(shortcuts_are_inhibited() ? binding_inhibited
 				: binding_unbound)(mods, syms[0]);
 
-	{
-		int allow_repeat = 0;
-		if (handled && binding_repeats(last_keybinding_func)
-				&& group->nx_group->keyboard.repeat_info.delay > 0)
-			allow_repeat = 1;
-		if (allow_repeat) {
-			group->mods = mods;
-			group->keysyms = syms;
-			group->nsyms = nsyms;
-			wl_event_source_timer_update(group->key_repeat_source,
-					group->nx_group->keyboard.repeat_info.delay);
-		} else {
-			group->nsyms = 0;
-			wl_event_source_timer_update(group->key_repeat_source, 0);
-		}
-	}
+	/* Super chatter keeps repeats alive. */
+	if (handled || !modkey_chatter(group, event->keycode))
+		key_repeat_bind(group, handled ? last_key : NULL, mods);
 
-	if (handled)
+	if (handled || deferred)
 		return;
 
 	/* Never forward the modkey itself to clients. Modifier state still goes
@@ -1875,15 +1894,21 @@ int
 keyrepeat(void *data)
 {
 	KeyboardGroup *group = data;
-	int i;
-	if (!group->nsyms || group->nx_group->keyboard.repeat_info.rate <= 0)
+	enum repeat_tick tick;
+	if (!group->repeating || group->nx_group->keyboard.repeat_info.rate <= 0)
 		return 0;
+	tick = modkey_repeat_tick(group);
+	if (tick == REPEAT_STOP) {
+		group->repeating = 0;
+		return 0;
+	}
 
 	wl_event_source_timer_update(group->key_repeat_source,
 			1000 / group->nx_group->keyboard.repeat_info.rate);
+	if (tick == REPEAT_PAUSE)
+		return 0;
 
-	for (i = 0; i < group->nsyms; i++)
-		keybinding(group->mods, group->keysyms[i]);
+	keybinding(group->mods, group->keysym);
 
 	return 0;
 }

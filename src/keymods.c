@@ -4,15 +4,21 @@
 #include "diag.h"
 #include "platform/input/keyboard/keyboard_state.h"
 
-#define MODKEY_BOUNCE_MS 80 /* measured gaps: 20-30 ms */
+#define MODKEY_BOUNCE_MS 140 /* EC drops whole 22 ms scans */
+#define MODKEY_LEAD_MS 25    /* same-scan key precedes Super */
+#define MODKEY_IDLE_MS 250   /* typing streams skip the lead */
 
 static uint32_t modkey_up_ms;
+static uint32_t last_press_ms;
 
-/* Bound key pressed in a modkey gap. */
+/* Bound key waiting on a late Super. */
 static struct {
-	struct nx_keyboard_key_event event;
+	struct nx_keyboard_key_event press;
+	struct nx_keyboard_key_event release;
 	uint32_t mods;
 	int armed;
+	int released;
+	int lead;
 	struct wl_event_source *timer;
 } pending;
 
@@ -118,18 +124,28 @@ chord_binding(struct nx_keyboard *kb, uint32_t mods, uint32_t keycode)
 	return k;
 }
 
+/* No Super came: replay as typed. */
+static void
+pending_deliver(void)
+{
+	key_replay(kb_group, &pending.press, pending.mods);
+	if (pending.released)
+		key_deliver(kb_group, &pending.release);
+}
+
 static int
 pending_expired(void *data)
 {
 	(void)data;
 	pending.armed = 0;
-	diag_logf("KEY", "MODBOUNCE expired");
-	key_deliver(kb_group, &pending.event);
+	if (!pending.lead)
+		diag_logf("KEY", "MODBOUNCE expired");
+	pending_deliver();
 	return 0;
 }
 
-/* Modkey return binds pending key. */
-void
+/* Late Super binds; 1 = event kept. */
+int
 modkey_settle(KeyboardGroup *group, const struct nx_keyboard_key_event *event)
 {
 	int pressed = event->state == WL_KEYBOARD_KEY_STATE_PRESSED;
@@ -137,43 +153,91 @@ modkey_settle(KeyboardGroup *group, const struct nx_keyboard_key_event *event)
 	const Key *k = NULL;
 
 	if (group != kb_group)
-		return;
+		return 0;
 	if (is_modkey && !pressed)
 		modkey_up_ms = event->time_msec;
 	if (!pending.armed)
-		return;
+		return 0;
+	if (!pressed && !pending.lead
+			&& event->keycode == pending.press.keycode) {
+		pending.release = *event;
+		pending.released = 1;
+		return 1;
+	}
 	pending.armed = 0;
 	wl_event_source_timer_update(pending.timer, 0);
 	if (is_modkey && pressed && !locked)
 		k = chord_binding(&group->nx_group->keyboard,
-				pending.mods | modkey, pending.event.keycode);
+				pending.mods | modkey, pending.press.keycode);
 	if (!k) {
-		key_deliver(group, &pending.event);
-		return;
+		pending_deliver();
+		return 0;
 	}
-	diag_logf("KEY", "MODBOUNCE gap=%ums", event->time_msec - modkey_up_ms);
+	if (pending.lead)
+		diag_logf("KEY", "MODLEAD lead=%ums",
+				event->time_msec - pending.press.time_msec);
+	else
+		diag_logf("KEY", "MODBOUNCE gap=%ums",
+				event->time_msec - modkey_up_ms);
 	key_run(k);
+	/* Bound keys still release normally. */
+	if (pending.released)
+		key_deliver(kb_group, &pending.release);
+	else
+		key_repeat_bind(group, k, pending.mods | modkey);
+	return 0;
 }
 
-/* Hold bound key in modkey gap. */
+/* Super edge on the chattering keyboard. */
+int
+modkey_chatter(KeyboardGroup *group, uint32_t keycode)
+{
+	return group == kb_group && key_mod(keycode) == modkey;
+}
+
+/* Repeats pause through Super chatter. */
+enum repeat_tick
+modkey_repeat_tick(KeyboardGroup *group)
+{
+	uint32_t now_ms = (uint32_t)monotonic_msec();
+
+	if (group != kb_group || !(group->mods & modkey)
+			|| binding_mods(&group->nx_group->keyboard) & modkey)
+		return REPEAT_RUN;
+	if (now_ms - modkey_up_ms < MODKEY_BOUNCE_MS)
+		return REPEAT_PAUSE;
+	return REPEAT_STOP;
+}
+
+/* Hold a bound key for a late Super. */
 int
 modkey_hold(KeyboardGroup *group, const struct nx_keyboard_key_event *event,
 		uint32_t mods)
 {
 	uint32_t since = event->time_msec - modkey_up_ms;
+	uint32_t idle = event->time_msec - last_press_ms;
+	int lead = since >= MODKEY_BOUNCE_MS;
 
-	if (group != kb_group || mods & modkey || key_mod(event->keycode)
-			|| since >= MODKEY_BOUNCE_MS
+	if (group != kb_group || key_mod(event->keycode))
+		return 0;
+	last_press_ms = event->time_msec;
+	if (mods & modkey || (lead && idle < MODKEY_IDLE_MS)
 			|| !chord_binding(&group->nx_group->keyboard,
-				mods | modkey, event->keycode))
+				mods | modkey, event->keycode)
+			|| chord_binding(&group->nx_group->keyboard,
+				mods, event->keycode)
+			|| (lead && looks_like_game(focustop(selmon))))
 		return 0;
 	if (!pending.timer)
 		pending.timer = wl_event_loop_add_timer(event_loop, pending_expired, NULL);
 	if (!pending.timer)
 		return 0;
-	pending.event = *event;
+	pending.press = *event;
 	pending.mods = mods;
+	pending.released = 0;
+	pending.lead = lead;
 	pending.armed = 1;
-	wl_event_source_timer_update(pending.timer, MODKEY_BOUNCE_MS - since);
+	wl_event_source_timer_update(pending.timer,
+			lead ? MODKEY_LEAD_MS : MODKEY_BOUNCE_MS - since);
 	return 1;
 }

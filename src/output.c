@@ -1571,6 +1571,17 @@ hidden_frame_done_iter(struct nx_surface *surface, int sx, int sy, void *data)
 	nx_fifo_v1_surface_latched(surface);
 }
 
+/* Launchers and notifications never slide. */
+static void
+layers_frame_done(struct wl_list *layer, struct timespec *now)
+{
+	LayerSurface *l;
+
+	wl_list_for_each(l, layer, link)
+		nx_surface_for_each_surface(l->layer_surface->surface,
+				hidden_frame_done_iter, now);
+}
+
 /* Release a client's queued frame callbacks right now.  Called on focus
  * change: an unfocused tile runs at unfocused_fps_cap (20 Hz on battery),
  * so the window the user just selected would otherwise sit on a queued
@@ -3921,6 +3932,8 @@ frame_done:
 
 	/* Layout motion frees the GPU. */
 	if (m->withhold_frames && !is_video && !is_game && !hidden_due && !locked) {
+		layers_frame_done(&m->layers[ZWLR_LAYER_SHELL_V1_LAYER_TOP], &now);
+		layers_frame_done(&m->layers[ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY], &now);
 	} else if (focus_power_save && unfocused_fps_cap > 0 && !is_game &&
 			!is_video && !m->withhold_frames && !locked) {
 		/* Throttle unfocused; lock exempt. */

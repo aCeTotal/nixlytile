@@ -1406,8 +1406,8 @@ struct LayoutNode {
 /* ── keyboard / text input ─────────────────────────────────────────── */
 typedef struct {
 	struct nx_keyboard_group *nx_group;
-	int nsyms;
-	const xkb_keysym_t *keysyms;
+	int repeating;
+	xkb_keysym_t keysym;
 	uint32_t mods;
 	struct wl_event_source *key_repeat_source;
 	struct wl_listener modifiers;
@@ -2813,13 +2813,19 @@ int keybinding(uint32_t mods, xkb_keysym_t sym);
 const Key *key_lookup(uint32_t mods, xkb_keysym_t sym);
 void key_run(const Key *k);
 void key_deliver(KeyboardGroup *group, const struct nx_keyboard_key_event *event);
+void key_replay(KeyboardGroup *group, const struct nx_keyboard_key_event *event,
+		uint32_t mods);
+void key_repeat_bind(KeyboardGroup *group, const Key *k, uint32_t mods);
 /* keymods.c */
+enum repeat_tick { REPEAT_RUN, REPEAT_PAUSE, REPEAT_STOP };
 uint32_t binding_mods(struct nx_keyboard *kb);
 void binding_inhibited(uint32_t mods, xkb_keysym_t sym);
 void binding_unbound(uint32_t mods, xkb_keysym_t sym);
-void modkey_settle(KeyboardGroup *group, const struct nx_keyboard_key_event *event);
+int modkey_settle(KeyboardGroup *group, const struct nx_keyboard_key_event *event);
 int modkey_hold(KeyboardGroup *group, const struct nx_keyboard_key_event *event,
 		uint32_t mods);
+int modkey_chatter(KeyboardGroup *group, uint32_t keycode);
+enum repeat_tick modkey_repeat_tick(KeyboardGroup *group);
 void keypress(struct wl_listener *listener, void *data);
 void keypressmod(struct wl_listener *listener, void *data);
 int keyrepeat(void *data);
