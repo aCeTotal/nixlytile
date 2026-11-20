@@ -45,6 +45,7 @@ overview_teardown(void)
 	free(ov.cells);
 	free(ov.rows);
 	ov = (struct Overview){ 0 };
+	pointer_reset();
 	detail_drop();
 	nx_scene_node_set_enabled(&layers[LyrTile]->node, 1);
 	nx_scene_node_set_enabled(&layers[LyrFloat]->node, 1);
@@ -54,12 +55,8 @@ overview_teardown(void)
 void
 overview_reflow(void)
 {
-	for (int i = 0; i < ov.n_cells; i++)
-		ov.cells[i].from = box_lerp(ov.cells[i].from, ov.cells[i].slot,
-				ov.flow.pos);
-	for (int r = 0; r < ov.n_rows; r++)
-		ov.rows[r].from = box_lerp(ov.rows[r].from, ov.rows[r].box,
-				ov.flow.pos);
+	grid_freeze();
+	pointer_reset();
 	if (!grid_collect(ov.mon)) {
 		overview_teardown();
 		return;
@@ -85,6 +82,8 @@ overview_reflow(void)
 static int
 intact(void)
 {
+	if (!grid_rows_alive())
+		return 0;
 	for (int i = 0; i < ov.n_cells; i++) {
 		Column *col = ov.cells[i].c->column;
 
@@ -147,6 +146,7 @@ begin_close(Client *target)
 {
 	Workspace *dest = target ? target->column->ws : monitor_active_ws(ov.mon);
 
+	pointer_reset();
 	ov.closing = 1;
 	ov.zoom.target = 0.0;
 	ov.activate = target;

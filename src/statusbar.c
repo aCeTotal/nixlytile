@@ -4,6 +4,7 @@
 #include "diag.h"
 #include "fetch_async.h"
 #include "netsys.h"
+#include "calendar/calendar.h"
 
 /* battery popup: hit ids 0-2 are the power-profile buttons */
 #define CHARGE_LIMIT_HIT_BASE 10
@@ -4459,7 +4460,7 @@ updatenethover(Monitor *m, double cx, double cy)
 	}
 
 	/* Hold the popup open while an SSID/password entry is active */
-	if (p->visible && text_entry_active())
+	if (p->visible && net_owns_entry())
 		inside = 1;
 
 	was_visible = p->visible;
@@ -4787,6 +4788,7 @@ cleanupstatusbar(Monitor *m)
 {
 	if (!m)
 		return;
+	calendar_closed(m);
 
 	tray_menu_clear(&m->statusbar.tray_menu);
 

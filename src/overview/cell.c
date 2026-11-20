@@ -78,8 +78,8 @@ cell_relabel(Cell *cell)
 }
 
 /* Zoom, reflow, then lift. */
-struct nx_box
-cell_box(const Cell *cell)
+static struct nx_box
+lifted_box(const Cell *cell)
 {
 	struct nx_box grid = box_lerp(cell->from, cell->slot, ov.flow.pos);
 	struct nx_box b = box_lerp(cell->live, grid, ov.zoom.pos);
@@ -88,6 +88,14 @@ cell_box(const Cell *cell)
 
 	return (struct nx_box){ b.x - dw / 2, b.y - dh / 2,
 			MAX(b.width + dw, 1), MAX(b.height + dh, 1) };
+}
+
+struct nx_box
+cell_box(const Cell *cell)
+{
+	if (ov.drag.active && cell == &ov.cells[ov.drag.cell])
+		return drag_box();
+	return lifted_box(cell);
 }
 
 static void

@@ -7,6 +7,7 @@
 #include "launchboost.h"
 #include "remote.h"
 #include "netsys.h"
+#include "calendar/calendar.h"
 #include <execinfo.h>
 #include <malloc.h>
 
@@ -2765,6 +2766,7 @@ setup(void)
 		fanwatch_init();
 	}
 	diskwatch_init();
+	calendar_init();
 	powersave_init();
 	launchboost_init();
 	gshortcuts_init();

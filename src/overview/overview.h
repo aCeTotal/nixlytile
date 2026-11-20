@@ -17,6 +17,12 @@ void overview_tick(Monitor *m, double dt, int *still);
 void overview_purge_mon(Monitor *m);
 void overview_purge_client(Client *c);
 
+void overview_pointer_motion(double x, double y);
+/* 1 when consumed. */
+int overview_pointer_button(uint32_t button, int pressed);
+/* Top-left screen corner toggles. */
+void overview_corner(Monitor *m, double x, double y);
+
 /* Worker thread; blurred wallpaper copy. */
 struct nx_buffer *overview_blur(GdkPixbuf *wallpaper);
 /* Takes ownership; NULL clears. */

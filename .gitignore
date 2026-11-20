@@ -5,6 +5,7 @@ nixlytile
 nixly-fand
 nixly-diskd
 nixly-jaild
+nixly-calsync
 result
 result-*
 game_params.conf

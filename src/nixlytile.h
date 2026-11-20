@@ -3128,6 +3128,11 @@ void info_popups_hide(Monitor *m);
 int volume_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 int mic_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 int light_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
+int clock_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
+int clock_popup_handle_scroll(Monitor *m, double cx, int steps);
+void clock_popup_click_outside(void);
+/* Cursor inside a visible popup. */
+int info_popup_under(Monitor *m, InfoPopup *p);
 void info_popup_slider_release(void);
 void meter_frame_tick(Monitor *m);
 /* audio_devices.c */
@@ -3290,6 +3295,8 @@ void refreshstatusdisk(void);
 void render_disk_popup(Monitor *m);
 int disk_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
 void disk_popup_entry_changed(void);
+int disk_owns_entry(void);
+void disk_popup_closed(void);
 int updatestatuscpu(void *data);
 int updatestatusclock(void *data);
 int readcpustats(struct CpuSample *out, int maxcount);
@@ -3591,7 +3598,12 @@ int audio_meter_running(int mic);
 double audio_meter_take_peak(void);
 
 /* notifyd.c — in-compositor org.freedesktop.Notifications daemon */
+typedef struct {
+	const char *app, *summary, *body;
+	int32_t expire_ms;
+} NotifyPost;
 void notifyd_init(void);
+void notifyd_post(const NotifyPost *n);
 
 /* wlsec.c — registry filter for the privileged Wayland protocols */
 void wlsec_privileged(struct wl_global *global);

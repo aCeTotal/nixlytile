@@ -10,12 +10,20 @@
 #define OV_RADIUS   14
 #define OV_LANE_PAD 18
 #define OV_BADGE    38
+#define OV_TILE_GAP 14
+#define OV_LANE_R   24
+#define OV_HOT_A    0.85f
 
 typedef enum { DETAIL_NONE, DETAIL_PATH, DETAIL_REMOTE } DetailKind;
 
 typedef struct {
 	double pos, vel, target;
 } Motion;
+
+typedef struct {
+	struct nx_scene_buffer *node;
+	int w, h;
+} Caption;
 
 typedef struct {
 	const float *rgba;
@@ -50,9 +58,17 @@ typedef struct {
 
 	struct nx_scene_rect *lane;
 	struct nx_scene_rect *badge;
-	struct nx_scene_buffer *digits;
-	int digits_w, digits_h;
+	Caption digits;
 } Row;
+
+/* Lane for new workspaces. */
+typedef struct {
+	int shown, fading;
+	struct nx_box from, box;
+
+	struct nx_scene_rect *fill, *edge, *badge;
+	Caption plus, hint;
+} Ghost;
 
 struct Overview {
 	Monitor *mon;
@@ -63,6 +79,7 @@ struct Overview {
 	int n_cells, sel;
 	Row *rows;
 	int n_rows;
+	Ghost ghost;
 
 	Motion zoom;  /* 0 real layout, 1 grid */
 	Motion flow;  /* reflow after a move */
@@ -76,6 +93,13 @@ struct Overview {
 	struct nx_scene_rect *glow;
 	struct nx_scene_tree *tiles;
 	struct nx_scene_rect *ring;
+	struct nx_scene_rect *marker;
+
+	struct {
+		int active, cell;
+		double x, y, ox, oy;
+		int row, col;
+	} drag;
 };
 
 extern struct Overview ov;
@@ -90,8 +114,14 @@ void overview_choose(void);
 
 /* grid.c */
 int grid_collect(Monitor *m);
+int grid_rows_alive(void);
+int column_shown(Column *col);
+
+/* layout.c */
 struct nx_box grid_screen_box(Client *c, Workspace *ref);
 struct nx_box box_lerp(struct nx_box a, struct nx_box b, double t);
+void grid_freeze(void);
+void grid_layout(Monitor *m);
 
 /* cell.c */
 void cell_build(Cell *cell);
@@ -118,11 +148,31 @@ void chrome_rows(void);
 void chrome_drop_row(Row *row);
 void chrome_apply(void);
 struct nx_box selection_box(void);
+struct nx_box lane_badge(struct nx_box lane);
+void caption_set(Caption *cap, const char *s, const float fg[static 4]);
+void caption_place(const Caption *cap, struct nx_box b, float alpha);
 
 /* backdrop.c */
 struct nx_scene_buffer *backdrop_attach(struct nx_scene_tree *parent, Monitor *m);
 
 /* keys.c */
 void select_toward(int dx, int dy);
+
+/* drag.c */
+struct nx_box drag_box(void);
+struct nx_box drag_marker(void);
+void drag_start(int cell, double fx, double fy);
+void drag_follow(double x, double y);
+void drag_drop(void);
+void drag_settle(void);
+
+/* pointer.c */
+void pointer_reset(void);
+
+/* ghost.c */
+void ghost_show(void);
+void ghost_hide(void);
+void ghost_apply(void);
+Workspace *ghost_workspace(void);
 
 #endif

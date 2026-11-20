@@ -13,6 +13,7 @@
 #include "remote.h"
 #include "config_loader.h"
 #include "overview/overview.h"
+#include "calendar/calendar.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -335,6 +336,28 @@ apply_remote(const KdlNode *n)
 	}
 	if (kdl_arg_int(kdl_find_child(n, "mouse-speed"), 0, &li) && li > 0)
 		remote_mouse_speed = (int)li;
+}
+
+static void
+apply_calendar(const KdlNode *n)
+{
+	const struct {
+		const char *key;
+		char *dst;
+		size_t len;
+	} fields[] = {
+		{ "google-client-id", calendar_config.google_id,
+			sizeof(calendar_config.google_id) },
+		{ "google-client-secret", calendar_config.google_secret,
+			sizeof(calendar_config.google_secret) },
+		{ "microsoft-client-id", calendar_config.microsoft_id,
+			sizeof(calendar_config.microsoft_id) },
+	};
+	const char *s;
+
+	for (size_t i = 0; i < LENGTH(fields); i++)
+		if (kdl_arg_string(kdl_find_child(n, fields[i].key), 0, &s))
+			snprintf(fields[i].dst, fields[i].len, "%s", s);
 }
 
 static void
@@ -942,6 +965,7 @@ apply_doc(const KdlDoc *doc, int initial)
 	runtime_monitor_count = 0;
 	free_runtime_rules();
 	free_runtime_spawn_cmds();
+	memset(&calendar_config, 0, sizeof(calendar_config));
 	runtime_xkb_rules_set = 0;
 	memset(&runtime_xkb_rules, 0, sizeof(runtime_xkb_rules));
 
@@ -969,6 +993,7 @@ apply_doc(const KdlDoc *doc, int initial)
 
 		if (!strcmp(n->name, "appearance"))         apply_appearance(n);
 		else if (!strcmp(n->name, "remote"))        apply_remote(n);
+		else if (!strcmp(n->name, "calendar"))      apply_calendar(n);
 		else if (!strcmp(n->name, "input"))         apply_input(n);
 		else if (!strcmp(n->name, "monitor"))       apply_monitor(n);
 		else if (!strcmp(n->name, "window-rule"))   apply_window_rule(n);

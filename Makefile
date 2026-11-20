@@ -73,13 +73,16 @@ SHADER_HDRS = $(SHADERS:%=$(BUILD)/%.h)
 PNPIDS = $(BUILD)/platform/drm/pnp_ids.c
 GENERATED = $(PROTO_HDRS) $(SHADER_HDRS)
 
-HELPERS = src/nixly_fand.c src/nixly_diskd.c src/nixly_jaild.c src/jaild_attach.c
+CALSYNC_SRCS = $(wildcard src/calsync/*.c src/calsync/*/*.c)
+CALSYNC_HDRS = $(wildcard src/calsync/*.h src/calsync/*/*.h)
+CALSYNC_PKGS = libcurl libical json-c libxml-2.0 libcrypto
+HELPERS = src/nixly_fand.c src/nixly_diskd.c src/nixly_jaild.c src/jaild_attach.c $(CALSYNC_SRCS)
 SRCS = $(filter-out $(HELPERS),$(wildcard src/*.c src/*/*.c)) $(shell find platform -name '*.c')
 OBJS = $(SRCS:%.c=$(BUILD)/%.o) $(PROTO_SRCS:%.c=%.o) $(PNPIDS:%.c=%.o)
 
 xml_of = $(filter %/$(1).xml,$(PROTOCOL_XMLS))
 
-all: nixlytile nixly-fand nixly-diskd nixly-jaild
+all: nixlytile nixly-fand nixly-diskd nixly-jaild nixly-calsync
 
 nixlytile: $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
@@ -122,15 +125,19 @@ nixly-diskd: src/nixly_diskd.c
 	$(CC) -O2 -Wall -Wextra -o $@ src/nixly_diskd.c
 nixly-jaild: src/nixly_jaild.c src/jaild_attach.c src/jaild.h src/priv_sock.h
 	$(CC) -O2 -Wall -Wextra -o $@ src/nixly_jaild.c src/jaild_attach.c
+nixly-calsync: $(CALSYNC_SRCS) $(CALSYNC_HDRS)
+	$(CC) -O2 $(WARNINGS) -D_GNU_SOURCE -Isrc/calsync $(shell $(PKG_CONFIG) --cflags $(CALSYNC_PKGS)) \
+		-o $@ $(CALSYNC_SRCS) $(shell $(PKG_CONFIG) --libs $(CALSYNC_PKGS))
 
 clean:
-	rm -rf $(BUILD) nixlytile nixly-fand nixly-diskd nixly-jaild
+	rm -rf $(BUILD) nixlytile nixly-fand nixly-diskd nixly-jaild nixly-calsync
 
 install: all
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
-	cp -f nixlytile nixly-fand nixly-diskd nixly-jaild $(DESTDIR)$(PREFIX)/bin
+	cp -f nixlytile nixly-fand nixly-diskd nixly-jaild nixly-calsync $(DESTDIR)$(PREFIX)/bin
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/nixlytile $(DESTDIR)$(PREFIX)/bin/nixly-fand \
-		$(DESTDIR)$(PREFIX)/bin/nixly-diskd $(DESTDIR)$(PREFIX)/bin/nixly-jaild
+		$(DESTDIR)$(PREFIX)/bin/nixly-diskd $(DESTDIR)$(PREFIX)/bin/nixly-jaild \
+		$(DESTDIR)$(PREFIX)/bin/nixly-calsync
 	mkdir -p $(DESTDIR)$(DATADIR)/nixlytile/images
 	cp -r images/svg $(DESTDIR)$(DATADIR)/nixlytile/images/
 	cp -r theme $(DESTDIR)$(DATADIR)/nixlytile/
@@ -152,6 +159,7 @@ install: all
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/nixlytile $(DESTDIR)$(PREFIX)/bin/nixly-fand \
 		$(DESTDIR)$(PREFIX)/bin/nixly-diskd $(DESTDIR)$(PREFIX)/bin/nixly-jaild \
+		$(DESTDIR)$(PREFIX)/bin/nixly-calsync \
 		$(DESTDIR)$(MANDIR)/man1/nixlytile.1 \
 		$(DESTDIR)$(DATADIR)/wayland-sessions/nixlytile.desktop \
 		$(DESTDIR)$(DATADIR)/xdg-desktop-portal/portals/nixlytile.portal \

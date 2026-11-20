@@ -11,7 +11,6 @@
 /* ── theme ───────────────────────────────────────────────────────── */
 
 #define CARD_RADIUS   10.0
-#define CARD_PAD      16
 #define CARD_COLGAP   28
 #define CARD_METER_H  44
 #define CARD_TICON(h) ((h) + 6)        /* CROW_TEXT row icon size */
@@ -241,12 +240,12 @@ typedef enum {
 	CROW_BUTTONS,
 	CROW_DISPLAYS,
 	CROW_GAP,
-	CROW_CAL,
 	CROW_CURVE,
 	CROW_ICONTEXT,
 	CROW_BIGBTN,
 	CROW_QR,
 	CROW_IMAGE,
+	CROW_CUSTOM,
 } CardRowType;
 
 typedef struct {
@@ -274,7 +273,6 @@ typedef struct {
 	int gap;
 	int hit_id, hot;
 	int hit_id2, hot2;   /* CROW_TEXT second right button (label in d) */
-	int year, mon, mday;
 	CardDisp dsp[CARD_DISP_MAX];
 	int ndsp;
 	uint8_t cv_t[CARD_CURVE_PTS_MAX], cv_p[CARD_CURVE_PTS_MAX];
@@ -282,6 +280,10 @@ typedef struct {
 	const uint8_t *qr;   /* CROW_QR module matrix (caller-owned) */
 	int qr_size;
 	cairo_surface_t *img;   /* CROW_IMAGE, caller-owned */
+	const CardPainter *painter;
+	const void *model;
+	size_t model_len;
+	int cw, ch;
 	/* computed in measure */
 	int y, h;
 } CardRow;
@@ -775,15 +777,17 @@ card_curve(Card *c, const uint8_t *temps, const uint8_t *pcts, int n,
 }
 
 void
-card_calendar(Card *c, int year, int mon, int mday)
+card_custom(Card *c, const CardBlock *b)
 {
-	CardRow *r = row_new(c, CROW_CAL);
+	CardRow *r = row_new(c, CROW_CUSTOM);
 
 	if (!r)
 		return;
-	r->year = year;
-	r->mon = mon;
-	r->mday = mday;
+	r->painter = b->painter;
+	r->model = b->model;
+	r->model_len = b->model_len;
+	r->cw = b->w;
+	r->ch = b->h;
 }
 
 /* ── layout ──────────────────────────────────────────────────────── */
@@ -801,12 +805,6 @@ btn_row_width(CardRow *r)
 			w += 10;
 	}
 	return w;
-}
-
-static int
-cal_cell_w(void)
-{
-	return text_width_f(card_font_small, "00", SMALL_LSPC) + 10;
 }
 
 /* Measure pass: computes each row's height and the card content width. */
@@ -964,12 +962,10 @@ card_measure(Card *c, int *out_w, int *out_h)
 			rw = cairo_image_surface_get_width(r->img);
 			r->h = cairo_image_surface_get_height(r->img);
 			break;
-		case CROW_CAL: {
-			int cw = cal_cell_w();
-			rw = 7 * cw;
-			r->h = small_h + 8 + 6 * (small_h + 6);
+		case CROW_CUSTOM:
+			rw = r->cw;
+			r->h = r->ch;
 			break;
-		}
 		}
 		if (rw > w)
 			w = rw;
@@ -1158,6 +1154,64 @@ add_hit(CardResult *out, int x, int y, int w, int h, int id)
 		.h = h, .id = id };
 }
 
+struct CardInk {
+	pixman_image_t *pix;
+	CardResult *out;
+	int ox, oy;
+};
+
+static struct fcft_font *
+card_font(CardFont f)
+{
+	static struct fcft_font **const fonts[] = {
+		[CARD_FONT_SMALL] = &card_font_small,
+		[CARD_FONT_CAPS] = &card_font_small,
+		[CARD_FONT_BASE] = &statusfont.font,
+		[CARD_FONT_BIG] = &card_font_big,
+	};
+
+	return *fonts[f];
+}
+
+int
+card_font_width(CardFont f, const char *s)
+{
+	return text_width_f(card_font(f), s, f == CARD_FONT_CAPS ? SMALL_LSPC : 0);
+}
+
+int
+card_font_height(CardFont f)
+{
+	return card_font(f)->height;
+}
+
+void
+card_ink_text(CardInk *ink, const CardText *t)
+{
+	struct fcft_font *f = card_font(t->font);
+
+	draw_text_f(ink->pix, f, t->s, ink->ox + t->x, ink->oy + t->y + f->ascent,
+			t->col, t->font == CARD_FONT_CAPS ? SMALL_LSPC : 0);
+}
+
+void
+card_ink_hit(CardInk *ink, CardRect r, int id)
+{
+	add_hit(ink->out, ink->ox + r.x, ink->oy + r.y, r.w, r.h, id);
+}
+
+void
+card_draw_icon(cairo_t *cr, const char *icon, CardRect box)
+{
+	draw_icon(cr, icon, box.x, box.y, box.w);
+}
+
+void
+card_rounded(cairo_t *cr, CardRound r)
+{
+	rounded(cr, r.x, r.y, r.w, r.h, r.radius);
+}
+
 /* Popups read fine glassy over the wallpaper, but over window content
  * the bleed-through hurts legibility: when the card actually overlaps
  * a visible client the backdrop goes nearly opaque, over bare
@@ -1209,14 +1263,7 @@ sig_bytes(const void *p, size_t n, uint32_t h)
 	return h;
 }
 
-/* card_finish with a change gate: hashes the card's full content (rows
- * incl. hover state, pointed-to colors, QR matrix, backdrop alpha) and
- * skips the whole rasterization when it matches *sig — the periodic
- * popup refresh timers (500 ms info popups, 2 s cpu/ram) re-render
- * identical cards almost every tick otherwise.  Returns 1 and frees the
- * card when unchanged (out untouched, existing scene content stays);
- * else behaves as card_finish and stores the new sig.  Reset the sig
- * (popup_view_hide does) whenever the scene content is torn down. */
+/* card_finish that skips unchanged cards. */
 int
 card_finish_sig(Card *c, CardResult *out, uint32_t *sig)
 {
@@ -1238,9 +1285,7 @@ card_finish_sig(Card *c, CardResult *out, uint32_t *sig)
 	for (i = 0; i < c->nrows; i++) {
 		const CardRow *r = &c->rows[i];
 
-		/* Color/QR pointers are hashed above by address; hash the
-		 * pointed-to values too so an aliased pointer with changed
-		 * content can never false-match. */
+		/* Hash pointed-to values too. */
 		if (r->subcol)
 			h32 = sig_bytes(r->subcol, 4 * sizeof(float), h32);
 		if (r->bcol)
@@ -1251,6 +1296,8 @@ card_finish_sig(Card *c, CardResult *out, uint32_t *sig)
 			h32 = sig_bytes(r->qr,
 					(size_t)r->qr_size * (size_t)r->qr_size,
 					h32);
+		if (r->type == CROW_CUSTOM)
+			h32 = sig_bytes(r->model, r->model_len, h32);
 	}
 	h32 = sig_bytes(&bg_a, sizeof(bg_a), h32);
 	if (h32 == 0)
@@ -1678,6 +1725,17 @@ card_finish(Card *c, CardResult *out)
 			cairo_restore(cr);
 			break;
 		}
+		case CROW_CUSTOM: {
+			CardInk ink = { NULL, out, CARD_PAD, y };
+
+			if (!r->painter->shapes)
+				break;
+			cairo_save(cr);
+			cairo_translate(cr, CARD_PAD, y);
+			r->painter->shapes(cr, &ink, r->model);
+			cairo_restore(cr);
+			break;
+		}
 		case CROW_ICONTEXT: {
 			int isz = base_h;
 
@@ -1821,30 +1879,6 @@ card_finish(Card *c, CardResult *out)
 				}
 			break;
 		}
-		case CROW_CAL: {
-			/* today pill */
-			struct tm tmv = {0};
-			int cw = cal_cell_w(), ch = small_h + 6;
-			int wday0, col, rowi;
-
-			tmv.tm_year = r->year - 1900;
-			tmv.tm_mon = r->mon;
-			tmv.tm_mday = 1;
-			tmv.tm_hour = 12;
-			if (mktime(&tmv) != (time_t)-1) {
-				wday0 = (tmv.tm_wday + 6) % 7; /* Mon=0 */
-				col = (wday0 + r->mday - 1) % 7;
-				rowi = (wday0 + r->mday - 1) / 7;
-				rounded(cr, CARD_PAD + col * cw - 3,
-						y + small_h + 8 + rowi * ch - 2,
-						cw - 4 + 6, ch - 2, 6);
-				cairo_set_source_rgba(cr, card_col_blue[0],
-						card_col_blue[1],
-						card_col_blue[2], 0.30);
-				cairo_fill(cr);
-			}
-			break;
-		}
 		default:
 			break;
 		}
@@ -1861,7 +1895,7 @@ card_finish(Card *c, CardResult *out)
 		return -1;
 	}
 
-	/* pass B: text (fcft glyphs via pixman) */
+	/* pass B: text via fcft */
 	for (int i = 0; i < c->nrows; i++) {
 		CardRow *r = &c->rows[i];
 		int y = r->y;
@@ -2137,48 +2171,10 @@ card_finish(Card *c, CardResult *out)
 			}
 			break;
 		}
-		case CROW_CAL: {
-			static const char *dows[7] =
-				{ "Mo", "Tu", "We", "Th", "Fr", "Sa", "Su" };
-			struct tm tmv = {0};
-			int cw = cal_cell_w(), ch = small_h + 6;
-			int wday0, days;
+		case CROW_CUSTOM: {
+			CardInk ink = { pix, out, CARD_PAD, y };
 
-			for (int d = 0; d < 7; d++)
-				draw_text_f(pix, card_font_small, dows[d],
-						CARD_PAD + d * cw,
-						y + small_asc, card_col_faint,
-						SMALL_LSPC);
-
-			tmv.tm_year = r->year - 1900;
-			tmv.tm_mon = r->mon;
-			tmv.tm_mday = 1;
-			tmv.tm_hour = 12;
-			if (mktime(&tmv) == (time_t)-1)
-				break;
-			wday0 = (tmv.tm_wday + 6) % 7;
-			{
-				static const int dim[12] = { 31, 28, 31, 30, 31,
-					30, 31, 31, 30, 31, 30, 31 };
-				int yy = r->year;
-				days = dim[r->mon];
-				if (r->mon == 1 && ((yy % 4 == 0 && yy % 100 != 0)
-						|| yy % 400 == 0))
-					days = 29;
-			}
-			for (int d = 1; d <= days; d++) {
-				int cell = wday0 + d - 1;
-				int col = cell % 7, rowi = cell / 7;
-				char num[4];
-
-				snprintf(num, sizeof(num), "%d", d);
-				draw_text_f(pix, card_font_small, num,
-						CARD_PAD + col * cw,
-						y + small_h + 8 + rowi * ch +
-						small_asc,
-						d == r->mday ? card_col_fg :
-						card_col_dim, 0);
-			}
+			r->painter->text(&ink, r->model);
 			break;
 		}
 		default:

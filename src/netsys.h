@@ -221,23 +221,30 @@ void bt_caps_apply(void);
 
 /* ── text_entry.c: single-line input for popups ──────────────────── */
 
+#define TEXT_ENTRY_MAX 512
+
 typedef void (*text_entry_submit_fn)(const char *text, void *data);
 
 void text_entry_begin(const char *label, int masked,
 		text_entry_submit_fn submit, void *data);
 void text_entry_cancel(void);
 int text_entry_active(void);
+/* Active entry submit callback. */
+text_entry_submit_fn text_entry_owner(void);
+/* Bumps on begin, cancel, submit. */
+unsigned text_entry_generation(void);
 const char *text_entry_label(void);
-/* Current content; masked entries return a run of dots for display. */
+/* Masked entries show dots. */
 const char *text_entry_display(void);
-/* Raw (unmasked) content — for in-process consumers like an inline
- * Connect button that must read the field without an Enter press. */
 const char *text_entry_text(void);
-/* Prefill the active entry (field focus switching). */
 void text_entry_set_text(const char *text);
-/* Feed one xkb keysym (+ UTF-8 text, may be "") from the keyboard
- * handler.  Returns 1 when the key was consumed. */
+/* 1 when consumed. */
 int text_entry_key(uint32_t keysym, const char *utf8);
+/* Append first pasted line. */
+void text_entry_insert(const char *s);
+void text_entry_paste(void);
+/* Wifi popup owns the entry. */
+int net_owns_entry(void);
 
 /* ── shared plumbing ─────────────────────────────────────────────── */
 

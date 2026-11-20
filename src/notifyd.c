@@ -73,6 +73,7 @@ static sd_bus *notifyd_bus;
 static sd_bus_slot *notifyd_vtable_slot;
 static struct wl_event_source *notifyd_event;
 static uint32_t notifyd_next_id = 1;
+static uint32_t notifyd_seq;
 
 static void
 nd_schedule(Monitor *m)
@@ -617,11 +618,23 @@ nd_thumb_done(cairo_surface_t *img, void *data)
 	free(data);
 }
 
+/* In-process card, no bus. */
+void
+notifyd_post(const NotifyPost *n)
+{
+	NdMsg p = { .id = notifyd_next_id++, .seq = ++notifyd_seq,
+		.progress = -1, .expire = n->expire_ms };
+
+	snprintf(p.app, sizeof(p.app), "%s", n->app);
+	snprintf(p.summary, sizeof(p.summary), "%s", n->summary);
+	snprintf(p.body, sizeof(p.body), "%s", n->body);
+	nd_show(&p, NULL);
+}
+
 static int
 notifyd_method_notify(sd_bus_message *msg, void *userdata,
 		sd_bus_error *ret_error)
 {
-	static uint32_t seq;
 	const char *app = NULL, *icon = NULL, *summary = NULL, *body = NULL;
 	uint32_t rid = 0;
 	NdHints hints;
@@ -646,7 +659,7 @@ notifyd_method_notify(sd_bus_message *msg, void *userdata,
 	snprintf(p->body, sizeof(p->body), "%s", body);
 	p->progress = hints.progress;
 	p->id = rid && nd_find(rid) ? rid : notifyd_next_id++;
-	p->seq = ++seq;
+	p->seq = ++notifyd_seq;
 
 	r = sd_bus_reply_method_return(msg, "u", p->id);
 	if (hints.image) {

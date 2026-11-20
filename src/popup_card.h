@@ -1,23 +1,17 @@
-/* Shared statusbar popup "card" renderer.
- *
- * Builds one ARGB buffer per popup (rounded translucent card, border,
- * header with icon + big value, gauge bar, key/value grid, sections,
- * buttons, mini calendar) with cairo + fcft, and presents it as a
- * single nx_scene_buffer.  Show animation (fade + slide + gauge
- * sweep) runs on a timer that only exists while a popup is animating,
- * so idle cost is zero.
- */
+/* Statusbar popup card renderer. */
 #ifndef POPUP_CARD_H
 #define POPUP_CARD_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include <cairo/cairo.h>
 #include "platform/scene/scene.h"
 
 #define CARD_MAX_ROWS  56
-#define CARD_MAX_HITS  48
+#define CARD_MAX_HITS  96
 #define CARD_MAX_FILLS 6
 #define CARD_MAX_BTN   6
+#define CARD_PAD       16
 
 /* Card palette, recoloured by theme.c. */
 extern float card_col_bg[4];
@@ -177,10 +171,54 @@ typedef struct {
 void card_displays(Card *c, const CardDisp *d, int n, int sel,
 		int drag_idx, int drag_dx, int id_base);
 void card_gap(Card *c, int px);
-/* Mini month calendar (Mon-first) highlighting mday. */
-void card_calendar(Card *c, int year, int mon, int mday);
-/* Override the card's minimum content width (default CARD_MIN_W) —
- * for compact menus that should hug their rows. */
+typedef enum {
+	CARD_FONT_SMALL,
+	CARD_FONT_CAPS,
+	CARD_FONT_BASE,
+	CARD_FONT_BIG,
+} CardFont;
+
+typedef struct {
+	int x, y, w, h;
+} CardRect;
+
+typedef struct {
+	double x, y, w, h, radius;
+} CardRound;
+
+typedef struct CardInk CardInk;
+
+typedef struct {
+	void (*shapes)(cairo_t *cr, CardInk *ink, const void *model);
+	void (*text)(CardInk *ink, const void *model);
+} CardPainter;
+
+/* Model bytes gate re-renders. */
+typedef struct {
+	const CardPainter *painter;
+	const void *model;
+	size_t model_len;
+	int w, h;
+} CardBlock;
+
+typedef struct {
+	CardFont font;
+	const char *s;
+	int x, y;
+	const float *col;
+} CardText;
+
+/* Caller-drawn block. */
+void card_custom(Card *c, const CardBlock *b);
+int card_font_width(CardFont f, const char *s);
+int card_font_height(CardFont f);
+/* Block-relative; y is top. */
+void card_ink_text(CardInk *ink, const CardText *t);
+void card_ink_hit(CardInk *ink, CardRect r, int id);
+/* Square icon, size box.w. */
+void card_draw_icon(cairo_t *cr, const char *icon, CardRect box);
+void card_rounded(cairo_t *cr, CardRound r);
+/* Minimum content width override. */
 void card_min_w(Card *c, int w);
 /* Reserve `px` of right-edge space on the row just added, even when that row
  * has no value text there — a device list reserves the "Active" tag column on

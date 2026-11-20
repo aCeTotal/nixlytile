@@ -15,6 +15,7 @@
 #include "nixlytile.h"
 #include "netsys.h"
 #include "popup_card.h"
+#include "calendar/calendar.h"
 
 /* hit ids in the net popup */
 #define NET_HIT_WIFI_TOGGLE 500
@@ -65,9 +66,9 @@ void
 netsys_changed(void)
 {
 	trigger_status_task_now(refreshstatusnet);
-	/* text_entry keystrokes land here too — echo into the disk
-	 * popup's Name field when that is what hosts the entry */
+	/* Echo entry keystrokes into popups. */
 	disk_popup_entry_changed();
+	calendar_entry_changed();
 }
 
 /* ── text-entry chains ───────────────────────────────────────────── */
@@ -103,11 +104,20 @@ hid_psk_submitted(const char *text, void *data)
 	}
 }
 
-/* commit the focused hidden-form field out of the live entry */
+int
+net_owns_entry(void)
+{
+	text_entry_submit_fn fn = text_entry_owner();
+
+	return fn == scan_psk_submitted || fn == hid_ssid_submitted ||
+		fn == hid_psk_submitted;
+}
+
+/* Commit the focused hidden field. */
 static void
 hid_capture_focused(void)
 {
-	if (!text_entry_active())
+	if (!net_owns_entry())
 		return;
 	if (ui_hid_focus == 0)
 		snprintf(ui_hid_ssid, sizeof(ui_hid_ssid), "%s",
@@ -126,7 +136,7 @@ net_view_reset(void)
 	ui_hid_ssid[0] = '\0';
 	memset(ui_hid_psk, 0, sizeof(ui_hid_psk));
 	ui_hid_focus = 0;
-	if (text_entry_active())
+	if (net_owns_entry())
 		text_entry_cancel();
 }
 
@@ -162,9 +172,8 @@ refreshstatusnet(void)
 		}
 	}
 
-	/* the entry only makes sense with the popup on screen; if the popup
-	 * was torn down another way, stop swallowing keyboard input */
-	if (!popup_active && text_entry_active())
+	/* Hidden popup drops its entry. */
+	if (!popup_active && net_owns_entry())
 		text_entry_cancel();
 	if (!popup_active) {
 		if (ui_view != NETV_NORMAL || ui_target[0])
@@ -351,7 +360,7 @@ render_net_list(Card *card, int hot)
 
 		*w = ui_nets[i];
 		icon = wifi_icon_for_quality(dbm_to_pct(w->signal_dbm));
-		if (ui_target[0] && text_entry_active() &&
+		if (ui_target[0] && net_owns_entry() &&
 				strcmp(w->ssid, ui_target) == 0) {
 			card_icon_text_rbtn_solo(card, icon, w->ssid,
 					text_entry_display(), card_col_blue,
@@ -414,9 +423,9 @@ render_hidden_view(Card *card, int hot)
 	card_section(card, "HIDDEN NETWORK");
 	card_text_rbtn(card, "Enter network details", NULL, NULL,
 			"Back", NET_HIT_BACK, hot == NET_HIT_BACK);
-	sd = ui_hid_focus == 0 && text_entry_active() ?
+	sd = ui_hid_focus == 0 && net_owns_entry() ?
 		text_entry_display() : ui_hid_ssid;
-	if (ui_hid_focus == 1 && text_entry_active()) {
+	if (ui_hid_focus == 1 && net_owns_entry()) {
 		pd = text_entry_display();
 	} else {
 		n = strlen(ui_hid_psk);
@@ -426,11 +435,11 @@ render_hidden_view(Card *card, int hot)
 		pd = pdots;
 	}
 	card_icon_text_hit(card, NULL, "SSID", sd,
-			ui_hid_focus == 0 && text_entry_active() ?
+			ui_hid_focus == 0 && net_owns_entry() ?
 			card_col_blue : card_col_fg,
 			NULL, NET_HIT_FIELD_SSID, hot == NET_HIT_FIELD_SSID);
 	card_icon_text_hit(card, NULL, "Passphrase", pd,
-			ui_hid_focus == 1 && text_entry_active() ?
+			ui_hid_focus == 1 && net_owns_entry() ?
 			card_col_blue : card_col_fg,
 			NULL, NET_HIT_FIELD_PSK, hot == NET_HIT_FIELD_PSK);
 	if (wifi_last_error()[0])
@@ -929,7 +938,7 @@ net_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 		} else if (id == NET_HIT_SCAN && button == BTN_LEFT) {
 			ui_view = NETV_SCAN;
 			ui_target[0] = '\0';
-			if (text_entry_active())
+			if (net_owns_entry())
 				text_entry_cancel();
 			wifi_scan_request();
 			ui_scanning = 1;
@@ -949,7 +958,7 @@ net_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 
 				snprintf(psk, sizeof(psk), "%s",
 						text_entry_text());
-				if (text_entry_active())
+				if (net_owns_entry())
 					text_entry_cancel();
 				ui_connect_ms = monotonic_msec();
 				wifi_connect(ui_target, psk, 0);

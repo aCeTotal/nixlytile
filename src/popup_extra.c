@@ -6,6 +6,7 @@
 #include "netsys.h"
 #include "popup_card.h"
 #include "fetch_async.h"
+#include "calendar/calendar.h"
 
 #define AUDIO_DEV_MAX  8
 #define SLIDER_HIT_ID  100
@@ -310,70 +311,6 @@ meter_frame_tick(Monitor *m)
 
 /* ── content builders ────────────────────────────────────────────── */
 
-static void
-render_clock_popup(Monitor *m)
-{
-	InfoPopup *p = &m->statusbar.clock_popup;
-	Card *card;
-	CardResult res;
-	time_t t = time(NULL);
-	struct tm lt;
-	char value[16], sub[48], buf[64], v1[48];
-	size_t i;
-
-	if (!p->tree || !localtime_r(&t, &lt))
-		return;
-
-	card = card_begin();
-	if (!card)
-		return;
-	card_at(m, m->statusbar.area.x + p->tree->node.x,
-			m->statusbar.area.y + statusbar_popup_y(m));
-
-	strftime(value, sizeof(value), "%H:%M", &lt);
-	strftime(sub, sizeof(sub), "%A", &lt);
-	for (i = 0; sub[i]; i++)
-		sub[i] = (char)toupper((unsigned char)sub[i]);
-	card_header(card, clock_icon_path, "Clock", sub, value);
-	card_gap(card, 6);
-
-	strftime(v1, sizeof(v1), "%d %B %Y", &lt);
-	card_kv2(card, "Date", v1, NULL, NULL, NULL, NULL);
-	strftime(v1, sizeof(v1), "%V", &lt);
-	{
-		FILE *fp = fopen("/proc/uptime", "r");
-		double up = -1.0;
-
-		if (fp) {
-			if (fscanf(fp, "%lf", &up) != 1)
-				up = -1.0;
-			fclose(fp);
-		}
-		if (up >= 0.0)
-			snprintf(buf, sizeof(buf), "%dh %dm",
-					(int)(up / 3600.0),
-					(int)((up - (int)(up / 3600.0) * 3600.0) / 60.0));
-		else
-			snprintf(buf, sizeof(buf), "--");
-	}
-	card_kv2(card, "Week", v1, NULL, "Uptime", buf, NULL);
-
-	strftime(buf, sizeof(buf), "%B %Y", &lt);
-	for (i = 0; buf[i]; i++)
-		buf[i] = (char)toupper((unsigned char)buf[i]);
-	card_section(card, buf);
-	card_calendar(card, lt.tm_year + 1900, lt.tm_mon, lt.tm_mday);
-
-	{
-		int cf = card_finish_sig(card, &res, &p->view.render_sig);
-		if (cf != 0)
-			return; /* error, or unchanged (content stays) */
-	}
-	popup_view_apply(&p->view, p->tree, &res);
-	p->width = p->view.w;
-	p->height = p->view.h;
-}
-
 /* Connection-type icon for a sink/source, keyed on the wpctl name:
  * HDMI/DP/USB/jack/bluetooth, with a speaker/mic fallback. */
 static const char *
@@ -624,6 +561,20 @@ static CardHit *popup_hit_by_id(InfoPopup *p, int id);
  * hides — crossing the bar→popup gap never closes it. */
 #define INFO_POPUP_GRACE_MS 250
 
+/* Hit id, else -1. */
+static int
+popup_hit_at(const InfoPopup *p, int x, int y)
+{
+	for (int i = 0; i < p->nhits; i++) {
+		const CardHit *hit = &p->hits[i];
+
+		if (hit->w > 0 && x >= hit->x && x < hit->x + hit->w &&
+				y >= hit->y && y < hit->y + hit->h)
+			return hit->id;
+	}
+	return -1;
+}
+
 static void
 info_popup_hover(Monitor *m, StatusModule *mod, InfoPopup *p,
 		void (*render)(Monitor *), double cx, double cy)
@@ -673,31 +624,24 @@ info_popup_hover(Monitor *m, StatusModule *mod, InfoPopup *p,
 			ly < statusbar_popup_y(m) + p->height)
 		inside = 1;
 
-	/* an active gauge drag holds its popup open even when the cursor
-	 * leaves the card; same for a display-box reorder drag */
+	/* Drags and typing hold open. */
 	if (sdrag_popup() == p || display_drag_popup() == p)
+		inside = 1;
+	if (p->visible && ((p == &m->statusbar.clock_popup &&
+			calendar_holds_open()) ||
+			(p == &m->statusbar.disk_popup && disk_owns_entry())))
 		inside = 1;
 
 	was_visible = p->visible;
 
-	/* hover highlight for device "Use" buttons */
+	/* Hover highlight for hits. */
 	if (inside && p->visible && p->nhits > 0) {
 		int rel_x = lx - popup_x;
 		int rel_y = ly - statusbar_popup_y(m);
-		int nh = -1;
+		int nh = popup_hit_at(p, rel_x, rel_y);
 
-		for (int i = 0; i < p->nhits; i++) {
-			CardHit *hit = &p->hits[i];
-
-			if (hit->id == SLIDER_HIT_ID || hit->w <= 0)
-				continue;
-			if (rel_x >= hit->x && rel_x < hit->x + hit->w &&
-					rel_y >= hit->y &&
-					rel_y < hit->y + hit->h) {
-				nh = hit->id;
-				break;
-			}
-		}
+		if (nh == SLIDER_HIT_ID)
+			nh = -1;
 		if (nh != p->btn_hover) {
 			p->btn_hover = nh;
 			p->last_render_ms = 0;
@@ -933,6 +877,44 @@ mic_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 			&m->statusbar.mic_popup, 1, lx, ly, button);
 }
 
+int
+clock_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
+{
+	InfoPopup *p = &m->statusbar.clock_popup;
+	int x = lx - info_popup_clamped_x(m, &m->statusbar.clock, p);
+	int y = ly - statusbar_popup_y(m);
+
+	if (x < 0 || y < 0 || x >= p->width || y >= p->height)
+		return 0;
+	if (button == BTN_LEFT)
+		calendar_click(popup_hit_at(p, x, y));
+	return 1;
+}
+
+int
+clock_popup_handle_scroll(Monitor *m, double cx, int steps)
+{
+	InfoPopup *p = &m->statusbar.clock_popup;
+
+	calendar_scroll((int)floor(cx) - m->statusbar.area.x - p->tree->node.x,
+			steps);
+	return 1;
+}
+
+/* Outside clicks end calendar typing. */
+void
+clock_popup_click_outside(void)
+{
+	Monitor *m;
+
+	if (!calendar_holds_open())
+		return;
+	wl_list_for_each(m, &mons, link)
+		if (info_popup_under(m, &m->statusbar.clock_popup))
+			return;
+	text_entry_cancel();
+}
+
 /* Click in the brightness popup: gauge = start drag + set level. */
 int
 light_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
@@ -1012,6 +994,30 @@ info_popup_mark_stale(void)
 		schedule_popup_delay(1);
 }
 
+static void
+disk_popup_hover(Monitor *m, double cx, double cy)
+{
+	InfoPopup *p = &m->statusbar.disk_popup;
+	int was = p->visible;
+
+	info_popup_hover(m, &m->statusbar.disk, p, render_disk_popup, cx, cy);
+	if (was && !p->visible)
+		disk_popup_closed();
+}
+
+static void
+clock_popup_hover(Monitor *m, double cx, double cy)
+{
+	InfoPopup *p = &m->statusbar.clock_popup;
+	int was = p->visible;
+
+	if (!was && p->hover_start_ms)
+		calendar_opening(m);
+	info_popup_hover(m, &m->statusbar.clock, p, calendar_render, cx, cy);
+	if (was && !p->visible)
+		calendar_closed(m);
+}
+
 void
 updateinfopopups(Monitor *m, double cx, double cy)
 {
@@ -1020,16 +1026,14 @@ updateinfopopups(Monitor *m, double cx, double cy)
 	if (sdrag.active)
 		slider_drag_motion(m, cx);
 	display_drag_motion(m, cx);
-	info_popup_hover(m, &m->statusbar.clock, &m->statusbar.clock_popup,
-			render_clock_popup, cx, cy);
+	clock_popup_hover(m, cx, cy);
 	info_popup_hover(m, &m->statusbar.volume, &m->statusbar.volume_popup,
 			render_volume_popup, cx, cy);
 	info_popup_hover(m, &m->statusbar.mic, &m->statusbar.mic_popup,
 			render_mic_popup, cx, cy);
 	info_popup_hover(m, &m->statusbar.light, &m->statusbar.light_popup,
 			render_light_popup, cx, cy);
-	info_popup_hover(m, &m->statusbar.disk, &m->statusbar.disk_popup,
-			render_disk_popup, cx, cy);
+	disk_popup_hover(m, cx, cy);
 	{
 		int bt_was = m->statusbar.bt_popup.visible;
 
@@ -1101,6 +1105,10 @@ info_popups_hide(Monitor *m)
 		&m->statusbar.bt_popup, &m->statusbar.display_popup,
 		&m->statusbar.power_popup };
 
+	if (m->statusbar.clock_popup.visible)
+		calendar_closed(m);
+	if (m->statusbar.disk_popup.visible)
+		disk_popup_closed();
 	for (int i = 0; i < 8; i++) {
 		InfoPopup *p = ps[i];
 

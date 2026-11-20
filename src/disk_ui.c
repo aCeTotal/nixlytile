@@ -431,7 +431,7 @@ render_format_view(Monitor *m, InfoPopup *p, Card *card)
 	}
 	card_gap(card, 4);
 
-	if (dview.editing && text_entry_active()) {
+	if (disk_owns_entry()) {
 		snprintf(buf, sizeof(buf), "%s", text_entry_display());
 		card_kv2(card, "Name", buf, card_col_blue, NULL, NULL, NULL);
 		card_text(card, "Enter saves \xc2\xb7 Esc cancels", NULL,
@@ -515,6 +515,20 @@ dk_label_submitted(const char *text, void *data)
 	disk_popup_entry_changed();
 }
 
+int
+disk_owns_entry(void)
+{
+	return text_entry_owner() == dk_label_submitted;
+}
+
+void
+disk_popup_closed(void)
+{
+	if (disk_owns_entry())
+		text_entry_cancel();
+	dview.editing = 0;
+}
+
 /* flat usb-part index → device (matches the render order above) */
 static DiskPart *
 dk_usb_flat(int want, DiskDev **devout)
@@ -560,10 +574,7 @@ dk_open_format(const char *disk, int is_usb)
 	dview.label[0] = '\0';
 	dview.confirm = 0;
 	dview.del_armed = -1;
-	if (dview.editing) {
-		text_entry_cancel();
-		dview.editing = 0;
-	}
+	disk_popup_closed();
 }
 
 static void
@@ -663,10 +674,7 @@ disk_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 		}
 		if (id == DK_HIT_BACK) {
 			dview.open = 0;
-			if (dview.editing) {
-				text_entry_cancel();
-				dview.editing = 0;
-			}
+			disk_popup_closed();
 			p->last_render_ms = 0;
 			return 1;
 		}
@@ -796,14 +804,13 @@ disk_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button)
 
 /* ── refresh plumbing ────────────────────────────────────────────── */
 
-/* A text-entry keystroke landed while our Name field is editing —
- * re-render the open popup so the echo is immediate. */
+/* Echo Name keystrokes immediately. */
 void
 disk_popup_entry_changed(void)
 {
 	Monitor *m;
 
-	if (!dview.editing && text_entry_active())
+	if (text_entry_active() && !disk_owns_entry())
 		return;
 	wl_list_for_each(m, &mons, link)
 		if (m->statusbar.disk_popup.visible) {

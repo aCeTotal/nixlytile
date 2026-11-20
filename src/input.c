@@ -388,8 +388,7 @@ adjust_mic_by_steps(int steps)
 	return 1;
 }
 
-/* Cursor inside a visible info popup's card (layout coords). */
-static int
+int
 info_popup_under(Monitor *m, InfoPopup *p)
 {
 	int x0, y0;
@@ -458,14 +457,15 @@ handlestatusscroll(struct nx_pointer_axis_event *event)
 	if (steps == 0)
 		return 0;
 
-	/* Over an open volume/mic/light popup: scroll adjusts the same
-	 * value as on the bar module itself. */
+	/* Popup scroll mirrors its module. */
 	if (info_popup_under(m, &m->statusbar.volume_popup))
 		return adjust_volume_by_steps(steps);
 	if (info_popup_under(m, &m->statusbar.mic_popup))
 		return adjust_mic_by_steps(steps);
 	if (info_popup_under(m, &m->statusbar.light_popup))
 		return adjust_backlight_by_steps(steps);
+	if (info_popup_under(m, &m->statusbar.clock_popup))
+		return clock_popup_handle_scroll(m, cursor->x, steps);
 
 	lx = (int)floor(cursor->x) - m->statusbar.area.x;
 	ly = (int)floor(cursor->y) - m->statusbar.area.y;
@@ -641,6 +641,10 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 			return 1;
 	}
 
+	if (m->statusbar.clock_popup.visible &&
+			clock_popup_handle_click(m, lx, ly, button))
+		return 1;
+
 	if (lx < 0 || ly < 0 ||
 			lx >= m->statusbar.area.width ||
 			ly >= m->statusbar.area.height)
@@ -726,9 +730,9 @@ buttonpress(struct wl_listener *listener, void *data)
 		if (locked)
 			break;
 
-		/* Overview is keyboard-only. */
-		if (overview_is_open())
+		if (overview_pointer_button(event->button, 1))
 			return;
+		clock_popup_click_outside();
 
 		/* An open tray context-menu eats the next click. */
 		if (selmon && selmon->statusbar.tray_menu.visible) {
@@ -843,6 +847,10 @@ buttonpress(struct wl_listener *listener, void *data)
 		}
 		break;
 	case WL_POINTER_BUTTON_STATE_RELEASED:
+		if (!locked && overview_pointer_button(event->button, 0)) {
+			cursor_mode = CurNormal;
+			return;
+		}
 		/* End a volume/mic popup gauge drag with a final commit. */
 		info_popup_slider_release();
 		/* End a display-box reorder drag (writes monitors.conf). */
@@ -1737,6 +1745,15 @@ key_deliver(KeyboardGroup *group, const struct nx_keyboard_key_event *event)
 			event->keycode, event->state);
 }
 
+/* Ctrl+V or Shift+Insert. */
+static int
+paste_chord(uint32_t mods, xkb_keysym_t sym)
+{
+	if (mods & NX_MODIFIER_CTRL)
+		return sym == XKB_KEY_v || sym == XKB_KEY_V;
+	return (mods & NX_MODIFIER_SHIFT) && sym == XKB_KEY_Insert;
+}
+
 void
 keypress(struct wl_listener *listener, void *data)
 {
@@ -1810,11 +1827,15 @@ keypress(struct wl_listener *listener, void *data)
 		}
 	}
 
-	/* Popup text entry (wifi SSID / passphrase): while active, keys go
-	 * to the entry buffer instead of bindings or clients. */
+	/* Active entry swallows keys. */
 	if (!locked && text_entry_active()) {
 		/* Entry swallows the repeat's release. */
 		key_repeat_bind(group, NULL, 0);
+		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED && nsyms &&
+				paste_chord(mods, syms[0])) {
+			text_entry_paste();
+			return;
+		}
 		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 			char utf8[8] = "";
 
@@ -2351,6 +2372,13 @@ drag_shared_edge(Column *col, Column *nbr, int w0, int nbr_w0, int delta)
 	return 1;
 }
 
+/* Lock screen keeps the pointer. */
+static int
+overview_owns_pointer(void)
+{
+	return !locked && overview_is_open();
+}
+
 void
 motionnotify(uint32_t time, struct nx_input_device *device, double dx, double dy,
 		double dx_unaccel, double dy_unaccel)
@@ -2559,6 +2587,7 @@ motionnotify(uint32_t time, struct nx_input_device *device, double dx, double dy
 			selmon = cm;
 			monitor_wake(cm);
 		}
+		overview_corner(cm, cursor->x, cursor->y);
 	}
 
 	/* Find the client under the pointer at the NEW cursor position.
@@ -2599,8 +2628,10 @@ motionnotify(uint32_t time, struct nx_input_device *device, double dx, double dy
 		}
 	}
 
-	/* Overview is keyboard-only. */
-	if (overview_is_open()) {
+	/* Overview owns the pointer. */
+	if (time && overview_owns_pointer())
+		overview_pointer_motion(cursor->x, cursor->y);
+	if (overview_owns_pointer()) {
 		c = NULL;
 		surface = NULL;
 	}
@@ -2817,7 +2848,7 @@ focus:
 	/* If there's no client surface under the cursor, set the cursor image to a
 	 * default. This is what makes the cursor image appear when you move it
 	 * off of a client or over its border. */
-	if (!surface && !seat->drag)
+	if (!surface && !seat->drag && !overview_owns_pointer())
 		nixly_cursor_set_xcursor("default");
 
 	/* Hover hint: when idle over the edge of a floating window, show the

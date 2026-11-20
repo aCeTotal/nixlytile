@@ -128,6 +128,17 @@ window-rule {
 // Wallpaper; nixlytile shows it and themes from it.
 wallpaper "~/.nixlyos/wallpapers/beach.jpg"
 
+// Calendar sync in the clock popup (all accounts sync every minute).
+// Without client IDs, Google and Outlook connect through their published
+// calendar links (read-only).  For full sign-in, add your own OAuth
+// "Desktop app" client IDs; redirect URI http://127.0.0.1 (Google) or
+// http://localhost (Microsoft).
+// calendar {
+//     google-client-id     "1234567890-abc.apps.googleusercontent.com"
+//     google-client-secret "GOCSPX-..."
+//     microsoft-client-id  "00000000-0000-0000-0000-000000000000"
+// }
+
 // Log verbosity.  error | info | debug
 log-level "debug"
 

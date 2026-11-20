@@ -52,6 +52,11 @@
             qrencode
             quirc
             libjpeg_turbo
+            curl
+            libical
+            json_c
+            libxml2
+            openssl
           ];
 
           gazeModel = name: hash: pkgs.fetchurl {
@@ -144,6 +149,11 @@
               pkgs.qrencode
               pkgs.quirc
               pkgs.libjpeg_turbo
+              pkgs.curl
+              pkgs.libical
+              pkgs.json_c
+              pkgs.libxml2
+              pkgs.openssl
             ];
 
             makeFlags = [ "PKG_CONFIG=${pkgs.pkg-config}/bin/pkg-config" ];
