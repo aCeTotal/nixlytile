@@ -8,6 +8,7 @@ struct nx_backend_impl {
 	bool (*start)(struct nx_backend *backend);
 	void (*destroy)(struct nx_backend *backend);
 	int (*get_drm_fd)(struct nx_backend *backend);
+	void (*dispatch_input)(struct nx_backend *backend);
 };
 
 void nx_backend_init(struct nx_backend *backend,

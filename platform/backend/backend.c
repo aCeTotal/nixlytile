@@ -36,3 +36,10 @@ int nx_backend_get_drm_fd(struct nx_backend *backend) {
 	}
 	return backend->impl->get_drm_fd(backend);
 }
+
+void nx_backend_dispatch_input(struct nx_backend *backend) {
+	if (backend->impl->dispatch_input == NULL) {
+		return;
+	}
+	backend->impl->dispatch_input(backend);
+}

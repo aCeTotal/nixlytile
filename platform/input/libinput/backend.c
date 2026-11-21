@@ -136,9 +136,21 @@ static void backend_destroy(struct nx_backend *nx_backend) {
 	free(backend);
 }
 
+static void backend_dispatch_input(struct nx_backend *nx_backend) {
+	struct nx_libinput_backend *backend =
+		wl_container_of(nx_backend, backend, backend);
+
+	if (!backend->input_event) {
+		return;
+	}
+	handle_libinput_readable(libinput_get_fd(backend->libinput_context),
+		WL_EVENT_READABLE, backend);
+}
+
 static const struct nx_backend_impl backend_impl = {
 	.start = backend_start,
 	.destroy = backend_destroy,
+	.dispatch_input = backend_dispatch_input,
 };
 
 static void session_signal(struct wl_listener *listener, void *data) {

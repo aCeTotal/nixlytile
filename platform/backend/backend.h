@@ -32,5 +32,7 @@ bool nx_backend_start(struct nx_backend *backend);
 void nx_backend_destroy(struct nx_backend *backend);
 // Still owned by the backend.
 int nx_backend_get_drm_fd(struct nx_backend *backend);
+// Handles input already queued.
+void nx_backend_dispatch_input(struct nx_backend *backend);
 
 #endif

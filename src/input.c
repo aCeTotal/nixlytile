@@ -1710,15 +1710,16 @@ overview_feed(KeyboardGroup *group, uint32_t keycode, uint32_t mods)
 	return fed;
 }
 
-/* Held key replays as unbound. */
-void
+/* Held key replays; 1 = client got it. */
+int
 key_replay(KeyboardGroup *group, const struct nx_keyboard_key_event *event,
 		uint32_t mods)
 {
 	if (!locked && overview_is_open()
 			&& overview_feed(group, event->keycode, mods))
-		return;
+		return 0;
 	key_deliver(group, event);
+	return 1;
 }
 
 /* Forward key to focused client. */
@@ -1849,6 +1850,8 @@ keypress(struct wl_listener *listener, void *data)
 		return;
 	}
 
+	mods |= modkey_skew(group, event, mods);
+
 	/* Overview is modal; chords fall through. */
 	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED
 			&& overview_is_open()
@@ -1859,17 +1862,8 @@ keypress(struct wl_listener *listener, void *data)
 	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 		if (!shortcuts_are_inhibited()) {
 			last_key = NULL;
-			for (i = 0; i < nsyms; i++)
-				handled = keybinding(mods, syms[i]) || handled;
-			/* Layout-agnostic match: also try unshifted (level-0) keysyms so
-			 * bindings like Mod+Shift+XKB_KEY_2 fire on Nordic layouts where
-			 * shift+2 produces " instead of @. */
-			if (!handled) {
-				for (i = 0; i < nlevel0; i++)
-					handled = keybinding(mods, level0_syms[i]) || handled;
-			}
-			if (!handled)
-				handled = modkey_hold(group, event, mods);
+			handled = modkey_hold(group, event, mods)
+					|| modkey_bind(group, event, mods);
 		}
 	}
 	if (!handled && !locked && nsyms > 0 &&
@@ -1897,6 +1891,7 @@ keypress(struct wl_listener *listener, void *data)
 			return;
 	}
 
+	modkey_flush(group, event);
 	key_deliver(group, event);
 }
 

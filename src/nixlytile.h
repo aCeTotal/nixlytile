@@ -2813,16 +2813,22 @@ int keybinding(uint32_t mods, xkb_keysym_t sym);
 const Key *key_lookup(uint32_t mods, xkb_keysym_t sym);
 void key_run(const Key *k);
 void key_deliver(KeyboardGroup *group, const struct nx_keyboard_key_event *event);
-void key_replay(KeyboardGroup *group, const struct nx_keyboard_key_event *event,
+int key_replay(KeyboardGroup *group, const struct nx_keyboard_key_event *event,
 		uint32_t mods);
 void key_repeat_bind(KeyboardGroup *group, const Key *k, uint32_t mods);
-/* keymods.c */
+/* modkey/ */
 enum repeat_tick { REPEAT_RUN, REPEAT_PAUSE, REPEAT_STOP };
 uint32_t binding_mods(struct nx_keyboard *kb);
 void binding_inhibited(uint32_t mods, xkb_keysym_t sym);
 void binding_unbound(uint32_t mods, xkb_keysym_t sym);
 int modkey_settle(KeyboardGroup *group, const struct nx_keyboard_key_event *event);
 int modkey_hold(KeyboardGroup *group, const struct nx_keyboard_key_event *event,
+		uint32_t mods);
+uint32_t modkey_skew(KeyboardGroup *group,
+		const struct nx_keyboard_key_event *event, uint32_t mods);
+void modkey_flush(KeyboardGroup *group,
+		const struct nx_keyboard_key_event *event);
+int modkey_bind(KeyboardGroup *group, const struct nx_keyboard_key_event *event,
 		uint32_t mods);
 int modkey_chatter(KeyboardGroup *group, uint32_t keycode);
 enum repeat_tick modkey_repeat_tick(KeyboardGroup *group);

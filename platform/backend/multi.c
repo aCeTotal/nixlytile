@@ -75,10 +75,20 @@ static int multi_backend_get_drm_fd(struct nx_backend *backend) {
 	return -1;
 }
 
+static void multi_backend_dispatch_input(struct nx_backend *backend) {
+	struct nx_multi_backend *multi = multi_backend_from_backend(backend);
+
+	struct subbackend_state *sub, *next;
+	wl_list_for_each_safe(sub, next, &multi->backends, link) {
+		nx_backend_dispatch_input(sub->backend);
+	}
+}
+
 static const struct nx_backend_impl backend_impl = {
 	.start = multi_backend_start,
 	.destroy = multi_backend_destroy,
 	.get_drm_fd = multi_backend_get_drm_fd,
+	.dispatch_input = multi_backend_dispatch_input,
 };
 
 static void handle_event_loop_destroy(struct wl_listener *listener, void *data) {
