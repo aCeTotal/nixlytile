@@ -9,6 +9,8 @@
 struct SuperState {
 	uint32_t up_ms;
 	uint32_t typed_ms;
+	uint32_t latch_ms; /* last bind under a dropout */
+	void (*last)(const Arg *); /* last Super bind */
 	uint32_t gone_mods; /* modifiers just released */
 	uint32_t gone_ms;
 	int missed;
@@ -25,6 +27,7 @@ struct Pending {
 	struct nx_keyboard_modifiers seen[PENDING_MAX];
 	int n;
 	int lead;
+	int latched;       /* binds at the deadline */
 	uint32_t until_ms; /* event time */
 	unsigned seq;
 	struct wl_event_source *timer;
@@ -41,6 +44,9 @@ const Key *chord_binding(struct nx_keyboard *kb, uint32_t mods,
 		uint32_t keycode);
 /* Some Super chord binds this key. */
 int chord_reachable(struct nx_keyboard *kb, uint32_t mods, uint32_t keycode);
+
+/* dropout.c */
+void super_ran(const Key *k);
 
 /* queue.c */
 int pending_presses(uint32_t keycode);

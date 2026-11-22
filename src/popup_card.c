@@ -268,7 +268,6 @@ typedef struct {
 	double frac;
 	float accent[4];
 	int nbtn, active, hover, id_base;
-	int red_mask;
 	char btn[CARD_MAX_BTN][32];
 	int gap;
 	int hit_id, hot;
@@ -633,16 +632,9 @@ void
 card_buttons(Card *c, const char *labels[], const char *icons[],
 		int n, int active, int hover, int id_base)
 {
-	(void)icons;
-	card_buttons_mask(c, labels, n, active, hover, id_base, 0);
-}
-
-void
-card_buttons_mask(Card *c, const char *labels[],
-		int n, int active, int hover, int id_base, int red_mask)
-{
 	CardRow *r = row_new(c, CROW_BUTTONS);
 
+	(void)icons;
 	if (!r)
 		return;
 	if (n > CARD_MAX_BTN)
@@ -651,7 +643,6 @@ card_buttons_mask(Card *c, const char *labels[],
 	r->active = active;
 	r->hover = hover;
 	r->id_base = id_base;
-	r->red_mask = red_mask;
 	for (int i = 0; i < n; i++)
 		setstr(r->btn[i], sizeof(r->btn[i]), labels[i]);
 }
@@ -1635,36 +1626,16 @@ card_finish(Card *c, CardResult *out)
 
 			for (int b = 0; b < n; b++) {
 				int bx = CARD_PAD + b * (bw + gap);
-				int red = r->red_mask >> b & 1;
 
 				rounded(cr, bx + 0.5, y + 0.5, bw - 1, bh - 1, 8);
 				if (b == r->active) {
-					if (red)
-						cairo_set_source_rgba(cr,
-								0.85, 0.30, 0.30, 0.30);
-					else
-						cairo_set_source_rgba(cr, 1, 1, 1, 0.14);
+					cairo_set_source_rgba(cr, 1, 1, 1, 0.14);
 					cairo_fill_preserve(cr);
-					if (red)
-						cairo_set_source_rgba(cr,
-								0.90, 0.35, 0.35, 0.60);
-					else
-						cairo_set_source_rgba(cr, 1, 1, 1, 0.25);
+					cairo_set_source_rgba(cr, 1, 1, 1, 0.25);
 				} else if (b == r->hover) {
-					if (red)
-						cairo_set_source_rgba(cr,
-								0.85, 0.30, 0.30, 0.18);
-					else
-						cairo_set_source_rgba(cr, 1, 1, 1, 0.07);
+					cairo_set_source_rgba(cr, 1, 1, 1, 0.07);
 					cairo_fill_preserve(cr);
-					if (red)
-						cairo_set_source_rgba(cr,
-								0.90, 0.35, 0.35, 0.45);
-					else
-						cairo_set_source_rgba(cr, 1, 1, 1, 0.14);
-				} else if (red) {
-					cairo_set_source_rgba(cr,
-							0.90, 0.35, 0.35, 0.35);
+					cairo_set_source_rgba(cr, 1, 1, 1, 0.14);
 				} else {
 					cairo_set_source_rgba(cr, 1, 1, 1, 0.13);
 				}
@@ -2069,10 +2040,8 @@ card_finish(Card *c, CardResult *out)
 
 				draw_text_f(pix, statusfont.font, r->btn[b],
 						bx + (bw - tw) / 2, bl,
-						r->red_mask >> b & 1 ?
-						card_col_red :
-						(b == r->active ? card_col_fg :
-						card_col_dim), 0);
+						b == r->active ? card_col_fg :
+						card_col_dim, 0);
 			}
 			break;
 		}

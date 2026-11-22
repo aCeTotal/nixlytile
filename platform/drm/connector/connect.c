@@ -76,6 +76,7 @@ static bool collect_modes(const drmModeConnector *drm_conn, struct wl_list *mode
 			free_modes(modes);
 			return false;
 		}
+		mode->probed = true;
 
 		nx_log(NX_INFO, "  %"PRId32"x%"PRId32" @ %.3f Hz %s",
 			mode->nx_mode.width, mode->nx_mode.height,

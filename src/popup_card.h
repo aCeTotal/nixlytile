@@ -153,10 +153,6 @@ void card_icon_text_rbtn_icons(Card *c, const char *icon_path,
  * a lighter fill. Hits recorded as id_base + index. */
 void card_buttons(Card *c, const char *labels[], const char *icons[],
 		int n, int active, int hover, int id_base);
-/* Same, but buttons whose bit is set in red_mask are drawn in red
- * (overclock / danger entries). */
-void card_buttons_mask(Card *c, const char *labels[],
-		int n, int active, int hover, int id_base, int red_mask);
 /* Strip of proportional display boxes (monitor arrangement).  wr/hr are
  * the displays' relative logical sizes; boxes are drawn left-to-right,
  * `sel` highlighted, and `drag_idx` (>=0) lifted and shifted `drag_dx`

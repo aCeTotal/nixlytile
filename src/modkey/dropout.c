@@ -2,17 +2,26 @@
 #include "modkey/modkey.h"
 #include "diag.h"
 
-#define MODKEY_BOUNCE_MS 200 /* Super dropouts reach 160 ms */
+#define MODKEY_BOUNCE_MS 200 /* Super usually returns by then */
 #define MODKEY_SKEW_MS 30    /* EC reorders edges per scan */
 #define MODKEY_STREAM_MS 8   /* edges in the same scan */
 #define MODKEY_IDLE_MS 250   /* gap ending a typing stream */
+#define MODKEY_LATCH_MS 500  /* first tap reaches 420 ms */
+#define MODKEY_CHAIN_MS 1500 /* taps under one dropout */
 
 struct SuperState super;
 
-/* Deadline passed: replay as typed. */
+/* Deadline: latched binds, rest types. */
 static void
 pending_expire(void)
 {
+	if (pending.latched && !locked) {
+		diag_logf("KEY", "MODLATCH since=%ums",
+				pending.ev[0].time_msec - super.up_ms);
+		pending_rebase(&kb_group->nx_group->keyboard);
+		pending_bind(kb_group);
+		return;
+	}
 	if (!pending.lead)
 		diag_logf("KEY", "MODBOUNCE expired since=%ums",
 				pending.ev[0].time_msec - super.up_ms);
@@ -252,6 +261,41 @@ hold_ms(uint32_t since, uint32_t time_msec)
 	return MODKEY_SKEW_MS;
 }
 
+/* Last Super bind picks latch taps. */
+void
+super_ran(const Key *k)
+{
+	if (k->mod & modkey)
+		super.last = k->func;
+}
+
+/* Held Super hopping workspaces again. */
+static int
+super_tap(struct nx_keyboard *kb, uint32_t mods, uint32_t keycode)
+{
+	const Key *k = chord_binding(kb, mods | modkey, keycode);
+
+	return k && k->func == super.last && (k->func == focus_workspace_n
+			|| k->func == move_client_to_ws_n);
+}
+
+/* Reported up, still held. */
+static int
+super_latched(struct nx_keyboard *kb, const struct nx_keyboard_key_event *event,
+		uint32_t mods)
+{
+	uint32_t t = event->time_msec, since = t - super.up_ms;
+
+	if (since < MODKEY_SKEW_MS
+			|| (int32_t)(super.typed_ms - super.up_ms) > 0
+			|| !super_tap(kb, mods, event->keycode))
+		return 0;
+	if (since < MODKEY_LATCH_MS)
+		return 1;
+	return (int32_t)(super.latch_ms - super.up_ms) >= 0
+			&& t - super.latch_ms < MODKEY_CHAIN_MS;
+}
+
 /* Hold a Super-bound key for Super. */
 int
 modkey_hold(KeyboardGroup *group, const struct nx_keyboard_key_event *event,
@@ -259,7 +303,7 @@ modkey_hold(KeyboardGroup *group, const struct nx_keyboard_key_event *event,
 {
 	uint32_t since = event->time_msec - super.up_ms;
 	int lead = since >= MODKEY_BOUNCE_MS;
-	int game;
+	int game, latched;
 	int32_t wait;
 
 	if (group != kb_group || key_mod(event->keycode))
@@ -279,9 +323,15 @@ modkey_hold(KeyboardGroup *group, const struct nx_keyboard_key_event *event,
 		pending.timer = wl_event_loop_add_timer(event_loop, pending_expired, NULL);
 	if (!pending.timer)
 		return 0;
-	pending.lead = lead;
+	latched = !game && super_latched(&group->nx_group->keyboard, event,
+			mods);
+	if (latched)
+		super.latch_ms = event->time_msec;
+	pending.latched = latched;
+	pending.lead = lead && !latched;
 	pending.seq++;
-	pending.until_ms = event->time_msec + hold_ms(since, event->time_msec);
+	pending.until_ms = event->time_msec + (latched ? MODKEY_STREAM_MS
+			: hold_ms(since, event->time_msec));
 	super.missed = 0;
 	wait = (int32_t)(pending.until_ms - (uint32_t)monotonic_msec());
 	wl_event_source_timer_update(pending.timer, MAX(wait, 1));

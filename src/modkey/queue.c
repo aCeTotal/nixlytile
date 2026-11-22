@@ -101,6 +101,7 @@ pending_type(void)
 		k = pending_fallback(kb, i);
 		if (k) {
 			key_run(k);
+			super_ran(k);
 			continue;
 		}
 		replay_press(i, &cur);
@@ -132,10 +133,12 @@ pending_bind(KeyboardGroup *group)
 			mods |= pending.released[i];
 			k = chord_binding(kb, mods, code);
 		}
-		if (k)
-			key_run(k);
-		else
+		if (!k) {
 			replay_press(i, &cur);
+			continue;
+		}
+		key_run(k);
+		super_ran(k);
 	}
 	client_mods_sync(&cur, &now);
 	if (k && key_down(kb, code))

@@ -156,5 +156,6 @@ modkey_bind(KeyboardGroup *group, const struct nx_keyboard_key_event *event,
 	if (!k)
 		return 0;
 	key_run(k);
+	super_ran(k);
 	return 1;
 }

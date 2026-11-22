@@ -31,4 +31,8 @@ struct nx_output_mode *nx_drm_connector_add_paced_mode(
 int nx_drm_connector_mode_pace_divisor(struct nx_output *output,
 	struct nx_output_mode *mode);
 
+/* False for custom, paced or non-DRM. */
+bool nx_drm_connector_mode_is_probed(struct nx_output *output,
+	struct nx_output_mode *mode);
+
 #endif

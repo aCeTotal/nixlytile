@@ -20,7 +20,7 @@
 #define DHIT_ROT   240   /* + transform index (normal/90/180/270) */
 #define DHIT_MIR   250   /* + strip index (skipping the selected one) */
 
-#define DISP_RATES_MAX 6   /* 4 EDID rates + custom 120-cap / OC entries */
+#define DISP_RATES_MAX CARD_MAX_BTN   /* one button row */
 
 char display_icon_path[PATH_MAX] = "images/svg/monitor.svg";
 
@@ -43,8 +43,7 @@ static DispInfo di[CARD_DISP_MAX];
 static int ndi;
 static int dsel;
 static char dsel_name[64];
-static float di_rates[DISP_RATES_MAX];
-static int di_rate_oc[DISP_RATES_MAX];   /* overclock entry → red */
+static float di_rates[DISP_RATES_MAX];   /* descending */
 static int di_nrates;
 
 /* drag-to-reorder state (mirrors the volume slider's sdrag pattern) */
@@ -149,82 +148,40 @@ build_disp(void)
 		snprintf(dsel_name, sizeof(dsel_name), "%s", di[dsel].name);
 }
 
+/* Descending top-N, near-duplicates merged. */
+static void
+rate_insert(float hz)
+{
+	int i;
+
+	for (i = 0; i < di_nrates; i++)
+		if (fabsf(di_rates[i] - hz) < 0.5f)
+			return;
+	for (i = 0; i < di_nrates && di_rates[i] > hz; i++)
+		;
+	if (i == DISP_RATES_MAX)
+		return;
+	if (di_nrates < DISP_RATES_MAX)
+		di_nrates++;
+	memmove(&di_rates[i + 1], &di_rates[i],
+			(size_t)(di_nrates - 1 - i) * sizeof(*di_rates));
+	di_rates[i] = hz;
+}
+
 static void
 build_rates(const DispInfo *d)
 {
+	struct nx_output *o;
 	struct nx_output_mode *mode;
-	int std_max = DISP_RATES_MAX - 2;   /* room for custom entries */
-	int have_paced = 0;
-	int i, j;
 
 	di_nrates = 0;
-	memset(di_rate_oc, 0, sizeof(di_rate_oc));
 	if (!d->mon || !d->mon->nx_output)
 		return;
-	/* Divisor modes (pace.c) already give granular real rates — no
-	 * synthetic 120-cap/OC entries needed, so the full row is theirs. */
-	wl_list_for_each(mode, &d->mon->nx_output->modes, link)
-		if (nx_drm_connector_mode_pace_divisor(d->mon->nx_output,
-				mode)) {
-			have_paced = 1;
-			std_max = DISP_RATES_MAX;
-			break;
-		}
-	wl_list_for_each(mode, &d->mon->nx_output->modes, link) {
-		float hz = mode->refresh / 1000.0f;
-
-		if (mode->width != d->w || mode->height != d->h)
-			continue;
-		for (i = 0; i < di_nrates; i++)
-			if (fabsf(di_rates[i] - hz) < 0.5f)
-				break;
-		if (i < di_nrates)
-			continue;
-		if (di_nrates < std_max) {
-			di_rates[di_nrates++] = hz;
-		} else {
-			/* keep the highest rates */
-			int lo = 0;
-			for (i = 1; i < di_nrates; i++)
-				if (di_rates[i] < di_rates[lo])
-					lo = i;
-			if (hz > di_rates[lo])
-				di_rates[lo] = hz;
-		}
-	}
-	/* custom entries: fast panels get a 120 Hz cap mode (committed as
-	 * a custom modeline, advertised to clients like any other mode);
-	 * 60 Hz panels get red overclock modes */
-	if (di_nrates > 0 && !have_paced) {
-		float top = di_rates[0];
-
-		for (i = 1; i < di_nrates; i++)
-			if (di_rates[i] > top)
-				top = di_rates[i];
-		if (top > 121.0f) {
-			for (i = 0; i < di_nrates; i++)
-				if (fabsf(di_rates[i] - 120.0f) < 1.0f)
-					break;
-			if (i == di_nrates)
-				di_rates[di_nrates++] = 120.0f;
-		} else if (top <= 60.5f) {
-			di_rate_oc[di_nrates] = 1;
-			di_rates[di_nrates++] = 100.0f;
-			di_rate_oc[di_nrates] = 1;
-			di_rates[di_nrates++] = 80.0f;
-		}
-	}
-	for (i = 0; i < di_nrates; i++)
-		for (j = i + 1; j < di_nrates; j++)
-			if (di_rates[j] > di_rates[i]) {
-				float t = di_rates[i];
-				int o = di_rate_oc[i];
-
-				di_rates[i] = di_rates[j];
-				di_rates[j] = t;
-				di_rate_oc[i] = di_rate_oc[j];
-				di_rate_oc[j] = o;
-			}
+	o = d->mon->nx_output;
+	wl_list_for_each(mode, &o->modes, link)
+		if (mode->width == d->w && mode->height == d->h &&
+				nx_drm_connector_mode_is_probed(o, mode))
+			rate_insert(mode->refresh / 1000.0f);
 }
 
 /* ── monitors.conf writer ────────────────────────────────────────── */
@@ -411,10 +368,12 @@ render_display_popup(Monitor *m)
 				(d->scale - SCALE_MIN) / (SCALE_MAX - SCALE_MIN),
 				card_col_blue, DHIT_SCALE);
 
-		if (di_nrates > 1) {
+		/* lone rate: escape custom mode */
+		if (di_nrates > 1 || (di_nrates == 1 &&
+				fabsf(d->hz - di_rates[0]) >= 0.5f)) {
 			const char *lbl[DISP_RATES_MAX];
 			static char rbuf[DISP_RATES_MAX][12];
-			int active = -1, mask = 0;
+			int active = -1;
 
 			card_section(card, "REFRESH RATE");
 			for (i = 0; i < di_nrates; i++) {
@@ -423,12 +382,10 @@ render_display_popup(Monitor *m)
 				lbl[i] = rbuf[i];
 				if (fabsf(d->hz - di_rates[i]) < 0.5f)
 					active = i;
-				if (di_rate_oc[i])
-					mask |= 1 << i;
 			}
-			card_buttons_mask(card, lbl, di_nrates, active,
+			card_buttons(card, lbl, NULL, di_nrates, active,
 					btn_hover_idx(hot, DHIT_RATE,
-						di_nrates), DHIT_RATE, mask);
+						di_nrates), DHIT_RATE);
 		}
 
 		card_section(card, "ROTATION");

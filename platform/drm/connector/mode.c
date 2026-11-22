@@ -137,3 +137,12 @@ int nx_drm_connector_mode_pace_divisor(struct nx_output *output,
 	const struct nx_drm_mode *mode = wl_container_of(nx_mode, mode, nx_mode);
 	return mode->pace_divisor;
 }
+
+bool nx_drm_connector_mode_is_probed(struct nx_output *output,
+		struct nx_output_mode *nx_mode) {
+	if (output == NULL || nx_mode == NULL || !nx_output_is_drm(output)) {
+		return false;
+	}
+	const struct nx_drm_mode *mode = wl_container_of(nx_mode, mode, nx_mode);
+	return mode->probed;
+}

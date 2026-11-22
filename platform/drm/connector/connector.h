@@ -18,6 +18,8 @@ struct nx_drm_mode {
 	drmModeModeInfo drm_mode;
 	/* Flips every Nth vblank */
 	int pace_divisor;
+	/* Listed by the kernel connector */
+	bool probed;
 };
 
 struct nx_drm_connector {

@@ -337,24 +337,19 @@ struct nx_output_mode *
 find_mode(struct nx_output *output, int width, int height, float refresh)
 {
 	struct nx_output_mode *mode, *best = NULL;
-	int best_refresh = 0;
+	int target_mhz = (int)lroundf(refresh * 1000.0f);
 
 	wl_list_for_each(mode, &output->modes, link) {
 		if (mode->width == width && mode->height == height) {
 			if (refresh > 0) {
-				/* Find closest match to requested refresh rate */
-				int mode_hz = mode->refresh / 1000;
-				int target_hz = (int)refresh;
-				if (!best || abs(mode_hz - target_hz) < abs(best_refresh - target_hz)) {
+				/* Closest match, in mHz */
+				if (!best || abs(mode->refresh - target_mhz) <
+						abs(best->refresh - target_mhz))
 					best = mode;
-					best_refresh = mode_hz;
-				}
 			} else {
 				/* No refresh specified - pick highest */
-				if (!best || mode->refresh > best->refresh) {
+				if (!best || mode->refresh > best->refresh)
 					best = mode;
-					best_refresh = mode->refresh / 1000;
-				}
 			}
 		}
 	}
