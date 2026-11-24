@@ -3197,12 +3197,11 @@ void fanconf_store(const char *key, int mode, int manual_pct,
 /* fan_helper.c — client for the nixly-fand root helper socket (worker
  * thread only). */
 int fan_helper_available(void);
-int fan_helper_ec_read(int off);
-int fan_helper_ec_write(int off, int val);
 int fan_helper_pwm(const char *hwmon, int idx, int val); /* val -1 = auto */
 int fan_helper_nv(int gpu, int fan, int pct);            /* pct -1 = auto */
 
 /* fan_ec.c — MSI EC fan tables through the helper (worker thread). */
+int fan_ec_writable(int is_gpu);
 int fan_ec_read_curve(int is_gpu, FanCurve *out);
 int fan_ec_write_curve(int is_gpu, const FanCurve *c);
 int fan_ec_write_flat(int is_gpu, int pct);

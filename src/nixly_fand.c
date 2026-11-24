@@ -1,21 +1,4 @@
-/*
- * nixly-fand — tiny root helper for fan control paths that need
- * privileges the compositor doesn't have:
- *
- *   ecr <hexoff>            read one MSI EC byte (debugfs ec_sys)
- *   ecw <hexoff> <val>      write one EC byte — fan-table offsets only
- *   pwm <hwmonN> <idx> <v>  hwmon pwm write; v 0-255 manual, -1 auto
- *   nv <gpu> <fan> <pct>    NVML fan set (root-only in the driver);
- *                           pct -1 restores the driver's auto policy
- *   ping                    liveness probe
- *
- * One text line per connection round on /run/nixly-fand.sock (root:wheel
- * 0660, peer checked via SO_PEERCRED —
- * the command surface is deliberately too narrow to matter: fan-table
- * EC bytes, pwm files, fan percent).  Replies "ok[ <val>]" or
- * "err <msg>".  Built standalone (no compositor deps), run as a
- * systemd service from the nixlyos flake.
- */
+/* Root helper for pwm and NVML fans. */
 #define _GNU_SOURCE
 #include <ctype.h>
 #include <dlfcn.h>
@@ -33,62 +16,6 @@
 #include "priv_sock.h"
 
 #define SOCK_PATH "/run/nixly-fand.sock"
-#define EC_IO     "/sys/kernel/debug/ec/ec0/io"
-
-/* MSI EC fan tables: CPU temps 0x6A-0x6F, speeds 0x72-0x78; GPU temps
- * 0x82-0x87, speeds 0x8A-0x90.  Writes outside these are refused. */
-static int
-ec_writable(int off)
-{
-	return (off >= 0x6A && off <= 0x6F) || (off >= 0x72 && off <= 0x78) ||
-		(off >= 0x82 && off <= 0x87) || (off >= 0x8A && off <= 0x90);
-}
-
-static int
-ec_open(void)
-{
-	static int fd = -2;
-
-	if (fd == -2) {
-		const char *p = getenv("NIXLY_FAND_EC_IO"); /* test override */
-
-		fd = open(p && *p ? p : EC_IO, O_RDWR | O_CLOEXEC);
-	}
-	return fd;
-}
-
-static void
-cmd_ec(FILE *out, const char *args, int write_op)
-{
-	unsigned off;
-	int val = 0, fd;
-	unsigned char b;
-
-	if (write_op ? sscanf(args, "%x %d", &off, &val) != 2 :
-			sscanf(args, "%x", &off) != 1) {
-		fprintf(out, "err parse\n");
-		return;
-	}
-	if (off > 0xFF || val < 0 || val > 0xFF ||
-			(write_op && !ec_writable((int)off))) {
-		fprintf(out, "err range\n");
-		return;
-	}
-	fd = ec_open();
-	if (fd < 0) {
-		fprintf(out, "err no-ec\n");
-		return;
-	}
-	if (write_op) {
-		b = (unsigned char)val;
-		fprintf(out, pwrite(fd, &b, 1, off) == 1 ? "ok\n" : "err io\n");
-	} else {
-		if (pread(fd, &b, 1, off) == 1)
-			fprintf(out, "ok %d\n", b);
-		else
-			fprintf(out, "err io\n");
-	}
-}
 
 static int
 write_sysfs(const char *path, int val)
@@ -250,10 +177,6 @@ main(void)
 		}
 		if (strncmp(line, "ping", 4) == 0)
 			fprintf(io, "ok\n");
-		else if (strncmp(line, "ecr ", 4) == 0)
-			cmd_ec(io, line + 4, 0);
-		else if (strncmp(line, "ecw ", 4) == 0)
-			cmd_ec(io, line + 4, 1);
 		else if (strncmp(line, "pwm ", 4) == 0)
 			cmd_pwm(io, line + 4);
 		else if (strncmp(line, "nv ", 3) == 0)

@@ -330,7 +330,7 @@ scan_msi(FanState *fs)
 
 			fe->ec_is_gpu = i == 1;
 			fan_curve_default(&fe->curve, i);
-			if (fan_helper_available() &&
+			if (fan_ec_writable(i) &&
 					fan_ec_read_curve(i, &fe->factory) == 0) {
 				fe->ctl = FAN_CTL_MSI_EC;
 				if (advanced)

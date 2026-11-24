@@ -1,16 +1,4 @@
-/*
- * fan_helper.c — client for the nixly-fand root helper.
- *
- * The helper (systemd service, see flake.nix) owns the privileged fan
- * paths: raw MSI EC table bytes, hwmon pwm files that aren't
- * user-writable, and NVML fan control (root-only in the driver).
- * Protocol: one text line per command on /run/nixly-fand.sock, reply
- * "ok[ <val>]" or "err <msg>".
- *
- * Worker-thread only (fanwatch) — connects per command with short
- * timeouts, so a dead helper costs at most ~300ms once; availability is
- * cached and rechecked lazily.
- */
+/* Client for the nixly-fand helper. */
 #include "nixlytile.h"
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -67,29 +55,6 @@ fan_helper_available(void)
 	fh_checked_ms = now;
 	fh_ok = fh_cmd("ping", reply, sizeof(reply)) == 0;
 	return fh_ok;
-}
-
-int
-fan_helper_ec_read(int off)
-{
-	char cmd[32], reply[64];
-	int val;
-
-	snprintf(cmd, sizeof(cmd), "ecr %02x", off);
-	if (fh_cmd(cmd, reply, sizeof(reply)) != 0)
-		return -1;
-	if (sscanf(reply, "ok %d", &val) != 1)
-		return -1;
-	return val;
-}
-
-int
-fan_helper_ec_write(int off, int val)
-{
-	char cmd[32], reply[64];
-
-	snprintf(cmd, sizeof(cmd), "ecw %02x %d", off, val);
-	return fh_cmd(cmd, reply, sizeof(reply));
 }
 
 /* val 0-255 sets manual pwm, -1 hands back to the firmware curve. */

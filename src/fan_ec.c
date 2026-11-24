@@ -1,79 +1,93 @@
-/*
- * fan_ec.c — MSI EC fan tables, through the nixly-fand helper.
- *
- * Register layout (MControlCenter/isw, identical across the boards the
- * msi-ec kernel driver whitelists — msi-ec loading is our gate that the
- * layout applies):
- *   CPU: 7 speed bytes @0x72-0x78 (percent), 6 temp thresholds @0x6A-0x6F
- *   GPU: 7 speed bytes @0x8A-0x90,           6 temp thresholds @0x82-0x87
- * speed[0] applies below temp[0]; speed[i+1] between temp[i] and
- * temp[i+1].  Our FanCurve maps as speed[0] = pct[0] (floor) and
- * speed[i+1] = pct[i], so "at/above temp[i] → pct[i]" holds exactly.
- *
- * The EC does the temp lookup itself once the table is written (fan
- * mode "advanced"), so curves cost zero per-tick work here.  Runs on
- * fanwatch's worker thread only.
- */
+/* MSI EC fan tables via msi-ec. */
 #include "nixlytile.h"
 
-#define EC_CPU_TEMP0  0x6A
-#define EC_CPU_SPEED0 0x72
-#define EC_GPU_TEMP0  0x82
-#define EC_GPU_SPEED0 0x8A
+#define EC_MAX_TEMP 100
+/* Six temperatures, then seven speeds. */
+#define EC_POINTS   (2 * FAN_CURVE_PTS + 1)
+#define EC_SPEED(i) (FAN_CURVE_PTS + (i))
+
+static const char *const curve_files[] = {
+	"/sys/devices/platform/msi-ec/cpu/fan_curve",
+	"/sys/devices/platform/msi-ec/gpu/fan_curve",
+};
+
+static int
+table_read(int is_gpu, unsigned table[EC_POINTS])
+{
+	FILE *f = fopen(curve_files[is_gpu], "re");
+	int i = 0;
+
+	if (!f)
+		return -1;
+	while (i < EC_POINTS && fscanf(f, "%u", &table[i]) == 1)
+		i++;
+	fclose(f);
+	return i == EC_POINTS ? 0 : -1;
+}
+
+static int
+table_write(int is_gpu, const unsigned table[EC_POINTS])
+{
+	char buf[128];
+	int len = 0, fd, ok;
+
+	for (int i = 0; i < EC_POINTS; i++)
+		len += snprintf(buf + len, sizeof(buf) - len, "%u%c", table[i], i == EC_POINTS - 1 ? '\n' : ' ');
+	fd = open(curve_files[is_gpu], O_WRONLY | O_CLOEXEC);
+	if (fd < 0)
+		return -1;
+	ok = write(fd, buf, (size_t)len) == len;
+	close(fd);
+	return ok ? 0 : -1;
+}
+
+int
+fan_ec_writable(int is_gpu)
+{
+	return access(curve_files[is_gpu], W_OK) == 0;
+}
 
 int
 fan_ec_read_curve(int is_gpu, FanCurve *out)
 {
-	int t0 = is_gpu ? EC_GPU_TEMP0 : EC_CPU_TEMP0;
-	int s0 = is_gpu ? EC_GPU_SPEED0 : EC_CPU_SPEED0;
+	unsigned table[EC_POINTS];
 
+	if (table_read(is_gpu, table) != 0)
+		return -1;
 	for (int i = 0; i < FAN_CURVE_PTS; i++) {
-		int t = fan_helper_ec_read(t0 + i);
-		int p = fan_helper_ec_read(s0 + 1 + i);
-
-		if (t < 0 || p < 0)
-			return -1;
-		out->temp[i] = (uint8_t)(t > 110 ? 110 : t);
-		out->pct[i] = (uint8_t)(p > 100 ? 100 : p);
+		out->temp[i] = (uint8_t)(table[i] > EC_MAX_TEMP ? EC_MAX_TEMP : table[i]);
+		out->pct[i] = (uint8_t)(table[EC_SPEED(i + 1)] > 100 ? 100 : table[EC_SPEED(i + 1)]);
 	}
-	{
-		int b = fan_helper_ec_read(s0);
-
-		if (b < 0)
-			return -1;
-		out->base = (uint8_t)(b > 100 ? 100 : b);
-	}
+	out->base = (uint8_t)(table[EC_SPEED(0)] > 100 ? 100 : table[EC_SPEED(0)]);
 	return 0;
 }
 
 int
 fan_ec_write_curve(int is_gpu, const FanCurve *c)
 {
-	int t0 = is_gpu ? EC_GPU_TEMP0 : EC_CPU_TEMP0;
-	int s0 = is_gpu ? EC_GPU_SPEED0 : EC_CPU_SPEED0;
+	unsigned table[EC_POINTS];
 
-	if (fan_helper_ec_write(s0, c->base) != 0)
-		return -1;
+	table[EC_SPEED(0)] = c->base;
 	for (int i = 0; i < FAN_CURVE_PTS; i++) {
-		if (fan_helper_ec_write(t0 + i, c->temp[i]) != 0 ||
-				fan_helper_ec_write(s0 + 1 + i, c->pct[i]) != 0)
-			return -1;
+		table[i] = c->temp[i] > EC_MAX_TEMP ? EC_MAX_TEMP : c->temp[i];
+		table[EC_SPEED(i + 1)] = c->pct[i];
 	}
-	return 0;
+	return table_write(is_gpu, table);
 }
 
-/* Manual speed on an EC fan = flat table (the EC always runs a table). */
+/* Manual speed is a flat table. */
 int
 fan_ec_write_flat(int is_gpu, int pct)
 {
-	int s0 = is_gpu ? EC_GPU_SPEED0 : EC_CPU_SPEED0;
+	unsigned table[EC_POINTS];
 
+	if (table_read(is_gpu, table) != 0)
+		return -1;
 	if (pct < 0)
 		pct = 0;
 	if (pct > 100)
 		pct = 100;
 	for (int i = 0; i <= FAN_CURVE_PTS; i++)
-		if (fan_helper_ec_write(s0 + i, pct) != 0)
-			return -1;
-	return 0;
+		table[EC_SPEED(i)] = (unsigned)pct;
+	return table_write(is_gpu, table);
 }
