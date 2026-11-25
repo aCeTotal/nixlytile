@@ -66,20 +66,11 @@ static void
 replay_press(int i, struct nx_keyboard_modifiers *cur)
 {
 	client_mods_sync(cur, &pending.seen[i]);
-	if (key_replay(kb_group, &pending.ev[i], pending.mods[i]))
-		super.typed_ms = pending.ev[i].time_msec;
-}
-
-/* Bind a press runs without Super. */
-static const Key *
-pending_fallback(struct nx_keyboard *kb, int i)
-{
-	const Key *k = NULL;
-
-	if (pending.released[i])
-		k = chord_binding(kb, pending.mods[i] | pending.released[i]
-				| modkey, pending.ev[i].keycode);
-	return k ? k : key_lookup(pending.mods[i], pending.plain[i]);
+	if (!key_replay(kb_group, &pending.ev[i], pending.mods[i]))
+		return;
+	super.typed_ms = pending.ev[i].time_msec;
+	if (!super_hop(key_lookup(pending.mods[i] | modkey, pending.sym[i])))
+		super.texted = 1;
 }
 
 /* Replay held keys without Super. */
@@ -98,10 +89,10 @@ pending_type(void)
 			key_deliver(kb_group, &pending.ev[i]);
 			continue;
 		}
-		k = pending_fallback(kb, i);
+		k = locked ? NULL : key_lookup(pending.mods[i], pending.plain[i]);
 		if (k) {
 			key_run(k);
-			super_ran(k);
+			super_ran(k, pending.ev[i].time_msec);
 			continue;
 		}
 		replay_press(i, &cur);
@@ -138,7 +129,7 @@ pending_bind(KeyboardGroup *group)
 			continue;
 		}
 		key_run(k);
-		super_ran(k);
+		super_ran(k, pending.ev[i].time_msec);
 	}
 	client_mods_sync(&cur, &now);
 	if (k && key_down(kb, code))

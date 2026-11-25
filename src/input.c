@@ -820,6 +820,7 @@ buttonpress(struct wl_listener *listener, void *data)
 		for (b = buttons; b < buttons + nbuttons; b++) {
 			if (CLEANMASK(mods) == CLEANMASK(b->mod) &&
 					event->button == b->button && b->func) {
+				modkey_click(b->mod);
 				b->func(&b->arg);
 				return;
 			}

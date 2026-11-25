@@ -145,6 +145,14 @@ chord_reachable(struct nx_keyboard *kb, uint32_t mods, uint32_t keycode)
 	return 0;
 }
 
+/* Workspace hop, latch candidate. */
+int
+binding_hops(const Key *k)
+{
+	return k && (k->func == focus_workspace_n
+			|| k->func == move_client_to_ws_n);
+}
+
 /* Run the bind this chord fires. */
 int
 modkey_bind(KeyboardGroup *group, const struct nx_keyboard_key_event *event,
@@ -156,6 +164,7 @@ modkey_bind(KeyboardGroup *group, const struct nx_keyboard_key_event *event,
 	if (!k)
 		return 0;
 	key_run(k);
-	super_ran(k);
+	if (group == kb_group)
+		super_ran(k, event->time_msec);
 	return 1;
 }

@@ -2832,6 +2832,7 @@ int modkey_bind(KeyboardGroup *group, const struct nx_keyboard_key_event *event,
 		uint32_t mods);
 int modkey_chatter(KeyboardGroup *group, uint32_t keycode);
 enum repeat_tick modkey_repeat_tick(KeyboardGroup *group);
+void modkey_click(uint32_t mods);
 void keypress(struct wl_listener *listener, void *data);
 void keypressmod(struct wl_listener *listener, void *data);
 int keyrepeat(void *data);
