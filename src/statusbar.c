@@ -155,6 +155,32 @@ typedef struct {
 	int x, h;
 } TrayPen;
 
+/* Known apps wear the bar's glyphs. */
+static int
+tray_place_glyph(TrayPen *pen, TrayItem *it)
+{
+	uint32_t cp = tray_app_glyph(it->sni_id);
+	struct nx_scene_buffer *scene_buf;
+	struct nx_buffer *buf;
+	float tinted[4];
+
+	if (!cp)
+		return 0;
+	bar_tint(statusbar_icon_fg, pen->module->tint, tinted);
+	buf = bar_label_buffer(&(BarLabel){ .icon = cp, .icon_fg = tinted }, pen->h);
+	if (!buf)
+		return 0;
+	it->w = buf->width + 2 * BAR_ICON_PAD;
+	pen->x += it->w;
+	scene_buf = nx_scene_buffer_create(pen->module->tree, NULL);
+	if (scene_buf) {
+		nx_scene_buffer_set_buffer(scene_buf, buf);
+		nx_scene_node_set_position(&scene_buf->node, it->x + BAR_ICON_PAD, 0);
+	}
+	nx_buffer_drop(buf);
+	return 1;
+}
+
 /* One padded hit cell at the pen. */
 static void
 tray_place_item(TrayPen *pen, TrayItem *it)
@@ -164,7 +190,11 @@ tray_place_item(TrayPen *pen, TrayItem *it)
 
 	it->x = pen->x;
 	it->w = 0;
-	if (it->passive || !it->icon_buf || it->icon_w <= 0 || it->icon_h <= 0)
+	if (it->passive)
+		return;
+	if (tray_place_glyph(pen, it))
+		return;
+	if (!it->icon_buf || it->icon_w <= 0 || it->icon_h <= 0)
 		return;
 	/* Space by visible ink. */
 	content_w = it->icon_w - it->icon_pad_l - it->icon_pad_r;

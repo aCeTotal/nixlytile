@@ -428,7 +428,7 @@ enum {
 	GLYPH_DISK = 0xF02CA,
 	GLYPH_DISPLAY = 0xF0379,
 	GLYPH_POWER = 0xF0425,
-	GLYPH_UPDATE = 0xF06B0,
+	GLYPH_UPDATE = 0xF0048,
 	GLYPH_TERMINAL = 0xF018D,
 	GLYPH_SSH = 0xF08C0,
 	GLYPH_NET_OFF = 0xF092E,
@@ -3029,6 +3029,7 @@ double bar_tint_drift(int slot, int slots);
 void bar_tint(const float base[static 4], double deg, float out[static 4]);
 uint32_t icon_glyph_cp(const char *path);
 const IconGlyph *icon_glyph_for(const char *path);
+uint32_t tray_app_glyph(const char *sni_id);
 const struct fcft_glyph *bar_glyph_px(uint32_t cp, int px);
 uint32_t bar_battery_glyph(double percent, int charging);
 void bar_layout_modules(Monitor *m);

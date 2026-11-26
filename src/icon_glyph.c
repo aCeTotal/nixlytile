@@ -84,3 +84,35 @@ icon_glyph_cp(const char *path)
 
 	return g ? g->cp : 0;
 }
+
+/* Tray app Ids to brand glyphs. */
+static const struct {
+	const char *id;
+	uint32_t cp;
+} tray_glyphs[] = {
+	{ "spotify",  0xF04C7 },
+	{ "discord",  0xF066F },
+	{ "vesktop",  0xF066F },
+	{ "webcord",  0xF066F },
+	{ "steam",    0xF04D3 },
+	{ "teams",    0xF02BB },
+	{ "slack",    0xF04B1 },
+	{ "whatsapp", 0xF05A3 },
+	{ "zapzap",   0xF05A3 },
+};
+
+/* Brand glyph for a tray Id, any case. */
+uint32_t
+tray_app_glyph(const char *sni_id)
+{
+	char id[64];
+	size_t i;
+
+	for (i = 0; sni_id[i] && i < sizeof(id) - 1; i++)
+		id[i] = (char)tolower((unsigned char)sni_id[i]);
+	id[i] = '\0';
+	for (i = 0; i < LENGTH(tray_glyphs); i++)
+		if (strstr(id, tray_glyphs[i].id))
+			return tray_glyphs[i].cp;
+	return 0;
+}
