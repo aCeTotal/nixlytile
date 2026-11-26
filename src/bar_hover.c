@@ -91,6 +91,7 @@ owner_span(StatusBar *bar, BarSpan *s)
 		{ bar->bt_popup.visible, &bar->bluetooth },
 		{ bar->display_popup.visible, &bar->display },
 		{ bar->power_popup.visible, &bar->power },
+		{ bar->update_popup.visible, &bar->update },
 	};
 
 	for (size_t i = 0; i < LENGTH(owners); i++) {

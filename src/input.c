@@ -466,6 +466,8 @@ handlestatusscroll(struct nx_pointer_axis_event *event)
 		return adjust_backlight_by_steps(steps);
 	if (info_popup_under(m, &m->statusbar.clock_popup))
 		return clock_popup_handle_scroll(m, cursor->x, steps);
+	if (info_popup_under(m, &m->statusbar.update_popup))
+		return update_popup_handle_scroll(m, steps);
 
 	lx = (int)floor(cursor->x) - m->statusbar.area.x;
 	ly = (int)floor(cursor->y) - m->statusbar.area.y;
@@ -640,6 +642,10 @@ handle_statusbar_clicks(Monitor *m, int lx, int ly, uint32_t button)
 		if (power_popup_handle_click(m, lx, ly, button))
 			return 1;
 	}
+
+	if (m->statusbar.update_popup.visible &&
+			update_popup_handle_click(m, lx, ly, button))
+		return 1;
 
 	if (m->statusbar.clock_popup.visible &&
 			clock_popup_handle_click(m, lx, ly, button))

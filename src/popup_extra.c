@@ -1050,6 +1050,8 @@ updateinfopopups(Monitor *m, double cx, double cy)
 			render_display_popup, cx, cy);
 	info_popup_hover(m, &m->statusbar.power, &m->statusbar.power_popup,
 			render_power_popup, cx, cy);
+	info_popup_hover(m, &m->statusbar.update, &m->statusbar.update_popup,
+			render_update_popup, cx, cy);
 }
 
 /* 1 while some info popup is waiting out its show delay — the shared
@@ -1067,6 +1069,9 @@ info_popup_pending(Monitor *m)
 		m->statusbar.power_popup.outside_since_ms != 0 ||
 		(m->statusbar.power_popup.hover_start_ms != 0 &&
 			!m->statusbar.power_popup.visible) ||
+		m->statusbar.update_popup.outside_since_ms != 0 ||
+		(m->statusbar.update_popup.hover_start_ms != 0 &&
+			!m->statusbar.update_popup.visible) ||
 		(m->statusbar.clock_popup.hover_start_ms != 0 &&
 			!m->statusbar.clock_popup.visible) ||
 		(m->statusbar.volume_popup.hover_start_ms != 0 &&
@@ -1093,23 +1098,24 @@ info_popup_visible(Monitor *m)
 		m->statusbar.disk_popup.visible ||
 		m->statusbar.bt_popup.visible ||
 		m->statusbar.display_popup.visible ||
-		m->statusbar.power_popup.visible;
+		m->statusbar.power_popup.visible ||
+		m->statusbar.update_popup.visible;
 }
 
 void
 info_popups_hide(Monitor *m)
 {
-	InfoPopup *ps[8] = { &m->statusbar.clock_popup,
+	InfoPopup *ps[] = { &m->statusbar.clock_popup,
 		&m->statusbar.volume_popup, &m->statusbar.mic_popup,
 		&m->statusbar.light_popup, &m->statusbar.disk_popup,
 		&m->statusbar.bt_popup, &m->statusbar.display_popup,
-		&m->statusbar.power_popup };
+		&m->statusbar.power_popup, &m->statusbar.update_popup };
 
 	if (m->statusbar.clock_popup.visible)
 		calendar_closed(m);
 	if (m->statusbar.disk_popup.visible)
 		disk_popup_closed();
-	for (int i = 0; i < 8; i++) {
+	for (size_t i = 0; i < LENGTH(ps); i++) {
 		InfoPopup *p = ps[i];
 
 		p->visible = 0;

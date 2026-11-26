@@ -3023,6 +3023,7 @@ static const struct {
 	{ "cpu",          offsetof(struct StatusBar, cpu) },
 	{ "ram",          offsetof(struct StatusBar, ram) },
 	{ "clock",        offsetof(struct StatusBar, clock) },
+	{ "update",       offsetof(struct StatusBar, update) },
 	{ "power",        offsetof(struct StatusBar, power) },
 };
 #define BARMOD_DEF_COUNT (sizeof(barmod_defs) / sizeof(barmod_defs[0]))
@@ -3439,6 +3440,8 @@ layoutstatusbar(Monitor *m, const struct nx_box *area, struct nx_box *client_are
 			renderdisplays(&m->statusbar.display, bar_area.height, "");
 		if (m->statusbar.power.tree)
 			renderpower(&m->statusbar.power, bar_area.height, "");
+		if (m->statusbar.update.tree)
+			renderupdate(&m->statusbar.update, bar_area.height, "");
 		if (m->statusbar.mic.tree)
 			rendermic(&m->statusbar.mic, bar_area.height, mic_text);
 		if (m->statusbar.ram.tree)
@@ -4587,7 +4590,11 @@ statusbar_popup_at(Monitor *m, double cx, double cy)
 		|| popup_contains(m, sb->power_popup.tree,
 				sb->power_popup.visible,
 				sb->power_popup.width,
-				sb->power_popup.height, cx, cy);
+				sb->power_popup.height, cx, cy)
+		|| popup_contains(m, sb->update_popup.tree,
+				sb->update_popup.visible,
+				sb->update_popup.width,
+				sb->update_popup.height, cx, cy);
 }
 
 int
@@ -4657,12 +4664,12 @@ initstatusbar(Monitor *m)
 			nx_scene_node_set_enabled(&m->statusbar.net_popup.tree->node, 0);
 		}
 		{
-			InfoPopup *info[8] = { &m->statusbar.clock_popup,
+			InfoPopup *info[] = { &m->statusbar.clock_popup,
 				&m->statusbar.volume_popup, &m->statusbar.mic_popup,
 				&m->statusbar.light_popup, &m->statusbar.disk_popup,
 				&m->statusbar.bt_popup, &m->statusbar.display_popup,
-				&m->statusbar.power_popup };
-			for (int i = 0; i < 8; i++) {
+				&m->statusbar.power_popup, &m->statusbar.update_popup };
+			for (size_t i = 0; i < LENGTH(info); i++) {
 				info[i]->tree = nx_scene_tree_create(m->statusbar.tree);
 				info[i]->visible = 0;
 				info[i]->hover_start_ms = 0;
@@ -4805,7 +4812,8 @@ cleanupstatusbar(Monitor *m)
 			&m->statusbar.disk_popup.view,
 			&m->statusbar.bt_popup.view,
 			&m->statusbar.display_popup.view,
-			&m->statusbar.power_popup.view };
+			&m->statusbar.power_popup.view,
+			&m->statusbar.update_popup.view };
 		for (size_t i = 0; i < LENGTH(views); i++) {
 			popup_view_hide(views[i]);
 			memset(views[i], 0, sizeof(*views[i]));
@@ -4818,6 +4826,7 @@ cleanupstatusbar(Monitor *m)
 		m->statusbar.bt_popup.tree = NULL;
 		m->statusbar.display_popup.tree = NULL;
 		m->statusbar.power_popup.tree = NULL;
+		m->statusbar.update_popup.tree = NULL;
 	}
 
 	if (m->statusbar.tree)

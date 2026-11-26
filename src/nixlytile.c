@@ -745,6 +745,7 @@ cleanup(void)
 	voice_stop();
 	audio_watch_cleanup();
 	gaming_conf_cleanup();
+	update_ui_cleanup();
 	gaze_cleanup();
 	vrslink_cleanup();
 	mic_gate_cleanup();
@@ -1074,6 +1075,9 @@ run(const char *startup_cmd)
 		struct xkb_rule_names prime = {0};
 		applyxkbdefaultsfromsystem(&prime);
 	}
+
+	/* Read before the first bar draws. */
+	update_ui_setup();
 
 	/* Start the backend. This will enumerate outputs and inputs, become the DRM
 	 * master, etc */

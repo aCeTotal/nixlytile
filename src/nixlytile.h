@@ -428,6 +428,7 @@ enum {
 	GLYPH_DISK = 0xF02CA,
 	GLYPH_DISPLAY = 0xF0379,
 	GLYPH_POWER = 0xF0425,
+	GLYPH_UPDATE = 0xF06B0,
 	GLYPH_TERMINAL = 0xF018D,
 	GLYPH_SSH = 0xF08C0,
 	GLYPH_NET_OFF = 0xF092E,
@@ -830,6 +831,8 @@ struct StatusBar {
 	StatusModule display;
 	StatusModule power;
 	InfoPopup power_popup;
+	StatusModule update;
+	InfoPopup update_popup;
 };
 
 struct TrayItem {
@@ -3123,6 +3126,13 @@ InfoPopup *display_drag_popup(void);
 void renderpower(StatusModule *module, int bar_height, const char *text);
 void render_power_popup(Monitor *m);
 int power_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
+void renderupdate(StatusModule *module, int bar_height, const char *text);
+void render_update_popup(Monitor *m);
+int update_popup_handle_click(Monitor *m, int lx, int ly, uint32_t button);
+int update_popup_handle_scroll(Monitor *m, int steps);
+void refreshstatusupdate(void);
+void update_ui_setup(void);
+void update_ui_cleanup(void);
 void format_speed(double bps, char *out, size_t len);
 int localip(const char *iface, char *out, size_t len);
 const char *wifi_icon_for_quality(double quality_pct);

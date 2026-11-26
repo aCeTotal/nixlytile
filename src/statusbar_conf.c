@@ -55,6 +55,7 @@ static const BarModCfg sc_mod_defaults[] = {
 	{ "net",          0, 0 },
 	{ "bluetooth",    0, 0 },
 	{ "display",      0, 0 },
+	{ "update",       0, 0 },
 	{ "window-title", 1, 0 },
 	{ "battery",      2, 0 },
 	{ "light",        2, 0 },
@@ -91,14 +92,15 @@ static const char sc_seed[] =
 "// Remove a line to hide that module. Add icons-only to show just the\n"
 "// icon without the number/percent. Edits apply immediately.\n"
 "//\n"
-"// Modules: workspaces tray net bluetooth display window-title battery\n"
-"//          light volume mic disk cpu ram clock power\n"
+"// Modules: workspaces tray net bluetooth display update window-title\n"
+"//          battery light volume mic disk cpu ram clock power\n"
 "\n"
 "module \"workspaces\"   \"left\"\n"
 "module \"tray\"         \"left\"\n"
 "module \"net\"          \"left\"\n"
 "module \"bluetooth\"    \"left\"\n"
 "module \"display\"      \"left\"\n"
+"module \"update\"       \"left\"\n"
 "\n"
 "module \"window-title\" \"middle\"\n"
 "\n"
